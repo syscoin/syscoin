@@ -429,6 +429,33 @@ bool PaymentAuditStore::IsHealthy() const
     return !m_failure.has_value();
 }
 
+bool PaymentAuditStore::CanAdvanceCandidateRevision() const
+{
+    if (m_candidate_revision != std::numeric_limits<uint64_t>::max()) {
+        return true;
+    }
+    m_failure = PaymentAuditStoreResult::DATABASE_ERROR;
+    return false;
+}
+
+void PaymentAuditStore::AdvanceCandidateRevision() const
+{
+    ++m_candidate_revision;
+}
+
+std::optional<uint64_t> PaymentAuditStore::ObserveCandidateRevision() const
+{
+    LOCK(m_mutex);
+    if (m_failure) return std::nullopt;
+    return m_candidate_revision;
+}
+
+bool PaymentAuditStore::IsCandidateRevisionCurrent(uint64_t revision) const
+{
+    LOCK(m_mutex);
+    return !m_failure && revision == m_candidate_revision;
+}
+
 PaymentAuditStoreResult PaymentAuditStore::ProbeLiveCandidateSlot(
     uint32_t epoch, uint8_t selected_quorum_mask) const
 {
@@ -542,14 +569,18 @@ PaymentAuditStoreResult PaymentAuditStore::AcceptVerified(
                 m_failure = PaymentAuditStoreResult::CORRUPT;
                 return *m_failure;
             }
-            if (!HasValidPresence(m_db, m_genesis_hash, epoch, witness_id) &&
-                !m_db.Write(
-                    presence_key,
-                    PresenceRecord{DB_FORMAT_VERSION, epoch, witness_id,
-                                   PRESENCE_GUARD},
-                    true)) {
-                m_failure = PaymentAuditStoreResult::DATABASE_ERROR;
-                return *m_failure;
+            if (!HasValidPresence(m_db, m_genesis_hash, epoch,
+                                  witness_id)) {
+                if (!CanAdvanceCandidateRevision()) return *m_failure;
+                if (!m_db.Write(
+                        presence_key,
+                        PresenceRecord{DB_FORMAT_VERSION, epoch, witness_id,
+                                       PRESENCE_GUARD},
+                        true)) {
+                    m_failure = PaymentAuditStoreResult::DATABASE_ERROR;
+                    return *m_failure;
+                }
+                AdvanceCandidateRevision();
             }
             return PaymentAuditStoreResult::DUPLICATE_WITNESS;
         }
@@ -571,10 +602,12 @@ PaymentAuditStoreResult PaymentAuditStore::AcceptVerified(
             repair.Write(presence_key,
                          PresenceRecord{DB_FORMAT_VERSION, epoch, witness_id,
                                         PRESENCE_GUARD});
+            if (!CanAdvanceCandidateRevision()) return *m_failure;
             if (!m_db.WriteBatch(repair, true)) {
                 m_failure = PaymentAuditStoreResult::DATABASE_ERROR;
                 return *m_failure;
             }
+            AdvanceCandidateRevision();
             return PaymentAuditStoreResult::ACCEPTED;
         }
         if (epoch_record.pinned_witness_id == witness_id) {
@@ -622,10 +655,12 @@ PaymentAuditStoreResult PaymentAuditStore::AcceptVerified(
                     PresenceRecord{DB_FORMAT_VERSION, epoch, witness_id,
                                    PRESENCE_GUARD});
         batch.Write(epoch_key, epoch_record);
+        if (!CanAdvanceCandidateRevision()) return *m_failure;
         if (!m_db.WriteBatch(batch, true)) {
             m_failure = PaymentAuditStoreResult::DATABASE_ERROR;
             return *m_failure;
         }
+        AdvanceCandidateRevision();
         return PaymentAuditStoreResult::ACCEPTED;
     } catch (const std::exception&) {
         m_failure = PaymentAuditStoreResult::DATABASE_ERROR;
@@ -653,8 +688,11 @@ std::optional<FinalPaymentAudit> PaymentAuditStore::Get(
                 CDBBatch repair{m_db};
                 repair.Erase(key);
                 repair.Erase(presence_key);
+                if (!CanAdvanceCandidateRevision()) return std::nullopt;
                 if (!m_db.WriteBatch(repair, true)) {
                     m_failure = PaymentAuditStoreResult::DATABASE_ERROR;
+                } else {
+                    AdvanceCandidateRevision();
                 }
             }
             return std::nullopt;
@@ -672,6 +710,7 @@ std::optional<FinalPaymentAudit> PaymentAuditStore::Get(
             return std::nullopt;
         }
         if (!HasValidPresence(m_db, m_genesis_hash, epoch, witness_id)) {
+            if (!CanAdvanceCandidateRevision()) return std::nullopt;
             if (!m_db.Write(
                     presence_key,
                     PresenceRecord{DB_FORMAT_VERSION, epoch, witness_id,
@@ -680,6 +719,7 @@ std::optional<FinalPaymentAudit> PaymentAuditStore::Get(
                 m_failure = PaymentAuditStoreResult::DATABASE_ERROR;
                 return std::nullopt;
             }
+            AdvanceCandidateRevision();
         }
         return record.audit;
     } catch (const std::exception&) {
@@ -688,31 +728,31 @@ std::optional<FinalPaymentAudit> PaymentAuditStore::Get(
     }
 }
 
-std::vector<FinalPaymentAudit> PaymentAuditStore::GetEpochCandidates(
-    uint32_t epoch) const
+std::optional<PaymentAuditCandidateSnapshot>
+PaymentAuditStore::GetEpochCandidateSnapshot(uint32_t epoch) const
 {
     LOCK(m_mutex);
-    std::vector<FinalPaymentAudit> result;
-    if (m_failure) return result;
+    if (m_failure) return std::nullopt;
+    PaymentAuditCandidateSnapshot snapshot{m_candidate_revision, epoch, {}};
     if (m_prune_checkpoint &&
         epoch <= m_prune_checkpoint->prune_through_epoch) {
-        return result;
+        return snapshot;
     }
     try {
         const EpochKey epoch_key{DB_EPOCH_PREFIX, DB_FORMAT_VERSION,
                                  m_genesis_hash, epoch};
         EpochRecord epoch_record;
-        if (!m_db.Exists(epoch_key)) return result;
+        if (!m_db.Exists(epoch_key)) return snapshot;
         if (!m_db.Read(epoch_key, epoch_record) ||
             !IsEpochRecordValid(epoch_record, epoch)) {
             m_failure = PaymentAuditStoreResult::CORRUPT;
-            return {};
+            return std::nullopt;
         }
         if (!epoch_record.pinned_witness_id.IsNull() &&
             !HasValidReference(m_db, m_genesis_hash, epoch,
                                epoch_record.pinned_witness_id)) {
             m_failure = PaymentAuditStoreResult::CORRUPT;
-            return {};
+            return std::nullopt;
         }
         std::vector<uint256> ids;
         const auto append_unique = [&](const uint256& id) {
@@ -726,7 +766,7 @@ std::vector<FinalPaymentAudit> PaymentAuditStore::GetEpochCandidates(
              epoch_record.live_candidates_by_missing_quorum) {
             append_unique(id);
         }
-        result.reserve(ids.size());
+        snapshot.ordered_candidates.reserve(ids.size());
         for (const auto& id : ids) {
             AuditRecord record;
             const WitnessKey witness_key{
@@ -738,15 +778,31 @@ std::vector<FinalPaymentAudit> PaymentAuditStore::GetEpochCandidates(
                 record.witness_id != id ||
                 record.audit.statement.commitment.seed.epoch != epoch) {
                 m_failure = PaymentAuditStoreResult::CORRUPT;
-                return {};
+                return std::nullopt;
             }
-            result.push_back(std::move(record.audit));
+            snapshot.ordered_candidates.push_back(
+                PaymentAuditCandidateView{record.logical_id,
+                                          record.witness_id,
+                                          std::move(record.audit)});
         }
-        return result;
+        return snapshot;
     } catch (const std::exception&) {
         m_failure = PaymentAuditStoreResult::DATABASE_ERROR;
-        return {};
+        return std::nullopt;
     }
+}
+
+std::vector<FinalPaymentAudit> PaymentAuditStore::GetEpochCandidates(
+    uint32_t epoch) const
+{
+    auto snapshot{GetEpochCandidateSnapshot(epoch)};
+    if (!snapshot) return {};
+    std::vector<FinalPaymentAudit> result;
+    result.reserve(snapshot->ordered_candidates.size());
+    for (auto& candidate : snapshot->ordered_candidates) {
+        result.push_back(std::move(candidate.audit));
+    }
+    return result;
 }
 
 bool PaymentAuditStore::Has(const uint256& witness_id) const
@@ -835,9 +891,11 @@ PaymentAuditStoreResult PaymentAuditStore::PinReferencedWitness(
         }
 
         CDBBatch batch{m_db};
+        bool removes_live_candidate{false};
         for (auto& candidate :
              epoch_record.live_candidates_by_missing_quorum) {
             if (candidate.IsNull()) continue;
+            removes_live_candidate = true;
             const WitnessKey victim_key{DB_WITNESS_PREFIX,
                                         DB_FORMAT_VERSION,
                                         m_genesis_hash, candidate};
@@ -863,6 +921,9 @@ PaymentAuditStoreResult PaymentAuditStore::PinReferencedWitness(
             }
             candidate.SetNull();
         }
+        if (already_pinned && !removes_live_candidate) {
+            return PaymentAuditStoreResult::DUPLICATE_WITNESS;
+        }
         if (!has_reference) {
             batch.Write(reference_key,
                         ReferenceRecord{DB_FORMAT_VERSION, epoch,
@@ -870,10 +931,12 @@ PaymentAuditStoreResult PaymentAuditStore::PinReferencedWitness(
         }
         epoch_record.pinned_witness_id = witness_id;
         batch.Write(epoch_key, epoch_record);
+        if (!CanAdvanceCandidateRevision()) return *m_failure;
         if (!m_db.WriteBatch(batch, true)) {
             m_failure = PaymentAuditStoreResult::DATABASE_ERROR;
             return *m_failure;
         }
+        AdvanceCandidateRevision();
         return already_pinned ? PaymentAuditStoreResult::DUPLICATE_WITNESS
                               : PaymentAuditStoreResult::ACCEPTED;
     } catch (const std::exception&) {
@@ -1088,11 +1151,13 @@ bool PaymentAuditStore::PruneThroughCheckpoint(
         batch.Write(DB_CHECKPOINT_KEY,
                     CheckpointRecord{DB_FORMAT_VERSION, checkpoint,
                                      CHECKPOINT_GUARD});
+        if (!CanAdvanceCandidateRevision()) return false;
         if (!m_db.WriteBatch(batch, true)) {
             m_failure = PaymentAuditStoreResult::DATABASE_ERROR;
             return false;
         }
         m_prune_checkpoint = checkpoint;
+        AdvanceCandidateRevision();
         return true;
     } catch (const CorruptArchiveIndex&) {
         m_failure = PaymentAuditStoreResult::CORRUPT;

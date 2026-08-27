@@ -179,6 +179,20 @@ void ErasePayloadAndPresence(const fs::path& path,
     BOOST_REQUIRE(db.WriteBatch(batch, true));
 }
 
+void ErasePresence(const fs::path& path, const uint256& genesis_hash,
+                   const uint256& witness_id)
+{
+    CDBWrapper db{DBParams{.path = path,
+                           .cache_bytes = 1 << 20,
+                           .memory_only = false,
+                           .wipe_data = false,
+                           .obfuscate = false}};
+    BOOST_REQUIRE(db.Erase(
+        TestPresenceKey{0xa4, PaymentAuditStore::DB_FORMAT_VERSION,
+                        genesis_hash, witness_id},
+        true));
+}
+
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(pq_payment_audit_store_tests, BasicTestingSetup)
@@ -236,6 +250,151 @@ BOOST_AUTO_TEST_CASE(archive_bounds_live_candidates_by_missing_quorum)
         BOOST_CHECK(store.Has(
             candidates[slot].GetWitnessId(genesis_hash)));
     }
+}
+
+BOOST_AUTO_TEST_CASE(candidate_snapshot_is_coherent_ordered_and_revisioned)
+{
+    const fs::path path{m_path_root /
+                        "pq_payment_audit_store_candidate_snapshot"};
+    const uint256 genesis_hash{NonNullHash(12)};
+    constexpr uint32_t epoch{12};
+    const auto pinned{Audit(epoch, 0x0b, 800)};
+    const auto late_slot{Audit(epoch, 0x07, 801)};
+    const auto early_slot{Audit(epoch, 0x0e, 802)};
+    const uint256 pinned_id{pinned.GetWitnessId(genesis_hash)};
+
+    PaymentAuditStore store{path, genesis_hash};
+    const auto initial_revision{store.ObserveCandidateRevision()};
+    BOOST_REQUIRE(initial_revision);
+    BOOST_CHECK(*initial_revision != 0);
+    const auto empty{store.GetEpochCandidateSnapshot(epoch)};
+    BOOST_REQUIRE(empty);
+    BOOST_CHECK_EQUAL(empty->revision, *initial_revision);
+    BOOST_CHECK_EQUAL(empty->epoch, epoch);
+    BOOST_CHECK(empty->ordered_candidates.empty());
+
+    BOOST_REQUIRE(store.AcceptVerified(pinned) ==
+                  PaymentAuditStoreResult::ACCEPTED);
+    const auto accepted_revision{store.ObserveCandidateRevision()};
+    BOOST_REQUIRE(accepted_revision);
+    BOOST_CHECK_EQUAL(*accepted_revision, *initial_revision + 1);
+    BOOST_CHECK(store.AcceptVerified(pinned) ==
+                PaymentAuditStoreResult::DUPLICATE_WITNESS);
+    BOOST_CHECK(store.ObserveCandidateRevision() == accepted_revision);
+
+    BOOST_REQUIRE(store.PinReferencedWitness(epoch, pinned_id) ==
+                  PaymentAuditStoreResult::ACCEPTED);
+    const auto pinned_revision{store.ObserveCandidateRevision()};
+    BOOST_REQUIRE(pinned_revision);
+    BOOST_CHECK_EQUAL(*pinned_revision, *accepted_revision + 1);
+    BOOST_REQUIRE(store.AcceptVerified(late_slot) ==
+                  PaymentAuditStoreResult::ACCEPTED);
+    BOOST_REQUIRE(store.AcceptVerified(early_slot) ==
+                  PaymentAuditStoreResult::ACCEPTED);
+
+    const auto snapshot{store.GetEpochCandidateSnapshot(epoch)};
+    BOOST_REQUIRE(snapshot);
+    BOOST_CHECK_EQUAL(snapshot->epoch, epoch);
+    BOOST_REQUIRE_EQUAL(snapshot->ordered_candidates.size(), 3U);
+    const std::array<const FinalPaymentAudit*, 3> expected{
+        &pinned, &early_slot, &late_slot};
+    for (std::size_t index{0}; index < expected.size(); ++index) {
+        const auto& candidate{snapshot->ordered_candidates[index]};
+        BOOST_CHECK(candidate.audit == *expected[index]);
+        BOOST_CHECK(candidate.logical_id ==
+                    expected[index]->GetLogicalId(genesis_hash));
+        BOOST_CHECK(candidate.witness_id ==
+                    expected[index]->GetWitnessId(genesis_hash));
+    }
+    BOOST_CHECK(store.IsCandidateRevisionCurrent(snapshot->revision));
+
+    const auto compatibility{store.GetEpochCandidates(epoch)};
+    BOOST_REQUIRE_EQUAL(compatibility.size(), expected.size());
+    for (std::size_t index{0}; index < expected.size(); ++index) {
+        BOOST_CHECK(compatibility[index] == *expected[index]);
+    }
+
+    auto rejected{early_slot};
+    rejected.report_witnesses[0]
+        .authenticated_signature.signature[2] ^= 1;
+    BOOST_REQUIRE(rejected.IsStructurallyValid());
+    BOOST_CHECK(store.AcceptVerified(rejected) ==
+                PaymentAuditStoreResult::LIVE_CANDIDATE_SLOT_FULL);
+    BOOST_CHECK(store.IsCandidateRevisionCurrent(snapshot->revision));
+
+    // Re-pinning the same witness removes branch candidates once, then is a
+    // true no-op until another candidate arrives.
+    BOOST_CHECK(store.PinReferencedWitness(epoch, pinned_id) ==
+                PaymentAuditStoreResult::DUPLICATE_WITNESS);
+    const auto repinned_revision{store.ObserveCandidateRevision()};
+    BOOST_REQUIRE(repinned_revision);
+    BOOST_CHECK_EQUAL(*repinned_revision, snapshot->revision + 1);
+    BOOST_CHECK(store.PinReferencedWitness(epoch, pinned_id) ==
+                PaymentAuditStoreResult::DUPLICATE_WITNESS);
+    BOOST_CHECK(store.ObserveCandidateRevision() == repinned_revision);
+
+    const auto checkpoint{Checkpoint(epoch, 80, 90'000)};
+    BOOST_REQUIRE(store.PruneThroughCheckpoint(checkpoint));
+    const auto pruned_revision{store.ObserveCandidateRevision()};
+    BOOST_REQUIRE(pruned_revision);
+    BOOST_CHECK_EQUAL(*pruned_revision, *repinned_revision + 1);
+    BOOST_REQUIRE(store.PruneThroughCheckpoint(checkpoint));
+    BOOST_CHECK(store.ObserveCandidateRevision() == pruned_revision);
+    const auto pruned{store.GetEpochCandidateSnapshot(epoch)};
+    BOOST_REQUIRE(pruned);
+    BOOST_CHECK_EQUAL(pruned->revision, *pruned_revision);
+    BOOST_CHECK(pruned->ordered_candidates.empty());
+}
+
+BOOST_AUTO_TEST_CASE(candidate_revision_tracks_repairs_and_fails_closed)
+{
+    const fs::path repair_path{m_path_root /
+                               "pq_payment_audit_store_revision_repair"};
+    const uint256 genesis_hash{NonNullHash(13)};
+    constexpr uint32_t epoch{13};
+    const auto audit{Audit(epoch, 0x07, 900)};
+    const uint256 witness_id{audit.GetWitnessId(genesis_hash)};
+    {
+        PaymentAuditStore store{repair_path, genesis_hash};
+        BOOST_REQUIRE(store.AcceptVerified(audit) ==
+                      PaymentAuditStoreResult::ACCEPTED);
+    }
+    ErasePresence(repair_path, genesis_hash, witness_id);
+    {
+        PaymentAuditStore store{repair_path, genesis_hash};
+        const auto before{store.ObserveCandidateRevision()};
+        BOOST_REQUIRE(before);
+        const auto restored{store.Get(witness_id)};
+        BOOST_REQUIRE(restored);
+        BOOST_CHECK(*restored == audit);
+        const auto after{store.ObserveCandidateRevision()};
+        BOOST_REQUIRE(after);
+        BOOST_CHECK_EQUAL(*after, *before + 1);
+        BOOST_CHECK(store.AcceptVerified(audit) ==
+                    PaymentAuditStoreResult::DUPLICATE_WITNESS);
+        BOOST_CHECK(store.ObserveCandidateRevision() == after);
+    }
+
+    const fs::path corrupt_path{m_path_root /
+                                "pq_payment_audit_store_revision_corrupt"};
+    {
+        PaymentAuditStore store{corrupt_path, genesis_hash};
+        BOOST_REQUIRE(store.AcceptVerified(audit) ==
+                      PaymentAuditStoreResult::ACCEPTED);
+    }
+    ErasePayloadAndPresence(corrupt_path, genesis_hash, witness_id,
+                            /*erase_presence=*/false);
+    PaymentAuditStore corrupt{corrupt_path, genesis_hash};
+    const auto before_repair{corrupt.ObserveCandidateRevision()};
+    BOOST_REQUIRE(before_repair);
+    BOOST_CHECK(!corrupt.Get(witness_id));
+    const auto repaired_revision{corrupt.ObserveCandidateRevision()};
+    BOOST_REQUIRE(repaired_revision);
+    BOOST_CHECK_EQUAL(*repaired_revision, *before_repair + 1);
+    BOOST_CHECK(!corrupt.GetEpochCandidateSnapshot(epoch));
+    BOOST_CHECK(!corrupt.IsHealthy());
+    BOOST_CHECK(!corrupt.ObserveCandidateRevision());
+    BOOST_CHECK(!corrupt.IsCandidateRevisionCurrent(*repaired_revision));
 }
 
 BOOST_AUTO_TEST_CASE(pin_prunes_old_candidates_but_accepts_new_branch_candidate)

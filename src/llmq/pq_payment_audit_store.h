@@ -63,6 +63,28 @@ struct PaymentAuditStoreCheckpoint {
 };
 
 /**
+ * An archive candidate decoded and validated while the store lock was held.
+ * The IDs passed IsRecordValid(), so callers can reuse them without hashing
+ * the large witness again.
+ */
+struct PaymentAuditCandidateView {
+    uint256 logical_id;
+    uint256 witness_id;
+    FinalPaymentAudit audit;
+};
+
+/**
+ * A coherent candidate-selection view. The revision is process-local and
+ * changes after every successful mutation that can affect candidate
+ * availability or ordering.
+ */
+struct PaymentAuditCandidateSnapshot {
+    uint64_t revision{0};
+    uint32_t epoch{0};
+    std::vector<PaymentAuditCandidateView> ordered_candidates;
+};
+
+/**
  * Exact certificate archive. Historical audit witnesses remain available
  * independently of the bounded live-row staging database until an
  * authenticated checkpoint retires their prefix.
@@ -95,6 +117,14 @@ public:
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     [[nodiscard]] std::optional<FinalPaymentAudit> Get(
         const uint256& witness_id) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    [[nodiscard]] std::optional<PaymentAuditCandidateSnapshot>
+    GetEpochCandidateSnapshot(uint32_t epoch) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** A healthy-store token suitable for invalidating derived local caches. */
+    [[nodiscard]] std::optional<uint64_t> ObserveCandidateRevision() const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    [[nodiscard]] bool IsCandidateRevisionCurrent(uint64_t revision) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /**
      * The preferred applied witness plus at most four bounded live candidates,
@@ -133,12 +163,17 @@ public:
 
 private:
     void Initialize() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    [[nodiscard]] bool CanAdvanceCandidateRevision() const
+        EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    void AdvanceCandidateRevision() const
+        EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
 
     uint256 m_genesis_hash;
     mutable CDBWrapper m_db;
     mutable Mutex m_mutex;
     mutable std::optional<PaymentAuditStoreResult> m_failure
         GUARDED_BY(m_mutex);
+    mutable uint64_t m_candidate_revision GUARDED_BY(m_mutex){1};
     std::optional<PaymentAuditStoreCheckpoint> m_prune_checkpoint
         GUARDED_BY(m_mutex);
 };
