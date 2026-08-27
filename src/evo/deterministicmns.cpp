@@ -1217,6 +1217,27 @@ static bool CompareByLastPaid(const CDeterministicMN* _a,
     return CompareByLastPaid(*_a, *_b);
 }
 
+template <typename Callback>
+static void ForEachPaymentEligibleMN(
+    const CDeterministicMNList& list,
+    const llmq::pq::PQPaymentEligibleProTxHashes* pq_payment_eligible,
+    Callback&& callback)
+{
+    if (pq_payment_eligible == nullptr) {
+        list.ForEachMNShared(true, std::forward<Callback>(callback));
+        return;
+    }
+
+    for (auto it = pq_payment_eligible->begin();
+         it != pq_payment_eligible->end(); ++it) {
+        // SYSCOIN: The registry supplies a sorted unique set. Retaining
+        // membership-set semantics here also prevents a malformed duplicate
+        // from duplicating projected payees.
+        if (it != pq_payment_eligible->begin() && *it == *(it - 1)) continue;
+        if (const auto dmn{list.GetValidMN(*it)}) callback(dmn);
+    }
+}
+
 CDeterministicMNCPtr CDeterministicMNList::GetMNPayee(
     const llmq::pq::PQPaymentProbationStateView* payment_state,
     const llmq::pq::PQPaymentEligibleProTxHashes* pq_payment_eligible) const
@@ -1227,16 +1248,11 @@ CDeterministicMNCPtr CDeterministicMNList::GetMNPayee(
 
     CDeterministicMNCPtr best;
     CDeterministicMNCPtr ordinary_best;
-    ForEachMNShared(true, [&](const CDeterministicMNCPtr& dmn) {
+    ForEachPaymentEligibleMN(*this, pq_payment_eligible,
+                             [&](const CDeterministicMNCPtr& dmn) {
         // SYSCOIN: Root capability is an admission gate, not another queue-age
         // penalty. A restored operator keeps its accrued age and one payment
         // moves it to the back through the ordinary nLastPaidHeight update.
-        if (pq_payment_eligible != nullptr &&
-            !std::binary_search(pq_payment_eligible->begin(),
-                                pq_payment_eligible->end(),
-                                dmn->proTxHash)) {
-            return;
-        }
         if (!ordinary_best ||
             CompareByLastPaid(dmn.get(), ordinary_best.get())) {
             ordinary_best = dmn;
@@ -1268,18 +1284,17 @@ CDeterministicMNList::GetProjectedMNPayees(
 
     std::vector<CDeterministicMNCPtr> result;
     std::vector<CDeterministicMNCPtr> ordinary_fallback;
-    result.reserve(GetValidMNsCount());
-    ordinary_fallback.reserve(GetValidMNsCount());
+    const std::size_t candidate_count{
+        pq_payment_eligible != nullptr
+            ? std::min(pq_payment_eligible->size(), mnMap.size())
+            : GetValidMNsCount()};
+    result.reserve(candidate_count);
+    ordinary_fallback.reserve(candidate_count);
 
-    ForEachMNShared(true, [&](const CDeterministicMNCPtr& dmn) {
+    ForEachPaymentEligibleMN(*this, pq_payment_eligible,
+                             [&](const CDeterministicMNCPtr& dmn) {
         // SYSCOIN: The fail-open withheld fallback remains inside the same
         // frozen-root admission set as the ordinary projected queue.
-        if (pq_payment_eligible != nullptr &&
-            !std::binary_search(pq_payment_eligible->begin(),
-                                pq_payment_eligible->end(),
-                                dmn->proTxHash)) {
-            return;
-        }
         ordinary_fallback.emplace_back(dmn);
         if (payment_state == nullptr ||
             !payment_state->IsPaymentWithheld(dmn->proTxHash)) {

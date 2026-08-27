@@ -756,6 +756,13 @@ BOOST_AUTO_TEST_CASE(payment_probation_is_reflected_in_projected_payees)
     for (const auto& member : members) {
         list.AddMN(member, /*fBumpTotalCount=*/false);
     }
+    const auto banned{MakeLegacyReplayMN(33, 13)};
+    list.AddMN(banned, /*fBumpTotalCount=*/false);
+    auto banned_state{
+        std::make_shared<CDeterministicMNState>(*banned->pdmnState)};
+    banned_state->BanIfNotBanned(510);
+    list.UpdateMN(banned->proTxHash, banned_state);
+    BOOST_CHECK(!list.GetValidMN(banned->proTxHash));
 
     llmq::pq::PQPaymentProbationState partial;
     partial.entries = {{members[0]->proTxHash, 2},
@@ -823,6 +830,31 @@ BOOST_AUTO_TEST_CASE(payment_probation_is_reflected_in_projected_payees)
         [&](const auto& payee) {
             return payee->proTxHash == members[0]->proTxHash;
         }));
+
+    // Direct PQ-set iteration must retain the old membership-filter behavior:
+    // absent and PoSe-banned entries are ignored, and duplicate entries cannot
+    // duplicate projected payees.
+    const auto noisy_pq_payment_eligible{sorted_hashes(
+        {MakeSnapshotKey(50'000), banned->proTxHash,
+         members[1]->proTxHash, members[1]->proTxHash,
+         members[2]->proTxHash})};
+    const auto noisy_payee{
+        list.GetMNPayee(&all_view, &noisy_pq_payment_eligible)};
+    BOOST_REQUIRE(noisy_payee);
+    BOOST_CHECK(noisy_payee->proTxHash ==
+                list.GetMNPayee(&all_view, &pq_payment_eligible)->proTxHash);
+    BOOST_CHECK(list.GetProjectedMNPayees(
+                    std::numeric_limits<int>::max(), &all_view,
+                    &noisy_pq_payment_eligible) == filtered_fallback);
+    BOOST_CHECK(list.GetProjectedMNPayees(
+                    std::numeric_limits<int>::max(), nullptr,
+                    &noisy_pq_payment_eligible) == filtered_ordinary);
+    BOOST_CHECK(list.GetProjectedMNPayees(
+                    std::numeric_limits<int>::max(), &partial_view,
+                    &noisy_pq_payment_eligible) ==
+                list.GetProjectedMNPayees(
+                    std::numeric_limits<int>::max(), &partial_view,
+                    &pq_payment_eligible));
 
     const std::vector<uint256> no_pq_payment_eligible;
     BOOST_CHECK(!list.GetMNPayee(&all_view, &no_pq_payment_eligible));
