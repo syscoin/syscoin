@@ -255,13 +255,19 @@ bool PQPaymentProbationDiff::IsStructurallyValid() const noexcept
 std::optional<uint256> GetPQPaymentProbationStateHash(
     const PQPaymentProbationState& state)
 {
-    if (!state.IsStructurallyValid()) return std::nullopt;
-    CHashWriter writer{SER_GETHASH, 0};
-    writer.write(AsBytes(Span{PQ_PAYMENT_PROBATION_STATE_HASH_DOMAIN.data(),
-                              PQ_PAYMENT_PROBATION_STATE_HASH_DOMAIN.size()}));
-    writer << state;
-    const uint256 hash{writer.GetHash()};
-    return hash.IsNull() ? std::nullopt : std::optional<uint256>{hash};
+    try {
+        CHashWriter writer{SER_GETHASH, 0};
+        writer.write(AsBytes(Span{
+            PQ_PAYMENT_PROBATION_STATE_HASH_DOMAIN.data(),
+            PQ_PAYMENT_PROBATION_STATE_HASH_DOMAIN.size()}));
+        // Serialization owns the canonical structural gate. Rechecking it
+        // here would scan the potentially maximal sparse state twice.
+        writer << state;
+        const uint256 hash{writer.GetHash()};
+        return hash.IsNull() ? std::nullopt : std::optional<uint256>{hash};
+    } catch (const std::ios_base::failure&) {
+        return std::nullopt;
+    }
 }
 
 bool PQPaymentProbationTransitionInput::IsStructurallyValid() const noexcept

@@ -559,16 +559,19 @@ BOOST_AUTO_TEST_CASE(state_and_diff_serialization_are_versioned_and_canonical)
     auto unsorted{applied->state};
     std::swap(unsorted.entries[0], unsorted.entries[1]);
     BOOST_CHECK(!unsorted.IsStructurallyValid());
+    BOOST_CHECK(!GetPQPaymentProbationStateHash(unsorted));
     CDataStream invalid_stream{SER_NETWORK, PROTOCOL_VERSION};
     BOOST_CHECK_THROW(invalid_stream << unsorted, std::ios_base::failure);
 
     auto bad_version{applied->state};
     bad_version.version = PQ_PAYMENT_PROBATION_STATE_VERSION - 1;
     BOOST_CHECK(!bad_version.IsStructurallyValid());
+    BOOST_CHECK(!GetPQPaymentProbationStateHash(bad_version));
 
     auto noncanonical_cursor{applied->state};
     noncanonical_cursor.cursor.has_receipt = 0;
     BOOST_CHECK(!noncanonical_cursor.IsStructurallyValid());
+    BOOST_CHECK(!GetPQPaymentProbationStateHash(noncanonical_cursor));
 }
 
 BOOST_AUTO_TEST_CASE(rejects_malformed_rosters_bitmaps_and_membership_sets)
