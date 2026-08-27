@@ -343,8 +343,7 @@ private:
     enum class Kind : uint8_t {
         INVALID = 0,
         NO_COMMIT,
-        UNCHANGED,
-        MATERIALIZED,
+        TRANSITION,
     };
 
     std::shared_ptr<const uint8_t> m_incarnation;
@@ -352,9 +351,9 @@ private:
     uint256 m_block_hash;
     uint256 m_consensus_state_root;
     int32_t m_height{-1};
-    std::shared_ptr<const PQRegistrySnapshotView> m_unchanged_parent;
-    std::optional<PQRegistrySnapshot> m_parent;
-    std::optional<PQRegistrySnapshot> m_result;
+    std::shared_ptr<const PQRegistrySnapshotView> m_parent;
+    std::shared_ptr<const PQRegistrySnapshotView> m_result;
+    std::optional<PQRegistryDiskSnapshot> m_disk;
 
     friend class PQRegistryManager;
 };
@@ -407,14 +406,9 @@ private:
         std::shared_ptr<const PQRegistrySnapshotView> snapshot,
         std::shared_ptr<const PQRegistrySnapshotView>* cached = nullptr) const
         EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
-    [[nodiscard]] bool CommitUnchangedSnapshot(
-        const std::shared_ptr<const PQRegistrySnapshotView>& parent,
-        const uint256& block_hash,
-        int32_t height,
-        PQRegistryError& error) EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
-    [[nodiscard]] bool CommitSnapshot(
-        const PQRegistrySnapshot& snapshot,
-        const PQRegistrySnapshot& parent,
+    [[nodiscard]] bool CommitPreparedSnapshot(
+        const std::shared_ptr<const PQRegistrySnapshotView>& snapshot,
+        const PQRegistryDiskSnapshot& disk,
         PQRegistryError& error) EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
     [[nodiscard]] bool PrepareBlockInternal(
         const CBlock& block,

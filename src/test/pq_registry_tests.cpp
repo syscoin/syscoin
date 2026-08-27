@@ -524,6 +524,17 @@ BOOST_AUTO_TEST_CASE(initial_root_registration_prepares_purely_and_commits_exact
         block.GetHash(), parent, 1295, missing, error));
     BOOST_CHECK(error.result == PQRegistryResult::SNAPSHOT_NOT_FOUND);
 
+    manager.SnapshotDatabase().FailNextWriteThroughForTesting();
+    BOOST_CHECK_THROW((void)manager.CommitPreparedBlock(prepared, error),
+                      dbwrapper_error);
+    BOOST_CHECK(prepared.IsValid());
+    BOOST_CHECK(!manager.SnapshotDatabase().ExistsCache(block.GetHash()));
+    BOOST_CHECK(!manager.GetSnapshot(
+        block.GetHash(), parent, 1295, missing, error));
+    BOOST_CHECK(error.result == PQRegistryResult::SNAPSHOT_NOT_FOUND);
+
+    // The failed commit has materialized the exact non-empty checkpoint in
+    // the token. Moving it must retain that disk payload for the retry.
     PQRegistryPreparedBlock moved{std::move(prepared)};
     BOOST_CHECK(!prepared.IsValid());
     BOOST_CHECK(!manager.CommitPreparedBlock(prepared, error));
@@ -553,6 +564,16 @@ BOOST_AUTO_TEST_CASE(initial_root_registration_prepares_purely_and_commits_exact
     PQRegistryDiskSnapshot first_disk;
     BOOST_REQUIRE(manager.SnapshotDatabase().ReadCache(
         block.GetHash(), first_disk));
+    BOOST_CHECK_EQUAL(first_disk.is_checkpoint, 1U);
+    BOOST_CHECK(first_disk.operator_states == snapshot.operator_states);
+    BOOST_CHECK(first_disk.tree_ids == snapshot.used_tree_ids);
+    BOOST_CHECK(first_disk.block_tree_ids == snapshot.block_tree_ids);
+    BOOST_CHECK(first_disk.removed_operators.empty());
+    const auto empty_root{
+        PQRegistrySnapshot{}.RecomputeConsensusStateRoot(genesis)};
+    BOOST_REQUIRE(empty_root);
+    BOOST_CHECK(first_disk.previous_consensus_state_root == *empty_root);
+    BOOST_CHECK(first_disk.consensus_state_root == prepared_root);
     const auto persisted_entries{
         manager.SnapshotDatabase().CountPersistedEntries()};
     PQRegistryPreparedBlock replay;
@@ -699,6 +720,7 @@ BOOST_AUTO_TEST_CASE(prepared_write_failure_does_not_publish_and_can_retry)
     BOOST_REQUIRE(manager.PrepareBlock(
         preparation, config.preparation_height, callbacks, {}, prepared,
         error));
+    const uint256 preparation_root{prepared.ConsensusStateRoot()};
     manager.SnapshotDatabase().FailNextWriteThroughForTesting();
     BOOST_CHECK_THROW((void)manager.CommitPreparedBlock(prepared, error),
                       dbwrapper_error);
@@ -709,7 +731,21 @@ BOOST_AUTO_TEST_CASE(prepared_write_failure_does_not_publish_and_can_retry)
         preparation.GetHash(), preparation.hashPrevBlock,
         config.preparation_height, missing, error));
     BOOST_CHECK(error.result == PQRegistryResult::SNAPSHOT_NOT_FOUND);
-    BOOST_REQUIRE(manager.CommitPreparedBlock(prepared, error));
+    PQRegistryPreparedBlock moved{std::move(prepared)};
+    BOOST_CHECK(!prepared.IsValid());
+    BOOST_CHECK(moved.IsValid());
+    BOOST_CHECK(moved.ConsensusStateRoot() == preparation_root);
+    BOOST_REQUIRE(manager.CommitPreparedBlock(moved, error));
+    BOOST_CHECK(!moved.IsValid());
+    PQRegistryReadView preparation_view;
+    BOOST_REQUIRE(manager.GetReadView(
+        preparation.GetHash(), preparation.hashPrevBlock,
+        config.preparation_height, preparation_view, error));
+    PQRegistryDiskSnapshot preparation_disk;
+    BOOST_REQUIRE(manager.SnapshotDatabase().ReadCache(
+        preparation.GetHash(), preparation_disk));
+    BOOST_CHECK(preparation_view.ConsensusStateRoot() == preparation_root);
+    BOOST_CHECK(preparation_disk.consensus_state_root == preparation_root);
 
     const auto cutoff{Block(
         preparation.GetHash(), 184, {OrdinaryTransaction(184)})};
@@ -732,6 +768,32 @@ BOOST_AUTO_TEST_CASE(prepared_write_failure_does_not_publish_and_can_retry)
         config.preparation_height + 2, missing, error));
     BOOST_CHECK(error.result == PQRegistryResult::SNAPSHOT_NOT_FOUND);
     BOOST_REQUIRE(manager.CommitPreparedBlock(unchanged, error));
+    BOOST_CHECK(!unchanged.IsValid());
+
+    PQRegistryReadView cutoff_view;
+    PQRegistryReadView steady_view;
+    BOOST_REQUIRE(manager.GetReadView(
+        cutoff.GetHash(), preparation.GetHash(),
+        config.preparation_height + 1, cutoff_view, error));
+    BOOST_REQUIRE(manager.GetReadView(
+        steady.GetHash(), cutoff.GetHash(),
+        config.preparation_height + 2, steady_view, error));
+    BOOST_CHECK(cutoff_view.SharesStateWith(steady_view));
+    BOOST_CHECK(cutoff_view.SharesTreeHistoryWith(steady_view));
+    BOOST_CHECK(cutoff_view.ConsensusStateRoot() ==
+                steady_view.ConsensusStateRoot());
+    PQRegistryDiskSnapshot steady_disk;
+    BOOST_REQUIRE(manager.SnapshotDatabase().ReadCache(
+        steady.GetHash(), steady_disk));
+    BOOST_CHECK_EQUAL(steady_disk.is_checkpoint, 0U);
+    BOOST_CHECK(steady_disk.operator_states.empty());
+    BOOST_CHECK(steady_disk.removed_operators.empty());
+    BOOST_CHECK(steady_disk.tree_ids.empty());
+    BOOST_CHECK(steady_disk.block_tree_ids.empty());
+    BOOST_CHECK(steady_disk.previous_consensus_state_root ==
+                cutoff_view.ConsensusStateRoot());
+    BOOST_CHECK(steady_disk.consensus_state_root ==
+                steady_view.ConsensusStateRoot());
 }
 
 BOOST_AUTO_TEST_CASE(mempool_prepass_defers_owner_and_slh_authorization)
@@ -895,6 +957,26 @@ BOOST_AUTO_TEST_CASE(branches_preserve_exact_tree_history_and_cutoff_roots)
     BOOST_CHECK(!b.HasUsedTreeId(commitment_a.tree_id));
     BOOST_CHECK_EQUAL(key_only.used_tree_ids.size(), 1U);
     BOOST_CHECK(key_only.block_tree_ids.empty());
+
+    PQRegistryReadView registered_view;
+    PQRegistryReadView a_view;
+    PQRegistryReadView b_view;
+    PQRegistryReadView key_only_view;
+    BOOST_REQUIRE(manager.GetReadView(
+        registration.GetHash(), registration.hashPrevBlock, 1295,
+        registered_view, error));
+    BOOST_REQUIRE(manager.GetReadView(
+        branch_a.GetHash(), registration.GetHash(), 1296, a_view, error));
+    BOOST_REQUIRE(manager.GetReadView(
+        branch_b.GetHash(), registration.GetHash(), 1296, b_view, error));
+    BOOST_REQUIRE(manager.GetReadView(
+        key_only_branch.GetHash(), registration.GetHash(), 1296,
+        key_only_view, error));
+    BOOST_CHECK(!registered_view.SharesStateWith(key_only_view));
+    BOOST_CHECK(registered_view.SharesTreeHistoryWith(key_only_view));
+    BOOST_CHECK(!registered_view.SharesTreeHistoryWith(a_view));
+    BOOST_CHECK(!registered_view.SharesTreeHistoryWith(b_view));
+    BOOST_CHECK(!a_view.SharesTreeHistoryWith(b_view));
 
     const auto& state_a{OnlyOperator(a)};
     const auto frozen{state_a.ResolveChildRoot(0)};
@@ -1177,6 +1259,46 @@ BOOST_AUTO_TEST_CASE(removal_merge_is_exact_check_only_is_pure_and_forks_reconst
     BOOST_REQUIRE(manager.SnapshotDatabase().ReadCache(
         sibling.GetHash(), sibling_delta));
     BOOST_CHECK(sibling_delta.removed_operators.empty());
+
+    std::vector<uint256> rootless_before{registered_hashes};
+    rootless_before.push_back(absent);
+    std::sort(rootless_before.begin(), rootless_before.end());
+    const auto rootless_removal{Block(
+        sibling.GetHash(), 415, {OrdinaryTransaction(415)})};
+    const std::vector<uint256> rootless_delta{absent};
+    BOOST_REQUIRE(manager.ProcessBlock(
+        rootless_removal, 1297,
+        Members(genesis, rootless_before, registered_hashes, owner_key_id),
+        rootless_delta, /*fJustCheck=*/false, error));
+    PQRegistryReadView sibling_view;
+    PQRegistryReadView rootless_view;
+    BOOST_REQUIRE(manager.GetReadView(
+        sibling.GetHash(), registration.GetHash(), 1296, sibling_view,
+        error));
+    BOOST_REQUIRE(manager.GetReadView(
+        rootless_removal.GetHash(), sibling.GetHash(), 1297, rootless_view,
+        error));
+    BOOST_CHECK(sibling_view.SharesStateWith(rootless_view));
+    BOOST_CHECK(sibling_view.SharesTreeHistoryWith(rootless_view));
+    BOOST_CHECK(sibling_view.ConsensusStateRoot() ==
+                rootless_view.ConsensusStateRoot());
+    PQRegistryDiskSnapshot rootless_disk;
+    BOOST_REQUIRE(manager.SnapshotDatabase().ReadCache(
+        rootless_removal.GetHash(), rootless_disk));
+    BOOST_CHECK_EQUAL(rootless_disk.is_checkpoint, 0U);
+    BOOST_CHECK(rootless_disk.operator_states.empty());
+    BOOST_CHECK(rootless_disk.removed_operators.empty());
+    BOOST_CHECK(rootless_disk.tree_ids.empty());
+    BOOST_CHECK(rootless_disk.block_tree_ids.empty());
+    BOOST_CHECK(rootless_disk.previous_consensus_state_root ==
+                sibling_view.ConsensusStateRoot());
+    BOOST_CHECK(rootless_disk.consensus_state_root ==
+                rootless_view.ConsensusStateRoot());
+
+    PQRegistrySnapshot rootless_undone;
+    BOOST_REQUIRE(manager.UndoBlock(
+        rootless_removal.GetHash(), 1297, rootless_undone, error));
+    BOOST_CHECK(rootless_undone == sibling_snapshot);
 
     PQRegistrySnapshot undone;
     BOOST_REQUIRE(manager.UndoBlock(
@@ -1925,8 +2047,16 @@ BOOST_AUTO_TEST_CASE(mixed_batch_merge_is_canonical_across_permutations)
         error));
     BOOST_CHECK(descending_prepared.ConsensusStateRoot() ==
                 ascending_prepared.ConsensusStateRoot());
+    const uint256 prepared_root{
+        descending_prepared.ConsensusStateRoot()};
     BOOST_REQUIRE(manager.CommitPreparedBlock(ascending_prepared, error));
+    BOOST_CHECK(!ascending_prepared.IsValid());
+    BOOST_CHECK(descending_prepared.IsValid());
+    BOOST_CHECK(descending_prepared.ConsensusStateRoot() == prepared_root);
+    BOOST_CHECK(!manager.SnapshotDatabase().ExistsCache(
+        descending.GetHash()));
     BOOST_REQUIRE(manager.CommitPreparedBlock(descending_prepared, error));
+    BOOST_CHECK(!descending_prepared.IsValid());
 
     PQRegistrySnapshot descending_snapshot;
     PQRegistrySnapshot ascending_snapshot;
@@ -1994,6 +2124,8 @@ BOOST_AUTO_TEST_CASE(mixed_batch_merge_is_canonical_across_permutations)
         }
         BOOST_CHECK(changed_operators == resulting_operators);
         BOOST_CHECK(disk.block_tree_ids == expected_new_tree_ids);
+        BOOST_CHECK(disk.previous_consensus_state_root ==
+                    parent.consensus_state_root);
         BOOST_CHECK(disk.consensus_state_root ==
                     descending_snapshot.consensus_state_root);
     };
