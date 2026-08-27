@@ -363,6 +363,7 @@ private:
         const CBlock& block,
         int32_t height,
         const PQRegistryCallbacks& callbacks,
+        std::span<const uint256> net_removed_pro_tx_hashes,
         bool fJustCheck,
         bool check_sigs,
         PQRegistryError& error,
@@ -384,6 +385,7 @@ public:
         const CBlock& block,
         int32_t height,
         const PQRegistryCallbacks& callbacks,
+        std::span<const uint256> net_removed_pro_tx_hashes,
         bool fJustCheck,
         PQRegistryError& error,
         uint256* resulting_state_root = nullptr)

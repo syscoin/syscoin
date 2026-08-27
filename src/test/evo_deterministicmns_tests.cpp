@@ -891,7 +891,7 @@ BOOST_AUTO_TEST_CASE(payment_projection_stops_at_frozen_epoch_boundary)
             block.nNonce = static_cast<uint32_t>(height);
             llmq::pq::PQRegistryError error;
             BOOST_REQUIRE_MESSAGE(registry.ProcessBlock(
-                block, height, membership, /*fJustCheck=*/false, error),
+                block, height, membership, {}, /*fJustCheck=*/false, error),
                 llmq::pq::PQRegistryResultString(error.result));
             previous_hash = block.GetHash();
             branch_hashes.push_back(previous_hash);

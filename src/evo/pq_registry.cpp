@@ -1303,19 +1303,21 @@ bool PQRegistryManager::ProcessBlock(
     const CBlock& block,
     int32_t height,
     const PQRegistryCallbacks& callbacks,
+    std::span<const uint256> net_removed_pro_tx_hashes,
     bool fJustCheck,
     PQRegistryError& error,
     uint256* resulting_state_root)
 {
-    return ProcessBlockInternal(block, height, callbacks, fJustCheck,
-                                /*check_sigs=*/true, error,
-                                resulting_state_root);
+    return ProcessBlockInternal(
+        block, height, callbacks, net_removed_pro_tx_hashes, fJustCheck,
+        /*check_sigs=*/true, error, resulting_state_root);
 }
 
 bool PQRegistryManager::ProcessBlockInternal(
     const CBlock& block,
     int32_t height,
     const PQRegistryCallbacks& callbacks,
+    std::span<const uint256> net_removed_pro_tx_hashes,
     bool fJustCheck,
     bool check_sigs,
     PQRegistryError& error,
@@ -1335,7 +1337,6 @@ bool PQRegistryManager::ProcessBlockInternal(
     if (block_hash.IsNull()) {
         return SetError(error, PQRegistryResult::INVALID_BLOCK);
     }
-
     if (height < m_config.preparation_height) {
         for (std::size_t index{0}; index < block.vtx.size(); ++index) {
             if (block.vtx[index] &&
@@ -1356,6 +1357,10 @@ bool PQRegistryManager::ProcessBlockInternal(
             *resulting_state_root = empty.consensus_state_root;
         }
         return true;
+    }
+    if (!net_removed_pro_tx_hashes.empty() &&
+        !IsStrictlySortedUnique(net_removed_pro_tx_hashes)) {
+        return SetError(error, PQRegistryResult::INTERNAL_ERROR);
     }
     if (!callbacks.HasMembershipCallbacks()) {
         return SetError(error, PQRegistryResult::CALLBACK_MISSING);
@@ -1510,18 +1515,27 @@ bool PQRegistryManager::ProcessBlockInternal(
         }
     }
 
-    for (auto state{next.operator_states.begin()};
-         state != next.operator_states.end();) {
-        bool exists_after{false};
-        if (!CallMembership(callbacks.dmn_exists_after, state->pro_tx_hash,
-                            exists_after, error)) {
-            return false;
+    if (!net_removed_pro_tx_hashes.empty()) {
+        std::size_t write_index{0};
+        auto removal{net_removed_pro_tx_hashes.begin()};
+        for (std::size_t read_index{0};
+             read_index < next.operator_states.size(); ++read_index) {
+            auto& state{next.operator_states[read_index]};
+            while (removal != net_removed_pro_tx_hashes.end() &&
+                   *removal < state.pro_tx_hash) {
+                ++removal;
+            }
+            if (removal != net_removed_pro_tx_hashes.end() &&
+                *removal == state.pro_tx_hash) {
+                ++removal;
+                continue;
+            }
+            if (write_index != read_index) {
+                next.operator_states[write_index] = std::move(state);
+            }
+            ++write_index;
         }
-        if (!exists_after) {
-            state = next.operator_states.erase(state);
-        } else {
-            ++state;
-        }
+        next.operator_states.resize(write_index);
     }
     std::sort(next.block_tree_ids.begin(), next.block_tree_ids.end());
     if ((!next.block_tree_ids.empty() &&

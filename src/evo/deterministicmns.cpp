@@ -1740,10 +1740,12 @@ bool CDeterministicMNManager::ProcessBlock(const CBlock& block, const CBlockInde
             }
             const auto callbacks = MakePQRegistryCallbacks(
                 oldList, newList, consensusParams.hashGenesisBlock);
+            const auto net_removed_pro_tx_hashes{
+                newList.BuildTrackedNetRemovedProTxHashes(oldList)};
             llmq::pq::PQRegistryError registry_error;
-            if (!registry->ProcessBlock(block, nHeight, callbacks, fJustCheck,
-                                        registry_error,
-                                        &pq_registry_state_root)) {
+            if (!registry->ProcessBlock(
+                    block, nHeight, callbacks, net_removed_pro_tx_hashes,
+                    fJustCheck, registry_error, &pq_registry_state_root)) {
                 LogPrintf("%s -- PQ registry rejected height=%d tx=%u protx=%s result=%s state_result=%u\n",
                           __func__, nHeight,
                           static_cast<unsigned>(registry_error.transaction_index),
