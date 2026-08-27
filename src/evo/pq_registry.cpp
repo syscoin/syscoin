@@ -188,6 +188,76 @@ bool MergeNewTreeIds(std::span<const uint256> current,
     return true;
 }
 
+bool ApplySparseOperatorDelta(
+    std::vector<OperatorKeyState>& current,
+    std::span<const uint256> removed,
+    std::span<const OperatorKeyState> changed)
+{
+    if (removed.empty() && changed.empty()) return true;
+
+    std::vector<OperatorKeyState> merged;
+    merged.reserve(std::min(
+        MAX_PQ_OPERATOR_STATES, current.size() + changed.size()));
+
+    const auto append = [&](OperatorKeyState state) {
+        if (merged.size() >= MAX_PQ_OPERATOR_STATES ||
+            (!merged.empty() &&
+             !(merged.back().pro_tx_hash < state.pro_tx_hash))) {
+            return false;
+        }
+        merged.push_back(std::move(state));
+        return true;
+    };
+
+    auto current_it{current.begin()};
+    auto removed_it{removed.begin()};
+    auto changed_it{changed.begin()};
+    while (current_it != current.end() || changed_it != changed.end()) {
+        if (removed_it != removed.end() &&
+            (current_it == current.end() ||
+             *removed_it < current_it->pro_tx_hash)) {
+            return false;
+        }
+
+        if (changed_it != changed.end() &&
+            (current_it == current.end() ||
+             changed_it->pro_tx_hash < current_it->pro_tx_hash)) {
+            if (removed_it != removed.end() &&
+                *removed_it == changed_it->pro_tx_hash) {
+                return false;
+            }
+            if (!append(*changed_it++)) return false;
+            continue;
+        }
+
+        if (removed_it != removed.end() &&
+            *removed_it == current_it->pro_tx_hash) {
+            if (changed_it != changed.end() &&
+                changed_it->pro_tx_hash == current_it->pro_tx_hash) {
+                return false;
+            }
+            ++current_it;
+            ++removed_it;
+            continue;
+        }
+
+        if (changed_it != changed.end() &&
+            changed_it->pro_tx_hash == current_it->pro_tx_hash) {
+            if (*changed_it == *current_it || !append(*changed_it)) {
+                return false;
+            }
+            ++current_it;
+            ++changed_it;
+            continue;
+        }
+
+        if (!append(std::move(*current_it++))) return false;
+    }
+    if (removed_it != removed.end()) return false;
+    current = std::move(merged);
+    return true;
+}
+
 bool IsRegistryCheckpoint(const PQRegistryConfig& config,
                           int32_t height) noexcept
 {
@@ -1330,28 +1400,10 @@ bool PQRegistryManager::ReconstructPersistentSnapshotView(
             states = record->operator_states;
             used_tree_ids = record->tree_ids;
         } else {
-            for (const auto& removed : record->removed_operators) {
-                auto position{FindOperatorPosition(states, removed)};
-                if (position == states.end() ||
-                    position->pro_tx_hash != removed) {
-                    return SetError(error,
-                                    PQRegistryResult::SNAPSHOT_CORRUPT);
-                }
-                states.erase(position);
-            }
-            for (const auto& changed : record->operator_states) {
-                auto position{
-                    FindOperatorPosition(states, changed.pro_tx_hash)};
-                if (position != states.end() &&
-                    position->pro_tx_hash == changed.pro_tx_hash) {
-                    if (*position == changed) {
-                        return SetError(error,
-                                        PQRegistryResult::SNAPSHOT_CORRUPT);
-                    }
-                    *position = changed;
-                } else {
-                    states.insert(position, changed);
-                }
+            if (!ApplySparseOperatorDelta(
+                    states, record->removed_operators,
+                    record->operator_states)) {
+                return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
             }
             std::vector<uint256> merged;
             if (!MergeNewTreeIds(used_tree_ids, record->block_tree_ids,

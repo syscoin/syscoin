@@ -2147,6 +2147,103 @@ BOOST_AUTO_TEST_CASE(mixed_batch_merge_is_canonical_across_permutations)
     };
     check_disk_delta(descending);
     check_disk_delta(ascending);
+
+    BOOST_REQUIRE(manager.PruneSnapshot(descending.GetHash()));
+    PQRegistrySnapshot reconstructed_descending;
+    BOOST_REQUIRE(manager.GetSnapshot(
+        descending.GetHash(), registration.GetHash(), 1296,
+        reconstructed_descending, error));
+    BOOST_CHECK(reconstructed_descending == descending_snapshot);
+
+    BOOST_REQUIRE(manager.PruneSnapshot(ascending.GetHash()));
+    PQRegistrySnapshot reconstructed_ascending;
+    BOOST_REQUIRE(manager.GetSnapshot(
+        ascending.GetHash(), registration.GetHash(), 1296,
+        reconstructed_ascending, error));
+    BOOST_CHECK(reconstructed_ascending == ascending_snapshot);
+
+    PQRegistryDiskSnapshot original_descending;
+    PQRegistryDiskSnapshot original_ascending;
+    BOOST_REQUIRE(manager.SnapshotDatabase().ReadCache(
+        descending.GetHash(), original_descending));
+    BOOST_REQUIRE(manager.SnapshotDatabase().ReadCache(
+        ascending.GetHash(), original_ascending));
+
+    auto overlapping{original_descending};
+    overlapping.operator_states.push_back(
+        RequiredOperator(parent, removed));
+    std::sort(overlapping.operator_states.begin(),
+              overlapping.operator_states.end(),
+              [](const auto& left, const auto& right) {
+                  return left.pro_tx_hash < right.pro_tx_hash;
+              });
+    BOOST_CHECK(!overlapping.IsStructurallyValid());
+
+    auto duplicate{original_descending};
+    duplicate.operator_states.push_back(duplicate.operator_states.front());
+    std::sort(duplicate.operator_states.begin(),
+              duplicate.operator_states.end(),
+              [](const auto& left, const auto& right) {
+                  return left.pro_tx_hash < right.pro_tx_hash;
+              });
+    BOOST_CHECK(!duplicate.IsStructurallyValid());
+
+    auto missing_removal{original_descending};
+    missing_removal.removed_operators = {NonNullHash(999'999)};
+    auto missing_removal_result{descending_snapshot};
+    missing_removal_result.operator_states.push_back(
+        RequiredOperator(parent, removed));
+    std::sort(missing_removal_result.operator_states.begin(),
+              missing_removal_result.operator_states.end(),
+              [](const auto& left, const auto& right) {
+                  return left.pro_tx_hash < right.pro_tx_hash;
+              });
+    const auto missing_removal_root{
+        missing_removal_result.RecomputeConsensusStateRoot(genesis)};
+    BOOST_REQUIRE(missing_removal_root);
+    missing_removal.consensus_state_root = *missing_removal_root;
+    BOOST_REQUIRE(missing_removal.IsStructurallyValid());
+    BOOST_REQUIRE(manager.SnapshotDatabase().WriteThrough(
+        descending.GetHash(), missing_removal, /*fSync=*/true));
+    BOOST_REQUIRE(manager.PruneSnapshot(descending.GetHash()));
+    PQRegistrySnapshot rejected;
+    BOOST_CHECK(!manager.GetSnapshot(
+        descending.GetHash(), registration.GetHash(), 1296, rejected,
+        error));
+    BOOST_CHECK(error.result == PQRegistryResult::SNAPSHOT_CORRUPT);
+
+    auto no_op_update{original_ascending};
+    const auto first_update{std::lower_bound(
+        no_op_update.operator_states.begin(),
+        no_op_update.operator_states.end(), first,
+        [](const OperatorKeyState& state, const uint256& pro_tx_hash) {
+            return state.pro_tx_hash < pro_tx_hash;
+        })};
+    BOOST_REQUIRE(first_update != no_op_update.operator_states.end());
+    BOOST_REQUIRE(first_update->pro_tx_hash == first);
+    *first_update = RequiredOperator(parent, first);
+    auto no_op_result{ascending_snapshot};
+    const auto no_op_first{std::lower_bound(
+        no_op_result.operator_states.begin(),
+        no_op_result.operator_states.end(), first,
+        [](const OperatorKeyState& state, const uint256& pro_tx_hash) {
+            return state.pro_tx_hash < pro_tx_hash;
+        })};
+    BOOST_REQUIRE(no_op_first != no_op_result.operator_states.end());
+    BOOST_REQUIRE(no_op_first->pro_tx_hash == first);
+    *no_op_first = RequiredOperator(parent, first);
+    const auto no_op_root{
+        no_op_result.RecomputeConsensusStateRoot(genesis)};
+    BOOST_REQUIRE(no_op_root);
+    no_op_update.consensus_state_root = *no_op_root;
+    BOOST_REQUIRE(no_op_update.IsStructurallyValid());
+    BOOST_REQUIRE(manager.SnapshotDatabase().WriteThrough(
+        ascending.GetHash(), no_op_update, /*fSync=*/true));
+    BOOST_REQUIRE(manager.PruneSnapshot(ascending.GetHash()));
+    BOOST_CHECK(!manager.GetSnapshot(
+        ascending.GetHash(), registration.GetHash(), 1296, rejected,
+        error));
+    BOOST_CHECK(error.result == PQRegistryResult::SNAPSHOT_CORRUPT);
 }
 
 BOOST_AUTO_TEST_CASE(membership_reconciliation_is_checkpoint_only)
