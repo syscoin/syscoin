@@ -84,6 +84,12 @@ struct PaymentAuditCandidateSnapshot {
     std::vector<PaymentAuditCandidateView> ordered_candidates;
 };
 
+/** One exact archived witness and the revision observed under the same lock. */
+struct PaymentAuditWitnessSnapshot {
+    FinalPaymentAudit audit;
+    uint64_t revision{0};
+};
+
 /**
  * Exact certificate archive. Historical audit witnesses remain available
  * independently of the bounded live-row staging database until an
@@ -117,6 +123,9 @@ public:
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     [[nodiscard]] std::optional<FinalPaymentAudit> Get(
         const uint256& witness_id) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    [[nodiscard]] std::optional<PaymentAuditWitnessSnapshot>
+    GetWithCandidateRevision(const uint256& witness_id) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     [[nodiscard]] std::optional<PaymentAuditCandidateSnapshot>
     GetEpochCandidateSnapshot(uint32_t epoch) const
@@ -162,6 +171,9 @@ public:
     GetPruneCheckpoint() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
 private:
+    [[nodiscard]] std::optional<FinalPaymentAudit> GetLocked(
+        const uint256& witness_id) const
+        EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
     void Initialize() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     [[nodiscard]] bool CanAdvanceCandidateRevision() const
         EXCLUSIVE_LOCKS_REQUIRED(m_mutex);

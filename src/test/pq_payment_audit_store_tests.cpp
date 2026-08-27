@@ -397,6 +397,58 @@ BOOST_AUTO_TEST_CASE(candidate_revision_tracks_repairs_and_fails_closed)
     BOOST_CHECK(!corrupt.IsCandidateRevisionCurrent(*repaired_revision));
 }
 
+BOOST_AUTO_TEST_CASE(exact_witness_snapshot_is_atomic_and_revision_bound)
+{
+    const fs::path path{m_path_root /
+                        "pq_payment_audit_store_witness_snapshot"};
+    const uint256 genesis_hash{NonNullHash(14)};
+    constexpr uint32_t epoch{14};
+    const auto audit{Audit(epoch, 0x07, 910)};
+    const auto mutation{Audit(epoch, 0x0b, 911)};
+    const uint256 witness_id{audit.GetWitnessId(genesis_hash)};
+
+    PaymentAuditStore store{path, genesis_hash};
+    BOOST_CHECK(!store.GetWithCandidateRevision(NonNullHash(999)));
+    BOOST_REQUIRE(store.IsHealthy());
+    BOOST_REQUIRE(store.AcceptVerified(audit) ==
+                  PaymentAuditStoreResult::ACCEPTED);
+
+    const auto exact{store.GetWithCandidateRevision(witness_id)};
+    BOOST_REQUIRE(exact);
+    BOOST_CHECK(exact->audit == audit);
+    BOOST_CHECK_NE(exact->revision, 0U);
+    BOOST_CHECK(store.IsCandidateRevisionCurrent(exact->revision));
+
+    BOOST_REQUIRE(store.AcceptVerified(mutation) ==
+                  PaymentAuditStoreResult::ACCEPTED);
+    BOOST_CHECK(!store.IsCandidateRevisionCurrent(exact->revision));
+}
+
+BOOST_AUTO_TEST_CASE(exact_witness_snapshot_captures_repair_revision)
+{
+    const fs::path path{m_path_root /
+                        "pq_payment_audit_store_witness_snapshot_repair"};
+    const uint256 genesis_hash{NonNullHash(15)};
+    constexpr uint32_t epoch{15};
+    const auto audit{Audit(epoch, 0x07, 920)};
+    const uint256 witness_id{audit.GetWitnessId(genesis_hash)};
+    {
+        PaymentAuditStore store{path, genesis_hash};
+        BOOST_REQUIRE(store.AcceptVerified(audit) ==
+                      PaymentAuditStoreResult::ACCEPTED);
+    }
+    ErasePresence(path, genesis_hash, witness_id);
+
+    PaymentAuditStore repaired{path, genesis_hash};
+    const auto before{repaired.ObserveCandidateRevision()};
+    BOOST_REQUIRE(before);
+    const auto exact{repaired.GetWithCandidateRevision(witness_id)};
+    BOOST_REQUIRE(exact);
+    BOOST_CHECK(exact->audit == audit);
+    BOOST_CHECK_EQUAL(exact->revision, *before + 1);
+    BOOST_CHECK(repaired.IsCandidateRevisionCurrent(exact->revision));
+}
+
 BOOST_AUTO_TEST_CASE(pin_prunes_old_candidates_but_accepts_new_branch_candidate)
 {
     const fs::path path{m_path_root / "pq_payment_audit_store_pin"};

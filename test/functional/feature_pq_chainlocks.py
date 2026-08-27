@@ -1871,13 +1871,32 @@ class PQChainLocksTest(SyscoinTestFramework):
         self.admit_payment_audit_chainlocks(context)
         carrier_hash, canonical_hash = \
             self.build_pending_payment_audit_carrier(bundle)
-        node.invalidateblock(carrier_hash)
-        assert_equal(node.getblockcount(), PAYMENT_AUDIT_CARRIER_HEIGHT - 1)
-        node.reconsiderblock(carrier_hash)
-        self.wait_until(
-            lambda: node.getbestblockhash() == carrier_hash,
-            timeout=1200,
-        )
+        # Initial activation pins the witness and advances the archive
+        # revision. The first reconnect must miss and republish under that
+        # stable revision; only the next reconnect may reuse it.
+        cache_hit_marker = (
+            "reused verified PQ payment-audit receipt transition "
+            "for carrier %d" % PAYMENT_AUDIT_CARRIER_HEIGHT)
+        with node.assert_debug_log(
+                [], unexpected_msgs=[cache_hit_marker], timeout=1200):
+            node.invalidateblock(carrier_hash)
+            assert_equal(
+                node.getblockcount(), PAYMENT_AUDIT_CARRIER_HEIGHT - 1)
+            node.reconsiderblock(carrier_hash)
+            self.wait_until(
+                lambda: node.getbestblockhash() == carrier_hash,
+                timeout=1200,
+            )
+        with node.assert_debug_log([cache_hit_marker], timeout=1200):
+            node.invalidateblock(carrier_hash)
+            assert_equal(
+                node.getblockcount(), PAYMENT_AUDIT_CARRIER_HEIGHT - 1)
+            node.reconsiderblock(carrier_hash)
+            self.wait_until(
+                lambda: node.getbestblockhash() == carrier_hash,
+                timeout=1200,
+            )
+        assert_equal(node.getblockcount(), PAYMENT_AUDIT_CARRIER_HEIGHT)
         # Before a covering CLSIG creates the compact checkpoint, the exact
         # audit is still live and independently retrievable.
         self.retrieve_payment_audit(

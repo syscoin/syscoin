@@ -414,6 +414,21 @@ using ChainLockRelayRecipients =
     const uint256& relay_pro_tx_hash,
     const pq::ChainLockShareTranscript& transcript) noexcept;
 
+class CChainLocksHandler;
+class VerifiedPaymentAuditReceiptTransition;
+class VerifiedPaymentAuditReceiptTransitionCache;
+
+/**
+ * Process-local proof that one exact receipt certificate and its derived
+ * probation transition were fully verified. Its definition and construction
+ * stay private to the handler implementation.
+ */
+using VerifiedPaymentAuditReceiptTransitionPtr =
+    std::shared_ptr<const VerifiedPaymentAuditReceiptTransition>;
+[[nodiscard]] const pq::PQPaymentProbationTransitionResult*
+GetVerifiedPaymentAuditReceiptTransition(
+    const VerifiedPaymentAuditReceiptTransitionPtr& verified) noexcept;
+
 /**
  * Live certificate and authenticated scheduled-WOTS-share handler. There is no DKG,
  * threshold-key ceremony, recovered-signature layer, or BLS state.
@@ -527,7 +542,7 @@ public:
     CheckPaymentAuditReceiptCertificate(
         const pq::PaymentAuditReceipt& receipt,
         const CBlockIndex& carrier,
-        std::optional<pq::PQPaymentProbationTransitionResult>& transition) const
+        VerifiedPaymentAuditReceiptTransitionPtr& transition) const
         EXCLUSIVE_LOCKS_REQUIRED(cs_main,
                                  !m_lookup_mutex,
                                  !m_verification_mutex);
@@ -790,7 +805,11 @@ private:
                                  !m_btcc_preseal_mutex);
     [[nodiscard]] bool IsConfiguredForVerification() const
         EXCLUSIVE_LOCKS_REQUIRED(!m_lookup_mutex);
-    [[nodiscard]] pq::FrozenQuorumRosterCachePtr GetQuorumRosterCache() const
+    [[nodiscard]] pq::FrozenQuorumRosterCachePtr GetQuorumRosterCache(
+        uint64_t* generation = nullptr) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_lookup_mutex);
+    [[nodiscard]] bool IsQuorumRosterSourceGenerationCurrent(
+        uint64_t generation) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_lookup_mutex);
     void DisableShareAdmission() noexcept;
     [[nodiscard]] uint64_t GetShareAdmissionGeneration() const noexcept;
@@ -884,8 +903,16 @@ private:
         uint8_t* authorization_mask = nullptr,
         bool require_live_transition_finality = false,
         PaymentAuditRosterBuildStatus* status = nullptr,
-        const PaymentAuditHistoricalContext* historical = nullptr) const
+        const PaymentAuditHistoricalContext* historical = nullptr,
+        uint64_t* roster_source_generation = nullptr,
+        int32_t* reconstruction_floor = nullptr) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_lookup_mutex);
+    [[nodiscard]] PaymentAuditReceiptCertificateStatus
+    RecheckVerifiedPaymentAuditReceiptTransition(
+        const VerifiedPaymentAuditReceiptTransition& verified,
+        const pq::PaymentAuditReceipt& receipt,
+        const CBlockIndex& carrier) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main, !m_lookup_mutex);
     [[nodiscard]] std::optional<PaymentAuditHistoricalContext>
     ResolvePendingPaymentAuditContext(const uint256& witness_id) const
         EXCLUSIVE_LOCKS_REQUIRED(
@@ -1200,12 +1227,16 @@ private:
     std::unique_ptr<pq::PaymentAuditStagingStore>
         m_payment_audit_staging_store;
     mutable PaymentAuditReceiptCache m_payment_audit_receipt_cache;
+    mutable std::unique_ptr<VerifiedPaymentAuditReceiptTransitionCache>
+        m_verified_payment_audit_transition_cache;
     mutable pq::ChainLockVerifier m_verifier;
     mutable pq::CatchupHistoricalProofCache m_catchup_proof_cache;
 
     mutable Mutex m_lookup_mutex;
     pq::FrozenQuorumRosterCachePtr m_quorum_roster_cache
         GUARDED_BY(m_lookup_mutex);
+    uint64_t m_quorum_roster_source_generation
+        GUARDED_BY(m_lookup_mutex){0};
     // ChainLock admission may rebuild branch context and therefore acquire
     // cs_main. Keep that serialization independent from the crypto-only mutex
     // so ConnectBlock can verify an archived audit while holding cs_main.

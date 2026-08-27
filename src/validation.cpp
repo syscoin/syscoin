@@ -2333,14 +2333,18 @@ static bool ConnectPaymentAuditReceiptState(
                 return state.Error(
                     "pq-payment-audit-handler-unavailable");
             }
+            llmq::VerifiedPaymentAuditReceiptTransitionPtr
+                verified_transition;
             std::optional<llmq::pq::PQPaymentProbationTransitionResult>
-                transition;
+                compact_transition;
+            const llmq::pq::PQPaymentProbationTransitionResult*
+                transition{nullptr};
             bool compact_replay{false};
             bool start_preseal{false};
             const auto certificate_status{
                 llmq::chainLocksHandler
                     ->CheckPaymentAuditReceiptCertificate(
-                        receipt, index, transition)};
+                        receipt, index, verified_transition)};
             using CertificateStatus =
                 llmq::CChainLocksHandler::
                     PaymentAuditReceiptCertificateStatus;
@@ -2385,15 +2389,17 @@ static bool ConnectPaymentAuditReceiptState(
                 }
                 llmq::pq::PQPaymentProbationError transition_error{
                     llmq::pq::PQPaymentProbationError::NONE};
-                transition = llmq::pq::ApplyPQPaymentProbationTransition(
-                    previous_probation, input, &transition_error);
-                if (!transition ||
-                    transition->undo.applied_state_hash !=
+                compact_transition =
+                    llmq::pq::ApplyPQPaymentProbationTransition(
+                        previous_probation, input, &transition_error);
+                if (!compact_transition ||
+                    compact_transition->undo.applied_state_hash !=
                         receipt.next_probation_state_hash) {
                     return state.Invalid(
                         BlockValidationResult::BLOCK_CONSENSUS,
                         "bad-pq-payment-audit-result");
                 }
+                transition = &*compact_transition;
             }
             if (certificate_status == CertificateStatus::UNAVAILABLE) {
                 return state.Error(
@@ -2414,8 +2420,14 @@ static bool ConnectPaymentAuditReceiptState(
                     expected_transition_receipt{
                         receipt.epoch, receipt.carrier_height,
                         receipt.result_hash};
-                if (!transition ||
-                    transition->undo.previous_state_hash !=
+                transition =
+                    llmq::GetVerifiedPaymentAuditReceiptTransition(
+                        verified_transition);
+                if (transition == nullptr) {
+                    return state.Error(
+                        "pq-payment-audit-prepared-transition-missing");
+                }
+                if (transition->undo.previous_state_hash !=
                         previous_probation_hash ||
                     transition->undo.applied_receipt !=
                         expected_transition_receipt ||
@@ -2426,6 +2438,10 @@ static bool ConnectPaymentAuditReceiptState(
                 }
             }
 
+            if (transition == nullptr) {
+                return state.Error(
+                    "pq-payment-audit-transition-missing");
+            }
             next_probation_hash = transition->undo.applied_state_hash;
             if (start_preseal && !fJustCheck &&
                 !llmq::chainLocksHandler->BeginPaymentAuditPreseal(

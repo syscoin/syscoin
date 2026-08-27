@@ -672,6 +672,23 @@ std::optional<FinalPaymentAudit> PaymentAuditStore::Get(
     const uint256& witness_id) const
 {
     LOCK(m_mutex);
+    return GetLocked(witness_id);
+}
+
+std::optional<PaymentAuditWitnessSnapshot>
+PaymentAuditStore::GetWithCandidateRevision(
+    const uint256& witness_id) const
+{
+    LOCK(m_mutex);
+    auto audit{GetLocked(witness_id)};
+    if (!audit) return std::nullopt;
+    return PaymentAuditWitnessSnapshot{
+        std::move(*audit), m_candidate_revision};
+}
+
+std::optional<FinalPaymentAudit> PaymentAuditStore::GetLocked(
+    const uint256& witness_id) const
+{
     if (m_failure || witness_id.IsNull()) return std::nullopt;
     try {
         const WitnessKey key{DB_WITNESS_PREFIX, DB_FORMAT_VERSION,

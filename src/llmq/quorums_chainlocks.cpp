@@ -883,6 +883,167 @@ PaymentAuditReceiptCache::StatsForTesting() const
         m_conflicts};
 }
 
+class VerifiedPaymentAuditReceiptTransition final {
+private:
+    VerifiedPaymentAuditReceiptTransition(
+        pq::PaymentAuditReceipt receipt,
+        pq::PaymentAuditStatement statement,
+        uint256 carrier_parent_hash,
+        int32_t carrier_parent_height,
+        uint256 parent_probation_state_hash,
+        uint64_t archive_revision,
+        uint64_t roster_source_generation,
+        int32_t reconstruction_floor,
+        uint8_t authorization_mask,
+        pq::PQPaymentProbationTransitionResult transition);
+
+    const pq::PaymentAuditReceipt m_receipt;
+    const pq::PaymentAuditStatement m_statement;
+    const uint256 m_carrier_parent_hash;
+    const int32_t m_carrier_parent_height;
+    const uint256 m_parent_probation_state_hash;
+    const uint64_t m_archive_revision;
+    const uint64_t m_roster_source_generation;
+    const int32_t m_reconstruction_floor;
+    const uint8_t m_authorization_mask;
+    const pq::PQPaymentProbationTransitionResult m_transition;
+
+    friend class CChainLocksHandler;
+    friend class VerifiedPaymentAuditReceiptTransitionCache;
+    friend const pq::PQPaymentProbationTransitionResult*
+    GetVerifiedPaymentAuditReceiptTransition(
+        const VerifiedPaymentAuditReceiptTransitionPtr&) noexcept;
+};
+
+const pq::PQPaymentProbationTransitionResult*
+GetVerifiedPaymentAuditReceiptTransition(
+    const VerifiedPaymentAuditReceiptTransitionPtr& verified) noexcept
+{
+    return verified ? &verified->m_transition : nullptr;
+}
+
+VerifiedPaymentAuditReceiptTransition::
+    VerifiedPaymentAuditReceiptTransition(
+        pq::PaymentAuditReceipt receipt,
+        pq::PaymentAuditStatement statement,
+        uint256 carrier_parent_hash,
+        int32_t carrier_parent_height,
+        uint256 parent_probation_state_hash,
+        uint64_t archive_revision,
+        uint64_t roster_source_generation,
+        int32_t reconstruction_floor,
+        uint8_t authorization_mask,
+        pq::PQPaymentProbationTransitionResult transition)
+    : m_receipt{std::move(receipt)},
+      m_statement{std::move(statement)},
+      m_carrier_parent_hash{std::move(carrier_parent_hash)},
+      m_carrier_parent_height{carrier_parent_height},
+      m_parent_probation_state_hash{std::move(parent_probation_state_hash)},
+      m_archive_revision{archive_revision},
+      m_roster_source_generation{roster_source_generation},
+      m_reconstruction_floor{reconstruction_floor},
+      m_authorization_mask{authorization_mask},
+      m_transition{std::move(transition)}
+{
+}
+
+class VerifiedPaymentAuditReceiptTransitionCache final {
+public:
+    static constexpr std::size_t CAPACITY{8};
+
+    struct Key {
+        uint256 carrier_parent_hash;
+        int32_t carrier_parent_height{-1};
+        uint256 parent_probation_state_hash;
+        int32_t carrier_height{-1};
+        pq::PaymentAuditReceipt receipt;
+        uint64_t archive_revision{0};
+        uint64_t roster_source_generation{0};
+
+        friend bool operator==(const Key&, const Key&) = default;
+    };
+
+    [[nodiscard]] VerifiedPaymentAuditReceiptTransitionPtr Get(
+        const Key& key) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex)
+    {
+        LOCK(m_mutex);
+        for (auto& entry : m_entries) {
+            if (entry.transition && entry.key == key) {
+                entry.recently_used = true;
+                return entry.transition;
+            }
+        }
+        return nullptr;
+    }
+
+    [[nodiscard]] VerifiedPaymentAuditReceiptTransitionPtr Publish(
+        const Key& key,
+        VerifiedPaymentAuditReceiptTransitionPtr transition)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex)
+    {
+        if (!transition || transition->m_receipt != key.receipt ||
+            transition->m_carrier_parent_hash != key.carrier_parent_hash ||
+            transition->m_carrier_parent_height != key.carrier_parent_height ||
+            transition->m_parent_probation_state_hash !=
+                key.parent_probation_state_hash ||
+            transition->m_receipt.carrier_height != key.carrier_height ||
+            transition->m_archive_revision != key.archive_revision ||
+            transition->m_roster_source_generation !=
+                key.roster_source_generation) {
+            return nullptr;
+        }
+
+        LOCK(m_mutex);
+        for (auto& entry : m_entries) {
+            if (!entry.transition || entry.key != key) continue;
+            entry.recently_used = true;
+            return entry.transition;
+        }
+
+        std::optional<std::size_t> victim;
+        for (std::size_t index{0}; index < m_entries.size(); ++index) {
+            if (!m_entries[index].transition) {
+                victim = index;
+                break;
+            }
+        }
+        while (!victim) {
+            const std::size_t index{m_clock};
+            m_clock = (m_clock + 1) % m_entries.size();
+            auto& candidate{m_entries[index]};
+            if (!candidate.recently_used) {
+                victim = index;
+            } else {
+                candidate.recently_used = false;
+            }
+        }
+
+        auto& entry{m_entries[*victim]};
+        entry.key = key;
+        entry.transition = std::move(transition);
+        entry.recently_used = true;
+        return entry.transition;
+    }
+
+    void Clear() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex)
+    {
+        LOCK(m_mutex);
+        m_entries = {};
+        m_clock = 0;
+    }
+
+private:
+    struct Entry {
+        Key key;
+        VerifiedPaymentAuditReceiptTransitionPtr transition;
+        bool recently_used{false};
+    };
+
+    mutable Mutex m_mutex;
+    mutable std::array<Entry, CAPACITY> m_entries GUARDED_BY(m_mutex);
+    mutable std::size_t m_clock GUARDED_BY(m_mutex){0};
+};
+
 bool IsCurrentChainLockCatchupCandidateAdmissible(
     const pq::ChainLockScheduleConfig& schedule,
     const CBlockIndex& active_tip,
@@ -1611,6 +1772,9 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
       m_config{MakePQChainLockFinalityStoreConfig(chainman.GetConsensus())},
       m_quorum_build_config{
           MakePQQuorumBuildConfig(chainman.GetConsensus())},
+      m_verified_payment_audit_transition_cache{
+          std::make_unique<
+              VerifiedPaymentAuditReceiptTransitionCache>()},
       m_verifier{GetPQChainLockVerifierThreads(GetNumCores())}
 {
     if (m_config) {
@@ -1874,6 +2038,7 @@ void CChainLocksHandler::Stop()
             m_share_admission_gate.SetReady(false);
         }
         m_payment_audit_receipt_cache.Clear();
+        m_verified_payment_audit_transition_cache->Clear();
         if (!m_started) return;
         m_started = false;
         scheduler = std::move(m_scheduler);
@@ -1932,16 +2097,35 @@ void CChainLocksHandler::SetQuorumRosterCache(
     }
     {
         LOCK(m_lookup_mutex);
+        if (m_quorum_roster_source_generation ==
+            std::numeric_limits<uint64_t>::max()) {
+            throw std::overflow_error{
+                "PQ quorum roster source generation exhausted"};
+        }
         m_quorum_roster_cache = std::move(cache);
+        ++m_quorum_roster_source_generation;
     }
     m_payment_audit_receipt_cache.Clear();
+    m_verified_payment_audit_transition_cache->Clear();
 }
 
 pq::FrozenQuorumRosterCachePtr
-CChainLocksHandler::GetQuorumRosterCache() const
+CChainLocksHandler::GetQuorumRosterCache(uint64_t* generation) const
 {
     LOCK(m_lookup_mutex);
+    if (generation != nullptr) {
+        *generation = m_quorum_roster_source_generation;
+    }
     return m_quorum_roster_cache;
+}
+
+bool CChainLocksHandler::IsQuorumRosterSourceGenerationCurrent(
+    uint64_t generation) const
+{
+    LOCK(m_lookup_mutex);
+    return generation != 0 &&
+           generation == m_quorum_roster_source_generation &&
+           static_cast<bool>(m_quorum_roster_cache);
 }
 
 void CChainLocksHandler::DisableShareAdmission() noexcept
@@ -2700,10 +2884,179 @@ bool CChainLocksHandler::VerifyPaymentAuditCertificateSignatures(
 }
 
 CChainLocksHandler::PaymentAuditReceiptCertificateStatus
+CChainLocksHandler::RecheckVerifiedPaymentAuditReceiptTransition(
+    const VerifiedPaymentAuditReceiptTransition& verified,
+    const pq::PaymentAuditReceipt& receipt,
+    const CBlockIndex& carrier) const
+{
+    AssertLockHeld(cs_main);
+    if (receipt.IsNull() || receipt != verified.m_receipt ||
+        !receipt.IsStructurallyValid() ||
+        !verified.m_statement.IsStructurallyValid() ||
+        carrier.nHeight != receipt.carrier_height ||
+        carrier.pprev == nullptr ||
+        carrier.pprev->nHeight != verified.m_carrier_parent_height ||
+        carrier.pprev->GetBlockHash() !=
+            verified.m_carrier_parent_hash ||
+        carrier.pprev->pqPaymentProbationStateHash !=
+            verified.m_parent_probation_state_hash) {
+        return PaymentAuditReceiptCertificateStatus::INVALID;
+    }
+    if (!m_config || !m_quorum_build_config ||
+        !m_payment_audit_store) {
+        return PaymentAuditReceiptCertificateStatus::UNAVAILABLE;
+    }
+    if (!m_payment_audit_store->IsHealthy() ||
+        !m_payment_audit_store->IsCandidateRevisionCurrent(
+            verified.m_archive_revision) ||
+        !IsQuorumRosterSourceGenerationCurrent(
+            verified.m_roster_source_generation)) {
+        return PaymentAuditReceiptCertificateStatus::LOCAL_ERROR;
+    }
+
+    const pq::PaymentAuditScheduleConfig schedule_config{
+        m_config->chainlock_schedule, m_config->btcc_schedule};
+    const auto carrier_status{ClassifyPaymentAuditReceiptCarrierContext(
+        receipt, carrier, schedule_config)};
+    if (carrier_status == PaymentAuditContextStatus::INVALID) {
+        return PaymentAuditReceiptCertificateStatus::INVALID;
+    }
+    if (carrier_status != PaymentAuditContextStatus::READY ||
+        (m_chainman.IsSnapshotActive() &&
+         !m_chainman.IsSnapshotValidated())) {
+        return PaymentAuditReceiptCertificateStatus::LOCAL_ERROR;
+    }
+
+    const auto& statement{verified.m_statement};
+    const auto expected_seal{pq::NextEligibleChainLockTargetHeight(
+        m_config->chainlock_schedule,
+        statement.seal_statement.previous_chainlock_height)};
+    const auto epoch_schedule{pq::BuildPaymentAuditEpochSchedule(
+        schedule_config, statement.commitment.seed.epoch)};
+    const auto round{
+        epoch_schedule
+            ? pq::SelectPaymentAuditRound(
+                  schedule_config, *epoch_schedule, m_genesis_hash,
+                  statement.commitment.subject_descriptor_hash,
+                  statement.commitment.seed)
+            : std::nullopt};
+    if (!expected_seal || !round ||
+        statement.commitment.seal_height != *expected_seal ||
+        round->selected_row != statement.commitment.selected_row ||
+        round->response_height != statement.commitment.response_height ||
+        round->deadline_height != statement.commitment.deadline_height ||
+        round->seal_height != statement.commitment.seal_height ||
+        receipt.epoch != statement.commitment.seed.epoch ||
+        receipt.seal_height != statement.commitment.seal_height ||
+        receipt.seal_block_hash != statement.seal_statement.block_hash ||
+        receipt.audit_logical_id != pq::GetPaymentAuditLogicalId(
+            m_genesis_hash, statement) ||
+        receipt.commitment_hash != pq::GetPaymentAuditCommitmentHash(
+            m_genesis_hash, statement.commitment) ||
+        verified.m_reconstruction_floor < 0 ||
+        !pq::IsSigningRosterAuthorizationMask(
+            verified.m_authorization_mask)) {
+        return PaymentAuditReceiptCertificateStatus::INVALID;
+    }
+
+    if (carrier.nStatus & BLOCK_FAILED_MASK) {
+        return PaymentAuditReceiptCertificateStatus::INVALID;
+    }
+    const CBlockIndex* seal{m_chainman.m_blockman.LookupBlockIndex(
+        statement.seal_statement.block_hash)};
+    const auto seal_status{ClassifyPaymentAuditSealContext(
+        seal, round->seal_height,
+        statement.seal_statement.previous_chainlock_height,
+        statement.seal_statement.previous_chainlock_hash,
+        PaymentAuditSealValidation::THRESHOLD_ATTESTED_HISTORY)};
+    if (seal_status == PaymentAuditContextStatus::INVALID) {
+        return PaymentAuditReceiptCertificateStatus::INVALID;
+    }
+    if (seal_status != PaymentAuditContextStatus::READY || seal == nullptr) {
+        return PaymentAuditReceiptCertificateStatus::LOCAL_ERROR;
+    }
+    if (carrier.GetAncestor(seal->nHeight) != seal) {
+        return PaymentAuditReceiptCertificateStatus::INVALID;
+    }
+
+    const CBlockIndex* response{seal->GetAncestor(round->response_height)};
+    const auto response_status{ClassifyPaymentAuditResponseContext(
+        response, /*require_block_data=*/false)};
+    if (response_status == PaymentAuditContextStatus::INVALID) {
+        return PaymentAuditReceiptCertificateStatus::INVALID;
+    }
+    if (response_status != PaymentAuditContextStatus::READY) {
+        return PaymentAuditReceiptCertificateStatus::LOCAL_ERROR;
+    }
+    const auto provenance_status{ClassifyHistoricalReceiptIndexRange(
+        *carrier.pprev, verified.m_reconstruction_floor)};
+    if (provenance_status == PaymentAuditContextStatus::INVALID) {
+        return PaymentAuditReceiptCertificateStatus::INVALID;
+    }
+    if (provenance_status != PaymentAuditContextStatus::READY) {
+        return PaymentAuditReceiptCertificateStatus::LOCAL_ERROR;
+    }
+
+    const auto indexed_btcc{IndexedBTCCReceiptState(*seal)};
+    const auto indexed_audit{IndexedPaymentAuditReceiptState(*seal)};
+    const auto seed_context{GetPaymentAuditSeedReceiptContext(
+        m_genesis_hash, schedule_config, *epoch_schedule, *seal)};
+    if (!indexed_btcc || !indexed_audit) {
+        return PaymentAuditReceiptCertificateStatus::LOCAL_ERROR;
+    }
+    if (seed_context.status == PaymentAuditContextStatus::INVALID) {
+        return PaymentAuditReceiptCertificateStatus::INVALID;
+    }
+    if (seed_context.status != PaymentAuditContextStatus::READY) {
+        return PaymentAuditReceiptCertificateStatus::LOCAL_ERROR;
+    }
+    pq::BTCCValidationError btcc_error{pq::BTCCValidationError::NONE};
+    if (*indexed_btcc != statement.seal_statement.btcc_receipt_state ||
+        *indexed_audit !=
+            statement.seal_statement.payment_audit_receipt_state ||
+        seal->pqPaymentProbationStateHash !=
+            statement.seal_statement.payment_probation_state_hash ||
+        !seed_context.seed_point ||
+        *seed_context.seed_point != statement.commitment.seed.anchor ||
+        !pq::ValidateBTCCursorTransition(
+            m_config->btcc_schedule, *seal,
+            statement.seal_statement.previous_btcc_cursor,
+            statement.seal_statement.accepted_btcc_cursor,
+            statement.seal_statement.btcc_advance, &btcc_error) ||
+        carrier.pprev->pqPaymentProbationStateHash !=
+            statement.commitment.previous_probation_state_hash) {
+        return PaymentAuditReceiptCertificateStatus::INVALID;
+    }
+    if (m_store) {
+        const auto predecessor{m_store->GetByHeight(
+            statement.seal_statement.previous_chainlock_height)};
+        if (predecessor &&
+            (predecessor->statement.block_hash !=
+                 statement.seal_statement.previous_chainlock_hash ||
+             predecessor->statement.accepted_btcc_cursor !=
+                 statement.seal_statement.previous_btcc_cursor)) {
+            return PaymentAuditReceiptCertificateStatus::INVALID;
+        }
+    }
+
+    const pq::PQPaymentAuditReceiptIdentity expected_transition_receipt{
+        receipt.epoch, receipt.carrier_height, receipt.result_hash};
+    const auto& transition{verified.m_transition};
+    if (transition.undo.previous_state_hash !=
+            verified.m_parent_probation_state_hash ||
+        transition.undo.applied_receipt != expected_transition_receipt ||
+        transition.undo.applied_state_hash !=
+            receipt.next_probation_state_hash) {
+        return PaymentAuditReceiptCertificateStatus::LOCAL_ERROR;
+    }
+    return PaymentAuditReceiptCertificateStatus::VERIFIED;
+}
+
+CChainLocksHandler::PaymentAuditReceiptCertificateStatus
 CChainLocksHandler::CheckPaymentAuditReceiptCertificate(
     const pq::PaymentAuditReceipt& receipt,
     const CBlockIndex& carrier,
-    std::optional<pq::PQPaymentProbationTransitionResult>& transition_out) const
+    VerifiedPaymentAuditReceiptTransitionPtr& transition_out) const
 {
     AssertLockHeld(cs_main);
     transition_out.reset();
@@ -2730,18 +3083,86 @@ CChainLocksHandler::CheckPaymentAuditReceiptCertificate(
     if (!m_payment_audit_store) {
         return PaymentAuditReceiptCertificateStatus::UNAVAILABLE;
     }
-    const bool healthy_before_read{
-        m_payment_audit_store->IsHealthy()};
+    if (carrier.pprev == nullptr) {
+        return PaymentAuditReceiptCertificateStatus::INVALID;
+    }
+    const auto make_cache_key = [&](uint64_t archive_revision,
+                                    uint64_t roster_source_generation) {
+        return VerifiedPaymentAuditReceiptTransitionCache::Key{
+            carrier.pprev->GetBlockHash(), carrier.pprev->nHeight,
+            carrier.pprev->pqPaymentProbationStateHash,
+            carrier.nHeight, receipt, archive_revision,
+            roster_source_generation};
+    };
+    const auto try_cached = [&](uint64_t archive_revision,
+                                uint64_t roster_source_generation)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+        -> std::optional<PaymentAuditReceiptCertificateStatus> {
+        const auto cached{m_verified_payment_audit_transition_cache->Get(
+            make_cache_key(archive_revision,
+                           roster_source_generation))};
+        if (!cached) return std::nullopt;
+        const auto status{RecheckVerifiedPaymentAuditReceiptTransition(
+            *cached, receipt, carrier)};
+        if (status != PaymentAuditReceiptCertificateStatus::VERIFIED) {
+            return status;
+        }
+        if (!m_payment_audit_store->IsCandidateRevisionCurrent(
+                archive_revision) ||
+            !IsQuorumRosterSourceGenerationCurrent(
+                roster_source_generation)) {
+            return PaymentAuditReceiptCertificateStatus::LOCAL_ERROR;
+        }
+        LogPrint(BCLog::CHAINLOCKS,
+                 "reused verified PQ payment-audit receipt transition "
+                 "for carrier %d\n",
+                 carrier.nHeight);
+        transition_out = cached;
+        return PaymentAuditReceiptCertificateStatus::VERIFIED;
+    };
+    const auto initial_revision{
+        m_payment_audit_store->ObserveCandidateRevision()};
+    uint64_t initial_roster_generation{0};
+    const auto initial_roster_cache{
+        GetQuorumRosterCache(&initial_roster_generation)};
+    if (!initial_revision) {
+        return PaymentAuditReceiptCertificateStatus::LOCAL_ERROR;
+    }
+    if (initial_roster_cache) {
+        if (const auto cached_status{try_cached(
+                *initial_revision, initial_roster_generation)}) {
+            return *cached_status;
+        }
+    }
+
+    const bool healthy_before_read{m_payment_audit_store->IsHealthy()};
     if (!healthy_before_read) {
         return PaymentAuditReceiptCertificateStatus::LOCAL_ERROR;
     }
-    const auto audit{m_payment_audit_store->Get(receipt.audit_witness_id)};
+    const auto audit_snapshot{
+        m_payment_audit_store->GetWithCandidateRevision(
+            receipt.audit_witness_id)};
+    const pq::FinalPaymentAudit* const audit{
+        audit_snapshot ? &audit_snapshot->audit : nullptr};
     const auto archive_status{ClassifyPaymentAuditArchiveRead(
-        true, healthy_before_read, audit.has_value(),
+        true, healthy_before_read, audit != nullptr,
         m_payment_audit_store->IsHealthy())};
     if (archive_status !=
         PaymentAuditReceiptCertificateStatus::VERIFIED) {
         return archive_status;
+    }
+    // The store captures this only after Get() has completed any presence
+    // repair, under the same lock as the exact witness read.
+    const uint64_t archive_revision{audit_snapshot->revision};
+    uint64_t roster_generation_after_read{0};
+    const auto roster_cache_after_read{
+        GetQuorumRosterCache(&roster_generation_after_read)};
+    if (archive_revision == 0 || !roster_cache_after_read) {
+        return PaymentAuditReceiptCertificateStatus::LOCAL_ERROR;
+    }
+    if (const auto cached_status{try_cached(
+            archive_revision, roster_generation_after_read)}) {
+        return *cached_status;
     }
     const auto classification{pq::ClassifyPaymentAuditReports(*audit)};
     if (audit->statement.commitment.seed.epoch != receipt.epoch ||
@@ -2769,11 +3190,14 @@ CChainLocksHandler::CheckPaymentAuditReceiptCertificate(
     PaymentAuditRosterBuildStatus roster_status{
         PaymentAuditRosterBuildStatus::INVALID};
     uint8_t authorization_mask{0};
+    uint64_t verified_roster_generation{0};
+    int32_t reconstruction_floor{-1};
     const auto rosters{BuildPaymentAuditVerificationRosters(
         audit->statement, &subject,
         &authorization_mask,
         /*require_live_transition_finality=*/false,
-        &roster_status, &historical)};
+        &roster_status, &historical, &verified_roster_generation,
+        &reconstruction_floor)};
     if (!rosters) {
         return roster_status == PaymentAuditRosterBuildStatus::LOCAL_ERROR
             ? PaymentAuditReceiptCertificateStatus::LOCAL_ERROR
@@ -2794,7 +3218,48 @@ CChainLocksHandler::CheckPaymentAuditReceiptCertificate(
             ? PaymentAuditReceiptCertificateStatus::LOCAL_ERROR
             : PaymentAuditReceiptCertificateStatus::INVALID;
     }
-    transition_out.emplace(std::move(*transition));
+    if (!m_payment_audit_store->IsHealthy() ||
+        !m_payment_audit_store->IsCandidateRevisionCurrent(
+            archive_revision) ||
+        !IsQuorumRosterSourceGenerationCurrent(
+            verified_roster_generation)) {
+        return PaymentAuditReceiptCertificateStatus::LOCAL_ERROR;
+    }
+
+    VerifiedPaymentAuditReceiptTransitionPtr verified{
+        new VerifiedPaymentAuditReceiptTransition{
+            receipt, audit->statement, carrier.pprev->GetBlockHash(),
+            carrier.pprev->nHeight,
+            carrier.pprev->pqPaymentProbationStateHash,
+            archive_revision, verified_roster_generation,
+            reconstruction_floor, authorization_mask,
+            std::move(*transition)}};
+    const auto published{
+        m_verified_payment_audit_transition_cache->Publish(
+            make_cache_key(archive_revision,
+                           verified_roster_generation),
+            std::move(verified))};
+    if (!published ||
+        !m_payment_audit_store->IsCandidateRevisionCurrent(
+            archive_revision) ||
+        !IsQuorumRosterSourceGenerationCurrent(
+            verified_roster_generation)) {
+        return PaymentAuditReceiptCertificateStatus::LOCAL_ERROR;
+    }
+    const auto recheck_status{
+        RecheckVerifiedPaymentAuditReceiptTransition(
+            *published, receipt, carrier)};
+    if (recheck_status !=
+        PaymentAuditReceiptCertificateStatus::VERIFIED) {
+        return recheck_status;
+    }
+    if (!m_payment_audit_store->IsCandidateRevisionCurrent(
+            archive_revision) ||
+        !IsQuorumRosterSourceGenerationCurrent(
+            verified_roster_generation)) {
+        return PaymentAuditReceiptCertificateStatus::LOCAL_ERROR;
+    }
+    transition_out = published;
     return PaymentAuditReceiptCertificateStatus::VERIFIED;
 }
 
@@ -8356,13 +8821,21 @@ CChainLocksHandler::BuildPaymentAuditVerificationRosters(
     uint8_t* authorization_mask_out,
     bool require_live_transition_finality,
     PaymentAuditRosterBuildStatus* status,
-    const PaymentAuditHistoricalContext* historical) const
+    const PaymentAuditHistoricalContext* historical,
+    uint64_t* roster_source_generation_out,
+    int32_t* reconstruction_floor_out) const
 {
     if (status != nullptr) {
         *status = PaymentAuditRosterBuildStatus::INVALID;
     }
     if (authorization_mask_out != nullptr) {
         *authorization_mask_out = 0;
+    }
+    if (roster_source_generation_out != nullptr) {
+        *roster_source_generation_out = 0;
+    }
+    if (reconstruction_floor_out != nullptr) {
+        *reconstruction_floor_out = -1;
     }
     if (!statement.IsStructurallyValid() ||
         (historical != nullptr && require_live_transition_finality)) {
@@ -8381,7 +8854,9 @@ CChainLocksHandler::BuildPaymentAuditVerificationRosters(
                               *expected_seal) {
         return nullptr;
     }
-    const auto roster_cache{GetQuorumRosterCache()};
+    uint64_t roster_source_generation{0};
+    const auto roster_cache{
+        GetQuorumRosterCache(&roster_source_generation)};
     if (!roster_cache) {
         if (status != nullptr) {
             *status = PaymentAuditRosterBuildStatus::LOCAL_ERROR;
@@ -8638,9 +9113,10 @@ CChainLocksHandler::BuildPaymentAuditVerificationRosters(
         }
         return nullptr;
     }
+    int32_t reconstruction_floor{-1};
     if (historical_carrier != nullptr) {
-        int32_t reconstruction_floor{
-            statement.seal_statement.previous_chainlock_height};
+        reconstruction_floor =
+            statement.seal_statement.previous_chainlock_height;
         const auto include_snapshots = [&](const pq::FrozenQuorumRosters& rosters) {
             for (const auto& roster : rosters) {
                 reconstruction_floor = std::min(
@@ -8669,6 +9145,12 @@ CChainLocksHandler::BuildPaymentAuditVerificationRosters(
     }
     if (status != nullptr) {
         *status = PaymentAuditRosterBuildStatus::VALID;
+    }
+    if (roster_source_generation_out != nullptr) {
+        *roster_source_generation_out = roster_source_generation;
+    }
+    if (reconstruction_floor_out != nullptr) {
+        *reconstruction_floor_out = reconstruction_floor;
     }
     return seal_rosters;
 }
