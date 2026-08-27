@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <evo/pq_payment_probation.h>
+#include <evo/pq_payment_probation_db.h>
 
 #include <hash.h>
 #include <span.h>
@@ -268,14 +269,16 @@ bool PQPaymentProbationTransitionInput::IsStructurallyValid() const noexcept
     return ValidateTransitionInput(*this) == PQPaymentProbationError::NONE;
 }
 
-std::optional<PQPaymentProbationTransitionResult>
-ApplyPQPaymentProbationTransition(
+static std::optional<PQPaymentProbationTransitionResult>
+ApplyPQPaymentProbationTransitionImpl(
     const PQPaymentProbationState& previous,
+    const std::optional<uint256>& authenticated_previous_hash,
     const PQPaymentProbationTransitionInput& input,
+    bool compact_result,
     PQPaymentProbationError* error)
 {
     SetError(error, PQPaymentProbationError::NONE);
-    if (!previous.IsStructurallyValid()) {
+    if (!authenticated_previous_hash && !previous.IsStructurallyValid()) {
         SetError(error, PQPaymentProbationError::INVALID_STATE);
         return std::nullopt;
     }
@@ -304,7 +307,9 @@ ApplyPQPaymentProbationTransition(
     result.state.version = previous.version;
     result.undo.previous_cursor = previous.cursor;
     result.undo.applied_receipt = input.receipt;
-    const auto previous_state_hash{GetPQPaymentProbationStateHash(previous)};
+    const auto previous_state_hash{authenticated_previous_hash
+        ? authenticated_previous_hash
+        : GetPQPaymentProbationStateHash(previous)};
     if (!previous_state_hash) {
         SetError(error, PQPaymentProbationError::INVALID_STATE);
         return std::nullopt;
@@ -374,7 +379,9 @@ ApplyPQPaymentProbationTransition(
         if (existing_index == input.existing_pro_tx_hashes.size() ||
             input.existing_pro_tx_hashes[existing_index] !=
                 entry.pro_tx_hash) {
-            result.pruned_pro_tx_hashes.push_back(entry.pro_tx_hash);
+            if (!compact_result) {
+                result.pruned_pro_tx_hashes.push_back(entry.pro_tx_hash);
+            }
         } else {
             surviving_entries.push_back(entry);
         }
@@ -413,8 +420,10 @@ ApplyPQPaymentProbationTransition(
         if (transition.observed && transition.exists) {
             if (entry.consecutive_misses ==
                 PQ_PAYMENT_PROBATION_MAX_MISSES) {
-                result.recovered_pro_tx_hashes.push_back(
-                    transition.pro_tx_hash);
+                if (!compact_result) {
+                    result.recovered_pro_tx_hashes.push_back(
+                        transition.pro_tx_hash);
+                }
             }
             if (entry.consecutive_misses != 0) {
                 entry.payment_eligible_since_height =
@@ -434,7 +443,10 @@ ApplyPQPaymentProbationTransition(
     }
 
     result.state.cursor = PQPaymentProbationCursor{1, input.receipt};
-    result.undo.changes = BuildChanges(previous.entries, result.state.entries);
+    if (!compact_result) {
+        result.undo.changes = BuildChanges(
+            previous.entries, result.state.entries);
+    }
     const auto applied_state_hash{
         GetPQPaymentProbationStateHash(result.state)};
     if (!applied_state_hash) {
@@ -442,12 +454,44 @@ ApplyPQPaymentProbationTransition(
         return std::nullopt;
     }
     result.undo.applied_state_hash = *applied_state_hash;
-    if (!result.state.IsStructurallyValid() ||
-        !result.undo.IsStructurallyValid()) {
+    if ((!compact_result && !result.undo.IsStructurallyValid()) ||
+        result.undo.previous_state_hash.IsNull() ||
+        result.undo.applied_state_hash.IsNull() ||
+        !result.undo.applied_receipt.IsStructurallyValid()) {
         SetError(error, PQPaymentProbationError::INVALID_RESULT);
         return std::nullopt;
     }
     return result;
+}
+
+std::optional<PQPaymentProbationTransitionResult>
+ApplyPQPaymentProbationTransition(
+    const PQPaymentProbationState& previous,
+    const PQPaymentProbationTransitionInput& input,
+    PQPaymentProbationError* error)
+{
+    return ApplyPQPaymentProbationTransitionImpl(
+        previous, std::nullopt, input, /*compact_result=*/false, error);
+}
+
+std::optional<PQPaymentProbationManager::CompactTransitionResult>
+PQPaymentProbationManager::ApplyCompactTransition(
+    const PQPaymentProbationStateView& previous,
+    const PQPaymentProbationTransitionInput& input,
+    PQPaymentProbationError* error)
+{
+    if (!previous.IsValid() || previous.State() == nullptr ||
+        previous.StateHash().IsNull()) {
+        SetError(error, PQPaymentProbationError::INVALID_STATE);
+        return std::nullopt;
+    }
+    auto result{ApplyPQPaymentProbationTransitionImpl(
+        *previous.State(), previous.StateHash(), input,
+        /*compact_result=*/true, error)};
+    if (!result) return std::nullopt;
+    return CompactTransitionResult{
+        std::move(result->state), result->undo.previous_state_hash,
+        result->undo.applied_receipt, result->undo.applied_state_hash};
 }
 
 std::optional<PQPaymentProbationState>

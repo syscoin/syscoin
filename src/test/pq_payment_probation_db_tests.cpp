@@ -9,6 +9,7 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <algorithm>
 #include <array>
 
 using namespace llmq::pq;
@@ -59,6 +60,16 @@ uint256 NonNullHash(uint8_t value)
     return hash;
 }
 
+uint256 MemberHash(std::size_t value)
+{
+    uint256 hash;
+    ++value;
+    for (std::size_t byte{0}; byte < sizeof(value); ++byte) {
+        hash.begin()[byte] = static_cast<uint8_t>(value >> (8 * byte));
+    }
+    return hash;
+}
+
 DBParams MemoryDB()
 {
     return DBParams{
@@ -99,6 +110,37 @@ uint256 Commit(PQPaymentProbationManager& manager,
     BOOST_REQUIRE(manager.CommitState(state, *state_hash,
                                       /*fJustCheck=*/false));
     return *state_hash;
+}
+
+void SetBit(QuorumBitmap& bitmap, std::size_t member)
+{
+    bitmap[member / 8] |=
+        static_cast<uint8_t>(uint8_t{1} << (member % 8));
+}
+
+PQPaymentProbationTransitionInput TransitionInput(uint32_t epoch,
+                                                   uint8_t tag,
+                                                   std::size_t observed_count =
+                                                       QUORUM_THRESHOLD)
+{
+    PQPaymentProbationTransitionInput input;
+    input.receipt = {
+        epoch, static_cast<int32_t>(2'000 + epoch), NonNullHash(tag)};
+    input.roster_valid_members.fill(0xff);
+    for (std::size_t member{0}; member < QUORUM_SIZE; ++member) {
+        input.frozen_roster[member] = MemberHash(member);
+        input.existing_pro_tx_hashes.push_back(
+            input.frozen_roster[member]);
+        input.current_valid_pro_tx_hashes.push_back(
+            input.frozen_roster[member]);
+        if (member < observed_count) SetBit(input.observed_members, member);
+    }
+    std::sort(input.existing_pro_tx_hashes.begin(),
+              input.existing_pro_tx_hashes.end());
+    std::sort(input.current_valid_pro_tx_hashes.begin(),
+              input.current_valid_pro_tx_hashes.end());
+    BOOST_REQUIRE(input.IsStructurallyValid());
+    return input;
 }
 
 PaymentAuditStoreCheckpoint Checkpoint(uint32_t epoch, uint8_t tag)
@@ -222,6 +264,116 @@ BOOST_AUTO_TEST_CASE(shared_views_are_authenticated_indexed_and_bounded)
                       0U);
 }
 
+BOOST_AUTO_TEST_CASE(authenticated_transition_reuses_exact_backing)
+{
+    using Access = test::PQPaymentProbationManagerTestAccess;
+    PQPaymentProbationManager manager{MemoryDB()};
+    PQPaymentProbationStateView previous;
+    BOOST_REQUIRE(manager.GetStateView(manager.EmptyStateHash(), previous));
+
+    const auto transition{
+        manager.ApplyTransition(previous, TransitionInput(1, 80))};
+    BOOST_REQUIRE(transition);
+    BOOST_REQUIRE(transition->IsValid());
+    BOOST_CHECK(transition->PreviousStateHash() ==
+                manager.EmptyStateHash());
+    BOOST_CHECK(!Access::IsCached(manager,
+                                  transition->Result().StateHash()));
+
+    const auto before_check{Access::Stats(manager)};
+    PQPaymentProbationStateView unpublished;
+    BOOST_CHECK(manager.CommitTransition(*transition,
+                                         /*fJustCheck=*/true,
+                                         &unpublished));
+    BOOST_CHECK(!unpublished.IsValid());
+    BOOST_CHECK(!Access::IsCached(manager,
+                                  transition->Result().StateHash()));
+    BOOST_CHECK_EQUAL(Access::Stats(manager).entries,
+                      before_check.entries);
+
+    PQPaymentProbationStateView published;
+    BOOST_REQUIRE(manager.CommitTransition(*transition,
+                                           /*fJustCheck=*/false,
+                                           &published));
+    BOOST_CHECK(published.SharesStateWith(transition->Result()));
+    BOOST_CHECK(Access::IsCached(manager, published.StateHash()));
+
+    // Replaying the same verified transition resolves the already-published
+    // exact root without constructing or hashing another state.
+    const auto before_replay{Access::Stats(manager)};
+    PQPaymentProbationStateView replayed;
+    BOOST_REQUIRE(manager.CommitTransition(*transition,
+                                           /*fJustCheck=*/false,
+                                           &replayed));
+    BOOST_CHECK(replayed.SharesStateWith(published));
+    BOOST_CHECK_EQUAL(Access::Stats(manager).builds,
+                      before_replay.builds);
+
+    // Reorg selects the authenticated parent root directly; it never rebuilds
+    // state by applying the compatibility undo vector.
+    PQPaymentProbationStateView restored_parent;
+    BOOST_REQUIRE(manager.GetStateView(
+        transition->PreviousStateHash(), restored_parent));
+    BOOST_CHECK(restored_parent.SharesStateWith(previous));
+}
+
+BOOST_AUTO_TEST_CASE(authenticated_transition_rejects_foreign_manager)
+{
+    PQPaymentProbationManager first{MemoryDB()};
+    PQPaymentProbationManager second{MemoryDB()};
+    PQPaymentProbationStateView first_previous;
+    BOOST_REQUIRE(first.GetStateView(first.EmptyStateHash(), first_previous));
+
+    PQPaymentProbationError error{PQPaymentProbationError::NONE};
+    BOOST_CHECK(!second.ApplyTransition(
+        first_previous, TransitionInput(2, 81), &error));
+    BOOST_CHECK(error == PQPaymentProbationError::INVALID_STATE);
+
+    const auto transition{
+        first.ApplyTransition(first_previous, TransitionInput(2, 82))};
+    BOOST_REQUIRE(transition);
+    BOOST_CHECK(!second.CommitTransition(*transition,
+                                         /*fJustCheck=*/false));
+    PQPaymentProbationStateView absent;
+    BOOST_CHECK(!second.GetStateView(
+        transition->Result().StateHash(), absent));
+}
+
+BOOST_AUTO_TEST_CASE(compact_transition_matches_raw_corpus)
+{
+    PQPaymentProbationManager manager{MemoryDB()};
+    PQPaymentProbationStateView previous_view;
+    BOOST_REQUIRE(manager.GetStateView(
+        manager.EmptyStateHash(), previous_view));
+    PQPaymentProbationState previous_raw;
+
+    for (uint32_t epoch{1}; epoch <= 24; ++epoch) {
+        const auto input{TransitionInput(
+            epoch, static_cast<uint8_t>(100 + epoch),
+            (epoch * 37) % (QUORUM_SIZE + 1))};
+        const auto raw{ApplyPQPaymentProbationTransition(
+            previous_raw, input)};
+        const auto compact{manager.ApplyTransition(previous_view, input)};
+        BOOST_REQUIRE(raw);
+        BOOST_REQUIRE(compact);
+        BOOST_REQUIRE(compact->Result().State() != nullptr);
+        BOOST_CHECK(*compact->Result().State() == raw->state);
+        BOOST_CHECK(compact->PreviousStateHash() ==
+                    raw->undo.previous_state_hash);
+        BOOST_CHECK(compact->AppliedReceipt() ==
+                    raw->undo.applied_receipt);
+        BOOST_CHECK(compact->Result().StateHash() ==
+                    raw->undo.applied_state_hash);
+
+        PQPaymentProbationStateView published;
+        BOOST_REQUIRE(manager.CommitTransition(
+            *compact, /*fJustCheck=*/false, &published));
+        BOOST_CHECK(published.SharesStateWith(compact->Result()));
+        previous_view = std::move(published);
+        previous_raw = raw->state;
+    }
+}
+
 BOOST_AUTO_TEST_CASE(probation_survives_process_restart)
 {
     const fs::path path{m_path_root / "pq_payment_probation_restart"};
@@ -269,6 +421,8 @@ BOOST_AUTO_TEST_CASE(checkpoint_gc_is_durable_and_preserves_retained_roots)
         cursorless.entries.push_back({NonNullHash(200), 1, -1});
         cursorless_hash = Commit(manager, cursorless);
         empty_hash = manager.EmptyStateHash();
+        PQPaymentProbationStateView empty_before_gc;
+        BOOST_REQUIRE(manager.GetStateView(empty_hash, empty_before_gc));
 
         // Warm the immutable view cache before pruning. The tombstone path
         // drops manager ownership while existing readers finish safely.
@@ -276,22 +430,39 @@ BOOST_AUTO_TEST_CASE(checkpoint_gc_is_durable_and_preserves_retained_roots)
         PQPaymentProbationStateView retained_view;
         BOOST_REQUIRE(manager.GetStateView(pruned_hash, pruned_view));
         BOOST_REQUIRE(manager.GetStateView(retained_hash, retained_view));
+        const auto stale_transition{manager.ApplyTransition(
+            pruned_view, TransitionInput(/*epoch=*/5, /*tag=*/83))};
+        BOOST_REQUIRE(stale_transition);
+        const uint256 stale_result_hash{
+            stale_transition->Result().StateHash()};
+        const uint64_t previous_generation{
+            manager.StateViewGeneration()};
 
         const std::array<uint256, 1> retained{retained_hash};
         BOOST_CHECK(!manager.IsGCCompleteForCheckpoint(checkpoint));
         BOOST_REQUIRE(manager.PruneStatesThroughCheckpoint(
             checkpoint, retained));
         BOOST_CHECK(manager.IsGCCompleteForCheckpoint(checkpoint));
+        BOOST_CHECK_GT(manager.StateViewGeneration(), previous_generation);
+        BOOST_CHECK(!manager.CommitTransition(
+            *stale_transition, /*fJustCheck=*/false));
+        BOOST_CHECK(!manager.ApplyTransition(
+            retained_view, TransitionInput(/*epoch=*/6, /*tag=*/84)));
+        BOOST_CHECK(!manager.ApplyTransition(
+            empty_before_gc, TransitionInput(/*epoch=*/1, /*tag=*/85)));
 
         PQPaymentProbationStateView loaded_view;
         BOOST_CHECK(!manager.GetStateView(pruned_hash, loaded_view));
+        BOOST_CHECK(!manager.GetStateView(stale_result_hash, loaded_view));
         BOOST_CHECK(!loaded_view.IsValid());
         BOOST_CHECK(!test::PQPaymentProbationManagerTestAccess::IsCached(
             manager, pruned_hash));
         BOOST_CHECK(pruned_view.IsValid());
         BOOST_CHECK_EQUAL(pruned_view.MissCount(NonNullHash(101)), 1U);
         BOOST_REQUIRE(manager.GetStateView(retained_hash, loaded_view));
-        BOOST_CHECK(loaded_view.SharesStateWith(retained_view));
+        BOOST_CHECK(!loaded_view.SharesStateWith(retained_view));
+        BOOST_CHECK(manager.ApplyTransition(
+            loaded_view, TransitionInput(/*epoch=*/6, /*tag=*/86)));
 
         PQPaymentProbationState loaded;
         BOOST_CHECK(manager.GetState(retained_hash, loaded));
@@ -299,6 +470,9 @@ BOOST_AUTO_TEST_CASE(checkpoint_gc_is_durable_and_preserves_retained_roots)
         BOOST_CHECK(manager.GetState(cursorless_hash, loaded));
         BOOST_CHECK(manager.GetState(empty_hash, loaded));
         BOOST_CHECK(loaded == PQPaymentProbationState{});
+        PQPaymentProbationStateView empty_after_gc;
+        BOOST_REQUIRE(manager.GetStateView(empty_hash, empty_after_gc));
+        BOOST_CHECK(!empty_after_gc.SharesStateWith(empty_before_gc));
     }
 
     {
@@ -368,8 +542,26 @@ BOOST_AUTO_TEST_CASE(completed_checkpoint_is_a_zero_flush_noop)
 {
     PQPaymentProbationManager manager{MemoryDB()};
     const auto checkpoint{Checkpoint(/*epoch=*/12, /*tag=*/70)};
+    const uint64_t initial_generation{manager.StateViewGeneration()};
+    PQPaymentProbationStateView stale_empty;
+    BOOST_REQUIRE(manager.GetStateView(
+        manager.EmptyStateHash(), stale_empty));
+    const auto stale_transition{manager.ApplyTransition(
+        stale_empty, TransitionInput(/*epoch=*/1, /*tag=*/87))};
+    BOOST_REQUIRE(stale_transition);
     BOOST_REQUIRE(manager.PruneStatesThroughCheckpoint(
         checkpoint, std::span<const uint256>{}));
+    const uint64_t completed_generation{manager.StateViewGeneration()};
+    BOOST_CHECK_GT(completed_generation, initial_generation);
+    BOOST_CHECK(!manager.CommitTransition(
+        *stale_transition, /*fJustCheck=*/false));
+    BOOST_CHECK(!manager.ApplyTransition(
+        stale_empty, TransitionInput(/*epoch=*/1, /*tag=*/88)));
+    PQPaymentProbationStateView fresh_empty;
+    BOOST_REQUIRE(manager.GetStateView(
+        manager.EmptyStateHash(), fresh_empty));
+    BOOST_CHECK(manager.ApplyTransition(
+        fresh_empty, TransitionInput(/*epoch=*/1, /*tag=*/89)));
     BOOST_REQUIRE(manager.IsGCCompleteForCheckpoint(checkpoint));
 
     // The exact completed checkpoint returns before the pre-scan durability
@@ -378,6 +570,7 @@ BOOST_AUTO_TEST_CASE(completed_checkpoint_is_a_zero_flush_noop)
     manager.StateDatabaseForTesting().FailNextFlushBatchForTesting();
     BOOST_CHECK(manager.PruneStatesThroughCheckpoint(
         checkpoint, std::span<const uint256>{}));
+    BOOST_CHECK_EQUAL(manager.StateViewGeneration(), completed_generation);
 
     auto refreshed_authorizer{checkpoint};
     refreshed_authorizer.authorizing_target_height++;
@@ -388,6 +581,7 @@ BOOST_AUTO_TEST_CASE(completed_checkpoint_is_a_zero_flush_noop)
     BOOST_CHECK(manager.IsGCCompleteForCheckpoint(refreshed_authorizer));
     BOOST_CHECK(manager.PruneStatesThroughCheckpoint(
         refreshed_authorizer, std::span<const uint256>{}));
+    BOOST_CHECK_EQUAL(manager.StateViewGeneration(), completed_generation);
     BOOST_CHECK_THROW((void)manager.Flush(/*fSync=*/true), dbwrapper_error);
     BOOST_CHECK(manager.Flush(/*fSync=*/true));
 

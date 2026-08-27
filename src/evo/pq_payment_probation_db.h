@@ -22,6 +22,7 @@
 namespace llmq::pq {
 
 struct PQPaymentProbationStateViewData;
+struct PQPaymentProbationStateViewOwner;
 class PQPaymentProbationManager;
 
 namespace test {
@@ -56,6 +57,26 @@ private:
     std::shared_ptr<const PQPaymentProbationStateViewData> m_state;
 
     friend class PQPaymentProbationManager;
+    friend class PQPaymentProbationTransitionView;
+};
+
+/** Immutable transition whose previous and result roots are manager-authenticated. */
+class PQPaymentProbationTransitionView {
+public:
+    PQPaymentProbationTransitionView() = default;
+
+    [[nodiscard]] bool IsValid() const noexcept;
+    [[nodiscard]] const PQPaymentProbationStateView& Result() const noexcept;
+    [[nodiscard]] uint256 PreviousStateHash() const noexcept;
+    [[nodiscard]] const PQPaymentAuditReceiptIdentity& AppliedReceipt() const noexcept;
+    [[nodiscard]] uint64_t ProvenanceGeneration() const noexcept;
+
+private:
+    PQPaymentProbationStateView m_result;
+    uint256 m_previous_state_hash;
+    PQPaymentAuditReceiptIdentity m_applied_receipt;
+
+    friend class PQPaymentProbationManager;
 };
 
 /**
@@ -64,6 +85,20 @@ private:
  */
 class PQPaymentProbationManager {
 private:
+    struct CompactTransitionResult {
+        PQPaymentProbationState state;
+        uint256 previous_state_hash;
+        PQPaymentAuditReceiptIdentity applied_receipt;
+        uint256 applied_state_hash;
+    };
+
+    /** Compact core used only after this manager authenticates the view. */
+    [[nodiscard]] static std::optional<CompactTransitionResult>
+    ApplyCompactTransition(
+        const PQPaymentProbationStateView& previous,
+        const PQPaymentProbationTransitionInput& input,
+        PQPaymentProbationError* error);
+
     static constexpr std::size_t STATE_VIEW_CACHE_SIZE{8};
     using StateViewDataPtr =
         std::shared_ptr<const PQPaymentProbationStateViewData>;
@@ -76,12 +111,14 @@ private:
     std::unique_ptr<CEvoDB<uint256, PQPaymentProbationState,
                            StaticSaltedHasher>> m_state_db;
     uint256 m_empty_state_hash;
+    std::shared_ptr<const PQPaymentProbationStateViewOwner> m_view_owner;
     StateViewDataPtr m_empty_state_view;
     mutable StateViewCacheList m_state_view_cache GUARDED_BY(m_mutex);
     mutable StateViewCacheMap m_state_view_cache_index GUARDED_BY(m_mutex);
     mutable uint64_t m_state_view_cache_hits GUARDED_BY(m_mutex){0};
     mutable uint64_t m_state_view_cache_misses GUARDED_BY(m_mutex){0};
     mutable uint64_t m_state_view_builds GUARDED_BY(m_mutex){0};
+    uint64_t m_state_view_generation GUARDED_BY(m_mutex){1};
 
     /** Build the index only after the caller authenticated the exact root. */
     [[nodiscard]] StateViewDataPtr BuildValidatedStateView(
@@ -92,9 +129,6 @@ private:
         StateViewDataPtr state,
         StateViewDataPtr* published = nullptr) const
         EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
-    void EvictStateView(const uint256& state_hash)
-        EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
-
 public:
     explicit PQPaymentProbationManager(const DBParams& db_params);
 
@@ -109,6 +143,14 @@ public:
         PQPaymentProbationStateView& view) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
+    /** Apply one transition without rehashing or copying its authenticated parent. */
+    [[nodiscard]] std::optional<PQPaymentProbationTransitionView>
+    ApplyTransition(
+        const PQPaymentProbationStateView& previous,
+        const PQPaymentProbationTransitionInput& input,
+        PQPaymentProbationError* error = nullptr) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
     /** Compatibility copying API retained for tests. */
     [[nodiscard]] bool GetState(const uint256& state_hash,
                                 PQPaymentProbationState& state) const
@@ -118,6 +160,17 @@ public:
     [[nodiscard]] bool CommitState(const PQPaymentProbationState& state,
                                    const uint256& expected_hash,
                                    bool fJustCheck)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /** Persist and publish the exact immutable result backing, or only verify it. */
+    [[nodiscard]] bool CommitTransition(
+        const PQPaymentProbationTransitionView& transition,
+        bool fJustCheck,
+        PQPaymentProbationStateView* published = nullptr)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /** Monotonic provenance for prepared views; GC invalidates old results. */
+    [[nodiscard]] uint64_t StateViewGeneration() const
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /** Order all earlier asynchronous state writes before a durable marker. */
