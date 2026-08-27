@@ -5,6 +5,7 @@
 #ifndef SYSCOIN_LLMQ_QUORUMS_CHAINLOCKS_H
 #define SYSCOIN_LLMQ_QUORUMS_CHAINLOCKS_H
 
+#include <evo/pq_payment_probation.h>
 #include <util/ranges.h>
 #include <llmq/pq_chainlock_collector.h>
 #include <llmq/pq_chainlock_persistence.h>
@@ -461,13 +462,16 @@ public:
                                  !m_lookup_mutex,
                                  !m_btcc_preseal_mutex);
 
-    /** Bind a receipt to its exact archived certificate and frozen subject. */
+    /**
+     * Bind a receipt to its certificate and exact probation transition.
+     * The owning result is reset on entry and must be consumed synchronously
+     * under the caller's continuously held cs_main branch snapshot.
+     */
     [[nodiscard]] PaymentAuditReceiptCertificateStatus
     CheckPaymentAuditReceiptCertificate(
         const pq::PaymentAuditReceipt& receipt,
         const CBlockIndex& carrier,
-        pq::FinalPaymentAudit* audit = nullptr,
-        pq::FrozenQuorumRoster* subject = nullptr) const
+        std::optional<pq::PQPaymentProbationTransitionResult>& transition) const
         EXCLUSIVE_LOCKS_REQUIRED(cs_main,
                                  !m_lookup_mutex,
                                  !m_verification_mutex);

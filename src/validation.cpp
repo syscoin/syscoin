@@ -2333,15 +2333,14 @@ static bool ConnectPaymentAuditReceiptState(
                 return state.Error(
                     "pq-payment-audit-handler-unavailable");
             }
-            llmq::pq::FinalPaymentAudit audit;
-            llmq::pq::FrozenQuorumRoster subject;
-            llmq::pq::PQPaymentProbationTransitionInput input;
+            std::optional<llmq::pq::PQPaymentProbationTransitionResult>
+                transition;
             bool compact_replay{false};
             bool start_preseal{false};
             const auto certificate_status{
                 llmq::chainLocksHandler
                     ->CheckPaymentAuditReceiptCertificate(
-                        receipt, index, &audit, &subject)};
+                        receipt, index, transition)};
             using CertificateStatus =
                 llmq::CChainLocksHandler::
                     PaymentAuditReceiptCertificateStatus;
@@ -2360,6 +2359,7 @@ static bool ConnectPaymentAuditReceiptState(
                         std::string{
                             PAYMENT_AUDIT_RECEIPT_CERTIFICATE_PENDING});
                 }
+                llmq::pq::PQPaymentProbationTransitionInput input;
                 const auto compact_status{
                     llmq::chainLocksHandler
                         ->BuildCompactPaymentAuditTransitionInput(
@@ -2377,6 +2377,23 @@ static bool ConnectPaymentAuditReceiptState(
                 }
                 compact_replay = true;
                 start_preseal = !prefix_authenticated;
+                llmq::pq::PQPaymentProbationState previous_probation;
+                if (!deterministicMNManager->GetPaymentProbationState(
+                        index.pprev, previous_probation)) {
+                    return state.Error(
+                        "pq-payment-audit-probation-state-unavailable");
+                }
+                llmq::pq::PQPaymentProbationError transition_error{
+                    llmq::pq::PQPaymentProbationError::NONE};
+                transition = llmq::pq::ApplyPQPaymentProbationTransition(
+                    previous_probation, input, &transition_error);
+                if (!transition ||
+                    transition->undo.applied_state_hash !=
+                        receipt.next_probation_state_hash) {
+                    return state.Invalid(
+                        BlockValidationResult::BLOCK_CONSENSUS,
+                        "bad-pq-payment-audit-result");
+                }
             }
             if (certificate_status == CertificateStatus::UNAVAILABLE) {
                 return state.Error(
@@ -2393,68 +2410,22 @@ static bool ConnectPaymentAuditReceiptState(
                         "bad-pq-payment-audit-certificate");
                 }
             } else {
-                const auto& commitment{audit.statement.commitment};
-                const auto classification{
-                    llmq::pq::ClassifyPaymentAuditReports(audit)};
-                if (!classification ||
-                    commitment.previous_probation_state_hash !=
-                        previous_probation_hash) {
-                    return state.Invalid(
-                        BlockValidationResult::BLOCK_CONSENSUS,
-                        "bad-pq-payment-audit-probation-root");
-                }
-                input.receipt = {
-                    receipt.epoch, receipt.carrier_height,
-                    receipt.result_hash};
-                input.roster_valid_members =
-                    commitment.subject_valid_members;
-                input.observed_members = receipt.online_members;
-                for (std::size_t member{0};
-                     member < llmq::pq::QUORUM_SIZE; ++member) {
-                    input.frozen_roster[member] =
-                        subject.members[member].pro_tx_hash;
-                }
-                try {
-                    const auto carrier_parent_list{
-                        deterministicMNManager->GetListForBlock(
-                            index.pprev)};
-                    carrier_parent_list.ForEachMN(
-                        false, [&](const CDeterministicMN& dmn) {
-                            input.existing_pro_tx_hashes.push_back(
-                                dmn.proTxHash);
-                            if (CDeterministicMNList::IsMNValid(dmn)) {
-                                input.current_valid_pro_tx_hashes.push_back(
-                                    dmn.proTxHash);
-                            }
-                        });
-                } catch (const std::exception&) {
+                const llmq::pq::PQPaymentAuditReceiptIdentity
+                    expected_transition_receipt{
+                        receipt.epoch, receipt.carrier_height,
+                        receipt.result_hash};
+                if (!transition ||
+                    transition->undo.previous_state_hash !=
+                        previous_probation_hash ||
+                    transition->undo.applied_receipt !=
+                        expected_transition_receipt ||
+                    transition->undo.applied_state_hash !=
+                        receipt.next_probation_state_hash) {
                     return state.Error(
-                        "pq-payment-audit-carrier-state-unavailable");
+                        "pq-payment-audit-prepared-transition-mismatch");
                 }
-                std::sort(input.existing_pro_tx_hashes.begin(),
-                          input.existing_pro_tx_hashes.end());
-                std::sort(input.current_valid_pro_tx_hashes.begin(),
-                          input.current_valid_pro_tx_hashes.end());
             }
 
-            llmq::pq::PQPaymentProbationState previous_probation;
-            if (!deterministicMNManager->GetPaymentProbationState(
-                    index.pprev, previous_probation)) {
-                return state.Error(
-                    "pq-payment-audit-probation-state-unavailable");
-            }
-            llmq::pq::PQPaymentProbationError transition_error{
-                llmq::pq::PQPaymentProbationError::NONE};
-            const auto transition{
-                llmq::pq::ApplyPQPaymentProbationTransition(
-                    previous_probation, input, &transition_error)};
-            if (!transition ||
-                transition->undo.applied_state_hash !=
-                    receipt.next_probation_state_hash) {
-                return state.Invalid(
-                    BlockValidationResult::BLOCK_CONSENSUS,
-                    "bad-pq-payment-audit-result");
-            }
             next_probation_hash = transition->undo.applied_state_hash;
             if (start_preseal && !fJustCheck &&
                 !llmq::chainLocksHandler->BeginPaymentAuditPreseal(

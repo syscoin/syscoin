@@ -121,7 +121,8 @@ bool SameFrozenQuorumRoster(const pq::FrozenQuorumRoster& first,
     return true;
 }
 
-std::optional<uint256> DerivePaymentAuditProbationStateHash(
+std::optional<pq::PQPaymentProbationTransitionResult>
+DerivePaymentAuditProbationTransition(
     const pq::PaymentAuditCommitment& commitment,
     const pq::FrozenQuorumRoster& subject,
     const CBlockIndex& carrier_parent,
@@ -178,11 +179,7 @@ std::optional<uint256> DerivePaymentAuditProbationStateHash(
               input.existing_pro_tx_hashes.end());
     std::sort(input.current_valid_pro_tx_hashes.begin(),
               input.current_valid_pro_tx_hashes.end());
-    const auto transition{pq::ApplyPQPaymentProbationTransition(
-        previous, input)};
-    return transition
-        ? std::optional<uint256>{transition->undo.applied_state_hash}
-        : std::nullopt;
+    return pq::ApplyPQPaymentProbationTransition(previous, input);
 }
 
 class ScopedFinalitySnapshotVerificationRetention final
@@ -2537,11 +2534,11 @@ CChainLocksHandler::GetPaymentAuditReceiptForCarrier(
                 audit.statement, &subject)) {
             continue;
         }
-        const auto next_hash{DerivePaymentAuditProbationStateHash(
+        const auto transition{DerivePaymentAuditProbationTransition(
             audit.statement.commitment, subject, carrier_parent,
             carrier_height, result_hash,
             classification->online_members)};
-        if (!next_hash) continue;
+        if (!transition) continue;
         return pq::PaymentAuditReceipt{
             pq::PAYMENT_AUDIT_RECEIPT_VERSION,
             1,
@@ -2553,7 +2550,7 @@ CChainLocksHandler::GetPaymentAuditReceiptForCarrier(
             witness_id,
             commitment_hash,
             result_hash,
-            *next_hash,
+            transition->undo.applied_state_hash,
             classification->online_members};
     }
     return null_receipt;
@@ -2579,10 +2576,10 @@ CChainLocksHandler::PaymentAuditReceiptCertificateStatus
 CChainLocksHandler::CheckPaymentAuditReceiptCertificate(
     const pq::PaymentAuditReceipt& receipt,
     const CBlockIndex& carrier,
-    pq::FinalPaymentAudit* audit_out,
-    pq::FrozenQuorumRoster* subject_out) const
+    std::optional<pq::PQPaymentProbationTransitionResult>& transition_out) const
 {
     AssertLockHeld(cs_main);
+    transition_out.reset();
     if (receipt.IsNull()) {
         return PaymentAuditReceiptCertificateStatus::VERIFIED;
     }
@@ -2660,17 +2657,17 @@ CChainLocksHandler::CheckPaymentAuditReceiptCertificate(
         return PaymentAuditReceiptCertificateStatus::INVALID;
     }
     bool transition_local_error{false};
-    const auto next_hash{DerivePaymentAuditProbationStateHash(
+    auto transition{DerivePaymentAuditProbationTransition(
         audit->statement.commitment, subject, *carrier.pprev,
         receipt.carrier_height, receipt.result_hash,
         receipt.online_members, &transition_local_error)};
-    if (!next_hash || *next_hash != receipt.next_probation_state_hash) {
+    if (!transition || transition->undo.applied_state_hash !=
+                           receipt.next_probation_state_hash) {
         return transition_local_error
             ? PaymentAuditReceiptCertificateStatus::LOCAL_ERROR
             : PaymentAuditReceiptCertificateStatus::INVALID;
     }
-    if (audit_out != nullptr) *audit_out = *audit;
-    if (subject_out != nullptr) *subject_out = std::move(subject);
+    transition_out.emplace(std::move(*transition));
     return PaymentAuditReceiptCertificateStatus::VERIFIED;
 }
 
