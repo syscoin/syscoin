@@ -31,6 +31,8 @@ enum class ShareCollectionError : uint8_t {
     DUPLICATE,
     INVALID_PUBLIC_KEY,
     INVALID_SIGNATURE,
+    INVALID_CHILD_PROOF,
+    LOCAL_ERROR,
 };
 
 enum class ShareCollectionResult : uint8_t {
@@ -49,6 +51,42 @@ enum class ShareCollectionResult : uint8_t {
  */
 class ChainLockCollector final {
 public:
+    class ShareVerificationReservation final {
+    public:
+        ShareVerificationReservation(
+            ShareVerificationReservation&&) noexcept = default;
+        ShareVerificationReservation& operator=(
+            ShareVerificationReservation&&) = delete;
+        ShareVerificationReservation(
+            const ShareVerificationReservation&) = delete;
+        ShareVerificationReservation& operator=(
+            const ShareVerificationReservation&) = delete;
+
+    private:
+        enum class VerificationState : uint8_t {
+            PENDING = 0,
+            VALID,
+            INVALID,
+        };
+
+        ShareVerificationReservation(
+            PreparedChainLockContextPtr context,
+            std::shared_ptr<const uint8_t> collector_token,
+            ChainLockShare share,
+            std::size_t quorum_slot,
+            uint16_t member_index);
+
+        PreparedChainLockContextPtr m_context;
+        std::shared_ptr<const uint8_t> m_collector_token;
+        ChainLockShare m_share;
+        std::size_t m_quorum_slot{0};
+        uint16_t m_member_index{0};
+        VerificationState m_verification_state{VerificationState::PENDING};
+        ShareCollectionError m_verification_error{ShareCollectionError::NONE};
+
+        friend class ChainLockCollector;
+    };
+
     static std::unique_ptr<ChainLockCollector> Create(
         const uint256& genesis_hash,
         ChainLockScheduleConfig schedule,
@@ -63,6 +101,24 @@ public:
 
     ChainLockCollector(const ChainLockCollector&) = delete;
     ChainLockCollector& operator=(const ChainLockCollector&) = delete;
+
+    /**
+     * Claim one signer slot before expensive crypto. The caller must complete
+     * the reservation or retire this exact collector instance.
+     */
+    [[nodiscard]] std::optional<ShareVerificationReservation>
+    ReserveShareVerification(
+        const ChainLockShare& share,
+        ShareCollectionError* error = nullptr);
+
+    /** Execute child-proof and WOTS verification without collector access. */
+    static void VerifyReservedShare(
+        ShareVerificationReservation& reservation);
+
+    /** Consume one exact claim and either insert its signature or release it. */
+    [[nodiscard]] ShareCollectionResult CompleteShareVerification(
+        ShareVerificationReservation reservation,
+        ShareCollectionError* error = nullptr);
 
     [[nodiscard]] ShareCollectionResult AddVerifiedShare(
         const ChainLockShare& share,
@@ -83,6 +139,8 @@ private:
     explicit ChainLockCollector(PreparedChainLockContextPtr context);
 
     PreparedChainLockContextPtr m_context;
+    std::shared_ptr<const uint8_t> m_instance_token;
+    std::array<QuorumBitmap, ACTIVE_QUORUMS> m_pending_shares{};
     std::array<std::map<uint16_t, AuthenticatedChildSignature>,
                ACTIVE_QUORUMS> m_shares;
 

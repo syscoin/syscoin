@@ -177,6 +177,13 @@ FrozenQuorumRostersPtr ShareRosters(const CollectorFixture& fixture)
     return std::make_shared<const FrozenQuorumRosters>(fixture.rosters);
 }
 
+PreparedChainLockContextPtr PrepareContext(const CollectorFixture& fixture)
+{
+    return PreparedChainLockContext::Create(
+        fixture.genesis_hash, fixture.schedule, fixture.statement,
+        ShareRosters(fixture), FULL_AUTHORIZATION_MASK);
+}
+
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(pq_chainlock_collector_tests, BasicTestingSetup)
@@ -398,6 +405,148 @@ BOOST_AUTO_TEST_CASE(cloned_signer_cannot_add_quorum_weight)
                 ShareCollectionResult::REJECTED);
     BOOST_CHECK(error == ShareCollectionError::INVALID_MEMBER);
     BOOST_CHECK_EQUAL(collector->ShareCounts()[0], 1U);
+}
+
+BOOST_AUTO_TEST_CASE(pending_reservation_deduplicates_before_crypto)
+{
+    auto fixture{MakeFixture()};
+    BOOST_REQUIRE(fixture);
+    auto collector{ChainLockCollector::Create(PrepareContext(*fixture))};
+    BOOST_REQUIRE(collector);
+
+    const ChainLockShare share{SignFirstShare(*fixture)};
+    ShareCollectionError error{ShareCollectionError::INVALID_ARGUMENT};
+    auto reservation{collector->ReserveShareVerification(share, &error)};
+    BOOST_REQUIRE(reservation);
+    BOOST_CHECK(error == ShareCollectionError::NONE);
+    BOOST_CHECK_EQUAL(collector->ShareCounts()[0], 0U);
+
+    BOOST_CHECK(!collector->ReserveShareVerification(share, &error));
+    BOOST_CHECK(error == ShareCollectionError::DUPLICATE);
+    auto alternate_witness{share};
+    alternate_witness.authenticated_signature.signature[0] ^= 1;
+    BOOST_CHECK(!collector->ReserveShareVerification(
+        alternate_witness, &error));
+    BOOST_CHECK(error == ShareCollectionError::DUPLICATE);
+    BOOST_CHECK_EQUAL(collector->ShareCounts()[0], 0U);
+
+    ChainLockCollector::VerifyReservedShare(*reservation);
+    BOOST_CHECK(collector->CompleteShareVerification(
+                    std::move(*reservation), &error) ==
+                ShareCollectionResult::ACCEPTED);
+    BOOST_CHECK(error == ShareCollectionError::NONE);
+    BOOST_CHECK_EQUAL(collector->ShareCounts()[0], 1U);
+}
+
+BOOST_AUTO_TEST_CASE(failed_reservation_releases_slot_for_valid_retry)
+{
+    auto fixture{MakeFixture()};
+    BOOST_REQUIRE(fixture);
+    auto collector{ChainLockCollector::Create(PrepareContext(*fixture))};
+    BOOST_REQUIRE(collector);
+
+    const ChainLockShare valid{SignFirstShare(*fixture)};
+    auto invalid_signature{valid};
+    invalid_signature.authenticated_signature.signature.back() ^= 1;
+    ShareCollectionError error{ShareCollectionError::NONE};
+    auto reservation{
+        collector->ReserveShareVerification(invalid_signature, &error)};
+    BOOST_REQUIRE(reservation);
+    ChainLockCollector::VerifyReservedShare(*reservation);
+    BOOST_CHECK(collector->CompleteShareVerification(
+                    std::move(*reservation), &error) ==
+                ShareCollectionResult::REJECTED);
+    BOOST_CHECK(error == ShareCollectionError::INVALID_SIGNATURE);
+    BOOST_CHECK_EQUAL(collector->ShareCounts()[0], 0U);
+
+    auto invalid_proof{valid};
+    invalid_proof.authenticated_signature.key_proof.siblings[0]
+        .begin()[0] ^= 1;
+    auto proof_reservation{collector->ReserveShareVerification(
+        invalid_proof, &error)};
+    BOOST_REQUIRE(proof_reservation);
+    BOOST_CHECK(collector->CompleteShareVerification(
+                    std::move(*reservation), &error) ==
+                ShareCollectionResult::REJECTED);
+    BOOST_CHECK(error == ShareCollectionError::LOCAL_ERROR);
+    BOOST_CHECK(!collector->ReserveShareVerification(valid, &error));
+    BOOST_CHECK(error == ShareCollectionError::DUPLICATE);
+    ChainLockCollector::VerifyReservedShare(*proof_reservation);
+    BOOST_CHECK(collector->CompleteShareVerification(
+                    std::move(*proof_reservation), &error) ==
+                ShareCollectionResult::REJECTED);
+    BOOST_CHECK(error == ShareCollectionError::INVALID_CHILD_PROOF);
+    BOOST_CHECK_EQUAL(collector->ShareCounts()[0], 0U);
+
+    auto valid_reservation{
+        collector->ReserveShareVerification(valid, &error)};
+    BOOST_REQUIRE(valid_reservation);
+    ChainLockCollector::VerifyReservedShare(*valid_reservation);
+    BOOST_CHECK(collector->CompleteShareVerification(
+                    std::move(*valid_reservation), &error) ==
+                ShareCollectionResult::ACCEPTED);
+    BOOST_CHECK(error == ShareCollectionError::NONE);
+    BOOST_CHECK_EQUAL(collector->ShareCounts()[0], 1U);
+}
+
+BOOST_AUTO_TEST_CASE(reservation_survives_collector_replacement_without_aba)
+{
+    auto fixture{MakeFixture()};
+    BOOST_REQUIRE(fixture);
+    auto context{PrepareContext(*fixture)};
+    BOOST_REQUIRE(context);
+
+    auto old_collector{ChainLockCollector::Create(context)};
+    auto new_collector{ChainLockCollector::Create(context)};
+    BOOST_REQUIRE(old_collector);
+    BOOST_REQUIRE(new_collector);
+    const ChainLockShare share{SignFirstShare(*fixture)};
+    ShareCollectionError error{ShareCollectionError::NONE};
+    auto old_reservation{
+        old_collector->ReserveShareVerification(share, &error)};
+    BOOST_REQUIRE(old_reservation);
+    old_collector.reset();
+
+    auto new_reservation{
+        new_collector->ReserveShareVerification(share, &error)};
+    BOOST_REQUIRE(new_reservation);
+
+    ChainLockCollector::VerifyReservedShare(*old_reservation);
+    BOOST_CHECK(new_collector->CompleteShareVerification(
+                    std::move(*old_reservation), &error) ==
+                ShareCollectionResult::REJECTED);
+    BOOST_CHECK(error == ShareCollectionError::LOCAL_ERROR);
+    BOOST_CHECK_EQUAL(new_collector->ShareCounts()[0], 0U);
+    BOOST_CHECK(!new_collector->ReserveShareVerification(share, &error));
+    BOOST_CHECK(error == ShareCollectionError::DUPLICATE);
+
+    ChainLockCollector::VerifyReservedShare(*new_reservation);
+    BOOST_CHECK(new_collector->CompleteShareVerification(
+                    std::move(*new_reservation), &error) ==
+                ShareCollectionResult::ACCEPTED);
+    BOOST_CHECK(error == ShareCollectionError::NONE);
+    BOOST_CHECK_EQUAL(new_collector->ShareCounts()[0], 1U);
+}
+
+BOOST_AUTO_TEST_CASE(reservation_retains_prepared_context)
+{
+    auto fixture{MakeFixture()};
+    BOOST_REQUIRE(fixture);
+    auto context{PrepareContext(*fixture)};
+    BOOST_REQUIRE(context);
+    std::weak_ptr<const PreparedChainLockContext> retained{context};
+    auto collector{ChainLockCollector::Create(context)};
+    BOOST_REQUIRE(collector);
+    auto reservation{collector->ReserveShareVerification(
+        SignFirstShare(*fixture))};
+    BOOST_REQUIRE(reservation);
+
+    context.reset();
+    collector.reset();
+    BOOST_CHECK(!retained.expired());
+    ChainLockCollector::VerifyReservedShare(*reservation);
+    reservation.reset();
+    BOOST_CHECK(retained.expired());
 }
 
 BOOST_AUTO_TEST_CASE(rejects_wrong_statement_member_and_signature)

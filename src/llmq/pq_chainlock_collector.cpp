@@ -31,6 +31,23 @@ ShareCollectionError MapVerificationError(ChainLockVerificationError error)
     }
 }
 
+ShareCollectionError MapReservedVerificationError(
+    ChainLockVerificationError error)
+{
+    switch (error) {
+    case ChainLockVerificationError::INVALID_CHILD_PROOF:
+        return ShareCollectionError::INVALID_CHILD_PROOF;
+    case ChainLockVerificationError::INVALID_PUBLIC_KEY:
+        return ShareCollectionError::INVALID_PUBLIC_KEY;
+    case ChainLockVerificationError::INVALID_SIGNATURE:
+        return ShareCollectionError::INVALID_SIGNATURE;
+    case ChainLockVerificationError::NONE:
+        return ShareCollectionError::NONE;
+    default:
+        return ShareCollectionError::LOCAL_ERROR;
+    }
+}
+
 void SetBit(QuorumBitmap& bitmap, uint16_t member_index)
 {
     bitmap[member_index / 8] |=
@@ -43,11 +60,33 @@ bool IsBitSet(const QuorumBitmap& bitmap, uint16_t member_index)
             static_cast<uint8_t>(uint8_t{1} << (member_index % 8))) != 0;
 }
 
+void ClearBit(QuorumBitmap& bitmap, uint16_t member_index)
+{
+    bitmap[member_index / 8] &=
+        static_cast<uint8_t>(~(uint8_t{1} << (member_index % 8)));
+}
+
 } // namespace
+
+ChainLockCollector::ShareVerificationReservation::
+    ShareVerificationReservation(
+        PreparedChainLockContextPtr context,
+        std::shared_ptr<const uint8_t> collector_token,
+        ChainLockShare share,
+        std::size_t quorum_slot,
+        uint16_t member_index)
+    : m_context{std::move(context)},
+      m_collector_token{std::move(collector_token)},
+      m_share{std::move(share)},
+      m_quorum_slot{quorum_slot},
+      m_member_index{member_index}
+{
+}
 
 ChainLockCollector::ChainLockCollector(
     PreparedChainLockContextPtr context)
-    : m_context{std::move(context)}
+    : m_context{std::move(context)},
+      m_instance_token{std::make_shared<uint8_t>(0)}
 {
 }
 
@@ -89,71 +128,157 @@ std::unique_ptr<ChainLockCollector> ChainLockCollector::Create(
         new ChainLockCollector{std::move(context)}};
 }
 
-ShareCollectionResult ChainLockCollector::AddVerifiedShare(
+std::optional<ChainLockCollector::ShareVerificationReservation>
+ChainLockCollector::ReserveShareVerification(
     const ChainLockShare& share,
     ShareCollectionError* error)
 {
     SetError(error, ShareCollectionError::NONE);
     if (!share.IsStructurallyValid()) {
         SetError(error, ShareCollectionError::INVALID_SHARE);
-        return ShareCollectionResult::REJECTED;
+        return std::nullopt;
     }
     if (share.GetStatement() != m_context->Statement()) {
         SetError(error, ShareCollectionError::STATEMENT_MISMATCH);
-        return ShareCollectionResult::REJECTED;
+        return std::nullopt;
     }
     const auto slot{m_context->FindQuorumSlot(share.transcript)};
     if (!slot) {
         SetError(error, ShareCollectionError::UNKNOWN_QUORUM);
-        return ShareCollectionResult::REJECTED;
+        return std::nullopt;
     }
     if ((m_context->AuthorizationMask() & (uint8_t{1} << *slot)) == 0) {
         SetError(error, ShareCollectionError::INVALID_CONTEXT);
-        return ShareCollectionResult::REJECTED;
+        return std::nullopt;
     }
     const uint16_t member_index{share.transcript.member_index};
     if (member_index >= QUORUM_SIZE) {
         SetError(error, ShareCollectionError::INVALID_MEMBER);
-        return ShareCollectionResult::REJECTED;
+        return std::nullopt;
     }
 
     const auto& roster{m_context->Rosters()[*slot]};
     if (roster.descriptor.valid_count < QUORUM_MIN_VALID) {
         SetError(error, ShareCollectionError::INVALID_CONTEXT);
-        return ShareCollectionResult::REJECTED;
+        return std::nullopt;
     }
     const auto& member{roster.members[member_index]};
     if (!IsBitSet(roster.descriptor.valid_members, member_index) ||
         !member.eligible || !member.child_root ||
         member.pro_tx_hash != share.transcript.member_pro_tx_hash) {
         SetError(error, ShareCollectionError::INVALID_MEMBER);
-        return ShareCollectionResult::REJECTED;
+        return std::nullopt;
     }
 
     auto& quorum_shares{m_shares[*slot]};
-    const auto existing{quorum_shares.find(member_index)};
-    if (existing != quorum_shares.end()) {
-        // A verified signer slot already contributes its only vote. Later
-        // bytes cannot add weight and are not evidence against the transport
-        // relay that delivered them, so discard them before verification.
+    if (quorum_shares.contains(member_index) ||
+        IsBitSet(m_pending_shares[*slot], member_index)) {
+        // An accepted or in-flight signer slot can contribute only one vote.
+        // Later bytes cannot add weight and are not evidence against the
+        // transport relay that delivered them, so skip their crypto work.
+        SetError(error, ShareCollectionError::DUPLICATE);
+        return std::nullopt;
+    }
+
+    SetBit(m_pending_shares[*slot], member_index);
+    return ShareVerificationReservation{
+        m_context, m_instance_token, share, *slot, member_index};
+}
+
+void ChainLockCollector::VerifyReservedShare(
+    ShareVerificationReservation& reservation)
+{
+    if (reservation.m_verification_state !=
+        ShareVerificationReservation::VerificationState::PENDING) {
+        return;
+    }
+    if (!reservation.m_context || !reservation.m_collector_token) {
+        reservation.m_verification_state =
+            ShareVerificationReservation::VerificationState::INVALID;
+        reservation.m_verification_error =
+            ShareCollectionError::LOCAL_ERROR;
+        return;
+    }
+    ChainLockVerificationError verification_error{ChainLockVerificationError::NONE};
+    auto check{PrepareChainLockShareVerification(
+        reservation.m_share, *reservation.m_context, &verification_error)};
+    if (!check) {
+        reservation.m_verification_state =
+            ShareVerificationReservation::VerificationState::INVALID;
+        reservation.m_verification_error =
+            MapReservedVerificationError(verification_error);
+        return;
+    }
+    if (!(*check)()) {
+        reservation.m_verification_state =
+            ShareVerificationReservation::VerificationState::INVALID;
+        reservation.m_verification_error =
+            ShareCollectionError::INVALID_SIGNATURE;
+        return;
+    }
+
+    reservation.m_verification_state =
+        ShareVerificationReservation::VerificationState::VALID;
+    reservation.m_verification_error = ShareCollectionError::NONE;
+}
+
+ShareCollectionResult ChainLockCollector::CompleteShareVerification(
+    ShareVerificationReservation reservation,
+    ShareCollectionError* error)
+{
+    SetError(error, ShareCollectionError::NONE);
+    if (!reservation.m_context || !reservation.m_collector_token ||
+        reservation.m_context != m_context ||
+        reservation.m_collector_token != m_instance_token ||
+        reservation.m_quorum_slot >= ACTIVE_QUORUMS ||
+        reservation.m_member_index >= QUORUM_SIZE) {
+        SetError(error, ShareCollectionError::LOCAL_ERROR);
+        return ShareCollectionResult::REJECTED;
+    }
+
+    auto& pending{m_pending_shares[reservation.m_quorum_slot]};
+    if (!IsBitSet(pending, reservation.m_member_index)) {
+        SetError(error, ShareCollectionError::LOCAL_ERROR);
+        return ShareCollectionResult::REJECTED;
+    }
+    ClearBit(pending, reservation.m_member_index);
+
+    if (reservation.m_verification_state !=
+        ShareVerificationReservation::VerificationState::VALID) {
+        const ShareCollectionError verification_error{
+            reservation.m_verification_state ==
+                    ShareVerificationReservation::VerificationState::INVALID
+                ? reservation.m_verification_error
+                : ShareCollectionError::LOCAL_ERROR};
+        SetError(error, verification_error);
+        return ShareCollectionResult::REJECTED;
+    }
+
+    auto& quorum_shares{m_shares[reservation.m_quorum_slot]};
+    if (quorum_shares.contains(reservation.m_member_index)) {
         SetError(error, ShareCollectionError::DUPLICATE);
         return ShareCollectionResult::DUPLICATE;
     }
-
-    ChainLockVerificationError verification_error{ChainLockVerificationError::NONE};
-    auto check{PrepareChainLockShareVerification(
-        share, *m_context, &verification_error)};
-    if (!check) {
-        SetError(error, MapVerificationError(verification_error));
-        return ShareCollectionResult::REJECTED;
-    }
-    if (!(*check)()) {
-        SetError(error, ShareCollectionError::INVALID_SIGNATURE);
-        return ShareCollectionResult::REJECTED;
-    }
-
-    quorum_shares.emplace(member_index, share.authenticated_signature);
+    quorum_shares.emplace(
+        reservation.m_member_index,
+        std::move(reservation.m_share.authenticated_signature));
     return ShareCollectionResult::ACCEPTED;
+}
+
+ShareCollectionResult ChainLockCollector::AddVerifiedShare(
+    const ChainLockShare& share,
+    ShareCollectionError* error)
+{
+    ShareCollectionError reservation_error{ShareCollectionError::NONE};
+    auto reservation{ReserveShareVerification(share, &reservation_error)};
+    if (!reservation) {
+        SetError(error, reservation_error);
+        return reservation_error == ShareCollectionError::DUPLICATE
+            ? ShareCollectionResult::DUPLICATE
+            : ShareCollectionResult::REJECTED;
+    }
+    VerifyReservedShare(*reservation);
+    return CompleteShareVerification(std::move(*reservation), error);
 }
 
 std::array<std::size_t, ACTIVE_QUORUMS> ChainLockCollector::ShareCounts() const
