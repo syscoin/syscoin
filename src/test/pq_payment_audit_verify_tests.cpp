@@ -549,15 +549,12 @@ BOOST_AUTO_TEST_CASE(collected_finalization_binds_exact_bytes_and_context)
         llmq_tests::PaymentAuditCollectorTestAccess::
             InsertFinalizedWitnesses(*collector, fixture->audit));
     BOOST_REQUIRE(collector->IsComplete());
-    const auto legacy{collector->Finalize()};
     const auto collected{collector->FinalizeCollection()};
-    BOOST_REQUIRE(legacy);
     BOOST_REQUIRE(collected);
     BOOST_CHECK(collected->ContextPtr() == retained_context.lock());
-    BOOST_CHECK(collected->Certificate() == *legacy);
     BOOST_CHECK(collected->Certificate() == fixture->audit);
 
-    auto detached_copy{*legacy};
+    auto detached_copy{collected->Certificate()};
     detached_copy.report_witnesses[0].observed_members[0] ^= 1;
     BOOST_CHECK(collected->Certificate() != detached_copy);
     collector.reset();

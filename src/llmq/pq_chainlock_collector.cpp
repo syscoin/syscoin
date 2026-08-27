@@ -310,11 +310,6 @@ bool ChainLockCollector::IsComplete() const
     return ready >= REQUIRED_QUORUMS;
 }
 
-std::optional<FinalChainLock> ChainLockCollector::Finalize() const
-{
-    return BuildFinalCertificate();
-}
-
 CollectedChainLockFinalizationPtr
 ChainLockCollector::FinalizeCollection() const
 {

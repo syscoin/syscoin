@@ -316,11 +316,6 @@ bool PaymentAuditCollector::IsComplete() const
     return ready >= REQUIRED_QUORUMS;
 }
 
-std::optional<FinalPaymentAudit> PaymentAuditCollector::Finalize() const
-{
-    return BuildFinalCertificate();
-}
-
 CollectedPaymentAuditFinalizationPtr
 PaymentAuditCollector::FinalizeCollection() const
 {

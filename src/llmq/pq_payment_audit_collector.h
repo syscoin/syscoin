@@ -137,7 +137,6 @@ public:
     [[nodiscard]] bool HasAcceptedShare(
         const PaymentAuditShareTranscript& transcript) const noexcept;
     [[nodiscard]] bool IsComplete() const;
-    [[nodiscard]] std::optional<FinalPaymentAudit> Finalize() const;
     [[nodiscard]] CollectedPaymentAuditFinalizationPtr
     FinalizeCollection() const;
     [[nodiscard]] PreparedPaymentAuditContextPtr

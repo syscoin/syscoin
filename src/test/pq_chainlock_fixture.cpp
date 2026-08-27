@@ -675,14 +675,15 @@ std::optional<FinalChainLock> SignAndVerifyChainLock(
             return std::nullopt;
         }
     }
-    auto final{collector->Finalize()};
+    const auto finalized{collector->FinalizeCollection()};
+    if (!finalized) return std::nullopt;
+    const auto& final{finalized->Certificate()};
     ChainLockVerificationError verification_error{
         ChainLockVerificationError::NONE};
     ChainLockVerifier verifier{WorkerCount()};
-    if (!final ||
-        !verifier.Verify(fixture.args.genesis_hash,
+    if (!verifier.Verify(fixture.args.genesis_hash,
                          fixture.args.build_config.schedule,
-                         *final, *rosters,
+                         final, *rosters,
                          AUTHORIZATION_MASK,
                          &verification_error) ||
         verification_error != ChainLockVerificationError::NONE) {
@@ -758,20 +759,19 @@ std::optional<FinalPaymentAudit> SignAndVerifyPaymentAudit(
             return std::nullopt;
         }
     }
-    auto final{collector->Finalize()};
+    const auto finalized{collector->FinalizeCollection()};
+    if (!finalized) return std::nullopt;
+    const auto& final{finalized->Certificate()};
     PaymentAuditVerificationError verification_error{
         PaymentAuditVerificationError::NONE};
-    auto prepared{final ? PrepareFinalPaymentAuditVerification(
-                              fixture.args.genesis_hash,
-                              PaymentAuditScheduleConfig{
-                                  fixture.args.build_config.schedule,
-                                  fixture.args.btcc_config},
-                              *final, *rosters,
-                              AUTHORIZATION_MASK,
-                              &verification_error)
-                        : std::nullopt};
+    auto prepared{PrepareFinalPaymentAuditVerification(
+        fixture.args.genesis_hash,
+        PaymentAuditScheduleConfig{fixture.args.build_config.schedule,
+                                   fixture.args.btcc_config},
+        final, *rosters, AUTHORIZATION_MASK,
+        &verification_error)};
     ChainLockVerifier verifier{WorkerCount()};
-    if (!final || !prepared ||
+    if (!prepared ||
         !verifier.VerifyChecks(std::move(prepared->checks)) ||
         verification_error != PaymentAuditVerificationError::NONE) {
         return std::nullopt;
@@ -2260,16 +2260,18 @@ int Generate(const GeneratorArguments& args)
                 "production collector rejected generated share");
         }
     }
-    const auto final{collector->Finalize()};
-    if (!final || !final->IsStructurallyValid()) {
+    const auto finalized{collector->FinalizeCollection()};
+    if (!finalized ||
+        !finalized->Certificate().IsStructurallyValid()) {
         throw std::runtime_error(
             "production collector did not finalize 801 shares");
     }
+    const auto& final{finalized->Certificate()};
     ChainLockVerificationError verification_error{
         ChainLockVerificationError::NONE};
     ChainLockVerifier verifier{WorkerCount()};
     if (!verifier.Verify(args.genesis_hash, args.build_config.schedule,
-                         *final, *fixture->rosters,
+                         final, *fixture->rosters,
                          AUTHORIZATION_MASK,
                          &verification_error) ||
         verification_error != ChainLockVerificationError::NONE) {
@@ -2283,7 +2285,7 @@ int Generate(const GeneratorArguments& args)
         throw std::runtime_error(
             "unable to write snapshot fixture: " + error);
     }
-    if (!WriteShareBundle(args.shares_output, *fixture, *final, error)) {
+    if (!WriteShareBundle(args.shares_output, *fixture, final, error)) {
         throw std::runtime_error(
             "unable to write share fixture: " + error);
     }

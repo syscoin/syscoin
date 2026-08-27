@@ -603,7 +603,6 @@ BOOST_AUTO_TEST_CASE(full_dimension_builder_collector_wire_and_verifier)
         BOOST_REQUIRE(collection_error == ShareCollectionError::NONE);
     }
     BOOST_CHECK(!collector->IsComplete());
-    BOOST_CHECK(!collector->Finalize());
     BOOST_CHECK(!collector->FinalizeCollection());
     const auto incomplete_counts{collector->ShareCounts()};
     BOOST_CHECK_EQUAL(incomplete_counts[0], QUORUM_THRESHOLD);
@@ -618,12 +617,10 @@ BOOST_AUTO_TEST_CASE(full_dimension_builder_collector_wire_and_verifier)
     BOOST_REQUIRE(collection_error == ShareCollectionError::NONE);
     BOOST_REQUIRE(collector->IsComplete());
 
-    const auto final{collector->Finalize()};
     const auto collected_final{collector->FinalizeCollection()};
-    BOOST_REQUIRE(final);
     BOOST_REQUIRE(collected_final);
+    const auto* final{&collected_final->Certificate()};
     BOOST_CHECK(collected_final->ContextPtr() == collector_context);
-    BOOST_CHECK(collected_final->Certificate() == *final);
     BOOST_CHECK(
         llmq::SelectFinalChainLockVerificationPath(
             collected_final.get(), &collected_final->Certificate(),
@@ -773,7 +770,6 @@ BOOST_AUTO_TEST_CASE(full_dimension_builder_collector_wire_and_verifier)
         BOOST_REQUIRE(collection_error == ShareCollectionError::NONE);
     }
     BOOST_CHECK(!audit_collector->IsComplete());
-    BOOST_CHECK(!audit_collector->Finalize());
     BOOST_CHECK(!audit_collector->FinalizeCollection());
     const auto incomplete_audit_counts{audit_collector->ShareCounts()};
     BOOST_CHECK_EQUAL(incomplete_audit_counts[0], QUORUM_THRESHOLD);
@@ -788,23 +784,19 @@ BOOST_AUTO_TEST_CASE(full_dimension_builder_collector_wire_and_verifier)
     BOOST_REQUIRE(final_audit_reservation);
     BOOST_REQUIRE(collection_error == ShareCollectionError::NONE);
     BOOST_CHECK(!audit_collector->IsComplete());
-    BOOST_CHECK(!audit_collector->Finalize());
     BOOST_CHECK(!audit_collector->FinalizeCollection());
     PaymentAuditCollector::VerifyReservedShare(*final_audit_reservation);
     BOOST_CHECK(!audit_collector->IsComplete());
-    BOOST_CHECK(!audit_collector->Finalize());
     BOOST_CHECK(!audit_collector->FinalizeCollection());
     BOOST_REQUIRE(audit_collector->CompleteShareVerification(
                       std::move(*final_audit_reservation),
                       &collection_error) ==
                   ShareCollectionResult::ACCEPTED);
     BOOST_REQUIRE(collection_error == ShareCollectionError::NONE);
-    const auto final_audit{audit_collector->Finalize()};
     const auto collected_audit{audit_collector->FinalizeCollection()};
-    BOOST_REQUIRE(final_audit);
     BOOST_REQUIRE(collected_audit);
+    const auto* final_audit{&collected_audit->Certificate()};
     BOOST_CHECK(collected_audit->ContextPtr() == audit_collector_context);
-    BOOST_CHECK(collected_audit->Certificate() == *final_audit);
     const PaymentAuditScheduleConfig audit_schedule{
         fixture->config.schedule,
         BTCCScheduleConfig{.candidate_origin = BTCC_CANDIDATE_ORIGIN}};

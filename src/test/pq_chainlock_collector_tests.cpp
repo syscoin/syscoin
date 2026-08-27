@@ -686,12 +686,10 @@ BOOST_AUTO_TEST_CASE(finalizes_exact_lowest_three_ready_quorums_canonically)
         *collector, 3, QUORUM_THRESHOLD, 0xd3);
     BOOST_CHECK(collector->IsComplete());
 
-    const auto final{collector->Finalize()};
     const auto collected{collector->FinalizeCollection()};
-    BOOST_REQUIRE(final);
     BOOST_REQUIRE(collected);
+    const auto* final{&collected->Certificate()};
     BOOST_CHECK(collected->ContextPtr() == retained_context.lock());
-    BOOST_CHECK(collected->Certificate() == *final);
     BOOST_CHECK(final->IsStructurallyValid());
     BOOST_CHECK_EQUAL(final->selected_quorum_mask, 0b1110);
     BOOST_CHECK_EQUAL(final->signatures.size(), FINAL_SIGNATURE_COUNT);
@@ -740,8 +738,9 @@ BOOST_AUTO_TEST_CASE(one_transition_ignores_and_rejects_newest_roster)
             *collector, slot, QUORUM_THRESHOLD,
             static_cast<uint8_t>(0xa0 + slot));
     }
-    const auto final{collector->Finalize()};
-    BOOST_REQUIRE(final);
+    const auto finalized{collector->FinalizeCollection()};
+    BOOST_REQUIRE(finalized);
+    const auto* final{&finalized->Certificate()};
     BOOST_CHECK_EQUAL(final->selected_quorum_mask, 0b0111);
 }
 

@@ -164,9 +164,6 @@ public:
     [[nodiscard]] std::array<std::size_t, ACTIVE_QUORUMS> ShareCounts() const;
     [[nodiscard]] bool IsComplete() const;
 
-    /** Select the lowest three ready quorum slots and first 267 member indices. */
-    [[nodiscard]] std::optional<FinalChainLock> Finalize() const;
-
     /**
      * Mint an opaque process-local proof for the exact finalized bytes and the
      * exact immutable context used by every accepted share.
