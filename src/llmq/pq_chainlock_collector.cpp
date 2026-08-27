@@ -25,7 +25,7 @@ ShareCollectionError MapVerificationError(ChainLockVerificationError error)
     case ChainLockVerificationError::INVALID_SIGNER:
         return ShareCollectionError::INVALID_MEMBER;
     case ChainLockVerificationError::NONE:
-        return ShareCollectionError::NONE;
+        return ShareCollectionError::LOCAL_ERROR;
     default:
         return ShareCollectionError::INVALID_CONTEXT;
     }
@@ -42,7 +42,7 @@ ShareCollectionError MapReservedVerificationError(
     case ChainLockVerificationError::INVALID_SIGNATURE:
         return ShareCollectionError::INVALID_SIGNATURE;
     case ChainLockVerificationError::NONE:
-        return ShareCollectionError::NONE;
+        return ShareCollectionError::LOCAL_ERROR;
     default:
         return ShareCollectionError::LOCAL_ERROR;
     }
