@@ -57,6 +57,10 @@ public:
         uint8_t authorization_mask,
         ShareCollectionError* error = nullptr);
 
+    static std::unique_ptr<ChainLockCollector> Create(
+        PreparedChainLockContextPtr context,
+        ShareCollectionError* error = nullptr);
+
     ChainLockCollector(const ChainLockCollector&) = delete;
     ChainLockCollector& operator=(const ChainLockCollector&) = delete;
 
@@ -72,25 +76,13 @@ public:
 
     [[nodiscard]] const ChainLockStatement& GetStatement() const noexcept
     {
-        return m_statement;
+        return m_context->Statement();
     }
 
 private:
-    ChainLockCollector(
-        uint256 genesis_hash,
-        ChainLockScheduleConfig schedule,
-        ChainLockStatement statement,
-        FrozenQuorumRostersPtr rosters,
-        uint8_t authorization_mask);
+    explicit ChainLockCollector(PreparedChainLockContextPtr context);
 
-    [[nodiscard]] std::optional<std::size_t> FindQuorumSlot(
-        const ChainLockShareTranscript& transcript) const;
-
-    uint256 m_genesis_hash;
-    ChainLockScheduleConfig m_schedule;
-    ChainLockStatement m_statement;
-    FrozenQuorumRostersPtr m_rosters;
-    uint8_t m_authorization_mask{0};
+    PreparedChainLockContextPtr m_context;
     std::array<std::map<uint16_t, AuthenticatedChildSignature>,
                ACTIVE_QUORUMS> m_shares;
 

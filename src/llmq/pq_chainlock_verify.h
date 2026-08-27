@@ -63,6 +63,66 @@ enum class ChainLockVerificationError : uint8_t {
     INVALID_SIGNATURE,
 };
 
+/**
+ * Immutable capability proving that one exact statement/roster binding passed
+ * full descriptor, membership, root, uniqueness, and authorization checks.
+ * Share hot paths consume this token instead of repeating those checks.
+ */
+class PreparedChainLockContext final {
+public:
+    [[nodiscard]] static std::shared_ptr<const PreparedChainLockContext>
+    Create(const uint256& genesis_hash,
+           ChainLockScheduleConfig schedule,
+           ChainLockStatement statement,
+           FrozenQuorumRostersPtr rosters,
+           uint8_t authorization_mask,
+           ChainLockVerificationError* error = nullptr);
+
+    [[nodiscard]] const uint256& GenesisHash() const noexcept
+    {
+        return m_genesis_hash;
+    }
+    [[nodiscard]] const ChainLockScheduleConfig& Schedule() const noexcept
+    {
+        return m_schedule;
+    }
+    [[nodiscard]] const ChainLockStatement& Statement() const noexcept
+    {
+        return m_statement;
+    }
+    [[nodiscard]] const FrozenQuorumRosters& Rosters() const noexcept
+    {
+        return *m_rosters;
+    }
+    [[nodiscard]] const FrozenQuorumRostersPtr& RostersPtr() const noexcept
+    {
+        return m_rosters;
+    }
+    [[nodiscard]] uint8_t AuthorizationMask() const noexcept
+    {
+        return m_authorization_mask;
+    }
+    [[nodiscard]] std::optional<std::size_t> FindQuorumSlot(
+        const ChainLockShareTranscript& transcript) const noexcept;
+
+private:
+    PreparedChainLockContext(
+        uint256 genesis_hash,
+        ChainLockScheduleConfig schedule,
+        ChainLockStatement statement,
+        FrozenQuorumRostersPtr rosters,
+        uint8_t authorization_mask);
+
+    uint256 m_genesis_hash;
+    ChainLockScheduleConfig m_schedule;
+    ChainLockStatement m_statement;
+    FrozenQuorumRostersPtr m_rosters;
+    uint8_t m_authorization_mask{0};
+};
+
+using PreparedChainLockContextPtr =
+    std::shared_ptr<const PreparedChainLockContext>;
+
 /** One self-contained scheduled-WOTS verification job. */
 class ScheduledWOTSCheck {
 public:
@@ -106,6 +166,13 @@ struct PreparedChainLockVerification {
     const ChainLockShare& share,
     const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
     uint8_t authorization_mask,
+    ChainLockVerificationError* error = nullptr);
+
+/** Prepare one share against an already fully validated exact context. */
+[[nodiscard]] std::optional<ScheduledWOTSCheck>
+PrepareChainLockShareVerification(
+    const ChainLockShare& share,
+    const PreparedChainLockContext& context,
     ChainLockVerificationError* error = nullptr);
 
 [[nodiscard]] bool VerifyChainLockShare(

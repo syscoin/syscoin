@@ -181,6 +181,178 @@ FrozenQuorumRostersPtr ShareRosters(const CollectorFixture& fixture)
 
 BOOST_FIXTURE_TEST_SUITE(pq_chainlock_collector_tests, BasicTestingSetup)
 
+BOOST_AUTO_TEST_CASE(prepared_context_is_exact_reusable_and_owned)
+{
+    auto fixture{MakeFixture()};
+    BOOST_REQUIRE(fixture);
+    FrozenQuorumRostersPtr rosters{ShareRosters(*fixture)};
+    ChainLockVerificationError verification_error{
+        ChainLockVerificationError::INVALID_ARGUMENT};
+    auto context{PreparedChainLockContext::Create(
+        fixture->genesis_hash, fixture->schedule, fixture->statement,
+        rosters, FULL_AUTHORIZATION_MASK, &verification_error)};
+    BOOST_REQUIRE(context);
+    BOOST_CHECK(verification_error == ChainLockVerificationError::NONE);
+    BOOST_CHECK(context->RostersPtr() != rosters);
+
+    const ChainLockShare share{SignFirstShare(*fixture)};
+    auto raw_check{PrepareChainLockShareVerification(
+        fixture->genesis_hash, fixture->schedule, share, *rosters,
+        FULL_AUTHORIZATION_MASK, &verification_error)};
+    BOOST_REQUIRE(raw_check);
+    auto prepared_check{PrepareChainLockShareVerification(
+        share, *context, &verification_error)};
+    BOOST_REQUIRE(prepared_check);
+    BOOST_CHECK(raw_check->GetPublicKey() == prepared_check->GetPublicKey());
+    BOOST_CHECK_EQUAL(raw_check->GetLeafIndex(),
+                      prepared_check->GetLeafIndex());
+    BOOST_CHECK(raw_check->GetMessageBytes() ==
+                prepared_check->GetMessageBytes());
+    BOOST_CHECK(raw_check->GetSignature() == prepared_check->GetSignature());
+    BOOST_CHECK((*prepared_check)());
+
+    const auto expect_same_rejection{
+        [&](const ChainLockShare& candidate,
+            const PreparedChainLockContext& prepared,
+            uint8_t authorization_mask,
+            ChainLockVerificationError expected) {
+            ChainLockVerificationError raw_error{
+                ChainLockVerificationError::NONE};
+            ChainLockVerificationError prepared_error{
+                ChainLockVerificationError::NONE};
+            BOOST_CHECK(!PrepareChainLockShareVerification(
+                fixture->genesis_hash, fixture->schedule, candidate,
+                *rosters, authorization_mask, &raw_error));
+            BOOST_CHECK(!PrepareChainLockShareVerification(
+                candidate, prepared, &prepared_error));
+            BOOST_CHECK(raw_error == expected);
+            BOOST_CHECK(prepared_error == raw_error);
+        }};
+
+    auto unknown_quorum{share};
+    unknown_quorum.transcript.quorum_base_hash = NonNullHash(7995);
+    expect_same_rejection(
+        unknown_quorum, *context, FULL_AUTHORIZATION_MASK,
+        ChainLockVerificationError::INVALID_AUTHORIZATION);
+
+    auto bad_proof{share};
+    bad_proof.authenticated_signature.key_proof.siblings[0].begin()[0] ^= 1;
+    expect_same_rejection(
+        bad_proof, *context, FULL_AUTHORIZATION_MASK,
+        ChainLockVerificationError::INVALID_CHILD_PROOF);
+
+    constexpr uint8_t TRANSITION_AUTHORIZATION_MASK{0b0111};
+    auto transition_context{PreparedChainLockContext::Create(
+        fixture->genesis_hash, fixture->schedule, fixture->statement,
+        rosters, TRANSITION_AUTHORIZATION_MASK, &verification_error)};
+    BOOST_REQUIRE(transition_context);
+    auto unauthorized_quorum{share};
+    unauthorized_quorum.transcript.quorum_epoch =
+        rosters->back().descriptor.epoch;
+    unauthorized_quorum.transcript.quorum_base_hash =
+        rosters->back().descriptor.base_hash;
+    expect_same_rejection(
+        unauthorized_quorum, *transition_context,
+        TRANSITION_AUTHORIZATION_MASK,
+        ChainLockVerificationError::INVALID_AUTHORIZATION);
+
+    auto wrong_statement{share};
+    wrong_statement.transcript.block_hash = NonNullHash(7998);
+    BOOST_CHECK(!PrepareChainLockShareVerification(
+        wrong_statement, *context, &verification_error));
+    BOOST_CHECK(verification_error ==
+                ChainLockVerificationError::QUORUM_CONTEXT_MISMATCH);
+
+    auto alternate_statement{fixture->statement};
+    alternate_statement.block_hash = NonNullHash(7997);
+    std::array<QuorumDescriptor, ACTIVE_QUORUMS> descriptors;
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        descriptors[slot] = (*rosters)[slot].descriptor;
+    }
+    alternate_statement.quorum_context_hash = GetQuorumContextHash(
+        fixture->genesis_hash, alternate_statement.height,
+        alternate_statement.block_hash, descriptors);
+    const auto original_statement{fixture->statement};
+    fixture->statement = alternate_statement;
+    const ChainLockShare alternate_share{SignFirstShare(*fixture)};
+    fixture->statement = original_statement;
+    auto alternate_context{PreparedChainLockContext::Create(
+        fixture->genesis_hash, fixture->schedule,
+        alternate_statement, rosters, FULL_AUTHORIZATION_MASK,
+        &verification_error)};
+    BOOST_REQUIRE(alternate_context);
+    BOOST_CHECK(alternate_context->RostersPtr() != rosters);
+
+    auto alternate_raw_check{PrepareChainLockShareVerification(
+        fixture->genesis_hash, fixture->schedule, alternate_share, *rosters,
+        FULL_AUTHORIZATION_MASK, &verification_error)};
+    BOOST_REQUIRE(alternate_raw_check);
+    BOOST_CHECK((*alternate_raw_check)());
+    BOOST_CHECK(!PrepareChainLockShareVerification(
+        alternate_share, *context, &verification_error));
+    BOOST_CHECK(verification_error ==
+                ChainLockVerificationError::QUORUM_CONTEXT_MISMATCH);
+    auto alternate_prepared_check{PrepareChainLockShareVerification(
+        alternate_share, *alternate_context, &verification_error)};
+    BOOST_REQUIRE(alternate_prepared_check);
+    BOOST_CHECK((*alternate_prepared_check)());
+
+    ShareCollectionError alternate_collection_error{
+        ShareCollectionError::NONE};
+    auto exact_collector{ChainLockCollector::Create(context)};
+    BOOST_REQUIRE(exact_collector);
+    BOOST_CHECK(exact_collector->AddVerifiedShare(
+                    alternate_share, &alternate_collection_error) ==
+                ShareCollectionResult::REJECTED);
+    BOOST_CHECK(alternate_collection_error ==
+                ShareCollectionError::STATEMENT_MISMATCH);
+    alternate_context.reset();
+
+    auto mutable_rosters{std::make_shared<FrozenQuorumRosters>(*rosters)};
+    FrozenQuorumRostersPtr aliased_rosters{mutable_rosters};
+    auto alias_safe_context{PreparedChainLockContext::Create(
+        fixture->genesis_hash, fixture->schedule, fixture->statement,
+        aliased_rosters, FULL_AUTHORIZATION_MASK, &verification_error)};
+    BOOST_REQUIRE(alias_safe_context);
+    const auto alias_slot{alias_safe_context->FindQuorumSlot(share.transcript)};
+    BOOST_REQUIRE(alias_slot);
+    mutable_rosters->at(*alias_slot)
+        .members.at(share.transcript.member_index)
+        .pro_tx_hash = NonNullHash(7996);
+    auto alias_safe_check{PrepareChainLockShareVerification(
+        share, *alias_safe_context, &verification_error)};
+    BOOST_REQUIRE(alias_safe_check);
+    BOOST_CHECK((*alias_safe_check)());
+
+    auto bad_rosters{std::make_shared<FrozenQuorumRosters>(*rosters)};
+    (*bad_rosters)[0].descriptor.member_root.begin()[0] ^= 1;
+    BOOST_CHECK(!PreparedChainLockContext::Create(
+        fixture->genesis_hash, fixture->schedule, fixture->statement,
+        bad_rosters, FULL_AUTHORIZATION_MASK, &verification_error));
+    BOOST_CHECK(verification_error ==
+                ChainLockVerificationError::MEMBER_ROOT_MISMATCH);
+
+    auto bad_statement{fixture->statement};
+    bad_statement.quorum_context_hash.begin()[0] ^= 1;
+    BOOST_CHECK(!PreparedChainLockContext::Create(
+        fixture->genesis_hash, fixture->schedule, std::move(bad_statement),
+        ShareRosters(*fixture), FULL_AUTHORIZATION_MASK,
+        &verification_error));
+    BOOST_CHECK(verification_error ==
+                ChainLockVerificationError::QUORUM_CONTEXT_MISMATCH);
+
+    std::weak_ptr<const PreparedChainLockContext> retained{context};
+    auto collector{ChainLockCollector::Create(context)};
+    BOOST_REQUIRE(collector);
+    context.reset();
+    rosters.reset();
+    BOOST_CHECK(!retained.expired());
+    ShareCollectionError collection_error{ShareCollectionError::NONE};
+    BOOST_CHECK(collector->AddVerifiedShare(share, &collection_error) ==
+                ShareCollectionResult::ACCEPTED);
+    BOOST_CHECK(collection_error == ShareCollectionError::NONE);
+}
+
 BOOST_AUTO_TEST_CASE(cloned_signer_cannot_add_quorum_weight)
 {
     auto fixture{MakeFixture()};

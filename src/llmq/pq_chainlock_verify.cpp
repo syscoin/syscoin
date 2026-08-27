@@ -26,7 +26,6 @@ constexpr std::string_view MEMBER_NODE_DOMAIN{"SYS_PQ_QUORUM_MEMBER_NODE_V1"};
 constexpr std::string_view CHILD_ABSENT_DOMAIN{"SYS_PQ_QUORUM_CHILD_ABSENT_V1"};
 constexpr std::string_view CHILD_PAD_DOMAIN{"SYS_PQ_QUORUM_CHILD_PAD_V1"};
 constexpr std::string_view CHILD_NODE_DOMAIN{"SYS_PQ_QUORUM_CHILD_NODE_V1"};
-
 static_assert(MERKLE_LEAF_COUNT >= QUORUM_SIZE);
 static_assert((MERKLE_LEAF_COUNT & (MERKLE_LEAF_COUNT - 1)) == 0);
 static_assert(MERKLE_LEAF_COUNT <= std::numeric_limits<uint16_t>::max());
@@ -237,6 +236,66 @@ bool ValidateFrozenQuorumContextInternal(
 
 } // namespace
 
+PreparedChainLockContext::PreparedChainLockContext(
+    uint256 genesis_hash,
+    ChainLockScheduleConfig schedule,
+    ChainLockStatement statement,
+    FrozenQuorumRostersPtr rosters,
+    uint8_t authorization_mask)
+    : m_genesis_hash{std::move(genesis_hash)},
+      m_schedule{schedule},
+      m_statement{std::move(statement)},
+      m_rosters{std::move(rosters)},
+      m_authorization_mask{authorization_mask}
+{
+}
+
+std::shared_ptr<const PreparedChainLockContext>
+PreparedChainLockContext::Create(
+    const uint256& genesis_hash,
+    ChainLockScheduleConfig schedule,
+    ChainLockStatement statement,
+    FrozenQuorumRostersPtr rosters,
+    uint8_t authorization_mask,
+    ChainLockVerificationError* error)
+{
+    SetError(error, ChainLockVerificationError::NONE);
+    if (!schedule.IsValid() || !rosters) {
+        SetError(error, ChainLockVerificationError::INVALID_ARGUMENT);
+        return nullptr;
+    }
+    if (genesis_hash.IsNull()) {
+        SetError(error, ChainLockVerificationError::INVALID_ARGUMENT);
+        return nullptr;
+    }
+    if (!statement.IsStructurallyValid()) {
+        SetError(error, ChainLockVerificationError::INVALID_CHAINLOCK);
+        return nullptr;
+    }
+    if (!IsSigningRosterAuthorizationMask(authorization_mask)) {
+        SetError(error, ChainLockVerificationError::INVALID_AUTHORIZATION);
+        return nullptr;
+    }
+    // shared_ptr<const T> is only shallowly const when the caller retains a
+    // mutable alias. Copy before validation so the capability owns state that
+    // cannot change after its roots and statement binding are checked.
+    rosters = std::make_shared<const FrozenQuorumRosters>(*rosters);
+    if (!ValidateFrozenQuorumContext(
+            genesis_hash, statement, *rosters, authorization_mask, error)) {
+        return nullptr;
+    }
+    return std::shared_ptr<const PreparedChainLockContext>{
+        new PreparedChainLockContext{
+            genesis_hash, schedule, std::move(statement), std::move(rosters),
+            authorization_mask}};
+}
+
+std::optional<std::size_t> PreparedChainLockContext::FindQuorumSlot(
+    const ChainLockShareTranscript& transcript) const noexcept
+{
+    return llmq::pq::FindQuorumSlot(transcript, *m_rosters);
+}
+
 ScheduledWOTSCheck::ScheduledWOTSCheck(
     scheduled_wots::PublicKey public_key,
     uint8_t leaf_index,
@@ -348,29 +407,34 @@ bool ValidateFrozenQuorumContext(
         /*selected_quorum_mask=*/0, error);
 }
 
-std::optional<ScheduledWOTSCheck> PrepareChainLockShareVerification(
+namespace {
+
+std::optional<ScheduledWOTSCheck>
+PrepareChainLockShareVerificationInternal(
     const uint256& genesis_hash,
     const ChainLockScheduleConfig& schedule,
     const ChainLockShare& share,
     const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
     uint8_t authorization_mask,
+    std::optional<std::size_t> prepared_quorum_slot,
+    bool context_prepared,
     ChainLockVerificationError* error)
 {
     SetError(error, ChainLockVerificationError::NONE);
-    if (!share.IsStructurallyValid()) {
-        SetError(error, ChainLockVerificationError::INVALID_CHAINLOCK);
-        return std::nullopt;
-    }
-    const auto quorum_slot{FindQuorumSlot(share.transcript, rosters)};
+    const auto quorum_slot{context_prepared
+        ? prepared_quorum_slot
+        : FindQuorumSlot(share.transcript, rosters)};
     if (!quorum_slot || !IsSelected(authorization_mask, *quorum_slot)) {
         SetError(error, ChainLockVerificationError::INVALID_AUTHORIZATION);
         return std::nullopt;
     }
-    const ChainLockStatement statement{share.GetStatement()};
-    if (!ValidateFrozenQuorumContextInternal(
-            genesis_hash, statement, rosters, authorization_mask,
-            /*selected_quorum_mask=*/0, error)) {
-        return std::nullopt;
+    if (!context_prepared) {
+        const ChainLockStatement statement{share.GetStatement()};
+        if (!ValidateFrozenQuorumContextInternal(
+                genesis_hash, statement, rosters, authorization_mask,
+                /*selected_quorum_mask=*/0, error)) {
+            return std::nullopt;
+        }
     }
 
     const auto& roster{rosters[*quorum_slot]};
@@ -412,6 +476,48 @@ std::optional<ScheduledWOTSCheck> PrepareChainLockShareVerification(
     return ScheduledWOTSCheck{
         std::move(public_key), *leaf_index, std::move(message),
         std::move(signature)};
+}
+
+} // namespace
+
+std::optional<ScheduledWOTSCheck> PrepareChainLockShareVerification(
+    const uint256& genesis_hash,
+    const ChainLockScheduleConfig& schedule,
+    const ChainLockShare& share,
+    const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
+    uint8_t authorization_mask,
+    ChainLockVerificationError* error)
+{
+    SetError(error, ChainLockVerificationError::NONE);
+    if (!share.IsStructurallyValid()) {
+        SetError(error, ChainLockVerificationError::INVALID_CHAINLOCK);
+        return std::nullopt;
+    }
+    return PrepareChainLockShareVerificationInternal(
+        genesis_hash, schedule, share, rosters, authorization_mask,
+        /*prepared_quorum_slot=*/std::nullopt,
+        /*context_prepared=*/false, error);
+}
+
+std::optional<ScheduledWOTSCheck> PrepareChainLockShareVerification(
+    const ChainLockShare& share,
+    const PreparedChainLockContext& context,
+    ChainLockVerificationError* error)
+{
+    SetError(error, ChainLockVerificationError::NONE);
+    if (!share.IsStructurallyValid()) {
+        SetError(error, ChainLockVerificationError::INVALID_CHAINLOCK);
+        return std::nullopt;
+    }
+    if (share.GetStatement() != context.Statement()) {
+        SetError(error, ChainLockVerificationError::QUORUM_CONTEXT_MISMATCH);
+        return std::nullopt;
+    }
+    return PrepareChainLockShareVerificationInternal(
+        context.GenesisHash(), context.Schedule(), share, context.Rosters(),
+        context.AuthorizationMask(),
+        context.FindQuorumSlot(share.transcript),
+        /*context_prepared=*/true, error);
 }
 
 bool VerifyChainLockShare(

@@ -46,16 +46,8 @@ bool IsBitSet(const QuorumBitmap& bitmap, uint16_t member_index)
 } // namespace
 
 ChainLockCollector::ChainLockCollector(
-    uint256 genesis_hash,
-    ChainLockScheduleConfig schedule,
-    ChainLockStatement statement,
-    FrozenQuorumRostersPtr rosters,
-    uint8_t authorization_mask)
-    : m_genesis_hash{std::move(genesis_hash)},
-      m_schedule{schedule},
-      m_statement{std::move(statement)},
-      m_rosters{std::move(rosters)},
-      m_authorization_mask{authorization_mask}
+    PreparedChainLockContextPtr context)
+    : m_context{std::move(context)}
 {
 }
 
@@ -74,28 +66,27 @@ std::unique_ptr<ChainLockCollector> ChainLockCollector::Create(
         return nullptr;
     }
     ChainLockVerificationError verification_error{ChainLockVerificationError::NONE};
-    if (!ValidateFrozenQuorumContext(genesis_hash, statement, *rosters,
-                                     authorization_mask,
-                                     &verification_error)) {
+    auto context{PreparedChainLockContext::Create(
+        genesis_hash, schedule, std::move(statement), std::move(rosters),
+        authorization_mask, &verification_error)};
+    if (!context) {
         SetError(error, MapVerificationError(verification_error));
         return nullptr;
     }
-    return std::unique_ptr<ChainLockCollector>{new ChainLockCollector{
-        genesis_hash, schedule, std::move(statement), std::move(rosters),
-        authorization_mask}};
+    return Create(std::move(context), error);
 }
 
-std::optional<std::size_t> ChainLockCollector::FindQuorumSlot(
-    const ChainLockShareTranscript& transcript) const
+std::unique_ptr<ChainLockCollector> ChainLockCollector::Create(
+    PreparedChainLockContextPtr context,
+    ShareCollectionError* error)
 {
-    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
-        const auto& descriptor{(*m_rosters)[slot].descriptor};
-        if (descriptor.epoch == transcript.quorum_epoch &&
-            descriptor.base_hash == transcript.quorum_base_hash) {
-            return slot;
-        }
+    SetError(error, ShareCollectionError::NONE);
+    if (!context) {
+        SetError(error, ShareCollectionError::INVALID_ARGUMENT);
+        return nullptr;
     }
-    return std::nullopt;
+    return std::unique_ptr<ChainLockCollector>{
+        new ChainLockCollector{std::move(context)}};
 }
 
 ShareCollectionResult ChainLockCollector::AddVerifiedShare(
@@ -107,16 +98,16 @@ ShareCollectionResult ChainLockCollector::AddVerifiedShare(
         SetError(error, ShareCollectionError::INVALID_SHARE);
         return ShareCollectionResult::REJECTED;
     }
-    if (share.GetStatement() != m_statement) {
+    if (share.GetStatement() != m_context->Statement()) {
         SetError(error, ShareCollectionError::STATEMENT_MISMATCH);
         return ShareCollectionResult::REJECTED;
     }
-    const auto slot{FindQuorumSlot(share.transcript)};
+    const auto slot{m_context->FindQuorumSlot(share.transcript)};
     if (!slot) {
         SetError(error, ShareCollectionError::UNKNOWN_QUORUM);
         return ShareCollectionResult::REJECTED;
     }
-    if ((m_authorization_mask & (uint8_t{1} << *slot)) == 0) {
+    if ((m_context->AuthorizationMask() & (uint8_t{1} << *slot)) == 0) {
         SetError(error, ShareCollectionError::INVALID_CONTEXT);
         return ShareCollectionResult::REJECTED;
     }
@@ -126,7 +117,7 @@ ShareCollectionResult ChainLockCollector::AddVerifiedShare(
         return ShareCollectionResult::REJECTED;
     }
 
-    const auto& roster{(*m_rosters)[*slot]};
+    const auto& roster{m_context->Rosters()[*slot]};
     if (roster.descriptor.valid_count < QUORUM_MIN_VALID) {
         SetError(error, ShareCollectionError::INVALID_CONTEXT);
         return ShareCollectionResult::REJECTED;
@@ -151,9 +142,7 @@ ShareCollectionResult ChainLockCollector::AddVerifiedShare(
 
     ChainLockVerificationError verification_error{ChainLockVerificationError::NONE};
     auto check{PrepareChainLockShareVerification(
-        m_genesis_hash, m_schedule, share, *m_rosters,
-        m_authorization_mask,
-        &verification_error)};
+        share, *m_context, &verification_error)};
     if (!check) {
         SetError(error, MapVerificationError(verification_error));
         return ShareCollectionResult::REJECTED;
@@ -180,7 +169,7 @@ bool ChainLockCollector::IsComplete() const
 {
     std::size_t ready{0};
     for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
-        if ((m_authorization_mask & (uint8_t{1} << slot)) != 0 &&
+        if ((m_context->AuthorizationMask() & (uint8_t{1} << slot)) != 0 &&
             m_shares[slot].size() >= QUORUM_THRESHOLD) {
             ++ready;
         }
@@ -193,13 +182,16 @@ std::optional<FinalChainLock> ChainLockCollector::Finalize() const
     if (!IsComplete()) return std::nullopt;
 
     FinalChainLock result;
-    result.statement = m_statement;
+    result.statement = m_context->Statement();
     result.signatures.reserve(FINAL_SIGNATURE_COUNT);
 
     std::size_t selected{0};
     for (std::size_t slot{0}; slot < ACTIVE_QUORUMS && selected < REQUIRED_QUORUMS;
          ++slot) {
-        if ((m_authorization_mask & (uint8_t{1} << slot)) == 0) continue;
+        if ((m_context->AuthorizationMask() &
+             (uint8_t{1} << slot)) == 0) {
+            continue;
+        }
         if (m_shares[slot].size() < QUORUM_THRESHOLD) continue;
         result.selected_quorum_mask |= static_cast<uint8_t>(uint8_t{1} << slot);
         std::size_t added{0};
