@@ -9095,73 +9095,20 @@ CChainLocksHandler::BuildPaymentAuditVerificationRosters(
         }
         return nullptr;
     }
-    const auto& subject{response_rosters->Rosters().back().descriptor};
-    if (subject.epoch != statement.commitment.subject_epoch ||
-        subject.base_hash !=
-            statement.commitment.subject_quorum_base_hash ||
-        subject.valid_members !=
-            statement.commitment.subject_valid_members ||
-        pq::GetPaymentAuditDescriptorHash(m_genesis_hash, subject) !=
-            statement.commitment.subject_descriptor_hash) {
+    if (!pq::MatchesVerifiedPaymentAuditSubject(
+            statement.commitment, *response_rosters)) {
         return nullptr;
     }
     if (statement.seal_statement.payment_probation_state_hash !=
             seal->pqPaymentProbationStateHash) {
         return nullptr;
     }
-
-    const CBlockIndex* snapshot_index{
+    const auto& subject{
+        response_rosters->Rosters().back().descriptor};
+    const CBlockIndex* subject_snapshot{
         response->GetAncestor(subject.snapshot_height)};
-    if (snapshot_index == nullptr ||
-        snapshot_index->GetBlockHash() != subject.snapshot_hash) {
-        if (status != nullptr) {
-            *status = PaymentAuditRosterBuildStatus::LOCAL_ERROR;
-        }
-        return nullptr;
-    }
-    std::optional<pq::QuorumSnapshotState> snapshot_state;
-    try {
-        snapshot_state = roster_cache->LookupSnapshot(*snapshot_index);
-    } catch (const std::exception&) {
-        if (status != nullptr) {
-            *status = PaymentAuditRosterBuildStatus::LOCAL_ERROR;
-        }
-        return nullptr;
-    }
-    if (!snapshot_state || !snapshot_state->operator_key_states) {
-        if (status != nullptr) {
-            *status = PaymentAuditRosterBuildStatus::LOCAL_ERROR;
-        }
-        return nullptr;
-    }
-    if (snapshot_state->deterministic_mns.IsNull() ||
-        snapshot_state->deterministic_mns.GetHeight() !=
-            subject.snapshot_height ||
-        snapshot_state->deterministic_mns.GetBlockHash() !=
-            subject.snapshot_hash) {
-        if (status != nullptr) {
-            *status = PaymentAuditRosterBuildStatus::LOCAL_ERROR;
-        }
-        return nullptr;
-    }
-    std::unique_ptr<pq::FrozenQuorumRoster> rebuilt_subject;
-    try {
-        rebuilt_subject = pq::BuildFrozenQuorumRoster(
-            m_genesis_hash, *m_quorum_build_config, subject.epoch,
-            subject.base_hash, snapshot_state->deterministic_mns,
-            std::span<const pq::OperatorKeyState>{
-                snapshot_state->operator_key_states->data(),
-                snapshot_state->operator_key_states->size()},
-            &build_error);
-    } catch (const std::exception&) {
-        if (status != nullptr) {
-            *status = PaymentAuditRosterBuildStatus::LOCAL_ERROR;
-        }
-        return nullptr;
-    }
-    if (!rebuilt_subject || !SameFrozenQuorumRoster(
-                                *rebuilt_subject,
-                                response_rosters->Rosters().back())) {
+    if (subject_snapshot == nullptr ||
+        subject_snapshot->GetBlockHash() != subject.snapshot_hash) {
         if (status != nullptr) {
             *status = PaymentAuditRosterBuildStatus::LOCAL_ERROR;
         }

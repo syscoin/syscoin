@@ -321,6 +321,22 @@ bool MatchesPaymentAuditResponseContext(
                expected.response_chainlock_logical_id;
 }
 
+bool MatchesVerifiedPaymentAuditSubject(
+    const PaymentAuditCommitment& commitment,
+    const VerifiedRosterSet& response_rosters)
+{
+    const auto& descriptor{
+        response_rosters.Rosters().back().descriptor};
+    return descriptor.epoch == commitment.subject_epoch &&
+           descriptor.base_hash ==
+               commitment.subject_quorum_base_hash &&
+           descriptor.valid_members ==
+               commitment.subject_valid_members &&
+           GetPaymentAuditDescriptorHash(
+               response_rosters.GenesisHash(), descriptor) ==
+               commitment.subject_descriptor_hash;
+}
+
 bool ValidatePaymentAuditContext(
     const uint256& genesis_hash,
     const PaymentAuditScheduleConfig& schedule,

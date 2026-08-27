@@ -129,6 +129,15 @@ PreparePaymentAuditResponseVerification(
     const PreparedChainLockContext& response_context,
     const ChainLockStatement& finalized_statement);
 
+/**
+ * Bind the audit subject to bytes already owned and authenticated by the
+ * response-roster capability. Rebuilding those bytes from the same snapshot
+ * would provide no independent evidence.
+ */
+[[nodiscard]] bool MatchesVerifiedPaymentAuditSubject(
+    const PaymentAuditCommitment& commitment,
+    const VerifiedRosterSet& response_rosters);
+
 [[nodiscard]] bool ValidatePaymentAuditContext(
     const uint256& genesis_hash,
     const PaymentAuditScheduleConfig& schedule,

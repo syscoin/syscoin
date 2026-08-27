@@ -473,6 +473,55 @@ BOOST_AUTO_TEST_CASE(final_preparation_reuses_verified_seal_rosters)
                       underfilled_hashes_before);
 }
 
+BOOST_AUTO_TEST_CASE(verified_response_rosters_bind_subject_without_rebuild)
+{
+    const auto fixture{MakeResponseFixture()};
+    ChainLockVerificationError roster_error{
+        ChainLockVerificationError::INVALID_ARGUMENT};
+    const auto roster_set{VerifiedRosterSet::Create(
+        fixture->genesis_hash,
+        std::make_shared<const FrozenQuorumRosters>(fixture->rosters),
+        &roster_error)};
+    BOOST_REQUIRE(roster_set);
+    BOOST_CHECK(roster_error == ChainLockVerificationError::NONE);
+
+    const auto& subject{roster_set->Rosters().back().descriptor};
+    PaymentAuditCommitment commitment;
+    commitment.subject_epoch = subject.epoch;
+    commitment.subject_quorum_base_hash = subject.base_hash;
+    commitment.subject_descriptor_hash =
+        GetPaymentAuditDescriptorHash(fixture->genesis_hash, subject);
+    commitment.subject_valid_members = subject.valid_members;
+
+    const uint64_t hashes_before{
+        GetQuorumRootTaggedHashCountForTesting()};
+    BOOST_CHECK(MatchesVerifiedPaymentAuditSubject(
+        commitment, *roster_set));
+    BOOST_CHECK_EQUAL(GetQuorumRootTaggedHashCountForTesting(),
+                      hashes_before);
+
+    const auto expect_mismatch = [&](auto mutate) {
+        auto mismatched{commitment};
+        mutate(mismatched);
+        BOOST_CHECK(!MatchesVerifiedPaymentAuditSubject(
+            mismatched, *roster_set));
+        BOOST_CHECK_EQUAL(GetQuorumRootTaggedHashCountForTesting(),
+                          hashes_before);
+    };
+    expect_mismatch([](auto& mismatched) {
+        ++mismatched.subject_epoch;
+    });
+    expect_mismatch([](auto& mismatched) {
+        mismatched.subject_quorum_base_hash.begin()[0] ^= 1;
+    });
+    expect_mismatch([](auto& mismatched) {
+        mismatched.subject_valid_members[0] ^= 1;
+    });
+    expect_mismatch([](auto& mismatched) {
+        mismatched.subject_descriptor_hash.begin()[0] ^= 1;
+    });
+}
+
 BOOST_AUTO_TEST_CASE(preparation_rejects_wrong_seal_context_and_membership)
 {
     PaymentAuditVerificationError error{PaymentAuditVerificationError::NONE};
