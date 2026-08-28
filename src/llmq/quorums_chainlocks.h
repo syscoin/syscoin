@@ -1165,6 +1165,14 @@ private:
         pq::VerifiedRosterSetPtr roster_set;
         uint8_t authorization_mask{0};
         HistoricalAdmissionContext historical;
+        uint64_t roster_source_generation{0};
+    };
+
+    struct PendingVerifiedHistoricalChainLock {
+        pq::FinalChainLock chainlock;
+        RuntimeVerificationContext verification;
+        uint256 logical_id;
+        uint256 witness_id;
     };
 
     struct CurrentSigningContext {
@@ -1327,6 +1335,31 @@ private:
         EXCLUSIVE_LOCKS_REQUIRED(!m_lookup_mutex,
                                  !m_persisted_mutex,
                                  !m_btcc_preseal_mutex);
+    [[nodiscard]] bool IsHistoricalVerificationCapabilityCurrent(
+        const RuntimeVerificationContext& verification,
+        const HistoricalAdmissionContext& expected) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_lookup_mutex);
+    [[nodiscard]] static bool DoesHistoricalVerificationCapabilityMatch(
+        const HistoricalAdmissionContext& verified,
+        uint64_t verified_roster_generation,
+        const HistoricalAdmissionContext& expected,
+        uint64_t current_roster_generation) noexcept;
+    [[nodiscard]] std::shared_ptr<const PendingVerifiedHistoricalChainLock>
+    GetPendingVerifiedHistoricalChainLock() const;
+    [[nodiscard]] bool RetainVerifiedHistoricalChainLock(
+        const pq::FinalChainLock& chainlock,
+        const RuntimeVerificationContext& verification);
+    void ContinueVerifiedHistoricalChainLock()
+        EXCLUSIVE_LOCKS_REQUIRED(!cs_main,
+                                 !m_chainlock_admission_mutex,
+                                 !m_verification_mutex,
+                                 !m_collector_mutex,
+                                 !m_lookup_mutex,
+                                 !m_persisted_mutex,
+                                 !m_btcc_preseal_mutex,
+                                 !m_needed_btcc_certificate_mutex,
+                                 !m_pending_btcc_receipt_mutex,
+                                 !m_signer_reconcile_mutex);
     [[nodiscard]] bool IsConfiguredForVerification() const
         EXCLUSIVE_LOCKS_REQUIRED(!m_lookup_mutex);
     [[nodiscard]] pq::FrozenQuorumRosterCachePtr GetQuorumRosterCache(
@@ -1406,7 +1439,9 @@ private:
         const pq::FinalChainLock& chainlock,
         BlockValidationState& state,
         bool* peer_fault,
-        const LocalChainLockFinalization* local_finalization)
+        const LocalChainLockFinalization* local_finalization,
+        const PendingVerifiedHistoricalChainLock* continuation = nullptr,
+        bool* retain_continuation = nullptr)
         EXCLUSIVE_LOCKS_REQUIRED(!cs_main,
                                  !m_chainlock_admission_mutex,
                                  !m_verification_mutex,
@@ -1931,6 +1966,8 @@ private:
         GUARDED_BY(cs_main);
     BoundedActiveRangeFrontier m_btcc_replay_validation_frontier
         GUARDED_BY(cs_main);
+    mutable std::shared_ptr<const PendingVerifiedHistoricalChainLock>
+        m_pending_verified_historical;
     std::unique_ptr<CPQSignerJournal> m_signer_journal;
     Mutex m_signer_reconcile_mutex;
     Mutex m_share_signing_mutex;

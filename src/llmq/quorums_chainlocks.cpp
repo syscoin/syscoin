@@ -2518,6 +2518,7 @@ void CChainLocksHandler::Start()
             (void)TryImportPersistedChainLock();
             (void)TryImportPersistedUnsealedBTCC();
             CheckActiveState();
+            ContinueVerifiedHistoricalChainLock();
             EnforceBestChainLock();
             RequestNeededBTCCCertificate();
             RequestNeededPaymentAuditCertificate();
@@ -2594,6 +2595,9 @@ void CChainLocksHandler::Stop()
             m_pending_payment_audit_last_request =
                 std::chrono::microseconds{0};
         }
+        std::atomic_store(
+            &m_pending_verified_historical,
+            std::shared_ptr<const PendingVerifiedHistoricalChainLock>{});
         m_retry_pending_btcc_block.store(false);
     }
 }
@@ -5766,6 +5770,7 @@ void CChainLocksHandler::RequestCatchupChainLock()
     if (!IsChainLockVerificationAvailable()) {
         return;
     }
+    if (GetPendingVerifiedHistoricalChainLock()) return;
     if (!m_config) return;
     {
         LOCK(cs_main);
@@ -6413,11 +6418,16 @@ void CChainLocksHandler::MaybeReplayBTCCPreseal()
 void CChainLocksHandler::RequestNeededBTCCCertificate()
 {
     (void)RevalidatePendingBTCCReceiptDependency();
+    const auto pending_verified{
+        GetPendingVerifiedHistoricalChainLock()};
     std::optional<uint256> logical_id;
     const auto now{GetTime<std::chrono::microseconds>()};
     {
         LOCK(m_pending_btcc_receipt_mutex);
         if (m_pending_btcc_receipt &&
+            (!pending_verified ||
+             pending_verified->logical_id !=
+                 m_pending_btcc_receipt->logical_id) &&
             (m_pending_btcc_last_request.count() == 0 ||
              now - m_pending_btcc_last_request >= std::chrono::seconds{5})) {
             logical_id = m_pending_btcc_receipt->logical_id;
@@ -6431,6 +6441,9 @@ void CChainLocksHandler::RequestNeededBTCCCertificate()
     {
         LOCK(m_needed_btcc_certificate_mutex);
         if (!m_needed_btcc_certificate ||
+            (pending_verified &&
+             pending_verified->logical_id ==
+                 *m_needed_btcc_certificate) ||
             (m_needed_btcc_last_request.count() != 0 &&
              now - m_needed_btcc_last_request < std::chrono::seconds{30})) {
             return;
@@ -7405,7 +7418,9 @@ CChainLocksHandler::BuildRuntimeVerificationContext(
 {
     if (definitively_invalid != nullptr) *definitively_invalid = false;
     if (!m_config || !m_quorum_build_config) return std::nullopt;
-    const auto roster_cache{GetQuorumRosterCache()};
+    uint64_t roster_source_generation{0};
+    const auto roster_cache{
+        GetQuorumRosterCache(&roster_source_generation)};
     if (!roster_cache) return std::nullopt;
 
     const CBlockIndex* candidate{nullptr};
@@ -7465,7 +7480,8 @@ CChainLocksHandler::BuildRuntimeVerificationContext(
         if (!expected_catchup && !expected_receipt) return std::nullopt;
     }
     return RuntimeVerificationContext{
-        roster_set, authorization_mask, historical};
+        roster_set, authorization_mask, historical,
+        roster_source_generation};
 }
 
 std::optional<CChainLocksHandler::RuntimeVerificationContext>
@@ -7479,7 +7495,9 @@ CChainLocksHandler::BuildHistoricalPreVerificationContext(
         expected.admission == HistoricalAdmission::NONE) {
         return std::nullopt;
     }
-    const auto roster_cache{GetQuorumRosterCache()};
+    uint64_t roster_source_generation{0};
+    const auto roster_cache{
+        GetQuorumRosterCache(&roster_source_generation)};
     if (!roster_cache) return std::nullopt;
 
     LOCK(cs_main);
@@ -7542,7 +7560,85 @@ CChainLocksHandler::BuildHistoricalPreVerificationContext(
         return std::nullopt;
     }
     return RuntimeVerificationContext{
-        roster_set, authorization_mask, expected};
+        roster_set, authorization_mask, expected,
+        roster_source_generation};
+}
+
+bool CChainLocksHandler::IsHistoricalVerificationCapabilityCurrent(
+    const RuntimeVerificationContext& verification,
+    const HistoricalAdmissionContext& expected) const
+{
+    uint64_t current_roster_generation{0};
+    (void)GetQuorumRosterCache(&current_roster_generation);
+    return verification.roster_set != nullptr &&
+           DoesHistoricalVerificationCapabilityMatch(
+               verification.historical,
+               verification.roster_source_generation, expected,
+               current_roster_generation);
+}
+
+bool CChainLocksHandler::DoesHistoricalVerificationCapabilityMatch(
+    const HistoricalAdmissionContext& verified,
+    uint64_t verified_roster_generation,
+    const HistoricalAdmissionContext& expected,
+    uint64_t current_roster_generation) noexcept
+{
+    return verified == expected && verified_roster_generation != 0 &&
+           verified_roster_generation == current_roster_generation;
+}
+
+std::shared_ptr<const CChainLocksHandler::PendingVerifiedHistoricalChainLock>
+CChainLocksHandler::GetPendingVerifiedHistoricalChainLock() const
+{
+    return std::atomic_load(&m_pending_verified_historical);
+}
+
+bool CChainLocksHandler::RetainVerifiedHistoricalChainLock(
+    const pq::FinalChainLock& chainlock,
+    const RuntimeVerificationContext& verification)
+{
+    const uint256 logical_id{chainlock.GetLogicalId(m_genesis_hash)};
+    const uint256 witness_id{chainlock.GetWitnessId(m_genesis_hash)};
+    auto pending{std::make_shared<PendingVerifiedHistoricalChainLock>()};
+    pending->chainlock = chainlock;
+    pending->verification = verification;
+    pending->logical_id = logical_id;
+    pending->witness_id = witness_id;
+    std::shared_ptr<const PendingVerifiedHistoricalChainLock> desired{
+        std::move(pending)};
+    std::shared_ptr<const PendingVerifiedHistoricalChainLock> empty;
+    if (std::atomic_compare_exchange_strong(
+            &m_pending_verified_historical, &empty, desired)) {
+        return true;
+    }
+    return empty && empty->logical_id == logical_id &&
+           empty->witness_id == witness_id;
+}
+
+void CChainLocksHandler::ContinueVerifiedHistoricalChainLock()
+{
+    const auto pending{GetPendingVerifiedHistoricalChainLock()};
+    if (!pending) return;
+
+    BlockValidationState state;
+    bool retain{false};
+    const bool accepted{ProcessNewChainLockInternal(
+        /*from=*/-1, pending->chainlock, state,
+        /*peer_fault=*/nullptr, /*local_finalization=*/nullptr,
+        pending.get(), &retain)};
+    if (accepted || !retain) {
+        auto expected{pending};
+        (void)std::atomic_compare_exchange_strong(
+            &m_pending_verified_historical, &expected,
+            std::shared_ptr<const PendingVerifiedHistoricalChainLock>{});
+    }
+    if (!accepted && !retain) {
+        LogPrint(BCLog::CHAINLOCKS,
+                 "CChainLocksHandler::%s dropped stale verified historical "
+                 "certificate %s: %s\n",
+                 __func__, pending->witness_id.ToString(),
+                 state.ToString());
+    }
 }
 
 bool CChainLocksHandler::HasExactLiveSigningTargetEndpoint(
@@ -11319,9 +11415,12 @@ bool CChainLocksHandler::ProcessNewChainLockInternal(
     const pq::FinalChainLock& chainlock,
     BlockValidationState& state,
     bool* peer_fault,
-    const LocalChainLockFinalization* local_finalization)
+    const LocalChainLockFinalization* local_finalization,
+    const PendingVerifiedHistoricalChainLock* continuation,
+    bool* retain_continuation)
 {
     if (peer_fault != nullptr) *peer_fault = false;
+    if (retain_continuation != nullptr) *retain_continuation = false;
     if (!IsChainLockVerificationAvailable()) {
         return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK,
                              "pq-clsig-not-configured");
@@ -11329,6 +11428,20 @@ bool CChainLocksHandler::ProcessNewChainLockInternal(
 
     const uint256 logical_id{chainlock.GetLogicalId(m_genesis_hash)};
     const uint256 witness_id{chainlock.GetWitnessId(m_genesis_hash)};
+    if (continuation != nullptr &&
+        (from != -1 || local_finalization != nullptr ||
+         continuation->logical_id != logical_id ||
+         continuation->witness_id != witness_id ||
+         continuation->chainlock != chainlock)) {
+        return state.Error("pq-clsig-invalid-local-continuation");
+    }
+    if (continuation == nullptr) {
+        const auto pending{GetPendingVerifiedHistoricalChainLock()};
+        if (pending && pending->logical_id == logical_id) {
+            CompletePeerResponse(from, logical_id);
+            return state.Error("pq-clsig-verified-continuation-pending");
+        }
+    }
     if (from != -1) {
         if (PeerRef peer{m_peerman.GetPeerRef(from)}) {
             m_peerman.AddKnownTx(*peer, logical_id);
@@ -11357,12 +11470,18 @@ bool CChainLocksHandler::ProcessNewChainLockInternal(
         historical.admission == HistoricalAdmission::PRESEAL_CATCHUP ||
         preseal_receipt_rebase};
     const bool historical_admission{catchup || preseal_receipt};
+    if (continuation != nullptr && !historical_admission) {
+        return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK,
+                             "pq-clsig-stale-local-continuation");
+    }
     pq::ChainLockFinalityError finality_error{pq::ChainLockFinalityError::NONE};
     std::optional<pq::PreparedFinalChainLockCandidate> prepared;
     std::optional<RuntimeVerificationContext> verification_context;
     bool index_persistence_failed{false};
     bool accepted{false};
     bool historical_acceptance_complete{false};
+    bool historical_capability_reusable{false};
+    std::optional<RuntimeVerificationContext> historical_preverification;
     std::optional<ScopedFinalitySnapshotVerificationRetention>
         snapshot_verification_retention;
 
@@ -11387,6 +11506,9 @@ bool CChainLocksHandler::ProcessNewChainLockInternal(
         if (!admission_lock) {
             if (prepared) m_store->AbandonPrepared(*prepared);
             CompletePeerResponse(from, logical_id);
+            if (continuation != nullptr && retain_continuation != nullptr) {
+                *retain_continuation = true;
+            }
             return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK,
                                  "pq-clsig-verifier-busy");
         }
@@ -11401,52 +11523,66 @@ bool CChainLocksHandler::ProcessNewChainLockInternal(
         // rosters and authenticate all 801 witness signatures. Random network
         // bytes can therefore consume bounded crypto, never O(chain-age) disk
         // work under cs_main.
-        std::optional<RuntimeVerificationContext> historical_preverification;
         if (historical_admission) {
-            if (m_store->AlreadyHaveWitness(witness_id)) {
+            if (continuation != nullptr) {
+                historical_preverification = continuation->verification;
+                if (!IsHistoricalVerificationCapabilityCurrent(
+                        *historical_preverification, historical)) {
+                    return state.Invalid(
+                        BlockValidationResult::BLOCK_CHAINLOCK,
+                        "pq-clsig-stale-verification-capability");
+                }
+                historical_capability_reusable = true;
+            } else if (m_store->AlreadyHaveWitness(witness_id)) {
                 CompletePeerResponse(from, logical_id);
                 return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK,
                                      "pq-clsig-duplicate-witness");
-            }
-            historical_preverification =
-                BuildHistoricalPreVerificationContext(chainlock, historical);
-            if (!historical_preverification) {
-                CompletePeerResponse(from, logical_id);
-                return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK,
-                                     "pq-clsig-context-unavailable");
-            }
-            pq::ChainLockVerificationError verification_error{
-                pq::ChainLockVerificationError::NONE};
-            auto signature_checks{pq::PrepareFinalChainLockVerification(
-                m_config->chainlock_schedule, chainlock,
-                *historical_preverification->roster_set,
-                historical_preverification->authorization_mask,
-                &verification_error)};
-            if (!signature_checks) {
-                m_store->RejectWitness(chainlock);
+            } else {
+                historical_preverification =
+                    BuildHistoricalPreVerificationContext(chainlock,
+                                                          historical);
+                if (!historical_preverification) {
+                    CompletePeerResponse(from, logical_id);
+                    return state.Invalid(
+                        BlockValidationResult::BLOCK_CHAINLOCK,
+                        "pq-clsig-context-unavailable");
+                }
+                pq::ChainLockVerificationError verification_error{
+                    pq::ChainLockVerificationError::NONE};
+                auto signature_checks{pq::PrepareFinalChainLockVerification(
+                    m_config->chainlock_schedule, chainlock,
+                    *historical_preverification->roster_set,
+                    historical_preverification->authorization_mask,
+                    &verification_error)};
+                if (!signature_checks) {
+                    m_store->RejectWitness(chainlock);
+                    if (peer_fault != nullptr) *peer_fault = true;
+                    FailPeerResponse(from, logical_id);
+                    return state.Invalid(
+                        BlockValidationResult::BLOCK_CHAINLOCK,
+                        "pq-clsig-invalid-context");
+                }
                 if (peer_fault != nullptr) *peer_fault = true;
-                FailPeerResponse(from, logical_id);
-                return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK,
-                                     "pq-clsig-invalid-context");
-            }
-            if (peer_fault != nullptr) *peer_fault = true;
-            bool signatures_valid{false};
-            {
-                LOCK(m_verification_mutex);
-                signatures_valid = m_verifier.VerifyChecks(
-                    std::move(signature_checks->checks));
-            }
-            if (!signatures_valid) {
-                m_store->RejectWitness(chainlock);
-                FailPeerResponse(from, logical_id);
-                return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK,
-                                     "pq-clsig-invalid-signatures");
-            }
-            if (peer_fault != nullptr) {
-                // Everything below is local historical state, storage, or a
-                // concurrent active/store context. A fully authenticated peer
-                // response must never be punished for those local failures.
-                *peer_fault = false;
+                bool signatures_valid{false};
+                {
+                    LOCK(m_verification_mutex);
+                    signatures_valid = m_verifier.VerifyChecks(
+                        std::move(signature_checks->checks));
+                }
+                if (!signatures_valid) {
+                    m_store->RejectWitness(chainlock);
+                    FailPeerResponse(from, logical_id);
+                    return state.Invalid(
+                        BlockValidationResult::BLOCK_CHAINLOCK,
+                        "pq-clsig-invalid-signatures");
+                }
+                historical_capability_reusable = true;
+                if (peer_fault != nullptr) {
+                    // Everything below is local historical state, storage, or
+                    // a concurrent active/store context. A fully authenticated
+                    // peer response must never be punished for those failures.
+                    *peer_fault = false;
+                }
             }
 
             // SYSCOIN: Marker catch-up derives authority from current best work
@@ -11468,8 +11604,9 @@ bool CChainLocksHandler::ProcessNewChainLockInternal(
                         : m_store->PreparePresealReceiptCandidate(
                               chainlock, &finality_error);
                     if (!prepared) return false;
-                    verification_context =
-                        BuildRuntimeVerificationContext(*prepared);
+                    bool definitively_invalid{false};
+                    verification_context = BuildRuntimeVerificationContext(
+                        *prepared, &definitively_invalid);
                     if (!verification_context ||
                         Descriptors(
                             verification_context->roster_set->Rosters()) !=
@@ -11477,7 +11614,21 @@ bool CChainLocksHandler::ProcessNewChainLockInternal(
                                             ->roster_set->Rosters()) ||
                         verification_context->authorization_mask !=
                             historical_preverification->authorization_mask ||
-                        verification_context->historical != historical) {
+                        verification_context->historical != historical ||
+                        verification_context->roster_source_generation !=
+                            historical_preverification
+                                ->roster_source_generation) {
+                        if (definitively_invalid || verification_context) {
+                            historical_capability_reusable = false;
+                        }
+                        finality_error =
+                            pq::ChainLockFinalityError::CONTEXT_CHANGED;
+                        m_store->AbandonPrepared(*prepared);
+                        return false;
+                    }
+                    if (!IsHistoricalVerificationCapabilityCurrent(
+                            *historical_preverification, historical)) {
+                        historical_capability_reusable = false;
                         finality_error =
                             pq::ChainLockFinalityError::CONTEXT_CHANGED;
                         m_store->AbandonPrepared(*prepared);
@@ -11662,6 +11813,28 @@ bool CChainLocksHandler::ProcessNewChainLockInternal(
     }
     if (!accepted) {
         if (prepared) m_store->AbandonPrepared(*prepared);
+        const bool retain_verified_historical{
+            historical_preverification &&
+            historical_capability_reusable &&
+            finality_error ==
+                pq::ChainLockFinalityError::CONTEXT_CHANGED &&
+            IsHistoricalVerificationCapabilityCurrent(
+                *historical_preverification, historical) &&
+            GetHistoricalAdmission(chainlock.statement, logical_id) ==
+                historical};
+        if (retain_verified_historical) {
+            const bool retained{
+                continuation != nullptr ||
+                RetainVerifiedHistoricalChainLock(
+                    chainlock, *historical_preverification)};
+            if (continuation != nullptr && retain_continuation != nullptr) {
+                *retain_continuation = true;
+            }
+            CompletePeerResponse(from, logical_id);
+            return retained
+                ? state.Error("pq-clsig-historical-continuation-pending")
+                : state.Error("pq-clsig-historical-continuation-occupied");
+        }
         CompletePeerResponse(from, logical_id);
         return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK,
                              strprintf("pq-clsig-%s",

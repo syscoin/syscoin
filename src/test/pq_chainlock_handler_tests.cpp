@@ -383,6 +383,28 @@ public:
             IsLiveSigningValidationRevisionCurrent(
                 source, current_revision);
     }
+
+    static bool HistoricalCapabilityMatches(
+        uint8_t verified_admission,
+        const uint256& verified_marker,
+        uint64_t verified_roster_generation,
+        uint8_t expected_admission,
+        const uint256& expected_marker,
+        uint64_t current_roster_generation)
+    {
+        const CChainLocksHandler::HistoricalAdmissionContext verified{
+            static_cast<CChainLocksHandler::HistoricalAdmission>(
+                verified_admission),
+            verified_marker};
+        const CChainLocksHandler::HistoricalAdmissionContext expected{
+            static_cast<CChainLocksHandler::HistoricalAdmission>(
+                expected_admission),
+            expected_marker};
+        return CChainLocksHandler::
+            DoesHistoricalVerificationCapabilityMatch(
+                verified, verified_roster_generation, expected,
+                current_roster_generation);
+    }
 };
 
 } // namespace llmq::test
@@ -616,6 +638,28 @@ BOOST_AUTO_TEST_CASE(
                   llmq::BoundedActiveRangeStatus::WORK);
     BOOST_CHECK(revoked_plan.reset);
     BOOST_CHECK_EQUAL(revoked_plan.first_height, FLOOR_HEIGHT + 1);
+}
+
+BOOST_AUTO_TEST_CASE(
+    historical_verification_capability_is_exact_source_bound)
+{
+    using Access = llmq::test::CChainLocksHandlerTestAccess;
+    constexpr uint8_t PRESEAL_CATCHUP{2};
+    const uint256 marker{NonNullHash(199'500)};
+
+    BOOST_CHECK(Access::HistoricalCapabilityMatches(
+        PRESEAL_CATCHUP, marker, /*verified_roster_generation=*/7,
+        PRESEAL_CATCHUP, marker, /*current_roster_generation=*/7));
+    BOOST_CHECK(!Access::HistoricalCapabilityMatches(
+        PRESEAL_CATCHUP, marker, /*verified_roster_generation=*/7,
+        PRESEAL_CATCHUP, marker, /*current_roster_generation=*/8));
+    BOOST_CHECK(!Access::HistoricalCapabilityMatches(
+        PRESEAL_CATCHUP, marker, /*verified_roster_generation=*/7,
+        PRESEAL_CATCHUP, NonNullHash(199'501),
+        /*current_roster_generation=*/7));
+    BOOST_CHECK(!Access::HistoricalCapabilityMatches(
+        PRESEAL_CATCHUP, marker, /*verified_roster_generation=*/0,
+        PRESEAL_CATCHUP, marker, /*current_roster_generation=*/0));
 }
 
 BOOST_AUTO_TEST_CASE(
