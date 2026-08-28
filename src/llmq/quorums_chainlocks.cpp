@@ -805,6 +805,196 @@ const char* FinalityErrorString(pq::ChainLockFinalityError error)
 
 CChainLocksHandler* chainLocksHandler{nullptr};
 
+bool PaymentAuditCandidateMetadataSnapshot::IsStructurallyValid() const noexcept
+{
+    if (candidate_revision == 0 ||
+        ordered_candidates.size() >
+            pq::PaymentAuditStore::MAX_LIVE_CANDIDATES + 1) {
+        return false;
+    }
+    for (std::size_t index{0}; index < ordered_candidates.size(); ++index) {
+        const auto& candidate{ordered_candidates[index]};
+        if (!candidate.statement.IsStructurallyValid() ||
+            candidate.statement.commitment.seed.epoch != epoch ||
+            candidate.logical_id.IsNull() || candidate.witness_id.IsNull() ||
+            candidate.commitment_hash.IsNull() ||
+            candidate.result_hash.IsNull()) {
+            return false;
+        }
+        const auto& valid_members{
+            candidate.statement.commitment.subject_valid_members};
+        for (std::size_t byte{0}; byte < candidate.online_members.size();
+             ++byte) {
+            if ((candidate.online_members[byte] &
+                 static_cast<uint8_t>(~valid_members[byte])) != 0) {
+                return false;
+            }
+        }
+        for (std::size_t prior{0}; prior < index; ++prior) {
+            if (ordered_candidates[prior].witness_id ==
+                candidate.witness_id) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+PaymentAuditCandidateMetadataSnapshotPtr
+PaymentAuditCandidateMetadataCache::Get(const Key& key) const
+{
+    LOCK(m_mutex);
+    for (auto& entry : m_entries) {
+        if (entry.occupied && entry.key == key) {
+            entry.recently_used = true;
+            ++m_hits;
+            return entry.snapshot;
+        }
+    }
+    return {};
+}
+
+PaymentAuditCandidateMetadataSnapshotPtr
+PaymentAuditCandidateMetadataCache::Publish(
+    const Key& key, PaymentAuditCandidateMetadataSnapshot snapshot)
+{
+    if (key.candidate_revision == 0 || key.epoch != snapshot.epoch ||
+        key.candidate_revision != snapshot.candidate_revision ||
+        !snapshot.IsStructurallyValid()) {
+        return {};
+    }
+
+    LOCK(m_mutex);
+    ++m_builds;
+    for (auto& entry : m_entries) {
+        if (!entry.occupied || entry.key != key) continue;
+        entry.recently_used = true;
+        if (!entry.snapshot || *entry.snapshot != snapshot) {
+            ++m_conflicts;
+            return {};
+        }
+        return entry.snapshot;
+    }
+
+    std::optional<std::size_t> victim;
+    for (std::size_t index{0}; index < m_entries.size(); ++index) {
+        if (!m_entries[index].occupied) {
+            victim = index;
+            break;
+        }
+    }
+    while (!victim) {
+        const std::size_t index{m_clock};
+        m_clock = (m_clock + 1) % m_entries.size();
+        auto& candidate{m_entries[index]};
+        if (!candidate.recently_used) {
+            victim = index;
+        } else {
+            candidate.recently_used = false;
+        }
+    }
+
+    auto& entry{m_entries[*victim]};
+    entry.key = key;
+    entry.snapshot =
+        std::make_shared<const PaymentAuditCandidateMetadataSnapshot>(
+            std::move(snapshot));
+    entry.occupied = true;
+    entry.recently_used = true;
+    return entry.snapshot;
+}
+
+PaymentAuditCandidateMetadataSnapshotPtr
+PaymentAuditCandidateMetadataCache::GetOrBuild(
+    const pq::PaymentAuditStore& store,
+    const uint256& genesis_hash,
+    uint32_t epoch)
+{
+    if (genesis_hash.IsNull()) return {};
+    const auto observed_revision{store.ObserveCandidateRevision()};
+    if (!observed_revision || *observed_revision == 0) return {};
+    const Key observed_key{epoch, *observed_revision};
+    if (const auto cached{Get(observed_key)}) {
+        return store.IsCandidateRevisionCurrent(*observed_revision)
+            ? cached
+            : PaymentAuditCandidateMetadataSnapshotPtr{};
+    }
+
+    LOCK(m_build_mutex);
+    const auto current_revision{store.ObserveCandidateRevision()};
+    if (!current_revision || *current_revision == 0) return {};
+    Key key{epoch, *current_revision};
+    if (const auto cached{Get(key)}) {
+        return store.IsCandidateRevisionCurrent(*current_revision)
+            ? cached
+            : PaymentAuditCandidateMetadataSnapshotPtr{};
+    }
+
+    const auto source{store.GetEpochCandidateSnapshot(epoch)};
+    if (!source || source->epoch != epoch || source->revision == 0) return {};
+    key.candidate_revision = source->revision;
+    if (const auto cached{Get(key)}) {
+        return store.IsCandidateRevisionCurrent(source->revision)
+            ? cached
+            : PaymentAuditCandidateMetadataSnapshotPtr{};
+    }
+
+    PaymentAuditCandidateMetadataSnapshot derived{
+        source->revision, source->epoch, {}};
+    derived.ordered_candidates.reserve(source->ordered_candidates.size());
+    for (const auto& source_candidate : source->ordered_candidates) {
+        const auto& audit{source_candidate.audit};
+        if (source_candidate.logical_id.IsNull() ||
+            source_candidate.witness_id.IsNull() ||
+            audit.statement.commitment.seed.epoch != epoch) {
+            return {};
+        }
+        const auto classification{pq::ClassifyPaymentAuditReports(audit)};
+        if (!classification) return {};
+        const uint256 commitment_hash{pq::GetPaymentAuditCommitmentHash(
+            genesis_hash, audit.statement.commitment)};
+        const uint256 result_hash{pq::GetPaymentAuditResultHash(
+            genesis_hash, audit, *classification)};
+        if (commitment_hash.IsNull() || result_hash.IsNull()) return {};
+        derived.ordered_candidates.push_back(
+            PaymentAuditCandidateMetadata{
+                audit.statement, source_candidate.logical_id,
+                source_candidate.witness_id, commitment_hash, result_hash,
+                classification->online_members});
+    }
+    if (!derived.IsStructurallyValid() ||
+        !store.IsCandidateRevisionCurrent(source->revision)) {
+        return {};
+    }
+    const auto published{Publish(key, std::move(derived))};
+    if (!published ||
+        !store.IsCandidateRevisionCurrent(source->revision)) {
+        return {};
+    }
+    return published;
+}
+
+void PaymentAuditCandidateMetadataCache::Clear()
+{
+    LOCK(m_build_mutex);
+    LOCK(m_mutex);
+    m_entries = {};
+    m_clock = 0;
+}
+
+PaymentAuditCandidateMetadataCache::Stats
+PaymentAuditCandidateMetadataCache::StatsForTesting() const
+{
+    LOCK(m_mutex);
+    return Stats{
+        static_cast<std::size_t>(std::count_if(
+            m_entries.begin(), m_entries.end(),
+            [](const Entry& entry) { return entry.occupied; })),
+        m_hits,
+        m_builds,
+        m_conflicts};
+}
+
 std::optional<pq::PaymentAuditReceipt> PaymentAuditReceiptCache::Get(
     const Key& key) const
 {
@@ -2106,6 +2296,7 @@ void CChainLocksHandler::Stop()
             LOCK(m_share_lifecycle_mutex);
             m_share_admission_gate.SetReady(false);
         }
+        m_payment_audit_candidate_metadata_cache.Clear();
         m_payment_audit_receipt_cache.Clear();
         m_verified_payment_audit_transition_cache->Clear();
         if (!m_started) return;
@@ -2865,75 +3056,70 @@ CChainLocksHandler::GetPaymentAuditReceiptForCarrier(
             : null_receipt;
     }
 
-    auto snapshot{
-        m_payment_audit_store->GetEpochCandidateSnapshot(*epoch)};
-    if (!snapshot || snapshot->epoch != *epoch ||
-        snapshot->revision == 0) {
+    const auto candidates{
+        m_payment_audit_candidate_metadata_cache.GetOrBuild(
+            *m_payment_audit_store, m_genesis_hash, *epoch)};
+    if (!candidates || candidates->epoch != *epoch ||
+        candidates->candidate_revision == 0) {
         return null_receipt;
     }
-    cache_key.archive_revision = snapshot->revision;
+    cache_key.archive_revision = candidates->candidate_revision;
     if (const auto cached{
             m_payment_audit_receipt_cache.Get(cache_key)}) {
         return m_payment_audit_store->IsCandidateRevisionCurrent(
-                   snapshot->revision)
+                   candidates->candidate_revision)
             ? *cached
             : null_receipt;
     }
 
-    for (const auto& candidate : snapshot->ordered_candidates) {
-        const auto& audit{candidate.audit};
-        if (audit.statement.commitment.seed.epoch != *epoch) continue;
+    for (const auto& candidate : candidates->ordered_candidates) {
+        const auto& statement{candidate.statement};
+        if (statement.commitment.seed.epoch != *epoch) continue;
         const CBlockIndex* seal{carrier_parent.GetAncestor(
-            audit.statement.commitment.seal_height)};
+            statement.commitment.seal_height)};
         if (seal == nullptr ||
             seal->GetBlockHash() !=
-                audit.statement.seal_statement.block_hash ||
-            audit.statement.commitment.previous_probation_state_hash !=
+                statement.seal_statement.block_hash ||
+            statement.commitment.previous_probation_state_hash !=
                 carrier_parent.pqPaymentProbationStateHash) {
             continue;
         }
-        const uint256 commitment_hash{pq::GetPaymentAuditCommitmentHash(
-            m_genesis_hash, audit.statement.commitment)};
-        const auto classification{pq::ClassifyPaymentAuditReports(audit)};
-        if (!classification) continue;
-        const uint256 result_hash{pq::GetPaymentAuditResultHash(
-            m_genesis_hash, audit, *classification)};
         if (candidate.logical_id.IsNull() || candidate.witness_id.IsNull() ||
-            commitment_hash.IsNull() || result_hash.IsNull()) {
+            candidate.commitment_hash.IsNull() ||
+            candidate.result_hash.IsNull()) {
             continue;
         }
         pq::FrozenQuorumRoster subject;
         if (!BuildPaymentAuditVerificationRosters(
-                audit.statement, &subject)) {
+                statement, &subject)) {
             continue;
         }
         const auto transition{DerivePaymentAuditProbationTransition(
-            audit.statement.commitment, subject, carrier_parent,
-            carrier_height, result_hash,
-            classification->online_members)};
+            statement.commitment, subject, carrier_parent, carrier_height,
+            candidate.result_hash, candidate.online_members)};
         if (!transition) continue;
         const pq::PaymentAuditReceipt receipt{
             pq::PAYMENT_AUDIT_RECEIPT_VERSION,
             1,
             *epoch,
-            audit.statement.commitment.seal_height,
-            audit.statement.seal_statement.block_hash,
+            statement.commitment.seal_height,
+            statement.seal_statement.block_hash,
             carrier_height,
             candidate.logical_id,
             candidate.witness_id,
-            commitment_hash,
-            result_hash,
+            candidate.commitment_hash,
+            candidate.result_hash,
             transition->Result().StateHash(),
-            classification->online_members};
+            candidate.online_members};
         if (!m_payment_audit_store->IsCandidateRevisionCurrent(
-                snapshot->revision)) {
+                candidates->candidate_revision)) {
             return null_receipt;
         }
         const auto published{
             m_payment_audit_receipt_cache.Publish(cache_key, receipt)};
         if (!published ||
             !m_payment_audit_store->IsCandidateRevisionCurrent(
-                snapshot->revision)) {
+                candidates->candidate_revision)) {
             return null_receipt;
         }
         return *published;

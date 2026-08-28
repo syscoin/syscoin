@@ -14,6 +14,7 @@
 #include <test/util/setup_common.h>
 #include <test/util/validation.h>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -114,6 +115,92 @@ void SetFirstMembers(llmq::pq::QuorumBitmap& bitmap, std::size_t count)
         bitmap[member / 8] |=
             static_cast<uint8_t>(uint8_t{1} << (member % 8));
     }
+}
+
+llmq::pq::FinalPaymentAudit MakePaymentAuditCandidate(
+    uint32_t epoch, uint8_t mask, uint64_t salt,
+    std::size_t observed_count = llmq::pq::QUORUM_MIN_VALID)
+{
+    using namespace llmq::pq;
+    FinalPaymentAudit audit;
+    auto& commitment{audit.statement.commitment};
+    const int32_t anchor_height{
+        static_cast<int32_t>(10'000 + epoch * 1'000)};
+    commitment.seed.epoch = epoch;
+    commitment.seed.anchor = PaymentAuditSeedPoint{
+        anchor_height, NonNullHash(100 + salt),
+        BTCCursor{anchor_height, NonNullHash(200 + salt),
+                  NonNullHash(300 + salt)},
+        BTCCAdvance::ADVANCE};
+    commitment.seed.anchor_btc_height = 800'000;
+    commitment.seed.future_btc_height =
+        800'000 + PAYMENT_AUDIT_FUTURE_BTC_HEIGHT_DELTA;
+    commitment.seed.future_btc_hash = NonNullHash(400 + salt);
+    commitment.selected_row = 3;
+    commitment.response_height = anchor_height - 30;
+    commitment.deadline_height = anchor_height - 10;
+    commitment.response_chainlock_logical_id = NonNullHash(500 + salt);
+    commitment.response_advance = BTCCAdvance::ADVANCE;
+    commitment.seal_height = anchor_height + PAYMENT_AUDIT_SEAL_DELAY;
+    commitment.subject_epoch = epoch;
+    commitment.subject_quorum_base_hash = NonNullHash(600 + salt);
+    commitment.subject_descriptor_hash = NonNullHash(700 + salt);
+    SetFirstMembers(commitment.subject_valid_members, QUORUM_SIZE);
+    commitment.previous_probation_state_hash = NonNullHash(800 + salt);
+
+    auto& seal{audit.statement.seal_statement};
+    seal.height = commitment.seal_height;
+    seal.block_hash = NonNullHash(900 + salt);
+    seal.previous_chainlock_height = commitment.seal_height - 5;
+    seal.previous_chainlock_hash = NonNullHash(1'000 + salt);
+    seal.quorum_context_hash = NonNullHash(1'100 + salt);
+    seal.payment_probation_state_hash =
+        commitment.previous_probation_state_hash;
+
+    audit.selected_quorum_mask = mask;
+    audit.report_witnesses.reserve(PAYMENT_AUDIT_SIGNATURE_COUNT);
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        if ((mask & (uint8_t{1} << slot)) == 0) continue;
+        SetFirstMembers(audit.signer_bitmaps[slot], QUORUM_THRESHOLD);
+        for (std::size_t reporter{0}; reporter < QUORUM_THRESHOLD;
+             ++reporter) {
+            PaymentAuditReportWitness witness;
+            SetFirstMembers(witness.observed_members, observed_count);
+            witness.authenticated_signature.key_proof.public_key[0] = 1;
+            witness.authenticated_signature.signature[0] =
+                static_cast<uint8_t>(salt + slot + reporter);
+            audit.report_witnesses.push_back(std::move(witness));
+        }
+    }
+    BOOST_REQUIRE(audit.IsStructurallyValid());
+    return audit;
+}
+
+llmq::pq::PaymentAuditStoreCheckpoint MakePaymentAuditCheckpoint(
+    uint32_t epoch, uint64_t salt, int32_t target_height)
+{
+    using namespace llmq::pq;
+    const int32_t covered_height{target_height - 2};
+    PaymentAuditReceiptState receipt_state;
+    receipt_state.cursor = {
+        covered_height - 1,
+        epoch,
+        NonNullHash(1'200 + salt),
+        NonNullHash(1'300 + salt),
+        NonNullHash(1'400 + salt)};
+    receipt_state.cumulative_hash = NonNullHash(1'500 + salt);
+    PaymentAuditStoreCheckpoint checkpoint{
+        epoch,
+        covered_height,
+        NonNullHash(1'600 + salt),
+        receipt_state,
+        NonNullHash(1'700 + salt),
+        target_height,
+        NonNullHash(1'800 + salt),
+        NonNullHash(1'900 + salt),
+        NonNullHash(2'000 + salt)};
+    BOOST_REQUIRE(checkpoint.IsStructurallyValid());
+    return checkpoint;
 }
 
 llmq::pq::FinalChainLock MakeCatchupChainLock(
@@ -345,6 +432,278 @@ BOOST_AUTO_TEST_CASE(payment_audit_receipt_cache_is_bounded_and_clearable)
     stats = cache.StatsForTesting();
     BOOST_CHECK_EQUAL(stats.entries, 0U);
     BOOST_CHECK(!cache.Get(keys.back()));
+}
+
+BOOST_AUTO_TEST_CASE(
+    payment_audit_candidate_metadata_preserves_order_and_receipt_fields)
+{
+    using namespace llmq;
+    using namespace llmq::pq;
+    const fs::path path{m_path_root /
+                        "pq_payment_audit_candidate_metadata_parity"};
+    const uint256 genesis_hash{NonNullHash(91'000)};
+    constexpr uint32_t epoch{21};
+    const auto pinned{MakePaymentAuditCandidate(epoch, 0x0b, 10)};
+    const auto late_slot{MakePaymentAuditCandidate(epoch, 0x07, 11)};
+    const auto early_slot{MakePaymentAuditCandidate(epoch, 0x0e, 12)};
+
+    PaymentAuditStore store{path, genesis_hash};
+    BOOST_REQUIRE(store.AcceptVerified(pinned) ==
+                  PaymentAuditStoreResult::ACCEPTED);
+    BOOST_REQUIRE(store.PinReferencedWitness(
+                      epoch, pinned.GetWitnessId(genesis_hash)) ==
+                  PaymentAuditStoreResult::ACCEPTED);
+    BOOST_REQUIRE(store.AcceptVerified(late_slot) ==
+                  PaymentAuditStoreResult::ACCEPTED);
+    BOOST_REQUIRE(store.AcceptVerified(early_slot) ==
+                  PaymentAuditStoreResult::ACCEPTED);
+
+    PaymentAuditCandidateMetadataCache cache;
+    const auto compact{cache.GetOrBuild(store, genesis_hash, epoch)};
+    BOOST_REQUIRE(compact);
+    BOOST_CHECK(compact->IsStructurallyValid());
+    const auto full{store.GetEpochCandidateSnapshot(epoch)};
+    BOOST_REQUIRE(full);
+    BOOST_CHECK_EQUAL(compact->candidate_revision, full->revision);
+    BOOST_REQUIRE_EQUAL(compact->ordered_candidates.size(),
+                        full->ordered_candidates.size());
+
+    for (std::size_t index{0};
+         index < full->ordered_candidates.size(); ++index) {
+        const auto& source{full->ordered_candidates[index]};
+        const auto& metadata{compact->ordered_candidates[index]};
+        const auto classification{ClassifyPaymentAuditReports(source.audit)};
+        BOOST_REQUIRE(classification);
+        BOOST_CHECK(metadata.statement == source.audit.statement);
+        BOOST_CHECK(metadata.logical_id == source.logical_id);
+        BOOST_CHECK(metadata.witness_id == source.witness_id);
+        BOOST_CHECK(metadata.commitment_hash ==
+                    GetPaymentAuditCommitmentHash(
+                        genesis_hash, source.audit.statement.commitment));
+        BOOST_CHECK(metadata.result_hash == GetPaymentAuditResultHash(
+                        genesis_hash, source.audit, *classification));
+        BOOST_CHECK(metadata.online_members ==
+                    classification->online_members);
+
+        const int32_t carrier_height{
+            source.audit.statement.commitment.seal_height +
+            static_cast<int32_t>(PAYMENT_AUDIT_RECEIPT_DELAY)};
+        const uint256 next_state_hash{NonNullHash(92'000 + index)};
+        const PaymentAuditReceipt direct{
+            PAYMENT_AUDIT_RECEIPT_VERSION,
+            1,
+            epoch,
+            source.audit.statement.commitment.seal_height,
+            source.audit.statement.seal_statement.block_hash,
+            carrier_height,
+            source.logical_id,
+            source.witness_id,
+            GetPaymentAuditCommitmentHash(
+                genesis_hash, source.audit.statement.commitment),
+            GetPaymentAuditResultHash(
+                genesis_hash, source.audit, *classification),
+            next_state_hash,
+            classification->online_members};
+        const PaymentAuditReceipt from_metadata{
+            PAYMENT_AUDIT_RECEIPT_VERSION,
+            1,
+            epoch,
+            metadata.statement.commitment.seal_height,
+            metadata.statement.seal_statement.block_hash,
+            carrier_height,
+            metadata.logical_id,
+            metadata.witness_id,
+            metadata.commitment_hash,
+            metadata.result_hash,
+            next_state_hash,
+            metadata.online_members};
+        BOOST_REQUIRE(direct.IsStructurallyValid());
+        BOOST_REQUIRE(from_metadata.IsStructurallyValid());
+        BOOST_CHECK(from_metadata == direct);
+    }
+
+    const auto repeated{cache.GetOrBuild(store, genesis_hash, epoch)};
+    BOOST_REQUIRE(repeated);
+    BOOST_CHECK(repeated == compact);
+    auto stats{cache.StatsForTesting()};
+    BOOST_CHECK_EQUAL(stats.builds, 1U);
+    BOOST_CHECK_EQUAL(stats.hits, 1U);
+
+    const auto empty{cache.GetOrBuild(store, genesis_hash, epoch + 1)};
+    BOOST_REQUIRE(empty);
+    BOOST_CHECK(empty->IsStructurallyValid());
+    BOOST_CHECK(empty->ordered_candidates.empty());
+    const auto repeated_empty{
+        cache.GetOrBuild(store, genesis_hash, epoch + 1)};
+    BOOST_REQUIRE(repeated_empty);
+    BOOST_CHECK(repeated_empty == empty);
+    stats = cache.StatsForTesting();
+    BOOST_CHECK_EQUAL(stats.builds, 2U);
+    BOOST_CHECK_EQUAL(stats.hits, 2U);
+}
+
+BOOST_AUTO_TEST_CASE(
+    payment_audit_candidate_metadata_tracks_archive_revision_and_health)
+{
+    using namespace llmq;
+    using namespace llmq::pq;
+    const fs::path path{m_path_root /
+                        "pq_payment_audit_candidate_metadata_revision"};
+    const uint256 genesis_hash{NonNullHash(93'000)};
+    constexpr uint32_t epoch{22};
+    const auto first{MakePaymentAuditCandidate(epoch, 0x07, 20)};
+    const auto second{MakePaymentAuditCandidate(epoch, 0x0b, 21)};
+
+    PaymentAuditStore store{path, genesis_hash};
+    BOOST_REQUIRE(store.AcceptVerified(first) ==
+                  PaymentAuditStoreResult::ACCEPTED);
+    PaymentAuditCandidateMetadataCache cache;
+    const auto initial{cache.GetOrBuild(store, genesis_hash, epoch)};
+    BOOST_REQUIRE(initial);
+    BOOST_REQUIRE_EQUAL(initial->ordered_candidates.size(), 1U);
+    BOOST_CHECK(store.IsCandidateRevisionCurrent(
+        initial->candidate_revision));
+
+    BOOST_REQUIRE(store.AcceptVerified(second) ==
+                  PaymentAuditStoreResult::ACCEPTED);
+    BOOST_CHECK(!store.IsCandidateRevisionCurrent(
+        initial->candidate_revision));
+    const auto advanced{cache.GetOrBuild(store, genesis_hash, epoch)};
+    BOOST_REQUIRE(advanced);
+    BOOST_CHECK_NE(advanced->candidate_revision,
+                   initial->candidate_revision);
+    BOOST_REQUIRE_EQUAL(advanced->ordered_candidates.size(), 2U);
+
+    const uint256 second_id{second.GetWitnessId(genesis_hash)};
+    BOOST_REQUIRE(store.PinReferencedWitness(epoch, second_id) ==
+                  PaymentAuditStoreResult::ACCEPTED);
+    BOOST_CHECK(!store.IsCandidateRevisionCurrent(
+        advanced->candidate_revision));
+    const auto pinned{cache.GetOrBuild(store, genesis_hash, epoch)};
+    BOOST_REQUIRE(pinned);
+    BOOST_REQUIRE_EQUAL(pinned->ordered_candidates.size(), 1U);
+    BOOST_CHECK(pinned->ordered_candidates.front().witness_id == second_id);
+
+    BOOST_REQUIRE(store.PruneThroughCheckpoint(
+        MakePaymentAuditCheckpoint(epoch, 22, 100'000)));
+    BOOST_CHECK(!store.IsCandidateRevisionCurrent(
+        pinned->candidate_revision));
+    const auto pruned{cache.GetOrBuild(store, genesis_hash, epoch)};
+    BOOST_REQUIRE(pruned);
+    BOOST_CHECK(pruned->ordered_candidates.empty());
+    BOOST_CHECK(store.IsCandidateRevisionCurrent(
+        pruned->candidate_revision));
+    const auto repeated{cache.GetOrBuild(store, genesis_hash, epoch)};
+    BOOST_REQUIRE(repeated);
+    BOOST_CHECK(repeated == pruned);
+
+    const auto before_failures{cache.StatsForTesting()};
+    BOOST_CHECK(!cache.GetOrBuild(store, uint256{}, epoch));
+    BOOST_CHECK(!cache.GetOrBuild(store, uint256{}, epoch));
+    const auto after_failures{cache.StatsForTesting()};
+    BOOST_CHECK_EQUAL(after_failures.entries, before_failures.entries);
+    BOOST_CHECK_EQUAL(after_failures.builds, before_failures.builds);
+
+    PaymentAuditStore unhealthy{
+        m_path_root / "pq_payment_audit_candidate_metadata_unhealthy",
+        uint256{}};
+    BOOST_CHECK(!unhealthy.IsHealthy());
+    BOOST_CHECK(!cache.GetOrBuild(unhealthy, genesis_hash, epoch));
+    BOOST_CHECK_EQUAL(cache.StatsForTesting().builds,
+                      before_failures.builds);
+}
+
+BOOST_AUTO_TEST_CASE(
+    payment_audit_candidate_metadata_cache_is_exact_bounded_and_clearable)
+{
+    using namespace llmq;
+    using namespace llmq::pq;
+    const fs::path path{m_path_root /
+                        "pq_payment_audit_candidate_metadata_conflict"};
+    const uint256 genesis_hash{NonNullHash(94'000)};
+    constexpr uint32_t epoch{23};
+    PaymentAuditStore store{path, genesis_hash};
+    BOOST_REQUIRE(store.AcceptVerified(
+                      MakePaymentAuditCandidate(epoch, 0x07, 30)) ==
+                  PaymentAuditStoreResult::ACCEPTED);
+    BOOST_REQUIRE(store.AcceptVerified(
+                      MakePaymentAuditCandidate(epoch, 0x0b, 31)) ==
+                  PaymentAuditStoreResult::ACCEPTED);
+
+    PaymentAuditCandidateMetadataCache source_cache;
+    const auto source{source_cache.GetOrBuild(
+        store, genesis_hash, epoch)};
+    BOOST_REQUIRE(source);
+    const PaymentAuditCandidateMetadataCache::Key key{
+        epoch, source->candidate_revision};
+
+    auto duplicate_logical_ids{*source};
+    duplicate_logical_ids.ordered_candidates[1].logical_id =
+        duplicate_logical_ids.ordered_candidates[0].logical_id;
+    BOOST_CHECK(duplicate_logical_ids.IsStructurallyValid());
+    auto duplicate_witness_ids{duplicate_logical_ids};
+    duplicate_witness_ids.ordered_candidates[1].witness_id =
+        duplicate_witness_ids.ordered_candidates[0].witness_id;
+    BOOST_CHECK(!duplicate_witness_ids.IsStructurallyValid());
+    auto invalid_online_subset{*source};
+    invalid_online_subset.ordered_candidates[0]
+        .statement.commitment.subject_valid_members[0] &=
+        static_cast<uint8_t>(~uint8_t{1});
+    BOOST_CHECK(!invalid_online_subset.IsStructurallyValid());
+
+    PaymentAuditCandidateMetadataCache cache;
+    const auto published{cache.Publish(key, *source)};
+    BOOST_REQUIRE(published);
+    BOOST_CHECK(cache.Get(key) == published);
+    BOOST_CHECK(!cache.Get({epoch + 1, key.candidate_revision}));
+    BOOST_CHECK(!cache.Get({epoch, key.candidate_revision + 1}));
+
+    auto reordered{*source};
+    std::reverse(reordered.ordered_candidates.begin(),
+                 reordered.ordered_candidates.end());
+    BOOST_REQUIRE(reordered.IsStructurallyValid());
+    BOOST_CHECK(!cache.Publish(key, std::move(reordered)));
+    BOOST_CHECK(cache.Get(key) == published);
+
+    auto changed_statement{*source};
+    changed_statement.ordered_candidates.front()
+        .statement.commitment.seed.future_btc_hash = NonNullHash(95'000);
+    BOOST_REQUIRE(changed_statement.IsStructurallyValid());
+    BOOST_CHECK(!cache.Publish(key, std::move(changed_statement)));
+    BOOST_CHECK(cache.Get(key) == published);
+    BOOST_CHECK_EQUAL(cache.StatsForTesting().conflicts, 2U);
+
+    PaymentAuditCandidateMetadataSnapshot invalid;
+    BOOST_CHECK(!cache.Publish({}, std::move(invalid)));
+    const auto before_fill{cache.StatsForTesting()};
+
+    std::array<PaymentAuditCandidateMetadataCache::Key,
+               PaymentAuditCandidateMetadataCache::CAPACITY + 1> keys;
+    PaymentAuditCandidateMetadataSnapshotPtr held;
+    for (std::size_t index{0}; index < keys.size(); ++index) {
+        keys[index] = {epoch + 1,
+                       static_cast<uint64_t>(1'000 + index)};
+        auto value{cache.Publish(
+            keys[index],
+            PaymentAuditCandidateMetadataSnapshot{
+                keys[index].candidate_revision,
+                keys[index].epoch,
+                {}})};
+        BOOST_REQUIRE(value);
+        if (index == 0) held = std::move(value);
+    }
+    BOOST_REQUIRE(held);
+    BOOST_CHECK(held->ordered_candidates.empty());
+    BOOST_CHECK_EQUAL(cache.StatsForTesting().entries,
+                      PaymentAuditCandidateMetadataCache::CAPACITY);
+    BOOST_CHECK(!cache.Get(key));
+    BOOST_CHECK(cache.Get(keys.back()));
+
+    cache.Clear();
+    BOOST_CHECK_EQUAL(cache.StatsForTesting().entries, 0U);
+    BOOST_CHECK(!cache.Get(keys.back()));
+    BOOST_CHECK(held->IsStructurallyValid());
+    BOOST_CHECK_EQUAL(before_fill.conflicts, 2U);
 }
 
 BOOST_AUTO_TEST_CASE(share_admission_gate_rejects_competing_observations)

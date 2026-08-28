@@ -176,6 +176,94 @@ private:
     std::atomic<uint64_t> m_state{0};
 };
 
+/** Compact immutable facts derived from one fully validated archive witness. */
+struct PaymentAuditCandidateMetadata {
+    pq::PaymentAuditStatement statement;
+    uint256 logical_id;
+    uint256 witness_id;
+    uint256 commitment_hash;
+    uint256 result_hash;
+    pq::QuorumBitmap online_members{};
+
+    friend bool operator==(const PaymentAuditCandidateMetadata&,
+                           const PaymentAuditCandidateMetadata&) = default;
+};
+
+/** One coherent ordered archive view without retaining certificate payloads. */
+struct PaymentAuditCandidateMetadataSnapshot {
+    uint64_t candidate_revision{0};
+    uint32_t epoch{0};
+    std::vector<PaymentAuditCandidateMetadata> ordered_candidates;
+
+    [[nodiscard]] bool IsStructurallyValid() const noexcept;
+    friend bool operator==(const PaymentAuditCandidateMetadataSnapshot&,
+                           const PaymentAuditCandidateMetadataSnapshot&) =
+        default;
+};
+
+using PaymentAuditCandidateMetadataSnapshotPtr =
+    std::shared_ptr<const PaymentAuditCandidateMetadataSnapshot>;
+
+/**
+ * Handler-owned memoization of the immutable candidate facts at one exact
+ * process-local archive revision. A cache instance must never outlive or be
+ * shared across its owning PaymentAuditStore instance.
+ */
+class PaymentAuditCandidateMetadataCache final {
+public:
+    static constexpr std::size_t CAPACITY{16};
+
+    struct Key {
+        uint32_t epoch{0};
+        uint64_t candidate_revision{0};
+
+        friend bool operator==(const Key&, const Key&) = default;
+    };
+
+    struct Stats {
+        std::size_t entries{0};
+        uint64_t hits{0};
+        uint64_t builds{0};
+        uint64_t conflicts{0};
+    };
+
+    [[nodiscard]] PaymentAuditCandidateMetadataSnapshotPtr Get(
+        const Key& key) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** Reject a conflicting publication while retaining the first value. */
+    [[nodiscard]] PaymentAuditCandidateMetadataSnapshotPtr Publish(
+        const Key& key, PaymentAuditCandidateMetadataSnapshot snapshot)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /**
+     * Load and derive at most once for the observed healthy store revision.
+     * Stale revisions and every load/derivation failure return no value.
+     */
+    [[nodiscard]] PaymentAuditCandidateMetadataSnapshotPtr GetOrBuild(
+        const pq::PaymentAuditStore& store,
+        const uint256& genesis_hash,
+        uint32_t epoch)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_build_mutex, !m_mutex);
+    void Clear()
+        EXCLUSIVE_LOCKS_REQUIRED(!m_build_mutex, !m_mutex);
+    [[nodiscard]] Stats StatsForTesting() const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+private:
+    struct Entry {
+        Key key;
+        PaymentAuditCandidateMetadataSnapshotPtr snapshot;
+        bool occupied{false};
+        bool recently_used{false};
+    };
+
+    mutable Mutex m_build_mutex;
+    mutable Mutex m_mutex;
+    mutable std::array<Entry, CAPACITY> m_entries GUARDED_BY(m_mutex);
+    mutable std::size_t m_clock GUARDED_BY(m_mutex){0};
+    mutable uint64_t m_hits GUARDED_BY(m_mutex){0};
+    mutable uint64_t m_builds GUARDED_BY(m_mutex){0};
+    mutable uint64_t m_conflicts GUARDED_BY(m_mutex){0};
+};
+
 /**
  * Bounded memoization for miner-only payment-audit receipt construction.
  * Null results are deliberately excluded because missing local context can
@@ -1344,6 +1432,8 @@ private:
     std::unique_ptr<pq::PaymentAuditStore> m_payment_audit_store;
     std::unique_ptr<pq::PaymentAuditStagingStore>
         m_payment_audit_staging_store;
+    mutable PaymentAuditCandidateMetadataCache
+        m_payment_audit_candidate_metadata_cache;
     mutable PaymentAuditReceiptCache m_payment_audit_receipt_cache;
     mutable std::unique_ptr<VerifiedPaymentAuditReceiptTransitionCache>
         m_verified_payment_audit_transition_cache;
