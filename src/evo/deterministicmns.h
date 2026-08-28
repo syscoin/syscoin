@@ -719,6 +719,13 @@ public:
     // and must never be inferred from this cache size.
     static constexpr int LIST_CACHE_SIZE = DISK_SNAPSHOT_PERIOD * DISK_SNAPSHOTS;
     static constexpr int HOT_LIST_CACHE_SIZE = 128;
+    // SYSCOIN: Full-snapshot compaction runs while chainstate is quiescent.
+    // These caps keep one recovery pass independent of outage duration.
+    static constexpr std::size_t SNAPSHOT_GC_MAX_SCANNED_RECORDS_PER_PASS{4096};
+    static constexpr std::size_t SNAPSHOT_GC_MAX_SCANNED_VALUE_BYTES_PER_PASS{
+        64U << 20};
+    static constexpr std::size_t SNAPSHOT_GC_MAX_RECORD_BYTES{256U << 20};
+    static constexpr std::size_t SNAPSHOT_GC_MAX_ERASE_ITEMS_PER_PASS{256};
     // SYSCOIN: Exact-parent payment selection is shared by consensus,
     // templates, governance, and RPC without retaining an unbounded branch
     // history.
@@ -772,6 +779,17 @@ private:
     const CBlockIndex* tipIndex GUARDED_BY(cs) {nullptr};
     uint256 m_last_maintained_tip GUARDED_BY(cs);
     std::vector<uint256> m_last_maintained_recovery_blocks GUARDED_BY(cs);
+    uint64_t m_last_maintained_snapshot_persistence_generation
+        GUARDED_BY(cs){0};
+    // SYSCOIN: Every full-snapshot insertion invalidates a hash-ordered
+    // compaction cursor, including a side-branch write before that cursor.
+    std::atomic<uint64_t> m_snapshot_persistence_generation{0};
+    struct SnapshotGCScanProgress {
+        uint256 plan_id;
+        std::optional<uint256> resume_after_key;
+    };
+    std::optional<SnapshotGCScanProgress> m_snapshot_gc_scan_progress
+        GUARDED_BY(cs);
     // SYSCOIN: A crash-durable BTCC/NEVM replay obligation retains every
     // branch snapshot at or above this floor. It is memory-only because the
     // preseal marker is the authoritative crash-restored record.

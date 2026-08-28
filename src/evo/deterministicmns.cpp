@@ -34,6 +34,8 @@ constexpr std::string_view DMN_INVERSE_BASE_DOMAIN{
     "SYS_DMN_INVERSE_BASE_V1"};
 constexpr std::string_view DMN_INVERSE_HISTORY_DOMAIN{
     "SYS_DMN_INVERSE_HISTORY_V1"};
+constexpr std::string_view DMN_SNAPSHOT_GC_PLAN_DOMAIN{
+    "SYS_DMN_SNAPSHOT_GC_PLAN_V1"};
 
 uint256 GetDMNInverseBaseCommitment(
     const uint256& genesis_hash,
@@ -364,27 +366,102 @@ std::vector<uint256> CollectRetainedSnapshotWindow(
     return ordered_hashes;
 }
 
-bool CollectPersistedKeysOutsideWindow(
+uint256 GetSnapshotGCPlanId(
+    const uint256& tip_hash,
+    uint64_t retention_generation,
+    uint64_t persistence_generation,
+    const EvoEraseSet& retained_hashes,
+    std::optional<int32_t> finality_retention_floor)
+{
+    std::vector<uint256> ordered_hashes{
+        retained_hashes.begin(), retained_hashes.end()};
+    std::sort(ordered_hashes.begin(), ordered_hashes.end());
+    CHashWriter writer{SER_GETHASH, 0};
+    writer.write(AsBytes(Span{DMN_SNAPSHOT_GC_PLAN_DOMAIN.data(),
+                              DMN_SNAPSHOT_GC_PLAN_DOMAIN.size()}));
+    writer << tip_hash << retention_generation << persistence_generation
+           << finality_retention_floor.value_or(
+                  std::numeric_limits<int32_t>::max())
+           << ordered_hashes;
+    return writer.GetHash();
+}
+
+bool CollectPersistedKeysOutsideWindowBounded(
     CEvoDB<uint256, CDeterministicMNList, StaticSaltedHasher>& evo_db,
     const EvoEraseSet& retained_hashes,
     std::optional<int32_t> finality_retention_floor,
+    const std::optional<uint256>& resume_after_key,
     std::vector<uint256>& prune_keys,
-    size_t& persisted_snapshot_count)
+    size_t& scanned_snapshot_count,
+    size_t& scanned_value_bytes,
+    std::optional<uint256>& next_resume_after_key,
+    bool& complete)
 {
+    prune_keys.clear();
+    scanned_snapshot_count = 0;
+    scanned_value_bytes = 0;
+    next_resume_after_key.reset();
+    complete = false;
     std::unique_ptr<CDBIterator> cursor(evo_db.NewIterator());
     if (!cursor) {
         LogPrint(BCLog::SYS, "CDeterministicMNManager::%s -- Failed to create EvoDB iterator\n", __func__);
         return false;
     }
 
-    for (cursor->SeekToFirst(); cursor->Valid(); cursor->Next()) {
+    if (resume_after_key) {
+        cursor->Seek(*resume_after_key);
+        if (cursor->Valid()) {
+            uint256 found_key;
+            if (!cursor->GetKeyExact(found_key)) return false;
+            if (found_key == *resume_after_key) cursor->Next();
+        }
+    } else {
+        cursor->SeekToFirst();
+    }
+
+    std::optional<uint256> last_key;
+    while (cursor->Valid() &&
+           scanned_snapshot_count <
+               CDeterministicMNManager::
+                   SNAPSHOT_GC_MAX_SCANNED_RECORDS_PER_PASS &&
+           prune_keys.size() <
+               CDeterministicMNManager::
+                   SNAPSHOT_GC_MAX_ERASE_ITEMS_PER_PASS) {
         uint256 key;
         // SYSCOIN: A destructive plan must not normalize a trailing database
         // key into a different canonical snapshot identity.
         if (!cursor->GetKeyExact(key)) return false;
 
-        ++persisted_snapshot_count;
-        if (retained_hashes.count(key) != 0) continue;
+        const size_t value_size{cursor->GetValueSize()};
+        if (value_size >
+            CDeterministicMNManager::SNAPSHOT_GC_MAX_RECORD_BYTES) {
+            LogPrintf("CDeterministicMNManager::%s -- oversized persisted "
+                      "snapshot %s size=%zu\n",
+                      __func__, key.ToString(), value_size);
+            return false;
+        }
+        const bool exceeds_soft_value_budget{
+            scanned_value_bytes >=
+                CDeterministicMNManager::
+                    SNAPSHOT_GC_MAX_SCANNED_VALUE_BYTES_PER_PASS ||
+            value_size >
+                CDeterministicMNManager::
+                        SNAPSHOT_GC_MAX_SCANNED_VALUE_BYTES_PER_PASS -
+                    scanned_value_bytes};
+        // SYSCOIN: Admit one schema-bounded first record so a legitimate
+        // large snapshot cannot pin the cursor forever.
+        if (scanned_snapshot_count != 0 &&
+            exceeds_soft_value_budget) {
+            break;
+        }
+
+        ++scanned_snapshot_count;
+        scanned_value_bytes += value_size;
+        last_key = key;
+        if (retained_hashes.count(key) != 0) {
+            cursor->Next();
+            continue;
+        }
 
         std::optional<int32_t> snapshot_height;
         if (finality_retention_floor) {
@@ -404,12 +481,21 @@ bool CollectPersistedKeysOutsideWindow(
             snapshot_height = snapshot.GetHeight();
         }
         if (snapshot_height &&
-            *snapshot_height >= *finality_retention_floor) continue;
+            *snapshot_height >= *finality_retention_floor) {
+            cursor->Next();
+            continue;
+        }
         prune_keys.emplace_back(key);
+        cursor->Next();
     }
     // SYSCOIN: Iterator failure is not successful end-of-database; publishing
-    // a partial erase plan would make the maintained marker unsound.
+    // a cursor after a failed bounded pass could permanently skip records.
     cursor->CheckStatus();
+    complete = !cursor->Valid();
+    if (!complete) {
+        if (!last_key) return false;
+        next_resume_after_key = *last_key;
+    }
 
     return true;
 }
@@ -573,7 +659,18 @@ CDeterministicMNManager::CDeterministicMNManager(const DBParams& db_params)
     // SYSCOIN: Persist and validate the sole canonical base for a
     // genesis-active deterministic-masternode deployment.
     const auto& consensus{Params().GetConsensus()};
-    const int64_t persisted_entry_count{m_evoDb->CountPersistedEntries()};
+    bool has_persisted_entries{false};
+    {
+        std::unique_ptr<CDBIterator> persisted_cursor{
+            m_evoDb->NewIterator()};
+        if (!persisted_cursor) {
+            throw std::runtime_error(
+                "Failed to inspect deterministic masternode snapshot store");
+        }
+        persisted_cursor->SeekToFirst();
+        persisted_cursor->CheckStatus();
+        has_persisted_entries = persisted_cursor->Valid();
+    }
     if (consensus.DIP0003Height == 0) {
         CDeterministicMNList genesis_snapshot;
         const bool has_genesis_snapshot{m_evoDb->ReadCache(
@@ -593,11 +690,14 @@ CDeterministicMNManager::CDeterministicMNManager(const DBParams& db_params)
             // empty base. Every later snapshot must still come from ProcessBlock.
             const CDeterministicMNList empty_genesis{
                 consensus.hashGenesisBlock, 0, 0};
+            m_snapshot_persistence_generation.fetch_add(
+                1, std::memory_order_relaxed);
             if (!m_evoDb->WriteThrough(consensus.hashGenesisBlock,
                                        empty_genesis, /*fSync=*/true)) {
                 throw std::runtime_error(
                     "Failed to persist deterministic masternode genesis snapshot");
             }
+            has_persisted_entries = true;
         }
 
     }
@@ -605,7 +705,7 @@ CDeterministicMNManager::CDeterministicMNManager(const DBParams& db_params)
     // SYSCOIN: A raw entry count cannot prove that the current rolling window
     // was completely maintained before shutdown. Enable disk-backed reads now,
     // but let this process's first successful maintenance establish the flag.
-    if (persisted_entry_count > 0 || consensus.DIP0003Height == 0) {
+    if (has_persisted_entries || consensus.DIP0003Height == 0) {
         m_evoDb->SetReadCacheSize(HOT_LIST_CACHE_SIZE);
     }
 }
@@ -1091,8 +1191,16 @@ bool CDeterministicMNManager::EnsureRetainedSnapshotWindow(
             child_list = std::move(persisted_parent);
             continue;
         }
-        if (m_evoDb->ExistsCache(path[position - 1]->GetBlockHash()) ||
-            !m_evoDb->WriteThrough(path[position - 1]->GetBlockHash(),
+        if (m_evoDb->ExistsCache(path[position - 1]->GetBlockHash())) {
+            LogPrintf("%s -- failed to restore retained deterministic-MN "
+                      "snapshot at height=%d block=%s\n",
+                      __func__, path[position - 1]->nHeight,
+                      path[position - 1]->GetBlockHash().ToString());
+            return false;
+        }
+        m_snapshot_persistence_generation.fetch_add(
+            1, std::memory_order_relaxed);
+        if (!m_evoDb->WriteThrough(path[position - 1]->GetBlockHash(),
                                    expected_parent, /*fSync=*/false)) {
             LogPrintf("%s -- failed to restore retained deterministic-MN "
                       "snapshot at height=%d block=%s\n",
@@ -2679,6 +2787,8 @@ bool CDeterministicMNManager::ProcessBlock(const CBlock& block, const CBlockInde
                 pq_config.schedule,
                 static_cast<uint32_t>(consensusParams.nPQRosterSnapshotLag),
                 nHeight)};
+        m_snapshot_persistence_generation.fetch_add(
+            1, std::memory_order_relaxed);
         if (nHeight == consensusParams.nPQLegacyAnchorHeight ||
             replay_write_through || finality_roster_write_through) {
             // SYSCOIN: IBD deliberately postpones normal EvoDB maintenance. The
@@ -2818,6 +2928,8 @@ bool CDeterministicMNManager::UndoBlock(const CBlockIndex* pindex, CDeterministi
                 // The recovered parent becomes the next disconnect's child.
                 // Publish it before returning so the ordinary UTXO durability
                 // barrier can order both states together.
+                m_snapshot_persistence_generation.fetch_add(
+                    1, std::memory_order_relaxed);
                 if (!m_evoDb->WriteThrough(
                         pindex->pprev->GetBlockHash(), prevList,
                         /*fSync=*/false)) {
@@ -4521,6 +4633,8 @@ bool CDeterministicMNManager::PrepareDMNInverseGCIntent(
             return true;
         }
 
+        m_snapshot_persistence_generation.fetch_add(
+            1, std::memory_order_relaxed);
         if (!m_evoDb->WriteThrough(
                 derived.boundary->block_hash, *derived.snapshot,
                 /*fSync=*/true)) {
@@ -5429,6 +5543,8 @@ bool CDeterministicMNManager::DoMaintenance(
     const size_t erase_entry_count{m_evoDb->GetEraseCacheSize()};
     const bool persistent_window_initialized =
         m_persistent_window_initialized.load(std::memory_order_relaxed);
+    const uint64_t opening_snapshot_persistence_generation{
+        m_snapshot_persistence_generation.load(std::memory_order_relaxed)};
 
     if (cache_entry_count == 0 && erase_entry_count == 0 &&
         !verify_recovery_snapshots()) {
@@ -5455,7 +5571,10 @@ bool CDeterministicMNManager::DoMaintenance(
         !auxiliary_gc_pending && !pq_scan_cleanup_ready &&
         WITH_LOCK(cs, return m_last_maintained_tip == tip_hash &&
                              m_last_maintained_recovery_blocks ==
-                                 recovery_hashes)) {
+                                 recovery_hashes &&
+                             m_last_maintained_snapshot_persistence_generation ==
+                                 opening_snapshot_persistence_generation &&
+                             !m_snapshot_gc_scan_progress)) {
         LogPrint(BCLog::SYS,
                  "CDeterministicMNManager::%s no-op; tip=%s already maintained elapsed=%d ms\n",
                  __func__,
@@ -5620,7 +5739,13 @@ bool CDeterministicMNManager::DoMaintenance(
     }
 
     std::vector<uint256> prune_keys;
-    size_t persisted_snapshot_count{0};
+    size_t scanned_snapshot_count{0};
+    size_t scanned_snapshot_value_bytes{0};
+    bool snapshot_gc_complete{true};
+    std::optional<uint256> snapshot_gc_plan_id;
+    std::optional<uint256> snapshot_gc_next_resume_after_key;
+    const uint64_t snapshot_persistence_generation{
+        m_snapshot_persistence_generation.load(std::memory_order_relaxed)};
     const bool retain_all_finality_snapshots{
         retention_plan.finality_verification_active ||
         retention_plan.finality_publication_pending};
@@ -5628,19 +5753,38 @@ bool CDeterministicMNManager::DoMaintenance(
         retain_all_finality_snapshots) {
         // SYSCOIN: A replay marker can protect both active and prospective
         // branches. Skipping disk pruning while it exists preserves every
-        // fork-local DMN snapshot without warming the bounded read cache. An
+        // fork-local DMN snapshot without loading the retained outage tail. An
         // in-flight verification or durable side-branch winner uses the same
         // fail-closed policy until publication is either abandoned or fully
         // enforced. Outage disk growth is intentionally unbounded.
-        const int64_t count{m_evoDb->CountPersistedEntries()};
-        if (count < 0) return false;
-        persisted_snapshot_count = static_cast<size_t>(count);
-    } else if (!CollectPersistedKeysOutsideWindow(
-                   *m_evoDb, retained_hashes,
-                   retention_plan.finality_roster_floor,
-                   prune_keys,
-                   persisted_snapshot_count)) {
-        return false;
+        LOCK(cs);
+        m_snapshot_gc_scan_progress.reset();
+    } else {
+        snapshot_gc_plan_id = GetSnapshotGCPlanId(
+            tip_hash, retention_plan.generation,
+            snapshot_persistence_generation, retained_hashes,
+            retention_plan.finality_roster_floor);
+        std::optional<uint256> resume_after_key;
+        {
+            LOCK(cs);
+            if (!m_snapshot_gc_scan_progress ||
+                m_snapshot_gc_scan_progress->plan_id !=
+                    *snapshot_gc_plan_id) {
+                m_snapshot_gc_scan_progress = SnapshotGCScanProgress{
+                    *snapshot_gc_plan_id, std::nullopt};
+            }
+            resume_after_key =
+                m_snapshot_gc_scan_progress->resume_after_key;
+        }
+        if (!CollectPersistedKeysOutsideWindowBounded(
+                *m_evoDb, retained_hashes,
+                retention_plan.finality_roster_floor,
+                resume_after_key, prune_keys, scanned_snapshot_count,
+                scanned_snapshot_value_bytes,
+                snapshot_gc_next_resume_after_key,
+                snapshot_gc_complete)) {
+            return false;
+        }
     }
 
     for (const uint256& key : prune_keys) {
@@ -5652,9 +5796,28 @@ bool CDeterministicMNManager::DoMaintenance(
     if (!verify_recovery_snapshots()) {
         return false;
     }
+    {
+        LOCK(cs);
+        if (snapshot_gc_plan_id) {
+            if (!m_snapshot_gc_scan_progress ||
+                m_snapshot_gc_scan_progress->plan_id !=
+                    *snapshot_gc_plan_id) {
+                return false;
+            }
+            if (snapshot_gc_complete) {
+                m_snapshot_gc_scan_progress.reset();
+            } else {
+                if (!snapshot_gc_next_resume_after_key) return false;
+                m_snapshot_gc_scan_progress->resume_after_key =
+                    snapshot_gc_next_resume_after_key;
+            }
+        }
+    }
+    auxiliary_gc_retry_required |= !snapshot_gc_complete;
 
     const bool should_initialize_hot_cache =
-        !persistent_window_initialized && !retained_hashes_ordered.empty();
+        snapshot_gc_complete && !persistent_window_initialized &&
+        !retained_hashes_ordered.empty();
     if (should_initialize_hot_cache) {
         m_evoDb->SetReadCacheSize(HOT_LIST_CACHE_SIZE);
         if (!WarmReadCacheFromWindow(*m_evoDb, retained_hashes_ordered)) {
@@ -5683,20 +5846,27 @@ bool CDeterministicMNManager::DoMaintenance(
         }
         if (!auxiliary_gc_retry_required &&
             m_replay_snapshot_retention_generation ==
-                retention_plan.generation) {
+                retention_plan.generation &&
+            m_snapshot_persistence_generation.load(
+                std::memory_order_relaxed) ==
+                snapshot_persistence_generation) {
             m_last_maintained_tip = tip_hash;
             m_last_maintained_recovery_blocks = recovery_hashes;
+            m_last_maintained_snapshot_persistence_generation =
+                snapshot_persistence_generation;
         } else {
             m_last_maintained_tip.SetNull();
             m_last_maintained_recovery_blocks.clear();
         }
     }
     LogPrint(BCLog::SYS,
-             "CDeterministicMNManager::%s maintenance complete tip=%s persisted=%zu pruned=%zu replay_retention_floor=%d finality_retention_floor=%d retain_all_finality=%d read_cache=%zu initialized_hot_cache=%d elapsed=%d ms\n",
+             "CDeterministicMNManager::%s maintenance complete tip=%s scanned=%zu scanned_bytes=%zu pruned=%zu snapshot_gc_complete=%d replay_retention_floor=%d finality_retention_floor=%d retain_all_finality=%d read_cache=%zu initialized_hot_cache=%d elapsed=%d ms\n",
              __func__,
              tip_hash.ToString(),
-             persisted_snapshot_count,
+             scanned_snapshot_count,
+             scanned_snapshot_value_bytes,
              prune_keys.size(),
+             snapshot_gc_complete,
              retention_plan.replay_floor.value_or(
                  std::numeric_limits<int>::max()),
              retention_plan.finality_roster_floor.value_or(

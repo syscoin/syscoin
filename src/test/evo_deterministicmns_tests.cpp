@@ -2252,6 +2252,79 @@ BOOST_AUTO_TEST_CASE(first_forced_flush_initializes_persisted_window_and_hot_cac
     BOOST_CHECK_EQUAL(snapshot.GetHeight(), start_height + total_snapshots - 1);
 }
 
+BOOST_AUTO_TEST_CASE(snapshot_compaction_is_bounded_and_resumes_after_restart)
+{
+    SelectParams(ChainType::MAIN);
+    constexpr int stale_backlog{
+        2 * static_cast<int>(
+                CDeterministicMNManager::
+                    SNAPSHOT_GC_MAX_ERASE_ITEMS_PER_PASS) +
+        17};
+    const int cache_limit{CDeterministicMNManager::LIST_CACHE_SIZE};
+    const int start_height{Params().GetConsensus().DIP0003Height};
+    const int total_snapshots{cache_limit + stale_backlog};
+    const auto chain{
+        BuildSnapshotIndexChain(start_height, total_snapshots)};
+    const ScopedDiskDBPath disk_db;
+    auto db_params = DBParams{
+        .path = disk_db.path,
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = false,
+        .wipe_data = true,
+    };
+
+    {
+        CDeterministicMNManager manager(db_params);
+        manager.UpdatedBlockTip(chain.Tip());
+        constexpr int flush_chunk{256};
+        for (int offset{0}; offset < total_snapshots;
+             offset += flush_chunk) {
+            const int count{
+                std::min(flush_chunk, total_snapshots - offset)};
+            WriteSnapshotRange(manager, start_height + offset, count);
+            BOOST_REQUIRE(
+                manager.FlushPendingSnapshotsToDisk(/*fSync=*/true));
+        }
+        BOOST_REQUIRE_EQUAL(
+            manager.m_evoDb->CountPersistedEntries(), total_snapshots);
+
+        BOOST_REQUIRE(manager.FlushCacheToDisk(/*bForceFlush=*/true));
+        BOOST_CHECK(!manager.HasPersistentWindow());
+        BOOST_CHECK_EQUAL(
+            manager.m_evoDb->CountPersistedEntries(),
+            total_snapshots - static_cast<int>(
+                CDeterministicMNManager::
+                    SNAPSHOT_GC_MAX_ERASE_ITEMS_PER_PASS));
+    }
+
+    // The cursor is deliberately process-local. A restart safely rescans
+    // already-compacted keys and still applies only one bounded erase batch.
+    db_params.wipe_data = false;
+    CDeterministicMNManager restarted(db_params);
+    restarted.UpdatedBlockTip(chain.Tip());
+    int64_t previous_count{
+        restarted.m_evoDb->CountPersistedEntries()};
+    BOOST_REQUIRE(restarted.FlushCacheToDisk(/*bForceFlush=*/true));
+    int64_t current_count{restarted.m_evoDb->CountPersistedEntries()};
+    BOOST_CHECK_LE(
+        previous_count - current_count,
+        static_cast<int64_t>(
+            CDeterministicMNManager::
+                SNAPSHOT_GC_MAX_ERASE_ITEMS_PER_PASS));
+    BOOST_CHECK(!restarted.HasPersistentWindow());
+
+    previous_count = current_count;
+    BOOST_REQUIRE(restarted.FlushCacheToDisk(/*bForceFlush=*/true));
+    current_count = restarted.m_evoDb->CountPersistedEntries();
+    BOOST_CHECK_LE(
+        previous_count - current_count,
+        static_cast<int64_t>(
+            CDeterministicMNManager::
+                SNAPSHOT_GC_MAX_ERASE_ITEMS_PER_PASS));
+    BOOST_CHECK(restarted.HasPersistentWindow());
+    BOOST_CHECK_EQUAL(current_count, cache_limit);
+}
+
 BOOST_AUTO_TEST_CASE(maintenance_retains_all_chainstate_recovery_snapshots)
 {
     SelectParams(ChainType::MAIN);
