@@ -55,6 +55,20 @@ struct SchemaValue {
                            const SchemaValue&) = default;
 };
 
+SchemaValue MakeSchemaValue(const uint256& genesis_hash)
+{
+    return SchemaValue{
+        PaymentAuditStore::DB_FORMAT_VERSION,
+        SCHEMA_GUARD,
+        genesis_hash,
+        PAYMENT_AUDIT_VERSION,
+        PAYMENT_AUDIT_RECEIPT_VERSION,
+        CHILD_SCHEDULED_WOTS_SHAKE_128_V1,
+        SCHEDULED_WOTS_USAGE_CAP,
+        CHILD_SIGNATURE_SIZE,
+        FinalPaymentAudit::WIRE_SIZE};
+}
+
 struct WitnessKey {
     uint8_t prefix{DB_WITNESS_PREFIX};
     uint32_t version{PaymentAuditStore::DB_FORMAT_VERSION};
@@ -385,14 +399,7 @@ void PaymentAuditStore::Initialize()
         return;
     }
     try {
-        const SchemaValue expected_schema{
-            DB_FORMAT_VERSION, SCHEMA_GUARD, m_genesis_hash,
-            PAYMENT_AUDIT_VERSION,
-            PAYMENT_AUDIT_RECEIPT_VERSION,
-            CHILD_SCHEDULED_WOTS_SHAKE_128_V1,
-            SCHEDULED_WOTS_USAGE_CAP,
-            CHILD_SIGNATURE_SIZE,
-            FinalPaymentAudit::WIRE_SIZE};
+        const SchemaValue expected_schema{MakeSchemaValue(m_genesis_hash)};
         if (!m_db.Exists(DB_SCHEMA_KEY)) {
             if (!m_db.IsEmpty()) {
                 m_failure = PaymentAuditStoreResult::CORRUPT;
@@ -984,14 +991,21 @@ bool PaymentAuditStore::PruneThroughCheckpoint(
             uint8_t prefix{0};
             if (!iterator->GetKey(prefix)) throw CorruptArchiveIndex{};
             if (prefix == DB_SCHEMA_KEY) {
-                if (found_schema) throw CorruptArchiveIndex{};
+                uint8_t key{0};
+                SchemaValue schema;
+                if (found_schema || !iterator->GetKeyExact(key) ||
+                    key != DB_SCHEMA_KEY ||
+                    !iterator->GetValueExact(schema) ||
+                    schema != MakeSchemaValue(m_genesis_hash)) {
+                    throw CorruptArchiveIndex{};
+                }
                 found_schema = true;
                 continue;
             }
 
             if (prefix == DB_WITNESS_PREFIX) {
                 WitnessKey key;
-                if (!iterator->GetKey(key) ||
+                if (!iterator->GetKeyExact(key) ||
                     key.prefix != DB_WITNESS_PREFIX ||
                     key.version != DB_FORMAT_VERSION ||
                     key.genesis_hash != m_genesis_hash ||
@@ -1011,11 +1025,11 @@ bool PaymentAuditStore::PruneThroughCheckpoint(
             if (prefix == DB_EPOCH_PREFIX) {
                 EpochKey key;
                 EpochRecord record;
-                if (!iterator->GetKey(key) ||
+                if (!iterator->GetKeyExact(key) ||
                     key.prefix != DB_EPOCH_PREFIX ||
                     key.version != DB_FORMAT_VERSION ||
                     key.genesis_hash != m_genesis_hash ||
-                    !iterator->GetValue(record) ||
+                    !iterator->GetValueExact(record) ||
                     !IsEpochRecordValid(record, key.epoch) ||
                     !epoch_records.insert(key.epoch).second) {
                     throw CorruptArchiveIndex{};
@@ -1046,12 +1060,12 @@ bool PaymentAuditStore::PruneThroughCheckpoint(
             if (prefix == DB_REFERENCE_PREFIX) {
                 ReferenceKey key;
                 ReferenceRecord record;
-                if (!iterator->GetKey(key) ||
+                if (!iterator->GetKeyExact(key) ||
                     key.prefix != DB_REFERENCE_PREFIX ||
                     key.version != DB_FORMAT_VERSION ||
                     key.genesis_hash != m_genesis_hash ||
                     key.witness_id.IsNull() ||
-                    !iterator->GetValue(record) ||
+                    !iterator->GetValueExact(record) ||
                     !IsReferenceRecordValid(record, record.epoch,
                                             key.witness_id) ||
                     !note_epoch(reference_epochs, key.witness_id,
@@ -1064,12 +1078,12 @@ bool PaymentAuditStore::PruneThroughCheckpoint(
             if (prefix == DB_PRESENCE_PREFIX) {
                 PresenceKey key;
                 PresenceRecord record;
-                if (!iterator->GetKey(key) ||
+                if (!iterator->GetKeyExact(key) ||
                     key.prefix != DB_PRESENCE_PREFIX ||
                     key.version != DB_FORMAT_VERSION ||
                     key.genesis_hash != m_genesis_hash ||
                     key.witness_id.IsNull() ||
-                    !iterator->GetValue(record) ||
+                    !iterator->GetValueExact(record) ||
                     !IsPresenceRecordValid(record, record.epoch,
                                            key.witness_id) ||
                     !note_epoch(presence_epochs, key.witness_id,
@@ -1080,8 +1094,11 @@ bool PaymentAuditStore::PruneThroughCheckpoint(
             }
 
             if (prefix == DB_CHECKPOINT_KEY) {
+                uint8_t key{0};
                 CheckpointRecord record;
-                if (found_checkpoint || !iterator->GetValue(record) ||
+                if (found_checkpoint || !iterator->GetKeyExact(key) ||
+                    key != DB_CHECKPOINT_KEY ||
+                    !iterator->GetValueExact(record) ||
                     !IsCheckpointRecordValid(record) ||
                     !m_prune_checkpoint ||
                     record.checkpoint != *m_prune_checkpoint) {
@@ -1092,6 +1109,7 @@ bool PaymentAuditStore::PruneThroughCheckpoint(
             }
             throw CorruptArchiveIndex{};
         }
+        iterator->CheckStatus();
 
         if (!found_schema ||
             found_checkpoint != m_prune_checkpoint.has_value() ||

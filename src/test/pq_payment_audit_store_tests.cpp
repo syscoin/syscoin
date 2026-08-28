@@ -44,6 +44,38 @@ struct TestPresenceKey {
     }
 };
 
+struct TestTrailingPresenceKey {
+    TestPresenceKey key;
+    uint8_t trailing{0xa5};
+
+    SERIALIZE_METHODS(TestTrailingPresenceKey, obj)
+    {
+        READWRITE(obj.key, obj.trailing);
+    }
+};
+
+struct TestPresenceRecord {
+    uint32_t version{PaymentAuditStore::DB_FORMAT_VERSION};
+    uint32_t epoch{0};
+    uint256 witness_id;
+    uint32_t guard{0x50525031};
+
+    SERIALIZE_METHODS(TestPresenceRecord, obj)
+    {
+        READWRITE(obj.version, obj.epoch, obj.witness_id, obj.guard);
+    }
+};
+
+struct TestTrailingPresenceRecord {
+    TestPresenceRecord record;
+    uint8_t trailing{0xa5};
+
+    SERIALIZE_METHODS(TestTrailingPresenceRecord, obj)
+    {
+        READWRITE(obj.record, obj.trailing);
+    }
+};
+
 uint256 NonNullHash(uint64_t value)
 {
     uint256 hash;
@@ -154,6 +186,7 @@ std::size_t CountDatabaseRecords(const fs::path& path)
     for (iterator->SeekToFirst(); iterator->Valid(); iterator->Next()) {
         ++count;
     }
+    iterator->CheckStatus();
     return count;
 }
 
@@ -190,6 +223,45 @@ void ErasePresence(const fs::path& path, const uint256& genesis_hash,
     BOOST_REQUIRE(db.Erase(
         TestPresenceKey{0xa4, PaymentAuditStore::DB_FORMAT_VERSION,
                         genesis_hash, witness_id},
+        true));
+}
+
+void AppendTrailingPresenceKey(const fs::path& path,
+                               const uint256& genesis_hash,
+                               uint32_t epoch,
+                               const uint256& witness_id)
+{
+    CDBWrapper db{DBParams{.path = path,
+                           .cache_bytes = 1 << 20,
+                           .memory_only = false,
+                           .wipe_data = false,
+                           .obfuscate = false}};
+    const TestPresenceKey key{0xa4, PaymentAuditStore::DB_FORMAT_VERSION,
+                              genesis_hash, witness_id};
+    CDBBatch batch{db};
+    batch.Erase(key);
+    batch.Write(TestTrailingPresenceKey{key},
+                TestPresenceRecord{PaymentAuditStore::DB_FORMAT_VERSION,
+                                   epoch, witness_id});
+    BOOST_REQUIRE(db.WriteBatch(batch, true));
+}
+
+void AppendTrailingPresenceValue(const fs::path& path,
+                                 const uint256& genesis_hash,
+                                 uint32_t epoch,
+                                 const uint256& witness_id)
+{
+    CDBWrapper db{DBParams{.path = path,
+                           .cache_bytes = 1 << 20,
+                           .memory_only = false,
+                           .wipe_data = false,
+                           .obfuscate = false}};
+    BOOST_REQUIRE(db.Write(
+        TestPresenceKey{0xa4, PaymentAuditStore::DB_FORMAT_VERSION,
+                        genesis_hash, witness_id},
+        TestTrailingPresenceRecord{
+            TestPresenceRecord{PaymentAuditStore::DB_FORMAT_VERSION,
+                               epoch, witness_id}},
         true));
 }
 
@@ -699,6 +771,60 @@ BOOST_AUTO_TEST_CASE(checkpoint_prune_fails_closed_on_dangling_index)
     }
     // The failed validation published neither deletes nor a checkpoint.
     BOOST_CHECK_EQUAL(CountDatabaseRecords(path), 3U);
+}
+
+BOOST_AUTO_TEST_CASE(checkpoint_prune_rejects_trailing_physical_key)
+{
+    const fs::path path{m_path_root /
+                        "pq_payment_audit_store_trailing_key"};
+    const uint256 genesis_hash{NonNullHash(61)};
+    constexpr uint32_t epoch{41};
+    const auto audit{Audit(epoch, 0x07, 710)};
+    const uint256 witness_id{audit.GetWitnessId(genesis_hash)};
+    {
+        PaymentAuditStore store{path, genesis_hash};
+        BOOST_REQUIRE(store.AcceptVerified(audit) ==
+                      PaymentAuditStoreResult::ACCEPTED);
+    }
+    AppendTrailingPresenceKey(path, genesis_hash, epoch, witness_id);
+    const std::size_t records_before{CountDatabaseRecords(path)};
+
+    {
+        PaymentAuditStore store{path, genesis_hash};
+        BOOST_REQUIRE(store.IsHealthy());
+        BOOST_CHECK(!store.PruneThroughCheckpoint(
+            Checkpoint(epoch, 62, 81'000)));
+        BOOST_CHECK(!store.IsHealthy());
+        BOOST_CHECK(!store.GetPruneCheckpoint());
+    }
+    BOOST_CHECK_EQUAL(CountDatabaseRecords(path), records_before);
+}
+
+BOOST_AUTO_TEST_CASE(checkpoint_prune_rejects_trailing_physical_value)
+{
+    const fs::path path{m_path_root /
+                        "pq_payment_audit_store_trailing_value"};
+    const uint256 genesis_hash{NonNullHash(63)};
+    constexpr uint32_t epoch{42};
+    const auto audit{Audit(epoch, 0x07, 720)};
+    const uint256 witness_id{audit.GetWitnessId(genesis_hash)};
+    {
+        PaymentAuditStore store{path, genesis_hash};
+        BOOST_REQUIRE(store.AcceptVerified(audit) ==
+                      PaymentAuditStoreResult::ACCEPTED);
+    }
+    AppendTrailingPresenceValue(path, genesis_hash, epoch, witness_id);
+    const std::size_t records_before{CountDatabaseRecords(path)};
+
+    {
+        PaymentAuditStore store{path, genesis_hash};
+        BOOST_REQUIRE(store.IsHealthy());
+        BOOST_CHECK(!store.PruneThroughCheckpoint(
+            Checkpoint(epoch, 64, 81'005)));
+        BOOST_CHECK(!store.IsHealthy());
+        BOOST_CHECK(!store.GetPruneCheckpoint());
+    }
+    BOOST_CHECK_EQUAL(CountDatabaseRecords(path), records_before);
 }
 
 BOOST_AUTO_TEST_CASE(required_response_repairs_missing_live_and_referenced_payload)
