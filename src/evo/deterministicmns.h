@@ -711,6 +711,15 @@ public:
         size_t removed_mns{0};
     };
 
+    struct InitialDMNInverseLineageStatsForTesting {
+        bool active{false};
+        int32_t boundary_height{-1};
+        int32_t cursor_height{-1};
+        uint64_t passes{0};
+        std::size_t last_decoded_bytes{0};
+        std::size_t last_decoded_records{0};
+    };
+
     static constexpr int DISK_SNAPSHOT_PERIOD = 576; // once per day
     static constexpr int DISK_SNAPSHOTS = 3; // keep cache for 3 disk snapshots to have 2 full days covered
 public:
@@ -737,6 +746,12 @@ public:
     static constexpr std::size_t SNAPSHOT_GC_MAX_SCANNED_VALUE_BYTES_PER_PASS{
         64U << 20};
     static constexpr std::size_t SNAPSHOT_GC_MAX_RECORD_BYTES{256U << 20};
+    static constexpr std::size_t
+        INITIAL_DMN_INVERSE_LINEAGE_MAX_RECORDS_PER_PASS{128};
+    static constexpr std::size_t
+        INITIAL_DMN_INVERSE_LINEAGE_MAX_DECODED_BYTES_PER_PASS{256U << 20};
+    static constexpr std::size_t
+        INITIAL_DMN_INVERSE_LINEAGE_MAX_RECORD_BYTES{64U << 20};
     // SYSCOIN: Exact-parent payment selection is shared by consensus,
     // templates, governance, and RPC without retaining an unbounded branch
     // history.
@@ -868,6 +883,25 @@ private:
     };
     std::optional<DMNInverseGCScanProgress>
         m_dmn_inverse_gc_scan_progress GUARDED_BY(cs);
+    struct InitialDMNInverseLineageProgress {
+        AuxiliaryHistoryGCAuthorization authorization;
+        AuxiliaryHistoryBlockIdentity boundary;
+        evo::AuxiliaryHistoryGCComponent component;
+        uint256 boundary_snapshot_hash;
+        AuxiliaryHistoryBlockIdentity cursor;
+        CDeterministicMNList cursor_snapshot;
+        AuxiliaryHistoryBlockIdentity legacy_anchor;
+        uint256 legacy_anchor_state_hash;
+        uint256 genesis_hash;
+        uint64_t passes{0};
+        std::size_t last_decoded_bytes{0};
+        std::size_t last_decoded_records{0};
+    };
+    std::optional<InitialDMNInverseLineageProgress>
+        m_initial_dmn_inverse_lineage_progress GUARDED_BY(cs);
+    std::size_t m_initial_dmn_inverse_lineage_byte_budget
+        GUARDED_BY(cs){
+            INITIAL_DMN_INVERSE_LINEAGE_MAX_DECODED_BYTES_PER_PASS};
     // SYSCOIN: The key includes every branch-local input not already
     // committed by the parent block hash. Miss derivation stays outside this
     // mutex; publication is double-checked.
@@ -887,12 +921,22 @@ private:
     bool LoadAndVerifyInverseJournalExactForGC(
         const CBlockIndex* child,
         const CDeterministicMNList& child_list,
-        CDeterministicMNList& parent_list);
+        CDeterministicMNList& parent_list,
+        std::size_t max_decoded_bytes =
+            std::numeric_limits<std::size_t>::max(),
+        std::size_t max_record_bytes =
+            std::numeric_limits<std::size_t>::max(),
+        std::size_t* decoded_bytes = nullptr,
+        std::size_t* decoded_records = nullptr);
     bool LoadAndVerifyInverseJournalInternal(
         const CBlockIndex* child,
         const CDeterministicMNList& child_list,
         CDeterministicMNList& parent_list,
-        bool exact_disk_for_gc);
+        bool exact_disk_for_gc,
+        std::size_t max_decoded_bytes,
+        std::size_t max_record_bytes,
+        std::size_t* decoded_bytes,
+        std::size_t* decoded_records);
     bool EnsureRetainedSnapshotWindow(
         const CBlockIndex* tip,
         const CDeterministicMNList& tip_list)
@@ -952,9 +996,12 @@ private:
         const EffectiveDMNInverseGCBoundary& effective,
         bool& complete)
         EXCLUSIVE_LOCKS_REQUIRED(m_evoDb->cs, !cs);
-    bool AuthenticateInitialDMNInverseGCLineage(
-        const CBlockIndex* boundary,
-        const CDeterministicMNList& boundary_snapshot)
+    bool AdvanceInitialDMNInverseGCLineage(
+        const CBlockIndex* tip,
+        std::span<const CBlockIndex* const> recovery_snapshot_indexes,
+        const AuxiliaryHistoryRetentionPlan& plan,
+        const DMNInverseGCBoundary* initial,
+        bool& complete)
         EXCLUSIVE_LOCKS_REQUIRED(m_evoDb->cs, cs);
     bool GetPQPaymentEligibleProTxHashes(
         const CBlockIndex* pindex,
@@ -1180,8 +1227,18 @@ public:
     [[nodiscard]] bool BeginAuxiliaryHistoryGCIntentForTesting(
         const evo::AuxiliaryHistoryGCIntentTarget& target)
         EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    [[nodiscard]] bool CompleteAuxiliaryHistoryGCIntentForTesting()
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    [[nodiscard]] bool AdvanceInitialDMNInverseGCLineageForTesting(
+        std::span<const CBlockIndex* const> recovery_snapshot_indexes = {})
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
     [[nodiscard]] uint64_t
     GetDMNInverseGCExactAuthenticationCountForTesting()
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    [[nodiscard]] InitialDMNInverseLineageStatsForTesting
+    GetInitialDMNInverseLineageStatsForTesting()
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    bool SetInitialDMNInverseLineageByteBudgetForTesting(std::size_t bytes)
         EXCLUSIVE_LOCKS_REQUIRED(!cs);
 private:
     const CDeterministicMNList GetListForBlockInternal(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(!cs);

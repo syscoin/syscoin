@@ -965,35 +965,64 @@ bool CDeterministicMNManager::LoadAndVerifyInverseJournal(
     CDeterministicMNList& parent_list)
 {
     return LoadAndVerifyInverseJournalInternal(
-        child, child_list, parent_list, /*exact_disk_for_gc=*/false);
+        child, child_list, parent_list, /*exact_disk_for_gc=*/false,
+        std::numeric_limits<std::size_t>::max(),
+        std::numeric_limits<std::size_t>::max(), nullptr, nullptr);
 }
 
 bool CDeterministicMNManager::LoadAndVerifyInverseJournalExactForGC(
     const CBlockIndex* child,
     const CDeterministicMNList& child_list,
-    CDeterministicMNList& parent_list)
+    CDeterministicMNList& parent_list,
+    std::size_t max_decoded_bytes,
+    std::size_t max_record_bytes,
+    std::size_t* decoded_bytes,
+    std::size_t* decoded_records)
 {
     return LoadAndVerifyInverseJournalInternal(
-        child, child_list, parent_list, /*exact_disk_for_gc=*/true);
+        child, child_list, parent_list, /*exact_disk_for_gc=*/true,
+        max_decoded_bytes, max_record_bytes, decoded_bytes,
+        decoded_records);
 }
 
 bool CDeterministicMNManager::LoadAndVerifyInverseJournalInternal(
     const CBlockIndex* child,
     const CDeterministicMNList& child_list,
     CDeterministicMNList& parent_list,
-    bool exact_disk_for_gc)
+    bool exact_disk_for_gc,
+    std::size_t max_decoded_bytes,
+    std::size_t max_record_bytes,
+    std::size_t* decoded_bytes,
+    std::size_t* decoded_records)
 {
     if (child == nullptr || child->pprev == nullptr) return false;
+    if (decoded_bytes) *decoded_bytes = 0;
+    if (decoded_records) *decoded_records = 0;
 
     try {
         using InverseDB = CEvoDB<
             uint256, CDeterministicMNListInverse, StaticSaltedHasher>;
+        std::size_t consumed_bytes{0};
+        std::size_t consumed_records{0};
         const auto read_inverse = [&](const uint256& key,
                                       CDeterministicMNListInverse& inverse) {
-            return exact_disk_for_gc
-                ? m_inverse_journal->ReadExactDiskForGC(key, inverse) ==
-                      InverseDB::ExactDiskReadResult::FOUND
-                : m_inverse_journal->ReadCache(key, inverse);
+            if (!exact_disk_for_gc) {
+                return m_inverse_journal->ReadCache(key, inverse);
+            }
+            if (consumed_bytes > max_decoded_bytes) return false;
+            const std::size_t remaining{
+                max_decoded_bytes - consumed_bytes};
+            if (m_inverse_journal->ReadExactDiskForGC(
+                    key, inverse,
+                    std::min(max_record_bytes, remaining)) !=
+                InverseDB::ExactDiskReadResult::FOUND) {
+                return false;
+            }
+            const std::size_t size{GetSerializeSize(inverse)};
+            if (size > remaining || size > max_record_bytes) return false;
+            consumed_bytes += size;
+            ++consumed_records;
+            return true;
         };
         CDeterministicMNListInverse inverse;
         if (!read_inverse(child->GetBlockHash(), inverse)) {
@@ -1045,6 +1074,9 @@ bool CDeterministicMNManager::LoadAndVerifyInverseJournalInternal(
                       child->GetBlockHash().ToString(), error);
             return false;
         }
+
+        if (decoded_bytes) *decoded_bytes = consumed_bytes;
+        if (decoded_records) *decoded_records = consumed_records;
 
         return true;
     } catch (const std::exception& exception) {
@@ -4109,6 +4141,14 @@ CDeterministicMNManager::BuildAuxiliaryHistoryRetentionPlan(
                 consensus.hashPQLegacyAnchorBlock;
         }
     }
+    if (m_initial_dmn_inverse_lineage_progress) {
+        // SYSCOIN: Initial lineage authentication spans bounded maintenance
+        // passes. Its frozen endpoint must remain physically available until
+        // the shared durable intent is published or the proof is abandoned.
+        retain_fixed_dependency(
+            m_initial_dmn_inverse_lineage_progress->boundary.height,
+            m_initial_dmn_inverse_lineage_progress->boundary.block_hash);
+    }
 
     bool authorization_active{false};
     if (plan.destructive_authorization && tip != nullptr) {
@@ -4462,48 +4502,354 @@ CDeterministicMNManager::DeriveDMNInverseGCBoundary(
     }
 }
 
-bool CDeterministicMNManager::AuthenticateInitialDMNInverseGCLineage(
-    const CBlockIndex* boundary,
-    const CDeterministicMNList& boundary_snapshot)
+bool CDeterministicMNManager::AdvanceInitialDMNInverseGCLineage(
+    const CBlockIndex* tip,
+    std::span<const CBlockIndex* const> recovery_snapshot_indexes,
+    const AuxiliaryHistoryRetentionPlan& plan,
+    const DMNInverseGCBoundary* initial,
+    bool& complete)
 {
     AssertLockHeld(m_evoDb->cs);
     AssertLockHeld(cs);
+    complete = false;
+    LOCK(m_inverse_journal->cs);
     const auto& consensus{Params().GetConsensus()};
-    if (boundary == nullptr || boundary_snapshot.IsNull() ||
-        boundary_snapshot.GetHeight() != boundary->nHeight ||
-        boundary_snapshot.GetBlockHash() != boundary->GetBlockHash() ||
+    if (tip == nullptr || !plan.AllowsDestructiveGC() ||
+        !plan.destructive_authorization ||
         Consensus::CheckPQLegacyAnchorConfiguration(consensus) !=
             Consensus::PQAnchorResult::VALID ||
         consensus.nPQLegacyAnchorHeight < consensus.DIP0003Height ||
         consensus.nPQLegacyAnchorHeight ==
             std::numeric_limits<int>::max() ||
-        consensus.nPQLegacyAnchorHeight > boundary->nHeight ||
         consensus.hashPQLegacyAnchorBlock.IsNull() ||
         consensus.hashPQLegacyMNState.IsNull()) {
         return false;
     }
 
-    const CBlockIndex* cursor{boundary};
-    CDeterministicMNList cursor_snapshot{boundary_snapshot};
-    while (cursor->nHeight > consensus.nPQLegacyAnchorHeight) {
-        if (cursor->pprev == nullptr) return false;
+    using InverseDB = CEvoDB<
+        uint256, CDeterministicMNListInverse, StaticSaltedHasher>;
+    using SnapshotDB = CEvoDB<
+        uint256, CDeterministicMNList, StaticSaltedHasher>;
+    const auto journal_state{m_auxiliary_history_gc_journal->GetState()};
+    if (journal_state.intent) return false;
+
+    bool initialized_now{false};
+    if (!m_initial_dmn_inverse_lineage_progress) {
+        if (initial == nullptr || !initial->boundary ||
+            !initial->component || !initial->snapshot ||
+            initial->status != DMNInverseGCBoundaryStatus::READY ||
+            initial->snapshot->IsNull() ||
+            initial->snapshot->GetHeight() != initial->boundary->height ||
+            initial->snapshot->GetBlockHash() !=
+                initial->boundary->block_hash ||
+            initial->boundary->height < consensus.nPQLegacyAnchorHeight ||
+            !evo::IsDMNInverseGCComponentBoundedByAuthorization(
+                *initial->component, *plan.destructive_authorization)) {
+            return false;
+        }
+        const auto closure{evo::DecodeDMNInverseGCClosure(
+            initial->component->closure)};
+        if (!closure || closure->boundary != *initial->boundary ||
+            closure->boundary_state_hash !=
+                initial->snapshot->GetOrComputePQLegacyStateHash(
+                    consensus.hashGenesisBlock)) {
+            return false;
+        }
+        m_initial_dmn_inverse_lineage_progress =
+            InitialDMNInverseLineageProgress{
+                *plan.destructive_authorization,
+                *initial->boundary,
+                *initial->component,
+                ::SerializeHash(*initial->snapshot),
+                *initial->boundary,
+                *initial->snapshot,
+                {consensus.nPQLegacyAnchorHeight,
+                 consensus.hashPQLegacyAnchorBlock},
+                consensus.hashPQLegacyMNState,
+                consensus.hashGenesisBlock,
+                0};
+        initialized_now = true;
+    } else if (initial != nullptr) {
+        return false;
+    }
+
+    auto& progress{*m_initial_dmn_inverse_lineage_progress};
+    if (journal_state.intent ||
+        (journal_state.watermark &&
+         journal_state.watermark->frontier.dmn) ||
+        progress.genesis_hash != consensus.hashGenesisBlock ||
+        progress.legacy_anchor.height !=
+            consensus.nPQLegacyAnchorHeight ||
+        progress.legacy_anchor.block_hash !=
+            consensus.hashPQLegacyAnchorBlock ||
+        progress.legacy_anchor_state_hash !=
+            consensus.hashPQLegacyMNState ||
+        !progress.authorization.IsValid() ||
+        !progress.component.IsValid() ||
+        !evo::IsDMNInverseGCComponentBoundedByAuthorization(
+            progress.component, progress.authorization)) {
+        m_initial_dmn_inverse_lineage_progress.reset();
+        return false;
+    }
+    const auto& current_authorization{*plan.destructive_authorization};
+    const CBlockIndex* frozen_authorizer{
+        progress.authorization.block.height <= tip->nHeight
+            ? tip->GetAncestor(progress.authorization.block.height)
+            : nullptr};
+    const CBlockIndex* current_authorizer{
+        current_authorization.block.height <= tip->nHeight
+            ? tip->GetAncestor(current_authorization.block.height)
+            : nullptr};
+    if (static_cast<uint8_t>(progress.authorization.source) >
+            static_cast<uint8_t>(current_authorization.source) ||
+        progress.authorization.block.height >
+            current_authorization.block.height ||
+        frozen_authorizer == nullptr ||
+        frozen_authorizer->GetBlockHash() !=
+            progress.authorization.block.block_hash ||
+        current_authorizer == nullptr ||
+        current_authorizer->GetBlockHash() !=
+            current_authorization.block.block_hash) {
+        m_initial_dmn_inverse_lineage_progress.reset();
+        return false;
+    }
+    // SYSCOIN: Another store may advance the shared journal while this
+    // bounded proof is in flight. A newer authorizer on the same active
+    // lineage preserves the authenticated DMN work and supplies the monotonic
+    // authority needed when this component is eventually published.
+    progress.authorization = current_authorization;
+
+    const CBlockIndex* boundary{
+        progress.boundary.height <= tip->nHeight
+            ? tip->GetAncestor(progress.boundary.height)
+            : nullptr};
+    if (boundary == nullptr ||
+        boundary->GetBlockHash() != progress.boundary.block_hash) {
+        m_initial_dmn_inverse_lineage_progress.reset();
+        return false;
+    }
+    for (const auto& branch : plan.branches) {
+        const CBlockIndex* head{branch.active ? tip : nullptr};
+        if (!branch.active) {
+            for (const CBlockIndex* recovery : recovery_snapshot_indexes) {
+                if (recovery != nullptr &&
+                    recovery->nHeight == branch.head.height &&
+                    recovery->GetBlockHash() == branch.head.block_hash) {
+                    head = recovery;
+                    break;
+                }
+            }
+        }
+        const CBlockIndex* branch_boundary{
+            head != nullptr && head->nHeight >= progress.boundary.height
+                ? head->GetAncestor(progress.boundary.height)
+                : nullptr};
+        if (branch_boundary == nullptr ||
+            branch_boundary->GetBlockHash() !=
+                progress.boundary.block_hash) {
+            m_initial_dmn_inverse_lineage_progress.reset();
+            return false;
+        }
+    }
+
+    const auto closure{evo::DecodeDMNInverseGCClosure(
+        progress.component.closure)};
+    std::size_t decoded_bytes{0};
+    std::size_t decoded_records{0};
+    const std::size_t decoded_byte_budget{
+        m_initial_dmn_inverse_lineage_byte_budget};
+    const auto validate_frozen_boundary = [&]() {
+        std::size_t boundary_snapshot_size{0};
+        CDeterministicMNList boundary_snapshot;
+        if (!closure || closure->boundary != progress.boundary ||
+            m_evoDb->GetExactDiskValueSizeForGC(
+                progress.boundary.block_hash, boundary_snapshot_size) !=
+                SnapshotDB::ExactDiskReadResult::FOUND ||
+            boundary_snapshot_size > SNAPSHOT_GC_MAX_RECORD_BYTES ||
+            m_evoDb->ReadExactDiskForGC(
+                progress.boundary.block_hash, boundary_snapshot,
+                SNAPSHOT_GC_MAX_RECORD_BYTES) !=
+                SnapshotDB::ExactDiskReadResult::FOUND ||
+            ::GetSerializeSize(boundary_snapshot) !=
+                boundary_snapshot_size ||
+            boundary_snapshot.IsNull() ||
+            boundary_snapshot.GetHeight() != progress.boundary.height ||
+            boundary_snapshot.GetBlockHash() !=
+                progress.boundary.block_hash ||
+            ::SerializeHash(boundary_snapshot) !=
+                progress.boundary_snapshot_hash ||
+            boundary_snapshot.GetOrComputePQLegacyStateHash(
+                consensus.hashGenesisBlock) !=
+                closure->boundary_state_hash) {
+            return false;
+        }
+
+        std::size_t boundary_inverse_size{0};
+        if (m_inverse_journal->GetExactDiskValueSizeForGC(
+                progress.boundary.block_hash, boundary_inverse_size) !=
+                InverseDB::ExactDiskReadResult::FOUND ||
+            boundary_inverse_size >
+                INITIAL_DMN_INVERSE_LINEAGE_MAX_RECORD_BYTES ||
+            boundary_inverse_size > decoded_byte_budget - decoded_bytes) {
+            return false;
+        }
+        CDeterministicMNListInverse boundary_inverse;
+        if (m_inverse_journal->ReadExactDiskForGC(
+                progress.boundary.block_hash, boundary_inverse,
+                INITIAL_DMN_INVERSE_LINEAGE_MAX_RECORD_BYTES) !=
+                InverseDB::ExactDiskReadResult::FOUND ||
+            ::GetSerializeSize(boundary_inverse) !=
+                boundary_inverse_size ||
+            !boundary_inverse.IsStructurallyValid() ||
+            boundary_inverse.genesis_hash != consensus.hashGenesisBlock ||
+            boundary_inverse.coverage_base_height !=
+                consensus.DIP0003Height ||
+            boundary_inverse.child_height != progress.boundary.height ||
+            boundary_inverse.child_hash != progress.boundary.block_hash ||
+            boundary_inverse.child_state_hash !=
+                closure->boundary_state_hash ||
+            boundary_inverse.history_commitment !=
+                closure->inverse_history_commitment ||
+            ::SerializeHash(boundary_inverse) !=
+                closure->inverse_record_hash) {
+            return false;
+        }
+        decoded_bytes += boundary_inverse_size;
+        ++decoded_records;
+        return true;
+    };
+    // SYSCOIN: The immutable endpoint is expensive but needs exact physical
+    // authentication only when the process-local proof is created and again
+    // in the dedicated publication pass. Continuations authenticate their
+    // own exact inverse segment and retain B against snapshot compaction.
+    const bool publication_pass{
+        !initialized_now &&
+        progress.cursor.height == progress.legacy_anchor.height};
+    if (publication_pass && journal_state.watermark &&
+        (current_authorization.block.height <=
+             journal_state.watermark->authorization.block.height ||
+         static_cast<uint8_t>(current_authorization.source) <
+             static_cast<uint8_t>(
+                 journal_state.watermark->authorization.source))) {
+        // SYSCOIN: Another store consumed this authorizer. Keep the completed
+        // proof, but avoid repeatedly decoding the large frozen endpoint until
+        // a newer ChainLock can monotonically publish the DMN component.
+        ++progress.passes;
+        progress.last_decoded_bytes = 0;
+        progress.last_decoded_records = 0;
+        return true;
+    }
+    if ((initialized_now || publication_pass) &&
+        !validate_frozen_boundary()) {
+        if (initialized_now) {
+            m_initial_dmn_inverse_lineage_progress.reset();
+        }
+        return false;
+    }
+
+    const CBlockIndex* cursor{
+        boundary->GetAncestor(progress.cursor.height)};
+    if (cursor == nullptr ||
+        cursor->GetBlockHash() != progress.cursor.block_hash ||
+        progress.cursor_snapshot.IsNull() ||
+        progress.cursor_snapshot.GetHeight() != progress.cursor.height ||
+        progress.cursor_snapshot.GetBlockHash() !=
+            progress.cursor.block_hash) {
+        return false;
+    }
+
+    if (publication_pass) {
+        complete =
+            cursor->GetBlockHash() == progress.legacy_anchor.block_hash &&
+            progress.cursor_snapshot.GetOrComputePQLegacyStateHash(
+                consensus.hashGenesisBlock) ==
+                progress.legacy_anchor_state_hash;
+        ++progress.passes;
+        progress.last_decoded_bytes = decoded_bytes;
+        progress.last_decoded_records = decoded_records;
+        return complete;
+    }
+
+    std::size_t advanced{0};
+    while (cursor->nHeight > progress.legacy_anchor.height) {
+        if (cursor->pprev == nullptr ||
+            cursor->pprev->nHeight != cursor->nHeight - 1) {
+            return false;
+        }
+        std::size_t child_size{0};
+        if (m_inverse_journal->GetExactDiskValueSizeForGC(
+                cursor->GetBlockHash(), child_size) !=
+                InverseDB::ExactDiskReadResult::FOUND ||
+            child_size > INITIAL_DMN_INVERSE_LINEAGE_MAX_RECORD_BYTES) {
+            return false;
+        }
+        std::size_t parent_size{0};
+        std::size_t step_records{1};
+        if (cursor->pprev->nHeight != consensus.DIP0003Height) {
+            if (m_inverse_journal->GetExactDiskValueSizeForGC(
+                    cursor->pprev->GetBlockHash(), parent_size) !=
+                    InverseDB::ExactDiskReadResult::FOUND ||
+                parent_size >
+                    INITIAL_DMN_INVERSE_LINEAGE_MAX_RECORD_BYTES) {
+                return false;
+            }
+            ++step_records;
+        }
+        if (decoded_records + step_records >
+                INITIAL_DMN_INVERSE_LINEAGE_MAX_RECORDS_PER_PASS ||
+            child_size > decoded_byte_budget - decoded_bytes ||
+            parent_size >
+                decoded_byte_budget - decoded_bytes - child_size) {
+            if (advanced == 0) return false;
+            break;
+        }
+
         CDeterministicMNList parent;
+        std::size_t step_bytes{0};
+        std::size_t actual_step_records{0};
         if (!LoadAndVerifyInverseJournalExactForGC(
-                cursor, cursor_snapshot, parent)) {
+                cursor, progress.cursor_snapshot, parent,
+                decoded_byte_budget - decoded_bytes,
+                INITIAL_DMN_INVERSE_LINEAGE_MAX_RECORD_BYTES,
+                &step_bytes, &actual_step_records) ||
+            step_bytes != child_size + parent_size ||
+            actual_step_records != step_records) {
             return false;
         }
         cursor = cursor->pprev;
-        cursor_snapshot = std::move(parent);
+        progress.cursor = {cursor->nHeight, cursor->GetBlockHash()};
+        progress.cursor_snapshot = std::move(parent);
+        decoded_records += actual_step_records;
+        decoded_bytes += step_bytes;
+        ++advanced;
     }
-    return cursor->nHeight == consensus.nPQLegacyAnchorHeight &&
-           cursor->GetBlockHash() ==
-               consensus.hashPQLegacyAnchorBlock &&
-           !cursor_snapshot.IsNull() &&
-           cursor_snapshot.GetHeight() == cursor->nHeight &&
-           cursor_snapshot.GetBlockHash() == cursor->GetBlockHash() &&
-           cursor_snapshot.GetOrComputePQLegacyStateHash(
-               consensus.hashGenesisBlock) ==
-               consensus.hashPQLegacyMNState;
+    ++progress.passes;
+    progress.last_decoded_bytes = decoded_bytes;
+    progress.last_decoded_records = decoded_records;
+    const bool reached_anchor{
+        cursor->nHeight == progress.legacy_anchor.height};
+    if (reached_anchor &&
+        (cursor->GetBlockHash() != progress.legacy_anchor.block_hash ||
+         progress.cursor_snapshot.IsNull() ||
+         progress.cursor_snapshot.GetHeight() != cursor->nHeight ||
+         progress.cursor_snapshot.GetBlockHash() !=
+             cursor->GetBlockHash() ||
+         progress.cursor_snapshot.GetOrComputePQLegacyStateHash(
+             consensus.hashGenesisBlock) !=
+             progress.legacy_anchor_state_hash)) {
+        return false;
+    }
+    // SYSCOIN: Reaching H never publishes in the same pass. A final bounded
+    // call reauthenticates the exact frozen B snapshot/inverse immediately
+    // before the durable shared intent is created.
+    complete = false;
+    LogPrint(BCLog::SYS,
+             "CDeterministicMNManager::%s boundary=%d cursor=%d "
+             "records=%zu decoded_bytes=%zu pass=%u anchor=%d\n",
+             __func__, progress.boundary.height, progress.cursor.height,
+             decoded_records, decoded_bytes,
+             static_cast<unsigned>(progress.passes), reached_anchor);
+    return true;
 }
 
 bool CDeterministicMNManager::PrepareDMNInverseGCIntent(
@@ -4581,6 +4927,78 @@ bool CDeterministicMNManager::PrepareDMNInverseGCIntent(
         } else if (initial_state.watermark &&
                    initial_state.watermark->frontier.dmn) {
             previous_component = initial_state.watermark->frontier.dmn;
+        }
+
+        const auto publish_intent = [&](
+            const AuxiliaryHistoryGCAuthorization& authorization,
+            const evo::AuxiliaryHistoryGCComponent& component,
+            const evo::AuxiliaryHistoryGCState& expected_state)
+            EXCLUSIVE_LOCKS_REQUIRED(cs) {
+            const auto final_state{
+                m_auxiliary_history_gc_journal->GetState()};
+            if (final_state.watermark != expected_state.watermark ||
+                final_state.intent != expected_state.intent) {
+                retry_required = true;
+                return true;
+            }
+            evo::AuxiliaryHistoryGCIntentTarget target;
+            target.authorization = authorization;
+            if (final_state.watermark) {
+                target.frontier = final_state.watermark->frontier;
+            }
+            target.frontier.dmn = component;
+            target.pq_erase_manifest.reset();
+
+            uint256 intent_id;
+            switch (m_auxiliary_history_gc_journal->Begin(
+                target, &intent_id)) {
+            case evo::AuxiliaryHistoryGCJournalResult::STARTED:
+            case evo::AuxiliaryHistoryGCJournalResult::EXISTING:
+                retry_required = true;
+                m_initial_dmn_inverse_lineage_progress.reset();
+                return !intent_id.IsNull() &&
+                       RefreshEffectiveDMNInverseGCBoundary();
+            case evo::AuxiliaryHistoryGCJournalResult::ALREADY_COMPLETE:
+                m_initial_dmn_inverse_lineage_progress.reset();
+                return !intent_id.IsNull() &&
+                       RefreshEffectiveDMNInverseGCBoundary();
+            case evo::AuxiliaryHistoryGCJournalResult::BUSY:
+            case evo::AuxiliaryHistoryGCJournalResult::NON_MONOTONIC:
+                retry_required = true;
+                return true;
+            case evo::AuxiliaryHistoryGCJournalResult::COMPLETED:
+            case evo::AuxiliaryHistoryGCJournalResult::INVALID_ARGUMENT:
+            case evo::AuxiliaryHistoryGCJournalResult::MISMATCH:
+            case evo::AuxiliaryHistoryGCJournalResult::CORRUPT:
+            case evo::AuxiliaryHistoryGCJournalResult::DB_ERROR:
+                return false;
+            }
+            return false;
+        };
+
+        if (!previous_component &&
+            m_initial_dmn_inverse_lineage_progress) {
+            bool lineage_complete{false};
+            if (!AdvanceInitialDMNInverseGCLineage(
+                    tip, recovery_snapshot_indexes, plan,
+                    /*initial=*/nullptr, lineage_complete)) {
+                retry_required = true;
+                return true;
+            }
+            if (!lineage_complete) {
+                retry_required = true;
+                return true;
+            }
+            const auto frozen{
+                *m_initial_dmn_inverse_lineage_progress};
+            const auto expected_state{
+                m_auxiliary_history_gc_journal->GetState()};
+            return publish_intent(
+                frozen.authorization, frozen.component, expected_state);
+        }
+        if (previous_component &&
+            m_initial_dmn_inverse_lineage_progress) {
+            m_initial_dmn_inverse_lineage_progress.reset();
         }
 
         const auto derived{DeriveDMNInverseGCBoundary(
@@ -4662,52 +5080,32 @@ bool CDeterministicMNManager::PrepareDMNInverseGCIntent(
             prepared.boundary->height)};
         if (prepared_index == nullptr ||
             prepared_index->GetBlockHash() !=
-                prepared.boundary->block_hash ||
-            (!previous_component &&
-             !AuthenticateInitialDMNInverseGCLineage(
-                 prepared_index, *prepared.snapshot))) {
+                prepared.boundary->block_hash) {
             retry_required = true;
             return true;
         }
-
-        const auto final_state{
-            m_auxiliary_history_gc_journal->GetState()};
-        if (final_state.watermark != initial_state.watermark ||
-            final_state.intent != initial_state.intent) {
-            retry_required = true;
-            return true;
+        if (!previous_component) {
+            bool lineage_complete{false};
+            if (!AdvanceInitialDMNInverseGCLineage(
+                    tip, recovery_snapshot_indexes, plan, &prepared,
+                    lineage_complete)) {
+                retry_required = true;
+                return true;
+            }
+            if (!lineage_complete) {
+                retry_required = true;
+                return true;
+            }
+            const auto frozen{
+                *m_initial_dmn_inverse_lineage_progress};
+            const auto expected_state{
+                m_auxiliary_history_gc_journal->GetState()};
+            return publish_intent(
+                frozen.authorization, frozen.component, expected_state);
         }
-        evo::AuxiliaryHistoryGCIntentTarget target;
-        target.authorization = *plan.destructive_authorization;
-        if (final_state.watermark) {
-            target.frontier = final_state.watermark->frontier;
-        }
-        target.frontier.dmn = *prepared.component;
-        // SYSCOIN: An unchanged PQ closure is cumulative state, not a PQ
-        // advance. No erase manifest may be synthesized for this DMN-only step.
-        target.pq_erase_manifest.reset();
-
-        uint256 intent_id;
-        switch (m_auxiliary_history_gc_journal->Begin(target, &intent_id)) {
-        case evo::AuxiliaryHistoryGCJournalResult::STARTED:
-        case evo::AuxiliaryHistoryGCJournalResult::EXISTING:
-            retry_required = true;
-            return !intent_id.IsNull() &&
-                   RefreshEffectiveDMNInverseGCBoundary();
-        case evo::AuxiliaryHistoryGCJournalResult::ALREADY_COMPLETE:
-            return !intent_id.IsNull() &&
-                   RefreshEffectiveDMNInverseGCBoundary();
-        case evo::AuxiliaryHistoryGCJournalResult::BUSY:
-        case evo::AuxiliaryHistoryGCJournalResult::NON_MONOTONIC:
-            retry_required = true;
-            return true;
-        case evo::AuxiliaryHistoryGCJournalResult::COMPLETED:
-        case evo::AuxiliaryHistoryGCJournalResult::INVALID_ARGUMENT:
-        case evo::AuxiliaryHistoryGCJournalResult::MISMATCH:
-        case evo::AuxiliaryHistoryGCJournalResult::CORRUPT:
-        case evo::AuxiliaryHistoryGCJournalResult::DB_ERROR:
-            return false;
-        }
+        return publish_intent(
+            *plan.destructive_authorization, *prepared.component,
+            initial_state);
     } catch (const std::exception& exception) {
         LogPrintf("%s -- failed to prepare deterministic-MN inverse GC: %s\n",
                   __func__, exception.what());
@@ -5394,11 +5792,65 @@ bool CDeterministicMNManager::BeginAuxiliaryHistoryGCIntentForTesting(
            !intent_id.IsNull() && RefreshEffectiveDMNInverseGCBoundary();
 }
 
+bool CDeterministicMNManager::
+CompleteAuxiliaryHistoryGCIntentForTesting()
+{
+    LOCK(m_evoDb->cs);
+    LOCK(cs);
+    const auto state{m_auxiliary_history_gc_journal->GetState()};
+    return state.intent &&
+           m_auxiliary_history_gc_journal->Complete(
+               state.intent->intent_id) ==
+               evo::AuxiliaryHistoryGCJournalResult::COMPLETED &&
+           RefreshEffectiveDMNInverseGCBoundary();
+}
+
+bool CDeterministicMNManager::
+AdvanceInitialDMNInverseGCLineageForTesting(
+    std::span<const CBlockIndex* const> recovery_snapshot_indexes)
+{
+    LOCK(m_evoDb->cs);
+    LOCK(cs);
+    const auto plan{BuildAuxiliaryHistoryRetentionPlan(
+        tipIndex, recovery_snapshot_indexes)};
+    bool complete{false};
+    return m_initial_dmn_inverse_lineage_progress &&
+           AdvanceInitialDMNInverseGCLineage(
+               tipIndex, recovery_snapshot_indexes, plan,
+               /*initial=*/nullptr, complete);
+}
+
 uint64_t CDeterministicMNManager::
 GetDMNInverseGCExactAuthenticationCountForTesting()
 {
     LOCK(cs);
     return m_effective_dmn_inverse_gc_exact_authentications_for_testing;
+}
+
+CDeterministicMNManager::InitialDMNInverseLineageStatsForTesting
+CDeterministicMNManager::GetInitialDMNInverseLineageStatsForTesting()
+{
+    LOCK(cs);
+    if (!m_initial_dmn_inverse_lineage_progress) return {};
+    return InitialDMNInverseLineageStatsForTesting{
+        true,
+        m_initial_dmn_inverse_lineage_progress->boundary.height,
+        m_initial_dmn_inverse_lineage_progress->cursor.height,
+        m_initial_dmn_inverse_lineage_progress->passes,
+        m_initial_dmn_inverse_lineage_progress->last_decoded_bytes,
+        m_initial_dmn_inverse_lineage_progress->last_decoded_records};
+}
+
+bool CDeterministicMNManager::
+SetInitialDMNInverseLineageByteBudgetForTesting(std::size_t bytes)
+{
+    LOCK(cs);
+    if (bytes == 0 ||
+        bytes > INITIAL_DMN_INVERSE_LINEAGE_MAX_DECODED_BYTES_PER_PASS) {
+        return false;
+    }
+    m_initial_dmn_inverse_lineage_byte_budget = bytes;
+    return true;
 }
 
 bool CDeterministicMNManager::DoMaintenance(
