@@ -1169,6 +1169,44 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_retries_failures_and_can_be_disabled)
         genesis, BuildConfig(), QuorumSnapshotLookup{}));
 }
 
+BOOST_AUTO_TEST_CASE(active_roster_cache_contains_snapshot_lookup_exceptions)
+{
+    constexpr int32_t TARGET_HEIGHT{2305};
+    const uint256 genesis{NonNullHash(26)};
+    IndexChain chain(TARGET_HEIGHT, TARGET_HEIGHT + 1, 0);
+    std::size_t lookups{0};
+    bool throw_next{true};
+    const QuorumSnapshotLookup lookup = [&](const CBlockIndex& index) {
+        ++lookups;
+        if (throw_next) {
+            throw_next = false;
+            throw std::runtime_error{"snapshot unavailable"};
+        }
+        QuorumSnapshotState result;
+        result.deterministic_mns = Snapshot(
+            index.nHeight, index.GetBlockHash(), QUORUM_SIZE);
+        result.operator_key_states = SharedOperatorStates();
+        return std::optional<QuorumSnapshotState>{std::move(result)};
+    };
+    const auto cache{FrozenQuorumRosterCache::Create(
+        genesis, BuildConfig(), lookup)};
+    BOOST_REQUIRE(cache);
+
+    QuorumBuildError error{QuorumBuildError::NONE};
+    BOOST_CHECK(!cache->GetActive(
+        TARGET_HEIGHT, chain.Tip(), &error));
+    BOOST_CHECK(error == QuorumBuildError::SNAPSHOT_LOOKUP_FAILED);
+    BOOST_CHECK_EQUAL(lookups, 1U);
+
+    const auto retry{cache->GetActive(
+        TARGET_HEIGHT, chain.Tip(), &error)};
+    BOOST_REQUIRE(retry);
+    BOOST_CHECK(error == QuorumBuildError::NONE);
+    BOOST_CHECK_EQUAL(lookups, 1U + ACTIVE_QUORUMS);
+    BOOST_CHECK(cache->GetActive(TARGET_HEIGHT, chain.Tip()) == retry);
+    BOOST_CHECK_EQUAL(lookups, 1U + ACTIVE_QUORUMS);
+}
+
 BOOST_AUTO_TEST_CASE(active_roster_cache_does_not_cache_rotation_failures)
 {
     constexpr int32_t FIRST_TARGET{2305};

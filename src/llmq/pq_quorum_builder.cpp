@@ -380,7 +380,15 @@ std::unique_ptr<FrozenQuorumRosters> BuildActiveFrozenQuorumRostersImpl(
             (*rosters)[slot] = *reusable;
             continue;
         }
-        auto snapshot_state{snapshot_lookup(*snapshot_index)};
+        std::optional<QuorumSnapshotState> snapshot_state;
+        try {
+            snapshot_state = snapshot_lookup(*snapshot_index);
+        } catch (...) {
+            // Storage lookup failures must remain local/transient rather than
+            // escaping a consensus caller that already handles this result.
+            SetError(error, QuorumBuildError::SNAPSHOT_LOOKUP_FAILED);
+            return nullptr;
+        }
         if (!snapshot_state) {
             SetError(error, QuorumBuildError::SNAPSHOT_LOOKUP_FAILED);
             return nullptr;
