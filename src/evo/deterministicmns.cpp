@@ -181,7 +181,9 @@ bool CollectPersistedKeysOutsideWindow(
 
     for (cursor->SeekToFirst(); cursor->Valid(); cursor->Next()) {
         uint256 key;
-        if (!cursor->GetKey(key)) return false;
+        // SYSCOIN: A destructive plan must not normalize a trailing database
+        // key into a different canonical snapshot identity.
+        if (!cursor->GetKeyExact(key)) return false;
 
         ++persisted_snapshot_count;
         if (retained_hashes.count(key) != 0) continue;
@@ -189,7 +191,7 @@ bool CollectPersistedKeysOutsideWindow(
         std::optional<int32_t> snapshot_height;
         if (finality_retention_floor) {
             CDeterministicMNList snapshot;
-            if (!cursor->GetValue(snapshot) ||
+            if (!cursor->GetValueExact(snapshot) ||
                 snapshot.IsNull() ||
                 snapshot.GetBlockHash() != key ||
                 snapshot.GetHeight() < Params().GetConsensus().DIP0003Height) {
@@ -207,6 +209,9 @@ bool CollectPersistedKeysOutsideWindow(
             *snapshot_height >= *finality_retention_floor) continue;
         prune_keys.emplace_back(key);
     }
+    // SYSCOIN: Iterator failure is not successful end-of-database; publishing
+    // a partial erase plan would make the maintained marker unsound.
+    cursor->CheckStatus();
 
     return true;
 }

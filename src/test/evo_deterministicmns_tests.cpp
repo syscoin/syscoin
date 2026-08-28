@@ -2696,6 +2696,17 @@ BOOST_AUTO_TEST_CASE(finality_floor_skips_retained_values_before_decoding)
     BOOST_REQUIRE(manager.m_evoDb->Read(retained_side_hash, snapshot));
     BOOST_CHECK_EQUAL(snapshot.GetHeight(), finality_floor);
 
+    BOOST_REQUIRE(manager.m_evoDb->AppendTrailingValueByteForTesting(
+        retained_side_hash));
+    manager.BeginFinalitySnapshotVerificationRetention();
+    manager.EndFinalitySnapshotVerificationRetention();
+    BOOST_CHECK(!manager.FlushCacheToDisk(/*bForceFlush=*/true));
+    BOOST_REQUIRE(manager.m_evoDb->RewriteExactValueForTesting(
+        retained_side_hash));
+    manager.BeginFinalitySnapshotVerificationRetention();
+    manager.EndFinalitySnapshotVerificationRetention();
+    BOOST_REQUIRE(manager.FlushCacheToDisk(/*bForceFlush=*/true));
+
     // Side-branch values remain fail-closed under the same floor.
     const uint256 corrupt_side_hash{
         MakeSnapshotKey(start_height + total_snapshots + 102)};

@@ -415,6 +415,9 @@ public:
                 count++;
                 pcursor->Next();
             }
+            // SYSCOIN: A partial LevelDB scan is an error, not a smaller
+            // persisted set.
+            pcursor->CheckStatus();
             return count;
         } catch (const std::exception& e) {
              LogPrint(BCLog::SYS, "CEvoDB::%s -- Exception during iteration: %s\n", __func__, e.what());
