@@ -387,9 +387,15 @@ private:
         GUARDED_BY(m_mutex);
     mutable PaymentEligibilityCacheMap m_payment_eligibility_cache_index
         GUARDED_BY(m_mutex);
-    // A diagnostic counter proves that bounded replay caching changes work,
+    // Diagnostic counters prove that bounded replay caching changes work,
     // never the authenticated result or any production cache decision.
     mutable uint64_t m_reconstruction_authenticated_records
+        GUARDED_BY(m_mutex){0};
+    mutable uint64_t m_reconstruction_reused_records
+        GUARDED_BY(m_mutex){0};
+    mutable uint64_t m_reconstruction_tree_id_hashes
+        GUARDED_BY(m_mutex){0};
+    mutable uint64_t m_reconstruction_state_hashes
         GUARDED_BY(m_mutex){0};
 
     [[nodiscard]] bool ReadDiskSnapshot(

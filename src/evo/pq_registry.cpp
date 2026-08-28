@@ -511,23 +511,23 @@ MakeAuthenticatedReplaySnapshotView(
     const SnapshotViewCache& cache,
     const PQRegistryDiskSnapshot& disk,
     const std::vector<OperatorKeyState>& operator_states,
-    const std::vector<uint256>& used_tree_ids,
+    const std::shared_ptr<const std::vector<uint256>>& used_tree_ids,
     const OperatorKeyScheduleState& schedule,
     const uint256& used_tree_ids_hash)
 {
+    if (!used_tree_ids) return nullptr;
     ReusableSnapshotBacking reusable;
     FindReusableSnapshotBacking(
-        staged, schedule, used_tree_ids_hash, used_tree_ids.size(),
+        staged, schedule, used_tree_ids_hash, used_tree_ids->size(),
         disk.consensus_state_root, reusable);
     FindReusableSnapshotBacking(
-        cache, schedule, used_tree_ids_hash, used_tree_ids.size(),
+        cache, schedule, used_tree_ids_hash, used_tree_ids->size(),
         disk.consensus_state_root, reusable);
     if (!reusable.state) {
         auto indexes{BuildRegistryIndexes(operator_states)};
         if (!indexes) return nullptr;
         if (!reusable.tree_ids) {
-            reusable.tree_ids =
-                std::make_shared<const std::vector<uint256>>(used_tree_ids);
+            reusable.tree_ids = used_tree_ids;
         }
         reusable.state = MakeRegistryStateData(
             std::make_shared<const std::vector<OperatorKeyState>>(
@@ -1460,7 +1460,9 @@ bool PQRegistryManager::ReconstructPersistentSnapshotView(
     }
 
     std::vector<OperatorKeyState> states;
-    std::vector<uint256> used_tree_ids;
+    std::shared_ptr<const std::vector<uint256>> used_tree_ids;
+    std::shared_ptr<const PQRegistryStateData> authenticated_state;
+    uint256 used_tree_ids_hash;
     SnapshotViewCache staged;
     const std::size_t staged_count{std::min(
         reverse_journal.size(), PQ_REGISTRY_SNAPSHOT_CACHE_SIZE)};
@@ -1469,52 +1471,120 @@ bool PQRegistryManager::ReconstructPersistentSnapshotView(
     std::size_t replayed_record{0};
     for (auto record{reverse_journal.rbegin()};
          record != reverse_journal.rend(); ++record) {
+        const bool is_checkpoint{record->is_checkpoint != 0};
+        const bool has_tree_id_additions{
+            !record->block_tree_ids.empty()};
         if (record->is_checkpoint != 0) {
             states = record->operator_states;
-            used_tree_ids = record->tree_ids;
+            used_tree_ids =
+                std::make_shared<const std::vector<uint256>>(
+                    record->tree_ids);
         } else {
             if (!ApplySparseOperatorDelta(
                     states, record->removed_operators,
                     record->operator_states)) {
                 return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
             }
-            std::vector<uint256> merged;
-            if (!MergeNewTreeIds(used_tree_ids, record->block_tree_ids,
-                                 merged)) {
+            if (!used_tree_ids) {
                 return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
             }
-            used_tree_ids = std::move(merged);
+            if (has_tree_id_additions) {
+                std::vector<uint256> merged;
+                if (!MergeNewTreeIds(*used_tree_ids,
+                                     record->block_tree_ids, merged)) {
+                    return SetError(
+                        error, PQRegistryResult::SNAPSHOT_CORRUPT);
+                }
+                used_tree_ids =
+                    std::make_shared<const std::vector<uint256>>(
+                        std::move(merged));
+            }
         }
         const auto schedule_view{DeriveOperatorKeyScheduleView(
             m_config.schedule, record->height,
             m_config.registration_cutoff_blocks,
             m_config.future_horizon_epochs)};
-        const auto tree_set_hash{
-            GetUsedTreeIdSetHash(m_genesis_hash, used_tree_ids)};
-        if (!schedule_view || !tree_set_hash ||
-            states.size() > MAX_PQ_OPERATOR_STATES ||
-            !StateTreeIdsAreRecorded(states, used_tree_ids) ||
-            std::any_of(states.begin(), states.end(),
-                        [&](const OperatorKeyState& state) {
-                            return !state.IsAdvancedTo(*schedule_view);
-                        })) {
+        if (!schedule_view || !used_tree_ids) {
             return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
         }
-        const auto root{GetCanonicalPQKeyConsensusStateHash(
-            m_genesis_hash,
-            std::span<const OperatorKeyState>{states.data(), states.size()},
-            *tree_set_hash)};
-        if (!root || *root != record->consensus_state_root) {
-            return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
+        const auto schedule{
+            OperatorKeyScheduleState::FromView(*schedule_view)};
+        const bool unchanged_sparse_record{
+            !is_checkpoint && record->operator_states.empty() &&
+            record->removed_operators.empty() && !has_tree_id_additions &&
+            authenticated_state &&
+            authenticated_state->schedule == schedule};
+
+        std::shared_ptr<const PQRegistrySnapshotView> rebuilt;
+        if (unchanged_sparse_record) {
+            // SYSCOIN: A claimed root is never trusted merely because the
+            // sparse payload is empty. Exact equality with the immediately
+            // prior authenticated state is what authorizes pointer reuse.
+            if (record->previous_consensus_state_root !=
+                    authenticated_state->consensus_state_root ||
+                record->consensus_state_root !=
+                    authenticated_state->consensus_state_root) {
+                return SetError(
+                    error, PQRegistryResult::SNAPSHOT_CORRUPT);
+            }
+            used_tree_ids = authenticated_state->used_tree_ids;
+            used_tree_ids_hash =
+                authenticated_state->used_tree_ids_hash;
+            ++m_reconstruction_reused_records;
+        } else {
+            if (is_checkpoint || has_tree_id_additions) {
+                const auto tree_set_hash{GetUsedTreeIdSetHash(
+                    m_genesis_hash, *used_tree_ids)};
+                ++m_reconstruction_tree_id_hashes;
+                if (!tree_set_hash) {
+                    return SetError(
+                        error, PQRegistryResult::SNAPSHOT_CORRUPT);
+                }
+                used_tree_ids_hash = *tree_set_hash;
+            } else if (used_tree_ids_hash.IsNull()) {
+                return SetError(
+                    error, PQRegistryResult::SNAPSHOT_CORRUPT);
+            }
+            if (states.size() > MAX_PQ_OPERATOR_STATES ||
+                !StateTreeIdsAreRecorded(states, *used_tree_ids) ||
+                std::any_of(states.begin(), states.end(),
+                            [&](const OperatorKeyState& state) {
+                                return !state.IsAdvancedTo(*schedule_view);
+                            })) {
+                return SetError(
+                    error, PQRegistryResult::SNAPSHOT_CORRUPT);
+            }
+            const auto root{GetCanonicalPQKeyConsensusStateHash(
+                m_genesis_hash,
+                std::span<const OperatorKeyState>{
+                    states.data(), states.size()},
+                used_tree_ids_hash)};
+            ++m_reconstruction_state_hashes;
+            if (!root || *root != record->consensus_state_root) {
+                return SetError(
+                    error, PQRegistryResult::SNAPSHOT_CORRUPT);
+            }
+            rebuilt = MakeAuthenticatedReplaySnapshotView(
+                staged, m_snapshot_cache, *record, states, used_tree_ids,
+                schedule, used_tree_ids_hash);
+            if (!rebuilt || !rebuilt->state) {
+                return SetError(
+                    error, PQRegistryResult::SNAPSHOT_CORRUPT);
+            }
+            authenticated_state = rebuilt->state;
+            used_tree_ids = authenticated_state->used_tree_ids;
+            used_tree_ids_hash =
+                authenticated_state->used_tree_ids_hash;
         }
         ++m_reconstruction_authenticated_records;
 
         if (replayed_record >= first_staged_record) {
-            const auto schedule{
-                OperatorKeyScheduleState::FromView(*schedule_view)};
-            auto rebuilt{MakeAuthenticatedReplaySnapshotView(
-                staged, m_snapshot_cache, *record, states, used_tree_ids,
-                schedule, *tree_set_hash)};
+            if (!rebuilt) {
+                rebuilt = MakeSnapshotView(
+                    record->height, record->block_hash,
+                    record->previous_block_hash, authenticated_state,
+                    record->block_tree_ids);
+            }
             if (!rebuilt) {
                 return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
             }

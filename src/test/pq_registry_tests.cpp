@@ -33,6 +33,9 @@ namespace llmq::pq::test {
 
 struct PQRegistryReconstructionStats {
     uint64_t authenticated_records{0};
+    uint64_t reused_records{0};
+    uint64_t tree_id_hashes{0};
+    uint64_t state_hashes{0};
     std::size_t cached_views{0};
 };
 
@@ -43,14 +46,20 @@ public:
     {
         LOCK(manager.m_mutex);
         return {manager.m_reconstruction_authenticated_records,
+                manager.m_reconstruction_reused_records,
+                manager.m_reconstruction_tree_id_hashes,
+                manager.m_reconstruction_state_hashes,
                 manager.m_snapshot_cache.size()};
     }
 
-    static void ResetAuthenticatedRecords(
+    static void ResetReconstructionStats(
         const PQRegistryManager& manager)
     {
         LOCK(manager.m_mutex);
         manager.m_reconstruction_authenticated_records = 0;
+        manager.m_reconstruction_reused_records = 0;
+        manager.m_reconstruction_tree_id_hashes = 0;
+        manager.m_reconstruction_state_hashes = 0;
     }
 };
 
@@ -1609,6 +1618,69 @@ BOOST_AUTO_TEST_CASE(restart_reconstructs_frozen_root_and_tree_history)
                 checkpoint_snapshot.consensus_state_root);
 }
 
+BOOST_AUTO_TEST_CASE(cold_reconstruction_reuses_long_no_op_suffix)
+{
+    auto config{Config()};
+    config.schedule.epoch_origin = 10'080;
+    BOOST_REQUIRE(config.IsValid());
+    const uint256 genesis{NonNullHash(691)};
+    const uint256 journal_parent{NonNullHash(692)};
+    auto db{MemoryDB(691)};
+    db.path = m_path_root / "pq_registry_cold_no_op_suffix";
+    db.memory_only = false;
+
+    constexpr std::size_t record_count{96};
+    std::vector<uint256> hashes;
+    hashes.reserve(record_count);
+    {
+        PQRegistryManager writer(db, genesis, config);
+        PQRegistryError error;
+        const auto callbacks{Members(genesis, {}, {}, CKeyID{})};
+        uint256 cursor{journal_parent};
+        for (std::size_t offset{0}; offset < record_count; ++offset) {
+            const uint32_t id{89'000 + static_cast<uint32_t>(offset)};
+            const auto block{Block(
+                cursor, id, {OrdinaryTransaction(id)})};
+            BOOST_REQUIRE(writer.ProcessBlock(
+                block,
+                config.preparation_height + static_cast<int32_t>(offset),
+                callbacks, {}, /*fJustCheck=*/false, error));
+            hashes.push_back(block.GetHash());
+            cursor = block.GetHash();
+        }
+        BOOST_REQUIRE(writer.Flush(/*fSync=*/true));
+    }
+
+    db.wipe_data = false;
+    PQRegistryManager reader(db, genesis, config);
+    test::PQRegistryManagerTestAccess::ResetReconstructionStats(reader);
+    PQRegistryError error;
+    PQRegistryReadView tip;
+    BOOST_REQUIRE(reader.GetReadView(
+        hashes.back(), hashes[hashes.size() - 2],
+        config.preparation_height + static_cast<int32_t>(record_count) - 1,
+        tip, error));
+    const auto stats{test::PQRegistryManagerTestAccess::Stats(reader)};
+    BOOST_CHECK_EQUAL(stats.authenticated_records, record_count);
+    BOOST_CHECK_EQUAL(stats.reused_records, record_count - 1);
+    BOOST_CHECK_EQUAL(stats.tree_id_hashes, 1U);
+    BOOST_CHECK_EQUAL(stats.state_hashes, 1U);
+    BOOST_CHECK_EQUAL(stats.cached_views,
+                      PQ_REGISTRY_SNAPSHOT_CACHE_SIZE);
+
+    PQRegistryReadView parent;
+    BOOST_REQUIRE(reader.GetReadView(
+        hashes[hashes.size() - 2], hashes[hashes.size() - 3],
+        config.preparation_height + static_cast<int32_t>(record_count) - 2,
+        parent, error));
+    BOOST_CHECK(tip.SharesStateWith(parent));
+    BOOST_CHECK(tip.SharesTreeHistoryWith(parent));
+    BOOST_CHECK_EQUAL(
+        test::PQRegistryManagerTestAccess::Stats(reader)
+            .authenticated_records,
+        record_count);
+}
+
 BOOST_AUTO_TEST_CASE(cold_sequential_undo_reuses_authenticated_replay_tail)
 {
     const auto config{FastConfig()};
@@ -1662,7 +1734,7 @@ BOOST_AUTO_TEST_CASE(cold_sequential_undo_reuses_authenticated_replay_tail)
 
     db.wipe_data = false;
     PQRegistryManager reader(db, genesis, config);
-    test::PQRegistryManagerTestAccess::ResetAuthenticatedRecords(reader);
+    test::PQRegistryManagerTestAccess::ResetReconstructionStats(reader);
     PQRegistryError error;
     for (std::size_t remaining{record_count}; remaining > 0; --remaining) {
         const std::size_t index{remaining - 1};
