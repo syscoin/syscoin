@@ -461,6 +461,17 @@ uint256 BTCCPresealStateToken(const pq::BTCCPresealState& state)
     return writer.GetHash();
 }
 
+uint256 BoundedBTCCPresealSourceToken(
+    const pq::BTCCPresealState& state,
+    uint64_t provenance_revocation_revision)
+{
+    CHashWriter writer{SER_GETHASH, 0};
+    writer << std::string{"SYS_PQ_BTCC_BOUNDED_RECOVERY_V1"}
+           << BTCCPresealStateToken(state)
+           << provenance_revocation_revision;
+    return writer.GetHash();
+}
+
 uint256 PaymentAuditPresealStateToken(
     const pq::PaymentAuditPresealState& state)
 {
@@ -722,48 +733,6 @@ BTCCCatchupRangeStatus GetFullyValidatedBTCCCatchupRangeStatusImpl(
     return BTCCCatchupRangeStatus::VALID;
 }
 
-std::optional<pq::BTCCReceiptState> RecomputeBTCCReceiptState(
-    const ChainstateManager& chainman,
-    const CBlockIndex& target,
-    const pq::ChainLockFinalityStoreConfig& config,
-    int32_t first_carrier_height,
-    pq::BTCCReceiptState state,
-    bool* transient_failure = nullptr)
-    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
-{
-    if (transient_failure != nullptr) *transient_failure = false;
-    if (!state.IsStructurallyValid() || first_carrier_height < 0 ||
-        target.nHeight < first_carrier_height ||
-        !pq::IsBTCCReceiptCarrierHeight(config.btcc_schedule,
-                                        first_carrier_height)) {
-        return std::nullopt;
-    }
-    for (int64_t height{first_carrier_height}; height <= target.nHeight;
-         height += config.btcc_schedule.candidate_period) {
-        const CBlockIndex* carrier{
-            target.GetAncestor(static_cast<int32_t>(height))};
-        if (carrier == nullptr) return std::nullopt;
-        CBlock block;
-        if (!chainman.m_blockman.ReadBlockFromDisk(block, *carrier)) {
-            if (transient_failure != nullptr) *transient_failure = true;
-            return std::nullopt;
-        }
-        pq::BTCCReceipt receipt;
-        if (!ExtractBTCCReceipt(block, receipt) ||
-            !pq::ValidateBTCCReceiptOnBranch(
-                config.btcc_schedule, *carrier, receipt)) {
-            return std::nullopt;
-        }
-        const auto next{pq::ApplyBTCCReceiptState(
-            chainman.GetConsensus().hashGenesisBlock,
-            config.chainlock_schedule, config.btcc_schedule,
-            carrier->nHeight, carrier->GetBlockHash(), state, receipt)};
-        if (!next) return std::nullopt;
-        state = *next;
-    }
-    return state;
-}
-
 const char* FinalityErrorString(pq::ChainLockFinalityError error)
 {
     switch (error) {
@@ -897,6 +866,104 @@ PaymentAuditContextStatus HistoricalIndexValidationCache::Validate(
     return entry->next_height < first_height
         ? PaymentAuditContextStatus::READY
         : PaymentAuditContextStatus::LOCAL_ERROR;
+}
+
+BoundedActiveRangePlan BoundedActiveRangeFrontier::Plan(
+    const CChain& active_chain,
+    const CBlockIndex& active_tip,
+    int32_t floor_height,
+    const uint256& floor_hash,
+    const uint256& source_token,
+    std::size_t block_budget)
+{
+    AssertLockHeld(cs_main);
+    m_plan_pending = false;
+    if (source_token.IsNull() || block_budget == 0 || floor_height < -1 ||
+        active_tip.nHeight < floor_height ||
+        active_chain[active_tip.nHeight] != &active_tip ||
+        (floor_height < 0) != floor_hash.IsNull()) {
+        return {};
+    }
+    const CBlockIndex* floor{
+        floor_height < 0 ? nullptr : active_chain[floor_height]};
+    if (floor_height >= 0 &&
+        (floor == nullptr || floor->GetBlockHash() != floor_hash)) {
+        return {};
+    }
+
+    bool reset{!m_initialized || m_source_token != source_token ||
+               m_floor_height != floor_height ||
+               m_floor_hash != floor_hash ||
+               m_validated_through_height < floor_height};
+    if (!reset) {
+        const CBlockIndex* through{
+            m_validated_through_height < 0
+                ? nullptr
+                : active_chain[m_validated_through_height]};
+        reset = (m_validated_through_height < 0) !=
+                    m_validated_through_hash.IsNull() ||
+                (m_validated_through_height >= 0 &&
+                 (through == nullptr ||
+                  through->GetBlockHash() !=
+                      m_validated_through_hash));
+    }
+    if (reset) {
+        m_initialized = true;
+        m_source_token = source_token;
+        m_floor_height = floor_height;
+        m_floor_hash = floor_hash;
+        m_validated_through_height = floor_height;
+        m_validated_through_hash = floor_hash;
+    }
+    if (m_validated_through_height >= active_tip.nHeight) {
+        return {BoundedActiveRangeStatus::COMPLETE, -1, -1, reset};
+    }
+
+    const int64_t first{
+        static_cast<int64_t>(m_validated_through_height) + 1};
+    const uint64_t remaining{
+        static_cast<uint64_t>(active_tip.nHeight - first) + 1};
+    const uint64_t span{std::min<uint64_t>(block_budget, remaining)};
+    const int64_t last{first + static_cast<int64_t>(span) - 1};
+    if (first < 0 || last > std::numeric_limits<int32_t>::max()) {
+        return {};
+    }
+    m_plan_pending = true;
+    m_planned_first = static_cast<int32_t>(first);
+    m_planned_last = static_cast<int32_t>(last);
+    return {BoundedActiveRangeStatus::WORK,
+            m_planned_first, m_planned_last, reset};
+}
+
+bool BoundedActiveRangeFrontier::CommitThrough(
+    const CChain& active_chain,
+    int32_t through_height)
+{
+    AssertLockHeld(cs_main);
+    if (!m_plan_pending || through_height < m_planned_first - 1 ||
+        through_height > m_planned_last) {
+        return false;
+    }
+    const CBlockIndex* through{
+        through_height < 0 ? nullptr : active_chain[through_height]};
+    if ((through_height < 0) != (through == nullptr) ||
+        (through != nullptr && through->nHeight != through_height)) {
+        return false;
+    }
+    m_validated_through_height = through_height;
+    m_validated_through_hash =
+        through == nullptr ? uint256{} : through->GetBlockHash();
+    m_plan_pending = false;
+    return true;
+}
+
+bool BoundedActiveRangeFrontier::IsComplete(
+    const CBlockIndex& active_tip) const noexcept
+{
+    AssertLockHeld(cs_main);
+    return m_initialized && !m_plan_pending &&
+           m_validated_through_height == active_tip.nHeight &&
+           m_validated_through_hash == active_tip.GetBlockHash();
 }
 
 bool PaymentAuditCandidateMetadataSnapshot::IsStructurallyValid() const noexcept
@@ -5952,6 +6019,188 @@ void CChainLocksHandler::MaybeReplayPaymentAuditPreseal()
     }
 }
 
+bool CChainLocksHandler::RecoverActiveBTCCPresealBounded(
+    const CBlockIndex& active_tip,
+    pq::BTCCPresealState& state)
+{
+    AssertLockHeld(cs_main);
+    if (!m_config) return false;
+    int32_t scan_from{std::numeric_limits<int32_t>::max()};
+    if (state.active) {
+        scan_from = std::min(
+            scan_from, state.active->earliest_carrier_height);
+    }
+    if (state.prospective) {
+        scan_from = std::min(
+            scan_from, state.prospective->earliest_carrier_height);
+    }
+    if (scan_from == std::numeric_limits<int32_t>::max() ||
+        scan_from > active_tip.nHeight) {
+        m_btcc_preseal_recovery_runtime = {};
+        state.active.reset();
+        return true;
+    }
+
+    const CChain& active_chain{m_chainman.ActiveChain()};
+    const int32_t floor_height{scan_from - 1};
+    const CBlockIndex* floor{
+        floor_height < 0 ? nullptr : active_chain[floor_height]};
+    if (floor_height >= 0 && floor == nullptr) return false;
+    const uint256 floor_hash{
+        floor == nullptr ? uint256{} : floor->GetBlockHash()};
+    const auto plan{
+        m_btcc_preseal_recovery_runtime.frontier.Plan(
+            active_chain, active_tip, floor_height, floor_hash,
+            BoundedBTCCPresealSourceToken(
+                state,
+                m_chainman.GetPQProvenanceRevocationRevision()),
+            HistoricalIndexValidationCache::BLOCK_BUDGET)};
+    if (plan.reset) {
+        m_btcc_preseal_recovery_runtime.recovered.reset();
+    }
+    if (plan.status == BoundedActiveRangeStatus::INVALID) return false;
+
+    if (plan.status == BoundedActiveRangeStatus::WORK) {
+        for (int32_t height{plan.first_height};
+             height <= plan.last_height; ++height) {
+            if (!pq::IsBTCCReceiptCarrierHeight(
+                    m_config->btcc_schedule, height)) {
+                continue;
+            }
+            const CBlockIndex* carrier{active_chain[height]};
+            CBlock block;
+            pq::BTCCReceipt receipt;
+            // Keep the durable branch obligations unchanged until every
+            // carrier in the exact active prefix has been inspected.
+            if (carrier == nullptr ||
+                !m_chainman.m_blockman.ReadBlockFromDisk(block, *carrier) ||
+                !ExtractBTCCReceipt(block, receipt) ||
+                !pq::ValidateBTCCReceiptOnBranch(
+                    m_config->btcc_schedule, *carrier, receipt)) {
+                (void)m_btcc_preseal_recovery_runtime.frontier.CommitThrough(
+                    active_chain, height - 1);
+                return false;
+            }
+            if (receipt.IsNull() ||
+                IsBTCCPrefixAuthenticated(*carrier) ||
+                CheckBTCCReceiptCertificate(receipt, *carrier) ==
+                    BTCCReceiptCertificateStatus::VERIFIED) {
+                continue;
+            }
+            const auto predecessor_state{
+                carrier->pprev == nullptr
+                    ? std::optional<pq::BTCCReceiptState>{}
+                    : IndexedBTCCReceiptState(*carrier->pprev)};
+            if (!predecessor_state) {
+                (void)m_btcc_preseal_recovery_runtime.frontier.CommitThrough(
+                    active_chain, height - 1);
+                return false;
+            }
+            auto& recovered{m_btcc_preseal_recovery_runtime.recovered};
+            if (!recovered) {
+                recovered = pq::BTCCPresealMarker{
+                    carrier->nHeight,
+                    carrier->GetBlockHash(),
+                    *predecessor_state,
+                    carrier->nHeight,
+                    carrier->GetBlockHash(),
+                    receipt,
+                    uint64_t{1}};
+            } else {
+                recovered->terminal_carrier_height = carrier->nHeight;
+                recovered->terminal_carrier_hash = carrier->GetBlockHash();
+                recovered->terminal_receipt = receipt;
+            }
+        }
+        if (!m_btcc_preseal_recovery_runtime.frontier.CommitThrough(
+                active_chain, plan.last_height)) {
+            return false;
+        }
+    }
+    if (!m_btcc_preseal_recovery_runtime.frontier.IsComplete(active_tip)) {
+        return false;
+    }
+    if (m_btcc_preseal_recovery_runtime.recovered) {
+        const auto& recovered{*m_btcc_preseal_recovery_runtime.recovered};
+        const CBlockIndex* terminal{
+            active_chain[recovered.terminal_carrier_height]};
+        if (terminal == nullptr ||
+            terminal->GetBlockHash() !=
+                recovered.terminal_carrier_hash) {
+            m_btcc_preseal_recovery_runtime = {};
+            return false;
+        }
+        // Accepted winners and archived certificates only add authority.
+        // Recheck the compressed terminal before publication so progress is
+        // not reset by each newer winner, yet an obligation which became
+        // fully authenticated during a long scan is never persisted.
+        if (IsBTCCPrefixAuthenticated(*terminal) ||
+            CheckBTCCReceiptCertificate(
+                recovered.terminal_receipt, *terminal) ==
+                BTCCReceiptCertificateStatus::VERIFIED) {
+            m_btcc_preseal_recovery_runtime.recovered.reset();
+        }
+    }
+    state.active = m_btcc_preseal_recovery_runtime.recovered;
+    m_btcc_preseal_recovery_runtime = {};
+    return true;
+}
+
+std::optional<int32_t>
+CChainLocksHandler::AdvanceBTCCReplayValidationBounded(
+    const CBlockIndex& active_tip,
+    const pq::BTCCPresealState& state,
+    int32_t authenticated_through)
+{
+    AssertLockHeld(cs_main);
+    if (!m_config || authenticated_through < 0 ||
+        authenticated_through > active_tip.nHeight) {
+        return std::nullopt;
+    }
+    const CChain& active_chain{m_chainman.ActiveChain()};
+    const CBlockIndex* floor{active_chain[authenticated_through]};
+    if (floor == nullptr) return std::nullopt;
+    const auto plan{m_btcc_replay_validation_frontier.Plan(
+        active_chain, active_tip, authenticated_through,
+        floor->GetBlockHash(),
+        BoundedBTCCPresealSourceToken(
+            state,
+            m_chainman.GetPQProvenanceRevocationRevision()),
+        HistoricalIndexValidationCache::BLOCK_BUDGET)};
+    if (plan.status == BoundedActiveRangeStatus::INVALID) {
+        return std::nullopt;
+    }
+    if (plan.status == BoundedActiveRangeStatus::WORK) {
+        for (int32_t height{plan.first_height};
+             height <= plan.last_height; ++height) {
+            if (!pq::IsBTCCReceiptCarrierHeight(
+                    m_config->btcc_schedule, height)) {
+                continue;
+            }
+            const CBlockIndex* carrier{active_chain[height]};
+            CBlock block;
+            pq::BTCCReceipt receipt;
+            if (carrier == nullptr ||
+                !m_chainman.m_blockman.ReadBlockFromDisk(block, *carrier) ||
+                !ExtractBTCCReceipt(block, receipt) ||
+                (!receipt.IsNull() &&
+                 CheckBTCCReceiptCertificate(receipt, *carrier) !=
+                     BTCCReceiptCertificateStatus::VERIFIED)) {
+                if (!m_btcc_replay_validation_frontier.CommitThrough(
+                        active_chain, height - 1)) {
+                    return std::nullopt;
+                }
+                return height - 1;
+            }
+        }
+        if (!m_btcc_replay_validation_frontier.CommitThrough(
+                active_chain, plan.last_height)) {
+            return std::nullopt;
+        }
+    }
+    return m_btcc_replay_validation_frontier.ValidatedThroughHeight();
+}
+
 void CChainLocksHandler::MaybeReplayBTCCPreseal()
 {
     pq::BTCCPresealState durable;
@@ -6019,67 +6268,7 @@ void CChainLocksHandler::MaybeReplayBTCCPreseal()
             // A marker can become stale only after a branch transition. Scan
             // from the earliest still-durable boundary before retiring it, so
             // an earlier active B@1100 is never lost to prospective A@1110.
-            int32_t scan_from{std::numeric_limits<int32_t>::max()};
-            if (next.active) {
-                scan_from = std::min(scan_from,
-                                     next.active->earliest_carrier_height);
-            }
-            if (next.prospective) {
-                scan_from = std::min(scan_from,
-                                     next.prospective->earliest_carrier_height);
-            }
-            std::optional<pq::BTCCPresealMarker> recovered;
-            if (scan_from != std::numeric_limits<int32_t>::max() &&
-                scan_from <= active_tip->nHeight) {
-                for (int32_t height{scan_from};
-                     height <= active_tip->nHeight; ++height) {
-                    if (!pq::IsBTCCReceiptCarrierHeight(
-                            m_config->btcc_schedule, height)) {
-                        continue;
-                    }
-                    const CBlockIndex* carrier{
-                        active_tip->GetAncestor(height)};
-                    CBlock block;
-                    pq::BTCCReceipt receipt;
-                    // Disk/transient failures retain both old obligations and
-                    // retry later; they never authorize clearing the boundary.
-                    if (carrier == nullptr ||
-                        !m_chainman.m_blockman.ReadBlockFromDisk(
-                            block, *carrier) ||
-                        !ExtractBTCCReceipt(block, receipt) ||
-                        !pq::ValidateBTCCReceiptOnBranch(
-                            m_config->btcc_schedule, *carrier, receipt)) {
-                        return;
-                    }
-                    if (receipt.IsNull() ||
-                        IsBTCCPrefixAuthenticated(*carrier) ||
-                        CheckBTCCReceiptCertificate(receipt, *carrier) ==
-                            BTCCReceiptCertificateStatus::VERIFIED) {
-                        continue;
-                    }
-                    const auto predecessor_state{
-                        carrier->pprev == nullptr
-                            ? std::optional<pq::BTCCReceiptState>{}
-                            : IndexedBTCCReceiptState(*carrier->pprev)};
-                    if (!predecessor_state) return;
-                    if (!recovered) {
-                        recovered = pq::BTCCPresealMarker{
-                            carrier->nHeight,
-                            carrier->GetBlockHash(),
-                            *predecessor_state,
-                            carrier->nHeight,
-                            carrier->GetBlockHash(),
-                            receipt,
-                            uint64_t{1}};
-                    } else {
-                        recovered->terminal_carrier_height = carrier->nHeight;
-                        recovered->terminal_carrier_hash =
-                            carrier->GetBlockHash();
-                        recovered->terminal_receipt = receipt;
-                    }
-                }
-            }
-            next.active = recovered;
+            if (!RecoverActiveBTCCPresealBounded(*active_tip, next)) return;
         }
 
         // A losing prospective branch is no longer a replay obligation once
@@ -6134,28 +6323,11 @@ void CChainLocksHandler::MaybeReplayBTCCPreseal()
             }
         }
         if (authenticated_through >= marker->terminal_carrier_height) {
-            replay_through = active_tip->nHeight;
-            for (int32_t height{authenticated_through + 1};
-                 height <= active_tip->nHeight; ++height) {
-                if (!pq::IsBTCCReceiptCarrierHeight(
-                        m_config->btcc_schedule, height)) {
-                    continue;
-                }
-                const CBlockIndex* carrier{
-                    active_tip->GetAncestor(height)};
-                CBlock block;
-                pq::BTCCReceipt receipt;
-                if (carrier == nullptr ||
-                    !m_chainman.m_blockman.ReadBlockFromDisk(
-                        block, *carrier) ||
-                    !ExtractBTCCReceipt(block, receipt) ||
-                    (!receipt.IsNull() &&
-                     CheckBTCCReceiptCertificate(receipt, *carrier) !=
-                         BTCCReceiptCertificateStatus::VERIFIED)) {
-                    replay_through = height - 1;
-                    break;
-                }
-            }
+            const auto validated_through{
+                AdvanceBTCCReplayValidationBounded(
+                    *active_tip, durable, authenticated_through)};
+            if (!validated_through) return;
+            replay_through = *validated_through;
             const CBlockIndex* replay_index{
                 active_tip->GetAncestor(replay_through)};
             if (replay_index != nullptr) {
@@ -6372,6 +6544,88 @@ CChainLocksHandler::ClassifyPaymentAuditSealContextCached(
 }
 
 std::optional<pq::BTCCReceiptState>
+CChainLocksHandler::RecomputeBTCCReceiptStateCached(
+    const CBlockIndex& target,
+    int32_t first_carrier_height,
+    const pq::BTCCReceiptState& initial_state,
+    const uint256& context_token,
+    bool* transient_failure,
+    std::size_t* examined_carriers) const
+{
+    AssertLockHeld(cs_main);
+    if (transient_failure != nullptr) *transient_failure = false;
+    if (examined_carriers != nullptr) *examined_carriers = 0;
+    if (!m_config || context_token.IsNull() ||
+        !initial_state.IsStructurallyValid() || first_carrier_height < 0 ||
+        target.nHeight < first_carrier_height ||
+        !pq::IsBTCCReceiptCarrierHeight(
+            m_config->btcc_schedule, first_carrier_height)) {
+        return std::nullopt;
+    }
+
+    auto& frontier{m_btcc_receipt_recompute_frontier};
+    const uint64_t provenance_revocation_revision{
+        m_chainman.GetPQProvenanceRevocationRevision()};
+    if (!frontier.initialized ||
+        frontier.context_token != context_token ||
+        frontier.provenance_revocation_revision !=
+            provenance_revocation_revision ||
+        frontier.target_height != target.nHeight ||
+        frontier.target_hash != target.GetBlockHash() ||
+        frontier.first_carrier_height != first_carrier_height ||
+        frontier.initial_state != initial_state) {
+        frontier = {};
+        frontier.initialized = true;
+        frontier.context_token = context_token;
+        frontier.provenance_revocation_revision =
+            provenance_revocation_revision;
+        frontier.target_height = target.nHeight;
+        frontier.target_hash = target.GetBlockHash();
+        frontier.first_carrier_height = first_carrier_height;
+        frontier.next_carrier_height = first_carrier_height;
+        frontier.initial_state = initial_state;
+        frontier.state = initial_state;
+    }
+
+    static constexpr std::size_t CARRIER_BUDGET{64};
+    std::size_t examined{0};
+    while (frontier.next_carrier_height <= target.nHeight &&
+           examined < CARRIER_BUDGET) {
+        const CBlockIndex* carrier{
+            target.GetAncestor(
+                static_cast<int32_t>(frontier.next_carrier_height))};
+        if (carrier == nullptr) return std::nullopt;
+        CBlock block;
+        if (!m_chainman.m_blockman.ReadBlockFromDisk(block, *carrier)) {
+            if (transient_failure != nullptr) *transient_failure = true;
+            return std::nullopt;
+        }
+        ++examined;
+        if (examined_carriers != nullptr) ++*examined_carriers;
+        pq::BTCCReceipt receipt;
+        if (!ExtractBTCCReceipt(block, receipt) ||
+            !pq::ValidateBTCCReceiptOnBranch(
+                m_config->btcc_schedule, *carrier, receipt)) {
+            return std::nullopt;
+        }
+        const auto next{pq::ApplyBTCCReceiptState(
+            m_chainman.GetConsensus().hashGenesisBlock,
+            m_config->chainlock_schedule, m_config->btcc_schedule,
+            carrier->nHeight, carrier->GetBlockHash(), frontier.state,
+            receipt)};
+        if (!next) return std::nullopt;
+        frontier.state = *next;
+        frontier.next_carrier_height +=
+            m_config->btcc_schedule.candidate_period;
+    }
+    if (frontier.next_carrier_height <= target.nHeight) {
+        if (transient_failure != nullptr) *transient_failure = true;
+        return std::nullopt;
+    }
+    return frontier.state;
+}
+
+std::optional<pq::BTCCReceiptState>
 CChainLocksHandler::GetCatchupHistoricalProof(
     const CBlockIndex& candidate,
     HistoricalAdmission admission) const
@@ -6457,10 +6711,11 @@ CChainLocksHandler::GetCatchupHistoricalProof(
                 return {std::nullopt, true};
             }
             bool transient_failure{false};
-            auto proof{RecomputeBTCCReceiptState(
-                m_chainman, candidate, *m_config,
+            auto proof{RecomputeBTCCReceiptStateCached(
+                candidate,
                 first_marker->earliest_carrier_height,
                 first_marker->predecessor_receipt_state,
+                context_token,
                 &transient_failure)};
             if (proof && *proof != *indexed) proof.reset();
             return {std::move(proof), !transient_failure};

@@ -539,6 +539,86 @@ BOOST_AUTO_TEST_CASE(
 }
 
 BOOST_AUTO_TEST_CASE(
+    bounded_active_range_frontier_is_branch_and_source_bound)
+{
+    constexpr std::size_t BLOCK_BUDGET{127};
+    constexpr int32_t FLOOR_HEIGHT{7};
+    constexpr int32_t LAST_HEIGHT{10'007};
+    constexpr std::size_t RANGE_SIZE{
+        static_cast<std::size_t>(LAST_HEIGHT - FLOOR_HEIGHT)};
+    LiveSigningIndexChain chain{
+        static_cast<std::size_t>(LAST_HEIGHT + 1)};
+    llmq::BoundedActiveRangeFrontier frontier;
+    const uint256 source{NonNullHash(199'000)};
+
+    LOCK(cs_main);
+    std::size_t calls{0};
+    for (;;) {
+        const auto plan{frontier.Plan(
+            chain.active, chain.At(LAST_HEIGHT), FLOOR_HEIGHT,
+            chain.At(FLOOR_HEIGHT).GetBlockHash(), source,
+            BLOCK_BUDGET)};
+        if (plan.status ==
+            llmq::BoundedActiveRangeStatus::COMPLETE) {
+            break;
+        }
+        BOOST_REQUIRE(plan.status ==
+                      llmq::BoundedActiveRangeStatus::WORK);
+        BOOST_CHECK_LE(
+            plan.last_height - plan.first_height + 1,
+            static_cast<int32_t>(BLOCK_BUDGET));
+        BOOST_REQUIRE(frontier.CommitThrough(
+            chain.active, plan.last_height));
+        ++calls;
+    }
+    BOOST_CHECK(frontier.IsComplete(chain.At(LAST_HEIGHT)));
+    BOOST_CHECK_EQUAL(calls,
+                      (RANGE_SIZE + BLOCK_BUDGET - 1) / BLOCK_BUDGET);
+
+    chain.RehashFrom(LAST_HEIGHT, 299'000);
+    const auto reorg_plan{frontier.Plan(
+        chain.active, chain.At(LAST_HEIGHT), FLOOR_HEIGHT,
+        chain.At(FLOOR_HEIGHT).GetBlockHash(), source, BLOCK_BUDGET)};
+    BOOST_REQUIRE(reorg_plan.status ==
+                  llmq::BoundedActiveRangeStatus::WORK);
+    BOOST_CHECK(reorg_plan.reset);
+    BOOST_CHECK_EQUAL(reorg_plan.first_height, FLOOR_HEIGHT + 1);
+    BOOST_CHECK(!frontier.CommitThrough(
+        chain.active, reorg_plan.last_height + 1));
+    BOOST_REQUIRE(frontier.CommitThrough(
+        chain.active, reorg_plan.last_height));
+
+    const auto new_source_plan{frontier.Plan(
+        chain.active, chain.At(LAST_HEIGHT), FLOOR_HEIGHT,
+        chain.At(FLOOR_HEIGHT).GetBlockHash(), NonNullHash(199'001),
+        BLOCK_BUDGET)};
+    BOOST_REQUIRE(new_source_plan.status ==
+                  llmq::BoundedActiveRangeStatus::WORK);
+    BOOST_CHECK(new_source_plan.reset);
+    BOOST_CHECK_EQUAL(new_source_plan.first_height, FLOOR_HEIGHT + 1);
+    const int32_t partial_through{new_source_plan.first_height + 20};
+    BOOST_REQUIRE(frontier.CommitThrough(
+        chain.active, partial_through));
+    const auto resumed_plan{frontier.Plan(
+        chain.active, chain.At(LAST_HEIGHT), FLOOR_HEIGHT,
+        chain.At(FLOOR_HEIGHT).GetBlockHash(), NonNullHash(199'001),
+        BLOCK_BUDGET)};
+    BOOST_REQUIRE(resumed_plan.status ==
+                  llmq::BoundedActiveRangeStatus::WORK);
+    BOOST_CHECK(!resumed_plan.reset);
+    BOOST_CHECK_EQUAL(resumed_plan.first_height, partial_through + 1);
+
+    const auto revoked_plan{frontier.Plan(
+        chain.active, chain.At(LAST_HEIGHT), FLOOR_HEIGHT,
+        chain.At(FLOOR_HEIGHT).GetBlockHash(), NonNullHash(199'002),
+        BLOCK_BUDGET)};
+    BOOST_REQUIRE(revoked_plan.status ==
+                  llmq::BoundedActiveRangeStatus::WORK);
+    BOOST_CHECK(revoked_plan.reset);
+    BOOST_CHECK_EQUAL(revoked_plan.first_height, FLOOR_HEIGHT + 1);
+}
+
+BOOST_AUTO_TEST_CASE(
     live_signing_frontier_retains_long_prefix_and_extends_only_delta)
 {
     using Access = llmq::test::CChainLocksHandlerTestAccess;

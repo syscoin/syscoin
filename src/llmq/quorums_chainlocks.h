@@ -728,6 +728,58 @@ private:
     std::size_t m_clock{0};
 };
 
+enum class BoundedActiveRangeStatus : uint8_t {
+    INVALID = 0,
+    COMPLETE,
+    WORK,
+};
+
+struct BoundedActiveRangePlan {
+    BoundedActiveRangeStatus status{BoundedActiveRangeStatus::INVALID};
+    int32_t first_height{-1};
+    int32_t last_height{-1};
+    bool reset{false};
+};
+
+/** Process-local progress over one exact active-chain source and floor. */
+class BoundedActiveRangeFrontier final {
+public:
+    [[nodiscard]] BoundedActiveRangePlan Plan(
+        const CChain& active_chain,
+        const CBlockIndex& active_tip,
+        int32_t floor_height,
+        const uint256& floor_hash,
+        const uint256& source_token,
+        std::size_t block_budget)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
+    [[nodiscard]] bool CommitThrough(
+        const CChain& active_chain,
+        int32_t through_height)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
+    [[nodiscard]] bool IsComplete(
+        const CBlockIndex& active_tip) const noexcept
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
+    [[nodiscard]] int32_t ValidatedThroughHeight() const noexcept
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+    {
+        return m_validated_through_height;
+    }
+
+private:
+    bool m_initialized{false};
+    uint256 m_source_token;
+    int32_t m_floor_height{-1};
+    uint256 m_floor_hash;
+    int32_t m_validated_through_height{-1};
+    uint256 m_validated_through_hash;
+    bool m_plan_pending{false};
+    int32_t m_planned_first{-1};
+    int32_t m_planned_last{-1};
+};
+
 enum class PaymentAuditSealValidation : uint8_t {
     LIVE_EXACT = 0,
     THRESHOLD_ATTESTED_HISTORY,
@@ -1156,6 +1208,23 @@ private:
         uint256 validated_through_hash;
     };
 
+    struct BTCCReceiptRecomputeFrontier {
+        bool initialized{false};
+        uint256 context_token;
+        uint64_t provenance_revocation_revision{0};
+        int32_t target_height{-1};
+        uint256 target_hash;
+        int32_t first_carrier_height{-1};
+        int64_t next_carrier_height{-1};
+        pq::BTCCReceiptState initial_state;
+        pq::BTCCReceiptState state;
+    };
+
+    struct BTCCPresealRecoveryRuntime {
+        BoundedActiveRangeFrontier frontier;
+        std::optional<pq::BTCCPresealMarker> recovered;
+    };
+
     struct CurrentSigningContexts {
         static constexpr std::size_t MAX_VARIANTS{2};
 
@@ -1219,6 +1288,25 @@ private:
         const CBlockIndex* seal, int32_t expected_height,
         int32_t predecessor_height, const uint256& predecessor_hash,
         PaymentAuditSealValidation validation) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    [[nodiscard]] std::optional<pq::BTCCReceiptState>
+    RecomputeBTCCReceiptStateCached(
+        const CBlockIndex& target,
+        int32_t first_carrier_height,
+        const pq::BTCCReceiptState& initial_state,
+        const uint256& context_token,
+        bool* transient_failure = nullptr,
+        std::size_t* examined_carriers = nullptr) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    [[nodiscard]] bool RecoverActiveBTCCPresealBounded(
+        const CBlockIndex& active_tip,
+        pq::BTCCPresealState& state)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    [[nodiscard]] std::optional<int32_t>
+    AdvanceBTCCReplayValidationBounded(
+        const CBlockIndex& active_tip,
+        const pq::BTCCPresealState& state,
+        int32_t authenticated_through)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     [[nodiscard]] std::optional<pq::BTCCReceiptState>
     GetCatchupHistoricalProof(const CBlockIndex& candidate,
@@ -1837,6 +1925,12 @@ private:
         GUARDED_BY(m_context_build_mutex){0};
     mutable HistoricalIndexValidationCache
         m_historical_index_validation_cache GUARDED_BY(cs_main);
+    mutable BTCCReceiptRecomputeFrontier
+        m_btcc_receipt_recompute_frontier GUARDED_BY(cs_main);
+    BTCCPresealRecoveryRuntime m_btcc_preseal_recovery_runtime
+        GUARDED_BY(cs_main);
+    BoundedActiveRangeFrontier m_btcc_replay_validation_frontier
+        GUARDED_BY(cs_main);
     std::unique_ptr<CPQSignerJournal> m_signer_journal;
     Mutex m_signer_reconcile_mutex;
     Mutex m_share_signing_mutex;
