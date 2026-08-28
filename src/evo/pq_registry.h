@@ -317,6 +317,10 @@ struct PQRegistryError {
 [[nodiscard]] std::string_view PQRegistryResultString(
     PQRegistryResult result) noexcept;
 
+/** Whether a registry preparation result reflects local auxiliary state. */
+[[nodiscard]] bool IsPQRegistryLocalFailure(
+    PQRegistryResult result) noexcept;
+
 struct PQRegistryCallbacks {
     std::function<bool(const uint256&)> dmn_exists_before;
     std::function<bool(const uint256&)> dmn_exists_after;

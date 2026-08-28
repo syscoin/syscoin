@@ -666,6 +666,48 @@ struct EmptyRootedGCHistory {
 
 BOOST_FIXTURE_TEST_SUITE(pq_registry_tests, BasicTestingSetup)
 
+BOOST_AUTO_TEST_CASE(local_failures_are_not_candidate_failures)
+{
+    constexpr std::array LOCAL_FAILURES{
+        PQRegistryResult::INVALID_CONFIGURATION,
+        PQRegistryResult::MISSING_PARENT_SNAPSHOT,
+        PQRegistryResult::INVALID_SCHEDULE,
+        PQRegistryResult::CALLBACK_MISSING,
+        PQRegistryResult::CALLBACK_FAILED,
+        PQRegistryResult::PARENT_DMN_MISMATCH,
+        PQRegistryResult::SNAPSHOT_NOT_FOUND,
+        PQRegistryResult::SNAPSHOT_CORRUPT,
+        PQRegistryResult::SNAPSHOT_CONFLICT,
+        PQRegistryResult::HISTORY_PRUNED,
+        PQRegistryResult::FLOOR_CONFLICT,
+        PQRegistryResult::PERSISTENCE_FAILED,
+        PQRegistryResult::UNDO_MISMATCH,
+        PQRegistryResult::INTERNAL_ERROR,
+    };
+    for (const auto result : LOCAL_FAILURES) {
+        BOOST_CHECK(IsPQRegistryLocalFailure(result));
+    }
+
+    constexpr std::array CANDIDATE_FAILURES{
+        PQRegistryResult::INVALID_BLOCK,
+        PQRegistryResult::PQ_TX_BEFORE_PREPARATION,
+        PQRegistryResult::DMN_MISSING_AT_PARENT,
+        PQRegistryResult::DMN_REMOVED_IN_BLOCK,
+        PQRegistryResult::DUPLICATE_OPERATOR_UPDATE,
+        PQRegistryResult::DUPLICATE_GLOBAL_KEY,
+        PQRegistryResult::DUPLICATE_CHILD_TREE_ID,
+        PQRegistryResult::INVALID_GLOBAL_KEY_PAYLOAD,
+        PQRegistryResult::INVALID_PROVIDER_REVOCATION_PAYLOAD,
+        PQRegistryResult::TRANSACTION_INPUTS_HASH_MISMATCH,
+        PQRegistryResult::OWNER_AUTHORIZATION_FAILED,
+        PQRegistryResult::OPERATOR_STATE_TRANSITION_FAILED,
+        PQRegistryResult::INVALID_RESULTING_STATE,
+    };
+    for (const auto result : CANDIDATE_FAILURES) {
+        BOOST_CHECK(!IsPQRegistryLocalFailure(result));
+    }
+}
+
 BOOST_AUTO_TEST_CASE(empty_registry_consensus_root_is_frozen)
 {
     PQRegistrySnapshot empty;

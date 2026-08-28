@@ -2565,6 +2565,15 @@ bool CDeterministicMNManager::ProcessBlock(const CBlock& block, const CBlockInde
                           std::string{llmq::pq::PQRegistryResultString(
                               pq_registry_error.result)},
                           static_cast<unsigned>(pq_registry_error.state_result));
+                if (llmq::pq::IsPQRegistryLocalFailure(
+                        pq_registry_error.result)) {
+                    // SYSCOIN: A missing, corrupt, or stale auxiliary view
+                    // says nothing about validity of the candidate block.
+                    return _state.Error(strprintf(
+                        "failed-pq-registry-prepare-%s",
+                        std::string{llmq::pq::PQRegistryResultString(
+                            pq_registry_error.result)}));
+                }
                 return _state.Invalid(
                     BlockValidationResult::BLOCK_CONSENSUS,
                     strprintf("bad-pq-%s",

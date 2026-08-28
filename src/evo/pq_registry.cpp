@@ -1318,6 +1318,43 @@ std::string_view PQRegistryResultString(PQRegistryResult result) noexcept
     return "unknown";
 }
 
+bool IsPQRegistryLocalFailure(PQRegistryResult result) noexcept
+{
+    switch (result) {
+    case PQRegistryResult::INVALID_CONFIGURATION:
+    case PQRegistryResult::MISSING_PARENT_SNAPSHOT:
+    case PQRegistryResult::INVALID_SCHEDULE:
+    case PQRegistryResult::CALLBACK_MISSING:
+    case PQRegistryResult::CALLBACK_FAILED:
+    case PQRegistryResult::PARENT_DMN_MISMATCH:
+    case PQRegistryResult::SNAPSHOT_NOT_FOUND:
+    case PQRegistryResult::SNAPSHOT_CORRUPT:
+    case PQRegistryResult::SNAPSHOT_CONFLICT:
+    case PQRegistryResult::HISTORY_PRUNED:
+    case PQRegistryResult::FLOOR_CONFLICT:
+    case PQRegistryResult::PERSISTENCE_FAILED:
+    case PQRegistryResult::UNDO_MISMATCH:
+    case PQRegistryResult::INTERNAL_ERROR:
+        return true;
+    case PQRegistryResult::OK:
+    case PQRegistryResult::INVALID_BLOCK:
+    case PQRegistryResult::PQ_TX_BEFORE_PREPARATION:
+    case PQRegistryResult::DMN_MISSING_AT_PARENT:
+    case PQRegistryResult::DMN_REMOVED_IN_BLOCK:
+    case PQRegistryResult::DUPLICATE_OPERATOR_UPDATE:
+    case PQRegistryResult::DUPLICATE_GLOBAL_KEY:
+    case PQRegistryResult::DUPLICATE_CHILD_TREE_ID:
+    case PQRegistryResult::INVALID_GLOBAL_KEY_PAYLOAD:
+    case PQRegistryResult::INVALID_PROVIDER_REVOCATION_PAYLOAD:
+    case PQRegistryResult::TRANSACTION_INPUTS_HASH_MISMATCH:
+    case PQRegistryResult::OWNER_AUTHORIZATION_FAILED:
+    case PQRegistryResult::OPERATOR_STATE_TRANSITION_FAILED:
+    case PQRegistryResult::INVALID_RESULTING_STATE:
+        return false;
+    }
+    return true;
+}
+
 bool PQRegistryCallbacks::HasMembershipCallbacks() const noexcept
 {
     return static_cast<bool>(dmn_exists_before) &&
