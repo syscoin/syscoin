@@ -467,6 +467,7 @@ struct AuxiliaryHistoryGCJournal::Impl {
                     "unknown auxiliary-history GC key"};
             }
         }
+        iterator->CheckStatus();
 
         const DiskSchema expected{
             AuxiliaryHistoryGCJournal::DB_FORMAT_VERSION, SCHEMA_GUARD,
