@@ -34,8 +34,6 @@ constexpr std::string_view DMN_INVERSE_BASE_DOMAIN{
     "SYS_DMN_INVERSE_BASE_V1"};
 constexpr std::string_view DMN_INVERSE_HISTORY_DOMAIN{
     "SYS_DMN_INVERSE_HISTORY_V1"};
-constexpr std::string_view DMN_SNAPSHOT_GC_PLAN_DOMAIN{
-    "SYS_DMN_SNAPSHOT_GC_PLAN_V1"};
 
 uint256 GetDMNInverseBaseCommitment(
     const uint256& genesis_hash,
@@ -366,26 +364,6 @@ std::vector<uint256> CollectRetainedSnapshotWindow(
     return ordered_hashes;
 }
 
-uint256 GetSnapshotGCPlanId(
-    const uint256& tip_hash,
-    uint64_t retention_generation,
-    uint64_t persistence_generation,
-    const EvoEraseSet& retained_hashes,
-    std::optional<int32_t> finality_retention_floor)
-{
-    std::vector<uint256> ordered_hashes{
-        retained_hashes.begin(), retained_hashes.end()};
-    std::sort(ordered_hashes.begin(), ordered_hashes.end());
-    CHashWriter writer{SER_GETHASH, 0};
-    writer.write(AsBytes(Span{DMN_SNAPSHOT_GC_PLAN_DOMAIN.data(),
-                              DMN_SNAPSHOT_GC_PLAN_DOMAIN.size()}));
-    writer << tip_hash << retention_generation << persistence_generation
-           << finality_retention_floor.value_or(
-                  std::numeric_limits<int32_t>::max())
-           << ordered_hashes;
-    return writer.GetHash();
-}
-
 bool CollectPersistedKeysOutsideWindowBounded(
     CEvoDB<uint256, CDeterministicMNList, StaticSaltedHasher>& evo_db,
     const EvoEraseSet& retained_hashes,
@@ -402,6 +380,7 @@ bool CollectPersistedKeysOutsideWindowBounded(
     scanned_value_bytes = 0;
     next_resume_after_key.reset();
     complete = false;
+    if (resume_after_key && !finality_retention_floor) return false;
     std::unique_ptr<CDBIterator> cursor(evo_db.NewIterator());
     if (!cursor) {
         LogPrint(BCLog::SYS, "CDeterministicMNManager::%s -- Failed to create EvoDB iterator\n", __func__);
@@ -432,39 +411,37 @@ bool CollectPersistedKeysOutsideWindowBounded(
         // key into a different canonical snapshot identity.
         if (!cursor->GetKeyExact(key)) return false;
 
-        const size_t value_size{cursor->GetValueSize()};
-        if (value_size >
-            CDeterministicMNManager::SNAPSHOT_GC_MAX_RECORD_BYTES) {
-            LogPrintf("CDeterministicMNManager::%s -- oversized persisted "
-                      "snapshot %s size=%zu\n",
-                      __func__, key.ToString(), value_size);
-            return false;
-        }
-        const bool exceeds_soft_value_budget{
-            scanned_value_bytes >=
-                CDeterministicMNManager::
-                    SNAPSHOT_GC_MAX_SCANNED_VALUE_BYTES_PER_PASS ||
-            value_size >
-                CDeterministicMNManager::
-                        SNAPSHOT_GC_MAX_SCANNED_VALUE_BYTES_PER_PASS -
-                    scanned_value_bytes};
-        // SYSCOIN: Admit one schema-bounded first record so a legitimate
-        // large snapshot cannot pin the cursor forever.
-        if (scanned_snapshot_count != 0 &&
-            exceeds_soft_value_budget) {
-            break;
-        }
-
-        ++scanned_snapshot_count;
-        scanned_value_bytes += value_size;
-        last_key = key;
         if (retained_hashes.count(key) != 0) {
+            ++scanned_snapshot_count;
+            last_key = key;
             cursor->Next();
             continue;
         }
 
         std::optional<int32_t> snapshot_height;
         if (finality_retention_floor) {
+            const size_t value_size{cursor->GetValueSize()};
+            if (value_size >
+                CDeterministicMNManager::SNAPSHOT_GC_MAX_RECORD_BYTES) {
+                LogPrintf("CDeterministicMNManager::%s -- oversized "
+                          "persisted snapshot %s size=%zu\n",
+                          __func__, key.ToString(), value_size);
+                return false;
+            }
+            const bool exceeds_soft_value_budget{
+                scanned_value_bytes >=
+                    CDeterministicMNManager::
+                        SNAPSHOT_GC_MAX_SCANNED_VALUE_BYTES_PER_PASS ||
+                value_size >
+                    CDeterministicMNManager::
+                            SNAPSHOT_GC_MAX_SCANNED_VALUE_BYTES_PER_PASS -
+                        scanned_value_bytes};
+            // SYSCOIN: Admit one schema-bounded decoded record so a
+            // legitimate large snapshot cannot pin the cursor forever.
+            if (scanned_value_bytes != 0 && exceeds_soft_value_budget) {
+                break;
+            }
+            scanned_value_bytes += value_size;
             CDeterministicMNList snapshot;
             if (!cursor->GetValueExact(snapshot) ||
                 snapshot.IsNull() ||
@@ -480,6 +457,8 @@ bool CollectPersistedKeysOutsideWindowBounded(
             }
             snapshot_height = snapshot.GetHeight();
         }
+        ++scanned_snapshot_count;
+        last_key = key;
         if (snapshot_height &&
             *snapshot_height >= *finality_retention_floor) {
             cursor->Next();
@@ -493,8 +472,19 @@ bool CollectPersistedKeysOutsideWindowBounded(
     cursor->CheckStatus();
     complete = !cursor->Valid();
     if (!complete) {
-        if (!last_key) return false;
-        next_resume_after_key = *last_key;
+        if (!finality_retention_floor) {
+            // SYSCOIN: With no height-retained side set, the visit bound
+            // exceeds every explicitly retained key by one full erase batch.
+            // A non-terminal pass must therefore have reclaimed that batch.
+            if (prune_keys.size() !=
+                CDeterministicMNManager::
+                    SNAPSHOT_GC_MAX_ERASE_ITEMS_PER_PASS) {
+                return false;
+            }
+        } else {
+            if (!last_key) return false;
+            next_resume_after_key = *last_key;
+        }
     }
 
     return true;
@@ -5447,6 +5437,13 @@ bool CDeterministicMNManager::DoMaintenance(
                         return left->GetBlockHash() == right->GetBlockHash();
                     }),
         recovery_indexes.end());
+    if (recovery_indexes.size() > MAX_RECOVERY_SNAPSHOT_HEADS) {
+        LogPrintf("%s -- too many distinct chainstate recovery markers: "
+                  "%zu > %zu\n",
+                  __func__, recovery_indexes.size(),
+                  MAX_RECOVERY_SNAPSHOT_HEADS);
+        return false;
+    }
     std::vector<uint256> recovery_hashes;
     recovery_hashes.reserve(recovery_indexes.size());
     for (const CBlockIndex* pindex : recovery_indexes) {
@@ -5595,7 +5592,7 @@ bool CDeterministicMNManager::DoMaintenance(
 
     std::vector<uint256> retained_hashes_ordered;
     EvoEraseSet retained_hashes;
-    retained_hashes.reserve(LIST_CACHE_SIZE * 2 + recovery_hashes.size());
+    retained_hashes.reserve(SNAPSHOT_GC_MAX_RETAINED_KEYS);
     for (const auto& branch : retention_plan.branches) {
         retained_hashes.insert(branch.snapshot_window.begin(),
                                branch.snapshot_window.end());
@@ -5605,6 +5602,13 @@ bool CDeterministicMNManager::DoMaintenance(
     }
     for (const auto& dependency : retention_plan.fixed_dependencies) {
         retained_hashes.insert(dependency.block_hash);
+    }
+    if (retained_hashes.size() > SNAPSHOT_GC_MAX_RETAINED_KEYS) {
+        LogPrintf("%s -- snapshot retention set exceeds production bound: "
+                  "%zu > %zu\n",
+                  __func__, retained_hashes.size(),
+                  SNAPSHOT_GC_MAX_RETAINED_KEYS);
+        return false;
     }
 
     LogPrint(BCLog::SYS,
@@ -5747,12 +5751,18 @@ bool CDeterministicMNManager::DoMaintenance(
                   __func__);
         return false;
     }
+    if (retained_hashes.size() > SNAPSHOT_GC_MAX_RETAINED_KEYS) {
+        LogPrintf("%s -- durable snapshot retention set exceeds production "
+                  "bound: %zu > %zu\n",
+                  __func__, retained_hashes.size(),
+                  SNAPSHOT_GC_MAX_RETAINED_KEYS);
+        return false;
+    }
 
     std::vector<uint256> prune_keys;
     size_t scanned_snapshot_count{0};
     size_t scanned_snapshot_value_bytes{0};
     bool snapshot_gc_complete{true};
-    std::optional<uint256> snapshot_gc_plan_id;
     std::optional<uint256> snapshot_gc_next_resume_after_key;
     const uint64_t snapshot_persistence_generation{
         m_snapshot_persistence_generation.load(std::memory_order_relaxed)};
@@ -5770,21 +5780,26 @@ bool CDeterministicMNManager::DoMaintenance(
         LOCK(cs);
         m_snapshot_gc_scan_progress.reset();
     } else {
-        snapshot_gc_plan_id = GetSnapshotGCPlanId(
-            tip_hash, retention_plan.generation,
-            snapshot_persistence_generation, retained_hashes,
-            retention_plan.finality_roster_floor);
         std::optional<uint256> resume_after_key;
-        {
+        if (retention_plan.finality_roster_floor) {
             LOCK(cs);
             if (!m_snapshot_gc_scan_progress ||
-                m_snapshot_gc_scan_progress->plan_id !=
-                    *snapshot_gc_plan_id) {
+                m_snapshot_gc_scan_progress->finality_roster_floor !=
+                    *retention_plan.finality_roster_floor) {
+                // SYSCOIN: Advancing/replacing the height-retention authority
+                // can make keys behind the old cursor newly erasable.
                 m_snapshot_gc_scan_progress = SnapshotGCScanProgress{
-                    *snapshot_gc_plan_id, std::nullopt};
+                    *retention_plan.finality_roster_floor, std::nullopt};
             }
             resume_after_key =
                 m_snapshot_gc_scan_progress->resume_after_key;
+        } else {
+            // SYSCOIN: At most five branch windows plus fixed dependencies
+            // are retained without a height floor. Restarting from the first
+            // key therefore guarantees a full erase batch every incomplete
+            // pass and needs no cursor state.
+            LOCK(cs);
+            m_snapshot_gc_scan_progress.reset();
         }
         if (!CollectPersistedKeysOutsideWindowBounded(
                 *m_evoDb, retained_hashes,
@@ -5808,10 +5823,12 @@ bool CDeterministicMNManager::DoMaintenance(
     }
     {
         LOCK(cs);
-        if (snapshot_gc_plan_id) {
-            if (!m_snapshot_gc_scan_progress ||
-                m_snapshot_gc_scan_progress->plan_id !=
-                    *snapshot_gc_plan_id) {
+        if (!retention_plan.replay_floor &&
+            !retain_all_finality_snapshots &&
+            retention_plan.finality_roster_floor) {
+            if (!m_snapshot_gc_scan_progress) return false;
+            if (m_snapshot_gc_scan_progress->finality_roster_floor !=
+                *retention_plan.finality_roster_floor) {
                 return false;
             }
             if (snapshot_gc_complete) {

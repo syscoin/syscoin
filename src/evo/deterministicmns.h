@@ -719,13 +719,24 @@ public:
     // and must never be inferred from this cache size.
     static constexpr int LIST_CACHE_SIZE = DISK_SNAPSHOT_PERIOD * DISK_SNAPSHOTS;
     static constexpr int HOT_LIST_CACHE_SIZE = 128;
+    // SYSCOIN: ChainstateManager persists at most two chainstates and each
+    // exposes at most two distinct coins-recovery markers.
+    static constexpr std::size_t MAX_RECOVERY_SNAPSHOT_HEADS{4};
+    static constexpr std::size_t SNAPSHOT_GC_MAX_FIXED_RETAINED_KEYS{8};
+    static constexpr std::size_t SNAPSHOT_GC_MAX_RETAINED_KEYS{
+        (MAX_RECOVERY_SNAPSHOT_HEADS + 1) *
+            static_cast<std::size_t>(LIST_CACHE_SIZE) +
+        SNAPSHOT_GC_MAX_FIXED_RETAINED_KEYS};
+    static constexpr std::size_t SNAPSHOT_GC_MAX_ERASE_ITEMS_PER_PASS{256};
     // SYSCOIN: Full-snapshot compaction runs while chainstate is quiescent.
-    // These caps keep one recovery pass independent of outage duration.
-    static constexpr std::size_t SNAPSHOT_GC_MAX_SCANNED_RECORDS_PER_PASS{4096};
+    // One pass can cross every explicitly retained branch key and still
+    // reclaim a complete erase batch, independent of their hash ordering.
+    static constexpr std::size_t SNAPSHOT_GC_MAX_SCANNED_RECORDS_PER_PASS{
+        SNAPSHOT_GC_MAX_RETAINED_KEYS +
+        SNAPSHOT_GC_MAX_ERASE_ITEMS_PER_PASS};
     static constexpr std::size_t SNAPSHOT_GC_MAX_SCANNED_VALUE_BYTES_PER_PASS{
         64U << 20};
     static constexpr std::size_t SNAPSHOT_GC_MAX_RECORD_BYTES{256U << 20};
-    static constexpr std::size_t SNAPSHOT_GC_MAX_ERASE_ITEMS_PER_PASS{256};
     // SYSCOIN: Exact-parent payment selection is shared by consensus,
     // templates, governance, and RPC without retaining an unbounded branch
     // history.
@@ -781,11 +792,12 @@ private:
     std::vector<uint256> m_last_maintained_recovery_blocks GUARDED_BY(cs);
     uint64_t m_last_maintained_snapshot_persistence_generation
         GUARDED_BY(cs){0};
-    // SYSCOIN: Every full-snapshot insertion invalidates a hash-ordered
-    // compaction cursor, including a side-branch write before that cursor.
+    // SYSCOIN: Every full-snapshot insertion defeats the same-tip no-op. The
+    // cursor itself keeps moving across plan changes; each visited key is
+    // re-evaluated against the latest immutable retention plan.
     std::atomic<uint64_t> m_snapshot_persistence_generation{0};
     struct SnapshotGCScanProgress {
-        uint256 plan_id;
+        int32_t finality_roster_floor;
         std::optional<uint256> resume_after_key;
     };
     std::optional<SnapshotGCScanProgress> m_snapshot_gc_scan_progress

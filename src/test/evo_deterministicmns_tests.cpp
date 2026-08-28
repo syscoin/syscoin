@@ -98,6 +98,17 @@ static CDeterministicMNList MakeSnapshot(int height)
     return CDeterministicMNList(block_hash, height, 0);
 }
 
+static uint256 MakeOrderedSnapshotKey(uint8_t prefix, uint64_t ordinal)
+{
+    uint256 key;
+    key.SetNull();
+    key.begin()[0] = prefix;
+    for (size_t i{0}; i < sizeof(ordinal); ++i) {
+        key.begin()[i + 1] = static_cast<uint8_t>(ordinal >> (8 * i));
+    }
+    return key;
+}
+
 static CKeyID MakeAnchorKeyID(uint8_t seed)
 {
     CKeyID key_id;
@@ -2365,6 +2376,178 @@ BOOST_AUTO_TEST_CASE(snapshot_compaction_is_bounded_and_resumes_after_restart)
                 SNAPSHOT_GC_MAX_ERASE_ITEMS_PER_PASS));
     BOOST_CHECK(restarted.HasPersistentWindow());
     BOOST_CHECK_EQUAL(current_count, cache_limit);
+}
+
+BOOST_AUTO_TEST_CASE(snapshot_compaction_progresses_across_moving_tips)
+{
+    SelectParams(ChainType::MAIN);
+    const int cache_limit{CDeterministicMNManager::LIST_CACHE_SIZE};
+    const int start_height{Params().GetConsensus().DIP0003Height};
+    constexpr int stale_count{300};
+    std::array<SnapshotIndexChain, 5> branches;
+    for (size_t branch{0}; branch < branches.size(); ++branch) {
+        branches[branch] = BuildSnapshotIndexChain(
+            start_height, cache_limit + (branch == 0 ? 1 : 0));
+        for (size_t offset{0}; offset < branches[branch].hashes.size();
+             ++offset) {
+            branches[branch].hashes[offset] = MakeOrderedSnapshotKey(
+                static_cast<uint8_t>(0x10 + branch), offset);
+        }
+    }
+
+    CDeterministicMNManager manager(DBParams{
+        .path = "testdb_dmn_moving_tip_compaction",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    });
+    const CBlockIndex* first_tip{
+        branches[0].At(start_height + cache_limit - 1)};
+    manager.UpdatedBlockTip(first_tip);
+
+    size_t pending{0};
+    const auto persist = [&](const uint256& hash, int height) {
+        manager.m_evoDb->WriteCache(
+            hash, CDeterministicMNList{hash, height, 0});
+        if (++pending == 256) {
+            BOOST_REQUIRE(
+                manager.FlushPendingSnapshotsToDisk(/*fSync=*/true));
+            pending = 0;
+        }
+    };
+    for (size_t branch{0}; branch < branches.size(); ++branch) {
+        for (int offset{0}; offset < cache_limit; ++offset) {
+            persist(branches[branch].hashes[offset],
+                    start_height + offset);
+        }
+    }
+    std::array<uint256, stale_count> stale_hashes;
+    for (size_t offset{0}; offset < stale_hashes.size(); ++offset) {
+        stale_hashes[offset] = MakeOrderedSnapshotKey(0xe0, offset);
+        persist(stale_hashes[offset], start_height);
+    }
+    if (pending != 0) {
+        BOOST_REQUIRE(
+            manager.FlushPendingSnapshotsToDisk(/*fSync=*/true));
+    }
+
+    const std::array<const CBlockIndex*, 4> recovery{
+        branches[1].Tip(), branches[2].Tip(), branches[3].Tip(),
+        branches[4].Tip()};
+    const int64_t initial_count{
+        static_cast<int64_t>(branches.size()) * cache_limit + stale_count};
+    BOOST_REQUIRE_EQUAL(
+        manager.m_evoDb->CountPersistedEntries(), initial_count);
+    BOOST_REQUIRE(manager.FlushCacheToDisk(
+        /*bForceFlush=*/true, /*fSync=*/false, recovery));
+    BOOST_CHECK_EQUAL(
+        manager.m_evoDb->CountPersistedEntries(),
+        initial_count - static_cast<int64_t>(
+                            CDeterministicMNManager::
+                                SNAPSHOT_GC_MAX_ERASE_ITEMS_PER_PASS));
+    CDeterministicMNList snapshot;
+    BOOST_CHECK(!manager.m_evoDb->Read(stale_hashes.front(), snapshot));
+    BOOST_CHECK(!manager.HasPersistentWindow());
+
+    // A normal tip insertion changes one retained key but must not reset or
+    // starve snapshot compaction behind the five production branch windows.
+    const CBlockIndex* advanced_tip{branches[0].Tip()};
+    const uint256 advanced_hash{advanced_tip->GetBlockHash()};
+    BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+        advanced_hash,
+        CDeterministicMNList{
+            advanced_hash, advanced_tip->nHeight, 0},
+        /*fSync=*/true));
+    manager.UpdatedBlockTip(advanced_tip);
+    BOOST_REQUIRE(manager.FlushCacheToDisk(
+        /*bForceFlush=*/true, /*fSync=*/false, recovery));
+    BOOST_CHECK_EQUAL(
+        manager.m_evoDb->CountPersistedEntries(),
+        static_cast<int64_t>(branches.size()) * cache_limit);
+    BOOST_CHECK(manager.HasPersistentWindow());
+    BOOST_CHECK(!manager.m_evoDb->Read(
+        branches[0].hashes.front(), snapshot));
+    BOOST_REQUIRE(manager.m_evoDb->Read(advanced_hash, snapshot));
+
+    // Production supplies no more than four distinct recovery heads. Reject
+    // a structurally impossible caller instead of weakening the visit proof.
+    const std::array<const CBlockIndex*, 5> excessive_recovery{
+        advanced_tip, branches[1].Tip(), branches[2].Tip(),
+        branches[3].Tip(), branches[4].Tip()};
+    BOOST_CHECK(!manager.FlushCacheToDisk(
+        /*bForceFlush=*/true, /*fSync=*/false, excessive_recovery));
+}
+
+BOOST_AUTO_TEST_CASE(snapshot_compaction_restarts_when_finality_floor_advances)
+{
+    SelectParams(ChainType::MAIN);
+    const int cache_limit{CDeterministicMNManager::LIST_CACHE_SIZE};
+    const int start_height{Params().GetConsensus().DIP0003Height};
+    auto chain{BuildSnapshotIndexChain(start_height, cache_limit)};
+    for (size_t offset{0}; offset < chain.hashes.size(); ++offset) {
+        chain.hashes[offset] = MakeOrderedSnapshotKey(0xf0, offset);
+    }
+    const int side_height{chain.Tip()->nHeight - 1};
+    constexpr size_t side_count{
+        CDeterministicMNManager::
+            SNAPSHOT_GC_MAX_SCANNED_RECORDS_PER_PASS + 1};
+
+    CDeterministicMNManager manager(DBParams{
+        .path = "testdb_dmn_finality_floor_cursor",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    });
+    manager.UpdatedBlockTip(chain.Tip());
+    size_t pending{0};
+    const auto persist = [&](const uint256& hash, int height) {
+        manager.m_evoDb->WriteCache(
+            hash, CDeterministicMNList{hash, height, 0});
+        if (++pending == 256) {
+            BOOST_REQUIRE(
+                manager.FlushPendingSnapshotsToDisk(/*fSync=*/true));
+            pending = 0;
+        }
+    };
+    for (size_t offset{0}; offset < chain.hashes.size(); ++offset) {
+        persist(chain.hashes[offset], start_height + offset);
+    }
+    std::vector<uint256> side_hashes;
+    side_hashes.reserve(side_count);
+    for (size_t offset{0}; offset < side_count; ++offset) {
+        side_hashes.emplace_back(MakeOrderedSnapshotKey(0x10, offset));
+        persist(side_hashes.back(), side_height);
+    }
+    if (pending != 0) {
+        BOOST_REQUIRE(
+            manager.FlushPendingSnapshotsToDisk(/*fSync=*/true));
+    }
+
+    BOOST_CHECK_EQUAL(
+        manager.UpdateFinalitySnapshotRetentionFloor(side_height),
+        side_height);
+    const int64_t initial_count{
+        static_cast<int64_t>(cache_limit + side_count)};
+    BOOST_REQUIRE(manager.FlushCacheToDisk(/*bForceFlush=*/true));
+    BOOST_CHECK_EQUAL(
+        manager.m_evoDb->CountPersistedEntries(), initial_count);
+    BOOST_CHECK(!manager.HasPersistentWindow());
+
+    // Raising the floor makes every previously visited side snapshot
+    // deletable. The old cursor must be discarded so the next bounded pass
+    // reconsiders the already-scanned prefix immediately.
+    BOOST_CHECK_EQUAL(
+        manager.UpdateFinalitySnapshotRetentionFloor(side_height + 1),
+        side_height + 1);
+    BOOST_REQUIRE(manager.FlushCacheToDisk(/*bForceFlush=*/true));
+    BOOST_CHECK_EQUAL(
+        manager.m_evoDb->CountPersistedEntries(),
+        initial_count - static_cast<int64_t>(
+                            CDeterministicMNManager::
+                                SNAPSHOT_GC_MAX_ERASE_ITEMS_PER_PASS));
+    CDeterministicMNList snapshot;
+    BOOST_CHECK(!manager.m_evoDb->Read(side_hashes.front(), snapshot));
+    BOOST_REQUIRE(manager.m_evoDb->Read(side_hashes.back(), snapshot));
 }
 
 BOOST_AUTO_TEST_CASE(maintenance_retains_all_chainstate_recovery_snapshots)
