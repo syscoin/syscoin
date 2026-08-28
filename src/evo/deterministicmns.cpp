@@ -2960,7 +2960,17 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
 
     int nHeight = pindexPrev->nHeight + 1;
 
-    oldList = GetListForBlock(pindexPrev);
+    // SYSCOIN: A missing or unreadable parent snapshot is local node state,
+    // not evidence that the candidate block violates consensus.
+    try {
+        oldList = GetListForBlock(pindexPrev);
+    } catch (const std::exception& e) {
+        LogPrintf("%s -- failed to load deterministic-MN parent state at "
+                  "height=%d block=%s: %s\n",
+                  __func__, pindexPrev->nHeight,
+                  pindexPrev->GetBlockHash().ToString(), e.what());
+        return _state.Error("failed-dmn-parent-state");
+    }
     CDeterministicMNList newList = oldList;
     newList.ResetTrackedChanges();
     newList.SetBlockHash(uint256()); // we can't know the final block hash, so better not return a (invalid) block hash

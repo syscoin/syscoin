@@ -705,6 +705,48 @@ BOOST_AUTO_TEST_CASE(first_dip3_just_check_validates_pq_without_persisting)
     BOOST_CHECK(!manager.m_evoDb->ReadCache(accepted_hash, snapshot));
 }
 
+BOOST_AUTO_TEST_CASE(missing_parent_snapshot_is_local_process_error)
+{
+    SelectParams(ChainType::REGTEST);
+    LOCK(::cs_main);
+
+    const int parent_height{Params().GetConsensus().DIP0003Height};
+    BOOST_REQUIRE_GE(parent_height, 0);
+    const uint256 parent_hash{MakeSnapshotKey(parent_height)};
+    CBlockIndex parent_index;
+    parent_index.nHeight = parent_height;
+    parent_index.phashBlock = &parent_hash;
+
+    CBlock block{MakeProviderMutationBlock({})};
+    block.hashPrevBlock = parent_hash;
+    block.nNonce = 1;
+    const uint256 block_hash{block.GetHash()};
+    CBlockIndex block_index;
+    block_index.nHeight = parent_height + 1;
+    block_index.pprev = &parent_index;
+    block_index.phashBlock = &block_hash;
+
+    auto db_params = DBParams{
+        .path = "testdb_dmn_missing_parent_process_error",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    };
+    CDeterministicMNManager manager(db_params);
+    CCoinsView base_view;
+    CCoinsViewCache view(&base_view);
+    BlockValidationState state;
+    CDeterministicMNListNEVMAddressDiff diff;
+    const llmq::CFinalCommitmentTxPayload no_legacy_commitment;
+
+    BOOST_CHECK(!manager.ProcessBlock(
+        block, &block_index, state, view, no_legacy_commitment, diff,
+        /*fJustCheck=*/true, /*ibd=*/true));
+    BOOST_CHECK(state.IsError());
+    BOOST_CHECK(!state.IsInvalid());
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "failed-dmn-parent-state");
+}
+
 BOOST_AUTO_TEST_CASE(pq_legacy_anchor_rejection_precedes_registry_commit)
 {
     SelectParams(ChainType::REGTEST);
