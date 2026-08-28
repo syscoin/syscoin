@@ -1233,6 +1233,24 @@ private:
         std::optional<pq::BTCCPresealMarker> recovered;
     };
 
+    enum class BTCCReplayCarrierStatus : uint8_t {
+        VERIFIED = 0,
+        MISSING,
+        INVALID,
+        LOCAL_ERROR,
+    };
+
+    struct BTCCReplayCarrierCheck {
+        BTCCReplayCarrierStatus status{
+            BTCCReplayCarrierStatus::LOCAL_ERROR};
+        uint256 logical_id;
+    };
+
+    struct BTCCReplayValidationStep {
+        std::optional<int32_t> validated_through;
+        std::optional<uint256> missing_logical_id;
+    };
+
     struct CurrentSigningContexts {
         static constexpr std::size_t MAX_VARIANTS{2};
 
@@ -1315,6 +1333,21 @@ private:
         const CBlockIndex& active_tip,
         const pq::BTCCPresealState& state,
         int32_t authenticated_through)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main,
+                                 !m_needed_btcc_certificate_mutex);
+    [[nodiscard]] static BTCCReplayValidationStep
+    AdvanceBTCCReplayValidationFrontier(
+        BoundedActiveRangeFrontier& frontier,
+        const CChain& active_chain,
+        const CBlockIndex& active_tip,
+        int32_t authenticated_through,
+        const uint256& authenticated_hash,
+        const uint256& source_token,
+        const pq::BTCCScheduleConfig& schedule,
+        const std::function<BTCCReplayCarrierCheck(
+            const CBlockIndex&)>& check,
+        std::size_t block_budget =
+            HistoricalIndexValidationCache::BLOCK_BUDGET)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     [[nodiscard]] std::optional<pq::BTCCReceiptState>
     GetCatchupHistoricalProof(const CBlockIndex& candidate,
@@ -2088,6 +2121,13 @@ GetFullyValidatedBTCCCatchupRangeStatus(
 /** An exact marker receipt newer than local finality becomes the new winner. */
 [[nodiscard]] bool ShouldRouteBTCCPresealReceiptToCatchup(
     bool marker_authorized_receipt,
+    int32_t receipt_target_height,
+    int32_t local_finality_height) noexcept;
+
+/** An exact replay dependency below the winner is archive-only history. */
+[[nodiscard]] bool ShouldArchiveRequiredBTCCReceiptCertificate(
+    bool exact_receipt_required,
+    bool has_local_finality,
     int32_t receipt_target_height,
     int32_t local_finality_height) noexcept;
 

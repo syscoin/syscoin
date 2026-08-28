@@ -298,6 +298,7 @@ public:
         VERIFIED = 0,
         MISSING,
         INVALID,
+        LOCAL_ERROR,
     };
 
     struct LiveSigningFrontier {
@@ -307,6 +308,14 @@ public:
 
     using CertificateCheck = std::function<CertificateStatus(
         const pq::BTCCReceipt&, const CBlockIndex&)>;
+
+    struct ReplayStep {
+        std::optional<int32_t> validated_through;
+        std::optional<uint256> missing_logical_id;
+    };
+
+    using ReplayCheck = std::function<std::pair<CertificateStatus, uint256>(
+        const CBlockIndex&)>;
 
     static bool Advance(
         LiveSigningFrontier& state,
@@ -335,6 +344,9 @@ public:
                 return CChainLocksHandler::
                     BTCCReceiptCertificateStatus::MISSING;
             case CertificateStatus::INVALID:
+                return CChainLocksHandler::
+                    BTCCReceiptCertificateStatus::INVALID;
+            case CertificateStatus::LOCAL_ERROR:
                 return CChainLocksHandler::
                     BTCCReceiptCertificateStatus::INVALID;
             }
@@ -404,6 +416,51 @@ public:
             DoesHistoricalVerificationCapabilityMatch(
                 verified, verified_roster_generation, expected,
                 current_roster_generation);
+    }
+
+    static ReplayStep AdvanceReplay(
+        BoundedActiveRangeFrontier& frontier,
+        const CChain& active_chain,
+        const CBlockIndex& active_tip,
+        int32_t authenticated_through,
+        const uint256& authenticated_hash,
+        const uint256& source_token,
+        const pq::BTCCScheduleConfig& schedule,
+        const ReplayCheck& check,
+        std::size_t block_budget =
+            HistoricalIndexValidationCache::BLOCK_BUDGET)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+    {
+        const auto adapter = [&](const CBlockIndex& carrier) {
+            const auto [status, logical_id]{check(carrier)};
+            CChainLocksHandler::BTCCReplayCarrierStatus translated{
+                CChainLocksHandler::BTCCReplayCarrierStatus::LOCAL_ERROR};
+            switch (status) {
+            case CertificateStatus::VERIFIED:
+                translated = CChainLocksHandler::
+                    BTCCReplayCarrierStatus::VERIFIED;
+                break;
+            case CertificateStatus::MISSING:
+                translated = CChainLocksHandler::
+                    BTCCReplayCarrierStatus::MISSING;
+                break;
+            case CertificateStatus::INVALID:
+                translated = CChainLocksHandler::
+                    BTCCReplayCarrierStatus::INVALID;
+                break;
+            case CertificateStatus::LOCAL_ERROR:
+                break;
+            }
+            return CChainLocksHandler::BTCCReplayCarrierCheck{
+                translated, logical_id};
+        };
+        const auto result{CChainLocksHandler::
+            AdvanceBTCCReplayValidationFrontier(
+                frontier, active_chain, active_tip,
+                authenticated_through, authenticated_hash,
+                source_token, schedule, adapter, block_budget)};
+        return {result.validated_through,
+                result.missing_logical_id};
     }
 };
 
@@ -660,6 +717,108 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(!Access::HistoricalCapabilityMatches(
         PRESEAL_CATCHUP, marker, /*verified_roster_generation=*/0,
         PRESEAL_CATCHUP, marker, /*current_roster_generation=*/0));
+}
+
+BOOST_AUTO_TEST_CASE(
+    btcc_replay_requests_missing_carriers_sequentially)
+{
+    using Access = llmq::test::CChainLocksHandlerTestAccess;
+    BOOST_CHECK(llmq::ShouldArchiveRequiredBTCCReceiptCertificate(
+        /*exact_receipt_required=*/true,
+        /*has_local_finality=*/true,
+        /*receipt_target_height=*/880,
+        /*local_finality_height=*/900));
+    BOOST_CHECK(!llmq::ShouldArchiveRequiredBTCCReceiptCertificate(
+        /*exact_receipt_required=*/false,
+        /*has_local_finality=*/true,
+        /*receipt_target_height=*/880,
+        /*local_finality_height=*/900));
+    BOOST_CHECK(!llmq::ShouldArchiveRequiredBTCCReceiptCertificate(
+        /*exact_receipt_required=*/true,
+        /*has_local_finality=*/true,
+        /*receipt_target_height=*/900,
+        /*local_finality_height=*/900));
+    const auto config{LiveSigningFrontierConfig()};
+    constexpr int32_t AUTHENTICATED_THROUGH{864};
+    constexpr int32_t TIP_HEIGHT{1'100};
+    LiveSigningIndexChain chain{
+        static_cast<std::size_t>(TIP_HEIGHT + 1)};
+    std::vector<int32_t> carriers;
+    for (int32_t height{AUTHENTICATED_THROUGH + 1};
+         height <= TIP_HEIGHT && carriers.size() < 2; ++height) {
+        if (llmq::pq::IsBTCCReceiptCarrierHeight(
+                config.btcc_schedule, height)) {
+            carriers.push_back(height);
+        }
+    }
+    BOOST_REQUIRE_EQUAL(carriers.size(), 2U);
+    const uint256 first_id{NonNullHash(199'600)};
+    const uint256 second_id{NonNullHash(199'601)};
+    const uint256 source{NonNullHash(199'602)};
+    llmq::BoundedActiveRangeFrontier frontier;
+    unsigned int phase{0};
+    const auto check = [&](const CBlockIndex& carrier) {
+        if (phase == 0 && carrier.nHeight == carriers[0]) {
+            return std::pair{Access::CertificateStatus::MISSING,
+                             first_id};
+        }
+        if (phase == 1 && carrier.nHeight == carriers[1]) {
+            return std::pair{Access::CertificateStatus::MISSING,
+                             second_id};
+        }
+        return std::pair{Access::CertificateStatus::VERIFIED,
+                         uint256{}};
+    };
+
+    LOCK(cs_main);
+    auto step{Access::AdvanceReplay(
+        frontier, chain.active, chain.At(TIP_HEIGHT),
+        AUTHENTICATED_THROUGH,
+        chain.At(AUTHENTICATED_THROUGH).GetBlockHash(), source,
+        config.btcc_schedule, check)};
+    BOOST_REQUIRE(step.validated_through);
+    BOOST_REQUIRE(step.missing_logical_id);
+    BOOST_CHECK_EQUAL(*step.validated_through, carriers[0] - 1);
+    BOOST_CHECK(*step.missing_logical_id == first_id);
+
+    phase = 1;
+    step = Access::AdvanceReplay(
+        frontier, chain.active, chain.At(TIP_HEIGHT),
+        AUTHENTICATED_THROUGH,
+        chain.At(AUTHENTICATED_THROUGH).GetBlockHash(), source,
+        config.btcc_schedule, check);
+    BOOST_REQUIRE(step.validated_through);
+    BOOST_REQUIRE(step.missing_logical_id);
+    BOOST_CHECK_EQUAL(*step.validated_through, carriers[1] - 1);
+    BOOST_CHECK(*step.missing_logical_id == second_id);
+
+    phase = 2;
+    step = Access::AdvanceReplay(
+        frontier, chain.active, chain.At(TIP_HEIGHT),
+        AUTHENTICATED_THROUGH,
+        chain.At(AUTHENTICATED_THROUGH).GetBlockHash(), source,
+        config.btcc_schedule, check);
+    BOOST_REQUIRE(step.validated_through);
+    BOOST_CHECK_EQUAL(*step.validated_through, TIP_HEIGHT);
+    BOOST_CHECK(!step.missing_logical_id);
+
+    llmq::BoundedActiveRangeFrontier invalid_frontier;
+    const auto invalid = [&](const CBlockIndex& carrier) {
+        return carrier.nHeight == carriers[0]
+            ? std::pair{Access::CertificateStatus::INVALID,
+                        first_id}
+            : std::pair{Access::CertificateStatus::VERIFIED,
+                        uint256{}};
+    };
+    const auto invalid_step{Access::AdvanceReplay(
+        invalid_frontier, chain.active, chain.At(TIP_HEIGHT),
+        AUTHENTICATED_THROUGH,
+        chain.At(AUTHENTICATED_THROUGH).GetBlockHash(), source,
+        config.btcc_schedule, invalid)};
+    BOOST_REQUIRE(invalid_step.validated_through);
+    BOOST_CHECK_EQUAL(*invalid_step.validated_through,
+                      carriers[0] - 1);
+    BOOST_CHECK(!invalid_step.missing_logical_id);
 }
 
 BOOST_AUTO_TEST_CASE(

@@ -1744,6 +1744,16 @@ bool ShouldRouteBTCCPresealReceiptToCatchup(
            receipt_target_height > local_finality_height;
 }
 
+bool ShouldArchiveRequiredBTCCReceiptCertificate(
+    bool exact_receipt_required,
+    bool has_local_finality,
+    int32_t receipt_target_height,
+    int32_t local_finality_height) noexcept
+{
+    return exact_receipt_required && has_local_finality &&
+           receipt_target_height < local_finality_height;
+}
+
 const pq::BTCCPresealMarker* SelectBTCCPresealRecomputeMarker(
     const pq::BTCCPresealState& state,
     const CBlockIndex& candidate) noexcept
@@ -6165,45 +6175,112 @@ CChainLocksHandler::AdvanceBTCCReplayValidationBounded(
     const CChain& active_chain{m_chainman.ActiveChain()};
     const CBlockIndex* floor{active_chain[authenticated_through]};
     if (floor == nullptr) return std::nullopt;
-    const auto plan{m_btcc_replay_validation_frontier.Plan(
-        active_chain, active_tip, authenticated_through,
-        floor->GetBlockHash(),
+    const auto check = [&](const CBlockIndex& carrier)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+        CBlock block;
+        pq::BTCCReceipt receipt;
+        if (!m_chainman.m_blockman.ReadBlockFromDisk(block, carrier) ||
+            !ExtractBTCCReceipt(block, receipt)) {
+            return BTCCReplayCarrierCheck{
+                BTCCReplayCarrierStatus::LOCAL_ERROR, {}};
+        }
+        if (receipt.IsNull()) {
+            return BTCCReplayCarrierCheck{
+                BTCCReplayCarrierStatus::VERIFIED, {}};
+        }
+        switch (CheckBTCCReceiptCertificate(receipt, carrier)) {
+        case BTCCReceiptCertificateStatus::VERIFIED:
+            return BTCCReplayCarrierCheck{
+                BTCCReplayCarrierStatus::VERIFIED, {}};
+        case BTCCReceiptCertificateStatus::MISSING:
+            return BTCCReplayCarrierCheck{
+                BTCCReplayCarrierStatus::MISSING,
+                receipt.chainlock_logical_id};
+        case BTCCReceiptCertificateStatus::INVALID:
+            return BTCCReplayCarrierCheck{
+                BTCCReplayCarrierStatus::INVALID, {}};
+        }
+        return BTCCReplayCarrierCheck{
+            BTCCReplayCarrierStatus::LOCAL_ERROR, {}};
+    };
+    const auto step{AdvanceBTCCReplayValidationFrontier(
+        m_btcc_replay_validation_frontier, active_chain, active_tip,
+        authenticated_through, floor->GetBlockHash(),
         BoundedBTCCPresealSourceToken(
             state,
             m_chainman.GetPQProvenanceRevocationRevision()),
-        HistoricalIndexValidationCache::BLOCK_BUDGET)};
+        m_config->btcc_schedule, check)};
+    if (step.missing_logical_id) {
+        LOCK(m_needed_btcc_certificate_mutex);
+        if (m_needed_btcc_certificate != step.missing_logical_id) {
+            m_needed_btcc_certificate = step.missing_logical_id;
+            m_needed_btcc_last_request = std::chrono::microseconds{0};
+        }
+    }
+    return step.validated_through;
+}
+
+CChainLocksHandler::BTCCReplayValidationStep
+CChainLocksHandler::AdvanceBTCCReplayValidationFrontier(
+    BoundedActiveRangeFrontier& frontier,
+    const CChain& active_chain,
+    const CBlockIndex& active_tip,
+    int32_t authenticated_through,
+    const uint256& authenticated_hash,
+    const uint256& source_token,
+    const pq::BTCCScheduleConfig& schedule,
+    const std::function<BTCCReplayCarrierCheck(
+        const CBlockIndex&)>& check,
+    std::size_t block_budget)
+{
+    AssertLockHeld(cs_main);
+    if (authenticated_through < 0 ||
+        authenticated_through > active_tip.nHeight ||
+        authenticated_hash.IsNull() || source_token.IsNull() ||
+        !check || block_budget == 0) {
+        return {};
+    }
+    const auto plan{frontier.Plan(
+        active_chain, active_tip, authenticated_through,
+        authenticated_hash, source_token, block_budget)};
     if (plan.status == BoundedActiveRangeStatus::INVALID) {
-        return std::nullopt;
+        return {};
     }
     if (plan.status == BoundedActiveRangeStatus::WORK) {
         for (int32_t height{plan.first_height};
              height <= plan.last_height; ++height) {
             if (!pq::IsBTCCReceiptCarrierHeight(
-                    m_config->btcc_schedule, height)) {
+                    schedule, height)) {
                 continue;
             }
             const CBlockIndex* carrier{active_chain[height]};
-            CBlock block;
-            pq::BTCCReceipt receipt;
-            if (carrier == nullptr ||
-                !m_chainman.m_blockman.ReadBlockFromDisk(block, *carrier) ||
-                !ExtractBTCCReceipt(block, receipt) ||
-                (!receipt.IsNull() &&
-                 CheckBTCCReceiptCertificate(receipt, *carrier) !=
-                     BTCCReceiptCertificateStatus::VERIFIED)) {
-                if (!m_btcc_replay_validation_frontier.CommitThrough(
+            const BTCCReplayCarrierCheck result{
+                carrier == nullptr
+                    ? BTCCReplayCarrierCheck{}
+                    : check(*carrier)};
+            if (result.status !=
+                BTCCReplayCarrierStatus::VERIFIED) {
+                if (!frontier.CommitThrough(
                         active_chain, height - 1)) {
-                    return std::nullopt;
+                    return {};
                 }
-                return height - 1;
+                BTCCReplayValidationStep step;
+                step.validated_through = height - 1;
+                if (result.status ==
+                        BTCCReplayCarrierStatus::MISSING &&
+                    !result.logical_id.IsNull()) {
+                    step.missing_logical_id = result.logical_id;
+                }
+                return step;
             }
         }
-        if (!m_btcc_replay_validation_frontier.CommitThrough(
+        if (!frontier.CommitThrough(
                 active_chain, plan.last_height)) {
-            return std::nullopt;
+            return {};
         }
     }
-    return m_btcc_replay_validation_frontier.ValidatedThroughHeight();
+    return BTCCReplayValidationStep{
+        frontier.ValidatedThroughHeight(), std::nullopt};
 }
 
 void CChainLocksHandler::MaybeReplayBTCCPreseal()
@@ -11460,11 +11537,16 @@ bool CChainLocksHandler::ProcessNewChainLockInternal(
         ShouldRouteBTCCPresealReceiptToCatchup(
             preseal_receipt, chainlock.statement.height,
             local_finality_height)};
+    const bool required_receipt_certificate{
+        IsPendingBTCCReceiptCertificate(logical_id) ||
+        WITH_LOCK(m_needed_btcc_certificate_mutex, return
+            m_needed_btcc_certificate == logical_id;)};
     const bool archive_only{
         (preseal_receipt && !preseal_receipt_rebase) ||
-        (IsPendingBTCCReceiptCertificate(logical_id) && current_best &&
-         chainlock.statement.height <
-             current_best->metadata.statement.height)};
+        ShouldArchiveRequiredBTCCReceiptCertificate(
+            required_receipt_certificate,
+            current_best.has_value(), chainlock.statement.height,
+            local_finality_height)};
     const bool catchup{
         historical.admission == HistoricalAdmission::CURRENT_CATCHUP ||
         historical.admission == HistoricalAdmission::PRESEAL_CATCHUP ||
