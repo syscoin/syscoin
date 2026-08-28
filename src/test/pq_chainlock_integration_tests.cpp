@@ -810,6 +810,24 @@ BOOST_AUTO_TEST_CASE(full_dimension_builder_collector_wire_and_verifier)
             /*runtime_generation_current=*/true,
             /*roster_source_generation_current=*/true) ==
         llmq::FinalPaymentAuditVerificationPath::COLLECTED);
+    BOOST_CHECK(llmq::IsPaymentAuditVerificationPathAuthorized(
+        /*local_certificate=*/true,
+        llmq::FinalPaymentAuditVerificationPath::COLLECTED));
+    const auto stale_local_path{
+        llmq::SelectFinalPaymentAuditVerificationPath(
+            collected_audit.get(), &collected_audit->Certificate(),
+            fixture->genesis_hash, audit_schedule,
+            audit_collector_context->RosterSetPtr(), AUTHORIZATION_MASK,
+            /*local_live_admission=*/true,
+            /*admission_generation_current=*/true,
+            /*runtime_generation_current=*/false,
+            /*roster_source_generation_current=*/true)};
+    BOOST_CHECK(stale_local_path ==
+                llmq::FinalPaymentAuditVerificationPath::FULL);
+    BOOST_CHECK(!llmq::IsPaymentAuditVerificationPathAuthorized(
+        /*local_certificate=*/true, stale_local_path));
+    BOOST_CHECK(llmq::IsPaymentAuditVerificationPathAuthorized(
+        /*local_certificate=*/false, stale_local_path));
     BOOST_REQUIRE(final_audit->IsStructurallyValid());
     BOOST_CHECK_EQUAL(final_audit->selected_quorum_mask, 0b0111);
     BOOST_CHECK_EQUAL(final_audit->report_witnesses.size(),

@@ -1980,6 +1980,14 @@ FinalPaymentAuditVerificationPath SelectFinalPaymentAuditVerificationPath(
     return FinalPaymentAuditVerificationPath::COLLECTED;
 }
 
+bool IsPaymentAuditVerificationPathAuthorized(
+    bool local_certificate,
+    FinalPaymentAuditVerificationPath path) noexcept
+{
+    return !local_certificate ||
+           path == FinalPaymentAuditVerificationPath::COLLECTED;
+}
+
 bool IsPaymentAuditFinalizationRetryDue(
     std::chrono::microseconds now,
     std::optional<std::chrono::microseconds> last_attempt) noexcept
@@ -1987,6 +1995,19 @@ bool IsPaymentAuditFinalizationRetryDue(
     return !last_attempt || now < *last_attempt ||
            now - *last_attempt >=
                PAYMENT_AUDIT_FINALIZATION_RETRY_INTERVAL;
+}
+
+bool IsExactPaymentAuditRuntimeBinding(
+    bool runtime_present,
+    bool collector_present,
+    bool generation_matches,
+    bool statement_matches,
+    bool prepared_context_matches,
+    bool relay_recipients_match) noexcept
+{
+    return runtime_present && collector_present && generation_matches &&
+           statement_matches && prepared_context_matches &&
+           relay_recipients_match;
 }
 
 bool IsChainLockCollectorOnAcceptedSuccessorView(
@@ -8858,9 +8879,69 @@ bool CChainLocksHandler::IsCurrentPaymentAuditStatement(
                statement.seal_statement.btcc_advance, &btcc_error);
 }
 
+bool CChainLocksHandler::HasExactPaymentAuditRuntime(
+    uint64_t expected_runtime_generation,
+    const pq::PaymentAuditStatement& statement,
+    const pq::PreparedPaymentAuditContextPtr& prepared_context,
+    const std::shared_ptr<const ChainLockRelayRecipients>& recipients) const
+{
+    if (!prepared_context || !recipients) return false;
+    LOCK(m_payment_audit_mutex);
+    const bool runtime_present{m_payment_audit_runtime.has_value()};
+    const bool collector_present{
+        runtime_present && m_payment_audit_runtime->collector != nullptr};
+    const auto current_context{
+        collector_present
+            ? m_payment_audit_runtime->collector->GetPreparedContext()
+            : nullptr};
+    return IsExactPaymentAuditRuntimeBinding(
+        runtime_present,
+        collector_present,
+        m_payment_audit_runtime_generation == expected_runtime_generation,
+        runtime_present && m_payment_audit_runtime->statement &&
+            *m_payment_audit_runtime->statement == statement &&
+            prepared_context->Statement() == statement,
+        current_context == prepared_context &&
+            m_payment_audit_runtime->signing_rosters ==
+                prepared_context->RostersPtr() &&
+            m_payment_audit_runtime->authorization_mask ==
+                prepared_context->AuthorizationMask(),
+        runtime_present && m_payment_audit_runtime->relay_recipients &&
+            m_payment_audit_runtime->relay_recipients == recipients);
+}
+
+bool CChainLocksHandler::HasExactPaymentAuditFinalization(
+    const LocalPaymentAuditFinalization& finalized) const
+{
+    if (!finalized.proof) return false;
+    LOCK(m_payment_audit_mutex);
+    return m_payment_audit_runtime_generation ==
+               finalized.runtime_generation &&
+           m_payment_audit_runtime &&
+           m_payment_audit_runtime->finalization_attempt_in_flight &&
+           m_payment_audit_runtime->finalized &&
+           m_payment_audit_runtime->finalized->proof == finalized.proof &&
+           m_payment_audit_runtime->finalized->admission_generation ==
+               finalized.admission_generation &&
+           m_payment_audit_runtime->finalized->runtime_generation ==
+               finalized.runtime_generation &&
+           m_payment_audit_runtime->finalized->roster_source_generation ==
+               finalized.roster_source_generation &&
+           m_payment_audit_runtime->roster_source_generation ==
+               finalized.roster_source_generation &&
+           m_payment_audit_runtime->collector &&
+           m_payment_audit_runtime->collector->GetPreparedContext() ==
+               finalized.proof->ContextPtr() &&
+           m_payment_audit_runtime->statement &&
+           *m_payment_audit_runtime->statement ==
+               finalized.proof->Certificate().statement;
+}
+
 void CChainLocksHandler::RelayPaymentAuditShare(
     const pq::PaymentAuditShare& share,
+    const pq::PreparedPaymentAuditContextPtr& prepared_context,
     const std::shared_ptr<const ChainLockRelayRecipients>& recipients,
+    uint64_t runtime_generation,
     uint64_t admission_generation,
     NodeId except_peer)
 {
@@ -8870,7 +8951,12 @@ void CChainLocksHandler::RelayPaymentAuditShare(
         LOCK(cs_main);
         if (IsPaymentAuditPresealActive()) return;
     }
-    if (!recipients) return;
+    if (!HasExactPaymentAuditRuntime(
+            runtime_generation, share.transcript.statement,
+            prepared_context, recipients) ||
+        !IsCurrentPaymentAuditStatement(share.transcript.statement)) {
+        return;
+    }
     m_connman.ForEachNode([&](CNode* node) {
         if (!IsShareAdmissionGenerationCurrent(admission_generation)) return;
         if (node == nullptr || node->GetId() == except_peer ||
@@ -9059,6 +9145,7 @@ void CChainLocksHandler::ProcessPaymentAuditShare(
         return;
     }
     std::shared_ptr<const ChainLockRelayRecipients> relay_recipients;
+    pq::PreparedPaymentAuditContextPtr prepared_context;
     uint64_t runtime_generation{0};
     {
         // Runtime construction belongs to the scheduler. This lock admits a
@@ -9079,6 +9166,9 @@ void CChainLocksHandler::ProcessPaymentAuditShare(
             return;
         }
         if (m_payment_audit_runtime->finalized) return;
+        prepared_context =
+            m_payment_audit_runtime->collector->GetPreparedContext();
+        if (!prepared_context) return;
         runtime_generation = m_payment_audit_runtime_generation;
     }
 
@@ -9100,7 +9190,10 @@ void CChainLocksHandler::ProcessPaymentAuditShare(
         }
         return;
     }
-    if (!IsCurrentPaymentAuditStatement(share.transcript.statement)) {
+    if (!HasExactPaymentAuditRuntime(
+            runtime_generation, share.transcript.statement,
+            prepared_context, relay_recipients) ||
+        !IsCurrentPaymentAuditStatement(share.transcript.statement)) {
         if (collection.finalized) {
             FinishPaymentAuditFinalizationAttempt(
                 *collection.finalized);
@@ -9108,7 +9201,8 @@ void CChainLocksHandler::ProcessPaymentAuditShare(
         return;
     }
     RelayPaymentAuditShare(
-        share, relay_recipients, admission_generation, node_id);
+        share, prepared_context, relay_recipients,
+        runtime_generation, admission_generation, node_id);
     if (!IsShareAdmissionGenerationCurrent(admission_generation)) {
         if (collection.finalized) {
             FinishPaymentAuditFinalizationAttempt(
@@ -9902,15 +9996,41 @@ void CChainLocksHandler::ProcessPaymentAuditCertificateInternal(
             return;
         }
     }
+    const auto is_exact_local_runtime = [&] {
+        return local_finalization && local_finalization->proof &&
+               HasExactPaymentAuditFinalization(*local_finalization) &&
+               local_finalization->proof->Certificate().statement ==
+                   audit.statement;
+    };
     PaymentAuditRosterBuildStatus roster_status{
         PaymentAuditRosterBuildStatus::INVALID};
     uint8_t authorization_mask{0};
     uint64_t roster_source_generation{0};
-    const auto rosters{BuildPaymentAuditVerificationRosters(
-        audit.statement, nullptr, &authorization_mask,
-        /*require_live_transition_finality=*/false, &roster_status,
-        historical ? &*historical : nullptr,
-        &roster_source_generation)};
+    pq::VerifiedRosterSetPtr rosters;
+    if (local_certificate) {
+        if (!local_finalization || historical ||
+            !is_exact_local_runtime() ||
+            !IsShareAdmissionGenerationCurrent(
+                local_finalization->admission_generation) ||
+            !IsQuorumRosterSourceGenerationCurrent(
+                local_finalization->roster_source_generation) ||
+            !IsCurrentPaymentAuditStatement(audit.statement)) {
+            return;
+        }
+        const auto& context{local_finalization->proof->ContextPtr()};
+        if (!context || context->Statement() != audit.statement) return;
+        rosters = context->RosterSetPtr();
+        authorization_mask = context->AuthorizationMask();
+        roster_source_generation =
+            local_finalization->roster_source_generation;
+        roster_status = PaymentAuditRosterBuildStatus::VALID;
+    } else {
+        rosters = BuildPaymentAuditVerificationRosters(
+            audit.statement, nullptr, &authorization_mask,
+            /*require_live_transition_finality=*/false, &roster_status,
+            historical ? &*historical : nullptr,
+            &roster_source_generation);
+    }
     if (historical) {
         LOCK(cs_main);
         const auto current{ResolvePendingPaymentAuditContext(witness_id)};
@@ -9919,31 +10039,6 @@ void CChainLocksHandler::ProcessPaymentAuditCertificateInternal(
             return;
         }
     }
-    const auto is_exact_local_runtime = [&] {
-        if (!local_finalization || !local_finalization->proof) return false;
-        LOCK(m_payment_audit_mutex);
-        return m_payment_audit_runtime_generation ==
-                   local_finalization->runtime_generation &&
-               m_payment_audit_runtime &&
-               m_payment_audit_runtime->finalization_attempt_in_flight &&
-               m_payment_audit_runtime->finalized &&
-               m_payment_audit_runtime->finalized->proof ==
-                   local_finalization->proof &&
-               m_payment_audit_runtime->finalized->admission_generation ==
-                   local_finalization->admission_generation &&
-               m_payment_audit_runtime->finalized->runtime_generation ==
-                   local_finalization->runtime_generation &&
-               m_payment_audit_runtime->finalized
-                       ->roster_source_generation ==
-                   local_finalization->roster_source_generation &&
-               m_payment_audit_runtime->roster_source_generation ==
-                   local_finalization->roster_source_generation &&
-               m_payment_audit_runtime->collector &&
-               m_payment_audit_runtime->collector->GetPreparedContext() ==
-                   local_finalization->proof->ContextPtr() &&
-               m_payment_audit_runtime->statement &&
-               *m_payment_audit_runtime->statement == audit.statement;
-    };
     if (!rosters) {
         if (roster_status == PaymentAuditRosterBuildStatus::LOCAL_ERROR) {
             fail_request();
@@ -9978,6 +10073,10 @@ void CChainLocksHandler::ProcessPaymentAuditCertificateInternal(
                     local_finalization->admission_generation),
             runtime_generation_current,
             roster_source_generation_current)};
+    if (!IsPaymentAuditVerificationPathAuthorized(
+            local_certificate, verification_path)) {
+        return;
+    }
     if (verification_path == FinalPaymentAuditVerificationPath::FULL) {
         pq::PaymentAuditVerificationError verification_error{
             pq::PaymentAuditVerificationError::NONE};
@@ -10084,15 +10183,18 @@ void CChainLocksHandler::ProcessPaymentAuditCertificateInternal(
             fail_request();
             return;
         }
-        if (verification_path ==
-                FinalPaymentAuditVerificationPath::COLLECTED &&
-            (!IsShareAdmissionGenerationCurrent(
+        if (local_certificate &&
+            (!local_finalization ||
+             verification_path !=
+                 FinalPaymentAuditVerificationPath::COLLECTED ||
+             !IsShareAdmissionGenerationCurrent(
                  local_finalization->admission_generation) ||
              !is_exact_local_runtime() ||
              roster_source_generation !=
                  local_finalization->roster_source_generation ||
              !IsQuorumRosterSourceGenerationCurrent(
-                 roster_source_generation))) {
+                 roster_source_generation) ||
+             !IsCurrentPaymentAuditStatement(audit.statement))) {
             return;
         }
         stored_result = m_payment_audit_store->AcceptVerified(
@@ -10168,6 +10270,15 @@ void CChainLocksHandler::FinishPaymentAuditFinalizationAttempt(
 void CChainLocksHandler::SubmitPaymentAuditFinalizationAttempt(
     const LocalPaymentAuditFinalization& finalized)
 {
+    if (!finalized.proof ||
+        !IsShareAdmissionGenerationCurrent(
+            finalized.admission_generation) ||
+        !HasExactPaymentAuditFinalization(finalized) ||
+        !IsCurrentPaymentAuditStatement(
+            finalized.proof->Certificate().statement)) {
+        FinishPaymentAuditFinalizationAttempt(finalized);
+        return;
+    }
     ProcessCollectedPaymentAudit(finalized);
     FinishPaymentAuditFinalizationAttempt(finalized);
 }
@@ -12012,9 +12123,19 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
                     !collection.accepted_duplicate;
                 continue;
             }
+            if (!HasExactPaymentAuditRuntime(
+                    runtime_generation, *statement, signing_context,
+                    relay_recipients) ||
+                !IsCurrentPaymentAuditStatement(*statement)) {
+                if (collection.finalized) {
+                    FinishPaymentAuditFinalizationAttempt(
+                        *collection.finalized);
+                }
+                return;
+            }
             RelayPaymentAuditShare(
-                *signed_share.share, relay_recipients,
-                admission_generation);
+                *signed_share.share, signing_context, relay_recipients,
+                runtime_generation, admission_generation);
             if (!IsShareAdmissionGenerationCurrent(admission_generation)) {
                 if (collection.finalized) {
                     FinishPaymentAuditFinalizationAttempt(

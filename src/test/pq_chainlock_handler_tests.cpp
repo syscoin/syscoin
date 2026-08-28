@@ -2170,6 +2170,23 @@ BOOST_AUTO_TEST_CASE(payment_audit_finalization_retry_is_rate_limited)
         first_attempt - std::chrono::seconds{1}, first_attempt));
 }
 
+BOOST_AUTO_TEST_CASE(payment_audit_side_effects_require_exact_runtime_binding)
+{
+    const auto allowed = [](const std::array<bool, 6>& checks) {
+        return llmq::IsExactPaymentAuditRuntimeBinding(
+            checks[0], checks[1], checks[2], checks[3], checks[4],
+            checks[5]);
+    };
+    std::array<bool, 6> checks;
+    checks.fill(true);
+    BOOST_CHECK(allowed(checks));
+    for (std::size_t mismatch{0}; mismatch < checks.size(); ++mismatch) {
+        checks[mismatch] = false;
+        BOOST_CHECK(!allowed(checks));
+        checks[mismatch] = true;
+    }
+}
+
 BOOST_AUTO_TEST_CASE(preseal_never_disables_durable_base_finality)
 {
     BOOST_CHECK(llmq::ShouldEnforceDurableChainLock(

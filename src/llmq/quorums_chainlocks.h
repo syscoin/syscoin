@@ -367,6 +367,11 @@ enum class FinalPaymentAuditVerificationPath : uint8_t {
     COLLECTED,
 };
 
+/** Local aggregate authority never survives replacement of its live runtime. */
+[[nodiscard]] bool IsPaymentAuditVerificationPathAuthorized(
+    bool local_certificate,
+    FinalPaymentAuditVerificationPath path) noexcept;
+
 /** Only an exact live collector proof may bypass final audit WOTS checks. */
 [[nodiscard]] FinalPaymentAuditVerificationPath
 SelectFinalPaymentAuditVerificationPath(
@@ -385,6 +390,15 @@ SelectFinalPaymentAuditVerificationPath(
 [[nodiscard]] bool IsPaymentAuditFinalizationRetryDue(
     std::chrono::microseconds now,
     std::optional<std::chrono::microseconds> last_attempt) noexcept;
+
+/** Every post-verification side effect belongs to one immutable runtime. */
+[[nodiscard]] bool IsExactPaymentAuditRuntimeBinding(
+    bool runtime_present,
+    bool collector_present,
+    bool generation_matches,
+    bool statement_matches,
+    bool prepared_context_matches,
+    bool relay_recipients_match) noexcept;
 
 /** Preserve only a collector for the exact successor view opened by a winner. */
 [[nodiscard]] bool IsChainLockCollectorOnAcceptedSuccessorView(
@@ -1111,7 +1125,8 @@ private:
                                  !m_payment_audit_mutex,
                                  !m_lookup_mutex,
                                  !m_verification_mutex,
-                                 !m_pending_payment_audit_receipt_mutex);
+                                 !m_pending_payment_audit_receipt_mutex,
+                                 !m_btcc_preseal_mutex);
     struct LocalPaymentAuditFinalization {
         pq::CollectedPaymentAuditFinalizationPtr proof;
         uint64_t admission_generation{0};
@@ -1130,7 +1145,8 @@ private:
                                  !m_payment_audit_mutex,
                                  !m_lookup_mutex,
                                  !m_verification_mutex,
-                                 !m_pending_payment_audit_receipt_mutex);
+                                 !m_pending_payment_audit_receipt_mutex,
+                                 !m_btcc_preseal_mutex);
     void ProcessPaymentAuditCertificateInternal(
         CNode* from,
         const pq::FinalPaymentAudit& audit,
@@ -1140,7 +1156,8 @@ private:
                                  !m_payment_audit_mutex,
                                  !m_lookup_mutex,
                                  !m_verification_mutex,
-                                 !m_pending_payment_audit_receipt_mutex);
+                                 !m_pending_payment_audit_receipt_mutex,
+                                 !m_btcc_preseal_mutex);
     void FinishPaymentAuditFinalizationAttempt(
         const LocalPaymentAuditFinalization& finalized)
         EXCLUSIVE_LOCKS_REQUIRED(!cs_main,
@@ -1155,7 +1172,8 @@ private:
                                  !m_payment_audit_mutex,
                                  !m_lookup_mutex,
                                  !m_verification_mutex,
-                                 !m_pending_payment_audit_receipt_mutex);
+                                 !m_pending_payment_audit_receipt_mutex,
+                                 !m_btcc_preseal_mutex);
     enum class PaymentAuditRosterBuildStatus : uint8_t {
         VALID = 0,
         INVALID,
@@ -1250,11 +1268,23 @@ private:
                                  !m_btcc_preseal_mutex);
     void RelayPaymentAuditShare(
         const pq::PaymentAuditShare& share,
+        const pq::PreparedPaymentAuditContextPtr& prepared_context,
         const std::shared_ptr<const ChainLockRelayRecipients>& recipients,
+        uint64_t runtime_generation,
         uint64_t admission_generation,
         NodeId except_peer = -1)
         EXCLUSIVE_LOCKS_REQUIRED(!m_share_lifecycle_mutex,
+                                 !m_payment_audit_mutex,
                                  !m_btcc_preseal_mutex);
+    [[nodiscard]] bool HasExactPaymentAuditRuntime(
+        uint64_t expected_runtime_generation,
+        const pq::PaymentAuditStatement& statement,
+        const pq::PreparedPaymentAuditContextPtr& prepared_context,
+        const std::shared_ptr<const ChainLockRelayRecipients>& recipients)
+        const EXCLUSIVE_LOCKS_REQUIRED(!m_payment_audit_mutex);
+    [[nodiscard]] bool HasExactPaymentAuditFinalization(
+        const LocalPaymentAuditFinalization& finalized) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_payment_audit_mutex);
     [[nodiscard]] bool PreparePaymentAuditSigningRuntime()
         EXCLUSIVE_LOCKS_REQUIRED(!m_lookup_mutex,
                                  !m_payment_audit_mutex,
