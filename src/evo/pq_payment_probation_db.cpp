@@ -713,6 +713,7 @@ bool PQPaymentProbationManager::PruneStatesThroughCheckpoint(
         }
         prune_keys.emplace_back(decoded_key.hash);
     }
+    cursor->CheckStatus();
 
     if (found_gc_record !=
         (previous_gc_status == GCRecordStatus::VALID)) {

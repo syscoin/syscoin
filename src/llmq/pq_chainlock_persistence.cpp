@@ -608,12 +608,15 @@ std::optional<Value> ReadExactValue(CDBWrapper& db, const DiskKey& key)
 {
     std::unique_ptr<CDBIterator> iterator{db.NewIterator()};
     iterator->Seek(key);
-    if (!iterator->Valid()) return std::nullopt;
+    if (!iterator->Valid()) {
+        iterator->CheckStatus();
+        return std::nullopt;
+    }
 
     DiskKey found_key;
     Value value;
-    if (!iterator->GetKey(found_key) || found_key.type != key.type ||
-        !iterator->GetValue(value)) {
+    if (!iterator->GetKeyExact(found_key) || found_key.type != key.type ||
+        !iterator->GetValueExact(value)) {
         return std::nullopt;
     }
     return value;
@@ -695,7 +698,7 @@ struct PQChainLockPersistence::Impl {
             for (iterator->SeekToFirst(); iterator->Valid(); iterator->Next()) {
                 any = true;
                 DiskKey key;
-                if (!iterator->GetKey(key)) {
+                if (!iterator->GetKeyExact(key)) {
                     throw std::runtime_error(
                         "corrupt PQ ChainLock persistence key");
                 }
@@ -758,6 +761,7 @@ struct PQChainLockPersistence::Impl {
                         "unknown PQ ChainLock persistence key");
                 }
             }
+            iterator->CheckStatus();
         }
 
         if (!any) {
