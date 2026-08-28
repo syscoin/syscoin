@@ -62,6 +62,22 @@ struct PaymentAuditStoreCheckpoint {
                            const PaymentAuditStoreCheckpoint&) = default;
 };
 
+enum class PaymentAuditPruneStatus : uint8_t {
+    COMPLETE = 0,
+    IN_PROGRESS,
+    INVALID,
+    CORRUPT,
+    DATABASE_ERROR,
+};
+
+/** Work performed by one bounded archive-maintenance pass. */
+struct PaymentAuditPruneProgress {
+    PaymentAuditPruneStatus status{PaymentAuditPruneStatus::INVALID};
+    std::size_t scanned_records{0};
+    std::size_t scanned_value_bytes{0};
+    std::size_t erased_records{0};
+};
+
 /**
  * An archive candidate decoded and validated while the store lock was held.
  * The IDs passed IsRecordValid(), so callers can reuse them without hashing
@@ -100,6 +116,9 @@ public:
     static constexpr uint32_t DB_FORMAT_VERSION{1};
     static constexpr std::size_t MAX_LIVE_CANDIDATES{
         ACTIVE_QUORUMS};
+    static constexpr std::size_t MAX_PRUNE_SCAN_RECORDS_PER_PASS{32};
+    static constexpr std::size_t MAX_PRUNE_VALUE_BYTES_PER_PASS{8 << 20};
+    static constexpr std::size_t MAX_PRUNE_ERASE_RECORDS_PER_PASS{64};
 
     PaymentAuditStore(fs::path path,
                       uint256 genesis_hash,
@@ -157,18 +176,42 @@ public:
         uint32_t epoch, const uint256& witness_id)
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
-    /**
-     * Atomically persist a strictly monotonic authenticated boundary and erase
-     * every archive record at or below its epoch. Reapplying the exact boundary
-     * is idempotent; regressions and equal-epoch conflicts are rejected.
-     */
+    /** Drain bounded passes until a strictly monotonic boundary completes. */
     [[nodiscard]] bool PruneThroughCheckpoint(
+        const PaymentAuditStoreCheckpoint& checkpoint)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /**
+     * Validate and retire one bounded portion of an authenticated prefix.
+     * The first pass durably installs a logical floor and intent; subsequent
+     * calls with the same checkpoint resume after crashes.
+     */
+    [[nodiscard]] PaymentAuditPruneProgress PruneThroughCheckpointStep(
         const PaymentAuditStoreCheckpoint& checkpoint)
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     [[nodiscard]] std::optional<PaymentAuditStoreCheckpoint>
     GetPruneCheckpoint() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    [[nodiscard]] std::optional<PaymentAuditStoreCheckpoint>
+    GetPendingPruneCheckpoint() const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
 private:
+    enum class PrunePhase : uint8_t {
+        VALIDATE_WITNESSES = 0,
+        VALIDATE_EPOCHS,
+        VALIDATE_REFERENCES,
+        VALIDATE_PRESENCE,
+        ERASE_WITNESSES,
+        ERASE_EPOCHS,
+    };
+
+    struct PruneIntentState {
+        PaymentAuditStoreCheckpoint checkpoint;
+        PrunePhase phase{PrunePhase::VALIDATE_WITNESSES};
+        bool has_cursor{false};
+        uint32_t epoch_cursor{0};
+        uint256 witness_cursor;
+    };
+
     [[nodiscard]] std::optional<FinalPaymentAudit> GetLocked(
         const uint256& witness_id) const
         EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
@@ -176,6 +219,9 @@ private:
     [[nodiscard]] bool CanAdvanceCandidateRevision() const
         EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
     void AdvanceCandidateRevision() const
+        EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    [[nodiscard]] const PaymentAuditStoreCheckpoint*
+    EffectivePruneCheckpointLocked() const
         EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
 
     uint256 m_genesis_hash;
@@ -185,6 +231,8 @@ private:
         GUARDED_BY(m_mutex);
     mutable uint64_t m_candidate_revision GUARDED_BY(m_mutex){1};
     std::optional<PaymentAuditStoreCheckpoint> m_prune_checkpoint
+        GUARDED_BY(m_mutex);
+    std::optional<PruneIntentState> m_prune_intent
         GUARDED_BY(m_mutex);
 };
 

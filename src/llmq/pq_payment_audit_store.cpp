@@ -7,10 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <exception>
-#include <ios>
 #include <limits>
-#include <map>
-#include <set>
 #include <vector>
 
 namespace llmq::pq {
@@ -22,6 +19,7 @@ constexpr uint8_t DB_EPOCH_PREFIX{0xa2};
 constexpr uint8_t DB_REFERENCE_PREFIX{0xa3};
 constexpr uint8_t DB_PRESENCE_PREFIX{0xa4};
 constexpr uint8_t DB_CHECKPOINT_KEY{0xa5};
+constexpr uint8_t DB_PRUNE_INTENT_KEY{0xa6};
 // Changing the archive layout must fail closed against an old local DB.
 constexpr uint32_t SCHEMA_GUARD{0x50414131}; // "PAA1"
 constexpr uint32_t WITNESS_GUARD{0x50575231}; // "PWR1"
@@ -29,6 +27,7 @@ constexpr uint32_t EPOCH_GUARD{0x50455231}; // "PER1"
 constexpr uint32_t REFERENCE_GUARD{0x50524631}; // "PRF1"
 constexpr uint32_t PRESENCE_GUARD{0x50525031}; // "PRP1"
 constexpr uint32_t CHECKPOINT_GUARD{0x50414331}; // "PAC1"
+constexpr uint32_t PRUNE_INTENT_GUARD{0x50414931}; // "PAI1"
 
 struct CorruptArchiveIndex {};
 
@@ -80,6 +79,8 @@ struct WitnessKey {
         READWRITE(obj.prefix, obj.version, obj.genesis_hash,
                   obj.witness_id);
     }
+
+    friend bool operator==(const WitnessKey&, const WitnessKey&) = default;
 };
 
 struct EpochKey {
@@ -92,6 +93,8 @@ struct EpochKey {
     {
         READWRITE(obj.prefix, obj.version, obj.genesis_hash, obj.epoch);
     }
+
+    friend bool operator==(const EpochKey&, const EpochKey&) = default;
 };
 
 struct ReferenceKey {
@@ -105,6 +108,9 @@ struct ReferenceKey {
         READWRITE(obj.prefix, obj.version, obj.genesis_hash,
                   obj.witness_id);
     }
+
+    friend bool operator==(const ReferenceKey&,
+                           const ReferenceKey&) = default;
 };
 
 struct PresenceKey {
@@ -118,6 +124,8 @@ struct PresenceKey {
         READWRITE(obj.prefix, obj.version, obj.genesis_hash,
                   obj.witness_id);
     }
+
+    friend bool operator==(const PresenceKey&, const PresenceKey&) = default;
 };
 
 struct AuditRecord {
@@ -203,10 +211,6 @@ struct CheckpointRecord {
     template <typename Stream>
     void Unserialize(Stream& stream)
     {
-        if (stream.size() != WIRE_SIZE) {
-            throw std::ios_base::failure(
-                "invalid payment-audit checkpoint size");
-        }
         ::UnserializeMany(
             stream, version, checkpoint.prune_through_epoch,
             checkpoint.covered_through_height,
@@ -221,6 +225,154 @@ struct CheckpointRecord {
 };
 
 static_assert(CheckpointRecord::WIRE_SIZE == 316);
+
+struct PruneIntentRecord {
+    uint32_t version{PaymentAuditStore::DB_FORMAT_VERSION};
+    CheckpointRecord checkpoint;
+    uint8_t phase{0};
+    uint8_t has_cursor{0};
+    uint32_t epoch_cursor{0};
+    uint256 witness_cursor;
+    uint32_t guard{PRUNE_INTENT_GUARD};
+
+    SERIALIZE_METHODS(PruneIntentRecord, obj)
+    {
+        READWRITE(obj.version, obj.checkpoint, obj.phase,
+                  obj.has_cursor, obj.epoch_cursor,
+                  obj.witness_cursor, obj.guard);
+    }
+};
+
+constexpr std::size_t AUDIT_RECORD_MAX_SIZE{
+    2 * sizeof(uint32_t) + 2 * 32 + FinalPaymentAudit::WIRE_SIZE};
+constexpr std::size_t SCHEMA_VALUE_SIZE{
+    4 * sizeof(uint32_t) + 4 * sizeof(uint16_t) + 32};
+constexpr std::size_t EPOCH_RECORD_MAX_SIZE{
+    3 * sizeof(uint32_t) +
+    (1 + PaymentAuditStore::MAX_LIVE_CANDIDATES) * 32};
+constexpr std::size_t SMALL_INDEX_RECORD_MAX_SIZE{
+    3 * sizeof(uint32_t) + 32};
+constexpr std::size_t PRUNE_INTENT_MAX_SIZE{
+    CheckpointRecord::WIRE_SIZE + 3 * sizeof(uint32_t) +
+    2 * sizeof(uint8_t) + 32};
+
+static_assert(EPOCH_RECORD_MAX_SIZE == 172);
+static_assert(SCHEMA_VALUE_SIZE == 56);
+static_assert(SMALL_INDEX_RECORD_MAX_SIZE == 44);
+static_assert(PRUNE_INTENT_MAX_SIZE == 362);
+static_assert(
+    PaymentAuditStore::MAX_PRUNE_SCAN_RECORDS_PER_PASS >=
+    1 + 4 * (PaymentAuditStore::MAX_LIVE_CANDIDATES + 1));
+static_assert(
+    PaymentAuditStore::MAX_PRUNE_VALUE_BYTES_PER_PASS >=
+    EPOCH_RECORD_MAX_SIZE +
+        (PaymentAuditStore::MAX_LIVE_CANDIDATES + 1) *
+            (AUDIT_RECORD_MAX_SIZE + EPOCH_RECORD_MAX_SIZE +
+             2 * SMALL_INDEX_RECORD_MAX_SIZE));
+
+enum class BoundedReadResult : uint8_t {
+    NOT_FOUND = 0,
+    FOUND,
+    CORRUPT,
+    BUDGET_EXHAUSTED,
+};
+
+template <typename Key, typename Value>
+BoundedReadResult ReadExactBounded(CDBWrapper& db,
+                                   const Key& key,
+                                   std::size_t maximum_value_size,
+                                   Value& value)
+{
+    std::unique_ptr<CDBIterator> iterator{db.NewIterator()};
+    iterator->Seek(key);
+    if (!iterator->Valid()) {
+        iterator->CheckStatus();
+        return BoundedReadResult::NOT_FOUND;
+    }
+    Key found;
+    if (!iterator->GetKey(found) || found != key) {
+        iterator->CheckStatus();
+        return BoundedReadResult::NOT_FOUND;
+    }
+    if (!iterator->GetKeyExact(found) ||
+        iterator->GetValueSize() > maximum_value_size ||
+        !iterator->GetValueExact(value)) {
+        return BoundedReadResult::CORRUPT;
+    }
+    iterator->CheckStatus();
+    return BoundedReadResult::FOUND;
+}
+
+bool HasExactSingletonRange(CDBWrapper& db, uint8_t key,
+                            bool expected_present)
+{
+    std::unique_ptr<CDBIterator> iterator{db.NewIterator()};
+    iterator->Seek(key);
+    if (!iterator->Valid()) {
+        iterator->CheckStatus();
+        return !expected_present;
+    }
+    uint8_t prefix{0};
+    if (!iterator->GetKey(prefix)) return false;
+    if (prefix != key) {
+        iterator->CheckStatus();
+        return !expected_present;
+    }
+    uint8_t exact_key{0};
+    if (!expected_present || !iterator->GetKeyExact(exact_key) ||
+        exact_key != key) {
+        return false;
+    }
+    iterator->Next();
+    if (iterator->Valid()) {
+        uint8_t next_prefix{0};
+        if (!iterator->GetKey(next_prefix) || next_prefix == key) {
+            return false;
+        }
+    }
+    iterator->CheckStatus();
+    return true;
+}
+
+template <typename Key, typename Value>
+BoundedReadResult ReadExactForPrune(
+    CDBWrapper& db, const Key& key, std::size_t maximum_value_size,
+    Value& value, PaymentAuditPruneProgress& progress)
+{
+    if (progress.scanned_records >=
+        PaymentAuditStore::MAX_PRUNE_SCAN_RECORDS_PER_PASS) {
+        return BoundedReadResult::BUDGET_EXHAUSTED;
+    }
+    std::unique_ptr<CDBIterator> iterator{db.NewIterator()};
+    iterator->Seek(key);
+    if (!iterator->Valid()) {
+        iterator->CheckStatus();
+        ++progress.scanned_records;
+        return BoundedReadResult::NOT_FOUND;
+    }
+    Key found;
+    if (!iterator->GetKey(found) || found != key) {
+        iterator->CheckStatus();
+        ++progress.scanned_records;
+        return BoundedReadResult::NOT_FOUND;
+    }
+    const std::size_t value_size{iterator->GetValueSize()};
+    if (!iterator->GetKeyExact(found) ||
+        value_size > maximum_value_size) {
+        return BoundedReadResult::CORRUPT;
+    }
+    if (progress.scanned_value_bytes + value_size >
+        PaymentAuditStore::MAX_PRUNE_VALUE_BYTES_PER_PASS) {
+        return BoundedReadResult::BUDGET_EXHAUSTED;
+    }
+    ++progress.scanned_records;
+    progress.scanned_value_bytes += value_size;
+    if (!iterator->GetValueExact(value)) {
+        return BoundedReadResult::CORRUPT;
+    }
+    iterator->CheckStatus();
+    return BoundedReadResult::FOUND;
+}
 
 bool IsRecordValid(const AuditRecord& record,
                    const uint256& genesis_hash)
@@ -278,6 +430,24 @@ bool IsCheckpointRecordValid(const CheckpointRecord& record)
     return record.version == PaymentAuditStore::DB_FORMAT_VERSION &&
            record.guard == CHECKPOINT_GUARD &&
            record.checkpoint.IsStructurallyValid();
+}
+
+bool IsPruneIntentRecordValid(const PruneIntentRecord& record)
+{
+    if (record.version != PaymentAuditStore::DB_FORMAT_VERSION ||
+        record.guard != PRUNE_INTENT_GUARD ||
+        !IsCheckpointRecordValid(record.checkpoint) ||
+        record.phase > 5 || record.has_cursor > 1) {
+        return false;
+    }
+    if (record.has_cursor == 0) {
+        return record.epoch_cursor == 0 &&
+               record.witness_cursor.IsNull();
+    }
+    const bool epoch_phase{record.phase == 1 || record.phase == 5};
+    return epoch_phase ? record.witness_cursor.IsNull()
+                       : record.epoch_cursor == 0 &&
+                             !record.witness_cursor.IsNull();
 }
 
 bool IsCheckpointAdvance(
@@ -375,6 +545,87 @@ bool ContainsLiveCandidate(const EpochRecord& record,
     return false;
 }
 
+struct ArchiveLinkValidation {
+    BoundedReadResult result{BoundedReadResult::CORRUPT};
+    bool has_reference{false};
+};
+
+ArchiveLinkValidation ValidateArchiveLinks(
+    CDBWrapper& db, const uint256& genesis_hash, uint32_t epoch,
+    const uint256& witness_id, bool require_witness,
+    PaymentAuditPruneProgress& progress)
+{
+    if (witness_id.IsNull()) return {};
+    if (require_witness) {
+        AuditRecord witness;
+        const auto witness_result{ReadExactForPrune(
+            db,
+            WitnessKey{DB_WITNESS_PREFIX,
+                       PaymentAuditStore::DB_FORMAT_VERSION,
+                       genesis_hash, witness_id},
+            AUDIT_RECORD_MAX_SIZE, witness, progress)};
+        if (witness_result != BoundedReadResult::FOUND) {
+            return {witness_result, false};
+        }
+        if (!IsRecordValid(witness, genesis_hash) ||
+            witness.witness_id != witness_id ||
+            witness.audit.statement.commitment.seed.epoch != epoch) {
+            return {};
+        }
+    }
+
+    PresenceRecord presence;
+    const auto presence_result{ReadExactForPrune(
+            db,
+            PresenceKey{DB_PRESENCE_PREFIX,
+                        PaymentAuditStore::DB_FORMAT_VERSION,
+                        genesis_hash, witness_id},
+            SMALL_INDEX_RECORD_MAX_SIZE, presence, progress)};
+    if (presence_result != BoundedReadResult::FOUND) {
+        return {presence_result, false};
+    }
+    if (!IsPresenceRecordValid(presence, epoch, witness_id)) {
+        return {};
+    }
+
+    EpochRecord epoch_record;
+    const auto epoch_result{ReadExactForPrune(
+            db,
+            EpochKey{DB_EPOCH_PREFIX,
+                     PaymentAuditStore::DB_FORMAT_VERSION,
+                     genesis_hash, epoch},
+            EPOCH_RECORD_MAX_SIZE, epoch_record, progress)};
+    if (epoch_result != BoundedReadResult::FOUND) {
+        return {epoch_result, false};
+    }
+    if (!IsEpochRecordValid(epoch_record, epoch)) {
+        return {};
+    }
+
+    ReferenceRecord reference;
+    const auto reference_result{ReadExactForPrune(
+        db,
+        ReferenceKey{DB_REFERENCE_PREFIX,
+                     PaymentAuditStore::DB_FORMAT_VERSION,
+                     genesis_hash, witness_id},
+        SMALL_INDEX_RECORD_MAX_SIZE, reference, progress)};
+    if (reference_result == BoundedReadResult::CORRUPT ||
+        reference_result == BoundedReadResult::BUDGET_EXHAUSTED) {
+        return {reference_result, false};
+    }
+    const bool referenced{reference_result == BoundedReadResult::FOUND};
+    if (referenced &&
+        !IsReferenceRecordValid(reference, epoch, witness_id)) {
+        return {};
+    }
+    const bool live{ContainsLiveCandidate(epoch_record, witness_id)};
+    const bool pinned{epoch_record.pinned_witness_id == witness_id};
+    const bool valid{live ? !referenced && !pinned : referenced};
+    return {valid ? BoundedReadResult::FOUND
+                  : BoundedReadResult::CORRUPT,
+            referenced};
+}
+
 } // namespace
 
 PaymentAuditStore::PaymentAuditStore(fs::path path,
@@ -411,19 +662,75 @@ void PaymentAuditStore::Initialize()
             return;
         }
         SchemaValue schema;
-        if (!m_db.Read(DB_SCHEMA_KEY, schema) ||
+        if (ReadExactBounded(m_db, DB_SCHEMA_KEY, SCHEMA_VALUE_SIZE,
+                             schema) != BoundedReadResult::FOUND ||
             schema != expected_schema) {
             m_failure = PaymentAuditStoreResult::CORRUPT;
             return;
         }
-        if (m_db.Exists(DB_CHECKPOINT_KEY)) {
+        {
+            std::unique_ptr<CDBIterator> first{m_db.NewIterator()};
+            first->SeekToFirst();
+            uint8_t key{0};
+            if (!first->Valid() || !first->GetKeyExact(key) ||
+                key != DB_SCHEMA_KEY) {
+                m_failure = PaymentAuditStoreResult::CORRUPT;
+                return;
+            }
+            first->CheckStatus();
+            std::unique_ptr<CDBIterator> trailing{m_db.NewIterator()};
+            trailing->Seek(static_cast<uint8_t>(DB_PRUNE_INTENT_KEY + 1));
+            if (trailing->Valid()) {
+                m_failure = PaymentAuditStoreResult::CORRUPT;
+                return;
+            }
+            trailing->CheckStatus();
+        }
+        const bool has_checkpoint{m_db.Exists(DB_CHECKPOINT_KEY)};
+        if (!HasExactSingletonRange(m_db, DB_SCHEMA_KEY,
+                                    /*expected_present=*/true) ||
+            !HasExactSingletonRange(m_db, DB_CHECKPOINT_KEY,
+                                    has_checkpoint)) {
+            m_failure = PaymentAuditStoreResult::CORRUPT;
+            return;
+        }
+        if (has_checkpoint) {
             CheckpointRecord record;
-            if (!m_db.Read(DB_CHECKPOINT_KEY, record) ||
+            if (ReadExactBounded(m_db, DB_CHECKPOINT_KEY,
+                                 CheckpointRecord::WIRE_SIZE,
+                                 record) != BoundedReadResult::FOUND ||
                 !IsCheckpointRecordValid(record)) {
                 m_failure = PaymentAuditStoreResult::CORRUPT;
                 return;
             }
             m_prune_checkpoint = record.checkpoint;
+        }
+        const bool has_intent{m_db.Exists(DB_PRUNE_INTENT_KEY)};
+        if (!HasExactSingletonRange(m_db, DB_PRUNE_INTENT_KEY,
+                                    has_intent)) {
+            m_failure = PaymentAuditStoreResult::CORRUPT;
+            return;
+        }
+        if (has_intent) {
+            PruneIntentRecord record;
+            if (ReadExactBounded(
+                    m_db, DB_PRUNE_INTENT_KEY,
+                    PRUNE_INTENT_MAX_SIZE, record) !=
+                    BoundedReadResult::FOUND ||
+                !IsPruneIntentRecordValid(record) ||
+                (m_prune_checkpoint &&
+                 !IsCheckpointAdvance(
+                     *m_prune_checkpoint,
+                     record.checkpoint.checkpoint))) {
+                m_failure = PaymentAuditStoreResult::CORRUPT;
+                return;
+            }
+            m_prune_intent = PruneIntentState{
+                record.checkpoint.checkpoint,
+                static_cast<PrunePhase>(record.phase),
+                record.has_cursor != 0,
+                record.epoch_cursor,
+                record.witness_cursor};
         }
     } catch (const std::exception&) {
         m_failure = PaymentAuditStoreResult::DATABASE_ERROR;
@@ -450,6 +757,15 @@ void PaymentAuditStore::AdvanceCandidateRevision() const
     ++m_candidate_revision;
 }
 
+const PaymentAuditStoreCheckpoint*
+PaymentAuditStore::EffectivePruneCheckpointLocked() const
+{
+    return m_prune_intent ? &m_prune_intent->checkpoint
+                          : m_prune_checkpoint
+                                ? &*m_prune_checkpoint
+                                : nullptr;
+}
+
 std::optional<uint64_t> PaymentAuditStore::ObserveCandidateRevision() const
 {
     LOCK(m_mutex);
@@ -471,8 +787,9 @@ PaymentAuditStoreResult PaymentAuditStore::ProbeLiveCandidateSlot(
     const auto missing_quorum_slot{
         MissingQuorumSlot(selected_quorum_mask)};
     if (!missing_quorum_slot) return PaymentAuditStoreResult::INVALID;
-    if (m_prune_checkpoint &&
-        epoch <= m_prune_checkpoint->prune_through_epoch) {
+    const auto* prune_checkpoint{EffectivePruneCheckpointLocked()};
+    if (prune_checkpoint &&
+        epoch <= prune_checkpoint->prune_through_epoch) {
         return PaymentAuditStoreResult::INVALID;
     }
 
@@ -518,8 +835,9 @@ PaymentAuditStoreResult PaymentAuditStore::AcceptVerified(
         !missing_quorum_slot) {
         return PaymentAuditStoreResult::INVALID;
     }
-    if (m_prune_checkpoint &&
-        epoch <= m_prune_checkpoint->prune_through_epoch) {
+    const auto* prune_checkpoint{EffectivePruneCheckpointLocked()};
+    if (prune_checkpoint &&
+        epoch <= prune_checkpoint->prune_through_epoch) {
         return PaymentAuditStoreResult::INVALID;
     }
 
@@ -703,12 +1021,32 @@ std::optional<FinalPaymentAudit> PaymentAuditStore::GetLocked(
         const PresenceKey presence_key{
             DB_PRESENCE_PREFIX, DB_FORMAT_VERSION, m_genesis_hash,
             witness_id};
+        PresenceRecord presence;
+        const auto presence_result{ReadExactBounded(
+            m_db, presence_key, SMALL_INDEX_RECORD_MAX_SIZE, presence)};
+        if (presence_result == BoundedReadResult::CORRUPT) {
+            m_failure = PaymentAuditStoreResult::CORRUPT;
+            return std::nullopt;
+        }
+        const bool has_presence{
+            presence_result == BoundedReadResult::FOUND};
+        if (has_presence &&
+            !IsPresenceRecordValid(presence, presence.epoch,
+                                   witness_id)) {
+            m_failure = PaymentAuditStoreResult::CORRUPT;
+            return std::nullopt;
+        }
+        const auto* prune_checkpoint{EffectivePruneCheckpointLocked()};
+        if (has_presence && prune_checkpoint &&
+            presence.epoch <= prune_checkpoint->prune_through_epoch) {
+            return std::nullopt;
+        }
         AuditRecord record;
         if (!m_db.Read(key, record)) {
             // A stale tiny index must never suppress exact-witness healing.
             // Remove both sides atomically; a required response can then
             // repopulate the fully verified payload and its presence key.
-            if (m_db.Exists(presence_key)) {
+            if (has_presence) {
                 CDBBatch repair{m_db};
                 repair.Erase(key);
                 repair.Erase(presence_key);
@@ -728,12 +1066,15 @@ std::optional<FinalPaymentAudit> PaymentAuditStore::GetLocked(
         }
         const uint32_t epoch{
             record.audit.statement.commitment.seed.epoch};
-        if (m_prune_checkpoint &&
-            epoch <= m_prune_checkpoint->prune_through_epoch) {
+        if (prune_checkpoint &&
+            epoch <= prune_checkpoint->prune_through_epoch) {
+            return std::nullopt;
+        }
+        if (has_presence && presence.epoch != epoch) {
             m_failure = PaymentAuditStoreResult::CORRUPT;
             return std::nullopt;
         }
-        if (!HasValidPresence(m_db, m_genesis_hash, epoch, witness_id)) {
+        if (!has_presence) {
             if (!CanAdvanceCandidateRevision()) return std::nullopt;
             if (!m_db.Write(
                     presence_key,
@@ -758,8 +1099,9 @@ PaymentAuditStore::GetEpochCandidateSnapshot(uint32_t epoch) const
     LOCK(m_mutex);
     if (m_failure) return std::nullopt;
     PaymentAuditCandidateSnapshot snapshot{m_candidate_revision, epoch, {}};
-    if (m_prune_checkpoint &&
-        epoch <= m_prune_checkpoint->prune_through_epoch) {
+    const auto* prune_checkpoint{EffectivePruneCheckpointLocked()};
+    if (prune_checkpoint &&
+        epoch <= prune_checkpoint->prune_through_epoch) {
         return snapshot;
     }
     try {
@@ -829,10 +1171,10 @@ bool PaymentAuditStore::Has(const uint256& witness_id) const
             m_failure = PaymentAuditStoreResult::CORRUPT;
             return false;
         }
-        if (m_prune_checkpoint &&
+        const auto* prune_checkpoint{EffectivePruneCheckpointLocked()};
+        if (prune_checkpoint &&
             presence.epoch <=
-                m_prune_checkpoint->prune_through_epoch) {
-            m_failure = PaymentAuditStoreResult::CORRUPT;
+                prune_checkpoint->prune_through_epoch) {
             return false;
         }
         return true;
@@ -848,8 +1190,9 @@ PaymentAuditStoreResult PaymentAuditStore::PinReferencedWitness(
     LOCK(m_mutex);
     if (m_failure) return *m_failure;
     if (witness_id.IsNull()) return PaymentAuditStoreResult::INVALID;
-    if (m_prune_checkpoint &&
-        epoch <= m_prune_checkpoint->prune_through_epoch) {
+    const auto* prune_checkpoint{EffectivePruneCheckpointLocked()};
+    if (prune_checkpoint &&
+        epoch <= prune_checkpoint->prune_through_epoch) {
         return PaymentAuditStoreResult::INVALID;
     }
     try {
@@ -959,234 +1302,453 @@ PaymentAuditStoreResult PaymentAuditStore::PinReferencedWitness(
 bool PaymentAuditStore::PruneThroughCheckpoint(
     const PaymentAuditStoreCheckpoint& checkpoint)
 {
-    LOCK(m_mutex);
-    if (m_failure || !checkpoint.IsStructurallyValid()) return false;
-    if (m_prune_checkpoint) {
-        if (checkpoint == *m_prune_checkpoint) return true;
-        if (!IsCheckpointAdvance(*m_prune_checkpoint, checkpoint)) {
+    for (;;) {
+        const auto progress{PruneThroughCheckpointStep(checkpoint)};
+        if (progress.status == PaymentAuditPruneStatus::COMPLETE) {
+            return true;
+        }
+        if (progress.status != PaymentAuditPruneStatus::IN_PROGRESS) {
             return false;
         }
     }
+}
+
+PaymentAuditPruneProgress
+PaymentAuditStore::PruneThroughCheckpointStep(
+    const PaymentAuditStoreCheckpoint& checkpoint)
+{
+    LOCK(m_mutex);
+    PaymentAuditPruneProgress progress;
+    if (m_failure) {
+        if (*m_failure == PaymentAuditStoreResult::CORRUPT) {
+            progress.status = PaymentAuditPruneStatus::CORRUPT;
+        } else if (*m_failure == PaymentAuditStoreResult::INVALID) {
+            progress.status = PaymentAuditPruneStatus::INVALID;
+        } else {
+            progress.status = PaymentAuditPruneStatus::DATABASE_ERROR;
+        }
+        return progress;
+    }
+    if (!checkpoint.IsStructurallyValid()) {
+        progress.status = PaymentAuditPruneStatus::INVALID;
+        return progress;
+    }
+    if (m_prune_intent &&
+        m_prune_intent->checkpoint != checkpoint) {
+        progress.status = PaymentAuditPruneStatus::INVALID;
+        return progress;
+    }
+    if (!m_prune_intent) {
+        if (m_prune_checkpoint) {
+            if (checkpoint == *m_prune_checkpoint) {
+                progress.status = PaymentAuditPruneStatus::COMPLETE;
+                return progress;
+            }
+            if (!IsCheckpointAdvance(*m_prune_checkpoint, checkpoint)) {
+                progress.status = PaymentAuditPruneStatus::INVALID;
+                return progress;
+            }
+        }
+        PruneIntentState intent{checkpoint, PrunePhase::VALIDATE_WITNESSES,
+                                false, 0, {}};
+        const PruneIntentRecord disk_intent{
+            DB_FORMAT_VERSION,
+            CheckpointRecord{DB_FORMAT_VERSION, checkpoint,
+                             CHECKPOINT_GUARD},
+            static_cast<uint8_t>(intent.phase), 0, 0, {},
+            PRUNE_INTENT_GUARD};
+        if (!CanAdvanceCandidateRevision()) {
+            progress.status = PaymentAuditPruneStatus::DATABASE_ERROR;
+            return progress;
+        }
+        if (!m_db.Write(DB_PRUNE_INTENT_KEY, disk_intent, true)) {
+            m_failure = PaymentAuditStoreResult::DATABASE_ERROR;
+            progress.status = PaymentAuditPruneStatus::DATABASE_ERROR;
+            return progress;
+        }
+        m_prune_intent = std::move(intent);
+        AdvanceCandidateRevision();
+    }
 
     try {
-        std::map<uint256, uint32_t> witness_epochs;
-        std::map<uint256, uint32_t> presence_epochs;
-        std::map<uint256, uint32_t> reference_epochs;
-        std::map<uint256, uint32_t> epoch_index_epochs;
-        std::set<uint32_t> epoch_records;
-        std::set<uint256> pinned_witnesses;
-        std::set<uint256> live_candidate_witnesses;
-        std::vector<EpochKey> epoch_keys_to_prune;
-        bool found_schema{false};
-        bool found_checkpoint{false};
-
-        const auto note_epoch = [](auto& index, const uint256& witness_id,
-                                   uint32_t epoch) {
-            if (witness_id.IsNull()) return false;
-            const auto [position, inserted]{index.emplace(witness_id, epoch)};
-            return inserted || position->second == epoch;
+        auto& intent{*m_prune_intent};
+        const auto make_disk_intent = [&] {
+            return PruneIntentRecord{
+                DB_FORMAT_VERSION,
+                CheckpointRecord{DB_FORMAT_VERSION, intent.checkpoint,
+                                 CHECKPOINT_GUARD},
+                static_cast<uint8_t>(intent.phase),
+                static_cast<uint8_t>(intent.has_cursor),
+                intent.epoch_cursor, intent.witness_cursor,
+                PRUNE_INTENT_GUARD};
         };
-        std::unique_ptr<CDBIterator> iterator{m_db.NewIterator()};
-        for (iterator->SeekToFirst(); iterator->Valid(); iterator->Next()) {
-            uint8_t prefix{0};
-            if (!iterator->GetKey(prefix)) throw CorruptArchiveIndex{};
-            if (prefix == DB_SCHEMA_KEY) {
-                uint8_t key{0};
-                SchemaValue schema;
-                if (found_schema || !iterator->GetKeyExact(key) ||
-                    key != DB_SCHEMA_KEY ||
-                    !iterator->GetValueExact(schema) ||
-                    schema != MakeSchemaValue(m_genesis_hash)) {
+        const auto reset_cursor = [&] {
+            intent.has_cursor = false;
+            intent.epoch_cursor = 0;
+            intent.witness_cursor.SetNull();
+        };
+        const auto can_scan = [&](std::size_t value_size) {
+            if (progress.scanned_records >=
+                MAX_PRUNE_SCAN_RECORDS_PER_PASS) {
+                return false;
+            }
+            return progress.scanned_value_bytes + value_size <=
+                   MAX_PRUNE_VALUE_BYTES_PER_PASS;
+        };
+        const auto note_scan = [&](std::size_t value_size) {
+            ++progress.scanned_records;
+            progress.scanned_value_bytes += value_size;
+        };
+        const uint32_t floor{checkpoint.prune_through_epoch};
+        CDBBatch batch{m_db};
+        bool phase_complete{false};
+        const bool running_epoch_erase{
+            intent.phase == PrunePhase::ERASE_EPOCHS};
+
+        if (intent.phase == PrunePhase::VALIDATE_WITNESSES) {
+            std::unique_ptr<CDBIterator> iterator{m_db.NewIterator()};
+            if (intent.has_cursor) {
+                iterator->Seek(WitnessKey{
+                    DB_WITNESS_PREFIX, DB_FORMAT_VERSION,
+                    m_genesis_hash, intent.witness_cursor});
+            } else {
+                iterator->Seek(DB_WITNESS_PREFIX);
+            }
+            while (iterator->Valid()) {
+                uint8_t prefix{0};
+                if (!iterator->GetKey(prefix)) {
                     throw CorruptArchiveIndex{};
                 }
-                found_schema = true;
-                continue;
-            }
-
-            if (prefix == DB_WITNESS_PREFIX) {
+                if (prefix != DB_WITNESS_PREFIX) {
+                    phase_complete = true;
+                    break;
+                }
                 WitnessKey key;
+                const std::size_t value_size{iterator->GetValueSize()};
                 if (!iterator->GetKeyExact(key) ||
                     key.prefix != DB_WITNESS_PREFIX ||
                     key.version != DB_FORMAT_VERSION ||
                     key.genesis_hash != m_genesis_hash ||
-                    key.witness_id.IsNull()) {
+                    key.witness_id.IsNull() ||
+                    value_size > AUDIT_RECORD_MAX_SIZE) {
                     throw CorruptArchiveIndex{};
                 }
-                // Presence records carry the epoch so pruning never needs to
-                // decode the multi-megabyte witness value.
-                if (!witness_epochs.emplace(
-                        key.witness_id,
-                        std::numeric_limits<uint32_t>::max()).second) {
+                if (!can_scan(value_size)) {
+                    intent.has_cursor = true;
+                    intent.witness_cursor = key.witness_id;
+                    break;
+                }
+                AuditRecord record;
+                if (!iterator->GetValueExact(record) ||
+                    !IsRecordValid(record, m_genesis_hash) ||
+                    record.witness_id != key.witness_id) {
                     throw CorruptArchiveIndex{};
                 }
-                continue;
+                note_scan(value_size);
+                const uint32_t epoch{
+                    record.audit.statement.commitment.seed.epoch};
+                if (epoch <= floor) {
+                    const auto links{ValidateArchiveLinks(
+                        m_db, m_genesis_hash, epoch, key.witness_id,
+                        /*require_witness=*/false, progress)};
+                    if (links.result ==
+                        BoundedReadResult::BUDGET_EXHAUSTED) {
+                        intent.has_cursor = true;
+                        intent.witness_cursor = key.witness_id;
+                        break;
+                    }
+                    if (links.result != BoundedReadResult::FOUND) {
+                        throw CorruptArchiveIndex{};
+                    }
+                }
+                iterator->Next();
             }
-
-            if (prefix == DB_EPOCH_PREFIX) {
+            iterator->CheckStatus();
+            if (!iterator->Valid()) phase_complete = true;
+            if (phase_complete) {
+                intent.phase = PrunePhase::VALIDATE_EPOCHS;
+                reset_cursor();
+            }
+        } else if (intent.phase == PrunePhase::VALIDATE_EPOCHS ||
+                   intent.phase == PrunePhase::ERASE_EPOCHS) {
+            const bool erasing{
+                intent.phase == PrunePhase::ERASE_EPOCHS};
+            std::unique_ptr<CDBIterator> iterator{m_db.NewIterator()};
+            if (intent.has_cursor) {
+                iterator->Seek(EpochKey{
+                    DB_EPOCH_PREFIX, DB_FORMAT_VERSION,
+                    m_genesis_hash, intent.epoch_cursor});
+            } else {
+                iterator->Seek(DB_EPOCH_PREFIX);
+            }
+            while (iterator->Valid()) {
+                uint8_t prefix{0};
+                if (!iterator->GetKey(prefix)) {
+                    throw CorruptArchiveIndex{};
+                }
+                if (prefix != DB_EPOCH_PREFIX) {
+                    phase_complete = true;
+                    break;
+                }
                 EpochKey key;
-                EpochRecord record;
+                const std::size_t value_size{iterator->GetValueSize()};
                 if (!iterator->GetKeyExact(key) ||
                     key.prefix != DB_EPOCH_PREFIX ||
                     key.version != DB_FORMAT_VERSION ||
                     key.genesis_hash != m_genesis_hash ||
-                    !iterator->GetValueExact(record) ||
-                    !IsEpochRecordValid(record, key.epoch) ||
-                    !epoch_records.insert(key.epoch).second) {
+                    value_size > EPOCH_RECORD_MAX_SIZE) {
                     throw CorruptArchiveIndex{};
                 }
-                if (!record.pinned_witness_id.IsNull()) {
-                    if (!note_epoch(epoch_index_epochs,
-                                    record.pinned_witness_id, key.epoch) ||
-                        !pinned_witnesses.insert(
-                            record.pinned_witness_id).second) {
+                if (!can_scan(value_size) ||
+                    (erasing && progress.erased_records >=
+                                     MAX_PRUNE_ERASE_RECORDS_PER_PASS)) {
+                    intent.has_cursor = true;
+                    intent.epoch_cursor = key.epoch;
+                    break;
+                }
+                EpochRecord record;
+                if (!iterator->GetValueExact(record) ||
+                    !IsEpochRecordValid(record, key.epoch)) {
+                    throw CorruptArchiveIndex{};
+                }
+                note_scan(value_size);
+                // Epoch integers serialize little-endian, so their LevelDB
+                // order is not numeric. Retained rows cannot terminate this
+                // scan; a later physical key may still be below the floor.
+                if (key.epoch > floor) {
+                    iterator->Next();
+                    continue;
+                }
+                if (!erasing) {
+                    bool budget_exhausted{false};
+                    const auto validate_witness = [&](
+                        const uint256& witness_id) {
+                        if (witness_id.IsNull()) return true;
+                        const auto links{ValidateArchiveLinks(
+                            m_db, m_genesis_hash, key.epoch, witness_id,
+                            /*require_witness=*/true, progress)};
+                        if (links.result ==
+                            BoundedReadResult::BUDGET_EXHAUSTED) {
+                            budget_exhausted = true;
+                            return false;
+                        }
+                        if (links.result != BoundedReadResult::FOUND) {
+                            throw CorruptArchiveIndex{};
+                        }
+                        return true;
+                    };
+                    if (!validate_witness(record.pinned_witness_id)) {
+                        intent.has_cursor = true;
+                        intent.epoch_cursor = key.epoch;
+                        break;
+                    }
+                    for (const auto& witness_id :
+                         record.live_candidates_by_missing_quorum) {
+                        if (!validate_witness(witness_id)) {
+                            break;
+                        }
+                    }
+                    if (budget_exhausted) {
+                        intent.has_cursor = true;
+                        intent.epoch_cursor = key.epoch;
+                        break;
+                    }
+                } else {
+                    batch.Erase(key);
+                    ++progress.erased_records;
+                }
+                iterator->Next();
+            }
+            iterator->CheckStatus();
+            if (!iterator->Valid()) phase_complete = true;
+            if (phase_complete && !erasing) {
+                intent.phase = PrunePhase::VALIDATE_REFERENCES;
+                reset_cursor();
+            }
+        } else {
+            const uint8_t prefix{
+                intent.phase == PrunePhase::VALIDATE_REFERENCES
+                    ? DB_REFERENCE_PREFIX
+                    : DB_PRESENCE_PREFIX};
+            const bool erasing{
+                intent.phase == PrunePhase::ERASE_WITNESSES};
+            std::unique_ptr<CDBIterator> iterator{m_db.NewIterator()};
+            if (intent.has_cursor) {
+                if (prefix == DB_REFERENCE_PREFIX) {
+                    iterator->Seek(ReferenceKey{
+                        prefix, DB_FORMAT_VERSION, m_genesis_hash,
+                        intent.witness_cursor});
+                } else {
+                    iterator->Seek(PresenceKey{
+                        prefix, DB_FORMAT_VERSION, m_genesis_hash,
+                        intent.witness_cursor});
+                }
+            } else {
+                iterator->Seek(prefix);
+            }
+            while (iterator->Valid()) {
+                uint8_t found_prefix{0};
+                if (!iterator->GetKey(found_prefix)) {
+                    throw CorruptArchiveIndex{};
+                }
+                if (found_prefix != prefix) {
+                    phase_complete = true;
+                    break;
+                }
+                const std::size_t value_size{iterator->GetValueSize()};
+                uint256 witness_id;
+                uint32_t epoch{0};
+                if (prefix == DB_REFERENCE_PREFIX) {
+                    ReferenceKey key;
+                    if (!iterator->GetKeyExact(key) ||
+                        key.prefix != prefix ||
+                        key.version != DB_FORMAT_VERSION ||
+                        key.genesis_hash != m_genesis_hash ||
+                        key.witness_id.IsNull() ||
+                        value_size > SMALL_INDEX_RECORD_MAX_SIZE) {
                         throw CorruptArchiveIndex{};
                     }
-                }
-                for (const auto& witness_id :
-                     record.live_candidates_by_missing_quorum) {
-                    if (witness_id.IsNull()) continue;
-                    if (!note_epoch(epoch_index_epochs, witness_id,
-                                    key.epoch) ||
-                        !live_candidate_witnesses.insert(witness_id).second) {
+                    witness_id = key.witness_id;
+                    if (!can_scan(value_size)) {
+                        intent.has_cursor = true;
+                        intent.witness_cursor = witness_id;
+                        break;
+                    }
+                    ReferenceRecord record;
+                    if (!iterator->GetValueExact(record) ||
+                        !IsReferenceRecordValid(
+                            record, record.epoch, witness_id)) {
                         throw CorruptArchiveIndex{};
                     }
+                    epoch = record.epoch;
+                } else {
+                    PresenceKey key;
+                    if (!iterator->GetKeyExact(key) ||
+                        key.prefix != prefix ||
+                        key.version != DB_FORMAT_VERSION ||
+                        key.genesis_hash != m_genesis_hash ||
+                        key.witness_id.IsNull() ||
+                        value_size > SMALL_INDEX_RECORD_MAX_SIZE) {
+                        throw CorruptArchiveIndex{};
+                    }
+                    witness_id = key.witness_id;
+                    if (!can_scan(value_size)) {
+                        intent.has_cursor = true;
+                        intent.witness_cursor = witness_id;
+                        break;
+                    }
+                    PresenceRecord record;
+                    if (!iterator->GetValueExact(record) ||
+                        !IsPresenceRecordValid(
+                            record, record.epoch, witness_id)) {
+                        throw CorruptArchiveIndex{};
+                    }
+                    epoch = record.epoch;
                 }
-                if (key.epoch <= checkpoint.prune_through_epoch) {
-                    epoch_keys_to_prune.push_back(key);
+                note_scan(value_size);
+                bool has_reference{false};
+                if (epoch <= floor) {
+                    const auto links{ValidateArchiveLinks(
+                        m_db, m_genesis_hash, epoch, witness_id,
+                        /*require_witness=*/true, progress)};
+                    if (links.result ==
+                        BoundedReadResult::BUDGET_EXHAUSTED) {
+                        intent.has_cursor = true;
+                        intent.witness_cursor = witness_id;
+                        break;
+                    }
+                    if (links.result != BoundedReadResult::FOUND) {
+                        throw CorruptArchiveIndex{};
+                    }
+                    has_reference = links.has_reference;
                 }
-                continue;
-            }
-
-            if (prefix == DB_REFERENCE_PREFIX) {
-                ReferenceKey key;
-                ReferenceRecord record;
-                if (!iterator->GetKeyExact(key) ||
-                    key.prefix != DB_REFERENCE_PREFIX ||
-                    key.version != DB_FORMAT_VERSION ||
-                    key.genesis_hash != m_genesis_hash ||
-                    key.witness_id.IsNull() ||
-                    !iterator->GetValueExact(record) ||
-                    !IsReferenceRecordValid(record, record.epoch,
-                                            key.witness_id) ||
-                    !note_epoch(reference_epochs, key.witness_id,
-                                record.epoch)) {
-                    throw CorruptArchiveIndex{};
+                const std::size_t erase_count{
+                    erasing && epoch <= floor
+                        ? 2 + static_cast<std::size_t>(has_reference)
+                        : 0};
+                if (progress.erased_records + erase_count >
+                    MAX_PRUNE_ERASE_RECORDS_PER_PASS) {
+                    intent.has_cursor = true;
+                    intent.witness_cursor = witness_id;
+                    break;
                 }
-                continue;
-            }
-
-            if (prefix == DB_PRESENCE_PREFIX) {
-                PresenceKey key;
-                PresenceRecord record;
-                if (!iterator->GetKeyExact(key) ||
-                    key.prefix != DB_PRESENCE_PREFIX ||
-                    key.version != DB_FORMAT_VERSION ||
-                    key.genesis_hash != m_genesis_hash ||
-                    key.witness_id.IsNull() ||
-                    !iterator->GetValueExact(record) ||
-                    !IsPresenceRecordValid(record, record.epoch,
-                                           key.witness_id) ||
-                    !note_epoch(presence_epochs, key.witness_id,
-                                record.epoch)) {
-                    throw CorruptArchiveIndex{};
+                if (erasing && epoch <= floor) {
+                    batch.Erase(WitnessKey{
+                        DB_WITNESS_PREFIX, DB_FORMAT_VERSION,
+                        m_genesis_hash, witness_id});
+                    if (has_reference) {
+                        batch.Erase(ReferenceKey{
+                            DB_REFERENCE_PREFIX, DB_FORMAT_VERSION,
+                            m_genesis_hash, witness_id});
+                    }
+                    batch.Erase(PresenceKey{
+                        DB_PRESENCE_PREFIX, DB_FORMAT_VERSION,
+                        m_genesis_hash, witness_id});
+                    progress.erased_records += erase_count;
                 }
-                continue;
+                iterator->Next();
             }
-
-            if (prefix == DB_CHECKPOINT_KEY) {
-                uint8_t key{0};
-                CheckpointRecord record;
-                if (found_checkpoint || !iterator->GetKeyExact(key) ||
-                    key != DB_CHECKPOINT_KEY ||
-                    !iterator->GetValueExact(record) ||
-                    !IsCheckpointRecordValid(record) ||
-                    !m_prune_checkpoint ||
-                    record.checkpoint != *m_prune_checkpoint) {
-                    throw CorruptArchiveIndex{};
+            iterator->CheckStatus();
+            if (!iterator->Valid()) phase_complete = true;
+            if (phase_complete) {
+                if (intent.phase == PrunePhase::VALIDATE_REFERENCES) {
+                    intent.phase = PrunePhase::VALIDATE_PRESENCE;
+                    reset_cursor();
+                } else if (intent.phase ==
+                           PrunePhase::VALIDATE_PRESENCE) {
+                    intent.phase = PrunePhase::ERASE_WITNESSES;
+                    reset_cursor();
+                } else {
+                    intent.phase = PrunePhase::ERASE_EPOCHS;
+                    reset_cursor();
                 }
-                found_checkpoint = true;
-                continue;
-            }
-            throw CorruptArchiveIndex{};
-        }
-        iterator->CheckStatus();
-
-        if (!found_schema ||
-            found_checkpoint != m_prune_checkpoint.has_value() ||
-            witness_epochs.size() != presence_epochs.size()) {
-            throw CorruptArchiveIndex{};
-        }
-        for (auto& [witness_id, epoch] : witness_epochs) {
-            const auto presence{presence_epochs.find(witness_id)};
-            if (presence == presence_epochs.end()) {
-                throw CorruptArchiveIndex{};
-            }
-            epoch = presence->second;
-        }
-        for (const auto& [witness_id, epoch] : presence_epochs) {
-            if (!witness_epochs.contains(witness_id) ||
-                !epoch_records.contains(epoch)) {
-                throw CorruptArchiveIndex{};
-            }
-            const auto indexed{epoch_index_epochs.find(witness_id)};
-            const auto referenced{reference_epochs.find(witness_id)};
-            if ((indexed == epoch_index_epochs.end() ||
-                 indexed->second != epoch) &&
-                (referenced == reference_epochs.end() ||
-                 referenced->second != epoch)) {
-                throw CorruptArchiveIndex{};
-            }
-        }
-        for (const auto& [witness_id, epoch] : epoch_index_epochs) {
-            const auto presence{presence_epochs.find(witness_id)};
-            if (presence == presence_epochs.end() ||
-                presence->second != epoch) {
-                throw CorruptArchiveIndex{};
-            }
-        }
-        for (const auto& [witness_id, epoch] : reference_epochs) {
-            const auto presence{presence_epochs.find(witness_id)};
-            if (presence == presence_epochs.end() ||
-                presence->second != epoch ||
-                !epoch_records.contains(epoch) ||
-                live_candidate_witnesses.contains(witness_id)) {
-                throw CorruptArchiveIndex{};
-            }
-        }
-        for (const auto& witness_id : pinned_witnesses) {
-            if (!reference_epochs.contains(witness_id)) {
-                throw CorruptArchiveIndex{};
             }
         }
 
-        CDBBatch batch{m_db};
-        for (const auto& key : epoch_keys_to_prune) batch.Erase(key);
-        for (const auto& [witness_id, epoch] : presence_epochs) {
-            if (epoch > checkpoint.prune_through_epoch) continue;
-            batch.Erase(WitnessKey{DB_WITNESS_PREFIX, DB_FORMAT_VERSION,
-                                   m_genesis_hash, witness_id});
-            batch.Erase(ReferenceKey{DB_REFERENCE_PREFIX, DB_FORMAT_VERSION,
-                                     m_genesis_hash, witness_id});
-            batch.Erase(PresenceKey{DB_PRESENCE_PREFIX, DB_FORMAT_VERSION,
-                                    m_genesis_hash, witness_id});
+        const bool completed_epoch_erase{
+            running_epoch_erase && phase_complete};
+        if (completed_epoch_erase) {
+            batch.Write(DB_CHECKPOINT_KEY,
+                        CheckpointRecord{DB_FORMAT_VERSION, checkpoint,
+                                         CHECKPOINT_GUARD});
+            batch.Erase(DB_PRUNE_INTENT_KEY);
+        } else {
+            batch.Write(DB_PRUNE_INTENT_KEY, make_disk_intent());
         }
-        batch.Write(DB_CHECKPOINT_KEY,
-                    CheckpointRecord{DB_FORMAT_VERSION, checkpoint,
-                                     CHECKPOINT_GUARD});
-        if (!CanAdvanceCandidateRevision()) return false;
         if (!m_db.WriteBatch(batch, true)) {
             m_failure = PaymentAuditStoreResult::DATABASE_ERROR;
-            return false;
+            progress.status = PaymentAuditPruneStatus::DATABASE_ERROR;
+            return progress;
         }
-        m_prune_checkpoint = checkpoint;
-        AdvanceCandidateRevision();
-        return true;
+        if (completed_epoch_erase) {
+            m_prune_checkpoint = checkpoint;
+            m_prune_intent.reset();
+            progress.status = PaymentAuditPruneStatus::COMPLETE;
+        } else {
+            progress.status = PaymentAuditPruneStatus::IN_PROGRESS;
+        }
+        return progress;
     } catch (const CorruptArchiveIndex&) {
+        // No physical pruning occurs until every target index has passed all
+        // validation phases. Restore the pre-request database shape when
+        // validation itself rejects the archive; once erasure starts, the
+        // durable intent must remain so restart can finish the prefix.
+        if (m_prune_intent &&
+            m_prune_intent->phase < PrunePhase::ERASE_WITNESSES) {
+            if (!m_db.Erase(DB_PRUNE_INTENT_KEY, true)) {
+                m_failure = PaymentAuditStoreResult::DATABASE_ERROR;
+                progress.status = PaymentAuditPruneStatus::DATABASE_ERROR;
+                return progress;
+            }
+            m_prune_intent.reset();
+        }
         m_failure = PaymentAuditStoreResult::CORRUPT;
-        return false;
+        progress.status = PaymentAuditPruneStatus::CORRUPT;
+        return progress;
     } catch (const std::exception&) {
         m_failure = PaymentAuditStoreResult::DATABASE_ERROR;
-        return false;
+        progress.status = PaymentAuditPruneStatus::DATABASE_ERROR;
+        return progress;
     }
 }
 
@@ -1195,6 +1757,16 @@ PaymentAuditStore::GetPruneCheckpoint() const
 {
     LOCK(m_mutex);
     return m_failure ? std::nullopt : m_prune_checkpoint;
+}
+
+std::optional<PaymentAuditStoreCheckpoint>
+PaymentAuditStore::GetPendingPruneCheckpoint() const
+{
+    LOCK(m_mutex);
+    return m_failure || !m_prune_intent
+               ? std::nullopt
+               : std::optional<PaymentAuditStoreCheckpoint>{
+                     m_prune_intent->checkpoint};
 }
 
 } // namespace llmq::pq

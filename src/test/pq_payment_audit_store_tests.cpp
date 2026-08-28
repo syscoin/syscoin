@@ -76,6 +76,16 @@ struct TestTrailingPresenceRecord {
     }
 };
 
+struct TestTrailingScalarKey {
+    uint8_t prefix{0xa6};
+    uint8_t trailing{0x01};
+
+    SERIALIZE_METHODS(TestTrailingScalarKey, obj)
+    {
+        READWRITE(obj.prefix, obj.trailing);
+    }
+};
+
 uint256 NonNullHash(uint64_t value)
 {
     uint256 hash;
@@ -263,6 +273,26 @@ void AppendTrailingPresenceValue(const fs::path& path,
             TestPresenceRecord{PaymentAuditStore::DB_FORMAT_VERSION,
                                epoch, witness_id}},
         true));
+}
+
+void AppendTrailingPruneIntentKey(const fs::path& path)
+{
+    CDBWrapper db{DBParams{.path = path,
+                           .cache_bytes = 1 << 20,
+                           .memory_only = false,
+                           .wipe_data = false,
+                           .obfuscate = false}};
+    BOOST_REQUIRE(db.Write(TestTrailingScalarKey{}, uint8_t{1}, true));
+}
+
+void OverwritePruneIntentValue(const fs::path& path)
+{
+    CDBWrapper db{DBParams{.path = path,
+                           .cache_bytes = 1 << 20,
+                           .memory_only = false,
+                           .wipe_data = false,
+                           .obfuscate = false}};
+    BOOST_REQUIRE(db.Write(uint8_t{0xa6}, uint8_t{1}, true));
 }
 
 } // namespace
@@ -646,6 +676,220 @@ BOOST_AUTO_TEST_CASE(checkpoint_prunes_prefix_and_preserves_live_suffix)
     const auto live_epoch{restarted.GetEpochCandidateSnapshot(11)};
     BOOST_REQUIRE(live_epoch);
     BOOST_CHECK_EQUAL(live_epoch->ordered_candidates.size(), 2U);
+}
+
+BOOST_AUTO_TEST_CASE(checkpoint_steps_are_bounded_logical_and_crash_resumable)
+{
+    const fs::path path{m_path_root /
+                        "pq_payment_audit_store_step_resume"};
+    const uint256 genesis_hash{NonNullHash(31)};
+    constexpr uint32_t epoch{70};
+    const auto checkpoint{Checkpoint(epoch, 310, 55'000)};
+    std::vector<FinalPaymentAudit> retired;
+    std::vector<uint256> retired_ids;
+    retired.reserve(10);
+    retired_ids.reserve(10);
+    for (std::size_t index{0}; index < 10; ++index) {
+        retired.emplace_back(Audit(epoch, 0x07, 3'100 + index));
+        retired_ids.emplace_back(
+            retired.back().GetWitnessId(genesis_hash));
+    }
+    const auto suffix{Audit(epoch + 1, 0x0b, 3'200)};
+    const uint256 suffix_id{suffix.GetWitnessId(genesis_hash)};
+
+    const auto check_bounds = [](const PaymentAuditPruneProgress& progress) {
+        BOOST_CHECK_LE(
+            progress.scanned_records,
+            PaymentAuditStore::MAX_PRUNE_SCAN_RECORDS_PER_PASS);
+        BOOST_CHECK_LE(
+            progress.scanned_value_bytes,
+            PaymentAuditStore::MAX_PRUNE_VALUE_BYTES_PER_PASS);
+        BOOST_CHECK_LE(
+            progress.erased_records,
+            PaymentAuditStore::MAX_PRUNE_ERASE_RECORDS_PER_PASS);
+    };
+
+    {
+        PaymentAuditStore store{path, genesis_hash};
+        for (std::size_t index{0}; index < retired.size(); ++index) {
+            BOOST_REQUIRE(store.AcceptVerified(retired[index]) ==
+                          PaymentAuditStoreResult::ACCEPTED);
+            BOOST_REQUIRE(store.PinReferencedWitness(
+                              epoch, retired_ids[index]) ==
+                          PaymentAuditStoreResult::ACCEPTED);
+        }
+
+        const auto first{store.PruneThroughCheckpointStep(checkpoint)};
+        check_bounds(first);
+        BOOST_CHECK(first.status == PaymentAuditPruneStatus::IN_PROGRESS);
+        BOOST_CHECK(store.GetPendingPruneCheckpoint() == checkpoint);
+        BOOST_CHECK(!store.GetPruneCheckpoint());
+
+        // The synced intent is the visibility boundary; physical rows can
+        // survive several bounded passes without re-entering any read or
+        // admission surface.
+        BOOST_CHECK(!store.Has(retired_ids.front()));
+        BOOST_CHECK(!store.Get(retired_ids.front()));
+        const auto hidden{store.GetEpochCandidateSnapshot(epoch)};
+        BOOST_REQUIRE(hidden);
+        BOOST_CHECK(hidden->ordered_candidates.empty());
+        BOOST_CHECK(store.AcceptVerified(
+                        retired.front(), /*required_witness=*/true) ==
+                    PaymentAuditStoreResult::INVALID);
+        BOOST_CHECK(store.PinReferencedWitness(
+                        epoch, retired_ids.front()) ==
+                    PaymentAuditStoreResult::INVALID);
+        BOOST_REQUIRE(store.AcceptVerified(suffix) ==
+                      PaymentAuditStoreResult::ACCEPTED);
+        BOOST_CHECK(store.Has(suffix_id));
+    }
+
+    {
+        PaymentAuditStore restarted{path, genesis_hash};
+        BOOST_REQUIRE(restarted.IsHealthy());
+        BOOST_CHECK(restarted.GetPendingPruneCheckpoint() == checkpoint);
+        BOOST_CHECK(!restarted.Has(retired_ids.back()));
+        BOOST_CHECK(restarted.Has(suffix_id));
+
+        bool erased_prefix{false};
+        for (std::size_t pass{0}; pass < 100 && !erased_prefix; ++pass) {
+            const auto progress{
+                restarted.PruneThroughCheckpointStep(checkpoint)};
+            check_bounds(progress);
+            BOOST_REQUIRE(progress.status ==
+                          PaymentAuditPruneStatus::IN_PROGRESS);
+            erased_prefix = progress.erased_records != 0;
+        }
+        BOOST_REQUIRE(erased_prefix);
+        BOOST_CHECK(restarted.GetPendingPruneCheckpoint() == checkpoint);
+        BOOST_CHECK(!restarted.GetPruneCheckpoint());
+    }
+
+    {
+        PaymentAuditStore restarted{path, genesis_hash};
+        BOOST_REQUIRE(restarted.IsHealthy());
+        BOOST_CHECK(restarted.GetPendingPruneCheckpoint() == checkpoint);
+        PaymentAuditPruneStatus status{
+            PaymentAuditPruneStatus::IN_PROGRESS};
+        for (std::size_t pass{0}; pass < 100 &&
+             status == PaymentAuditPruneStatus::IN_PROGRESS; ++pass) {
+            const auto progress{
+                restarted.PruneThroughCheckpointStep(checkpoint)};
+            check_bounds(progress);
+            status = progress.status;
+        }
+        BOOST_REQUIRE(status == PaymentAuditPruneStatus::COMPLETE);
+        BOOST_CHECK(restarted.GetPruneCheckpoint() == checkpoint);
+        BOOST_CHECK(!restarted.GetPendingPruneCheckpoint());
+        for (const auto& witness_id : retired_ids) {
+            BOOST_CHECK(!restarted.Has(witness_id));
+        }
+        BOOST_CHECK(restarted.Has(suffix_id));
+    }
+
+    // schema + checkpoint + one retained epoch/witness/presence.
+    BOOST_CHECK_EQUAL(CountDatabaseRecords(path), 5U);
+}
+
+BOOST_AUTO_TEST_CASE(epoch_pruning_uses_numeric_not_leveldb_order)
+{
+    const fs::path path{m_path_root /
+                        "pq_payment_audit_store_epoch_byte_order"};
+    const uint256 genesis_hash{NonNullHash(32)};
+    const std::array<uint32_t, 4> epochs{1, 255, 256, 65'536};
+    std::array<FinalPaymentAudit, epochs.size()> audits;
+    std::array<uint256, epochs.size()> witness_ids;
+    PaymentAuditStore store{path, genesis_hash};
+    for (std::size_t index{0}; index < epochs.size(); ++index) {
+        audits[index] = Audit(epochs[index], 0x07, 3'300 + index);
+        witness_ids[index] = audits[index].GetWitnessId(genesis_hash);
+        BOOST_REQUIRE(store.AcceptVerified(audits[index]) ==
+                      PaymentAuditStoreResult::ACCEPTED);
+    }
+
+    const auto checkpoint{Checkpoint(255, 330, 56'000)};
+    BOOST_REQUIRE(store.PruneThroughCheckpoint(checkpoint));
+    BOOST_CHECK(!store.Has(witness_ids[0]));
+    BOOST_CHECK(!store.Has(witness_ids[1]));
+    BOOST_CHECK(store.Has(witness_ids[2]));
+    BOOST_CHECK(store.Has(witness_ids[3]));
+    for (std::size_t index{0}; index < epochs.size(); ++index) {
+        const auto snapshot{
+            store.GetEpochCandidateSnapshot(epochs[index])};
+        BOOST_REQUIRE(snapshot);
+        BOOST_CHECK_EQUAL(snapshot->ordered_candidates.size(),
+                          index < 2 ? 0U : 1U);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(pending_checkpoint_revalidates_links_after_restart)
+{
+    const fs::path path{m_path_root /
+                        "pq_payment_audit_store_pending_links"};
+    const uint256 genesis_hash{NonNullHash(33)};
+    constexpr uint32_t epoch{80};
+    const auto audit{Audit(epoch, 0x07, 3'400)};
+    const uint256 witness_id{audit.GetWitnessId(genesis_hash)};
+    const auto checkpoint{Checkpoint(epoch, 340, 57'000)};
+    {
+        PaymentAuditStore store{path, genesis_hash};
+        BOOST_REQUIRE(store.AcceptVerified(audit) ==
+                      PaymentAuditStoreResult::ACCEPTED);
+        BOOST_REQUIRE(store.PinReferencedWitness(epoch, witness_id) ==
+                      PaymentAuditStoreResult::ACCEPTED);
+        const auto progress{
+            store.PruneThroughCheckpointStep(checkpoint)};
+        BOOST_REQUIRE(progress.status ==
+                      PaymentAuditPruneStatus::IN_PROGRESS);
+        BOOST_CHECK(store.GetPendingPruneCheckpoint() == checkpoint);
+    }
+    ErasePresence(path, genesis_hash, witness_id);
+
+    {
+        PaymentAuditStore restarted{path, genesis_hash};
+        BOOST_REQUIRE(restarted.IsHealthy());
+        BOOST_CHECK(restarted.GetPendingPruneCheckpoint() == checkpoint);
+        const auto progress{
+            restarted.PruneThroughCheckpointStep(checkpoint)};
+        BOOST_CHECK(progress.status == PaymentAuditPruneStatus::CORRUPT);
+        BOOST_CHECK(!restarted.IsHealthy());
+        BOOST_CHECK(!restarted.GetPruneCheckpoint());
+    }
+    // Validation failed before physical pruning, so its intent was rolled
+    // back and restart cannot mistake a partial prefix for completion.
+    BOOST_CHECK_EQUAL(CountDatabaseRecords(path), 4U);
+}
+
+BOOST_AUTO_TEST_CASE(pending_checkpoint_rejects_corrupt_scalar_records)
+{
+    const uint256 genesis_hash{NonNullHash(34)};
+    const auto checkpoint{Checkpoint(90, 350, 58'000)};
+
+    const fs::path trailing_path{
+        m_path_root / "pq_payment_audit_store_pending_trailing_key"};
+    {
+        PaymentAuditStore store{trailing_path, genesis_hash};
+        const auto progress{
+            store.PruneThroughCheckpointStep(checkpoint)};
+        BOOST_REQUIRE(progress.status ==
+                      PaymentAuditPruneStatus::IN_PROGRESS);
+    }
+    AppendTrailingPruneIntentKey(trailing_path);
+    PaymentAuditStore trailing{trailing_path, genesis_hash};
+    BOOST_CHECK(!trailing.IsHealthy());
+
+    const fs::path value_path{
+        m_path_root / "pq_payment_audit_store_pending_bad_value"};
+    {
+        PaymentAuditStore store{value_path, genesis_hash};
+        const auto progress{
+            store.PruneThroughCheckpointStep(checkpoint)};
+        BOOST_REQUIRE(progress.status ==
+                      PaymentAuditPruneStatus::IN_PROGRESS);
+    }
+    OverwritePruneIntentValue(value_path);
+    PaymentAuditStore bad_value{value_path, genesis_hash};
+    BOOST_CHECK(!bad_value.IsHealthy());
 }
 
 BOOST_AUTO_TEST_CASE(checkpoint_is_strictly_monotonic_and_idempotent)
