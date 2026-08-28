@@ -788,14 +788,6 @@ public:
         llmq::pq::PQPaymentProbationStateView& view) const
         EXCLUSIVE_LOCKS_REQUIRED(!cs);
 
-    /** Derive one manager-authenticated immutable probation transition. */
-    std::optional<llmq::pq::PQPaymentProbationTransitionView>
-    ApplyPaymentProbationTransition(
-        const llmq::pq::PQPaymentProbationStateView& previous,
-        const llmq::pq::PQPaymentProbationTransitionInput& input,
-        llmq::pq::PQPaymentProbationError* error = nullptr) const
-        EXCLUSIVE_LOCKS_REQUIRED(!cs);
-
     /** Derive membership and state from one exact carrier parent. */
     [[nodiscard]] llmq::pq::PQPaymentProbationTransitionOutcome
     ApplyPaymentProbationTransition(

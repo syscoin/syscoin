@@ -720,15 +720,6 @@ bool CDeterministicMNManager::GetPaymentProbationState(
     return m_payment_probation->GetState(state_hash, state);
 }
 
-std::optional<llmq::pq::PQPaymentProbationTransitionView>
-CDeterministicMNManager::ApplyPaymentProbationTransition(
-    const llmq::pq::PQPaymentProbationStateView& previous,
-    const llmq::pq::PQPaymentProbationTransitionInput& input,
-    llmq::pq::PQPaymentProbationError* error) const
-{
-    return m_payment_probation->ApplyTransition(previous, input, error);
-}
-
 llmq::pq::PQPaymentProbationTransitionOutcome
 CDeterministicMNManager::ApplyPaymentProbationTransition(
     const CBlockIndex& carrier_parent,

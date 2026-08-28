@@ -115,11 +115,6 @@ private:
     [[nodiscard]] static std::optional<CompactTransitionResult>
     ApplyCompactTransition(
         const PQPaymentProbationStateView& previous,
-        const PQPaymentProbationTransitionInput& input,
-        PQPaymentProbationError* error);
-    [[nodiscard]] static std::optional<CompactTransitionResult>
-    ApplyCompactTransition(
-        const PQPaymentProbationStateView& previous,
         const PQPaymentProbationTransitionContext& context,
         const MembershipResolver& membership,
         PQPaymentProbationError* error);
@@ -186,14 +181,6 @@ public:
     [[nodiscard]] bool GetStateView(
         const uint256& state_hash,
         PQPaymentProbationStateView& view) const
-        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
-
-    /** Apply one transition without rehashing or copying its authenticated parent. */
-    [[nodiscard]] std::optional<PQPaymentProbationTransitionView>
-    ApplyTransition(
-        const PQPaymentProbationStateView& previous,
-        const PQPaymentProbationTransitionInput& input,
-        PQPaymentProbationError* error = nullptr) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /** Compatibility copying API retained for tests. */

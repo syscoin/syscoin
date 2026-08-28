@@ -630,7 +630,7 @@ BOOST_AUTO_TEST_CASE(transition_context_validates_only_receipt_roster_and_bitmap
     BOOST_CHECK(!too_few_valid.IsStructurallyValid());
 }
 
-BOOST_AUTO_TEST_CASE(legacy_vector_api_preserves_exact_validation_precedence)
+BOOST_AUTO_TEST_CASE(reference_vector_api_preserves_exact_validation_precedence)
 {
     const auto valid{Input(/*epoch=*/41, /*receipt_tag=*/41,
                            PQ_PAYMENT_AUDIT_CONCLUSIVE_MEMBERS)};

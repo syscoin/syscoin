@@ -470,25 +470,6 @@ PQPaymentProbationManager::FinalizeTransition(
 }
 
 std::optional<PQPaymentProbationTransitionView>
-PQPaymentProbationManager::ApplyTransition(
-    const PQPaymentProbationStateView& previous,
-    const PQPaymentProbationTransitionInput& input,
-    PQPaymentProbationError* error) const
-{
-    StateViewDataPtr previous_state;
-    uint64_t generation{0};
-    if (!AuthenticateTransitionParent(
-            previous, previous_state, generation, error)) {
-        return std::nullopt;
-    }
-    AssertLockNotHeld(m_mutex);
-    auto result{ApplyCompactTransition(previous, input, error)};
-    if (!result) return std::nullopt;
-    return FinalizeTransition(
-        std::move(previous_state), generation, std::move(*result), error);
-}
-
-std::optional<PQPaymentProbationTransitionView>
 PQPaymentProbationManager::ApplyTransitionWithMembership(
     const PQPaymentProbationStateView& previous,
     const PQPaymentProbationTransitionContext& context,

@@ -61,6 +61,29 @@ public:
             previous, context, std::move(lookup), error);
     }
 
+    static std::optional<PQPaymentProbationTransitionView>
+    ApplyReferenceTransition(
+        const PQPaymentProbationManager& manager,
+        const PQPaymentProbationStateView& previous,
+        const PQPaymentProbationTransitionInput& input,
+        PQPaymentProbationError* error = nullptr)
+    {
+        const auto membership = [&input](const uint256& pro_tx_hash) {
+            if (!std::binary_search(input.existing_pro_tx_hashes.begin(),
+                                    input.existing_pro_tx_hashes.end(),
+                                    pro_tx_hash)) {
+                return PQPaymentProbationMembership::ABSENT;
+            }
+            return std::binary_search(
+                       input.current_valid_pro_tx_hashes.begin(),
+                       input.current_valid_pro_tx_hashes.end(), pro_tx_hash)
+                ? PQPaymentProbationMembership::PRESENT_VALID
+                : PQPaymentProbationMembership::PRESENT_INVALID;
+        };
+        return manager.ApplyTransitionWithMembership(
+            previous, input, membership, error);
+    }
+
     static bool AdvanceGenerationIfUnlocked(
         PQPaymentProbationManager& manager)
     {
@@ -80,6 +103,16 @@ public:
 } // namespace llmq::pq::test
 
 namespace {
+
+std::optional<PQPaymentProbationTransitionView> ApplyReferenceTransition(
+    const PQPaymentProbationManager& manager,
+    const PQPaymentProbationStateView& previous,
+    const PQPaymentProbationTransitionInput& input,
+    PQPaymentProbationError* error = nullptr)
+{
+    return test::PQPaymentProbationManagerTestAccess::
+        ApplyReferenceTransition(manager, previous, input, error);
+}
 
 uint256 NonNullHash(uint8_t value)
 {
@@ -299,8 +332,8 @@ BOOST_AUTO_TEST_CASE(authenticated_transition_reuses_exact_backing)
     PQPaymentProbationStateView previous;
     BOOST_REQUIRE(manager.GetStateView(manager.EmptyStateHash(), previous));
 
-    const auto transition{
-        manager.ApplyTransition(previous, TransitionInput(1, 80))};
+    const auto transition{ApplyReferenceTransition(
+        manager, previous, TransitionInput(1, 80))};
     BOOST_REQUIRE(transition);
     BOOST_REQUIRE(transition->IsValid());
     BOOST_CHECK(transition->PreviousStateHash() ==
@@ -338,7 +371,7 @@ BOOST_AUTO_TEST_CASE(authenticated_transition_reuses_exact_backing)
                       before_replay.builds);
 
     // Reorg selects the authenticated parent root directly; it never rebuilds
-    // state by applying the compatibility undo vector.
+    // state by replaying an inverse journal.
     PQPaymentProbationStateView restored_parent;
     BOOST_REQUIRE(manager.GetStateView(
         transition->PreviousStateHash(), restored_parent));
@@ -353,12 +386,12 @@ BOOST_AUTO_TEST_CASE(authenticated_transition_rejects_foreign_manager)
     BOOST_REQUIRE(first.GetStateView(first.EmptyStateHash(), first_previous));
 
     PQPaymentProbationError error{PQPaymentProbationError::NONE};
-    BOOST_CHECK(!second.ApplyTransition(
-        first_previous, TransitionInput(2, 81), &error));
+    BOOST_CHECK(!ApplyReferenceTransition(
+        second, first_previous, TransitionInput(2, 81), &error));
     BOOST_CHECK(error == PQPaymentProbationError::INVALID_STATE);
 
-    const auto transition{
-        first.ApplyTransition(first_previous, TransitionInput(2, 82))};
+    const auto transition{ApplyReferenceTransition(
+        first, first_previous, TransitionInput(2, 82))};
     BOOST_REQUIRE(transition);
     BOOST_CHECK(!second.CommitTransition(*transition,
                                          /*fJustCheck=*/false));
@@ -381,7 +414,8 @@ BOOST_AUTO_TEST_CASE(compact_transition_matches_raw_corpus)
             (epoch * 37) % (QUORUM_SIZE + 1))};
         const auto raw{ApplyPQPaymentProbationTransition(
             previous_raw, input)};
-        const auto compact{manager.ApplyTransition(previous_view, input)};
+        const auto compact{
+            ApplyReferenceTransition(manager, previous_view, input)};
         BOOST_REQUIRE(raw);
         BOOST_REQUIRE(compact);
         BOOST_REQUIRE(compact->Result().State() != nullptr);
@@ -569,8 +603,9 @@ BOOST_AUTO_TEST_CASE(checkpoint_gc_is_durable_and_preserves_retained_roots)
         PQPaymentProbationStateView retained_view;
         BOOST_REQUIRE(manager.GetStateView(pruned_hash, pruned_view));
         BOOST_REQUIRE(manager.GetStateView(retained_hash, retained_view));
-        const auto stale_transition{manager.ApplyTransition(
-            pruned_view, TransitionInput(/*epoch=*/5, /*tag=*/83))};
+        const auto stale_transition{ApplyReferenceTransition(
+            manager, pruned_view,
+            TransitionInput(/*epoch=*/5, /*tag=*/83))};
         BOOST_REQUIRE(stale_transition);
         const uint256 stale_result_hash{
             stale_transition->Result().StateHash()};
@@ -585,10 +620,12 @@ BOOST_AUTO_TEST_CASE(checkpoint_gc_is_durable_and_preserves_retained_roots)
         BOOST_CHECK_GT(manager.StateViewGeneration(), previous_generation);
         BOOST_CHECK(!manager.CommitTransition(
             *stale_transition, /*fJustCheck=*/false));
-        BOOST_CHECK(!manager.ApplyTransition(
-            retained_view, TransitionInput(/*epoch=*/6, /*tag=*/84)));
-        BOOST_CHECK(!manager.ApplyTransition(
-            empty_before_gc, TransitionInput(/*epoch=*/1, /*tag=*/85)));
+        BOOST_CHECK(!ApplyReferenceTransition(
+            manager, retained_view,
+            TransitionInput(/*epoch=*/6, /*tag=*/84)));
+        BOOST_CHECK(!ApplyReferenceTransition(
+            manager, empty_before_gc,
+            TransitionInput(/*epoch=*/1, /*tag=*/85)));
 
         PQPaymentProbationStateView loaded_view;
         BOOST_CHECK(!manager.GetStateView(pruned_hash, loaded_view));
@@ -600,8 +637,9 @@ BOOST_AUTO_TEST_CASE(checkpoint_gc_is_durable_and_preserves_retained_roots)
         BOOST_CHECK_EQUAL(pruned_view.MissCount(NonNullHash(101)), 1U);
         BOOST_REQUIRE(manager.GetStateView(retained_hash, loaded_view));
         BOOST_CHECK(!loaded_view.SharesStateWith(retained_view));
-        BOOST_CHECK(manager.ApplyTransition(
-            loaded_view, TransitionInput(/*epoch=*/6, /*tag=*/86)));
+        BOOST_CHECK(ApplyReferenceTransition(
+            manager, loaded_view,
+            TransitionInput(/*epoch=*/6, /*tag=*/86)));
 
         PQPaymentProbationState loaded;
         BOOST_CHECK(manager.GetState(retained_hash, loaded));
@@ -685,8 +723,9 @@ BOOST_AUTO_TEST_CASE(completed_checkpoint_is_a_zero_flush_noop)
     PQPaymentProbationStateView stale_empty;
     BOOST_REQUIRE(manager.GetStateView(
         manager.EmptyStateHash(), stale_empty));
-    const auto stale_transition{manager.ApplyTransition(
-        stale_empty, TransitionInput(/*epoch=*/1, /*tag=*/87))};
+    const auto stale_transition{ApplyReferenceTransition(
+        manager, stale_empty,
+        TransitionInput(/*epoch=*/1, /*tag=*/87))};
     BOOST_REQUIRE(stale_transition);
     BOOST_REQUIRE(manager.PruneStatesThroughCheckpoint(
         checkpoint, std::span<const uint256>{}));
@@ -694,13 +733,15 @@ BOOST_AUTO_TEST_CASE(completed_checkpoint_is_a_zero_flush_noop)
     BOOST_CHECK_GT(completed_generation, initial_generation);
     BOOST_CHECK(!manager.CommitTransition(
         *stale_transition, /*fJustCheck=*/false));
-    BOOST_CHECK(!manager.ApplyTransition(
-        stale_empty, TransitionInput(/*epoch=*/1, /*tag=*/88)));
+    BOOST_CHECK(!ApplyReferenceTransition(
+        manager, stale_empty,
+        TransitionInput(/*epoch=*/1, /*tag=*/88)));
     PQPaymentProbationStateView fresh_empty;
     BOOST_REQUIRE(manager.GetStateView(
         manager.EmptyStateHash(), fresh_empty));
-    BOOST_CHECK(manager.ApplyTransition(
-        fresh_empty, TransitionInput(/*epoch=*/1, /*tag=*/89)));
+    BOOST_CHECK(ApplyReferenceTransition(
+        manager, fresh_empty,
+        TransitionInput(/*epoch=*/1, /*tag=*/89)));
     BOOST_REQUIRE(manager.IsGCCompleteForCheckpoint(checkpoint));
 
     // The exact completed checkpoint returns before the pre-scan durability

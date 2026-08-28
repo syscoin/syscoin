@@ -219,9 +219,9 @@ struct PQPaymentProbationTransitionContext {
 };
 
 /**
- * Compatibility/reference input with complete parent membership vectors. The
- * lists must be strictly sorted and current-valid must be a subset of existing.
- * Service, operator-key, revive, and PoSe fields do not enter this state machine.
+ * Reference input for the pure state-machine tests. Production membership is
+ * resolved from the exact parent DMN snapshot. The lists must be strictly
+ * sorted and current-valid must be a subset of existing.
  */
 struct PQPaymentProbationTransitionInput
     : PQPaymentProbationTransitionContext {
@@ -242,6 +242,7 @@ struct PQPaymentProbationTransitionResult {
     std::vector<uint256> pruned_pro_tx_hashes;
 };
 
+/** Pure reference transition used to verify the compact production path. */
 [[nodiscard]] std::optional<PQPaymentProbationTransitionResult>
 ApplyPQPaymentProbationTransition(
     const PQPaymentProbationState& previous,

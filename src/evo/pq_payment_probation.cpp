@@ -106,8 +106,8 @@ PQPaymentProbationError ValidateTransitionContext(
 PQPaymentProbationError ValidateTransitionInput(
     const PQPaymentProbationTransitionInput& input) noexcept
 {
-    // Preserve the compatibility API's historical error precedence even
-    // though the semantic context can now be validated independently.
+    // Preserve the reference oracle's error precedence even though the
+    // semantic context can now be validated independently.
     if (!input.receipt.IsStructurallyValid()) {
         return PQPaymentProbationError::INVALID_RECEIPT;
     }
@@ -124,7 +124,7 @@ PQPaymentProbationError ValidateTransitionInput(
     return ValidateTransitionRosterContext(input);
 }
 
-/** Sorted vectors retain the exact compatibility semantics at the public API. */
+/** Sorted vectors retain the reference oracle's exact validation semantics. */
 class SortedVectorMembershipLookup final
 {
 public:
@@ -531,28 +531,6 @@ ApplyPQPaymentProbationTransition(
         previous, std::nullopt, input, membership,
         ValidateTransitionInput(input),
         /*compact_result=*/false, error);
-}
-
-std::optional<PQPaymentProbationManager::CompactTransitionResult>
-PQPaymentProbationManager::ApplyCompactTransition(
-    const PQPaymentProbationStateView& previous,
-    const PQPaymentProbationTransitionInput& input,
-    PQPaymentProbationError* error)
-{
-    if (!previous.IsValid() || previous.State() == nullptr ||
-        previous.StateHash().IsNull()) {
-        SetError(error, PQPaymentProbationError::INVALID_STATE);
-        return std::nullopt;
-    }
-    const SortedVectorMembershipLookup membership{input};
-    auto result{ApplyPQPaymentProbationTransitionImpl(
-        *previous.State(), previous.StateHash(), input, membership,
-        ValidateTransitionInput(input),
-        /*compact_result=*/true, error)};
-    if (!result) return std::nullopt;
-    return CompactTransitionResult{
-        std::move(result->state), result->undo.previous_state_hash,
-        result->undo.applied_receipt, result->undo.applied_state_hash};
 }
 
 std::optional<PQPaymentProbationManager::CompactTransitionResult>
