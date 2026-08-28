@@ -1104,6 +1104,18 @@ public:
         std::span<const uint256> retained_state_hashes)
         EXCLUSIVE_LOCKS_REQUIRED(!cs);
 
+    /** Retire one bounded probation-state maintenance slice. */
+    [[nodiscard]] llmq::pq::PQPaymentProbationPruneProgress
+    PrunePaymentProbationStatesThroughCheckpointStep(
+        const llmq::pq::PaymentAuditStoreCheckpoint& checkpoint,
+        std::span<const uint256> retained_state_hashes)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
+    /** Recover the exact durable request after an interrupted GC pass. */
+    [[nodiscard]] std::optional<llmq::pq::PQPaymentProbationGCRequest>
+    GetPendingPaymentProbationGCRequest() const
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
     /** Select the deterministic payee after applying payment-only probation. */
     bool GetMNPayeeForBlock(const CBlockIndex* pindex,
                             CDeterministicMNCPtr& payee)

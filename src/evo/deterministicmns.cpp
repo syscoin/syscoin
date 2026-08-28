@@ -1398,6 +1398,21 @@ bool CDeterministicMNManager::PrunePaymentProbationStatesThroughCheckpoint(
         checkpoint, retained_state_hashes);
 }
 
+llmq::pq::PQPaymentProbationPruneProgress
+CDeterministicMNManager::PrunePaymentProbationStatesThroughCheckpointStep(
+    const llmq::pq::PaymentAuditStoreCheckpoint& checkpoint,
+    std::span<const uint256> retained_state_hashes)
+{
+    return m_payment_probation->PruneStatesThroughCheckpointStep(
+        checkpoint, retained_state_hashes);
+}
+
+std::optional<llmq::pq::PQPaymentProbationGCRequest>
+CDeterministicMNManager::GetPendingPaymentProbationGCRequest() const
+{
+    return m_payment_probation->GetPendingGCRequest();
+}
+
 std::optional<CDeterministicMNCPtr>
 CDeterministicMNManager::MNPayeeCache::Get(
     const MNPayeeCacheKey& key)
