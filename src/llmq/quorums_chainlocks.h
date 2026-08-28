@@ -554,6 +554,14 @@ SelectFinalPaymentAuditVerificationPath(
     std::chrono::microseconds now,
     std::optional<std::chrono::microseconds> last_attempt) noexcept;
 
+/** Retire work whose roster source changed or whose final proof was revoked. */
+[[nodiscard]] bool ShouldResetPaymentAuditRuntime(
+    bool finalized,
+    uint64_t finalization_admission_generation,
+    uint64_t current_admission_generation,
+    uint64_t runtime_roster_source_generation,
+    uint64_t current_roster_source_generation) noexcept;
+
 /** Every post-verification side effect belongs to one immutable runtime. */
 [[nodiscard]] bool IsExactPaymentAuditRuntimeBinding(
     bool runtime_present,

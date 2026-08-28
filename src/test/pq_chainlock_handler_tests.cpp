@@ -2347,6 +2347,42 @@ BOOST_AUTO_TEST_CASE(payment_audit_finalization_retry_is_rate_limited)
         first_attempt - std::chrono::seconds{1}, first_attempt));
 }
 
+BOOST_AUTO_TEST_CASE(payment_audit_runtime_retires_revoked_capabilities)
+{
+    llmq::ShareAdmissionGate gate;
+    gate.SetReady(true);
+    BOOST_REQUIRE(gate.TryPublishEnabled(gate.Observe(), true));
+    const uint64_t first_token{gate.Acquire()};
+    BOOST_REQUIRE_NE(first_token, 0U);
+
+    constexpr uint64_t roster_generation{7};
+    BOOST_CHECK(!llmq::ShouldResetPaymentAuditRuntime(
+        /*finalized=*/false, /*finalization_admission_generation=*/0,
+        first_token, roster_generation, roster_generation));
+    BOOST_CHECK(!llmq::ShouldResetPaymentAuditRuntime(
+        /*finalized=*/true, first_token, first_token,
+        roster_generation, roster_generation));
+
+    BOOST_REQUIRE(gate.TryPublishEnabled(gate.Observe(), false));
+    BOOST_CHECK(llmq::ShouldResetPaymentAuditRuntime(
+        /*finalized=*/true, first_token, gate.Acquire(),
+        roster_generation, roster_generation));
+    BOOST_REQUIRE(gate.TryPublishEnabled(gate.Observe(), true));
+    const uint64_t reopened_token{gate.Acquire()};
+    BOOST_REQUIRE_NE(reopened_token, 0U);
+    BOOST_CHECK_NE(reopened_token, first_token);
+    BOOST_CHECK(llmq::ShouldResetPaymentAuditRuntime(
+        /*finalized=*/true, first_token, reopened_token,
+        roster_generation, roster_generation));
+
+    BOOST_CHECK(llmq::ShouldResetPaymentAuditRuntime(
+        /*finalized=*/false, /*finalization_admission_generation=*/0,
+        reopened_token, roster_generation, roster_generation + 1));
+    BOOST_CHECK(llmq::ShouldResetPaymentAuditRuntime(
+        /*finalized=*/true, reopened_token, reopened_token,
+        roster_generation, roster_generation + 1));
+}
+
 BOOST_AUTO_TEST_CASE(payment_audit_side_effects_require_exact_runtime_binding)
 {
     const auto allowed = [](const std::array<bool, 6>& checks) {

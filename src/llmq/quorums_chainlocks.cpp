@@ -1997,6 +1997,24 @@ bool IsPaymentAuditFinalizationRetryDue(
                PAYMENT_AUDIT_FINALIZATION_RETRY_INTERVAL;
 }
 
+bool ShouldResetPaymentAuditRuntime(
+    bool finalized,
+    uint64_t finalization_admission_generation,
+    uint64_t current_admission_generation,
+    uint64_t runtime_roster_source_generation,
+    uint64_t current_roster_source_generation) noexcept
+{
+    if (runtime_roster_source_generation == 0 ||
+        runtime_roster_source_generation !=
+            current_roster_source_generation) {
+        return true;
+    }
+    return finalized &&
+           (current_admission_generation == 0 ||
+            finalization_admission_generation !=
+                current_admission_generation);
+}
+
 bool IsExactPaymentAuditRuntimeBinding(
     bool runtime_present,
     bool collector_present,
@@ -8599,12 +8617,28 @@ bool CChainLocksHandler::PreparePaymentAuditSigningRuntime()
         !pq::IsBTCHeaderPolicyEnabled()) {
         return false;
     }
-    const auto roster_cache{GetQuorumRosterCache()};
-    if (!roster_cache) return false;
+    uint64_t current_roster_source_generation{0};
+    const auto roster_cache{
+        GetQuorumRosterCache(&current_roster_source_generation)};
+    const uint64_t current_admission_generation{
+        GetShareAdmissionGeneration()};
+    if (!roster_cache || current_admission_generation == 0) return false;
 
     std::optional<pq::PaymentAuditStatement> cached_statement;
     {
         LOCK(m_payment_audit_mutex);
+        if (m_payment_audit_runtime &&
+            ShouldResetPaymentAuditRuntime(
+                m_payment_audit_runtime->finalized.has_value(),
+                m_payment_audit_runtime->finalized
+                    ? m_payment_audit_runtime->finalized
+                          ->admission_generation
+                    : 0,
+                current_admission_generation,
+                m_payment_audit_runtime->roster_source_generation,
+                current_roster_source_generation)) {
+            ResetPaymentAuditRuntime();
+        }
         if (m_payment_audit_runtime &&
             m_payment_audit_runtime->collector &&
             m_payment_audit_runtime->statement &&
@@ -8878,10 +8912,12 @@ bool CChainLocksHandler::PreparePaymentAuditSigningRuntime()
             std::make_shared<const ChainLockRelayRecipients>(
                 BuildChainLockRelayRecipients(*signing_rosters_ptr))};
 
-        // Bind publication to the negative archive view. If that view changes
+        // Bind publication to both immutable sources. If either changes
         // across publication, retire only the runtime installed by this pass.
         if (!m_payment_audit_store->IsCandidateRevisionCurrent(
-                existing_candidates->candidate_revision)) {
+                existing_candidates->candidate_revision) ||
+            !IsQuorumRosterSourceGenerationCurrent(
+                roster_source_generation)) {
             return false;
         }
         uint64_t published_generation{0};
@@ -8896,7 +8932,9 @@ bool CChainLocksHandler::PreparePaymentAuditSigningRuntime()
                     false, false});
         }
         if (!m_payment_audit_store->IsCandidateRevisionCurrent(
-                existing_candidates->candidate_revision)) {
+                existing_candidates->candidate_revision) ||
+            !IsQuorumRosterSourceGenerationCurrent(
+                roster_source_generation)) {
             LOCK(m_payment_audit_mutex);
             if (m_payment_audit_runtime_generation ==
                 published_generation) {
