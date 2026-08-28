@@ -190,6 +190,8 @@ bool CollectPersistedKeysOutsideWindow(
         if (!cursor->GetKey(key)) return false;
 
         ++persisted_snapshot_count;
+        if (retained_hashes.count(key) != 0) continue;
+
         std::optional<int32_t> snapshot_height;
         if (finality_retention_floor) {
             CDeterministicMNList snapshot;
@@ -207,7 +209,6 @@ bool CollectPersistedKeysOutsideWindow(
             }
             snapshot_height = snapshot.GetHeight();
         }
-        if (retained_hashes.count(key) != 0) continue;
         if (snapshot_height &&
             *snapshot_height >= *finality_retention_floor) continue;
         prune_keys.emplace_back(key);

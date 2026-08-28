@@ -2279,6 +2279,83 @@ BOOST_AUTO_TEST_CASE(maintenance_retains_each_chainstate_random_access_window)
         representative_ancestor_height);
 }
 
+BOOST_AUTO_TEST_CASE(finality_floor_skips_retained_values_before_decoding)
+{
+    SelectParams(ChainType::MAIN);
+    const int cache_limit{CDeterministicMNManager::LIST_CACHE_SIZE};
+    const int hot_cache_limit{CDeterministicMNManager::HOT_LIST_CACHE_SIZE};
+    const int start_height{Params().GetConsensus().DIP0003Height};
+    const int total_snapshots{cache_limit + hot_cache_limit + 8};
+    const auto chain{BuildSnapshotIndexChain(start_height, total_snapshots)};
+    const int oldest_retained_height{
+        chain.Tip()->nHeight - cache_limit + 1};
+    const int finality_floor{chain.Tip()->nHeight - 16};
+
+    CDeterministicMNManager manager(DBParams{
+        .path = "testdb_dmn_retained_value_skip",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    });
+    manager.UpdatedBlockTip(chain.Tip());
+    for (int height{oldest_retained_height};
+         height <= chain.Tip()->nHeight; ++height) {
+        BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+            MakeSnapshotKey(height), MakeSnapshot(height),
+            /*fSync=*/true));
+    }
+
+    // This retained active-chain key is deliberately outside the hot cache.
+    // Maintenance owns only its lifetime; consumers validate its value when
+    // they actually load the snapshot.
+    const uint256 retained_hash{MakeSnapshotKey(oldest_retained_height)};
+    BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+        retained_hash,
+        CDeterministicMNList{
+            MakeSnapshotKey(oldest_retained_height + 1),
+            oldest_retained_height, 0},
+        /*fSync=*/true));
+
+    const uint256 old_side_hash{
+        MakeSnapshotKey(start_height + total_snapshots + 100)};
+    const uint256 retained_side_hash{
+        MakeSnapshotKey(start_height + total_snapshots + 101)};
+    BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+        old_side_hash,
+        CDeterministicMNList{old_side_hash, finality_floor - 1, 0},
+        /*fSync=*/true));
+    BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+        retained_side_hash,
+        CDeterministicMNList{retained_side_hash, finality_floor, 0},
+        /*fSync=*/true));
+
+    BOOST_CHECK_EQUAL(
+        manager.UpdateFinalitySnapshotRetentionFloor(finality_floor),
+        finality_floor);
+    BOOST_REQUIRE(manager.FlushCacheToDisk(/*bForceFlush=*/true));
+    BOOST_CHECK(manager.m_evoDb->ExistsCache(retained_hash));
+    BOOST_CHECK(!manager.VerifyPersistedSnapshot(
+        chain.At(oldest_retained_height)));
+
+    CDeterministicMNList snapshot;
+    BOOST_CHECK(!manager.m_evoDb->Read(old_side_hash, snapshot));
+    BOOST_REQUIRE(manager.m_evoDb->Read(retained_side_hash, snapshot));
+    BOOST_CHECK_EQUAL(snapshot.GetHeight(), finality_floor);
+
+    // Side-branch values remain fail-closed under the same floor.
+    const uint256 corrupt_side_hash{
+        MakeSnapshotKey(start_height + total_snapshots + 102)};
+    BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+        corrupt_side_hash,
+        CDeterministicMNList{
+            MakeSnapshotKey(start_height + total_snapshots + 103),
+            finality_floor, 0},
+        /*fSync=*/true));
+    manager.BeginFinalitySnapshotVerificationRetention();
+    manager.EndFinalitySnapshotVerificationRetention();
+    BOOST_CHECK(!manager.FlushCacheToDisk(/*bForceFlush=*/true));
+}
+
 BOOST_AUTO_TEST_CASE(subsequent_forced_flush_appends_and_prunes_without_rewrite)
 {
     SelectParams(ChainType::MAIN);
