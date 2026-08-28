@@ -8,6 +8,7 @@
 #include <crypto/slhdsa/slhdsa.h>
 #include <evo/providertx.h>
 #include <evo/specialtx.h>
+#include <hash.h>
 #include <key.h>
 #include <llmq/pq_global_auth.h>
 #include <messagesigner.h>
@@ -16,6 +17,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <ios>
@@ -37,6 +39,8 @@ struct PQRegistryReconstructionStats {
     uint64_t tree_id_hashes{0};
     uint64_t state_hashes{0};
     std::size_t cached_views{0};
+    std::size_t cached_payment_views{0};
+    uint64_t gc_floor_revision{0};
 };
 
 class PQRegistryManagerTestAccess {
@@ -49,7 +53,9 @@ public:
                 manager.m_reconstruction_reused_records,
                 manager.m_reconstruction_tree_id_hashes,
                 manager.m_reconstruction_state_hashes,
-                manager.m_snapshot_cache.size()};
+                manager.m_snapshot_cache.size(),
+                manager.m_payment_eligibility_cache.size(),
+                manager.m_gc_floor_revision};
     }
 
     static void ResetReconstructionStats(
@@ -60,6 +66,65 @@ public:
         manager.m_reconstruction_reused_records = 0;
         manager.m_reconstruction_tree_id_hashes = 0;
         manager.m_reconstruction_state_hashes = 0;
+    }
+
+    static void DropAllCaches(PQRegistryManager& manager)
+    {
+        LOCK(manager.m_mutex);
+        manager.m_snapshot_cache.clear();
+        manager.m_snapshot_cache_index.clear();
+        manager.m_payment_eligibility_cache.clear();
+        manager.m_payment_eligibility_cache_index.clear();
+        manager.m_snapshot_db->SetReadCacheSize(0);
+        manager.m_snapshot_db->SetReadCacheSize(
+            PQ_REGISTRY_SNAPSHOT_CACHE_SIZE);
+    }
+
+    static bool ReadExactDiskSnapshot(
+        PQRegistryManager& manager,
+        const uint256& block_hash,
+        PQRegistryDiskSnapshot& snapshot)
+    {
+        LOCK(manager.m_mutex);
+        using ExactReadResult = typename CEvoDB<
+            uint256, PQRegistryDiskSnapshot,
+            StaticSaltedHasher>::ExactDiskReadResult;
+        return manager.m_snapshot_db->ReadExactDiskForGC(
+                   block_hash, snapshot) == ExactReadResult::FOUND;
+    }
+
+    static bool EraseExactDiskSnapshot(
+        PQRegistryManager& manager,
+        const uint256& block_hash)
+    {
+        LOCK(manager.m_mutex);
+        const std::array<uint256, 1> keys{block_hash};
+        return manager.m_snapshot_db->EraseExactDiskKeysForGC(
+            keys, /*fSync=*/true);
+    }
+
+    static bool AppendTrailingDiskByte(
+        PQRegistryManager& manager,
+        const uint256& block_hash)
+    {
+        LOCK(manager.m_mutex);
+        return manager.m_snapshot_db->AppendTrailingValueByteForTesting(
+            block_hash);
+    }
+
+    static bool RewriteExactDiskSnapshot(
+        PQRegistryManager& manager,
+        const uint256& block_hash,
+        const PQRegistryDiskSnapshot& snapshot)
+    {
+        LOCK(manager.m_mutex);
+        const auto cached{manager.m_snapshot_cache_index.find(block_hash)};
+        if (cached != manager.m_snapshot_cache_index.end()) {
+            manager.m_snapshot_cache.erase(cached->second);
+            manager.m_snapshot_cache_index.erase(cached);
+        }
+        return manager.m_snapshot_db->WriteThrough(
+            block_hash, snapshot, /*fSync=*/true);
     }
 };
 
@@ -377,6 +442,72 @@ const OperatorKeyState& RequiredOperator(const PQRegistrySnapshot& snapshot,
     const auto* state{snapshot.FindOperator(pro_tx_hash)};
     BOOST_REQUIRE(state != nullptr);
     return *state;
+}
+
+evo::AuxiliaryHistoryGCAuthorization FloorAuthorization(int32_t height,
+                                                        uint32_t tag)
+{
+    return {
+        evo::AuxiliaryHistoryGCAuthorizationSource::
+            ENFORCED_DURABLE_CHAINLOCK,
+        {height, NonNullHash(tag)},
+    };
+}
+
+evo::PQRegistryGCClosure FloorClosure(
+    PQRegistryManager& manager,
+    const uint256& checkpoint_hash,
+    uint64_t generation,
+    std::optional<uint256> scan_after_key,
+    const uint256& lineage_commitment,
+    const uint256& legacy_island_commitment)
+{
+    PQRegistryDiskSnapshot disk;
+    BOOST_REQUIRE(test::PQRegistryManagerTestAccess::ReadExactDiskSnapshot(
+        manager, checkpoint_hash, disk));
+    evo::PQRegistryGCClosure closure;
+    closure.generation = generation;
+    closure.checkpoint = {disk.height, disk.block_hash};
+    closure.checkpoint_state_root = disk.consensus_state_root;
+    closure.checkpoint_record_hash = ::SerializeHash(disk);
+    closure.cumulative_lineage_commitment = lineage_commitment;
+    closure.legacy_island_commitment = legacy_island_commitment;
+    closure.scan_complete = scan_after_key
+        ? evo::PQRegistryGCClosure::SCANNING
+        : evo::PQRegistryGCClosure::COMPLETE;
+    closure.scan_after_key = std::move(scan_after_key);
+    BOOST_REQUIRE(closure.IsValid());
+    return closure;
+}
+
+evo::AuxiliaryHistoryGCComponent FloorComponent(
+    const evo::PQRegistryGCClosure& closure)
+{
+    const auto encoded{evo::EncodePQRegistryGCClosure(closure)};
+    BOOST_REQUIRE(encoded);
+    evo::AuxiliaryHistoryGCComponent component{
+        evo::PQRegistryGCClosure::VERSION,
+        closure.generation,
+        *encoded,
+    };
+    BOOST_REQUIRE(component.IsValid());
+    return component;
+}
+
+CBlock AppendOrdinaryRegistryBlock(
+    PQRegistryManager& manager,
+    const uint256& genesis,
+    const uint256& previous,
+    int32_t height,
+    uint32_t block_id,
+    PQRegistryError& error)
+{
+    const CBlock block{Block(
+        previous, block_id, {OrdinaryTransaction(block_id)})};
+    BOOST_REQUIRE(manager.ProcessBlock(
+        block, height, Members(genesis, {}, {}, CKeyID{}), {},
+        /*fJustCheck=*/false, error));
+    return block;
 }
 
 } // namespace
@@ -3185,6 +3316,419 @@ BOOST_AUTO_TEST_CASE(direct_validation_rejects_key_retained_after_revocation)
         /*fJustCheck=*/true, block_error));
     BOOST_CHECK(direct_error == block_error);
     BOOST_CHECK_EQUAL(owner_calls, 0U);
+}
+
+BOOST_AUTO_TEST_CASE(
+    gc_floor_is_exact_branch_bound_and_crash_monotonic)
+{
+    const auto config{FastConfig()};
+    const uint256 genesis{NonNullHash(801)};
+    PQRegistryManager manager(MemoryDB(801), genesis, config);
+    PQRegistryError error;
+    const int32_t first_floor_height{
+        config.preparation_height + PQ_REGISTRY_CHECKPOINT_INTERVAL};
+    const int32_t second_floor_height{
+        first_floor_height + PQ_REGISTRY_CHECKPOINT_INTERVAL};
+    uint32_t block_id{100'000};
+    uint256 cursor{NonNullHash(block_id++)};
+    uint256 first_floor_parent;
+    uint256 first_floor_grandparent;
+
+    for (int32_t height{config.preparation_height};
+         height < first_floor_height; ++height) {
+        const uint256 previous{cursor};
+        const CBlock block{AppendOrdinaryRegistryBlock(
+            manager, genesis, previous, height, block_id++, error)};
+        cursor = block.GetHash();
+        if (height == first_floor_height - 1) {
+            first_floor_parent = cursor;
+            first_floor_grandparent = previous;
+        }
+    }
+
+    const CBlock first_floor{AppendOrdinaryRegistryBlock(
+        manager, genesis, first_floor_parent, first_floor_height,
+        block_id++, error)};
+    const CBlock competing_floor{AppendOrdinaryRegistryBlock(
+        manager, genesis, first_floor_parent, first_floor_height,
+        block_id++, error)};
+    const CBlock compatible_child{AppendOrdinaryRegistryBlock(
+        manager, genesis, first_floor.GetHash(), first_floor_height + 1,
+        block_id++, error)};
+    const CBlock incompatible_child{AppendOrdinaryRegistryBlock(
+        manager, genesis, competing_floor.GetHash(),
+        first_floor_height + 1, block_id++, error)};
+
+    cursor = compatible_child.GetHash();
+    uint256 second_floor_parent;
+    CBlock second_floor;
+    for (int32_t height{first_floor_height + 2};
+         height <= second_floor_height; ++height) {
+        const uint256 previous{cursor};
+        const CBlock block{AppendOrdinaryRegistryBlock(
+            manager, genesis, previous, height, block_id++, error)};
+        cursor = block.GetHash();
+        if (height == second_floor_height) {
+            second_floor_parent = previous;
+            second_floor = block;
+        }
+    }
+
+    const auto authorization{FloorAuthorization(
+        second_floor_height + 100, block_id++)};
+    const uint256 lineage_one{NonNullHash(block_id++)};
+    const uint256 lineage_two{NonNullHash(block_id++)};
+    const uint256 legacy_island{NonNullHash(block_id++)};
+    const uint256 scan_cursor_one{NonNullHash(1)};
+    const uint256 scan_cursor_two{NonNullHash(2)};
+    const uint256 scan_cursor_three{NonNullHash(3)};
+    BOOST_REQUIRE(scan_cursor_one < scan_cursor_two);
+    BOOST_REQUIRE(scan_cursor_two < scan_cursor_three);
+
+    const auto first_scanning{FloorClosure(
+        manager, first_floor.GetHash(), /*generation=*/1,
+        scan_cursor_one, lineage_one, legacy_island)};
+    BOOST_REQUIRE(manager.InstallGCFloor(
+        FloorComponent(first_scanning), authorization, error));
+    BOOST_CHECK_EQUAL(
+        test::PQRegistryManagerTestAccess::Stats(manager)
+            .gc_floor_revision,
+        1U);
+
+    // The floor checkpoint is a self-contained authenticated base. Its
+    // physical predecessor can disappear without preventing exact-C or
+    // compatible descendant reconstruction.
+    BOOST_REQUIRE(
+        test::PQRegistryManagerTestAccess::EraseExactDiskSnapshot(
+            manager, first_floor_parent));
+    PQRegistryDiskSnapshot erased;
+    BOOST_CHECK(
+        !test::PQRegistryManagerTestAccess::ReadExactDiskSnapshot(
+            manager, first_floor_parent, erased));
+    PQRegistrySnapshot exact_floor;
+    BOOST_REQUIRE(manager.GetSnapshot(
+        first_floor.GetHash(), first_floor_parent, first_floor_height,
+        exact_floor, error));
+    test::PQRegistryManagerTestAccess::DropAllCaches(manager);
+    PQRegistrySnapshot compatible;
+    BOOST_REQUIRE(manager.GetSnapshot(
+        compatible_child.GetHash(), first_floor.GetHash(),
+        first_floor_height + 1, compatible, error));
+
+    PQRegistrySnapshot rejected;
+    BOOST_CHECK(!manager.GetSnapshot(
+        first_floor_parent, first_floor_grandparent,
+        first_floor_height - 1, rejected, error));
+    BOOST_CHECK(error.result == PQRegistryResult::HISTORY_PRUNED);
+    BOOST_CHECK(!manager.GetSnapshot(
+        competing_floor.GetHash(), first_floor_parent,
+        first_floor_height, rejected, error));
+    BOOST_CHECK(error.result == PQRegistryResult::FLOOR_CONFLICT);
+    BOOST_CHECK(!manager.GetSnapshot(
+        incompatible_child.GetHash(), competing_floor.GetHash(),
+        first_floor_height + 1, rejected, error));
+    BOOST_CHECK(error.result == PQRegistryResult::FLOOR_CONFLICT);
+
+    const uint32_t below_floor_block_id{block_id++};
+    const uint32_t below_floor_tx_id{block_id++};
+    const CBlock below_floor_candidate{Block(
+        first_floor_grandparent, below_floor_block_id,
+        {OrdinaryTransaction(below_floor_tx_id)})};
+    const uint32_t at_floor_block_id{block_id++};
+    const uint32_t at_floor_tx_id{block_id++};
+    const CBlock at_floor_candidate{Block(
+        first_floor_parent, at_floor_block_id,
+        {OrdinaryTransaction(at_floor_tx_id)})};
+    PQRegistryPreparedBlock boundary_prepared;
+    BOOST_CHECK(!manager.PrepareBlock(
+        below_floor_candidate, first_floor_height - 1,
+        Members(genesis, {}, {}, CKeyID{}), {}, boundary_prepared,
+        error));
+    BOOST_CHECK(error.result == PQRegistryResult::HISTORY_PRUNED);
+    BOOST_CHECK(!manager.PrepareBlock(
+        at_floor_candidate, first_floor_height,
+        Members(genesis, {}, {}, CKeyID{}), {}, boundary_prepared,
+        error));
+    BOOST_CHECK(error.result == PQRegistryResult::HISTORY_PRUNED);
+
+    const std::vector<uint256> no_requested_operators;
+    PQRegistryMempoolView mempool_view;
+    BOOST_CHECK(!manager.GetMempoolView(
+        first_floor_parent, first_floor_height - 1,
+        no_requested_operators, mempool_view, error));
+    BOOST_CHECK(error.result == PQRegistryResult::HISTORY_PRUNED);
+    BOOST_CHECK(!manager.GetMempoolView(
+        competing_floor.GetHash(), first_floor_height,
+        no_requested_operators, mempool_view, error));
+    BOOST_CHECK(error.result == PQRegistryResult::FLOOR_CONFLICT);
+    BOOST_REQUIRE(manager.GetMempoolView(
+        first_floor.GetHash(), first_floor_height,
+        no_requested_operators, mempool_view, error));
+
+    BOOST_CHECK(!manager.UndoBlock(
+        first_floor_parent, first_floor_grandparent,
+        first_floor_height - 1, error));
+    BOOST_CHECK(error.result == PQRegistryResult::HISTORY_PRUNED);
+    BOOST_CHECK(!manager.UndoBlock(
+        first_floor.GetHash(), first_floor_parent,
+        first_floor_height, error));
+    BOOST_CHECK(error.result == PQRegistryResult::HISTORY_PRUNED);
+    test::PQRegistryManagerTestAccess::DropAllCaches(manager);
+    BOOST_REQUIRE(manager.UndoBlock(
+        compatible_child.GetHash(), first_floor.GetHash(),
+        first_floor_height + 1, error));
+
+    const uint32_t prepared_side_block_id{block_id++};
+    const uint32_t prepared_side_tx_id{block_id++};
+    const CBlock prepared_side_block{Block(
+        compatible_child.GetHash(), prepared_side_block_id,
+        {OrdinaryTransaction(prepared_side_tx_id)})};
+    PQRegistryPreparedBlock prepared_across_cursor;
+    BOOST_REQUIRE(manager.PrepareBlock(
+        prepared_side_block, first_floor_height + 2,
+        Members(genesis, {}, {}, CKeyID{}), {},
+        prepared_across_cursor, error));
+    PQPaymentEligibleProTxHashesPtr payment_before;
+    BOOST_REQUIRE(manager.GetPaymentEligibleProTxHashes(
+        compatible_child.GetHash(), first_floor.GetHash(),
+        first_floor_height + 1, /*epoch=*/0, payment_before, error));
+    BOOST_REQUIRE(payment_before);
+    const auto before_cursor_progress{
+        test::PQRegistryManagerTestAccess::Stats(manager)};
+    BOOST_CHECK_GT(before_cursor_progress.cached_views, 0U);
+    BOOST_CHECK_EQUAL(before_cursor_progress.cached_payment_views, 1U);
+
+    auto second_scanning{first_scanning};
+    second_scanning.generation = 2;
+    second_scanning.scan_after_key = scan_cursor_two;
+    BOOST_REQUIRE(manager.InstallGCFloor(
+        FloorComponent(second_scanning), authorization, error));
+    const auto after_cursor_progress{
+        test::PQRegistryManagerTestAccess::Stats(manager)};
+    BOOST_CHECK_EQUAL(after_cursor_progress.gc_floor_revision,
+                      before_cursor_progress.gc_floor_revision);
+    BOOST_CHECK_EQUAL(after_cursor_progress.cached_views,
+                      before_cursor_progress.cached_views);
+    BOOST_CHECK_EQUAL(after_cursor_progress.cached_payment_views,
+                      before_cursor_progress.cached_payment_views);
+    PQPaymentEligibleProTxHashesPtr payment_after;
+    BOOST_REQUIRE(manager.GetPaymentEligibleProTxHashes(
+        compatible_child.GetHash(), first_floor.GetHash(),
+        first_floor_height + 1, /*epoch=*/0, payment_after, error));
+    BOOST_CHECK(payment_after == payment_before);
+    BOOST_REQUIRE(manager.CommitPreparedBlock(
+        prepared_across_cursor, error));
+
+    auto regressing_cursor{second_scanning};
+    regressing_cursor.generation = 3;
+    regressing_cursor.scan_after_key = scan_cursor_one;
+    BOOST_CHECK(!manager.InstallGCFloor(
+        FloorComponent(regressing_cursor), authorization, error));
+    BOOST_CHECK(error.result == PQRegistryResult::FLOOR_CONFLICT);
+
+    auto premature_higher{FloorClosure(
+        manager, second_floor.GetHash(), /*generation=*/3,
+        scan_cursor_three, lineage_two, legacy_island)};
+    BOOST_CHECK(!manager.InstallGCFloor(
+        FloorComponent(premature_higher), authorization, error));
+    BOOST_CHECK(error.result == PQRegistryResult::FLOOR_CONFLICT);
+
+    auto first_complete{second_scanning};
+    first_complete.generation = 3;
+    first_complete.scan_complete = evo::PQRegistryGCClosure::COMPLETE;
+    first_complete.scan_after_key.reset();
+    BOOST_REQUIRE(manager.InstallGCFloor(
+        FloorComponent(first_complete), authorization, error));
+
+    auto reopen_complete{second_scanning};
+    reopen_complete.generation = 4;
+    reopen_complete.scan_after_key = scan_cursor_three;
+    BOOST_CHECK(!manager.InstallGCFloor(
+        FloorComponent(reopen_complete), authorization, error));
+    BOOST_CHECK(error.result == PQRegistryResult::FLOOR_CONFLICT);
+
+    auto wrong_interval{premature_higher};
+    wrong_interval.generation = 4;
+    ++wrong_interval.checkpoint.height;
+    BOOST_REQUIRE(wrong_interval.IsValid());
+    BOOST_CHECK(!manager.InstallGCFloor(
+        FloorComponent(wrong_interval), authorization, error));
+    BOOST_CHECK(error.result == PQRegistryResult::FLOOR_CONFLICT);
+
+    const uint32_t prepared_after_floor_block_id{block_id++};
+    const uint32_t prepared_after_floor_tx_id{block_id++};
+    const CBlock prepared_after_second_floor{Block(
+        second_floor.GetHash(), prepared_after_floor_block_id,
+        {OrdinaryTransaction(prepared_after_floor_tx_id)})};
+    PQRegistryPreparedBlock stale_after_floor_advance;
+    BOOST_REQUIRE(manager.PrepareBlock(
+        prepared_after_second_floor, second_floor_height + 1,
+        Members(genesis, {}, {}, CKeyID{}), {},
+        stale_after_floor_advance, error));
+    PQPaymentEligibleProTxHashesPtr second_payment;
+    BOOST_REQUIRE(manager.GetPaymentEligibleProTxHashes(
+        second_floor.GetHash(), second_floor_parent,
+        second_floor_height, /*epoch=*/1, second_payment, error));
+    const auto before_floor_advance{
+        test::PQRegistryManagerTestAccess::Stats(manager)};
+    BOOST_CHECK_GT(before_floor_advance.cached_views, 0U);
+    BOOST_CHECK_GT(before_floor_advance.cached_payment_views, 0U);
+
+    auto valid_higher{premature_higher};
+    valid_higher.generation = 4;
+    BOOST_REQUIRE(manager.InstallGCFloor(
+        FloorComponent(valid_higher), authorization, error));
+    const auto after_floor_advance{
+        test::PQRegistryManagerTestAccess::Stats(manager)};
+    BOOST_CHECK_EQUAL(after_floor_advance.gc_floor_revision,
+                      before_floor_advance.gc_floor_revision + 1);
+    BOOST_CHECK_EQUAL(after_floor_advance.cached_views, 0U);
+    BOOST_CHECK_EQUAL(after_floor_advance.cached_payment_views, 0U);
+    BOOST_CHECK(!manager.CommitPreparedBlock(
+        stale_after_floor_advance, error));
+    BOOST_CHECK(error.result == PQRegistryResult::FLOOR_CONFLICT);
+    BOOST_CHECK(stale_after_floor_advance.IsValid());
+}
+
+BOOST_AUTO_TEST_CASE(gc_floor_install_requires_an_exact_checkpoint_record)
+{
+    const auto config{FastConfig()};
+    const uint256 genesis{NonNullHash(811)};
+    const int32_t checkpoint_height{config.preparation_height};
+    const auto authorization{FloorAuthorization(
+        checkpoint_height + 100, 811)};
+    const uint256 lineage{NonNullHash(812)};
+    const uint256 island{NonNullHash(813)};
+    const uint256 scan_cursor{NonNullHash(814)};
+
+    PQRegistryManager missing(MemoryDB(811), genesis, config);
+    evo::PQRegistryGCClosure absent;
+    absent.generation = 1;
+    absent.checkpoint = {checkpoint_height, NonNullHash(815)};
+    absent.checkpoint_state_root = NonNullHash(816);
+    absent.checkpoint_record_hash = NonNullHash(817);
+    absent.cumulative_lineage_commitment = lineage;
+    absent.legacy_island_commitment = island;
+    absent.scan_after_key = scan_cursor;
+    BOOST_REQUIRE(absent.IsValid());
+    PQRegistryError error;
+    BOOST_CHECK(!missing.InstallGCFloor(
+        FloorComponent(absent), authorization, error));
+    BOOST_CHECK(error.result == PQRegistryResult::SNAPSHOT_NOT_FOUND);
+    BOOST_CHECK_EQUAL(
+        test::PQRegistryManagerTestAccess::Stats(missing)
+            .gc_floor_revision,
+        0U);
+
+    PQRegistryManager corrupt(MemoryDB(812), genesis, config);
+    const CBlock checkpoint{AppendOrdinaryRegistryBlock(
+        corrupt, genesis, NonNullHash(818), checkpoint_height, 819,
+        error)};
+    const auto closure{FloorClosure(
+        corrupt, checkpoint.GetHash(), /*generation=*/1, scan_cursor,
+        lineage, island)};
+    BOOST_REQUIRE(test::PQRegistryManagerTestAccess::AppendTrailingDiskByte(
+        corrupt, checkpoint.GetHash()));
+    BOOST_CHECK(!corrupt.InstallGCFloor(
+        FloorComponent(closure), authorization, error));
+    BOOST_CHECK(error.result == PQRegistryResult::SNAPSHOT_CORRUPT);
+    BOOST_CHECK_EQUAL(
+        test::PQRegistryManagerTestAccess::Stats(corrupt)
+            .gc_floor_revision,
+        0U);
+
+    PQRegistryManager idempotent(MemoryDB(813), genesis, config);
+    const CBlock idempotent_checkpoint{AppendOrdinaryRegistryBlock(
+        idempotent, genesis, NonNullHash(832), checkpoint_height, 833,
+        error)};
+    const auto idempotent_closure{FloorClosure(
+        idempotent, idempotent_checkpoint.GetHash(), /*generation=*/1,
+        scan_cursor, lineage, island)};
+    const auto idempotent_component{FloorComponent(idempotent_closure)};
+    BOOST_REQUIRE(idempotent.InstallGCFloor(
+        idempotent_component, authorization, error));
+    BOOST_CHECK_EQUAL(
+        test::PQRegistryManagerTestAccess::Stats(idempotent)
+            .gc_floor_revision,
+        1U);
+    BOOST_REQUIRE(test::PQRegistryManagerTestAccess::AppendTrailingDiskByte(
+        idempotent, idempotent_checkpoint.GetHash()));
+    BOOST_CHECK(!idempotent.InstallGCFloor(
+        idempotent_component, authorization, error));
+    BOOST_CHECK(error.result == PQRegistryResult::SNAPSHOT_CORRUPT);
+    BOOST_CHECK_EQUAL(
+        test::PQRegistryManagerTestAccess::Stats(idempotent)
+            .gc_floor_revision,
+        1U);
+}
+
+BOOST_AUTO_TEST_CASE(
+    gc_floor_checkpoint_rejects_duplicate_global_key_owners)
+{
+    const auto config{FastConfig()};
+    const uint256 genesis{NonNullHash(821)};
+    std::vector<uint256> operators{
+        NonNullHash(822), NonNullHash(823)};
+    std::sort(operators.begin(), operators.end());
+    auto first_key{DeterministicKey(171)};
+    auto second_key{DeterministicKey(172)};
+    CKey owner_key;
+    owner_key.MakeNewKey(/*fCompressed=*/true);
+    const CKeyID owner_key_id{owner_key.GetPubKey().GetID()};
+    const auto first_commitment{CommitmentAt(
+        config, config.preparation_height, 1, 821)};
+    const auto second_commitment{CommitmentAt(
+        config, config.preparation_height, 1, 822)};
+    const CBlock checkpoint{Block(
+        NonNullHash(824), 825,
+        {GlobalRegistration(
+             genesis, operators[0], first_key, owner_key,
+             first_commitment, 826),
+         GlobalRegistration(
+             genesis, operators[1], second_key, owner_key,
+             second_commitment, 827)})};
+    PQRegistryManager manager(MemoryDB(821), genesis, config);
+    PQRegistryError error;
+    BOOST_REQUIRE(manager.ProcessBlock(
+        checkpoint, config.preparation_height,
+        Members(genesis, operators, operators, owner_key_id), {},
+        /*fJustCheck=*/false, error));
+
+    PQRegistryDiskSnapshot duplicate;
+    BOOST_REQUIRE(test::PQRegistryManagerTestAccess::ReadExactDiskSnapshot(
+        manager, checkpoint.GetHash(), duplicate));
+    BOOST_REQUIRE_EQUAL(duplicate.operator_states.size(), 2U);
+    BOOST_REQUIRE_EQUAL(
+        duplicate.checkpoint_operator_states.size(), 2U);
+    duplicate.operator_states[1].global_key.public_key =
+        duplicate.operator_states[0].global_key.public_key;
+    duplicate.checkpoint_operator_states[1].global_key.public_key =
+        duplicate.checkpoint_operator_states[0].global_key.public_key;
+    PQRegistrySnapshot duplicate_state;
+    duplicate_state.operator_states =
+        duplicate.checkpoint_operator_states;
+    duplicate_state.used_tree_ids = duplicate.tree_ids;
+    const auto duplicate_root{
+        duplicate_state.RecomputeConsensusStateRoot(genesis)};
+    BOOST_REQUIRE(duplicate_root);
+    duplicate.consensus_state_root = *duplicate_root;
+    BOOST_REQUIRE(duplicate.IsStructurallyValid());
+    BOOST_REQUIRE(
+        test::PQRegistryManagerTestAccess::RewriteExactDiskSnapshot(
+            manager, checkpoint.GetHash(), duplicate));
+
+    const auto closure{FloorClosure(
+        manager, checkpoint.GetHash(), /*generation=*/1,
+        NonNullHash(828), NonNullHash(829), NonNullHash(830))};
+    const auto authorization{FloorAuthorization(
+        config.preparation_height + 100, 831)};
+    BOOST_CHECK(!manager.InstallGCFloor(
+        FloorComponent(closure), authorization, error));
+    BOOST_CHECK(error.result == PQRegistryResult::SNAPSHOT_CORRUPT);
+    BOOST_CHECK_EQUAL(
+        test::PQRegistryManagerTestAccess::Stats(manager)
+            .gc_floor_revision,
+        0U);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

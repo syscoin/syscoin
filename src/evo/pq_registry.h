@@ -5,6 +5,7 @@
 #ifndef SYSCOIN_EVO_PQ_REGISTRY_H
 #define SYSCOIN_EVO_PQ_REGISTRY_H
 
+#include <evo/auxiliary_history_gc.h>
 #include <evo/evodb.h>
 #include <evo/pq_providertx.h>
 #include <llmq/pq_operator_key_state.h>
@@ -234,6 +235,8 @@ enum class PQRegistryResult : uint8_t {
     SNAPSHOT_NOT_FOUND,
     SNAPSHOT_CORRUPT,
     SNAPSHOT_CONFLICT,
+    HISTORY_PRUNED,
+    FLOOR_CONFLICT,
     PERSISTENCE_FAILED,
     UNDO_MISMATCH,
     INTERNAL_ERROR,
@@ -372,6 +375,7 @@ private:
     uint256 m_block_hash;
     uint256 m_consensus_state_root;
     int32_t m_height{-1};
+    uint64_t m_gc_floor_revision{0};
     std::shared_ptr<const PQRegistrySnapshotView> m_parent;
     std::shared_ptr<const PQRegistrySnapshotView> m_result;
     std::optional<PQRegistryDiskSnapshot> m_disk;
@@ -404,6 +408,11 @@ private:
         GUARDED_BY(m_mutex);
     mutable PaymentEligibilityCacheMap m_payment_eligibility_cache_index
         GUARDED_BY(m_mutex);
+    std::optional<evo::AuxiliaryHistoryGCComponent> m_gc_floor_component
+        GUARDED_BY(m_mutex);
+    std::optional<evo::PQRegistryGCClosure> m_gc_floor
+        GUARDED_BY(m_mutex);
+    uint64_t m_gc_floor_revision GUARDED_BY(m_mutex){0};
     // Diagnostic counters prove that bounded replay caching changes work,
     // never the authenticated result or any production cache decision.
     mutable uint64_t m_reconstruction_authenticated_records
@@ -419,6 +428,19 @@ private:
         const uint256& block_hash,
         PQRegistryDiskSnapshot& snapshot,
         PQRegistryError& error) const EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    [[nodiscard]] bool CheckGCFloorAccess(
+        const uint256& block_hash,
+        int32_t height,
+        PQRegistryError& error) const EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    [[nodiscard]] bool AuthenticateGCFloorCheckpoint(
+        const evo::PQRegistryGCClosure& closure,
+        std::shared_ptr<const PQRegistrySnapshotView>* snapshot,
+        PQRegistryError& error) const EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    [[nodiscard]] bool ReconstructPersistentSnapshotViewAboveFloor(
+        const uint256& block_hash,
+        int32_t expected_height,
+        std::shared_ptr<const PQRegistrySnapshotView>& snapshot,
+        PQRegistryError& error) const EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
     [[nodiscard]] bool ReconstructPersistentSnapshotView(
         const uint256& block_hash,
         int32_t expected_height,
@@ -431,6 +453,7 @@ private:
     [[nodiscard]] bool CommitPreparedSnapshot(
         const std::shared_ptr<const PQRegistrySnapshotView>& snapshot,
         const PQRegistryDiskSnapshot& disk,
+        uint64_t floor_revision,
         PQRegistryError& error) EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
     [[nodiscard]] bool PrepareBlockInternal(
         const CBlock& block,
@@ -451,6 +474,16 @@ public:
         return m_config;
     }
     [[nodiscard]] bool IsEnabled() const noexcept;
+
+    /**
+     * Install the crash-monotonic PQ history floor selected by the shared GC
+     * journal. The checkpoint is authenticated from its exact physical record
+     * before any cached view can observe a new boundary revision.
+     */
+    [[nodiscard]] bool InstallGCFloor(
+        const evo::AuxiliaryHistoryGCComponent& component,
+        const evo::AuxiliaryHistoryGCAuthorization& authorization,
+        PQRegistryError& error) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     [[nodiscard]] bool ProcessBlock(
         const CBlock& block,

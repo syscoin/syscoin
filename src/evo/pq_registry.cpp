@@ -43,6 +43,7 @@ struct PQRegistrySnapshotView {
     int32_t height{-1};
     uint256 block_hash;
     uint256 previous_block_hash;
+    uint64_t gc_floor_revision{0};
     std::shared_ptr<const PQRegistryStateData> state;
     std::shared_ptr<const std::vector<uint256>> block_tree_ids;
 };
@@ -456,13 +457,15 @@ std::shared_ptr<const PQRegistrySnapshotView> MakeSnapshotView(
     const uint256& block_hash,
     const uint256& previous_block_hash,
     std::shared_ptr<const PQRegistryStateData> state,
-    std::vector<uint256> block_tree_ids)
+    std::vector<uint256> block_tree_ids,
+    uint64_t gc_floor_revision = 0)
 {
     if (!state) return nullptr;
     auto snapshot{std::make_shared<PQRegistrySnapshotView>()};
     snapshot->height = height;
     snapshot->block_hash = block_hash;
     snapshot->previous_block_hash = previous_block_hash;
+    snapshot->gc_floor_revision = gc_floor_revision;
     snapshot->state = std::move(state);
     snapshot->block_tree_ids =
         std::make_shared<const std::vector<uint256>>(
@@ -481,7 +484,8 @@ MakeAuthenticatedSnapshotView(
     std::vector<uint256> block_tree_ids,
     std::optional<OperatorKeyScheduleState> schedule,
     const uint256& used_tree_ids_hash,
-    const uint256& consensus_state_root)
+    const uint256& consensus_state_root,
+    uint64_t gc_floor_revision = 0)
 {
     ReusableSnapshotBacking reusable;
     FindReusableSnapshotBacking(
@@ -504,7 +508,8 @@ MakeAuthenticatedSnapshotView(
     }
     return MakeSnapshotView(
         height, block_hash, previous_block_hash,
-        std::move(reusable.state), std::move(block_tree_ids));
+        std::move(reusable.state), std::move(block_tree_ids),
+        gc_floor_revision);
 }
 
 std::shared_ptr<const PQRegistrySnapshotView>
@@ -515,7 +520,8 @@ MakeAuthenticatedReplaySnapshotView(
     const std::vector<OperatorKeyState>& operator_states,
     const std::shared_ptr<const std::vector<uint256>>& used_tree_ids,
     const OperatorKeyScheduleState& schedule,
-    const uint256& used_tree_ids_hash)
+    const uint256& used_tree_ids_hash,
+    uint64_t gc_floor_revision = 0)
 {
     if (!used_tree_ids) return nullptr;
     ReusableSnapshotBacking reusable;
@@ -540,7 +546,8 @@ MakeAuthenticatedReplaySnapshotView(
     }
     return MakeSnapshotView(
         disk.height, disk.block_hash, disk.previous_block_hash,
-        std::move(reusable.state), disk.block_tree_ids);
+        std::move(reusable.state), disk.block_tree_ids,
+        gc_floor_revision);
 }
 
 std::shared_ptr<const PQRegistrySnapshotView>
@@ -904,6 +911,8 @@ PQRegistryPreparedBlock& PQRegistryPreparedBlock::operator=(
     m_block_hash = std::move(other.m_block_hash);
     m_consensus_state_root = std::move(other.m_consensus_state_root);
     m_height = std::exchange(other.m_height, -1);
+    m_gc_floor_revision =
+        std::exchange(other.m_gc_floor_revision, 0);
     m_parent = std::move(other.m_parent);
     m_result = std::move(other.m_result);
     m_disk = std::move(other.m_disk);
@@ -1257,6 +1266,8 @@ std::string_view PQRegistryResultString(PQRegistryResult result) noexcept
     case PQRegistryResult::SNAPSHOT_NOT_FOUND: return "snapshot-not-found";
     case PQRegistryResult::SNAPSHOT_CORRUPT: return "snapshot-corrupt";
     case PQRegistryResult::SNAPSHOT_CONFLICT: return "snapshot-conflict";
+    case PQRegistryResult::HISTORY_PRUNED: return "history-pruned";
+    case PQRegistryResult::FLOOR_CONFLICT: return "floor-conflict";
     case PQRegistryResult::PERSISTENCE_FAILED: return "persistence-failed";
     case PQRegistryResult::UNDO_MISMATCH: return "undo-mismatch";
     case PQRegistryResult::INTERNAL_ERROR: return "internal-error";
@@ -1302,17 +1313,207 @@ bool PQRegistryManager::IsEnabled() const noexcept
     return !m_genesis_hash.IsNull() && m_config.IsValid();
 }
 
+bool PQRegistryManager::CheckGCFloorAccess(
+    const uint256& block_hash,
+    int32_t height,
+    PQRegistryError& error) const
+{
+    if (!m_gc_floor) return true;
+    if (height < m_gc_floor->checkpoint.height) {
+        return SetError(error, PQRegistryResult::HISTORY_PRUNED);
+    }
+    if (height == m_gc_floor->checkpoint.height &&
+        block_hash != m_gc_floor->checkpoint.block_hash) {
+        return SetError(error, PQRegistryResult::FLOOR_CONFLICT);
+    }
+    return true;
+}
+
+bool PQRegistryManager::AuthenticateGCFloorCheckpoint(
+    const evo::PQRegistryGCClosure& closure,
+    std::shared_ptr<const PQRegistrySnapshotView>* snapshot,
+    PQRegistryError& error) const
+{
+    PQRegistryDiskSnapshot disk;
+    const auto read_result{m_snapshot_db->ReadExactDiskForGC(
+        closure.checkpoint.block_hash, disk)};
+    using ExactReadResult =
+        typename CEvoDB<uint256, PQRegistryDiskSnapshot,
+                        StaticSaltedHasher>::ExactDiskReadResult;
+    if (read_result == ExactReadResult::NOT_FOUND) {
+        return SetError(error, PQRegistryResult::SNAPSHOT_NOT_FOUND);
+    }
+    if (read_result != ExactReadResult::FOUND ||
+        !disk.IsStructurallyValid() ||
+        disk.block_hash != closure.checkpoint.block_hash ||
+        disk.height != closure.checkpoint.height || disk.is_checkpoint != 1 ||
+        disk.consensus_state_root != closure.checkpoint_state_root ||
+        ::SerializeHash(disk) != closure.checkpoint_record_hash ||
+        disk.height < m_config.preparation_height ||
+        !IsRegistryCheckpoint(m_config, disk.height)) {
+        return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
+    }
+
+    const auto schedule_view{DeriveOperatorKeyScheduleView(
+        m_config.schedule, disk.height,
+        m_config.registration_cutoff_blocks,
+        m_config.future_horizon_epochs)};
+    const auto tree_ids_hash{GetUsedTreeIdSetHash(
+        m_genesis_hash, disk.tree_ids)};
+    if (!schedule_view || !tree_ids_hash ||
+        !StateTreeIdsAreRecorded(disk.checkpoint_operator_states,
+                                 disk.tree_ids) ||
+        std::any_of(
+            disk.checkpoint_operator_states.begin(),
+            disk.checkpoint_operator_states.end(),
+            [&](const OperatorKeyState& state) {
+                return !state.IsAdvancedTo(*schedule_view);
+            })) {
+        return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
+    }
+    const auto state_root{GetCanonicalPQKeyConsensusStateHash(
+        m_genesis_hash, disk.checkpoint_operator_states,
+        *tree_ids_hash)};
+    const auto indexes{
+        BuildRegistryIndexes(disk.checkpoint_operator_states)};
+    if (!state_root || *state_root != disk.consensus_state_root ||
+        !indexes) {
+        return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
+    }
+
+    if (snapshot != nullptr) {
+        auto authenticated{MakeAuthenticatedSnapshotView(
+            m_snapshot_cache, disk.height, disk.block_hash,
+            disk.previous_block_hash, disk.checkpoint_operator_states,
+            disk.tree_ids, disk.block_tree_ids,
+            OperatorKeyScheduleState::FromView(*schedule_view),
+            *tree_ids_hash, disk.consensus_state_root,
+            m_gc_floor_revision)};
+        if (!authenticated) {
+            return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
+        }
+        *snapshot = std::move(authenticated);
+    }
+    return true;
+}
+
+bool PQRegistryManager::InstallGCFloor(
+    const evo::AuxiliaryHistoryGCComponent& component,
+    const evo::AuxiliaryHistoryGCAuthorization& authorization,
+    PQRegistryError& error)
+{
+    error.Clear();
+    if (!IsEnabled() ||
+        !evo::IsPQRegistryGCComponentBoundedByAuthorization(
+            component, authorization)) {
+        return SetError(error, PQRegistryResult::INVALID_CONFIGURATION);
+    }
+    const auto closure{evo::DecodePQRegistryGCClosure(component.closure)};
+    if (!closure) {
+        return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
+    }
+    LOCK(m_mutex);
+    bool idempotent{false};
+    if (m_gc_floor_component &&
+        component.monotonic_position ==
+            m_gc_floor_component->monotonic_position) {
+        if (component != *m_gc_floor_component) {
+            return SetError(error, PQRegistryResult::FLOOR_CONFLICT);
+        }
+        idempotent = true;
+    }
+    if (!idempotent && m_gc_floor_component &&
+        (component.monotonic_position !=
+             m_gc_floor_component->monotonic_position + 1 ||
+         component.monotonic_position == 0)) {
+        return SetError(error, PQRegistryResult::FLOOR_CONFLICT);
+    }
+
+    const bool same_checkpoint{
+        m_gc_floor && closure->checkpoint == m_gc_floor->checkpoint};
+    if (m_gc_floor && !idempotent) {
+        if (closure->legacy_island_commitment !=
+            m_gc_floor->legacy_island_commitment) {
+            return SetError(error, PQRegistryResult::FLOOR_CONFLICT);
+        }
+        if (same_checkpoint) {
+            const bool immutable_closure_matches{
+                closure->checkpoint_state_root ==
+                    m_gc_floor->checkpoint_state_root &&
+                closure->checkpoint_record_hash ==
+                    m_gc_floor->checkpoint_record_hash &&
+                closure->cumulative_lineage_commitment ==
+                    m_gc_floor->cumulative_lineage_commitment};
+            const bool cursor_advances{
+                m_gc_floor->scan_complete ==
+                    evo::PQRegistryGCClosure::SCANNING &&
+                ((closure->scan_complete ==
+                      evo::PQRegistryGCClosure::SCANNING &&
+                  m_gc_floor->scan_after_key &&
+                  closure->scan_after_key &&
+                  *m_gc_floor->scan_after_key <
+                      *closure->scan_after_key) ||
+                 closure->scan_complete ==
+                     evo::PQRegistryGCClosure::COMPLETE)};
+            if (!immutable_closure_matches || !cursor_advances) {
+                return SetError(error, PQRegistryResult::FLOOR_CONFLICT);
+            }
+        } else {
+            const int64_t height_delta{
+                static_cast<int64_t>(closure->checkpoint.height) -
+                m_gc_floor->checkpoint.height};
+            if (m_gc_floor->scan_complete !=
+                    evo::PQRegistryGCClosure::COMPLETE ||
+                height_delta != PQ_REGISTRY_CHECKPOINT_INTERVAL) {
+                return SetError(error, PQRegistryResult::FLOOR_CONFLICT);
+            }
+        }
+    }
+    if (!AuthenticateGCFloorCheckpoint(*closure, nullptr, error)) {
+        return false;
+    }
+    if (idempotent) return true;
+
+    // Finish every allocation before mutating the effective floor. A failed
+    // component copy must leave both the boundary revision and caches intact.
+    std::optional<evo::AuxiliaryHistoryGCComponent> prepared_component{
+        component};
+    std::optional<evo::PQRegistryGCClosure> prepared_closure{*closure};
+    const bool boundary_changed{!same_checkpoint};
+    if (boundary_changed) {
+        if (m_gc_floor_revision ==
+            std::numeric_limits<uint64_t>::max()) {
+            return SetError(error, PQRegistryResult::FLOOR_CONFLICT);
+        }
+    }
+
+    m_gc_floor_component.swap(prepared_component);
+    m_gc_floor.swap(prepared_closure);
+    if (boundary_changed) {
+        m_snapshot_cache.clear();
+        m_snapshot_cache_index.clear();
+        m_payment_eligibility_cache.clear();
+        m_payment_eligibility_cache_index.clear();
+        ++m_gc_floor_revision;
+    }
+    return true;
+}
+
 bool PQRegistryManager::CacheSnapshotView(
     std::shared_ptr<const PQRegistrySnapshotView> snapshot,
     std::shared_ptr<const PQRegistrySnapshotView>* cached) const
 {
+    PQRegistryError floor_error;
     if (!snapshot || !snapshot->state ||
         !snapshot->state->operator_states ||
         !snapshot->state->used_tree_ids || !snapshot->state->indexes ||
         !snapshot->block_tree_ids || snapshot->height < 0 ||
         snapshot->block_hash.IsNull() ||
         (snapshot->height != 0 && snapshot->previous_block_hash.IsNull()) ||
-        snapshot->state->consensus_state_root.IsNull()) {
+        snapshot->state->consensus_state_root.IsNull() ||
+        snapshot->gc_floor_revision != m_gc_floor_revision ||
+        !CheckGCFloorAccess(snapshot->block_hash, snapshot->height,
+                            floor_error)) {
         return false;
     }
 
@@ -1359,9 +1560,12 @@ bool PQRegistryManager::CacheSnapshotView(
 bool PQRegistryManager::CommitPreparedSnapshot(
     const std::shared_ptr<const PQRegistrySnapshotView>& snapshot,
     const PQRegistryDiskSnapshot& disk,
+    uint64_t floor_revision,
     PQRegistryError& error)
 {
-    if (!snapshot || !snapshot->state ||
+    if (floor_revision != m_gc_floor_revision ||
+        !snapshot || snapshot->gc_floor_revision != floor_revision ||
+        !snapshot->state ||
         !snapshot->state->operator_states ||
         !snapshot->state->used_tree_ids || !snapshot->state->indexes ||
         !snapshot->block_tree_ids || snapshot->block_hash.IsNull() ||
@@ -1372,7 +1576,10 @@ bool PQRegistryManager::CommitPreparedSnapshot(
             snapshot->state->consensus_state_root ||
         disk.block_tree_ids != *snapshot->block_tree_ids ||
         (disk.is_checkpoint != 0) !=
-            IsRegistryCheckpoint(m_config, snapshot->height)) {
+            IsRegistryCheckpoint(m_config, snapshot->height) ||
+        !CheckGCFloorAccess(snapshot->block_hash, snapshot->height,
+                            error)) {
+        if (error.result != PQRegistryResult::OK) return false;
         return SetError(error, PQRegistryResult::INVALID_RESULTING_STATE);
     }
 
@@ -1414,6 +1621,196 @@ bool PQRegistryManager::ReadDiskSnapshot(
     return true;
 }
 
+bool PQRegistryManager::ReconstructPersistentSnapshotViewAboveFloor(
+    const uint256& block_hash,
+    int32_t expected_height,
+    std::shared_ptr<const PQRegistrySnapshotView>& snapshot,
+    PQRegistryError& error) const
+{
+    if (!m_gc_floor || expected_height < m_gc_floor->checkpoint.height) {
+        return SetError(error, PQRegistryResult::INTERNAL_ERROR);
+    }
+
+    std::vector<uint256> reverse_hashes;
+    const int64_t distance{
+        static_cast<int64_t>(expected_height) -
+        m_gc_floor->checkpoint.height};
+    reverse_hashes.reserve(static_cast<std::size_t>(std::min<int64_t>(
+        distance, 2 * PQ_REGISTRY_CHECKPOINT_INTERVAL)));
+    uint256 cursor{block_hash};
+    for (int32_t cursor_height{expected_height};
+         cursor_height > m_gc_floor->checkpoint.height; --cursor_height) {
+        PQRegistryDiskSnapshot record;
+        if (!ReadDiskSnapshot(cursor, record, error)) return false;
+        if (record.height != cursor_height || record.block_hash != cursor ||
+            (record.is_checkpoint != 0) !=
+                IsRegistryCheckpoint(m_config, cursor_height) ||
+            record.previous_block_hash.IsNull()) {
+            return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
+        }
+        reverse_hashes.push_back(cursor);
+        cursor = record.previous_block_hash;
+    }
+    if (cursor != m_gc_floor->checkpoint.block_hash) {
+        return SetError(error, PQRegistryResult::FLOOR_CONFLICT);
+    }
+
+    std::shared_ptr<const PQRegistrySnapshotView> base;
+    if (!AuthenticateGCFloorCheckpoint(*m_gc_floor, &base, error) ||
+        !base || !base->state || !base->state->operator_states ||
+        !base->state->used_tree_ids || !base->state->indexes ||
+        !base->block_tree_ids) {
+        if (error.result == PQRegistryResult::OK) {
+            SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
+        }
+        return false;
+    }
+
+    std::vector<OperatorKeyState> states{*base->state->operator_states};
+    std::shared_ptr<const std::vector<uint256>> used_tree_ids{
+        base->state->used_tree_ids};
+    std::shared_ptr<const PQRegistryStateData> authenticated_state{
+        base->state};
+    uint256 used_tree_ids_hash{base->state->used_tree_ids_hash};
+    uint256 previous_hash{base->block_hash};
+    int32_t replay_height{base->height};
+
+    SnapshotViewCache staged;
+    staged.emplace_back(base->block_hash, base);
+    ++m_reconstruction_authenticated_records;
+    ++m_reconstruction_tree_id_hashes;
+    ++m_reconstruction_state_hashes;
+
+    for (auto hash{reverse_hashes.rbegin()};
+         hash != reverse_hashes.rend(); ++hash) {
+        PQRegistryDiskSnapshot record;
+        if (!ReadDiskSnapshot(*hash, record, error)) return false;
+        ++replay_height;
+        if (record.block_hash != *hash || record.height != replay_height ||
+            record.previous_block_hash != previous_hash ||
+            record.previous_consensus_state_root !=
+                authenticated_state->consensus_state_root ||
+            (record.is_checkpoint != 0) !=
+                IsRegistryCheckpoint(m_config, record.height) ||
+            !ApplySparseOperatorDelta(
+                states, record.removed_operators,
+                record.operator_states)) {
+            return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
+        }
+
+        const bool has_tree_id_additions{!record.block_tree_ids.empty()};
+        if (has_tree_id_additions) {
+            std::vector<uint256> merged;
+            if (!MergeNewTreeIds(*used_tree_ids,
+                                 record.block_tree_ids, merged)) {
+                return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
+            }
+            used_tree_ids =
+                std::make_shared<const std::vector<uint256>>(
+                    std::move(merged));
+        }
+        const bool is_checkpoint{record.is_checkpoint != 0};
+        if (is_checkpoint &&
+            (states != record.checkpoint_operator_states ||
+             *used_tree_ids != record.tree_ids)) {
+            return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
+        }
+
+        const auto schedule_view{DeriveOperatorKeyScheduleView(
+            m_config.schedule, record.height,
+            m_config.registration_cutoff_blocks,
+            m_config.future_horizon_epochs)};
+        if (!schedule_view) {
+            return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
+        }
+        const auto schedule{
+            OperatorKeyScheduleState::FromView(*schedule_view)};
+        const bool unchanged_sparse_record{
+            !is_checkpoint && record.operator_states.empty() &&
+            record.removed_operators.empty() &&
+            !has_tree_id_additions &&
+            authenticated_state->schedule == schedule};
+
+        std::shared_ptr<const PQRegistrySnapshotView> rebuilt;
+        if (unchanged_sparse_record) {
+            if (record.consensus_state_root !=
+                authenticated_state->consensus_state_root) {
+                return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
+            }
+            used_tree_ids = authenticated_state->used_tree_ids;
+            used_tree_ids_hash = authenticated_state->used_tree_ids_hash;
+            ++m_reconstruction_reused_records;
+        } else {
+            if (is_checkpoint || has_tree_id_additions) {
+                const auto tree_set_hash{GetUsedTreeIdSetHash(
+                    m_genesis_hash, *used_tree_ids)};
+                ++m_reconstruction_tree_id_hashes;
+                if (!tree_set_hash) {
+                    return SetError(error,
+                                    PQRegistryResult::SNAPSHOT_CORRUPT);
+                }
+                used_tree_ids_hash = *tree_set_hash;
+            }
+            if (states.size() > MAX_PQ_OPERATOR_STATES ||
+                !StateTreeIdsAreRecorded(states, *used_tree_ids) ||
+                std::any_of(states.begin(), states.end(),
+                            [&](const OperatorKeyState& state) {
+                                return !state.IsAdvancedTo(*schedule_view);
+                            })) {
+                return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
+            }
+            const auto root{GetCanonicalPQKeyConsensusStateHash(
+                m_genesis_hash, states, used_tree_ids_hash)};
+            ++m_reconstruction_state_hashes;
+            if (!root || *root != record.consensus_state_root) {
+                return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
+            }
+            rebuilt = MakeAuthenticatedReplaySnapshotView(
+                staged, m_snapshot_cache, record, states, used_tree_ids,
+                schedule, used_tree_ids_hash, m_gc_floor_revision);
+            if (!rebuilt || !rebuilt->state) {
+                return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
+            }
+            authenticated_state = rebuilt->state;
+            used_tree_ids = authenticated_state->used_tree_ids;
+            used_tree_ids_hash = authenticated_state->used_tree_ids_hash;
+        }
+        ++m_reconstruction_authenticated_records;
+        if (!rebuilt) {
+            rebuilt = MakeSnapshotView(
+                record.height, record.block_hash,
+                record.previous_block_hash, authenticated_state,
+                record.block_tree_ids, m_gc_floor_revision);
+        }
+        if (!rebuilt) {
+            return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
+        }
+        staged.emplace_back(record.block_hash, std::move(rebuilt));
+        while (staged.size() > 1 &&
+               (staged.size() > PQ_REGISTRY_SNAPSHOT_CACHE_SIZE ||
+                SnapshotCacheDynamicMemoryUsage(
+                    staged, staged.back().second->state.get()) >
+                    PQ_REGISTRY_SNAPSHOT_CACHE_MAX_INCREMENTAL_BYTES)) {
+            staged.pop_front();
+        }
+        previous_hash = record.block_hash;
+    }
+
+    if (staged.empty() || staged.back().first != block_hash ||
+        !staged.back().second ||
+        staged.back().second->height != expected_height) {
+        return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
+    }
+    const auto target{std::prev(staged.end())};
+    for (auto view{staged.begin()}; view != staged.end(); ++view) {
+        if (!CacheSnapshotView(
+                view->second, view == target ? &snapshot : nullptr)) {
+            return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
+        }
+    }
+    return snapshot != nullptr;
+}
+
 bool PQRegistryManager::ReconstructPersistentSnapshotView(
     const uint256& block_hash,
     int32_t expected_height,
@@ -1421,12 +1818,16 @@ bool PQRegistryManager::ReconstructPersistentSnapshotView(
     PQRegistryError& error) const
 {
     snapshot.reset();
+    if (!CheckGCFloorAccess(block_hash, expected_height, error)) {
+        return false;
+    }
     const auto cached{m_snapshot_cache_index.find(block_hash)};
     if (cached != m_snapshot_cache_index.end()) {
         const auto& candidate{cached->second->second};
         if (!candidate || !candidate->state ||
             candidate->height != expected_height ||
-            candidate->block_hash != block_hash) {
+            candidate->block_hash != block_hash ||
+            candidate->gc_floor_revision != m_gc_floor_revision) {
             return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
         }
         snapshot = candidate;
@@ -1434,6 +1835,11 @@ bool PQRegistryManager::ReconstructPersistentSnapshotView(
                                 cached->second);
         cached->second = std::prev(m_snapshot_cache.end());
         return true;
+    }
+
+    if (m_gc_floor) {
+        return ReconstructPersistentSnapshotViewAboveFloor(
+            block_hash, expected_height, snapshot, error);
     }
 
     std::vector<PQRegistryDiskSnapshot> reverse_journal;
@@ -1742,7 +2148,11 @@ bool PQRegistryManager::ProcessBlock(
     if (resulting_state_root != nullptr) {
         *resulting_state_root = prepared.ConsensusStateRoot();
     }
-    return fJustCheck || CommitPreparedBlock(prepared, error);
+    if (!fJustCheck) return CommitPreparedBlock(prepared, error);
+    LOCK(m_mutex);
+    return prepared.m_gc_floor_revision == m_gc_floor_revision
+        ? true
+        : SetError(error, PQRegistryResult::FLOOR_CONFLICT);
 }
 
 bool PQRegistryManager::PrepareBlock(
@@ -1778,6 +2188,7 @@ bool PQRegistryManager::PrepareBlockInternal(
     if (block_hash.IsNull()) {
         return SetError(error, PQRegistryResult::INVALID_BLOCK);
     }
+    uint64_t floor_revision{0};
     if (height < m_config.preparation_height) {
         for (std::size_t index{0}; index < block.vtx.size(); ++index) {
             if (block.vtx[index] &&
@@ -1793,11 +2204,19 @@ bool PQRegistryManager::PrepareBlockInternal(
             SetError(error, PQRegistryResult::INVALID_RESULTING_STATE);
             return false;
         }
+        {
+            LOCK(m_mutex);
+            if (m_gc_floor && height <= m_gc_floor->checkpoint.height) {
+                return SetError(error, PQRegistryResult::HISTORY_PRUNED);
+            }
+            floor_revision = m_gc_floor_revision;
+        }
         prepared.m_incarnation = m_incarnation;
         prepared.m_kind = PQRegistryPreparedBlock::Kind::NO_COMMIT;
         prepared.m_block_hash = block_hash;
         prepared.m_consensus_state_root = *root;
         prepared.m_height = height;
+        prepared.m_gc_floor_revision = floor_revision;
         return true;
     }
     if (!net_removed_pro_tx_hashes.empty() &&
@@ -1840,12 +2259,19 @@ bool PQRegistryManager::PrepareBlockInternal(
     std::shared_ptr<const PQRegistrySnapshotView> parent_view;
     if (height == m_config.preparation_height) {
         LOCK(m_mutex);
+        if (m_gc_floor && height <= m_gc_floor->checkpoint.height) {
+            return SetError(error, PQRegistryResult::HISTORY_PRUNED);
+        }
+        floor_revision = m_gc_floor_revision;
         parent_view = MakePrePreparationSnapshotView(
             m_snapshot_cache, m_genesis_hash, m_config,
             block.hashPrevBlock, uint256{}, height - 1, error);
         if (!parent_view) return false;
     } else {
         LOCK(m_mutex);
+        if (m_gc_floor && height <= m_gc_floor->checkpoint.height) {
+            return SetError(error, PQRegistryResult::HISTORY_PRUNED);
+        }
         if (!ReconstructPersistentSnapshotView(
                 block.hashPrevBlock, height - 1, parent_view, error)) {
             if (error.result == PQRegistryResult::SNAPSHOT_NOT_FOUND) {
@@ -1853,6 +2279,7 @@ bool PQRegistryManager::PrepareBlockInternal(
             }
             return false;
         }
+        floor_revision = m_gc_floor_revision;
     }
 
     if (IsRegistryCheckpoint(m_config, height)) {
@@ -1899,6 +2326,7 @@ bool PQRegistryManager::PrepareBlockInternal(
         result->height = height;
         result->block_hash = block_hash;
         result->previous_block_hash = block.hashPrevBlock;
+        result->gc_floor_revision = floor_revision;
         result->state = parent_view->state;
         result->block_tree_ids =
             std::make_shared<const std::vector<uint256>>();
@@ -1908,6 +2336,7 @@ bool PQRegistryManager::PrepareBlockInternal(
         prepared.m_consensus_state_root =
             result->state->consensus_state_root;
         prepared.m_height = height;
+        prepared.m_gc_floor_revision = floor_revision;
         prepared.m_parent = std::move(parent_view);
         prepared.m_result = std::move(result);
         return true;
@@ -2143,6 +2572,7 @@ bool PQRegistryManager::PrepareBlockInternal(
     result->height = height;
     result->block_hash = block_hash;
     result->previous_block_hash = block.hashPrevBlock;
+    result->gc_floor_revision = floor_revision;
     result->state = std::move(state);
     result->block_tree_ids =
         std::make_shared<const std::vector<uint256>>(
@@ -2152,6 +2582,7 @@ bool PQRegistryManager::PrepareBlockInternal(
     prepared.m_block_hash = block_hash;
     prepared.m_consensus_state_root = result->state->consensus_state_root;
     prepared.m_height = height;
+    prepared.m_gc_floor_revision = floor_revision;
     prepared.m_parent = std::move(parent_view);
     prepared.m_result = std::move(result);
     return true;
@@ -2167,6 +2598,14 @@ bool PQRegistryManager::CommitPreparedBlock(
         return SetError(error, PQRegistryResult::INTERNAL_ERROR);
     }
 
+    LOCK(m_mutex);
+    if (prepared.m_gc_floor_revision != m_gc_floor_revision) {
+        return SetError(error, PQRegistryResult::FLOOR_CONFLICT);
+    }
+    if (m_gc_floor &&
+        prepared.m_height <= m_gc_floor->checkpoint.height) {
+        return SetError(error, PQRegistryResult::HISTORY_PRUNED);
+    }
     bool committed{false};
     switch (prepared.m_kind) {
     case PQRegistryPreparedBlock::Kind::NO_COMMIT:
@@ -2199,11 +2638,9 @@ bool PQRegistryManager::CommitPreparedBlock(
             prepared.m_parent->state->consensus_state_root) {
             return SetError(error, PQRegistryResult::INTERNAL_ERROR);
         }
-        {
-            LOCK(m_mutex);
-            committed = CommitPreparedSnapshot(
-                prepared.m_result, *prepared.m_disk, error);
-        }
+        committed = CommitPreparedSnapshot(
+            prepared.m_result, *prepared.m_disk,
+            prepared.m_gc_floor_revision, error);
         break;
     case PQRegistryPreparedBlock::Kind::INVALID:
         return SetError(error, PQRegistryResult::INTERNAL_ERROR);
@@ -2254,15 +2691,15 @@ bool PQRegistryManager::ValidateTransaction(
     const bool logical_empty_parent{
         height == m_config.preparation_height};
     PQRegistryReadView parent;
-    if (logical_empty_parent) {
-        if (!EmptyRegistryConsensusStateRoot(m_genesis_hash)) {
-            SetError(error, PQRegistryResult::INVALID_RESULTING_STATE);
-            return false;
+    uint64_t validation_floor_revision{0};
+    {
+        LOCK(m_mutex);
+        if (m_gc_floor && height <= m_gc_floor->checkpoint.height) {
+            return SetError(error, PQRegistryResult::HISTORY_PRUNED);
         }
-    } else {
-        std::shared_ptr<const PQRegistrySnapshotView> snapshot;
-        {
-            LOCK(m_mutex);
+        validation_floor_revision = m_gc_floor_revision;
+        if (!logical_empty_parent) {
+            std::shared_ptr<const PQRegistrySnapshotView> snapshot;
             if (!ReconstructPersistentSnapshotView(
                     parent_block_hash, height - 1, snapshot, error)) {
                 if (error.result == PQRegistryResult::SNAPSHOT_NOT_FOUND) {
@@ -2270,8 +2707,15 @@ bool PQRegistryManager::ValidateTransaction(
                 }
                 return false;
             }
+            parent = PQRegistryReadView{std::move(snapshot)};
         }
-        parent = PQRegistryReadView{std::move(snapshot)};
+    }
+    if (logical_empty_parent) {
+        if (!EmptyRegistryConsensusStateRoot(m_genesis_hash)) {
+            SetError(error, PQRegistryResult::INVALID_RESULTING_STATE);
+            return false;
+        }
+    } else {
         if (!parent.IsValid()) {
             return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
         }
@@ -2366,6 +2810,12 @@ bool PQRegistryManager::ValidateTransaction(
         !state.IsStructurallyValid()) {
         return SetError(error, PQRegistryResult::INVALID_RESULTING_STATE);
     }
+    {
+        LOCK(m_mutex);
+        if (validation_floor_revision != m_gc_floor_revision) {
+            return SetError(error, PQRegistryResult::FLOOR_CONFLICT);
+        }
+    }
     return true;
 }
 
@@ -2382,6 +2832,13 @@ bool PQRegistryManager::GetSnapshot(
         return false;
     }
     snapshot = MaterializeSnapshot(*view.m_snapshot);
+    {
+        LOCK(m_mutex);
+        if (view.m_snapshot->gc_floor_revision != m_gc_floor_revision) {
+            snapshot = {};
+            return SetError(error, PQRegistryResult::FLOOR_CONFLICT);
+        }
+    }
     return true;
 }
 
@@ -2403,6 +2860,7 @@ bool PQRegistryManager::GetReadView(
     }
 
     LOCK(m_mutex);
+    if (!CheckGCFloorAccess(block_hash, height, error)) return false;
     std::shared_ptr<const PQRegistrySnapshotView> snapshot;
     if (height < m_config.preparation_height) {
         auto empty{MakePrePreparationSnapshotView(
@@ -2440,8 +2898,11 @@ bool PQRegistryManager::GetPaymentEligibleProTxHashes(
         return SetError(error, PQRegistryResult::INVALID_BLOCK);
     }
     if (height < m_config.preparation_height) {
-        eligible =
-            std::make_shared<const PQPaymentEligibleProTxHashes>();
+        auto empty{
+            std::make_shared<const PQPaymentEligibleProTxHashes>()};
+        LOCK(m_mutex);
+        if (!CheckGCFloorAccess(block_hash, height, error)) return false;
+        eligible = std::move(empty);
         return true;
     }
 
@@ -2454,6 +2915,15 @@ bool PQRegistryManager::GetPaymentEligibleProTxHashes(
     const PaymentEligibilityCacheKey key{snapshot.ConsensusStateRoot(), epoch};
     {
         LOCK(m_mutex);
+        if (!snapshot.m_snapshot ||
+            snapshot.m_snapshot->gc_floor_revision !=
+                m_gc_floor_revision ||
+            !CheckGCFloorAccess(block_hash, height, error)) {
+            if (error.result == PQRegistryResult::OK) {
+                SetError(error, PQRegistryResult::FLOOR_CONFLICT);
+            }
+            return false;
+        }
         const auto eligibility_cached{
             m_payment_eligibility_cache_index.find(key)};
         if (eligibility_cached != m_payment_eligibility_cache_index.end()) {
@@ -2480,6 +2950,16 @@ bool PQRegistryManager::GetPaymentEligibleProTxHashes(
     }
     {
         LOCK(m_mutex);
+        if (!snapshot.m_snapshot ||
+            snapshot.m_snapshot->gc_floor_revision !=
+                m_gc_floor_revision ||
+            !CheckGCFloorAccess(block_hash, height, error)) {
+            if (error.result == PQRegistryResult::OK) {
+                SetError(error, PQRegistryResult::FLOOR_CONFLICT);
+            }
+            eligible.reset();
+            return false;
+        }
         const auto winner{m_payment_eligibility_cache_index.find(key)};
         if (winner != m_payment_eligibility_cache_index.end()) {
             eligible = winner->second->second;
@@ -2518,7 +2998,6 @@ bool PQRegistryManager::GetMempoolView(
          !IsStrictlySortedUnique(requested_operators))) {
         return SetError(error, PQRegistryResult::INVALID_BLOCK);
     }
-
     view.operators.reserve(requested_operators.size());
     if (height < m_config.preparation_height) {
         for (const auto& pro_tx_hash : requested_operators) {
@@ -2528,6 +3007,11 @@ bool PQRegistryManager::GetMempoolView(
                 .has_global_key = 0,
                 .current_commitment = {},
             });
+        }
+        LOCK(m_mutex);
+        if (!CheckGCFloorAccess(block_hash, height, error)) {
+            view = {};
+            return false;
         }
         return true;
     }
@@ -2573,6 +3057,13 @@ bool PQRegistryManager::GetMempoolView(
         }
         view.operators.push_back(std::move(state));
     }
+    {
+        LOCK(m_mutex);
+        if (snapshot->gc_floor_revision != m_gc_floor_revision) {
+            view = {};
+            return SetError(error, PQRegistryResult::FLOOR_CONFLICT);
+        }
+    }
     return true;
 }
 
@@ -2588,6 +3079,9 @@ bool PQRegistryManager::UndoBlock(
         return SetError(error, PQRegistryResult::UNDO_MISMATCH);
     }
     LOCK(m_mutex);
+    if (m_gc_floor && height <= m_gc_floor->checkpoint.height) {
+        return SetError(error, PQRegistryResult::HISTORY_PRUNED);
+    }
     std::shared_ptr<const PQRegistrySnapshotView> current;
     if (!ReconstructPersistentSnapshotView(block_hash, height, current,
                                            error)) {
