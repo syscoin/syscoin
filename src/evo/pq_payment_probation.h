@@ -184,17 +184,23 @@ struct PQPaymentProbationDiff {
 [[nodiscard]] std::optional<uint256> GetPQPaymentProbationStateHash(
     const PQPaymentProbationState& state);
 
-/**
- * All membership collections are exact transition inputs. The two collateral
- * lists must be strictly sorted; current_valid_pro_tx_hashes must be a subset
- * of existing_pro_tx_hashes. Service, operator-key, revive, and PoSe fields do
- * not enter this state machine.
- */
-struct PQPaymentProbationTransitionInput {
+/** Receipt semantics are independent of how parent membership is resolved. */
+struct PQPaymentProbationTransitionContext {
     PQPaymentAuditReceiptIdentity receipt;
     std::array<uint256, QUORUM_SIZE> frozen_roster;
     QuorumBitmap roster_valid_members{};
     QuorumBitmap observed_members{};
+
+    [[nodiscard]] bool IsStructurallyValid() const noexcept;
+};
+
+/**
+ * Compatibility/reference input with complete parent membership vectors. The
+ * lists must be strictly sorted and current-valid must be a subset of existing.
+ * Service, operator-key, revive, and PoSe fields do not enter this state machine.
+ */
+struct PQPaymentProbationTransitionInput
+    : PQPaymentProbationTransitionContext {
     std::vector<uint256> existing_pro_tx_hashes;
     std::vector<uint256> current_valid_pro_tx_hashes;
 

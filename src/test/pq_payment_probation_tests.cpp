@@ -293,6 +293,21 @@ void CheckSameTransition(
                 expected.recovered_pro_tx_hashes);
     BOOST_CHECK(actual.pruned_pro_tx_hashes ==
                 expected.pruned_pro_tx_hashes);
+
+    CDataStream actual_bytes{SER_NETWORK, PROTOCOL_VERSION};
+    actual_bytes << actual.state << actual.undo
+                 << actual.effective_observed_count << actual.conclusive
+                 << actual.recovered_pro_tx_hashes
+                 << actual.pruned_pro_tx_hashes;
+    CDataStream expected_bytes{SER_NETWORK, PROTOCOL_VERSION};
+    expected_bytes << expected.state << expected.undo
+                   << expected.effective_observed_count
+                   << expected.conclusive
+                   << expected.recovered_pro_tx_hashes
+                   << expected.pruned_pro_tx_hashes;
+    BOOST_CHECK_EQUAL_COLLECTIONS(
+        actual_bytes.begin(), actual_bytes.end(),
+        expected_bytes.begin(), expected_bytes.end());
 }
 
 } // namespace
@@ -572,6 +587,115 @@ BOOST_AUTO_TEST_CASE(state_and_diff_serialization_are_versioned_and_canonical)
     noncanonical_cursor.cursor.has_receipt = 0;
     BOOST_CHECK(!noncanonical_cursor.IsStructurallyValid());
     BOOST_CHECK(!GetPQPaymentProbationStateHash(noncanonical_cursor));
+}
+
+BOOST_AUTO_TEST_CASE(transition_context_validates_only_receipt_roster_and_bitmaps)
+{
+    auto input{Input(/*epoch=*/40, /*receipt_tag=*/40,
+                     PQ_PAYMENT_AUDIT_CONCLUSIVE_MEMBERS)};
+    const auto& context{
+        static_cast<const PQPaymentProbationTransitionContext&>(input)};
+    BOOST_REQUIRE(context.IsStructurallyValid());
+
+    auto invalid_membership{input};
+    std::swap(invalid_membership.existing_pro_tx_hashes[0],
+              invalid_membership.existing_pro_tx_hashes[1]);
+    BOOST_CHECK(!invalid_membership.IsStructurallyValid());
+    BOOST_CHECK(static_cast<const PQPaymentProbationTransitionContext&>(
+                    invalid_membership)
+                    .IsStructurallyValid());
+
+    auto invalid_receipt{context};
+    invalid_receipt.receipt.receipt_id.SetNull();
+    BOOST_CHECK(!invalid_receipt.IsStructurallyValid());
+
+    auto duplicate_roster{context};
+    duplicate_roster.frozen_roster[1] =
+        duplicate_roster.frozen_roster[0];
+    BOOST_CHECK(!duplicate_roster.IsStructurallyValid());
+
+    auto null_roster_member{context};
+    null_roster_member.frozen_roster[0].SetNull();
+    BOOST_CHECK(!null_roster_member.IsStructurallyValid());
+
+    auto observed_invalid{context};
+    ClearBit(observed_invalid.roster_valid_members, 0);
+    BOOST_CHECK(!observed_invalid.IsStructurallyValid());
+
+    auto too_few_valid{context};
+    for (std::size_t member{299}; member < QUORUM_SIZE; ++member) {
+        ClearBit(too_few_valid.roster_valid_members, member);
+        ClearBit(too_few_valid.observed_members, member);
+    }
+    BOOST_CHECK(!too_few_valid.IsStructurallyValid());
+}
+
+BOOST_AUTO_TEST_CASE(legacy_vector_api_preserves_exact_validation_precedence)
+{
+    const auto valid{Input(/*epoch=*/41, /*receipt_tag=*/41,
+                           PQ_PAYMENT_AUDIT_CONCLUSIVE_MEMBERS)};
+    const auto check_error = [&](const PQPaymentProbationState& previous,
+                                 const PQPaymentProbationTransitionInput& input,
+                                 PQPaymentProbationError expected) {
+        PQPaymentProbationError error{PQPaymentProbationError::NONE};
+        BOOST_CHECK(!ApplyPQPaymentProbationTransition(
+            previous, input, &error));
+        BOOST_CHECK(error == expected);
+    };
+
+    auto invalid_receipt{valid};
+    invalid_receipt.receipt.receipt_id.SetNull();
+    check_error({}, invalid_receipt,
+                PQPaymentProbationError::INVALID_RECEIPT);
+
+    auto invalid_existing{valid};
+    std::swap(invalid_existing.existing_pro_tx_hashes[0],
+              invalid_existing.existing_pro_tx_hashes[1]);
+    check_error({}, invalid_existing,
+                PQPaymentProbationError::INVALID_COLLATERAL_SET);
+
+    auto invalid_current{valid};
+    invalid_current.current_valid_pro_tx_hashes.push_back(
+        NonNullHash(80'000));
+    std::sort(invalid_current.current_valid_pro_tx_hashes.begin(),
+              invalid_current.current_valid_pro_tx_hashes.end());
+    check_error({}, invalid_current,
+                PQPaymentProbationError::INVALID_CURRENT_VALID_SET);
+
+    auto too_few_valid{valid};
+    for (std::size_t member{299}; member < QUORUM_SIZE; ++member) {
+        ClearBit(too_few_valid.roster_valid_members, member);
+        ClearBit(too_few_valid.observed_members, member);
+    }
+    check_error({}, too_few_valid,
+                PQPaymentProbationError::INVALID_BITMAP);
+
+    auto null_roster_member{valid};
+    null_roster_member.frozen_roster[0].SetNull();
+    check_error({}, null_roster_member,
+                PQPaymentProbationError::INVALID_ROSTER);
+
+    auto observed_invalid{valid};
+    ClearBit(observed_invalid.roster_valid_members, 0);
+    check_error({}, observed_invalid,
+                PQPaymentProbationError::INVALID_BITMAP);
+
+    auto duplicate_roster{valid};
+    duplicate_roster.frozen_roster[1] =
+        duplicate_roster.frozen_roster[0];
+    check_error({}, duplicate_roster,
+                PQPaymentProbationError::INVALID_ROSTER);
+
+    auto collateral_precedes_context{null_roster_member};
+    std::swap(collateral_precedes_context.existing_pro_tx_hashes[0],
+              collateral_precedes_context.existing_pro_tx_hashes[1]);
+    check_error({}, collateral_precedes_context,
+                PQPaymentProbationError::INVALID_COLLATERAL_SET);
+
+    auto invalid_state{PQPaymentProbationState{}};
+    invalid_state.version = PQ_PAYMENT_PROBATION_STATE_VERSION - 1;
+    check_error(invalid_state, invalid_receipt,
+                PQPaymentProbationError::INVALID_STATE);
 }
 
 BOOST_AUTO_TEST_CASE(rejects_malformed_rosters_bitmaps_and_membership_sets)

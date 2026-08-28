@@ -70,9 +70,44 @@ auto FindEntry(Records& entries, const uint256& pro_tx_hash)
         });
 }
 
+PQPaymentProbationError ValidateTransitionRosterContext(
+    const PQPaymentProbationTransitionContext& context) noexcept
+{
+    if (BitmapCount(context.roster_valid_members) < QUORUM_MIN_VALID) {
+        return PQPaymentProbationError::INVALID_BITMAP;
+    }
+    for (std::size_t member{0}; member < QUORUM_SIZE; ++member) {
+        if (context.frozen_roster[member].IsNull()) {
+            return PQPaymentProbationError::INVALID_ROSTER;
+        }
+        if (IsBitSet(context.observed_members, member) &&
+            !IsBitSet(context.roster_valid_members, member)) {
+            return PQPaymentProbationError::INVALID_BITMAP;
+        }
+    }
+    auto sorted_roster{context.frozen_roster};
+    std::sort(sorted_roster.begin(), sorted_roster.end());
+    if (std::adjacent_find(sorted_roster.begin(), sorted_roster.end()) !=
+        sorted_roster.end()) {
+        return PQPaymentProbationError::INVALID_ROSTER;
+    }
+    return PQPaymentProbationError::NONE;
+}
+
+PQPaymentProbationError ValidateTransitionContext(
+    const PQPaymentProbationTransitionContext& context) noexcept
+{
+    if (!context.receipt.IsStructurallyValid()) {
+        return PQPaymentProbationError::INVALID_RECEIPT;
+    }
+    return ValidateTransitionRosterContext(context);
+}
+
 PQPaymentProbationError ValidateTransitionInput(
     const PQPaymentProbationTransitionInput& input) noexcept
 {
+    // Preserve the compatibility API's historical error precedence even
+    // though the semantic context can now be validated independently.
     if (!input.receipt.IsStructurallyValid()) {
         return PQPaymentProbationError::INVALID_RECEIPT;
     }
@@ -86,26 +121,37 @@ PQPaymentProbationError ValidateTransitionInput(
                        input.current_valid_pro_tx_hashes.end())) {
         return PQPaymentProbationError::INVALID_CURRENT_VALID_SET;
     }
-    if (BitmapCount(input.roster_valid_members) < QUORUM_MIN_VALID) {
-        return PQPaymentProbationError::INVALID_BITMAP;
-    }
-    for (std::size_t member{0}; member < QUORUM_SIZE; ++member) {
-        if (input.frozen_roster[member].IsNull()) {
-            return PQPaymentProbationError::INVALID_ROSTER;
-        }
-        if (IsBitSet(input.observed_members, member) &&
-            !IsBitSet(input.roster_valid_members, member)) {
-            return PQPaymentProbationError::INVALID_BITMAP;
-        }
-    }
-    auto sorted_roster{input.frozen_roster};
-    std::sort(sorted_roster.begin(), sorted_roster.end());
-    if (std::adjacent_find(sorted_roster.begin(), sorted_roster.end()) !=
-        sorted_roster.end()) {
-        return PQPaymentProbationError::INVALID_ROSTER;
-    }
-    return PQPaymentProbationError::NONE;
+    return ValidateTransitionRosterContext(input);
 }
+
+/** Sorted vectors retain the exact compatibility semantics at the public API. */
+class SortedVectorMembershipLookup final
+{
+public:
+    explicit SortedVectorMembershipLookup(
+        const PQPaymentProbationTransitionInput& input)
+        : m_existing{input.existing_pro_tx_hashes},
+          m_current_valid{input.current_valid_pro_tx_hashes}
+    {
+    }
+
+    [[nodiscard]] bool Exists(const uint256& pro_tx_hash) const noexcept
+    {
+        return std::binary_search(
+            m_existing.begin(), m_existing.end(), pro_tx_hash);
+    }
+
+    [[nodiscard]] bool IsCurrentValid(
+        const uint256& pro_tx_hash) const noexcept
+    {
+        return std::binary_search(
+            m_current_valid.begin(), m_current_valid.end(), pro_tx_hash);
+    }
+
+private:
+    std::span<const uint256> m_existing;
+    std::span<const uint256> m_current_valid;
+};
 
 std::vector<PQPaymentProbationChange> BuildChanges(
     std::span<const PQPaymentProbationEntry> before,
@@ -270,16 +316,25 @@ std::optional<uint256> GetPQPaymentProbationStateHash(
     }
 }
 
+bool PQPaymentProbationTransitionContext::IsStructurallyValid() const noexcept
+{
+    return ValidateTransitionContext(*this) ==
+           PQPaymentProbationError::NONE;
+}
+
 bool PQPaymentProbationTransitionInput::IsStructurallyValid() const noexcept
 {
     return ValidateTransitionInput(*this) == PQPaymentProbationError::NONE;
 }
 
+template <typename MembershipLookup>
 static std::optional<PQPaymentProbationTransitionResult>
 ApplyPQPaymentProbationTransitionImpl(
     const PQPaymentProbationState& previous,
     const std::optional<uint256>& authenticated_previous_hash,
-    const PQPaymentProbationTransitionInput& input,
+    const PQPaymentProbationTransitionContext& context,
+    const MembershipLookup& membership,
+    PQPaymentProbationError input_error,
     bool compact_result,
     PQPaymentProbationError* error)
 {
@@ -288,21 +343,20 @@ ApplyPQPaymentProbationTransitionImpl(
         SetError(error, PQPaymentProbationError::INVALID_STATE);
         return std::nullopt;
     }
-    const auto input_error{ValidateTransitionInput(input)};
     if (input_error != PQPaymentProbationError::NONE) {
         SetError(error, input_error);
         return std::nullopt;
     }
     if (previous.cursor.has_receipt != 0) {
-        if (input.receipt.epoch == previous.cursor.receipt.epoch) {
+        if (context.receipt.epoch == previous.cursor.receipt.epoch) {
             SetError(error,
-                     input.receipt == previous.cursor.receipt
+                     context.receipt == previous.cursor.receipt
                          ? PQPaymentProbationError::DUPLICATE_RECEIPT
                          : PQPaymentProbationError::CONFLICTING_RECEIPT);
             return std::nullopt;
         }
-        if (input.receipt.epoch < previous.cursor.receipt.epoch ||
-            input.receipt.carrier_height <=
+        if (context.receipt.epoch < previous.cursor.receipt.epoch ||
+            context.receipt.carrier_height <=
                 previous.cursor.receipt.carrier_height) {
             SetError(error, PQPaymentProbationError::OUT_OF_ORDER_RECEIPT);
             return std::nullopt;
@@ -312,7 +366,7 @@ ApplyPQPaymentProbationTransitionImpl(
     PQPaymentProbationTransitionResult result;
     result.state.version = previous.version;
     result.undo.previous_cursor = previous.cursor;
-    result.undo.applied_receipt = input.receipt;
+    result.undo.applied_receipt = context.receipt;
     const auto previous_state_hash{authenticated_previous_hash
         ? authenticated_previous_hash
         : GetPQPaymentProbationStateHash(previous)};
@@ -334,36 +388,17 @@ ApplyPQPaymentProbationTransitionImpl(
     std::vector<RosterTransition> roster_transitions;
     roster_transitions.reserve(QUORUM_SIZE);
     for (std::size_t member{0}; member < QUORUM_SIZE; ++member) {
-        if (!IsBitSet(input.roster_valid_members, member)) continue;
-        roster_transitions.push_back({
-            input.frozen_roster[member],
-            IsBitSet(input.observed_members, member)});
+        if (!IsBitSet(context.roster_valid_members, member)) continue;
+        const auto& pro_tx_hash{context.frozen_roster[member]};
+        roster_transitions.push_back({pro_tx_hash,
+                                      IsBitSet(context.observed_members, member),
+                                      membership.Exists(pro_tx_hash),
+                                      membership.IsCurrentValid(pro_tx_hash)});
     }
     std::sort(roster_transitions.begin(), roster_transitions.end(),
               [](const auto& lhs, const auto& rhs) {
                   return lhs.pro_tx_hash < rhs.pro_tx_hash;
               });
-
-    const auto mark_membership = [](auto& transitions,
-                                    std::span<const uint256> members,
-                                    bool RosterTransition::*field) {
-        std::size_t member_index{0};
-        for (auto& transition : transitions) {
-            while (member_index < members.size() &&
-                   members[member_index] < transition.pro_tx_hash) {
-                ++member_index;
-            }
-            transition.*field =
-                member_index < members.size() &&
-                members[member_index] == transition.pro_tx_hash;
-        }
-    };
-    mark_membership(
-        roster_transitions, input.existing_pro_tx_hashes,
-        &RosterTransition::exists);
-    mark_membership(
-        roster_transitions, input.current_valid_pro_tx_hashes,
-        &RosterTransition::current_valid);
     for (const auto& transition : roster_transitions) {
         if (transition.observed && transition.current_valid) {
             ++result.effective_observed_count;
@@ -375,16 +410,8 @@ ApplyPQPaymentProbationTransitionImpl(
 
     std::vector<PQPaymentProbationEntry> surviving_entries;
     surviving_entries.reserve(previous.entries.size());
-    std::size_t existing_index{0};
     for (const auto& entry : previous.entries) {
-        while (existing_index < input.existing_pro_tx_hashes.size() &&
-               input.existing_pro_tx_hashes[existing_index] <
-                   entry.pro_tx_hash) {
-            ++existing_index;
-        }
-        if (existing_index == input.existing_pro_tx_hashes.size() ||
-            input.existing_pro_tx_hashes[existing_index] !=
-                entry.pro_tx_hash) {
+        if (!membership.Exists(entry.pro_tx_hash)) {
             if (!compact_result) {
                 result.pruned_pro_tx_hashes.push_back(entry.pro_tx_hash);
             }
@@ -435,7 +462,7 @@ ApplyPQPaymentProbationTransitionImpl(
                 entry.payment_eligible_since_height =
                     entry.consecutive_misses ==
                             PQ_PAYMENT_PROBATION_MAX_MISSES
-                        ? input.receipt.carrier_height
+                        ? context.receipt.carrier_height
                         : entry.payment_eligible_since_height;
                 entry.consecutive_misses = 0;
             }
@@ -448,7 +475,7 @@ ApplyPQPaymentProbationTransitionImpl(
         emit(entry);
     }
 
-    result.state.cursor = PQPaymentProbationCursor{1, input.receipt};
+    result.state.cursor = PQPaymentProbationCursor{1, context.receipt};
     if (!compact_result) {
         result.undo.changes = BuildChanges(
             previous.entries, result.state.entries);
@@ -476,8 +503,11 @@ ApplyPQPaymentProbationTransition(
     const PQPaymentProbationTransitionInput& input,
     PQPaymentProbationError* error)
 {
+    const SortedVectorMembershipLookup membership{input};
     return ApplyPQPaymentProbationTransitionImpl(
-        previous, std::nullopt, input, /*compact_result=*/false, error);
+        previous, std::nullopt, input, membership,
+        ValidateTransitionInput(input),
+        /*compact_result=*/false, error);
 }
 
 std::optional<PQPaymentProbationManager::CompactTransitionResult>
@@ -491,8 +521,10 @@ PQPaymentProbationManager::ApplyCompactTransition(
         SetError(error, PQPaymentProbationError::INVALID_STATE);
         return std::nullopt;
     }
+    const SortedVectorMembershipLookup membership{input};
     auto result{ApplyPQPaymentProbationTransitionImpl(
-        *previous.State(), previous.StateHash(), input,
+        *previous.State(), previous.StateHash(), input, membership,
+        ValidateTransitionInput(input),
         /*compact_result=*/true, error)};
     if (!result) return std::nullopt;
     return CompactTransitionResult{
