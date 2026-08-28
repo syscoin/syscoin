@@ -5985,53 +5985,6 @@ void CChainLocksHandler::MaybeReplayBTCCPreseal()
     }
 }
 
-bool CChainLocksHandler::AreBTCCReceiptsReadyForSigning(
-    const CBlockIndex& target,
-    int32_t predecessor_height) const
-{
-    AssertLockHeld(cs_main);
-    if (!m_config || predecessor_height >= target.nHeight) return false;
-
-    for (int32_t height{predecessor_height + 1};
-         height <= target.nHeight; ++height) {
-        if (!pq::IsBTCCReceiptCarrierHeight(m_config->btcc_schedule,
-                                            height)) {
-            continue;
-        }
-        const CBlockIndex* carrier{target.GetAncestor(height)};
-        if (carrier == nullptr || carrier->pprev == nullptr) return false;
-        const auto previous_state{
-            IndexedBTCCReceiptState(*carrier->pprev)};
-        const auto current_state{IndexedBTCCReceiptState(*carrier)};
-        if (!previous_state || !current_state) {
-            return false;
-        }
-        const auto receipt{pq::ReconstructBTCCReceipt(
-            m_genesis_hash, m_config->chainlock_schedule,
-            m_config->btcc_schedule, *carrier, *previous_state,
-            *current_state, carrier->pqBTCCReceiptLogicalId)};
-        if (!receipt) return false;
-        if (receipt->IsNull()) continue;
-
-        const auto status{CheckBTCCReceiptCertificate(*receipt, *carrier)};
-        if (status == BTCCReceiptCertificateStatus::VERIFIED) {
-            LOCK(m_needed_btcc_certificate_mutex);
-            if (m_needed_btcc_certificate ==
-                receipt->chainlock_logical_id) {
-                m_needed_btcc_certificate.reset();
-                m_needed_btcc_last_request = std::chrono::microseconds{0};
-            }
-            continue;
-        }
-        if (status == BTCCReceiptCertificateStatus::MISSING) {
-            LOCK(m_needed_btcc_certificate_mutex);
-            m_needed_btcc_certificate = receipt->chainlock_logical_id;
-        }
-        return false;
-    }
-    return true;
-}
-
 void CChainLocksHandler::RequestNeededBTCCCertificate()
 {
     (void)RevalidatePendingBTCCReceiptDependency();
@@ -7403,9 +7356,6 @@ CChainLocksHandler::BuildCurrentSigningContexts(
     contexts.roster_set = std::move(roster_set);
     contexts.authorization_mask = authorization_mask;
     if (!IsCurrentSigningSource(contexts.source)) return std::nullopt;
-    for (std::size_t i{0}; i < contexts.count; ++i) {
-        if (!IsCurrentSigningStatement(contexts.statements[i])) return std::nullopt;
-    }
     return contexts;
 }
 
@@ -7463,19 +7413,19 @@ bool CChainLocksHandler::IsCurrentSigningSource(
             : pq::CurrentChainLockSigningWindow(
                   m_config->chainlock_schedule,
                   source.durable_predecessor.height, tip->nHeight)};
+        const CChain& active_chain{m_chainman.ActiveChain()};
         const CBlockIndex* target{
             tip != nullptr && tip->nHeight >= source.window.target_height
-                ? tip->GetAncestor(source.window.target_height)
+                ? active_chain[source.window.target_height]
                 : nullptr};
         const CBlockIndex* declared_predecessor{
             target == nullptr
                 ? nullptr
-                : target->GetAncestor(
-                      source.window.declared_predecessor_height)};
+                : active_chain[
+                      source.window.declared_predecessor_height]};
         const CBlockIndex* durable_index{
             target != nullptr && source.durable_predecessor.height >= 0
-                ? target->GetAncestor(
-                      source.durable_predecessor.height)
+                ? active_chain[source.durable_predecessor.height]
                 : nullptr};
         const auto receipt_state{target == nullptr
             ? std::optional<pq::BTCCReceiptState>{}
@@ -7537,92 +7487,6 @@ bool CChainLocksHandler::IsCurrentSigningSource(
                source.roster_source_generation);
 }
 
-bool CChainLocksHandler::IsCurrentSigningStatement(
-    const pq::ChainLockStatement& statement) const
-{
-    if (!m_share_admission_gate.IsOpen() || !m_config || !m_store ||
-        !statement.IsStructurallyValid()) {
-        return false;
-    }
-
-    {
-        LOCK(cs_main);
-        if (IsPaymentAuditPresealActive()) return false;
-    }
-
-    const auto best{m_store->GetBestRecord()};
-    const pq::ChainLockPredecessor durable_predecessor{
-        best ? pq::ChainLockPredecessor{
-                   best->metadata.statement.height,
-                   best->metadata.statement.block_hash,
-                   best->metadata.statement.accepted_btcc_cursor}
-             : pq::ChainLockPredecessor{
-                   m_config->anchor.height, m_config->anchor.block_hash,
-                   m_config->anchor.btcc_cursor}};
-    LOCK(cs_main);
-    if (m_chainman.IsSnapshotActive() &&
-        !m_chainman.IsSnapshotValidated()) {
-        return false;
-    }
-    const CBlockIndex* tip{m_chainman.ActiveTip()};
-    const auto window{tip == nullptr
-        ? std::optional<pq::ChainLockSigningWindow>{}
-        : pq::CurrentChainLockSigningWindow(
-              m_config->chainlock_schedule,
-              durable_predecessor.height, tip->nHeight)};
-    if (tip == nullptr || !window ||
-        window->target_height != statement.height ||
-        window->declared_predecessor_height !=
-            statement.previous_chainlock_height) {
-        return false;
-    }
-    const CBlockIndex* target{tip->GetAncestor(statement.height)};
-    const CBlockIndex* declared_predecessor{
-        target == nullptr
-            ? nullptr
-            : target->GetAncestor(statement.previous_chainlock_height)};
-    if (target == nullptr || target->GetBlockHash() != statement.block_hash ||
-        declared_predecessor == nullptr ||
-        declared_predecessor->GetBlockHash() !=
-            statement.previous_chainlock_hash ||
-        !(target->nStatus & BLOCK_HAVE_DATA) ||
-        !HasFullChainLockTargetValidation(
-            *target, durable_predecessor.height)) {
-        return false;
-    }
-    if (durable_predecessor.height >= 0) {
-        const CBlockIndex* predecessor_index{
-            target->GetAncestor(durable_predecessor.height)};
-        if (predecessor_index == nullptr ||
-            predecessor_index->GetBlockHash() !=
-                durable_predecessor.block_hash) {
-            return false;
-        }
-    } else if (!durable_predecessor.block_hash.IsNull()) {
-        return false;
-    }
-
-    if (!AreBTCCReceiptsReadyForSigning(
-            *target, durable_predecessor.height)) {
-        return false;
-    }
-    const auto selected{SelectCurrentChainLockBTCC(
-        m_genesis_hash, *m_config, *target,
-        best ? &best->metadata : nullptr)};
-    const auto receipt_state{IndexedBTCCReceiptState(*target)};
-    const auto payment_audit_state{
-        IndexedPaymentAuditReceiptState(*target)};
-    if (!selected || !receipt_state || !payment_audit_state ||
-        *receipt_state != statement.btcc_receipt_state ||
-        *payment_audit_state != statement.payment_audit_receipt_state ||
-        target->pqPaymentProbationStateHash !=
-            statement.payment_probation_state_hash) {
-        return false;
-    }
-    return MatchesCurrentChainLockBTCCSelection(
-        *selected, statement, durable_predecessor.btcc_cursor);
-}
-
 bool CChainLocksHandler::CheckBTCHeaderSigningPolicy(
     const pq::ChainLockStatement& statement)
 {
@@ -7643,23 +7507,22 @@ bool CChainLocksHandler::CheckBTCHeaderSigningPolicy(
     // sentry's independent Bitcoin view.
     {
         LOCK(cs_main);
-        const CBlockIndex* target{
-            m_chainman.m_blockman.LookupBlockIndex(statement.block_hash)};
+        const CChain& active_chain{m_chainman.ActiveChain()};
         const CBlockIndex* tip{m_chainman.ActiveTip()};
-        const CBlockIndex* active_target{
-            target != nullptr && tip != nullptr &&
-                    tip->nHeight >= target->nHeight
-                ? tip->GetAncestor(target->nHeight)
+        const CBlockIndex* target{
+            tip != nullptr && tip->nHeight >= statement.height
+                ? active_chain[statement.height]
                 : nullptr};
         const auto selected{
-            target == active_target
+            target != nullptr &&
+                    target->GetBlockHash() == statement.block_hash
                 ? pq::SelectBTCCForChainLock(
                       m_config->btcc_schedule, *target,
                       statement.previous_btcc_cursor)
                 : std::nullopt};
         const CBlockIndex* source{
             selected && selected->advance == pq::BTCCAdvance::ADVANCE
-                ? target->GetAncestor(selected->cursor.sys_height)
+                ? active_chain[selected->cursor.sys_height]
                 : nullptr};
         if (!selected || selected->cursor != statement.accepted_btcc_cursor ||
             selected->advance != statement.btcc_advance || source == nullptr ||
@@ -7725,10 +7588,10 @@ bool CChainLocksHandler::CheckBTCHeaderSigningPolicy(
         return false;
     }
 
-    // The external calls did not hold cs_main. Recheck the full Syscoin
-    // statement after them so a concurrent reorg cannot authorize a stale
-    // BTCPREV vote.
-    if (!IsCurrentSigningStatement(statement)) return false;
+    // This result is Bitcoin policy only. External calls hold no Syscoin
+    // authority; the caller must capture the exact published collector and
+    // recheck its source and both local pre-seals before any signer-journal
+    // state is consumed.
     {
         LOCK(m_btc_header_policy_mutex);
         m_btc_header_policy_last_denied.reset();
@@ -7867,15 +7730,7 @@ bool CChainLocksHandler::RefreshCurrentSigningContexts(
     }
     const auto is_current = [this](
         const CurrentSigningContextsPtr& contexts) {
-        if (!contexts || !IsCurrentSigningSource(contexts->source)) {
-            return false;
-        }
-        for (std::size_t i{0}; i < contexts->count; ++i) {
-            if (!IsCurrentSigningStatement(contexts->statements[i])) {
-                return false;
-            }
-        }
-        return true;
+        return contexts && IsCurrentSigningSource(contexts->source);
     };
 
     auto cached{GetPublishedCurrentSigningContexts(admission_generation)};
@@ -9305,6 +9160,7 @@ CChainLocksHandler::CollectChainLockShare(
             return outcome;
         }
         collector_generation = m_collector_generation;
+        outcome.collector_generation = collector_generation;
     }
 
     const auto retire_if_exact = [&]() {
@@ -9314,8 +9170,20 @@ CChainLocksHandler::CollectChainLockShare(
             ResetCollectors();
         }
     };
-    if (!IsCurrentSigningSource(signing_contexts->source) ||
-        !IsCurrentSigningStatement(statement)) {
+    const auto has_exact_collector = [&]() {
+        LOCK(m_collector_mutex);
+        return m_collector_generation == collector_generation &&
+               m_current_signing_contexts == signing_contexts &&
+               variant_index < signing_contexts->count &&
+               m_collectors[variant_index] != nullptr &&
+               m_collectors[variant_index]->GetStatement() == statement;
+    };
+    const auto is_current = [&]() {
+        return IsShareAdmissionGenerationCurrent(admission_generation) &&
+               IsCurrentSigningSource(signing_contexts->source) &&
+               has_exact_collector();
+    };
+    if (!is_current()) {
         retire_if_exact();
         outcome.stale = true;
         return outcome;
@@ -9343,12 +9211,6 @@ CChainLocksHandler::CollectChainLockShare(
                 : pq::ShareCollectionResult::REJECTED;
         }
     }
-    const auto is_current = [&]() {
-        return IsShareAdmissionGenerationCurrent(admission_generation) &&
-               IsCurrentSigningSource(signing_contexts->source) &&
-               IsCurrentSigningStatement(statement);
-    };
-
     if (!reservation) {
         if (outcome.result == pq::ShareCollectionResult::DUPLICATE) {
             return outcome;
@@ -9485,8 +9347,26 @@ void CChainLocksHandler::ProcessChainLockShare(CNode* from,
         }
         return;
     }
+    const auto collection_is_current = [&]() {
+        if (!IsShareAdmissionGenerationCurrent(admission_generation) ||
+            !IsCurrentSigningSource(contexts->source)) {
+            return false;
+        }
+        LOCK(m_collector_mutex);
+        return m_collector_generation ==
+                   collection.collector_generation &&
+               m_current_signing_contexts == contexts &&
+               current->variant_index < contexts->count &&
+               m_collectors[current->variant_index] != nullptr &&
+               m_collectors[current->variant_index]->GetStatement() ==
+                   share.GetStatement();
+    };
+    // Verification runs outside the collector lock. Bind both subsequent
+    // side effects to the exact capability generation that accepted it.
+    if (!collection_is_current()) return;
     MaybeCapturePaymentAuditResponse(
         share, current->rosters, admission_generation);
+    if (!collection_is_current()) return;
     RelayChainLockShare(share, contexts, current->variant_index,
                         admission_generation, node_id);
 
@@ -11574,10 +11454,13 @@ void CChainLocksHandler::RelayChainLockShare(
     uint64_t admission_generation,
     NodeId except_peer)
 {
+    if (!signing_contexts ||
+        !IsCurrentSigningSource(signing_contexts->source)) {
+        return;
+    }
     LOCK(m_share_lifecycle_mutex);
     if (!IsShareAdmissionGenerationCurrent(admission_generation)) return;
-    if (!signing_contexts ||
-        variant_index >= signing_contexts->count ||
+    if (variant_index >= signing_contexts->count ||
         share.GetStatement() !=
             signing_contexts->statements[variant_index]) {
         return;
@@ -11731,17 +11614,17 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
         return !IsBTCCPresealActive() &&
                !IsPaymentAuditPresealActive();
     };
+    const auto exact_signing_capability_is_current = [&]() {
+        return IsShareAdmissionGenerationCurrent(admission_generation) &&
+               has_exact_collector() &&
+               local_preseals_clear() &&
+               IsCurrentSigningSource(contexts->source);
+    };
 
     // Bitcoin policy checks deliberately run without cs_main and can span
     // several bounded RPC calls. A concurrent Syscoin reorg invalidates both
     // approval and fallback; never let either path reserve a stale key slot.
-    if (!IsShareAdmissionGenerationCurrent(admission_generation) ||
-        !has_exact_collector() ||
-        !local_preseals_clear() ||
-        !IsCurrentSigningSource(contexts->source) ||
-        !IsCurrentSigningStatement(statement)) {
-        return;
-    }
+    if (!exact_signing_capability_is_current()) return;
     if (!ConsumeStartupChainLockSlots(
             *signing_context, local_pro_tx_hash)) {
         return;
@@ -11782,6 +11665,7 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
                 !member.child_root) {
                 continue;
             }
+            if (!exact_signing_capability_is_current()) return;
             auto signing_material{GetActiveMasternodeChildSigningMaterial(
                 m_genesis_hash, local_pro_tx_hash, *member.child_root)};
             if (!signing_material) {
@@ -11791,9 +11675,9 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
                          __func__, roster.descriptor.epoch);
                 continue;
             }
-            // Recheck for every roster slot: child signing itself is expensive,
-            // so the active branch can change between two local signatures.
-            if (!IsCurrentSigningStatement(statement)) return;
+            // Material derivation can span a capability transition. Recheck
+            // before consulting or consuming durable signer-journal state.
+            if (!exact_signing_capability_is_current()) return;
             const auto expected_branch_lock{m_signer_journal->GetBranchLock(
                 m_genesis_hash, local_pro_tx_hash)};
             if (!m_signer_journal->IsHealthy()) return;
@@ -11805,14 +11689,16 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
                 }
                 if (candidate_branch_lock.height > expected_branch_lock->height) {
                     LOCK(cs_main);
+                    const CChain& active_chain{m_chainman.ActiveChain()};
                     const CBlockIndex* target{
-                        m_chainman.m_blockman.LookupBlockIndex(
-                            candidate_branch_lock.block_hash)};
+                        active_chain[candidate_branch_lock.height]};
                     const CBlockIndex* locked_ancestor{
-                        target == nullptr
+                        target == nullptr || expected_branch_lock->height < 0
                             ? nullptr
-                            : target->GetAncestor(expected_branch_lock->height)};
+                            : active_chain[expected_branch_lock->height]};
                     if (target == nullptr ||
+                        target->GetBlockHash() !=
+                            candidate_branch_lock.block_hash ||
                         target->nHeight != candidate_branch_lock.height ||
                         locked_ancestor == nullptr ||
                         locked_ancestor->GetBlockHash() !=
@@ -11826,12 +11712,7 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
             }
             pq::ChainLockSigningError signing_error{
                 pq::ChainLockSigningError::NONE};
-            if (!IsShareAdmissionGenerationCurrent(admission_generation) ||
-                !has_exact_collector() ||
-                !local_preseals_clear() ||
-                !IsCurrentSigningSource(contexts->source)) {
-                return;
-            }
+            if (!exact_signing_capability_is_current()) return;
             auto signed_share{signer.Sign(
                 *signing_context,
                 static_cast<uint8_t>(slot),
@@ -11856,11 +11737,7 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
 
             // The expensive signing operation may span a reorg. Burned slots
             // are never refunded, but stale signatures are never announced.
-            if (!local_preseals_clear() ||
-                !IsCurrentSigningSource(contexts->source) ||
-                !IsCurrentSigningStatement(statement)) {
-                return;
-            }
+            if (!exact_signing_capability_is_current()) return;
 
             auto collection{CollectChainLockShare(
                 *signed_share.share, contexts,
@@ -11875,14 +11752,7 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
                 // our own exact duplicate; remote duplicates never relay.
                 if (ShouldRetryLocalChainLockShareRelay(
                         signed_share.replayed, collection.result)) {
-                    if (!IsShareAdmissionGenerationCurrent(
-                            admission_generation) ||
-                        !has_exact_collector() ||
-                        !local_preseals_clear() ||
-                        !IsCurrentSigningSource(contexts->source) ||
-                        !IsCurrentSigningStatement(statement)) {
-                        return;
-                    }
+                    if (!exact_signing_capability_is_current()) return;
                     RelayChainLockShare(
                         *signed_share.share, contexts,
                         current->variant_index,
@@ -11893,17 +11763,11 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
             // Collection verifies outside the collector lock. Authorize the
             // local announcement at the exact still-published capability and
             // preseal state, rather than relying on the pre-collection fence.
-            if (!IsShareAdmissionGenerationCurrent(
-                    admission_generation) ||
-                !has_exact_collector() ||
-                !local_preseals_clear() ||
-                !IsCurrentSigningSource(contexts->source) ||
-                !IsCurrentSigningStatement(statement)) {
-                return;
-            }
+            if (!exact_signing_capability_is_current()) return;
             MaybeCapturePaymentAuditResponse(
                 *signed_share.share, signing_context->RostersPtr(),
                 admission_generation);
+            if (!exact_signing_capability_is_current()) return;
             RelayChainLockShare(
                 *signed_share.share, contexts,
                 current->variant_index, admission_generation);

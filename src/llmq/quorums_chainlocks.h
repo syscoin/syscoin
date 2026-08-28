@@ -1048,6 +1048,7 @@ private:
             pq::ShareCollectionResult::REJECTED};
         pq::ShareCollectionError error{pq::ShareCollectionError::NONE};
         std::optional<LocalChainLockFinalization> finalized;
+        uint64_t collector_generation{0};
         bool stale{false};
     };
     [[nodiscard]] bool ProcessCollectedChainLock(
@@ -1376,10 +1377,6 @@ private:
         const CurrentSigningSource& source) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_lookup_mutex,
                                  !m_btcc_preseal_mutex);
-    [[nodiscard]] bool IsCurrentSigningStatement(
-        const pq::ChainLockStatement& statement) const
-        EXCLUSIVE_LOCKS_REQUIRED(!m_needed_btcc_certificate_mutex,
-                                 !m_btcc_preseal_mutex);
     [[nodiscard]] bool CheckBTCHeaderSigningPolicy(
         const pq::ChainLockStatement& statement)
         EXCLUSIVE_LOCKS_REQUIRED(!m_btc_header_policy_mutex,
@@ -1389,11 +1386,6 @@ private:
         const pq::PaymentAuditStatement& statement)
         EXCLUSIVE_LOCKS_REQUIRED(!m_btc_header_policy_mutex,
                                  !m_payment_audit_mutex);
-    [[nodiscard]] bool AreBTCCReceiptsReadyForSigning(
-        const CBlockIndex& target,
-        int32_t predecessor_height) const
-        EXCLUSIVE_LOCKS_REQUIRED(cs_main,
-                                 !m_needed_btcc_certificate_mutex);
     void RequestNeededBTCCCertificate()
         EXCLUSIVE_LOCKS_REQUIRED(!m_pending_btcc_receipt_mutex,
                                  !m_needed_btcc_certificate_mutex);
@@ -1474,6 +1466,7 @@ private:
                              NodeId except_peer = -1)
         EXCLUSIVE_LOCKS_REQUIRED(!m_share_lifecycle_mutex,
                                  !m_collector_mutex,
+                                 !m_lookup_mutex,
                                  !m_btcc_preseal_mutex);
     void ResetCollectors() EXCLUSIVE_LOCKS_REQUIRED(m_collector_mutex);
     enum class PersistedChainLockImport : uint8_t {
