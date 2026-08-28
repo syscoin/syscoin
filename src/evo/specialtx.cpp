@@ -36,8 +36,9 @@ bool CheckSpecialTx(node::BlockManager &blockman, const CTransaction& tx, const 
                                    check_sigs, validation_context);
         case SYSCOIN_TX_VERSION_PQ_GLOBAL_KEY: {
             if (!deterministicMNManager) {
-                return FormatSyscoinErrorMessage(
-                    state, "bad-pq-registry-unavailable", fJustCheck);
+                // SYSCOIN: Missing node-local auxiliary state is not a
+                // transaction consensus failure.
+                return state.Error("failed-pq-registry-unavailable");
             }
             // A false check_sigs value is an optimization hint, not consensus
             // authority. Only named deferred-validation paths may skip here.
@@ -84,6 +85,11 @@ bool ProcessSpecialTxsInBlock(ChainstateManager &chainman, const CBlock& block, 
             if (!CheckSpecialTx(chainman.m_blockman, *ptr_tx, pindex->pprev,
                                 txstate, view, false, check_sigs,
                                 tx_validation_context)) {
+                // SYSCOIN: Preserve local auxiliary-state failures so a
+                // valid block is never cached as consensus-invalid.
+                if (txstate.IsError()) {
+                    return state.Error(txstate.GetRejectReason());
+                }
                 return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, txstate.GetRejectReason());
             }
         }

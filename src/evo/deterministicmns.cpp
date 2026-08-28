@@ -3304,18 +3304,30 @@ bool CDeterministicMNManager::CheckPQTransaction(
                                          fJustCheck);
     }
 
+    llmq::pq::PQRegistryConfig config;
+    const auto deployment{llmq::pq::GetPQRegistryConfig(
+        Params().GetConsensus(), config)};
+    if (deployment ==
+        llmq::pq::PQRegistryDeploymentResult::DISABLED) {
+        return FormatSyscoinErrorMessage(
+            state, "pq-registry-disabled", fJustCheck);
+    }
+    if (deployment !=
+        llmq::pq::PQRegistryDeploymentResult::VALID) {
+        return state.Error("failed-pq-registry-configuration");
+    }
+
     std::string registry_error;
     auto* registry = GetOrCreatePQRegistry(registry_error);
     if (registry == nullptr) {
-        return FormatSyscoinErrorMessage(state, registry_error, fJustCheck);
+        return state.Error(registry_error);
     }
 
     CDeterministicMNList parent_list;
     try {
         parent_list = GetListForBlockInternal(pindexPrev);
     } catch (const std::exception&) {
-        return FormatSyscoinErrorMessage(state, "bad-pq-missing-dmn-parent",
-                                         fJustCheck);
+        return state.Error("failed-pq-missing-dmn-parent");
     }
     const auto callbacks = MakePQRegistryCallbacks(
         parent_list, parent_list, Params().GetConsensus().hashGenesisBlock);
@@ -3323,6 +3335,12 @@ bool CDeterministicMNManager::CheckPQTransaction(
     if (!registry->ValidateTransaction(tx, pindexPrev->GetBlockHash(),
                                        pindexPrev->nHeight + 1, callbacks,
                                        check_sigs, error)) {
+        if (llmq::pq::IsPQRegistryLocalFailure(error.result)) {
+            return state.Error(strprintf(
+                "failed-pq-%s",
+                std::string{llmq::pq::PQRegistryResultString(
+                    error.result)}));
+        }
         return FormatSyscoinErrorMessage(
             state,
             strprintf("bad-pq-%s",

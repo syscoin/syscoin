@@ -436,6 +436,64 @@ BOOST_AUTO_TEST_CASE(unavailable_and_corrupt_negative_heights_are_null)
     BOOST_CHECK(corrupt.IsNull());
 }
 
+BOOST_FIXTURE_TEST_CASE(
+    special_tx_local_error_is_not_cached_as_consensus_invalid,
+    TestingSetup)
+{
+    LOCK(::cs_main);
+    BOOST_REQUIRE(deterministicMNManager);
+    CBlockIndex* parent{m_node.chainman->ActiveTip()};
+    BOOST_REQUIRE(parent);
+
+    CMutableTransaction pq_transaction;
+    pq_transaction.nVersion = llmq::pq::PQ_GLOBAL_KEY_TX_VERSION;
+    CBlock block{MakeProviderMutationBlock(
+        {MakeTransactionRef(std::move(pq_transaction))})};
+    block.hashPrevBlock = parent->GetBlockHash();
+    block.nNonce = 90'001;
+    const uint256 block_hash{block.GetHash()};
+    CBlockIndex block_index;
+    block_index.nHeight = parent->nHeight + 1;
+    block_index.pprev = parent;
+    block_index.phashBlock = &block_hash;
+
+    auto saved_manager{std::move(deterministicMNManager)};
+    BlockValidationState local_state;
+    CDeterministicMNListNEVMAddressDiff local_diff;
+    const bool local_result{ProcessSpecialTxsInBlock(
+        *m_node.chainman, block, &block_index, local_state, local_diff,
+        m_node.chainman->ActiveChainstate().CoinsTip(),
+        /*fJustCheck=*/true, /*check_sigs=*/true, /*ibd=*/true,
+        SpecialTxValidationContext::NORMAL)};
+    deterministicMNManager = std::move(saved_manager);
+    BOOST_CHECK(!local_result);
+    BOOST_CHECK(local_state.IsError());
+    BOOST_CHECK(!local_state.IsInvalid());
+    BOOST_CHECK_EQUAL(local_state.GetRejectReason(),
+                      "failed-pq-registry-unavailable");
+
+    CMutableTransaction invalid_registration;
+    invalid_registration.nVersion = SYSCOIN_TX_VERSION_MN_REGISTER;
+    CBlock invalid_block{MakeProviderMutationBlock(
+        {MakeTransactionRef(std::move(invalid_registration))})};
+    invalid_block.hashPrevBlock = parent->GetBlockHash();
+    invalid_block.nNonce = 90'002;
+    const uint256 invalid_hash{invalid_block.GetHash()};
+    CBlockIndex invalid_index;
+    invalid_index.nHeight = parent->nHeight + 1;
+    invalid_index.pprev = parent;
+    invalid_index.phashBlock = &invalid_hash;
+    BlockValidationState invalid_state;
+    CDeterministicMNListNEVMAddressDiff invalid_diff;
+    BOOST_CHECK(!ProcessSpecialTxsInBlock(
+        *m_node.chainman, invalid_block, &invalid_index, invalid_state,
+        invalid_diff, m_node.chainman->ActiveChainstate().CoinsTip(),
+        /*fJustCheck=*/true, /*check_sigs=*/true, /*ibd=*/true,
+        SpecialTxValidationContext::NORMAL));
+    BOOST_CHECK(invalid_state.IsInvalid());
+    BOOST_CHECK(!invalid_state.IsError());
+}
+
 // SYSCOIN: Prove the genesis-active base survives bounded-window maintenance.
 BOOST_AUTO_TEST_CASE(dip3_at_genesis_persists_only_the_canonical_empty_base)
 {
