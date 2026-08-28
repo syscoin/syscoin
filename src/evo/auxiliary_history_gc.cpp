@@ -435,13 +435,13 @@ struct AuxiliaryHistoryGCJournal::Impl {
         for (iterator->SeekToFirst(); iterator->Valid(); iterator->Next()) {
             any = true;
             DiskKey key;
-            if (!iterator->GetKey(key)) {
+            if (!iterator->GetKeyExact(key)) {
                 throw std::runtime_error{
                     "corrupt auxiliary-history GC key"};
             }
             switch (key.type) {
             case DB_SCHEMA_KEY:
-                if (found_schema || !iterator->GetValue(schema)) {
+                if (found_schema || !iterator->GetValueExact(schema)) {
                     throw std::runtime_error{
                         "corrupt auxiliary-history GC schema"};
                 }
@@ -449,14 +449,15 @@ struct AuxiliaryHistoryGCJournal::Impl {
                 break;
             case DB_WATERMARK_KEY:
                 if (found_watermark ||
-                    !iterator->GetValue(disk_watermark)) {
+                    !iterator->GetValueExact(disk_watermark)) {
                     throw std::runtime_error{
                         "corrupt auxiliary-history GC watermark"};
                 }
                 found_watermark = true;
                 break;
             case DB_INTENT_KEY:
-                if (found_intent || !iterator->GetValue(disk_intent)) {
+                if (found_intent ||
+                    !iterator->GetValueExact(disk_intent)) {
                     throw std::runtime_error{
                         "corrupt auxiliary-history GC intent"};
                 }
