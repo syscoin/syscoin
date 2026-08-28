@@ -9,10 +9,14 @@
 #include <flatdatabase.h>
 
 #include <chain.h>
+#include <chainparams.h>
 #include <crypto/common.h>
+#include <crypto/slhdsa/slhdsa.h>
 #include <evo/deterministicmns.h>
+#include <evo/pq_registry.h>
 #include <pubkey.h>
 #include <streams.h>
+#include <test/util/setup_common.h>
 #include <version.h>
 
 #include <boost/test/unit_test.hpp>
@@ -25,6 +29,7 @@
 #include <limits>
 #include <memory>
 #include <set>
+#include <span>
 #include <vector>
 
 using namespace llmq::pq;
@@ -36,7 +41,8 @@ void BuildBranch(std::array<CBlockIndex, Size>& indices,
                  std::array<uint256, Size>& hashes,
                  CBlockIndex* parent,
                  int first_height,
-                 unsigned char hash_domain)
+                 unsigned char hash_domain,
+                 bool build_skip = true)
 {
     for (std::size_t i{0}; i < Size; ++i) {
         hashes[i].begin()[0] = hash_domain;
@@ -44,9 +50,135 @@ void BuildBranch(std::array<CBlockIndex, Size>& indices,
         indices[i].nHeight = first_height + static_cast<int>(i);
         indices[i].pprev = i == 0 ? parent : &indices[i - 1];
         indices[i].phashBlock = &hashes[i];
-        indices[i].BuildSkip();
+        if (build_skip) indices[i].BuildSkip();
     }
 }
+
+slhdsa::SecretKey DeterministicGlobalKey(uint8_t domain)
+{
+    slhdsa::KeyGenerationSeed seed{};
+    for (std::size_t i{0}; i < seed.size(); ++i) {
+        seed[i] = static_cast<uint8_t>(domain + i);
+    }
+    auto key{slhdsa::GenerateSecretKey(seed)};
+    BOOST_REQUIRE(key);
+    return std::move(*key);
+}
+
+GlobalKeyRecord GlobalKeyFor(const slhdsa::SecretKey& key,
+                             uint32_t key_version,
+                             uint32_t activated_height)
+{
+    GlobalKeyRecord record;
+    record.key_version = key_version;
+    record.activated_height = activated_height;
+    BOOST_REQUIRE(key.GetPublicKey(record.public_key));
+    record.child_key_commitment.generation = key_version;
+    record.child_key_commitment.first_epoch = 7;
+    record.child_key_commitment.tree_id.begin()[0] =
+        static_cast<uint8_t>(0x80 + key_version);
+    record.child_key_commitment.root.begin()[0] =
+        static_cast<uint8_t>(0x90 + key_version);
+    BOOST_REQUIRE(record.IsStructurallyValid());
+    return record;
+}
+
+GlobalSignature SignGovernance(const slhdsa::SecretKey& key,
+                               GlobalAuthPurpose purpose,
+                               const uint256& digest)
+{
+    GlobalSignature signature;
+    BOOST_REQUIRE(slhdsa::SignDeterministic(
+        key, std::span<const uint8_t>{digest.begin(), digest.size()},
+        GetGlobalAuthContext(purpose), signature));
+    return signature;
+}
+
+OperatorKeyState CurrentOperatorState(const uint256& pro_tx_hash,
+                                      const GlobalKeyRecord& key,
+                                      bool active,
+                                      uint32_t revoked_height = 0)
+{
+    auto state{OperatorKeyState::ForOperator(pro_tx_hash)};
+    state.has_global_key = 1;
+    state.global_key_active = active ? 1 : 0;
+    state.revoked_height = revoked_height;
+    state.global_key = key;
+    state.schedule_initialized = 1;
+    state.schedule.last_admissible_epoch = 7;
+    BOOST_REQUIRE(state.IsStructurallyValid());
+    return state;
+}
+
+PQRegistrySnapshot CurrentRegistrySnapshot(
+    const CBlockIndex& tip,
+    const OperatorKeyState& state,
+    std::vector<uint256> used_tree_ids)
+{
+    PQRegistrySnapshot snapshot;
+    snapshot.height = tip.nHeight;
+    snapshot.block_hash = tip.GetBlockHash();
+    snapshot.previous_block_hash = tip.pprev->GetBlockHash();
+    snapshot.operator_states = {state};
+    std::sort(used_tree_ids.begin(), used_tree_ids.end());
+    snapshot.used_tree_ids = std::move(used_tree_ids);
+    const auto root{snapshot.RecomputeConsensusStateRoot(
+        Params().GetConsensus().hashGenesisBlock)};
+    BOOST_REQUIRE(root);
+    snapshot.consensus_state_root = *root;
+    BOOST_REQUIRE(snapshot.IsStructurallyValid());
+    return snapshot;
+}
+
+CDeterministicMNList CurrentMNList(const CBlockIndex& tip,
+                                   const uint256& pro_tx_hash,
+                                   const COutPoint& collateral)
+{
+    CDeterministicMNList list{
+        tip.GetBlockHash(), tip.nHeight, /*total_registered_count=*/1};
+    auto member{std::make_shared<CDeterministicMN>(1)};
+    member->proTxHash = pro_tx_hash;
+    member->collateralOutpoint = collateral;
+    auto state{std::make_shared<CDeterministicMNState>()};
+    state->keyIDOwner.begin()[0] = 1;
+    member->pdmnState = std::move(state);
+    list.AddMN(member, /*fBumpTotalCount=*/false);
+    BOOST_REQUIRE(list.GetValidMNByCollateral(collateral));
+    return list;
+}
+
+class ScopedPQLegacyAnchor
+{
+private:
+    Consensus::Params& m_consensus;
+    const int m_height;
+    const uint256 m_block;
+    const uint256 m_mn_state;
+    const uint256 m_registry_state;
+
+public:
+    ScopedPQLegacyAnchor(int height, const uint256& block)
+        : m_consensus{
+              const_cast<Consensus::Params&>(Params().GetConsensus())},
+          m_height{m_consensus.nPQLegacyAnchorHeight},
+          m_block{m_consensus.hashPQLegacyAnchorBlock},
+          m_mn_state{m_consensus.hashPQLegacyMNState},
+          m_registry_state{m_consensus.hashPQLegacyPQRegistryState}
+    {
+        m_consensus.nPQLegacyAnchorHeight = height;
+        m_consensus.hashPQLegacyAnchorBlock = block;
+        m_consensus.hashPQLegacyMNState = uint256{1};
+        m_consensus.hashPQLegacyPQRegistryState = uint256{2};
+    }
+
+    ~ScopedPQLegacyAnchor()
+    {
+        m_consensus.nPQLegacyAnchorHeight = m_height;
+        m_consensus.hashPQLegacyAnchorBlock = m_block;
+        m_consensus.hashPQLegacyMNState = m_mn_state;
+        m_consensus.hashPQLegacyPQRegistryState = m_registry_state;
+    }
+};
 
 } // namespace
 
@@ -113,6 +245,89 @@ BOOST_AUTO_TEST_CASE(unavailable_dmn_context_fails_closed_without_height_access)
         branch, CDeterministicMNList{}, PQRegistrySnapshot{}, COutPoint{},
         encoded, decoded, error));
     BOOST_CHECK_EQUAL(error, "governance validation contexts do not match");
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    current_key_authorizes_older_height_until_rotation_or_revocation,
+    BasicTestingSetup)
+{
+    const int anchor_height{Params().GetConsensus().DIP0003Height};
+    std::array<CBlockIndex, 4> branch;
+    std::array<uint256, 4> hashes;
+    BuildBranch(branch, hashes, nullptr, anchor_height, 0x40,
+                /*build_skip=*/false);
+    ScopedPQLegacyAnchor anchor{anchor_height, hashes.front()};
+
+    const uint256 pro_tx_hash{uint256{10}};
+    const COutPoint collateral{uint256{11}, 1};
+    const uint256 payload_hash{uint256{12}};
+    const auto mn_list{
+        CurrentMNList(branch.back(), pro_tx_hash, collateral)};
+
+    auto signing_secret{DeterministicGlobalKey(0x20)};
+    const auto signing_key{GlobalKeyFor(
+        signing_secret, /*key_version=*/1,
+        static_cast<uint32_t>(anchor_height))};
+    GovernanceAuthorization authorization;
+    authorization.signed_height = branch[1].nHeight;
+    authorization.signed_block_hash = branch[1].GetBlockHash();
+    authorization.pro_tx_hash = pro_tx_hash;
+    authorization.global_key_version = signing_key.key_version;
+    const auto digest{GetGovernanceAuthorizationHash(
+        Params().GetConsensus().hashGenesisBlock, signing_key,
+        authorization, GovernanceAuthPurpose::TRIGGER, payload_hash)};
+    BOOST_REQUIRE(digest);
+    authorization.signature = SignGovernance(
+        signing_secret, GlobalAuthPurpose::GOVERNANCE_TRIGGER, *digest);
+    std::vector<unsigned char> encoded;
+    BOOST_REQUIRE(EncodeGovernanceAuthorization(authorization, encoded));
+
+    const auto current_state{
+        CurrentOperatorState(pro_tx_hash, signing_key, /*active=*/true)};
+    const auto current_snapshot{CurrentRegistrySnapshot(
+        branch.back(), current_state,
+        {signing_key.child_key_commitment.tree_id})};
+    std::string error;
+    BOOST_CHECK(VerifyGovernanceAuthorizationForBranch(
+        branch.back(), mn_list, current_snapshot, collateral,
+        GovernanceAuthPurpose::TRIGGER, payload_hash, encoded, error));
+    BOOST_CHECK(error.empty());
+
+    auto replacement_secret{DeterministicGlobalKey(0x60)};
+    const auto replacement_key{GlobalKeyFor(
+        replacement_secret, /*key_version=*/2,
+        static_cast<uint32_t>(branch[2].nHeight))};
+    const auto rotated_snapshot{CurrentRegistrySnapshot(
+        branch.back(),
+        CurrentOperatorState(pro_tx_hash, replacement_key, /*active=*/true),
+        {signing_key.child_key_commitment.tree_id,
+         replacement_key.child_key_commitment.tree_id})};
+    BOOST_CHECK(!VerifyGovernanceAuthorizationForBranch(
+        branch.back(), mn_list, rotated_snapshot, collateral,
+        GovernanceAuthPurpose::TRIGGER, payload_hash, encoded, error));
+    BOOST_CHECK_EQUAL(
+        error, "governance signer key is revoked, rotated, or replaced");
+
+    const auto revoked_snapshot{CurrentRegistrySnapshot(
+        branch.back(),
+        CurrentOperatorState(
+            pro_tx_hash, signing_key, /*active=*/false,
+            static_cast<uint32_t>(branch[2].nHeight)),
+        {signing_key.child_key_commitment.tree_id})};
+    BOOST_CHECK(!VerifyGovernanceAuthorizationForBranch(
+        branch.back(), mn_list, revoked_snapshot, collateral,
+        GovernanceAuthPurpose::TRIGGER, payload_hash, encoded, error));
+    BOOST_CHECK_EQUAL(
+        error, "governance signer key is revoked, rotated, or replaced");
+
+    auto wrong_version{authorization};
+    ++wrong_version.global_key_version;
+    BOOST_REQUIRE(EncodeGovernanceAuthorization(wrong_version, encoded));
+    BOOST_CHECK(!VerifyGovernanceAuthorizationForBranch(
+        branch.back(), mn_list, current_snapshot, collateral,
+        GovernanceAuthPurpose::TRIGGER, payload_hash, encoded, error));
+    BOOST_CHECK_EQUAL(
+        error, "governance signer key is revoked, rotated, or replaced");
 }
 
 BOOST_AUTO_TEST_CASE(governance_signature_vector_is_bounded_before_relay)

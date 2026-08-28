@@ -336,36 +336,36 @@ BOOST_AUTO_TEST_CASE(governance_envelope_is_fixed_domain_separated_and_current_k
     const uint256 genesis{NonNullHash(40)};
     const uint256 pro_tx_hash{NonNullHash(41)};
     const uint256 payload_hash{NonNullHash(42)};
-    auto historical_secret{DeterministicKey()};
-    GlobalKeyRecord historical_key{CandidateFor(historical_secret, 3)};
-    historical_key.activated_height = 100;
+    auto current_secret{DeterministicKey()};
+    GlobalKeyRecord current_key{CandidateFor(current_secret, 3)};
+    current_key.activated_height = 100;
 
     GovernanceAuthorization authorization;
     authorization.signed_height = 120;
     authorization.signed_block_hash = NonNullHash(43);
     authorization.pro_tx_hash = pro_tx_hash;
-    authorization.global_key_version = historical_key.key_version;
+    authorization.global_key_version = current_key.key_version;
     BOOST_CHECK(authorization.IsHeaderStructurallyValid());
     BOOST_CHECK(!authorization.IsStructurallyValid());
 
     const auto digest{GetGovernanceAuthorizationHash(
-        genesis, historical_key, authorization,
+        genesis, current_key, authorization,
         GovernanceAuthPurpose::TRIGGER, payload_hash)};
     BOOST_REQUIRE(digest);
     authorization.signature = Sign(
-        historical_secret, GlobalAuthPurpose::GOVERNANCE_TRIGGER, *digest);
+        current_secret, GlobalAuthPurpose::GOVERNANCE_TRIGGER, *digest);
     BOOST_REQUIRE(authorization.IsStructurallyValid());
     BOOST_CHECK(VerifyGovernanceAuthorization(
-        genesis, historical_key, authorization,
+        genesis, current_key, authorization,
         GovernanceAuthPurpose::TRIGGER, payload_hash));
     BOOST_CHECK(!VerifyGovernanceAuthorization(
-        genesis, historical_key, authorization,
+        genesis, current_key, authorization,
         GovernanceAuthPurpose::TRIGGER_VOTE, payload_hash));
     BOOST_CHECK(!VerifyGovernanceAuthorization(
-        genesis, historical_key, authorization,
+        genesis, current_key, authorization,
         GovernanceAuthPurpose::PROPOSAL_VOTE, payload_hash));
     BOOST_CHECK(!VerifyGovernanceAuthorization(
-        genesis, historical_key, authorization,
+        genesis, current_key, authorization,
         GovernanceAuthPurpose::TRIGGER, NonNullHash(44)));
 
     std::vector<unsigned char> encoded;
@@ -388,38 +388,43 @@ BOOST_AUTO_TEST_CASE(governance_envelope_is_fixed_domain_separated_and_current_k
     BOOST_REQUIRE(replacement_secret);
     GlobalKeyRecord replacement_key{CandidateFor(*replacement_secret, 4)};
     replacement_key.activated_height = 130;
-    // The historical primitive remains useful for exact registry replay, but
-    // live off-chain governance must reject it as soon as the key rotates.
+    // Live off-chain governance must reject the authorization as soon as the
+    // branch-current key rotates.
     BOOST_CHECK(!VerifyGovernanceAuthorization(
         genesis, replacement_key, authorization,
         GovernanceAuthPurpose::TRIGGER, payload_hash));
     BOOST_CHECK(VerifyGovernanceAuthorization(
-        genesis, historical_key, authorization,
+        genesis, current_key, authorization,
         GovernanceAuthPurpose::TRIGGER, payload_hash));
 
     const auto proposal_digest{GetGovernanceAuthorizationHash(
-        genesis, historical_key, authorization,
+        genesis, current_key, authorization,
         GovernanceAuthPurpose::PROPOSAL_VOTE, payload_hash)};
     BOOST_REQUIRE(proposal_digest);
     authorization.signature = Sign(
-        historical_secret,
+        current_secret,
         GlobalAuthPurpose::GOVERNANCE_PROPOSAL_VOTE,
         *proposal_digest);
     BOOST_CHECK(VerifyGovernanceAuthorization(
-        genesis, historical_key, authorization,
+        genesis, current_key, authorization,
         GovernanceAuthPurpose::PROPOSAL_VOTE, payload_hash));
     BOOST_CHECK(!VerifyGovernanceAuthorization(
-        genesis, historical_key, authorization,
+        genesis, current_key, authorization,
         GovernanceAuthPurpose::TRIGGER_VOTE, payload_hash));
     BOOST_CHECK(GovernanceAuthorizationMatchesCurrentKey(
-        authorization, historical_key));
+        authorization, current_key));
     BOOST_CHECK(!GovernanceAuthorizationMatchesCurrentKey(
         authorization, replacement_key));
+    auto not_yet_active{current_key};
+    not_yet_active.activated_height =
+        static_cast<uint32_t>(authorization.signed_height + 1);
+    BOOST_CHECK(!GovernanceAuthorizationMatchesCurrentKey(
+        authorization, not_yet_active));
 
     auto changed_anchor{authorization};
     changed_anchor.signed_block_hash = NonNullHash(45);
     BOOST_CHECK(!VerifyGovernanceAuthorization(
-        genesis, historical_key, changed_anchor,
+        genesis, current_key, changed_anchor,
         GovernanceAuthPurpose::PROPOSAL_VOTE, payload_hash));
 }
 

@@ -199,16 +199,16 @@ bool DecodeGovernanceAuthorization(
 
 std::optional<uint256> GetGovernanceAuthorizationHash(
     const uint256& genesis_hash,
-    const GlobalKeyRecord& historical_key,
+    const GlobalKeyRecord& signing_key,
     const GovernanceAuthorization& authorization,
     GovernanceAuthPurpose purpose,
     const uint256& unsigned_payload_hash)
 {
     if (genesis_hash.IsNull() || unsigned_payload_hash.IsNull() ||
-        !IsStoredGlobalKeyRecordStructurallyValid(historical_key) ||
+        !IsStoredGlobalKeyRecordStructurallyValid(signing_key) ||
         !authorization.IsHeaderStructurallyValid() ||
-        authorization.global_key_version != historical_key.key_version ||
-        historical_key.activated_height >
+        authorization.global_key_version != signing_key.key_version ||
+        signing_key.activated_height >
             static_cast<uint32_t>(authorization.signed_height)) {
         return std::nullopt;
     }
@@ -232,20 +232,20 @@ std::optional<uint256> GetGovernanceAuthorizationHash(
                       authorization.signed_block_hash,
                       authorization.pro_tx_hash,
                       authorization.global_key_version,
-                      historical_key.version, historical_key.profile,
-                      historical_key.activated_height,
-                      PublicKeyHash(historical_key), unsigned_payload_hash);
+                      signing_key.version, signing_key.profile,
+                      signing_key.activated_height,
+                      PublicKeyHash(signing_key), unsigned_payload_hash);
 }
 
 bool VerifyGovernanceAuthorization(
     const uint256& genesis_hash,
-    const GlobalKeyRecord& historical_key,
+    const GlobalKeyRecord& signing_key,
     const GovernanceAuthorization& authorization,
     GovernanceAuthPurpose purpose,
     const uint256& unsigned_payload_hash)
 {
     const auto digest = GetGovernanceAuthorizationHash(
-        genesis_hash, historical_key, authorization, purpose,
+        genesis_hash, signing_key, authorization, purpose,
         unsigned_payload_hash);
     if (!digest || !authorization.IsStructurallyValid()) return false;
     GlobalAuthPurpose global_purpose;
@@ -262,7 +262,7 @@ bool VerifyGovernanceAuthorization(
     default:
         return false;
     }
-    return VerifyDigest(historical_key, global_purpose, *digest,
+    return VerifyDigest(signing_key, global_purpose, *digest,
                         authorization.signature);
 }
 
@@ -272,7 +272,9 @@ bool GovernanceAuthorizationMatchesCurrentKey(
 {
     return authorization.IsHeaderStructurallyValid() &&
            IsStoredGlobalKeyRecordStructurallyValid(current_key) &&
-           authorization.global_key_version == current_key.key_version;
+           authorization.global_key_version == current_key.key_version &&
+           current_key.activated_height <=
+               static_cast<uint32_t>(authorization.signed_height);
 }
 
 bool IsGlobalKeyCandidateStructurallyValid(const GlobalKeyRecord& candidate) noexcept

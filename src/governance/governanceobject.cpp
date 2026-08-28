@@ -538,10 +538,10 @@ bool CGovernanceObject::SignPQ(const CBlockIndex& signing_block,
     if (governance) AssertLockNotHeld(governance->cs);
     AssertLockNotHeld(cs);
 
-    llmq::pq::GlobalKeyRecord historical_key;
+    llmq::pq::GlobalKeyRecord current_key;
     std::string error;
-    if (!llmq::pq::GetGovernanceSigningKey(
-            signing_block, pro_tx_hash, global_key_version, historical_key,
+    if (!llmq::pq::GetCurrentGovernanceSigningKey(
+            signing_block, pro_tx_hash, global_key_version, current_key,
             error)) {
         LogPrint(BCLog::GOBJECT,
                  "CGovernanceObject::SignPQ -- %s\n", error);
@@ -554,7 +554,7 @@ bool CGovernanceObject::SignPQ(const CBlockIndex& signing_block,
     authorization.pro_tx_hash = pro_tx_hash;
     authorization.global_key_version = global_key_version;
     const auto digest{llmq::pq::GetGovernanceAuthorizationHash(
-        Params().GetConsensus().hashGenesisBlock, historical_key,
+        Params().GetConsensus().hashGenesisBlock, current_key,
         authorization, llmq::pq::GovernanceAuthPurpose::TRIGGER,
         GetSignatureHash())};
     if (!digest || !SignActiveMasternodeGovernanceTrigger(

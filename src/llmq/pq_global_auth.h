@@ -59,10 +59,10 @@ enum class GovernanceAuthPurpose : uint8_t {
 /**
  * Fixed authorization carried in the existing governance signature field.
  *
- * The signed block identifies the immutable PQ-registry snapshot containing
- * the exact historical global key. Branch validation also requires this key
- * version to remain current because an off-chain signature has no immutable
- * evidence that it was produced before a later rotation or revocation.
+ * The signed block binds the authorization to an exact branch position. The
+ * verifier resolves the exact active key at its validation tip and requires
+ * that key to have activated by the signed height. A later rotation or
+ * revocation therefore invalidates the off-chain authorization immediately.
  */
 struct GovernanceAuthorization {
     static constexpr std::size_t WIRE_SIZE{
@@ -100,18 +100,18 @@ static_assert(GovernanceAuthorization::WIRE_SIZE == 7'930);
 
 [[nodiscard]] std::optional<uint256> GetGovernanceAuthorizationHash(
     const uint256& genesis_hash,
-    const GlobalKeyRecord& historical_key,
+    const GlobalKeyRecord& signing_key,
     const GovernanceAuthorization& authorization,
     GovernanceAuthPurpose purpose,
     const uint256& unsigned_payload_hash);
 [[nodiscard]] bool VerifyGovernanceAuthorization(
     const uint256& genesis_hash,
-    const GlobalKeyRecord& historical_key,
+    const GlobalKeyRecord& signing_key,
     const GovernanceAuthorization& authorization,
     GovernanceAuthPurpose purpose,
     const uint256& unsigned_payload_hash);
 
-/** Off-chain authorization is valid only while its signing key is current. */
+/** Current-key match, including proof that it was active by signed_height. */
 [[nodiscard]] bool GovernanceAuthorizationMatchesCurrentKey(
     const GovernanceAuthorization& authorization,
     const GlobalKeyRecord& current_key) noexcept;

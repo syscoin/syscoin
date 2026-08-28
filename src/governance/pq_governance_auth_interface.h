@@ -23,9 +23,9 @@ class PQRegistryReadView;
     const CBlockIndex& validation_branch,
     const GovernanceAuthorization& authorization) noexcept;
 
-/** Resolve the active global key at one exact post-anchor branch tip. */
-[[nodiscard]] bool GetGovernanceSigningKey(
-    const CBlockIndex& signing_block,
+/** Resolve the current active global key at the post-anchor signing tip. */
+[[nodiscard]] bool GetCurrentGovernanceSigningKey(
+    const CBlockIndex& signing_tip,
     const uint256& pro_tx_hash,
     uint32_t global_key_version,
     GlobalKeyRecord& key,
@@ -59,13 +59,24 @@ class PQRegistryReadView;
     std::string& error);
 
 /**
- * Verify against the exact signed-block registry state on validation_branch.
- * Current deterministic-MN membership remains required so removed operators
- * lose governance authority exactly as they did before the PQ migration.
+ * Verify with the exact active key at validation_branch. The signed block
+ * remains an ancestry/freshness commitment, while rotation or revocation at
+ * the validation tip immediately invalidates an off-chain authorization.
  */
 [[nodiscard]] bool VerifyGovernanceAuthorizationForBranch(
     const CBlockIndex& validation_branch,
     const CDeterministicMNList& validation_mn_list,
+    const COutPoint& masternode_outpoint,
+    GovernanceAuthPurpose purpose,
+    const uint256& unsigned_payload_hash,
+    std::span<const unsigned char> encoded,
+    std::string& error);
+
+/** Snapshot overload for callers that already hold the authenticated tip. */
+[[nodiscard]] bool VerifyGovernanceAuthorizationForBranch(
+    const CBlockIndex& validation_branch,
+    const CDeterministicMNList& validation_mn_list,
+    const PQRegistrySnapshot& current_snapshot,
     const COutPoint& masternode_outpoint,
     GovernanceAuthPurpose purpose,
     const uint256& unsigned_payload_hash,

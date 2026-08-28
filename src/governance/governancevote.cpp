@@ -237,10 +237,10 @@ bool CGovernanceVote::SignPQ(const CBlockIndex& signing_block,
     AssertLockNotHeld(cs_main);
     AssertGovernanceLockNotHeld();
 
-    llmq::pq::GlobalKeyRecord historical_key;
+    llmq::pq::GlobalKeyRecord current_key;
     std::string error;
-    if (!llmq::pq::GetGovernanceSigningKey(
-            signing_block, pro_tx_hash, global_key_version, historical_key,
+    if (!llmq::pq::GetCurrentGovernanceSigningKey(
+            signing_block, pro_tx_hash, global_key_version, current_key,
             error)) {
         LogPrint(BCLog::GOBJECT, "CGovernanceVote::SignPQ -- %s\n", error);
         return false;
@@ -252,7 +252,7 @@ bool CGovernanceVote::SignPQ(const CBlockIndex& signing_block,
     authorization.pro_tx_hash = pro_tx_hash;
     authorization.global_key_version = global_key_version;
     const auto digest{llmq::pq::GetGovernanceAuthorizationHash(
-        Params().GetConsensus().hashGenesisBlock, historical_key,
+        Params().GetConsensus().hashGenesisBlock, current_key,
         authorization, purpose, GetSignatureHash())};
     const bool signed_authorization{digest &&
         (purpose == llmq::pq::GovernanceAuthPurpose::TRIGGER_VOTE

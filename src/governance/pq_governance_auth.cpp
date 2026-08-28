@@ -11,6 +11,8 @@
 #include <evo/pq_registry.h>
 #include <governance/governancecommon.h>
 
+#include <utility>
+
 static_assert(llmq::pq::GovernanceAuthorization::WIRE_SIZE <=
               MAX_GOVERNANCE_SIGNATURE_SIZE);
 
@@ -49,6 +51,7 @@ bool CheckGovernanceAuthorizationContextImpl(
     const COutPoint& masternode_outpoint,
     std::span<const unsigned char> encoded,
     GovernanceAuthorization& authorization,
+    GlobalKeyRecord* resolved_current_key,
     std::string& error)
 {
     if (encoded.size() != GovernanceAuthorization::WIRE_SIZE ||
@@ -92,13 +95,55 @@ bool CheckGovernanceAuthorizationContextImpl(
     }
     const OperatorKeyState* current_state{
         find_operator(authorization.pro_tx_hash)};
+    // Registry key versions are immutable and monotonic. The exact current
+    // record plus its activation bound proves authority without replaying the
+    // signed-height registry, while preserving immediate rotation/revocation.
     if (current_state == nullptr || !current_state->HasActiveGlobalKey() ||
         !GovernanceAuthorizationMatchesCurrentKey(
             authorization, current_state->global_key)) {
         error = "governance signer key is revoked, rotated, or replaced";
         return false;
     }
+    if (resolved_current_key != nullptr) {
+        *resolved_current_key = current_state->global_key;
+    }
 
+    error.clear();
+    return true;
+}
+
+template <typename FindOperator>
+bool VerifyGovernanceAuthorizationWithCurrentRegistry(
+    const CBlockIndex& validation_branch,
+    const CDeterministicMNList& validation_mn_list,
+    int32_t registry_height,
+    const uint256& registry_block_hash,
+    FindOperator&& find_operator,
+    const COutPoint& masternode_outpoint,
+    GovernanceAuthPurpose purpose,
+    const uint256& unsigned_payload_hash,
+    std::span<const unsigned char> encoded,
+    std::string& error)
+{
+    if (unsigned_payload_hash.IsNull()) {
+        error = "invalid governance unsigned payload hash";
+        return false;
+    }
+    GovernanceAuthorization authorization;
+    GlobalKeyRecord current_key;
+    if (!CheckGovernanceAuthorizationContextImpl(
+            validation_branch, validation_mn_list, registry_height,
+            registry_block_hash, std::forward<FindOperator>(find_operator),
+            masternode_outpoint, encoded, authorization, &current_key,
+            error)) {
+        return false;
+    }
+    if (!VerifyGovernanceAuthorization(
+            Params().GetConsensus().hashGenesisBlock, current_key,
+            authorization, purpose, unsigned_payload_hash)) {
+        error = "invalid governance SLH signature";
+        return false;
+    }
     error.clear();
     return true;
 }
@@ -119,14 +164,14 @@ bool IsGovernanceAuthorizationOnBranch(
            signing_block->GetBlockHash() == authorization.signed_block_hash;
 }
 
-bool GetGovernanceSigningKey(const CBlockIndex& signing_block,
-                             const uint256& pro_tx_hash,
-                             uint32_t global_key_version,
-                             GlobalKeyRecord& key,
-                             std::string& error)
+bool GetCurrentGovernanceSigningKey(const CBlockIndex& signing_tip,
+                                    const uint256& pro_tx_hash,
+                                    uint32_t global_key_version,
+                                    GlobalKeyRecord& key,
+                                    std::string& error)
 {
     if (pro_tx_hash.IsNull() || global_key_version == 0 ||
-        !CheckPostAnchorBranch(signing_block, error)) {
+        !CheckPostAnchorBranch(signing_tip, error)) {
         if (error.empty()) error = "invalid governance signer identity";
         return false;
     }
@@ -137,16 +182,17 @@ bool GetGovernanceSigningKey(const CBlockIndex& signing_block,
 
     PQRegistryReadView snapshot;
     if (!deterministicMNManager->GetPQRegistryReadView(
-            &signing_block, snapshot, error)) {
-        error = "unable to reconstruct governance signing registry: " + error;
+            &signing_tip, snapshot, error)) {
+        error = "unable to reconstruct current governance signing registry: " +
+                error;
         return false;
     }
     const OperatorKeyState* state{snapshot.FindOperator(pro_tx_hash)};
     if (state == nullptr || !state->HasActiveGlobalKey() ||
         state->global_key.key_version != global_key_version ||
         state->global_key.activated_height >
-            static_cast<uint32_t>(signing_block.nHeight)) {
-        error = "governance signer key is not active at the signed block";
+            static_cast<uint32_t>(signing_tip.nHeight)) {
+        error = "governance signer key is not current at the signing tip";
         return false;
     }
     key = state->global_key;
@@ -189,7 +235,8 @@ bool CheckGovernanceAuthorizationContext(
         [&](const uint256& pro_tx_hash) {
             return current_snapshot.FindOperator(pro_tx_hash);
         },
-        masternode_outpoint, encoded, authorization, error);
+        masternode_outpoint, encoded, authorization,
+        /*resolved_current_key=*/nullptr, error);
 }
 
 bool CheckGovernanceAuthorizationContext(
@@ -207,7 +254,8 @@ bool CheckGovernanceAuthorizationContext(
         [&](const uint256& pro_tx_hash) {
             return current_snapshot.FindOperator(pro_tx_hash);
         },
-        masternode_outpoint, encoded, authorization, error);
+        masternode_outpoint, encoded, authorization,
+        /*resolved_current_key=*/nullptr, error);
 }
 
 bool VerifyGovernanceAuthorizationForBranch(
@@ -219,37 +267,43 @@ bool VerifyGovernanceAuthorizationForBranch(
     std::span<const unsigned char> encoded,
     std::string& error)
 {
-    GovernanceAuthorization authorization;
-    if (unsigned_payload_hash.IsNull() ||
-        !CheckGovernanceAuthorizationContextForBranch(
-            validation_branch, validation_mn_list, masternode_outpoint,
-            encoded, authorization, error)) {
-        if (unsigned_payload_hash.IsNull()) {
-            error = "invalid governance unsigned payload hash";
-        }
+    if (unsigned_payload_hash.IsNull()) {
+        error = "invalid governance unsigned payload hash";
         return false;
     }
-    const CBlockIndex* signing_block{
-        validation_branch.GetAncestor(authorization.signed_height)};
-    if (signing_block == nullptr) {
-        error = "governance signing block disappeared";
+    PQRegistryReadView current_snapshot;
+    if (deterministicMNManager == nullptr ||
+        !deterministicMNManager->GetPQRegistryReadView(
+            &validation_branch, current_snapshot, error)) {
+        error = "unable to reconstruct current governance registry: " + error;
         return false;
     }
+    return VerifyGovernanceAuthorizationWithCurrentRegistry(
+        validation_branch, validation_mn_list, current_snapshot.Height(),
+        current_snapshot.BlockHash(),
+        [&](const uint256& pro_tx_hash) {
+            return current_snapshot.FindOperator(pro_tx_hash);
+        },
+        masternode_outpoint, purpose, unsigned_payload_hash, encoded, error);
+}
 
-    GlobalKeyRecord historical_key;
-    if (!GetGovernanceSigningKey(
-            *signing_block, authorization.pro_tx_hash,
-            authorization.global_key_version, historical_key, error)) {
-        return false;
-    }
-    if (!VerifyGovernanceAuthorization(
-            Params().GetConsensus().hashGenesisBlock, historical_key,
-            authorization, purpose, unsigned_payload_hash)) {
-        error = "invalid governance SLH signature";
-        return false;
-    }
-    error.clear();
-    return true;
+bool VerifyGovernanceAuthorizationForBranch(
+    const CBlockIndex& validation_branch,
+    const CDeterministicMNList& validation_mn_list,
+    const PQRegistrySnapshot& current_snapshot,
+    const COutPoint& masternode_outpoint,
+    GovernanceAuthPurpose purpose,
+    const uint256& unsigned_payload_hash,
+    std::span<const unsigned char> encoded,
+    std::string& error)
+{
+    return VerifyGovernanceAuthorizationWithCurrentRegistry(
+        validation_branch, validation_mn_list, current_snapshot.height,
+        current_snapshot.block_hash,
+        [&](const uint256& pro_tx_hash) {
+            return current_snapshot.FindOperator(pro_tx_hash);
+        },
+        masternode_outpoint, purpose, unsigned_payload_hash, encoded, error);
 }
 
 } // namespace llmq::pq
