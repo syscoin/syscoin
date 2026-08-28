@@ -454,6 +454,17 @@ BOOST_AUTO_TEST_CASE(PQOperatorUpdateConflicts)
             return PQMempoolTestAccess::FindPackageProviderTxConflict(
                 pool, package, replacement_list, replacement_view);
         };
+    // SYSCOIN: A single registry update cannot remove its own target DMN;
+    // reject it before admission or block-template assembly.
+    for (const auto* mutation : {&replacement_global,
+                                 &replacement_revoke}) {
+        CMutableTransaction self_spend{*mutation};
+        self_spend.vin[0].prevout = replaced_collateral;
+        conflict_index = find_replacement_conflict(
+            {MakeTransactionRef(self_spend)});
+        BOOST_REQUIRE(conflict_index);
+        BOOST_CHECK_EQUAL(*conflict_index, 0U);
+    }
     for (const auto* mutation : {&replacement_global,
                                  &replacement_revoke}) {
         conflict_index = find_replacement_conflict(

@@ -106,6 +106,15 @@ bool IsBranchBoundProviderTransaction(const CTransaction& tx) noexcept
            tx.nVersion == SYSCOIN_TX_VERSION_PQ_GLOBAL_KEY;
 }
 
+bool SpendsOutpoint(const CTransaction& tx,
+                    const COutPoint& outpoint) noexcept
+{
+    return std::any_of(tx.vin.begin(), tx.vin.end(),
+                       [&](const CTxIn& input) {
+                           return input.prevout == outpoint;
+                       });
+}
+
 } // namespace
 // SYSCOIN: end branch-bound PQ provider mempool helpers.
 
@@ -1478,7 +1487,8 @@ std::optional<size_t> CTxMemPool::FindPackageProviderTxConflict(
         if (pq_operator_update) {
             const auto dmn{mn_list.GetMN(*pq_operator_update)};
             if (dmn &&
-                (spent_inputs.count(dmn->collateralOutpoint) != 0 ||
+                (SpendsOutpoint(tx, dmn->collateralOutpoint) ||
+                 spent_inputs.count(dmn->collateralOutpoint) != 0 ||
                  mapNextTx.count(dmn->collateralOutpoint) != 0 ||
                  provider_collaterals.count(dmn->collateralOutpoint) != 0)) {
                 return index;
@@ -2184,7 +2194,8 @@ bool CTxMemPool::existsProviderTxConflict(
         if (pq_operator_collateral != nullptr) {
             *pq_operator_collateral = dmn->collateralOutpoint;
         }
-        if (mapNextTx.count(dmn->collateralOutpoint) != 0 ||
+        if (SpendsOutpoint(tx, dmn->collateralOutpoint) ||
+            mapNextTx.count(dmn->collateralOutpoint) != 0 ||
             mapProTxCollaterals.count(dmn->collateralOutpoint) != 0) {
             return true;
         }
