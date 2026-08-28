@@ -5783,13 +5783,14 @@ bool CDeterministicMNManager::DoMaintenance(
         std::optional<uint256> resume_after_key;
         if (retention_plan.finality_roster_floor) {
             LOCK(cs);
-            if (!m_snapshot_gc_scan_progress ||
-                m_snapshot_gc_scan_progress->finality_roster_floor !=
-                    *retention_plan.finality_roster_floor) {
-                // SYSCOIN: Advancing/replacing the height-retention authority
-                // can make keys behind the old cursor newly erasable.
+            if (!m_snapshot_gc_scan_progress) {
                 m_snapshot_gc_scan_progress = SnapshotGCScanProgress{
-                    *retention_plan.finality_roster_floor, std::nullopt};
+                    *retention_plan.finality_roster_floor,
+                    retention_plan.generation,
+                    snapshot_persistence_generation,
+                    tip_hash,
+                    recovery_hashes,
+                    std::nullopt};
             }
             resume_after_key =
                 m_snapshot_gc_scan_progress->resume_after_key;
@@ -5827,12 +5828,38 @@ bool CDeterministicMNManager::DoMaintenance(
             !retain_all_finality_snapshots &&
             retention_plan.finality_roster_floor) {
             if (!m_snapshot_gc_scan_progress) return false;
-            if (m_snapshot_gc_scan_progress->finality_roster_floor !=
-                *retention_plan.finality_roster_floor) {
-                return false;
-            }
             if (snapshot_gc_complete) {
-                m_snapshot_gc_scan_progress.reset();
+                const bool sweep_dirty{
+                    m_snapshot_gc_scan_progress->
+                            sweep_start_finality_roster_floor !=
+                        *retention_plan.finality_roster_floor ||
+                    m_snapshot_gc_scan_progress->
+                            sweep_start_retention_generation !=
+                        retention_plan.generation ||
+                    m_snapshot_gc_scan_progress->
+                            sweep_start_persistence_generation !=
+                        snapshot_persistence_generation ||
+                    m_snapshot_gc_scan_progress->sweep_start_tip !=
+                        tip_hash ||
+                    m_snapshot_gc_scan_progress->
+                            sweep_start_recovery_heads !=
+                        recovery_hashes};
+                if (sweep_dirty) {
+                    // SYSCOIN: Continue a moving sweep to EOF so frequent
+                    // ChainLocks cannot starve it, then cover keys inserted
+                    // or made stale behind the cursor before publishing
+                    // completion.
+                    m_snapshot_gc_scan_progress = SnapshotGCScanProgress{
+                        *retention_plan.finality_roster_floor,
+                        retention_plan.generation,
+                        snapshot_persistence_generation,
+                        tip_hash,
+                        recovery_hashes,
+                        std::nullopt};
+                    snapshot_gc_complete = false;
+                } else {
+                    m_snapshot_gc_scan_progress.reset();
+                }
             } else {
                 if (!snapshot_gc_next_resume_after_key) return false;
                 m_snapshot_gc_scan_progress->resume_after_key =

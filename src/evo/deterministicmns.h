@@ -797,7 +797,11 @@ private:
     // re-evaluated against the latest immutable retention plan.
     std::atomic<uint64_t> m_snapshot_persistence_generation{0};
     struct SnapshotGCScanProgress {
-        int32_t finality_roster_floor;
+        int32_t sweep_start_finality_roster_floor;
+        uint64_t sweep_start_retention_generation{0};
+        uint64_t sweep_start_persistence_generation{0};
+        uint256 sweep_start_tip;
+        std::vector<uint256> sweep_start_recovery_heads;
         std::optional<uint256> resume_after_key;
     };
     std::optional<SnapshotGCScanProgress> m_snapshot_gc_scan_progress

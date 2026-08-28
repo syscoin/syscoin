@@ -2478,7 +2478,7 @@ BOOST_AUTO_TEST_CASE(snapshot_compaction_progresses_across_moving_tips)
         /*bForceFlush=*/true, /*fSync=*/false, excessive_recovery));
 }
 
-BOOST_AUTO_TEST_CASE(snapshot_compaction_restarts_when_finality_floor_advances)
+BOOST_AUTO_TEST_CASE(snapshot_compaction_rechecks_dirty_finality_floor_sweep)
 {
     SelectParams(ChainType::MAIN);
     const int cache_limit{CDeterministicMNManager::LIST_CACHE_SIZE};
@@ -2534,11 +2534,26 @@ BOOST_AUTO_TEST_CASE(snapshot_compaction_restarts_when_finality_floor_advances)
     BOOST_CHECK(!manager.HasPersistentWindow());
 
     // Raising the floor makes every previously visited side snapshot
-    // deletable. The old cursor must be discarded so the next bounded pass
-    // reconsiders the already-scanned prefix immediately.
+    // deletable. A new low key also lands behind the existing cursor.
+    const uint256 inserted_low_hash{MakeOrderedSnapshotKey(0x01, 0)};
+    BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+        inserted_low_hash,
+        CDeterministicMNList{inserted_low_hash, side_height, 0},
+        /*fSync=*/true));
     BOOST_CHECK_EQUAL(
         manager.UpdateFinalitySnapshotRetentionFloor(side_height + 1),
         side_height + 1);
+
+    // Continue to EOF instead of restarting on a moving ChainLock floor. The
+    // changed sweep identity prevents this call from declaring completion.
+    BOOST_REQUIRE(manager.FlushCacheToDisk(/*bForceFlush=*/true));
+    BOOST_CHECK_EQUAL(
+        manager.m_evoDb->CountPersistedEntries(),
+        initial_count);
+    BOOST_CHECK(!manager.HasPersistentWindow());
+
+    // The mandatory fresh cycle now sees both the newly stale prefix and the
+    // insertion that sorted before the old cursor.
     BOOST_REQUIRE(manager.FlushCacheToDisk(/*bForceFlush=*/true));
     BOOST_CHECK_EQUAL(
         manager.m_evoDb->CountPersistedEntries(),
@@ -2546,6 +2561,7 @@ BOOST_AUTO_TEST_CASE(snapshot_compaction_restarts_when_finality_floor_advances)
                             CDeterministicMNManager::
                                 SNAPSHOT_GC_MAX_ERASE_ITEMS_PER_PASS));
     CDeterministicMNList snapshot;
+    BOOST_CHECK(!manager.m_evoDb->Read(inserted_low_hash, snapshot));
     BOOST_CHECK(!manager.m_evoDb->Read(side_hashes.front(), snapshot));
     BOOST_REQUIRE(manager.m_evoDb->Read(side_hashes.back(), snapshot));
 }
