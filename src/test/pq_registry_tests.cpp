@@ -80,6 +80,18 @@ public:
             PQ_REGISTRY_SNAPSHOT_CACHE_SIZE);
     }
 
+    static void DropCachedSnapshot(
+        PQRegistryManager& manager,
+        const uint256& block_hash)
+    {
+        LOCK(manager.m_mutex);
+        const auto cached{
+            manager.m_snapshot_cache_index.find(block_hash)};
+        if (cached == manager.m_snapshot_cache_index.end()) return;
+        manager.m_snapshot_cache.erase(cached->second);
+        manager.m_snapshot_cache_index.erase(cached);
+    }
+
     static bool ReadExactDiskSnapshot(
         PQRegistryManager& manager,
         const uint256& block_hash,
@@ -101,6 +113,15 @@ public:
         const std::array<uint256, 1> keys{block_hash};
         return manager.m_snapshot_db->EraseExactDiskKeysForGC(
             keys, /*fSync=*/true);
+    }
+
+    static bool EraseExactDiskSnapshots(
+        PQRegistryManager& manager,
+        std::span<const uint256> block_hashes)
+    {
+        LOCK(manager.m_mutex);
+        return manager.m_snapshot_db->EraseExactDiskKeysForGC(
+            block_hashes, /*fSync=*/true);
     }
 
     static bool AppendTrailingDiskByte(
@@ -2108,7 +2129,8 @@ BOOST_AUTO_TEST_CASE(reconstruction_rejects_broken_root_link)
     corrupt.previous_consensus_state_root = NonNullHash(104);
     BOOST_REQUIRE(manager.SnapshotDatabase().WriteThrough(
         child.GetHash(), corrupt, /*fSync=*/true));
-    BOOST_REQUIRE(manager.PruneSnapshot(child.GetHash()));
+    test::PQRegistryManagerTestAccess::DropCachedSnapshot(
+        manager, child.GetHash());
 
     PQRegistrySnapshot rejected;
     BOOST_CHECK(!manager.GetSnapshot(
@@ -2643,14 +2665,16 @@ BOOST_AUTO_TEST_CASE(mixed_batch_merge_is_canonical_across_permutations)
     check_disk_delta(descending);
     check_disk_delta(ascending);
 
-    BOOST_REQUIRE(manager.PruneSnapshot(descending.GetHash()));
+    test::PQRegistryManagerTestAccess::DropCachedSnapshot(
+        manager, descending.GetHash());
     PQRegistrySnapshot reconstructed_descending;
     BOOST_REQUIRE(manager.GetSnapshot(
         descending.GetHash(), registration.GetHash(), 1296,
         reconstructed_descending, error));
     BOOST_CHECK(reconstructed_descending == descending_snapshot);
 
-    BOOST_REQUIRE(manager.PruneSnapshot(ascending.GetHash()));
+    test::PQRegistryManagerTestAccess::DropCachedSnapshot(
+        manager, ascending.GetHash());
     PQRegistrySnapshot reconstructed_ascending;
     BOOST_REQUIRE(manager.GetSnapshot(
         ascending.GetHash(), registration.GetHash(), 1296,
@@ -2700,7 +2724,8 @@ BOOST_AUTO_TEST_CASE(mixed_batch_merge_is_canonical_across_permutations)
     BOOST_REQUIRE(missing_removal.IsStructurallyValid());
     BOOST_REQUIRE(manager.SnapshotDatabase().WriteThrough(
         descending.GetHash(), missing_removal, /*fSync=*/true));
-    BOOST_REQUIRE(manager.PruneSnapshot(descending.GetHash()));
+    test::PQRegistryManagerTestAccess::DropCachedSnapshot(
+        manager, descending.GetHash());
     PQRegistrySnapshot rejected;
     BOOST_CHECK(!manager.GetSnapshot(
         descending.GetHash(), registration.GetHash(), 1296, rejected,
@@ -2734,7 +2759,8 @@ BOOST_AUTO_TEST_CASE(mixed_batch_merge_is_canonical_across_permutations)
     BOOST_REQUIRE(no_op_update.IsStructurallyValid());
     BOOST_REQUIRE(manager.SnapshotDatabase().WriteThrough(
         ascending.GetHash(), no_op_update, /*fSync=*/true));
-    BOOST_REQUIRE(manager.PruneSnapshot(ascending.GetHash()));
+    test::PQRegistryManagerTestAccess::DropCachedSnapshot(
+        manager, ascending.GetHash());
     BOOST_CHECK(!manager.GetSnapshot(
         ascending.GetHash(), registration.GetHash(), 1296, rejected,
         error));
@@ -2986,7 +3012,8 @@ BOOST_AUTO_TEST_CASE(checkpoint_retains_and_authenticates_exact_block_delta)
     BOOST_REQUIRE_EQUAL(original.block_tree_ids.size(), 2U);
 
     test::PQRegistryManagerTestAccess::ResetReconstructionStats(manager);
-    BOOST_REQUIRE(manager.PruneSnapshot(checkpoint.GetHash()));
+    test::PQRegistryManagerTestAccess::DropCachedSnapshot(
+        manager, checkpoint.GetHash());
     PQRegistrySnapshot reconstructed;
     BOOST_REQUIRE(manager.GetSnapshot(
         checkpoint.GetHash(), cursor, checkpoint_height, reconstructed,
@@ -3001,7 +3028,8 @@ BOOST_AUTO_TEST_CASE(checkpoint_retains_and_authenticates_exact_block_delta)
         BOOST_REQUIRE(tampered.IsStructurallyValid());
         BOOST_REQUIRE(manager.SnapshotDatabase().WriteThrough(
             checkpoint.GetHash(), tampered, /*fSync=*/true));
-        BOOST_REQUIRE(manager.PruneSnapshot(checkpoint.GetHash()));
+        test::PQRegistryManagerTestAccess::DropCachedSnapshot(
+            manager, checkpoint.GetHash());
         PQRegistrySnapshot rejected;
         BOOST_CHECK(!manager.GetSnapshot(
             checkpoint.GetHash(), cursor, checkpoint_height, rejected,
@@ -3025,7 +3053,8 @@ BOOST_AUTO_TEST_CASE(checkpoint_retains_and_authenticates_exact_block_delta)
         missing_tree_delta.block_tree_ids.begin());
     reject_tamper(std::move(missing_tree_delta));
 
-    BOOST_REQUIRE(manager.PruneSnapshot(checkpoint.GetHash()));
+    test::PQRegistryManagerTestAccess::DropCachedSnapshot(
+        manager, checkpoint.GetHash());
     BOOST_REQUIRE(manager.GetSnapshot(
         checkpoint.GetHash(), cursor, checkpoint_height, reconstructed,
         error));
@@ -3784,6 +3813,433 @@ BOOST_AUTO_TEST_CASE(gc_effective_floor_protects_rooted_exact_keys)
         test::PQRegistryManagerTestAccess::Stats(manager)
             .gc_floor_revision,
         1U);
+}
+
+BOOST_AUTO_TEST_CASE(gc_erase_batch_advances_physical_scan_cursor)
+{
+    EmptyRootedGCHistory history{80'500};
+    auto& manager{*history.manager};
+    PQRegistryError error;
+    const auto context{
+        history.Context(history.initial_checkpoint_height)};
+    BOOST_REQUIRE(manager.FlushForGC(error));
+
+    evo::AuxiliaryHistoryGCComponent first;
+    evo::PQRegistryGCEraseManifest first_manifest;
+    BOOST_REQUIRE(manager.BuildGCEraseBatch(
+        context, std::nullopt, /*max_scanned_records=*/1,
+        /*max_candidates=*/1,
+        first, first_manifest, error));
+    const auto first_closure{
+        evo::DecodePQRegistryGCClosure(first.closure)};
+    BOOST_REQUIRE(first_closure);
+    BOOST_CHECK_EQUAL(first_closure->generation, 1U);
+    BOOST_CHECK_EQUAL(first_closure->scan_complete,
+                      evo::PQRegistryGCClosure::SCANNING);
+    BOOST_CHECK(!first_manifest.from_cursor);
+    BOOST_REQUIRE(first_manifest.scan_through);
+    BOOST_CHECK(first_closure->scan_after_key ==
+                first_manifest.scan_through);
+    BOOST_CHECK_EQUAL(first_manifest.reached_eof, 0U);
+    BOOST_CHECK_LE(first_manifest.candidates.size(), 1U);
+
+    evo::AuxiliaryHistoryGCComponent second;
+    evo::PQRegistryGCEraseManifest second_manifest;
+    BOOST_REQUIRE(manager.BuildGCEraseBatch(
+        context, first, /*max_scanned_records=*/1,
+        /*max_candidates=*/1,
+        second, second_manifest, error));
+    const auto second_closure{
+        evo::DecodePQRegistryGCClosure(second.closure)};
+    BOOST_REQUIRE(second_closure);
+    BOOST_CHECK_EQUAL(second_closure->generation, 2U);
+    BOOST_CHECK(second_manifest.from_cursor ==
+                first_manifest.scan_through);
+    BOOST_REQUIRE(second_manifest.scan_through);
+    BOOST_CHECK(*first_manifest.scan_through <
+                *second_manifest.scan_through);
+    BOOST_CHECK(second_closure->scan_after_key ==
+                second_manifest.scan_through);
+    BOOST_CHECK_LE(second_manifest.candidates.size(), 1U);
+}
+
+BOOST_AUTO_TEST_CASE(gc_erase_batch_caps_nonerasable_scan_work)
+{
+    EmptyRootedGCHistory history{80'525};
+    auto& manager{*history.manager};
+    PQRegistryError error;
+    const auto context{
+        history.Context(history.initial_checkpoint_height)};
+    const auto& checkpoint{
+        history.Identity(history.initial_checkpoint_height)};
+    for (uint32_t offset{0};
+         offset < evo::PQRegistryGCEraseManifest::MAX_CANDIDATES;
+         ++offset) {
+        const uint32_t tag{82'000 + offset};
+        const CBlock above_floor{Block(
+            checkpoint.block_hash, tag,
+            {OrdinaryTransaction(tag)})};
+        BOOST_REQUIRE(manager.ProcessBlock(
+            above_floor, checkpoint.height + 1,
+            Members(history.genesis, {}, {}, CKeyID{}), {},
+            /*fJustCheck=*/false, error));
+    }
+    BOOST_REQUIRE(manager.FlushForGC(error));
+
+    evo::AuxiliaryHistoryGCComponent target;
+    evo::PQRegistryGCEraseManifest manifest;
+    BOOST_REQUIRE(manager.BuildGCEraseBatch(
+        context, std::nullopt,
+        /*max_scanned_records=*/4096,
+        /*max_candidates=*/256,
+        target, manifest, error));
+    const auto closure{evo::DecodePQRegistryGCClosure(target.closure)};
+    BOOST_REQUIRE(closure);
+    BOOST_CHECK_EQUAL(closure->scan_complete,
+                      evo::PQRegistryGCClosure::SCANNING);
+    BOOST_CHECK_EQUAL(manifest.reached_eof, 0U);
+    BOOST_CHECK(manifest.candidates.empty());
+    BOOST_REQUIRE(manifest.scan_through);
+    BOOST_CHECK(closure->scan_after_key == manifest.scan_through);
+}
+
+BOOST_AUTO_TEST_CASE(gc_erase_batch_protects_paths_and_is_idempotent)
+{
+    EmptyRootedGCHistory history{80'550};
+    auto& manager{*history.manager};
+    PQRegistryError error;
+    const auto context{
+        history.Context(history.initial_checkpoint_height)};
+    const CBlock side_q{Block(
+        history.blocks.front().hashPrevBlock, 80'551,
+        {OrdinaryTransaction(80'551)})};
+    BOOST_REQUIRE(manager.ProcessBlock(
+        side_q, history.config.preparation_height,
+        Members(history.genesis, {}, {}, CKeyID{}), {},
+        /*fJustCheck=*/false, error));
+    const CBlock side_c{Block(
+        history.Identity(history.initial_checkpoint_height - 1).block_hash,
+        80'552, {OrdinaryTransaction(80'552)})};
+    BOOST_REQUIRE(manager.ProcessBlock(
+        side_c, history.initial_checkpoint_height,
+        Members(history.genesis, {}, {}, CKeyID{}), {},
+        /*fJustCheck=*/false, error));
+    BOOST_REQUIRE(manager.FlushForGC(error));
+
+    evo::AuxiliaryHistoryGCComponent target;
+    evo::PQRegistryGCEraseManifest manifest;
+    BOOST_REQUIRE(manager.BuildGCEraseBatch(
+        context, std::nullopt,
+        evo::PQRegistryGCEraseManifest::MAX_CANDIDATES,
+        /*max_candidates=*/256,
+        target, manifest, error));
+    const auto closure{evo::DecodePQRegistryGCClosure(target.closure)};
+    BOOST_REQUIRE(closure);
+    BOOST_CHECK_EQUAL(closure->scan_complete,
+                      evo::PQRegistryGCClosure::COMPLETE);
+    BOOST_CHECK_EQUAL(manifest.reached_eof, 1U);
+    BOOST_REQUIRE_EQUAL(manifest.candidates.size(), 2U);
+    const auto find_candidate = [&](const uint256& key) {
+        return std::find_if(
+            manifest.candidates.begin(), manifest.candidates.end(),
+            [&](const auto& candidate) { return candidate.key == key; });
+    };
+    const auto side_q_candidate{find_candidate(side_q.GetHash())};
+    BOOST_REQUIRE(side_q_candidate != manifest.candidates.end());
+    BOOST_CHECK_EQUAL(side_q_candidate->height,
+                      history.config.preparation_height);
+    const auto side_c_candidate{find_candidate(side_c.GetHash())};
+    BOOST_REQUIRE(side_c_candidate != manifest.candidates.end());
+    BOOST_CHECK_EQUAL(side_c_candidate->height,
+                      history.initial_checkpoint_height);
+
+    const auto& protected_q{context.legacy_island.front()};
+    PQRegistryDiskSnapshot protected_disk;
+    BOOST_REQUIRE(
+        test::PQRegistryManagerTestAccess::ReadExactDiskSnapshot(
+            manager, protected_q.block_hash, protected_disk));
+    BOOST_REQUIRE(manager.InstallGCFloor(
+        target,
+        FloorAuthorization(history.second_checkpoint_height + 10,
+                           80'553),
+        error, context));
+    BOOST_REQUIRE(manager.EraseGCManifest(
+        target, std::nullopt, context, manifest, error));
+
+    PQRegistryDiskSnapshot erased;
+    BOOST_CHECK(!test::PQRegistryManagerTestAccess::ReadExactDiskSnapshot(
+        manager, side_q.GetHash(), erased));
+    BOOST_CHECK(!test::PQRegistryManagerTestAccess::ReadExactDiskSnapshot(
+        manager, side_c.GetHash(), erased));
+    BOOST_REQUIRE(
+        test::PQRegistryManagerTestAccess::ReadExactDiskSnapshot(
+            manager, protected_q.block_hash, protected_disk));
+    const auto& protected_c{context.rooted_segment.back()};
+    BOOST_REQUIRE(
+        test::PQRegistryManagerTestAccess::ReadExactDiskSnapshot(
+            manager, protected_c.block_hash, protected_disk));
+    BOOST_REQUIRE(manager.EraseGCManifest(
+        target, std::nullopt, context, manifest, error));
+}
+
+BOOST_AUTO_TEST_CASE(gc_erase_manifest_resumes_only_over_missing_prefix)
+{
+    EmptyRootedGCHistory history{80'600};
+    auto& manager{*history.manager};
+    PQRegistryError error;
+    const auto context{
+        history.Context(history.initial_checkpoint_height)};
+    for (uint32_t tag{80'601}; tag <= 80'603; ++tag) {
+        const CBlock side{Block(
+            history.blocks.front().hashPrevBlock, tag,
+            {OrdinaryTransaction(tag)})};
+        BOOST_REQUIRE(manager.ProcessBlock(
+            side, history.config.preparation_height,
+            Members(history.genesis, {}, {}, CKeyID{}), {},
+            /*fJustCheck=*/false, error));
+    }
+    BOOST_REQUIRE(manager.FlushForGC(error));
+
+    evo::AuxiliaryHistoryGCComponent target;
+    evo::PQRegistryGCEraseManifest manifest;
+    BOOST_REQUIRE(manager.BuildGCEraseBatch(
+        context, std::nullopt,
+        evo::PQRegistryGCEraseManifest::MAX_CANDIDATES,
+        /*max_candidates=*/256,
+        target, manifest, error));
+    BOOST_REQUIRE_EQUAL(manifest.candidates.size(), 3U);
+    BOOST_REQUIRE(manager.InstallGCFloor(
+        target,
+        FloorAuthorization(history.second_checkpoint_height + 10,
+                           80'604),
+        error, context));
+
+    BOOST_REQUIRE(test::PQRegistryManagerTestAccess::EraseExactDiskSnapshot(
+        manager, manifest.candidates.front().key));
+    BOOST_REQUIRE(manager.EraseGCManifest(
+        target, std::nullopt, context, manifest, error));
+    for (const auto& candidate : manifest.candidates) {
+        PQRegistryDiskSnapshot disk;
+        BOOST_CHECK(
+            !test::PQRegistryManagerTestAccess::ReadExactDiskSnapshot(
+                manager, candidate.key, disk));
+    }
+    BOOST_REQUIRE(manager.EraseGCManifest(
+        target, std::nullopt, context, manifest, error));
+}
+
+BOOST_AUTO_TEST_CASE(gc_erase_batch_caps_dense_candidates_and_retries)
+{
+    EmptyRootedGCHistory history{80'625};
+    auto& manager{*history.manager};
+    PQRegistryError error;
+    const auto context{
+        history.Context(history.initial_checkpoint_height)};
+    std::vector<uint256> side_hashes;
+    side_hashes.reserve(257);
+    for (uint32_t offset{0}; offset < 257; ++offset) {
+        const uint32_t tag{81'000 + offset};
+        const CBlock side{Block(
+            history.blocks.front().hashPrevBlock, tag,
+            {OrdinaryTransaction(tag)})};
+        BOOST_REQUIRE(manager.ProcessBlock(
+            side, history.config.preparation_height,
+            Members(history.genesis, {}, {}, CKeyID{}), {},
+            /*fJustCheck=*/false, error));
+        side_hashes.push_back(side.GetHash());
+    }
+    BOOST_REQUIRE(manager.FlushForGC(error));
+
+    evo::AuxiliaryHistoryGCComponent target;
+    evo::PQRegistryGCEraseManifest manifest;
+    BOOST_REQUIRE(manager.BuildGCEraseBatch(
+        context, std::nullopt,
+        evo::PQRegistryGCEraseManifest::MAX_CANDIDATES,
+        /*max_candidates=*/256,
+        target, manifest, error));
+    BOOST_REQUIRE_EQUAL(manifest.candidates.size(), 256U);
+    const auto closure{evo::DecodePQRegistryGCClosure(target.closure)};
+    BOOST_REQUIRE(closure);
+    BOOST_CHECK_EQUAL(closure->scan_complete,
+                      evo::PQRegistryGCClosure::SCANNING);
+    BOOST_CHECK_EQUAL(manifest.reached_eof, 0U);
+    BOOST_REQUIRE(manager.InstallGCFloor(
+        target,
+        FloorAuthorization(history.second_checkpoint_height + 10,
+                           80'626),
+        error, context));
+
+    std::vector<uint256> durable_prefix;
+    durable_prefix.reserve(128);
+    for (std::size_t i{0}; i < 128; ++i) {
+        durable_prefix.push_back(manifest.candidates[i].key);
+    }
+    BOOST_REQUIRE(
+        test::PQRegistryManagerTestAccess::EraseExactDiskSnapshots(
+            manager, durable_prefix));
+    manager.SnapshotDatabase()
+        .FailNextSynchronousFlushBatchForTesting();
+    BOOST_CHECK(!manager.EraseGCManifest(
+        target, std::nullopt, context, manifest, error));
+    BOOST_CHECK(error.result == PQRegistryResult::PERSISTENCE_FAILED);
+
+    PQRegistryDiskSnapshot last;
+    BOOST_REQUIRE(test::PQRegistryManagerTestAccess::ReadExactDiskSnapshot(
+        manager, manifest.candidates.back().key, last));
+    BOOST_REQUIRE(manager.EraseGCManifest(
+        target, std::nullopt, context, manifest, error));
+    std::size_t remaining_side_records{0};
+    for (const auto& side_hash : side_hashes) {
+        remaining_side_records +=
+            test::PQRegistryManagerTestAccess::ReadExactDiskSnapshot(
+                manager, side_hash, last)
+            ? 1
+            : 0;
+    }
+    BOOST_CHECK_EQUAL(remaining_side_records, 1U);
+}
+
+BOOST_AUTO_TEST_CASE(gc_erase_manifest_rejects_gaps_and_tampering)
+{
+    EmptyRootedGCHistory history{80'650};
+    auto& manager{*history.manager};
+    PQRegistryError error;
+    const auto context{
+        history.Context(history.initial_checkpoint_height)};
+    for (uint32_t tag{80'651}; tag <= 80'653; ++tag) {
+        const CBlock side{Block(
+            history.blocks.front().hashPrevBlock, tag,
+            {OrdinaryTransaction(tag)})};
+        BOOST_REQUIRE(manager.ProcessBlock(
+            side, history.config.preparation_height,
+            Members(history.genesis, {}, {}, CKeyID{}), {},
+            /*fJustCheck=*/false, error));
+    }
+    BOOST_REQUIRE(manager.FlushForGC(error));
+
+    evo::AuxiliaryHistoryGCComponent target;
+    evo::PQRegistryGCEraseManifest manifest;
+    BOOST_REQUIRE(manager.BuildGCEraseBatch(
+        context, std::nullopt,
+        evo::PQRegistryGCEraseManifest::MAX_CANDIDATES,
+        /*max_candidates=*/256,
+        target, manifest, error));
+    BOOST_REQUIRE_EQUAL(manifest.candidates.size(), 3U);
+    BOOST_REQUIRE(manager.InstallGCFloor(
+        target,
+        FloorAuthorization(history.second_checkpoint_height + 10,
+                           80'654),
+        error, context));
+
+    auto false_empty_eof{manifest};
+    false_empty_eof.scan_through.reset();
+    false_empty_eof.candidates.clear();
+    BOOST_REQUIRE(false_empty_eof.IsValid());
+    BOOST_CHECK(!manager.EraseGCManifest(
+        target, std::nullopt, context, false_empty_eof, error));
+    BOOST_CHECK(error.result == PQRegistryResult::FLOOR_CONFLICT);
+
+    auto wrong_hash{manifest};
+    wrong_hash.candidates.front().exact_record_hash =
+        NonNullHash(80'655);
+    BOOST_CHECK(!manager.EraseGCManifest(
+        target, std::nullopt, context, wrong_hash, error));
+    BOOST_CHECK(error.result == PQRegistryResult::SNAPSHOT_CORRUPT);
+
+    auto omitted{manifest};
+    omitted.candidates.erase(omitted.candidates.begin() + 1);
+    BOOST_CHECK(!manager.EraseGCManifest(
+        target, std::nullopt, context, omitted, error));
+    BOOST_CHECK(error.result == PQRegistryResult::FLOOR_CONFLICT);
+
+    BOOST_REQUIRE(test::PQRegistryManagerTestAccess::EraseExactDiskSnapshot(
+        manager, manifest.candidates[1].key));
+    BOOST_CHECK(!manager.EraseGCManifest(
+        target, std::nullopt, context, manifest, error));
+    BOOST_CHECK(error.result == PQRegistryResult::FLOOR_CONFLICT);
+    PQRegistryDiskSnapshot disk;
+    BOOST_REQUIRE(test::PQRegistryManagerTestAccess::ReadExactDiskSnapshot(
+        manager, manifest.candidates.front().key, disk));
+    BOOST_REQUIRE(test::PQRegistryManagerTestAccess::ReadExactDiskSnapshot(
+        manager, manifest.candidates.back().key, disk));
+}
+
+BOOST_AUTO_TEST_CASE(gc_erase_empty_resume_ignores_later_above_floor_record)
+{
+    EmptyRootedGCHistory history{80'675};
+    auto& manager{*history.manager};
+    PQRegistryError error;
+    const auto context{
+        history.Context(history.initial_checkpoint_height)};
+    BOOST_REQUIRE(manager.FlushForGC(error));
+
+    evo::AuxiliaryHistoryGCComponent probe_target;
+    evo::PQRegistryGCEraseManifest probe_manifest;
+    BOOST_REQUIRE(manager.BuildGCEraseBatch(
+        context, std::nullopt,
+        evo::PQRegistryGCEraseManifest::MAX_CANDIDATES,
+        /*max_candidates=*/256,
+        probe_target, probe_manifest, error));
+    BOOST_REQUIRE_EQUAL(probe_manifest.reached_eof, 1U);
+    BOOST_REQUIRE(probe_manifest.scan_through);
+
+    evo::PQRegistryGCClosure previous_closure;
+    BOOST_REQUIRE(manager.BuildGCFloorClosure(
+        /*generation=*/1, probe_manifest.scan_through, context,
+        /*previous=*/nullptr, previous_closure, error));
+    BOOST_REQUIRE_EQUAL(previous_closure.scan_complete,
+                        evo::PQRegistryGCClosure::SCANNING);
+    const auto previous{FloorComponent(previous_closure)};
+
+    evo::AuxiliaryHistoryGCComponent target;
+    evo::PQRegistryGCEraseManifest manifest;
+    BOOST_REQUIRE(manager.BuildGCEraseBatch(
+        context, previous,
+        evo::PQRegistryGCEraseManifest::MAX_CANDIDATES,
+        /*max_candidates=*/256,
+        target, manifest, error));
+    const auto target_closure{
+        evo::DecodePQRegistryGCClosure(target.closure)};
+    BOOST_REQUIRE(target_closure);
+    BOOST_CHECK_EQUAL(target_closure->scan_complete,
+                      evo::PQRegistryGCClosure::COMPLETE);
+    BOOST_CHECK(manifest.from_cursor == probe_manifest.scan_through);
+    BOOST_CHECK(!manifest.scan_through);
+    BOOST_CHECK_EQUAL(manifest.reached_eof, 1U);
+    BOOST_CHECK(manifest.candidates.empty());
+
+    const auto authorization{FloorAuthorization(
+        history.second_checkpoint_height + 10, 80'676)};
+    BOOST_REQUIRE(manager.InstallGCFloor(
+        previous, authorization, error, context));
+    BOOST_REQUIRE(manager.InstallGCFloor(
+        target, authorization, error, context));
+
+    std::optional<CBlock> later;
+    const auto& checkpoint{context.rooted_segment.back()};
+    for (uint32_t tag{800'000}; tag < 900'000; ++tag) {
+        CBlock candidate{Block(
+            checkpoint.block_hash, tag,
+            {OrdinaryTransaction(tag)})};
+        if (*manifest.from_cursor < candidate.GetHash()) {
+            later = std::move(candidate);
+            break;
+        }
+    }
+    BOOST_REQUIRE(later);
+    BOOST_REQUIRE(manager.ProcessBlock(
+        *later, checkpoint.height + 1,
+        Members(history.genesis, {}, {}, CKeyID{}), {},
+        /*fJustCheck=*/false, error));
+    BOOST_REQUIRE(manager.FlushForGC(error));
+
+    PQRegistryDiskSnapshot disk;
+    BOOST_REQUIRE(test::PQRegistryManagerTestAccess::ReadExactDiskSnapshot(
+        manager, later->GetHash(), disk));
+    BOOST_REQUIRE(manager.EraseGCManifest(
+        target, previous, context, manifest, error));
+    BOOST_REQUIRE(test::PQRegistryManagerTestAccess::ReadExactDiskSnapshot(
+        manager, later->GetHash(), disk));
 }
 
 

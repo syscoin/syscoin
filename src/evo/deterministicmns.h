@@ -646,6 +646,16 @@ public:
                                const EffectiveDMNInverseGCBoundary&) = default;
     };
 
+    struct EffectivePQRegistryGCBoundary {
+        evo::AuxiliaryHistoryGCComponent component;
+        evo::PQRegistryGCClosure closure;
+        AuxiliaryHistoryGCAuthorization authorization;
+        bool pending{false};
+
+        friend bool operator==(const EffectivePQRegistryGCBoundary&,
+                               const EffectivePQRegistryGCBoundary&) = default;
+    };
+
     /**
      * SYSCOIN: One immutable maintenance observation for both append-only
      * auxiliary histories. Finality authorizes destruction; branch windows,
@@ -660,6 +670,8 @@ public:
         std::vector<AuxiliaryHistoryBlockIdentity> fixed_dependencies;
         std::optional<EffectiveDMNInverseGCBoundary>
             effective_dmn_inverse_gc_boundary;
+        std::optional<EffectivePQRegistryGCBoundary>
+            effective_pq_registry_gc_boundary;
         bool finality_verification_active{false};
         bool finality_publication_pending{false};
         bool requirements_valid{false};
@@ -887,6 +899,18 @@ private:
     bool ResumePendingDMNInverseGC(
         const CBlockIndex* tip,
         const AuxiliaryHistoryRetentionPlan& plan,
+        bool& retry_required)
+        EXCLUSIVE_LOCKS_REQUIRED(m_evoDb->cs, !cs);
+    bool ResumePendingPQRegistryGC(
+        const CBlockIndex* tip,
+        std::span<const CBlockIndex* const> recovery_snapshot_indexes,
+        const AuxiliaryHistoryRetentionPlan& plan,
+        bool& handled,
+        bool& retry_required)
+        EXCLUSIVE_LOCKS_REQUIRED(m_evoDb->cs, !cs);
+    bool PreparePQRegistryGCIntent(
+        const CBlockIndex* tip,
+        std::span<const CBlockIndex* const> recovery_snapshot_indexes,
         bool& retry_required)
         EXCLUSIVE_LOCKS_REQUIRED(m_evoDb->cs, !cs);
     bool GarbageCollectDMNInversePrefix(

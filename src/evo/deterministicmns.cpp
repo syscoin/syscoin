@@ -170,12 +170,12 @@ std::optional<int32_t> GetPQLegacyIslandBaseHeight(
 bool BuildPQRegistryGCAuthenticationContext(
     const Consensus::Params& consensus,
     const llmq::pq::PQRegistryConfig& registry_config,
-    const evo::PQRegistryGCClosure& closure,
+    const evo::AuxiliaryHistoryGCBlockIdentity& checkpoint,
     const CBlockIndex* recovered_tip,
     llmq::pq::PQRegistryGCAuthenticationContext& context)
 {
     context = {};
-    if (!closure.IsValid() || recovered_tip == nullptr ||
+    if (!checkpoint.IsValid() || recovered_tip == nullptr ||
         Consensus::CheckPQLegacyAnchorConfiguration(consensus) !=
             Consensus::PQAnchorResult::VALID) {
         return false;
@@ -189,7 +189,7 @@ bool BuildPQRegistryGCAuthenticationContext(
     const int64_t initial_checkpoint_height{
         island_base_height +
         llmq::pq::PQ_REGISTRY_CHECKPOINT_INTERVAL};
-    const int64_t checkpoint_height{closure.checkpoint.height};
+    const int64_t checkpoint_height{checkpoint.height};
     if (checkpoint_height < initial_checkpoint_height ||
         (checkpoint_height - initial_checkpoint_height) %
                 llmq::pq::PQ_REGISTRY_CHECKPOINT_INTERVAL !=
@@ -213,12 +213,24 @@ bool BuildPQRegistryGCAuthenticationContext(
             context.legacy_island) ||
         !CollectPQRegistryGCPath(
             recovered_tip, static_cast<int32_t>(rooted_base_height),
-            closure.checkpoint.height, context.rooted_segment) ||
-        context.rooted_segment.back() != closure.checkpoint) {
+            checkpoint.height, context.rooted_segment) ||
+        context.rooted_segment.back() != checkpoint) {
         context = {};
         return false;
     }
     return context.IsStructurallyValid();
+}
+
+bool BuildPQRegistryGCAuthenticationContext(
+    const Consensus::Params& consensus,
+    const llmq::pq::PQRegistryConfig& registry_config,
+    const evo::PQRegistryGCClosure& closure,
+    const CBlockIndex* recovered_tip,
+    llmq::pq::PQRegistryGCAuthenticationContext& context)
+{
+    return closure.IsValid() && BuildPQRegistryGCAuthenticationContext(
+        consensus, registry_config, closure.checkpoint, recovered_tip,
+        context);
 }
 
 bool BuildEffectivePQRegistryGCAuthenticationContext(
@@ -242,6 +254,18 @@ bool BuildEffectivePQRegistryGCAuthenticationContext(
     return closure && BuildPQRegistryGCAuthenticationContext(
                           consensus, registry_config, *closure,
                           recovered_tip, context);
+}
+
+const CBlockIndex* GetAuxiliaryHistoryCommonAncestor(
+    const CBlockIndex* tip,
+    std::span<const CBlockIndex* const> recovery_snapshot_indexes)
+{
+    const CBlockIndex* common{tip};
+    for (const CBlockIndex* recovery : recovery_snapshot_indexes) {
+        if (common == nullptr || recovery == nullptr) return nullptr;
+        common = LastCommonAncestor(common, recovery);
+    }
+    return common;
 }
 
 std::optional<uint256> EmptyPQRegistryStateRoot(const uint256& genesis_hash)
@@ -3765,6 +3789,85 @@ CDeterministicMNManager::BuildAuxiliaryHistoryRetentionPlan(
             EnsureAuthenticatedEffectiveDMNInverseGCBoundary(
                 tip, *plan.effective_dmn_inverse_gc_boundary);
     }
+
+    const auto journal_state{m_auxiliary_history_gc_journal->GetState()};
+    const auto decode_effective_pq = [&]()
+        -> std::optional<EffectivePQRegistryGCBoundary> {
+        const evo::AuxiliaryHistoryGCComponent* component{nullptr};
+        const AuxiliaryHistoryGCAuthorization* authorization{nullptr};
+        bool pending{false};
+        if (journal_state.intent &&
+            journal_state.intent->target.frontier.pq_registry) {
+            component = &*journal_state.intent->target.frontier.pq_registry;
+            authorization = &journal_state.intent->target.authorization;
+            const auto previous{journal_state.watermark
+                ? journal_state.watermark->frontier.pq_registry
+                : std::optional<evo::AuxiliaryHistoryGCComponent>{}};
+            const bool pq_advances{
+                journal_state.intent->target.frontier.pq_registry !=
+                previous};
+            const auto& encoded_manifest{
+                journal_state.intent->target.pq_erase_manifest};
+            if (encoded_manifest.has_value() != pq_advances) {
+                requirements_valid = false;
+                return std::nullopt;
+            }
+            if (pq_advances) {
+                const auto manifest{evo::DecodePQRegistryGCEraseManifest(
+                    encoded_manifest->payload)};
+                const auto target_hash{
+                    evo::GetAuxiliaryHistoryGCComponentHash(*component)};
+                const auto previous_hash{previous
+                    ? evo::GetAuxiliaryHistoryGCComponentHash(*previous)
+                    : std::optional<uint256>{}};
+                if (encoded_manifest->version !=
+                        evo::PQRegistryGCEraseManifest::VERSION ||
+                    !manifest || !target_hash ||
+                    manifest->target_component_hash != *target_hash ||
+                    manifest->previous_component_hash != previous_hash) {
+                    requirements_valid = false;
+                    return std::nullopt;
+                }
+            }
+            pending = pq_advances;
+        } else if (journal_state.watermark &&
+                   journal_state.watermark->frontier.pq_registry) {
+            component = &*journal_state.watermark->frontier.pq_registry;
+            authorization = &journal_state.watermark->authorization;
+        }
+        if (component == nullptr) return std::nullopt;
+        const auto closure{
+            evo::DecodePQRegistryGCClosure(component->closure)};
+        if (authorization == nullptr || !component->IsValid() || !closure ||
+            component->version != evo::PQRegistryGCClosure::VERSION ||
+            component->monotonic_position != closure->generation ||
+            !evo::IsPQRegistryGCComponentBoundedByAuthorization(
+                *component, *authorization)) {
+            requirements_valid = false;
+            return std::nullopt;
+        }
+        return EffectivePQRegistryGCBoundary{
+            *component, *closure, *authorization, pending};
+    };
+    plan.effective_pq_registry_gc_boundary = decode_effective_pq();
+
+    // SYSCOIN: The random-access window may not cross either irreversible
+    // auxiliary-history floor. Keep the exact DMN endpoint separately below;
+    // the higher typed floor is only the common lower bound for branch views.
+    std::optional<AuxiliaryHistoryBlockIdentity> durable_window_floor{
+        durable_dmn_floor};
+    if (plan.effective_pq_registry_gc_boundary) {
+        const auto& pq_floor{
+            plan.effective_pq_registry_gc_boundary->closure.checkpoint};
+        if (!durable_window_floor ||
+            pq_floor.height > durable_window_floor->height) {
+            durable_window_floor = pq_floor;
+        } else if (pq_floor.height == durable_window_floor->height &&
+                   pq_floor.block_hash !=
+                       durable_window_floor->block_hash) {
+            requirements_valid = false;
+        }
+    }
     std::unordered_set<uint256, StaticSaltedHasher> observed_heads;
     const auto add_branch = [&](const CBlockIndex* head, bool active) {
         if (head == nullptr) {
@@ -3777,7 +3880,18 @@ CDeterministicMNManager::BuildAuxiliaryHistoryRetentionPlan(
         }
         bool window_valid{true};
         auto window{CollectRetainedSnapshotWindow(
-            head, durable_dmn_floor, window_valid)};
+            head, durable_window_floor, window_valid)};
+        if (plan.effective_pq_registry_gc_boundary) {
+            const auto& checkpoint{
+                plan.effective_pq_registry_gc_boundary->closure.checkpoint};
+            const CBlockIndex* checkpoint_index{
+                head->nHeight >= checkpoint.height
+                    ? head->GetAncestor(checkpoint.height)
+                    : nullptr};
+            window_valid &= checkpoint_index != nullptr &&
+                            checkpoint_index->GetBlockHash() ==
+                                checkpoint.block_hash;
+        }
         requirements_valid &= window_valid && !window.empty();
         if (window.empty()) return;
         const CBlockIndex* floor{head->GetAncestor(
@@ -4260,7 +4374,6 @@ bool CDeterministicMNManager::PrepareDMNInverseGCIntent(
     bool& retry_required)
 {
     AssertLockHeld(m_evoDb->cs);
-    AssertLockHeld(cs);
     retry_required = false;
     if (!plan.AllowsDestructiveGC()) return true;
     if (tip == nullptr || !plan.destructive_authorization ||
@@ -4304,6 +4417,19 @@ bool CDeterministicMNManager::PrepareDMNInverseGCIntent(
                   *initial_state.intent->target.frontier.dmn,
                   initial_state.intent->target.authorization)))) {
             retry_required = true;
+            return true;
+        }
+
+        if (!initial_state.intent && initial_state.watermark &&
+            (plan.destructive_authorization->block.height <=
+                 initial_state.watermark->authorization.block.height ||
+             static_cast<uint8_t>(
+                 plan.destructive_authorization->source) <
+                 static_cast<uint8_t>(
+                     initial_state.watermark->authorization.source))) {
+            // SYSCOIN: A shared journal sequence consumes its authorizer.
+            // Waiting for the next finality update is a stable no-work state,
+            // not a retry that should defeat same-tip maintenance forever.
             return true;
         }
 
@@ -4607,6 +4733,413 @@ bool CDeterministicMNManager::GarbageCollectDMNInversePrefix(
     }
 }
 
+bool CDeterministicMNManager::ResumePendingPQRegistryGC(
+    const CBlockIndex* tip,
+    std::span<const CBlockIndex* const> recovery_snapshot_indexes,
+    const AuxiliaryHistoryRetentionPlan& plan,
+    bool& handled,
+    bool& retry_required)
+{
+    AssertLockHeld(m_evoDb->cs);
+    handled = false;
+    retry_required = false;
+
+    const auto state{m_auxiliary_history_gc_journal->GetState()};
+    if (!state.intent) return true;
+    const auto previous_component{state.watermark
+        ? state.watermark->frontier.pq_registry
+        : std::optional<evo::AuxiliaryHistoryGCComponent>{}};
+    const auto& target{state.intent->target};
+    const bool pq_owned{target.pq_erase_manifest.has_value() &&
+                        target.frontier.pq_registry.has_value() &&
+                        target.frontier.pq_registry != previous_component};
+    if (!pq_owned) return true;
+    handled = true;
+    retry_required = true;
+
+    if (!plan.requirements_valid || tip == nullptr ||
+        !plan.effective_pq_registry_gc_boundary ||
+        !plan.effective_pq_registry_gc_boundary->pending ||
+        plan.effective_pq_registry_gc_boundary->component !=
+            *target.frontier.pq_registry) {
+        return false;
+    }
+
+    llmq::pq::PQRegistryConfig registry_config;
+    if (llmq::pq::GetPQRegistryConfig(
+            Params().GetConsensus(), registry_config) !=
+            llmq::pq::PQRegistryDeploymentResult::VALID) {
+        return false;
+    }
+    const CBlockIndex* common{GetAuxiliaryHistoryCommonAncestor(
+        tip, recovery_snapshot_indexes)};
+    llmq::pq::PQRegistryGCAuthenticationContext context;
+    if (common == nullptr ||
+        !BuildPQRegistryGCAuthenticationContext(
+            Params().GetConsensus(), registry_config,
+            plan.effective_pq_registry_gc_boundary->closure,
+            common, context)) {
+        return false;
+    }
+
+    std::string open_error;
+    auto* registry{GetOrCreatePQRegistry(open_error)};
+    if (registry == nullptr) {
+        LogPrintf("%s -- pending PQ registry GC unavailable: %s\n",
+                  __func__, open_error);
+        return false;
+    }
+    llmq::pq::PQRegistryError registry_error;
+    if (!registry->FlushForGC(registry_error)) {
+        LogPrintf("%s -- failed to synchronize pending PQ GC: %s\n",
+                  __func__, std::string{llmq::pq::PQRegistryResultString(
+                                registry_error.result)});
+        return false;
+    }
+    if (!registry->InstallEffectiveGCFloor(
+            state, registry_error, context)) {
+        LogPrintf("%s -- failed to install pending PQ GC floor: %s\n",
+                  __func__, std::string{llmq::pq::PQRegistryResultString(
+                                registry_error.result)});
+        return false;
+    }
+    const auto manifest{evo::DecodePQRegistryGCEraseManifest(
+        target.pq_erase_manifest->payload)};
+    if (target.pq_erase_manifest->version !=
+            evo::PQRegistryGCEraseManifest::VERSION ||
+        !manifest ||
+        !registry->EraseGCManifest(
+            *target.frontier.pq_registry, previous_component,
+            context, *manifest, registry_error)) {
+        LogPrintf("%s -- failed to resume pending PQ GC erase: %s\n",
+                  __func__, std::string{llmq::pq::PQRegistryResultString(
+                                registry_error.result)});
+        return false;
+    }
+
+    LOCK(cs);
+    const auto final_state{m_auxiliary_history_gc_journal->GetState()};
+    if (final_state.intent != state.intent ||
+        final_state.watermark != state.watermark) {
+        return false;
+    }
+    switch (m_auxiliary_history_gc_journal->Complete(
+        state.intent->intent_id)) {
+    case evo::AuxiliaryHistoryGCJournalResult::COMPLETED:
+    case evo::AuxiliaryHistoryGCJournalResult::ALREADY_COMPLETE:
+        retry_required = false;
+        return RefreshEffectiveDMNInverseGCBoundary();
+    case evo::AuxiliaryHistoryGCJournalResult::STARTED:
+    case evo::AuxiliaryHistoryGCJournalResult::EXISTING:
+    case evo::AuxiliaryHistoryGCJournalResult::BUSY:
+    case evo::AuxiliaryHistoryGCJournalResult::NON_MONOTONIC:
+    case evo::AuxiliaryHistoryGCJournalResult::INVALID_ARGUMENT:
+    case evo::AuxiliaryHistoryGCJournalResult::MISMATCH:
+    case evo::AuxiliaryHistoryGCJournalResult::CORRUPT:
+    case evo::AuxiliaryHistoryGCJournalResult::DB_ERROR:
+        return false;
+    }
+    return false;
+}
+
+bool CDeterministicMNManager::PreparePQRegistryGCIntent(
+    const CBlockIndex* tip,
+    std::span<const CBlockIndex* const> recovery_snapshot_indexes,
+    bool& retry_required)
+{
+    AssertLockHeld(m_evoDb->cs);
+    retry_required = false;
+
+    llmq::pq::PQRegistryConfig registry_config;
+    const auto& consensus{Params().GetConsensus()};
+    if (llmq::pq::GetPQRegistryConfig(consensus, registry_config) !=
+            llmq::pq::PQRegistryDeploymentResult::VALID ||
+        !MakePQRegistryGCRootConfig(consensus, registry_config)) {
+        return true;
+    }
+
+    enum class CandidateStatus : uint8_t { NO_WORK, READY, INVALID };
+    const auto derive_candidate = [&]
+        (const AuxiliaryHistoryRetentionPlan& observed,
+         const evo::AuxiliaryHistoryGCState& state,
+         std::optional<evo::AuxiliaryHistoryGCComponent>& previous,
+         llmq::pq::PQRegistryGCAuthenticationContext& context)
+            -> CandidateStatus {
+        previous.reset();
+        context = {};
+        if (state.intent) return CandidateStatus::INVALID;
+        if (!observed.requirements_valid || tip == nullptr ||
+            !observed.destructive_authorization ||
+            !observed.destructive_authorization->IsValid() ||
+            observed.finality_health_ambiguous ||
+            observed.branches.empty()) {
+            return CandidateStatus::NO_WORK;
+        }
+        if (state.watermark) {
+            if (observed.destructive_authorization->block.height <=
+                    state.watermark->authorization.block.height ||
+                static_cast<uint8_t>(
+                    observed.destructive_authorization->source) <
+                    static_cast<uint8_t>(
+                        state.watermark->authorization.source)) {
+                return CandidateStatus::NO_WORK;
+            }
+            previous = state.watermark->frontier.pq_registry;
+        }
+
+        std::optional<evo::PQRegistryGCClosure> previous_closure;
+        if (previous) {
+            previous_closure = evo::DecodePQRegistryGCClosure(
+                previous->closure);
+            if (!previous->IsValid() || !previous_closure ||
+                previous->version != evo::PQRegistryGCClosure::VERSION ||
+                previous->monotonic_position !=
+                    previous_closure->generation) {
+                return CandidateStatus::INVALID;
+            }
+        }
+
+        const auto island_base{
+            GetPQLegacyIslandBaseHeight(consensus, registry_config)};
+        if (!island_base) return CandidateStatus::INVALID;
+        const int64_t initial_checkpoint{
+            static_cast<int64_t>(*island_base) +
+            llmq::pq::PQ_REGISTRY_CHECKPOINT_INTERVAL};
+        int64_t checkpoint_height{initial_checkpoint};
+        bool advances_checkpoint{true};
+        if (previous_closure) {
+            if (previous_closure->scan_complete ==
+                evo::PQRegistryGCClosure::SCANNING) {
+                checkpoint_height = previous_closure->checkpoint.height;
+                advances_checkpoint = false;
+            } else if (previous_closure->scan_complete ==
+                       evo::PQRegistryGCClosure::COMPLETE) {
+                checkpoint_height =
+                    static_cast<int64_t>(
+                        previous_closure->checkpoint.height) +
+                    llmq::pq::PQ_REGISTRY_CHECKPOINT_INTERVAL;
+            } else {
+                return CandidateStatus::INVALID;
+            }
+        }
+        if (checkpoint_height < 0 ||
+            checkpoint_height > std::numeric_limits<int32_t>::max()) {
+            return CandidateStatus::INVALID;
+        }
+
+        const CBlockIndex* common{GetAuxiliaryHistoryCommonAncestor(
+            tip, recovery_snapshot_indexes)};
+        if (common == nullptr) return CandidateStatus::INVALID;
+        if (advances_checkpoint) {
+            if (!observed.AllowsDestructiveGC() ||
+                !observed.finality_roster_floor ||
+                *observed.finality_roster_floor <= 0) {
+                return CandidateStatus::NO_WORK;
+            }
+            int32_t safe_ceiling{std::min(
+                observed.destructive_authorization->block.height,
+                common->nHeight)};
+            safe_ceiling = std::min(
+                safe_ceiling,
+                static_cast<int32_t>(
+                    *observed.finality_roster_floor - 1));
+            for (const auto& branch : observed.branches) {
+                safe_ceiling = std::min(
+                    safe_ceiling, branch.random_access_floor.height);
+            }
+            if (checkpoint_height > safe_ceiling) {
+                return CandidateStatus::NO_WORK;
+            }
+        } else if (checkpoint_height > common->nHeight) {
+            return CandidateStatus::INVALID;
+        }
+
+        const CBlockIndex* checkpoint{common->GetAncestor(
+            static_cast<int32_t>(checkpoint_height))};
+        if (checkpoint == nullptr) return CandidateStatus::INVALID;
+        const evo::AuxiliaryHistoryGCBlockIdentity identity{
+            checkpoint->nHeight, checkpoint->GetBlockHash()};
+        if (previous_closure && !advances_checkpoint &&
+            identity != previous_closure->checkpoint) {
+            return CandidateStatus::INVALID;
+        }
+        return BuildPQRegistryGCAuthenticationContext(
+                   consensus, registry_config, identity, common, context)
+            ? CandidateStatus::READY
+            : CandidateStatus::INVALID;
+    };
+
+    evo::AuxiliaryHistoryGCState initial_state;
+    AuxiliaryHistoryRetentionPlan initial_plan;
+    std::optional<evo::AuxiliaryHistoryGCComponent> previous_component;
+    llmq::pq::PQRegistryGCAuthenticationContext context;
+    CandidateStatus initial_status{CandidateStatus::INVALID};
+    {
+        LOCK(cs);
+        initial_state = m_auxiliary_history_gc_journal->GetState();
+        initial_plan = BuildAuxiliaryHistoryRetentionPlan(
+            tip, recovery_snapshot_indexes);
+        initial_status = derive_candidate(
+            initial_plan, initial_state, previous_component, context);
+    }
+    if (initial_status == CandidateStatus::NO_WORK) return true;
+    if (initial_status == CandidateStatus::INVALID) return false;
+
+    std::string open_error;
+    auto* registry{GetOrCreatePQRegistry(open_error)};
+    if (registry == nullptr) {
+        LogPrintf("%s -- PQ registry unavailable for GC: %s\n",
+                  __func__, open_error);
+        return false;
+    }
+    llmq::pq::PQRegistryError registry_error;
+    if (!registry->FlushForGC(registry_error)) {
+        LogPrintf("%s -- failed to synchronize PQ registry before GC: %s\n",
+                  __func__, std::string{llmq::pq::PQRegistryResultString(
+                                registry_error.result)});
+        return false;
+    }
+
+    // SYSCOIN: The mandatory registry fsync precedes the authoritative
+    // observation. The caller's cs_main/EvoDB fence excludes chain,
+    // registry, and finality mutations; the final scoped manager observation
+    // below rejects any other in-memory drift before durable Begin().
+    evo::AuxiliaryHistoryGCState observed_state;
+    AuxiliaryHistoryRetentionPlan observed_plan;
+    CandidateStatus observed_status{CandidateStatus::INVALID};
+    {
+        LOCK(cs);
+        observed_state = m_auxiliary_history_gc_journal->GetState();
+        observed_plan = BuildAuxiliaryHistoryRetentionPlan(
+            tip, recovery_snapshot_indexes);
+        observed_status = derive_candidate(
+            observed_plan, observed_state, previous_component, context);
+    }
+    if (observed_status == CandidateStatus::NO_WORK) return true;
+    if (observed_status == CandidateStatus::INVALID) return false;
+
+    evo::AuxiliaryHistoryGCComponent pq_component;
+    evo::PQRegistryGCEraseManifest manifest;
+    if (!registry->BuildGCEraseBatch(
+            context, previous_component,
+            evo::PQRegistryGCEraseManifest::MAX_CANDIDATES,
+            /*max_candidates=*/256,
+            pq_component, manifest, registry_error)) {
+        LogPrintf("%s -- failed to build PQ registry GC batch: %s\n",
+                  __func__, std::string{llmq::pq::PQRegistryResultString(
+                                registry_error.result)});
+        return false;
+    }
+    const auto encoded_manifest{
+        evo::EncodePQRegistryGCEraseManifest(manifest)};
+    if (!encoded_manifest) return false;
+    uint256 intent_id;
+    evo::AuxiliaryHistoryGCState pending_state;
+    {
+        LOCK(cs);
+        const auto begin_state{
+            m_auxiliary_history_gc_journal->GetState()};
+        const auto begin_plan{BuildAuxiliaryHistoryRetentionPlan(
+            tip, recovery_snapshot_indexes)};
+        std::optional<evo::AuxiliaryHistoryGCComponent> begin_previous;
+        llmq::pq::PQRegistryGCAuthenticationContext begin_context;
+        const auto begin_status{derive_candidate(
+            begin_plan, begin_state, begin_previous, begin_context)};
+        if (begin_status == CandidateStatus::INVALID) return false;
+        const bool same_context{
+            begin_context.legacy_island == context.legacy_island &&
+            begin_context.rooted_segment == context.rooted_segment};
+        if (begin_status == CandidateStatus::NO_WORK ||
+            begin_state.watermark != observed_state.watermark ||
+            begin_state.intent != observed_state.intent ||
+            begin_previous != previous_component || !same_context) {
+            retry_required = true;
+            return true;
+        }
+        if (!begin_plan.destructive_authorization) {
+            return false;
+        }
+
+        evo::AuxiliaryHistoryGCIntentTarget target;
+        target.authorization = *begin_plan.destructive_authorization;
+        if (begin_state.watermark) {
+            target.frontier = begin_state.watermark->frontier;
+        }
+        target.frontier.pq_registry = pq_component;
+        target.pq_erase_manifest = evo::AuxiliaryHistoryGCManifest{
+            evo::PQRegistryGCEraseManifest::VERSION,
+            *encoded_manifest};
+
+        const auto begin_result{
+            m_auxiliary_history_gc_journal->Begin(target, &intent_id)};
+        if (begin_result == evo::AuxiliaryHistoryGCJournalResult::BUSY ||
+            begin_result ==
+                evo::AuxiliaryHistoryGCJournalResult::NON_MONOTONIC) {
+            retry_required = true;
+            return true;
+        }
+        if (begin_result ==
+                evo::AuxiliaryHistoryGCJournalResult::ALREADY_COMPLETE) {
+            return !intent_id.IsNull() &&
+                   RefreshEffectiveDMNInverseGCBoundary();
+        }
+        if ((begin_result !=
+                 evo::AuxiliaryHistoryGCJournalResult::STARTED &&
+             begin_result !=
+                 evo::AuxiliaryHistoryGCJournalResult::EXISTING) ||
+            intent_id.IsNull() ||
+            !RefreshEffectiveDMNInverseGCBoundary()) {
+            return false;
+        }
+        pending_state = m_auxiliary_history_gc_journal->GetState();
+    }
+    retry_required = true;
+
+    if (!pending_state.intent ||
+        pending_state.intent->intent_id != intent_id ||
+        !registry->InstallEffectiveGCFloor(
+            pending_state, registry_error, context)) {
+        LogPrintf("%s -- failed to install new PQ GC floor: %s\n",
+                  __func__, std::string{llmq::pq::PQRegistryResultString(
+                                registry_error.result)});
+        return false;
+    }
+    if (!registry->EraseGCManifest(
+            pq_component, previous_component, context, manifest,
+            registry_error)) {
+        LogPrintf("%s -- failed to apply new PQ GC manifest: %s\n",
+                  __func__, std::string{llmq::pq::PQRegistryResultString(
+                                registry_error.result)});
+        return false;
+    }
+
+    {
+        LOCK(cs);
+        const auto final_state{
+            m_auxiliary_history_gc_journal->GetState()};
+        if (final_state.intent != pending_state.intent ||
+            final_state.watermark != pending_state.watermark) {
+            return false;
+        }
+        switch (m_auxiliary_history_gc_journal->Complete(intent_id)) {
+        case evo::AuxiliaryHistoryGCJournalResult::COMPLETED:
+        case evo::AuxiliaryHistoryGCJournalResult::ALREADY_COMPLETE:
+            retry_required = false;
+            return RefreshEffectiveDMNInverseGCBoundary();
+        case evo::AuxiliaryHistoryGCJournalResult::STARTED:
+        case evo::AuxiliaryHistoryGCJournalResult::EXISTING:
+        case evo::AuxiliaryHistoryGCJournalResult::BUSY:
+        case evo::AuxiliaryHistoryGCJournalResult::NON_MONOTONIC:
+        case evo::AuxiliaryHistoryGCJournalResult::INVALID_ARGUMENT:
+        case evo::AuxiliaryHistoryGCJournalResult::MISMATCH:
+        case evo::AuxiliaryHistoryGCJournalResult::CORRUPT:
+        case evo::AuxiliaryHistoryGCJournalResult::DB_ERROR:
+            return false;
+        }
+    }
+    return false;
+}
+
 bool CDeterministicMNManager::ResumePendingDMNInverseGC(
     const CBlockIndex* tip,
     const AuxiliaryHistoryRetentionPlan& plan,
@@ -4743,6 +5276,11 @@ bool CDeterministicMNManager::DoMaintenance(
         return true;
     }
 
+    // SYSCOIN: Direct test callers and production FlushStateToDisk share one
+    // insertion fence. Recursive acquisition is intentional because the
+    // production caller already holds cs_main while publishing chainstate.
+    LOCK(::cs_main);
+
     std::vector<const CBlockIndex*> recovery_indexes;
     recovery_indexes.reserve(recovery_snapshot_indexes.size());
     const int dip3_height{Params().GetConsensus().DIP0003Height};
@@ -4779,7 +5317,15 @@ bool CDeterministicMNManager::DoMaintenance(
     }
 
     llmq::pq::PQRegistryManager* pq_registry{nullptr};
-    if (m_pq_registry_init_requested.load(std::memory_order_acquire)) {
+    const auto opening_gc_state{
+        m_auxiliary_history_gc_journal->GetState()};
+    const bool has_durable_pq_frontier{
+        (opening_gc_state.watermark &&
+         opening_gc_state.watermark->frontier.pq_registry) ||
+        (opening_gc_state.intent &&
+         opening_gc_state.intent->target.frontier.pq_registry)};
+    if (has_durable_pq_frontier ||
+        m_pq_registry_init_requested.load(std::memory_order_acquire)) {
         std::string registry_error;
         pq_registry = GetOrCreatePQRegistry(registry_error);
         if (pq_registry == nullptr) {
@@ -4809,6 +5355,8 @@ bool CDeterministicMNManager::DoMaintenance(
     const CBlockIndex* tip{nullptr};
     AuxiliaryHistoryRetentionPlan retention_plan;
     bool auxiliary_gc_retry_required{false};
+    const bool had_pending_intent{
+        opening_gc_state.intent.has_value()};
     {
         LOCK(cs);
         tip = tipIndex;
@@ -4818,7 +5366,14 @@ bool CDeterministicMNManager::DoMaintenance(
     if (retention_plan.requirements_valid && tip != nullptr) {
         // SYSCOIN: Resume the immutable durable target before a same-tip
         // shortcut or any attempt to derive a newer frontier.
-        if (!ResumePendingDMNInverseGC(
+        bool pq_handled{false};
+        if (!ResumePendingPQRegistryGC(
+                tip, recovery_indexes, retention_plan, pq_handled,
+                auxiliary_gc_retry_required)) {
+            return false;
+        }
+        if (!pq_handled &&
+            !ResumePendingDMNInverseGC(
                 tip, retention_plan, auxiliary_gc_retry_required)) {
             return false;
         }
@@ -4859,11 +5414,25 @@ bool CDeterministicMNManager::DoMaintenance(
         !verify_recovery_snapshots()) {
         return false;
     }
+    const auto shortcut_gc_state{
+        m_auxiliary_history_gc_journal->GetState()};
     const bool auxiliary_gc_pending{
-        retention_plan.AllowsDestructiveGC() &&
-        m_auxiliary_history_gc_journal->GetState().intent.has_value()};
+        shortcut_gc_state.intent.has_value()};
+    const bool pq_scan_cleanup_ready{
+        !auxiliary_gc_pending && shortcut_gc_state.watermark &&
+        retention_plan.effective_pq_registry_gc_boundary &&
+        retention_plan.effective_pq_registry_gc_boundary->closure
+                .scan_complete == evo::PQRegistryGCClosure::SCANNING &&
+        retention_plan.destructive_authorization &&
+        !retention_plan.finality_health_ambiguous &&
+        retention_plan.destructive_authorization->block.height >
+            shortcut_gc_state.watermark->authorization.block.height &&
+        static_cast<uint8_t>(
+            retention_plan.destructive_authorization->source) >=
+            static_cast<uint8_t>(
+                shortcut_gc_state.watermark->authorization.source)};
     if (cache_entry_count == 0 && erase_entry_count == 0 &&
-        !auxiliary_gc_pending &&
+        !auxiliary_gc_pending && !pq_scan_cleanup_ready &&
         WITH_LOCK(cs, return m_last_maintained_tip == tip_hash &&
                              m_last_maintained_recovery_blocks ==
                                  recovery_hashes)) {
@@ -4916,17 +5485,90 @@ bool CDeterministicMNManager::DoMaintenance(
         // EvoDB->manager lock order.
         retention_plan = BuildAuxiliaryHistoryRetentionPlan(
             tip, recovery_indexes);
-        if (!retention_plan.requirements_valid) {
-            LogPrintf("%s -- invalid auxiliary-history retention "
-                      "requirements before GC preparation\n",
-                      __func__);
-            return false;
-        }
-        if (!PrepareDMNInverseGCIntent(
+    }
+    if (!retention_plan.requirements_valid) {
+        LogPrintf("%s -- invalid auxiliary-history retention "
+                  "requirements before GC preparation\n",
+                  __func__);
+        return false;
+    }
+    if (!had_pending_intent) {
+        const auto initial_gc_state{
+            m_auxiliary_history_gc_journal->GetState()};
+        const uint64_t completed_sequence{initial_gc_state.watermark
+            ? initial_gc_state.watermark->sequence
+            : 0};
+        const bool dmn_first{completed_sequence % 2 == 0};
+        const auto try_dmn = [&](bool& retry_required)
+            EXCLUSIVE_LOCKS_REQUIRED(m_evoDb->cs) {
+            LOCK(cs);
+            return PrepareDMNInverseGCIntent(
                 tip, recovery_indexes, retention_plan,
-                auxiliary_gc_retry_required)) {
+                retry_required);
+        };
+        const auto try_pq = [&](bool& retry_required)
+            EXCLUSIVE_LOCKS_REQUIRED(m_evoDb->cs) {
+            return PreparePQRegistryGCIntent(
+                tip, recovery_indexes,
+                retry_required);
+        };
+        const auto try_preferred_then_fallback =
+            [&](const auto& preferred, const auto& fallback)
+                EXCLUSIVE_LOCKS_REQUIRED(m_evoDb->cs) {
+            const auto before{
+                m_auxiliary_history_gc_journal->GetState()};
+            bool preferred_retry{false};
+            if (!preferred(preferred_retry)) {
+                auxiliary_gc_retry_required |= preferred_retry;
+                return false;
+            }
+            const auto after{
+                m_auxiliary_history_gc_journal->GetState()};
+            if (after.watermark != before.watermark ||
+                after.intent != before.intent) {
+                auxiliary_gc_retry_required |= preferred_retry;
+                return true;
+            }
+            // SYSCOIN: A local store may be temporarily blocked without
+            // publishing a shared-journal transition. That retry must keep
+            // the same-tip marker clear, but must not starve the other store.
+            bool fallback_retry{false};
+            const bool success{fallback(fallback_retry)};
+            const auto fallback_after{
+                m_auxiliary_history_gc_journal->GetState()};
+            const bool fallback_published{
+                fallback_after.watermark != after.watermark ||
+                fallback_after.intent != after.intent};
+            auxiliary_gc_retry_required |= fallback_retry ||
+                (!fallback_published && preferred_retry);
+            return success;
+        };
+        if (!(dmn_first
+                  ? try_preferred_then_fallback(try_dmn, try_pq)
+                  : try_preferred_then_fallback(try_pq, try_dmn))) {
             return false;
         }
+    }
+
+    {
+        LOCK(cs);
+        // SYSCOIN: A successful Begin/Complete changes the common durable
+        // floor. Rebuild the retained windows before selecting tombstones.
+        retention_plan = BuildAuxiliaryHistoryRetentionPlan(
+            tip, recovery_indexes);
+        if (!retention_plan.requirements_valid) return false;
+    }
+    retained_hashes_ordered.clear();
+    retained_hashes.clear();
+    for (const auto& branch : retention_plan.branches) {
+        retained_hashes.insert(branch.snapshot_window.begin(),
+                               branch.snapshot_window.end());
+        if (branch.active) {
+            retained_hashes_ordered = branch.snapshot_window;
+        }
+    }
+    for (const auto& dependency : retention_plan.fixed_dependencies) {
+        retained_hashes.insert(dependency.block_hash);
     }
     const auto auxiliary_gc_state{
         m_auxiliary_history_gc_journal->GetState()};
@@ -4983,14 +5625,6 @@ bool CDeterministicMNManager::DoMaintenance(
 
     for (const uint256& key : prune_keys) {
         m_evoDb->EraseCache(key);
-        if (pq_registry != nullptr &&
-            !pq_registry->PruneSnapshot(key, /*fSync=*/false)) {
-            return false;
-        }
-    }
-    if (!prune_keys.empty() && pq_registry != nullptr &&
-        !pq_registry->Flush(fSync)) {
-        return false;
     }
     if (!prune_keys.empty() && !m_evoDb->FlushCacheToDisk(/*CHUNK_ITEMS=*/256, fSync)) {
         return false;
@@ -5011,6 +5645,22 @@ bool CDeterministicMNManager::DoMaintenance(
 
     {
         LOCK(cs);
+        const auto final_gc_state{
+            m_auxiliary_history_gc_journal->GetState()};
+        if (had_pending_intent && !final_gc_state.intent &&
+            final_gc_state.watermark &&
+            retention_plan.destructive_authorization &&
+            retention_plan.destructive_authorization->block.height >
+                final_gc_state.watermark->authorization.block.height &&
+            static_cast<uint8_t>(
+                retention_plan.destructive_authorization->source) >=
+                static_cast<uint8_t>(
+                    final_gc_state.watermark->authorization.source)) {
+            // SYSCOIN: Completing a crash-restored intent consumes its old
+            // authorizer, not a newer live one. Force a follow-up pass even
+            // when this tip and its recovery set are otherwise unchanged.
+            auxiliary_gc_retry_required = true;
+        }
         if (!auxiliary_gc_retry_required &&
             m_replay_snapshot_retention_generation ==
                 retention_plan.generation) {

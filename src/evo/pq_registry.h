@@ -485,6 +485,13 @@ private:
         bool derive_initial_base = false,
         bool verify_island_only = false) const
         EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    [[nodiscard]] bool BuildGCFloorClosureLocked(
+        uint64_t generation,
+        std::optional<uint256> scan_after_key,
+        const PQRegistryGCAuthenticationContext& context,
+        const evo::PQRegistryGCClosure* previous,
+        evo::PQRegistryGCClosure& closure,
+        PQRegistryError& error) const EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
     [[nodiscard]] bool ReconstructPersistentSnapshotViewAboveFloor(
         const uint256& block_hash,
         int32_t expected_height,
@@ -539,6 +546,38 @@ public:
         const evo::PQRegistryGCClosure* previous,
         evo::PQRegistryGCClosure& closure,
         PQRegistryError& error) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /**
+     * Build one deterministic, bounded physical erase pass and the closure
+     * that durably advances over it. Generation is derived from the previous
+     * component so callers cannot select a journal position independently.
+     * Independent scan and candidate budgets cap both read latency and the
+     * number of synchronously erased keys in the resulting intent.
+     */
+    [[nodiscard]] bool BuildGCEraseBatch(
+        const PQRegistryGCAuthenticationContext& context,
+        const std::optional<evo::AuxiliaryHistoryGCComponent>& previous,
+        std::size_t max_scanned_records,
+        std::size_t max_candidates,
+        evo::AuxiliaryHistoryGCComponent& target,
+        evo::PQRegistryGCEraseManifest& manifest,
+        PQRegistryError& error) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /** Synchronously make every registry write visible to a later GC scan. */
+    [[nodiscard]] bool FlushForGC(PQRegistryError& error)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /**
+     * Revalidate and synchronously erase one already-installed manifest.
+     * Retrying after a crash accepts only an erased candidate prefix followed
+     * by an exact present suffix.
+     */
+    [[nodiscard]] bool EraseGCManifest(
+        const evo::AuxiliaryHistoryGCComponent& target,
+        const std::optional<evo::AuxiliaryHistoryGCComponent>& previous,
+        const PQRegistryGCAuthenticationContext& context,
+        const evo::PQRegistryGCEraseManifest& manifest,
+        PQRegistryError& error) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /**
      * Install the crash-monotonic PQ history floor selected by the shared GC
@@ -636,9 +675,6 @@ public:
 
     [[nodiscard]] bool Flush(bool fSync = true)
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
-    [[nodiscard]] bool PruneSnapshot(
-        const uint256& block_hash,
-        bool fSync = false) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     [[nodiscard]] CEvoDB<uint256, PQRegistryDiskSnapshot,
                          StaticSaltedHasher>& SnapshotDatabase()

@@ -2631,7 +2631,7 @@ BOOST_AUTO_TEST_CASE(
     constexpr int checkpoint_height{
         preparation_height + llmq::pq::PQ_REGISTRY_CHECKPOINT_INTERVAL};
     constexpr int first_height{preparation_height - 1};
-    const int block_count{checkpoint_height - preparation_height + 1};
+    const int block_count{checkpoint_height - preparation_height + 2};
 
     SnapshotIndexChain chain{
         first_height,
@@ -2725,26 +2725,22 @@ BOOST_AUTO_TEST_CASE(
         evo::MakeAuxiliaryHistoryGCDeployment(consensus).configuration_id,
         {anchor_height, consensus.hashPQLegacyAnchorBlock},
         *empty_pq_root};
-    evo::PQRegistryGCClosure closure;
+    evo::AuxiliaryHistoryGCComponent component;
+    evo::PQRegistryGCEraseManifest erase_manifest;
     {
         llmq::pq::PQRegistryManager authenticator{
             pq_db_params, consensus.hashGenesisBlock, registry_config,
             root_config};
-        BOOST_REQUIRE(authenticator.BuildGCFloorClosure(
-            /*generation=*/1, /*scan_after_key=*/std::nullopt,
-            context, /*previous=*/nullptr, closure, registry_error));
+        BOOST_REQUIRE(authenticator.FlushForGC(registry_error));
+        BOOST_REQUIRE(authenticator.BuildGCEraseBatch(
+            context, std::nullopt, /*max_scanned_records=*/1,
+            /*max_candidates=*/1, component, erase_manifest,
+            registry_error));
     }
-    const auto closure_payload{evo::EncodePQRegistryGCClosure(closure)};
-    BOOST_REQUIRE(closure_payload);
-    const evo::AuxiliaryHistoryGCComponent component{
-        evo::PQRegistryGCClosure::VERSION, /*monotonic_position=*/1,
-        *closure_payload};
-    const auto component_hash{
-        evo::GetAuxiliaryHistoryGCComponentHash(component)};
-    BOOST_REQUIRE(component_hash);
-    evo::PQRegistryGCEraseManifest erase_manifest;
-    erase_manifest.target_component_hash = *component_hash;
-    erase_manifest.reached_eof = 1;
+    const auto closure{evo::DecodePQRegistryGCClosure(component.closure)};
+    BOOST_REQUIRE(closure);
+    BOOST_CHECK_EQUAL(closure->scan_complete,
+                      evo::PQRegistryGCClosure::SCANNING);
     const auto manifest_payload{
         evo::EncodePQRegistryGCEraseManifest(erase_manifest)};
     BOOST_REQUIRE(manifest_payload);
@@ -2763,18 +2759,97 @@ BOOST_AUTO_TEST_CASE(
         BOOST_REQUIRE(builder.m_evoDb->WriteThrough(
             consensus.hashPQLegacyAnchorBlock, anchor_snapshot,
             /*fSync=*/true));
+        for (int height{checkpoint_height};
+             height <= checkpoint_height + 1; ++height) {
+            BOOST_REQUIRE(builder.m_evoDb->WriteThrough(
+                chain.At(height)->GetBlockHash(),
+                CDeterministicMNList{
+                    chain.At(height)->GetBlockHash(), height, 0},
+                /*fSync=*/true));
+        }
         BOOST_REQUIRE(builder.BeginAuxiliaryHistoryGCIntentForTesting(
             target));
     }
 
     CDeterministicMNManager restarted{db_params};
-    const CBlockIndex* recovered{chain.At(checkpoint_height)};
+    const CBlockIndex* authorizer{chain.At(checkpoint_height)};
+    const CBlockIndex* recovered{chain.At(checkpoint_height + 1)};
     const auto lookup_authorizer = [&](const uint256& hash) {
-        return hash == recovered->GetBlockHash() ? recovered : nullptr;
+        return hash == authorizer->GetBlockHash() ? authorizer : nullptr;
     };
     BOOST_REQUIRE(restarted.UpdatedBlockTipForStartup(
         recovered, lookup_authorizer));
+    const CDeterministicMNManager::AuxiliaryHistoryGCAuthorization
+        live_authorization{
+            evo::AuxiliaryHistoryGCAuthorizationSource::
+                ENFORCED_DURABLE_CHAINLOCK,
+            {checkpoint_height + 1, recovered->GetBlockHash()}};
+    BOOST_REQUIRE(restarted.UpdateAuxiliaryHistoryGCAuthorization(
+        live_authorization));
     BOOST_REQUIRE(restarted.VerifyPersistedPQRegistrySnapshot(recovered));
+    const auto pending_plan{
+        restarted.GetAuxiliaryHistoryRetentionPlanForTesting()};
+    BOOST_REQUIRE(pending_plan.requirements_valid);
+    BOOST_REQUIRE(pending_plan.effective_pq_registry_gc_boundary);
+    BOOST_CHECK(pending_plan.effective_pq_registry_gc_boundary->pending);
+    BOOST_CHECK(
+        pending_plan.effective_pq_registry_gc_boundary->closure.checkpoint ==
+        closure->checkpoint);
+
+    const std::array<const CBlockIndex*, 1> below_checkpoint{
+        chain.At(checkpoint_height - 1)};
+    BOOST_CHECK(!restarted.GetAuxiliaryHistoryRetentionPlanForTesting(
+                              below_checkpoint)
+                     .requirements_valid);
+    uint256 side_checkpoint_hash{MakeSnapshotKey(120'999)};
+    CBlockIndex side_checkpoint;
+    side_checkpoint.nHeight = checkpoint_height;
+    side_checkpoint.pprev = chain.At(checkpoint_height - 1);
+    side_checkpoint.phashBlock = &side_checkpoint_hash;
+    const std::array<const CBlockIndex*, 1> side_checkpoint_recovery{
+        &side_checkpoint};
+    BOOST_CHECK(!restarted.GetAuxiliaryHistoryRetentionPlanForTesting(
+                              side_checkpoint_recovery)
+                     .requirements_valid);
+
+    // SYSCOIN: A restart resumes the PQ-owned intent before considering new
+    // DMN work, installs its logical floor, and completes its exact manifest.
+    BOOST_REQUIRE(restarted.FlushCacheToDisk(
+        /*bForceFlush=*/true, /*fSync=*/false));
+    const auto completed_state{
+        restarted.GetAuxiliaryHistoryGCStateForTesting()};
+    BOOST_CHECK(!completed_state.intent);
+    BOOST_REQUIRE(completed_state.watermark);
+    BOOST_CHECK(completed_state.watermark->frontier.pq_registry ==
+                target.frontier.pq_registry);
+    BOOST_CHECK(completed_state.watermark->authorization ==
+                target.authorization);
+
+    // SYSCOIN: Resuming an old-authorizer SCANNING intent cannot set the
+    // same-tip marker while a newer live authorizer can continue that exact
+    // checkpoint. The follow-up consumes C+1 once, then the unchanged live
+    // authorization becomes stable no-work.
+    BOOST_REQUIRE(restarted.FlushCacheToDisk(
+        /*bForceFlush=*/true, /*fSync=*/false));
+    const auto continued_state{
+        restarted.GetAuxiliaryHistoryGCStateForTesting()};
+    BOOST_CHECK(!continued_state.intent);
+    BOOST_REQUIRE(continued_state.watermark);
+    BOOST_REQUIRE(continued_state.watermark->frontier.pq_registry);
+    const auto continued_closure{evo::DecodePQRegistryGCClosure(
+        continued_state.watermark->frontier.pq_registry->closure)};
+    BOOST_REQUIRE(continued_closure);
+    BOOST_CHECK_EQUAL(continued_closure->generation,
+                      closure->generation + 1);
+    BOOST_CHECK(continued_closure->checkpoint == closure->checkpoint);
+    BOOST_CHECK(continued_state.watermark->authorization ==
+                live_authorization);
+    BOOST_REQUIRE(restarted.FlushCacheToDisk(
+        /*bForceFlush=*/true, /*fSync=*/false));
+    const auto stable_state{
+        restarted.GetAuxiliaryHistoryGCStateForTesting()};
+    BOOST_CHECK(stable_state.intent == continued_state.intent);
+    BOOST_CHECK(stable_state.watermark == continued_state.watermark);
     llmq::pq::PQRegistrySnapshot below_floor_snapshot;
     std::string below_floor_error;
     BOOST_CHECK(!restarted.GetPQRegistrySnapshot(
@@ -3674,33 +3749,6 @@ BOOST_FIXTURE_TEST_CASE(
         BOOST_CHECK(completed_state.watermark->frontier.dmn ==
                     expected_gc_component);
 
-        // A shared intent carrying an unprocessed PQ advance must not be
-        // completed by the DMN stage, even when its carried DMN frontier is
-        // already physically satisfied.
-        evo::AuxiliaryHistoryGCIntentTarget combined_target;
-        combined_target.authorization = {
-            CDeterministicMNManager::
-                AuxiliaryHistoryGCAuthorizationSource::
-                    ENFORCED_DURABLE_CHAINLOCK,
-            {start_height + gc_boundary_offset + 1,
-             hashes[gc_boundary_offset + 1]}};
-        combined_target.frontier = completed_state.watermark->frontier;
-        combined_target.frontier.pq_registry =
-            evo::AuxiliaryHistoryGCComponent{1, 1, {0x51}};
-        combined_target.pq_erase_manifest =
-            evo::AuxiliaryHistoryGCManifest{1, {0x52}};
-        BOOST_REQUIRE(restarted.UpdateAuxiliaryHistoryGCAuthorization(
-            combined_target.authorization));
-        BOOST_REQUIRE(restarted.BeginAuxiliaryHistoryGCIntentForTesting(
-            combined_target));
-        const auto combined_state{
-            restarted.GetAuxiliaryHistoryGCStateForTesting()};
-        BOOST_REQUIRE(combined_state.intent);
-        BOOST_REQUIRE(restarted.FlushCacheToDisk(
-            /*bForceFlush=*/true, /*fSync=*/false));
-        BOOST_CHECK(restarted.GetAuxiliaryHistoryGCStateForTesting().intent ==
-                    combined_state.intent);
-
         // Recovery heads below B or on a branch with a different block at B
         // cannot widen the random-access window across the durable floor.
         const std::array<const CBlockIndex*, 1> below_boundary_recovery{
@@ -3797,6 +3845,39 @@ BOOST_FIXTURE_TEST_CASE(
             hashes[gc_boundary_offset], boundary_inverse));
         BOOST_CHECK(!reopened.GetInverseJournalEntryStatsForTesting(
             hashes[gc_boundary_offset - 1], boundary_inverse));
+
+        // SYSCOIN: A shared intent carrying a malformed PQ advance is not a
+        // usable effective floor and must fail closed before either store can
+        // complete it. Publish it last because the durable journal correctly
+        // makes this corruption sticky across restart.
+        const auto completed_state{
+            reopened.GetAuxiliaryHistoryGCStateForTesting()};
+        BOOST_REQUIRE(completed_state.watermark);
+        evo::AuxiliaryHistoryGCIntentTarget combined_target;
+        combined_target.authorization = {
+            CDeterministicMNManager::
+                AuxiliaryHistoryGCAuthorizationSource::
+                    ENFORCED_DURABLE_CHAINLOCK,
+            {start_height + gc_boundary_offset + 1,
+             hashes[gc_boundary_offset + 1]}};
+        combined_target.frontier = completed_state.watermark->frontier;
+        combined_target.frontier.pq_registry =
+            evo::AuxiliaryHistoryGCComponent{1, 1, {0x51}};
+        combined_target.pq_erase_manifest =
+            evo::AuxiliaryHistoryGCManifest{1, {0x52}};
+        BOOST_REQUIRE(reopened.UpdateAuxiliaryHistoryGCAuthorization(
+            combined_target.authorization));
+        BOOST_REQUIRE(reopened.BeginAuxiliaryHistoryGCIntentForTesting(
+            combined_target));
+        const auto combined_state{
+            reopened.GetAuxiliaryHistoryGCStateForTesting()};
+        BOOST_REQUIRE(combined_state.intent);
+        BOOST_CHECK(!reopened.GetAuxiliaryHistoryRetentionPlanForTesting()
+                         .requirements_valid);
+        BOOST_CHECK(!reopened.FlushCacheToDisk(
+            /*bForceFlush=*/true, /*fSync=*/false));
+        BOOST_CHECK(reopened.GetAuxiliaryHistoryGCStateForTesting().intent ==
+                    combined_state.intent);
     }
 }
 
