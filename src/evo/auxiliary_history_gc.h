@@ -78,6 +78,37 @@ struct AuxiliaryHistoryGCOptionalFormatter {
     }
 };
 
+template <std::size_t MaximumElements>
+struct AuxiliaryHistoryGCLimitedVectorFormatter {
+    template <typename Stream, typename Value>
+    void Ser(Stream& stream, const std::vector<Value>& values)
+    {
+        if (values.size() > MaximumElements) {
+            throw std::ios_base::failure{
+                "auxiliary-history GC vector too large"};
+        }
+        WriteCompactSize(stream, values.size());
+        for (const auto& value : values) stream << value;
+    }
+
+    template <typename Stream, typename Value>
+    void Unser(Stream& stream, std::vector<Value>& values)
+    {
+        const std::size_t size{ReadCompactSize(stream)};
+        if (size > MaximumElements) {
+            throw std::ios_base::failure{
+                "auxiliary-history GC vector too large"};
+        }
+        values.clear();
+        values.reserve(size);
+        for (std::size_t i{0}; i < size; ++i) {
+            Value value;
+            stream >> value;
+            values.push_back(std::move(value));
+        }
+    }
+};
+
 enum class AuxiliaryHistoryGCAuthorizationSource : uint8_t {
     IMMUTABLE_CHAINLOCK_ANCHOR = 0,
     ENFORCED_DURABLE_CHAINLOCK,
@@ -159,6 +190,79 @@ EncodeDMNInverseGCClosure(const DMNInverseGCClosure& closure);
 DecodeDMNInverseGCClosure(Span<const unsigned char> payload);
 
 /**
+ * SYSCOIN: Crash-monotonic authenticated checkpoint for bounded PQ-registry
+ * pruning. A fixed-width cursor encoding keeps the closure canonical while
+ * the optional value distinguishes an in-progress scan from completion.
+ */
+struct PQRegistryGCClosure {
+    static constexpr uint32_t FORMAT_GUARD{0x50514331}; // "PQC1"
+    static constexpr uint16_t VERSION{1};
+    static constexpr uint8_t SCANNING{0};
+    static constexpr uint8_t COMPLETE{1};
+    static constexpr std::size_t SERIALIZED_SIZE{
+        sizeof(uint32_t) + sizeof(uint16_t) + sizeof(uint64_t) +
+        sizeof(int32_t) + 6 * uint256::size() + 2 * sizeof(uint8_t)};
+
+    uint32_t format_guard{FORMAT_GUARD};
+    uint16_t version{VERSION};
+    uint64_t generation{0};
+    AuxiliaryHistoryGCBlockIdentity checkpoint;
+    uint256 checkpoint_state_root;
+    uint256 checkpoint_record_hash;
+    uint256 cumulative_lineage_commitment;
+    uint256 legacy_island_commitment;
+    uint8_t scan_complete{SCANNING};
+    std::optional<uint256> scan_after_key;
+
+    [[nodiscard]] bool IsValid() const noexcept;
+
+    template <typename Stream>
+    void Serialize(Stream& stream) const
+    {
+        const uint8_t cursor_present{
+            static_cast<uint8_t>(scan_after_key.has_value())};
+        const uint256 cursor{scan_after_key.value_or(uint256{})};
+        ::SerializeMany(stream, format_guard, version, generation,
+                        checkpoint, checkpoint_state_root,
+                        checkpoint_record_hash,
+                        cumulative_lineage_commitment,
+                        legacy_island_commitment, scan_complete,
+                        cursor_present, cursor);
+    }
+
+    template <typename Stream>
+    void Unserialize(Stream& stream)
+    {
+        uint8_t cursor_present{0};
+        uint256 cursor;
+        ::UnserializeMany(stream, format_guard, version, generation,
+                          checkpoint, checkpoint_state_root,
+                          checkpoint_record_hash,
+                          cumulative_lineage_commitment,
+                          legacy_island_commitment, scan_complete,
+                          cursor_present, cursor);
+        if (scan_complete > COMPLETE || cursor_present > 1 ||
+            (cursor_present == 0 && !cursor.IsNull()) ||
+            (cursor_present == 1 && cursor.IsNull())) {
+            throw std::ios_base::failure{
+                "non-canonical PQ-registry GC closure"};
+        }
+        scan_after_key = cursor_present == 1
+            ? std::optional<uint256>{cursor}
+            : std::nullopt;
+    }
+
+    friend bool operator==(const PQRegistryGCClosure&,
+                           const PQRegistryGCClosure&) = default;
+};
+
+[[nodiscard]] std::optional<std::vector<unsigned char>>
+EncodePQRegistryGCClosure(const PQRegistryGCClosure& closure);
+
+[[nodiscard]] std::optional<PQRegistryGCClosure>
+DecodePQRegistryGCClosure(Span<const unsigned char> payload);
+
+/**
  * SYSCOIN: Bounded, versioned closure data owned by one auxiliary store.
  * The coordinator treats the payload as opaque; the store-specific GC pass
  * must decode it before Begin() and again before applying any deletion.
@@ -186,6 +290,13 @@ struct AuxiliaryHistoryGCComponent {
 [[nodiscard]] bool IsDMNInverseGCComponentBoundedByAuthorization(
     const AuxiliaryHistoryGCComponent& component,
     const AuxiliaryHistoryGCAuthorization& authorization);
+
+[[nodiscard]] bool IsPQRegistryGCComponentBoundedByAuthorization(
+    const AuxiliaryHistoryGCComponent& component,
+    const AuxiliaryHistoryGCAuthorization& authorization);
+
+[[nodiscard]] std::optional<uint256> GetAuxiliaryHistoryGCComponentHash(
+    const AuxiliaryHistoryGCComponent& component);
 
 /** Compact cumulative closures that survive after an erase completes. */
 struct AuxiliaryHistoryGCFrontier {
@@ -233,6 +344,74 @@ struct AuxiliaryHistoryGCManifest {
     friend bool operator==(const AuxiliaryHistoryGCManifest&,
                            const AuxiliaryHistoryGCManifest&) = default;
 };
+
+/** One exact physical PQ-registry record authorized for bounded removal. */
+struct PQRegistryGCEraseCandidate {
+    uint256 key;
+    int32_t height{-1};
+    uint256 exact_record_hash;
+
+    [[nodiscard]] bool IsValid() const noexcept
+    {
+        return !key.IsNull() && height >= 0 &&
+               !exact_record_hash.IsNull();
+    }
+
+    SERIALIZE_METHODS(PQRegistryGCEraseCandidate, obj)
+    {
+        READWRITE(obj.key, obj.height, obj.exact_record_hash);
+    }
+
+    friend bool operator==(const PQRegistryGCEraseCandidate&,
+                           const PQRegistryGCEraseCandidate&) = default;
+};
+
+/**
+ * SYSCOIN: Exact, bounded PQ-registry erase work for one journal intent.
+ * Store-specific validation binds the optional previous hash to an initial
+ * frontier and proves every candidate lies below the authenticated floor.
+ */
+struct PQRegistryGCEraseManifest {
+    static constexpr uint32_t FORMAT_GUARD{0x50514d31}; // "PQM1"
+    static constexpr uint16_t VERSION{1};
+    static constexpr std::size_t MAX_CANDIDATES{4096};
+
+    uint32_t format_guard{FORMAT_GUARD};
+    uint16_t version{VERSION};
+    std::optional<uint256> previous_component_hash;
+    uint256 target_component_hash;
+    std::optional<uint256> from_cursor;
+    std::optional<uint256> scan_through;
+    uint8_t reached_eof{0};
+    std::vector<PQRegistryGCEraseCandidate> candidates;
+
+    [[nodiscard]] bool IsValid() const noexcept;
+
+    SERIALIZE_METHODS(PQRegistryGCEraseManifest, obj)
+    {
+        READWRITE(obj.format_guard, obj.version,
+                  Using<AuxiliaryHistoryGCOptionalFormatter<uint256>>(
+                      obj.previous_component_hash),
+                  obj.target_component_hash,
+                  Using<AuxiliaryHistoryGCOptionalFormatter<uint256>>(
+                      obj.from_cursor),
+                  Using<AuxiliaryHistoryGCOptionalFormatter<uint256>>(
+                      obj.scan_through),
+                  obj.reached_eof,
+                  Using<AuxiliaryHistoryGCLimitedVectorFormatter<
+                      MAX_CANDIDATES>>(obj.candidates));
+    }
+
+    friend bool operator==(const PQRegistryGCEraseManifest&,
+                           const PQRegistryGCEraseManifest&) = default;
+};
+
+[[nodiscard]] std::optional<std::vector<unsigned char>>
+EncodePQRegistryGCEraseManifest(
+    const PQRegistryGCEraseManifest& manifest);
+
+[[nodiscard]] std::optional<PQRegistryGCEraseManifest>
+DecodePQRegistryGCEraseManifest(Span<const unsigned char> payload);
 
 struct AuxiliaryHistoryGCIntentTarget {
     AuxiliaryHistoryGCAuthorization authorization;

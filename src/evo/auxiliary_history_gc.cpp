@@ -31,6 +31,8 @@ constexpr std::string_view INTENT_ID_DOMAIN{
     "SYS_AUXILIARY_HISTORY_GC_INTENT_ID_V1"};
 constexpr std::string_view WATERMARK_ID_DOMAIN{
     "SYS_AUXILIARY_HISTORY_GC_WATERMARK_ID_V1"};
+constexpr std::string_view COMPONENT_HASH_DOMAIN{
+    "SYS_AUXILIARY_HISTORY_GC_COMPONENT_HASH_V1"};
 
 struct DiskKey {
     uint8_t type{0};
@@ -186,28 +188,49 @@ bool ComponentDominates(
            *next == *previous;
 }
 
-bool PQFrontierAdvances(const AuxiliaryHistoryGCFrontier& previous,
-                        const AuxiliaryHistoryGCFrontier& next)
+bool ComponentAdvances(
+    const std::optional<AuxiliaryHistoryGCComponent>& previous,
+    const std::optional<AuxiliaryHistoryGCComponent>& next)
 {
-    if (!next.pq_registry) return false;
-    return !previous.pq_registry ||
-           next.pq_registry->monotonic_position >
-               previous.pq_registry->monotonic_position;
+    return next &&
+           (!previous ||
+            next->monotonic_position > previous->monotonic_position);
 }
 
-bool ManifestMatchesPQAdvance(
+bool AdvancesExactlyOneComponent(
     const AuxiliaryHistoryGCFrontier& previous,
     const AuxiliaryHistoryGCIntentTarget& target)
 {
-    return PQFrontierAdvances(previous, target.frontier) ==
-           target.pq_erase_manifest.has_value();
+    const bool dmn_advances{
+        ComponentAdvances(previous.dmn, target.frontier.dmn)};
+    const bool pq_advances{
+        ComponentAdvances(previous.pq_registry,
+                          target.frontier.pq_registry)};
+    const bool dmn_unchanged{previous.dmn == target.frontier.dmn};
+    const bool pq_unchanged{
+        previous.pq_registry == target.frontier.pq_registry};
+
+    // SYSCOIN: One durable intent belongs to exactly one store. This keeps
+    // resume ownership unambiguous after a crash and makes omission of the
+    // other store's physical work impossible.
+    return (dmn_advances && pq_unchanged &&
+            !target.pq_erase_manifest) ||
+           (pq_advances && dmn_unchanged &&
+            target.pq_erase_manifest.has_value());
 }
 
-bool ManifestMatchesInitialFrontier(
+bool HasExactlyOneInitialComponent(
     const AuxiliaryHistoryGCIntentTarget& target)
 {
-    return target.frontier.pq_registry.has_value() ==
-           target.pq_erase_manifest.has_value();
+    const bool has_dmn{target.frontier.dmn.has_value()};
+    const bool has_pq{target.frontier.pq_registry.has_value()};
+    return has_dmn != has_pq &&
+           has_pq == target.pq_erase_manifest.has_value();
+}
+
+bool HasExactlyOneComponent(const AuxiliaryHistoryGCFrontier& frontier)
+{
+    return frontier.dmn.has_value() != frontier.pq_registry.has_value();
 }
 
 bool FrontierDominates(const AuxiliaryHistoryGCFrontier& previous,
@@ -246,6 +269,8 @@ bool IsValidWatermark(const AuxiliaryHistoryGCWatermark& watermark,
            watermark.configuration_id == deployment.configuration_id &&
            watermark.authorization.IsValid() &&
            watermark.frontier.IsValid() &&
+           (watermark.sequence != 1 ||
+            HasExactlyOneComponent(watermark.frontier)) &&
            !watermark.completed_intent_id.IsNull() &&
            !watermark.watermark_id.IsNull() &&
            watermark.watermark_id == GetWatermarkId(
@@ -264,9 +289,8 @@ bool IntentAdvancesWatermark(
                                          intent.target.authorization) &&
            FrontierDominates(watermark.frontier,
                              intent.target.frontier) &&
-           ManifestMatchesPQAdvance(watermark.frontier,
-                                    intent.target) &&
-           watermark.frontier != intent.target.frontier;
+           AdvancesExactlyOneComponent(watermark.frontier,
+                                       intent.target);
 }
 
 AuxiliaryHistoryGCWatermark WatermarkFromIntent(
@@ -335,6 +359,50 @@ DecodeDMNInverseGCClosure(Span<const unsigned char> payload)
     }
 }
 
+bool PQRegistryGCClosure::IsValid() const noexcept
+{
+    const bool scan_state_valid{
+        (scan_complete == SCANNING && scan_after_key.has_value()) ||
+        (scan_complete == COMPLETE && !scan_after_key)};
+    return format_guard == FORMAT_GUARD && version == VERSION &&
+           generation > 0 && checkpoint.IsValid() &&
+           !checkpoint_state_root.IsNull() &&
+           !checkpoint_record_hash.IsNull() &&
+           !cumulative_lineage_commitment.IsNull() &&
+           !legacy_island_commitment.IsNull() && scan_state_valid &&
+           (!scan_after_key || !scan_after_key->IsNull());
+}
+
+std::optional<std::vector<unsigned char>>
+EncodePQRegistryGCClosure(const PQRegistryGCClosure& closure)
+{
+    if (!closure.IsValid()) return std::nullopt;
+    DataStream stream;
+    stream << closure;
+    if (stream.size() != PQRegistryGCClosure::SERIALIZED_SIZE) {
+        return std::nullopt;
+    }
+    const auto bytes{MakeUCharSpan(stream)};
+    return std::vector<unsigned char>{bytes.begin(), bytes.end()};
+}
+
+std::optional<PQRegistryGCClosure>
+DecodePQRegistryGCClosure(Span<const unsigned char> payload)
+{
+    if (payload.size() != PQRegistryGCClosure::SERIALIZED_SIZE) {
+        return std::nullopt;
+    }
+    try {
+        DataStream stream{payload};
+        PQRegistryGCClosure closure;
+        stream >> closure;
+        if (!stream.empty() || !closure.IsValid()) return std::nullopt;
+        return closure;
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
 bool AuxiliaryHistoryGCComponent::IsValid() const noexcept
 {
     return version > 0 && monotonic_position > 0 && !closure.empty() &&
@@ -353,6 +421,30 @@ bool IsDMNInverseGCComponentBoundedByAuthorization(
            closure->boundary.height <= authorization.block.height;
 }
 
+bool IsPQRegistryGCComponentBoundedByAuthorization(
+    const AuxiliaryHistoryGCComponent& component,
+    const AuxiliaryHistoryGCAuthorization& authorization)
+{
+    const auto closure{DecodePQRegistryGCClosure(component.closure)};
+    return authorization.IsValid() && component.IsValid() && closure &&
+           component.version == PQRegistryGCClosure::VERSION &&
+           component.monotonic_position == closure->generation &&
+           closure->checkpoint.height <= authorization.block.height;
+}
+
+std::optional<uint256> GetAuxiliaryHistoryGCComponentHash(
+    const AuxiliaryHistoryGCComponent& component)
+{
+    if (!component.IsValid()) return std::nullopt;
+    CHashWriter writer{SER_GETHASH, 0};
+    writer.write(AsBytes(Span{COMPONENT_HASH_DOMAIN.data(),
+                              COMPONENT_HASH_DOMAIN.size()}));
+    writer << component;
+    const uint256 hash{writer.GetHash()};
+    if (hash.IsNull()) return std::nullopt;
+    return hash;
+}
+
 bool AuxiliaryHistoryGCFrontier::IsValid() const noexcept
 {
     return (dmn || pq_registry) && (!dmn || dmn->IsValid()) &&
@@ -362,6 +454,70 @@ bool AuxiliaryHistoryGCFrontier::IsValid() const noexcept
 bool AuxiliaryHistoryGCManifest::IsValid() const noexcept
 {
     return version > 0 && payload.size() <= MAX_MANIFEST_BYTES;
+}
+
+bool PQRegistryGCEraseManifest::IsValid() const noexcept
+{
+    if (format_guard != FORMAT_GUARD || version != VERSION ||
+        target_component_hash.IsNull() || reached_eof > 1 ||
+        candidates.size() > MAX_CANDIDATES ||
+        (previous_component_hash && previous_component_hash->IsNull()) ||
+        (from_cursor && from_cursor->IsNull()) ||
+        (scan_through && scan_through->IsNull()) ||
+        (!candidates.empty() && !scan_through) ||
+        (reached_eof == 0 && !scan_through) ||
+        (from_cursor && scan_through &&
+         !(*from_cursor < *scan_through))) {
+        return false;
+    }
+
+    const uint256* previous_key{nullptr};
+    for (const auto& candidate : candidates) {
+        if (!candidate.IsValid() ||
+            (previous_key && !(*previous_key < candidate.key)) ||
+            (from_cursor && !(*from_cursor < candidate.key)) ||
+            (scan_through && *scan_through < candidate.key)) {
+            return false;
+        }
+        previous_key = &candidate.key;
+    }
+    return true;
+}
+
+std::optional<std::vector<unsigned char>>
+EncodePQRegistryGCEraseManifest(
+    const PQRegistryGCEraseManifest& manifest)
+{
+    if (!manifest.IsValid()) return std::nullopt;
+    try {
+        DataStream stream;
+        stream << manifest;
+        if (stream.size() > AuxiliaryHistoryGCManifest::MAX_MANIFEST_BYTES) {
+            return std::nullopt;
+        }
+        const auto bytes{MakeUCharSpan(stream)};
+        return std::vector<unsigned char>{bytes.begin(), bytes.end()};
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+std::optional<PQRegistryGCEraseManifest>
+DecodePQRegistryGCEraseManifest(Span<const unsigned char> payload)
+{
+    if (payload.empty() ||
+        payload.size() > AuxiliaryHistoryGCManifest::MAX_MANIFEST_BYTES) {
+        return std::nullopt;
+    }
+    try {
+        DataStream stream{payload};
+        PQRegistryGCEraseManifest manifest;
+        stream >> manifest;
+        if (!stream.empty() || !manifest.IsValid()) return std::nullopt;
+        return manifest;
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
 }
 
 bool AuxiliaryHistoryGCIntentTarget::IsValid() const noexcept
@@ -536,7 +692,7 @@ struct AuxiliaryHistoryGCJournal::Impl {
                      ? !IntentAdvancesWatermark(*state.watermark,
                                                 disk_intent.intent)
                      : disk_intent.intent.sequence != 1 ||
-                           !ManifestMatchesInitialFrontier(
+                           !HasExactlyOneInitialComponent(
                                disk_intent.intent.target))) {
                 throw std::runtime_error{
                     "invalid auxiliary-history GC pending intent"};
@@ -600,13 +756,12 @@ AuxiliaryHistoryGCJournalResult AuxiliaryHistoryGCJournal::Begin(
         if (!AuthorizationStrictlyAdvances(watermark.authorization,
                                            target.authorization) ||
             !FrontierDominates(watermark.frontier, target.frontier) ||
-            !ManifestMatchesPQAdvance(watermark.frontier, target) ||
-            watermark.frontier == target.frontier ||
+            !AdvancesExactlyOneComponent(watermark.frontier, target) ||
             watermark.sequence == std::numeric_limits<uint64_t>::max()) {
             return AuxiliaryHistoryGCJournalResult::NON_MONOTONIC;
         }
         sequence = watermark.sequence + 1;
-    } else if (!ManifestMatchesInitialFrontier(target)) {
+    } else if (!HasExactlyOneInitialComponent(target)) {
         return AuxiliaryHistoryGCJournalResult::INVALID_ARGUMENT;
     }
 
