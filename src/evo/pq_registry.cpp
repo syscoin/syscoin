@@ -310,9 +310,11 @@ bool BuildPreparedDiskSnapshot(
         parent->state->consensus_state_root;
     disk.block_tree_ids = *result->block_tree_ids;
     if (disk.is_checkpoint != 0) {
-        disk.operator_states = *result->state->operator_states;
+        disk.checkpoint_operator_states =
+            *result->state->operator_states;
         disk.tree_ids = *result->state->used_tree_ids;
-    } else if (parent->state != result->state) {
+    }
+    if (parent->state != result->state) {
         const auto& previous_states{*parent->state->operator_states};
         const auto& current_states{*result->state->operator_states};
         auto previous{previous_states.begin()};
@@ -1158,22 +1160,35 @@ bool PQRegistryDiskSnapshot::IsStructurallyValid() const noexcept
         consensus_state_root.IsNull() ||
         operator_states.size() > MAX_PQ_OPERATOR_STATES ||
         removed_operators.size() > MAX_PQ_OPERATOR_STATES ||
+        checkpoint_operator_states.size() > MAX_PQ_OPERATOR_STATES ||
         tree_ids.size() > MAX_PQ_USED_TREE_IDS ||
         block_tree_ids.size() > MAX_PQ_TREE_IDS_PER_BLOCK ||
         !IsStrictlySortedOperators(operator_states) ||
+        !IsStrictlySortedOperators(checkpoint_operator_states) ||
         (!removed_operators.empty() &&
          !IsStrictlySortedUnique(removed_operators)) ||
         (!tree_ids.empty() && !IsStrictlySortedUnique(tree_ids)) ||
         (!block_tree_ids.empty() &&
          !IsStrictlySortedUnique(block_tree_ids)) ||
-        (is_checkpoint != 0 && !removed_operators.empty()) ||
-        (is_checkpoint == 0 && !tree_ids.empty()) ||
+        (is_checkpoint == 0 &&
+         (!checkpoint_operator_states.empty() || !tree_ids.empty())) ||
         (is_checkpoint != 0 &&
          (!IsSubset(block_tree_ids, tree_ids) ||
-          !StateTreeIdsAreRecorded(operator_states, tree_ids)))) {
+          !StateTreeIdsAreRecorded(checkpoint_operator_states,
+                                   tree_ids)))) {
         return false;
     }
     for (const auto& state : operator_states) {
+        if (state.has_global_key != 0 &&
+            state.global_key.activated_height >
+                static_cast<uint32_t>(height)) {
+            return false;
+        }
+        if (state.revoked_height > static_cast<uint32_t>(height)) {
+            return false;
+        }
+    }
+    for (const auto& state : checkpoint_operator_states) {
         if (state.has_global_key != 0 &&
             state.global_key.activated_height >
                 static_cast<uint32_t>(height)) {
@@ -1188,6 +1203,24 @@ bool PQRegistryDiskSnapshot::IsStructurallyValid() const noexcept
         if (position != operator_states.end() &&
             position->pro_tx_hash == removed) {
             return false;
+        }
+    }
+    if (is_checkpoint != 0) {
+        for (const auto& state : operator_states) {
+            const auto position{FindOperatorPosition(
+                checkpoint_operator_states, state.pro_tx_hash)};
+            if (position == checkpoint_operator_states.end() ||
+                *position != state) {
+                return false;
+            }
+        }
+        for (const auto& removed : removed_operators) {
+            const auto position{FindOperatorPosition(
+                checkpoint_operator_states, removed)};
+            if (position != checkpoint_operator_states.end() &&
+                position->pro_tx_hash == removed) {
+                return false;
+            }
         }
     }
     return true;
@@ -1404,7 +1437,7 @@ bool PQRegistryManager::ReconstructPersistentSnapshotView(
     }
 
     std::vector<PQRegistryDiskSnapshot> reverse_journal;
-    reverse_journal.reserve(PQ_REGISTRY_CHECKPOINT_INTERVAL);
+    reverse_journal.reserve(2 * PQ_REGISTRY_CHECKPOINT_INTERVAL);
     uint256 cursor{block_hash};
     int32_t cursor_height{expected_height};
     for (int32_t depth{0}; depth < PQ_REGISTRY_CHECKPOINT_INTERVAL; ++depth) {
@@ -1441,20 +1474,69 @@ bool PQRegistryManager::ReconstructPersistentSnapshotView(
         return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
     }
 
-    const auto& checkpoint{reverse_journal.back()};
-    if (checkpoint.height == m_config.preparation_height) {
+    // A checkpoint delta can only be authenticated against its parent state.
+    // Retain one earlier full checkpoint as the bounded cold base, then replay
+    // no more than one complete interval through the newer checkpoint.
+    if (reverse_journal.back().height != m_config.preparation_height) {
+        cursor = reverse_journal.back().previous_block_hash;
+        cursor_height = reverse_journal.back().height - 1;
+        bool found_base{false};
+        for (int32_t depth{0}; depth < PQ_REGISTRY_CHECKPOINT_INTERVAL;
+             ++depth) {
+            PQRegistryDiskSnapshot record;
+            if (!ReadDiskSnapshot(cursor, record, error)) return false;
+            const bool expected_checkpoint{
+                (cursor_height - m_config.preparation_height) %
+                    PQ_REGISTRY_CHECKPOINT_INTERVAL ==
+                0};
+            const auto& child{reverse_journal.back()};
+            if (record.height != cursor_height ||
+                record.block_hash != cursor ||
+                (record.is_checkpoint != 0) != expected_checkpoint ||
+                child.previous_block_hash != record.block_hash ||
+                child.previous_consensus_state_root !=
+                    record.consensus_state_root ||
+                child.height != record.height + 1) {
+                return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
+            }
+            reverse_journal.push_back(std::move(record));
+            if (reverse_journal.back().is_checkpoint != 0) {
+                found_base = true;
+                break;
+            }
+            if (reverse_journal.back().previous_block_hash.IsNull() ||
+                cursor_height <= 0) {
+                return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
+            }
+            cursor = reverse_journal.back().previous_block_hash;
+            --cursor_height;
+        }
+        if (!found_base) {
+            return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
+        }
+    }
+    if (reverse_journal.size() >
+        2 * static_cast<std::size_t>(PQ_REGISTRY_CHECKPOINT_INTERVAL)) {
+        return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
+    }
+
+    const auto& base_checkpoint{reverse_journal.back()};
+    std::optional<uint256> preparation_parent_root;
+    if (base_checkpoint.height == m_config.preparation_height) {
         const auto parent_root{
             EmptyRegistryConsensusStateRoot(m_genesis_hash)};
-        if (!parent_root || checkpoint.previous_consensus_state_root !=
+        if (!parent_root || base_checkpoint.previous_consensus_state_root !=
                                 *parent_root) {
             return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
         }
+        preparation_parent_root = *parent_root;
     } else {
         PQRegistryDiskSnapshot parent;
-        if (!ReadDiskSnapshot(checkpoint.previous_block_hash, parent, error) ||
-            parent.height != checkpoint.height - 1 ||
+        if (!ReadDiskSnapshot(base_checkpoint.previous_block_hash, parent,
+                              error) ||
+            parent.height != base_checkpoint.height - 1 ||
             parent.consensus_state_root !=
-                checkpoint.previous_consensus_state_root) {
+                base_checkpoint.previous_consensus_state_root) {
             return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
         }
     }
@@ -1463,6 +1545,10 @@ bool PQRegistryManager::ReconstructPersistentSnapshotView(
     std::shared_ptr<const std::vector<uint256>> used_tree_ids;
     std::shared_ptr<const PQRegistryStateData> authenticated_state;
     uint256 used_tree_ids_hash;
+    if (preparation_parent_root) {
+        used_tree_ids =
+            std::make_shared<const std::vector<uint256>>();
+    }
     SnapshotViewCache staged;
     const std::size_t staged_count{std::min(
         reverse_journal.size(), PQ_REGISTRY_SNAPSHOT_CACHE_SIZE)};
@@ -1472,14 +1558,24 @@ bool PQRegistryManager::ReconstructPersistentSnapshotView(
     for (auto record{reverse_journal.rbegin()};
          record != reverse_journal.rend(); ++record) {
         const bool is_checkpoint{record->is_checkpoint != 0};
+        const bool is_cold_base{
+            replayed_record == 0 &&
+            record->height != m_config.preparation_height};
         const bool has_tree_id_additions{
             !record->block_tree_ids.empty()};
-        if (record->is_checkpoint != 0) {
-            states = record->operator_states;
+        if (is_cold_base) {
+            states = record->checkpoint_operator_states;
             used_tree_ids =
                 std::make_shared<const std::vector<uint256>>(
                     record->tree_ids);
         } else {
+            const uint256 prior_root{authenticated_state
+                ? authenticated_state->consensus_state_root
+                : preparation_parent_root.value_or(uint256{})};
+            if (prior_root.IsNull() ||
+                record->previous_consensus_state_root != prior_root) {
+                return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
+            }
             if (!ApplySparseOperatorDelta(
                     states, record->removed_operators,
                     record->operator_states)) {
@@ -1498,6 +1594,11 @@ bool PQRegistryManager::ReconstructPersistentSnapshotView(
                 used_tree_ids =
                     std::make_shared<const std::vector<uint256>>(
                         std::move(merged));
+            }
+            if (is_checkpoint &&
+                (states != record->checkpoint_operator_states ||
+                 *used_tree_ids != record->tree_ids)) {
+                return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
             }
         }
         const auto schedule_view{DeriveOperatorKeyScheduleView(

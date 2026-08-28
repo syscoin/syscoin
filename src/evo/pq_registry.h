@@ -107,9 +107,10 @@ struct PQRegistrySnapshot {
 };
 
 /**
- * One sparse branch journal record. Checkpoints contain the full operator and
- * used-tree-id sets; intermediate records contain only operator deltas and
- * tree ids introduced by that block.
+ * One sparse branch journal record. Every record retains its exact operator
+ * and tree-id delta. Checkpoints additionally retain the full resulting sets
+ * so replay can authenticate the sparse transition before accepting the
+ * checkpoint as a reconstruction base.
  */
 struct PQRegistryDiskSnapshot {
     uint16_t version{PQ_REGISTRY_DISK_VERSION};
@@ -118,8 +119,12 @@ struct PQRegistryDiskSnapshot {
     uint256 block_hash;
     uint256 previous_block_hash;
     uint256 previous_consensus_state_root;
+    /** Operators added or changed by this exact block. */
     std::vector<OperatorKeyState> operator_states;
+    /** Operators removed by this exact block. */
     std::vector<uint256> removed_operators;
+    /** Full resulting operator set at checkpoints; empty otherwise. */
+    std::vector<OperatorKeyState> checkpoint_operator_states;
     /** Full append-only set at checkpoints; empty on sparse records. */
     std::vector<uint256> tree_ids;
     /** Exact additions made by this block, including checkpoint blocks. */
@@ -155,6 +160,18 @@ struct PQRegistryDiskSnapshot {
         for (auto& pro_tx_hash : obj.removed_operators) {
             READWRITE(pro_tx_hash);
         }
+
+        uint16_t checkpoint_operator_count{
+            static_cast<uint16_t>(obj.checkpoint_operator_states.size())};
+        SER_WRITE(obj, if (obj.checkpoint_operator_states.size() >
+                           MAX_PQ_OPERATOR_STATES) {
+            throw std::ios_base::failure(
+                "too many checkpoint PQ operator states");
+        });
+        READWRITE(checkpoint_operator_count);
+        SER_READ(obj, obj.checkpoint_operator_states.resize(
+                          checkpoint_operator_count));
+        for (auto& state : obj.checkpoint_operator_states) READWRITE(state);
 
         uint32_t tree_id_count{
             static_cast<uint32_t>(obj.tree_ids.size())};

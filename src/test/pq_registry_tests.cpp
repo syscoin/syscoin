@@ -617,6 +617,8 @@ BOOST_AUTO_TEST_CASE(initial_root_registration_prepares_purely_and_commits_exact
         block.GetHash(), first_disk));
     BOOST_CHECK_EQUAL(first_disk.is_checkpoint, 1U);
     BOOST_CHECK(first_disk.operator_states == snapshot.operator_states);
+    BOOST_CHECK(first_disk.checkpoint_operator_states ==
+                snapshot.operator_states);
     BOOST_CHECK(first_disk.tree_ids == snapshot.used_tree_ids);
     BOOST_CHECK(first_disk.block_tree_ids == snapshot.block_tree_ids);
     BOOST_CHECK(first_disk.removed_operators.empty());
@@ -1591,7 +1593,9 @@ BOOST_AUTO_TEST_CASE(restart_reconstructs_frozen_root_and_tree_history)
         BOOST_REQUIRE(restarted.SnapshotDatabase().ReadCache(
             checkpoint_hash, checkpoint_disk));
         BOOST_CHECK_EQUAL(checkpoint_disk.is_checkpoint, 1U);
-        BOOST_REQUIRE_EQUAL(checkpoint_disk.operator_states.size(), 1U);
+        BOOST_CHECK(checkpoint_disk.operator_states.empty());
+        BOOST_REQUIRE_EQUAL(
+            checkpoint_disk.checkpoint_operator_states.size(), 1U);
         BOOST_REQUIRE_EQUAL(checkpoint_disk.tree_ids.size(), 1U);
         BOOST_CHECK(checkpoint_disk.block_tree_ids.empty());
 
@@ -1675,6 +1679,61 @@ BOOST_AUTO_TEST_CASE(cold_reconstruction_reuses_long_no_op_suffix)
         parent, error));
     BOOST_CHECK(tip.SharesStateWith(parent));
     BOOST_CHECK(tip.SharesTreeHistoryWith(parent));
+    BOOST_CHECK_EQUAL(
+        test::PQRegistryManagerTestAccess::Stats(reader)
+            .authenticated_records,
+        record_count);
+}
+
+BOOST_AUTO_TEST_CASE(cold_reconstruction_has_exact_two_interval_bound)
+{
+    auto config{Config()};
+    config.schedule.epoch_origin = 10'080;
+    BOOST_REQUIRE(config.IsValid());
+    const uint256 genesis{NonNullHash(696)};
+    const uint256 journal_parent{NonNullHash(697)};
+    auto db{MemoryDB(696)};
+    db.path = m_path_root / "pq_registry_two_interval_bound";
+    db.memory_only = false;
+
+    constexpr std::size_t record_count{
+        2U * static_cast<std::size_t>(PQ_REGISTRY_CHECKPOINT_INTERVAL)};
+    const int32_t target_height{
+        config.preparation_height + static_cast<int32_t>(record_count) - 1};
+    uint256 target_hash;
+    uint256 target_parent;
+    PQRegistrySnapshot expected;
+    {
+        PQRegistryManager writer(db, genesis, config);
+        PQRegistryError error;
+        const auto callbacks{Members(genesis, {}, {}, CKeyID{})};
+        uint256 cursor{journal_parent};
+        for (std::size_t offset{0}; offset < record_count; ++offset) {
+            const uint32_t id{89'500 + static_cast<uint32_t>(offset)};
+            const auto block{Block(
+                cursor, id, {OrdinaryTransaction(id)})};
+            BOOST_REQUIRE(writer.ProcessBlock(
+                block,
+                config.preparation_height +
+                    static_cast<int32_t>(offset),
+                callbacks, {}, /*fJustCheck=*/false, error));
+            target_parent = cursor;
+            cursor = block.GetHash();
+        }
+        target_hash = cursor;
+        BOOST_REQUIRE(writer.GetSnapshot(
+            target_hash, target_parent, target_height, expected, error));
+        BOOST_REQUIRE(writer.Flush(/*fSync=*/true));
+    }
+
+    db.wipe_data = false;
+    PQRegistryManager reader(db, genesis, config);
+    test::PQRegistryManagerTestAccess::ResetReconstructionStats(reader);
+    PQRegistryError error;
+    PQRegistrySnapshot reconstructed;
+    BOOST_REQUIRE(reader.GetSnapshot(
+        target_hash, target_parent, target_height, reconstructed, error));
+    BOOST_CHECK(reconstructed == expected);
     BOOST_CHECK_EQUAL(
         test::PQRegistryManagerTestAccess::Stats(reader)
             .authenticated_records,
@@ -2651,6 +2710,153 @@ BOOST_AUTO_TEST_CASE(membership_reconciliation_is_checkpoint_only)
         /*fJustCheck=*/false, error));
     BOOST_CHECK(before_calls == before_members);
     BOOST_CHECK(after_calls.empty());
+}
+
+BOOST_AUTO_TEST_CASE(checkpoint_retains_and_authenticates_exact_block_delta)
+{
+    const auto config{FastConfig()};
+    const uint256 genesis{NonNullHash(651)};
+    const uint256 updated{NonNullHash(652)};
+    const uint256 removed{NonNullHash(653)};
+    const uint256 added{NonNullHash(654)};
+    auto updated_key{DeterministicKey(151)};
+    auto removed_key{DeterministicKey(152)};
+    auto replacement_key{DeterministicKey(153)};
+    auto added_key{DeterministicKey(154)};
+    CKey owner_key;
+    owner_key.MakeNewKey(/*fCompressed=*/true);
+    const CKeyID owner_key_id{owner_key.GetPubKey().GetID()};
+    std::vector<uint256> all_members{updated, removed, added};
+    std::sort(all_members.begin(), all_members.end());
+
+    uint32_t block_id{70'000};
+    const auto updated_initial{CommitmentAt(
+        config, config.preparation_height, 1, block_id++)};
+    const auto removed_initial{CommitmentAt(
+        config, config.preparation_height, 1, block_id++)};
+    const uint256 preparation_parent{NonNullHash(block_id++)};
+    const uint32_t preparation_id{block_id++};
+    const uint32_t updated_registration_id{block_id++};
+    const uint32_t removed_registration_id{block_id++};
+    const auto preparation{Block(
+        preparation_parent, preparation_id,
+        {GlobalRegistration(genesis, updated, updated_key, owner_key,
+                            updated_initial, updated_registration_id),
+         GlobalRegistration(genesis, removed, removed_key, owner_key,
+                            removed_initial, removed_registration_id)})};
+    PQRegistryManager manager(MemoryDB(651), genesis, config);
+    PQRegistryError error;
+    BOOST_REQUIRE(manager.ProcessBlock(
+        preparation, config.preparation_height,
+        Members(genesis, all_members, all_members, owner_key_id), {},
+        /*fJustCheck=*/false, error));
+
+    uint256 cursor{preparation.GetHash()};
+    uint256 cursor_parent{preparation.hashPrevBlock};
+    for (int32_t height{config.preparation_height + 1};
+         height < config.preparation_height +
+                      PQ_REGISTRY_CHECKPOINT_INTERVAL;
+         ++height) {
+        const auto ordinary{Block(
+            cursor, block_id, {OrdinaryTransaction(block_id)})};
+        ++block_id;
+        BOOST_REQUIRE(manager.ProcessBlock(
+            ordinary, height,
+            Members(genesis, all_members, all_members, owner_key_id), {},
+            /*fJustCheck=*/false, error));
+        cursor_parent = cursor;
+        cursor = ordinary.GetHash();
+    }
+
+    const int32_t checkpoint_height{
+        config.preparation_height + PQ_REGISTRY_CHECKPOINT_INTERVAL};
+    PQRegistrySnapshot parent;
+    BOOST_REQUIRE(manager.GetSnapshot(
+        cursor, cursor_parent, checkpoint_height - 1, parent, error));
+    const auto updated_next{CommitmentAt(
+        config, checkpoint_height, 2, block_id++)};
+    const auto added_initial{CommitmentAt(
+        config, checkpoint_height, 1, block_id++)};
+    const auto rotation{GlobalRotation(
+        genesis, updated, RequiredOperator(parent, updated).global_key,
+        updated_key, replacement_key, updated_next, block_id++)};
+    const auto registration{GlobalRegistration(
+        genesis, added, added_key, owner_key, added_initial, block_id++)};
+    const auto checkpoint{Block(
+        cursor, block_id++, {rotation, registration})};
+    std::vector<uint256> resulting_members{updated, added};
+    std::sort(resulting_members.begin(), resulting_members.end());
+    const std::vector<uint256> removals{removed};
+    BOOST_REQUIRE(manager.ProcessBlock(
+        checkpoint, checkpoint_height,
+        Members(genesis, all_members, resulting_members, owner_key_id),
+        removals, /*fJustCheck=*/false, error));
+
+    PQRegistrySnapshot expected;
+    BOOST_REQUIRE(manager.GetSnapshot(
+        checkpoint.GetHash(), cursor, checkpoint_height, expected, error));
+    PQRegistryDiskSnapshot original;
+    BOOST_REQUIRE(manager.SnapshotDatabase().ReadCache(
+        checkpoint.GetHash(), original));
+    BOOST_REQUIRE_EQUAL(original.is_checkpoint, 1U);
+    BOOST_CHECK(original.removed_operators == removals);
+    BOOST_REQUIRE_EQUAL(original.operator_states.size(), 2U);
+    std::vector<uint256> delta_operators;
+    for (const auto& state : original.operator_states) {
+        delta_operators.push_back(state.pro_tx_hash);
+    }
+    BOOST_CHECK(delta_operators == resulting_members);
+    BOOST_CHECK(original.checkpoint_operator_states ==
+                expected.operator_states);
+    BOOST_CHECK(original.tree_ids == expected.used_tree_ids);
+    BOOST_CHECK(original.block_tree_ids == expected.block_tree_ids);
+    BOOST_REQUIRE_EQUAL(original.block_tree_ids.size(), 2U);
+
+    test::PQRegistryManagerTestAccess::ResetReconstructionStats(manager);
+    BOOST_REQUIRE(manager.PruneSnapshot(checkpoint.GetHash()));
+    PQRegistrySnapshot reconstructed;
+    BOOST_REQUIRE(manager.GetSnapshot(
+        checkpoint.GetHash(), cursor, checkpoint_height, reconstructed,
+        error));
+    BOOST_CHECK(reconstructed == expected);
+    BOOST_CHECK_LE(
+        test::PQRegistryManagerTestAccess::Stats(manager)
+            .authenticated_records,
+        static_cast<uint64_t>(PQ_REGISTRY_CHECKPOINT_INTERVAL + 1));
+
+    const auto reject_tamper = [&](PQRegistryDiskSnapshot tampered) {
+        BOOST_REQUIRE(tampered.IsStructurallyValid());
+        BOOST_REQUIRE(manager.SnapshotDatabase().WriteThrough(
+            checkpoint.GetHash(), tampered, /*fSync=*/true));
+        BOOST_REQUIRE(manager.PruneSnapshot(checkpoint.GetHash()));
+        PQRegistrySnapshot rejected;
+        BOOST_CHECK(!manager.GetSnapshot(
+            checkpoint.GetHash(), cursor, checkpoint_height, rejected,
+            error));
+        BOOST_CHECK(error.result == PQRegistryResult::SNAPSHOT_CORRUPT);
+        BOOST_REQUIRE(manager.SnapshotDatabase().WriteThrough(
+            checkpoint.GetHash(), original, /*fSync=*/true));
+    };
+
+    auto missing_operator_delta{original};
+    missing_operator_delta.operator_states.erase(
+        missing_operator_delta.operator_states.begin());
+    reject_tamper(std::move(missing_operator_delta));
+
+    auto missing_removal_delta{original};
+    missing_removal_delta.removed_operators.clear();
+    reject_tamper(std::move(missing_removal_delta));
+
+    auto missing_tree_delta{original};
+    missing_tree_delta.block_tree_ids.erase(
+        missing_tree_delta.block_tree_ids.begin());
+    reject_tamper(std::move(missing_tree_delta));
+
+    BOOST_REQUIRE(manager.PruneSnapshot(checkpoint.GetHash()));
+    BOOST_REQUIRE(manager.GetSnapshot(
+        checkpoint.GetHash(), cursor, checkpoint_height, reconstructed,
+        error));
+    BOOST_CHECK(reconstructed == expected);
 }
 
 BOOST_AUTO_TEST_CASE(direct_validation_matches_single_transaction_block_checks)

@@ -1538,18 +1538,31 @@ BOOST_AUTO_TEST_CASE(payment_projection_stops_at_frozen_epoch_boundary)
     {
         llmq::pq::PQRegistryManager registry{
             registry_db, consensus.hashGenesisBlock, registry_config};
-        const uint256 checkpoint_parent_root{MakeSnapshotKey(94'000)};
-        llmq::pq::PQRegistryDiskSnapshot checkpoint_parent;
-        checkpoint_parent.height = checkpoint_height - 1;
-        checkpoint_parent.block_hash = checkpoint_parent_hash;
-        checkpoint_parent.previous_block_hash =
-            MakeSnapshotKey(checkpoint_height - 2);
-        checkpoint_parent.previous_consensus_state_root =
-            MakeSnapshotKey(94'001);
-        checkpoint_parent.consensus_state_root = checkpoint_parent_root;
-        BOOST_REQUIRE(checkpoint_parent.IsStructurallyValid());
-        BOOST_REQUIRE(registry.SnapshotDatabase().WriteThrough(
-            checkpoint_parent_hash, checkpoint_parent, /*fSync=*/true));
+        const auto empty_root{
+            llmq::pq::PQRegistrySnapshot{}.RecomputeConsensusStateRoot(
+                consensus.hashGenesisBlock)};
+        BOOST_REQUIRE(empty_root);
+        // SYSCOIN: Seed the same bounded authenticated checkpoint segment used
+        // by production replay; a synthetic C-1 root cannot authorize C's
+        // sparse operator and tree-id transition.
+        uint256 previous_registry_hash{
+            MakeSnapshotKey(preparation_height - 1)};
+        for (int height{preparation_height}; height < checkpoint_height;
+             ++height) {
+            llmq::pq::PQRegistryDiskSnapshot record;
+            record.is_checkpoint = static_cast<uint8_t>(
+                height == preparation_height);
+            record.height = height;
+            record.block_hash = MakeSnapshotKey(height);
+            record.previous_block_hash = previous_registry_hash;
+            record.previous_consensus_state_root = *empty_root;
+            record.consensus_state_root = *empty_root;
+            BOOST_REQUIRE(record.IsStructurallyValid());
+            BOOST_REQUIRE(registry.SnapshotDatabase().WriteThrough(
+                record.block_hash, record, /*fSync=*/true));
+            previous_registry_hash = record.block_hash;
+        }
+        BOOST_REQUIRE(previous_registry_hash == checkpoint_parent_hash);
 
         llmq::pq::PQRegistrySnapshot checkpoint;
         checkpoint.height = checkpoint_height;
@@ -1569,9 +1582,11 @@ BOOST_AUTO_TEST_CASE(payment_projection_stops_at_frozen_epoch_boundary)
         checkpoint_disk.block_hash = checkpoint_hash;
         checkpoint_disk.previous_block_hash = checkpoint_parent_hash;
         checkpoint_disk.previous_consensus_state_root =
-            checkpoint_parent_root;
+            *empty_root;
         checkpoint_disk.operator_states = operator_states;
+        checkpoint_disk.checkpoint_operator_states = operator_states;
         checkpoint_disk.tree_ids = tree_ids;
+        checkpoint_disk.block_tree_ids = tree_ids;
         checkpoint_disk.consensus_state_root = *checkpoint_root;
         BOOST_REQUIRE(checkpoint_disk.IsStructurallyValid());
         BOOST_REQUIRE(registry.SnapshotDatabase().WriteThrough(
