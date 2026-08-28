@@ -2021,6 +2021,7 @@ bool PQRegistryManager::BuildGCEraseBatch(
     const PQRegistryGCAuthenticationContext& context,
     const std::optional<evo::AuxiliaryHistoryGCComponent>& previous,
     std::size_t max_scanned_records,
+    std::size_t max_scanned_value_bytes,
     std::size_t max_candidates,
     evo::AuxiliaryHistoryGCComponent& target,
     evo::PQRegistryGCEraseManifest& manifest,
@@ -2029,7 +2030,8 @@ bool PQRegistryManager::BuildGCEraseBatch(
     error.Clear();
     target = {};
     manifest = {};
-    if (max_scanned_records == 0 || max_candidates == 0 ||
+    if (max_scanned_records == 0 || max_scanned_value_bytes == 0 ||
+        max_candidates == 0 ||
         max_scanned_records >
             evo::PQRegistryGCEraseManifest::MAX_CANDIDATES ||
         max_candidates >
@@ -2148,8 +2150,22 @@ bool PQRegistryManager::BuildGCEraseBatch(
             }
 
             std::size_t scanned{0};
+            std::size_t scanned_value_bytes{0};
             while (cursor->Valid() && scanned < max_scanned_records &&
                    candidates.size() < max_candidates) {
+                const std::size_t value_size{cursor->GetValueSize()};
+                if (value_size > PQRegistryDiskSnapshot::MAX_SERIALIZED_SIZE) {
+                    return SetError(
+                        error, PQRegistryResult::SNAPSHOT_CORRUPT);
+                }
+                const bool exceeds_soft_budget{
+                    scanned_value_bytes >= max_scanned_value_bytes ||
+                    value_size >
+                        max_scanned_value_bytes - scanned_value_bytes};
+                // SYSCOIN: Defer a value that would cross the aggregate
+                // budget, but always consume one value so a large valid
+                // checkpoint cannot strand this cursor forever.
+                if (scanned != 0 && exceeds_soft_budget) break;
                 uint256 key;
                 PQRegistryDiskSnapshot disk;
                 if (!cursor->GetKeyExact(key) ||
@@ -2173,6 +2189,7 @@ bool PQRegistryManager::BuildGCEraseBatch(
                         key, disk.height, ::SerializeHash(disk)});
                 }
                 last_key = key;
+                scanned_value_bytes += value_size;
                 ++scanned;
                 cursor->Next();
             }

@@ -5023,6 +5023,7 @@ bool CDeterministicMNManager::PreparePQRegistryGCIntent(
     if (!registry->BuildGCEraseBatch(
             context, previous_component,
             evo::PQRegistryGCEraseManifest::MAX_CANDIDATES,
+            llmq::pq::PQ_REGISTRY_GC_MAX_SCANNED_VALUE_BYTES,
             /*max_candidates=*/256,
             pq_component, manifest, registry_error)) {
         LogPrintf("%s -- failed to build PQ registry GC batch: %s\n",

@@ -159,6 +159,13 @@ public:
 
     void Next();
 
+    // SYSCOIN: Bounded maintenance must inspect a physical value's size
+    // before GetValueExact() copies and deserializes it.
+    [[nodiscard]] size_t GetValueSize() const
+    {
+        return GetValueImpl().size();
+    }
+
     template<typename K> bool GetKey(K& key) {
         try {
             DataStream ssKey{GetKeyImpl()};

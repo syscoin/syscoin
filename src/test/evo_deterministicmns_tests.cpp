@@ -2734,6 +2734,7 @@ BOOST_AUTO_TEST_CASE(
         BOOST_REQUIRE(authenticator.FlushForGC(registry_error));
         BOOST_REQUIRE(authenticator.BuildGCEraseBatch(
             context, std::nullopt, /*max_scanned_records=*/1,
+            llmq::pq::PQ_REGISTRY_GC_MAX_SCANNED_VALUE_BYTES,
             /*max_candidates=*/1, component, erase_manifest,
             registry_error));
     }

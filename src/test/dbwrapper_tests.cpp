@@ -184,13 +184,16 @@ BOOST_AUTO_TEST_CASE(dbwrapper_iterator)
         uint256 val_res;
 
         BOOST_REQUIRE(it->GetKey(key_res));
+        BOOST_CHECK_EQUAL(it->GetValueSize(), GetSerializeSize(in));
         BOOST_REQUIRE(it->GetValue(val_res));
+        BOOST_CHECK_EQUAL(it->GetValueSize(), GetSerializeSize(in));
         BOOST_CHECK_EQUAL(key_res, key);
         BOOST_CHECK_EQUAL(val_res.ToString(), in.ToString());
 
         it->Next();
 
         BOOST_REQUIRE(it->GetKey(key_res));
+        BOOST_CHECK_EQUAL(it->GetValueSize(), GetSerializeSize(in2));
         BOOST_REQUIRE(it->GetValue(val_res));
         BOOST_CHECK_EQUAL(key_res, key2);
         BOOST_CHECK_EQUAL(val_res.ToString(), in2.ToString());

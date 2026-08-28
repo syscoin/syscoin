@@ -150,6 +150,26 @@ public:
         return manager.m_snapshot_db->WriteThrough(
             block_hash, snapshot, /*fSync=*/true);
     }
+
+    static std::vector<std::pair<uint256, std::size_t>>
+    PersistedDiskValueSizes(PQRegistryManager& manager)
+    {
+        LOCK(manager.m_mutex);
+        LOCK(manager.m_snapshot_db->cs);
+        std::vector<std::pair<uint256, std::size_t>> values;
+        std::unique_ptr<CDBIterator> cursor{
+            manager.m_snapshot_db->NewIterator()};
+        if (!cursor) return values;
+        cursor->SeekToFirst();
+        while (cursor->Valid()) {
+            uint256 key;
+            if (!cursor->GetKeyExact(key)) return {};
+            values.emplace_back(key, cursor->GetValueSize());
+            cursor->Next();
+        }
+        cursor->CheckStatus();
+        return values;
+    }
 };
 
 } // namespace llmq::pq::test
@@ -3831,13 +3851,30 @@ BOOST_AUTO_TEST_CASE(gc_erase_batch_advances_physical_scan_cursor)
     const auto context{
         history.Context(history.initial_checkpoint_height)};
     BOOST_REQUIRE(manager.FlushForGC(error));
+    const auto persisted_sizes{
+        test::PQRegistryManagerTestAccess::PersistedDiskValueSizes(manager)};
+    BOOST_REQUIRE_GE(persisted_sizes.size(), 3U);
+
+    evo::AuxiliaryHistoryGCComponent invalid_target;
+    evo::PQRegistryGCEraseManifest invalid_manifest;
+    BOOST_CHECK(!manager.BuildGCEraseBatch(
+        context, std::nullopt,
+        evo::PQRegistryGCEraseManifest::MAX_CANDIDATES,
+        /*max_scanned_value_bytes=*/0,
+        /*max_candidates=*/1,
+        invalid_target, invalid_manifest, error));
+    BOOST_CHECK(error.result == PQRegistryResult::INVALID_CONFIGURATION);
+    BOOST_CHECK(!invalid_target.IsValid());
+    BOOST_CHECK(!invalid_manifest.IsValid());
 
     evo::AuxiliaryHistoryGCComponent first;
     evo::PQRegistryGCEraseManifest first_manifest;
     test::PQRegistryManagerTestAccess::ResetReconstructionStats(manager);
     BOOST_REQUIRE(manager.BuildGCEraseBatch(
-        context, std::nullopt, /*max_scanned_records=*/1,
-        /*max_candidates=*/1,
+        context, std::nullopt,
+        evo::PQRegistryGCEraseManifest::MAX_CANDIDATES,
+        /*max_scanned_value_bytes=*/persisted_sizes[0].second,
+        evo::PQRegistryGCEraseManifest::MAX_CANDIDATES,
         first, first_manifest, error));
     BOOST_CHECK_EQUAL(
         test::PQRegistryManagerTestAccess::Stats(manager)
@@ -3851,6 +3888,7 @@ BOOST_AUTO_TEST_CASE(gc_erase_batch_advances_physical_scan_cursor)
                       evo::PQRegistryGCClosure::SCANNING);
     BOOST_CHECK(!first_manifest.from_cursor);
     BOOST_REQUIRE(first_manifest.scan_through);
+    BOOST_CHECK(*first_manifest.scan_through == persisted_sizes[0].first);
     BOOST_CHECK(first_closure->scan_after_key ==
                 first_manifest.scan_through);
     BOOST_CHECK_EQUAL(first_manifest.reached_eof, 0U);
@@ -3859,8 +3897,10 @@ BOOST_AUTO_TEST_CASE(gc_erase_batch_advances_physical_scan_cursor)
     evo::AuxiliaryHistoryGCComponent second;
     evo::PQRegistryGCEraseManifest second_manifest;
     BOOST_REQUIRE(manager.BuildGCEraseBatch(
-        context, first, /*max_scanned_records=*/1,
-        /*max_candidates=*/1,
+        context, first,
+        evo::PQRegistryGCEraseManifest::MAX_CANDIDATES,
+        /*max_scanned_value_bytes=*/1,
+        evo::PQRegistryGCEraseManifest::MAX_CANDIDATES,
         second, second_manifest, error));
     BOOST_CHECK_EQUAL(
         test::PQRegistryManagerTestAccess::Stats(manager)
@@ -3873,6 +3913,7 @@ BOOST_AUTO_TEST_CASE(gc_erase_batch_advances_physical_scan_cursor)
     BOOST_CHECK(second_manifest.from_cursor ==
                 first_manifest.scan_through);
     BOOST_REQUIRE(second_manifest.scan_through);
+    BOOST_CHECK(*second_manifest.scan_through == persisted_sizes[1].first);
     BOOST_CHECK(*first_manifest.scan_through <
                 *second_manifest.scan_through);
     BOOST_CHECK(second_closure->scan_after_key ==
@@ -3908,6 +3949,7 @@ BOOST_AUTO_TEST_CASE(gc_erase_batch_caps_nonerasable_scan_work)
     BOOST_REQUIRE(manager.BuildGCEraseBatch(
         context, std::nullopt,
         /*max_scanned_records=*/4096,
+        PQ_REGISTRY_GC_MAX_SCANNED_VALUE_BYTES,
         /*max_candidates=*/256,
         target, manifest, error));
     const auto closure{evo::DecodePQRegistryGCClosure(target.closure)};
@@ -3948,6 +3990,7 @@ BOOST_AUTO_TEST_CASE(gc_erase_batch_protects_paths_and_is_idempotent)
     BOOST_REQUIRE(manager.BuildGCEraseBatch(
         context, std::nullopt,
         evo::PQRegistryGCEraseManifest::MAX_CANDIDATES,
+        PQ_REGISTRY_GC_MAX_SCANNED_VALUE_BYTES,
         /*max_candidates=*/256,
         target, manifest, error));
     const auto closure{evo::DecodePQRegistryGCClosure(target.closure)};
@@ -4022,6 +4065,7 @@ BOOST_AUTO_TEST_CASE(gc_erase_manifest_resumes_only_over_missing_prefix)
     BOOST_REQUIRE(manager.BuildGCEraseBatch(
         context, std::nullopt,
         evo::PQRegistryGCEraseManifest::MAX_CANDIDATES,
+        PQ_REGISTRY_GC_MAX_SCANNED_VALUE_BYTES,
         /*max_candidates=*/256,
         target, manifest, error));
     BOOST_REQUIRE_EQUAL(manifest.candidates.size(), 3U);
@@ -4072,6 +4116,7 @@ BOOST_AUTO_TEST_CASE(gc_erase_batch_caps_dense_candidates_and_retries)
     BOOST_REQUIRE(manager.BuildGCEraseBatch(
         context, std::nullopt,
         evo::PQRegistryGCEraseManifest::MAX_CANDIDATES,
+        PQ_REGISTRY_GC_MAX_SCANNED_VALUE_BYTES,
         /*max_candidates=*/256,
         target, manifest, error));
     BOOST_REQUIRE_EQUAL(manifest.candidates.size(), 256U);
@@ -4139,6 +4184,7 @@ BOOST_AUTO_TEST_CASE(gc_erase_manifest_rejects_gaps_and_tampering)
     BOOST_REQUIRE(manager.BuildGCEraseBatch(
         context, std::nullopt,
         evo::PQRegistryGCEraseManifest::MAX_CANDIDATES,
+        PQ_REGISTRY_GC_MAX_SCANNED_VALUE_BYTES,
         /*max_candidates=*/256,
         target, manifest, error));
     BOOST_REQUIRE_EQUAL(manifest.candidates.size(), 3U);
@@ -4195,6 +4241,7 @@ BOOST_AUTO_TEST_CASE(gc_erase_empty_resume_ignores_later_above_floor_record)
     BOOST_REQUIRE(manager.BuildGCEraseBatch(
         context, std::nullopt,
         evo::PQRegistryGCEraseManifest::MAX_CANDIDATES,
+        PQ_REGISTRY_GC_MAX_SCANNED_VALUE_BYTES,
         /*max_candidates=*/256,
         probe_target, probe_manifest, error));
     BOOST_REQUIRE_EQUAL(probe_manifest.reached_eof, 1U);
@@ -4213,6 +4260,7 @@ BOOST_AUTO_TEST_CASE(gc_erase_empty_resume_ignores_later_above_floor_record)
     BOOST_REQUIRE(manager.BuildGCEraseBatch(
         context, previous,
         evo::PQRegistryGCEraseManifest::MAX_CANDIDATES,
+        PQ_REGISTRY_GC_MAX_SCANNED_VALUE_BYTES,
         /*max_candidates=*/256,
         target, manifest, error));
     const auto target_closure{

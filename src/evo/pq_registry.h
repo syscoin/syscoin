@@ -56,6 +56,20 @@ inline constexpr std::size_t PQ_PAYMENT_ELIGIBILITY_CACHE_SIZE{8};
 inline constexpr std::size_t MAX_PQ_OPERATOR_STATES{65'535};
 inline constexpr std::size_t MAX_PQ_TREE_IDS_PER_BLOCK{65'535};
 inline constexpr std::size_t MAX_PQ_USED_TREE_IDS{1'000'000};
+inline constexpr std::size_t PQ_REGISTRY_GC_MAX_SCANNED_VALUE_BYTES{
+    16U * 1024U * 1024U};
+/** Exact maximum serialized size of one fully populated operator state. */
+inline constexpr std::size_t PQ_OPERATOR_KEY_STATE_MAX_SERIALIZED_SIZE{
+    (sizeof(uint16_t) + uint256::size() + 2 * sizeof(uint8_t) +
+     sizeof(uint32_t)) +
+    (2 * sizeof(uint16_t) + sizeof(uint32_t) + GLOBAL_PUBLIC_KEY_SIZE +
+     ChildKeyTreeCommitment::WIRE_SIZE + sizeof(uint32_t)) +
+    sizeof(uint8_t) + (sizeof(uint8_t) + 4 * sizeof(uint32_t)) +
+    sizeof(uint16_t) +
+    MAX_RETAINED_FROZEN_CHILD_ROOTS *
+        (uint256::size() + 2 * sizeof(uint32_t) +
+         ChildKeyTreeCommitment::WIRE_SIZE)};
+static_assert(PQ_OPERATOR_KEY_STATE_MAX_SERIALIZED_SIZE == 4'024);
 /** Active reservations plus one standard package, without an unbounded copy. */
 inline constexpr std::size_t MAX_PQ_MEMPOOL_OPERATOR_REQUESTS{
     MAX_PQ_OPERATOR_STATES + 64};
@@ -141,6 +155,22 @@ struct PQRegistrySnapshot {
  * checkpoint as a reconstruction base.
  */
 struct PQRegistryDiskSnapshot {
+    /** Exact decoder envelope implied by every fixed-width collection cap. */
+    static constexpr std::size_t MAX_SERIALIZED_SIZE{
+        (sizeof(uint16_t) + sizeof(uint8_t) + sizeof(int32_t) +
+         3 * uint256::size()) +
+        sizeof(uint16_t) +
+        MAX_PQ_OPERATOR_STATES *
+            PQ_OPERATOR_KEY_STATE_MAX_SERIALIZED_SIZE +
+        sizeof(uint16_t) + MAX_PQ_OPERATOR_STATES * uint256::size() +
+        sizeof(uint16_t) +
+        MAX_PQ_OPERATOR_STATES *
+            PQ_OPERATOR_KEY_STATE_MAX_SERIALIZED_SIZE +
+        sizeof(uint32_t) + MAX_PQ_USED_TREE_IDS * uint256::size() +
+        sizeof(uint16_t) +
+        MAX_PQ_TREE_IDS_PER_BLOCK * uint256::size() + uint256::size()};
+    static_assert(MAX_SERIALIZED_SIZE == 563'620'067);
+
     uint16_t version{PQ_REGISTRY_DISK_VERSION};
     uint8_t is_checkpoint{0};
     int32_t height{-1};
@@ -564,13 +594,16 @@ public:
      * Build one deterministic, bounded physical erase pass and the closure
      * that durably advances over it. Generation is derived from the previous
      * component so callers cannot select a journal position independently.
-     * Independent scan and candidate budgets cap both read latency and the
-     * number of synchronously erased keys in the resulting intent.
+     * Independent record, serialized-value, and candidate budgets bound
+     * ordinary aggregate decode work and the number of synchronously erased
+     * keys in the resulting intent. One schema-bounded oversized first value
+     * is admitted so a valid checkpoint cannot strand the physical cursor.
      */
     [[nodiscard]] bool BuildGCEraseBatch(
         const PQRegistryGCAuthenticationContext& context,
         const std::optional<evo::AuxiliaryHistoryGCComponent>& previous,
         std::size_t max_scanned_records,
+        std::size_t max_scanned_value_bytes,
         std::size_t max_candidates,
         evo::AuxiliaryHistoryGCComponent& target,
         evo::PQRegistryGCEraseManifest& manifest,
