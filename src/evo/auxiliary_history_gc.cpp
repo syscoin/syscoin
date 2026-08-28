@@ -551,6 +551,7 @@ struct AuxiliaryHistoryGCJournal::Impl {
     AuxiliaryHistoryGCState state GUARDED_BY(mutex);
     std::optional<AuxiliaryHistoryGCJournalResult> failure
         GUARDED_BY(mutex);
+    bool fail_next_complete_for_testing GUARDED_BY(mutex){false};
 };
 
 AuxiliaryHistoryGCJournal::AuxiliaryHistoryGCJournal(
@@ -658,6 +659,11 @@ AuxiliaryHistoryGCJournalResult AuxiliaryHistoryGCJournal::Complete(
         m_impl->failure = AuxiliaryHistoryGCJournalResult::CORRUPT;
         return *m_impl->failure;
     }
+    if (m_impl->fail_next_complete_for_testing) {
+        m_impl->fail_next_complete_for_testing = false;
+        m_impl->failure = AuxiliaryHistoryGCJournalResult::DB_ERROR;
+        return *m_impl->failure;
+    }
     try {
         CDBBatch batch{m_impl->db};
         batch.Write(DiskKey{DB_WATERMARK_KEY},
@@ -700,6 +706,12 @@ bool AuxiliaryHistoryGCJournal::IsHealthy() const
 {
     LOCK(m_impl->mutex);
     return !m_impl->failure.has_value();
+}
+
+void AuxiliaryHistoryGCJournal::FailNextCompleteForTesting()
+{
+    LOCK(m_impl->mutex);
+    m_impl->fail_next_complete_for_testing = true;
 }
 
 } // namespace evo

@@ -338,6 +338,8 @@ public:
     [[nodiscard]] std::optional<AuxiliaryHistoryGCAuthorization>
     HighestAuthorization() const;
     [[nodiscard]] bool IsHealthy() const;
+    /** SYSCOIN: Fail the next completion write after physical GC in tests. */
+    void FailNextCompleteForTesting();
 
 private:
     struct Impl;

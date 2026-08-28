@@ -635,6 +635,16 @@ public:
         std::vector<uint256> snapshot_window;
     };
 
+    struct EffectiveDMNInverseGCBoundary {
+        evo::AuxiliaryHistoryGCComponent component;
+        evo::DMNInverseGCClosure closure;
+        AuxiliaryHistoryGCAuthorization authorization;
+        bool pending{false};
+
+        friend bool operator==(const EffectiveDMNInverseGCBoundary&,
+                               const EffectiveDMNInverseGCBoundary&) = default;
+    };
+
     /**
      * SYSCOIN: One immutable maintenance observation for both append-only
      * auxiliary histories. Finality authorizes destruction; branch windows,
@@ -647,6 +657,8 @@ public:
         std::optional<int32_t> finality_roster_floor;
         std::vector<AuxiliaryHistoryBranchRequirement> branches;
         std::vector<AuxiliaryHistoryBlockIdentity> fixed_dependencies;
+        std::optional<EffectiveDMNInverseGCBoundary>
+            effective_dmn_inverse_gc_boundary;
         bool finality_verification_active{false};
         bool finality_publication_pending{false};
         bool requirements_valid{false};
@@ -784,6 +796,24 @@ private:
     // both auxiliary stores; store-specific deletion is intentionally separate.
     std::unique_ptr<evo::AuxiliaryHistoryGCJournal>
         m_auxiliary_history_gc_journal;
+    // SYSCOIN: The durable journal is decoded into a typed rollback floor.
+    // The manager caches exact B/I_B authentication after a frontier's first
+    // non-destructive use, invalidates it on every durable transition, and
+    // force-exactly reauthenticates every pending destructive resume pass.
+    std::optional<EffectiveDMNInverseGCBoundary>
+        m_effective_dmn_inverse_gc_boundary GUARDED_BY(cs);
+    bool m_effective_dmn_inverse_gc_boundary_authenticated GUARDED_BY(cs){
+        false};
+    uint64_t m_effective_dmn_inverse_gc_exact_authentications_for_testing
+        GUARDED_BY(cs){0};
+    struct DMNInverseGCScanProgress {
+        uint256 intent_id;
+        std::optional<uint256> resume_after_key;
+        bool erased_in_cycle{false};
+        bool found_boundary_in_cycle{false};
+    };
+    std::optional<DMNInverseGCScanProgress>
+        m_dmn_inverse_gc_scan_progress GUARDED_BY(cs);
     // SYSCOIN: The key includes every branch-local input not already
     // committed by the parent block hash. Miss derivation stays outside this
     // mutex; publication is double-checked.
@@ -811,12 +841,13 @@ private:
         bool exact_disk_for_gc);
     bool EnsureRetainedSnapshotWindow(
         const CBlockIndex* tip,
-        const CDeterministicMNList& tip_list);
+        const CDeterministicMNList& tip_list)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
     [[nodiscard]] AuxiliaryHistoryRetentionPlan
     BuildAuxiliaryHistoryRetentionPlan(
         const CBlockIndex* tip,
-        std::span<const CBlockIndex* const> recovery_snapshot_indexes) const
-        EXCLUSIVE_LOCKS_REQUIRED(cs);
+        std::span<const CBlockIndex* const> recovery_snapshot_indexes)
+        EXCLUSIVE_LOCKS_REQUIRED(m_evoDb->cs, cs);
     [[nodiscard]] DMNInverseGCBoundary DeriveDMNInverseGCBoundary(
         const CBlockIndex* tip,
         std::span<const CBlockIndex* const> recovery_snapshot_indexes,
@@ -830,6 +861,31 @@ private:
         const AuxiliaryHistoryRetentionPlan& plan,
         bool& retry_required)
         EXCLUSIVE_LOCKS_REQUIRED(m_evoDb->cs, cs);
+    bool RefreshEffectiveDMNInverseGCBoundary()
+        EXCLUSIVE_LOCKS_REQUIRED(cs);
+    bool IsHeadCompatibleWithEffectiveDMNInverseGCBoundary(
+        const CBlockIndex* head,
+        const EffectiveDMNInverseGCBoundary& effective) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs);
+    bool AuthenticateEffectiveDMNInverseGCBoundary(
+        const CBlockIndex* head,
+        const EffectiveDMNInverseGCBoundary& effective,
+        CDeterministicMNList* boundary_snapshot = nullptr)
+        EXCLUSIVE_LOCKS_REQUIRED(m_evoDb->cs, cs);
+    bool EnsureAuthenticatedEffectiveDMNInverseGCBoundary(
+        const CBlockIndex* head,
+        const EffectiveDMNInverseGCBoundary& effective)
+        EXCLUSIVE_LOCKS_REQUIRED(m_evoDb->cs, cs);
+    bool ResumePendingDMNInverseGC(
+        const CBlockIndex* tip,
+        const AuxiliaryHistoryRetentionPlan& plan,
+        bool& retry_required)
+        EXCLUSIVE_LOCKS_REQUIRED(m_evoDb->cs, !cs);
+    bool GarbageCollectDMNInversePrefix(
+        const uint256& intent_id,
+        const EffectiveDMNInverseGCBoundary& effective,
+        bool& complete)
+        EXCLUSIVE_LOCKS_REQUIRED(m_evoDb->cs, !cs);
     bool AuthenticateInitialDMNInverseGCLineage(
         const CBlockIndex* boundary,
         const CDeterministicMNList& boundary_snapshot)
@@ -1010,6 +1066,7 @@ public:
     bool EraseInverseJournalEntryForTesting(const uint256& child_hash);
     void FailNextInverseJournalFlushForTesting();
     void FailNextInverseJournalSynchronousFlushForTesting();
+    void FailNextAuxiliaryHistoryGCCompleteForTesting();
     /** SYSCOIN: Verify rejected and check-only blocks never reach PQ publication. */
     void FailNextPQRegistryWriteThroughForTesting();
     /** SYSCOIN: Lower a replay floor, or erase it only after the durable marker clears. */
@@ -1049,6 +1106,12 @@ public:
         EXCLUSIVE_LOCKS_REQUIRED(!cs);
     [[nodiscard]] evo::AuxiliaryHistoryGCState
     GetAuxiliaryHistoryGCStateForTesting() const;
+    [[nodiscard]] bool BeginAuxiliaryHistoryGCIntentForTesting(
+        const evo::AuxiliaryHistoryGCIntentTarget& target)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    [[nodiscard]] uint64_t
+    GetDMNInverseGCExactAuthenticationCountForTesting()
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
 private:
     const CDeterministicMNList GetListForBlockInternal(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(!cs);
 };

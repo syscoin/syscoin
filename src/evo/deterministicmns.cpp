@@ -142,15 +142,36 @@ int64_t ElapsedMillis(const std::chrono::steady_clock::time_point& start)
 
 std::vector<uint256> CollectRetainedSnapshotWindow(
     const CBlockIndex* tip,
+    const std::optional<evo::AuxiliaryHistoryGCBlockIdentity>&
+        durable_floor,
     bool& structurally_valid)
 {
     const auto& consensus = Params().GetConsensus();
+    int32_t oldest_height{consensus.DIP0003Height};
+    if (tip != nullptr) {
+        oldest_height = std::max(
+            oldest_height, tip->nHeight -
+                               CDeterministicMNManager::LIST_CACHE_SIZE + 1);
+    }
+    if (durable_floor) {
+        if (tip == nullptr || tip->nHeight < durable_floor->height) {
+            structurally_valid = false;
+            return {};
+        }
+        const CBlockIndex* floor_ancestor{
+            tip->GetAncestor(durable_floor->height)};
+        if (floor_ancestor == nullptr ||
+            floor_ancestor->GetBlockHash() != durable_floor->block_hash) {
+            structurally_valid = false;
+            return {};
+        }
+        oldest_height = std::max(oldest_height, durable_floor->height);
+    }
     std::vector<uint256> ordered_hashes;
     ordered_hashes.reserve(CDeterministicMNManager::LIST_CACHE_SIZE);
     const CBlockIndex* previous{nullptr};
     for (const CBlockIndex* pindex = tip;
-         pindex != nullptr &&
-         pindex->nHeight >= consensus.DIP0003Height &&
+         pindex != nullptr && pindex->nHeight >= oldest_height &&
          ordered_hashes.size() < CDeterministicMNManager::LIST_CACHE_SIZE;
          pindex = pindex->pprev) {
         if (previous != nullptr &&
@@ -365,6 +386,13 @@ CDeterministicMNManager::CDeterministicMNManager(const DBParams& db_params)
     m_auxiliary_history_gc_high_watermark =
         m_auxiliary_history_gc_journal->HighestAuthorization();
     m_evoDb = std::make_unique<CEvoDB<uint256, CDeterministicMNList, StaticSaltedHasher>>(db_params, LIST_CACHE_SIZE);
+    {
+        LOCK(cs);
+        if (!RefreshEffectiveDMNInverseGCBoundary()) {
+            throw std::runtime_error(
+                "Invalid deterministic-MN inverse GC journal state");
+        }
+    }
     // SYSCOIN: Persist and validate the sole canonical base for a
     // genesis-active deterministic-masternode deployment.
     const auto& consensus{Params().GetConsensus()};
@@ -403,6 +431,168 @@ CDeterministicMNManager::CDeterministicMNManager(const DBParams& db_params)
     if (persisted_entry_count > 0 || consensus.DIP0003Height == 0) {
         m_evoDb->SetReadCacheSize(HOT_LIST_CACHE_SIZE);
     }
+}
+
+bool CDeterministicMNManager::RefreshEffectiveDMNInverseGCBoundary()
+{
+    AssertLockHeld(cs);
+    m_effective_dmn_inverse_gc_boundary_authenticated = false;
+    const auto state{m_auxiliary_history_gc_journal->GetState()};
+    const auto decode = [&](
+        const std::optional<evo::AuxiliaryHistoryGCComponent>& component,
+        const AuxiliaryHistoryGCAuthorization& authorization,
+        bool pending)
+        -> std::optional<EffectiveDMNInverseGCBoundary> {
+        if (!component) return std::nullopt;
+        const auto closure{evo::DecodeDMNInverseGCClosure(
+            component->closure)};
+        if (!component->IsValid() ||
+            component->version != evo::DMNInverseGCClosure::VERSION ||
+            !closure || component->monotonic_position !=
+                            static_cast<uint64_t>(
+                                closure->boundary.height) ||
+            closure->boundary.height <=
+                Params().GetConsensus().DIP0003Height ||
+            !evo::IsDMNInverseGCComponentBoundedByAuthorization(
+                *component, authorization)) {
+            throw std::runtime_error(
+                "invalid typed deterministic-MN inverse GC closure");
+        }
+        return EffectiveDMNInverseGCBoundary{
+            *component, *closure, authorization, pending};
+    };
+
+    try {
+        std::optional<EffectiveDMNInverseGCBoundary> watermark;
+        std::optional<EffectiveDMNInverseGCBoundary> pending;
+        if (state.watermark) {
+            watermark = decode(state.watermark->frontier.dmn,
+                               state.watermark->authorization,
+                               /*pending=*/false);
+        }
+        if (state.intent) {
+            pending = decode(state.intent->target.frontier.dmn,
+                             state.intent->target.authorization,
+                             /*pending=*/true);
+        }
+        m_effective_dmn_inverse_gc_boundary = pending
+            ? std::move(pending)
+            : std::move(watermark);
+        return true;
+    } catch (const std::exception& exception) {
+        LogPrintf("%s -- %s\n", __func__, exception.what());
+        m_effective_dmn_inverse_gc_boundary.reset();
+        return false;
+    }
+}
+
+bool CDeterministicMNManager::
+IsHeadCompatibleWithEffectiveDMNInverseGCBoundary(
+    const CBlockIndex* head,
+    const EffectiveDMNInverseGCBoundary& effective) const
+{
+    AssertLockHeld(cs);
+    const auto& consensus{Params().GetConsensus()};
+    const auto& closure{effective.closure};
+    if (!effective.component.IsValid() ||
+        effective.component.version != evo::DMNInverseGCClosure::VERSION ||
+        effective.component.monotonic_position !=
+            static_cast<uint64_t>(closure.boundary.height) ||
+        !evo::IsDMNInverseGCComponentBoundedByAuthorization(
+            effective.component, effective.authorization) ||
+        closure.boundary.height <= consensus.DIP0003Height ||
+        head == nullptr || head->nHeight < closure.boundary.height) {
+        return false;
+    }
+    const CBlockIndex* boundary{
+        head->GetAncestor(closure.boundary.height)};
+    return boundary != nullptr &&
+           boundary->GetBlockHash() == closure.boundary.block_hash;
+}
+
+bool CDeterministicMNManager::AuthenticateEffectiveDMNInverseGCBoundary(
+    const CBlockIndex* head,
+    const EffectiveDMNInverseGCBoundary& effective,
+    CDeterministicMNList* boundary_snapshot)
+{
+    AssertLockHeld(m_evoDb->cs);
+    AssertLockHeld(cs);
+    using SnapshotDB = CEvoDB<
+        uint256, CDeterministicMNList, StaticSaltedHasher>;
+    using InverseDB = CEvoDB<
+        uint256, CDeterministicMNListInverse, StaticSaltedHasher>;
+    const auto& consensus{Params().GetConsensus()};
+    const auto& closure{effective.closure};
+    const bool authenticating_current{
+        m_effective_dmn_inverse_gc_boundary &&
+        *m_effective_dmn_inverse_gc_boundary == effective};
+    if (authenticating_current) {
+        m_effective_dmn_inverse_gc_boundary_authenticated = false;
+    }
+    if (!IsHeadCompatibleWithEffectiveDMNInverseGCBoundary(
+            head, effective)) {
+        return false;
+    }
+    ++m_effective_dmn_inverse_gc_exact_authentications_for_testing;
+    const CBlockIndex* boundary{
+        head->GetAncestor(closure.boundary.height)};
+    if (boundary == nullptr ||
+        boundary->GetBlockHash() != closure.boundary.block_hash) {
+        return false;
+    }
+
+    CDeterministicMNList snapshot;
+    if (m_evoDb->ReadExactDiskForGC(
+            closure.boundary.block_hash, snapshot) !=
+            SnapshotDB::ExactDiskReadResult::FOUND ||
+        snapshot.IsNull() ||
+        snapshot.GetHeight() != closure.boundary.height ||
+        snapshot.GetBlockHash() != closure.boundary.block_hash ||
+        snapshot.GetOrComputePQLegacyStateHash(
+            consensus.hashGenesisBlock) != closure.boundary_state_hash) {
+        return false;
+    }
+
+    CDeterministicMNListInverse inverse;
+    LOCK(m_inverse_journal->cs);
+    if (m_inverse_journal->ReadExactDiskForGC(
+            closure.boundary.block_hash, inverse) !=
+            InverseDB::ExactDiskReadResult::FOUND ||
+        !inverse.IsStructurallyValid() ||
+        inverse.genesis_hash != consensus.hashGenesisBlock ||
+        inverse.coverage_base_height != consensus.DIP0003Height ||
+        inverse.child_height != closure.boundary.height ||
+        inverse.child_hash != closure.boundary.block_hash ||
+        inverse.child_state_hash != closure.boundary_state_hash ||
+        inverse.history_commitment !=
+            closure.inverse_history_commitment ||
+        ::SerializeHash(inverse) != closure.inverse_record_hash) {
+        return false;
+    }
+    if (boundary_snapshot != nullptr) {
+        *boundary_snapshot = std::move(snapshot);
+    }
+    if (authenticating_current) {
+        m_effective_dmn_inverse_gc_boundary_authenticated = true;
+    }
+    return true;
+}
+
+bool CDeterministicMNManager::
+EnsureAuthenticatedEffectiveDMNInverseGCBoundary(
+    const CBlockIndex* head,
+    const EffectiveDMNInverseGCBoundary& effective)
+{
+    AssertLockHeld(m_evoDb->cs);
+    AssertLockHeld(cs);
+    if (!m_effective_dmn_inverse_gc_boundary ||
+        *m_effective_dmn_inverse_gc_boundary != effective ||
+        !IsHeadCompatibleWithEffectiveDMNInverseGCBoundary(
+            head, effective)) {
+        return false;
+    }
+    return m_effective_dmn_inverse_gc_boundary_authenticated ||
+           AuthenticateEffectiveDMNInverseGCBoundary(head, effective);
 }
 
 bool CDeterministicMNManager::CommitInverseJournal(
@@ -605,6 +795,7 @@ bool CDeterministicMNManager::EnsureRetainedSnapshotWindow(
     const CBlockIndex* tip,
     const CDeterministicMNList& tip_list)
 {
+    LOCK(m_evoDb->cs);
     const auto& consensus{Params().GetConsensus()};
     if (tip == nullptr || tip->nHeight < consensus.DIP0003Height ||
         tip_list.IsNull() || tip_list.GetHeight() != tip->nHeight ||
@@ -612,9 +803,24 @@ bool CDeterministicMNManager::EnsureRetainedSnapshotWindow(
         return false;
     }
 
-    const int oldest_height{std::max(
+    int oldest_height{std::max(
         consensus.DIP0003Height,
         tip->nHeight - LIST_CACHE_SIZE + 1)};
+    {
+        LOCK(cs);
+        if (m_effective_dmn_inverse_gc_boundary) {
+            if (!EnsureAuthenticatedEffectiveDMNInverseGCBoundary(
+                    tip, *m_effective_dmn_inverse_gc_boundary)) {
+                LogPrintf("%s -- deterministic-MN recovery head does not "
+                          "contain the durable inverse GC boundary\n",
+                          __func__);
+                return false;
+            }
+            oldest_height = std::max(
+                oldest_height,
+                m_effective_dmn_inverse_gc_boundary->closure.boundary.height);
+        }
+    }
     const CBlockIndex* oldest{tip->GetAncestor(oldest_height)};
     if (oldest == nullptr) return false;
     CDeterministicMNList oldest_snapshot;
@@ -725,6 +931,7 @@ bool CDeterministicMNManager::EnsureRetainedSnapshotWindow(
 bool CDeterministicMNManager::EnsureRetainedSnapshotWindow(
     const CBlockIndex* tip)
 {
+    LOCK(m_evoDb->cs);
     if (tip == nullptr) return false;
     if (tip->nHeight < Params().GetConsensus().DIP0003Height) return true;
     CDeterministicMNList tip_list;
@@ -2169,6 +2376,28 @@ bool CDeterministicMNManager::ProcessBlock(const CBlock& block, const CBlockInde
 bool CDeterministicMNManager::UndoBlock(const CBlockIndex* pindex, CDeterministicMNListNEVMAddressDiff &inversedDiffNEVMAddress)
 {
     if (pindex == nullptr) return false;
+    // SYSCOIN: A durable inverse-GC boundary is an irreversible local
+    // rollback floor. Serialize the check with tip replacement and GC before
+    // mutating either the PQ registry or deterministic-MN state.
+    LOCK(m_evoDb->cs);
+    {
+        LOCK(cs);
+        if (m_effective_dmn_inverse_gc_boundary) {
+            const auto& effective{*m_effective_dmn_inverse_gc_boundary};
+            if (pindex->nHeight <= effective.closure.boundary.height ||
+                !EnsureAuthenticatedEffectiveDMNInverseGCBoundary(
+                    pindex, effective)) {
+                LogPrintf("%s -- refusing disconnect at height=%d block=%s "
+                          "across deterministic-MN inverse GC boundary "
+                          "height=%d block=%s\n",
+                          __func__, pindex->nHeight,
+                          pindex->GetBlockHash().ToString(),
+                          effective.closure.boundary.height,
+                          effective.closure.boundary.block_hash.ToString());
+                return false;
+            }
+        }
+    }
     const auto& consensus{Params().GetConsensus()};
     if (pindex->nHeight < consensus.DIP0003Height) return true;
     if (pindex->pprev == nullptr) return false;
@@ -2924,6 +3153,7 @@ bool CDeterministicMNManager::VerifyPersistedSnapshot(const CBlockIndex* pindex)
 bool CDeterministicMNManager::VerifyInverseJournalTipSeal(
     const CBlockIndex* tip)
 {
+    LOCK(m_evoDb->cs);
     if (tip == nullptr) return false;
     const auto& consensus{Params().GetConsensus()};
     if (tip->nHeight < consensus.DIP0003Height) return true;
@@ -2933,6 +3163,27 @@ bool CDeterministicMNManager::VerifyInverseJournalTipSeal(
         tip_snapshot.IsNull() || tip_snapshot.GetHeight() != tip->nHeight ||
         tip_snapshot.GetBlockHash() != tip->GetBlockHash()) {
         return false;
+    }
+    bool at_effective_boundary{false};
+    {
+        LOCK(cs);
+        if (m_effective_dmn_inverse_gc_boundary) {
+            const auto& effective{*m_effective_dmn_inverse_gc_boundary};
+            if (tip->nHeight < effective.closure.boundary.height ||
+                !EnsureAuthenticatedEffectiveDMNInverseGCBoundary(
+                    tip, effective)) {
+                return false;
+            }
+            if (tip->nHeight == effective.closure.boundary.height) {
+                // SYSCOIN: I_B is the authenticated retained endpoint; the
+                // ordinary child verifier would incorrectly cross the floor
+                // and demand the deliberately deleted I_(B-1).
+                at_effective_boundary = true;
+            }
+        }
+    }
+    if (at_effective_boundary) {
+        return EnsureRetainedSnapshotWindow(tip, tip_snapshot);
     }
     if (tip->nHeight == consensus.DIP0003Height) {
         return EnsureRetainedSnapshotWindow(tip, tip_snapshot);
@@ -3041,6 +3292,12 @@ FailNextInverseJournalSynchronousFlushForTesting()
     m_inverse_journal->FailNextSynchronousFlushBatchForTesting();
 }
 
+void CDeterministicMNManager::
+FailNextAuxiliaryHistoryGCCompleteForTesting()
+{
+    m_auxiliary_history_gc_journal->FailNextCompleteForTesting();
+}
+
 void CDeterministicMNManager::FailNextPQRegistryWriteThroughForTesting()
 {
     std::string error;
@@ -3090,8 +3347,9 @@ bool CDeterministicMNManager::IsDIP3Enforced(int nHeight)
 CDeterministicMNManager::AuxiliaryHistoryRetentionPlan
 CDeterministicMNManager::BuildAuxiliaryHistoryRetentionPlan(
     const CBlockIndex* tip,
-    std::span<const CBlockIndex* const> recovery_snapshot_indexes) const
+    std::span<const CBlockIndex* const> recovery_snapshot_indexes)
 {
+    AssertLockHeld(m_evoDb->cs);
     AssertLockHeld(cs);
     AuxiliaryHistoryRetentionPlan plan;
     plan.destructive_authorization =
@@ -3110,9 +3368,19 @@ CDeterministicMNManager::BuildAuxiliaryHistoryRetentionPlan(
     plan.finality_publication_pending =
         m_finality_snapshot_publication_pending;
     plan.generation = m_replay_snapshot_retention_generation;
+    plan.effective_dmn_inverse_gc_boundary =
+        m_effective_dmn_inverse_gc_boundary;
 
     const auto& consensus{Params().GetConsensus()};
     bool requirements_valid{true};
+    std::optional<AuxiliaryHistoryBlockIdentity> durable_dmn_floor;
+    if (plan.effective_dmn_inverse_gc_boundary) {
+        durable_dmn_floor =
+            plan.effective_dmn_inverse_gc_boundary->closure.boundary;
+        requirements_valid &=
+            EnsureAuthenticatedEffectiveDMNInverseGCBoundary(
+                tip, *plan.effective_dmn_inverse_gc_boundary);
+    }
     std::unordered_set<uint256, StaticSaltedHasher> observed_heads;
     const auto add_branch = [&](const CBlockIndex* head, bool active) {
         if (head == nullptr) {
@@ -3124,7 +3392,8 @@ CDeterministicMNManager::BuildAuxiliaryHistoryRetentionPlan(
             return;
         }
         bool window_valid{true};
-        auto window{CollectRetainedSnapshotWindow(head, window_valid)};
+        auto window{CollectRetainedSnapshotWindow(
+            head, durable_dmn_floor, window_valid)};
         requirements_valid &= window_valid && !window.empty();
         if (window.empty()) return;
         const CBlockIndex* floor{head->GetAncestor(
@@ -3163,6 +3432,10 @@ CDeterministicMNManager::BuildAuxiliaryHistoryRetentionPlan(
     };
     if (consensus.DIP0003Height == 0) {
         retain_fixed_dependency(0, consensus.hashGenesisBlock);
+    }
+    if (durable_dmn_floor) {
+        retain_fixed_dependency(durable_dmn_floor->height,
+                                durable_dmn_floor->block_hash);
     }
     if (consensus.nPQLegacyAnchorHeight !=
         std::numeric_limits<int>::max()) {
@@ -3768,9 +4041,11 @@ bool CDeterministicMNManager::PrepareDMNInverseGCIntent(
         case evo::AuxiliaryHistoryGCJournalResult::STARTED:
         case evo::AuxiliaryHistoryGCJournalResult::EXISTING:
             retry_required = true;
-            return !intent_id.IsNull();
+            return !intent_id.IsNull() &&
+                   RefreshEffectiveDMNInverseGCBoundary();
         case evo::AuxiliaryHistoryGCJournalResult::ALREADY_COMPLETE:
-            return !intent_id.IsNull();
+            return !intent_id.IsNull() &&
+                   RefreshEffectiveDMNInverseGCBoundary();
         case evo::AuxiliaryHistoryGCJournalResult::BUSY:
         case evo::AuxiliaryHistoryGCJournalResult::NON_MONOTONIC:
             retry_required = true;
@@ -3785,6 +4060,241 @@ bool CDeterministicMNManager::PrepareDMNInverseGCIntent(
     } catch (const std::exception& exception) {
         LogPrintf("%s -- failed to prepare deterministic-MN inverse GC: %s\n",
                   __func__, exception.what());
+        return false;
+    }
+    return false;
+}
+
+bool CDeterministicMNManager::GarbageCollectDMNInversePrefix(
+    const uint256& intent_id,
+    const EffectiveDMNInverseGCBoundary& effective,
+    bool& complete)
+{
+    AssertLockHeld(m_evoDb->cs);
+    complete = false;
+    const auto& consensus{Params().GetConsensus()};
+    const auto& closure{effective.closure};
+    static constexpr size_t ERASE_CHUNK_ITEMS{256};
+    static constexpr size_t SCAN_ITEMS_PER_PASS{4096};
+    if (intent_id.IsNull()) return false;
+
+    try {
+        DMNInverseGCScanProgress next_progress;
+        {
+            LOCK(cs);
+            const auto state{m_auxiliary_history_gc_journal->GetState()};
+            if (!state.intent ||
+                state.intent->intent_id != intent_id ||
+                !state.intent->target.frontier.dmn ||
+                *state.intent->target.frontier.dmn != effective.component ||
+                !effective.pending ||
+                !m_effective_dmn_inverse_gc_boundary ||
+                *m_effective_dmn_inverse_gc_boundary != effective) {
+                return false;
+            }
+            next_progress = m_dmn_inverse_gc_scan_progress &&
+                    m_dmn_inverse_gc_scan_progress->intent_id == intent_id
+                ? *m_dmn_inverse_gc_scan_progress
+                : DMNInverseGCScanProgress{
+                      intent_id, std::nullopt, false, false};
+        }
+
+        // SYSCOIN: Once the intent is durable, UndoBlock forbids crossing B.
+        // Any newly admitted active or recovery-branch inverse is therefore
+        // above B, so a hash-ordered insertion before this process-local
+        // cursor cannot introduce a missed erasable record. Restarting loses
+        // only progress and safely begins another scan from the first key.
+        std::vector<uint256> erase_batch;
+        erase_batch.reserve(ERASE_CHUNK_ITEMS);
+        size_t scanned{0};
+        bool reached_end{false};
+        {
+            LOCK(m_inverse_journal->cs);
+            if (m_inverse_journal->GetReadWriteCacheSize() != 0 ||
+                m_inverse_journal->GetEraseCacheSize() != 0) {
+                return false;
+            }
+
+            std::unique_ptr<CDBIterator> cursor{
+                m_inverse_journal->NewIterator()};
+            if (!cursor) return false;
+            if (next_progress.resume_after_key) {
+                cursor->Seek(*next_progress.resume_after_key);
+                if (cursor->Valid()) {
+                    uint256 found_key;
+                    if (!cursor->GetKeyExact(found_key)) return false;
+                    if (found_key == *next_progress.resume_after_key) {
+                        cursor->Next();
+                    }
+                }
+            } else {
+                cursor->SeekToFirst();
+            }
+
+            std::optional<uint256> last_key;
+            while (cursor->Valid() && scanned < SCAN_ITEMS_PER_PASS &&
+                   erase_batch.size() < ERASE_CHUNK_ITEMS) {
+                uint256 key;
+                CDeterministicMNListInverse inverse;
+                if (!cursor->GetKeyExact(key) ||
+                    !cursor->GetValueExact(inverse) ||
+                    !inverse.IsStructurallyValid() ||
+                    key != inverse.child_hash ||
+                    inverse.genesis_hash != consensus.hashGenesisBlock ||
+                    inverse.coverage_base_height !=
+                        consensus.DIP0003Height) {
+                    return false;
+                }
+                if (key == closure.boundary.block_hash) {
+                    if (inverse.child_height != closure.boundary.height ||
+                        inverse.child_state_hash !=
+                            closure.boundary_state_hash ||
+                        inverse.history_commitment !=
+                            closure.inverse_history_commitment ||
+                        ::SerializeHash(inverse) !=
+                            closure.inverse_record_hash) {
+                        return false;
+                    }
+                    next_progress.found_boundary_in_cycle = true;
+                }
+                if (inverse.child_height < closure.boundary.height) {
+                    erase_batch.emplace_back(key);
+                }
+                last_key = key;
+                ++scanned;
+                cursor->Next();
+            }
+            // SYSCOIN: CheckStatus is required even when a bounded pass stops
+            // on its work budget; an error cannot advance the scan cursor.
+            cursor->CheckStatus();
+            reached_end = !cursor->Valid();
+            if (!erase_batch.empty() &&
+                !m_inverse_journal->EraseExactDiskKeysForGC(
+                    erase_batch, /*fSync=*/true)) {
+                return false;
+            }
+            next_progress.erased_in_cycle |= !erase_batch.empty();
+            if (last_key) next_progress.resume_after_key = *last_key;
+        }
+
+        bool completed_cycle{false};
+        std::optional<DMNInverseGCScanProgress> published_progress;
+        if (reached_end) {
+            if (!next_progress.found_boundary_in_cycle) return false;
+            if (!next_progress.erased_in_cycle) {
+                completed_cycle = true;
+            } else {
+                // SYSCOIN: At least one durable erase invalidates this cycle's
+                // absence proof. A later deletion-free cycle must rescan from
+                // the first physical key before Complete().
+                published_progress =
+                    DMNInverseGCScanProgress{
+                        intent_id, std::nullopt, false, false};
+            }
+        } else {
+            published_progress = std::move(next_progress);
+        }
+
+        {
+            LOCK(cs);
+            const auto state{m_auxiliary_history_gc_journal->GetState()};
+            if (!state.intent ||
+                state.intent->intent_id != intent_id ||
+                !state.intent->target.frontier.dmn ||
+                *state.intent->target.frontier.dmn != effective.component ||
+                !m_effective_dmn_inverse_gc_boundary ||
+                *m_effective_dmn_inverse_gc_boundary != effective) {
+                return false;
+            }
+            m_dmn_inverse_gc_scan_progress =
+                std::move(published_progress);
+            complete = completed_cycle;
+        }
+        LogPrint(BCLog::SYS,
+                 "CDeterministicMNManager::%s scanned=%zu erased=%zu "
+                 "height=%d complete=%d\n",
+                 __func__, scanned, erase_batch.size(),
+                 closure.boundary.height, complete);
+        return true;
+    } catch (const std::exception& exception) {
+        LogPrintf("%s -- deterministic-MN inverse GC failed: %s\n",
+                  __func__, exception.what());
+        return false;
+    }
+}
+
+bool CDeterministicMNManager::ResumePendingDMNInverseGC(
+    const CBlockIndex* tip,
+    const AuxiliaryHistoryRetentionPlan& plan,
+    bool& retry_required)
+{
+    AssertLockHeld(m_evoDb->cs);
+    std::optional<uint256> intent_id;
+    EffectiveDMNInverseGCBoundary effective;
+    {
+        LOCK(cs);
+        const auto state{m_auxiliary_history_gc_journal->GetState()};
+        if (!state.intent) return true;
+        retry_required = true;
+
+        const auto& target{state.intent->target};
+        const auto previous_pq{state.watermark
+            ? state.watermark->frontier.pq_registry
+            : std::optional<evo::AuxiliaryHistoryGCComponent>{}};
+        if (target.pq_erase_manifest ||
+            target.frontier.pq_registry != previous_pq) {
+            // SYSCOIN: The cumulative coordinator must not be completed until
+            // a future PQ stage durably processes its own typed advance.
+            return true;
+        }
+        if (!target.frontier.dmn) return true;
+        if (!plan.effective_dmn_inverse_gc_boundary ||
+            !plan.effective_dmn_inverse_gc_boundary->pending ||
+            plan.effective_dmn_inverse_gc_boundary->component !=
+                *target.frontier.dmn ||
+            !m_effective_dmn_inverse_gc_boundary ||
+            *m_effective_dmn_inverse_gc_boundary !=
+                *plan.effective_dmn_inverse_gc_boundary ||
+            !AuthenticateEffectiveDMNInverseGCBoundary(
+                tip, *plan.effective_dmn_inverse_gc_boundary)) {
+            return false;
+        }
+        intent_id = state.intent->intent_id;
+        effective = *plan.effective_dmn_inverse_gc_boundary;
+    }
+
+    // SYSCOIN: Resume authenticates the pending endpoint directly from the
+    // exact B snapshot and I_B. Earlier watermark records may already have
+    // been erased by a prior successful chunk and are never consulted here.
+    bool physical_gc_complete{false};
+    if (!GarbageCollectDMNInversePrefix(
+            *intent_id, effective, physical_gc_complete)) {
+        return false;
+    }
+    if (!physical_gc_complete) return true;
+
+    LOCK(cs);
+    const auto final_state{m_auxiliary_history_gc_journal->GetState()};
+    if (!final_state.intent ||
+        final_state.intent->intent_id != *intent_id ||
+        !m_effective_dmn_inverse_gc_boundary ||
+        *m_effective_dmn_inverse_gc_boundary != effective) {
+        return false;
+    }
+    switch (m_auxiliary_history_gc_journal->Complete(*intent_id)) {
+    case evo::AuxiliaryHistoryGCJournalResult::COMPLETED:
+    case evo::AuxiliaryHistoryGCJournalResult::ALREADY_COMPLETE:
+        retry_required = false;
+        return RefreshEffectiveDMNInverseGCBoundary();
+    case evo::AuxiliaryHistoryGCJournalResult::BUSY:
+    case evo::AuxiliaryHistoryGCJournalResult::NON_MONOTONIC:
+        return true;
+    case evo::AuxiliaryHistoryGCJournalResult::STARTED:
+    case evo::AuxiliaryHistoryGCJournalResult::EXISTING:
+    case evo::AuxiliaryHistoryGCJournalResult::INVALID_ARGUMENT:
+    case evo::AuxiliaryHistoryGCJournalResult::MISMATCH:
+    case evo::AuxiliaryHistoryGCJournalResult::CORRUPT:
+    case evo::AuxiliaryHistoryGCJournalResult::DB_ERROR:
         return false;
     }
     return false;
@@ -3818,6 +4328,26 @@ evo::AuxiliaryHistoryGCState
 CDeterministicMNManager::GetAuxiliaryHistoryGCStateForTesting() const
 {
     return m_auxiliary_history_gc_journal->GetState();
+}
+
+bool CDeterministicMNManager::BeginAuxiliaryHistoryGCIntentForTesting(
+    const evo::AuxiliaryHistoryGCIntentTarget& target)
+{
+    LOCK(m_evoDb->cs);
+    LOCK(cs);
+    uint256 intent_id;
+    const auto result{m_auxiliary_history_gc_journal->Begin(
+        target, &intent_id)};
+    return (result == evo::AuxiliaryHistoryGCJournalResult::STARTED ||
+            result == evo::AuxiliaryHistoryGCJournalResult::EXISTING) &&
+           !intent_id.IsNull() && RefreshEffectiveDMNInverseGCBoundary();
+}
+
+uint64_t CDeterministicMNManager::
+GetDMNInverseGCExactAuthenticationCountForTesting()
+{
+    LOCK(cs);
+    return m_effective_dmn_inverse_gc_exact_authentications_for_testing;
 }
 
 bool CDeterministicMNManager::DoMaintenance(
@@ -3894,11 +4424,25 @@ bool CDeterministicMNManager::DoMaintenance(
     };
     const CBlockIndex* tip{nullptr};
     AuxiliaryHistoryRetentionPlan retention_plan;
+    bool auxiliary_gc_retry_required{false};
     {
         LOCK(cs);
         tip = tipIndex;
         retention_plan = BuildAuxiliaryHistoryRetentionPlan(
             tip, recovery_indexes);
+    }
+    if (retention_plan.requirements_valid && tip != nullptr) {
+        // SYSCOIN: Resume the immutable durable target before a same-tip
+        // shortcut or any attempt to derive a newer frontier.
+        if (!ResumePendingDMNInverseGC(
+                tip, retention_plan, auxiliary_gc_retry_required)) {
+            return false;
+        }
+        {
+            LOCK(cs);
+            retention_plan = BuildAuxiliaryHistoryRetentionPlan(
+                tip, recovery_indexes);
+        }
     }
     if (!retention_plan.requirements_valid) {
         LogPrintf("%s -- invalid auxiliary-history retention requirements\n",
@@ -3980,7 +4524,6 @@ bool CDeterministicMNManager::DoMaintenance(
         return false;
     }
 
-    bool auxiliary_gc_retry_required{false};
     {
         LOCK(cs);
         // SYSCOIN: Re-observe all finality and branch inputs only after the

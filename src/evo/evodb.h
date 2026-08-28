@@ -369,6 +369,26 @@ public:
         return true;
     }
 
+    // SYSCOIN: Destructive auxiliary-history maintenance exact-decodes each
+    // bounded physical slice and requires a final deletion-free absence
+    // cycle. Bypass the ordinary tombstone cache so each successful chunk is
+    // independently crash durable and a failed chunk remains retryable.
+    bool EraseExactDiskKeysForGC(Span<const K> keys, bool fSync = true)
+    {
+        LOCK(cs);
+        if (keys.empty()) return true;
+        CDBBatch batch(*this);
+        for (const auto& key : keys) {
+            if (mapCache.contains(key) || setEraseCache.contains(key)) {
+                return false;
+            }
+            batch.Erase(key);
+        }
+        if (!WriteFlushBatch(batch, fSync)) return false;
+        for (const auto& key : keys) EraseReadCache(key);
+        return true;
+    }
+
     // SYSCOIN: Tests inject a one-shot exception at the same seam used by
     // real LevelDB failures and then verify that the staged chunk can retry.
     void FailNextFlushBatchForTesting()

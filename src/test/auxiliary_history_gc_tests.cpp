@@ -246,7 +246,11 @@ BOOST_AUTO_TEST_CASE(manager_restores_persisted_authorization_high_watermark)
     auto params{TestDBParams(base, /*wipe=*/true)};
     const auto deployment{
         evo::MakeAuxiliaryHistoryGCDeployment(consensus)};
-    const auto target{Target(anchor_height + 100, 80)};
+    auto target{Target(anchor_height + 100, 80)};
+    target.frontier.pq_registry = target.frontier.dmn;
+    target.frontier.dmn.reset();
+    target.pq_erase_manifest = evo::AuxiliaryHistoryGCManifest{
+        /*version=*/1, {}};
     uint256 intent_id;
     {
         evo::AuxiliaryHistoryGCJournal journal{params, deployment};

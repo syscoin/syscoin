@@ -2844,7 +2844,9 @@ BOOST_FIXTURE_TEST_CASE(
     consensus.hashPQChainLockAnchorBlock.SetNull();
 
     const int start_height{consensus.DIP0003Height};
-    const int rollback_depth{CDeterministicMNManager::LIST_CACHE_SIZE + 4};
+    constexpr int gc_boundary_offset{300};
+    const int rollback_depth{
+        CDeterministicMNManager::LIST_CACHE_SIZE + gc_boundary_offset};
     std::vector<uint256> hashes(static_cast<size_t>(rollback_depth + 1));
     std::vector<CBlockIndex> indices(static_cast<size_t>(rollback_depth + 1));
     hashes[0] = MakeSnapshotKey(start_height);
@@ -2863,6 +2865,8 @@ BOOST_FIXTURE_TEST_CASE(
     };
     CDeterministicMNList expected_gc_boundary_snapshot;
     uint256 expected_gc_boundary_state_hash;
+    std::optional<evo::AuxiliaryHistoryGCComponent>
+        expected_gc_component;
 
     {
         CDeterministicMNManager manager(db_params);
@@ -2943,9 +2947,10 @@ BOOST_FIXTURE_TEST_CASE(
                     "DMN inverse payload sizes: empty=245 bytes, "
                     "one-state-update=251 bytes");
             }
-            if (offset == 4) {
+            if (offset == gc_boundary_offset) {
                 expected_gc_boundary_snapshot =
-                    manager.GetListForBlock(&indices[4]);
+                    manager.GetListForBlock(
+                        &indices[gc_boundary_offset]);
                 expected_gc_boundary_state_hash =
                     expected_gc_boundary_snapshot.GetPQLegacyStateHash(
                         consensus.hashGenesisBlock);
@@ -2982,7 +2987,8 @@ BOOST_FIXTURE_TEST_CASE(
         const CDeterministicMNManager::AuxiliaryHistoryGCAuthorization
             gc_authorization{
             Source::ENFORCED_DURABLE_CHAINLOCK,
-            {start_height + 4, hashes[4]}};
+            {start_height + gc_boundary_offset,
+             hashes[gc_boundary_offset]}};
         BOOST_REQUIRE(manager.UpdateAuxiliaryHistoryGCAuthorization(
             gc_authorization));
 
@@ -2992,10 +2998,13 @@ BOOST_FIXTURE_TEST_CASE(
             BOOST_REQUIRE(result.status == Status::READY);
             BOOST_REQUIRE(result.boundary);
             BOOST_REQUIRE(result.component);
-            BOOST_CHECK_EQUAL(result.boundary->height, start_height + 4);
-            BOOST_CHECK_EQUAL(result.boundary->block_hash, hashes[4]);
+            BOOST_CHECK_EQUAL(result.boundary->height,
+                              start_height + gc_boundary_offset);
+            BOOST_CHECK_EQUAL(result.boundary->block_hash,
+                              hashes[gc_boundary_offset]);
             BOOST_CHECK_EQUAL(result.component->monotonic_position,
-                              static_cast<uint64_t>(start_height + 4));
+                              static_cast<uint64_t>(
+                                  start_height + gc_boundary_offset));
             const auto closure{evo::DecodeDMNInverseGCClosure(
                 result.component->closure)};
             BOOST_REQUIRE(closure);
@@ -3011,30 +3020,34 @@ BOOST_FIXTURE_TEST_CASE(
         };
         const auto first_boundary{check_boundary()};
         BOOST_REQUIRE(first_boundary.component);
+        expected_gc_component = first_boundary.component;
         BOOST_CHECK(evo::IsDMNInverseGCComponentBoundedByAuthorization(
             *first_boundary.component, gc_authorization));
         const CDeterministicMNManager::AuxiliaryHistoryGCAuthorization
             under_authorized{
                 Source::ENFORCED_DURABLE_CHAINLOCK,
-                {start_height + 3, hashes[3]}};
+                {start_height + gc_boundary_offset - 1,
+                 hashes[gc_boundary_offset - 1]}};
         BOOST_CHECK(!evo::IsDMNInverseGCComponentBoundedByAuthorization(
             *first_boundary.component, under_authorized));
 
         // SYSCOIN: Derivation reconstructs the boundary in memory; this stage
         // must not silently turn a closure proposal into a database mutation.
         CDeterministicMNList absent_boundary;
-        BOOST_CHECK(!manager.m_evoDb->Read(hashes[4], absent_boundary));
+        BOOST_CHECK(!manager.m_evoDb->Read(
+            hashes[gc_boundary_offset], absent_boundary));
 
         // A read-only derivation must not flush a pending tombstone while
         // distinguishing an absent optional B snapshot from corrupt state.
-        manager.m_evoDb->EraseCache(hashes[4]);
+        manager.m_evoDb->EraseCache(hashes[gc_boundary_offset]);
         BOOST_CHECK_EQUAL(manager.m_evoDb->GetEraseCacheSize(), 1U);
         BOOST_CHECK(manager.GetDMNInverseGCBoundaryForTesting().status ==
                     Status::BLOCKED);
         BOOST_CHECK_EQUAL(manager.m_evoDb->GetEraseCacheSize(), 1U);
-        BOOST_CHECK(!manager.m_evoDb->Read(hashes[4], absent_boundary));
+        BOOST_CHECK(!manager.m_evoDb->Read(
+            hashes[gc_boundary_offset], absent_boundary));
         manager.m_evoDb->WriteCache(
-            hashes[4], expected_gc_boundary_snapshot);
+            hashes[gc_boundary_offset], expected_gc_boundary_snapshot);
         BOOST_REQUIRE(manager.m_evoDb->FlushCacheToDisk(
             /*CHUNK_ITEMS=*/256, /*fSync=*/true));
         check_boundary();
@@ -3042,25 +3055,29 @@ BOOST_FIXTURE_TEST_CASE(
         // Ordinary EvoDB reads accept a valid object prefix. The physical GC
         // path must reject the same snapshot and inverse with trailing bytes.
         BOOST_REQUIRE(manager.m_evoDb->AppendTrailingValueByteForTesting(
-            hashes[4]));
+            hashes[gc_boundary_offset]));
         CDeterministicMNList prefix_snapshot;
-        BOOST_REQUIRE(manager.m_evoDb->Read(hashes[4], prefix_snapshot));
+        BOOST_REQUIRE(manager.m_evoDb->Read(
+            hashes[gc_boundary_offset], prefix_snapshot));
         BOOST_CHECK(manager.GetDMNInverseGCBoundaryForTesting().status ==
                     Status::BLOCKED);
         BOOST_REQUIRE(
-            manager.m_evoDb->RewriteExactValueForTesting(hashes[4]));
+            manager.m_evoDb->RewriteExactValueForTesting(
+                hashes[gc_boundary_offset]));
         check_boundary();
 
         BOOST_REQUIRE(
-            manager.AppendInverseJournalTrailingByteForTesting(hashes[4]));
+            manager.AppendInverseJournalTrailingByteForTesting(
+                hashes[gc_boundary_offset]));
         CDeterministicMNManager::InverseJournalEntryStatsForTesting
             prefix_inverse_stats;
         BOOST_REQUIRE(manager.GetInverseJournalEntryStatsForTesting(
-            hashes[4], prefix_inverse_stats));
+            hashes[gc_boundary_offset], prefix_inverse_stats));
         BOOST_CHECK(manager.GetDMNInverseGCBoundaryForTesting().status ==
                     Status::BLOCKED);
         BOOST_REQUIRE(
-            manager.RewriteExactInverseJournalValueForTesting(hashes[4]));
+            manager.RewriteExactInverseJournalValueForTesting(
+                hashes[gc_boundary_offset]));
         check_boundary();
 
         auto trailing{first_boundary.component->closure};
@@ -3070,17 +3087,21 @@ BOOST_FIXTURE_TEST_CASE(
         wrong_guard.front() ^= 1;
         BOOST_CHECK(!evo::DecodeDMNInverseGCClosure(wrong_guard));
 
-        // The selected floor is height base+5, so I_5 is the bounded suffix
-        // used to materialize B=base+4 and I_4 is the retained boundary seal.
-        BOOST_REQUIRE(manager.CorruptInverseJournalForTesting(hashes[5]));
+        // The selected floor is B+1, so I_(B+1) materializes the chosen
+        // boundary while I_B remains its retained closure endpoint.
+        BOOST_REQUIRE(manager.CorruptInverseJournalForTesting(
+            hashes[gc_boundary_offset + 1]));
         BOOST_CHECK(manager.GetDMNInverseGCBoundaryForTesting().status ==
                     Status::BLOCKED);
-        BOOST_REQUIRE(manager.CorruptInverseJournalForTesting(hashes[5]));
+        BOOST_REQUIRE(manager.CorruptInverseJournalForTesting(
+            hashes[gc_boundary_offset + 1]));
         check_boundary();
-        BOOST_REQUIRE(manager.CorruptInverseJournalForTesting(hashes[4]));
+        BOOST_REQUIRE(manager.CorruptInverseJournalForTesting(
+            hashes[gc_boundary_offset]));
         BOOST_CHECK(manager.GetDMNInverseGCBoundaryForTesting().status ==
                     Status::BLOCKED);
-        BOOST_REQUIRE(manager.CorruptInverseJournalForTesting(hashes[4]));
+        BOOST_REQUIRE(manager.CorruptInverseJournalForTesting(
+            hashes[gc_boundary_offset]));
         check_boundary();
 
         // Read-only endpoint derivation reaches only I_B and I_(B-1). The
@@ -3121,7 +3142,8 @@ BOOST_FIXTURE_TEST_CASE(
             retained_preboundary_inverse;
         BOOST_REQUIRE(manager.GetInverseJournalEntryStatsForTesting(
             hashes[1], retained_preboundary_inverse));
-        BOOST_REQUIRE(manager.VerifyPersistedSnapshot(&indices[4]));
+        BOOST_REQUIRE(manager.VerifyPersistedSnapshot(
+            &indices[gc_boundary_offset]));
 
         // A prolonged finality stall can move the ordinary random-access
         // window more than one full cache beyond B. Current-closure
@@ -3150,10 +3172,11 @@ BOOST_FIXTURE_TEST_CASE(
                     prepared_state.intent->target.frontier.dmn);
         manager.UpdatedBlockTip(&indices.back());
 
-        // This isolated stage leaves the exact durable intent pending; a
-        // repeated maintenance pass authenticates it without completing or
-        // deleting any inverse record.
-        BOOST_REQUIRE(manager.FlushCacheToDisk(
+        // The first physical chunk is independently synchronous even when
+        // ordinary maintenance is not. A failed chunk keeps both the durable
+        // intent and every not-yet-committed inverse record retryable.
+        manager.FailNextInverseJournalSynchronousFlushForTesting();
+        BOOST_CHECK(!manager.FlushCacheToDisk(
             /*bForceFlush=*/true, /*fSync=*/false));
         BOOST_CHECK(manager.GetAuxiliaryHistoryGCStateForTesting().intent ==
                     prepared_state.intent);
@@ -3182,27 +3205,183 @@ BOOST_FIXTURE_TEST_CASE(
                 CDeterministicMNManager::
                     AuxiliaryHistoryGCAuthorizationSource::
                         ENFORCED_DURABLE_CHAINLOCK,
-                {start_height + 4, hashes[4]}};
+                {start_height + gc_boundary_offset,
+                 hashes[gc_boundary_offset]}};
         BOOST_REQUIRE(restarted.UpdateAuxiliaryHistoryGCAuthorization(
             resumed_authorization));
         const auto resumed_state{
             restarted.GetAuxiliaryHistoryGCStateForTesting()};
         BOOST_REQUIRE(resumed_state.intent);
 
-        // I_(oldB-1) is below the pending closure. Resume authenticates I_B
-        // directly and must not cross that durable boundary.
+        // The bounded physical scan must reject strict-decoding failures in
+        // every record, not only at the retained B endpoint. Choose the
+        // lexicographically first non-B chain record so the first pass is
+        // guaranteed to encounter it before reaching its erase budget.
+        size_t malformed_scan_offset{1};
+        for (size_t offset{2}; offset < hashes.size(); ++offset) {
+            if (offset != static_cast<size_t>(gc_boundary_offset) &&
+                (malformed_scan_offset ==
+                     static_cast<size_t>(gc_boundary_offset) ||
+                 hashes[offset] < hashes[malformed_scan_offset])) {
+                malformed_scan_offset = offset;
+            }
+        }
+        BOOST_REQUIRE_NE(malformed_scan_offset,
+                         static_cast<size_t>(gc_boundary_offset));
         BOOST_REQUIRE(
-            restarted.AppendInverseJournalTrailingByteForTesting(hashes[3]));
-        BOOST_REQUIRE(restarted.FlushCacheToDisk(
+            restarted.AppendInverseJournalTrailingByteForTesting(
+                hashes[malformed_scan_offset]));
+        BOOST_CHECK(!restarted.FlushCacheToDisk(
             /*bForceFlush=*/true, /*fSync=*/false));
         BOOST_CHECK(restarted.GetAuxiliaryHistoryGCStateForTesting().intent ==
                     resumed_state.intent);
         BOOST_REQUIRE(
-            restarted.RewriteExactInverseJournalValueForTesting(hashes[3]));
+            restarted.RewriteExactInverseJournalValueForTesting(
+                hashes[malformed_scan_offset]));
+
+        // First use has more than one erase chunk. Each same-tip pass removes
+        // at most 256 child heights below B and leaves the durable intent
+        // pending; reaching EOF after erases starts a fresh absence cycle.
+        BOOST_REQUIRE(restarted.FlushCacheToDisk(
+            /*bForceFlush=*/true, /*fSync=*/false));
+        BOOST_CHECK(restarted.GetAuxiliaryHistoryGCStateForTesting().intent ==
+                    resumed_state.intent);
+        BOOST_REQUIRE(restarted.FlushCacheToDisk(
+            /*bForceFlush=*/true, /*fSync=*/false));
+        BOOST_CHECK(restarted.GetAuxiliaryHistoryGCStateForTesting().intent ==
+                    resumed_state.intent);
+        CDeterministicMNManager::InverseJournalEntryStatsForTesting
+            erased_inverse;
+        BOOST_CHECK(!restarted.GetInverseJournalEntryStatsForTesting(
+            hashes[1], erased_inverse));
+        BOOST_CHECK(!restarted.GetInverseJournalEntryStatsForTesting(
+            hashes[gc_boundary_offset - 1], erased_inverse));
+        BOOST_REQUIRE(restarted.GetInverseJournalEntryStatsForTesting(
+            hashes[gc_boundary_offset], erased_inverse));
+
+        // The final deletion-free cycle authenticates both physical halves of
+        // the closure. Neither a prefix-decodable B snapshot nor I_B may
+        // authorize completion.
+        BOOST_REQUIRE(restarted.m_evoDb->AppendTrailingValueByteForTesting(
+            hashes[gc_boundary_offset]));
+        BOOST_CHECK(!restarted.FlushCacheToDisk(
+            /*bForceFlush=*/true, /*fSync=*/false));
+        BOOST_REQUIRE(
+            restarted.m_evoDb->RewriteExactValueForTesting(
+                hashes[gc_boundary_offset]));
+        BOOST_REQUIRE(
+            restarted.AppendInverseJournalTrailingByteForTesting(
+                hashes[gc_boundary_offset]));
+        BOOST_CHECK(!restarted.FlushCacheToDisk(
+            /*bForceFlush=*/true, /*fSync=*/false));
+        BOOST_REQUIRE(
+            restarted.RewriteExactInverseJournalValueForTesting(
+                hashes[gc_boundary_offset]));
+
+        // A failure after all inverse chunks are durable must leave the exact
+        // pending target for restart; it must not resurrect the erased prefix.
+        restarted.FailNextAuxiliaryHistoryGCCompleteForTesting();
+        BOOST_CHECK(!restarted.FlushCacheToDisk(
+            /*bForceFlush=*/true, /*fSync=*/false));
+        BOOST_CHECK(restarted.GetAuxiliaryHistoryGCStateForTesting().intent ==
+                    resumed_state.intent);
+        BOOST_CHECK(!restarted.GetInverseJournalEntryStatsForTesting(
+            hashes[1], erased_inverse));
+        BOOST_REQUIRE(restarted.GetInverseJournalEntryStatsForTesting(
+            hashes[gc_boundary_offset], erased_inverse));
+    }
+
+    {
+        CDeterministicMNManager restarted(db_params);
+        restarted.UpdatedBlockTip(&indices.back());
+        BOOST_CHECK_EQUAL(
+            restarted.UpdateFinalitySnapshotRetentionFloor(start_height),
+            start_height);
+        const CDeterministicMNManager::AuxiliaryHistoryGCAuthorization
+            resumed_authorization{
+                CDeterministicMNManager::
+                    AuxiliaryHistoryGCAuthorizationSource::
+                        ENFORCED_DURABLE_CHAINLOCK,
+                {start_height + gc_boundary_offset,
+                 hashes[gc_boundary_offset]}};
+        BOOST_REQUIRE(restarted.UpdateAuxiliaryHistoryGCAuthorization(
+            resumed_authorization));
+        BOOST_REQUIRE(
+            restarted.GetAuxiliaryHistoryGCStateForTesting().intent);
+        BOOST_REQUIRE(restarted.FlushCacheToDisk(
+            /*bForceFlush=*/true, /*fSync=*/false));
+        const auto completed_state{
+            restarted.GetAuxiliaryHistoryGCStateForTesting()};
+        BOOST_CHECK(!completed_state.intent);
+        BOOST_REQUIRE(completed_state.watermark);
+        BOOST_REQUIRE(completed_state.watermark->frontier.dmn);
+        BOOST_CHECK(completed_state.watermark->frontier.dmn ==
+                    expected_gc_component);
+
+        // A shared intent carrying an unprocessed PQ advance must not be
+        // completed by the DMN stage, even when its carried DMN frontier is
+        // already physically satisfied.
+        evo::AuxiliaryHistoryGCIntentTarget combined_target;
+        combined_target.authorization = {
+            CDeterministicMNManager::
+                AuxiliaryHistoryGCAuthorizationSource::
+                    ENFORCED_DURABLE_CHAINLOCK,
+            {start_height + gc_boundary_offset + 1,
+             hashes[gc_boundary_offset + 1]}};
+        combined_target.frontier = completed_state.watermark->frontier;
+        combined_target.frontier.pq_registry =
+            evo::AuxiliaryHistoryGCComponent{1, 1, {0x51}};
+        combined_target.pq_erase_manifest =
+            evo::AuxiliaryHistoryGCManifest{1, {0x52}};
+        BOOST_REQUIRE(restarted.UpdateAuxiliaryHistoryGCAuthorization(
+            combined_target.authorization));
+        BOOST_REQUIRE(restarted.BeginAuxiliaryHistoryGCIntentForTesting(
+            combined_target));
+        const auto combined_state{
+            restarted.GetAuxiliaryHistoryGCStateForTesting()};
+        BOOST_REQUIRE(combined_state.intent);
+        BOOST_REQUIRE(restarted.FlushCacheToDisk(
+            /*bForceFlush=*/true, /*fSync=*/false));
+        BOOST_CHECK(restarted.GetAuxiliaryHistoryGCStateForTesting().intent ==
+                    combined_state.intent);
+
+        // Recovery heads below B or on a branch with a different block at B
+        // cannot widen the random-access window across the durable floor.
+        const std::array<const CBlockIndex*, 1> below_boundary_recovery{
+            &indices[gc_boundary_offset - 1]};
+        BOOST_CHECK(!restarted.GetAuxiliaryHistoryRetentionPlanForTesting(
+                                  below_boundary_recovery)
+                         .requirements_valid);
+        uint256 wrong_boundary_hash{MakeSnapshotKey(7'000'004)};
+        uint256 wrong_child_hash{MakeSnapshotKey(7'000'005)};
+        CBlockIndex wrong_boundary;
+        wrong_boundary.nHeight = start_height + gc_boundary_offset;
+        wrong_boundary.pprev = &indices[gc_boundary_offset - 1];
+        wrong_boundary.phashBlock = &wrong_boundary_hash;
+        CBlockIndex wrong_child;
+        wrong_child.nHeight = start_height + gc_boundary_offset + 1;
+        wrong_child.pprev = &wrong_boundary;
+        wrong_child.phashBlock = &wrong_child_hash;
+        const std::array<const CBlockIndex*, 1> wrong_branch_recovery{
+            &wrong_child};
+        BOOST_CHECK(!restarted.GetAuxiliaryHistoryRetentionPlanForTesting(
+                                  wrong_branch_recovery)
+                         .requirements_valid);
+        const uint64_t exact_authentications_before_wrong_undo{
+            restarted.GetDMNInverseGCExactAuthenticationCountForTesting()};
+        CDeterministicMNListNEVMAddressDiff wrong_branch_nevm;
+        BOOST_CHECK(!restarted.UndoBlock(
+            &wrong_child, wrong_branch_nevm));
+        BOOST_CHECK_EQUAL(
+            restarted.GetDMNInverseGCExactAuthenticationCountForTesting(),
+            exact_authentications_before_wrong_undo);
 
         BOOST_REQUIRE(restarted.VerifyPersistedSnapshot(&indices.back()));
         BOOST_REQUIRE(restarted.VerifyInverseJournalTipSeal(&indices.back()));
-        for (int offset{rollback_depth}; offset > 1; --offset) {
+        const uint64_t exact_authentications_before_disconnects{
+            restarted.GetDMNInverseGCExactAuthenticationCountForTesting()};
+        for (int offset{rollback_depth};
+             offset > gc_boundary_offset; --offset) {
             CDeterministicMNListNEVMAddressDiff inverse_nevm;
             BOOST_TEST_CONTEXT("undo offset=" << offset) {
                 BOOST_REQUIRE(restarted.UndoBlock(
@@ -3212,36 +3391,56 @@ BOOST_FIXTURE_TEST_CASE(
                 &indices[static_cast<size_t>(offset - 1)]));
             restarted.UpdatedBlockTip(
                 &indices[static_cast<size_t>(offset - 1)]);
-            if (offset <= 3) {
-                BOOST_TEST_CONTEXT("maintenance after undo offset=" << offset) {
-                    BOOST_REQUIRE(restarted.FlushCacheToDisk(
-                        /*bForceFlush=*/true, /*fSync=*/true));
-                }
-            }
         }
+        BOOST_REQUIRE(restarted.EnsureRetainedSnapshotWindow(
+            &indices[gc_boundary_offset]));
+        BOOST_REQUIRE(restarted.VerifyInverseJournalTipSeal(
+            &indices[gc_boundary_offset]));
+        BOOST_CHECK_EQUAL(
+            restarted.GetDMNInverseGCExactAuthenticationCountForTesting(),
+            exact_authentications_before_disconnects);
+        const auto boundary_plan{
+            restarted.GetAuxiliaryHistoryRetentionPlanForTesting()};
+        BOOST_REQUIRE(boundary_plan.requirements_valid);
+        BOOST_REQUIRE_EQUAL(boundary_plan.branches.size(), 1U);
+        BOOST_CHECK_EQUAL(
+            boundary_plan.branches.front().random_access_floor.height,
+            start_height + gc_boundary_offset);
+        BOOST_CHECK_EQUAL(
+            boundary_plan.branches.front().random_access_floor.block_hash,
+            hashes[gc_boundary_offset]);
+        CDeterministicMNListNEVMAddressDiff boundary_nevm;
+        BOOST_CHECK(!restarted.UndoBlock(
+            &indices[gc_boundary_offset], boundary_nevm));
         BOOST_REQUIRE(restarted.FlushPendingSnapshotsToDisk(/*fSync=*/true));
-        BOOST_REQUIRE(restarted.VerifyPersistedSnapshot(&indices[1]));
-        BOOST_REQUIRE(restarted.VerifyPersistedSnapshot(&indices.front()));
-        BOOST_CHECK(restarted.GetListForBlock(&indices.front())
+        BOOST_REQUIRE(restarted.VerifyPersistedSnapshot(
+            &indices[gc_boundary_offset]));
+        BOOST_CHECK(restarted.GetListForBlock(
+                        &indices[gc_boundary_offset])
                         .GetPQLegacyStateHash(consensus.hashGenesisBlock) ==
-                    base_state_hash);
+                    expected_gc_boundary_state_hash);
     }
 
     {
         CDeterministicMNManager reopened(db_params);
-        BOOST_REQUIRE(reopened.VerifyInverseJournalTipSeal(&indices[1]));
-        BOOST_REQUIRE(reopened.VerifyPersistedSnapshot(&indices.front()));
-        BOOST_CHECK(reopened.GetListForBlock(&indices.front())
+        reopened.UpdatedBlockTip(&indices[gc_boundary_offset]);
+        BOOST_REQUIRE(reopened.VerifyInverseJournalTipSeal(
+            &indices[gc_boundary_offset]));
+        BOOST_REQUIRE(reopened.VerifyPersistedSnapshot(
+            &indices[gc_boundary_offset]));
+        BOOST_CHECK(reopened.GetListForBlock(
+                        &indices[gc_boundary_offset])
                         .GetPQLegacyStateHash(consensus.hashGenesisBlock) ==
-                    base_state_hash);
+                    expected_gc_boundary_state_hash);
         CDeterministicMNListNEVMAddressDiff inverse_nevm;
-        BOOST_REQUIRE(reopened.UndoBlock(&indices[1], inverse_nevm));
-        const auto recovered{reopened.GetListForBlock(&indices.front())};
-        BOOST_CHECK_EQUAL(recovered.GetAllMNsCount(), 3U);
-        BOOST_CHECK_EQUAL(recovered.GetTotalRegisteredCount(), 17U);
-        BOOST_CHECK(
-            recovered.GetPQLegacyStateHash(consensus.hashGenesisBlock) ==
-            base_state_hash);
+        BOOST_CHECK(!reopened.UndoBlock(
+            &indices[gc_boundary_offset], inverse_nevm));
+        CDeterministicMNManager::InverseJournalEntryStatsForTesting
+            boundary_inverse;
+        BOOST_REQUIRE(reopened.GetInverseJournalEntryStatsForTesting(
+            hashes[gc_boundary_offset], boundary_inverse));
+        BOOST_CHECK(!reopened.GetInverseJournalEntryStatsForTesting(
+            hashes[gc_boundary_offset - 1], boundary_inverse));
     }
 }
 
