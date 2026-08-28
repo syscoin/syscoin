@@ -38,6 +38,7 @@ class CEvoDB : public CDBWrapper {
     // SYSCOIN: Exercise retry safety at the exact batch-publication seam
     // without changing CDBWrapper's production exception contract.
     bool m_fail_next_flush_batch_for_testing{false};
+    bool m_fail_next_sync_flush_batch_for_testing{false};
     bool m_fail_next_write_through_for_testing{false};
     bool m_fail_next_sync_write_through_for_testing{false};
 public:
@@ -65,6 +66,11 @@ private:
         if (m_fail_next_flush_batch_for_testing) {
             m_fail_next_flush_batch_for_testing = false;
             throw dbwrapper_error{"injected EvoDB flush-batch failure"};
+        }
+        if (fSync && m_fail_next_sync_flush_batch_for_testing) {
+            m_fail_next_sync_flush_batch_for_testing = false;
+            throw dbwrapper_error{
+                "injected synchronous EvoDB flush-batch failure"};
         }
         return WriteBatch(batch, fSync);
     }
@@ -369,6 +375,14 @@ public:
     {
         LOCK(cs);
         m_fail_next_flush_batch_for_testing = true;
+    }
+
+    // SYSCOIN: Exercise a WAL ordering barrier independently from the normal
+    // asynchronous maintenance flush that can precede it.
+    void FailNextSynchronousFlushBatchForTesting()
+    {
+        LOCK(cs);
+        m_fail_next_sync_flush_batch_for_testing = true;
     }
 
     // SYSCOIN: This one-shot seam verifies that consensus callers classify a

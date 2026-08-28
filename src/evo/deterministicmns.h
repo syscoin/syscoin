@@ -676,6 +676,7 @@ public:
             DMNInverseGCBoundaryStatus::BLOCKED};
         std::optional<AuxiliaryHistoryBlockIdentity> boundary;
         std::optional<evo::AuxiliaryHistoryGCComponent> component;
+        std::optional<CDeterministicMNList> snapshot;
     };
 
     struct InverseJournalEntryStatsForTesting {
@@ -819,7 +820,19 @@ private:
     [[nodiscard]] DMNInverseGCBoundary DeriveDMNInverseGCBoundary(
         const CBlockIndex* tip,
         std::span<const CBlockIndex* const> recovery_snapshot_indexes,
-        const AuxiliaryHistoryRetentionPlan& plan)
+        const AuxiliaryHistoryRetentionPlan& plan,
+        const std::optional<evo::AuxiliaryHistoryGCComponent>&
+            previous_component = std::nullopt)
+        EXCLUSIVE_LOCKS_REQUIRED(m_evoDb->cs, cs);
+    bool PrepareDMNInverseGCIntent(
+        const CBlockIndex* tip,
+        std::span<const CBlockIndex* const> recovery_snapshot_indexes,
+        const AuxiliaryHistoryRetentionPlan& plan,
+        bool& retry_required)
+        EXCLUSIVE_LOCKS_REQUIRED(m_evoDb->cs, cs);
+    bool AuthenticateInitialDMNInverseGCLineage(
+        const CBlockIndex* boundary,
+        const CDeterministicMNList& boundary_snapshot)
         EXCLUSIVE_LOCKS_REQUIRED(m_evoDb->cs, cs);
     bool GetPQPaymentEligibleProTxHashes(
         const CBlockIndex* pindex,
@@ -996,6 +1009,7 @@ public:
         InverseJournalEntryStatsForTesting& stats);
     bool EraseInverseJournalEntryForTesting(const uint256& child_hash);
     void FailNextInverseJournalFlushForTesting();
+    void FailNextInverseJournalSynchronousFlushForTesting();
     /** SYSCOIN: Verify rejected and check-only blocks never reach PQ publication. */
     void FailNextPQRegistryWriteThroughForTesting();
     /** SYSCOIN: Lower a replay floor, or erase it only after the durable marker clears. */
@@ -1029,8 +1043,12 @@ public:
     /** SYSCOIN: Derive the read-only authenticated DMN GC closure. */
     [[nodiscard]] DMNInverseGCBoundary
     GetDMNInverseGCBoundaryForTesting(
-        std::span<const CBlockIndex* const> recovery_snapshot_indexes = {})
+        std::span<const CBlockIndex* const> recovery_snapshot_indexes = {},
+        const std::optional<evo::AuxiliaryHistoryGCComponent>&
+            previous_component = std::nullopt)
         EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    [[nodiscard]] evo::AuxiliaryHistoryGCState
+    GetAuxiliaryHistoryGCStateForTesting() const;
 private:
     const CDeterministicMNList GetListForBlockInternal(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(!cs);
 };

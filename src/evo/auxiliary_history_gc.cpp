@@ -341,6 +341,18 @@ bool AuxiliaryHistoryGCComponent::IsValid() const noexcept
            closure.size() <= MAX_CLOSURE_BYTES;
 }
 
+bool IsDMNInverseGCComponentBoundedByAuthorization(
+    const AuxiliaryHistoryGCComponent& component,
+    const AuxiliaryHistoryGCAuthorization& authorization)
+{
+    const auto closure{DecodeDMNInverseGCClosure(component.closure)};
+    return authorization.IsValid() && component.IsValid() && closure &&
+           component.version == DMNInverseGCClosure::VERSION &&
+           component.monotonic_position ==
+               static_cast<uint64_t>(closure->boundary.height) &&
+           closure->boundary.height <= authorization.block.height;
+}
+
 bool AuxiliaryHistoryGCFrontier::IsValid() const noexcept
 {
     return (dmn || pq_registry) && (!dmn || dmn->IsValid()) &&

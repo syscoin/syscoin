@@ -183,6 +183,10 @@ struct AuxiliaryHistoryGCComponent {
                            const AuxiliaryHistoryGCComponent&) = default;
 };
 
+[[nodiscard]] bool IsDMNInverseGCComponentBoundedByAuthorization(
+    const AuxiliaryHistoryGCComponent& component,
+    const AuxiliaryHistoryGCAuthorization& authorization);
+
 /** Compact cumulative closures that survive after an erase completes. */
 struct AuxiliaryHistoryGCFrontier {
     std::optional<AuxiliaryHistoryGCComponent> dmn;
