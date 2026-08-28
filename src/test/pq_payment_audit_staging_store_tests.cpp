@@ -4,6 +4,7 @@
 
 #include <llmq/pq_payment_audit_staging_store.h>
 
+#include <dbwrapper.h>
 #include <test/util/setup_common.h>
 
 #include <cstddef>
@@ -14,6 +15,64 @@
 using namespace llmq::pq;
 
 namespace {
+
+struct TestDiskKey {
+    uint8_t type{0};
+    uint32_t epoch{0};
+    uint8_t row_index{0};
+    uint16_t member_index{0};
+
+    SERIALIZE_METHODS(TestDiskKey, obj)
+    {
+        READWRITE(obj.type, obj.epoch, obj.row_index, obj.member_index);
+    }
+};
+
+struct TestTrailingDiskKey {
+    TestDiskKey key;
+    uint8_t trailing{0xa5};
+
+    SERIALIZE_METHODS(TestTrailingDiskKey, obj)
+    {
+        READWRITE(obj.key, obj.trailing);
+    }
+};
+
+struct TestDiskState {
+    uint32_t format_version{PaymentAuditStagingStore::DB_FORMAT_VERSION};
+    uint32_t guard{0};
+    uint8_t has_active_epoch{0};
+    uint32_t active_epoch{0};
+    uint8_t has_retained_epoch{0};
+    uint32_t retained_epoch{0};
+    uint256 checksum;
+
+    SERIALIZE_METHODS(TestDiskState, obj)
+    {
+        READWRITE(obj.format_version, obj.guard, obj.has_active_epoch,
+                  obj.active_epoch, obj.has_retained_epoch,
+                  obj.retained_epoch, obj.checksum);
+    }
+};
+
+struct TestTrailingDiskState {
+    TestDiskState state;
+    uint8_t trailing{0xa5};
+
+    SERIALIZE_METHODS(TestTrailingDiskState, obj)
+    {
+        READWRITE(obj.state, obj.trailing);
+    }
+};
+
+DBParams DiskParams(const fs::path& path)
+{
+    return DBParams{.path = path,
+                    .cache_bytes = 1 << 20,
+                    .memory_only = false,
+                    .wipe_data = false,
+                    .obfuscate = false};
+}
 
 uint256 NonNullHash(uint64_t value)
 {
@@ -390,6 +449,86 @@ BOOST_AUTO_TEST_CASE(failed_sync_barrier_never_leaves_a_summary)
     BOOST_REQUIRE(restarted.IsHealthy());
     BOOST_CHECK(!restarted.GetOpenRow(11, 0));
     BOOST_CHECK(!restarted.GetSummary(11, 0));
+}
+
+BOOST_AUTO_TEST_CASE(startup_rejects_trailing_physical_key)
+{
+    const fs::path path{m_path_root /
+                        "pq_payment_audit_staging_trailing_key"};
+    const uint256 genesis_hash{NonNullHash(60)};
+    {
+        PaymentAuditStagingStore store{path, genesis_hash};
+        BOOST_REQUIRE(store.IsHealthy());
+    }
+    {
+        CDBWrapper db{DiskParams(path)};
+        BOOST_REQUIRE(db.Write(
+            TestTrailingDiskKey{TestDiskKey{0xa2, 12, 0, 0}},
+            uint8_t{1}, true));
+    }
+
+    PaymentAuditStagingStore restarted{path, genesis_hash};
+    BOOST_CHECK(!restarted.IsHealthy());
+}
+
+BOOST_AUTO_TEST_CASE(startup_rejects_trailing_physical_value)
+{
+    const fs::path path{m_path_root /
+                        "pq_payment_audit_staging_trailing_value"};
+    const uint256 genesis_hash{NonNullHash(61)};
+    {
+        PaymentAuditStagingStore store{path, genesis_hash};
+        BOOST_REQUIRE(store.IsHealthy());
+    }
+    {
+        CDBWrapper db{DiskParams(path)};
+        const TestDiskKey state_key{0xa1, 0, 0, 0};
+        TestDiskState state;
+        BOOST_REQUIRE(db.Read(state_key, state));
+        BOOST_REQUIRE(db.Write(
+            state_key, TestTrailingDiskState{state}, true));
+    }
+
+    PaymentAuditStagingStore restarted{path, genesis_hash};
+    BOOST_CHECK(!restarted.IsHealthy());
+}
+
+BOOST_AUTO_TEST_CASE(startup_scan_is_physically_bounded)
+{
+    const fs::path path{m_path_root /
+                        "pq_payment_audit_staging_physical_bound"};
+    const uint256 genesis_hash{NonNullHash(62)};
+    constexpr std::size_t max_persisted_records{
+        2 + 2 * PAYMENT_AUDIT_ROW_COUNT +
+        PaymentAuditStagingStore::MAX_OPEN_ROWS * (1 + QUORUM_SIZE)};
+    {
+        PaymentAuditStagingStore store{path, genesis_hash};
+        BOOST_REQUIRE(store.IsHealthy());
+    }
+    const TestDiskKey first_extra{0xa2, 100, 0, 0};
+    {
+        CDBWrapper db{DiskParams(path)};
+        CDBBatch batch{db};
+        for (std::size_t index{0}; index < max_persisted_records - 1;
+             ++index) {
+            batch.Write(
+                TestDiskKey{
+                    0xa2,
+                    static_cast<uint32_t>(100 +
+                                          index / PAYMENT_AUDIT_ROW_COUNT),
+                    static_cast<uint8_t>(index %
+                                         PAYMENT_AUDIT_ROW_COUNT),
+                    0},
+                uint8_t{1});
+        }
+        BOOST_REQUIRE(db.WriteBatch(batch, true));
+    }
+    {
+        PaymentAuditStagingStore restarted{path, genesis_hash};
+        BOOST_CHECK(!restarted.IsHealthy());
+    }
+    CDBWrapper db{DiskParams(path)};
+    BOOST_CHECK(db.Exists(first_extra));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

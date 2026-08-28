@@ -36,6 +36,11 @@ constexpr std::string_view RESPONSE_DOMAIN{
     "SYS_PQ_PAYMENT_AUDIT_STAGING_RESPONSE_V1"};
 constexpr std::string_view SUMMARY_DOMAIN{
     "SYS_PQ_PAYMENT_AUDIT_STAGING_SUMMARY_V1"};
+// Active and retained epochs can each hold one summary per row; only the
+// active epoch can additionally own the bounded open-row response set.
+constexpr std::size_t MAX_PERSISTED_RECORDS{
+    2 + 2 * PAYMENT_AUDIT_ROW_COUNT +
+    PaymentAuditStagingStore::MAX_OPEN_ROWS * (1 + QUORUM_SIZE)};
 
 using RowKey = std::pair<uint32_t, uint8_t>;
 
@@ -510,11 +515,16 @@ struct PaymentAuditStagingStore::Impl {
             bool found_state{false};
             DiskState loaded_state;
             std::vector<DiskKey> discard_open;
+            std::size_t persisted_records{0};
             std::unique_ptr<CDBIterator> iterator{db.NewIterator()};
             for (iterator->SeekToFirst(); iterator->Valid(); iterator->Next()) {
+                if (++persisted_records > MAX_PERSISTED_RECORDS) {
+                    Fail(PaymentAuditStagingResult::CORRUPT);
+                    return;
+                }
                 any = true;
                 DiskKey key;
-                if (!iterator->GetKey(key)) {
+                if (!iterator->GetKeyExact(key)) {
                     Fail(PaymentAuditStagingResult::CORRUPT);
                     return;
                 }
@@ -522,7 +532,7 @@ struct PaymentAuditStagingStore::Impl {
                     DiskSchema loaded;
                     if (key.epoch != 0 || key.row_index != 0 ||
                         key.member_index != 0 || found_schema ||
-                        !iterator->GetValue(loaded) || loaded != schema) {
+                        !iterator->GetValueExact(loaded) || loaded != schema) {
                         Fail(PaymentAuditStagingResult::CORRUPT);
                         return;
                     }
@@ -530,7 +540,7 @@ struct PaymentAuditStagingStore::Impl {
                 } else if (key.type == DB_STATE_KEY) {
                     if (key.epoch != 0 || key.row_index != 0 ||
                         key.member_index != 0 || found_state ||
-                        !iterator->GetValue(loaded_state) ||
+                        !iterator->GetValueExact(loaded_state) ||
                         !IsStateValid(genesis_hash, loaded_state)) {
                         Fail(PaymentAuditStagingResult::CORRUPT);
                         return;
@@ -556,7 +566,7 @@ struct PaymentAuditStagingStore::Impl {
                     DiskSummary disk;
                     if (key.member_index != 0 ||
                         key.row_index >= PAYMENT_AUDIT_ROW_COUNT ||
-                        !iterator->GetValue(disk) ||
+                        !iterator->GetValueExact(disk) ||
                         disk.format_version != DB_FORMAT_VERSION ||
                         disk.guard != SUMMARY_GUARD ||
                         disk.identity.epoch != key.epoch ||
@@ -579,6 +589,7 @@ struct PaymentAuditStagingStore::Impl {
                     return;
                 }
             }
+            iterator->CheckStatus();
             if (!any) {
                 CDBBatch batch{db};
                 batch.Write(SchemaKey(), schema);
