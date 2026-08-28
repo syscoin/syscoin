@@ -378,7 +378,11 @@ bool CDBWrapper::IsEmpty()
 {
     std::unique_ptr<CDBIterator> it(NewIterator());
     it->SeekToFirst();
-    return !(it->Valid());
+    const bool empty{!it->Valid()};
+    // SYSCOIN: A failed iterator is not evidence that a security-sensitive
+    // database is empty and safe to initialize with a fresh schema.
+    it->CheckStatus();
+    return empty;
 }
 
 void CDBWrapper::CloseDB()
