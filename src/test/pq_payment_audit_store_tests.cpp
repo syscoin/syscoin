@@ -308,10 +308,13 @@ BOOST_AUTO_TEST_CASE(candidate_snapshot_is_coherent_ordered_and_revisioned)
     }
     BOOST_CHECK(store.IsCandidateRevisionCurrent(snapshot->revision));
 
-    const auto compatibility{store.GetEpochCandidates(epoch)};
-    BOOST_REQUIRE_EQUAL(compatibility.size(), expected.size());
+    const auto compatibility{store.GetEpochCandidateSnapshot(epoch)};
+    BOOST_REQUIRE(compatibility);
+    BOOST_REQUIRE_EQUAL(compatibility->ordered_candidates.size(),
+                        expected.size());
     for (std::size_t index{0}; index < expected.size(); ++index) {
-        BOOST_CHECK(compatibility[index] == *expected[index]);
+        BOOST_CHECK(compatibility->ordered_candidates[index].audit ==
+                    *expected[index]);
     }
 
     auto rejected{early_slot};
@@ -469,23 +472,28 @@ BOOST_AUTO_TEST_CASE(pin_prunes_old_candidates_but_accepts_new_branch_candidate)
                     PaymentAuditStoreResult::ACCEPTED);
         BOOST_CHECK(!store.Has(first_id));
         BOOST_CHECK(store.Has(second_id));
-        const auto selected{store.GetEpochCandidates(epoch)};
-        BOOST_REQUIRE_EQUAL(selected.size(), 1U);
-        BOOST_CHECK(selected.front().GetWitnessId(genesis_hash) ==
+        const auto selected{store.GetEpochCandidateSnapshot(epoch)};
+        BOOST_REQUIRE(selected);
+        BOOST_REQUIRE_EQUAL(selected->ordered_candidates.size(), 1U);
+        BOOST_CHECK(selected->ordered_candidates.front().witness_id ==
                     second_id);
 
         const auto unsolicited{Audit(epoch, 0x0d, 202)};
         BOOST_CHECK(store.AcceptVerified(unsolicited) ==
                     PaymentAuditStoreResult::ACCEPTED);
-        BOOST_CHECK_EQUAL(store.GetEpochCandidates(epoch).size(), 2U);
+        const auto with_unsolicited{
+            store.GetEpochCandidateSnapshot(epoch)};
+        BOOST_REQUIRE(with_unsolicited);
+        BOOST_CHECK_EQUAL(with_unsolicited->ordered_candidates.size(), 2U);
     }
     {
         PaymentAuditStore restarted{path, genesis_hash};
         BOOST_REQUIRE(restarted.IsHealthy());
         BOOST_CHECK(!restarted.Has(first_id));
-        const auto selected{restarted.GetEpochCandidates(epoch)};
-        BOOST_REQUIRE_EQUAL(selected.size(), 2U);
-        BOOST_CHECK(selected.front() == second);
+        const auto selected{restarted.GetEpochCandidateSnapshot(epoch)};
+        BOOST_REQUIRE(selected);
+        BOOST_REQUIRE_EQUAL(selected->ordered_candidates.size(), 2U);
+        BOOST_CHECK(selected->ordered_candidates.front().audit == second);
         BOOST_CHECK(restarted.PinReferencedWitness(epoch, second_id) ==
                     PaymentAuditStoreResult::DUPLICATE_WITNESS);
     }
@@ -535,8 +543,12 @@ BOOST_AUTO_TEST_CASE(checkpoint_prunes_prefix_and_preserves_live_suffix)
             BOOST_CHECK(!store.Has(witness_id));
             BOOST_CHECK(!store.Get(witness_id));
         }
-        BOOST_CHECK(store.GetEpochCandidates(9).empty());
-        BOOST_CHECK(store.GetEpochCandidates(10).empty());
+        const auto old_epoch{store.GetEpochCandidateSnapshot(9)};
+        const auto boundary_epoch{store.GetEpochCandidateSnapshot(10)};
+        BOOST_REQUIRE(old_epoch);
+        BOOST_REQUIRE(boundary_epoch);
+        BOOST_CHECK(old_epoch->ordered_candidates.empty());
+        BOOST_CHECK(boundary_epoch->ordered_candidates.empty());
         BOOST_CHECK(store.AcceptVerified(
                         old_first, /*required_witness=*/true) ==
                     PaymentAuditStoreResult::INVALID);
@@ -545,7 +557,9 @@ BOOST_AUTO_TEST_CASE(checkpoint_prunes_prefix_and_preserves_live_suffix)
         for (const auto& witness_id : live_ids) {
             BOOST_CHECK(store.Has(witness_id));
         }
-        BOOST_CHECK_EQUAL(store.GetEpochCandidates(11).size(), 2U);
+        const auto live_epoch{store.GetEpochCandidateSnapshot(11)};
+        BOOST_REQUIRE(live_epoch);
+        BOOST_CHECK_EQUAL(live_epoch->ordered_candidates.size(), 2U);
     }
 
     PaymentAuditStore restarted{path, genesis_hash};
@@ -557,7 +571,9 @@ BOOST_AUTO_TEST_CASE(checkpoint_prunes_prefix_and_preserves_live_suffix)
     for (const auto& witness_id : live_ids) {
         BOOST_CHECK(restarted.Has(witness_id));
     }
-    BOOST_CHECK_EQUAL(restarted.GetEpochCandidates(11).size(), 2U);
+    const auto live_epoch{restarted.GetEpochCandidateSnapshot(11)};
+    BOOST_REQUIRE(live_epoch);
+    BOOST_CHECK_EQUAL(live_epoch->ordered_candidates.size(), 2U);
 }
 
 BOOST_AUTO_TEST_CASE(checkpoint_is_strictly_monotonic_and_idempotent)
@@ -637,7 +653,10 @@ BOOST_AUTO_TEST_CASE(repeated_checkpoints_bound_all_archive_record_classes)
                     static_cast<int32_t>(70'000 + 5 * epoch));
                 BOOST_REQUIRE(
                     store.PruneThroughCheckpoint(final_checkpoint));
-                BOOST_CHECK_EQUAL(store.GetEpochCandidates(epoch).size(), 1U);
+                const auto candidates{
+                    store.GetEpochCandidateSnapshot(epoch)};
+                BOOST_REQUIRE(candidates);
+                BOOST_CHECK_EQUAL(candidates->ordered_candidates.size(), 1U);
                 BOOST_CHECK(store.Has(first_id));
                 BOOST_CHECK(store.Has(second_id));
             }
@@ -652,7 +671,9 @@ BOOST_AUTO_TEST_CASE(repeated_checkpoints_bound_all_archive_record_classes)
     BOOST_CHECK(restarted.GetPruneCheckpoint() == final_checkpoint);
     BOOST_CHECK(restarted.Has(retained_ids[0]));
     BOOST_CHECK(restarted.Has(retained_ids[1]));
-    BOOST_CHECK_EQUAL(restarted.GetEpochCandidates(35).size(), 1U);
+    const auto candidates{restarted.GetEpochCandidateSnapshot(35)};
+    BOOST_REQUIRE(candidates);
+    BOOST_CHECK_EQUAL(candidates->ordered_candidates.size(), 1U);
 }
 
 BOOST_AUTO_TEST_CASE(checkpoint_prune_fails_closed_on_dangling_index)

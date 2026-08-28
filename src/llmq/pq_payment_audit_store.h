@@ -127,14 +127,6 @@ public:
     [[nodiscard]] std::optional<PaymentAuditWitnessSnapshot>
     GetWithCandidateRevision(const uint256& witness_id) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
-    [[nodiscard]] std::optional<PaymentAuditCandidateSnapshot>
-    GetEpochCandidateSnapshot(uint32_t epoch) const
-        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
-    /** A healthy-store token suitable for invalidating derived local caches. */
-    [[nodiscard]] std::optional<uint64_t> ObserveCandidateRevision() const
-        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
-    [[nodiscard]] bool IsCandidateRevisionCurrent(uint64_t revision) const
-        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /**
      * The preferred applied witness plus at most four bounded live candidates,
      * one for each possible missing reporter quorum.
@@ -143,8 +135,14 @@ public:
      * change the seal or probation root, so a new branch-compatible candidate
      * must be selectable before any carrier can reference it.
      */
-    [[nodiscard]] std::vector<FinalPaymentAudit> GetEpochCandidates(
-        uint32_t epoch) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    [[nodiscard]] std::optional<PaymentAuditCandidateSnapshot>
+    GetEpochCandidateSnapshot(uint32_t epoch) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** A healthy-store token suitable for invalidating derived local caches. */
+    [[nodiscard]] std::optional<uint64_t> ObserveCandidateRevision() const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    [[nodiscard]] bool IsCandidateRevisionCurrent(uint64_t revision) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /** Cheap key-presence check for inventory admission. Full record decoding
      * and witness validation remain on Get()/certificate verification paths. */
     [[nodiscard]] bool Has(const uint256& witness_id) const

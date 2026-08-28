@@ -614,6 +614,76 @@ BOOST_AUTO_TEST_CASE(
 }
 
 BOOST_AUTO_TEST_CASE(
+    payment_audit_candidate_metadata_exact_compatibility_fences_stale_negative)
+{
+    using namespace llmq;
+    using namespace llmq::pq;
+    const fs::path path{m_path_root /
+                        "pq_payment_audit_candidate_metadata_compatibility"};
+    const uint256 genesis_hash{NonNullHash(93'500)};
+    constexpr uint32_t epoch{24};
+    const auto completed{MakePaymentAuditCandidate(epoch, 0x07, 25)};
+    const auto incompatible{MakePaymentAuditCandidate(epoch, 0x0b, 26)};
+
+    PaymentAuditStore store{path, genesis_hash};
+    PaymentAuditCandidateMetadataCache cache;
+    const auto healthy_empty{cache.GetOrBuild(store, genesis_hash, epoch)};
+    BOOST_REQUIRE(healthy_empty);
+    BOOST_CHECK(healthy_empty->ordered_candidates.empty());
+    BOOST_CHECK(!healthy_empty->ContainsExactStatement(
+        completed.statement));
+    BOOST_CHECK(store.IsCandidateRevisionCurrent(
+        healthy_empty->candidate_revision));
+
+    const auto repeated_empty{
+        cache.GetOrBuild(store, genesis_hash, epoch)};
+    BOOST_REQUIRE(repeated_empty);
+    BOOST_CHECK(repeated_empty == healthy_empty);
+    BOOST_CHECK_EQUAL(cache.StatsForTesting().builds, 1U);
+    BOOST_CHECK_EQUAL(cache.StatsForTesting().hits, 1U);
+
+    // A negative decision is usable only while its exact archive revision is
+    // still current. Installing the matching witness invalidates it before a
+    // runtime can be retained or published.
+    BOOST_REQUIRE(store.AcceptVerified(completed) ==
+                  PaymentAuditStoreResult::ACCEPTED);
+    BOOST_CHECK(!store.IsCandidateRevisionCurrent(
+        healthy_empty->candidate_revision));
+    BOOST_CHECK(!healthy_empty->ContainsExactStatement(
+        completed.statement));
+
+    const auto refreshed{cache.GetOrBuild(store, genesis_hash, epoch)};
+    BOOST_REQUIRE(refreshed);
+    BOOST_CHECK_NE(refreshed->candidate_revision,
+                   healthy_empty->candidate_revision);
+    BOOST_CHECK(refreshed->ContainsExactStatement(completed.statement));
+    BOOST_CHECK(!refreshed->ContainsExactStatement(incompatible.statement));
+    BOOST_CHECK(store.IsCandidateRevisionCurrent(
+        refreshed->candidate_revision));
+
+    const auto full{store.GetEpochCandidateSnapshot(epoch)};
+    BOOST_REQUIRE(full);
+    const auto matches_full = [&](const PaymentAuditStatement& statement) {
+        return std::any_of(
+            full->ordered_candidates.begin(),
+            full->ordered_candidates.end(),
+            [&](const auto& candidate) {
+                return IsPaymentAuditCandidateCompatible(
+                    candidate.audit, statement);
+            });
+    };
+    BOOST_CHECK_EQUAL(
+        refreshed->ContainsExactStatement(completed.statement),
+        matches_full(completed.statement));
+    BOOST_CHECK_EQUAL(
+        refreshed->ContainsExactStatement(incompatible.statement),
+        matches_full(incompatible.statement));
+
+    PaymentAuditStatement invalid_statement;
+    BOOST_CHECK(!refreshed->ContainsExactStatement(invalid_statement));
+}
+
+BOOST_AUTO_TEST_CASE(
     payment_audit_candidate_metadata_cache_is_exact_bounded_and_clearable)
 {
     using namespace llmq;

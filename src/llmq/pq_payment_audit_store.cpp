@@ -809,19 +809,6 @@ PaymentAuditStore::GetEpochCandidateSnapshot(uint32_t epoch) const
     }
 }
 
-std::vector<FinalPaymentAudit> PaymentAuditStore::GetEpochCandidates(
-    uint32_t epoch) const
-{
-    auto snapshot{GetEpochCandidateSnapshot(epoch)};
-    if (!snapshot) return {};
-    std::vector<FinalPaymentAudit> result;
-    result.reserve(snapshot->ordered_candidates.size());
-    for (auto& candidate : snapshot->ordered_candidates) {
-        result.push_back(std::move(candidate.audit));
-    }
-    return result;
-}
-
 bool PaymentAuditStore::Has(const uint256& witness_id) const
 {
     LOCK(m_mutex);

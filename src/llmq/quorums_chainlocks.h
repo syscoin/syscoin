@@ -196,6 +196,8 @@ struct PaymentAuditCandidateMetadataSnapshot {
     std::vector<PaymentAuditCandidateMetadata> ordered_candidates;
 
     [[nodiscard]] bool IsStructurallyValid() const noexcept;
+    [[nodiscard]] bool ContainsExactStatement(
+        const pq::PaymentAuditStatement& statement) const noexcept;
     friend bool operator==(const PaymentAuditCandidateMetadataSnapshot&,
                            const PaymentAuditCandidateMetadataSnapshot&) =
         default;

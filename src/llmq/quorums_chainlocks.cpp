@@ -840,6 +840,17 @@ bool PaymentAuditCandidateMetadataSnapshot::IsStructurallyValid() const noexcept
     return true;
 }
 
+bool PaymentAuditCandidateMetadataSnapshot::ContainsExactStatement(
+    const pq::PaymentAuditStatement& statement) const noexcept
+{
+    return statement.IsStructurallyValid() &&
+           std::any_of(
+               ordered_candidates.begin(), ordered_candidates.end(),
+               [&](const auto& candidate) {
+                   return candidate.statement == statement;
+               });
+}
+
 PaymentAuditCandidateMetadataSnapshotPtr
 PaymentAuditCandidateMetadataCache::Get(const Key& key) const
 {
@@ -8314,15 +8325,18 @@ bool CChainLocksHandler::PreparePaymentAuditSigningRuntime()
     }
     if (cached_statement &&
         IsCurrentPaymentAuditStatement(*cached_statement)) {
-        const auto candidates{m_payment_audit_store->GetEpochCandidates(
-            cached_statement->commitment.seed.epoch)};
-        const bool already_complete{std::any_of(
-            candidates.begin(), candidates.end(),
-            [&](const auto& candidate) {
-                return pq::IsPaymentAuditCandidateCompatible(
-                    candidate, *cached_statement);
-            })};
-        if (!already_complete) return true;
+        const auto candidates{
+            m_payment_audit_candidate_metadata_cache.GetOrBuild(
+                *m_payment_audit_store, m_genesis_hash,
+                cached_statement->commitment.seed.epoch)};
+        if (!candidates) return false;
+        if (!candidates->ContainsExactStatement(*cached_statement)) {
+            if (!m_payment_audit_store->IsCandidateRevisionCurrent(
+                    candidates->candidate_revision)) {
+                return false;
+            }
+            return true;
+        }
     }
 
     std::vector<uint32_t> candidate_epochs;
@@ -8536,14 +8550,10 @@ bool CChainLocksHandler::PreparePaymentAuditSigningRuntime()
                 &roster_source_generation)};
         if (!signing_rosters) continue;
         const auto existing_candidates{
-            m_payment_audit_store->GetEpochCandidates(epoch)};
-        if (std::any_of(
-                existing_candidates.begin(),
-                existing_candidates.end(),
-                [&](const auto& candidate) {
-                    return pq::IsPaymentAuditCandidateCompatible(
-                        candidate, statement);
-                })) {
+            m_payment_audit_candidate_metadata_cache.GetOrBuild(
+                *m_payment_audit_store, m_genesis_hash, epoch)};
+        if (!existing_candidates) return false;
+        if (existing_candidates->ContainsExactStatement(statement)) {
             continue;
         }
         pq::ShareCollectionError collection_error{
@@ -8575,13 +8585,32 @@ bool CChainLocksHandler::PreparePaymentAuditSigningRuntime()
             std::make_shared<const ChainLockRelayRecipients>(
                 BuildChainLockRelayRecipients(*signing_rosters_ptr))};
 
-        LOCK(m_payment_audit_mutex);
-        (void)PublishPaymentAuditRuntime(PaymentAuditResponseRuntime{
-            *round, selected, statement, *seal_chainlock,
-            signing_rosters_ptr,
-            relay_recipients, authorization_mask,
-            roster_source_generation,
-            std::move(collector), std::nullopt, std::nullopt, false, false});
+        // Bind publication to the negative archive view. If that view changes
+        // across publication, retire only the runtime installed by this pass.
+        if (!m_payment_audit_store->IsCandidateRevisionCurrent(
+                existing_candidates->candidate_revision)) {
+            return false;
+        }
+        uint64_t published_generation{0};
+        {
+            LOCK(m_payment_audit_mutex);
+            published_generation = PublishPaymentAuditRuntime(
+                PaymentAuditResponseRuntime{
+                    *round, selected, statement, *seal_chainlock,
+                    signing_rosters_ptr, relay_recipients,
+                    authorization_mask, roster_source_generation,
+                    std::move(collector), std::nullopt, std::nullopt,
+                    false, false});
+        }
+        if (!m_payment_audit_store->IsCandidateRevisionCurrent(
+                existing_candidates->candidate_revision)) {
+            LOCK(m_payment_audit_mutex);
+            if (m_payment_audit_runtime_generation ==
+                published_generation) {
+                ResetPaymentAuditRuntime();
+            }
+            return false;
+        }
         return true;
     }
 
