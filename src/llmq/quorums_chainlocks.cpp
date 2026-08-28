@@ -500,6 +500,24 @@ uint256 PaymentAuditPresealStateToken(
     return writer.GetHash();
 }
 
+uint256 PaymentAuditCheckpointToken(
+    const std::optional<pq::PaymentAuditStoreCheckpoint>& checkpoint)
+{
+    if (!checkpoint) return {};
+    CHashWriter writer{SER_GETHASH, 0};
+    writer << std::string{"SYS_PQ_PAYMENT_AUDIT_CHECKPOINT_SOURCE_V1"}
+           << checkpoint->prune_through_epoch
+           << checkpoint->covered_through_height
+           << checkpoint->covered_through_hash
+           << checkpoint->authenticated_receipt_state
+           << checkpoint->authenticated_probation_state_hash
+           << checkpoint->authorizing_target_height
+           << checkpoint->authorizing_target_hash
+           << checkpoint->authorizing_chainlock_logical_id
+           << checkpoint->authorizing_chainlock_witness_id;
+    return writer.GetHash();
+}
+
 uint256 PresealAdmissionToken(
     const pq::BTCCPresealState& btcc_state,
     const pq::PaymentAuditPresealState& payment_audit_state)
@@ -1899,6 +1917,13 @@ bool MustRetryPaymentAuditCertificateContext(
     return historical_required && !historical_resolved;
 }
 
+bool ShouldRetryLocalChainLockShareRelay(
+    bool journal_replayed, pq::ShareCollectionResult result) noexcept
+{
+    return journal_replayed &&
+           result == pq::ShareCollectionResult::DUPLICATE;
+}
+
 FinalChainLockVerificationPath SelectFinalChainLockVerificationPath(
     const pq::CollectedChainLockFinalization* collected,
     const pq::FinalChainLock* certificate,
@@ -2272,6 +2297,12 @@ void CChainLocksHandler::Start()
             MaybeReplayBTCCPreseal();
             RefreshPQHistoryAuthState();
             MaybeRelayPaymentAuditHave();
+            const uint64_t admission_generation{
+                GetShareAdmissionGeneration()};
+            if (admission_generation != 0) {
+                (void)RefreshCurrentSigningContexts(
+                    admission_generation);
+            }
             MaybeCreateAndSignChainLock();
             MaybeCreateAndSignPaymentAudit();
         }, std::chrono::seconds{5});
@@ -2338,7 +2369,8 @@ CChainLocksHandler::CurrentSigningContexts::Find(
     for (std::size_t i{0}; i < count; ++i) {
         if (statements[i] == statement) {
             return CurrentSigningContext{
-                statement, roster_set->RostersPtr(), authorization_mask};
+                static_cast<uint8_t>(i), statement,
+                roster_set->RostersPtr(), authorization_mask};
         }
     }
     return std::nullopt;
@@ -7002,13 +7034,52 @@ CChainLocksHandler::BuildHistoricalPreVerificationContext(
 }
 
 std::optional<CChainLocksHandler::CurrentSigningContexts>
-CChainLocksHandler::BuildCurrentSigningContexts() const
+CChainLocksHandler::BuildCurrentSigningContexts(
+    uint64_t admission_generation) const
 {
-    if (!m_share_admission_gate.IsOpen() || !m_config ||
-        !m_quorum_build_config ||
-        !m_store) {
+    if (!IsShareAdmissionGenerationCurrent(admission_generation) ||
+        !m_config || !m_quorum_build_config || !m_store ||
+        !m_persistence || !m_payment_audit_store) {
         return std::nullopt;
     }
+
+    uint64_t roster_source_generation{0};
+    const auto roster_cache{
+        GetQuorumRosterCache(&roster_source_generation)};
+    if (!roster_cache) return std::nullopt;
+
+    const pq::ChainLockFinalityStateObservation finality{
+        m_store->ObserveState()};
+    const pq::DurableFinalityStateView persistence{
+        m_persistence->GetFinalityState()};
+    if (persistence.best != finality.best) return std::nullopt;
+    if (!m_payment_audit_store->IsHealthy()) return std::nullopt;
+    const auto payment_audit_checkpoint{
+        m_payment_audit_store->GetPruneCheckpoint()};
+    if (!m_payment_audit_store->IsHealthy()) return std::nullopt;
+
+    uint256 payment_audit_preseal_token;
+    {
+        LOCK(m_btcc_preseal_mutex);
+        payment_audit_preseal_token = PaymentAuditPresealStateToken(
+            m_payment_audit_preseal_state);
+    }
+
+    const pq::ChainLockPredecessor durable_predecessor{
+        finality.best ? pq::ChainLockPredecessor{
+                   finality.best->statement.height,
+                   finality.best->statement.block_hash,
+                   finality.best->statement.accepted_btcc_cursor}
+             : pq::ChainLockPredecessor{
+                   m_config->anchor.height, m_config->anchor.block_hash,
+                   m_config->anchor.btcc_cursor}};
+
+    pq::QuorumBuildError build_error{pq::QuorumBuildError::NONE};
+    pq::VerifiedRosterSetPtr roster_set;
+    pq::FrozenQuorumRostersPtr rosters;
+    CurrentChainLockBTCCSelection btcc;
+    uint8_t authorization_mask{0};
+    CurrentSigningSource source;
     {
         LOCK(cs_main);
         if (IsPaymentAuditPresealActive() ||
@@ -7016,26 +7087,6 @@ CChainLocksHandler::BuildCurrentSigningContexts() const
              !m_chainman.IsSnapshotValidated())) {
             return std::nullopt;
         }
-    }
-    const auto roster_cache{GetQuorumRosterCache()};
-    if (!roster_cache) return std::nullopt;
-
-    const auto best{m_store->GetBestRecord()};
-    const pq::ChainLockPredecessor durable_predecessor{
-        best ? pq::ChainLockPredecessor{
-                   best->metadata.statement.height,
-                   best->metadata.statement.block_hash,
-                   best->metadata.statement.accepted_btcc_cursor}
-             : pq::ChainLockPredecessor{
-                   m_config->anchor.height, m_config->anchor.block_hash,
-                   m_config->anchor.btcc_cursor}};
-
-    int32_t target_height{-1};
-    uint256 target_hash;
-    int32_t declared_predecessor_height{-1};
-    uint256 declared_predecessor_hash;
-    {
-        LOCK(cs_main);
         const CBlockIndex* tip{m_chainman.ActiveTip()};
         const auto window{tip == nullptr
             ? std::optional<pq::ChainLockSigningWindow>{}
@@ -7043,23 +7094,21 @@ CChainLocksHandler::BuildCurrentSigningContexts() const
                   m_config->chainlock_schedule,
                   durable_predecessor.height, tip->nHeight)};
         if (tip == nullptr || !window) return std::nullopt;
-        target_height = window->target_height;
-        declared_predecessor_height =
-            window->declared_predecessor_height;
-        const CBlockIndex* target{tip->GetAncestor(target_height)};
+        const CBlockIndex* indexed_target{
+            tip->GetAncestor(window->target_height)};
         const CBlockIndex* declared_predecessor{
-            target == nullptr
+            indexed_target == nullptr
                 ? nullptr
-                : target->GetAncestor(declared_predecessor_height)};
-        if (target == nullptr ||
-            declared_predecessor == nullptr ||
-            !HasFullChainLockTargetValidation(
-                *target, durable_predecessor.height)) {
+                : indexed_target->GetAncestor(
+                      window->declared_predecessor_height)};
+        if (indexed_target == nullptr || declared_predecessor == nullptr ||
+            !HasFullChainLockTargetValidation(*indexed_target,
+                                              durable_predecessor.height)) {
             return std::nullopt;
         }
         if (durable_predecessor.height >= 0) {
             const CBlockIndex* predecessor_index{
-                target->GetAncestor(durable_predecessor.height)};
+                indexed_target->GetAncestor(durable_predecessor.height)};
             if (predecessor_index == nullptr ||
                 predecessor_index->GetBlockHash() !=
                     durable_predecessor.block_hash) {
@@ -7068,80 +7117,53 @@ CChainLocksHandler::BuildCurrentSigningContexts() const
         } else if (!durable_predecessor.block_hash.IsNull()) {
             return std::nullopt;
         }
-        target_hash = target->GetBlockHash();
-        declared_predecessor_hash =
-            declared_predecessor->GetBlockHash();
-    }
-
-    pq::QuorumBuildError build_error{pq::QuorumBuildError::NONE};
-    pq::VerifiedRosterSetPtr roster_set;
-    pq::FrozenQuorumRostersPtr rosters;
-    CurrentChainLockBTCCSelection btcc;
-    pq::BTCCReceiptState receipt_state;
-    pq::PaymentAuditReceiptState payment_audit_receipt_state;
-    uint256 payment_probation_state_hash;
-    uint8_t authorization_mask{0};
-    {
-        LOCK(cs_main);
-        const CBlockIndex* indexed_target{
-            m_chainman.m_blockman.LookupBlockIndex(target_hash)};
-        const CBlockIndex* tip{m_chainman.ActiveTip()};
-        const CBlockIndex* active_target{
-            tip != nullptr && tip->nHeight >= target_height
-                ? tip->GetAncestor(target_height)
-                : nullptr};
-        const auto window{tip == nullptr
-            ? std::optional<pq::ChainLockSigningWindow>{}
-            : pq::CurrentChainLockSigningWindow(
-                  m_config->chainlock_schedule,
-                  durable_predecessor.height, tip->nHeight)};
-        const CBlockIndex* declared_predecessor{
-            active_target == nullptr
-                ? nullptr
-                : active_target->GetAncestor(
-                      declared_predecessor_height)};
-        if (indexed_target == nullptr || indexed_target != active_target ||
-            indexed_target->nHeight != target_height ||
-            !window || window->target_height != target_height ||
-            window->declared_predecessor_height !=
-                declared_predecessor_height ||
-            declared_predecessor == nullptr ||
-            declared_predecessor->GetBlockHash() !=
-                declared_predecessor_hash ||
-            !HasFullChainLockTargetValidation(*indexed_target,
-                                              durable_predecessor.height)) {
-            return std::nullopt;
-        }
         if (!AreBTCCReceiptsReadyForSigning(*indexed_target,
                                             durable_predecessor.height)) {
             return std::nullopt;
         }
         const auto selected{SelectCurrentChainLockBTCC(
             m_genesis_hash, *m_config, *indexed_target,
-            best ? &best->metadata : nullptr)};
+            finality.best ? &*finality.best : nullptr)};
         if (!selected) return std::nullopt;
         btcc = *selected;
         const auto indexed_receipt_state{
             IndexedBTCCReceiptState(*indexed_target)};
         if (!indexed_receipt_state) return std::nullopt;
-        receipt_state = *indexed_receipt_state;
         const auto indexed_payment_audit_state{
             IndexedPaymentAuditReceiptState(*indexed_target)};
         if (!indexed_payment_audit_state ||
             indexed_target->pqPaymentProbationStateHash.IsNull()) {
             return std::nullopt;
         }
-        payment_audit_receipt_state = *indexed_payment_audit_state;
-        payment_probation_state_hash =
-            indexed_target->pqPaymentProbationStateHash;
         roster_set = roster_cache->GetVerifiedActive(
             indexed_target->nHeight, *indexed_target, &build_error);
         if (roster_set) {
             rosters = roster_set->RostersPtr();
             authorization_mask = DeriveSigningRosterAuthorizationMask(
-                *rosters, *indexed_target, declared_predecessor_height,
-                declared_predecessor_hash);
+                *rosters, *indexed_target,
+                window->declared_predecessor_height,
+                declared_predecessor->GetBlockHash());
         }
+
+        source.admission_generation = admission_generation;
+        source.finality_store_revision = finality.state_revision;
+        source.roster_source_generation = roster_source_generation;
+        source.persistence_certificate_revision =
+            persistence.certificate_revision;
+        source.payment_audit_checkpoint_token =
+            PaymentAuditCheckpointToken(payment_audit_checkpoint);
+        source.durable_predecessor = durable_predecessor;
+        source.window = *window;
+        source.target_hash = indexed_target->GetBlockHash();
+        source.declared_predecessor_hash =
+            declared_predecessor->GetBlockHash();
+        source.payment_audit_preseal_token =
+            payment_audit_preseal_token;
+        source.btcc_receipt_state = *indexed_receipt_state;
+        source.payment_audit_receipt_state =
+            *indexed_payment_audit_state;
+        source.payment_probation_state_hash =
+            indexed_target->pqPaymentProbationStateHash;
     }
     if (!rosters ||
         !pq::IsSigningRosterAuthorizationMask(authorization_mask)) {
@@ -7151,18 +7173,22 @@ CChainLocksHandler::BuildCurrentSigningContexts() const
     }
 
     CurrentSigningContexts contexts;
+    contexts.source = std::move(source);
     pq::ChainLockStatement& selected{contexts.statements[contexts.count++]};
-    selected.height = target_height;
-    selected.block_hash = target_hash;
-    selected.previous_chainlock_height = declared_predecessor_height;
-    selected.previous_chainlock_hash = declared_predecessor_hash;
+    selected.height = contexts.source.window.target_height;
+    selected.block_hash = contexts.source.target_hash;
+    selected.previous_chainlock_height =
+        contexts.source.window.declared_predecessor_height;
+    selected.previous_chainlock_hash =
+        contexts.source.declared_predecessor_hash;
     selected.previous_btcc_cursor = btcc.previous_cursor;
     selected.accepted_btcc_cursor = btcc.selected.cursor;
     selected.btcc_advance = btcc.selected.advance;
-    selected.btcc_receipt_state = receipt_state;
-    selected.payment_audit_receipt_state = payment_audit_receipt_state;
+    selected.btcc_receipt_state = contexts.source.btcc_receipt_state;
+    selected.payment_audit_receipt_state =
+        contexts.source.payment_audit_receipt_state;
     selected.payment_probation_state_hash =
-        payment_probation_state_hash;
+        contexts.source.payment_probation_state_hash;
     selected.quorum_context_hash = pq::GetQuorumContextHash(
         m_genesis_hash, selected.height, selected.block_hash,
         Descriptors(*rosters));
@@ -7185,10 +7211,142 @@ CChainLocksHandler::BuildCurrentSigningContexts() const
     }
     contexts.roster_set = std::move(roster_set);
     contexts.authorization_mask = authorization_mask;
+    if (!IsCurrentSigningSource(contexts.source)) return std::nullopt;
     for (std::size_t i{0}; i < contexts.count; ++i) {
         if (!IsCurrentSigningStatement(contexts.statements[i])) return std::nullopt;
     }
     return contexts;
+}
+
+bool CChainLocksHandler::IsCurrentSigningSource(
+    const CurrentSigningSource& source) const
+{
+    if (!IsShareAdmissionGenerationCurrent(source.admission_generation) ||
+        !m_config || !m_store || !m_persistence ||
+        !m_payment_audit_store ||
+        source.window.target_height < 0 || source.target_hash.IsNull()) {
+        return false;
+    }
+
+    const auto finality{m_store->ObserveState()};
+    const auto durable{m_persistence->GetFinalityState()};
+    if (!m_payment_audit_store->IsHealthy()) return false;
+    const auto payment_audit_checkpoint{
+        m_payment_audit_store->GetPruneCheckpoint()};
+    if (!m_payment_audit_store->IsHealthy()) return false;
+    uint256 payment_audit_preseal_token;
+    {
+        LOCK(m_btcc_preseal_mutex);
+        payment_audit_preseal_token = PaymentAuditPresealStateToken(
+            m_payment_audit_preseal_state);
+    }
+    const pq::ChainLockPredecessor durable_predecessor{
+        finality.best
+            ? pq::ChainLockPredecessor{
+                  finality.best->statement.height,
+                  finality.best->statement.block_hash,
+                  finality.best->statement.accepted_btcc_cursor}
+            : pq::ChainLockPredecessor{
+                  m_config->anchor.height, m_config->anchor.block_hash,
+                  m_config->anchor.btcc_cursor}};
+    if (finality.state_revision != source.finality_store_revision ||
+        durable.certificate_revision !=
+            source.persistence_certificate_revision ||
+        durable.best != finality.best ||
+        durable_predecessor != source.durable_predecessor ||
+        PaymentAuditCheckpointToken(payment_audit_checkpoint) !=
+            source.payment_audit_checkpoint_token ||
+        payment_audit_preseal_token !=
+            source.payment_audit_preseal_token ||
+        !IsQuorumRosterSourceGenerationCurrent(
+            source.roster_source_generation)) {
+        return false;
+    }
+
+    bool branch_current{false};
+    {
+        LOCK(cs_main);
+        const CBlockIndex* tip{m_chainman.ActiveTip()};
+        const auto window{tip == nullptr
+            ? std::optional<pq::ChainLockSigningWindow>{}
+            : pq::CurrentChainLockSigningWindow(
+                  m_config->chainlock_schedule,
+                  source.durable_predecessor.height, tip->nHeight)};
+        const CBlockIndex* target{
+            tip != nullptr && tip->nHeight >= source.window.target_height
+                ? tip->GetAncestor(source.window.target_height)
+                : nullptr};
+        const CBlockIndex* declared_predecessor{
+            target == nullptr
+                ? nullptr
+                : target->GetAncestor(
+                      source.window.declared_predecessor_height)};
+        const CBlockIndex* durable_index{
+            target != nullptr && source.durable_predecessor.height >= 0
+                ? target->GetAncestor(
+                      source.durable_predecessor.height)
+                : nullptr};
+        const auto receipt_state{target == nullptr
+            ? std::optional<pq::BTCCReceiptState>{}
+            : IndexedBTCCReceiptState(*target)};
+        const auto payment_audit_state{target == nullptr
+            ? std::optional<pq::PaymentAuditReceiptState>{}
+            : IndexedPaymentAuditReceiptState(*target)};
+        constexpr uint32_t target_provenance{
+            BLOCK_PQ_BTCC_INDEX_VALIDATED |
+            BLOCK_PQ_RECEIPT_INDEX_VALIDATED};
+        const bool durable_branch{
+            source.durable_predecessor.height >= 0
+                ? durable_index != nullptr &&
+                      durable_index->GetBlockHash() ==
+                          source.durable_predecessor.block_hash
+                : source.durable_predecessor.block_hash.IsNull()};
+        branch_current =
+            !(m_chainman.IsSnapshotActive() &&
+              !m_chainman.IsSnapshotValidated()) &&
+            !IsPaymentAuditPresealActive() &&
+            window && *window == source.window && target != nullptr &&
+            target->GetBlockHash() == source.target_hash &&
+            declared_predecessor != nullptr &&
+            declared_predecessor->GetBlockHash() ==
+                source.declared_predecessor_hash &&
+            durable_branch && (target->nStatus & BLOCK_HAVE_DATA) &&
+            !(target->nStatus & BLOCK_FAILED_MASK) &&
+            !target->IsAssumedValid() &&
+            target->IsValid(BLOCK_VALID_SCRIPTS) &&
+            (target->nStatus & target_provenance) == target_provenance &&
+            receipt_state &&
+            *receipt_state == source.btcc_receipt_state &&
+            payment_audit_state &&
+            *payment_audit_state ==
+                source.payment_audit_receipt_state &&
+            target->pqPaymentProbationStateHash ==
+                source.payment_probation_state_hash;
+    }
+    if (!branch_current) return false;
+
+    // These observations bracket the chain-index check. A source is usable
+    // only when every independently synchronized input remained unchanged.
+    const auto finality_after{m_store->ObserveState()};
+    const auto durable_after{m_persistence->GetFinalityState()};
+    if (!m_payment_audit_store->IsHealthy()) return false;
+    const auto payment_audit_checkpoint_after{
+        m_payment_audit_store->GetPruneCheckpoint()};
+    uint256 payment_audit_preseal_after;
+    {
+        LOCK(m_btcc_preseal_mutex);
+        payment_audit_preseal_after = PaymentAuditPresealStateToken(
+            m_payment_audit_preseal_state);
+    }
+    return IsShareAdmissionGenerationCurrent(source.admission_generation) &&
+           finality_after == finality && durable_after == durable &&
+           m_payment_audit_store->IsHealthy() &&
+           payment_audit_checkpoint_after ==
+               payment_audit_checkpoint &&
+           payment_audit_preseal_after ==
+               payment_audit_preseal_token &&
+           IsQuorumRosterSourceGenerationCurrent(
+               source.roster_source_generation);
 }
 
 bool CChainLocksHandler::IsCurrentSigningStatement(
@@ -7482,137 +7640,143 @@ bool CChainLocksHandler::CheckPaymentAuditSeedSigningPolicy(
     return true;
 }
 
-std::optional<CChainLocksHandler::CurrentSigningContexts>
-CChainLocksHandler::GetOrCreateCurrentSigningContexts(
+CChainLocksHandler::CurrentSigningContextsPtr
+CChainLocksHandler::GetPublishedCurrentSigningContexts(
+    uint64_t admission_generation) const
+{
+    if (!IsShareAdmissionGenerationCurrent(admission_generation)) return {};
+    LOCK(m_collector_mutex);
+    const auto& current{m_current_signing_contexts};
+    if (!current ||
+        current->source.admission_generation != admission_generation ||
+        current->count == 0 ||
+        current->count > CurrentSigningContexts::MAX_VARIANTS ||
+        !current->roster_set || !current->relay_recipients ||
+        !pq::IsSigningRosterAuthorizationMask(
+            current->authorization_mask)) {
+        return {};
+    }
+    for (std::size_t i{0}; i < current->count; ++i) {
+        if (!m_collectors[i] ||
+            m_collectors[i]->GetStatement() != current->statements[i] ||
+            m_collectors[i]->GetPreparedContext()->RosterSetPtr() !=
+                current->roster_set ||
+            m_collectors[i]->GetPreparedContext()->AuthorizationMask() !=
+                current->authorization_mask) {
+            return {};
+        }
+    }
+    return IsShareAdmissionGenerationCurrent(admission_generation)
+        ? current
+        : CurrentSigningContextsPtr{};
+}
+
+bool CChainLocksHandler::RefreshCurrentSigningContexts(
     uint64_t admission_generation)
 {
     if (!IsShareAdmissionGenerationCurrent(admission_generation)) {
-        return std::nullopt;
+        return false;
     }
-    {
-        LOCK(cs_main);
-        if (IsPaymentAuditPresealActive()) return std::nullopt;
-    }
-    const auto cached_context = [this]()
-        -> std::optional<CurrentSigningContexts> {
-        LOCK(m_collector_mutex);
-        if (m_collector_count == 0 || !m_collectors[0] ||
-            !m_collector_rosters || !m_collector_relay_recipients) {
-            return std::nullopt;
-        }
-        CurrentSigningContexts contexts;
-        contexts.count = m_collector_count;
-        contexts.roster_set =
-            m_collectors[0]->GetPreparedContext()->RosterSetPtr();
-        if (!contexts.roster_set ||
-            contexts.roster_set->RostersPtr() != m_collector_rosters) {
-            return std::nullopt;
-        }
-        contexts.relay_recipients = m_collector_relay_recipients;
-        contexts.authorization_mask = m_collector_authorization_mask;
-        for (std::size_t i{0}; i < contexts.count; ++i) {
-            if (!m_collectors[i] ||
-                m_collectors[i]->GetPreparedContext()->RosterSetPtr() !=
-                    contexts.roster_set) {
-                return std::nullopt;
-            }
-            contexts.statements[i] = m_collectors[i]->GetStatement();
-        }
-        return contexts;
-    };
-
-    const auto is_current = [this](const CurrentSigningContexts& contexts) {
-        if (!contexts.roster_set || contexts.count == 0 ||
-            contexts.count > CurrentSigningContexts::MAX_VARIANTS ||
-            !pq::IsSigningRosterAuthorizationMask(
-                contexts.authorization_mask)) {
+    const auto is_current = [this](
+        const CurrentSigningContextsPtr& contexts) {
+        if (!contexts || !IsCurrentSigningSource(contexts->source)) {
             return false;
         }
-        for (std::size_t i{0}; i < contexts.count; ++i) {
-            if (!IsCurrentSigningStatement(contexts.statements[i])) {
+        for (std::size_t i{0}; i < contexts->count; ++i) {
+            if (!IsCurrentSigningStatement(contexts->statements[i])) {
                 return false;
             }
         }
         return true;
     };
 
-    auto cached{cached_context()};
-    if (cached &&
-        IsShareAdmissionGenerationCurrent(admission_generation) &&
-        is_current(*cached)) {
-        return cached;
-    }
+    auto cached{GetPublishedCurrentSigningContexts(admission_generation)};
+    if (is_current(cached)) return true;
 
     LOCK(m_context_build_mutex);
     if (!IsShareAdmissionGenerationCurrent(admission_generation)) {
-        return std::nullopt;
+        return false;
     }
-    cached = cached_context();
-    if (cached &&
-        IsShareAdmissionGenerationCurrent(admission_generation) &&
-        is_current(*cached)) {
-        return cached;
-    }
+    cached = GetPublishedCurrentSigningContexts(admission_generation);
+    if (is_current(cached)) return true;
+
     uint64_t build_generation{0};
+    CurrentSigningContextsPtr replaced;
     {
         LOCK(m_collector_mutex);
         if (!IsShareAdmissionGenerationCurrent(admission_generation)) {
-            return std::nullopt;
+            return false;
         }
-        ResetCollectors();
         build_generation = m_collector_generation;
+        replaced = m_current_signing_contexts;
     }
+    const auto retire_replaced_if_exact = [&]() {
+        if (!replaced) return;
+        LOCK(m_collector_mutex);
+        if (m_collector_generation == build_generation &&
+            m_current_signing_contexts == replaced) {
+            ResetCollectors();
+        }
+    };
 
-    auto current{BuildCurrentSigningContexts()};
-    if (!current) return std::nullopt;
-    if (!is_current(*current)) return std::nullopt;
-
-    auto relay_recipients{std::make_shared<const ChainLockRelayRecipients>(
-        BuildChainLockRelayRecipients(current->roster_set->Rosters()))};
-    current->relay_recipients = relay_recipients;
+    auto built{BuildCurrentSigningContexts(admission_generation)};
+    if (!built) {
+        retire_replaced_if_exact();
+        return false;
+    }
+    built->relay_recipients =
+        std::make_shared<const ChainLockRelayRecipients>(
+            BuildChainLockRelayRecipients(
+                built->roster_set->Rosters()));
 
     pq::ChainLockVerificationError verification_error{
         pq::ChainLockVerificationError::NONE};
     std::array<std::unique_ptr<pq::ChainLockCollector>,
                CurrentSigningContexts::MAX_VARIANTS> collectors;
-    for (std::size_t i{0}; i < current->count; ++i) {
+    for (std::size_t i{0}; i < built->count; ++i) {
         auto prepared{pq::PreparedChainLockContext::Create(
-            m_config->chainlock_schedule, current->statements[i],
-            current->roster_set, current->authorization_mask,
+            m_config->chainlock_schedule, built->statements[i],
+            built->roster_set, built->authorization_mask,
             &verification_error)};
-        if (!prepared) return std::nullopt;
+        if (!prepared) {
+            retire_replaced_if_exact();
+            return false;
+        }
         pq::ShareCollectionError error{pq::ShareCollectionError::NONE};
         collectors[i] = pq::ChainLockCollector::Create(
             std::move(prepared), &error);
-        if (!collectors[i]) return std::nullopt;
+        if (!collectors[i]) {
+            retire_replaced_if_exact();
+            return false;
+        }
     }
+    auto published{std::make_shared<const CurrentSigningContexts>(
+        std::move(*built))};
 
     uint64_t published_generation{0};
     {
         LOCK(m_collector_mutex);
         if (!IsShareAdmissionGenerationCurrent(admission_generation) ||
-            m_collector_generation != build_generation) {
-            return std::nullopt;
+            m_collector_generation != build_generation ||
+            m_current_signing_contexts != replaced) {
+            return false;
         }
         m_collectors = std::move(collectors);
-        m_collector_count = current->count;
-        m_collector_rosters = current->roster_set->RostersPtr();
-        m_collector_relay_recipients = relay_recipients;
-        m_collector_authorization_mask = current->authorization_mask;
+        m_current_signing_contexts = published;
         published_generation = ++m_collector_generation;
     }
-    // Tip and durable-predecessor state are not serialized by the collector
-    // mutex. Recheck after publication and invalidate only the generation
-    // built here, never a replacement installed by a later caller.
-    if (!IsShareAdmissionGenerationCurrent(admission_generation) ||
-        !is_current(*current)) {
+    // Source inputs are not serialized by the publication mutex. Retire only
+    // this exact pointer/generation if the post-publication safety check loses
+    // a race; never tear down a replacement installed by another transition.
+    if (!is_current(published)) {
         LOCK(m_collector_mutex);
-        if (m_collector_generation == published_generation) {
+        if (m_collector_generation == published_generation &&
+            m_current_signing_contexts == published) {
             ResetCollectors();
         }
-        return std::nullopt;
+        return false;
     }
-    return current;
+    return true;
 }
 
 std::optional<CChainLocksHandler::PaymentAuditResponseDefinition>
@@ -8923,25 +9087,63 @@ void CChainLocksHandler::ProcessPaymentAuditShare(
 CChainLocksHandler::ChainLockShareCollectionOutcome
 CChainLocksHandler::CollectChainLockShare(
     const pq::ChainLockShare& share,
-    const pq::ChainLockStatement& statement,
+    CurrentSigningContextsPtr signing_contexts,
+    std::size_t variant_index,
     uint64_t admission_generation)
 {
     ChainLockShareCollectionOutcome outcome;
+    if (!signing_contexts ||
+        variant_index >= signing_contexts->count ||
+        share.GetStatement() !=
+            signing_contexts->statements[variant_index]) {
+        outcome.stale = true;
+        return outcome;
+    }
+    const pq::ChainLockStatement& statement{
+        signing_contexts->statements[variant_index]};
     uint64_t collector_generation{0};
     std::optional<
         pq::ChainLockCollector::ShareVerificationReservation> reservation;
     {
         LOCK(m_collector_mutex);
-        if (!IsShareAdmissionGenerationCurrent(admission_generation)) {
+        if (!IsShareAdmissionGenerationCurrent(admission_generation) ||
+            m_current_signing_contexts != signing_contexts ||
+            variant_index >= signing_contexts->count) {
             outcome.stale = true;
             return outcome;
         }
-        pq::ChainLockCollector* collector{FindCollector(statement)};
-        if (collector == nullptr) {
+        if (!m_collectors[variant_index]) {
             outcome.stale = true;
             return outcome;
         }
         collector_generation = m_collector_generation;
+    }
+
+    const auto retire_if_exact = [&]() {
+        LOCK(m_collector_mutex);
+        if (m_collector_generation == collector_generation &&
+            m_current_signing_contexts == signing_contexts) {
+            ResetCollectors();
+        }
+    };
+    if (!IsCurrentSigningSource(signing_contexts->source) ||
+        !IsCurrentSigningStatement(statement)) {
+        retire_if_exact();
+        outcome.stale = true;
+        return outcome;
+    }
+
+    {
+        LOCK(m_collector_mutex);
+        if (!IsShareAdmissionGenerationCurrent(admission_generation) ||
+            m_collector_generation != collector_generation ||
+            m_current_signing_contexts != signing_contexts ||
+            !m_collectors[variant_index]) {
+            outcome.stale = true;
+            return outcome;
+        }
+        pq::ChainLockCollector* collector{
+            m_collectors[variant_index].get()};
         auto pending{collector->ReserveShareVerification(
             share, &outcome.error)};
         if (pending) {
@@ -8953,15 +9155,9 @@ CChainLocksHandler::CollectChainLockShare(
                 : pq::ShareCollectionResult::REJECTED;
         }
     }
-
-    const auto retire_if_exact = [&]() {
-        LOCK(m_collector_mutex);
-        if (m_collector_generation == collector_generation) {
-            ResetCollectors();
-        }
-    };
     const auto is_current = [&]() {
         return IsShareAdmissionGenerationCurrent(admission_generation) &&
+               IsCurrentSigningSource(signing_contexts->source) &&
                IsCurrentSigningStatement(statement);
     };
 
@@ -8992,14 +9188,17 @@ CChainLocksHandler::CollectChainLockShare(
     {
         LOCK(m_collector_mutex);
         if (!IsShareAdmissionGenerationCurrent(admission_generation) ||
-            m_collector_generation != collector_generation) {
-            if (m_collector_generation == collector_generation) {
+            m_collector_generation != collector_generation ||
+            m_current_signing_contexts != signing_contexts) {
+            if (m_collector_generation == collector_generation &&
+                m_current_signing_contexts == signing_contexts) {
                 ResetCollectors();
             }
             outcome.stale = true;
             return outcome;
         }
-        pq::ChainLockCollector* collector{FindCollector(statement)};
+        pq::ChainLockCollector* collector{
+            m_collectors[variant_index].get()};
         if (collector == nullptr) {
             ResetCollectors();
             outcome.stale = true;
@@ -9011,7 +9210,8 @@ CChainLocksHandler::CollectChainLockShare(
             auto proof{collector->FinalizeCollection()};
             if (proof) {
                 outcome.finalized.emplace(LocalChainLockFinalization{
-                    std::move(proof), admission_generation,
+                    std::move(proof), signing_contexts, variant_index,
+                    admission_generation,
                     collector_generation});
             }
         }
@@ -9060,7 +9260,10 @@ void CChainLocksHandler::ProcessChainLockShare(CNode* from,
         punish(100, "bad-pq-clshare-encoding");
         return;
     }
-    auto contexts{GetOrCreateCurrentSigningContexts(admission_generation)};
+    // Network ingress may consume scheduler-minted immutable state but never
+    // build chain, receipt, roster, or collector context on a peer's behalf.
+    auto contexts{GetPublishedCurrentSigningContexts(
+        admission_generation)};
     const auto current{contexts ? contexts->Find(share.GetStatement())
                                 : std::nullopt};
     if (!current || !current->rosters || !contexts->relay_recipients ||
@@ -9075,7 +9278,8 @@ void CChainLocksHandler::ProcessChainLockShare(CNode* from,
     }
 
     auto collection{CollectChainLockShare(
-        share, current->statement, admission_generation)};
+        share, contexts, current->variant_index,
+        admission_generation)};
     if (collection.stale ||
         !IsShareAdmissionGenerationCurrent(admission_generation)) {
         return;
@@ -9095,7 +9299,8 @@ void CChainLocksHandler::ProcessChainLockShare(CNode* from,
     }
     MaybeCapturePaymentAuditResponse(
         share, current->rosters, admission_generation);
-    RelayChainLockShare(share, admission_generation, node_id);
+    RelayChainLockShare(share, contexts, current->variant_index,
+                        admission_generation, node_id);
 
     if (!IsShareAdmissionGenerationCurrent(admission_generation)) return;
     if (collection.finalized) {
@@ -10598,13 +10803,21 @@ bool CChainLocksHandler::ProcessNewChainLockInternal(
             }
 
             bool collector_generation_current{false};
-            if (local_finalization && local_finalization->proof) {
+            if (local_finalization && local_finalization->proof &&
+                local_finalization->signing_contexts &&
+                local_finalization->variant_index <
+                    local_finalization->signing_contexts->count) {
                 LOCK(m_collector_mutex);
                 const pq::ChainLockCollector* collector{
-                    FindCollector(chainlock.statement)};
+                    m_collectors[local_finalization->variant_index].get()};
                 collector_generation_current =
                     m_collector_generation ==
                         local_finalization->collector_generation &&
+                    m_current_signing_contexts ==
+                        local_finalization->signing_contexts &&
+                    local_finalization->signing_contexts
+                            ->statements[local_finalization->variant_index] ==
+                        chainlock.statement &&
                     collector != nullptr &&
                     collector->GetPreparedContext() ==
                         local_finalization->proof->ContextPtr();
@@ -10804,7 +11017,9 @@ bool CChainLocksHandler::ProcessNewChainLockInternal(
     {
         LOCK(m_collector_mutex);
         const bool collector_follows_winner{
-            m_collector_count != 0 && m_collectors[0] &&
+            m_current_signing_contexts &&
+            m_current_signing_contexts->count != 0 &&
+            m_collectors[0] &&
             IsChainLockCollectorOnAcceptedSuccessorView(
                 m_config->chainlock_schedule,
                 m_collectors[0]->GetStatement(), chainlock.statement)};
@@ -10956,7 +11171,9 @@ CChainLocksHandler::TryImportPersistedChainLock()
     {
         LOCK(m_collector_mutex);
         const bool collector_follows_winner{
-            m_collector_count != 0 && m_collectors[0] &&
+            m_current_signing_contexts &&
+            m_current_signing_contexts->count != 0 &&
+            m_collectors[0] &&
             IsChainLockCollectorOnAcceptedSuccessorView(
                 m_config->chainlock_schedule,
                 m_collectors[0]->GetStatement(), persisted.statement)};
@@ -11155,59 +11372,42 @@ bool IsAuthorizedChainLockShareRelay(
     return signer_matches_transcript;
 }
 
-pq::ChainLockCollector* CChainLocksHandler::FindCollector(
-    const pq::ChainLockStatement& statement)
-{
-    for (std::size_t i{0}; i < m_collector_count; ++i) {
-        if (m_collectors[i] &&
-            m_collectors[i]->GetStatement() == statement) {
-            return m_collectors[i].get();
-        }
-    }
-    return nullptr;
-}
-
-const pq::ChainLockCollector* CChainLocksHandler::FindCollector(
-    const pq::ChainLockStatement& statement) const
-{
-    for (std::size_t i{0}; i < m_collector_count; ++i) {
-        if (m_collectors[i] &&
-            m_collectors[i]->GetStatement() == statement) {
-            return m_collectors[i].get();
-        }
-    }
-    return nullptr;
-}
-
 void CChainLocksHandler::ResetCollectors()
 {
     for (auto& collector : m_collectors) collector.reset();
-    m_collector_count = 0;
-    m_collector_rosters.reset();
-    m_collector_relay_recipients.reset();
-    m_collector_authorization_mask = 0;
+    m_current_signing_contexts.reset();
     ++m_collector_generation;
 }
 
 void CChainLocksHandler::RelayChainLockShare(
     const pq::ChainLockShare& share,
+    CurrentSigningContextsPtr signing_contexts,
+    std::size_t variant_index,
     uint64_t admission_generation,
     NodeId except_peer)
 {
     LOCK(m_share_lifecycle_mutex);
     if (!IsShareAdmissionGenerationCurrent(admission_generation)) return;
+    if (!signing_contexts ||
+        variant_index >= signing_contexts->count ||
+        share.GetStatement() !=
+            signing_contexts->statements[variant_index]) {
+        return;
+    }
     {
         LOCK(cs_main);
         if (IsPaymentAuditPresealActive()) return;
     }
-    std::shared_ptr<const ChainLockRelayRecipients> recipients;
     {
         LOCK(m_collector_mutex);
-        if (FindCollector(share.GetStatement()) == nullptr) {
+        if (m_current_signing_contexts != signing_contexts ||
+            !m_collectors[variant_index] ||
+            m_collectors[variant_index]->GetStatement() !=
+                share.GetStatement()) {
             return;
         }
-        recipients = m_collector_relay_recipients;
     }
+    const auto& recipients{signing_contexts->relay_recipients};
     if (!recipients) return;
 
     m_connman.ForEachNode([&](CNode* node) {
@@ -11260,7 +11460,8 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
         return;
     }
 
-    auto contexts{GetOrCreateCurrentSigningContexts(admission_generation)};
+    auto contexts{GetPublishedCurrentSigningContexts(
+        admission_generation)};
     if (!contexts) return;
 
     std::optional<CurrentSigningContext> current;
@@ -11308,7 +11509,12 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
     uint64_t collector_generation{0};
     {
         LOCK(m_collector_mutex);
-        pq::ChainLockCollector* collector{FindCollector(current->statement)};
+        if (m_current_signing_contexts != contexts ||
+            current->variant_index >= contexts->count) {
+            return;
+        }
+        pq::ChainLockCollector* collector{
+            m_collectors[current->variant_index].get()};
         if (collector == nullptr) return;
         signing_context = collector->GetPreparedContext();
         collector_generation = m_collector_generation;
@@ -11323,10 +11529,19 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
         signing_context->AuthorizationMask()};
     const auto has_exact_collector = [&]() {
         LOCK(m_collector_mutex);
-        pq::ChainLockCollector* collector{FindCollector(statement)};
         return m_collector_generation == collector_generation &&
-               collector != nullptr &&
-               collector->GetPreparedContext() == signing_context;
+               m_current_signing_contexts == contexts &&
+               current->variant_index < contexts->count &&
+               m_collectors[current->variant_index] != nullptr &&
+               m_collectors[current->variant_index]->GetStatement() ==
+                   statement &&
+               m_collectors[current->variant_index]
+                       ->GetPreparedContext() == signing_context;
+    };
+    const auto local_preseals_clear = [this]() {
+        LOCK(cs_main);
+        return !IsBTCCPresealActive() &&
+               !IsPaymentAuditPresealActive();
     };
 
     // Bitcoin policy checks deliberately run without cs_main and can span
@@ -11334,6 +11549,8 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
     // approval and fallback; never let either path reserve a stale key slot.
     if (!IsShareAdmissionGenerationCurrent(admission_generation) ||
         !has_exact_collector() ||
+        !local_preseals_clear() ||
+        !IsCurrentSigningSource(contexts->source) ||
         !IsCurrentSigningStatement(statement)) {
         return;
     }
@@ -11422,7 +11639,9 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
             pq::ChainLockSigningError signing_error{
                 pq::ChainLockSigningError::NONE};
             if (!IsShareAdmissionGenerationCurrent(admission_generation) ||
-                !has_exact_collector()) {
+                !has_exact_collector() ||
+                !local_preseals_clear() ||
+                !IsCurrentSigningSource(contexts->source)) {
                 return;
             }
             auto signed_share{signer.Sign(
@@ -11449,21 +11668,57 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
 
             // The expensive signing operation may span a reorg. Burned slots
             // are never refunded, but stale signatures are never announced.
-            if (!IsCurrentSigningStatement(statement)) return;
+            if (!local_preseals_clear() ||
+                !IsCurrentSigningSource(contexts->source) ||
+                !IsCurrentSigningStatement(statement)) {
+                return;
+            }
 
             auto collection{CollectChainLockShare(
-                *signed_share.share, statement,
+                *signed_share.share, contexts,
+                current->variant_index,
                 admission_generation)};
             if (collection.stale) return;
             if (collection.result !=
                 pq::ShareCollectionResult::ACCEPTED) {
+                // A peer can receive our first share before its private
+                // scheduler has published the matching capability. Journal
+                // replay is deterministic, so periodically re-announce only
+                // our own exact duplicate; remote duplicates never relay.
+                if (ShouldRetryLocalChainLockShareRelay(
+                        signed_share.replayed, collection.result)) {
+                    if (!IsShareAdmissionGenerationCurrent(
+                            admission_generation) ||
+                        !has_exact_collector() ||
+                        !local_preseals_clear() ||
+                        !IsCurrentSigningSource(contexts->source) ||
+                        !IsCurrentSigningStatement(statement)) {
+                        return;
+                    }
+                    RelayChainLockShare(
+                        *signed_share.share, contexts,
+                        current->variant_index,
+                        admission_generation);
+                }
                 continue;
+            }
+            // Collection verifies outside the collector lock. Authorize the
+            // local announcement at the exact still-published capability and
+            // preseal state, rather than relying on the pre-collection fence.
+            if (!IsShareAdmissionGenerationCurrent(
+                    admission_generation) ||
+                !has_exact_collector() ||
+                !local_preseals_clear() ||
+                !IsCurrentSigningSource(contexts->source) ||
+                !IsCurrentSigningStatement(statement)) {
+                return;
             }
             MaybeCapturePaymentAuditResponse(
                 *signed_share.share, signing_context->RostersPtr(),
                 admission_generation);
             RelayChainLockShare(
-                *signed_share.share, admission_generation);
+                *signed_share.share, contexts,
+                current->variant_index, admission_generation);
             if (!IsShareAdmissionGenerationCurrent(admission_generation)) {
                 return;
             }

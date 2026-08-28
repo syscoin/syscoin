@@ -1065,6 +1065,21 @@ ChainLockFinalityStore::GetBestRecord() const
         m_best->chainlock};
 }
 
+ChainLockFinalityStateObservation
+ChainLockFinalityStore::ObserveState() const
+{
+    LOCK(m_mutex);
+    ChainLockFinalityStateObservation observation;
+    observation.state_revision = m_revision;
+    if (m_best) {
+        observation.best = FinalChainLockRecordMetadata{
+            m_best->logical_id,
+            m_best->witness_id,
+            m_best->chainlock->statement};
+    }
+    return observation;
+}
+
 std::shared_ptr<const FinalChainLock>
 ChainLockFinalityStore::GetUnsealedBTCC() const
 {

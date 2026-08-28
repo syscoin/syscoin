@@ -279,6 +279,9 @@ BOOST_AUTO_TEST_CASE(best_record_view_shares_witness_and_tracks_store_revision)
     TestFinalityContext context;
     ChainLockFinalityStore store{genesis, MakeConfig(), context};
     BOOST_CHECK(!store.GetBestRecord());
+    const auto empty_observation{store.ObserveState()};
+    BOOST_CHECK_EQUAL(empty_observation.state_revision, 0U);
+    BOOST_CHECK(!empty_observation.best);
 
     const auto first{MakeChainLock(865, 864, NonNullHash(864), 101)};
     auto prepared{store.PrepareCandidate(first)};
@@ -296,6 +299,10 @@ BOOST_AUTO_TEST_CASE(best_record_view_shares_witness_and_tracks_store_revision)
                 first.GetWitnessId(genesis));
     BOOST_CHECK(first_view->metadata.statement == first.statement);
     BOOST_CHECK(first_view->certificate == certificate);
+    const auto first_observation{store.ObserveState()};
+    BOOST_CHECK_EQUAL(first_observation.state_revision, 1U);
+    BOOST_REQUIRE(first_observation.best);
+    BOOST_CHECK(*first_observation.best == first_view->metadata);
 
     const auto second{MakeChainLock(
         870, first.statement.height, first.statement.block_hash, 102)};
@@ -307,6 +314,10 @@ BOOST_AUTO_TEST_CASE(best_record_view_shares_witness_and_tracks_store_revision)
     BOOST_REQUIRE(second_view);
     BOOST_CHECK_EQUAL(second_view->state_revision, 2U);
     BOOST_CHECK(second_view->metadata.statement == second.statement);
+    const auto second_observation{store.ObserveState()};
+    BOOST_CHECK_EQUAL(second_observation.state_revision, 2U);
+    BOOST_REQUIRE(second_observation.best);
+    BOOST_CHECK(*second_observation.best == second_view->metadata);
     BOOST_CHECK(first_view->certificate == certificate);
     BOOST_CHECK(*first_view->certificate == first);
 }
@@ -990,6 +1001,11 @@ BOOST_AUTO_TEST_CASE(receipt_archive_is_verified_without_rebasing_best)
     const auto best_before_archive{store.GetBestRecord()};
     BOOST_REQUIRE(best_before_archive);
     BOOST_CHECK_EQUAL(best_before_archive->state_revision, 1U);
+    const auto observed_before_archive{store.ObserveState()};
+    BOOST_REQUIRE(observed_before_archive.best);
+    BOOST_CHECK_EQUAL(observed_before_archive.state_revision, 1U);
+    BOOST_CHECK(*observed_before_archive.best ==
+                best_before_archive->metadata);
 
     auto archive_prepared{store.PrepareReceiptArchiveCandidate(archived)};
     BOOST_REQUIRE(archive_prepared);
@@ -1007,6 +1023,11 @@ BOOST_AUTO_TEST_CASE(receipt_archive_is_verified_without_rebasing_best)
                 best_before_archive->metadata);
     BOOST_CHECK(best_after_archive->certificate ==
                 best_before_archive->certificate);
+    const auto observed_after_archive{store.ObserveState()};
+    BOOST_REQUIRE(observed_after_archive.best);
+    BOOST_CHECK_EQUAL(observed_after_archive.state_revision, 2U);
+    BOOST_CHECK(*observed_after_archive.best ==
+                best_before_archive->metadata);
     BOOST_REQUIRE(store.GetByLogicalId(archived.GetLogicalId(genesis)));
 }
 

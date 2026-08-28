@@ -328,6 +328,15 @@ struct AcceptedFinalChainLockView {
     std::shared_ptr<const FinalChainLock> certificate;
 };
 
+/** Coherent lightweight observation, including the pre-first-winner state. */
+struct ChainLockFinalityStateObservation {
+    uint64_t state_revision{0};
+    std::optional<FinalChainLockRecordMetadata> best;
+
+    friend bool operator==(const ChainLockFinalityStateObservation&,
+                           const ChainLockFinalityStateObservation&) = default;
+};
+
 class ChainLockFinalityStore final {
 public:
     ChainLockFinalityStore(uint256 genesis_hash,
@@ -447,6 +456,8 @@ public:
     [[nodiscard]] std::shared_ptr<const FinalChainLock> GetBest() const
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     [[nodiscard]] std::optional<AcceptedFinalChainLockView> GetBestRecord() const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    [[nodiscard]] ChainLockFinalityStateObservation ObserveState() const
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     [[nodiscard]] std::shared_ptr<const FinalChainLock> GetUnsealedBTCC() const
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);

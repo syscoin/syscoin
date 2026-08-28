@@ -330,6 +330,10 @@ private:
 [[nodiscard]] bool MustRetryPaymentAuditCertificateContext(
     bool historical_required, bool historical_resolved) noexcept;
 
+/** Retry only a deterministic local journal replay that we already collected. */
+[[nodiscard]] bool ShouldRetryLocalChainLockShareRelay(
+    bool journal_replayed, pq::ShareCollectionResult result) noexcept;
+
 enum class FinalChainLockVerificationPath : uint8_t {
     FULL = 0,
     COLLECTED,
@@ -874,14 +878,35 @@ private:
     };
 
     struct CurrentSigningContext {
+        uint8_t variant_index{0};
         pq::ChainLockStatement statement;
         pq::FrozenQuorumRostersPtr rosters;
         uint8_t authorization_mask{0};
     };
 
+    struct CurrentSigningSource {
+        uint64_t admission_generation{0};
+        uint64_t finality_store_revision{0};
+        uint64_t roster_source_generation{0};
+        uint64_t persistence_certificate_revision{0};
+        uint256 payment_audit_checkpoint_token;
+        pq::ChainLockPredecessor durable_predecessor;
+        pq::ChainLockSigningWindow window;
+        uint256 target_hash;
+        uint256 declared_predecessor_hash;
+        uint256 payment_audit_preseal_token;
+        pq::BTCCReceiptState btcc_receipt_state;
+        pq::PaymentAuditReceiptState payment_audit_receipt_state;
+        uint256 payment_probation_state_hash;
+
+        friend bool operator==(const CurrentSigningSource&,
+                               const CurrentSigningSource&) = default;
+    };
+
     struct CurrentSigningContexts {
         static constexpr std::size_t MAX_VARIANTS{2};
 
+        CurrentSigningSource source;
         std::array<pq::ChainLockStatement, MAX_VARIANTS> statements{};
         std::size_t count{0};
         pq::VerifiedRosterSetPtr roster_set;
@@ -892,11 +917,14 @@ private:
             const pq::ChainLockStatement& statement) const;
     };
 
+    using CurrentSigningContextsPtr =
+        std::shared_ptr<const CurrentSigningContexts>;
+
     // Message and scheduler threads have deliberately small stacks. Never
     // embed the roughly 500 KiB immutable roster set in a handler context.
     static_assert(sizeof(RuntimeVerificationContext) <= 64);
     static_assert(sizeof(CurrentSigningContext) <= 544);
-    static_assert(sizeof(CurrentSigningContexts) <= 1088);
+    static_assert(sizeof(CurrentSigningContexts) <= 1792);
 
     [[nodiscard]] std::optional<pq::ChainLockCandidateContext>
     PrepareCandidate(
@@ -986,6 +1014,8 @@ private:
                                  !m_pending_btcc_receipt_mutex);
     struct LocalChainLockFinalization {
         pq::CollectedChainLockFinalizationPtr proof;
+        CurrentSigningContextsPtr signing_contexts;
+        std::size_t variant_index{0};
         uint64_t admission_generation{0};
         uint64_t collector_generation{0};
     };
@@ -1028,10 +1058,12 @@ private:
                                  !m_signer_reconcile_mutex);
     [[nodiscard]] ChainLockShareCollectionOutcome CollectChainLockShare(
         const pq::ChainLockShare& share,
-        const pq::ChainLockStatement& statement,
+        CurrentSigningContextsPtr signing_contexts,
+        std::size_t variant_index,
         uint64_t admission_generation)
         EXCLUSIVE_LOCKS_REQUIRED(!cs_main,
                                  !m_collector_mutex,
+                                 !m_lookup_mutex,
                                  !m_btcc_preseal_mutex,
                                  !m_needed_btcc_certificate_mutex,
                                  !m_pending_btcc_receipt_mutex);
@@ -1267,17 +1299,34 @@ private:
         EXCLUSIVE_LOCKS_REQUIRED(!m_lookup_mutex,
                                  !m_payment_audit_mutex,
                                  !m_btcc_preseal_mutex);
+    /** Build the exact live capability; only the private scheduler calls it. */
     [[nodiscard]] std::optional<CurrentSigningContexts>
-    BuildCurrentSigningContexts() const
+    BuildCurrentSigningContexts(uint64_t admission_generation) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_lookup_mutex,
                                  !m_needed_btcc_certificate_mutex,
                                  !m_btcc_preseal_mutex);
-    [[nodiscard]] std::optional<CurrentSigningContexts>
-    GetOrCreateCurrentSigningContexts(uint64_t admission_generation)
+    [[nodiscard]] bool RefreshCurrentSigningContexts(
+        uint64_t admission_generation)
         EXCLUSIVE_LOCKS_REQUIRED(!m_context_build_mutex,
                                  !m_collector_mutex,
                                  !m_lookup_mutex,
                                  !m_needed_btcc_certificate_mutex,
+                                 !m_btcc_preseal_mutex);
+    /**
+     * Return only an already-published capability. This path deliberately
+     * performs no chain suffix, receipt, roster, or collector construction.
+     */
+    [[nodiscard]] CurrentSigningContextsPtr
+    GetPublishedCurrentSigningContexts(uint64_t admission_generation) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_collector_mutex);
+    /**
+     * Recheck mutable inputs without reminting the private capability. This
+     * does not prove that its historical suffix was validated; only the
+     * scheduler-owned builder may establish that invariant.
+     */
+    [[nodiscard]] bool IsCurrentSigningSource(
+        const CurrentSigningSource& source) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_lookup_mutex,
                                  !m_btcc_preseal_mutex);
     [[nodiscard]] bool IsCurrentSigningStatement(
         const pq::ChainLockStatement& statement) const
@@ -1371,17 +1420,13 @@ private:
     [[nodiscard]] bool FlushBTCCIndexStateForDurableAcceptance(
         const pq::FinalChainLock& chainlock) const LOCKS_EXCLUDED(cs_main);
     void RelayChainLockShare(const pq::ChainLockShare& share,
+                             CurrentSigningContextsPtr signing_contexts,
+                             std::size_t variant_index,
                              uint64_t admission_generation,
                              NodeId except_peer = -1)
         EXCLUSIVE_LOCKS_REQUIRED(!m_share_lifecycle_mutex,
                                  !m_collector_mutex,
                                  !m_btcc_preseal_mutex);
-    [[nodiscard]] pq::ChainLockCollector* FindCollector(
-        const pq::ChainLockStatement& statement)
-        EXCLUSIVE_LOCKS_REQUIRED(m_collector_mutex);
-    [[nodiscard]] const pq::ChainLockCollector* FindCollector(
-        const pq::ChainLockStatement& statement) const
-        EXCLUSIVE_LOCKS_REQUIRED(m_collector_mutex);
     void ResetCollectors() EXCLUSIVE_LOCKS_REQUIRED(m_collector_mutex);
     enum class PersistedChainLockImport : uint8_t {
         NONE = 0,
@@ -1471,16 +1516,12 @@ private:
     bool m_persisted_unsealed_auth_pending
         GUARDED_BY(m_persisted_mutex){false};
 
-    Mutex m_collector_mutex;
+    mutable Mutex m_collector_mutex;
     std::array<std::unique_ptr<pq::ChainLockCollector>,
                CurrentSigningContexts::MAX_VARIANTS> m_collectors
         GUARDED_BY(m_collector_mutex);
-    std::size_t m_collector_count GUARDED_BY(m_collector_mutex){0};
-    pq::FrozenQuorumRostersPtr m_collector_rosters
+    CurrentSigningContextsPtr m_current_signing_contexts
         GUARDED_BY(m_collector_mutex);
-    std::shared_ptr<const ChainLockRelayRecipients>
-        m_collector_relay_recipients GUARDED_BY(m_collector_mutex);
-    uint8_t m_collector_authorization_mask GUARDED_BY(m_collector_mutex){0};
     uint64_t m_collector_generation GUARDED_BY(m_collector_mutex){0};
     Mutex m_context_build_mutex;
     std::unique_ptr<CPQSignerJournal> m_signer_journal;

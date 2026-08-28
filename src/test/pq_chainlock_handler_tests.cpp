@@ -1688,6 +1688,19 @@ BOOST_AUTO_TEST_CASE(payment_audit_required_history_ingress_survives_kill_switch
         /*historical_resolved=*/true));
 }
 
+BOOST_AUTO_TEST_CASE(local_chainlock_share_retry_is_journal_replay_only)
+{
+    using llmq::pq::ShareCollectionResult;
+    BOOST_CHECK(llmq::ShouldRetryLocalChainLockShareRelay(
+        /*journal_replayed=*/true, ShareCollectionResult::DUPLICATE));
+    BOOST_CHECK(!llmq::ShouldRetryLocalChainLockShareRelay(
+        /*journal_replayed=*/false, ShareCollectionResult::DUPLICATE));
+    BOOST_CHECK(!llmq::ShouldRetryLocalChainLockShareRelay(
+        /*journal_replayed=*/true, ShareCollectionResult::ACCEPTED));
+    BOOST_CHECK(!llmq::ShouldRetryLocalChainLockShareRelay(
+        /*journal_replayed=*/true, ShareCollectionResult::REJECTED));
+}
+
 BOOST_AUTO_TEST_CASE(payment_audit_finalization_retry_is_rate_limited)
 {
     using Microseconds = std::chrono::microseconds;
