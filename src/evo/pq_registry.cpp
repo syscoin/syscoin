@@ -1458,6 +1458,10 @@ bool PQRegistryManager::AuthenticateGCContext(
     bool derive_initial_base,
     bool verify_island_only) const
 {
+    if (m_gc_context_authentications !=
+        std::numeric_limits<uint64_t>::max()) {
+        ++m_gc_context_authentications;
+    }
     result = {};
     if (!m_gc_root_config ||
         !m_gc_root_config->IsValid(m_config) ||
@@ -1961,6 +1965,24 @@ bool PQRegistryManager::BuildGCFloorClosureLocked(
             derive_initial_base)) {
         return false;
     }
+    return BuildGCFloorClosureFromAuthenticatedLocked(
+        generation, std::move(scan_after_key), authenticated, closure,
+        error);
+}
+
+bool PQRegistryManager::BuildGCFloorClosureFromAuthenticatedLocked(
+    uint64_t generation,
+    std::optional<uint256> scan_after_key,
+    const GCAuthenticationResult& authenticated,
+    evo::PQRegistryGCClosure& closure,
+    PQRegistryError& error) const
+{
+    closure = {};
+    if (!m_gc_root_config ||
+        !m_gc_root_config->IsValid(m_config) || generation == 0 ||
+        (scan_after_key && scan_after_key->IsNull())) {
+        return SetError(error, PQRegistryResult::INVALID_CONFIGURATION);
+    }
     const int64_t initial_height{
         static_cast<int64_t>(m_config.preparation_height) +
         (static_cast<int64_t>(
@@ -2064,6 +2086,17 @@ bool PQRegistryManager::BuildGCEraseBatch(
                 authenticated, error, derive_initial_base)) {
             return false;
         }
+        if (previous_closure &&
+            previous_closure->checkpoint != authenticated.checkpoint) {
+            const int64_t height_delta{
+                static_cast<int64_t>(authenticated.checkpoint.height) -
+                previous_closure->checkpoint.height};
+            if (previous_closure->scan_complete !=
+                    evo::PQRegistryGCClosure::COMPLETE ||
+                height_delta != PQ_REGISTRY_CHECKPOINT_INTERVAL) {
+                return SetError(error, PQRegistryResult::FLOOR_CONFLICT);
+            }
+        }
         std::unordered_map<uint256, int32_t, StaticSaltedHasher>
             protected_records;
         protected_records.reserve(authenticated.protected_records.size());
@@ -2151,11 +2184,10 @@ bool PQRegistryManager::BuildGCEraseBatch(
         }
 
         evo::PQRegistryGCClosure closure;
-        if (!BuildGCFloorClosureLocked(
+        if (!BuildGCFloorClosureFromAuthenticatedLocked(
                 generation,
                 reached_eof ? std::nullopt : last_key,
-                context,
-                previous_closure ? &*previous_closure : nullptr,
+                authenticated,
                 closure, error)) {
             return false;
         }
@@ -2509,6 +2541,19 @@ bool PQRegistryManager::InstallGCFloor(
             authenticated, error)) {
         return false;
     }
+    return InstallGCFloorFromAuthenticatedLocked(
+        component, &*closure, authenticated, error);
+}
+
+bool PQRegistryManager::InstallGCFloorFromAuthenticatedLocked(
+    const evo::AuxiliaryHistoryGCComponent& component,
+    const evo::PQRegistryGCClosure* closure,
+    const GCAuthenticationResult& authenticated,
+    PQRegistryError& error)
+{
+    if (closure == nullptr) {
+        return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
+    }
     const int64_t anchor_delta{
         static_cast<int64_t>(m_gc_root_config->legacy_anchor.height) -
         m_config.preparation_height};
@@ -2773,14 +2818,14 @@ bool PQRegistryManager::InstallEffectiveGCFloor(
     // trust link; exact replay below independently rebinds its current
     // segment and the permanently pinned Q..A island.
     GCAuthenticationResult authenticated;
-    {
-        LOCK(m_mutex);
-        if (!AuthenticateGCContext(
-                context, effective_closure->lineage_base_commitment,
-                previous_closure ? &*previous_closure : nullptr,
-                authenticated, error)) {
-            return false;
-        }
+    // Keep the authenticated records and effective floor under one lock until
+    // publication so the reused result cannot become stale between phases.
+    LOCK(m_mutex);
+    if (!AuthenticateGCContext(
+            context, effective_closure->lineage_base_commitment,
+            previous_closure ? &*previous_closure : nullptr,
+            authenticated, error)) {
+        return false;
     }
     const int64_t anchor_delta{
         static_cast<int64_t>(m_gc_root_config->legacy_anchor.height) -
@@ -2908,54 +2953,48 @@ bool PQRegistryManager::InstallEffectiveGCFloor(
         using SnapshotDB = CEvoDB<
             uint256, PQRegistryDiskSnapshot, StaticSaltedHasher>;
         bool found_present_candidate{false};
-        {
-            LOCK(m_mutex);
-            for (const auto& candidate : decoded_manifest->candidates) {
-                const auto protected_position{
-                    protected_records.find(candidate.key)};
-                const bool protects_authentication_path{
-                    protected_position != protected_records.end() &&
-                    protected_position->second == candidate.height};
-                if (protects_authentication_path) return fail_transition();
-                if (candidate.height < m_config.preparation_height ||
-                    candidate.height >
-                        effective_closure->checkpoint.height) {
-                    return fail_transition();
-                }
-                PQRegistryDiskSnapshot disk;
-                const auto read_result{m_snapshot_db->ReadExactDiskForGC(
-                    candidate.key, disk)};
-                if (read_result == SnapshotDB::ExactDiskReadResult::BLOCKED) {
-                    return SetError(
-                        error, PQRegistryResult::SNAPSHOT_CORRUPT);
-                }
-                if (read_result ==
-                    SnapshotDB::ExactDiskReadResult::NOT_FOUND) {
-                    if (found_present_candidate) return fail_transition();
-                    continue;
-                }
-                found_present_candidate = true;
-                if (!disk.IsStructurallyValid() ||
-                    disk.block_hash != candidate.key ||
-                    disk.height != candidate.height ||
-                    ::SerializeHash(disk) != candidate.exact_record_hash ||
-                    (disk.is_checkpoint != 0) !=
-                        IsRegistryCheckpoint(m_config, disk.height)) {
-                    return SetError(
-                        error, PQRegistryResult::SNAPSHOT_CORRUPT);
-                }
+        for (const auto& candidate : decoded_manifest->candidates) {
+            const auto protected_position{
+                protected_records.find(candidate.key)};
+            const bool protects_authentication_path{
+                protected_position != protected_records.end() &&
+                protected_position->second == candidate.height};
+            if (protects_authentication_path) return fail_transition();
+            if (candidate.height < m_config.preparation_height ||
+                candidate.height >
+                    effective_closure->checkpoint.height) {
+                return fail_transition();
+            }
+            PQRegistryDiskSnapshot disk;
+            const auto read_result{m_snapshot_db->ReadExactDiskForGC(
+                candidate.key, disk)};
+            if (read_result == SnapshotDB::ExactDiskReadResult::BLOCKED) {
+                return SetError(
+                    error, PQRegistryResult::SNAPSHOT_CORRUPT);
+            }
+            if (read_result ==
+                SnapshotDB::ExactDiskReadResult::NOT_FOUND) {
+                if (found_present_candidate) return fail_transition();
+                continue;
+            }
+            found_present_candidate = true;
+            if (!disk.IsStructurallyValid() ||
+                disk.block_hash != candidate.key ||
+                disk.height != candidate.height ||
+                ::SerializeHash(disk) != candidate.exact_record_hash ||
+                (disk.is_checkpoint != 0) !=
+                    IsRegistryCheckpoint(m_config, disk.height)) {
+                return SetError(
+                    error, PQRegistryResult::SNAPSHOT_CORRUPT);
             }
         }
 
         if (previous_closure && !same_checkpoint) {
             bool previous_missing{false};
-            {
-                LOCK(m_mutex);
-                if (!AuthenticateGCFloorCheckpoint(
-                        *previous_closure, nullptr, error,
-                        &previous_missing)) {
-                    return false;
-                }
+            if (!AuthenticateGCFloorCheckpoint(
+                    *previous_closure, nullptr, error,
+                    &previous_missing)) {
+                return false;
             }
             if (previous_missing) return fail_transition();
         }
@@ -2965,8 +3004,8 @@ bool PQRegistryManager::InstallEffectiveGCFloor(
         return fail_transition();
     }
 
-    return InstallGCFloor(
-        *effective_component, *effective_authorization, error, context);
+    return InstallGCFloorFromAuthenticatedLocked(
+        *effective_component, &*effective_closure, authenticated, error);
 }
 
 bool PQRegistryManager::CacheSnapshotView(

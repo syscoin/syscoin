@@ -451,6 +451,8 @@ private:
         GUARDED_BY(m_mutex){0};
     mutable uint64_t m_reconstruction_state_hashes
         GUARDED_BY(m_mutex){0};
+    mutable uint64_t m_gc_context_authentications
+        GUARDED_BY(m_mutex){0};
 
     struct GCAuthenticationResult {
         evo::AuxiliaryHistoryGCBlockIdentity checkpoint;
@@ -492,6 +494,17 @@ private:
         const evo::PQRegistryGCClosure* previous,
         evo::PQRegistryGCClosure& closure,
         PQRegistryError& error) const EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    [[nodiscard]] bool BuildGCFloorClosureFromAuthenticatedLocked(
+        uint64_t generation,
+        std::optional<uint256> scan_after_key,
+        const GCAuthenticationResult& authenticated,
+        evo::PQRegistryGCClosure& closure,
+        PQRegistryError& error) const EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    [[nodiscard]] bool InstallGCFloorFromAuthenticatedLocked(
+        const evo::AuxiliaryHistoryGCComponent& component,
+        const evo::PQRegistryGCClosure* closure,
+        const GCAuthenticationResult& authenticated,
+        PQRegistryError& error) EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
     [[nodiscard]] bool ReconstructPersistentSnapshotViewAboveFloor(
         const uint256& block_hash,
         int32_t expected_height,

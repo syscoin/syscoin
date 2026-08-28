@@ -41,6 +41,7 @@ struct PQRegistryReconstructionStats {
     std::size_t cached_views{0};
     std::size_t cached_payment_views{0};
     uint64_t gc_floor_revision{0};
+    uint64_t gc_context_authentications{0};
 };
 
 class PQRegistryManagerTestAccess {
@@ -55,7 +56,8 @@ public:
                 manager.m_reconstruction_state_hashes,
                 manager.m_snapshot_cache.size(),
                 manager.m_payment_eligibility_cache.size(),
-                manager.m_gc_floor_revision};
+                manager.m_gc_floor_revision,
+                manager.m_gc_context_authentications};
     }
 
     static void ResetReconstructionStats(
@@ -66,6 +68,7 @@ public:
         manager.m_reconstruction_reused_records = 0;
         manager.m_reconstruction_tree_id_hashes = 0;
         manager.m_reconstruction_state_hashes = 0;
+        manager.m_gc_context_authentications = 0;
     }
 
     static void DropAllCaches(PQRegistryManager& manager)
@@ -3807,8 +3810,13 @@ BOOST_AUTO_TEST_CASE(gc_effective_floor_protects_rooted_exact_keys)
         evo::EncodePQRegistryGCEraseManifest(decoded)};
     BOOST_REQUIRE(side_encoded);
     intent.target.pq_erase_manifest->payload = *side_encoded;
+    test::PQRegistryManagerTestAccess::ResetReconstructionStats(manager);
     BOOST_REQUIRE(manager.InstallEffectiveGCFloor(
         {std::nullopt, intent}, error, context));
+    BOOST_CHECK_EQUAL(
+        test::PQRegistryManagerTestAccess::Stats(manager)
+            .gc_context_authentications,
+        1U);
     BOOST_CHECK_EQUAL(
         test::PQRegistryManagerTestAccess::Stats(manager)
             .gc_floor_revision,
@@ -3826,10 +3834,15 @@ BOOST_AUTO_TEST_CASE(gc_erase_batch_advances_physical_scan_cursor)
 
     evo::AuxiliaryHistoryGCComponent first;
     evo::PQRegistryGCEraseManifest first_manifest;
+    test::PQRegistryManagerTestAccess::ResetReconstructionStats(manager);
     BOOST_REQUIRE(manager.BuildGCEraseBatch(
         context, std::nullopt, /*max_scanned_records=*/1,
         /*max_candidates=*/1,
         first, first_manifest, error));
+    BOOST_CHECK_EQUAL(
+        test::PQRegistryManagerTestAccess::Stats(manager)
+            .gc_context_authentications,
+        1U);
     const auto first_closure{
         evo::DecodePQRegistryGCClosure(first.closure)};
     BOOST_REQUIRE(first_closure);
@@ -3849,6 +3862,10 @@ BOOST_AUTO_TEST_CASE(gc_erase_batch_advances_physical_scan_cursor)
         context, first, /*max_scanned_records=*/1,
         /*max_candidates=*/1,
         second, second_manifest, error));
+    BOOST_CHECK_EQUAL(
+        test::PQRegistryManagerTestAccess::Stats(manager)
+            .gc_context_authentications,
+        2U);
     const auto second_closure{
         evo::DecodePQRegistryGCClosure(second.closure)};
     BOOST_REQUIRE(second_closure);
