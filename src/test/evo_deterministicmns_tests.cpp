@@ -2346,9 +2346,19 @@ BOOST_AUTO_TEST_CASE(auxiliary_history_retention_plan_separates_authority)
     BOOST_CHECK_EQUAL(plan.fixed_dependencies.front().height,
                       consensus.nPQLegacyAnchorHeight);
 
-    const CDeterministicMNManager::AuxiliaryHistoryGCAuthorization anchor{
-        CDeterministicMNManager::AuxiliaryHistoryGCAuthorizationSource::
-            IMMUTABLE_CHAINLOCK_ANCHOR,
+    using Authorization =
+        CDeterministicMNManager::AuxiliaryHistoryGCAuthorization;
+    using AuthorizationSource = CDeterministicMNManager::
+        AuxiliaryHistoryGCAuthorizationSource;
+    const Authorization invalid{
+        static_cast<AuthorizationSource>(0xff),
+        {anchor_height, consensus.hashPQChainLockAnchorBlock}};
+    BOOST_CHECK(!manager.UpdateAuxiliaryHistoryGCAuthorization(invalid));
+    BOOST_CHECK(!manager.GetAuxiliaryHistoryRetentionPlanForTesting(recovery)
+                     .destructive_authorization);
+
+    const Authorization anchor{
+        AuthorizationSource::IMMUTABLE_CHAINLOCK_ANCHOR,
         {anchor_height, consensus.hashPQChainLockAnchorBlock}};
     manager.UpdateFinalitySnapshotPublicationRetention(true);
     BOOST_REQUIRE(manager.UpdateAuxiliaryHistoryGCAuthorization(
@@ -2373,9 +2383,8 @@ BOOST_AUTO_TEST_CASE(auxiliary_history_retention_plan_separates_authority)
     manager.EndFinalitySnapshotVerificationRetention();
 
     const int winner_height{anchor_height + 5};
-    const CDeterministicMNManager::AuxiliaryHistoryGCAuthorization winner{
-        CDeterministicMNManager::AuxiliaryHistoryGCAuthorizationSource::
-            ENFORCED_DURABLE_CHAINLOCK,
+    const Authorization winner{
+        AuthorizationSource::ENFORCED_DURABLE_CHAINLOCK,
         {winner_height,
          active_chain.At(winner_height)->GetBlockHash()}};
     BOOST_REQUIRE(

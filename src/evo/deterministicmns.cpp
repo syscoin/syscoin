@@ -3537,6 +3537,7 @@ bool CDeterministicMNManager::UpdateAuxiliaryHistoryGCAuthorization(
         }
         return true;
     }
+    if (!authorization->IsValid()) return reject();
 
     const auto& consensus{Params().GetConsensus()};
     const AuxiliaryHistoryBlockIdentity block{authorization->block};
@@ -3560,6 +3561,8 @@ bool CDeterministicMNManager::UpdateAuxiliaryHistoryGCAuthorization(
             return reject();
         }
         break;
+    default:
+        return reject();
     }
 
     if (m_auxiliary_history_gc_high_watermark) {
