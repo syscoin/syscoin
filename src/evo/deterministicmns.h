@@ -1082,11 +1082,6 @@ public:
     void FailNextAuxiliaryHistoryGCCompleteForTesting();
     /** SYSCOIN: Verify rejected and check-only blocks never reach PQ publication. */
     void FailNextPQRegistryWriteThroughForTesting();
-    /** SYSCOIN: Install an authenticated rollback floor for ordering tests. */
-    bool InstallPQRegistryGCFloorForTesting(
-        const evo::PQRegistryGCClosure& closure,
-        const AuxiliaryHistoryGCAuthorization& authorization,
-        llmq::pq::PQRegistryError& error);
     /** SYSCOIN: Lower a replay floor, or erase it only after the durable marker clears. */
     int UpdateReplaySnapshotRetentionFloor(
         std::optional<int32_t> floor) EXCLUSIVE_LOCKS_REQUIRED(!cs);

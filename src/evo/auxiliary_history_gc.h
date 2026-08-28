@@ -197,11 +197,12 @@ DecodeDMNInverseGCClosure(Span<const unsigned char> payload);
 struct PQRegistryGCClosure {
     static constexpr uint32_t FORMAT_GUARD{0x50514331}; // "PQC1"
     static constexpr uint16_t VERSION{1};
+    static constexpr uint16_t LINEAGE_PROFILE_VERSION{1};
     static constexpr uint8_t SCANNING{0};
     static constexpr uint8_t COMPLETE{1};
     static constexpr std::size_t SERIALIZED_SIZE{
         sizeof(uint32_t) + sizeof(uint16_t) + sizeof(uint64_t) +
-        sizeof(int32_t) + 6 * uint256::size() + 2 * sizeof(uint8_t)};
+        sizeof(int32_t) + 7 * uint256::size() + 2 * sizeof(uint8_t)};
 
     uint32_t format_guard{FORMAT_GUARD};
     uint16_t version{VERSION};
@@ -209,7 +210,10 @@ struct PQRegistryGCClosure {
     AuxiliaryHistoryGCBlockIdentity checkpoint;
     uint256 checkpoint_state_root;
     uint256 checkpoint_record_hash;
-    uint256 cumulative_lineage_commitment;
+    /** Root inherited from the preceding authenticated segment. */
+    uint256 lineage_base_commitment;
+    /** Commitment to the base plus this exact bounded replay segment. */
+    uint256 rooted_lineage_commitment;
     uint256 legacy_island_commitment;
     uint8_t scan_complete{SCANNING};
     std::optional<uint256> scan_after_key;
@@ -225,7 +229,8 @@ struct PQRegistryGCClosure {
         ::SerializeMany(stream, format_guard, version, generation,
                         checkpoint, checkpoint_state_root,
                         checkpoint_record_hash,
-                        cumulative_lineage_commitment,
+                        lineage_base_commitment,
+                        rooted_lineage_commitment,
                         legacy_island_commitment, scan_complete,
                         cursor_present, cursor);
     }
@@ -238,7 +243,8 @@ struct PQRegistryGCClosure {
         ::UnserializeMany(stream, format_guard, version, generation,
                           checkpoint, checkpoint_state_root,
                           checkpoint_record_hash,
-                          cumulative_lineage_commitment,
+                          lineage_base_commitment,
+                          rooted_lineage_commitment,
                           legacy_island_commitment, scan_complete,
                           cursor_present, cursor);
         if (scan_complete > COMPLETE || cursor_present > 1 ||

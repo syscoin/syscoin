@@ -827,41 +827,6 @@ BOOST_AUTO_TEST_CASE(pq_legacy_anchor_rejection_precedes_registry_commit)
     BOOST_REQUIRE(manager.GetPQRegistrySnapshot(
         &anchor_index, pq_snapshot, snapshot_error));
     BOOST_CHECK(pq_snapshot.consensus_state_root == correct_pq_root);
-
-    // The PQ rollback floor must reject before UndoBlock tries to recover and
-    // publish a physically missing deterministic-MN parent.
-    llmq::pq::PQRegistryDiskSnapshot checkpoint_record;
-    checkpoint_record.is_checkpoint = 1;
-    checkpoint_record.height = preparation_height;
-    checkpoint_record.block_hash = anchor_hash;
-    checkpoint_record.previous_block_hash = parent_hash;
-    checkpoint_record.previous_consensus_state_root = correct_pq_root;
-    checkpoint_record.consensus_state_root = correct_pq_root;
-    BOOST_REQUIRE(checkpoint_record.IsStructurallyValid());
-    evo::PQRegistryGCClosure floor;
-    floor.generation = 1;
-    floor.checkpoint = {preparation_height, anchor_hash};
-    floor.checkpoint_state_root = correct_pq_root;
-    floor.checkpoint_record_hash = ::SerializeHash(checkpoint_record);
-    floor.cumulative_lineage_commitment = MakeSnapshotKey(95'002);
-    floor.legacy_island_commitment = MakeSnapshotKey(95'003);
-    floor.scan_complete = evo::PQRegistryGCClosure::SCANNING;
-    floor.scan_after_key = anchor_hash;
-    evo::AuxiliaryHistoryGCAuthorization floor_authorization{
-        evo::AuxiliaryHistoryGCAuthorizationSource::
-            ENFORCED_DURABLE_CHAINLOCK,
-        {preparation_height, anchor_hash}};
-    BOOST_REQUIRE(manager.InstallPQRegistryGCFloorForTesting(
-        floor, floor_authorization, registry_error));
-
-    manager.m_evoDb->EraseCache(parent_hash);
-    BOOST_REQUIRE(manager.m_evoDb->FlushCacheToDisk(
-        /*CHUNK_ITEMS=*/256, /*fSync=*/true));
-    CDeterministicMNList missing_parent;
-    BOOST_CHECK(!manager.m_evoDb->ReadCache(parent_hash, missing_parent));
-    CDeterministicMNListNEVMAddressDiff floor_rejected_diff;
-    BOOST_CHECK(!manager.UndoBlock(&anchor_index, floor_rejected_diff));
-    BOOST_CHECK(!manager.m_evoDb->ReadCache(parent_hash, missing_parent));
 }
 
 BOOST_AUTO_TEST_CASE(pq_payment_eligibility_follows_consensus_ban_state)
@@ -2624,6 +2589,199 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_NO_THROW(
         restarted.FailNextPQRegistryWriteThroughForTesting());
     BOOST_CHECK(restarted.VerifyPersistedPQRegistrySnapshot(recovered));
+}
+
+BOOST_AUTO_TEST_CASE(
+    pq_gc_startup_authenticates_tip_paths_and_below_floor_legacy_anchor)
+{
+    SelectParams(ChainType::REGTEST);
+    LOCK(::cs_main);
+    auto& consensus{const_cast<Consensus::Params&>(Params().GetConsensus())};
+    struct RestoreProfile {
+        Consensus::Params& consensus;
+        int dip3{consensus.DIP0003Height};
+        int preparation{consensus.nPQPreparationHeight};
+        int epoch_origin{consensus.nPQChainLockEpochOrigin};
+        uint32_t cutoff{consensus.nPQRegistrationCutoffBlocks};
+        uint32_t future{consensus.nPQFutureHorizonEpochs};
+        int legacy_height{consensus.nPQLegacyAnchorHeight};
+        uint256 legacy_block{consensus.hashPQLegacyAnchorBlock};
+        uint256 legacy_mn{consensus.hashPQLegacyMNState};
+        uint256 legacy_pq{consensus.hashPQLegacyPQRegistryState};
+        int chainlock_height{consensus.nPQChainLockAnchorHeight};
+        uint256 chainlock_block{consensus.hashPQChainLockAnchorBlock};
+        ~RestoreProfile()
+        {
+            consensus.DIP0003Height = dip3;
+            consensus.nPQPreparationHeight = preparation;
+            consensus.nPQChainLockEpochOrigin = epoch_origin;
+            consensus.nPQRegistrationCutoffBlocks = cutoff;
+            consensus.nPQFutureHorizonEpochs = future;
+            consensus.nPQLegacyAnchorHeight = legacy_height;
+            consensus.hashPQLegacyAnchorBlock = legacy_block;
+            consensus.hashPQLegacyMNState = legacy_mn;
+            consensus.hashPQLegacyPQRegistryState = legacy_pq;
+            consensus.nPQChainLockAnchorHeight = chainlock_height;
+            consensus.hashPQChainLockAnchorBlock = chainlock_block;
+        }
+    } restore{consensus};
+
+    constexpr int preparation_height{1295};
+    constexpr int anchor_height{preparation_height + 17};
+    constexpr int checkpoint_height{
+        preparation_height + llmq::pq::PQ_REGISTRY_CHECKPOINT_INTERVAL};
+    constexpr int first_height{preparation_height - 1};
+    const int block_count{checkpoint_height - preparation_height + 1};
+
+    SnapshotIndexChain chain{
+        first_height,
+        std::vector<uint256>(block_count + 1),
+        std::vector<CBlockIndex>(block_count + 1)};
+    std::vector<CBlock> blocks;
+    blocks.reserve(block_count);
+    chain.hashes.front() = MakeSnapshotKey(120'000);
+    chain.indices.front().nHeight = first_height;
+    chain.indices.front().phashBlock = &chain.hashes.front();
+    for (int i{0}; i < block_count; ++i) {
+        const int height{preparation_height + i};
+        CBlock block{MakeProviderMutationBlock({})};
+        block.hashPrevBlock = chain.hashes[i];
+        block.nTime = static_cast<uint32_t>(1'700'000'000 + height);
+        block.nNonce = static_cast<uint32_t>(height);
+        blocks.push_back(std::move(block));
+        chain.hashes[i + 1] = blocks.back().GetHash();
+        chain.indices[i + 1].nHeight = height;
+        chain.indices[i + 1].pprev = &chain.indices[i];
+        chain.indices[i + 1].phashBlock = &chain.hashes[i + 1];
+    }
+
+    consensus.DIP0003Height = first_height;
+    consensus.nPQPreparationHeight = preparation_height;
+    consensus.nPQChainLockEpochOrigin = 1440;
+    consensus.nPQRegistrationCutoffBlocks = 144;
+    consensus.nPQFutureHorizonEpochs = 8;
+    consensus.nPQLegacyAnchorHeight = anchor_height;
+    consensus.hashPQLegacyAnchorBlock =
+        chain.At(anchor_height)->GetBlockHash();
+    const CDeterministicMNList anchor_snapshot{
+        consensus.hashPQLegacyAnchorBlock, anchor_height, 0};
+    consensus.hashPQLegacyMNState =
+        anchor_snapshot.GetPQLegacyStateHash(consensus.hashGenesisBlock);
+    const auto empty_pq_root{
+        llmq::pq::PQRegistrySnapshot{}.RecomputeConsensusStateRoot(
+            consensus.hashGenesisBlock)};
+    BOOST_REQUIRE(empty_pq_root);
+    consensus.hashPQLegacyPQRegistryState = *empty_pq_root;
+    consensus.nPQChainLockAnchorHeight = anchor_height;
+    consensus.hashPQChainLockAnchorBlock =
+        consensus.hashPQLegacyAnchorBlock;
+
+    llmq::pq::PQRegistryConfig registry_config;
+    BOOST_REQUIRE(llmq::pq::GetPQRegistryConfig(
+                      consensus, registry_config) ==
+                  llmq::pq::PQRegistryDeploymentResult::VALID);
+    const ScopedDiskDBPath disk_db;
+    DBParams db_params{
+        .path = disk_db.path,
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = false,
+        .wipe_data = false,
+    };
+    auto pq_db_params{db_params};
+    pq_db_params.path = SiblingDBPath(db_params.path, "_pq_registry");
+    pq_db_params.wipe_data = true;
+    llmq::pq::PQRegistryCallbacks callbacks;
+    callbacks.dmn_exists_before = [](const uint256&) { return false; };
+    callbacks.dmn_exists_after = [](const uint256&) { return false; };
+    llmq::pq::PQRegistryError registry_error;
+    {
+        llmq::pq::PQRegistryManager writer{
+            pq_db_params, consensus.hashGenesisBlock, registry_config};
+        for (int i{0}; i < block_count; ++i) {
+            uint256 state_root;
+            BOOST_REQUIRE(writer.ProcessBlock(
+                blocks[i], preparation_height + i, callbacks, {},
+                /*fJustCheck=*/false, registry_error, &state_root));
+            if (preparation_height + i == anchor_height) {
+                BOOST_CHECK(state_root == *empty_pq_root);
+            }
+        }
+        BOOST_REQUIRE(writer.Flush(/*fSync=*/true));
+    }
+    pq_db_params.wipe_data = false;
+
+    llmq::pq::PQRegistryGCAuthenticationContext context;
+    for (int height{preparation_height}; height <= anchor_height;
+         ++height) {
+        context.legacy_island.push_back(
+            {height, chain.At(height)->GetBlockHash()});
+    }
+    for (int height{anchor_height}; height <= checkpoint_height;
+         ++height) {
+        context.rooted_segment.push_back(
+            {height, chain.At(height)->GetBlockHash()});
+    }
+    const llmq::pq::PQRegistryGCRootConfig root_config{
+        evo::MakeAuxiliaryHistoryGCDeployment(consensus).configuration_id,
+        {anchor_height, consensus.hashPQLegacyAnchorBlock},
+        *empty_pq_root};
+    evo::PQRegistryGCClosure closure;
+    {
+        llmq::pq::PQRegistryManager authenticator{
+            pq_db_params, consensus.hashGenesisBlock, registry_config,
+            root_config};
+        BOOST_REQUIRE(authenticator.BuildGCFloorClosure(
+            /*generation=*/1, /*scan_after_key=*/std::nullopt,
+            context, /*previous=*/nullptr, closure, registry_error));
+    }
+    const auto closure_payload{evo::EncodePQRegistryGCClosure(closure)};
+    BOOST_REQUIRE(closure_payload);
+    const evo::AuxiliaryHistoryGCComponent component{
+        evo::PQRegistryGCClosure::VERSION, /*monotonic_position=*/1,
+        *closure_payload};
+    const auto component_hash{
+        evo::GetAuxiliaryHistoryGCComponentHash(component)};
+    BOOST_REQUIRE(component_hash);
+    evo::PQRegistryGCEraseManifest erase_manifest;
+    erase_manifest.target_component_hash = *component_hash;
+    erase_manifest.reached_eof = 1;
+    const auto manifest_payload{
+        evo::EncodePQRegistryGCEraseManifest(erase_manifest)};
+    BOOST_REQUIRE(manifest_payload);
+    evo::AuxiliaryHistoryGCIntentTarget target;
+    target.authorization = {
+        evo::AuxiliaryHistoryGCAuthorizationSource::
+            ENFORCED_DURABLE_CHAINLOCK,
+        {checkpoint_height,
+         chain.At(checkpoint_height)->GetBlockHash()}};
+    target.frontier.pq_registry = component;
+    target.pq_erase_manifest = evo::AuxiliaryHistoryGCManifest{
+        evo::PQRegistryGCEraseManifest::VERSION, *manifest_payload};
+
+    {
+        CDeterministicMNManager builder{db_params};
+        BOOST_REQUIRE(builder.m_evoDb->WriteThrough(
+            consensus.hashPQLegacyAnchorBlock, anchor_snapshot,
+            /*fSync=*/true));
+        BOOST_REQUIRE(builder.BeginAuxiliaryHistoryGCIntentForTesting(
+            target));
+    }
+
+    CDeterministicMNManager restarted{db_params};
+    const CBlockIndex* recovered{chain.At(checkpoint_height)};
+    const auto lookup_authorizer = [&](const uint256& hash) {
+        return hash == recovered->GetBlockHash() ? recovered : nullptr;
+    };
+    BOOST_REQUIRE(restarted.UpdatedBlockTipForStartup(
+        recovered, lookup_authorizer));
+    BOOST_REQUIRE(restarted.VerifyPersistedPQRegistrySnapshot(recovered));
+    llmq::pq::PQRegistrySnapshot below_floor_snapshot;
+    std::string below_floor_error;
+    BOOST_CHECK(!restarted.GetPQRegistrySnapshot(
+        chain.At(anchor_height), below_floor_snapshot,
+        below_floor_error));
+    BOOST_CHECK(restarted.VerifyPQLegacyAnchorState(
+        chain.At(anchor_height)));
 }
 
 BOOST_AUTO_TEST_CASE(dmn_inverse_gc_boundary_uses_only_rollback_inputs)

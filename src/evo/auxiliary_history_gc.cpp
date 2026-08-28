@@ -368,7 +368,8 @@ bool PQRegistryGCClosure::IsValid() const noexcept
            generation > 0 && checkpoint.IsValid() &&
            !checkpoint_state_root.IsNull() &&
            !checkpoint_record_hash.IsNull() &&
-           !cumulative_lineage_commitment.IsNull() &&
+           !lineage_base_commitment.IsNull() &&
+           !rooted_lineage_commitment.IsNull() &&
            !legacy_island_commitment.IsNull() && scan_state_valid &&
            (!scan_after_key || !scan_after_key->IsNull());
 }
@@ -560,7 +561,12 @@ MakeAuxiliaryHistoryGCDeployment(const Consensus::Params& consensus)
            << CDeterministicMNListInverse::VERSION
            << CDeterministicMNManager::LIST_CACHE_SIZE
            << llmq::pq::PQ_REGISTRY_DISK_VERSION
-           << llmq::pq::PQ_REGISTRY_CHECKPOINT_INTERVAL;
+           << llmq::pq::PQ_REGISTRY_CHECKPOINT_INTERVAL
+           << PQRegistryGCClosure::FORMAT_GUARD
+           << PQRegistryGCClosure::VERSION
+           << PQRegistryGCClosure::LINEAGE_PROFILE_VERSION
+           << static_cast<uint32_t>(
+                  PQRegistryGCClosure::SERIALIZED_SIZE);
     return AuxiliaryHistoryGCDeployment{
         consensus.hashGenesisBlock, writer.GetHash()};
 }

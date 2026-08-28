@@ -100,7 +100,8 @@ evo::PQRegistryGCClosure PQClosure(
         TestHash(static_cast<uint64_t>(checkpoint_height) + 1)};
     closure.checkpoint_state_root = TestHash(1001);
     closure.checkpoint_record_hash = TestHash(1002);
-    closure.cumulative_lineage_commitment = TestHash(1003);
+    closure.lineage_base_commitment = TestHash(1003);
+    closure.rooted_lineage_commitment = TestHash(1005);
     closure.legacy_island_commitment = TestHash(1004);
     closure.scan_complete = complete
         ? evo::PQRegistryGCClosure::COMPLETE
@@ -201,6 +202,7 @@ BOOST_AUTO_TEST_CASE(pq_registry_closure_codec_is_fixed_and_strict)
     const auto encoded_scanning{
         evo::EncodePQRegistryGCClosure(scanning)};
     BOOST_REQUIRE(encoded_scanning);
+    static_assert(evo::PQRegistryGCClosure::SERIALIZED_SIZE == 244);
     BOOST_CHECK_EQUAL(encoded_scanning->size(),
                       evo::PQRegistryGCClosure::SERIALIZED_SIZE);
     BOOST_CHECK(evo::DecodePQRegistryGCClosure(*encoded_scanning) ==
@@ -225,6 +227,12 @@ BOOST_AUTO_TEST_CASE(pq_registry_closure_codec_is_fixed_and_strict)
     BOOST_CHECK(!evo::EncodePQRegistryGCClosure(invalid));
     invalid = scanning;
     invalid.checkpoint_state_root.SetNull();
+    BOOST_CHECK(!evo::EncodePQRegistryGCClosure(invalid));
+    invalid = scanning;
+    invalid.lineage_base_commitment.SetNull();
+    BOOST_CHECK(!evo::EncodePQRegistryGCClosure(invalid));
+    invalid = scanning;
+    invalid.rooted_lineage_commitment.SetNull();
     BOOST_CHECK(!evo::EncodePQRegistryGCClosure(invalid));
     invalid = scanning;
     invalid.scan_after_key.reset();

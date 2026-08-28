@@ -91,6 +91,159 @@ DBParams MakeDMNInverseJournalDBParams(DBParams params)
     return params;
 }
 
+std::optional<llmq::pq::PQRegistryGCRootConfig>
+MakePQRegistryGCRootConfig(
+    const Consensus::Params& consensus,
+    const llmq::pq::PQRegistryConfig& registry_config)
+{
+    if (Consensus::CheckPQLegacyAnchorConfiguration(consensus) !=
+        Consensus::PQAnchorResult::VALID) {
+        return std::nullopt;
+    }
+    llmq::pq::PQRegistryGCRootConfig root{
+        evo::MakeAuxiliaryHistoryGCDeployment(consensus).configuration_id,
+        {consensus.nPQLegacyAnchorHeight,
+         consensus.hashPQLegacyAnchorBlock},
+        consensus.hashPQLegacyPQRegistryState};
+    return root.IsValid(registry_config)
+        ? std::optional<llmq::pq::PQRegistryGCRootConfig>{root}
+        : std::nullopt;
+}
+
+bool CollectPQRegistryGCPath(
+    const CBlockIndex* head,
+    int32_t first_height,
+    int32_t last_height,
+    std::vector<evo::AuxiliaryHistoryGCBlockIdentity>& path)
+{
+    path.clear();
+    const int64_t count{
+        static_cast<int64_t>(last_height) - first_height + 1};
+    if (head == nullptr || first_height < 0 || last_height < first_height ||
+        last_height > head->nHeight || count <= 0 ||
+        count > static_cast<int64_t>(
+                    llmq::pq::PQRegistryGCAuthenticationContext::
+                        MAX_PATH_RECORDS)) {
+        return false;
+    }
+
+    const CBlockIndex* cursor{head->GetAncestor(last_height)};
+    path.reserve(static_cast<std::size_t>(count));
+    for (int32_t expected{last_height}; expected >= first_height;
+         --expected) {
+        if (cursor == nullptr || cursor->nHeight != expected) {
+            path.clear();
+            return false;
+        }
+        path.push_back({expected, cursor->GetBlockHash()});
+        cursor = cursor->pprev;
+    }
+    std::reverse(path.begin(), path.end());
+    return true;
+}
+
+std::optional<int32_t> GetPQLegacyIslandBaseHeight(
+    const Consensus::Params& consensus,
+    const llmq::pq::PQRegistryConfig& registry_config)
+{
+    if (Consensus::CheckPQLegacyAnchorConfiguration(consensus) !=
+            Consensus::PQAnchorResult::VALID ||
+        consensus.nPQLegacyAnchorHeight <
+            registry_config.preparation_height) {
+        return std::nullopt;
+    }
+    const int64_t anchor_delta{
+        static_cast<int64_t>(consensus.nPQLegacyAnchorHeight) -
+        registry_config.preparation_height};
+    const int64_t base_height{
+        static_cast<int64_t>(registry_config.preparation_height) +
+        anchor_delta / llmq::pq::PQ_REGISTRY_CHECKPOINT_INTERVAL *
+            llmq::pq::PQ_REGISTRY_CHECKPOINT_INTERVAL};
+    if (base_height < 0 ||
+        base_height > std::numeric_limits<int32_t>::max() -
+                          llmq::pq::PQ_REGISTRY_CHECKPOINT_INTERVAL) {
+        return std::nullopt;
+    }
+    return static_cast<int32_t>(base_height);
+}
+
+bool BuildPQRegistryGCAuthenticationContext(
+    const Consensus::Params& consensus,
+    const llmq::pq::PQRegistryConfig& registry_config,
+    const evo::PQRegistryGCClosure& closure,
+    const CBlockIndex* recovered_tip,
+    llmq::pq::PQRegistryGCAuthenticationContext& context)
+{
+    context = {};
+    if (!closure.IsValid() || recovered_tip == nullptr ||
+        Consensus::CheckPQLegacyAnchorConfiguration(consensus) !=
+            Consensus::PQAnchorResult::VALID) {
+        return false;
+    }
+
+    const auto island_base{
+        GetPQLegacyIslandBaseHeight(consensus, registry_config)};
+    if (!island_base) return false;
+    const int64_t anchor_height{consensus.nPQLegacyAnchorHeight};
+    const int64_t island_base_height{*island_base};
+    const int64_t initial_checkpoint_height{
+        island_base_height +
+        llmq::pq::PQ_REGISTRY_CHECKPOINT_INTERVAL};
+    const int64_t checkpoint_height{closure.checkpoint.height};
+    if (checkpoint_height < initial_checkpoint_height ||
+        (checkpoint_height - initial_checkpoint_height) %
+                llmq::pq::PQ_REGISTRY_CHECKPOINT_INTERVAL !=
+            0) {
+        return false;
+    }
+    const int64_t rooted_base_height{
+        checkpoint_height == initial_checkpoint_height
+            ? anchor_height
+            : checkpoint_height -
+                  llmq::pq::PQ_REGISTRY_CHECKPOINT_INTERVAL};
+    if (island_base_height < 0 ||
+        rooted_base_height < 0 ||
+        checkpoint_height > recovered_tip->nHeight) {
+        return false;
+    }
+
+    if (!CollectPQRegistryGCPath(
+            recovered_tip, static_cast<int32_t>(island_base_height),
+            static_cast<int32_t>(anchor_height),
+            context.legacy_island) ||
+        !CollectPQRegistryGCPath(
+            recovered_tip, static_cast<int32_t>(rooted_base_height),
+            closure.checkpoint.height, context.rooted_segment) ||
+        context.rooted_segment.back() != closure.checkpoint) {
+        context = {};
+        return false;
+    }
+    return context.IsStructurallyValid();
+}
+
+bool BuildEffectivePQRegistryGCAuthenticationContext(
+    const Consensus::Params& consensus,
+    const llmq::pq::PQRegistryConfig& registry_config,
+    const evo::AuxiliaryHistoryGCState& state,
+    const CBlockIndex* recovered_tip,
+    llmq::pq::PQRegistryGCAuthenticationContext& context)
+{
+    context = {};
+    std::optional<evo::AuxiliaryHistoryGCComponent> effective_component;
+    if (state.intent) {
+        effective_component =
+            state.intent->target.frontier.pq_registry;
+    } else if (state.watermark) {
+        effective_component = state.watermark->frontier.pq_registry;
+    }
+    if (!effective_component) return true;
+    const auto closure{
+        evo::DecodePQRegistryGCClosure(effective_component->closure)};
+    return closure && BuildPQRegistryGCAuthenticationContext(
+                          consensus, registry_config, *closure,
+                          recovered_tip, context);
+}
+
 std::optional<uint256> EmptyPQRegistryStateRoot(const uint256& genesis_hash)
 {
     llmq::pq::PQRegistrySnapshot empty;
@@ -1336,6 +1489,15 @@ llmq::pq::PQRegistryManager* CDeterministicMNManager::GetOrCreatePQRegistry(
         error = "pq-registry-invalid-configuration";
         return nullptr;
     }
+    const auto& consensus{Params().GetConsensus()};
+    const auto gc_root_config{
+        MakePQRegistryGCRootConfig(consensus, config)};
+    if (Consensus::CheckPQLegacyAnchorConfiguration(consensus) ==
+            Consensus::PQAnchorResult::VALID &&
+        !gc_root_config) {
+        error = "pq-registry-invalid-gc-root-configuration";
+        return nullptr;
+    }
 
     m_pq_registry_init_requested.store(true, std::memory_order_release);
     // SYSCOIN: Serialize startup with EvoDB journal publication before
@@ -1347,15 +1509,17 @@ llmq::pq::PQRegistryManager* CDeterministicMNManager::GetOrCreatePQRegistry(
         return m_pq_registry.get();
     }
     try {
-        std::call_once(m_pq_registry_init_once, [this, config] {
+        std::call_once(
+            m_pq_registry_init_once, [this, config, gc_root_config] {
             // SYSCOIN: Opening a LevelDB is not publication. First bind the
             // temporary registry to one stable, ancestry-valid durable GC
             // state while the same lock order excludes maintenance changes.
+            const auto& consensus{Params().GetConsensus()};
             evo::AuxiliaryHistoryGCState journal_state;
+            llmq::pq::PQRegistryGCAuthenticationContext floor_context;
             {
                 LOCK(cs);
                 journal_state = m_auxiliary_history_gc_journal->GetState();
-                const auto& consensus{Params().GetConsensus()};
                 const bool has_durable_gc_state{
                     journal_state.watermark.has_value() ||
                     journal_state.intent.has_value()};
@@ -1446,15 +1610,26 @@ llmq::pq::PQRegistryManager* CDeterministicMNManager::GetOrCreatePQRegistry(
                     throw std::runtime_error{
                         "PQ GC authorization or checkpoint is not ancestral"};
                 }
+                // SYSCOIN: The journal selects a closure, but only the
+                // recovered tip selects its exact retained branch records.
+                // Never authenticate a floor from the potentially newer
+                // authorization witness used solely to bound deletion.
+                if (!BuildEffectivePQRegistryGCAuthenticationContext(
+                        consensus, config, journal_state, tipIndex,
+                        floor_context)) {
+                    throw std::runtime_error{
+                        "PQ GC retained authentication path is unavailable"};
+                }
             }
 
             auto registry{
                 std::make_unique<llmq::pq::PQRegistryManager>(
-                m_pq_registry_db_params,
-                Params().GetConsensus().hashGenesisBlock, config)};
+                    m_pq_registry_db_params,
+                    consensus.hashGenesisBlock, config,
+                    gc_root_config)};
             llmq::pq::PQRegistryError floor_error;
             if (!registry->InstallEffectiveGCFloor(
-                    journal_state, floor_error)) {
+                    journal_state, floor_error, floor_context)) {
                 throw std::runtime_error{strprintf(
                     "invalid effective PQ GC floor: %s",
                     std::string{llmq::pq::PQRegistryResultString(
@@ -3211,9 +3386,10 @@ bool CDeterministicMNManager::GetPQRegistryMempoolView(
 
 bool CDeterministicMNManager::VerifyPQLegacyAnchorState(const CBlockIndex* anchor)
 {
+    const auto& consensus{Params().GetConsensus()};
     if (anchor == nullptr ||
-        anchor->nHeight != Params().GetConsensus().nPQLegacyAnchorHeight ||
-        anchor->GetBlockHash() != Params().GetConsensus().hashPQLegacyAnchorBlock) {
+        anchor->nHeight != consensus.nPQLegacyAnchorHeight ||
+        anchor->GetBlockHash() != consensus.hashPQLegacyAnchorBlock) {
         return false;
     }
 
@@ -3222,19 +3398,45 @@ bool CDeterministicMNManager::VerifyPQLegacyAnchorState(const CBlockIndex* ancho
     uint256 pq_state_root;
     llmq::pq::PQRegistryConfig config;
     const auto deployment = llmq::pq::GetPQRegistryConfig(
-        Params().GetConsensus(), config);
+        consensus, config);
     if (deployment ==
         llmq::pq::PQRegistryDeploymentResult::INVALID_CONFIGURATION) {
         return false;
     }
     if (deployment == llmq::pq::PQRegistryDeploymentResult::VALID) {
-        llmq::pq::PQRegistrySnapshot pq_snapshot;
-        std::string error;
-        if (!GetPQRegistrySnapshot(anchor, pq_snapshot, error)) return false;
-        pq_state_root = pq_snapshot.consensus_state_root;
+        const auto island_base{
+            GetPQLegacyIslandBaseHeight(consensus, config)};
+        std::vector<evo::AuxiliaryHistoryGCBlockIdentity> legacy_island;
+        std::string open_error;
+        auto* registry{GetOrCreatePQRegistry(open_error)};
+        if (registry == nullptr) {
+            LogPrintf("%s -- %s\n", __func__, open_error);
+            return false;
+        }
+        llmq::pq::PQRegistryError registry_error;
+        if (!island_base ||
+            !CollectPQRegistryGCPath(anchor, *island_base,
+                                     anchor->nHeight,
+                                     legacy_island)) {
+            LogPrintf("%s -- retained PQ legacy island path is unavailable\n",
+                      __func__);
+            return false;
+        }
+        if (!registry->VerifyGCLegacyIsland(
+                legacy_island, registry_error)) {
+            LogPrintf("%s -- retained PQ legacy island authentication "
+                      "failed: %s\n",
+                      __func__,
+                      std::string{llmq::pq::PQRegistryResultString(
+                          registry_error.result)});
+            return false;
+        }
+        // SYSCOIN: Exact Q..A replay authenticates the configured state root
+        // even after the ordinary random-access floor has advanced past A.
+        pq_state_root = consensus.hashPQLegacyPQRegistryState;
     } else {
         const auto empty_root = EmptyPQRegistryStateRoot(
-            Params().GetConsensus().hashGenesisBlock);
+            consensus.hashGenesisBlock);
         if (!empty_root) return false;
         pq_state_root = *empty_root;
     }
@@ -3242,9 +3444,9 @@ bool CDeterministicMNManager::VerifyPQLegacyAnchorState(const CBlockIndex* ancho
            snapshot.GetHeight() == anchor->nHeight &&
            snapshot.GetBlockHash() == anchor->GetBlockHash() &&
            Consensus::CheckPQLegacyState(
-               Params().GetConsensus(), anchor->nHeight,
+               consensus, anchor->nHeight,
                snapshot.GetPQLegacyStateHash(
-                   Params().GetConsensus().hashGenesisBlock),
+                   consensus.hashGenesisBlock),
                pq_state_root);
 }
 
@@ -3450,21 +3652,6 @@ void CDeterministicMNManager::FailNextPQRegistryWriteThroughForTesting()
         throw std::runtime_error(error);
     }
     registry->SnapshotDatabase().FailNextWriteThroughForTesting();
-}
-
-bool CDeterministicMNManager::InstallPQRegistryGCFloorForTesting(
-    const evo::PQRegistryGCClosure& closure,
-    const AuxiliaryHistoryGCAuthorization& authorization,
-    llmq::pq::PQRegistryError& error)
-{
-    std::string open_error;
-    auto* registry{GetOrCreatePQRegistry(open_error)};
-    if (registry == nullptr) return false;
-    const auto payload{evo::EncodePQRegistryGCClosure(closure)};
-    if (!payload) return false;
-    const evo::AuxiliaryHistoryGCComponent component{
-        evo::PQRegistryGCClosure::VERSION, closure.generation, *payload};
-    return registry->InstallGCFloor(component, authorization, error);
 }
 
 void CDeterministicMNManager::UpdatedBlockTip(const CBlockIndex* pindex) {
