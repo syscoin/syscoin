@@ -3439,10 +3439,19 @@ bool PQRegistryManager::ReconstructPersistentSnapshotView(
         return true;
     }
 
-    if (m_gc_floor) {
+    if (m_gc_floor &&
+        static_cast<int64_t>(expected_height) -
+                m_gc_floor->checkpoint.height <
+            2LL * PQ_REGISTRY_CHECKPOINT_INTERVAL) {
         return ReconstructPersistentSnapshotViewAboveFloor(
             block_hash, expected_height, snapshot, error);
     }
+
+    // SYSCOIN: A distant target is selected by the independently persisted
+    // block-index/DMN branch. Use the same internally authenticated full
+    // checkpoint authority as the no-floor cold path instead of replaying an
+    // unbounded outage. Near the floor, the stronger rooted replay above is
+    // retained; a distant cold base must remain strictly above that boundary.
 
     std::vector<PQRegistryDiskSnapshot> reverse_journal;
     reverse_journal.reserve(2 * PQ_REGISTRY_CHECKPOINT_INTERVAL);
@@ -3529,6 +3538,10 @@ bool PQRegistryManager::ReconstructPersistentSnapshotView(
     }
 
     const auto& base_checkpoint{reverse_journal.back()};
+    if (m_gc_floor &&
+        base_checkpoint.height <= m_gc_floor->checkpoint.height) {
+        return SetError(error, PQRegistryResult::FLOOR_CONFLICT);
+    }
     std::optional<uint256> preparation_parent_root;
     if (base_checkpoint.height == m_config.preparation_height) {
         const auto parent_root{
@@ -3675,7 +3688,7 @@ bool PQRegistryManager::ReconstructPersistentSnapshotView(
             }
             rebuilt = MakeAuthenticatedReplaySnapshotView(
                 staged, m_snapshot_cache, *record, states, used_tree_ids,
-                schedule, used_tree_ids_hash);
+                schedule, used_tree_ids_hash, m_gc_floor_revision);
             if (!rebuilt || !rebuilt->state) {
                 return SetError(
                     error, PQRegistryResult::SNAPSHOT_CORRUPT);
@@ -3692,7 +3705,7 @@ bool PQRegistryManager::ReconstructPersistentSnapshotView(
                 rebuilt = MakeSnapshotView(
                     record->height, record->block_hash,
                     record->previous_block_hash, authenticated_state,
-                    record->block_tree_ids);
+                    record->block_tree_ids, m_gc_floor_revision);
             }
             if (!rebuilt) {
                 return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);

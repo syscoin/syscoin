@@ -2064,6 +2064,133 @@ BOOST_AUTO_TEST_CASE(cold_reconstruction_has_exact_two_interval_bound)
         record_count);
 }
 
+BOOST_AUTO_TEST_CASE(gc_floor_long_restart_uses_bounded_checkpoint_base)
+{
+    const auto config{FastConfig()};
+    BOOST_REQUIRE(config.IsValid());
+    const uint256 genesis{NonNullHash(69'800)};
+    const uint256 configuration_id{NonNullHash(69'801)};
+    const uint256 journal_parent{NonNullHash(69'802)};
+    constexpr int32_t anchor_offset{7};
+    constexpr int32_t target_suffix{17};
+    const int32_t anchor_height{
+        config.preparation_height + anchor_offset};
+    const int32_t floor_height{
+        config.preparation_height + PQ_REGISTRY_CHECKPOINT_INTERVAL};
+    const int32_t target_height{
+        floor_height + 2 * PQ_REGISTRY_CHECKPOINT_INTERVAL +
+        target_suffix};
+
+    auto db{MemoryDB(69'800)};
+    db.path = m_path_root / "pq_registry_gc_floor_long_restart";
+    db.memory_only = false;
+
+    std::vector<CBlock> blocks;
+    std::vector<evo::AuxiliaryHistoryGCBlockIdentity> identities;
+    blocks.reserve(static_cast<std::size_t>(
+        target_height - config.preparation_height + 1));
+    identities.reserve(blocks.capacity());
+    uint256 cursor{journal_parent};
+    uint32_t block_id{99'000};
+    for (int32_t height{config.preparation_height};
+         height <= target_height; ++height) {
+        blocks.push_back(Block(
+            cursor, block_id, {OrdinaryTransaction(block_id)}));
+        cursor = blocks.back().GetHash();
+        identities.push_back({height, cursor});
+        ++block_id;
+    }
+    const auto identity = [&](int32_t height)
+        -> const evo::AuxiliaryHistoryGCBlockIdentity& {
+        BOOST_REQUIRE_GE(height, config.preparation_height);
+        BOOST_REQUIRE_LE(height, target_height);
+        return identities[static_cast<std::size_t>(
+            height - config.preparation_height)];
+    };
+
+    PQRegistrySnapshot empty;
+    const auto empty_root{empty.RecomputeConsensusStateRoot(genesis)};
+    BOOST_REQUIRE(empty_root);
+    const PQRegistryGCRootConfig root_config{
+        configuration_id, identity(anchor_height), *empty_root};
+    PQRegistryGCAuthenticationContext context;
+    context.legacy_island.assign(
+        identities.begin(),
+        identities.begin() + anchor_offset + 1);
+    context.rooted_segment.assign(
+        identities.begin() + anchor_offset,
+        identities.begin() +
+            (floor_height - config.preparation_height + 1));
+    BOOST_REQUIRE(context.IsStructurallyValid());
+
+    evo::PQRegistryGCClosure closure;
+    PQRegistrySnapshot expected;
+    {
+        PQRegistryManager writer(db, genesis, config, root_config);
+        PQRegistryError error;
+        const auto callbacks{Members(genesis, {}, {}, CKeyID{})};
+        for (std::size_t index{0}; index < blocks.size(); ++index) {
+            BOOST_REQUIRE(writer.ProcessBlock(
+                blocks[index], identities[index].height, callbacks, {},
+                /*fJustCheck=*/false, error));
+        }
+        BOOST_REQUIRE(writer.BuildGCFloorClosure(
+            /*generation=*/1, std::nullopt, context, nullptr, closure,
+            error));
+        BOOST_REQUIRE(writer.GetSnapshot(
+            identity(target_height).block_hash,
+            identity(target_height - 1).block_hash, target_height,
+            expected, error));
+        BOOST_REQUIRE(writer.Flush(/*fSync=*/true));
+    }
+
+    db.wipe_data = false;
+    PQRegistryManager reader(db, genesis, config, root_config);
+    PQRegistryError error;
+    BOOST_REQUIRE(reader.InstallGCFloor(
+        FloorComponent(closure),
+        FloorAuthorization(target_height + 100, 69'803), error,
+        context));
+    test::PQRegistryManagerTestAccess::ResetReconstructionStats(reader);
+
+    PQRegistrySnapshot reconstructed;
+    BOOST_REQUIRE(reader.GetSnapshot(
+        identity(target_height).block_hash,
+        identity(target_height - 1).block_hash, target_height,
+        reconstructed, error));
+    BOOST_CHECK(reconstructed == expected);
+    const auto stats{test::PQRegistryManagerTestAccess::Stats(reader)};
+    BOOST_CHECK_EQUAL(
+        stats.authenticated_records,
+        static_cast<uint64_t>(PQ_REGISTRY_CHECKPOINT_INTERVAL +
+                              target_suffix + 1));
+    BOOST_CHECK_LE(
+        stats.authenticated_records,
+        2U * static_cast<uint64_t>(PQ_REGISTRY_CHECKPOINT_INTERVAL));
+
+    PQRegistrySnapshot rejected;
+    BOOST_CHECK(!reader.GetSnapshot(
+        NonNullHash(69'804), identity(floor_height - 1).block_hash,
+        floor_height, rejected, error));
+    BOOST_CHECK(error.result == PQRegistryResult::FLOOR_CONFLICT);
+
+    PQRegistryDiskSnapshot target_record;
+    BOOST_REQUIRE(test::PQRegistryManagerTestAccess::ReadExactDiskSnapshot(
+        reader, identity(target_height).block_hash, target_record));
+    const auto original_target_record{target_record};
+    target_record.previous_consensus_state_root = NonNullHash(69'805);
+    BOOST_REQUIRE(test::PQRegistryManagerTestAccess::RewriteExactDiskSnapshot(
+        reader, identity(target_height).block_hash, target_record));
+    BOOST_CHECK(!reader.GetSnapshot(
+        identity(target_height).block_hash,
+        identity(target_height - 1).block_hash, target_height, rejected,
+        error));
+    BOOST_CHECK(error.result == PQRegistryResult::SNAPSHOT_CORRUPT);
+    BOOST_REQUIRE(test::PQRegistryManagerTestAccess::RewriteExactDiskSnapshot(
+        reader, identity(target_height).block_hash,
+        original_target_record));
+}
+
 BOOST_AUTO_TEST_CASE(cold_sequential_undo_reuses_authenticated_replay_tail)
 {
     const auto config{FastConfig()};
