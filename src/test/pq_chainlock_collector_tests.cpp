@@ -4,6 +4,7 @@
 
 #include <llmq/pq_chainlock_collector.h>
 
+#include <streams.h>
 #include <test/pq_test_util.h>
 #include <test/util/setup_common.h>
 
@@ -37,12 +38,14 @@ namespace llmq_tests {
 
 class ChainLockCollectorTestAccess {
 public:
-    static void Insert(ChainLockCollector& collector,
-                       std::size_t quorum_slot,
-                       std::size_t count,
-        uint8_t tag)
+    static void InsertFrom(ChainLockCollector& collector,
+                           std::size_t quorum_slot,
+                           std::size_t first_member,
+                           std::size_t count,
+                           uint8_t tag)
     {
-        for (std::size_t member{0}; member < count; ++member) {
+        for (std::size_t member{first_member};
+             member < first_member + count; ++member) {
             AuthenticatedChildSignature signature;
             signature.key_proof.public_key[0] = 1;
             signature.signature[0] = tag;
@@ -51,6 +54,14 @@ public:
             collector.m_shares[quorum_slot].emplace(
                 static_cast<uint16_t>(member), std::move(signature));
         }
+    }
+
+    static void Insert(ChainLockCollector& collector,
+                       std::size_t quorum_slot,
+                       std::size_t count,
+                       uint8_t tag)
+    {
+        InsertFrom(collector, quorum_slot, 0, count, tag);
     }
 };
 
@@ -709,6 +720,96 @@ BOOST_AUTO_TEST_CASE(finalizes_exact_lowest_three_ready_quorums_canonically)
     collector.reset();
     BOOST_CHECK(!retained_context.expired());
     BOOST_CHECK(collected->ContextPtr() == retained_context.lock());
+}
+
+BOOST_AUTO_TEST_CASE(finalization_is_immutable_while_late_shares_remain_accepted)
+{
+    auto fixture{MakeFixture()};
+    BOOST_REQUIRE(fixture);
+    auto collector{ChainLockCollector::Create(PrepareContext(*fixture))};
+    BOOST_REQUIRE(collector);
+
+    const ChainLockShare late_lower_quorum_share{SignFirstShare(*fixture)};
+    ShareCollectionError error{ShareCollectionError::INVALID_ARGUMENT};
+    auto pending{collector->ReserveShareVerification(
+        late_lower_quorum_share, &error)};
+    BOOST_REQUIRE(pending);
+    BOOST_CHECK(error == ShareCollectionError::NONE);
+
+    // Leave member zero pending so this lower quorum reaches threshold only
+    // after the first exact certificate has been frozen.
+    llmq_tests::ChainLockCollectorTestAccess::InsertFrom(
+        *collector, 0, 1, QUORUM_THRESHOLD - 1, 0xa0);
+    for (std::size_t slot{1}; slot < ACTIVE_QUORUMS; ++slot) {
+        llmq_tests::ChainLockCollectorTestAccess::Insert(
+            *collector, slot, QUORUM_THRESHOLD,
+            static_cast<uint8_t>(0xa0 + slot));
+    }
+
+    const auto first{collector->FinalizeCollection()};
+    BOOST_REQUIRE(first);
+    BOOST_REQUIRE_EQUAL(first->Certificate().selected_quorum_mask, 0b1110);
+    const uint256 first_witness{
+        first->Certificate().GetWitnessId(fixture->genesis_hash)};
+    DataStream first_bytes;
+    first_bytes << first->Certificate();
+    BOOST_REQUIRE_EQUAL(first_bytes.size(), FinalChainLock::WIRE_SIZE);
+
+    ChainLockCollector::VerifyReservedShare(*pending);
+    BOOST_CHECK(collector->CompleteShareVerification(
+                    std::move(*pending), &error) ==
+                ShareCollectionResult::ACCEPTED);
+    BOOST_CHECK(error == ShareCollectionError::NONE);
+    BOOST_CHECK_EQUAL(collector->ShareCounts()[0], QUORUM_THRESHOLD);
+
+    // The exact accepted slot is still permanently deduplicated after the
+    // certificate snapshot, without closing collection to other late members.
+    BOOST_CHECK(collector->AddVerifiedShare(
+                    late_lower_quorum_share, &error) ==
+                ShareCollectionResult::DUPLICATE);
+    BOOST_CHECK(error == ShareCollectionError::DUPLICATE);
+    BOOST_CHECK_EQUAL(collector->ShareCounts()[0], QUORUM_THRESHOLD);
+
+    const auto second{collector->FinalizeCollection()};
+    BOOST_REQUIRE(second);
+    BOOST_CHECK(first == second);
+    BOOST_CHECK_EQUAL(second->Certificate().selected_quorum_mask, 0b1110);
+    BOOST_CHECK(second->Certificate().GetWitnessId(fixture->genesis_hash) ==
+                first_witness);
+    DataStream second_bytes;
+    second_bytes << second->Certificate();
+    BOOST_REQUIRE_EQUAL(second_bytes.size(), first_bytes.size());
+    BOOST_CHECK(std::equal(first_bytes.begin(), first_bytes.end(),
+                           second_bytes.begin()));
+}
+
+BOOST_AUTO_TEST_CASE(finalization_does_not_close_new_share_reservations)
+{
+    auto fixture{MakeFixture()};
+    BOOST_REQUIRE(fixture);
+    auto collector{ChainLockCollector::Create(PrepareContext(*fixture))};
+    BOOST_REQUIRE(collector);
+
+    for (std::size_t slot{1}; slot < ACTIVE_QUORUMS; ++slot) {
+        llmq_tests::ChainLockCollectorTestAccess::Insert(
+            *collector, slot, QUORUM_THRESHOLD,
+            static_cast<uint8_t>(0xa0 + slot));
+    }
+    const auto finalized{collector->FinalizeCollection()};
+    BOOST_REQUIRE(finalized);
+
+    const ChainLockShare late_share{SignFirstShare(*fixture)};
+    ShareCollectionError error{ShareCollectionError::INVALID_ARGUMENT};
+    BOOST_CHECK(collector->AddVerifiedShare(late_share, &error) ==
+                ShareCollectionResult::ACCEPTED);
+    BOOST_CHECK(error == ShareCollectionError::NONE);
+    BOOST_CHECK_EQUAL(collector->ShareCounts()[0], 1U);
+    BOOST_CHECK(collector->FinalizeCollection() == finalized);
+
+    BOOST_CHECK(collector->AddVerifiedShare(late_share, &error) ==
+                ShareCollectionResult::DUPLICATE);
+    BOOST_CHECK(error == ShareCollectionError::DUPLICATE);
+    BOOST_CHECK_EQUAL(collector->ShareCounts()[0], 1U);
 }
 
 BOOST_AUTO_TEST_CASE(one_transition_ignores_and_rejects_newest_roster)

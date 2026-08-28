@@ -311,16 +311,19 @@ bool ChainLockCollector::IsComplete() const
 }
 
 CollectedChainLockFinalizationPtr
-ChainLockCollector::FinalizeCollection() const
+ChainLockCollector::FinalizeCollection()
 {
+    if (m_finalization) return m_finalization;
+
     auto certificate{BuildFinalCertificate()};
     if (!certificate || !m_context ||
         certificate->statement != m_context->Statement()) {
         return nullptr;
     }
-    return CollectedChainLockFinalizationPtr{
+    m_finalization = CollectedChainLockFinalizationPtr{
         new CollectedChainLockFinalization{
             std::move(*certificate), m_context}};
+    return m_finalization;
 }
 
 std::optional<FinalChainLock>

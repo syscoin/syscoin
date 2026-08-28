@@ -165,11 +165,11 @@ public:
     [[nodiscard]] bool IsComplete() const;
 
     /**
-     * Mint an opaque process-local proof for the exact finalized bytes and the
-     * exact immutable context used by every accepted share.
+     * Return the first complete process-local proof. Later accepted shares
+     * remain available to downstream protocols but never rewrite its bytes.
      */
     [[nodiscard]] CollectedChainLockFinalizationPtr
-    FinalizeCollection() const;
+    FinalizeCollection();
 
     [[nodiscard]] const ChainLockStatement& GetStatement() const noexcept
     {
@@ -192,6 +192,7 @@ private:
     std::array<QuorumBitmap, ACTIVE_QUORUMS> m_pending_shares{};
     std::array<std::map<uint16_t, AuthenticatedChildSignature>,
                ACTIVE_QUORUMS> m_shares;
+    CollectedChainLockFinalizationPtr m_finalization;
 
     friend class ::llmq_tests::ChainLockCollectorTestAccess;
 };
