@@ -16,9 +16,11 @@
 #include <functional>
 #include <list>
 #include <memory>
+#include <optional>
 #include <span>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 class CDeterministicMNManager;
 
@@ -95,12 +97,51 @@ struct PQPaymentProbationTransitionOutcome {
     std::optional<PQPaymentProbationTransitionView> transition;
 };
 
+struct PQPaymentProbationGCRequest {
+    PaymentAuditStoreCheckpoint checkpoint;
+    std::vector<uint256> retained_state_hashes;
+
+    friend bool operator==(const PQPaymentProbationGCRequest&,
+                           const PQPaymentProbationGCRequest&) = default;
+};
+
+enum class PQPaymentProbationPruneStatus : uint8_t {
+    COMPLETE = 0,
+    IN_PROGRESS,
+    INVALID,
+    CORRUPT,
+    DATABASE_ERROR,
+};
+
+/** Work performed by one bounded probation-state maintenance pass. */
+struct PQPaymentProbationPruneProgress {
+    PQPaymentProbationPruneStatus status{
+        PQPaymentProbationPruneStatus::INVALID};
+    std::size_t scanned_records{0};
+    std::size_t scanned_value_bytes{0};
+    std::size_t erased_records{0};
+};
+
 /**
  * Hash-addressed branch state for payment probation. Only receipt transitions
  * create records; intervening blocks retain the parent root in CBlockIndex.
  */
 class PQPaymentProbationManager {
 private:
+    enum class GCPhase : uint8_t {
+        VALIDATE_RETAINED = 0,
+        VALIDATE_RECORDS,
+        ERASE_RECORDS,
+    };
+
+    struct GCIntentState {
+        PQPaymentProbationGCRequest request;
+        GCPhase phase{GCPhase::VALIDATE_RETAINED};
+        uint8_t retained_index{0};
+        bool has_cursor{false};
+        uint256 cursor;
+    };
+
     struct CompactTransitionResult {
         PQPaymentProbationState state;
         uint256 previous_state_hash;
@@ -139,6 +180,20 @@ private:
     mutable uint64_t m_state_view_cache_misses GUARDED_BY(m_mutex){0};
     mutable uint64_t m_state_view_builds GUARDED_BY(m_mutex){0};
     uint64_t m_state_view_generation GUARDED_BY(m_mutex){1};
+    std::optional<PQPaymentProbationGCRequest> m_completed_gc
+        GUARDED_BY(m_mutex);
+    std::optional<GCIntentState> m_gc_intent GUARDED_BY(m_mutex);
+    bool m_fail_next_gc_batch_for_testing GUARDED_BY(m_mutex){false};
+
+    [[nodiscard]] const PQPaymentProbationGCRequest*
+    EffectiveGCRequest() const EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    [[nodiscard]] bool IsStateAllowedByGC(
+        const uint256& state_hash,
+        const PQPaymentProbationState& state) const
+        EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    void InitializeGCState() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    [[nodiscard]] bool WriteGCBatch(CDBBatch& batch)
+        EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
 
     /** Build the index only after the caller authenticated the exact root. */
     [[nodiscard]] StateViewDataPtr BuildValidatedStateView(
@@ -170,6 +225,11 @@ private:
         PQPaymentProbationError* error = nullptr) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 public:
+    static constexpr std::size_t MAX_GC_RETAINED_ROOTS{16};
+    static constexpr std::size_t MAX_GC_SCAN_RECORDS_PER_PASS{32};
+    static constexpr std::size_t MAX_GC_VALUE_BYTES_PER_PASS{8 << 20};
+    static constexpr std::size_t MAX_GC_ERASE_RECORDS_PER_PASS{32};
+
     explicit PQPaymentProbationManager(const DBParams& db_params);
 
     [[nodiscard]] const uint256& EmptyStateHash() const noexcept
@@ -228,6 +288,19 @@ public:
         const PaymentAuditStoreCheckpoint& checkpoint,
         std::span<const uint256> retained_state_hashes)
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /**
+     * Validate and retire one bounded slice. The first pass durably installs
+     * the logical floor; later calls resume the exact phase and physical key.
+     */
+    [[nodiscard]] PQPaymentProbationPruneProgress
+    PruneStatesThroughCheckpointStep(
+        const PaymentAuditStoreCheckpoint& checkpoint,
+        std::span<const uint256> retained_state_hashes)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    [[nodiscard]] std::optional<PQPaymentProbationGCRequest>
+    GetPendingGCRequest() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     CEvoDB<uint256, PQPaymentProbationState, StaticSaltedHasher>&
     StateDatabaseForTesting() noexcept

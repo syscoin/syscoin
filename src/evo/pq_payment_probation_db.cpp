@@ -33,6 +33,13 @@ namespace {
 
 constexpr uint32_t PAYMENT_PROBATION_GC_VERSION{1};
 constexpr uint32_t PAYMENT_PROBATION_GC_GUARD{0x50504731}; // "PPG1"
+constexpr uint32_t PAYMENT_PROBATION_GC_INTENT_GUARD{0x50504732}; // "PPG2"
+
+constexpr std::size_t PAYMENT_PROBATION_STATE_MAX_WIRE_SIZE{
+    sizeof(uint16_t) + sizeof(uint8_t) + sizeof(uint32_t) +
+    sizeof(int32_t) + 32 + sizeof(uint16_t) +
+    MAX_PQ_PAYMENT_PROBATION_ENTRIES *
+        (32 + sizeof(uint8_t) + sizeof(int32_t))};
 
 const uint256& PaymentProbationGCKey()
 {
@@ -46,57 +53,161 @@ const uint256& PaymentProbationGCKey()
     return key;
 }
 
+const uint256& PaymentProbationGCIntentKey()
+{
+    static const uint256 key{[] {
+        uint256 value;
+        std::fill(value.begin(), value.end(), 0xff);
+        value.begin()[0] = 0xfe;
+        return value;
+    }()};
+    return key;
+}
+
+bool IsPaymentProbationMetadataKey(const uint256& key)
+{
+    return key == PaymentProbationGCKey() ||
+           key == PaymentProbationGCIntentKey();
+}
+
+template <typename Stream>
+void SerializeGCCheckpoint(Stream& stream,
+                           const PaymentAuditStoreCheckpoint& checkpoint)
+{
+    ::SerializeMany(
+        stream, checkpoint.prune_through_epoch,
+        checkpoint.covered_through_height,
+        checkpoint.covered_through_hash,
+        checkpoint.authenticated_receipt_state,
+        checkpoint.authenticated_probation_state_hash,
+        checkpoint.authorizing_target_height,
+        checkpoint.authorizing_target_hash,
+        checkpoint.authorizing_chainlock_logical_id,
+        checkpoint.authorizing_chainlock_witness_id);
+}
+
+template <typename Stream>
+void UnserializeGCCheckpoint(Stream& stream,
+                             PaymentAuditStoreCheckpoint& checkpoint)
+{
+    ::UnserializeMany(
+        stream, checkpoint.prune_through_epoch,
+        checkpoint.covered_through_height,
+        checkpoint.covered_through_hash,
+        checkpoint.authenticated_receipt_state,
+        checkpoint.authenticated_probation_state_hash,
+        checkpoint.authorizing_target_height,
+        checkpoint.authorizing_target_hash,
+        checkpoint.authorizing_chainlock_logical_id,
+        checkpoint.authorizing_chainlock_witness_id);
+}
+
 struct PaymentProbationGCRecord {
-    static constexpr std::size_t WIRE_SIZE{
+    static constexpr std::size_t CHECKPOINT_WIRE_SIZE{
         5 * sizeof(uint32_t) + 5 * 32 +
         PaymentAuditReceiptState::WIRE_SIZE};
+    static constexpr std::size_t MAX_WIRE_SIZE{
+        CHECKPOINT_WIRE_SIZE + sizeof(uint8_t) +
+        PQPaymentProbationManager::MAX_GC_RETAINED_ROOTS * 32};
 
     uint32_t version{PAYMENT_PROBATION_GC_VERSION};
-    PaymentAuditStoreCheckpoint checkpoint;
+    PQPaymentProbationGCRequest request;
     uint32_t guard{PAYMENT_PROBATION_GC_GUARD};
 
     template <typename Stream>
     void Serialize(Stream& stream) const
     {
-        ::SerializeMany(
-            stream, version, checkpoint.prune_through_epoch,
-            checkpoint.covered_through_height,
-            checkpoint.covered_through_hash,
-            checkpoint.authenticated_receipt_state,
-            checkpoint.authenticated_probation_state_hash,
-            checkpoint.authorizing_target_height,
-            checkpoint.authorizing_target_hash,
-            checkpoint.authorizing_chainlock_logical_id,
-            checkpoint.authorizing_chainlock_witness_id, guard);
+        if (request.retained_state_hashes.size() >
+            PQPaymentProbationManager::MAX_GC_RETAINED_ROOTS) {
+            throw std::ios_base::failure{
+                "too many retained payment probation roots"};
+        }
+        stream << version;
+        SerializeGCCheckpoint(stream, request.checkpoint);
+        const uint8_t retained_count{
+            static_cast<uint8_t>(request.retained_state_hashes.size())};
+        stream << retained_count;
+        for (const auto& state_hash : request.retained_state_hashes) {
+            stream << state_hash;
+        }
+        stream << guard;
     }
 
     template <typename Stream>
     void Unserialize(Stream& stream)
     {
-        if (stream.size() != WIRE_SIZE) {
+        stream >> version;
+        UnserializeGCCheckpoint(stream, request.checkpoint);
+        uint8_t retained_count{0};
+        stream >> retained_count;
+        if (retained_count >
+            PQPaymentProbationManager::MAX_GC_RETAINED_ROOTS) {
             throw std::ios_base::failure{
-                "invalid payment probation GC marker size"};
+                "too many retained payment probation roots"};
         }
-        ::UnserializeMany(
-            stream, version, checkpoint.prune_through_epoch,
-            checkpoint.covered_through_height,
-            checkpoint.covered_through_hash,
-            checkpoint.authenticated_receipt_state,
-            checkpoint.authenticated_probation_state_hash,
-            checkpoint.authorizing_target_height,
-            checkpoint.authorizing_target_hash,
-            checkpoint.authorizing_chainlock_logical_id,
-            checkpoint.authorizing_chainlock_witness_id, guard);
+        request.retained_state_hashes.resize(retained_count);
+        for (auto& state_hash : request.retained_state_hashes) {
+            stream >> state_hash;
+        }
+        stream >> guard;
     }
 };
 
-static_assert(PaymentProbationGCRecord::WIRE_SIZE == 316);
+static_assert(PaymentProbationGCRecord::CHECKPOINT_WIRE_SIZE == 316);
+static_assert(PaymentProbationGCRecord::MAX_WIRE_SIZE == 829);
 
-bool IsGCRecordValid(const PaymentProbationGCRecord& record)
+struct PaymentProbationGCIntentRecord {
+    uint32_t version{PAYMENT_PROBATION_GC_VERSION};
+    PaymentProbationGCRecord target;
+    uint8_t phase{0};
+    uint8_t retained_index{0};
+    uint8_t has_cursor{0};
+    uint256 cursor;
+    uint32_t guard{PAYMENT_PROBATION_GC_INTENT_GUARD};
+
+    SERIALIZE_METHODS(PaymentProbationGCIntentRecord, obj)
+    {
+        READWRITE(obj.version, obj.target, obj.phase,
+                  obj.retained_index, obj.has_cursor, obj.cursor,
+                  obj.guard);
+    }
+};
+
+constexpr std::size_t PAYMENT_PROBATION_GC_INTENT_MAX_WIRE_SIZE{
+    sizeof(uint32_t) + PaymentProbationGCRecord::MAX_WIRE_SIZE +
+    3 * sizeof(uint8_t) + 32 + sizeof(uint32_t)};
+static_assert(PAYMENT_PROBATION_GC_INTENT_MAX_WIRE_SIZE == 872);
+
+bool AreRetainedRootsCanonical(const std::vector<uint256>& roots,
+                               const uint256& empty_state_hash)
+{
+    if (roots.size() >
+        PQPaymentProbationManager::MAX_GC_RETAINED_ROOTS) {
+        return false;
+    }
+    for (std::size_t index{0}; index < roots.size(); ++index) {
+        if (roots[index].IsNull() ||
+            IsPaymentProbationMetadataKey(roots[index]) ||
+            roots[index] == empty_state_hash ||
+            (index != 0 && !(roots[index - 1] < roots[index]))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool IsGCRecordValid(const PaymentProbationGCRecord& record,
+                     const uint256& empty_state_hash)
 {
     return record.version == PAYMENT_PROBATION_GC_VERSION &&
            record.guard == PAYMENT_PROBATION_GC_GUARD &&
-           record.checkpoint.IsStructurallyValid();
+           record.request.checkpoint.IsStructurallyValid() &&
+           !IsPaymentProbationMetadataKey(
+               record.request.checkpoint
+                   .authenticated_probation_state_hash) &&
+           AreRetainedRootsCanonical(
+               record.request.retained_state_hashes,
+               empty_state_hash);
 }
 
 bool HasSameGCBoundary(const PaymentAuditStoreCheckpoint& left,
@@ -112,24 +223,158 @@ bool HasSameGCBoundary(const PaymentAuditStoreCheckpoint& left,
                right.authenticated_probation_state_hash;
 }
 
-enum class GCRecordStatus : uint8_t {
-    ABSENT,
-    VALID,
+bool IsGCCheckpointAdvance(
+    const PaymentAuditStoreCheckpoint& previous,
+    const PaymentAuditStoreCheckpoint& candidate) noexcept
+{
+    if (candidate.prune_through_epoch <= previous.prune_through_epoch ||
+        candidate.covered_through_height <=
+            previous.covered_through_height ||
+        candidate.authorizing_target_height <=
+            previous.authorizing_target_height) {
+        return false;
+    }
+    const auto& old_state{previous.authenticated_receipt_state};
+    const auto& new_state{candidate.authenticated_receipt_state};
+    if (old_state.cursor.IsNull()) {
+        return !new_state.cursor.IsNull() ||
+               candidate.authenticated_probation_state_hash ==
+                   previous.authenticated_probation_state_hash;
+    }
+    if (new_state.cursor.IsNull() ||
+        new_state.cursor.epoch < old_state.cursor.epoch ||
+        new_state.cursor.carrier_height <
+            old_state.cursor.carrier_height) {
+        return false;
+    }
+    if (new_state.cursor == old_state.cursor) {
+        return new_state == old_state &&
+               candidate.authenticated_probation_state_hash ==
+                   previous.authenticated_probation_state_hash;
+    }
+    return true;
+}
+
+enum class BoundedReadResult : uint8_t {
+    NOT_FOUND = 0,
+    FOUND,
     CORRUPT,
 };
 
-GCRecordStatus ReadGCRecord(
-    const CEvoDB<uint256, PQPaymentProbationState, StaticSaltedHasher>& db,
-    PaymentProbationGCRecord& record)
+template <typename Value>
+BoundedReadResult ReadExactBounded(
+    CDBWrapper& db, const uint256& key,
+    std::size_t maximum_value_size, Value& value)
 {
-    if (!db.Exists(PaymentProbationGCKey())) {
-        return GCRecordStatus::ABSENT;
+    std::unique_ptr<CDBIterator> iterator{db.NewIterator()};
+    iterator->Seek(key);
+    if (!iterator->Valid()) {
+        iterator->CheckStatus();
+        return BoundedReadResult::NOT_FOUND;
     }
-    if (!db.Read(PaymentProbationGCKey(), record) ||
-        !IsGCRecordValid(record)) {
-        return GCRecordStatus::CORRUPT;
+    uint256 found;
+    if (!iterator->GetKey(found) || found != key) {
+        iterator->CheckStatus();
+        return BoundedReadResult::NOT_FOUND;
     }
-    return GCRecordStatus::VALID;
+    if (!iterator->GetKeyExact(found) ||
+        iterator->GetValueSize() > maximum_value_size ||
+        !iterator->GetValueExact(value)) {
+        return BoundedReadResult::CORRUPT;
+    }
+    iterator->CheckStatus();
+    return BoundedReadResult::FOUND;
+}
+
+bool HasExactSingletonRange(CDBWrapper& db, const uint256& key,
+                            bool expected_present)
+{
+    std::unique_ptr<CDBIterator> iterator{db.NewIterator()};
+    iterator->Seek(key);
+    if (!iterator->Valid()) {
+        iterator->CheckStatus();
+        return !expected_present;
+    }
+    uint256 found;
+    if (!iterator->GetKey(found)) return false;
+    if (found != key) {
+        iterator->CheckStatus();
+        return !expected_present;
+    }
+    uint256 exact;
+    if (!expected_present || !iterator->GetKeyExact(exact) ||
+        exact != key) {
+        return false;
+    }
+    iterator->Next();
+    if (iterator->Valid()) {
+        uint256 next;
+        if (!iterator->GetKey(next) || next == key) return false;
+    }
+    iterator->CheckStatus();
+    return true;
+}
+
+std::optional<PQPaymentProbationGCRequest> NormalizeGCRequest(
+    const PaymentAuditStoreCheckpoint& checkpoint,
+    std::span<const uint256> retained_state_hashes,
+    const uint256& empty_state_hash)
+{
+    if (!checkpoint.IsStructurallyValid() ||
+        IsPaymentProbationMetadataKey(
+            checkpoint.authenticated_probation_state_hash) ||
+        retained_state_hashes.size() >
+            PQPaymentProbationManager::MAX_GC_RETAINED_ROOTS) {
+        return std::nullopt;
+    }
+    PQPaymentProbationGCRequest request{checkpoint, {}};
+    request.retained_state_hashes.reserve(retained_state_hashes.size());
+    for (const auto& state_hash : retained_state_hashes) {
+        if (state_hash.IsNull() ||
+            IsPaymentProbationMetadataKey(state_hash)) {
+            return std::nullopt;
+        }
+        if (state_hash != empty_state_hash) {
+            request.retained_state_hashes.emplace_back(state_hash);
+        }
+    }
+    std::sort(request.retained_state_hashes.begin(),
+              request.retained_state_hashes.end());
+    request.retained_state_hashes.erase(
+        std::unique(request.retained_state_hashes.begin(),
+                    request.retained_state_hashes.end()),
+        request.retained_state_hashes.end());
+    return request;
+}
+
+PaymentProbationGCRecord MakeGCRecord(
+    const PQPaymentProbationGCRequest& request)
+{
+    return {PAYMENT_PROBATION_GC_VERSION, request,
+            PAYMENT_PROBATION_GC_GUARD};
+}
+
+bool IsGCIntentRecordValid(
+    const PaymentProbationGCIntentRecord& record,
+    const uint256& empty_state_hash)
+{
+    if (record.version != PAYMENT_PROBATION_GC_VERSION ||
+        record.guard != PAYMENT_PROBATION_GC_INTENT_GUARD ||
+        !IsGCRecordValid(record.target, empty_state_hash) ||
+        record.phase > 2 || record.has_cursor > 1 ||
+        record.retained_index >
+            record.target.request.retained_state_hashes.size()) {
+        return false;
+    }
+    if (record.phase == 0) {
+        return record.retained_index <
+                   record.target.request.retained_state_hashes.size() &&
+               record.has_cursor == 0 && record.cursor.IsNull();
+    }
+    return record.retained_index ==
+               record.target.request.retained_state_hashes.size() &&
+           ((record.has_cursor == 0 && record.cursor.IsNull()) ||
+            (record.has_cursor == 1 && !record.cursor.IsNull()));
 }
 
 DBParams PaymentProbationDBParams(DBParams params)
@@ -173,6 +418,9 @@ struct ExactPaymentProbationStateValue {
         }
     }
 };
+
+struct CorruptPaymentProbationGC {};
+struct InvalidPaymentProbationGCRetainedRoot {};
 
 } // namespace
 
@@ -278,10 +526,11 @@ PQPaymentProbationManager::PQPaymentProbationManager(
             "failed to derive empty payment probation state"};
     }
     m_empty_state_hash = *empty_hash;
-    if (m_empty_state_hash == PaymentProbationGCKey()) {
+    if (IsPaymentProbationMetadataKey(m_empty_state_hash)) {
         throw std::runtime_error{
             "payment probation empty-state hash collides with metadata key"};
     }
+    InitializeGCState();
     auto empty_view{std::make_shared<PQPaymentProbationStateViewData>()};
     empty_view->owner = m_view_owner;
     empty_view->generation = m_state_view_generation;
@@ -290,12 +539,103 @@ PQPaymentProbationManager::PQPaymentProbationManager(
     m_empty_state_view = std::move(empty_view);
 }
 
+void PQPaymentProbationManager::InitializeGCState()
+{
+    LOCK(m_mutex);
+    try {
+        PaymentProbationGCRecord completed;
+        const auto completed_status{ReadExactBounded(
+            *m_state_db, PaymentProbationGCKey(),
+            PaymentProbationGCRecord::MAX_WIRE_SIZE, completed)};
+        if (completed_status == BoundedReadResult::CORRUPT ||
+            !HasExactSingletonRange(
+                *m_state_db, PaymentProbationGCKey(),
+                completed_status == BoundedReadResult::FOUND) ||
+            (completed_status == BoundedReadResult::FOUND &&
+             !IsGCRecordValid(completed, m_empty_state_hash))) {
+            throw std::runtime_error{
+                "corrupt payment probation GC marker"};
+        }
+        if (completed_status == BoundedReadResult::FOUND) {
+            m_completed_gc = completed.request;
+        }
+
+        PaymentProbationGCIntentRecord pending;
+        const auto pending_status{ReadExactBounded(
+            *m_state_db, PaymentProbationGCIntentKey(),
+            PAYMENT_PROBATION_GC_INTENT_MAX_WIRE_SIZE, pending)};
+        if (pending_status == BoundedReadResult::CORRUPT ||
+            !HasExactSingletonRange(
+                *m_state_db, PaymentProbationGCIntentKey(),
+                pending_status == BoundedReadResult::FOUND) ||
+            (pending_status == BoundedReadResult::FOUND &&
+             (!IsGCIntentRecordValid(pending, m_empty_state_hash) ||
+              (m_completed_gc &&
+               !IsGCCheckpointAdvance(
+                   m_completed_gc->checkpoint,
+                   pending.target.request.checkpoint))))) {
+            throw std::runtime_error{
+                "corrupt payment probation GC intent"};
+        }
+        if (pending_status == BoundedReadResult::FOUND) {
+            m_gc_intent = GCIntentState{
+                pending.target.request,
+                static_cast<GCPhase>(pending.phase),
+                pending.retained_index,
+                pending.has_cursor != 0,
+                pending.cursor};
+        }
+    } catch (const dbwrapper_error&) {
+        throw;
+    } catch (const std::runtime_error&) {
+        throw;
+    } catch (const std::exception& exception) {
+        throw std::runtime_error{
+            std::string{"failed to initialize payment probation GC: "} +
+            exception.what()};
+    }
+}
+
+const PQPaymentProbationGCRequest*
+PQPaymentProbationManager::EffectiveGCRequest() const
+{
+    return m_gc_intent ? &m_gc_intent->request
+                       : m_completed_gc ? &*m_completed_gc : nullptr;
+}
+
+bool PQPaymentProbationManager::IsStateAllowedByGC(
+    const uint256& state_hash,
+    const PQPaymentProbationState& state) const
+{
+    if (state_hash == m_empty_state_hash) return true;
+    const auto* request{EffectiveGCRequest()};
+    if (request == nullptr) return true;
+    if (std::binary_search(request->retained_state_hashes.begin(),
+                           request->retained_state_hashes.end(),
+                           state_hash)) {
+        return true;
+    }
+    return state.cursor.has_receipt == 0 ||
+           state.cursor.receipt.epoch >
+               request->checkpoint.prune_through_epoch;
+}
+
+bool PQPaymentProbationManager::WriteGCBatch(CDBBatch& batch)
+{
+    if (m_fail_next_gc_batch_for_testing) {
+        m_fail_next_gc_batch_for_testing = false;
+        throw dbwrapper_error{
+            "injected payment probation GC batch failure"};
+    }
+    return m_state_db->WriteBatch(batch, /*fSync=*/true);
+}
+
 PQPaymentProbationManager::StateViewDataPtr
 PQPaymentProbationManager::BuildValidatedStateView(
     const uint256& state_hash,
     PQPaymentProbationState state) const
 {
-    if (state_hash.IsNull() || state_hash == PaymentProbationGCKey()) {
+    if (state_hash.IsNull() || IsPaymentProbationMetadataKey(state_hash)) {
         return nullptr;
     }
     auto view{std::make_shared<PQPaymentProbationStateViewData>()};
@@ -320,7 +660,7 @@ bool PQPaymentProbationManager::PublishStateView(
     StateViewDataPtr* published) const
 {
     if (!state || state->state_hash.IsNull() ||
-        state->state_hash == PaymentProbationGCKey() ||
+        IsPaymentProbationMetadataKey(state->state_hash) ||
         state->state_hash == m_empty_state_hash) {
         return false;
     }
@@ -360,7 +700,7 @@ bool PQPaymentProbationManager::GetStateView(
 {
     view = PQPaymentProbationStateView{};
     LOCK(m_mutex);
-    if (state_hash.IsNull() || state_hash == PaymentProbationGCKey()) {
+    if (state_hash.IsNull() || IsPaymentProbationMetadataKey(state_hash)) {
         return false;
     }
     if (state_hash == m_empty_state_hash) {
@@ -371,6 +711,10 @@ bool PQPaymentProbationManager::GetStateView(
 
     const auto cached{m_state_view_cache_index.find(state_hash)};
     if (cached != m_state_view_cache_index.end()) {
+        if (!IsStateAllowedByGC(
+                state_hash, cached->second->second->state)) {
+            return false;
+        }
         m_state_view_cache.splice(m_state_view_cache.end(),
                                   m_state_view_cache, cached->second);
         ++m_state_view_cache_hits;
@@ -382,7 +726,10 @@ bool PQPaymentProbationManager::GetStateView(
     PQPaymentProbationState state;
     if (!m_state_db->ReadCache(state_hash, state)) return false;
     const auto actual_hash{GetPQPaymentProbationStateHash(state)};
-    if (!actual_hash || *actual_hash != state_hash) return false;
+    if (!actual_hash || *actual_hash != state_hash ||
+        !IsStateAllowedByGC(state_hash, state)) {
+        return false;
+    }
     auto built{BuildValidatedStateView(state_hash, std::move(state))};
     if (!built) return false;
     StateViewDataPtr published;
@@ -511,7 +858,8 @@ bool PQPaymentProbationManager::CommitState(
     LOCK(m_mutex);
     const auto actual_hash{GetPQPaymentProbationStateHash(state)};
     if (!actual_hash || *actual_hash != expected_hash ||
-        expected_hash == PaymentProbationGCKey()) {
+        IsPaymentProbationMetadataKey(expected_hash) ||
+        !IsStateAllowedByGC(expected_hash, state)) {
         return false;
     }
     if (expected_hash == m_empty_state_hash || fJustCheck) return true;
@@ -543,7 +891,12 @@ bool PQPaymentProbationManager::CommitTransition(
     LOCK(m_mutex);
     if (!transition.IsValid() || !transition.m_result.m_state ||
         transition.m_result.m_state->owner != m_view_owner ||
-        transition.m_result.m_state->generation != m_state_view_generation) {
+        transition.m_result.m_state->generation != m_state_view_generation ||
+        IsPaymentProbationMetadataKey(
+            transition.m_result.m_state->state_hash) ||
+        !IsStateAllowedByGC(
+            transition.m_result.m_state->state_hash,
+            transition.m_result.m_state->state)) {
         return false;
     }
     if (fJustCheck) return true;
@@ -591,191 +944,377 @@ bool PQPaymentProbationManager::IsGCCompleteForCheckpoint(
     const PaymentAuditStoreCheckpoint& checkpoint) const
 {
     LOCK(m_mutex);
-    if (!checkpoint.IsStructurallyValid()) return false;
-    try {
-        PaymentProbationGCRecord record;
-        return ReadGCRecord(*m_state_db, record) == GCRecordStatus::VALID &&
-               HasSameGCBoundary(record.checkpoint, checkpoint);
-    } catch (const std::exception& exception) {
-        LogPrintf("%s -- unable to read payment probation GC marker: %s\n",
-                  __func__, exception.what());
-        return false;
-    }
+    return checkpoint.IsStructurallyValid() && m_completed_gc &&
+           HasSameGCBoundary(
+               m_completed_gc->checkpoint, checkpoint);
 }
 
 bool PQPaymentProbationManager::PruneStatesThroughCheckpoint(
     const PaymentAuditStoreCheckpoint& checkpoint,
     std::span<const uint256> retained_state_hashes)
 {
-    LOCK(m_mutex);
-    if (!checkpoint.IsStructurallyValid()) return false;
-
-    PaymentProbationGCRecord previous_gc;
-    const auto previous_gc_status{ReadGCRecord(*m_state_db, previous_gc)};
-    if (previous_gc_status == GCRecordStatus::CORRUPT) {
-        LogPrintf("%s -- corrupt payment probation GC marker\n", __func__);
-        return false;
-    }
-    if (previous_gc_status == GCRecordStatus::VALID) {
-        if (HasSameGCBoundary(previous_gc.checkpoint, checkpoint)) {
+    while (true) {
+        const auto progress{PruneStatesThroughCheckpointStep(
+            checkpoint, retained_state_hashes)};
+        if (progress.status ==
+            PQPaymentProbationPruneStatus::COMPLETE) {
             return true;
         }
-        if (checkpoint.prune_through_epoch <=
-            previous_gc.checkpoint.prune_through_epoch) {
-            LogPrintf("%s -- refusing non-monotonic payment probation GC "
-                      "checkpoint\n",
-                      __func__);
+        if (progress.status !=
+            PQPaymentProbationPruneStatus::IN_PROGRESS) {
             return false;
         }
     }
+}
 
-    std::unordered_set<uint256, StaticSaltedHasher> retained;
-    retained.reserve(retained_state_hashes.size() + 1);
-    retained.insert(m_empty_state_hash);
-    for (const uint256& state_hash : retained_state_hashes) {
-        if (state_hash.IsNull()) {
-            LogPrintf("%s -- refusing null retained payment probation "
-                      "state hash\n",
-                      __func__);
-            return false;
+PQPaymentProbationPruneProgress
+PQPaymentProbationManager::PruneStatesThroughCheckpointStep(
+    const PaymentAuditStoreCheckpoint& checkpoint,
+    std::span<const uint256> retained_state_hashes)
+{
+    LOCK(m_mutex);
+    PQPaymentProbationPruneProgress progress;
+
+    if (!checkpoint.IsStructurallyValid() ||
+        IsPaymentProbationMetadataKey(
+            checkpoint.authenticated_probation_state_hash)) {
+        return progress;
+    }
+    const auto normalized{NormalizeGCRequest(
+        checkpoint, retained_state_hashes, m_empty_state_hash)};
+    if (!normalized) return progress;
+    if (m_completed_gc && HasSameGCBoundary(
+            m_completed_gc->checkpoint, checkpoint)) {
+        if (m_completed_gc->retained_state_hashes ==
+            normalized->retained_state_hashes) {
+            progress.status = PQPaymentProbationPruneStatus::COMPLETE;
         }
-        retained.insert(state_hash);
+        return progress;
     }
 
-    // Publish every earlier state write before taking the iterator snapshot.
-    // This is also the ordering barrier between the durable audit checkpoint
-    // and the tombstones below.
-    if (!m_state_db->FlushCacheToDisk(/*nMaxBatchSize=*/256,
-                                      /*fSync=*/true)) {
-        return false;
-    }
+    const auto make_disk_intent = [](const GCIntentState& intent) {
+        return PaymentProbationGCIntentRecord{
+            PAYMENT_PROBATION_GC_VERSION,
+            MakeGCRecord(intent.request),
+            static_cast<uint8_t>(intent.phase),
+            intent.retained_index,
+            static_cast<uint8_t>(intent.has_cursor),
+            intent.cursor,
+            PAYMENT_PROBATION_GC_INTENT_GUARD};
+    };
 
-    std::unordered_set<uint256, StaticSaltedHasher> unresolved_retained{
-        retained};
-    unresolved_retained.erase(m_empty_state_hash);
-    std::vector<uint256> prune_keys;
-    bool found_gc_record{false};
-    std::unique_ptr<CDBIterator> cursor{m_state_db->NewIterator()};
-    if (!cursor) {
-        LogPrintf("%s -- failed to create payment probation state iterator\n",
-                  __func__);
-        return false;
-    }
-
-    for (cursor->SeekToFirst(); cursor->Valid(); cursor->Next()) {
-        ExactPaymentProbationStateKey decoded_key;
-        if (!cursor->GetKey(decoded_key) || decoded_key.hash.IsNull()) {
-            LogPrintf("%s -- invalid persisted payment probation state "
-                      "key\n",
-                      __func__);
-            return false;
-        }
-        if (decoded_key.hash == PaymentProbationGCKey()) {
-            PaymentProbationGCRecord record;
-            if (found_gc_record || !cursor->GetValue(record) ||
-                !IsGCRecordValid(record) ||
-                previous_gc_status != GCRecordStatus::VALID ||
-                record.checkpoint != previous_gc.checkpoint) {
-                LogPrintf("%s -- invalid persisted payment probation GC "
-                          "marker\n",
-                          __func__);
-                return false;
+    try {
+        if (m_gc_intent) {
+            if (!HasSameGCBoundary(
+                    m_gc_intent->request.checkpoint, checkpoint) ||
+                m_gc_intent->request.retained_state_hashes !=
+                    normalized->retained_state_hashes) {
+                return progress;
             }
-            found_gc_record = true;
-            continue;
+        } else {
+            if (m_completed_gc &&
+                !IsGCCheckpointAdvance(
+                    m_completed_gc->checkpoint, checkpoint)) {
+                return progress;
+            }
+            if (m_state_view_generation ==
+                std::numeric_limits<uint64_t>::max()) {
+                progress.status =
+                    PQPaymentProbationPruneStatus::DATABASE_ERROR;
+                return progress;
+            }
+
+            // Order every earlier state write before publishing a durable
+            // logical floor. Once installed, ordinary admission prevents a
+            // covered non-retained root from being recreated during GC.
+            if (!m_state_db->FlushCacheToDisk(
+                    /*nMaxBatchSize=*/256, /*fSync=*/true)) {
+                progress.status =
+                    PQPaymentProbationPruneStatus::DATABASE_ERROR;
+                return progress;
+            }
+            GCIntentState intent{
+                *normalized,
+                normalized->retained_state_hashes.empty()
+                    ? GCPhase::VALIDATE_RECORDS
+                    : GCPhase::VALIDATE_RETAINED,
+                0, false, {}};
+            if (intent.phase != GCPhase::VALIDATE_RETAINED) {
+                intent.retained_index = static_cast<uint8_t>(
+                    intent.request.retained_state_hashes.size());
+            }
+
+            const uint64_t next_generation{
+                m_state_view_generation + 1};
+            auto empty_view{
+                std::make_shared<PQPaymentProbationStateViewData>()};
+            empty_view->owner = m_view_owner;
+            empty_view->generation = next_generation;
+            empty_view->state_hash = m_empty_state_hash;
+
+            CDBBatch batch{*m_state_db};
+            batch.Write(PaymentProbationGCIntentKey(),
+                        make_disk_intent(intent));
+            if (!WriteGCBatch(batch)) {
+                progress.status =
+                    PQPaymentProbationPruneStatus::DATABASE_ERROR;
+                return progress;
+            }
+            m_gc_intent = std::move(intent);
+            m_state_view_generation = next_generation;
+            m_state_view_cache.clear();
+            m_state_view_cache_index.clear();
+            m_empty_state_view = std::move(empty_view);
         }
 
-        ExactPaymentProbationStateValue decoded_value;
-        if (!cursor->GetValue(decoded_value) ||
-            !decoded_value.state.IsStructurallyValid()) {
-            LogPrintf("%s -- invalid persisted payment probation state "
-                      "record\n",
-                      __func__);
-            return false;
+        const GCIntentState original_intent{*m_gc_intent};
+        GCIntentState next_intent{original_intent};
+        const PaymentProbationGCIntentRecord original_disk_intent{
+            make_disk_intent(original_intent)};
+        const auto can_scan = [&](std::size_t value_size) {
+            return progress.scanned_records <
+                       MAX_GC_SCAN_RECORDS_PER_PASS &&
+                   progress.scanned_value_bytes + value_size <=
+                       MAX_GC_VALUE_BYTES_PER_PASS;
+        };
+        const auto note_scan = [&](std::size_t value_size) {
+            ++progress.scanned_records;
+            progress.scanned_value_bytes += value_size;
+        };
+        const auto reset_cursor = [&] {
+            next_intent.has_cursor = false;
+            next_intent.cursor.SetNull();
+        };
+        const auto validate_state = [&](
+            const uint256& state_hash,
+            const PQPaymentProbationState& state) {
+            const auto actual_hash{
+                GetPQPaymentProbationStateHash(state)};
+            return actual_hash && *actual_hash == state_hash &&
+                   (!state_hash.IsNull()) &&
+                   (!IsPaymentProbationMetadataKey(state_hash)) &&
+                   (state_hash != m_empty_state_hash ||
+                    state == PQPaymentProbationState{});
+        };
+
+        CDBBatch batch{*m_state_db};
+        bool phase_complete{false};
+
+        if (original_intent.phase == GCPhase::VALIDATE_RETAINED) {
+            while (next_intent.retained_index <
+                   next_intent.request.retained_state_hashes.size()) {
+                const uint256& state_hash{
+                    next_intent.request.retained_state_hashes[
+                        next_intent.retained_index]};
+                std::unique_ptr<CDBIterator> iterator{
+                    m_state_db->NewIterator()};
+                iterator->Seek(state_hash);
+                if (!iterator->Valid()) {
+                    iterator->CheckStatus();
+                    throw InvalidPaymentProbationGCRetainedRoot{};
+                }
+                uint256 found;
+                if (!iterator->GetKey(found) || found != state_hash) {
+                    iterator->CheckStatus();
+                    throw InvalidPaymentProbationGCRetainedRoot{};
+                }
+                const std::size_t value_size{iterator->GetValueSize()};
+                if (!iterator->GetKeyExact(found) ||
+                    value_size >
+                        PAYMENT_PROBATION_STATE_MAX_WIRE_SIZE) {
+                    throw CorruptPaymentProbationGC{};
+                }
+                if (!can_scan(value_size)) break;
+                ExactPaymentProbationStateValue value;
+                if (!iterator->GetValueExact(value) ||
+                    !validate_state(state_hash, value.state)) {
+                    throw CorruptPaymentProbationGC{};
+                }
+                iterator->CheckStatus();
+                note_scan(value_size);
+                ++next_intent.retained_index;
+            }
+            if (next_intent.retained_index ==
+                next_intent.request.retained_state_hashes.size()) {
+                next_intent.phase = GCPhase::VALIDATE_RECORDS;
+                reset_cursor();
+            }
+        } else {
+            const bool erasing{
+                original_intent.phase == GCPhase::ERASE_RECORDS};
+            std::unique_ptr<CDBIterator> iterator{
+                m_state_db->NewIterator()};
+            if (original_intent.has_cursor) {
+                iterator->Seek(original_intent.cursor);
+            } else {
+                iterator->SeekToFirst();
+            }
+
+            while (iterator->Valid()) {
+                uint256 state_hash;
+                if (!iterator->GetKey(state_hash) ||
+                    state_hash.IsNull()) {
+                    throw CorruptPaymentProbationGC{};
+                }
+                const std::size_t value_size{iterator->GetValueSize()};
+                const std::size_t maximum_value_size{
+                    state_hash == PaymentProbationGCKey()
+                        ? PaymentProbationGCRecord::MAX_WIRE_SIZE
+                        : state_hash == PaymentProbationGCIntentKey()
+                            ? PAYMENT_PROBATION_GC_INTENT_MAX_WIRE_SIZE
+                            : PAYMENT_PROBATION_STATE_MAX_WIRE_SIZE};
+                ExactPaymentProbationStateKey exact_key;
+                if (!iterator->GetKey(exact_key) ||
+                    exact_key.hash != state_hash ||
+                    value_size > maximum_value_size) {
+                    throw CorruptPaymentProbationGC{};
+                }
+                if (!can_scan(value_size) ||
+                    (erasing && progress.erased_records >=
+                                     MAX_GC_ERASE_RECORDS_PER_PASS)) {
+                    next_intent.has_cursor = true;
+                    next_intent.cursor = state_hash;
+                    break;
+                }
+
+                bool erase{false};
+                if (state_hash == PaymentProbationGCKey()) {
+                    PaymentProbationGCRecord record;
+                    if (!iterator->GetValueExact(record) ||
+                        !m_completed_gc ||
+                        !IsGCRecordValid(record, m_empty_state_hash) ||
+                        record.request != *m_completed_gc) {
+                        throw CorruptPaymentProbationGC{};
+                    }
+                } else if (state_hash ==
+                           PaymentProbationGCIntentKey()) {
+                    PaymentProbationGCIntentRecord record;
+                    if (!iterator->GetValueExact(record) ||
+                        !IsGCIntentRecordValid(
+                            record, m_empty_state_hash) ||
+                        record.version != original_disk_intent.version ||
+                        record.target.request !=
+                            original_disk_intent.target.request ||
+                        record.target.version !=
+                            original_disk_intent.target.version ||
+                        record.target.guard !=
+                            original_disk_intent.target.guard ||
+                        record.phase != original_disk_intent.phase ||
+                        record.retained_index !=
+                            original_disk_intent.retained_index ||
+                        record.has_cursor !=
+                            original_disk_intent.has_cursor ||
+                        record.cursor != original_disk_intent.cursor ||
+                        record.guard != original_disk_intent.guard) {
+                        throw CorruptPaymentProbationGC{};
+                    }
+                } else {
+                    ExactPaymentProbationStateValue value;
+                    if (!iterator->GetValueExact(value) ||
+                        !validate_state(state_hash, value.state)) {
+                        throw CorruptPaymentProbationGC{};
+                    }
+                    erase = erasing &&
+                        !IsStateAllowedByGC(state_hash, value.state);
+                }
+
+                note_scan(value_size);
+                if (erase) {
+                    batch.Erase(state_hash);
+                    ++progress.erased_records;
+                }
+                iterator->Next();
+            }
+            iterator->CheckStatus();
+            if (!iterator->Valid()) phase_complete = true;
+            if (phase_complete && !erasing) {
+                next_intent.phase = GCPhase::ERASE_RECORDS;
+                reset_cursor();
+            }
         }
 
-        const auto actual_hash{
-            GetPQPaymentProbationStateHash(decoded_value.state)};
-        if (!actual_hash || *actual_hash != decoded_key.hash ||
-            (decoded_key.hash == m_empty_state_hash &&
-             decoded_value.state != PQPaymentProbationState{})) {
-            LogPrintf("%s -- payment probation state hash mismatch for %s\n",
-                      __func__, decoded_key.hash.ToString());
-            return false;
+        if (original_intent.phase == GCPhase::ERASE_RECORDS &&
+            phase_complete) {
+            batch.Write(PaymentProbationGCKey(),
+                        MakeGCRecord(original_intent.request));
+            batch.Erase(PaymentProbationGCIntentKey());
+            if (!WriteGCBatch(batch)) {
+                progress.status =
+                    PQPaymentProbationPruneStatus::DATABASE_ERROR;
+                return progress;
+            }
+            m_completed_gc = original_intent.request;
+            m_gc_intent.reset();
+            progress.status = PQPaymentProbationPruneStatus::COMPLETE;
+            return progress;
         }
 
-        unresolved_retained.erase(decoded_key.hash);
-        if (retained.count(decoded_key.hash) != 0 ||
-            decoded_value.state.cursor.has_receipt == 0 ||
-            decoded_value.state.cursor.receipt.epoch >
-                checkpoint.prune_through_epoch) {
-            continue;
+        batch.Write(PaymentProbationGCIntentKey(),
+                    make_disk_intent(next_intent));
+        if (!WriteGCBatch(batch)) {
+            progress.status =
+                PQPaymentProbationPruneStatus::DATABASE_ERROR;
+            return progress;
         }
-        prune_keys.emplace_back(decoded_key.hash);
+        m_gc_intent = std::move(next_intent);
+        progress.status = PQPaymentProbationPruneStatus::IN_PROGRESS;
+        return progress;
+    } catch (const InvalidPaymentProbationGCRetainedRoot&) {
+        if (m_gc_intent &&
+            m_gc_intent->phase != GCPhase::ERASE_RECORDS) {
+            try {
+                CDBBatch batch{*m_state_db};
+                batch.Erase(PaymentProbationGCIntentKey());
+                if (!WriteGCBatch(batch)) {
+                    progress.status =
+                        PQPaymentProbationPruneStatus::DATABASE_ERROR;
+                    return progress;
+                }
+                m_gc_intent.reset();
+            } catch (const std::exception&) {
+                progress.status =
+                    PQPaymentProbationPruneStatus::DATABASE_ERROR;
+                return progress;
+            }
+        }
+        progress.status = PQPaymentProbationPruneStatus::INVALID;
+        return progress;
+    } catch (const CorruptPaymentProbationGC&) {
+        if (m_gc_intent &&
+            m_gc_intent->phase != GCPhase::ERASE_RECORDS) {
+            try {
+                CDBBatch batch{*m_state_db};
+                batch.Erase(PaymentProbationGCIntentKey());
+                if (!WriteGCBatch(batch)) {
+                    progress.status =
+                        PQPaymentProbationPruneStatus::DATABASE_ERROR;
+                    return progress;
+                }
+                m_gc_intent.reset();
+            } catch (const std::exception&) {
+                progress.status =
+                    PQPaymentProbationPruneStatus::DATABASE_ERROR;
+                return progress;
+            }
+        }
+        progress.status = PQPaymentProbationPruneStatus::CORRUPT;
+        return progress;
+    } catch (const std::exception& exception) {
+        LogPrintf("%s -- payment probation GC database failure: %s\n",
+                  __func__, exception.what());
+        progress.status =
+            PQPaymentProbationPruneStatus::DATABASE_ERROR;
+        return progress;
     }
-    cursor->CheckStatus();
+}
 
-    if (found_gc_record !=
-        (previous_gc_status == GCRecordStatus::VALID)) {
-        LogPrintf("%s -- payment probation GC marker iterator mismatch\n",
-                  __func__);
-        return false;
-    }
-    if (!unresolved_retained.empty()) {
-        LogPrintf("%s -- retained payment probation state %s is missing\n",
-                  __func__, unresolved_retained.begin()->ToString());
-        return false;
-    }
-
-    // Invalidate every prepared transition before the first destructive or
-    // marker mutation. This also covers an accepted empty-prune boundary: an
-    // unpublished old result must not later recreate a below-boundary state.
-    if (m_state_view_generation == std::numeric_limits<uint64_t>::max()) {
-        LogPrintf("%s -- payment probation state-view generation exhausted\n",
-                  __func__);
-        return false;
-    }
-    const uint64_t next_generation{m_state_view_generation + 1};
-    auto empty_view{std::make_shared<PQPaymentProbationStateViewData>()};
-    empty_view->owner = m_view_owner;
-    empty_view->generation = next_generation;
-    empty_view->state_hash = m_empty_state_hash;
-
-    m_state_view_generation = next_generation;
-    m_state_view_cache.clear();
-    m_state_view_cache_index.clear();
-    m_empty_state_view = std::move(empty_view);
-
-    for (const uint256& state_hash : prune_keys) {
-        // Future root resolution must fail after pruning, while a reader that
-        // already owns this immutable state may safely finish its operation.
-        // EraseCache removes both dirty and read-cache copies before staging a
-        // tombstone, so a later lookup cannot resurrect the deleted state.
-        m_state_db->EraseCache(state_hash);
-    }
-    if (!m_state_db->FlushCacheToDisk(/*nMaxBatchSize=*/256,
-                                      /*fSync=*/true)) {
-        return false;
-    }
-
-    // The marker follows durable tombstones. A crash between the two writes
-    // repeats an idempotent repair pass; once this marker is durable the
-    // scheduler can skip every fsync for the unchanged checkpoint.
-    if (!m_state_db->Write(
-            PaymentProbationGCKey(),
-            PaymentProbationGCRecord{
-                PAYMENT_PROBATION_GC_VERSION, checkpoint,
-                PAYMENT_PROBATION_GC_GUARD},
-            /*fSync=*/true)) {
-        return false;
-    }
-
-    LogPrint(BCLog::SYS,
-             "%s -- pruned %zu payment probation states through epoch %u; "
-             "retained=%zu\n",
-             __func__, prune_keys.size(), checkpoint.prune_through_epoch,
-             retained.size());
-    return true;
+std::optional<PQPaymentProbationGCRequest>
+PQPaymentProbationManager::GetPendingGCRequest() const
+{
+    LOCK(m_mutex);
+    return m_gc_intent
+        ? std::optional<PQPaymentProbationGCRequest>{m_gc_intent->request}
+        : std::nullopt;
 }
 
 } // namespace llmq::pq

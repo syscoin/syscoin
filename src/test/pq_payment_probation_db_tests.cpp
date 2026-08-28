@@ -98,6 +98,22 @@ public:
         TRY_LOCK(manager.m_mutex, lock);
         return static_cast<bool>(lock);
     }
+
+    static void FailNextGCBatch(PQPaymentProbationManager& manager)
+    {
+        LOCK(manager.m_mutex);
+        manager.m_fail_next_gc_batch_for_testing = true;
+    }
+
+    static std::optional<uint8_t> PendingGCPhase(
+        const PQPaymentProbationManager& manager)
+    {
+        LOCK(manager.m_mutex);
+        return manager.m_gc_intent
+            ? std::optional<uint8_t>{static_cast<uint8_t>(
+                  manager.m_gc_intent->phase)}
+            : std::nullopt;
+    }
 };
 
 } // namespace llmq::pq::test
@@ -120,6 +136,30 @@ uint256 NonNullHash(uint8_t value)
     hash.begin()[0] = value == 0 ? 1 : value;
     return hash;
 }
+
+uint256 ProbationGCMarkerKey()
+{
+    uint256 key;
+    std::fill(key.begin(), key.end(), 0xff);
+    return key;
+}
+
+uint256 ProbationGCIntentKey()
+{
+    uint256 key{ProbationGCMarkerKey()};
+    key.begin()[0] = 0xfe;
+    return key;
+}
+
+struct TrailingProbationDBKey {
+    uint256 hash;
+    uint8_t trailing{0xa5};
+
+    SERIALIZE_METHODS(TrailingProbationDBKey, obj)
+    {
+        READWRITE(obj.hash, obj.trailing);
+    }
+};
 
 uint256 MemberHash(std::size_t value)
 {
@@ -765,12 +805,308 @@ BOOST_AUTO_TEST_CASE(completed_checkpoint_is_a_zero_flush_noop)
     BOOST_CHECK_THROW((void)manager.Flush(/*fSync=*/true), dbwrapper_error);
     BOOST_CHECK(manager.Flush(/*fSync=*/true));
 
+    // A completed floor cannot silently bless a newly supplied retention
+    // set. That would hide a caller bug if the added covered root had already
+    // been retired by the durable request.
+    const std::array<uint256, 1> changed_retained{NonNullHash(90)};
+    BOOST_CHECK(manager.PruneStatesThroughCheckpointStep(
+                    refreshed_authorizer, changed_retained).status ==
+                PQPaymentProbationPruneStatus::INVALID);
+    BOOST_CHECK(!manager.PruneStatesThroughCheckpoint(
+        refreshed_authorizer, changed_retained));
+
     auto conflicting{refreshed_authorizer};
     conflicting.authenticated_probation_state_hash = NonNullHash(83);
     BOOST_REQUIRE(conflicting.IsStructurallyValid());
     BOOST_CHECK(!manager.IsGCCompleteForCheckpoint(conflicting));
     BOOST_CHECK(!manager.PruneStatesThroughCheckpoint(
         conflicting, std::span<const uint256>{}));
+}
+
+BOOST_AUTO_TEST_CASE(bounded_gc_floor_is_durable_and_resumes_exactly)
+{
+    using Access = test::PQPaymentProbationManagerTestAccess;
+    const fs::path path{m_path_root / "pq_payment_probation_bounded_gc"};
+    std::vector<PQPaymentProbationState> states;
+    std::vector<uint256> state_hashes;
+    states.reserve(80);
+    state_hashes.reserve(80);
+    PaymentAuditStoreCheckpoint checkpoint;
+    uint256 retained_hash;
+
+    {
+        PQPaymentProbationManager manager{DiskDB(path, /*wipe=*/true)};
+        for (uint32_t epoch{1}; epoch <= 80; ++epoch) {
+            states.emplace_back(StateAtEpoch(
+                epoch, static_cast<uint8_t>(epoch)));
+            state_hashes.emplace_back(Commit(manager, states.back()));
+        }
+        retained_hash = state_hashes[39];
+        checkpoint = Checkpoint(/*epoch=*/60, /*tag=*/90);
+        checkpoint.authenticated_probation_state_hash = retained_hash;
+        BOOST_REQUIRE(checkpoint.IsStructurallyValid());
+        const std::array<uint256, 1> retained{retained_hash};
+
+        const auto first{manager.PruneStatesThroughCheckpointStep(
+            checkpoint, retained)};
+        BOOST_CHECK(first.status ==
+                    PQPaymentProbationPruneStatus::IN_PROGRESS);
+        BOOST_CHECK_LE(first.scanned_records,
+                       PQPaymentProbationManager::
+                           MAX_GC_SCAN_RECORDS_PER_PASS);
+        BOOST_CHECK_LE(first.scanned_value_bytes,
+                       PQPaymentProbationManager::
+                           MAX_GC_VALUE_BYTES_PER_PASS);
+        BOOST_REQUIRE(manager.GetPendingGCRequest());
+
+        // The durable intent is already the logical floor, even though no
+        // physical state scan or erase is required to finish this call.
+        PQPaymentProbationState loaded;
+        BOOST_CHECK(!manager.GetState(state_hashes.front(), loaded));
+        BOOST_CHECK(!manager.CommitState(
+            states.front(), state_hashes.front(), /*fJustCheck=*/true));
+        BOOST_CHECK(manager.GetState(retained_hash, loaded));
+        BOOST_CHECK(manager.GetState(state_hashes.back(), loaded));
+    }
+
+    {
+        PQPaymentProbationManager manager{DiskDB(path, /*wipe=*/false)};
+        const std::array<uint256, 1> retained{retained_hash};
+        BOOST_REQUIRE(manager.GetPendingGCRequest());
+
+        while (Access::PendingGCPhase(manager) !=
+               std::optional<uint8_t>{2}) {
+            const auto progress{manager.PruneStatesThroughCheckpointStep(
+                checkpoint, retained)};
+            BOOST_REQUIRE(progress.status ==
+                          PQPaymentProbationPruneStatus::IN_PROGRESS);
+            BOOST_CHECK_LE(progress.scanned_records,
+                           PQPaymentProbationManager::
+                               MAX_GC_SCAN_RECORDS_PER_PASS);
+            BOOST_CHECK_LE(progress.scanned_value_bytes,
+                           PQPaymentProbationManager::
+                               MAX_GC_VALUE_BYTES_PER_PASS);
+            BOOST_CHECK_EQUAL(progress.erased_records, 0U);
+        }
+
+        const auto physical_covered = [&] {
+            std::size_t count{0};
+            for (std::size_t index{0}; index < 60; ++index) {
+                if (manager.StateDatabaseForTesting().Exists(
+                        state_hashes[index])) {
+                    ++count;
+                }
+            }
+            return count;
+        };
+        const std::size_t before_failure{physical_covered()};
+        Access::FailNextGCBatch(manager);
+        const auto failed{manager.PruneStatesThroughCheckpointStep(
+            checkpoint, retained)};
+        BOOST_CHECK(failed.status ==
+                    PQPaymentProbationPruneStatus::DATABASE_ERROR);
+        BOOST_CHECK_EQUAL(physical_covered(), before_failure);
+        BOOST_CHECK(Access::PendingGCPhase(manager) ==
+                    std::optional<uint8_t>{2});
+
+        const auto partial{manager.PruneStatesThroughCheckpointStep(
+            checkpoint, retained)};
+        BOOST_REQUIRE(partial.status ==
+                      PQPaymentProbationPruneStatus::IN_PROGRESS);
+        BOOST_CHECK_GT(partial.erased_records, 0U);
+        BOOST_CHECK_LE(partial.erased_records,
+                       PQPaymentProbationManager::
+                           MAX_GC_ERASE_RECORDS_PER_PASS);
+        BOOST_CHECK_LT(physical_covered(), before_failure);
+    }
+
+    {
+        PQPaymentProbationManager manager{DiskDB(path, /*wipe=*/false)};
+        const std::array<uint256, 1> retained{retained_hash};
+        while (true) {
+            const auto progress{manager.PruneStatesThroughCheckpointStep(
+                checkpoint, retained)};
+            BOOST_CHECK_LE(progress.scanned_records,
+                           PQPaymentProbationManager::
+                               MAX_GC_SCAN_RECORDS_PER_PASS);
+            BOOST_CHECK_LE(progress.scanned_value_bytes,
+                           PQPaymentProbationManager::
+                               MAX_GC_VALUE_BYTES_PER_PASS);
+            BOOST_CHECK_LE(progress.erased_records,
+                           PQPaymentProbationManager::
+                               MAX_GC_ERASE_RECORDS_PER_PASS);
+            if (progress.status ==
+                PQPaymentProbationPruneStatus::COMPLETE) {
+                break;
+            }
+            BOOST_REQUIRE(progress.status ==
+                          PQPaymentProbationPruneStatus::IN_PROGRESS);
+        }
+        BOOST_CHECK(!manager.GetPendingGCRequest());
+        BOOST_CHECK(manager.IsGCCompleteForCheckpoint(checkpoint));
+        PQPaymentProbationState loaded;
+        for (std::size_t index{0}; index < 60; ++index) {
+            BOOST_CHECK_EQUAL(
+                manager.GetState(state_hashes[index], loaded),
+                state_hashes[index] == retained_hash);
+        }
+        for (std::size_t index{60}; index < state_hashes.size(); ++index) {
+            BOOST_CHECK(manager.GetState(state_hashes[index], loaded));
+        }
+        BOOST_CHECK(!manager.CommitState(
+            states.front(), state_hashes.front(), /*fJustCheck=*/false));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(gc_rejects_missing_retained_and_reserved_roots)
+{
+    PQPaymentProbationManager manager{MemoryDB()};
+    const auto covered{StateAtEpoch(/*epoch=*/4, /*tag=*/91)};
+    const uint256 covered_hash{Commit(manager, covered)};
+    const auto checkpoint{Checkpoint(/*epoch=*/5, /*tag=*/92)};
+
+    const std::array<uint256, 1> missing{NonNullHash(240)};
+    const auto missing_result{manager.PruneStatesThroughCheckpointStep(
+        checkpoint, missing)};
+    BOOST_CHECK(missing_result.status ==
+                PQPaymentProbationPruneStatus::INVALID);
+    BOOST_CHECK(!manager.GetPendingGCRequest());
+
+    const std::array<uint256, 1> intent_key{ProbationGCIntentKey()};
+    BOOST_CHECK(manager.PruneStatesThroughCheckpointStep(
+                    checkpoint, intent_key).status ==
+                PQPaymentProbationPruneStatus::INVALID);
+    const std::array<uint256, 1> marker_key{ProbationGCMarkerKey()};
+    BOOST_CHECK(manager.PruneStatesThroughCheckpointStep(
+                    checkpoint, marker_key).status ==
+                PQPaymentProbationPruneStatus::INVALID);
+
+    std::array<uint256,
+               PQPaymentProbationManager::MAX_GC_RETAINED_ROOTS + 1>
+        too_many{};
+    for (std::size_t index{0}; index < too_many.size(); ++index) {
+        too_many[index] = MemberHash(10'000 + index);
+    }
+    BOOST_CHECK(manager.PruneStatesThroughCheckpointStep(
+                    checkpoint, too_many).status ==
+                PQPaymentProbationPruneStatus::INVALID);
+
+    PQPaymentProbationState loaded;
+    BOOST_CHECK(manager.GetState(covered_hash, loaded));
+    BOOST_CHECK(!manager.GetState(ProbationGCIntentKey(), loaded));
+    BOOST_CHECK(!manager.GetState(ProbationGCMarkerKey(), loaded));
+
+    auto reserved_checkpoint{checkpoint};
+    reserved_checkpoint.authenticated_probation_state_hash =
+        ProbationGCIntentKey();
+    BOOST_REQUIRE(reserved_checkpoint.IsStructurallyValid());
+    BOOST_CHECK(manager.PruneStatesThroughCheckpointStep(
+                    reserved_checkpoint,
+                    std::span<const uint256>{}).status ==
+                PQPaymentProbationPruneStatus::INVALID);
+}
+
+BOOST_AUTO_TEST_CASE(gc_exact_validation_rejects_trailing_state_key)
+{
+    const auto expect_corrupt = [](PQPaymentProbationManager& manager,
+                                   const auto& checkpoint) {
+        while (true) {
+            const auto progress{manager.PruneStatesThroughCheckpointStep(
+                checkpoint, std::span<const uint256>{})};
+            if (progress.status !=
+                PQPaymentProbationPruneStatus::IN_PROGRESS) {
+                BOOST_CHECK(progress.status ==
+                            PQPaymentProbationPruneStatus::CORRUPT);
+                break;
+            }
+        }
+        BOOST_CHECK(!manager.GetPendingGCRequest());
+    };
+
+    {
+        PQPaymentProbationManager manager{MemoryDB()};
+        const auto covered{StateAtEpoch(/*epoch=*/4, /*tag=*/93)};
+        const uint256 covered_hash{Commit(manager, covered)};
+        BOOST_REQUIRE(manager.Flush(/*fSync=*/true));
+        BOOST_REQUIRE(manager.StateDatabaseForTesting().Write(
+            TrailingProbationDBKey{covered_hash}, covered,
+            /*fSync=*/true));
+        expect_corrupt(manager, Checkpoint(/*epoch=*/5, /*tag=*/94));
+        PQPaymentProbationState loaded;
+        BOOST_CHECK(manager.GetState(covered_hash, loaded));
+    }
+
+    {
+        PQPaymentProbationManager manager{MemoryDB()};
+        const auto covered{StateAtEpoch(/*epoch=*/4, /*tag=*/98)};
+        const uint256 covered_hash{Commit(manager, covered)};
+        BOOST_REQUIRE(manager.Flush(/*fSync=*/true));
+        BOOST_REQUIRE(manager.StateDatabaseForTesting()
+                          .AppendTrailingValueByteForTesting(covered_hash));
+        expect_corrupt(manager, Checkpoint(/*epoch=*/5, /*tag=*/99));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(gc_restart_rejects_corrupt_or_trailing_metadata)
+{
+    const auto make_pending = [&](const fs::path& path) {
+        PQPaymentProbationManager manager{DiskDB(path, /*wipe=*/true)};
+        Commit(manager, StateAtEpoch(/*epoch=*/4, /*tag=*/95));
+        const auto progress{manager.PruneStatesThroughCheckpointStep(
+            Checkpoint(/*epoch=*/5, /*tag=*/96),
+            std::span<const uint256>{})};
+        BOOST_REQUIRE(progress.status ==
+                      PQPaymentProbationPruneStatus::IN_PROGRESS);
+        BOOST_REQUIRE(manager.GetPendingGCRequest());
+        return manager.GetPendingGCRequest()->checkpoint;
+    };
+
+    const fs::path corrupt_path{
+        m_path_root / "pq_payment_probation_corrupt_intent"};
+    {
+        (void)make_pending(corrupt_path);
+        PQPaymentProbationManager manager{
+            DiskDB(corrupt_path, /*wipe=*/false)};
+        BOOST_REQUIRE(manager.StateDatabaseForTesting().Write(
+            ProbationGCIntentKey(), PQPaymentProbationState{},
+            /*fSync=*/true));
+    }
+    BOOST_CHECK_THROW(
+        (PQPaymentProbationManager{
+            DiskDB(corrupt_path, /*wipe=*/false)}),
+        std::runtime_error);
+
+    const fs::path trailing_intent_path{
+        m_path_root / "pq_payment_probation_trailing_intent"};
+    {
+        (void)make_pending(trailing_intent_path);
+        PQPaymentProbationManager manager{
+            DiskDB(trailing_intent_path, /*wipe=*/false)};
+        BOOST_REQUIRE(manager.StateDatabaseForTesting().Write(
+            TrailingProbationDBKey{ProbationGCIntentKey()},
+            PQPaymentProbationState{}, /*fSync=*/true));
+    }
+    BOOST_CHECK_THROW(
+        (PQPaymentProbationManager{
+            DiskDB(trailing_intent_path, /*wipe=*/false)}),
+        std::runtime_error);
+
+    const fs::path trailing_marker_path{
+        m_path_root / "pq_payment_probation_trailing_marker"};
+    {
+        PQPaymentProbationManager manager{
+            DiskDB(trailing_marker_path, /*wipe=*/true)};
+        const auto checkpoint{Checkpoint(/*epoch=*/5, /*tag=*/97)};
+        BOOST_REQUIRE(manager.PruneStatesThroughCheckpoint(
+            checkpoint, std::span<const uint256>{}));
+        BOOST_REQUIRE(manager.StateDatabaseForTesting().Write(
+            TrailingProbationDBKey{ProbationGCMarkerKey()},
+            PQPaymentProbationState{}, /*fSync=*/true));
+    }
+    BOOST_CHECK_THROW(
+        (PQPaymentProbationManager{
+            DiskDB(trailing_marker_path, /*wipe=*/false)}),
+        std::runtime_error);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -190,6 +190,32 @@ public:
             : ExactDiskReadResult::BLOCKED;
     }
 
+    // SYSCOIN: Let bounded authenticated replays budget physical decoding
+    // before allocating the exact value. Cache/tombstone ambiguity is the
+    // same fail-closed state as an exact destructive read.
+    ExactDiskReadResult GetExactDiskValueSizeForGC(
+        const K& key, std::size_t& value_size) {
+        LOCK(cs);
+        value_size = 0;
+        if (mapCache.contains(key) || setEraseCache.contains(key)) {
+            return ExactDiskReadResult::BLOCKED;
+        }
+        std::unique_ptr<CDBIterator> cursor{NewIterator()};
+        if (!cursor) return ExactDiskReadResult::BLOCKED;
+        cursor->Seek(key);
+        if (!cursor->Valid()) {
+            cursor->CheckStatus();
+            return ExactDiskReadResult::NOT_FOUND;
+        }
+        K found_key;
+        if (!cursor->GetKeyExact(found_key)) {
+            return ExactDiskReadResult::BLOCKED;
+        }
+        if (found_key != key) return ExactDiskReadResult::NOT_FOUND;
+        value_size = cursor->GetValueSize();
+        return ExactDiskReadResult::FOUND;
+    }
+
     // SYSCOIN: Exercise the exact-value decoder against physical trailing
     // bytes without changing the production serialization type.
     bool AppendTrailingValueByteForTesting(const K& key) {
