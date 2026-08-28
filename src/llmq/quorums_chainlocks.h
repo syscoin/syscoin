@@ -1249,6 +1249,11 @@ private:
     struct BTCCReplayValidationStep {
         std::optional<int32_t> validated_through;
         std::optional<uint256> missing_logical_id;
+        BTCCReplayCarrierStatus terminal_status{
+            BTCCReplayCarrierStatus::VERIFIED};
+        int32_t blocked_carrier_height{-1};
+        uint256 blocked_carrier_hash;
+        uint256 blocked_logical_id;
     };
 
     struct CurrentSigningContexts {

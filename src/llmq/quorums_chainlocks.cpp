@@ -6198,7 +6198,8 @@ CChainLocksHandler::AdvanceBTCCReplayValidationBounded(
                 receipt.chainlock_logical_id};
         case BTCCReceiptCertificateStatus::INVALID:
             return BTCCReplayCarrierCheck{
-                BTCCReplayCarrierStatus::INVALID, {}};
+                BTCCReplayCarrierStatus::INVALID,
+                receipt.chainlock_logical_id};
         }
         return BTCCReplayCarrierCheck{
             BTCCReplayCarrierStatus::LOCAL_ERROR, {}};
@@ -6216,6 +6217,17 @@ CChainLocksHandler::AdvanceBTCCReplayValidationBounded(
             m_needed_btcc_certificate = step.missing_logical_id;
             m_needed_btcc_last_request = std::chrono::microseconds{0};
         }
+    }
+    if (step.terminal_status == BTCCReplayCarrierStatus::INVALID) {
+        if (!m_persistence_failed.exchange(true)) {
+            LogPrintf("CChainLocksHandler::%s -- invalid archived BTCC "
+                      "authority %s for active replay carrier %s at %d; "
+                      "disabling ChainLock share admission\n",
+                      __func__, step.blocked_logical_id.ToString(),
+                      step.blocked_carrier_hash.ToString(),
+                      step.blocked_carrier_height);
+        }
+        DisableShareAdmission();
     }
     return step.validated_through;
 }
@@ -6266,6 +6278,12 @@ CChainLocksHandler::AdvanceBTCCReplayValidationFrontier(
                 }
                 BTCCReplayValidationStep step;
                 step.validated_through = height - 1;
+                step.terminal_status = result.status;
+                step.blocked_carrier_height = height;
+                step.blocked_carrier_hash =
+                    carrier == nullptr ? uint256{}
+                                       : carrier->GetBlockHash();
+                step.blocked_logical_id = result.logical_id;
                 if (result.status ==
                         BTCCReplayCarrierStatus::MISSING &&
                     !result.logical_id.IsNull()) {
@@ -6280,7 +6298,8 @@ CChainLocksHandler::AdvanceBTCCReplayValidationFrontier(
         }
     }
     return BTCCReplayValidationStep{
-        frontier.ValidatedThroughHeight(), std::nullopt};
+        frontier.ValidatedThroughHeight(), std::nullopt,
+        BTCCReplayCarrierStatus::VERIFIED, -1, {}, {}};
 }
 
 void CChainLocksHandler::MaybeReplayBTCCPreseal()

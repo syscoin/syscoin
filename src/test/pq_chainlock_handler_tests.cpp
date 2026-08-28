@@ -312,6 +312,10 @@ public:
     struct ReplayStep {
         std::optional<int32_t> validated_through;
         std::optional<uint256> missing_logical_id;
+        CertificateStatus terminal_status{CertificateStatus::VERIFIED};
+        int32_t blocked_carrier_height{-1};
+        uint256 blocked_carrier_hash;
+        uint256 blocked_logical_id;
     };
 
     using ReplayCheck = std::function<std::pair<CertificateStatus, uint256>(
@@ -459,8 +463,27 @@ public:
                 frontier, active_chain, active_tip,
                 authenticated_through, authenticated_hash,
                 source_token, schedule, adapter, block_budget)};
+        CertificateStatus terminal_status{CertificateStatus::LOCAL_ERROR};
+        switch (result.terminal_status) {
+        case CChainLocksHandler::BTCCReplayCarrierStatus::VERIFIED:
+            terminal_status = CertificateStatus::VERIFIED;
+            break;
+        case CChainLocksHandler::BTCCReplayCarrierStatus::MISSING:
+            terminal_status = CertificateStatus::MISSING;
+            break;
+        case CChainLocksHandler::BTCCReplayCarrierStatus::INVALID:
+            terminal_status = CertificateStatus::INVALID;
+            break;
+        case CChainLocksHandler::BTCCReplayCarrierStatus::LOCAL_ERROR:
+            terminal_status = CertificateStatus::LOCAL_ERROR;
+            break;
+        }
         return {result.validated_through,
-                result.missing_logical_id};
+                result.missing_logical_id,
+                terminal_status,
+                result.blocked_carrier_height,
+                result.blocked_carrier_hash,
+                result.blocked_logical_id};
     }
 };
 
@@ -819,6 +842,45 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(*invalid_step.validated_through,
                       carriers[0] - 1);
     BOOST_CHECK(!invalid_step.missing_logical_id);
+    BOOST_CHECK(invalid_step.terminal_status ==
+                Access::CertificateStatus::INVALID);
+    BOOST_CHECK_EQUAL(invalid_step.blocked_carrier_height,
+                      carriers[0]);
+    BOOST_CHECK(invalid_step.blocked_carrier_hash ==
+                chain.At(carriers[0]).GetBlockHash());
+    BOOST_CHECK(invalid_step.blocked_logical_id == first_id);
+
+    const auto invalid_retry{Access::AdvanceReplay(
+        invalid_frontier, chain.active, chain.At(TIP_HEIGHT),
+        AUTHENTICATED_THROUGH,
+        chain.At(AUTHENTICATED_THROUGH).GetBlockHash(), source,
+        config.btcc_schedule, invalid)};
+    BOOST_REQUIRE(invalid_retry.validated_through);
+    BOOST_CHECK_EQUAL(*invalid_retry.validated_through,
+                      carriers[0] - 1);
+    BOOST_CHECK(!invalid_retry.missing_logical_id);
+    BOOST_CHECK(invalid_retry.terminal_status ==
+                Access::CertificateStatus::INVALID);
+
+    llmq::BoundedActiveRangeFrontier local_error_frontier;
+    const auto local_error = [&](const CBlockIndex& carrier) {
+        return carrier.nHeight == carriers[0]
+            ? std::pair{Access::CertificateStatus::LOCAL_ERROR,
+                        first_id}
+            : std::pair{Access::CertificateStatus::VERIFIED,
+                        uint256{}};
+    };
+    const auto local_error_step{Access::AdvanceReplay(
+        local_error_frontier, chain.active, chain.At(TIP_HEIGHT),
+        AUTHENTICATED_THROUGH,
+        chain.At(AUTHENTICATED_THROUGH).GetBlockHash(), source,
+        config.btcc_schedule, local_error)};
+    BOOST_REQUIRE(local_error_step.validated_through);
+    BOOST_CHECK_EQUAL(*local_error_step.validated_through,
+                      carriers[0] - 1);
+    BOOST_CHECK(!local_error_step.missing_logical_id);
+    BOOST_CHECK(local_error_step.terminal_status ==
+                Access::CertificateStatus::LOCAL_ERROR);
 }
 
 BOOST_AUTO_TEST_CASE(
