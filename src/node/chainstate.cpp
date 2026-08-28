@@ -266,7 +266,27 @@ static ChainstateLoadResult CompleteChainstateInitialization(
     // block tree into BlockIndex()!
     // SYSCOIN
     bool coinsViewEmpty = false;
-    for (Chainstate* chainstate : chainman.GetAll()) {
+    std::vector<Chainstate*> loaded_chainstates;
+    auto chainstates{chainman.GetAll()};
+    Chainstate* const active_chainstate{&chainman.ActiveChainstate()};
+    const auto publish_startup_tip = [&](const CBlockIndex* recovered_tip)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+        return deterministicMNManager == nullptr ||
+               deterministicMNManager->UpdatedBlockTipForStartup(
+                   recovered_tip,
+                   [&](const uint256& hash)
+                       EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+                       return chainman.m_blockman.LookupBlockIndex(hash);
+                   });
+    };
+    // SYSCOIN: The active recovery head is the ancestry authority for shared
+    // journal-bound stores. Load it before an AssumeUTXO background state.
+    std::stable_partition(
+        chainstates.begin(), chainstates.end(),
+        [active_chainstate](const Chainstate* chainstate) {
+            return chainstate == active_chainstate;
+        });
+    for (Chainstate* chainstate : chainstates) {
         LogPrintf("Initializing chainstate %s\n", chainstate->ToString());
 
         chainstate->InitCoinsDB(
@@ -301,6 +321,35 @@ static ChainstateLoadResult CompleteChainstateInitialization(
                 return {ChainstateLoadStatus::FAILURE, _("Error initializing block database")};
             }
             assert(chainstate->m_chain.Tip() != nullptr);
+            if (chainstate == active_chainstate &&
+                !publish_startup_tip(chainstate->m_chain.Tip())) {
+                return {ChainstateLoadStatus::FAILURE_INCOMPATIBLE_DB,
+                        _("Auxiliary-history GC authorization is not compatible with the recovered active chain")};
+            }
+            loaded_chainstates.push_back(chainstate);
+        }
+        // SYSCOIN
+        else {
+            coinsViewEmpty = true;
+        }
+    }
+
+    // SYSCOIN: Publish the loaded active tip before opening any journal-bound
+    // auxiliary store. A pending GC intent is authenticated against the
+    // active chain, which may be the snapshot chainstate loaded after its IBD
+    // counterpart. Verify every loaded recovery chainstate only after that
+    // active-chain identity is available.
+    if (!coinsViewEmpty && !loaded_chainstates.empty()) {
+        const CBlockIndex* active_tip{active_chainstate->m_chain.Tip()};
+        if (active_tip == nullptr) {
+            return {ChainstateLoadStatus::FAILURE,
+                    _("Error initializing active chain tip")};
+        }
+        if (!publish_startup_tip(active_tip)) {
+            return {ChainstateLoadStatus::FAILURE_INCOMPATIBLE_DB,
+                    _("Auxiliary-history GC authorization is not compatible with the recovered active chain")};
+        }
+        for (const Chainstate* chainstate : loaded_chainstates) {
             // SYSCOIN: Treat an anchor/registry mismatch as an incompatible
             // database, not a recoverable tip-selection error; reindexing is
             // required to reconstruct the branch-bound snapshots.
@@ -309,9 +358,8 @@ static ChainstateLoadResult CompleteChainstateInitialization(
                         _("Mandatory post-quantum anchors, deterministic masternode state, rollback-journal tip seal, or PQ key registry is missing or invalid. Reindex with the matching Syscoin release; existing pre-journal datadirs cannot be backfilled from the bounded snapshot window.")};
             }
         }
-        // SYSCOIN
-        else {
-            coinsViewEmpty = true;
+        if (deterministicMNManager) {
+            deterministicMNManager->UpdatedBlockTip(active_tip);
         }
     }
 

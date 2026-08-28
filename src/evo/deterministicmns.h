@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <functional>
 #include <ios>
 #include <limits>
 #include <mutex>
@@ -750,7 +751,8 @@ private:
         uint64_t m_builds GUARDED_BY(m_mutex){0};
     };
 
-    Mutex cs;
+    // SYSCOIN: Const PQ readers may perform one-time journal-bound startup.
+    mutable Mutex cs;
     // Main thread has indicated we should perform cleanup up to this height
     std::atomic<int> to_cleanup {0};
     std::atomic<bool> m_persistent_window_initialized{false};
@@ -787,7 +789,13 @@ private:
     // initialization-lock precondition on every consensus caller.
     mutable std::once_flag m_pq_registry_init_once;
     mutable std::atomic_bool m_pq_registry_init_requested{false};
+    mutable std::atomic_bool m_pq_registry_ready{false};
     mutable std::unique_ptr<llmq::pq::PQRegistryManager> m_pq_registry;
+    // SYSCOIN: During crash recovery the durable ChainLock authorizer may be
+    // a known descendant of the older recovered UTXO tip. Keep that ancestry
+    // witness separate from the actual manager tip.
+    const CBlockIndex* m_pq_registry_startup_authorization_head
+        GUARDED_BY(cs){nullptr};
     std::unique_ptr<llmq::pq::PQPaymentProbationManager>
         m_payment_probation;
     std::unique_ptr<CEvoDB<uint256, CDeterministicMNListInverse,
@@ -1038,6 +1046,11 @@ public:
         std::span<const CBlockIndex* const> recovery_snapshot_indexes = {})
         EXCLUSIVE_LOCKS_REQUIRED(!cs);
     void UpdatedBlockTip(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    /** SYSCOIN: Bind crash-restored journal authority to a comparable tip. */
+    [[nodiscard]] bool UpdatedBlockTipForStartup(
+        const CBlockIndex* recovered_tip,
+        const std::function<const CBlockIndex*(const uint256&)>& lookup)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs, cs_main);
     bool GetEvoDBStats(EvoDBStats& stats) EXCLUSIVE_LOCKS_REQUIRED(!cs);
     bool HasPersistentWindow() const;
     bool VerifyPQLegacyAnchorState(const CBlockIndex* anchor) EXCLUSIVE_LOCKS_REQUIRED(!cs);
@@ -1069,6 +1082,11 @@ public:
     void FailNextAuxiliaryHistoryGCCompleteForTesting();
     /** SYSCOIN: Verify rejected and check-only blocks never reach PQ publication. */
     void FailNextPQRegistryWriteThroughForTesting();
+    /** SYSCOIN: Install an authenticated rollback floor for ordering tests. */
+    bool InstallPQRegistryGCFloorForTesting(
+        const evo::PQRegistryGCClosure& closure,
+        const AuxiliaryHistoryGCAuthorization& authorization,
+        llmq::pq::PQRegistryError& error);
     /** SYSCOIN: Lower a replay floor, or erase it only after the durable marker clears. */
     int UpdateReplaySnapshotRetentionFloor(
         std::optional<int32_t> floor) EXCLUSIVE_LOCKS_REQUIRED(!cs);

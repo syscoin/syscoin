@@ -1316,6 +1316,15 @@ bool CDeterministicMNManager::GetPQPaymentEligibleProTxHashes(
 llmq::pq::PQRegistryManager* CDeterministicMNManager::GetOrCreatePQRegistry(
     std::string& error) const
 {
+    if (m_pq_registry_ready.load(std::memory_order_acquire)) {
+        if (m_pq_registry == nullptr) {
+            error = "pq-registry-publication-corrupt";
+            return nullptr;
+        }
+        error.clear();
+        return m_pq_registry.get();
+    }
+
     llmq::pq::PQRegistryConfig config;
     const auto deployment = llmq::pq::GetPQRegistryConfig(
         Params().GetConsensus(), config);
@@ -1329,11 +1338,137 @@ llmq::pq::PQRegistryManager* CDeterministicMNManager::GetOrCreatePQRegistry(
     }
 
     m_pq_registry_init_requested.store(true, std::memory_order_release);
+    // SYSCOIN: Serialize startup with EvoDB journal publication before
+    // entering call_once, so callers already holding this outer lock cannot
+    // deadlock while waiting for another initializer.
+    LOCK(m_evoDb->cs);
+    if (m_pq_registry_ready.load(std::memory_order_acquire)) {
+        error.clear();
+        return m_pq_registry.get();
+    }
     try {
-        std::call_once(m_pq_registry_init_once, [this, &config] {
-            m_pq_registry = std::make_unique<llmq::pq::PQRegistryManager>(
+        std::call_once(m_pq_registry_init_once, [this, config] {
+            // SYSCOIN: Opening a LevelDB is not publication. First bind the
+            // temporary registry to one stable, ancestry-valid durable GC
+            // state while the same lock order excludes maintenance changes.
+            evo::AuxiliaryHistoryGCState journal_state;
+            {
+                LOCK(cs);
+                journal_state = m_auxiliary_history_gc_journal->GetState();
+                const auto& consensus{Params().GetConsensus()};
+                const bool has_durable_gc_state{
+                    journal_state.watermark.has_value() ||
+                    journal_state.intent.has_value()};
+                const CBlockIndex* const authorization_head{
+                    m_pq_registry_startup_authorization_head != nullptr
+                        ? m_pq_registry_startup_authorization_head
+                        : tipIndex};
+                if (has_durable_gc_state &&
+                    (Consensus::CheckPQChainLockAnchorConfiguration(
+                        consensus) != Consensus::PQAnchorResult::VALID ||
+                     tipIndex == nullptr ||
+                     authorization_head == nullptr ||
+                     authorization_head->nHeight <
+                         consensus.nPQChainLockAnchorHeight)) {
+                    throw std::runtime_error{
+                        "PQ ChainLock anchor is not available"};
+                }
+                const CBlockIndex* configured_anchor{
+                    has_durable_gc_state
+                        ? authorization_head->GetAncestor(
+                              consensus.nPQChainLockAnchorHeight)
+                        : nullptr};
+                if (has_durable_gc_state &&
+                    (configured_anchor == nullptr ||
+                     configured_anchor->GetBlockHash() !=
+                         consensus.hashPQChainLockAnchorBlock)) {
+                    throw std::runtime_error{
+                        "PQ ChainLock anchor is not on the active chain"};
+                }
+                const auto authorization_is_compatible =
+                    [&consensus, authorization_head](
+                        const evo::AuxiliaryHistoryGCAuthorization& authorization)
+                        EXCLUSIVE_LOCKS_REQUIRED(cs) {
+                    if (!authorization.IsValid() ||
+                        authorization_head == nullptr ||
+                        authorization.block.height >
+                            authorization_head->nHeight ||
+                        authorization.block.height <
+                            consensus.nPQChainLockAnchorHeight) {
+                        return false;
+                    }
+                    if (authorization.source == evo::
+                            AuxiliaryHistoryGCAuthorizationSource::
+                                IMMUTABLE_CHAINLOCK_ANCHOR &&
+                        (authorization.block.height !=
+                             consensus.nPQChainLockAnchorHeight ||
+                         authorization.block.block_hash !=
+                             consensus.hashPQChainLockAnchorBlock)) {
+                        return false;
+                    }
+                    const CBlockIndex* active{
+                        authorization_head->GetAncestor(
+                            authorization.block.height)};
+                    return active != nullptr &&
+                           active->GetBlockHash() ==
+                               authorization.block.block_hash;
+                };
+                const auto frontier_is_ancestral =
+                    [this, &authorization_is_compatible](
+                        const evo::AuxiliaryHistoryGCFrontier& frontier,
+                        const evo::AuxiliaryHistoryGCAuthorization& authorization)
+                        EXCLUSIVE_LOCKS_REQUIRED(cs) {
+                        if (!authorization_is_compatible(authorization)) {
+                            return false;
+                        }
+                        if (!frontier.pq_registry) return true;
+                        const auto closure{evo::DecodePQRegistryGCClosure(
+                            frontier.pq_registry->closure)};
+                        if (!closure || tipIndex == nullptr ||
+                            closure->checkpoint.height > authorization.block.height) {
+                            return false;
+                        }
+                        const CBlockIndex* checkpoint{
+                            tipIndex->GetAncestor(
+                                closure->checkpoint.height)};
+                        return checkpoint != nullptr &&
+                               checkpoint->GetBlockHash() ==
+                                   closure->checkpoint.block_hash;
+                    };
+                if ((journal_state.watermark &&
+                     !frontier_is_ancestral(
+                         journal_state.watermark->frontier,
+                         journal_state.watermark->authorization)) ||
+                    (journal_state.intent &&
+                     !frontier_is_ancestral(
+                         journal_state.intent->target.frontier,
+                         journal_state.intent->target.authorization))) {
+                    throw std::runtime_error{
+                        "PQ GC authorization or checkpoint is not ancestral"};
+                }
+            }
+
+            auto registry{
+                std::make_unique<llmq::pq::PQRegistryManager>(
                 m_pq_registry_db_params,
-                Params().GetConsensus().hashGenesisBlock, config);
+                Params().GetConsensus().hashGenesisBlock, config)};
+            llmq::pq::PQRegistryError floor_error;
+            if (!registry->InstallEffectiveGCFloor(
+                    journal_state, floor_error)) {
+                throw std::runtime_error{strprintf(
+                    "invalid effective PQ GC floor: %s",
+                    std::string{llmq::pq::PQRegistryResultString(
+                        floor_error.result)})};
+            }
+            const auto stable_state{
+                m_auxiliary_history_gc_journal->GetState()};
+            if (stable_state.watermark != journal_state.watermark ||
+                stable_state.intent != journal_state.intent) {
+                throw std::runtime_error{
+                    "PQ GC journal changed during registry startup"};
+            }
+            m_pq_registry = std::move(registry);
+            m_pq_registry_ready.store(true, std::memory_order_release);
         });
     } catch (const std::exception& e) {
         error = strprintf("pq-registry-open-failed: %s", e.what());
@@ -1343,8 +1478,9 @@ llmq::pq::PQRegistryManager* CDeterministicMNManager::GetOrCreatePQRegistry(
         error = "pq-registry-open-failed";
         return nullptr;
     }
-    if (m_pq_registry->GetConfig() != config) {
-        error = "pq-registry-configuration-changed";
+    if (!m_pq_registry_ready.load(std::memory_order_acquire) ||
+        m_pq_registry->GetConfig() != config) {
+        error = "pq-registry-publication-failed";
         return nullptr;
     }
     error.clear();
@@ -2409,6 +2545,27 @@ bool CDeterministicMNManager::UndoBlock(const CBlockIndex* pindex, CDeterministi
         llmq::pq::PQRegistryDeploymentResult::INVALID_CONFIGURATION) {
         return false;
     }
+    // SYSCOIN: Preflight the irreversible PQ floor before reconstructing and
+    // publishing a missing deterministic-MN parent. A local rollback refusal
+    // must leave both auxiliary stores byte-for-byte unchanged.
+    if (pq_deployment == llmq::pq::PQRegistryDeploymentResult::VALID &&
+        pindex->nHeight >= pq_config.preparation_height) {
+        std::string registry_open_error;
+        auto* registry = GetOrCreatePQRegistry(registry_open_error);
+        if (registry == nullptr) return false;
+        llmq::pq::PQRegistryError registry_error;
+        if (!registry->PreflightUndoBlock(
+                pindex->GetBlockHash(), pindex->pprev->GetBlockHash(),
+                pindex->nHeight, registry_error)) {
+            LogPrintf("%s -- PQ registry undo preflight failed at height=%d "
+                      "block=%s result=%s\n",
+                      __func__, pindex->nHeight,
+                      pindex->GetBlockHash().ToString(),
+                      std::string{llmq::pq::PQRegistryResultString(
+                          registry_error.result)});
+            return false;
+        }
+    }
 
     CDeterministicMNList curList;
     CDeterministicMNList prevList;
@@ -2466,27 +2623,6 @@ bool CDeterministicMNManager::UndoBlock(const CBlockIndex* pindex, CDeterministi
                   __func__, pindex->nHeight,
                   pindex->GetBlockHash().ToString(), exception.what());
         return false;
-    }
-
-    // Validate and recover the DMN parent before rolling back any other
-    // branch-bound database. A bad journal therefore fails closed without
-    // leaving the registry one block behind the active chain.
-    if (pq_deployment == llmq::pq::PQRegistryDeploymentResult::VALID &&
-        pindex->nHeight >= pq_config.preparation_height) {
-        std::string registry_open_error;
-        auto* registry = GetOrCreatePQRegistry(registry_open_error);
-        if (registry == nullptr) return false;
-        llmq::pq::PQRegistryError registry_error;
-        if (!registry->UndoBlock(
-                pindex->GetBlockHash(), pindex->pprev->GetBlockHash(),
-                pindex->nHeight, registry_error)) {
-            LogPrintf("%s -- PQ registry undo failed at height=%d block=%s result=%s\n",
-                      __func__, pindex->nHeight,
-                      pindex->GetBlockHash().ToString(),
-                      std::string{llmq::pq::PQRegistryResultString(
-                          registry_error.result)});
-            return false;
-        }
     }
 
     CDeterministicMNListDiff inversedDiff;
@@ -3125,6 +3261,14 @@ bool CDeterministicMNManager::VerifyPersistedPQRegistrySnapshot(
     if (deployment != llmq::pq::PQRegistryDeploymentResult::VALID) {
         return false;
     }
+    // SYSCOIN: Startup must consume a durable GC journal while its
+    // descendant-authorizer witness is still installed, even when the
+    // recovered UTXO tip predates PQ preparation and has no registry record.
+    std::string open_error;
+    if (GetOrCreatePQRegistry(open_error) == nullptr) {
+        LogPrintf("%s -- %s\n", __func__, open_error);
+        return false;
+    }
     if (pindex->nHeight < config.preparation_height) return true;
 
     llmq::pq::PQRegistrySnapshot snapshot;
@@ -3308,6 +3452,21 @@ void CDeterministicMNManager::FailNextPQRegistryWriteThroughForTesting()
     registry->SnapshotDatabase().FailNextWriteThroughForTesting();
 }
 
+bool CDeterministicMNManager::InstallPQRegistryGCFloorForTesting(
+    const evo::PQRegistryGCClosure& closure,
+    const AuxiliaryHistoryGCAuthorization& authorization,
+    llmq::pq::PQRegistryError& error)
+{
+    std::string open_error;
+    auto* registry{GetOrCreatePQRegistry(open_error)};
+    if (registry == nullptr) return false;
+    const auto payload{evo::EncodePQRegistryGCClosure(closure)};
+    if (!payload) return false;
+    const evo::AuxiliaryHistoryGCComponent component{
+        evo::PQRegistryGCClosure::VERSION, closure.generation, *payload};
+    return registry->InstallGCFloor(component, authorization, error);
+}
+
 void CDeterministicMNManager::UpdatedBlockTip(const CBlockIndex* pindex) {
     // SYSCOIN: Tip replacement participates in the same EvoDB->manager
     // barrier as retention mutations, so maintenance cannot authorize or
@@ -3315,6 +3474,44 @@ void CDeterministicMNManager::UpdatedBlockTip(const CBlockIndex* pindex) {
     LOCK(m_evoDb->cs);
     LOCK(cs);
     tipIndex = pindex;
+    m_pq_registry_startup_authorization_head = nullptr;
+}
+
+bool CDeterministicMNManager::UpdatedBlockTipForStartup(
+    const CBlockIndex* recovered_tip,
+    const std::function<const CBlockIndex*(const uint256&)>& lookup)
+{
+    if (recovered_tip == nullptr || !lookup) return false;
+    LOCK(m_evoDb->cs);
+    LOCK(cs);
+
+    const CBlockIndex* authorization_head{recovered_tip};
+    if (m_auxiliary_history_gc_high_watermark) {
+        const auto& authorized{
+            m_auxiliary_history_gc_high_watermark->block};
+        const CBlockIndex* indexed_authorizer{
+            lookup(authorized.block_hash)};
+        if (indexed_authorizer == nullptr ||
+            indexed_authorizer->nHeight != authorized.height ||
+            indexed_authorizer->GetBlockHash() !=
+                authorized.block_hash) {
+            return false;
+        }
+        if (authorized.height <= recovered_tip->nHeight) {
+            const CBlockIndex* active_authorizer{
+                recovered_tip->GetAncestor(authorized.height)};
+            if (active_authorizer != indexed_authorizer) return false;
+        } else {
+            const CBlockIndex* recovered_ancestor{
+                indexed_authorizer->GetAncestor(recovered_tip->nHeight)};
+            if (recovered_ancestor != recovered_tip) return false;
+            authorization_head = indexed_authorizer;
+        }
+    }
+
+    tipIndex = recovered_tip;
+    m_pq_registry_startup_authorization_head = authorization_head;
+    return true;
 }
 
 bool CDeterministicMNManager::IsProTxWithCollateral(const CTransactionRef& tx, uint32_t n)

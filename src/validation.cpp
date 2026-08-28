@@ -7901,6 +7901,23 @@ bool Chainstate::ReplayBlocks()
         pindexFork = LastCommonAncestor(pindexOld, pindexNew);
         assert(pindexFork != nullptr);
     }
+    // SYSCOIN: Interrupted-flush replay touches branch-bound DMN/PQ stores
+    // before LoadChainTip(). Publish the active recovered target first so a
+    // crash-restored GC floor is authenticated against the intended chain.
+    // Background AssumeUTXO replay deliberately keeps that active authority.
+    if (this == &m_chainman.ActiveChainstate() &&
+        deterministicMNManager &&
+        !deterministicMNManager->UpdatedBlockTipForStartup(
+            pindexNew,
+            [this](const uint256& hash)
+                EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+                return m_blockman.LookupBlockIndex(hash);
+            })) {
+        return error(
+            "ReplayBlocks(): auxiliary-history GC authorization is not "
+            "compatible with recovered head %s",
+            pindexNew->GetBlockHash().ToString());
+    }
     // Rollback along the old branch.
     while (pindexOld != pindexFork) {
         if (pindexOld->nHeight > 0) { // Never disconnect the genesis block.

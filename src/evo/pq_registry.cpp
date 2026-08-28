@@ -1332,8 +1332,10 @@ bool PQRegistryManager::CheckGCFloorAccess(
 bool PQRegistryManager::AuthenticateGCFloorCheckpoint(
     const evo::PQRegistryGCClosure& closure,
     std::shared_ptr<const PQRegistrySnapshotView>* snapshot,
-    PQRegistryError& error) const
+    PQRegistryError& error,
+    bool* missing) const
 {
+    if (missing != nullptr) *missing = false;
     PQRegistryDiskSnapshot disk;
     const auto read_result{m_snapshot_db->ReadExactDiskForGC(
         closure.checkpoint.block_hash, disk)};
@@ -1341,6 +1343,10 @@ bool PQRegistryManager::AuthenticateGCFloorCheckpoint(
         typename CEvoDB<uint256, PQRegistryDiskSnapshot,
                         StaticSaltedHasher>::ExactDiskReadResult;
     if (read_result == ExactReadResult::NOT_FOUND) {
+        if (missing != nullptr) {
+            *missing = true;
+            return true;
+        }
         return SetError(error, PQRegistryResult::SNAPSHOT_NOT_FOUND);
     }
     if (read_result != ExactReadResult::FOUND ||
@@ -1497,6 +1503,283 @@ bool PQRegistryManager::InstallGCFloor(
         ++m_gc_floor_revision;
     }
     return true;
+}
+
+bool PQRegistryManager::InstallEffectiveGCFloor(
+    const evo::AuxiliaryHistoryGCState& state,
+    PQRegistryError& error)
+{
+    error.Clear();
+    const auto fail_transition = [&] {
+        return SetError(error, PQRegistryResult::FLOOR_CONFLICT);
+    };
+    const auto component_dominates = [](
+        const std::optional<evo::AuxiliaryHistoryGCComponent>& previous,
+        const std::optional<evo::AuxiliaryHistoryGCComponent>& next) {
+        if (!previous) return true;
+        return next && next->version == previous->version &&
+               next->monotonic_position >= previous->monotonic_position &&
+               (next->monotonic_position != previous->monotonic_position ||
+                *next == *previous);
+    };
+    const auto component_advances = [](
+        const std::optional<evo::AuxiliaryHistoryGCComponent>& previous,
+        const std::optional<evo::AuxiliaryHistoryGCComponent>& next) {
+        return next &&
+               (!previous || next->monotonic_position >
+                                previous->monotonic_position);
+    };
+
+    const evo::AuxiliaryHistoryGCFrontier* completed_frontier{nullptr};
+    const evo::AuxiliaryHistoryGCAuthorization* completed_authorization{
+        nullptr};
+    if (state.watermark) {
+        const auto& watermark{*state.watermark};
+        if (watermark.sequence == 0 || watermark.configuration_id.IsNull() ||
+            !watermark.authorization.IsValid() ||
+            !watermark.frontier.IsValid() ||
+            watermark.completed_intent_id.IsNull() ||
+            watermark.watermark_id.IsNull()) {
+            return fail_transition();
+        }
+        completed_frontier = &watermark.frontier;
+        completed_authorization = &watermark.authorization;
+    }
+
+    const evo::AuxiliaryHistoryGCFrontier* effective_frontier{
+        completed_frontier};
+    const evo::AuxiliaryHistoryGCAuthorization* effective_authorization{
+        completed_authorization};
+    const evo::AuxiliaryHistoryGCManifest* pending_manifest{nullptr};
+    bool pq_advances{false};
+    if (state.intent) {
+        const auto& intent{*state.intent};
+        if (intent.sequence == 0 || intent.configuration_id.IsNull() ||
+            !intent.target.IsValid() || intent.intent_id.IsNull()) {
+            return fail_transition();
+        }
+        const auto& target{intent.target};
+        if (state.watermark) {
+            const auto& watermark{*state.watermark};
+            if (watermark.sequence == std::numeric_limits<uint64_t>::max() ||
+                intent.sequence != watermark.sequence + 1 ||
+                intent.configuration_id != watermark.configuration_id ||
+                target.authorization.block.height <=
+                    watermark.authorization.block.height ||
+                static_cast<uint8_t>(target.authorization.source) <
+                    static_cast<uint8_t>(
+                        watermark.authorization.source) ||
+                !component_dominates(
+                    watermark.frontier.dmn, target.frontier.dmn) ||
+                !component_dominates(
+                    watermark.frontier.pq_registry,
+                    target.frontier.pq_registry)) {
+                return fail_transition();
+            }
+            const bool dmn_advances{component_advances(
+                watermark.frontier.dmn, target.frontier.dmn)};
+            pq_advances = component_advances(
+                watermark.frontier.pq_registry,
+                target.frontier.pq_registry);
+            if (dmn_advances == pq_advances) return fail_transition();
+        } else {
+            if (intent.sequence != 1) return fail_transition();
+            const bool has_dmn{target.frontier.dmn.has_value()};
+            const bool has_pq{target.frontier.pq_registry.has_value()};
+            if (has_dmn == has_pq) return fail_transition();
+            pq_advances = has_pq;
+        }
+        if (target.pq_erase_manifest.has_value() != pq_advances) {
+            return fail_transition();
+        }
+        pending_manifest = target.pq_erase_manifest
+            ? &*target.pq_erase_manifest
+            : nullptr;
+        effective_frontier = &target.frontier;
+        effective_authorization = &target.authorization;
+    }
+
+    const auto& previous_component{state.watermark
+        ? state.watermark->frontier.pq_registry
+        : std::optional<evo::AuxiliaryHistoryGCComponent>{}};
+    const auto& effective_component{effective_frontier
+        ? effective_frontier->pq_registry
+        : std::optional<evo::AuxiliaryHistoryGCComponent>{}};
+    if (!effective_component) {
+        return previous_component || pq_advances
+            ? fail_transition()
+            : true;
+    }
+    if (effective_authorization == nullptr ||
+        !evo::IsPQRegistryGCComponentBoundedByAuthorization(
+            *effective_component, *effective_authorization)) {
+        return fail_transition();
+    }
+    const auto effective_closure{evo::DecodePQRegistryGCClosure(
+        effective_component->closure)};
+    if (!effective_closure) return fail_transition();
+
+    std::optional<evo::PQRegistryGCClosure> previous_closure;
+    if (previous_component) {
+        if (completed_authorization == nullptr ||
+            !evo::IsPQRegistryGCComponentBoundedByAuthorization(
+                *previous_component, *completed_authorization)) {
+            return fail_transition();
+        }
+        previous_closure = evo::DecodePQRegistryGCClosure(
+            previous_component->closure);
+        if (!previous_closure) return fail_transition();
+    }
+
+    std::optional<evo::PQRegistryGCEraseManifest> decoded_manifest;
+    if (pq_advances) {
+        if (pending_manifest == nullptr ||
+            pending_manifest->version !=
+                evo::PQRegistryGCEraseManifest::VERSION) {
+            return fail_transition();
+        }
+        decoded_manifest = evo::DecodePQRegistryGCEraseManifest(
+            pending_manifest->payload);
+        const auto target_hash{evo::GetAuxiliaryHistoryGCComponentHash(
+            *effective_component)};
+        const auto previous_hash{previous_component
+            ? evo::GetAuxiliaryHistoryGCComponentHash(*previous_component)
+            : std::optional<uint256>{}};
+        if (!decoded_manifest || !target_hash ||
+            decoded_manifest->target_component_hash != *target_hash ||
+            decoded_manifest->previous_component_hash != previous_hash) {
+            return fail_transition();
+        }
+        if (!previous_component &&
+            (effective_component->monotonic_position != 1 ||
+             effective_closure->generation != 1)) {
+            return fail_transition();
+        }
+
+        const bool same_checkpoint{previous_closure &&
+            previous_closure->checkpoint ==
+                effective_closure->checkpoint};
+        if (previous_closure) {
+            if (effective_component->monotonic_position !=
+                    previous_component->monotonic_position + 1 ||
+                effective_closure->legacy_island_commitment !=
+                    previous_closure->legacy_island_commitment) {
+                return fail_transition();
+            }
+            if (same_checkpoint) {
+                if (previous_closure->scan_complete !=
+                        evo::PQRegistryGCClosure::SCANNING ||
+                    effective_closure->checkpoint_state_root !=
+                        previous_closure->checkpoint_state_root ||
+                    effective_closure->checkpoint_record_hash !=
+                        previous_closure->checkpoint_record_hash ||
+                    effective_closure->cumulative_lineage_commitment !=
+                        previous_closure->cumulative_lineage_commitment) {
+                    return fail_transition();
+                }
+            } else {
+                const int64_t height_delta{
+                    static_cast<int64_t>(
+                        effective_closure->checkpoint.height) -
+                    previous_closure->checkpoint.height};
+                if (previous_closure->scan_complete !=
+                        evo::PQRegistryGCClosure::COMPLETE ||
+                    height_delta != PQ_REGISTRY_CHECKPOINT_INTERVAL) {
+                    return fail_transition();
+                }
+                // The deferred planner must independently prove how the new
+                // cumulative lineage continues the completed old closure.
+                // Startup can authenticate both endpoints and the durable
+                // component hashes, but must not invent that missing proof.
+            }
+        }
+
+        const std::optional<uint256> expected_from_cursor{
+            previous_closure && same_checkpoint
+                ? previous_closure->scan_after_key
+                : std::nullopt};
+        if (decoded_manifest->from_cursor != expected_from_cursor) {
+            return fail_transition();
+        }
+        if (effective_closure->scan_complete ==
+            evo::PQRegistryGCClosure::SCANNING) {
+            if (decoded_manifest->reached_eof != 0 ||
+                decoded_manifest->scan_through !=
+                    effective_closure->scan_after_key) {
+                return fail_transition();
+            }
+        } else if (decoded_manifest->reached_eof != 1) {
+            return fail_transition();
+        }
+        using SnapshotDB = CEvoDB<
+            uint256, PQRegistryDiskSnapshot, StaticSaltedHasher>;
+        bool found_present_candidate{false};
+        {
+            LOCK(m_mutex);
+            for (const auto& candidate : decoded_manifest->candidates) {
+                if (candidate.height < m_config.preparation_height ||
+                    candidate.height >=
+                        effective_closure->checkpoint.height) {
+                    return fail_transition();
+                }
+                PQRegistryDiskSnapshot disk;
+                const auto read_result{m_snapshot_db->ReadExactDiskForGC(
+                    candidate.key, disk)};
+                if (read_result == SnapshotDB::ExactDiskReadResult::BLOCKED) {
+                    return SetError(
+                        error, PQRegistryResult::SNAPSHOT_CORRUPT);
+                }
+                if (read_result ==
+                    SnapshotDB::ExactDiskReadResult::NOT_FOUND) {
+                    if (found_present_candidate) return fail_transition();
+                    continue;
+                }
+                found_present_candidate = true;
+                if (!disk.IsStructurallyValid() ||
+                    disk.block_hash != candidate.key ||
+                    disk.height != candidate.height ||
+                    ::SerializeHash(disk) != candidate.exact_record_hash ||
+                    (disk.is_checkpoint != 0) !=
+                        IsRegistryCheckpoint(m_config, disk.height)) {
+                    return SetError(
+                        error, PQRegistryResult::SNAPSHOT_CORRUPT);
+                }
+            }
+        }
+
+        if (previous_closure && !same_checkpoint) {
+            bool previous_missing{false};
+            {
+                LOCK(m_mutex);
+                if (!AuthenticateGCFloorCheckpoint(
+                        *previous_closure, nullptr, error,
+                        &previous_missing)) {
+                    return false;
+                }
+            }
+            if (previous_missing) {
+                const bool exact_candidate{std::any_of(
+                    decoded_manifest->candidates.begin(),
+                    decoded_manifest->candidates.end(),
+                    [&](const evo::PQRegistryGCEraseCandidate& candidate) {
+                        return candidate.key ==
+                                   previous_closure->checkpoint.block_hash &&
+                               candidate.height ==
+                                   previous_closure->checkpoint.height &&
+                               candidate.exact_record_hash ==
+                                   previous_closure->checkpoint_record_hash;
+                    })};
+                if (!exact_candidate) return fail_transition();
+            }
+        }
+    } else if (pending_manifest != nullptr ||
+               (previous_component &&
+                *previous_component != *effective_component)) {
+        return fail_transition();
+    }
+
+    return InstallGCFloor(
+        *effective_component, *effective_authorization, error);
 }
 
 bool PQRegistryManager::CacheSnapshotView(
@@ -3067,7 +3350,7 @@ bool PQRegistryManager::GetMempoolView(
     return true;
 }
 
-bool PQRegistryManager::UndoBlock(
+bool PQRegistryManager::PreflightUndoBlock(
     const uint256& block_hash,
     const uint256& expected_parent_block_hash,
     int32_t height,

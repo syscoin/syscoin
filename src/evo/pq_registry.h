@@ -435,7 +435,8 @@ private:
     [[nodiscard]] bool AuthenticateGCFloorCheckpoint(
         const evo::PQRegistryGCClosure& closure,
         std::shared_ptr<const PQRegistrySnapshotView>* snapshot,
-        PQRegistryError& error) const EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+        PQRegistryError& error,
+        bool* missing = nullptr) const EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
     [[nodiscard]] bool ReconstructPersistentSnapshotViewAboveFloor(
         const uint256& block_hash,
         int32_t expected_height,
@@ -483,6 +484,15 @@ public:
     [[nodiscard]] bool InstallGCFloor(
         const evo::AuxiliaryHistoryGCComponent& component,
         const evo::AuxiliaryHistoryGCAuthorization& authorization,
+        PQRegistryError& error) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /**
+     * Validate and publish the effective crash-restored journal floor. A
+     * pending target wins over the completed watermark, including when only
+     * the deterministic-MN component advanced.
+     */
+    [[nodiscard]] bool InstallEffectiveGCFloor(
+        const evo::AuxiliaryHistoryGCState& state,
         PQRegistryError& error) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     [[nodiscard]] bool ProcessBlock(
@@ -550,7 +560,7 @@ public:
         PQRegistryMempoolView& view,
         PQRegistryError& error) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
-    [[nodiscard]] bool UndoBlock(
+    [[nodiscard]] bool PreflightUndoBlock(
         const uint256& block_hash,
         const uint256& expected_parent_block_hash,
         int32_t height,

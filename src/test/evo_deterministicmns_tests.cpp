@@ -4,6 +4,7 @@
 #include <chain.h>
 #include <script/script.h>
 #include <coins.h>
+#include <consensus/pq_migration_config.h> // SYSCOIN: Exercise crash-restored PQ anchor ancestry.
 #include <consensus/validation.h>
 #include <evo/providertx.h>
 #include <evo/specialtx.h>
@@ -826,6 +827,41 @@ BOOST_AUTO_TEST_CASE(pq_legacy_anchor_rejection_precedes_registry_commit)
     BOOST_REQUIRE(manager.GetPQRegistrySnapshot(
         &anchor_index, pq_snapshot, snapshot_error));
     BOOST_CHECK(pq_snapshot.consensus_state_root == correct_pq_root);
+
+    // The PQ rollback floor must reject before UndoBlock tries to recover and
+    // publish a physically missing deterministic-MN parent.
+    llmq::pq::PQRegistryDiskSnapshot checkpoint_record;
+    checkpoint_record.is_checkpoint = 1;
+    checkpoint_record.height = preparation_height;
+    checkpoint_record.block_hash = anchor_hash;
+    checkpoint_record.previous_block_hash = parent_hash;
+    checkpoint_record.previous_consensus_state_root = correct_pq_root;
+    checkpoint_record.consensus_state_root = correct_pq_root;
+    BOOST_REQUIRE(checkpoint_record.IsStructurallyValid());
+    evo::PQRegistryGCClosure floor;
+    floor.generation = 1;
+    floor.checkpoint = {preparation_height, anchor_hash};
+    floor.checkpoint_state_root = correct_pq_root;
+    floor.checkpoint_record_hash = ::SerializeHash(checkpoint_record);
+    floor.cumulative_lineage_commitment = MakeSnapshotKey(95'002);
+    floor.legacy_island_commitment = MakeSnapshotKey(95'003);
+    floor.scan_complete = evo::PQRegistryGCClosure::SCANNING;
+    floor.scan_after_key = anchor_hash;
+    evo::AuxiliaryHistoryGCAuthorization floor_authorization{
+        evo::AuxiliaryHistoryGCAuthorizationSource::
+            ENFORCED_DURABLE_CHAINLOCK,
+        {preparation_height, anchor_hash}};
+    BOOST_REQUIRE(manager.InstallPQRegistryGCFloorForTesting(
+        floor, floor_authorization, registry_error));
+
+    manager.m_evoDb->EraseCache(parent_hash);
+    BOOST_REQUIRE(manager.m_evoDb->FlushCacheToDisk(
+        /*CHUNK_ITEMS=*/256, /*fSync=*/true));
+    CDeterministicMNList missing_parent;
+    BOOST_CHECK(!manager.m_evoDb->ReadCache(parent_hash, missing_parent));
+    CDeterministicMNListNEVMAddressDiff floor_rejected_diff;
+    BOOST_CHECK(!manager.UndoBlock(&anchor_index, floor_rejected_diff));
+    BOOST_CHECK(!manager.m_evoDb->ReadCache(parent_hash, missing_parent));
 }
 
 BOOST_AUTO_TEST_CASE(pq_payment_eligibility_follows_consensus_ban_state)
@@ -2434,6 +2470,28 @@ BOOST_AUTO_TEST_CASE(auxiliary_history_retention_plan_separates_authority)
          active_chain.At(winner_height)->GetBlockHash()}};
     BOOST_REQUIRE(
         manager.UpdateAuxiliaryHistoryGCAuthorization(winner));
+
+    // A crash can leave the recovered UTXO tip behind the fsynced GC
+    // authorizer. Startup accepts only a directly comparable indexed
+    // descendant and keeps the actual recovered tip as the retention head.
+    const CBlockIndex* winner_index{active_chain.At(winner_height)};
+    const auto lookup_winner = [&](const uint256& hash) {
+        return hash == winner_index->GetBlockHash()
+            ? winner_index
+            : nullptr;
+    };
+    const CBlockIndex* recovered_tip{active_chain.At(winner_height - 1)};
+    BOOST_REQUIRE(manager.UpdatedBlockTipForStartup(
+        recovered_tip, lookup_winner));
+    plan = manager.GetAuxiliaryHistoryRetentionPlanForTesting(recovery);
+    BOOST_REQUIRE(!plan.branches.empty());
+    BOOST_CHECK(plan.branches.front().head.block_hash ==
+                recovered_tip->GetBlockHash());
+    BOOST_CHECK(plan.finality_health_ambiguous);
+    BOOST_CHECK(!manager.UpdatedBlockTipForStartup(
+        recovery_chain.At(winner_height - 1), lookup_winner));
+    manager.UpdatedBlockTip(active_chain.Tip());
+
     BOOST_REQUIRE(
         manager.UpdateAuxiliaryHistoryGCAuthorization(std::nullopt));
     BOOST_CHECK(!manager.UpdateAuxiliaryHistoryGCAuthorization(anchor));
@@ -2441,6 +2499,131 @@ BOOST_AUTO_TEST_CASE(auxiliary_history_retention_plan_separates_authority)
     BOOST_CHECK(!plan.destructive_authorization);
     BOOST_CHECK(plan.finality_health_ambiguous);
     BOOST_CHECK(!plan.AllowsDestructiveGC());
+}
+
+BOOST_AUTO_TEST_CASE(
+    pq_gc_startup_binds_descendant_authorizer_before_preparation)
+{
+    SelectParams(ChainType::MAIN);
+    LOCK(::cs_main);
+    auto& consensus{const_cast<Consensus::Params&>(Params().GetConsensus())};
+    struct RestoreProfile {
+        Consensus::Params& consensus;
+        int dip3{consensus.DIP0003Height};
+        int preparation{consensus.nPQPreparationHeight};
+        int epoch_origin{consensus.nPQChainLockEpochOrigin};
+        uint32_t cutoff{consensus.nPQRegistrationCutoffBlocks};
+        uint32_t future{consensus.nPQFutureHorizonEpochs};
+        int legacy_height{consensus.nPQLegacyAnchorHeight};
+        uint256 legacy_block{consensus.hashPQLegacyAnchorBlock};
+        uint256 legacy_mn{consensus.hashPQLegacyMNState};
+        uint256 legacy_pq{consensus.hashPQLegacyPQRegistryState};
+        int chainlock_height{consensus.nPQChainLockAnchorHeight};
+        uint256 chainlock_block{consensus.hashPQChainLockAnchorBlock};
+        ~RestoreProfile()
+        {
+            consensus.DIP0003Height = dip3;
+            consensus.nPQPreparationHeight = preparation;
+            consensus.nPQChainLockEpochOrigin = epoch_origin;
+            consensus.nPQRegistrationCutoffBlocks = cutoff;
+            consensus.nPQFutureHorizonEpochs = future;
+            consensus.nPQLegacyAnchorHeight = legacy_height;
+            consensus.hashPQLegacyAnchorBlock = legacy_block;
+            consensus.hashPQLegacyMNState = legacy_mn;
+            consensus.hashPQLegacyPQRegistryState = legacy_pq;
+            consensus.nPQChainLockAnchorHeight = chainlock_height;
+            consensus.hashPQChainLockAnchorBlock = chainlock_block;
+        }
+    } restore{consensus};
+
+    constexpr int dip3_height{1290};
+    constexpr int boundary_height{dip3_height + 1};
+    constexpr int recovered_height{dip3_height + 2};
+    constexpr int preparation_height{dip3_height + 3};
+    constexpr int anchor_height{dip3_height + 4};
+    constexpr int authorizer_height{dip3_height + 5};
+    auto chain{BuildSnapshotIndexChain(
+        dip3_height, authorizer_height - dip3_height + 1)};
+
+    consensus.DIP0003Height = dip3_height;
+    consensus.nPQPreparationHeight = preparation_height;
+    consensus.nPQChainLockEpochOrigin = 1440;
+    consensus.nPQRegistrationCutoffBlocks = 144;
+    consensus.nPQFutureHorizonEpochs = 8;
+    consensus.nPQLegacyAnchorHeight = anchor_height;
+    consensus.hashPQLegacyAnchorBlock =
+        chain.At(anchor_height)->GetBlockHash();
+    consensus.hashPQLegacyMNState = MakeSnapshotKey(96'001);
+    consensus.hashPQLegacyPQRegistryState = MakeSnapshotKey(96'002);
+    consensus.nPQChainLockAnchorHeight = anchor_height;
+    consensus.hashPQChainLockAnchorBlock =
+        consensus.hashPQLegacyAnchorBlock;
+    llmq::pq::PQRegistryConfig registry_config;
+    BOOST_REQUIRE(llmq::pq::GetPQRegistryConfig(
+                      consensus, registry_config) ==
+                  llmq::pq::PQRegistryDeploymentResult::VALID);
+    BOOST_REQUIRE(Consensus::CheckPQChainLockAnchorConfiguration(
+                      consensus) == Consensus::PQAnchorResult::VALID);
+
+    const ScopedDiskDBPath disk_db;
+    auto db_params = DBParams{
+        .path = disk_db.path,
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = false,
+        .wipe_data = true,
+    };
+    using Authorization =
+        CDeterministicMNManager::AuxiliaryHistoryGCAuthorization;
+    const Authorization authorization{
+        evo::AuxiliaryHistoryGCAuthorizationSource::
+            ENFORCED_DURABLE_CHAINLOCK,
+        {authorizer_height,
+         chain.At(authorizer_height)->GetBlockHash()}};
+
+    {
+        CDeterministicMNManager builder(db_params);
+        BOOST_REQUIRE(builder.UpdateAuxiliaryHistoryGCAuthorization(
+            authorization));
+        evo::DMNInverseGCClosure closure;
+        closure.boundary = {
+            boundary_height,
+            chain.At(boundary_height)->GetBlockHash()};
+        closure.boundary_state_hash = MakeSnapshotKey(96'003);
+        closure.inverse_history_commitment = MakeSnapshotKey(96'004);
+        closure.inverse_record_hash = MakeSnapshotKey(96'005);
+        const auto payload{evo::EncodeDMNInverseGCClosure(closure)};
+        BOOST_REQUIRE(payload);
+        evo::AuxiliaryHistoryGCIntentTarget target;
+        target.authorization = authorization;
+        target.frontier.dmn = evo::AuxiliaryHistoryGCComponent{
+            evo::DMNInverseGCClosure::VERSION,
+            static_cast<uint64_t>(boundary_height), *payload};
+        BOOST_REQUIRE(builder.BeginAuxiliaryHistoryGCIntentForTesting(
+            target));
+    }
+
+    db_params.wipe_data = false;
+    CDeterministicMNManager restarted(db_params);
+    const CBlockIndex* authorizer{chain.At(authorizer_height)};
+    const auto lookup_authorizer = [&](const uint256& hash) {
+        return hash == authorizer->GetBlockHash() ? authorizer : nullptr;
+    };
+    uint256 fork_hash{MakeSnapshotKey(96'006)};
+    CBlockIndex fork_recovered;
+    fork_recovered.nHeight = recovered_height;
+    fork_recovered.pprev = chain.At(boundary_height);
+    fork_recovered.phashBlock = &fork_hash;
+    BOOST_CHECK(!restarted.UpdatedBlockTipForStartup(
+        &fork_recovered, lookup_authorizer));
+
+    const CBlockIndex* recovered{chain.At(recovered_height)};
+    BOOST_REQUIRE(restarted.UpdatedBlockTipForStartup(
+        recovered, lookup_authorizer));
+    BOOST_CHECK(restarted.VerifyPersistedPQRegistrySnapshot(recovered));
+    restarted.UpdatedBlockTip(recovered);
+    BOOST_CHECK_NO_THROW(
+        restarted.FailNextPQRegistryWriteThroughForTesting());
+    BOOST_CHECK(restarted.VerifyPersistedPQRegistrySnapshot(recovered));
 }
 
 BOOST_AUTO_TEST_CASE(dmn_inverse_gc_boundary_uses_only_rollback_inputs)
