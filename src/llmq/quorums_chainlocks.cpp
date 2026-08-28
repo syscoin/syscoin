@@ -138,49 +138,35 @@ DerivePaymentAuditProbationTransition(
         if (local_error != nullptr) *local_error = true;
         return std::nullopt;
     }
-    if (carrier_parent.nHeight + 1 != carrier_height ||
+    if (carrier_parent.nHeight == std::numeric_limits<int32_t>::max() ||
+        carrier_parent.nHeight + 1 != carrier_height ||
         commitment.seal_height >= carrier_height || result_hash.IsNull() ||
         commitment.previous_probation_state_hash.IsNull() ||
         carrier_parent.pqPaymentProbationStateHash !=
             commitment.previous_probation_state_hash) {
         return std::nullopt;
     }
-    pq::PQPaymentProbationStateView previous;
-    if (!deterministicMNManager->GetPaymentProbationStateView(
-            &carrier_parent, previous) || previous.State() == nullptr) {
-        if (local_error != nullptr) *local_error = true;
-        return std::nullopt;
-    }
-
-    pq::PQPaymentProbationTransitionInput input;
-    input.receipt = {
+    pq::PQPaymentProbationTransitionContext context;
+    context.receipt = {
         commitment.seed.epoch, carrier_height, result_hash};
-    input.roster_valid_members = commitment.subject_valid_members;
-    input.observed_members = observed_members;
+    context.roster_valid_members = commitment.subject_valid_members;
+    context.observed_members = observed_members;
     for (std::size_t member{0}; member < pq::QUORUM_SIZE; ++member) {
-        input.frozen_roster[member] =
+        context.frozen_roster[member] =
             subject.members[member].pro_tx_hash;
     }
-    try {
-        const auto list{
-            deterministicMNManager->GetListForBlock(&carrier_parent)};
-        list.ForEachMN(false, [&](const CDeterministicMN& dmn) {
-            input.existing_pro_tx_hashes.push_back(dmn.proTxHash);
-            if (CDeterministicMNList::IsMNValid(dmn)) {
-                input.current_valid_pro_tx_hashes.push_back(
-                    dmn.proTxHash);
-            }
-        });
-    } catch (const std::exception&) {
-        if (local_error != nullptr) *local_error = true;
+    auto outcome{deterministicMNManager->ApplyPaymentProbationTransition(
+        carrier_parent, context)};
+    if (outcome.status !=
+            pq::PQPaymentProbationTransitionStatus::READY ||
+        !outcome.transition) {
+        if (local_error != nullptr) {
+            *local_error = outcome.status !=
+                pq::PQPaymentProbationTransitionStatus::INVALID;
+        }
         return std::nullopt;
     }
-    std::sort(input.existing_pro_tx_hashes.begin(),
-              input.existing_pro_tx_hashes.end());
-    std::sort(input.current_valid_pro_tx_hashes.begin(),
-              input.current_valid_pro_tx_hashes.end());
-    return deterministicMNManager->ApplyPaymentProbationTransition(
-        previous, input);
+    return std::move(outcome.transition);
 }
 
 class ScopedFinalitySnapshotVerificationRetention final

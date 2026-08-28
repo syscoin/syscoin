@@ -1227,6 +1227,7 @@ BOOST_AUTO_TEST_CASE(exact_parent_probation_transition_fails_closed)
     };
     CDeterministicMNManager manager(db_params);
     using Status = llmq::pq::PQPaymentProbationTransitionStatus;
+    using Error = llmq::pq::PQPaymentProbationError;
 
     const int height{std::max(Params().GetConsensus().DIP0003Height, 700)};
     const uint256 empty_hash{MakeSnapshotKey(height + 50'000)};
@@ -1243,9 +1244,21 @@ BOOST_AUTO_TEST_CASE(exact_parent_probation_transition_fails_closed)
     const auto empty_outcome{
         manager.ApplyPaymentProbationTransition(empty_parent, context)};
     BOOST_REQUIRE(empty_outcome.status == Status::READY);
+    BOOST_CHECK(empty_outcome.error == Error::NONE);
     BOOST_REQUIRE(empty_outcome.transition);
     BOOST_CHECK(empty_outcome.transition->PreviousStateHash() ==
                 manager.EmptyPaymentProbationStateHash());
+
+    // The live receipt seam must reject malformed peer context while keeping
+    // unavailable exact-parent data in the local-error path below.
+    auto invalid_bitmap{context};
+    invalid_bitmap.roster_valid_members.fill(0);
+    const auto malformed{
+        manager.ApplyPaymentProbationTransition(empty_parent,
+                                                 invalid_bitmap)};
+    BOOST_CHECK(malformed.status == Status::INVALID);
+    BOOST_CHECK(malformed.error == Error::INVALID_BITMAP);
+    BOOST_CHECK(!malformed.transition);
 
     const uint256 missing_hash{MakeSnapshotKey(height + 60'000)};
     CBlockIndex missing_parent;
@@ -1264,6 +1277,7 @@ BOOST_AUTO_TEST_CASE(exact_parent_probation_transition_fails_closed)
     const auto missing_snapshot{
         manager.ApplyPaymentProbationTransition(missing_parent, context)};
     BOOST_CHECK(missing_snapshot.status == Status::LOCAL_ERROR);
+    BOOST_CHECK(missing_snapshot.error == Error::INVALID_STATE);
     BOOST_CHECK(!missing_snapshot.transition);
 
     const uint256 missing_root_hash{MakeSnapshotKey(height + 70'000)};
@@ -1278,6 +1292,7 @@ BOOST_AUTO_TEST_CASE(exact_parent_probation_transition_fails_closed)
     const auto missing_root{manager.ApplyPaymentProbationTransition(
         missing_root_parent, context)};
     BOOST_CHECK(missing_root.status == Status::LOCAL_ERROR);
+    BOOST_CHECK(missing_root.error == Error::INVALID_STATE);
     BOOST_CHECK(!missing_root.transition);
 
     const uint256 corrupt_hash{MakeSnapshotKey(height + 80'000)};
@@ -1290,6 +1305,7 @@ BOOST_AUTO_TEST_CASE(exact_parent_probation_transition_fails_closed)
     const auto corrupt_snapshot{
         manager.ApplyPaymentProbationTransition(corrupt_parent, context)};
     BOOST_CHECK(corrupt_snapshot.status == Status::LOCAL_ERROR);
+    BOOST_CHECK(corrupt_snapshot.error == Error::INVALID_STATE);
     BOOST_CHECK(!corrupt_snapshot.transition);
 }
 
