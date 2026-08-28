@@ -11,6 +11,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <list>
+#include <limits>
 #include <utility>
 #include <vector>
 #include <logging.h>
@@ -158,7 +159,11 @@ public:
 
     // SYSCOIN: Destructive GC derives its durable trust boundary from the
     // physical record, not a cache entry that could hide trailing corruption.
-    ExactDiskReadResult ReadExactDiskForGC(const K& key, V& value) {
+    ExactDiskReadResult ReadExactDiskForGC(
+        const K& key,
+        V& value,
+        std::size_t max_serialized_size =
+            std::numeric_limits<std::size_t>::max()) {
         LOCK(cs);
         if (mapCache.contains(key) || setEraseCache.contains(key)) {
             return ExactDiskReadResult::BLOCKED;
@@ -175,6 +180,11 @@ public:
             return ExactDiskReadResult::BLOCKED;
         }
         if (found_key != key) return ExactDiskReadResult::NOT_FOUND;
+        // SYSCOIN: Reject an oversized physical value before exact decoding
+        // can allocate or copy attacker-controlled/corrupt storage bytes.
+        if (cursor->GetValueSize() > max_serialized_size) {
+            return ExactDiskReadResult::BLOCKED;
+        }
         return cursor->GetValueExact(value)
             ? ExactDiskReadResult::FOUND
             : ExactDiskReadResult::BLOCKED;

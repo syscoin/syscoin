@@ -489,6 +489,34 @@ BOOST_AUTO_TEST_CASE(write_through_survives_dirty_fifo_eviction)
     BOOST_CHECK(evo_db.ReadCache(42, persisted));
     BOOST_CHECK_EQUAL(persisted, 4242);
 }
+
+BOOST_AUTO_TEST_CASE(exact_disk_read_enforces_predecode_size_limit)
+{
+    auto db_params = DBParams{
+        .path = "testdb_exact_size_limit",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true};
+    CEvoDB<int, int> evo_db(db_params, 2);
+    using ReadResult = CEvoDB<int, int>::ExactDiskReadResult;
+    constexpr int key{42};
+    constexpr int expected{4242};
+    BOOST_REQUIRE(evo_db.WriteThrough(key, expected));
+
+    const std::size_t encoded_size{GetSerializeSize(expected, 0)};
+    BOOST_REQUIRE_GT(encoded_size, 0U);
+    int actual{0};
+    // SYSCOIN: The physical size gate must reject before deserialization and
+    // admit the same canonical record at its exact encoded size.
+    BOOST_CHECK(evo_db.ReadExactDiskForGC(
+                    key, actual, encoded_size - 1) ==
+                ReadResult::BLOCKED);
+    BOOST_CHECK_EQUAL(actual, 0);
+    BOOST_CHECK(evo_db.ReadExactDiskForGC(
+                    key, actual, encoded_size) ==
+                ReadResult::FOUND);
+    BOOST_CHECK_EQUAL(actual, expected);
+}
+
 BOOST_AUTO_TEST_CASE(TestUint256KeyUniqueness)
 {
     auto dbParams = DBParams{

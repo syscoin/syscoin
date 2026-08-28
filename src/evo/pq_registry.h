@@ -112,6 +112,9 @@ struct PQRegistryGCAuthenticationContext {
     std::vector<evo::AuxiliaryHistoryGCBlockIdentity> rooted_segment;
 
     [[nodiscard]] bool IsStructurallyValid() const noexcept;
+    friend bool operator==(const PQRegistryGCAuthenticationContext&,
+                           const PQRegistryGCAuthenticationContext&) =
+        default;
 };
 
 enum class PQRegistryDeploymentResult : uint8_t {
@@ -471,6 +474,14 @@ private:
     std::optional<evo::PQRegistryGCClosure> m_gc_floor
         GUARDED_BY(m_mutex);
     uint64_t m_gc_floor_revision GUARDED_BY(m_mutex){0};
+    // SYSCOIN: Cursor-only GC publications leave the logical access boundary
+    // unchanged, but they still invalidate a pass prepared against the prior
+    // durable component.
+    uint64_t m_gc_floor_state_revision GUARDED_BY(m_mutex){0};
+    // SYSCOIN: This process-local generation is a freshness witness for a
+    // fully authenticated destructive pass. The durable journal, not this
+    // counter, remains the restart authority.
+    uint64_t m_snapshot_content_revision GUARDED_BY(m_mutex){0};
     // Diagnostic counters prove that bounded replay caching changes work,
     // never the authenticated result or any production cache decision.
     mutable uint64_t m_reconstruction_authenticated_records
@@ -494,6 +505,27 @@ private:
         std::vector<evo::AuxiliaryHistoryGCBlockIdentity>
             protected_records;
     };
+
+    struct ValidatedGCPass {
+        enum class Phase : uint8_t {
+            PREPARED = 0,
+            INSTALLED,
+        };
+
+        Phase phase{Phase::PREPARED};
+        uint64_t content_revision{0};
+        uint64_t floor_state_revision{0};
+        std::optional<evo::AuxiliaryHistoryGCComponent> previous;
+        evo::AuxiliaryHistoryGCComponent target;
+        evo::PQRegistryGCEraseManifest manifest;
+        PQRegistryGCAuthenticationContext context;
+        GCAuthenticationResult authenticated;
+        std::optional<evo::AuxiliaryHistoryGCWatermark> bound_watermark;
+        std::optional<evo::AuxiliaryHistoryGCIntent> bound_intent;
+        std::size_t first_present_candidate{0};
+    };
+    std::optional<ValidatedGCPass> m_validated_gc_pass
+        GUARDED_BY(m_mutex);
 
     [[nodiscard]] bool ReadDiskSnapshot(
         const uint256& block_hash,
@@ -535,6 +567,15 @@ private:
         const evo::PQRegistryGCClosure* closure,
         const GCAuthenticationResult& authenticated,
         PQRegistryError& error) EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    [[nodiscard]] bool ValidateGCEraseIntervalLocked(
+        const evo::PQRegistryGCClosure& target,
+        const evo::PQRegistryGCClosure* previous,
+        const GCAuthenticationResult& authenticated,
+        const evo::PQRegistryGCEraseManifest& manifest,
+        std::size_t& first_present_candidate,
+        PQRegistryError& error) const EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    [[nodiscard]] bool NoteSnapshotContentMutationLocked()
+        EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
     [[nodiscard]] bool ReconstructPersistentSnapshotViewAboveFloor(
         const uint256& block_hash,
         int32_t expected_height,
@@ -607,22 +648,19 @@ public:
         std::size_t max_candidates,
         evo::AuxiliaryHistoryGCComponent& target,
         evo::PQRegistryGCEraseManifest& manifest,
-        PQRegistryError& error) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+        PQRegistryError& error) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /** Synchronously make every registry write visible to a later GC scan. */
     [[nodiscard]] bool FlushForGC(PQRegistryError& error)
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /**
-     * Revalidate and synchronously erase one already-installed manifest.
-     * Retrying after a crash accepts only an erased candidate prefix followed
-     * by an exact present suffix.
+     * Consume the exact authenticated pass retained while installing this
+     * fsynced pending journal intent. The pass is burned before any erase I/O;
+     * a retry must reconstruct it from the durable intent and physical DB.
      */
-    [[nodiscard]] bool EraseGCManifest(
-        const evo::AuxiliaryHistoryGCComponent& target,
-        const std::optional<evo::AuxiliaryHistoryGCComponent>& previous,
-        const PQRegistryGCAuthenticationContext& context,
-        const evo::PQRegistryGCEraseManifest& manifest,
+    [[nodiscard]] bool EraseInstalledGCIntent(
+        const evo::AuxiliaryHistoryGCState& state,
         PQRegistryError& error) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /**
@@ -722,11 +760,13 @@ public:
     [[nodiscard]] bool Flush(bool fSync = true)
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
-    [[nodiscard]] CEvoDB<uint256, PQRegistryDiskSnapshot,
-                         StaticSaltedHasher>& SnapshotDatabase()
-    {
-        return *m_snapshot_db;
-    }
+    /** Narrow seams used by deterministic-manager failure/fixture tests. */
+    void FailNextSnapshotWriteThroughForTesting()
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    [[nodiscard]] bool WriteExactSnapshotForTesting(
+        const uint256& block_hash,
+        const PQRegistryDiskSnapshot& snapshot)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     friend class test::PQRegistryManagerTestAccess;
 };

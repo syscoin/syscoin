@@ -1559,8 +1559,8 @@ BOOST_AUTO_TEST_CASE(payment_projection_stops_at_frozen_epoch_boundary)
             record.previous_consensus_state_root = *empty_root;
             record.consensus_state_root = *empty_root;
             BOOST_REQUIRE(record.IsStructurallyValid());
-            BOOST_REQUIRE(registry.SnapshotDatabase().WriteThrough(
-                record.block_hash, record, /*fSync=*/true));
+            BOOST_REQUIRE(registry.WriteExactSnapshotForTesting(
+                record.block_hash, record));
             previous_registry_hash = record.block_hash;
         }
         BOOST_REQUIRE(previous_registry_hash == checkpoint_parent_hash);
@@ -1590,8 +1590,8 @@ BOOST_AUTO_TEST_CASE(payment_projection_stops_at_frozen_epoch_boundary)
         checkpoint_disk.block_tree_ids = tree_ids;
         checkpoint_disk.consensus_state_root = *checkpoint_root;
         BOOST_REQUIRE(checkpoint_disk.IsStructurallyValid());
-        BOOST_REQUIRE(registry.SnapshotDatabase().WriteThrough(
-            checkpoint_hash, checkpoint_disk, /*fSync=*/true));
+        BOOST_REQUIRE(registry.WriteExactSnapshotForTesting(
+            checkpoint_hash, checkpoint_disk));
 
         llmq::pq::PQRegistryCallbacks membership;
         membership.dmn_exists_before = [](const uint256&) { return true; };

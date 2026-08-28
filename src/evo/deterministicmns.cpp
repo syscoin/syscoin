@@ -3675,7 +3675,7 @@ void CDeterministicMNManager::FailNextPQRegistryWriteThroughForTesting()
     if (registry == nullptr) {
         throw std::runtime_error(error);
     }
-    registry->SnapshotDatabase().FailNextWriteThroughForTesting();
+    registry->FailNextSnapshotWriteThroughForTesting();
 }
 
 void CDeterministicMNManager::UpdatedBlockTip(const CBlockIndex* pindex) {
@@ -4803,14 +4803,7 @@ bool CDeterministicMNManager::ResumePendingPQRegistryGC(
                                 registry_error.result)});
         return false;
     }
-    const auto manifest{evo::DecodePQRegistryGCEraseManifest(
-        target.pq_erase_manifest->payload)};
-    if (target.pq_erase_manifest->version !=
-            evo::PQRegistryGCEraseManifest::VERSION ||
-        !manifest ||
-        !registry->EraseGCManifest(
-            *target.frontier.pq_registry, previous_component,
-            context, *manifest, registry_error)) {
+    if (!registry->EraseInstalledGCIntent(state, registry_error)) {
         LogPrintf("%s -- failed to resume pending PQ GC erase: %s\n",
                   __func__, std::string{llmq::pq::PQRegistryResultString(
                                 registry_error.result)});
@@ -5105,9 +5098,8 @@ bool CDeterministicMNManager::PreparePQRegistryGCIntent(
                                 registry_error.result)});
         return false;
     }
-    if (!registry->EraseGCManifest(
-            pq_component, previous_component, context, manifest,
-            registry_error)) {
+    if (!registry->EraseInstalledGCIntent(
+            pending_state, registry_error)) {
         LogPrintf("%s -- failed to apply new PQ GC manifest: %s\n",
                   __func__, std::string{llmq::pq::PQRegistryResultString(
                                 registry_error.result)});
