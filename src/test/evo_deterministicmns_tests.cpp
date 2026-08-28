@@ -234,6 +234,104 @@ static SnapshotIndexChain BuildSnapshotIndexChain(int start_height, int count)
     return chain;
 }
 
+static void SetProbationBitmapBit(
+    llmq::pq::QuorumBitmap& bitmap, std::size_t member)
+{
+    bitmap[member / 8] |=
+        static_cast<uint8_t>(uint8_t{1} << (member % 8));
+}
+
+static llmq::pq::PQPaymentProbationTransitionContext
+MakeProbationTransitionContext(
+    int parent_height,
+    const std::array<uint256, 4>& special_members,
+    uint32_t epoch = 1)
+{
+    llmq::pq::PQPaymentProbationTransitionContext context;
+    context.receipt = {
+        epoch, parent_height + 1,
+        MakeSnapshotKey(1'000'000 + parent_height)};
+    for (std::size_t member{0}; member < llmq::pq::QUORUM_SIZE; ++member) {
+        context.frozen_roster[member] =
+            MakeSnapshotKey(2'000'000 + static_cast<int>(member));
+        if (member < llmq::pq::QUORUM_MIN_VALID) {
+            SetProbationBitmapBit(context.roster_valid_members, member);
+        }
+    }
+    context.frozen_roster[0] = special_members[0];
+    context.frozen_roster[1] = special_members[1];
+    context.frozen_roster[2] = special_members[2];
+    context.frozen_roster[350] = special_members[3];
+    SetProbationBitmapBit(context.observed_members, 0);
+    SetProbationBitmapBit(context.observed_members, 1);
+    SetProbationBitmapBit(context.observed_members, 2);
+    return context;
+}
+
+static llmq::pq::PQPaymentProbationTransitionInput
+MakeReferenceProbationInput(
+    const llmq::pq::PQPaymentProbationTransitionContext& context,
+    const CDeterministicMNList& list)
+{
+    llmq::pq::PQPaymentProbationTransitionInput input;
+    static_cast<llmq::pq::PQPaymentProbationTransitionContext&>(input) =
+        context;
+    list.ForEachMN(false, [&](const CDeterministicMN& dmn) {
+        input.existing_pro_tx_hashes.push_back(dmn.proTxHash);
+        if (CDeterministicMNList::IsMNValid(dmn)) {
+            input.current_valid_pro_tx_hashes.push_back(dmn.proTxHash);
+        }
+    });
+    std::sort(input.existing_pro_tx_hashes.begin(),
+              input.existing_pro_tx_hashes.end());
+    std::sort(input.current_valid_pro_tx_hashes.begin(),
+              input.current_valid_pro_tx_hashes.end());
+    return input;
+}
+
+static uint256 CheckExactParentProbationTransition(
+    CDeterministicMNManager& manager,
+    const CBlockIndex& parent,
+    const llmq::pq::PQPaymentProbationTransitionContext& context,
+    const CDeterministicMNList& list,
+    const llmq::pq::PQPaymentProbationState& previous,
+    const uint256& previous_hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    AssertLockHeld(::cs_main);
+    const auto reference_input{MakeReferenceProbationInput(context, list)};
+    BOOST_REQUIRE(reference_input.IsStructurallyValid());
+    const auto expected{llmq::pq::ApplyPQPaymentProbationTransition(
+        previous, reference_input)};
+    BOOST_REQUIRE(expected);
+    auto outcome{manager.ApplyPaymentProbationTransition(parent, context)};
+    BOOST_REQUIRE(
+        outcome.status ==
+        llmq::pq::PQPaymentProbationTransitionStatus::READY);
+    BOOST_CHECK(outcome.error == llmq::pq::PQPaymentProbationError::NONE);
+    BOOST_REQUIRE(outcome.transition);
+    BOOST_REQUIRE(outcome.transition->Result().State() != nullptr);
+    BOOST_CHECK(*outcome.transition->Result().State() == expected->state);
+    BOOST_CHECK(outcome.transition->PreviousStateHash() == previous_hash);
+    BOOST_CHECK(outcome.transition->AppliedReceipt() ==
+                expected->undo.applied_receipt);
+    BOOST_CHECK(outcome.transition->Result().StateHash() ==
+                expected->undo.applied_state_hash);
+
+    CDataStream actual_bytes{SER_NETWORK, PROTOCOL_VERSION};
+    actual_bytes << *outcome.transition->Result().State()
+                 << outcome.transition->PreviousStateHash()
+                 << outcome.transition->AppliedReceipt()
+                 << outcome.transition->Result().StateHash();
+    CDataStream expected_bytes{SER_NETWORK, PROTOCOL_VERSION};
+    expected_bytes << expected->state << expected->undo.previous_state_hash
+                   << expected->undo.applied_receipt
+                   << expected->undo.applied_state_hash;
+    BOOST_CHECK_EQUAL_COLLECTIONS(
+        actual_bytes.begin(), actual_bytes.end(), expected_bytes.begin(),
+        expected_bytes.end());
+    return outcome.transition->Result().StateHash();
+}
+
 static CTransactionRef MakeProviderMutationTransaction(
     int32_t transaction_version, const uint256& pro_tx_hash, uint32_t tag)
 {
@@ -989,6 +1087,210 @@ BOOST_AUTO_TEST_CASE(exact_parent_payee_cache_is_branch_bounded)
     stats = manager.GetMNPayeeCacheStatsForTesting();
     BOOST_CHECK_EQUAL(stats.builds, 4U);
     BOOST_CHECK_EQUAL(stats.hits, 4U);
+}
+
+BOOST_AUTO_TEST_CASE(
+    exact_parent_probation_transition_matches_reference_on_each_branch)
+{
+    SelectParams(ChainType::REGTEST);
+    LOCK(::cs_main);
+    auto db_params = DBParams{
+        .path = "testdb_dmn_exact_parent_probation_transition",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    };
+    CDeterministicMNManager manager(db_params);
+
+    const int height{std::max(Params().GetConsensus().DIP0003Height, 600)};
+    const uint256 hash_a{MakeSnapshotKey(height + 30'000)};
+    const uint256 hash_b{MakeSnapshotKey(height + 40'000)};
+    CBlockIndex parent_a;
+    parent_a.nHeight = height;
+    parent_a.phashBlock = &hash_a;
+    CBlockIndex parent_b;
+    parent_b.nHeight = height;
+    parent_b.phashBlock = &hash_b;
+
+    const auto valid{MakeAnchorMN(100, 1)};
+    const auto banned{MakeAnchorMN(101, 2)};
+    const uint256 absent{MakeSnapshotKey(2'500'000)};
+    const auto branch_only{MakeAnchorMN(102, 3)};
+    const std::array<uint256, 4> special_members{
+        valid->proTxHash, banned->proTxHash, absent,
+        branch_only->proTxHash};
+    const auto context{
+        MakeProbationTransitionContext(height, special_members)};
+    BOOST_REQUIRE(context.IsStructurallyValid());
+
+    CDeterministicMNList list_a{hash_a, height, 2};
+    list_a.AddMN(valid, /*fBumpTotalCount=*/false);
+    list_a.AddMN(banned, /*fBumpTotalCount=*/false);
+    CDeterministicMNList list_b{hash_b, height, 3};
+    list_b.AddMN(valid, /*fBumpTotalCount=*/false);
+    list_b.AddMN(banned, /*fBumpTotalCount=*/false);
+    list_b.AddMN(branch_only, /*fBumpTotalCount=*/false);
+    manager.m_evoDb->WriteCache(hash_a, list_a);
+    manager.m_evoDb->WriteCache(hash_b, list_b);
+
+    llmq::pq::PQPaymentProbationState previous;
+    previous.entries = {
+        {valid->proTxHash, 1, -1},
+        {banned->proTxHash, 1, -1},
+        {absent, 1, -1},
+        {branch_only->proTxHash, 1, -1},
+    };
+    std::sort(previous.entries.begin(), previous.entries.end(),
+              [](const auto& lhs, const auto& rhs) {
+                  return lhs.pro_tx_hash < rhs.pro_tx_hash;
+              });
+    const auto previous_hash{
+        llmq::pq::GetPQPaymentProbationStateHash(previous)};
+    BOOST_REQUIRE(previous_hash);
+    BOOST_REQUIRE(manager.CommitPaymentProbationState(
+        previous, *previous_hash, /*fJustCheck=*/false));
+    parent_a.pqPaymentProbationStateHash = *previous_hash;
+    parent_b.pqPaymentProbationStateHash = *previous_hash;
+
+    const uint256 result_a{CheckExactParentProbationTransition(
+        manager, parent_a, context, list_a, previous, *previous_hash)};
+    const uint256 result_b{CheckExactParentProbationTransition(
+        manager, parent_b, context, list_b, previous, *previous_hash)};
+    BOOST_CHECK(result_a != result_b);
+    const auto outcome_a{
+        manager.ApplyPaymentProbationTransition(parent_a, context)};
+    const auto outcome_b{
+        manager.ApplyPaymentProbationTransition(parent_b, context)};
+    BOOST_REQUIRE(outcome_a.transition);
+    BOOST_REQUIRE(outcome_b.transition);
+    BOOST_CHECK_EQUAL(
+        outcome_a.transition->Result().MissCount(valid->proTxHash), 0U);
+    BOOST_CHECK_EQUAL(
+        outcome_a.transition->Result().MissCount(banned->proTxHash), 0U);
+    BOOST_CHECK_EQUAL(
+        outcome_a.transition->Result().MissCount(absent), 0U);
+    BOOST_CHECK_EQUAL(
+        outcome_a.transition->Result().MissCount(branch_only->proTxHash),
+        0U);
+    BOOST_CHECK_EQUAL(
+        outcome_b.transition->Result().MissCount(branch_only->proTxHash),
+        1U);
+
+    FastRandomContext random{true};
+    for (uint32_t trial{0}; trial < 24; ++trial) {
+        auto randomized_context{context};
+        randomized_context.receipt.epoch = 10 + trial;
+        randomized_context.receipt.receipt_id =
+            MakeSnapshotKey(2'800'000 + static_cast<int>(trial));
+        randomized_context.observed_members.fill(0);
+        for (std::size_t member{0}; member < 3; ++member) {
+            if (random.randrange(2) != 0) {
+                SetProbationBitmapBit(
+                    randomized_context.observed_members, member);
+            }
+        }
+
+        llmq::pq::PQPaymentProbationState randomized_previous;
+        for (const uint256& pro_tx_hash : special_members) {
+            if (random.randrange(2) == 0) continue;
+            randomized_previous.entries.push_back({
+                pro_tx_hash,
+                static_cast<uint8_t>(1 + random.randrange(2)), -1});
+        }
+        std::sort(randomized_previous.entries.begin(),
+                  randomized_previous.entries.end(),
+                  [](const auto& lhs, const auto& rhs) {
+                      return lhs.pro_tx_hash < rhs.pro_tx_hash;
+                  });
+        const auto randomized_previous_hash{
+            llmq::pq::GetPQPaymentProbationStateHash(randomized_previous)};
+        BOOST_REQUIRE(randomized_previous_hash);
+        BOOST_REQUIRE(manager.CommitPaymentProbationState(
+            randomized_previous, *randomized_previous_hash,
+            /*fJustCheck=*/false));
+        parent_a.pqPaymentProbationStateHash = *randomized_previous_hash;
+        (void)CheckExactParentProbationTransition(
+            manager, parent_a, randomized_context, list_a,
+            randomized_previous, *randomized_previous_hash);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(exact_parent_probation_transition_fails_closed)
+{
+    SelectParams(ChainType::REGTEST);
+    LOCK(::cs_main);
+    auto db_params = DBParams{
+        .path = "testdb_dmn_exact_parent_probation_failures",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    };
+    CDeterministicMNManager manager(db_params);
+    using Status = llmq::pq::PQPaymentProbationTransitionStatus;
+
+    const int height{std::max(Params().GetConsensus().DIP0003Height, 700)};
+    const uint256 empty_hash{MakeSnapshotKey(height + 50'000)};
+    CBlockIndex empty_parent;
+    empty_parent.nHeight = height;
+    empty_parent.phashBlock = &empty_hash;
+    manager.m_evoDb->WriteCache(
+        empty_hash, CDeterministicMNList{empty_hash, height, 0});
+    const std::array<uint256, 4> special_members{
+        MakeSnapshotKey(2'600'000), MakeSnapshotKey(2'600'001),
+        MakeSnapshotKey(2'600'002), MakeSnapshotKey(2'600'003)};
+    const auto context{
+        MakeProbationTransitionContext(height, special_members)};
+    const auto empty_outcome{
+        manager.ApplyPaymentProbationTransition(empty_parent, context)};
+    BOOST_REQUIRE(empty_outcome.status == Status::READY);
+    BOOST_REQUIRE(empty_outcome.transition);
+    BOOST_CHECK(empty_outcome.transition->PreviousStateHash() ==
+                manager.EmptyPaymentProbationStateHash());
+
+    const uint256 missing_hash{MakeSnapshotKey(height + 60'000)};
+    CBlockIndex missing_parent;
+    missing_parent.nHeight = height;
+    missing_parent.phashBlock = &missing_hash;
+    auto wrong_height{context};
+    ++wrong_height.receipt.carrier_height;
+    const auto invalid{
+        manager.ApplyPaymentProbationTransition(missing_parent,
+                                                 wrong_height)};
+    BOOST_CHECK(invalid.status == Status::INVALID);
+    BOOST_CHECK(invalid.error ==
+                llmq::pq::PQPaymentProbationError::INVALID_RECEIPT);
+    BOOST_CHECK(!invalid.transition);
+
+    const auto missing_snapshot{
+        manager.ApplyPaymentProbationTransition(missing_parent, context)};
+    BOOST_CHECK(missing_snapshot.status == Status::LOCAL_ERROR);
+    BOOST_CHECK(!missing_snapshot.transition);
+
+    const uint256 missing_root_hash{MakeSnapshotKey(height + 70'000)};
+    CBlockIndex missing_root_parent;
+    missing_root_parent.nHeight = height;
+    missing_root_parent.phashBlock = &missing_root_hash;
+    manager.m_evoDb->WriteCache(
+        missing_root_hash,
+        CDeterministicMNList{missing_root_hash, height, 0});
+    missing_root_parent.pqPaymentProbationStateHash =
+        MakeSnapshotKey(2'700'000);
+    const auto missing_root{manager.ApplyPaymentProbationTransition(
+        missing_root_parent, context)};
+    BOOST_CHECK(missing_root.status == Status::LOCAL_ERROR);
+    BOOST_CHECK(!missing_root.transition);
+
+    const uint256 corrupt_hash{MakeSnapshotKey(height + 80'000)};
+    CBlockIndex corrupt_parent;
+    corrupt_parent.nHeight = height;
+    corrupt_parent.phashBlock = &corrupt_hash;
+    manager.m_evoDb->WriteCache(
+        corrupt_hash,
+        CDeterministicMNList{MakeSnapshotKey(height + 80'001), height, 0});
+    const auto corrupt_snapshot{
+        manager.ApplyPaymentProbationTransition(corrupt_parent, context)};
+    BOOST_CHECK(corrupt_snapshot.status == Status::LOCAL_ERROR);
+    BOOST_CHECK(!corrupt_snapshot.transition);
 }
 
 // SYSCOIN: A legacy projection ends where root eligibility begins.

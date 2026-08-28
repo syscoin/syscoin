@@ -184,29 +184,6 @@ struct PQPaymentProbationDiff {
 [[nodiscard]] std::optional<uint256> GetPQPaymentProbationStateHash(
     const PQPaymentProbationState& state);
 
-/** Receipt semantics are independent of how parent membership is resolved. */
-struct PQPaymentProbationTransitionContext {
-    PQPaymentAuditReceiptIdentity receipt;
-    std::array<uint256, QUORUM_SIZE> frozen_roster;
-    QuorumBitmap roster_valid_members{};
-    QuorumBitmap observed_members{};
-
-    [[nodiscard]] bool IsStructurallyValid() const noexcept;
-};
-
-/**
- * Compatibility/reference input with complete parent membership vectors. The
- * lists must be strictly sorted and current-valid must be a subset of existing.
- * Service, operator-key, revive, and PoSe fields do not enter this state machine.
- */
-struct PQPaymentProbationTransitionInput
-    : PQPaymentProbationTransitionContext {
-    std::vector<uint256> existing_pro_tx_hashes;
-    std::vector<uint256> current_valid_pro_tx_hashes;
-
-    [[nodiscard]] bool IsStructurallyValid() const noexcept;
-};
-
 enum class PQPaymentProbationError : uint8_t {
     NONE = 0,
     INVALID_STATE,
@@ -222,6 +199,36 @@ enum class PQPaymentProbationError : uint8_t {
     INVALID_DIFF,
     UNDO_MISMATCH,
     INVALID_PAYMENT_QUEUE,
+};
+
+enum class PQPaymentProbationMembership : uint8_t {
+    ABSENT = 0,
+    PRESENT_INVALID,
+    PRESENT_VALID,
+};
+
+/** Receipt semantics are independent of how parent membership is resolved. */
+struct PQPaymentProbationTransitionContext {
+    PQPaymentAuditReceiptIdentity receipt;
+    std::array<uint256, QUORUM_SIZE> frozen_roster;
+    QuorumBitmap roster_valid_members{};
+    QuorumBitmap observed_members{};
+
+    [[nodiscard]] bool IsStructurallyValid() const noexcept;
+    [[nodiscard]] PQPaymentProbationError ValidationError() const noexcept;
+};
+
+/**
+ * Compatibility/reference input with complete parent membership vectors. The
+ * lists must be strictly sorted and current-valid must be a subset of existing.
+ * Service, operator-key, revive, and PoSe fields do not enter this state machine.
+ */
+struct PQPaymentProbationTransitionInput
+    : PQPaymentProbationTransitionContext {
+    std::vector<uint256> existing_pro_tx_hashes;
+    std::vector<uint256> current_valid_pro_tx_hashes;
+
+    [[nodiscard]] bool IsStructurallyValid() const noexcept;
 };
 
 struct PQPaymentProbationTransitionResult {

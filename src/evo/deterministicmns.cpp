@@ -729,6 +729,94 @@ CDeterministicMNManager::ApplyPaymentProbationTransition(
     return m_payment_probation->ApplyTransition(previous, input, error);
 }
 
+llmq::pq::PQPaymentProbationTransitionOutcome
+CDeterministicMNManager::ApplyPaymentProbationTransition(
+    const CBlockIndex& carrier_parent,
+    const llmq::pq::PQPaymentProbationTransitionContext& context)
+{
+    AssertLockHeld(cs_main);
+    using Error = llmq::pq::PQPaymentProbationError;
+    using Membership = llmq::pq::PQPaymentProbationMembership;
+    using Outcome = llmq::pq::PQPaymentProbationTransitionOutcome;
+    using Status = llmq::pq::PQPaymentProbationTransitionStatus;
+
+    const auto context_error{context.ValidationError()};
+    if (context_error != Error::NONE ||
+        carrier_parent.nHeight == std::numeric_limits<int>::max() ||
+        context.receipt.carrier_height != carrier_parent.nHeight + 1) {
+        return Outcome{
+            Status::INVALID,
+            context_error != Error::NONE ? context_error
+                                         : Error::INVALID_RECEIPT,
+            std::nullopt};
+    }
+    if (carrier_parent.nHeight < 0 || carrier_parent.phashBlock == nullptr) {
+        return Outcome{Status::LOCAL_ERROR, Error::INVALID_STATE,
+                       std::nullopt};
+    }
+
+    CDeterministicMNList parent_list;
+    try {
+        parent_list = GetListForBlock(&carrier_parent);
+    } catch (const std::exception&) {
+        return Outcome{Status::LOCAL_ERROR, Error::INVALID_STATE,
+                       std::nullopt};
+    }
+    if (parent_list.IsNull() ||
+        parent_list.GetHeight() != carrier_parent.nHeight ||
+        parent_list.GetBlockHash() != carrier_parent.GetBlockHash()) {
+        return Outcome{Status::LOCAL_ERROR, Error::INVALID_STATE,
+                       std::nullopt};
+    }
+
+    const uint256 parent_state_hash{
+        carrier_parent.pqPaymentProbationStateHash.IsNull()
+            ? m_payment_probation->EmptyStateHash()
+            : carrier_parent.pqPaymentProbationStateHash};
+    llmq::pq::PQPaymentProbationStateView previous;
+    try {
+        if (!m_payment_probation->GetStateView(parent_state_hash, previous) ||
+            previous.State() == nullptr ||
+            previous.StateHash() != parent_state_hash) {
+            return Outcome{Status::LOCAL_ERROR, Error::INVALID_STATE,
+                           std::nullopt};
+        }
+    } catch (const std::exception&) {
+        return Outcome{Status::LOCAL_ERROR, Error::INVALID_STATE,
+                       std::nullopt};
+    }
+
+    Error error{Error::NONE};
+    auto transition{m_payment_probation->ApplyTransitionWithMembership(
+        previous, context,
+        [&parent_list](const uint256& pro_tx_hash) {
+            const auto dmn{parent_list.GetMN(pro_tx_hash)};
+            if (!dmn) return Membership::ABSENT;
+            return CDeterministicMNList::IsMNValid(*dmn)
+                ? Membership::PRESENT_VALID
+                : Membership::PRESENT_INVALID;
+        },
+        &error)};
+    if (!transition) {
+        const bool invalid{
+            error == Error::INVALID_RECEIPT ||
+            error == Error::DUPLICATE_RECEIPT ||
+            error == Error::CONFLICTING_RECEIPT ||
+            error == Error::OUT_OF_ORDER_RECEIPT ||
+            error == Error::INVALID_ROSTER ||
+            error == Error::INVALID_BITMAP};
+        return Outcome{invalid ? Status::INVALID : Status::LOCAL_ERROR,
+                       error, std::nullopt};
+    }
+    if (!transition->IsValid() ||
+        transition->PreviousStateHash() != parent_state_hash ||
+        transition->AppliedReceipt() != context.receipt) {
+        return Outcome{Status::LOCAL_ERROR, Error::INVALID_RESULT,
+                       std::nullopt};
+    }
+    return Outcome{Status::READY, Error::NONE, std::move(transition)};
+}
+
 bool CDeterministicMNManager::CommitPaymentProbationState(
     const llmq::pq::PQPaymentProbationState& state,
     const uint256& expected_hash,

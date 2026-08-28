@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <array>
+#include <functional>
 
 using namespace llmq::pq;
 
@@ -46,6 +47,33 @@ public:
     static constexpr std::size_t Capacity()
     {
         return PQPaymentProbationManager::STATE_VIEW_CACHE_SIZE;
+    }
+
+    static std::optional<PQPaymentProbationTransitionView>
+    ApplyWithMembership(
+        const PQPaymentProbationManager& manager,
+        const PQPaymentProbationStateView& previous,
+        const PQPaymentProbationTransitionContext& context,
+        std::function<PQPaymentProbationMembership(const uint256&)> lookup,
+        PQPaymentProbationError* error = nullptr)
+    {
+        return manager.ApplyTransitionWithMembership(
+            previous, context, std::move(lookup), error);
+    }
+
+    static bool AdvanceGenerationIfUnlocked(
+        PQPaymentProbationManager& manager)
+    {
+        TRY_LOCK(manager.m_mutex, lock);
+        if (!lock) return false;
+        ++manager.m_state_view_generation;
+        return true;
+    }
+
+    static bool IsUnlocked(PQPaymentProbationManager& manager)
+    {
+        TRY_LOCK(manager.m_mutex, lock);
+        return static_cast<bool>(lock);
     }
 };
 
@@ -372,6 +400,117 @@ BOOST_AUTO_TEST_CASE(compact_transition_matches_raw_corpus)
         previous_view = std::move(published);
         previous_raw = raw->state;
     }
+}
+
+BOOST_AUTO_TEST_CASE(private_membership_lookup_is_single_shot_and_lock_free)
+{
+    using Access = test::PQPaymentProbationManagerTestAccess;
+    PQPaymentProbationManager manager{MemoryDB()};
+    auto input{TransitionInput(
+        /*epoch=*/1, /*tag=*/125,
+        PQ_PAYMENT_AUDIT_CONCLUSIVE_MEMBERS + 3)};
+    const auto absent{input.frozen_roster[0]};
+    const auto observed_invalid{input.frozen_roster[1]};
+    const auto missed_valid{input.frozen_roster[350]};
+    const auto missed_invalid{input.frozen_roster[351]};
+    const auto erase = [](auto& values, const uint256& value) {
+        values.erase(std::lower_bound(values.begin(), values.end(), value));
+    };
+    erase(input.existing_pro_tx_hashes, absent);
+    erase(input.current_valid_pro_tx_hashes, absent);
+    erase(input.current_valid_pro_tx_hashes, observed_invalid);
+    erase(input.current_valid_pro_tx_hashes, missed_invalid);
+    BOOST_REQUIRE(input.IsStructurallyValid());
+
+    PQPaymentProbationState previous;
+    previous.entries = {
+        {absent, 1, -1},
+        {observed_invalid, 1, -1},
+        {missed_valid, 1, -1},
+        {missed_invalid, 1, -1},
+    };
+    std::sort(previous.entries.begin(), previous.entries.end(),
+              [](const auto& lhs, const auto& rhs) {
+                  return lhs.pro_tx_hash < rhs.pro_tx_hash;
+              });
+    const uint256 previous_hash{Commit(manager, previous)};
+    PQPaymentProbationStateView previous_view;
+    BOOST_REQUIRE(manager.GetStateView(previous_hash, previous_view));
+
+    const auto expected{ApplyPQPaymentProbationTransition(previous, input)};
+    BOOST_REQUIRE(expected);
+    std::size_t lookups{0};
+    std::size_t overlapping_lookups{0};
+    bool always_unlocked{true};
+    const auto actual{Access::ApplyWithMembership(
+        manager, previous_view, input,
+        [&](const uint256& pro_tx_hash) {
+            ++lookups;
+            if (pro_tx_hash == missed_valid) ++overlapping_lookups;
+            always_unlocked = always_unlocked && Access::IsUnlocked(manager);
+            if (pro_tx_hash == absent) {
+                return PQPaymentProbationMembership::ABSENT;
+            }
+            if (pro_tx_hash == observed_invalid ||
+                pro_tx_hash == missed_invalid) {
+                return PQPaymentProbationMembership::PRESENT_INVALID;
+            }
+            return PQPaymentProbationMembership::PRESENT_VALID;
+        })};
+    BOOST_REQUIRE(actual);
+    BOOST_REQUIRE(actual->Result().State() != nullptr);
+    BOOST_CHECK(always_unlocked);
+    BOOST_CHECK_EQUAL(
+        lookups, previous.entries.size() + QUORUM_SIZE);
+    BOOST_CHECK_EQUAL(overlapping_lookups, 2U);
+    BOOST_CHECK(*actual->Result().State() == expected->state);
+    BOOST_CHECK(actual->PreviousStateHash() ==
+                expected->undo.previous_state_hash);
+    BOOST_CHECK(actual->Result().StateHash() ==
+                expected->undo.applied_state_hash);
+    BOOST_CHECK_EQUAL(actual->Result().MissCount(absent), 0U);
+    BOOST_CHECK_EQUAL(actual->Result().MissCount(observed_invalid), 0U);
+    BOOST_CHECK_EQUAL(actual->Result().MissCount(missed_valid), 2U);
+    BOOST_CHECK_EQUAL(actual->Result().MissCount(missed_invalid), 1U);
+}
+
+BOOST_AUTO_TEST_CASE(private_membership_lookup_is_provenance_fenced)
+{
+    using Access = test::PQPaymentProbationManagerTestAccess;
+    PQPaymentProbationManager first{MemoryDB()};
+    PQPaymentProbationManager second{MemoryDB()};
+    PQPaymentProbationStateView first_view;
+    BOOST_REQUIRE(first.GetStateView(first.EmptyStateHash(), first_view));
+    const auto input{TransitionInput(/*epoch=*/1, /*tag=*/126)};
+
+    std::size_t foreign_lookups{0};
+    PQPaymentProbationError error{PQPaymentProbationError::NONE};
+    BOOST_CHECK(!Access::ApplyWithMembership(
+        second, first_view, input,
+        [&](const uint256&) {
+            ++foreign_lookups;
+            return PQPaymentProbationMembership::PRESENT_VALID;
+        },
+        &error));
+    BOOST_CHECK_EQUAL(foreign_lookups, 0U);
+    BOOST_CHECK(error == PQPaymentProbationError::INVALID_STATE);
+
+    bool advanced{false};
+    std::size_t lookups{0};
+    error = PQPaymentProbationError::NONE;
+    BOOST_CHECK(!Access::ApplyWithMembership(
+        first, first_view, input,
+        [&](const uint256&) {
+            ++lookups;
+            if (!advanced) {
+                advanced = Access::AdvanceGenerationIfUnlocked(first);
+            }
+            return PQPaymentProbationMembership::PRESENT_VALID;
+        },
+        &error));
+    BOOST_CHECK(advanced);
+    BOOST_CHECK_GT(lookups, 0U);
+    BOOST_CHECK(error == PQPaymentProbationError::INVALID_STATE);
 }
 
 BOOST_AUTO_TEST_CASE(probation_survives_process_restart)

@@ -403,33 +403,44 @@ bool PQPaymentProbationManager::GetState(
     return true;
 }
 
-std::optional<PQPaymentProbationTransitionView>
-PQPaymentProbationManager::ApplyTransition(
+bool PQPaymentProbationManager::AuthenticateTransitionParent(
     const PQPaymentProbationStateView& previous,
-    const PQPaymentProbationTransitionInput& input,
+    StateViewDataPtr& authenticated,
+    uint64_t& generation,
     PQPaymentProbationError* error) const
 {
-    StateViewDataPtr previous_state;
-    uint64_t generation{0};
-    {
-        LOCK(m_mutex);
-        if (!previous.m_state || previous.m_state->owner != m_view_owner ||
-            previous.m_state->generation != m_state_view_generation) {
-            if (error != nullptr) {
-                *error = PQPaymentProbationError::INVALID_STATE;
-            }
-            return std::nullopt;
+    if (error != nullptr) *error = PQPaymentProbationError::NONE;
+    LOCK(m_mutex);
+    if (!previous.m_state || previous.m_state->owner != m_view_owner ||
+        previous.m_state->generation != m_state_view_generation) {
+        if (error != nullptr) {
+            *error = PQPaymentProbationError::INVALID_STATE;
         }
-        previous_state = previous.m_state;
-        generation = m_state_view_generation;
+        return false;
     }
-    auto raw{ApplyCompactTransition(previous, input, error)};
-    if (!raw) return std::nullopt;
+    authenticated = previous.m_state;
+    generation = m_state_view_generation;
+    return true;
+}
+
+std::optional<PQPaymentProbationTransitionView>
+PQPaymentProbationManager::FinalizeTransition(
+    StateViewDataPtr previous,
+    uint64_t generation,
+    CompactTransitionResult result,
+    PQPaymentProbationError* error) const
+{
+    if (!previous || result.previous_state_hash != previous->state_hash) {
+        if (error != nullptr) {
+            *error = PQPaymentProbationError::INVALID_RESULT;
+        }
+        return std::nullopt;
+    }
     auto result_state{std::make_shared<PQPaymentProbationStateViewData>()};
-    result_state->owner = previous_state->owner;
+    result_state->owner = previous->owner;
     result_state->generation = generation;
-    result_state->state_hash = raw->applied_state_hash;
-    result_state->state = std::move(raw->state);
+    result_state->state_hash = result.applied_state_hash;
+    result_state->state = std::move(result.state);
     result_state->entry_index.reserve(result_state->state.entries.size());
     for (std::size_t index{0}; index < result_state->state.entries.size();
          ++index) {
@@ -453,9 +464,62 @@ PQPaymentProbationManager::ApplyTransition(
     }
     PQPaymentProbationTransitionView transition;
     transition.m_result = PQPaymentProbationStateView{std::move(result_state)};
-    transition.m_previous_state_hash = raw->previous_state_hash;
-    transition.m_applied_receipt = raw->applied_receipt;
+    transition.m_previous_state_hash = result.previous_state_hash;
+    transition.m_applied_receipt = result.applied_receipt;
     return transition;
+}
+
+std::optional<PQPaymentProbationTransitionView>
+PQPaymentProbationManager::ApplyTransition(
+    const PQPaymentProbationStateView& previous,
+    const PQPaymentProbationTransitionInput& input,
+    PQPaymentProbationError* error) const
+{
+    StateViewDataPtr previous_state;
+    uint64_t generation{0};
+    if (!AuthenticateTransitionParent(
+            previous, previous_state, generation, error)) {
+        return std::nullopt;
+    }
+    AssertLockNotHeld(m_mutex);
+    auto result{ApplyCompactTransition(previous, input, error)};
+    if (!result) return std::nullopt;
+    return FinalizeTransition(
+        std::move(previous_state), generation, std::move(*result), error);
+}
+
+std::optional<PQPaymentProbationTransitionView>
+PQPaymentProbationManager::ApplyTransitionWithMembership(
+    const PQPaymentProbationStateView& previous,
+    const PQPaymentProbationTransitionContext& context,
+    const MembershipResolver& membership,
+    PQPaymentProbationError* error) const
+{
+    if (!membership) {
+        if (error != nullptr) {
+            *error = PQPaymentProbationError::INVALID_RESULT;
+        }
+        return std::nullopt;
+    }
+    StateViewDataPtr previous_state;
+    uint64_t generation{0};
+    if (!AuthenticateTransitionParent(
+            previous, previous_state, generation, error)) {
+        return std::nullopt;
+    }
+    AssertLockNotHeld(m_mutex);
+    std::optional<CompactTransitionResult> result;
+    try {
+        result = ApplyCompactTransition(previous, context, membership, error);
+    } catch (...) {
+        if (error != nullptr) {
+            *error = PQPaymentProbationError::INVALID_RESULT;
+        }
+        return std::nullopt;
+    }
+    if (!result) return std::nullopt;
+    return FinalizeTransition(
+        std::move(previous_state), generation, std::move(*result), error);
 }
 
 bool PQPaymentProbationManager::CommitState(

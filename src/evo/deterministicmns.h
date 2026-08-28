@@ -796,6 +796,13 @@ public:
         llmq::pq::PQPaymentProbationError* error = nullptr) const
         EXCLUSIVE_LOCKS_REQUIRED(!cs);
 
+    /** Derive membership and state from one exact carrier parent. */
+    [[nodiscard]] llmq::pq::PQPaymentProbationTransitionOutcome
+    ApplyPaymentProbationTransition(
+        const CBlockIndex& carrier_parent,
+        const llmq::pq::PQPaymentProbationTransitionContext& context)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs, cs_main);
+
     /** Compatibility copying API retained for tests. */
     bool GetPaymentProbationState(
         const CBlockIndex* pindex,

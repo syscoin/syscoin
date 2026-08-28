@@ -13,11 +13,14 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <list>
 #include <memory>
 #include <span>
 #include <unordered_map>
 #include <utility>
+
+class CDeterministicMNManager;
 
 namespace llmq::pq {
 
@@ -79,6 +82,19 @@ private:
     friend class PQPaymentProbationManager;
 };
 
+enum class PQPaymentProbationTransitionStatus : uint8_t {
+    READY = 0,
+    INVALID,
+    LOCAL_ERROR,
+};
+
+struct PQPaymentProbationTransitionOutcome {
+    PQPaymentProbationTransitionStatus status{
+        PQPaymentProbationTransitionStatus::LOCAL_ERROR};
+    PQPaymentProbationError error{PQPaymentProbationError::INVALID_STATE};
+    std::optional<PQPaymentProbationTransitionView> transition;
+};
+
 /**
  * Hash-addressed branch state for payment probation. Only receipt transitions
  * create records; intervening blocks retain the parent root in CBlockIndex.
@@ -92,11 +108,20 @@ private:
         uint256 applied_state_hash;
     };
 
+    using MembershipResolver = std::function<
+        PQPaymentProbationMembership(const uint256&)>;
+
     /** Compact core used only after this manager authenticates the view. */
     [[nodiscard]] static std::optional<CompactTransitionResult>
     ApplyCompactTransition(
         const PQPaymentProbationStateView& previous,
         const PQPaymentProbationTransitionInput& input,
+        PQPaymentProbationError* error);
+    [[nodiscard]] static std::optional<CompactTransitionResult>
+    ApplyCompactTransition(
+        const PQPaymentProbationStateView& previous,
+        const PQPaymentProbationTransitionContext& context,
+        const MembershipResolver& membership,
         PQPaymentProbationError* error);
 
     static constexpr std::size_t STATE_VIEW_CACHE_SIZE{8};
@@ -129,6 +154,26 @@ private:
         StateViewDataPtr state,
         StateViewDataPtr* published = nullptr) const
         EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    [[nodiscard]] bool AuthenticateTransitionParent(
+        const PQPaymentProbationStateView& previous,
+        StateViewDataPtr& authenticated,
+        uint64_t& generation,
+        PQPaymentProbationError* error) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    [[nodiscard]] std::optional<PQPaymentProbationTransitionView>
+    FinalizeTransition(
+        StateViewDataPtr previous,
+        uint64_t generation,
+        CompactTransitionResult result,
+        PQPaymentProbationError* error) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    [[nodiscard]] std::optional<PQPaymentProbationTransitionView>
+    ApplyTransitionWithMembership(
+        const PQPaymentProbationStateView& previous,
+        const PQPaymentProbationTransitionContext& context,
+        const MembershipResolver& membership,
+        PQPaymentProbationError* error = nullptr) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 public:
     explicit PQPaymentProbationManager(const DBParams& db_params);
 
@@ -204,6 +249,7 @@ public:
     }
 
     friend class test::PQPaymentProbationManagerTestAccess;
+    friend class ::CDeterministicMNManager;
 };
 
 } // namespace llmq::pq
