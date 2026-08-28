@@ -3843,18 +3843,17 @@ bool CChainLocksHandler::RetireInvalidPendingPaymentAuditReceipt(
 }
 
 PaymentAuditContextStatus
-CChainLocksHandler::BuildCompactPaymentAuditTransitionInput(
+CChainLocksHandler::BuildCompactPaymentAuditTransitionContext(
     const pq::PaymentAuditReceipt& receipt,
     const CBlockIndex& carrier,
-    pq::PQPaymentProbationTransitionInput& input) const
+    pq::PQPaymentProbationTransitionContext& context) const
 {
     AssertLockHeld(cs_main);
-    input = {};
+    context = {};
     if (receipt.IsNull() || !receipt.IsStructurallyValid()) {
         return PaymentAuditContextStatus::INVALID;
     }
-    if (!m_config || !m_quorum_build_config ||
-        deterministicMNManager == nullptr) {
+    if (!m_config || !m_quorum_build_config) {
         return PaymentAuditContextStatus::LOCAL_ERROR;
     }
     const pq::PaymentAuditScheduleConfig audit_schedule{
@@ -3919,41 +3918,23 @@ CChainLocksHandler::BuildCompactPaymentAuditTransitionInput(
         return PaymentAuditContextStatus::LOCAL_ERROR;
     }
 
-    input.receipt = {
+    context.receipt = {
         receipt.epoch, receipt.carrier_height, receipt.result_hash};
-    input.roster_valid_members = subject->descriptor.valid_members;
-    input.observed_members = receipt.online_members;
+    context.roster_valid_members = subject->descriptor.valid_members;
+    context.observed_members = receipt.online_members;
     for (std::size_t byte{0}; byte < pq::BITMAP_SIZE; ++byte) {
-        if ((input.observed_members[byte] &
-             static_cast<uint8_t>(~input.roster_valid_members[byte])) != 0) {
-            input = {};
+        if ((context.observed_members[byte] &
+             static_cast<uint8_t>(~context.roster_valid_members[byte])) != 0) {
+            context = {};
             return PaymentAuditContextStatus::INVALID;
         }
     }
     for (std::size_t member{0}; member < pq::QUORUM_SIZE; ++member) {
-        input.frozen_roster[member] =
+        context.frozen_roster[member] =
             subject->members[member].pro_tx_hash;
     }
-    try {
-        const auto parent_list{
-            deterministicMNManager->GetListForBlock(carrier.pprev)};
-        parent_list.ForEachMN(false, [&](const CDeterministicMN& dmn) {
-            input.existing_pro_tx_hashes.push_back(dmn.proTxHash);
-            if (CDeterministicMNList::IsMNValid(dmn)) {
-                input.current_valid_pro_tx_hashes.push_back(
-                    dmn.proTxHash);
-            }
-        });
-    } catch (const std::exception&) {
-        input = {};
-        return PaymentAuditContextStatus::LOCAL_ERROR;
-    }
-    std::sort(input.existing_pro_tx_hashes.begin(),
-              input.existing_pro_tx_hashes.end());
-    std::sort(input.current_valid_pro_tx_hashes.begin(),
-              input.current_valid_pro_tx_hashes.end());
-    if (!input.IsStructurallyValid()) {
-        input = {};
+    if (!context.IsStructurallyValid()) {
+        context = {};
         return PaymentAuditContextStatus::LOCAL_ERROR;
     }
     return PaymentAuditContextStatus::READY;

@@ -748,10 +748,10 @@ public:
      * authenticates the resulting cumulative receipt and probation roots.
      */
     [[nodiscard]] PaymentAuditContextStatus
-    BuildCompactPaymentAuditTransitionInput(
+    BuildCompactPaymentAuditTransitionContext(
         const pq::PaymentAuditReceipt& receipt,
         const CBlockIndex& carrier,
-        pq::PQPaymentProbationTransitionInput& input) const
+        pq::PQPaymentProbationTransitionContext& context) const
         EXCLUSIVE_LOCKS_REQUIRED(cs_main, !m_lookup_mutex);
     [[nodiscard]] bool BeginPaymentAuditPreseal(
         const CBlockIndex& carrier,

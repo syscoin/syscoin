@@ -2363,11 +2363,11 @@ static bool ConnectPaymentAuditReceiptState(
                         std::string{
                             PAYMENT_AUDIT_RECEIPT_CERTIFICATE_PENDING});
                 }
-                llmq::pq::PQPaymentProbationTransitionInput input;
+                llmq::pq::PQPaymentProbationTransitionContext context;
                 const auto compact_status{
                     llmq::chainLocksHandler
-                        ->BuildCompactPaymentAuditTransitionInput(
-                            receipt, index, input)};
+                        ->BuildCompactPaymentAuditTransitionContext(
+                            receipt, index, context)};
                 if (compact_status ==
                     llmq::PaymentAuditContextStatus::INVALID) {
                     return state.Invalid(
@@ -2381,25 +2381,43 @@ static bool ConnectPaymentAuditReceiptState(
                 }
                 compact_replay = true;
                 start_preseal = !prefix_authenticated;
-                llmq::pq::PQPaymentProbationStateView previous_probation;
-                if (!deterministicMNManager->GetPaymentProbationStateView(
-                        index.pprev, previous_probation) ||
-                    previous_probation.State() == nullptr) {
+                if (index.pprev == nullptr) {
                     return state.Error(
                         "pq-payment-audit-probation-state-unavailable");
                 }
-                llmq::pq::PQPaymentProbationError transition_error{
-                    llmq::pq::PQPaymentProbationError::NONE};
-                compact_transition = deterministicMNManager
-                    ->ApplyPaymentProbationTransition(
-                        previous_probation, input, &transition_error);
-                if (!compact_transition ||
-                    compact_transition->Result().StateHash() !=
+                auto outcome{deterministicMNManager
+                    ->ApplyPaymentProbationTransition(*index.pprev,
+                                                       context)};
+                using TransitionStatus =
+                    llmq::pq::PQPaymentProbationTransitionStatus;
+                if (outcome.status == TransitionStatus::INVALID) {
+                    return state.Invalid(
+                        BlockValidationResult::BLOCK_CONSENSUS,
+                        "bad-pq-payment-audit-result");
+                }
+                if (outcome.status != TransitionStatus::READY ||
+                    !outcome.transition) {
+                    return state.Error(
+                        "pq-payment-audit-compact-transition-unavailable");
+                }
+                const llmq::pq::PQPaymentAuditReceiptIdentity
+                    expected_transition_receipt{
+                        receipt.epoch, receipt.carrier_height,
+                        receipt.result_hash};
+                if (outcome.transition->PreviousStateHash() !=
+                        previous_probation_hash ||
+                    outcome.transition->AppliedReceipt() !=
+                        expected_transition_receipt) {
+                    return state.Error(
+                        "pq-payment-audit-compact-transition-unavailable");
+                }
+                if (outcome.transition->Result().StateHash() !=
                         receipt.next_probation_state_hash) {
                     return state.Invalid(
                         BlockValidationResult::BLOCK_CONSENSUS,
                         "bad-pq-payment-audit-result");
                 }
+                compact_transition = std::move(outcome.transition);
                 transition = &*compact_transition;
             }
             if (certificate_status == CertificateStatus::UNAVAILABLE) {
