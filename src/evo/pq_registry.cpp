@@ -415,6 +415,59 @@ std::optional<uint256> EmptyRegistryConsensusStateRoot(
 using SnapshotViewCache = std::list<std::pair<
     uint256, std::shared_ptr<const PQRegistrySnapshotView>>>;
 
+struct ReusableSnapshotBacking {
+    std::shared_ptr<const PQRegistryStateData> state;
+    std::shared_ptr<const std::vector<uint256>> tree_ids;
+};
+
+void FindReusableSnapshotBacking(
+    const SnapshotViewCache& cache,
+    const std::optional<OperatorKeyScheduleState>& schedule,
+    const uint256& used_tree_ids_hash,
+    std::size_t used_tree_id_count,
+    const uint256& consensus_state_root,
+    ReusableSnapshotBacking& reusable)
+{
+    if (reusable.state) return;
+    for (auto entry{cache.rbegin()}; entry != cache.rend(); ++entry) {
+        const auto& candidate{entry->second};
+        if (!candidate || !candidate->state) continue;
+        const auto& candidate_state{candidate->state};
+        const bool same_tree_history{
+            candidate_state->used_tree_ids_hash == used_tree_ids_hash &&
+            candidate_state->used_tree_ids &&
+            candidate_state->used_tree_ids->size() == used_tree_id_count};
+        if (candidate_state->consensus_state_root == consensus_state_root &&
+            candidate_state->schedule == schedule && same_tree_history) {
+            reusable.state = candidate_state;
+            reusable.tree_ids = candidate_state->used_tree_ids;
+            return;
+        }
+        if (!reusable.tree_ids && same_tree_history) {
+            reusable.tree_ids = candidate_state->used_tree_ids;
+        }
+    }
+}
+
+std::shared_ptr<const PQRegistrySnapshotView> MakeSnapshotView(
+    int32_t height,
+    const uint256& block_hash,
+    const uint256& previous_block_hash,
+    std::shared_ptr<const PQRegistryStateData> state,
+    std::vector<uint256> block_tree_ids)
+{
+    if (!state) return nullptr;
+    auto snapshot{std::make_shared<PQRegistrySnapshotView>()};
+    snapshot->height = height;
+    snapshot->block_hash = block_hash;
+    snapshot->previous_block_hash = previous_block_hash;
+    snapshot->state = std::move(state);
+    snapshot->block_tree_ids =
+        std::make_shared<const std::vector<uint256>>(
+            std::move(block_tree_ids));
+    return snapshot;
+}
+
 std::shared_ptr<const PQRegistrySnapshotView>
 MakeAuthenticatedSnapshotView(
     const SnapshotViewCache& cache,
@@ -428,48 +481,64 @@ MakeAuthenticatedSnapshotView(
     const uint256& used_tree_ids_hash,
     const uint256& consensus_state_root)
 {
-    std::shared_ptr<const PQRegistryStateData> state;
-    std::shared_ptr<const std::vector<uint256>> shared_tree_ids;
-    for (auto entry{cache.rbegin()}; entry != cache.rend(); ++entry) {
-        const auto& candidate{entry->second};
-        if (!candidate || !candidate->state) continue;
-        if (candidate->state->consensus_state_root == consensus_state_root &&
-            candidate->state->schedule == schedule) {
-            state = candidate->state;
-            break;
-        }
-        if (!shared_tree_ids &&
-            candidate->state->used_tree_ids_hash == used_tree_ids_hash &&
-            candidate->state->used_tree_ids &&
-            candidate->state->used_tree_ids->size() == used_tree_ids.size()) {
-            shared_tree_ids = candidate->state->used_tree_ids;
-        }
-    }
-    if (!state) {
+    ReusableSnapshotBacking reusable;
+    FindReusableSnapshotBacking(
+        cache, schedule, used_tree_ids_hash, used_tree_ids.size(),
+        consensus_state_root, reusable);
+    if (!reusable.state) {
         auto indexes{BuildRegistryIndexes(operator_states)};
         if (!indexes) return nullptr;
-        if (!shared_tree_ids) {
-            shared_tree_ids =
+        if (!reusable.tree_ids) {
+            reusable.tree_ids =
                 std::make_shared<const std::vector<uint256>>(
                     std::move(used_tree_ids));
         }
-        state = MakeRegistryStateData(
+        reusable.state = MakeRegistryStateData(
             std::make_shared<const std::vector<OperatorKeyState>>(
                 std::move(operator_states)),
-            std::move(shared_tree_ids), std::move(indexes),
+            std::move(reusable.tree_ids), std::move(indexes),
             std::move(schedule), used_tree_ids_hash, consensus_state_root);
-        if (!state) return nullptr;
+        if (!reusable.state) return nullptr;
     }
+    return MakeSnapshotView(
+        height, block_hash, previous_block_hash,
+        std::move(reusable.state), std::move(block_tree_ids));
+}
 
-    auto snapshot{std::make_shared<PQRegistrySnapshotView>()};
-    snapshot->height = height;
-    snapshot->block_hash = block_hash;
-    snapshot->previous_block_hash = previous_block_hash;
-    snapshot->state = std::move(state);
-    snapshot->block_tree_ids =
-        std::make_shared<const std::vector<uint256>>(
-            std::move(block_tree_ids));
-    return snapshot;
+std::shared_ptr<const PQRegistrySnapshotView>
+MakeAuthenticatedReplaySnapshotView(
+    const SnapshotViewCache& staged,
+    const SnapshotViewCache& cache,
+    const PQRegistryDiskSnapshot& disk,
+    const std::vector<OperatorKeyState>& operator_states,
+    const std::vector<uint256>& used_tree_ids,
+    const OperatorKeyScheduleState& schedule,
+    const uint256& used_tree_ids_hash)
+{
+    ReusableSnapshotBacking reusable;
+    FindReusableSnapshotBacking(
+        staged, schedule, used_tree_ids_hash, used_tree_ids.size(),
+        disk.consensus_state_root, reusable);
+    FindReusableSnapshotBacking(
+        cache, schedule, used_tree_ids_hash, used_tree_ids.size(),
+        disk.consensus_state_root, reusable);
+    if (!reusable.state) {
+        auto indexes{BuildRegistryIndexes(operator_states)};
+        if (!indexes) return nullptr;
+        if (!reusable.tree_ids) {
+            reusable.tree_ids =
+                std::make_shared<const std::vector<uint256>>(used_tree_ids);
+        }
+        reusable.state = MakeRegistryStateData(
+            std::make_shared<const std::vector<OperatorKeyState>>(
+                operator_states),
+            std::move(reusable.tree_ids), std::move(indexes), schedule,
+            used_tree_ids_hash, disk.consensus_state_root);
+        if (!reusable.state) return nullptr;
+    }
+    return MakeSnapshotView(
+        disk.height, disk.block_hash, disk.previous_block_hash,
+        std::move(reusable.state), disk.block_tree_ids);
 }
 
 std::shared_ptr<const PQRegistrySnapshotView>
@@ -1392,8 +1461,12 @@ bool PQRegistryManager::ReconstructPersistentSnapshotView(
 
     std::vector<OperatorKeyState> states;
     std::vector<uint256> used_tree_ids;
-    std::optional<OperatorKeyScheduleState> final_schedule;
-    uint256 final_tree_set_hash;
+    SnapshotViewCache staged;
+    const std::size_t staged_count{std::min(
+        reverse_journal.size(), PQ_REGISTRY_SNAPSHOT_CACHE_SIZE)};
+    const std::size_t first_staged_record{
+        reverse_journal.size() - staged_count};
+    std::size_t replayed_record{0};
     for (auto record{reverse_journal.rbegin()};
          record != reverse_journal.rend(); ++record) {
         if (record->is_checkpoint != 0) {
@@ -1434,22 +1507,48 @@ bool PQRegistryManager::ReconstructPersistentSnapshotView(
         if (!root || *root != record->consensus_state_root) {
             return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
         }
-        final_schedule = OperatorKeyScheduleState::FromView(*schedule_view);
-        final_tree_set_hash = *tree_set_hash;
+        ++m_reconstruction_authenticated_records;
+
+        if (replayed_record >= first_staged_record) {
+            const auto schedule{
+                OperatorKeyScheduleState::FromView(*schedule_view)};
+            auto rebuilt{MakeAuthenticatedReplaySnapshotView(
+                staged, m_snapshot_cache, *record, states, used_tree_ids,
+                schedule, *tree_set_hash)};
+            if (!rebuilt) {
+                return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
+            }
+            staged.emplace_back(record->block_hash, std::move(rebuilt));
+            // The replay tail is unpublished authority. Bound its temporary
+            // ownership exactly like the live cache while a later corrupt
+            // record can still make the complete reconstruction fail.
+            while (staged.size() > 1 &&
+                   (staged.size() > PQ_REGISTRY_SNAPSHOT_CACHE_SIZE ||
+                    SnapshotCacheDynamicMemoryUsage(
+                        staged, staged.back().second->state.get()) >
+                        PQ_REGISTRY_SNAPSHOT_CACHE_MAX_INCREMENTAL_BYTES)) {
+                staged.pop_front();
+            }
+        }
+        ++replayed_record;
     }
 
-    auto disk{std::move(reverse_journal.front())};
-    if (!final_schedule || final_tree_set_hash.IsNull()) {
+    if (staged.empty() || staged.back().first != block_hash ||
+        !staged.back().second ||
+        staged.back().second->height != expected_height) {
         return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
     }
 
-    auto rebuilt{MakeAuthenticatedSnapshotView(
-        m_snapshot_cache, disk.height, disk.block_hash,
-        disk.previous_block_hash,
-        std::move(states), std::move(used_tree_ids),
-        std::move(disk.block_tree_ids), final_schedule, final_tree_set_hash,
-        disk.consensus_state_root)};
-    if (!CacheSnapshotView(std::move(rebuilt), &snapshot) || !snapshot) {
+    // A corrupt suffix must not make an authenticated prefix observable as a
+    // successful cache side effect. Publish only after the target completed.
+    const auto target{std::prev(staged.end())};
+    for (auto view{staged.begin()}; view != staged.end(); ++view) {
+        if (!CacheSnapshotView(
+                view->second, view == target ? &snapshot : nullptr)) {
+            return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
+        }
+    }
+    if (!snapshot) {
         return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
     }
     return true;

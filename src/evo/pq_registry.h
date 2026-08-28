@@ -36,6 +36,10 @@ struct Params;
 
 namespace llmq::pq {
 
+namespace test {
+class PQRegistryManagerTestAccess;
+}
+
 using PQPaymentEligibleProTxHashes = std::vector<uint256>;
 using PQPaymentEligibleProTxHashesPtr =
     std::shared_ptr<const PQPaymentEligibleProTxHashes>;
@@ -383,6 +387,10 @@ private:
         GUARDED_BY(m_mutex);
     mutable PaymentEligibilityCacheMap m_payment_eligibility_cache_index
         GUARDED_BY(m_mutex);
+    // A diagnostic counter proves that bounded replay caching changes work,
+    // never the authenticated result or any production cache decision.
+    mutable uint64_t m_reconstruction_authenticated_records
+        GUARDED_BY(m_mutex){0};
 
     [[nodiscard]] bool ReadDiskSnapshot(
         const uint256& block_hash,
@@ -503,6 +511,8 @@ public:
     {
         return *m_snapshot_db;
     }
+
+    friend class test::PQRegistryManagerTestAccess;
 };
 
 } // namespace llmq::pq

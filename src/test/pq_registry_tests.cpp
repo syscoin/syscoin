@@ -29,6 +29,33 @@
 
 using namespace llmq::pq;
 
+namespace llmq::pq::test {
+
+struct PQRegistryReconstructionStats {
+    uint64_t authenticated_records{0};
+    std::size_t cached_views{0};
+};
+
+class PQRegistryManagerTestAccess {
+public:
+    static PQRegistryReconstructionStats Stats(
+        const PQRegistryManager& manager)
+    {
+        LOCK(manager.m_mutex);
+        return {manager.m_reconstruction_authenticated_records,
+                manager.m_snapshot_cache.size()};
+    }
+
+    static void ResetAuthenticatedRecords(
+        const PQRegistryManager& manager)
+    {
+        LOCK(manager.m_mutex);
+        manager.m_reconstruction_authenticated_records = 0;
+    }
+};
+
+} // namespace llmq::pq::test
+
 namespace {
 
 uint256 NonNullHash(uint32_t value)
@@ -1580,6 +1607,170 @@ BOOST_AUTO_TEST_CASE(restart_reconstructs_frozen_root_and_tree_history)
     BOOST_CHECK(checkpoint_snapshot.HasUsedTreeId(commitment.tree_id));
     BOOST_CHECK(checkpoint_snapshot.RecomputeConsensusStateRoot(genesis) ==
                 checkpoint_snapshot.consensus_state_root);
+}
+
+BOOST_AUTO_TEST_CASE(cold_sequential_undo_reuses_authenticated_replay_tail)
+{
+    const auto config{FastConfig()};
+    const uint256 genesis{NonNullHash(701)};
+    const uint256 pro_tx_hash{NonNullHash(702)};
+    const uint256 journal_parent{NonNullHash(703)};
+    auto key{DeterministicKey(91)};
+    CKey owner_key;
+    owner_key.MakeNewKey(/*fCompressed=*/true);
+    const CKeyID owner_key_id{owner_key.GetPubKey().GetID()};
+    const auto commitment{CommitmentAt(
+        config, config.preparation_height, 1, 701)};
+    auto db{MemoryDB(701)};
+    db.path = m_path_root / "pq_registry_cold_sequential_undo";
+    db.memory_only = false;
+
+    constexpr std::size_t record_count{
+        static_cast<std::size_t>(PQ_REGISTRY_CHECKPOINT_INTERVAL)};
+    std::vector<uint256> hashes;
+    std::vector<uint256> roots;
+    hashes.reserve(record_count);
+    roots.reserve(record_count);
+    {
+        PQRegistryManager writer(db, genesis, config);
+        PQRegistryError error;
+        uint256 cursor{journal_parent};
+        for (std::size_t offset{0}; offset < record_count; ++offset) {
+            const int32_t height{
+                config.preparation_height + static_cast<int32_t>(offset)};
+            const uint32_t id{90'000 + static_cast<uint32_t>(offset)};
+            std::vector<CTransactionRef> transactions{
+                OrdinaryTransaction(id)};
+            if (offset == 0) {
+                transactions.push_back(GlobalRegistration(
+                    genesis, pro_tx_hash, key, owner_key, commitment,
+                    id + 1'000));
+            }
+            const auto block{Block(cursor, id, std::move(transactions))};
+            uint256 root;
+            BOOST_REQUIRE(writer.ProcessBlock(
+                block, height,
+                Member(genesis, pro_tx_hash, owner_key_id), {},
+                /*fJustCheck=*/false, error, &root));
+            BOOST_REQUIRE(!root.IsNull());
+            hashes.push_back(block.GetHash());
+            roots.push_back(root);
+            cursor = block.GetHash();
+        }
+        BOOST_REQUIRE(writer.Flush(/*fSync=*/true));
+    }
+
+    db.wipe_data = false;
+    PQRegistryManager reader(db, genesis, config);
+    test::PQRegistryManagerTestAccess::ResetAuthenticatedRecords(reader);
+    PQRegistryError error;
+    for (std::size_t remaining{record_count}; remaining > 0; --remaining) {
+        const std::size_t index{remaining - 1};
+        const uint256& parent{
+            index == 0 ? journal_parent : hashes[index - 1]};
+        BOOST_REQUIRE(reader.UndoBlock(
+            hashes[index], parent,
+            config.preparation_height + static_cast<int32_t>(index), error));
+        if (index == record_count - 1) {
+            const auto first_stats{
+                test::PQRegistryManagerTestAccess::Stats(reader)};
+            BOOST_CHECK_EQUAL(first_stats.authenticated_records,
+                              record_count);
+            BOOST_CHECK_EQUAL(first_stats.cached_views,
+                              PQ_REGISTRY_SNAPSHOT_CACHE_SIZE);
+        }
+    }
+
+    uint64_t expected_authentications{0};
+    for (std::size_t remaining{record_count}; remaining > 0;) {
+        expected_authentications += remaining;
+        if (remaining <= PQ_REGISTRY_SNAPSHOT_CACHE_SIZE) break;
+        remaining -= PQ_REGISTRY_SNAPSHOT_CACHE_SIZE;
+    }
+    BOOST_CHECK_EQUAL(expected_authentications, 800U);
+    const auto stats{test::PQRegistryManagerTestAccess::Stats(reader)};
+    BOOST_CHECK_EQUAL(stats.authenticated_records,
+                      expected_authentications);
+    BOOST_CHECK_LE(stats.cached_views, PQ_REGISTRY_SNAPSHOT_CACHE_SIZE);
+
+    PQRegistryReadView preparation;
+    PQRegistryReadView cutoff;
+    PQRegistryReadView steady;
+    BOOST_REQUIRE(reader.GetReadView(
+        hashes[0], journal_parent, config.preparation_height,
+        preparation, error));
+    BOOST_REQUIRE(reader.GetReadView(
+        hashes[1], hashes[0], config.preparation_height + 1,
+        cutoff, error));
+    BOOST_REQUIRE(reader.GetReadView(
+        hashes[2], hashes[1], config.preparation_height + 2,
+        steady, error));
+    BOOST_CHECK(preparation.ConsensusStateRoot() == roots[0]);
+    BOOST_CHECK(cutoff.ConsensusStateRoot() == roots[1]);
+    BOOST_CHECK(steady.ConsensusStateRoot() == roots[2]);
+    BOOST_CHECK(!preparation.SharesStateWith(cutoff));
+    BOOST_CHECK(cutoff.SharesStateWith(steady));
+    BOOST_CHECK(preparation.SharesTreeHistoryWith(cutoff));
+    BOOST_CHECK(cutoff.SharesTreeHistoryWith(steady));
+    BOOST_CHECK_EQUAL(preparation.OperatorCount(), 1U);
+    BOOST_CHECK_EQUAL(cutoff.OperatorCount(), 1U);
+    BOOST_CHECK_EQUAL(steady.OperatorCount(), 1U);
+    BOOST_CHECK_EQUAL(
+        test::PQRegistryManagerTestAccess::Stats(reader)
+            .authenticated_records,
+        expected_authentications);
+}
+
+BOOST_AUTO_TEST_CASE(corrupt_reconstruction_does_not_publish_replay_prefix)
+{
+    const auto config{FastConfig()};
+    const uint256 genesis{NonNullHash(711)};
+    const uint256 journal_parent{NonNullHash(712)};
+    auto db{MemoryDB(711)};
+    db.path = m_path_root / "pq_registry_corrupt_replay_prefix";
+    db.memory_only = false;
+    constexpr std::size_t record_count{8};
+    std::vector<uint256> hashes;
+    hashes.reserve(record_count);
+    {
+        PQRegistryManager writer(db, genesis, config);
+        PQRegistryError error;
+        const auto callbacks{Members(genesis, {}, {}, CKeyID{})};
+        uint256 cursor{journal_parent};
+        for (std::size_t offset{0}; offset < record_count; ++offset) {
+            const uint32_t id{91'000 + static_cast<uint32_t>(offset)};
+            const auto block{Block(
+                cursor, id, {OrdinaryTransaction(id)})};
+            BOOST_REQUIRE(writer.ProcessBlock(
+                block,
+                config.preparation_height + static_cast<int32_t>(offset),
+                callbacks, {}, /*fJustCheck=*/false, error));
+            hashes.push_back(block.GetHash());
+            cursor = block.GetHash();
+        }
+        PQRegistryDiskSnapshot corrupt;
+        BOOST_REQUIRE(writer.SnapshotDatabase().ReadCache(
+            hashes.back(), corrupt));
+        corrupt.consensus_state_root.begin()[0] ^= 1;
+        BOOST_REQUIRE(writer.SnapshotDatabase().WriteThrough(
+            hashes.back(), corrupt, /*fSync=*/true));
+        BOOST_REQUIRE(writer.Flush(/*fSync=*/true));
+    }
+
+    db.wipe_data = false;
+    PQRegistryManager reader(db, genesis, config);
+    BOOST_CHECK_EQUAL(
+        test::PQRegistryManagerTestAccess::Stats(reader).cached_views, 0U);
+    PQRegistryError error;
+    PQRegistrySnapshot rejected;
+    BOOST_CHECK(!reader.GetSnapshot(
+        hashes.back(), hashes[hashes.size() - 2],
+        config.preparation_height + static_cast<int32_t>(record_count) - 1,
+        rejected, error));
+    BOOST_CHECK(error.result == PQRegistryResult::SNAPSHOT_CORRUPT);
+    const auto stats{test::PQRegistryManagerTestAccess::Stats(reader)};
+    BOOST_CHECK_EQUAL(stats.authenticated_records, record_count - 1);
+    BOOST_CHECK_EQUAL(stats.cached_views, 0U);
 }
 
 BOOST_AUTO_TEST_CASE(reconstruction_rejects_broken_root_link)
