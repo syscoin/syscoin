@@ -481,6 +481,8 @@ libsyscoin_node_a_SOURCES = \
   governance/governancevalidators.cpp \
   governance/governancevote.cpp \
   governance/governancevotedb.cpp \
+  evo/auxiliary_history_gc.cpp \
+  evo/auxiliary_history_gc.h \
   evo/deterministicmns.cpp \
   evo/mnauth.cpp \
   evo/dmnstate.cpp \

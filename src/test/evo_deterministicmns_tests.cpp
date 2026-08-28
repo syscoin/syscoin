@@ -79,6 +79,8 @@ public:
             SiblingDBPath(path, "_pq_payment_probation"), error);
         error.clear();
         fs::remove_all(SiblingDBPath(path, "_pq_registry"), error);
+        error.clear();
+        fs::remove_all(SiblingDBPath(path, "_aux_gc"), error);
     }
 
     const fs::path path;

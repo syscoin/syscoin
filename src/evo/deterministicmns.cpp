@@ -350,8 +350,14 @@ CDeterministicMNManager::CDeterministicMNManager(const DBParams& db_params)
       m_inverse_journal(std::make_unique<CEvoDB<
           uint256, CDeterministicMNListInverse, StaticSaltedHasher>>(
           MakeDMNInverseJournalDBParams(db_params), /*maxCacheSizeIn=*/0,
-          /*maxReadCacheSizeIn=*/2))
+          /*maxReadCacheSizeIn=*/2)),
+      m_auxiliary_history_gc_journal(
+          std::make_unique<evo::AuxiliaryHistoryGCJournal>(
+              db_params, evo::MakeAuxiliaryHistoryGCDeployment(
+                             Params().GetConsensus())))
 {
+    m_auxiliary_history_gc_high_watermark =
+        m_auxiliary_history_gc_journal->HighestAuthorization();
     m_evoDb = std::make_unique<CEvoDB<uint256, CDeterministicMNList, StaticSaltedHasher>>(db_params, LIST_CACHE_SIZE);
     // SYSCOIN: Persist and validate the sole canonical base for a
     // genesis-active deterministic-masternode deployment.

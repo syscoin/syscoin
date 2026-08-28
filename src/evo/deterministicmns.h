@@ -9,6 +9,7 @@
 #include <arith_uint256.h>
 #include <consensus/params.h>
 #include <crypto/common.h>
+#include <evo/auxiliary_history_gc.h>
 #include <evo/evodb.h>
 #include <evo/pq_registry.h>
 #include <evo/pq_payment_probation_db.h>
@@ -620,32 +621,12 @@ public:
 class CDeterministicMNManager
 {
 public:
-    enum class AuxiliaryHistoryGCAuthorizationSource : uint8_t {
-        IMMUTABLE_CHAINLOCK_ANCHOR = 0,
-        ENFORCED_DURABLE_CHAINLOCK,
-    };
-
-    struct AuxiliaryHistoryBlockIdentity {
-        int32_t height{-1};
-        uint256 block_hash;
-
-        [[nodiscard]] bool IsValid() const noexcept
-        {
-            return height >= 0 && !block_hash.IsNull();
-        }
-
-        friend bool operator==(const AuxiliaryHistoryBlockIdentity&,
-                               const AuxiliaryHistoryBlockIdentity&) = default;
-    };
-
-    struct AuxiliaryHistoryGCAuthorization {
-        AuxiliaryHistoryGCAuthorizationSource source{
-            AuxiliaryHistoryGCAuthorizationSource::IMMUTABLE_CHAINLOCK_ANCHOR};
-        AuxiliaryHistoryBlockIdentity block;
-
-        friend bool operator==(const AuxiliaryHistoryGCAuthorization&,
-                               const AuxiliaryHistoryGCAuthorization&) = default;
-    };
+    using AuxiliaryHistoryGCAuthorizationSource =
+        evo::AuxiliaryHistoryGCAuthorizationSource;
+    using AuxiliaryHistoryBlockIdentity =
+        evo::AuxiliaryHistoryGCBlockIdentity;
+    using AuxiliaryHistoryGCAuthorization =
+        evo::AuxiliaryHistoryGCAuthorization;
 
     struct AuxiliaryHistoryBranchRequirement {
         bool active{false};
@@ -785,6 +766,10 @@ private:
         m_payment_probation;
     std::unique_ptr<CEvoDB<uint256, CDeterministicMNListInverse,
                           StaticSaltedHasher>> m_inverse_journal;
+    // SYSCOIN: One crash-monotonic coordinator owns physical-GC progress for
+    // both auxiliary stores; store-specific deletion is intentionally separate.
+    std::unique_ptr<evo::AuxiliaryHistoryGCJournal>
+        m_auxiliary_history_gc_journal;
     // SYSCOIN: The key includes every branch-local input not already
     // committed by the parent block hash. Miss derivation stays outside this
     // mutex; publication is double-checked.
