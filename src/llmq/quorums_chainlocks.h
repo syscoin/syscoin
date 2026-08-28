@@ -684,6 +684,50 @@ enum class PaymentAuditContextStatus : uint8_t {
     LOCAL_ERROR,
 };
 
+enum class HistoricalIndexValidationMode : uint8_t {
+    BTCC_COMPAT = 0,
+    FULL_RECEIPT,
+    FULL_FINALITY,
+};
+
+enum class BTCCCatchupRangeStatus : uint8_t;
+
+/**
+ * Bounded progress over one of a small number of immutable branch ranges.
+ * A transient result retains the exact next block, so finality recovery can
+ * resume without monopolizing cs_main after an arbitrarily long outage.
+ */
+class HistoricalIndexValidationCache final {
+public:
+    static constexpr std::size_t CAPACITY{16};
+    static constexpr std::size_t BLOCK_BUDGET{4096};
+
+    [[nodiscard]] PaymentAuditContextStatus Validate(
+        const CBlockIndex& last,
+        int32_t first_height,
+        HistoricalIndexValidationMode mode,
+        uint64_t provenance_revocation_revision,
+        std::size_t block_budget = BLOCK_BUDGET,
+        std::size_t* examined_blocks = nullptr)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
+private:
+    struct Entry {
+        bool occupied{false};
+        bool recently_used{false};
+        HistoricalIndexValidationMode mode{
+            HistoricalIndexValidationMode::BTCC_COMPAT};
+        uint64_t provenance_revocation_revision{0};
+        int32_t last_height{-1};
+        uint256 last_hash;
+        int32_t first_height{-1};
+        int32_t next_height{-1};
+    };
+
+    std::array<Entry, CAPACITY> m_entries{};
+    std::size_t m_clock{0};
+};
+
 enum class PaymentAuditSealValidation : uint8_t {
     LIVE_EXACT = 0,
     THRESHOLD_ATTESTED_HISTORY,
@@ -1158,6 +1202,24 @@ private:
         const CBlockIndex** candidate = nullptr) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_persisted_mutex,
                                  !m_btcc_preseal_mutex);
+    [[nodiscard]] PaymentAuditContextStatus
+    ClassifyHistoricalReceiptIndexRangeCached(
+        const CBlockIndex& last, int32_t first_height) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    [[nodiscard]] bool HasFullChainLockTargetValidationCached(
+        const CBlockIndex& candidate, int32_t predecessor_height) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    [[nodiscard]] BTCCCatchupRangeStatus
+    GetFullyValidatedBTCCCatchupRangeStatusCached(
+        const CBlockIndex& candidate,
+        const pq::BTCCReceiptAssumptionAnchor& anchor) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    [[nodiscard]] PaymentAuditContextStatus
+    ClassifyPaymentAuditSealContextCached(
+        const CBlockIndex* seal, int32_t expected_height,
+        int32_t predecessor_height, const uint256& predecessor_hash,
+        PaymentAuditSealValidation validation) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     [[nodiscard]] std::optional<pq::BTCCReceiptState>
     GetCatchupHistoricalProof(const CBlockIndex& candidate,
                               HistoricalAdmission admission) const
@@ -1548,7 +1610,9 @@ private:
         const std::function<BTCCReceiptCertificateStatus(
             const pq::BTCCReceipt&, const CBlockIndex&)>&
             certificate_status,
-        uint64_t& examined_blocks)
+        uint64_t& examined_blocks,
+        std::size_t block_budget =
+            HistoricalIndexValidationCache::BLOCK_BUDGET)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     [[nodiscard]] static bool IsLiveSigningValidationRevisionCurrent(
         const CurrentSigningSource& source,
@@ -1771,6 +1835,8 @@ private:
         GUARDED_BY(m_context_build_mutex);
     uint64_t m_live_signing_validation_examined_blocks
         GUARDED_BY(m_context_build_mutex){0};
+    mutable HistoricalIndexValidationCache
+        m_historical_index_validation_cache GUARDED_BY(cs_main);
     std::unique_ptr<CPQSignerJournal> m_signer_journal;
     Mutex m_signer_reconcile_mutex;
     Mutex m_share_signing_mutex;

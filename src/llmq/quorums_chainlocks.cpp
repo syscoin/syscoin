@@ -367,32 +367,25 @@ PaymentAuditSeedReceiptContext GetPaymentAuditSeedReceiptContext(
 }
 
 PaymentAuditContextStatus ClassifyHistoricalReceiptIndexRange(
-    const CBlockIndex& last, int32_t first_height)
+    const CBlockIndex& last, int32_t first_height,
+    HistoricalIndexValidationCache& cache,
+    uint64_t provenance_revocation_revision,
+    std::size_t block_budget =
+        HistoricalIndexValidationCache::BLOCK_BUDGET)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
-    if (first_height < 0 || last.nHeight < first_height) {
-        return PaymentAuditContextStatus::INVALID;
-    }
-    for (const CBlockIndex* walk{&last}; walk != nullptr;
-         walk = walk->pprev) {
-        if (walk->nStatus & BLOCK_FAILED_MASK) {
-            return PaymentAuditContextStatus::INVALID;
-        }
-        if (walk->IsAssumedValid() ||
-            !walk->IsValid(BLOCK_VALID_SCRIPTS) ||
-            !HasFullReceiptIndexProvenance(*walk)) {
-            return PaymentAuditContextStatus::LOCAL_ERROR;
-        }
-        if (walk->nHeight == first_height) {
-            return PaymentAuditContextStatus::READY;
-        }
-        if (walk->nHeight < first_height) break;
-    }
-    return PaymentAuditContextStatus::LOCAL_ERROR;
+    return cache.Validate(
+        last, first_height,
+        HistoricalIndexValidationMode::FULL_RECEIPT,
+        provenance_revocation_revision, block_budget);
 }
 
 bool HasFullChainLockTargetValidation(const CBlockIndex& candidate,
-                                      int32_t predecessor_height)
+                                      int32_t predecessor_height,
+                                      HistoricalIndexValidationCache& cache,
+                                      uint64_t provenance_revocation_revision,
+                                      std::size_t block_budget =
+                                          HistoricalIndexValidationCache::BLOCK_BUDGET)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
     constexpr uint32_t target_provenance{
@@ -401,22 +394,12 @@ bool HasFullChainLockTargetValidation(const CBlockIndex& candidate,
     if (predecessor_height < 0 ||
         predecessor_height >= candidate.nHeight ||
         (candidate.nStatus & target_provenance) != target_provenance ||
-        ClassifyHistoricalReceiptIndexRange(
-            candidate, predecessor_height + 1) !=
+        cache.Validate(
+            candidate, predecessor_height + 1,
+            HistoricalIndexValidationMode::FULL_FINALITY,
+            provenance_revocation_revision, block_budget) !=
             PaymentAuditContextStatus::READY) {
         return false;
-    }
-    // The predecessor is the already-authenticated checkpoint. Every later
-    // block must carry locally reconstructed receipt provenance, while exact
-    // governance is additionally required wherever that suffix can pay a
-    // superblock.
-    for (const CBlockIndex* walk{&candidate};
-         walk != nullptr && walk->nHeight > predecessor_height;
-         walk = walk->pprev) {
-        if (CSuperblock::IsValidBlockHeight(walk->nHeight) &&
-            !(walk->nStatus & BLOCK_GOVERNANCE_VALIDATED)) {
-            return false;
-        }
     }
     return true;
 }
@@ -682,7 +665,11 @@ uint256 CatchupHistoricalContextToken(
 BTCCCatchupRangeStatus GetFullyValidatedBTCCCatchupRangeStatusImpl(
     const ChainstateManager& chainman,
     const CBlockIndex& candidate,
-    const pq::BTCCReceiptAssumptionAnchor& anchor)
+    const pq::BTCCReceiptAssumptionAnchor& anchor,
+    HistoricalIndexValidationCache& cache,
+    uint64_t provenance_revocation_revision,
+    std::size_t block_budget =
+        HistoricalIndexValidationCache::BLOCK_BUDGET)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
     if (!chainman.IsBaseBlockSyncComplete() ||
@@ -716,21 +703,21 @@ BTCCCatchupRangeStatus GetFullyValidatedBTCCCatchupRangeStatusImpl(
         }
     }
 
-    for (const CBlockIndex* walk{&candidate};
-         walk != nullptr && walk->nHeight > anchor.height;
-         walk = walk->pprev) {
-        if (walk->nStatus & BLOCK_FAILED_MASK) {
-            return BTCCCatchupRangeStatus::DEFINITIVE_INVALID;
-        }
-        if (!HasBTCCIndexProvenance(*walk) ||
-            walk->IsAssumedValid() ||
-            !walk->IsValid(BLOCK_VALID_SCRIPTS)) {
-            // Background script/index validation and storage recovery can
-            // advance without changing the candidate index token. Historical
-            // governance is supplied only by the preverified 801-signature
-            // certificate which authorizes this bounded scan.
-            return BTCCCatchupRangeStatus::TRANSIENT_UNAVAILABLE;
-        }
+    if (candidate.nHeight == anchor.height) {
+        return BTCCCatchupRangeStatus::VALID;
+    }
+    const auto range_status{cache.Validate(
+        candidate, anchor.height + 1,
+        HistoricalIndexValidationMode::BTCC_COMPAT,
+        provenance_revocation_revision, block_budget)};
+    if (range_status == PaymentAuditContextStatus::INVALID) {
+        return BTCCCatchupRangeStatus::DEFINITIVE_INVALID;
+    }
+    if (range_status != PaymentAuditContextStatus::READY) {
+        // Background script/index validation and storage recovery can advance
+        // without changing the candidate index token. Historical governance
+        // is supplied only by the preverified 801-signature certificate.
+        return BTCCCatchupRangeStatus::TRANSIENT_UNAVAILABLE;
     }
     return BTCCCatchupRangeStatus::VALID;
 }
@@ -808,6 +795,109 @@ const char* FinalityErrorString(pq::ChainLockFinalityError error)
 } // namespace
 
 CChainLocksHandler* chainLocksHandler{nullptr};
+
+PaymentAuditContextStatus HistoricalIndexValidationCache::Validate(
+    const CBlockIndex& last,
+    int32_t first_height,
+    HistoricalIndexValidationMode mode,
+    uint64_t provenance_revocation_revision,
+    std::size_t block_budget,
+    std::size_t* examined_blocks)
+{
+    AssertLockHeld(cs_main);
+    if (examined_blocks != nullptr) *examined_blocks = 0;
+    if (first_height < 0 || last.nHeight < first_height ||
+        last.GetBlockHash().IsNull()) {
+        return PaymentAuditContextStatus::INVALID;
+    }
+    if (block_budget == 0) {
+        return PaymentAuditContextStatus::LOCAL_ERROR;
+    }
+
+    const auto classify = [&](const CBlockIndex& index)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+        if (index.nStatus & BLOCK_FAILED_MASK) {
+            return PaymentAuditContextStatus::INVALID;
+        }
+        const bool provenance{
+            mode == HistoricalIndexValidationMode::BTCC_COMPAT
+                ? HasBTCCIndexProvenance(index)
+                : HasFullReceiptIndexProvenance(index)};
+        if (index.IsAssumedValid() ||
+            !index.IsValid(BLOCK_VALID_SCRIPTS) || !provenance ||
+            (mode == HistoricalIndexValidationMode::FULL_FINALITY &&
+             CSuperblock::IsValidBlockHeight(index.nHeight) &&
+             !(index.nStatus & BLOCK_GOVERNANCE_VALIDATED))) {
+            return PaymentAuditContextStatus::LOCAL_ERROR;
+        }
+        return PaymentAuditContextStatus::READY;
+    };
+
+    const uint256 last_hash{last.GetBlockHash()};
+    Entry* entry{nullptr};
+    for (auto& candidate : m_entries) {
+        if (candidate.occupied && candidate.mode == mode &&
+            candidate.provenance_revocation_revision ==
+                provenance_revocation_revision &&
+            candidate.last_height == last.nHeight &&
+            candidate.last_hash == last_hash &&
+            candidate.first_height == first_height) {
+            candidate.recently_used = true;
+            entry = &candidate;
+            break;
+        }
+    }
+    if (entry == nullptr) {
+        std::optional<std::size_t> victim;
+        for (std::size_t index{0}; index < m_entries.size(); ++index) {
+            if (!m_entries[index].occupied) {
+                victim = index;
+                break;
+            }
+        }
+        while (!victim) {
+            const std::size_t index{m_clock};
+            m_clock = (m_clock + 1) % m_entries.size();
+            if (!m_entries[index].recently_used) {
+                victim = index;
+            } else {
+                m_entries[index].recently_used = false;
+            }
+        }
+        entry = &m_entries[*victim];
+        *entry = Entry{};
+        entry->occupied = true;
+        entry->recently_used = true;
+        entry->mode = mode;
+        entry->provenance_revocation_revision =
+            provenance_revocation_revision;
+        entry->last_height = last.nHeight;
+        entry->last_hash = last_hash;
+        entry->first_height = first_height;
+        entry->next_height = last.nHeight;
+    }
+
+    if (entry->next_height < first_height) {
+        return classify(last);
+    }
+    if (entry->next_height > last.nHeight) {
+        entry->next_height = last.nHeight;
+    }
+    const CBlockIndex* walk{last.GetAncestor(entry->next_height)};
+    for (std::size_t examined{0};
+         walk != nullptr && walk->nHeight >= first_height &&
+         examined < block_budget;
+         ++examined) {
+        if (examined_blocks != nullptr) ++*examined_blocks;
+        const auto status{classify(*walk)};
+        if (status != PaymentAuditContextStatus::READY) return status;
+        entry->next_height = walk->nHeight - 1;
+        walk = walk->pprev;
+    }
+    return entry->next_height < first_height
+        ? PaymentAuditContextStatus::READY
+        : PaymentAuditContextStatus::LOCAL_ERROR;
+}
 
 bool PaymentAuditCandidateMetadataSnapshot::IsStructurallyValid() const noexcept
 {
@@ -1571,8 +1661,11 @@ BTCCCatchupRangeStatus GetFullyValidatedBTCCCatchupRangeStatus(
     const pq::BTCCReceiptAssumptionAnchor& anchor)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
+    HistoricalIndexValidationCache cache;
     return GetFullyValidatedBTCCCatchupRangeStatusImpl(
-        chainman, candidate, anchor);
+        chainman, candidate, anchor, cache,
+        chainman.GetPQProvenanceRevocationRevision(),
+        std::numeric_limits<std::size_t>::max());
 }
 
 bool ShouldRouteBTCCPresealReceiptToCatchup(
@@ -1856,10 +1949,15 @@ ExtractDeferredPaymentAuditReceipt(
     return receipt;
 }
 
-PaymentAuditContextStatus ClassifyPaymentAuditSealContext(
+PaymentAuditContextStatus ClassifyPaymentAuditSealContextImpl(
     const CBlockIndex* seal, int32_t expected_height,
     int32_t predecessor_height, const uint256& predecessor_hash,
-    PaymentAuditSealValidation validation)
+    PaymentAuditSealValidation validation,
+    HistoricalIndexValidationCache& cache,
+    uint64_t provenance_revocation_revision,
+    std::size_t block_budget =
+        HistoricalIndexValidationCache::BLOCK_BUDGET)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
     if (seal == nullptr) return PaymentAuditContextStatus::LOCAL_ERROR;
     if (seal->nHeight != expected_height ||
@@ -1875,19 +1973,37 @@ PaymentAuditContextStatus ClassifyPaymentAuditSealContext(
         return PaymentAuditContextStatus::INVALID;
     }
     if (validation == PaymentAuditSealValidation::LIVE_EXACT) {
-        return HasFullChainLockTargetValidation(*seal, predecessor_height)
+        return HasFullChainLockTargetValidation(
+                   *seal, predecessor_height, cache,
+                   provenance_revocation_revision, block_budget)
             ? PaymentAuditContextStatus::READY
             : PaymentAuditContextStatus::LOCAL_ERROR;
     }
     const auto predecessor_status{ClassifyHistoricalReceiptIndexRange(
-        *predecessor, predecessor_height)};
+        *predecessor, predecessor_height, cache,
+        provenance_revocation_revision, block_budget)};
     if (predecessor_status != PaymentAuditContextStatus::READY) {
         return predecessor_status;
     }
     // The certificate attests governance only after its declared predecessor;
     // scripts and receipt accumulators remain locally reconstructed.
     return ClassifyHistoricalReceiptIndexRange(
-        *seal, predecessor_height + 1);
+        *seal, predecessor_height + 1, cache,
+        provenance_revocation_revision, block_budget);
+}
+
+PaymentAuditContextStatus ClassifyPaymentAuditSealContext(
+    const CBlockIndex* seal, int32_t expected_height,
+    int32_t predecessor_height, const uint256& predecessor_hash,
+    PaymentAuditSealValidation validation)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    HistoricalIndexValidationCache cache;
+    return ClassifyPaymentAuditSealContextImpl(
+        seal, expected_height, predecessor_height, predecessor_hash,
+        validation, cache,
+        /*provenance_revocation_revision=*/0,
+        std::numeric_limits<std::size_t>::max());
 }
 
 PaymentAuditContextStatus ClassifyPaymentAuditResponseContext(
@@ -3319,7 +3435,7 @@ CChainLocksHandler::RecheckVerifiedPaymentAuditReceiptTransition(
     }
     const CBlockIndex* seal{m_chainman.m_blockman.LookupBlockIndex(
         statement.seal_statement.block_hash)};
-    const auto seal_status{ClassifyPaymentAuditSealContext(
+    const auto seal_status{ClassifyPaymentAuditSealContextCached(
         seal, round->seal_height,
         statement.seal_statement.previous_chainlock_height,
         statement.seal_statement.previous_chainlock_hash,
@@ -3343,7 +3459,7 @@ CChainLocksHandler::RecheckVerifiedPaymentAuditReceiptTransition(
     if (response_status != PaymentAuditContextStatus::READY) {
         return PaymentAuditReceiptCertificateStatus::LOCAL_ERROR;
     }
-    const auto provenance_status{ClassifyHistoricalReceiptIndexRange(
+    const auto provenance_status{ClassifyHistoricalReceiptIndexRangeCached(
         *carrier.pprev, verified.m_reconstruction_floor)};
     if (provenance_status == PaymentAuditContextStatus::INVALID) {
         return PaymentAuditReceiptCertificateStatus::INVALID;
@@ -4604,7 +4720,7 @@ bool CChainLocksHandler::IsPaymentAuditPrefixAuthenticated(
              (current.epoch < previous.epoch ||
               current.carrier_height < previous.carrier_height)) ||
             (target->nHeight > authorizer->nHeight &&
-             ClassifyHistoricalReceiptIndexRange(
+             ClassifyHistoricalReceiptIndexRangeCached(
                  *target, authorizer->nHeight + 1) !=
                  PaymentAuditContextStatus::READY)) {
             return false;
@@ -5495,7 +5611,7 @@ CChainLocksHandler::GetHistoricalAdmissionLocked(
                 return false;
             }
             if (signed_target->nHeight > terminal->nHeight &&
-                ClassifyHistoricalReceiptIndexRange(
+                ClassifyHistoricalReceiptIndexRangeCached(
                     *signed_target, terminal->nHeight + 1) !=
                     PaymentAuditContextStatus::READY) {
                 return false;
@@ -6210,6 +6326,51 @@ void CChainLocksHandler::RetryPendingBTCCBlock()
     }
 }
 
+PaymentAuditContextStatus
+CChainLocksHandler::ClassifyHistoricalReceiptIndexRangeCached(
+    const CBlockIndex& last, int32_t first_height) const
+{
+    AssertLockHeld(cs_main);
+    return ClassifyHistoricalReceiptIndexRange(
+        last, first_height, m_historical_index_validation_cache,
+        m_chainman.GetPQProvenanceRevocationRevision());
+}
+
+bool CChainLocksHandler::HasFullChainLockTargetValidationCached(
+    const CBlockIndex& candidate, int32_t predecessor_height) const
+{
+    AssertLockHeld(cs_main);
+    return HasFullChainLockTargetValidation(
+        candidate, predecessor_height,
+        m_historical_index_validation_cache,
+        m_chainman.GetPQProvenanceRevocationRevision());
+}
+
+BTCCCatchupRangeStatus
+CChainLocksHandler::GetFullyValidatedBTCCCatchupRangeStatusCached(
+    const CBlockIndex& candidate,
+    const pq::BTCCReceiptAssumptionAnchor& anchor) const
+{
+    AssertLockHeld(cs_main);
+    return GetFullyValidatedBTCCCatchupRangeStatusImpl(
+        m_chainman, candidate, anchor,
+        m_historical_index_validation_cache,
+        m_chainman.GetPQProvenanceRevocationRevision());
+}
+
+PaymentAuditContextStatus
+CChainLocksHandler::ClassifyPaymentAuditSealContextCached(
+    const CBlockIndex* seal, int32_t expected_height,
+    int32_t predecessor_height, const uint256& predecessor_hash,
+    PaymentAuditSealValidation validation) const
+{
+    AssertLockHeld(cs_main);
+    return ClassifyPaymentAuditSealContextImpl(
+        seal, expected_height, predecessor_height, predecessor_hash,
+        validation, m_historical_index_validation_cache,
+        m_chainman.GetPQProvenanceRevocationRevision());
+}
+
 std::optional<pq::BTCCReceiptState>
 CChainLocksHandler::GetCatchupHistoricalProof(
     const CBlockIndex& candidate,
@@ -6256,8 +6417,8 @@ CChainLocksHandler::GetCatchupHistoricalProof(
         branch_token, context_token,
         [&]() EXCLUSIVE_LOCKS_REQUIRED(cs_main)
             -> pq::CatchupHistoricalProofCache::BuildResult {
-            const auto range_status{GetFullyValidatedBTCCCatchupRangeStatus(
-                m_chainman, candidate,
+            const auto range_status{GetFullyValidatedBTCCCatchupRangeStatusCached(
+                candidate,
                 m_config->btcc_receipt_assumption_anchor)};
             if (range_status != BTCCCatchupRangeStatus::VALID) {
                 return {std::nullopt,
@@ -6394,7 +6555,7 @@ CChainLocksHandler::BuildCandidateContext(
         request.admission == pq::ChainLockCandidateAdmission::RECEIPT_ARCHIVE
             ? request.statement.previous_chainlock_height
             : request.local_best.height};
-    const bool exact_local_target{HasFullChainLockTargetValidation(
+    const bool exact_local_target{HasFullChainLockTargetValidationCached(
         *candidate, validation_floor)};
     const bool payment_only_catchup{
         catchup && exact_local_target &&
@@ -6413,15 +6574,16 @@ CChainLocksHandler::BuildCandidateContext(
         pq::ChainLockCandidateAdmission::TRUSTED_PERSISTENCE};
     const bool catchup_historical_receipt_range{
         catchup && !exact_local_target && validation_floor >= 0 &&
-        ClassifyHistoricalReceiptIndexRange(*candidate, validation_floor) ==
+        ClassifyHistoricalReceiptIndexRangeCached(
+            *candidate, validation_floor) ==
             PaymentAuditContextStatus::READY};
     const bool trusted_historical_range{
         trusted_persistence && !exact_local_target &&
-        GetFullyValidatedBTCCCatchupRangeStatus(
-            m_chainman, *candidate,
+        GetFullyValidatedBTCCCatchupRangeStatusCached(
+            *candidate,
             m_config->btcc_receipt_assumption_anchor) ==
             BTCCCatchupRangeStatus::VALID &&
-        ClassifyHistoricalReceiptIndexRange(
+        ClassifyHistoricalReceiptIndexRangeCached(
             *candidate,
             m_config->btcc_receipt_assumption_anchor.height) ==
             PaymentAuditContextStatus::READY};
@@ -6827,7 +6989,7 @@ void CChainLocksHandler::MaybeCheckpointPaymentAuditPreseal(
                     accepted_now->metadata.statement.payment_probation_state_hash ==
                         observed_authorizer->pqPaymentProbationStateHash &&
                     (observed_authorizer->nHeight == target->nHeight ||
-                     ClassifyHistoricalReceiptIndexRange(
+                     ClassifyHistoricalReceiptIndexRangeCached(
                          *observed_authorizer, target->nHeight + 1) ==
                          PaymentAuditContextStatus::READY) &&
                     (same_boundary_refresh || boundary_advance)};
@@ -7156,7 +7318,8 @@ bool CChainLocksHandler::AdvanceLiveSigningValidationFrontier(
     const std::function<BTCCReceiptCertificateStatus(
         const pq::BTCCReceipt&, const CBlockIndex&)>&
         certificate_status,
-    uint64_t& examined_blocks)
+    uint64_t& examined_blocks,
+    std::size_t block_budget)
 {
     AssertLockHeld(cs_main);
     if (!config.IsValid() || genesis_hash.IsNull() ||
@@ -7231,8 +7394,11 @@ bool CChainLocksHandler::AdvanceLiveSigningValidationFrontier(
         }
     }
 
+    std::size_t examined_this_call{0};
     for (int32_t height{frontier.validated_through_height + 1};
          height <= target.nHeight; ++height) {
+        if (examined_this_call == block_budget) return false;
+        ++examined_this_call;
         if (examined_blocks != std::numeric_limits<uint64_t>::max()) {
             ++examined_blocks;
         }
@@ -8982,7 +9148,7 @@ bool CChainLocksHandler::IsCurrentPaymentAuditStatement(
         m_chainman.ActiveChain()[statement.commitment.seal_height]};
     if (active == nullptr ||
         active->GetBlockHash() != statement.seal_statement.block_hash ||
-        ClassifyPaymentAuditSealContext(
+        ClassifyPaymentAuditSealContextCached(
             active, statement.commitment.seal_height,
             statement.seal_statement.previous_chainlock_height,
             statement.seal_statement.previous_chainlock_hash,
@@ -9694,7 +9860,7 @@ CChainLocksHandler::BuildPaymentAuditVerificationRosters(
     const CBlockIndex* seal{
         m_chainman.m_blockman.LookupBlockIndex(
             statement.seal_statement.block_hash)};
-    const auto seal_status{ClassifyPaymentAuditSealContext(
+    const auto seal_status{ClassifyPaymentAuditSealContextCached(
         seal, round->seal_height,
         statement.seal_statement.previous_chainlock_height,
         statement.seal_statement.previous_chainlock_hash,
@@ -9873,7 +10039,7 @@ CChainLocksHandler::BuildPaymentAuditVerificationRosters(
         };
         include_snapshots(seal_rosters->Rosters());
         include_snapshots(response_rosters->Rosters());
-        const auto provenance_status{ClassifyHistoricalReceiptIndexRange(
+        const auto provenance_status{ClassifyHistoricalReceiptIndexRangeCached(
             *historical_carrier->pprev, reconstruction_floor)};
         if (provenance_status != PaymentAuditContextStatus::READY) {
             if (status != nullptr &&
@@ -11428,7 +11594,7 @@ CChainLocksHandler::TryImportPersistedChainLock()
                     persisted.statement.block_hash)};
             return target != nullptr &&
                 target->nHeight == persisted.statement.height &&
-                !HasFullChainLockTargetValidation(
+                !HasFullChainLockTargetValidationCached(
                     *target,
                     persisted.statement.previous_chainlock_height);
         })};
@@ -12335,7 +12501,7 @@ void CChainLocksHandler::EnforceBestChainLock()
             !m_chainman.IsSnapshotValidated()) {
             return;
         }
-        if (!HasFullChainLockTargetValidation(
+        if (!HasFullChainLockTargetValidationCached(
                 *best, statement.previous_chainlock_height)) {
             const uint256 witness_id{record->metadata.witness_id};
             if (witness_id.IsNull() ||
@@ -12362,11 +12528,11 @@ void CChainLocksHandler::EnforceBestChainLock()
             if (predecessor == nullptr ||
                 predecessor->GetBlockHash() !=
                     statement.previous_chainlock_hash ||
-                ClassifyHistoricalReceiptIndexRange(
+                ClassifyHistoricalReceiptIndexRangeCached(
                     *predecessor,
                     statement.previous_chainlock_height) !=
                     PaymentAuditContextStatus::READY ||
-                ClassifyHistoricalReceiptIndexRange(
+                ClassifyHistoricalReceiptIndexRangeCached(
                     *best, statement.previous_chainlock_height + 1) !=
                     PaymentAuditContextStatus::READY ||
                 !indexed_btcc ||

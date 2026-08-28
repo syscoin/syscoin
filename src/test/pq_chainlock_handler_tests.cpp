@@ -316,7 +316,9 @@ public:
         const pq::ChainLockFinalityStoreConfig& config,
         const uint256& genesis_hash,
         uint64_t provenance_revocation_revision,
-        const CertificateCheck& check)
+        const CertificateCheck& check,
+        std::size_t block_budget =
+            HistoricalIndexValidationCache::BLOCK_BUDGET)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main)
     {
         const auto adapter = [&](const pq::BTCCReceipt& receipt,
@@ -344,7 +346,7 @@ public:
                 state.frontier, active_chain, target,
                 durable_predecessor, config, genesis_hash,
                 provenance_revocation_revision, adapter,
-                state.examined_blocks);
+                state.examined_blocks, block_budget);
     }
 
     static bool HasExactTargetEndpoint(const CBlockIndex& target)
@@ -483,6 +485,60 @@ const auto ACCEPT_LIVE_SIGNING_CERTIFICATE = [](
 BOOST_FIXTURE_TEST_SUITE(pq_chainlock_handler_tests, BasicTestingSetup)
 
 BOOST_AUTO_TEST_CASE(
+    historical_index_validation_resumes_long_ranges_in_bounded_steps)
+{
+    constexpr std::size_t BLOCK_BUDGET{127};
+    constexpr int32_t FIRST_HEIGHT{7};
+    constexpr int32_t LAST_HEIGHT{10'007};
+    constexpr std::size_t RANGE_SIZE{
+        static_cast<std::size_t>(LAST_HEIGHT - FIRST_HEIGHT + 1)};
+    LiveSigningIndexChain chain{
+        static_cast<std::size_t>(LAST_HEIGHT + 1)};
+    llmq::HistoricalIndexValidationCache cache;
+
+    LOCK(cs_main);
+    llmq::PaymentAuditContextStatus status{
+        llmq::PaymentAuditContextStatus::LOCAL_ERROR};
+    std::size_t calls{0};
+    std::size_t total_examined{0};
+    while (status != llmq::PaymentAuditContextStatus::READY) {
+        std::size_t examined{0};
+        status = cache.Validate(
+            chain.At(LAST_HEIGHT), FIRST_HEIGHT,
+            llmq::HistoricalIndexValidationMode::FULL_FINALITY,
+            /*provenance_revocation_revision=*/1, BLOCK_BUDGET,
+            &examined);
+        BOOST_REQUIRE(status ==
+                          llmq::PaymentAuditContextStatus::LOCAL_ERROR ||
+                      status == llmq::PaymentAuditContextStatus::READY);
+        BOOST_CHECK_LE(examined, BLOCK_BUDGET);
+        BOOST_REQUIRE_GT(examined, 0U);
+        total_examined += examined;
+        ++calls;
+    }
+    BOOST_CHECK_EQUAL(total_examined, RANGE_SIZE);
+    BOOST_CHECK_EQUAL(calls,
+                      (RANGE_SIZE + BLOCK_BUDGET - 1) / BLOCK_BUDGET);
+
+    std::size_t examined{1};
+    BOOST_CHECK(cache.Validate(
+                    chain.At(LAST_HEIGHT), FIRST_HEIGHT,
+                    llmq::HistoricalIndexValidationMode::FULL_FINALITY,
+                    /*provenance_revocation_revision=*/1, BLOCK_BUDGET,
+                    &examined) ==
+                llmq::PaymentAuditContextStatus::READY);
+    BOOST_CHECK_EQUAL(examined, 0U);
+
+    BOOST_CHECK(cache.Validate(
+                    chain.At(LAST_HEIGHT), FIRST_HEIGHT,
+                    llmq::HistoricalIndexValidationMode::FULL_FINALITY,
+                    /*provenance_revocation_revision=*/2, BLOCK_BUDGET,
+                    &examined) ==
+                llmq::PaymentAuditContextStatus::LOCAL_ERROR);
+    BOOST_CHECK_EQUAL(examined, BLOCK_BUDGET);
+}
+
+BOOST_AUTO_TEST_CASE(
     live_signing_frontier_retains_long_prefix_and_extends_only_delta)
 {
     using Access = llmq::test::CChainLocksHandlerTestAccess;
@@ -523,6 +579,34 @@ BOOST_AUTO_TEST_CASE(
         ACCEPT_LIVE_SIGNING_CERTIFICATE));
     BOOST_CHECK_EQUAL(state.examined_blocks, after_initial + 5);
     BOOST_CHECK_EQUAL(Access::ValidatedThrough(state), 1'885);
+}
+
+BOOST_AUTO_TEST_CASE(live_signing_frontier_caps_each_recovery_step)
+{
+    using Access = llmq::test::CChainLocksHandlerTestAccess;
+    constexpr std::size_t BLOCK_BUDGET{127};
+    const auto config{LiveSigningFrontierConfig()};
+    const uint256 genesis{NonNullHash(200'500)};
+    LiveSigningIndexChain chain{1'881};
+    Access::LiveSigningFrontier state;
+    const auto floor{chain.Predecessor(864)};
+
+    LOCK(cs_main);
+    bool ready{false};
+    std::size_t calls{0};
+    while (!ready) {
+        const uint64_t before{state.examined_blocks};
+        ready = Access::Advance(
+            state, chain.active, chain.At(1'880), floor, config, genesis,
+            /*provenance_revocation_revision=*/1,
+            ACCEPT_LIVE_SIGNING_CERTIFICATE, BLOCK_BUDGET);
+        BOOST_CHECK_LE(state.examined_blocks - before, BLOCK_BUDGET);
+        BOOST_REQUIRE_GT(state.examined_blocks - before, 0U);
+        ++calls;
+    }
+    BOOST_CHECK_EQUAL(state.examined_blocks, 1'016U);
+    BOOST_CHECK_EQUAL(calls, (1'016U + BLOCK_BUDGET - 1) / BLOCK_BUDGET);
+    BOOST_CHECK_EQUAL(Access::ValidatedThrough(state), 1'880);
 }
 
 BOOST_AUTO_TEST_CASE(
@@ -566,9 +650,13 @@ BOOST_AUTO_TEST_CASE(
         LOCK(cs_main);
         chain.ClearStatus(governance_height,
                           BLOCK_GOVERNANCE_VALIDATED);
-        BOOST_CHECK(!Access::Advance(
-            state, chain.active, chain.At(governance_height + 5), floor,
-            config, genesis, 1, ACCEPT_LIVE_SIGNING_CERTIFICATE));
+        do {
+            BOOST_CHECK(!Access::Advance(
+                state, chain.active, chain.At(governance_height + 5),
+                floor, config, genesis, 1,
+                ACCEPT_LIVE_SIGNING_CERTIFICATE));
+        } while (Access::ValidatedThrough(state) <
+                 governance_height - 1);
         BOOST_CHECK_EQUAL(Access::ValidatedThrough(state),
                           governance_height - 1);
         const uint64_t after_wait{state.examined_blocks};
