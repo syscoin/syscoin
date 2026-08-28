@@ -27,6 +27,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <map>
 #include <optional>
@@ -180,6 +181,168 @@ private:
     }
 
     std::atomic<uint64_t> m_state{0};
+};
+
+/**
+ * Serialize destructive-history authority with lifecycle, health, and newer
+ * durability barriers. Expensive proof construction happens outside this
+ * gate; its generation prevents that work from publishing stale authority.
+ */
+class AuxiliaryHistoryGCAuthorizationGate {
+public:
+    using Token = uint64_t;
+
+    enum class MutationResult : uint8_t {
+        STALE = 0,
+        APPLIED,
+        FAILED,
+    };
+
+    template <typename Revoke>
+    [[nodiscard]] bool Start(Revoke&& revoke)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex)
+    {
+        LOCK(m_mutex);
+        if (m_state == State::FAILED || !AdvanceLocked()) {
+            m_state = State::FAILED;
+            (void)revoke();
+            return false;
+        }
+        m_state = State::STARTING;
+        if (!revoke()) {
+            m_state = State::FAILED;
+            return false;
+        }
+        return true;
+    }
+
+    template <typename Revoke>
+    void Stop(Revoke&& revoke)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex)
+    {
+        LOCK(m_mutex);
+        if (m_state != State::FAILED) {
+            if (AdvanceLocked()) {
+                m_state = State::STOPPED;
+            } else {
+                m_state = State::FAILED;
+            }
+        }
+        if (!revoke()) m_state = State::FAILED;
+    }
+
+    template <typename Revoke>
+    void Fail(Revoke&& revoke)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex)
+    {
+        LOCK(m_mutex);
+        if (m_state != State::FAILED) {
+            (void)AdvanceLocked();
+            m_state = State::FAILED;
+        }
+        (void)revoke();
+    }
+
+    template <typename Revoke>
+    [[nodiscard]] bool SetHealthy(bool healthy, Revoke&& revoke)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex)
+    {
+        LOCK(m_mutex);
+        if (m_state == State::STOPPED || m_state == State::FAILED) {
+            return false;
+        }
+        if (healthy) {
+            if (m_state == State::READY) return true;
+            if (!AdvanceLocked()) {
+                m_state = State::FAILED;
+                (void)revoke();
+                return false;
+            }
+            m_state = State::READY;
+            return true;
+        }
+        if (m_state == State::STARTING) return false;
+        if (!AdvanceLocked()) {
+            m_state = State::FAILED;
+        } else {
+            m_state = State::STARTING;
+        }
+        if (!revoke()) m_state = State::FAILED;
+        return false;
+    }
+
+    template <typename Arm>
+    [[nodiscard]] bool ArmPublication(Arm&& arm)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex)
+    {
+        LOCK(m_mutex);
+        if (!AdvanceLocked()) m_state = State::FAILED;
+        if (!arm()) {
+            m_state = State::FAILED;
+            return false;
+        }
+        return m_state != State::FAILED;
+    }
+
+    [[nodiscard]] std::optional<Token> ObserveReady() const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex)
+    {
+        LOCK(m_mutex);
+        return m_state == State::READY
+            ? std::optional<Token>{m_generation}
+            : std::nullopt;
+    }
+
+    template <typename RevokeFn>
+    [[nodiscard]] MutationResult Revoke(RevokeFn&& revoke)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex)
+    {
+        LOCK(m_mutex);
+        if (!AdvanceLocked()) m_state = State::FAILED;
+        if (!revoke()) m_state = State::FAILED;
+        return m_state == State::FAILED ? MutationResult::FAILED
+                                        : MutationResult::APPLIED;
+    }
+
+    template <typename Publish>
+    [[nodiscard]] MutationResult TryPublish(Token token, Publish&& publish)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex)
+    {
+        LOCK(m_mutex);
+        if (m_state != State::READY || token != m_generation) {
+            return MutationResult::STALE;
+        }
+        // Consume the observation before exposing authority so another
+        // positive proof built from the same generation cannot republish it.
+        if (!AdvanceLocked()) {
+            m_state = State::FAILED;
+            return MutationResult::FAILED;
+        }
+        if (publish()) return MutationResult::APPLIED;
+        m_state = State::FAILED;
+        return MutationResult::FAILED;
+    }
+
+private:
+    enum class State : uint8_t {
+        STOPPED = 0,
+        STARTING,
+        READY,
+        FAILED,
+    };
+
+    [[nodiscard]] bool AdvanceLocked() EXCLUSIVE_LOCKS_REQUIRED(m_mutex)
+    {
+        if (m_generation == std::numeric_limits<uint64_t>::max()) {
+            return false;
+        }
+        ++m_generation;
+        return true;
+    }
+
+    mutable Mutex m_mutex;
+    State m_state GUARDED_BY(m_mutex){State::STOPPED};
+    uint64_t m_generation GUARDED_BY(m_mutex){0};
 };
 
 /** Compact immutable facts derived from one fully validated archive witness. */
@@ -1014,6 +1177,7 @@ private:
     [[nodiscard]] bool IsQuorumRosterSourceGenerationCurrent(
         uint64_t generation) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_lookup_mutex);
+    [[nodiscard]] bool RevokeAuxiliaryHistoryGCAuthorization();
     void DisableShareAdmission() noexcept;
     [[nodiscard]] uint64_t GetShareAdmissionGeneration() const noexcept;
     [[nodiscard]] bool IsShareAdmissionGenerationCurrent(
@@ -1665,6 +1829,7 @@ private:
     // Lifecycle, operational state, and terminal faults publish atomically so
     // no false->true interval can revive work from an older handler state.
     ShareAdmissionGate m_share_admission_gate;
+    AuxiliaryHistoryGCAuthorizationGate m_auxiliary_history_gc_auth_gate;
     std::atomic_bool m_persistence_failed{false};
     std::atomic_bool m_enforced{false};
 };

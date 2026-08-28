@@ -808,6 +808,183 @@ BOOST_AUTO_TEST_CASE(share_admission_gate_terminal_failure_is_sticky)
     BOOST_CHECK_EQUAL(open_gate.Acquire(), 0U);
 }
 
+BOOST_AUTO_TEST_CASE(auxiliary_gc_authority_rejects_stale_lifecycle_proofs)
+{
+    using Gate = llmq::AuxiliaryHistoryGCAuthorizationGate;
+    Gate gate;
+    bool authority{true};
+    bool publication_hold{false};
+    std::size_t publishes{0};
+    std::size_t revocations{0};
+    const auto revoke = [&] {
+        ++revocations;
+        authority = false;
+        return true;
+    };
+
+    BOOST_REQUIRE(gate.Start(revoke));
+    BOOST_CHECK_EQUAL(revocations, 1U);
+    BOOST_CHECK(!gate.SetHealthy(false, revoke));
+    BOOST_CHECK_EQUAL(revocations, 1U);
+    BOOST_REQUIRE(gate.SetHealthy(true, revoke));
+    const auto running{gate.ObserveReady()};
+    BOOST_REQUIRE(running);
+
+    gate.Stop(revoke);
+    BOOST_CHECK_EQUAL(revocations, 2U);
+    BOOST_CHECK(!authority);
+    BOOST_CHECK(gate.TryPublish(*running, [&] {
+        ++publishes;
+        authority = true;
+        return true;
+    }) == Gate::MutationResult::STALE);
+    BOOST_CHECK_EQUAL(publishes, 0U);
+    BOOST_CHECK(!authority);
+
+    // A certificate already crossing its durability seam during shutdown
+    // must retain history, but it cannot revive destructive authority.
+    BOOST_CHECK(gate.ArmPublication([&] {
+        publication_hold = true;
+        return true;
+    }));
+    BOOST_CHECK(publication_hold);
+    BOOST_CHECK(!gate.ObserveReady());
+
+    BOOST_REQUIRE(gate.Start(revoke));
+    BOOST_REQUIRE(gate.SetHealthy(true, revoke));
+    const auto restarted{gate.ObserveReady()};
+    BOOST_REQUIRE(restarted);
+    BOOST_CHECK_NE(*restarted, *running);
+    BOOST_CHECK(gate.TryPublish(*restarted, [&] {
+        ++publishes;
+        authority = true;
+        publication_hold = false;
+        return true;
+    }) == Gate::MutationResult::APPLIED);
+    BOOST_CHECK(authority);
+    BOOST_CHECK(!publication_hold);
+    BOOST_CHECK_EQUAL(publishes, 1U);
+
+    BOOST_CHECK(!gate.SetHealthy(false, revoke));
+    BOOST_CHECK_EQUAL(revocations, 4U);
+    BOOST_CHECK(!gate.ObserveReady());
+    BOOST_CHECK(!gate.SetHealthy(false, revoke));
+    BOOST_CHECK_EQUAL(revocations, 4U);
+    BOOST_REQUIRE(gate.SetHealthy(true, revoke));
+    const auto revalidated{gate.ObserveReady()};
+    BOOST_REQUIRE(revalidated);
+    BOOST_CHECK_NE(*revalidated, *restarted);
+}
+
+BOOST_AUTO_TEST_CASE(auxiliary_gc_authority_newer_barrier_invalidates_proof)
+{
+    using Gate = llmq::AuxiliaryHistoryGCAuthorizationGate;
+    Gate gate;
+    bool authority{false};
+    bool publication_hold{false};
+    const auto revoke = [&] {
+        authority = false;
+        return true;
+    };
+
+    BOOST_REQUIRE(gate.Start(revoke));
+    BOOST_REQUIRE(gate.SetHealthy(true, revoke));
+    const auto before_barrier{gate.ObserveReady()};
+    BOOST_REQUIRE(before_barrier);
+    BOOST_REQUIRE(gate.ArmPublication([&] {
+        publication_hold = true;
+        return true;
+    }));
+
+    BOOST_CHECK(gate.TryPublish(*before_barrier, [&] {
+        authority = true;
+        publication_hold = false;
+        return true;
+    }) == Gate::MutationResult::STALE);
+    BOOST_CHECK(!authority);
+    BOOST_CHECK(publication_hold);
+
+    const auto after_barrier{gate.ObserveReady()};
+    BOOST_REQUIRE(after_barrier);
+    const auto competing_proof{after_barrier};
+    BOOST_CHECK(gate.TryPublish(*after_barrier, [&] {
+        authority = true;
+        publication_hold = false;
+        return true;
+    }) == Gate::MutationResult::APPLIED);
+    BOOST_CHECK(authority);
+    BOOST_CHECK(!publication_hold);
+    std::size_t duplicate_publishes{0};
+    BOOST_CHECK(gate.TryPublish(*competing_proof, [&] {
+        ++duplicate_publishes;
+        return true;
+    }) == Gate::MutationResult::STALE);
+    BOOST_CHECK_EQUAL(duplicate_publishes, 0U);
+
+    const auto before_revoke{gate.ObserveReady()};
+    BOOST_REQUIRE(before_revoke);
+    BOOST_CHECK(gate.Revoke(revoke) == Gate::MutationResult::APPLIED);
+    BOOST_CHECK(!authority);
+    BOOST_CHECK(gate.TryPublish(*before_revoke, [&] {
+        ++duplicate_publishes;
+        return true;
+    }) == Gate::MutationResult::STALE);
+    BOOST_CHECK_EQUAL(duplicate_publishes, 0U);
+
+    // A failure observation is conservative even when it was built beside a
+    // successful proof; it must invalidate the published erase authority.
+    const auto after_revoke{gate.ObserveReady()};
+    BOOST_REQUIRE(after_revoke);
+    BOOST_CHECK_NE(*after_revoke, *competing_proof);
+}
+
+BOOST_AUTO_TEST_CASE(auxiliary_gc_authority_failure_is_sticky)
+{
+    using Gate = llmq::AuxiliaryHistoryGCAuthorizationGate;
+    Gate gate;
+    bool authority{false};
+    bool publication_hold{false};
+    const auto revoke = [&] {
+        authority = false;
+        return true;
+    };
+
+    BOOST_REQUIRE(gate.Start(revoke));
+    BOOST_REQUIRE(gate.SetHealthy(true, revoke));
+    const auto before_failure{gate.ObserveReady()};
+    BOOST_REQUIRE(before_failure);
+    authority = true;
+    gate.Fail(revoke);
+    BOOST_CHECK(!authority);
+    BOOST_CHECK(!gate.ObserveReady());
+    BOOST_CHECK(gate.TryPublish(*before_failure, [&] {
+        authority = true;
+        return true;
+    }) == Gate::MutationResult::STALE);
+    BOOST_CHECK(!gate.Start(revoke));
+    BOOST_CHECK(!gate.SetHealthy(true, revoke));
+
+    // Late certificate ingress may only strengthen retention after failure.
+    BOOST_CHECK(!gate.ArmPublication([&] {
+        publication_hold = true;
+        return true;
+    }));
+    BOOST_CHECK(publication_hold);
+    BOOST_CHECK(!authority);
+
+    Gate rejected_publication;
+    BOOST_REQUIRE(rejected_publication.Start([] { return true; }));
+    BOOST_REQUIRE(rejected_publication.SetHealthy(
+        true, [] { return true; }));
+    const auto rejected_token{rejected_publication.ObserveReady()};
+    BOOST_REQUIRE(rejected_token);
+    BOOST_CHECK(rejected_publication.TryPublish(
+                    *rejected_token, [] { return false; }) ==
+                Gate::MutationResult::FAILED);
+    BOOST_CHECK(!rejected_publication.ObserveReady());
+    BOOST_CHECK(!rejected_publication.Start([] { return true; }));
+}
+
 BOOST_AUTO_TEST_CASE(payment_audit_receipt_cache_is_exact_context_bound)
 {
     llmq::PaymentAuditReceiptCache cache;

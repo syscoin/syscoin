@@ -2225,12 +2225,11 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
         // publication before startup pruning and revoke any process-local GC
         // authority until this handler reproves the exact active winner or
         // immutable anchor.
-        (void)deterministicMNManager
-            ->UpdateAuxiliaryHistoryGCAuthorization(std::nullopt);
-        if (IsPersistedChainLockPending()) {
-            deterministicMNManager
-                ->UpdateFinalitySnapshotPublicationRetention(true);
-        }
+        m_auxiliary_history_gc_auth_gate.Stop([this] {
+            return RevokeAuxiliaryHistoryGCAuthorization();
+        });
+        deterministicMNManager->UpdateFinalitySnapshotPublicationRetention(
+            IsPersistedChainLockPending());
     }
 
     bool loaded_preseal{false};
@@ -2280,6 +2279,9 @@ void CChainLocksHandler::Start()
         LOCK(m_lifecycle_mutex);
         if (m_started) return;
         m_share_admission_gate.SetReady(false);
+        (void)m_auxiliary_history_gc_auth_gate.Start([this] {
+            return RevokeAuxiliaryHistoryGCAuthorization();
+        });
         {
             LOCK(m_share_signing_mutex);
             m_signer_startup_pro_tx_hash.SetNull();
@@ -2350,6 +2352,9 @@ void CChainLocksHandler::Stop()
             LOCK(m_share_lifecycle_mutex);
             m_share_admission_gate.SetReady(false);
         }
+        m_auxiliary_history_gc_auth_gate.Stop([this] {
+            return RevokeAuxiliaryHistoryGCAuthorization();
+        });
         m_payment_audit_candidate_metadata_cache.Clear();
         m_payment_audit_receipt_cache.Clear();
         m_verified_payment_audit_transition_cache->Clear();
@@ -2448,13 +2453,19 @@ bool CChainLocksHandler::IsQuorumRosterSourceGenerationCurrent(
            static_cast<bool>(m_quorum_roster_cache);
 }
 
+bool CChainLocksHandler::RevokeAuxiliaryHistoryGCAuthorization()
+{
+    return deterministicMNManager == nullptr ||
+           deterministicMNManager->UpdateAuxiliaryHistoryGCAuthorization(
+               std::nullopt);
+}
+
 void CChainLocksHandler::DisableShareAdmission() noexcept
 {
     m_share_admission_gate.Fail();
-    if (deterministicMNManager) {
-        (void)deterministicMNManager
-            ->UpdateAuxiliaryHistoryGCAuthorization(std::nullopt);
-    }
+    m_auxiliary_history_gc_auth_gate.Fail([this] {
+        return RevokeAuxiliaryHistoryGCAuthorization();
+    });
 }
 
 uint64_t CChainLocksHandler::GetShareAdmissionGeneration() const noexcept
@@ -4977,15 +4988,34 @@ bool CChainLocksHandler::FlushChainLockAuxiliarySnapshotsForDurability()
     if (!deterministicMNManager) return false;
     // SYSCOIN: This callback is reached only after context construction and
     // all 801 signatures (or while importing that same fsynced certificate).
-    // Arm the durable retain-all state before the write-ahead barrier so a
-    // side-branch winner cannot race maintenance before enforcement.
-    deterministicMNManager->UpdateFinalitySnapshotPublicationRetention(true);
+    // Advance the publication generation while arming retain-all so an older
+    // enforcement proof cannot release a newer certificate's barrier.
+    if (!m_auxiliary_history_gc_auth_gate.ArmPublication([] {
+            deterministicMNManager
+                ->UpdateFinalitySnapshotPublicationRetention(true);
+            return true;
+        })) {
+        return false;
+    }
     return deterministicMNManager->FlushPendingSnapshotsToDisk(
         /*fSync=*/true);
 }
 
 void CChainLocksHandler::MaybeReleaseFinalitySnapshotPublicationRetention()
 {
+    const auto authorization_token{
+        m_auxiliary_history_gc_auth_gate.ObserveReady()};
+    if (!authorization_token) return;
+    const auto revoke = [&] {
+        const auto result{m_auxiliary_history_gc_auth_gate.Revoke([this] {
+            return RevokeAuxiliaryHistoryGCAuthorization();
+        })};
+        if (result == AuxiliaryHistoryGCAuthorizationGate::
+                          MutationResult::FAILED) {
+            m_persistence_failed.store(true);
+            DisableShareAdmission();
+        }
+    };
     const bool persisted_pending{WITH_LOCK(m_persisted_mutex, return
         m_pending_persisted.has_value() ||
         m_pending_persisted_unsealed_btcc.has_value() ||
@@ -5001,10 +5031,7 @@ void CChainLocksHandler::MaybeReleaseFinalitySnapshotPublicationRetention()
         !m_persistence_failed.load() && m_enforced.load() &&
         !persisted_pending};
     if (!healthy) {
-        if (deterministicMNManager) {
-            (void)deterministicMNManager
-                ->UpdateAuxiliaryHistoryGCAuthorization(std::nullopt);
-        }
+        revoke();
         return;
     }
 
@@ -5016,8 +5043,7 @@ void CChainLocksHandler::MaybeReleaseFinalitySnapshotPublicationRetention()
         if (!accepted_best ||
             *durable_best != accepted_best->metadata ||
             !durable_best->IsInternallyConsistent(m_genesis_hash)) {
-            (void)deterministicMNManager
-                ->UpdateAuxiliaryHistoryGCAuthorization(std::nullopt);
+            revoke();
             return;
         }
         authorization.source = CDeterministicMNManager::
@@ -5031,8 +5057,7 @@ void CChainLocksHandler::MaybeReleaseFinalitySnapshotPublicationRetention()
         // first enforced winner, destruction is authorized solely by the
         // release-pinned ChainLock anchor.
         if (accepted_best || !m_config->anchor.IsStructurallyValid()) {
-            (void)deterministicMNManager
-                ->UpdateAuxiliaryHistoryGCAuthorization(std::nullopt);
+            revoke();
             return;
         }
         authorization.source = CDeterministicMNManager::
@@ -5050,15 +5075,19 @@ void CChainLocksHandler::MaybeReleaseFinalitySnapshotPublicationRetention()
                active->GetBlockHash() == authorization.block.block_hash;
     })};
     if (!authorizer_active) {
-        (void)deterministicMNManager
-            ->UpdateAuxiliaryHistoryGCAuthorization(std::nullopt);
+        revoke();
         return;
     }
 
     // SYSCOIN: The same barrier publishes exact finality authority and releases
     // the all-branch hold, so maintenance cannot observe one without the other.
-    if (!deterministicMNManager->UpdateAuxiliaryHistoryGCAuthorization(
-            authorization, /*release_publication=*/true)) {
+    const auto result{m_auxiliary_history_gc_auth_gate.TryPublish(
+        *authorization_token, [&authorization] {
+            return deterministicMNManager
+                ->UpdateAuxiliaryHistoryGCAuthorization(
+                    authorization, /*release_publication=*/true);
+        })};
+    if (result == AuxiliaryHistoryGCAuthorizationGate::MutationResult::FAILED) {
         m_persistence_failed.store(true);
         DisableShareAdmission();
     }
@@ -12393,14 +12422,13 @@ void CChainLocksHandler::CheckActiveState()
     const bool enforce{ShouldEnforceDurableChainLock(
         configured, pending, HasNEVMReplayObligation())};
     m_enforced.store(enforce);
-    if (deterministicMNManager &&
-        (!configured || !verification_available || !enforce)) {
-        // SYSCOIN: Backend health can fail without passing through the share
-        // gate's permanent-failure path. Revoke process-local erase authority
-        // while leaving the already durable finality decision fail-closed.
-        (void)deterministicMNManager
-            ->UpdateAuxiliaryHistoryGCAuthorization(std::nullopt);
-    }
+    // SYSCOIN: Backend health can fail without passing through the share
+    // gate's permanent-failure path. Publish that transition through the same
+    // generation gate as certificate durability and handler lifecycle.
+    (void)m_auxiliary_history_gc_auth_gate.SetHealthy(
+        deterministicMNManager && configured && verification_available &&
+            enforce,
+        [this] { return RevokeAuxiliaryHistoryGCAuthorization(); });
 }
 
 bool CChainLocksHandler::GetCLSIGFromPeers()
