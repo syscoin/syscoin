@@ -3905,6 +3905,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             BLOCK_PQ_BTCC_INDEX_VALIDATED |
             BLOCK_PQ_RECEIPT_INDEX_VALIDATED};
         if (pindex->nStatus & provenance_mask) {
+            m_chainman.NotePQProvenanceRevoked();
             pindex->nStatus = static_cast<BlockStatus>(
                 pindex->nStatus & ~provenance_mask);
             m_blockman.m_dirty_blockindex.insert(pindex);
@@ -7773,10 +7774,14 @@ bool Chainstate::RollforwardBlock(CBlockIndex* pindex, CCoinsViewCache& inputs, 
         // index record, so rollforward should never observe one without the
         // other. If recovery does rewrite the accumulator, fail closed rather
         // than carrying an attestation across an unexpected state change.
-        pindex->nStatus = static_cast<BlockStatus>(
-            pindex->nStatus &
-            ~(BLOCK_PQ_BTCC_INDEX_VALIDATED |
-              BLOCK_PQ_RECEIPT_INDEX_VALIDATED));
+        constexpr uint32_t provenance_mask{
+            BLOCK_PQ_BTCC_INDEX_VALIDATED |
+            BLOCK_PQ_RECEIPT_INDEX_VALIDATED};
+        if (pindex->nStatus & provenance_mask) {
+            m_chainman.NotePQProvenanceRevoked();
+            pindex->nStatus = static_cast<BlockStatus>(
+                pindex->nStatus & ~provenance_mask);
+        }
         m_blockman.m_dirty_blockindex.insert(pindex);
     }
     bool payment_audit_state_changed{false};
@@ -7795,10 +7800,14 @@ bool Chainstate::RollforwardBlock(CBlockIndex* pindex, CCoinsViewCache& inputs, 
             state.ToString());
     }
     if (payment_audit_state_changed) {
-        pindex->nStatus = static_cast<BlockStatus>(
-            pindex->nStatus &
-            ~(BLOCK_PQ_BTCC_INDEX_VALIDATED |
-              BLOCK_PQ_RECEIPT_INDEX_VALIDATED));
+        constexpr uint32_t provenance_mask{
+            BLOCK_PQ_BTCC_INDEX_VALIDATED |
+            BLOCK_PQ_RECEIPT_INDEX_VALIDATED};
+        if (pindex->nStatus & provenance_mask) {
+            m_chainman.NotePQProvenanceRevoked();
+            pindex->nStatus = static_cast<BlockStatus>(
+                pindex->nStatus & ~provenance_mask);
+        }
         m_blockman.m_dirty_blockindex.insert(pindex);
     }
     // SYSCOIN

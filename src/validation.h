@@ -1064,6 +1064,19 @@ private:
 
     CBlockIndex* m_best_invalid GUARDED_BY(::cs_main){nullptr};
 
+    // SYSCOIN: Invalidates process-local proofs over mutable PQ block-index
+    // provenance. This is deliberately global: recovery-time revocation on a
+    // side branch may conservatively discard an active proof, while ordinary
+    // first validation and tip extension never advance the counter.
+    uint64_t m_pq_provenance_revocation_revision GUARDED_BY(::cs_main){0};
+    void NotePQProvenanceRevoked() EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        AssertLockHeld(::cs_main);
+        assert(m_pq_provenance_revocation_revision !=
+               std::numeric_limits<uint64_t>::max());
+        ++m_pq_provenance_revocation_revision;
+    }
+
     //! Internal helper for ActivateSnapshot().
     [[nodiscard]] bool PopulateAndValidateSnapshot(
         Chainstate& snapshot_chainstate,
@@ -1292,6 +1305,13 @@ public:
     CChain& ActiveChain() const EXCLUSIVE_LOCKS_REQUIRED(GetMutex()) { return ActiveChainstate().m_chain; }
     int ActiveHeight() const EXCLUSIVE_LOCKS_REQUIRED(GetMutex()) { return ActiveChain().Height(); }
     CBlockIndex* ActiveTip() const EXCLUSIVE_LOCKS_REQUIRED(GetMutex()) { return ActiveChain().Tip(); }
+    // SYSCOIN: Reject process-local PQ proofs built before index provenance
+    // was revoked without changing the active block hash.
+    uint64_t GetPQProvenanceRevocationRevision() const
+        EXCLUSIVE_LOCKS_REQUIRED(GetMutex())
+    {
+        return m_pq_provenance_revocation_revision;
+    }
 
     /** SYSCOIN: Persistently retire only one definitively invalid deferred audit branch. */
     [[nodiscard]] bool RetireDeferredPaymentAuditReceiptCarrier(

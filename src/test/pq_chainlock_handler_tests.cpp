@@ -18,8 +18,10 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <optional>
+#include <vector>
 
 #include <boost/test/unit_test.hpp>
 
@@ -288,7 +290,459 @@ private:
 
 } // namespace
 
+namespace llmq::test {
+
+class CChainLocksHandlerTestAccess {
+public:
+    enum class CertificateStatus : uint8_t {
+        VERIFIED = 0,
+        MISSING,
+        INVALID,
+    };
+
+    struct LiveSigningFrontier {
+        CChainLocksHandler::LiveSigningValidationFrontier frontier;
+        uint64_t examined_blocks{0};
+    };
+
+    using CertificateCheck = std::function<CertificateStatus(
+        const pq::BTCCReceipt&, const CBlockIndex&)>;
+
+    static bool Advance(
+        LiveSigningFrontier& state,
+        const CChain& active_chain,
+        const CBlockIndex& target,
+        const pq::ChainLockPredecessor& durable_predecessor,
+        const pq::ChainLockFinalityStoreConfig& config,
+        const uint256& genesis_hash,
+        uint64_t provenance_revocation_revision,
+        const CertificateCheck& check)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+    {
+        const auto adapter = [&](const pq::BTCCReceipt& receipt,
+                                 const CBlockIndex& carrier) {
+            if (!check) {
+                return CChainLocksHandler::
+                    BTCCReceiptCertificateStatus::INVALID;
+            }
+            switch (check(receipt, carrier)) {
+            case CertificateStatus::VERIFIED:
+                return CChainLocksHandler::
+                    BTCCReceiptCertificateStatus::VERIFIED;
+            case CertificateStatus::MISSING:
+                return CChainLocksHandler::
+                    BTCCReceiptCertificateStatus::MISSING;
+            case CertificateStatus::INVALID:
+                return CChainLocksHandler::
+                    BTCCReceiptCertificateStatus::INVALID;
+            }
+            return CChainLocksHandler::
+                BTCCReceiptCertificateStatus::INVALID;
+        };
+        return CChainLocksHandler::
+            AdvanceLiveSigningValidationFrontier(
+                state.frontier, active_chain, target,
+                durable_predecessor, config, genesis_hash,
+                provenance_revocation_revision, adapter,
+                state.examined_blocks);
+    }
+
+    static bool HasExactTargetEndpoint(const CBlockIndex& target)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+    {
+        return CChainLocksHandler::
+            HasExactLiveSigningTargetEndpoint(target);
+    }
+
+    static int32_t ValidatedThrough(
+        const LiveSigningFrontier& state) noexcept
+    {
+        return state.frontier.validated_through_height;
+    }
+
+    static uint256 ValidatedThroughHash(
+        const LiveSigningFrontier& state)
+    {
+        return state.frontier.validated_through_hash;
+    }
+
+    static pq::ChainLockPredecessor DurablePredecessor(
+        const LiveSigningFrontier& state)
+    {
+        return state.frontier.durable_predecessor;
+    }
+
+    static bool SourceRevisionCurrent(uint64_t source_revision,
+                                      uint64_t current_revision)
+    {
+        CChainLocksHandler::CurrentSigningSource source;
+        source.provenance_revocation_revision = source_revision;
+        return CChainLocksHandler::
+            IsLiveSigningValidationRevisionCurrent(
+                source, current_revision);
+    }
+};
+
+} // namespace llmq::test
+
+namespace {
+
+struct LiveSigningIndexChain {
+    std::vector<uint256> hashes;
+    std::vector<CBlockIndex> indices;
+    CChain active;
+
+    explicit LiveSigningIndexChain(std::size_t count)
+        : hashes(count), indices(count)
+    {
+        for (std::size_t height{0}; height < count; ++height) {
+            hashes[height] = NonNullHash(100'000 + height);
+            CBlockIndex& index{indices[height]};
+            index.nHeight = static_cast<int32_t>(height);
+            index.phashBlock = &hashes[height];
+            index.pprev = height == 0 ? nullptr : &indices[height - 1];
+            index.nStatus = static_cast<BlockStatus>(
+                BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA |
+                BLOCK_PQ_BTCC_INDEX_VALIDATED |
+                BLOCK_PQ_RECEIPT_INDEX_VALIDATED |
+                (CSuperblock::IsValidBlockHeight(index.nHeight)
+                     ? BLOCK_GOVERNANCE_VALIDATED
+                     : 0));
+            index.BuildSkip();
+        }
+        active.SetTip(indices.back());
+    }
+
+    CBlockIndex& At(int32_t height)
+    {
+        return indices.at(static_cast<std::size_t>(height));
+    }
+
+    const CBlockIndex& At(int32_t height) const
+    {
+        return indices.at(static_cast<std::size_t>(height));
+    }
+
+    llmq::pq::ChainLockPredecessor Predecessor(int32_t height) const
+    {
+        return llmq::pq::ChainLockPredecessor{
+            height, At(height).GetBlockHash(), {}};
+    }
+
+    void SetReceiptStateFrom(int32_t height,
+                             const llmq::pq::BTCCReceiptState& state)
+    {
+        for (std::size_t offset{static_cast<std::size_t>(height)};
+             offset < indices.size(); ++offset) {
+            CBlockIndex& index{indices[offset]};
+            index.pqBTCCReceiptCursorHeight = state.cursor.sys_height;
+            index.pqBTCCReceiptCursorSysHash = state.cursor.sys_hash;
+            index.pqBTCCReceiptCursorBTCHash = state.cursor.btc_hash;
+            index.pqBTCCReceiptStateHash = state.cumulative_hash;
+        }
+    }
+
+    void ClearStatus(int32_t height, uint32_t status)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+    {
+        CBlockIndex& index{At(height)};
+        index.nStatus = static_cast<BlockStatus>(index.nStatus & ~status);
+    }
+
+    void SetStatus(int32_t height, uint32_t status)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+    {
+        CBlockIndex& index{At(height)};
+        index.nStatus = static_cast<BlockStatus>(index.nStatus | status);
+    }
+
+    void RehashFrom(int32_t height, uint64_t salt)
+    {
+        for (std::size_t offset{static_cast<std::size_t>(height)};
+             offset < hashes.size(); ++offset) {
+            hashes[offset] = NonNullHash(salt + offset);
+        }
+    }
+};
+
+llmq::pq::ChainLockFinalityStoreConfig LiveSigningFrontierConfig()
+{
+    auto config{CatchupStoreConfig()};
+    BOOST_REQUIRE(config.IsValid());
+    return config;
+}
+
+const auto ACCEPT_LIVE_SIGNING_CERTIFICATE = [](
+    const llmq::pq::BTCCReceipt&, const CBlockIndex&) {
+    return llmq::test::CChainLocksHandlerTestAccess::
+        CertificateStatus::VERIFIED;
+};
+
+} // namespace
+
 BOOST_FIXTURE_TEST_SUITE(pq_chainlock_handler_tests, BasicTestingSetup)
+
+BOOST_AUTO_TEST_CASE(
+    live_signing_frontier_retains_long_prefix_and_extends_only_delta)
+{
+    using Access = llmq::test::CChainLocksHandlerTestAccess;
+    const auto config{LiveSigningFrontierConfig()};
+    const uint256 genesis{NonNullHash(200'000)};
+    LiveSigningIndexChain chain{1'886};
+    Access::LiveSigningFrontier state;
+    const auto floor{chain.Predecessor(864)};
+
+    LOCK(cs_main);
+    chain.ClearStatus(1'880, BLOCK_HAVE_DATA);
+    chain.ClearStatus(1'880, BLOCK_PQ_BTCC_INDEX_VALIDATED);
+    BOOST_REQUIRE(Access::Advance(
+        state, chain.active, chain.At(1'880), floor, config, genesis,
+        /*provenance_revocation_revision=*/1,
+        ACCEPT_LIVE_SIGNING_CERTIFICATE));
+    BOOST_CHECK_EQUAL(state.examined_blocks, 1'016U);
+    BOOST_CHECK_EQUAL(Access::ValidatedThrough(state), 1'880);
+    BOOST_CHECK(!Access::HasExactTargetEndpoint(chain.At(1'880)));
+
+    const uint64_t after_initial{state.examined_blocks};
+    BOOST_REQUIRE(Access::Advance(
+        state, chain.active, chain.At(1'880), floor, config, genesis, 1,
+        ACCEPT_LIVE_SIGNING_CERTIFICATE));
+    BOOST_CHECK_EQUAL(state.examined_blocks, after_initial);
+
+    chain.SetStatus(1'880, BLOCK_HAVE_DATA);
+    BOOST_CHECK(!Access::HasExactTargetEndpoint(chain.At(1'880)));
+    BOOST_REQUIRE(Access::Advance(
+        state, chain.active, chain.At(1'880), floor, config, genesis, 1,
+        ACCEPT_LIVE_SIGNING_CERTIFICATE));
+    BOOST_CHECK_EQUAL(state.examined_blocks, after_initial);
+    chain.SetStatus(1'880, BLOCK_PQ_BTCC_INDEX_VALIDATED);
+    BOOST_CHECK(Access::HasExactTargetEndpoint(chain.At(1'880)));
+
+    BOOST_REQUIRE(Access::Advance(
+        state, chain.active, chain.At(1'885), floor, config, genesis, 1,
+        ACCEPT_LIVE_SIGNING_CERTIFICATE));
+    BOOST_CHECK_EQUAL(state.examined_blocks, after_initial + 5);
+    BOOST_CHECK_EQUAL(Access::ValidatedThrough(state), 1'885);
+}
+
+BOOST_AUTO_TEST_CASE(
+    live_signing_frontier_resumes_after_partial_provenance_and_governance)
+{
+    using Access = llmq::test::CChainLocksHandlerTestAccess;
+    const auto config{LiveSigningFrontierConfig()};
+    const uint256 genesis{NonNullHash(201'000)};
+
+    {
+        LiveSigningIndexChain chain{1'011};
+        Access::LiveSigningFrontier state;
+        const auto floor{chain.Predecessor(864)};
+
+        LOCK(cs_main);
+        chain.ClearStatus(1'001, BLOCK_PQ_RECEIPT_INDEX_VALIDATED);
+        BOOST_CHECK(!Access::Advance(
+            state, chain.active, chain.At(1'010), floor, config, genesis,
+            /*provenance_revocation_revision=*/1,
+            ACCEPT_LIVE_SIGNING_CERTIFICATE));
+        BOOST_CHECK_EQUAL(Access::ValidatedThrough(state), 1'000);
+        const uint64_t after_wait{state.examined_blocks};
+
+        chain.SetStatus(1'001, BLOCK_PQ_RECEIPT_INDEX_VALIDATED);
+        BOOST_REQUIRE(Access::Advance(
+            state, chain.active, chain.At(1'010), floor, config, genesis,
+            1, ACCEPT_LIVE_SIGNING_CERTIFICATE));
+        BOOST_CHECK_EQUAL(state.examined_blocks, after_wait + 10);
+    }
+
+    {
+        int32_t governance_height{865};
+        while (!CSuperblock::IsValidBlockHeight(governance_height)) {
+            ++governance_height;
+        }
+        LiveSigningIndexChain chain{
+            static_cast<std::size_t>(governance_height + 6)};
+        Access::LiveSigningFrontier state;
+        const auto floor{chain.Predecessor(864)};
+
+        LOCK(cs_main);
+        chain.ClearStatus(governance_height,
+                          BLOCK_GOVERNANCE_VALIDATED);
+        BOOST_CHECK(!Access::Advance(
+            state, chain.active, chain.At(governance_height + 5), floor,
+            config, genesis, 1, ACCEPT_LIVE_SIGNING_CERTIFICATE));
+        BOOST_CHECK_EQUAL(Access::ValidatedThrough(state),
+                          governance_height - 1);
+        const uint64_t after_wait{state.examined_blocks};
+
+        chain.SetStatus(governance_height,
+                        BLOCK_GOVERNANCE_VALIDATED);
+        BOOST_REQUIRE(Access::Advance(
+            state, chain.active, chain.At(governance_height + 5), floor,
+            config, genesis, 1, ACCEPT_LIVE_SIGNING_CERTIFICATE));
+        BOOST_CHECK_EQUAL(state.examined_blocks, after_wait + 6);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(
+    live_signing_frontier_resumes_at_exact_missing_btcc_certificate)
+{
+    using Access = llmq::test::CChainLocksHandlerTestAccess;
+    const auto config{LiveSigningFrontierConfig()};
+    const uint256 genesis{NonNullHash(202'000)};
+    LiveSigningIndexChain chain{891};
+    const auto floor{chain.Predecessor(864)};
+    CBlockIndex& source{chain.At(870)};
+    CBlockIndex& carrier{chain.At(880)};
+    source.btcpPrevCommitment = NonNullHash(202'100);
+
+    llmq::pq::BTCCReceipt receipt;
+    receipt.chainlock_target_height = source.nHeight;
+    receipt.chainlock_target_hash = source.GetBlockHash();
+    receipt.chainlock_logical_id = NonNullHash(202'200);
+    receipt.accepted_cursor = llmq::pq::BTCCursor{
+        source.nHeight, source.GetBlockHash(), source.btcpPrevCommitment};
+    const auto applied{llmq::pq::ApplyBTCCReceiptState(
+        genesis, config.chainlock_schedule, config.btcc_schedule,
+        carrier.nHeight, carrier.GetBlockHash(), {}, receipt)};
+    BOOST_REQUIRE(applied);
+    chain.SetReceiptStateFrom(carrier.nHeight, *applied);
+    carrier.pqBTCCReceiptLogicalId = receipt.chainlock_logical_id;
+
+    Access::LiveSigningFrontier state;
+    uint256 requested;
+    const auto missing = [&](const llmq::pq::BTCCReceipt& candidate,
+                             const CBlockIndex&) {
+        requested = candidate.chainlock_logical_id;
+        return Access::CertificateStatus::MISSING;
+    };
+
+    LOCK(cs_main);
+    BOOST_CHECK(!Access::Advance(
+        state, chain.active, chain.At(890), floor, config, genesis, 1,
+        missing));
+    BOOST_CHECK(requested == receipt.chainlock_logical_id);
+    BOOST_CHECK_EQUAL(Access::ValidatedThrough(state), 879);
+    const uint64_t after_missing{state.examined_blocks};
+
+    BOOST_REQUIRE(Access::Advance(
+        state, chain.active, chain.At(890), floor, config, genesis, 1,
+        ACCEPT_LIVE_SIGNING_CERTIFICATE));
+    BOOST_CHECK_EQUAL(state.examined_blocks, after_missing + 11);
+    const uint64_t after_verified{state.examined_blocks};
+
+    unsigned int unexpected_callbacks{0};
+    const auto evicted = [&](const llmq::pq::BTCCReceipt&,
+                             const CBlockIndex&) {
+        ++unexpected_callbacks;
+        return Access::CertificateStatus::MISSING;
+    };
+    BOOST_REQUIRE(Access::Advance(
+        state, chain.active, chain.At(890), floor, config, genesis, 1,
+        evicted));
+    BOOST_CHECK_EQUAL(unexpected_callbacks, 0U);
+    BOOST_CHECK_EQUAL(state.examined_blocks, after_verified);
+
+    Access::LiveSigningFrontier invalid_state;
+    const auto invalid = [](const llmq::pq::BTCCReceipt&,
+                            const CBlockIndex&) {
+        return Access::CertificateStatus::INVALID;
+    };
+    BOOST_CHECK(!Access::Advance(
+        invalid_state, chain.active, chain.At(890), floor, config,
+        genesis, 1, invalid));
+    BOOST_CHECK_EQUAL(Access::ValidatedThrough(invalid_state), 879);
+}
+
+BOOST_AUTO_TEST_CASE(
+    live_signing_frontier_rebases_and_resets_on_branch_or_floor_change)
+{
+    using Access = llmq::test::CChainLocksHandlerTestAccess;
+    const auto config{LiveSigningFrontierConfig()};
+    const uint256 genesis{NonNullHash(203'000)};
+    LiveSigningIndexChain chain{996};
+    Access::LiveSigningFrontier state;
+
+    LOCK(cs_main);
+    BOOST_REQUIRE(Access::Advance(
+        state, chain.active, chain.At(990), chain.Predecessor(864),
+        config, genesis, 1, ACCEPT_LIVE_SIGNING_CERTIFICATE));
+    BOOST_CHECK_EQUAL(state.examined_blocks, 126U);
+
+    BOOST_REQUIRE(Access::Advance(
+        state, chain.active, chain.At(990), chain.Predecessor(870),
+        config, genesis, 1, ACCEPT_LIVE_SIGNING_CERTIFICATE));
+    BOOST_CHECK_EQUAL(state.examined_blocks, 126U);
+    BOOST_CHECK(Access::DurablePredecessor(state) ==
+                chain.Predecessor(870));
+
+    BOOST_REQUIRE(Access::Advance(
+        state, chain.active, chain.At(995), chain.Predecessor(870),
+        config, genesis, 1, ACCEPT_LIVE_SIGNING_CERTIFICATE));
+    BOOST_CHECK_EQUAL(state.examined_blocks, 131U);
+
+    BOOST_REQUIRE(Access::Advance(
+        state, chain.active, chain.At(995), chain.Predecessor(865),
+        config, genesis, 1, ACCEPT_LIVE_SIGNING_CERTIFICATE));
+    BOOST_CHECK_EQUAL(state.examined_blocks, 261U);
+
+    BOOST_REQUIRE(Access::Advance(
+        state, chain.active, chain.At(990), chain.Predecessor(865),
+        config, genesis, 1, ACCEPT_LIVE_SIGNING_CERTIFICATE));
+    BOOST_CHECK_EQUAL(state.examined_blocks, 386U);
+
+    LiveSigningIndexChain fork{996};
+    fork.RehashFrom(950, 300'000);
+    BOOST_REQUIRE(Access::Advance(
+        state, fork.active, fork.At(990), fork.Predecessor(865), config,
+        genesis, 1, ACCEPT_LIVE_SIGNING_CERTIFICATE));
+    BOOST_CHECK_EQUAL(state.examined_blocks, 511U);
+    BOOST_CHECK(Access::ValidatedThroughHash(state) ==
+                fork.At(990).GetBlockHash());
+
+    Access::LiveSigningFrontier rebased;
+    chain.ClearStatus(900, BLOCK_PQ_RECEIPT_INDEX_VALIDATED);
+    BOOST_CHECK(!Access::Advance(
+        rebased, chain.active, chain.At(995), chain.Predecessor(864),
+        config, genesis, 1, ACCEPT_LIVE_SIGNING_CERTIFICATE));
+    BOOST_CHECK_EQUAL(Access::ValidatedThrough(rebased), 899);
+    const uint64_t before_rebase{rebased.examined_blocks};
+    BOOST_REQUIRE(Access::Advance(
+        rebased, chain.active, chain.At(995), chain.Predecessor(920),
+        config, genesis, 1, ACCEPT_LIVE_SIGNING_CERTIFICATE));
+    BOOST_CHECK_EQUAL(Access::ValidatedThrough(rebased), 995);
+    BOOST_CHECK(Access::DurablePredecessor(rebased) ==
+                chain.Predecessor(920));
+    BOOST_CHECK_EQUAL(rebased.examined_blocks, before_rebase + 75);
+}
+
+BOOST_AUTO_TEST_CASE(
+    live_signing_frontier_revision_revokes_same_hash_proof_and_source)
+{
+    using Access = llmq::test::CChainLocksHandlerTestAccess;
+    const auto config{LiveSigningFrontierConfig()};
+    const uint256 genesis{NonNullHash(204'000)};
+    LiveSigningIndexChain chain{981};
+    Access::LiveSigningFrontier state;
+    const auto floor{chain.Predecessor(864)};
+
+    LOCK(cs_main);
+    BOOST_REQUIRE(Access::Advance(
+        state, chain.active, chain.At(980), floor, config, genesis,
+        /*provenance_revocation_revision=*/7,
+        ACCEPT_LIVE_SIGNING_CERTIFICATE));
+    BOOST_CHECK_EQUAL(state.examined_blocks, 116U);
+    BOOST_REQUIRE(Access::Advance(
+        state, chain.active, chain.At(980), floor, config, genesis, 7,
+        ACCEPT_LIVE_SIGNING_CERTIFICATE));
+    BOOST_CHECK_EQUAL(state.examined_blocks, 116U);
+
+    BOOST_REQUIRE(Access::Advance(
+        state, chain.active, chain.At(980), floor, config, genesis,
+        /*provenance_revocation_revision=*/8,
+        ACCEPT_LIVE_SIGNING_CERTIFICATE));
+    BOOST_CHECK_EQUAL(state.examined_blocks, 232U);
+    BOOST_CHECK(Access::SourceRevisionCurrent(8, 8));
+    BOOST_CHECK(!Access::SourceRevisionCurrent(8, 9));
+}
 
 BOOST_AUTO_TEST_CASE(share_admission_gate_linearizes_lifecycle_and_health)
 {

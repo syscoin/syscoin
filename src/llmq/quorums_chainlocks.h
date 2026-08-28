@@ -26,6 +26,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <map>
 #include <optional>
@@ -37,6 +38,7 @@
 class BlockValidationState;
 class CBlock;
 class CBlockIndex;
+class CChain;
 class CConnman;
 class CDataStream;
 class CNode;
@@ -50,6 +52,10 @@ struct Params;
 }
 
 namespace llmq {
+
+namespace test {
+class CChainLocksHandlerTestAccess;
+}
 
 namespace pq {
 class PQPaymentProbationTransitionView;
@@ -601,6 +607,7 @@ public:
     void Stop()
         EXCLUSIVE_LOCKS_REQUIRED(!m_lifecycle_mutex,
                                  !m_share_lifecycle_mutex,
+                                 !m_context_build_mutex,
                                  !m_collector_mutex,
                                  !m_payment_audit_mutex,
                                  !m_pending_btcc_receipt_mutex,
@@ -837,6 +844,8 @@ public:
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
 private:
+    friend class test::CChainLocksHandlerTestAccess;
+
     enum class HistoricalAdmission : uint8_t {
         NONE = 0,
         CURRENT_CATCHUP,
@@ -889,6 +898,7 @@ private:
         uint64_t finality_store_revision{0};
         uint64_t roster_source_generation{0};
         uint64_t persistence_certificate_revision{0};
+        uint64_t provenance_revocation_revision{0};
         uint256 payment_audit_checkpoint_token;
         pq::ChainLockPredecessor durable_predecessor;
         pq::ChainLockSigningWindow window;
@@ -901,6 +911,20 @@ private:
 
         friend bool operator==(const CurrentSigningSource&,
                                const CurrentSigningSource&) = default;
+    };
+
+    /**
+     * Process-local proof of one fully checked active-chain suffix. A verified
+     * non-null carrier remains proven if its certificate leaves the bounded
+     * store: accepted certificates and this handler's config are immutable.
+     * Stop, branch changes, and provenance revocation discard the proof.
+     */
+    struct LiveSigningValidationFrontier {
+        bool initialized{false};
+        uint64_t provenance_revocation_revision{0};
+        pq::ChainLockPredecessor durable_predecessor;
+        int32_t validated_through_height{-1};
+        uint256 validated_through_hash;
     };
 
     struct CurrentSigningContexts {
@@ -1301,10 +1325,34 @@ private:
                                  !m_btcc_preseal_mutex);
     /** Build the exact live capability; only the private scheduler calls it. */
     [[nodiscard]] std::optional<CurrentSigningContexts>
-    BuildCurrentSigningContexts(uint64_t admission_generation) const
-        EXCLUSIVE_LOCKS_REQUIRED(!m_lookup_mutex,
+    BuildCurrentSigningContexts(uint64_t admission_generation)
+        EXCLUSIVE_LOCKS_REQUIRED(m_context_build_mutex,
+                                 !m_lookup_mutex,
                                  !m_needed_btcc_certificate_mutex,
                                  !m_btcc_preseal_mutex);
+    /**
+     * Extend a private proof over the active suffix. The certificate callback
+     * is production-owned; tests can inject only through the private friend.
+     */
+    [[nodiscard]] static bool AdvanceLiveSigningValidationFrontier(
+        LiveSigningValidationFrontier& frontier,
+        const CChain& active_chain,
+        const CBlockIndex& target,
+        const pq::ChainLockPredecessor& durable_predecessor,
+        const pq::ChainLockFinalityStoreConfig& config,
+        const uint256& genesis_hash,
+        uint64_t provenance_revocation_revision,
+        const std::function<BTCCReceiptCertificateStatus(
+            const pq::BTCCReceipt&, const CBlockIndex&)>&
+            certificate_status,
+        uint64_t& examined_blocks)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    [[nodiscard]] static bool IsLiveSigningValidationRevisionCurrent(
+        const CurrentSigningSource& source,
+        uint64_t provenance_revocation_revision) noexcept;
+    [[nodiscard]] static bool HasExactLiveSigningTargetEndpoint(
+        const CBlockIndex& target)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     [[nodiscard]] bool RefreshCurrentSigningContexts(
         uint64_t admission_generation)
         EXCLUSIVE_LOCKS_REQUIRED(!m_context_build_mutex,
@@ -1524,6 +1572,10 @@ private:
         GUARDED_BY(m_collector_mutex);
     uint64_t m_collector_generation GUARDED_BY(m_collector_mutex){0};
     Mutex m_context_build_mutex;
+    LiveSigningValidationFrontier m_live_signing_validation_frontier
+        GUARDED_BY(m_context_build_mutex);
+    uint64_t m_live_signing_validation_examined_blocks
+        GUARDED_BY(m_context_build_mutex){0};
     std::unique_ptr<CPQSignerJournal> m_signer_journal;
     Mutex m_signer_reconcile_mutex;
     Mutex m_share_signing_mutex;

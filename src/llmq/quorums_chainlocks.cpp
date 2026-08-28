@@ -2337,6 +2337,11 @@ void CChainLocksHandler::Stop()
         if (scheduler) scheduler->stop();
         if (thread && thread->joinable()) thread->join();
         {
+            LOCK(m_context_build_mutex);
+            m_live_signing_validation_frontier = {};
+            m_live_signing_validation_examined_blocks = 0;
+        }
+        {
             LOCK(m_collector_mutex);
             ResetCollectors();
         }
@@ -7033,9 +7038,166 @@ CChainLocksHandler::BuildHistoricalPreVerificationContext(
         roster_set, authorization_mask, expected};
 }
 
+bool CChainLocksHandler::HasExactLiveSigningTargetEndpoint(
+    const CBlockIndex& target)
+{
+    AssertLockHeld(cs_main);
+    constexpr uint32_t target_provenance{
+        BLOCK_PQ_BTCC_INDEX_VALIDATED |
+        BLOCK_PQ_RECEIPT_INDEX_VALIDATED};
+    return target.nHeight >= 0 &&
+           (target.nStatus & BLOCK_HAVE_DATA) &&
+           !(target.nStatus & BLOCK_FAILED_MASK) &&
+           !target.IsAssumedValid() &&
+           target.IsValid(BLOCK_VALID_SCRIPTS) &&
+           (target.nStatus & target_provenance) == target_provenance &&
+           (!CSuperblock::IsValidBlockHeight(target.nHeight) ||
+            (target.nStatus & BLOCK_GOVERNANCE_VALIDATED));
+}
+
+bool CChainLocksHandler::AdvanceLiveSigningValidationFrontier(
+    LiveSigningValidationFrontier& frontier,
+    const CChain& active_chain,
+    const CBlockIndex& target,
+    const pq::ChainLockPredecessor& durable_predecessor,
+    const pq::ChainLockFinalityStoreConfig& config,
+    const uint256& genesis_hash,
+    uint64_t provenance_revocation_revision,
+    const std::function<BTCCReceiptCertificateStatus(
+        const pq::BTCCReceipt&, const CBlockIndex&)>&
+        certificate_status,
+    uint64_t& examined_blocks)
+{
+    AssertLockHeld(cs_main);
+    if (!config.IsValid() || genesis_hash.IsNull() ||
+        durable_predecessor.height < 0 ||
+        durable_predecessor.height >= target.nHeight ||
+        durable_predecessor.block_hash.IsNull() ||
+        !durable_predecessor.btcc_cursor.IsStructurallyValid()) {
+        return false;
+    }
+    const CBlockIndex* active_floor{
+        active_chain[durable_predecessor.height]};
+    const CBlockIndex* active_target{active_chain[target.nHeight]};
+    if (active_floor == nullptr ||
+        active_floor->GetBlockHash() !=
+            durable_predecessor.block_hash ||
+        active_target != &target) {
+        return false;
+    }
+
+    const auto reset_to_floor = [&] {
+        frontier.initialized = true;
+        frontier.provenance_revocation_revision =
+            provenance_revocation_revision;
+        frontier.durable_predecessor = durable_predecessor;
+        frontier.validated_through_height =
+            durable_predecessor.height;
+        frontier.validated_through_hash =
+            durable_predecessor.block_hash;
+    };
+    if (!frontier.initialized) {
+        reset_to_floor();
+    } else {
+        const bool shape_valid{
+            frontier.durable_predecessor.height >= 0 &&
+            frontier.validated_through_height >=
+                frontier.durable_predecessor.height &&
+            !frontier.durable_predecessor.block_hash.IsNull() &&
+            !frontier.validated_through_hash.IsNull()};
+        const CBlockIndex* active_through{
+            shape_valid
+                ? active_chain[frontier.validated_through_height]
+                : nullptr};
+        const bool through_current{
+            active_through != nullptr &&
+            active_through->GetBlockHash() ==
+                frontier.validated_through_hash};
+        const bool exact_floor{
+            frontier.durable_predecessor == durable_predecessor};
+        const bool same_branch_floor_advance{
+            shape_valid && through_current &&
+            durable_predecessor.height >
+                frontier.durable_predecessor.height &&
+            active_chain[frontier.durable_predecessor.height] != nullptr &&
+            active_chain[frontier.durable_predecessor.height]
+                    ->GetBlockHash() ==
+                frontier.durable_predecessor.block_hash};
+        if (!shape_valid || !through_current ||
+            frontier.provenance_revocation_revision !=
+                provenance_revocation_revision ||
+            target.nHeight < frontier.validated_through_height ||
+            (!exact_floor && !same_branch_floor_advance)) {
+            reset_to_floor();
+        } else if (same_branch_floor_advance) {
+            frontier.durable_predecessor = durable_predecessor;
+            if (frontier.validated_through_height <
+                durable_predecessor.height) {
+                frontier.validated_through_height =
+                    durable_predecessor.height;
+                frontier.validated_through_hash =
+                    durable_predecessor.block_hash;
+            }
+        }
+    }
+
+    for (int32_t height{frontier.validated_through_height + 1};
+         height <= target.nHeight; ++height) {
+        if (examined_blocks != std::numeric_limits<uint64_t>::max()) {
+            ++examined_blocks;
+        }
+        const CBlockIndex* index{active_chain[height]};
+        if (index == nullptr || index->nHeight != height ||
+            (index->nStatus & BLOCK_FAILED_MASK) ||
+            index->IsAssumedValid() ||
+            !index->IsValid(BLOCK_VALID_SCRIPTS) ||
+            !HasFullReceiptIndexProvenance(*index) ||
+            (CSuperblock::IsValidBlockHeight(height) &&
+             !(index->nStatus & BLOCK_GOVERNANCE_VALIDATED))) {
+            return false;
+        }
+
+        if (pq::IsBTCCReceiptCarrierHeight(config.btcc_schedule,
+                                           height)) {
+            if (index->pprev == nullptr) return false;
+            const auto previous_state{
+                IndexedBTCCReceiptState(*index->pprev)};
+            const auto current_state{IndexedBTCCReceiptState(*index)};
+            const auto receipt{
+                previous_state && current_state
+                    ? pq::ReconstructBTCCReceipt(
+                          genesis_hash, config.chainlock_schedule,
+                          config.btcc_schedule, *index,
+                          *previous_state, *current_state,
+                          index->pqBTCCReceiptLogicalId)
+                    : std::optional<pq::BTCCReceipt>{}};
+            if (!receipt ||
+                (!receipt->IsNull() &&
+                 (!certificate_status ||
+                  certificate_status(*receipt, *index) !=
+                      BTCCReceiptCertificateStatus::VERIFIED))) {
+                return false;
+            }
+        }
+
+        frontier.validated_through_height = height;
+        frontier.validated_through_hash = index->GetBlockHash();
+    }
+    return frontier.validated_through_height == target.nHeight &&
+           frontier.validated_through_hash == target.GetBlockHash();
+}
+
+bool CChainLocksHandler::IsLiveSigningValidationRevisionCurrent(
+    const CurrentSigningSource& source,
+    uint64_t provenance_revocation_revision) noexcept
+{
+    return source.provenance_revocation_revision ==
+           provenance_revocation_revision;
+}
+
 std::optional<CChainLocksHandler::CurrentSigningContexts>
 CChainLocksHandler::BuildCurrentSigningContexts(
-    uint64_t admission_generation) const
+    uint64_t admission_generation)
 {
     if (!IsShareAdmissionGenerationCurrent(admission_generation) ||
         !m_config || !m_quorum_build_config || !m_store ||
@@ -7094,21 +7256,17 @@ CChainLocksHandler::BuildCurrentSigningContexts(
                   m_config->chainlock_schedule,
                   durable_predecessor.height, tip->nHeight)};
         if (tip == nullptr || !window) return std::nullopt;
+        const CChain& active_chain{m_chainman.ActiveChain()};
         const CBlockIndex* indexed_target{
-            tip->GetAncestor(window->target_height)};
+            active_chain[window->target_height]};
         const CBlockIndex* declared_predecessor{
-            indexed_target == nullptr
-                ? nullptr
-                : indexed_target->GetAncestor(
-                      window->declared_predecessor_height)};
-        if (indexed_target == nullptr || declared_predecessor == nullptr ||
-            !HasFullChainLockTargetValidation(*indexed_target,
-                                              durable_predecessor.height)) {
+            active_chain[window->declared_predecessor_height]};
+        if (indexed_target == nullptr || declared_predecessor == nullptr) {
             return std::nullopt;
         }
         if (durable_predecessor.height >= 0) {
             const CBlockIndex* predecessor_index{
-                indexed_target->GetAncestor(durable_predecessor.height)};
+                active_chain[durable_predecessor.height]};
             if (predecessor_index == nullptr ||
                 predecessor_index->GetBlockHash() !=
                     durable_predecessor.block_hash) {
@@ -7117,8 +7275,39 @@ CChainLocksHandler::BuildCurrentSigningContexts(
         } else if (!durable_predecessor.block_hash.IsNull()) {
             return std::nullopt;
         }
-        if (!AreBTCCReceiptsReadyForSigning(*indexed_target,
-                                            durable_predecessor.height)) {
+        const uint64_t provenance_revocation_revision{
+            m_chainman.GetPQProvenanceRevocationRevision()};
+        const auto certificate_status = [this](
+            const pq::BTCCReceipt& receipt,
+            const CBlockIndex& carrier)
+            EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+            const auto status{
+                CheckBTCCReceiptCertificate(receipt, carrier)};
+            if (status == BTCCReceiptCertificateStatus::VERIFIED) {
+                LOCK(m_needed_btcc_certificate_mutex);
+                if (m_needed_btcc_certificate ==
+                    receipt.chainlock_logical_id) {
+                    m_needed_btcc_certificate.reset();
+                    m_needed_btcc_last_request =
+                        std::chrono::microseconds{0};
+                }
+            } else if (status ==
+                       BTCCReceiptCertificateStatus::MISSING) {
+                LOCK(m_needed_btcc_certificate_mutex);
+                m_needed_btcc_certificate =
+                    receipt.chainlock_logical_id;
+            }
+            return status;
+        };
+        if (!AdvanceLiveSigningValidationFrontier(
+                m_live_signing_validation_frontier, active_chain,
+                *indexed_target, durable_predecessor, *m_config,
+                m_genesis_hash, provenance_revocation_revision,
+                certificate_status,
+                m_live_signing_validation_examined_blocks)) {
+            return std::nullopt;
+        }
+        if (!HasExactLiveSigningTargetEndpoint(*indexed_target)) {
             return std::nullopt;
         }
         const auto selected{SelectCurrentChainLockBTCC(
@@ -7150,6 +7339,8 @@ CChainLocksHandler::BuildCurrentSigningContexts(
         source.roster_source_generation = roster_source_generation;
         source.persistence_certificate_revision =
             persistence.certificate_revision;
+        source.provenance_revocation_revision =
+            provenance_revocation_revision;
         source.payment_audit_checkpoint_token =
             PaymentAuditCheckpointToken(payment_audit_checkpoint);
         source.durable_predecessor = durable_predecessor;
@@ -7292,9 +7483,6 @@ bool CChainLocksHandler::IsCurrentSigningSource(
         const auto payment_audit_state{target == nullptr
             ? std::optional<pq::PaymentAuditReceiptState>{}
             : IndexedPaymentAuditReceiptState(*target)};
-        constexpr uint32_t target_provenance{
-            BLOCK_PQ_BTCC_INDEX_VALIDATED |
-            BLOCK_PQ_RECEIPT_INDEX_VALIDATED};
         const bool durable_branch{
             source.durable_predecessor.height >= 0
                 ? durable_index != nullptr &&
@@ -7305,16 +7493,16 @@ bool CChainLocksHandler::IsCurrentSigningSource(
             !(m_chainman.IsSnapshotActive() &&
               !m_chainman.IsSnapshotValidated()) &&
             !IsPaymentAuditPresealActive() &&
+            IsLiveSigningValidationRevisionCurrent(
+                source,
+                m_chainman.GetPQProvenanceRevocationRevision()) &&
             window && *window == source.window && target != nullptr &&
             target->GetBlockHash() == source.target_hash &&
             declared_predecessor != nullptr &&
             declared_predecessor->GetBlockHash() ==
                 source.declared_predecessor_hash &&
-            durable_branch && (target->nStatus & BLOCK_HAVE_DATA) &&
-            !(target->nStatus & BLOCK_FAILED_MASK) &&
-            !target->IsAssumedValid() &&
-            target->IsValid(BLOCK_VALID_SCRIPTS) &&
-            (target->nStatus & target_provenance) == target_provenance &&
+            durable_branch &&
+            HasExactLiveSigningTargetEndpoint(*target) &&
             receipt_state &&
             *receipt_state == source.btcc_receipt_state &&
             payment_audit_state &&
