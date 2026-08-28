@@ -2279,6 +2279,111 @@ BOOST_AUTO_TEST_CASE(maintenance_retains_each_chainstate_random_access_window)
         representative_ancestor_height);
 }
 
+BOOST_AUTO_TEST_CASE(auxiliary_history_retention_plan_separates_authority)
+{
+    SelectParams(ChainType::MAIN);
+    LOCK(::cs_main);
+    auto& consensus{const_cast<Consensus::Params&>(Params().GetConsensus())};
+    struct RestoreAnchors {
+        Consensus::Params& consensus;
+        int chainlock_height{consensus.nPQChainLockAnchorHeight};
+        uint256 chainlock_hash{consensus.hashPQChainLockAnchorBlock};
+        int legacy_height{consensus.nPQLegacyAnchorHeight};
+        uint256 legacy_hash{consensus.hashPQLegacyAnchorBlock};
+        ~RestoreAnchors()
+        {
+            consensus.nPQChainLockAnchorHeight = chainlock_height;
+            consensus.hashPQChainLockAnchorBlock = chainlock_hash;
+            consensus.nPQLegacyAnchorHeight = legacy_height;
+            consensus.hashPQLegacyAnchorBlock = legacy_hash;
+        }
+    } restore{consensus};
+
+    const int start_height{consensus.DIP0003Height};
+    auto active_chain{BuildSnapshotIndexChain(start_height, 24)};
+    auto recovery_chain{BuildSnapshotIndexChain(start_height, 17)};
+    const int anchor_height{start_height + 5};
+    for (int height{anchor_height + 1};
+         height <= recovery_chain.Tip()->nHeight; ++height) {
+        recovery_chain.hashes[height - start_height].begin()[31] ^= 0x80;
+    }
+    consensus.nPQChainLockAnchorHeight = anchor_height;
+    consensus.hashPQChainLockAnchorBlock =
+        active_chain.At(anchor_height)->GetBlockHash();
+    consensus.nPQLegacyAnchorHeight = start_height + 2;
+    consensus.hashPQLegacyAnchorBlock =
+        active_chain.At(consensus.nPQLegacyAnchorHeight)->GetBlockHash();
+
+    CDeterministicMNManager manager(DBParams{
+        .path = "testdb_dmn_auxiliary_retention_plan",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    });
+    manager.UpdatedBlockTip(active_chain.Tip());
+    BOOST_CHECK_EQUAL(
+        manager.UpdateFinalitySnapshotRetentionFloor(start_height + 1),
+        start_height + 1);
+    const std::array<const CBlockIndex*, 1> recovery{
+        recovery_chain.Tip()};
+
+    auto plan{manager.GetAuxiliaryHistoryRetentionPlanForTesting(recovery)};
+    BOOST_CHECK(plan.requirements_valid);
+    BOOST_CHECK(plan.finality_health_ambiguous);
+    BOOST_CHECK(!plan.destructive_authorization);
+    BOOST_CHECK(!plan.AllowsDestructiveGC());
+    BOOST_REQUIRE_EQUAL(plan.branches.size(), 2U);
+    BOOST_CHECK(plan.branches.front().active);
+    BOOST_CHECK_EQUAL(plan.branches.front().snapshot_window.size(), 24U);
+    BOOST_CHECK(!plan.branches.back().active);
+    BOOST_CHECK_EQUAL(plan.branches.back().snapshot_window.size(), 17U);
+    BOOST_REQUIRE_EQUAL(plan.fixed_dependencies.size(), 1U);
+    BOOST_CHECK_EQUAL(plan.fixed_dependencies.front().height,
+                      consensus.nPQLegacyAnchorHeight);
+
+    const CDeterministicMNManager::AuxiliaryHistoryGCAuthorization anchor{
+        CDeterministicMNManager::AuxiliaryHistoryGCAuthorizationSource::
+            IMMUTABLE_CHAINLOCK_ANCHOR,
+        {anchor_height, consensus.hashPQChainLockAnchorBlock}};
+    manager.UpdateFinalitySnapshotPublicationRetention(true);
+    BOOST_REQUIRE(manager.UpdateAuxiliaryHistoryGCAuthorization(
+        anchor, /*release_publication=*/true));
+    plan = manager.GetAuxiliaryHistoryRetentionPlanForTesting(recovery);
+    BOOST_CHECK(!plan.finality_publication_pending);
+    BOOST_CHECK(!plan.finality_health_ambiguous);
+    BOOST_CHECK(plan.AllowsDestructiveGC());
+
+    BOOST_CHECK_EQUAL(
+        manager.UpdateReplaySnapshotRetentionFloor(start_height),
+        start_height);
+    plan = manager.GetAuxiliaryHistoryRetentionPlanForTesting(recovery);
+    BOOST_CHECK(plan.replay_floor);
+    BOOST_CHECK(!plan.AllowsDestructiveGC());
+    manager.UpdateReplaySnapshotRetentionFloor(std::nullopt);
+
+    manager.BeginFinalitySnapshotVerificationRetention();
+    plan = manager.GetAuxiliaryHistoryRetentionPlanForTesting(recovery);
+    BOOST_CHECK(plan.finality_verification_active);
+    BOOST_CHECK(!plan.AllowsDestructiveGC());
+    manager.EndFinalitySnapshotVerificationRetention();
+
+    const int winner_height{anchor_height + 5};
+    const CDeterministicMNManager::AuxiliaryHistoryGCAuthorization winner{
+        CDeterministicMNManager::AuxiliaryHistoryGCAuthorizationSource::
+            ENFORCED_DURABLE_CHAINLOCK,
+        {winner_height,
+         active_chain.At(winner_height)->GetBlockHash()}};
+    BOOST_REQUIRE(
+        manager.UpdateAuxiliaryHistoryGCAuthorization(winner));
+    BOOST_REQUIRE(
+        manager.UpdateAuxiliaryHistoryGCAuthorization(std::nullopt));
+    BOOST_CHECK(!manager.UpdateAuxiliaryHistoryGCAuthorization(anchor));
+    plan = manager.GetAuxiliaryHistoryRetentionPlanForTesting(recovery);
+    BOOST_CHECK(!plan.destructive_authorization);
+    BOOST_CHECK(plan.finality_health_ambiguous);
+    BOOST_CHECK(!plan.AllowsDestructiveGC());
+}
+
 BOOST_AUTO_TEST_CASE(finality_floor_skips_retained_values_before_decoding)
 {
     SelectParams(ChainType::MAIN);

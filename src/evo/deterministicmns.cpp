@@ -140,36 +140,30 @@ int64_t ElapsedMillis(const std::chrono::steady_clock::time_point& start)
         .count();
 }
 
-void CollectRetainedSnapshotHashes(
+std::vector<uint256> CollectRetainedSnapshotWindow(
     const CBlockIndex* tip,
-    std::vector<uint256>& ordered_hashes,
-    EvoEraseSet& retained_hashes)
+    bool& structurally_valid)
 {
     const auto& consensus = Params().GetConsensus();
+    std::vector<uint256> ordered_hashes;
+    ordered_hashes.reserve(CDeterministicMNManager::LIST_CACHE_SIZE);
+    const CBlockIndex* previous{nullptr};
     for (const CBlockIndex* pindex = tip;
          pindex != nullptr &&
          pindex->nHeight >= consensus.DIP0003Height &&
          ordered_hashes.size() < CDeterministicMNManager::LIST_CACHE_SIZE;
          pindex = pindex->pprev) {
+        if (previous != nullptr &&
+            (previous->pprev != pindex ||
+             previous->nHeight != pindex->nHeight + 1)) {
+            structurally_valid = false;
+            break;
+        }
         const uint256 block_hash = pindex->GetBlockHash();
         ordered_hashes.emplace_back(block_hash);
-        retained_hashes.insert(block_hash);
+        previous = pindex;
     }
-
-    // SYSCOIN: A genesis-active deployment has one exact base snapshot that
-    // cannot be reproduced by ConnectBlock. Keep this single record outside
-    // the bounded hot window; ordinary historical snapshots remain subject to
-    // pruning.
-    if (consensus.DIP0003Height == 0) {
-        retained_hashes.insert(consensus.hashGenesisBlock);
-    }
-
-    if (consensus.nPQLegacyAnchorHeight != std::numeric_limits<int>::max() &&
-        tip != nullptr && tip->nHeight >= consensus.nPQLegacyAnchorHeight) {
-        if (const CBlockIndex* anchor = tip->GetAncestor(consensus.nPQLegacyAnchorHeight)) {
-            retained_hashes.insert(anchor->GetBlockHash());
-        }
-    }
+    return ordered_hashes;
 }
 
 bool CollectPersistedKeysOutsideWindow(
@@ -3031,6 +3025,144 @@ bool CDeterministicMNManager::IsDIP3Enforced(int nHeight)
     return nHeight >= Params().GetConsensus().DIP0003EnforcementHeight;
 }
 
+CDeterministicMNManager::AuxiliaryHistoryRetentionPlan
+CDeterministicMNManager::BuildAuxiliaryHistoryRetentionPlan(
+    const CBlockIndex* tip,
+    std::span<const CBlockIndex* const> recovery_snapshot_indexes) const
+{
+    AssertLockHeld(cs);
+    AuxiliaryHistoryRetentionPlan plan;
+    plan.destructive_authorization =
+        m_auxiliary_history_gc_authorization;
+    if (m_finality_snapshot_retention_floor !=
+        std::numeric_limits<int>::max()) {
+        plan.finality_roster_floor =
+            m_finality_snapshot_retention_floor;
+    }
+    if (m_replay_snapshot_retention_floor !=
+        std::numeric_limits<int>::max()) {
+        plan.replay_floor = m_replay_snapshot_retention_floor;
+    }
+    plan.finality_verification_active =
+        m_finality_snapshot_verifications_in_flight != 0;
+    plan.finality_publication_pending =
+        m_finality_snapshot_publication_pending;
+    plan.generation = m_replay_snapshot_retention_generation;
+
+    const auto& consensus{Params().GetConsensus()};
+    bool requirements_valid{true};
+    std::unordered_set<uint256, StaticSaltedHasher> observed_heads;
+    const auto add_branch = [&](const CBlockIndex* head, bool active) {
+        if (head == nullptr ||
+            head->nHeight < consensus.DIP0003Height ||
+            !observed_heads.emplace(head->GetBlockHash()).second) {
+            requirements_valid &= head != nullptr;
+            return;
+        }
+        bool window_valid{true};
+        auto window{CollectRetainedSnapshotWindow(head, window_valid)};
+        requirements_valid &= window_valid && !window.empty();
+        if (window.empty()) return;
+        const CBlockIndex* floor{head->GetAncestor(
+            head->nHeight - static_cast<int32_t>(window.size()) + 1)};
+        if (floor == nullptr ||
+            floor->GetBlockHash() != window.back()) {
+            requirements_valid = false;
+            return;
+        }
+        plan.branches.push_back(AuxiliaryHistoryBranchRequirement{
+            .active = active,
+            .head = {head->nHeight, head->GetBlockHash()},
+            .random_access_floor = {
+                floor->nHeight, floor->GetBlockHash()},
+            .snapshot_window = std::move(window),
+        });
+    };
+    add_branch(tip, /*active=*/true);
+    for (const CBlockIndex* recovery : recovery_snapshot_indexes) {
+        add_branch(recovery, /*active=*/false);
+    }
+
+    const auto retain_fixed_dependency = [&](int32_t height,
+                                              const uint256& hash) {
+        if (height < 0 || hash.IsNull()) {
+            requirements_valid = false;
+            return;
+        }
+        for (const auto& dependency : plan.fixed_dependencies) {
+            if (dependency.height == height) {
+                requirements_valid &= dependency.block_hash == hash;
+                return;
+            }
+        }
+        plan.fixed_dependencies.push_back({height, hash});
+    };
+    if (consensus.DIP0003Height == 0) {
+        retain_fixed_dependency(0, consensus.hashGenesisBlock);
+    }
+    if (consensus.nPQLegacyAnchorHeight !=
+        std::numeric_limits<int>::max()) {
+        for (const auto& branch : plan.branches) {
+            if (branch.head.height < consensus.nPQLegacyAnchorHeight) {
+                continue;
+            }
+            const CBlockIndex* head_index{nullptr};
+            if (tip != nullptr &&
+                tip->GetBlockHash() == branch.head.block_hash) {
+                head_index = tip;
+            } else {
+                for (const CBlockIndex* recovery :
+                     recovery_snapshot_indexes) {
+                    if (recovery != nullptr &&
+                        recovery->GetBlockHash() == branch.head.block_hash) {
+                        head_index = recovery;
+                        break;
+                    }
+                }
+            }
+            const CBlockIndex* anchor{head_index == nullptr
+                ? nullptr
+                : head_index->GetAncestor(
+                      consensus.nPQLegacyAnchorHeight)};
+            if (anchor == nullptr) {
+                requirements_valid = false;
+                continue;
+            }
+            retain_fixed_dependency(anchor->nHeight,
+                                    anchor->GetBlockHash());
+            requirements_valid &=
+                anchor->GetBlockHash() ==
+                consensus.hashPQLegacyAnchorBlock;
+        }
+    }
+
+    bool authorization_active{false};
+    if (plan.destructive_authorization && tip != nullptr) {
+        const auto& authorized{plan.destructive_authorization->block};
+        const CBlockIndex* active_authorizer{
+            authorized.height <= tip->nHeight
+                ? tip->GetAncestor(authorized.height)
+                : nullptr};
+        authorization_active =
+            active_authorizer != nullptr &&
+            active_authorizer->GetBlockHash() == authorized.block_hash;
+    }
+    plan.requirements_valid = requirements_valid;
+    plan.finality_health_ambiguous =
+        !authorization_active;
+    return plan;
+}
+
+CDeterministicMNManager::AuxiliaryHistoryRetentionPlan
+CDeterministicMNManager::GetAuxiliaryHistoryRetentionPlanForTesting(
+    std::span<const CBlockIndex* const> recovery_snapshot_indexes)
+{
+    LOCK(m_evoDb->cs);
+    LOCK(cs);
+    return BuildAuxiliaryHistoryRetentionPlan(
+        tipIndex, recovery_snapshot_indexes);
+}
+
 bool CDeterministicMNManager::DoMaintenance(
     bool bForceFlush,
     bool fSync,
@@ -3104,20 +3236,17 @@ bool CDeterministicMNManager::DoMaintenance(
         return true;
     };
     const CBlockIndex* tip{nullptr};
-    int replay_retention_floor{std::numeric_limits<int>::max()};
-    int finality_retention_floor{std::numeric_limits<int>::max()};
-    bool retain_all_finality_snapshots{false};
-    uint64_t replay_retention_generation{0};
+    AuxiliaryHistoryRetentionPlan retention_plan;
     {
         LOCK(cs);
         tip = tipIndex;
-        replay_retention_floor = m_replay_snapshot_retention_floor;
-        finality_retention_floor = m_finality_snapshot_retention_floor;
-        retain_all_finality_snapshots =
-            m_finality_snapshot_verifications_in_flight != 0 ||
-            m_finality_snapshot_publication_pending;
-        replay_retention_generation =
-            m_replay_snapshot_retention_generation;
+        retention_plan = BuildAuxiliaryHistoryRetentionPlan(
+            tip, recovery_indexes);
+    }
+    if (!retention_plan.requirements_valid) {
+        LogPrintf("%s -- invalid auxiliary-history retention requirements\n",
+                  __func__);
+        return false;
     }
     if (tip == nullptr) {
         const size_t cache_entry_count{m_evoDb->GetReadWriteCacheSize()};
@@ -3158,20 +3287,17 @@ bool CDeterministicMNManager::DoMaintenance(
     }
 
     std::vector<uint256> retained_hashes_ordered;
-    retained_hashes_ordered.reserve(LIST_CACHE_SIZE);
     EvoEraseSet retained_hashes;
     retained_hashes.reserve(LIST_CACHE_SIZE * 2 + recovery_hashes.size());
-    CollectRetainedSnapshotHashes(tip, retained_hashes_ordered, retained_hashes);
-    // Shared DMN storage serves every initialized chainstate. Background
-    // validation and fork-local roster lookups need the same bounded random-
-    // access ancestry as the active tip, including around crash-visible
-    // CoinsDB heads. Only the active window below is warmed into memory.
-    for (const CBlockIndex* recovery_index : recovery_indexes) {
-        if (recovery_index->GetBlockHash() == tip_hash) continue;
-        std::vector<uint256> recovery_window;
-        recovery_window.reserve(LIST_CACHE_SIZE);
-        CollectRetainedSnapshotHashes(
-            recovery_index, recovery_window, retained_hashes);
+    for (const auto& branch : retention_plan.branches) {
+        retained_hashes.insert(branch.snapshot_window.begin(),
+                               branch.snapshot_window.end());
+        if (branch.active) {
+            retained_hashes_ordered = branch.snapshot_window;
+        }
+    }
+    for (const auto& dependency : retention_plan.fixed_dependencies) {
+        retained_hashes.insert(dependency.block_hash);
     }
 
     LogPrint(BCLog::SYS,
@@ -3195,9 +3321,11 @@ bool CDeterministicMNManager::DoMaintenance(
 
     std::vector<uint256> prune_keys;
     size_t persisted_snapshot_count{0};
-    const bool retain_replay_snapshots{
-        replay_retention_floor != std::numeric_limits<int>::max()};
-    if (retain_replay_snapshots || retain_all_finality_snapshots) {
+    const bool retain_all_finality_snapshots{
+        retention_plan.finality_verification_active ||
+        retention_plan.finality_publication_pending};
+    if (retention_plan.replay_floor ||
+        retain_all_finality_snapshots) {
         // SYSCOIN: A replay marker can protect both active and prospective
         // branches. Skipping disk pruning while it exists preserves every
         // fork-local DMN snapshot without warming the bounded read cache. An
@@ -3209,9 +3337,7 @@ bool CDeterministicMNManager::DoMaintenance(
         persisted_snapshot_count = static_cast<size_t>(count);
     } else if (!CollectPersistedKeysOutsideWindow(
                    *m_evoDb, retained_hashes,
-                   finality_retention_floor == std::numeric_limits<int>::max()
-                       ? std::nullopt
-                       : std::optional<int32_t>{finality_retention_floor},
+                   retention_plan.finality_roster_floor,
                    prune_keys,
                    persisted_snapshot_count)) {
         return false;
@@ -3248,7 +3374,7 @@ bool CDeterministicMNManager::DoMaintenance(
     {
         LOCK(cs);
         if (m_replay_snapshot_retention_generation ==
-            replay_retention_generation) {
+            retention_plan.generation) {
             m_last_maintained_tip = tip_hash;
             m_last_maintained_recovery_blocks = recovery_hashes;
         } else {
@@ -3262,8 +3388,10 @@ bool CDeterministicMNManager::DoMaintenance(
              tip_hash.ToString(),
              persisted_snapshot_count,
              prune_keys.size(),
-             replay_retention_floor,
-             finality_retention_floor,
+             retention_plan.replay_floor.value_or(
+                 std::numeric_limits<int>::max()),
+             retention_plan.finality_roster_floor.value_or(
+                 std::numeric_limits<int>::max()),
              retain_all_finality_snapshots,
              m_evoDb->GetReadCacheSize(),
              should_initialize_hot_cache,
@@ -3370,6 +3498,86 @@ void CDeterministicMNManager::UpdateFinalitySnapshotPublicationRetention(
     // shortcut. Arming follows any already-running prune; releasing permits
     // accumulated fork snapshots to be compacted immediately.
     m_last_maintained_tip.SetNull();
+}
+
+bool CDeterministicMNManager::UpdateAuxiliaryHistoryGCAuthorization(
+    std::optional<AuxiliaryHistoryGCAuthorization> authorization,
+    bool release_publication)
+{
+    LOCK(cs);
+    const auto mark_changed = [&]() EXCLUSIVE_LOCKS_REQUIRED(cs) {
+        ++m_replay_snapshot_retention_generation;
+        m_last_maintained_tip.SetNull();
+    };
+    const auto reject = [&]() EXCLUSIVE_LOCKS_REQUIRED(cs) {
+        if (m_auxiliary_history_gc_authorization) {
+            m_auxiliary_history_gc_authorization.reset();
+            mark_changed();
+        }
+        return false;
+    };
+    if (!authorization) {
+        if (release_publication) return false;
+        if (m_auxiliary_history_gc_authorization) {
+            m_auxiliary_history_gc_authorization.reset();
+            mark_changed();
+        }
+        return true;
+    }
+
+    const auto& consensus{Params().GetConsensus()};
+    const AuxiliaryHistoryBlockIdentity block{authorization->block};
+    const bool configured_anchor{
+        consensus.nPQChainLockAnchorHeight >= consensus.DIP0003Height &&
+        consensus.nPQChainLockAnchorHeight !=
+            std::numeric_limits<int>::max() &&
+        !consensus.hashPQChainLockAnchorBlock.IsNull()};
+    if (!configured_anchor || !block.IsValid()) return reject();
+    switch (authorization->source) {
+    case AuxiliaryHistoryGCAuthorizationSource::
+        IMMUTABLE_CHAINLOCK_ANCHOR:
+        if (block.height != consensus.nPQChainLockAnchorHeight ||
+            block.block_hash != consensus.hashPQChainLockAnchorBlock) {
+            return reject();
+        }
+        break;
+    case AuxiliaryHistoryGCAuthorizationSource::
+        ENFORCED_DURABLE_CHAINLOCK:
+        if (block.height < consensus.nPQChainLockAnchorHeight) {
+            return reject();
+        }
+        break;
+    }
+
+    if (m_auxiliary_history_gc_high_watermark) {
+        const auto& high{m_auxiliary_history_gc_high_watermark->block};
+        if (block.height < high.height ||
+            (block.height == high.height &&
+             block.block_hash != high.block_hash)) {
+            return reject();
+        }
+        if (block.height == high.height) {
+            authorization = m_auxiliary_history_gc_high_watermark;
+        }
+    } else {
+        m_auxiliary_history_gc_high_watermark = authorization;
+    }
+    if (!m_auxiliary_history_gc_high_watermark ||
+        block.height >
+            m_auxiliary_history_gc_high_watermark->block.height) {
+        m_auxiliary_history_gc_high_watermark = authorization;
+    }
+
+    bool changed{
+        m_auxiliary_history_gc_authorization != authorization};
+    m_auxiliary_history_gc_authorization = std::move(authorization);
+    if (release_publication &&
+        m_finality_snapshot_publication_pending) {
+        m_finality_snapshot_publication_pending = false;
+        changed = true;
+    }
+    if (changed) mark_changed();
+    return true;
 }
 bool CDeterministicMNManager::HasPersistentWindow() const
 {

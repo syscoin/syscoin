@@ -620,6 +620,70 @@ public:
 class CDeterministicMNManager
 {
 public:
+    enum class AuxiliaryHistoryGCAuthorizationSource : uint8_t {
+        IMMUTABLE_CHAINLOCK_ANCHOR = 0,
+        ENFORCED_DURABLE_CHAINLOCK,
+    };
+
+    struct AuxiliaryHistoryBlockIdentity {
+        int32_t height{-1};
+        uint256 block_hash;
+
+        [[nodiscard]] bool IsValid() const noexcept
+        {
+            return height >= 0 && !block_hash.IsNull();
+        }
+
+        friend bool operator==(const AuxiliaryHistoryBlockIdentity&,
+                               const AuxiliaryHistoryBlockIdentity&) = default;
+    };
+
+    struct AuxiliaryHistoryGCAuthorization {
+        AuxiliaryHistoryGCAuthorizationSource source{
+            AuxiliaryHistoryGCAuthorizationSource::IMMUTABLE_CHAINLOCK_ANCHOR};
+        AuxiliaryHistoryBlockIdentity block;
+
+        friend bool operator==(const AuxiliaryHistoryGCAuthorization&,
+                               const AuxiliaryHistoryGCAuthorization&) = default;
+    };
+
+    struct AuxiliaryHistoryBranchRequirement {
+        bool active{false};
+        AuxiliaryHistoryBlockIdentity head;
+        AuxiliaryHistoryBlockIdentity random_access_floor;
+        std::vector<uint256> snapshot_window;
+    };
+
+    /**
+     * SYSCOIN: One immutable maintenance observation for both append-only
+     * auxiliary histories. Finality authorizes destruction; branch windows,
+     * roster floors, and fixed anchors independently describe what survives.
+     */
+    struct AuxiliaryHistoryRetentionPlan {
+        std::optional<AuxiliaryHistoryGCAuthorization>
+            destructive_authorization;
+        std::optional<int32_t> replay_floor;
+        std::optional<int32_t> finality_roster_floor;
+        std::vector<AuxiliaryHistoryBranchRequirement> branches;
+        std::vector<AuxiliaryHistoryBlockIdentity> fixed_dependencies;
+        bool finality_verification_active{false};
+        bool finality_publication_pending{false};
+        bool requirements_valid{false};
+        bool finality_health_ambiguous{true};
+        uint64_t generation{0};
+
+        [[nodiscard]] bool AllowsDestructiveGC() const noexcept
+        {
+            return destructive_authorization.has_value() &&
+                   finality_roster_floor.has_value() && !branches.empty() &&
+                   !replay_floor.has_value() &&
+                   !finality_verification_active &&
+                   !finality_publication_pending &&
+                   requirements_valid &&
+                   !finality_health_ambiguous;
+        }
+    };
+
     struct InverseJournalEntryStatsForTesting {
         size_t serialized_size{0};
         size_t added_mns{0};
@@ -703,6 +767,13 @@ private:
     size_t m_finality_snapshot_verifications_in_flight GUARDED_BY(cs){0};
     bool m_finality_snapshot_publication_pending GUARDED_BY(cs){false};
     uint64_t m_replay_snapshot_retention_generation GUARDED_BY(cs){0};
+    // SYSCOIN: These process-local values are admission proofs, not persisted
+    // deletion metadata. Physical GC must rederive durable authority and
+    // validate each retained database boundary before publishing tombstones.
+    std::optional<AuxiliaryHistoryGCAuthorization>
+        m_auxiliary_history_gc_authorization GUARDED_BY(cs);
+    std::optional<AuxiliaryHistoryGCAuthorization>
+        m_auxiliary_history_gc_high_watermark GUARDED_BY(cs);
     DBParams m_pq_registry_db_params;
     // SYSCOIN: The registry is immutable after successful publication. A
     // once-flag models that lifetime directly and avoids imposing a private
@@ -733,6 +804,11 @@ private:
     bool EnsureRetainedSnapshotWindow(
         const CBlockIndex* tip,
         const CDeterministicMNList& tip_list);
+    [[nodiscard]] AuxiliaryHistoryRetentionPlan
+    BuildAuxiliaryHistoryRetentionPlan(
+        const CBlockIndex* tip,
+        std::span<const CBlockIndex* const> recovery_snapshot_indexes) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs);
     bool GetPQPaymentEligibleProTxHashes(
         const CBlockIndex* pindex,
         llmq::pq::PQPaymentEligibleProTxHashesPtr& eligible) const;
@@ -920,6 +996,19 @@ public:
         EXCLUSIVE_LOCKS_REQUIRED(!cs);
     /** SYSCOIN: Retain all branches until durable finality is active. */
     void UpdateFinalitySnapshotPublicationRetention(bool retain)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    /**
+     * SYSCOIN: Publish only an exact active finality decision already proven
+     * by the ChainLock handler. Null marks finality health as ambiguous.
+     */
+    [[nodiscard]] bool UpdateAuxiliaryHistoryGCAuthorization(
+        std::optional<AuxiliaryHistoryGCAuthorization> authorization,
+        bool release_publication = false)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    /** SYSCOIN: Observe the immutable plan without granting erase authority. */
+    [[nodiscard]] AuxiliaryHistoryRetentionPlan
+    GetAuxiliaryHistoryRetentionPlanForTesting(
+        std::span<const CBlockIndex* const> recovery_snapshot_indexes = {})
         EXCLUSIVE_LOCKS_REQUIRED(!cs);
 private:
     const CDeterministicMNList GetListForBlockInternal(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(!cs);

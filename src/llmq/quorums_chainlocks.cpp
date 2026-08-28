@@ -2222,10 +2222,15 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
     UpdateDurableChainLockAuxiliaryRetention();
     if (deterministicMNManager) {
         // SYSCOIN: A recreated handler must both restore a pending durable
-        // publication before startup pruning and clear a stale prior-handler
-        // hold when no certificate remains to import.
-        deterministicMNManager->UpdateFinalitySnapshotPublicationRetention(
-            IsPersistedChainLockPending());
+        // publication before startup pruning and revoke any process-local GC
+        // authority until this handler reproves the exact active winner or
+        // immutable anchor.
+        (void)deterministicMNManager
+            ->UpdateAuxiliaryHistoryGCAuthorization(std::nullopt);
+        if (IsPersistedChainLockPending()) {
+            deterministicMNManager
+                ->UpdateFinalitySnapshotPublicationRetention(true);
+        }
     }
 
     bool loaded_preseal{false};
@@ -2446,6 +2451,10 @@ bool CChainLocksHandler::IsQuorumRosterSourceGenerationCurrent(
 void CChainLocksHandler::DisableShareAdmission() noexcept
 {
     m_share_admission_gate.Fail();
+    if (deterministicMNManager) {
+        (void)deterministicMNManager
+            ->UpdateAuxiliaryHistoryGCAuthorization(std::nullopt);
+    }
 }
 
 uint64_t CChainLocksHandler::GetShareAdmissionGeneration() const noexcept
@@ -4933,11 +4942,24 @@ void CChainLocksHandler::UpdateDurableChainLockAuxiliaryRetention()
         inspect(durable.unsealed_btcc);
     }
     if (!found_durable && m_config) {
-        // SYSCOIN: Before the first winner, retain every validated branch at
-        // or above the release-pinned finality anchor. Older roster snapshots
-        // are common ancestry and remain covered by the ordinary active
-        // window when an admissible first target can still require them.
-        floor = m_config->anchor.height;
+        // SYSCOIN: The anchor authorizes finality, but the first admissible
+        // winner authenticates older registration cutoffs. Keep that roster
+        // requirement separate from the future destructive-GC authority.
+        const auto first_target{m_quorum_build_config
+            ? pq::NextEligibleChainLockTargetHeight(
+                  m_quorum_build_config->schedule,
+                  m_config->anchor.height)
+            : std::nullopt};
+        const auto first_roster_floor{first_target && m_quorum_build_config
+            ? OldestRosterSnapshotHeight(
+                  *m_quorum_build_config, *first_target)
+            : std::nullopt};
+        if (!first_roster_floor) {
+            valid = false;
+        } else {
+            floor = std::min(m_config->anchor.height,
+                             *first_roster_floor);
+        }
     }
     if (!valid) {
         // A durable certificate without reconstructible roster coordinates
@@ -4967,31 +4989,78 @@ void CChainLocksHandler::MaybeReleaseFinalitySnapshotPublicationRetention()
     const bool persisted_pending{WITH_LOCK(m_persisted_mutex, return
         m_pending_persisted.has_value() ||
         m_pending_persisted_unsealed_btcc.has_value() ||
+        m_persisted_best_auth_pending ||
+        m_persisted_unsealed_auth_pending ||
         m_persisted_invalid;)};
-    if (!deterministicMNManager || m_persistence_failed.load() ||
-        persisted_pending || !m_persistence || !m_store) {
+    const bool healthy{
+        deterministicMNManager && m_config && m_quorum_build_config &&
+        m_persistence && m_store && m_payment_audit_store &&
+        m_payment_audit_staging_store &&
+        m_payment_audit_store->IsHealthy() &&
+        m_payment_audit_staging_store->IsHealthy() &&
+        !m_persistence_failed.load() && m_enforced.load() &&
+        !persisted_pending};
+    if (!healthy) {
+        if (deterministicMNManager) {
+            (void)deterministicMNManager
+                ->UpdateAuxiliaryHistoryGCAuthorization(std::nullopt);
+        }
         return;
     }
 
-    const auto durable_best{m_persistence->GetFinalityState().best};
+    const auto durable_state{m_persistence->GetFinalityState()};
+    const auto& durable_best{durable_state.best};
     const auto accepted_best{m_store->GetBestRecord()};
-    if (!durable_best || !accepted_best ||
-        *durable_best != accepted_best->metadata) {
+    CDeterministicMNManager::AuxiliaryHistoryGCAuthorization authorization;
+    if (durable_best) {
+        if (!accepted_best ||
+            *durable_best != accepted_best->metadata ||
+            !durable_best->IsInternallyConsistent(m_genesis_hash)) {
+            (void)deterministicMNManager
+                ->UpdateAuxiliaryHistoryGCAuthorization(std::nullopt);
+            return;
+        }
+        authorization.source = CDeterministicMNManager::
+            AuxiliaryHistoryGCAuthorizationSource::
+                ENFORCED_DURABLE_CHAINLOCK;
+        authorization.block = {
+            durable_best->statement.height,
+            durable_best->statement.block_hash};
+    } else {
+        // An unsealed BTCC record affects roster retention only. Before the
+        // first enforced winner, destruction is authorized solely by the
+        // release-pinned ChainLock anchor.
+        if (accepted_best || !m_config->anchor.IsStructurallyValid()) {
+            (void)deterministicMNManager
+                ->UpdateAuxiliaryHistoryGCAuthorization(std::nullopt);
+            return;
+        }
+        authorization.source = CDeterministicMNManager::
+            AuxiliaryHistoryGCAuthorizationSource::
+                IMMUTABLE_CHAINLOCK_ANCHOR;
+        authorization.block = {
+            m_config->anchor.height,
+            m_config->anchor.block_hash};
+    }
+
+    const bool authorizer_active{WITH_LOCK(cs_main, {
+        const CBlockIndex* active{
+            m_chainman.ActiveChain()[authorization.block.height]};
+        return active != nullptr &&
+               active->GetBlockHash() == authorization.block.block_hash;
+    })};
+    if (!authorizer_active) {
+        (void)deterministicMNManager
+            ->UpdateAuxiliaryHistoryGCAuthorization(std::nullopt);
         return;
     }
 
-    const bool durable_best_active{WITH_LOCK(cs_main, {
-        const CBlockIndex* active{
-            m_chainman.ActiveChain()[durable_best->statement.height]};
-        return active != nullptr &&
-               active->GetBlockHash() == durable_best->statement.block_hash;
-    })};
-    if (durable_best_active) {
-        // SYSCOIN: Only a fully imported winner proven on the active chain may
-        // release the all-branch publication hold. Numeric value-aware
-        // retention continues to protect every still-admissible branch.
-        deterministicMNManager->UpdateFinalitySnapshotPublicationRetention(
-            false);
+    // SYSCOIN: The same barrier publishes exact finality authority and releases
+    // the all-branch hold, so maintenance cannot observe one without the other.
+    if (!deterministicMNManager->UpdateAuxiliaryHistoryGCAuthorization(
+            authorization, /*release_publication=*/true)) {
+        m_persistence_failed.store(true);
+        DisableShareAdmission();
     }
 }
 
@@ -12176,7 +12245,12 @@ void CChainLocksHandler::EnforceBestChainLock()
     if (!m_enforced.load()) return;
     if (!m_store || !m_config) return;
     const auto record{m_store->GetBestRecord()};
-    if (!record) return;
+    if (!record) {
+        // The immutable anchor is already the enforced finality reference
+        // before the first accepted winner.
+        MaybeReleaseFinalitySnapshotPublicationRetention();
+        return;
+    }
     uint256 threshold_attested_witness;
     {
         LOCK(m_persisted_mutex);
@@ -12259,8 +12333,6 @@ void CChainLocksHandler::EnforceBestChainLock()
             best, provenance)) {
         return;
     }
-    MaybeReleaseFinalitySnapshotPublicationRetention();
-    MaybeCheckpointPaymentAuditPreseal(record->metadata);
     const bool enforced_on_active{WITH_LOCK(cs_main, {
         const CBlockIndex* tip{m_chainman.ActiveTip()};
         return tip != nullptr && tip->nHeight >= best->nHeight &&
@@ -12270,6 +12342,8 @@ void CChainLocksHandler::EnforceBestChainLock()
         LOCK(m_persisted_mutex);
         m_persisted_best_auth_pending = false;
     }
+    MaybeReleaseFinalitySnapshotPublicationRetention();
+    MaybeCheckpointPaymentAuditPreseal(record->metadata);
 }
 
 void CChainLocksHandler::NotifyHeaderTip(const CBlockIndex*)
