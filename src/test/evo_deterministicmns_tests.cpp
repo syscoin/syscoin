@@ -23,13 +23,16 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <future>
 #include <initializer_list>
 #include <limits>
 #include <memory>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -2382,6 +2385,98 @@ BOOST_AUTO_TEST_CASE(auxiliary_history_retention_plan_separates_authority)
     BOOST_CHECK(!plan.destructive_authorization);
     BOOST_CHECK(plan.finality_health_ambiguous);
     BOOST_CHECK(!plan.AllowsDestructiveGC());
+}
+
+BOOST_AUTO_TEST_CASE(auxiliary_retention_plan_allows_null_tip_flush)
+{
+    SelectParams(ChainType::MAIN);
+    const int height{Params().GetConsensus().DIP0003Height};
+    CDeterministicMNManager manager(DBParams{
+        .path = "testdb_dmn_auxiliary_null_tip",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    });
+    manager.m_evoDb->WriteCache(MakeSnapshotKey(height),
+                                MakeSnapshot(height));
+
+    const auto plan{
+        manager.GetAuxiliaryHistoryRetentionPlanForTesting()};
+    BOOST_CHECK(plan.requirements_valid);
+    BOOST_CHECK(plan.branches.empty());
+    BOOST_CHECK(!plan.AllowsDestructiveGC());
+    BOOST_REQUIRE(manager.FlushCacheToDisk(/*bForceFlush=*/true));
+    CDeterministicMNList persisted;
+    BOOST_REQUIRE(manager.m_evoDb->Read(MakeSnapshotKey(height), persisted));
+    BOOST_CHECK_EQUAL(persisted.GetHeight(), height);
+}
+
+BOOST_AUTO_TEST_CASE(auxiliary_retention_mutators_share_maintenance_barrier)
+{
+    SelectParams(ChainType::MAIN);
+    LOCK(::cs_main);
+    auto& consensus{const_cast<Consensus::Params&>(Params().GetConsensus())};
+    struct RestoreAnchor {
+        Consensus::Params& consensus;
+        int height{consensus.nPQChainLockAnchorHeight};
+        uint256 hash{consensus.hashPQChainLockAnchorBlock};
+        ~RestoreAnchor()
+        {
+            consensus.nPQChainLockAnchorHeight = height;
+            consensus.hashPQChainLockAnchorBlock = hash;
+        }
+    } restore{consensus};
+    const int anchor_height{consensus.DIP0003Height + 5};
+    const uint256 anchor_hash{MakeSnapshotKey(anchor_height)};
+    consensus.nPQChainLockAnchorHeight = anchor_height;
+    consensus.hashPQChainLockAnchorBlock = anchor_hash;
+
+    CDeterministicMNManager manager(DBParams{
+        .path = "testdb_dmn_auxiliary_retention_barrier",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    });
+    const auto expect_serialized = [&](auto operation) {
+        std::promise<void> entered;
+        std::promise<void> completed;
+        auto entered_future{entered.get_future()};
+        auto completed_future{completed.get_future()};
+        std::thread worker;
+        bool blocked{false};
+        {
+            LOCK(manager.m_evoDb->cs);
+            worker = std::thread([&] {
+                entered.set_value();
+                operation();
+                completed.set_value();
+            });
+            entered_future.wait();
+            blocked = completed_future.wait_for(
+                std::chrono::milliseconds{50}) ==
+                std::future_status::timeout;
+        }
+        completed_future.wait();
+        worker.join();
+        BOOST_CHECK(blocked);
+    };
+
+    expect_serialized([&] {
+        (void)manager.UpdateReplaySnapshotRetentionFloor(anchor_height);
+    });
+    expect_serialized([&] {
+        (void)manager.UpdateFinalitySnapshotRetentionFloor(anchor_height);
+    });
+    expect_serialized([&] {
+        const CDeterministicMNManager::AuxiliaryHistoryGCAuthorization
+            authorization{
+                CDeterministicMNManager::
+                    AuxiliaryHistoryGCAuthorizationSource::
+                        IMMUTABLE_CHAINLOCK_ANCHOR,
+                {anchor_height, anchor_hash}};
+        (void)manager.UpdateAuxiliaryHistoryGCAuthorization(
+            authorization);
+    });
 }
 
 BOOST_AUTO_TEST_CASE(finality_floor_skips_retained_values_before_decoding)

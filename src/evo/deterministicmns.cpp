@@ -3053,10 +3053,12 @@ CDeterministicMNManager::BuildAuxiliaryHistoryRetentionPlan(
     bool requirements_valid{true};
     std::unordered_set<uint256, StaticSaltedHasher> observed_heads;
     const auto add_branch = [&](const CBlockIndex* head, bool active) {
-        if (head == nullptr ||
-            head->nHeight < consensus.DIP0003Height ||
+        if (head == nullptr) {
+            requirements_valid &= active;
+            return;
+        }
+        if (head->nHeight < consensus.DIP0003Height ||
             !observed_heads.emplace(head->GetBlockHash()).second) {
-            requirements_valid &= head != nullptr;
             return;
         }
         bool window_valid{true};
@@ -3429,6 +3431,7 @@ bool CDeterministicMNManager::FlushPendingSnapshotsToDisk(bool fSync)
 int CDeterministicMNManager::UpdateReplaySnapshotRetentionFloor(
     std::optional<int32_t> floor)
 {
+    LOCK(m_evoDb->cs);
     LOCK(cs);
     const int disabled{std::numeric_limits<int>::max()};
     const int requested{
@@ -3450,6 +3453,7 @@ int CDeterministicMNManager::UpdateReplaySnapshotRetentionFloor(
 int CDeterministicMNManager::UpdateFinalitySnapshotRetentionFloor(
     std::optional<int32_t> floor)
 {
+    LOCK(m_evoDb->cs);
     LOCK(cs);
     const int next{
         floor ? std::max<int>(*floor, Params().GetConsensus().DIP0003Height)
@@ -3504,6 +3508,9 @@ bool CDeterministicMNManager::UpdateAuxiliaryHistoryGCAuthorization(
     std::optional<AuxiliaryHistoryGCAuthorization> authorization,
     bool release_publication)
 {
+    // SYSCOIN: A retention mutation cannot race a maintenance pass after it
+    // samples the immutable plan but before it publishes erase tombstones.
+    LOCK(m_evoDb->cs);
     LOCK(cs);
     const auto mark_changed = [&]() EXCLUSIVE_LOCKS_REQUIRED(cs) {
         ++m_replay_snapshot_retention_generation;

@@ -11213,7 +11213,6 @@ bool CChainLocksHandler::ProcessNewChainLockInternal(
         m_peerman.RelayInv(inventory);
         CompletePeerResponse(from, logical_id);
         ForgetAllRequests(logical_id);
-        MaybeReleaseFinalitySnapshotPublicationRetention();
         RefreshPQHistoryAuthState();
         LogPrint(BCLog::CHAINLOCKS,
                  "CChainLocksHandler::%s accepted archived receipt ADVANCE "
@@ -12368,6 +12367,7 @@ void CChainLocksHandler::CheckActiveState()
 {
     bool configured{false};
     bool pending{false};
+    bool verification_available{false};
     while (true) {
         const ShareAdmissionGate::Observation observation{
             m_share_admission_gate.Observe()};
@@ -12378,8 +12378,7 @@ void CChainLocksHandler::CheckActiveState()
             m_payment_audit_staging_store->IsHealthy();
         const bool operational{AreChainLocksEnabled()};
         pending = IsPersistedChainLockPending();
-        const bool verification_available{
-            IsChainLockVerificationAvailable()};
+        verification_available = IsChainLockVerificationAvailable();
         if (m_share_admission_gate.TryPublishEnabled(
                 observation, verification_available && operational)) {
             break;
@@ -12391,8 +12390,17 @@ void CChainLocksHandler::CheckActiveState()
     // The pre-seal gates signing and Geth delivery above; base ChainLock
     // enforcement starts immediately so a PoW fork cannot strand the seal on
     // an incompatible branch while Geth is offline.
-    m_enforced.store(ShouldEnforceDurableChainLock(
-        configured, pending, HasNEVMReplayObligation()));
+    const bool enforce{ShouldEnforceDurableChainLock(
+        configured, pending, HasNEVMReplayObligation())};
+    m_enforced.store(enforce);
+    if (deterministicMNManager &&
+        (!configured || !verification_available || !enforce)) {
+        // SYSCOIN: Backend health can fail without passing through the share
+        // gate's permanent-failure path. Revoke process-local erase authority
+        // while leaving the already durable finality decision fail-closed.
+        (void)deterministicMNManager
+            ->UpdateAuxiliaryHistoryGCAuthorization(std::nullopt);
+    }
 }
 
 bool CChainLocksHandler::GetCLSIGFromPeers()
