@@ -282,6 +282,7 @@ bool ReconstructParentFromInverse(
     error.clear();
     return true;
 }
+
 } // namespace
 
 bool CDeterministicMNListInverse::IsStructurallyValid() const
@@ -501,11 +502,39 @@ bool CDeterministicMNManager::LoadAndVerifyInverseJournal(
     const CDeterministicMNList& child_list,
     CDeterministicMNList& parent_list)
 {
+    return LoadAndVerifyInverseJournalInternal(
+        child, child_list, parent_list, /*exact_disk_for_gc=*/false);
+}
+
+bool CDeterministicMNManager::LoadAndVerifyInverseJournalExactForGC(
+    const CBlockIndex* child,
+    const CDeterministicMNList& child_list,
+    CDeterministicMNList& parent_list)
+{
+    return LoadAndVerifyInverseJournalInternal(
+        child, child_list, parent_list, /*exact_disk_for_gc=*/true);
+}
+
+bool CDeterministicMNManager::LoadAndVerifyInverseJournalInternal(
+    const CBlockIndex* child,
+    const CDeterministicMNList& child_list,
+    CDeterministicMNList& parent_list,
+    bool exact_disk_for_gc)
+{
     if (child == nullptr || child->pprev == nullptr) return false;
 
     try {
+        using InverseDB = CEvoDB<
+            uint256, CDeterministicMNListInverse, StaticSaltedHasher>;
+        const auto read_inverse = [&](const uint256& key,
+                                      CDeterministicMNListInverse& inverse) {
+            return exact_disk_for_gc
+                ? m_inverse_journal->ReadExactDiskForGC(key, inverse) ==
+                      InverseDB::ExactDiskReadResult::FOUND
+                : m_inverse_journal->ReadCache(key, inverse);
+        };
         CDeterministicMNListInverse inverse;
-        if (!m_inverse_journal->ReadCache(child->GetBlockHash(), inverse)) {
+        if (!read_inverse(child->GetBlockHash(), inverse)) {
             LogPrintf("%s -- missing deterministic-MN inverse coverage at "
                       "height=%d block=%s; reindex is required\n",
                       __func__, child->nHeight,
@@ -526,8 +555,7 @@ bool CDeterministicMNManager::LoadAndVerifyInverseJournal(
             }
         } else {
             CDeterministicMNListInverse parent_inverse;
-            if (!m_inverse_journal->ReadCache(inverse.parent_hash,
-                                              parent_inverse) ||
+            if (!read_inverse(inverse.parent_hash, parent_inverse) ||
                 !parent_inverse.IsStructurallyValid() ||
                 parent_inverse.genesis_hash != inverse.genesis_hash ||
                 parent_inverse.coverage_base_height !=
@@ -2955,6 +2983,18 @@ bool CDeterministicMNManager::CorruptInverseJournalForTesting(
                                            /*fSync=*/true);
 }
 
+bool CDeterministicMNManager::AppendInverseJournalTrailingByteForTesting(
+    const uint256& child_hash)
+{
+    return m_inverse_journal->AppendTrailingValueByteForTesting(child_hash);
+}
+
+bool CDeterministicMNManager::RewriteExactInverseJournalValueForTesting(
+    const uint256& child_hash)
+{
+    return m_inverse_journal->RewriteExactValueForTesting(child_hash);
+}
+
 bool CDeterministicMNManager::GetInverseJournalEntryStatsForTesting(
     const uint256& child_hash,
     InverseJournalEntryStatsForTesting& stats)
@@ -3161,6 +3201,244 @@ CDeterministicMNManager::BuildAuxiliaryHistoryRetentionPlan(
     return plan;
 }
 
+CDeterministicMNManager::DMNInverseGCBoundary
+CDeterministicMNManager::DeriveDMNInverseGCBoundary(
+    const CBlockIndex* tip,
+    std::span<const CBlockIndex* const> recovery_snapshot_indexes,
+    const AuxiliaryHistoryRetentionPlan& plan)
+{
+    AssertLockHeld(m_evoDb->cs);
+    AssertLockHeld(cs);
+    DMNInverseGCBoundary derived;
+    try {
+        const auto& consensus{Params().GetConsensus()};
+        if (!plan.AllowsDestructiveGC() || tip == nullptr ||
+            tip->nHeight < consensus.DIP0003Height ||
+            !plan.destructive_authorization ||
+            !plan.destructive_authorization->IsValid()) {
+            return derived;
+        }
+
+        struct MappedBranch {
+            const CBlockIndex* head;
+            const CBlockIndex* floor;
+        };
+        std::vector<MappedBranch> mapped_branches;
+        mapped_branches.reserve(plan.branches.size());
+        bool found_active{false};
+        for (const auto& branch : plan.branches) {
+            const CBlockIndex* head{nullptr};
+            if (branch.active) {
+                if (found_active) return derived;
+                found_active = true;
+                head = tip;
+            } else {
+                for (const CBlockIndex* recovery :
+                     recovery_snapshot_indexes) {
+                    if (recovery != nullptr &&
+                        recovery->nHeight == branch.head.height &&
+                        recovery->GetBlockHash() ==
+                            branch.head.block_hash) {
+                        head = recovery;
+                        break;
+                    }
+                }
+            }
+            if (head == nullptr || head->nHeight != branch.head.height ||
+                head->GetBlockHash() != branch.head.block_hash ||
+                branch.snapshot_window.empty() ||
+                branch.snapshot_window.size() > LIST_CACHE_SIZE ||
+                branch.snapshot_window.front() != branch.head.block_hash ||
+                branch.snapshot_window.back() !=
+                    branch.random_access_floor.block_hash ||
+                branch.random_access_floor.height <
+                    consensus.DIP0003Height ||
+                branch.random_access_floor.height > head->nHeight ||
+                static_cast<uint64_t>(
+                    head->nHeight - branch.random_access_floor.height + 1) !=
+                    branch.snapshot_window.size()) {
+                return derived;
+            }
+            const CBlockIndex* floor{
+                head->GetAncestor(branch.random_access_floor.height)};
+            if (floor == nullptr ||
+                floor->GetBlockHash() !=
+                    branch.random_access_floor.block_hash) {
+                return derived;
+            }
+            mapped_branches.push_back({head, floor});
+        }
+        if (!found_active || mapped_branches.empty()) return derived;
+
+        const auto& authorization{plan.destructive_authorization->block};
+        const CBlockIndex* authorizer{
+            authorization.height <= tip->nHeight
+                ? tip->GetAncestor(authorization.height)
+                : nullptr};
+        if (authorizer == nullptr ||
+            authorizer->GetBlockHash() != authorization.block_hash ||
+            authorization.height < consensus.DIP0003Height) {
+            return derived;
+        }
+
+        const CBlockIndex* common_ancestor{mapped_branches.front().head};
+        const CBlockIndex* common_base{
+            common_ancestor->GetAncestor(consensus.DIP0003Height)};
+        if (common_base == nullptr) return derived;
+        for (std::size_t i{1}; i < mapped_branches.size(); ++i) {
+            if (mapped_branches[i].head->GetAncestor(
+                    consensus.DIP0003Height) != common_base) {
+                return derived;
+            }
+            common_ancestor = LastCommonAncestor(
+                common_ancestor, mapped_branches[i].head);
+            if (common_ancestor == nullptr ||
+                common_ancestor->nHeight < consensus.DIP0003Height) {
+                return derived;
+            }
+        }
+
+        int32_t boundary_height{
+            std::min(authorization.height, common_ancestor->nHeight)};
+        const MappedBranch* minimum_floor_branch{&mapped_branches.front()};
+        for (std::size_t i{0}; i < mapped_branches.size(); ++i) {
+            const auto& branch{plan.branches[i]};
+            boundary_height = std::min(
+                boundary_height, branch.random_access_floor.height);
+            if (mapped_branches[i].floor->nHeight <
+                minimum_floor_branch->floor->nHeight) {
+                minimum_floor_branch = &mapped_branches[i];
+            }
+        }
+        // SYSCOIN: The roster floor gates snapshot availability but does not
+        // constrain sequential inverse rollback, so it is deliberately not a
+        // boundary input.
+        if (boundary_height < consensus.DIP0003Height) return derived;
+
+        const CBlockIndex* boundary_index{
+            tip->GetAncestor(boundary_height)};
+        if (boundary_index == nullptr) return derived;
+        for (const auto& branch : mapped_branches) {
+            const CBlockIndex* branch_boundary{
+                branch.head->GetAncestor(boundary_height)};
+            if (branch_boundary != boundary_index ||
+                branch_boundary->GetBlockHash() !=
+                    boundary_index->GetBlockHash()) {
+                return derived;
+            }
+        }
+        derived.boundary = AuxiliaryHistoryBlockIdentity{
+            boundary_height, boundary_index->GetBlockHash()};
+        if (boundary_height == consensus.DIP0003Height) {
+            derived.status = DMNInverseGCBoundaryStatus::NO_OP;
+            return derived;
+        }
+
+        const CBlockIndex* floor{minimum_floor_branch->floor};
+        if (floor->nHeight < boundary_height ||
+            floor->nHeight - boundary_height > LIST_CACHE_SIZE) {
+            return derived;
+        }
+        CDeterministicMNList boundary_list;
+        using SnapshotDB = CEvoDB<
+            uint256, CDeterministicMNList, StaticSaltedHasher>;
+        if (m_evoDb->ReadExactDiskForGC(
+                floor->GetBlockHash(), boundary_list) !=
+                SnapshotDB::ExactDiskReadResult::FOUND ||
+            boundary_list.IsNull() ||
+            boundary_list.GetHeight() != floor->nHeight ||
+            boundary_list.GetBlockHash() != floor->GetBlockHash()) {
+            return derived;
+        }
+        const CBlockIndex* cursor{floor};
+        while (cursor->nHeight > boundary_height) {
+            if (cursor->pprev == nullptr ||
+                cursor->pprev->nHeight != cursor->nHeight - 1) {
+                return derived;
+            }
+            CDeterministicMNList parent;
+            if (!LoadAndVerifyInverseJournalExactForGC(
+                    cursor, boundary_list, parent)) {
+                return derived;
+            }
+            boundary_list = std::move(parent);
+            cursor = cursor->pprev;
+        }
+        if (cursor != boundary_index || boundary_list.IsNull() ||
+            boundary_list.GetHeight() != boundary_height ||
+            boundary_list.GetBlockHash() !=
+                boundary_index->GetBlockHash()) {
+            return derived;
+        }
+        const uint256 boundary_state_hash{
+            boundary_list.GetOrComputePQLegacyStateHash(
+                consensus.hashGenesisBlock)};
+        if (boundary_state_hash.IsNull()) return derived;
+
+        CDeterministicMNList existing_boundary;
+        const auto existing_result{m_evoDb->ReadExactDiskForGC(
+            boundary_index->GetBlockHash(), existing_boundary)};
+        if (existing_result == SnapshotDB::ExactDiskReadResult::FOUND) {
+            if (existing_boundary.IsNull() ||
+                existing_boundary.GetHeight() != boundary_height ||
+                existing_boundary.GetBlockHash() !=
+                    boundary_index->GetBlockHash() ||
+                existing_boundary.GetOrComputePQLegacyStateHash(
+                    consensus.hashGenesisBlock) != boundary_state_hash ||
+                ::SerializeHash(existing_boundary) !=
+                    ::SerializeHash(boundary_list)) {
+                return derived;
+            }
+        } else if (existing_result ==
+                   SnapshotDB::ExactDiskReadResult::BLOCKED) {
+            return derived;
+        }
+
+        using InverseDB = CEvoDB<
+            uint256, CDeterministicMNListInverse, StaticSaltedHasher>;
+        CDeterministicMNListInverse boundary_inverse;
+        if (m_inverse_journal->ReadExactDiskForGC(
+                boundary_index->GetBlockHash(), boundary_inverse) !=
+                InverseDB::ExactDiskReadResult::FOUND ||
+            !boundary_inverse.IsStructurallyValid() ||
+            boundary_inverse.genesis_hash != consensus.hashGenesisBlock ||
+            boundary_inverse.coverage_base_height !=
+                consensus.DIP0003Height ||
+            boundary_inverse.child_height != boundary_height ||
+            boundary_inverse.child_hash !=
+                boundary_index->GetBlockHash() ||
+            boundary_inverse.child_state_hash != boundary_state_hash) {
+            return derived;
+        }
+        CDeterministicMNList boundary_parent;
+        if (!LoadAndVerifyInverseJournalExactForGC(
+                boundary_index, boundary_list, boundary_parent)) {
+            return derived;
+        }
+
+        const evo::DMNInverseGCClosure closure{
+            evo::DMNInverseGCClosure::FORMAT_GUARD,
+            evo::DMNInverseGCClosure::VERSION,
+            *derived.boundary,
+            boundary_state_hash,
+            boundary_inverse.history_commitment,
+            ::SerializeHash(boundary_inverse)};
+        const auto payload{evo::EncodeDMNInverseGCClosure(closure)};
+        if (!payload) return derived;
+        evo::AuxiliaryHistoryGCComponent component{
+            evo::DMNInverseGCClosure::VERSION,
+            static_cast<uint64_t>(boundary_height), *payload};
+        if (!component.IsValid()) return derived;
+        derived.component = std::move(component);
+        derived.status = DMNInverseGCBoundaryStatus::READY;
+        return derived;
+    } catch (const std::exception&) {
+        derived.status = DMNInverseGCBoundaryStatus::BLOCKED;
+        derived.component.reset();
+        return derived;
+    }
+}
+
 CDeterministicMNManager::AuxiliaryHistoryRetentionPlan
 CDeterministicMNManager::GetAuxiliaryHistoryRetentionPlanForTesting(
     std::span<const CBlockIndex* const> recovery_snapshot_indexes)
@@ -3169,6 +3447,18 @@ CDeterministicMNManager::GetAuxiliaryHistoryRetentionPlanForTesting(
     LOCK(cs);
     return BuildAuxiliaryHistoryRetentionPlan(
         tipIndex, recovery_snapshot_indexes);
+}
+
+CDeterministicMNManager::DMNInverseGCBoundary
+CDeterministicMNManager::GetDMNInverseGCBoundaryForTesting(
+    std::span<const CBlockIndex* const> recovery_snapshot_indexes)
+{
+    LOCK(m_evoDb->cs);
+    LOCK(cs);
+    const auto plan{BuildAuxiliaryHistoryRetentionPlan(
+        tipIndex, recovery_snapshot_indexes)};
+    return DeriveDMNInverseGCBoundary(
+        tipIndex, recovery_snapshot_indexes, plan);
 }
 
 bool CDeterministicMNManager::DoMaintenance(

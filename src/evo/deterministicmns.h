@@ -665,6 +665,19 @@ public:
         }
     };
 
+    enum class DMNInverseGCBoundaryStatus : uint8_t {
+        BLOCKED = 0,
+        NO_OP,
+        READY,
+    };
+
+    struct DMNInverseGCBoundary {
+        DMNInverseGCBoundaryStatus status{
+            DMNInverseGCBoundaryStatus::BLOCKED};
+        std::optional<AuxiliaryHistoryBlockIdentity> boundary;
+        std::optional<evo::AuxiliaryHistoryGCComponent> component;
+    };
+
     struct InverseJournalEntryStatsForTesting {
         size_t serialized_size{0};
         size_t added_mns{0};
@@ -786,6 +799,15 @@ private:
         const CBlockIndex* child,
         const CDeterministicMNList& child_list,
         CDeterministicMNList& parent_list);
+    bool LoadAndVerifyInverseJournalExactForGC(
+        const CBlockIndex* child,
+        const CDeterministicMNList& child_list,
+        CDeterministicMNList& parent_list);
+    bool LoadAndVerifyInverseJournalInternal(
+        const CBlockIndex* child,
+        const CDeterministicMNList& child_list,
+        CDeterministicMNList& parent_list,
+        bool exact_disk_for_gc);
     bool EnsureRetainedSnapshotWindow(
         const CBlockIndex* tip,
         const CDeterministicMNList& tip_list);
@@ -794,6 +816,11 @@ private:
         const CBlockIndex* tip,
         std::span<const CBlockIndex* const> recovery_snapshot_indexes) const
         EXCLUSIVE_LOCKS_REQUIRED(cs);
+    [[nodiscard]] DMNInverseGCBoundary DeriveDMNInverseGCBoundary(
+        const CBlockIndex* tip,
+        std::span<const CBlockIndex* const> recovery_snapshot_indexes,
+        const AuxiliaryHistoryRetentionPlan& plan)
+        EXCLUSIVE_LOCKS_REQUIRED(m_evoDb->cs, cs);
     bool GetPQPaymentEligibleProTxHashes(
         const CBlockIndex* pindex,
         llmq::pq::PQPaymentEligibleProTxHashesPtr& eligible) const;
@@ -960,6 +987,10 @@ public:
         EXCLUSIVE_LOCKS_REQUIRED(!cs);
     /** Inject a self-consistent but semantically wrong parent hash in tests. */
     bool CorruptInverseJournalForTesting(const uint256& child_hash);
+    bool AppendInverseJournalTrailingByteForTesting(
+        const uint256& child_hash);
+    bool RewriteExactInverseJournalValueForTesting(
+        const uint256& child_hash);
     bool GetInverseJournalEntryStatsForTesting(
         const uint256& child_hash,
         InverseJournalEntryStatsForTesting& stats);
@@ -993,6 +1024,11 @@ public:
     /** SYSCOIN: Observe the immutable plan without granting erase authority. */
     [[nodiscard]] AuxiliaryHistoryRetentionPlan
     GetAuxiliaryHistoryRetentionPlanForTesting(
+        std::span<const CBlockIndex* const> recovery_snapshot_indexes = {})
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    /** SYSCOIN: Derive the read-only authenticated DMN GC closure. */
+    [[nodiscard]] DMNInverseGCBoundary
+    GetDMNInverseGCBoundaryForTesting(
         std::span<const CBlockIndex* const> recovery_snapshot_indexes = {})
         EXCLUSIVE_LOCKS_REQUIRED(!cs);
 private:

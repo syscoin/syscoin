@@ -144,6 +144,10 @@ public:
 
     bool Valid() const;
 
+    // SYSCOIN: An invalid iterator can mean clean exhaustion or an I/O error;
+    // destructive maintenance must distinguish them before declaring absence.
+    void CheckStatus() const;
+
     void SeekToFirst();
 
     template<typename K> void Seek(const K& key) {
@@ -165,6 +169,18 @@ public:
         return true;
     }
 
+    // SYSCOIN: Destructive auxiliary-history maintenance must reject a
+    // database key whose valid prefix is followed by uncommitted bytes.
+    template<typename K> bool GetKeyExact(K& key) {
+        try {
+            DataStream ssKey{GetKeyImpl()};
+            ssKey >> key;
+            return ssKey.empty();
+        } catch (const std::exception&) {
+            return false;
+        }
+    }
+
     template<typename V> bool GetValue(V& value) {
         try {
             DataStream ssValue{GetValueImpl()};
@@ -174,6 +190,19 @@ public:
             return false;
         }
         return true;
+    }
+
+    // SYSCOIN: Keep exact decoding opt-in so ordinary database reads retain
+    // their existing compatibility behavior while GC closures fail closed.
+    template<typename V> bool GetValueExact(V& value) {
+        try {
+            DataStream ssValue{GetValueImpl()};
+            ssValue.Xor(dbwrapper_private::GetObfuscateKey(parent));
+            ssValue >> value;
+            return ssValue.empty();
+        } catch (const std::exception&) {
+            return false;
+        }
     }
 };
 

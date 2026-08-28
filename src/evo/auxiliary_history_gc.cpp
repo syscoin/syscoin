@@ -8,6 +8,7 @@
 #include <evo/deterministicmns.h>
 #include <evo/pq_registry.h>
 #include <hash.h>
+#include <streams.h>
 
 #include <algorithm>
 #include <limits>
@@ -293,6 +294,45 @@ bool AuxiliaryHistoryGCAuthorization::IsValid() const noexcept
                AuxiliaryHistoryGCAuthorizationSource::
                    ENFORCED_DURABLE_CHAINLOCK) &&
            block.IsValid();
+}
+
+bool DMNInverseGCClosure::IsValid() const noexcept
+{
+    return format_guard == FORMAT_GUARD && version == VERSION &&
+           boundary.IsValid() &&
+           !boundary_state_hash.IsNull() &&
+           !inverse_history_commitment.IsNull() &&
+           !inverse_record_hash.IsNull();
+}
+
+std::optional<std::vector<unsigned char>>
+EncodeDMNInverseGCClosure(const DMNInverseGCClosure& closure)
+{
+    if (!closure.IsValid()) return std::nullopt;
+    DataStream stream;
+    stream << closure;
+    if (stream.size() != DMNInverseGCClosure::SERIALIZED_SIZE) {
+        return std::nullopt;
+    }
+    const auto bytes{MakeUCharSpan(stream)};
+    return std::vector<unsigned char>{bytes.begin(), bytes.end()};
+}
+
+std::optional<DMNInverseGCClosure>
+DecodeDMNInverseGCClosure(Span<const unsigned char> payload)
+{
+    if (payload.size() != DMNInverseGCClosure::SERIALIZED_SIZE) {
+        return std::nullopt;
+    }
+    try {
+        DataStream stream{payload};
+        DMNInverseGCClosure closure;
+        stream >> closure;
+        if (!stream.empty() || !closure.IsValid()) return std::nullopt;
+        return closure;
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
 }
 
 bool AuxiliaryHistoryGCComponent::IsValid() const noexcept

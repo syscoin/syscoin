@@ -17,6 +17,15 @@
 
 template <typename K, typename V, typename Hasher = std::hash<K>>
 class CEvoDB : public CDBWrapper {
+    struct ValueWithTrailingByteForTesting {
+        V value;
+        uint8_t trailing{0};
+
+        SERIALIZE_METHODS(ValueWithTrailingByteForTesting, obj)
+        {
+            READWRITE(obj.value, obj.trailing);
+        }
+    };
     std::unordered_map<K, typename std::list<std::pair<K, V>>::iterator, Hasher> mapCache;
     std::list<std::pair<K, V>> fifoList;
     std::unordered_map<K, typename std::list<std::pair<K, V>>::iterator, Hasher> mapReadCache;
@@ -32,6 +41,12 @@ class CEvoDB : public CDBWrapper {
     bool m_fail_next_write_through_for_testing{false};
     bool m_fail_next_sync_write_through_for_testing{false};
 public:
+    enum class ExactDiskReadResult : uint8_t {
+        NOT_FOUND = 0,
+        FOUND,
+        BLOCKED,
+    };
+
     mutable RecursiveMutex cs;
     using CDBWrapper::CDBWrapper;
     explicit CEvoDB(const DBParams &db_params, size_t maxCacheSizeIn, size_t maxReadCacheSizeIn = 0)
@@ -132,6 +147,62 @@ public:
             return false;
         }
         WriteReadCache(key, value);
+        return true;
+    }
+
+    // SYSCOIN: Destructive GC derives its durable trust boundary from the
+    // physical record, not a cache entry that could hide trailing corruption.
+    ExactDiskReadResult ReadExactDiskForGC(const K& key, V& value) {
+        LOCK(cs);
+        if (mapCache.contains(key) || setEraseCache.contains(key)) {
+            return ExactDiskReadResult::BLOCKED;
+        }
+        std::unique_ptr<CDBIterator> cursor{NewIterator()};
+        if (!cursor) return ExactDiskReadResult::BLOCKED;
+        cursor->Seek(key);
+        if (!cursor->Valid()) {
+            cursor->CheckStatus();
+            return ExactDiskReadResult::NOT_FOUND;
+        }
+        K found_key;
+        if (!cursor->GetKeyExact(found_key)) {
+            return ExactDiskReadResult::BLOCKED;
+        }
+        if (found_key != key) return ExactDiskReadResult::NOT_FOUND;
+        return cursor->GetValueExact(value)
+            ? ExactDiskReadResult::FOUND
+            : ExactDiskReadResult::BLOCKED;
+    }
+
+    // SYSCOIN: Exercise the exact-value decoder against physical trailing
+    // bytes without changing the production serialization type.
+    bool AppendTrailingValueByteForTesting(const K& key) {
+        LOCK(cs);
+        if (mapCache.contains(key) || setEraseCache.contains(key)) {
+            return false;
+        }
+        V value;
+        if (!CDBWrapper::Read(key, value) ||
+            !CDBWrapper::Write(
+                key, ValueWithTrailingByteForTesting{value, 0xa5},
+                /*fSync=*/true)) {
+            return false;
+        }
+        EraseReadCache(key);
+        return true;
+    }
+
+    bool RewriteExactValueForTesting(const K& key) {
+        LOCK(cs);
+        if (mapCache.contains(key) || setEraseCache.contains(key)) {
+            return false;
+        }
+        V value;
+        if (!CDBWrapper::Read(key, value) ||
+            !CDBWrapper::Write(key, value, /*fSync=*/true)) {
+            return false;
+        }
+        EraseReadCache(key);
         return true;
     }
 

@@ -121,6 +121,44 @@ struct AuxiliaryHistoryGCAuthorization {
 };
 
 /**
+ * SYSCOIN: Authenticated trust base retained when a deterministic-MN inverse
+ * prefix is eventually removed. The boundary inverse itself remains stored.
+ */
+struct DMNInverseGCClosure {
+    static constexpr uint32_t FORMAT_GUARD{0x444d4e31}; // "DMN1"
+    static constexpr uint16_t VERSION{1};
+    static constexpr std::size_t SERIALIZED_SIZE{
+        sizeof(uint32_t) + sizeof(uint16_t) + sizeof(int32_t) +
+        4 * uint256::size()};
+
+    uint32_t format_guard{FORMAT_GUARD};
+    uint16_t version{VERSION};
+    AuxiliaryHistoryGCBlockIdentity boundary;
+    uint256 boundary_state_hash;
+    uint256 inverse_history_commitment;
+    uint256 inverse_record_hash;
+
+    [[nodiscard]] bool IsValid() const noexcept;
+
+    SERIALIZE_METHODS(DMNInverseGCClosure, obj)
+    {
+        READWRITE(obj.format_guard, obj.version, obj.boundary,
+                  obj.boundary_state_hash,
+                  obj.inverse_history_commitment,
+                  obj.inverse_record_hash);
+    }
+
+    friend bool operator==(const DMNInverseGCClosure&,
+                           const DMNInverseGCClosure&) = default;
+};
+
+[[nodiscard]] std::optional<std::vector<unsigned char>>
+EncodeDMNInverseGCClosure(const DMNInverseGCClosure& closure);
+
+[[nodiscard]] std::optional<DMNInverseGCClosure>
+DecodeDMNInverseGCClosure(Span<const unsigned char> payload);
+
+/**
  * SYSCOIN: Bounded, versioned closure data owned by one auxiliary store.
  * The coordinator treats the payload as opaque; the store-specific GC pass
  * must decode it before Begin() and again before applying any deletion.

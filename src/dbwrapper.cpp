@@ -452,6 +452,16 @@ Span<const std::byte> CDBIterator::GetValueImpl() const
 
 CDBIterator::~CDBIterator() = default;
 bool CDBIterator::Valid() const { return m_impl_iter->iter->Valid(); }
+// SYSCOIN: Exact GC reads must distinguish clean iterator exhaustion from
+// storage failure before treating a key as absent.
+void CDBIterator::CheckStatus() const
+{
+    const leveldb::Status status{m_impl_iter->iter->status()};
+    if (!status.ok()) {
+        LogPrintf("LevelDB iterator failure: %s\n", status.ToString());
+        HandleError(status);
+    }
+}
 void CDBIterator::SeekToFirst() { m_impl_iter->iter->SeekToFirst(); }
 void CDBIterator::Next() { m_impl_iter->iter->Next(); }
 
