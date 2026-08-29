@@ -7306,23 +7306,26 @@ bool CChainLocksHandler::ContinuePaymentAuditCheckpointGC()
                  static_cast<uint8_t>(progress.status));
             return true;
         }
+        // SYSCOIN: Keep each scheduler invocation to one bounded database
+        // phase while cs_main pins the authorizing branch. The completed
+        // archive checkpoint durably selects probation work on the next pass.
+        return true;
     }
 
     std::vector<uint256> retained_probation_roots{
         plan.retained_probation_roots};
-    const auto pending_probation_after_archive{
+    const auto pending_probation_request{
         deterministicMNManager->GetPendingPaymentProbationGCRequest()};
-    if (pending_probation_after_archive) {
+    if (pending_probation_request) {
         if (!HasSamePaymentAuditCheckpointBoundary(
-                pending_probation_after_archive->checkpoint,
+                pending_probation_request->checkpoint,
                 plan.checkpoint)) {
             fail("probation intent does not match completed archive");
             return true;
         }
         retained_probation_roots =
-            pending_probation_after_archive->retained_state_hashes;
-    } else if (plan.derive_retained_probation_roots ||
-               plan.phase == PaymentAuditGCMaintenancePhase::ARCHIVE) {
+            pending_probation_request->retained_state_hashes;
+    } else if (plan.derive_retained_probation_roots) {
         pq::PaymentAuditPresealState retained_markers;
         {
             LOCK(m_btcc_preseal_mutex);
