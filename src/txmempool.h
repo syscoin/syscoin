@@ -445,6 +445,13 @@ private:
         bool introduces_operator{true};
         bool introduces_tree{true};
     };
+
+    struct PackageProviderConflictStats {
+        std::size_t registry_operator_requests{0};
+        std::size_t indexed_provider_references_examined{0};
+    };
+    mutable PackageProviderConflictStats m_last_package_provider_conflict_stats
+        GUARDED_BY(cs);
     // SYSCOIN: end branch-bound PQ provider reservations.
 
 
@@ -584,6 +591,9 @@ public:
     bool RebuildPQRegistryReservations(const CBlockIndex* active_tip)
         EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
     void RemoveProviderTransactionsForReorg()
+        EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
+    // SYSCOIN: Purge legacy provider payloads before the first PQ-only block.
+    void RemoveLegacyProviderTransactionsForPQActivation()
         EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
     bool existsConflicts(const CTransaction& tx) const EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
     bool isSyscoinConflictIsFirstSeen(const CTransaction &tx) const EXCLUSIVE_LOCKS_REQUIRED(cs);

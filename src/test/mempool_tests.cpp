@@ -30,6 +30,21 @@ public:
 
 // SYSCOIN BEGIN: expose fork-only mempool reservation invariants to tests.
 struct PQMempoolTestAccess {
+    static void ResetPackageProviderConflictStats(CTxMemPool& pool)
+        EXCLUSIVE_LOCKS_REQUIRED(pool.cs)
+    {
+        pool.m_last_package_provider_conflict_stats = {};
+    }
+
+    static std::pair<std::size_t, std::size_t>
+    LastPackageProviderConflictStats(const CTxMemPool& pool)
+        EXCLUSIVE_LOCKS_REQUIRED(pool.cs)
+    {
+        const auto& stats{pool.m_last_package_provider_conflict_stats};
+        return {stats.registry_operator_requests,
+                stats.indexed_provider_references_examined};
+    }
+
     static std::optional<size_t> FindPackageProviderTxConflict(
         const CTxMemPool& pool,
         const std::vector<CTransactionRef>& package,
@@ -557,6 +572,55 @@ BOOST_AUTO_TEST_CASE(PQOperatorUpdateConflicts)
                          REMOVAL_REASON_DUMMY);
     BOOST_CHECK_EQUAL(pool.size(), 0U);
 
+    // Package admission may stage up to 64 provider mutations locally, but it
+    // must fail closed before doing unbounded package-local work.
+    std::vector<CMutableTransaction> bounded_mutations;
+    std::vector<CTransactionRef> bounded_package;
+    bounded_mutations.reserve(65);
+    bounded_package.reserve(65);
+    for (uint32_t i{0}; i < 65; ++i) {
+        auto mutation{PQServiceTransaction(PQMempoolHash(90'000 + i))};
+        mutation.vin[0].prevout =
+            COutPoint{PQMempoolHash(91'000 + i), 0};
+        bounded_mutations.push_back(std::move(mutation));
+        bounded_package.push_back(
+            MakeTransactionRef(bounded_mutations.back()));
+    }
+    const std::vector<CTransactionRef> allowed_package{
+        bounded_package.begin(), bounded_package.begin() + 64};
+    BOOST_CHECK(!find_replacement_conflict(allowed_package));
+    conflict_index = find_replacement_conflict(bounded_package);
+    BOOST_REQUIRE(conflict_index);
+    BOOST_CHECK_EQUAL(*conflict_index, 0U);
+
+    // Unrelated provider reservations must not be copied or walked for a
+    // replacement. Only references indexed under the replaced operator are
+    // relevant to its UTXO-ordering check.
+    constexpr uint32_t unrelated_count{512};
+    std::vector<CMutableTransaction> unrelated_mutations;
+    unrelated_mutations.reserve(unrelated_count);
+    for (uint32_t i{0}; i < unrelated_count; ++i) {
+        auto mutation{PQServiceTransaction(PQMempoolHash(100'000 + i))};
+        mutation.vin[0].prevout =
+            COutPoint{PQMempoolHash(110'000 + i), 0};
+        unrelated_mutations.push_back(std::move(mutation));
+        pool.addUnchecked(entry.FromTx(unrelated_mutations.back()));
+    }
+    pool.addUnchecked(entry.FromTx(replacement_service));
+    CMutableTransaction indexed_replacement{replacement};
+    indexed_replacement.vin[0].prevout =
+        COutPoint{replacement_service.GetHash(), 0};
+    PQMempoolTestAccess::ResetPackageProviderConflictStats(pool);
+    BOOST_CHECK(!find_replacement_conflict(
+        {MakeTransactionRef(indexed_replacement)}));
+    const auto [registry_requests, indexed_references]{
+        PQMempoolTestAccess::LastPackageProviderConflictStats(pool)};
+    BOOST_CHECK_EQUAL(registry_requests, 0U);
+    BOOST_CHECK_EQUAL(indexed_references, 1U);
+    BOOST_CHECK_EQUAL(pool.size(), unrelated_count + 1);
+    pool.RemoveProviderTransactionsForReorg();
+    BOOST_CHECK_EQUAL(pool.size(), 0U);
+
     // Connected external-collateral replacement and PQ mutations evict the
     // opposite pending transaction plus descendants using the parent-tip DMN
     // list, so block assembly never sees a stale provider entry.
@@ -681,6 +745,39 @@ BOOST_AUTO_TEST_CASE(PQOperatorUpdateConflicts)
         CTransaction{PQRevokeTransaction(PQMempoolHash(80'001))},
         active_tip));
     pool.removeRecursive(CTransaction{ordinary}, REMOVAL_REASON_DUMMY);
+
+    // A normal forward connection to A - 1 changes the next-block provider
+    // wire era. Drop legacy provider payloads and descendants without evicting
+    // preparation-era global-key registrations or ordinary transactions.
+    CMutableTransaction legacy_service{PQServiceTransaction(
+        PQMempoolHash(80'002))};
+    CProUpServTx legacy_payload;
+    BOOST_REQUIRE(GetTxPayload(legacy_service, legacy_payload));
+    legacy_payload.nVersion = CProUpServTx::UPDATE_NEVM_VERSION;
+    legacy_payload.legacySig = {};
+    legacy_payload.globalKeyVersion = 0;
+    legacy_payload.pqSig = {};
+    SetTxPayload(legacy_service, legacy_payload);
+    CMutableTransaction legacy_child{PQMempoolBaseTransaction(2, 802)};
+    legacy_child.vin[0].prevout =
+        COutPoint{legacy_service.GetHash(), 0};
+    const auto retained_global{
+        PQGlobalKeyTransaction(PQMempoolHash(80'003), 31, 31)};
+    const auto retained_ordinary{PQMempoolBaseTransaction(2, 803)};
+    pool.addUnchecked(entry.FromTx(legacy_service));
+    pool.addUnchecked(entry.FromTx(legacy_child));
+    pool.addUnchecked(entry.FromTx(retained_global));
+    pool.addUnchecked(entry.FromTx(retained_ordinary));
+    BOOST_REQUIRE_EQUAL(pool.size(), 4U);
+    pool.RemoveLegacyProviderTransactionsForPQActivation();
+    BOOST_CHECK_EQUAL(pool.size(), 2U);
+    BOOST_CHECK(!pool.exists(GenTxid::Txid(legacy_service.GetHash())));
+    BOOST_CHECK(!pool.exists(GenTxid::Txid(legacy_child.GetHash())));
+    BOOST_CHECK(pool.exists(GenTxid::Txid(retained_global.GetHash())));
+    BOOST_CHECK(pool.exists(GenTxid::Txid(retained_ordinary.GetHash())));
+    pool.removeRecursive(CTransaction{retained_global}, REMOVAL_REASON_DUMMY);
+    pool.removeRecursive(CTransaction{retained_ordinary},
+                         REMOVAL_REASON_DUMMY);
 }
 BOOST_AUTO_TEST_CASE(PQRegistryMempoolCapacity)
 {
@@ -794,6 +891,32 @@ BOOST_AUTO_TEST_CASE(PQRegistryMempoolCapacity)
         pool, reused_view));
     BOOST_CHECK_EQUAL(pool.size(), 1U);
     pool.removeRecursive(CTransaction{global_a}, REMOVAL_REASON_DUMMY);
+
+    // Loading branch state for a package is proportional to the package's
+    // operators, regardless of unrelated global-key reservations already in
+    // the mempool.
+    constexpr uint32_t unrelated_count{128};
+    std::vector<CMutableTransaction> unrelated_globals;
+    unrelated_globals.reserve(unrelated_count);
+    for (uint32_t i{0}; i < unrelated_count; ++i) {
+        auto unrelated{PQGlobalKeyTransaction(
+            PQMempoolHash(120'000 + i), 64 + i, 1'000 + i)};
+        unrelated.vin[0].prevout =
+            COutPoint{PQMempoolHash(130'000 + i), 0};
+        unrelated_globals.push_back(std::move(unrelated));
+        pool.addUnchecked(entry.FromTx(unrelated_globals.back()));
+    }
+    const auto package_global{
+        PQGlobalKeyTransaction(PQMempoolHash(140'000), 250, 2'000)};
+    (void)pool.FindPackageProviderTxConflict(
+        {MakeTransactionRef(package_global)}, active_tip);
+    const auto [registry_requests, indexed_references]{
+        PQMempoolTestAccess::LastPackageProviderConflictStats(pool)};
+    BOOST_CHECK_EQUAL(registry_requests, 1U);
+    BOOST_CHECK_EQUAL(indexed_references, 0U);
+    BOOST_CHECK_EQUAL(pool.size(), unrelated_count);
+    pool.RemoveProviderTransactionsForReorg();
+    BOOST_CHECK_EQUAL(pool.size(), 0U);
 }
 
 // SYSCOIN END: PQ provider mempool conflict and reservation tests.

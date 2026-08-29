@@ -43,6 +43,8 @@ extern std::unordered_map<COutPoint, std::pair<CTransactionRef, CTransactionRef>
 // SYSCOIN: begin branch-bound PQ provider mempool helpers.
 namespace {
 
+constexpr std::size_t MAX_PROVIDER_PACKAGE_TRANSACTIONS{64};
+
 std::optional<llmq::pq::GlobalKeyTxPayload> GetPQGlobalKeyPayload(
     const CTransaction& tx)
 {
@@ -1299,25 +1301,32 @@ void CTxMemPool::removeProTxConflicts(
     }
 }
 
+// SYSCOIN BEGIN: Indexed package-local provider and PQ conflict validation.
 std::optional<size_t> CTxMemPool::FindPackageProviderTxConflict(
     const std::vector<CTransactionRef>& package,
     const CBlockIndex* active_tip) const
 {
     AssertLockHeld(cs_main);
     AssertLockHeld(cs);
+    m_last_package_provider_conflict_stats = {};
 
-    if (std::none_of(
-            package.begin(), package.end(), [](const CTransactionRef& tx) {
-                return tx && IsBranchBoundProviderTransaction(*tx);
-            })) {
+    std::optional<size_t> first_branch_bound;
+    for (size_t index{0}; index < package.size(); ++index) {
+        if (package[index] &&
+            IsBranchBoundProviderTransaction(*package[index])) {
+            first_branch_bound = index;
+            break;
+        }
+    }
+    if (!first_branch_bound) {
         // Per-transaction PreChecks already used the indexed ordinary path.
         return std::nullopt;
     }
+    if (package.size() > MAX_PROVIDER_PACKAGE_TRANSACTIONS) {
+        return first_branch_bound;
+    }
 
     std::set<uint256> requested_operators;
-    for (const auto& [_, reservation] : mapPQGlobalReservations) {
-        requested_operators.insert(reservation.pro_tx_hash);
-    }
     std::optional<size_t> first_global;
     for (size_t index{0}; index < package.size(); ++index) {
         if (!package[index] ||
@@ -1329,12 +1338,14 @@ std::optional<size_t> CTxMemPool::FindPackageProviderTxConflict(
         if (!payload) return index;
         requested_operators.insert(payload->pro_tx_hash);
     }
+    m_last_package_provider_conflict_stats.registry_operator_requests =
+        requested_operators.size();
 
     llmq::pq::PQRegistryMempoolView view;
     if (first_global) {
         if (active_tip == nullptr || !deterministicMNManager ||
             requested_operators.size() >
-                llmq::pq::MAX_PQ_MEMPOOL_OPERATOR_REQUESTS) {
+                MAX_PROVIDER_PACKAGE_TRANSACTIONS) {
             return first_global;
         }
         std::vector<uint256> requested{requested_operators.begin(),
@@ -1358,6 +1369,8 @@ std::optional<size_t> CTxMemPool::FindPackageProviderTxConflict(
 {
     AssertLockHeld(cs_main);
     AssertLockHeld(cs);
+    m_last_package_provider_conflict_stats
+        .indexed_provider_references_examined = 0;
 
     CDeterministicMNList mn_list;
     if (active_tip != nullptr && deterministicMNManager) {
@@ -1386,46 +1399,48 @@ std::optional<size_t> CTxMemPool::FindPackageProviderTxConflict(
     AssertLockHeld(cs_main);
     AssertLockHeld(cs);
 
-    std::set<uint256> pq_operator_updates;
-    for (const auto& [pro_tx_hash, _] : mapPQOperatorUpdates) {
-        pq_operator_updates.insert(pro_tx_hash);
-    }
-    std::set<uint256> provider_references;
-    std::map<uint256, std::set<uint256>> provider_reference_txids;
-    for (const auto& [pro_tx_hash, _] : mapProTxRefs) {
-        provider_references.insert(pro_tx_hash);
-    }
-    for (const auto& [pro_tx_hash, txid] : mapProTxRefs) {
-        if (mapTx.find(txid) != mapTx.end()) {
-            provider_reference_txids[pro_tx_hash].insert(txid);
+    if (package.size() > MAX_PROVIDER_PACKAGE_TRANSACTIONS) {
+        for (size_t index{0}; index < package.size(); ++index) {
+            if (package[index] &&
+                IsBranchBoundProviderTransaction(*package[index])) {
+                return index;
+            }
         }
+        return std::nullopt;
     }
-    std::set<uint256> pq_revocations;
-    for (const auto& [pro_tx_hash, _] : mapPQRevocations) {
-        pq_revocations.insert(pro_tx_hash);
-    }
-    std::set<std::array<uint8_t, 32>> global_keys;
-    for (const auto& [key, _] : mapPQGlobalKeys) global_keys.insert(key);
-    std::set<uint256> tree_ids;
-    for (const auto& [tree_id, _] : mapPQTreeIds) tree_ids.insert(tree_id);
-    std::set<CService> provider_addresses;
-    for (const auto& [address, _] : mapProTxAddresses) {
-        provider_addresses.insert(address);
-    }
-    std::set<std::vector<unsigned char>> provider_nevm_addresses;
-    for (const auto& [address, _] : mapProTxNEVMAddresses) {
-        provider_nevm_addresses.insert(address);
-    }
-    std::set<CKeyID> provider_owner_keys;
-    for (const auto& [owner, _] : mapProTxPubKeyIDs) {
-        provider_owner_keys.insert(owner);
-    }
-    std::set<COutPoint> provider_collaterals;
-    for (const auto& [collateral, _] : mapProTxCollaterals) {
-        provider_collaterals.insert(collateral);
-    }
+
+    // Only package-local reservations need materialization. Existing mempool
+    // reservations remain stable under cs and are queried by their indexes.
+    std::set<uint256> package_pq_operator_updates;
+    std::set<uint256> package_provider_references;
+    std::map<uint256, std::set<uint256>>
+        package_provider_reference_txids;
+    std::set<uint256> package_pq_revocations;
+    std::set<std::array<uint8_t, 32>> package_global_keys;
+    std::set<uint256> package_tree_ids;
+    std::set<CService> package_provider_addresses;
+    std::set<std::vector<unsigned char>> package_provider_nevm_addresses;
+    std::set<CKeyID> package_provider_owner_keys;
+    std::set<COutPoint> package_provider_collaterals;
     std::set<COutPoint> spent_inputs;
     std::map<uint256, const CTransaction*> prior_package_transactions;
+
+    const auto has_pq_operator_update = [&](const uint256& pro_tx_hash) {
+        return package_pq_operator_updates.count(pro_tx_hash) != 0 ||
+               mapPQOperatorUpdates.count(pro_tx_hash) != 0;
+    };
+    const auto has_provider_reference = [&](const uint256& pro_tx_hash) {
+        return package_provider_references.count(pro_tx_hash) != 0 ||
+               mapProTxRefs.count(pro_tx_hash) != 0;
+    };
+    const auto has_pq_revocation = [&](const uint256& pro_tx_hash) {
+        return package_pq_revocations.count(pro_tx_hash) != 0 ||
+               mapPQRevocations.count(pro_tx_hash) != 0;
+    };
+    const auto has_provider_collateral = [&](const COutPoint& collateral) {
+        return package_provider_collaterals.count(collateral) != 0 ||
+               mapProTxCollaterals.count(collateral) != 0;
+    };
 
     const auto collect_ancestor_txids =
         [&](const CTransaction& descendant)
@@ -1460,6 +1475,38 @@ std::optional<size_t> CTxMemPool::FindPackageProviderTxConflict(
             return visited;
         };
 
+    const auto has_unordered_provider_reference =
+        [&](const uint256& pro_tx_hash, const CTransaction& replacement)
+            EXCLUSIVE_LOCKS_REQUIRED(cs) {
+            std::optional<std::set<uint256>> ancestors;
+            const auto is_not_ancestor = [&](const uint256& txid)
+                EXCLUSIVE_LOCKS_REQUIRED(cs) {
+                if (!ancestors) {
+                    ancestors.emplace(
+                        collect_ancestor_txids(replacement));
+                }
+                return ancestors->count(txid) == 0;
+            };
+
+            const auto package_refs{
+                package_provider_reference_txids.find(pro_tx_hash)};
+            if (package_refs != package_provider_reference_txids.end()) {
+                for (const auto& txid : package_refs->second) {
+                    if (is_not_ancestor(txid)) return true;
+                }
+            }
+            const auto [first, last]{mapProTxRefs.equal_range(pro_tx_hash)};
+            for (auto reference{first}; reference != last; ++reference) {
+                ++m_last_package_provider_conflict_stats
+                      .indexed_provider_references_examined;
+                if (mapTx.find(reference->second) != mapTx.end() &&
+                    is_not_ancestor(reference->second)) {
+                    return true;
+                }
+            }
+            return false;
+        };
+
     size_t package_operator_introductions{0};
     size_t package_tree_introductions{0};
     for (size_t index{0}; index < package.size(); ++index) {
@@ -1480,7 +1527,7 @@ std::optional<size_t> CTxMemPool::FindPackageProviderTxConflict(
         // but tx86/revoke cannot coexist with one in either transaction order.
         for (const auto& input : tx.vin) {
             const auto dmn{mn_list.GetMNByCollateral(input.prevout)};
-            if (dmn && pq_operator_updates.count(dmn->proTxHash) != 0) {
+            if (dmn && has_pq_operator_update(dmn->proTxHash)) {
                 return index;
             }
         }
@@ -1490,14 +1537,14 @@ std::optional<size_t> CTxMemPool::FindPackageProviderTxConflict(
                 (SpendsOutpoint(tx, dmn->collateralOutpoint) ||
                  spent_inputs.count(dmn->collateralOutpoint) != 0 ||
                  mapNextTx.count(dmn->collateralOutpoint) != 0 ||
-                 provider_collaterals.count(dmn->collateralOutpoint) != 0)) {
+                 has_provider_collateral(dmn->collateralOutpoint))) {
                 return index;
             }
         }
         if (provider_mutation) {
             const auto dmn{mn_list.GetMN(*provider_mutation)};
             if (dmn &&
-                provider_collaterals.count(dmn->collateralOutpoint) != 0) {
+                has_provider_collateral(dmn->collateralOutpoint)) {
                 // An ordinary mutation followed by the replacement can be
                 // consensus-valid, but independent mempool transactions have
                 // no ordering guarantee. Excluding both orders keeps every
@@ -1506,25 +1553,32 @@ std::optional<size_t> CTxMemPool::FindPackageProviderTxConflict(
             }
         }
 
-        if (pq_operator_update &&
-            !pq_operator_updates.insert(*pq_operator_update).second) {
-            return index;
+        if (pq_operator_update) {
+            if (package_pq_operator_updates.count(*pq_operator_update) != 0 ||
+                mapPQOperatorUpdates.count(*pq_operator_update) != 0) {
+                return index;
+            }
+            package_pq_operator_updates.insert(*pq_operator_update);
         }
         if (provider_mutation &&
-            pq_revocations.count(*provider_mutation) != 0) {
+            has_pq_revocation(*provider_mutation)) {
             return index;
         }
         if (is_pq_revoke &&
-            provider_references.count(*pq_operator_update) != 0) {
+            has_provider_reference(*pq_operator_update)) {
             return index;
         }
 
         if (global) {
             const auto& commitment{global->candidate.child_key_commitment};
-            if (!global_keys.insert(global->candidate.public_key).second ||
-                !tree_ids.insert(commitment.tree_id).second) {
+            if (package_global_keys.count(global->candidate.public_key) != 0 ||
+                mapPQGlobalKeys.count(global->candidate.public_key) != 0 ||
+                package_tree_ids.count(commitment.tree_id) != 0 ||
+                mapPQTreeIds.count(commitment.tree_id) != 0) {
                 return index;
             }
+            package_global_keys.insert(global->candidate.public_key);
+            package_tree_ids.insert(commitment.tree_id);
             const auto* current{
                 registry_view.FindOperator(global->pro_tx_hash)};
             if (current == nullptr) return index;
@@ -1558,10 +1612,14 @@ std::optional<size_t> CTxMemPool::FindPackageProviderTxConflict(
         if (tx.nVersion == SYSCOIN_TX_VERSION_MN_REGISTER) {
             CProRegTx payload;
             if (!GetTxPayload(tx, payload)) return index;
-            if (!provider_addresses.insert(payload.addr).second ||
-                !provider_owner_keys.insert(payload.keyIDOwner).second) {
+            if (package_provider_addresses.count(payload.addr) != 0 ||
+                mapProTxAddresses.count(payload.addr) != 0 ||
+                package_provider_owner_keys.count(payload.keyIDOwner) != 0 ||
+                mapProTxPubKeyIDs.count(payload.keyIDOwner) != 0) {
                 return index;
             }
+            package_provider_addresses.insert(payload.addr);
+            package_provider_owner_keys.insert(payload.keyIDOwner);
 
             COutPoint collateral{payload.collateralOutpoint};
             if (collateral.hash.IsNull()) {
@@ -1573,58 +1631,57 @@ std::optional<size_t> CTxMemPool::FindPackageProviderTxConflict(
                 }
                 const auto replaced{mn_list.GetMNByCollateral(collateral)};
                 if (replaced) {
-                    if (pq_operator_updates.count(replaced->proTxHash) != 0) {
+                    if (has_pq_operator_update(replaced->proTxHash)) {
                         return index;
                     }
-                    const auto refs{provider_reference_txids.find(
-                        replaced->proTxHash)};
-                    if (refs != provider_reference_txids.end()) {
-                        const auto ancestors{collect_ancestor_txids(tx)};
-                        if (std::any_of(
-                                refs->second.begin(), refs->second.end(),
-                                [&](const uint256& mutation_txid) {
-                                    return ancestors.count(mutation_txid) == 0;
-                                })) {
-                            // Ordinary mutations may precede a replacement
-                            // only when UTXO ancestry forces that
-                            // consensus-valid order.
-                            return index;
-                        }
+                    if (has_unordered_provider_reference(
+                            replaced->proTxHash, tx)) {
+                        // Ordinary mutations may precede a replacement only
+                        // when UTXO ancestry forces that consensus-valid order.
+                        return index;
                     }
                 }
             }
-            if (!provider_collaterals.insert(collateral).second) {
+            if (has_provider_collateral(collateral)) {
                 return index;
             }
+            package_provider_collaterals.insert(collateral);
             if (!payload.collateralOutpoint.hash.IsNull()) {
-                provider_references.insert(tx.GetHash());
+                package_provider_references.insert(tx.GetHash());
             }
         } else if (tx.nVersion ==
                    SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE) {
             CProUpServTx payload;
             if (!GetTxPayload(tx, payload)) return index;
             if (payload.addr != CService() &&
-                provider_addresses.count(payload.addr) != 0) {
+                (package_provider_addresses.count(payload.addr) != 0 ||
+                 mapProTxAddresses.count(payload.addr) != 0)) {
                 return index;
             }
-            provider_addresses.insert(payload.addr);
+            package_provider_addresses.insert(payload.addr);
             if (!payload.vchNEVMAddress.empty() &&
-                !provider_nevm_addresses
-                     .insert(payload.vchNEVMAddress)
-                     .second) {
+                (package_provider_nevm_addresses.count(
+                     payload.vchNEVMAddress) != 0 ||
+                 mapProTxNEVMAddresses.count(payload.vchNEVMAddress) != 0)) {
                 return index;
+            }
+            if (!payload.vchNEVMAddress.empty()) {
+                package_provider_nevm_addresses.insert(
+                    payload.vchNEVMAddress);
             }
         }
 
         if (provider_mutation) {
-            provider_references.insert(*provider_mutation);
-            provider_reference_txids[*provider_mutation].insert(tx.GetHash());
+            package_provider_references.insert(*provider_mutation);
+            package_provider_reference_txids[*provider_mutation].insert(
+                tx.GetHash());
         } else if (global) {
-            provider_references.insert(global->pro_tx_hash);
-            provider_reference_txids[global->pro_tx_hash].insert(tx.GetHash());
+            package_provider_references.insert(global->pro_tx_hash);
+            package_provider_reference_txids[global->pro_tx_hash].insert(
+                tx.GetHash());
         }
         if (is_pq_revoke) {
-            pq_revocations.insert(*pq_operator_update);
+            package_pq_revocations.insert(*pq_operator_update);
         }
         for (const auto& input : tx.vin) {
             spent_inputs.insert(input.prevout);
@@ -1633,6 +1690,7 @@ std::optional<size_t> CTxMemPool::FindPackageProviderTxConflict(
     }
     return std::nullopt;
 }
+// SYSCOIN END: Indexed package-local provider and PQ conflict validation.
 
 bool CTxMemPool::RebuildPQRegistryReservations(
     const CBlockIndex* active_tip)
@@ -1835,6 +1893,34 @@ void CTxMemPool::RemoveProviderTransactionsForReorg()
         }
     }
 }
+
+// SYSCOIN BEGIN: Purge legacy provider payloads at the PQ activation boundary.
+void CTxMemPool::RemoveLegacyProviderTransactionsForPQActivation()
+{
+    AssertLockHeld(cs_main);
+    AssertLockHeld(cs);
+
+    // SYSCOIN: The mempool was populated for a legacy next block. At the
+    // boundary all provider payloads admitted under that wire era become
+    // invalid, while preparation-era global-key registrations remain valid.
+    std::vector<uint256> txids;
+    for (const auto& entry : mapTx) {
+        const auto version{entry.GetTx().nVersion};
+        if (version == SYSCOIN_TX_VERSION_MN_REGISTER ||
+            version == SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE ||
+            version == SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR ||
+            version == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE) {
+            txids.push_back(entry.GetTx().GetHash());
+        }
+    }
+    for (const auto& txid : txids) {
+        const auto entry{mapTx.find(txid)};
+        if (entry != mapTx.end()) {
+            removeRecursive(entry->GetTx(), MemPoolRemovalReason::CONFLICT);
+        }
+    }
+}
+// SYSCOIN END: Purge legacy provider payloads at the PQ activation boundary.
 /**
  * Called when a block is connected. Removes from mempool and updates the miner fee estimator.
  */

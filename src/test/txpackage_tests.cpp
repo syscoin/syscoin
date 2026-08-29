@@ -3,7 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <chainparams.h> // SYSCOIN: branch-bound provider package fixtures.
-#include <common/args.h> // SYSCOIN: regtest PQ anchor fixtures.
+#include <common/args.h> // SYSCOIN: regtest PQ activation fixtures.
 #include <consensus/validation.h>
 #include <evo/providertx.h> // SYSCOIN: provider package fixtures.
 #include <evo/specialtx_payload.h> // SYSCOIN: provider payload fixtures.
@@ -79,8 +79,8 @@ std::optional<CMutableTransaction> CreateFundedProviderRegistration(
     payload.collateralOutpoint = COutPoint{uint256{}, 0};
     payload.addr = service;
     payload.keyIDOwner = owner;
-    // Legacy BLS fields are opaque historical blobs after PQ activation;
-    // IsValid only requires a non-null, correctly sized byte string.
+    // Legacy BLS fields are opaque historical blobs during pre-activation
+    // replay; IsValid only requires a non-null, correctly sized byte string.
     std::array<uint8_t, CLegacyBLSPublicKey::SERIALIZED_SIZE> operator_key;
     operator_key.fill(tag);
     if (!payload.pubKeyOperator.SetBytes(operator_key)) {
@@ -253,31 +253,19 @@ BOOST_FIXTURE_TEST_CASE(provider_package_conflict_boundary,
     struct RestoreProviderParams {
         Consensus::Params& consensus;
         CAmount collateral;
-        int anchor_height;
-        uint256 anchor_block;
-        uint256 anchor_dmn;
-        uint256 anchor_registry;
+        int activation_height;
         ~RestoreProviderParams()
         {
             nMNCollateralRequired = collateral;
-            consensus.nPQLegacyAnchorHeight = anchor_height;
-            consensus.hashPQLegacyAnchorBlock = anchor_block;
-            consensus.hashPQLegacyMNState = anchor_dmn;
-            consensus.hashPQLegacyPQRegistryState = anchor_registry;
+            consensus.nPQActivationHeight = activation_height;
         }
     } restore{
         consensus,
         nMNCollateralRequired,
-        consensus.nPQLegacyAnchorHeight,
-        consensus.hashPQLegacyAnchorBlock,
-        consensus.hashPQLegacyMNState,
-        consensus.hashPQLegacyPQRegistryState,
+        consensus.nPQActivationHeight,
     };
     nMNCollateralRequired = 40 * COIN;
-    consensus.nPQLegacyAnchorHeight = consensus.DIP0003Height;
-    consensus.hashPQLegacyAnchorBlock = uint256::ONEV;
-    consensus.hashPQLegacyMNState = uint256::TWOV;
-    consensus.hashPQLegacyPQRegistryState = uint256S("03");
+    consensus.nPQActivationHeight = consensus.DIP0003Height;
 
     CKey owner_key;
     owner_key.MakeNewKey(true);
