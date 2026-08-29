@@ -391,7 +391,7 @@ BASE_SCRIPTS = [
     'feature_shutdown.py',
     'feature_sporks.py',
     # SYSCOIN: post-quantum ChainLock P2P and RPC admission coverage.
-    'feature_pq_chainlocks.py',
+    'feature_pq_chainlocks.py --descriptors',
     'feature_multikeysporks.py',
     'wallet_migration.py',
     'p2p_ibd_txrelay.py',
