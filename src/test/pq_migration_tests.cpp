@@ -2,364 +2,550 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-#include <consensus/pq_migration.h>
-
-#include <chainparams.h>
-#include <common/args.h>
-#include <evo/pq_registry.h>
+#include <consensus/pq_migration_config.h>
+#include <node/miner.h>
+#include <node/pq_activation_handoff.h>
+#include <streams.h>
+#include <version.h>
 
 #include <boost/test/unit_test.hpp>
 
-#include <array>
-#include <limits>
-#include <stdexcept>
-#include <string>
-
-namespace {
-
-const std::string ANCHOR_BLOCK_HASH{std::string(63, '0') + "1"};
-const std::string ANCHOR_DMN_STATE_HASH{std::string(63, '0') + "2"};
-const std::string ANCHOR_PQ_STATE_HASH{std::string(63, '0') + "3"};
-const std::string CHAINLOCK_ANCHOR_BLOCK_HASH{std::string(63, '0') + "4"};
-
-void SetPQLegacyAnchorArgs(ArgsManager& args, std::string height = "1100")
-{
-    args.ForceSetArg("-pqlegacyanchorheight", height);
-    args.ForceSetArg("-pqlegacyanchorblockhash", ANCHOR_BLOCK_HASH);
-    args.ForceSetArg("-pqlegacydmnstatehash", ANCHOR_DMN_STATE_HASH);
-    args.ForceSetArg("-pqlegacypqregistrystatehash", ANCHOR_PQ_STATE_HASH);
-}
-
-void SetPQChainLockAnchorArgs(ArgsManager& args,
-                              std::string height = "2304")
-{
-    args.ForceSetArg("-pqchainlockanchorheight", height);
-    args.ForceSetArg("-pqchainlockanchorblockhash",
-                     CHAINLOCK_ANCHOR_BLOCK_HASH);
-}
-
-} // namespace
+#include <initializer_list>
 
 BOOST_AUTO_TEST_SUITE(pq_migration_tests)
 
-BOOST_AUTO_TEST_CASE(configuration_is_fail_closed)
+BOOST_AUTO_TEST_CASE(quarantine_blocks_every_template_creation_path)
+{
+    BOOST_CHECK(node::ShouldCreateBlockTemplate(
+        /*pq_participation_allowed=*/true));
+    BOOST_CHECK(!node::ShouldCreateBlockTemplate(
+        /*pq_participation_allowed=*/false));
+}
+
+BOOST_AUTO_TEST_CASE(historical_replay_can_produce_only_activation_block)
 {
     Consensus::Params params;
-    BOOST_CHECK(Consensus::CheckPQLegacyAnchorConfiguration(params) ==
-                Consensus::PQAnchorResult::DISABLED);
-    BOOST_CHECK(Consensus::CheckPQLegacyReplay(params, 10) ==
-                Consensus::PQLegacyReplayResult::ALLOWED);
-    BOOST_CHECK(Consensus::CheckPQPaymentEligibility(params, 10) ==
-                Consensus::PQPaymentEligibilityResult::LEGACY);
-    BOOST_CHECK(Consensus::CheckPQLegacyAnchor(params, 0, uint256::ZEROV, nullptr) ==
-                Consensus::PQAnchorResult::DISABLED);
+    params.DIP0003Height = 5;
+    params.nPQActivationHeight = 9;
+    const auto allowed = [&](node::PQActivationRuntimeState state,
+                             int32_t tip_height,
+                             bool tip_valid = true,
+                             bool local_state = true,
+                             bool durable_finality_clear = true,
+                             bool durable_marker = true) {
+        return node::IsPQActivationBlockProductionAllowed(
+            params, state, /*participation_allowed=*/false,
+            durable_marker, tip_height, tip_valid, local_state,
+            durable_finality_clear);
+    };
 
-    params.nPQLegacyAnchorHeight = 10;
-    BOOST_CHECK(Consensus::CheckPQLegacyAnchorConfiguration(params) ==
-                Consensus::PQAnchorResult::INVALID_CONFIGURATION);
-    BOOST_CHECK(Consensus::CheckPQLegacyReplay(params, 10) ==
-                Consensus::PQLegacyReplayResult::INVALID_CONFIGURATION);
-    BOOST_CHECK(Consensus::CheckPQPaymentEligibility(params, 10) ==
-                Consensus::PQPaymentEligibilityResult::INVALID_CONFIGURATION);
-    BOOST_CHECK(Consensus::CheckPQLegacyAnchor(params, 0, uint256::ZEROV, nullptr) ==
-                Consensus::PQAnchorResult::INVALID_CONFIGURATION);
+    // Fresh/reindex replay reaches A-1 with a durable null marker. The
+    // replacement transition into this same predicate is covered below.
+    BOOST_CHECK(allowed(node::PQActivationRuntimeState::HISTORICAL_REPLAY, 8));
 
-    params.DIP0003Height = 11;
-    params.hashPQLegacyAnchorBlock = uint256::ONEV;
-    params.hashPQLegacyMNState = uint256::TWOV;
-    params.hashPQLegacyPQRegistryState = uint256S("3");
-    BOOST_CHECK(Consensus::CheckPQLegacyAnchorConfiguration(params) ==
-                Consensus::PQAnchorResult::INVALID_CONFIGURATION);
+    BOOST_CHECK(!allowed(node::PQActivationRuntimeState::HISTORICAL_REPLAY, 7));
+    BOOST_CHECK(!allowed(node::PQActivationRuntimeState::HISTORICAL_REPLAY, 9));
+    BOOST_CHECK(!allowed(node::PQActivationRuntimeState::HISTORICAL_REPLAY, 8,
+                         /*tip_valid=*/false));
+    BOOST_CHECK(!allowed(node::PQActivationRuntimeState::HISTORICAL_REPLAY, 8,
+                         /*tip_valid=*/true, /*local_state=*/false));
+    BOOST_CHECK(!allowed(node::PQActivationRuntimeState::HISTORICAL_REPLAY, 8,
+                         /*tip_valid=*/true, /*local_state=*/true,
+                         /*durable_finality_clear=*/false));
+    BOOST_CHECK(!allowed(node::PQActivationRuntimeState::HISTORICAL_REPLAY, 8,
+                         /*tip_valid=*/true, /*local_state=*/true,
+                         /*durable_finality_clear=*/true,
+                         /*durable_marker=*/false));
+    for (const auto state : {
+             node::PQActivationRuntimeState::SYNC_ONLY,
+             node::PQActivationRuntimeState::DEFERRED_HANDOFF,
+             node::PQActivationRuntimeState::FAILED}) {
+        BOOST_CHECK(!allowed(state, 8));
+    }
+
+    BOOST_CHECK(node::IsPQActivationBlockProductionAllowed(
+        params, node::PQActivationRuntimeState::FAILED,
+        /*participation_allowed=*/true,
+        /*durable_replay_marker=*/false, /*active_tip_height=*/-1,
+        /*active_tip_fully_validated=*/false,
+        /*local_state_usable=*/false, /*durable_finality_clear=*/false));
+}
+
+BOOST_AUTO_TEST_CASE(activation_handoff_record_serialization_is_canonical)
+{
+    constexpr int32_t activation_height{100};
+    const uint256 predecessor{uint256::ONEV};
+    const auto roundtrip = [](const node::PQActivationHandoffRecord& record) {
+        CDataStream encoded{SER_DISK, PROTOCOL_VERSION};
+        encoded << record;
+        node::PQActivationHandoffRecord decoded;
+        encoded >> decoded;
+        return decoded;
+    };
+
+    for (const auto& record : {
+             node::PQActivationHandoffRecord{
+                 node::PQActivationHandoffRecord::VERSION,
+                 node::PQActivationHandoffState::HISTORICAL_REPLAY,
+                 activation_height, {}},
+             node::PQActivationHandoffRecord{
+                 node::PQActivationHandoffRecord::VERSION,
+                 node::PQActivationHandoffState::PINNED,
+                 activation_height, predecessor},
+             node::PQActivationHandoffRecord{
+                 node::PQActivationHandoffRecord::VERSION,
+                 node::PQActivationHandoffState::FAILED,
+                 activation_height, {}}}) {
+        const auto decoded{roundtrip(record)};
+        BOOST_CHECK_EQUAL(decoded.version, record.version);
+        BOOST_CHECK(decoded.state == record.state);
+        BOOST_CHECK_EQUAL(decoded.activation_height,
+                          record.activation_height);
+        BOOST_CHECK(decoded.predecessor_hash == record.predecessor_hash);
+        BOOST_CHECK(decoded.IsValid(activation_height));
+    }
+
+    CDataStream invalid_state{SER_DISK, PROTOCOL_VERSION};
+    invalid_state << node::PQActivationHandoffRecord::VERSION << uint8_t{4}
+                  << activation_height << uint256{};
+    node::PQActivationHandoffRecord decoded_invalid_state;
+    BOOST_CHECK_THROW(invalid_state >> decoded_invalid_state,
+                      std::ios_base::failure);
+
+    auto invalid_version{node::PQActivationHandoffRecord{
+        node::PQActivationHandoffRecord::VERSION + 1,
+        node::PQActivationHandoffState::HISTORICAL_REPLAY,
+        activation_height, {}}};
+    BOOST_CHECK(!roundtrip(invalid_version).IsValid(activation_height));
+
+    auto historical_with_hash{node::PQActivationHandoffRecord{
+        node::PQActivationHandoffRecord::VERSION,
+        node::PQActivationHandoffState::HISTORICAL_REPLAY,
+        activation_height, predecessor}};
+    BOOST_CHECK(!historical_with_hash.IsValid(activation_height));
+    auto pinned_without_hash{node::PQActivationHandoffRecord{
+        node::PQActivationHandoffRecord::VERSION,
+        node::PQActivationHandoffState::PINNED,
+        activation_height, {}}};
+    BOOST_CHECK(!pinned_without_hash.IsValid(activation_height));
+}
+
+BOOST_AUTO_TEST_CASE(disabled_activation_preserves_legacy_replay)
+{
+    Consensus::Params params;
     params.DIP0003Height = 10;
 
-    BOOST_CHECK(Consensus::CheckPQLegacyAnchorConfiguration(params) ==
-                Consensus::PQAnchorResult::VALID);
-    BOOST_CHECK(Consensus::CheckPQLegacyReplay(params, 10) ==
-                Consensus::PQLegacyReplayResult::ALLOWED);
-    BOOST_CHECK(Consensus::CheckPQLegacyReplay(params, 11) ==
-                Consensus::PQLegacyReplayResult::RETIRED);
-    BOOST_CHECK(Consensus::CheckPQLegacyAnchor(params, 9, uint256::ZEROV, nullptr) ==
-                Consensus::PQAnchorResult::VALID);
-    BOOST_CHECK(Consensus::CheckPQLegacyAnchor(params, 10, uint256::TWOV, nullptr) ==
-                Consensus::PQAnchorResult::BLOCK_HASH_MISMATCH);
-    BOOST_CHECK(Consensus::CheckPQLegacyAnchor(params, 10, uint256::ONEV, nullptr) ==
-                Consensus::PQAnchorResult::VALID);
-
-    BOOST_CHECK(Consensus::CheckPQChainLockAnchorConfiguration(params) ==
-                Consensus::PQAnchorResult::DISABLED);
-    BOOST_CHECK(Consensus::CheckPQPaymentEligibility(params, 100) ==
-                Consensus::PQPaymentEligibilityResult::LEGACY);
-    params.nPQChainLockAnchorHeight = 9;
-    params.hashPQChainLockAnchorBlock = uint256S("4");
-    BOOST_CHECK(Consensus::CheckPQChainLockAnchorConfiguration(params) ==
-                Consensus::PQAnchorResult::INVALID_CONFIGURATION);
-    BOOST_CHECK(Consensus::CheckPQPaymentEligibility(params, 10) ==
-                Consensus::PQPaymentEligibilityResult::INVALID_CONFIGURATION);
-    params.nPQChainLockAnchorHeight = 12;
-    BOOST_CHECK(Consensus::CheckPQChainLockAnchorConfiguration(params) ==
-                Consensus::PQAnchorResult::VALID);
-    BOOST_CHECK(Consensus::CheckPQPaymentEligibility(params, 11) ==
-                Consensus::PQPaymentEligibilityResult::LEGACY);
-    BOOST_CHECK(Consensus::CheckPQPaymentEligibility(params, 12) ==
-                Consensus::PQPaymentEligibilityResult::LEGACY);
-    BOOST_CHECK(Consensus::CheckPQPaymentEligibility(params, 13) ==
-                Consensus::PQPaymentEligibilityResult::ROOT_REQUIRED);
-    BOOST_CHECK(Consensus::CheckPQChainLockAnchor(
-                    params, 12, uint256S("5"), nullptr) ==
-                Consensus::PQAnchorResult::BLOCK_HASH_MISMATCH);
-    BOOST_CHECK(Consensus::CheckPQChainLockAnchor(
-                    params, 12, uint256S("4"), nullptr) ==
-                Consensus::PQAnchorResult::VALID);
+    BOOST_CHECK(
+        Consensus::CheckPQActivationConfiguration(params) ==
+        Consensus::PQActivationResult::DISABLED);
+    BOOST_CHECK(!Consensus::IsPQProviderMempoolTransitionTip(params, 10));
+    for (const int height : {9, 10, 11, 1'000'000}) {
+        BOOST_CHECK(
+            Consensus::CheckPQLegacyReplay(params, height) ==
+            Consensus::PQLegacyReplayResult::ALLOWED);
+        BOOST_CHECK(
+            Consensus::CheckPQPaymentEligibility(params, height) ==
+            Consensus::PQPaymentEligibilityResult::LEGACY);
+    }
 }
 
-BOOST_AUTO_TEST_CASE(regtest_anchor_overrides_are_atomic_exact_and_scoped)
+BOOST_AUTO_TEST_CASE(activation_before_dip3_is_invalid)
 {
-    const auto defaults = CreateChainParams(ArgsManager{}, ChainType::REGTEST);
+    Consensus::Params params;
+    params.DIP0003Height = 10;
+    params.nPQActivationHeight = 9;
+
     BOOST_CHECK(
-        Consensus::CheckPQLegacyAnchorConfiguration(defaults->GetConsensus()) ==
-        Consensus::PQAnchorResult::DISABLED);
-
-    ArgsManager configured;
-    SetPQLegacyAnchorArgs(configured);
-    SetPQChainLockAnchorArgs(configured);
-    configured.ForceSetArg("-pqpreparationheight", "500");
-    configured.ForceSetArg("-pqchainlockepochorigin", "1440");
-    configured.ForceSetArg("-pqregistrationcutoffblocks", "144");
-    configured.ForceSetArg("-pqfuturehorizonepochs", "8");
-    const auto params = CreateChainParams(configured, ChainType::REGTEST);
-    const auto& consensus = params->GetConsensus();
-    BOOST_CHECK_EQUAL(consensus.nPQLegacyAnchorHeight, 1100);
-    BOOST_CHECK_EQUAL(consensus.hashPQLegacyAnchorBlock.GetHex(),
-                      ANCHOR_BLOCK_HASH);
-    BOOST_CHECK_EQUAL(consensus.hashPQLegacyMNState.GetHex(),
-                      ANCHOR_DMN_STATE_HASH);
-    BOOST_CHECK_EQUAL(consensus.hashPQLegacyPQRegistryState.GetHex(),
-                      ANCHOR_PQ_STATE_HASH);
-    BOOST_CHECK_EQUAL(consensus.nPQChainLockAnchorHeight, 2304);
-    BOOST_CHECK_EQUAL(consensus.hashPQChainLockAnchorBlock.GetHex(),
-                      CHAINLOCK_ANCHOR_BLOCK_HASH);
-    BOOST_CHECK(
-        Consensus::CheckPQLegacyAnchorConfiguration(consensus) ==
-        Consensus::PQAnchorResult::VALID);
-    llmq::pq::PQRegistryConfig registry_config;
-    BOOST_CHECK(llmq::pq::GetPQRegistryConfig(consensus, registry_config) ==
-                llmq::pq::PQRegistryDeploymentResult::VALID);
-
-    BOOST_CHECK_THROW(CreateChainParams(configured, ChainType::MAIN),
-                      std::runtime_error);
-
-    ArgsManager partial;
-    partial.ForceSetArg("-pqlegacyanchorheight", "1100");
-    BOOST_CHECK_THROW(CreateChainParams(partial, ChainType::REGTEST),
-                      std::runtime_error);
-
-    ArgsManager partial_chainlock;
-    SetPQLegacyAnchorArgs(partial_chainlock);
-    partial_chainlock.ForceSetArg("-pqchainlockanchorheight", "2304");
-    BOOST_CHECK_THROW(
-        CreateChainParams(partial_chainlock, ChainType::REGTEST),
-        std::runtime_error);
-
-    ArgsManager chainlock_before_migration;
-    SetPQLegacyAnchorArgs(chainlock_before_migration);
-    SetPQChainLockAnchorArgs(chainlock_before_migration, "1099");
-    BOOST_CHECK_THROW(
-        CreateChainParams(chainlock_before_migration, ChainType::REGTEST),
-        std::runtime_error);
-
-    ArgsManager malformed_hash;
-    SetPQLegacyAnchorArgs(malformed_hash);
-    malformed_hash.ForceSetArg("-pqlegacyanchorblockhash", "01");
-    BOOST_CHECK_THROW(CreateChainParams(malformed_hash, ChainType::REGTEST),
-                      std::runtime_error);
-
-    ArgsManager non_hex_hash;
-    SetPQLegacyAnchorArgs(non_hex_hash);
-    non_hex_hash.ForceSetArg("-pqlegacyanchorblockhash",
-                            std::string(63, '0') + "g");
-    BOOST_CHECK_THROW(CreateChainParams(non_hex_hash, ChainType::REGTEST),
-                      std::runtime_error);
-
-    ArgsManager zero_hash;
-    SetPQLegacyAnchorArgs(zero_hash);
-    zero_hash.ForceSetArg("-pqlegacydmnstatehash", std::string(64, '0'));
-    BOOST_CHECK_THROW(CreateChainParams(zero_hash, ChainType::REGTEST),
-                      std::runtime_error);
-
-    ArgsManager malformed_height;
-    SetPQLegacyAnchorArgs(malformed_height, "1100x");
-    BOOST_CHECK_THROW(CreateChainParams(malformed_height, ChainType::REGTEST),
-                      std::runtime_error);
-
-    ArgsManager before_dip3;
-    SetPQLegacyAnchorArgs(before_dip3, "100");
-    BOOST_CHECK_THROW(CreateChainParams(before_dip3, ChainType::REGTEST),
-                      std::runtime_error);
+        Consensus::CheckPQActivationConfiguration(params) ==
+        Consensus::PQActivationResult::INVALID_CONFIGURATION);
+    BOOST_CHECK(!Consensus::IsPQProviderMempoolTransitionTip(params, 8));
+    for (const int height : {8, 9, 10}) {
+        BOOST_CHECK(
+            Consensus::CheckPQLegacyReplay(params, height) ==
+            Consensus::PQLegacyReplayResult::INVALID_CONFIGURATION);
+        BOOST_CHECK(
+            Consensus::CheckPQPaymentEligibility(params, height) ==
+            Consensus::PQPaymentEligibilityResult::INVALID_CONFIGURATION);
+    }
 }
 
-BOOST_AUTO_TEST_CASE(ancestry_and_state_are_anchored)
+BOOST_AUTO_TEST_CASE(genesis_activation_is_invalid)
 {
     Consensus::Params params;
     params.DIP0003Height = 0;
-    params.nPQLegacyAnchorHeight = 2;
-    params.hashPQLegacyAnchorBlock = uint256::ONEV;
-    params.hashPQLegacyMNState = uint256::TWOV;
-    params.hashPQLegacyPQRegistryState = uint256S("3");
-
-    std::array<CBlockIndex, 4> chain;
-    std::array<uint256, 4> hashes{uint256::ZEROV, uint256::ZEROV, uint256::ONEV, uint256::ZEROV};
-    for (size_t i = 0; i < chain.size(); ++i) {
-        chain[i].nHeight = static_cast<int>(i);
-        chain[i].phashBlock = &hashes[i];
-        if (i != 0) chain[i].pprev = &chain[i - 1];
-        chain[i].BuildSkip();
-    }
-
-    BOOST_CHECK(Consensus::CheckPQLegacyAnchor(params, 3, hashes[3], &chain[2]) ==
-                Consensus::PQAnchorResult::VALID);
-    hashes[2] = uint256::TWOV;
-    BOOST_CHECK(Consensus::CheckPQLegacyAnchor(params, 3, hashes[3], &chain[2]) ==
-                Consensus::PQAnchorResult::ANCESTOR_HASH_MISMATCH);
-
-    BOOST_CHECK(Consensus::CheckPQLegacyMNState(params, 1, uint256::ZEROV));
-    BOOST_CHECK(!Consensus::CheckPQLegacyMNState(params, 2, uint256::ONEV));
-    BOOST_CHECK(Consensus::CheckPQLegacyMNState(params, 2, uint256::TWOV));
-    BOOST_CHECK(!Consensus::CheckPQLegacyState(
-        params, 2, uint256::TWOV, uint256::ONEV));
-    BOOST_CHECK(Consensus::CheckPQLegacyState(
-        params, 2, uint256::TWOV, uint256S("3")));
-}
-
-BOOST_AUTO_TEST_CASE(loaded_branches_must_descend_from_anchor)
-{
-    Consensus::Params params;
-    params.DIP0003Height = 0;
-    params.nPQLegacyAnchorHeight = 2;
-    params.hashPQLegacyAnchorBlock = uint256::ONEV;
-    params.hashPQLegacyMNState = uint256::TWOV;
-    params.hashPQLegacyPQRegistryState = uint256S("3");
-    params.nPQChainLockAnchorHeight = 3;
-
-    std::array<uint256, 4> good_hashes{uint256S("10"), uint256S("11"),
-                                       uint256::ONEV, uint256S("13")};
-    params.hashPQChainLockAnchorBlock = good_hashes.back();
-    std::array<CBlockIndex, 4> good{};
-    for (size_t i = 0; i < good.size(); ++i) {
-        good[i].nHeight = static_cast<int>(i);
-        good[i].phashBlock = &good_hashes[i];
-        good[i].pprev = i == 0 ? nullptr : &good[i - 1];
-        good[i].BuildSkip();
-    }
-    BOOST_CHECK(Consensus::IsPQLegacyAnchorCompatible(params, &good[1], &good[2]));
-    BOOST_CHECK(Consensus::IsPQLegacyAnchorCompatible(params, &good[3], &good[2]));
-    BOOST_CHECK(Consensus::ArePQAnchorsCompatible(
-        params, &good[1], &good[2], &good[3]));
-    BOOST_CHECK(Consensus::ArePQAnchorsCompatible(
-        params, &good[3], &good[2], &good[3]));
-
-    std::array<uint256, 4> stale_hashes{uint256S("20"), uint256S("21"),
-                                        uint256S("22"), uint256S("23")};
-    std::array<CBlockIndex, 4> stale{};
-    for (size_t i = 0; i < stale.size(); ++i) {
-        stale[i].nHeight = static_cast<int>(i);
-        stale[i].phashBlock = &stale_hashes[i];
-        stale[i].pprev = i == 0 ? nullptr : &stale[i - 1];
-        stale[i].BuildSkip();
-    }
-    BOOST_CHECK(Consensus::IsPQLegacyAnchorCompatible(params, &stale[1]));
-    BOOST_CHECK(!Consensus::IsPQLegacyAnchorCompatible(params, &stale[1], &good[2]));
-    BOOST_CHECK(!Consensus::IsPQLegacyAnchorCompatible(params, &stale[2], &good[2]));
-    BOOST_CHECK(!Consensus::IsPQLegacyAnchorCompatible(params, &stale[3], &good[2]));
-    BOOST_CHECK(!Consensus::ArePQAnchorsCompatible(
-        params, &stale[1], &good[2], &good[3]));
-    BOOST_CHECK(!Consensus::ArePQAnchorsCompatible(
-        params, &stale[3], &good[2], &good[3]));
-}
-
-BOOST_AUTO_TEST_CASE(known_anchor_rejects_fork_prefix_ending_immediately_before_it)
-{
-    Consensus::Params params;
-    params.DIP0003Height = 0;
-    params.nPQLegacyAnchorHeight = 3;
-    params.hashPQLegacyMNState = uint256::TWOV;
-    params.hashPQLegacyPQRegistryState = uint256S("3");
-
-    std::array<uint256, 4> canonical_hashes{
-        uint256S("100"), uint256S("101"), uint256S("102"), uint256S("103")};
-    params.hashPQLegacyAnchorBlock = canonical_hashes.back();
-    std::array<CBlockIndex, 4> canonical{};
-    for (size_t i = 0; i < canonical.size(); ++i) {
-        canonical[i].nHeight = static_cast<int>(i);
-        canonical[i].phashBlock = &canonical_hashes[i];
-        canonical[i].pprev = i == 0 ? nullptr : &canonical[i - 1];
-        canonical[i].BuildSkip();
-    }
-
-    std::array<uint256, 3> fork_hashes{
-        canonical_hashes[0], canonical_hashes[1], uint256S("202")};
-    std::array<CBlockIndex, 3> fork{};
-    for (size_t i = 0; i < fork.size(); ++i) {
-        fork[i].nHeight = static_cast<int>(i);
-        fork[i].phashBlock = &fork_hashes[i];
-        fork[i].pprev = i == 0 ? nullptr : &fork[i - 1];
-        fork[i].BuildSkip();
-    }
+    params.nPQActivationHeight = 0;
 
     BOOST_CHECK(
-        Consensus::CheckPQLegacyAnchor(
-            params, 2, canonical_hashes[2], &canonical[1], &canonical[3]) ==
-        Consensus::PQAnchorResult::VALID);
-    BOOST_CHECK(
-        Consensus::CheckPQLegacyAnchor(
-            params, 2, fork_hashes[2], &fork[1], &canonical[3]) ==
-        Consensus::PQAnchorResult::ANCESTOR_HASH_MISMATCH);
-    BOOST_CHECK(!Consensus::IsPQLegacyAnchorCompatible(
-        params, &fork[2], &canonical[3]));
+        Consensus::CheckPQActivationConfiguration(params) ==
+        Consensus::PQActivationResult::INVALID_CONFIGURATION);
 }
 
-BOOST_AUTO_TEST_CASE(known_finality_anchor_pins_the_post_migration_prefix)
+BOOST_AUTO_TEST_CASE(first_pq_block_has_exact_height_boundary)
 {
     Consensus::Params params;
-    params.DIP0003Height = 0;
-    params.nPQLegacyAnchorHeight = 1;
-    params.hashPQLegacyMNState = uint256::TWOV;
-    params.hashPQLegacyPQRegistryState = uint256S("3");
-    params.nPQChainLockAnchorHeight = 4;
+    params.DIP0003Height = 10;
+    constexpr int activation_height{100};
+    params.nPQActivationHeight = activation_height;
 
-    std::array<uint256, 5> canonical_hashes{
-        uint256S("300"), uint256S("301"), uint256S("302"),
-        uint256S("303"), uint256S("304")};
-    params.hashPQLegacyAnchorBlock = canonical_hashes[1];
-    params.hashPQChainLockAnchorBlock = canonical_hashes[4];
-    std::array<CBlockIndex, 5> canonical{};
-    for (size_t i = 0; i < canonical.size(); ++i) {
-        canonical[i].nHeight = static_cast<int>(i);
-        canonical[i].phashBlock = &canonical_hashes[i];
-        canonical[i].pprev = i == 0 ? nullptr : &canonical[i - 1];
-        canonical[i].BuildSkip();
-    }
+    BOOST_REQUIRE(
+        Consensus::CheckPQActivationConfiguration(params) ==
+        Consensus::PQActivationResult::VALID);
 
-    std::array<uint256, 4> fork_hashes{
-        canonical_hashes[0], canonical_hashes[1], uint256S("402"),
-        uint256S("403")};
-    std::array<CBlockIndex, 4> fork{};
-    for (size_t i = 0; i < fork.size(); ++i) {
-        fork[i].nHeight = static_cast<int>(i);
-        fork[i].phashBlock = &fork_hashes[i];
-        fork[i].pprev = i == 0 ? nullptr : &fork[i - 1];
-        fork[i].BuildSkip();
-    }
+    BOOST_CHECK(
+        Consensus::CheckPQLegacyReplay(params, activation_height - 1) ==
+        Consensus::PQLegacyReplayResult::ALLOWED);
+    BOOST_CHECK(
+        Consensus::CheckPQLegacyReplay(params, activation_height) ==
+        Consensus::PQLegacyReplayResult::RETIRED);
+    BOOST_CHECK(
+        Consensus::CheckPQLegacyReplay(params, activation_height + 1) ==
+        Consensus::PQLegacyReplayResult::RETIRED);
 
-    BOOST_CHECK(Consensus::IsPQLegacyAnchorCompatible(
-        params, &fork[3], &canonical[1]));
-    BOOST_CHECK(Consensus::IsPQChainLockAnchorCompatible(
-        params, &fork[3]));
-    BOOST_CHECK(!Consensus::IsPQChainLockAnchorCompatible(
-        params, &fork[3], &canonical[4]));
-    BOOST_CHECK(!Consensus::ArePQAnchorsCompatible(
-        params, &fork[3], &canonical[1], &canonical[4]));
-    BOOST_CHECK(Consensus::ArePQAnchorsCompatible(
-        params, &canonical[3], &canonical[1], &canonical[4]));
+    BOOST_CHECK(
+        Consensus::CheckPQPaymentEligibility(
+            params, activation_height - 1) ==
+        Consensus::PQPaymentEligibilityResult::LEGACY);
+    BOOST_CHECK(
+        Consensus::CheckPQPaymentEligibility(params, activation_height) ==
+        Consensus::PQPaymentEligibilityResult::ROOT_REQUIRED);
+    BOOST_CHECK(
+        Consensus::CheckPQPaymentEligibility(
+            params, activation_height + 1) ==
+        Consensus::PQPaymentEligibilityResult::ROOT_REQUIRED);
+
+    BOOST_CHECK(!Consensus::IsPQProviderMempoolTransitionTip(
+        params, activation_height - 2));
+    BOOST_CHECK(Consensus::IsPQProviderMempoolTransitionTip(
+        params, activation_height - 1));
+    BOOST_CHECK(!Consensus::IsPQProviderMempoolTransitionTip(
+        params, activation_height));
+}
+
+BOOST_AUTO_TEST_CASE(activation_height_must_not_be_a_superblock)
+{
+    Consensus::Params params;
+    params.DIP0003Height = 5;
+    params.nPQActivationHeight = 2'305;
+    params.nSuperblockStartBlock = 1;
+    params.nSuperblockCycle = 10;
+    params.nNEVMStartBlock = 2'050;
+    BOOST_CHECK(Consensus::IsPQActivationHeightCompatibleWithSuperblocks(
+        params));
+
+    params.nPQActivationHeight = 2'310;
+    BOOST_CHECK(!Consensus::IsPQActivationHeightCompatibleWithSuperblocks(
+        params));
+
+    params.nPQActivationHeight = 100;
+    params.nNEVMStartBlock = 200;
+    BOOST_CHECK(!Consensus::IsPQActivationHeightCompatibleWithSuperblocks(
+        params));
+
+    params.nSuperblockCycle = 0;
+    BOOST_CHECK(!Consensus::IsPQActivationHeightCompatibleWithSuperblocks(
+        params));
+}
+
+BOOST_AUTO_TEST_CASE(dip3_block_can_be_the_first_pq_block)
+{
+    Consensus::Params params;
+    params.DIP0003Height = 10;
+    params.nPQActivationHeight = params.DIP0003Height;
+
+    BOOST_REQUIRE(
+        Consensus::CheckPQActivationConfiguration(params) ==
+        Consensus::PQActivationResult::VALID);
+    BOOST_CHECK(
+        Consensus::CheckPQLegacyReplay(params, 9) ==
+        Consensus::PQLegacyReplayResult::ALLOWED);
+    BOOST_CHECK(
+        Consensus::CheckPQLegacyReplay(params, 10) ==
+        Consensus::PQLegacyReplayResult::RETIRED);
+    BOOST_CHECK(
+        Consensus::CheckPQPaymentEligibility(params, 10) ==
+        Consensus::PQPaymentEligibilityResult::ROOT_REQUIRED);
+}
+
+BOOST_AUTO_TEST_CASE(public_activation_handoff_requires_validated_predecessor)
+{
+    Consensus::Params params;
+    params.DIP0003Height = 5;
+    params.nPQActivationHeight = 9;
+    const uint256 predecessor{uint256::ONEV};
+
+    const auto prepared{node::PreparePQActivationHandoff(
+        params, /*public_network=*/true,
+        /*force_historical_replay=*/false,
+        /*empty_chainstate=*/false, std::nullopt)};
+    BOOST_CHECK(prepared.state ==
+                node::PQActivationRuntimeState::DEFERRED_HANDOFF);
+    BOOST_CHECK(!prepared.record_to_write);
+
+    node::PQActivationHandoffTip at_predecessor{
+        /*height=*/8, predecessor, predecessor,
+        /*predecessor_fully_validated=*/true,
+        /*activation_fully_validated=*/false};
+    const auto pinned{node::FinalizePQActivationHandoff(
+        params, prepared.state, std::nullopt, at_predecessor)};
+    BOOST_REQUIRE(pinned.record_to_write);
+    BOOST_CHECK(pinned.state == node::PQActivationRuntimeState::PINNED);
+    BOOST_CHECK(pinned.record_to_write->state ==
+                node::PQActivationHandoffState::PINNED);
+    BOOST_CHECK_EQUAL(pinned.record_to_write->activation_height, 9);
+    BOOST_CHECK(pinned.record_to_write->predecessor_hash == predecessor);
+
+    at_predecessor.height = 7;
+    const auto too_early{node::FinalizePQActivationHandoff(
+        params, prepared.state, std::nullopt, at_predecessor)};
+    BOOST_CHECK(too_early.state ==
+                node::PQActivationRuntimeState::DEFERRED_HANDOFF);
+    BOOST_CHECK(!too_early.record_to_write);
+
+    at_predecessor.height = 9;
+    const auto legacy_past_activation{node::FinalizePQActivationHandoff(
+        params, prepared.state, std::nullopt, at_predecessor)};
+    BOOST_REQUIRE(legacy_past_activation.record_to_write);
+    BOOST_CHECK(legacy_past_activation.state ==
+                node::PQActivationRuntimeState::FAILED);
+
+    at_predecessor.activation_fully_validated = true;
+    const auto no_record_past_activation{
+        node::FinalizePQActivationHandoff(
+            params, prepared.state, std::nullopt, at_predecessor)};
+    BOOST_REQUIRE(no_record_past_activation.record_to_write);
+    BOOST_CHECK(no_record_past_activation.state ==
+                node::PQActivationRuntimeState::FAILED);
+
+    const auto restored_past_activation{node::FinalizePQActivationHandoff(
+        params, prepared.state, pinned.record_to_write, at_predecessor)};
+    BOOST_CHECK(restored_past_activation.state ==
+                node::PQActivationRuntimeState::PINNED);
+    BOOST_CHECK(!restored_past_activation.record_to_write);
+}
+
+BOOST_AUTO_TEST_CASE(activation_handoff_uses_only_active_or_connecting_tip)
+{
+    BOOST_CHECK(node::IsPQActivationHandoffActiveView(
+        /*candidate_is_active_tip=*/true,
+        /*candidate_extends_active_tip=*/false));
+    BOOST_CHECK(node::IsPQActivationHandoffActiveView(
+        /*candidate_is_active_tip=*/false,
+        /*candidate_extends_active_tip=*/true));
+    BOOST_CHECK(!node::IsPQActivationHandoffActiveView(
+        /*candidate_is_active_tip=*/false,
+        /*candidate_extends_active_tip=*/false));
+}
+
+BOOST_AUTO_TEST_CASE(historical_replay_unlocks_only_after_validating_activation)
+{
+    Consensus::Params params;
+    params.DIP0003Height = 5;
+    params.nPQActivationHeight = 9;
+    const uint256 predecessor{uint256::ONEV};
+
+    const auto prepared{node::PreparePQActivationHandoff(
+        params, /*public_network=*/true,
+        /*force_historical_replay=*/true,
+        /*empty_chainstate=*/false, std::nullopt)};
+    BOOST_REQUIRE(prepared.record_to_write);
+    BOOST_CHECK(prepared.state ==
+                node::PQActivationRuntimeState::HISTORICAL_REPLAY);
+
+    node::PQActivationHandoffTip tip{
+        /*height=*/8, predecessor, predecessor,
+        /*predecessor_fully_validated=*/true,
+        /*activation_fully_validated=*/false};
+    auto resolution{node::FinalizePQActivationHandoff(
+        params, prepared.state, prepared.record_to_write, tip)};
+    BOOST_CHECK(resolution.state ==
+                node::PQActivationRuntimeState::HISTORICAL_REPLAY);
+    BOOST_CHECK(!resolution.record_to_write);
+
+    tip.height = 9;
+    resolution = node::FinalizePQActivationHandoff(
+        params, prepared.state, prepared.record_to_write, tip);
+    BOOST_CHECK(resolution.state ==
+                node::PQActivationRuntimeState::HISTORICAL_REPLAY);
+    BOOST_CHECK(!resolution.record_to_write);
+
+    tip.activation_fully_validated = true;
+    resolution = node::FinalizePQActivationHandoff(
+        params, prepared.state, prepared.record_to_write, tip);
+    BOOST_REQUIRE(resolution.record_to_write);
+    BOOST_CHECK(resolution.state == node::PQActivationRuntimeState::PINNED);
+    BOOST_CHECK(resolution.record_to_write->predecessor_hash == predecessor);
+}
+
+BOOST_AUTO_TEST_CASE(pinned_handoff_is_sticky_only_at_exact_predecessor)
+{
+    Consensus::Params params;
+    params.DIP0003Height = 5;
+    params.nPQActivationHeight = 9;
+    const uint256 predecessor{uint256::ONEV};
+    const uint256 other{uint256::TWOV};
+    const node::PQActivationHandoffRecord pinned{
+        node::PQActivationHandoffRecord::VERSION,
+        node::PQActivationHandoffState::PINNED,
+        params.nPQActivationHeight, predecessor};
+
+    const auto prepared{node::PreparePQActivationHandoff(
+        params, /*public_network=*/true,
+        /*force_historical_replay=*/false,
+        /*empty_chainstate=*/false, pinned)};
+    BOOST_CHECK(prepared.state ==
+                node::PQActivationRuntimeState::DEFERRED_HANDOFF);
+    node::PQActivationHandoffTip matching_tip{
+        /*height=*/9, predecessor, predecessor,
+        /*predecessor_fully_validated=*/true,
+        /*activation_fully_validated=*/true};
+    const auto restored{node::FinalizePQActivationHandoff(
+        params, prepared.state, pinned, matching_tip)};
+    BOOST_CHECK(restored.state == node::PQActivationRuntimeState::PINNED);
+    BOOST_CHECK(!restored.record_to_write);
+
+    // The block-tree pin is fsynced before ConnectTip publishes A. If a crash
+    // rolls chainstate back below A-1, reaching a different valid A-1 must
+    // reproduce the normal pre-finality quarantine transition rather than
+    // turning the local pin into a hash checkpoint.
+    node::PQActivationHandoffTip recovered_replacement{
+        /*height=*/8, other, other,
+        /*predecessor_fully_validated=*/true,
+        /*activation_fully_validated=*/false};
+    const auto crash_recovery{node::FinalizePQActivationHandoff(
+        params, prepared.state, pinned, recovered_replacement)};
+    BOOST_REQUIRE(crash_recovery.record_to_write);
+    BOOST_CHECK(crash_recovery.state ==
+                node::PQActivationRuntimeState::HISTORICAL_REPLAY);
+    BOOST_CHECK(crash_recovery.record_to_write->state ==
+                node::PQActivationHandoffState::HISTORICAL_REPLAY);
+    BOOST_CHECK(crash_recovery.record_to_write->predecessor_hash.IsNull());
+
+    const auto recovery_waits_at_predecessor{
+        node::FinalizePQActivationHandoff(
+            params, crash_recovery.state, crash_recovery.record_to_write,
+            recovered_replacement)};
+    BOOST_CHECK(recovery_waits_at_predecessor.state ==
+                node::PQActivationRuntimeState::HISTORICAL_REPLAY);
+    BOOST_CHECK(!recovery_waits_at_predecessor.record_to_write);
+    recovered_replacement.height = 9;
+    recovered_replacement.activation_fully_validated = true;
+    const auto recovered_pin{node::FinalizePQActivationHandoff(
+        params, crash_recovery.state, crash_recovery.record_to_write,
+        recovered_replacement)};
+    BOOST_REQUIRE(recovered_pin.record_to_write);
+    BOOST_CHECK(recovered_pin.state ==
+                node::PQActivationRuntimeState::PINNED);
+    BOOST_CHECK(recovered_pin.record_to_write->predecessor_hash == other);
+
+    matching_tip.active_predecessor_hash = other;
+    const auto mismatched_active_branch{node::FinalizePQActivationHandoff(
+        params, prepared.state, pinned, matching_tip)};
+    BOOST_REQUIRE(mismatched_active_branch.record_to_write);
+    BOOST_CHECK(mismatched_active_branch.state ==
+                node::PQActivationRuntimeState::FAILED);
+
+    BOOST_CHECK(node::DisconnectCrossesPQActivationHandoff(
+        params, node::PQActivationRuntimeState::PINNED, pinned,
+        /*disconnect_height=*/8, predecessor));
+    BOOST_CHECK(!node::DisconnectCrossesPQActivationHandoff(
+        params, node::PQActivationRuntimeState::PINNED, pinned,
+        /*disconnect_height=*/9, other));
+    BOOST_CHECK(!node::DisconnectCrossesPQActivationHandoff(
+        params, node::PQActivationRuntimeState::PINNED, pinned,
+        /*disconnect_height=*/8, other));
+
+    const auto quarantined{node::ResolvePQActivationHandoffDisconnect(
+        params, node::PQActivationRuntimeState::PINNED, pinned,
+        /*disconnect_height=*/8, predecessor)};
+    BOOST_REQUIRE(quarantined.record_to_write);
+    BOOST_CHECK(quarantined.state ==
+                node::PQActivationRuntimeState::HISTORICAL_REPLAY);
+    BOOST_CHECK(quarantined.record_to_write->state ==
+                node::PQActivationHandoffState::HISTORICAL_REPLAY);
+    BOOST_CHECK(node::IsPQActivationBlockProductionAllowed(
+        params, quarantined.state, /*participation_allowed=*/false,
+        quarantined.record_to_write->IsValid(params.nPQActivationHeight),
+        /*active_tip_height=*/8, /*active_tip_fully_validated=*/true,
+        /*local_state_usable=*/true, /*durable_finality_clear=*/true));
+    BOOST_CHECK(quarantined.record_to_write->predecessor_hash.IsNull());
+
+    const auto unrelated_disconnect{
+        node::ResolvePQActivationHandoffDisconnect(
+            params, node::PQActivationRuntimeState::PINNED, pinned,
+            /*disconnect_height=*/8, other)};
+    BOOST_CHECK(unrelated_disconnect.state ==
+                node::PQActivationRuntimeState::PINNED);
+    BOOST_CHECK(!unrelated_disconnect.record_to_write);
+
+    // A crash at any point after the durable quarantine restarts without the
+    // old hash. The replacement A-1 alone cannot unlock participation; full
+    // validation of its block A successor establishes the replacement pin.
+    const auto restarted{node::PreparePQActivationHandoff(
+        params, /*public_network=*/true,
+        /*force_historical_replay=*/false,
+        /*empty_chainstate=*/false, quarantined.record_to_write)};
+    BOOST_CHECK(restarted.state ==
+                node::PQActivationRuntimeState::HISTORICAL_REPLAY);
+    BOOST_CHECK(!restarted.record_to_write);
+
+    node::PQActivationHandoffTip replacement_tip{
+        /*height=*/8, other, other,
+        /*predecessor_fully_validated=*/true,
+        /*activation_fully_validated=*/false};
+    auto replacement{node::FinalizePQActivationHandoff(
+        params, restarted.state, quarantined.record_to_write,
+        replacement_tip)};
+    BOOST_CHECK(replacement.state ==
+                node::PQActivationRuntimeState::HISTORICAL_REPLAY);
+    BOOST_CHECK(!replacement.record_to_write);
+
+    replacement_tip.height = 9;
+    replacement_tip.activation_fully_validated = true;
+    replacement = node::FinalizePQActivationHandoff(
+        params, restarted.state, quarantined.record_to_write,
+        replacement_tip);
+    BOOST_REQUIRE(replacement.record_to_write);
+    BOOST_CHECK(replacement.state ==
+                node::PQActivationRuntimeState::PINNED);
+    BOOST_CHECK(replacement.record_to_write->state ==
+                node::PQActivationHandoffState::PINNED);
+    BOOST_CHECK(replacement.record_to_write->predecessor_hash == other);
+}
+
+BOOST_AUTO_TEST_CASE(unassigned_public_is_sync_only_and_regtest_bypasses)
+{
+    Consensus::Params params;
+    params.DIP0003Height = 5;
+
+    const auto public_unassigned{node::PreparePQActivationHandoff(
+        params, /*public_network=*/true,
+        /*force_historical_replay=*/false,
+        /*empty_chainstate=*/false, std::nullopt)};
+    BOOST_CHECK(public_unassigned.state ==
+                node::PQActivationRuntimeState::SYNC_ONLY);
+    BOOST_CHECK(!public_unassigned.record_to_write);
+
+    params.nPQActivationHeight = 9;
+    const node::PQActivationHandoffRecord failed{
+        node::PQActivationHandoffRecord::VERSION,
+        node::PQActivationHandoffState::FAILED,
+        params.nPQActivationHeight, {}};
+    const auto regtest{node::PreparePQActivationHandoff(
+        params, /*public_network=*/false,
+        /*force_historical_replay=*/true,
+        /*empty_chainstate=*/true, failed)};
+    BOOST_CHECK(regtest.state == node::PQActivationRuntimeState::BYPASS);
+    BOOST_CHECK(!regtest.record_to_write);
+
+    const auto reindex{node::PreparePQActivationHandoff(
+        params, /*public_network=*/true,
+        /*force_historical_replay=*/true,
+        /*empty_chainstate=*/false, failed)};
+    BOOST_REQUIRE(reindex.record_to_write);
+    BOOST_CHECK(reindex.state ==
+                node::PQActivationRuntimeState::HISTORICAL_REPLAY);
+    BOOST_CHECK(reindex.record_to_write->state ==
+                node::PQActivationHandoffState::HISTORICAL_REPLAY);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

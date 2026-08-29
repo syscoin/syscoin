@@ -110,8 +110,7 @@ struct AuxiliaryHistoryGCLimitedVectorFormatter {
 };
 
 enum class AuxiliaryHistoryGCAuthorizationSource : uint8_t {
-    IMMUTABLE_CHAINLOCK_ANCHOR = 0,
-    ENFORCED_DURABLE_CHAINLOCK,
+    ENFORCED_DURABLE_CHAINLOCK = 0,
 };
 
 struct AuxiliaryHistoryGCBlockIdentity {
@@ -134,7 +133,7 @@ struct AuxiliaryHistoryGCBlockIdentity {
 
 struct AuxiliaryHistoryGCAuthorization {
     AuxiliaryHistoryGCAuthorizationSource source{
-        AuxiliaryHistoryGCAuthorizationSource::IMMUTABLE_CHAINLOCK_ANCHOR};
+        AuxiliaryHistoryGCAuthorizationSource::ENFORCED_DURABLE_CHAINLOCK};
     AuxiliaryHistoryGCBlockIdentity block;
 
     [[nodiscard]] bool IsValid() const noexcept;
@@ -150,6 +149,11 @@ struct AuxiliaryHistoryGCAuthorization {
     friend bool operator==(const AuxiliaryHistoryGCAuthorization&,
                            const AuxiliaryHistoryGCAuthorization&) = default;
 };
+
+/** Exact reuse is allowed; height/source regression and equal-height forks are not. */
+[[nodiscard]] bool AuxiliaryHistoryGCAuthorizationDominates(
+    const AuxiliaryHistoryGCAuthorization& previous,
+    const AuxiliaryHistoryGCAuthorization& next) noexcept;
 
 /**
  * SYSCOIN: Authenticated trust base retained when a deterministic-MN inverse
@@ -200,9 +204,16 @@ struct PQRegistryGCClosure {
     static constexpr uint16_t LINEAGE_PROFILE_VERSION{1};
     static constexpr uint8_t SCANNING{0};
     static constexpr uint8_t COMPLETE{1};
+    // SYSCOIN: The low bit records EOF and the high bit records that a newer
+    // logical checkpoint made keys behind the physical cursor eligible. The
+    // original 0/1 encodings and fixed-width payload remain unchanged so an
+    // existing local journal upgrades in place. A binary predating these two
+    // states rejects them fail-closed on downgrade.
+    static constexpr uint8_t SCANNING_DIRTY{2};
+    static constexpr uint8_t RESTART_REQUIRED{3};
     static constexpr std::size_t SERIALIZED_SIZE{
         sizeof(uint32_t) + sizeof(uint16_t) + sizeof(uint64_t) +
-        sizeof(int32_t) + 7 * uint256::size() + 2 * sizeof(uint8_t)};
+        sizeof(int32_t) + 6 * uint256::size() + 2 * sizeof(uint8_t)};
 
     uint32_t format_guard{FORMAT_GUARD};
     uint16_t version{VERSION};
@@ -214,11 +225,22 @@ struct PQRegistryGCClosure {
     uint256 lineage_base_commitment;
     /** Commitment to the base plus this exact bounded replay segment. */
     uint256 rooted_lineage_commitment;
-    uint256 legacy_island_commitment;
     uint8_t scan_complete{SCANNING};
     std::optional<uint256> scan_after_key;
 
     [[nodiscard]] bool IsValid() const noexcept;
+    [[nodiscard]] bool HasScanCursor() const noexcept
+    {
+        return (scan_complete & COMPLETE) == 0;
+    }
+    [[nodiscard]] bool ScanIsDirty() const noexcept
+    {
+        return (scan_complete & SCANNING_DIRTY) != 0;
+    }
+    [[nodiscard]] bool NeedsPhysicalSweep() const noexcept
+    {
+        return scan_complete != COMPLETE;
+    }
 
     template <typename Stream>
     void Serialize(Stream& stream) const
@@ -231,8 +253,7 @@ struct PQRegistryGCClosure {
                         checkpoint_record_hash,
                         lineage_base_commitment,
                         rooted_lineage_commitment,
-                        legacy_island_commitment, scan_complete,
-                        cursor_present, cursor);
+                        scan_complete, cursor_present, cursor);
     }
 
     template <typename Stream>
@@ -245,11 +266,12 @@ struct PQRegistryGCClosure {
                           checkpoint_record_hash,
                           lineage_base_commitment,
                           rooted_lineage_commitment,
-                          legacy_island_commitment, scan_complete,
-                          cursor_present, cursor);
-        if (scan_complete > COMPLETE || cursor_present > 1 ||
+                          scan_complete, cursor_present, cursor);
+        if (scan_complete > RESTART_REQUIRED || cursor_present > 1 ||
             (cursor_present == 0 && !cursor.IsNull()) ||
-            (cursor_present == 1 && cursor.IsNull())) {
+            (cursor_present == 1 && cursor.IsNull()) ||
+            ((scan_complete & COMPLETE) == 0) !=
+                (cursor_present == 1)) {
             throw std::ios_base::failure{
                 "non-canonical PQ-registry GC closure"};
         }
@@ -328,9 +350,9 @@ struct AuxiliaryHistoryGCFrontier {
  * deliberately omitted from the compact WATERMARK after completion.
  */
 struct AuxiliaryHistoryGCManifest {
-    // SYSCOIN: This is a fail-closed per-intent chunk bound. Callers that
-    // need more space must advance over multiple strictly newer authorizers;
-    // an erase manifest must never be truncated.
+    // SYSCOIN: This is a fail-closed per-intent chunk bound. Larger work uses
+    // multiple monotonic journal generations under a still-active bounding
+    // authorizer; an erase manifest must never be truncated.
     static constexpr std::size_t MAX_MANIFEST_BYTES{4 * 1024 * 1024};
 
     uint16_t version{0};

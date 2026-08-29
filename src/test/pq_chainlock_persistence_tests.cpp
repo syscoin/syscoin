@@ -68,8 +68,7 @@ ChainLockFinalityStoreConfig MakeConfig()
     ChainLockFinalityStoreConfig config;
     config.chainlock_schedule = *MakeChainLockScheduleConfig(0);
     config.btcc_schedule.candidate_origin = 870;
-    config.anchor.height = 864;
-    config.anchor.block_hash = NonNullHash(864);
+    config.activation_predecessor_height = 864;
     return config;
 }
 
@@ -292,7 +291,7 @@ FinalChainLock MakeBTCCWinner(const DurableBTCCIndexState& index_state,
                               uint64_t salt)
 {
     const auto predecessor{NextEligibleChainLockTargetHeight(
-        config.chainlock_schedule, config.anchor.height)};
+        config.chainlock_schedule, config.activation_predecessor_height)};
     BOOST_REQUIRE(predecessor);
     auto winner{MakeChainLock(
         870, *predecessor, NonNullHash(*predecessor), salt)};
@@ -362,13 +361,85 @@ BOOST_AUTO_TEST_CASE(empty_database_initializes_fixed_schema)
     BOOST_CHECK(!state.unsealed_btcc);
 }
 
+BOOST_AUTO_TEST_CASE(activation_predecessor_hash_is_not_configuration)
+{
+    const uint256 genesis{NonNullHash(64)};
+    const auto config{MakeConfig()};
+    const auto branch_a{MakeChainLock(
+        865, config.activation_predecessor_height, NonNullHash(8641), 64)};
+    const auto branch_b{MakeChainLock(
+        865, config.activation_predecessor_height, NonNullHash(8642), 65)};
+    const fs::path path_a{m_path_root / "pqcl_height_boundary_a"};
+    const fs::path path_b{m_path_root / "pqcl_height_boundary_b"};
+
+    {
+        PQChainLockPersistence persistence{DiskParams(path_a), genesis, config};
+        BOOST_REQUIRE(persistence.PersistBest(branch_a));
+    }
+    {
+        PQChainLockPersistence persistence{DiskParams(path_a), genesis, config};
+        const auto loaded{persistence.LoadBest()};
+        BOOST_REQUIRE(loaded);
+        BOOST_CHECK(*loaded == branch_a);
+    }
+    {
+        PQChainLockPersistence persistence{DiskParams(path_b), genesis, config};
+        BOOST_REQUIRE(persistence.PersistBest(branch_b));
+    }
+    {
+        PQChainLockPersistence persistence{DiskParams(path_b), genesis, config};
+        const auto loaded{persistence.LoadBest()};
+        BOOST_REQUIRE(loaded);
+        BOOST_CHECK(*loaded == branch_b);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(activation_predecessor_requires_valid_boundary_shape)
+{
+    const auto config{MakeConfig()};
+    PQChainLockPersistence persistence{
+        MemoryParams(m_path_root / "pqcl_height_boundary_shape"),
+        NonNullHash(66), config};
+    ChainLockPersistenceError error{ChainLockPersistenceError::NONE};
+
+    const auto null_hash{
+        MakeChainLock(865, config.activation_predecessor_height, {}, 66)};
+    BOOST_CHECK(!persistence.PersistBest(null_hash, &error));
+    BOOST_CHECK(error == ChainLockPersistenceError::INVALID_CHAINLOCK);
+
+    auto cursor_mismatch{MakeChainLock(
+        865, config.activation_predecessor_height, NonNullHash(8643), 67)};
+    cursor_mismatch.statement.previous_btcc_cursor = BTCCursor{
+        860, NonNullHash(8601), NonNullHash(8602)};
+    cursor_mismatch.statement.accepted_btcc_cursor =
+        cursor_mismatch.statement.previous_btcc_cursor;
+    BOOST_REQUIRE(cursor_mismatch.IsStructurallyValid());
+    BOOST_CHECK(!persistence.PersistBest(cursor_mismatch, &error));
+    BOOST_CHECK(error == ChainLockPersistenceError::INVALID_CHAINLOCK);
+
+    const int32_t earlier_predecessor{
+        config.activation_predecessor_height -
+        static_cast<int32_t>(config.chainlock_schedule.chainlock_period)};
+    const auto earlier_target{NextEligibleChainLockTargetHeight(
+        config.chainlock_schedule, earlier_predecessor)};
+    BOOST_REQUIRE(earlier_target);
+    const auto before_boundary{MakeChainLock(
+        *earlier_target, earlier_predecessor,
+        NonNullHash(earlier_predecessor), 68)};
+    BOOST_REQUIRE(before_boundary.IsStructurallyValid());
+    BOOST_CHECK(!persistence.PersistBest(before_boundary, &error));
+    BOOST_CHECK(error == ChainLockPersistenceError::INVALID_CHAINLOCK);
+    BOOST_CHECK(!persistence.LoadBest());
+}
+
 BOOST_AUTO_TEST_CASE(roundtrip_survives_restart)
 {
     const fs::path path{m_path_root / "pqcl_roundtrip"};
     const uint256 genesis{NonNullHash(2)};
     const auto config{MakeConfig()};
     const auto chainlock{
-        MakeChainLock(865, config.anchor.height, config.anchor.block_hash, 1)};
+        MakeChainLock(865, config.activation_predecessor_height,
+                      NonNullHash(config.activation_predecessor_height), 1)};
     const auto next{MakeChainLock(
         870, chainlock.statement.height, chainlock.statement.block_hash, 2)};
 
@@ -406,7 +477,7 @@ BOOST_AUTO_TEST_CASE(durable_record_view_is_coherent_and_idempotence_is_stable)
         MemoryParams(m_path_root / "pqcl_finality_view"), genesis, config};
 
     const auto first{MakeChainLock(
-        865, config.anchor.height, config.anchor.block_hash, 61)};
+        865, config.activation_predecessor_height, NonNullHash(config.activation_predecessor_height), 61)};
     BOOST_REQUIRE(persistence.PersistBest(first));
     const auto first_state{persistence.GetFinalityState()};
     BOOST_REQUIRE(first_state.best);
@@ -777,6 +848,21 @@ BOOST_AUTO_TEST_CASE(wrong_schema_and_configuration_fail_closed)
         PQChainLockPersistence(DiskParams(path), NonNullHash(4), MakeConfig()),
         std::runtime_error);
 
+    const fs::path activation_path{
+        m_path_root / "pqcl_wrong_activation_height"};
+    {
+        PQChainLockPersistence persistence{
+            DiskParams(activation_path), genesis, MakeConfig()};
+    }
+    auto changed_activation{MakeConfig()};
+    changed_activation.activation_predecessor_height -= static_cast<int32_t>(
+        changed_activation.chainlock_schedule.chainlock_period);
+    BOOST_REQUIRE(changed_activation.IsValid());
+    BOOST_CHECK_THROW(
+        PQChainLockPersistence(
+            DiskParams(activation_path), genesis, changed_activation),
+        std::runtime_error);
+
     const fs::path missing_schema{m_path_root / "pqcl_missing_schema"};
     {
         CDBWrapper raw{DiskParams(missing_schema)};
@@ -806,7 +892,8 @@ BOOST_AUTO_TEST_CASE(corrupt_best_record_fails_closed)
     const uint256 genesis{NonNullHash(5)};
     const auto config{MakeConfig()};
     const auto chainlock{
-        MakeChainLock(865, config.anchor.height, config.anchor.block_hash, 5)};
+        MakeChainLock(865, config.activation_predecessor_height,
+                      NonNullHash(config.activation_predecessor_height), 5)};
     {
         PQChainLockPersistence persistence{
             DiskParams(path), genesis, config};
@@ -831,8 +918,8 @@ BOOST_AUTO_TEST_CASE(writes_are_monotonic_and_first_winner_is_durable)
         MemoryParams(m_path_root / "pqcl_monotonic"), genesis, config};
 
     auto first{
-        MakeChainLock(865, config.anchor.height, config.anchor.block_hash, 6)};
-    first.statement.previous_btcc_cursor = config.anchor.btcc_cursor;
+        MakeChainLock(865, config.activation_predecessor_height,
+                      NonNullHash(config.activation_predecessor_height), 6)};
     first.statement.accepted_btcc_cursor =
         BTCCursor{860, NonNullHash(8600), NonNullHash(8601)};
     first.statement.btcc_advance = BTCCAdvance::ADVANCE;
@@ -852,7 +939,8 @@ BOOST_AUTO_TEST_CASE(writes_are_monotonic_and_first_winner_is_durable)
     BOOST_REQUIRE(persistence.PersistBest(next));
 
     auto stale{
-        MakeChainLock(865, config.anchor.height, config.anchor.block_hash, 8)};
+        MakeChainLock(865, config.activation_predecessor_height,
+                      NonNullHash(config.activation_predecessor_height), 8)};
     BOOST_CHECK(!persistence.PersistBest(stale));
 
     auto rollback{MakeChainLock(875, 870, next.statement.block_hash, 9)};
@@ -874,7 +962,7 @@ BOOST_AUTO_TEST_CASE(durable_records_require_the_unique_successor_geometry)
         MemoryParams(m_path_root / "pqcl_successor_geometry"),
         genesis, config};
     const auto skipped{MakeChainLock(
-        870, config.anchor.height, config.anchor.block_hash, 60)};
+        870, config.activation_predecessor_height, NonNullHash(config.activation_predecessor_height), 60)};
     ChainLockPersistenceError error{ChainLockPersistenceError::NONE};
 
     BOOST_CHECK(!persistence.PersistBest(skipped, &error));
@@ -884,7 +972,7 @@ BOOST_AUTO_TEST_CASE(durable_records_require_the_unique_successor_geometry)
     BOOST_CHECK(!persistence.LoadBest());
 
     const auto predecessor{NextEligibleChainLockTargetHeight(
-        config.chainlock_schedule, config.anchor.height)};
+        config.chainlock_schedule, config.activation_predecessor_height)};
     BOOST_REQUIRE(predecessor);
     const auto exact{MakeChainLock(
         870, *predecessor, NonNullHash(*predecessor), 61)};
@@ -954,7 +1042,7 @@ BOOST_AUTO_TEST_CASE(
     const uint256 genesis{NonNullHash(13)};
     const auto config{MakeConfig()};
     const auto prior{MakeChainLock(
-        865, config.anchor.height, config.anchor.block_hash, 13)};
+        865, config.activation_predecessor_height, NonNullHash(config.activation_predecessor_height), 13)};
     auto advance{MakeChainLock(870, 865, prior.statement.block_hash, 14)};
     advance.statement.accepted_btcc_cursor =
         BTCCursor{870, advance.statement.block_hash, NonNullHash(87'014)};
@@ -1114,7 +1202,7 @@ BOOST_AUTO_TEST_CASE(catchup_audit_marker_advances_across_later_outages)
     const uint256 genesis{NonNullHash(22)};
     const auto config{MakeConfig()};
     const auto first{MakeChainLock(
-        865, config.anchor.height, config.anchor.block_hash, 220)};
+        865, config.activation_predecessor_height, NonNullHash(config.activation_predecessor_height), 220)};
     const auto live{MakeChainLock(
         870, first.statement.height, first.statement.block_hash, 221)};
     const auto second{MakeChainLock(895, 890, NonNullHash(890), 222)};

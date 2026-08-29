@@ -33,12 +33,13 @@ inline constexpr std::size_t MAX_FINALITY_ID_CACHE_SIZE{65536};
 inline constexpr std::size_t MAX_RECENT_CHAINLOCKS_SIZE{64};
 
 /**
- * Bounded memoization for the expensive fixed-anchor catch-up proof.
+ * Bounded memoization for the expensive historical catch-up proof.
  * Candidate hashes commit to their ancestry, so immutable candidate proofs
  * survive descendant tip extensions and temporary reorgs. Integration must
  * independently enforce the exact admission class and signing-window branch
- * bound, and change the validation domain token whenever anchor, configuration,
- * active-tip, marker, or validation provenance changes. Ordinary current
+ * bound, and change the validation domain token whenever the activation
+ * boundary, configuration, active tip, marker, or validation provenance
+ * changes. Ordinary current
  * catch-up may select a shallow competing branch; marker recovery remains
  * active-branch-only.
  */
@@ -89,20 +90,10 @@ private:
     std::size_t m_computations GUARDED_BY(m_mutex){0};
 };
 
-struct ChainLockFinalityAnchor {
-    int32_t height{-1};
-    uint256 block_hash;
-    BTCCursor btcc_cursor;
-
-    [[nodiscard]] bool IsStructurallyValid() const noexcept;
-    friend bool operator==(const ChainLockFinalityAnchor&,
-                           const ChainLockFinalityAnchor&) = default;
-};
-
 /**
  * Release-pinned boundary for assuming only historical BTCC receipt
- * certificates. This is deliberately distinct from the immutable migration
- * anchor, which commits the reconstructed DMN and PQ-registry state.
+ * certificates. This is deliberately distinct from the height-only PQ
+ * activation boundary.
  */
 struct BTCCReceiptAssumptionAnchor {
     int32_t height{-1};
@@ -118,7 +109,7 @@ struct BTCCReceiptAssumptionAnchor {
 struct ChainLockFinalityStoreConfig {
     ChainLockScheduleConfig chainlock_schedule;
     BTCCScheduleConfig btcc_schedule;
-    ChainLockFinalityAnchor anchor;
+    int32_t activation_predecessor_height{-1};
     BTCCReceiptAssumptionAnchor btcc_receipt_assumption_anchor;
     std::size_t seen_logical_capacity{DEFAULT_SEEN_LOGICAL_CACHE_SIZE};
     std::size_t seen_witness_capacity{DEFAULT_SEEN_WITNESS_CACHE_SIZE};
@@ -185,7 +176,7 @@ enum class ChainLockCandidateAdmission : uint8_t {
 
 struct ChainLockCandidateContextRequest {
     ChainLockStatement statement;
-    /** The locally accepted winner, or the immutable fork anchor before one exists. */
+    /** The locally accepted winner, or the candidate's activation predecessor. */
     ChainLockPredecessor local_best;
     bool has_local_chainlock{false};
     /** Present only when this node retained the declared predecessor certificate. */
@@ -506,6 +497,9 @@ private:
 
     [[nodiscard]] ChainLockPredecessor CurrentPredecessor() const
         EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    [[nodiscard]] bool IsPreparedPredecessorCurrent(
+        const ChainLockPredecessor& predecessor,
+        bool had_local_chainlock) const EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
     [[nodiscard]] bool CheckCurrentStoreState(
         const FinalChainLock& chainlock,
         const uint256& logical_id,

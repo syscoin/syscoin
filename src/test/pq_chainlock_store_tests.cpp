@@ -80,8 +80,7 @@ ChainLockFinalityStoreConfig MakeConfig(std::size_t cache_capacity = 4,
     ChainLockFinalityStoreConfig config;
     config.chainlock_schedule = *MakeChainLockScheduleConfig(0);
     config.btcc_schedule.candidate_origin = 870;
-    config.anchor.height = 864;
-    config.anchor.block_hash = NonNullHash(864);
+    config.activation_predecessor_height = 864;
     config.seen_logical_capacity = cache_capacity;
     config.seen_witness_capacity = cache_capacity;
     config.rejected_witness_capacity = cache_capacity;
@@ -322,18 +321,30 @@ BOOST_AUTO_TEST_CASE(best_record_view_shares_witness_and_tracks_store_revision)
     BOOST_CHECK(*first_view->certificate == first);
 }
 
-BOOST_AUTO_TEST_CASE(local_import_defers_only_unknown_anchor_ancestry)
+BOOST_AUTO_TEST_CASE(activation_height_is_not_finality_before_first_winner)
 {
     TestFinalityContext context;
     ChainLockFinalityStore store{NonNullHash(1), MakeConfig(), context};
     const uint256 candidate{NonNullHash(859)};
 
-    BOOST_CHECK(store.HasConflictingChainLock(
+    BOOST_CHECK(!store.HasChainLock(/*height=*/859, candidate));
+    BOOST_CHECK(!store.HasConflictingChainLock(
         /*height=*/859, candidate, /*unknown_is_conflict=*/true));
     BOOST_CHECK(!store.HasConflictingChainLock(
         /*height=*/859, candidate, /*unknown_is_conflict=*/false));
 
-    context.accepted_branch.emplace(859, candidate);
+    context.accepted_branch.emplace(859, NonNullHash(999));
+    BOOST_CHECK(!store.HasChainLock(/*height=*/859, candidate));
+    BOOST_CHECK(!store.HasConflictingChainLock(
+        /*height=*/859, candidate, /*unknown_is_conflict=*/true));
+
+    const auto first{MakeChainLock(865, 864, NonNullHash(864), 201)};
+    auto prepared{store.PrepareCandidate(first)};
+    BOOST_REQUIRE(prepared);
+    BOOST_REQUIRE(store.AcceptVerified(*prepared, first, true));
+
+    context.accepted_branch[859] = candidate;
+    BOOST_CHECK(store.HasChainLock(/*height=*/859, candidate));
     BOOST_CHECK(!store.HasConflictingChainLock(
         /*height=*/859, candidate, /*unknown_is_conflict=*/true));
     BOOST_CHECK(!store.HasConflictingChainLock(
@@ -344,6 +355,98 @@ BOOST_AUTO_TEST_CASE(local_import_defers_only_unknown_anchor_ancestry)
         /*height=*/859, candidate, /*unknown_is_conflict=*/true));
     BOOST_CHECK(store.HasConflictingChainLock(
         /*height=*/859, candidate, /*unknown_is_conflict=*/false));
+}
+
+BOOST_AUTO_TEST_CASE(invalid_first_witness_does_not_pin_activation_hash)
+{
+    TestFinalityContext context;
+    ChainLockFinalityStore store{NonNullHash(202), MakeConfig(), context};
+    const uint256 predecessor_a{NonNullHash(8641)};
+    const uint256 predecessor_b{NonNullHash(8642)};
+    const auto invalid{MakeChainLock(865, 864, predecessor_a, 202)};
+
+    auto prepared{store.PrepareCandidate(invalid)};
+    BOOST_REQUIRE(prepared);
+    BOOST_CHECK(!prepared->has_local_chainlock);
+    BOOST_CHECK(prepared->predecessor.block_hash == predecessor_a);
+    ChainLockFinalityError error{ChainLockFinalityError::NONE};
+    BOOST_CHECK(!store.AcceptVerified(*prepared, invalid, false, &error));
+    BOOST_CHECK(error == ChainLockFinalityError::INVALID_SIGNATURES);
+    BOOST_CHECK(!store.GetBest());
+
+    const auto winner{MakeChainLock(865, 864, predecessor_b, 203)};
+    prepared = store.PrepareCandidate(winner, &error);
+    BOOST_REQUIRE(prepared);
+    BOOST_CHECK(prepared->predecessor.block_hash == predecessor_b);
+    BOOST_REQUIRE(store.AcceptVerified(*prepared, winner, true, &error));
+    BOOST_CHECK(error == ChainLockFinalityError::NONE);
+    BOOST_REQUIRE(store.GetBest());
+    BOOST_CHECK(*store.GetBest() == winner);
+}
+
+BOOST_AUTO_TEST_CASE(first_seen_candidate_does_not_pin_activation_hash)
+{
+    TestFinalityContext context;
+    ChainLockFinalityStore store{NonNullHash(208), MakeConfig(), context};
+    const auto branch_a{
+        MakeChainLock(865, 864, NonNullHash(8646), 208)};
+    const auto branch_b{
+        MakeChainLock(865, 864, NonNullHash(8647), 209)};
+
+    auto prepared_a{store.PrepareCandidate(branch_a)};
+    auto prepared_b{store.PrepareCandidate(branch_b)};
+    BOOST_REQUIRE(prepared_a);
+    BOOST_REQUIRE(prepared_b);
+    BOOST_CHECK(prepared_a->predecessor.block_hash !=
+                prepared_b->predecessor.block_hash);
+    BOOST_REQUIRE(store.AcceptVerified(*prepared_b, branch_b, true));
+
+    ChainLockFinalityError error{ChainLockFinalityError::NONE};
+    BOOST_CHECK(!store.AcceptVerified(*prepared_a, branch_a, true, &error));
+    BOOST_CHECK(error == ChainLockFinalityError::CONTEXT_CHANGED);
+    BOOST_CHECK(*store.GetBest() == branch_b);
+}
+
+BOOST_AUTO_TEST_CASE(first_predecessor_must_be_proven_by_candidate_context)
+{
+    TestFinalityContext context;
+    ChainLockFinalityStore store{NonNullHash(204), MakeConfig(), context};
+    ChainLockFinalityError error{ChainLockFinalityError::NONE};
+    const auto rejected{
+        MakeChainLock(865, 864, NonNullHash(8643), 204)};
+
+    context.descendant = false;
+    BOOST_CHECK(!store.PrepareCandidate(rejected, &error));
+    BOOST_CHECK(error == ChainLockFinalityError::NOT_PREDECESSOR_DESCENDANT);
+    BOOST_CHECK(!store.GetBest());
+
+    context.descendant = true;
+    const auto winner{MakeChainLock(865, 864, NonNullHash(8644), 205)};
+    auto prepared{store.PrepareCandidate(winner, &error)};
+    BOOST_REQUIRE(prepared);
+    BOOST_REQUIRE(store.AcceptVerified(*prepared, winner, true, &error));
+    BOOST_CHECK(*store.GetBest() == winner);
+}
+
+BOOST_AUTO_TEST_CASE(first_predecessor_requires_nonnull_hash_and_null_cursor)
+{
+    TestFinalityContext context;
+    ChainLockFinalityStore store{NonNullHash(206), MakeConfig(), context};
+    ChainLockFinalityError error{ChainLockFinalityError::NONE};
+
+    const auto null_hash{MakeChainLock(865, 864, {}, 206)};
+    BOOST_CHECK(!store.PrepareCandidate(null_hash, &error));
+    BOOST_CHECK(error == ChainLockFinalityError::INVALID_CHAINLOCK);
+
+    auto cursor_mismatch{
+        MakeChainLock(865, 864, NonNullHash(8645), 207)};
+    cursor_mismatch.statement.previous_btcc_cursor = MakeCursor(860, 207);
+    cursor_mismatch.statement.accepted_btcc_cursor =
+        cursor_mismatch.statement.previous_btcc_cursor;
+    BOOST_REQUIRE(cursor_mismatch.IsStructurallyValid());
+    BOOST_CHECK(!store.PrepareCandidate(cursor_mismatch, &error));
+    BOOST_CHECK(error == ChainLockFinalityError::PREDECESSOR_MISMATCH);
+    BOOST_CHECK(!store.GetBest());
 }
 
 BOOST_AUTO_TEST_CASE(witness_dedup_does_not_suppress_an_alternate_witness)
@@ -599,6 +702,88 @@ BOOST_AUTO_TEST_CASE(catchup_rebases_repeatably_across_missing_predecessors)
     BOOST_CHECK(!store.PrepareCatchupCandidate(
         predecessor_before_local, &error));
     BOOST_CHECK(error == ChainLockFinalityError::PREDECESSOR_MISMATCH);
+}
+
+BOOST_AUTO_TEST_CASE(
+    first_winner_can_be_current_catchup_after_multiple_missed_rounds)
+{
+    const uint256 genesis{NonNullHash(406)};
+    const auto config{MakeConfig()};
+    const auto window{CurrentChainLockSigningWindow(
+        config.chainlock_schedule, config.activation_predecessor_height,
+        /*tip_height=*/885)};
+    BOOST_REQUIRE(window);
+    // Targets 865, 870, and 875 elapsed without a durable certificate. The
+    // live scheduler must move to target 880 instead of waiting on 865.
+    BOOST_CHECK_EQUAL(window->target_height, 880);
+    BOOST_CHECK_EQUAL(window->declared_predecessor_height, 875);
+
+    TestFinalityContext context;
+    std::size_t live_writes{0};
+    std::size_t catchup_writes{0};
+    std::size_t pre_durable_calls{0};
+    ChainLockFinalityStore store{
+        genesis, config, context,
+        [&](const FinalChainLock&) {
+            ++live_writes;
+            return true;
+        },
+        {},
+        [&](const FinalChainLock&,
+            const std::optional<BTCCCursorReconciliationProof>&) {
+            ++catchup_writes;
+            return true;
+        }};
+
+    const auto recovered{MakeChainLock(
+        window->target_height, window->declared_predecessor_height,
+        NonNullHash(window->declared_predecessor_height), 406)};
+    ChainLockFinalityError error{ChainLockFinalityError::NONE};
+    BOOST_CHECK(!store.PrepareCandidate(recovered, &error));
+    BOOST_CHECK(error == ChainLockFinalityError::PREDECESSOR_MISMATCH);
+
+    auto prepared{store.PrepareCatchupCandidate(recovered, &error)};
+    BOOST_REQUIRE(prepared);
+    BOOST_CHECK(!prepared->has_local_chainlock);
+    BOOST_CHECK(prepared->admission == ChainLockCandidateAdmission::CATCHUP);
+    BOOST_CHECK(context.last_admission == ChainLockCandidateAdmission::CATCHUP);
+    BOOST_REQUIRE(store.AcceptCatchupVerified(
+        *prepared, recovered, /*signatures_valid=*/true,
+        [&] {
+            ++pre_durable_calls;
+            return true;
+        },
+        {}, &error));
+    BOOST_CHECK(error == ChainLockFinalityError::NONE);
+    BOOST_CHECK_EQUAL(pre_durable_calls, 1U);
+    BOOST_CHECK_EQUAL(catchup_writes, 1U);
+    BOOST_CHECK_EQUAL(live_writes, 0U);
+    BOOST_REQUIRE(store.GetBest());
+    BOOST_CHECK(*store.GetBest() == recovered);
+
+    // Once the gap is durably rebased, the immediately following target uses
+    // the recovered certificate as its exact predecessor and returns to LIVE.
+    const auto next_height{NextEligibleChainLockTargetHeight(
+        config.chainlock_schedule, recovered.statement.height)};
+    BOOST_REQUIRE(next_height);
+    const auto next{MakeChainLock(
+        *next_height, recovered.statement.height,
+        recovered.statement.block_hash, 407)};
+    prepared = store.PrepareCandidate(next, &error);
+    BOOST_REQUIRE(prepared);
+    BOOST_CHECK(prepared->has_local_chainlock);
+    BOOST_CHECK(prepared->predecessor.height == recovered.statement.height);
+    BOOST_CHECK(prepared->predecessor.block_hash ==
+                recovered.statement.block_hash);
+    BOOST_CHECK(prepared->admission == ChainLockCandidateAdmission::LIVE);
+    BOOST_CHECK(context.last_admission == ChainLockCandidateAdmission::LIVE);
+    BOOST_REQUIRE(store.AcceptVerified(
+        *prepared, next, /*signatures_valid=*/true, &error));
+    BOOST_CHECK(error == ChainLockFinalityError::NONE);
+    BOOST_CHECK_EQUAL(catchup_writes, 1U);
+    BOOST_CHECK_EQUAL(live_writes, 1U);
+    BOOST_REQUIRE(store.GetBest());
+    BOOST_CHECK(*store.GetBest() == next);
 }
 
 BOOST_AUTO_TEST_CASE(

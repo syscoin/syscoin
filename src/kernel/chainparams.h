@@ -152,20 +152,9 @@ public:
      * RegTestOptions holds configurations for creating a regtest CChainParams.
      */
     struct RegTestOptions {
-        // SYSCOIN: begin regtest PQ migration and receipt-anchor overrides.
-        struct PQLegacyAnchorOptions {
-            int height;
-            uint256 block_hash;
-            uint256 dmn_state_hash;
-            uint256 pq_registry_state_hash;
-        };
-
-        struct PQChainLockAnchorOptions {
-            int height;
-            uint256 block_hash;
-        };
-
-        // SYSCOIN: Separate from the immutable migration-state anchor.
+        // SYSCOIN BEGIN: Regtest PQ activation and receipt-anchor overrides.
+        // The activation height is the first block which enforces PQ-only
+        // provider authorization, payment eligibility, and finality rules.
         struct PQBTCCReceiptAnchorOptions {
             int height;
             uint256 block_hash;
@@ -183,8 +172,7 @@ public:
         int dip3enforcement{432};
         int nevmstartblock{2050};
         int clreceiptstartblock{std::numeric_limits<int>::max()};
-        std::optional<PQLegacyAnchorOptions> pqlegacyanchor;
-        std::optional<PQChainLockAnchorOptions> pqchainlockanchor;
+        int pqactivationheight{std::numeric_limits<int>::max()};
         std::optional<PQBTCCReceiptAnchorOptions> pqbtccreceiptanchor;
         int pqpreparationheight{std::numeric_limits<int>::max()};
         int pqchainlockepochorigin{std::numeric_limits<int>::max()};
@@ -193,7 +181,7 @@ public:
         int pqfuturehorizonepochs{0};
         int pqbtcccandidateorigin{std::numeric_limits<int>::max()};
         int pqbtccnevminjectionlag{10};
-        // SYSCOIN: end regtest PQ migration and receipt-anchor overrides.
+        // SYSCOIN END: Regtest PQ activation and receipt-anchor overrides.
         int bridgev2startblock{std::numeric_limits<int>::max()};
 
     };

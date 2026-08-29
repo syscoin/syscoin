@@ -223,8 +223,8 @@ std::optional<BTCCReceiptState> CatchupHistoricalProofCache::GetOrCompute(
     }
 
     // Both outcomes are immutable for the supplied token. The integration
-    // includes active-tip, validation, schedule, anchor, and indexed-state
-    // facts in that token, so a real state transition invalidates this entry
+    // includes active-tip, validation, schedule, activation-boundary, and
+    // indexed-state facts in that token, so a real state transition invalidates this entry
     // instead of allowing each network message to retry an O(chain-age) scan.
     static constexpr int64_t INITIAL_BACKOFF_MS{1000};
     static constexpr int64_t MAX_BACKOFF_MS{60000};
@@ -257,16 +257,6 @@ std::size_t CatchupHistoricalProofCache::SizeForTesting() const
 {
     LOCK(m_mutex);
     return m_proofs.size();
-}
-
-bool ChainLockFinalityAnchor::IsStructurallyValid() const noexcept
-{
-    if (!btcc_cursor.IsStructurallyValid()) return false;
-    if (height == -1) {
-        return block_hash.IsNull() && btcc_cursor.IsNull();
-    }
-    return height >= 0 && !block_hash.IsNull() &&
-           (btcc_cursor.IsNull() || btcc_cursor.sys_height <= height);
 }
 
 bool BTCCReceiptAssumptionAnchor::IsDisabled() const noexcept
@@ -306,9 +296,8 @@ bool ChainLockFinalityStoreConfig::IsValid() const noexcept
             chainlock_schedule.epoch_origin) %
                    chainlock_schedule.chainlock_period ==
                0 &&
-           anchor.IsStructurallyValid() &&
-           anchor.height < btcc_schedule.candidate_origin &&
-           anchor.btcc_cursor.IsNull() &&
+           activation_predecessor_height >= -1 &&
+           activation_predecessor_height < btcc_schedule.candidate_origin &&
            btcc_receipt_assumption_anchor.IsStructurallyValid() &&
            valid_receipt_anchor_height &&
            ValidCapacity(seen_logical_capacity, MAX_FINALITY_ID_CACHE_SIZE) &&
@@ -365,12 +354,22 @@ ChainLockFinalityStore::ChainLockFinalityStore(
 ChainLockPredecessor ChainLockFinalityStore::CurrentPredecessor() const
 {
     if (!m_best) {
-        return ChainLockPredecessor{m_config.anchor.height, m_config.anchor.block_hash,
-                                    m_config.anchor.btcc_cursor};
+        return ChainLockPredecessor{m_config.activation_predecessor_height, {}, {}};
     }
     const auto& statement = m_best->chainlock->statement;
     return ChainLockPredecessor{statement.height, statement.block_hash,
                                 statement.accepted_btcc_cursor};
+}
+
+bool ChainLockFinalityStore::IsPreparedPredecessorCurrent(
+    const ChainLockPredecessor& predecessor,
+    bool had_local_chainlock) const
+{
+    if (m_best.has_value() != had_local_chainlock) return false;
+    // Before the first verified winner, the candidate supplies the branch
+    // hash and the integration authenticates it against that candidate's
+    // ancestry. Merely preparing an invalid witness must never pin that hash.
+    return !had_local_chainlock || CurrentPredecessor() == predecessor;
 }
 
 bool ChainLockFinalityStore::CheckCurrentStoreState(
@@ -394,13 +393,19 @@ bool ChainLockFinalityStore::CheckCurrentStoreState(
         return false;
     }
     const ChainLockPredecessor predecessor{CurrentPredecessor()};
+    const bool declares_activation_predecessor{
+        statement.previous_chainlock_height == m_config.activation_predecessor_height &&
+        !statement.previous_chainlock_hash.IsNull() &&
+        statement.previous_btcc_cursor.IsNull()};
     if (admission == ChainLockCandidateAdmission::LIVE) {
         // A signed, merely eligible predecessor is not evidence that the
         // preceding validator set accepted it. Exact chaining makes every
         // live roster transition depend on this node's durable winner.
-        if (statement.previous_chainlock_height != predecessor.height ||
-            statement.previous_chainlock_hash != predecessor.block_hash ||
-            statement.previous_btcc_cursor != predecessor.btcc_cursor) {
+        if ((!m_best && !declares_activation_predecessor) ||
+            (m_best &&
+             (statement.previous_chainlock_height != predecessor.height ||
+              statement.previous_chainlock_hash != predecessor.block_hash ||
+              statement.previous_btcc_cursor != predecessor.btcc_cursor))) {
             SetError(error, ChainLockFinalityError::PREDECESSOR_MISMATCH);
             return false;
         }
@@ -411,10 +416,10 @@ bool ChainLockFinalityStore::CheckCurrentStoreState(
             SetError(error, ChainLockFinalityError::PERSISTED_IMPORT_NOT_EMPTY);
             return false;
         }
-        if (statement.previous_chainlock_height < m_config.anchor.height ||
-            (statement.previous_chainlock_height == m_config.anchor.height &&
-             statement.previous_chainlock_hash != m_config.anchor.block_hash) ||
-            (statement.previous_chainlock_height > m_config.anchor.height &&
+        if (statement.previous_chainlock_height < m_config.activation_predecessor_height ||
+            (statement.previous_chainlock_height == m_config.activation_predecessor_height &&
+             !declares_activation_predecessor) ||
+            (statement.previous_chainlock_height > m_config.activation_predecessor_height &&
              !IsEligibleChainLockTarget(m_config.chainlock_schedule,
                                         statement.previous_chainlock_height))) {
             SetError(error, ChainLockFinalityError::PREDECESSOR_MISMATCH);
@@ -422,7 +427,7 @@ bool ChainLockFinalityStore::CheckCurrentStoreState(
         }
     } else if (admission == ChainLockCandidateAdmission::RECEIPT_ARCHIVE) {
         if (!IsReceiptableAdvance(chainlock, m_config) ||
-            statement.height <= m_config.anchor.height ||
+            statement.height <= m_config.activation_predecessor_height ||
             (m_best && statement.height >= predecessor.height)) {
             SetError(error, ChainLockFinalityError::STALE_HEIGHT);
             return false;
@@ -434,7 +439,7 @@ bool ChainLockFinalityStore::CheckCurrentStoreState(
         // exact terminal certificate must use marker-authorized CATCHUP so the
         // persisted best/unsealed restart invariant remains coherent.
         if (!IsReceiptableAdvance(chainlock, m_config) ||
-            statement.height <= m_config.anchor.height || !m_best ||
+            statement.height <= m_config.activation_predecessor_height || !m_best ||
             statement.height >= predecessor.height) {
             SetError(error, ChainLockFinalityError::STALE_HEIGHT);
             return false;
@@ -444,15 +449,15 @@ bool ChainLockFinalityStore::CheckCurrentStoreState(
         // certificates. The candidate and its declared predecessor must both
         // descend from the durable local winner; the integration rechecks that
         // active best-work relation and the full receipt accumulator.
-        if (statement.previous_chainlock_height < predecessor.height ||
-            (statement.previous_chainlock_height == predecessor.height &&
-             statement.previous_chainlock_hash != predecessor.block_hash) ||
+        if ((m_best &&
+             (statement.previous_chainlock_height < predecessor.height ||
+              (statement.previous_chainlock_height == predecessor.height &&
+               statement.previous_chainlock_hash != predecessor.block_hash))) ||
             statement.previous_chainlock_height <
-                m_config.anchor.height ||
-            (statement.previous_chainlock_height == m_config.anchor.height &&
-             statement.previous_chainlock_hash !=
-                 m_config.anchor.block_hash) ||
-            (statement.previous_chainlock_height > m_config.anchor.height &&
+                m_config.activation_predecessor_height ||
+            (statement.previous_chainlock_height == m_config.activation_predecessor_height &&
+             !declares_activation_predecessor) ||
+            (statement.previous_chainlock_height > m_config.activation_predecessor_height &&
              !IsEligibleChainLockTarget(
                  m_config.chainlock_schedule,
                  statement.previous_chainlock_height))) {
@@ -509,9 +514,8 @@ bool ChainLockFinalityStore::CheckCurrentStoreState(
 std::optional<BTCCursor> ChainLockFinalityStore::FindDeclaredPredecessorCursor(
     const ChainLockStatement& statement) const
 {
-    if (statement.previous_chainlock_height == m_config.anchor.height &&
-        statement.previous_chainlock_hash == m_config.anchor.block_hash) {
-        return m_config.anchor.btcc_cursor;
+    if (statement.previous_chainlock_height == m_config.activation_predecessor_height) {
+        return BTCCursor{};
     }
     if (m_best &&
         m_best->chainlock->statement.height == statement.previous_chainlock_height &&
@@ -638,8 +642,13 @@ ChainLockFinalityStore::PrepareCandidateInternal(
                 chainlock, logical_id, witness_id, admission, error)) {
             return std::nullopt;
         }
-        predecessor = CurrentPredecessor();
         has_local_chainlock = m_best.has_value();
+        predecessor = has_local_chainlock
+            ? CurrentPredecessor()
+            : ChainLockPredecessor{
+                  chainlock.statement.previous_chainlock_height,
+                  chainlock.statement.previous_chainlock_hash,
+                  chainlock.statement.previous_btcc_cursor};
         declared_predecessor_cursor =
             admission != ChainLockCandidateAdmission::LIVE
                 ? std::optional<BTCCursor>{chainlock.statement.previous_btcc_cursor}
@@ -655,7 +664,9 @@ ChainLockFinalityStore::PrepareCandidateInternal(
 
     {
         LOCK(m_mutex);
-        if (m_revision != revision || CurrentPredecessor() != predecessor) {
+        if (m_revision != revision ||
+            !IsPreparedPredecessorCurrent(predecessor,
+                                          has_local_chainlock)) {
             SetError(error, ChainLockFinalityError::CONTEXT_CHANGED);
             return std::nullopt;
         }
@@ -780,7 +791,9 @@ bool ChainLockFinalityStore::AcceptVerifiedInternal(
     {
         LOCK(m_mutex);
         if (m_revision != prepared.store_revision ||
-            CurrentPredecessor() != prepared.predecessor) {
+            !IsPreparedPredecessorCurrent(
+                prepared.predecessor,
+                prepared.has_local_chainlock)) {
             SetError(error, ChainLockFinalityError::CONTEXT_CHANGED);
             return false;
         }
@@ -843,7 +856,9 @@ bool ChainLockFinalityStore::AcceptVerifiedInternal(
 
     LOCK(m_mutex);
     if (m_revision != prepared.store_revision ||
-        CurrentPredecessor() != prepared.predecessor) {
+        !IsPreparedPredecessorCurrent(
+            prepared.predecessor,
+            prepared.has_local_chainlock)) {
         SetError(error, ChainLockFinalityError::CONTEXT_CHANGED);
         return false;
     }
@@ -992,13 +1007,11 @@ bool ChainLockFinalityStore::HasChainLock(int32_t height,
     uint256 best_hash;
     {
         LOCK(m_mutex);
-        if (height < 0 || block_hash.IsNull()) {
+        if (!m_best || height < 0 || block_hash.IsNull()) {
             return false;
         }
-        best_height = m_best ? m_best->chainlock->statement.height
-                             : m_config.anchor.height;
-        best_hash = m_best ? m_best->chainlock->statement.block_hash
-                           : m_config.anchor.block_hash;
+        best_height = m_best->chainlock->statement.height;
+        best_hash = m_best->chainlock->statement.block_hash;
         if (height > best_height) return false;
         if (height == best_height) return block_hash == best_hash;
         const auto recent{m_recent_by_height.find(height)};
@@ -1019,10 +1032,12 @@ bool ChainLockFinalityStore::HasConflictingChainLock(
     uint256 best_hash;
     {
         LOCK(m_mutex);
-        best_height = m_best ? m_best->chainlock->statement.height
-                             : m_config.anchor.height;
-        best_hash = m_best ? m_best->chainlock->statement.block_hash
-                           : m_config.anchor.block_hash;
+        // A height-only activation boundary is not a ChainLock. Until a
+        // certificate is fully verified and durable, ordinary PoW fork choice
+        // remains authoritative for every branch.
+        if (!m_best) return false;
+        best_height = m_best->chainlock->statement.height;
+        best_hash = m_best->chainlock->statement.block_hash;
         if (height > best_height) return false;
         if (height < 0 || block_hash.IsNull()) return true;
         if (height == best_height) return block_hash != best_hash;

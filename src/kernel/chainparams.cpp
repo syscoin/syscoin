@@ -9,7 +9,7 @@
 #include <consensus/amount.h>
 #include <consensus/merkle.h>
 #include <consensus/params.h>
-#include <consensus/pq_migration_config.h> // SYSCOIN: validate pinned PQ activation anchors.
+#include <consensus/pq_migration_config.h> // SYSCOIN: validate height-only PQ activation profiles.
 #include <hash.h>
 #include <kernel/messagestartchars.h>
 #include <logging.h>
@@ -599,22 +599,8 @@ public:
         consensus.nBridgeStartBlock = 0;
         consensus.nNEVMStartBlock = opts.nevmstartblock;
         consensus.nCLReceiptStartBlock = opts.clreceiptstartblock;
-        // SYSCOIN: begin regtest PQ migration and receipt-anchor configuration.
-        if (opts.pqlegacyanchor) {
-            consensus.nPQLegacyAnchorHeight = opts.pqlegacyanchor->height;
-            consensus.hashPQLegacyAnchorBlock =
-                opts.pqlegacyanchor->block_hash;
-            consensus.hashPQLegacyMNState =
-                opts.pqlegacyanchor->dmn_state_hash;
-            consensus.hashPQLegacyPQRegistryState =
-                opts.pqlegacyanchor->pq_registry_state_hash;
-        }
-        if (opts.pqchainlockanchor) {
-            consensus.nPQChainLockAnchorHeight =
-                opts.pqchainlockanchor->height;
-            consensus.hashPQChainLockAnchorBlock =
-                opts.pqchainlockanchor->block_hash;
-        }
+        // SYSCOIN BEGIN: Regtest PQ activation and receipt-anchor configuration.
+        consensus.nPQActivationHeight = opts.pqactivationheight;
         consensus.nPQPreparationHeight = opts.pqpreparationheight;
         consensus.nPQChainLockEpochOrigin = opts.pqchainlockepochorigin;
         consensus.nPQRegistrationCutoffBlocks =
@@ -626,7 +612,7 @@ public:
         consensus.nPQBTCCCandidateOrigin = opts.pqbtcccandidateorigin;
         consensus.nPQBTCCNEVMInjectionLag = opts.pqbtccnevminjectionlag;
         // SYSCOIN: Keep the release-updatable receipt assumption independent
-        // from the immutable DMN/PQ-registry migration anchor.
+        // from the PQ consensus activation height.
         if (opts.pqbtccreceiptanchor) {
             consensus.nPQBTCCReceiptAnchorHeight =
                 opts.pqbtccreceiptanchor->height;
@@ -649,17 +635,12 @@ public:
         consensus.nV19StartBlock = opts.v19startblock;
         consensus.DIP0003Height = opts.dip3startblock;
         consensus.DIP0003EnforcementHeight = opts.dip3enforcement;
-        if (Consensus::CheckPQLegacyAnchorConfiguration(consensus) ==
-            Consensus::PQAnchorResult::INVALID_CONFIGURATION) {
+        if (Consensus::CheckPQActivationConfiguration(consensus) ==
+            Consensus::PQActivationResult::INVALID_CONFIGURATION) {
             throw std::runtime_error(
-                "Invalid regtest PQ legacy anchor configuration");
+                "Invalid regtest PQ activation configuration");
         }
-        if (Consensus::CheckPQChainLockAnchorConfiguration(consensus) ==
-            Consensus::PQAnchorResult::INVALID_CONFIGURATION) {
-            throw std::runtime_error(
-                "Invalid regtest PQ ChainLock anchor configuration");
-        }
-        // SYSCOIN: end regtest PQ migration and receipt-anchor configuration.
+        // SYSCOIN END: Regtest PQ activation and receipt-anchor configuration.
 
         pchMessageStart[0] = 0xfa;
         pchMessageStart[1] = 0xbf;

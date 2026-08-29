@@ -240,18 +240,6 @@ bool FrontierDominates(const AuxiliaryHistoryGCFrontier& previous,
            ComponentDominates(previous.pq_registry, next.pq_registry);
 }
 
-bool AuthorizationStrictlyAdvances(
-    const AuxiliaryHistoryGCAuthorization& previous,
-    const AuxiliaryHistoryGCAuthorization& next)
-{
-    // SYSCOIN: This journal proves only durable local monotonicity. Before an
-    // erase or resume, the store-specific caller must independently prove
-    // authorizer ancestry and decode both retained closure payloads.
-    if (next.block.height <= previous.block.height) return false;
-    return static_cast<uint8_t>(next.source) >=
-           static_cast<uint8_t>(previous.source);
-}
-
 bool IsValidIntent(const AuxiliaryHistoryGCIntent& intent,
                    const AuxiliaryHistoryGCDeployment& deployment)
 {
@@ -285,8 +273,8 @@ bool IntentAdvancesWatermark(
 {
     return watermark.sequence != std::numeric_limits<uint64_t>::max() &&
            intent.sequence == watermark.sequence + 1 &&
-           AuthorizationStrictlyAdvances(watermark.authorization,
-                                         intent.target.authorization) &&
+           AuxiliaryHistoryGCAuthorizationDominates(
+               watermark.authorization, intent.target.authorization) &&
            FrontierDominates(watermark.frontier,
                              intent.target.frontier) &&
            AdvancesExactlyOneComponent(watermark.frontier,
@@ -311,12 +299,24 @@ AuxiliaryHistoryGCWatermark WatermarkFromIntent(
 
 } // namespace
 
+bool AuxiliaryHistoryGCAuthorizationDominates(
+    const AuxiliaryHistoryGCAuthorization& previous,
+    const AuxiliaryHistoryGCAuthorization& next) noexcept
+{
+    // The journal proves durable local monotonicity. Store-specific callers
+    // still authenticate ancestry and decode both retained closures.
+    if (next.block.height < previous.block.height ||
+        static_cast<uint8_t>(next.source) <
+            static_cast<uint8_t>(previous.source)) {
+        return false;
+    }
+    return next.block.height != previous.block.height || next == previous;
+}
+
 bool AuxiliaryHistoryGCAuthorization::IsValid() const noexcept
 {
-    const auto source_value{static_cast<uint8_t>(source)};
-    return source_value <= static_cast<uint8_t>(
-               AuxiliaryHistoryGCAuthorizationSource::
-                   ENFORCED_DURABLE_CHAINLOCK) &&
+    return source == AuxiliaryHistoryGCAuthorizationSource::
+                         ENFORCED_DURABLE_CHAINLOCK &&
            block.IsValid();
 }
 
@@ -362,16 +362,15 @@ DecodeDMNInverseGCClosure(Span<const unsigned char> payload)
 bool PQRegistryGCClosure::IsValid() const noexcept
 {
     const bool scan_state_valid{
-        (scan_complete == SCANNING && scan_after_key.has_value()) ||
-        (scan_complete == COMPLETE && !scan_after_key)};
+        scan_complete <= RESTART_REQUIRED &&
+        HasScanCursor() == scan_after_key.has_value()};
     return format_guard == FORMAT_GUARD && version == VERSION &&
            generation > 0 && checkpoint.IsValid() &&
            !checkpoint_state_root.IsNull() &&
            !checkpoint_record_hash.IsNull() &&
            !lineage_base_commitment.IsNull() &&
            !rooted_lineage_commitment.IsNull() &&
-           !legacy_island_commitment.IsNull() && scan_state_valid &&
-           (!scan_after_key || !scan_after_key->IsNull());
+           scan_state_valid && (!scan_after_key || !scan_after_key->IsNull());
 }
 
 std::optional<std::vector<unsigned char>>
@@ -537,12 +536,7 @@ MakeAuxiliaryHistoryGCDeployment(const Consensus::Params& consensus)
     writer << consensus.hashGenesisBlock
            << static_cast<int32_t>(consensus.DIP0003Height)
            << static_cast<int32_t>(consensus.DIP0003EnforcementHeight)
-           << static_cast<int32_t>(consensus.nPQLegacyAnchorHeight)
-           << consensus.hashPQLegacyAnchorBlock
-           << consensus.hashPQLegacyMNState
-           << consensus.hashPQLegacyPQRegistryState
-           << static_cast<int32_t>(consensus.nPQChainLockAnchorHeight)
-           << consensus.hashPQChainLockAnchorBlock
+           << static_cast<int32_t>(consensus.nPQActivationHeight)
            << static_cast<int32_t>(consensus.nPQPreparationHeight)
            << static_cast<int32_t>(consensus.nPQChainLockEpochOrigin)
            << consensus.nPQRegistrationCutoffBlocks
@@ -759,8 +753,8 @@ AuxiliaryHistoryGCJournalResult AuxiliaryHistoryGCJournal::Begin(
             }
             return AuxiliaryHistoryGCJournalResult::ALREADY_COMPLETE;
         }
-        if (!AuthorizationStrictlyAdvances(watermark.authorization,
-                                           target.authorization) ||
+        if (!AuxiliaryHistoryGCAuthorizationDominates(
+                watermark.authorization, target.authorization) ||
             !FrontierDominates(watermark.frontier, target.frontier) ||
             !AdvancesExactlyOneComponent(watermark.frontier, target) ||
             watermark.sequence == std::numeric_limits<uint64_t>::max()) {

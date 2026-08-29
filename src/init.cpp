@@ -666,12 +666,8 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-dip19params=<n:m>", "DIP19 params used for testing only", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-nevmstartheight=<n>", "NEVM Start height used for testing only", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-clreceiptstartheight=<n>", "CL receipt start height used for testing only", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-pqlegacyanchorheight=<n>", "Mandatory PQ migration anchor height; regtest only and requires all PQ legacy anchor arguments", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-pqlegacyanchorblockhash=<hex>", "Exact non-zero block hash at the PQ migration anchor; regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-pqlegacydmnstatehash=<hex>", "Exact non-zero deterministic-masternode state root at the PQ migration anchor; regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-pqlegacypqregistrystatehash=<hex>", "Exact non-zero PQ registry state root at the PQ migration anchor; regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-pqchainlockanchorheight=<n>", "Immutable predecessor height for the first PQ ChainLock; regtest only and requires both PQ ChainLock anchor arguments", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-pqchainlockanchorblockhash=<hex>", "Exact non-zero block hash of the first PQ ChainLock predecessor; regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
+    // SYSCOIN BEGIN: Regtest PQ deployment arguments.
+    argsman.AddArg("-pqactivationheight=<n>", "First block enforcing PQ-only provider authorization, root-qualified payments, and PQ finality; regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
     argsman.AddArg("-pqfinalitypreparation", "Run the regtest PQ registry/quorum preparation phase without a finality store, signing, acceptance, or enforcement", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
     argsman.AddArg("-pqpreparationheight=<n>", "First PQ key-registry transaction height used for regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
     argsman.AddArg("-pqchainlockepochorigin=<n>", "PQ ChainLock epoch origin used for regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
@@ -681,18 +677,19 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-pqchainlocktestfixture=<path>", "Load a bounded branch-bound quorum snapshot fixture for full-dimension ChainLock functional tests; mine-on-demand regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-pqoperatorcommitmenttestfixture=<genesis>:<chainlockseedhash>:<treeid>:<generation>:<firstepoch>:<root>", "Use an exact precomputed depth-16 operator commitment; mine-on-demand regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST); // SYSCOIN: Keep low-core lifecycle tests on real signatures without rebuilding 65,536 child keys.
     argsman.AddArg("-pqoperatorcommitmenttestfixtureverify", "Rebuild and verify the configured PQ operator commitment test fixture", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
-    argsman.AddArg("-pqoperatorcommitmentteststub", "Use synthetic child roots and disable child-tree cache construction in PQ preparation-only functional tests", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST); // SYSCOIN: Keep unrelated regtest suites from multiplying the production 65,536-leaf build.
+    argsman.AddArg("-pqoperatorcommitmentteststub", "Use recognizable synthetic child roots in mine-on-demand regtest functional tests; root creation remains preparation-only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST); // SYSCOIN: Keep unrelated regtest suites from multiplying the production 65,536-leaf build.
     argsman.AddArg("-pqbtcccandidateorigin=<n>", "PQ BTCC candidate origin used for regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
     argsman.AddArg("-pqbtccnevminjectionlag=<n>", "PQ BTCC NEVM injection lag used for regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
     // SYSCOIN: Regtest-only override for the release-pinned receipt-crypto
     // assumption. All six values are required together and never alter the
-    // immutable migration-state or ChainLock anchors.
+    // height-only PQ activation boundary.
     argsman.AddArg("-pqbtccreceiptanchorheight=<n>", "Historical PQ BTCC receipt assumption carrier height; regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
     argsman.AddArg("-pqbtccreceiptanchorblockhash=<hex>", "Exact block hash at the PQ BTCC receipt assumption height; regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
     argsman.AddArg("-pqbtccreceiptanchorcursorheight=<n>", "Last receipted Syscoin cursor height at the PQ BTCC assumption boundary (-1 for none); regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
     argsman.AddArg("-pqbtccreceiptanchorcursorsyshash=<hex>", "Last receipted Syscoin cursor hash at the PQ BTCC assumption boundary; regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
     argsman.AddArg("-pqbtccreceiptanchorcursorbtchash=<hex>", "Last receipted Bitcoin hash at the PQ BTCC assumption boundary; regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
     argsman.AddArg("-pqbtccreceiptanchorstatehash=<hex>", "Cumulative PQ BTCC receipt-state hash at the assumption boundary; regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
+    // SYSCOIN END: Regtest PQ deployment arguments.
     argsman.AddArg("-btcheadermanaged", strprintf("Start and supervise the pinned local Bitcoin headers-only node (default: %u)", DEFAULT_BTC_HEADER_MANAGED), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-btcheaderbinary=<path>", "Path to managed bitcoind; otherwise search bundled btcheadernode locations", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-btcheaderclibinary=<path>", "Path to managed bitcoin-cli; otherwise use the binary beside bitcoind", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -1427,15 +1424,13 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 {
     const ArgsManager& args = *Assert(node.args);
     const CChainParams& chainparams = Params();
-    // SYSCOIN: Public chains remain explicitly pre-activation until a release
-    // pins the complete profile. Regtest additionally has an explicit
-    // preparation state which builds H-authenticated registry history while
-    // leaving every finality-specific field unassigned.
+    // SYSCOIN BEGIN: Public PQ deployment-profile validation.
+    // Public chains remain explicitly pre-activation until a release
+    // assigns the complete height-based profile. Regtest additionally has an
+    // explicit registry preparation state with finality disabled.
     const auto& consensus{chainparams.GetConsensus()};
-    static constexpr std::array<const char*, 20> REGTEST_PQ_DEPLOYMENT_ARGS{
-        "-pqlegacyanchorheight", "-pqlegacyanchorblockhash",
-        "-pqlegacydmnstatehash", "-pqlegacypqregistrystatehash",
-        "-pqchainlockanchorheight", "-pqchainlockanchorblockhash",
+    static constexpr std::array<const char*, 15> REGTEST_PQ_DEPLOYMENT_ARGS{
+        "-pqactivationheight",
         "-pqfinalitypreparation",
         "-pqpreparationheight", "-pqchainlockepochorigin",
         "-pqregistrationcutoffblocks", "-pqrostersnapshotlag",
@@ -1447,9 +1442,9 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         "-pqbtccreceiptanchorcursorbtchash",
         "-pqbtccreceiptanchorstatehash",
     };
-    static constexpr std::array<const char*, 10> REGTEST_PQ_FINALITY_ARGS{
-        "-pqchainlockanchorheight", "-pqchainlockanchorblockhash",
-        "-pqbtcccandidateorigin", "-pqbtccnevminjectionlag",
+    static constexpr std::array<const char*, 9> REGTEST_PQ_FINALITY_ARGS{
+        "-pqactivationheight", "-pqbtcccandidateorigin",
+        "-pqbtccnevminjectionlag",
         "-pqbtccreceiptanchorheight", "-pqbtccreceiptanchorblockhash",
         "-pqbtccreceiptanchorcursorheight",
         "-pqbtccreceiptanchorcursorsyshash",
@@ -1468,12 +1463,12 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         args.GetBoolArg("-pqoperatorcommitmentteststub", false)};
     if (operator_commitment_test_stub &&
         (chainparams.GetChainType() != ChainType::REGTEST ||
-         !chainparams.MineBlocksOnDemand() || !preparation_requested ||
+         !chainparams.MineBlocksOnDemand() ||
          args.IsArgSet("-pqoperatorcommitmenttestfixture") ||
          args.GetBoolArg("-pqoperatorcommitmenttestfixtureverify", false))) {
         return InitError(Untranslated(
-            "-pqoperatorcommitmentteststub requires preparation-only "
-            "mine-on-demand regtest and cannot be combined with an exact "
+            "-pqoperatorcommitmentteststub requires mine-on-demand regtest "
+            "and cannot be combined with an exact "
             "operator commitment fixture"));
     }
     const bool finality_arg_supplied{std::any_of(
@@ -1481,12 +1476,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         [&](const char* name) { return args.IsArgSet(name); })};
     const bool public_profile_unassigned{
         chainparams.GetChainType() != ChainType::REGTEST &&
-        consensus.nPQLegacyAnchorHeight == std::numeric_limits<int>::max() &&
-        consensus.hashPQLegacyAnchorBlock.IsNull() &&
-        consensus.hashPQLegacyMNState.IsNull() &&
-        consensus.hashPQLegacyPQRegistryState.IsNull() &&
-        consensus.nPQChainLockAnchorHeight == std::numeric_limits<int>::max() &&
-        consensus.hashPQChainLockAnchorBlock.IsNull() &&
+        consensus.nPQActivationHeight == std::numeric_limits<int>::max() &&
         consensus.nPQPreparationHeight == std::numeric_limits<int>::max() &&
         consensus.nPQChainLockEpochOrigin == std::numeric_limits<int>::max() &&
         consensus.nPQRegistrationCutoffBlocks == 0 &&
@@ -1502,12 +1492,19 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     const bool complete_pq_profile{
         llmq::MakePQChainLockFinalityStoreConfig(consensus).has_value() &&
         llmq::MakePQQuorumBuildConfig(consensus).has_value()};
+    // SYSCOIN BEGIN: Historical replay cannot obtain exact live governance
+    // authority while quarantined, so a superblock at A cannot establish the
+    // strong provenance required to leave quarantine.
+    if (complete_pq_profile &&
+        !Consensus::IsPQActivationHeightCompatibleWithSuperblocks(consensus)) {
+        return InitError(Untranslated(
+            "PQ activation height must not be a superblock height"));
+    }
+    // SYSCOIN END: Reject a circular PQ activation profile at startup.
     const bool preparation_profile{
         preparation_requested && !finality_arg_supplied &&
-        Consensus::CheckPQLegacyAnchorConfiguration(consensus) ==
-            Consensus::PQAnchorResult::VALID &&
-        Consensus::CheckPQChainLockAnchorConfiguration(consensus) ==
-            Consensus::PQAnchorResult::DISABLED &&
+        Consensus::CheckPQActivationConfiguration(consensus) ==
+            Consensus::PQActivationResult::DISABLED &&
         consensus.nPQBTCCCandidateOrigin == std::numeric_limits<int>::max() &&
         consensus.nPQBTCCReceiptAnchorHeight ==
             std::numeric_limits<int>::max() &&
@@ -1518,6 +1515,12 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         consensus.hashPQBTCCReceiptAnchorState.IsNull() &&
         llmq::MakePQQuorumBuildConfig(consensus).has_value() &&
         !llmq::MakePQChainLockFinalityStoreConfig(consensus).has_value()};
+    if (operator_commitment_test_stub &&
+        !preparation_profile && !complete_pq_profile) {
+        return InitError(Untranslated(
+            "-pqoperatorcommitmentteststub requires a complete preparation "
+            "or activation profile"));
+    }
     if ((preparation_requested && !preparation_profile) ||
         (regtest_pq_arg_supplied && !preparation_requested &&
          !complete_pq_profile) ||
@@ -1525,8 +1528,8 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
          !public_profile_unassigned && !complete_pq_profile)) {
         return InitError(_(
             "This BLS-free build has an incomplete PQ deployment: the "
-            "migration anchor, ChainLock anchor, BTCC receipt assumption "
-            "anchor, schedules, and roster parameters must be assigned "
+            "activation height, BTCC receipt assumption anchor, schedules, "
+            "and roster parameters must be assigned "
             "consistently. Regtest preparation requires "
             "-pqfinalitypreparation with all finality fields unassigned."));
     }
@@ -1540,6 +1543,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             "network. Legacy history uses compatibility replay and no "
             "ChainLock finality service will start."));
     }
+    // SYSCOIN END: Public PQ deployment-profile validation.
     fRegTest = args.GetBoolArg("-regtest", false);
     fSigNet = args.GetBoolArg("-signet", false);
     fTestNet = args.GetBoolArg("-testnet", false);
@@ -2395,6 +2399,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                             "active chain. Restart with -reindex.",
                             nHeightFromGeth)));
                     }
+                    // SYSCOIN BEGIN: Durable finality floor for Geth recovery.
                     // Resolve the floor before beginning recovery so the
                     // operator gets a precise Geth-specific error. The
                     // administrative invalidation repeats this check while
@@ -2402,12 +2407,18 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                     const CBlockIndex* durable_finality_floor{nullptr};
                     const CBlockIndex* durable_finality_target{nullptr};
                     std::string finality_floor_error;
-                    if (llmq::chainLocksHandler != nullptr &&
-                        !llmq::chainLocksHandler
-                             ->GetDurableFinalityRecoveryFloor(
-                                 durable_finality_floor,
-                                 durable_finality_target,
-                                 finality_floor_error)) {
+                    bool finality_floor_available{true};
+                    {
+                        LOCK(cs_main);
+                        finality_floor_available =
+                            llmq::chainLocksHandler == nullptr ||
+                            llmq::chainLocksHandler
+                                ->GetDurableFinalityRecoveryFloor(
+                                    durable_finality_floor,
+                                    durable_finality_target,
+                                    finality_floor_error);
+                    }
+                    if (!finality_floor_available) {
                         node.chainman->ActiveChainstate().StopGethNode(true);
                         return InitError(Untranslated(strprintf(
                             "Cannot establish the durable finality recovery "
@@ -2425,6 +2436,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                             "chain and rebuild or bootstrap Geth state instead.",
                             durable_finality_floor->nHeight)));
                     }
+                    // SYSCOIN END: Durable finality floor for Geth recovery.
                     // Core is ahead of Geth here, so align Core without
                     // emitting nevmdisconnect notifications for blocks Geth
                     // has never applied. All local special-tx state still

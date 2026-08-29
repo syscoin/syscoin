@@ -11,13 +11,10 @@
 
 namespace Consensus {
 
-enum class PQAnchorResult {
+enum class PQActivationResult {
     DISABLED,
     VALID,
     INVALID_CONFIGURATION,
-    BLOCK_HASH_MISMATCH,
-    MISSING_ANCESTOR,
-    ANCESTOR_HASH_MISMATCH,
 };
 
 enum class PQLegacyReplayResult {
@@ -32,86 +29,78 @@ enum class PQPaymentEligibilityResult {
     INVALID_CONFIGURATION,
 };
 
-// SYSCOIN: Configuration validation is chain-independent so parameter
-// construction cannot import branch-navigation dependencies.
-inline PQAnchorResult CheckPQLegacyAnchorConfiguration(
+// SYSCOIN: This height-only transition intentionally carries no branch hash or
+// reconstructed-state commitment. Historical fork choice remains ordinary
+// proof of work until PQ ChainLocks provide live finality.
+inline PQActivationResult CheckPQActivationConfiguration(
     const Params& params)
 {
-    const bool disabled_height{
-        params.nPQLegacyAnchorHeight == std::numeric_limits<int>::max()};
-    const bool null_hashes{params.hashPQLegacyAnchorBlock.IsNull() &&
-                           params.hashPQLegacyMNState.IsNull() &&
-                           params.hashPQLegacyPQRegistryState.IsNull()};
-    if (disabled_height) {
-        return null_hashes ? PQAnchorResult::DISABLED
-                           : PQAnchorResult::INVALID_CONFIGURATION;
+    if (params.nPQActivationHeight == std::numeric_limits<int>::max()) {
+        return PQActivationResult::DISABLED;
     }
-    if (params.hashPQLegacyAnchorBlock.IsNull() ||
-        params.hashPQLegacyMNState.IsNull() ||
-        params.hashPQLegacyPQRegistryState.IsNull()) {
-        return PQAnchorResult::INVALID_CONFIGURATION;
+    // The first finality statement authenticates the block at A - 1. A
+    // genesis-height activation has no real predecessor to bind.
+    if (params.nPQActivationHeight <= 0 ||
+        params.nPQActivationHeight < params.DIP0003Height) {
+        return PQActivationResult::INVALID_CONFIGURATION;
     }
-    if (params.nPQLegacyAnchorHeight < params.DIP0003Height) {
-        return PQAnchorResult::INVALID_CONFIGURATION;
+    return PQActivationResult::VALID;
+}
+
+inline bool IsPQActivationHeightCompatibleWithSuperblocks(
+    const Params& params) noexcept
+{
+    const auto activation{CheckPQActivationConfiguration(params)};
+    if (activation != PQActivationResult::VALID) {
+        return activation == PQActivationResult::DISABLED;
     }
-    return PQAnchorResult::VALID;
+    int64_t cycle{params.nSuperblockCycle};
+    if (params.nPQActivationHeight < params.nNEVMStartBlock) {
+        cycle = cycle * 5 / 2;
+    }
+    if (cycle <= 0 || cycle > std::numeric_limits<int>::max()) return false;
+    return params.nPQActivationHeight < params.nSuperblockStartBlock ||
+           params.nPQActivationHeight % cycle != 0;
 }
 
 inline PQLegacyReplayResult CheckPQLegacyReplay(
     const Params& params,
     int height)
 {
-    const auto configuration{CheckPQLegacyAnchorConfiguration(params)};
-    if (configuration == PQAnchorResult::DISABLED) {
+    const auto configuration{CheckPQActivationConfiguration(params)};
+    if (configuration == PQActivationResult::DISABLED) {
         return PQLegacyReplayResult::ALLOWED;
     }
-    if (configuration != PQAnchorResult::VALID) {
+    if (configuration != PQActivationResult::VALID) {
         return PQLegacyReplayResult::INVALID_CONFIGURATION;
     }
-    return height <= params.nPQLegacyAnchorHeight
+    return height < params.nPQActivationHeight
         ? PQLegacyReplayResult::ALLOWED
         : PQLegacyReplayResult::RETIRED;
 }
 
-inline PQAnchorResult CheckPQChainLockAnchorConfiguration(
-    const Params& params)
+/** The active tip after which mempool provider payloads change wire era. */
+inline bool IsPQProviderMempoolTransitionTip(const Params& params,
+                                             int tip_height)
 {
-    const bool disabled_height{
-        params.nPQChainLockAnchorHeight == std::numeric_limits<int>::max()};
-    if (disabled_height) {
-        return params.hashPQChainLockAnchorBlock.IsNull()
-            ? PQAnchorResult::DISABLED
-            : PQAnchorResult::INVALID_CONFIGURATION;
-    }
-    if (params.hashPQChainLockAnchorBlock.IsNull() ||
-        CheckPQLegacyAnchorConfiguration(params) !=
-            PQAnchorResult::VALID ||
-        params.nPQChainLockAnchorHeight < params.nPQLegacyAnchorHeight ||
-        (params.nPQChainLockAnchorHeight == params.nPQLegacyAnchorHeight &&
-         params.hashPQChainLockAnchorBlock !=
-             params.hashPQLegacyAnchorBlock)) {
-        return PQAnchorResult::INVALID_CONFIGURATION;
-    }
-    return PQAnchorResult::VALID;
+    return CheckPQActivationConfiguration(params) ==
+               PQActivationResult::VALID &&
+           tip_height == params.nPQActivationHeight - 1;
 }
 
-/** Root-bearing payment eligibility starts after the immutable PQ-finality predecessor. */
+/** Root-bearing payment eligibility starts at the first PQ-only block. */
 inline PQPaymentEligibilityResult CheckPQPaymentEligibility(
     const Params& params,
     int height)
 {
-    if (CheckPQLegacyAnchorConfiguration(params) ==
-        PQAnchorResult::INVALID_CONFIGURATION) {
-        return PQPaymentEligibilityResult::INVALID_CONFIGURATION;
-    }
-    const auto configuration{CheckPQChainLockAnchorConfiguration(params)};
-    if (configuration == PQAnchorResult::DISABLED) {
+    const auto configuration{CheckPQActivationConfiguration(params)};
+    if (configuration == PQActivationResult::DISABLED) {
         return PQPaymentEligibilityResult::LEGACY;
     }
-    if (configuration != PQAnchorResult::VALID) {
+    if (configuration != PQActivationResult::VALID) {
         return PQPaymentEligibilityResult::INVALID_CONFIGURATION;
     }
-    return height <= params.nPQChainLockAnchorHeight
+    return height < params.nPQActivationHeight
         ? PQPaymentEligibilityResult::LEGACY
         : PQPaymentEligibilityResult::ROOT_REQUIRED;
 }

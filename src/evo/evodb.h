@@ -286,9 +286,9 @@ public:
         }
     }
 
-    // SYSCOIN: Persist migration anchors and similarly sparse consensus
-    // records immediately so bounded dirty-FIFO eviction cannot remove their
-    // only durable copy during IBD. Keep only the read-cache copy afterward.
+    // SYSCOIN: Persist sparse consensus records immediately so bounded
+    // dirty-FIFO eviction cannot remove their only durable copy during IBD.
+    // Keep only the read-cache copy afterward.
     bool WriteThrough(const K& key, const V& value, bool fSync = true) {
         LOCK(cs);
         if (m_fail_next_write_through_for_testing) {

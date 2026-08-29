@@ -192,7 +192,6 @@ SYSCOIN_CORE_H = \
   node/connection_types.h \
   consensus/consensus.h \
   consensus/pq_migration_config.h \
-  consensus/pq_migration.h \
   consensus/tx_check.h \
   consensus/tx_verify.h \
   crypto/legacy_bls.h \
@@ -284,6 +283,7 @@ SYSCOIN_CORE_H = \
   node/miner.h \
   node/mini_miner.h \
   node/minisketchwrapper.h \
+  node/pq_activation_handoff.h \
   node/peerman_args.h \
   node/psbt.h \
   node/transaction.h \

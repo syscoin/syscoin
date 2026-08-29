@@ -179,7 +179,8 @@ struct DurableFinalityStateView {
  * Durable storage for the single best post-quantum ChainLock certificate.
  *
  * The database schema binds the record to the network genesis, complete
- * finality configuration, immutable anchors, and fixed cryptographic profile.
+ * finality configuration, height-only activation boundary, historical receipt
+ * assumption, and fixed cryptographic profile.
  * Construction validates every database key and every byte of the record;
  * callers must still perform full branch, roster, and signature verification
  * before importing LoadBest() into live finality state.

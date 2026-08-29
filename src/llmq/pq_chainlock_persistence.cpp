@@ -21,11 +21,11 @@ namespace llmq::pq {
 namespace {
 
 inline constexpr std::array<uint8_t, 8> SCHEMA_MAGIC{
-    'S', 'Y', 'S', 'P', 'Q', 'C', 'L', '1'};
-inline constexpr uint16_t SCHEMA_VERSION{1};
+    'S', 'Y', 'S', 'P', 'Q', 'C', 'L', '2'};
+inline constexpr uint16_t SCHEMA_VERSION{2};
 inline constexpr uint16_t RECORD_VERSION{1};
 inline constexpr std::string_view SCHEMA_HASH_DOMAIN{
-    "SYS_PQ_CHAINLOCK_PERSISTENCE_SCHEMA_V1"};
+    "SYS_PQ_CHAINLOCK_PERSISTENCE_SCHEMA_V2"};
 inline constexpr std::string_view RECORD_HASH_DOMAIN{
     "SYS_PQ_CHAINLOCK_PERSISTENCE_RECORD_V1"};
 inline constexpr std::string_view CATCHUP_MARKER_HASH_DOMAIN{
@@ -66,7 +66,7 @@ struct DiskKey {
 };
 
 struct DiskSchema {
-    static constexpr std::size_t WIRE_SIZE{390};
+    static constexpr std::size_t WIRE_SIZE{290};
 
     std::array<uint8_t, 8> magic{SCHEMA_MAGIC};
     uint16_t schema_version{SCHEMA_VERSION};
@@ -83,9 +83,7 @@ struct DiskSchema {
     uint32_t btcc_candidate_period{0};
     uint32_t btcc_nevm_injection_lag{0};
 
-    int32_t anchor_height{-1};
-    uint256 anchor_block_hash;
-    BTCCursor anchor_btcc_cursor;
+    int32_t activation_predecessor_height{-1};
 
     int32_t btcc_receipt_assumption_height{-1};
     uint256 btcc_receipt_assumption_block_hash;
@@ -119,8 +117,8 @@ struct DiskSchema {
             epoch_origin,
             epoch_blocks, chainlock_period, sign_lag, active_epochs,
             btcc_candidate_origin, btcc_candidate_period,
-            btcc_nevm_injection_lag, anchor_height, anchor_block_hash,
-            anchor_btcc_cursor, btcc_receipt_assumption_height,
+            btcc_nevm_injection_lag, activation_predecessor_height,
+            btcc_receipt_assumption_height,
             btcc_receipt_assumption_block_hash,
             btcc_receipt_assumption_state, seen_logical_capacity,
             seen_witness_capacity,
@@ -144,8 +142,8 @@ struct DiskSchema {
             epoch_origin,
             epoch_blocks, chainlock_period, sign_lag, active_epochs,
             btcc_candidate_origin, btcc_candidate_period,
-            btcc_nevm_injection_lag, anchor_height, anchor_block_hash,
-            anchor_btcc_cursor, btcc_receipt_assumption_height,
+            btcc_nevm_injection_lag, activation_predecessor_height,
+            btcc_receipt_assumption_height,
             btcc_receipt_assumption_block_hash,
             btcc_receipt_assumption_state, seen_logical_capacity,
             seen_witness_capacity,
@@ -182,9 +180,8 @@ DiskSchema MakeSchema(const uint256& genesis_hash,
     schema.btcc_candidate_origin = config.btcc_schedule.candidate_origin;
     schema.btcc_candidate_period = config.btcc_schedule.candidate_period;
     schema.btcc_nevm_injection_lag = config.btcc_schedule.nevm_injection_lag;
-    schema.anchor_height = config.anchor.height;
-    schema.anchor_block_hash = config.anchor.block_hash;
-    schema.anchor_btcc_cursor = config.anchor.btcc_cursor;
+    schema.activation_predecessor_height =
+        config.activation_predecessor_height;
     schema.btcc_receipt_assumption_height =
         config.btcc_receipt_assumption_anchor.height;
     schema.btcc_receipt_assumption_block_hash =
@@ -475,7 +472,7 @@ bool IsValidBTCCPresealMarker(
     if (!source_height || !signing_height ||
         marker.terminal_receipt.chainlock_target_height != *source_height ||
         marker.terminal_receipt.chainlock_target_height <=
-            config.anchor.height ||
+            config.activation_predecessor_height ||
         marker.terminal_receipt.accepted_cursor.sys_height != *source_height ||
         marker.terminal_receipt.chainlock_target_hash !=
             marker.terminal_receipt.accepted_cursor.sys_hash ||
@@ -542,8 +539,8 @@ bool IsValidPaymentAuditPresealMarker(
             terminal_schedule->seal_height ||
         marker.terminal_receipt.carrier_height !=
             marker.terminal_carrier_height ||
-        earliest_schedule->seal_height <= config.anchor.height ||
-        marker.terminal_receipt.seal_height <= config.anchor.height ||
+        earliest_schedule->seal_height <= config.activation_predecessor_height ||
+        marker.terminal_receipt.seal_height <= config.activation_predecessor_height ||
         (marker.terminal_carrier_height ==
              marker.earliest_carrier_height &&
          marker.terminal_carrier_hash !=
@@ -676,10 +673,11 @@ struct PQChainLockPersistence::Impl {
             config.chainlock_schedule,
             statement.previous_chainlock_height)};
         return next_target && statement.height == *next_target &&
-               statement.height > config.anchor.height &&
-               statement.previous_chainlock_height >= config.anchor.height &&
-               (statement.previous_chainlock_height != config.anchor.height ||
-                statement.previous_chainlock_hash == config.anchor.block_hash);
+               statement.height > config.activation_predecessor_height &&
+               statement.previous_chainlock_height >= config.activation_predecessor_height &&
+               (statement.previous_chainlock_height != config.activation_predecessor_height ||
+                (!statement.previous_chainlock_hash.IsNull() &&
+                 statement.previous_btcc_cursor.IsNull()));
     }
 
     void InitializeOrLoad() EXCLUSIVE_LOCKS_REQUIRED(mutex)

@@ -13,7 +13,7 @@ class ChainstateManager;
 namespace llmq
 {
 
-// Initialize the pre-anchor commitment replay shim and PQ finality service.
+// SYSCOIN: Initialize the pre-activation commitment replay shim and PQ finality service.
 void InitLLMQSystem(CConnman& connman,
                     PeerManager& peerman,
                     ChainstateManager& chainman)

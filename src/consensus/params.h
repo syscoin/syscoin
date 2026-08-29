@@ -71,8 +71,8 @@ struct BIP9Deployment {
 
 // SYSCOIN: Structural parameters for replaying historical tx85 commitments.
 // An unassigned migration profile uses them for compatibility replay; a
-// configured profile retires that replay after H. They are not a live BLS
-// quorum configuration.
+// configured profile retires that replay at activation height A. They are not
+// a live BLS quorum configuration.
 struct LegacyQuorumReplayParams {
     int size;
     // Structural replay preserves final-commitment minSize, not the smaller
@@ -102,23 +102,13 @@ struct Params {
     int nNEVMStartBlock;
     int nCLReceiptStartBlock;
     // SYSCOIN: begin post-quantum migration and receipt policy.
-    // Mandatory BLS-free activation boundary. The all-sentinel profile is a
-    // compatibility-replay state only; activation pins this exact block and
-    // the reconstructed state used to bootstrap post-quantum quorums.
-    int nPQLegacyAnchorHeight{std::numeric_limits<int>::max()};
-    uint256 hashPQLegacyAnchorBlock;
-    uint256 hashPQLegacyMNState;
-    uint256 hashPQLegacyPQRegistryState;
-    // Immutable predecessor of the first PQ ChainLock. This is distinct from
-    // the migration-state anchor so preparation history can be built before
-    // finality is enabled without leaving bootstrap rosters branch-derived.
-    int nPQChainLockAnchorHeight{std::numeric_limits<int>::max()};
-    uint256 hashPQChainLockAnchorBlock;
-    // PQ ChainLock deployment remains fail-closed until a release pins all
-    // values. Preparation is the first height accepting key-registry
-    // transactions; it must be no later than the migration anchor and must
-    // precede epoch zero's registration cutoff so the anchor commits the
-    // reconstructed registry.
+    // First block that accepts only post-quantum provider authorization and
+    // requires PQ-root-capable masternode payees. Legacy history below this
+    // height is replayed structurally and follows ordinary proof-of-work fork
+    // choice; this boundary is not a block or derived-state checkpoint.
+    int nPQActivationHeight{std::numeric_limits<int>::max()};
+    // Preparation is the first height accepting key-registry transactions and
+    // must precede epoch zero's registration cutoff.
     // The epoch and BTCC origins are schedule anchors.
     int nPQPreparationHeight{std::numeric_limits<int>::max()};
     int nPQChainLockEpochOrigin{std::numeric_limits<int>::max()};
@@ -130,8 +120,8 @@ struct Params {
     // receipted after the fixed five-block propagation buffer at H+10.
     int nPQBTCCNEVMInjectionLag{10};
     // SYSCOIN: Release-updatable historical BTCC receipt assumption boundary.
-    // This is intentionally independent from both immutable anchors: only the
-    // pre-boundary receipt-certificate crypto is assumed here.
+    // This is intentionally independent from the height-only activation
+    // boundary: only the pre-boundary receipt-certificate crypto is assumed.
     int nPQBTCCReceiptAnchorHeight{std::numeric_limits<int>::max()};
     uint256 hashPQBTCCReceiptAnchorBlock;
     int nPQBTCCReceiptAnchorCursorHeight{-1};

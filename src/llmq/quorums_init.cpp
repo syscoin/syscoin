@@ -7,6 +7,7 @@
 #include <chain.h>
 #include <chainparams.h>
 #include <common/args.h>
+#include <consensus/pq_migration_config.h> // SYSCOIN: height-only activation predecessor.
 #include <llmq/quorums_blockprocessor.h>
 #include <llmq/quorums_chainlocks.h>
 #include <llmq/pq_chainlock_test_fixture.h>
@@ -115,21 +116,25 @@ void InitLLMQSystem(CConnman& connman,
     }
 
     // SYSCOIN: This processor structurally replays legacy commitments for
-    // compatibility sync and reconstructs the state pinned by an assigned H.
+    // compatibility sync below the height-only PQ activation boundary.
     // It has no live P2P or mining path.
     quorumBlockProcessor = new CQuorumBlockProcessor();
     chainLocksHandler = new CChainLocksHandler(connman, peerman, chainman);
     // SYSCOIN: Frozen SLH rosters need only deterministic share-relay
     // connectivity; there is no DKG or threshold-key lifecycle.
-    const int32_t initial_predecessor_height{
-        chainman.GetConsensus().nPQChainLockAnchorHeight};
+    const auto& consensus{chainman.GetConsensus()};
+    const std::optional<int32_t> initial_predecessor_height{
+        Consensus::CheckPQActivationConfiguration(consensus) ==
+                Consensus::PQActivationResult::VALID
+            ? std::optional<int32_t>{consensus.nPQActivationHeight - 1}
+            : std::nullopt};
     pqQuorumConnectionOverlay = new CPQQuorumConnectionOverlay(
         connman, roster_cache,
         [initial_predecessor_height]() -> std::optional<int32_t> {
             const auto best{chainLocksHandler
                                 ? chainLocksHandler->GetBestChainLock()
                                 : nullptr};
-            return best ? best->statement.height
+            return best ? std::optional<int32_t>{best->statement.height}
                         : initial_predecessor_height;
         });
     chainLocksHandler->SetQuorumRosterCache(std::move(roster_cache));

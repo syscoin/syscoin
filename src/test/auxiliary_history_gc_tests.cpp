@@ -102,7 +102,6 @@ evo::PQRegistryGCClosure PQClosure(
     closure.checkpoint_record_hash = TestHash(1002);
     closure.lineage_base_commitment = TestHash(1003);
     closure.rooted_lineage_commitment = TestHash(1005);
-    closure.legacy_island_commitment = TestHash(1004);
     closure.scan_complete = complete
         ? evo::PQRegistryGCClosure::COMPLETE
         : evo::PQRegistryGCClosure::SCANNING;
@@ -202,7 +201,12 @@ BOOST_AUTO_TEST_CASE(pq_registry_closure_codec_is_fixed_and_strict)
     const auto encoded_scanning{
         evo::EncodePQRegistryGCClosure(scanning)};
     BOOST_REQUIRE(encoded_scanning);
-    static_assert(evo::PQRegistryGCClosure::SERIALIZED_SIZE == 244);
+    static_assert(evo::PQRegistryGCClosure::VERSION == 1);
+    static_assert(evo::PQRegistryGCClosure::SCANNING == 0);
+    static_assert(evo::PQRegistryGCClosure::COMPLETE == 1);
+    static_assert(evo::PQRegistryGCClosure::SCANNING_DIRTY == 2);
+    static_assert(evo::PQRegistryGCClosure::RESTART_REQUIRED == 3);
+    static_assert(evo::PQRegistryGCClosure::SERIALIZED_SIZE == 212);
     BOOST_CHECK_EQUAL(encoded_scanning->size(),
                       evo::PQRegistryGCClosure::SERIALIZED_SIZE);
     BOOST_CHECK(evo::DecodePQRegistryGCClosure(*encoded_scanning) ==
@@ -218,6 +222,28 @@ BOOST_AUTO_TEST_CASE(pq_registry_closure_codec_is_fixed_and_strict)
                       evo::PQRegistryGCClosure::SERIALIZED_SIZE);
     BOOST_CHECK(evo::DecodePQRegistryGCClosure(*encoded_complete) ==
                 complete);
+
+    auto dirty_scanning{scanning};
+    dirty_scanning.scan_complete =
+        evo::PQRegistryGCClosure::SCANNING_DIRTY;
+    const auto encoded_dirty{
+        evo::EncodePQRegistryGCClosure(dirty_scanning)};
+    BOOST_REQUIRE(encoded_dirty);
+    BOOST_CHECK_EQUAL(encoded_dirty->size(),
+                      evo::PQRegistryGCClosure::SERIALIZED_SIZE);
+    BOOST_CHECK(evo::DecodePQRegistryGCClosure(*encoded_dirty) ==
+                dirty_scanning);
+
+    auto restart_required{complete};
+    restart_required.scan_complete =
+        evo::PQRegistryGCClosure::RESTART_REQUIRED;
+    const auto encoded_restart{
+        evo::EncodePQRegistryGCClosure(restart_required)};
+    BOOST_REQUIRE(encoded_restart);
+    BOOST_CHECK_EQUAL(encoded_restart->size(),
+                      evo::PQRegistryGCClosure::SERIALIZED_SIZE);
+    BOOST_CHECK(evo::DecodePQRegistryGCClosure(*encoded_restart) ==
+                restart_required);
 
     auto invalid{scanning};
     invalid.generation = 0;
@@ -240,8 +266,16 @@ BOOST_AUTO_TEST_CASE(pq_registry_closure_codec_is_fixed_and_strict)
     invalid = complete;
     invalid.scan_after_key = TestHash(2000);
     BOOST_CHECK(!evo::EncodePQRegistryGCClosure(invalid));
+    invalid = dirty_scanning;
+    invalid.scan_after_key.reset();
+    BOOST_CHECK(!evo::EncodePQRegistryGCClosure(invalid));
     invalid = complete;
-    invalid.scan_complete = 2;
+    invalid.scan_complete =
+        evo::PQRegistryGCClosure::RESTART_REQUIRED;
+    invalid.scan_after_key = TestHash(2002);
+    BOOST_CHECK(!evo::EncodePQRegistryGCClosure(invalid));
+    invalid = complete;
+    invalid.scan_complete = 4;
     BOOST_CHECK(!evo::EncodePQRegistryGCClosure(invalid));
 
     auto trailing{*encoded_scanning};
@@ -512,6 +546,80 @@ BOOST_AUTO_TEST_CASE(sequence_two_cumulative_watermark_survives_restart)
     BOOST_CHECK(replay_id == second_id);
 }
 
+BOOST_AUTO_TEST_CASE(one_authorization_drives_bounded_cross_store_progress)
+{
+    const fs::path base{m_path_root / "aux_gc_reused_authorization"};
+    const auto deployment{TestDeployment(9)};
+    auto params{TestDBParams(base, /*wipe=*/true)};
+    const auto authorization{Authorization(100)};
+
+    auto dmn_first{DMNTarget(/*authorization_height=*/100,
+                             /*dmn_position=*/80)};
+    auto pq_first{PQTarget(/*authorization_height=*/100,
+                           /*pq_position=*/1)};
+    pq_first.frontier.dmn = dmn_first.frontier.dmn;
+    uint256 intent_id;
+    {
+        evo::AuxiliaryHistoryGCJournal journal{params, deployment};
+        BOOST_REQUIRE(journal.Begin(dmn_first, &intent_id) ==
+                      evo::AuxiliaryHistoryGCJournalResult::STARTED);
+        BOOST_REQUIRE(journal.Complete(intent_id) ==
+                      evo::AuxiliaryHistoryGCJournalResult::COMPLETED);
+        BOOST_REQUIRE(journal.Begin(pq_first, &intent_id) ==
+                      evo::AuxiliaryHistoryGCJournalResult::STARTED);
+        BOOST_REQUIRE(journal.Complete(intent_id) ==
+                      evo::AuxiliaryHistoryGCJournalResult::COMPLETED);
+    }
+
+    // Cursor batches remain independently crash-atomic, but do not consume
+    // the durable winner that bounds their monotonically advancing frontier.
+    params.wipe_data = false;
+    auto pq_second{pq_first};
+    pq_second.frontier.pq_registry = Component(2, 2);
+    uint256 pending_id;
+    {
+        evo::AuxiliaryHistoryGCJournal resumed{params, deployment};
+        BOOST_REQUIRE(resumed.Begin(pq_second, &pending_id) ==
+                      evo::AuxiliaryHistoryGCJournalResult::STARTED);
+        BOOST_CHECK(!pending_id.IsNull());
+    }
+
+    // Startup preserves exact idempotence for an intent whose authorizer is
+    // equal to the completed watermark, then permits later components to keep
+    // using that same durable winner.
+    evo::AuxiliaryHistoryGCJournal resumed{params, deployment};
+    uint256 replayed_id;
+    BOOST_REQUIRE(resumed.Begin(pq_second, &replayed_id) ==
+                  evo::AuxiliaryHistoryGCJournalResult::EXISTING);
+    BOOST_CHECK(replayed_id == pending_id);
+    BOOST_REQUIRE(resumed.Complete(replayed_id) ==
+                  evo::AuxiliaryHistoryGCJournalResult::COMPLETED);
+
+    auto dmn_second{pq_second};
+    dmn_second.frontier.dmn = Component(81, 81);
+    dmn_second.pq_erase_manifest.reset();
+    BOOST_REQUIRE(resumed.Begin(dmn_second, &intent_id) ==
+                  evo::AuxiliaryHistoryGCJournalResult::STARTED);
+    BOOST_REQUIRE(resumed.Complete(intent_id) ==
+                  evo::AuxiliaryHistoryGCJournalResult::COMPLETED);
+
+    const auto state{resumed.GetState()};
+    BOOST_REQUIRE(state.watermark);
+    BOOST_CHECK_EQUAL(state.watermark->sequence, 4U);
+    BOOST_CHECK(state.watermark->authorization == authorization);
+    BOOST_CHECK(state.watermark->frontier == dmn_second.frontier);
+
+    auto conflicting_authorizer{dmn_second};
+    conflicting_authorizer.frontier.dmn = Component(82, 82);
+    conflicting_authorizer.authorization.block.block_hash = TestHash(9999);
+    BOOST_CHECK(resumed.Begin(conflicting_authorizer) ==
+                evo::AuxiliaryHistoryGCJournalResult::NON_MONOTONIC);
+    auto regressed_authorizer{conflicting_authorizer};
+    regressed_authorizer.authorization = Authorization(99);
+    BOOST_CHECK(resumed.Begin(regressed_authorizer) ==
+                evo::AuxiliaryHistoryGCJournalResult::NON_MONOTONIC);
+}
+
 BOOST_AUTO_TEST_CASE(begin_enforces_exact_idempotence_and_cumulative_progress)
 {
     const fs::path base{m_path_root / "aux_gc_monotonic"};
@@ -619,25 +727,22 @@ BOOST_AUTO_TEST_CASE(manager_restores_persisted_authorization_high_watermark)
 {
     SelectParams(ChainType::REGTEST);
     auto& consensus{const_cast<Consensus::Params&>(Params().GetConsensus())};
-    struct RestoreAnchor {
+    struct RestoreActivation {
         Consensus::Params& consensus;
-        int32_t height{consensus.nPQChainLockAnchorHeight};
-        uint256 hash{consensus.hashPQChainLockAnchorBlock};
-        ~RestoreAnchor()
+        int32_t height{consensus.nPQActivationHeight};
+        ~RestoreActivation()
         {
-            consensus.nPQChainLockAnchorHeight = height;
-            consensus.hashPQChainLockAnchorBlock = hash;
+            consensus.nPQActivationHeight = height;
         }
     } restore{consensus};
-    const int32_t anchor_height{consensus.DIP0003Height + 10};
-    consensus.nPQChainLockAnchorHeight = anchor_height;
-    consensus.hashPQChainLockAnchorBlock = TestHash(500);
+    const int32_t activation_height{consensus.DIP0003Height + 10};
+    consensus.nPQActivationHeight = activation_height;
 
     const fs::path base{m_path_root / "aux_gc_manager_restore"};
     auto params{TestDBParams(base, /*wipe=*/true)};
     const auto deployment{
         evo::MakeAuxiliaryHistoryGCDeployment(consensus)};
-    auto target{PQTarget(anchor_height + 100, 80)};
+    auto target{PQTarget(activation_height + 100, 80)};
     uint256 intent_id;
     {
         evo::AuxiliaryHistoryGCJournal journal{params, deployment};
@@ -652,7 +757,7 @@ BOOST_AUTO_TEST_CASE(manager_restores_persisted_authorization_high_watermark)
     const CDeterministicMNManager::AuxiliaryHistoryGCAuthorization lower{
         CDeterministicMNManager::AuxiliaryHistoryGCAuthorizationSource::
             ENFORCED_DURABLE_CHAINLOCK,
-        {anchor_height + 50, TestHash(650)}};
+        {activation_height + 50, TestHash(650)}};
     BOOST_CHECK(!manager.UpdateAuxiliaryHistoryGCAuthorization(lower));
 }
 
