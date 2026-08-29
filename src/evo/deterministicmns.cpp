@@ -8,9 +8,10 @@
 #include <base58.h>
 #include <chainparams.h>
 #include <core_io.h>
-#include <consensus/pq_migration.h>
+#include <consensus/pq_migration_config.h>
 #include <hash.h>
 #include <script/script.h>
+#include <streams.h> // SYSCOIN: canonical DMN commitment elements.
 #include <node/interface_ui.h>
 #include <validation.h>
 #include <validationinterface.h>
@@ -29,7 +30,14 @@
 #include <stdexcept>
 
 namespace {
-constexpr std::string_view PQ_LEGACY_STATE_DOMAIN{"SYS_PQ_LEGACY_DMN_STATE_V1"};
+// SYSCOIN: This is the first supported MuHash format. Pre-release databases
+// using another domain fail authenticated inverse checks and require reindex.
+constexpr std::string_view PQ_DMN_MUHASH_STATE_DOMAIN{
+    "SYS_PQ_DMN_MUHASH_STATE_V1"};
+// SYSCOIN BEGIN: Incremental branch-local deterministic-state commitment.
+constexpr std::string_view PQ_LEGACY_STATE_ELEMENT_DOMAIN{
+    "SYS_PQ_LEGACY_DMN_STATE_ELEMENT_V1"};
+// SYSCOIN END: Incremental branch-local deterministic-state commitment.
 constexpr std::string_view DMN_INVERSE_BASE_DOMAIN{
     "SYS_DMN_INVERSE_BASE_V1"};
 constexpr std::string_view DMN_INVERSE_HISTORY_DOMAIN{
@@ -65,6 +73,20 @@ uint256 GetDMNInverseHistoryCommitment(
     return writer.GetHash();
 }
 
+// SYSCOIN BEGIN: Incremental branch-local deterministic-state commitment.
+DataStream SerializePQLegacyStateElement(const CDeterministicMN& dmn)
+{
+    DataStream stream;
+    stream.write(AsBytes(Span{PQ_LEGACY_STATE_ELEMENT_DOMAIN.data(),
+                              PQ_LEGACY_STATE_ELEMENT_DOMAIN.size()}));
+    stream << dmn.proTxHash
+           << static_cast<uint64_t>(dmn.GetInternalId())
+           << dmn.collateralOutpoint << dmn.nOperatorReward;
+    dmn.pdmnState->SerializePQStateDiagnosticV1(stream);
+    return stream;
+}
+// SYSCOIN END: Incremental branch-local deterministic-state commitment.
+
 DBParams MakePQRegistryDBParams(DBParams params)
 {
     if (params.path.empty()) {
@@ -89,25 +111,6 @@ DBParams MakeDMNInverseJournalDBParams(DBParams params)
     }
     params.cache_bytes = std::max<std::size_t>(1, params.cache_bytes / 8);
     return params;
-}
-
-std::optional<llmq::pq::PQRegistryGCRootConfig>
-MakePQRegistryGCRootConfig(
-    const Consensus::Params& consensus,
-    const llmq::pq::PQRegistryConfig& registry_config)
-{
-    if (Consensus::CheckPQLegacyAnchorConfiguration(consensus) !=
-        Consensus::PQAnchorResult::VALID) {
-        return std::nullopt;
-    }
-    llmq::pq::PQRegistryGCRootConfig root{
-        evo::MakeAuxiliaryHistoryGCDeployment(consensus).configuration_id,
-        {consensus.nPQLegacyAnchorHeight,
-         consensus.hashPQLegacyAnchorBlock},
-        consensus.hashPQLegacyPQRegistryState};
-    return root.IsValid(registry_config)
-        ? std::optional<llmq::pq::PQRegistryGCRootConfig>{root}
-        : std::nullopt;
 }
 
 bool CollectPQRegistryGCPath(
@@ -142,52 +145,19 @@ bool CollectPQRegistryGCPath(
     return true;
 }
 
-std::optional<int32_t> GetPQLegacyIslandBaseHeight(
-    const Consensus::Params& consensus,
-    const llmq::pq::PQRegistryConfig& registry_config)
-{
-    if (Consensus::CheckPQLegacyAnchorConfiguration(consensus) !=
-            Consensus::PQAnchorResult::VALID ||
-        consensus.nPQLegacyAnchorHeight <
-            registry_config.preparation_height) {
-        return std::nullopt;
-    }
-    const int64_t anchor_delta{
-        static_cast<int64_t>(consensus.nPQLegacyAnchorHeight) -
-        registry_config.preparation_height};
-    const int64_t base_height{
-        static_cast<int64_t>(registry_config.preparation_height) +
-        anchor_delta / llmq::pq::PQ_REGISTRY_CHECKPOINT_INTERVAL *
-            llmq::pq::PQ_REGISTRY_CHECKPOINT_INTERVAL};
-    if (base_height < 0 ||
-        base_height > std::numeric_limits<int32_t>::max() -
-                          llmq::pq::PQ_REGISTRY_CHECKPOINT_INTERVAL) {
-        return std::nullopt;
-    }
-    return static_cast<int32_t>(base_height);
-}
-
 bool BuildPQRegistryGCAuthenticationContext(
-    const Consensus::Params& consensus,
     const llmq::pq::PQRegistryConfig& registry_config,
     const evo::AuxiliaryHistoryGCBlockIdentity& checkpoint,
     const CBlockIndex* recovered_tip,
     llmq::pq::PQRegistryGCAuthenticationContext& context)
 {
     context = {};
-    if (!checkpoint.IsValid() || recovered_tip == nullptr ||
-        Consensus::CheckPQLegacyAnchorConfiguration(consensus) !=
-            Consensus::PQAnchorResult::VALID) {
+    if (!checkpoint.IsValid() || recovered_tip == nullptr) {
         return false;
     }
 
-    const auto island_base{
-        GetPQLegacyIslandBaseHeight(consensus, registry_config)};
-    if (!island_base) return false;
-    const int64_t anchor_height{consensus.nPQLegacyAnchorHeight};
-    const int64_t island_base_height{*island_base};
     const int64_t initial_checkpoint_height{
-        island_base_height +
+        static_cast<int64_t>(registry_config.preparation_height) +
         llmq::pq::PQ_REGISTRY_CHECKPOINT_INTERVAL};
     const int64_t checkpoint_height{checkpoint.height};
     if (checkpoint_height < initial_checkpoint_height ||
@@ -197,21 +167,13 @@ bool BuildPQRegistryGCAuthenticationContext(
         return false;
     }
     const int64_t rooted_base_height{
-        checkpoint_height == initial_checkpoint_height
-            ? anchor_height
-            : checkpoint_height -
-                  llmq::pq::PQ_REGISTRY_CHECKPOINT_INTERVAL};
-    if (island_base_height < 0 ||
-        rooted_base_height < 0 ||
+        checkpoint_height - llmq::pq::PQ_REGISTRY_CHECKPOINT_INTERVAL};
+    if (rooted_base_height < registry_config.preparation_height ||
         checkpoint_height > recovered_tip->nHeight) {
         return false;
     }
 
     if (!CollectPQRegistryGCPath(
-            recovered_tip, static_cast<int32_t>(island_base_height),
-            static_cast<int32_t>(anchor_height),
-            context.legacy_island) ||
-        !CollectPQRegistryGCPath(
             recovered_tip, static_cast<int32_t>(rooted_base_height),
             checkpoint.height, context.rooted_segment) ||
         context.rooted_segment.back() != checkpoint) {
@@ -222,19 +184,16 @@ bool BuildPQRegistryGCAuthenticationContext(
 }
 
 bool BuildPQRegistryGCAuthenticationContext(
-    const Consensus::Params& consensus,
     const llmq::pq::PQRegistryConfig& registry_config,
     const evo::PQRegistryGCClosure& closure,
     const CBlockIndex* recovered_tip,
     llmq::pq::PQRegistryGCAuthenticationContext& context)
 {
     return closure.IsValid() && BuildPQRegistryGCAuthenticationContext(
-        consensus, registry_config, closure.checkpoint, recovered_tip,
-        context);
+        registry_config, closure.checkpoint, recovered_tip, context);
 }
 
 bool BuildEffectivePQRegistryGCAuthenticationContext(
-    const Consensus::Params& consensus,
     const llmq::pq::PQRegistryConfig& registry_config,
     const evo::AuxiliaryHistoryGCState& state,
     const CBlockIndex* recovered_tip,
@@ -252,8 +211,8 @@ bool BuildEffectivePQRegistryGCAuthenticationContext(
     const auto closure{
         evo::DecodePQRegistryGCClosure(effective_component->closure)};
     return closure && BuildPQRegistryGCAuthenticationContext(
-                          consensus, registry_config, *closure,
-                          recovered_tip, context);
+                          registry_config, *closure, recovered_tip,
+                          context);
 }
 
 const CBlockIndex* GetAuxiliaryHistoryCommonAncestor(
@@ -266,12 +225,6 @@ const CBlockIndex* GetAuxiliaryHistoryCommonAncestor(
         common = LastCommonAncestor(common, recovery);
     }
     return common;
-}
-
-std::optional<uint256> EmptyPQRegistryStateRoot(const uint256& genesis_hash)
-{
-    llmq::pq::PQRegistrySnapshot empty;
-    return empty.RecomputeConsensusStateRoot(genesis_hash);
 }
 
 llmq::pq::PQRegistryCallbacks MakePQRegistryCallbacks(
@@ -638,6 +591,20 @@ CDeterministicMNManager::CDeterministicMNManager(const DBParams& db_params)
 {
     m_auxiliary_history_gc_high_watermark =
         m_auxiliary_history_gc_journal->HighestAuthorization();
+    const auto auxiliary_gc_state{
+        m_auxiliary_history_gc_journal->GetState()};
+    // SYSCOIN: A crash may follow a bounded component completion before this
+    // process can schedule the next component. One startup pass must therefore
+    // reobserve both stores even when only a completed watermark remains.
+    const bool auxiliary_gc_recheck_required{
+        auxiliary_gc_state.intent.has_value() ||
+        auxiliary_gc_state.watermark.has_value()};
+    m_auxiliary_history_maintenance_request_generation.store(
+        auxiliary_gc_recheck_required ? 1 : 0,
+        std::memory_order_relaxed);
+    m_auxiliary_history_maintenance_retry_requested.store(
+        auxiliary_gc_recheck_required,
+        std::memory_order_relaxed);
     m_evoDb = std::make_unique<CEvoDB<uint256, CDeterministicMNList, StaticSaltedHasher>>(db_params, LIST_CACHE_SIZE);
     {
         LOCK(cs);
@@ -1539,11 +1506,11 @@ bool CDeterministicMNManager::GetProjectedMNPayeesForBlock(
                                              first_payment_height)};
     int known_count{count};
     if (eligibility == Consensus::PQPaymentEligibilityResult::LEGACY) {
-        if (Consensus::CheckPQChainLockAnchorConfiguration(consensus) ==
-            Consensus::PQAnchorResult::VALID) {
+        if (Consensus::CheckPQActivationConfiguration(consensus) ==
+            Consensus::PQActivationResult::VALID) {
             const int64_t available{
-                static_cast<int64_t>(consensus.nPQChainLockAnchorHeight) -
-                first_payment_height + 1};
+                static_cast<int64_t>(consensus.nPQActivationHeight) -
+                first_payment_height};
             if (available <= 0) return false;
             known_count = static_cast<int>(std::min<int64_t>(
                 known_count, available));
@@ -1658,16 +1625,6 @@ llmq::pq::PQRegistryManager* CDeterministicMNManager::GetOrCreatePQRegistry(
         error = "pq-registry-invalid-configuration";
         return nullptr;
     }
-    const auto& consensus{Params().GetConsensus()};
-    const auto gc_root_config{
-        MakePQRegistryGCRootConfig(consensus, config)};
-    if (Consensus::CheckPQLegacyAnchorConfiguration(consensus) ==
-            Consensus::PQAnchorResult::VALID &&
-        !gc_root_config) {
-        error = "pq-registry-invalid-gc-root-configuration";
-        return nullptr;
-    }
-
     m_pq_registry_init_requested.store(true, std::memory_order_release);
     // SYSCOIN: Serialize startup with EvoDB journal publication before
     // entering call_once, so callers already holding this outer lock cannot
@@ -1679,7 +1636,7 @@ llmq::pq::PQRegistryManager* CDeterministicMNManager::GetOrCreatePQRegistry(
     }
     try {
         std::call_once(
-            m_pq_registry_init_once, [this, config, gc_root_config] {
+            m_pq_registry_init_once, [this, config] {
             // SYSCOIN: Opening a LevelDB is not publication. First bind the
             // temporary registry to one stable, ancestry-valid durable GC
             // state while the same lock order excludes maintenance changes.
@@ -1697,26 +1654,14 @@ llmq::pq::PQRegistryManager* CDeterministicMNManager::GetOrCreatePQRegistry(
                         ? m_pq_registry_startup_authorization_head
                         : tipIndex};
                 if (has_durable_gc_state &&
-                    (Consensus::CheckPQChainLockAnchorConfiguration(
-                        consensus) != Consensus::PQAnchorResult::VALID ||
+                    (Consensus::CheckPQActivationConfiguration(consensus) !=
+                         Consensus::PQActivationResult::VALID ||
                      tipIndex == nullptr ||
                      authorization_head == nullptr ||
                      authorization_head->nHeight <
-                         consensus.nPQChainLockAnchorHeight)) {
+                         consensus.nPQActivationHeight)) {
                     throw std::runtime_error{
-                        "PQ ChainLock anchor is not available"};
-                }
-                const CBlockIndex* configured_anchor{
-                    has_durable_gc_state
-                        ? authorization_head->GetAncestor(
-                              consensus.nPQChainLockAnchorHeight)
-                        : nullptr};
-                if (has_durable_gc_state &&
-                    (configured_anchor == nullptr ||
-                     configured_anchor->GetBlockHash() !=
-                         consensus.hashPQChainLockAnchorBlock)) {
-                    throw std::runtime_error{
-                        "PQ ChainLock anchor is not on the active chain"};
+                        "durable PQ ChainLock authorization is unavailable"};
                 }
                 const auto authorization_is_compatible =
                     [&consensus, authorization_head](
@@ -1727,16 +1672,7 @@ llmq::pq::PQRegistryManager* CDeterministicMNManager::GetOrCreatePQRegistry(
                         authorization.block.height >
                             authorization_head->nHeight ||
                         authorization.block.height <
-                            consensus.nPQChainLockAnchorHeight) {
-                        return false;
-                    }
-                    if (authorization.source == evo::
-                            AuxiliaryHistoryGCAuthorizationSource::
-                                IMMUTABLE_CHAINLOCK_ANCHOR &&
-                        (authorization.block.height !=
-                             consensus.nPQChainLockAnchorHeight ||
-                         authorization.block.block_hash !=
-                             consensus.hashPQChainLockAnchorBlock)) {
+                            consensus.nPQActivationHeight) {
                         return false;
                     }
                     const CBlockIndex* active{
@@ -1784,7 +1720,7 @@ llmq::pq::PQRegistryManager* CDeterministicMNManager::GetOrCreatePQRegistry(
                 // Never authenticate a floor from the potentially newer
                 // authorization witness used solely to bound deletion.
                 if (!BuildEffectivePQRegistryGCAuthenticationContext(
-                        consensus, config, journal_state, tipIndex,
+                        config, journal_state, tipIndex,
                         floor_context)) {
                     throw std::runtime_error{
                         "PQ GC retained authentication path is unavailable"};
@@ -1795,7 +1731,8 @@ llmq::pq::PQRegistryManager* CDeterministicMNManager::GetOrCreatePQRegistry(
                 std::make_unique<llmq::pq::PQRegistryManager>(
                     m_pq_registry_db_params,
                     consensus.hashGenesisBlock, config,
-                    gc_root_config)};
+                    evo::MakeAuxiliaryHistoryGCDeployment(consensus)
+                        .configuration_id)};
             llmq::pq::PQRegistryError floor_error;
             if (!registry->InstallEffectiveGCFloor(
                     journal_state, floor_error, floor_context)) {
@@ -1907,28 +1844,18 @@ CDeterministicMNCPtr CDeterministicMNList::GetMN(const uint256& proTxHash) const
     return *p;
 }
 
+// SYSCOIN BEGIN: Incremental branch-local deterministic-state diagnostics.
 uint256 CDeterministicMNList::GetPQLegacyStateHash(const uint256& genesis_hash) const
 {
-    std::vector<CDeterministicMNCPtr> ordered;
-    ordered.reserve(mnMap.size());
-    for (const auto& item : mnMap) ordered.emplace_back(item.second);
-    std::sort(ordered.begin(), ordered.end(), [](const auto& lhs, const auto& rhs) {
-        return lhs->proTxHash < rhs->proTxHash;
-    });
+    MuHash3072 content{m_pq_legacy_content_hash};
+    uint256 content_hash;
+    content.Finalize(content_hash);
 
     CHashWriter writer{SER_GETHASH, 0};
-    writer.write(AsBytes(Span{PQ_LEGACY_STATE_DOMAIN.data(), PQ_LEGACY_STATE_DOMAIN.size()}));
+    writer.write(AsBytes(Span{PQ_DMN_MUHASH_STATE_DOMAIN.data(),
+                              PQ_DMN_MUHASH_STATE_DOMAIN.size()}));
     writer << genesis_hash << blockHash << nHeight << nTotalRegisteredCount;
-    writer << static_cast<uint32_t>(ordered.size());
-    for (const auto& dmn : ordered) {
-        // SYSCOIN: this byte layout is deliberately independent from the
-        // mutable database serializers used by post-anchor PQ state.
-        writer << dmn->proTxHash
-               << static_cast<uint64_t>(dmn->GetInternalId())
-               << dmn->collateralOutpoint
-               << dmn->nOperatorReward;
-        dmn->pdmnState->SerializePQLegacyAnchorV1(writer);
-    }
+    writer << static_cast<uint32_t>(mnMap.size()) << content_hash;
     return writer.GetHash();
 }
 
@@ -1942,6 +1869,7 @@ uint256 CDeterministicMNList::GetOrComputePQLegacyStateHash(
     }
     return *m_pq_legacy_state_hash;
 }
+// SYSCOIN END: Incremental branch-local deterministic-state diagnostics.
 
 CDeterministicMNCPtr CDeterministicMNList::GetValidMN(const uint256& proTxHash) const
 {
@@ -2223,14 +2151,20 @@ void CDeterministicMNList::PoSePunish(const uint256& proTxHash, int penalty)
     UpdateMN(proTxHash, newState);
 }
 
-void CDeterministicMNList::PoSeDecrease(const CDeterministicMN& dmn)
+// SYSCOIN BEGIN: Resolve PoSe decrease against the current immutable list entry.
+void CDeterministicMNList::PoSeDecrease(const uint256& proTxHash)
 {
-    assert(dmn.pdmnState->nPoSePenalty > 0 && !dmn.pdmnState->IsBanned());
+    const auto dmn{GetMN(proTxHash)};
+    if (!dmn) {
+        throw(std::runtime_error(strprintf("%s: Can't find a masternode with proTxHash=%s", __func__, proTxHash.ToString())));
+    }
+    assert(dmn->pdmnState->nPoSePenalty > 0 && !dmn->pdmnState->IsBanned());
 
-    auto newState = std::make_shared<CDeterministicMNState>(*dmn.pdmnState);
+    auto newState = std::make_shared<CDeterministicMNState>(*dmn->pdmnState);
     newState->nPoSePenalty--;
-    UpdateMN(dmn, newState);
+    UpdateMN(proTxHash, newState);
 }
+// SYSCOIN END: Resolve PoSe decrease against the current immutable list entry.
 
 void CDeterministicMNList::BuildDiff(const CDeterministicMNList& to, CDeterministicMNListDiff &diffRet, CDeterministicMNListNEVMAddressDiff &diffRetNEVMAddress) const
 {
@@ -2478,6 +2412,8 @@ void CDeterministicMNList::AddMN(const CDeterministicMNCPtr& dmn, bool fBumpTota
     if (mnInternalIdMap.find(dmn->GetInternalId())) {
         throw(std::runtime_error(strprintf("%s: Can't add a masternode with a duplicate internalId=%d", __func__, dmn->GetInternalId())));
     }
+    // SYSCOIN: Precompute the authenticated element before publishing the new entry.
+    const DataStream content{SerializePQLegacyStateElement(*dmn)};
 
     // All mnUniquePropertyMap's updates must be atomic.
     // Using this temporary map as a checkpoint to rollback to in case of any issues.
@@ -2510,6 +2446,8 @@ void CDeterministicMNList::AddMN(const CDeterministicMNCPtr& dmn, bool fBumpTota
     }
     mnMap = mnMap.set(dmn->proTxHash, dmn);
     mnInternalIdMap = mnInternalIdMap.set(dmn->GetInternalId(), dmn->proTxHash);
+    // SYSCOIN: Keep the branch-local commitment synchronized with the list.
+    m_pq_legacy_content_hash.Insert(MakeUCharSpan(content));
     if (fBumpTotalCount) {
         // nTotalRegisteredCount acts more like a checkpoint, not as a limit,
         nTotalRegisteredCount = std::max(dmn->GetInternalId() + 1, (uint64_t)nTotalRegisteredCount);
@@ -2518,11 +2456,26 @@ void CDeterministicMNList::AddMN(const CDeterministicMNCPtr& dmn, bool fBumpTota
     m_pq_legacy_state_hash.reset();
 }
 
+// SYSCOIN BEGIN: Current-entry-safe deterministic-state mutation and commitment.
 void CDeterministicMNList::UpdateMN(const CDeterministicMN& oldDmn, const std::shared_ptr<const CDeterministicMNState>& pdmnState)
 {
-    auto dmn = std::make_shared<CDeterministicMN>(oldDmn);
+    const uint256 proTxHash{oldDmn.proTxHash};
+    UpdateMN(proTxHash, pdmnState);
+}
+
+void CDeterministicMNList::UpdateMN(const uint256& proTxHash, const std::shared_ptr<const CDeterministicMNState>& pdmnState)
+{
+    const uint256 entryProTxHash{proTxHash};
+    const auto oldDmn{GetMN(entryProTxHash)};
+    if (!oldDmn) {
+        throw(std::runtime_error(strprintf("%s: Can't find a masternode with proTxHash=%s", __func__, entryProTxHash.ToString())));
+    }
+
+    auto dmn = std::make_shared<CDeterministicMN>(*oldDmn);
     auto oldState = dmn->pdmnState;
     dmn->pdmnState = pdmnState;
+    const DataStream old_content{SerializePQLegacyStateElement(*oldDmn)};
+    const DataStream new_content{SerializePQLegacyStateElement(*dmn)};
 
     // All mnUniquePropertyMap's updates must be atomic.
     // Using this temporary map as a checkpoint to rollback to in case of any issues.
@@ -2531,44 +2484,42 @@ void CDeterministicMNList::UpdateMN(const CDeterministicMN& oldDmn, const std::s
     if (!UpdateUniqueProperty(*dmn, oldState->addr, pdmnState->addr)) {
         mnUniquePropertyMap = mnUniquePropertyMapSaved;
         throw(std::runtime_error(strprintf("%s: Can't update a masternode %s with a duplicate address=%s", __func__,
-                oldDmn.proTxHash.ToString(), pdmnState->addr.ToStringAddrPort())));
+                entryProTxHash.ToString(), pdmnState->addr.ToStringAddrPort())));
     }
     if (!UpdateUniqueProperty(*dmn, oldState->keyIDOwner, pdmnState->keyIDOwner)) {
         mnUniquePropertyMap = mnUniquePropertyMapSaved;
         throw(std::runtime_error(strprintf("%s: Can't update a masternode %s with a duplicate keyIDOwner=%s", __func__,
-                oldDmn.proTxHash.ToString(), EncodeDestination(WitnessV0KeyHash(pdmnState->keyIDOwner)))));
+                entryProTxHash.ToString(), EncodeDestination(WitnessV0KeyHash(pdmnState->keyIDOwner)))));
     }
     if (!UpdateUniqueProperty(*dmn, oldState->pubKeyOperator, pdmnState->pubKeyOperator)) {
         mnUniquePropertyMap = mnUniquePropertyMapSaved;
         throw(std::runtime_error(strprintf("%s: Can't update a masternode %s with a duplicate pubKeyOperator=%s", __func__,
-                oldDmn.proTxHash.ToString(), pdmnState->pubKeyOperator.ToString())));
+                entryProTxHash.ToString(), pdmnState->pubKeyOperator.ToString())));
     }
     if (!UpdateUniqueProperty(*dmn, oldState->vchNEVMAddress, pdmnState->vchNEVMAddress)) {
         mnUniquePropertyMap = mnUniquePropertyMapSaved;
         throw(std::runtime_error(strprintf("%s: Can't update a masternode %s with a duplicate old vchNEVMAddress=%s vs new vchNEVMAddress=%s", __func__,
-                oldDmn.proTxHash.ToString(), HexStr(oldState->vchNEVMAddress), HexStr(pdmnState->vchNEVMAddress))));
+                entryProTxHash.ToString(), HexStr(oldState->vchNEVMAddress), HexStr(pdmnState->vchNEVMAddress))));
     }
-    mnMap = mnMap.set(oldDmn.proTxHash, dmn);
-    m_tracked_changes.emplace(oldDmn.proTxHash);
+    mnMap = mnMap.set(entryProTxHash, dmn);
+    m_pq_legacy_content_hash.Remove(MakeUCharSpan(old_content));
+    m_pq_legacy_content_hash.Insert(MakeUCharSpan(new_content));
+    m_tracked_changes.emplace(entryProTxHash);
     m_pq_legacy_state_hash.reset();
-}
-
-void CDeterministicMNList::UpdateMN(const uint256& proTxHash, const std::shared_ptr<const CDeterministicMNState>& pdmnState)
-{
-    auto oldDmn = mnMap.find(proTxHash);
-    if (!oldDmn) {
-        throw(std::runtime_error(strprintf("%s: Can't find a masternode with proTxHash=%s", __func__, proTxHash.ToString())));
-    }
-    UpdateMN(**oldDmn, pdmnState);
 }
 
 void CDeterministicMNList::UpdateMN(const CDeterministicMN& oldDmn, const CDeterministicMNStateDiff& stateDiff)
 {
-    auto oldState = oldDmn.pdmnState;
-    auto newState = std::make_shared<CDeterministicMNState>(*oldState);
+    const uint256 proTxHash{oldDmn.proTxHash};
+    const auto currentDmn{GetMN(proTxHash)};
+    if (!currentDmn) {
+        throw(std::runtime_error(strprintf("%s: Can't find a masternode with proTxHash=%s", __func__, proTxHash.ToString())));
+    }
+    auto newState = std::make_shared<CDeterministicMNState>(*currentDmn->pdmnState);
     stateDiff.ApplyToState(*newState);
-    UpdateMN(oldDmn, newState);
+    UpdateMN(currentDmn->proTxHash, newState);
 }
+// SYSCOIN END: Current-entry-safe deterministic-state mutation and commitment.
 
 void CDeterministicMNList::RemoveMN(const uint256& proTxHash)
 {
@@ -2576,6 +2527,8 @@ void CDeterministicMNList::RemoveMN(const uint256& proTxHash)
     if (!dmn) {
         throw(std::runtime_error(strprintf("%s: Can't find a masternode with proTxHash=%s", __func__, proTxHash.ToString())));
     }
+    // SYSCOIN: Precompute the authenticated element before removing the entry.
+    const DataStream content{SerializePQLegacyStateElement(*dmn)};
 
     // All mnUniquePropertyMap's updates must be atomic.
     // Using this temporary map as a checkpoint to rollback to in case of any issues.
@@ -2608,6 +2561,8 @@ void CDeterministicMNList::RemoveMN(const uint256& proTxHash)
     }
     mnMap = mnMap.erase(proTxHash);
     mnInternalIdMap = mnInternalIdMap.erase(dmn->GetInternalId());
+    // SYSCOIN: Keep the branch-local commitment synchronized with the list.
+    m_pq_legacy_content_hash.Remove(MakeUCharSpan(content));
     m_tracked_changes.emplace(proTxHash);
     m_pq_legacy_state_hash.reset();
 }
@@ -2658,9 +2613,8 @@ bool CDeterministicMNManager::ProcessBlock(const CBlock& block, const CBlockInde
 
         newList.SetBlockHash(pindex->GetBlockHash());
 
-        // SYSCOIN: Anchor validation must observe the exact prepared PQ root,
-        // while rejected and check-only blocks must publish no registry state.
-        uint256 pq_registry_state_root;
+        // SYSCOIN: Block validation stages the exact branch-local PQ state;
+        // rejected and check-only blocks must publish no registry state.
         llmq::pq::PQRegistryManager* pq_registry{nullptr};
         llmq::pq::PQRegistryPreparedBlock pq_registry_prepared;
         llmq::pq::PQRegistryError pq_registry_error;
@@ -2725,8 +2679,6 @@ bool CDeterministicMNManager::ProcessBlock(const CBlock& block, const CBlockInde
                               std::string{llmq::pq::PQRegistryResultString(
                               pq_registry_error.result)}));
             }
-            pq_registry_state_root =
-                pq_registry_prepared.ConsensusStateRoot();
         } else {
             for (const auto& transaction : block.vtx) {
                 if (transaction &&
@@ -2736,22 +2688,10 @@ bool CDeterministicMNManager::ProcessBlock(const CBlock& block, const CBlockInde
                                           "bad-pq-registry-disabled");
                 }
             }
-            const auto empty_root = EmptyPQRegistryStateRoot(
-                consensusParams.hashGenesisBlock);
-            if (!empty_root) {
-                return _state.Error("failed-pq-empty-registry-root");
-            }
-            pq_registry_state_root = *empty_root;
         }
 
         const uint256 dmn_state_hash{newList.GetOrComputePQLegacyStateHash(
             consensusParams.hashGenesisBlock)};
-        if (!Consensus::CheckPQLegacyState(
-                consensusParams, nHeight, dmn_state_hash,
-                pq_registry_state_root)) {
-            return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
-                                  "bad-pq-legacy-state");
-        }
 
         if (fJustCheck) {
             return true;
@@ -2826,13 +2766,10 @@ bool CDeterministicMNManager::ProcessBlock(const CBlock& block, const CBlockInde
                 nHeight)};
         m_snapshot_persistence_generation.fetch_add(
             1, std::memory_order_relaxed);
-        if (nHeight == consensusParams.nPQLegacyAnchorHeight ||
-            replay_write_through || finality_roster_write_through) {
+        if (replay_write_through || finality_roster_write_through) {
             // SYSCOIN: IBD deliberately postpones normal EvoDB maintenance. The
-            // migration snapshot must reach disk before the bounded dirty FIFO
-            // can evict it as replay advances beyond the cache window. A live
-            // BTCC/NEVM replay marker extends the same write-ahead requirement
-            // to every later snapshot, including an arbitrarily long NULL-
+            // live BTCC/NEVM replay marker extends write-ahead persistence to
+            // every affected snapshot, including an arbitrarily long NULL-
             // receipt tail whose marker never otherwise mutates. Without a
             // marker, only exact roster cutoffs are written through on every
             // branch; persisting every historical full list would make IBD
@@ -2841,9 +2778,8 @@ bool CDeterministicMNManager::ProcessBlock(const CBlock& block, const CBlockInde
                 if (replay_write_through) {
                     return _state.Error("failed-btcc-replay-dmn-persist");
                 }
-                return _state.Error(finality_roster_write_through
-                    ? "failed-finality-roster-dmn-persist"
-                    : "failed-pq-anchor-dmn-persist");
+                return _state.Error(
+                    "failed-finality-roster-dmn-persist");
             }
         } else {
             m_evoDb->WriteCache(pindex->GetBlockHash(), std::move(newList));
@@ -3124,7 +3060,7 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
 
         // SYSCOIN: this is historical state reconstruction, not live DKG.
         // Missing participation changed PoSe bans and subsequent payee state,
-        // which an anchor hash alone cannot recreate without a snapshot.
+        // so compatibility replay must reproduce these structural effects.
         if (!commitment.IsNull()) {
             for (std::size_t i{0}; i < members.size(); ++i) {
                 if (!newList.HasMN(members[i]->proTxHash)) {
@@ -3406,7 +3342,7 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
 void CDeterministicMNManager::DecreasePoSePenalties(CDeterministicMNList& mnList, const std::vector<CDeterministicMNCPtr> &toDecrease)
 {
     for (const CDeterministicMNCPtr& dmnPtr : toDecrease) {
-        mnList.PoSeDecrease(*dmnPtr);
+        mnList.PoSeDecrease(dmnPtr->proTxHash);
     }
 }
 
@@ -3592,72 +3528,6 @@ bool CDeterministicMNManager::GetPQRegistryMempoolView(
         return false;
     }
     return true;
-}
-
-bool CDeterministicMNManager::VerifyPQLegacyAnchorState(const CBlockIndex* anchor)
-{
-    const auto& consensus{Params().GetConsensus()};
-    if (anchor == nullptr ||
-        anchor->nHeight != consensus.nPQLegacyAnchorHeight ||
-        anchor->GetBlockHash() != consensus.hashPQLegacyAnchorBlock) {
-        return false;
-    }
-
-    CDeterministicMNList snapshot;
-    if (!m_evoDb->ReadCache(anchor->GetBlockHash(), snapshot)) return false;
-    uint256 pq_state_root;
-    llmq::pq::PQRegistryConfig config;
-    const auto deployment = llmq::pq::GetPQRegistryConfig(
-        consensus, config);
-    if (deployment ==
-        llmq::pq::PQRegistryDeploymentResult::INVALID_CONFIGURATION) {
-        return false;
-    }
-    if (deployment == llmq::pq::PQRegistryDeploymentResult::VALID) {
-        const auto island_base{
-            GetPQLegacyIslandBaseHeight(consensus, config)};
-        std::vector<evo::AuxiliaryHistoryGCBlockIdentity> legacy_island;
-        std::string open_error;
-        auto* registry{GetOrCreatePQRegistry(open_error)};
-        if (registry == nullptr) {
-            LogPrintf("%s -- %s\n", __func__, open_error);
-            return false;
-        }
-        llmq::pq::PQRegistryError registry_error;
-        if (!island_base ||
-            !CollectPQRegistryGCPath(anchor, *island_base,
-                                     anchor->nHeight,
-                                     legacy_island)) {
-            LogPrintf("%s -- retained PQ legacy island path is unavailable\n",
-                      __func__);
-            return false;
-        }
-        if (!registry->VerifyGCLegacyIsland(
-                legacy_island, registry_error)) {
-            LogPrintf("%s -- retained PQ legacy island authentication "
-                      "failed: %s\n",
-                      __func__,
-                      std::string{llmq::pq::PQRegistryResultString(
-                          registry_error.result)});
-            return false;
-        }
-        // SYSCOIN: Exact Q..A replay authenticates the configured state root
-        // even after the ordinary random-access floor has advanced past A.
-        pq_state_root = consensus.hashPQLegacyPQRegistryState;
-    } else {
-        const auto empty_root = EmptyPQRegistryStateRoot(
-            consensus.hashGenesisBlock);
-        if (!empty_root) return false;
-        pq_state_root = *empty_root;
-    }
-    return !snapshot.IsNull() &&
-           snapshot.GetHeight() == anchor->nHeight &&
-           snapshot.GetBlockHash() == anchor->GetBlockHash() &&
-           Consensus::CheckPQLegacyState(
-               consensus, anchor->nHeight,
-               snapshot.GetPQLegacyStateHash(
-                   consensus.hashGenesisBlock),
-               pq_state_root);
 }
 
 bool CDeterministicMNManager::VerifyPersistedPQRegistrySnapshot(
@@ -3874,9 +3744,12 @@ void CDeterministicMNManager::UpdatedBlockTip(const CBlockIndex* pindex) {
     m_pq_registry_startup_authorization_head = nullptr;
 }
 
+// SYSCOIN BEGIN: Authenticate crash-restored auxiliary history against durable finality.
 bool CDeterministicMNManager::UpdatedBlockTipForStartup(
     const CBlockIndex* recovered_tip,
-    const std::function<const CBlockIndex*(const uint256&)>& lookup)
+    const std::function<const CBlockIndex*(const uint256&)>& lookup,
+    const std::optional<AuxiliaryHistoryBlockIdentity>&
+        durable_finality_target)
 {
     if (recovered_tip == nullptr || !lookup) return false;
     LOCK(m_evoDb->cs);
@@ -3892,6 +3765,26 @@ bool CDeterministicMNManager::UpdatedBlockTipForStartup(
             indexed_authorizer->nHeight != authorized.height ||
             indexed_authorizer->GetBlockHash() !=
                 authorized.block_hash) {
+            return false;
+        }
+        if (!durable_finality_target ||
+            !durable_finality_target->IsValid() ||
+            durable_finality_target->height < authorized.height) {
+            return false;
+        }
+        const CBlockIndex* indexed_durable_target{
+            lookup(durable_finality_target->block_hash)};
+        if (indexed_durable_target == nullptr ||
+            indexed_durable_target->nHeight !=
+                durable_finality_target->height ||
+            indexed_durable_target->GetBlockHash() !=
+                durable_finality_target->block_hash ||
+            (indexed_durable_target->nStatus &
+             (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK)) ||
+            indexed_durable_target->IsAssumedValid() ||
+            !indexed_durable_target->IsValid(BLOCK_VALID_SCRIPTS) ||
+            indexed_durable_target->GetAncestor(authorized.height) !=
+                indexed_authorizer) {
             return false;
         }
         if (authorized.height <= recovered_tip->nHeight) {
@@ -3910,6 +3803,7 @@ bool CDeterministicMNManager::UpdatedBlockTipForStartup(
     m_pq_registry_startup_authorization_head = authorization_head;
     return true;
 }
+// SYSCOIN END: Authenticate crash-restored auxiliary history against durable finality.
 
 bool CDeterministicMNManager::IsProTxWithCollateral(const CTransactionRef& tx, uint32_t n)
 {
@@ -4060,8 +3954,11 @@ CDeterministicMNManager::BuildAuxiliaryHistoryRetentionPlan(
             requirements_valid &= active;
             return;
         }
-        if (head->nHeight < consensus.DIP0003Height ||
-            !observed_heads.emplace(head->GetBlockHash()).second) {
+        if (head->nHeight < consensus.DIP0003Height) {
+            plan.pre_dip3_recovery_pending = true;
+            return;
+        }
+        if (!observed_heads.emplace(head->GetBlockHash()).second) {
             return;
         }
         bool window_valid{true};
@@ -4121,50 +4018,6 @@ CDeterministicMNManager::BuildAuxiliaryHistoryRetentionPlan(
         retain_fixed_dependency(durable_dmn_floor->height,
                                 durable_dmn_floor->block_hash);
     }
-    if (consensus.nPQLegacyAnchorHeight !=
-        std::numeric_limits<int>::max()) {
-        for (const auto& branch : plan.branches) {
-            if (branch.head.height < consensus.nPQLegacyAnchorHeight) {
-                continue;
-            }
-            const CBlockIndex* head_index{nullptr};
-            if (tip != nullptr &&
-                tip->GetBlockHash() == branch.head.block_hash) {
-                head_index = tip;
-            } else {
-                for (const CBlockIndex* recovery :
-                     recovery_snapshot_indexes) {
-                    if (recovery != nullptr &&
-                        recovery->GetBlockHash() == branch.head.block_hash) {
-                        head_index = recovery;
-                        break;
-                    }
-                }
-            }
-            const CBlockIndex* anchor{head_index == nullptr
-                ? nullptr
-                : head_index->GetAncestor(
-                      consensus.nPQLegacyAnchorHeight)};
-            if (anchor == nullptr) {
-                requirements_valid = false;
-                continue;
-            }
-            retain_fixed_dependency(anchor->nHeight,
-                                    anchor->GetBlockHash());
-            requirements_valid &=
-                anchor->GetBlockHash() ==
-                consensus.hashPQLegacyAnchorBlock;
-        }
-    }
-    if (m_initial_dmn_inverse_lineage_progress) {
-        // SYSCOIN: Initial lineage authentication spans bounded maintenance
-        // passes. Its frozen endpoint must remain physically available until
-        // the shared durable intent is published or the proof is abandoned.
-        retain_fixed_dependency(
-            m_initial_dmn_inverse_lineage_progress->boundary.height,
-            m_initial_dmn_inverse_lineage_progress->boundary.block_hash);
-    }
-
     bool authorization_active{false};
     if (plan.destructive_authorization && tip != nullptr) {
         const auto& authorized{plan.destructive_authorization->block};
@@ -4517,356 +4370,6 @@ CDeterministicMNManager::DeriveDMNInverseGCBoundary(
     }
 }
 
-bool CDeterministicMNManager::AdvanceInitialDMNInverseGCLineage(
-    const CBlockIndex* tip,
-    std::span<const CBlockIndex* const> recovery_snapshot_indexes,
-    const AuxiliaryHistoryRetentionPlan& plan,
-    const DMNInverseGCBoundary* initial,
-    bool& complete)
-{
-    AssertLockHeld(m_evoDb->cs);
-    AssertLockHeld(cs);
-    complete = false;
-    LOCK(m_inverse_journal->cs);
-    const auto& consensus{Params().GetConsensus()};
-    if (tip == nullptr || !plan.AllowsDestructiveGC() ||
-        !plan.destructive_authorization ||
-        Consensus::CheckPQLegacyAnchorConfiguration(consensus) !=
-            Consensus::PQAnchorResult::VALID ||
-        consensus.nPQLegacyAnchorHeight < consensus.DIP0003Height ||
-        consensus.nPQLegacyAnchorHeight ==
-            std::numeric_limits<int>::max() ||
-        consensus.hashPQLegacyAnchorBlock.IsNull() ||
-        consensus.hashPQLegacyMNState.IsNull()) {
-        return false;
-    }
-
-    using InverseDB = CEvoDB<
-        uint256, CDeterministicMNListInverse, StaticSaltedHasher>;
-    using SnapshotDB = CEvoDB<
-        uint256, CDeterministicMNList, StaticSaltedHasher>;
-    const auto journal_state{m_auxiliary_history_gc_journal->GetState()};
-    if (journal_state.intent) return false;
-
-    bool initialized_now{false};
-    if (!m_initial_dmn_inverse_lineage_progress) {
-        if (initial == nullptr || !initial->boundary ||
-            !initial->component || !initial->snapshot ||
-            initial->status != DMNInverseGCBoundaryStatus::READY ||
-            initial->snapshot->IsNull() ||
-            initial->snapshot->GetHeight() != initial->boundary->height ||
-            initial->snapshot->GetBlockHash() !=
-                initial->boundary->block_hash ||
-            initial->boundary->height < consensus.nPQLegacyAnchorHeight ||
-            !evo::IsDMNInverseGCComponentBoundedByAuthorization(
-                *initial->component, *plan.destructive_authorization)) {
-            return false;
-        }
-        const auto closure{evo::DecodeDMNInverseGCClosure(
-            initial->component->closure)};
-        if (!closure || closure->boundary != *initial->boundary ||
-            closure->boundary_state_hash !=
-                initial->snapshot->GetOrComputePQLegacyStateHash(
-                    consensus.hashGenesisBlock)) {
-            return false;
-        }
-        m_initial_dmn_inverse_lineage_progress =
-            InitialDMNInverseLineageProgress{
-                *plan.destructive_authorization,
-                *initial->boundary,
-                *initial->component,
-                ::SerializeHash(*initial->snapshot),
-                *initial->boundary,
-                *initial->snapshot,
-                {consensus.nPQLegacyAnchorHeight,
-                 consensus.hashPQLegacyAnchorBlock},
-                consensus.hashPQLegacyMNState,
-                consensus.hashGenesisBlock,
-                0};
-        initialized_now = true;
-    } else if (initial != nullptr) {
-        return false;
-    }
-
-    auto& progress{*m_initial_dmn_inverse_lineage_progress};
-    if (journal_state.intent ||
-        (journal_state.watermark &&
-         journal_state.watermark->frontier.dmn) ||
-        progress.genesis_hash != consensus.hashGenesisBlock ||
-        progress.legacy_anchor.height !=
-            consensus.nPQLegacyAnchorHeight ||
-        progress.legacy_anchor.block_hash !=
-            consensus.hashPQLegacyAnchorBlock ||
-        progress.legacy_anchor_state_hash !=
-            consensus.hashPQLegacyMNState ||
-        !progress.authorization.IsValid() ||
-        !progress.component.IsValid() ||
-        !evo::IsDMNInverseGCComponentBoundedByAuthorization(
-            progress.component, progress.authorization)) {
-        m_initial_dmn_inverse_lineage_progress.reset();
-        return false;
-    }
-    const auto& current_authorization{*plan.destructive_authorization};
-    const CBlockIndex* frozen_authorizer{
-        progress.authorization.block.height <= tip->nHeight
-            ? tip->GetAncestor(progress.authorization.block.height)
-            : nullptr};
-    const CBlockIndex* current_authorizer{
-        current_authorization.block.height <= tip->nHeight
-            ? tip->GetAncestor(current_authorization.block.height)
-            : nullptr};
-    if (static_cast<uint8_t>(progress.authorization.source) >
-            static_cast<uint8_t>(current_authorization.source) ||
-        progress.authorization.block.height >
-            current_authorization.block.height ||
-        frozen_authorizer == nullptr ||
-        frozen_authorizer->GetBlockHash() !=
-            progress.authorization.block.block_hash ||
-        current_authorizer == nullptr ||
-        current_authorizer->GetBlockHash() !=
-            current_authorization.block.block_hash) {
-        m_initial_dmn_inverse_lineage_progress.reset();
-        return false;
-    }
-    // SYSCOIN: Another store may advance the shared journal while this
-    // bounded proof is in flight. A newer authorizer on the same active
-    // lineage preserves the authenticated DMN work and supplies the monotonic
-    // authority needed when this component is eventually published.
-    progress.authorization = current_authorization;
-
-    const CBlockIndex* boundary{
-        progress.boundary.height <= tip->nHeight
-            ? tip->GetAncestor(progress.boundary.height)
-            : nullptr};
-    if (boundary == nullptr ||
-        boundary->GetBlockHash() != progress.boundary.block_hash) {
-        m_initial_dmn_inverse_lineage_progress.reset();
-        return false;
-    }
-    for (const auto& branch : plan.branches) {
-        const CBlockIndex* head{branch.active ? tip : nullptr};
-        if (!branch.active) {
-            for (const CBlockIndex* recovery : recovery_snapshot_indexes) {
-                if (recovery != nullptr &&
-                    recovery->nHeight == branch.head.height &&
-                    recovery->GetBlockHash() == branch.head.block_hash) {
-                    head = recovery;
-                    break;
-                }
-            }
-        }
-        const CBlockIndex* branch_boundary{
-            head != nullptr && head->nHeight >= progress.boundary.height
-                ? head->GetAncestor(progress.boundary.height)
-                : nullptr};
-        if (branch_boundary == nullptr ||
-            branch_boundary->GetBlockHash() !=
-                progress.boundary.block_hash) {
-            m_initial_dmn_inverse_lineage_progress.reset();
-            return false;
-        }
-    }
-
-    const auto closure{evo::DecodeDMNInverseGCClosure(
-        progress.component.closure)};
-    std::size_t decoded_bytes{0};
-    std::size_t decoded_records{0};
-    const std::size_t decoded_byte_budget{
-        m_initial_dmn_inverse_lineage_byte_budget};
-    const auto validate_frozen_boundary = [&]() {
-        std::size_t boundary_snapshot_size{0};
-        CDeterministicMNList boundary_snapshot;
-        if (!closure || closure->boundary != progress.boundary ||
-            m_evoDb->GetExactDiskValueSizeForGC(
-                progress.boundary.block_hash, boundary_snapshot_size) !=
-                SnapshotDB::ExactDiskReadResult::FOUND ||
-            boundary_snapshot_size > SNAPSHOT_GC_MAX_RECORD_BYTES ||
-            m_evoDb->ReadExactDiskForGC(
-                progress.boundary.block_hash, boundary_snapshot,
-                SNAPSHOT_GC_MAX_RECORD_BYTES) !=
-                SnapshotDB::ExactDiskReadResult::FOUND ||
-            ::GetSerializeSize(boundary_snapshot) !=
-                boundary_snapshot_size ||
-            boundary_snapshot.IsNull() ||
-            boundary_snapshot.GetHeight() != progress.boundary.height ||
-            boundary_snapshot.GetBlockHash() !=
-                progress.boundary.block_hash ||
-            ::SerializeHash(boundary_snapshot) !=
-                progress.boundary_snapshot_hash ||
-            boundary_snapshot.GetOrComputePQLegacyStateHash(
-                consensus.hashGenesisBlock) !=
-                closure->boundary_state_hash) {
-            return false;
-        }
-
-        std::size_t boundary_inverse_size{0};
-        if (m_inverse_journal->GetExactDiskValueSizeForGC(
-                progress.boundary.block_hash, boundary_inverse_size) !=
-                InverseDB::ExactDiskReadResult::FOUND ||
-            boundary_inverse_size >
-                INITIAL_DMN_INVERSE_LINEAGE_MAX_RECORD_BYTES ||
-            boundary_inverse_size > decoded_byte_budget - decoded_bytes) {
-            return false;
-        }
-        CDeterministicMNListInverse boundary_inverse;
-        if (m_inverse_journal->ReadExactDiskForGC(
-                progress.boundary.block_hash, boundary_inverse,
-                INITIAL_DMN_INVERSE_LINEAGE_MAX_RECORD_BYTES) !=
-                InverseDB::ExactDiskReadResult::FOUND ||
-            ::GetSerializeSize(boundary_inverse) !=
-                boundary_inverse_size ||
-            !boundary_inverse.IsStructurallyValid() ||
-            boundary_inverse.genesis_hash != consensus.hashGenesisBlock ||
-            boundary_inverse.coverage_base_height !=
-                consensus.DIP0003Height ||
-            boundary_inverse.child_height != progress.boundary.height ||
-            boundary_inverse.child_hash != progress.boundary.block_hash ||
-            boundary_inverse.child_state_hash !=
-                closure->boundary_state_hash ||
-            boundary_inverse.history_commitment !=
-                closure->inverse_history_commitment ||
-            ::SerializeHash(boundary_inverse) !=
-                closure->inverse_record_hash) {
-            return false;
-        }
-        decoded_bytes += boundary_inverse_size;
-        ++decoded_records;
-        return true;
-    };
-    // SYSCOIN: The immutable endpoint is expensive but needs exact physical
-    // authentication only when the process-local proof is created and again
-    // in the dedicated publication pass. Continuations authenticate their
-    // own exact inverse segment and retain B against snapshot compaction.
-    const bool publication_pass{
-        !initialized_now &&
-        progress.cursor.height == progress.legacy_anchor.height};
-    if (publication_pass && journal_state.watermark &&
-        (current_authorization.block.height <=
-             journal_state.watermark->authorization.block.height ||
-         static_cast<uint8_t>(current_authorization.source) <
-             static_cast<uint8_t>(
-                 journal_state.watermark->authorization.source))) {
-        // SYSCOIN: Another store consumed this authorizer. Keep the completed
-        // proof, but avoid repeatedly decoding the large frozen endpoint until
-        // a newer ChainLock can monotonically publish the DMN component.
-        ++progress.passes;
-        progress.last_decoded_bytes = 0;
-        progress.last_decoded_records = 0;
-        return true;
-    }
-    if ((initialized_now || publication_pass) &&
-        !validate_frozen_boundary()) {
-        if (initialized_now) {
-            m_initial_dmn_inverse_lineage_progress.reset();
-        }
-        return false;
-    }
-
-    const CBlockIndex* cursor{
-        boundary->GetAncestor(progress.cursor.height)};
-    if (cursor == nullptr ||
-        cursor->GetBlockHash() != progress.cursor.block_hash ||
-        progress.cursor_snapshot.IsNull() ||
-        progress.cursor_snapshot.GetHeight() != progress.cursor.height ||
-        progress.cursor_snapshot.GetBlockHash() !=
-            progress.cursor.block_hash) {
-        return false;
-    }
-
-    if (publication_pass) {
-        complete =
-            cursor->GetBlockHash() == progress.legacy_anchor.block_hash &&
-            progress.cursor_snapshot.GetOrComputePQLegacyStateHash(
-                consensus.hashGenesisBlock) ==
-                progress.legacy_anchor_state_hash;
-        ++progress.passes;
-        progress.last_decoded_bytes = decoded_bytes;
-        progress.last_decoded_records = decoded_records;
-        return complete;
-    }
-
-    std::size_t advanced{0};
-    while (cursor->nHeight > progress.legacy_anchor.height) {
-        if (cursor->pprev == nullptr ||
-            cursor->pprev->nHeight != cursor->nHeight - 1) {
-            return false;
-        }
-        std::size_t child_size{0};
-        if (m_inverse_journal->GetExactDiskValueSizeForGC(
-                cursor->GetBlockHash(), child_size) !=
-                InverseDB::ExactDiskReadResult::FOUND ||
-            child_size > INITIAL_DMN_INVERSE_LINEAGE_MAX_RECORD_BYTES) {
-            return false;
-        }
-        std::size_t parent_size{0};
-        std::size_t step_records{1};
-        if (cursor->pprev->nHeight != consensus.DIP0003Height) {
-            if (m_inverse_journal->GetExactDiskValueSizeForGC(
-                    cursor->pprev->GetBlockHash(), parent_size) !=
-                    InverseDB::ExactDiskReadResult::FOUND ||
-                parent_size >
-                    INITIAL_DMN_INVERSE_LINEAGE_MAX_RECORD_BYTES) {
-                return false;
-            }
-            ++step_records;
-        }
-        if (decoded_records + step_records >
-                INITIAL_DMN_INVERSE_LINEAGE_MAX_RECORDS_PER_PASS ||
-            child_size > decoded_byte_budget - decoded_bytes ||
-            parent_size >
-                decoded_byte_budget - decoded_bytes - child_size) {
-            if (advanced == 0) return false;
-            break;
-        }
-
-        CDeterministicMNList parent;
-        std::size_t step_bytes{0};
-        std::size_t actual_step_records{0};
-        if (!LoadAndVerifyInverseJournalExactForGC(
-                cursor, progress.cursor_snapshot, parent,
-                decoded_byte_budget - decoded_bytes,
-                INITIAL_DMN_INVERSE_LINEAGE_MAX_RECORD_BYTES,
-                &step_bytes, &actual_step_records) ||
-            step_bytes != child_size + parent_size ||
-            actual_step_records != step_records) {
-            return false;
-        }
-        cursor = cursor->pprev;
-        progress.cursor = {cursor->nHeight, cursor->GetBlockHash()};
-        progress.cursor_snapshot = std::move(parent);
-        decoded_records += actual_step_records;
-        decoded_bytes += step_bytes;
-        ++advanced;
-    }
-    ++progress.passes;
-    progress.last_decoded_bytes = decoded_bytes;
-    progress.last_decoded_records = decoded_records;
-    const bool reached_anchor{
-        cursor->nHeight == progress.legacy_anchor.height};
-    if (reached_anchor &&
-        (cursor->GetBlockHash() != progress.legacy_anchor.block_hash ||
-         progress.cursor_snapshot.IsNull() ||
-         progress.cursor_snapshot.GetHeight() != cursor->nHeight ||
-         progress.cursor_snapshot.GetBlockHash() !=
-             cursor->GetBlockHash() ||
-         progress.cursor_snapshot.GetOrComputePQLegacyStateHash(
-             consensus.hashGenesisBlock) !=
-             progress.legacy_anchor_state_hash)) {
-        return false;
-    }
-    // SYSCOIN: Reaching H never publishes in the same pass. A final bounded
-    // call reauthenticates the exact frozen B snapshot/inverse immediately
-    // before the durable shared intent is created.
-    complete = false;
-    LogPrint(BCLog::SYS,
-             "CDeterministicMNManager::%s boundary=%d cursor=%d "
-             "records=%zu decoded_bytes=%zu pass=%u anchor=%d\n",
-             __func__, progress.boundary.height, progress.cursor.height,
-             decoded_records, decoded_bytes,
-             static_cast<unsigned>(progress.passes), reached_anchor);
-    return true;
-}
-
 bool CDeterministicMNManager::PrepareDMNInverseGCIntent(
     const CBlockIndex* tip,
     std::span<const CBlockIndex* const> recovery_snapshot_indexes,
@@ -4921,15 +4424,9 @@ bool CDeterministicMNManager::PrepareDMNInverseGCIntent(
         }
 
         if (!initial_state.intent && initial_state.watermark &&
-            (plan.destructive_authorization->block.height <=
-                 initial_state.watermark->authorization.block.height ||
-             static_cast<uint8_t>(
-                 plan.destructive_authorization->source) <
-                 static_cast<uint8_t>(
-                     initial_state.watermark->authorization.source))) {
-            // SYSCOIN: A shared journal sequence consumes its authorizer.
-            // Waiting for the next finality update is a stable no-work state,
-            // not a retry that should defeat same-tip maintenance forever.
+            !evo::AuxiliaryHistoryGCAuthorizationDominates(
+                initial_state.watermark->authorization,
+                *plan.destructive_authorization)) {
             return true;
         }
 
@@ -4969,12 +4466,12 @@ bool CDeterministicMNManager::PrepareDMNInverseGCIntent(
                 target, &intent_id)) {
             case evo::AuxiliaryHistoryGCJournalResult::STARTED:
             case evo::AuxiliaryHistoryGCJournalResult::EXISTING:
+                m_auxiliary_history_maintenance_retry_requested.store(
+                    true, std::memory_order_release);
                 retry_required = true;
-                m_initial_dmn_inverse_lineage_progress.reset();
                 return !intent_id.IsNull() &&
                        RefreshEffectiveDMNInverseGCBoundary();
             case evo::AuxiliaryHistoryGCJournalResult::ALREADY_COMPLETE:
-                m_initial_dmn_inverse_lineage_progress.reset();
                 return !intent_id.IsNull() &&
                        RefreshEffectiveDMNInverseGCBoundary();
             case evo::AuxiliaryHistoryGCJournalResult::BUSY:
@@ -4990,31 +4487,6 @@ bool CDeterministicMNManager::PrepareDMNInverseGCIntent(
             }
             return false;
         };
-
-        if (!previous_component &&
-            m_initial_dmn_inverse_lineage_progress) {
-            bool lineage_complete{false};
-            if (!AdvanceInitialDMNInverseGCLineage(
-                    tip, recovery_snapshot_indexes, plan,
-                    /*initial=*/nullptr, lineage_complete)) {
-                retry_required = true;
-                return true;
-            }
-            if (!lineage_complete) {
-                retry_required = true;
-                return true;
-            }
-            const auto frozen{
-                *m_initial_dmn_inverse_lineage_progress};
-            const auto expected_state{
-                m_auxiliary_history_gc_journal->GetState()};
-            return publish_intent(
-                frozen.authorization, frozen.component, expected_state);
-        }
-        if (previous_component &&
-            m_initial_dmn_inverse_lineage_progress) {
-            m_initial_dmn_inverse_lineage_progress.reset();
-        }
 
         const auto derived{DeriveDMNInverseGCBoundary(
             tip, recovery_snapshot_indexes, plan, previous_component)};
@@ -5098,25 +4570,6 @@ bool CDeterministicMNManager::PrepareDMNInverseGCIntent(
                 prepared.boundary->block_hash) {
             retry_required = true;
             return true;
-        }
-        if (!previous_component) {
-            bool lineage_complete{false};
-            if (!AdvanceInitialDMNInverseGCLineage(
-                    tip, recovery_snapshot_indexes, plan, &prepared,
-                    lineage_complete)) {
-                retry_required = true;
-                return true;
-            }
-            if (!lineage_complete) {
-                retry_required = true;
-                return true;
-            }
-            const auto frozen{
-                *m_initial_dmn_inverse_lineage_progress};
-            const auto expected_state{
-                m_auxiliary_history_gc_journal->GetState()};
-            return publish_intent(
-                frozen.authorization, frozen.component, expected_state);
         }
         return publish_intent(
             *plan.destructive_authorization, *prepared.component,
@@ -5315,6 +4768,8 @@ bool CDeterministicMNManager::ResumePendingPQRegistryGC(
 
     const auto state{m_auxiliary_history_gc_journal->GetState()};
     if (!state.intent) return true;
+    m_auxiliary_history_maintenance_retry_requested.store(
+        true, std::memory_order_release);
     const auto previous_component{state.watermark
         ? state.watermark->frontier.pq_registry
         : std::optional<evo::AuxiliaryHistoryGCComponent>{}};
@@ -5345,8 +4800,7 @@ bool CDeterministicMNManager::ResumePendingPQRegistryGC(
     llmq::pq::PQRegistryGCAuthenticationContext context;
     if (common == nullptr ||
         !BuildPQRegistryGCAuthenticationContext(
-            Params().GetConsensus(), registry_config,
-            plan.effective_pq_registry_gc_boundary->closure,
+            registry_config, plan.effective_pq_registry_gc_boundary->closure,
             common, context)) {
         return false;
     }
@@ -5389,7 +4843,10 @@ bool CDeterministicMNManager::ResumePendingPQRegistryGC(
         state.intent->intent_id)) {
     case evo::AuxiliaryHistoryGCJournalResult::COMPLETED:
     case evo::AuxiliaryHistoryGCJournalResult::ALREADY_COMPLETE:
-        retry_required = false;
+        // The next bounded cursor batch may reuse this exact durable winner.
+        // A follow-up no-work observation, not authorization consumption,
+        // decides when same-tip maintenance can sleep.
+        retry_required = true;
         return RefreshEffectiveDMNInverseGCBoundary();
     case evo::AuxiliaryHistoryGCJournalResult::STARTED:
     case evo::AuxiliaryHistoryGCJournalResult::EXISTING:
@@ -5415,8 +4872,7 @@ bool CDeterministicMNManager::PreparePQRegistryGCIntent(
     llmq::pq::PQRegistryConfig registry_config;
     const auto& consensus{Params().GetConsensus()};
     if (llmq::pq::GetPQRegistryConfig(consensus, registry_config) !=
-            llmq::pq::PQRegistryDeploymentResult::VALID ||
-        !MakePQRegistryGCRootConfig(consensus, registry_config)) {
+        llmq::pq::PQRegistryDeploymentResult::VALID) {
         return true;
     }
 
@@ -5438,12 +4894,9 @@ bool CDeterministicMNManager::PreparePQRegistryGCIntent(
             return CandidateStatus::NO_WORK;
         }
         if (state.watermark) {
-            if (observed.destructive_authorization->block.height <=
-                    state.watermark->authorization.block.height ||
-                static_cast<uint8_t>(
-                    observed.destructive_authorization->source) <
-                    static_cast<uint8_t>(
-                        state.watermark->authorization.source)) {
+            if (!evo::AuxiliaryHistoryGCAuthorizationDominates(
+                    state.watermark->authorization,
+                    *observed.destructive_authorization)) {
                 return CandidateStatus::NO_WORK;
             }
             previous = state.watermark->frontier.pq_registry;
@@ -5461,58 +4914,55 @@ bool CDeterministicMNManager::PreparePQRegistryGCIntent(
             }
         }
 
-        const auto island_base{
-            GetPQLegacyIslandBaseHeight(consensus, registry_config)};
-        if (!island_base) return CandidateStatus::INVALID;
+        const CBlockIndex* common{GetAuxiliaryHistoryCommonAncestor(
+            tip, recovery_snapshot_indexes)};
+        if (common == nullptr) return CandidateStatus::INVALID;
+        std::optional<int32_t> safe_ceiling;
+        if (observed.AllowsDestructiveGC() &&
+            observed.finality_roster_floor &&
+            *observed.finality_roster_floor > 0) {
+            int32_t computed_safe_ceiling{std::min(
+                observed.destructive_authorization->block.height,
+                common->nHeight)};
+            computed_safe_ceiling = std::min<int32_t>(
+                computed_safe_ceiling,
+                static_cast<int32_t>(
+                    *observed.finality_roster_floor - 1));
+            for (const auto& branch : observed.branches) {
+                computed_safe_ceiling = std::min(
+                    computed_safe_ceiling,
+                    branch.random_access_floor.height);
+            }
+            safe_ceiling.emplace(computed_safe_ceiling);
+        }
+
         const int64_t initial_checkpoint{
-            static_cast<int64_t>(*island_base) +
+            static_cast<int64_t>(registry_config.preparation_height) +
             llmq::pq::PQ_REGISTRY_CHECKPOINT_INTERVAL};
         int64_t checkpoint_height{initial_checkpoint};
         bool advances_checkpoint{true};
         if (previous_closure) {
-            if (previous_closure->scan_complete ==
-                evo::PQRegistryGCClosure::SCANNING) {
+            const int64_t next_checkpoint{
+                static_cast<int64_t>(
+                    previous_closure->checkpoint.height) +
+                llmq::pq::PQ_REGISTRY_CHECKPOINT_INTERVAL};
+            if (safe_ceiling &&
+                next_checkpoint <= *safe_ceiling &&
+                next_checkpoint <= std::numeric_limits<int32_t>::max()) {
+                checkpoint_height = next_checkpoint;
+            } else if (previous_closure->NeedsPhysicalSweep()) {
                 checkpoint_height = previous_closure->checkpoint.height;
                 advances_checkpoint = false;
-            } else if (previous_closure->scan_complete ==
-                       evo::PQRegistryGCClosure::COMPLETE) {
-                checkpoint_height =
-                    static_cast<int64_t>(
-                        previous_closure->checkpoint.height) +
-                    llmq::pq::PQ_REGISTRY_CHECKPOINT_INTERVAL;
             } else {
-                return CandidateStatus::INVALID;
+                return CandidateStatus::NO_WORK;
             }
+        } else if (!safe_ceiling ||
+                   initial_checkpoint > *safe_ceiling) {
+            return CandidateStatus::NO_WORK;
         }
         if (checkpoint_height < 0 ||
-            checkpoint_height > std::numeric_limits<int32_t>::max()) {
-            return CandidateStatus::INVALID;
-        }
-
-        const CBlockIndex* common{GetAuxiliaryHistoryCommonAncestor(
-            tip, recovery_snapshot_indexes)};
-        if (common == nullptr) return CandidateStatus::INVALID;
-        if (advances_checkpoint) {
-            if (!observed.AllowsDestructiveGC() ||
-                !observed.finality_roster_floor ||
-                *observed.finality_roster_floor <= 0) {
-                return CandidateStatus::NO_WORK;
-            }
-            int32_t safe_ceiling{std::min(
-                observed.destructive_authorization->block.height,
-                common->nHeight)};
-            safe_ceiling = std::min(
-                safe_ceiling,
-                static_cast<int32_t>(
-                    *observed.finality_roster_floor - 1));
-            for (const auto& branch : observed.branches) {
-                safe_ceiling = std::min(
-                    safe_ceiling, branch.random_access_floor.height);
-            }
-            if (checkpoint_height > safe_ceiling) {
-                return CandidateStatus::NO_WORK;
-            }
-        } else if (checkpoint_height > common->nHeight) {
+            checkpoint_height > std::numeric_limits<int32_t>::max() ||
+            (!advances_checkpoint && checkpoint_height > common->nHeight)) {
             return CandidateStatus::INVALID;
         }
 
@@ -5526,7 +4976,7 @@ bool CDeterministicMNManager::PreparePQRegistryGCIntent(
             return CandidateStatus::INVALID;
         }
         return BuildPQRegistryGCAuthenticationContext(
-                   consensus, registry_config, identity, common, context)
+                   registry_config, identity, common, context)
             ? CandidateStatus::READY
             : CandidateStatus::INVALID;
     };
@@ -5609,9 +5059,7 @@ bool CDeterministicMNManager::PreparePQRegistryGCIntent(
         const auto begin_status{derive_candidate(
             begin_plan, begin_state, begin_previous, begin_context)};
         if (begin_status == CandidateStatus::INVALID) return false;
-        const bool same_context{
-            begin_context.legacy_island == context.legacy_island &&
-            begin_context.rooted_segment == context.rooted_segment};
+        const bool same_context{begin_context == context};
         if (begin_status == CandidateStatus::NO_WORK ||
             begin_state.watermark != observed_state.watermark ||
             begin_state.intent != observed_state.intent ||
@@ -5650,10 +5098,12 @@ bool CDeterministicMNManager::PreparePQRegistryGCIntent(
                  evo::AuxiliaryHistoryGCJournalResult::STARTED &&
              begin_result !=
                  evo::AuxiliaryHistoryGCJournalResult::EXISTING) ||
-            intent_id.IsNull() ||
-            !RefreshEffectiveDMNInverseGCBoundary()) {
+            intent_id.IsNull()) {
             return false;
         }
+        m_auxiliary_history_maintenance_retry_requested.store(
+            true, std::memory_order_release);
+        if (!RefreshEffectiveDMNInverseGCBoundary()) return false;
         pending_state = m_auxiliary_history_gc_journal->GetState();
     }
     retry_required = true;
@@ -5686,7 +5136,9 @@ bool CDeterministicMNManager::PreparePQRegistryGCIntent(
         switch (m_auxiliary_history_gc_journal->Complete(intent_id)) {
         case evo::AuxiliaryHistoryGCJournalResult::COMPLETED:
         case evo::AuxiliaryHistoryGCJournalResult::ALREADY_COMPLETE:
-            retry_required = false;
+            // One batch is intentionally bounded; retain the same-tip retry
+            // until another pass proves the scan (and the other store) idle.
+            retry_required = true;
             return RefreshEffectiveDMNInverseGCBoundary();
         case evo::AuxiliaryHistoryGCJournalResult::STARTED:
         case evo::AuxiliaryHistoryGCJournalResult::EXISTING:
@@ -5714,6 +5166,8 @@ bool CDeterministicMNManager::ResumePendingDMNInverseGC(
         LOCK(cs);
         const auto state{m_auxiliary_history_gc_journal->GetState()};
         if (!state.intent) return true;
+        m_auxiliary_history_maintenance_retry_requested.store(
+            true, std::memory_order_release);
         retry_required = true;
 
         const auto& target{state.intent->target};
@@ -5763,7 +5217,9 @@ bool CDeterministicMNManager::ResumePendingDMNInverseGC(
     switch (m_auxiliary_history_gc_journal->Complete(*intent_id)) {
     case evo::AuxiliaryHistoryGCJournalResult::COMPLETED:
     case evo::AuxiliaryHistoryGCJournalResult::ALREADY_COMPLETE:
-        retry_required = false;
+        // Completion releases the shared journal so this same winner can
+        // authorize the other component without waiting for another block.
+        retry_required = true;
         return RefreshEffectiveDMNInverseGCBoundary();
     case evo::AuxiliaryHistoryGCJournalResult::BUSY:
     case evo::AuxiliaryHistoryGCJournalResult::NON_MONOTONIC:
@@ -5817,9 +5273,15 @@ bool CDeterministicMNManager::BeginAuxiliaryHistoryGCIntentForTesting(
     uint256 intent_id;
     const auto result{m_auxiliary_history_gc_journal->Begin(
         target, &intent_id)};
-    return (result == evo::AuxiliaryHistoryGCJournalResult::STARTED ||
-            result == evo::AuxiliaryHistoryGCJournalResult::EXISTING) &&
-           !intent_id.IsNull() && RefreshEffectiveDMNInverseGCBoundary();
+    const bool pending{
+        (result == evo::AuxiliaryHistoryGCJournalResult::STARTED ||
+         result == evo::AuxiliaryHistoryGCJournalResult::EXISTING) &&
+        !intent_id.IsNull()};
+    if (pending) {
+        m_auxiliary_history_maintenance_retry_requested.store(
+            true, std::memory_order_release);
+    }
+    return pending && RefreshEffectiveDMNInverseGCBoundary();
 }
 
 bool CDeterministicMNManager::
@@ -5828,26 +5290,16 @@ CompleteAuxiliaryHistoryGCIntentForTesting()
     LOCK(m_evoDb->cs);
     LOCK(cs);
     const auto state{m_auxiliary_history_gc_journal->GetState()};
-    return state.intent &&
-           m_auxiliary_history_gc_journal->Complete(
-               state.intent->intent_id) ==
-               evo::AuxiliaryHistoryGCJournalResult::COMPLETED &&
-           RefreshEffectiveDMNInverseGCBoundary();
-}
-
-bool CDeterministicMNManager::
-AdvanceInitialDMNInverseGCLineageForTesting(
-    std::span<const CBlockIndex* const> recovery_snapshot_indexes)
-{
-    LOCK(m_evoDb->cs);
-    LOCK(cs);
-    const auto plan{BuildAuxiliaryHistoryRetentionPlan(
-        tipIndex, recovery_snapshot_indexes)};
-    bool complete{false};
-    return m_initial_dmn_inverse_lineage_progress &&
-           AdvanceInitialDMNInverseGCLineage(
-               tipIndex, recovery_snapshot_indexes, plan,
-               /*initial=*/nullptr, complete);
+    const bool completed{
+        state.intent &&
+        m_auxiliary_history_gc_journal->Complete(
+            state.intent->intent_id) ==
+            evo::AuxiliaryHistoryGCJournalResult::COMPLETED};
+    if (completed) {
+        m_auxiliary_history_maintenance_retry_requested.store(
+            true, std::memory_order_release);
+    }
+    return completed && RefreshEffectiveDMNInverseGCBoundary();
 }
 
 uint64_t CDeterministicMNManager::
@@ -5855,32 +5307,6 @@ GetDMNInverseGCExactAuthenticationCountForTesting()
 {
     LOCK(cs);
     return m_effective_dmn_inverse_gc_exact_authentications_for_testing;
-}
-
-CDeterministicMNManager::InitialDMNInverseLineageStatsForTesting
-CDeterministicMNManager::GetInitialDMNInverseLineageStatsForTesting()
-{
-    LOCK(cs);
-    if (!m_initial_dmn_inverse_lineage_progress) return {};
-    return InitialDMNInverseLineageStatsForTesting{
-        true,
-        m_initial_dmn_inverse_lineage_progress->boundary.height,
-        m_initial_dmn_inverse_lineage_progress->cursor.height,
-        m_initial_dmn_inverse_lineage_progress->passes,
-        m_initial_dmn_inverse_lineage_progress->last_decoded_bytes,
-        m_initial_dmn_inverse_lineage_progress->last_decoded_records};
-}
-
-bool CDeterministicMNManager::
-SetInitialDMNInverseLineageByteBudgetForTesting(std::size_t bytes)
-{
-    LOCK(cs);
-    if (bytes == 0 ||
-        bytes > INITIAL_DMN_INVERSE_LINEAGE_MAX_DECODED_BYTES_PER_PASS) {
-        return false;
-    }
-    m_initial_dmn_inverse_lineage_byte_budget = bytes;
-    return true;
 }
 
 bool CDeterministicMNManager::DoMaintenance(
@@ -5905,9 +5331,7 @@ bool CDeterministicMNManager::DoMaintenance(
             LogPrintf("%s -- null chainstate recovery marker\n", __func__);
             return false;
         }
-        if (pindex->nHeight >= dip3_height) {
-            recovery_indexes.push_back(pindex);
-        }
+        recovery_indexes.push_back(pindex);
     }
     std::sort(recovery_indexes.begin(), recovery_indexes.end(),
               [](const CBlockIndex* left, const CBlockIndex* right) {
@@ -5931,6 +5355,13 @@ bool CDeterministicMNManager::DoMaintenance(
     for (const CBlockIndex* pindex : recovery_indexes) {
         recovery_hashes.push_back(pindex->GetBlockHash());
     }
+    std::vector<const CBlockIndex*> recovery_snapshot_heads;
+    recovery_snapshot_heads.reserve(recovery_indexes.size());
+    std::copy_if(recovery_indexes.begin(), recovery_indexes.end(),
+                 std::back_inserter(recovery_snapshot_heads),
+                 [dip3_height](const CBlockIndex* pindex) {
+                     return pindex->nHeight >= dip3_height;
+                 });
 
     // Per-block inverse records use asynchronous write-through. Order their
     // WAL before any maintenance result can be used to publish a chainstate
@@ -5964,7 +5395,7 @@ bool CDeterministicMNManager::DoMaintenance(
     LOCK(m_evoDb->cs);
     const auto maintenance_start = std::chrono::steady_clock::now();
     const auto verify_recovery_snapshots = [&] {
-        for (const CBlockIndex* pindex : recovery_indexes) {
+        for (const CBlockIndex* pindex : recovery_snapshot_heads) {
             if (!VerifyPersistedSnapshot(pindex)) {
                 LogPrintf("%s -- missing or invalid chainstate recovery "
                           "snapshot at height=%d block=%s\n",
@@ -5991,7 +5422,7 @@ bool CDeterministicMNManager::DoMaintenance(
         // shortcut or any attempt to derive a newer frontier.
         bool pq_handled{false};
         if (!ResumePendingPQRegistryGC(
-                tip, recovery_indexes, retention_plan, pq_handled,
+                tip, recovery_snapshot_heads, retention_plan, pq_handled,
                 auxiliary_gc_retry_required)) {
             return false;
         }
@@ -6047,15 +5478,12 @@ bool CDeterministicMNManager::DoMaintenance(
         !auxiliary_gc_pending && shortcut_gc_state.watermark &&
         retention_plan.effective_pq_registry_gc_boundary &&
         retention_plan.effective_pq_registry_gc_boundary->closure
-                .scan_complete == evo::PQRegistryGCClosure::SCANNING &&
+                .NeedsPhysicalSweep() &&
         retention_plan.destructive_authorization &&
         !retention_plan.finality_health_ambiguous &&
-        retention_plan.destructive_authorization->block.height >
-            shortcut_gc_state.watermark->authorization.block.height &&
-        static_cast<uint8_t>(
-            retention_plan.destructive_authorization->source) >=
-            static_cast<uint8_t>(
-                shortcut_gc_state.watermark->authorization.source)};
+        evo::AuxiliaryHistoryGCAuthorizationDominates(
+            shortcut_gc_state.watermark->authorization,
+            *retention_plan.destructive_authorization)};
     if (cache_entry_count == 0 && erase_entry_count == 0 &&
         !auxiliary_gc_pending && !pq_scan_cleanup_ready &&
         WITH_LOCK(cs, return m_last_maintained_tip == tip_hash &&
@@ -6069,6 +5497,8 @@ bool CDeterministicMNManager::DoMaintenance(
                  __func__,
                  tip_hash.ToString(),
                  ElapsedMillis(maintenance_start));
+        m_auxiliary_history_maintenance_retry_requested.store(
+            false, std::memory_order_release);
         return true;
     }
 
@@ -6138,13 +5568,13 @@ bool CDeterministicMNManager::DoMaintenance(
             EXCLUSIVE_LOCKS_REQUIRED(m_evoDb->cs) {
             LOCK(cs);
             return PrepareDMNInverseGCIntent(
-                tip, recovery_indexes, retention_plan,
+                tip, recovery_snapshot_heads, retention_plan,
                 retry_required);
         };
         const auto try_pq = [&](bool& retry_required)
             EXCLUSIVE_LOCKS_REQUIRED(m_evoDb->cs) {
             return PreparePQRegistryGCIntent(
-                tip, recovery_indexes,
+                tip, recovery_snapshot_heads,
                 retry_required);
         };
         const auto try_preferred_then_fallback =
@@ -6250,7 +5680,8 @@ bool CDeterministicMNManager::DoMaintenance(
         m_snapshot_persistence_generation.load(std::memory_order_relaxed)};
     const bool retain_all_finality_snapshots{
         retention_plan.finality_verification_active ||
-        retention_plan.finality_publication_pending};
+        retention_plan.finality_publication_pending ||
+        retention_plan.pre_dip3_recovery_pending};
     if (retention_plan.replay_floor ||
         retain_all_finality_snapshots) {
         // SYSCOIN: A replay marker can protect both active and prospective
@@ -6375,17 +5806,20 @@ bool CDeterministicMNManager::DoMaintenance(
                 retention_plan.destructive_authorization->source) >=
                 static_cast<uint8_t>(
                     final_gc_state.watermark->authorization.source)) {
-            // SYSCOIN: Completing a crash-restored intent consumes its old
-            // authorizer, not a newer live one. Force a follow-up pass even
-            // when this tip and its recovery set are otherwise unchanged.
+            // SYSCOIN: A crash-restored intent completes under its immutable
+            // old authorizer. Reobserve the newer live bound before allowing
+            // same-tip maintenance to sleep.
             auxiliary_gc_retry_required = true;
         }
-        if (!auxiliary_gc_retry_required &&
+        const bool maintenance_inputs_stable{
             m_replay_snapshot_retention_generation ==
                 retention_plan.generation &&
             m_snapshot_persistence_generation.load(
                 std::memory_order_relaxed) ==
-                snapshot_persistence_generation) {
+                snapshot_persistence_generation};
+        const bool retry_after_success{
+            auxiliary_gc_retry_required || !maintenance_inputs_stable};
+        if (!retry_after_success) {
             m_last_maintained_tip = tip_hash;
             m_last_maintained_recovery_blocks = recovery_hashes;
             m_last_maintained_snapshot_persistence_generation =
@@ -6394,6 +5828,8 @@ bool CDeterministicMNManager::DoMaintenance(
             m_last_maintained_tip.SetNull();
             m_last_maintained_recovery_blocks.clear();
         }
+        m_auxiliary_history_maintenance_retry_requested.store(
+            retry_after_success, std::memory_order_release);
     }
     LogPrint(BCLog::SYS,
              "CDeterministicMNManager::%s maintenance complete tip=%s scanned=%zu scanned_bytes=%zu pruned=%zu snapshot_gc_complete=%d replay_retention_floor=%d finality_retention_floor=%d retain_all_finality=%d read_cache=%zu initialized_hot_cache=%d elapsed=%d ms\n",
@@ -6459,6 +5895,10 @@ int CDeterministicMNManager::UpdateReplaySnapshotRetentionFloor(
         // SYSCOIN: Clearing the crash-restored replay obligation must force
         // same-tip maintenance to revisit and compact the retained disk set.
         m_last_maintained_tip.SetNull();
+        m_auxiliary_history_maintenance_request_generation.fetch_add(
+            1, std::memory_order_acq_rel);
+        m_auxiliary_history_maintenance_retry_requested.store(
+            true, std::memory_order_release);
     }
     return m_replay_snapshot_retention_floor;
 }
@@ -6477,6 +5917,10 @@ int CDeterministicMNManager::UpdateFinalitySnapshotRetentionFloor(
         // SYSCOIN: Durable best/unsealed replacement can make a same-tip
         // database either newly protected or newly eligible for compaction.
         m_last_maintained_tip.SetNull();
+        m_auxiliary_history_maintenance_request_generation.fetch_add(
+            1, std::memory_order_acq_rel);
+        m_auxiliary_history_maintenance_retry_requested.store(
+            true, std::memory_order_release);
     }
     return m_finality_snapshot_retention_floor;
 }
@@ -6489,8 +5933,6 @@ void CDeterministicMNManager::BeginFinalitySnapshotVerificationRetention()
     LOCK(m_evoDb->cs);
     LOCK(cs);
     ++m_finality_snapshot_verifications_in_flight;
-    ++m_replay_snapshot_retention_generation;
-    m_last_maintained_tip.SetNull();
 }
 
 void CDeterministicMNManager::EndFinalitySnapshotVerificationRetention()
@@ -6499,8 +5941,13 @@ void CDeterministicMNManager::EndFinalitySnapshotVerificationRetention()
     LOCK(cs);
     assert(m_finality_snapshot_verifications_in_flight != 0);
     --m_finality_snapshot_verifications_in_flight;
-    ++m_replay_snapshot_retention_generation;
-    m_last_maintained_tip.SetNull();
+    if (m_finality_snapshot_verifications_in_flight == 0) {
+        // The barrier may have deferred otherwise-due cleanup, but a remote
+        // verification must not turn the next mempool admission into a full
+        // metadata flush. A naturally due or explicitly forced pass revisits
+        // this tip after the last reader releases it.
+        m_last_maintained_tip.SetNull();
+    }
 }
 
 void CDeterministicMNManager::UpdateFinalitySnapshotPublicationRetention(
@@ -6515,6 +5962,10 @@ void CDeterministicMNManager::UpdateFinalitySnapshotPublicationRetention(
     // shortcut. Arming follows any already-running prune; releasing permits
     // accumulated fork snapshots to be compacted immediately.
     m_last_maintained_tip.SetNull();
+    m_auxiliary_history_maintenance_request_generation.fetch_add(
+        1, std::memory_order_acq_rel);
+    m_auxiliary_history_maintenance_retry_requested.store(
+        true, std::memory_order_release);
 }
 
 bool CDeterministicMNManager::UpdateAuxiliaryHistoryGCAuthorization(
@@ -6528,6 +5979,10 @@ bool CDeterministicMNManager::UpdateAuxiliaryHistoryGCAuthorization(
     const auto mark_changed = [&]() EXCLUSIVE_LOCKS_REQUIRED(cs) {
         ++m_replay_snapshot_retention_generation;
         m_last_maintained_tip.SetNull();
+        m_auxiliary_history_maintenance_request_generation.fetch_add(
+            1, std::memory_order_acq_rel);
+        m_auxiliary_history_maintenance_retry_requested.store(
+            true, std::memory_order_release);
     };
     const auto reject = [&]() EXCLUSIVE_LOCKS_REQUIRED(cs) {
         if (m_auxiliary_history_gc_authorization) {
@@ -6548,27 +6003,11 @@ bool CDeterministicMNManager::UpdateAuxiliaryHistoryGCAuthorization(
 
     const auto& consensus{Params().GetConsensus()};
     const AuxiliaryHistoryBlockIdentity block{authorization->block};
-    const bool configured_anchor{
-        consensus.nPQChainLockAnchorHeight >= consensus.DIP0003Height &&
-        consensus.nPQChainLockAnchorHeight !=
-            std::numeric_limits<int>::max() &&
-        !consensus.hashPQChainLockAnchorBlock.IsNull()};
-    if (!configured_anchor || !block.IsValid()) return reject();
-    switch (authorization->source) {
-    case AuxiliaryHistoryGCAuthorizationSource::
-        IMMUTABLE_CHAINLOCK_ANCHOR:
-        if (block.height != consensus.nPQChainLockAnchorHeight ||
-            block.block_hash != consensus.hashPQChainLockAnchorBlock) {
-            return reject();
-        }
-        break;
-    case AuxiliaryHistoryGCAuthorizationSource::
-        ENFORCED_DURABLE_CHAINLOCK:
-        if (block.height < consensus.nPQChainLockAnchorHeight) {
-            return reject();
-        }
-        break;
-    default:
+    if (Consensus::CheckPQActivationConfiguration(consensus) !=
+            Consensus::PQActivationResult::VALID ||
+        !block.IsValid() || block.height < consensus.nPQActivationHeight ||
+        authorization->source != AuxiliaryHistoryGCAuthorizationSource::
+                                     ENFORCED_DURABLE_CHAINLOCK) {
         return reject();
     }
 
@@ -6605,6 +6044,20 @@ bool CDeterministicMNManager::UpdateAuxiliaryHistoryGCAuthorization(
 bool CDeterministicMNManager::HasPersistentWindow() const
 {
     return m_persistent_window_initialized.load(std::memory_order_relaxed);
+}
+
+bool CDeterministicMNManager::AuxiliaryHistoryMaintenanceRetryRequested()
+    const noexcept
+{
+    return m_auxiliary_history_maintenance_retry_requested.load(
+        std::memory_order_acquire);
+}
+
+uint64_t CDeterministicMNManager::
+AuxiliaryHistoryMaintenanceRequestGeneration() const noexcept
+{
+    return m_auxiliary_history_maintenance_request_generation.load(
+        std::memory_order_acquire);
 }
 bool CDeterministicMNManager::GetEvoDBStats(EvoDBStats& stats)
 {

@@ -6,6 +6,7 @@
 #include <evo/deterministicmns.h>
 
 #include <common/args.h>
+#include <hash.h> // SYSCOIN: recognize deterministic regtest stub commitments.
 #include <net.h>
 #include <netbase.h>
 #include <protocol.h>
@@ -459,21 +460,42 @@ void ClearActiveIdentity() EXCLUSIVE_LOCKS_REQUIRED(activeMasternodeInfoCs)
     activeMasternodeInfo.outpoint.SetNull();
 }
 
+// SYSCOIN BEGIN: Active PQ child-tree cache requests and regtest stubs.
 void RequestActiveChildKeyTrees(
     const llmq::pq::OperatorKeyState& operator_state)
     EXCLUSIVE_LOCKS_REQUIRED(activeMasternodeInfoCs)
 {
-    // Preparation-only functional tests commit synthetic roots because their
-    // governance/MNAUTH coverage never requests a child signature. Do not
-    // wastefully build a production tree that cannot match that test root.
-    if (gArgs.GetBoolArg("-pqoperatorcommitmentteststub", false) &&
-        Params().GetChainType() == ChainType::REGTEST &&
-        Params().MineBlocksOnDemand() &&
-        gArgs.GetBoolArg("-pqfinalitypreparation", false)) {
-        return;
-    }
     if (!activeMasternodeInfo.operatorKeyManager ||
         !operator_state.HasActiveGlobalKey()) {
+        return;
+    }
+    std::vector<llmq::pq::ChildKeyTreeCommitment> commitments;
+    commitments.reserve(1 + operator_state.frozen_child_roots.size());
+    commitments.push_back(operator_state.global_key.child_key_commitment);
+    for (const auto& frozen : operator_state.frozen_child_roots) {
+        commitments.push_back(frozen.commitment);
+    }
+    if (gArgs.GetBoolArg("-pqoperatorcommitmentteststub", false) &&
+        Params().GetChainType() == ChainType::REGTEST &&
+        Params().MineBlocksOnDemand()) {
+        commitments.erase(
+            std::remove_if(
+                commitments.begin(), commitments.end(),
+                [&](const auto& commitment) {
+                    CHashWriter writer{SER_GETHASH, 0};
+                    writer << std::string{"SYS_PQ_OPERATOR_TEST_STUB_V1"}
+                           << Params().GetConsensus().hashGenesisBlock
+                           << commitment.tree_id << commitment.generation
+                           << commitment.first_epoch << commitment.depth;
+                    return writer.GetHash() == commitment.root;
+                }),
+            commitments.end());
+    }
+    if (commitments.empty()) {
+        if (activeMasternodeInfo.childKeyCache) {
+            activeMasternodeInfo.childKeyCache->Request(
+                Params().GenesisBlock().GetHash(), {});
+        }
         return;
     }
     if (!activeMasternodeInfo.childKeyCache) {
@@ -482,15 +504,10 @@ void RequestActiveChildKeyTrees(
                 *activeMasternodeInfo.operatorKeyManager,
                 gArgs.GetDataDirNet() / "llmq/pq-child-key-trees");
     }
-    std::vector<llmq::pq::ChildKeyTreeCommitment> commitments;
-    commitments.reserve(1 + operator_state.frozen_child_roots.size());
-    commitments.push_back(operator_state.global_key.child_key_commitment);
-    for (const auto& frozen : operator_state.frozen_child_roots) {
-        commitments.push_back(frozen.commitment);
-    }
     activeMasternodeInfo.childKeyCache->Request(
         Params().GenesisBlock().GetHash(), commitments);
 }
+// SYSCOIN END: Active PQ child-tree cache requests and regtest stubs.
 
 } // namespace
 

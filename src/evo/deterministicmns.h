@@ -9,6 +9,7 @@
 #include <arith_uint256.h>
 #include <consensus/params.h>
 #include <crypto/common.h>
+#include <crypto/muhash.h> // SYSCOIN: incremental DMN state commitment.
 #include <evo/auxiliary_history_gc.h>
 #include <evo/evodb.h>
 #include <evo/pq_registry.h>
@@ -106,8 +107,11 @@ private:
     uint32_t nTotalRegisteredCount{0};
     MnMap mnMap;
     MnInternalIdMap mnInternalIdMap;
-    // Memory-only seal cache. Accepted children inherit it, so validating the
-    // next inverse link does not rescan/sort the full list in steady state.
+    // SYSCOIN: Incremental authenticated content for the inverse journal.
+    // Block identity remains outside this set so unchanged lists share O(1)
+    // content across blocks while each mutation updates one exact element.
+    MuHash3072 m_pq_legacy_content_hash;
+    // Memory-only cache for branch-local deterministic-state diagnostics.
     mutable std::optional<uint256> m_pq_legacy_state_hash;
     mutable uint256 m_pq_legacy_state_hash_genesis;
     // Memory-only mutation keys for compact inverse-journal construction.
@@ -146,6 +150,8 @@ public:
         mnMap = MnMap();
         mnUniquePropertyMap = MnUniquePropertyMap();
         mnInternalIdMap = MnInternalIdMap();
+        // SYSCOIN: Rebuild the memory-only commitment through AddMN below.
+        m_pq_legacy_content_hash = MuHash3072{};
         m_pq_legacy_state_hash.reset();
         m_tracked_changes.clear();
         s >> blockHash;
@@ -163,6 +169,8 @@ public:
         mnMap = MnMap();
         mnUniquePropertyMap = MnUniquePropertyMap();
         mnInternalIdMap = MnInternalIdMap();
+        // SYSCOIN: Clear the memory-only deterministic-state commitment.
+        m_pq_legacy_content_hash = MuHash3072{};
         m_pq_legacy_state_hash.reset();
         m_tracked_changes.clear();
         blockHash.SetNull();
@@ -245,7 +253,7 @@ public:
         return nTotalRegisteredCount;
     }
 
-    /** SYSCOIN: Stable versioned digest for migration anchors. */
+    /** SYSCOIN: Stable versioned digest for branch-local diagnostics. */
     [[nodiscard]] uint256 GetPQLegacyStateHash(const uint256& genesis_hash) const;
     [[nodiscard]] uint256 GetOrComputePQLegacyStateHash(
         const uint256& genesis_hash) const;
@@ -332,7 +340,8 @@ public:
      * Decrease penalty score of MN by 1.
      * Only allowed on non-banned MNs.
      */
-    void PoSeDecrease(const CDeterministicMN& dmn);
+    // SYSCOIN: Resolve against the current immutable-list entry by identity.
+    void PoSeDecrease(const uint256& proTxHash);
 
     void BuildDiff(const CDeterministicMNList& to, CDeterministicMNListDiff &diffRet, CDeterministicMNListNEVMAddressDiff &diffRetNEVMAddress) const;
     void BuildTrackedInverseDiff(const CDeterministicMNList& parent,
@@ -674,6 +683,7 @@ public:
             effective_pq_registry_gc_boundary;
         bool finality_verification_active{false};
         bool finality_publication_pending{false};
+        bool pre_dip3_recovery_pending{false};
         bool requirements_valid{false};
         bool finality_health_ambiguous{true};
         uint64_t generation{0};
@@ -685,6 +695,7 @@ public:
                    !replay_floor.has_value() &&
                    !finality_verification_active &&
                    !finality_publication_pending &&
+                   !pre_dip3_recovery_pending &&
                    requirements_valid &&
                    !finality_health_ambiguous;
         }
@@ -709,15 +720,6 @@ public:
         size_t added_mns{0};
         size_t updated_mns{0};
         size_t removed_mns{0};
-    };
-
-    struct InitialDMNInverseLineageStatsForTesting {
-        bool active{false};
-        int32_t boundary_height{-1};
-        int32_t cursor_height{-1};
-        uint64_t passes{0};
-        std::size_t last_decoded_bytes{0};
-        std::size_t last_decoded_records{0};
     };
 
     static constexpr int DISK_SNAPSHOT_PERIOD = 576; // once per day
@@ -747,17 +749,10 @@ public:
         64U << 20};
     static constexpr std::size_t SNAPSHOT_GC_MAX_RECORD_BYTES{256U << 20};
     static constexpr std::size_t
-        INITIAL_DMN_INVERSE_LINEAGE_MAX_RECORDS_PER_PASS{128};
-    static constexpr std::size_t
-        INITIAL_DMN_INVERSE_LINEAGE_MAX_DECODED_BYTES_PER_PASS{256U << 20};
-    static constexpr std::size_t
-        INITIAL_DMN_INVERSE_LINEAGE_MAX_RECORD_BYTES{64U << 20};
-    static constexpr std::size_t
         DMN_INVERSE_GC_MAX_SCANNED_RECORDS_PER_PASS{4096};
     static constexpr std::size_t
         DMN_INVERSE_GC_MAX_SCANNED_VALUE_BYTES_PER_PASS{256U << 20};
-    static constexpr std::size_t DMN_INVERSE_GC_MAX_RECORD_BYTES{
-        INITIAL_DMN_INVERSE_LINEAGE_MAX_RECORD_BYTES};
+    static constexpr std::size_t DMN_INVERSE_GC_MAX_RECORD_BYTES{64U << 20};
     // SYSCOIN: Exact-parent payment selection is shared by consensus,
     // templates, governance, and RPC without retaining an unbounded branch
     // history.
@@ -807,6 +802,13 @@ private:
     // Main thread has indicated we should perform cleanup up to this height
     std::atomic<int> to_cleanup {0};
     std::atomic<bool> m_persistent_window_initialized{false};
+    // SYSCOIN: Bounded auxiliary-GC batches must remain schedulable without
+    // waiting for the hourly metadata-write interval or a newer ChainLock.
+    std::atomic_bool m_auxiliary_history_maintenance_retry_requested{false};
+    // SYSCOIN: External retention/finality changes may require a new pass at
+    // the same tip; internal batch continuation is deliberately tip-throttled.
+    std::atomic<uint64_t>
+        m_auxiliary_history_maintenance_request_generation{0};
 
     const CBlockIndex* tipIndex GUARDED_BY(cs) {nullptr};
     uint256 m_last_maintained_tip GUARDED_BY(cs);
@@ -889,25 +891,6 @@ private:
     };
     std::optional<DMNInverseGCScanProgress>
         m_dmn_inverse_gc_scan_progress GUARDED_BY(cs);
-    struct InitialDMNInverseLineageProgress {
-        AuxiliaryHistoryGCAuthorization authorization;
-        AuxiliaryHistoryBlockIdentity boundary;
-        evo::AuxiliaryHistoryGCComponent component;
-        uint256 boundary_snapshot_hash;
-        AuxiliaryHistoryBlockIdentity cursor;
-        CDeterministicMNList cursor_snapshot;
-        AuxiliaryHistoryBlockIdentity legacy_anchor;
-        uint256 legacy_anchor_state_hash;
-        uint256 genesis_hash;
-        uint64_t passes{0};
-        std::size_t last_decoded_bytes{0};
-        std::size_t last_decoded_records{0};
-    };
-    std::optional<InitialDMNInverseLineageProgress>
-        m_initial_dmn_inverse_lineage_progress GUARDED_BY(cs);
-    std::size_t m_initial_dmn_inverse_lineage_byte_budget
-        GUARDED_BY(cs){
-            INITIAL_DMN_INVERSE_LINEAGE_MAX_DECODED_BYTES_PER_PASS};
     // SYSCOIN: The key includes every branch-local input not already
     // committed by the parent block hash. Miss derivation stays outside this
     // mutex; publication is double-checked.
@@ -1002,13 +985,6 @@ private:
         const EffectiveDMNInverseGCBoundary& effective,
         bool& complete)
         EXCLUSIVE_LOCKS_REQUIRED(m_evoDb->cs, !cs);
-    bool AdvanceInitialDMNInverseGCLineage(
-        const CBlockIndex* tip,
-        std::span<const CBlockIndex* const> recovery_snapshot_indexes,
-        const AuxiliaryHistoryRetentionPlan& plan,
-        const DMNInverseGCBoundary* initial,
-        bool& complete)
-        EXCLUSIVE_LOCKS_REQUIRED(m_evoDb->cs, cs);
     bool GetPQPaymentEligibleProTxHashes(
         const CBlockIndex* pindex,
         llmq::pq::PQPaymentEligibleProTxHashesPtr& eligible) const;
@@ -1172,11 +1148,16 @@ public:
     /** SYSCOIN: Bind crash-restored journal authority to a comparable tip. */
     [[nodiscard]] bool UpdatedBlockTipForStartup(
         const CBlockIndex* recovered_tip,
-        const std::function<const CBlockIndex*(const uint256&)>& lookup)
+        const std::function<const CBlockIndex*(const uint256&)>& lookup,
+        const std::optional<AuxiliaryHistoryBlockIdentity>&
+            durable_finality_target)
         EXCLUSIVE_LOCKS_REQUIRED(!cs, cs_main);
     bool GetEvoDBStats(EvoDBStats& stats) EXCLUSIVE_LOCKS_REQUIRED(!cs);
     bool HasPersistentWindow() const;
-    bool VerifyPQLegacyAnchorState(const CBlockIndex* anchor) EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    [[nodiscard]] bool AuxiliaryHistoryMaintenanceRetryRequested() const
+        noexcept;
+    [[nodiscard]] uint64_t AuxiliaryHistoryMaintenanceRequestGeneration()
+        const noexcept;
     bool VerifyPersistedPQRegistrySnapshot(const CBlockIndex* pindex);
     /** SYSCOIN: Read an existing snapshot without creating recovery state on a miss. */
     bool VerifyPersistedSnapshot(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(!cs);
@@ -1247,16 +1228,8 @@ public:
         EXCLUSIVE_LOCKS_REQUIRED(!cs);
     [[nodiscard]] bool CompleteAuxiliaryHistoryGCIntentForTesting()
         EXCLUSIVE_LOCKS_REQUIRED(!cs);
-    [[nodiscard]] bool AdvanceInitialDMNInverseGCLineageForTesting(
-        std::span<const CBlockIndex* const> recovery_snapshot_indexes = {})
-        EXCLUSIVE_LOCKS_REQUIRED(!cs);
     [[nodiscard]] uint64_t
     GetDMNInverseGCExactAuthenticationCountForTesting()
-        EXCLUSIVE_LOCKS_REQUIRED(!cs);
-    [[nodiscard]] InitialDMNInverseLineageStatsForTesting
-    GetInitialDMNInverseLineageStatsForTesting()
-        EXCLUSIVE_LOCKS_REQUIRED(!cs);
-    bool SetInitialDMNInverseLineageByteBudgetForTesting(std::size_t bytes)
         EXCLUSIVE_LOCKS_REQUIRED(!cs);
 private:
     const CDeterministicMNList GetListForBlockInternal(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(!cs);

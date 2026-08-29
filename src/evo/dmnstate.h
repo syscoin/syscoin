@@ -45,8 +45,8 @@ public:
     uint256 confirmedHashWithProRegTxHash;
 
     CKeyID keyIDOwner;
-    // SYSCOIN: retained as bytes only for historical DMN replay and the
-    // immutable migration anchor. It is never a live post-anchor auth key.
+    // SYSCOIN: retained as bytes only for historical DMN replay and branch
+    // diagnostics. It is never a live post-activation authentication key.
     CLegacyBLSPublicKey pubKeyOperator;
     CKeyID keyIDVoting;
     CService addr;
@@ -136,9 +136,9 @@ public:
         h.Finalize(confirmedHashWithProRegTxHash.begin());
     }
 
-    /** Fixed field encoding used only by the immutable migration anchor. */
+    /** SYSCOIN: Fixed field encoding for branch-local deterministic-state diagnostics. */
     template <typename Stream>
-    void SerializePQLegacyAnchorV1(Stream& stream) const
+    void SerializePQStateDiagnosticV1(Stream& stream) const
     {
         stream << static_cast<int32_t>(nVersion)
                << static_cast<int32_t>(nRegisteredHeight)

@@ -4,7 +4,7 @@
 
 #include <consensus/validation.h>
 // SYSCOIN: post-quantum operator/root lifecycle dependencies.
-#include <consensus/pq_migration.h>
+#include <consensus/pq_migration_config.h>
 #include <crypto/slhdsa/slhdsa.h>
 #include <core_io.h>
 #include <hash.h>
@@ -339,12 +339,69 @@ static UniValue protx_generate_operator_keys()
 static void EnsurePQProviderRPCActive(int current_height)
 {
     const auto& consensus = Params().GetConsensus();
-    if (Consensus::CheckPQLegacyAnchorConfiguration(consensus) !=
-            Consensus::PQAnchorResult::VALID ||
-        current_height + 1 <= consensus.nPQLegacyAnchorHeight) {
+    if (Consensus::CheckPQActivationConfiguration(consensus) !=
+            Consensus::PQActivationResult::VALID ||
+        current_height + 1 < consensus.nPQActivationHeight) {
         throw JSONRPCError(
             RPC_MISC_ERROR,
-            "Post-quantum provider RPCs require the mandatory migration anchor to be active");
+            "Post-quantum provider RPCs require PQ activation at the next block height");
+    }
+}
+
+// SYSCOIN: Provider registration follows the next block's consensus era.
+// Public pre-activation callers must still supply their legacy operator key;
+// preparation-only regtest may synthesize opaque bytes because no legacy BLS
+// operation is performed and the key exists only to build migration history.
+static void ConfigureProviderRegistrationForNextBlock(
+    CProRegTx& payload,
+    int current_height,
+    const std::string& legacy_operator_public_key)
+{
+    const auto replay{Consensus::CheckPQLegacyReplay(
+        Params().GetConsensus(), current_height + 1)};
+    if (replay == Consensus::PQLegacyReplayResult::INVALID_CONFIGURATION) {
+        throw JSONRPCError(RPC_MISC_ERROR,
+                           "Invalid post-quantum activation configuration");
+    }
+    if (replay == Consensus::PQLegacyReplayResult::RETIRED) {
+        EnsurePQProviderRPCActive(current_height);
+        if (!legacy_operator_public_key.empty()) {
+            throw JSONRPCError(
+                RPC_INVALID_PARAMETER,
+                "legacyOperatorPubKey must be empty after PQ activation");
+        }
+        payload.nVersion = CProRegTx::PQ_VERSION;
+        return;
+    }
+
+    payload.nVersion = CProRegTx::GetVersion(
+        llmq::CLLMQUtils::IsV19Active(current_height));
+    std::vector<unsigned char> encoded;
+    if (!legacy_operator_public_key.empty()) {
+        if (!IsHex(legacy_operator_public_key)) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER,
+                               "legacyOperatorPubKey must be hexadecimal");
+        }
+        encoded = ParseHex(legacy_operator_public_key);
+    } else {
+        if (Params().GetChainType() != ChainType::REGTEST ||
+            !Params().MineBlocksOnDemand() ||
+            !gArgs.GetBoolArg("-pqfinalitypreparation", false)) {
+            throw JSONRPCError(
+                RPC_INVALID_PARAMETER,
+                "legacyOperatorPubKey is required before PQ activation");
+        }
+        encoded.resize(CLegacyBLSPublicKey::SERIALIZED_SIZE);
+        GetStrongRandBytesChunked(encoded);
+        encoded.front() |= 1U;
+    }
+    if (!payload.pubKeyOperator.SetBytes(encoded) ||
+        !payload.pubKeyOperator.IsValid()) {
+        throw JSONRPCError(
+            RPC_INVALID_PARAMETER,
+            strprintf("legacyOperatorPubKey must encode exactly %u nonzero bytes",
+                      static_cast<unsigned>(
+                          CLegacyBLSPublicKey::SERIALIZED_SIZE)));
     }
 }
 
@@ -556,7 +613,7 @@ static UniValue SignAndSendSpecialTx(const node::JSONRPCRequest& request, const 
 
 
 // handles register, register_prepare and register_fund
-// SYSCOIN: PQ provider registration leaves the legacy BLS field null.
+// SYSCOIN: provider registration is serialized for the next block's era.
 static RPCHelpMan protx_register()
 {
     return RPCHelpMan{"protx_register",
@@ -571,7 +628,7 @@ static RPCHelpMan protx_register()
                     {"ownerAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "The Syscoin address to use for payee updates and proposal voting.\n"
                                         "The corresponding private key does not have to be known by your wallet.\n"
                                         "The address must be unused and must differ from the collateralAddress."},
-                    {"deprecatedOperatorPubKey", RPCArg::Type::STR, RPCArg::Optional::NO, "Must be empty. The global SLH-DSA key is registered separately with a PQ global-key transaction."},
+                    {"legacyOperatorPubKey", RPCArg::Type::STR, RPCArg::Optional::NO, "Legacy 48-byte operator public key before PQ activation; must be empty after activation. The global SLH-DSA key is registered separately."},
                     {"votingAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "The voting key address. The private key does not have to be known by your wallet.\n"
                                         "It has to match the private key which is later used when voting on proposals.\n"
                                         "If set to an empty string, ownerAddress will be used.\n"},
@@ -609,8 +666,6 @@ static RPCHelpMan protx_register()
         LOCK(cs_main);
         current_height = *pwallet->chain().getHeight();
     }
-    EnsurePQProviderRPCActive(current_height);
-    ptx.nVersion = CProRegTx::PQ_VERSION;
 
     uint256 collateralHash = ParseHashV(request.params[paramIdx], "collateralHash");
     int32_t collateralIndex = request.params[paramIdx + 1].getInt<int>();
@@ -636,10 +691,9 @@ static RPCHelpMan protx_register()
         }
 
         ptx.keyIDOwner = ParsePubKeyIDFromAddress(request.params[paramIdx + 1].get_str(), "owner address");
-        if (!request.params[paramIdx + 2].get_str().empty()) {
-            throw JSONRPCError(RPC_INVALID_PARAMETER,
-                               "deprecatedOperatorPubKey must be empty for PQ provider registration");
-        }
+        ConfigureProviderRegistrationForNextBlock(
+            ptx, current_height,
+            request.params[paramIdx + 2].get_str());
         CKeyID keyIDVoting = ptx.keyIDOwner;
         if (request.params[paramIdx + 3].get_str() != "") {
             keyIDVoting = ParsePubKeyIDFromAddress(request.params[paramIdx + 3].get_str(), "voting address");
@@ -724,7 +778,7 @@ static RPCHelpMan protx_register()
     };
 }
     
-// SYSCOIN: funded PQ provider registration leaves the legacy BLS field null.
+// SYSCOIN: funded provider registration is serialized for the next block's era.
 static RPCHelpMan protx_register_fund()
 {
         return RPCHelpMan{"protx_register_fund",
@@ -738,7 +792,7 @@ static RPCHelpMan protx_register_fund()
                     {"ownerAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "The Syscoin address to use for payee updates and proposal voting.\n"
                                         "The corresponding private key does not have to be known by your wallet.\n"
                                         "The address must be unused and must differ from the collateralAddress."},
-                    {"deprecatedOperatorPubKey", RPCArg::Type::STR, RPCArg::Optional::NO, "Must be empty. Register the global SLH-DSA key separately."},
+                    {"legacyOperatorPubKey", RPCArg::Type::STR, RPCArg::Optional::NO, "Legacy 48-byte operator public key before PQ activation; must be empty after activation. Register the global SLH-DSA key separately."},
                     {"votingAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "The voting key address. The private key does not have to be known by your wallet.\n"
                                         "It has to match the private key which is later used when voting on proposals.\n"
                                         "If set to an empty string, ownerAddress will be used.\n"},
@@ -776,8 +830,6 @@ static RPCHelpMan protx_register_fund()
         current_height = *pwallet->chain().getHeight();
     }
     CProRegTx ptx;
-    EnsurePQProviderRPCActive(current_height);
-    ptx.nVersion = CProRegTx::PQ_VERSION;
 
 
     CTxDestination collateralDest = DecodeDestination(request.params[paramIdx].get_str());
@@ -801,10 +853,9 @@ static RPCHelpMan protx_register_fund()
     }
 
     ptx.keyIDOwner = ParsePubKeyIDFromAddress(request.params[paramIdx + 1].get_str(), "owner address");
-    if (!request.params[paramIdx + 2].get_str().empty()) {
-        throw JSONRPCError(RPC_INVALID_PARAMETER,
-                           "deprecatedOperatorPubKey must be empty for PQ provider registration");
-    }
+    ConfigureProviderRegistrationForNextBlock(
+        ptx, current_height,
+        request.params[paramIdx + 2].get_str());
     CKeyID keyIDVoting = ptx.keyIDOwner;
     if (request.params[paramIdx + 3].get_str() != "") {
         keyIDVoting = ParsePubKeyIDFromAddress(request.params[paramIdx + 3].get_str(), "voting address");
@@ -864,7 +915,7 @@ static RPCHelpMan protx_register_fund()
 },
     };
 }
-// SYSCOIN: prepared PQ provider registration leaves the legacy BLS field null.
+// SYSCOIN: prepared provider registration is serialized for the next block's era.
 static RPCHelpMan protx_register_prepare()
 {
     return RPCHelpMan{"protx_register_prepare",
@@ -879,7 +930,7 @@ static RPCHelpMan protx_register_prepare()
                 {"ownerAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "The Syscoin address to use for payee updates and proposal voting.\n"
                                     "The corresponding private key does not have to be known by your wallet.\n"
                                     "The address must be unused and must differ from the collateralAddress."},
-                {"deprecatedOperatorPubKey", RPCArg::Type::STR, RPCArg::Optional::NO, "Must be empty. Register the global SLH-DSA key separately."},
+                {"legacyOperatorPubKey", RPCArg::Type::STR, RPCArg::Optional::NO, "Legacy 48-byte operator public key before PQ activation; must be empty after activation. Register the global SLH-DSA key separately."},
                 {"votingAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "The voting key address. The private key does not have to be known by your wallet.\n"
                                     "It has to match the private key which is later used when voting on proposals.\n"
                                     "If set to an empty string, ownerAddress will be used.\n"},
@@ -913,8 +964,6 @@ static RPCHelpMan protx_register_prepare()
         current_height = *pwallet->chain().getHeight();
     }
     CProRegTx ptx;
-    EnsurePQProviderRPCActive(current_height);
-    ptx.nVersion = CProRegTx::PQ_VERSION;
 
     uint256 collateralHash = ParseHashV(request.params[paramIdx], "collateralHash");
     int32_t collateralIndex = request.params[paramIdx + 1].getInt<int>();
@@ -940,10 +989,9 @@ static RPCHelpMan protx_register_prepare()
         }
 
         ptx.keyIDOwner = ParsePubKeyIDFromAddress(request.params[paramIdx + 1].get_str(), "owner address");
-        if (!request.params[paramIdx + 2].get_str().empty()) {
-            throw JSONRPCError(RPC_INVALID_PARAMETER,
-                               "deprecatedOperatorPubKey must be empty for PQ provider registration");
-        }
+        ConfigureProviderRegistrationForNextBlock(
+            ptx, current_height,
+            request.params[paramIdx + 2].get_str());
         CKeyID keyIDVoting = ptx.keyIDOwner;
         if (request.params[paramIdx + 3].get_str() != "") {
             keyIDVoting = ParsePubKeyIDFromAddress(request.params[paramIdx + 3].get_str(), "voting address");

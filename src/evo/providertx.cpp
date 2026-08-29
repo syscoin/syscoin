@@ -6,7 +6,7 @@
 #include <evo/pq_registry.h>
 #include <evo/providertx.h>
 #include <evo/specialtx.h>
-#include <consensus/pq_migration.h>
+#include <consensus/pq_migration_config.h>
 #include <llmq/pq_global_auth.h>
 #include <llmq/quorums_utils.h>
 

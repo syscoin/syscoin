@@ -87,28 +87,16 @@ struct PQRegistryConfig {
                            const PQRegistryConfig&) = default;
 };
 
-/** Immutable trust root for pruning the fixed pre-activation PQ history. */
-struct PQRegistryGCRootConfig {
-    uint256 configuration_id;
-    evo::AuxiliaryHistoryGCBlockIdentity legacy_anchor;
-    uint256 legacy_anchor_state_root;
-
-    [[nodiscard]] bool IsValid(
-        const PQRegistryConfig& registry) const noexcept;
-    friend bool operator==(const PQRegistryGCRootConfig&,
-                           const PQRegistryGCRootConfig&) = default;
-};
-
 /**
- * Caller-provided active-chain identities for the two bounded authenticated
- * replay ranges. The registry independently exact-reads and validates every
- * named record; database predecessor links never select a trusted branch.
+ * Caller-provided active-chain identities for one bounded authenticated
+ * checkpoint interval. The registry independently exact-reads and validates
+ * every named record; database predecessor links never select a trusted
+ * branch.
  */
 struct PQRegistryGCAuthenticationContext {
     static constexpr std::size_t MAX_PATH_RECORDS{
         PQ_REGISTRY_CHECKPOINT_INTERVAL + 1};
 
-    std::vector<evo::AuxiliaryHistoryGCBlockIdentity> legacy_island;
     std::vector<evo::AuxiliaryHistoryGCBlockIdentity> rooted_segment;
 
     [[nodiscard]] bool IsStructurallyValid() const noexcept;
@@ -461,7 +449,8 @@ private:
 
     const uint256 m_genesis_hash;
     const PQRegistryConfig m_config;
-    const std::optional<PQRegistryGCRootConfig> m_gc_root_config;
+    /** Generic journal deployment binding; null disables destructive GC. */
+    const uint256 m_gc_configuration_id;
     const std::shared_ptr<const uint8_t> m_incarnation{
         std::make_shared<const uint8_t>(0)};
     mutable Mutex m_mutex;
@@ -505,7 +494,6 @@ private:
         uint256 checkpoint_record_hash;
         uint256 lineage_base_commitment;
         uint256 rooted_lineage_commitment;
-        uint256 legacy_island_commitment;
         std::vector<evo::AuxiliaryHistoryGCBlockIdentity>
             protected_records;
     };
@@ -550,8 +538,7 @@ private:
         const evo::PQRegistryGCClosure* previous,
         GCAuthenticationResult& result,
         PQRegistryError& error,
-        bool derive_initial_base = false,
-        bool verify_island_only = false) const
+        bool derive_initial_base = false) const
         EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
     [[nodiscard]] bool BuildGCFloorClosureLocked(
         uint64_t generation,
@@ -562,6 +549,7 @@ private:
         PQRegistryError& error) const EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
     [[nodiscard]] bool BuildGCFloorClosureFromAuthenticatedLocked(
         uint64_t generation,
+        uint8_t scan_state,
         std::optional<uint256> scan_after_key,
         const GCAuthenticationResult& authenticated,
         evo::PQRegistryGCClosure& closure,
@@ -612,19 +600,13 @@ public:
     PQRegistryManager(const DBParams& db_params,
                       const uint256& genesis_hash,
                       const PQRegistryConfig& config,
-                      std::optional<PQRegistryGCRootConfig> gc_root_config =
-                          std::nullopt);
+                      const uint256& gc_configuration_id = {});
 
     [[nodiscard]] const PQRegistryConfig& GetConfig() const noexcept
     {
         return m_config;
     }
     [[nodiscard]] bool IsEnabled() const noexcept;
-
-    /** Reauthenticate the permanently retained Q..A migration island. */
-    [[nodiscard]] bool VerifyGCLegacyIsland(
-        std::span<const evo::AuxiliaryHistoryGCBlockIdentity> island,
-        PQRegistryError& error) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /** Construct the only closure accepted for the supplied exact paths. */
     [[nodiscard]] bool BuildGCFloorClosure(

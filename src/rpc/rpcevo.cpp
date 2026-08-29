@@ -227,20 +227,22 @@ static RPCHelpMan protx_operator_key_info()
         }};
 }
 
+// SYSCOIN BEGIN: Branch-local deterministic-state diagnostic RPC.
 static RPCHelpMan protx_migration_info()
 {
     return RPCHelpMan{
         "protx_migration_info",
-        "\nReturns the exact block and consensus-state commitments needed to "
-        "pin a post-quantum migration anchor.\n",
+        "\nReturns branch-local deterministic-masternode and PQ-registry "
+        "state diagnostics for the active tip. These values are not a "
+        "consensus checkpoint.\n",
         {},
         RPCResult{
             RPCResult::Type::OBJ,
             "",
-            "Canonical migration-anchor data for the active tip.",
+            "Branch-local state diagnostics for the active tip.",
             {
-                {RPCResult::Type::NUM, "height", "Anchor block height"},
-                {RPCResult::Type::STR_HEX, "blockHash", "Anchor block hash"},
+                {RPCResult::Type::NUM, "height", "Active-tip block height"},
+                {RPCResult::Type::STR_HEX, "blockHash", "Active-tip block hash"},
                 {RPCResult::Type::STR_HEX, "dmnStateHash", "Deterministic-masternode state commitment"},
                 {RPCResult::Type::STR_HEX, "pqRegistryStateHash", "PQ operator-key registry state commitment"},
             }},
@@ -253,8 +255,8 @@ static RPCHelpMan protx_migration_info()
 
             CDeterministicMNList mn_list;
             llmq::pq::PQRegistrySnapshot pq_snapshot;
-            int anchor_height{-1};
-            uint256 anchor_block_hash;
+            int tip_height{-1};
+            uint256 tip_block_hash;
             {
                 LOCK(cs_main);
                 const CBlockIndex* tip = node.chainman->ActiveChain().Tip();
@@ -262,10 +264,10 @@ static RPCHelpMan protx_migration_info()
                     tip->nHeight < Params().GetConsensus().DIP0003Height) {
                     throw JSONRPCError(
                         RPC_MISC_ERROR,
-                        "DIP3 must be active before deriving a migration anchor");
+                        "DIP3 must be active before deriving masternode state diagnostics");
                 }
-                anchor_height = tip->nHeight;
-                anchor_block_hash = tip->GetBlockHash();
+                tip_height = tip->nHeight;
+                tip_block_hash = tip->GetBlockHash();
                 mn_list = deterministicMNManager->GetListForBlock(tip);
 
                 llmq::pq::PQRegistryConfig config;
@@ -297,14 +299,15 @@ static RPCHelpMan protx_migration_info()
             }
 
             UniValue result{UniValue::VOBJ};
-            result.pushKV("height", anchor_height);
-            result.pushKV("blockHash", anchor_block_hash.GetHex());
+            result.pushKV("height", tip_height);
+            result.pushKV("blockHash", tip_block_hash.GetHex());
             result.pushKV("dmnStateHash",
                           mn_list.GetPQLegacyStateHash(genesis_hash).GetHex());
             result.pushKV("pqRegistryStateHash", pq_root->GetHex());
             return result;
         }};
 }
+// SYSCOIN END: Branch-local deterministic-state diagnostic RPC.
 
 void RegisterEvoRPCCommands(CRPCTable &t)
 {

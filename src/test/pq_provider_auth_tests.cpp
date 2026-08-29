@@ -47,10 +47,7 @@ class PostPQProviderAuthSetup : public BasicTestingSetup
 {
 private:
     Consensus::Params& m_consensus;
-    const int m_old_anchor_height;
-    const uint256 m_old_anchor_block;
-    const uint256 m_old_anchor_dmn_state;
-    const uint256 m_old_anchor_registry_state;
+    const int m_old_activation_height;
     const int m_old_preparation_height;
     const int m_old_epoch_origin;
     const uint32_t m_old_registration_cutoff;
@@ -58,7 +55,7 @@ private:
     std::unique_ptr<CDeterministicMNManager> m_previous_manager;
 
 public:
-    static constexpr int ANCHOR_HEIGHT{1000};
+    static constexpr int ACTIVATION_HEIGHT{1000};
 
     const uint256 pro_tx_hash{NonNullHash(1)};
     const uint256 parent_hash{NonNullHash(2)};
@@ -70,28 +67,22 @@ public:
     PostPQProviderAuthSetup()
         : BasicTestingSetup{ChainType::REGTEST},
           m_consensus{const_cast<Consensus::Params&>(Params().GetConsensus())},
-          m_old_anchor_height{m_consensus.nPQLegacyAnchorHeight},
-          m_old_anchor_block{m_consensus.hashPQLegacyAnchorBlock},
-          m_old_anchor_dmn_state{m_consensus.hashPQLegacyMNState},
-          m_old_anchor_registry_state{m_consensus.hashPQLegacyPQRegistryState},
+          m_old_activation_height{m_consensus.nPQActivationHeight},
           m_old_preparation_height{m_consensus.nPQPreparationHeight},
           m_old_epoch_origin{m_consensus.nPQChainLockEpochOrigin},
           m_old_registration_cutoff{m_consensus.nPQRegistrationCutoffBlocks},
           m_old_future_horizon{m_consensus.nPQFutureHorizonEpochs},
           m_previous_manager{std::move(deterministicMNManager)}
     {
-        m_consensus.nPQLegacyAnchorHeight = ANCHOR_HEIGHT;
-        m_consensus.hashPQLegacyAnchorBlock = parent_hash;
-        m_consensus.hashPQLegacyMNState = NonNullHash(3);
-        m_consensus.hashPQLegacyPQRegistryState = NonNullHash(4);
-        m_consensus.nPQPreparationHeight = ANCHOR_HEIGHT;
+        m_consensus.nPQActivationHeight = ACTIVATION_HEIGHT;
+        m_consensus.nPQPreparationHeight = ACTIVATION_HEIGHT - 1;
         m_consensus.nPQChainLockEpochOrigin = 1440;
         m_consensus.nPQRegistrationCutoffBlocks = 144;
         m_consensus.nPQFutureHorizonEpochs = 8;
 
-        previous_index.nHeight = ANCHOR_HEIGHT - 1;
+        previous_index.nHeight = ACTIVATION_HEIGHT - 2;
         previous_index.phashBlock = &previous_hash;
-        parent_index.nHeight = ANCHOR_HEIGHT;
+        parent_index.nHeight = ACTIVATION_HEIGHT - 1;
         parent_index.pprev = &previous_index;
         parent_index.phashBlock = &parent_hash;
 
@@ -108,14 +99,15 @@ public:
         deterministicMNManager =
             std::make_unique<CDeterministicMNManager>(db_params);
 
-        CDeterministicMNList parent_list{parent_hash, ANCHOR_HEIGHT, 1};
+        CDeterministicMNList parent_list{
+            parent_hash, ACTIVATION_HEIGHT - 1, 1};
         auto member = std::make_shared<CDeterministicMN>(0);
         member->proTxHash = pro_tx_hash;
         member->collateralOutpoint = COutPoint{NonNullHash(5), 0};
         auto state = std::make_shared<CDeterministicMNState>();
         state->nVersion = CProRegTx::PQ_VERSION;
-        state->nRegisteredHeight = ANCHOR_HEIGHT - 100;
-        state->nCollateralHeight = ANCHOR_HEIGHT - 200;
+        state->nRegisteredHeight = ACTIVATION_HEIGHT - 100;
+        state->nCollateralHeight = ACTIVATION_HEIGHT - 200;
         state->keyIDOwner = NonNullKeyID(1);
         state->keyIDVoting = NonNullKeyID(2);
         member->pdmnState = std::move(state);
@@ -128,11 +120,7 @@ public:
     {
         deterministicMNManager.reset();
         deterministicMNManager = std::move(m_previous_manager);
-        m_consensus.nPQLegacyAnchorHeight = m_old_anchor_height;
-        m_consensus.hashPQLegacyAnchorBlock = m_old_anchor_block;
-        m_consensus.hashPQLegacyMNState = m_old_anchor_dmn_state;
-        m_consensus.hashPQLegacyPQRegistryState =
-            m_old_anchor_registry_state;
+        m_consensus.nPQActivationHeight = m_old_activation_height;
         m_consensus.nPQPreparationHeight = m_old_preparation_height;
         m_consensus.nPQChainLockEpochOrigin = m_old_epoch_origin;
         m_consensus.nPQRegistrationCutoffBlocks =
@@ -140,12 +128,9 @@ public:
         m_consensus.nPQFutureHorizonEpochs = m_old_future_horizon;
     }
 
-    void UseDisabledLegacyReplay()
+    void UseDisabledPQActivation()
     {
-        m_consensus.nPQLegacyAnchorHeight = std::numeric_limits<int>::max();
-        m_consensus.hashPQLegacyAnchorBlock.SetNull();
-        m_consensus.hashPQLegacyMNState.SetNull();
-        m_consensus.hashPQLegacyPQRegistryState.SetNull();
+        m_consensus.nPQActivationHeight = std::numeric_limits<int>::max();
     }
 
     CTransaction ServiceMutation() const
@@ -227,9 +212,9 @@ public:
 
 BOOST_FIXTURE_TEST_SUITE(pq_provider_auth_tests, PostPQProviderAuthSetup)
 
-BOOST_AUTO_TEST_CASE(disabled_anchor_replays_legacy_provider_versions)
+BOOST_AUTO_TEST_CASE(disabled_activation_replays_legacy_provider_versions)
 {
-    UseDisabledLegacyReplay();
+    UseDisabledPQActivation();
     const CTransaction service{LegacyServiceMutation()};
     const CTransaction revoke{LegacyRevokeMutation()};
 

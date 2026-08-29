@@ -4,7 +4,7 @@
 
 #include <evo/pq_registry.h>
 
-#include <consensus/pq_migration.h>
+#include <consensus/pq_migration_config.h>
 #include <evo/provider_revoke_payload.h>
 #include <evo/specialtx_payload.h>
 #include <hash.h>
@@ -50,8 +50,6 @@ struct PQRegistrySnapshotView {
 
 namespace {
 
-inline constexpr std::string_view PQ_GC_LEGACY_ISLAND_DOMAIN{
-    "SYS_PQ_GC_LEGACY_ISLAND_V1"};
 inline constexpr std::string_view PQ_GC_LINEAGE_BASE_DOMAIN{
     "SYS_PQ_GC_LINEAGE_BASE_V1"};
 inline constexpr std::string_view PQ_GC_ROOTED_SEGMENT_DOMAIN{
@@ -90,6 +88,80 @@ bool SetError(
     error.pro_tx_hash = pro_tx_hash;
     error.state_result = state_result;
     return false;
+}
+
+struct PQRegistryGCSweepTransition {
+    std::optional<uint256> from_cursor;
+    bool dirty{false};
+};
+
+std::optional<PQRegistryGCSweepTransition> DeriveGCSweepTransition(
+    const evo::PQRegistryGCClosure* previous,
+    const evo::AuxiliaryHistoryGCBlockIdentity& checkpoint) noexcept
+{
+    if (previous == nullptr) return PQRegistryGCSweepTransition{};
+    if (!previous->IsValid() || !checkpoint.IsValid()) return std::nullopt;
+
+    const int64_t height_delta{
+        static_cast<int64_t>(checkpoint.height) -
+        previous->checkpoint.height};
+    const bool advances_checkpoint{
+        height_delta == PQ_REGISTRY_CHECKPOINT_INTERVAL};
+    if ((height_delta != 0 && !advances_checkpoint) ||
+        (height_delta == 0 &&
+         previous->scan_complete == evo::PQRegistryGCClosure::COMPLETE)) {
+        return std::nullopt;
+    }
+
+    PQRegistryGCSweepTransition transition;
+    if (previous->HasScanCursor()) {
+        transition.from_cursor = previous->scan_after_key;
+        transition.dirty = previous->ScanIsDirty() || advances_checkpoint;
+    }
+    return transition;
+}
+
+uint8_t PQRegistryGCSweepState(bool dirty, bool reached_eof) noexcept
+{
+    return static_cast<uint8_t>(
+        (dirty ? evo::PQRegistryGCClosure::SCANNING_DIRTY : 0) |
+        (reached_eof ? evo::PQRegistryGCClosure::COMPLETE : 0));
+}
+
+bool ValidateGCSweepStateTransition(
+    const evo::PQRegistryGCClosure* previous,
+    const evo::AuxiliaryHistoryGCBlockIdentity& checkpoint,
+    uint8_t target_state,
+    const std::optional<uint256>& target_cursor,
+    PQRegistryGCSweepTransition* derived = nullptr) noexcept
+{
+    const auto transition{
+        DeriveGCSweepTransition(previous, checkpoint)};
+    const bool target_has_cursor{
+        (target_state & evo::PQRegistryGCClosure::COMPLETE) == 0};
+    const bool target_is_dirty{
+        (target_state & evo::PQRegistryGCClosure::SCANNING_DIRTY) != 0};
+    if (!transition ||
+        target_state > evo::PQRegistryGCClosure::RESTART_REQUIRED ||
+        target_has_cursor != target_cursor.has_value() ||
+        (target_cursor && target_cursor->IsNull()) ||
+        target_is_dirty != transition->dirty ||
+        (target_has_cursor && transition->from_cursor &&
+         !(*transition->from_cursor < *target_cursor))) {
+        return false;
+    }
+    if (derived != nullptr) *derived = *transition;
+    return true;
+}
+
+bool ValidateGCSweepClosureTransition(
+    const evo::PQRegistryGCClosure* previous,
+    const evo::PQRegistryGCClosure& target,
+    PQRegistryGCSweepTransition* derived = nullptr) noexcept
+{
+    return target.IsValid() && ValidateGCSweepStateTransition(
+        previous, target.checkpoint, target.scan_complete,
+        target.scan_after_key, derived);
 }
 
 template <typename Records>
@@ -1064,25 +1136,6 @@ bool PQRegistryConfig::IsValid() const noexcept
            preparation_view->last_admissible_epoch >= ACTIVE_QUORUMS - 1;
 }
 
-bool PQRegistryGCRootConfig::IsValid(
-    const PQRegistryConfig& registry) const noexcept
-{
-    if (!registry.IsValid() || configuration_id.IsNull() ||
-        !legacy_anchor.IsValid() || legacy_anchor_state_root.IsNull() ||
-        legacy_anchor.height < registry.preparation_height) {
-        return false;
-    }
-    const int64_t anchor_delta{
-        static_cast<int64_t>(legacy_anchor.height) -
-        registry.preparation_height};
-    const int64_t base_height{
-        static_cast<int64_t>(registry.preparation_height) +
-        anchor_delta / PQ_REGISTRY_CHECKPOINT_INTERVAL *
-            PQ_REGISTRY_CHECKPOINT_INTERVAL};
-    return base_height <= std::numeric_limits<int32_t>::max() -
-                              PQ_REGISTRY_CHECKPOINT_INTERVAL;
-}
-
 bool PQRegistryGCAuthenticationContext::IsStructurallyValid() const noexcept
 {
     const auto valid_path = [](const auto& path) {
@@ -1097,7 +1150,7 @@ bool PQRegistryGCAuthenticationContext::IsStructurallyValid() const noexcept
         }
         return true;
     };
-    return valid_path(legacy_island) && valid_path(rooted_segment);
+    return valid_path(rooted_segment);
 }
 
 PQRegistryDeploymentResult GetPQRegistryConfig(
@@ -1111,17 +1164,17 @@ PQRegistryDeploymentResult GetPQRegistryConfig(
         params.nPQRegistrationCutoffBlocks == 0 &&
         params.nPQFutureHorizonEpochs == 0};
     if (disabled) return PQRegistryDeploymentResult::DISABLED;
-    const auto anchor_configuration{
-        Consensus::CheckPQLegacyAnchorConfiguration(params)};
+    const auto activation_configuration{
+        Consensus::CheckPQActivationConfiguration(params)};
     if (params.nPQPreparationHeight < params.DIP0003Height ||
         params.nPQPreparationHeight == std::numeric_limits<int>::max() ||
         params.nPQChainLockEpochOrigin == std::numeric_limits<int>::max() ||
         params.nPQRegistrationCutoffBlocks == 0 ||
         params.nPQFutureHorizonEpochs == 0 ||
-        anchor_configuration ==
-            Consensus::PQAnchorResult::INVALID_CONFIGURATION ||
-        (anchor_configuration == Consensus::PQAnchorResult::VALID &&
-         params.nPQPreparationHeight > params.nPQLegacyAnchorHeight)) {
+        activation_configuration ==
+            Consensus::PQActivationResult::INVALID_CONFIGURATION ||
+        (activation_configuration == Consensus::PQActivationResult::VALID &&
+         params.nPQPreparationHeight >= params.nPQActivationHeight)) {
         return PQRegistryDeploymentResult::INVALID_CONFIGURATION;
     }
     const auto schedule{
@@ -1379,11 +1432,10 @@ const PQRegistryMempoolOperatorState* PQRegistryMempoolView::FindOperator(
 PQRegistryManager::PQRegistryManager(const DBParams& db_params,
                                      const uint256& genesis_hash,
                                      const PQRegistryConfig& config,
-                                     std::optional<PQRegistryGCRootConfig>
-                                         gc_root_config)
+                                     const uint256& gc_configuration_id)
     : m_genesis_hash(genesis_hash),
       m_config(config),
-      m_gc_root_config(std::move(gc_root_config)),
+      m_gc_configuration_id(gc_configuration_id),
       m_snapshot_db(std::make_unique<CEvoDB<
           uint256, PQRegistryDiskSnapshot, StaticSaltedHasher>>(
           RegistryDBParams(db_params, "snapshots"),
@@ -1493,62 +1545,43 @@ bool PQRegistryManager::AuthenticateGCContext(
     const evo::PQRegistryGCClosure* previous,
     GCAuthenticationResult& result,
     PQRegistryError& error,
-    bool derive_initial_base,
-    bool verify_island_only) const
+    bool derive_initial_base) const
 {
     if (m_gc_context_authentications !=
         std::numeric_limits<uint64_t>::max()) {
         ++m_gc_context_authentications;
     }
     result = {};
-    if (!m_gc_root_config ||
-        !m_gc_root_config->IsValid(m_config) ||
+    if (!IsEnabled() || m_gc_configuration_id.IsNull() ||
         !context.IsStructurallyValid() ||
         (claimed_lineage_base.IsNull() && !derive_initial_base)) {
         return SetError(error, PQRegistryResult::INVALID_CONFIGURATION);
     }
 
-    const auto& root_config{*m_gc_root_config};
-    const int64_t anchor_delta{
-        static_cast<int64_t>(root_config.legacy_anchor.height) -
-        m_config.preparation_height};
-    const int32_t island_base_height{static_cast<int32_t>(
+    const int64_t initial_checkpoint_height{
         static_cast<int64_t>(m_config.preparation_height) +
-        anchor_delta / PQ_REGISTRY_CHECKPOINT_INTERVAL *
-            PQ_REGISTRY_CHECKPOINT_INTERVAL)};
-    const int32_t initial_checkpoint_height{
-        island_base_height + PQ_REGISTRY_CHECKPOINT_INTERVAL};
-    const auto& island{context.legacy_island};
+        PQ_REGISTRY_CHECKPOINT_INTERVAL};
     const auto& segment{context.rooted_segment};
     const auto& target_identity{segment.back()};
     const int64_t target_delta{
         static_cast<int64_t>(target_identity.height) -
         initial_checkpoint_height};
-    if (island.front().height != island_base_height ||
-        island.back() != root_config.legacy_anchor ||
-        island.size() != static_cast<std::size_t>(
-            root_config.legacy_anchor.height - island_base_height + 1)) {
-        return SetError(error, PQRegistryResult::FLOOR_CONFLICT);
-    }
-    const bool initial{!verify_island_only &&
-        target_identity.height == initial_checkpoint_height};
-    if (!verify_island_only &&
-        (target_delta < 0 ||
-         target_delta % PQ_REGISTRY_CHECKPOINT_INTERVAL != 0 ||
-         !IsRegistryCheckpoint(m_config, target_identity.height))) {
+    const bool initial{target_delta == 0};
+    if (target_delta < 0 ||
+        target_delta % PQ_REGISTRY_CHECKPOINT_INTERVAL != 0 ||
+        !IsRegistryCheckpoint(m_config, target_identity.height)) {
         return SetError(error, PQRegistryResult::FLOOR_CONFLICT);
     }
     if (derive_initial_base && !initial) {
         return SetError(error, PQRegistryResult::FLOOR_CONFLICT);
     }
-    const int32_t expected_segment_base{initial
-        ? root_config.legacy_anchor.height
-        : target_identity.height - PQ_REGISTRY_CHECKPOINT_INTERVAL};
-    if (!verify_island_only &&
-        (segment.front().height != expected_segment_base ||
+    const int64_t expected_segment_base{
+        static_cast<int64_t>(target_identity.height) -
+        PQ_REGISTRY_CHECKPOINT_INTERVAL};
+    if (segment.front().height != expected_segment_base ||
         segment.size() != static_cast<std::size_t>(
-            target_identity.height - expected_segment_base + 1) ||
-         (initial && segment.front() != root_config.legacy_anchor))) {
+            PQ_REGISTRY_CHECKPOINT_INTERVAL + 1) ||
+        !IsRegistryCheckpoint(m_config, segment.front().height)) {
         return SetError(error, PQRegistryResult::FLOOR_CONFLICT);
     }
 
@@ -1722,108 +1755,43 @@ bool PQRegistryManager::AuthenticateGCContext(
     };
     const auto replay_path = [&]
         (std::span<const evo::AuxiliaryHistoryGCBlockIdentity> path,
-         ReplayState& replay, bool has_authenticated_base) {
-        std::size_t first{0};
-        if (has_authenticated_base) {
-            if (path.front() != replay.identity) {
-                return SetError(error, PQRegistryResult::FLOOR_CONFLICT);
-            }
-            PQRegistryDiskSnapshot disk;
-            if (!read_exact(path.front(), disk) ||
-                disk.consensus_state_root != replay.state_root) {
-                if (error.result == PQRegistryResult::OK) {
-                    SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
-                }
-                return false;
-            }
-            replay.records = {{path.front(), disk.consensus_state_root,
-                               ::SerializeHash(disk)}};
-            first = 1;
-        } else if (!authenticate_checkpoint(path.front(), replay)) {
+         ReplayState& replay) {
+        if (!authenticate_checkpoint(path.front(), replay)) {
             return false;
-        } else {
-            first = 1;
         }
-        for (std::size_t i{first}; i < path.size(); ++i) {
+        for (std::size_t i{1}; i < path.size(); ++i) {
             if (!replay_descendant(path[i], replay)) return false;
         }
         return true;
     };
 
-    ReplayState island_replay;
-    if (!replay_path(island, island_replay,
-                     /*has_authenticated_base=*/false) ||
-        island_replay.identity != root_config.legacy_anchor ||
-        island_replay.state_root !=
-            root_config.legacy_anchor_state_root) {
-        if (error.result == PQRegistryResult::OK) {
-            SetError(error, PQRegistryResult::FLOOR_CONFLICT);
-        }
-        return false;
-    }
-
-    CHashWriter island_writer{SER_GETHASH, 0};
-    island_writer.write(AsBytes(Span{
-        PQ_GC_LEGACY_ISLAND_DOMAIN.data(),
-        PQ_GC_LEGACY_ISLAND_DOMAIN.size()}));
-    island_writer << root_config.configuration_id << m_genesis_hash
-                  << evo::PQRegistryGCClosure::FORMAT_GUARD
-                  << evo::PQRegistryGCClosure::VERSION
-                  << evo::PQRegistryGCClosure::LINEAGE_PROFILE_VERSION
-                  << PQ_REGISTRY_DISK_VERSION
-                  << static_cast<int32_t>(PQ_REGISTRY_CHECKPOINT_INTERVAL)
-                  << island.front() << root_config.legacy_anchor
-                  << root_config.legacy_anchor_state_root
-                  << static_cast<uint32_t>(island_replay.records.size());
-    for (const auto& record : island_replay.records) {
-        island_writer << record.identity << record.state_root
-                      << record.record_hash;
-    }
-    result.legacy_island_commitment = island_writer.GetHash();
-    if (result.legacy_island_commitment.IsNull()) {
-        return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
-    }
-    if (previous != nullptr &&
-        previous->legacy_island_commitment !=
-            result.legacy_island_commitment) {
-        return SetError(error, PQRegistryResult::FLOOR_CONFLICT);
-    }
-    if (verify_island_only) {
-        result.checkpoint = root_config.legacy_anchor;
-        result.checkpoint_state_root = island_replay.state_root;
-        result.checkpoint_record_hash =
-            island_replay.records.back().record_hash;
-        result.protected_records.assign(island.begin(), island.end());
-        return true;
-    }
-
     ReplayState segment_replay;
+    if (!replay_path(segment, segment_replay)) return false;
     if (initial) {
-        segment_replay = island_replay;
-        if (!replay_path(segment, segment_replay,
-                         /*has_authenticated_base=*/true)) {
-            return false;
-        }
         CHashWriter base_writer{SER_GETHASH, 0};
         base_writer.write(AsBytes(Span{
             PQ_GC_LINEAGE_BASE_DOMAIN.data(),
             PQ_GC_LINEAGE_BASE_DOMAIN.size()}));
-        base_writer << root_config.configuration_id << m_genesis_hash
+        base_writer << m_gc_configuration_id << m_genesis_hash
                     << evo::PQRegistryGCClosure::FORMAT_GUARD
                     << evo::PQRegistryGCClosure::VERSION
                     << evo::PQRegistryGCClosure::LINEAGE_PROFILE_VERSION
                     << PQ_REGISTRY_DISK_VERSION
                     << static_cast<int32_t>(
                            PQ_REGISTRY_CHECKPOINT_INTERVAL)
-                    << root_config.legacy_anchor
-                    << root_config.legacy_anchor_state_root
-                    << result.legacy_island_commitment;
+                    << m_config.preparation_height
+                    << m_config.schedule.epoch_origin
+                    << m_config.schedule.epoch_blocks
+                    << m_config.schedule.chainlock_period
+                    << m_config.schedule.sign_lag
+                    << m_config.schedule.active_epochs
+                    << m_config.registration_cutoff_blocks
+                    << m_config.future_horizon_epochs
+                    << segment_replay.records.front().identity
+                    << segment_replay.records.front().state_root
+                    << segment_replay.records.front().record_hash;
         result.lineage_base_commitment = base_writer.GetHash();
     } else {
-        if (!replay_path(segment, segment_replay,
-                         /*has_authenticated_base=*/false)) {
-            return false;
-        }
         result.lineage_base_commitment = claimed_lineage_base;
         if (previous != nullptr) {
             const bool same_checkpoint{
@@ -1852,7 +1820,7 @@ bool PQRegistryManager::AuthenticateGCContext(
     rooted_writer.write(AsBytes(Span{
         PQ_GC_ROOTED_SEGMENT_DOMAIN.data(),
         PQ_GC_ROOTED_SEGMENT_DOMAIN.size()}));
-    rooted_writer << root_config.configuration_id << m_genesis_hash
+    rooted_writer << m_gc_configuration_id << m_genesis_hash
                   << evo::PQRegistryGCClosure::FORMAT_GUARD
                   << evo::PQRegistryGCClosure::VERSION
                   << evo::PQRegistryGCClosure::LINEAGE_PROFILE_VERSION
@@ -1870,9 +1838,7 @@ bool PQRegistryManager::AuthenticateGCContext(
     }
     if (previous != nullptr &&
         previous->checkpoint == target_identity &&
-        (previous->legacy_island_commitment !=
-             result.legacy_island_commitment ||
-         previous->lineage_base_commitment !=
+        (previous->lineage_base_commitment !=
              result.lineage_base_commitment ||
          previous->rooted_lineage_commitment !=
              result.rooted_lineage_commitment)) {
@@ -1883,11 +1849,10 @@ bool PQRegistryManager::AuthenticateGCContext(
     result.checkpoint_state_root = segment_replay.state_root;
     result.checkpoint_record_hash =
         segment_replay.records.back().record_hash;
-    result.protected_records.reserve(
-        island.size() + segment.size());
+    result.protected_records.reserve(segment.size());
     std::unordered_map<uint256, int32_t, StaticSaltedHasher>
         protected_index;
-    protected_index.reserve(island.size() + segment.size());
+    protected_index.reserve(segment.size());
     const auto append_protected = [&](const auto& identities) {
         for (const auto& identity : identities) {
             const auto [position, inserted]{protected_index.emplace(
@@ -1899,29 +1864,10 @@ bool PQRegistryManager::AuthenticateGCContext(
         }
         return true;
     };
-    if (!append_protected(island) || !append_protected(segment)) {
+    if (!append_protected(segment)) {
         return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
     }
     return true;
-}
-
-bool PQRegistryManager::VerifyGCLegacyIsland(
-    std::span<const evo::AuxiliaryHistoryGCBlockIdentity> island,
-    PQRegistryError& error) const
-{
-    error.Clear();
-    if (island.empty()) {
-        return SetError(error, PQRegistryResult::INVALID_CONFIGURATION);
-    }
-    PQRegistryGCAuthenticationContext context;
-    context.legacy_island.assign(island.begin(), island.end());
-    context.rooted_segment.push_back(island.back());
-    GCAuthenticationResult authenticated;
-    LOCK(m_mutex);
-    return AuthenticateGCContext(
-        context, uint256::ONEV, nullptr, authenticated, error,
-        /*derive_initial_base=*/false,
-        /*verify_island_only=*/true);
 }
 
 bool PQRegistryManager::BuildGCFloorClosure(
@@ -1948,8 +1894,7 @@ bool PQRegistryManager::BuildGCFloorClosureLocked(
     PQRegistryError& error) const
 {
     closure = {};
-    if (!m_gc_root_config ||
-        !m_gc_root_config->IsValid(m_config) ||
+    if (!IsEnabled() || m_gc_configuration_id.IsNull() ||
         !context.IsStructurallyValid() || generation == 0 ||
         (scan_after_key && scan_after_key->IsNull())) {
         return SetError(error, PQRegistryResult::INVALID_CONFIGURATION);
@@ -1964,29 +1909,15 @@ bool PQRegistryManager::BuildGCFloorClosureLocked(
             generation != previous->generation + 1) {
             return SetError(error, PQRegistryResult::FLOOR_CONFLICT);
         }
-        const bool same_checkpoint{
-            previous->checkpoint == context.rooted_segment.back()};
-        if (same_checkpoint) {
-            const bool cursor_advances{
-                previous->scan_complete ==
-                    evo::PQRegistryGCClosure::SCANNING &&
-                ((!scan_after_key) ||
-                 (previous->scan_after_key &&
-                  *previous->scan_after_key < *scan_after_key))};
-            if (!cursor_advances) {
-                return SetError(error, PQRegistryResult::FLOOR_CONFLICT);
-            }
-        } else {
-            const int64_t height_delta{
-                static_cast<int64_t>(
-                    context.rooted_segment.back().height) -
-                previous->checkpoint.height};
-            if (previous->scan_complete !=
-                    evo::PQRegistryGCClosure::COMPLETE ||
-                height_delta != PQ_REGISTRY_CHECKPOINT_INTERVAL) {
-                return SetError(error, PQRegistryResult::FLOOR_CONFLICT);
-            }
-        }
+    }
+
+    const uint8_t scan_state{scan_after_key
+        ? evo::PQRegistryGCClosure::SCANNING
+        : evo::PQRegistryGCClosure::COMPLETE};
+    if (!ValidateGCSweepStateTransition(
+            previous, context.rooted_segment.back(), scan_state,
+            scan_after_key)) {
+        return SetError(error, PQRegistryResult::FLOOR_CONFLICT);
     }
 
     uint256 claimed_base;
@@ -2004,35 +1935,47 @@ bool PQRegistryManager::BuildGCFloorClosureLocked(
             derive_initial_base)) {
         return false;
     }
-    return BuildGCFloorClosureFromAuthenticatedLocked(
-        generation, std::move(scan_after_key), authenticated, closure,
-        error);
+    if (!BuildGCFloorClosureFromAuthenticatedLocked(
+            generation, scan_state, std::move(scan_after_key),
+            authenticated, closure, error)) {
+        return false;
+    }
+    if (!ValidateGCSweepClosureTransition(previous, closure)) {
+        closure = {};
+        return SetError(error, PQRegistryResult::FLOOR_CONFLICT);
+    }
+    return true;
 }
 
 bool PQRegistryManager::BuildGCFloorClosureFromAuthenticatedLocked(
     uint64_t generation,
+    uint8_t scan_state,
     std::optional<uint256> scan_after_key,
     const GCAuthenticationResult& authenticated,
     evo::PQRegistryGCClosure& closure,
     PQRegistryError& error) const
 {
     closure = {};
-    if (!m_gc_root_config ||
-        !m_gc_root_config->IsValid(m_config) || generation == 0 ||
+    const bool cursor_state{
+        (scan_state & evo::PQRegistryGCClosure::COMPLETE) == 0};
+    if (!IsEnabled() || m_gc_configuration_id.IsNull() || generation == 0 ||
+        scan_state > evo::PQRegistryGCClosure::RESTART_REQUIRED ||
+        cursor_state != scan_after_key.has_value() ||
         (scan_after_key && scan_after_key->IsNull())) {
         return SetError(error, PQRegistryResult::INVALID_CONFIGURATION);
     }
     const int64_t initial_height{
         static_cast<int64_t>(m_config.preparation_height) +
-        (static_cast<int64_t>(
-             m_gc_root_config->legacy_anchor.height) -
-         m_config.preparation_height) /
-            PQ_REGISTRY_CHECKPOINT_INTERVAL *
-            PQ_REGISTRY_CHECKPOINT_INTERVAL +
         PQ_REGISTRY_CHECKPOINT_INTERVAL};
+    const int64_t checkpoint_delta{
+        static_cast<int64_t>(authenticated.checkpoint.height) -
+        initial_height};
+    if (checkpoint_delta < 0 ||
+        checkpoint_delta % PQ_REGISTRY_CHECKPOINT_INTERVAL != 0) {
+        return SetError(error, PQRegistryResult::FLOOR_CONFLICT);
+    }
     const uint64_t minimum_generation{static_cast<uint64_t>(
-        1 + (authenticated.checkpoint.height - initial_height) /
-                PQ_REGISTRY_CHECKPOINT_INTERVAL)};
+        1 + checkpoint_delta / PQ_REGISTRY_CHECKPOINT_INTERVAL)};
     if (generation < minimum_generation) {
         return SetError(error, PQRegistryResult::FLOOR_CONFLICT);
     }
@@ -2045,11 +1988,7 @@ bool PQRegistryManager::BuildGCFloorClosureFromAuthenticatedLocked(
         authenticated.lineage_base_commitment;
     closure.rooted_lineage_commitment =
         authenticated.rooted_lineage_commitment;
-    closure.legacy_island_commitment =
-        authenticated.legacy_island_commitment;
-    closure.scan_complete = scan_after_key
-        ? evo::PQRegistryGCClosure::SCANNING
-        : evo::PQRegistryGCClosure::COMPLETE;
+    closure.scan_complete = scan_state;
     closure.scan_after_key = std::move(scan_after_key);
     return closure.IsValid()
         ? true
@@ -2102,8 +2041,7 @@ bool PQRegistryManager::BuildGCEraseBatch(
         LOCK(m_mutex);
         LOCK(m_snapshot_db->cs);
         m_validated_gc_pass.reset();
-        if (!m_gc_root_config ||
-            !m_gc_root_config->IsValid(m_config)) {
+        if (!IsEnabled() || m_gc_configuration_id.IsNull()) {
             return SetError(
                 error, PQRegistryResult::INVALID_CONFIGURATION);
         }
@@ -2130,16 +2068,11 @@ bool PQRegistryManager::BuildGCEraseBatch(
                 authenticated, error, derive_initial_base)) {
             return false;
         }
-        if (previous_closure &&
-            previous_closure->checkpoint != authenticated.checkpoint) {
-            const int64_t height_delta{
-                static_cast<int64_t>(authenticated.checkpoint.height) -
-                previous_closure->checkpoint.height};
-            if (previous_closure->scan_complete !=
-                    evo::PQRegistryGCClosure::COMPLETE ||
-                height_delta != PQ_REGISTRY_CHECKPOINT_INTERVAL) {
-                return SetError(error, PQRegistryResult::FLOOR_CONFLICT);
-            }
+        const auto sweep_transition{DeriveGCSweepTransition(
+            previous_closure ? &*previous_closure : nullptr,
+            authenticated.checkpoint)};
+        if (!sweep_transition) {
+            return SetError(error, PQRegistryResult::FLOOR_CONFLICT);
         }
         std::unordered_map<uint256, int32_t, StaticSaltedHasher>
             protected_records;
@@ -2153,17 +2086,8 @@ bool PQRegistryManager::BuildGCEraseBatch(
             }
         }
 
-        const bool same_checkpoint{previous_closure &&
-            previous_closure->checkpoint == authenticated.checkpoint};
-        const std::optional<uint256> from_cursor{same_checkpoint
-            ? previous_closure->scan_after_key
-            : std::nullopt};
-        if (same_checkpoint &&
-            (previous_closure->scan_complete !=
-                 evo::PQRegistryGCClosure::SCANNING ||
-             !from_cursor)) {
-            return SetError(error, PQRegistryResult::FLOOR_CONFLICT);
-        }
+        const std::optional<uint256> from_cursor{
+            sweep_transition->from_cursor};
 
         std::vector<evo::PQRegistryGCEraseCandidate> candidates;
         candidates.reserve(std::min(
@@ -2243,12 +2167,19 @@ bool PQRegistryManager::BuildGCEraseBatch(
         }
 
         evo::PQRegistryGCClosure closure;
+        const uint8_t scan_state{PQRegistryGCSweepState(
+            sweep_transition->dirty, reached_eof)};
         if (!BuildGCFloorClosureFromAuthenticatedLocked(
-                generation,
+                generation, scan_state,
                 reached_eof ? std::nullopt : last_key,
                 authenticated,
                 closure, error)) {
             return false;
+        }
+        if (!ValidateGCSweepClosureTransition(
+                previous_closure ? &*previous_closure : nullptr,
+                closure)) {
+            return SetError(error, PQRegistryResult::INTERNAL_ERROR);
         }
         const auto encoded_closure{
             evo::EncodePQRegistryGCClosure(closure)};
@@ -2341,15 +2272,14 @@ bool PQRegistryManager::ValidateGCEraseIntervalLocked(
     first_present_candidate = manifest.candidates.size();
     const bool same_checkpoint{
         previous && previous->checkpoint == target.checkpoint};
-    const std::optional<uint256> expected_from_cursor{same_checkpoint
-        ? previous->scan_after_key
-        : std::nullopt};
-    if (manifest.from_cursor != expected_from_cursor ||
-        (target.scan_complete == evo::PQRegistryGCClosure::SCANNING &&
+    PQRegistryGCSweepTransition sweep_transition;
+    if (!ValidateGCSweepClosureTransition(
+            previous, target, &sweep_transition) ||
+        manifest.from_cursor != sweep_transition.from_cursor ||
+        (target.HasScanCursor() &&
          (manifest.reached_eof != 0 ||
           manifest.scan_through != target.scan_after_key)) ||
-        (target.scan_complete == evo::PQRegistryGCClosure::COMPLETE &&
-         manifest.reached_eof != 1) ||
+        (!target.HasScanCursor() && manifest.reached_eof != 1) ||
         authenticated.checkpoint != target.checkpoint ||
         authenticated.checkpoint_state_root !=
             target.checkpoint_state_root ||
@@ -2358,9 +2288,7 @@ bool PQRegistryManager::ValidateGCEraseIntervalLocked(
         authenticated.lineage_base_commitment !=
             target.lineage_base_commitment ||
         authenticated.rooted_lineage_commitment !=
-            target.rooted_lineage_commitment ||
-        authenticated.legacy_island_commitment !=
-            target.legacy_island_commitment) {
+            target.rooted_lineage_commitment) {
         return SetError(error, PQRegistryResult::FLOOR_CONFLICT);
     }
     if (!previous) {
@@ -2369,15 +2297,11 @@ bool PQRegistryManager::ValidateGCEraseIntervalLocked(
         }
     } else {
         if (previous->generation == std::numeric_limits<uint64_t>::max() ||
-            target.generation != previous->generation + 1 ||
-            target.legacy_island_commitment !=
-                previous->legacy_island_commitment) {
+            target.generation != previous->generation + 1) {
             return SetError(error, PQRegistryResult::FLOOR_CONFLICT);
         }
         if (same_checkpoint) {
-            if (previous->scan_complete !=
-                    evo::PQRegistryGCClosure::SCANNING ||
-                target.checkpoint_state_root !=
+            if (target.checkpoint_state_root !=
                     previous->checkpoint_state_root ||
                 target.checkpoint_record_hash !=
                     previous->checkpoint_record_hash ||
@@ -2391,9 +2315,7 @@ bool PQRegistryManager::ValidateGCEraseIntervalLocked(
             const int64_t height_delta{
                 static_cast<int64_t>(target.checkpoint.height) -
                 previous->checkpoint.height};
-            if (previous->scan_complete !=
-                    evo::PQRegistryGCClosure::COMPLETE ||
-                height_delta != PQ_REGISTRY_CHECKPOINT_INTERVAL ||
+            if (height_delta != PQ_REGISTRY_CHECKPOINT_INTERVAL ||
                 target.lineage_base_commitment !=
                     previous->rooted_lineage_commitment) {
                 return SetError(error, PQRegistryResult::FLOOR_CONFLICT);
@@ -2627,13 +2549,8 @@ bool PQRegistryManager::InstallGCFloorFromAuthenticatedLocked(
     if (closure == nullptr) {
         return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
     }
-    const int64_t anchor_delta{
-        static_cast<int64_t>(m_gc_root_config->legacy_anchor.height) -
-        m_config.preparation_height};
     const int64_t initial_checkpoint_height{
         static_cast<int64_t>(m_config.preparation_height) +
-        anchor_delta / PQ_REGISTRY_CHECKPOINT_INTERVAL *
-            PQ_REGISTRY_CHECKPOINT_INTERVAL +
         PQ_REGISTRY_CHECKPOINT_INTERVAL};
     const int64_t checkpoint_delta{
         static_cast<int64_t>(closure->checkpoint.height) -
@@ -2651,9 +2568,7 @@ bool PQRegistryManager::InstallGCFloorFromAuthenticatedLocked(
         closure->lineage_base_commitment !=
             authenticated.lineage_base_commitment ||
         closure->rooted_lineage_commitment !=
-            authenticated.rooted_lineage_commitment ||
-        closure->legacy_island_commitment !=
-            authenticated.legacy_island_commitment) {
+            authenticated.rooted_lineage_commitment) {
         return SetError(error, PQRegistryResult::FLOOR_CONFLICT);
     }
     bool idempotent{false};
@@ -2675,8 +2590,8 @@ bool PQRegistryManager::InstallGCFloorFromAuthenticatedLocked(
     const bool same_checkpoint{
         m_gc_floor && closure->checkpoint == m_gc_floor->checkpoint};
     if (m_gc_floor && !idempotent) {
-        if (closure->legacy_island_commitment !=
-            m_gc_floor->legacy_island_commitment) {
+        if (!ValidateGCSweepClosureTransition(
+                &*m_gc_floor, *closure)) {
             return SetError(error, PQRegistryResult::FLOOR_CONFLICT);
         }
         if (same_checkpoint) {
@@ -2689,27 +2604,12 @@ bool PQRegistryManager::InstallGCFloorFromAuthenticatedLocked(
                     m_gc_floor->lineage_base_commitment &&
                 closure->rooted_lineage_commitment ==
                     m_gc_floor->rooted_lineage_commitment};
-            const bool cursor_advances{
-                m_gc_floor->scan_complete ==
-                    evo::PQRegistryGCClosure::SCANNING &&
-                ((closure->scan_complete ==
-                      evo::PQRegistryGCClosure::SCANNING &&
-                  m_gc_floor->scan_after_key &&
-                  closure->scan_after_key &&
-                  *m_gc_floor->scan_after_key <
-                      *closure->scan_after_key) ||
-                 closure->scan_complete ==
-                     evo::PQRegistryGCClosure::COMPLETE)};
-            if (!immutable_closure_matches || !cursor_advances) {
+            if (!immutable_closure_matches) {
                 return SetError(error, PQRegistryResult::FLOOR_CONFLICT);
             }
         } else {
-            const int64_t height_delta{
-                static_cast<int64_t>(closure->checkpoint.height) -
-                m_gc_floor->checkpoint.height};
-            if (m_gc_floor->scan_complete !=
-                    evo::PQRegistryGCClosure::COMPLETE ||
-                height_delta != PQ_REGISTRY_CHECKPOINT_INTERVAL) {
+            if (closure->lineage_base_commitment !=
+                m_gc_floor->rooted_lineage_commitment) {
                 return SetError(error, PQRegistryResult::FLOOR_CONFLICT);
             }
         }
@@ -2751,6 +2651,10 @@ bool PQRegistryManager::InstallEffectiveGCFloor(
     const auto fail_transition = [&] {
         return SetError(error, PQRegistryResult::FLOOR_CONFLICT);
     };
+    if ((state.watermark || state.intent) &&
+        (!IsEnabled() || m_gc_configuration_id.IsNull())) {
+        return SetError(error, PQRegistryResult::INVALID_CONFIGURATION);
+    }
     const auto component_dominates = [](
         const std::optional<evo::AuxiliaryHistoryGCComponent>& previous,
         const std::optional<evo::AuxiliaryHistoryGCComponent>& next) {
@@ -2773,9 +2677,8 @@ bool PQRegistryManager::InstallEffectiveGCFloor(
         nullptr};
     if (state.watermark) {
         const auto& watermark{*state.watermark};
-        if (watermark.sequence == 0 || watermark.configuration_id.IsNull() ||
-            (m_gc_root_config && watermark.configuration_id !=
-                 m_gc_root_config->configuration_id) ||
+        if (watermark.sequence == 0 ||
+            watermark.configuration_id != m_gc_configuration_id ||
             !watermark.authorization.IsValid() ||
             !watermark.frontier.IsValid() ||
             watermark.completed_intent_id.IsNull() ||
@@ -2794,9 +2697,8 @@ bool PQRegistryManager::InstallEffectiveGCFloor(
     bool pq_advances{false};
     if (state.intent) {
         const auto& intent{*state.intent};
-        if (intent.sequence == 0 || intent.configuration_id.IsNull() ||
-            (m_gc_root_config && intent.configuration_id !=
-                 m_gc_root_config->configuration_id) ||
+        if (intent.sequence == 0 ||
+            intent.configuration_id != m_gc_configuration_id ||
             !intent.target.IsValid() || intent.intent_id.IsNull()) {
             return fail_transition();
         }
@@ -2806,11 +2708,8 @@ bool PQRegistryManager::InstallEffectiveGCFloor(
             if (watermark.sequence == std::numeric_limits<uint64_t>::max() ||
                 intent.sequence != watermark.sequence + 1 ||
                 intent.configuration_id != watermark.configuration_id ||
-                target.authorization.block.height <=
-                    watermark.authorization.block.height ||
-                static_cast<uint8_t>(target.authorization.source) <
-                    static_cast<uint8_t>(
-                        watermark.authorization.source) ||
+                !evo::AuxiliaryHistoryGCAuthorizationDominates(
+                    watermark.authorization, target.authorization) ||
                 !component_dominates(
                     watermark.frontier.dmn, target.frontier.dmn) ||
                 !component_dominates(
@@ -2854,16 +2753,8 @@ bool PQRegistryManager::InstallEffectiveGCFloor(
         m_validated_gc_pass.reset();
         return previous_component || pq_advances ? fail_transition() : true;
     }
-    if (!m_gc_root_config ||
-        !m_gc_root_config->IsValid(m_config)) {
+    if (!IsEnabled() || m_gc_configuration_id.IsNull()) {
         return SetError(error, PQRegistryResult::INVALID_CONFIGURATION);
-    }
-    if ((state.watermark &&
-         state.watermark->configuration_id !=
-             m_gc_root_config->configuration_id) ||
-        (state.intent && state.intent->configuration_id !=
-             m_gc_root_config->configuration_id)) {
-        return fail_transition();
     }
     if (effective_authorization == nullptr ||
         !evo::IsPQRegistryGCComponentBoundedByAuthorization(
@@ -2911,20 +2802,24 @@ bool PQRegistryManager::InstallEffectiveGCFloor(
             return fail_transition();
         }
 
-        const bool same_checkpoint{previous_closure &&
-            previous_closure->checkpoint ==
-                effective_closure->checkpoint};
+        PQRegistryGCSweepTransition sweep_transition;
+        if (!ValidateGCSweepClosureTransition(
+                previous_closure ? &*previous_closure : nullptr,
+                *effective_closure, &sweep_transition) ||
+            decoded_manifest->from_cursor !=
+                sweep_transition.from_cursor) {
+            return fail_transition();
+        }
         if (previous_closure) {
             if (effective_component->monotonic_position !=
-                    previous_component->monotonic_position + 1 ||
-                effective_closure->legacy_island_commitment !=
-                    previous_closure->legacy_island_commitment) {
+                    previous_component->monotonic_position + 1) {
                 return fail_transition();
             }
+            const bool same_checkpoint{
+                previous_closure->checkpoint ==
+                effective_closure->checkpoint};
             if (same_checkpoint) {
-                if (previous_closure->scan_complete !=
-                        evo::PQRegistryGCClosure::SCANNING ||
-                    effective_closure->checkpoint_state_root !=
+                if (effective_closure->checkpoint_state_root !=
                         previous_closure->checkpoint_state_root ||
                     effective_closure->checkpoint_record_hash !=
                         previous_closure->checkpoint_record_hash ||
@@ -2934,30 +2829,13 @@ bool PQRegistryManager::InstallEffectiveGCFloor(
                         previous_closure->rooted_lineage_commitment) {
                     return fail_transition();
                 }
-            } else {
-                const int64_t height_delta{
-                    static_cast<int64_t>(
-                        effective_closure->checkpoint.height) -
-                    previous_closure->checkpoint.height};
-                if (previous_closure->scan_complete !=
-                        evo::PQRegistryGCClosure::COMPLETE ||
-                    height_delta != PQ_REGISTRY_CHECKPOINT_INTERVAL ||
-                    effective_closure->lineage_base_commitment !=
-                        previous_closure->rooted_lineage_commitment) {
-                    return fail_transition();
-                }
+            } else if (effective_closure->lineage_base_commitment !=
+                       previous_closure->rooted_lineage_commitment) {
+                return fail_transition();
             }
         }
 
-        const std::optional<uint256> expected_from_cursor{
-            previous_closure && same_checkpoint
-                ? previous_closure->scan_after_key
-                : std::nullopt};
-        if (decoded_manifest->from_cursor != expected_from_cursor) {
-            return fail_transition();
-        }
-        if (effective_closure->scan_complete ==
-            evo::PQRegistryGCClosure::SCANNING) {
+        if (effective_closure->HasScanCursor()) {
             if (decoded_manifest->reached_eof != 0 ||
                 decoded_manifest->scan_through !=
                     effective_closure->scan_after_key) {
@@ -3008,7 +2886,7 @@ bool PQRegistryManager::InstallEffectiveGCFloor(
     } else {
         m_validated_gc_pass.reset();
         // A compact watermark carries only its latest rooted base. Exact
-        // replay rebinds that segment and the permanently pinned Q..A island.
+        // replay rebinds the corresponding checkpoint interval.
         if (!AuthenticateGCContext(
                 context, effective_closure->lineage_base_commitment,
                 previous_closure ? &*previous_closure : nullptr,
@@ -3026,13 +2904,8 @@ bool PQRegistryManager::InstallEffectiveGCFloor(
         }
     }
 
-    const int64_t anchor_delta{
-        static_cast<int64_t>(m_gc_root_config->legacy_anchor.height) -
-        m_config.preparation_height};
     const int64_t initial_checkpoint_height{
         static_cast<int64_t>(m_config.preparation_height) +
-        anchor_delta / PQ_REGISTRY_CHECKPOINT_INTERVAL *
-            PQ_REGISTRY_CHECKPOINT_INTERVAL +
         PQ_REGISTRY_CHECKPOINT_INTERVAL};
     const int64_t checkpoint_delta{
         static_cast<int64_t>(effective_closure->checkpoint.height) -
@@ -3053,9 +2926,7 @@ bool PQRegistryManager::InstallEffectiveGCFloor(
         effective_closure->lineage_base_commitment !=
             authenticated->lineage_base_commitment ||
         effective_closure->rooted_lineage_commitment !=
-            authenticated->rooted_lineage_commitment ||
-        effective_closure->legacy_island_commitment !=
-            authenticated->legacy_island_commitment) {
+            authenticated->rooted_lineage_commitment) {
         m_validated_gc_pass.reset();
         return fail_transition();
     }
@@ -3976,10 +3847,11 @@ bool PQRegistryManager::PrepareBlockInternal(
 
     std::vector<OperatorKeyState> replacements;
     replacements.reserve(updates.size());
+    auto next_indexes{
+        std::make_shared<PQRegistryIndexes>(*parent_view->state->indexes)};
     // Ownership and tree reuse are sequential consensus checks: later
     // transactions see successful earlier updates, while removals remain a
     // final-state operation and cannot release either namespace mid-block.
-    std::map<GlobalPublicKey, std::optional<uint256>> key_owner_overlay;
     std::unordered_set<uint256, StaticSaltedHasher> new_tree_id_set;
     new_tree_id_set.reserve(updates.size());
     for (const auto& update : updates) {
@@ -4030,19 +3902,10 @@ bool PQRegistryManager::PrepareBlockInternal(
         const auto find_global_key_owner{
             [&](const GlobalPublicKey& public_key)
                 -> std::optional<uint256> {
-                const auto changed{key_owner_overlay.find(public_key)};
-                if (changed != key_owner_overlay.end()) {
-                    return changed->second;
-                }
-                if (!parent_view || !parent_view->state ||
-                    !parent_view->state->indexes) {
-                    return std::nullopt;
-                }
                 const auto owner{
-                    parent_view->state->indexes->global_key_owner.find(
-                        public_key)};
+                    next_indexes->global_key_owner.find(public_key)};
                 return owner ==
-                        parent_view->state->indexes->global_key_owner.end()
+                        next_indexes->global_key_owner.end()
                     ? std::nullopt
                     : std::optional<uint256>{owner->second};
             }};
@@ -4062,11 +3925,25 @@ bool PQRegistryManager::PrepareBlockInternal(
         if (previous_global_key &&
             (candidate.has_global_key == 0 ||
              candidate.global_key.public_key != *previous_global_key)) {
-            key_owner_overlay[*previous_global_key] = std::nullopt;
+            const auto previous_owner{
+                next_indexes->global_key_owner.find(*previous_global_key)};
+            if (previous_owner == next_indexes->global_key_owner.end() ||
+                previous_owner->second != update.pro_tx_hash) {
+                return SetError(error, PQRegistryResult::INTERNAL_ERROR,
+                                update.transaction_index,
+                                update.pro_tx_hash);
+            }
+            next_indexes->global_key_owner.erase(previous_owner);
         }
         if (candidate.has_global_key != 0) {
-            key_owner_overlay[candidate.global_key.public_key] =
-                update.pro_tx_hash;
+            const auto [owner, inserted]{
+                next_indexes->global_key_owner.emplace(
+                    candidate.global_key.public_key, update.pro_tx_hash)};
+            if (!inserted && owner->second != update.pro_tx_hash) {
+                return SetError(error, PQRegistryResult::INTERNAL_ERROR,
+                                update.transaction_index,
+                                update.pro_tx_hash);
+            }
         }
         if (introduced_tree_id) {
             block_tree_ids.push_back(*introduced_tree_id);
@@ -4077,6 +3954,36 @@ bool PQRegistryManager::PrepareBlockInternal(
             }
         }
         replacements.push_back(std::move(candidate));
+    }
+
+    std::sort(block_tree_ids.begin(), block_tree_ids.end());
+    std::shared_ptr<const std::vector<uint256>> used_tree_ids{
+        parent_view->state->used_tree_ids};
+    uint256 used_tree_ids_hash{parent_view->state->used_tree_ids_hash};
+    if (!block_tree_ids.empty()) {
+        std::vector<uint256> merged_tree_ids;
+        if (!MergeNewTreeIds(*parent_view->state->used_tree_ids,
+                             block_tree_ids, merged_tree_ids)) {
+            return SetError(error,
+                            PQRegistryResult::INVALID_RESULTING_STATE);
+        }
+        const auto tree_hash{
+            GetUsedTreeIdSetHash(m_genesis_hash, merged_tree_ids)};
+        if (!tree_hash) {
+            return SetError(error,
+                            PQRegistryResult::INVALID_RESULTING_STATE);
+        }
+        used_tree_ids_hash = *tree_hash;
+        used_tree_ids =
+            std::make_shared<const std::vector<uint256>>(
+                std::move(merged_tree_ids));
+    }
+    // The authenticated parent already proved tree membership for every
+    // inherited state. Schedule advancement can only retain/drop that global
+    // tree or freeze it for another epoch, so only block replacements can
+    // introduce a membership obligation.
+    if (!StateTreeIdsAreRecorded(replacements, *used_tree_ids)) {
+        return SetError(error, PQRegistryResult::INVALID_RESULTING_STATE);
     }
 
     if (!replacements.empty()) {
@@ -4118,6 +4025,18 @@ bool PQRegistryManager::PrepareBlockInternal(
             }
             if (removal != net_removed_pro_tx_hashes.end() &&
                 *removal == state.pro_tx_hash) {
+                if (state.has_global_key != 0) {
+                    const auto owner{next_indexes->global_key_owner.find(
+                        state.global_key.public_key)};
+                    if (owner == next_indexes->global_key_owner.end() ||
+                        owner->second != state.pro_tx_hash) {
+                        return SetError(
+                            error, PQRegistryResult::INTERNAL_ERROR,
+                            std::numeric_limits<std::size_t>::max(),
+                            state.pro_tx_hash);
+                    }
+                    next_indexes->global_key_owner.erase(owner);
+                }
                 ++removal;
                 continue;
             }
@@ -4128,32 +4047,9 @@ bool PQRegistryManager::PrepareBlockInternal(
         }
         next_operator_states.resize(write_index);
     }
-    std::sort(block_tree_ids.begin(), block_tree_ids.end());
-    std::shared_ptr<const std::vector<uint256>> used_tree_ids{
-        parent_view->state->used_tree_ids};
-    uint256 used_tree_ids_hash{parent_view->state->used_tree_ids_hash};
-    if (!block_tree_ids.empty()) {
-        std::vector<uint256> merged_tree_ids;
-        if (!MergeNewTreeIds(*parent_view->state->used_tree_ids,
-                             block_tree_ids, merged_tree_ids)) {
-            return SetError(error,
-                            PQRegistryResult::INVALID_RESULTING_STATE);
-        }
-        const auto tree_hash{
-            GetUsedTreeIdSetHash(m_genesis_hash, merged_tree_ids)};
-        if (!tree_hash) {
-            return SetError(error,
-                            PQRegistryResult::INVALID_RESULTING_STATE);
-        }
-        used_tree_ids_hash = *tree_hash;
-        used_tree_ids =
-            std::make_shared<const std::vector<uint256>>(
-                std::move(merged_tree_ids));
-    }
     if (next_operator_states.size() > MAX_PQ_OPERATOR_STATES ||
         block_tree_ids.size() > MAX_PQ_TREE_IDS_PER_BLOCK ||
         !IsSubset(block_tree_ids, *used_tree_ids) ||
-        !StateTreeIdsAreRecorded(next_operator_states, *used_tree_ids) ||
         std::any_of(
             next_operator_states.begin(), next_operator_states.end(),
             [&](const OperatorKeyState& state) {
@@ -4172,14 +4068,11 @@ bool PQRegistryManager::PrepareBlockInternal(
     if (!state_root) {
         return SetError(error, PQRegistryResult::INVALID_RESULTING_STATE);
     }
-    const auto indexes{BuildRegistryIndexes(next_operator_states)};
-    auto state{indexes
-        ? MakeRegistryStateData(
-              std::make_shared<const std::vector<OperatorKeyState>>(
-                  std::move(next_operator_states)),
-              std::move(used_tree_ids), indexes, next_schedule,
-              used_tree_ids_hash, *state_root)
-        : nullptr};
+    auto state{MakeRegistryStateData(
+        std::make_shared<const std::vector<OperatorKeyState>>(
+            std::move(next_operator_states)),
+        std::move(used_tree_ids), std::move(next_indexes), next_schedule,
+        used_tree_ids_hash, *state_root)};
     if (!state) {
         return SetError(error, PQRegistryResult::INVALID_RESULTING_STATE);
     }
