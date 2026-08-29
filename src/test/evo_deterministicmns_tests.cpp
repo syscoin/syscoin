@@ -1140,7 +1140,7 @@ BOOST_AUTO_TEST_CASE(exact_parent_payee_cache_is_branch_bounded)
     };
     CDeterministicMNManager manager(db_params);
 
-    constexpr int height{520};
+    const int height{std::max(Params().GetConsensus().DIP0003Height, 520)};
     const uint256 hash_a{MakeSnapshotKey(height)};
     const uint256 hash_b{MakeSnapshotKey(height + 10'000)};
     const uint256 hash_empty{MakeSnapshotKey(height + 20'000)};
