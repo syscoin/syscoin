@@ -45,9 +45,11 @@ from test_framework.script import CScript, OP_RETURN
 from test_framework.test_node import ErrorMatch
 from test_framework.test_framework import SyscoinTestFramework
 from test_framework.util import (
+    Decimal,
     assert_equal,
     assert_raises_rpc_error,
     force_finish_mnsync,
+    p2p_port,
 )
 
 
@@ -270,6 +272,9 @@ def serialize_final_chainlock(statement, signature_byte=0):
 
 
 class PQChainLocksTest(SyscoinTestFramework):
+    def add_options(self, parser):
+        self.add_wallet_options(parser, descriptors=True, legacy=False)
+
     def set_test_params(self):
         self.num_nodes = 1
         self.setup_clean_chain = True
@@ -278,9 +283,15 @@ class PQChainLocksTest(SyscoinTestFramework):
             "-debug=chainlocks",
             "-debug=net",
             "-dip3params=1:1",
+            "-mncollateral=100",
             "-sporkkey=cVpF924EspNh8KjYsfhgY96mmxvT6DgdWiTYMtMjuM74hJaU5psW",
         ]
         self.extra_args = [list(self.base_args)]
+
+    def skip_test_if_missing_module(self):
+        self.options.descriptors = True
+        self.default_wallet_name = "default_wallet"
+        self.skip_if_no_wallet()
 
     @staticmethod
     def peer_id(node, marker):
@@ -327,9 +338,54 @@ class PQChainLocksTest(SyscoinTestFramework):
             peer_info["verified_proregtx_hash"], "%064x" % protx_hash)
         return peer
 
+    def install_payment_masternode(self, node, mining_address):
+        while node.getbalance() < Decimal("101"):
+            self.generatetoaddress(
+                node, 10, mining_address, sync_fun=self.no_op)
+
+        operator_keys = node.protx_generate_operator_keypair()
+        funds_address = node.getnewaddress()
+        owner_address = node.getnewaddress()
+        payout_address = node.getnewaddress()
+        service = "127.0.0.1:%d" % p2p_port(2)
+        node.sendtoaddress(funds_address, Decimal("100.001"))
+        protx_hash = node.protx_register_fund(
+            node.getnewaddress(),
+            service,
+            owner_address,
+            "",
+            owner_address,
+            0,
+            payout_address,
+            funds_address,
+        )
+        self.generatetoaddress(node, 1, mining_address, sync_fun=self.no_op)
+        node.protx_register_operator_key(
+            protx_hash,
+            operator_keys["operatorKey"],
+            operator_keys["chainlockSeed"],
+            funds_address,
+        )
+        self.generatetoaddress(node, 1, mining_address, sync_fun=self.no_op)
+        node.protx_update_service(
+            protx_hash,
+            service,
+            operator_keys["operatorKey"],
+            "",
+            "",
+            funds_address,
+        )
+        self.generatetoaddress(node, 1, mining_address, sync_fun=self.no_op)
+
+        info = node.protx_info(protx_hash)
+        assert_equal(info["state"]["PoSeBanHeight"], -1)
+        assert_equal(
+            node.protx_operator_key_info(protx_hash)["keyVersion"], 1)
+        self.payment_masternode_protx_hash = protx_hash
+
     def configure_private_migration(self):
         node = self.nodes[0]
-        address = node.get_deterministic_priv_key().address
+        address = node.getnewaddress()
         self.generatetoaddress(node, 1, address, sync_fun=self.no_op)
         migration_anchor = node.protx_migration_info()
         assert_equal(migration_anchor["height"], 1)
@@ -350,7 +406,10 @@ class PQChainLocksTest(SyscoinTestFramework):
             "-pqrostersnapshotlag=%d" % roster_snapshot_lag,
             "-pqfuturehorizonepochs=8",
         ]
-        preparation_args = profile_args + ["-pqfinalitypreparation=1"]
+        preparation_args = profile_args + [
+            "-pqfinalitypreparation=1",
+            "-pqoperatorcommitmentteststub=1",
+        ]
         self.stop_node(0)
         node.extra_args = list(preparation_args)
         with node.assert_debug_log([
@@ -360,6 +419,11 @@ class PQChainLocksTest(SyscoinTestFramework):
         force_finish_mnsync(node)
         assert_equal(node.protx_migration_info(), migration_anchor)
         self.assert_no_chainlock_rpcs(node)
+
+        # Post-anchor payment consensus requires at least one valid operator
+        # whose child root was frozen before the finality predecessor. The
+        # synthetic quorum fixture does not replace the on-chain payment set.
+        self.install_payment_masternode(node, address)
 
         self.generatetoaddress(
             node, FINALITY_ANCHOR_HEIGHT - node.getblockcount(), address,
@@ -1798,8 +1862,19 @@ class PQChainLocksTest(SyscoinTestFramework):
         assert_equal(bundle["unobserved_member_misses"], 0)
         # The synthetic historical roster is intentionally not injected into
         # the live deterministic-MN set. The real transition is therefore
-        # inconclusive: its receipt cursor advances while entries stay empty.
-        assert_equal(node.protx_list("registered", True), [])
+        # inconclusive: its receipt cursor advances without penalizing the
+        # independent root-bearing payment masternode.
+        registered = node.protx_list("registered", True)
+        assert_equal(len(registered), 1)
+        assert_equal(
+            registered[0]["proTxHash"],
+            self.payment_masternode_protx_hash,
+        )
+        assert_equal(registered[0]["paymentAudit"], {
+            "consecutiveMisses": 0,
+            "paymentWithheld": False,
+            "paymentEligibleSinceHeight": -1,
+        })
 
     def retrieve_payment_audit(self, bundle, marker, identity):
         peer = self.authenticate_peer(
