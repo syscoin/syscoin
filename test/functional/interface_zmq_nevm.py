@@ -222,7 +222,8 @@ class ZMQTest(SyscoinTestFramework):
         self.ctxpub = zmq.Context()
         self.threads = []
         try:
-            self.configure_pq_migration_anchor()
+            # SYSCOIN: Rebuild the cached legacy chain under PQ preparation rules.
+            self.configure_pq_preparation()
             address = 'tcp://127.0.0.1:29458'
             address1 = 'tcp://127.0.0.1:29459'
 
@@ -245,6 +246,10 @@ class ZMQTest(SyscoinTestFramework):
             self.sync_blocks()
             self.mn_count = 0
             self.test_basic(nevmsub, nevmsub1)
+            # SYSCOIN BEGIN: Register roots and cross the PQ activation boundary.
+            self.prepare_pq_masternodes()
+            self.activate_pq_profile()
+            # SYSCOIN END: Register roots and cross the PQ activation boundary.
             self.test_nevm_mapping(nevmsub)
             self.test_nevm_edge_cases(nevmsub)
         finally:
@@ -255,9 +260,10 @@ class ZMQTest(SyscoinTestFramework):
             for t in self.threads:
                 t.join()
 
-    def configure_pq_migration_anchor(self):
-        # SYSCOIN: Pin migration immediately before NEVM activation so the
-        # subscribers observe block 205 and can test the 206 -> 205 rollback.
+    def configure_pq_preparation(self):
+        # SYSCOIN: Start registry preparation immediately before NEVM
+        # activation so subscribers observe block 205 and the 206 -> 205
+        # rollback remains covered.
         dip3_height = 204
         current_height = self.nodes[0].getblockcount()
         assert current_height <= dip3_height
@@ -273,10 +279,6 @@ class ZMQTest(SyscoinTestFramework):
         roster_snapshot_lag = 288
         assert registration_cutoff_blocks >= roster_snapshot_lag
         pq_args = [
-            '-pqlegacyanchorheight=%d' % anchor['height'],
-            '-pqlegacyanchorblockhash=%s' % anchor['blockHash'],
-            '-pqlegacydmnstatehash=%s' % anchor['dmnStateHash'],
-            '-pqlegacypqregistrystatehash=%s' % anchor['pqRegistryStateHash'],
             '-pqpreparationheight=%d' % dip3_height,
             '-pqchainlockepochorigin=1440',
             '-pqregistrationcutoffblocks=%d' % registration_cutoff_blocks,
@@ -293,8 +295,7 @@ class ZMQTest(SyscoinTestFramework):
         for index in range(self.num_nodes):
             self.nodes[index].extra_args = list(self.extra_args[index])
         # SYSCOIN: This test starts from the shared cached chain. Rebuild the
-        # UTXO, deterministic-MN, and PQ-registry state while retaining its
-        # validated block index so the exact migration anchor can be replayed.
+        # UTXO, deterministic-MN, and PQ-registry state from validated history.
         self.start_node(0, extra_args=self.extra_args[0] + ['-reindex-chainstate'])
         self.start_node(1, extra_args=self.extra_args[1] + ['-reindex-chainstate'])
         self.connect_nodes(0, 1)
@@ -494,9 +495,12 @@ class ZMQTest(SyscoinTestFramework):
         expected_mapping[new_mn1_nevm_address.lower()] = self.mns[1].collateral_height
         nevmsub.assertMNList(expected_mapping)
         
-        # Test case 7: Reorg that undoes an MN creation (should remove NEVM address)
-        self.log.info("Reorg to undo MN creation")
-        invalidblock = self.reorg(self.mns[0].collateral_height)
+        # SYSCOIN BEGIN: Post-activation NEVM mapping reorg coverage.
+        # Test case 7: Reorg that undoes the first post-activation mapping.
+        # The provider/root records deliberately predate the immutable receipt
+        # assumption boundary; the NEVM transition under test does not.
+        self.log.info("Reorg to undo initial MN mapping")
+        invalidblock = self.reorg(self.mns[0].initial_nevm_height)
         nevmsub.assertMNList({})
         # sync back to tip
         self.nodes[0].reconsiderblock(invalidblock)
@@ -514,12 +518,13 @@ class ZMQTest(SyscoinTestFramework):
 
         # Test case 9: Reorg that undoes an MN removal (should re-add NEVM address)
         self.log.info("Reorg to undo MN removal")
-        self.reorg(self.mns[1].removal_height)
+        removal_block = self.reorg(self.mns[1].removal_height)
         nevmsub.assertMNList({new_mn1_nevm_address.lower(): self.mns[0].collateral_height})
         # sync back to tip
-        self.nodes[0].reconsiderblock(invalidblock)
+        self.nodes[0].reconsiderblock(removal_block)
         self.sync_blocks()
         nevmsub.assertMNList(expected_mapping)
+        # SYSCOIN END: Post-activation NEVM mapping reorg coverage.
         self.log.info('NEVM address mapping tests done')
 
     def test_nevm_edge_cases(self, nevmsub):
@@ -624,8 +629,26 @@ class ZMQTest(SyscoinTestFramework):
         mn.chainlockSeed = operator_keys['chainlockSeed']
         return mn
 
+    # SYSCOIN BEGIN: PQ-rooted NEVM masternode preparation and activation.
     def create_mn_with_nevm(self, index, alias, nevm_address = None):
         """Create a masternode with the specified NEVM address"""
+        mn = self.prepared_mns.pop(index)
+        assert_equal(mn.alias, alias)
+        self.nodes[0].protx_update_service(
+            mn.protx_hash, '127.0.0.1:%d' % mn.p2p_port,
+            mn.operatorKey, "", "", mn.fundsAddr)
+        self.generate(self.nodes[0], 1)
+        if nevm_address is not None:
+            self.generate(self.nodes[0], (self.mn_count+1)*2 + 1)
+            self.update_mn_set_nevm(mn, nevm_address)
+            mn.initial_nevm_height = self.nodes[0].getblockcount()
+        else:
+            self.generate(self.nodes[0], 1)
+            self.generate(self.nodes[0], (self.mn_count+1)*2 + 1)
+        return mn
+
+    def prepare_registered_mn(self, index, alias):
+        """Register one legacy provider and its PQ root before activation."""
         mn = self.prepare_mn(self.nodes[0], index, alias)
         self.nodes[0].sendtoaddress(mn.fundsAddr, 100.001)
         mn.collateral_address = self.nodes[0].getnewaddress()
@@ -657,21 +680,56 @@ class ZMQTest(SyscoinTestFramework):
         operator_registration_rpc.protx_register_operator_key(
             mn.protx_hash, mn.operatorKey, mn.chainlockSeed, mn.fundsAddr)
         self.generate(self.nodes[0], 1)
-        self.nodes[0].protx_update_service(
-            mn.protx_hash, '127.0.0.1:%d' % mn.p2p_port,
-            mn.operatorKey, "", "", mn.fundsAddr)
-        self.generate(self.nodes[0], 1)
-        if nevm_address is not None:
-            # SYSCOIN: PQ service authorization becomes usable only after the
-            # operator-root transaction is mined. On regtest that same block
-            # confirms the new MN, so the legacy intermediate state (active
-            # operator but unconfirmed MN) is intentionally unreachable.
-            self.generate(self.nodes[0], (self.mn_count+1)*2 + 1)
-            self.update_mn_set_nevm(mn, nevm_address)
-        else:
-            self.generate(self.nodes[0], 1)
-            self.generate(self.nodes[0], (self.mn_count+1)*2 + 1)
         return mn
+
+    def prepare_pq_masternodes(self):
+        self.prepared_mns = {}
+        for index, alias in (
+                (1, "nevm-mn"),
+                (2, "non-nevm-mn"),
+                (3, "edge-nevm-mn"),
+                (4, "edge-non-nevm-mn")):
+            self.prepared_mns[index] = self.prepare_registered_mn(index, alias)
+
+    def activate_pq_profile(self):
+        predecessor_height = 2304
+        assert self.nodes[0].getblockcount() <= predecessor_height
+        self.generatetoaddress(
+            self.nodes[0],
+            predecessor_height - self.nodes[0].getblockcount(),
+            self.nodes[0].getnewaddress())
+        self.sync_blocks()
+        predecessor_hash = self.nodes[0].getblockhash(predecessor_height)
+        activation_args = [
+            '-pqactivationheight=%d' % (predecessor_height + 1),
+            '-pqbtcccandidateorigin=1000000',
+            '-pqbtccreceiptanchorheight=%d' % predecessor_height,
+            '-pqbtccreceiptanchorblockhash=%s' % predecessor_hash,
+            '-pqbtccreceiptanchorcursorheight=-1',
+            '-pqbtccreceiptanchorcursorsyshash=%s' % ('0' * 64),
+            '-pqbtccreceiptanchorcursorbtchash=%s' % ('0' * 64),
+            '-pqbtccreceiptanchorstatehash=%s' % ('0' * 64),
+        ]
+        for index, args in enumerate(self.extra_args):
+            self.extra_args[index] = [
+                arg for arg in args
+                if arg != '-pqfinalitypreparation=1'
+            ] + activation_args
+            if '-reindex-chainstate' not in self.extra_args[index]:
+                self.extra_args[index].append('-reindex-chainstate')
+
+        self.stop_nodes()
+        for index, node in enumerate(self.nodes):
+            node.extra_args = list(self.extra_args[index])
+            self.start_node(index, extra_args=self.extra_args[index])
+            force_finish_mnsync(node)
+        self.connect_nodes(0, 1)
+        self.sync_blocks()
+        assert_equal(self.nodes[0].getblockcount(), predecessor_height)
+        assert_equal(self.nodes[1].getblockcount(), predecessor_height)
+        assert_equal(self.nodes[0].getbestblockhash(), predecessor_hash)
+        assert_equal(self.nodes[1].getbestblockhash(), predecessor_hash)
+    # SYSCOIN END: PQ-rooted NEVM masternode preparation and activation.
 
     def update_mn_set_nevm(self, mn, nevm_address):
         """Update an MN to set an NEVM address"""

@@ -34,7 +34,7 @@ class AuxpowMiningTest (SyscoinTestFramework):
     self.num_nodes = 2
     # SYSCOIN: keep this cached-chain compatibility test pre-DIP3. Scheduled
     # BTCPREV behavior is covered by feature_btcheader_external_policy.py with
-    # an exact two-phase migration anchor.
+    # the height-only PQ activation profile.
     self.extra_args = [
       ['-dip3params=9000:9000'],
       ['-dip3params=9000:9000'],

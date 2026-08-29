@@ -18,15 +18,17 @@ class DIP3Test(SyscoinTestFramework):
         # This test is descriptor-only; do not expose legacy wallet mode.
         self.add_wallet_options(parser, descriptors=True, legacy=False)
 
+    # SYSCOIN BEGIN: PQ-sized deterministic-MN test topology.
     def set_test_params(self):
-        # No prebuilt legacy-anchor fixture exists for this dynamically mined
-        # chain. Five post-anchor records are enough to retain the collateral
+        # No prebuilt PQ registry fixture exists for this dynamically mined
+        # chain. Five prepared records are enough to retain the collateral
         # removal, reorg, and replacement matrix. Only the payment-eligible
         # record needs a live MN process; PQ lifecycle behavior has its own
         # focused functional test.
         self.num_initial_mn = 4
         self.num_nodes = 2
         self.setup_clean_chain = True
+    # SYSCOIN END: PQ-sized deterministic-MN test topology.
 
         self.extra_args = ["-sporkkey=cVpF924EspNh8KjYsfhgY96mmxvT6DgdWiTYMtMjuM74hJaU5psW"]
         self.extra_args += ["-mncollateral=100"]
@@ -38,13 +40,14 @@ class DIP3Test(SyscoinTestFramework):
         self.default_wallet_name = "default_wallet"
         self.skip_if_no_wallet()
 
+    # SYSCOIN BEGIN: Defer governance until PQ registry preparation.
     def setup_network(self):
         self.add_nodes(1)
         self.start_controller_node()
-        # This chain must reach DIP3 before its exact PQ migration anchor can
-        # be discovered. Superblocks cannot be evaluated against PQ
-        # governance until then, so keep them off only for that bootstrap.
+        # This chain must reach DIP3 before PQ registry preparation starts.
+        # Superblocks cannot be evaluated against PQ governance until then.
         self.nodes[0].spork("SPORK_9_SUPERBLOCKS_ENABLED", 4070908800)
+    # SYSCOIN END: Defer governance until PQ registry preparation.
 
     def start_controller_node(self):
         self.log.info("starting controller node")
@@ -62,7 +65,8 @@ class DIP3Test(SyscoinTestFramework):
         self.stop_controller_node()
         self.start_controller_node()
 
-    def configure_pq_migration_anchor(self):
+    # SYSCOIN BEGIN: Reindex legacy history into the PQ preparation profile.
+    def configure_pq_preparation(self):
         anchor = self.nodes[0].protx_migration_info()
         assert_equal(anchor['height'], self.nodes[0].getblockcount())
         registration_cutoff_blocks = 288
@@ -70,10 +74,6 @@ class DIP3Test(SyscoinTestFramework):
         roster_snapshot_lag = 288
         assert registration_cutoff_blocks >= roster_snapshot_lag
         self.extra_args += [
-            '-pqlegacyanchorheight=%d' % anchor['height'],
-            '-pqlegacyanchorblockhash=%s' % anchor['blockHash'],
-            '-pqlegacydmnstatehash=%s' % anchor['dmnStateHash'],
-            '-pqlegacypqregistrystatehash=%s' % anchor['pqRegistryStateHash'],
             '-pqpreparationheight=%d' % anchor['height'],
             '-pqchainlockepochorigin=1440',
             '-pqregistrationcutoffblocks=%d' % registration_cutoff_blocks,
@@ -93,14 +93,13 @@ class DIP3Test(SyscoinTestFramework):
             self.nodes[0].loadwallet(self.default_wallet_name)
         force_finish_mnsync(self.nodes[0])
         assert_equal(self.nodes[0].protx_migration_info(), anchor)
-        # The reindexed chain now has an exact PQ registry at the active tip;
+        # The reindexed chain now has a PQ registry at the active tip;
         # restore normal superblock enforcement for the remainder of the test.
         self.nodes[0].spork("SPORK_9_SUPERBLOCKS_ENABLED", 0)
 
-        # SYSCOIN: A configured node with no persisted winner must discover the
-        # pinned anchor over P2P before ChainLock ancestry can be classified.
-        # Exercise that bootstrap before expensive PQ authorization blocks so a
-        # finality lifecycle regression cannot be hidden by crypto-test timing.
+        # Exercise a second node's structural replay before expensive PQ
+        # authorization blocks so a registry replay regression cannot be
+        # hidden by crypto-test timing.
         self.add_nodes(1, offset=1)
         self.start_node(1, extra_args=self.extra_args)
         self.connect_nodes(1, 0)
@@ -108,6 +107,7 @@ class DIP3Test(SyscoinTestFramework):
         assert_equal(self.nodes[1].getbestblockhash(), anchor['blockHash'])
         assert_equal(self.nodes[1].protx_migration_info(), anchor)
         self.stop_node(1)
+    # SYSCOIN END: Reindex legacy history into the PQ preparation profile.
 
     def run_test(self):
         if self.is_wallet_compiled():
@@ -116,8 +116,9 @@ class DIP3Test(SyscoinTestFramework):
         while self.nodes[0].getbalance() < (self.num_initial_mn + 3) * 100:
             self.generatetoaddress(self.nodes[0], 10, self.nodes[0].getnewaddress()) # generate enough for collaterals
         self.log.info("controller node has {} syscoin".format(self.nodes[0].getbalance()))
-        # Preserve the historical DIP3 activation boundary before installing
-        # the private post-quantum migration anchor.
+        # SYSCOIN BEGIN: Transition the historical DIP3 chain into PQ activation.
+        # Preserve the historical DIP3 activation boundary before starting
+        # private post-quantum registry preparation.
         self.log.info("testing rejection of ProTx before dip3 activation")
         assert self.nodes[0].getblockchaininfo()['blocks'] < 432
         mns = []
@@ -135,10 +136,17 @@ class DIP3Test(SyscoinTestFramework):
         self.generate(self.nodes[0], 1)
         self.sync_blocks(self.nodes, timeout=120)
 
-        self.configure_pq_migration_anchor()
+        self.configure_pq_preparation()
         self.register_mn(self.nodes[0], before_dip3_mn)
         self.activate_payment_mn(self.nodes[0], before_dip3_mn)
+        self.activate_pq_profile()
+        self.nodes[0].protx_update_service(
+            before_dip3_mn.protx_hash,
+            '127.0.0.1:%d' % before_dip3_mn.p2p_port,
+            before_dip3_mn.operatorKey, "", "", before_dip3_mn.fundsAddr)
+        self.generate(self.nodes[0], 1, sync_fun=self.no_op)
         self.start_mn(before_dip3_mn)
+        # SYSCOIN END: Transition the historical DIP3 chain into PQ activation.
 
         self.log.info("registering inactive list-only MNs")
         for i in range(0, self.num_initial_mn):
@@ -160,22 +168,27 @@ class DIP3Test(SyscoinTestFramework):
             self.sync_all()
             self.assert_mnlists(mns)
 
+        # SYSCOIN BEGIN: Preserve the root-bearing MN across spend and reorg coverage.
         self.log.info("test that MNs disappear from the list when the ProTx collateral is spent")
         spend_mns_count = 3
+        # Keep the one root-bearing payment MN available after activation;
+        # the list-only records intentionally remain payment-ineligible.
+        spent_mns = mns[-spend_mns_count:]
         mns_tmp = [] + mns
         dummy_txins = []
-        for i in range(spend_mns_count):
-            dummy_txin = self.spend_mn_collateral(mns[i], with_dummy_input_output=True)
+        for mn in spent_mns:
+            dummy_txin = self.spend_mn_collateral(mn, with_dummy_input_output=True)
             dummy_txins.append(dummy_txin)
             self.generate(self.nodes[0], 1)
-            mns_tmp.remove(mns[i])
+            mns_tmp.remove(mn)
             self.assert_mnlists(mns_tmp)
 
         self.log.info("test that reverting the blockchain on a single node results in the mnlist to be reverted as well")
         for i in range(spend_mns_count):
             self.nodes[0].invalidateblock(self.nodes[0].getbestblockhash())
-            mns_tmp.append(mns[spend_mns_count - 1 - i])
+            mns_tmp.append(spent_mns[spend_mns_count - 1 - i])
             self.assert_mnlist(self.nodes[0], mns_tmp)
+        # SYSCOIN END: Preserve the root-bearing MN across spend and reorg coverage.
 
         self.log.info("cause a reorg with a double spend and check that mnlists are still correct on all nodes")
         self.mine_double_spend(self.nodes[0], dummy_txins, self.nodes[0].getnewaddress(), use_mnmerkleroot_from_tip=True)
@@ -249,9 +262,13 @@ class DIP3Test(SyscoinTestFramework):
             self.generate(self.nodes[0], 1)
             self.assert_mnlists(mns)
 
+        # SYSCOIN BEGIN: Bound payout-input selection after PQ test acceleration.
         self.log.info("testing masternode status updates")
-        # Restore a wallet-controlled payout after the multisig payment case
-        # so the empty fee-source path below can select and spend it.
+        # Use a fresh wallet-controlled payout after the multisig case. The
+        # original address has accumulated thousands of tiny test payments;
+        # selecting all of them would obscure the empty fee-source behavior
+        # with an unrelated standard-transaction weight failure.
+        payment_mn.rewards_address = self.nodes[0].getnewaddress()
         self.update_mn_payee(payment_mn, payment_mn.rewards_address)
         # change voting address and see if changes are reflected in `masternode status` rpc output
         mn = payment_mn
@@ -262,8 +279,10 @@ class DIP3Test(SyscoinTestFramework):
         assert old_voting_address != new_voting_address
         # also check if funds from payout address are used when no fee source address is specified
         node.sendtoaddress(mn.rewards_address, 0.001)
+        self.generate(node, 1)
         node.protx_update_registrar(mn.protx_hash, "", new_voting_address, "")
         self.generate(node, 1)
+        # SYSCOIN END: Bound payout-input selection after PQ test acceleration.
         new_dmnState = mn.node.masternode_status()["dmnState"]
         new_voting_address_from_rpc = new_dmnState["votingAddress"]
         assert new_voting_address_from_rpc == new_voting_address
@@ -325,6 +344,7 @@ class DIP3Test(SyscoinTestFramework):
 
         mn.protx_hash = node.protx_register(mn.collateral_txid, mn.collateral_vout, '127.0.0.1:%d' % mn.p2p_port, mn.ownerAddr, "", mn.votingAddr, 0, mn.rewards_address, mn.fundsAddr)
 
+    # SYSCOIN BEGIN: Register one real root and activate the PQ test profile.
     def activate_payment_mn(self, node, mn):
         # The migration bootstrap verifier occupying node 1 is deliberately
         # stopped until start_mn() reuses that slot.
@@ -339,10 +359,37 @@ class DIP3Test(SyscoinTestFramework):
         registration_rpc.protx_register_operator_key(
             mn.protx_hash, mn.operatorKey, mn.chainlockSeed, mn.fundsAddr)
         self.generate(node, 1, sync_fun=self.no_op)
-        node.protx_update_service(
-            mn.protx_hash, '127.0.0.1:%d' % mn.p2p_port,
-            mn.operatorKey, "", "", mn.fundsAddr)
-        self.generate(node, 1, sync_fun=self.no_op)
+
+    def activate_pq_profile(self):
+        predecessor_height = 2304
+        assert self.nodes[0].getblockcount() <= predecessor_height
+        self.generatetoaddress(
+            self.nodes[0],
+            predecessor_height - self.nodes[0].getblockcount(),
+            self.nodes[0].getnewaddress(), sync_fun=self.no_op)
+        predecessor_hash = self.nodes[0].getblockhash(predecessor_height)
+        self.extra_args = [
+            arg for arg in self.extra_args
+            if arg != '-pqfinalitypreparation=1'
+        ] + [
+            '-pqactivationheight=%d' % (predecessor_height + 1),
+            '-pqbtcccandidateorigin=1000000',
+            '-pqbtccreceiptanchorheight=%d' % predecessor_height,
+            '-pqbtccreceiptanchorblockhash=%s' % predecessor_hash,
+            '-pqbtccreceiptanchorcursorheight=-1',
+            '-pqbtccreceiptanchorcursorsyshash=%s' % ('0' * 64),
+            '-pqbtccreceiptanchorcursorbtchash=%s' % ('0' * 64),
+            '-pqbtccreceiptanchorstatehash=%s' % ('0' * 64),
+        ]
+        self.stop_controller_node()
+        self.nodes[0].extra_args = list(self.extra_args)
+        self.start_node(0, extra_args=self.extra_args + ['-reindex'])
+        if self.default_wallet_name not in self.nodes[0].listwallets():
+            self.nodes[0].loadwallet(self.default_wallet_name)
+        force_finish_mnsync(self.nodes[0])
+        assert_equal(self.nodes[0].getblockcount(), predecessor_height)
+        assert_equal(self.nodes[0].getbestblockhash(), predecessor_hash)
+    # SYSCOIN END: Register one real root and activate the PQ test profile.
 
     def start_mn(self, mn):
         start_idx = len(self.nodes) - 1

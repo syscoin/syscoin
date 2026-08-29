@@ -872,7 +872,7 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
             # SYSCOIN: Preserve fork-owned deterministic/PQ/NEVM sidecars in
             # the reusable cached chain.
             for entry in os.listdir(cache_path()):
-                if entry not in ['chainstate', 'blocks', 'indexes', 'nevmminttx', 'nevmtxroots', 'geth', 'dbblockindex', 'evodb_dmn', 'evodb_dmn_inverse', 'evodb_dmn_pq_registry', 'evodb_dmn_pq_payment_probation', 'evodb_sb', 'nevmdata', 'nevmblobdata']:
+                if entry not in ['chainstate', 'blocks', 'indexes', 'nevmminttx', 'nevmtxroots', 'geth', 'dbblockindex', 'evodb_dmn', 'evodb_dmn_aux_gc', 'evodb_dmn_inverse', 'evodb_dmn_pq_registry', 'evodb_dmn_pq_payment_probation', 'evodb_sb', 'nevmdata', 'nevmblobdata']:
                     os.remove(cache_path(entry))
 
         for i in range(self.num_nodes):
@@ -1047,7 +1047,9 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
 
 # SYSCOIN BEGIN: deterministic-masternode and PQ functional framework.
 class MasternodeInfo:
-    def __init__(self, proTxHash, ownerAddr, votingAddr, operatorKey, chainlockSeed, collateral_address, collateral_txid, collateral_vout):
+    def __init__(self, proTxHash, ownerAddr, votingAddr, operatorKey,
+                 chainlockSeed, collateral_address, collateral_txid,
+                 collateral_vout, service, operatorPayoutAddress):
         self.proTxHash = proTxHash
         self.ownerAddr = ownerAddr
         self.votingAddr = votingAddr
@@ -1056,9 +1058,15 @@ class MasternodeInfo:
         self.collateral_address = collateral_address
         self.collateral_txid = collateral_txid
         self.collateral_vout = collateral_vout
+        self.service = service
+        self.operatorPayoutAddress = operatorPayoutAddress
 
 
 class DashTestFramework(SyscoinTestFramework):
+    PQ_ACTIVATION_PREDECESSOR_HEIGHT = 2304
+    # Generic MN/governance tests do not exercise AuxPoW/BTCC carriers.
+    PQ_BTCC_CANDIDATE_ORIGIN = 1_000_000
+
     def add_wallet_options(self, parser, *, descriptors=True, legacy=True):
         # Dash/MN functional tests are descriptor-only.
         super().add_wallet_options(parser, descriptors=True, legacy=False)
@@ -1098,32 +1106,27 @@ class DashTestFramework(SyscoinTestFramework):
                 arg for arg in self.extra_args[i]
                 if not arg.startswith("-dip3params=")
             ]
-            # The first empty DIP3 block becomes the exact, dynamically pinned
-            # migration anchor before any provider transaction is accepted.
+            # PQ registry preparation starts with the first DIP3 block.
             self.extra_args[i].append("-dip3params=1:1")
             self.extra_args[i].append("-mncollateral=100")
             # Enable CL receipt consensus rules for Syscoin/Dash functional tests.
             self.extra_args[i].append("-clreceiptstartheight=0")
         self.disable_autoconnect = False
 
-    def configure_pq_migration_anchor(self):
+    def configure_pq_preparation(self):
         assert_equal(self.nodes[0].getblockcount(), 0)
         self.bump_mocktime(1, nodes=[self.nodes[0]])
         self.generatetoaddress(
             self.nodes[0], 1, self.nodes[0].getnewaddress(),
             sync_fun=self.no_op)
-        anchor = self.nodes[0].protx_migration_info()
-        assert_equal(anchor["height"], 1)
+        preparation_state = self.nodes[0].protx_migration_info()
+        assert_equal(preparation_state["height"], 1)
 
         registration_cutoff_blocks = 288
         # SYSCOIN: roster membership is sampled only after root registration closes.
         roster_snapshot_lag = 288
         assert registration_cutoff_blocks >= roster_snapshot_lag
         pq_args = [
-            "-pqlegacyanchorheight=%d" % anchor["height"],
-            "-pqlegacyanchorblockhash=%s" % anchor["blockHash"],
-            "-pqlegacydmnstatehash=%s" % anchor["dmnStateHash"],
-            "-pqlegacypqregistrystatehash=%s" % anchor["pqRegistryStateHash"],
             "-pqpreparationheight=1",
             "-pqchainlockepochorigin=1440",
             "-pqregistrationcutoffblocks=%d" % registration_cutoff_blocks,
@@ -1142,7 +1145,7 @@ class DashTestFramework(SyscoinTestFramework):
         self.nodes[0].extra_args = copy.deepcopy(self.extra_args[0])
         self.start_node(0, extra_args=self.extra_args[0] + ["-reindex"])
         force_finish_mnsync(self.nodes[0])
-        assert_equal(self.nodes[0].protx_migration_info(), anchor)
+        assert_equal(self.nodes[0].protx_migration_info(), preparation_state)
 
     def create_simple_node(self):
         idx = len(self.nodes)
@@ -1156,6 +1159,72 @@ class DashTestFramework(SyscoinTestFramework):
         for idx in range(0, self.mn_count):
             self.prepare_masternode(idx)
         self.sync_all()
+
+    def pq_activation_height(self):
+        for arg in self.extra_args[0]:
+            if arg.startswith("-pqactivationheight="):
+                return int(arg.split("=", 1)[1])
+        return None
+
+    def activate_prepared_pq_masternodes(self):
+        if self.mn_count == 0 or self.pq_activation_height() is not None:
+            return
+
+        predecessor_height = getattr(
+            self, "ACTIVATION_PREDECESSOR_HEIGHT",
+            self.PQ_ACTIVATION_PREDECESSOR_HEIGHT)
+        candidate_origin = getattr(
+            self, "BTC_CANDIDATE_ORIGIN",
+            self.PQ_BTCC_CANDIDATE_ORIGIN)
+        assert self.nodes[0].getblockcount() <= predecessor_height
+        # Root registration consumed the setup fee outputs. Refill each
+        # operator's isolated source before the long preparation catch-up so
+        # the A-block service batch has confirmed inputs.
+        for mn in self.mninfo:
+            self.nodes[0].sendtoaddress(mn.collateral_address, 0.01)
+        self.generatetoaddress(
+            self.nodes[0],
+            predecessor_height - self.nodes[0].getblockcount(),
+            self.nodes[0].getnewaddress(),
+        )
+        self.sync_blocks(self.nodes)
+        predecessor_hash = self.nodes[0].getblockhash(predecessor_height)
+        activation_args = [
+            "-pqactivationheight=%d" % (predecessor_height + 1),
+            "-pqbtcccandidateorigin=%d" % candidate_origin,
+            "-pqbtccreceiptanchorheight=%d" % predecessor_height,
+            "-pqbtccreceiptanchorblockhash=%s" % predecessor_hash,
+            "-pqbtccreceiptanchorcursorheight=-1",
+            "-pqbtccreceiptanchorcursorsyshash=%s" % ("0" * 64),
+            "-pqbtccreceiptanchorcursorbtchash=%s" % ("0" * 64),
+            "-pqbtccreceiptanchorstatehash=%s" % ("0" * 64),
+        ]
+        for index, args in enumerate(self.extra_args):
+            self.extra_args[index] = [
+                arg for arg in args
+                if arg != "-pqfinalitypreparation=1"
+            ] + activation_args
+
+        self.stop_nodes()
+        for index, node in enumerate(self.nodes):
+            node.extra_args = copy.deepcopy(self.extra_args[index])
+            self.start_node(
+                index, extra_args=self.extra_args[index] + ["-reindex"])
+            force_finish_mnsync(node)
+        for index in range(1, len(self.nodes)):
+            self.connect_nodes(0, index)
+        self.sync_blocks(self.nodes)
+        assert_equal(self.nodes[0].getblockcount(), predecessor_height)
+        assert_equal(self.nodes[0].getbestblockhash(), predecessor_hash)
+
+        # Preserve the service/payout state that legacy ProUpServ would have
+        # established during setup, but authorize it under the PQ rules in A.
+        for mn in self.mninfo:
+            self.nodes[0].protx_update_service(
+                mn.proTxHash, mn.service, mn.operatorKey, "",
+                mn.operatorPayoutAddress, mn.collateral_address)
+        self.generate(self.nodes[0], 1)
+        self.sync_blocks(self.nodes)
 
     def prepare_masternode(self, idx):
         register_fund = (idx % 2) == 0
@@ -1196,9 +1265,9 @@ class DashTestFramework(SyscoinTestFramework):
         else:
             proTxHash = self.nodes[0].sendrawtransaction(protx_result)
 
-        # A PQ ProReg starts inactive. One owner-authorized transaction binds
-        # the global key and its deterministic scheduled-WOTS tree root; no recurring
-        # child-key registration transaction is required.
+        # Preparation uses the legacy ProReg form. One owner-authorized
+        # transaction binds the global key and deterministic scheduled-WOTS
+        # tree root before the PQ-only activation height.
         self.generate(self.nodes[0], 1)
         registered_mn = self.nodes[0].protx_info(proTxHash)
         collateral_txid = registered_mn["collateralHash"]
@@ -1219,15 +1288,19 @@ class DashTestFramework(SyscoinTestFramework):
         self.generate(self.nodes[0], 1)
         operatorPayoutAddress = (
             self.nodes[0].getnewaddress() if operatorReward > 0 else "")
-        self.nodes[0].protx_update_service(
-            proTxHash, ipAndPort, operator_keys["operatorKey"], "",
-            operatorPayoutAddress, address)
-        self.generate(self.nodes[0], 1)
+        activation_height = self.pq_activation_height()
+        if (activation_height is not None and
+                self.nodes[0].getblockcount() + 1 >= activation_height):
+            self.nodes[0].protx_update_service(
+                proTxHash, ipAndPort, operator_keys["operatorKey"], "",
+                operatorPayoutAddress, address)
+            self.generate(self.nodes[0], 1)
 
         self.mninfo.append(MasternodeInfo(
             proTxHash, ownerAddr, votingAddr,
             operator_keys["operatorKey"], operator_keys["chainlockSeed"],
-            address, collateral_txid, collateral_vout))
+            address, collateral_txid, collateral_vout,
+            ipAndPort, operatorPayoutAddress))
 
         self.log.info("Prepared masternode %d: collateral_txid=%s, collateral_vout=%d, protxHash=%s" % (idx, collateral_txid, collateral_vout, proTxHash))
 
@@ -1309,7 +1382,7 @@ class DashTestFramework(SyscoinTestFramework):
         if self.is_wallet_compiled():
             self.import_deterministic_coinbase_privkeys()
         self.num_nodes = num_nodes_copy
-        self.configure_pq_migration_anchor()
+        self.configure_pq_preparation()
         required_balance = MASTERNODE_COLLATERAL * self.mn_count + 1
         self.log.info("Generating %d coins" % required_balance)
         force_finish_mnsync(self.nodes[0])
@@ -1329,6 +1402,7 @@ class DashTestFramework(SyscoinTestFramework):
 
         # create masternodes
         self.prepare_masternodes()
+        self.activate_prepared_pq_masternodes()
         self.prepare_datadirs()
         self.start_masternodes()
 
@@ -1341,10 +1415,9 @@ class DashTestFramework(SyscoinTestFramework):
         self.generate(self.nodes[0], 1)
         # Enable ChainLocks by default
         self.nodes[0].spork("SPORK_19_CHAINLOCKS_ENABLED", 0)
-        # SYSCOIN: first-run PQ masternodes build 65,536-leaf public child-key
-        # caches concurrently. Match the bounded registration RPC so parallel
-        # functional jobs cannot exhaust this positive convergence wait while
-        # the message handlers are CPU-starved by those cache builders.
+        # SYSCOIN: several PQ-authenticated peers can perform global SLH-DSA
+        # work concurrently on constrained CI hosts. Keep convergence bounded
+        # without inheriting the ordinary short spork deadline.
         self.wait_for_sporks_same(timeout=600)
         self.bump_mocktime(1)
 

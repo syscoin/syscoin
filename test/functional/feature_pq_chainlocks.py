@@ -4,8 +4,8 @@
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Live P2P coverage for post-quantum ChainLock admission and finality.
 
-The test derives private regtest migration-state and finality anchors at
-runtime. It never changes the production 400-member, 267-threshold, four-roster
+The test prepares a private registry and activates PQ rules at a runtime-mined
+height. It never changes the production 400-member, 267-threshold, four-roster
 profile. A non-installed C++ helper derives four snapshots from the mined
 branch and signs 801 real scheduled-WOTS shares; syscoind receives them only through the
 production P2P collector.
@@ -81,7 +81,7 @@ PAYMENT_AUDIT_RECEIPT_VERSION = 1
 PAYMENT_PROBATION_STATE_VERSION = 1
 CHAINLOCK_PERIOD = 5
 FIRST_ELIGIBLE_TARGET_HEIGHT = 2305
-FINALITY_ANCHOR_HEIGHT = FIRST_ELIGIBLE_TARGET_HEIGHT - 1
+ACTIVATION_PREDECESSOR_HEIGHT = FIRST_ELIGIBLE_TARGET_HEIGHT - 1
 SIGN_LAG = 5
 EPOCH_ORIGIN = 1440
 EPOCH_BLOCKS = 288
@@ -367,16 +367,6 @@ class PQChainLocksTest(SyscoinTestFramework):
             funds_address,
         )
         self.generatetoaddress(node, 1, mining_address, sync_fun=self.no_op)
-        node.protx_update_service(
-            protx_hash,
-            service,
-            operator_keys["operatorKey"],
-            "",
-            "",
-            funds_address,
-        )
-        self.generatetoaddress(node, 1, mining_address, sync_fun=self.no_op)
-
         info = node.protx_info(protx_hash)
         assert_equal(info["state"]["PoSeBanHeight"], -1)
         assert_equal(
@@ -387,19 +377,14 @@ class PQChainLocksTest(SyscoinTestFramework):
         node = self.nodes[0]
         address = node.getnewaddress()
         self.generatetoaddress(node, 1, address, sync_fun=self.no_op)
-        migration_anchor = node.protx_migration_info()
-        assert_equal(migration_anchor["height"], 1)
+        preparation_state = node.protx_migration_info()
+        assert_equal(preparation_state["height"], 1)
 
         registration_cutoff_blocks = 288
         # SYSCOIN: roster membership is sampled only after root registration closes.
         roster_snapshot_lag = 288
         assert registration_cutoff_blocks >= roster_snapshot_lag
         profile_args = self.base_args + [
-            "-pqlegacyanchorheight=%d" % migration_anchor["height"],
-            "-pqlegacyanchorblockhash=%s" % migration_anchor["blockHash"],
-            "-pqlegacydmnstatehash=%s" % migration_anchor["dmnStateHash"],
-            "-pqlegacypqregistrystatehash=%s" %
-            migration_anchor["pqRegistryStateHash"],
             "-pqpreparationheight=1",
             "-pqchainlockepochorigin=1440",
             "-pqregistrationcutoffblocks=%d" % registration_cutoff_blocks,
@@ -417,28 +402,27 @@ class PQChainLocksTest(SyscoinTestFramework):
                 "PQ finality service will start"]):
             self.start_node(0, extra_args=preparation_args + ["-reindex"])
         force_finish_mnsync(node)
-        assert_equal(node.protx_migration_info(), migration_anchor)
+        assert_equal(node.protx_migration_info(), preparation_state)
         self.assert_no_chainlock_rpcs(node)
 
-        # Post-anchor payment consensus requires at least one valid operator
-        # whose child root was frozen before the finality predecessor. The
+        # Post-activation payment consensus requires at least one valid
+        # operator whose child root was frozen before activation. The
         # synthetic quorum fixture does not replace the on-chain payment set.
         self.install_payment_masternode(node, address)
 
         self.generatetoaddress(
-            node, FINALITY_ANCHOR_HEIGHT - node.getblockcount(), address,
+            node, ACTIVATION_PREDECESSOR_HEIGHT - node.getblockcount(), address,
             sync_fun=self.no_op)
-        assert_equal(node.getblockcount(), FINALITY_ANCHOR_HEIGHT)
-        finality_anchor = {
-            "height": FINALITY_ANCHOR_HEIGHT,
-            "blockHash": node.getblockhash(FINALITY_ANCHOR_HEIGHT),
+        assert_equal(node.getblockcount(), ACTIVATION_PREDECESSOR_HEIGHT)
+        activation_predecessor = {
+            "height": ACTIVATION_PREDECESSOR_HEIGHT,
+            "blockHash": node.getblockhash(ACTIVATION_PREDECESSOR_HEIGHT),
         }
         pq_args = profile_args + [
-            "-pqchainlockanchorheight=%d" % finality_anchor["height"],
-            "-pqchainlockanchorblockhash=%s" % finality_anchor["blockHash"],
+            "-pqactivationheight=%d" % (activation_predecessor["height"] + 1),
             "-pqbtcccandidateorigin=%d" % BTCC_CANDIDATE_ORIGIN,
-            "-pqbtccreceiptanchorheight=%d" % finality_anchor["height"],
-            "-pqbtccreceiptanchorblockhash=%s" % finality_anchor["blockHash"],
+            "-pqbtccreceiptanchorheight=%d" % activation_predecessor["height"],
+            "-pqbtccreceiptanchorblockhash=%s" % activation_predecessor["blockHash"],
             "-pqbtccreceiptanchorcursorheight=-1",
             "-pqbtccreceiptanchorcursorsyshash=%s" % ("0" * 64),
             "-pqbtccreceiptanchorcursorbtchash=%s" % ("0" * 64),
@@ -448,20 +432,18 @@ class PQChainLocksTest(SyscoinTestFramework):
         self.extra_args[0] = pq_args
         node.extra_args = list(pq_args)
         self.start_node(0, extra_args=pq_args + ["-reindex"])
-        assert_equal(node.getblockhash(migration_anchor["height"]),
-                     migration_anchor["blockHash"])
         tip_state = node.protx_migration_info()
-        assert_equal(tip_state["height"], finality_anchor["height"])
-        assert_equal(tip_state["blockHash"], finality_anchor["blockHash"])
-        assert_equal(node.getblockhash(finality_anchor["height"]),
-                     finality_anchor["blockHash"])
+        assert_equal(tip_state["height"], activation_predecessor["height"])
+        assert_equal(tip_state["blockHash"], activation_predecessor["blockHash"])
+        assert_equal(node.getblockhash(activation_predecessor["height"]),
+                     activation_predecessor["blockHash"])
 
         node.spork("SPORK_19_CHAINLOCKS_ENABLED", 0)
         self.generatetoaddress(node, 1, address, sync_fun=self.no_op)
         self.assert_no_chainlock_rpcs(node)
-        return migration_anchor, finality_anchor
+        return preparation_state, activation_predecessor
 
-    def test_rpc_compatibility_without_winner(self, anchor):
+    def test_rpc_compatibility_without_winner(self, preparation_state):
         node = self.nodes[0]
         self.assert_no_chainlock_rpcs(node)
         assert_equal(node.gettxchainlocks([]), [])
@@ -470,12 +452,14 @@ class PQChainLocksTest(SyscoinTestFramework):
             [{"height": 0, "chainlock": False, "mempool": False}],
         )
 
-        anchor_coinbase = node.getblock(anchor["blockHash"], 2)["tx"][0]["txid"]
-        # The migration block is an ancestor of the separately pinned finality
-        # predecessor. It remains final even though no PQ winner exists yet.
+        preparation_coinbase = node.getblock(
+            preparation_state["blockHash"], 2)["tx"][0]["txid"]
+        # A height-only cutover does not manufacture finality. Until the first
+        # valid certificate is durably accepted, ordinary PoW fork choice
+        # remains authoritative for every historical block.
         assert_equal(
-            node.gettxchainlocks([anchor_coinbase]),
-            [{"height": anchor["height"], "chainlock": True,
+            node.gettxchainlocks([preparation_coinbase]),
+            [{"height": preparation_state["height"], "chainlock": False,
               "mempool": False}],
         )
         genesis_coinbase = node.getblock(node.getblockhash(0), 2)["tx"][0]["txid"]
@@ -486,15 +470,15 @@ class PQChainLocksTest(SyscoinTestFramework):
             -8, "Up to 100 txids only", node.gettxchainlocks,
             ["%064x" % (index + 1) for index in range(101)])
 
-    def test_share_admission(self, finality_anchor):
+    def test_share_admission(self, activation_predecessor):
         node = self.nodes[0]
         dmn_state_before = node.protx_migration_info()["dmnStateHash"]
         identity = 0x11
         statement_fields = (
             FIRST_ELIGIBLE_TARGET_HEIGHT,
             0x41,
-            finality_anchor["height"],
-            int(finality_anchor["blockHash"], 16),
+            activation_predecessor["height"],
+            int(activation_predecessor["blockHash"], 16),
             0x42,
         )
 
@@ -556,15 +540,15 @@ class PQChainLocksTest(SyscoinTestFramework):
         peer.wait_for_getdata([logical_hash], timeout=15)
         assert_equal(peer.last_message["getdata"].inv[0].type, MSG_CLSIG)
 
-    def test_final_chainlock_admission(self, finality_anchor):
+    def test_final_chainlock_admission(self, activation_predecessor):
         node = self.nodes[0]
         genesis_hash = int(node.getblockhash(0), 16)
-        previous_hash = int(finality_anchor["blockHash"], 16)
+        previous_hash = int(activation_predecessor["blockHash"], 16)
 
         requested_statement = serialize_statement(
             FIRST_ELIGIBLE_TARGET_HEIGHT,
             0x51,
-            finality_anchor["height"],
+            activation_predecessor["height"],
             previous_hash,
             0x52,
         )
@@ -590,7 +574,7 @@ class PQChainLocksTest(SyscoinTestFramework):
         wrong_statement = serialize_statement(
             FIRST_ELIGIBLE_TARGET_HEIGHT,
             0x53,
-            finality_anchor["height"],
+            activation_predecessor["height"],
             previous_hash,
             0x52,
         )
@@ -625,14 +609,14 @@ class PQChainLocksTest(SyscoinTestFramework):
         assert alternate_peer.is_connected
         self.assert_no_chainlock_rpcs(node)
 
-    def test_no_winner_survives_restart(self, anchor):
+    def test_no_winner_survives_restart(self, preparation_state):
         node = self.nodes[0]
         tip = node.getbestblockhash()
         tip_migration_state = node.protx_migration_info()
         self.restart_node(0, extra_args=self.extra_args[0])
         assert_equal(node.getbestblockhash(), tip)
         assert_equal(node.protx_migration_info(), tip_migration_state)
-        self.test_rpc_compatibility_without_winner(anchor)
+        self.test_rpc_compatibility_without_winner(preparation_state)
 
     @staticmethod
     def read_full_dimension_bundle(path):
@@ -952,7 +936,7 @@ class PQChainLocksTest(SyscoinTestFramework):
             "probation_state_hash": probation_state_hash,
         }
 
-    def generate_full_dimension_fixture(self, finality_anchor):
+    def generate_full_dimension_fixture(self, activation_predecessor):
         node = self.nodes[0]
         address = node.get_deterministic_priv_key().address
         # ChainLock targets require exact governance provenance. Rapid mining
@@ -997,8 +981,8 @@ class PQChainLocksTest(SyscoinTestFramework):
             genesis_hash,
             str(FIRST_ELIGIBLE_TARGET_HEIGHT),
             target_hash,
-            str(finality_anchor["height"]),
-            finality_anchor["blockHash"],
+            str(activation_predecessor["height"]),
+            activation_predecessor["blockHash"],
             str(EPOCH_ORIGIN),
             str(REGISTRATION_CUTOFF_BLOCKS),
             str(ROSTER_SNAPSHOT_LAG),
@@ -1217,11 +1201,18 @@ class PQChainLocksTest(SyscoinTestFramework):
         )
         assert_equal(side_tip["status"], "invalid")
 
-    def test_full_dimension_collection(self, finality_anchor):
+    def test_full_dimension_collection(self, activation_predecessor):
         node = self.nodes[0]
         target_hash, fixture_args, bundle = \
-            self.generate_full_dimension_fixture(finality_anchor)
+            self.generate_full_dimension_fixture(activation_predecessor)
         canonical_tip, competing_blocks = self.prepare_competing_work()
+        # The deliberate branch switch above revokes the previously published
+        # capability even after the fixture branch becomes active again. Peer
+        # ingress consumes only a scheduler-published immutable replacement.
+        with node.assert_debug_log(
+                ["PQ ChainLock test fixture matched snapshot height=2016"],
+                timeout=30):
+            node.syncwithvalidationinterfacequeue()
         dmn_state_before = node.protx_migration_info()["dmnStateHash"]
 
         sender_marker = "pq-full-sender"
@@ -2105,13 +2096,13 @@ class PQChainLocksTest(SyscoinTestFramework):
         assert_equal(node.getblock(canonical_target)["confirmations"], -1)
 
     def run_test(self):
-        migration_anchor, finality_anchor = self.configure_private_migration()
-        self.test_rpc_compatibility_without_winner(migration_anchor)
+        preparation_state, activation_predecessor = self.configure_private_migration()
+        self.test_rpc_compatibility_without_winner(preparation_state)
         self.test_getclsig_requests()
-        self.test_share_admission(finality_anchor)
-        self.test_final_chainlock_admission(finality_anchor)
-        self.test_no_winner_survives_restart(migration_anchor)
-        self.test_full_dimension_collection(finality_anchor)
+        self.test_share_admission(activation_predecessor)
+        self.test_final_chainlock_admission(activation_predecessor)
+        self.test_no_winner_survives_restart(preparation_state)
+        self.test_full_dimension_collection(activation_predecessor)
         self.test_current_catchup_side_branch_reorg()
         self.test_payment_audit_receipt()
 

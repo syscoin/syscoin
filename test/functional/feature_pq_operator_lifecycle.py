@@ -18,6 +18,8 @@ from test_framework.util import (
 
 class PQOperatorLifecycleTest(SyscoinTestFramework):
     CHAINLOCK_SEED = "11" * 32
+    ACTIVATION_PREDECESSOR_HEIGHT = 2304
+    BTCC_CANDIDATE_ORIGIN = 2315
 
     def add_options(self, parser):
         self.add_wallet_options(parser, descriptors=True, legacy=False)
@@ -47,9 +49,8 @@ class PQOperatorLifecycleTest(SyscoinTestFramework):
         self.add_nodes(1)
         self.start_node(0, extra_args=self.extra_args)
         force_finish_mnsync(self.nodes[0])
-        # The migration anchor is discovered from this bootstrap chain, so no
-        # exact PQ governance registry exists yet. Keep superblocks off only
-        # until that anchor is installed; otherwise the first superblock must
+        # PQ registry preparation has not started on this bootstrap chain.
+        # Keep superblocks off until it is enabled; otherwise the first one must
         # correctly fail closed on unavailable governance state.
         self.nodes[0].spork("SPORK_9_SUPERBLOCKS_ENABLED", 4070908800)
 
@@ -71,7 +72,7 @@ class PQOperatorLifecycleTest(SyscoinTestFramework):
             "paymentEligibleSinceHeight": -1,
         })
 
-    def configure_pq_migration_anchor(self):
+    def configure_pq_preparation(self):
         node = self.nodes[0]
         anchor = node.protx_migration_info()
         assert_equal(anchor["height"], node.getblockcount())
@@ -79,10 +80,6 @@ class PQOperatorLifecycleTest(SyscoinTestFramework):
         roster_snapshot_lag = 288
         assert registration_cutoff_blocks >= roster_snapshot_lag
         self.extra_args += [
-            "-pqlegacyanchorheight=%d" % anchor["height"],
-            "-pqlegacyanchorblockhash=%s" % anchor["blockHash"],
-            "-pqlegacydmnstatehash=%s" % anchor["dmnStateHash"],
-            "-pqlegacypqregistrystatehash=%s" % anchor["pqRegistryStateHash"],
             "-pqpreparationheight=%d" % anchor["height"],
             "-pqchainlockepochorigin=1440",
             "-pqregistrationcutoffblocks=%d" % registration_cutoff_blocks,
@@ -126,7 +123,10 @@ class PQOperatorLifecycleTest(SyscoinTestFramework):
         )
         self.generate(node, 1)
         info = node.protx_info(protx_hash)
-        assert info["state"]["PoSeBanHeight"] != -1
+        # The migration record is a normal legacy MN until A. Its separately
+        # registered root makes it PQ-eligible without a synthetic service
+        # update during preparation.
+        assert_equal(info["state"]["PoSeBanHeight"], -1)
         self.assert_payment_audit_clear(info)
         listed = [
             entry for entry in node.protx_list("registered", True)
@@ -274,6 +274,42 @@ class PQOperatorLifecycleTest(SyscoinTestFramework):
         masternode["operator_key"] = replacement["operatorKey"]
         return rotated_key
 
+    def activate_pq(self):
+        node = self.nodes[0]
+        self.generate(
+            node,
+            self.ACTIVATION_PREDECESSOR_HEIGHT - node.getblockcount(),
+        )
+        anchor_hash = node.getblockhash(
+            self.ACTIVATION_PREDECESSOR_HEIGHT)
+        self.extra_args = [
+            arg for arg in self.extra_args
+            if arg not in (
+                "-pqfinalitypreparation=1",
+                "-pqoperatorcommitmentteststub=1",
+            )
+        ]
+        self.extra_args += [
+            "-pqactivationheight=%d" %
+            (self.ACTIVATION_PREDECESSOR_HEIGHT + 1),
+            "-pqbtcccandidateorigin=%d" % self.BTCC_CANDIDATE_ORIGIN,
+            "-pqbtccreceiptanchorheight=%d" %
+            self.ACTIVATION_PREDECESSOR_HEIGHT,
+            "-pqbtccreceiptanchorblockhash=%s" % anchor_hash,
+            "-pqbtccreceiptanchorcursorheight=-1",
+            "-pqbtccreceiptanchorcursorsyshash=%s" % ("0" * 64),
+            "-pqbtccreceiptanchorcursorbtchash=%s" % ("0" * 64),
+            "-pqbtccreceiptanchorstatehash=%s" % ("0" * 64),
+        ]
+        self.stop_node(0)
+        node.extra_args = list(self.extra_args)
+        self.start_node(0, extra_args=self.extra_args + ["-reindex"])
+        self.ensure_controller_wallet()
+        force_finish_mnsync(node)
+        assert_equal(node.getblockcount(),
+                     self.ACTIVATION_PREDECESSOR_HEIGHT)
+        assert_equal(node.getbestblockhash(), anchor_hash)
+
     def update_service(self, masternode):
         node = self.nodes[0]
         node.protx_update_service(
@@ -334,13 +370,14 @@ class PQOperatorLifecycleTest(SyscoinTestFramework):
         while node.getbalance() < Decimal("101"):
             self.generatetoaddress(node, 10, node.getnewaddress())
 
-        self.configure_pq_migration_anchor()
+        self.configure_pq_preparation()
         masternode = self.create_masternode()
         independent_tx = self.create_independent_mempool_tx()
         operator_rpc, initial_key = self.register_initial_root(
             masternode, independent_tx)
         rotated_key = self.rotate_operator_on_same_root(
             operator_rpc, masternode, initial_key)
+        self.activate_pq()
         expected_info = self.update_service(masternode)
         self.check_restart_and_fresh_replay(
             masternode, expected_info, rotated_key)
