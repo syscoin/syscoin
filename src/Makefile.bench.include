@@ -47,6 +47,7 @@ bench_bench_syscoin_SOURCES = \
   bench/poly1305.cpp \
   bench/pool.cpp \
   bench/pq_crypto.cpp \
+  bench/pq_registry.cpp \
   bench/prevector.cpp \
   bench/rollingbloom.cpp \
   bench/rpc_blockchain.cpp \
