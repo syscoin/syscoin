@@ -8,6 +8,7 @@
 #include <evo/deterministicmns.h>
 #include <masternode/activemasternode.h>
 #include <netbase.h>
+#include <net_processing.h>
 #include <streams.h>
 #include <util/time.h>
 
@@ -421,6 +422,16 @@ BOOST_AUTO_TEST_CASE(version_identity_is_scoped_to_masternode_transport)
     BOOST_CHECK(dedicated.HasMasternodeIdentity());
     BOOST_CHECK(dedicated.pro_tx_hash == pro_tx_hash);
     BOOST_CHECK_EQUAL(dedicated.global_key_version, key_version);
+
+    BOOST_CHECK(ShouldClassifyRemoteMasternodeIdentity(
+        /*participation_allowed=*/true,
+        /*identity_advertised=*/true));
+    BOOST_CHECK(!ShouldClassifyRemoteMasternodeIdentity(
+        /*participation_allowed=*/false,
+        /*identity_advertised=*/true));
+    BOOST_CHECK(!ShouldClassifyRemoteMasternodeIdentity(
+        /*participation_allowed=*/true,
+        /*identity_advertised=*/false));
 }
 
 BOOST_AUTO_TEST_CASE(wire_encoding_is_fixed_and_strict)

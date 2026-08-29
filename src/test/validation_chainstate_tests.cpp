@@ -33,6 +33,7 @@
 
 // SYSCOIN BEGIN: fork governance/PQ chainstate test dependencies.
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <future>
 #include <limits>
@@ -276,6 +277,44 @@ public:
         manager.m_pq_authority_tip_hash = tip.GetBlockHash();
         manager.m_pq_authority_tip_height = tip.nHeight;
         manager.m_pq_authority_snapshot_valid = snapshot_valid;
+    }
+
+    struct AuthoritySnapshotCacheStats {
+        uint64_t builds{0};
+        uint64_t reuses{0};
+    };
+
+    static void RememberAuthorityContent(
+        CGovernanceManager& manager,
+        const CBlockIndex& tip,
+        const uint256& dmn_state_hash,
+        const uint256& registry_state_root)
+    {
+        LOCK(manager.cs);
+        manager.m_pq_authority_tip_hash = tip.GetBlockHash();
+        manager.m_pq_authority_tip_height = tip.nHeight;
+        manager.m_pq_authority_snapshot_valid = true;
+        manager.m_pq_authority_dmn_state_hash = dmn_state_hash;
+        manager.m_pq_authority_registry_state_root = registry_state_root;
+    }
+
+    static bool TryReuseAuthorityContent(
+        CGovernanceManager& manager,
+        const CBlockIndex& tip,
+        const uint256& dmn_state_hash,
+        const uint256& registry_state_root)
+    {
+        LOCK(manager.cs);
+        return manager.TryReusePQGovernanceSnapshot(
+            tip, dmn_state_hash, registry_state_root);
+    }
+
+    static AuthoritySnapshotCacheStats AuthoritySnapshotStats(
+        CGovernanceManager& manager)
+    {
+        LOCK(manager.cs);
+        return {manager.m_pq_authority_snapshot_builds,
+                manager.m_pq_exact_snapshot_reuses};
     }
 
     static bool IsStraightExtension(
@@ -1285,7 +1324,8 @@ BOOST_FIXTURE_TEST_CASE(chainlock_enforcement_provenance_mode_matrix,
             target->nStatus = status;
         }
         BlockValidationState state;
-        return chainstate.EnforceBlock(state, target, provenance);
+        return chainstate.EnforceBlock(
+            state, target, target->pprev, provenance);
     };
     constexpr uint32_t usable{
         BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA};
@@ -1344,13 +1384,198 @@ BOOST_FIXTURE_TEST_CASE(chainlock_enforcement_provenance_mode_matrix,
     }
     BlockValidationState detached_state;
     BOOST_CHECK(!chainstate.EnforceBlock(
-        detached_state, &detached,
+        detached_state, &detached, target->pprev,
         Provenance::VERIFIED_DURABLE_CERTIFICATE));
     BOOST_CHECK(!enforce(
         BLOCK_VALID_TRANSACTIONS | BLOCK_HAVE_DATA |
             BLOCK_PQ_RECEIPT_INDEX_VALIDATED,
         Provenance::VERIFIED_DURABLE_CERTIFICATE));
 }
+
+// SYSCOIN BEGIN: Batched ChainLock-conflict correctness and work bounds.
+BOOST_FIXTURE_TEST_CASE(
+    active_chainlock_marks_preindexed_interval_siblings,
+    TestChain100Setup)
+{
+    using Provenance = ChainLockEnforcementProvenance;
+
+    auto& chainman{*Assert(m_node.chainman)};
+    auto& chainstate{chainman.ActiveChainstate()};
+    CBlockIndex* target;
+    CBlockIndex* predecessor;
+    CBlockIndex* sibling;
+    CBlockIndex* sibling_child;
+    CBlockIndex* earlier_sibling;
+    CBlockIndex* earlier_sibling_child;
+    uint32_t original_status;
+    {
+        LOCK(::cs_main);
+        target = chainman.ActiveChain().Tip();
+        BOOST_REQUIRE(target != nullptr);
+        predecessor = target->pprev;
+        BOOST_REQUIRE(predecessor != nullptr);
+        BOOST_REQUIRE(predecessor->pprev != nullptr);
+        original_status = target->nStatus;
+        target->nStatus |= BLOCK_PQ_RECEIPT_INDEX_VALIDATED;
+
+        const auto add_header = [&](const CBlockIndex& parent,
+                                    uint32_t time_offset)
+            EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+            CBlockHeader header;
+            header.nVersion = 4;
+            header.hashPrevBlock = parent.GetBlockHash();
+            header.hashMerkleRoot = InsecureRand256();
+            header.nTime = parent.nTime + time_offset;
+            header.nBits = parent.nBits;
+            return chainman.m_blockman.AddToBlockIndex(
+                header, chainman.m_best_header);
+        };
+        sibling = add_header(*predecessor, 1);
+        sibling_child = add_header(*sibling, 1);
+        earlier_sibling = add_header(*predecessor->pprev, 1);
+        earlier_sibling_child = add_header(*earlier_sibling, 1);
+        BOOST_REQUIRE(!(sibling->nStatus & BLOCK_CONFLICT_CHAINLOCK));
+        BOOST_REQUIRE(!(sibling_child->nStatus & BLOCK_CONFLICT_CHAINLOCK));
+        BOOST_REQUIRE(!(earlier_sibling->nStatus &
+                        BLOCK_CONFLICT_CHAINLOCK));
+        BOOST_REQUIRE(!(earlier_sibling_child->nStatus &
+                        BLOCK_CONFLICT_CHAINLOCK));
+        chainstate.ResetChainLockConflictMarkingStatsForTesting();
+    }
+    struct RestoreStatus {
+        CBlockIndex* target;
+        uint32_t status;
+        ~RestoreStatus()
+        {
+            LOCK(::cs_main);
+            target->nStatus = status;
+        }
+    } restore{target, original_status};
+
+    BlockValidationState state;
+    BOOST_REQUIRE(chainstate.EnforceBlock(
+        state, target, predecessor,
+        Provenance::VERIFIED_DURABLE_CERTIFICATE));
+    ChainLockConflictMarkingStatsForTesting first_stats;
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK(sibling->nStatus & BLOCK_CONFLICT_CHAINLOCK);
+        BOOST_CHECK(sibling_child->nStatus & BLOCK_CONFLICT_CHAINLOCK);
+        BOOST_CHECK(earlier_sibling->nStatus & BLOCK_CONFLICT_CHAINLOCK);
+        BOOST_CHECK(earlier_sibling_child->nStatus &
+                    BLOCK_CONFLICT_CHAINLOCK);
+        BOOST_CHECK(!(target->nStatus & BLOCK_CONFLICT_CHAINLOCK));
+        BOOST_CHECK(chainman.m_best_header == target);
+        first_stats =
+            chainstate.GetChainLockConflictMarkingStatsForTesting();
+        BOOST_CHECK_EQUAL(first_stats.batch_calls, 1U);
+        BOOST_CHECK_EQUAL(first_stats.input_roots, 2U);
+        BOOST_CHECK_EQUAL(first_stats.visited_blocks, 4U);
+        BOOST_CHECK_EQUAL(first_stats.block_index_scans, 1U);
+        BOOST_CHECK_EQUAL(first_stats.disconnect_tip_calls, 0U);
+        BOOST_CHECK_EQUAL(first_stats.tip_publications, 1U);
+    }
+
+    BlockValidationState repeat_state;
+    BOOST_REQUIRE(chainstate.EnforceBlock(
+        repeat_state, target, predecessor,
+        Provenance::VERIFIED_DURABLE_CERTIFICATE));
+    {
+        LOCK(::cs_main);
+        const auto repeat_stats{
+            chainstate.GetChainLockConflictMarkingStatsForTesting()};
+        BOOST_CHECK_EQUAL(repeat_stats.batch_calls, first_stats.batch_calls);
+        BOOST_CHECK_EQUAL(repeat_stats.input_roots, first_stats.input_roots);
+        BOOST_CHECK_EQUAL(repeat_stats.visited_blocks,
+                          first_stats.visited_blocks);
+        BOOST_CHECK_EQUAL(repeat_stats.block_index_scans,
+                          first_stats.block_index_scans);
+        BOOST_CHECK_EQUAL(repeat_stats.tip_publications,
+                          first_stats.tip_publications);
+    }
+    SyncWithValidationInterfaceQueue();
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    inactive_chainlock_conflict_batch_is_mempool_lock_safe,
+    TestChain100Setup)
+{
+    auto& chainman{*Assert(m_node.chainman)};
+    auto& chainstate{chainman.ActiveChainstate()};
+    LOCK(::cs_main);
+    CBlockIndex* const tip{chainman.ActiveChain().Tip()};
+    BOOST_REQUIRE(tip != nullptr);
+    BOOST_REQUIRE(tip->pprev != nullptr);
+
+    const auto add_header = [&](const CBlockIndex& parent,
+                                uint32_t time_offset)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+        CBlockHeader header;
+        header.nVersion = 4;
+        header.hashPrevBlock = parent.GetBlockHash();
+        header.hashMerkleRoot = InsecureRand256();
+        header.nTime = parent.nTime + time_offset;
+        header.nBits = parent.nBits;
+        return chainman.m_blockman.AddToBlockIndex(
+            header, chainman.m_best_header);
+    };
+    CBlockIndex* const root{add_header(*tip->pprev, 1)};
+    CBlockIndex* const child{add_header(*root, 1)};
+    chainstate.ResetChainLockConflictMarkingStatsForTesting();
+
+    std::array<CBlockIndex*, 1> roots{root};
+    BlockValidationState state;
+    {
+        LOCK(chainstate.MempoolMutex());
+        BOOST_REQUIRE(
+            chainstate.MarkConflictingBlocksInactive(state, roots));
+    }
+    BOOST_CHECK(root->nStatus & BLOCK_CONFLICT_CHAINLOCK);
+    BOOST_CHECK(child->nStatus & BLOCK_CONFLICT_CHAINLOCK);
+    const auto stats{
+        chainstate.GetChainLockConflictMarkingStatsForTesting()};
+    BOOST_CHECK_EQUAL(stats.batch_calls, 1U);
+    BOOST_CHECK_EQUAL(stats.input_roots, 1U);
+    BOOST_CHECK_EQUAL(stats.visited_blocks, 2U);
+    BOOST_CHECK_EQUAL(stats.block_index_scans, 1U);
+    BOOST_CHECK_EQUAL(stats.disconnect_tip_calls, 0U);
+    BOOST_CHECK_EQUAL(stats.tip_publications, 0U);
+
+    std::array<CBlockIndex*, 1> active_root{tip};
+    BlockValidationState active_state;
+    {
+        LOCK(chainstate.MempoolMutex());
+        BOOST_CHECK(!chainstate.MarkConflictingBlocksInactive(
+            active_state, active_root));
+    }
+    BOOST_CHECK(active_state.IsError());
+    BOOST_CHECK(!(tip->nStatus & BLOCK_CONFLICT_CHAINLOCK));
+    const auto rejected_stats{
+        chainstate.GetChainLockConflictMarkingStatsForTesting()};
+    BOOST_CHECK_EQUAL(rejected_stats.batch_calls, stats.batch_calls);
+    BOOST_CHECK_EQUAL(rejected_stats.block_index_scans,
+                      stats.block_index_scans);
+}
+// SYSCOIN END: Batched ChainLock-conflict correctness and work bounds.
+
+// SYSCOIN BEGIN: Preparation remains open only to PQ-authenticated tx86.
+BOOST_AUTO_TEST_CASE(pq_activation_quarantine_provider_version_policy)
+{
+    BOOST_CHECK(IsPQActivationQuarantinedProviderTxVersion(
+        SYSCOIN_TX_VERSION_MN_REGISTER));
+    BOOST_CHECK(IsPQActivationQuarantinedProviderTxVersion(
+        SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE));
+    BOOST_CHECK(IsPQActivationQuarantinedProviderTxVersion(
+        SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR));
+    BOOST_CHECK(IsPQActivationQuarantinedProviderTxVersion(
+        SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE));
+    BOOST_CHECK(IsMasternodeTx(SYSCOIN_TX_VERSION_PQ_GLOBAL_KEY));
+    BOOST_CHECK(!IsPQActivationQuarantinedProviderTxVersion(
+        SYSCOIN_TX_VERSION_PQ_GLOBAL_KEY));
+    BOOST_CHECK(!IsPQActivationQuarantinedProviderTxVersion(
+        CTransaction::CURRENT_VERSION));
+}
+// SYSCOIN END: Preparation remains open only to PQ-authenticated tx86.
 
 BOOST_FIXTURE_TEST_CASE(
     past_superblock_trigger_and_funding_vote_are_rejected,
@@ -2502,6 +2727,84 @@ BOOST_FIXTURE_TEST_CASE(
     BOOST_CHECK(!Access::IsStraightExtension(*governance, next));
 }
 
+// SYSCOIN BEGIN: exact governance authority snapshot cache coverage.
+BOOST_FIXTURE_TEST_CASE(
+    governance_exact_tip_content_reuse_is_constant_time_and_branch_safe,
+    TestChain100Setup)
+{
+    using Access = governance_tests::CGovernanceManagerTestAccess;
+    BOOST_REQUIRE(governance != nullptr);
+    const CBlockIndex* tip{
+        WITH_LOCK(::cs_main, return m_node.chainman->ActiveTip())};
+    BOOST_REQUIRE(tip != nullptr);
+    BOOST_REQUIRE(tip->pprev != nullptr);
+
+    const uint256 dmn_state_hash{InsecureRand256()};
+    const uint256 registry_state_root{InsecureRand256()};
+    BOOST_REQUIRE(!dmn_state_hash.IsNull());
+    BOOST_REQUIRE(!registry_state_root.IsNull());
+    Access::RememberAuthorityContent(
+        *governance, *tip, dmn_state_hash, registry_state_root);
+    governance->ObserveChainTip(tip);
+    BOOST_REQUIRE(Access::PublishReadyForTip(*governance, *tip));
+
+    const auto before{Access::AuthoritySnapshotStats(*governance)};
+    BOOST_CHECK(Access::TryReuseAuthorityContent(
+        *governance, *tip, dmn_state_hash, registry_state_root));
+    BOOST_CHECK(Access::TryReuseAuthorityContent(
+        *governance, *tip, dmn_state_hash, registry_state_root));
+    const auto repeated{Access::AuthoritySnapshotStats(*governance)};
+    BOOST_CHECK_EQUAL(repeated.builds, before.builds);
+    BOOST_CHECK_EQUAL(repeated.reuses, before.reuses + 2);
+
+    // Either authenticated content identity changing invalidates the shortcut,
+    // including voting/delegation state in the DMN identity and PQ authority
+    // in the registry identity.
+    BOOST_CHECK(!Access::TryReuseAuthorityContent(
+        *governance, *tip, InsecureRand256(), registry_state_root));
+    BOOST_CHECK(!Access::TryReuseAuthorityContent(
+        *governance, *tip, dmn_state_hash, InsecureRand256()));
+
+    uint256 sibling_hash{InsecureRand256()};
+    CBlockIndex sibling;
+    sibling.nHeight = tip->nHeight;
+    sibling.pprev = tip->pprev;
+    sibling.phashBlock = &sibling_hash;
+    BOOST_CHECK(!Access::TryReuseAuthorityContent(
+        *governance, sibling, dmn_state_hash, registry_state_root));
+
+    // Observing another branch and returning to the same tip must not revive
+    // the former publication without the normal full recovery pass.
+    governance->ObserveChainTip(tip->pprev);
+    governance->ObserveChainTip(tip);
+    BOOST_CHECK(!Access::TryReuseAuthorityContent(
+        *governance, *tip, dmn_state_hash, registry_state_root));
+    const auto invalidated{Access::AuthoritySnapshotStats(*governance)};
+    BOOST_CHECK_EQUAL(invalidated.builds, before.builds);
+    BOOST_CHECK_EQUAL(invalidated.reuses, repeated.reuses);
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    governance_validation_context_is_hidden_during_pq_quarantine,
+    TestingSetup)
+{
+    using Access = governance_tests::CGovernanceManagerTestAccess;
+    BOOST_REQUIRE(governance != nullptr);
+    BOOST_REQUIRE(!m_node.chainman->IsPQParticipationAllowed());
+
+    const CBlockIndex* tip{
+        WITH_LOCK(::cs_main, return m_node.chainman->ActiveTip())};
+    BOOST_REQUIRE(tip != nullptr);
+
+    // Preserve the exact race shape: readiness was published before the
+    // activation handoff revoked public participation.
+    Access::SetReady(*governance, true);
+    BOOST_CHECK(!governance->IsReady());
+    BOOST_CHECK(
+        !governance->GetPQGovernanceValidationContextEpoch().has_value());
+}
+// SYSCOIN END: exact governance authority snapshot cache coverage.
+
 BOOST_FIXTURE_TEST_CASE(
     governance_startup_snapshot_failure_is_fail_closed_and_recoverable,
     TestChain100Setup)
@@ -2742,19 +3045,13 @@ BOOST_FIXTURE_TEST_CASE(
 
     auto& consensus{
         const_cast<Consensus::Params&>(Params().GetConsensus())};
-    struct AnchorRestore {
+    struct ActivationRestore {
         Consensus::Params& consensus;
-        int height{consensus.nPQLegacyAnchorHeight};
-        uint256 block{consensus.hashPQLegacyAnchorBlock};
-        uint256 mn_state{consensus.hashPQLegacyMNState};
-        uint256 registry_state{consensus.hashPQLegacyPQRegistryState};
+        int height{consensus.nPQActivationHeight};
         int min_quorum{consensus.nGovernanceMinQuorum};
-        ~AnchorRestore()
+        ~ActivationRestore()
         {
-            consensus.nPQLegacyAnchorHeight = height;
-            consensus.hashPQLegacyAnchorBlock = block;
-            consensus.hashPQLegacyMNState = mn_state;
-            consensus.hashPQLegacyPQRegistryState = registry_state;
+            consensus.nPQActivationHeight = height;
             consensus.nGovernanceMinQuorum = min_quorum;
         }
     } restore{consensus};
@@ -2807,10 +3104,7 @@ BOOST_FIXTURE_TEST_CASE(
     tip_reactivated.phashBlock = &hashes[5];
     tip_reactivated.BuildSkip();
 
-    consensus.nPQLegacyAnchorHeight = anchor.nHeight;
-    consensus.hashPQLegacyAnchorBlock = anchor.GetBlockHash();
-    consensus.hashPQLegacyMNState = uint256::ONEV;
-    consensus.hashPQLegacyPQRegistryState = uint256::TWOV;
+    consensus.nPQActivationHeight = signed_a.nHeight;
 
     const uint256 pro_tx_hash{uint256{95}};
     const COutPoint collateral{uint256{96}, 0};

@@ -98,6 +98,13 @@ static BlockAssembler::Options ConfiguredOptions()
 BlockAssembler::BlockAssembler(Chainstate& chainstate, const CTxMemPool* mempool)
     : BlockAssembler(chainstate, mempool, ConfiguredOptions()) {}
 
+// SYSCOIN BEGIN: One central gate covers GBT and every direct generate RPC.
+bool ShouldCreateBlockTemplate(bool pq_participation_allowed) noexcept
+{
+    return pq_participation_allowed;
+}
+// SYSCOIN END: Public PQ activation block-production gate.
+
 void BlockAssembler::resetBlock()
 {
     inBlock.clear();
@@ -137,6 +144,14 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(
     LOCK(::cs_main);
     CBlockIndex* pindexPrev = m_chainstate.m_chain.Tip();
     assert(pindexPrev != nullptr);
+    // SYSCOIN BEGIN: Bind the mining-only activation exception to the exact
+    // fully validated A-1 tip. All other quarantined services remain disabled.
+    if (!ShouldCreateBlockTemplate(
+            m_chainstate.m_chainman.IsPQBlockProductionAllowed(pindexPrev))) {
+        throw std::runtime_error(
+            "PQ activation handoff is in sync-only quarantine");
+    }
+    // SYSCOIN END: Public PQ activation block-production gate.
     nHeight = pindexPrev->nHeight + 1;
     // SYSCOIN
     const bool btcp_required{llmq::pq::IsBTCPREVCommitmentHeight(

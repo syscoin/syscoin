@@ -55,6 +55,9 @@ static const unsigned int MAX_CMPCTBLOCKS_INFLIGHT_PER_BLOCK = 3;
 /** PQ ChainLocks are never transaction relay, even though they use inventory. */
 [[nodiscard]] bool IsActualTransactionInv(const CInv& inv) noexcept;
 [[nodiscard]] bool SupportsPQChainLocks(int common_version) noexcept;
+/** Quarantine downgrades an advertised masternode to an ordinary block peer. */
+[[nodiscard]] bool ShouldClassifyRemoteMasternodeIdentity(
+    bool participation_allowed, bool identity_advertised) noexcept;
 /**
  * Whether a connection may carry bounded exact governance pages.
  *

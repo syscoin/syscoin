@@ -50,6 +50,7 @@
 #include <string>
 #include <thread>
 #include <type_traits>
+#include <unordered_set> // SYSCOIN: Batched ChainLock-conflict descendant membership.
 #include <utility>
 #include <vector>
 // SYSCOIN
@@ -78,11 +79,25 @@ enum class ChainLockEnforcementProvenance : uint8_t {
     EXACT_LOCAL = 0,
     VERIFIED_DURABLE_CERTIFICATE,
 };
+// SYSCOIN BEGIN: Observable work bounds for batched ChainLock conflicts.
+struct ChainLockConflictMarkingStatsForTesting {
+    uint64_t batch_calls{0};
+    uint64_t input_roots{0};
+    uint64_t visited_blocks{0};
+    uint64_t block_index_scans{0};
+    uint64_t disconnect_tip_calls{0};
+    uint64_t tip_publications{0};
+};
+// SYSCOIN END: Observable work bounds for batched ChainLock conflicts.
 enum class PQHistoryAuthState : uint8_t {
     UNINITIALIZED = 0,
     PENDING,
     READY,
 };
+// SYSCOIN: Quarantine legacy provider mutations while still permitting the
+// independently PQ-authenticated global-key preparation transaction.
+[[nodiscard]] bool IsPQActivationQuarantinedProviderTxVersion(
+    int32_t version) noexcept;
 // SYSCOIN
 namespace llmq {
     class CChainLockSig;
@@ -787,13 +802,32 @@ public:
     bool IsManagedBTCHeaderNodeRunning(std::string& reason);
     // SYSCOIN: Probe policy readiness and recover only an authenticated owned child.
     bool CheckBTCHeaderNodeHealth(bool recover, std::string& reason);
+    // SYSCOIN: Enforce a PQ ChainLock against its authenticated predecessor.
     bool EnforceBlock(BlockValidationState& state, const CBlockIndex* pindex,
+                      const CBlockIndex* finalized_predecessor,
                       ChainLockEnforcementProvenance provenance)
         EXCLUSIVE_LOCKS_REQUIRED(!m_chainstate_mutex)
         LOCKS_EXCLUDED(cs_main);
+    // SYSCOIN BEGIN: Batched ChainLock-conflict marking interfaces.
     bool MarkConflictingBlock(BlockValidationState& state, CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    /**
+     * Quarantine known-inactive branches without touching the active chain or
+     * mempool. This is safe while ActivateBestChainStep holds both locks.
+     */
+    bool MarkConflictingBlocksInactive(
+        BlockValidationState& state,
+        std::span<CBlockIndex* const> roots)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    [[nodiscard]] ChainLockConflictMarkingStatsForTesting
+    GetChainLockConflictMarkingStatsForTesting() const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    void ResetChainLockConflictMarkingStatsForTesting()
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    // SYSCOIN END: Batched ChainLock-conflict marking interfaces.
+    // SYSCOIN: Reconcile the active chain with an authenticated PQ ChainLock.
     bool EnforceBestChainLock(
         const CBlockIndex* bestChainLockBlockIndex,
+        const CBlockIndex* finalized_predecessor,
         ChainLockEnforcementProvenance provenance)
         EXCLUSIVE_LOCKS_REQUIRED(!m_chainstate_mutex)
         LOCKS_EXCLUDED(cs_main);
@@ -912,7 +946,25 @@ private:
         CBlockIndex& candidate) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     void RemoveDeferredBTCCReceiptCandidatesThrough(
         const CBlockIndex& unusable) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    // SYSCOIN BEGIN: Remove one complete batch without repeated ancestry scans.
+    void RemoveDeferredBTCCReceiptCandidatesIn(
+        const std::unordered_set<const CBlockIndex*>& unusable)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    // SYSCOIN END: Remove one complete batch without repeated ancestry scans.
     // SYSCOIN END: Internal deferred-receipt index maintenance.
+    // SYSCOIN BEGIN: Internal batched ChainLock-conflict engine.
+    enum class ChainLockConflictMarkingMode : uint8_t {
+        DISCONNECT_ACTIVE,
+        REQUIRE_INACTIVE,
+    };
+    bool MarkConflictingBlocks(
+        BlockValidationState& state,
+        std::span<CBlockIndex* const> roots,
+        ChainLockConflictMarkingMode mode)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    ChainLockConflictMarkingStatsForTesting
+        m_chainlock_conflict_marking_stats GUARDED_BY(cs_main);
+    // SYSCOIN END: Internal batched ChainLock-conflict engine.
     bool StartBTCHeaderNodeInternal(bool force_reindex) EXCLUSIVE_LOCKS_REQUIRED(cs_btcheader);
     bool StopBTCHeaderNodeInternal(bool bOnStart) EXCLUSIVE_LOCKS_REQUIRED(cs_btcheader);
     // SYSCOIN: Keep watchdog mutation in a lock-annotated member instead of a
@@ -966,6 +1018,11 @@ private:
     bool ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMap &mapNEVMTxRoots, const CBlock& block, const CBlockIndex* pindex, const uint256& nBlockHash, const uint32_t& nHeight, const bool fJustCheck, PoDAMAPMemory &mapPoDA, const CDeterministicMNListNEVMAddressDiff &diff, bool btcc_prefix_authenticated = false);
     SteadyClock::time_point m_last_write{};
     SteadyClock::time_point m_last_flush{};
+    // SYSCOIN: Retry auxiliary GC once per tip or external retention change;
+    // mempool-triggered periodic calls must not amplify one bounded batch.
+    uint256 m_last_dmn_maintenance_retry_tip GUARDED_BY(::cs_main);
+    uint64_t m_last_dmn_maintenance_retry_generation
+        GUARDED_BY(::cs_main){0};
 
     /**
      * In case of an invalid snapshot, rename the coins leveldb directory so
@@ -1076,6 +1133,14 @@ private:
                std::numeric_limits<uint64_t>::max());
         ++m_pq_provenance_revocation_revision;
     }
+
+    // SYSCOIN BEGIN: Fail-closed local provenance for the BLS-free activation.
+    node::PQActivationRuntimeState m_pq_activation_runtime_state
+        GUARDED_BY(::cs_main){node::PQActivationRuntimeState::FAILED};
+    std::optional<node::PQActivationHandoffRecord>
+        m_pq_activation_handoff_record GUARDED_BY(::cs_main);
+    std::atomic<bool> m_pq_activation_participation_allowed{false};
+    // SYSCOIN END: Fail-closed local provenance for the BLS-free activation.
 
     //! Internal helper for ActivateSnapshot().
     [[nodiscard]] bool PopulateAndValidateSnapshot(
@@ -1358,6 +1423,50 @@ public:
     /** Check whether we are doing an initial block download (synchronizing from disk or network) */
     bool IsInitialBlockDownload() const;
 
+    // SYSCOIN BEGIN: Public-network BLS-to-PQ activation handoff.
+    /**
+     * Initialize local provenance before replay. Explicit replay and an empty
+     * coins DB are durably quarantined before any opaque legacy block is read.
+     */
+    bool PreparePQActivationHandoff(bool force_historical_replay,
+                                    bool empty_chainstate,
+                                    bilingual_str& error)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Verify or establish the exact A-1 pin after startup recovery. */
+    bool FinalizePQActivationHandoff(const CBlockIndex* tip,
+                                     bilingual_str& error)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** A fully validated A may promote historical replay to the exact A-1 pin. */
+    bool MaybeFinalizePQActivationHandoff(const CBlockIndex& tip,
+                                          std::string& error)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /**
+     * Protect any durable ChainLock floor, then persist quarantine before an
+     * ordinary pre-finality replacement of the exact local A-1 pin.
+     */
+    bool CheckPQActivationHandoffDisconnect(const CBlockIndex& disconnecting,
+                                             bool& blocked,
+                                             std::string& error)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    bool IsPQParticipationAllowed() const noexcept
+    {
+        return GetParams().GetChainType() == ChainType::REGTEST ||
+               m_pq_activation_participation_allowed.load(
+                   std::memory_order_acquire);
+    }
+
+    /**
+     * Permit normal producers, or the single activation block that can end a
+     * durable historical-replay quarantine.
+     */
+    bool IsPQBlockProductionAllowed(const CBlockIndex* active_tip)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    // SYSCOIN END: Public-network BLS-to-PQ activation handoff.
+
     // SYSCOIN: Separate base sync from the one-way public-readiness latch used
     // by PQ-history authentication and NEVM startup.
     /** Base-chain synchronization only; excludes PQ authentication and Geth. */
@@ -1499,9 +1608,6 @@ public:
 
     //! Load the block tree and coins database from disk, initializing state if we're running with -reindex
     bool LoadBlockIndex() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
-    // SYSCOIN: Quarantine every indexed branch conflicting with either immutable PQ block anchor.
-    bool EnforcePQAnchorBranches() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
-
     //! Check to see if caches are out of balance and if so, call
     //! ResizeCoinsCaches() as needed.
     void MaybeRebalanceCaches() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);

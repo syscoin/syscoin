@@ -79,6 +79,12 @@ bool SupportsPQChainLocks(int common_version) noexcept
     return common_version >= PQ_MNAUTH_PROTO_VERSION;
 }
 
+bool ShouldClassifyRemoteMasternodeIdentity(
+    bool participation_allowed, bool identity_advertised) noexcept
+{
+    return participation_allowed && identity_advertised;
+}
+
 bool CanUseGovernancePageProtocol(const CNode& node)
 {
     // A masternode may reach governance sync before its one-shot MNAUTH proof
@@ -4176,8 +4182,12 @@ void PeerManagerImpl::PushNodeVersion(CNode& pnode, const Peer& peer)
     if (fRegTest && gArgs.IsArgSet("-pushversion")) {
         nProtocolVersion = gArgs.GetIntArg("-pushversion", PROTOCOL_VERSION);
     }
-    const CMNAuthVersionData mnauth_version =
-        CMNAuth::MakeVersionData(pnode.m_masternode_connection.load());
+    // SYSCOIN BEGIN: A quarantined public node must present no masternode
+    // identity even when it was started with masternode configuration.
+    const CMNAuthVersionData mnauth_version = CMNAuth::MakeVersionData(
+        pnode.m_masternode_connection.load() &&
+        m_chainman.IsPQParticipationAllowed());
+    // SYSCOIN END: Public PQ activation MNAUTH identity gate.
     if (nProtocolVersion <= 0 ||
         !pnode.SetLocalMNAuthConnectionData(
             mnauth_version, mnauth_challenge, nonce,
@@ -5532,6 +5542,10 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
                     break;
                 }
                 case(MSG_CLSIG): {
+                    // SYSCOIN BEGIN: Never serve durable PQ authority from a
+                    // public node whose activation handoff is quarantined.
+                    if (!m_chainman.IsPQParticipationAllowed()) break;
+                    // SYSCOIN END: Public PQ activation upload gate.
                     if (m_connman.OutboundTargetReached(false) &&
                         !pfrom.HasPermission(NetPermissionFlags::Download)) {
                         LogPrint(BCLog::NET,
@@ -5563,6 +5577,10 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
                     break;
                 }
                 case(MSG_PQPOSECERT): {
+                    // SYSCOIN BEGIN: Never serve durable PQ authority from a
+                    // public node whose activation handoff is quarantined.
+                    if (!m_chainman.IsPQParticipationAllowed()) break;
+                    // SYSCOIN END: Public PQ activation upload gate.
                     if (m_connman.OutboundTargetReached(false) &&
                         !pfrom.HasPermission(NetPermissionFlags::Download)) {
                         LogPrint(BCLog::NET,
@@ -6661,6 +6679,20 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             }
             CMNAuthVersionData mnauth_version;
             vRecv >> mnauth_version;
+            // SYSCOIN BEGIN: Sync-only nodes accept ordinary block peers but
+            // never enter the authenticated masternode connection lane.
+            const bool classify_masternode{
+                ShouldClassifyRemoteMasternodeIdentity(
+                    m_chainman.IsPQParticipationAllowed(),
+                    mnauth_version.HasMasternodeIdentity())};
+            if (mnauth_version.HasMasternodeIdentity() &&
+                !classify_masternode) {
+                LogPrint(BCLog::NET_NETCONN,
+                         "downgrading masternode identity while PQ activation "
+                         "handoff is quarantined, peer=%d\n",
+                         pfrom.GetId());
+            }
+            // SYSCOIN END: Public PQ activation MNAUTH peer gate.
             if (!vRecv.empty() ||
                 legacy_masternode_claim !=
                     mnauth_version.HasMasternodeIdentity() ||
@@ -6674,10 +6706,15 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 pfrom.fDisconnect = true;
                 return;
             }
+            // SYSCOIN BEGIN: A quarantined dedicated connection becomes an
+            // ordinary block peer; its passive VERSION claim authorizes no lane.
+            if (!classify_masternode) {
+                pfrom.m_masternode_connection = false;
+            }
+            // SYSCOIN END: Public PQ activation MNAUTH peer downgrade.
             if (pfrom.IsInboundConn()) {
-                pfrom.m_masternode_connection =
-                    mnauth_version.HasMasternodeIdentity();
-                if (mnauth_version.HasMasternodeIdentity()) {
+                pfrom.m_masternode_connection = classify_masternode;
+                if (classify_masternode) {
                     LogPrint(BCLog::NET_NETCONN,
                              "peer=%d claims an inbound PQ masternode connection\n",
                              pfrom.GetId());
@@ -6881,11 +6918,13 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                       pfrom.GetId(), (fLogIPs ? strprintf(", peeraddr=%s", pfrom.addr.ToStringAddrPort()) : ""),
                       (mapped_as ? strprintf(", mapped_as=%d", mapped_as) : ""));
         }
-        // SYSCOIN
-        if (fMasternodeMode) {
+        // SYSCOIN BEGIN: Public PQ activation MNAUTH initiation gate.
+        if (fMasternodeMode &&
+            m_chainman.IsPQParticipationAllowed()) {
             CMNAuth::BeginMNAUTH(
                 &pfrom, m_chainman, m_mnauth_async);
         }
+        // SYSCOIN END: Public PQ activation MNAUTH initiation gate.
 
         if (pfrom.GetCommonVersion() >= SHORT_IDS_BLOCKS_VERSION) {
             // Tell our peer we are willing to provide version 2 cmpctblocks.
@@ -7041,7 +7080,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         return;
     }
     // SYSCOIN
-    if (msg_type == NetMsgType::MNAUTH) {
+    if (msg_type == NetMsgType::MNAUTH &&
+        m_chainman.IsPQParticipationAllowed()) {
         pfrom.fFirstMessageIsMNAUTH = true;
     }
     if (pfrom.nTimeFirstMessageReceived.load() == 0s && msg_type != NetMsgType::WTXIDRELAY && msg_type != NetMsgType::SENDADDRV2) {
@@ -7173,6 +7213,10 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
 
             if (inv.type == MSG_GOVERNANCE_OBJECT ||
                 inv.type == MSG_GOVERNANCE_OBJECT_VOTE) {
+                // SYSCOIN BEGIN: Governance inventory is live authority, not
+                // historical block data; ignore it until A-1 is pinned.
+                if (!m_chainman.IsPQParticipationAllowed()) continue;
+                // SYSCOIN END: Public PQ activation governance-inv gate.
                 const bool already_have{AlreadyHaveTx(ToGenTxid(inv))};
                 LogPrint(BCLog::NET, "got governance inv: %s  %s peer=%d\n",
                          inv.ToString(), already_have ? "have" : "new",
@@ -7190,6 +7234,10 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             }
 
             if (inv.type == MSG_CLSIG || inv.type == MSG_PQPOSECERT) {
+                // SYSCOIN BEGIN: Do not create request/known-filter state for
+                // PQ certificates while activation is sync-only.
+                if (!m_chainman.IsPQParticipationAllowed()) continue;
+                // SYSCOIN END: Public PQ activation certificate-inv gate.
                 if (!SupportsPQChainLocks(pfrom.GetCommonVersion())) continue;
                 const bool required_chainlock{
                     inv.type == MSG_CLSIG &&
@@ -8247,6 +8295,10 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
     }
     // SYSCOIN: begin targeted PQ certificate handlers.
     if (msg_type == NetMsgType::GETCLSIG) {
+        // SYSCOIN BEGIN: Quarantined public nodes do not advertise or serve
+        // live finality authority.
+        if (!m_chainman.IsPQParticipationAllowed()) return;
+        // SYSCOIN END: Public PQ activation certificate-request gate.
         if (!SupportsPQChainLocks(pfrom.GetCommonVersion())) return;
         std::optional<uint256> requested;
         if (!vRecv.empty()) {
@@ -8309,6 +8361,10 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         return;
     }
     if (msg_type == NetMsgType::GETPQPOSE) {
+        // SYSCOIN BEGIN: Quarantined public nodes do not advertise or serve
+        // live finality authority.
+        if (!m_chainman.IsPQParticipationAllowed()) return;
+        // SYSCOIN END: Public PQ activation certificate-request gate.
         if (!SupportsPQChainLocks(pfrom.GetCommonVersion())) return;
         if (vRecv.size() != uint256::size()) {
             Misbehaving(*peer, 100, "bad-getpqpose-size");
@@ -8608,22 +8664,35 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                     // If we receive a NOTFOUND message for a tx we requested, mark the announcement for it as
                     // completed in TxRequestTracker.
                     if (inv.type == MSG_CLSIG) {
-                        if (SupportsPQChainLocks(pfrom.GetCommonVersion())) {
+                        // SYSCOIN BEGIN: Quarantine has no PQ request state to
+                        // complete or mutate.
+                        if (m_chainman.IsPQParticipationAllowed() &&
+                            SupportsPQChainLocks(pfrom.GetCommonVersion())) {
                             (void)m_clsig_requests.ReceivedFailure(
                                 pfrom.GetId(), inv.hash,
                                 GetTime<std::chrono::microseconds>());
                         }
+                        // SYSCOIN END: Public PQ activation NOTFOUND gate.
                     } else if (inv.type == MSG_PQPOSECERT) {
-                        if (SupportsPQChainLocks(pfrom.GetCommonVersion())) {
+                        // SYSCOIN BEGIN: Quarantine has no PQ request state to
+                        // complete or mutate.
+                        if (m_chainman.IsPQParticipationAllowed() &&
+                            SupportsPQChainLocks(pfrom.GetCommonVersion())) {
                             (void)m_payment_audit_requests.ReceivedFailure(
                                 pfrom.GetId(), inv.hash,
                                 GetTime<std::chrono::microseconds>());
                         }
+                        // SYSCOIN END: Public PQ activation NOTFOUND gate.
                     } else if (inv.type == MSG_GOVERNANCE_OBJECT ||
                                inv.type == MSG_GOVERNANCE_OBJECT_VOTE) {
-                        (void)m_governance_requests.ReceivedNotFound(
-                            pfrom.GetId(), inv,
-                            GetTime<std::chrono::microseconds>());
+                        // SYSCOIN BEGIN: Quarantine has no governance request
+                        // state to complete or mutate.
+                        if (m_chainman.IsPQParticipationAllowed()) {
+                            (void)m_governance_requests.ReceivedNotFound(
+                                pfrom.GetId(), inv,
+                                GetTime<std::chrono::microseconds>());
+                        }
+                        // SYSCOIN END: Public PQ activation NOTFOUND gate.
                     } else {
                         m_txrequest.ReceivedResponse(pfrom.GetId(), inv.hash);
                     }
@@ -8641,6 +8710,10 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         masternodeSync.ProcessMessage(&pfrom, msg_type, vRecv);
         return;
     } else if (msg_type == NetMsgType::GOVPAGE) {
+        // SYSCOIN BEGIN: Governance synchronization is live authority and is
+        // disabled while the public activation handoff is quarantined.
+        if (!m_chainman.IsPQParticipationAllowed()) return;
+        // SYSCOIN END: Public PQ activation governance gate.
         if (!CanUseGovernancePageProtocol(pfrom)) {
             return;
         }
@@ -8653,9 +8726,19 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         msg_type == NetMsgType::MNGOVERNANCESYNC ||
         msg_type == NetMsgType::MNGOVERNANCEOBJECT ||
         msg_type == NetMsgType::MNGOVERNANCEOBJECTVOTE) {
+        // SYSCOIN BEGIN: Do not let quarantined governance traffic mutate
+        // relay, page, or object state.
+        if (!m_chainman.IsPQParticipationAllowed()) return;
+        // SYSCOIN END: Public PQ activation governance gate.
         governance->ProcessMessage(&pfrom, msg_type, vRecv, m_connman, *this);
         return;
     } else if(msg_type == NetMsgType::MNAUTH) {
+        // SYSCOIN BEGIN: Do not consume or verify authenticated masternode
+        // traffic until the exact local activation predecessor is pinned.
+        if (!m_chainman.IsPQParticipationAllowed()) {
+            return;
+        }
+        // SYSCOIN END: Public PQ activation MNAUTH message gate.
         CMNAuth::ProcessMessage(
             &pfrom, msg_type, vRecv, m_chainman,
             m_mnauth_async, *this);
@@ -8666,6 +8749,10 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
               msg_type == NetMsgType::PQPOSEHAVE ||
               msg_type == NetMsgType::PQPOSERESP ||
               msg_type == NetMsgType::PQPOSESHARE) {
+        // SYSCOIN BEGIN: Ignore all certificate/share traffic until the
+        // public node has durably pinned its exact A-1 handoff.
+        if (!m_chainman.IsPQParticipationAllowed()) return;
+        // SYSCOIN END: Public PQ activation finality-traffic gate.
         if (!SupportsPQChainLocks(pfrom.GetCommonVersion())) {
             return;
         }
@@ -9829,7 +9916,10 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                   ->IsPendingPaymentAuditReceiptCertificate(*required))) {
             m_payment_audit_requests.ClearRequired(*required);
         }
-        if (SupportsPQChainLocks(pto->GetCommonVersion())) {
+        // SYSCOIN BEGIN: Do not schedule certificate downloads before the
+        // exact public activation predecessor is pinned.
+        if (m_chainman.IsPQParticipationAllowed() &&
+            SupportsPQChainLocks(pto->GetCommonVersion())) {
             std::vector<ChainLockRequestTracker::InFlight> expired_clsigs;
             const auto clsig_request{m_clsig_requests.Request(
                 pto->GetId(), current_time, current_time + CLSIG_REQUEST_TIMEOUT,
@@ -9910,62 +10000,70 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                 }
             }
         }
+        // SYSCOIN END: Public PQ activation certificate-download gate.
 
-        std::optional<GovernanceRequestTracker::InFlight> expired_governance;
-        const auto governance_request{m_governance_requests.Request(
-            pto->GetId(), current_time,
-            current_time + std::chrono::seconds{30},
-            &expired_governance)};
-        if (expired_governance) {
-            LogPrint(BCLog::NET,
-                     "timeout of governance %s from peer=%d\n",
-                     expired_governance->inv.ToString(),
-                     expired_governance->source.peer);
-            if (PeerRef stalled_peer{
-                    GetPeerRef(expired_governance->source.peer)}) {
-                Misbehaving(*stalled_peer, 10, "withheld-governance");
-            }
-        }
-        if (governance_request) {
-            if (!AlreadyHaveTx(ToGenTxid(*governance_request))) {
+        // SYSCOIN BEGIN: Governance requests are live-authority traffic and
+        // remain dormant while a public activation handoff is quarantined.
+        if (m_chainman.IsPQParticipationAllowed()) {
+            std::optional<GovernanceRequestTracker::InFlight>
+                expired_governance;
+            const auto governance_request{m_governance_requests.Request(
+                pto->GetId(), current_time,
+                current_time + std::chrono::seconds{30},
+                &expired_governance)};
+            if (expired_governance) {
                 LogPrint(BCLog::NET,
-                         "Requesting governance %s peer=%d\n",
-                         governance_request->ToString(), pto->GetId());
-                vGetData.push_back(*governance_request);
-            } else {
-                const auto authorization{
-                    m_governance_requests.BeginResponse(
-                        pto->GetId(), *governance_request, current_time)};
-                if (authorization && authorization->page_required) {
-                    const bool exact_known{
-                        governance_request->type ==
-                                MSG_GOVERNANCE_OBJECT
-                            ? authorization->page_scope.IsNull() &&
-                                  governance->HaveObjectForPage(
-                                      governance_request->hash)
-                            : governance_request->type ==
-                                      MSG_GOVERNANCE_OBJECT_VOTE &&
-                                  !authorization->page_scope.IsNull() &&
-                                  governance->HaveVoteForPage(
-                                      authorization->page_scope,
-                                      governance_request->hash)};
-                    (void)m_governance_requests.CompleteResponse(
-                        *authorization,
-                        exact_known
-                            ? GovernanceRequestTracker::ResponseOutcome::
-                                  VALID_OR_EXACT_KNOWN
-                            : GovernanceRequestTracker::ResponseOutcome::
-                                  LOCAL_CONTEXT_CHANGED,
-                        current_time);
-                } else if (authorization) {
-                    (void)m_governance_requests.CompleteResponse(
-                        *authorization,
-                        GovernanceRequestTracker::ResponseOutcome::
-                            VALID_OR_EXACT_KNOWN,
-                        current_time);
+                         "timeout of governance %s from peer=%d\n",
+                         expired_governance->inv.ToString(),
+                         expired_governance->source.peer);
+                if (PeerRef stalled_peer{
+                        GetPeerRef(expired_governance->source.peer)}) {
+                    Misbehaving(*stalled_peer, 10, "withheld-governance");
+                }
+            }
+            if (governance_request) {
+                if (!AlreadyHaveTx(ToGenTxid(*governance_request))) {
+                    LogPrint(BCLog::NET,
+                             "Requesting governance %s peer=%d\n",
+                             governance_request->ToString(), pto->GetId());
+                    vGetData.push_back(*governance_request);
+                } else {
+                    const auto authorization{
+                        m_governance_requests.BeginResponse(
+                            pto->GetId(), *governance_request,
+                            current_time)};
+                    if (authorization && authorization->page_required) {
+                        const bool exact_known{
+                            governance_request->type ==
+                                    MSG_GOVERNANCE_OBJECT
+                                ? authorization->page_scope.IsNull() &&
+                                      governance->HaveObjectForPage(
+                                          governance_request->hash)
+                                : governance_request->type ==
+                                          MSG_GOVERNANCE_OBJECT_VOTE &&
+                                      !authorization->page_scope.IsNull() &&
+                                      governance->HaveVoteForPage(
+                                          authorization->page_scope,
+                                          governance_request->hash)};
+                        (void)m_governance_requests.CompleteResponse(
+                            *authorization,
+                            exact_known
+                                ? GovernanceRequestTracker::ResponseOutcome::
+                                      VALID_OR_EXACT_KNOWN
+                                : GovernanceRequestTracker::ResponseOutcome::
+                                      LOCAL_CONTEXT_CHANGED,
+                            current_time);
+                    } else if (authorization) {
+                        (void)m_governance_requests.CompleteResponse(
+                            *authorization,
+                            GovernanceRequestTracker::ResponseOutcome::
+                                VALID_OR_EXACT_KNOWN,
+                            current_time);
+                    }
                 }
             }
         }
+        // SYSCOIN END: Public PQ activation governance-download gate.
 
         std::vector<std::pair<NodeId, GenTxid>> expired;
         auto requestable = m_txrequest.GetRequestable(pto->GetId(), current_time, &expired);

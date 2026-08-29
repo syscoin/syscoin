@@ -13,6 +13,7 @@
 #include <kernel/chainparams.h>
 #include <kernel/cs_main.h>
 #include <kernel/messagestartchars.h>
+#include <node/pq_activation_handoff.h> // SYSCOIN: durable local PQ activation provenance.
 #include <sync.h>
 #include <util/fs.h>
 #include <util/hasher.h>
@@ -64,6 +65,12 @@ public:
     void ReadReindexing(bool& fReindexing);
     bool WriteFlag(const std::string& name, bool fValue);
     bool ReadFlag(const std::string& name, bool& fValue);
+    // SYSCOIN BEGIN: Persist the local BLS-to-PQ activation handoff atomically.
+    bool HasPQActivationHandoff() const;
+    bool WritePQActivationHandoff(
+        const node::PQActivationHandoffRecord& record);
+    bool ReadPQActivationHandoff(node::PQActivationHandoffRecord& record);
+    // SYSCOIN END: Persist the local BLS-to-PQ activation handoff atomically.
     bool LoadBlockIndexGuts(const Consensus::Params& consensusParams, std::function<CBlockIndex*(const uint256&)> insertBlockIndex, const util::SignalInterrupt& interrupt)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 };

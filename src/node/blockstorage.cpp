@@ -99,6 +99,30 @@ bool BlockTreeDB::ReadFlag(const std::string& name, bool& fValue)
     return true;
 }
 
+// SYSCOIN BEGIN: Persist the local BLS-to-PQ activation handoff atomically.
+namespace {
+const std::string DB_PQ_ACTIVATION_HANDOFF{"pq_activation_handoff_v1"};
+}
+
+bool BlockTreeDB::HasPQActivationHandoff() const
+{
+    return Exists(std::make_pair(DB_FLAG, DB_PQ_ACTIVATION_HANDOFF));
+}
+
+bool BlockTreeDB::WritePQActivationHandoff(
+    const node::PQActivationHandoffRecord& record)
+{
+    return Write(std::make_pair(DB_FLAG, DB_PQ_ACTIVATION_HANDOFF), record,
+                 /*fSync=*/true);
+}
+
+bool BlockTreeDB::ReadPQActivationHandoff(
+    node::PQActivationHandoffRecord& record)
+{
+    return Read(std::make_pair(DB_FLAG, DB_PQ_ACTIVATION_HANDOFF), record);
+}
+// SYSCOIN END: Persist the local BLS-to-PQ activation handoff atomically.
+
 bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, std::function<CBlockIndex*(const uint256&)> insertBlockIndex, const util::SignalInterrupt& interrupt)
 {
     AssertLockHeld(::cs_main);

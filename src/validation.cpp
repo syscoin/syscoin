@@ -19,7 +19,7 @@
 #include <consensus/amount.h>
 #include <consensus/consensus.h>
 #include <consensus/merkle.h>
-#include <consensus/pq_migration.h> // SYSCOIN: pinned PQ migration boundary.
+#include <consensus/pq_migration_config.h> // SYSCOIN: provider mempool era transition.
 #include <consensus/tx_check.h>
 #include <consensus/tx_verify.h>
 #include <consensus/validation.h>
@@ -80,6 +80,7 @@
 #include <string>
 #include <string_view> // SYSCOIN: managed-helper argument validation.
 #include <tuple>
+#include <unordered_set> // SYSCOIN: Batched ChainLock-conflict traversal.
 #include <utility>
 // SYSCOIN
 #include <masternode/masternodepayments.h>
@@ -393,6 +394,16 @@ static bool IsBranchBoundProviderMempoolTransaction(
            tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE ||
            tx.nVersion == SYSCOIN_TX_VERSION_PQ_GLOBAL_KEY;
 }
+
+// SYSCOIN BEGIN: Public activation-quarantine provider policy.
+bool IsPQActivationQuarantinedProviderTxVersion(int32_t version) noexcept
+{
+    return version == SYSCOIN_TX_VERSION_MN_REGISTER ||
+           version == SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE ||
+           version == SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR ||
+           version == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE;
+}
+// SYSCOIN END: Public activation-quarantine provider policy.
 
 void Chainstate::MaybeUpdateMempoolForReorg(
     DisconnectedBlockTransactions& disconnectpool,
@@ -851,6 +862,15 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
     // Coinbase is only valid in a block, not as a loose transaction
     if (tx.IsCoinBase())
         return state.Invalid(TxValidationResult::TX_CONSENSUS, "coinbase");
+
+    // SYSCOIN BEGIN: A sync-only public node may replay provider mutations in
+    // blocks, but must not originate, relay, or reserve them in its mempool.
+    if (!m_active_chainstate.m_chainman.IsPQParticipationAllowed() &&
+        IsPQActivationQuarantinedProviderTxVersion(tx.nVersion)) {
+        return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY,
+                             "pq-activation-quarantine");
+    }
+    // SYSCOIN END: Public PQ activation provider-mempool gate.
 
     // Rather not work on nonstandard transactions (unless -testnet/-regtest)
     std::string reason;
@@ -2634,6 +2654,303 @@ void Chainstate::InitCoinsCache(size_t cache_size_bytes)
     m_coins_views->InitCache();
 }
 
+// SYSCOIN BEGIN: Local BLS-to-PQ activation handoff persistence.
+namespace {
+
+node::PQActivationHandoffTip BuildPQActivationHandoffTip(
+    const ChainstateManager& chainman,
+    const CBlockIndex* tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    const auto& consensus{chainman.GetConsensus()};
+    node::PQActivationHandoffTip result;
+    if (tip == nullptr ||
+        Consensus::CheckPQActivationConfiguration(consensus) !=
+            Consensus::PQActivationResult::VALID) {
+        return result;
+    }
+    result.height = tip->nHeight;
+    const CBlockIndex* predecessor{
+        tip->nHeight >= consensus.nPQActivationHeight - 1
+            ? tip->GetAncestor(consensus.nPQActivationHeight - 1)
+            : nullptr};
+    if (predecessor != nullptr) {
+        result.predecessor_hash = predecessor->GetBlockHash();
+        result.predecessor_fully_validated =
+            predecessor->IsValid(BLOCK_VALID_SCRIPTS) &&
+            !predecessor->IsAssumedValid();
+    }
+    const CBlockIndex* active_tip{chainman.ActiveTip()};
+    // ConnectTip finalizes the handoff after the candidate has passed full
+    // validation but before m_chain.SetTip(). Treat only that direct successor
+    // as the active view; an unrelated branch must never authorize the pin.
+    const CBlockIndex* active_view_tip{
+        node::IsPQActivationHandoffActiveView(
+            tip == active_tip,
+            tip != nullptr && tip->pprev == active_tip)
+            ? tip
+            : active_tip};
+    const CBlockIndex* active_predecessor{
+        active_view_tip != nullptr &&
+                active_view_tip->nHeight >= consensus.nPQActivationHeight - 1
+            ? active_view_tip->GetAncestor(
+                  consensus.nPQActivationHeight - 1)
+            : nullptr};
+    if (active_predecessor != nullptr) {
+        result.active_predecessor_hash =
+            active_predecessor->GetBlockHash();
+    }
+    const CBlockIndex* activation{
+        tip->nHeight >= consensus.nPQActivationHeight
+            ? tip->GetAncestor(consensus.nPQActivationHeight)
+            : nullptr};
+    result.activation_fully_validated =
+        activation != nullptr && activation->IsValid(BLOCK_VALID_SCRIPTS) &&
+        !activation->IsAssumedValid() &&
+        (activation->nStatus & BLOCK_PQ_BTCC_INDEX_VALIDATED);
+    return result;
+}
+
+} // namespace
+
+bool ChainstateManager::PreparePQActivationHandoff(
+    bool force_historical_replay,
+    bool empty_chainstate,
+    bilingual_str& error)
+{
+    AssertLockHeld(cs_main);
+    error = {};
+    const bool public_network{
+        GetParams().GetChainType() != ChainType::REGTEST};
+    std::optional<node::PQActivationHandoffRecord> persisted;
+    auto* const block_tree{m_blockman.m_block_tree_db.get()};
+    if (block_tree == nullptr) {
+        error = Untranslated("PQ activation handoff database is unavailable");
+        return false;
+    }
+
+    // An explicit reconstruction is the only supported recovery from a stale
+    // or failed local pin, so it deliberately replaces the old record.
+    if (!force_historical_replay && !empty_chainstate && public_network &&
+        block_tree->HasPQActivationHandoff()) {
+        node::PQActivationHandoffRecord record;
+        if (!block_tree->ReadPQActivationHandoff(record)) {
+            error = Untranslated("PQ activation handoff record is unreadable");
+            return false;
+        }
+        persisted = std::move(record);
+    }
+
+    const auto resolution{node::PreparePQActivationHandoff(
+        GetConsensus(), public_network, force_historical_replay,
+        empty_chainstate, persisted)};
+    if (resolution.record_to_write &&
+        !block_tree->WritePQActivationHandoff(
+            *resolution.record_to_write)) {
+        error = Untranslated("Failed to persist PQ activation replay quarantine");
+        return false;
+    }
+
+    m_pq_activation_runtime_state = resolution.state;
+    m_pq_activation_handoff_record = resolution.record_to_write
+        ? resolution.record_to_write
+        : persisted;
+    m_pq_activation_participation_allowed.store(
+        resolution.state == node::PQActivationRuntimeState::PINNED ||
+            resolution.state == node::PQActivationRuntimeState::BYPASS,
+        std::memory_order_release);
+    if (resolution.state == node::PQActivationRuntimeState::FAILED) {
+        error = Untranslated(
+            "PQ activation handoff state is invalid; restart with -reindex");
+        return false;
+    }
+    return true;
+}
+
+bool ChainstateManager::FinalizePQActivationHandoff(
+    const CBlockIndex* tip,
+    bilingual_str& error)
+{
+    AssertLockHeld(cs_main);
+    error = {};
+    const auto resolution{node::FinalizePQActivationHandoff(
+        GetConsensus(), m_pq_activation_runtime_state,
+        m_pq_activation_handoff_record,
+        BuildPQActivationHandoffTip(*this, tip))};
+    if (resolution.record_to_write &&
+        !m_blockman.m_block_tree_db->WritePQActivationHandoff(
+            *resolution.record_to_write)) {
+        m_pq_activation_runtime_state =
+            node::PQActivationRuntimeState::FAILED;
+        m_pq_activation_participation_allowed.store(
+            false, std::memory_order_release);
+        error = Untranslated("Failed to persist PQ activation handoff state");
+        return false;
+    }
+    if (resolution.record_to_write) {
+        m_pq_activation_handoff_record = resolution.record_to_write;
+    }
+    m_pq_activation_runtime_state = resolution.state;
+    m_pq_activation_participation_allowed.store(
+        resolution.state == node::PQActivationRuntimeState::PINNED ||
+            resolution.state == node::PQActivationRuntimeState::BYPASS,
+        std::memory_order_release);
+    if (resolution.state == node::PQActivationRuntimeState::FAILED) {
+        error = Untranslated(
+            "The local PQ activation handoff is missing, unvalidated, or no "
+            "longer matches the active A-1 predecessor; restart with -reindex");
+        return false;
+    }
+    return true;
+}
+
+bool ChainstateManager::MaybeFinalizePQActivationHandoff(
+    const CBlockIndex& tip,
+    std::string& error)
+{
+    AssertLockHeld(cs_main);
+    error.clear();
+    if (m_pq_activation_runtime_state !=
+            node::PQActivationRuntimeState::HISTORICAL_REPLAY &&
+        m_pq_activation_runtime_state !=
+            node::PQActivationRuntimeState::DEFERRED_HANDOFF) {
+        return true;
+    }
+    bilingual_str translated_error;
+    if (!FinalizePQActivationHandoff(&tip, translated_error)) {
+        error = translated_error.original;
+        return false;
+    }
+    return true;
+}
+
+bool ChainstateManager::CheckPQActivationHandoffDisconnect(
+    const CBlockIndex& disconnecting,
+    bool& blocked,
+    std::string& error)
+{
+    AssertLockHeld(cs_main);
+    blocked = false;
+    error.clear();
+    // A durable ChainLock is a generic finality floor, including regtest and
+    // activation-bypass configurations. Resolve it before the A-1-specific
+    // handoff transition so no accepted block can be disconnected in the
+    // fsync-to-conflict-publication interval.
+    if (llmq::chainLocksHandler != nullptr) {
+        const CBlockIndex* active_floor{nullptr};
+        const CBlockIndex* durable_target{nullptr};
+        if (!llmq::chainLocksHandler->GetDurableFinalityRecoveryFloor(
+                active_floor, durable_target, error)) {
+            return false;
+        }
+        if ((active_floor == nullptr) != (durable_target == nullptr)) {
+            error = "incomplete durable PQ ChainLock recovery boundary";
+            return false;
+        }
+        if (active_floor != nullptr) {
+            const bool floor_descends_from_disconnect{
+                active_floor->nHeight >= disconnecting.nHeight &&
+                active_floor->GetAncestor(disconnecting.nHeight) ==
+                    &disconnecting};
+            if (llmq::DisconnectCrossesDurableChainLockFloor(
+                    disconnecting.nHeight, active_floor->nHeight,
+                    floor_descends_from_disconnect)) {
+                blocked = true;
+                error = "the durable PQ ChainLock winner finalizes the "
+                        "active recovery floor";
+                return false;
+            }
+        }
+    }
+    const auto resolution{node::ResolvePQActivationHandoffDisconnect(
+        GetConsensus(), m_pq_activation_runtime_state,
+        m_pq_activation_handoff_record, disconnecting.nHeight,
+        disconnecting.GetBlockHash())};
+    if (!resolution.record_to_write) {
+        return true;
+    }
+
+    // Persist the quarantine before chainstate mutation. On write failure the
+    // in-memory pin remains authoritative and the caller must not disconnect.
+    if (!m_blockman.m_block_tree_db->WritePQActivationHandoff(
+            *resolution.record_to_write)) {
+        error = "failed to persist the PQ activation reorg quarantine";
+        return false;
+    }
+    m_pq_activation_handoff_record = resolution.record_to_write;
+    m_pq_activation_runtime_state = resolution.state;
+    m_pq_activation_participation_allowed.store(false,
+                                                 std::memory_order_release);
+    LogPrintf(
+        "PQ activation handoff: quarantined before replacing predecessor %s "
+        "at height %d\n",
+        disconnecting.GetBlockHash().ToString(), disconnecting.nHeight);
+    return true;
+}
+
+bool ChainstateManager::IsPQBlockProductionAllowed(
+    const CBlockIndex* active_tip)
+{
+    AssertLockHeld(cs_main);
+    const bool participation_allowed{IsPQParticipationAllowed()};
+    if (participation_allowed) return true;
+
+    const bool durable_replay_marker{
+        m_pq_activation_handoff_record &&
+        m_pq_activation_handoff_record->IsValid(
+            GetConsensus().nPQActivationHeight) &&
+        m_pq_activation_handoff_record->state ==
+            node::PQActivationHandoffState::HISTORICAL_REPLAY};
+    const bool active_tip_fully_validated{
+        active_tip != nullptr && active_tip->IsValid(BLOCK_VALID_SCRIPTS) &&
+        !active_tip->IsAssumedValid() &&
+        (active_tip->nStatus & BLOCK_PQ_RECEIPT_INDEX_VALIDATED)};
+
+    bool local_state_usable{false};
+    if (active_tip_fully_validated && deterministicMNManager != nullptr) {
+        try {
+            const auto dmn_list{
+                deterministicMNManager->GetListForBlock(active_tip)};
+            llmq::pq::PQPaymentProbationStateView probation_state;
+            llmq::pq::PQRegistryReadView registry_state;
+            std::string registry_error;
+            local_state_usable =
+                !dmn_list.IsNull() &&
+                dmn_list.GetHeight() == active_tip->nHeight &&
+                dmn_list.GetBlockHash() == active_tip->GetBlockHash() &&
+                deterministicMNManager->VerifyInverseJournalTipSeal(
+                    active_tip) &&
+                deterministicMNManager->GetPaymentProbationStateView(
+                    active_tip, probation_state) &&
+                deterministicMNManager->GetPQRegistryReadView(
+                    active_tip, registry_state, registry_error) &&
+                registry_state.IsValid() &&
+                registry_state.Height() == active_tip->nHeight &&
+                registry_state.BlockHash() == active_tip->GetBlockHash();
+        } catch (const std::exception&) {
+            local_state_usable = false;
+        }
+    }
+
+    bool durable_finality_clear{false};
+    if (llmq::chainLocksHandler != nullptr) {
+        const CBlockIndex* active_floor{nullptr};
+        const CBlockIndex* durable_target{nullptr};
+        std::string error;
+        durable_finality_clear =
+            llmq::chainLocksHandler->GetDurableFinalityRecoveryFloor(
+                active_floor, durable_target, error) &&
+            active_floor == nullptr && durable_target == nullptr;
+    }
+
+    return node::IsPQActivationBlockProductionAllowed(
+        GetConsensus(), m_pq_activation_runtime_state,
+        participation_allowed, durable_replay_marker,
+        active_tip != nullptr ? active_tip->nHeight : -1,
+        active_tip_fully_validated, local_state_usable,
+        durable_finality_clear);
+}
+// SYSCOIN END: Local BLS-to-PQ activation handoff persistence.
+
 // Note that though this is marked const, we may end up modifying `m_cached_finished_ibd`, which
 // is a performance-related implementation detail. This function must be marked
 // `const` so that `CValidationInterface` clients (which are given a `const Chainstate*`)
@@ -2655,6 +2972,12 @@ bool ChainstateManager::IsInitialBlockDownload() const
         if (!IsBaseBlockSyncComplete()) {
             return true;
         }
+        // SYSCOIN BEGIN: A public BLS-free node is not ready to participate
+        // until its exact local A-1 handoff has been established.
+        if (!IsPQParticipationAllowed()) {
+            return true;
+        }
+        // SYSCOIN END: Public PQ activation participation gate.
         if (m_pq_history_auth_state != PQHistoryAuthState::READY) {
             return true;
         }
@@ -2689,7 +3012,11 @@ bool ChainstateManager::IsBaseBlockSyncComplete() const
 bool ChainstateManager::CanBeginPQHistoryAuthentication() const
 {
     AssertLockHeld(cs_main);
-    return !m_cached_finished_ibd.load(std::memory_order_relaxed);
+    // SYSCOIN BEGIN: Never begin live finality authentication from a
+    // structurally replayed but locally unpinned legacy prefix.
+    return IsPQParticipationAllowed() &&
+           !m_cached_finished_ibd.load(std::memory_order_relaxed);
+    // SYSCOIN END: Public PQ activation participation gate.
 }
 
 bool ChainstateManager::PublishPQHistoryAuthState(PQHistoryAuthState state)
@@ -3825,30 +4152,6 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     const auto time_start{SteadyClock::now()};
     const CChainParams& params{m_chainman.GetParams()};
 
-    // SYSCOIN: H authenticates reconstructed provider state; F separately
-    // pins the exact predecessor branch from which PQ finality may begin.
-    const CBlockIndex* known_legacy_anchor{
-        m_chainman.m_blockman.LookupBlockIndex(
-            params.GetConsensus().hashPQLegacyAnchorBlock)};
-    const auto legacy_anchor_result = Consensus::CheckPQLegacyAnchor(
-        params.GetConsensus(), pindex->nHeight, block_hash, pindex->pprev,
-        known_legacy_anchor);
-    if (legacy_anchor_result != Consensus::PQAnchorResult::DISABLED &&
-        legacy_anchor_result != Consensus::PQAnchorResult::VALID) {
-        return state.Invalid(BlockValidationResult::BLOCK_CHECKPOINT, "bad-pq-legacy-anchor");
-    }
-    const CBlockIndex* known_chainlock_anchor{
-        m_chainman.m_blockman.LookupBlockIndex(
-            params.GetConsensus().hashPQChainLockAnchorBlock)};
-    const auto chainlock_anchor_result = Consensus::CheckPQChainLockAnchor(
-        params.GetConsensus(), pindex->nHeight, block_hash, pindex->pprev,
-        known_chainlock_anchor);
-    if (chainlock_anchor_result != Consensus::PQAnchorResult::DISABLED &&
-        chainlock_anchor_result != Consensus::PQAnchorResult::VALID) {
-        return state.Invalid(BlockValidationResult::BLOCK_CHECKPOINT,
-                             "bad-pq-chainlock-anchor");
-    }
-
     // Check it again in case a previous version let a bad block in
     // NOTE: We don't currently (re-)invoke ContextualCheckBlock() or
     // ContextualCheckBlockHeader() here. This means that if we add a new
@@ -4543,10 +4846,34 @@ bool Chainstate::FlushStateToDisk(
             dip3_active &&
             deterministicMNManager &&
             !deterministicMNManager->HasPersistentWindow();
+        // SYSCOIN BEGIN: Retryable bounded DMN maintenance scheduling.
+        const bool dmn_maintenance_retry_requested =
+            deterministicMNManager &&
+            deterministicMNManager->
+                AuxiliaryHistoryMaintenanceRetryRequested();
+        const uint64_t dmn_maintenance_request_generation{
+            deterministicMNManager
+                ? deterministicMNManager->
+                      AuxiliaryHistoryMaintenanceRequestGeneration()
+                : 0};
+        const uint256 dmn_maintenance_retry_tip{
+            m_chain.Tip() ? m_chain.Tip()->GetBlockHash() : uint256{}};
+        const bool dmn_maintenance_retry_needed =
+            mode == FlushStateMode::PERIODIC &&
+            !in_ibd &&
+            dip3_active &&
+            dmn_maintenance_retry_requested &&
+            (m_last_dmn_maintenance_retry_tip !=
+                 dmn_maintenance_retry_tip ||
+             m_last_dmn_maintenance_retry_generation !=
+                 dmn_maintenance_request_generation);
+        // SYSCOIN END: Retryable bounded DMN maintenance scheduling.
         // Combine all conditions that result in a full cache flush.
         fDoFullFlush = (mode == FlushStateMode::ALWAYS) || fCacheLarge || fCacheCritical || fPeriodicFlush || fFlushForPrune;
         // Write blocks and block index to disk.
-        if (fDoFullFlush || fPeriodicWrite || dmn_window_init_needed) {
+        // SYSCOIN: A pending bounded DMN pass also requires this metadata write path.
+        if (fDoFullFlush || fPeriodicWrite || dmn_window_init_needed ||
+            dmn_maintenance_retry_needed) {
             // Ensure we can write block index
             if (!CheckDiskSpace(m_blockman.m_opts.blocks_dir)) {
                 return FatalError(m_chainman.GetNotifications(), state, "Disk space is too low!", _("Disk space is too low!"));
@@ -4593,6 +4920,7 @@ bool Chainstate::FlushStateToDisk(
             }
             // SYSCOIN: nevmminttx is flushed with the full UTXO flush below (write-ahead
             // of CoinsTip), not on ordinary periodic metadata writes.
+            // SYSCOIN BEGIN: Recovery-aware deterministic-MN maintenance.
             const bool force_dmn_maintenance =
                 deterministicMNManager &&
                 (mode == FlushStateMode::ALWAYS ||
@@ -4611,22 +4939,24 @@ bool Chainstate::FlushStateToDisk(
                                   "DMN maintenance: %s",
                                   recovery_error));
                 }
-                std::vector<const CBlockIndex*> recovery_snapshot_indexes;
-                for (const CBlockIndex* pindex : *all_recovery_indexes) {
-                    if (pindex->nHeight >=
-                        Params().GetConsensus().DIP0003Height) {
-                        recovery_snapshot_indexes.push_back(pindex);
-                    }
-                }
                 // Maintenance precedes this chainstate's CoinsTip flush, but
                 // the shared DB must remain recoverable across both markers
                 // of every active or cleanup-pending AssumeUTXO chainstate.
+                // A pre-DIP3 marker has no DMN snapshot to retain, but still
+                // vetoes destructive auxiliary GC until replay reaches DIP3.
                 if (!deterministicMNManager->FlushCacheToDisk(
                         force_dmn_maintenance, sys_sync_flush,
-                        recovery_snapshot_indexes)) {
+                        *all_recovery_indexes)) {
                     return FatalError(m_chainman.GetNotifications(), state, "Failed to commit DMN DB");
                 }
+                if (dmn_maintenance_retry_requested) {
+                    m_last_dmn_maintenance_retry_tip =
+                        dmn_maintenance_retry_tip;
+                    m_last_dmn_maintenance_retry_generation =
+                        dmn_maintenance_request_generation;
+                }
             }
+            // SYSCOIN END: Recovery-aware deterministic-MN maintenance.
             if (governance && !governance->FlushCacheToDisk(sys_sync_flush)) {
                 return FatalError(m_chainman.GetNotifications(), state, "Failed to commit governance DB");
             }
@@ -4820,6 +5150,20 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
     CBlockIndex *pindexDelete = m_chain.Tip();
     assert(pindexDelete);
     assert(pindexDelete->pprev);
+    // SYSCOIN BEGIN: Persist a sync-only quarantine before replacing the
+    // locally pinned A-1; the replacement is pinned only after validating A.
+    bool pq_handoff_disconnect_blocked{false};
+    std::string pq_handoff_disconnect_error;
+    if (!m_chainman.CheckPQActivationHandoffDisconnect(
+            *pindexDelete, pq_handoff_disconnect_blocked,
+            pq_handoff_disconnect_error)) {
+        return FatalError(
+            m_chainman.GetNotifications(), state,
+            pq_handoff_disconnect_error.empty()
+                ? "PQ activation handoff disconnect rejected"
+                : pq_handoff_disconnect_error);
+    }
+    // SYSCOIN END: Protect the exact local PQ activation handoff.
     // Read block from disk.
     std::shared_ptr<CBlock> pblock = std::make_shared<CBlock>();
     CBlock& block = *pblock;
@@ -5043,6 +5387,18 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
         bool flushed = view.Flush();
         assert(flushed);
     }
+    // SYSCOIN BEGIN: Historical replay becomes live only after this process
+    // fully validates A and durably pins its actual A-1 predecessor.
+    std::string pq_handoff_error;
+    if (!m_chainman.MaybeFinalizePQActivationHandoff(
+            *pindexNew, pq_handoff_error)) {
+        return FatalError(
+            m_chainman.GetNotifications(), state,
+            pq_handoff_error.empty()
+                ? "Failed to finalize PQ activation handoff"
+                : pq_handoff_error);
+    }
+    // SYSCOIN END: Finalize historical-replay PQ activation handoff.
     // SYSCOIN: Stage mint markers in cache; they become durable on the next full
     // UTXO flush (write-ahead of CoinsTip) or on mint-containing disconnect/replay.
     if(pnevmdatadb)
@@ -5079,6 +5435,15 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
     UpdateTip(pindexNew);
     // SYSCOIN: The active branch determines outstanding PQ registry capacity.
     if (m_mempool) {
+        // SYSCOIN BEGIN: Purge legacy provider payloads at PQ activation.
+        // Entries admitted while A - 1 was the next block use legacy provider
+        // payloads. They cannot be mined at A and must not poison every block
+        // template after the forward transition.
+        if (Consensus::IsPQProviderMempoolTransitionTip(
+                m_chainman.GetParams().GetConsensus(), pindexNew->nHeight)) {
+            m_mempool->RemoveLegacyProviderTransactionsForPQActivation();
+        }
+        // SYSCOIN END: Purge legacy provider payloads at PQ activation.
         m_mempool->RebuildPQRegistryReservations(pindexNew);
     }
 
@@ -5132,20 +5497,6 @@ CBlockIndex* Chainstate::FindMostWorkChain()
                 FindDeferredBTCCReceiptDependency(*pindexNew)}) {
             AddDeferredBTCCReceiptCandidate(
                 dependency->first, *dependency->second, *pindexNew);
-            setBlockIndexCandidates.erase(pindexNew);
-            continue;
-        }
-
-        // SYSCOIN: Work selection must respect both immutable PQ anchors.
-        const CBlockIndex* known_legacy_anchor = m_blockman.LookupBlockIndex(
-            m_chainman.GetConsensus().hashPQLegacyAnchorBlock);
-        const CBlockIndex* known_chainlock_anchor = m_blockman.LookupBlockIndex(
-            m_chainman.GetConsensus().hashPQChainLockAnchorBlock);
-        if (!Consensus::ArePQAnchorsCompatible(
-                m_chainman.GetConsensus(), pindexNew, known_legacy_anchor,
-                known_chainlock_anchor)) {
-            pindexNew->nStatus |= BLOCK_CONFLICT_CHAINLOCK;
-            m_blockman.m_dirty_blockindex.insert(pindexNew);
             setBlockIndexCandidates.erase(pindexNew);
             continue;
         }
@@ -5549,6 +5900,56 @@ void Chainstate::RemoveDeferredBTCCReceiptCandidatesThrough(
     }
 }
 
+// SYSCOIN BEGIN: Batched deferred-receipt conflict cleanup.
+void Chainstate::RemoveDeferredBTCCReceiptCandidatesIn(
+    const std::unordered_set<const CBlockIndex*>& unusable)
+{
+    AssertLockHeld(cs_main);
+    if (unusable.empty()) return;
+
+    const auto is_unusable = [&](const CBlockIndex* candidate)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+        if (unusable.contains(candidate)) return true;
+        // Production deferred entries live in BlockManager and were covered
+        // by the child-bucket walk. Preserve the public single-root helper's
+        // behavior for synthetic/unindexed callers without adding ancestry
+        // work to that indexed hot path.
+        if (m_blockman.LookupBlockIndex(candidate->GetBlockHash()) ==
+            candidate) {
+            return false;
+        }
+        for (const CBlockIndex* ancestor{candidate->pprev};
+             ancestor != nullptr; ancestor = ancestor->pprev) {
+            if (unusable.contains(ancestor)) return true;
+        }
+        return false;
+    };
+
+    for (auto dependency{m_deferred_btcc_receipt_candidates.begin()};
+         dependency != m_deferred_btcc_receipt_candidates.end();) {
+        auto& branches{dependency->second.branches};
+        for (auto branch{branches.begin()}; branch != branches.end();) {
+            if (is_unusable(branch->first)) {
+                branch = branches.erase(branch);
+                continue;
+            }
+            auto& candidates{branch->second};
+            for (auto candidate{candidates.begin()};
+                 candidate != candidates.end();) {
+                candidate = is_unusable(*candidate)
+                                ? candidates.erase(candidate)
+                                : std::next(candidate);
+            }
+            branch = candidates.empty() ? branches.erase(branch)
+                                        : std::next(branch);
+        }
+        dependency = branches.empty()
+                         ? m_deferred_btcc_receipt_candidates.erase(dependency)
+                         : std::next(dependency);
+    }
+}
+// SYSCOIN END: Batched deferred-receipt conflict cleanup.
+
 // SYSCOIN: Retire only the exact deferred branch whose witness proved invalid.
 bool ChainstateManager::RetireDeferredPaymentAuditReceiptCarrier(
     const uint256& witness_id,
@@ -5624,22 +6025,6 @@ void Chainstate::PruneBlockIndexCandidates() {
         }
     }
 
-    const CBlockIndex* known_legacy_anchor = m_blockman.LookupBlockIndex(
-        m_chainman.GetConsensus().hashPQLegacyAnchorBlock);
-    const CBlockIndex* known_chainlock_anchor = m_blockman.LookupBlockIndex(
-        m_chainman.GetConsensus().hashPQChainLockAnchorBlock);
-    if (m_chain.Tip() != nullptr &&
-        (known_legacy_anchor != nullptr || known_chainlock_anchor != nullptr) &&
-        !Consensus::ArePQAnchorsCompatible(
-            m_chainman.GetConsensus(), m_chain.Tip(), known_legacy_anchor,
-            known_chainlock_anchor)) {
-        // SYSCOIN: The mandatory anchor can first become known while a
-        // higher-work pre-anchor fork is active. Compatible recovery
-        // candidates are intentionally allowed to have less work than that
-        // now-forbidden tip, so it must not be used as the pruning baseline.
-        return;
-    }
-
     // Note that we can't delete the current block itself, as we may need to return to it later in case a
     // reorganization to a better block fails.
     std::set<CBlockIndex*, CBlockIndexWorkComparator>::iterator it = setBlockIndexCandidates.begin();
@@ -5664,6 +6049,71 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
 
     const CBlockIndex* pindexOldTip = m_chain.Tip();
     const CBlockIndex* pindexFork = m_chain.FindFork(pindexMostWork);
+
+    // SYSCOIN BEGIN: Close the durable-accept/enforcement scheduling gap.
+    // Certificate acceptance fsyncs while holding m_chainstate_mutex, but
+    // conflict publication follows in a separate acquisition. If ordinary
+    // best-work activation wins that acquisition, reject its incompatible
+    // inactive branch before disconnecting any block from the finalized view.
+    if (llmq::chainLocksHandler != nullptr) {
+        const CBlockIndex* durable_active_floor{nullptr};
+        const CBlockIndex* durable_target{nullptr};
+        std::string durable_error;
+        if (!llmq::chainLocksHandler->GetDurableFinalityRecoveryFloor(
+                durable_active_floor, durable_target, durable_error)) {
+            return state.Error(strprintf(
+                "cannot establish durable finality before best-chain "
+                "activation: %s",
+                durable_error));
+        }
+        if ((durable_active_floor == nullptr) !=
+            (durable_target == nullptr)) {
+            return state.Error(
+                "incomplete durable finality boundary before best-chain "
+                "activation");
+        }
+        if (durable_target != nullptr) {
+            const bool candidate_descends_target{
+                pindexMostWork->nHeight >= durable_target->nHeight &&
+                pindexMostWork->GetAncestor(durable_target->nHeight) ==
+                    durable_target};
+            const bool target_descends_candidate{
+                durable_target->nHeight >= pindexMostWork->nHeight &&
+                durable_target->GetAncestor(pindexMostWork->nHeight) ==
+                    pindexMostWork};
+            if (!llmq::IsDurableChainLockCandidateCompatible(
+                    pindexMostWork->nHeight, durable_target->nHeight,
+                    candidate_descends_target, target_descends_candidate)) {
+                if (pindexFork == nullptr ||
+                    pindexFork->nHeight ==
+                        std::numeric_limits<int32_t>::max() ||
+                    pindexMostWork->nHeight <= pindexFork->nHeight) {
+                    return state.Error(
+                        "cannot isolate incompatible durable-finality "
+                        "candidate branch");
+                }
+                CBlockIndex* conflict_root{pindexMostWork->GetAncestor(
+                    pindexFork->nHeight + 1)};
+                if (conflict_root == nullptr ||
+                    m_chain.Contains(conflict_root)) {
+                    return state.Error(
+                        "invalid inactive durable-finality conflict root");
+                }
+                std::array<CBlockIndex*, 1> roots{conflict_root};
+                if (!MarkConflictingBlocksInactive(state, roots)) {
+                    return false;
+                }
+                LogPrintf(
+                    "Chainstate::%s -- rejected best-work candidate %s "
+                    "incompatible with durable PQ ChainLock %s\n",
+                    __func__, pindexMostWork->GetBlockHash().ToString(),
+                    durable_target->GetBlockHash().ToString());
+                fInvalidFound = true;
+                return true;
+            }
+        }
+    }
+    // SYSCOIN END: Preflight durable finality before best-chain disconnect.
 
     // Disconnect active blocks which are no longer in the best chain.
     bool fBlocksDisconnected = false;
@@ -6044,6 +6494,7 @@ bool Chainstate::PreciousBlock(BlockValidationState& state, CBlockIndex* pindex)
 // SYSCOIN BEGIN: PQ ChainLock enforcement with explicit provenance.
 bool Chainstate::EnforceBestChainLock(
     const CBlockIndex* bestChainLockBlockIndex,
+    const CBlockIndex* finalized_predecessor,
     ChainLockEnforcementProvenance provenance)
 {
     AssertLockNotHeld(m_chainstate_mutex);
@@ -6055,7 +6506,8 @@ bool Chainstate::EnforceBestChainLock(
     BlockValidationState state;
     // Go backwards through the chain referenced by clsig until we find a block that is part of the main chain and invalidate the fork block (next block in main chain).
     LogPrint(BCLog::CHAINLOCKS, "Chainstate::%s -- enforcing block %s via CLSIG\n", __func__, bestChainLockBlockIndex->GetBlockHash().ToString());
-    if (!EnforceBlock(state, bestChainLockBlockIndex, provenance)) {
+    if (!EnforceBlock(state, bestChainLockBlockIndex,
+                      finalized_predecessor, provenance)) {
         return false;
     }
     // no cs_main allowed
@@ -6082,6 +6534,7 @@ bool Chainstate::EnforceBestChainLock(
 }
 bool Chainstate::EnforceBlock(
     BlockValidationState& state, const CBlockIndex* pindex,
+    const CBlockIndex* finalized_predecessor,
     ChainLockEnforcementProvenance provenance)
 {
     AssertLockNotHeld(m_chainstate_mutex);
@@ -6091,6 +6544,11 @@ bool Chainstate::EnforceBlock(
     // blocks.
     LOCK(m_chainstate_mutex);
     LOCK(cs_main);
+    if (pindex == nullptr || finalized_predecessor == nullptr) {
+        LogPrintf("Chainstate::%s -- refusing ChainLock with an unavailable "
+                  "finality interval\n", __func__);
+        return false;
+    }
     const bool exact_local{
         provenance == ChainLockEnforcementProvenance::EXACT_LOCAL};
     const bool verified_durable{
@@ -6109,7 +6567,16 @@ bool Chainstate::EnforceBlock(
                   exact_local_provenance
             : (pindex->nStatus &
                BLOCK_PQ_RECEIPT_INDEX_VALIDATED) != 0};
-    if ((!exact_local && !verified_durable) ||
+    const CBlockIndex* resolved_predecessor{pindex};
+    while (resolved_predecessor != nullptr &&
+           resolved_predecessor->nHeight >
+               finalized_predecessor->nHeight) {
+        resolved_predecessor = resolved_predecessor->pprev;
+    }
+    const bool valid_finality_range{
+        finalized_predecessor->nHeight < pindex->nHeight &&
+        resolved_predecessor == finalized_predecessor};
+    if (!valid_finality_range || (!exact_local && !verified_durable) ||
         (!already_active && !(pindex->nStatus & BLOCK_HAVE_DATA)) ||
         (pindex->nStatus & BLOCK_FAILED_MASK) ||
         pindex->IsAssumedValid() || !receipt_provenance ||
@@ -6121,25 +6588,44 @@ bool Chainstate::EnforceBlock(
                   __func__, pindex->GetBlockHash().ToString());
         return false;
     }
+    // Every certificate authenticates an exact, bounded successor interval.
+    // Mark siblings throughout that interval even when the target is already
+    // active; otherwise a branch indexed before acceptance can later extend
+    // above the best ChainLock height and evade the height-local admission
+    // check.
+    // SYSCOIN BEGIN: Publish all interval conflicts in one indexed batch.
+    std::vector<CBlockIndex*> conflict_roots;
     const CBlockIndex* pindex_walk = pindex;
-
-    while (pindex_walk && !m_chain.Contains(pindex_walk)) {
+    while (pindex_walk &&
+           pindex_walk->nHeight >= finalized_predecessor->nHeight) {
         // Mark all blocks that have the same prevBlockHash but are not equal to blockHash as conflicting
-        auto itp = m_blockman.LookupBlockIndexPrev(pindex_walk->pprev->GetBlockHash());
-        for (auto jt = itp.first; jt != itp.second; ++jt) {
-            if (jt->second == pindex_walk) {
-                continue;
+        if (pindex_walk->pprev != nullptr) {
+            auto itp = m_blockman.LookupBlockIndexPrev(
+                pindex_walk->pprev->GetBlockHash());
+            for (auto jt = itp.first; jt != itp.second; ++jt) {
+                if (jt->second == pindex_walk ||
+                    (jt->second->nStatus & BLOCK_CONFLICT_CHAINLOCK)) {
+                    continue;
+                }
+                conflict_roots.push_back(jt->second);
             }
-            if (!MarkConflictingBlock(state, jt->second)) {
-                LogPrintf("Chainstate::%s -- MarkConflictingBlock failed: %s\n", __func__, state.ToString());
-                // This should not have happened and we are in a state were it's not safe to continue anymore
-                assert(false);
-            }
-            LogPrintf("Chainstate::%s -- marked block %s as conflicting\n",
-                      __func__, jt->second->GetBlockHash().ToString());
         }
         pindex_walk = pindex_walk->pprev;
     }
+    if (!conflict_roots.empty() &&
+        !MarkConflictingBlocks(
+            state, conflict_roots,
+            ChainLockConflictMarkingMode::DISCONNECT_ACTIVE)) {
+        LogPrintf("Chainstate::%s -- batched conflict marking failed: %s\n",
+                  __func__, state.ToString());
+        // A partially disconnected finality interval is unsafe to continue.
+        assert(false);
+    }
+    for (const CBlockIndex* conflict_root : conflict_roots) {
+        LogPrintf("Chainstate::%s -- marked block %s as conflicting\n",
+                  __func__, conflict_root->GetBlockHash().ToString());
+    }
+    // SYSCOIN END: Publish all interval conflicts in one indexed batch.
     return true;
 }
 // SYSCOIN END: PQ ChainLock enforcement with explicit provenance.
@@ -6161,12 +6647,14 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex *pinde
     // blocks.
     LOCK(m_chainstate_mutex);
 
+    // SYSCOIN BEGIN: Protect durable finality during administrative invalidation.
     bool invalidates_active_chain{false};
     {
         LOCK(cs_main);
         invalidates_active_chain = m_chain.Contains(pindex);
     }
     if (llmq::chainLocksHandler != nullptr) {
+        LOCK(cs_main);
         const CBlockIndex* durable_finality_floor{nullptr};
         const CBlockIndex* durable_finality_target{nullptr};
         std::string finality_floor_error;
@@ -6197,6 +6685,7 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex *pinde
                 durable_finality_floor->nHeight));
         }
     }
+    // SYSCOIN END: Protect durable finality during administrative invalidation.
 
     // We'll be acquiring and releasing cs_main below, to allow the validation
     // callbacks to run. However, we should keep the block index in a
@@ -6338,117 +6827,195 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex *pinde
     }
     return true;
 }
-// SYSCOIN
-bool Chainstate::MarkConflictingBlock(BlockValidationState& state, CBlockIndex *pindex)
+// SYSCOIN BEGIN: Batched ChainLock-conflict marking.
+bool Chainstate::MarkConflictingBlock(BlockValidationState& state,
+                                      CBlockIndex* pindex)
+{
+    std::array<CBlockIndex*, 1> roots{pindex};
+    return MarkConflictingBlocks(
+        state, roots, ChainLockConflictMarkingMode::DISCONNECT_ACTIVE);
+}
+
+bool Chainstate::MarkConflictingBlocksInactive(
+    BlockValidationState& state,
+    std::span<CBlockIndex* const> roots)
+{
+    return MarkConflictingBlocks(
+        state, roots, ChainLockConflictMarkingMode::REQUIRE_INACTIVE);
+}
+
+ChainLockConflictMarkingStatsForTesting
+Chainstate::GetChainLockConflictMarkingStatsForTesting() const
 {
     AssertLockHeld(cs_main);
-    AssertLockNotHeld(m_mempool->cs);
-    bool pindex_was_in_chain = false;
-    int disconnected = 0;
-    CBlockIndex *conflicting_walk_tip = m_chain.Tip();
+    return m_chainlock_conflict_marking_stats;
+}
 
+void Chainstate::ResetChainLockConflictMarkingStatsForTesting()
+{
+    AssertLockHeld(cs_main);
+    m_chainlock_conflict_marking_stats = {};
+}
 
-    if (pindex == m_chainman.m_best_header) {
-        m_chainman.m_best_header = m_chainman.m_best_header->pprev;
+bool Chainstate::MarkConflictingBlocks(
+    BlockValidationState& state,
+    std::span<CBlockIndex* const> roots,
+    ChainLockConflictMarkingMode mode)
+{
+    AssertLockHeld(cs_main);
+    const bool disconnect_active{
+        mode == ChainLockConflictMarkingMode::DISCONNECT_ACTIVE};
+    if (disconnect_active && m_mempool != nullptr) {
+        AssertLockNotHeld(m_mempool->cs);
     }
-    DisconnectedBlockTransactions disconnectpool{MAX_DISCONNECTED_TX_POOL_SIZE * 1000};
-    while (true) {
-        if (m_chainman.m_interrupt) break;
 
-        // Lock for as long as disconnectpool is in scope to make sure MaybeUpdateMempoolForReorg is
-        // called after DisconnectTip without unlocking in between
-        LOCK(MempoolMutex());
-        if(!m_chain.Contains(pindex)) break;
-        const CBlockIndex* pindexOldTip = m_chain.Tip();
-        pindex_was_in_chain = true;
-        // ActivateBestChain considers blocks already in m_chain
-        // unconditionally valid already, so force disconnect away from it.
-        bool ret = DisconnectTip(state, &disconnectpool);
-        // DisconnectTip will add transactions to disconnectpool.
-        // Adjust the mempool to be consistent with the new tip, adding
-        // transactions back to the mempool if disconnecting was successful,
-        // and we're not doing a very deep invalidation (in which case
-        // keeping the mempool up to date is probably futile anyway).
-        MaybeUpdateMempoolForReorg(disconnectpool, /* fAddToMempool = */ (++disconnected <= 10) && ret);
-        if (!ret) return false;
-        if (pindexOldTip == m_chainman.m_best_header) {
-            m_chainman.m_best_header = m_chainman.m_best_header->pprev;
+    std::vector<CBlockIndex*> unique_roots;
+    unique_roots.reserve(roots.size());
+    std::unordered_set<const CBlockIndex*> root_set;
+    root_set.reserve(roots.size());
+    for (CBlockIndex* root : roots) {
+        if (root == nullptr) {
+            return state.Error("null ChainLock conflict root");
+        }
+        if (root_set.insert(root).second) {
+            unique_roots.push_back(root);
+        }
+    }
+    if (unique_roots.empty()) return true;
+
+    CBlockIndex* active_root{nullptr};
+    for (CBlockIndex* root : unique_roots) {
+        if (!m_chain.Contains(root)) continue;
+        if (!disconnect_active) {
+            return state.Error("active ChainLock conflict in inactive batch");
+        }
+        if (active_root == nullptr || root->nHeight < active_root->nHeight) {
+            active_root = root;
         }
     }
 
-    // Now mark the blocks we just disconnected as descendants conflicting
-    // (note this may not be all descendants).
-    while (pindex_was_in_chain && conflicting_walk_tip != pindex) {
-        conflicting_walk_tip->nStatus |= BLOCK_CONFLICT_CHAINLOCK;
-        setBlockIndexCandidates.erase(conflicting_walk_tip);
-        conflicting_walk_tip = conflicting_walk_tip->pprev;
-    }
+    ++m_chainlock_conflict_marking_stats.batch_calls;
+    m_chainlock_conflict_marking_stats.input_roots += unique_roots.size();
 
+    bool active_chain_changed{false};
+    int disconnected{0};
+    DisconnectedBlockTransactions disconnectpool{
+        MAX_DISCONNECTED_TX_POOL_SIZE * 1000};
+    if (disconnect_active) {
+        for (const CBlockIndex* root : unique_roots) {
+            if (root == m_chainman.m_best_header) {
+                m_chainman.m_best_header = root->pprev;
+                break;
+            }
+        }
+        while (active_root != nullptr && m_chain.Contains(active_root)) {
+            if (m_chainman.m_interrupt) break;
 
-    if (m_chain.Contains(pindex)) {
-        // If the to-be-marked invalid block is in the active chain, something is interfering and we can't proceed.
-        return false;
+            // Preserve the existing disconnect/mempool transaction boundary;
+            // batching removes repeated subtree scans, not reorg semantics.
+            LOCK(MempoolMutex());
+            const CBlockIndex* old_tip{m_chain.Tip()};
+            active_chain_changed = true;
+            ++m_chainlock_conflict_marking_stats.disconnect_tip_calls;
+            const bool disconnected_tip{DisconnectTip(state, &disconnectpool)};
+            MaybeUpdateMempoolForReorg(
+                disconnectpool,
+                /*fAddToMempool=*/(++disconnected <= 10) && disconnected_tip);
+            if (!disconnected_tip) return false;
+            if (old_tip == m_chainman.m_best_header) {
+                m_chainman.m_best_header = m_chainman.m_best_header->pprev;
+            }
+        }
+        if (active_root != nullptr && m_chain.Contains(active_root)) {
+            return state.Error("failed to disconnect active ChainLock conflict");
+        }
     }
-    // Mark the block itself as conflicting.
-    pindex->nStatus |= BLOCK_CONFLICT_CHAINLOCK;
-    setBlockIndexCandidates.erase(pindex);
 
     const auto chainstates{m_chainman.GetAll()};
-    for (Chainstate* chainstate : chainstates) {
-        chainstate->RemoveDeferredBTCCReceiptCandidatesThrough(*pindex);
+    std::deque<CBlockIndex*> pending(unique_roots.begin(), unique_roots.end());
+    std::unordered_set<const CBlockIndex*> conflicting_blocks;
+    while (!pending.empty()) {
+        CBlockIndex* const conflict{pending.front()};
+        pending.pop_front();
+        if (!conflicting_blocks.insert(conflict).second) continue;
+
+        conflict->nStatus |= BLOCK_CONFLICT_CHAINLOCK;
+        m_blockman.m_dirty_blockindex.insert(conflict);
+        for (Chainstate* chainstate : chainstates) {
+            chainstate->setBlockIndexCandidates.erase(conflict);
+        }
+        const auto children{
+            m_blockman.LookupBlockIndexPrev(conflict->GetBlockHash())};
+        for (auto child{children.first}; child != children.second; ++child) {
+            pending.push_back(child->second);
+        }
     }
-    // DisconnectTip will add transactions to disconnectpool; try to add these
-    // back to the mempool.
-    {
+    m_chainlock_conflict_marking_stats.visited_blocks +=
+        conflicting_blocks.size();
+    for (Chainstate* chainstate : chainstates) {
+        chainstate->RemoveDeferredBTCCReceiptCandidatesIn(conflicting_blocks);
+    }
+
+    if (disconnect_active) {
+        // Preserve single-root behavior: even an inactive root completes the
+        // empty disconnect-pool reconciliation before tip publication.
         LOCK(MempoolMutex());
         MaybeUpdateMempoolForReorg(disconnectpool, true);
     }
 
-    // The resulting new best tip may not be in setBlockIndexCandidates anymore, so
-    // add it again.
-    // A known header-only descendant does not pass through FindMostWorkChain,
-    // so propagate the conflict eagerly. Otherwise it can remain the best
-    // header and accept further descendants after its ancestor is finalized
-    // away. This scan also restores the exact best surviving header.
+    // Descendants were found through the maintained parent->children index.
+    // Scan the block index exactly once to restore the best surviving header
+    // and any eligible candidates displaced by an active-chain disconnect.
+    ++m_chainlock_conflict_marking_stats.block_index_scans;
     m_chainman.m_best_header = nullptr;
     for (auto& [_, block_index] : m_blockman.m_block_index) {
-        const bool descends_from_conflict{
-            block_index.nHeight >= pindex->nHeight &&
-            block_index.GetAncestor(pindex->nHeight) == pindex};
-        if (descends_from_conflict) {
-            block_index.nStatus |= BLOCK_CONFLICT_CHAINLOCK;
-            m_blockman.m_dirty_blockindex.insert(&block_index);
-            for (Chainstate* chainstate : chainstates) {
-                chainstate->setBlockIndexCandidates.erase(&block_index);
-            }
-        } else if (!(block_index.nStatus &
-                     (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK)) &&
-                   block_index.IsValid(BLOCK_VALID_TREE) &&
-                   (m_chainman.m_best_header == nullptr ||
-                    CBlockIndexWorkComparator()(m_chainman.m_best_header,
-                                                &block_index))) {
+        if (!(block_index.nStatus &
+              (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK)) &&
+            block_index.IsValid(BLOCK_VALID_TREE) &&
+            (m_chainman.m_best_header == nullptr ||
+             CBlockIndexWorkComparator()(m_chainman.m_best_header,
+                                         &block_index))) {
             m_chainman.m_best_header = &block_index;
         }
-        // SYSCOIN
-        if (!(block_index.nStatus & BLOCK_CONFLICT_CHAINLOCK) && block_index.IsValid(BLOCK_VALID_TRANSACTIONS) && block_index.HaveNumChainTxs() && !setBlockIndexCandidates.value_comp()(&block_index, m_chain.Tip())) {
+        if (!(block_index.nStatus & BLOCK_CONFLICT_CHAINLOCK) &&
+            block_index.IsValid(BLOCK_VALID_TRANSACTIONS) &&
+            block_index.HaveNumChainTxs() &&
+            !setBlockIndexCandidates.value_comp()(&block_index,
+                                                   m_chain.Tip())) {
             setBlockIndexCandidates.insert(&block_index);
         }
     }
 
-    ConflictingChainFound(pindex);
-    if(deterministicMNManager)
-        deterministicMNManager->UpdatedBlockTip(m_chain.Tip());
-    GetMainSignals().UpdatedBlockTip(
-        m_chain.Tip(), nullptr, m_chainman,
-        m_chainman.IsInitialBlockDownload());
+    CBlockIndex* representative{unique_roots.front()};
+    for (CBlockIndex* root : unique_roots) {
+        if (root->nChainWork > representative->nChainWork) {
+            representative = root;
+        }
+    }
+    ConflictingChainFound(representative);
 
-    // Only notify about a new block tip if the active chain was modified.
-    if (pindex_was_in_chain) {
-        // SYSCOIN for MN list to update
-        (void)m_chainman.GetNotifications().blockTip(GetSynchronizationState(m_chainman.IsInitialBlockDownload()), *pindex->pprev);
+    // ActivateBestChainStep publishes its own final tip after preflight. The
+    // inactive-only entry point therefore performs no callbacks while its
+    // caller holds the mempool lock.
+    if (disconnect_active) {
+        if (deterministicMNManager) {
+            deterministicMNManager->UpdatedBlockTip(m_chain.Tip());
+        }
+        GetMainSignals().UpdatedBlockTip(
+            m_chain.Tip(), nullptr, m_chainman,
+            m_chainman.IsInitialBlockDownload());
+        ++m_chainlock_conflict_marking_stats.tip_publications;
+
+        if (active_chain_changed) {
+            (void)m_chainman.GetNotifications().blockTip(
+                GetSynchronizationState(
+                    m_chainman.IsInitialBlockDownload()),
+                *Assert(m_chain.Tip()));
+        }
     }
     return true;
 }
+// SYSCOIN END: Batched ChainLock-conflict marking.
 bool Chainstate::ResetLastBlock() {
     AssertLockHeld(cs_main);
     if(m_chainman.m_best_invalid && m_chainman.m_best_invalid->GetAncestor(m_chain.Height()) == m_chain.Tip()) {
@@ -6533,29 +7100,9 @@ void Chainstate::TryAddBlockIndexCandidate(CBlockIndex* pindex)
             dependency->first, *dependency->second, *pindex);
         return;
     }
-    // SYSCOIN: Never admit a candidate conflicting with either immutable PQ
-    // boundary, even if it has more accumulated work.
-    const CBlockIndex* known_legacy_anchor = m_blockman.LookupBlockIndex(
-        m_chainman.GetConsensus().hashPQLegacyAnchorBlock);
-    const CBlockIndex* known_chainlock_anchor = m_blockman.LookupBlockIndex(
-        m_chainman.GetConsensus().hashPQChainLockAnchorBlock);
-    if (!Consensus::ArePQAnchorsCompatible(
-            m_chainman.GetConsensus(), pindex, known_legacy_anchor,
-            known_chainlock_anchor)) {
-        pindex->nStatus |= BLOCK_CONFLICT_CHAINLOCK;
-        m_blockman.m_dirty_blockindex.insert(pindex);
-        return;
-    }
-    const bool recovering_from_incompatible_tip =
-        m_chain.Tip() != nullptr &&
-        (known_legacy_anchor != nullptr || known_chainlock_anchor != nullptr) &&
-        !Consensus::ArePQAnchorsCompatible(
-            m_chainman.GetConsensus(), m_chain.Tip(), known_legacy_anchor,
-            known_chainlock_anchor);
     // The block only is a candidate for the most-work-chain if it has the same
-    // or more work than our current tip. A tip excluded by the mandatory
-    // anchor is not a valid work baseline while recovering to the anchor.
-    if (!recovering_from_incompatible_tip && m_chain.Tip() != nullptr &&
+    // or more work than our current tip.
+    if (m_chain.Tip() != nullptr &&
         setBlockIndexCandidates.value_comp()(pindex, m_chain.Tip())) {
         return;
     }
@@ -6790,27 +7337,6 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
 
     // Check proof of work
     const Consensus::Params& consensusParams = chainman.GetConsensus();
-    // SYSCOIN: Bind header admission to both immutable PQ boundaries before
-    // PoW fork choice can make an incompatible branch selectable.
-    const CBlockIndex* known_legacy_anchor =
-        blockman.LookupBlockIndex(consensusParams.hashPQLegacyAnchorBlock);
-    const auto legacy_anchor_result = Consensus::CheckPQLegacyAnchor(
-        consensusParams, nHeight, block.GetHash(), pindexPrev,
-        known_legacy_anchor);
-    if (legacy_anchor_result != Consensus::PQAnchorResult::DISABLED &&
-        legacy_anchor_result != Consensus::PQAnchorResult::VALID) {
-        return state.Invalid(BlockValidationResult::BLOCK_CHECKPOINT, "bad-pq-legacy-anchor");
-    }
-    const CBlockIndex* known_chainlock_anchor =
-        blockman.LookupBlockIndex(consensusParams.hashPQChainLockAnchorBlock);
-    const auto chainlock_anchor_result = Consensus::CheckPQChainLockAnchor(
-        consensusParams, nHeight, block.GetHash(), pindexPrev,
-        known_chainlock_anchor);
-    if (chainlock_anchor_result != Consensus::PQAnchorResult::DISABLED &&
-        chainlock_anchor_result != Consensus::PQAnchorResult::VALID) {
-        return state.Invalid(BlockValidationResult::BLOCK_CHECKPOINT,
-                             "bad-pq-chainlock-anchor");
-    }
     // Disallow legacy blocks after merge-mining start.
     if (!consensusParams.AllowLegacyBlocks(nHeight) && block.IsLegacy()){
         LogPrintf("ERROR: %s: legacy block after auxpow start\n", __func__);
@@ -7171,15 +7697,6 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
     }
     if(pindex == nullptr)
         pindex = m_blockman.AddToBlockIndex(block, m_best_header, nStatus);
-
-    // SYSCOIN: Once either exact anchor arrives, quarantine every indexed
-    // competing branch before exposing it to normal candidate selection.
-    if ((hash == GetConsensus().hashPQLegacyAnchorBlock ||
-        hash == GetConsensus().hashPQChainLockAnchorBlock) &&
-        !EnforcePQAnchorBranches()) {
-        return state.Invalid(BlockValidationResult::BLOCK_CHECKPOINT,
-                             "bad-pq-anchor-index");
-    }
 
     if (ppindex)
         *ppindex = pindex;
@@ -7912,7 +8429,11 @@ bool Chainstate::ReplayBlocks()
             [this](const uint256& hash)
                 EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
                 return m_blockman.LookupBlockIndex(hash);
-            })) {
+            },
+            llmq::chainLocksHandler
+                ? llmq::chainLocksHandler
+                      ->GetDurableFinalityTargetForStartup()
+                : std::nullopt)) {
         return error(
             "ReplayBlocks(): auxiliary-history GC authorization is not "
             "compatible with recovered head %s",
@@ -8032,123 +8553,6 @@ void Chainstate::ClearBlockIndexCandidates()
     m_deferred_btcc_receipt_candidates.clear();
 }
 
-// SYSCOIN: Quarantine every indexed branch incompatible with either immutable PQ anchor.
-bool ChainstateManager::EnforcePQAnchorBranches()
-{
-    AssertLockHeld(cs_main);
-    const auto& consensus = GetConsensus();
-    const auto legacy_configuration{
-        Consensus::CheckPQLegacyAnchorConfiguration(consensus)};
-    const auto chainlock_configuration{
-        Consensus::CheckPQChainLockAnchorConfiguration(consensus)};
-    if (legacy_configuration ==
-            Consensus::PQAnchorResult::INVALID_CONFIGURATION ||
-        chainlock_configuration ==
-            Consensus::PQAnchorResult::INVALID_CONFIGURATION) {
-        return false;
-    }
-    if (legacy_configuration == Consensus::PQAnchorResult::DISABLED &&
-        chainlock_configuration == Consensus::PQAnchorResult::DISABLED) {
-        return true;
-    }
-
-    // A fresh node has no indexed headers yet. The configured anchors are
-    // enforced as their headers arrive; absence before genesis/bootstrap is
-    // not an incompatible branch.
-    if (m_blockman.m_block_index.empty()) {
-        m_best_header = nullptr;
-        return true;
-    }
-
-    CBlockIndex* legacy_anchor{
-        legacy_configuration == Consensus::PQAnchorResult::VALID
-            ? m_blockman.LookupBlockIndex(consensus.hashPQLegacyAnchorBlock)
-            : nullptr};
-    CBlockIndex* chainlock_anchor{
-        chainlock_configuration == Consensus::PQAnchorResult::VALID
-            ? m_blockman.LookupBlockIndex(
-                  consensus.hashPQChainLockAnchorBlock)
-            : nullptr};
-    if ((legacy_anchor != nullptr &&
-         legacy_anchor->nHeight != consensus.nPQLegacyAnchorHeight) ||
-        (chainlock_anchor != nullptr &&
-         chainlock_anchor->nHeight != consensus.nPQChainLockAnchorHeight)) {
-        return false;
-    }
-    if (chainlock_anchor != nullptr &&
-        (legacy_anchor == nullptr ||
-         !Consensus::ArePQAnchorsCompatible(
-             consensus, chainlock_anchor, legacy_anchor,
-             chainlock_anchor))) {
-        return false;
-    }
-
-    const auto chainstates = GetAll();
-    m_best_header = nullptr;
-    for (auto& [_, index] : m_blockman.m_block_index) {
-        CBlockIndex* pindex = &index;
-        if (!Consensus::ArePQAnchorsCompatible(
-                consensus, pindex, legacy_anchor, chainlock_anchor)) {
-            if (!(pindex->nStatus & BLOCK_CONFLICT_CHAINLOCK)) {
-                pindex->nStatus |= BLOCK_CONFLICT_CHAINLOCK;
-                m_blockman.m_dirty_blockindex.insert(pindex);
-            }
-            for (Chainstate* chainstate : chainstates) {
-                chainstate->setBlockIndexCandidates.erase(pindex);
-            }
-            continue;
-        }
-        if (!(pindex->nStatus & (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK)) &&
-            pindex->IsValid(BLOCK_VALID_TREE) &&
-            (m_best_header == nullptr ||
-             CBlockIndexWorkComparator()(m_best_header, pindex))) {
-            m_best_header = pindex;
-        }
-    }
-
-    // SYSCOIN: The anchor scan marks every incompatible carrier directly,
-    // including branches hidden from ordinary candidate selection.
-    for (Chainstate* chainstate : chainstates) {
-        if (chainstate->m_chain.Tip() != nullptr &&
-            !chainstate->setBlockIndexCandidates.empty()) {
-            chainstate->PruneBlockIndexCandidates();
-        }
-    }
-
-    // SYSCOIN: Before an anchor header arrived, ordinary work-based pruning
-    // may have removed every compatible candidate below a higher-work fork.
-    // Seed recovery from the highest known immutable boundary.
-    CBlockIndex* recovery_anchor{
-        chainlock_anchor != nullptr ? chainlock_anchor : legacy_anchor};
-    if (recovery_anchor == nullptr) return m_best_header != nullptr;
-    for (Chainstate* chainstate : chainstates) {
-        if (chainstate->m_chain.Tip() == nullptr ||
-            Consensus::ArePQAnchorsCompatible(
-                consensus, chainstate->m_chain.Tip(), legacy_anchor,
-                chainlock_anchor)) {
-            continue;
-        }
-
-        for (CBlockIndex* recovery = recovery_anchor; recovery != nullptr;
-             recovery = recovery->pprev) {
-            const bool eligible =
-                recovery == GetSnapshotBaseBlock() ||
-                (recovery->IsValid(BLOCK_VALID_TRANSACTIONS) &&
-                 !(recovery->nStatus & BLOCK_CONFLICT_CHAINLOCK) &&
-                 (recovery->HaveNumChainTxs() || recovery->pprev == nullptr));
-            if (!eligible) continue;
-
-            const size_t candidate_count = chainstate->setBlockIndexCandidates.size();
-            chainstate->TryAddBlockIndexCandidate(recovery);
-            if (chainstate->setBlockIndexCandidates.size() != candidate_count ||
-                chainstate->setBlockIndexCandidates.count(recovery) != 0) {
-                break;
-            }
-        }
-    }
-    return m_best_header != nullptr;
-}
-
 bool ChainstateManager::LoadBlockIndex()
 {
     AssertLockHeld(cs_main);
@@ -8164,45 +8568,8 @@ bool ChainstateManager::LoadBlockIndex()
         std::sort(vSortedByHeight.begin(), vSortedByHeight.end(),
                   CBlockIndexHeightOnlyComparator());
 
-        // SYSCOIN: Enforce both immutable PQ boundaries before ordinary
-        // best-header and candidate reconstruction.
-        const auto legacy_anchor_configuration =
-            Consensus::CheckPQLegacyAnchorConfiguration(GetConsensus());
-        const auto chainlock_anchor_configuration =
-            Consensus::CheckPQChainLockAnchorConfiguration(GetConsensus());
-        if (legacy_anchor_configuration ==
-                Consensus::PQAnchorResult::INVALID_CONFIGURATION ||
-            chainlock_anchor_configuration ==
-                Consensus::PQAnchorResult::INVALID_CONFIGURATION) {
-            LogPrintf("%s: incomplete mandatory PQ anchor configuration\n", __func__);
-            return false;
-        }
-
-        if (!EnforcePQAnchorBranches()) {
-            LogPrintf("%s: failed to enforce mandatory PQ anchor branches\n", __func__);
-            return false;
-        }
-
-        const CBlockIndex* known_legacy_anchor =
-            m_blockman.LookupBlockIndex(GetConsensus().hashPQLegacyAnchorBlock);
-        const CBlockIndex* known_chainlock_anchor =
-            m_blockman.LookupBlockIndex(
-                GetConsensus().hashPQChainLockAnchorBlock);
-
         for (CBlockIndex* pindex : vSortedByHeight) {
             if (m_interrupt) return false;
-            if (!Consensus::ArePQAnchorsCompatible(
-                    GetConsensus(), pindex, known_legacy_anchor,
-                    known_chainlock_anchor)) {
-                // SYSCOIN: exclude stale pre-fork database branches before
-                // candidate/header selection. A header-only branch must not
-                // remain m_best_header and poison headers-first sync.
-                if (!(pindex->nStatus & BLOCK_CONFLICT_CHAINLOCK)) {
-                    pindex->nStatus |= BLOCK_CONFLICT_CHAINLOCK;
-                    m_blockman.m_dirty_blockindex.insert(pindex);
-                }
-                continue;
-            }
             // If we have an assumeutxo-based chainstate, then the snapshot
             // block will be a candidate for the tip, but it may not be
             // VALID_TRANSACTIONS (eg if we haven't yet downloaded the block),

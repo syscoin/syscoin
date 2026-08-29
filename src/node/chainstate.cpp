@@ -8,7 +8,7 @@
 #include <chain.h>
 #include <coins.h>
 #include <consensus/params.h>
-#include <consensus/pq_migration.h> // SYSCOIN: preserve PQ state across reindex modes.
+#include <consensus/pq_migration_config.h> // SYSCOIN: validate the height-only PQ deployment.
 #include <logging.h>
 #include <node/blockstorage.h>
 #include <node/caches.h>
@@ -26,6 +26,7 @@
 #include <services/assetconsensus.h>
 #include <evo/evodb.h>
 #include <evo/deterministicmns.h>
+#include <llmq/quorums_chainlocks.h> // SYSCOIN: startup handoff finality provenance.
 #include <llmq/quorums_init.h>
 #include <governance/governance.h>
 #include <netfulfilledman.h>
@@ -41,10 +42,9 @@
 namespace node {
 namespace {
 
-// SYSCOIN: A loaded coins database is usable only when its deterministic-MN
-// and PQ-registry snapshots agree with the release-pinned migration branch.
-// This prevents a stale pre-PQ database from silently bootstrapping finality.
-bool VerifyActivePQAnchors(const Chainstate& chainstate)
+// SYSCOIN: A loaded coins database is usable only when its branch-local
+// deterministic-MN, rollback, probation, and PQ-registry state is intact.
+bool VerifyActivePQState(const Chainstate& chainstate)
     EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
 {
     const auto& consensus = chainstate.m_chainman.GetConsensus();
@@ -55,9 +55,10 @@ bool VerifyActivePQAnchors(const Chainstate& chainstate)
         llmq::pq::PQRegistryDeploymentResult::INVALID_CONFIGURATION) {
         return false;
     }
-    const auto configuration = Consensus::CheckPQLegacyAnchorConfiguration(consensus);
-    const auto finality_configuration =
-        Consensus::CheckPQChainLockAnchorConfiguration(consensus);
+    if (Consensus::CheckPQActivationConfiguration(consensus) ==
+        Consensus::PQActivationResult::INVALID_CONFIGURATION) {
+        return false;
+    }
     const CBlockIndex* tip = chainstate.m_chain.Tip();
     llmq::pq::PQPaymentProbationStateView probation_state;
     if (tip != nullptr && tip->nHeight >= consensus.DIP0003Height &&
@@ -73,51 +74,10 @@ bool VerifyActivePQAnchors(const Chainstate& chainstate)
         // fail-closed at point of use.
         return false;
     }
-    if (configuration == Consensus::PQAnchorResult::DISABLED) {
-        return finality_configuration ==
-                   Consensus::PQAnchorResult::DISABLED &&
-               (pq_deployment !=
-                    llmq::pq::PQRegistryDeploymentResult::VALID ||
-                tip == nullptr ||
-                (deterministicMNManager != nullptr &&
-                 deterministicMNManager->VerifyPersistedPQRegistrySnapshot(tip)));
-    }
-    if (configuration != Consensus::PQAnchorResult::VALID ||
-        finality_configuration ==
-            Consensus::PQAnchorResult::INVALID_CONFIGURATION) {
-        return false;
-    }
-
-    if (tip == nullptr) return true;
-    const CBlockIndex* known_legacy_anchor{
-        chainstate.m_chainman.m_blockman.LookupBlockIndex(
-            consensus.hashPQLegacyAnchorBlock)};
-    const auto ancestry = Consensus::CheckPQLegacyAnchor(
-        consensus, tip->nHeight, tip->GetBlockHash(), tip->pprev,
-        known_legacy_anchor);
-    if (ancestry != Consensus::PQAnchorResult::VALID) return false;
-
-    if (finality_configuration == Consensus::PQAnchorResult::VALID) {
-        const CBlockIndex* known_finality_anchor{
-            chainstate.m_chainman.m_blockman.LookupBlockIndex(
-                consensus.hashPQChainLockAnchorBlock)};
-        if (Consensus::CheckPQChainLockAnchor(
-                consensus, tip->nHeight, tip->GetBlockHash(), tip->pprev,
-                known_finality_anchor) !=
-            Consensus::PQAnchorResult::VALID) {
-            return false;
-        }
-    }
-
-    const CBlockIndex* anchor{
-        tip->nHeight >= consensus.nPQLegacyAnchorHeight
-            ? tip->GetAncestor(consensus.nPQLegacyAnchorHeight)
-            : nullptr};
-    return deterministicMNManager != nullptr &&
-           (anchor == nullptr ||
-            deterministicMNManager->VerifyPQLegacyAnchorState(anchor)) &&
-           deterministicMNManager->VerifyPersistedSnapshot(tip) &&
-           deterministicMNManager->VerifyPersistedPQRegistrySnapshot(tip);
+    return pq_deployment != llmq::pq::PQRegistryDeploymentResult::VALID ||
+           tip == nullptr ||
+           (deterministicMNManager != nullptr &&
+            deterministicMNManager->VerifyPersistedPQRegistrySnapshot(tip));
 }
 
 } // namespace
@@ -269,6 +229,7 @@ static ChainstateLoadResult CompleteChainstateInitialization(
     std::vector<Chainstate*> loaded_chainstates;
     auto chainstates{chainman.GetAll()};
     Chainstate* const active_chainstate{&chainman.ActiveChainstate()};
+    // SYSCOIN BEGIN: Publish the recovered tip with durable finality authority.
     const auto publish_startup_tip = [&](const CBlockIndex* recovered_tip)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
         return deterministicMNManager == nullptr ||
@@ -277,8 +238,13 @@ static ChainstateLoadResult CompleteChainstateInitialization(
                    [&](const uint256& hash)
                        EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
                        return chainman.m_blockman.LookupBlockIndex(hash);
-                   });
+                   },
+                   llmq::chainLocksHandler
+                       ? llmq::chainLocksHandler
+                             ->GetDurableFinalityTargetForStartup()
+                       : std::nullopt);
     };
+    // SYSCOIN END: Publish the recovered tip with durable finality authority.
     // SYSCOIN: The active recovery head is the ancestry authority for shared
     // journal-bound stores. Load it before an AssumeUTXO background state.
     std::stable_partition(
@@ -293,6 +259,25 @@ static ChainstateLoadResult CompleteChainstateInitialization(
             /*cache_size_bytes=*/chainman.m_total_coinsdb_cache * init_cache_fraction,
             /*in_memory=*/options.coins_db_in_memory,
             /*should_wipe=*/options.reindex || options.reindex_chainstate);
+
+        // SYSCOIN BEGIN: Persist replay quarantine before opaque legacy state
+        // can be reconstructed by this BLS-free binary.
+        if (chainstate == active_chainstate) {
+            const bool coins_db_empty{
+                chainstate->CoinsDB().GetBestBlock().IsNull() &&
+                chainstate->CoinsDB().GetHeadBlocks().empty()};
+            const bool force_historical_replay{
+                options.reindex || options.reindex_chainstate ||
+                disk_reindexing || chainman.IsSnapshotActive()};
+            bilingual_str handoff_error;
+            if (!chainman.PreparePQActivationHandoff(
+                    force_historical_replay, coins_db_empty,
+                    handoff_error)) {
+                return {ChainstateLoadStatus::FAILURE_INCOMPATIBLE_DB,
+                        handoff_error};
+            }
+        }
+        // SYSCOIN END: Persist replay quarantine before legacy replay.
 
         if (options.coins_error_cb) {
             chainstate->CoinsErrorCatcher().AddReadErrCallback(options.coins_error_cb);
@@ -321,6 +306,18 @@ static ChainstateLoadResult CompleteChainstateInitialization(
                 return {ChainstateLoadStatus::FAILURE, _("Error initializing block database")};
             }
             assert(chainstate->m_chain.Tip() != nullptr);
+            // SYSCOIN BEGIN: Establish or verify the exact local A-1 handoff
+            // before any public service can observe startup readiness.
+            if (chainstate == active_chainstate) {
+                bilingual_str handoff_error;
+                if (!chainman.FinalizePQActivationHandoff(
+                        chainstate->m_chain.Tip(), handoff_error)) {
+                    return {
+                        ChainstateLoadStatus::FAILURE_INCOMPATIBLE_DB,
+                        handoff_error};
+                }
+            }
+            // SYSCOIN END: Verify the local PQ activation handoff.
             if (chainstate == active_chainstate &&
                 !publish_startup_tip(chainstate->m_chain.Tip())) {
                 return {ChainstateLoadStatus::FAILURE_INCOMPATIBLE_DB,
@@ -350,12 +347,12 @@ static ChainstateLoadResult CompleteChainstateInitialization(
                     _("Auxiliary-history GC authorization is not compatible with the recovered active chain")};
         }
         for (const Chainstate* chainstate : loaded_chainstates) {
-            // SYSCOIN: Treat an anchor/registry mismatch as an incompatible
+            // SYSCOIN: Treat an auxiliary-state mismatch as an incompatible
             // database, not a recoverable tip-selection error; reindexing is
-            // required to reconstruct the branch-bound snapshots.
-            if (!VerifyActivePQAnchors(*chainstate)) {
+            // required to reconstruct the branch-bound records.
+            if (!VerifyActivePQState(*chainstate)) {
                 return {ChainstateLoadStatus::FAILURE_INCOMPATIBLE_DB,
-                        _("Mandatory post-quantum anchors, deterministic masternode state, rollback-journal tip seal, or PQ key registry is missing or invalid. Reindex with the matching Syscoin release; existing pre-journal datadirs cannot be backfilled from the bounded snapshot window.")};
+                        _("Post-quantum deterministic masternode state, rollback-journal tip seal, payment probation state, or PQ key registry is missing or invalid. Reindex with the matching Syscoin release; existing pre-journal datadirs cannot be backfilled from the bounded snapshot window.")};
             }
         }
         if (deterministicMNManager) {

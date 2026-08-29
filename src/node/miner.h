@@ -213,6 +213,12 @@ void IncrementExtraNonce(CBlock* pblock, const CBlockIndex* pindexPrev, unsigned
 int64_t UpdateTime(CBlockHeader* pblock, const Consensus::Params& consensusParams, const CBlockIndex* pindexPrev);
 bool ProcessBlockFound(const CBlock* pblock, const CChainParams& chainParams);
 
+// SYSCOIN BEGIN: A quarantined public node may validate blocks but must never
+// originate a candidate block through any template or generate RPC path.
+[[nodiscard]] bool ShouldCreateBlockTemplate(
+    bool pq_participation_allowed) noexcept;
+// SYSCOIN END: Public PQ activation block-production gate.
+
 // SYSCOIN
 /** Update an old GenerateCoinbaseCommitment from CreateNewBlock after the block txs have changed */
 // SYSCOIN

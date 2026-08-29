@@ -4,7 +4,7 @@
 //
 #include <addresstype.h> // SYSCOIN: deterministic valid-MN payout.
 #include <chainparams.h>
-#include <consensus/pq_migration.h> // SYSCOIN: pinned migration-anchor tests.
+#include <consensus/pq_migration_config.h> // SYSCOIN: PQ activation-boundary tests.
 #include <consensus/validation.h>
 #include <evo/deterministicmns.h> // SYSCOIN: deep rollback integration state.
 #include <evo/pq_payment_probation_db.h> // SYSCOIN: multi-chainstate probation GC.
@@ -35,7 +35,7 @@
 
 #include <tinyformat.h>
 
-#include <array> // SYSCOIN: synthetic migration-anchor fixtures.
+#include <array> // SYSCOIN: synthetic PQ activation fixtures.
 #include <vector>
 
 #include <boost/test/unit_test.hpp>
@@ -123,7 +123,7 @@ BOOST_FIXTURE_TEST_CASE(persisted_reindex_marker_forces_clean_block_index, Chain
 }
 BOOST_FIXTURE_TEST_SUITE(validation_chainstatemanager_tests, TestingSetup)
 
-// SYSCOIN: BEGIN public IBD remains latched until PQ-history authentication
+// SYSCOIN BEGIN: Public IBD and durable recovery-marker lifecycle tests.
 // and deferred NEVM recovery reach the exact active tip.
 BOOST_FIXTURE_TEST_CASE(pq_history_auth_state_gates_public_ibd,
                         TestChain100Setup)
@@ -194,18 +194,12 @@ BOOST_FIXTURE_TEST_CASE(
     consensus.nPQRegistrationCutoffBlocks = 288;
     consensus.nPQRosterSnapshotLag = 288;
     consensus.nPQFutureHorizonEpochs = 8;
-    consensus.nPQLegacyAnchorHeight = 1'000;
-    consensus.hashPQLegacyAnchorBlock = GetRandHash();
-    consensus.hashPQLegacyMNState = GetRandHash();
-    consensus.hashPQLegacyPQRegistryState = GetRandHash();
-    consensus.nPQChainLockAnchorHeight = 2'304;
-    consensus.hashPQChainLockAnchorBlock = GetRandHash();
+    consensus.nPQActivationHeight = 2'305;
     consensus.nPQBTCCCandidateOrigin = 2'310;
     consensus.nPQBTCCNEVMInjectionLag =
         static_cast<int>(llmq::pq::PQ_BTCC_NEVM_LAG);
     consensus.nPQBTCCReceiptAnchorHeight = 1'000;
-    consensus.hashPQBTCCReceiptAnchorBlock =
-        consensus.hashPQLegacyAnchorBlock;
+    consensus.hashPQBTCCReceiptAnchorBlock = GetRandHash();
     consensus.nPQBTCCReceiptAnchorCursorHeight = -1;
     consensus.hashPQBTCCReceiptAnchorCursorSysBlock.SetNull();
     consensus.hashPQBTCCReceiptAnchorCursorBTCBlock.SetNull();
@@ -381,7 +375,7 @@ BOOST_AUTO_TEST_CASE(coins_recovery_marker_validation)
                      {}, null_new_head, {}, error)
                      .has_value());
 }
-// SYSCOIN: END public IBD and durable recovery-marker lifecycle tests.
+// SYSCOIN END: Public IBD and durable recovery-marker lifecycle tests.
 
 //! Basic tests for ChainstateManager.
 //!
@@ -652,95 +646,7 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_rebalance_caches, TestChain100Setup)
     SyncWithValidationInterfaceQueue();
 }
 
-// SYSCOIN BEGIN: PQ migration and payment-audit chainstate-manager regressions.
-// The exact migration anchor can arrive after a higher-work fork below
-// the anchor height became active. That forbidden tip must not prevent the node
-// from selecting the lower-work anchored branch for recovery.
-BOOST_FIXTURE_TEST_CASE(pq_anchor_recovery_ignores_forbidden_tip_work,
-                        TestChain100Setup)
-{
-    // SYSCOIN: BasicTestingSetup pins DIP3 at 550. Extend the already-checked
-    // 100-block fixture here so the synthetic migration anchor is genuinely
-    // post-DIP3 without depending on a brittle hard-coded 600-block tip hash.
-    mineBlocks(500);
-    ChainstateManager& chainman = *Assert(m_node.chainman);
-    Chainstate& chainstate = chainman.ActiveChainstate();
-    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
-    const int old_anchor_height = consensus.nPQLegacyAnchorHeight;
-    const uint256 old_anchor_block = consensus.hashPQLegacyAnchorBlock;
-    const uint256 old_anchor_state = consensus.hashPQLegacyMNState;
-    const uint256 old_anchor_pq_state =
-        consensus.hashPQLegacyPQRegistryState;
-    struct RestoreAnchorParams {
-        Consensus::Params& consensus;
-        int height;
-        uint256 block;
-        uint256 state;
-        uint256 pq_state;
-        ~RestoreAnchorParams()
-        {
-            consensus.nPQLegacyAnchorHeight = height;
-            consensus.hashPQLegacyAnchorBlock = block;
-            consensus.hashPQLegacyMNState = state;
-            consensus.hashPQLegacyPQRegistryState = pq_state;
-        }
-    } restore{consensus, old_anchor_height, old_anchor_block, old_anchor_state,
-              old_anchor_pq_state};
-
-    LOCK(::cs_main);
-    constexpr int anchor_height{600};
-    CBlockIndex* const original_tip = chainstate.m_chain.Tip();
-    CBlockIndex* const anchor = chainstate.m_chain[anchor_height];
-    BOOST_REQUIRE(original_tip != nullptr);
-    BOOST_REQUIRE(anchor != nullptr);
-    BOOST_REQUIRE(anchor->pprev != nullptr);
-
-    consensus.nPQLegacyAnchorHeight = anchor_height;
-    consensus.hashPQLegacyAnchorBlock = anchor->GetBlockHash();
-    consensus.hashPQLegacyMNState = uint256::ONEV;
-    consensus.hashPQLegacyPQRegistryState = uint256S("3");
-
-    BOOST_REQUIRE(
-        Consensus::CheckPQLegacyAnchorConfiguration(consensus) ==
-        Consensus::PQAnchorResult::VALID);
-    BOOST_REQUIRE_EQUAL(
-        chainman.m_blockman.LookupBlockIndex(anchor->GetBlockHash()), anchor);
-    BOOST_REQUIRE(Consensus::IsPQLegacyAnchorCompatible(
-        consensus, original_tip, anchor));
-    BOOST_REQUIRE(original_tip->IsValid(BLOCK_VALID_TREE));
-    BOOST_REQUIRE(!(original_tip->nStatus &
-                    (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK)));
-
-    uint256 fork_hash = GetRandHash();
-    while (fork_hash == anchor->pprev->GetBlockHash()) fork_hash = GetRandHash();
-    CBlockIndex forbidden_tip;
-    forbidden_tip.phashBlock = &fork_hash;
-    forbidden_tip.pprev = anchor->pprev->pprev;
-    forbidden_tip.nHeight = anchor_height - 1;
-    forbidden_tip.nChainWork = original_tip->nChainWork + 1;
-
-    const auto original_candidates = chainstate.setBlockIndexCandidates;
-    CBlockIndex* const original_best_header = chainman.m_best_header;
-    chainstate.m_chain.SetTip(forbidden_tip);
-    chainstate.setBlockIndexCandidates.clear();
-
-    BOOST_CHECK(!Consensus::IsPQLegacyAnchorCompatible(
-        consensus, chainstate.m_chain.Tip(), anchor));
-    BOOST_CHECK(node::CBlockIndexWorkComparator()(anchor, &forbidden_tip));
-    BOOST_CHECK(chainman.EnforcePQAnchorBranches());
-    BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(anchor), 1U);
-
-    chainstate.setBlockIndexCandidates.clear();
-    chainstate.TryAddBlockIndexCandidate(anchor);
-    BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(anchor), 1U);
-    chainstate.PruneBlockIndexCandidates();
-    BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(anchor), 1U);
-
-    chainstate.m_chain.SetTip(*original_tip);
-    chainstate.setBlockIndexCandidates = original_candidates;
-    chainman.m_best_header = original_best_header;
-}
-
+// SYSCOIN BEGIN: PQ finality and payment-audit chainstate-manager regressions.
 BOOST_FIXTURE_TEST_CASE(
     chainlock_conflict_quarantines_known_header_descendants,
     TestChain100Setup)
@@ -787,6 +693,7 @@ BOOST_FIXTURE_TEST_CASE(
              {conflict_root, conflict_descendant, former_best_header}) {
             chainstate.setBlockIndexCandidates.insert(index);
         }
+        chainstate.ResetChainLockConflictMarkingStatsForTesting();
 
         BlockValidationState conflict_state;
         BOOST_REQUIRE(
@@ -799,6 +706,14 @@ BOOST_FIXTURE_TEST_CASE(
                 chainstate.setBlockIndexCandidates.count(index), 0U);
         }
         BOOST_CHECK_EQUAL(chainman.m_best_header, surviving_tip);
+        const auto stats{
+            chainstate.GetChainLockConflictMarkingStatsForTesting()};
+        BOOST_CHECK_EQUAL(stats.batch_calls, 1U);
+        BOOST_CHECK_EQUAL(stats.input_roots, 1U);
+        BOOST_CHECK_EQUAL(stats.visited_blocks, 3U);
+        BOOST_CHECK_EQUAL(stats.block_index_scans, 1U);
+        BOOST_CHECK_EQUAL(stats.disconnect_tip_calls, 0U);
+        BOOST_CHECK_EQUAL(stats.tip_publications, 1U);
 
         rejected_child = make_header(*former_best_header, 1);
     }
@@ -1251,7 +1166,7 @@ BOOST_FIXTURE_TEST_CASE(btcc_pending_candidate_yields_and_requeues_exactly,
         higher_logical_id));
 }
 
-// SYSCOIN END: PQ migration and payment-audit chainstate-manager regressions.
+// SYSCOIN END: PQ finality and payment-audit chainstate-manager regressions.
 
 struct SnapshotTestSetup : TestChain100Setup {
     // Run with coinsdb on the filesystem to support, e.g., moving invalidated
@@ -1496,7 +1411,7 @@ struct SnapshotTestSetup : TestChain100Setup {
     }
 };
 
-// SYSCOIN: BEGIN durable ChainLock boundaries and reconstructed DMN/PQ roots
+// SYSCOIN BEGIN: Durable ChainLock restart and deep-invalidation tests.
 // must protect active and side branches across block-index reloads.
 BOOST_FIXTURE_TEST_CASE(
     chainlock_conflicting_best_header_is_not_restored_after_restart,
@@ -1617,14 +1532,7 @@ BOOST_FIXTURE_TEST_CASE(
         uint32_t future_horizon{consensus.nPQFutureHorizonEpochs};
         int btcc_candidate_origin{consensus.nPQBTCCCandidateOrigin};
         int btcc_injection_lag{consensus.nPQBTCCNEVMInjectionLag};
-        int legacy_anchor_height{consensus.nPQLegacyAnchorHeight};
-        uint256 legacy_anchor_block{consensus.hashPQLegacyAnchorBlock};
-        uint256 legacy_mn_state{consensus.hashPQLegacyMNState};
-        uint256 legacy_registry_state{
-            consensus.hashPQLegacyPQRegistryState};
-        int chainlock_anchor_height{consensus.nPQChainLockAnchorHeight};
-        uint256 chainlock_anchor_block{
-            consensus.hashPQChainLockAnchorBlock};
+        int activation_height{consensus.nPQActivationHeight};
         int receipt_anchor_height{consensus.nPQBTCCReceiptAnchorHeight};
         uint256 receipt_anchor_block{consensus.hashPQBTCCReceiptAnchorBlock};
         int receipt_anchor_cursor_height{
@@ -1643,12 +1551,7 @@ BOOST_FIXTURE_TEST_CASE(
             consensus.nPQFutureHorizonEpochs = future_horizon;
             consensus.nPQBTCCCandidateOrigin = btcc_candidate_origin;
             consensus.nPQBTCCNEVMInjectionLag = btcc_injection_lag;
-            consensus.nPQLegacyAnchorHeight = legacy_anchor_height;
-            consensus.hashPQLegacyAnchorBlock = legacy_anchor_block;
-            consensus.hashPQLegacyMNState = legacy_mn_state;
-            consensus.hashPQLegacyPQRegistryState = legacy_registry_state;
-            consensus.nPQChainLockAnchorHeight = chainlock_anchor_height;
-            consensus.hashPQChainLockAnchorBlock = chainlock_anchor_block;
+            consensus.nPQActivationHeight = activation_height;
             consensus.nPQBTCCReceiptAnchorHeight = receipt_anchor_height;
             consensus.hashPQBTCCReceiptAnchorBlock = receipt_anchor_block;
             consensus.nPQBTCCReceiptAnchorCursorHeight =
@@ -1677,12 +1580,7 @@ BOOST_FIXTURE_TEST_CASE(
     consensus.nPQFutureHorizonEpochs = 8;
     consensus.nPQBTCCCandidateOrigin = std::numeric_limits<int>::max();
     consensus.nPQBTCCNEVMInjectionLag = 10;
-    consensus.nPQLegacyAnchorHeight = std::numeric_limits<int>::max();
-    consensus.hashPQLegacyAnchorBlock.SetNull();
-    consensus.hashPQLegacyMNState.SetNull();
-    consensus.hashPQLegacyPQRegistryState.SetNull();
-    consensus.nPQChainLockAnchorHeight = std::numeric_limits<int>::max();
-    consensus.hashPQChainLockAnchorBlock.SetNull();
+    consensus.nPQActivationHeight = std::numeric_limits<int>::max();
     consensus.nPQBTCCReceiptAnchorHeight =
         std::numeric_limits<int>::max();
     consensus.hashPQBTCCReceiptAnchorBlock.SetNull();
@@ -1705,36 +1603,22 @@ BOOST_FIXTURE_TEST_CASE(
     BOOST_REQUIRE(deterministicMNManager->m_evoDb->WriteThrough(
         seeded_base->GetBlockHash(), seeded_list, /*fSync=*/true));
 
-    // First create the registry snapshot that pins the synthetic migration
-    // anchor. The receipt schedule stays disabled until its exact hash and
-    // state roots are known.
+    // First create the historical receipt-assumption boundary. The receipt
+    // schedule stays disabled until this exact block hash is known.
     mineBlocks(1);
-    CBlockIndex* migration_anchor;
+    CBlockIndex* receipt_anchor;
     {
         LOCK(::cs_main);
-        migration_anchor = Assert(m_node.chainman)->ActiveChain().Tip();
+        receipt_anchor = Assert(m_node.chainman)->ActiveChain().Tip();
     }
-    BOOST_REQUIRE(migration_anchor != nullptr);
-    BOOST_REQUIRE_EQUAL(migration_anchor->nHeight, seeded_height + 1);
-    const auto migration_anchor_list{
-        deterministicMNManager->GetListForBlock(migration_anchor)};
-    llmq::pq::PQRegistrySnapshot migration_anchor_registry;
+    BOOST_REQUIRE(receipt_anchor != nullptr);
+    BOOST_REQUIRE_EQUAL(receipt_anchor->nHeight, seeded_height + 1);
     std::string registry_error;
-    BOOST_REQUIRE(deterministicMNManager->GetPQRegistrySnapshot(
-        migration_anchor, migration_anchor_registry, registry_error));
 
-    consensus.nPQLegacyAnchorHeight = migration_anchor->nHeight;
-    consensus.hashPQLegacyAnchorBlock = migration_anchor->GetBlockHash();
-    consensus.hashPQLegacyMNState =
-        migration_anchor_list.GetPQLegacyStateHash(
-            consensus.hashGenesisBlock);
-    consensus.hashPQLegacyPQRegistryState =
-        migration_anchor_registry.consensus_state_root;
-    consensus.nPQChainLockAnchorHeight = 3'744;
-    consensus.hashPQChainLockAnchorBlock = uint256S("3744");
-    consensus.nPQBTCCReceiptAnchorHeight = migration_anchor->nHeight;
+    consensus.nPQActivationHeight = 3'745;
+    consensus.nPQBTCCReceiptAnchorHeight = receipt_anchor->nHeight;
     consensus.hashPQBTCCReceiptAnchorBlock =
-        migration_anchor->GetBlockHash();
+        receipt_anchor->GetBlockHash();
     consensus.nPQBTCCReceiptAnchorCursorHeight = -1;
     consensus.hashPQBTCCReceiptAnchorCursorSysBlock.SetNull();
     consensus.hashPQBTCCReceiptAnchorCursorBTCBlock.SetNull();
@@ -1758,9 +1642,8 @@ BOOST_FIXTURE_TEST_CASE(
         deterministicMNManager->GetListForBlock(rollback_base)};
     BOOST_REQUIRE_EQUAL(rollback_base_list.GetAllMNsCount(), 1U);
     BOOST_REQUIRE(rollback_base_list.IsMNPoSeBanned(pro_tx_hash));
-    const uint256 expected_dmn_root{
-        rollback_base_list.GetPQLegacyStateHash(
-            consensus.hashGenesisBlock)};
+    const uint256 expected_dmn_snapshot_hash{
+        ::SerializeHash(rollback_base_list)};
 
     llmq::pq::PQRegistrySnapshot rollback_base_registry;
     registry_error.clear();
@@ -1855,8 +1738,8 @@ BOOST_FIXTURE_TEST_CASE(
     BOOST_CHECK_EQUAL(recovered_list.GetAllMNsCount(), 1U);
     BOOST_REQUIRE(recovered_list.GetMN(pro_tx_hash));
     BOOST_CHECK(recovered_list.IsMNPoSeBanned(pro_tx_hash));
-    BOOST_CHECK(recovered_list.GetPQLegacyStateHash(
-                    consensus.hashGenesisBlock) == expected_dmn_root);
+    BOOST_CHECK(::SerializeHash(recovered_list) ==
+                expected_dmn_snapshot_hash);
 
     llmq::pq::PQRegistrySnapshot recovered_registry;
     registry_error.clear();
@@ -1897,14 +1780,7 @@ BOOST_FIXTURE_TEST_CASE(
         uint32_t future_horizon{consensus.nPQFutureHorizonEpochs};
         int btcc_candidate_origin{consensus.nPQBTCCCandidateOrigin};
         int btcc_injection_lag{consensus.nPQBTCCNEVMInjectionLag};
-        int legacy_anchor_height{consensus.nPQLegacyAnchorHeight};
-        uint256 legacy_anchor_block{consensus.hashPQLegacyAnchorBlock};
-        uint256 legacy_mn_state{consensus.hashPQLegacyMNState};
-        uint256 legacy_registry_state{
-            consensus.hashPQLegacyPQRegistryState};
-        int chainlock_anchor_height{consensus.nPQChainLockAnchorHeight};
-        uint256 chainlock_anchor_block{
-            consensus.hashPQChainLockAnchorBlock};
+        int activation_height{consensus.nPQActivationHeight};
         int receipt_anchor_height{consensus.nPQBTCCReceiptAnchorHeight};
         uint256 receipt_anchor_block{consensus.hashPQBTCCReceiptAnchorBlock};
         int receipt_anchor_cursor_height{
@@ -1924,12 +1800,7 @@ BOOST_FIXTURE_TEST_CASE(
             consensus.nPQFutureHorizonEpochs = future_horizon;
             consensus.nPQBTCCCandidateOrigin = btcc_candidate_origin;
             consensus.nPQBTCCNEVMInjectionLag = btcc_injection_lag;
-            consensus.nPQLegacyAnchorHeight = legacy_anchor_height;
-            consensus.hashPQLegacyAnchorBlock = legacy_anchor_block;
-            consensus.hashPQLegacyMNState = legacy_mn_state;
-            consensus.hashPQLegacyPQRegistryState = legacy_registry_state;
-            consensus.nPQChainLockAnchorHeight = chainlock_anchor_height;
-            consensus.hashPQChainLockAnchorBlock = chainlock_anchor_block;
+            consensus.nPQActivationHeight = activation_height;
             consensus.nPQBTCCReceiptAnchorHeight = receipt_anchor_height;
             consensus.hashPQBTCCReceiptAnchorBlock = receipt_anchor_block;
             consensus.nPQBTCCReceiptAnchorCursorHeight =
@@ -1962,12 +1833,7 @@ BOOST_FIXTURE_TEST_CASE(
     consensus.nPQBTCCCandidateOrigin = 2'310;
     consensus.nPQBTCCNEVMInjectionLag =
         static_cast<int>(llmq::pq::PQ_BTCC_NEVM_LAG);
-    consensus.nPQLegacyAnchorHeight = active_lca->nHeight;
-    consensus.hashPQLegacyAnchorBlock = active_lca->GetBlockHash();
-    consensus.hashPQLegacyMNState = uint256::ONEV;
-    consensus.hashPQLegacyPQRegistryState = uint256S("2");
-    consensus.nPQChainLockAnchorHeight = 2'304;
-    consensus.hashPQChainLockAnchorBlock = GetRandHash();
+    consensus.nPQActivationHeight = 2'305;
     consensus.nPQBTCCReceiptAnchorHeight = active_lca->nHeight;
     consensus.hashPQBTCCReceiptAnchorBlock = active_lca->GetBlockHash();
     consensus.nPQBTCCReceiptAnchorCursorHeight = -1;
@@ -1987,15 +1853,12 @@ BOOST_FIXTURE_TEST_CASE(
 
     CBlockIndex* durable_target{active_lca};
     CBlockIndex* durable_ancestor{nullptr};
-    CBlockIndex* durable_anchor{nullptr};
+    CBlockIndex* activation_predecessor{nullptr};
     {
         LOCK(::cs_main);
         for (int32_t height{active_lca->nHeight + 1};
              height <= target_height; ++height) {
-            uint256 hash{
-                height == consensus.nPQChainLockAnchorHeight
-                    ? consensus.hashPQChainLockAnchorBlock
-                    : GetRandHash()};
+            uint256 hash{GetRandHash()};
             while (chainman.m_blockman.LookupBlockIndex(hash) != nullptr) {
                 hash = GetRandHash();
             }
@@ -2012,15 +1875,15 @@ BOOST_FIXTURE_TEST_CASE(
             index.nStatus = BLOCK_VALID_SCRIPTS;
             index.BuildSkip();
             durable_target = &index;
-            if (height == consensus.nPQChainLockAnchorHeight) {
-                durable_anchor = durable_target;
+            if (height == config->activation_predecessor_height) {
+                activation_predecessor = durable_target;
             }
             if (height == target_height - 1) {
                 durable_ancestor = durable_target;
             }
         }
     }
-    BOOST_REQUIRE(durable_anchor != nullptr);
+    BOOST_REQUIRE(activation_predecessor != nullptr);
     BOOST_REQUIRE(durable_ancestor != nullptr);
     BOOST_REQUIRE_EQUAL(durable_target->nHeight, target_height);
     {
@@ -2031,8 +1894,10 @@ BOOST_FIXTURE_TEST_CASE(
     llmq::pq::FinalChainLock winner;
     winner.statement.height = durable_target->nHeight;
     winner.statement.block_hash = durable_target->GetBlockHash();
-    winner.statement.previous_chainlock_height = durable_anchor->nHeight;
-    winner.statement.previous_chainlock_hash = durable_anchor->GetBlockHash();
+    winner.statement.previous_chainlock_height =
+        activation_predecessor->nHeight;
+    winner.statement.previous_chainlock_hash =
+        activation_predecessor->GetBlockHash();
     winner.statement.quorum_context_hash = GetRandHash();
     winner.statement.payment_probation_state_hash = GetRandHash();
     winner.selected_quorum_mask = 0b0111;
@@ -2079,10 +1944,13 @@ BOOST_FIXTURE_TEST_CASE(
     const CBlockIndex* resolved_floor{nullptr};
     const CBlockIndex* resolved_target{nullptr};
     std::string recovery_error;
-    BOOST_REQUIRE_MESSAGE(
-        llmq::chainLocksHandler->GetDurableFinalityRecoveryFloor(
-            resolved_floor, resolved_target, recovery_error),
-        recovery_error);
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE_MESSAGE(
+            llmq::chainLocksHandler->GetDurableFinalityRecoveryFloor(
+                resolved_floor, resolved_target, recovery_error),
+            recovery_error);
+    }
     BOOST_CHECK_EQUAL(resolved_floor, active_lca);
     BOOST_CHECK_EQUAL(resolved_target, durable_target);
 
@@ -2107,7 +1975,7 @@ BOOST_FIXTURE_TEST_CASE(
     assert_rejected(durable_ancestor);
     assert_rejected(active_lca);
 }
-// SYSCOIN: END durable ChainLock restart and deep-invalidation tests.
+// SYSCOIN END: Durable ChainLock restart and deep-invalidation tests.
 
 //! Test basic snapshot activation.
 BOOST_FIXTURE_TEST_CASE(chainstatemanager_activate_snapshot, SnapshotTestSetup)

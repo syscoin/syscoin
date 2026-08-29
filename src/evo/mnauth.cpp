@@ -1259,7 +1259,9 @@ void CMNAuth::BeginMNAUTH(CNode* pnode,
                           ChainstateManager& chainman,
                           AsyncProcessor& async)
 {
+    // SYSCOIN: Quarantine suppresses local authenticated masternode participation.
     if (pnode == nullptr || !fMasternodeMode ||
+        !chainman.IsPQParticipationAllowed() ||
         !masternodeSync.IsBlockchainSynced() ||
         !pnode->m_masternode_connection) {
         return;
@@ -1299,7 +1301,9 @@ void CMNAuth::ProcessMessage(CNode* pnode,
                              AsyncProcessor& async,
                              PeerManager& peerman)
 {
+    // SYSCOIN: Quarantine consumes no authenticated masternode traffic.
     if (pnode == nullptr || str_command != NetMsgType::MNAUTH ||
+        !chainman.IsPQParticipationAllowed() ||
         !masternodeSync.IsBlockchainSynced()) {
         return;
     }

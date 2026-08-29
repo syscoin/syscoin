@@ -741,15 +741,37 @@ static RPCHelpMan getblocktemplate()
     if (strMode != "template")
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid mode");
 
+    // SYSCOIN BEGIN: Use the same tip-locked predicate as BlockAssembler so a
+    // reconstructed A-1 may produce only A while every other service remains
+    // quarantined.
+    const bool pq_participation_allowed{
+        chainman.IsPQParticipationAllowed()};
+    const bool pq_block_production_allowed{
+        chainman.IsPQBlockProductionAllowed(active_chain.Tip())};
+    const bool pq_activation_block_exception{
+        pq_block_production_allowed && !pq_participation_allowed};
+    if (!pq_block_production_allowed) {
+        throw JSONRPCError(
+            RPC_CLIENT_IN_INITIAL_DOWNLOAD,
+            PACKAGE_NAME " is in sync-only PQ activation quarantine");
+    }
+    // SYSCOIN END: Public PQ activation mining gate.
+
     if (!chainman.GetParams().IsTestChain()) {
         const CConnman& connman = EnsureConnman(node);
         if (connman.GetNodeCount(ConnectionDirection::Both) == 0) {
             throw JSONRPCError(RPC_CLIENT_NOT_CONNECTED, PACKAGE_NAME " is not connected!");
         }
 
-        if (chainman.IsInitialBlockDownload()) {
+        // SYSCOIN BEGIN: The exact A-1 recovery exception exists because its
+        // quarantine deliberately keeps the ordinary public IBD latch closed.
+        const bool block_production_initial_sync{
+            chainman.IsInitialBlockDownload() &&
+            !pq_activation_block_exception};
+        if (block_production_initial_sync) {
             throw JSONRPCError(RPC_CLIENT_IN_INITIAL_DOWNLOAD, PACKAGE_NAME " is in initial sync and waiting for blocks...");
         }
+        // SYSCOIN END: Activation-block-only IBD exception.
     }
 
     // SYSCOIN
