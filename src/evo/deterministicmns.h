@@ -752,6 +752,12 @@ public:
         INITIAL_DMN_INVERSE_LINEAGE_MAX_DECODED_BYTES_PER_PASS{256U << 20};
     static constexpr std::size_t
         INITIAL_DMN_INVERSE_LINEAGE_MAX_RECORD_BYTES{64U << 20};
+    static constexpr std::size_t
+        DMN_INVERSE_GC_MAX_SCANNED_RECORDS_PER_PASS{4096};
+    static constexpr std::size_t
+        DMN_INVERSE_GC_MAX_SCANNED_VALUE_BYTES_PER_PASS{256U << 20};
+    static constexpr std::size_t DMN_INVERSE_GC_MAX_RECORD_BYTES{
+        INITIAL_DMN_INVERSE_LINEAGE_MAX_RECORD_BYTES};
     // SYSCOIN: Exact-parent payment selection is shared by consensus,
     // templates, governance, and RPC without retaining an unbounded branch
     // history.

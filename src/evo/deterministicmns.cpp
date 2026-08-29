@@ -5139,7 +5139,6 @@ bool CDeterministicMNManager::GarbageCollectDMNInversePrefix(
     const auto& consensus{Params().GetConsensus()};
     const auto& closure{effective.closure};
     static constexpr size_t ERASE_CHUNK_ITEMS{256};
-    static constexpr size_t SCAN_ITEMS_PER_PASS{4096};
     if (intent_id.IsNull()) return false;
 
     try {
@@ -5171,6 +5170,7 @@ bool CDeterministicMNManager::GarbageCollectDMNInversePrefix(
         std::vector<uint256> erase_batch;
         erase_batch.reserve(ERASE_CHUNK_ITEMS);
         size_t scanned{0};
+        size_t scanned_value_bytes{0};
         bool reached_end{false};
         {
             LOCK(m_inverse_journal->cs);
@@ -5196,8 +5196,22 @@ bool CDeterministicMNManager::GarbageCollectDMNInversePrefix(
             }
 
             std::optional<uint256> last_key;
-            while (cursor->Valid() && scanned < SCAN_ITEMS_PER_PASS &&
+            while (cursor->Valid() &&
+                   scanned < DMN_INVERSE_GC_MAX_SCANNED_RECORDS_PER_PASS &&
                    erase_batch.size() < ERASE_CHUNK_ITEMS) {
+                // SYSCOIN: A record-count limit alone does not bound restart
+                // work when one physical inverse value is unexpectedly large.
+                const size_t value_size{cursor->GetValueSize()};
+                if (value_size > DMN_INVERSE_GC_MAX_RECORD_BYTES) {
+                    return false;
+                }
+                const bool exceeds_value_budget{
+                    scanned_value_bytes >=
+                        DMN_INVERSE_GC_MAX_SCANNED_VALUE_BYTES_PER_PASS ||
+                    value_size >
+                        DMN_INVERSE_GC_MAX_SCANNED_VALUE_BYTES_PER_PASS -
+                            scanned_value_bytes};
+                if (scanned != 0 && exceeds_value_budget) break;
                 uint256 key;
                 CDeterministicMNListInverse inverse;
                 if (!cursor->GetKeyExact(key) ||
@@ -5226,6 +5240,7 @@ bool CDeterministicMNManager::GarbageCollectDMNInversePrefix(
                 }
                 last_key = key;
                 ++scanned;
+                scanned_value_bytes += value_size;
                 cursor->Next();
             }
             // SYSCOIN: CheckStatus is required even when a bounded pass stops
