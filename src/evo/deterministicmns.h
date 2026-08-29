@@ -1153,6 +1153,9 @@ public:
             durable_finality_target)
         EXCLUSIVE_LOCKS_REQUIRED(!cs, cs_main);
     bool GetEvoDBStats(EvoDBStats& stats) EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    /** Read process-local PQ registry payload ownership without opening it. */
+    [[nodiscard]] bool GetPQRegistryMemoryStats(
+        llmq::pq::PQRegistryMemoryStats& stats) const;
     bool HasPersistentWindow() const;
     [[nodiscard]] bool AuxiliaryHistoryMaintenanceRetryRequested() const
         noexcept;

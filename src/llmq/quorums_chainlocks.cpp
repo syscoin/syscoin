@@ -18,6 +18,7 @@
 #include <evo/pq_registry.h>
 #include <governance/governanceclasses.h>
 #include <logging.h>
+#include <memusage.h>
 #include <masternode/activemasternode.h>
 #include <masternode/masternodesync.h>
 #include <net.h>
@@ -3132,6 +3133,85 @@ CChainLockSigCPtr CChainLocksHandler::GetBestChainLock() const
     return m_chainman.IsPQParticipationAllowed() && m_store
         ? m_store->GetBest()
         : nullptr;
+}
+
+std::size_t CChainLocksHandler::GetPaymentAuditRuntimePinnedBytes() const
+{
+    LOCK(m_payment_audit_mutex);
+    std::size_t bytes{memusage::DynamicUsage(
+        m_payment_audit_supplied_to_peer)};
+    for (const auto& [peer, supplied] :
+         m_payment_audit_supplied_to_peer) {
+        (void)peer;
+        bytes += memusage::DynamicUsage(supplied);
+    }
+
+    std::set<const pq::FrozenQuorumRosters*> counted_rosters;
+    std::set<const pq::VerifiedRosterSet*> counted_roster_sets;
+    std::set<const pq::PreparedChainLockContext*> counted_chain_contexts;
+    std::set<const pq::PreparedPaymentAuditContext*> counted_audit_contexts;
+    const auto add_roster = [&](const pq::FrozenQuorumRostersPtr& rosters) {
+        if (rosters && counted_rosters.insert(rosters.get()).second) {
+            bytes += sizeof(pq::FrozenQuorumRosters);
+        }
+    };
+    const auto add_chain_context = [&](
+        const pq::PreparedChainLockContextPtr& context) {
+        if (!context ||
+            !counted_chain_contexts.insert(context.get()).second) {
+            return;
+        }
+        bytes += sizeof(pq::PreparedChainLockContext);
+        if (counted_roster_sets.insert(context->RosterSetPtr().get()).second) {
+            bytes += sizeof(pq::VerifiedRosterSet);
+        }
+        add_roster(context->RostersPtr());
+    };
+    const auto add_audit_context = [&](
+        const pq::PreparedPaymentAuditContextPtr& context) {
+        if (!context ||
+            !counted_audit_contexts.insert(context.get()).second) {
+            return;
+        }
+        bytes += sizeof(pq::PreparedPaymentAuditContext);
+        add_chain_context(context->SealContextPtr());
+    };
+
+    if (m_payment_audit_runtime) {
+        const auto& runtime{*m_payment_audit_runtime};
+        bytes += sizeof(PaymentAuditResponseRuntime);
+        add_roster(runtime.signing_rosters);
+        if (runtime.relay_recipients) {
+            bytes += sizeof(ChainLockRelayRecipients) +
+                     memusage::DynamicUsage(*runtime.relay_recipients);
+        }
+        if (runtime.seal_chainlock) {
+            bytes += memusage::DynamicUsage(
+                runtime.seal_chainlock->signatures);
+        }
+        if (runtime.collector) {
+            bytes += runtime.collector->MemoryUsage();
+            add_audit_context(runtime.collector->GetPreparedContext());
+        }
+        if (runtime.finalized && runtime.finalized->proof) {
+            bytes += sizeof(pq::CollectedPaymentAuditFinalization) +
+                     memusage::DynamicUsage(
+                         runtime.finalized->proof->Certificate()
+                             .report_witnesses);
+            add_audit_context(runtime.finalized->proof->ContextPtr());
+        }
+    }
+
+    if (m_payment_audit_network_context) {
+        bytes += sizeof(PaymentAuditNetworkContext) +
+                 memusage::DynamicUsage(
+                     m_payment_audit_network_context->rows);
+        for (const auto& row : m_payment_audit_network_context->rows) {
+            add_chain_context(row.response_context);
+            bytes += memusage::DynamicUsage(row.active_relays);
+        }
+    }
+    return bytes;
 }
 
 const CBlockIndex* CChainLocksHandler::GetBestChainLockIndex() const

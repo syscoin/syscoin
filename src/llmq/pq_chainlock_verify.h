@@ -74,6 +74,7 @@ enum class ChainLockVerificationError : uint8_t {
  */
 class VerifiedRosterSet final {
 public:
+    ~VerifiedRosterSet();
     [[nodiscard]] static std::shared_ptr<const VerifiedRosterSet>
     Create(const uint256& genesis_hash,
            FrozenQuorumRostersPtr rosters,
@@ -116,6 +117,15 @@ private:
 };
 
 using VerifiedRosterSetPtr = std::shared_ptr<const VerifiedRosterSet>;
+
+/** Current immutable roster capabilities and in-flight verifier payload. */
+struct PQVerificationMemoryStats {
+    std::size_t live_roster_contexts{0};
+    std::size_t verification_worker_pinned_bytes{0};
+};
+
+[[nodiscard]] PQVerificationMemoryStats GetPQVerificationMemoryStats()
+    noexcept;
 
 /**
  * Immutable capability proving that one exact statement/roster binding passed

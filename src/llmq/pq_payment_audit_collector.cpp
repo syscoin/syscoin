@@ -4,6 +4,8 @@
 
 #include <llmq/pq_payment_audit_collector.h>
 
+#include <memusage.h>
+
 #include <algorithm>
 #include <utility>
 
@@ -314,6 +316,15 @@ bool PaymentAuditCollector::IsComplete() const
         }
     }
     return ready >= REQUIRED_QUORUMS;
+}
+
+std::size_t PaymentAuditCollector::MemoryUsage() const noexcept
+{
+    std::size_t usage{sizeof(PaymentAuditCollector)};
+    for (const auto& shares : m_shares) {
+        usage += memusage::DynamicUsage(shares);
+    }
+    return usage;
 }
 
 CollectedPaymentAuditFinalizationPtr

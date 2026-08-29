@@ -161,6 +161,23 @@ void SetMember(QuorumBitmap& bitmap, std::size_t member)
 
 BOOST_FIXTURE_TEST_SUITE(pq_chainlock_verify_tests, BasicTestingSetup)
 
+BOOST_AUTO_TEST_CASE(roster_context_memory_counter_tracks_capability_lifetime)
+{
+    const auto fixture{MakeVerificationFixture()};
+    const std::size_t baseline{
+        GetPQVerificationMemoryStats().live_roster_contexts};
+    auto roster_set{VerifiedRosterSet::Create(
+        fixture->genesis_hash,
+        std::make_shared<const FrozenQuorumRosters>(fixture->rosters))};
+    BOOST_REQUIRE(roster_set);
+    BOOST_CHECK_EQUAL(
+        GetPQVerificationMemoryStats().live_roster_contexts,
+        baseline + 1);
+    roster_set.reset();
+    BOOST_CHECK_EQUAL(
+        GetPQVerificationMemoryStats().live_roster_contexts, baseline);
+}
+
 BOOST_AUTO_TEST_CASE(preparation_recomputes_roots_context_and_canonical_mapping)
 {
     const auto fixture = MakeVerificationFixture();
@@ -413,6 +430,9 @@ BOOST_AUTO_TEST_CASE(preparation_rejects_duplicate_members_and_child_keys)
 
 BOOST_AUTO_TEST_CASE(real_signature_check_and_owned_queue_lifecycle)
 {
+    BOOST_CHECK_EQUAL(
+        GetPQVerificationMemoryStats().verification_worker_pinned_bytes,
+        0U);
     scheduled_wots::KeyGenerationSeed seed{};
     scheduled_wots::Message message;
     for (std::size_t i{0}; i < seed.size(); ++i) seed[i] = i;
@@ -446,6 +466,10 @@ BOOST_AUTO_TEST_CASE(real_signature_check_and_owned_queue_lifecycle)
             public_key, static_cast<uint8_t>(LEAF_INDEX + 1), message,
             signature);
         BOOST_CHECK(!verifier.VerifyChecks(std::move(wrong_leaf_checks)));
+        BOOST_CHECK_EQUAL(
+            GetPQVerificationMemoryStats()
+                .verification_worker_pinned_bytes,
+            0U);
     }
 
     // A zero-worker queue is a supported lifecycle: the calling thread owns
@@ -456,6 +480,10 @@ BOOST_AUTO_TEST_CASE(real_signature_check_and_owned_queue_lifecycle)
         checks.emplace_back(public_key, LEAF_INDEX, message, signature);
         BOOST_CHECK(verifier.VerifyChecks(std::move(checks)));
         BOOST_CHECK(verifier.VerifyChecks({}));
+        BOOST_CHECK_EQUAL(
+            GetPQVerificationMemoryStats()
+                .verification_worker_pinned_bytes,
+            0U);
     }
 
     BOOST_CHECK_THROW(

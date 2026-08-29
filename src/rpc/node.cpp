@@ -14,7 +14,10 @@
 #include <interfaces/ipc.h>
 #include <kernel/cs_main.h>
 #include <hash.h> // SYSCOIN: PQ MNAUTH test identity hash.
+#include <evo/deterministicmns.h> // SYSCOIN: PQ registry memory accounting.
 #include <llmq/pq_chainlock_types.h> // SYSCOIN: PQ MNAUTH key types.
+#include <llmq/pq_chainlock_verify.h> // SYSCOIN: PQ verifier memory accounting.
+#include <llmq/quorums_chainlocks.h> // SYSCOIN: PQ audit runtime accounting.
 #include <logging.h>
 #include <node/context.h>
 #include <rpc/server.h>
@@ -292,6 +295,36 @@ static UniValue RPCLockedMemoryInfo()
     return obj;
 }
 
+// SYSCOIN BEGIN: expose bounded PQ shared-state ownership.
+static UniValue RPCPQMemoryInfo()
+{
+    llmq::pq::PQRegistryMemoryStats registry;
+    if (deterministicMNManager) {
+        (void)deterministicMNManager->GetPQRegistryMemoryStats(registry);
+    }
+    const auto verification{llmq::pq::GetPQVerificationMemoryStats()};
+
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("cache_owned_bytes",
+                  uint64_t{registry.cache_owned_bytes});
+    result.pushKV("externally_pinned_state_bytes",
+                  uint64_t{registry.externally_pinned_state_bytes});
+    result.pushKV("live_registry_views",
+                  uint64_t{registry.live_registry_views});
+    result.pushKV("live_roster_contexts",
+                  uint64_t{verification.live_roster_contexts});
+    result.pushKV("verification_worker_pinned_bytes",
+                  uint64_t{verification.verification_worker_pinned_bytes});
+    result.pushKV(
+        "audit_runtime_pinned_bytes",
+        uint64_t{llmq::chainLocksHandler
+                     ? llmq::chainLocksHandler
+                           ->GetPaymentAuditRuntimePinnedBytes()
+                     : 0});
+    return result;
+}
+// SYSCOIN END: expose bounded PQ shared-state ownership.
+
 #ifdef HAVE_MALLOC_INFO
 static std::string RPCMallocInfo()
 {
@@ -336,6 +369,17 @@ static RPCHelpMan getmemoryinfo()
                                 {RPCResult::Type::NUM, "chunks_used", "Number allocated chunks"},
                                 {RPCResult::Type::NUM, "chunks_free", "Number unused chunks"},
                             }},
+                            // SYSCOIN BEGIN: PQ shared-state memory accounting.
+                            {RPCResult::Type::OBJ, "pq", "Post-quantum immutable-state and bounded-runtime payload accounting",
+                            {
+                                {RPCResult::Type::NUM, "cache_owned_bytes", "Registry allocation payload reachable from its snapshot cache"},
+                                {RPCResult::Type::NUM, "externally_pinned_state_bytes", "Registry allocation payload alive outside the snapshot cache"},
+                                {RPCResult::Type::NUM, "live_registry_views", "Number of live immutable registry snapshot-view objects"},
+                                {RPCResult::Type::NUM, "live_roster_contexts", "Number of live verified immutable roster capabilities"},
+                                {RPCResult::Type::NUM, "verification_worker_pinned_bytes", "Scheduled-WOTS check-vector payload currently retained by verifiers"},
+                                {RPCResult::Type::NUM, "audit_runtime_pinned_bytes", "Estimated allocation payload retained by live payment-audit runtime state"},
+                            }},
+                            // SYSCOIN END: PQ shared-state memory accounting.
                         }
                     },
                     RPCResult{"mode \"mallocinfo\"",
@@ -352,6 +396,7 @@ static RPCHelpMan getmemoryinfo()
     if (mode == "stats") {
         UniValue obj(UniValue::VOBJ);
         obj.pushKV("locked", RPCLockedMemoryInfo());
+        obj.pushKV("pq", RPCPQMemoryInfo()); // SYSCOIN
         return obj;
     } else if (mode == "mallocinfo") {
 #ifdef HAVE_MALLOC_INFO

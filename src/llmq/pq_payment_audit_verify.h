@@ -71,6 +71,11 @@ public:
     {
         return m_seal_context->RosterSetPtr();
     }
+    [[nodiscard]] const PreparedChainLockContextPtr& SealContextPtr() const
+        noexcept
+    {
+        return m_seal_context;
+    }
     [[nodiscard]] uint8_t AuthorizationMask() const noexcept
     {
         return m_seal_context->AuthorizationMask();

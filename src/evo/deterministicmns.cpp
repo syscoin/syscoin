@@ -6114,3 +6114,15 @@ bool CDeterministicMNManager::GetEvoDBStats(EvoDBStats& stats)
         return false;
     }
 }
+
+bool CDeterministicMNManager::GetPQRegistryMemoryStats(
+    llmq::pq::PQRegistryMemoryStats& stats) const
+{
+    stats = {};
+    if (!m_pq_registry_ready.load(std::memory_order_acquire) ||
+        m_pq_registry == nullptr) {
+        return false;
+    }
+    stats = m_pq_registry->GetMemoryStats();
+    return true;
+}

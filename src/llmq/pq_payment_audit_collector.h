@@ -137,6 +137,8 @@ public:
     [[nodiscard]] bool HasAcceptedShare(
         const PaymentAuditShareTranscript& transcript) const noexcept;
     [[nodiscard]] bool IsComplete() const;
+    /** Collector object and bounded share-map payload; shared context excluded. */
+    [[nodiscard]] std::size_t MemoryUsage() const noexcept;
     [[nodiscard]] CollectedPaymentAuditFinalizationPtr
     FinalizeCollection() const;
     [[nodiscard]] PreparedPaymentAuditContextPtr

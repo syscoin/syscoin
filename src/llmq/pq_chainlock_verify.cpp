@@ -5,6 +5,7 @@
 #include <llmq/pq_chainlock_verify.h>
 
 #include <hash.h>
+#include <memusage.h>
 
 #include <algorithm>
 #include <array>
@@ -30,9 +31,30 @@ constexpr std::string_view CHILD_ABSENT_DOMAIN{"SYS_PQ_QUORUM_CHILD_ABSENT_V1"};
 constexpr std::string_view CHILD_PAD_DOMAIN{"SYS_PQ_QUORUM_CHILD_PAD_V1"};
 constexpr std::string_view CHILD_NODE_DOMAIN{"SYS_PQ_QUORUM_CHILD_NODE_V1"};
 std::atomic<uint64_t> g_quorum_root_tagged_hashes{0};
+std::atomic<std::size_t> g_live_roster_contexts{0};
+std::atomic<std::size_t> g_verification_worker_pinned_bytes{0};
 static_assert(MERKLE_LEAF_COUNT >= QUORUM_SIZE);
 static_assert((MERKLE_LEAF_COUNT & (MERKLE_LEAF_COUNT - 1)) == 0);
 static_assert(MERKLE_LEAF_COUNT <= std::numeric_limits<uint16_t>::max());
+
+class ScopedVerificationPinnedBytes final {
+public:
+    explicit ScopedVerificationPinnedBytes(std::size_t bytes)
+        : m_bytes{bytes}
+    {
+        g_verification_worker_pinned_bytes.fetch_add(
+            m_bytes, std::memory_order_relaxed);
+    }
+
+    ~ScopedVerificationPinnedBytes()
+    {
+        g_verification_worker_pinned_bytes.fetch_sub(
+            m_bytes, std::memory_order_relaxed);
+    }
+
+private:
+    const std::size_t m_bytes;
+};
 
 void SetError(ChainLockVerificationError* error, ChainLockVerificationError value)
 {
@@ -363,6 +385,20 @@ VerifiedRosterSet::VerifiedRosterSet(
       m_rosters{std::move(rosters)},
       m_build_provenance{std::move(build_provenance)}
 {
+    g_live_roster_contexts.fetch_add(1, std::memory_order_relaxed);
+}
+
+VerifiedRosterSet::~VerifiedRosterSet()
+{
+    g_live_roster_contexts.fetch_sub(1, std::memory_order_relaxed);
+}
+
+PQVerificationMemoryStats GetPQVerificationMemoryStats() noexcept
+{
+    return {
+        g_live_roster_contexts.load(std::memory_order_relaxed),
+        g_verification_worker_pinned_bytes.load(std::memory_order_relaxed),
+    };
 }
 
 VerifiedRosterSet::BuildProvenancePtr
@@ -845,6 +881,8 @@ PrepareFinalChainLockVerification(
 bool VerifyScheduledWOTSChecks(std::vector<ScheduledWOTSCheck>&& checks,
                               ScheduledWOTSCheckQueue* queue)
 {
+    const ScopedVerificationPinnedBytes pinned{
+        memusage::DynamicUsage(checks)};
     if (queue == nullptr) {
         for (const auto& check : checks) {
             if (!check()) return false;
@@ -919,27 +957,31 @@ bool ChainLockVerifier::Verify(
 
 bool ChainLockVerifier::VerifyChecks(std::vector<ScheduledWOTSCheck>&& checks)
 {
-    // Random invalid bundles normally fail after one serial WOTS+ check instead
-    // of occupying every worker. The process-secret RNG makes the sampled
-    // member positions unpredictable to a remote sender. Every sampled job is
-    // removed only after it succeeds, so valid certificates still execute all
-    // checks exactly once.
-    const std::size_t preflight_count{
-        std::min(SERIAL_PREFLIGHT_CHECKS, checks.size())};
-    for (std::size_t checked{0}; checked < preflight_count; ++checked) {
-        std::size_t index{0};
-        {
-            LOCK(m_preflight_mutex);
-            index = static_cast<std::size_t>(
-                m_preflight_rng.randrange(checks.size()));
+    {
+        const ScopedVerificationPinnedBytes pinned{
+            memusage::DynamicUsage(checks)};
+        // Random invalid bundles normally fail after one serial WOTS+ check
+        // instead of occupying every worker. The process-secret RNG makes the
+        // sampled member positions unpredictable to a remote sender. Every
+        // sampled job is removed only after it succeeds, so valid certificates
+        // still execute all checks exactly once.
+        const std::size_t preflight_count{
+            std::min(SERIAL_PREFLIGHT_CHECKS, checks.size())};
+        for (std::size_t checked{0}; checked < preflight_count; ++checked) {
+            std::size_t index{0};
+            {
+                LOCK(m_preflight_mutex);
+                index = static_cast<std::size_t>(
+                    m_preflight_rng.randrange(checks.size()));
+            }
+            if (!checks[index]()) return false;
+            if (index != checks.size() - 1) {
+                checks[index] = std::move(checks.back());
+            }
+            checks.pop_back();
         }
-        if (!checks[index]()) return false;
-        if (index != checks.size() - 1) {
-            checks[index] = std::move(checks.back());
-        }
-        checks.pop_back();
+        if (checks.empty()) return true;
     }
-    if (checks.empty()) return true;
     return VerifyScheduledWOTSChecks(std::move(checks), &m_queue);
 }
 

@@ -823,6 +823,46 @@ BOOST_AUTO_TEST_CASE(read_views_share_state_but_preserve_exact_block_identity)
     BOOST_CHECK_EQUAL(retained_operators->size(), retained_operator_count);
 }
 
+BOOST_AUTO_TEST_CASE(memory_stats_distinguish_cache_ownership_from_reader_pins)
+{
+    const auto config{FastConfig()};
+    PQRegistryManager manager(MemoryDB(308), NonNullHash(308), config);
+    const uint256 block_hash{NonNullHash(309)};
+    PQRegistryError error;
+    PQRegistryReadView view;
+
+    BOOST_REQUIRE(manager.GetReadView(
+        block_hash, uint256{}, 0, view, error));
+    auto retained_operators{view.ShareOperatorStates()};
+    BOOST_REQUIRE(retained_operators);
+    const auto cached{manager.GetMemoryStats()};
+    BOOST_CHECK_GT(cached.cache_owned_bytes, 0U);
+    BOOST_CHECK_EQUAL(cached.externally_pinned_state_bytes, 0U);
+    BOOST_CHECK_EQUAL(cached.live_registry_views, 1U);
+
+    test::PQRegistryManagerTestAccess::DropCachedSnapshot(
+        manager, block_hash);
+    const auto pinned{manager.GetMemoryStats()};
+    BOOST_CHECK_EQUAL(pinned.cache_owned_bytes, 0U);
+    BOOST_CHECK_EQUAL(pinned.externally_pinned_state_bytes,
+                      cached.cache_owned_bytes);
+    BOOST_CHECK_EQUAL(pinned.live_registry_views, 1U);
+
+    view = {};
+    const auto vector_only{manager.GetMemoryStats()};
+    BOOST_CHECK_EQUAL(vector_only.cache_owned_bytes, 0U);
+    BOOST_CHECK_GT(vector_only.externally_pinned_state_bytes, 0U);
+    BOOST_CHECK_LT(vector_only.externally_pinned_state_bytes,
+                   pinned.externally_pinned_state_bytes);
+    BOOST_CHECK_EQUAL(vector_only.live_registry_views, 0U);
+
+    retained_operators.reset();
+    const auto released{manager.GetMemoryStats()};
+    BOOST_CHECK_EQUAL(released.cache_owned_bytes, 0U);
+    BOOST_CHECK_EQUAL(released.externally_pinned_state_bytes, 0U);
+    BOOST_CHECK_EQUAL(released.live_registry_views, 0U);
+}
+
 BOOST_AUTO_TEST_CASE(preparation_token_before_registry_activation_never_persists)
 {
     const auto config{FastConfig()};

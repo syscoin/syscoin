@@ -542,12 +542,15 @@ BOOST_AUTO_TEST_CASE(collected_finalization_binds_exact_bytes_and_context)
         prepared_context};
     auto collector{PaymentAuditCollector::Create(prepared_context)};
     BOOST_REQUIRE(collector);
+    const std::size_t empty_collector_bytes{collector->MemoryUsage()};
+    BOOST_CHECK_GE(empty_collector_bytes, sizeof(PaymentAuditCollector));
     prepared_context.reset();
 
     BOOST_CHECK(!collector->FinalizeCollection());
     BOOST_REQUIRE(
         llmq_tests::PaymentAuditCollectorTestAccess::
             InsertFinalizedWitnesses(*collector, fixture->audit));
+    BOOST_CHECK_GT(collector->MemoryUsage(), empty_collector_bytes);
     BOOST_REQUIRE(collector->IsComplete());
     const auto collected{collector->FinalizeCollection()};
     BOOST_REQUIRE(collected);

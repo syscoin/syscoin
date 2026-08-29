@@ -348,7 +348,15 @@ struct PQRegistryMempoolView {
 };
 
 struct PQRegistrySnapshotView;
+struct PQRegistryMemoryTracker;
 class PQRegistryManager;
+
+/** Process-local immutable registry payload retained by the cache and readers. */
+struct PQRegistryMemoryStats {
+    std::size_t cache_owned_bytes{0};
+    std::size_t externally_pinned_state_bytes{0};
+    std::size_t live_registry_views{0};
+};
 
 /**
  * Immutable ownership handle for one exact branch-local registry snapshot.
@@ -453,6 +461,7 @@ private:
     const uint256 m_gc_configuration_id;
     const std::shared_ptr<const uint8_t> m_incarnation{
         std::make_shared<const uint8_t>(0)};
+    const std::shared_ptr<PQRegistryMemoryTracker> m_memory_tracker;
     mutable Mutex m_mutex;
     std::unique_ptr<CEvoDB<uint256, PQRegistryDiskSnapshot,
                            StaticSaltedHasher>> m_snapshot_db;
@@ -607,6 +616,9 @@ public:
         return m_config;
     }
     [[nodiscard]] bool IsEnabled() const noexcept;
+    /** Allocation-payload accounting; allocator and shared_ptr overhead excluded. */
+    [[nodiscard]] PQRegistryMemoryStats GetMemoryStats() const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /** Construct the only closure accepted for the supplied exact paths. */
     [[nodiscard]] bool BuildGCFloorClosure(

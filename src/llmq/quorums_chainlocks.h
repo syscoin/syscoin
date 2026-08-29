@@ -908,6 +908,9 @@ public:
                                           CChainLockSig& result) const;
     [[nodiscard]] CChainLockSigCPtr GetMostRecentChainLock() const;
     [[nodiscard]] CChainLockSigCPtr GetBestChainLock() const;
+    /** Immutable/dynamic payload retained by live payment-audit machinery. */
+    [[nodiscard]] std::size_t GetPaymentAuditRuntimePinnedBytes() const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_payment_audit_mutex);
     [[nodiscard]] const CBlockIndex* GetBestChainLockIndex() const;
     /** Read the healthy fsynced winner before live-store import. */
     [[nodiscard]] std::optional<evo::AuxiliaryHistoryGCBlockIdentity>

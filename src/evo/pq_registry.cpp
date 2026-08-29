@@ -14,13 +14,20 @@
 #include <streams.h>
 
 #include <algorithm>
+#include <atomic>
 #include <exception>
 #include <string>
+#include <type_traits>
 #include <unordered_set>
 #include <utility>
 #include <variant>
 
 namespace llmq::pq {
+
+struct PQRegistryMemoryTracker {
+    std::atomic<std::size_t> live_payload_bytes{0};
+    std::atomic<std::size_t> live_views{0};
+};
 
 struct PQRegistryIndexes {
     // Retained inactive/revoked records continue to own their global key until
@@ -36,6 +43,7 @@ struct PQRegistryStateData {
     uint256 used_tree_ids_hash;
     uint256 consensus_state_root;
     std::size_t owned_dynamic_memory_usage{0};
+    std::size_t operator_states_dynamic_memory_usage{0};
     std::size_t used_tree_ids_dynamic_memory_usage{0};
 };
 
@@ -62,6 +70,32 @@ struct DecodedProviderRevocation {
 
 using DecodedPayload =
     std::variant<GlobalKeyTxPayload, DecodedProviderRevocation>;
+
+template <typename T>
+std::shared_ptr<const std::vector<T>> MakeTrackedVector(
+    std::vector<T> values,
+    const std::shared_ptr<PQRegistryMemoryTracker>& tracker,
+    std::size_t* memory_usage = nullptr)
+{
+    if (!tracker) return nullptr;
+    auto allocation{std::make_unique<std::vector<T>>(std::move(values))};
+    std::size_t bytes{
+        sizeof(std::vector<T>) + memusage::DynamicUsage(*allocation)};
+    if constexpr (std::is_same_v<T, OperatorKeyState>) {
+        for (const auto& state : *allocation) {
+            bytes += memusage::DynamicUsage(state.frozen_child_roots);
+        }
+    }
+    if (memory_usage != nullptr) *memory_usage = bytes;
+    tracker->live_payload_bytes.fetch_add(bytes, std::memory_order_relaxed);
+    return std::shared_ptr<const std::vector<T>>{
+        allocation.release(),
+        [tracker, bytes](const std::vector<T>* value) {
+            delete value;
+            tracker->live_payload_bytes.fetch_sub(
+                bytes, std::memory_order_relaxed);
+        }};
+}
 
 struct DecodedUpdate {
     std::size_t transaction_index{0};
@@ -442,13 +476,6 @@ std::size_t RegistryStateOwnedDynamicMemoryUsage(
     const PQRegistryStateData& state) noexcept
 {
     std::size_t usage{sizeof(PQRegistryStateData)};
-    if (state.operator_states) {
-        usage += sizeof(std::vector<OperatorKeyState>) +
-                 memusage::DynamicUsage(*state.operator_states);
-        for (const auto& key_state : *state.operator_states) {
-            usage += memusage::DynamicUsage(key_state.frozen_child_roots);
-        }
-    }
     if (state.indexes) {
         usage += sizeof(PQRegistryIndexes) +
                  memusage::DynamicUsage(state.indexes->global_key_owner);
@@ -462,13 +489,16 @@ std::shared_ptr<const PQRegistryStateData> MakeRegistryStateData(
     std::shared_ptr<const PQRegistryIndexes> indexes,
     std::optional<OperatorKeyScheduleState> schedule,
     const uint256& used_tree_ids_hash,
-    const uint256& consensus_state_root)
+    const uint256& consensus_state_root,
+    std::size_t operator_states_memory_usage,
+    const std::shared_ptr<PQRegistryMemoryTracker>& tracker)
 {
-    if (!operator_states || !used_tree_ids || !indexes ||
+    if (!operator_states || !used_tree_ids || !indexes || !tracker ||
+        operator_states_memory_usage < sizeof(std::vector<OperatorKeyState>) ||
         used_tree_ids_hash.IsNull() || consensus_state_root.IsNull()) {
         return nullptr;
     }
-    auto state{std::make_shared<PQRegistryStateData>()};
+    auto state{std::make_unique<PQRegistryStateData>()};
     state->operator_states = std::move(operator_states);
     state->used_tree_ids = std::move(used_tree_ids);
     state->indexes = std::move(indexes);
@@ -477,10 +507,20 @@ std::shared_ptr<const PQRegistryStateData> MakeRegistryStateData(
     state->consensus_state_root = consensus_state_root;
     state->owned_dynamic_memory_usage =
         RegistryStateOwnedDynamicMemoryUsage(*state);
+    state->operator_states_dynamic_memory_usage =
+        operator_states_memory_usage;
     state->used_tree_ids_dynamic_memory_usage =
         sizeof(std::vector<uint256>) +
         memusage::DynamicUsage(*state->used_tree_ids);
-    return state;
+    const std::size_t bytes{state->owned_dynamic_memory_usage};
+    tracker->live_payload_bytes.fetch_add(bytes, std::memory_order_relaxed);
+    return std::shared_ptr<const PQRegistryStateData>{
+        state.release(),
+        [tracker, bytes](const PQRegistryStateData* value) {
+            delete value;
+            tracker->live_payload_bytes.fetch_sub(
+                bytes, std::memory_order_relaxed);
+        }};
 }
 
 std::optional<uint256> EmptyRegistryConsensusStateRoot(
@@ -537,19 +577,30 @@ std::shared_ptr<const PQRegistrySnapshotView> MakeSnapshotView(
     const uint256& previous_block_hash,
     std::shared_ptr<const PQRegistryStateData> state,
     std::vector<uint256> block_tree_ids,
-    uint64_t gc_floor_revision = 0)
+    uint64_t gc_floor_revision,
+    const std::shared_ptr<PQRegistryMemoryTracker>& tracker)
 {
-    if (!state) return nullptr;
-    auto snapshot{std::make_shared<PQRegistrySnapshotView>()};
+    if (!state || !tracker) return nullptr;
+    auto snapshot{std::make_unique<PQRegistrySnapshotView>()};
     snapshot->height = height;
     snapshot->block_hash = block_hash;
     snapshot->previous_block_hash = previous_block_hash;
     snapshot->gc_floor_revision = gc_floor_revision;
     snapshot->state = std::move(state);
     snapshot->block_tree_ids =
-        std::make_shared<const std::vector<uint256>>(
-            std::move(block_tree_ids));
-    return snapshot;
+        MakeTrackedVector(std::move(block_tree_ids), tracker);
+    if (!snapshot->block_tree_ids) return nullptr;
+    constexpr std::size_t bytes{sizeof(PQRegistrySnapshotView)};
+    tracker->live_payload_bytes.fetch_add(bytes, std::memory_order_relaxed);
+    tracker->live_views.fetch_add(1, std::memory_order_relaxed);
+    return std::shared_ptr<const PQRegistrySnapshotView>{
+        snapshot.release(),
+        [tracker](const PQRegistrySnapshotView* value) {
+            delete value;
+            tracker->live_views.fetch_sub(1, std::memory_order_relaxed);
+            tracker->live_payload_bytes.fetch_sub(
+                sizeof(PQRegistrySnapshotView), std::memory_order_relaxed);
+        }};
 }
 
 std::shared_ptr<const PQRegistrySnapshotView>
@@ -564,7 +615,8 @@ MakeAuthenticatedSnapshotView(
     std::optional<OperatorKeyScheduleState> schedule,
     const uint256& used_tree_ids_hash,
     const uint256& consensus_state_root,
-    uint64_t gc_floor_revision = 0)
+    uint64_t gc_floor_revision,
+    const std::shared_ptr<PQRegistryMemoryTracker>& tracker)
 {
     ReusableSnapshotBacking reusable;
     FindReusableSnapshotBacking(
@@ -575,20 +627,23 @@ MakeAuthenticatedSnapshotView(
         if (!indexes) return nullptr;
         if (!reusable.tree_ids) {
             reusable.tree_ids =
-                std::make_shared<const std::vector<uint256>>(
-                    std::move(used_tree_ids));
+                MakeTrackedVector(std::move(used_tree_ids), tracker);
         }
+        std::size_t operator_states_memory_usage{0};
+        auto tracked_operator_states{MakeTrackedVector(
+            std::move(operator_states), tracker,
+            &operator_states_memory_usage)};
         reusable.state = MakeRegistryStateData(
-            std::make_shared<const std::vector<OperatorKeyState>>(
-                std::move(operator_states)),
+            std::move(tracked_operator_states),
             std::move(reusable.tree_ids), std::move(indexes),
-            std::move(schedule), used_tree_ids_hash, consensus_state_root);
+            std::move(schedule), used_tree_ids_hash, consensus_state_root,
+            operator_states_memory_usage, tracker);
         if (!reusable.state) return nullptr;
     }
     return MakeSnapshotView(
         height, block_hash, previous_block_hash,
         std::move(reusable.state), std::move(block_tree_ids),
-        gc_floor_revision);
+        gc_floor_revision, tracker);
 }
 
 std::shared_ptr<const PQRegistrySnapshotView>
@@ -600,7 +655,8 @@ MakeAuthenticatedReplaySnapshotView(
     const std::shared_ptr<const std::vector<uint256>>& used_tree_ids,
     const OperatorKeyScheduleState& schedule,
     const uint256& used_tree_ids_hash,
-    uint64_t gc_floor_revision = 0)
+    uint64_t gc_floor_revision,
+    const std::shared_ptr<PQRegistryMemoryTracker>& tracker)
 {
     if (!used_tree_ids) return nullptr;
     ReusableSnapshotBacking reusable;
@@ -616,17 +672,22 @@ MakeAuthenticatedReplaySnapshotView(
         if (!reusable.tree_ids) {
             reusable.tree_ids = used_tree_ids;
         }
+        std::size_t operator_states_memory_usage{0};
+        auto tracked_operator_states{MakeTrackedVector(
+            std::vector<OperatorKeyState>{operator_states.begin(),
+                                          operator_states.end()},
+            tracker, &operator_states_memory_usage)};
         reusable.state = MakeRegistryStateData(
-            std::make_shared<const std::vector<OperatorKeyState>>(
-                operator_states),
+            std::move(tracked_operator_states),
             std::move(reusable.tree_ids), std::move(indexes), schedule,
-            used_tree_ids_hash, disk.consensus_state_root);
+            used_tree_ids_hash, disk.consensus_state_root,
+            operator_states_memory_usage, tracker);
         if (!reusable.state) return nullptr;
     }
     return MakeSnapshotView(
         disk.height, disk.block_hash, disk.previous_block_hash,
         std::move(reusable.state), disk.block_tree_ids,
-        gc_floor_revision);
+        gc_floor_revision, tracker);
 }
 
 std::shared_ptr<const PQRegistrySnapshotView>
@@ -637,7 +698,8 @@ MakePrePreparationSnapshotView(
     const uint256& block_hash,
     const uint256& previous_block_hash,
     int32_t height,
-    PQRegistryError& error)
+    PQRegistryError& error,
+    const std::shared_ptr<PQRegistryMemoryTracker>& tracker)
 {
     const auto tree_hash{GetUsedTreeIdSetHash(
         genesis_hash, std::span<const uint256>{})};
@@ -655,7 +717,7 @@ MakePrePreparationSnapshotView(
     }
     auto snapshot{MakeAuthenticatedSnapshotView(
         cache, height, block_hash, previous_block_hash, {}, {}, {}, schedule,
-        *tree_hash, *root)};
+        *tree_hash, *root, /*gc_floor_revision=*/0, tracker)};
     if (!snapshot) {
         SetError(error, PQRegistryResult::INVALID_RESULTING_STATE);
     }
@@ -667,11 +729,17 @@ std::size_t SnapshotCacheDynamicMemoryUsage(
     const PQRegistryStateData* baseline)
 {
     std::vector<const PQRegistryStateData*> counted_states;
+    std::vector<const std::vector<OperatorKeyState>*> counted_operator_sets;
     std::vector<const std::vector<uint256>*> counted_tree_sets;
     counted_states.reserve(cache.size());
+    counted_operator_sets.reserve(cache.size());
     counted_tree_sets.reserve(cache.size());
     if (baseline != nullptr) {
         counted_states.push_back(baseline);
+        if (baseline->operator_states) {
+            counted_operator_sets.push_back(
+                baseline->operator_states.get());
+        }
         if (baseline->used_tree_ids) {
             counted_tree_sets.push_back(baseline->used_tree_ids.get());
         }
@@ -691,6 +759,15 @@ std::size_t SnapshotCacheDynamicMemoryUsage(
                 counted_states.end()) {
             counted_states.push_back(state);
             usage += state->owned_dynamic_memory_usage;
+        }
+        const auto* operator_set{
+            state != nullptr ? state->operator_states.get() : nullptr};
+        if (operator_set != nullptr &&
+            std::find(counted_operator_sets.begin(),
+                      counted_operator_sets.end(), operator_set) ==
+                counted_operator_sets.end()) {
+            counted_operator_sets.push_back(operator_set);
+            usage += state->operator_states_dynamic_memory_usage;
         }
         const auto* tree_set{
             state != nullptr ? state->used_tree_ids.get() : nullptr};
@@ -1436,6 +1513,7 @@ PQRegistryManager::PQRegistryManager(const DBParams& db_params,
     : m_genesis_hash(genesis_hash),
       m_config(config),
       m_gc_configuration_id(gc_configuration_id),
+      m_memory_tracker(std::make_shared<PQRegistryMemoryTracker>()),
       m_snapshot_db(std::make_unique<CEvoDB<
           uint256, PQRegistryDiskSnapshot, StaticSaltedHasher>>(
           RegistryDBParams(db_params, "snapshots"),
@@ -1446,6 +1524,22 @@ PQRegistryManager::PQRegistryManager(const DBParams& db_params,
 bool PQRegistryManager::IsEnabled() const noexcept
 {
     return !m_genesis_hash.IsNull() && m_config.IsValid();
+}
+
+PQRegistryMemoryStats PQRegistryManager::GetMemoryStats() const
+{
+    LOCK(m_mutex);
+    const std::size_t cache_owned_bytes{
+        SnapshotCacheDynamicMemoryUsage(m_snapshot_cache, nullptr)};
+    const std::size_t live_payload_bytes{
+        m_memory_tracker->live_payload_bytes.load(std::memory_order_relaxed)};
+    return {
+        cache_owned_bytes,
+        live_payload_bytes > cache_owned_bytes
+            ? live_payload_bytes - cache_owned_bytes
+            : 0,
+        m_memory_tracker->live_views.load(std::memory_order_relaxed),
+    };
 }
 
 bool PQRegistryManager::CheckGCFloorAccess(
@@ -1530,7 +1624,7 @@ bool PQRegistryManager::AuthenticateGCFloorCheckpoint(
             disk.tree_ids, disk.block_tree_ids,
             OperatorKeyScheduleState::FromView(*schedule_view),
             *tree_ids_hash, disk.consensus_state_root,
-            m_gc_floor_revision)};
+            m_gc_floor_revision, m_memory_tracker)};
         if (!authenticated) {
             return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
         }
@@ -3178,9 +3272,8 @@ bool PQRegistryManager::ReconstructPersistentSnapshotViewAboveFloor(
                                  record.block_tree_ids, merged)) {
                 return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
             }
-            used_tree_ids =
-                std::make_shared<const std::vector<uint256>>(
-                    std::move(merged));
+            used_tree_ids = MakeTrackedVector(
+                std::move(merged), m_memory_tracker);
         }
         const bool is_checkpoint{record.is_checkpoint != 0};
         if (is_checkpoint &&
@@ -3240,7 +3333,8 @@ bool PQRegistryManager::ReconstructPersistentSnapshotViewAboveFloor(
             }
             rebuilt = MakeAuthenticatedReplaySnapshotView(
                 staged, m_snapshot_cache, record, states, used_tree_ids,
-                schedule, used_tree_ids_hash, m_gc_floor_revision);
+                schedule, used_tree_ids_hash, m_gc_floor_revision,
+                m_memory_tracker);
             if (!rebuilt || !rebuilt->state) {
                 return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
             }
@@ -3253,7 +3347,8 @@ bool PQRegistryManager::ReconstructPersistentSnapshotViewAboveFloor(
             rebuilt = MakeSnapshotView(
                 record.height, record.block_hash,
                 record.previous_block_hash, authenticated_state,
-                record.block_tree_ids, m_gc_floor_revision);
+                record.block_tree_ids, m_gc_floor_revision,
+                m_memory_tracker);
         }
         if (!rebuilt) {
             return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
@@ -3438,8 +3533,8 @@ bool PQRegistryManager::ReconstructPersistentSnapshotView(
     std::shared_ptr<const PQRegistryStateData> authenticated_state;
     uint256 used_tree_ids_hash;
     if (preparation_parent_root) {
-        used_tree_ids =
-            std::make_shared<const std::vector<uint256>>();
+        used_tree_ids = MakeTrackedVector(
+            std::vector<uint256>{}, m_memory_tracker);
     }
     SnapshotViewCache staged;
     const std::size_t staged_count{std::min(
@@ -3457,9 +3552,8 @@ bool PQRegistryManager::ReconstructPersistentSnapshotView(
             !record->block_tree_ids.empty()};
         if (is_cold_base) {
             states = record->checkpoint_operator_states;
-            used_tree_ids =
-                std::make_shared<const std::vector<uint256>>(
-                    record->tree_ids);
+            used_tree_ids = MakeTrackedVector(
+                record->tree_ids, m_memory_tracker);
         } else {
             const uint256 prior_root{authenticated_state
                 ? authenticated_state->consensus_state_root
@@ -3483,9 +3577,8 @@ bool PQRegistryManager::ReconstructPersistentSnapshotView(
                     return SetError(
                         error, PQRegistryResult::SNAPSHOT_CORRUPT);
                 }
-                used_tree_ids =
-                    std::make_shared<const std::vector<uint256>>(
-                        std::move(merged));
+                used_tree_ids = MakeTrackedVector(
+                    std::move(merged), m_memory_tracker);
             }
             if (is_checkpoint &&
                 (states != record->checkpoint_operator_states ||
@@ -3559,7 +3652,8 @@ bool PQRegistryManager::ReconstructPersistentSnapshotView(
             }
             rebuilt = MakeAuthenticatedReplaySnapshotView(
                 staged, m_snapshot_cache, *record, states, used_tree_ids,
-                schedule, used_tree_ids_hash, m_gc_floor_revision);
+                schedule, used_tree_ids_hash, m_gc_floor_revision,
+                m_memory_tracker);
             if (!rebuilt || !rebuilt->state) {
                 return SetError(
                     error, PQRegistryResult::SNAPSHOT_CORRUPT);
@@ -3576,7 +3670,8 @@ bool PQRegistryManager::ReconstructPersistentSnapshotView(
                 rebuilt = MakeSnapshotView(
                     record->height, record->block_hash,
                     record->previous_block_hash, authenticated_state,
-                    record->block_tree_ids, m_gc_floor_revision);
+                    record->block_tree_ids, m_gc_floor_revision,
+                    m_memory_tracker);
             }
             if (!rebuilt) {
                 return SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
@@ -3751,7 +3846,8 @@ bool PQRegistryManager::PrepareBlockInternal(
         floor_revision = m_gc_floor_revision;
         parent_view = MakePrePreparationSnapshotView(
             m_snapshot_cache, m_genesis_hash, m_config,
-            block.hashPrevBlock, uint256{}, height - 1, error);
+            block.hashPrevBlock, uint256{}, height - 1, error,
+            m_memory_tracker);
         if (!parent_view) return false;
     } else {
         LOCK(m_mutex);
@@ -3808,14 +3904,13 @@ bool PQRegistryManager::PrepareBlockInternal(
         !schedule_changed && updates.empty() &&
         !removes_registry_operator};
     if (unchanged_state) {
-        auto result{std::make_shared<PQRegistrySnapshotView>()};
-        result->height = height;
-        result->block_hash = block_hash;
-        result->previous_block_hash = block.hashPrevBlock;
-        result->gc_floor_revision = floor_revision;
-        result->state = parent_view->state;
-        result->block_tree_ids =
-            std::make_shared<const std::vector<uint256>>();
+        auto result{MakeSnapshotView(
+            height, block_hash, block.hashPrevBlock, parent_view->state,
+            {}, floor_revision, m_memory_tracker)};
+        if (!result) {
+            return SetError(error,
+                            PQRegistryResult::INVALID_RESULTING_STATE);
+        }
         prepared.m_incarnation = m_incarnation;
         prepared.m_kind = PQRegistryPreparedBlock::Kind::TRANSITION;
         prepared.m_block_hash = block_hash;
@@ -3974,9 +4069,8 @@ bool PQRegistryManager::PrepareBlockInternal(
                             PQRegistryResult::INVALID_RESULTING_STATE);
         }
         used_tree_ids_hash = *tree_hash;
-        used_tree_ids =
-            std::make_shared<const std::vector<uint256>>(
-                std::move(merged_tree_ids));
+        used_tree_ids = MakeTrackedVector(
+            std::move(merged_tree_ids), m_memory_tracker);
     }
     // The authenticated parent already proved tree membership for every
     // inherited state. Schedule advancement can only retain/drop that global
@@ -4068,23 +4162,24 @@ bool PQRegistryManager::PrepareBlockInternal(
     if (!state_root) {
         return SetError(error, PQRegistryResult::INVALID_RESULTING_STATE);
     }
+    std::size_t operator_states_memory_usage{0};
+    auto tracked_operator_states{MakeTrackedVector(
+        std::move(next_operator_states), m_memory_tracker,
+        &operator_states_memory_usage)};
     auto state{MakeRegistryStateData(
-        std::make_shared<const std::vector<OperatorKeyState>>(
-            std::move(next_operator_states)),
+        std::move(tracked_operator_states),
         std::move(used_tree_ids), std::move(next_indexes), next_schedule,
-        used_tree_ids_hash, *state_root)};
+        used_tree_ids_hash, *state_root, operator_states_memory_usage,
+        m_memory_tracker)};
     if (!state) {
         return SetError(error, PQRegistryResult::INVALID_RESULTING_STATE);
     }
-    auto result{std::make_shared<PQRegistrySnapshotView>()};
-    result->height = height;
-    result->block_hash = block_hash;
-    result->previous_block_hash = block.hashPrevBlock;
-    result->gc_floor_revision = floor_revision;
-    result->state = std::move(state);
-    result->block_tree_ids =
-        std::make_shared<const std::vector<uint256>>(
-            std::move(block_tree_ids));
+    auto result{MakeSnapshotView(
+        height, block_hash, block.hashPrevBlock, std::move(state),
+        std::move(block_tree_ids), floor_revision, m_memory_tracker)};
+    if (!result) {
+        return SetError(error, PQRegistryResult::INVALID_RESULTING_STATE);
+    }
     prepared.m_incarnation = m_incarnation;
     prepared.m_kind = PQRegistryPreparedBlock::Kind::TRANSITION;
     prepared.m_block_hash = block_hash;
@@ -4373,7 +4468,7 @@ bool PQRegistryManager::GetReadView(
     if (height < m_config.preparation_height) {
         auto empty{MakePrePreparationSnapshotView(
             m_snapshot_cache, m_genesis_hash, m_config, block_hash,
-            previous_block_hash, height, error)};
+            previous_block_hash, height, error, m_memory_tracker)};
         if (!empty || !CacheSnapshotView(std::move(empty), &snapshot)) {
             if (error.result == PQRegistryResult::OK) {
                 SetError(error, PQRegistryResult::SNAPSHOT_CORRUPT);
