@@ -1055,6 +1055,9 @@ public:
         EXCLUSIVE_LOCKS_REQUIRED(cs_main, !m_btcc_preseal_mutex);
     [[nodiscard]] bool IsPaymentAuditPrefixAuthenticated(
         const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    [[nodiscard]] bool IsPaymentAuditCheckpointAuthenticated(
+        const pq::PaymentAuditStoreCheckpoint& checkpoint,
+        const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     void ProcessMessage(CNode* from,
                         const std::string& command,
@@ -1231,6 +1234,21 @@ private:
     struct BTCCPresealRecoveryRuntime {
         BoundedActiveRangeFrontier frontier;
         std::optional<pq::BTCCPresealMarker> recovered;
+    };
+
+    enum class PaymentAuditGCMaintenancePhase : uint8_t {
+        NONE = 0,
+        ARCHIVE,
+        PROBATION,
+        INVALID,
+    };
+
+    struct PaymentAuditGCMaintenancePlan {
+        PaymentAuditGCMaintenancePhase phase{
+            PaymentAuditGCMaintenancePhase::NONE};
+        pq::PaymentAuditStoreCheckpoint checkpoint;
+        std::vector<uint256> retained_probation_roots;
+        bool derive_retained_probation_roots{false};
     };
 
     enum class BTCCReplayCarrierStatus : uint8_t {
@@ -1876,6 +1894,20 @@ private:
     void MaybeCheckpointPaymentAuditPreseal(
         const pq::FinalChainLockRecordMetadata& durable_winner)
         EXCLUSIVE_LOCKS_REQUIRED(!m_btcc_preseal_mutex);
+    void MaintainPaymentAuditCheckpointGC()
+        EXCLUSIVE_LOCKS_REQUIRED(!m_btcc_preseal_mutex);
+    [[nodiscard]] bool ContinuePaymentAuditCheckpointGC()
+        EXCLUSIVE_LOCKS_REQUIRED(!m_btcc_preseal_mutex);
+    [[nodiscard]] static PaymentAuditGCMaintenancePlan
+    SelectPaymentAuditGCMaintenancePlan(
+        const std::optional<pq::PaymentAuditStoreCheckpoint>&
+            pending_archive,
+        const std::optional<pq::PaymentAuditStoreCheckpoint>&
+            pending_probation,
+        std::span<const uint256> pending_probation_roots,
+        const std::optional<pq::PaymentAuditStoreCheckpoint>&
+            completed_archive,
+        bool completed_probation) noexcept;
     void UpdateDurableChainLockAuxiliaryRetention();
     [[nodiscard]] bool FlushChainLockAuxiliarySnapshotsForDurability();
     void MaybeReleaseFinalitySnapshotPublicationRetention()
@@ -2052,6 +2084,11 @@ private:
     std::chrono::microseconds m_catchup_last_request
         GUARDED_BY(m_catchup_mutex){0};
     std::atomic_bool m_catchup_used{false};
+    // SYSCOIN: The scheduler and a just-accepted ChainLock can both enter
+    // checkpoint maintenance. Only one may select or advance a durable
+    // archive/probation intent at a time; the network path may defer to the
+    // next periodic bounded pass instead of waiting on database work.
+    std::atomic_bool m_payment_audit_gc_active{false};
     mutable Mutex m_btcc_preseal_mutex;
     pq::BTCCPresealState m_btcc_preseal_state
         GUARDED_BY(m_btcc_preseal_mutex);

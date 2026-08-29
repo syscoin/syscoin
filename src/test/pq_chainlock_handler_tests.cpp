@@ -318,6 +318,20 @@ public:
         uint256 blocked_logical_id;
     };
 
+    enum class PaymentAuditGCPhase : uint8_t {
+        NONE = 0,
+        ARCHIVE,
+        PROBATION,
+        INVALID,
+    };
+
+    struct PaymentAuditGCPlan {
+        PaymentAuditGCPhase phase{PaymentAuditGCPhase::NONE};
+        pq::PaymentAuditStoreCheckpoint checkpoint;
+        std::vector<uint256> retained_roots;
+        bool derive_retained_roots{false};
+    };
+
     using ReplayCheck = std::function<std::pair<CertificateStatus, uint256>(
         const CBlockIndex&)>;
 
@@ -484,6 +498,33 @@ public:
                 result.blocked_carrier_height,
                 result.blocked_carrier_hash,
                 result.blocked_logical_id};
+    }
+
+    static PaymentAuditGCPlan SelectPaymentAuditGCPlan(
+        const std::optional<pq::PaymentAuditStoreCheckpoint>&
+            pending_archive,
+        const std::optional<pq::PQPaymentProbationGCRequest>&
+            pending_probation,
+        const std::optional<pq::PaymentAuditStoreCheckpoint>&
+            completed_archive,
+        bool completed_probation)
+    {
+        const auto selected{
+            CChainLocksHandler::SelectPaymentAuditGCMaintenancePlan(
+                pending_archive,
+                pending_probation
+                    ? std::optional<pq::PaymentAuditStoreCheckpoint>{
+                          pending_probation->checkpoint}
+                    : std::nullopt,
+                pending_probation
+                    ? std::span<const uint256>{
+                          pending_probation->retained_state_hashes}
+                    : std::span<const uint256>{},
+                completed_archive, completed_probation)};
+        return {static_cast<PaymentAuditGCPhase>(selected.phase),
+                selected.checkpoint,
+                selected.retained_probation_roots,
+                selected.derive_retained_probation_roots};
     }
 };
 
@@ -2978,6 +3019,87 @@ BOOST_AUTO_TEST_CASE(payment_audit_checkpoint_boundary_ignores_authorizer_refres
     malformed.authorizing_target_hash.SetNull();
     BOOST_CHECK(!llmq::HasSamePaymentAuditCheckpointBoundary(
         checkpoint, malformed));
+}
+
+BOOST_AUTO_TEST_CASE(payment_audit_gc_resumes_exact_durable_phase_first)
+{
+    using Access = llmq::test::CChainLocksHandlerTestAccess;
+    using Phase = Access::PaymentAuditGCPhase;
+
+    llmq::pq::PaymentAuditStoreCheckpoint checkpoint;
+    checkpoint.prune_through_epoch = 7;
+    checkpoint.covered_through_height = 100;
+    checkpoint.covered_through_hash = NonNullHash(200);
+    checkpoint.authenticated_receipt_state.cursor = {
+        99, 7, NonNullHash(201), NonNullHash(202), NonNullHash(203)};
+    checkpoint.authenticated_receipt_state.cumulative_hash =
+        NonNullHash(204);
+    checkpoint.authenticated_probation_state_hash = NonNullHash(205);
+    checkpoint.authorizing_target_height = 110;
+    checkpoint.authorizing_target_hash = NonNullHash(206);
+    checkpoint.authorizing_chainlock_logical_id = NonNullHash(207);
+    checkpoint.authorizing_chainlock_witness_id = NonNullHash(208);
+    BOOST_REQUIRE(checkpoint.IsStructurallyValid());
+
+    auto plan{Access::SelectPaymentAuditGCPlan(
+        std::nullopt, std::nullopt, std::nullopt,
+        /*completed_probation=*/false)};
+    BOOST_CHECK(plan.phase == Phase::NONE);
+
+    plan = Access::SelectPaymentAuditGCPlan(
+        checkpoint, std::nullopt, std::nullopt,
+        /*completed_probation=*/false);
+    BOOST_CHECK(plan.phase == Phase::ARCHIVE);
+    BOOST_CHECK(plan.checkpoint == checkpoint);
+    BOOST_CHECK(plan.retained_roots.empty());
+    BOOST_CHECK(!plan.derive_retained_roots);
+
+    const llmq::pq::PQPaymentProbationGCRequest probation{
+        checkpoint, {NonNullHash(209), NonNullHash(210)}};
+    plan = Access::SelectPaymentAuditGCPlan(
+        checkpoint, probation, std::nullopt,
+        /*completed_probation=*/false);
+    BOOST_CHECK(plan.phase == Phase::INVALID);
+
+    plan = Access::SelectPaymentAuditGCPlan(
+        std::nullopt, probation, std::nullopt,
+        /*completed_probation=*/false);
+    BOOST_CHECK(plan.phase == Phase::INVALID);
+
+    plan = Access::SelectPaymentAuditGCPlan(
+        std::nullopt, probation, checkpoint,
+        /*completed_probation=*/false);
+    BOOST_CHECK(plan.phase == Phase::PROBATION);
+    BOOST_CHECK(plan.checkpoint == checkpoint);
+    BOOST_CHECK(plan.retained_roots == probation.retained_state_hashes);
+    BOOST_CHECK(!plan.derive_retained_roots);
+
+    auto different_boundary{checkpoint};
+    ++different_boundary.prune_through_epoch;
+    ++different_boundary.covered_through_height;
+    different_boundary.covered_through_hash = NonNullHash(211);
+    ++different_boundary.authorizing_target_height;
+    different_boundary.authorizing_target_hash = NonNullHash(212);
+    different_boundary.authorizing_chainlock_logical_id = NonNullHash(213);
+    different_boundary.authorizing_chainlock_witness_id = NonNullHash(214);
+    BOOST_REQUIRE(different_boundary.IsStructurallyValid());
+    plan = Access::SelectPaymentAuditGCPlan(
+        std::nullopt, probation, different_boundary,
+        /*completed_probation=*/false);
+    BOOST_CHECK(plan.phase == Phase::INVALID);
+
+    plan = Access::SelectPaymentAuditGCPlan(
+        std::nullopt, std::nullopt, checkpoint,
+        /*completed_probation=*/false);
+    BOOST_CHECK(plan.phase == Phase::PROBATION);
+    BOOST_CHECK(plan.checkpoint == checkpoint);
+    BOOST_CHECK(plan.retained_roots.empty());
+    BOOST_CHECK(plan.derive_retained_roots);
+
+    plan = Access::SelectPaymentAuditGCPlan(
+        std::nullopt, std::nullopt, checkpoint,
+        /*completed_probation=*/true);
+    BOOST_CHECK(plan.phase == Phase::NONE);
 }
 
 BOOST_AUTO_TEST_CASE(preseal_marker_forces_retained_body_recomputation)

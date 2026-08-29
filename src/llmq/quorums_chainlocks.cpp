@@ -1722,6 +1722,51 @@ bool ShouldRunPaymentAuditDurableGC(
     return !reuse_archive_checkpoint || !probation_gc_complete;
 }
 
+CChainLocksHandler::PaymentAuditGCMaintenancePlan
+CChainLocksHandler::SelectPaymentAuditGCMaintenancePlan(
+    const std::optional<pq::PaymentAuditStoreCheckpoint>& pending_archive,
+    const std::optional<pq::PaymentAuditStoreCheckpoint>& pending_probation,
+    std::span<const uint256> pending_probation_roots,
+    const std::optional<pq::PaymentAuditStoreCheckpoint>& completed_archive,
+    bool completed_probation) noexcept
+{
+    PaymentAuditGCMaintenancePlan plan;
+    if (pending_archive) {
+        if (pending_probation || !pending_archive->IsStructurallyValid()) {
+            plan.phase = PaymentAuditGCMaintenancePhase::INVALID;
+            return plan;
+        }
+        plan.phase = PaymentAuditGCMaintenancePhase::ARCHIVE;
+        plan.checkpoint = *pending_archive;
+        return plan;
+    }
+    if (pending_probation) {
+        if (!pending_probation->IsStructurallyValid() ||
+            !completed_archive ||
+            !HasSamePaymentAuditCheckpointBoundary(
+                *pending_probation, *completed_archive)) {
+            plan.phase = PaymentAuditGCMaintenancePhase::INVALID;
+            return plan;
+        }
+        plan.phase = PaymentAuditGCMaintenancePhase::PROBATION;
+        plan.checkpoint = *pending_probation;
+        plan.retained_probation_roots.assign(
+            pending_probation_roots.begin(),
+            pending_probation_roots.end());
+        return plan;
+    }
+    if (completed_archive && !completed_probation) {
+        if (!completed_archive->IsStructurallyValid()) {
+            plan.phase = PaymentAuditGCMaintenancePhase::INVALID;
+            return plan;
+        }
+        plan.phase = PaymentAuditGCMaintenancePhase::PROBATION;
+        plan.checkpoint = *completed_archive;
+        plan.derive_retained_probation_roots = true;
+    }
+    return plan;
+}
+
 BTCCCatchupRangeStatus GetFullyValidatedBTCCCatchupRangeStatus(
     const ChainstateManager& chainman,
     const CBlockIndex& candidate,
@@ -2451,7 +2496,11 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
     }
     const bool loaded_payment_audit_checkpoint{
         m_payment_audit_store &&
-        m_payment_audit_store->GetPruneCheckpoint().has_value()};
+        (m_payment_audit_store->GetPendingPruneCheckpoint().has_value() ||
+         m_payment_audit_store->GetPruneCheckpoint().has_value() ||
+         (deterministicMNManager &&
+          deterministicMNManager
+              ->GetPendingPaymentProbationGCRequest().has_value()))};
     bool loaded_persisted{false};
     {
         LOCK(m_persisted_mutex);
@@ -2517,6 +2566,7 @@ void CChainLocksHandler::Start()
         // check. Enforce it before publishing authentication readiness.
         CheckActiveState();
         EnforceBestChainLock();
+        MaintainPaymentAuditCheckpointGC();
         m_scheduler = std::make_unique<CScheduler>();
         CScheduler* const scheduler{m_scheduler.get()};
         m_scheduler_thread = std::make_unique<std::thread>(
@@ -2530,6 +2580,7 @@ void CChainLocksHandler::Start()
             CheckActiveState();
             ContinueVerifiedHistoricalChainLock();
             EnforceBestChainLock();
+            MaintainPaymentAuditCheckpointGC();
             RequestNeededBTCCCertificate();
             RequestNeededPaymentAuditCertificate();
             RetryPendingBTCCBlock();
@@ -2927,7 +2978,22 @@ bool CChainLocksHandler::HasPendingPQHistoryAuthentication() const
         }
     }
 
-    const auto checkpoint{m_payment_audit_store->GetPruneCheckpoint()};
+    const auto pending_archive{
+        m_payment_audit_store->GetPendingPruneCheckpoint()};
+    const auto pending_probation{
+        deterministicMNManager
+            ? deterministicMNManager
+                  ->GetPendingPaymentProbationGCRequest()
+            : std::nullopt};
+    const auto completed_archive{
+        m_payment_audit_store->GetPruneCheckpoint()};
+    const std::optional<pq::PaymentAuditStoreCheckpoint> checkpoint{
+        pending_archive
+            ? pending_archive
+            : pending_probation
+                  ? std::optional<pq::PaymentAuditStoreCheckpoint>{
+                        pending_probation->checkpoint}
+                  : completed_archive};
     if (checkpoint) {
         // The compact archive boundary is not self-authenticating. Keep IBD
         // recoverable until a still-durable active descendant certificate
@@ -2937,7 +3003,8 @@ bool CChainLocksHandler::HasPendingPQHistoryAuthentication() const
                 checkpoint->authorizing_target_hash)};
         if (!checkpoint->IsStructurallyValid() || authorizer == nullptr ||
             authorizer->nHeight != checkpoint->authorizing_target_height ||
-            !IsPaymentAuditPrefixAuthenticated(*authorizer)) {
+            !IsPaymentAuditCheckpointAuthenticated(
+                *checkpoint, *authorizer)) {
             return true;
         }
     }
@@ -4729,18 +4796,31 @@ bool CChainLocksHandler::IsPaymentAuditPrefixAuthenticated(
         return false;
     }
     const auto checkpoint{m_payment_audit_store->GetPruneCheckpoint()};
+    return checkpoint &&
+           IsPaymentAuditCheckpointAuthenticated(*checkpoint, index);
+}
+
+bool CChainLocksHandler::IsPaymentAuditCheckpointAuthenticated(
+    const pq::PaymentAuditStoreCheckpoint& checkpoint,
+    const CBlockIndex& index) const
+{
+    AssertLockHeld(cs_main);
+    if (!m_store || !m_persistence ||
+        !checkpoint.IsStructurallyValid() ||
+        m_persistence_failed.load()) {
+        return false;
+    }
     const auto accepted{m_store->GetBestRecord()};
     const auto durable{m_persistence->GetFinalityState().best};
-    if (!checkpoint || !checkpoint->IsStructurallyValid() || !accepted ||
-        !durable || accepted->metadata != *durable) {
+    if (!accepted || !durable || accepted->metadata != *durable) {
         return false;
     }
     const CBlockIndex* authorizer{m_chainman.m_blockman.LookupBlockIndex(
-        checkpoint->authorizing_target_hash)};
+        checkpoint.authorizing_target_hash)};
     const CBlockIndex* target{m_chainman.m_blockman.LookupBlockIndex(
         accepted->metadata.statement.block_hash)};
     if (authorizer == nullptr || target == nullptr ||
-        authorizer->nHeight != checkpoint->authorizing_target_height ||
+        authorizer->nHeight != checkpoint.authorizing_target_height ||
         target->nHeight != accepted->metadata.statement.height ||
         target->nHeight < authorizer->nHeight ||
         target->GetAncestor(authorizer->nHeight) != authorizer ||
@@ -4749,9 +4829,9 @@ bool CChainLocksHandler::IsPaymentAuditPrefixAuthenticated(
         return false;
     }
     const CBlockIndex* covered{m_chainman.m_blockman.LookupBlockIndex(
-        checkpoint->covered_through_hash)};
+        checkpoint.covered_through_hash)};
     if (covered == nullptr ||
-        covered->nHeight != checkpoint->covered_through_height ||
+        covered->nHeight != checkpoint.covered_through_height ||
         authorizer->nHeight < covered->nHeight ||
         authorizer->GetAncestor(covered->nHeight) != covered ||
         target->nHeight < index.nHeight ||
@@ -4769,9 +4849,9 @@ bool CChainLocksHandler::IsPaymentAuditPrefixAuthenticated(
         IndexedPaymentAuditReceiptState(*authorizer)};
     const auto indexed_target{IndexedPaymentAuditReceiptState(*target)};
     if (!indexed_authorizer ||
-        *indexed_authorizer != checkpoint->authenticated_receipt_state ||
+        *indexed_authorizer != checkpoint.authenticated_receipt_state ||
         authorizer->pqPaymentProbationStateHash !=
-            checkpoint->authenticated_probation_state_hash ||
+            checkpoint.authenticated_probation_state_hash ||
         !indexed_target ||
         *indexed_target !=
             accepted->metadata.statement.payment_audit_receipt_state ||
@@ -4781,19 +4861,19 @@ bool CChainLocksHandler::IsPaymentAuditPrefixAuthenticated(
     }
     const bool same_authorizer_target{
         accepted->metadata.statement.height ==
-            checkpoint->authorizing_target_height &&
+            checkpoint.authorizing_target_height &&
         accepted->metadata.statement.block_hash ==
-            checkpoint->authorizing_target_hash};
+            checkpoint.authorizing_target_hash};
     const bool exact_authorizer{
         same_authorizer_target &&
         accepted->metadata.logical_id ==
-            checkpoint->authorizing_chainlock_logical_id &&
+            checkpoint.authorizing_chainlock_logical_id &&
         accepted->metadata.witness_id ==
-            checkpoint->authorizing_chainlock_witness_id};
+            checkpoint.authorizing_chainlock_witness_id};
     if (same_authorizer_target && !exact_authorizer) return false;
     if (!exact_authorizer) {
         const auto& previous{
-            checkpoint->authenticated_receipt_state.cursor};
+            checkpoint.authenticated_receipt_state.cursor};
         const auto& current{
             accepted->metadata.statement.payment_audit_receipt_state.cursor};
         if ((!previous.IsNull() && current.IsNull()) ||
@@ -4808,16 +4888,16 @@ bool CChainLocksHandler::IsPaymentAuditPrefixAuthenticated(
         }
         if (current == previous &&
             (accepted->metadata.statement.payment_audit_receipt_state !=
-                 checkpoint->authenticated_receipt_state ||
+                 checkpoint.authenticated_receipt_state ||
              accepted->metadata.statement.payment_probation_state_hash !=
-                 checkpoint->authenticated_probation_state_hash)) {
+                 checkpoint.authenticated_probation_state_hash)) {
             return false;
         }
     }
     const auto indexed{IndexedPaymentAuditReceiptState(index)};
     if (!indexed) return false;
     if (indexed->cursor.IsNull()) return true;
-    return indexed->cursor.epoch <= checkpoint->prune_through_epoch;
+    return indexed->cursor.epoch <= checkpoint.prune_through_epoch;
 }
 
 bool CChainLocksHandler::IsPaymentAuditPresealActive() const
@@ -7132,6 +7212,170 @@ bool CChainLocksHandler::FlushBTCCIndexStateForDurableAcceptance(
            m_chainman.m_blockman.WriteBlockIndexDB();
 }
 
+void CChainLocksHandler::MaintainPaymentAuditCheckpointGC()
+{
+    bool expected{false};
+    if (!m_payment_audit_gc_active.compare_exchange_strong(
+            expected, true, std::memory_order_acquire,
+            std::memory_order_relaxed)) {
+        return;
+    }
+    struct MaintenanceGuard final {
+        std::atomic_bool& active;
+        ~MaintenanceGuard()
+        {
+            active.store(false, std::memory_order_release);
+        }
+    } maintenance_guard{m_payment_audit_gc_active};
+    if (ContinuePaymentAuditCheckpointGC() || !m_store) return;
+    const auto record{m_store->GetBestRecord()};
+    if (record) MaybeCheckpointPaymentAuditPreseal(record->metadata);
+}
+
+bool CChainLocksHandler::ContinuePaymentAuditCheckpointGC()
+{
+    if (!m_payment_audit_store || !deterministicMNManager ||
+        m_persistence_failed.load()) {
+        return false;
+    }
+
+    const auto pending_archive{
+        m_payment_audit_store->GetPendingPruneCheckpoint()};
+    const auto pending_probation{
+        deterministicMNManager->GetPendingPaymentProbationGCRequest()};
+    const auto completed_archive{
+        m_payment_audit_store->GetPruneCheckpoint()};
+    const bool completed_probation{
+        completed_archive &&
+        deterministicMNManager
+            ->IsPaymentProbationGCCompleteForCheckpoint(
+                *completed_archive)};
+    const auto plan{SelectPaymentAuditGCMaintenancePlan(
+        pending_archive,
+        pending_probation
+            ? std::optional<pq::PaymentAuditStoreCheckpoint>{
+                  pending_probation->checkpoint}
+            : std::nullopt,
+        pending_probation
+            ? std::span<const uint256>{
+                  pending_probation->retained_state_hashes}
+            : std::span<const uint256>{},
+        completed_archive, completed_probation)};
+    if (plan.phase == PaymentAuditGCMaintenancePhase::NONE) {
+        return false;
+    }
+    const auto fail = [&](const char* reason, uint8_t status = 0) {
+        LogPrintf("CChainLocksHandler::%s -- payment-audit GC %s "
+                  "(status=%u, checkpoint=%s); disabling ChainLock "
+                  "share admission\n",
+                  __func__, reason, status,
+                  plan.checkpoint.authorizing_chainlock_witness_id
+                      .ToString());
+        m_persistence_failed.store(true);
+        DisableShareAdmission();
+    };
+    if (plan.phase == PaymentAuditGCMaintenancePhase::INVALID) {
+        fail("has conflicting durable intents");
+        return true;
+    }
+
+    LOCK(cs_main);
+    const CBlockIndex* authorizer{
+        m_chainman.m_blockman.LookupBlockIndex(
+            plan.checkpoint.authorizing_target_hash)};
+    if (authorizer == nullptr ||
+        authorizer->nHeight !=
+            plan.checkpoint.authorizing_target_height ||
+        !IsPaymentAuditCheckpointAuthenticated(
+            plan.checkpoint, *authorizer)) {
+        // Import/enforcement and active-chain connection may still be
+        // converging. The durable intent remains authoritative and is retried
+        // without allowing a newer checkpoint to pass it.
+        return true;
+    }
+
+    if (plan.phase == PaymentAuditGCMaintenancePhase::ARCHIVE) {
+        const auto progress{
+            m_payment_audit_store->PruneThroughCheckpointStep(
+                plan.checkpoint)};
+        if (progress.status == pq::PaymentAuditPruneStatus::IN_PROGRESS) {
+            return true;
+        }
+        if (progress.status != pq::PaymentAuditPruneStatus::COMPLETE) {
+            fail("archive step failed",
+                 static_cast<uint8_t>(progress.status));
+            return true;
+        }
+    }
+
+    std::vector<uint256> retained_probation_roots{
+        plan.retained_probation_roots};
+    const auto pending_probation_after_archive{
+        deterministicMNManager->GetPendingPaymentProbationGCRequest()};
+    if (pending_probation_after_archive) {
+        if (!HasSamePaymentAuditCheckpointBoundary(
+                pending_probation_after_archive->checkpoint,
+                plan.checkpoint)) {
+            fail("probation intent does not match completed archive");
+            return true;
+        }
+        retained_probation_roots =
+            pending_probation_after_archive->retained_state_hashes;
+    } else if (plan.derive_retained_probation_roots ||
+               plan.phase == PaymentAuditGCMaintenancePhase::ARCHIVE) {
+        pq::PaymentAuditPresealState retained_markers;
+        {
+            LOCK(m_btcc_preseal_mutex);
+            retained_markers = m_payment_audit_preseal_state;
+        }
+        const auto retain_probation_root = [&](const uint256& root) {
+            if (!root.IsNull() &&
+                std::find(retained_probation_roots.begin(),
+                          retained_probation_roots.end(), root) ==
+                    retained_probation_roots.end()) {
+                retained_probation_roots.push_back(root);
+            }
+        };
+        retain_probation_root(
+            plan.checkpoint.authenticated_probation_state_hash);
+        retain_probation_root(authorizer->pqPaymentProbationStateHash);
+        const auto chainstate_probation_roots{
+            CollectChainstatePaymentProbationRoots(m_chainman)};
+        if (!chainstate_probation_roots) {
+            fail("could not collect retained probation roots");
+            return true;
+        }
+        for (const uint256& root : *chainstate_probation_roots) {
+            retain_probation_root(root);
+        }
+        if (retained_markers.active) {
+            retain_probation_root(
+                retained_markers.active
+                    ->predecessor_probation_state_hash);
+        }
+        if (retained_markers.prospective) {
+            retain_probation_root(
+                retained_markers.prospective
+                    ->predecessor_probation_state_hash);
+        }
+    }
+
+    const auto probation_progress{
+        deterministicMNManager
+            ->PrunePaymentProbationStatesThroughCheckpointStep(
+                plan.checkpoint,
+                std::span<const uint256>{retained_probation_roots})};
+    if (probation_progress.status ==
+            pq::PQPaymentProbationPruneStatus::IN_PROGRESS ||
+        probation_progress.status ==
+            pq::PQPaymentProbationPruneStatus::COMPLETE) {
+        return true;
+    }
+    fail("probation step failed",
+         static_cast<uint8_t>(probation_progress.status));
+    return true;
+}
+
 void CChainLocksHandler::MaybeCheckpointPaymentAuditPreseal(
     const pq::FinalChainLockRecordMetadata& durable_winner)
 {
@@ -7231,7 +7475,7 @@ void CChainLocksHandler::MaybeCheckpointPaymentAuditPreseal(
         HasSamePaymentAuditCheckpointBoundary(
             *previous_checkpoint, checkpoint) &&
         IsPaymentAuditPrefixAuthenticated(*target)};
-    pq::PaymentAuditStoreCheckpoint committed_checkpoint{
+    const pq::PaymentAuditStoreCheckpoint committed_checkpoint{
         reuse_archive_checkpoint ? *previous_checkpoint : checkpoint};
     const CBlockIndex* checkpoint_target{target};
 
@@ -7252,6 +7496,11 @@ void CChainLocksHandler::MaybeCheckpointPaymentAuditPreseal(
         // probation-state durability barriers, so restart can never land
         // below a root removed by this checkpoint. Holding cs_main keeps the
         // authenticated target active across the flush and both GC commits.
+        if (reuse_archive_checkpoint) {
+            // A completed archive with unfinished probation state is resumed
+            // by the exact durable-request path on the next bounded pass.
+            return;
+        }
         BlockValidationState flush_state;
         if (!m_chainman.ActiveChainstate().FlushStateToDisk(
                 flush_state, FlushStateMode::ALWAYS)) {
@@ -7263,166 +7512,24 @@ void CChainLocksHandler::MaybeCheckpointPaymentAuditPreseal(
             return;
         }
 
-        // The checkpoint batch follows index/probation fsync, durable certificate
-        // installation, active-chain enforcement, and the chainstate marker. A
-        // crash before this write keeps every audit; a crash after it can
-        // authenticate the pruned prefix even if marker clearing lags.
-        if (!reuse_archive_checkpoint &&
-            !m_payment_audit_store->PruneThroughCheckpoint(checkpoint)) {
-            const auto observed{
-                m_payment_audit_store->GetPruneCheckpoint()};
-            if (!m_payment_audit_store->IsHealthy() || !observed ||
-                !observed->IsStructurallyValid()) {
-                m_persistence_failed.store(true);
-                DisableShareAdmission();
-                return;
-            }
-            if (*observed != checkpoint) {
-                // A later enforced winner can win the checkpoint race. Accept it
-                // only when the current durable winner cryptographically matches
-                // the observed authorizer and extends this exact active target.
-                const auto accepted_now{m_store->GetBestRecord()};
-                const auto persisted_now{
-                    m_persistence->GetFinalityState().best};
-                const CBlockIndex* observed_authorizer{
-                    m_chainman.m_blockman.LookupBlockIndex(
-                        observed->authorizing_target_hash)};
-                const CBlockIndex* observed_covered{
-                    m_chainman.m_blockman.LookupBlockIndex(
-                        observed->covered_through_hash)};
-                const auto observed_state{
-                    observed_authorizer == nullptr
-                        ? std::optional<pq::PaymentAuditReceiptState>{}
-                        : IndexedPaymentAuditReceiptState(
-                              *observed_authorizer)};
-                const bool same_boundary_refresh{
-                    observed->prune_through_epoch ==
-                        checkpoint.prune_through_epoch &&
-                    observed->covered_through_height ==
-                        checkpoint.covered_through_height &&
-                    observed->covered_through_hash ==
-                        checkpoint.covered_through_hash &&
-                    observed->authenticated_receipt_state ==
-                        checkpoint.authenticated_receipt_state &&
-                    observed->authenticated_probation_state_hash ==
-                        checkpoint.authenticated_probation_state_hash &&
-                    observed->authorizing_target_height >
-                        checkpoint.authorizing_target_height};
-                const bool boundary_advance{
-                    observed->prune_through_epoch >
-                        checkpoint.prune_through_epoch &&
-                    observed->covered_through_height >
-                        checkpoint.covered_through_height &&
-                    observed->authorizing_target_height >=
-                        observed->covered_through_height};
-                const bool durable_dominates{
-                    accepted_now && persisted_now &&
-                    accepted_now->metadata == *persisted_now &&
-                    observed_authorizer != nullptr &&
-                    observed_covered != nullptr && observed_state &&
-                    observed_authorizer->nHeight ==
-                        observed->authorizing_target_height &&
-                    observed_covered->nHeight ==
-                        observed->covered_through_height &&
-                    observed_authorizer->GetAncestor(
-                        observed_covered->nHeight) == observed_covered &&
-                    observed_authorizer->nHeight >= target->nHeight &&
-                    observed_authorizer->GetAncestor(target->nHeight) ==
-                        target &&
-                    active_tip->nHeight >= observed_authorizer->nHeight &&
-                    active_tip->GetAncestor(observed_authorizer->nHeight) ==
-                        observed_authorizer &&
-                    !(observed_authorizer->nStatus & BLOCK_FAILED_MASK) &&
-                    !observed_authorizer->IsAssumedValid() &&
-                    observed_authorizer->IsValid(BLOCK_VALID_SCRIPTS) &&
-                    HasFullReceiptIndexProvenance(*observed_authorizer) &&
-                    *observed_state ==
-                        observed->authenticated_receipt_state &&
-                    observed_authorizer->pqPaymentProbationStateHash ==
-                        observed->authenticated_probation_state_hash &&
-                    accepted_now->metadata.statement.height ==
-                        observed->authorizing_target_height &&
-                    accepted_now->metadata.statement.block_hash ==
-                        observed->authorizing_target_hash &&
-                    accepted_now->metadata.logical_id ==
-                        observed->authorizing_chainlock_logical_id &&
-                    accepted_now->metadata.witness_id ==
-                        observed->authorizing_chainlock_witness_id &&
-                    accepted_now->metadata.statement.payment_audit_receipt_state ==
-                        *observed_state &&
-                    accepted_now->metadata.statement.payment_probation_state_hash ==
-                        observed_authorizer->pqPaymentProbationStateHash &&
-                    (observed_authorizer->nHeight == target->nHeight ||
-                     ClassifyHistoricalReceiptIndexRangeCached(
-                         *observed_authorizer, target->nHeight + 1) ==
-                         PaymentAuditContextStatus::READY) &&
-                    (same_boundary_refresh || boundary_advance)};
-                if (!durable_dominates) {
-                    m_persistence_failed.store(true);
-                    DisableShareAdmission();
-                    return;
-                }
-                committed_checkpoint = *observed;
-                checkpoint_target = observed_authorizer;
-            }
-        }
-
-        pq::PaymentAuditPresealState retained_markers;
-        {
-            LOCK(m_btcc_preseal_mutex);
-            retained_markers = m_payment_audit_preseal_state;
-        }
-        std::vector<uint256> retained_probation_roots;
-        const auto retain_probation_root = [&](const uint256& root) {
-            if (!root.IsNull() &&
-                std::find(retained_probation_roots.begin(),
-                          retained_probation_roots.end(), root) ==
-                    retained_probation_roots.end()) {
-                retained_probation_roots.push_back(root);
-            }
-        };
-        retain_probation_root(
-            committed_checkpoint.authenticated_probation_state_hash);
-        retain_probation_root(
-            checkpoint_target->pqPaymentProbationStateHash);
-        const auto chainstate_probation_roots{
-            CollectChainstatePaymentProbationRoots(m_chainman)};
-        if (!chainstate_probation_roots) {
+        // The checkpoint batch follows index/probation fsync, durable
+        // certificate installation, active-chain enforcement, and the
+        // chainstate marker. Only one bounded archive slice runs here; exact
+        // durable intent recovery owns every continuation and probation pass.
+        const auto archive_progress{
+            m_payment_audit_store->PruneThroughCheckpointStep(checkpoint)};
+        if (archive_progress.status !=
+                pq::PaymentAuditPruneStatus::IN_PROGRESS &&
+            archive_progress.status !=
+                pq::PaymentAuditPruneStatus::COMPLETE) {
+            LogPrintf("CChainLocksHandler::%s -- payment-audit archive GC "
+                      "failed with status %u\n",
+                      __func__,
+                      static_cast<unsigned>(archive_progress.status));
             m_persistence_failed.store(true);
             DisableShareAdmission();
-            return;
         }
-        for (const uint256& root : *chainstate_probation_roots) {
-            retain_probation_root(root);
-        }
-        if (retained_markers.active) {
-            retain_probation_root(
-                retained_markers.active->predecessor_probation_state_hash);
-        }
-        if (retained_markers.prospective) {
-            retain_probation_root(
-                retained_markers.prospective
-                    ->predecessor_probation_state_hash);
-        }
-        bool probation_gc_succeeded{false};
-        try {
-            probation_gc_succeeded =
-                deterministicMNManager &&
-                deterministicMNManager
-                    ->PrunePaymentProbationStatesThroughCheckpoint(
-                        committed_checkpoint,
-                        std::span<const uint256>{
-                            retained_probation_roots});
-        } catch (const std::exception& exception) {
-            LogPrintf("CChainLocksHandler::%s -- payment probation state GC "
-                      "failed: %s\n",
-                      __func__, exception.what());
-        }
-        if (!probation_gc_succeeded) {
-            m_persistence_failed.store(true);
-            DisableShareAdmission();
-            return;
-        }
+        return;
     }
 
     LOCK(m_btcc_preseal_mutex);
@@ -12011,6 +12118,7 @@ bool CChainLocksHandler::ProcessNewChainLockInternal(
     CompletePeerResponse(from, logical_id);
     ForgetAllRequests(logical_id);
     EnforceBestChainLock();
+    MaintainPaymentAuditCheckpointGC();
     RefreshPQHistoryAuthState();
     if (pnevmdatadb) {
         const CBlockIndex* accepted_index{GetBestChainLockIndex()};
@@ -13104,7 +13212,6 @@ void CChainLocksHandler::EnforceBestChainLock()
         m_persisted_best_auth_pending = false;
     }
     MaybeReleaseFinalitySnapshotPublicationRetention();
-    MaybeCheckpointPaymentAuditPreseal(record->metadata);
 }
 
 void CChainLocksHandler::NotifyHeaderTip(const CBlockIndex*)
