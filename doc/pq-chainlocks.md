@@ -9,9 +9,9 @@ and migration work. It does not claim that the scheduled Merkle-WOTS+ child
 signature profile is standardized, audited, or ready for mainnet.
 
 The final activated implementation has no BLS cryptography and no DKG. It keeps
-only byte-exact, non-cryptographic legacy decoders needed to replay the chain up
-to the mandatory migration-state boundary `H`; the later immutable finality
-predecessor `F` is a separate block-only anchor.
+only byte-exact, non-cryptographic legacy decoders needed to replay blocks below
+the configured activation height `A`. `A` is a rule boundary, not a block-hash
+or reconstructed-state checkpoint.
 
 ## 1. Decisions and non-goals
 
@@ -56,13 +56,13 @@ The design fixes the following decisions:
   classified 400-member bitmap on chain; historical IBD may replay that compact
   prefix provisionally, then authenticate it with a normally verified covering
   CLSIG and prune the covered full audit certificates.
-- The immutable migration-state anchor `H` pins one block plus the reconstructed
-  deterministic-masternode and PQ-registry roots that authorize opaque legacy
-  replay. The distinct immutable finality anchor `F` pins the initial PQ
-  ChainLock predecessor and its bootstrap-roster ancestry. The independently
-  updateable receipt assumption `R` authenticates only compact BTCC receipt
-  history. `defaultAssumeValid` and ordinary optional checkpoints are not
-  substitutes for any of these rules.
+- The first PQ-only block is selected by height `A`. Below it, opaque legacy
+  replay follows the ordinary valid-most-work chain. At and above it, legacy
+  authority is retired and PQ roots are required. Before the first durable PQ
+  certificate, the active PoW branch supplies the block at `A-1`; the first
+  fully verified certificate binds that branch through signed ancestry. The
+  independently updateable exact receipt assumption `R` authenticates only
+  compact BTCC receipt history.
 
 The design does not attempt to:
 
@@ -113,10 +113,10 @@ leaf schedule.
 `PQ_EPOCH_ORIGIN` should be aligned to both the 288-block rotation and the
 five-block ChainLock cadence. Their least common multiple is 1,440 blocks.
 
-Key-registry deployment is fail-closed behind three additional pinned values:
+Key-registry deployment is fail-closed behind three additional values:
 the first tx86 preparation height, the registration-cutoff lag, and the
-maximum future epoch horizon. Preparation must be at or above DIP3, no later
-than the mandatory migration anchor, and strictly before epoch zero's cutoff.
+maximum future epoch horizon. Preparation must be at or above DIP3, strictly
+before activation, and strictly before epoch zero's cutoff.
 The roster snapshot lag used for deterministic selection is a
 different consensus constant and must not be reused as the registration
 cutoff.
@@ -475,11 +475,11 @@ from consuming the registry's global one-million-ID safety bound through cheap
 successive root rotations. Root rotation still pays and validates an ordinary
 tx86 transaction; there is no periodic transaction or coordinator.
 
-The immutable migration-state anchor `H` commits the canonically sorted
-deterministic-masternode state and this complete PQ registry state at the same
-height. It does not double as the initial ChainLock predecessor. The registry
-schema intentionally differs from the abandoned per-key prototype, so stale
-databases fail closed instead of being reinterpreted.
+Every registry snapshot is branch-local and authenticated by its parent link,
+block identity, and resulting state root. No one snapshot is elevated into a
+release-pinned migration commitment. The registry schema intentionally differs
+from the abandoned per-key prototype, so stale databases fail closed instead
+of being reinterpreted.
 
 ## 6. Deterministic quorum construction
 
@@ -499,9 +499,9 @@ For epoch `e`:
    an oldest-to-newest prefix and at least three slots must be authorized. Thus
    normal operation uses `1111`, while one in-flight rotation uses `0111` and
    still has the unchanged three older rosters needed for a certificate;
-   `0011` fails closed. `F` is at or after the fourth bootstrap base and the
-   configured first eligible target after `F` is checked to ensure every
-   initially active authorization point is already on `F`'s ancestry.
+   `0011` fails closed. The block at `A-1` is at or after the fourth bootstrap
+   base, and configuration checks ensure that every roster active at the first
+   eligible target is already authorized by that predecessor height.
 3. Load the deterministic masternode list at the snapshot.
 4. Use the existing deterministic score ordering, with the epoch base block
    hash as modifier, to select 400 roster slots.
@@ -774,9 +774,10 @@ height: they move to the latest target `H`, declare the active block at
 statement. The durable winner remains the ancestry, receipt-state, and cursor
 floor. This prevents multiple valid target heights in one declared-predecessor
 view without making a missed round permanent.
-Before the first winner, `F` is that durable predecessor and its BTCC cursor is
-canonically null. The deployment therefore requires `F` to precede the first
-BTCC candidate source rather than silently inventing cursor state at `F`.
+Before the first winner, the predecessor height is `A-1`, its hash is obtained
+from the fully validated candidate branch, and its BTCC cursor is canonically
+null. The deployment therefore requires `A-1` to precede the first BTCC
+candidate source rather than silently inventing cursor state at activation.
 
 A distinct current `CATCHUP` admission handles a fresh node, a node that missed
 one or more certificates, or the rolling recovery statement above. It is
@@ -1298,8 +1299,8 @@ exhaustion or an fsync failure stops the affected transition fail-closed.
 Old `CBTCCheckpointSig`, BLS BTCC shares, `BTCCSIG`, and aggregate BLS
 verification are removed. The compact PQ receipt described above replaces the
 legacy carrier proof. Public-network BTCC activation remains disabled until the
-candidate schedule, both immutable block anchors, and the receipt assumption
-boundary are release-pinned.
+activation height, candidate schedule, and independent receipt assumption
+boundary are assigned.
 
 ### 10.3 Payment-only participation audit
 
@@ -1307,12 +1308,12 @@ The payment audit discourages registered operators from collecting rewards
 while remaining unavailable to the PQ finality network. It is deliberately not
 PoSe: its state never changes `nPoSePenalty`, `nPoSeBanHeight`, deterministic
 masternode validity, MNAUTH eligibility, quorum thresholds, or collateral
-validity. Beginning at `F+1`, the exact parent registry must give a payee an
+validity. Beginning at `A`, the exact parent registry must give a payee an
 active global key and a `FROZEN_PRESENT` child root for the payment's target
-epoch. Preparation and legacy payments through `F` are unchanged. Payment
+epoch. Preparation and legacy payments below `A` are unchanged. Payment
 probation then filters only that root-capable deterministic queue. If every
 root-capable payee is withheld, selection falls back to the same root-capable
-queue so an audit outage cannot remove its last payee. A post-`F` state with no
+queue so an audit outage cannot remove its last payee. A post-activation state with no
 root-capable valid payee is rejected rather than paying a rootless operator.
 
 One audit is attempted per 288-block epoch, about twelve hours at the nominal
@@ -1490,96 +1491,118 @@ continues to rely on the threshold of independent sentries that validate
 same currently unshipped PQ/BTCC consensus launch; no released chain contains
 any payment-audit history.
 
-## 11. Immutable anchors and legacy replay
+## 11. Height-only activation and legacy replay
 
-### 11.1 Migration state `H` and finality predecessor `F`
+### 11.1 Activation boundary `A`
 
-The activation release hardcodes two different immutable block boundaries per
-network:
+Each network assigns one consensus height:
 
 ```text
-PQMigrationStateAnchor {
-    int32   height;                 // H
-    uint256 blockHash;              // exact hash at H
-    uint256 deterministicMNRoot;    // canonical DMN state after connecting H
-    uint256 pqRegistryRoot;         // canonical PQ key state after connecting H
-    uint256 minimumChainWork;
-}
-
-PQChainLockAnchor {
-    int32   height;                 // F
-    uint256 blockHash;              // exact initial PQ ChainLock predecessor
-}
+nPQActivationHeight = A   // first PQ-only block
 ```
 
-Both rules are mandatory and are not controlled by `-checkpoints`:
+The boundary has deliberately narrow meaning:
 
-- A header/block at `H` must have exactly `blockHash`.
-- Every accepted header/block above `H` must have that block as ancestor at
-  height `H`.
-- Connecting `H` must reconstruct both pinned state roots exactly.
-- `F` must be at or after `H` and, when they are equal, name the same block.
-- A header/block at `F` must have exactly the configured finality-anchor hash,
-  and every accepted branch above or below it must agree with that immutable
-  prefix once the exact anchor is known.
-- `F` must cover the exact authorization points for every roster active at the
-  first eligible target after `F`. In the normal bootstrap geometry it is at
-  or after the epoch-three base block.
-- `F` must precede the first configured BTCC candidate source. Its initial
-  ChainLock predecessor cursor is therefore canonically null; a deployment
-  cannot silently infer a non-null cursor from earlier receipt history.
-- The checks run during normal header acceptance, block connection, reindex,
-  `-reindex-chainstate`, roll-forward recovery, and VerifyDB paths.
-- A reorg that conflicts with either immutable prefix is invalid.
+- Blocks below `A` replay legacy provider and quorum data through fixed-size
+  opaque codecs. Their BLS/DKG cryptographic validity is assumed, while all
+  non-BLS structure and deterministic state effects are still checked.
+- Block `A` and every descendant use only PQ provider authorization,
+  root-qualified payments, deterministic PQ rosters, and PQ finality rules.
+- `A` carries no configured block hash, deterministic-MN root, PQ-registry
+  root, or special minimum-work commitment. Before PQ finality exists, normal
+  valid-most-work fork choice selects history.
+- The configured initial predecessor height is `A-1`. Its hash is read from
+  the fully validated candidate branch, never from configuration or the first
+  message observed on the network.
+- The first fully verified certificate is written durably before enforcement.
+  Its signed predecessor and target ancestry bind the actual branch. Invalid,
+  incomplete, or merely first-seen data cannot pin a hash.
+- If finality is unavailable at activation, base-chain mining and fork choice
+  continue. Current-window catch-up can establish the first durable winner
+  later; a missed signing window does not permanently disable `LIVE`.
+- Destructive DMN/PQ history GC is disabled until a durable enforced winner
+  exists. Thereafter normal branch snapshots, inverse undo, rooted checkpoint
+  segments, and restart journals provide the authenticated pruning boundary.
 
-`defaultAssumeValid` may also be set to `H`, and `nMinimumChainWork` must be
-updated, but neither supplies the mandatory ancestry/state rule.
+Configuration checks require `A > 0`, `A >= DIP3`, registry preparation
+strictly before `A`, complete bootstrap-roster authorization by `A-1`, and the first
+BTCC candidate source strictly after `A-1`. Regtest exposes only
+`-pqactivationheight`; there are no migration block-hash or state-root options.
+Public-network overrides remain forbidden and activation is release-disabled
+until a complete profile is compiled for that network.
 
-Regtest exposes `H` through four debug arguments that must be set together:
-`-pqlegacyanchorheight`, `-pqlegacyanchorblockhash`,
-`-pqlegacydmnstatehash`, and `-pqlegacypqregistrystatehash`. It exposes `F`
-through the atomic pair `-pqchainlockanchorheight` and
-`-pqchainlockanchorblockhash`. Hashes are exactly 64 hexadecimal characters
-and non-zero. Partial, malformed, pre-DIP3, inconsistent, or public-network
-overrides fail during chain-parameter construction. Registry tests must
-additionally configure preparation height, epoch origin, registration cutoff,
-snapshot lag, and future horizon; setting either anchor alone does not
-implicitly enable finality.
-
-The release-updatable BTCC receipt assumption `R` remains a third, separate
-record containing an exact block, cursor, and cumulative receipt-state hash. It
-does not become the ChainLock predecessor and need not be at or after `F`.
+The release-updatable BTCC receipt assumption `R` remains a separate exact
+record containing a block hash, cursor, and cumulative receipt-state hash. It
+does not become the ChainLock predecessor and need not be at or after `A`.
 Before the first carrier it is valid only with the canonical empty state;
 afterward it must land on an exact carrier and match the recomputed state. The
-compiled assume-valid boundary must not exceed `H` and must remain strictly
+compiled assume-valid boundary must remain below `A` and strictly
 below `R`.
 
-This split adds no wire field and no block-index serialization version. The
-existing finality database configuration record already commits its initial
-anchor height and hash, so an unshipped regtest database created with `H` in
-that slot fails the configuration check and must be rebuilt with the staged
-`F` profile. Public profiles are still disabled, so there is no released
-production database migration to infer or accept.
+This model adds no wire field or block-index serialization version. The local
+finality schema commits `A-1`, all schedules, `R`, genesis, and the signature
+profile, but no activation block hash. A persisted winner carries its own
+signed branch identity and is fully reverified on restart. Public profiles are
+still disabled, so there is no released production database migration to infer.
 
-The canonical state root includes at least:
+### 11.2 Local activation handoff
 
-- the deterministic masternode list and all state that affects roster scoring;
-- ECDSA identity references and active global PQ key records;
-- active and frozen child-root commitments needed by the four transition
-  epochs;
-- the exact append-only used-tree-ID set;
-- the four PQ quorum descriptors that become active at transition;
-- the last accepted legacy ChainLock/BTCC cursor migration value, if any; and
-- explicit serialization/version tags for every component.
+The final BLS-free binary keeps a separate, fsynced local handoff record. This
+record is deployment provenance, not consensus state and not a configured
+activation hash. It prevents the same binary that assumes legacy BLS history
+from silently treating an arbitrary live pre-activation branch as authenticated
+authority.
 
-The root algorithm and ordering require independent tooling and a published
-mainnet reproduction manifest before `H` can be assigned. The same manifest
-must independently derive `F`, prove that it descends from `H`, and enumerate
-the bootstrap roster authorization points covered by its ancestry.
+- A normal non-empty public datadir with no record may install the activation
+  release before `A-1`. While its fully script-validated tip is below `A-1`, it
+  remains sync-only in the distinct deferred-handoff state and writes no pin or
+  failure record. The transition is retried as the active tip advances and
+  pins the exact active block when `A-1` is reached. A loaded tip already at or
+  above `A` must have both that matching durable pin and block `A`'s strong
+  complete-PQ-validation provenance. A late upgrade with neither pin nor a
+  historical-replay marker must reindex; an older release could have written
+  generic receipt provenance without enforcing this activation's full rule set.
+- Deferred handoff is not historical replay: it preserves an existing
+  branch-local datadir and can pin at `A-1` without reconstructing block `A`.
+  Empty datadirs and explicit reconstruction use the stricter historical path
+  below. Non-mining operators therefore may deploy the activation release ahead
+  of `A`; they do not need to switch binaries at the boundary. Deferred nodes
+  cannot create block templates, so block producers must retain the
+  legacy/preparation-capable release through `A-1` (or upgrade only after
+  `A-1` is reached). If every producer upgrades sooner, production stalls below
+  the handoff instead of allowing unauthenticated authority to originate.
+- An empty datadir, full reindex, `-reindex-chainstate`, or snapshot/background
+  validation starts in historical-replay quarantine. Blocks and headers still
+  synchronize normally, but mining, provider admission, MNAUTH, governance,
+  PQ share/certificate traffic, certificate restoration, and ChainLock
+  enforcement remain disabled. Quarantine ends only after this process fully
+  validates block `A`, at which point it fsyncs the actual active-chain `A-1`
+  predecessor. Background validation may unlock a snapshot only when both
+  chains have that same predecessor.
+- Before disconnecting the exact pinned `A-1` without a durable certificate,
+  the node fsyncs a null-hash historical-replay marker and disables
+  participation. The PoW reorganization then proceeds normally; the
+  replacement `A-1` is pinned only after this process fully validates its
+  block `A` successor. A crash before, during, or after the disconnect
+  therefore restarts quarantined instead of reviving the old pin. A first
+  durable certificate may name a side branch: its active-chain fork remains
+  protected while normal ChainLock enforcement switches to that verified
+  branch, after which the replacement predecessor is pinned. Independently of
+  activation state, no disconnect may cross a block on the active path to a
+  fsynced winner; blocks above the winner and a losing side branch remain
+  disconnectable.
+- A public all-sentinel profile remains sync-only and never advertises live
+  authority. Regtest bypasses this deployment handoff so activation fixtures
+  retain their existing behavior.
 
-### 11.2 Opaque legacy codecs
+`A` must not be a superblock height. Historical replay intentionally does not
+consume live governance authority before the pin, while the strong provenance
+needed to unlock quarantine requires exact validation of block `A`; selecting
+a superblock would make those requirements circular.
 
-Blocks and deterministic state through `H` still contain BLS-shaped fields.
+### 11.3 Opaque legacy codecs
+
+Blocks and deterministic state below `A` still contain BLS-shaped fields.
 The final implementation retains fixed-size opaque types only:
 
 ```text
@@ -1593,25 +1616,24 @@ payloads, final-commitment payloads, deterministic-MN state/diffs, and EvoDB
 records. They never parse a curve point, perform subgroup/canonical checks, or
 call a BLS library.
 
-For blocks at or below `H`, the mandatory anchor assumes historical BLS/DKG
-cryptographic validity. Replay still performs non-BLS deterministic state
-effects needed to reproduce the pinned anchor, including:
+For blocks below `A`, compatibility replay assumes historical BLS/DKG
+cryptographic validity. It still performs non-BLS deterministic state effects
+needed by descendant consensus, including:
 
 - provider registration/update/removal and uniqueness rules;
 - bounded commitment height/hash/schedule and bitmap decoding;
 - payments, confirmations, bans/revivals, and collateral removals; and
 - byte-identical transaction, block, and state serialization.
 
-The anchor assumes the cryptographic validity of legacy commitments, but a node
-syncing from genesis must still reproduce their narrow deterministic
-`validMembers` PoSe transition through `H`. Those bounded opaque bitmaps affect
-ban state, payee eligibility, seniority, and therefore later coinbase validity;
-a root checked only at `H` cannot recover state that was needed to validate
-earlier blocks. This replay performs no BLS operation and is disabled above
-`H`. Provider/collateral/payment state likewise remains live input to the `H`
-state roots and the post-`H` deterministic-masternode list.
+Although legacy commitment cryptography is assumed, a node syncing from
+genesis still reproduces the narrow deterministic `validMembers` PoSe
+transition below `A`. Those bounded opaque bitmaps affect ban state, payee
+eligibility, seniority, and therefore state needed to validate later blocks.
+Replay performs no BLS operation and is
+retired at `A`. Provider, collateral, payment, and PoSe state continues
+normally into the post-activation deterministic-masternode list.
 
-Above `H`, legacy provider versions that require BLS, BLS final-commitment
+At and above `A`, legacy provider versions that require BLS, BLS final-commitment
 coinbases, DKG messages, BLS recovered signatures, and BLS ChainLocks are
 invalid or unsupported as specified by their layer. No post-activation code
 path can deserialize a BLS field into a cryptographic object.
@@ -1633,20 +1655,18 @@ for sync and reindex, but no legacy or PQ ChainLock finality service starts. It
 is not an authoritative public-network upgrade, and supplying only part of a
 public activation profile remains a startup error.
 
-Regtest additionally exposes one explicit preparation-only configuration: `H`
-plus the registry/quorum schedule are complete,
-`-pqfinalitypreparation=1` is present, and every `F`, BTCC candidate, and
-receipt-assumption field remains unassigned. That state constructs no finality
-store and cannot sign, accept, restore, or enforce a PQ ChainLock.
+Regtest additionally exposes one explicit preparation-only configuration: the
+registry/quorum schedule is complete, `-pqfinalitypreparation=1` is present,
+and activation, BTCC candidate, and receipt-assumption fields remain
+unassigned. That state constructs no finality store and cannot sign, accept,
+restore, or enforce a PQ ChainLock.
 
 Stages A and B require a future, explicitly supported BLS-free public
 preparation profile. It is a complete rollout state in its own right, not a
 partial activation profile inferred by filling selected fields in this release.
-It starts from already-known accepted public-chain data, enables registry and
-shadow operation without finality authority, and leaves `H`, its block hash,
-and its state roots unassigned until the named block actually exists. The
-regtest preparation state remains the deterministic harness for the later
-H-authenticated registry history and exact `F` derivation.
+It starts from already-known accepted public-chain data and enables registry
+and shadow operation without finality authority. The regtest preparation state
+remains the deterministic harness for that rollout behavior.
 
 ### Stage A: preparatory release
 
@@ -1659,7 +1679,6 @@ only opaque compatibility replay for accepted legacy chain data and adds:
 - deterministic PQ quorum descriptors;
 - signer journals and shadow share/certificate generation;
 - PQ MNAUTH negotiation in non-authoritative test/shadow mode;
-- state-root reproduction tooling; and
 - metrics and RPC inspection for key coverage, shadow thresholds, certificate
   size, latency, and verification cost.
 
@@ -1672,49 +1691,41 @@ operated as though it enforces either legacy or PQ finality.
 ### Stage B: four complete shadow epochs
 
 The network must complete at least four consecutive usable shadow epochs so the
-later migration boundary has a full four-quorum PQ active set. Each must have
+later activation boundary has a full four-quorum PQ active set. Each must have
 at least 300 valid registered roots and repeatedly demonstrate 267-member
-shares. `H` remains unassigned during this phase. Missing the coverage/readiness
-criteria delays selecting `H` and the complete activation manifest; it does not
-alter the eventual fixed epoch rules.
+shares. Activation remains unassigned during this phase. Missing the
+coverage/readiness criteria delays selecting `A` and the complete activation
+profile; it does not alter the eventual fixed epoch rules.
 
-### Stage C: anchor release
+### Stage C: activation release
 
-After four complete shadow epochs, select `H` only after that exact block has
-been mined and ChainLocked on the intended public chain. Reproduce its exact
-block hash and both state roots from that chain; never predict a future `H`,
-hash, or root. The cutover is coordinated so `H` is the last block accepted
-under legacy-authority rules and `H+1` is the first post-quantum block; choosing
-an older `H` after legacy descendants already exist would be a retroactive fork
-and is forbidden. Choose an observed `F` at or after `H` that covers the initial
-roster authorization points and precedes the first BTCC candidate source.
-Freeze a complete activation manifest that pins `H`, its
-exact block hash and both state roots, `F` and its exact block hash, minimum
-chainwork, epoch/BTCC origins, roster parameters, and the separate BTCC receipt
-assumption `R`. `defaultAssumeValid` must not exceed `H` and must remain strictly
-below `R`. Reproducible tools must independently derive every value from the
-public chain.
+After four complete shadow epochs, choose a future height `A` that leaves
+operators time to install the activation release. The profile fixes only the
+height, schedules, roster parameters, and separate receipt assumption `R`; it
+does not predict a future block hash or state root. `A-1` must cover every
+initial roster authorization point and precede the first BTCC candidate source.
+`defaultAssumeValid` must remain below both `A` and `R`.
 
 The boundary is unambiguous:
 
-- legacy BLS/DKG chain-derived objects are replayed through `H` with opaque
+- legacy BLS/DKG chain-derived objects are replayed below `A` with opaque
   codecs and assumed cryptographic validity;
 - no legacy DKG/BLS object is produced or accepted for live authority after
-  `H`;
-- the interval from `H` through `F` continues the authenticated provider and
-  PQ-registry history without PQ finality; and
-- the first eligible target after `F` uses `F` as its exact predecessor and the
-  already-shadowed four quorum descriptors selected by the specified snapshot
-  rule.
+  `A`;
+- block `A` is the first block requiring PQ-only authorization and
+  root-qualified payments; and
+- the first normal ChainLock target uses the actual active-branch block at
+  `A-1` as predecessor. A later catch-up target remains possible if the first
+  signing windows are missed.
 
 ### Stage D: final BLS-free activation release
 
 Publish the BLS-free activation release only with the complete manifest. The
 only remaining legacy support is the isolated opaque decoder/state-transition
-module for heights through `H`. Nodes sync from genesis without a centrally
-distributed state snapshot, verify the mandatory block and state roots at `H`,
-then verify the separate immutable block at `F` before finality can start. An
-all-sentinel release remains a non-authoritative compatibility-replay/sync
+module for heights below `A`. Nodes sync from genesis without a centrally
+distributed state snapshot and follow valid-most-work history until a fully
+verified durable PQ certificate establishes finality. An all-sentinel release
+remains a non-authoritative compatibility-replay/sync
 build, and a partially populated public profile must never start. The future
 preparation release must identify its no-finality profile explicitly rather
 than weakening that partial-profile check.
@@ -1734,25 +1745,24 @@ The implementation must preserve these invariants:
 4. A child key is authorized for one epoch, one profile, and exactly the
    scheduled leaf domain 0 through 234; leaves 235 through 255 are invalid.
 5. A sentry never generates two child signatures from the same physical leaf.
-6. A reorg cannot refund a journal entry or cross an accepted ChainLock or
-   conflict with either immutable block anchor.
+6. A reorg cannot refund a journal entry or cross an accepted durable ChainLock.
 7. A final CLSIG proves exactly 267 valid distinct slots in each of exactly
    three distinct active quorums for one common statement.
 8. Failure to form a CLSIG affects finality/bridge liveness, not base-chain
    block validity or mining.
 9. A missing scheduled BTC candidate keeps the prior cursor and does not stop a
    Syscoin ChainLock.
-10. Historical base-chain replay depends on chain data and the immutable `H`
-    migration-state anchor. The first finality predecessor and bootstrap roster
-    ancestry depend separately on immutable `F`. Assuming pruned historical
-    receipt certificates requires release-pinned `R`; resuming after a gap
-    requires exact current-window `LIVE` predecessor chaining, bounded-current
-    `CATCHUP`, or the exact-terminal/covering exception bound by a durable
-    pre-seal marker.
+10. Historical base-chain replay depends on valid-most-work chain data below
+    height `A`; there is no configured historical block or state commitment.
+    Assuming pruned receipt certificates requires exact release-pinned `R`;
+    resuming after a gap requires exact current-window `LIVE` predecessor
+    chaining, bounded-current `CATCHUP`, or the exact-terminal/covering
+    exception bound by a durable pre-seal marker.
 11. ECDSA alone cannot replace an already active global PQ key.
 12. No final-production code path invokes BLS or DKG cryptography.
 13. Every `LIVE` CLSIG names the exact locally durable predecessor certificate.
-    Before the first certificate, it names exact `F` with a null BTCC cursor.
+    Before the first certificate, normal `LIVE` names height `A-1`, the actual
+    candidate-branch block at that height, and a null BTCC cursor.
     Trusted startup restoration may reinstall only this node's checksummed,
     fsynced winner; network `CATCHUP` is a distinct admission that authenticates
     either an ordinary certificate inside the current fork window or the
@@ -1762,7 +1772,7 @@ The implementation must preserve these invariants:
     permits base Syscoin sync to continue until an exact or covering certificate
     is supplied and verified.
 15. An authoritative public finality deployment has a complete, internally
-    consistent `H`/`F`/`R`, schedule, and roster profile. The current
+    consistent `A`/`R`, schedule, and roster profile. The current
     all-sentinel profile is non-authoritative compatibility replay/sync, and
     current partial public profiles fail startup. A future BLS-free public
     preparation profile must be explicitly defined as a complete no-finality
@@ -1772,7 +1782,7 @@ The implementation must preserve these invariants:
     erase a miss, while an authenticated later positive may clear it.
 17. Payment-audit results never mutate PoSe, deterministic-masternode validity,
     collateral validity, MNAUTH, or finality membership/order. Roster selection
-    never consults probation state; after `F`, payment selection first requires
+    never consults probation state; at and after `A`, payment selection first requires
     the target epoch's frozen PQ child root, and an all-withheld fallback remains
     confined to that root-capable queue.
 18. Compact payment-audit replay is provisional until one fully verified,
@@ -1813,10 +1823,10 @@ Expected failures are fail-closed:
 | Covering payment-audit CLSIG is absent, off-branch, below-terminal, or invalid | Keep requesting a valid descendant; the marker grants no authority and no covered certificate may be pruned |
 | Payment-audit state, pre-seal, checkpoint, certificate, or prune-batch fsync fails | Keep the obligation and gates active; never publish provisional state, clear a marker, advance a checkpoint, or infer an empty audit |
 | All root-capable valid payees are payment-withheld | Use the ordinary root-capable deterministic payee as the explicit liveness fallback |
-| No root-capable valid payee exists after `F` | Reject the block; never redirect the masternode reward to a rootless operator or the miner |
-| Regtest preparation profile supplies `F`, candidate, or receipt fields | Fail startup; preparation has registry/quorum history only and no finality state |
-| Partial public or full regtest deployment profile | Fail startup; never infer missing anchors, cursor state, or schedule values |
-| `H` block/state-root or `F` block mismatch | Reject the incompatible branch and halt synchronization if no compatible branch remains |
+| No root-capable valid payee exists at or after `A` | Reject the block; never redirect the masternode reward to a rootless operator or the miner |
+| Regtest preparation profile supplies activation, candidate, or receipt fields | Fail startup; preparation has registry/quorum history only and no finality state |
+| Partial public or full regtest deployment profile | Fail startup; never infer missing activation, receipt state, or schedule values |
+| No durable winner yet | Continue ordinary valid-most-work fork choice and forbid destructive auxiliary-state GC |
 
 ## 14. Required test matrix
 
@@ -1858,7 +1868,7 @@ Expected failures are fail-closed:
 - Fixed epoch advance when an epoch is unusable; no fallback to last successful
   quorum.
 - Four-epoch bootstrap and all epoch-boundary/reorg positions. Bootstrap
-  descriptors must authorize their exact base height/hash through `F`; epochs
+  descriptors must authorize their exact base height/hash through `A-1`; epochs
   after bootstrap must authorize their exact roster snapshot through an
   accepted ChainLock, and neither path may accept a branch-derived substitute.
 - Depth-16 tree build/cache round-trip, internal-node mutation with a recomputed
@@ -1869,7 +1879,6 @@ Expected failures are fail-closed:
 - Restart-import one checksummed durable latest winner only into an empty store,
   fully reverify its branch/rosters/signatures, and prove that P2P admission
   cannot invoke the import exception.
-- State-root reproduction from genesis by two independent tools.
 
 ### Signer journal tests
 
@@ -2097,47 +2106,47 @@ Expected failures are fail-closed:
 
 ### Migration and legacy tests
 
-- Exact `H-1`, `H`, and `H+1` boundaries for all legacy and PQ payloads.
-- Exact `F-1`, `F`, and `F+1` ancestry checks, including a higher-work fork
-  that ends before `F`, a branch with the wrong block at `F`, and startup where
-  `F` does not descend from `H`.
-- Mandatory `H` and `F` enforcement with `-checkpoints=0`, normal sync,
-  headers-first sync, reindex, `-reindex-chainstate`, VerifyDB, and roll-forward
-  recovery.
-- Reject `F < H`, `F` before an initially active roster authorization point,
-  `F` at or after the first BTCC candidate source, and a non-null initial
-  predecessor cursor.
-- Differential replay through `H`: a legacy BLS build and opaque-codec build
-  must produce identical transaction/block hashes, deterministic MN state,
-  PoSe state, and activation state root.
+- Exact `A-1`, `A`, and `A+1` boundaries for every legacy and PQ payload,
+  provider authorization rule, and root-qualified payment rule.
+- Before the first winner, accept the valid-most-work branch without a
+  configured hash; prove that first-seen invalid data cannot pin `A-1`, while a
+  fully verified durable certificate binds its candidate ancestry.
+- Exercise higher-work pre-winner reorgs with `-checkpoints=0`, normal sync,
+  headers-first sync, reindex, `-reindex-chainstate`, VerifyDB, roll-forward,
+  and restart. After a winner is enforced, conflicting ancestry is rejected.
+- Reject `A <= 0`, `A < DIP3`, preparation at or after `A`, `A-1` before an initial
+  roster authorization point, a BTCC candidate source at or before `A-1`, and
+  a non-null initial predecessor cursor.
+- Differential replay below `A`: a legacy BLS build and opaque-codec build must
+  produce identical transaction/block hashes, deterministic MN state, and PoSe
+  state without consulting a release-pinned state root.
 - Legacy/basic 48-byte and 96-byte golden vectors, including all-zero values,
   malformed non-curve bytes, state diffs, provider payloads, commitments, and
   existing EvoDB records. Opaque replay must never attempt curve validation.
 - Existing datadir upgrade with retired DKG/vvec/secret-share databases.
-- Old/new peer interoperability before `H` and deterministic rejection or
-  ordinary-peer downgrade after `H`.
+- Old/new peer interoperability below `A` and deterministic rejection or
+  ordinary-peer downgrade at and above `A`.
 - Fresh genesis sync without an externally supplied deterministic-MN snapshot.
 - Public all-sentinel parameters replay historical commitments and legacy
   provider payloads through sync/reindex while starting no ChainLock finality
   service; any current partial public profile fails startup.
 - The future BLS-free public preparation profile starts from known chain data,
   admits registry/shadow operation without finality authority, completes four
-  usable epochs, and selects no `H`, hash, or state root before the exact block
-  exists. Regtest with no PQ argument stays disabled; explicit regtest
-  preparation accepts only complete `H` plus registry/quorum fields and proves
+  usable epochs without assigning an activation hash or state root. Regtest
+  with no PQ argument stays disabled; explicit regtest preparation accepts only
+  registry/quorum fields and proves
   that no finality store/signing/admission/enforcement exists; full regtest
-  activation requires complete `H`, `F`, `R`, and schedule fields.
+  activation requires complete `A`, `R`, and schedule fields.
 
 ## 15. Unresolved deployment constants and activation blockers
 
 The following must be resolved in code and release artifacts before activation:
 
-- each supported public network's `H`, exact block hash, both state roots,
-  minimum chainwork, and a distinct exact `F` that descends from `H`;
+- each supported public network's future activation height `A`;
 - the receipt assumption `R` and independently reproduced cursor/accumulator,
-  without imposing an artificial `R >= F` ordering;
+  without imposing an artificial `R >= A` ordering;
 - `PQ_EPOCH_ORIGIN`, registration cutoff lag, snapshot lag, and the precise
-  first eligible ChainLock height after `F`, including proof that `F` covers
+  first eligible ChainLock height after `A-1`, including proof that `A-1` covers
   every initially active roster authorization point and precedes the first
   BTCC candidate source;
 - global-key registration start and shadow-protocol start heights;
@@ -2150,8 +2159,6 @@ The following must be resolved in code and release artifacts before activation:
   FIPS 205 SHAKE primitive boundary, 32-byte public key, 704-byte encoding,
   explicit 235-leaf schedule, KAT hashes, source revision, bounded-use argument,
   and audit results;
-- canonical activation-state-root serialization and independent tree/root test
-  vectors;
 - production resource targets for the fixed protocol-70018 share/CLSIG relay,
   verification caches, and bounded worker pools;
 - production resource bounds and independent review for the payment-audit
@@ -2189,16 +2196,15 @@ The following must be resolved in code and release artifacts before activation:
 - network-specific BTCC candidate origin, initial/assumption cursor, and
   compatibility of the consumer-facing header-proof/checkpoint interface;
 - bridge behavior before the first valid live PQ CLSIG;
-- reproducible real-chain migration evidence: differential replay through `H`
+- reproducible real-chain migration evidence: differential replay below `A`
   comparing a known-good pre-migration release and the opaque-codec build,
   upgrade of an existing datadir containing retired DKG/vvec/secret-share
-  databases, and independent reproduction of the exact `H` block and state
-  roots, `F` block and covered bootstrap roster bases, and `R` receipt state
-  from public chain data;
+  databases, proof that `A-1` covers all bootstrap roster authorization points,
+  and independent reproduction of `R` from public chain data;
 - an explicitly supported BLS-free public preparation/shadow release, with
   reproducible evidence that it begins from already-known chain data, has no
-  finality authority, completes four usable shadow epochs, and selects `H` only
-  after its exact block, hash, and state roots exist; and
+  finality authority, completes four usable shadow epochs, and coordinates a
+  future activation height with adequate operator notice; and
 - the single-signer backup and recovery procedure for scheduled child-key
   journals, including rotation to a fresh child-tree generation after loss.
 

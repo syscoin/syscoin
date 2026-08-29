@@ -28,10 +28,9 @@ Bitcoin hash to NEVM, a live node verifies the exact certificate. Missing data
 is one bounded, non-punitive block dependency and is requested by logical ID;
 a null carrier remains valid. Historical releases pin a separate BTCC receipt
 assumption `R` (block hash, cursor, and cumulative receipt-state hash), so
-pre-`R` receipt crypto can be assumed without changing either the immutable
-migration-state anchor `H` or the immutable initial ChainLock predecessor `F`.
-All base blocks, AuxPoW, deterministic-masternode state, and post-`R` receipt
-transitions are still checked.
+pre-`R` receipt crypto can be assumed independently from the height-only PQ
+activation boundary `A`. All base blocks, AuxPoW, deterministic-masternode
+state, and post-`R` receipt transitions are still checked.
 
 A durable off-chain `ADVANCE` can be ahead of this indexed receipt state until
 its one carrier. Current-window signing keeps that cursor before the carrier.
@@ -44,13 +43,15 @@ recheck. It is not a stale-certificate exception and cannot widen the bounded
 ChainLock reorganization window.
 
 The receipt assumption record is mandatory whenever the PQ BTCC schedule is
-enabled. `F` must descend from `H`, cover the bootstrap roster bases, and
-precede the first candidate source, so the initial ChainLock predecessor cursor
-is canonically null. `R` authenticates a different history and need not be at
-or after `F`: before the first carrier it is valid only with the canonical
-empty cursor and accumulator, while a later release-updated boundary must name
-an exact carrier and its recomputed state. The compiled `defaultAssumeValid`
-height must not exceed `H` and must remain strictly below `R`; a custom
+enabled. The activation predecessor height `A-1` must cover the bootstrap
+roster bases and precede the first candidate source, so its initial ChainLock
+cursor is canonically null. Its block hash comes from the fully validated
+candidate branch and is bound only by the first durable verified certificate.
+`R` authenticates a different history and need not be at or after `A`: before
+the first carrier it is valid only with the canonical empty cursor and
+accumulator, while a later release-updated boundary must name an exact carrier
+and its recomputed state. The compiled `defaultAssumeValid` height must remain
+below `A` and strictly below `R`; a custom
 `-assumevalid` above `R` causes catch-up admission to remain fail-closed.
 
 Ordinary network catch-up is limited to the latest signable ChainLock target
@@ -66,11 +67,10 @@ signed predecessor view.
 Until a release pins that complete profile, public networks remain in an
 explicit pre-activation state and start without the PQ finality service.
 Regtest behaves the same when no PQ deployment option is supplied. It also has
-an explicit preparation-only state with complete `H` and registry/quorum
-fields but no `F`, candidate schedule, receipt assumption, finality store,
-signing, admission, restoration, or enforcement. Any other partial profile
-fails startup; full activation requires complete `H`, `F`, `R`, and schedule
-fields.
+an explicit preparation-only state with complete registry/quorum fields but no
+activation, candidate schedule, receipt assumption, finality store, signing,
+admission, restoration, or enforcement. Any other partial profile fails
+startup; full activation requires complete `A`, `R`, and schedule fields.
 
 ## Managed mode (default)
 
@@ -235,7 +235,7 @@ forward into later carrier slots.
 
 A non-null receipt updates a branch-local cumulative receipt-state hash. The
 next descendant ChainLock signs that compact state, after which the large
-receipt certificate can be pruned under the protocol's anchor/retention rules.
+receipt certificate can be pruned under the protocol's finality/retention rules.
 Until then the exact certificate is persisted and served across restart.
 `KEEP` and null receipts never clear or advance NEVM's prior Bitcoin checkpoint.
 
