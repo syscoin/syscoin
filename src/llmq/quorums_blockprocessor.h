@@ -16,9 +16,10 @@ namespace llmq {
 
 /**
  * Compatibility replay parser for legacy on-chain quorum commitments. An
- * unassigned migration profile keeps public history replayable; a configured
- * anchor retires this path above its exact boundary. There is deliberately no
- * DKG, P2P, mining, key-share, or signature-verification surface here.
+ * unassigned migration profile keeps all legacy blocks replayable; a configured
+ * activation height retires this path starting with the PQ-only block. There is
+ * deliberately no DKG, P2P, mining, key-share, or signature-verification
+ * surface here.
  */
 class CQuorumBlockProcessor final {
 public:

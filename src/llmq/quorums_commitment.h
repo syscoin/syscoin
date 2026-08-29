@@ -22,8 +22,8 @@ namespace llmq {
 
 /**
  * Compatibility view of a historical on-chain DKG commitment. Cryptographic
- * fields are opaque bytes; this type can decode the anchored prefix but cannot
- * verify or create a BLS signature.
+ * fields are opaque bytes; this type can decode pre-activation history but
+ * cannot verify or create a BLS signature.
  */
 class CFinalCommitment {
 public:

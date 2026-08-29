@@ -19,7 +19,7 @@
 
 /**
  * Opaque storage for BLS fields committed before the post-quantum activation
- * anchor. These bytes are retained solely so historical consensus objects and
+ * height. These bytes are retained solely so historical consensus objects and
  * deterministic-masternode state remain byte-for-byte decodable. No group
  * element is constructed and no cryptographic validity is implied.
  */
@@ -47,7 +47,6 @@ public:
     [[nodiscard]] bool IsValid() const { return !IsNull(); }
 
     void SetNull() { m_bytes.fill(0); }
-    void Reset() { SetNull(); }
 
     bool SetBytes(Span<const uint8_t> bytes)
     {
@@ -60,8 +59,6 @@ public:
     }
 
     [[nodiscard]] const std::array<uint8_t, Size>& GetBytes() const { return m_bytes; }
-    [[nodiscard]] uint256 GetHash() const { return ::SerializeHash(*this); }
-    [[nodiscard]] const CLegacyBLSBlob& Get() const { return *this; }
     [[nodiscard]] std::string ToString() const { return HexStr(m_bytes); }
 
     template <typename Stream>
@@ -71,18 +68,10 @@ public:
     }
 
     template <typename Stream>
-    void Serialize(Stream& stream, bool) const
-    {
-        Serialize(stream);
-    }
-
-    template <typename Stream>
     void Unserialize(Stream& stream)
     {
         stream.read(AsWritableBytes(Span{m_bytes}));
     }
-
-    void SetLegacy(bool) {}
 };
 
 using CLegacyBLSPublicKey = CLegacyBLSBlob<48>;

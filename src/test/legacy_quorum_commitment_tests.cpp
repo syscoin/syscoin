@@ -51,19 +51,13 @@ llmq::legacy::FinalCommitment MakeCommitment()
     return commitment;
 }
 
-struct LegacyAnchorRestorer {
+struct PQActivationRestorer {
     Consensus::Params& params;
-    const int height{params.nPQLegacyAnchorHeight};
-    const uint256 block_hash{params.hashPQLegacyAnchorBlock};
-    const uint256 dmn_state_hash{params.hashPQLegacyMNState};
-    const uint256 registry_state_hash{params.hashPQLegacyPQRegistryState};
+    const int height{params.nPQActivationHeight};
 
-    ~LegacyAnchorRestorer()
+    ~PQActivationRestorer()
     {
-        params.nPQLegacyAnchorHeight = height;
-        params.hashPQLegacyAnchorBlock = block_hash;
-        params.hashPQLegacyMNState = dmn_state_hash;
-        params.hashPQLegacyPQRegistryState = registry_state_hash;
+        params.nPQActivationHeight = height;
     }
 };
 
@@ -143,14 +137,11 @@ BOOST_AUTO_TEST_CASE(bitset_bound_is_checked_before_resize)
     BOOST_CHECK(bits.empty());
 }
 
-BOOST_AUTO_TEST_CASE(block_processor_replays_sentinel_and_retires_after_anchor)
+BOOST_AUTO_TEST_CASE(block_processor_replays_sentinel_until_activation)
 {
     auto& consensus{const_cast<Consensus::Params&>(Params().GetConsensus())};
-    LegacyAnchorRestorer restore{consensus};
-    consensus.nPQLegacyAnchorHeight = std::numeric_limits<int>::max();
-    consensus.hashPQLegacyAnchorBlock.SetNull();
-    consensus.hashPQLegacyMNState.SetNull();
-    consensus.hashPQLegacyPQRegistryState.SetNull();
+    PQActivationRestorer restore{consensus};
+    consensus.nPQActivationHeight = std::numeric_limits<int>::max();
 
     llmq::CQuorumBlockProcessor processor;
     LOCK(cs_main);
@@ -205,16 +196,13 @@ BOOST_AUTO_TEST_CASE(block_processor_replays_sentinel_and_retires_after_anchor)
     BOOST_CHECK_EQUAL(mismatch_state.GetRejectReason(),
                       "bad-qc-block-mismatch");
 
-    consensus.nPQLegacyAnchorHeight = carrier_height;
-    consensus.hashPQLegacyAnchorBlock = carrier_hash;
-    consensus.hashPQLegacyMNState = TestHash(0xd4);
-    consensus.hashPQLegacyPQRegistryState = TestHash(0xd5);
-    BlockValidationState anchored_state;
+    consensus.nPQActivationHeight = carrier_height + 1;
+    BlockValidationState last_legacy_state;
     BOOST_REQUIRE(processor.ProcessBlock(
-        carrier_block, &carrier_index, anchored_state, decoded,
+        carrier_block, &carrier_index, last_legacy_state, decoded,
         /*just_check=*/false, /*check_sigs=*/false));
 
-    const uint256 retired_hash{TestHash(0xd6)};
+    const uint256 retired_hash{TestHash(0xd4)};
     CBlockIndex retired_index;
     retired_index.nHeight = carrier_height + 1;
     retired_index.pprev = &carrier_index;

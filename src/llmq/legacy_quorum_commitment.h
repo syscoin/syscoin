@@ -53,7 +53,8 @@ struct BoundedDynamicBitSetFormatter {
 
 /**
  * Historical on-chain DKG result. BLS-shaped fields are deliberately opaque:
- * this type exists only to reconstruct the anchored deterministic state.
+ * this type exists only to reconstruct deterministic state committed by
+ * pre-activation history.
  */
 struct FinalCommitment {
     uint16_t version{LEGACY_SCHEME_COMMITMENT_VERSION};

@@ -6,7 +6,7 @@
 
 #include <chain.h>
 #include <chainparams.h>
-#include <consensus/pq_migration.h>
+#include <consensus/pq_migration_config.h>
 #include <consensus/validation.h>
 #include <evo/specialtx.h>
 #include <primitives/block.h>
