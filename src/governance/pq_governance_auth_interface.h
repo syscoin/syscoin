@@ -23,7 +23,7 @@ class PQRegistryReadView;
     const CBlockIndex& validation_branch,
     const GovernanceAuthorization& authorization) noexcept;
 
-/** Resolve the current active global key at the post-anchor signing tip. */
+/** Resolve the current active global key at the post-activation signing tip. */
 [[nodiscard]] bool GetCurrentGovernanceSigningKey(
     const CBlockIndex& signing_tip,
     const uint256& pro_tx_hash,

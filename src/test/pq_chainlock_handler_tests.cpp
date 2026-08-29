@@ -92,12 +92,7 @@ Consensus::Params ValidConsensus()
     Consensus::Params consensus;
     consensus.hashGenesisBlock = NonNullHash(1);
     consensus.DIP0003Height = 1;
-    consensus.nPQLegacyAnchorHeight = 1000;
-    consensus.hashPQLegacyAnchorBlock = NonNullHash(2);
-    consensus.hashPQLegacyMNState = NonNullHash(3);
-    consensus.hashPQLegacyPQRegistryState = NonNullHash(4);
-    consensus.nPQChainLockAnchorHeight = 2304;
-    consensus.hashPQChainLockAnchorBlock = NonNullHash(5);
+    consensus.nPQActivationHeight = 2305;
     consensus.nPQPreparationHeight = 1000;
     consensus.nPQChainLockEpochOrigin = 1440;
     consensus.nPQRegistrationCutoffBlocks = 288;
@@ -106,8 +101,7 @@ Consensus::Params ValidConsensus()
     consensus.nPQBTCCCandidateOrigin = 2310;
     consensus.nPQBTCCNEVMInjectionLag = llmq::pq::PQ_BTCC_NEVM_LAG;
     consensus.nPQBTCCReceiptAnchorHeight = 1000;
-    consensus.hashPQBTCCReceiptAnchorBlock =
-        consensus.hashPQLegacyAnchorBlock;
+    consensus.hashPQBTCCReceiptAnchorBlock = NonNullHash(2);
     return consensus;
 }
 
@@ -236,8 +230,7 @@ llmq::pq::ChainLockFinalityStoreConfig CatchupStoreConfig()
     config.chainlock_schedule =
         *llmq::pq::MakeChainLockScheduleConfig(/*epoch_origin=*/0);
     config.btcc_schedule.candidate_origin = 870;
-    config.anchor.height = 864;
-    config.anchor.block_hash = NonNullHash(864);
+    config.activation_predecessor_height = 864;
     return config;
 }
 
@@ -434,6 +427,27 @@ public:
             DoesHistoricalVerificationCapabilityMatch(
                 verified, verified_roster_generation, expected,
                 current_roster_generation);
+    }
+
+    static int32_t CandidateFullValidationFloor(
+        const pq::ChainLockCandidateContextRequest& request,
+        int32_t activation_predecessor_height)
+    {
+        return CChainLocksHandler::CandidateFullValidationFloor(
+            request, activation_predecessor_height);
+    }
+
+    static bool CandidateTargetValidationSufficient(
+        pq::ChainLockCandidateAdmission admission,
+        bool has_local_chainlock,
+        bool marker_authorized_catchup,
+        bool exact_local_target,
+        bool historical_receipt_range_ready)
+    {
+        return CChainLocksHandler::IsCandidateTargetValidationSufficient(
+            admission, has_local_chainlock, marker_authorized_catchup,
+            exact_local_target,
+            historical_receipt_range_ready);
     }
 
     static ReplayStep AdvanceReplay(
@@ -679,6 +693,111 @@ BOOST_AUTO_TEST_CASE(
                     &examined) ==
                 llmq::PaymentAuditContextStatus::LOCAL_ERROR);
     BOOST_CHECK_EQUAL(examined, BLOCK_BUDGET);
+}
+
+BOOST_AUTO_TEST_CASE(
+    first_winner_catchup_cannot_narrow_full_validation_to_its_predecessor)
+{
+    int32_t previous_superblock{0};
+    int32_t superblock_height{0};
+    CSuperblock::GetNearestSuperblocksHeights(
+        /*nBlockHeight=*/1, previous_superblock, superblock_height);
+    BOOST_REQUIRE_GT(superblock_height, 1);
+    const int32_t activation_predecessor{superblock_height - 1};
+    const int32_t declared_predecessor{superblock_height + 1};
+    const int32_t target_height{superblock_height + 2};
+    llmq::pq::ChainLockCandidateContextRequest request;
+    request.admission = llmq::pq::ChainLockCandidateAdmission::CATCHUP;
+    request.has_local_chainlock = false;
+    request.local_best.height = declared_predecessor;
+    request.statement.previous_chainlock_height = declared_predecessor;
+
+    const int32_t first_winner_floor{
+        llmq::test::CChainLocksHandlerTestAccess::
+            CandidateFullValidationFloor(
+                request, activation_predecessor)};
+    BOOST_CHECK_EQUAL(first_winner_floor, activation_predecessor);
+    BOOST_CHECK(!llmq::test::CChainLocksHandlerTestAccess::
+                    CandidateTargetValidationSufficient(
+                        llmq::pq::ChainLockCandidateAdmission::CATCHUP,
+                        /*has_local_chainlock=*/false,
+                        /*marker_authorized_catchup=*/false,
+                        /*exact_local_target=*/false,
+                        /*historical_receipt_range_ready=*/true));
+    BOOST_CHECK(llmq::test::CChainLocksHandlerTestAccess::
+                    CandidateTargetValidationSufficient(
+                        llmq::pq::ChainLockCandidateAdmission::CATCHUP,
+                        /*has_local_chainlock=*/false,
+                        /*marker_authorized_catchup=*/true,
+                        /*exact_local_target=*/false,
+                        /*historical_receipt_range_ready=*/true));
+    BOOST_CHECK(llmq::test::CChainLocksHandlerTestAccess::
+                    CandidateTargetValidationSufficient(
+                        llmq::pq::ChainLockCandidateAdmission::CATCHUP,
+                        /*has_local_chainlock=*/true,
+                        /*marker_authorized_catchup=*/false,
+                        /*exact_local_target=*/false,
+                        /*historical_receipt_range_ready=*/true));
+
+    request.has_local_chainlock = true;
+    BOOST_CHECK_EQUAL(
+        llmq::test::CChainLocksHandlerTestAccess::
+            CandidateFullValidationFloor(
+                request, activation_predecessor),
+        declared_predecessor);
+
+    request.has_local_chainlock = false;
+    request.admission =
+        llmq::pq::ChainLockCandidateAdmission::TRUSTED_PERSISTENCE;
+    BOOST_CHECK_EQUAL(
+        llmq::test::CChainLocksHandlerTestAccess::
+            CandidateFullValidationFloor(
+                request, activation_predecessor),
+        activation_predecessor);
+    BOOST_CHECK(!llmq::test::CChainLocksHandlerTestAccess::
+                    CandidateTargetValidationSufficient(
+                        llmq::pq::ChainLockCandidateAdmission::
+                            TRUSTED_PERSISTENCE,
+                        /*has_local_chainlock=*/false,
+                        /*marker_authorized_catchup=*/false,
+                        /*exact_local_target=*/false,
+                        /*historical_receipt_range_ready=*/true));
+    BOOST_CHECK(llmq::test::CChainLocksHandlerTestAccess::
+                    CandidateTargetValidationSufficient(
+                        llmq::pq::ChainLockCandidateAdmission::
+                            TRUSTED_PERSISTENCE,
+                        /*has_local_chainlock=*/false,
+                        /*marker_authorized_catchup=*/false,
+                        /*exact_local_target=*/true,
+                        /*historical_receipt_range_ready=*/false));
+
+    request.admission =
+        llmq::pq::ChainLockCandidateAdmission::RECEIPT_ARCHIVE;
+    BOOST_CHECK_EQUAL(
+        llmq::test::CChainLocksHandlerTestAccess::
+            CandidateFullValidationFloor(
+                request, activation_predecessor),
+        declared_predecessor);
+
+    // The skipped interval contains a superblock whose governance provenance
+    // is absent. A floor derived from the unsigned local declaration would
+    // miss it; the activation predecessor correctly keeps it in scope.
+    LiveSigningIndexChain chain{
+        static_cast<std::size_t>(target_height + 1)};
+    llmq::HistoricalIndexValidationCache full_cache;
+    llmq::HistoricalIndexValidationCache narrowed_cache;
+    LOCK(cs_main);
+    chain.ClearStatus(superblock_height, BLOCK_GOVERNANCE_VALIDATED);
+    BOOST_CHECK(full_cache.Validate(
+                    chain.At(target_height), first_winner_floor + 1,
+                    llmq::HistoricalIndexValidationMode::FULL_FINALITY,
+                    /*provenance_revocation_revision=*/1) ==
+                llmq::PaymentAuditContextStatus::LOCAL_ERROR);
+    BOOST_CHECK(narrowed_cache.Validate(
+                    chain.At(target_height), declared_predecessor + 1,
+                    llmq::HistoricalIndexValidationMode::FULL_FINALITY,
+                    /*provenance_revocation_revision=*/1) ==
+                llmq::PaymentAuditContextStatus::READY);
 }
 
 BOOST_AUTO_TEST_CASE(
@@ -1959,17 +2078,15 @@ BOOST_AUTO_TEST_CASE(deployment_configuration_is_fail_closed)
     auto consensus{ValidConsensus()};
     const auto config{llmq::MakePQChainLockFinalityStoreConfig(consensus)};
     BOOST_REQUIRE(config);
-    BOOST_CHECK_EQUAL(config->anchor.height,
-                      consensus.nPQChainLockAnchorHeight);
-    BOOST_CHECK(config->anchor.block_hash ==
-                consensus.hashPQChainLockAnchorBlock);
+    BOOST_CHECK_EQUAL(config->activation_predecessor_height,
+                      consensus.nPQActivationHeight - 1);
     BOOST_CHECK_EQUAL(config->chainlock_schedule.epoch_origin,
                       consensus.nPQChainLockEpochOrigin);
     BOOST_CHECK_EQUAL(config->btcc_schedule.candidate_origin,
                       consensus.nPQBTCCCandidateOrigin);
     BOOST_CHECK_EQUAL(config->btcc_receipt_assumption_anchor.height, 1000);
     const auto first_target{llmq::pq::NextEligibleChainLockTargetHeight(
-        config->chainlock_schedule, config->anchor.height)};
+        config->chainlock_schedule, config->activation_predecessor_height)};
     BOOST_REQUIRE(first_target);
     BOOST_CHECK_EQUAL(*first_target, 2305);
     BOOST_CHECK_EQUAL(
@@ -1990,20 +2107,16 @@ BOOST_AUTO_TEST_CASE(deployment_configuration_is_fail_closed)
     consensus.nPQRosterSnapshotLag = 289;
     BOOST_CHECK(!llmq::MakePQQuorumBuildConfig(consensus));
 
-    consensus.hashPQLegacyPQRegistryState.SetNull();
+    consensus.nPQActivationHeight = std::numeric_limits<int>::max();
     BOOST_CHECK(!llmq::MakePQChainLockFinalityStoreConfig(consensus));
 
     consensus = ValidConsensus();
-    consensus.hashPQChainLockAnchorBlock.SetNull();
+    consensus.nPQActivationHeight = consensus.DIP0003Height - 1;
     BOOST_CHECK(!llmq::MakePQChainLockFinalityStoreConfig(consensus));
 
     consensus = ValidConsensus();
-    consensus.nPQChainLockAnchorHeight--;
-    BOOST_CHECK(!llmq::MakePQChainLockFinalityStoreConfig(consensus));
-
-    consensus = ValidConsensus();
-    consensus.nPQChainLockAnchorHeight =
-        consensus.nPQBTCCCandidateOrigin;
+    consensus.nPQActivationHeight =
+        consensus.nPQBTCCCandidateOrigin + 1;
     BOOST_CHECK(!llmq::MakePQChainLockFinalityStoreConfig(consensus));
 
     consensus = ValidConsensus();
@@ -2056,7 +2169,7 @@ BOOST_AUTO_TEST_CASE(deployment_configuration_is_fail_closed)
     consensus.nDefaultAssumeValidHeight = 1000;
     BOOST_CHECK(llmq::MakePQChainLockFinalityStoreConfig(consensus));
     consensus.nDefaultAssumeValidHeight = 1001;
-    BOOST_CHECK(!llmq::MakePQChainLockFinalityStoreConfig(consensus));
+    BOOST_CHECK(llmq::MakePQChainLockFinalityStoreConfig(consensus));
     consensus.nDefaultAssumeValidHeight = 2320;
     BOOST_CHECK(!llmq::MakePQChainLockFinalityStoreConfig(consensus));
 }
@@ -2151,7 +2264,7 @@ BOOST_AUTO_TEST_CASE(
     LOCK(cs_main);
     for (std::size_t offset{0}; offset < chain.size(); ++offset) {
         hashes[offset] = offset == 0
-            ? config.anchor.block_hash
+            ? NonNullHash(config.activation_predecessor_height)
             : NonNullHash(54'100 + offset);
         chain[offset].nHeight = 864 + static_cast<int32_t>(offset);
         chain[offset].phashBlock = &hashes[offset];
@@ -2890,6 +3003,46 @@ BOOST_AUTO_TEST_CASE(preseal_never_disables_durable_base_finality)
         /*btcc_preseal_active=*/false));
 }
 
+BOOST_AUTO_TEST_CASE(durable_finality_floor_blocks_only_crossing_disconnects)
+{
+    // The active winner itself is the normal recovery floor.
+    BOOST_CHECK(llmq::DisconnectCrossesDurableChainLockFloor(
+        /*disconnect_height=*/10, /*active_floor_height=*/10,
+        /*floor_descends_from_disconnect=*/true));
+    // Reorganizations above the winner remain ordinary PoW fork choice.
+    BOOST_CHECK(!llmq::DisconnectCrossesDurableChainLockFloor(
+        /*disconnect_height=*/11, /*active_floor_height=*/10,
+        /*floor_descends_from_disconnect=*/false));
+    // A side winner protects the active common ancestor, not the losing
+    // branch above it; enforcement may disconnect that branch and repin A-1.
+    BOOST_CHECK(!llmq::DisconnectCrossesDurableChainLockFloor(
+        /*disconnect_height=*/8, /*active_floor_height=*/7,
+        /*floor_descends_from_disconnect=*/false));
+    BOOST_CHECK(!llmq::DisconnectCrossesDurableChainLockFloor(
+        /*disconnect_height=*/7, /*active_floor_height=*/10,
+        /*floor_descends_from_disconnect=*/false));
+
+    // Best-chain activation compares the complete candidate and winner
+    // branches before any disconnect. Descendants and winner prefixes are
+    // usable; a competing branch is retired for clean reselection.
+    BOOST_CHECK(llmq::IsDurableChainLockCandidateCompatible(
+        /*candidate_height=*/12, /*durable_target_height=*/10,
+        /*candidate_descends_target=*/true,
+        /*target_descends_candidate=*/false));
+    BOOST_CHECK(llmq::IsDurableChainLockCandidateCompatible(
+        /*candidate_height=*/8, /*durable_target_height=*/10,
+        /*candidate_descends_target=*/false,
+        /*target_descends_candidate=*/true));
+    BOOST_CHECK(!llmq::IsDurableChainLockCandidateCompatible(
+        /*candidate_height=*/12, /*durable_target_height=*/10,
+        /*candidate_descends_target=*/false,
+        /*target_descends_candidate=*/false));
+    BOOST_CHECK(!llmq::IsDurableChainLockCandidateCompatible(
+        /*candidate_height=*/-1, /*durable_target_height=*/10,
+        /*candidate_descends_target=*/true,
+        /*target_descends_candidate=*/true));
+}
+
 BOOST_AUTO_TEST_CASE(chainlock_recovery_survives_operational_kill_switch)
 {
     BOOST_CHECK(llmq::ShouldVerifyChainLockCertificate(
@@ -2907,6 +3060,38 @@ BOOST_AUTO_TEST_CASE(chainlock_recovery_survives_operational_kill_switch)
     BOOST_CHECK(!llmq::ShouldVerifyChainLockCertificate(
         /*configured_and_healthy=*/true,
         /*persisted_import_pending=*/false,
+        /*persistence_failed=*/true));
+
+    // Startup import owns the pending state it must clear. A configured,
+    // participating node must therefore attempt import even though ordinary
+    // certificate verification is intentionally unavailable while pending.
+    BOOST_CHECK(!llmq::ShouldVerifyChainLockCertificate(
+        /*configured_and_healthy=*/true,
+        /*persisted_import_pending=*/true,
+        /*persistence_failed=*/false));
+    BOOST_CHECK(llmq::ShouldAttemptPersistedChainLockImport(
+        /*participation_allowed=*/true,
+        /*configured_for_verification=*/true));
+    BOOST_CHECK(!llmq::ShouldAttemptPersistedChainLockImport(
+        /*participation_allowed=*/false,
+        /*configured_for_verification=*/true));
+    BOOST_CHECK(!llmq::ShouldAttemptPersistedChainLockImport(
+        /*participation_allowed=*/true,
+        /*configured_for_verification=*/false));
+
+    // ReplayBlocks runs while the activation handoff is still quarantined.
+    // Recovery metadata intentionally has no live-participation input.
+    BOOST_CHECK(llmq::ShouldExposeDurableFinalityRecoveryMetadata(
+        /*configured=*/true, /*persistence_available=*/true,
+        /*persistence_failed=*/false));
+    BOOST_CHECK(!llmq::ShouldExposeDurableFinalityRecoveryMetadata(
+        /*configured=*/false, /*persistence_available=*/true,
+        /*persistence_failed=*/false));
+    BOOST_CHECK(!llmq::ShouldExposeDurableFinalityRecoveryMetadata(
+        /*configured=*/true, /*persistence_available=*/false,
+        /*persistence_failed=*/false));
+    BOOST_CHECK(!llmq::ShouldExposeDurableFinalityRecoveryMetadata(
+        /*configured=*/true, /*persistence_available=*/true,
         /*persistence_failed=*/true));
 }
 

@@ -24,6 +24,41 @@ struct ScoredMember {
     std::optional<FrozenChildRootRecord> child_root;
 };
 
+/**
+ * Registry snapshots are already strictly ordered. Preserve insertion-order
+ * independence for synthetic callers without rebuilding a tree map on the
+ * production path: only non-registry input pays for the pointer sort.
+ */
+struct OperatorStateLookup {
+    std::span<const OperatorKeyState> states;
+    std::vector<const OperatorKeyState*> reordered;
+
+    [[nodiscard]] const OperatorKeyState* Find(
+        const uint256& pro_tx_hash) const noexcept
+    {
+        if (reordered.empty()) {
+            const auto position{std::lower_bound(
+                states.begin(), states.end(), pro_tx_hash,
+                [](const OperatorKeyState& state, const uint256& hash) {
+                    return state.pro_tx_hash < hash;
+                })};
+            return position != states.end() &&
+                    position->pro_tx_hash == pro_tx_hash
+                ? &*position
+                : nullptr;
+        }
+        const auto position{std::lower_bound(
+            reordered.begin(), reordered.end(), pro_tx_hash,
+            [](const OperatorKeyState* state, const uint256& hash) {
+                return state->pro_tx_hash < hash;
+            })};
+        return position != reordered.end() &&
+                (*position)->pro_tx_hash == pro_tx_hash
+            ? *position
+            : nullptr;
+    }
+};
+
 void SetError(QuorumBuildError* error, QuorumBuildError value)
 {
     if (error != nullptr) *error = value;
@@ -43,7 +78,7 @@ std::optional<std::vector<ScoredMember>> SelectRosterMembers(
     const CDeterministicMNList& snapshot,
     const uint256& modifier,
     uint32_t epoch,
-    const std::map<uint256, const OperatorKeyState*>& operator_states,
+    const OperatorStateLookup& operator_states,
     QuorumBuildError* error)
 {
     std::vector<ScoredMember> candidates;
@@ -71,10 +106,10 @@ std::optional<std::vector<ScoredMember>> SelectRosterMembers(
         hasher.Write(modifier.begin(), modifier.size());
         hasher.Finalize(score_hash.begin());
         std::optional<FrozenChildRootRecord> child_root;
-        const auto state_it{operator_states.find(dmn->proTxHash)};
-        if (state_it != operator_states.end()) {
+        const auto* state{operator_states.Find(dmn->proTxHash)};
+        if (state != nullptr) {
             const ChildRootResolution resolution{
-                state_it->second->ResolveChildRoot(epoch)};
+                state->ResolveChildRoot(epoch)};
             if (resolution.status ==
                 ChildRootResolutionStatus::FROZEN_PRESENT) {
                 if (!resolution.record ||
@@ -208,13 +243,38 @@ std::unique_ptr<FrozenQuorumRoster> BuildFrozenQuorumRoster(
         return nullptr;
     }
 
-    std::map<uint256, const OperatorKeyState*> operator_states;
+    OperatorStateLookup operator_states{operator_key_states, {}};
+    bool strictly_ordered{true};
+    const OperatorKeyState* previous_state{nullptr};
     for (const auto& state : operator_key_states) {
         if (!state.IsStructurallyValid() || state.schedule_initialized == 0) {
             SetError(error, QuorumBuildError::INVALID_OPERATOR_STATE);
             return nullptr;
         }
-        if (!operator_states.emplace(state.pro_tx_hash, &state).second) {
+        if (previous_state != nullptr &&
+            !(previous_state->pro_tx_hash < state.pro_tx_hash)) {
+            strictly_ordered = false;
+        }
+        previous_state = &state;
+    }
+    if (!strictly_ordered) {
+        operator_states.reordered.reserve(operator_key_states.size());
+        for (const auto& state : operator_key_states) {
+            operator_states.reordered.push_back(&state);
+        }
+        std::sort(operator_states.reordered.begin(),
+                  operator_states.reordered.end(),
+                  [](const OperatorKeyState* lhs,
+                     const OperatorKeyState* rhs) {
+                      return lhs->pro_tx_hash < rhs->pro_tx_hash;
+                  });
+        if (std::adjacent_find(
+                operator_states.reordered.begin(),
+                operator_states.reordered.end(),
+                [](const OperatorKeyState* lhs,
+                   const OperatorKeyState* rhs) {
+                    return lhs->pro_tx_hash == rhs->pro_tx_hash;
+                }) != operator_states.reordered.end()) {
             SetError(error, QuorumBuildError::DUPLICATE_OPERATOR_STATE);
             return nullptr;
         }
@@ -233,9 +293,8 @@ std::unique_ptr<FrozenQuorumRoster> BuildFrozenQuorumRoster(
         SetError(error, QuorumBuildError::OPERATOR_STATE_SNAPSHOT_MISMATCH);
         return nullptr;
     }
-    for (const auto& [pro_tx_hash, state] : operator_states) {
-        (void)pro_tx_hash;
-        if (!state->IsAdvancedTo(*schedule_view)) {
+    for (const auto& state : operator_key_states) {
+        if (!state.IsAdvancedTo(*schedule_view)) {
             SetError(error,
                      QuorumBuildError::OPERATOR_STATE_SNAPSHOT_MISMATCH);
             return nullptr;

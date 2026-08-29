@@ -12,7 +12,7 @@
 #include <common/args.h>
 #include <common/system.h>
 #include <consensus/params.h>
-#include <consensus/pq_migration.h>
+#include <consensus/pq_migration_config.h>
 #include <consensus/validation.h>
 #include <evo/deterministicmns.h>
 #include <evo/pq_registry.h>
@@ -688,7 +688,7 @@ BTCCCatchupRangeStatus GetFullyValidatedBTCCCatchupRangeStatusImpl(
         return BTCCCatchupRangeStatus::TRANSIENT_UNAVAILABLE;
     }
     // SYSCOIN: Equality is the pinned receipt boundary itself, not an
-    // unvalidated pre-anchor range. Its exact block hash and indexed receipt
+    // unvalidated earlier range. Its exact block hash and indexed receipt
     // state are still checked below; the caller separately requires the
     // marker token and all 801 signatures before reaching this disk proof.
     if (anchor.IsDisabled() || candidate.nHeight < anchor.height) {
@@ -1609,7 +1609,7 @@ SelectCurrentChainLockBTCC(
     AssertLockHeld(cs_main);
     const pq::BTCCursor durable_cursor{
         durable_best ? durable_best->statement.accepted_btcc_cursor
-                     : config.anchor.btcc_cursor};
+                     : pq::BTCCursor{}};
     if (!config.IsValid() || !durable_cursor.IsStructurallyValid()) {
         return std::nullopt;
     }
@@ -1837,21 +1837,21 @@ std::string CChainLockSig::ToString() const
         GetLogicalId(genesis_hash).ToString(), GetWitnessId(genesis_hash).ToString());
 }
 
-static bool IsInitialChainLockRosterSetAnchored(
+static bool IsInitialChainLockRosterSetAvailable(
     const pq::ChainLockScheduleConfig& schedule,
     uint32_t roster_snapshot_lag,
-    int32_t anchor_height) noexcept
+    int32_t predecessor_height) noexcept
 {
     const auto last_bootstrap_base{
         pq::EpochBaseHeight(schedule, pq::ACTIVE_QUORUMS - 1)};
-    if (!last_bootstrap_base || anchor_height < *last_bootstrap_base ||
-        anchor_height == std::numeric_limits<int32_t>::max()) {
+    if (!last_bootstrap_base || predecessor_height < *last_bootstrap_base ||
+        predecessor_height == std::numeric_limits<int32_t>::max()) {
         return false;
     }
 
     std::optional<int32_t> first_target;
-    for (int64_t height{static_cast<int64_t>(anchor_height) + 1};
-         height <= static_cast<int64_t>(anchor_height) +
+    for (int64_t height{static_cast<int64_t>(predecessor_height) + 1};
+         height <= static_cast<int64_t>(predecessor_height) +
                        schedule.chainlock_period &&
          height <= std::numeric_limits<int32_t>::max();
          ++height) {
@@ -1871,7 +1871,8 @@ static bool IsInitialChainLockRosterSetAnchored(
                 ? std::optional<int32_t>{identity.base_height}
                 : pq::RegistrationCutoffHeight(
                       schedule, identity.epoch, roster_snapshot_lag)};
-        if (!authorization_height || *authorization_height > anchor_height) {
+        if (!authorization_height ||
+            *authorization_height > predecessor_height) {
             return false;
         }
     }
@@ -1881,12 +1882,11 @@ static bool IsInitialChainLockRosterSetAnchored(
 std::optional<pq::ChainLockFinalityStoreConfig>
 MakePQChainLockFinalityStoreConfig(const Consensus::Params& consensus)
 {
-    if (Consensus::CheckPQLegacyAnchorConfiguration(consensus) !=
-            Consensus::PQAnchorResult::VALID ||
-        Consensus::CheckPQChainLockAnchorConfiguration(consensus) !=
-            Consensus::PQAnchorResult::VALID) {
+    if (Consensus::CheckPQActivationConfiguration(consensus) !=
+        Consensus::PQActivationResult::VALID) {
         return std::nullopt;
     }
+    const int32_t predecessor_height{consensus.nPQActivationHeight - 1};
     pq::PQRegistryConfig registry_config;
     if (pq::GetPQRegistryConfig(consensus, registry_config) !=
         pq::PQRegistryDeploymentResult::VALID) {
@@ -1896,12 +1896,12 @@ MakePQChainLockFinalityStoreConfig(const Consensus::Params& consensus)
         pq::MakeChainLockScheduleConfig(consensus.nPQChainLockEpochOrigin)};
     if (!schedule || *schedule != registry_config.schedule ||
         consensus.nPQRosterSnapshotLag <= 0 ||
-        !IsInitialChainLockRosterSetAnchored(
+        !IsInitialChainLockRosterSetAvailable(
             *schedule, static_cast<uint32_t>(consensus.nPQRosterSnapshotLag),
-            consensus.nPQChainLockAnchorHeight) ||
+            predecessor_height) ||
         consensus.nPQBTCCCandidateOrigin == std::numeric_limits<int>::max() ||
         consensus.nPQBTCCCandidateOrigin <=
-            consensus.nPQChainLockAnchorHeight ||
+            predecessor_height ||
         consensus.nPQBTCCNEVMInjectionLag != static_cast<int>(pq::PQ_BTCC_NEVM_LAG)) {
         return std::nullopt;
     }
@@ -1911,8 +1911,7 @@ MakePQChainLockFinalityStoreConfig(const Consensus::Params& consensus)
     config.btcc_schedule.candidate_origin = consensus.nPQBTCCCandidateOrigin;
     config.btcc_schedule.nevm_injection_lag =
         static_cast<uint32_t>(consensus.nPQBTCCNEVMInjectionLag);
-    config.anchor.height = consensus.nPQChainLockAnchorHeight;
-    config.anchor.block_hash = consensus.hashPQChainLockAnchorBlock;
+    config.activation_predecessor_height = predecessor_height;
     const bool receipt_anchor_disabled{
         consensus.nPQBTCCReceiptAnchorHeight ==
             std::numeric_limits<int>::max() &&
@@ -1929,8 +1928,8 @@ MakePQChainLockFinalityStoreConfig(const Consensus::Params& consensus)
         consensus.nPQBTCCReceiptAnchorHeight ==
             std::numeric_limits<int>::max() ||
         (consensus.nDefaultAssumeValidHeight >= 0 &&
-         (consensus.nDefaultAssumeValidHeight >
-              consensus.nPQLegacyAnchorHeight ||
+         (consensus.nDefaultAssumeValidHeight >=
+              consensus.nPQActivationHeight ||
           consensus.nDefaultAssumeValidHeight >=
               consensus.nPQBTCCReceiptAnchorHeight))) {
         return std::nullopt;
@@ -2480,7 +2479,7 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
         // SYSCOIN: A recreated handler must both restore a pending durable
         // publication before startup pruning and revoke any process-local GC
         // authority until this handler reproves the exact active winner or
-        // immutable anchor.
+        // authenticated historical receipt boundary.
         m_auxiliary_history_gc_auth_gate.Stop([this] {
             return RevokeAuxiliaryHistoryGCAuthorization();
         });
@@ -2753,6 +2752,7 @@ bool CChainLocksHandler::IsConfiguredForVerification() const
 
 bool CChainLocksHandler::IsChainLockVerificationAvailable() const
 {
+    if (!m_chainman.IsPQParticipationAllowed()) return false;
     const bool configured_and_healthy{
         m_persistence != nullptr && m_store != nullptr &&
         m_payment_audit_store != nullptr &&
@@ -3129,11 +3129,14 @@ CChainLockSigCPtr CChainLocksHandler::GetMostRecentChainLock() const
 
 CChainLockSigCPtr CChainLocksHandler::GetBestChainLock() const
 {
-    return m_store ? m_store->GetBest() : nullptr;
+    return m_chainman.IsPQParticipationAllowed() && m_store
+        ? m_store->GetBest()
+        : nullptr;
 }
 
 const CBlockIndex* CChainLocksHandler::GetBestChainLockIndex() const
 {
+    if (!m_chainman.IsPQParticipationAllowed()) return nullptr;
     const auto best{m_store ? m_store->GetBestRecord() : std::nullopt};
     if (!best) return nullptr;
     LOCK(cs_main);
@@ -3146,11 +3149,32 @@ const CBlockIndex* CChainLocksHandler::GetBestChainLockIndex() const
         : nullptr;
 }
 
+std::optional<evo::AuxiliaryHistoryGCBlockIdentity>
+CChainLocksHandler::GetDurableFinalityTargetForStartup() const
+{
+    if (!ShouldExposeDurableFinalityRecoveryMetadata(
+            m_config.has_value(), m_persistence != nullptr,
+            m_persistence_failed.load())) {
+        return std::nullopt;
+    }
+    try {
+        const auto best{m_persistence->GetFinalityState().best};
+        if (!best || !best->IsInternallyConsistent(m_genesis_hash)) {
+            return std::nullopt;
+        }
+        return evo::AuxiliaryHistoryGCBlockIdentity{
+            best->statement.height, best->statement.block_hash};
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
 bool CChainLocksHandler::GetDurableFinalityRecoveryFloor(
     const CBlockIndex*& active_floor,
     const CBlockIndex*& durable_target,
     std::string& error) const
 {
+    AssertLockHeld(cs_main);
     active_floor = nullptr;
     durable_target = nullptr;
     error.clear();
@@ -3197,7 +3221,6 @@ bool CChainLocksHandler::GetDurableFinalityRecoveryFloor(
             return false;
         }
 
-        LOCK(cs_main);
         const CBlockIndex* target{m_chainman.m_blockman.LookupBlockIndex(
             durable->statement.block_hash)};
         const CBlockIndex* active_tip{m_chainman.ActiveTip()};
@@ -3358,6 +3381,9 @@ CChainLocksHandler::PaymentAuditReceiptCertificateStatus
 CChainLocksHandler::PinPaymentAuditReceiptCertificate(
     uint32_t epoch, const uint256& witness_id)
 {
+    if (!m_chainman.IsPQParticipationAllowed()) {
+        return PaymentAuditReceiptCertificateStatus::UNAVAILABLE;
+    }
     if (witness_id.IsNull()) {
         return PaymentAuditReceiptCertificateStatus::INVALID;
     }
@@ -3687,6 +3713,9 @@ CChainLocksHandler::CheckPaymentAuditReceiptCertificate(
     if (receipt.IsNull()) {
         return PaymentAuditReceiptCertificateStatus::VERIFIED;
     }
+    if (!m_chainman.IsPQParticipationAllowed()) {
+        return PaymentAuditReceiptCertificateStatus::MISSING;
+    }
     if (!receipt.IsStructurallyValid() ||
         carrier.nHeight != receipt.carrier_height) {
         return PaymentAuditReceiptCertificateStatus::INVALID;
@@ -3975,6 +4004,9 @@ CChainLocksHandler::CheckBTCCReceiptCertificate(
 {
     AssertLockHeld(cs_main);
     if (receipt.IsNull()) return BTCCReceiptCertificateStatus::VERIFIED;
+    if (!m_chainman.IsPQParticipationAllowed()) {
+        return BTCCReceiptCertificateStatus::MISSING;
+    }
     if (!receipt.IsStructurallyValid() || !m_store || !m_config ||
         !pq::IsBTCCReceiptCarrierHeight(m_config->btcc_schedule,
                                         carrier.nHeight)) {
@@ -4311,7 +4343,7 @@ bool CChainLocksHandler::BeginBTCCPreseal(
             m_config->btcc_receipt_assumption_anchor.height ||
         missing_receipt.IsNull() ||
         !missing_receipt.IsStructurallyValid() ||
-        missing_receipt.chainlock_target_height <= m_config->anchor.height ||
+        missing_receipt.chainlock_target_height <= m_config->activation_predecessor_height ||
         !pq::ValidateBTCCReceiptOnBranch(m_config->btcc_schedule, carrier,
                                          missing_receipt) ||
         !pq::IsBTCCReceiptCarrierHeight(m_config->btcc_schedule,
@@ -4733,6 +4765,7 @@ bool CChainLocksHandler::IsBTCCPresealActive() const
 
 bool CChainLocksHandler::HasNEVMReplayObligation() const
 {
+    if (!m_chainman.IsPQParticipationAllowed()) return false;
     LOCK(m_btcc_preseal_mutex);
     return !m_btcc_preseal_state.IsEmpty() ||
            !m_payment_audit_preseal_state.IsEmpty();
@@ -4742,6 +4775,7 @@ bool CChainLocksHandler::ShouldDeferBTCCNEVM(
     const CBlockIndex& index) const
 {
     AssertLockHeld(cs_main);
+    if (!m_chainman.IsPQParticipationAllowed()) return false;
     pq::BTCCPresealState btcc_state;
     pq::PaymentAuditPresealState payment_audit_state;
     {
@@ -5248,13 +5282,13 @@ void CChainLocksHandler::UpdateDurableChainLockAuxiliaryRetention()
         inspect(durable.unsealed_btcc);
     }
     if (!found_durable && m_config) {
-        // SYSCOIN: The anchor authorizes finality, but the first admissible
-        // winner authenticates older registration cutoffs. Keep that roster
-        // requirement separate from the future destructive-GC authority.
+        // SYSCOIN: The activation predecessor bounds initial roster retention,
+        // but it grants no finality. Only a durable verified winner may later
+        // authorize destructive GC.
         const auto first_target{m_quorum_build_config
             ? pq::NextEligibleChainLockTargetHeight(
                   m_quorum_build_config->schedule,
-                  m_config->anchor.height)
+                  m_config->activation_predecessor_height)
             : std::nullopt};
         const auto first_roster_floor{first_target && m_quorum_build_config
             ? OldestRosterSnapshotHeight(
@@ -5263,7 +5297,7 @@ void CChainLocksHandler::UpdateDurableChainLockAuxiliaryRetention()
         if (!first_roster_floor) {
             valid = false;
         } else {
-            floor = std::min(m_config->anchor.height,
+            floor = std::min(m_config->activation_predecessor_height,
                              *first_roster_floor);
         }
     }
@@ -5348,19 +5382,10 @@ void CChainLocksHandler::MaybeReleaseFinalitySnapshotPublicationRetention()
             durable_best->statement.height,
             durable_best->statement.block_hash};
     } else {
-        // An unsealed BTCC record affects roster retention only. Before the
-        // first enforced winner, destruction is authorized solely by the
-        // release-pinned ChainLock anchor.
-        if (accepted_best || !m_config->anchor.IsStructurallyValid()) {
-            revoke();
-            return;
-        }
-        authorization.source = CDeterministicMNManager::
-            AuxiliaryHistoryGCAuthorizationSource::
-                IMMUTABLE_CHAINLOCK_ANCHOR;
-        authorization.block = {
-            m_config->anchor.height,
-            m_config->anchor.block_hash};
+        // A height-only activation boundary is not finality and cannot
+        // authorize destructive pruning. Wait for an enforced durable winner.
+        revoke();
+        return;
     }
 
     const bool authorizer_active{WITH_LOCK(cs_main, {
@@ -5590,14 +5615,6 @@ CChainLocksHandler::GetHistoricalAdmissionLocked(
     }
 
     const auto best{m_store->GetBestRecord()};
-    const pq::ChainLockPredecessor local{
-        best ? pq::ChainLockPredecessor{
-                   best->metadata.statement.height,
-                   best->metadata.statement.block_hash,
-                   best->metadata.statement.accepted_btcc_cursor}
-             : pq::ChainLockPredecessor{
-                   m_config->anchor.height, m_config->anchor.block_hash,
-                   m_config->anchor.btcc_cursor}};
     if (!m_chainman.IsBaseBlockSyncComplete() ||
         (m_chainman.IsSnapshotActive() &&
          !m_chainman.IsSnapshotValidated())) {
@@ -5614,6 +5631,19 @@ CChainLocksHandler::GetHistoricalAdmissionLocked(
         target->nHeight != statement.height) {
         return {};
     }
+    const CBlockIndex* activation_predecessor{
+        !best && tip->nHeight >= m_config->activation_predecessor_height
+            ? tip->GetAncestor(m_config->activation_predecessor_height)
+            : nullptr};
+    if (!best && activation_predecessor == nullptr) return {};
+    const pq::ChainLockPredecessor local{
+        best ? pq::ChainLockPredecessor{
+                   best->metadata.statement.height,
+                   best->metadata.statement.block_hash,
+                   best->metadata.statement.accepted_btcc_cursor}
+             : pq::ChainLockPredecessor{
+                   m_config->activation_predecessor_height,
+                   activation_predecessor->GetBlockHash(), {}}};
     const bool target_is_active{target == active_target};
 
     pq::BTCCPresealState preseal;
@@ -5680,7 +5710,7 @@ CChainLocksHandler::GetHistoricalAdmissionLocked(
             exact_preseal_receipt ||
             (!winner_covers && !exact_receipt_verified &&
              logical_id == receipt.chainlock_logical_id &&
-             statement.height > m_config->anchor.height &&
+             statement.height > m_config->activation_predecessor_height &&
              statement.height == receipt.chainlock_target_height &&
              statement.block_hash == receipt.chainlock_target_hash &&
              statement.accepted_btcc_cursor == receipt.accepted_cursor &&
@@ -5881,7 +5911,7 @@ void CChainLocksHandler::RequestCatchupChainLock()
                                     tip->nHeight)};
         const auto best{m_store->GetBestRecord()};
         const int32_t local_height{
-            best ? best->metadata.statement.height : m_config->anchor.height};
+            best ? best->metadata.statement.height : m_config->activation_predecessor_height};
         if (!latest || *latest <= local_height) return;
     }
     const auto now{GetTime<std::chrono::microseconds>()};
@@ -5898,6 +5928,7 @@ void CChainLocksHandler::RequestCatchupChainLock()
 
 void CChainLocksHandler::MaybeReplayPaymentAuditPreseal()
 {
+    if (!m_chainman.IsPQParticipationAllowed()) return;
     pq::PaymentAuditPresealState durable;
     {
         LOCK(m_btcc_preseal_mutex);
@@ -6384,6 +6415,7 @@ CChainLocksHandler::AdvanceBTCCReplayValidationFrontier(
 
 void CChainLocksHandler::MaybeReplayBTCCPreseal()
 {
+    if (!m_chainman.IsPQParticipationAllowed()) return;
     pq::BTCCPresealState durable;
     pq::PaymentAuditPresealState payment_audit_durable;
     {
@@ -6593,6 +6625,7 @@ void CChainLocksHandler::MaybeReplayBTCCPreseal()
 
 void CChainLocksHandler::RequestNeededBTCCCertificate()
 {
+    if (!m_chainman.IsPQParticipationAllowed()) return;
     (void)RevalidatePendingBTCCReceiptDependency();
     const auto pending_verified{
         GetPendingVerifiedHistoricalChainLock()};
@@ -6641,6 +6674,7 @@ void CChainLocksHandler::RequestNeededBTCCCertificate()
 
 void CChainLocksHandler::RequestNeededPaymentAuditCertificate()
 {
+    if (!m_chainman.IsPQParticipationAllowed()) return;
     {
         LOCK(cs_main);
         if (IsPaymentAuditPresealActive()) return;
@@ -6872,7 +6906,7 @@ CChainLocksHandler::GetCatchupHistoricalProof(
             if (!indexed) return {std::nullopt, true};
 
             // SYSCOIN: Ordinary current catch-up trusts the branch-local state
-            // only after every post-anchor index proves full non-assumed
+            // only after every post-receipt-anchor index proves full non-assumed
             // validation. A pre-seal candidate additionally recomputes the
             // retained marker-to-target carrier range, never pruned anchor
             // history.
@@ -6909,6 +6943,36 @@ CChainLocksHandler::GetCatchupHistoricalProof(
             if (proof && *proof != *indexed) proof.reset();
             return {std::move(proof), !transient_failure};
         });
+}
+
+int32_t CChainLocksHandler::CandidateFullValidationFloor(
+    const pq::ChainLockCandidateContextRequest& request,
+    int32_t activation_predecessor_height) noexcept
+{
+    if (request.admission ==
+        pq::ChainLockCandidateAdmission::RECEIPT_ARCHIVE) {
+        return request.statement.previous_chainlock_height;
+    }
+    return request.has_local_chainlock ? request.local_best.height
+                                       : activation_predecessor_height;
+}
+
+bool CChainLocksHandler::IsCandidateTargetValidationSufficient(
+    pq::ChainLockCandidateAdmission admission,
+    bool has_local_chainlock,
+    bool marker_authorized_catchup,
+    bool exact_local_target,
+    bool historical_receipt_range_ready) noexcept
+{
+    if (exact_local_target) return true;
+    // SYSCOIN: An ordinary first winner must prove full finality provenance
+    // from the activation predecessor. Marker-authorized preseal catch-up is
+    // the sole exception: its durable replay obligation and authenticated
+    // retained-range proof are what allow a covering CLSIG to restore the
+    // first local winner after reindex.
+    return admission == pq::ChainLockCandidateAdmission::CATCHUP &&
+        (has_local_chainlock || marker_authorized_catchup) &&
+        historical_receipt_range_ready;
 }
 
 std::optional<pq::ChainLockCandidateContext>
@@ -6995,10 +7059,11 @@ CChainLocksHandler::BuildCandidateContext(
     const bool exact_preseal_receipt{
         !preseal_receipt ||
         historical.admission == HistoricalAdmission::PRESEAL_RECEIPT};
-    const int32_t validation_floor{
-        request.admission == pq::ChainLockCandidateAdmission::RECEIPT_ARCHIVE
-            ? request.statement.previous_chainlock_height
-            : request.local_best.height};
+    // SYSCOIN: Before the first durable winner, a catch-up or restored
+    // certificate's declared predecessor is only part of its signed chain.
+    // It cannot narrow full validation of the branch segment from A-1.
+    const int32_t validation_floor{CandidateFullValidationFloor(
+        request, m_config->activation_predecessor_height)};
     const bool exact_local_target{HasFullChainLockTargetValidationCached(
         *candidate, validation_floor)};
     const bool payment_only_catchup{
@@ -7021,25 +7086,19 @@ CChainLocksHandler::BuildCandidateContext(
         ClassifyHistoricalReceiptIndexRangeCached(
             *candidate, validation_floor) ==
             PaymentAuditContextStatus::READY};
-    const bool trusted_historical_range{
-        trusted_persistence && !exact_local_target &&
-        GetFullyValidatedBTCCCatchupRangeStatusCached(
-            *candidate,
-            m_config->btcc_receipt_assumption_anchor) ==
-            BTCCCatchupRangeStatus::VALID &&
-        ClassifyHistoricalReceiptIndexRangeCached(
-            *candidate,
-            m_config->btcc_receipt_assumption_anchor.height) ==
-            PaymentAuditContextStatus::READY};
+    const bool target_validation_sufficient{
+        IsCandidateTargetValidationSufficient(
+            request.admission, request.has_local_chainlock,
+            historical.admission == HistoricalAdmission::PRESEAL_CATCHUP,
+            exact_local_target, catchup_historical_receipt_range)};
     const bool validated{
         live_candidate_admissible && exact_catchup_target &&
         exact_preseal_receipt && marker_snapshot_matches_historical &&
         !side_candidate_blocked_by_preseal &&
         (trusted_persistence
-             ? (exact_local_target || trusted_historical_range)
+             ? target_validation_sufficient
              : (catchup ? (catchup_proof.has_value() &&
-                           (exact_local_target ||
-                            catchup_historical_receipt_range))
+                           target_validation_sufficient)
                         : (preseal_receipt
                                ? (exact_local_target ||
                                   catchup_proof.has_value())
@@ -7214,6 +7273,7 @@ bool CChainLocksHandler::FlushBTCCIndexStateForDurableAcceptance(
 
 void CChainLocksHandler::MaintainPaymentAuditCheckpointGC()
 {
+    if (!m_chainman.IsPQParticipationAllowed()) return;
     bool expected{false};
     if (!m_payment_audit_gc_active.compare_exchange_strong(
             expected, true, std::memory_order_acquire,
@@ -7369,9 +7429,20 @@ bool CChainLocksHandler::ContinuePaymentAuditCheckpointGC()
                 plan.checkpoint,
                 std::span<const uint256>{retained_probation_roots})};
     if (probation_progress.status ==
-            pq::PQPaymentProbationPruneStatus::IN_PROGRESS ||
-        probation_progress.status ==
+            pq::PQPaymentProbationPruneStatus::IN_PROGRESS) {
+        return true;
+    }
+    if (probation_progress.status ==
             pq::PQPaymentProbationPruneStatus::COMPLETE) {
+        // The bounded archive and probation stores are now both durable. The
+        // next maintenance pass observes NONE, so this transition is the
+        // single completion notification for asynchronous checkpoint GC.
+        LogPrint(BCLog::CHAINLOCKS,
+                 "CChainLocksHandler::%s -- authenticated payment-audit "
+                 "archive through epoch %u with durable CLSIG %s at %d\n",
+                 __func__, plan.checkpoint.prune_through_epoch,
+                 plan.checkpoint.authorizing_chainlock_witness_id.ToString(),
+                 plan.checkpoint.authorizing_target_height);
         return true;
     }
     fail("probation step failed",
@@ -8040,14 +8111,7 @@ CChainLocksHandler::BuildCurrentSigningContexts(
             m_payment_audit_preseal_state);
     }
 
-    const pq::ChainLockPredecessor durable_predecessor{
-        finality.best ? pq::ChainLockPredecessor{
-                   finality.best->statement.height,
-                   finality.best->statement.block_hash,
-                   finality.best->statement.accepted_btcc_cursor}
-             : pq::ChainLockPredecessor{
-                   m_config->anchor.height, m_config->anchor.block_hash,
-                   m_config->anchor.btcc_cursor}};
+    pq::ChainLockPredecessor durable_predecessor;
 
     pq::QuorumBuildError build_error{pq::QuorumBuildError::NONE};
     pq::VerifiedRosterSetPtr roster_set;
@@ -8063,13 +8127,26 @@ CChainLocksHandler::BuildCurrentSigningContexts(
             return std::nullopt;
         }
         const CBlockIndex* tip{m_chainman.ActiveTip()};
+        const CChain& active_chain{m_chainman.ActiveChain()};
+        if (finality.best) {
+            durable_predecessor = pq::ChainLockPredecessor{
+                finality.best->statement.height,
+                finality.best->statement.block_hash,
+                finality.best->statement.accepted_btcc_cursor};
+        } else {
+            const CBlockIndex* activation_predecessor{
+                active_chain[m_config->activation_predecessor_height]};
+            if (activation_predecessor == nullptr) return std::nullopt;
+            durable_predecessor = pq::ChainLockPredecessor{
+                m_config->activation_predecessor_height,
+                activation_predecessor->GetBlockHash(), {}};
+        }
         const auto window{tip == nullptr
             ? std::optional<pq::ChainLockSigningWindow>{}
             : pq::CurrentChainLockSigningWindow(
                   m_config->chainlock_schedule,
                   durable_predecessor.height, tip->nHeight)};
         if (tip == nullptr || !window) return std::nullopt;
-        const CChain& active_chain{m_chainman.ActiveChain()};
         const CBlockIndex* indexed_target{
             active_chain[window->target_height]};
         const CBlockIndex* declared_predecessor{
@@ -8241,20 +8318,19 @@ bool CChainLocksHandler::IsCurrentSigningSource(
         payment_audit_preseal_token = PaymentAuditPresealStateToken(
             m_payment_audit_preseal_state);
     }
-    const pq::ChainLockPredecessor durable_predecessor{
+    const bool predecessor_shape_valid{
         finality.best
-            ? pq::ChainLockPredecessor{
+            ? source.durable_predecessor == pq::ChainLockPredecessor{
                   finality.best->statement.height,
                   finality.best->statement.block_hash,
                   finality.best->statement.accepted_btcc_cursor}
-            : pq::ChainLockPredecessor{
-                  m_config->anchor.height, m_config->anchor.block_hash,
-                  m_config->anchor.btcc_cursor}};
+            : source.durable_predecessor.height == m_config->activation_predecessor_height &&
+                  !source.durable_predecessor.block_hash.IsNull() &&
+                  source.durable_predecessor.btcc_cursor.IsNull()};
     if (finality.state_revision != source.finality_store_revision ||
         durable.certificate_revision !=
             source.persistence_certificate_revision ||
-        durable.best != finality.best ||
-        durable_predecessor != source.durable_predecessor ||
+        durable.best != finality.best || !predecessor_shape_valid ||
         PaymentAuditCheckpointToken(payment_audit_checkpoint) !=
             source.payment_audit_checkpoint_token ||
         payment_audit_preseal_token !=
@@ -9284,7 +9360,8 @@ void CChainLocksHandler::RelayPaymentAuditResponse(
 
 void CChainLocksHandler::MaybeRelayPaymentAuditHave()
 {
-    if (!RefreshPaymentAuditNetworkContext() ||
+    if (!m_chainman.IsPQParticipationAllowed() ||
+        !RefreshPaymentAuditNetworkContext() ||
         !m_payment_audit_staging_store) {
         return;
     }
@@ -10432,7 +10509,7 @@ CChainLocksHandler::BuildPaymentAuditVerificationRosters(
         return nullptr;
     }
     if (statement.seal_statement.previous_chainlock_height <
-            m_config->anchor.height) {
+            m_config->activation_predecessor_height) {
         return nullptr;
     }
     const auto indexed_btcc{IndexedBTCCReceiptState(*seal)};
@@ -11459,6 +11536,7 @@ void CChainLocksHandler::ProcessMessage(CNode* from,
                                         const std::string& command,
                                         CDataStream& payload)
 {
+    if (!m_chainman.IsPQParticipationAllowed()) return;
     if (!m_store) {
         if (command == NetMsgType::CLSIG && from != nullptr) {
             std::optional<uint256> requested;
@@ -11661,7 +11739,7 @@ bool CChainLocksHandler::ProcessNewChainLockInternal(
         historical.admission == HistoricalAdmission::PRESEAL_RECEIPT};
     const int32_t local_finality_height{
         current_best ? current_best->metadata.statement.height
-                     : m_config->anchor.height};
+                     : m_config->activation_predecessor_height};
     const bool preseal_receipt_rebase{
         ShouldRouteBTCCPresealReceiptToCatchup(
             preseal_receipt, chainlock.statement.height,
@@ -12172,7 +12250,11 @@ CChainLocksHandler::TryImportPersistedChainLock()
         if (!m_pending_persisted) return PersistedChainLockImport::NONE;
         persisted = *m_pending_persisted;
     }
-    if (!IsConfiguredForVerification()) return PersistedChainLockImport::PENDING;
+    if (!ShouldAttemptPersistedChainLockImport(
+            m_chainman.IsPQParticipationAllowed(),
+            IsConfiguredForVerification())) {
+        return PersistedChainLockImport::PENDING;
+    }
 
     TRY_LOCK(m_chainlock_admission_mutex, admission_lock);
     if (!admission_lock) return PersistedChainLockImport::PENDING;
@@ -12326,7 +12408,11 @@ CChainLocksHandler::TryImportPersistedUnsealedBTCC()
         if (m_pending_persisted) return PersistedChainLockImport::PENDING;
         persisted = *m_pending_persisted_unsealed_btcc;
     }
-    if (!IsConfiguredForVerification()) return PersistedChainLockImport::PENDING;
+    if (!ShouldAttemptPersistedChainLockImport(
+            m_chainman.IsPQParticipationAllowed(),
+            IsConfiguredForVerification())) {
+        return PersistedChainLockImport::PENDING;
+    }
 
     const uint256 logical_id{persisted.GetLogicalId(m_genesis_hash)};
     if (m_store->GetByLogicalId(logical_id)) {
@@ -13118,8 +13204,8 @@ void CChainLocksHandler::EnforceBestChainLock()
     if (!m_store || !m_config) return;
     const auto record{m_store->GetBestRecord()};
     if (!record) {
-        // The immutable anchor is already the enforced finality reference
-        // before the first accepted winner.
+        // No PQ finality exists before the first durable winner. Ordinary PoW
+        // still selects the active branch; only refresh snapshot retention.
         MaybeReleaseFinalitySnapshotPublicationRetention();
         return;
     }
@@ -13130,6 +13216,7 @@ void CChainLocksHandler::EnforceBestChainLock()
             m_threshold_attested_enforcement_witness;
     }
     const CBlockIndex* best{nullptr};
+    const CBlockIndex* finalized_predecessor{nullptr};
     ChainLockEnforcementProvenance provenance{
         ChainLockEnforcementProvenance::EXACT_LOCAL};
     {
@@ -13137,6 +13224,13 @@ void CChainLocksHandler::EnforceBestChainLock()
         const auto& statement{record->metadata.statement};
         best = m_chainman.m_blockman.LookupBlockIndex(statement.block_hash);
         if (best == nullptr || best->nHeight != statement.height) return;
+        finalized_predecessor = best->GetAncestor(
+            statement.previous_chainlock_height);
+        if (finalized_predecessor == nullptr ||
+            finalized_predecessor->GetBlockHash() !=
+                statement.previous_chainlock_hash) {
+            return;
+        }
         if (m_chainman.IsSnapshotActive() &&
             !m_chainman.IsSnapshotValidated()) {
             return;
@@ -13150,7 +13244,7 @@ void CChainLocksHandler::EnforceBestChainLock()
                 (m_chainman.IsSnapshotActive() &&
                  !m_chainman.IsSnapshotValidated()) ||
                 statement.previous_chainlock_height <
-                    m_config->anchor.height ||
+                    m_config->activation_predecessor_height ||
                 statement.previous_chainlock_height >= statement.height ||
                 (best->nStatus & BLOCK_FAILED_MASK) ||
                 (best->nStatus & BLOCK_HAVE_DATA) == 0 ||
@@ -13159,17 +13253,12 @@ void CChainLocksHandler::EnforceBestChainLock()
                 !HasFullReceiptIndexProvenance(*best)) {
                 return;
             }
-            const CBlockIndex* predecessor{best->GetAncestor(
-                statement.previous_chainlock_height)};
             const auto indexed_btcc{IndexedBTCCReceiptState(*best)};
             const auto indexed_audit{IndexedPaymentAuditReceiptState(*best)};
             pq::BTCCValidationError btcc_error{
                 pq::BTCCValidationError::NONE};
-            if (predecessor == nullptr ||
-                predecessor->GetBlockHash() !=
-                    statement.previous_chainlock_hash ||
-                ClassifyHistoricalReceiptIndexRangeCached(
-                    *predecessor,
+            if (ClassifyHistoricalReceiptIndexRangeCached(
+                    *finalized_predecessor,
                     statement.previous_chainlock_height) !=
                     PaymentAuditContextStatus::READY ||
                 ClassifyHistoricalReceiptIndexRangeCached(
@@ -13202,7 +13291,7 @@ void CChainLocksHandler::EnforceBestChainLock()
         }
     }
     if (!m_chainman.ActiveChainstate().EnforceBestChainLock(
-            best, provenance)) {
+            best, finalized_predecessor, provenance)) {
         return;
     }
     const bool enforced_on_active{WITH_LOCK(cs_main, {
@@ -13262,8 +13351,9 @@ void CChainLocksHandler::CheckActiveState()
     // The pre-seal gates signing and Geth delivery above; base ChainLock
     // enforcement starts immediately so a PoW fork cannot strand the seal on
     // an incompatible branch while Geth is offline.
-    const bool enforce{ShouldEnforceDurableChainLock(
-        configured, pending, HasNEVMReplayObligation())};
+    const bool enforce{m_chainman.IsPQParticipationAllowed() &&
+        ShouldEnforceDurableChainLock(
+            configured, pending, HasNEVMReplayObligation())};
     m_enforced.store(enforce);
     // SYSCOIN: Backend health can fail without passing through the share
     // gate's permanent-failure path. Publish that transition through the same
@@ -13295,23 +13385,8 @@ bool CChainLocksHandler::HasChainLock(int32_t height,
 bool CChainLocksHandler::HasConflictingChainLock(
     int32_t height, const uint256& block_hash) const
 {
-    bool unknown_is_conflict{true};
-    if (m_store && m_config && !m_store->GetBestRecord()) {
-        AssertLockHeld(cs_main);
-        const CBlockIndex* const anchor{
-            m_chainman.m_blockman.LookupBlockIndex(
-                m_config->anchor.block_hash)};
-        // SYSCOIN: Before the first winner, the immutable finality anchor is
-        // the store's finality reference. Its prefix cannot be classified
-        // until that exact header is discovered. Contextual anchor validation
-        // pins F meanwhile; after discovery, UNKNOWN again fails closed.
-        unknown_is_conflict =
-            anchor != nullptr && anchor->nHeight == m_config->anchor.height;
-    }
     return m_enforced.load() && m_store &&
-           m_store->HasConflictingChainLock(
-               height, block_hash,
-               /*unknown_is_conflict=*/unknown_is_conflict);
+           m_store->HasConflictingChainLock(height, block_hash);
 }
 
 bool AreChainLocksEnabled()
@@ -13330,6 +13405,24 @@ bool ShouldVerifyChainLockCertificate(
            !persistence_failed;
 }
 
+bool ShouldAttemptPersistedChainLockImport(
+    bool participation_allowed, bool configured_for_verification) noexcept
+{
+    // Import is what clears the pending state, so it cannot use the normal
+    // verification-availability gate that pending import intentionally closes.
+    return participation_allowed && configured_for_verification;
+}
+
+bool ShouldExposeDurableFinalityRecoveryMetadata(
+    bool configured, bool persistence_available,
+    bool persistence_failed) noexcept
+{
+    // PreparePQActivationHandoff deliberately quarantines a persisted pin
+    // before ReplayBlocks. Recovery of journal-authorizing metadata must not
+    // depend on the live participation flag that replay itself precedes.
+    return configured && persistence_available && !persistence_failed;
+}
+
 bool ShouldEnforceDurableChainLock(
     bool configured, bool persisted_import_pending,
     bool btcc_preseal_active) noexcept
@@ -13338,6 +13431,26 @@ bool ShouldEnforceDurableChainLock(
     // reverse a fully verified and fsynced Syscoin finality decision.
     (void)btcc_preseal_active;
     return configured && !persisted_import_pending;
+}
+
+bool DisconnectCrossesDurableChainLockFloor(
+    int32_t disconnect_height, int32_t active_floor_height,
+    bool floor_descends_from_disconnect) noexcept
+{
+    return disconnect_height >= 0 &&
+           active_floor_height >= disconnect_height &&
+           floor_descends_from_disconnect;
+}
+
+bool IsDurableChainLockCandidateCompatible(
+    int32_t candidate_height, int32_t durable_target_height,
+    bool candidate_descends_target,
+    bool target_descends_candidate) noexcept
+{
+    if (candidate_height < 0 || durable_target_height < 0) return false;
+    return candidate_height >= durable_target_height
+        ? candidate_descends_target
+        : target_descends_candidate;
 }
 
 bool IsBTCCPresealCoveredByDurableWinner(

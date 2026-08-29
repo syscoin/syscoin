@@ -6,7 +6,7 @@
 
 #include <chain.h>
 #include <chainparams.h>
-#include <consensus/pq_migration.h>
+#include <consensus/pq_migration_config.h>
 #include <evo/deterministicmns.h>
 #include <evo/pq_registry.h>
 #include <governance/governancecommon.h>
@@ -19,23 +19,16 @@ static_assert(llmq::pq::GovernanceAuthorization::WIRE_SIZE <=
 namespace llmq::pq {
 namespace {
 
-bool CheckPostAnchorBranch(const CBlockIndex& block, std::string& error)
+bool CheckPostActivationBlock(const CBlockIndex& block, std::string& error)
 {
     const auto& consensus{Params().GetConsensus()};
-    if (Consensus::CheckPQLegacyAnchorConfiguration(consensus) !=
-        Consensus::PQAnchorResult::VALID) {
-        error = "PQ legacy anchor is not configured";
+    if (Consensus::CheckPQActivationConfiguration(consensus) !=
+        Consensus::PQActivationResult::VALID) {
+        error = "PQ activation is not configured";
         return false;
     }
-    if (block.nHeight <= consensus.nPQLegacyAnchorHeight) {
-        error = "governance authorization is not post-anchor";
-        return false;
-    }
-    const CBlockIndex* anchor{
-        block.GetAncestor(consensus.nPQLegacyAnchorHeight)};
-    if (anchor == nullptr ||
-        anchor->GetBlockHash() != consensus.hashPQLegacyAnchorBlock) {
-        error = "governance authorization is on an incompatible branch";
+    if (block.nHeight < consensus.nPQActivationHeight) {
+        error = "governance authorization predates PQ activation";
         return false;
     }
     return true;
@@ -75,7 +68,7 @@ bool CheckGovernanceAuthorizationContextImpl(
         validation_branch.GetAncestor(authorization.signed_height)};
     if (signing_block == nullptr ||
         signing_block->GetBlockHash() != authorization.signed_block_hash ||
-        !CheckPostAnchorBranch(*signing_block, error)) {
+        !CheckPostActivationBlock(*signing_block, error)) {
         if (error.empty()) {
             error = "governance signed block is not a branch ancestor";
         }
@@ -171,7 +164,7 @@ bool GetCurrentGovernanceSigningKey(const CBlockIndex& signing_tip,
                                     std::string& error)
 {
     if (pro_tx_hash.IsNull() || global_key_version == 0 ||
-        !CheckPostAnchorBranch(signing_tip, error)) {
+        !CheckPostActivationBlock(signing_tip, error)) {
         if (error.empty()) error = "invalid governance signer identity";
         return false;
     }

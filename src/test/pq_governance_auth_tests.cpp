@@ -147,36 +147,24 @@ CDeterministicMNList CurrentMNList(const CBlockIndex& tip,
     return list;
 }
 
-class ScopedPQLegacyAnchor
+class ScopedPQActivation
 {
 private:
     Consensus::Params& m_consensus;
     const int m_height;
-    const uint256 m_block;
-    const uint256 m_mn_state;
-    const uint256 m_registry_state;
 
 public:
-    ScopedPQLegacyAnchor(int height, const uint256& block)
+    explicit ScopedPQActivation(int height)
         : m_consensus{
               const_cast<Consensus::Params&>(Params().GetConsensus())},
-          m_height{m_consensus.nPQLegacyAnchorHeight},
-          m_block{m_consensus.hashPQLegacyAnchorBlock},
-          m_mn_state{m_consensus.hashPQLegacyMNState},
-          m_registry_state{m_consensus.hashPQLegacyPQRegistryState}
+          m_height{m_consensus.nPQActivationHeight}
     {
-        m_consensus.nPQLegacyAnchorHeight = height;
-        m_consensus.hashPQLegacyAnchorBlock = block;
-        m_consensus.hashPQLegacyMNState = uint256{1};
-        m_consensus.hashPQLegacyPQRegistryState = uint256{2};
+        m_consensus.nPQActivationHeight = height;
     }
 
-    ~ScopedPQLegacyAnchor()
+    ~ScopedPQActivation()
     {
-        m_consensus.nPQLegacyAnchorHeight = m_height;
-        m_consensus.hashPQLegacyAnchorBlock = m_block;
-        m_consensus.hashPQLegacyMNState = m_mn_state;
-        m_consensus.hashPQLegacyPQRegistryState = m_registry_state;
+        m_consensus.nPQActivationHeight = m_height;
     }
 };
 
@@ -248,15 +236,16 @@ BOOST_AUTO_TEST_CASE(unavailable_dmn_context_fails_closed_without_height_access)
 }
 
 BOOST_FIXTURE_TEST_CASE(
-    current_key_authorizes_older_height_until_rotation_or_revocation,
+    current_key_authorizes_activation_block_until_rotation_or_revocation,
     BasicTestingSetup)
 {
-    const int anchor_height{Params().GetConsensus().DIP0003Height};
+    const int activation_height{Params().GetConsensus().DIP0003Height};
+    BOOST_REQUIRE_GT(activation_height, 0);
     std::array<CBlockIndex, 4> branch;
     std::array<uint256, 4> hashes;
-    BuildBranch(branch, hashes, nullptr, anchor_height, 0x40,
+    BuildBranch(branch, hashes, nullptr, activation_height - 1, 0x40,
                 /*build_skip=*/false);
-    ScopedPQLegacyAnchor anchor{anchor_height, hashes.front()};
+    ScopedPQActivation activation{activation_height};
 
     const uint256 pro_tx_hash{uint256{10}};
     const COutPoint collateral{uint256{11}, 1};
@@ -267,7 +256,7 @@ BOOST_FIXTURE_TEST_CASE(
     auto signing_secret{DeterministicGlobalKey(0x20)};
     const auto signing_key{GlobalKeyFor(
         signing_secret, /*key_version=*/1,
-        static_cast<uint32_t>(anchor_height))};
+        static_cast<uint32_t>(activation_height - 1))};
     GovernanceAuthorization authorization;
     authorization.signed_height = branch[1].nHeight;
     authorization.signed_block_hash = branch[1].GetBlockHash();
@@ -292,6 +281,26 @@ BOOST_FIXTURE_TEST_CASE(
         branch.back(), mn_list, current_snapshot, collateral,
         GovernanceAuthPurpose::TRIGGER, payload_hash, encoded, error));
     BOOST_CHECK(error.empty());
+
+    auto pre_activation{authorization};
+    pre_activation.signed_height = branch.front().nHeight;
+    pre_activation.signed_block_hash = branch.front().GetBlockHash();
+    const auto pre_activation_digest{GetGovernanceAuthorizationHash(
+        Params().GetConsensus().hashGenesisBlock, signing_key,
+        pre_activation, GovernanceAuthPurpose::TRIGGER, payload_hash)};
+    BOOST_REQUIRE(pre_activation_digest);
+    pre_activation.signature = SignGovernance(
+        signing_secret, GlobalAuthPurpose::GOVERNANCE_TRIGGER,
+        *pre_activation_digest);
+    std::vector<unsigned char> pre_activation_encoded;
+    BOOST_REQUIRE(EncodeGovernanceAuthorization(
+        pre_activation, pre_activation_encoded));
+    BOOST_CHECK(!VerifyGovernanceAuthorizationForBranch(
+        branch.back(), mn_list, current_snapshot, collateral,
+        GovernanceAuthPurpose::TRIGGER, payload_hash,
+        pre_activation_encoded, error));
+    BOOST_CHECK_EQUAL(error,
+                      "governance authorization predates PQ activation");
 
     auto replacement_secret{DeterministicGlobalKey(0x60)};
     const auto replacement_key{GlobalKeyFor(

@@ -533,8 +533,13 @@ CGovernanceManager::CGovernanceManager(ChainstateManager& _chainman) :
 {
 }
 
+// SYSCOIN BEGIN: Public PQ activation governance-readiness gate.
 bool CGovernanceManager::IsReady() const
 {
+    // A public BLS-free node may reconstruct legacy governance only for
+    // historical validation. It must not advertise or consume that state as
+    // live authority until the exact local A-1 handoff is pinned.
+    if (!chainman.IsPQParticipationAllowed()) return false;
     if (!IsValid()) return false;
     const auto state{
         m_pq_governance_readiness.load(std::memory_order_acquire)};
@@ -544,6 +549,7 @@ bool CGovernanceManager::IsReady() const
 
 bool CGovernanceManager::IsReadyForTip(const CBlockIndex* tip) const
 {
+    if (!chainman.IsPQParticipationAllowed()) return false;
     if (tip == nullptr || !IsValid()) return false;
     const PQGovernanceTipIdentity expected{*tip};
     const auto state{
@@ -555,7 +561,11 @@ bool CGovernanceManager::IsReadyForTip(const CBlockIndex* tip) const
 std::optional<uint64_t>
 CGovernanceManager::GetPQGovernanceValidationContextEpoch() const
 {
-    if (!IsValid()) return std::nullopt;
+    // A queued exact-page upload must not outlive the public participation
+    // authority that created its validation context.
+    if (!chainman.IsPQParticipationAllowed() || !IsValid()) {
+        return std::nullopt;
+    }
     const auto state{
         m_pq_governance_readiness.load(std::memory_order_acquire)};
     if (!state || !state->observed_tip ||
@@ -565,6 +575,7 @@ CGovernanceManager::GetPQGovernanceValidationContextEpoch() const
     }
     return state->validation_context_epoch;
 }
+// SYSCOIN END: Public PQ activation governance-readiness gate.
 
 void CGovernanceManager::ObserveChainTip(const CBlockIndex* tip)
 {
@@ -1242,6 +1253,8 @@ CGovernanceManager::GetGovernancePageObjectHashes() const
 
 void CGovernanceManager::ProcessMessage(CNode* pfrom, const std::string& strCommand, CDataStream& vRecv, CConnman& connman, PeerManager& peerman)
 {
+    // SYSCOIN: Quarantined nodes reconstruct history but consume no live governance traffic.
+    if (!chainman.IsPQParticipationAllowed()) return;
     if (strCommand == NetMsgType::GETGOVPAGE) {
         if (!CanUseGovernancePageProtocol(*pfrom)) {
             LogPrint(BCLog::GOBJECT,
@@ -4367,6 +4380,9 @@ void CGovernanceManager::RememberFailedPQGovernanceTip(
     m_pq_authority_tip_hash = validation_tip.GetBlockHash();
     m_pq_authority_tip_height = validation_tip.nHeight;
     m_pq_authority_snapshot_valid = false;
+    // SYSCOIN: A failed tip invalidates both authenticated snapshot identities.
+    m_pq_authority_dmn_state_hash.SetNull();
+    m_pq_authority_registry_state_root.SetNull();
 }
 
 bool CGovernanceManager::IsPQInactiveTrigger(
@@ -4740,6 +4756,35 @@ bool CGovernanceManager::IsRememberedPQGovernanceTip(
         validation_tip.GetBlockHash() == m_pq_authority_tip_hash;
 }
 
+// SYSCOIN BEGIN: Exact authenticated governance snapshot reuse.
+bool CGovernanceManager::TryReusePQGovernanceSnapshot(
+    const CBlockIndex& validation_tip,
+    const uint256& dmn_state_hash,
+    const uint256& registry_state_root)
+{
+    AssertLockHeld(cs);
+    if (dmn_state_hash.IsNull() || registry_state_root.IsNull() ||
+        !IsRememberedPQGovernanceTip(validation_tip) ||
+        m_pq_authority_dmn_state_hash != dmn_state_hash ||
+        m_pq_authority_registry_state_root != registry_state_root) {
+        return false;
+    }
+
+    // A-B-A observation deliberately clears readiness, even though A's exact
+    // block and content identities match. Only a continuously published A may
+    // reuse its authority maps; every reorg/recovery transition rebuilds.
+    const PQGovernanceTipIdentity expected_tip{validation_tip};
+    const auto readiness{
+        m_pq_governance_readiness.load(std::memory_order_acquire)};
+    if (!readiness || readiness->observed_tip != expected_tip ||
+        readiness->ready_tip != expected_tip) {
+        return false;
+    }
+    ++m_pq_exact_snapshot_reuses;
+    return true;
+}
+// SYSCOIN END: Exact authenticated governance snapshot reuse.
+
 std::set<COutPoint>
 CGovernanceManager::FindChangedPQGovernanceAuthorities(
     const pq_authority_map_t& previous,
@@ -5020,8 +5065,8 @@ bool CGovernanceManager::RevalidatePQGovernanceImpl(
         return false;
     }
     ObserveChainTip(&validation_tip);
-    MarkPQGovernanceUnavailableForTip(validation_tip);
     if (deterministicMNManager == nullptr) {
+        MarkPQGovernanceUnavailableForTip(validation_tip);
         RememberFailedPQGovernanceTip(validation_tip);
         LogPrint(BCLog::GOBJECT,
                  "CGovernanceManager::%s deterministic masternode state is unavailable\n",
@@ -5033,6 +5078,7 @@ bool CGovernanceManager::RevalidatePQGovernanceImpl(
     try {
         mn_list = deterministicMNManager->GetListForBlock(&validation_tip);
     } catch (const std::exception& e) {
+        MarkPQGovernanceUnavailableForTip(validation_tip);
         RememberFailedPQGovernanceTip(validation_tip);
         LogPrint(BCLog::GOBJECT,
                  "CGovernanceManager::%s unable to read deterministic masternode snapshot: %s\n",
@@ -5043,12 +5089,30 @@ bool CGovernanceManager::RevalidatePQGovernanceImpl(
     std::string registry_error;
     if (!deterministicMNManager->GetPQRegistryReadView(
             &validation_tip, registry_snapshot, registry_error)) {
+        MarkPQGovernanceUnavailableForTip(validation_tip);
         RememberFailedPQGovernanceTip(validation_tip);
         LogPrint(BCLog::GOBJECT,
                  "CGovernanceManager::%s unable to read PQ registry: %s\n",
                  __func__, registry_error);
         return false;
     }
+
+    // SYSCOIN BEGIN: Authenticated O(1) governance snapshot reuse.
+    // These authenticated O(1) identities cover every input to both authority
+    // maps: the DMN state hash commits voting/delegation keys and validity,
+    // while the registry root commits PQ operator authority. Exact content at
+    // an exact continuously-ready tip therefore needs no repeated O(N) scan.
+    const uint256 dmn_state_hash{mn_list.GetOrComputePQLegacyStateHash(
+        Params().GetConsensus().hashGenesisBlock)};
+    const uint256 registry_state_root{
+        registry_snapshot.ConsensusStateRoot()};
+    if (TryReusePQGovernanceSnapshot(
+            validation_tip, dmn_state_hash, registry_state_root)) {
+        return true;
+    }
+    MarkPQGovernanceUnavailableForTip(validation_tip);
+    ++m_pq_authority_snapshot_builds;
+    // SYSCOIN END: Authenticated O(1) governance snapshot reuse.
 
     pq_authority_map_t next_authorities;
     if (!BuildPQGovernanceAuthorityMap(
@@ -5089,16 +5153,7 @@ bool CGovernanceManager::RevalidatePQGovernanceImpl(
             }
         }
     }
-    // Duplicate tip notifications are common during startup and must not
-    // turn an immutable snapshot into another full governance-vote scan.
-    const bool unchanged_repeated_tip{
-        IsRememberedPQGovernanceTip(validation_tip) &&
-        m_pq_authorities == next_authorities &&
-        m_delegated_funding_authorities ==
-            next_delegated_authorities &&
-        m_governance_valid_mn_count == next_valid_mn_count};
-    const bool full_revalidation{
-        !straight_extension && !unchanged_repeated_tip};
+    const bool full_revalidation{!straight_extension};
     const std::set<COutPoint> changed_pq_operators{full_revalidation
         ? std::set<COutPoint>{}
         : FindChangedPQGovernanceAuthorities(m_pq_authorities,
@@ -5204,6 +5259,9 @@ bool CGovernanceManager::RevalidatePQGovernanceImpl(
     m_governance_valid_mn_count = next_valid_mn_count;
     m_pq_authority_tip_hash = validation_tip.GetBlockHash();
     m_pq_authority_tip_height = validation_tip.nHeight;
+    // SYSCOIN: Publish the authenticated identities for exact snapshot reuse.
+    m_pq_authority_dmn_state_hash = dmn_state_hash;
+    m_pq_authority_registry_state_root = registry_state_root;
     m_pq_authority_snapshot_valid = true;
     return PublishPQGovernanceReadyForTip(
         validation_tip, advance_validation_context);

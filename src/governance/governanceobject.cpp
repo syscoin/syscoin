@@ -779,7 +779,7 @@ bool CGovernanceObject::IsValidLocally(ChainstateManager &chainman, const CDeter
             CheckPQAuthorizationContext(*validation_tip, tip_mn_list,
                                         strError);
         if (!valid) {
-            strError = "Invalid post-anchor SLH trigger authorization for " +
+            strError = "Invalid post-activation SLH trigger authorization for " +
                        strOutpoint + ": " + strError;
             return false;
         }

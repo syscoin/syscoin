@@ -560,12 +560,20 @@ private:
     uint256 m_pq_authority_tip_hash GUARDED_BY(cs);
     int32_t m_pq_authority_tip_height GUARDED_BY(cs){-1};
     bool m_pq_authority_snapshot_valid GUARDED_BY(cs){false};
+    // SYSCOIN BEGIN: Authenticated governance snapshot identities.
+    uint256 m_pq_authority_dmn_state_hash GUARDED_BY(cs);
+    uint256 m_pq_authority_registry_state_root GUARDED_BY(cs);
+    // SYSCOIN END: Authenticated governance snapshot identities.
     std::size_t m_governance_valid_mn_count GUARDED_BY(cs){0};
     bool m_rebuilding_cached_triggers GUARDED_BY(cs){false};
     bool m_pq_trigger_state_initialized GUARDED_BY(cs){false};
     uint64_t m_pq_vote_context_checks GUARDED_BY(cs){0};
     uint64_t m_delegated_vote_context_checks GUARDED_BY(cs){0};
     uint64_t m_pq_full_revalidations GUARDED_BY(cs){0};
+    // SYSCOIN BEGIN: Governance snapshot cache work counters.
+    uint64_t m_pq_authority_snapshot_builds GUARDED_BY(cs){0};
+    uint64_t m_pq_exact_snapshot_reuses GUARDED_BY(cs){0};
+    // SYSCOIN END: Governance snapshot cache work counters.
     uint64_t m_persisted_vote_bytes GUARDED_BY(cs){0};
 
 public:
@@ -821,6 +829,14 @@ private:
     [[nodiscard]] bool IsRememberedPQGovernanceTip(
         const CBlockIndex& validation_tip) const
         EXCLUSIVE_LOCKS_REQUIRED(cs);
+
+    // SYSCOIN BEGIN: Exact authenticated governance snapshot reuse.
+    [[nodiscard]] bool TryReusePQGovernanceSnapshot(
+        const CBlockIndex& validation_tip,
+        const uint256& dmn_state_hash,
+        const uint256& registry_state_root)
+        EXCLUSIVE_LOCKS_REQUIRED(cs);
+    // SYSCOIN END: Exact authenticated governance snapshot reuse.
 
     [[nodiscard]] static std::set<COutPoint>
     FindChangedPQGovernanceAuthorities(

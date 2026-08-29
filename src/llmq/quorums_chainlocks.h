@@ -5,6 +5,7 @@
 #ifndef SYSCOIN_LLMQ_QUORUMS_CHAINLOCKS_H
 #define SYSCOIN_LLMQ_QUORUMS_CHAINLOCKS_H
 
+#include <evo/auxiliary_history_gc.h>
 #include <evo/pq_payment_probation.h>
 #include <util/ranges.h>
 #include <llmq/pq_chainlock_collector.h>
@@ -908,6 +909,9 @@ public:
     [[nodiscard]] CChainLockSigCPtr GetMostRecentChainLock() const;
     [[nodiscard]] CChainLockSigCPtr GetBestChainLock() const;
     [[nodiscard]] const CBlockIndex* GetBestChainLockIndex() const;
+    /** Read the healthy fsynced winner before live-store import. */
+    [[nodiscard]] std::optional<evo::AuxiliaryHistoryGCBlockIdentity>
+    GetDurableFinalityTargetForStartup() const;
     /**
      * Resolve the active-chain floor protected by the fsynced winner before
      * Start() imports it into the live store. If the winner is on a validated
@@ -917,7 +921,7 @@ public:
     [[nodiscard]] bool GetDurableFinalityRecoveryFloor(
         const CBlockIndex*& active_floor,
         const CBlockIndex*& durable_target,
-        std::string& error) const EXCLUSIVE_LOCKS_REQUIRED(!cs_main);
+        std::string& error) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     [[nodiscard]] bool GetRecentChainLockByHeight(
         int32_t height, CChainLockSig& result) const;
 
@@ -1314,6 +1318,17 @@ private:
         int32_t accepted_tip_height,
         const uint256& accepted_tip_hash) const override;
 
+    // SYSCOIN: A declared predecessor is not a local validation checkpoint
+    // until at least one fully verified winner has been made durable.
+    [[nodiscard]] static int32_t CandidateFullValidationFloor(
+        const pq::ChainLockCandidateContextRequest& request,
+        int32_t activation_predecessor_height) noexcept;
+    [[nodiscard]] static bool IsCandidateTargetValidationSufficient(
+        pq::ChainLockCandidateAdmission admission,
+        bool has_local_chainlock,
+        bool marker_authorized_catchup,
+        bool exact_local_target,
+        bool historical_receipt_range_ready) noexcept;
     [[nodiscard]] std::optional<pq::ChainLockCandidateContext>
     BuildCandidateContext(
         const pq::ChainLockCandidateContextRequest& request,
@@ -2124,10 +2139,30 @@ extern CChainLocksHandler* chainLocksHandler;
     bool configured_and_healthy, bool persisted_import_pending,
     bool persistence_failed) noexcept;
 
+/** Startup import must remain possible while that import holds verification pending. */
+[[nodiscard]] bool ShouldAttemptPersistedChainLockImport(
+    bool participation_allowed, bool configured_for_verification) noexcept;
+
+/** Startup recovery metadata must remain visible while live service is quarantined. */
+[[nodiscard]] bool ShouldExposeDurableFinalityRecoveryMetadata(
+    bool configured, bool persistence_available,
+    bool persistence_failed) noexcept;
+
 /** Durable Syscoin finality is independent of deferred NEVM replay readiness. */
 [[nodiscard]] bool ShouldEnforceDurableChainLock(
     bool configured, bool persisted_import_pending,
     bool btcc_preseal_active) noexcept;
+
+/** Never disconnect the active fork at or below its durable finality floor. */
+[[nodiscard]] bool DisconnectCrossesDurableChainLockFloor(
+    int32_t disconnect_height, int32_t active_floor_height,
+    bool floor_descends_from_disconnect) noexcept;
+
+/** Candidate and durable winner must lie on one ancestry-comparable branch. */
+[[nodiscard]] bool IsDurableChainLockCandidateCompatible(
+    int32_t candidate_height, int32_t durable_target_height,
+    bool candidate_descends_target,
+    bool target_descends_candidate) noexcept;
 
 [[nodiscard]] bool IsBTCCPresealCoveredByDurableWinner(
     int32_t marker_height, int32_t winner_height,
@@ -2150,7 +2185,7 @@ enum class BTCCCatchupRangeStatus : uint8_t {
 };
 
 /**
- * Require the pinned receipt-anchor identity and full post-anchor index
+ * Require the pinned receipt-boundary identity and full subsequent index
  * provenance before historical receipt state may replace block-body replay.
  */
 [[nodiscard]] BTCCCatchupRangeStatus
