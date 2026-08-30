@@ -31,6 +31,30 @@ bool IsKnownAdvance(BTCCAdvance advance)
     return advance == BTCCAdvance::KEEP || advance == BTCCAdvance::ADVANCE;
 }
 
+bool IsKnownRosterBeaconAnchorKind(RosterBeaconAnchorKind kind)
+{
+    return kind == RosterBeaconAnchorKind::NORMAL ||
+           kind == RosterBeaconAnchorKind::RECOVERY;
+}
+
+bool IsKnownRosterBeaconState(RosterBeaconState state)
+{
+    return state == RosterBeaconState::EMPTY ||
+           state == RosterBeaconState::PENDING ||
+           state == RosterBeaconState::READY;
+}
+
+bool IsKnownRosterAuthorizationTransition(
+    RosterAuthorizationTransitionKind kind)
+{
+    return kind == RosterAuthorizationTransitionKind::INITIALIZE ||
+           kind == RosterAuthorizationTransitionKind::KEEP ||
+           kind == RosterAuthorizationTransitionKind::OBSERVE ||
+           kind == RosterAuthorizationTransitionKind::REVEAL ||
+           kind == RosterAuthorizationTransitionKind::ROTATE ||
+           kind == RosterAuthorizationTransitionKind::RECOVER;
+}
+
 bool IsCursorTransitionStructurallyValid(
     int32_t previous_chainlock_height,
     const BTCCursor& previous,
@@ -115,6 +139,77 @@ bool BTCCursor::IsStructurallyValid() const
 {
     if (sys_height == -1) return IsNull();
     return sys_height >= 0 && !sys_hash.IsNull() && !btc_hash.IsNull();
+}
+
+std::optional<int32_t> RosterBeaconSeed::FutureBTCHeight() const noexcept
+{
+    if (anchor_btc_height < 0 ||
+        static_cast<int64_t>(anchor_btc_height) +
+                ROSTER_BEACON_FUTURE_BTC_HEIGHT_DELTA >
+            std::numeric_limits<int32_t>::max()) {
+        return std::nullopt;
+    }
+    return anchor_btc_height +
+           static_cast<int32_t>(ROSTER_BEACON_FUTURE_BTC_HEIGHT_DELTA);
+}
+
+bool RosterBeaconSeed::IsStructurallyValid() const noexcept
+{
+    if (version != ROSTER_BEACON_VERSION ||
+        !IsKnownRosterBeaconAnchorKind(anchor_kind) ||
+        !IsKnownRosterBeaconState(state)) {
+        return false;
+    }
+    if (state == RosterBeaconState::EMPTY) {
+        return anchor_kind == RosterBeaconAnchorKind::NORMAL &&
+               anchor_cursor.IsNull() && anchor_btc_height == -1 &&
+               future_btc_hash.IsNull();
+    }
+    if (!anchor_cursor.IsStructurallyValid() || anchor_cursor.IsNull() ||
+        !FutureBTCHeight()) {
+        return false;
+    }
+    if (state == RosterBeaconState::PENDING) {
+        return future_btc_hash.IsNull();
+    }
+    return !future_btc_hash.IsNull() &&
+           future_btc_hash != anchor_cursor.btc_hash;
+}
+
+bool RosterBeaconSeed::IsReady() const noexcept
+{
+    return state == RosterBeaconState::READY && IsStructurallyValid();
+}
+
+bool ActiveRosterBeaconBundle::IsStructurallyValid() const noexcept
+{
+    if (version != ROSTER_BEACON_BUNDLE_VERSION ||
+        !seeds.front().IsReady()) {
+        return false;
+    }
+    const uint64_t first_epoch{seeds.front().epoch};
+    for (std::size_t slot{1}; slot < ACTIVE_QUORUMS; ++slot) {
+        if (!seeds[slot].IsReady() ||
+            first_epoch + slot > std::numeric_limits<uint32_t>::max() ||
+            seeds[slot].epoch != first_epoch + slot) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool ActiveRosterBeaconBundle::IsForNewestEpoch(
+    uint32_t newest_epoch) const noexcept
+{
+    return IsStructurallyValid() && seeds.back().epoch == newest_epoch;
+}
+
+bool RosterBeaconWindow::IsStructurallyValid() const noexcept
+{
+    return active.IsStructurallyValid() && next.IsStructurallyValid() &&
+           active.seeds.back().epoch <
+               std::numeric_limits<uint32_t>::max() &&
+           next.epoch == active.seeds.back().epoch + 1;
 }
 
 bool BTCCReceiptState::IsStructurallyValid() const

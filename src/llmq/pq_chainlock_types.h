@@ -224,6 +224,123 @@ struct BTCCursor {
     friend bool operator==(const BTCCursor&, const BTCCursor&) = default;
 };
 
+inline constexpr uint16_t ROSTER_BEACON_VERSION{1};
+inline constexpr uint16_t ROSTER_BEACON_BUNDLE_VERSION{1};
+inline constexpr uint32_t ROSTER_BEACON_FUTURE_BTC_HEIGHT_DELTA{37};
+inline constexpr uint32_t ROSTER_BEACON_MAX_ANCHOR_BTC_LAG{6};
+
+enum class RosterBeaconAnchorKind : uint8_t {
+    NORMAL = 1,
+    RECOVERY = 2,
+};
+
+enum class RosterBeaconState : uint8_t {
+    EMPTY = 0,
+    PENDING = 1,
+    READY = 2,
+};
+
+/**
+ * Non-self-referential delayed-Bitcoin observation for one roster epoch.
+ * The future height is implied by anchor_btc_height + 37, so PENDING can be
+ * signed before the corresponding Bitcoin hash is knowable.
+ */
+struct RosterBeaconSeed {
+    static constexpr std::size_t WIRE_SIZE{
+        sizeof(uint16_t) + 2 * sizeof(uint8_t) + sizeof(uint32_t) +
+        sizeof(int32_t) + 32 + BTCCursor::WIRE_SIZE};
+
+    uint16_t version{ROSTER_BEACON_VERSION};
+    RosterBeaconAnchorKind anchor_kind{RosterBeaconAnchorKind::NORMAL};
+    RosterBeaconState state{RosterBeaconState::EMPTY};
+    uint32_t epoch{0};
+    BTCCursor anchor_cursor;
+    int32_t anchor_btc_height{-1};
+    uint256 future_btc_hash;
+
+    SERIALIZE_METHODS(RosterBeaconSeed, obj)
+    {
+        uint8_t anchor_kind{static_cast<uint8_t>(obj.anchor_kind)};
+        uint8_t state{static_cast<uint8_t>(obj.state)};
+        READWRITE(obj.version, anchor_kind, state, obj.epoch,
+                  obj.anchor_cursor, obj.anchor_btc_height,
+                  obj.future_btc_hash);
+        SER_READ(obj, obj.anchor_kind =
+                          static_cast<RosterBeaconAnchorKind>(anchor_kind));
+        SER_READ(obj, obj.state = static_cast<RosterBeaconState>(state));
+        SER_READ(obj, if (!obj.IsStructurallyValid()) {
+            throw std::ios_base::failure("non-canonical roster beacon seed");
+        });
+    }
+
+    [[nodiscard]] bool IsStructurallyValid() const noexcept;
+    [[nodiscard]] bool IsReady() const noexcept;
+    [[nodiscard]] std::optional<int32_t> FutureBTCHeight() const noexcept;
+    friend bool operator==(const RosterBeaconSeed&,
+                           const RosterBeaconSeed&) = default;
+};
+
+static_assert(RosterBeaconSeed::WIRE_SIZE == 112);
+
+/** Oldest-to-newest READY beacon identities for the four active rosters. */
+struct ActiveRosterBeaconBundle {
+    static constexpr std::size_t WIRE_SIZE{
+        sizeof(uint16_t) + ACTIVE_QUORUMS * RosterBeaconSeed::WIRE_SIZE};
+
+    uint16_t version{ROSTER_BEACON_BUNDLE_VERSION};
+    std::array<RosterBeaconSeed, ACTIVE_QUORUMS> seeds{};
+
+    SERIALIZE_METHODS(ActiveRosterBeaconBundle, obj)
+    {
+        READWRITE(obj.version);
+        for (auto& seed : obj.seeds) READWRITE(seed);
+        SER_READ(obj, if (!obj.IsStructurallyValid()) {
+            throw std::ios_base::failure(
+                "non-canonical active roster beacon bundle");
+        });
+    }
+
+    [[nodiscard]] bool IsStructurallyValid() const noexcept;
+    [[nodiscard]] bool IsForNewestEpoch(uint32_t newest_epoch) const noexcept;
+    friend bool operator==(const ActiveRosterBeaconBundle&,
+                           const ActiveRosterBeaconBundle&) = default;
+};
+
+static_assert(ActiveRosterBeaconBundle::WIRE_SIZE == 450);
+
+/** The active four READY beacons plus the next EMPTY/PENDING/READY record. */
+struct RosterBeaconWindow {
+    static constexpr std::size_t WIRE_SIZE{
+        ActiveRosterBeaconBundle::WIRE_SIZE + RosterBeaconSeed::WIRE_SIZE};
+
+    ActiveRosterBeaconBundle active;
+    RosterBeaconSeed next;
+
+    SERIALIZE_METHODS(RosterBeaconWindow, obj)
+    {
+        READWRITE(obj.active, obj.next);
+        SER_READ(obj, if (!obj.IsStructurallyValid()) {
+            throw std::ios_base::failure(
+                "non-canonical roster beacon window");
+        });
+    }
+
+    [[nodiscard]] bool IsStructurallyValid() const noexcept;
+    friend bool operator==(const RosterBeaconWindow&,
+                           const RosterBeaconWindow&) = default;
+};
+
+static_assert(RosterBeaconWindow::WIRE_SIZE == 562);
+
+enum class RosterAuthorizationTransitionKind : uint8_t {
+    INITIALIZE = 0,
+    KEEP = 1,
+    OBSERVE = 2,
+    REVEAL = 3,
+    ROTATE = 4,
+    RECOVER = 5,
+};
+
 /**
  * Compact branch-local accumulator over accepted on-chain BTCC receipts.
  * Every ChainLock signs this state, so the first verified descendant seals

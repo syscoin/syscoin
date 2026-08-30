@@ -170,6 +170,7 @@ SYSCOIN_TESTS =\
   test/pq_provider_codec_tests.cpp \
   test/pq_providertx_tests.cpp \
   test/pq_registry_tests.cpp \
+  test/pq_roster_beacon_tests.cpp \
   test/pq_quorum_builder_tests.cpp \
   test/pq_quorum_overlay_tests.cpp \
   test/pq_signer_journal_tests.cpp \
