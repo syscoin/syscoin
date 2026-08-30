@@ -469,6 +469,38 @@ public:
                 current_roster_generation);
     }
 
+    static uint8_t HistoricalRosterAuthorization(
+        pq::ChainLockCandidateAdmission candidate_admission,
+        uint8_t historical_admission,
+        pq::RosterAuthorizationTransitionKind transition)
+    {
+        return static_cast<uint8_t>(CChainLocksHandler::
+            SelectHistoricalRosterAuthorization(
+                candidate_admission,
+                static_cast<CChainLocksHandler::HistoricalAdmission>(
+                    historical_admission),
+                transition));
+    }
+
+    static pq::ChainLockCandidateAdmission
+    HistoricalPreVerificationAdmission(
+        uint8_t historical_admission,
+        int32_t statement_height,
+        std::optional<int32_t> best_height)
+    {
+        return CChainLocksHandler::
+            SelectHistoricalPreVerificationAdmission(
+                static_cast<CChainLocksHandler::HistoricalAdmission>(
+                    historical_admission),
+                statement_height, best_height);
+    }
+
+    static bool HistoricalArchiveIdentity(
+        pq::ChainLockCandidateAdmission admission)
+    {
+        return CChainLocksHandler::IsHistoricalArchiveIdentity(admission);
+    }
+
     static int32_t CandidateFullValidationFloor(
         const pq::ChainLockCandidateContextRequest& request,
         int32_t activation_predecessor_height)
@@ -940,6 +972,67 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(!Access::HistoricalCapabilityMatches(
         PRESEAL_CATCHUP, marker, /*verified_roster_generation=*/0,
         PRESEAL_CATCHUP, marker, /*current_roster_generation=*/0));
+}
+
+BOOST_AUTO_TEST_CASE(historical_roster_authorization_routes_are_explicit)
+{
+    using Access = llmq::test::CChainLocksHandlerTestAccess;
+    using Admission = llmq::pq::ChainLockCandidateAdmission;
+    using Transition = llmq::pq::RosterAuthorizationTransitionKind;
+    constexpr uint8_t INVALID{0};
+    constexpr uint8_t EXACT_NETWORK{1};
+    constexpr uint8_t ATTESTED_HISTORY{2};
+    constexpr uint8_t NONE{0};
+    constexpr uint8_t CURRENT_CATCHUP{1};
+    constexpr uint8_t RECOVERY{2};
+    constexpr uint8_t PRESEAL_CATCHUP{3};
+    constexpr uint8_t PRESEAL_RECEIPT{4};
+    const std::array transitions{
+        Transition::INITIALIZE, Transition::KEEP, Transition::OBSERVE,
+        Transition::REVEAL, Transition::ROTATE, Transition::RECOVER};
+
+    for (const auto transition : transitions) {
+        const bool reset{transition == Transition::INITIALIZE ||
+                         transition == Transition::RECOVER};
+        BOOST_CHECK_EQUAL(Access::HistoricalRosterAuthorization(
+                              Admission::LIVE, NONE, transition),
+                          EXACT_NETWORK);
+        BOOST_CHECK_EQUAL(Access::HistoricalRosterAuthorization(
+                              Admission::RECEIPT_ARCHIVE, NONE,
+                              transition),
+                          reset ? EXACT_NETWORK : ATTESTED_HISTORY);
+        BOOST_CHECK_EQUAL(Access::HistoricalRosterAuthorization(
+                              Admission::CATCHUP, CURRENT_CATCHUP,
+                              transition),
+                          reset ? INVALID : ATTESTED_HISTORY);
+        BOOST_CHECK_EQUAL(Access::HistoricalRosterAuthorization(
+                              Admission::CATCHUP, RECOVERY, transition),
+                          reset ? EXACT_NETWORK : INVALID);
+        BOOST_CHECK_EQUAL(Access::HistoricalRosterAuthorization(
+                              Admission::CATCHUP, PRESEAL_CATCHUP,
+                              transition),
+                          reset ? EXACT_NETWORK : ATTESTED_HISTORY);
+        BOOST_CHECK_EQUAL(Access::HistoricalRosterAuthorization(
+                              Admission::PRESEAL_RECEIPT,
+                              PRESEAL_RECEIPT, transition),
+                          reset ? EXACT_NETWORK : ATTESTED_HISTORY);
+    }
+
+    const auto old_receipt{Access::HistoricalPreVerificationAdmission(
+        PRESEAL_RECEIPT, /*statement_height=*/90,
+        /*best_height=*/100)};
+    const auto newer_receipt{Access::HistoricalPreVerificationAdmission(
+        PRESEAL_RECEIPT, /*statement_height=*/110,
+        /*best_height=*/100)};
+    const auto first_receipt{Access::HistoricalPreVerificationAdmission(
+        PRESEAL_RECEIPT, /*statement_height=*/90, std::nullopt)};
+    BOOST_CHECK(old_receipt == Admission::PRESEAL_RECEIPT);
+    BOOST_CHECK(newer_receipt == Admission::CATCHUP);
+    BOOST_CHECK(first_receipt == Admission::CATCHUP);
+    BOOST_CHECK(Access::HistoricalArchiveIdentity(old_receipt));
+    BOOST_CHECK(!Access::HistoricalArchiveIdentity(newer_receipt));
+    BOOST_CHECK(Access::HistoricalArchiveIdentity(
+        Admission::RECEIPT_ARCHIVE));
 }
 
 BOOST_AUTO_TEST_CASE(
@@ -2086,6 +2179,67 @@ BOOST_AUTO_TEST_CASE(startup_slot_consumption_is_limited_to_live_rounds)
         chainlock, /*startup_tip_height=*/885, /*target_height=*/880));
     BOOST_CHECK(!llmq::ShouldConsumeChainLockStartupSlot(
         chainlock, /*startup_tip_height=*/885, /*target_height=*/885));
+}
+
+BOOST_AUTO_TEST_CASE(staged_recovery_keeps_one_canonical_historical_target)
+{
+    const llmq::pq::ChainLockScheduleConfig chainlock{.epoch_origin = 0};
+    const llmq::pq::BTCCScheduleConfig btcc{.candidate_origin = 865};
+    BOOST_REQUIRE(chainlock.IsValid());
+    BOOST_REQUIRE(btcc.IsValid());
+
+    const auto target{llmq::pq::CanonicalRosterRecoveryTargetHeight(
+        chainlock, btcc, /*epoch=*/3)};
+    BOOST_REQUIRE(target);
+    BOOST_CHECK_EQUAL(*target, 865);
+    BOOST_CHECK(!llmq::pq::CanonicalRosterRecoveryTargetHeight(
+        chainlock, btcc, /*epoch=*/4));
+
+    llmq::pq::RosterRecoveryPrecommit precommit;
+    precommit.admission =
+        llmq::pq::RosterRecoveryAdmission::INITIALIZE;
+    precommit.pending_seed.anchor_kind =
+        llmq::pq::RosterBeaconAnchorKind::RECOVERY;
+    precommit.pending_seed.state =
+        llmq::pq::RosterBeaconState::PENDING;
+    precommit.pending_seed.epoch = 3;
+    precommit.pending_seed.anchor_cursor = llmq::pq::BTCCursor{
+        *target, NonNullHash(210'000), NonNullHash(210'001)};
+    precommit.pending_seed.anchor_btc_height = 800'000;
+    BOOST_REQUIRE(precommit.IsStructurallyValid());
+
+    const auto first{llmq::StagedRecoverySigningWindow(
+        chainlock, btcc, precommit,
+        /*durable_predecessor_height=*/864,
+        /*tip_height=*/870)};
+    const auto much_later{llmq::StagedRecoverySigningWindow(
+        chainlock, btcc, precommit,
+        /*durable_predecessor_height=*/864,
+        /*tip_height=*/5'000)};
+    BOOST_REQUIRE(first);
+    BOOST_REQUIRE(much_later);
+    BOOST_CHECK(*first == *much_later);
+    BOOST_CHECK_EQUAL(first->target_height, *target);
+    BOOST_CHECK_EQUAL(first->declared_predecessor_height, 864);
+    BOOST_CHECK(!llmq::StagedRecoverySigningWindow(
+        chainlock, btcc, precommit,
+        /*durable_predecessor_height=*/864,
+        /*tip_height=*/869));
+
+    BOOST_CHECK(!llmq::StagedRecoveryRolloverTarget(
+        chainlock, btcc, precommit, /*tip_height=*/2'029));
+    const auto rollover{llmq::StagedRecoveryRolloverTarget(
+        chainlock, btcc, precommit, /*tip_height=*/2'030)};
+    BOOST_REQUIRE(rollover);
+    BOOST_CHECK_EQUAL(*rollover, 2'025);
+
+    auto wrong_target{precommit};
+    wrong_target.pending_seed.anchor_cursor.sys_height +=
+        static_cast<int32_t>(chainlock.chainlock_period);
+    BOOST_CHECK(!llmq::StagedRecoverySigningWindow(
+        chainlock, btcc, wrong_target,
+        /*durable_predecessor_height=*/864,
+        /*tip_height=*/5'000));
 }
 
 BOOST_AUTO_TEST_CASE(payment_audit_signing_height_is_exactly_window_bounded)

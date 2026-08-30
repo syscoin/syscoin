@@ -985,6 +985,107 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_reuses_exact_branch_contexts)
     BOOST_CHECK_EQUAL(lookups, ACTIVE_QUORUMS + 4);
 }
 
+BOOST_AUTO_TEST_CASE(active_roster_cache_never_crosses_beacon_bundles)
+{
+    constexpr int32_t TARGET_HEIGHT{2305};
+    const uint256 genesis{NonNullHash(20'001)};
+    IndexChain chain(TARGET_HEIGHT, TARGET_HEIGHT + 1, 0);
+    std::size_t lookups{0};
+    const QuorumSnapshotLookup lookup = [&](const CBlockIndex& index) {
+        ++lookups;
+        QuorumSnapshotState result;
+        result.deterministic_mns = Snapshot(
+            index.nHeight, index.GetBlockHash(), QUORUM_SIZE + 20);
+        result.operator_key_states = SharedOperatorStates();
+        return std::optional<QuorumSnapshotState>{std::move(result)};
+    };
+    const auto cache{FrozenQuorumRosterCache::Create(
+        genesis, BuildConfig(), lookup)};
+    BOOST_REQUIRE(cache);
+
+    const auto first_bundle{BeaconBundleAtHeight(TARGET_HEIGHT)};
+    const auto first{cache->GetVerifiedActive(
+        TARGET_HEIGHT, chain.Tip(), first_bundle)};
+    BOOST_REQUIRE(first);
+    BOOST_CHECK_EQUAL(lookups, ACTIVE_QUORUMS);
+
+    auto changed_bundle{first_bundle};
+    changed_bundle.seeds.back().future_btc_hash = NonNullHash(20'002);
+    BOOST_REQUIRE(changed_bundle.IsStructurallyValid());
+    const auto changed{cache->GetVerifiedActive(
+        TARGET_HEIGHT, chain.Tip(), changed_bundle)};
+    BOOST_REQUIRE(changed);
+    BOOST_CHECK(changed != first);
+    // The three exact overlapping beacon/snapshot pairs are reused. Only the
+    // changed newest seed may build a distinct roster.
+    BOOST_CHECK_EQUAL(lookups, ACTIVE_QUORUMS + 1);
+    for (std::size_t slot{0}; slot + 1 < ACTIVE_QUORUMS; ++slot) {
+        BOOST_CHECK(changed->Rosters()[slot].descriptor ==
+                    first->Rosters()[slot].descriptor);
+    }
+    BOOST_CHECK(changed->Rosters().back().descriptor.roster_beacon_hash !=
+                first->Rosters().back().descriptor.roster_beacon_hash);
+    BOOST_CHECK(cache->GetVerifiedActive(
+                    TARGET_HEIGHT, chain.Tip(), first_bundle) == first);
+    BOOST_CHECK(cache->GetVerifiedActive(
+                    TARGET_HEIGHT, chain.Tip(), changed_bundle) == changed);
+    BOOST_CHECK_EQUAL(lookups, ACTIVE_QUORUMS + 1);
+
+    auto pending_bundle{first_bundle};
+    pending_bundle.seeds.back().state = RosterBeaconState::PENDING;
+    pending_bundle.seeds.back().future_btc_hash.SetNull();
+    BOOST_REQUIRE(pending_bundle.seeds.back().IsStructurallyValid());
+    QuorumBuildError error{QuorumBuildError::NONE};
+    BOOST_CHECK(!cache->GetVerifiedActive(
+        TARGET_HEIGHT, chain.Tip(), pending_bundle, &error));
+    BOOST_CHECK(error == QuorumBuildError::INVALID_ROSTER_BEACON);
+    BOOST_CHECK_EQUAL(lookups, ACTIVE_QUORUMS + 1);
+}
+
+BOOST_AUTO_TEST_CASE(unverified_roster_builds_do_not_evict_live_cache)
+{
+    constexpr int32_t TARGET_HEIGHT{2305};
+    const uint256 genesis{NonNullHash(20'100)};
+    IndexChain chain(TARGET_HEIGHT, TARGET_HEIGHT + 1, 0);
+    std::size_t lookups{0};
+    const QuorumSnapshotLookup lookup = [&](const CBlockIndex& index) {
+        ++lookups;
+        QuorumSnapshotState result;
+        result.deterministic_mns = Snapshot(
+            index.nHeight, index.GetBlockHash(), QUORUM_SIZE + 20);
+        result.operator_key_states = SharedOperatorStates();
+        return std::optional<QuorumSnapshotState>{std::move(result)};
+    };
+    const auto cache{FrozenQuorumRosterCache::Create(
+        genesis, BuildConfig(), lookup)};
+    BOOST_REQUIRE(cache);
+
+    const auto live_bundle{BeaconBundleAtHeight(TARGET_HEIGHT)};
+    const auto live{cache->GetVerifiedActive(
+        TARGET_HEIGHT, chain.Tip(), live_bundle)};
+    BOOST_REQUIRE(live);
+    BOOST_CHECK_EQUAL(lookups, ACTIVE_QUORUMS);
+
+    for (std::size_t attempt{0};
+         attempt < FROZEN_QUORUM_ROSTER_CACHE_CAPACITY + 1;
+         ++attempt) {
+        auto claimed{live_bundle};
+        claimed.seeds.back().future_btc_hash =
+            NonNullHash(20'200 + attempt);
+        BOOST_REQUIRE(claimed.IsStructurallyValid());
+        BOOST_REQUIRE(cache->GetVerifiedActiveNoPublish(
+            TARGET_HEIGHT, chain.Tip(), claimed));
+    }
+    BOOST_CHECK_EQUAL(
+        lookups,
+        ACTIVE_QUORUMS + FROZEN_QUORUM_ROSTER_CACHE_CAPACITY + 1);
+    BOOST_CHECK(cache->GetVerifiedActive(
+                    TARGET_HEIGHT, chain.Tip(), live_bundle) == live);
+    BOOST_CHECK_EQUAL(
+        lookups,
+        ACTIVE_QUORUMS + FROZEN_QUORUM_ROSTER_CACHE_CAPACITY + 1);
+}
+
 BOOST_AUTO_TEST_CASE(active_roster_cache_reuses_overlapping_epoch_rosters)
 {
     constexpr int32_t FIRST_TARGET{2305};
