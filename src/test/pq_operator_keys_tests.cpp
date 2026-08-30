@@ -321,6 +321,56 @@ BOOST_AUTO_TEST_CASE(active_identity_reads_do_not_wait_for_global_signing)
                             [](uint8_t byte) { return byte == 0; }));
 }
 
+BOOST_AUTO_TEST_CASE(active_child_material_lease_tracks_current_identity)
+{
+    ActiveMasternodeInfoGuard active_info_guard;
+    auto manager = std::make_shared<LocalOperatorKeyManager>(
+        DeterministicManager(0xc8));
+    BOOST_REQUIRE(manager->IsValid());
+
+    const uint256 pro_tx_hash{NonNullHash(36)};
+    constexpr uint32_t ACTIVE_KEY_VERSION{7};
+    constexpr uint32_t FROZEN_KEY_VERSION{3};
+    uint64_t identity_generation{0};
+    {
+        LOCK(activeMasternodeInfoCs);
+        activeMasternodeInfo.operatorKeyManager = manager;
+        activeMasternodeInfo.proTxHash = pro_tx_hash;
+        activeMasternodeInfo.globalKeyVersion = ACTIVE_KEY_VERSION;
+        identity_generation = ++activeMasternodeInfo.identityGeneration;
+        fMasternodeMode = true;
+    }
+
+    FrozenChildRootRecord frozen{
+        pro_tx_hash, FROZEN_KEY_VERSION, 0, Commitment(37)};
+    BOOST_REQUIRE(frozen.IsStructurallyValid());
+    BOOST_REQUIRE_LT(frozen.global_key_version, ACTIVE_KEY_VERSION);
+
+    ActiveChildSigningMaterial material;
+    material.active_key_manager = manager;
+    material.active_global_key_version = ACTIVE_KEY_VERSION;
+    material.active_identity_generation = identity_generation;
+    BOOST_CHECK(IsActiveMasternodeChildSigningMaterialCurrent(
+        frozen.pro_tx_hash, material));
+
+    uint64_t rotated_generation{0};
+    {
+        LOCK(activeMasternodeInfoCs);
+        ++activeMasternodeInfo.globalKeyVersion;
+        rotated_generation = ++activeMasternodeInfo.identityGeneration;
+    }
+    BOOST_CHECK(!IsActiveMasternodeChildSigningMaterialCurrent(
+        frozen.pro_tx_hash, material));
+
+    // The old frozen record remains usable after rotation when the current
+    // manager can still derive its exact committed root; only the active
+    // identity lease changes.
+    material.active_global_key_version = ACTIVE_KEY_VERSION + 1;
+    material.active_identity_generation = rotated_generation;
+    BOOST_CHECK(IsActiveMasternodeChildSigningMaterialCurrent(
+        frozen.pro_tx_hash, material));
+}
+
 BOOST_AUTO_TEST_CASE(mnauth_waiter_precedes_queued_governance_signing)
 {
     ActiveMasternodeInfoGuard active_info_guard;

@@ -158,6 +158,14 @@ BOOST_AUTO_TEST_CASE(configuration_bounds_are_exact)
     BOOST_CHECK(!config.IsValid());
 }
 
+BOOST_AUTO_TEST_CASE(pre_cancelled_build_stops_without_materializing_tree)
+{
+    const auto seed{TestSeed()};
+    const auto config{TestConfig()};
+    std::atomic<bool> cancel{true};
+    BOOST_CHECK(!ChildKeyTree::Build(seed, config, 4, &cancel));
+}
+
 BOOST_AUTO_TEST_CASE(serial_and_parallel_roots_match_and_all_paths_verify)
 {
     const auto seed{TestSeed()};

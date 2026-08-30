@@ -52,9 +52,14 @@ private:
 
 template <typename Function>
 bool ParallelFor(std::size_t count, std::size_t requested_workers,
-                 Function&& function)
+                 const std::atomic<bool>* cancel, Function&& function)
 {
     if (count == 0) return true;
+    const auto cancelled = [&] {
+        return cancel != nullptr &&
+               cancel->load(std::memory_order_relaxed);
+    };
+    if (cancelled()) return false;
     const auto invoke = [&](std::size_t index) noexcept {
         // No exception may cross a std::thread entry, and the optional builder
         // result must not depend on whether this batch runs serially.
@@ -68,6 +73,7 @@ bool ParallelFor(std::size_t count, std::size_t requested_workers,
         std::max<std::size_t>(1, std::min(count, requested_workers))};
     if (workers == 1) {
         for (std::size_t i{0}; i < count; ++i) {
+            if (cancelled()) return false;
             if (!invoke(i)) return false;
         }
         return true;
@@ -85,7 +91,8 @@ bool ParallelFor(std::size_t count, std::size_t requested_workers,
         try {
             for (std::size_t worker{0}; worker < workers; ++worker) {
                 threads.emplace_back([&] {
-                    while (success.load(std::memory_order_relaxed)) {
+                    while (success.load(std::memory_order_relaxed) &&
+                           !cancelled()) {
                         const std::size_t index{
                             next.fetch_add(1, std::memory_order_relaxed)};
                         if (index >= count) break;
@@ -101,7 +108,7 @@ bool ParallelFor(std::size_t count, std::size_t requested_workers,
             return false;
         }
     }
-    return success.load(std::memory_order_relaxed);
+    return success.load(std::memory_order_relaxed) && !cancelled();
 }
 
 void WriteTreeMetadata(CHashWriter& writer, const ChildKeyTreeConfig& config)
@@ -250,10 +257,13 @@ uint256 GetChildKeyTreeNodeHash(const ChildKeyTreeConfig& config,
 std::optional<ChildKeyTree> ChildKeyTree::Build(
     std::span<const uint8_t> chainlock_master_seed,
     const ChildKeyTreeConfig& config,
-    std::size_t worker_count)
+    std::size_t worker_count,
+    const std::atomic<bool>* cancel)
 {
     if (!config.IsValid() || worker_count == 0 ||
-        worker_count > CHILD_KEY_TREE_MAX_WORKERS) {
+        worker_count > CHILD_KEY_TREE_MAX_WORKERS ||
+        (cancel != nullptr &&
+         cancel->load(std::memory_order_relaxed))) {
         return std::nullopt;
     }
     const std::size_t leaf_count{config.LeafCount()};
@@ -262,17 +272,21 @@ std::optional<ChildKeyTree> ChildKeyTree::Build(
     tree.m_nodes.resize(2 * leaf_count - 1);
     const std::size_t leaf_base{leaf_count - 1};
 
-    if (!ParallelFor(leaf_count, worker_count, [&](std::size_t index) {
-            const auto epoch{config.EpochAt(index)};
-            if (!epoch) return false;
-            const auto public_key{DeriveCommittedChildPublicKey(
-                chainlock_master_seed, config.genesis_hash, config.tree_id,
-                config.generation, *epoch)};
-            if (!public_key) return false;
-            tree.m_nodes[leaf_base + index] =
-                GetChildKeyTreeLeafHash(config, *epoch, *public_key);
-            return true;
-        })) {
+    if (!ParallelFor(leaf_count, worker_count, cancel,
+                     [&](std::size_t index) {
+                         const auto epoch{config.EpochAt(index)};
+                         if (!epoch) return false;
+                         const auto public_key{
+                             DeriveCommittedChildPublicKey(
+                                 chainlock_master_seed,
+                                 config.genesis_hash, config.tree_id,
+                                 config.generation, *epoch)};
+                         if (!public_key) return false;
+                         tree.m_nodes[leaf_base + index] =
+                             GetChildKeyTreeLeafHash(
+                                 config, *epoch, *public_key);
+                         return true;
+                     })) {
         return std::nullopt;
     }
 
@@ -280,12 +294,17 @@ std::optional<ChildKeyTree> ChildKeyTree::Build(
         const std::size_t parent_count{leaf_count >> level};
         const std::size_t parent_base{parent_count - 1};
         const std::size_t child_base{(parent_count << 1) - 1};
-        if (!ParallelFor(parent_count, worker_count, [&](std::size_t index) {
-                const std::size_t left{child_base + 2 * index};
-                tree.m_nodes[parent_base + index] = GetChildKeyTreeNodeHash(
-                    config, level, tree.m_nodes[left], tree.m_nodes[left + 1]);
-                return true;
-            })) {
+        if (!ParallelFor(parent_count, worker_count, cancel,
+                         [&](std::size_t index) {
+                             const std::size_t left{
+                                 child_base + 2 * index};
+                             tree.m_nodes[parent_base + index] =
+                                 GetChildKeyTreeNodeHash(
+                                     config, level,
+                                     tree.m_nodes[left],
+                                     tree.m_nodes[left + 1]);
+                             return true;
+                         })) {
             return std::nullopt;
         }
     }

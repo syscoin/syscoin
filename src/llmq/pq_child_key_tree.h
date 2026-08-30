@@ -7,6 +7,7 @@
 
 #include <llmq/pq_chainlock_types.h>
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -64,7 +65,8 @@ public:
     [[nodiscard]] static std::optional<ChildKeyTree> Build(
         std::span<const uint8_t> chainlock_master_seed,
         const ChildKeyTreeConfig& config,
-        std::size_t worker_count = 1);
+        std::size_t worker_count = 1,
+        const std::atomic<bool>* cancel = nullptr);
 
     [[nodiscard]] const ChildKeyTreeConfig& GetConfig() const noexcept
     {

@@ -19,8 +19,10 @@
 #include <algorithm>
 #include <atomic>
 #include <cassert>
+#include <chrono>
 #include <condition_variable>
 #include <deque>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <thread>
@@ -30,6 +32,9 @@ namespace llmq::pq {
 namespace {
 
 constexpr std::size_t MAX_CACHED_ACTIVE_CHILD_KEYS{8};
+constexpr std::size_t MAX_RECOVERY_CHILD_TREES{ACTIVE_QUORUMS};
+constexpr std::chrono::seconds CHILD_TREE_RETRY_INITIAL{60};
+constexpr std::chrono::seconds CHILD_TREE_RETRY_MAX{3600};
 
 bool ContainsCommitment(
     const std::vector<ChildKeyTreeCommitment>& commitments,
@@ -48,6 +53,14 @@ fs::path ChildTreeCachePath(
         commitment.generation, commitment.root.ToString()));
 }
 
+std::chrono::seconds ChildTreeRetryDelay(uint32_t failures) noexcept
+{
+    const uint32_t shift{
+        std::min<uint32_t>(failures > 0 ? failures - 1 : 0, 6)};
+    return std::min(CHILD_TREE_RETRY_INITIAL * (uint32_t{1} << shift),
+                    CHILD_TREE_RETRY_MAX);
+}
+
 } // namespace
 
 class ActiveChildKeyCache::Impl final {
@@ -62,6 +75,7 @@ public:
 
     ~Impl()
     {
+        m_cancel_build.store(true, std::memory_order_release);
         {
             std::lock_guard lock{m_mutex};
             m_stopping = true;
@@ -87,26 +101,40 @@ public:
 
         {
             std::lock_guard lock{m_mutex};
-            m_genesis_hash = genesis_hash;
-            m_desired = std::move(desired);
-            m_ready.erase(
-                std::remove_if(
-                    m_ready.begin(), m_ready.end(),
-                    [&](const auto& entry) {
-                        return !ContainsCommitment(m_desired,
-                                                   entry.commitment);
-                    }),
-                m_ready.end());
-            m_pending.clear();
-            for (const auto& commitment : m_desired) {
-                const bool ready{std::any_of(
-                    m_ready.begin(), m_ready.end(), [&](const auto& entry) {
-                        return entry.commitment == commitment;
-                    })};
-                if (!ready && (!m_building || *m_building != commitment)) {
-                    m_pending.push_back(commitment);
-                }
+            if (m_genesis_hash != genesis_hash) {
+                m_recovery_desired.clear();
+                m_failed.clear();
+                m_transient_failures.clear();
             }
+            m_genesis_hash = genesis_hash;
+            m_base_desired = std::move(desired);
+            RebuildDesired();
+        }
+        m_condition.notify_one();
+    }
+
+    void RequestRecovery(
+        const uint256& genesis_hash,
+        const std::vector<ChildKeyTreeCommitment>& commitments)
+    {
+        std::vector<ChildKeyTreeCommitment> desired;
+        desired.reserve(std::min(commitments.size(),
+                                 MAX_RECOVERY_CHILD_TREES));
+        for (const auto& commitment : commitments) {
+            if (desired.size() == MAX_RECOVERY_CHILD_TREES) break;
+            if (!ChildKeyTreeConfig::FromCommitment(genesis_hash,
+                                                    commitment) ||
+                ContainsCommitment(desired, commitment)) {
+                continue;
+            }
+            desired.push_back(commitment);
+        }
+
+        {
+            std::lock_guard lock{m_mutex};
+            if (m_genesis_hash != genesis_hash) return;
+            m_recovery_desired = std::move(desired);
+            RebuildDesired();
         }
         m_condition.notify_one();
     }
@@ -187,7 +215,8 @@ public:
                 genesis_hash, record.commitment, record.epoch, *proof)) {
             return std::nullopt;
         }
-        return ActiveChildSigningMaterial{std::move(secret_key), *proof};
+        return ActiveChildSigningMaterial{
+            std::move(secret_key), *proof, nullptr, 0, 0};
     }
 
 private:
@@ -198,6 +227,113 @@ private:
                  std::shared_ptr<const scheduled_wots::SecretKey>> child_keys;
     };
 
+    struct TransientFailure {
+        ChildKeyTreeCommitment commitment;
+        uint32_t failures{0};
+        std::chrono::steady_clock::time_point retry_after;
+    };
+
+    using SteadyTime = std::chrono::steady_clock::time_point;
+
+    auto FindTransientFailure(const ChildKeyTreeCommitment& commitment)
+    {
+        return std::find_if(
+            m_transient_failures.begin(), m_transient_failures.end(),
+            [&](const auto& failure) {
+                return failure.commitment == commitment;
+            });
+    }
+
+    auto FindTransientFailure(
+        const ChildKeyTreeCommitment& commitment) const
+    {
+        return std::find_if(
+            m_transient_failures.begin(), m_transient_failures.end(),
+            [&](const auto& failure) {
+                return failure.commitment == commitment;
+            });
+    }
+
+    void RecordTransientFailure(const ChildKeyTreeCommitment& commitment)
+    {
+        auto failure{FindTransientFailure(commitment)};
+        if (failure == m_transient_failures.end()) {
+            m_transient_failures.push_back(
+                TransientFailure{commitment, 0, {}});
+            failure = std::prev(m_transient_failures.end());
+        }
+        failure->failures = std::min<uint32_t>(failure->failures + 1, 7);
+        failure->retry_after = std::chrono::steady_clock::now() +
+                               ChildTreeRetryDelay(failure->failures);
+    }
+
+    std::optional<SteadyTime> NextTransientRetry() const
+    {
+        std::optional<SteadyTime> next;
+        for (const auto& failure : m_transient_failures) {
+            if (!ContainsCommitment(m_desired, failure.commitment)) continue;
+            if (!next || failure.retry_after < *next) {
+                next = failure.retry_after;
+            }
+        }
+        return next;
+    }
+
+    void RebuildDesired()
+    {
+        // A recovery attempt has a narrow signing window. Prepare its bounded
+        // roots before ordinary current/frozen cache demand.
+        m_desired = m_recovery_desired;
+        for (const auto& commitment : m_base_desired) {
+            if (!ContainsCommitment(m_desired, commitment)) {
+                m_desired.push_back(commitment);
+            }
+        }
+        // A derived root mismatch is deterministic for one key manager and
+        // exact commitment. Unrelated demand must not restart that same
+        // 2^16-child build.
+        m_failed.erase(
+            std::remove_if(
+                m_failed.begin(), m_failed.end(),
+                [&](const auto& commitment) {
+                    return !ContainsCommitment(m_desired, commitment);
+                }),
+            m_failed.end());
+        m_transient_failures.erase(
+            std::remove_if(
+                m_transient_failures.begin(),
+                m_transient_failures.end(), [&](const auto& failure) {
+                    return !ContainsCommitment(m_desired,
+                                               failure.commitment);
+                }),
+            m_transient_failures.end());
+        m_ready.erase(
+            std::remove_if(
+                m_ready.begin(), m_ready.end(),
+                [&](const auto& entry) {
+                    return !ContainsCommitment(m_desired,
+                                               entry.commitment);
+                }),
+            m_ready.end());
+        m_pending.clear();
+        const auto now{std::chrono::steady_clock::now()};
+        for (const auto& commitment : m_desired) {
+            const bool ready{std::any_of(
+                m_ready.begin(), m_ready.end(), [&](const auto& entry) {
+                    return entry.commitment == commitment;
+                })};
+            const auto transient{FindTransientFailure(commitment)};
+            const bool retry_due{
+                transient == m_transient_failures.end() ||
+                transient->retry_after <= now};
+            if (!ready && retry_due &&
+                !ContainsCommitment(m_failed, commitment) &&
+                (!m_building || *m_building != commitment)) {
+                m_pending.push_back(commitment);
+            }
+        }
+    }
+
     void Run()
     {
         while (true) {
@@ -205,9 +341,15 @@ private:
             uint256 genesis_hash;
             {
                 std::unique_lock lock{m_mutex};
-                m_condition.wait(lock, [&] {
-                    return m_stopping || !m_pending.empty();
-                });
+                while (!m_stopping && m_pending.empty()) {
+                    const auto next_retry{NextTransientRetry()};
+                    if (next_retry) {
+                        m_condition.wait_until(lock, *next_retry);
+                    } else {
+                        m_condition.wait(lock);
+                    }
+                    RebuildDesired();
+                }
                 if (m_stopping) return;
                 commitment = m_pending.front();
                 m_pending.pop_front();
@@ -215,7 +357,13 @@ private:
                 genesis_hash = m_genesis_hash;
             }
 
+            enum class BuildOutcome : uint8_t {
+                READY = 0,
+                TRANSIENT_FAILURE,
+                PERMANENT_MISMATCH,
+            };
             std::optional<ChildKeyTree> tree;
+            BuildOutcome outcome{BuildOutcome::TRANSIENT_FAILURE};
             const auto config{ChildKeyTreeConfig::FromCommitment(
                 genesis_hash, commitment)};
             if (config) {
@@ -226,8 +374,20 @@ private:
                     LogPrintf("PQ child-key tree cache miss for %s; "
                               "building public cache asynchronously\n",
                               commitment.tree_id.ToString());
-                    tree = m_key_manager.BuildCommittedChildKeyTree(
-                        *config, DefaultChildKeyTreeWorkerCount());
+                    try {
+                        tree = m_key_manager.BuildCommittedChildKeyTree(
+                            *config, DefaultChildKeyTreeWorkerCount(),
+                            &m_cancel_build);
+                    } catch (const std::exception& exception) {
+                        LogPrintf("PQ child-key tree cache build for %s "
+                                  "failed transiently: %s\n",
+                                  commitment.tree_id.ToString(),
+                                  exception.what());
+                    } catch (...) {
+                        LogPrintf("PQ child-key tree cache build for %s "
+                                  "failed transiently\n",
+                                  commitment.tree_id.ToString());
+                    }
                     if (tree && tree->GetRoot() == commitment.root) {
                         try {
                             fs::create_directories(m_cache_directory);
@@ -241,17 +401,26 @@ private:
                                       "cache %s\n",
                                       fs::PathToString(path));
                         }
-                    } else {
+                    } else if (tree) {
                         tree.reset();
+                        outcome = BuildOutcome::PERMANENT_MISMATCH;
                     }
                 }
+                if (tree) outcome = BuildOutcome::READY;
+            } else {
+                outcome = BuildOutcome::PERMANENT_MISMATCH;
             }
 
             {
                 std::lock_guard lock{m_mutex};
                 m_building.reset();
-                if (tree && m_genesis_hash == genesis_hash &&
+                if (outcome == BuildOutcome::READY && tree &&
+                    m_genesis_hash == genesis_hash &&
                     ContainsCommitment(m_desired, commitment)) {
+                    const auto transient{FindTransientFailure(commitment)};
+                    if (transient != m_transient_failures.end()) {
+                        m_transient_failures.erase(transient);
+                    }
                     m_ready.erase(
                         std::remove_if(
                             m_ready.begin(), m_ready.end(),
@@ -261,7 +430,25 @@ private:
                         m_ready.end());
                     m_ready.push_back(
                         ReadyTree{commitment, std::move(*tree), {}});
+                } else if (m_genesis_hash == genesis_hash &&
+                           ContainsCommitment(m_desired, commitment)) {
+                    if (outcome == BuildOutcome::PERMANENT_MISMATCH) {
+                        const auto transient{
+                            FindTransientFailure(commitment)};
+                        if (transient != m_transient_failures.end()) {
+                            m_transient_failures.erase(transient);
+                        }
+                        if (!ContainsCommitment(m_failed, commitment)) {
+                            m_failed.push_back(commitment);
+                        }
+                    } else {
+                        RecordTransientFailure(commitment);
+                    }
                 }
+                // Re-evaluate priority after every expensive build. Once an
+                // urgent recovery retry becomes due it may wait behind only
+                // the tree already in flight, never the remaining base queue.
+                RebuildDesired();
             }
         }
     }
@@ -270,9 +457,16 @@ private:
     const fs::path m_cache_directory;
     mutable std::mutex m_mutex;
     std::condition_variable m_condition;
+    std::atomic<bool> m_cancel_build{false};
     bool m_stopping{false};
     uint256 m_genesis_hash;
+    std::vector<ChildKeyTreeCommitment> m_base_desired;
+    std::vector<ChildKeyTreeCommitment> m_recovery_desired;
     std::vector<ChildKeyTreeCommitment> m_desired;
+    // Only a successfully derived root mismatch is deterministic. Resource
+    // and worker-start failures remain retryable with bounded backoff.
+    std::vector<ChildKeyTreeCommitment> m_failed;
+    std::vector<TransientFailure> m_transient_failures;
     std::deque<ChildKeyTreeCommitment> m_pending;
     std::optional<ChildKeyTreeCommitment> m_building;
     mutable std::vector<ReadyTree> m_ready;
@@ -294,6 +488,13 @@ void ActiveChildKeyCache::Request(
     const std::vector<ChildKeyTreeCommitment>& commitments)
 {
     m_impl->Request(genesis_hash, commitments);
+}
+
+void ActiveChildKeyCache::RequestRecovery(
+    const uint256& genesis_hash,
+    const std::vector<ChildKeyTreeCommitment>& commitments)
+{
+    m_impl->RequestRecovery(genesis_hash, commitments);
 }
 
 std::optional<ActiveChildSigningMaterial>
@@ -662,8 +863,62 @@ GetActiveMasternodeChildSigningMaterial(
         !activeMasternodeInfo.childKeyCache) {
         return std::nullopt;
     }
-    return activeMasternodeInfo.childKeyCache->GetSigningMaterial(
-        genesis_hash, pro_tx_hash, record);
+    auto material{activeMasternodeInfo.childKeyCache->GetSigningMaterial(
+        genesis_hash, pro_tx_hash, record)};
+    if (!material) return std::nullopt;
+    material->active_key_manager =
+        activeMasternodeInfo.operatorKeyManager;
+    material->active_global_key_version =
+        activeMasternodeInfo.globalKeyVersion;
+    material->active_identity_generation =
+        activeMasternodeInfo.identityGeneration;
+    return material;
+}
+
+bool IsActiveMasternodeChildSigningMaterialCurrent(
+    const uint256& pro_tx_hash,
+    const llmq::pq::ActiveChildSigningMaterial& material)
+{
+    LOCK(activeMasternodeInfoCs);
+    return fMasternodeMode && !pro_tx_hash.IsNull() &&
+           material.active_key_manager &&
+           material.active_key_manager->IsValid() &&
+           activeMasternodeInfo.proTxHash == pro_tx_hash &&
+           activeMasternodeInfo.operatorKeyManager ==
+               material.active_key_manager &&
+           activeMasternodeInfo.globalKeyVersion ==
+               material.active_global_key_version &&
+           activeMasternodeInfo.identityGeneration ==
+               material.active_identity_generation;
+}
+
+bool RequestActiveMasternodeRecoveryChildKeyTrees(
+    const uint256& genesis_hash,
+    const std::vector<llmq::pq::FrozenChildRootRecord>& records)
+{
+    LOCK(activeMasternodeInfoCs);
+    if (!fMasternodeMode || genesis_hash.IsNull() ||
+        activeMasternodeInfo.proTxHash.IsNull() ||
+        !activeMasternodeInfo.childKeyCache) {
+        return records.empty();
+    }
+    std::vector<llmq::pq::ChildKeyTreeCommitment> commitments;
+    commitments.reserve(std::min(
+        records.size(), llmq::pq::ACTIVE_QUORUMS));
+    for (const auto& record : records) {
+        if (!record.IsStructurallyValid() ||
+            record.pro_tx_hash != activeMasternodeInfo.proTxHash) {
+            return false;
+        }
+        if (std::find(commitments.begin(), commitments.end(),
+                      record.commitment) == commitments.end()) {
+            commitments.push_back(record.commitment);
+        }
+    }
+    if (commitments.size() > llmq::pq::ACTIVE_QUORUMS) return false;
+    activeMasternodeInfo.childKeyCache->RequestRecovery(
+        genesis_hash, commitments);
+    return true;
 }
 
 std::string CActiveMasternodeManager::GetStateString() const

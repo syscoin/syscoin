@@ -292,10 +292,12 @@ LocalOperatorKeyManager::DeriveCommittedChildKey(
 std::optional<ChildKeyTree>
 LocalOperatorKeyManager::BuildCommittedChildKeyTree(
     const ChildKeyTreeConfig& config,
-    std::size_t worker_count) const
+    std::size_t worker_count,
+    const std::atomic<bool>* cancel) const
 {
     if (!IsValid()) return std::nullopt;
-    return ChildKeyTree::Build(m_chainlock_master_seed, config, worker_count);
+    return ChildKeyTree::Build(
+        m_chainlock_master_seed, config, worker_count, cancel);
 }
 
 } // namespace llmq::pq

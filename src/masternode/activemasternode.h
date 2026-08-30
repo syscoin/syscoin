@@ -25,6 +25,9 @@ namespace llmq::pq {
 struct ActiveChildSigningMaterial {
     std::shared_ptr<const scheduled_wots::SecretKey> secret_key;
     ChildKeyProof key_proof;
+    std::shared_ptr<const LocalOperatorKeyManager> active_key_manager;
+    uint32_t active_global_key_version{0};
+    uint64_t active_identity_generation{0};
 };
 
 /**
@@ -46,6 +49,11 @@ public:
 
     void Request(const uint256& genesis_hash,
                  const std::vector<ChildKeyTreeCommitment>& commitments);
+
+    /** Pin the bounded set needed by one crash-durable recovery attempt. */
+    void RequestRecovery(
+        const uint256& genesis_hash,
+        const std::vector<ChildKeyTreeCommitment>& commitments);
 
     [[nodiscard]] std::optional<ActiveChildSigningMaterial>
     GetSigningMaterial(const uint256& genesis_hash,
@@ -157,6 +165,16 @@ GetActiveMasternodeChildSigningMaterial(
     const uint256& genesis_hash,
     const uint256& pro_tx_hash,
     const llmq::pq::FrozenChildRootRecord& record);
+
+/** Reject material spanning an active operator identity transition. */
+bool IsActiveMasternodeChildSigningMaterialCurrent(
+    const uint256& pro_tx_hash,
+    const llmq::pq::ActiveChildSigningMaterial& material);
+
+/** Replace the bounded local child-tree pins for one recovery attempt. */
+bool RequestActiveMasternodeRecoveryChildKeyTrees(
+    const uint256& genesis_hash,
+    const std::vector<llmq::pq::FrozenChildRootRecord>& records);
 
 
 class CActiveMasternodeManager : public CValidationInterface

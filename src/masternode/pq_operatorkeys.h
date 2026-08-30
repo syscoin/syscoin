@@ -66,7 +66,8 @@ public:
      * network-processing paths. The resulting cache contains public data. */
     [[nodiscard]] std::optional<ChildKeyTree> BuildCommittedChildKeyTree(
         const ChildKeyTreeConfig& config,
-        std::size_t worker_count) const;
+        std::size_t worker_count,
+        const std::atomic<bool>* cancel = nullptr) const;
 
 private:
     slhdsa::SecretKey m_global_secret_key;
