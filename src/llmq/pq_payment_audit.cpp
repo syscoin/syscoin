@@ -594,6 +594,7 @@ bool PaymentAuditReceipt::IsNull() const noexcept
            audit_witness_id.IsNull() && commitment_hash.IsNull() &&
            result_hash.IsNull() &&
            next_probation_state_hash.IsNull() &&
+           subject_roster_beacon == RosterBeaconSeed{} &&
            online_members == QuorumBitmap{};
 }
 
@@ -610,7 +611,9 @@ bool PaymentAuditReceipt::IsStructurallyValid() const noexcept
            !seal_block_hash.IsNull() && !audit_logical_id.IsNull() &&
            !audit_witness_id.IsNull() && !commitment_hash.IsNull() &&
            !result_hash.IsNull() &&
-           !next_probation_state_hash.IsNull();
+           !next_probation_state_hash.IsNull() &&
+           subject_roster_beacon.IsReady() &&
+           subject_roster_beacon.epoch == epoch;
 }
 
 bool IsPaymentAuditCandidateCompatible(

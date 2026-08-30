@@ -140,7 +140,7 @@ struct PaymentAuditResponse {
                            const PaymentAuditResponse&) = default;
 };
 
-static_assert(PaymentAuditResponse::WIRE_SIZE == 1'870);
+static_assert(PaymentAuditResponse::WIRE_SIZE == 2'465);
 
 struct PaymentAuditScheduleConfig {
     ChainLockScheduleConfig chainlock;
@@ -369,7 +369,7 @@ struct PaymentAuditStatement {
                            const PaymentAuditStatement&) = default;
 };
 
-static_assert(PaymentAuditStatement::WIRE_SIZE == 862);
+static_assert(PaymentAuditStatement::WIRE_SIZE == 1'457);
 
 struct PaymentAuditShareTranscript {
     static constexpr std::size_t WIRE_SIZE{
@@ -399,7 +399,7 @@ struct PaymentAuditShareTranscript {
                            const PaymentAuditShareTranscript&) = default;
 };
 
-static_assert(PaymentAuditShareTranscript::WIRE_SIZE == 982);
+static_assert(PaymentAuditShareTranscript::WIRE_SIZE == 1'577);
 
 struct PaymentAuditShare {
     static constexpr std::size_t WIRE_SIZE{
@@ -424,7 +424,7 @@ struct PaymentAuditShare {
                            const PaymentAuditShare&) = default;
 };
 
-static_assert(PaymentAuditShare::WIRE_SIZE == 2'230);
+static_assert(PaymentAuditShare::WIRE_SIZE == 2'825);
 
 /** One signer-bound report, aligned with signer_bitmaps canonical order. */
 struct PaymentAuditReportWitness {
@@ -497,7 +497,7 @@ struct FinalPaymentAudit {
                            const FinalPaymentAudit&) = default;
 };
 
-static_assert(FinalPaymentAudit::WIRE_SIZE == 1'040'763);
+static_assert(FinalPaymentAudit::WIRE_SIZE == 1'041'358);
 static_assert(FinalPaymentAudit::WIRE_SIZE <
               MAX_PAYMENT_AUDIT_CERTIFICATE_SIZE);
 
@@ -505,7 +505,8 @@ static_assert(FinalPaymentAudit::WIRE_SIZE <
 struct PaymentAuditReceipt {
     static constexpr std::size_t WIRE_SIZE{
         sizeof(uint16_t) + sizeof(uint8_t) + sizeof(uint32_t) +
-        2 * sizeof(int32_t) + 6 * 32 + BITMAP_SIZE};
+        2 * sizeof(int32_t) + 6 * 32 +
+        RosterBeaconSeed::WIRE_SIZE + BITMAP_SIZE};
 
     uint16_t version{PAYMENT_AUDIT_RECEIPT_VERSION};
     uint8_t has_audit{0};
@@ -518,6 +519,7 @@ struct PaymentAuditReceipt {
     uint256 commitment_hash;
     uint256 result_hash;
     uint256 next_probation_state_hash;
+    RosterBeaconSeed subject_roster_beacon;
     QuorumBitmap online_members{};
 
     SERIALIZE_METHODS(PaymentAuditReceipt, obj)
@@ -526,7 +528,8 @@ struct PaymentAuditReceipt {
                   obj.seal_block_hash, obj.carrier_height,
                   obj.audit_logical_id, obj.audit_witness_id,
                   obj.commitment_hash, obj.result_hash,
-                  obj.next_probation_state_hash, obj.online_members);
+                  obj.next_probation_state_hash,
+                  obj.subject_roster_beacon, obj.online_members);
         SER_READ(obj, if (!obj.IsStructurallyValid()) {
             throw std::ios_base::failure(
                 "non-canonical payment-audit receipt");
@@ -539,7 +542,7 @@ struct PaymentAuditReceipt {
                            const PaymentAuditReceipt&) = default;
 };
 
-static_assert(PaymentAuditReceipt::WIRE_SIZE == 257);
+static_assert(PaymentAuditReceipt::WIRE_SIZE == 369);
 
 /** Deterministic classification derived only from the exact 801 reports. */
 struct PaymentAuditClassification {

@@ -414,6 +414,7 @@ struct QuorumDescriptor {
     uint256 base_hash;
     int32_t snapshot_height{-1};
     uint256 snapshot_hash;
+    uint256 roster_beacon_hash;
     uint16_t profile{CHILD_SCHEDULED_WOTS_SHAKE_128_V1};
     uint16_t usage_cap{SCHEDULED_WOTS_USAGE_CAP};
     QuorumBitmap valid_members{};
@@ -423,9 +424,11 @@ struct QuorumDescriptor {
 
     SERIALIZE_METHODS(QuorumDescriptor, obj)
     {
-        READWRITE(obj.version, obj.epoch, obj.base_height, obj.base_hash, obj.snapshot_height,
-                  obj.snapshot_hash, obj.profile, obj.usage_cap, obj.valid_members,
-                  obj.member_root, obj.child_key_root, obj.valid_count);
+        READWRITE(obj.version, obj.epoch, obj.base_height, obj.base_hash,
+                  obj.snapshot_height, obj.snapshot_hash,
+                  obj.roster_beacon_hash, obj.profile, obj.usage_cap,
+                  obj.valid_members, obj.member_root, obj.child_key_root,
+                  obj.valid_count);
     }
 
     [[nodiscard]] bool IsStructurallyValid() const;
@@ -440,6 +443,10 @@ struct ChainLockShareTranscript {
     int32_t previous_chainlock_height{-1};
     uint256 previous_chainlock_hash;
     uint256 quorum_context_hash;
+    RosterAuthorizationTransitionKind roster_transition{
+        RosterAuthorizationTransitionKind::INITIALIZE};
+    RosterBeaconWindow roster_beacons;
+    uint256 roster_authorization_state_hash;
     uint32_t quorum_epoch{0};
     uint256 quorum_base_hash;
     uint16_t member_index{std::numeric_limits<uint16_t>::max()};
@@ -454,15 +461,22 @@ struct ChainLockShareTranscript {
     SERIALIZE_METHODS(ChainLockShareTranscript, obj)
     {
         uint8_t btcc_advance{static_cast<uint8_t>(obj.btcc_advance)};
+        uint8_t roster_transition{
+            static_cast<uint8_t>(obj.roster_transition)};
         READWRITE(obj.chainlock_version, obj.child_profile, obj.height, obj.block_hash,
                   obj.previous_chainlock_height, obj.previous_chainlock_hash,
-                  obj.quorum_context_hash, obj.quorum_epoch, obj.quorum_base_hash,
+                  obj.quorum_context_hash, roster_transition,
+                  obj.roster_beacons, obj.roster_authorization_state_hash,
+                  obj.quorum_epoch, obj.quorum_base_hash,
                   obj.member_index, obj.member_pro_tx_hash,
                   obj.previous_btcc_cursor, obj.accepted_btcc_cursor,
                   btcc_advance, obj.btcc_receipt_state,
                   obj.payment_audit_receipt_state,
                   obj.payment_probation_state_hash);
         SER_READ(obj, obj.btcc_advance = static_cast<BTCCAdvance>(btcc_advance));
+        SER_READ(obj, obj.roster_transition =
+                          static_cast<RosterAuthorizationTransitionKind>(
+                              roster_transition));
     }
 
     [[nodiscard]] bool IsStructurallyValid() const;
@@ -472,6 +486,7 @@ struct ChainLockShareTranscript {
 struct ChainLockStatement {
     static constexpr std::size_t WIRE_SIZE{
         2 * sizeof(uint16_t) + 2 * sizeof(int32_t) + 3 * 32 +
+        sizeof(uint8_t) + RosterBeaconWindow::WIRE_SIZE + 32 +
         2 * BTCCursor::WIRE_SIZE + sizeof(uint8_t) +
         BTCCReceiptState::WIRE_SIZE +
         PaymentAuditReceiptState::WIRE_SIZE + 32};
@@ -482,6 +497,10 @@ struct ChainLockStatement {
     int32_t previous_chainlock_height{-1};
     uint256 previous_chainlock_hash;
     uint256 quorum_context_hash;
+    RosterAuthorizationTransitionKind roster_transition{
+        RosterAuthorizationTransitionKind::INITIALIZE};
+    RosterBeaconWindow roster_beacons;
+    uint256 roster_authorization_state_hash;
     BTCCursor previous_btcc_cursor;
     BTCCursor accepted_btcc_cursor;
     BTCCAdvance btcc_advance{BTCCAdvance::KEEP};
@@ -492,14 +511,21 @@ struct ChainLockStatement {
     SERIALIZE_METHODS(ChainLockStatement, obj)
     {
         uint8_t btcc_advance{static_cast<uint8_t>(obj.btcc_advance)};
+        uint8_t roster_transition{
+            static_cast<uint8_t>(obj.roster_transition)};
         READWRITE(obj.version, obj.child_profile, obj.height, obj.block_hash,
                   obj.previous_chainlock_height, obj.previous_chainlock_hash,
-                  obj.quorum_context_hash, obj.previous_btcc_cursor,
+                  obj.quorum_context_hash, roster_transition,
+                  obj.roster_beacons, obj.roster_authorization_state_hash,
+                  obj.previous_btcc_cursor,
                   obj.accepted_btcc_cursor, btcc_advance,
                   obj.btcc_receipt_state,
                   obj.payment_audit_receipt_state,
                   obj.payment_probation_state_hash);
         SER_READ(obj, obj.btcc_advance = static_cast<BTCCAdvance>(btcc_advance));
+        SER_READ(obj, obj.roster_transition =
+                          static_cast<RosterAuthorizationTransitionKind>(
+                              roster_transition));
     }
 
     [[nodiscard]] bool IsStructurallyValid() const;
@@ -513,12 +539,13 @@ struct ChainLockStatement {
 struct ChainLockShare {
     static constexpr std::size_t WIRE_SIZE{
         2 * sizeof(uint16_t) + 2 * sizeof(int32_t) + 7 * 32 +
+        sizeof(uint8_t) + RosterBeaconWindow::WIRE_SIZE + 32 +
         sizeof(uint32_t) + sizeof(uint16_t) + sizeof(int32_t) +
         sizeof(uint8_t) + sizeof(int32_t) + 2 * 32 +
         BTCCReceiptState::WIRE_SIZE +
         PaymentAuditReceiptState::WIRE_SIZE + 32 +
         AuthenticatedChildSignature::WIRE_SIZE};
-    static_assert(WIRE_SIZE == 1'831);
+    static_assert(WIRE_SIZE == 2'426);
 
     ChainLockShareTranscript transcript;
     AuthenticatedChildSignature authenticated_signature;
@@ -547,7 +574,7 @@ struct FinalChainLock {
         ACTIVE_QUORUMS * BITMAP_SIZE + sizeof(uint16_t) +
         FINAL_SIGNATURE_COUNT * AuthenticatedChildSignature::WIRE_SIZE};
     static_assert(WIRE_SIZE < MAX_CHAINLOCK_SIZE);
-    static_assert(WIRE_SIZE == 1'000'364);
+    static_assert(WIRE_SIZE == 1'000'959);
 
     ChainLockStatement statement;
     uint8_t selected_quorum_mask{0};
@@ -638,8 +665,8 @@ FinalChainLock ReadFinalChainLock(Stream& stream, std::size_t payload_size)
 }
 
 static_assert(FinalChainLockSerializedSize() < MAX_CHAINLOCK_SIZE);
-static_assert(ChainLockShare::WIRE_SIZE == 1'831);
-static_assert(FinalChainLockSerializedSize() == 1'000'364);
+static_assert(ChainLockShare::WIRE_SIZE == 2'426);
+static_assert(FinalChainLockSerializedSize() == 1'000'959);
 
 } // namespace llmq::pq
 

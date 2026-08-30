@@ -39,6 +39,31 @@ void SetFirstMembers(QuorumBitmap& bitmap, std::size_t count)
     }
 }
 
+RosterBeaconSeed ReadySeed(uint32_t epoch)
+{
+    RosterBeaconSeed seed;
+    seed.state = RosterBeaconState::READY;
+    seed.epoch = epoch;
+    seed.anchor_cursor = BTCCursor{
+        1'000 + static_cast<int32_t>(epoch),
+        NonNullHash(100 + epoch), NonNullHash(200 + epoch)};
+    seed.anchor_btc_height = 800'000 + static_cast<int32_t>(epoch);
+    seed.future_btc_hash = NonNullHash(300 + epoch);
+    return seed;
+}
+
+RosterBeaconWindow ReadyWindow(uint32_t first_epoch)
+{
+    RosterBeaconWindow window;
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        window.active.seeds[slot] =
+            ReadySeed(first_epoch + static_cast<uint32_t>(slot));
+    }
+    window.next.epoch =
+        first_epoch + static_cast<uint32_t>(ACTIVE_QUORUMS);
+    return window;
+}
+
 ChainLockStatement ValidStatement()
 {
     ChainLockStatement statement;
@@ -48,6 +73,10 @@ ChainLockStatement ValidStatement()
     statement.previous_chainlock_hash = NonNullHash(2);
     statement.quorum_context_hash = NonNullHash(3);
     statement.payment_probation_state_hash = NonNullHash(4);
+    statement.roster_transition =
+        RosterAuthorizationTransitionKind::KEEP;
+    statement.roster_beacons = ReadyWindow(2);
+    statement.roster_authorization_state_hash = NonNullHash(5);
     return statement;
 }
 
@@ -136,6 +165,7 @@ BOOST_AUTO_TEST_CASE(cursor_and_descriptor_structure)
     descriptor.snapshot_hash = NonNullHash(4);
     descriptor.member_root = NonNullHash(5);
     descriptor.child_key_root = NonNullHash(6);
+    descriptor.roster_beacon_hash = NonNullHash(7);
     SetFirstMembers(descriptor.valid_members, QUORUM_MIN_VALID);
     descriptor.valid_count = QUORUM_MIN_VALID;
     BOOST_CHECK(descriptor.IsStructurallyValid());
@@ -294,6 +324,7 @@ BOOST_AUTO_TEST_CASE(logical_and_witness_ids_are_separated)
 
 BOOST_AUTO_TEST_CASE(share_hash_binds_member_epoch_btcc_and_genesis)
 {
+    const ChainLockStatement statement_template{ValidStatement()};
     ChainLockShareTranscript transcript;
     transcript.height = 1445;
     transcript.block_hash = NonNullHash(1);
@@ -305,6 +336,11 @@ BOOST_AUTO_TEST_CASE(share_hash_binds_member_epoch_btcc_and_genesis)
     transcript.member_index = 10;
     transcript.member_pro_tx_hash = NonNullHash(5);
     transcript.payment_probation_state_hash = NonNullHash(6);
+    transcript.roster_transition =
+        statement_template.roster_transition;
+    transcript.roster_beacons = statement_template.roster_beacons;
+    transcript.roster_authorization_state_hash =
+        statement_template.roster_authorization_state_hash;
     BOOST_REQUIRE(transcript.IsStructurallyValid());
 
     const uint256 genesis = NonNullHash(100);

@@ -249,7 +249,8 @@ bool QuorumDescriptor::IsStructurallyValid() const
 {
     return version == QUORUM_DESCRIPTOR_VERSION && base_height >= 0 &&
            snapshot_height >= 0 && snapshot_height < base_height && !base_hash.IsNull() &&
-           !snapshot_hash.IsNull() && profile == CHILD_SCHEDULED_WOTS_SHAKE_128_V1 &&
+           !snapshot_hash.IsNull() && !roster_beacon_hash.IsNull() &&
+           profile == CHILD_SCHEDULED_WOTS_SHAKE_128_V1 &&
            usage_cap == SCHEDULED_WOTS_USAGE_CAP && valid_count == CountSet(valid_members) &&
            valid_count >= QUORUM_MIN_VALID && valid_count <= QUORUM_SIZE &&
            !member_root.IsNull() && !child_key_root.IsNull();
@@ -261,7 +262,11 @@ bool ChainLockShareTranscript::IsStructurallyValid() const
            height >= 0 && !block_hash.IsNull() && previous_chainlock_height < height &&
            (previous_chainlock_height >= 0 || previous_chainlock_hash.IsNull()) &&
            (previous_chainlock_height < 0 || !previous_chainlock_hash.IsNull()) &&
-           !quorum_context_hash.IsNull() && !quorum_base_hash.IsNull() &&
+           !quorum_context_hash.IsNull() &&
+           IsKnownRosterAuthorizationTransition(roster_transition) &&
+           roster_beacons.IsStructurallyValid() &&
+           !roster_authorization_state_hash.IsNull() &&
+           !quorum_base_hash.IsNull() &&
            member_index < QUORUM_SIZE && !member_pro_tx_hash.IsNull() &&
            IsCursorTransitionStructurallyValid(
                previous_chainlock_height, previous_btcc_cursor,
@@ -279,6 +284,9 @@ bool ChainLockStatement::IsStructurallyValid() const
            (previous_chainlock_height >= 0 || previous_chainlock_hash.IsNull()) &&
            (previous_chainlock_height < 0 || !previous_chainlock_hash.IsNull()) &&
            !quorum_context_hash.IsNull() &&
+           IsKnownRosterAuthorizationTransition(roster_transition) &&
+           roster_beacons.IsStructurallyValid() &&
+           !roster_authorization_state_hash.IsNull() &&
            IsCursorTransitionStructurallyValid(
                previous_chainlock_height, previous_btcc_cursor,
                accepted_btcc_cursor, btcc_advance) &&
@@ -304,6 +312,10 @@ ChainLockStatement ChainLockShare::GetStatement() const
     statement.previous_chainlock_height = transcript.previous_chainlock_height;
     statement.previous_chainlock_hash = transcript.previous_chainlock_hash;
     statement.quorum_context_hash = transcript.quorum_context_hash;
+    statement.roster_transition = transcript.roster_transition;
+    statement.roster_beacons = transcript.roster_beacons;
+    statement.roster_authorization_state_hash =
+        transcript.roster_authorization_state_hash;
     statement.previous_btcc_cursor = transcript.previous_btcc_cursor;
     statement.accepted_btcc_cursor = transcript.accepted_btcc_cursor;
     statement.btcc_advance = transcript.btcc_advance;

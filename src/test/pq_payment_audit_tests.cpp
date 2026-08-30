@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <llmq/pq_payment_audit.h>
+#include <llmq/pq_roster_beacon.h>
 
 #include <primitives/block.h>
 #include <primitives/transaction.h>
@@ -31,6 +32,54 @@ uint256 NonNullHash(uint64_t value)
     }
     if (hash.IsNull()) hash.begin()[0] = 1;
     return hash;
+}
+
+RosterBeaconSeed SubjectBeacon(uint32_t epoch)
+{
+    RosterBeaconSeed seed;
+    seed.state = RosterBeaconState::READY;
+    seed.epoch = epoch;
+    seed.anchor_cursor = BTCCursor{
+        10'000 + static_cast<int32_t>(epoch),
+        NonNullHash(100'000 + epoch), NonNullHash(200'000 + epoch)};
+    seed.anchor_btc_height = 800'000 + static_cast<int32_t>(epoch);
+    seed.future_btc_hash = NonNullHash(300'000 + epoch);
+    return seed;
+}
+
+void SealNormalKeepRosterAuthorization(
+    const ChainLockScheduleConfig& schedule,
+    const uint256& genesis_hash,
+    ChainLockStatement& statement)
+{
+    const auto active_epochs{
+        ActiveEpochsAtHeight(schedule, statement.height)};
+    BOOST_REQUIRE(active_epochs);
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        statement.roster_beacons.active.seeds[slot] =
+            SubjectBeacon((*active_epochs)[slot].epoch);
+    }
+    statement.roster_beacons.next.epoch =
+        active_epochs->back().epoch + 1;
+    statement.roster_transition =
+        RosterAuthorizationTransitionKind::KEEP;
+
+    RosterAuthorizationTransition transition;
+    transition.kind = statement.roster_transition;
+    transition.target_height = statement.height;
+    transition.target_block_hash = statement.block_hash;
+    transition.predecessor_height =
+        statement.previous_chainlock_height;
+    transition.predecessor_block_hash =
+        statement.previous_chainlock_hash;
+    transition.previous = RosterAuthorizationPriorState{
+        NonNullHash(400'000 + static_cast<uint64_t>(statement.height)),
+        statement.roster_beacons};
+    transition.new_window = statement.roster_beacons;
+    const auto state_hash{
+        GetRosterAuthorizationStateHash(genesis_hash, transition)};
+    BOOST_REQUIRE(state_hash);
+    statement.roster_authorization_state_hash = *state_hash;
 }
 
 void SetMembers(QuorumBitmap& bitmap, std::size_t first, std::size_t count)
@@ -136,6 +185,8 @@ PaymentAuditStatement ValidStatement(
     seal.quorum_context_hash = NonNullHash(203);
     seal.payment_probation_state_hash =
         commitment.previous_probation_state_hash;
+    SealNormalKeepRosterAuthorization(
+        config.chainlock, genesis_hash, seal);
     BOOST_REQUIRE(seal.IsStructurallyValid());
     return PaymentAuditStatement{commitment, seal};
 }
@@ -612,6 +663,7 @@ BOOST_AUTO_TEST_CASE(null_then_later_nonnull_carrier_applies_once)
     receipt.commitment_hash = NonNullHash(54);
     receipt.result_hash = NonNullHash(55);
     receipt.next_probation_state_hash = NonNullHash(56);
+    receipt.subject_roster_beacon = SubjectBeacon(receipt.epoch);
     SetMembers(receipt.online_members, 7, 3);
     BOOST_REQUIRE(receipt.IsStructurallyValid());
     BOOST_CHECK_EQUAL(*PaymentAuditReceiptSlotEpoch(
@@ -647,6 +699,7 @@ BOOST_AUTO_TEST_CASE(payment_audit_receipt_commits_online_members)
     receipt.commitment_hash = NonNullHash(63);
     receipt.result_hash = NonNullHash(64);
     receipt.next_probation_state_hash = NonNullHash(65);
+    receipt.subject_roster_beacon = SubjectBeacon(receipt.epoch);
     SetMembers(receipt.online_members, 17, 11);
     BOOST_REQUIRE(receipt.IsStructurallyValid());
 
@@ -719,6 +772,7 @@ BOOST_AUTO_TEST_CASE(audit_tail_precedes_btcc_and_allows_opaque_magic)
               expected.commitment_hash.begin());
     expected.result_hash = NonNullHash(74);
     expected.next_probation_state_hash = NonNullHash(75);
+    expected.subject_roster_beacon = SubjectBeacon(expected.epoch);
     SetMembers(expected.online_members, 31, 5);
     BOOST_REQUIRE(expected.IsStructurallyValid());
 
