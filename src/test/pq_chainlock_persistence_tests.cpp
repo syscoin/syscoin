@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <llmq/pq_chainlock_persistence.h>
+#include <llmq/pq_roster_beacon.h>
 
 #include <chain.h>
 #include <chainparams.h>
@@ -39,6 +40,58 @@ void SetFirstMembers(QuorumBitmap& bitmap, std::size_t count)
     }
 }
 
+RosterBeaconSeed MakeRecoveryPendingSeed(uint32_t newest_epoch,
+                                         uint64_t salt,
+                                         int32_t anchor_height = 870)
+{
+    RosterBeaconSeed seed;
+    seed.anchor_kind = RosterBeaconAnchorKind::RECOVERY;
+    seed.state = RosterBeaconState::PENDING;
+    seed.epoch = newest_epoch;
+    seed.anchor_cursor = BTCCursor{
+        anchor_height, NonNullHash(700'000 + salt),
+        NonNullHash(710'000 + salt)};
+    seed.anchor_btc_height = 900'000 + static_cast<int32_t>(salt);
+    BOOST_REQUIRE(seed.IsStructurallyValid());
+    return seed;
+}
+
+RosterBeaconWindow MakeRecoveryWindow(const RosterBeaconSeed& pending,
+                                      uint64_t salt)
+{
+    BOOST_REQUIRE(pending.epoch >= ACTIVE_QUORUMS - 1);
+    RosterBeaconWindow window;
+    const uint256 future_hash{NonNullHash(720'000 + salt)};
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        auto& seed{window.active.seeds[slot]};
+        seed = pending;
+        seed.state = RosterBeaconState::READY;
+        seed.epoch = pending.epoch - (ACTIVE_QUORUMS - 1) + slot;
+        seed.future_btc_hash = future_hash;
+    }
+    window.next.epoch = pending.epoch + 1;
+    BOOST_REQUIRE(window.IsStructurallyValid());
+    return window;
+}
+
+RosterRecoveryPrecommit MakeRecoveryPrecommit(
+    RosterRecoveryAdmission admission,
+    uint64_t salt,
+    int32_t predecessor_height = -1,
+    uint256 predecessor_hash = {},
+    int32_t anchor_height = 870,
+    uint32_t epoch = 3)
+{
+    RosterRecoveryPrecommit precommit;
+    precommit.admission = admission;
+    precommit.predecessor_height = predecessor_height;
+    precommit.predecessor_hash = predecessor_hash;
+    precommit.pending_seed =
+        MakeRecoveryPendingSeed(epoch, salt, anchor_height);
+    BOOST_REQUIRE(precommit.IsStructurallyValid());
+    return precommit;
+}
+
 FinalChainLock MakeChainLock(int32_t height,
                              int32_t previous_height,
                              const uint256& previous_hash,
@@ -50,6 +103,13 @@ FinalChainLock MakeChainLock(int32_t height,
     chainlock.statement.previous_chainlock_height = previous_height;
     chainlock.statement.previous_chainlock_hash = previous_hash;
     chainlock.statement.quorum_context_hash = NonNullHash(20000 + salt);
+    chainlock.statement.roster_transition =
+        RosterAuthorizationTransitionKind::KEEP;
+    chainlock.statement.roster_beacons =
+        MakeRecoveryWindow(MakeRecoveryPendingSeed(3, 900'000),
+                           900'001);
+    chainlock.statement.roster_authorization_state_hash =
+        NonNullHash(25'000 + salt);
     chainlock.statement.payment_probation_state_hash = NonNullHash(30'000);
     chainlock.selected_quorum_mask = 0b0111;
     chainlock.signatures.resize(FINAL_SIGNATURE_COUNT);
@@ -61,6 +121,25 @@ FinalChainLock MakeChainLock(int32_t height,
     }
     chainlock.signatures.front().signature.front() = static_cast<uint8_t>(salt);
     return chainlock;
+}
+
+void SetRecoveryTransition(FinalChainLock& chainlock,
+                           const RosterRecoveryPrecommit& precommit,
+                           uint64_t salt)
+{
+    chainlock.statement.block_hash =
+        precommit.pending_seed.anchor_cursor.sys_hash;
+    chainlock.statement.accepted_btcc_cursor =
+        precommit.pending_seed.anchor_cursor;
+    chainlock.statement.btcc_advance = BTCCAdvance::ADVANCE;
+    chainlock.statement.roster_transition =
+        precommit.admission == RosterRecoveryAdmission::INITIALIZE
+            ? RosterAuthorizationTransitionKind::INITIALIZE
+            : RosterAuthorizationTransitionKind::RECOVER;
+    chainlock.statement.roster_beacons =
+        MakeRecoveryWindow(precommit.pending_seed, salt);
+    chainlock.statement.roster_authorization_state_hash =
+        NonNullHash(730'000 + salt);
 }
 
 ChainLockFinalityStoreConfig MakeConfig()
@@ -201,6 +280,11 @@ PaymentAuditPresealMarker MakePaymentAuditPresealMarker(
     receipt.commitment_hash = NonNullHash(630'000 + salt);
     receipt.result_hash = NonNullHash(640'000 + salt);
     receipt.next_probation_state_hash = NonNullHash(650'000 + salt);
+    receipt.subject_roster_beacon =
+        MakeRecoveryPendingSeed(epoch, 680'000 + salt);
+    receipt.subject_roster_beacon.state = RosterBeaconState::READY;
+    receipt.subject_roster_beacon.future_btc_hash =
+        NonNullHash(690'000 + salt);
     BOOST_REQUIRE(receipt.IsStructurallyValid());
 
     return PaymentAuditPresealMarker{
@@ -359,6 +443,533 @@ BOOST_AUTO_TEST_CASE(empty_database_initializes_fixed_schema)
     BOOST_CHECK_EQUAL(state.certificate_revision, 0U);
     BOOST_CHECK(!state.best);
     BOOST_CHECK(!state.unsealed_btcc);
+}
+
+BOOST_AUTO_TEST_CASE(roster_recovery_precommit_is_canonical_and_durable)
+{
+    const fs::path path{m_path_root / "pqcl_roster_recovery_precommit"};
+    const uint256 genesis{NonNullHash(81)};
+    const auto config{MakeConfig()};
+    const auto prior{MakeChainLock(
+        865, config.activation_predecessor_height,
+        NonNullHash(config.activation_predecessor_height), 80)};
+    const auto staged{MakeRecoveryPrecommit(
+        RosterRecoveryAdmission::CURRENT_CATCHUP, 1,
+        prior.statement.height, prior.statement.block_hash)};
+
+    {
+        PQChainLockPersistence persistence{DiskParams(path), genesis, config};
+        BOOST_REQUIRE(persistence.PersistBest(prior));
+        BOOST_CHECK(!persistence.LoadRosterRecoveryPrecommit());
+
+        auto ready_first{staged};
+        ready_first.pending_seed.state = RosterBeaconState::READY;
+        ready_first.pending_seed.future_btc_hash = NonNullHash(798'999);
+        BOOST_REQUIRE(ready_first.IsStructurallyValid());
+        ChainLockPersistenceError error{ChainLockPersistenceError::NONE};
+        BOOST_CHECK(!persistence.PersistRosterRecoveryPrecommit(
+            ready_first, &error));
+        BOOST_CHECK(error == ChainLockPersistenceError::INVALID_CHAINLOCK);
+
+        BOOST_REQUIRE(
+            persistence.PersistRosterRecoveryPrecommit(staged));
+        BOOST_CHECK(persistence.LoadRosterRecoveryPrecommit() == staged);
+        BOOST_CHECK(persistence.PersistRosterRecoveryPrecommit(staged));
+
+        auto conflict{staged};
+        conflict.pending_seed.anchor_btc_height++;
+        BOOST_REQUIRE(conflict.IsStructurallyValid());
+        error = ChainLockPersistenceError::NONE;
+        BOOST_CHECK(!persistence.PersistRosterRecoveryPrecommit(
+            conflict, &error));
+        BOOST_CHECK(error == ChainLockPersistenceError::HEIGHT_CONFLICT);
+        BOOST_CHECK(persistence.LoadRosterRecoveryPrecommit() == staged);
+
+        auto resolved{staged};
+        resolved.pending_seed.state = RosterBeaconState::READY;
+        resolved.pending_seed.future_btc_hash = NonNullHash(799'001);
+        BOOST_REQUIRE(resolved.IsStructurallyValid());
+        BOOST_REQUIRE(
+            persistence.PersistRosterRecoveryPrecommit(resolved));
+        BOOST_CHECK(persistence.LoadRosterRecoveryPrecommit() == resolved);
+        BOOST_CHECK(persistence.PersistRosterRecoveryPrecommit(resolved));
+
+        auto different_resolution{resolved};
+        different_resolution.pending_seed.future_btc_hash =
+            NonNullHash(799'002);
+        BOOST_REQUIRE(different_resolution.IsStructurallyValid());
+        BOOST_CHECK(!persistence.PersistRosterRecoveryPrecommit(
+            different_resolution, &error));
+        BOOST_CHECK(error == ChainLockPersistenceError::HEIGHT_CONFLICT);
+        BOOST_CHECK(persistence.LoadRosterRecoveryPrecommit() == resolved);
+    }
+    {
+        PQChainLockPersistence persistence{DiskParams(path), genesis, config};
+        const auto resolved{persistence.LoadRosterRecoveryPrecommit()};
+        BOOST_REQUIRE(resolved);
+        BOOST_CHECK(resolved->pending_seed.IsReady());
+        BOOST_CHECK(resolved->pending_seed.future_btc_hash ==
+                    NonNullHash(799'001));
+        BOOST_CHECK(persistence.PersistRosterRecoveryPrecommit(*resolved));
+        BOOST_REQUIRE(persistence.ClearRosterRecoveryPrecommit());
+        BOOST_CHECK(!persistence.LoadRosterRecoveryPrecommit());
+    }
+    {
+        PQChainLockPersistence persistence{DiskParams(path), genesis, config};
+        BOOST_CHECK(!persistence.LoadRosterRecoveryPrecommit());
+    }
+
+    auto invalid{staged};
+    invalid.pending_seed.epoch = 4;
+    BOOST_CHECK(!invalid.IsStructurallyValid());
+    invalid = staged;
+    invalid.pending_seed.anchor_kind = RosterBeaconAnchorKind::NORMAL;
+    BOOST_CHECK(!invalid.IsStructurallyValid());
+    invalid = staged;
+    invalid.predecessor_height = invalid.pending_seed.anchor_cursor.sys_height;
+    BOOST_CHECK(!invalid.IsStructurallyValid());
+
+    auto initialize{MakeRecoveryPrecommit(
+        RosterRecoveryAdmission::INITIALIZE, 2)};
+    BOOST_CHECK(initialize.IsStructurallyValid());
+    initialize.predecessor_height = 864;
+    initialize.predecessor_hash = NonNullHash(864);
+    BOOST_CHECK(!initialize.IsStructurallyValid());
+
+    auto wrong_epoch{staged};
+    wrong_epoch.pending_seed.epoch = 7;
+    BOOST_REQUIRE(wrong_epoch.IsStructurallyValid());
+    {
+        PQChainLockPersistence persistence{
+            MemoryParams(path / "wrong_epoch"), genesis, config};
+        ChainLockPersistenceError error{ChainLockPersistenceError::NONE};
+        BOOST_CHECK(!persistence.PersistRosterRecoveryPrecommit(
+            wrong_epoch, &error));
+        BOOST_CHECK(error == ChainLockPersistenceError::INVALID_CHAINLOCK);
+    }
+
+    auto later_joint_target{staged};
+    later_joint_target.pending_seed.anchor_cursor.sys_height = 880;
+    later_joint_target.pending_seed.anchor_cursor.sys_hash =
+        NonNullHash(880);
+    later_joint_target.pending_seed.anchor_cursor.btc_hash =
+        NonNullHash(881);
+    BOOST_REQUIRE(later_joint_target.IsStructurallyValid());
+    {
+        PQChainLockPersistence persistence{
+            MemoryParams(path / "noncanonical_target"), genesis, config};
+        BOOST_REQUIRE(persistence.PersistBest(prior));
+        ChainLockPersistenceError error{ChainLockPersistenceError::NONE};
+        BOOST_CHECK(!persistence.PersistRosterRecoveryPrecommit(
+            later_joint_target, &error));
+        BOOST_CHECK(error == ChainLockPersistenceError::INVALID_CHAINLOCK);
+    }
+
+    auto off_target_config{config};
+    off_target_config.btcc_schedule.candidate_origin = 0;
+    off_target_config.activation_predecessor_height = -1;
+    const auto off_target{MakeRecoveryPrecommit(
+        RosterRecoveryAdmission::INITIALIZE, 2, -1, {},
+        /*anchor_height=*/0)};
+    {
+        PQChainLockPersistence persistence{
+            MemoryParams(path / "off_target"), genesis,
+            off_target_config};
+        ChainLockPersistenceError error{ChainLockPersistenceError::NONE};
+        BOOST_CHECK(!persistence.PersistRosterRecoveryPrecommit(
+            off_target, &error));
+        BOOST_CHECK(error == ChainLockPersistenceError::INVALID_CHAINLOCK);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(roster_recovery_precommit_replacement_is_exact_cas)
+{
+    const fs::path path{m_path_root / "pqcl_roster_recovery_replace"};
+    const uint256 genesis{NonNullHash(811)};
+    const auto config{MakeConfig()};
+    const auto prior{MakeChainLock(
+        865, config.activation_predecessor_height,
+        NonNullHash(config.activation_predecessor_height), 811)};
+    const auto staged{MakeRecoveryPrecommit(
+        RosterRecoveryAdmission::CURRENT_CATCHUP, 811,
+        prior.statement.height, prior.statement.block_hash)};
+
+    auto same_slot{staged};
+    same_slot.pending_seed.anchor_cursor.sys_hash = NonNullHash(812);
+    same_slot.pending_seed.anchor_cursor.btc_hash = NonNullHash(813);
+    same_slot.pending_seed.anchor_btc_height++;
+    BOOST_REQUIRE(same_slot.IsStructurallyValid());
+
+    auto stale_expected{staged};
+    stale_expected.pending_seed.anchor_btc_height++;
+    BOOST_REQUIRE(stale_expected.IsStructurallyValid());
+
+    {
+        PQChainLockPersistence persistence{DiskParams(path), genesis, config};
+        BOOST_REQUIRE(persistence.PersistBest(prior));
+        BOOST_REQUIRE(persistence.PersistRosterRecoveryPrecommit(staged));
+
+        ChainLockPersistenceError error{ChainLockPersistenceError::NONE};
+        BOOST_CHECK(!persistence.ReplaceRosterRecoveryPrecommit(
+            stale_expected, same_slot, &error));
+        BOOST_CHECK(error == ChainLockPersistenceError::HEIGHT_CONFLICT);
+        BOOST_CHECK(persistence.LoadRosterRecoveryPrecommit() == staged);
+
+        BOOST_REQUIRE(persistence.ReplaceRosterRecoveryPrecommit(
+            staged, same_slot));
+        BOOST_CHECK(persistence.LoadRosterRecoveryPrecommit() == same_slot);
+    }
+    {
+        PQChainLockPersistence persistence{DiskParams(path), genesis, config};
+        BOOST_CHECK(persistence.LoadRosterRecoveryPrecommit() == same_slot);
+
+        auto ready{same_slot};
+        ready.pending_seed.state = RosterBeaconState::READY;
+        ready.pending_seed.future_btc_hash = NonNullHash(814);
+        BOOST_REQUIRE(ready.IsStructurallyValid());
+        BOOST_REQUIRE(persistence.PersistRosterRecoveryPrecommit(ready));
+
+        auto ready_same_slot_retarget{same_slot};
+        ready_same_slot_retarget.pending_seed.anchor_cursor.sys_hash =
+            NonNullHash(815);
+        ready_same_slot_retarget.pending_seed.anchor_cursor.btc_hash =
+            NonNullHash(816);
+        BOOST_REQUIRE(ready_same_slot_retarget.IsStructurallyValid());
+        ChainLockPersistenceError error{ChainLockPersistenceError::NONE};
+        BOOST_CHECK(!persistence.ReplaceRosterRecoveryPrecommit(
+            ready, ready_same_slot_retarget, &error));
+        BOOST_CHECK(error == ChainLockPersistenceError::INVALID_CHAINLOCK);
+        BOOST_CHECK(persistence.LoadRosterRecoveryPrecommit() == ready);
+
+        const auto later_target{CanonicalRosterRecoveryTargetHeight(
+            config.chainlock_schedule, config.btcc_schedule, 7)};
+        BOOST_REQUIRE(later_target);
+        const auto later{MakeRecoveryPrecommit(
+            RosterRecoveryAdmission::CURRENT_CATCHUP, 817,
+            prior.statement.height, prior.statement.block_hash,
+            *later_target, /*epoch=*/7)};
+        BOOST_REQUIRE(persistence.ReplaceRosterRecoveryPrecommit(
+            ready, later));
+        BOOST_CHECK(persistence.LoadRosterRecoveryPrecommit() == later);
+
+        BOOST_CHECK(!persistence.ReplaceRosterRecoveryPrecommit(
+            ready, same_slot, &error));
+        BOOST_CHECK(error == ChainLockPersistenceError::HEIGHT_CONFLICT);
+    }
+    {
+        PQChainLockPersistence persistence{DiskParams(path), genesis, config};
+        const auto later{persistence.LoadRosterRecoveryPrecommit()};
+        BOOST_REQUIRE(later);
+        BOOST_CHECK_EQUAL(later->pending_seed.epoch, 7U);
+        BOOST_CHECK_EQUAL(later->pending_seed.anchor_cursor.sys_height,
+                          2'020);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(initialized_best_atomically_consumes_recovery_precommit)
+{
+    const fs::path path{m_path_root / "pqcl_roster_initialize"};
+    const uint256 genesis{NonNullHash(82)};
+    auto config{MakeConfig()};
+    config.btcc_schedule.candidate_origin = 865;
+    const auto staged{MakeRecoveryPrecommit(
+        RosterRecoveryAdmission::INITIALIZE, 3, -1, {},
+        /*anchor_height=*/865)};
+    auto initialized{MakeChainLock(
+        865, config.activation_predecessor_height,
+        NonNullHash(config.activation_predecessor_height), 82)};
+    SetRecoveryTransition(initialized, staged, 3);
+    BOOST_REQUIRE(initialized.IsStructurallyValid());
+
+    {
+        PQChainLockPersistence persistence{DiskParams(path), genesis, config};
+        BOOST_REQUIRE(
+            persistence.PersistRosterRecoveryPrecommit(staged));
+        ChainLockPersistenceError error{ChainLockPersistenceError::NONE};
+        BOOST_CHECK(!persistence.PersistBest(initialized, &error));
+        BOOST_CHECK(error == ChainLockPersistenceError::INVALID_CHAINLOCK);
+        BOOST_CHECK(persistence.LoadRosterRecoveryPrecommit() == staged);
+
+        auto bypass{initialized};
+        bypass.statement.roster_transition =
+            RosterAuthorizationTransitionKind::KEEP;
+        BOOST_CHECK(!persistence.PersistBest(bypass, &error));
+        BOOST_CHECK(persistence.LoadRosterRecoveryPrecommit() == staged);
+
+        auto wrong_target_hash{initialized};
+        wrong_target_hash.statement.block_hash = NonNullHash(999'990);
+        BOOST_REQUIRE(wrong_target_hash.IsStructurallyValid());
+        BOOST_CHECK(!persistence.PersistInitializedBest(
+            wrong_target_hash, &error));
+        BOOST_CHECK(persistence.LoadRosterRecoveryPrecommit() == staged);
+
+        auto mismatched{initialized};
+        mismatched.statement.roster_beacons.active.seeds.back()
+            .future_btc_hash = NonNullHash(999'991);
+        BOOST_REQUIRE(mismatched.IsStructurallyValid());
+        BOOST_CHECK(!persistence.PersistInitializedBest(mismatched, &error));
+        BOOST_CHECK(persistence.LoadRosterRecoveryPrecommit() == staged);
+
+        auto keep{initialized};
+        keep.statement.btcc_advance = BTCCAdvance::KEEP;
+        keep.statement.accepted_btcc_cursor = {};
+        BOOST_REQUIRE(keep.IsStructurallyValid());
+        BOOST_CHECK(!persistence.PersistInitializedBest(keep, &error));
+        BOOST_CHECK(persistence.LoadRosterRecoveryPrecommit() == staged);
+
+        auto wrong_cursor{initialized};
+        wrong_cursor.statement.accepted_btcc_cursor.btc_hash =
+            NonNullHash(999'994);
+        BOOST_REQUIRE(wrong_cursor.IsStructurallyValid());
+        BOOST_CHECK(!persistence.PersistInitializedBest(
+            wrong_cursor, &error));
+        BOOST_CHECK(persistence.LoadRosterRecoveryPrecommit() == staged);
+
+        BOOST_REQUIRE(persistence.PersistInitializedBest(initialized));
+        BOOST_CHECK(persistence.HasBest());
+        BOOST_CHECK(!persistence.LoadRosterRecoveryPrecommit());
+        BOOST_CHECK(persistence.PersistInitializedBest(initialized));
+    }
+    {
+        PQChainLockPersistence persistence{DiskParams(path), genesis, config};
+        BOOST_REQUIRE(persistence.LoadBest());
+        BOOST_CHECK(*persistence.LoadBest() == initialized);
+        BOOST_CHECK(!persistence.LoadRosterRecoveryPrecommit());
+        BOOST_CHECK(!persistence.PersistRosterRecoveryPrecommit(staged));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(catchup_best_atomically_consumes_recovery_precommit)
+{
+    const fs::path path{m_path_root / "pqcl_roster_recover"};
+    const uint256 genesis{NonNullHash(83)};
+    const auto config{MakeConfig()};
+    auto prior{MakeChainLock(
+        865, config.activation_predecessor_height,
+        NonNullHash(config.activation_predecessor_height), 83)};
+    const auto staged{MakeRecoveryPrecommit(
+        RosterRecoveryAdmission::CURRENT_CATCHUP, 4,
+        prior.statement.height, prior.statement.block_hash)};
+    const auto future_target{CanonicalRosterRecoveryTargetHeight(
+        config.chainlock_schedule, config.btcc_schedule, 7)};
+    BOOST_REQUIRE(future_target);
+    const auto future_staged{MakeRecoveryPrecommit(
+        RosterRecoveryAdmission::CURRENT_CATCHUP, 40,
+        prior.statement.height, prior.statement.block_hash,
+        *future_target, /*epoch=*/7)};
+    auto recovered{MakeChainLock(
+        870, prior.statement.height, prior.statement.block_hash, 84)};
+    SetRecoveryTransition(recovered, staged, 4);
+    BOOST_REQUIRE(recovered.IsStructurallyValid());
+    auto wrong_target_height{recovered};
+    SetRecoveryTransition(wrong_target_height, future_staged, 40);
+    BOOST_REQUIRE(wrong_target_height.IsStructurallyValid());
+
+    {
+        PQChainLockPersistence persistence{DiskParams(path), genesis, config};
+        BOOST_REQUIRE(persistence.PersistBest(prior));
+        BOOST_REQUIRE(
+            persistence.PersistRosterRecoveryPrecommit(future_staged));
+
+        ChainLockPersistenceError error{ChainLockPersistenceError::NONE};
+        BOOST_CHECK(!persistence.PersistRecoveryCatchupBest(
+            wrong_target_height, &error));
+        BOOST_CHECK(error == ChainLockPersistenceError::INVALID_CHAINLOCK);
+        BOOST_CHECK(
+            persistence.LoadRosterRecoveryPrecommit() == future_staged);
+        BOOST_REQUIRE(persistence.ClearRosterRecoveryPrecommit());
+        BOOST_REQUIRE(
+            persistence.PersistRosterRecoveryPrecommit(staged));
+
+        BOOST_CHECK(!persistence.PersistCatchupBest(recovered, &error));
+        BOOST_CHECK(error == ChainLockPersistenceError::INVALID_CHAINLOCK);
+        BOOST_CHECK(persistence.LoadRosterRecoveryPrecommit() == staged);
+
+        auto wrong_reveal{recovered};
+        wrong_reveal.statement.roster_beacons.active.seeds.back()
+            .future_btc_hash = NonNullHash(999'992);
+        BOOST_REQUIRE(wrong_reveal.IsStructurallyValid());
+        BOOST_CHECK(!persistence.PersistRecoveryCatchupBest(
+            wrong_reveal, &error));
+        BOOST_CHECK(persistence.LoadRosterRecoveryPrecommit() == staged);
+
+        auto keep{recovered};
+        keep.statement.btcc_advance = BTCCAdvance::KEEP;
+        keep.statement.accepted_btcc_cursor = {};
+        BOOST_REQUIRE(keep.IsStructurallyValid());
+        BOOST_CHECK(!persistence.PersistRecoveryCatchupBest(keep, &error));
+        BOOST_CHECK(persistence.LoadRosterRecoveryPrecommit() == staged);
+
+        auto wrong_cursor{recovered};
+        wrong_cursor.statement.accepted_btcc_cursor.btc_hash =
+            NonNullHash(999'995);
+        BOOST_REQUIRE(wrong_cursor.IsStructurallyValid());
+        BOOST_CHECK(!persistence.PersistRecoveryCatchupBest(
+            wrong_cursor, &error));
+        BOOST_CHECK(persistence.LoadRosterRecoveryPrecommit() == staged);
+
+        BOOST_REQUIRE(
+            persistence.PersistRecoveryCatchupBest(recovered));
+        BOOST_CHECK(!persistence.LoadRosterRecoveryPrecommit());
+        BOOST_CHECK(persistence.HasCatchupMarker());
+        BOOST_CHECK(persistence.PersistRecoveryCatchupBest(recovered));
+    }
+    {
+        PQChainLockPersistence persistence{DiskParams(path), genesis, config};
+        BOOST_REQUIRE(persistence.LoadBest());
+        BOOST_CHECK(*persistence.LoadBest() == recovered);
+        BOOST_CHECK(!persistence.LoadRosterRecoveryPrecommit());
+        BOOST_CHECK(persistence.HasCatchupMarker());
+    }
+}
+
+BOOST_AUTO_TEST_CASE(
+    verified_recovery_persistence_does_not_require_local_precommit)
+{
+    const uint256 genesis{NonNullHash(84)};
+    auto config{MakeConfig()};
+    config.btcc_schedule.candidate_origin = 865;
+    const auto initialize_marker{MakeRecoveryPrecommit(
+        RosterRecoveryAdmission::INITIALIZE, 41, -1, {},
+        /*anchor_height=*/865)};
+    auto initialized{MakeChainLock(
+        865, config.activation_predecessor_height,
+        NonNullHash(config.activation_predecessor_height), 841)};
+    SetRecoveryTransition(initialized, initialize_marker, 41);
+    BOOST_REQUIRE(initialized.IsStructurallyValid());
+
+    {
+        PQChainLockPersistence persistence{
+            MemoryParams(m_path_root / "pqcl_recovery_no_local_initialize"),
+            genesis, config};
+        BOOST_CHECK(!persistence.LoadRosterRecoveryPrecommit());
+        BOOST_REQUIRE(persistence.PersistInitializedBest(initialized));
+        BOOST_CHECK(persistence.LoadBest() == initialized);
+    }
+
+    const auto catchup_target{CanonicalRosterRecoveryTargetHeight(
+        config.chainlock_schedule, config.btcc_schedule, 7)};
+    BOOST_REQUIRE(catchup_target);
+    const auto catchup_marker{MakeRecoveryPrecommit(
+        RosterRecoveryAdmission::CURRENT_CATCHUP, 42,
+        initialized.statement.height, initialized.statement.block_hash,
+        *catchup_target, /*epoch=*/7)};
+    auto recovered{MakeChainLock(
+        *catchup_target,
+        *catchup_target - static_cast<int32_t>(PQ_CL_PERIOD),
+        NonNullHash(*catchup_target - PQ_CL_PERIOD), 842)};
+    SetRecoveryTransition(recovered, catchup_marker, 42);
+    BOOST_REQUIRE(recovered.IsStructurallyValid());
+    {
+        PQChainLockPersistence persistence{
+            MemoryParams(m_path_root / "pqcl_recovery_no_local_catchup"),
+            genesis, config};
+        BOOST_REQUIRE(persistence.PersistInitializedBest(initialized));
+        BOOST_CHECK(!persistence.LoadRosterRecoveryPrecommit());
+        BOOST_REQUIRE(persistence.PersistRecoveryCatchupBest(recovered));
+        BOOST_CHECK(persistence.LoadBest() == recovered);
+    }
+    {
+        PQChainLockPersistence persistence{
+            MemoryParams(m_path_root / "pqcl_recovery_empty_store"),
+            genesis, config};
+        BOOST_CHECK(!persistence.LoadBest());
+        BOOST_CHECK(!persistence.LoadRosterRecoveryPrecommit());
+        BOOST_REQUIRE(persistence.PersistRecoveryCatchupBest(recovered));
+        BOOST_CHECK(persistence.LoadBest() == recovered);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(ordinary_winner_atomically_discards_stale_catchup_precommit)
+{
+    const fs::path path{m_path_root / "pqcl_roster_recover_superseded"};
+    const uint256 genesis{NonNullHash(85)};
+    const auto config{MakeConfig()};
+    const auto prior{MakeChainLock(
+        865, config.activation_predecessor_height,
+        NonNullHash(config.activation_predecessor_height), 85)};
+    const auto staged{MakeRecoveryPrecommit(
+        RosterRecoveryAdmission::CURRENT_CATCHUP, 5,
+        prior.statement.height, prior.statement.block_hash)};
+    const auto ordinary{MakeChainLock(
+        870, prior.statement.height, prior.statement.block_hash, 86)};
+    const auto ordinary_successor{MakeChainLock(
+        875, ordinary.statement.height, ordinary.statement.block_hash, 87)};
+
+    {
+        PQChainLockPersistence persistence{DiskParams(path), genesis, config};
+        BOOST_REQUIRE(persistence.PersistBest(prior));
+        BOOST_REQUIRE(persistence.PersistRosterRecoveryPrecommit(staged));
+
+        auto rejected{prior};
+        rejected.statement.block_hash = NonNullHash(999'993);
+        rejected.signatures.front().signature.front() ^= 1;
+        BOOST_REQUIRE(rejected.IsStructurallyValid());
+        ChainLockPersistenceError error{ChainLockPersistenceError::NONE};
+        BOOST_CHECK(!persistence.PersistBest(rejected, &error));
+        BOOST_CHECK(error == ChainLockPersistenceError::HEIGHT_CONFLICT);
+        BOOST_CHECK(persistence.LoadRosterRecoveryPrecommit() == staged);
+
+        BOOST_REQUIRE(persistence.PersistBest(ordinary));
+        BOOST_CHECK(!persistence.LoadRosterRecoveryPrecommit());
+
+        BOOST_REQUIRE(persistence.PersistBest(ordinary_successor));
+
+        const auto replacement_target{CanonicalRosterRecoveryTargetHeight(
+            config.chainlock_schedule, config.btcc_schedule, 7)};
+        BOOST_REQUIRE(replacement_target);
+        const auto replacement{MakeRecoveryPrecommit(
+            RosterRecoveryAdmission::CURRENT_CATCHUP, 6,
+            ordinary_successor.statement.height,
+            ordinary_successor.statement.block_hash,
+            *replacement_target, /*epoch=*/7)};
+        BOOST_REQUIRE(
+            persistence.PersistRosterRecoveryPrecommit(replacement));
+        BOOST_CHECK(persistence.LoadRosterRecoveryPrecommit() == replacement);
+    }
+    {
+        PQChainLockPersistence persistence{DiskParams(path), genesis, config};
+        const auto best{persistence.LoadBest()};
+        BOOST_REQUIRE(best);
+        BOOST_CHECK(*best == ordinary_successor);
+        BOOST_REQUIRE(persistence.LoadRosterRecoveryPrecommit());
+
+        const auto replacement{*persistence.LoadRosterRecoveryPrecommit()};
+        auto recovered{MakeChainLock(
+            replacement.pending_seed.anchor_cursor.sys_height,
+            replacement.pending_seed.anchor_cursor.sys_height -
+                static_cast<int32_t>(PQ_CL_PERIOD),
+            NonNullHash(replacement.pending_seed.anchor_cursor.sys_height -
+                        PQ_CL_PERIOD),
+            88)};
+        SetRecoveryTransition(recovered, replacement, 6);
+        BOOST_REQUIRE(recovered.IsStructurallyValid());
+        ChainLockPersistenceError error{ChainLockPersistenceError::NONE};
+        BOOST_REQUIRE_MESSAGE(
+            persistence.PersistRecoveryCatchupBest(recovered, &error),
+            "persistence error " << static_cast<int>(error));
+        BOOST_CHECK(!persistence.LoadRosterRecoveryPrecommit());
+    }
+}
+
+BOOST_AUTO_TEST_CASE(corrupt_roster_recovery_precommit_fails_closed)
+{
+    const fs::path path{m_path_root / "pqcl_roster_recovery_corrupt"};
+    const uint256 genesis{NonNullHash(84)};
+    const auto config{MakeConfig()};
+    {
+        PQChainLockPersistence persistence{DiskParams(path), genesis, config};
+    }
+    {
+        CDBWrapper raw{DiskParams(path)};
+        BOOST_REQUIRE(raw.Write(
+            RawDiskKey{
+                PQ_CHAINLOCK_PERSISTENCE_ROSTER_RECOVERY_PRECOMMIT_KEY},
+            uint8_t{1}, true));
+    }
+    BOOST_CHECK_THROW(
+        PQChainLockPersistence(DiskParams(path), genesis, config),
+        std::runtime_error);
 }
 
 BOOST_AUTO_TEST_CASE(activation_predecessor_hash_is_not_configuration)

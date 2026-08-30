@@ -96,6 +96,31 @@ uint256 NonNullHash(uint64_t value)
     return hash;
 }
 
+RosterBeaconSeed ReadyRosterBeacon(uint32_t epoch)
+{
+    RosterBeaconSeed seed;
+    seed.state = RosterBeaconState::READY;
+    seed.epoch = epoch;
+    seed.anchor_cursor = BTCCursor{
+        10'000 + static_cast<int32_t>(epoch),
+        NonNullHash(100'000 + epoch), NonNullHash(200'000 + epoch)};
+    seed.anchor_btc_height = 800'000 + static_cast<int32_t>(epoch);
+    seed.future_btc_hash = NonNullHash(300'000 + epoch);
+    return seed;
+}
+
+RosterBeaconWindow ReadyRosterWindow(uint32_t first_epoch)
+{
+    RosterBeaconWindow window;
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        window.active.seeds[slot] = ReadyRosterBeacon(
+            first_epoch + static_cast<uint32_t>(slot));
+    }
+    window.next.epoch = first_epoch + ACTIVE_QUORUMS;
+    BOOST_REQUIRE(window.IsStructurallyValid());
+    return window;
+}
+
 void SetFirstMembers(QuorumBitmap& bitmap, std::size_t count)
 {
     for (std::size_t member{0}; member < count; ++member) {
@@ -138,6 +163,13 @@ FinalPaymentAudit Audit(uint32_t epoch, uint8_t mask, uint64_t salt)
     seal.previous_chainlock_height = commitment.seal_height - 5;
     seal.previous_chainlock_hash = NonNullHash(19 + salt);
     seal.quorum_context_hash = NonNullHash(20 + salt);
+    seal.roster_transition = RosterAuthorizationTransitionKind::KEEP;
+    const uint32_t first_active_epoch{
+        epoch >= ACTIVE_QUORUMS - 2
+            ? epoch - static_cast<uint32_t>(ACTIVE_QUORUMS - 2)
+            : 0};
+    seal.roster_beacons = ReadyRosterWindow(first_active_epoch);
+    seal.roster_authorization_state_hash = NonNullHash(21 + salt);
     seal.payment_probation_state_hash =
         commitment.previous_probation_state_hash;
 

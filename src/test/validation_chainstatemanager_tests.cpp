@@ -1009,6 +1009,15 @@ BOOST_FIXTURE_TEST_CASE(btcc_pending_candidate_yields_and_requeues_exactly,
     known_payment_receipt.commitment_hash = GetRandHash();
     known_payment_receipt.result_hash = GetRandHash();
     known_payment_receipt.next_probation_state_hash = GetRandHash();
+    known_payment_receipt.subject_roster_beacon.state =
+        llmq::pq::RosterBeaconState::READY;
+    known_payment_receipt.subject_roster_beacon.epoch =
+        known_payment_receipt.epoch;
+    known_payment_receipt.subject_roster_beacon.anchor_cursor =
+        llmq::pq::BTCCursor{1, GetRandHash(), GetRandHash()};
+    known_payment_receipt.subject_roster_beacon.anchor_btc_height = 1;
+    known_payment_receipt.subject_roster_beacon.future_btc_hash =
+        GetRandHash();
     BOOST_REQUIRE(known_payment_receipt.IsStructurallyValid());
     llmq::chainLocksHandler->NotePendingPaymentAuditReceiptCertificate(
         known_payment_receipt, payment_pending);
@@ -1899,6 +1908,25 @@ BOOST_FIXTURE_TEST_CASE(
     winner.statement.previous_chainlock_hash =
         activation_predecessor->GetBlockHash();
     winner.statement.quorum_context_hash = GetRandHash();
+    winner.statement.roster_transition =
+        llmq::pq::RosterAuthorizationTransitionKind::KEEP;
+    const auto active_epochs{llmq::pq::ActiveEpochsAtHeight(
+        config->chainlock_schedule, winner.statement.height)};
+    BOOST_REQUIRE(active_epochs);
+    for (std::size_t slot{0}; slot < llmq::pq::ACTIVE_QUORUMS; ++slot) {
+        auto& seed{winner.statement.roster_beacons.active.seeds[slot]};
+        seed.state = llmq::pq::RosterBeaconState::READY;
+        seed.epoch = (*active_epochs)[slot].epoch;
+        seed.anchor_cursor = llmq::pq::BTCCursor{
+            1 + static_cast<int32_t>(slot), GetRandHash(), GetRandHash()};
+        seed.anchor_btc_height = 800'000 + static_cast<int32_t>(slot);
+        do {
+            seed.future_btc_hash = GetRandHash();
+        } while (seed.future_btc_hash == seed.anchor_cursor.btc_hash);
+    }
+    winner.statement.roster_beacons.next.epoch =
+        active_epochs->back().epoch + 1;
+    winner.statement.roster_authorization_state_hash = GetRandHash();
     winner.statement.payment_probation_state_hash = GetRandHash();
     winner.selected_quorum_mask = 0b0111;
     winner.signatures.resize(llmq::pq::FINAL_SIGNATURE_COUNT);

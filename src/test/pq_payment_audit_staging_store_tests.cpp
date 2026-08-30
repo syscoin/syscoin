@@ -84,6 +84,34 @@ uint256 NonNullHash(uint64_t value)
     return hash;
 }
 
+RosterBeaconSeed ReadyRosterBeacon(uint32_t epoch)
+{
+    RosterBeaconSeed seed;
+    seed.state = RosterBeaconState::READY;
+    seed.epoch = epoch;
+    seed.anchor_cursor = BTCCursor{
+        10'000 + static_cast<int32_t>(epoch),
+        NonNullHash(100'000 + epoch), NonNullHash(200'000 + epoch)};
+    seed.anchor_btc_height = 800'000 + static_cast<int32_t>(epoch);
+    seed.future_btc_hash = NonNullHash(300'000 + epoch);
+    return seed;
+}
+
+RosterBeaconWindow ReadyRosterWindow(uint32_t newest_epoch)
+{
+    BOOST_REQUIRE(newest_epoch >= ACTIVE_QUORUMS - 1);
+    const uint32_t first_epoch{
+        newest_epoch - static_cast<uint32_t>(ACTIVE_QUORUMS - 1)};
+    RosterBeaconWindow window;
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        window.active.seeds[slot] = ReadyRosterBeacon(
+            first_epoch + static_cast<uint32_t>(slot));
+    }
+    window.next.epoch = newest_epoch + 1;
+    BOOST_REQUIRE(window.IsStructurallyValid());
+    return window;
+}
+
 void SetBit(QuorumBitmap& bitmap, std::size_t member)
 {
     bitmap[member / 8] |=
@@ -104,6 +132,12 @@ ChainLockShare ResponseShare(int32_t height,
     transcript.quorum_context_hash = NonNullHash(branch_salt + 2);
     transcript.quorum_epoch = 7;
     transcript.quorum_base_hash = NonNullHash(branch_salt + 3);
+    transcript.roster_transition =
+        RosterAuthorizationTransitionKind::KEEP;
+    transcript.roster_beacons =
+        ReadyRosterWindow(transcript.quorum_epoch);
+    transcript.roster_authorization_state_hash =
+        NonNullHash(branch_salt + 8);
     transcript.member_index = member;
     transcript.member_pro_tx_hash = NonNullHash(branch_salt + 100 + member);
     transcript.previous_btcc_cursor =

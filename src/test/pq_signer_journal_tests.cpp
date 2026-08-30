@@ -112,6 +112,23 @@ void SetFirstMembers(llmq::pq::QuorumBitmap& bitmap, std::size_t count)
     }
 }
 
+llmq::pq::RosterBeaconWindow MakeRosterBeaconWindow()
+{
+    llmq::pq::RosterBeaconWindow window;
+    for (std::size_t slot{0}; slot < llmq::pq::ACTIVE_QUORUMS; ++slot) {
+        auto& seed{window.active.seeds[slot]};
+        seed.state = llmq::pq::RosterBeaconState::READY;
+        seed.epoch = static_cast<uint32_t>(slot);
+        seed.anchor_cursor = llmq::pq::BTCCursor{
+            10 + static_cast<int32_t>(slot),
+            MakeHash(10'000 + slot), MakeHash(20'000 + slot)};
+        seed.anchor_btc_height = 800'000 + static_cast<int32_t>(slot);
+        seed.future_btc_hash = MakeHash(30'000 + slot);
+    }
+    window.next.epoch = llmq::pq::ACTIVE_QUORUMS;
+    return window;
+}
+
 llmq::pq::FinalChainLock MakeCertificate(
     std::int32_t height,
     const uint256& block_hash,
@@ -125,6 +142,10 @@ llmq::pq::FinalChainLock MakeCertificate(
         MakeHash(static_cast<std::uint64_t>(30'000 + height));
     chainlock.statement.quorum_context_hash =
         MakeHash(static_cast<std::uint64_t>(40'000 + height));
+    chainlock.statement.roster_transition =
+        llmq::pq::RosterAuthorizationTransitionKind::KEEP;
+    chainlock.statement.roster_beacons = MakeRosterBeaconWindow();
+    chainlock.statement.roster_authorization_state_hash = MakeHash(45'000);
     chainlock.statement.payment_probation_state_hash = MakeHash(50'000);
     chainlock.selected_quorum_mask = 0b1011;
     SetFirstMembers(chainlock.signer_bitmaps[0], llmq::pq::QUORUM_THRESHOLD);

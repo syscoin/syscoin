@@ -34,6 +34,33 @@ void SetFirstMembers(QuorumBitmap& bitmap, std::size_t count)
     }
 }
 
+RosterBeaconSeed ReadySeed(uint32_t epoch)
+{
+    RosterBeaconSeed seed;
+    seed.state = RosterBeaconState::READY;
+    seed.epoch = epoch;
+    seed.anchor_cursor = BTCCursor{
+        10'000 + static_cast<int32_t>(epoch),
+        NonNullHash(100'000 + epoch), NonNullHash(200'000 + epoch)};
+    seed.anchor_btc_height = 800'000 + static_cast<int32_t>(epoch);
+    seed.future_btc_hash = NonNullHash(300'000 + epoch);
+    return seed;
+}
+
+RosterBeaconWindow ReadyWindow(int32_t height)
+{
+    RosterBeaconWindow window;
+    const auto schedule{MakeChainLockScheduleConfig(0)};
+    BOOST_REQUIRE(schedule);
+    const auto active{ActiveEpochsAtHeight(*schedule, height)};
+    BOOST_REQUIRE(active);
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        window.active.seeds[slot] = ReadySeed((*active)[slot].epoch);
+    }
+    window.next.epoch = active->back().epoch + 1;
+    return window;
+}
+
 FinalChainLock MakeChainLock(int32_t height,
                              int32_t previous_height,
                              const uint256& previous_hash,
@@ -46,6 +73,11 @@ FinalChainLock MakeChainLock(int32_t height,
     chainlock.statement.previous_chainlock_hash = previous_hash;
     chainlock.statement.quorum_context_hash = NonNullHash(20000 + salt);
     chainlock.statement.payment_probation_state_hash = NonNullHash(30'000);
+    chainlock.statement.roster_transition =
+        RosterAuthorizationTransitionKind::KEEP;
+    chainlock.statement.roster_beacons = ReadyWindow(height);
+    chainlock.statement.roster_authorization_state_hash =
+        NonNullHash(40'000 + salt);
     chainlock.selected_quorum_mask = 0b0111;
     chainlock.signatures.resize(FINAL_SIGNATURE_COUNT);
     for (auto& authenticated : chainlock.signatures) {
