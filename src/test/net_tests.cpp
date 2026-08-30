@@ -689,6 +689,13 @@ BOOST_AUTO_TEST_CASE(pq_chainlock_required_reuses_cancelled_provider_immediately
         /*required=*/false, uint256S("d004")));
     BOOST_REQUIRE(tracker.Request(only_provider, now, expiry));
 
+    // The future dependency may already be known as generic inventory. Its
+    // later promotion to the selected required ID must still displace the
+    // in-flight generic request immediately.
+    BOOST_REQUIRE(tracker.Announce(
+        only_provider, required,
+        ChainLockRequestTracker::SourcePriority::AUTHENTICATED_OUTBOUND,
+        /*required=*/false, uint256S("d004")));
     BOOST_REQUIRE(tracker.Announce(
         only_provider, required,
         ChainLockRequestTracker::SourcePriority::AUTHENTICATED_OUTBOUND,

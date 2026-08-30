@@ -22,53 +22,12 @@ BOOST_AUTO_TEST_CASE(quarantine_blocks_every_template_creation_path)
         /*pq_participation_allowed=*/false));
 }
 
-BOOST_AUTO_TEST_CASE(historical_replay_can_produce_only_activation_block)
+BOOST_AUTO_TEST_CASE(block_production_requires_authenticated_handoff)
 {
-    Consensus::Params params;
-    params.DIP0003Height = 5;
-    params.nPQActivationHeight = 9;
-    const auto allowed = [&](node::PQActivationRuntimeState state,
-                             int32_t tip_height,
-                             bool tip_valid = true,
-                             bool local_state = true,
-                             bool durable_finality_clear = true,
-                             bool durable_marker = true) {
-        return node::IsPQActivationBlockProductionAllowed(
-            params, state, /*participation_allowed=*/false,
-            durable_marker, tip_height, tip_valid, local_state,
-            durable_finality_clear);
-    };
-
-    // Fresh/reindex replay reaches A-1 with a durable null marker. The
-    // replacement transition into this same predicate is covered below.
-    BOOST_CHECK(allowed(node::PQActivationRuntimeState::HISTORICAL_REPLAY, 8));
-
-    BOOST_CHECK(!allowed(node::PQActivationRuntimeState::HISTORICAL_REPLAY, 7));
-    BOOST_CHECK(!allowed(node::PQActivationRuntimeState::HISTORICAL_REPLAY, 9));
-    BOOST_CHECK(!allowed(node::PQActivationRuntimeState::HISTORICAL_REPLAY, 8,
-                         /*tip_valid=*/false));
-    BOOST_CHECK(!allowed(node::PQActivationRuntimeState::HISTORICAL_REPLAY, 8,
-                         /*tip_valid=*/true, /*local_state=*/false));
-    BOOST_CHECK(!allowed(node::PQActivationRuntimeState::HISTORICAL_REPLAY, 8,
-                         /*tip_valid=*/true, /*local_state=*/true,
-                         /*durable_finality_clear=*/false));
-    BOOST_CHECK(!allowed(node::PQActivationRuntimeState::HISTORICAL_REPLAY, 8,
-                         /*tip_valid=*/true, /*local_state=*/true,
-                         /*durable_finality_clear=*/true,
-                         /*durable_marker=*/false));
-    for (const auto state : {
-             node::PQActivationRuntimeState::SYNC_ONLY,
-             node::PQActivationRuntimeState::DEFERRED_HANDOFF,
-             node::PQActivationRuntimeState::FAILED}) {
-        BOOST_CHECK(!allowed(state, 8));
-    }
-
+    BOOST_CHECK(!node::IsPQActivationBlockProductionAllowed(
+        /*participation_allowed=*/false));
     BOOST_CHECK(node::IsPQActivationBlockProductionAllowed(
-        params, node::PQActivationRuntimeState::FAILED,
-        /*participation_allowed=*/true,
-        /*durable_replay_marker=*/false, /*active_tip_height=*/-1,
-        /*active_tip_fully_validated=*/false,
-        /*local_state_usable=*/false, /*durable_finality_clear=*/false));
+        /*participation_allowed=*/true));
 }
 
 BOOST_AUTO_TEST_CASE(activation_handoff_record_serialization_is_canonical)
@@ -266,7 +225,7 @@ BOOST_AUTO_TEST_CASE(dip3_block_can_be_the_first_pq_block)
         Consensus::PQPaymentEligibilityResult::ROOT_REQUIRED);
 }
 
-BOOST_AUTO_TEST_CASE(public_activation_handoff_requires_validated_predecessor)
+BOOST_AUTO_TEST_CASE(public_activation_requires_imported_predecessor)
 {
     Consensus::Params params;
     params.DIP0003Height = 5;
@@ -285,14 +244,11 @@ BOOST_AUTO_TEST_CASE(public_activation_handoff_requires_validated_predecessor)
         /*height=*/8, predecessor, predecessor,
         /*predecessor_fully_validated=*/true,
         /*activation_fully_validated=*/false};
-    const auto pinned{node::FinalizePQActivationHandoff(
+    const auto not_imported{node::FinalizePQActivationHandoff(
         params, prepared.state, std::nullopt, at_predecessor)};
-    BOOST_REQUIRE(pinned.record_to_write);
-    BOOST_CHECK(pinned.state == node::PQActivationRuntimeState::PINNED);
-    BOOST_CHECK(pinned.record_to_write->state ==
-                node::PQActivationHandoffState::PINNED);
-    BOOST_CHECK_EQUAL(pinned.record_to_write->activation_height, 9);
-    BOOST_CHECK(pinned.record_to_write->predecessor_hash == predecessor);
+    BOOST_CHECK(not_imported.state ==
+                node::PQActivationRuntimeState::DEFERRED_HANDOFF);
+    BOOST_CHECK(!not_imported.record_to_write);
 
     at_predecessor.height = 7;
     const auto too_early{node::FinalizePQActivationHandoff(
@@ -316,8 +272,12 @@ BOOST_AUTO_TEST_CASE(public_activation_handoff_requires_validated_predecessor)
     BOOST_CHECK(no_record_past_activation.state ==
                 node::PQActivationRuntimeState::FAILED);
 
+    const node::PQActivationHandoffRecord imported{
+        node::PQActivationHandoffRecord::VERSION,
+        node::PQActivationHandoffState::PINNED,
+        params.nPQActivationHeight, predecessor};
     const auto restored_past_activation{node::FinalizePQActivationHandoff(
-        params, prepared.state, pinned.record_to_write, at_predecessor)};
+        params, prepared.state, imported, at_predecessor)};
     BOOST_CHECK(restored_past_activation.state ==
                 node::PQActivationRuntimeState::PINNED);
     BOOST_CHECK(!restored_past_activation.record_to_write);
@@ -336,7 +296,7 @@ BOOST_AUTO_TEST_CASE(activation_handoff_uses_only_active_or_connecting_tip)
         /*candidate_extends_active_tip=*/false));
 }
 
-BOOST_AUTO_TEST_CASE(historical_replay_unlocks_only_after_validating_activation)
+BOOST_AUTO_TEST_CASE(historical_replay_never_self_promotes)
 {
     Consensus::Params params;
     params.DIP0003Height = 5;
@@ -371,12 +331,12 @@ BOOST_AUTO_TEST_CASE(historical_replay_unlocks_only_after_validating_activation)
     tip.activation_fully_validated = true;
     resolution = node::FinalizePQActivationHandoff(
         params, prepared.state, prepared.record_to_write, tip);
-    BOOST_REQUIRE(resolution.record_to_write);
-    BOOST_CHECK(resolution.state == node::PQActivationRuntimeState::PINNED);
-    BOOST_CHECK(resolution.record_to_write->predecessor_hash == predecessor);
+    BOOST_CHECK(resolution.state ==
+                node::PQActivationRuntimeState::HISTORICAL_REPLAY);
+    BOOST_CHECK(!resolution.record_to_write);
 }
 
-BOOST_AUTO_TEST_CASE(pinned_handoff_is_sticky_only_at_exact_predecessor)
+BOOST_AUTO_TEST_CASE(pinned_handoff_rejects_replacement_predecessor)
 {
     Consensus::Params params;
     params.DIP0003Height = 5;
@@ -403,10 +363,8 @@ BOOST_AUTO_TEST_CASE(pinned_handoff_is_sticky_only_at_exact_predecessor)
     BOOST_CHECK(restored.state == node::PQActivationRuntimeState::PINNED);
     BOOST_CHECK(!restored.record_to_write);
 
-    // The block-tree pin is fsynced before ConnectTip publishes A. If a crash
-    // rolls chainstate back below A-1, reaching a different valid A-1 must
-    // reproduce the normal pre-finality quarantine transition rather than
-    // turning the local pin into a hash checkpoint.
+    // This BLS-free process cannot authenticate a replacement A-1, including
+    // one exposed by crash recovery before block A was published.
     node::PQActivationHandoffTip recovered_replacement{
         /*height=*/8, other, other,
         /*predecessor_fully_validated=*/true,
@@ -415,27 +373,11 @@ BOOST_AUTO_TEST_CASE(pinned_handoff_is_sticky_only_at_exact_predecessor)
         params, prepared.state, pinned, recovered_replacement)};
     BOOST_REQUIRE(crash_recovery.record_to_write);
     BOOST_CHECK(crash_recovery.state ==
-                node::PQActivationRuntimeState::HISTORICAL_REPLAY);
+                node::PQActivationRuntimeState::FAILED);
     BOOST_CHECK(crash_recovery.record_to_write->state ==
-                node::PQActivationHandoffState::HISTORICAL_REPLAY);
-    BOOST_CHECK(crash_recovery.record_to_write->predecessor_hash.IsNull());
-
-    const auto recovery_waits_at_predecessor{
-        node::FinalizePQActivationHandoff(
-            params, crash_recovery.state, crash_recovery.record_to_write,
-            recovered_replacement)};
-    BOOST_CHECK(recovery_waits_at_predecessor.state ==
-                node::PQActivationRuntimeState::HISTORICAL_REPLAY);
-    BOOST_CHECK(!recovery_waits_at_predecessor.record_to_write);
-    recovered_replacement.height = 9;
-    recovered_replacement.activation_fully_validated = true;
-    const auto recovered_pin{node::FinalizePQActivationHandoff(
-        params, crash_recovery.state, crash_recovery.record_to_write,
-        recovered_replacement)};
-    BOOST_REQUIRE(recovered_pin.record_to_write);
-    BOOST_CHECK(recovered_pin.state ==
-                node::PQActivationRuntimeState::PINNED);
-    BOOST_CHECK(recovered_pin.record_to_write->predecessor_hash == other);
+                node::PQActivationHandoffState::FAILED);
+    BOOST_CHECK(crash_recovery.record_to_write->predecessor_hash ==
+                predecessor);
 
     matching_tip.active_predecessor_hash = other;
     const auto mismatched_active_branch{node::FinalizePQActivationHandoff(
@@ -454,62 +396,8 @@ BOOST_AUTO_TEST_CASE(pinned_handoff_is_sticky_only_at_exact_predecessor)
         params, node::PQActivationRuntimeState::PINNED, pinned,
         /*disconnect_height=*/8, other));
 
-    const auto quarantined{node::ResolvePQActivationHandoffDisconnect(
-        params, node::PQActivationRuntimeState::PINNED, pinned,
-        /*disconnect_height=*/8, predecessor)};
-    BOOST_REQUIRE(quarantined.record_to_write);
-    BOOST_CHECK(quarantined.state ==
-                node::PQActivationRuntimeState::HISTORICAL_REPLAY);
-    BOOST_CHECK(quarantined.record_to_write->state ==
-                node::PQActivationHandoffState::HISTORICAL_REPLAY);
-    BOOST_CHECK(node::IsPQActivationBlockProductionAllowed(
-        params, quarantined.state, /*participation_allowed=*/false,
-        quarantined.record_to_write->IsValid(params.nPQActivationHeight),
-        /*active_tip_height=*/8, /*active_tip_fully_validated=*/true,
-        /*local_state_usable=*/true, /*durable_finality_clear=*/true));
-    BOOST_CHECK(quarantined.record_to_write->predecessor_hash.IsNull());
-
-    const auto unrelated_disconnect{
-        node::ResolvePQActivationHandoffDisconnect(
-            params, node::PQActivationRuntimeState::PINNED, pinned,
-            /*disconnect_height=*/8, other)};
-    BOOST_CHECK(unrelated_disconnect.state ==
-                node::PQActivationRuntimeState::PINNED);
-    BOOST_CHECK(!unrelated_disconnect.record_to_write);
-
-    // A crash at any point after the durable quarantine restarts without the
-    // old hash. The replacement A-1 alone cannot unlock participation; full
-    // validation of its block A successor establishes the replacement pin.
-    const auto restarted{node::PreparePQActivationHandoff(
-        params, /*public_network=*/true,
-        /*force_historical_replay=*/false,
-        /*empty_chainstate=*/false, quarantined.record_to_write)};
-    BOOST_CHECK(restarted.state ==
-                node::PQActivationRuntimeState::HISTORICAL_REPLAY);
-    BOOST_CHECK(!restarted.record_to_write);
-
-    node::PQActivationHandoffTip replacement_tip{
-        /*height=*/8, other, other,
-        /*predecessor_fully_validated=*/true,
-        /*activation_fully_validated=*/false};
-    auto replacement{node::FinalizePQActivationHandoff(
-        params, restarted.state, quarantined.record_to_write,
-        replacement_tip)};
-    BOOST_CHECK(replacement.state ==
-                node::PQActivationRuntimeState::HISTORICAL_REPLAY);
-    BOOST_CHECK(!replacement.record_to_write);
-
-    replacement_tip.height = 9;
-    replacement_tip.activation_fully_validated = true;
-    replacement = node::FinalizePQActivationHandoff(
-        params, restarted.state, quarantined.record_to_write,
-        replacement_tip);
-    BOOST_REQUIRE(replacement.record_to_write);
-    BOOST_CHECK(replacement.state ==
-                node::PQActivationRuntimeState::PINNED);
-    BOOST_CHECK(replacement.record_to_write->state ==
-                node::PQActivationHandoffState::PINNED);
-    BOOST_CHECK(replacement.record_to_write->predecessor_hash == other);
+    BOOST_CHECK(!node::IsPQActivationBlockProductionAllowed(
+        /*participation_allowed=*/false));
 }
 
 BOOST_AUTO_TEST_CASE(unassigned_public_is_sync_only_and_regtest_bypasses)

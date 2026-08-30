@@ -27,6 +27,7 @@ inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_BTCC_PROSPECTIVE_PRESEAL_KEY{6
 inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_PAYMENT_AUDIT_PRESEAL_KEY{7};
 inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_PAYMENT_AUDIT_PROSPECTIVE_PRESEAL_KEY{8};
 inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_ROSTER_RECOVERY_PRECOMMIT_KEY{9};
+inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_RECEIPT_ARCHIVE_AUTHORIZATION_KEY{10};
 
 inline constexpr uint16_t ROSTER_RECOVERY_PRECOMMIT_VERSION{1};
 
@@ -218,6 +219,8 @@ struct DurableFinalityStateView {
     uint64_t certificate_revision{0};
     std::optional<FinalChainLockRecordMetadata> best;
     std::optional<FinalChainLockRecordMetadata> unsealed_btcc;
+    std::optional<ReceiptArchiveRosterAuthorization>
+        receipt_archive_authorization;
 
     friend bool operator==(const DurableFinalityStateView&,
                            const DurableFinalityStateView&) = default;
@@ -263,6 +266,15 @@ public:
         ChainLockPersistenceError* error = nullptr);
 
     /**
+     * Atomically advance a normally verified durable winner and retire the
+     * exact gap authority that the new winner independently covers.
+     */
+    [[nodiscard]] bool PersistBestCoveringReceiptArchive(
+        const FinalChainLock& chainlock,
+        const ReceiptArchiveRosterAuthorization& expected_authorization,
+        ChainLockPersistenceError* error = nullptr);
+
+    /**
      * Retain a fully verified stale ADVANCE needed by an exact on-chain
      * receipt without changing the finality winner.
      */
@@ -270,12 +282,23 @@ public:
         const FinalChainLock& chainlock,
         ChainLockPersistenceError* error = nullptr);
 
+    /**
+     * Atomically install the exact verified receipt archive and consume the
+     * owner-bound roster authority retained by the catch-up winner.
+     */
+    [[nodiscard]] bool PersistAuthorizedUnsealedBTCC(
+        const FinalChainLock& chainlock,
+        const ReceiptArchiveRosterAuthorization& expected_authorization,
+        ChainLockPersistenceError* error = nullptr);
+
     /** Atomically advance the winner and highest catch-up audit marker. */
     [[nodiscard]] bool PersistCatchupBest(
         const FinalChainLock& chainlock,
         ChainLockPersistenceError* error = nullptr,
         const std::optional<BTCCCursorReconciliationProof>&
-            btcc_cursor_reconciliation = std::nullopt);
+            btcc_cursor_reconciliation = std::nullopt,
+        const ReceiptArchiveRosterAuthorization*
+            consume_receipt_archive_authorization = nullptr);
 
     /**
      * Atomically install a verified first INITIALIZE winner, consuming a
@@ -293,7 +316,9 @@ public:
         const FinalChainLock& chainlock,
         ChainLockPersistenceError* error = nullptr,
         const std::optional<BTCCCursorReconciliationProof>&
-            btcc_cursor_reconciliation = std::nullopt);
+            btcc_cursor_reconciliation = std::nullopt,
+        const ReceiptArchiveRosterAuthorization*
+            consume_receipt_archive_authorization = nullptr);
 
     /** Stage PENDING first; only its exact durable record may become READY. */
     [[nodiscard]] bool PersistRosterRecoveryPrecommit(

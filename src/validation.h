@@ -1433,22 +1433,20 @@ public:
                                     bilingual_str& error)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
-    /** Verify or establish the exact A-1 pin after startup recovery. */
+    /** Verify the transition release's exact imported A-1 pin. */
     bool FinalizePQActivationHandoff(const CBlockIndex* tip,
                                      bilingual_str& error)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
-    /** A fully validated A may promote historical replay to the exact A-1 pin. */
+    /** Verify an imported transition-release pin against the active tip. */
     bool MaybeFinalizePQActivationHandoff(const CBlockIndex& tip,
                                           std::string& error)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /**
-     * Protect any durable ChainLock floor, then persist quarantine before an
-     * ordinary pre-finality replacement of the exact local A-1 pin.
+     * Protect any durable ChainLock floor and the imported A-1 handoff.
      */
     bool CheckPQActivationHandoffDisconnect(const CBlockIndex& disconnecting,
-                                             bool& blocked,
                                              std::string& error)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
@@ -1459,12 +1457,8 @@ public:
                    std::memory_order_acquire);
     }
 
-    /**
-     * Permit normal producers, or the single activation block that can end a
-     * durable historical-replay quarantine.
-     */
-    bool IsPQBlockProductionAllowed(const CBlockIndex* active_tip)
-        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** Permit block production only after authenticated handoff. */
+    bool IsPQBlockProductionAllowed() const noexcept;
     // SYSCOIN END: Public-network BLS-to-PQ activation handoff.
 
     // SYSCOIN: Separate base sync from the one-way public-readiness latch used

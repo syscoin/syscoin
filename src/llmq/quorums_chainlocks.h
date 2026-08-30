@@ -898,6 +898,8 @@ public:
                                  !m_verification_mutex,
                                  !m_collector_mutex,
                                  !m_payment_audit_mutex,
+                                 !m_pending_btcc_receipt_mutex,
+                                 !m_needed_btcc_certificate_mutex,
                                  !m_pending_payment_audit_receipt_mutex,
                                  !m_signer_reconcile_mutex,
                                  !m_share_signing_mutex,
@@ -931,16 +933,26 @@ public:
     /** Read the healthy fsynced winner before live-store import. */
     [[nodiscard]] std::optional<evo::AuxiliaryHistoryGCBlockIdentity>
     GetDurableFinalityTargetForStartup() const;
+    enum class DurableFinalityRecoveryMode : uint8_t {
+        STRICT,
+        BLOCK_INDEX_REPLAY,
+    };
     /**
      * Resolve the active-chain floor protected by the fsynced winner before
      * Start() imports it into the live store. If the winner is on a validated
      * side branch, its active-chain fork is protected until normal finality
-     * enforcement can activate it.
+     * enforcement can activate it. Block-index replay may use the exact
+     * transaction-valid target as a provisional ancestry constraint while
+     * ConnectBlock performs the remaining script validation.
     */
     [[nodiscard]] bool GetDurableFinalityRecoveryFloor(
         const CBlockIndex*& active_floor,
         const CBlockIndex*& durable_target,
-        std::string& error) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+        std::string& error,
+        DurableFinalityRecoveryMode mode =
+            DurableFinalityRecoveryMode::STRICT,
+        bool* replay_target_pending = nullptr) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     [[nodiscard]] bool GetRecentChainLockByHeight(
         int32_t height, CChainLockSig& result) const;
 
@@ -1026,6 +1038,10 @@ public:
     [[nodiscard]] bool IsPendingBTCCReceiptCertificate(
         const uint256& logical_id) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_pending_btcc_receipt_mutex);
+    [[nodiscard]] bool IsRequiredBTCCReceiptCertificate(
+        const uint256& logical_id) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_pending_btcc_receipt_mutex,
+                                 !m_needed_btcc_certificate_mutex);
     void NotePendingPaymentAuditReceiptCertificate(
         const pq::PaymentAuditReceipt& receipt,
         const CBlockIndex& carrier)
@@ -1304,6 +1320,46 @@ private:
         uint256 blocked_logical_id;
     };
 
+    enum class NeededBTCCCertificateSource : uint8_t {
+        LIVE_FRONTIER = 0,
+        PRESEAL_REPLAY = 1,
+    };
+
+    struct NeededBTCCCertificate {
+        NeededBTCCCertificateSource source{
+            NeededBTCCCertificateSource::LIVE_FRONTIER};
+        uint256 logical_id;
+        uint256 source_token;
+        std::chrono::microseconds last_request{0};
+    };
+
+    struct PendingBTCCReceiptDependency {
+        uint256 logical_id{};
+        uint256 carrier_hash{};
+
+        friend bool operator==(const PendingBTCCReceiptDependency&,
+                               const PendingBTCCReceiptDependency&) = default;
+    };
+
+    enum class BTCCReceiptArchiveSource : uint8_t {
+        PENDING_CARRIER = 0,
+        LIVE_FRONTIER,
+        PRESEAL_REPLAY,
+    };
+
+    /** Immutable admission capability retained across the WOTS+ checks. */
+    struct BTCCReceiptArchiveCapability {
+        BTCCReceiptArchiveSource source{
+            BTCCReceiptArchiveSource::PENDING_CARRIER};
+        uint256 logical_id;
+        uint256 source_token;
+        uint64_t persistence_certificate_revision{0};
+        pq::ReceiptArchiveRosterAuthorization authorization;
+
+        friend bool operator==(const BTCCReceiptArchiveCapability&,
+                               const BTCCReceiptArchiveCapability&) = default;
+    };
+
     struct CurrentSigningContexts {
         static constexpr std::size_t MAX_VARIANTS{2};
 
@@ -1351,6 +1407,9 @@ private:
     [[nodiscard]] static int32_t CandidateFullValidationFloor(
         const pq::ChainLockCandidateContextRequest& request,
         int32_t activation_predecessor_height) noexcept;
+    [[nodiscard]] static HistoricalIndexValidationMode
+    CandidateTargetValidationMode(
+        pq::ChainLockCandidateAdmission admission) noexcept;
     [[nodiscard]] static bool IsCandidateTargetValidationSufficient(
         pq::ChainLockCandidateAdmission admission,
         bool has_local_chainlock,
@@ -1367,8 +1426,9 @@ private:
     ClassifyHistoricalReceiptIndexRangeCached(
         const CBlockIndex& last, int32_t first_height) const
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
-    [[nodiscard]] bool HasFullChainLockTargetValidationCached(
-        const CBlockIndex& candidate, int32_t predecessor_height) const
+    [[nodiscard]] bool HasChainLockTargetValidationCached(
+        const CBlockIndex& candidate, int32_t predecessor_height,
+        HistoricalIndexValidationMode mode) const
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     [[nodiscard]] BTCCCatchupRangeStatus
     GetFullyValidatedBTCCCatchupRangeStatusCached(
@@ -1423,21 +1483,24 @@ private:
     BuildRuntimeVerificationContext(
         const pq::PreparedFinalChainLockCandidate& prepared,
         bool* definitively_invalid = nullptr,
-        bool publish_roster = false) const
+        bool publish_roster = false,
+        const BTCCReceiptArchiveCapability*
+            receipt_archive_capability = nullptr) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_lookup_mutex,
                                  !m_persisted_mutex,
-                                 !m_btcc_preseal_mutex);
+                                 !m_btcc_preseal_mutex,
+                                 !m_pending_btcc_receipt_mutex,
+                                 !m_needed_btcc_certificate_mutex);
     enum class RosterBeaconEvidence : uint8_t {
         SIGNER_POLICY,
-        PREVERIFICATION_CLAIM,
+        THRESHOLD_CERTIFICATE,
     };
     [[nodiscard]] std::optional<pq::NormalRosterAuthorizationInput>
     BuildNormalRosterAuthorizationInput(
         const pq::ChainLockStatement& statement,
         const pq::FinalChainLockRecordMetadata& prior,
         pq::RosterAuthorizationTransitionKind requested_transition,
-        RosterBeaconEvidence evidence =
-            RosterBeaconEvidence::SIGNER_POLICY) const;
+        RosterBeaconEvidence evidence) const;
     [[nodiscard]] std::optional<
         pq::RosterAuthorizationVerificationContext>
     BuildNetworkRosterAuthorizationContext(
@@ -1912,6 +1975,57 @@ private:
     void RequestNeededBTCCCertificate()
         EXCLUSIVE_LOCKS_REQUIRED(!m_pending_btcc_receipt_mutex,
                                  !m_needed_btcc_certificate_mutex);
+    void NoteNeededBTCCCertificate(
+        NeededBTCCCertificateSource source,
+        const uint256& logical_id,
+        const uint256& source_token)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_needed_btcc_certificate_mutex);
+    void ClearNeededBTCCCertificate(
+        NeededBTCCCertificateSource source,
+        const std::optional<uint256>& source_token = std::nullopt)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_needed_btcc_certificate_mutex);
+    void ClearNeededBTCCCertificate(const uint256& logical_id)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_needed_btcc_certificate_mutex);
+    [[nodiscard]] bool IsNeededBTCCReceiptCertificate(
+        const uint256& logical_id) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_pending_btcc_receipt_mutex,
+                                 !m_needed_btcc_certificate_mutex);
+    [[nodiscard]] std::optional<BTCCReceiptArchiveCapability>
+    GetBTCCReceiptArchiveCapability(const uint256& logical_id) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_pending_btcc_receipt_mutex,
+                                 !m_needed_btcc_certificate_mutex);
+    [[nodiscard]] bool IsBTCCReceiptArchiveCapabilityCurrent(
+        const BTCCReceiptArchiveCapability& capability) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_pending_btcc_receipt_mutex,
+                                 !m_needed_btcc_certificate_mutex);
+    [[nodiscard]] static bool DoesBTCCReceiptArchiveSourceMatch(
+        const BTCCReceiptArchiveCapability& capability,
+        const std::optional<PendingBTCCReceiptDependency>& pending,
+        const std::optional<NeededBTCCCertificate>& needed) noexcept;
+    [[nodiscard]] bool AuthorizeBTCCReceiptArchivePersistence(
+        const BTCCReceiptArchiveCapability& capability,
+        const std::function<bool()>& persist_record,
+        pq::ChainLockFinalityError* error) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_pending_btcc_receipt_mutex,
+                                 !m_needed_btcc_certificate_mutex);
+    [[nodiscard]] std::optional<pq::ReceiptArchiveRosterAuthorization>
+    GetReceiptArchiveCoverageAuthorization(
+        const pq::PreparedFinalChainLockCandidate& prepared) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_persisted_mutex,
+                                 !m_btcc_preseal_mutex);
+    [[nodiscard]] static bool PublishNeededBTCCCertificate(
+        std::optional<NeededBTCCCertificate>& current,
+        NeededBTCCCertificateSource source,
+        const uint256& logical_id,
+        const uint256& source_token);
+    [[nodiscard]] static bool EraseNeededBTCCCertificate(
+        std::optional<NeededBTCCCertificate>& current,
+        NeededBTCCCertificateSource source,
+        const std::optional<uint256>& source_token = std::nullopt);
+    [[nodiscard]] static std::optional<uint256>
+    SelectRequiredBTCCCertificate(
+        const std::optional<uint256>& pending,
+        const std::optional<NeededBTCCCertificate>& needed);
     [[nodiscard]] bool RevalidatePendingBTCCReceiptDependency()
         EXCLUSIVE_LOCKS_REQUIRED(!m_pending_btcc_receipt_mutex);
     void RetryPendingBTCCBlock();
@@ -1947,10 +2061,12 @@ private:
         EXCLUSIVE_LOCKS_REQUIRED(!m_btcc_preseal_mutex);
     [[nodiscard]] bool ClearBTCCPreseal(
         const pq::BTCCPresealMarker& expected)
-        EXCLUSIVE_LOCKS_REQUIRED(!m_btcc_preseal_mutex);
+        EXCLUSIVE_LOCKS_REQUIRED(!m_btcc_preseal_mutex,
+                                 !m_needed_btcc_certificate_mutex);
     [[nodiscard]] bool PersistBTCCPresealStateLocked(
         const pq::BTCCPresealState& state)
-        EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_btcc_preseal_mutex);
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_btcc_preseal_mutex,
+                                 !m_needed_btcc_certificate_mutex);
     [[nodiscard]] bool PersistPaymentAuditPresealStateLocked(
         const pq::PaymentAuditPresealState& state)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_btcc_preseal_mutex);
@@ -2019,6 +2135,8 @@ private:
                                  !m_verification_mutex,
                                  !m_collector_mutex,
                                  !m_signer_reconcile_mutex,
+                                 !m_pending_btcc_receipt_mutex,
+                                 !m_needed_btcc_certificate_mutex,
                                  !m_btcc_preseal_mutex);
     [[nodiscard]] PersistedChainLockImport TryImportPersistedUnsealedBTCC()
         EXCLUSIVE_LOCKS_REQUIRED(!m_persisted_mutex,
@@ -2026,6 +2144,8 @@ private:
                                  !m_chainlock_admission_mutex,
                                  !m_verification_mutex,
                                  !m_collector_mutex,
+                                 !m_pending_btcc_receipt_mutex,
+                                 !m_needed_btcc_certificate_mutex,
                                  !m_btcc_preseal_mutex);
     [[nodiscard]] bool IsPersistedChainLockPending() const
         EXCLUSIVE_LOCKS_REQUIRED(!m_persisted_mutex);
@@ -2137,15 +2257,9 @@ private:
     std::string m_btc_header_policy_last_reason
         GUARDED_BY(m_btc_header_policy_mutex);
     mutable Mutex m_needed_btcc_certificate_mutex;
-    mutable std::optional<uint256> m_needed_btcc_certificate
+    mutable std::optional<NeededBTCCCertificate> m_needed_btcc_certificate
         GUARDED_BY(m_needed_btcc_certificate_mutex);
-    mutable std::chrono::microseconds m_needed_btcc_last_request
-        GUARDED_BY(m_needed_btcc_certificate_mutex){0};
 
-    struct PendingBTCCReceiptDependency {
-        uint256 logical_id{};
-        uint256 carrier_hash{};
-    };
     mutable Mutex m_pending_btcc_receipt_mutex;
     std::optional<PendingBTCCReceiptDependency> m_pending_btcc_receipt
         GUARDED_BY(m_pending_btcc_receipt_mutex);

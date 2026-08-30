@@ -7243,7 +7243,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                     inv.type == MSG_CLSIG &&
                     llmq::chainLocksHandler != nullptr &&
                     llmq::chainLocksHandler
-                        ->IsPendingBTCCReceiptCertificate(inv.hash)};
+                        ->IsRequiredBTCCReceiptCertificate(inv.hash)};
                 const bool required_payment_audit{
                     inv.type == MSG_PQPOSECERT &&
                     llmq::chainLocksHandler != nullptr &&
@@ -9905,7 +9905,7 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
             required &&
             (llmq::chainLocksHandler == nullptr ||
              !llmq::chainLocksHandler
-                  ->IsPendingBTCCReceiptCertificate(*required))) {
+                  ->IsRequiredBTCCReceiptCertificate(*required))) {
             m_clsig_requests.ClearRequired(*required);
         }
         if (const auto required{

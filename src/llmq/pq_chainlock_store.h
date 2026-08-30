@@ -265,11 +265,18 @@ enum class ChainLockFinalityError : uint8_t {
     PERSISTENCE_FAILURE,
 };
 
+struct ReceiptArchiveRosterAuthorization;
+
 using ChainLockDurableAccept = std::function<bool(const FinalChainLock&)>;
 using ChainLockDurableArchive = std::function<bool(const FinalChainLock&)>;
+using ChainLockDurableReceiptArchive = std::function<bool(
+    const FinalChainLock&, const ReceiptArchiveRosterAuthorization&)>;
+using ChainLockDurableCoveringAccept = std::function<bool(
+    const FinalChainLock&, const ReceiptArchiveRosterAuthorization&)>;
 using ChainLockDurableCatchup = std::function<bool(
     const FinalChainLock&,
-    const std::optional<BTCCCursorReconciliationProof>&)>;
+    const std::optional<BTCCCursorReconciliationProof>&,
+    const ReceiptArchiveRosterAuthorization*)>;
 using ChainLockPreDurableCatchup = std::function<bool()>;
 using ChainLockDurableAuthorization = std::function<bool(
     const std::function<bool()>&, ChainLockFinalityError*)>;
@@ -306,6 +313,26 @@ struct FinalChainLockRecordMetadata {
 };
 
 /**
+ * Exact durable authority retained across one catch-up gap.
+ *
+ * Persistence creates this edge from its actual old best record. The owner is
+ * the catch-up winner that consumed that state; a network candidate can never
+ * nominate its own authorization predecessor.
+ */
+struct ReceiptArchiveRosterAuthorization {
+    FinalChainLockRecordMetadata owner;
+    uint256 covering_logical_id;
+    uint256 covering_witness_id;
+    FinalChainLockRecordMetadata predecessor;
+
+    [[nodiscard]] bool IsInternallyConsistent(
+        const uint256& genesis_hash) const;
+
+    friend bool operator==(const ReceiptArchiveRosterAuthorization&,
+                           const ReceiptArchiveRosterAuthorization&) = default;
+};
+
+/**
  * Immutable view of the accepted winner at one in-memory store revision.
  *
  * The revision is process-local and changes after every successful accepted
@@ -335,7 +362,11 @@ public:
                            const ChainLockFinalityContext& context,
                            ChainLockDurableAccept durable_accept = {},
                            ChainLockDurableArchive durable_archive = {},
-                           ChainLockDurableCatchup durable_catchup = {});
+                           ChainLockDurableCatchup durable_catchup = {},
+                           ChainLockDurableReceiptArchive
+                               durable_receipt_archive = {},
+                           ChainLockDurableCoveringAccept
+                               durable_covering_accept = {});
 
     ChainLockFinalityStore(const ChainLockFinalityStore&) = delete;
     ChainLockFinalityStore& operator=(const ChainLockFinalityStore&) = delete;
@@ -394,6 +425,15 @@ public:
         ChainLockFinalityError* error = nullptr)
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
+    /** Accept LIVE while atomically retiring an independently covered gap. */
+    [[nodiscard]] bool AcceptVerifiedCoveringReceiptArchive(
+        const PreparedFinalChainLockCandidate& prepared,
+        const FinalChainLock& chainlock,
+        bool signatures_valid,
+        const ReceiptArchiveRosterAuthorization& authorization,
+        ChainLockFinalityError* error = nullptr)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
     /** Install a fully reverified token produced by PreparePersistedCandidate. */
     [[nodiscard]] bool AcceptPersistedVerified(
         const PreparedFinalChainLockCandidate& prepared,
@@ -403,6 +443,16 @@ public:
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     [[nodiscard]] bool AcceptReceiptArchiveVerified(
+        const PreparedFinalChainLockCandidate& prepared,
+        const FinalChainLock& chainlock,
+        bool signatures_valid,
+        const ReceiptArchiveRosterAuthorization& authorization,
+        ChainLockDurableAuthorization durable_authorization = {},
+        ChainLockFinalityError* error = nullptr)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /** Import the exact locally fsynced unsealed record without rewriting it. */
+    [[nodiscard]] bool AcceptPersistedReceiptArchiveVerified(
         const PreparedFinalChainLockCandidate& prepared,
         const FinalChainLock& chainlock,
         bool signatures_valid,
@@ -424,7 +474,9 @@ public:
         bool signatures_valid,
         ChainLockPreDurableCatchup pre_durable,
         ChainLockDurableAuthorization durable_authorization,
-        ChainLockFinalityError* error = nullptr)
+        ChainLockFinalityError* error = nullptr,
+        const ReceiptArchiveRosterAuthorization*
+            covering_authorization = nullptr)
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     void RejectPrepared(const PreparedFinalChainLockCandidate& prepared)
@@ -525,6 +577,10 @@ private:
         bool persist,
         const ChainLockPreDurableCatchup& pre_durable,
         const ChainLockDurableAuthorization& durable_authorization,
+        const ReceiptArchiveRosterAuthorization*
+            receipt_archive_authorization,
+        const ReceiptArchiveRosterAuthorization*
+            covering_authorization,
         ChainLockFinalityError* error) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     void RememberAccepted(AcceptedRecord record) EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
 
@@ -534,6 +590,8 @@ private:
     const ChainLockDurableAccept m_durable_accept;
     const ChainLockDurableArchive m_durable_archive;
     const ChainLockDurableCatchup m_durable_catchup;
+    const ChainLockDurableReceiptArchive m_durable_receipt_archive;
+    const ChainLockDurableCoveringAccept m_durable_covering_accept;
 
     mutable Mutex m_mutex;
     uint64_t m_revision GUARDED_BY(m_mutex){0};

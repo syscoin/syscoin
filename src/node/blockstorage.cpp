@@ -1287,9 +1287,10 @@ void ImportBlocks(ChainstateManager& chainman, std::vector<fs::path> vImportFile
 
     {
         ImportingNow imp{chainman.m_blockman.m_importing};
+        const bool reindexing{fReindex.load()};
 
         // -reindex
-        if (fReindex) {
+        if (reindexing) {
             int nFile = 0;
             // Map of disk positions for blocks with unknown parent (only used for reindex);
             // parent hash -> child disk position, multiple children can have the same parent.
@@ -1311,9 +1312,6 @@ void ImportBlocks(ChainstateManager& chainman, std::vector<fs::path> vImportFile
                 }
                 nFile++;
             }
-            WITH_LOCK(::cs_main, chainman.m_blockman.m_block_tree_db->WriteReindexing(false));
-            fReindex = false;
-            LogPrintf("Reindexing finished\n");
             // To avoid ending up in a situation without genesis block, re-try initializing (no-op if reindexing worked):
             chainman.ActiveChainstate().LoadGenesisBlock();
         }
@@ -1344,6 +1342,20 @@ void ImportBlocks(ChainstateManager& chainman, std::vector<fs::path> vImportFile
                 chainman.GetNotifications().fatalError(strprintf("Failed to connect best block (%s)", state.ToString()));
                 return;
             }
+        }
+        if (reindexing) {
+            const bool marker_cleared{WITH_LOCK(
+                ::cs_main,
+                return chainman.m_blockman.m_block_tree_db->WriteReindexing(
+                    false))};
+            if (!marker_cleared) {
+                chainman.GetNotifications().fatalError(
+                    "Failed to clear durable reindex marker after best-chain "
+                    "activation");
+                return;
+            }
+            fReindex = false;
+            LogPrintf("Reindexing finished\n");
         }
         // SYSCOIN
         if(pdsNotificationInterface)

@@ -144,10 +144,10 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(
     LOCK(::cs_main);
     CBlockIndex* pindexPrev = m_chainstate.m_chain.Tip();
     assert(pindexPrev != nullptr);
-    // SYSCOIN BEGIN: Bind the mining-only activation exception to the exact
-    // fully validated A-1 tip. All other quarantined services remain disabled.
+    // SYSCOIN BEGIN: Block production requires authenticated handoff
+    // participation; historical replay is always sync-only.
     if (!ShouldCreateBlockTemplate(
-            m_chainstate.m_chainman.IsPQBlockProductionAllowed(pindexPrev))) {
+            m_chainstate.m_chainman.IsPQBlockProductionAllowed())) {
         throw std::runtime_error(
             "PQ activation handoff is in sync-only quarantine");
     }

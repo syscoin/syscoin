@@ -24,6 +24,7 @@
 #include <net.h>
 #include <net_processing.h>
 #include <netmessagemaker.h>
+#include <node/blockstorage.h>
 #include <protocol.h>
 #include <scheduler.h>
 #include <services/nevmconsensus.h>
@@ -432,23 +433,37 @@ PaymentAuditContextStatus ClassifyHistoricalReceiptIndexRange(
         provenance_revocation_revision, block_budget);
 }
 
-bool HasFullChainLockTargetValidation(const CBlockIndex& candidate,
-                                      int32_t predecessor_height,
-                                      HistoricalIndexValidationCache& cache,
-                                      uint64_t provenance_revocation_revision,
-                                      std::size_t block_budget =
-                                          HistoricalIndexValidationCache::BLOCK_BUDGET)
+bool HasChainLockTargetValidation(const CBlockIndex& candidate,
+                                  int32_t predecessor_height,
+                                  HistoricalIndexValidationMode mode,
+                                  HistoricalIndexValidationCache& cache,
+                                  uint64_t provenance_revocation_revision,
+                                  std::size_t block_budget =
+                                      HistoricalIndexValidationCache::BLOCK_BUDGET)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
-    constexpr uint32_t target_provenance{
-        BLOCK_PQ_BTCC_INDEX_VALIDATED |
-        BLOCK_PQ_RECEIPT_INDEX_VALIDATED};
+    bool target_provenance{false};
+    switch (mode) {
+    case HistoricalIndexValidationMode::BTCC_COMPAT:
+        target_provenance = HasBTCCIndexProvenance(candidate);
+        break;
+    case HistoricalIndexValidationMode::FULL_RECEIPT:
+        target_provenance = HasFullReceiptIndexProvenance(candidate);
+        break;
+    case HistoricalIndexValidationMode::FULL_FINALITY: {
+        constexpr uint32_t required{
+            BLOCK_PQ_BTCC_INDEX_VALIDATED |
+            BLOCK_PQ_RECEIPT_INDEX_VALIDATED};
+        target_provenance = (candidate.nStatus & required) == required;
+        break;
+    }
+    }
     if (predecessor_height < 0 ||
         predecessor_height >= candidate.nHeight ||
-        (candidate.nStatus & target_provenance) != target_provenance ||
+        !target_provenance ||
         cache.Validate(
             candidate, predecessor_height + 1,
-            HistoricalIndexValidationMode::FULL_FINALITY,
+            mode,
             provenance_revocation_revision, block_budget) !=
             PaymentAuditContextStatus::READY) {
         return false;
@@ -516,6 +531,22 @@ uint256 BoundedBTCCPresealSourceToken(
     writer << std::string{"SYS_PQ_BTCC_BOUNDED_RECOVERY_V1"}
            << BTCCPresealStateToken(state)
            << provenance_revocation_revision;
+    return writer.GetHash();
+}
+
+uint256 LiveBTCCCertificateSourceToken(
+    uint64_t provenance_revocation_revision,
+    const pq::ChainLockPredecessor& durable_predecessor,
+    int32_t target_height,
+    const uint256& target_hash)
+{
+    CHashWriter writer{SER_GETHASH, 0};
+    writer << std::string{"SYS_PQ_BTCC_LIVE_CERTIFICATE_NEED_V1"}
+           << provenance_revocation_revision
+           << durable_predecessor.height
+           << durable_predecessor.block_hash
+           << durable_predecessor.btcc_cursor
+           << target_height << target_hash;
     return writer.GetHash();
 }
 
@@ -841,8 +872,13 @@ bool DoesRecoverySeedAuthorizeReady(
         : durable_seed.IsReady() && durable_seed == ready_seed;
 }
 
+// A normal final certificate is authorized only by rosters inherited from
+// the durable prior state. These facts reconstruct its signed transition;
+// they are not local Bitcoin-policy results and must never authorize RESET or
+// a local share. Full threshold verification is the authentication boundary.
 std::optional<pq::ValidatedRosterBeaconAnchor>
-ClaimedRosterBeaconAnchor(const pq::RosterBeaconSeed& seed) noexcept
+ThresholdCertificateRosterBeaconAnchor(
+    const pq::RosterBeaconSeed& seed) noexcept
 {
     if (seed.state != pq::RosterBeaconState::PENDING ||
         !seed.IsStructurallyValid() || seed.anchor_btc_height < 0) {
@@ -854,7 +890,8 @@ ClaimedRosterBeaconAnchor(const pq::RosterBeaconSeed& seed) noexcept
 }
 
 std::optional<pq::ValidatedRosterBeaconRange>
-ClaimedRosterBeaconRange(const pq::RosterBeaconSeed& seed) noexcept
+ThresholdCertificateRosterBeaconRange(
+    const pq::RosterBeaconSeed& seed) noexcept
 {
     const auto future_height{seed.FutureBTCHeight()};
     if (!seed.IsReady() || !future_height ||
@@ -2297,8 +2334,9 @@ PaymentAuditContextStatus ClassifyPaymentAuditSealContextImpl(
         return PaymentAuditContextStatus::INVALID;
     }
     if (validation == PaymentAuditSealValidation::LIVE_EXACT) {
-        return HasFullChainLockTargetValidation(
-                   *seal, predecessor_height, cache,
+        return HasChainLockTargetValidation(
+                   *seal, predecessor_height,
+                   HistoricalIndexValidationMode::FULL_FINALITY, cache,
                    provenance_revocation_revision, block_budget)
             ? PaymentAuditContextStatus::READY
             : PaymentAuditContextStatus::LOCAL_ERROR;
@@ -2540,10 +2578,10 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
     if (m_config) {
         bool full_reindex{false};
         if (m_chainman.m_blockman.m_block_tree_db) {
-            // The persisted block-index marker distinguishes a full reindex
-            // (which can deterministically refetch exact witnesses) from
-            // -reindex-chainstate and ordinary restart. Only the former may
-            // discard a corrupt archive instead of failing closed.
+            // Full reindex may rebuild bounded block-derived audit data, but
+            // it cannot rediscover the roster-authorization predecessor chain
+            // from block inventory. Preserve the fsynced finality state and
+            // reauthenticate it against the rebuilt branch instead.
             m_chainman.m_blockman.m_block_tree_db->ReadReindexing(
                 full_reindex);
         }
@@ -2551,7 +2589,7 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
             DBParams{
                 .path = chainman.m_options.datadir / "llmq/pq-chainlocks",
                 .cache_bytes = 4U << 20,
-                .wipe_data = full_reindex,
+                .wipe_data = false,
             },
             m_genesis_hash, *m_config);
         m_pending_persisted = m_persistence->LoadBest();
@@ -2629,34 +2667,80 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
             },
             [this](const pq::FinalChainLock& chainlock,
                    const std::optional<pq::BTCCCursorReconciliationProof>&
-                       btcc_cursor_reconciliation) {
+                       btcc_cursor_reconciliation,
+                   const pq::ReceiptArchiveRosterAuthorization*
+                       covering_authorization) {
+                pq::ChainLockPersistenceError persistence_error{
+                    pq::ChainLockPersistenceError::NONE};
                 const auto persist = [&] {
                     switch (chainlock.statement.roster_transition) {
                     case pq::RosterAuthorizationTransitionKind::INITIALIZE:
                         return m_persistence->PersistInitializedBest(
-                            chainlock);
+                            chainlock, &persistence_error);
                     case pq::RosterAuthorizationTransitionKind::RECOVER:
                         return m_persistence->PersistRecoveryCatchupBest(
-                            chainlock, nullptr,
-                            btcc_cursor_reconciliation);
+                            chainlock, &persistence_error,
+                            btcc_cursor_reconciliation,
+                            covering_authorization);
                     case pq::RosterAuthorizationTransitionKind::KEEP:
                     case pq::RosterAuthorizationTransitionKind::OBSERVE:
                     case pq::RosterAuthorizationTransitionKind::REVEAL:
                     case pq::RosterAuthorizationTransitionKind::ROTATE:
                         return m_persistence->PersistCatchupBest(
-                            chainlock, nullptr,
-                            btcc_cursor_reconciliation);
+                            chainlock, &persistence_error,
+                            btcc_cursor_reconciliation,
+                            covering_authorization);
                     }
                     return false;
                 };
+                const bool auxiliary_flushed{
+                    FlushChainLockAuxiliarySnapshotsForDurability()};
+                const bool persisted{auxiliary_flushed && m_persistence &&
+                                     persist()};
+                if (!persisted) {
+                    // A stale semantic CAS is a rejected candidate, not a
+                    // failed database. Only an actual durability failure may
+                    // permanently close admission until restart.
+                    if (!auxiliary_flushed || !m_persistence ||
+                        persistence_error ==
+                            pq::ChainLockPersistenceError::IO_FAILURE) {
+                        m_persistence_failed.store(true);
+                        DisableShareAdmission();
+                    }
+                } else {
+                    m_catchup_used.store(true);
+                    UpdateDurableChainLockAuxiliaryRetention();
+                }
+                return persisted;
+            },
+            [this](
+                const pq::FinalChainLock& chainlock,
+                const pq::ReceiptArchiveRosterAuthorization& authorization) {
                 const bool persisted{
                     FlushChainLockAuxiliarySnapshotsForDurability() &&
-                    m_persistence && persist()};
+                    m_persistence &&
+                    m_persistence->PersistAuthorizedUnsealedBTCC(
+                        chainlock, authorization)};
                 if (!persisted) {
                     m_persistence_failed.store(true);
                     DisableShareAdmission();
                 } else {
-                    m_catchup_used.store(true);
+                    UpdateDurableChainLockAuxiliaryRetention();
+                }
+                return persisted;
+            },
+            [this](
+                const pq::FinalChainLock& chainlock,
+                const pq::ReceiptArchiveRosterAuthorization& authorization) {
+                const bool persisted{
+                    FlushChainLockAuxiliarySnapshotsForDurability() &&
+                    m_persistence &&
+                    m_persistence->PersistBestCoveringReceiptArchive(
+                        chainlock, authorization)};
+                if (!persisted) {
+                    m_persistence_failed.store(true);
+                    DisableShareAdmission();
+                } else {
                     UpdateDurableChainLockAuxiliaryRetention();
                 }
                 return persisted;
@@ -2796,18 +2880,19 @@ void CChainLocksHandler::Start()
             [scheduler] { scheduler->serviceQueue(); });
         scheduler->scheduleEvery([this]() EXCLUSIVE_LOCKS_REQUIRED(
             !cs_main, !m_chainlock_admission_mutex,
-            !m_share_lifecycle_mutex) {
+            !m_share_lifecycle_mutex, !m_pending_btcc_receipt_mutex,
+            !m_needed_btcc_certificate_mutex) {
             (void)TryImportPersistedChainLock();
             (void)TryImportPersistedUnsealedBTCC();
             CheckActiveState();
             ContinueVerifiedHistoricalChainLock();
             EnforceBestChainLock();
             MaintainPaymentAuditCheckpointGC();
+            MaybeReplayBTCCPreseal();
             RequestNeededBTCCCertificate();
             RequestNeededPaymentAuditCertificate();
             RetryPendingBTCCBlock();
             RequestCatchupChainLock();
-            MaybeReplayBTCCPreseal();
             RefreshPQHistoryAuthState();
             MaybeRelayPaymentAuditHave();
             const uint64_t admission_generation{
@@ -3516,12 +3601,17 @@ CChainLocksHandler::GetDurableFinalityTargetForStartup() const
 bool CChainLocksHandler::GetDurableFinalityRecoveryFloor(
     const CBlockIndex*& active_floor,
     const CBlockIndex*& durable_target,
-    std::string& error) const
+    std::string& error,
+    DurableFinalityRecoveryMode mode,
+    bool* replay_target_pending) const
 {
     AssertLockHeld(cs_main);
     active_floor = nullptr;
     durable_target = nullptr;
     error.clear();
+    if (replay_target_pending != nullptr) {
+        *replay_target_pending = false;
+    }
     try {
         if (m_config &&
             (!m_persistence || !m_payment_audit_store ||
@@ -3568,11 +3658,29 @@ bool CChainLocksHandler::GetDurableFinalityRecoveryFloor(
         const CBlockIndex* target{m_chainman.m_blockman.LookupBlockIndex(
             durable->statement.block_hash)};
         const CBlockIndex* active_tip{m_chainman.ActiveTip()};
-        if (target == nullptr ||
-            target->nHeight != durable->statement.height ||
+        const bool block_index_replay{
+            mode == DurableFinalityRecoveryMode::BLOCK_INDEX_REPLAY &&
+            node::fReindex.load() && !checkpoint};
+        if (target == nullptr) {
+            if (block_index_replay && replay_target_pending != nullptr) {
+                *replay_target_pending = true;
+                return true;
+            }
+            error = "durable ChainLock recovery target is unavailable or "
+                    "not fully validated";
+            return false;
+        }
+        const bool fully_validated{
+            target->IsValid(BLOCK_VALID_SCRIPTS)};
+        const bool provisional_replay_target{
+            block_index_replay &&
+            (target->nStatus & BLOCK_HAVE_DATA) &&
+            target->IsValid(BLOCK_VALID_TRANSACTIONS) &&
+            target->HaveNumChainTxs()};
+        if (target->nHeight != durable->statement.height ||
             (target->nStatus & BLOCK_FAILED_MASK) ||
             target->IsAssumedValid() ||
-            !target->IsValid(BLOCK_VALID_SCRIPTS) ||
+            (!fully_validated && !provisional_replay_target) ||
             active_tip == nullptr) {
             error = "durable ChainLock recovery target is unavailable or "
                     "not fully validated";
@@ -4443,6 +4551,305 @@ bool CChainLocksHandler::IsPendingBTCCReceiptCertificate(
     LOCK(m_pending_btcc_receipt_mutex);
     return m_pending_btcc_receipt &&
            m_pending_btcc_receipt->logical_id == logical_id;
+}
+
+bool CChainLocksHandler::IsRequiredBTCCReceiptCertificate(
+    const uint256& logical_id) const
+{
+    if (logical_id.IsNull()) return false;
+    const auto pending_verified{
+        GetPendingVerifiedHistoricalChainLock()};
+    LOCK2(m_pending_btcc_receipt_mutex,
+          m_needed_btcc_certificate_mutex);
+    std::optional<uint256> pending;
+    if (m_pending_btcc_receipt &&
+        (!pending_verified ||
+         pending_verified->logical_id !=
+             m_pending_btcc_receipt->logical_id)) {
+        pending = m_pending_btcc_receipt->logical_id;
+    }
+    return SelectRequiredBTCCCertificate(
+               pending, m_needed_btcc_certificate) == logical_id;
+}
+
+bool CChainLocksHandler::IsNeededBTCCReceiptCertificate(
+    const uint256& logical_id) const
+{
+    if (logical_id.IsNull()) return false;
+    LOCK2(m_pending_btcc_receipt_mutex,
+          m_needed_btcc_certificate_mutex);
+    return (m_pending_btcc_receipt &&
+            m_pending_btcc_receipt->logical_id == logical_id) ||
+           (m_needed_btcc_certificate &&
+            m_needed_btcc_certificate->logical_id == logical_id);
+}
+
+std::optional<CChainLocksHandler::BTCCReceiptArchiveCapability>
+CChainLocksHandler::GetBTCCReceiptArchiveCapability(
+    const uint256& logical_id) const
+{
+    if (logical_id.IsNull() || !m_persistence) return std::nullopt;
+    const auto durable{m_persistence->GetFinalityState()};
+    if (!durable.best || !durable.receipt_archive_authorization ||
+        !durable.receipt_archive_authorization->IsInternallyConsistent(
+            m_genesis_hash) ||
+        durable.receipt_archive_authorization->covering_logical_id !=
+            durable.best->logical_id ||
+        durable.receipt_archive_authorization->covering_witness_id !=
+            durable.best->witness_id ||
+        durable.best->statement.height <
+            durable.receipt_archive_authorization->owner.statement.height ||
+        (durable.best->statement.height ==
+             durable.receipt_archive_authorization->owner.statement.height &&
+         (durable.receipt_archive_authorization->owner.logical_id !=
+              durable.best->logical_id ||
+          durable.receipt_archive_authorization->owner.witness_id !=
+              durable.best->witness_id ||
+          durable.receipt_archive_authorization->owner.statement.block_hash !=
+              durable.best->statement.block_hash))) {
+        return std::nullopt;
+    }
+
+    LOCK2(m_pending_btcc_receipt_mutex,
+          m_needed_btcc_certificate_mutex);
+    BTCCReceiptArchiveCapability capability;
+    if (m_pending_btcc_receipt &&
+        m_pending_btcc_receipt->logical_id == logical_id) {
+        capability.source = BTCCReceiptArchiveSource::PENDING_CARRIER;
+        capability.source_token = m_pending_btcc_receipt->carrier_hash;
+    } else if (m_needed_btcc_certificate &&
+               m_needed_btcc_certificate->logical_id == logical_id) {
+        capability.source =
+            m_needed_btcc_certificate->source ==
+                    NeededBTCCCertificateSource::LIVE_FRONTIER
+                ? BTCCReceiptArchiveSource::LIVE_FRONTIER
+                : BTCCReceiptArchiveSource::PRESEAL_REPLAY;
+        capability.source_token =
+            m_needed_btcc_certificate->source_token;
+    } else {
+        return std::nullopt;
+    }
+    if (capability.source_token.IsNull()) return std::nullopt;
+    capability.logical_id = logical_id;
+    capability.persistence_certificate_revision =
+        durable.certificate_revision;
+    capability.authorization =
+        *durable.receipt_archive_authorization;
+    return capability;
+}
+
+bool CChainLocksHandler::IsBTCCReceiptArchiveCapabilityCurrent(
+    const BTCCReceiptArchiveCapability& capability) const
+{
+    const auto current{
+        GetBTCCReceiptArchiveCapability(capability.logical_id)};
+    return current && *current == capability;
+}
+
+bool CChainLocksHandler::DoesBTCCReceiptArchiveSourceMatch(
+    const BTCCReceiptArchiveCapability& capability,
+    const std::optional<PendingBTCCReceiptDependency>& pending,
+    const std::optional<NeededBTCCCertificate>& needed) noexcept
+{
+    switch (capability.source) {
+    case BTCCReceiptArchiveSource::PENDING_CARRIER:
+        return pending && pending->logical_id == capability.logical_id &&
+            pending->carrier_hash == capability.source_token;
+    case BTCCReceiptArchiveSource::LIVE_FRONTIER:
+    case BTCCReceiptArchiveSource::PRESEAL_REPLAY: {
+        const auto expected_source{
+            capability.source == BTCCReceiptArchiveSource::LIVE_FRONTIER
+                ? NeededBTCCCertificateSource::LIVE_FRONTIER
+                : NeededBTCCCertificateSource::PRESEAL_REPLAY};
+        return needed && needed->source == expected_source &&
+            needed->logical_id == capability.logical_id &&
+            needed->source_token == capability.source_token;
+    }
+    }
+    return false;
+}
+
+bool CChainLocksHandler::AuthorizeBTCCReceiptArchivePersistence(
+    const BTCCReceiptArchiveCapability& capability,
+    const std::function<bool()>& persist_record,
+    pq::ChainLockFinalityError* error) const
+{
+    if (!persist_record || !m_persistence ||
+        capability.logical_id.IsNull() ||
+        capability.source_token.IsNull()) {
+        if (error != nullptr) {
+            *error = pq::ChainLockFinalityError::CONTEXT_CHANGED;
+        }
+        return false;
+    }
+
+    LOCK2(m_pending_btcc_receipt_mutex,
+          m_needed_btcc_certificate_mutex);
+    const bool source_current{DoesBTCCReceiptArchiveSourceMatch(
+        capability, m_pending_btcc_receipt,
+        m_needed_btcc_certificate)};
+
+    const auto durable{m_persistence->GetFinalityState()};
+    const bool authority_current{
+        durable.certificate_revision ==
+                capability.persistence_certificate_revision &&
+        durable.best && durable.receipt_archive_authorization &&
+        durable.best->logical_id ==
+            capability.authorization.covering_logical_id &&
+        durable.best->witness_id ==
+            capability.authorization.covering_witness_id &&
+        durable.best->statement.height >=
+            capability.authorization.owner.statement.height &&
+        *durable.receipt_archive_authorization ==
+            capability.authorization};
+    if (!source_current || !authority_current) {
+        if (error != nullptr) {
+            *error = pq::ChainLockFinalityError::CONTEXT_CHANGED;
+        }
+        return false;
+    }
+    return persist_record();
+}
+
+std::optional<pq::ReceiptArchiveRosterAuthorization>
+CChainLocksHandler::GetReceiptArchiveCoverageAuthorization(
+    const pq::PreparedFinalChainLockCandidate& prepared) const
+{
+    if (!m_config || !m_persistence || !m_store ||
+        (prepared.admission != pq::ChainLockCandidateAdmission::LIVE &&
+         prepared.admission != pq::ChainLockCandidateAdmission::CATCHUP)) {
+        return std::nullopt;
+    }
+    const auto durable{m_persistence->GetFinalityState()};
+    if (!durable.best || !durable.receipt_archive_authorization ||
+        !durable.receipt_archive_authorization->IsInternallyConsistent(
+            m_genesis_hash) ||
+        durable.best->logical_id !=
+            durable.receipt_archive_authorization->covering_logical_id ||
+        durable.best->witness_id !=
+            durable.receipt_archive_authorization->covering_witness_id ||
+        prepared.predecessor.height != durable.best->statement.height ||
+        prepared.predecessor.block_hash !=
+            durable.best->statement.block_hash) {
+        return std::nullopt;
+    }
+    const auto store_best{m_store->GetBestRecord()};
+    if (!store_best || store_best->metadata != *durable.best) {
+        return std::nullopt;
+    }
+
+    const auto& authorization{*durable.receipt_archive_authorization};
+    const int64_t coverage_height{
+        static_cast<int64_t>(
+            authorization.owner.statement.previous_chainlock_height) +
+        m_config->btcc_schedule.nevm_injection_lag};
+    if (prepared.statement.height < coverage_height) return std::nullopt;
+
+    LOCK(cs_main);
+    const CBlockIndex* candidate{
+        m_chainman.m_blockman.LookupBlockIndex(
+            prepared.statement.block_hash)};
+    const CBlockIndex* active{
+        candidate != nullptr
+            ? m_chainman.ActiveChain()[prepared.statement.height]
+            : nullptr};
+    const CBlockIndex* owner{
+        candidate != nullptr
+            ? candidate->GetAncestor(authorization.owner.statement.height)
+            : nullptr};
+    const auto indexed_receipt{
+        candidate != nullptr ? IndexedBTCCReceiptState(*candidate)
+                             : std::optional<pq::BTCCReceiptState>{}};
+    if (candidate == nullptr || active != candidate ||
+        candidate->nHeight != prepared.statement.height ||
+        owner == nullptr ||
+        owner->GetBlockHash() != authorization.owner.statement.block_hash ||
+        !HasChainLockTargetValidationCached(
+            *candidate, authorization.owner.statement.height,
+            HistoricalIndexValidationMode::FULL_FINALITY) ||
+        !indexed_receipt ||
+        *indexed_receipt != prepared.statement.btcc_receipt_state) {
+        return std::nullopt;
+    }
+    return authorization;
+}
+
+bool CChainLocksHandler::PublishNeededBTCCCertificate(
+    std::optional<NeededBTCCCertificate>& current,
+    NeededBTCCCertificateSource source,
+    const uint256& logical_id,
+    const uint256& source_token)
+{
+    if (logical_id.IsNull() || source_token.IsNull()) return false;
+    if (current) {
+        if (static_cast<uint8_t>(current->source) >
+            static_cast<uint8_t>(source)) {
+            return false;
+        }
+        if (current->source == source &&
+            current->logical_id == logical_id &&
+            current->source_token == source_token) {
+            return false;
+        }
+    }
+    current = NeededBTCCCertificate{
+        source, logical_id, source_token,
+        std::chrono::microseconds{0}};
+    return true;
+}
+
+bool CChainLocksHandler::EraseNeededBTCCCertificate(
+    std::optional<NeededBTCCCertificate>& current,
+    NeededBTCCCertificateSource source,
+    const std::optional<uint256>& source_token)
+{
+    if (!current || current->source != source ||
+        (source_token && current->source_token != *source_token)) {
+        return false;
+    }
+    current.reset();
+    return true;
+}
+
+std::optional<uint256>
+CChainLocksHandler::SelectRequiredBTCCCertificate(
+    const std::optional<uint256>& pending,
+    const std::optional<NeededBTCCCertificate>& needed)
+{
+    if (pending && !pending->IsNull()) return pending;
+    return needed && !needed->logical_id.IsNull()
+        ? std::optional<uint256>{needed->logical_id}
+        : std::nullopt;
+}
+
+void CChainLocksHandler::NoteNeededBTCCCertificate(
+    NeededBTCCCertificateSource source,
+    const uint256& logical_id,
+    const uint256& source_token)
+{
+    LOCK(m_needed_btcc_certificate_mutex);
+    (void)PublishNeededBTCCCertificate(
+        m_needed_btcc_certificate, source, logical_id, source_token);
+}
+
+void CChainLocksHandler::ClearNeededBTCCCertificate(
+    NeededBTCCCertificateSource source,
+    const std::optional<uint256>& source_token)
+{
+    LOCK(m_needed_btcc_certificate_mutex);
+    (void)EraseNeededBTCCCertificate(
+        m_needed_btcc_certificate, source, source_token);
+}
+
+void CChainLocksHandler::ClearNeededBTCCCertificate(
+    const uint256& logical_id)
+{
+    if (logical_id.IsNull()) return;
+    LOCK(m_needed_btcc_certificate_mutex);
+    if (m_needed_btcc_certificate &&
+        m_needed_btcc_certificate->logical_id == logical_id) {
+        m_needed_btcc_certificate.reset();
+    }
 }
 
 void CChainLocksHandler::NotePendingPaymentAuditReceiptCertificate(
@@ -5343,8 +5750,9 @@ bool CChainLocksHandler::PersistBTCCPresealStateLocked(
     AssertLockHeld(cs_main);
     AssertLockHeld(m_btcc_preseal_mutex);
     pq::BTCCPresealState durable{state};
+    const bool changed{durable != m_btcc_preseal_state};
     uint64_t next_revision{m_btcc_preseal_revision};
-    if (durable != m_btcc_preseal_state && !durable.IsEmpty()) {
+    if (changed && !durable.IsEmpty()) {
         if (next_revision == std::numeric_limits<uint64_t>::max()) {
             m_persistence_failed.store(true);
             DisableShareAdmission();
@@ -5378,6 +5786,10 @@ bool CChainLocksHandler::PersistBTCCPresealStateLocked(
         m_persistence_failed.store(true);
         DisableShareAdmission();
         return false;
+    }
+    if (changed) {
+        ClearNeededBTCCCertificate(
+            NeededBTCCCertificateSource::PRESEAL_REPLAY);
     }
     m_btcc_preseal_state = durable;
     m_btcc_preseal_revision = next_revision;
@@ -5616,6 +6028,10 @@ void CChainLocksHandler::UpdateDurableChainLockAuxiliaryRetention()
         const auto durable{m_persistence->GetFinalityState()};
         inspect(durable.best);
         inspect(durable.unsealed_btcc);
+        if (durable.receipt_archive_authorization) {
+            inspect(std::optional<pq::FinalChainLockRecordMetadata>{
+                durable.receipt_archive_authorization->predecessor});
+        }
     }
     if (!found_durable && m_config) {
         // SYSCOIN: The activation predecessor bounds initial roster retention,
@@ -6679,19 +7095,23 @@ CChainLocksHandler::AdvanceBTCCReplayValidationBounded(
         return BTCCReplayCarrierCheck{
             BTCCReplayCarrierStatus::LOCAL_ERROR, {}};
     };
+    const uint256 source_token{BoundedBTCCPresealSourceToken(
+        state, m_chainman.GetPQProvenanceRevocationRevision())};
     const auto step{AdvanceBTCCReplayValidationFrontier(
         m_btcc_replay_validation_frontier, active_chain, active_tip,
         authenticated_through, floor->GetBlockHash(),
-        BoundedBTCCPresealSourceToken(
-            state,
-            m_chainman.GetPQProvenanceRevocationRevision()),
+        source_token,
         m_config->btcc_schedule, check)};
     if (step.missing_logical_id) {
-        LOCK(m_needed_btcc_certificate_mutex);
-        if (m_needed_btcc_certificate != step.missing_logical_id) {
-            m_needed_btcc_certificate = step.missing_logical_id;
-            m_needed_btcc_last_request = std::chrono::microseconds{0};
-        }
+        NoteNeededBTCCCertificate(
+            NeededBTCCCertificateSource::PRESEAL_REPLAY,
+            *step.missing_logical_id, source_token);
+    } else if (step.validated_through &&
+               step.terminal_status !=
+                   BTCCReplayCarrierStatus::LOCAL_ERROR) {
+        ClearNeededBTCCCertificate(
+            NeededBTCCCertificateSource::PRESEAL_REPLAY,
+            source_token);
     }
     if (step.terminal_status == BTCCReplayCarrierStatus::INVALID) {
         if (!m_persistence_failed.exchange(true)) {
@@ -6788,6 +7208,8 @@ void CChainLocksHandler::MaybeReplayBTCCPreseal()
         payment_audit_durable = m_payment_audit_preseal_state;
     }
     if (durable.IsEmpty()) {
+        ClearNeededBTCCCertificate(
+            NeededBTCCCertificateSource::PRESEAL_REPLAY);
         MaybeReplayPaymentAuditPreseal();
         return;
     }
@@ -6869,7 +7291,11 @@ void CChainLocksHandler::MaybeReplayBTCCPreseal()
             durable = next;
         }
         marker = durable.active;
-        if (!marker || !marker_on_active(marker)) return;
+        if (!marker || !marker_on_active(marker)) {
+            ClearNeededBTCCCertificate(
+                NeededBTCCCertificateSource::PRESEAL_REPLAY);
+            return;
+        }
 
         const auto best{m_store->GetBestRecord()};
         const CBlockIndex* authenticated{
@@ -6911,13 +7337,12 @@ void CChainLocksHandler::MaybeReplayBTCCPreseal()
                 replay_through_hash = replay_index->GetBlockHash();
             }
         } else {
-            LOCK(m_needed_btcc_certificate_mutex);
-            if (m_needed_btcc_certificate !=
-                marker->terminal_receipt.chainlock_logical_id) {
-                m_needed_btcc_certificate =
-                    marker->terminal_receipt.chainlock_logical_id;
-                m_needed_btcc_last_request = std::chrono::microseconds{0};
-            }
+            NoteNeededBTCCCertificate(
+                NeededBTCCCertificateSource::PRESEAL_REPLAY,
+                marker->terminal_receipt.chainlock_logical_id,
+                BoundedBTCCPresealSourceToken(
+                    durable,
+                    m_chainman.GetPQProvenanceRevocationRevision()));
         }
 
         // A BTCC-authenticated prefix must not replay across an intersecting
@@ -6994,36 +7419,40 @@ void CChainLocksHandler::RequestNeededBTCCCertificate()
     const auto pending_verified{
         GetPendingVerifiedHistoricalChainLock()};
     std::optional<uint256> logical_id;
+    bool pending_blocks_lower_priority{false};
     const auto now{GetTime<std::chrono::microseconds>()};
     {
         LOCK(m_pending_btcc_receipt_mutex);
         if (m_pending_btcc_receipt &&
             (!pending_verified ||
              pending_verified->logical_id !=
-                 m_pending_btcc_receipt->logical_id) &&
-            (m_pending_btcc_last_request.count() == 0 ||
-             now - m_pending_btcc_last_request >= std::chrono::seconds{5})) {
-            logical_id = m_pending_btcc_receipt->logical_id;
-            m_pending_btcc_last_request = now;
+                 m_pending_btcc_receipt->logical_id)) {
+            pending_blocks_lower_priority = true;
+            if (m_pending_btcc_last_request.count() == 0 ||
+                now - m_pending_btcc_last_request >=
+                    std::chrono::seconds{5}) {
+                logical_id = m_pending_btcc_receipt->logical_id;
+                m_pending_btcc_last_request = now;
+            }
         }
     }
     // A best-work block dependency outranks signing/readiness lookups. It is
     // still a single deduplicated ID and therefore cannot expand the ordinary
     // CLSIG download lanes.
+    if (pending_blocks_lower_priority && !logical_id) return;
     if (!logical_id) {
-    {
         LOCK(m_needed_btcc_certificate_mutex);
         if (!m_needed_btcc_certificate ||
             (pending_verified &&
              pending_verified->logical_id ==
-                 *m_needed_btcc_certificate) ||
-            (m_needed_btcc_last_request.count() != 0 &&
-             now - m_needed_btcc_last_request < std::chrono::seconds{30})) {
+                 m_needed_btcc_certificate->logical_id) ||
+            (m_needed_btcc_certificate->last_request.count() != 0 &&
+             now - m_needed_btcc_certificate->last_request <
+                 std::chrono::seconds{30})) {
             return;
         }
-        logical_id = m_needed_btcc_certificate;
-        m_needed_btcc_last_request = now;
-    }
+        logical_id = m_needed_btcc_certificate->logical_id;
+        m_needed_btcc_certificate->last_request = now;
     }
     m_connman.ForEachNode([&](CNode* node) {
         if (!SupportsPQChainLocks(node->GetCommonVersion())) return;
@@ -7095,12 +7524,13 @@ CChainLocksHandler::ClassifyHistoricalReceiptIndexRangeCached(
         m_chainman.GetPQProvenanceRevocationRevision());
 }
 
-bool CChainLocksHandler::HasFullChainLockTargetValidationCached(
-    const CBlockIndex& candidate, int32_t predecessor_height) const
+bool CChainLocksHandler::HasChainLockTargetValidationCached(
+    const CBlockIndex& candidate, int32_t predecessor_height,
+    HistoricalIndexValidationMode mode) const
 {
     AssertLockHeld(cs_main);
-    return HasFullChainLockTargetValidation(
-        candidate, predecessor_height,
+    return HasChainLockTargetValidation(
+        candidate, predecessor_height, mode,
         m_historical_index_validation_cache,
         m_chainman.GetPQProvenanceRevocationRevision());
 }
@@ -7321,6 +7751,19 @@ int32_t CChainLocksHandler::CandidateFullValidationFloor(
                                        : activation_predecessor_height;
 }
 
+HistoricalIndexValidationMode
+CChainLocksHandler::CandidateTargetValidationMode(
+    pq::ChainLockCandidateAdmission admission) noexcept
+{
+    // The exact fsynced winner was already admitted with live governance
+    // provenance before persistence. Reindex can reproduce scripts and both
+    // receipt accumulators, but not historical governance vote availability.
+    return admission ==
+            pq::ChainLockCandidateAdmission::TRUSTED_PERSISTENCE
+        ? HistoricalIndexValidationMode::FULL_RECEIPT
+        : HistoricalIndexValidationMode::FULL_FINALITY;
+}
+
 bool CChainLocksHandler::IsCandidateTargetValidationSufficient(
     pq::ChainLockCandidateAdmission admission,
     bool has_local_chainlock,
@@ -7430,8 +7873,9 @@ CChainLocksHandler::BuildCandidateContext(
     // It cannot narrow full validation of the branch segment from A-1.
     const int32_t validation_floor{CandidateFullValidationFloor(
         request, m_config->activation_predecessor_height)};
-    const bool exact_local_target{HasFullChainLockTargetValidationCached(
-        *candidate, validation_floor)};
+    const bool exact_local_target{HasChainLockTargetValidationCached(
+        *candidate, validation_floor,
+        CandidateTargetValidationMode(request.admission))};
     const bool payment_only_catchup{
         catchup && exact_local_target &&
         historical.admission == HistoricalAdmission::PRESEAL_CATCHUP &&
@@ -8168,7 +8612,7 @@ CChainLocksHandler::BuildNormalRosterAuthorizationInput(
             pq::RosterAuthorizationTransitionKind::ROTATE};
     if (!observation_required && !range_required) return input;
 
-    if (evidence == RosterBeaconEvidence::PREVERIFICATION_CLAIM) {
+    if (evidence == RosterBeaconEvidence::THRESHOLD_CERTIFICATE) {
         if (range_required) {
             const pq::RosterBeaconSeed* claimed_ready{nullptr};
             if (requested_transition ==
@@ -8180,7 +8624,8 @@ CChainLocksHandler::BuildNormalRosterAuthorizationInput(
                 claimed_ready =
                     &statement.roster_beacons.active.seeds.back();
             }
-            const auto range{ClaimedRosterBeaconRange(*claimed_ready)};
+            const auto range{
+                ThresholdCertificateRosterBeaconRange(*claimed_ready)};
             if (!range) return std::nullopt;
             if (input.previous.window.next.IsReady()) {
                 input.ready_rotation = *range;
@@ -8189,7 +8634,7 @@ CChainLocksHandler::BuildNormalRosterAuthorizationInput(
             }
         }
         if (observation_required) {
-            const auto anchor{ClaimedRosterBeaconAnchor(
+            const auto anchor{ThresholdCertificateRosterBeaconAnchor(
                 statement.roster_beacons.next)};
             if (!anchor) return std::nullopt;
             input.accepted_anchor = *anchor;
@@ -8343,7 +8788,7 @@ CChainLocksHandler::BuildNetworkRosterAuthorizationContext(
     authorization.admission = pq::RosterAuthorizationAdmission::LIVE;
     authorization.normal_input = BuildNormalRosterAuthorizationInput(
         statement, *prior, transition,
-        RosterBeaconEvidence::PREVERIFICATION_CLAIM);
+        RosterBeaconEvidence::THRESHOLD_CERTIFICATE);
     if (!authorization.normal_input) return std::nullopt;
     return authorization;
 }
@@ -8352,7 +8797,9 @@ std::optional<CChainLocksHandler::RuntimeVerificationContext>
 CChainLocksHandler::BuildRuntimeVerificationContext(
     const pq::PreparedFinalChainLockCandidate& prepared,
     bool* definitively_invalid,
-    bool publish_roster) const
+    bool publish_roster,
+    const BTCCReceiptArchiveCapability*
+        receipt_archive_capability) const
 {
     if (definitively_invalid != nullptr) *definitively_invalid = false;
     if (!m_config || !m_quorum_build_config) return std::nullopt;
@@ -8414,6 +8861,17 @@ CChainLocksHandler::BuildRuntimeVerificationContext(
             prepared.logical_id &&
         persisted_unsealed->GetWitnessId(m_genesis_hash) ==
             prepared.witness_id};
+    const bool network_receipt_archive{
+        prepared.admission ==
+            pq::ChainLockCandidateAdmission::RECEIPT_ARCHIVE &&
+        !trusted_persisted_unsealed};
+    if (network_receipt_archive &&
+        (receipt_archive_capability == nullptr ||
+         receipt_archive_capability->logical_id != prepared.logical_id ||
+         !IsBTCCReceiptArchiveCapabilityCurrent(
+             *receipt_archive_capability))) {
+        return std::nullopt;
+    }
     if (prepared.admission ==
             pq::ChainLockCandidateAdmission::TRUSTED_PERSISTENCE ||
         trusted_persisted_unsealed) {
@@ -8430,6 +8888,47 @@ CChainLocksHandler::BuildRuntimeVerificationContext(
                   prepared.predecessor.block_hash))) {
             return std::nullopt;
         }
+        if (network_receipt_archive) {
+            if (!best || best->metadata.statement.height <
+                             receipt_archive_capability->authorization
+                                 .owner.statement.height ||
+                prepared.statement.height <=
+                    receipt_archive_capability->authorization.predecessor
+                        .statement.height ||
+                prepared.statement.height >
+                    receipt_archive_capability->authorization
+                        .owner.statement.previous_chainlock_height) {
+                return std::nullopt;
+            }
+            if (best->metadata.logical_id !=
+                    receipt_archive_capability->authorization
+                        .covering_logical_id ||
+                best->metadata.witness_id !=
+                    receipt_archive_capability->authorization
+                        .covering_witness_id) {
+                return std::nullopt;
+            }
+            LOCK(cs_main);
+            const CBlockIndex* best_index{
+                m_chainman.m_blockman.LookupBlockIndex(
+                    best->metadata.statement.block_hash)};
+            const CBlockIndex* owner_index{
+                best_index != nullptr &&
+                        best_index->nHeight ==
+                            best->metadata.statement.height
+                    ? best_index->GetAncestor(
+                          receipt_archive_capability->authorization
+                              .owner.statement.height)
+                    : nullptr};
+            if (owner_index == nullptr ||
+                owner_index->GetBlockHash() !=
+                    receipt_archive_capability->authorization
+                        .owner.statement.block_hash ||
+                owner_index->GetAncestor(prepared.statement.height) !=
+                    candidate) {
+                return std::nullopt;
+            }
+        }
         const auto authorization_route{
             SelectHistoricalRosterAuthorization(
                 prepared.admission, historical.admission,
@@ -8441,11 +8940,18 @@ CChainLocksHandler::BuildRuntimeVerificationContext(
                 pq::RosterAuthorizationAdmission::ATTESTED_HISTORY);
         } else if (authorization_route ==
                    HistoricalRosterAuthorization::EXACT_NETWORK) {
+            const pq::FinalChainLockRecordMetadata* authorization_prior{
+                nullptr};
+            if (network_receipt_archive) {
+                authorization_prior = &receipt_archive_capability
+                    ->authorization.predecessor;
+            } else if (!IsHistoricalArchiveIdentity(prepared.admission) &&
+                       best) {
+                authorization_prior = &best->metadata;
+            }
             const auto derived{BuildNetworkRosterAuthorizationContext(
                 prepared.statement, *candidate,
-                !IsHistoricalArchiveIdentity(prepared.admission) && best
-                    ? &best->metadata
-                    : nullptr)};
+                authorization_prior)};
             if (!derived) return std::nullopt;
             authorization = *derived;
         } else {
@@ -8621,19 +9127,15 @@ CChainLocksHandler::SelectHistoricalRosterAuthorization(
     case HistoricalAdmission::CURRENT_CATCHUP:
         return reset_transition
             ? HistoricalRosterAuthorization::INVALID
-            : HistoricalRosterAuthorization::ATTESTED_HISTORY;
+            : HistoricalRosterAuthorization::EXACT_NETWORK;
     case HistoricalAdmission::PRESEAL_CATCHUP:
+        return HistoricalRosterAuthorization::EXACT_NETWORK;
     case HistoricalAdmission::PRESEAL_RECEIPT:
         return reset_transition
             ? HistoricalRosterAuthorization::EXACT_NETWORK
             : HistoricalRosterAuthorization::ATTESTED_HISTORY;
     case HistoricalAdmission::NONE:
-        if (candidate_admission ==
-            pq::ChainLockCandidateAdmission::RECEIPT_ARCHIVE) {
-            return reset_transition
-                ? HistoricalRosterAuthorization::EXACT_NETWORK
-                : HistoricalRosterAuthorization::ATTESTED_HISTORY;
-        }
+        (void)candidate_admission;
         return HistoricalRosterAuthorization::EXACT_NETWORK;
     }
     return HistoricalRosterAuthorization::INVALID;
@@ -9065,25 +9567,23 @@ CChainLocksHandler::BuildCurrentSigningContexts(
         }
         const uint64_t provenance_revocation_revision{
             m_chainman.GetPQProvenanceRevocationRevision()};
-        const auto certificate_status = [this](
+        const uint256 live_source_token{LiveBTCCCertificateSourceToken(
+            provenance_revocation_revision, durable_predecessor,
+            indexed_target->nHeight, indexed_target->GetBlockHash())};
+        const auto certificate_status = [this, live_source_token](
             const pq::BTCCReceipt& receipt,
             const CBlockIndex& carrier)
             EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
             const auto status{
                 CheckBTCCReceiptCertificate(receipt, carrier)};
             if (status == BTCCReceiptCertificateStatus::VERIFIED) {
-                LOCK(m_needed_btcc_certificate_mutex);
-                if (m_needed_btcc_certificate ==
-                    receipt.chainlock_logical_id) {
-                    m_needed_btcc_certificate.reset();
-                    m_needed_btcc_last_request =
-                        std::chrono::microseconds{0};
-                }
+                ClearNeededBTCCCertificate(
+                    receipt.chainlock_logical_id);
             } else if (status ==
                        BTCCReceiptCertificateStatus::MISSING) {
-                LOCK(m_needed_btcc_certificate_mutex);
-                m_needed_btcc_certificate =
-                    receipt.chainlock_logical_id;
+                NoteNeededBTCCCertificate(
+                    NeededBTCCCertificateSource::LIVE_FRONTIER,
+                    receipt.chainlock_logical_id, live_source_token);
             }
             return status;
         };
@@ -9095,6 +9595,9 @@ CChainLocksHandler::BuildCurrentSigningContexts(
                 m_live_signing_validation_examined_blocks)) {
             return std::nullopt;
         }
+        ClearNeededBTCCCertificate(
+            NeededBTCCCertificateSource::LIVE_FRONTIER,
+            live_source_token);
         if (!HasExactLiveSigningTargetEndpoint(*indexed_target)) {
             return std::nullopt;
         }
@@ -9196,7 +9699,8 @@ CChainLocksHandler::BuildCurrentSigningContexts(
         }
 
         auto input{BuildNormalRosterAuthorizationInput(
-            statement, *finality.best, requested)};
+            statement, *finality.best, requested,
+            RosterBeaconEvidence::SIGNER_POLICY)};
         auto decision{input
             ? pq::DeriveNormalRosterAuthorizationDecision(
                   m_genesis_hash, *input)
@@ -9206,7 +9710,8 @@ CChainLocksHandler::BuildCurrentSigningContexts(
                 pq::RosterAuthorizationTransitionKind::REVEAL) {
             requested = pq::RosterAuthorizationTransitionKind::KEEP;
             input = BuildNormalRosterAuthorizationInput(
-                statement, *finality.best, requested);
+                statement, *finality.best, requested,
+                RosterBeaconEvidence::SIGNER_POLICY);
             decision = input
                 ? pq::DeriveNormalRosterAuthorizationDecision(
                       m_genesis_hash, *input)
@@ -13240,16 +13745,24 @@ bool CChainLocksHandler::ProcessNewChainLockInternal(
         ShouldRouteBTCCPresealReceiptToCatchup(
             preseal_receipt, chainlock.statement.height,
             local_finality_height)};
-    const bool required_receipt_certificate{
-        IsPendingBTCCReceiptCertificate(logical_id) ||
-        WITH_LOCK(m_needed_btcc_certificate_mutex, return
-            m_needed_btcc_certificate == logical_id;)};
+    const bool needed_receipt_certificate{
+        IsNeededBTCCReceiptCertificate(logical_id)};
     const bool archive_only{
         (preseal_receipt && !preseal_receipt_rebase) ||
         ShouldArchiveRequiredBTCCReceiptCertificate(
-            required_receipt_certificate,
+            needed_receipt_certificate,
             current_best.has_value(), chainlock.statement.height,
             local_finality_height)};
+    const auto receipt_archive_capability{
+        archive_only && !preseal_receipt
+            ? GetBTCCReceiptArchiveCapability(logical_id)
+            : std::optional<BTCCReceiptArchiveCapability>{}};
+    if (archive_only && !preseal_receipt &&
+        !receipt_archive_capability) {
+        CompletePeerResponse(from, logical_id);
+        return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK,
+                             "pq-clsig-archive-authority-unavailable");
+    }
     const bool catchup{
         historical.admission == HistoricalAdmission::CURRENT_CATCHUP ||
         historical.admission == HistoricalAdmission::RECOVERY ||
@@ -13447,12 +13960,18 @@ bool CChainLocksHandler::ProcessNewChainLockInternal(
                                 return false;
                             }
                             return persist_record();
-                        };
+                    };
                     if (catchup) {
+                        const auto coverage_authorization{
+                            GetReceiptArchiveCoverageAuthorization(
+                                *prepared)};
                         return m_store->AcceptCatchupVerified(
                             *prepared, chainlock, /*signatures_valid=*/true,
                             sync_index, authorize_durable,
-                            &finality_error);
+                            &finality_error,
+                            coverage_authorization
+                                ? &*coverage_authorization
+                                : nullptr);
                     }
                     return m_store->AcceptPresealReceiptVerified(
                         *prepared, chainlock, /*signatures_valid=*/true,
@@ -13465,7 +13984,10 @@ bool CChainLocksHandler::ProcessNewChainLockInternal(
         } else {
             verification_context = BuildRuntimeVerificationContext(
                 *prepared, /*definitively_invalid=*/nullptr,
-                /*publish_roster=*/false);
+                /*publish_roster=*/false,
+                receipt_archive_capability
+                    ? &*receipt_archive_capability
+                    : nullptr);
             if (!verification_context) {
                 m_store->AbandonPrepared(*prepared);
                 CompletePeerResponse(from, logical_id);
@@ -13536,9 +14058,7 @@ bool CChainLocksHandler::ProcessNewChainLockInternal(
                 }
                 if (!signatures_valid) {
                     if (archive_only) {
-                        (void)m_store->AcceptReceiptArchiveVerified(
-                            *prepared, chainlock,
-                            /*signatures_valid=*/false, &finality_error);
+                        m_store->RejectPrepared(*prepared);
                     } else {
                         (void)m_store->AcceptVerified(
                             *prepared, chainlock,
@@ -13560,7 +14080,10 @@ bool CChainLocksHandler::ProcessNewChainLockInternal(
             prepared ? BuildRuntimeVerificationContext(
                            *prepared,
                            /*definitively_invalid=*/nullptr,
-                           /*publish_roster=*/true)
+                           /*publish_roster=*/true,
+                           receipt_archive_capability
+                               ? &*receipt_archive_capability
+                               : nullptr)
                      : std::nullopt};
         if (!verification_context || !publication_context ||
             publication_context->prepared_context->AuthorizationMask() !=
@@ -13572,23 +14095,38 @@ bool CChainLocksHandler::ProcessNewChainLockInternal(
             finality_error = pq::ChainLockFinalityError::CONTEXT_CHANGED;
             return false;
         }
+        const auto coverage_authorization{
+            archive_only
+                ? std::optional<
+                      pq::ReceiptArchiveRosterAuthorization>{}
+                : GetReceiptArchiveCoverageAuthorization(*prepared)};
         if (!FlushBTCCIndexStateForDurableAcceptance(chainlock)) {
             index_persistence_failed = true;
             return false;
         }
-        return archive_only
-                   ? m_store->AcceptReceiptArchiveVerified(
-                         *prepared, chainlock, /*signatures_valid=*/true,
-                         &finality_error)
-                   : m_store->AcceptVerified(
-                               *prepared, chainlock,
-                               /*signatures_valid=*/true, &finality_error);
+        if (archive_only) {
+            const auto authorize_durable =
+                [&](const std::function<bool()>& persist_record,
+                    pq::ChainLockFinalityError* error) {
+                    return AuthorizeBTCCReceiptArchivePersistence(
+                        *receipt_archive_capability, persist_record, error);
+                };
+            return m_store->AcceptReceiptArchiveVerified(
+                *prepared, chainlock, /*signatures_valid=*/true,
+                receipt_archive_capability->authorization,
+                authorize_durable, &finality_error);
+        }
+        return coverage_authorization
+            ? m_store->AcceptVerifiedCoveringReceiptArchive(
+                  *prepared, chainlock, /*signatures_valid=*/true,
+                  *coverage_authorization, &finality_error)
+            : m_store->AcceptVerified(
+                  *prepared, chainlock, /*signatures_valid=*/true,
+                  &finality_error);
     };
     if (!historical_acceptance_complete) {
-        accepted = archive_only
-            ? accept_verified()
-            : m_chainman.ActiveChainstate().RunWithStableActiveChain(
-                  accept_verified);
+        accepted = m_chainman.ActiveChainstate().RunWithStableActiveChain(
+            accept_verified);
     }
     if (index_persistence_failed) {
         // This is a local durability failure, never peer misbehavior. Refuse
@@ -13638,13 +14176,7 @@ bool CChainLocksHandler::ProcessNewChainLockInternal(
         }
         return reconsidered;
     })};
-    {
-        LOCK(m_needed_btcc_certificate_mutex);
-        if (m_needed_btcc_certificate == logical_id) {
-            m_needed_btcc_certificate.reset();
-            m_needed_btcc_last_request = std::chrono::microseconds{0};
-        }
-    }
+    ClearNeededBTCCCertificate(logical_id);
     {
         LOCK(m_pending_btcc_receipt_mutex);
         if (m_pending_btcc_receipt &&
@@ -13814,9 +14346,10 @@ CChainLocksHandler::TryImportPersistedChainLock()
                     persisted.statement.block_hash)};
             return target != nullptr &&
                 target->nHeight == persisted.statement.height &&
-                !HasFullChainLockTargetValidationCached(
+                !HasChainLockTargetValidationCached(
                     *target,
-                    persisted.statement.previous_chainlock_height);
+                    persisted.statement.previous_chainlock_height,
+                    HistoricalIndexValidationMode::FULL_FINALITY);
         })};
 
     if (!FlushChainLockAuxiliarySnapshotsForDurability()) {
@@ -13981,7 +14514,7 @@ CChainLocksHandler::TryImportPersistedUnsealedBTCC()
         return PersistedChainLockImport::PENDING;
     }
 
-    if (!m_store->AcceptReceiptArchiveVerified(
+    if (!m_store->AcceptPersistedReceiptArchiveVerified(
             *prepared, persisted, /*signatures_valid=*/true,
             &finality_error)) {
         m_store->AbandonPrepared(*prepared);
@@ -14750,8 +15283,9 @@ void CChainLocksHandler::EnforceBestChainLock()
             !m_chainman.IsSnapshotValidated()) {
             return;
         }
-        if (!HasFullChainLockTargetValidationCached(
-                *best, statement.previous_chainlock_height)) {
+        if (!HasChainLockTargetValidationCached(
+                *best, statement.previous_chainlock_height,
+                HistoricalIndexValidationMode::FULL_FINALITY)) {
             const uint256 witness_id{record->metadata.witness_id};
             if (witness_id.IsNull() ||
                 threshold_attested_witness != witness_id ||

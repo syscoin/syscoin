@@ -335,13 +335,17 @@ ChainLockFinalityStore::ChainLockFinalityStore(
     const ChainLockFinalityContext& context,
     ChainLockDurableAccept durable_accept,
     ChainLockDurableArchive durable_archive,
-    ChainLockDurableCatchup durable_catchup)
+    ChainLockDurableCatchup durable_catchup,
+    ChainLockDurableReceiptArchive durable_receipt_archive,
+    ChainLockDurableCoveringAccept durable_covering_accept)
     : m_genesis_hash(std::move(genesis_hash)),
       m_config(std::move(config)),
       m_context(context),
       m_durable_accept(std::move(durable_accept)),
       m_durable_archive(std::move(durable_archive)),
       m_durable_catchup(std::move(durable_catchup)),
+      m_durable_receipt_archive(std::move(durable_receipt_archive)),
+      m_durable_covering_accept(std::move(durable_covering_accept)),
       m_seen_logical(m_config.seen_logical_capacity),
       m_seen_witness(m_config.seen_witness_capacity),
       m_rejected_witness(m_config.rejected_witness_capacity)
@@ -699,7 +703,21 @@ bool ChainLockFinalityStore::AcceptVerified(
 {
     return AcceptVerifiedInternal(
         prepared, chainlock, signatures_valid,
-        ChainLockCandidateAdmission::LIVE, /*persist=*/true, {}, {}, error);
+        ChainLockCandidateAdmission::LIVE, /*persist=*/true, {}, {}, nullptr,
+        nullptr, error);
+}
+
+bool ChainLockFinalityStore::AcceptVerifiedCoveringReceiptArchive(
+    const PreparedFinalChainLockCandidate& prepared,
+    const FinalChainLock& chainlock,
+    bool signatures_valid,
+    const ReceiptArchiveRosterAuthorization& authorization,
+    ChainLockFinalityError* error)
+{
+    return AcceptVerifiedInternal(
+        prepared, chainlock, signatures_valid,
+        ChainLockCandidateAdmission::LIVE, /*persist=*/true, {}, {}, nullptr,
+        &authorization, error);
 }
 
 bool ChainLockFinalityStore::AcceptPersistedVerified(
@@ -711,10 +729,25 @@ bool ChainLockFinalityStore::AcceptPersistedVerified(
     return AcceptVerifiedInternal(
         prepared, chainlock, signatures_valid,
         ChainLockCandidateAdmission::TRUSTED_PERSISTENCE,
-        /*persist=*/false, {}, {}, error);
+        /*persist=*/false, {}, {}, nullptr, nullptr, error);
 }
 
 bool ChainLockFinalityStore::AcceptReceiptArchiveVerified(
+    const PreparedFinalChainLockCandidate& prepared,
+    const FinalChainLock& chainlock,
+    bool signatures_valid,
+    const ReceiptArchiveRosterAuthorization& authorization,
+    ChainLockDurableAuthorization durable_authorization,
+    ChainLockFinalityError* error)
+{
+    return AcceptVerifiedInternal(
+        prepared, chainlock, signatures_valid,
+        ChainLockCandidateAdmission::RECEIPT_ARCHIVE,
+        /*persist=*/true, {}, durable_authorization, &authorization, nullptr,
+        error);
+}
+
+bool ChainLockFinalityStore::AcceptPersistedReceiptArchiveVerified(
     const PreparedFinalChainLockCandidate& prepared,
     const FinalChainLock& chainlock,
     bool signatures_valid,
@@ -723,7 +756,7 @@ bool ChainLockFinalityStore::AcceptReceiptArchiveVerified(
     return AcceptVerifiedInternal(
         prepared, chainlock, signatures_valid,
         ChainLockCandidateAdmission::RECEIPT_ARCHIVE,
-        /*persist=*/true, {}, {}, error);
+        /*persist=*/false, {}, {}, nullptr, nullptr, error);
 }
 
 bool ChainLockFinalityStore::AcceptPresealReceiptVerified(
@@ -737,7 +770,8 @@ bool ChainLockFinalityStore::AcceptPresealReceiptVerified(
     return AcceptVerifiedInternal(
         prepared, chainlock, signatures_valid,
         ChainLockCandidateAdmission::PRESEAL_RECEIPT,
-        /*persist=*/true, pre_durable, durable_authorization, error);
+        /*persist=*/true, pre_durable, durable_authorization, nullptr, nullptr,
+        error);
 }
 
 bool ChainLockFinalityStore::AcceptCatchupVerified(
@@ -746,12 +780,14 @@ bool ChainLockFinalityStore::AcceptCatchupVerified(
     bool signatures_valid,
     ChainLockPreDurableCatchup pre_durable,
     ChainLockDurableAuthorization durable_authorization,
-    ChainLockFinalityError* error)
+    ChainLockFinalityError* error,
+    const ReceiptArchiveRosterAuthorization* covering_authorization)
 {
     return AcceptVerifiedInternal(
         prepared, chainlock, signatures_valid,
         ChainLockCandidateAdmission::CATCHUP,
-        /*persist=*/true, pre_durable, durable_authorization, error);
+        /*persist=*/true, pre_durable, durable_authorization, nullptr,
+        covering_authorization, error);
 }
 
 bool ChainLockFinalityStore::AcceptVerifiedInternal(
@@ -762,6 +798,9 @@ bool ChainLockFinalityStore::AcceptVerifiedInternal(
     bool persist,
     const ChainLockPreDurableCatchup& pre_durable,
     const ChainLockDurableAuthorization& durable_authorization,
+    const ReceiptArchiveRosterAuthorization*
+        receipt_archive_authorization,
+    const ReceiptArchiveRosterAuthorization* covering_authorization,
     ChainLockFinalityError* error)
 {
     SetError(error, ChainLockFinalityError::NONE);
@@ -769,7 +808,22 @@ bool ChainLockFinalityStore::AcceptVerifiedInternal(
     const uint256 witness_id{chainlock.GetWitnessId(m_genesis_hash)};
     if (!chainlock.IsStructurallyValid() || prepared.logical_id != logical_id ||
         prepared.witness_id != witness_id || prepared.statement != chainlock.statement ||
-        prepared.admission != admission) {
+        prepared.admission != admission ||
+        (receipt_archive_authorization != nullptr &&
+         (admission != ChainLockCandidateAdmission::RECEIPT_ARCHIVE ||
+          !persist ||
+          !receipt_archive_authorization->IsInternallyConsistent(
+              m_genesis_hash))) ||
+        (admission == ChainLockCandidateAdmission::RECEIPT_ARCHIVE &&
+         persist && receipt_archive_authorization == nullptr) ||
+        (covering_authorization != nullptr &&
+         (admission != ChainLockCandidateAdmission::LIVE &&
+          admission != ChainLockCandidateAdmission::CATCHUP)) ||
+        (covering_authorization != nullptr &&
+         (!persist ||
+          receipt_archive_authorization != nullptr ||
+          !covering_authorization->IsInternallyConsistent(
+              m_genesis_hash)))) {
         SetError(error, ChainLockFinalityError::INVALID_PREPARATION_TOKEN);
         return false;
     }
@@ -886,19 +940,32 @@ bool ChainLockFinalityStore::AcceptVerifiedInternal(
     const bool catchup_accept{
         admission == ChainLockCandidateAdmission::CATCHUP};
     const bool has_durable_callback{
-        archive_only ? static_cast<bool>(m_durable_archive)
+        admission == ChainLockCandidateAdmission::RECEIPT_ARCHIVE
+            ? static_cast<bool>(m_durable_receipt_archive)
+        : covering_authorization &&
+                  admission == ChainLockCandidateAdmission::LIVE
+            ? static_cast<bool>(m_durable_covering_accept)
+        : archive_only ? static_cast<bool>(m_durable_archive)
                      : catchup_accept
                            ? static_cast<bool>(m_durable_catchup)
                            : static_cast<bool>(m_durable_accept)};
     const auto persist_record = [&] {
         try {
             const bool persisted{
-                archive_only
+                admission == ChainLockCandidateAdmission::RECEIPT_ARCHIVE
+                    ? m_durable_receipt_archive(
+                          chainlock, *receipt_archive_authorization)
+                : covering_authorization &&
+                          admission == ChainLockCandidateAdmission::LIVE
+                    ? m_durable_covering_accept(
+                          chainlock, *covering_authorization)
+                : archive_only
                     ? m_durable_archive(chainlock)
                     : catchup_accept
                           ? m_durable_catchup(
                                 chainlock,
-                                rechecked->btcc_cursor_reconciliation)
+                                rechecked->btcc_cursor_reconciliation,
+                                covering_authorization)
                           : m_durable_accept(chainlock)};
             if (!persisted) {
                 SetError(error, ChainLockFinalityError::PERSISTENCE_FAILURE);
@@ -1064,6 +1131,19 @@ bool FinalChainLockRecordMetadata::IsInternallyConsistent(
     return !genesis_hash.IsNull() && !logical_id.IsNull() &&
            !witness_id.IsNull() && statement.IsStructurallyValid() &&
            logical_id == GetLogicalChainLockId(genesis_hash, statement);
+}
+
+bool ReceiptArchiveRosterAuthorization::IsInternallyConsistent(
+    const uint256& genesis_hash) const
+{
+    return owner.IsInternallyConsistent(genesis_hash) &&
+           !covering_logical_id.IsNull() &&
+           !covering_witness_id.IsNull() &&
+           predecessor.IsInternallyConsistent(genesis_hash) &&
+           owner.statement.previous_chainlock_height >
+               predecessor.statement.height &&
+           owner.statement.previous_chainlock_height <
+               owner.statement.height;
 }
 
 std::optional<AcceptedFinalChainLockView>

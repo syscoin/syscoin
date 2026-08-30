@@ -741,15 +741,9 @@ static RPCHelpMan getblocktemplate()
     if (strMode != "template")
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid mode");
 
-    // SYSCOIN BEGIN: Use the same tip-locked predicate as BlockAssembler so a
-    // reconstructed A-1 may produce only A while every other service remains
-    // quarantined.
-    const bool pq_participation_allowed{
-        chainman.IsPQParticipationAllowed()};
+    // SYSCOIN BEGIN: Historical replay remains sync-only, including at A-1.
     const bool pq_block_production_allowed{
-        chainman.IsPQBlockProductionAllowed(active_chain.Tip())};
-    const bool pq_activation_block_exception{
-        pq_block_production_allowed && !pq_participation_allowed};
+        chainman.IsPQBlockProductionAllowed()};
     if (!pq_block_production_allowed) {
         throw JSONRPCError(
             RPC_CLIENT_IN_INITIAL_DOWNLOAD,
@@ -763,15 +757,11 @@ static RPCHelpMan getblocktemplate()
             throw JSONRPCError(RPC_CLIENT_NOT_CONNECTED, PACKAGE_NAME " is not connected!");
         }
 
-        // SYSCOIN BEGIN: The exact A-1 recovery exception exists because its
-        // quarantine deliberately keeps the ordinary public IBD latch closed.
-        const bool block_production_initial_sync{
-            chainman.IsInitialBlockDownload() &&
-            !pq_activation_block_exception};
-        if (block_production_initial_sync) {
+        // SYSCOIN BEGIN: Authenticated handoff does not bypass ordinary IBD.
+        if (chainman.IsInitialBlockDownload()) {
             throw JSONRPCError(RPC_CLIENT_IN_INITIAL_DOWNLOAD, PACKAGE_NAME " is in initial sync and waiting for blocks...");
         }
-        // SYSCOIN END: Activation-block-only IBD exception.
+        // SYSCOIN END: Public activation IBD gate.
     }
 
     // SYSCOIN

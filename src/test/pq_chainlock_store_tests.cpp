@@ -681,11 +681,22 @@ BOOST_AUTO_TEST_CASE(catchup_rebases_repeatably_across_missing_predecessors)
     const uint256 genesis{NonNullHash(401)};
     TestFinalityContext context;
     std::size_t catchup_writes{0};
+    std::size_t catchup_pre_durable_calls{0};
+    std::size_t null_covering_authorizations{0};
+    bool require_covering_authorization{false};
+    std::optional<ReceiptArchiveRosterAuthorization>
+        observed_covering_authorization;
     ChainLockFinalityStore store{
         genesis, MakeConfig(), context, {}, {},
         [&](const FinalChainLock&,
-            const std::optional<BTCCCursorReconciliationProof>&) {
+            const std::optional<BTCCCursorReconciliationProof>&,
+            const ReceiptArchiveRosterAuthorization* authorization) {
             ++catchup_writes;
+            if (authorization == nullptr) {
+                ++null_covering_authorizations;
+                return !require_covering_authorization;
+            }
+            observed_covering_authorization = *authorization;
             return true;
         }};
 
@@ -706,8 +717,15 @@ BOOST_AUTO_TEST_CASE(catchup_rebases_repeatably_across_missing_predecessors)
     BOOST_REQUIRE(prepared);
     BOOST_CHECK(context.last_admission == ChainLockCandidateAdmission::CATCHUP);
     BOOST_REQUIRE(store.AcceptCatchupVerified(
-        *prepared, first_rebase, true, [] { return true; }, {}, &error));
+        *prepared, first_rebase, true,
+        [&] {
+            ++catchup_pre_durable_calls;
+            return true;
+        },
+        {}, &error));
     BOOST_CHECK_EQUAL(catchup_writes, 1U);
+    BOOST_CHECK_EQUAL(catchup_pre_durable_calls, 1U);
+    BOOST_CHECK_EQUAL(null_covering_authorizations, 1U);
     BOOST_REQUIRE(store.GetBest());
     BOOST_CHECK(*store.GetBest() == first_rebase);
 
@@ -722,11 +740,63 @@ BOOST_AUTO_TEST_CASE(catchup_rebases_repeatably_across_missing_predecessors)
     // A later outage may require another authenticated gap rebase; the audit
     // marker is not a one-shot liveness fuse.
     const auto second_rebase{MakeChainLock(915, 910, NonNullHash(910), 404)};
+    const ReceiptArchiveRosterAuthorization authorization{
+        FinalChainLockRecordMetadata{
+            first_rebase.GetLogicalId(genesis),
+            first_rebase.GetWitnessId(genesis), first_rebase.statement},
+        exact.GetLogicalId(genesis), exact.GetWitnessId(genesis),
+        FinalChainLockRecordMetadata{
+            local.GetLogicalId(genesis), local.GetWitnessId(genesis),
+            local.statement}};
+    BOOST_REQUIRE(authorization.IsInternallyConsistent(genesis));
+
+    auto malformed_authorization{authorization};
+    malformed_authorization.owner.logical_id = NonNullHash(405);
+    prepared = store.PrepareCatchupCandidate(second_rebase, &error);
+    BOOST_REQUIRE(prepared);
+    BOOST_CHECK(!store.AcceptCatchupVerified(
+        *prepared, second_rebase, true,
+        [&] {
+            ++catchup_pre_durable_calls;
+            return true;
+        },
+        {}, &error, &malformed_authorization));
+    BOOST_CHECK(error == ChainLockFinalityError::INVALID_PREPARATION_TOKEN);
+    BOOST_CHECK_EQUAL(catchup_writes, 1U);
+    BOOST_CHECK_EQUAL(catchup_pre_durable_calls, 1U);
+    BOOST_CHECK(*store.GetBest() == exact);
+    store.AbandonPrepared(*prepared);
+
+    require_covering_authorization = true;
+    prepared = store.PrepareCatchupCandidate(second_rebase, &error);
+    BOOST_REQUIRE(prepared);
+    BOOST_CHECK(!store.AcceptCatchupVerified(
+        *prepared, second_rebase, true,
+        [&] {
+            ++catchup_pre_durable_calls;
+            return true;
+        },
+        {}, &error));
+    BOOST_CHECK(error == ChainLockFinalityError::PERSISTENCE_FAILURE);
+    BOOST_CHECK_EQUAL(catchup_writes, 2U);
+    BOOST_CHECK_EQUAL(catchup_pre_durable_calls, 2U);
+    BOOST_CHECK_EQUAL(null_covering_authorizations, 2U);
+    BOOST_CHECK(*store.GetBest() == exact);
+    store.AbandonPrepared(*prepared);
+
     prepared = store.PrepareCatchupCandidate(second_rebase, &error);
     BOOST_REQUIRE(prepared);
     BOOST_REQUIRE(store.AcceptCatchupVerified(
-        *prepared, second_rebase, true, [] { return true; }, {}, &error));
-    BOOST_CHECK_EQUAL(catchup_writes, 2U);
+        *prepared, second_rebase, true,
+        [&] {
+            ++catchup_pre_durable_calls;
+            return true;
+        },
+        {}, &error, &authorization));
+    BOOST_CHECK_EQUAL(catchup_writes, 3U);
+    BOOST_CHECK_EQUAL(catchup_pre_durable_calls, 3U);
+    BOOST_REQUIRE(observed_covering_authorization);
+    BOOST_CHECK(*observed_covering_authorization == authorization);
     BOOST_CHECK(*store.GetBest() == second_rebase);
 
     const auto predecessor_before_local{
@@ -762,7 +832,8 @@ BOOST_AUTO_TEST_CASE(
         },
         {},
         [&](const FinalChainLock&,
-            const std::optional<BTCCCursorReconciliationProof>&) {
+            const std::optional<BTCCCursorReconciliationProof>&,
+            const ReceiptArchiveRosterAuthorization*) {
             ++catchup_writes;
             return true;
         }};
@@ -827,7 +898,8 @@ BOOST_AUTO_TEST_CASE(
     ChainLockFinalityStore store{
         genesis, MakeConfig(), context, {}, {},
         [&](const FinalChainLock&,
-            const std::optional<BTCCCursorReconciliationProof>&) {
+            const std::optional<BTCCCursorReconciliationProof>&,
+            const ReceiptArchiveRosterAuthorization*) {
             ++catchup_writes;
             return true;
         }};
@@ -914,21 +986,24 @@ BOOST_AUTO_TEST_CASE(
     ChainLockFinalityStore ahead{
         genesis, MakeConfig(), ahead_context, {}, {},
         [&](const FinalChainLock&,
-            const std::optional<BTCCCursorReconciliationProof>& reconciliation) {
+            const std::optional<BTCCCursorReconciliationProof>& reconciliation,
+            const ReceiptArchiveRosterAuthorization*) {
             ahead_reconciliation = reconciliation.has_value();
             return true;
         }};
     ChainLockFinalityStore caught_up{
         genesis, MakeConfig(), caught_up_context, {}, {},
         [&](const FinalChainLock&,
-            const std::optional<BTCCCursorReconciliationProof>& reconciliation) {
+            const std::optional<BTCCCursorReconciliationProof>& reconciliation,
+            const ReceiptArchiveRosterAuthorization*) {
             caught_up_reconciliation = reconciliation.has_value();
             return true;
         }};
     ChainLockFinalityStore behind{
         genesis, MakeConfig(), behind_context, {}, {},
         [&](const FinalChainLock&,
-            const std::optional<BTCCCursorReconciliationProof>& reconciliation) {
+            const std::optional<BTCCCursorReconciliationProof>& reconciliation,
+            const ReceiptArchiveRosterAuthorization*) {
             behind_reconciliation = reconciliation.has_value();
             return true;
         }};
@@ -1052,7 +1127,8 @@ BOOST_AUTO_TEST_CASE(historical_durable_authorization_is_the_fsync_seam)
     ChainLockFinalityStore store{
         genesis, MakeConfig(), context, {}, {},
         [&](const FinalChainLock&,
-            const std::optional<BTCCCursorReconciliationProof>&) {
+            const std::optional<BTCCCursorReconciliationProof>&,
+            const ReceiptArchiveRosterAuthorization*) {
             ++durable_writes;
             return true;
         }};
@@ -1083,7 +1159,8 @@ BOOST_AUTO_TEST_CASE(historical_durable_authorization_is_the_fsync_seam)
     ChainLockFinalityStore success_store{
         genesis, MakeConfig(), success_context, {}, {},
         [&](const FinalChainLock&,
-            const std::optional<BTCCCursorReconciliationProof>&) {
+            const std::optional<BTCCCursorReconciliationProof>&,
+            const ReceiptArchiveRosterAuthorization*) {
             ++durable_writes;
             return true;
         }};
@@ -1120,7 +1197,8 @@ BOOST_AUTO_TEST_CASE(preseal_receipt_at_updated_anchor_rebases_as_catchup)
             return true;
         },
         [&](const FinalChainLock&,
-            const std::optional<BTCCCursorReconciliationProof>&) {
+            const std::optional<BTCCCursorReconciliationProof>&,
+            const ReceiptArchiveRosterAuthorization*) {
             ++catchup_writes;
             return true;
         }};
@@ -1195,8 +1273,9 @@ BOOST_AUTO_TEST_CASE(receipt_archive_is_verified_without_rebasing_best)
     TestFinalityContext context;
     std::size_t archive_writes{0};
     ChainLockFinalityStore store{
-        genesis, MakeConfig(), context, {},
-        [&](const FinalChainLock&) {
+        genesis, MakeConfig(), context, {}, {}, {},
+        [&](const FinalChainLock&,
+            const ReceiptArchiveRosterAuthorization&) {
             ++archive_writes;
             return true;
         }};
@@ -1228,8 +1307,20 @@ BOOST_AUTO_TEST_CASE(receipt_archive_is_verified_without_rebasing_best)
     BOOST_REQUIRE(archive_prepared);
     BOOST_CHECK(archive_prepared->admission ==
                 ChainLockCandidateAdmission::RECEIPT_ARCHIVE);
+    const auto authorization_predecessor{MakeChainLock(
+        865, MakeConfig().activation_predecessor_height,
+        NonNullHash(MakeConfig().activation_predecessor_height), 41)};
+    const ReceiptArchiveRosterAuthorization authorization{
+        FinalChainLockRecordMetadata{
+            latest.GetLogicalId(genesis), latest.GetWitnessId(genesis),
+            latest.statement},
+        latest.GetLogicalId(genesis), latest.GetWitnessId(genesis),
+        FinalChainLockRecordMetadata{
+            authorization_predecessor.GetLogicalId(genesis),
+            authorization_predecessor.GetWitnessId(genesis),
+            authorization_predecessor.statement}};
     BOOST_REQUIRE(store.AcceptReceiptArchiveVerified(
-        *archive_prepared, archived, true));
+        *archive_prepared, archived, true, authorization));
     BOOST_CHECK_EQUAL(archive_writes, 1U);
     BOOST_REQUIRE(store.GetBest());
     BOOST_CHECK(*store.GetBest() == latest);
@@ -1246,6 +1337,56 @@ BOOST_AUTO_TEST_CASE(receipt_archive_is_verified_without_rebasing_best)
     BOOST_CHECK(*observed_after_archive.best ==
                 best_before_archive->metadata);
     BOOST_REQUIRE(store.GetByLogicalId(archived.GetLogicalId(genesis)));
+}
+
+BOOST_AUTO_TEST_CASE(covered_receipt_gap_uses_dedicated_durable_callback)
+{
+    const uint256 genesis{NonNullHash(420)};
+    TestFinalityContext context;
+    std::size_t ordinary_writes{0};
+    std::size_t covering_writes{0};
+    ChainLockFinalityStore store{
+        genesis, MakeConfig(), context,
+        [&](const FinalChainLock&) {
+            ++ordinary_writes;
+            return true;
+        },
+        {}, {}, {},
+        [&](const FinalChainLock&,
+            const ReceiptArchiveRosterAuthorization&) {
+            ++covering_writes;
+            return true;
+        }};
+
+    const auto predecessor{MakeChainLock(
+        865, MakeConfig().activation_predecessor_height,
+        NonNullHash(MakeConfig().activation_predecessor_height), 420)};
+    const auto owner{MakeChainLock(
+        875, 870, NonNullHash(870), 421)};
+    auto prepared{store.PreparePersistedCandidate(owner)};
+    BOOST_REQUIRE(prepared);
+    BOOST_REQUIRE(store.AcceptPersistedVerified(*prepared, owner, true));
+
+    const ReceiptArchiveRosterAuthorization authorization{
+        FinalChainLockRecordMetadata{
+            owner.GetLogicalId(genesis), owner.GetWitnessId(genesis),
+            owner.statement},
+        owner.GetLogicalId(genesis), owner.GetWitnessId(genesis),
+        FinalChainLockRecordMetadata{
+            predecessor.GetLogicalId(genesis),
+            predecessor.GetWitnessId(genesis), predecessor.statement}};
+    BOOST_REQUIRE(authorization.IsInternallyConsistent(genesis));
+
+    const auto successor{MakeChainLock(
+        880, owner.statement.height, owner.statement.block_hash, 422)};
+    prepared = store.PrepareCandidate(successor);
+    BOOST_REQUIRE(prepared);
+    BOOST_REQUIRE(store.AcceptVerifiedCoveringReceiptArchive(
+        *prepared, successor, true, authorization));
+    BOOST_CHECK_EQUAL(ordinary_writes, 0U);
+    BOOST_CHECK_EQUAL(covering_writes, 1U);
+    BOOST_REQUIRE(store.GetBest());
+    BOOST_CHECK(*store.GetBest() == successor);
 }
 
 BOOST_AUTO_TEST_CASE(validated_record_metadata_checks_precomputed_identity)

@@ -235,6 +235,30 @@ struct RawBTCCPresealMarkerV1 {
     }
 };
 
+struct RawReceiptArchiveRosterAuthorizationV1 {
+    uint16_t version{1};
+    uint256 schema_hash;
+    uint256 owner_logical_id;
+    uint256 owner_witness_id;
+    ChainLockStatement owner_statement;
+    uint256 covering_logical_id;
+    uint256 covering_witness_id;
+    uint256 predecessor_logical_id;
+    uint256 predecessor_witness_id;
+    ChainLockStatement predecessor_statement;
+    uint256 checksum;
+
+    SERIALIZE_METHODS(RawReceiptArchiveRosterAuthorizationV1, obj)
+    {
+        READWRITE(obj.version, obj.schema_hash, obj.owner_logical_id,
+                  obj.owner_witness_id, obj.owner_statement,
+                  obj.covering_logical_id, obj.covering_witness_id,
+                  obj.predecessor_logical_id,
+                  obj.predecessor_witness_id,
+                  obj.predecessor_statement, obj.checksum);
+    }
+};
+
 BTCCPresealMarker MakePresealMarker(int32_t earliest_height,
                                     int32_t terminal_height,
                                     uint64_t revision,
@@ -1077,6 +1101,377 @@ BOOST_AUTO_TEST_CASE(roundtrip_survives_restart)
         BOOST_CHECK(state.best->logical_id == next.GetLogicalId(genesis));
         BOOST_CHECK(state.best->witness_id == next.GetWitnessId(genesis));
         BOOST_CHECK(state.best->statement == next.statement);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(
+    receipt_archive_authorization_is_owner_bound_atomic_and_durable)
+{
+    const fs::path path{m_path_root / "pqcl_receipt_archive_authorization"};
+    const uint256 genesis{NonNullHash(201)};
+    auto config{MakeConfig()};
+    config.btcc_schedule.candidate_origin = 880;
+    BOOST_REQUIRE(config.IsValid());
+
+    const auto predecessor{MakeChainLock(
+        865, config.activation_predecessor_height,
+        NonNullHash(config.activation_predecessor_height), 201)};
+    const auto owner{MakeChainLock(
+        885, 880, NonNullHash(880), 202)};
+    auto archive{MakeChainLock(
+        880, 875, NonNullHash(875), 203)};
+    archive.statement.accepted_btcc_cursor = BTCCursor{
+        archive.statement.height, archive.statement.block_hash,
+        NonNullHash(880'203)};
+    archive.statement.btcc_advance = BTCCAdvance::ADVANCE;
+    BOOST_REQUIRE(archive.IsStructurallyValid());
+
+    ReceiptArchiveRosterAuthorization authorization;
+    {
+        PQChainLockPersistence persistence{
+            DiskParams(path), genesis, config};
+        BOOST_REQUIRE(persistence.PersistBest(predecessor));
+        BOOST_REQUIRE(persistence.PersistCatchupBest(owner));
+
+        const auto state{persistence.GetFinalityState()};
+        BOOST_REQUIRE(state.best);
+        BOOST_REQUIRE(state.receipt_archive_authorization);
+        authorization = *state.receipt_archive_authorization;
+        BOOST_CHECK_EQUAL(state.certificate_revision, 2U);
+        BOOST_CHECK(authorization.owner.logical_id ==
+                    owner.GetLogicalId(genesis));
+        BOOST_CHECK(authorization.owner.witness_id ==
+                    owner.GetWitnessId(genesis));
+        BOOST_CHECK(authorization.owner.statement == owner.statement);
+        BOOST_CHECK(authorization.covering_logical_id ==
+                    owner.GetLogicalId(genesis));
+        BOOST_CHECK(authorization.covering_witness_id ==
+                    owner.GetWitnessId(genesis));
+        BOOST_CHECK(authorization.predecessor.logical_id ==
+                    predecessor.GetLogicalId(genesis));
+        BOOST_CHECK(authorization.predecessor.witness_id ==
+                    predecessor.GetWitnessId(genesis));
+        BOOST_CHECK(authorization.predecessor.statement ==
+                    predecessor.statement);
+
+        const auto before_rejections{persistence.GetFinalityState()};
+        const auto second_catchup{MakeChainLock(
+            900, 895, NonNullHash(895), 204)};
+        ChainLockPersistenceError error{ChainLockPersistenceError::NONE};
+        BOOST_CHECK(!persistence.PersistCatchupBest(
+            second_catchup, &error));
+        BOOST_CHECK(error == ChainLockPersistenceError::HEIGHT_CONFLICT);
+        BOOST_CHECK(persistence.GetFinalityState() == before_rejections);
+
+        auto wrong_authorization{authorization};
+        wrong_authorization.owner.logical_id = NonNullHash(205);
+        BOOST_CHECK(!persistence.PersistAuthorizedUnsealedBTCC(
+            archive, wrong_authorization, &error));
+        BOOST_CHECK(error == ChainLockPersistenceError::INVALID_CHAINLOCK);
+        BOOST_CHECK(persistence.GetFinalityState() == before_rejections);
+    }
+
+    {
+        PQChainLockPersistence persistence{
+            DiskParams(path), genesis, config};
+        const auto restarted{persistence.GetFinalityState()};
+        BOOST_REQUIRE(restarted.best);
+        BOOST_REQUIRE(restarted.receipt_archive_authorization);
+        BOOST_CHECK(*restarted.receipt_archive_authorization ==
+                    authorization);
+        BOOST_CHECK_EQUAL(restarted.certificate_revision, 1U);
+
+        BOOST_REQUIRE(persistence.PersistAuthorizedUnsealedBTCC(
+            archive, authorization));
+        const auto consumed{persistence.GetFinalityState()};
+        BOOST_REQUIRE(consumed.best);
+        BOOST_REQUIRE(consumed.unsealed_btcc);
+        BOOST_CHECK(!consumed.receipt_archive_authorization);
+        BOOST_CHECK(consumed.best->statement == owner.statement);
+        BOOST_CHECK(consumed.unsealed_btcc->logical_id ==
+                    archive.GetLogicalId(genesis));
+        BOOST_CHECK(consumed.unsealed_btcc->witness_id ==
+                    archive.GetWitnessId(genesis));
+        BOOST_CHECK(consumed.unsealed_btcc->statement == archive.statement);
+        BOOST_CHECK_EQUAL(consumed.certificate_revision, 2U);
+    }
+
+    {
+        PQChainLockPersistence persistence{
+            DiskParams(path), genesis, config};
+        const auto restarted{persistence.GetFinalityState()};
+        BOOST_REQUIRE(restarted.best);
+        BOOST_REQUIRE(restarted.unsealed_btcc);
+        BOOST_CHECK(!restarted.receipt_archive_authorization);
+        BOOST_CHECK(restarted.unsealed_btcc->statement == archive.statement);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(corrupt_receipt_archive_authorization_fails_closed)
+{
+    const fs::path path{
+        m_path_root / "pqcl_receipt_archive_authorization_corrupt"};
+    const uint256 genesis{NonNullHash(206)};
+    const auto config{MakeConfig()};
+    const auto predecessor{MakeChainLock(
+        865, config.activation_predecessor_height,
+        NonNullHash(config.activation_predecessor_height), 206)};
+    const auto owner{MakeChainLock(
+        875, 870, NonNullHash(870), 207)};
+    {
+        PQChainLockPersistence persistence{
+            DiskParams(path), genesis, config};
+        BOOST_REQUIRE(persistence.PersistBest(predecessor));
+        BOOST_REQUIRE(persistence.PersistCatchupBest(owner));
+        BOOST_REQUIRE(
+            persistence.GetFinalityState().receipt_archive_authorization);
+    }
+    {
+        CDBWrapper raw{DiskParams(path)};
+        RawReceiptArchiveRosterAuthorizationV1 authorization;
+        const RawDiskKey key{
+            PQ_CHAINLOCK_PERSISTENCE_RECEIPT_ARCHIVE_AUTHORIZATION_KEY};
+        BOOST_REQUIRE(raw.Read(key, authorization));
+        authorization.checksum.begin()[0] ^= 1;
+        BOOST_REQUIRE(raw.Write(key, authorization, true));
+    }
+    BOOST_CHECK_THROW(
+        PQChainLockPersistence(DiskParams(path), genesis, config),
+        std::runtime_error);
+}
+
+BOOST_AUTO_TEST_CASE(
+    covering_catchup_atomically_replaces_receipt_archive_authorization)
+{
+    const fs::path path{
+        m_path_root / "pqcl_receipt_archive_covering_catchup"};
+    const uint256 genesis{NonNullHash(213)};
+    const auto config{MakeConfig()};
+    const auto predecessor{MakeChainLock(
+        865, config.activation_predecessor_height,
+        NonNullHash(config.activation_predecessor_height), 213)};
+    const auto first_catchup{MakeChainLock(
+        875, 870, NonNullHash(870), 214)};
+    const auto second_catchup{MakeChainLock(
+        885, 880, NonNullHash(880), 215)};
+
+    ReceiptArchiveRosterAuthorization replacement;
+    {
+        PQChainLockPersistence persistence{
+            DiskParams(path), genesis, config};
+        BOOST_REQUIRE(persistence.PersistBest(predecessor));
+        BOOST_REQUIRE(persistence.PersistCatchupBest(first_catchup));
+        const auto first_state{persistence.GetFinalityState()};
+        BOOST_REQUIRE(first_state.receipt_archive_authorization);
+        const auto first_authorization{
+            *first_state.receipt_archive_authorization};
+
+        ChainLockPersistenceError error{ChainLockPersistenceError::NONE};
+        BOOST_CHECK(!persistence.PersistCatchupBest(
+            second_catchup, &error));
+        BOOST_CHECK(error == ChainLockPersistenceError::HEIGHT_CONFLICT);
+        BOOST_CHECK(persistence.GetFinalityState() == first_state);
+
+        auto wrong_authorization{first_authorization};
+        wrong_authorization.covering_witness_id = NonNullHash(216);
+        BOOST_CHECK(!persistence.PersistCatchupBest(
+            second_catchup, &error, std::nullopt,
+            &wrong_authorization));
+        BOOST_CHECK(error == ChainLockPersistenceError::INVALID_CHAINLOCK);
+        BOOST_CHECK(persistence.GetFinalityState() == first_state);
+
+        BOOST_REQUIRE(persistence.PersistCatchupBest(
+            second_catchup, &error, std::nullopt,
+            &first_authorization));
+        const auto replaced{persistence.GetFinalityState()};
+        BOOST_REQUIRE(replaced.best);
+        BOOST_REQUIRE(replaced.receipt_archive_authorization);
+        BOOST_CHECK(replaced.best->statement == second_catchup.statement);
+        replacement = *replaced.receipt_archive_authorization;
+        BOOST_CHECK(replacement.owner.statement ==
+                    second_catchup.statement);
+        BOOST_CHECK(replacement.predecessor.statement ==
+                    first_catchup.statement);
+        BOOST_CHECK(replacement.covering_logical_id ==
+                    second_catchup.GetLogicalId(genesis));
+        BOOST_CHECK(replacement.covering_witness_id ==
+                    second_catchup.GetWitnessId(genesis));
+        BOOST_CHECK_EQUAL(replaced.certificate_revision, 3U);
+    }
+
+    {
+        PQChainLockPersistence persistence{
+            DiskParams(path), genesis, config};
+        const auto restarted{persistence.GetFinalityState()};
+        BOOST_REQUIRE(restarted.best);
+        BOOST_REQUIRE(restarted.receipt_archive_authorization);
+        BOOST_CHECK(restarted.best->statement == second_catchup.statement);
+        BOOST_CHECK(*restarted.receipt_archive_authorization == replacement);
+        BOOST_CHECK_EQUAL(restarted.certificate_revision, 1U);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(
+    recovery_catchup_atomically_consumes_precommit_and_replaces_archive_authority)
+{
+    const fs::path path{
+        m_path_root / "pqcl_recovery_covering_receipt_archive"};
+    const uint256 genesis{NonNullHash(217)};
+    const auto config{MakeConfig()};
+    const auto predecessor{MakeChainLock(
+        865, config.activation_predecessor_height,
+        NonNullHash(config.activation_predecessor_height), 217)};
+    const auto first_catchup{MakeChainLock(
+        875, 870, NonNullHash(870), 218)};
+    const auto recovery_target{CanonicalRosterRecoveryTargetHeight(
+        config.chainlock_schedule, config.btcc_schedule, 7)};
+    BOOST_REQUIRE(recovery_target);
+    const auto staged{MakeRecoveryPrecommit(
+        RosterRecoveryAdmission::CURRENT_CATCHUP, 219,
+        first_catchup.statement.height,
+        first_catchup.statement.block_hash,
+        *recovery_target, /*epoch=*/7)};
+    auto recovered{MakeChainLock(
+        *recovery_target,
+        *recovery_target - static_cast<int32_t>(PQ_CL_PERIOD),
+        NonNullHash(*recovery_target - PQ_CL_PERIOD), 220)};
+    SetRecoveryTransition(recovered, staged, 220);
+    BOOST_REQUIRE(recovered.IsStructurallyValid());
+
+    ReceiptArchiveRosterAuthorization replacement;
+    {
+        PQChainLockPersistence persistence{
+            DiskParams(path), genesis, config};
+        BOOST_REQUIRE(persistence.PersistBest(predecessor));
+        BOOST_REQUIRE(persistence.PersistCatchupBest(first_catchup));
+        const auto before{persistence.GetFinalityState()};
+        BOOST_REQUIRE(before.receipt_archive_authorization);
+        const auto authorization{*before.receipt_archive_authorization};
+        BOOST_REQUIRE(persistence.PersistRosterRecoveryPrecommit(staged));
+        const auto staged_precommit{
+            persistence.LoadRosterRecoveryPrecommit()};
+        BOOST_REQUIRE(staged_precommit);
+
+        ChainLockPersistenceError error{ChainLockPersistenceError::NONE};
+        BOOST_CHECK(!persistence.PersistRecoveryCatchupBest(
+            recovered, &error));
+        BOOST_CHECK(error == ChainLockPersistenceError::HEIGHT_CONFLICT);
+        BOOST_CHECK(persistence.GetFinalityState() == before);
+        BOOST_CHECK(persistence.LoadRosterRecoveryPrecommit() ==
+                    staged_precommit);
+
+        auto wrong_authorization{authorization};
+        wrong_authorization.covering_witness_id = NonNullHash(221);
+        BOOST_CHECK(!persistence.PersistRecoveryCatchupBest(
+            recovered, &error, std::nullopt, &wrong_authorization));
+        BOOST_CHECK(error == ChainLockPersistenceError::INVALID_CHAINLOCK);
+        BOOST_CHECK(persistence.GetFinalityState() == before);
+        BOOST_CHECK(persistence.LoadRosterRecoveryPrecommit() ==
+                    staged_precommit);
+
+        BOOST_REQUIRE(persistence.PersistRecoveryCatchupBest(
+            recovered, &error, std::nullopt, &authorization));
+        BOOST_CHECK(error == ChainLockPersistenceError::NONE);
+        const auto resolved{persistence.GetFinalityState()};
+        BOOST_REQUIRE(resolved.best);
+        BOOST_REQUIRE(resolved.receipt_archive_authorization);
+        BOOST_CHECK(!persistence.LoadRosterRecoveryPrecommit());
+        BOOST_CHECK(resolved.best->statement == recovered.statement);
+        replacement = *resolved.receipt_archive_authorization;
+        BOOST_CHECK(replacement.owner.statement == recovered.statement);
+        BOOST_CHECK(replacement.predecessor.statement ==
+                    first_catchup.statement);
+    }
+
+    {
+        PQChainLockPersistence persistence{
+            DiskParams(path), genesis, config};
+        BOOST_REQUIRE(persistence.LoadBest());
+        BOOST_CHECK(*persistence.LoadBest() == recovered);
+        BOOST_CHECK(!persistence.LoadRosterRecoveryPrecommit());
+        BOOST_REQUIRE(
+            persistence.GetFinalityState().receipt_archive_authorization);
+        BOOST_CHECK(
+            *persistence.GetFinalityState().receipt_archive_authorization ==
+            replacement);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(
+    covering_best_rolls_and_atomically_retires_receipt_authorization)
+{
+    const fs::path path{
+        m_path_root / "pqcl_receipt_archive_covering_best"};
+    const uint256 genesis{NonNullHash(208)};
+    const auto config{MakeConfig()};
+    const auto predecessor{MakeChainLock(
+        865, config.activation_predecessor_height,
+        NonNullHash(config.activation_predecessor_height), 208)};
+    const auto owner{MakeChainLock(
+        875, 870, NonNullHash(870), 209)};
+    const auto live{MakeChainLock(
+        880, owner.statement.height, owner.statement.block_hash, 210)};
+    const auto covering{MakeChainLock(
+        885, live.statement.height, live.statement.block_hash, 211)};
+
+    {
+        PQChainLockPersistence persistence{
+            DiskParams(path), genesis, config};
+        BOOST_REQUIRE(persistence.PersistBest(predecessor));
+        BOOST_REQUIRE(persistence.PersistCatchupBest(owner));
+        BOOST_REQUIRE(persistence.PersistBest(live));
+
+        const auto state{persistence.GetFinalityState()};
+        BOOST_REQUIRE(state.receipt_archive_authorization);
+        BOOST_CHECK(state.receipt_archive_authorization->owner.statement ==
+                    owner.statement);
+        BOOST_CHECK(
+            state.receipt_archive_authorization->covering_logical_id ==
+            live.GetLogicalId(genesis));
+        BOOST_CHECK(
+            state.receipt_archive_authorization->covering_witness_id ==
+            live.GetWitnessId(genesis));
+    }
+
+    {
+        PQChainLockPersistence persistence{
+            DiskParams(path), genesis, config};
+        const auto restarted{persistence.GetFinalityState()};
+        BOOST_REQUIRE(restarted.receipt_archive_authorization);
+        const auto authorization{
+            *restarted.receipt_archive_authorization};
+        BOOST_CHECK(authorization.covering_logical_id ==
+                    live.GetLogicalId(genesis));
+        BOOST_CHECK(authorization.covering_witness_id ==
+                    live.GetWitnessId(genesis));
+
+        auto wrong_authorization{authorization};
+        wrong_authorization.covering_witness_id = NonNullHash(212);
+        const auto before_rejection{persistence.GetFinalityState()};
+        ChainLockPersistenceError error{ChainLockPersistenceError::NONE};
+        BOOST_CHECK(!persistence.PersistBestCoveringReceiptArchive(
+            covering, wrong_authorization, &error));
+        BOOST_CHECK(error == ChainLockPersistenceError::INVALID_CHAINLOCK);
+        BOOST_CHECK(persistence.GetFinalityState() == before_rejection);
+
+        BOOST_REQUIRE(persistence.PersistBestCoveringReceiptArchive(
+            covering, authorization, &error));
+        BOOST_CHECK(error == ChainLockPersistenceError::NONE);
+        const auto consumed{persistence.GetFinalityState()};
+        BOOST_REQUIRE(consumed.best);
+        BOOST_CHECK(consumed.best->statement == covering.statement);
+        BOOST_CHECK(!consumed.receipt_archive_authorization);
+        BOOST_CHECK(!consumed.unsealed_btcc);
+        BOOST_CHECK_EQUAL(consumed.certificate_revision, 2U);
+    }
+
+    {
+        PQChainLockPersistence persistence{
+            DiskParams(path), genesis, config};
+        const auto restarted{persistence.GetFinalityState()};
+        BOOST_REQUIRE(restarted.best);
+        BOOST_CHECK(restarted.best->statement == covering.statement);
+        BOOST_CHECK(!restarted.receipt_archive_authorization);
     }
 }
 

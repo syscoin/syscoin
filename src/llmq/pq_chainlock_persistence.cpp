@@ -57,6 +57,8 @@ inline constexpr std::string_view PAYMENT_AUDIT_PRESEAL_MARKER_HASH_DOMAIN{
     "SYS_PQ_PAYMENT_AUDIT_PRESEAL_MARKER_V1"};
 inline constexpr std::string_view ROSTER_RECOVERY_PRECOMMIT_HASH_DOMAIN{
     "SYS_PQ_ROSTER_RECOVERY_PRECOMMIT_V1"};
+inline constexpr std::string_view RECEIPT_ARCHIVE_AUTHORIZATION_HASH_DOMAIN{
+    "SYS_PQ_RECEIPT_ARCHIVE_AUTHORIZATION_V1"};
 
 void SetError(ChainLockPersistenceError* error,
               ChainLockPersistenceError value)
@@ -326,6 +328,49 @@ struct DiskRosterRecoveryPrecommit {
     }
 };
 
+struct DiskReceiptArchiveRosterAuthorization {
+    static constexpr uint16_t VERSION{1};
+    static constexpr std::size_t WIRE_SIZE{
+        sizeof(uint16_t) + 8 * 32 +
+        2 * ChainLockStatement::WIRE_SIZE};
+
+    uint16_t version{VERSION};
+    uint256 schema_hash;
+    uint256 owner_logical_id;
+    uint256 owner_witness_id;
+    ChainLockStatement owner_statement;
+    uint256 covering_logical_id;
+    uint256 covering_witness_id;
+    uint256 predecessor_logical_id;
+    uint256 predecessor_witness_id;
+    ChainLockStatement predecessor_statement;
+    uint256 checksum;
+
+    template <typename Stream>
+    void Serialize(Stream& stream) const
+    {
+        ::SerializeMany(
+            stream, version, schema_hash, owner_logical_id,
+            owner_witness_id, owner_statement, covering_logical_id,
+            covering_witness_id, predecessor_logical_id,
+            predecessor_witness_id, predecessor_statement, checksum);
+    }
+
+    template <typename Stream>
+    void Unserialize(Stream& stream)
+    {
+        if (stream.size() != WIRE_SIZE) {
+            throw std::ios_base::failure(
+                "invalid receipt-archive authorization size");
+        }
+        ::UnserializeMany(
+            stream, version, schema_hash, owner_logical_id,
+            owner_witness_id, owner_statement, covering_logical_id,
+            covering_witness_id, predecessor_logical_id,
+            predecessor_witness_id, predecessor_statement, checksum);
+    }
+};
+
 struct DiskBTCCPresealMarker {
     static constexpr uint16_t VERSION{1};
     static constexpr std::size_t WIRE_SIZE{
@@ -456,6 +501,60 @@ DiskRosterRecoveryPrecommit MakeDiskRosterRecoveryPrecommit(
     return disk;
 }
 
+uint256 GetReceiptArchiveAuthorizationChecksum(
+    const uint256& schema_hash,
+    const ReceiptArchiveRosterAuthorization& authorization)
+{
+    HashWriter writer{SER_GETHASH, 0};
+    WriteDomain(writer, RECEIPT_ARCHIVE_AUTHORIZATION_HASH_DOMAIN);
+    writer << schema_hash << authorization.owner.logical_id
+           << authorization.owner.witness_id
+           << authorization.owner.statement
+           << authorization.covering_logical_id
+           << authorization.covering_witness_id
+           << authorization.predecessor.logical_id
+           << authorization.predecessor.witness_id
+           << authorization.predecessor.statement;
+    return writer.GetHash();
+}
+
+DiskReceiptArchiveRosterAuthorization
+MakeDiskReceiptArchiveRosterAuthorization(
+    const uint256& schema_hash,
+    const ReceiptArchiveRosterAuthorization& authorization)
+{
+    DiskReceiptArchiveRosterAuthorization disk;
+    disk.schema_hash = schema_hash;
+    disk.owner_logical_id = authorization.owner.logical_id;
+    disk.owner_witness_id = authorization.owner.witness_id;
+    disk.owner_statement = authorization.owner.statement;
+    disk.covering_logical_id = authorization.covering_logical_id;
+    disk.covering_witness_id = authorization.covering_witness_id;
+    disk.predecessor_logical_id = authorization.predecessor.logical_id;
+    disk.predecessor_witness_id = authorization.predecessor.witness_id;
+    disk.predecessor_statement = authorization.predecessor.statement;
+    disk.checksum = GetReceiptArchiveAuthorizationChecksum(
+        schema_hash, authorization);
+    return disk;
+}
+
+ReceiptArchiveRosterAuthorization
+GetReceiptArchiveRosterAuthorization(
+    const DiskReceiptArchiveRosterAuthorization& disk)
+{
+    return ReceiptArchiveRosterAuthorization{
+        FinalChainLockRecordMetadata{
+            disk.owner_logical_id,
+            disk.owner_witness_id,
+            disk.owner_statement},
+        disk.covering_logical_id,
+        disk.covering_witness_id,
+        FinalChainLockRecordMetadata{
+            disk.predecessor_logical_id,
+            disk.predecessor_witness_id,
+            disk.predecessor_statement}};
+}
+
 uint256 GetBTCCPresealMarkerChecksum(const uint256& schema_hash,
                                      const BTCCPresealMarker& marker)
 {
@@ -522,6 +621,7 @@ DiskPaymentAuditPresealMarker MakePaymentAuditPresealMarker(
 
 static_assert(DiskRecord::WIRE_SIZE < MAX_SIZE);
 static_assert(DiskRosterRecoveryPrecommit::WIRE_SIZE == 217);
+static_assert(DiskReceiptArchiveRosterAuthorization::WIRE_SIZE < MAX_SIZE);
 static_assert(DiskBTCCPresealMarker::WIRE_SIZE == 384);
 static_assert(DiskPaymentAuditPresealMarker::WIRE_SIZE == 683);
 
@@ -833,6 +933,65 @@ struct PQChainLockPersistence::Impl {
                  statement.previous_btcc_cursor.IsNull()));
     }
 
+    FinalChainLockRecordMetadata Metadata(const DiskRecord& record) const
+    {
+        return FinalChainLockRecordMetadata{
+            record.logical_id, record.witness_id,
+            record.chainlock.statement};
+    }
+
+    bool ValidateReceiptArchiveAuthorization(
+        const ReceiptArchiveRosterAuthorization& authorization,
+        const DiskRecord* durable_best) const
+    {
+        if (!durable_best ||
+            !authorization.IsInternallyConsistent(genesis_hash) ||
+            authorization.covering_logical_id !=
+                durable_best->logical_id ||
+            authorization.covering_witness_id !=
+                durable_best->witness_id ||
+            authorization.owner.statement.height >
+                durable_best->chainlock.statement.height) {
+            return false;
+        }
+
+        const auto& predecessor{authorization.predecessor.statement};
+        const auto& owner_statement{authorization.owner.statement};
+        const auto predecessor_target{NextEligibleChainLockTargetHeight(
+            config.chainlock_schedule,
+            predecessor.previous_chainlock_height)};
+        const auto owner_target{NextEligibleChainLockTargetHeight(
+            config.chainlock_schedule,
+            owner_statement.previous_chainlock_height)};
+        const bool owner_is_cover{
+            owner_statement.height ==
+            durable_best->chainlock.statement.height};
+        return predecessor_target &&
+               predecessor.height == *predecessor_target &&
+               predecessor.height > config.activation_predecessor_height &&
+               predecessor.previous_chainlock_height >=
+                   config.activation_predecessor_height &&
+               owner_target && owner_statement.height == *owner_target &&
+               (!owner_is_cover ||
+                (authorization.owner.logical_id ==
+                     durable_best->logical_id &&
+                 authorization.owner.witness_id ==
+                     durable_best->witness_id &&
+                 owner_statement ==
+                     durable_best->chainlock.statement));
+    }
+
+    ReceiptArchiveRosterAuthorization
+    MakeReceiptArchiveAuthorization(const DiskRecord& owner,
+                                    const DiskRecord& predecessor) const
+    {
+        return ReceiptArchiveRosterAuthorization{
+            Metadata(owner),
+            owner.logical_id,
+            owner.witness_id,
+            Metadata(predecessor)};
+    }
+
     void InitializeOrLoad() EXCLUSIVE_LOCKS_REQUIRED(mutex)
     {
         bool any{false};
@@ -845,6 +1004,7 @@ struct PQChainLockPersistence::Impl {
         bool found_payment_audit_preseal{false};
         bool found_payment_audit_prospective_preseal{false};
         bool found_roster_recovery_precommit{false};
+        bool found_receipt_archive_authorization{false};
         {
             std::unique_ptr<CDBIterator> iterator{db.NewIterator()};
             for (iterator->SeekToFirst(); iterator->Valid(); iterator->Next()) {
@@ -915,6 +1075,13 @@ struct PQChainLockPersistence::Impl {
                             "duplicate roster recovery precommit");
                     }
                     found_roster_recovery_precommit = true;
+                } else if (key.type ==
+                           PQ_CHAINLOCK_PERSISTENCE_RECEIPT_ARCHIVE_AUTHORIZATION_KEY) {
+                    if (found_receipt_archive_authorization) {
+                        throw std::runtime_error(
+                            "duplicate receipt-archive authorization");
+                    }
+                    found_receipt_archive_authorization = true;
                 } else {
                     throw std::runtime_error(
                         "unknown PQ ChainLock persistence key");
@@ -976,6 +1143,32 @@ struct PQChainLockPersistence::Impl {
                     "corrupt roster recovery precommit");
             }
             roster_recovery_precommit = disk->precommit;
+        }
+
+        if (found_receipt_archive_authorization) {
+            const DiskKey authorization_key{
+                PQ_CHAINLOCK_PERSISTENCE_RECEIPT_ARCHIVE_AUTHORIZATION_KEY};
+            const auto disk{
+                ReadExactValue<DiskReceiptArchiveRosterAuthorization>(
+                    db, authorization_key)};
+            if (!disk ||
+                disk->version !=
+                    DiskReceiptArchiveRosterAuthorization::VERSION ||
+                disk->schema_hash != schema_hash) {
+                throw std::runtime_error(
+                    "corrupt receipt-archive authorization");
+            }
+            const auto authorization{
+                GetReceiptArchiveRosterAuthorization(*disk)};
+            if (!ValidateReceiptArchiveAuthorization(
+                    authorization, best ? &*best : nullptr) ||
+                disk->checksum !=
+                    GetReceiptArchiveAuthorizationChecksum(
+                        disk->schema_hash, authorization)) {
+                throw std::runtime_error(
+                    "corrupt receipt-archive authorization");
+            }
+            receipt_archive_authorization = authorization;
         }
 
         if (found_catchup_marker) {
@@ -1111,7 +1304,9 @@ struct PQChainLockPersistence::Impl {
                      const std::optional<BTCCCursorReconciliationProof>&
                          btcc_cursor_reconciliation = std::nullopt,
                      std::optional<RosterRecoveryAdmission>
-                         consume_recovery_precommit = std::nullopt)
+                         consume_recovery_precommit = std::nullopt,
+                     const ReceiptArchiveRosterAuthorization*
+                         consume_receipt_archive_authorization = nullptr)
         EXCLUSIVE_LOCKS_REQUIRED(mutex)
     {
         SetError(error, ChainLockPersistenceError::NONE);
@@ -1155,6 +1350,15 @@ struct PQChainLockPersistence::Impl {
             candidate.logical_id == best->logical_id &&
             candidate.checksum == best->checksum &&
             candidate.chainlock == best->chainlock};
+        if (consume_receipt_archive_authorization != nullptr &&
+            (!best || !receipt_archive_authorization ||
+             *receipt_archive_authorization !=
+                 *consume_receipt_archive_authorization ||
+             candidate.chainlock.statement.height <=
+                 best->chainlock.statement.height)) {
+            SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
+            return false;
+        }
         if (consume_recovery_precommit) {
             if (!IsExactRecoveryStatement(
                     chainlock, *consume_recovery_precommit) ||
@@ -1253,6 +1457,41 @@ struct PQChainLockPersistence::Impl {
             }
         }
 
+        std::optional<ReceiptArchiveRosterAuthorization>
+            next_receipt_archive_authorization{
+                receipt_archive_authorization};
+        if (consume_receipt_archive_authorization != nullptr) {
+            next_receipt_archive_authorization.reset();
+        }
+        if (catchup && best &&
+            best->chainlock.statement.height <
+                candidate.chainlock.statement.previous_chainlock_height) {
+            if (receipt_archive_authorization &&
+                consume_receipt_archive_authorization == nullptr) {
+                SetError(error, ChainLockPersistenceError::HEIGHT_CONFLICT);
+                return false;
+            }
+            next_receipt_archive_authorization =
+                MakeReceiptArchiveAuthorization(candidate, *best);
+            if (!ValidateReceiptArchiveAuthorization(
+                    *next_receipt_archive_authorization, &candidate)) {
+                SetError(error,
+                         ChainLockPersistenceError::INVALID_CHAINLOCK);
+                return false;
+            }
+        } else if (next_receipt_archive_authorization) {
+            next_receipt_archive_authorization->covering_logical_id =
+                candidate.logical_id;
+            next_receipt_archive_authorization->covering_witness_id =
+                candidate.witness_id;
+        }
+        if (next_receipt_archive_authorization &&
+            !ValidateReceiptArchiveAuthorization(
+                *next_receipt_archive_authorization, &candidate)) {
+            SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
+            return false;
+        }
+
         std::optional<DiskRecord> next_unsealed{unsealed};
         if (next_unsealed &&
             SealsUnsealedBTCC(chainlock, next_unsealed->chainlock, config)) {
@@ -1280,6 +1519,28 @@ struct PQChainLockPersistence::Impl {
                     DiskKey{PQ_CHAINLOCK_PERSISTENCE_CATCHUP_MARKER_KEY},
                     MakeCatchupMarker(candidate));
             }
+            if (next_receipt_archive_authorization &&
+                next_receipt_archive_authorization !=
+                    receipt_archive_authorization) {
+                const auto disk_authorization{
+                    MakeDiskReceiptArchiveRosterAuthorization(
+                        schema_hash,
+                        *next_receipt_archive_authorization)};
+                if (::GetSerializeSize(disk_authorization) !=
+                    DiskReceiptArchiveRosterAuthorization::WIRE_SIZE) {
+                    SetError(error,
+                             ChainLockPersistenceError::INVALID_CHAINLOCK);
+                    return false;
+                }
+                batch.Write(
+                    DiskKey{
+                        PQ_CHAINLOCK_PERSISTENCE_RECEIPT_ARCHIVE_AUTHORIZATION_KEY},
+                    disk_authorization);
+            } else if (!next_receipt_archive_authorization &&
+                       receipt_archive_authorization) {
+                batch.Erase(DiskKey{
+                    PQ_CHAINLOCK_PERSISTENCE_RECEIPT_ARCHIVE_AUTHORIZATION_KEY});
+            }
             if (erase_recovery_precommit) {
                 batch.Erase(DiskKey{
                     PQ_CHAINLOCK_PERSISTENCE_ROSTER_RECOVERY_PRECOMMIT_KEY});
@@ -1296,6 +1557,8 @@ struct PQChainLockPersistence::Impl {
         }
         best = std::move(candidate);
         unsealed = std::move(next_unsealed);
+        receipt_archive_authorization =
+            std::move(next_receipt_archive_authorization);
         catchup_used = catchup_used || catchup;
         if (erase_recovery_precommit) {
             roster_recovery_precommit.reset();
@@ -1346,6 +1609,77 @@ struct PQChainLockPersistence::Impl {
             return false;
         }
         unsealed = std::move(candidate);
+        ++certificate_revision;
+        return true;
+    }
+
+    bool PersistAuthorizedUnsealedBTCC(
+        const FinalChainLock& chainlock,
+        const ReceiptArchiveRosterAuthorization& expected_authorization,
+        ChainLockPersistenceError* error)
+        EXCLUSIVE_LOCKS_REQUIRED(mutex)
+    {
+        SetError(error, ChainLockPersistenceError::NONE);
+        if (failed || !chainlock.IsStructurallyValid() ||
+            !IsReceiptableAdvance(chainlock, config)) {
+            SetError(error, failed
+                                ? ChainLockPersistenceError::IO_FAILURE
+                                : ChainLockPersistenceError::INVALID_CHAINLOCK);
+            return false;
+        }
+
+        DiskRecord candidate{MakeRecord(chainlock)};
+        if (::GetSerializeSize(candidate) != DiskRecord::WIRE_SIZE ||
+            !ValidateRecord(candidate) ||
+            !receipt_archive_authorization ||
+            *receipt_archive_authorization != expected_authorization ||
+            !ValidateReceiptArchiveAuthorization(
+                expected_authorization, best ? &*best : nullptr)) {
+            SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
+            return false;
+        }
+
+        const int32_t archive_height{candidate.chainlock.statement.height};
+        if (archive_height <=
+                expected_authorization.predecessor.statement.height ||
+            archive_height >
+                expected_authorization.owner.statement
+                    .previous_chainlock_height) {
+            SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
+            return false;
+        }
+
+        if (unsealed &&
+            (unsealed->logical_id != candidate.logical_id ||
+             unsealed->witness_id != candidate.witness_id ||
+             unsealed->checksum != candidate.checksum ||
+             unsealed->chainlock != candidate.chainlock)) {
+            SetError(error, ChainLockPersistenceError::HEIGHT_CONFLICT);
+            return false;
+        }
+
+        try {
+            CDBBatch batch{db};
+            if (!unsealed) {
+                batch.Write(
+                    DiskKey{PQ_CHAINLOCK_PERSISTENCE_UNSEALED_BTCC_KEY},
+                    candidate);
+            }
+            batch.Erase(DiskKey{
+                PQ_CHAINLOCK_PERSISTENCE_RECEIPT_ARCHIVE_AUTHORIZATION_KEY});
+            if (!db.WriteBatch(batch, /*fSync=*/true)) {
+                failed = true;
+                SetError(error, ChainLockPersistenceError::IO_FAILURE);
+                return false;
+            }
+        } catch (const std::exception&) {
+            failed = true;
+            SetError(error, ChainLockPersistenceError::IO_FAILURE);
+            return false;
+        }
+
+        if (!unsealed) unsealed = std::move(candidate);
+        receipt_archive_authorization.reset();
         ++certificate_revision;
         return true;
     }
@@ -1646,6 +1980,8 @@ struct PQChainLockPersistence::Impl {
     mutable Mutex mutex;
     std::optional<DiskRecord> best GUARDED_BY(mutex);
     std::optional<DiskRecord> unsealed GUARDED_BY(mutex);
+    std::optional<ReceiptArchiveRosterAuthorization>
+        receipt_archive_authorization GUARDED_BY(mutex);
     uint64_t certificate_revision GUARDED_BY(mutex){0};
     BTCCPresealState btcc_preseal_state GUARDED_BY(mutex);
     uint64_t highest_btcc_preseal_revision GUARDED_BY(mutex){0};
@@ -1690,6 +2026,8 @@ DurableFinalityStateView PQChainLockPersistence::GetFinalityState() const
     if (m_impl->unsealed) {
         view.unsealed_btcc = metadata(*m_impl->unsealed);
     }
+    view.receipt_archive_authorization =
+        m_impl->receipt_archive_authorization;
     return view;
 }
 
@@ -1741,6 +2079,17 @@ bool PQChainLockPersistence::PersistBest(
     return m_impl->PersistBest(chainlock, error);
 }
 
+bool PQChainLockPersistence::PersistBestCoveringReceiptArchive(
+    const FinalChainLock& chainlock,
+    const ReceiptArchiveRosterAuthorization& expected_authorization,
+    ChainLockPersistenceError* error)
+{
+    LOCK(m_impl->mutex);
+    return m_impl->PersistBest(
+        chainlock, error, /*catchup=*/false, std::nullopt, std::nullopt,
+        &expected_authorization);
+}
+
 bool PQChainLockPersistence::PersistUnsealedBTCC(
     const FinalChainLock& chainlock,
     ChainLockPersistenceError* error)
@@ -1749,16 +2098,29 @@ bool PQChainLockPersistence::PersistUnsealedBTCC(
     return m_impl->PersistUnsealedBTCC(chainlock, error);
 }
 
+bool PQChainLockPersistence::PersistAuthorizedUnsealedBTCC(
+    const FinalChainLock& chainlock,
+    const ReceiptArchiveRosterAuthorization& expected_authorization,
+    ChainLockPersistenceError* error)
+{
+    LOCK(m_impl->mutex);
+    return m_impl->PersistAuthorizedUnsealedBTCC(
+        chainlock, expected_authorization, error);
+}
+
 bool PQChainLockPersistence::PersistCatchupBest(
     const FinalChainLock& chainlock,
     ChainLockPersistenceError* error,
     const std::optional<BTCCCursorReconciliationProof>&
-        btcc_cursor_reconciliation)
+        btcc_cursor_reconciliation,
+    const ReceiptArchiveRosterAuthorization*
+        consume_receipt_archive_authorization)
 {
     LOCK(m_impl->mutex);
     return m_impl->PersistBest(
         chainlock, error, /*catchup=*/true,
-        btcc_cursor_reconciliation);
+        btcc_cursor_reconciliation, std::nullopt,
+        consume_receipt_archive_authorization);
 }
 
 bool PQChainLockPersistence::PersistInitializedBest(
@@ -1775,13 +2137,16 @@ bool PQChainLockPersistence::PersistRecoveryCatchupBest(
     const FinalChainLock& chainlock,
     ChainLockPersistenceError* error,
     const std::optional<BTCCCursorReconciliationProof>&
-        btcc_cursor_reconciliation)
+        btcc_cursor_reconciliation,
+    const ReceiptArchiveRosterAuthorization*
+        consume_receipt_archive_authorization)
 {
     LOCK(m_impl->mutex);
     return m_impl->PersistBest(
         chainlock, error, /*catchup=*/true,
         btcc_cursor_reconciliation,
-        RosterRecoveryAdmission::CURRENT_CATCHUP);
+        RosterRecoveryAdmission::CURRENT_CATCHUP,
+        consume_receipt_archive_authorization);
 }
 
 bool PQChainLockPersistence::PersistRosterRecoveryPrecommit(

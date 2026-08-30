@@ -306,7 +306,7 @@ static ChainstateLoadResult CompleteChainstateInitialization(
                 return {ChainstateLoadStatus::FAILURE, _("Error initializing block database")};
             }
             assert(chainstate->m_chain.Tip() != nullptr);
-            // SYSCOIN BEGIN: Establish or verify the exact local A-1 handoff
+            // SYSCOIN BEGIN: Verify the transition release's imported A-1 pin
             // before any public service can observe startup readiness.
             if (chainstate == active_chainstate) {
                 bilingual_str handoff_error;

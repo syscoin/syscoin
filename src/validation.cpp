@@ -2728,8 +2728,8 @@ bool ChainstateManager::PreparePQActivationHandoff(
         return false;
     }
 
-    // An explicit reconstruction is the only supported recovery from a stale
-    // or failed local pin, so it deliberately replaces the old record.
+    // Reconstruction cannot authenticate legacy BLS history, so it
+    // deliberately replaces any live pin with permanent replay quarantine.
     if (!force_historical_replay && !empty_chainstate && public_network &&
         block_tree->HasPQActivationHandoff()) {
         node::PQActivationHandoffRecord record;
@@ -2760,7 +2760,8 @@ bool ChainstateManager::PreparePQActivationHandoff(
         std::memory_order_release);
     if (resolution.state == node::PQActivationRuntimeState::FAILED) {
         error = Untranslated(
-            "PQ activation handoff state is invalid; restart with -reindex");
+            "PQ activation handoff state is invalid; restore the transition "
+            "release handoff or run that release on the selected branch");
         return false;
     }
     return true;
@@ -2797,7 +2798,8 @@ bool ChainstateManager::FinalizePQActivationHandoff(
     if (resolution.state == node::PQActivationRuntimeState::FAILED) {
         error = Untranslated(
             "The local PQ activation handoff is missing, unvalidated, or no "
-            "longer matches the active A-1 predecessor; restart with -reindex");
+            "longer matches the active A-1 predecessor; return to the "
+            "legacy-validating transition release");
         return false;
     }
     return true;
@@ -2825,11 +2827,9 @@ bool ChainstateManager::MaybeFinalizePQActivationHandoff(
 
 bool ChainstateManager::CheckPQActivationHandoffDisconnect(
     const CBlockIndex& disconnecting,
-    bool& blocked,
     std::string& error)
 {
     AssertLockHeld(cs_main);
-    blocked = false;
     error.clear();
     // A durable ChainLock is a generic finality floor, including regtest and
     // activation-bypass configurations. Resolve it before the A-1-specific
@@ -2854,100 +2854,27 @@ bool ChainstateManager::CheckPQActivationHandoffDisconnect(
             if (llmq::DisconnectCrossesDurableChainLockFloor(
                     disconnecting.nHeight, active_floor->nHeight,
                     floor_descends_from_disconnect)) {
-                blocked = true;
                 error = "the durable PQ ChainLock winner finalizes the "
                         "active recovery floor";
                 return false;
             }
         }
     }
-    const auto resolution{node::ResolvePQActivationHandoffDisconnect(
-        GetConsensus(), m_pq_activation_runtime_state,
-        m_pq_activation_handoff_record, disconnecting.nHeight,
-        disconnecting.GetBlockHash())};
-    if (!resolution.record_to_write) {
-        return true;
-    }
-
-    // Persist the quarantine before chainstate mutation. On write failure the
-    // in-memory pin remains authoritative and the caller must not disconnect.
-    if (!m_blockman.m_block_tree_db->WritePQActivationHandoff(
-            *resolution.record_to_write)) {
-        error = "failed to persist the PQ activation reorg quarantine";
+    if (node::DisconnectCrossesPQActivationHandoff(
+            GetConsensus(), m_pq_activation_runtime_state,
+            m_pq_activation_handoff_record, disconnecting.nHeight,
+            disconnecting.GetBlockHash())) {
+        error = "the imported PQ activation handoff fixes the A-1 "
+                "predecessor";
         return false;
     }
-    m_pq_activation_handoff_record = resolution.record_to_write;
-    m_pq_activation_runtime_state = resolution.state;
-    m_pq_activation_participation_allowed.store(false,
-                                                 std::memory_order_release);
-    LogPrintf(
-        "PQ activation handoff: quarantined before replacing predecessor %s "
-        "at height %d\n",
-        disconnecting.GetBlockHash().ToString(), disconnecting.nHeight);
     return true;
 }
 
-bool ChainstateManager::IsPQBlockProductionAllowed(
-    const CBlockIndex* active_tip)
+bool ChainstateManager::IsPQBlockProductionAllowed() const noexcept
 {
-    AssertLockHeld(cs_main);
-    const bool participation_allowed{IsPQParticipationAllowed()};
-    if (participation_allowed) return true;
-
-    const bool durable_replay_marker{
-        m_pq_activation_handoff_record &&
-        m_pq_activation_handoff_record->IsValid(
-            GetConsensus().nPQActivationHeight) &&
-        m_pq_activation_handoff_record->state ==
-            node::PQActivationHandoffState::HISTORICAL_REPLAY};
-    const bool active_tip_fully_validated{
-        active_tip != nullptr && active_tip->IsValid(BLOCK_VALID_SCRIPTS) &&
-        !active_tip->IsAssumedValid() &&
-        (active_tip->nStatus & BLOCK_PQ_RECEIPT_INDEX_VALIDATED)};
-
-    bool local_state_usable{false};
-    if (active_tip_fully_validated && deterministicMNManager != nullptr) {
-        try {
-            const auto dmn_list{
-                deterministicMNManager->GetListForBlock(active_tip)};
-            llmq::pq::PQPaymentProbationStateView probation_state;
-            llmq::pq::PQRegistryReadView registry_state;
-            std::string registry_error;
-            local_state_usable =
-                !dmn_list.IsNull() &&
-                dmn_list.GetHeight() == active_tip->nHeight &&
-                dmn_list.GetBlockHash() == active_tip->GetBlockHash() &&
-                deterministicMNManager->VerifyInverseJournalTipSeal(
-                    active_tip) &&
-                deterministicMNManager->GetPaymentProbationStateView(
-                    active_tip, probation_state) &&
-                deterministicMNManager->GetPQRegistryReadView(
-                    active_tip, registry_state, registry_error) &&
-                registry_state.IsValid() &&
-                registry_state.Height() == active_tip->nHeight &&
-                registry_state.BlockHash() == active_tip->GetBlockHash();
-        } catch (const std::exception&) {
-            local_state_usable = false;
-        }
-    }
-
-    bool durable_finality_clear{false};
-    if (llmq::chainLocksHandler != nullptr) {
-        const CBlockIndex* active_floor{nullptr};
-        const CBlockIndex* durable_target{nullptr};
-        std::string error;
-        durable_finality_clear =
-            llmq::chainLocksHandler->GetDurableFinalityRecoveryFloor(
-                active_floor, durable_target, error) &&
-            active_floor == nullptr && durable_target == nullptr;
-    }
-
     return node::IsPQActivationBlockProductionAllowed(
-        GetConsensus(), m_pq_activation_runtime_state,
-        participation_allowed, durable_replay_marker,
-        active_tip != nullptr ? active_tip->nHeight : -1,
-        active_tip_fully_validated, local_state_usable,
-        durable_finality_clear);
+        IsPQParticipationAllowed());
 }
 // SYSCOIN END: Local BLS-to-PQ activation handoff persistence.
 
@@ -5150,13 +5077,11 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
     CBlockIndex *pindexDelete = m_chain.Tip();
     assert(pindexDelete);
     assert(pindexDelete->pprev);
-    // SYSCOIN BEGIN: Persist a sync-only quarantine before replacing the
-    // locally pinned A-1; the replacement is pinned only after validating A.
-    bool pq_handoff_disconnect_blocked{false};
+    // SYSCOIN BEGIN: Never cross the imported A-1 handoff in this BLS-free
+    // process. A transition release must validate any replacement first.
     std::string pq_handoff_disconnect_error;
     if (!m_chainman.CheckPQActivationHandoffDisconnect(
-            *pindexDelete, pq_handoff_disconnect_blocked,
-            pq_handoff_disconnect_error)) {
+            *pindexDelete, pq_handoff_disconnect_error)) {
         return FatalError(
             m_chainman.GetNotifications(), state,
             pq_handoff_disconnect_error.empty()
@@ -5368,6 +5293,22 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
     NEVMTxRootMap mapNEVMTxRoots;
     PoDAMAPMemory mapPoDA;
     std::vector<std::pair<uint256, uint32_t> > vecTXIDPairs;
+    // SYSCOIN BEGIN: A deferred BLS-free process must possess the imported
+    // A-1 pin before mutating chainstate with block A. Historical replay is
+    // allowed to continue only because it remains permanently sync-only.
+    if (pindexNew->nHeight >=
+            m_chainman.GetConsensus().nPQActivationHeight) {
+        std::string pq_handoff_error;
+        if (!m_chainman.MaybeFinalizePQActivationHandoff(
+                *pindexNew, pq_handoff_error)) {
+            return FatalError(
+                m_chainman.GetNotifications(), state,
+                pq_handoff_error.empty()
+                    ? "Missing imported PQ activation handoff"
+                    : pq_handoff_error);
+        }
+    }
+    // SYSCOIN END: Enforce the imported activation handoff before ConnectBlock.
     {
         CCoinsViewCache view(&CoinsTip());
         bool rv = ConnectBlock(blockConnecting, state, pindexNew, view, false /*bJustCheck*/, setMintTxs, mapNEVMTxRoots, mapPoDA, vecTXIDPairs);
@@ -5387,18 +5328,21 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
         bool flushed = view.Flush();
         assert(flushed);
     }
-    // SYSCOIN BEGIN: Historical replay becomes live only after this process
-    // fully validates A and durably pins its actual A-1 predecessor.
-    std::string pq_handoff_error;
-    if (!m_chainman.MaybeFinalizePQActivationHandoff(
-            *pindexNew, pq_handoff_error)) {
-        return FatalError(
-            m_chainman.GetNotifications(), state,
-            pq_handoff_error.empty()
-                ? "Failed to finalize PQ activation handoff"
-                : pq_handoff_error);
+    // SYSCOIN BEGIN: A node replaying from below A-1 may consume an existing
+    // transition-release pin only after validating that exact predecessor.
+    if (pindexNew->nHeight ==
+            m_chainman.GetConsensus().nPQActivationHeight - 1) {
+        std::string pq_handoff_error;
+        if (!m_chainman.MaybeFinalizePQActivationHandoff(
+                *pindexNew, pq_handoff_error)) {
+            return FatalError(
+                m_chainman.GetNotifications(), state,
+                pq_handoff_error.empty()
+                    ? "Invalid imported PQ activation handoff"
+                    : pq_handoff_error);
+        }
     }
-    // SYSCOIN END: Finalize historical-replay PQ activation handoff.
+    // SYSCOIN END: Consume only an already-imported A-1 handoff.
     // SYSCOIN: Stage mint markers in cache; they become durable on the next full
     // UTXO flush (write-ahead of CoinsTip) or on mint-containing disconnect/replay.
     if(pnevmdatadb)
@@ -6058,13 +6002,31 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
     if (llmq::chainLocksHandler != nullptr) {
         const CBlockIndex* durable_active_floor{nullptr};
         const CBlockIndex* durable_target{nullptr};
+        bool replay_target_pending{false};
         std::string durable_error;
+        const auto recovery_mode{
+            fReindex.load()
+                ? llmq::CChainLocksHandler::DurableFinalityRecoveryMode::
+                      BLOCK_INDEX_REPLAY
+                : llmq::CChainLocksHandler::DurableFinalityRecoveryMode::
+                      STRICT};
         if (!llmq::chainLocksHandler->GetDurableFinalityRecoveryFloor(
-                durable_active_floor, durable_target, durable_error)) {
+                durable_active_floor, durable_target, durable_error,
+                recovery_mode,
+                &replay_target_pending)) {
             return state.Error(strprintf(
                 "cannot establish durable finality before best-chain "
                 "activation: %s",
                 durable_error));
+        }
+        if (replay_target_pending) {
+            if (pindexOldTip != nullptr || pindexMostWork->nHeight != 0 ||
+                pindexMostWork->GetBlockHash() !=
+                    m_chainman.GetConsensus().hashGenesisBlock) {
+                return state.Error(
+                    "durable finality target is pending during block-index "
+                    "replay outside genesis activation");
+            }
         }
         if ((durable_active_floor == nullptr) !=
             (durable_target == nullptr)) {

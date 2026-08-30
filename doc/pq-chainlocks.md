@@ -765,15 +765,16 @@ the active tip, and the candidate and active chain must share the block at one
 signing lag before the target. With the fixed five-block cadence and lag, a
 target is 5--9 blocks behind the tip and the shared boundary is 10--14 blocks
 behind it. A withheld certificate expires when the next signing window opens.
-The same predecessor-to-successor relation is checked for trusted-persistence
-import, archive, and catch-up admission. Collectors and their deterministic relay
-overlay follow the current signing window. If the immediate successor of the
-durable winner misses its window, nodes do not keep signing that expired
-height: they move to the latest target `H`, declare the active block at
-`H - chainlock_period` as `P`, and produce the unique `H = N(P)` recovery
-statement. The durable winner remains the ancestry, receipt-state, and cursor
-floor. This prevents multiple valid target heights in one declared-predecessor
-view without making a missed round permanent.
+Collectors and their deterministic relay overlay follow the current signing
+window. If the immediate successor of the durable winner misses its window,
+nodes do not keep signing that expired height: they move to the latest target
+`H`, declare the active block at `H - chainlock_period` as wire predecessor `P`,
+and produce the unique `H = N(P)` recovery statement. The durable winner `S`
+remains the independently authenticated roster-state, ancestry, receipt-state,
+and cursor floor. `S` may be older than `P`; the normal authorization transition
+is derived exactly from `S`, while schedule geometry is checked against `P`.
+This prevents multiple valid target heights in one declared-predecessor view
+without making a missed unsigned round permanent.
 Before the first winner, the predecessor height is `A-1`, its hash is obtained
 from the fully validated candidate branch, and its BTCC cursor is canonically
 null. The deployment therefore requires `A-1` to precede the first BTCC
@@ -812,10 +813,13 @@ certificate, waive a signature, or turn a losing branch into the active one.
 Truncated or incomplete marker records lack the terminal dependency and fail
 closed rather than being upgraded by inference.
 
-Every historical admission first rebuilds the four exact rosters from the
-candidate branch, derives the same contiguous authorization prefix from the
-certificate's declared predecessor on that branch, and verifies all 801
-signatures under the single bounded verifier. An unselected unauthorized
+Ordinary current catch-up first derives the unique normal roster transition
+from the exact durable authorization predecessor `S`; it never treats the
+candidate's own roster statement as an authorization edge. Historical paths
+with an independently durable covering receipt use their exact authenticated
+boundary. Each path then rebuilds the four exact rosters from the candidate
+branch and verifies all 801 signatures under the single bounded verifier. An
+unselected unauthorized
 newest descriptor may have a snapshot above that predecessor, but it remains
 fully structure-, root-, and context-bound and its slot cannot contribute a
 share or final signature. Only then may admission read retained carrier bodies
@@ -827,6 +831,23 @@ the durable state immediately before the earliest carrier, rereads and
 validates every retained carrier through the candidate, recomputes the
 accumulator, and requires exact equality with the candidate's indexed and
 signed state.
+
+If catch-up skips an accepted roster-state transition that a later fixed
+carrier still needs, persistence retains one bounded authorization edge: the
+exact old durable predecessor, the catch-up winner that consumed it, and the
+logical/witness identity of the current durable winner covering that owner.
+The record contains no certificate witness and is created only from the
+database's actual old best during the catch-up fsync; a peer cannot nominate
+it. An ordinary network receipt archive must derive its roster transition from
+that predecessor under `EXACT_NETWORK`. The requested carrier or replay token
+is only an exact source/TOCTOU capability and never roster authority. Later
+ordinary winners roll the covering identity forward atomically. The edge is
+removed atomically either when the exact archive is fsynced or when a normal
+`LIVE` winner, fully validated from the owner through the fixed carrier range,
+proves the same indexed receipt state. A second unresolved catch-up gap cannot
+overwrite it. This preserves late-receipt liveness without retaining a
+megabyte certificate per epoch or consulting Bitcoin RPC during consensus
+verification.
 
 Durable publication orders the block-index `BTCPREV`/receipt fsync before the
 DMN/PQ snapshot and certificate fsyncs. A marker-authorized preparation carries
@@ -1547,50 +1568,30 @@ still disabled, so there is no released production database migration to infer.
 
 ### 11.2 Local activation handoff
 
-The final BLS-free binary keeps a separate, fsynced local handoff record. This
-record is deployment provenance, not consensus state and not a configured
-activation hash. It prevents the same binary that assumes legacy BLS history
-from silently treating an arbitrary live pre-activation branch as authenticated
-authority.
+The final BLS-free binary consumes a separate, fsynced handoff record written by
+the legacy-validating transition release at `A-1`. This record is deployment
+provenance, not consensus state and not a configured activation hash. The
+BLS-free process can verify an imported pin but cannot manufacture or replace
+one from structurally replayed legacy history.
 
-- A normal non-empty public datadir with no record may install the activation
-  release before `A-1`. While its fully script-validated tip is below `A-1`, it
-  remains sync-only in the distinct deferred-handoff state and writes no pin or
-  failure record. The transition is retried as the active tip advances and
-  pins the exact active block when `A-1` is reached. A loaded tip already at or
-  above `A` must have both that matching durable pin and block `A`'s strong
-  complete-PQ-validation provenance. A late upgrade with neither pin nor a
-  historical-replay marker must reindex; an older release could have written
-  generic receipt provenance without enforcing this activation's full rule set.
-- Deferred handoff is not historical replay: it preserves an existing
-  branch-local datadir and can pin at `A-1` without reconstructing block `A`.
-  Empty datadirs and explicit reconstruction use the stricter historical path
-  below. Non-mining operators therefore may deploy the activation release ahead
-  of `A`; they do not need to switch binaries at the boundary. Deferred nodes
-  cannot create block templates, so block producers must retain the
-  legacy/preparation-capable release through `A-1` (or upgrade only after
-  `A-1` is reached). If every producer upgrades sooner, production stalls below
-  the handoff instead of allowing unauthenticated authority to originate.
+- A public datadir without an imported pin remains sync-only. Below `A-1` it is
+  deferred; at `A-1` it cannot create block `A`, and it fails closed if asked to
+  cross the activation boundary. Producers therefore run the transition release
+  through `A-1`, let it fsync the exact predecessor, and only then start the
+  BLS-free release. A loaded tip at or above `A` must have both that matching pin
+  and block `A`'s strong complete-PQ-validation provenance.
 - An empty datadir, full reindex, `-reindex-chainstate`, or snapshot/background
-  validation starts in historical-replay quarantine. Blocks and headers still
-  synchronize normally, but mining, provider admission, MNAUTH, governance,
-  PQ share/certificate traffic, certificate restoration, and ChainLock
-  enforcement remain disabled. Quarantine ends only after this process fully
-  validates block `A`, at which point it fsyncs the actual active-chain `A-1`
-  predecessor. Background validation may unlock a snapshot only when both
-  chains have that same predecessor.
-- Before disconnecting the exact pinned `A-1` without a durable certificate,
-  the node fsyncs a null-hash historical-replay marker and disables
-  participation. The PoW reorganization then proceeds normally; the
-  replacement `A-1` is pinned only after this process fully validates its
-  block `A` successor. A crash before, during, or after the disconnect
-  therefore restarts quarantined instead of reviving the old pin. A first
-  durable certificate may name a side branch: its active-chain fork remains
-  protected while normal ChainLock enforcement switches to that verified
-  branch, after which the replacement predecessor is pinned. Independently of
-  activation state, no disconnect may cross a block on the active path to a
-  fsynced winner; blocks above the winner and a losing side branch remain
-  disconnectable.
+  validation starts in historical-replay quarantine. Blocks and headers may be
+  reconstructed for inspection, but mining, provider admission, MNAUTH,
+  governance, PQ share/certificate traffic, certificate restoration, and
+  ChainLock enforcement remain disabled. Validating block `A` in this mode does
+  not promote the process or create a pin. A later authenticated checkpoint or
+  snapshot release is required to make a fresh BLS-free reconstruction live.
+- The imported `A-1` pin is a local transition checkpoint. This BLS-free process
+  rejects any disconnection that would cross it, even before the first durable
+  PQ ChainLock. Operators must return to the transition release to validate a
+  replacement legacy branch and produce its handoff. Reorganizations strictly
+  above `A-1` remain subject to the ordinary PoW and PQ-finality rules.
 - A public all-sentinel profile remains sync-only and never advertises live
   authority. Regtest bypasses this deployment handoff so activation fixtures
   retain their existing behavior.

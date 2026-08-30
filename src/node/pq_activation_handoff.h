@@ -149,6 +149,7 @@ inline PQActivationHandoffResolution FinalizePQActivationHandoff(
 {
     if (runtime_state == PQActivationRuntimeState::BYPASS ||
         runtime_state == PQActivationRuntimeState::SYNC_ONLY ||
+        runtime_state == PQActivationRuntimeState::HISTORICAL_REPLAY ||
         runtime_state == PQActivationRuntimeState::FAILED ||
         runtime_state == PQActivationRuntimeState::PINNED) {
         return {runtime_state, std::nullopt};
@@ -164,29 +165,6 @@ inline PQActivationHandoffResolution FinalizePQActivationHandoff(
         tip.predecessor_fully_validated &&
         !tip.predecessor_hash.IsNull() &&
         tip.active_predecessor_hash == tip.predecessor_hash};
-    if (runtime_state == PQActivationRuntimeState::HISTORICAL_REPLAY) {
-        if (tip.height < params.nPQActivationHeight ||
-            !tip.activation_fully_validated) {
-            return {runtime_state, std::nullopt};
-        }
-        if (!usable_predecessor) {
-            return {
-                PQActivationRuntimeState::FAILED,
-                PQActivationHandoffRecord{
-                    PQActivationHandoffRecord::VERSION,
-                    PQActivationHandoffState::FAILED,
-                    params.nPQActivationHeight,
-                    {}}};
-        }
-        return {
-            PQActivationRuntimeState::PINNED,
-            PQActivationHandoffRecord{
-                PQActivationHandoffRecord::VERSION,
-                PQActivationHandoffState::PINNED,
-                params.nPQActivationHeight,
-                tip.predecessor_hash}};
-    }
-
     if (runtime_state != PQActivationRuntimeState::DEFERRED_HANDOFF) {
         return {PQActivationRuntimeState::FAILED, std::nullopt};
     }
@@ -196,9 +174,11 @@ inline PQActivationHandoffResolution FinalizePQActivationHandoff(
     if (tip.height < predecessor_height) {
         return {PQActivationRuntimeState::DEFERRED_HANDOFF, std::nullopt};
     }
-    // A legacy-capable release can establish the handoff at A-1. Above the
-    // boundary, strong block provenance is meaningful only together with the
-    // pin this activation release necessarily wrote before connecting A.
+    // This BLS-free release may consume, but never manufacture, the pin that
+    // the legacy-validating transition release wrote at A-1.
+    if (!persisted && tip.height == predecessor_height) {
+        return {PQActivationRuntimeState::DEFERRED_HANDOFF, std::nullopt};
+    }
     if (!usable_predecessor ||
         (tip.height >= params.nPQActivationHeight &&
          (!persisted || !tip.activation_fully_validated))) {
@@ -211,23 +191,6 @@ inline PQActivationHandoffResolution FinalizePQActivationHandoff(
                 persisted ? persisted->predecessor_hash : uint256{}}};
     }
     if (persisted &&
-        persisted->state == PQActivationHandoffState::PINNED &&
-        persisted->predecessor_hash != tip.predecessor_hash &&
-        tip.height == predecessor_height) {
-        // The block-tree pin can outrun the chainstate tip across a crash.
-        // Reaching a different fully validated A-1 is therefore an ordinary
-        // pre-finality PoW replacement, not evidence of corruption. Burn the
-        // stale hash before connecting A; only A's full validation may pin the
-        // replacement branch.
-        return {
-            PQActivationRuntimeState::HISTORICAL_REPLAY,
-            PQActivationHandoffRecord{
-                PQActivationHandoffRecord::VERSION,
-                PQActivationHandoffState::HISTORICAL_REPLAY,
-                params.nPQActivationHeight,
-                {}}};
-    }
-    if (persisted &&
         (persisted->state != PQActivationHandoffState::PINNED ||
          persisted->predecessor_hash != tip.predecessor_hash)) {
         return {
@@ -238,41 +201,13 @@ inline PQActivationHandoffResolution FinalizePQActivationHandoff(
                 params.nPQActivationHeight,
                 persisted->predecessor_hash}};
     }
-    if (persisted) {
-        return {PQActivationRuntimeState::PINNED, std::nullopt};
-    }
-    return {
-        PQActivationRuntimeState::PINNED,
-        PQActivationHandoffRecord{
-            PQActivationHandoffRecord::VERSION,
-            PQActivationHandoffState::PINNED,
-            params.nPQActivationHeight,
-            tip.predecessor_hash}};
+    return {PQActivationRuntimeState::PINNED, std::nullopt};
 }
 
-/**
- * Keep ordinary participation quarantined while allowing the one block that
- * completes a fully reconstructed activation handoff. The caller must bind
- * these facts to one stable active tip under cs_main.
- */
 inline bool IsPQActivationBlockProductionAllowed(
-    const Consensus::Params& params,
-    PQActivationRuntimeState runtime_state,
-    bool participation_allowed,
-    bool durable_replay_marker,
-    int32_t active_tip_height,
-    bool active_tip_fully_validated,
-    bool local_state_usable,
-    bool durable_finality_clear) noexcept
+    bool participation_allowed) noexcept
 {
-    if (participation_allowed) return true;
-    return Consensus::CheckPQActivationConfiguration(params) ==
-               Consensus::PQActivationResult::VALID &&
-           runtime_state == PQActivationRuntimeState::HISTORICAL_REPLAY &&
-           durable_replay_marker &&
-           active_tip_height == params.nPQActivationHeight - 1 &&
-           active_tip_fully_validated && local_state_usable &&
-           durable_finality_clear;
+    return participation_allowed;
 }
 
 inline bool DisconnectCrossesPQActivationHandoff(
@@ -288,32 +223,6 @@ inline bool DisconnectCrossesPQActivationHandoff(
            persisted->state == PQActivationHandoffState::PINNED &&
            disconnect_height == params.nPQActivationHeight - 1 &&
            disconnect_hash == persisted->predecessor_hash;
-}
-
-/**
- * Quarantine before replacing the locally pinned predecessor. The durable
- * null marker must be written before chainstate mutation; a replacement pin
- * is authorized only after this process fully validates the new block A.
- */
-inline PQActivationHandoffResolution ResolvePQActivationHandoffDisconnect(
-    const Consensus::Params& params,
-    PQActivationRuntimeState runtime_state,
-    const std::optional<PQActivationHandoffRecord>& persisted,
-    int32_t disconnect_height,
-    const uint256& disconnect_hash)
-{
-    if (!DisconnectCrossesPQActivationHandoff(
-            params, runtime_state, persisted, disconnect_height,
-            disconnect_hash)) {
-        return {runtime_state, std::nullopt};
-    }
-    return {
-        PQActivationRuntimeState::HISTORICAL_REPLAY,
-        PQActivationHandoffRecord{
-            PQActivationHandoffRecord::VERSION,
-            PQActivationHandoffState::HISTORICAL_REPLAY,
-            params.nPQActivationHeight,
-            {}}};
 }
 
 } // namespace node

@@ -16,11 +16,14 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <limits>
 #include <optional>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 #include <boost/test/unit_test.hpp>
@@ -358,6 +361,62 @@ public:
         INVALID,
     };
 
+    enum class NeededCertificateSource : uint8_t {
+        LIVE_FRONTIER = 0,
+        PRESEAL_REPLAY = 1,
+    };
+
+    class NeededCertificateState {
+        friend class CChainLocksHandlerTestAccess;
+        std::optional<CChainLocksHandler::NeededBTCCCertificate> current;
+    };
+
+    static bool PublishNeededCertificate(
+        NeededCertificateState& state,
+        NeededCertificateSource source,
+        const uint256& logical_id,
+        const uint256& source_token)
+    {
+        return CChainLocksHandler::PublishNeededBTCCCertificate(
+            state.current,
+            static_cast<CChainLocksHandler::NeededBTCCCertificateSource>(
+                source),
+            logical_id, source_token);
+    }
+
+    static bool EraseNeededCertificate(
+        NeededCertificateState& state,
+        NeededCertificateSource source,
+        const std::optional<uint256>& source_token = std::nullopt)
+    {
+        return CChainLocksHandler::EraseNeededBTCCCertificate(
+            state.current,
+            static_cast<CChainLocksHandler::NeededBTCCCertificateSource>(
+                source),
+            source_token);
+    }
+
+    static std::optional<uint256> SelectRequiredCertificate(
+        const std::optional<uint256>& pending,
+        const NeededCertificateState& state)
+    {
+        return CChainLocksHandler::SelectRequiredBTCCCertificate(
+            pending, state.current);
+    }
+
+    static void MarkNeededCertificateRequested(
+        NeededCertificateState& state)
+    {
+        BOOST_REQUIRE(state.current);
+        state.current->last_request = std::chrono::microseconds{1};
+    }
+
+    static bool NeededCertificateRequestTimerIsClear(
+        const NeededCertificateState& state)
+    {
+        return state.current && state.current->last_request.count() == 0;
+    }
+
     struct PaymentAuditGCPlan {
         PaymentAuditGCPhase phase{PaymentAuditGCPhase::NONE};
         pq::PaymentAuditStoreCheckpoint checkpoint;
@@ -501,12 +560,50 @@ public:
         return CChainLocksHandler::IsHistoricalArchiveIdentity(admission);
     }
 
+    static bool ReceiptArchiveSourceMatches(
+        uint8_t capability_source,
+        const uint256& logical_id,
+        const uint256& source_token,
+        std::optional<std::pair<uint256, uint256>> pending,
+        std::optional<std::tuple<uint8_t, uint256, uint256>> needed)
+    {
+        CChainLocksHandler::BTCCReceiptArchiveCapability capability;
+        capability.source = static_cast<
+            CChainLocksHandler::BTCCReceiptArchiveSource>(
+                capability_source);
+        capability.logical_id = logical_id;
+        capability.source_token = source_token;
+        std::optional<CChainLocksHandler::PendingBTCCReceiptDependency>
+            pending_dependency;
+        if (pending) {
+            pending_dependency =
+                CChainLocksHandler::PendingBTCCReceiptDependency{
+                    pending->first, pending->second};
+        }
+        std::optional<CChainLocksHandler::NeededBTCCCertificate>
+            needed_certificate;
+        if (needed) {
+            needed_certificate = CChainLocksHandler::NeededBTCCCertificate{
+                static_cast<CChainLocksHandler::NeededBTCCCertificateSource>(
+                    std::get<0>(*needed)),
+                std::get<1>(*needed), std::get<2>(*needed), {}};
+        }
+        return CChainLocksHandler::DoesBTCCReceiptArchiveSourceMatch(
+            capability, pending_dependency, needed_certificate);
+    }
+
     static int32_t CandidateFullValidationFloor(
         const pq::ChainLockCandidateContextRequest& request,
         int32_t activation_predecessor_height)
     {
         return CChainLocksHandler::CandidateFullValidationFloor(
             request, activation_predecessor_height);
+    }
+
+    static HistoricalIndexValidationMode CandidateTargetValidationMode(
+        pq::ChainLockCandidateAdmission admission)
+    {
+        return CChainLocksHandler::CandidateTargetValidationMode(admission);
     }
 
     static bool CandidateTargetValidationSufficient(
@@ -860,6 +957,24 @@ BOOST_AUTO_TEST_CASE(
     llmq::HistoricalIndexValidationCache narrowed_cache;
     LOCK(cs_main);
     chain.ClearStatus(superblock_height, BLOCK_GOVERNANCE_VALIDATED);
+    chain.ClearStatus(target_height, BLOCK_PQ_BTCC_INDEX_VALIDATED);
+    BOOST_CHECK(
+        llmq::test::CChainLocksHandlerTestAccess::
+            CandidateTargetValidationMode(
+                llmq::pq::ChainLockCandidateAdmission::
+                    TRUSTED_PERSISTENCE) ==
+        llmq::HistoricalIndexValidationMode::FULL_RECEIPT);
+    BOOST_CHECK(
+        llmq::test::CChainLocksHandlerTestAccess::
+            CandidateTargetValidationMode(
+                llmq::pq::ChainLockCandidateAdmission::LIVE) ==
+        llmq::HistoricalIndexValidationMode::FULL_FINALITY);
+    llmq::HistoricalIndexValidationCache persisted_cache;
+    BOOST_CHECK(persisted_cache.Validate(
+                    chain.At(target_height), first_winner_floor + 1,
+                    llmq::HistoricalIndexValidationMode::FULL_RECEIPT,
+                    /*provenance_revocation_revision=*/1) ==
+                llmq::PaymentAuditContextStatus::READY);
     BOOST_CHECK(full_cache.Validate(
                     chain.At(target_height), first_winner_floor + 1,
                     llmq::HistoricalIndexValidationMode::FULL_FINALITY,
@@ -1000,18 +1115,18 @@ BOOST_AUTO_TEST_CASE(historical_roster_authorization_routes_are_explicit)
         BOOST_CHECK_EQUAL(Access::HistoricalRosterAuthorization(
                               Admission::RECEIPT_ARCHIVE, NONE,
                               transition),
-                          reset ? EXACT_NETWORK : ATTESTED_HISTORY);
+                          EXACT_NETWORK);
         BOOST_CHECK_EQUAL(Access::HistoricalRosterAuthorization(
                               Admission::CATCHUP, CURRENT_CATCHUP,
                               transition),
-                          reset ? INVALID : ATTESTED_HISTORY);
+                          reset ? INVALID : EXACT_NETWORK);
         BOOST_CHECK_EQUAL(Access::HistoricalRosterAuthorization(
                               Admission::CATCHUP, RECOVERY, transition),
                           reset ? EXACT_NETWORK : INVALID);
         BOOST_CHECK_EQUAL(Access::HistoricalRosterAuthorization(
                               Admission::CATCHUP, PRESEAL_CATCHUP,
                               transition),
-                          reset ? EXACT_NETWORK : ATTESTED_HISTORY);
+                          EXACT_NETWORK);
         BOOST_CHECK_EQUAL(Access::HistoricalRosterAuthorization(
                               Admission::PRESEAL_RECEIPT,
                               PRESEAL_RECEIPT, transition),
@@ -1033,6 +1148,35 @@ BOOST_AUTO_TEST_CASE(historical_roster_authorization_routes_are_explicit)
     BOOST_CHECK(!Access::HistoricalArchiveIdentity(newer_receipt));
     BOOST_CHECK(Access::HistoricalArchiveIdentity(
         Admission::RECEIPT_ARCHIVE));
+}
+
+BOOST_AUTO_TEST_CASE(receipt_archive_source_capability_is_exact)
+{
+    using Access = llmq::test::CChainLocksHandlerTestAccess;
+    const uint256 logical_id{NonNullHash(199'600)};
+    const uint256 carrier_hash{NonNullHash(199'601)};
+    const uint256 source_token{NonNullHash(199'602)};
+
+    BOOST_CHECK(Access::ReceiptArchiveSourceMatches(
+        /*PENDING_CARRIER=*/0, logical_id, carrier_hash,
+        std::pair{logical_id, carrier_hash}, std::nullopt));
+    BOOST_CHECK(!Access::ReceiptArchiveSourceMatches(
+        /*PENDING_CARRIER=*/0, logical_id, carrier_hash,
+        std::pair{logical_id, NonNullHash(199'603)}, std::nullopt));
+    BOOST_CHECK(!Access::ReceiptArchiveSourceMatches(
+        /*PENDING_CARRIER=*/0, logical_id, carrier_hash,
+        std::pair{NonNullHash(199'604), carrier_hash}, std::nullopt));
+
+    BOOST_CHECK(Access::ReceiptArchiveSourceMatches(
+        /*LIVE_FRONTIER=*/1, logical_id, source_token, std::nullopt,
+        std::tuple{/*LIVE_FRONTIER=*/0, logical_id, source_token}));
+    BOOST_CHECK(!Access::ReceiptArchiveSourceMatches(
+        /*LIVE_FRONTIER=*/1, logical_id, source_token, std::nullopt,
+        std::tuple{/*PRESEAL_REPLAY=*/1, logical_id, source_token}));
+    BOOST_CHECK(!Access::ReceiptArchiveSourceMatches(
+        /*LIVE_FRONTIER=*/1, logical_id, source_token, std::nullopt,
+        std::tuple{/*LIVE_FRONTIER=*/0, logical_id,
+                   NonNullHash(199'605)}));
 }
 
 BOOST_AUTO_TEST_CASE(
@@ -3339,6 +3483,54 @@ BOOST_AUTO_TEST_CASE(durable_seal_closes_consensus_preseal_without_geth)
     BOOST_CHECK(!llmq::IsBTCCPresealCoveredByDurableWinner(
         /*marker_height=*/1100, /*winner_height=*/1115,
         /*winner_descends_marker=*/false));
+}
+
+BOOST_AUTO_TEST_CASE(btcc_certificate_need_is_source_bound_and_prioritized)
+{
+    using Access = llmq::test::CChainLocksHandlerTestAccess;
+    using Source = Access::NeededCertificateSource;
+    Access::NeededCertificateState state;
+    const uint256 live_id{NonNullHash(1)};
+    const uint256 newer_live_id{NonNullHash(2)};
+    const uint256 replay_id{NonNullHash(3)};
+    const uint256 pending_id{NonNullHash(4)};
+    const uint256 live_token{NonNullHash(10)};
+    const uint256 newer_live_token{NonNullHash(11)};
+    const uint256 replay_token{NonNullHash(12)};
+
+    BOOST_CHECK(Access::PublishNeededCertificate(
+        state, Source::LIVE_FRONTIER, live_id, live_token));
+    Access::MarkNeededCertificateRequested(state);
+    BOOST_CHECK(!Access::NeededCertificateRequestTimerIsClear(state));
+    BOOST_CHECK(!Access::PublishNeededCertificate(
+        state, Source::LIVE_FRONTIER, live_id, live_token));
+    BOOST_CHECK(!Access::NeededCertificateRequestTimerIsClear(state));
+
+    BOOST_CHECK(Access::PublishNeededCertificate(
+        state, Source::LIVE_FRONTIER, newer_live_id, newer_live_token));
+    BOOST_CHECK(Access::NeededCertificateRequestTimerIsClear(state));
+    BOOST_REQUIRE(Access::SelectRequiredCertificate(std::nullopt, state));
+    BOOST_CHECK(*Access::SelectRequiredCertificate(
+                    std::nullopt, state) == newer_live_id);
+
+    BOOST_CHECK(Access::PublishNeededCertificate(
+        state, Source::PRESEAL_REPLAY, replay_id, replay_token));
+    BOOST_CHECK(!Access::PublishNeededCertificate(
+        state, Source::LIVE_FRONTIER, live_id, live_token));
+    BOOST_REQUIRE(Access::SelectRequiredCertificate(
+        pending_id, state));
+    BOOST_CHECK(*Access::SelectRequiredCertificate(
+                    pending_id, state) == pending_id);
+    BOOST_CHECK(*Access::SelectRequiredCertificate(
+                    std::nullopt, state) == replay_id);
+
+    BOOST_CHECK(!Access::EraseNeededCertificate(
+        state, Source::LIVE_FRONTIER, live_token));
+    BOOST_CHECK(!Access::EraseNeededCertificate(
+        state, Source::PRESEAL_REPLAY, live_token));
+    BOOST_CHECK(Access::EraseNeededCertificate(
+        state, Source::PRESEAL_REPLAY, replay_token));
+    BOOST_CHECK(!Access::SelectRequiredCertificate(std::nullopt, state));
 }
 
 BOOST_AUTO_TEST_CASE(payment_audit_checkpoint_boundary_ignores_authorizer_refresh)
