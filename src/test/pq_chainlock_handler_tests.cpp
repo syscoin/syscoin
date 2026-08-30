@@ -37,6 +37,19 @@ uint256 NonNullHash(uint64_t value)
     return hash;
 }
 
+llmq::pq::RosterBeaconSeed SubjectBeacon(uint32_t epoch)
+{
+    llmq::pq::RosterBeaconSeed seed;
+    seed.state = llmq::pq::RosterBeaconState::READY;
+    seed.epoch = epoch;
+    seed.anchor_cursor = llmq::pq::BTCCursor{
+        10'000 + static_cast<int32_t>(epoch),
+        NonNullHash(100'000 + epoch), NonNullHash(200'000 + epoch)};
+    seed.anchor_btc_height = 800'000 + static_cast<int32_t>(epoch);
+    seed.future_btc_hash = NonNullHash(300'000 + epoch);
+    return seed;
+}
+
 llmq::pq::PaymentAuditReceipt NonNullPaymentAuditReceipt(uint64_t salt)
 {
     llmq::pq::PaymentAuditReceipt receipt;
@@ -51,6 +64,7 @@ llmq::pq::PaymentAuditReceipt NonNullPaymentAuditReceipt(uint64_t salt)
     receipt.commitment_hash = NonNullHash(40'000 + salt);
     receipt.result_hash = NonNullHash(50'000 + salt);
     receipt.next_probation_state_hash = NonNullHash(60'000 + salt);
+    receipt.subject_roster_beacon = SubjectBeacon(receipt.epoch);
     receipt.online_members[0] = 1;
     BOOST_REQUIRE(receipt.IsStructurallyValid());
     return receipt;
@@ -152,6 +166,16 @@ llmq::pq::FinalPaymentAudit MakePaymentAuditCandidate(
     seal.quorum_context_hash = NonNullHash(1'100 + salt);
     seal.payment_probation_state_hash =
         commitment.previous_probation_state_hash;
+    const uint32_t first_active_epoch{
+        epoch - static_cast<uint32_t>(ACTIVE_QUORUMS - 2)};
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        seal.roster_beacons.active.seeds[slot] = SubjectBeacon(
+            first_active_epoch + static_cast<uint32_t>(slot));
+    }
+    seal.roster_beacons.next.epoch =
+        first_active_epoch + ACTIVE_QUORUMS;
+    seal.roster_transition = RosterAuthorizationTransitionKind::KEEP;
+    seal.roster_authorization_state_hash = NonNullHash(1'200 + salt);
 
     audit.selected_quorum_mask = mask;
     audit.report_witnesses.reserve(PAYMENT_AUDIT_SIGNATURE_COUNT);
@@ -210,6 +234,22 @@ llmq::pq::FinalChainLock MakeCatchupChainLock(
     chainlock.statement.previous_chainlock_hash = previous_hash;
     chainlock.statement.quorum_context_hash = NonNullHash(20'000 + salt);
     chainlock.statement.payment_probation_state_hash = NonNullHash(30'000);
+    const auto schedule{
+        llmq::pq::MakeChainLockScheduleConfig(/*epoch_origin=*/0)};
+    BOOST_REQUIRE(schedule);
+    const auto active_epochs{
+        llmq::pq::ActiveEpochsAtHeight(*schedule, height)};
+    BOOST_REQUIRE(active_epochs);
+    for (std::size_t slot{0}; slot < llmq::pq::ACTIVE_QUORUMS; ++slot) {
+        chainlock.statement.roster_beacons.active.seeds[slot] =
+            SubjectBeacon((*active_epochs)[slot].epoch);
+    }
+    chainlock.statement.roster_beacons.next.epoch =
+        active_epochs->back().epoch + 1;
+    chainlock.statement.roster_transition =
+        llmq::pq::RosterAuthorizationTransitionKind::KEEP;
+    chainlock.statement.roster_authorization_state_hash =
+        NonNullHash(25'000 + salt);
     chainlock.selected_quorum_mask = 0b0111;
     chainlock.signatures.resize(llmq::pq::FINAL_SIGNATURE_COUNT);
     for (auto& authenticated : chainlock.signatures) {
@@ -884,7 +924,7 @@ BOOST_AUTO_TEST_CASE(
     historical_verification_capability_is_exact_source_bound)
 {
     using Access = llmq::test::CChainLocksHandlerTestAccess;
-    constexpr uint8_t PRESEAL_CATCHUP{2};
+    constexpr uint8_t PRESEAL_CATCHUP{3};
     const uint256 marker{NonNullHash(199'500)};
 
     BOOST_CHECK(Access::HistoricalCapabilityMatches(
@@ -1713,6 +1753,12 @@ BOOST_AUTO_TEST_CASE(
             source.audit.statement.commitment.seal_height +
             static_cast<int32_t>(PAYMENT_AUDIT_RECEIPT_DELAY)};
         const uint256 next_state_hash{NonNullHash(92'000 + index)};
+        const RosterBeaconSeed* subject_beacon{nullptr};
+        for (const auto& seed : source.audit.statement.seal_statement
+                                    .roster_beacons.active.seeds) {
+            if (seed.epoch == epoch) subject_beacon = &seed;
+        }
+        BOOST_REQUIRE(subject_beacon);
         const PaymentAuditReceipt direct{
             PAYMENT_AUDIT_RECEIPT_VERSION,
             1,
@@ -1727,6 +1773,7 @@ BOOST_AUTO_TEST_CASE(
             GetPaymentAuditResultHash(
                 genesis_hash, source.audit, *classification),
             next_state_hash,
+            *subject_beacon,
             classification->online_members};
         const PaymentAuditReceipt from_metadata{
             PAYMENT_AUDIT_RECEIPT_VERSION,
@@ -1740,6 +1787,7 @@ BOOST_AUTO_TEST_CASE(
             metadata.commitment_hash,
             metadata.result_hash,
             next_state_hash,
+            *subject_beacon,
             metadata.online_members};
         BOOST_REQUIRE(direct.IsStructurallyValid());
         BOOST_REQUIRE(from_metadata.IsStructurallyValid());
@@ -2477,6 +2525,7 @@ BOOST_AUTO_TEST_CASE(payment_audit_carrier_context_precedes_archive_lookup)
     receipt.commitment_hash = NonNullHash(503);
     receipt.result_hash = NonNullHash(504);
     receipt.next_probation_state_hash = NonNullHash(505);
+    receipt.subject_roster_beacon = SubjectBeacon(receipt.epoch);
     BOOST_REQUIRE(receipt.IsStructurallyValid());
 
     constexpr std::size_t PATH_CAPACITY{32};
@@ -2526,6 +2575,7 @@ BOOST_AUTO_TEST_CASE(deferred_payment_audit_receipt_is_exactly_carrier_bound)
     receipt.commitment_hash = NonNullHash(804);
     receipt.result_hash = NonNullHash(805);
     receipt.next_probation_state_hash = NonNullHash(806);
+    receipt.subject_roster_beacon = SubjectBeacon(receipt.epoch);
     BOOST_REQUIRE(receipt.IsStructurallyValid());
 
     CBlock block{PaymentAuditCarrierBlock(receipt)};

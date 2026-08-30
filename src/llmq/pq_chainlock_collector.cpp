@@ -103,7 +103,7 @@ std::unique_ptr<ChainLockCollector> ChainLockCollector::Create(
     ChainLockScheduleConfig schedule,
     ChainLockStatement statement,
     FrozenQuorumRostersPtr rosters,
-    uint8_t authorization_mask,
+    const RosterAuthorizationVerificationContext& authorization,
     ShareCollectionError* error)
 {
     SetError(error, ShareCollectionError::NONE);
@@ -115,7 +115,7 @@ std::unique_ptr<ChainLockCollector> ChainLockCollector::Create(
     ChainLockVerificationError verification_error{ChainLockVerificationError::NONE};
     auto context{PreparedChainLockContext::Create(
         genesis_hash, schedule, std::move(statement), std::move(rosters),
-        authorization_mask, &verification_error)};
+        authorization, &verification_error)};
     if (!context) {
         SetError(error, MapVerificationError(verification_error));
         return nullptr;

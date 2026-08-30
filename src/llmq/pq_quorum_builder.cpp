@@ -7,7 +7,6 @@
 #include <arith_uint256.h>
 #include <chain.h>
 #include <crypto/sha256.h>
-#include <hash.h>
 
 #include <algorithm>
 #include <map>
@@ -62,11 +61,6 @@ struct OperatorStateLookup {
 void SetError(QuorumBuildError* error, QuorumBuildError value)
 {
     if (error != nullptr) *error = value;
-}
-
-void WriteDomain(CHashWriter& writer, std::string_view domain)
-{
-    writer.write(AsBytes(Span{domain.data(), domain.size()}));
 }
 
 void SetBit(QuorumBitmap& bitmap, std::size_t member)
@@ -202,22 +196,12 @@ bool QuorumBuildConfig::IsValid() const noexcept
            *epoch_zero_cutoff <= *epoch_zero_snapshot;
 }
 
-std::optional<uint256> GetPQQuorumModifier(const uint256& genesis_hash,
-                                           uint32_t epoch,
-                                           const uint256& base_hash)
-{
-    if (genesis_hash.IsNull() || base_hash.IsNull()) return std::nullopt;
-    CHashWriter writer{SER_GETHASH, 0};
-    WriteDomain(writer, PQ_QUORUM_MODIFIER_DOMAIN);
-    writer << genesis_hash << epoch << base_hash;
-    return writer.GetHash();
-}
-
 std::unique_ptr<FrozenQuorumRoster> BuildFrozenQuorumRoster(
     const uint256& genesis_hash,
     const QuorumBuildConfig& config,
     uint32_t epoch,
     const uint256& base_hash,
+    const RosterBeaconSeed& beacon_seed,
     const CDeterministicMNList& snapshot,
     std::span<const OperatorKeyState> operator_key_states,
     QuorumBuildError* error)
@@ -237,9 +221,13 @@ std::unique_ptr<FrozenQuorumRoster> BuildFrozenQuorumRoster(
         SetError(error, QuorumBuildError::SNAPSHOT_MISMATCH);
         return nullptr;
     }
-    const auto modifier{GetPQQuorumModifier(genesis_hash, epoch, base_hash)};
-    if (!modifier) {
-        SetError(error, QuorumBuildError::INVALID_ARGUMENT);
+    const auto modifier{GetPQQuorumModifier(
+        genesis_hash, epoch, snapshot.GetHeight(), snapshot.GetBlockHash(),
+        beacon_seed)};
+    const auto beacon_hash{
+        GetRosterBeaconCommitmentHash(genesis_hash, beacon_seed)};
+    if (!modifier || !beacon_hash) {
+        SetError(error, QuorumBuildError::INVALID_ROSTER_BEACON);
         return nullptr;
     }
 
@@ -311,6 +299,7 @@ std::unique_ptr<FrozenQuorumRoster> BuildFrozenQuorumRoster(
     roster->descriptor.base_hash = base_hash;
     roster->descriptor.snapshot_height = snapshot.GetHeight();
     roster->descriptor.snapshot_hash = snapshot.GetBlockHash();
+    roster->descriptor.roster_beacon_hash = *beacon_hash;
 
     std::set<uint256> selected_members;
     std::map<uint256, std::pair<uint256, uint32_t>> tree_owners;
@@ -352,13 +341,15 @@ std::unique_ptr<FrozenQuorumRoster> BuildFrozenQuorumRoster(
 namespace {
 
 // An exact base hash commits the branch through its snapshot. Matching both
-// descriptor heights and hashes lets rotations reuse already verified bytes
-// without trusting a roster built for another fork or cutoff.
+// descriptor identities and the seed commitment lets rotations reuse already
+// verified bytes without trusting a roster built for another fork, cutoff, or
+// delayed-Bitcoin observation.
 const FrozenQuorumRoster* FindReusableRoster(
     const uint256& genesis_hash,
     const EpochIdentity& identity,
     const CBlockIndex& base_index,
     const CBlockIndex& snapshot_index,
+    const uint256& beacon_hash,
     std::span<const VerifiedRosterSetPtr> reusable_sets)
 {
     for (const auto& roster_set : reusable_sets) {
@@ -369,7 +360,8 @@ const FrozenQuorumRoster* FindReusableRoster(
                 descriptor.base_height == identity.base_height &&
                 descriptor.base_hash == base_index.GetBlockHash() &&
                 descriptor.snapshot_height == snapshot_index.nHeight &&
-                descriptor.snapshot_hash == snapshot_index.GetBlockHash()) {
+                descriptor.snapshot_hash == snapshot_index.GetBlockHash() &&
+                descriptor.roster_beacon_hash == beacon_hash) {
                 return &roster;
             }
         }
@@ -382,6 +374,7 @@ std::unique_ptr<FrozenQuorumRosters> BuildActiveFrozenQuorumRostersImpl(
     const QuorumBuildConfig& config,
     int32_t target_height,
     const CBlockIndex& branch_tip,
+    const ActiveRosterBeaconBundle& beacon_bundle,
     const QuorumSnapshotLookup& snapshot_lookup,
     std::span<const VerifiedRosterSetPtr> reusable_sets,
     QuorumBuildError* error)
@@ -409,6 +402,10 @@ std::unique_ptr<FrozenQuorumRosters> BuildActiveFrozenQuorumRostersImpl(
         SetError(error, QuorumBuildError::INVALID_TARGET_HEIGHT);
         return nullptr;
     }
+    if (!beacon_bundle.IsForNewestEpoch(active_epochs->back().epoch)) {
+        SetError(error, QuorumBuildError::INVALID_ROSTER_BEACON);
+        return nullptr;
+    }
 
     auto rosters{std::make_unique<FrozenQuorumRosters>()};
     std::map<uint256, std::pair<uint256, uint32_t>> tree_owners;
@@ -428,9 +425,15 @@ std::unique_ptr<FrozenQuorumRosters> BuildActiveFrozenQuorumRostersImpl(
             SetError(error, QuorumBuildError::MISSING_BRANCH_ANCESTOR);
             return nullptr;
         }
+        const auto beacon_hash{GetRosterBeaconCommitmentHash(
+            genesis_hash, beacon_bundle.seeds[slot])};
+        if (!beacon_hash) {
+            SetError(error, QuorumBuildError::INVALID_ROSTER_BEACON);
+            return nullptr;
+        }
         const FrozenQuorumRoster* reusable{FindReusableRoster(
             genesis_hash, identity, *base_index, *snapshot_index,
-            reusable_sets)};
+            *beacon_hash, reusable_sets)};
         if (reusable != nullptr) {
             if (!AddActiveChildRootsToSet(*reusable, tree_owners)) {
                 SetError(error, QuorumBuildError::DUPLICATE_CHILD_KEY);
@@ -462,10 +465,12 @@ std::unique_ptr<FrozenQuorumRosters> BuildActiveFrozenQuorumRostersImpl(
         }
         auto roster{BuildFrozenQuorumRoster(
             genesis_hash, config, identity.epoch, base_index->GetBlockHash(),
+            beacon_bundle.seeds[slot],
             snapshot_state->deterministic_mns,
             std::span<const OperatorKeyState>{
                 snapshot_state->operator_key_states->data(),
-                snapshot_state->operator_key_states->size()}, error)};
+                snapshot_state->operator_key_states->size()},
+            error)};
         if (!roster) return nullptr;
         if (!AddActiveChildRootsToSet(*roster, tree_owners)) {
             SetError(error, QuorumBuildError::DUPLICATE_CHILD_KEY);
@@ -483,11 +488,13 @@ FrozenQuorumRostersPtr BuildActiveFrozenQuorumRosters(
     const QuorumBuildConfig& config,
     int32_t target_height,
     const CBlockIndex& branch_tip,
+    const ActiveRosterBeaconBundle& beacon_bundle,
     const QuorumSnapshotLookup& snapshot_lookup,
     QuorumBuildError* error)
 {
     auto rosters{BuildActiveFrozenQuorumRostersImpl(
-        genesis_hash, config, target_height, branch_tip, snapshot_lookup,
+        genesis_hash, config, target_height, branch_tip, beacon_bundle,
+        snapshot_lookup,
         /*reusable_sets=*/{}, error)};
     if (!rosters) return nullptr;
     return FrozenQuorumRostersPtr{std::move(rosters)};
@@ -547,23 +554,48 @@ FrozenQuorumRosterCache::Create(
 FrozenQuorumRostersPtr FrozenQuorumRosterCache::GetActive(
     int32_t target_height,
     const CBlockIndex& branch_tip,
+    const ActiveRosterBeaconBundle& beacon_bundle,
     QuorumBuildError* error) const
 {
     const auto roster_set{GetVerifiedActive(
-        target_height, branch_tip, error)};
+        target_height, branch_tip, beacon_bundle, error)};
     return roster_set ? roster_set->RostersPtr() : nullptr;
 }
 
 VerifiedRosterSetPtr FrozenQuorumRosterCache::GetVerifiedActive(
     int32_t target_height,
     const CBlockIndex& branch_tip,
+    const ActiveRosterBeaconBundle& beacon_bundle,
+    QuorumBuildError* error) const
+{
+    return GetVerifiedActiveImpl(
+        target_height, branch_tip, beacon_bundle,
+        /*publish=*/true, error);
+}
+
+VerifiedRosterSetPtr FrozenQuorumRosterCache::GetVerifiedActiveNoPublish(
+    int32_t target_height,
+    const CBlockIndex& branch_tip,
+    const ActiveRosterBeaconBundle& beacon_bundle,
+    QuorumBuildError* error) const
+{
+    return GetVerifiedActiveImpl(
+        target_height, branch_tip, beacon_bundle,
+        /*publish=*/false, error);
+}
+
+VerifiedRosterSetPtr FrozenQuorumRosterCache::GetVerifiedActiveImpl(
+    int32_t target_height,
+    const CBlockIndex& branch_tip,
+    const ActiveRosterBeaconBundle& beacon_bundle,
+    bool publish,
     QuorumBuildError* error) const
 {
     SetError(error, QuorumBuildError::NONE);
     if (!m_cache_results) {
         auto built{BuildActiveFrozenQuorumRostersImpl(
             m_genesis_hash, m_config, target_height, branch_tip,
-            m_snapshot_lookup, /*reusable_sets=*/{}, error)};
+            beacon_bundle, m_snapshot_lookup, /*reusable_sets=*/{}, error)};
         if (!built) return nullptr;
         auto roster_set{VerifiedRosterSet::MintCanonicalBuild(
             std::move(built), *this)};
@@ -592,6 +624,13 @@ VerifiedRosterSetPtr FrozenQuorumRosterCache::GetVerifiedActive(
         return nullptr;
     }
     const auto& newest{active_epochs->back()};
+    const auto beacon_bundle_hash{GetActiveRosterBeaconBundleHash(
+        m_genesis_hash, beacon_bundle)};
+    if (!beacon_bundle_hash ||
+        !beacon_bundle.IsForNewestEpoch(newest.epoch)) {
+        SetError(error, QuorumBuildError::INVALID_ROSTER_BEACON);
+        return nullptr;
+    }
     const CBlockIndex* newest_base{
         target->GetAncestor(newest.base_height)};
     if (newest_base == nullptr) {
@@ -601,7 +640,9 @@ VerifiedRosterSetPtr FrozenQuorumRosterCache::GetVerifiedActive(
     // A block hash commits its complete ancestry. Every other active base and
     // snapshot is an ancestor of this newest base, so this key distinguishes
     // forks exactly while allowing descendants after the base to share state.
-    const Key key{newest.epoch, newest_base->GetBlockHash()};
+    // The bundle hash prevents a hit across different delayed-Bitcoin seeds.
+    const Key key{newest.epoch, newest_base->GetBlockHash(),
+                  *beacon_bundle_hash};
 
     std::array<VerifiedRosterSetPtr,
                FROZEN_QUORUM_ROSTER_CACHE_CAPACITY> reusable_sets;
@@ -624,7 +665,7 @@ VerifiedRosterSetPtr FrozenQuorumRosterCache::GetVerifiedActive(
 
     auto built{BuildActiveFrozenQuorumRostersImpl(
         m_genesis_hash, m_config, target_height, branch_tip,
-        m_snapshot_lookup, reusable_sets, error)};
+        beacon_bundle, m_snapshot_lookup, reusable_sets, error)};
     if (!built) return nullptr;
     auto verified{VerifiedRosterSet::MintCanonicalBuild(
         std::move(built), *this)};
@@ -632,6 +673,7 @@ VerifiedRosterSetPtr FrozenQuorumRosterCache::GetVerifiedActive(
         SetError(error, QuorumBuildError::INVALID_FROZEN_ROSTER);
         return nullptr;
     }
+    if (!publish) return verified;
 
     VerifiedRosterSetPtr displaced;
     VerifiedRosterSetPtr result;

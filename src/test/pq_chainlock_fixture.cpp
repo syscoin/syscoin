@@ -46,7 +46,6 @@ const std::function<std::string(const char*)> G_TRANSLATION_FUN = nullptr;
 namespace {
 
 constexpr std::size_t MAX_TEST_WORKERS{8};
-constexpr uint8_t AUTHORIZATION_MASK{0b0111};
 constexpr std::size_t MAX_FIXTURE_EPOCHS{5};
 constexpr std::size_t CHILD_KEY_COUNT{
     MAX_FIXTURE_EPOCHS * QUORUM_MIN_VALID};
@@ -80,6 +79,80 @@ uint256 NonNullHash(uint64_t value, uint64_t salt = 0)
     }
     if (hash.IsNull()) hash.begin()[0] = 1;
     return hash;
+}
+
+RosterBeaconSeed FixtureReadySeed(uint32_t epoch)
+{
+    RosterBeaconSeed seed;
+    seed.state = RosterBeaconState::READY;
+    seed.epoch = epoch;
+    seed.anchor_cursor = BTCCursor{
+        10'000 + static_cast<int32_t>(epoch),
+        NonNullHash(100'000 + epoch), NonNullHash(200'000 + epoch)};
+    seed.anchor_btc_height = 800'000 + static_cast<int32_t>(epoch);
+    seed.future_btc_hash = NonNullHash(300'000 + epoch);
+    return seed;
+}
+
+ActiveRosterBeaconBundle FixtureReadyBundle(
+    const ChainLockScheduleConfig& schedule, int32_t height)
+{
+    ActiveRosterBeaconBundle bundle;
+    const auto active{ActiveEpochsAtHeight(schedule, height)};
+    if (!active) return bundle;
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        bundle.seeds[slot] = FixtureReadySeed((*active)[slot].epoch);
+    }
+    return bundle;
+}
+
+RosterAuthorizationVerificationContext SealLiveFixtureAuthorization(
+    const uint256& genesis_hash,
+    ChainLockStatement& statement,
+    const ActiveRosterBeaconBundle& bundle)
+{
+    statement.roster_beacons.active = bundle;
+    statement.roster_beacons.next.epoch = bundle.seeds.back().epoch + 1;
+    statement.roster_transition = RosterAuthorizationTransitionKind::KEEP;
+
+    RosterAuthorizationVerificationContext authorization;
+    authorization.predecessor_height = statement.previous_chainlock_height;
+    authorization.predecessor_block_hash = statement.previous_chainlock_hash;
+    authorization.previous = RosterAuthorizationPriorState{
+        NonNullHash(static_cast<uint64_t>(statement.previous_chainlock_height + 2),
+                    0x41555448),
+        statement.roster_beacons};
+    authorization.normal_input =
+        test::MakeSyntheticNormalRosterAuthorizationInput(
+            statement, *authorization.previous);
+    RosterAuthorizationTransition transition;
+    transition.kind = statement.roster_transition;
+    transition.target_height = statement.height;
+    transition.target_block_hash = statement.block_hash;
+    transition.predecessor_height = statement.previous_chainlock_height;
+    transition.predecessor_block_hash = statement.previous_chainlock_hash;
+    transition.previous = authorization.previous;
+    transition.new_window = statement.roster_beacons;
+    const auto state_hash{GetRosterAuthorizationStateHash(
+        genesis_hash, transition)};
+    if (state_hash) statement.roster_authorization_state_hash = *state_hash;
+    return authorization;
+}
+
+RosterAuthorizationVerificationContext FixtureAuthorizationFor(
+    const ChainLockStatement& statement)
+{
+    RosterAuthorizationVerificationContext authorization;
+    authorization.predecessor_height = statement.previous_chainlock_height;
+    authorization.predecessor_block_hash = statement.previous_chainlock_hash;
+    authorization.previous = RosterAuthorizationPriorState{
+        NonNullHash(static_cast<uint64_t>(statement.previous_chainlock_height + 2),
+                    0x41555448),
+        statement.roster_beacons};
+    authorization.normal_input =
+        test::MakeSyntheticNormalRosterAuthorizationInput(
+            statement, *authorization.previous);
+    return authorization;
 }
 
 CKeyID KeyId(uint64_t value)
@@ -517,6 +590,8 @@ FrozenQuorumRostersPtr BuildPaymentAuditRosters(
     const auto rosters{BuildActiveFrozenQuorumRosters(
         fixture.args.genesis_hash, fixture.args.build_config,
         target_height, fixture.chain.Tip(),
+        FixtureReadyBundle(fixture.args.build_config.schedule,
+                           target_height),
         [&](const CBlockIndex& index) {
             return LookupPaymentAuditSnapshot(fixture, index);
         },
@@ -566,10 +641,13 @@ std::optional<ChainLockStatement> MakeChainLockStatement(
     statement.quorum_context_hash = GetQuorumContextHash(
         fixture.args.genesis_hash, height, block_hash,
         Descriptors(rosters));
+    const auto authorization{SealLiveFixtureAuthorization(
+        fixture.args.genesis_hash, statement,
+        FixtureReadyBundle(fixture.args.build_config.schedule, height))};
     if (!statement.IsStructurallyValid() ||
         !ValidateFrozenQuorumContext(
             fixture.args.genesis_hash, statement, rosters,
-            AUTHORIZATION_MASK)) {
+            authorization)) {
         return std::nullopt;
     }
     return statement;
@@ -663,10 +741,11 @@ std::optional<FinalChainLock> SignAndVerifyChainLock(
     }
 
     ShareCollectionError collection_error{ShareCollectionError::NONE};
+    const auto authorization{FixtureAuthorizationFor(statement)};
     auto collector{ChainLockCollector::Create(
         fixture.args.genesis_hash, fixture.args.build_config.schedule,
         statement, rosters,
-        AUTHORIZATION_MASK, &collection_error)};
+        authorization, &collection_error)};
     if (!collector) return std::nullopt;
     for (const auto& share : shares) {
         if (collector->AddVerifiedShare(share, &collection_error) !=
@@ -684,7 +763,7 @@ std::optional<FinalChainLock> SignAndVerifyChainLock(
     if (!verifier.Verify(fixture.args.genesis_hash,
                          fixture.args.build_config.schedule,
                          final, *rosters,
-                         AUTHORIZATION_MASK,
+                         authorization,
                          &verification_error) ||
         verification_error != ChainLockVerificationError::NONE) {
         return std::nullopt;
@@ -744,12 +823,14 @@ std::optional<FinalPaymentAudit> SignAndVerifyPaymentAudit(
     }
 
     ShareCollectionError collection_error{ShareCollectionError::NONE};
+    const auto authorization{
+        FixtureAuthorizationFor(statement.seal_statement)};
     auto collector{PaymentAuditCollector::Create(
         fixture.args.genesis_hash,
         PaymentAuditScheduleConfig{
             fixture.args.build_config.schedule, fixture.args.btcc_config},
         statement, seal_chainlock, rosters,
-        AUTHORIZATION_MASK,
+        authorization,
         &collection_error)};
     if (!collector) return std::nullopt;
     for (const auto& share : shares) {
@@ -768,7 +849,7 @@ std::optional<FinalPaymentAudit> SignAndVerifyPaymentAudit(
         fixture.args.genesis_hash,
         PaymentAuditScheduleConfig{fixture.args.build_config.schedule,
                                    fixture.args.btcc_config},
-        final, *rosters, AUTHORIZATION_MASK,
+        final, *rosters, authorization,
         &verification_error)};
     ChainLockVerifier verifier{WorkerCount()};
     if (!prepared ||
@@ -909,6 +990,8 @@ bool BuildSnapshotsAndRosters(FullDimensionFixture& fixture)
     fixture.rosters = BuildActiveFrozenQuorumRosters(
         fixture.args.genesis_hash, fixture.args.build_config,
         fixture.args.target_height, fixture.chain.Tip(),
+        FixtureReadyBundle(fixture.args.build_config.schedule,
+                           fixture.args.target_height),
         [&](const CBlockIndex& snapshot_index)
             -> std::optional<QuorumSnapshotState> {
             for (const auto& snapshot : fixture.snapshot_fixture.snapshots) {
@@ -960,10 +1043,14 @@ bool BuildSnapshotsAndRosters(FullDimensionFixture& fixture)
     fixture.statement.quorum_context_hash = GetQuorumContextHash(
         fixture.args.genesis_hash, fixture.statement.height,
         fixture.statement.block_hash, descriptors);
+    const auto authorization{SealLiveFixtureAuthorization(
+        fixture.args.genesis_hash, fixture.statement,
+        FixtureReadyBundle(fixture.args.build_config.schedule,
+                           fixture.statement.height))};
     return fixture.statement.IsStructurallyValid() &&
            ValidateFrozenQuorumContext(
                fixture.args.genesis_hash, fixture.statement,
-               *fixture.rosters, AUTHORIZATION_MASK);
+               *fixture.rosters, authorization);
 }
 
 bool BuildAndSignShares(FullDimensionFixture& fixture)
@@ -1593,6 +1680,13 @@ std::optional<PaymentAuditArtifacts> BuildPaymentAuditArtifacts(
     receipt.result_hash = result_hash;
     receipt.next_probation_state_hash =
         transition->undo.applied_state_hash;
+    const RosterBeaconSeed* subject_beacon{nullptr};
+    for (const auto& seed : seal_chainlock->statement.roster_beacons.active
+                                .seeds) {
+        if (seed.epoch == receipt.epoch) subject_beacon = &seed;
+    }
+    if (!subject_beacon) return std::nullopt;
+    receipt.subject_roster_beacon = *subject_beacon;
     receipt.online_members = classification->online_members;
     const auto receipt_state{ApplyPaymentAuditReceipt(
         fixture.args.genesis_hash, PaymentAuditReceiptState{}, receipt)};
@@ -2244,10 +2338,12 @@ int Generate(const GeneratorArguments& args)
     }
 
     ShareCollectionError collection_error{ShareCollectionError::NONE};
+    const auto authorization{
+        FixtureAuthorizationFor(fixture->statement)};
     auto collector{ChainLockCollector::Create(
         args.genesis_hash, args.build_config.schedule,
         fixture->statement, fixture->rosters,
-        AUTHORIZATION_MASK,
+        authorization,
         &collection_error)};
     if (!collector) {
         throw std::runtime_error("unable to create production collector");
@@ -2272,7 +2368,7 @@ int Generate(const GeneratorArguments& args)
     ChainLockVerifier verifier{WorkerCount()};
     if (!verifier.Verify(args.genesis_hash, args.build_config.schedule,
                          final, *fixture->rosters,
-                         AUTHORIZATION_MASK,
+                         authorization,
                          &verification_error) ||
         verification_error != ChainLockVerificationError::NONE) {
         throw std::runtime_error(

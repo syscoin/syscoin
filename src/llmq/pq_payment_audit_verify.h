@@ -36,7 +36,7 @@ public:
            PaymentAuditStatement statement,
            const FinalChainLock& seal_chainlock,
            FrozenQuorumRostersPtr rosters,
-           uint8_t authorization_mask,
+           const RosterAuthorizationVerificationContext& authorization,
            PaymentAuditVerificationError* error = nullptr);
 
     [[nodiscard]] static std::shared_ptr<const PreparedPaymentAuditContext>
@@ -44,7 +44,7 @@ public:
            PaymentAuditStatement statement,
            const FinalChainLock& seal_chainlock,
            VerifiedRosterSetPtr roster_set,
-           uint8_t authorization_mask,
+           const RosterAuthorizationVerificationContext& authorization,
            PaymentAuditVerificationError* error = nullptr);
 
     [[nodiscard]] const uint256& GenesisHash() const noexcept
@@ -117,7 +117,7 @@ PreparePaymentAuditResponseVerification(
     const PaymentAuditResponse& response,
     const PaymentAuditHave& expected,
     const FrozenQuorumRosters& response_rosters,
-    uint8_t authorization_mask,
+    const RosterAuthorizationVerificationContext& authorization,
     PaymentAuditVerificationError* error = nullptr);
 
 /** Prepare one response against its exact prevalidated ordinary ChainLock. */
@@ -148,7 +148,7 @@ PreparePaymentAuditResponseVerification(
     const PaymentAuditScheduleConfig& schedule,
     const PaymentAuditStatement& statement,
     const FrozenQuorumRosters& rosters,
-    uint8_t authorization_mask,
+    const RosterAuthorizationVerificationContext& authorization,
     PaymentAuditVerificationError* error = nullptr);
 
 /** Live-only gate: B must already have the exact ordinary ChainLock witness. */
@@ -171,7 +171,7 @@ PreparePaymentAuditShareVerification(
     const PaymentAuditScheduleConfig& schedule,
     const PaymentAuditShare& share,
     const FrozenQuorumRosters& rosters,
-    uint8_t authorization_mask,
+    const RosterAuthorizationVerificationContext& authorization,
     PaymentAuditVerificationError* error = nullptr);
 
 /** Prepare one share against an already validated exact live audit context. */
@@ -187,7 +187,7 @@ PrepareFinalPaymentAuditVerification(
     const PaymentAuditScheduleConfig& schedule,
     const FinalPaymentAudit& audit,
     const FrozenQuorumRosters& rosters,
-    uint8_t authorization_mask,
+    const RosterAuthorizationVerificationContext& authorization,
     PaymentAuditVerificationError* error = nullptr);
 
 /** Prepare a final audit against an intrinsically verified seal roster set. */
@@ -196,7 +196,7 @@ PrepareFinalPaymentAuditVerification(
     const PaymentAuditScheduleConfig& schedule,
     const FinalPaymentAudit& audit,
     VerifiedRosterSetPtr roster_set,
-    uint8_t authorization_mask,
+    const RosterAuthorizationVerificationContext& authorization,
     PaymentAuditVerificationError* error = nullptr);
 
 [[nodiscard]] bool VerifyFinalPaymentAudit(
@@ -204,7 +204,7 @@ PrepareFinalPaymentAuditVerification(
     const PaymentAuditScheduleConfig& schedule,
     const FinalPaymentAudit& audit,
     const FrozenQuorumRosters& rosters,
-    uint8_t authorization_mask,
+    const RosterAuthorizationVerificationContext& authorization,
     ScheduledWOTSCheckQueue* queue = nullptr,
     PaymentAuditVerificationError* error = nullptr);
 

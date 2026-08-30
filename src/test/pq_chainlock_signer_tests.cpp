@@ -20,8 +20,6 @@ using namespace llmq::pq;
 
 namespace {
 
-constexpr uint8_t AUTHORIZATION_MASK{0b0111};
-
 uint256 NonNullHash(uint64_t value)
 {
     uint256 hash;
@@ -30,6 +28,25 @@ uint256 NonNullHash(uint64_t value)
     }
     if (hash.IsNull()) hash.begin()[0] = 1;
     return hash;
+}
+
+RosterBeaconWindow RecoveryWindow(uint32_t first_epoch)
+{
+    RosterBeaconWindow window;
+    RosterBeaconSeed shared;
+    shared.anchor_kind = RosterBeaconAnchorKind::RECOVERY;
+    shared.state = RosterBeaconState::READY;
+    shared.anchor_cursor = BTCCursor{
+        10'000, NonNullHash(100'000), NonNullHash(200'000)};
+    shared.anchor_btc_height = 800'000;
+    shared.future_btc_hash = NonNullHash(300'000);
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        auto seed{shared};
+        seed.epoch = first_epoch + static_cast<uint32_t>(slot);
+        window.active.seeds[slot] = std::move(seed);
+    }
+    window.next.epoch = first_epoch + ACTIVE_QUORUMS;
+    return window;
 }
 
 void SetBit(QuorumBitmap& bitmap, std::size_t member)
@@ -54,6 +71,7 @@ struct SignerFixture {
     ChainLockScheduleConfig schedule{.epoch_origin = 1440};
     ChainLockStatement statement;
     std::array<FrozenQuorumRoster, ACTIVE_QUORUMS> rosters;
+    RosterAuthorizationVerificationContext authorization;
     std::optional<scheduled_wots::SecretKey> child_secret_key;
     ChildKeyProof child_key_proof;
 };
@@ -67,6 +85,26 @@ std::unique_ptr<SignerFixture> MakeFixture()
     fixture->statement.previous_chainlock_height = 2300;
     fixture->statement.previous_chainlock_hash = NonNullHash(8099);
     fixture->statement.payment_probation_state_hash = NonNullHash(8101);
+    fixture->statement.roster_beacons = RecoveryWindow(0);
+    fixture->statement.roster_transition =
+        RosterAuthorizationTransitionKind::INITIALIZE;
+    fixture->authorization.admission =
+        RosterAuthorizationAdmission::INITIALIZE;
+    fixture->authorization.predecessor_height =
+        fixture->statement.previous_chainlock_height;
+    fixture->authorization.predecessor_block_hash =
+        fixture->statement.previous_chainlock_hash;
+    RosterAuthorizationTransition transition;
+    transition.kind = fixture->statement.roster_transition;
+    transition.target_height = fixture->statement.height;
+    transition.target_block_hash = fixture->statement.block_hash;
+    transition.predecessor_height =
+        fixture->statement.previous_chainlock_height;
+    transition.predecessor_block_hash =
+        fixture->statement.previous_chainlock_hash;
+    transition.new_window = fixture->statement.roster_beacons;
+    fixture->statement.roster_authorization_state_hash =
+        *GetRosterAuthorizationStateHash(fixture->genesis_hash, transition);
 
     scheduled_wots::KeyGenerationSeed keygen_seed{};
     for (std::size_t i{0}; i < keygen_seed.size(); ++i) {
@@ -86,6 +124,9 @@ std::unique_ptr<SignerFixture> MakeFixture()
         descriptor.base_hash = NonNullHash(8200 + slot);
         descriptor.snapshot_height = descriptor.base_height - 288;
         descriptor.snapshot_hash = NonNullHash(8300 + slot);
+        descriptor.roster_beacon_hash = *GetRosterBeaconCommitmentHash(
+            fixture->genesis_hash,
+            fixture->statement.roster_beacons.active.seeds[slot]);
 
         for (std::size_t member{0}; member < QUORUM_SIZE; ++member) {
             auto& roster_member{roster.members[member]};
@@ -128,11 +169,23 @@ std::unique_ptr<SignerFixture> MakeFixture()
 PreparedChainLockContextPtr PrepareContext(const SignerFixture& fixture,
                                            ChainLockStatement statement)
 {
+    RosterAuthorizationTransition transition;
+    transition.kind = statement.roster_transition;
+    transition.target_height = statement.height;
+    transition.target_block_hash = statement.block_hash;
+    transition.predecessor_height = statement.previous_chainlock_height;
+    transition.predecessor_block_hash = statement.previous_chainlock_hash;
+    transition.previous = fixture.authorization.previous;
+    transition.new_window = statement.roster_beacons;
+    const auto authorization_hash{
+        GetRosterAuthorizationStateHash(fixture.genesis_hash, transition)};
+    BOOST_REQUIRE(authorization_hash);
+    statement.roster_authorization_state_hash = *authorization_hash;
     ChainLockVerificationError error{ChainLockVerificationError::NONE};
     auto context{PreparedChainLockContext::Create(
         fixture.genesis_hash, fixture.schedule, std::move(statement),
         std::make_shared<const FrozenQuorumRosters>(fixture.rosters),
-        AUTHORIZATION_MASK, &error)};
+        fixture.authorization, &error)};
     BOOST_REQUIRE(context);
     BOOST_CHECK(error == ChainLockVerificationError::NONE);
     return context;
@@ -167,7 +220,7 @@ BOOST_AUTO_TEST_CASE(signs_after_durable_reservation_and_replays_exact_share)
     BOOST_CHECK(VerifyChainLockShare(
         fixture->genesis_hash, fixture->schedule, *first.share,
         fixture->rosters,
-        AUTHORIZATION_MASK, &verify_error));
+        fixture->authorization, &verify_error));
 
     const auto replay{signer.Sign(
         *context, 0, 0,
@@ -232,7 +285,7 @@ BOOST_AUTO_TEST_CASE(refuses_equivocation_and_wrong_secret_key)
     BOOST_CHECK(error == ChainLockSigningError::SECRET_KEY_MISMATCH);
 }
 
-BOOST_AUTO_TEST_CASE(rejects_unauthorized_roster_before_journal_reservation)
+BOOST_AUTO_TEST_CASE(rejects_wrong_operator_before_journal_reservation)
 {
     auto fixture{MakeFixture()};
     const auto context{PrepareContext(*fixture)};
@@ -246,7 +299,7 @@ BOOST_AUTO_TEST_CASE(rejects_unauthorized_roster_before_journal_reservation)
         *context, 3, 0,
         *fixture->child_secret_key, fixture->child_key_proof,
         std::nullopt, &error).share);
-    BOOST_CHECK(error == ChainLockSigningError::INACTIVE_QUORUM);
+    BOOST_CHECK(error == ChainLockSigningError::WRONG_OPERATOR);
     BOOST_CHECK(!journal.GetBranchLock(
         fixture->genesis_hash, fixture->local_pro_tx_hash));
 }

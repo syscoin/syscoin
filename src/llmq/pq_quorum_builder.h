@@ -9,6 +9,7 @@
 #include <llmq/pq_chainlock_schedule.h>
 #include <llmq/pq_chainlock_verify.h>
 #include <llmq/pq_operator_key_state.h>
+#include <llmq/pq_roster_beacon.h>
 #include <sync.h>
 
 #include <array>
@@ -18,15 +19,11 @@
 #include <memory>
 #include <optional>
 #include <span>
-#include <string_view>
 #include <vector>
 
 class CBlockIndex;
 
 namespace llmq::pq {
-
-inline constexpr std::string_view PQ_QUORUM_MODIFIER_DOMAIN{
-    "SYS_PQ_QUORUM_MODIFIER_V1"};
 
 /**
  * Fork-pinned inputs needed to reconstruct a roster at one exact branch.
@@ -61,6 +58,7 @@ enum class QuorumBuildError : uint8_t {
     MISSING_BRANCH_ANCESTOR,
     SNAPSHOT_LOOKUP_FAILED,
     SNAPSHOT_MISMATCH,
+    INVALID_ROSTER_BEACON,
     INVALID_FROZEN_ROSTER,
 };
 
@@ -98,12 +96,22 @@ public:
     [[nodiscard]] FrozenQuorumRostersPtr GetActive(
         int32_t target_height,
         const CBlockIndex& branch_tip,
+        const ActiveRosterBeaconBundle& beacon_bundle,
         QuorumBuildError* error = nullptr) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     [[nodiscard]] VerifiedRosterSetPtr GetVerifiedActive(
         int32_t target_height,
         const CBlockIndex& branch_tip,
+        const ActiveRosterBeaconBundle& beacon_bundle,
+        QuorumBuildError* error = nullptr) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /** Cache hits may be reused, but a miss is not published before auth. */
+    [[nodiscard]] VerifiedRosterSetPtr GetVerifiedActiveNoPublish(
+        int32_t target_height,
+        const CBlockIndex& branch_tip,
+        const ActiveRosterBeaconBundle& beacon_bundle,
         QuorumBuildError* error = nullptr) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
@@ -124,6 +132,7 @@ private:
     struct Key {
         uint32_t newest_epoch{0};
         uint256 newest_base_hash;
+        uint256 beacon_bundle_hash;
 
         friend bool operator==(const Key&, const Key&) = default;
     };
@@ -138,6 +147,14 @@ private:
                             QuorumBuildConfig config,
                             QuorumSnapshotLookup snapshot_lookup,
                             bool cache_results);
+
+    [[nodiscard]] VerifiedRosterSetPtr GetVerifiedActiveImpl(
+        int32_t target_height,
+        const CBlockIndex& branch_tip,
+        const ActiveRosterBeaconBundle& beacon_bundle,
+        bool publish,
+        QuorumBuildError* error) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     const uint256 m_genesis_hash;
     const QuorumBuildConfig m_config;
@@ -158,33 +175,31 @@ private:
 using FrozenQuorumRosterCachePtr =
     std::shared_ptr<const FrozenQuorumRosterCache>;
 
-/** Domain-separated replacement for the legacy opaque DKG/base modifier. */
-[[nodiscard]] std::optional<uint256> GetPQQuorumModifier(
-    const uint256& genesis_hash,
-    uint32_t epoch,
-    const uint256& base_hash);
-
 /**
  * Build one canonical 400-slot roster from an exact deterministic-MN snapshot.
  * The base height is derived from the fixed schedule, not accepted from a
  * caller. Payment state never enters validator selection. Root-capable
  * candidates rank ahead of keyless records, with each group ordered by the
- * existing epoch score. Missing operator state or a frozen-absent key leaves
- * an otherwise selected slot without a child key.
+ * epoch score derived from the exact READY delayed-Bitcoin seed. The branch
+ * base hash remains descriptor identity only and never enters that score.
+ * Missing operator state or a frozen-absent key leaves an otherwise selected
+ * slot without a child key.
  */
 [[nodiscard]] std::unique_ptr<FrozenQuorumRoster> BuildFrozenQuorumRoster(
     const uint256& genesis_hash,
     const QuorumBuildConfig& config,
     uint32_t epoch,
     const uint256& base_hash,
+    const RosterBeaconSeed& beacon_seed,
     const CDeterministicMNList& snapshot,
     std::span<const OperatorKeyState> operator_key_states,
     QuorumBuildError* error = nullptr);
 
 /**
- * Build the four oldest-to-newest active rosters on one explicit branch. The
- * lookup is invoked only with ancestors of branch_tip, then its returned
- * height/hash and exact registry schedule revision are checked.
+ * Build the four oldest-to-newest active rosters on one explicit branch from
+ * the exact corresponding READY beacon bundle. The lookup is invoked only
+ * with ancestors of branch_tip, then its returned height/hash and exact
+ * registry schedule revision are checked.
  */
 [[nodiscard]] FrozenQuorumRostersPtr
 BuildActiveFrozenQuorumRosters(
@@ -192,6 +207,7 @@ BuildActiveFrozenQuorumRosters(
     const QuorumBuildConfig& config,
     int32_t target_height,
     const CBlockIndex& branch_tip,
+    const ActiveRosterBeaconBundle& beacon_bundle,
     const QuorumSnapshotLookup& snapshot_lookup,
     QuorumBuildError* error = nullptr);
 

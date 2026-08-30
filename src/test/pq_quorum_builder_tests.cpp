@@ -7,6 +7,7 @@
 #include <arith_uint256.h>
 #include <chain.h>
 #include <crypto/sha256.h>
+#include <test/pq_test_util.h>
 
 #include <boost/test/unit_test.hpp>
 
@@ -142,6 +143,95 @@ QuorumBuildConfig BuildConfig(uint32_t snapshot_lag = 144)
     config.registration_cutoff_blocks = snapshot_lag;
     config.future_horizon_epochs = 8;
     return config;
+}
+
+RosterBeaconSeed ReadyBeaconSeed(uint32_t epoch, uint64_t salt = 0)
+{
+    const auto base_height{EpochBaseHeight(Schedule(), epoch)};
+    BOOST_REQUIRE(base_height);
+    RosterBeaconSeed seed;
+    seed.anchor_kind = RosterBeaconAnchorKind::NORMAL;
+    seed.state = RosterBeaconState::READY;
+    seed.epoch = epoch;
+    seed.anchor_cursor = BTCCursor{
+        *base_height - 1,
+        NonNullHash(900'000 + epoch, salt),
+        NonNullHash(910'000 + epoch, salt)};
+    seed.anchor_btc_height = 800'000 + static_cast<int32_t>(epoch);
+    seed.future_btc_hash = NonNullHash(920'000 + epoch, salt);
+    BOOST_REQUIRE(seed.IsReady());
+    return seed;
+}
+
+ActiveRosterBeaconBundle BeaconBundle(uint32_t newest_epoch,
+                                      uint64_t salt = 0)
+{
+    BOOST_REQUIRE_GE(newest_epoch,
+                     static_cast<uint32_t>(ACTIVE_QUORUMS - 1));
+    ActiveRosterBeaconBundle bundle;
+    const uint32_t first_epoch{
+        newest_epoch - static_cast<uint32_t>(ACTIVE_QUORUMS - 1)};
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        bundle.seeds[slot] = ReadyBeaconSeed(
+            first_epoch + static_cast<uint32_t>(slot), salt);
+    }
+    BOOST_REQUIRE(bundle.IsForNewestEpoch(newest_epoch));
+    return bundle;
+}
+
+ActiveRosterBeaconBundle BeaconBundleAtHeight(int32_t target_height,
+                                              uint64_t salt = 0)
+{
+    const auto epochs{ActiveEpochsAtHeight(Schedule(), target_height)};
+    BOOST_REQUIRE(epochs);
+    return BeaconBundle(epochs->back().epoch, salt);
+}
+
+std::unique_ptr<FrozenQuorumRoster> BuildTestRoster(
+    const uint256& genesis_hash,
+    const QuorumBuildConfig& config,
+    uint32_t epoch,
+    const uint256& base_hash,
+    const CDeterministicMNList& snapshot,
+    std::span<const OperatorKeyState> operator_key_states,
+    QuorumBuildError* error = nullptr)
+{
+    return BuildFrozenQuorumRoster(
+        genesis_hash, config, epoch, base_hash, ReadyBeaconSeed(epoch),
+        snapshot, operator_key_states, error);
+}
+
+FrozenQuorumRostersPtr BuildTestActiveRosters(
+    const uint256& genesis_hash,
+    const QuorumBuildConfig& config,
+    int32_t target_height,
+    const CBlockIndex& branch_tip,
+    const QuorumSnapshotLookup& snapshot_lookup,
+    QuorumBuildError* error = nullptr)
+{
+    return BuildActiveFrozenQuorumRosters(
+        genesis_hash, config, target_height, branch_tip,
+        BeaconBundleAtHeight(target_height), snapshot_lookup, error);
+}
+
+FrozenQuorumRostersPtr GetTestActive(
+    const FrozenQuorumRosterCachePtr& cache,
+    int32_t target_height,
+    const CBlockIndex& branch_tip,
+    QuorumBuildError* error = nullptr)
+{
+    return cache->GetActive(target_height, branch_tip,
+                            BeaconBundleAtHeight(target_height), error);
+}
+
+VerifiedRosterSetPtr GetTestVerifiedActive(
+    const FrozenQuorumRosterCachePtr& cache,
+    int32_t target_height,
+    const CBlockIndex& branch_tip,
+    QuorumBuildError* error = nullptr)
+{
+    return cache->GetVerifiedActive(
+        target_height, branch_tip, BeaconBundleAtHeight(target_height), error);
 }
 
 OperatorKeyState KeyState(const ChainLockScheduleConfig& schedule,
@@ -354,17 +444,55 @@ struct IndexChain {
 
 BOOST_AUTO_TEST_SUITE(pq_quorum_builder_tests)
 
-BOOST_AUTO_TEST_CASE(modifier_binds_network_epoch_and_base)
+BOOST_AUTO_TEST_CASE(base_hash_cannot_grind_fixed_snapshot_and_beacon)
 {
     const uint256 genesis{NonNullHash(1)};
-    const uint256 base{NonNullHash(2)};
-    const auto modifier{GetPQQuorumModifier(genesis, 4, base)};
-    BOOST_REQUIRE(modifier);
-    BOOST_CHECK(*modifier != *GetPQQuorumModifier(NonNullHash(3), 4, base));
-    BOOST_CHECK(*modifier != *GetPQQuorumModifier(genesis, 5, base));
-    BOOST_CHECK(*modifier != *GetPQQuorumModifier(genesis, 4, NonNullHash(4)));
-    BOOST_CHECK(!GetPQQuorumModifier(uint256{}, 4, base));
-    BOOST_CHECK(!GetPQQuorumModifier(genesis, 4, uint256{}));
+    constexpr uint32_t EPOCH{4};
+    constexpr int32_t SNAPSHOT_HEIGHT{2448};
+    const auto snapshot{Snapshot(
+        SNAPSHOT_HEIGHT, NonNullHash(2), QUORUM_SIZE + 20)};
+    const auto seed{ReadyBeaconSeed(EPOCH)};
+    const auto first{BuildFrozenQuorumRoster(
+        genesis, BuildConfig(), EPOCH, NonNullHash(3), seed, snapshot, {})};
+    const auto changed_base{BuildFrozenQuorumRoster(
+        genesis, BuildConfig(), EPOCH, NonNullHash(4), seed, snapshot, {})};
+    BOOST_REQUIRE(first);
+    BOOST_REQUIRE(changed_base);
+    BOOST_CHECK(first->descriptor.base_hash !=
+                changed_base->descriptor.base_hash);
+    BOOST_CHECK(first->descriptor.roster_beacon_hash ==
+                changed_base->descriptor.roster_beacon_hash);
+    BOOST_CHECK(first->descriptor.member_root ==
+                changed_base->descriptor.member_root);
+    BOOST_CHECK(first->descriptor.child_key_root ==
+                changed_base->descriptor.child_key_root);
+    for (std::size_t slot{0}; slot < QUORUM_SIZE; ++slot) {
+        BOOST_CHECK(first->members[slot].pro_tx_hash ==
+                    changed_base->members[slot].pro_tx_hash);
+    }
+
+    auto changed_future{seed};
+    changed_future.future_btc_hash = NonNullHash(5);
+    const auto first_modifier{GetPQQuorumModifier(
+        genesis, EPOCH, SNAPSHOT_HEIGHT, snapshot.GetBlockHash(), seed)};
+    const auto changed_modifier{GetPQQuorumModifier(
+        genesis, EPOCH, SNAPSHOT_HEIGHT, snapshot.GetBlockHash(),
+        changed_future)};
+    BOOST_REQUIRE(first_modifier);
+    BOOST_REQUIRE(changed_modifier);
+    BOOST_CHECK(*first_modifier != *changed_modifier);
+    const auto changed_seed{BuildFrozenQuorumRoster(
+        genesis, BuildConfig(), EPOCH, NonNullHash(3), changed_future,
+        snapshot, {})};
+    BOOST_REQUIRE(changed_seed);
+    BOOST_CHECK(first->descriptor.roster_beacon_hash !=
+                changed_seed->descriptor.roster_beacon_hash);
+    bool identical_order{true};
+    for (std::size_t slot{0}; slot < QUORUM_SIZE; ++slot) {
+        identical_order &= first->members[slot].pro_tx_hash ==
+                           changed_seed->members[slot].pro_tx_hash;
+    }
+    BOOST_CHECK(!identical_order);
 }
 
 BOOST_AUTO_TEST_CASE(order_is_insertion_independent_and_ties_match_legacy_order)
@@ -379,9 +507,9 @@ BOOST_AUTO_TEST_CASE(order_is_insertion_independent_and_ties_match_legacy_order)
     const auto reverse = Snapshot(SNAPSHOT_HEIGHT, snapshot_hash, QUORUM_SIZE,
                                   true, true);
 
-    const auto a = BuildFrozenQuorumRoster(
+    const auto a = BuildTestRoster(
         genesis, BuildConfig(), EPOCH, base_hash, forward, {}, {});
-    const auto b = BuildFrozenQuorumRoster(
+    const auto b = BuildTestRoster(
         genesis, BuildConfig(), EPOCH, base_hash, reverse, {}, {});
     BOOST_REQUIRE(a);
     BOOST_REQUIRE(b);
@@ -407,7 +535,7 @@ BOOST_AUTO_TEST_CASE(eligibility_keys_and_roots_are_derived_not_fabricated)
     const uint256 banned_hash{NonNullHash(10'000 + QUORUM_SIZE)};
     const uint256 unconfirmed_hash{NonNullHash(10'001 + QUORUM_SIZE)};
 
-    const auto without_keys = BuildFrozenQuorumRoster(
+    const auto without_keys = BuildTestRoster(
         genesis, BuildConfig(), EPOCH, NonNullHash(10), snapshot, {}, {});
     BOOST_REQUIRE(without_keys);
     BOOST_CHECK_EQUAL(without_keys->descriptor.valid_count, 0U);
@@ -423,7 +551,7 @@ BOOST_AUTO_TEST_CASE(eligibility_keys_and_roots_are_derived_not_fabricated)
     // State belonging to an ineligible/banned DMN cannot create a roster slot.
     states.push_back(KeyState(Schedule(), banned_hash, EPOCH, SNAPSHOT_HEIGHT, 3));
 
-    const auto roster = BuildFrozenQuorumRoster(
+    const auto roster = BuildTestRoster(
         genesis, BuildConfig(), EPOCH, NonNullHash(10), snapshot, states, {});
     BOOST_REQUIRE(roster);
     BOOST_CHECK_EQUAL(roster->descriptor.valid_count, 1U);
@@ -455,11 +583,13 @@ BOOST_AUTO_TEST_CASE(more_than_400_candidates_select_top_scores_deterministicall
     const auto snapshot{Snapshot(
         SNAPSHOT_HEIGHT, NonNullHash(82), CANDIDATES)};
     const auto states{KeyStates(ROOT_CAPABLE, EPOCH, SNAPSHOT_HEIGHT)};
-    const auto modifier{GetPQQuorumModifier(genesis, EPOCH, base_hash)};
+    const auto modifier{GetPQQuorumModifier(
+        genesis, EPOCH, SNAPSHOT_HEIGHT, snapshot.GetBlockHash(),
+        ReadyBeaconSeed(EPOCH))};
     BOOST_REQUIRE(modifier);
     const auto expected{ScoreOrderedMembers(ROOT_CAPABLE, *modifier)};
 
-    const auto roster{BuildFrozenQuorumRoster(
+    const auto roster{BuildTestRoster(
         genesis, BuildConfig(), EPOCH, base_hash, snapshot, states)};
     BOOST_REQUIRE(roster);
     BOOST_CHECK_EQUAL(roster->descriptor.valid_count, QUORUM_SIZE);
@@ -479,7 +609,7 @@ BOOST_AUTO_TEST_CASE(more_than_400_candidates_select_top_scores_deterministicall
     const auto reverse_snapshot{Snapshot(
         SNAPSHOT_HEIGHT, NonNullHash(82), CANDIDATES,
         /*reverse=*/true)};
-    const auto reversed{BuildFrozenQuorumRoster(
+    const auto reversed{BuildTestRoster(
         genesis, BuildConfig(), EPOCH, base_hash, reverse_snapshot, states)};
     BOOST_REQUIRE(reversed);
     BOOST_CHECK(reversed->descriptor == roster->descriptor);
@@ -547,8 +677,9 @@ BOOST_AUTO_TEST_CASE(partial_sort_matches_full_sort_oracle_at_cutoff)
         const uint256 genesis{NonNullHash(720'000 + scenario_index)};
         const uint256 base_hash{NonNullHash(730'000 + scenario_index)};
         const uint256 snapshot_hash{NonNullHash(740'000 + scenario_index)};
-        const auto modifier{
-            GetPQQuorumModifier(genesis, EPOCH, base_hash)};
+        const auto modifier{GetPQQuorumModifier(
+            genesis, EPOCH, SNAPSHOT_HEIGHT, snapshot_hash,
+            ReadyBeaconSeed(EPOCH))};
         BOOST_REQUIRE(modifier);
         const auto expected{
             FullSortRosterOracle(members, *modifier, root_capable)};
@@ -581,7 +712,7 @@ BOOST_AUTO_TEST_CASE(partial_sort_matches_full_sort_oracle_at_cutoff)
             if ((permutation & 1U) != 0) {
                 std::reverse(ordered_states.begin(), ordered_states.end());
             }
-            const auto roster{BuildFrozenQuorumRoster(
+            const auto roster{BuildTestRoster(
                 genesis, BuildConfig(), EPOCH, base_hash, snapshot,
                 ordered_states)};
             BOOST_REQUIRE(roster);
@@ -633,7 +764,7 @@ BOOST_AUTO_TEST_CASE(root_capable_members_rank_ahead_when_they_fit)
     constexpr uint32_t ROOTS{300};
     const auto states{KeyStates(ROOTS, EPOCH, SNAPSHOT_HEIGHT)};
 
-    const auto roster{BuildFrozenQuorumRoster(
+    const auto roster{BuildTestRoster(
         genesis, BuildConfig(), EPOCH, base_hash, snapshot, states)};
     BOOST_REQUIRE(roster);
     BOOST_CHECK_EQUAL(roster->descriptor.valid_count, ROOTS);
@@ -653,13 +784,13 @@ BOOST_AUTO_TEST_CASE(fewer_than_400_unsafe_cutoff_and_duplicate_keys_fail_closed
     constexpr uint32_t EPOCH{4};
     const uint256 genesis{NonNullHash(11)};
     QuorumBuildError error{QuorumBuildError::NONE};
-    BOOST_CHECK(!BuildFrozenQuorumRoster(
+    BOOST_CHECK(!BuildTestRoster(
         genesis, BuildConfig(), EPOCH, NonNullHash(12),
         CDeterministicMNList{}, {}, &error));
     BOOST_CHECK_EQUAL(error, QuorumBuildError::SNAPSHOT_MISMATCH);
 
     const auto too_small = Snapshot(2448, NonNullHash(12), QUORUM_SIZE - 1);
-    BOOST_CHECK(!BuildFrozenQuorumRoster(
+    BOOST_CHECK(!BuildTestRoster(
         genesis, BuildConfig(), EPOCH, NonNullHash(13), too_small, {},
         &error));
     BOOST_CHECK_EQUAL(error, QuorumBuildError::INSUFFICIENT_ELIGIBLE_MEMBERS);
@@ -668,7 +799,7 @@ BOOST_AUTO_TEST_CASE(fewer_than_400_unsafe_cutoff_and_duplicate_keys_fail_closed
     unsafe_config.registration_cutoff_blocks =
         unsafe_config.roster_snapshot_lag_blocks - 1;
     BOOST_CHECK(!unsafe_config.IsValid());
-    BOOST_CHECK(!BuildFrozenQuorumRoster(
+    BOOST_CHECK(!BuildTestRoster(
         genesis, unsafe_config, EPOCH, NonNullHash(15),
         Snapshot(2448, NonNullHash(14), QUORUM_SIZE), {}, &error));
     BOOST_CHECK_EQUAL(error, QuorumBuildError::INVALID_SCHEDULE);
@@ -680,7 +811,7 @@ BOOST_AUTO_TEST_CASE(fewer_than_400_unsafe_cutoff_and_duplicate_keys_fail_closed
     BOOST_CHECK(!multi_epoch_lag_config.IsValid());
 
     const auto frozen_snapshot = Snapshot(2448, NonNullHash(16), QUORUM_SIZE);
-    const auto first = BuildFrozenQuorumRoster(
+    const auto first = BuildTestRoster(
         genesis, BuildConfig(), EPOCH, NonNullHash(17), frozen_snapshot, {},
         nullptr);
     BOOST_REQUIRE(first);
@@ -694,13 +825,13 @@ BOOST_AUTO_TEST_CASE(fewer_than_400_unsafe_cutoff_and_duplicate_keys_fail_closed
         key_a.global_key.child_key_commitment.tree_id;
     BOOST_REQUIRE(key_b.IsStructurallyValid());
     std::array<OperatorKeyState, 2> duplicate_keys{key_a, key_b};
-    BOOST_CHECK(!BuildFrozenQuorumRoster(
+    BOOST_CHECK(!BuildTestRoster(
         genesis, BuildConfig(), EPOCH, NonNullHash(17), frozen_snapshot,
         duplicate_keys, &error));
     BOOST_CHECK_EQUAL(error, QuorumBuildError::DUPLICATE_CHILD_KEY);
 
     std::array<OperatorKeyState, 2> duplicate_states{key_a, key_a};
-    BOOST_CHECK(!BuildFrozenQuorumRoster(
+    BOOST_CHECK(!BuildTestRoster(
         genesis, BuildConfig(), EPOCH, NonNullHash(17), frozen_snapshot,
         duplicate_states, &error));
     BOOST_CHECK_EQUAL(error, QuorumBuildError::DUPLICATE_OPERATOR_STATE);
@@ -723,10 +854,10 @@ BOOST_AUTO_TEST_CASE(active_builder_uses_canonical_branch_bases_and_snapshots)
     };
 
     QuorumBuildError error{QuorumBuildError::NONE};
-    const auto a = BuildActiveFrozenQuorumRosters(
+    const auto a = BuildTestActiveRosters(
         genesis, BuildConfig(SNAPSHOT_LAG), TARGET_HEIGHT, chain_a.Tip(),
         lookup, &error);
-    const auto b = BuildActiveFrozenQuorumRosters(
+    const auto b = BuildTestActiveRosters(
         genesis, BuildConfig(SNAPSHOT_LAG), TARGET_HEIGHT, chain_b.Tip(),
         lookup, &error);
     BOOST_REQUIRE(a);
@@ -757,12 +888,12 @@ BOOST_AUTO_TEST_CASE(active_builder_uses_canonical_branch_bases_and_snapshots)
         result.operator_key_states = SharedOperatorStates();
         return std::optional<QuorumSnapshotState>{std::move(result)};
     };
-    BOOST_CHECK(!BuildActiveFrozenQuorumRosters(
+    BOOST_CHECK(!BuildTestActiveRosters(
         genesis, BuildConfig(SNAPSHOT_LAG), TARGET_HEIGHT, chain_b.Tip(),
         wrong_fork, &error));
     BOOST_CHECK_EQUAL(error, QuorumBuildError::SNAPSHOT_MISMATCH);
 
-    BOOST_CHECK(!BuildActiveFrozenQuorumRosters(
+    BOOST_CHECK(!BuildTestActiveRosters(
         genesis, BuildConfig(SNAPSHOT_LAG), TARGET_HEIGHT,
         chain_a.At(TARGET_HEIGHT - 1), lookup, &error));
     BOOST_CHECK_EQUAL(error, QuorumBuildError::MISSING_BRANCH_ANCESTOR);
@@ -770,7 +901,7 @@ BOOST_AUTO_TEST_CASE(active_builder_uses_canonical_branch_bases_and_snapshots)
     const QuorumSnapshotLookup unavailable = [](const CBlockIndex&) {
         return std::optional<QuorumSnapshotState>{QuorumSnapshotState{}};
     };
-    BOOST_CHECK(!BuildActiveFrozenQuorumRosters(
+    BOOST_CHECK(!BuildTestActiveRosters(
         genesis, BuildConfig(SNAPSHOT_LAG), TARGET_HEIGHT, chain_a.Tip(),
         unavailable, &error));
     BOOST_CHECK_EQUAL(error, QuorumBuildError::SNAPSHOT_MISMATCH);
@@ -800,35 +931,35 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_reuses_exact_branch_contexts)
     BOOST_CHECK(cache->Config() == BuildConfig());
 
     QuorumBuildError error{QuorumBuildError::INVALID_ARGUMENT};
-    const auto first_verified{cache->GetVerifiedActive(
-        FIRST_TARGET, canonical.Tip(), &error)};
+    const auto first_verified{GetTestVerifiedActive(cache,
+                                                    FIRST_TARGET, canonical.Tip(), &error)};
     BOOST_REQUIRE(first_verified);
     BOOST_CHECK(error == QuorumBuildError::NONE);
     BOOST_CHECK_EQUAL(lookups, ACTIVE_QUORUMS);
-    const auto first{cache->GetActive(
-        FIRST_TARGET, canonical.Tip(), &error)};
+    const auto first{GetTestActive(cache,
+                                   FIRST_TARGET, canonical.Tip(), &error)};
     BOOST_REQUIRE(first);
     BOOST_CHECK(first == first_verified->RostersPtr());
     BOOST_CHECK_EQUAL(lookups, ACTIVE_QUORUMS);
 
-    const auto same_verified{cache->GetVerifiedActive(
-        SECOND_TARGET, canonical.Tip(), &error)};
+    const auto same_verified{GetTestVerifiedActive(cache,
+                                                   SECOND_TARGET, canonical.Tip(), &error)};
     BOOST_REQUIRE(same_verified);
     BOOST_CHECK(first_verified == same_verified);
     BOOST_CHECK_EQUAL(lookups, ACTIVE_QUORUMS);
 
-    const auto post_base_fork{cache->GetActive(
-        SECOND_TARGET, fork_after_base.Tip(), &error)};
+    const auto post_base_fork{GetTestActive(cache,
+                                            SECOND_TARGET, fork_after_base.Tip(), &error)};
     BOOST_REQUIRE(post_base_fork);
     BOOST_CHECK(post_base_fork == first);
     BOOST_CHECK_EQUAL(lookups, ACTIVE_QUORUMS);
 
-    const auto base_fork{cache->GetActive(
-        FIRST_TARGET, fork_at_third_base.Tip(), &error)};
+    const auto base_fork{GetTestActive(cache,
+                                       FIRST_TARGET, fork_at_third_base.Tip(), &error)};
     BOOST_REQUIRE(base_fork);
     BOOST_CHECK(base_fork != first);
-    const auto base_fork_verified{cache->GetVerifiedActive(
-        FIRST_TARGET, fork_at_third_base.Tip(), &error)};
+    const auto base_fork_verified{GetTestVerifiedActive(cache,
+                                                        FIRST_TARGET, fork_at_third_base.Tip(), &error)};
     BOOST_REQUIRE(base_fork_verified);
     BOOST_CHECK(base_fork_verified != first_verified);
     BOOST_CHECK(base_fork == base_fork_verified->RostersPtr());
@@ -840,12 +971,12 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_reuses_exact_branch_contexts)
     BOOST_CHECK((*base_fork)[3].descriptor.base_hash !=
                 (*first)[3].descriptor.base_hash);
 
-    BOOST_CHECK(!cache->GetActive(
-        FIRST_TARGET + 1, canonical.Tip(), &error));
+    BOOST_CHECK(!GetTestActive(cache,
+                               FIRST_TARGET + 1, canonical.Tip(), &error));
     BOOST_CHECK(error == QuorumBuildError::INVALID_TARGET_HEIGHT);
     BOOST_CHECK_EQUAL(lookups, ACTIVE_QUORUMS + 2);
-    BOOST_CHECK(!cache->GetActive(
-        FIRST_TARGET, canonical.At(FIRST_TARGET - 1), &error));
+    BOOST_CHECK(!GetTestActive(cache,
+                               FIRST_TARGET, canonical.At(FIRST_TARGET - 1), &error));
     BOOST_CHECK(error == QuorumBuildError::MISSING_BRANCH_ANCESTOR);
     BOOST_CHECK_EQUAL(lookups, ACTIVE_QUORUMS + 2);
 
@@ -879,8 +1010,8 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_reuses_overlapping_epoch_rosters)
 
     const uint64_t first_hashes_before{
         GetQuorumRootTaggedHashCountForTesting()};
-    const auto first{cache->GetVerifiedActive(
-        FIRST_TARGET, canonical.Tip())};
+    const auto first{GetTestVerifiedActive(cache,
+                                           FIRST_TARGET, canonical.Tip())};
     BOOST_REQUIRE(first);
     BOOST_CHECK_EQUAL(lookups, ACTIVE_QUORUMS);
     BOOST_CHECK_EQUAL(GetQuorumRootTaggedHashCountForTesting() -
@@ -889,8 +1020,8 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_reuses_overlapping_epoch_rosters)
 
     const uint64_t rotation_hashes_before{
         GetQuorumRootTaggedHashCountForTesting()};
-    const auto rotated{cache->GetVerifiedActive(
-        ROTATED_TARGET, canonical.Tip())};
+    const auto rotated{GetTestVerifiedActive(cache,
+                                             ROTATED_TARGET, canonical.Tip())};
     BOOST_REQUIRE(rotated);
     BOOST_CHECK(rotated != first);
     BOOST_CHECK_EQUAL(lookups, ACTIVE_QUORUMS + 1);
@@ -904,8 +1035,8 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_reuses_overlapping_epoch_rosters)
 
     const uint64_t fork_hashes_before{
         GetQuorumRootTaggedHashCountForTesting()};
-    const auto forked{cache->GetVerifiedActive(
-        ROTATED_TARGET, fork_at_new_base.Tip())};
+    const auto forked{GetTestVerifiedActive(cache,
+                                            ROTATED_TARGET, fork_at_new_base.Tip())};
     BOOST_REQUIRE(forked);
     BOOST_CHECK(forked != rotated);
     BOOST_CHECK_EQUAL(lookups, ACTIVE_QUORUMS + 2);
@@ -920,8 +1051,8 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_reuses_overlapping_epoch_rosters)
                       ROOT_HASHES_PER_ROSTER);
     const uint64_t hit_hashes_before{
         GetQuorumRootTaggedHashCountForTesting()};
-    BOOST_CHECK(cache->GetVerifiedActive(
-                    ROTATED_TARGET, fork_at_new_base.Tip()) == forked);
+    BOOST_CHECK(GetTestVerifiedActive(cache,
+                                      ROTATED_TARGET, fork_at_new_base.Tip()) == forked);
     BOOST_CHECK_EQUAL(lookups, ACTIVE_QUORUMS + 2);
     BOOST_CHECK_EQUAL(GetQuorumRootTaggedHashCountForTesting(),
                       hit_hashes_before);
@@ -958,8 +1089,8 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_mint_matches_public_validation)
 
     const uint64_t build_hashes_before{
         GetQuorumRootTaggedHashCountForTesting()};
-    const auto cached{cache->GetVerifiedActive(
-        TARGET_HEIGHT, chain.Tip())};
+    const auto cached{GetTestVerifiedActive(cache,
+                                            TARGET_HEIGHT, chain.Tip())};
     BOOST_REQUIRE(cached);
     BOOST_CHECK_EQUAL(GetQuorumRootTaggedHashCountForTesting() -
                           build_hashes_before,
@@ -1025,16 +1156,16 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_mint_matches_public_validation)
                 ChainLockVerificationError::DUPLICATE_MEMBER);
     const uint64_t hit_hashes_before{
         GetQuorumRootTaggedHashCountForTesting()};
-    BOOST_CHECK(cache->GetVerifiedActive(
-                    TARGET_HEIGHT, chain.Tip()) == cached);
+    BOOST_CHECK(GetTestVerifiedActive(cache,
+                                      TARGET_HEIGHT, chain.Tip()) == cached);
     BOOST_CHECK_EQUAL(GetQuorumRootTaggedHashCountForTesting(),
                       hit_hashes_before);
 
     const auto independent_cache{FrozenQuorumRosterCache::Create(
         genesis, BuildConfig(SNAPSHOT_LAG), lookup)};
     BOOST_REQUIRE(independent_cache);
-    const auto independently_minted{independent_cache->GetVerifiedActive(
-        TARGET_HEIGHT, chain.Tip())};
+    const auto independently_minted{GetTestVerifiedActive(independent_cache,
+                                                          TARGET_HEIGHT, chain.Tip())};
     BOOST_REQUIRE(independently_minted);
     BOOST_CHECK(independently_minted != cached);
     BOOST_CHECK(independently_minted->RostersPtr() != cached->RostersPtr());
@@ -1081,20 +1212,20 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_rechecks_cross_roster_child_keys)
     const auto cache{FrozenQuorumRosterCache::Create(
         genesis, BuildConfig(SNAPSHOT_LAG), lookup)};
     BOOST_REQUIRE(cache);
-    BOOST_REQUIRE(cache->GetVerifiedActive(FIRST_TARGET, chain.Tip()));
+    BOOST_REQUIRE(GetTestVerifiedActive(cache, FIRST_TARGET, chain.Tip()));
     BOOST_CHECK_EQUAL(lookups, ACTIVE_QUORUMS);
 
     QuorumBuildError error{QuorumBuildError::NONE};
     const uint64_t failure_hashes_before{
         GetQuorumRootTaggedHashCountForTesting()};
-    BOOST_CHECK(!cache->GetVerifiedActive(
-        ROTATED_TARGET, chain.Tip(), &error));
+    BOOST_CHECK(!GetTestVerifiedActive(cache,
+                                       ROTATED_TARGET, chain.Tip(), &error));
     BOOST_CHECK(error == QuorumBuildError::DUPLICATE_CHILD_KEY);
     BOOST_CHECK_EQUAL(lookups, ACTIVE_QUORUMS + 1);
     BOOST_CHECK_EQUAL(GetQuorumRootTaggedHashCountForTesting() -
                           failure_hashes_before,
                       2'046U);
-    BOOST_REQUIRE(cache->GetVerifiedActive(FIRST_TARGET, chain.Tip()));
+    BOOST_REQUIRE(GetTestVerifiedActive(cache, FIRST_TARGET, chain.Tip()));
     BOOST_CHECK_EQUAL(lookups, ACTIVE_QUORUMS + 1);
 }
 
@@ -1121,16 +1252,17 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_retries_failures_and_can_be_disabled)
         genesis, BuildConfig(), lookup)};
     BOOST_REQUIRE(cache);
     QuorumBuildError error{QuorumBuildError::NONE};
-    BOOST_CHECK(!cache->GetActive(
-        TARGET_HEIGHT, chain.Tip(), &error));
+    BOOST_CHECK(!GetTestActive(cache,
+                               TARGET_HEIGHT, chain.Tip(), &error));
     BOOST_CHECK(error == QuorumBuildError::SNAPSHOT_LOOKUP_FAILED);
     BOOST_CHECK_EQUAL(lookups, 1U);
 
-    const auto retry{cache->GetActive(TARGET_HEIGHT, chain.Tip(), &error)};
+    const auto retry{GetTestActive(
+        cache, TARGET_HEIGHT, chain.Tip(), &error)};
     BOOST_REQUIRE(retry);
     BOOST_CHECK(error == QuorumBuildError::NONE);
     BOOST_CHECK_EQUAL(lookups, 1U + ACTIVE_QUORUMS);
-    BOOST_CHECK(cache->GetActive(TARGET_HEIGHT, chain.Tip()) == retry);
+    BOOST_CHECK(GetTestActive(cache, TARGET_HEIGHT, chain.Tip()) == retry);
     BOOST_CHECK_EQUAL(lookups, 1U + ACTIVE_QUORUMS);
 
     std::size_t uncached_lookups{0};
@@ -1150,9 +1282,9 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_retries_failures_and_can_be_disabled)
     const uint64_t uncached_hashes_before{
         GetQuorumRootTaggedHashCountForTesting()};
     const auto uncached_first{
-        uncached->GetActive(TARGET_HEIGHT, chain.Tip())};
+        GetTestActive(uncached, TARGET_HEIGHT, chain.Tip())};
     const auto uncached_second{
-        uncached->GetActive(TARGET_HEIGHT, chain.Tip())};
+        GetTestActive(uncached, TARGET_HEIGHT, chain.Tip())};
     BOOST_REQUIRE(uncached_first);
     BOOST_REQUIRE(uncached_second);
     BOOST_CHECK(uncached_first != uncached_second);
@@ -1193,17 +1325,17 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_contains_snapshot_lookup_exceptions)
     BOOST_REQUIRE(cache);
 
     QuorumBuildError error{QuorumBuildError::NONE};
-    BOOST_CHECK(!cache->GetActive(
-        TARGET_HEIGHT, chain.Tip(), &error));
+    BOOST_CHECK(!GetTestActive(cache,
+                               TARGET_HEIGHT, chain.Tip(), &error));
     BOOST_CHECK(error == QuorumBuildError::SNAPSHOT_LOOKUP_FAILED);
     BOOST_CHECK_EQUAL(lookups, 1U);
 
-    const auto retry{cache->GetActive(
-        TARGET_HEIGHT, chain.Tip(), &error)};
+    const auto retry{GetTestActive(cache,
+                                   TARGET_HEIGHT, chain.Tip(), &error)};
     BOOST_REQUIRE(retry);
     BOOST_CHECK(error == QuorumBuildError::NONE);
     BOOST_CHECK_EQUAL(lookups, 1U + ACTIVE_QUORUMS);
-    BOOST_CHECK(cache->GetActive(TARGET_HEIGHT, chain.Tip()) == retry);
+    BOOST_CHECK(GetTestActive(cache, TARGET_HEIGHT, chain.Tip()) == retry);
     BOOST_CHECK_EQUAL(lookups, 1U + ACTIVE_QUORUMS);
 }
 
@@ -1231,14 +1363,14 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_does_not_cache_rotation_failures)
     const auto cache{FrozenQuorumRosterCache::Create(
         genesis, BuildConfig(), lookup)};
     BOOST_REQUIRE(cache);
-    BOOST_REQUIRE(cache->GetVerifiedActive(FIRST_TARGET, chain.Tip()));
+    BOOST_REQUIRE(GetTestVerifiedActive(cache, FIRST_TARGET, chain.Tip()));
     BOOST_CHECK_EQUAL(lookups, ACTIVE_QUORUMS);
 
     QuorumBuildError error{QuorumBuildError::NONE};
     const uint64_t failure_hashes_before{
         GetQuorumRootTaggedHashCountForTesting()};
-    BOOST_CHECK(!cache->GetVerifiedActive(
-        ROTATED_TARGET, chain.Tip(), &error));
+    BOOST_CHECK(!GetTestVerifiedActive(cache,
+                                       ROTATED_TARGET, chain.Tip(), &error));
     BOOST_CHECK(error == QuorumBuildError::SNAPSHOT_LOOKUP_FAILED);
     BOOST_CHECK_EQUAL(lookups, ACTIVE_QUORUMS + 1);
     BOOST_CHECK_EQUAL(GetQuorumRootTaggedHashCountForTesting(),
@@ -1246,8 +1378,8 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_does_not_cache_rotation_failures)
 
     const uint64_t retry_hashes_before{
         GetQuorumRootTaggedHashCountForTesting()};
-    const auto retry{cache->GetVerifiedActive(
-        ROTATED_TARGET, chain.Tip(), &error)};
+    const auto retry{GetTestVerifiedActive(cache,
+                                           ROTATED_TARGET, chain.Tip(), &error)};
     BOOST_REQUIRE(retry);
     BOOST_CHECK(error == QuorumBuildError::NONE);
     BOOST_CHECK_EQUAL(lookups, ACTIVE_QUORUMS + 2);
@@ -1256,8 +1388,8 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_does_not_cache_rotation_failures)
                       2'046U);
     const uint64_t hit_hashes_before{
         GetQuorumRootTaggedHashCountForTesting()};
-    BOOST_CHECK(cache->GetVerifiedActive(
-                    ROTATED_TARGET, chain.Tip()) == retry);
+    BOOST_CHECK(GetTestVerifiedActive(cache,
+                                      ROTATED_TARGET, chain.Tip()) == retry);
     BOOST_CHECK_EQUAL(lookups, ACTIVE_QUORUMS + 2);
     BOOST_CHECK_EQUAL(GetQuorumRootTaggedHashCountForTesting(),
                       hit_hashes_before);
@@ -1299,12 +1431,12 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_converges_concurrent_builds)
         GetQuorumRootTaggedHashCountForTesting()};
     std::array<VerifiedRosterSetPtr, 2> results;
     std::thread first{[&] {
-        results[0] = cache->GetVerifiedActive(
-            TARGET_HEIGHT, chain.Tip());
+        results[0] = GetTestVerifiedActive(cache,
+                                           TARGET_HEIGHT, chain.Tip());
     }};
     std::thread second{[&] {
-        results[1] = cache->GetVerifiedActive(
-            TARGET_HEIGHT, chain.Tip());
+        results[1] = GetTestVerifiedActive(cache,
+                                           TARGET_HEIGHT, chain.Tip());
     }};
     first.join();
     second.join();
@@ -1312,7 +1444,7 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_converges_concurrent_builds)
     BOOST_REQUIRE(results[0]);
     BOOST_REQUIRE(results[1]);
     BOOST_CHECK(results[0] == results[1]);
-    BOOST_CHECK(cache->GetActive(TARGET_HEIGHT, chain.Tip()) ==
+    BOOST_CHECK(GetTestActive(cache, TARGET_HEIGHT, chain.Tip()) ==
                 results[0]->RostersPtr());
     BOOST_CHECK_EQUAL(lookups.load(std::memory_order_relaxed),
                       2 * ACTIVE_QUORUMS);
@@ -1353,7 +1485,7 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_converges_concurrent_rotations)
     const auto cache{FrozenQuorumRosterCache::Create(
         genesis, BuildConfig(), lookup)};
     BOOST_REQUIRE(cache);
-    BOOST_REQUIRE(cache->GetVerifiedActive(FIRST_TARGET, chain.Tip()));
+    BOOST_REQUIRE(GetTestVerifiedActive(cache, FIRST_TARGET, chain.Tip()));
     BOOST_CHECK_EQUAL(lookups.load(std::memory_order_relaxed),
                       ACTIVE_QUORUMS);
 
@@ -1361,12 +1493,12 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_converges_concurrent_rotations)
         GetQuorumRootTaggedHashCountForTesting()};
     std::array<VerifiedRosterSetPtr, 2> results;
     std::thread first{[&] {
-        results[0] = cache->GetVerifiedActive(
-            ROTATED_TARGET, chain.Tip());
+        results[0] = GetTestVerifiedActive(cache,
+                                           ROTATED_TARGET, chain.Tip());
     }};
     std::thread second{[&] {
-        results[1] = cache->GetVerifiedActive(
-            ROTATED_TARGET, chain.Tip());
+        results[1] = GetTestVerifiedActive(cache,
+                                           ROTATED_TARGET, chain.Tip());
     }};
     first.join();
     second.join();
@@ -1374,8 +1506,8 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_converges_concurrent_rotations)
     BOOST_REQUIRE(results[0]);
     BOOST_REQUIRE(results[1]);
     BOOST_CHECK(results[0] == results[1]);
-    BOOST_CHECK(cache->GetVerifiedActive(
-                    ROTATED_TARGET, chain.Tip()) == results[0]);
+    BOOST_CHECK(GetTestVerifiedActive(cache,
+                                      ROTATED_TARGET, chain.Tip()) == results[0]);
     BOOST_CHECK_EQUAL(lookups.load(std::memory_order_relaxed),
                       ACTIVE_QUORUMS + 2);
     BOOST_CHECK_EQUAL(GetQuorumRootTaggedHashCountForTesting() -
@@ -1408,18 +1540,18 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_eviction_preserves_reader_lifetime)
         genesis, BuildConfig(), lookup)};
     BOOST_REQUIRE(cache);
 
-    const auto retained{cache->GetActive(
-        FIRST_TARGET, chain.Tip())};
+    const auto retained{GetTestActive(cache,
+                                      FIRST_TARGET, chain.Tip())};
     BOOST_REQUIRE(retained);
     const auto retained_descriptor{retained->front().descriptor};
     for (std::size_t context{1}; context < CONTEXTS; ++context) {
         const int32_t target{
             FIRST_TARGET + static_cast<int32_t>(context) * CONTEXT_STRIDE};
-        BOOST_REQUIRE(cache->GetActive(target, chain.Tip()));
+        BOOST_REQUIRE(GetTestActive(cache, target, chain.Tip()));
     }
     BOOST_CHECK_EQUAL(lookups, CONTEXTS * ACTIVE_QUORUMS);
 
-    const auto rebuilt{cache->GetActive(FIRST_TARGET, chain.Tip())};
+    const auto rebuilt{GetTestActive(cache, FIRST_TARGET, chain.Tip())};
     BOOST_REQUIRE(rebuilt);
     BOOST_CHECK(rebuilt != retained);
     BOOST_CHECK(rebuilt->front().descriptor == retained_descriptor);
@@ -1449,7 +1581,7 @@ BOOST_AUTO_TEST_CASE(probation_checkpoint_roots_do_not_select_validators)
         return std::optional<QuorumSnapshotState>{std::move(result)};
     };
 
-    const auto original{BuildActiveFrozenQuorumRosters(
+    const auto original{BuildTestActiveRosters(
         genesis, BuildConfig(SNAPSHOT_LAG), TARGET_HEIGHT, chain.Tip(),
         lookup)};
     BOOST_REQUIRE(original);
@@ -1458,7 +1590,7 @@ BOOST_AUTO_TEST_CASE(probation_checkpoint_roots_do_not_select_validators)
             NonNullHash(70'000 + slot);
     }
 
-    const auto checkpointed{BuildActiveFrozenQuorumRosters(
+    const auto checkpointed{BuildTestActiveRosters(
         genesis, BuildConfig(SNAPSHOT_LAG), TARGET_HEIGHT, chain.Tip(),
         lookup)};
     BOOST_REQUIRE(checkpointed);
@@ -1474,7 +1606,7 @@ BOOST_AUTO_TEST_CASE(probation_checkpoint_roots_do_not_select_validators)
 
 BOOST_AUTO_TEST_CASE(side_branch_context_is_self_contained_at_target)
 {
-    constexpr int32_t TARGET_HEIGHT{2305};
+    constexpr int32_t TARGET_HEIGHT{2595};
     constexpr uint32_t SNAPSHOT_LAG{144};
     const uint256 genesis{NonNullHash(19)};
     // The active branch has five later blocks, but shares no target block with
@@ -1489,8 +1621,16 @@ BOOST_AUTO_TEST_CASE(side_branch_context_is_self_contained_at_target)
         return std::optional<QuorumSnapshotState>{std::move(result)};
     };
 
+    const auto active_epochs{ActiveEpochsAtHeight(Schedule(), TARGET_HEIGHT)};
+    BOOST_REQUIRE(active_epochs);
+    const uint32_t newest_epoch{active_epochs->back().epoch};
+    RosterBeaconWindow roster_beacons;
+    roster_beacons.active = BeaconBundle(newest_epoch);
+    roster_beacons.next.epoch = newest_epoch + 1;
+    BOOST_REQUIRE(roster_beacons.IsStructurallyValid());
     const auto rosters = BuildActiveFrozenQuorumRosters(
-        genesis, BuildConfig(SNAPSHOT_LAG), TARGET_HEIGHT, side.Tip(), lookup);
+        genesis, BuildConfig(SNAPSHOT_LAG), TARGET_HEIGHT, side.Tip(),
+        roster_beacons.active, lookup);
     BOOST_REQUIRE(rosters);
     std::array<QuorumDescriptor, ACTIVE_QUORUMS> descriptors;
     for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
@@ -1503,28 +1643,66 @@ BOOST_AUTO_TEST_CASE(side_branch_context_is_self_contained_at_target)
     statement.previous_chainlock_height = TARGET_HEIGHT - PQ_CL_SIGN_LAG;
     statement.previous_chainlock_hash =
         side.At(statement.previous_chainlock_height).GetBlockHash();
+    statement.roster_transition =
+        RosterAuthorizationTransitionKind::ROTATE;
+    statement.roster_beacons = roster_beacons;
     statement.payment_probation_state_hash = NonNullHash(60'001);
     statement.quorum_context_hash = GetQuorumContextHash(
         genesis, TARGET_HEIGHT, statement.block_hash, descriptors);
+
+    RosterBeaconWindow previous_window;
+    previous_window.active = BeaconBundle(newest_epoch - 1);
+    previous_window.next = ReadyBeaconSeed(newest_epoch);
+    RosterAuthorizationVerificationContext live;
+    live.predecessor_height = statement.previous_chainlock_height;
+    live.predecessor_block_hash = statement.previous_chainlock_hash;
+    live.previous = RosterAuthorizationPriorState{
+        NonNullHash(60'002), previous_window};
+    live.normal_input = test::MakeSyntheticNormalRosterAuthorizationInput(
+        statement, *live.previous);
+
+    const auto set_authorization_hash = [&, previous = live.previous](
+                                            ChainLockStatement& value) {
+        RosterAuthorizationTransition transition;
+        transition.kind = value.roster_transition;
+        transition.target_height = value.height;
+        transition.target_block_hash = value.block_hash;
+        transition.predecessor_height = value.previous_chainlock_height;
+        transition.predecessor_block_hash = value.previous_chainlock_hash;
+        transition.previous = previous;
+        transition.new_window = value.roster_beacons;
+        const auto hash{GetRosterAuthorizationStateHash(genesis, transition)};
+        BOOST_REQUIRE(hash);
+        value.roster_authorization_state_hash = *hash;
+    };
+    set_authorization_hash(statement);
+    const auto authorization_mask{
+        ValidateRosterAuthorizationState(genesis, statement, live)};
+    BOOST_REQUIRE(authorization_mask);
+    BOOST_CHECK_EQUAL(*authorization_mask, 0b0111);
+    BOOST_CHECK_EQUAL(
+        *authorization_mask & (uint8_t{1} << (ACTIVE_QUORUMS - 1)), 0);
     BOOST_CHECK(ValidateFrozenQuorumContext(
-        genesis, statement, *rosters, 0b0111));
-    BOOST_CHECK(!ValidateFrozenQuorumContext(
-        genesis, statement, *rosters, 0b1111));
+        genesis, statement, *rosters, live));
     ChainLockVerificationError error{ChainLockVerificationError::NONE};
     const auto roster_set{VerifiedRosterSet::Create(
         genesis, rosters, &error)};
     BOOST_REQUIRE(roster_set);
     BOOST_CHECK(error == ChainLockVerificationError::NONE);
-    BOOST_REQUIRE(PreparedChainLockContext::Create(
-        Schedule(), statement, roster_set, 0b0111, &error));
-    BOOST_CHECK(!PreparedChainLockContext::Create(
-        Schedule(), statement, roster_set, 0b1111, &error));
-    BOOST_CHECK(error == ChainLockVerificationError::INVALID_DESCRIPTOR);
+    const auto prepared{PreparedChainLockContext::Create(
+        Schedule(), statement, roster_set, live, &error)};
+    BOOST_REQUIRE(prepared);
+    BOOST_CHECK_EQUAL(prepared->AuthorizationMask(), 0b0111);
 
     auto wrong_branch{statement};
     wrong_branch.block_hash = active.At(TARGET_HEIGHT).GetBlockHash();
+    set_authorization_hash(wrong_branch);
+    auto wrong_branch_live{live};
+    wrong_branch_live.normal_input =
+        test::MakeSyntheticNormalRosterAuthorizationInput(
+            wrong_branch, *wrong_branch_live.previous);
     BOOST_CHECK(!PreparedChainLockContext::Create(
-        Schedule(), wrong_branch, roster_set, 0b0111, &error));
+        Schedule(), wrong_branch, roster_set, wrong_branch_live, &error));
     BOOST_CHECK(error ==
                 ChainLockVerificationError::QUORUM_CONTEXT_MISMATCH);
     BOOST_CHECK(statement.quorum_context_hash != GetQuorumContextHash(

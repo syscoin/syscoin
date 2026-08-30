@@ -10,6 +10,7 @@
 #include <llmq/pq_child_key_tree.h>
 #include <llmq/pq_chainlock_schedule.h>
 #include <llmq/pq_chainlock_types.h>
+#include <llmq/pq_roster_beacon.h>
 #include <random.h>
 #include <sync.h>
 
@@ -57,6 +58,7 @@ enum class ChainLockVerificationError : uint8_t {
     DUPLICATE_CHILD_KEY,
     MEMBER_ROOT_MISMATCH,
     CHILD_KEY_ROOT_MISMATCH,
+    INVALID_ROSTER_BEACON,
     QUORUM_CONTEXT_MISMATCH,
     INVALID_AUTHORIZATION,
     INVALID_SIGNER,
@@ -64,6 +66,50 @@ enum class ChainLockVerificationError : uint8_t {
     INVALID_PUBLIC_KEY,
     INVALID_SIGNATURE,
 };
+
+/**
+ * The only contexts allowed to introduce a discontinuous roster-beacon
+ * state. Ordinary live verification admits neither exception.
+ */
+enum class RosterAuthorizationAdmission : uint8_t {
+    LIVE = 0,
+    INITIALIZE = 1,
+    RECOVER = 2,
+    /** Exact latest winner loaded from this node's authenticated fsynced DB. */
+    TRUSTED_PERSISTENCE = 3,
+    /** Exact old statement already covered by a durable receipt checkpoint. */
+    ATTESTED_HISTORY = 4,
+};
+
+/**
+ * Exact predecessor state supplied by the branch/finality layer. A live
+ * normal transition always requires it. INITIALIZE and RECOVER are explicit
+ * admission decisions rather than shapes inferred from the wire.
+ */
+struct RosterAuthorizationVerificationContext {
+    RosterAuthorizationAdmission admission{
+        RosterAuthorizationAdmission::LIVE};
+    int32_t predecessor_height{-1};
+    uint256 predecessor_block_hash;
+    std::optional<RosterAuthorizationPriorState> previous;
+    /**
+     * Exact chain/BTC facts prevalidated by the live handler. The verifier
+     * rederives the sole permitted normal transition from this input; a
+     * caller cannot authorize LIVE by supplying only a matching state hash.
+     */
+    std::optional<NormalRosterAuthorizationInput> normal_input;
+};
+
+/**
+ * Validate the statement's complete roster state transition and return its
+ * consensus authorization mask. ROTATE authorizes the old three rosters;
+ * every other admitted transition authorizes all four.
+ */
+[[nodiscard]] std::optional<uint8_t> ValidateRosterAuthorizationState(
+    const uint256& genesis_hash,
+    const ChainLockStatement& statement,
+    const RosterAuthorizationVerificationContext& context,
+    ChainLockVerificationError* error = nullptr);
 
 /**
  * Immutable capability proving one exact roster set satisfies all intrinsic
@@ -140,14 +186,14 @@ public:
            ChainLockScheduleConfig schedule,
            ChainLockStatement statement,
            FrozenQuorumRostersPtr rosters,
-           uint8_t authorization_mask,
+           const RosterAuthorizationVerificationContext& authorization,
            ChainLockVerificationError* error = nullptr);
 
     [[nodiscard]] static std::shared_ptr<const PreparedChainLockContext>
     Create(ChainLockScheduleConfig schedule,
            ChainLockStatement statement,
            VerifiedRosterSetPtr roster_set,
-           uint8_t authorization_mask,
+           const RosterAuthorizationVerificationContext& authorization,
            ChainLockVerificationError* error = nullptr);
 
     [[nodiscard]] const uint256& GenesisHash() const noexcept
@@ -230,7 +276,7 @@ struct PreparedChainLockVerification {
     const uint256& genesis_hash,
     const ChainLockStatement& statement,
     const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
-    uint8_t authorization_mask,
+    const RosterAuthorizationVerificationContext& authorization,
     ChainLockVerificationError* error = nullptr);
 
 /** Cheap/contextual preparation for one private quorum share. */
@@ -239,7 +285,7 @@ struct PreparedChainLockVerification {
     const ChainLockScheduleConfig& schedule,
     const ChainLockShare& share,
     const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
-    uint8_t authorization_mask,
+    const RosterAuthorizationVerificationContext& authorization,
     ChainLockVerificationError* error = nullptr);
 
 /** Prepare one share against an already fully validated exact context. */
@@ -254,7 +300,7 @@ PrepareChainLockShareVerification(
     const ChainLockScheduleConfig& schedule,
     const ChainLockShare& share,
     const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
-    uint8_t authorization_mask,
+    const RosterAuthorizationVerificationContext& authorization,
     ChainLockVerificationError* error = nullptr);
 
 /**
@@ -288,7 +334,7 @@ PrepareChainLockShareVerification(
     const ChainLockScheduleConfig& schedule,
     const FinalChainLock& chainlock,
     const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
-    uint8_t authorization_mask,
+    const RosterAuthorizationVerificationContext& authorization,
     ChainLockVerificationError* error = nullptr);
 
 /** Prepare a final certificate against an intrinsically verified roster set. */
@@ -297,7 +343,14 @@ PrepareFinalChainLockVerification(
     const ChainLockScheduleConfig& schedule,
     const FinalChainLock& chainlock,
     const VerifiedRosterSet& roster_set,
-    uint8_t authorization_mask,
+    const RosterAuthorizationVerificationContext& authorization,
+    ChainLockVerificationError* error = nullptr);
+
+/** Prepare a final witness against an already validated exact statement. */
+[[nodiscard]] std::optional<PreparedChainLockVerification>
+PrepareFinalChainLockVerification(
+    const FinalChainLock& chainlock,
+    const PreparedChainLockContext& context,
     ChainLockVerificationError* error = nullptr);
 
 /**
@@ -313,7 +366,7 @@ PrepareFinalChainLockVerification(
     const ChainLockScheduleConfig& schedule,
     const FinalChainLock& chainlock,
     const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
-    uint8_t authorization_mask,
+    const RosterAuthorizationVerificationContext& authorization,
     ScheduledWOTSCheckQueue* queue = nullptr,
     ChainLockVerificationError* error = nullptr);
 
@@ -333,7 +386,7 @@ public:
         const ChainLockScheduleConfig& schedule,
         const FinalChainLock& chainlock,
         const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
-        uint8_t authorization_mask,
+        const RosterAuthorizationVerificationContext& authorization,
         ChainLockVerificationError* error = nullptr)
         EXCLUSIVE_LOCKS_REQUIRED(!m_preflight_mutex);
 

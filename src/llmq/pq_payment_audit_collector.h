@@ -101,7 +101,7 @@ public:
         PaymentAuditStatement statement,
         const FinalChainLock& seal_chainlock,
         FrozenQuorumRostersPtr rosters,
-        uint8_t authorization_mask,
+        const RosterAuthorizationVerificationContext& authorization,
         ShareCollectionError* error = nullptr);
 
     static std::unique_ptr<PaymentAuditCollector> Create(

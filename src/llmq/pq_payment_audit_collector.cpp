@@ -107,7 +107,7 @@ std::unique_ptr<PaymentAuditCollector> PaymentAuditCollector::Create(
     PaymentAuditStatement statement,
     const FinalChainLock& seal_chainlock,
     FrozenQuorumRostersPtr rosters,
-    uint8_t authorization_mask,
+    const RosterAuthorizationVerificationContext& authorization,
     ShareCollectionError* error)
 {
     SetError(error, ShareCollectionError::NONE);
@@ -120,7 +120,7 @@ std::unique_ptr<PaymentAuditCollector> PaymentAuditCollector::Create(
         PaymentAuditVerificationError::NONE};
     auto context{PreparedPaymentAuditContext::Create(
         genesis_hash, schedule, std::move(statement), seal_chainlock,
-        std::move(rosters), authorization_mask, &verification_error)};
+        std::move(rosters), authorization, &verification_error)};
     if (!context) {
         SetError(error, MapVerificationError(verification_error));
         return nullptr;

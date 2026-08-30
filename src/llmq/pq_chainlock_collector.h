@@ -129,7 +129,7 @@ public:
         ChainLockScheduleConfig schedule,
         ChainLockStatement statement,
         FrozenQuorumRostersPtr rosters,
-        uint8_t authorization_mask,
+        const RosterAuthorizationVerificationContext& authorization,
         ShareCollectionError* error = nullptr);
 
     static std::unique_ptr<ChainLockCollector> Create(

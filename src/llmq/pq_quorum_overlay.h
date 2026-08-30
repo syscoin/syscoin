@@ -113,6 +113,7 @@ private:
         uint256 local_pro_tx_hash;
         uint32_t newest_epoch{0};
         uint256 newest_base_hash;
+        uint256 roster_beacon_bundle_hash;
 
         friend bool operator==(const Context&, const Context&) = default;
     };

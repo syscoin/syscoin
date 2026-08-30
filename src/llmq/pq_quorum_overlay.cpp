@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <llmq/pq_quorum_overlay.h>
+#include <llmq/quorums_chainlocks.h>
 
 #include <chain.h>
 #include <evo/deterministicmns.h>
@@ -276,13 +277,32 @@ void CPQQuorumConnectionOverlay::UpdatedBlockTip(
         ClearLocked();
         return;
     }
+    const auto accepted_chainlock{
+        chainLocksHandler ? chainLocksHandler->GetBestChainLock() : nullptr};
+    if (!accepted_chainlock ||
+        !accepted_chainlock->statement.roster_beacons.active
+             .IsForNewestEpoch(newest_identity.epoch)) {
+        LogPrint(BCLog::NET_NETCONN,
+                 "PQ overlay retaining previous topology; no exact accepted "
+                 "roster beacon bundle for target=%d\n",
+                 *target_height);
+        return;
+    }
+    const auto& beacon_bundle{
+        accepted_chainlock->statement.roster_beacons.active};
+    const auto beacon_bundle_hash{pq::GetActiveRosterBeaconBundleHash(
+        genesis_hash, beacon_bundle)};
+    if (!beacon_bundle_hash) {
+        ClearLocked();
+        return;
+    }
     const Context context{*local_operator, newest_identity.epoch,
-                          newest_base->GetBlockHash()};
+                          newest_base->GetBlockHash(), *beacon_bundle_hash};
     if (m_context && *m_context == context) return;
 
     pq::QuorumBuildError build_error{pq::QuorumBuildError::NONE};
     const auto rosters{m_roster_cache->GetActive(
-        *target_height, *target, &build_error)};
+        *target_height, *target, beacon_bundle, &build_error)};
     if (!rosters) {
         // Consensus validation and share verification remain fail-closed. A
         // stale bounded connection set is harmless and can help recovery.
