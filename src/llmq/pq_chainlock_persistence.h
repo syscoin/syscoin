@@ -9,7 +9,9 @@
 #include <llmq/pq_chainlock_store.h>
 #include <llmq/pq_payment_audit.h>
 
+#include <cstddef>
 #include <cstdint>
+#include <ios>
 #include <memory>
 #include <optional>
 
@@ -24,6 +26,52 @@ inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_BTCC_PRESEAL_KEY{5};
 inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_BTCC_PROSPECTIVE_PRESEAL_KEY{6};
 inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_PAYMENT_AUDIT_PRESEAL_KEY{7};
 inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_PAYMENT_AUDIT_PROSPECTIVE_PRESEAL_KEY{8};
+inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_ROSTER_RECOVERY_PRECOMMIT_KEY{9};
+
+inline constexpr uint16_t ROSTER_RECOVERY_PRECOMMIT_VERSION{1};
+
+/** The only two admission paths allowed to consume a recovery precommit. */
+enum class RosterRecoveryAdmission : uint8_t {
+    INITIALIZE = 0,
+    CURRENT_CATCHUP = 1,
+};
+
+/**
+ * Local signer-safety state, not network verification authority. It is first
+ * fsynced as PENDING before the future Bitcoin block exists, then may advance
+ * exactly once to READY before any share is produced. Normal roster handoffs
+ * live entirely in the best ChainLock certificate and never use this record.
+ */
+struct RosterRecoveryPrecommit {
+    static constexpr std::size_t WIRE_SIZE{
+        sizeof(uint16_t) + sizeof(uint8_t) + sizeof(int32_t) + 32 +
+        RosterBeaconSeed::WIRE_SIZE};
+
+    uint16_t version{ROSTER_RECOVERY_PRECOMMIT_VERSION};
+    RosterRecoveryAdmission admission{RosterRecoveryAdmission::INITIALIZE};
+    int32_t predecessor_height{-1};
+    uint256 predecessor_hash;
+    RosterBeaconSeed pending_seed;
+
+    SERIALIZE_METHODS(RosterRecoveryPrecommit, obj)
+    {
+        uint8_t admission{static_cast<uint8_t>(obj.admission)};
+        READWRITE(obj.version, admission, obj.predecessor_height,
+                  obj.predecessor_hash, obj.pending_seed);
+        SER_READ(obj, obj.admission =
+                          static_cast<RosterRecoveryAdmission>(admission));
+        SER_READ(obj, if (!obj.IsStructurallyValid()) {
+            throw std::ios_base::failure(
+                "non-canonical roster recovery precommit");
+        });
+    }
+
+    [[nodiscard]] bool IsStructurallyValid() const noexcept;
+    friend bool operator==(const RosterRecoveryPrecommit&,
+                           const RosterRecoveryPrecommit&) = default;
+};
+
+static_assert(RosterRecoveryPrecommit::WIRE_SIZE == 151);
 
 /**
  * Crash-durable bounds for one deferred BTCC/NEVM replay obligation.
@@ -203,6 +251,8 @@ public:
     [[nodiscard]] BTCCPresealState LoadBTCCPresealState() const;
     [[nodiscard]] PaymentAuditPresealState
     LoadPaymentAuditPresealState() const;
+    [[nodiscard]] std::optional<RosterRecoveryPrecommit>
+    LoadRosterRecoveryPrecommit() const;
 
     /**
      * Synchronously replace the durable winner. An identical write is
@@ -226,6 +276,39 @@ public:
         ChainLockPersistenceError* error = nullptr,
         const std::optional<BTCCCursorReconciliationProof>&
             btcc_cursor_reconciliation = std::nullopt);
+
+    /**
+     * Atomically install a verified first INITIALIZE winner, consuming a
+     * matching local marker when present. Plain PersistBest rejects it.
+     */
+    [[nodiscard]] bool PersistInitializedBest(
+        const FinalChainLock& chainlock,
+        ChainLockPersistenceError* error = nullptr);
+
+    /**
+     * Atomically install a verified RECOVER winner, consuming a matching
+     * local marker when present. Plain PersistCatchupBest rejects it.
+     */
+    [[nodiscard]] bool PersistRecoveryCatchupBest(
+        const FinalChainLock& chainlock,
+        ChainLockPersistenceError* error = nullptr,
+        const std::optional<BTCCCursorReconciliationProof>&
+            btcc_cursor_reconciliation = std::nullopt);
+
+    /** Stage PENDING first; only its exact durable record may become READY. */
+    [[nodiscard]] bool PersistRosterRecoveryPrecommit(
+        const RosterRecoveryPrecommit& precommit,
+        ChainLockPersistenceError* error = nullptr);
+
+    /** Atomically replace one exact attempt; never exposes a clear gap. */
+    [[nodiscard]] bool ReplaceRosterRecoveryPrecommit(
+        const RosterRecoveryPrecommit& expected,
+        const RosterRecoveryPrecommit& replacement,
+        ChainLockPersistenceError* error = nullptr);
+
+    /** Explicitly abandon the staged recovery observation. */
+    [[nodiscard]] bool ClearRosterRecoveryPrecommit(
+        ChainLockPersistenceError* error = nullptr);
 
     /** Atomically replace both deferred-NEVM branch obligations. */
     [[nodiscard]] bool PersistBTCCPresealState(

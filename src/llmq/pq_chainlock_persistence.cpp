@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <llmq/pq_chainlock_persistence.h>
+#include <llmq/pq_roster_beacon.h>
 
 #include <hash.h>
 #include <streams.h>
@@ -18,14 +19,34 @@
 #include <utility>
 
 namespace llmq::pq {
+
+bool RosterRecoveryPrecommit::IsStructurallyValid() const noexcept
+{
+    if (version != ROSTER_RECOVERY_PRECOMMIT_VERSION ||
+        (admission != RosterRecoveryAdmission::INITIALIZE &&
+         admission != RosterRecoveryAdmission::CURRENT_CATCHUP) ||
+        !pending_seed.IsStructurallyValid() ||
+        pending_seed.anchor_kind != RosterBeaconAnchorKind::RECOVERY ||
+        (pending_seed.state != RosterBeaconState::PENDING &&
+         !pending_seed.IsReady()) ||
+        pending_seed.epoch % ACTIVE_QUORUMS != ACTIVE_QUORUMS - 1) {
+        return false;
+    }
+    if (admission == RosterRecoveryAdmission::INITIALIZE) {
+        return predecessor_height == -1 && predecessor_hash.IsNull();
+    }
+    return predecessor_height >= 0 && !predecessor_hash.IsNull() &&
+           pending_seed.anchor_cursor.sys_height > predecessor_height;
+}
+
 namespace {
 
 inline constexpr std::array<uint8_t, 8> SCHEMA_MAGIC{
-    'S', 'Y', 'S', 'P', 'Q', 'C', 'L', '2'};
-inline constexpr uint16_t SCHEMA_VERSION{2};
+    'S', 'Y', 'S', 'P', 'Q', 'C', 'L', '1'};
+inline constexpr uint16_t SCHEMA_VERSION{1};
 inline constexpr uint16_t RECORD_VERSION{1};
 inline constexpr std::string_view SCHEMA_HASH_DOMAIN{
-    "SYS_PQ_CHAINLOCK_PERSISTENCE_SCHEMA_V2"};
+    "SYS_PQ_CHAINLOCK_PERSISTENCE_SCHEMA_V1"};
 inline constexpr std::string_view RECORD_HASH_DOMAIN{
     "SYS_PQ_CHAINLOCK_PERSISTENCE_RECORD_V1"};
 inline constexpr std::string_view CATCHUP_MARKER_HASH_DOMAIN{
@@ -34,6 +55,8 @@ inline constexpr std::string_view BTCC_PRESEAL_MARKER_HASH_DOMAIN{
     "SYS_PQ_BTCC_PRESEAL_MARKER_V1"};
 inline constexpr std::string_view PAYMENT_AUDIT_PRESEAL_MARKER_HASH_DOMAIN{
     "SYS_PQ_PAYMENT_AUDIT_PRESEAL_MARKER_V1"};
+inline constexpr std::string_view ROSTER_RECOVERY_PRECOMMIT_HASH_DOMAIN{
+    "SYS_PQ_ROSTER_RECOVERY_PRECOMMIT_V1"};
 
 void SetError(ChainLockPersistenceError* error,
               ChainLockPersistenceError value)
@@ -275,6 +298,34 @@ struct DiskCatchupMarker {
     }
 };
 
+struct DiskRosterRecoveryPrecommit {
+    static constexpr uint16_t VERSION{1};
+    static constexpr std::size_t WIRE_SIZE{
+        sizeof(uint16_t) + 2 * 32 +
+        RosterRecoveryPrecommit::WIRE_SIZE};
+
+    uint16_t version{VERSION};
+    uint256 schema_hash;
+    RosterRecoveryPrecommit precommit;
+    uint256 checksum;
+
+    template <typename Stream>
+    void Serialize(Stream& stream) const
+    {
+        ::SerializeMany(stream, version, schema_hash, precommit, checksum);
+    }
+
+    template <typename Stream>
+    void Unserialize(Stream& stream)
+    {
+        if (stream.size() != WIRE_SIZE) {
+            throw std::ios_base::failure(
+                "invalid roster recovery precommit size");
+        }
+        ::UnserializeMany(stream, version, schema_hash, precommit, checksum);
+    }
+};
+
 struct DiskBTCCPresealMarker {
     static constexpr uint16_t VERSION{1};
     static constexpr std::size_t WIRE_SIZE{
@@ -383,6 +434,28 @@ DiskCatchupMarker MakeCatchupMarker(const DiskRecord& record)
     return marker;
 }
 
+uint256 GetRosterRecoveryPrecommitChecksum(
+    const uint256& schema_hash,
+    const RosterRecoveryPrecommit& precommit)
+{
+    HashWriter writer{SER_GETHASH, 0};
+    WriteDomain(writer, ROSTER_RECOVERY_PRECOMMIT_HASH_DOMAIN);
+    writer << schema_hash << precommit;
+    return writer.GetHash();
+}
+
+DiskRosterRecoveryPrecommit MakeDiskRosterRecoveryPrecommit(
+    const uint256& schema_hash,
+    const RosterRecoveryPrecommit& precommit)
+{
+    DiskRosterRecoveryPrecommit disk;
+    disk.schema_hash = schema_hash;
+    disk.precommit = precommit;
+    disk.checksum =
+        GetRosterRecoveryPrecommitChecksum(schema_hash, precommit);
+    return disk;
+}
+
 uint256 GetBTCCPresealMarkerChecksum(const uint256& schema_hash,
                                      const BTCCPresealMarker& marker)
 {
@@ -448,8 +521,9 @@ DiskPaymentAuditPresealMarker MakePaymentAuditPresealMarker(
 }
 
 static_assert(DiskRecord::WIRE_SIZE < MAX_SIZE);
+static_assert(DiskRosterRecoveryPrecommit::WIRE_SIZE == 217);
 static_assert(DiskBTCCPresealMarker::WIRE_SIZE == 384);
-static_assert(DiskPaymentAuditPresealMarker::WIRE_SIZE == 571);
+static_assert(DiskPaymentAuditPresealMarker::WIRE_SIZE == 683);
 
 bool IsValidBTCCPresealMarker(
     const ChainLockFinalityStoreConfig& config,
@@ -555,6 +629,33 @@ bool IsValidPaymentAuditPresealMarker(
             marker.terminal_receipt.epoch > predecessor.epoch);
 }
 
+bool IsValidRosterRecoveryPrecommit(
+    const ChainLockFinalityStoreConfig& config,
+    const RosterRecoveryPrecommit& precommit) noexcept
+{
+    const auto& pending_seed{precommit.pending_seed};
+    const auto anchor_epoch{EpochForHeight(
+        config.chainlock_schedule,
+        pending_seed.anchor_cursor.sys_height)};
+    const auto canonical_target{anchor_epoch
+        ? CanonicalRosterRecoveryTargetHeight(
+              config.chainlock_schedule, config.btcc_schedule,
+              *anchor_epoch)
+        : std::optional<int32_t>{}};
+    return precommit.IsStructurallyValid() &&
+           pending_seed.anchor_cursor.sys_height >
+               config.activation_predecessor_height &&
+           IsEligibleChainLockTarget(
+               config.chainlock_schedule,
+               pending_seed.anchor_cursor.sys_height) &&
+           anchor_epoch && *anchor_epoch == pending_seed.epoch &&
+           canonical_target &&
+           *canonical_target == pending_seed.anchor_cursor.sys_height &&
+           IsBTCCCandidateHeight(
+               config.btcc_schedule,
+               pending_seed.anchor_cursor.sys_height);
+}
+
 bool HasFreshPaymentAuditPresealRevision(
     const PaymentAuditPresealState& candidate,
     uint64_t previous_revision) noexcept
@@ -598,6 +699,58 @@ bool SealsUnsealedBTCC(const FinalChainLock& seal,
         config.btcc_schedule.nevm_injection_lag};
     return carrier_height <= std::numeric_limits<int32_t>::max() &&
            seal.statement.height >= carrier_height;
+}
+
+bool IsExactRecoveryStatement(
+    const FinalChainLock& chainlock,
+    RosterRecoveryAdmission expected_admission) noexcept
+{
+    if (!chainlock.IsStructurallyValid() ||
+        chainlock.statement.btcc_advance != BTCCAdvance::ADVANCE ||
+        !IsRecoveryRosterBeaconWindow(chainlock.statement.roster_beacons)) {
+        return false;
+    }
+    const auto& ready{
+        chainlock.statement.roster_beacons.active.seeds.back()};
+    if (!ready.IsReady() ||
+        ready.anchor_cursor.sys_height != chainlock.statement.height ||
+        ready.anchor_cursor.sys_hash != chainlock.statement.block_hash ||
+        chainlock.statement.accepted_btcc_cursor != ready.anchor_cursor) {
+        return false;
+    }
+    if (expected_admission == RosterRecoveryAdmission::INITIALIZE) {
+        return chainlock.statement.roster_transition ==
+               RosterAuthorizationTransitionKind::INITIALIZE;
+    }
+    return chainlock.statement.roster_transition ==
+           RosterAuthorizationTransitionKind::RECOVER;
+}
+
+bool DoesRecoveryPrecommitMatchBest(
+    const RosterRecoveryPrecommit& precommit,
+    const std::optional<DiskRecord>& best) noexcept
+{
+    if (precommit.admission == RosterRecoveryAdmission::INITIALIZE) {
+        return !best && precommit.predecessor_height == -1 &&
+               precommit.predecessor_hash.IsNull();
+    }
+    return best &&
+           precommit.predecessor_height ==
+               best->chainlock.statement.height &&
+           precommit.predecessor_hash ==
+               best->chainlock.statement.block_hash;
+}
+
+bool IsExactRosterRecoveryResolution(
+    const RosterRecoveryPrecommit& pending,
+    const RosterRecoveryPrecommit& ready) noexcept
+{
+    return pending.version == ready.version &&
+           pending.admission == ready.admission &&
+           pending.predecessor_height == ready.predecessor_height &&
+           pending.predecessor_hash == ready.predecessor_hash &&
+           IsExactRosterBeaconReveal(
+               pending.pending_seed, ready.pending_seed);
 }
 
 template <typename Value>
@@ -691,6 +844,7 @@ struct PQChainLockPersistence::Impl {
         bool found_btcc_prospective_preseal{false};
         bool found_payment_audit_preseal{false};
         bool found_payment_audit_prospective_preseal{false};
+        bool found_roster_recovery_precommit{false};
         {
             std::unique_ptr<CDBIterator> iterator{db.NewIterator()};
             for (iterator->SeekToFirst(); iterator->Valid(); iterator->Next()) {
@@ -754,6 +908,13 @@ struct PQChainLockPersistence::Impl {
                             "duplicate prospective payment-audit pre-seal marker");
                     }
                     found_payment_audit_prospective_preseal = true;
+                } else if (key.type ==
+                           PQ_CHAINLOCK_PERSISTENCE_ROSTER_RECOVERY_PRECOMMIT_KEY) {
+                    if (found_roster_recovery_precommit) {
+                        throw std::runtime_error(
+                            "duplicate roster recovery precommit");
+                    }
+                    found_roster_recovery_precommit = true;
                 } else {
                     throw std::runtime_error(
                         "unknown PQ ChainLock persistence key");
@@ -795,6 +956,26 @@ struct PQChainLockPersistence::Impl {
                     "corrupt PQ ChainLock persistence record");
             }
             best = std::move(*record);
+        }
+
+        if (found_roster_recovery_precommit) {
+            const DiskKey precommit_key{
+                PQ_CHAINLOCK_PERSISTENCE_ROSTER_RECOVERY_PRECOMMIT_KEY};
+            const auto disk{ReadExactValue<DiskRosterRecoveryPrecommit>(
+                db, precommit_key)};
+            if (!disk ||
+                disk->version != DiskRosterRecoveryPrecommit::VERSION ||
+                disk->schema_hash != schema_hash ||
+                !IsValidRosterRecoveryPrecommit(config,
+                                                disk->precommit) ||
+                disk->checksum != GetRosterRecoveryPrecommitChecksum(
+                    disk->schema_hash, disk->precommit) ||
+                !DoesRecoveryPrecommitMatchBest(
+                    disk->precommit, best)) {
+                throw std::runtime_error(
+                    "corrupt roster recovery precommit");
+            }
+            roster_recovery_precommit = disk->precommit;
         }
 
         if (found_catchup_marker) {
@@ -928,7 +1109,9 @@ struct PQChainLockPersistence::Impl {
                      ChainLockPersistenceError* error,
                      bool catchup = false,
                      const std::optional<BTCCCursorReconciliationProof>&
-                         btcc_cursor_reconciliation = std::nullopt)
+                         btcc_cursor_reconciliation = std::nullopt,
+                     std::optional<RosterRecoveryAdmission>
+                         consume_recovery_precommit = std::nullopt)
         EXCLUSIVE_LOCKS_REQUIRED(mutex)
     {
         SetError(error, ChainLockPersistenceError::NONE);
@@ -937,6 +1120,24 @@ struct PQChainLockPersistence::Impl {
                                        chainlock.statement.height)) {
             SetError(error, failed ? ChainLockPersistenceError::IO_FAILURE
                                    : ChainLockPersistenceError::INVALID_CHAINLOCK);
+            return false;
+        }
+
+        const auto transition{chainlock.statement.roster_transition};
+        if ((!consume_recovery_precommit &&
+             (transition == RosterAuthorizationTransitionKind::INITIALIZE ||
+              transition == RosterAuthorizationTransitionKind::RECOVER)) ||
+            (!consume_recovery_precommit &&
+             roster_recovery_precommit &&
+             roster_recovery_precommit->admission ==
+                 RosterRecoveryAdmission::INITIALIZE) ||
+            (consume_recovery_precommit ==
+                 RosterRecoveryAdmission::INITIALIZE &&
+             catchup) ||
+            (consume_recovery_precommit ==
+                 RosterRecoveryAdmission::CURRENT_CATCHUP &&
+             !catchup)) {
+            SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
             return false;
         }
 
@@ -949,6 +1150,38 @@ struct PQChainLockPersistence::Impl {
             SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
             return false;
         }
+        const bool exact_best{
+            best && candidate.witness_id == best->witness_id &&
+            candidate.logical_id == best->logical_id &&
+            candidate.checksum == best->checksum &&
+            candidate.chainlock == best->chainlock};
+        if (consume_recovery_precommit) {
+            if (!IsExactRecoveryStatement(
+                    chainlock, *consume_recovery_precommit) ||
+                (*consume_recovery_precommit ==
+                     RosterRecoveryAdmission::INITIALIZE &&
+                 best && !exact_best)) {
+                SetError(error,
+                         ChainLockPersistenceError::INVALID_CHAINLOCK);
+                return false;
+            }
+        }
+        const bool ordinary_invalidates_current_recovery{
+            !consume_recovery_precommit &&
+            transition != RosterAuthorizationTransitionKind::RECOVER &&
+            roster_recovery_precommit &&
+            roster_recovery_precommit->admission ==
+                RosterRecoveryAdmission::CURRENT_CATCHUP &&
+            (candidate.chainlock.statement.height >
+                 roster_recovery_precommit->predecessor_height ||
+             (candidate.chainlock.statement.height ==
+                  roster_recovery_precommit->predecessor_height &&
+              candidate.chainlock.statement.block_hash !=
+                  roster_recovery_precommit->predecessor_hash))};
+        const bool erase_recovery_precommit{
+            (consume_recovery_precommit.has_value() &&
+             roster_recovery_precommit.has_value()) ||
+            ordinary_invalidates_current_recovery};
         const bool cursor_regresses{
             best && !IsDurableBTCCursorMonotonic(
                 best->chainlock.statement.accepted_btcc_cursor,
@@ -970,10 +1203,27 @@ struct PQChainLockPersistence::Impl {
             }
             if (candidate.chainlock.statement.height ==
                 best->chainlock.statement.height) {
-                if (candidate.witness_id == best->witness_id &&
-                    candidate.logical_id == best->logical_id &&
-                    candidate.checksum == best->checksum &&
-                    candidate.chainlock == best->chainlock) {
+                if (exact_best) {
+                    if (erase_recovery_precommit &&
+                        roster_recovery_precommit) {
+                        try {
+                            CDBBatch batch{db};
+                            batch.Erase(DiskKey{
+                                PQ_CHAINLOCK_PERSISTENCE_ROSTER_RECOVERY_PRECOMMIT_KEY});
+                            if (!db.WriteBatch(batch, /*fSync=*/true)) {
+                                failed = true;
+                                SetError(error,
+                                         ChainLockPersistenceError::IO_FAILURE);
+                                return false;
+                            }
+                        } catch (const std::exception&) {
+                            failed = true;
+                            SetError(error,
+                                     ChainLockPersistenceError::IO_FAILURE);
+                            return false;
+                        }
+                        roster_recovery_precommit.reset();
+                    }
                     return true;
                 }
                 SetError(error, ChainLockPersistenceError::HEIGHT_CONFLICT);
@@ -1030,6 +1280,10 @@ struct PQChainLockPersistence::Impl {
                     DiskKey{PQ_CHAINLOCK_PERSISTENCE_CATCHUP_MARKER_KEY},
                     MakeCatchupMarker(candidate));
             }
+            if (erase_recovery_precommit) {
+                batch.Erase(DiskKey{
+                    PQ_CHAINLOCK_PERSISTENCE_ROSTER_RECOVERY_PRECOMMIT_KEY});
+            }
             if (!db.WriteBatch(batch, /*fSync=*/true)) {
                 failed = true;
                 SetError(error, ChainLockPersistenceError::IO_FAILURE);
@@ -1043,6 +1297,9 @@ struct PQChainLockPersistence::Impl {
         best = std::move(candidate);
         unsealed = std::move(next_unsealed);
         catchup_used = catchup_used || catchup;
+        if (erase_recovery_precommit) {
+            roster_recovery_precommit.reset();
+        }
         ++certificate_revision;
         return true;
     }
@@ -1090,6 +1347,160 @@ struct PQChainLockPersistence::Impl {
         }
         unsealed = std::move(candidate);
         ++certificate_revision;
+        return true;
+    }
+
+    bool PersistRosterRecoveryPrecommit(
+        const RosterRecoveryPrecommit& precommit,
+        ChainLockPersistenceError* error)
+        EXCLUSIVE_LOCKS_REQUIRED(mutex)
+    {
+        SetError(error, ChainLockPersistenceError::NONE);
+        if (failed || !IsValidRosterRecoveryPrecommit(config, precommit) ||
+            !DoesRecoveryPrecommitMatchBest(precommit, best)) {
+            SetError(error, failed
+                                ? ChainLockPersistenceError::IO_FAILURE
+                                : ChainLockPersistenceError::INVALID_CHAINLOCK);
+            return false;
+        }
+        if (!roster_recovery_precommit &&
+            precommit.pending_seed.state != RosterBeaconState::PENDING) {
+            SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
+            return false;
+        }
+        if (roster_recovery_precommit &&
+            *roster_recovery_precommit == precommit) {
+            return true;
+        }
+        if (roster_recovery_precommit &&
+            !IsExactRosterRecoveryResolution(
+                *roster_recovery_precommit, precommit)) {
+            SetError(error, ChainLockPersistenceError::HEIGHT_CONFLICT);
+            return false;
+        }
+
+        const auto disk{
+            MakeDiskRosterRecoveryPrecommit(schema_hash, precommit)};
+        if (::GetSerializeSize(disk) !=
+            DiskRosterRecoveryPrecommit::WIRE_SIZE) {
+            SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
+            return false;
+        }
+        try {
+            CDBBatch batch{db};
+            batch.Write(
+                DiskKey{
+                    PQ_CHAINLOCK_PERSISTENCE_ROSTER_RECOVERY_PRECOMMIT_KEY},
+                disk);
+            if (!db.WriteBatch(batch, /*fSync=*/true)) {
+                failed = true;
+                SetError(error, ChainLockPersistenceError::IO_FAILURE);
+                return false;
+            }
+        } catch (const std::exception&) {
+            failed = true;
+            SetError(error, ChainLockPersistenceError::IO_FAILURE);
+            return false;
+        }
+        roster_recovery_precommit = precommit;
+        return true;
+    }
+
+    bool ReplaceRosterRecoveryPrecommit(
+        const RosterRecoveryPrecommit& expected,
+        const RosterRecoveryPrecommit& replacement,
+        ChainLockPersistenceError* error)
+        EXCLUSIVE_LOCKS_REQUIRED(mutex)
+    {
+        SetError(error, ChainLockPersistenceError::NONE);
+        if (failed) {
+            SetError(error, ChainLockPersistenceError::IO_FAILURE);
+            return false;
+        }
+        if (!roster_recovery_precommit ||
+            *roster_recovery_precommit != expected) {
+            SetError(error, ChainLockPersistenceError::HEIGHT_CONFLICT);
+            return false;
+        }
+        if (!IsValidRosterRecoveryPrecommit(config, replacement) ||
+            !DoesRecoveryPrecommitMatchBest(replacement, best) ||
+            replacement.pending_seed.state != RosterBeaconState::PENDING ||
+            replacement.admission != expected.admission ||
+            replacement.predecessor_height != expected.predecessor_height ||
+            replacement.predecessor_hash != expected.predecessor_hash) {
+            SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
+            return false;
+        }
+        if (replacement == expected) return true;
+
+        const uint32_t old_epoch{expected.pending_seed.epoch};
+        const uint32_t new_epoch{replacement.pending_seed.epoch};
+        const bool same_pending_slot{
+            expected.pending_seed.state == RosterBeaconState::PENDING &&
+            new_epoch == old_epoch &&
+            replacement.pending_seed.anchor_cursor.sys_height ==
+                expected.pending_seed.anchor_cursor.sys_height};
+        const bool later_disjoint_window{
+            static_cast<uint64_t>(new_epoch) >=
+                static_cast<uint64_t>(old_epoch) + ACTIVE_QUORUMS &&
+            replacement.pending_seed.anchor_cursor.sys_height >
+                expected.pending_seed.anchor_cursor.sys_height};
+        if (!same_pending_slot && !later_disjoint_window) {
+            SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
+            return false;
+        }
+
+        const auto disk{
+            MakeDiskRosterRecoveryPrecommit(schema_hash, replacement)};
+        if (::GetSerializeSize(disk) !=
+            DiskRosterRecoveryPrecommit::WIRE_SIZE) {
+            SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
+            return false;
+        }
+        try {
+            CDBBatch batch{db};
+            batch.Write(
+                DiskKey{
+                    PQ_CHAINLOCK_PERSISTENCE_ROSTER_RECOVERY_PRECOMMIT_KEY},
+                disk);
+            if (!db.WriteBatch(batch, /*fSync=*/true)) {
+                failed = true;
+                SetError(error, ChainLockPersistenceError::IO_FAILURE);
+                return false;
+            }
+        } catch (const std::exception&) {
+            failed = true;
+            SetError(error, ChainLockPersistenceError::IO_FAILURE);
+            return false;
+        }
+        roster_recovery_precommit = replacement;
+        return true;
+    }
+
+    bool ClearRosterRecoveryPrecommit(ChainLockPersistenceError* error)
+        EXCLUSIVE_LOCKS_REQUIRED(mutex)
+    {
+        SetError(error, ChainLockPersistenceError::NONE);
+        if (failed) {
+            SetError(error, ChainLockPersistenceError::IO_FAILURE);
+            return false;
+        }
+        if (!roster_recovery_precommit) return true;
+        try {
+            CDBBatch batch{db};
+            batch.Erase(DiskKey{
+                PQ_CHAINLOCK_PERSISTENCE_ROSTER_RECOVERY_PRECOMMIT_KEY});
+            if (!db.WriteBatch(batch, /*fSync=*/true)) {
+                failed = true;
+                SetError(error, ChainLockPersistenceError::IO_FAILURE);
+                return false;
+            }
+        } catch (const std::exception&) {
+            failed = true;
+            SetError(error, ChainLockPersistenceError::IO_FAILURE);
+            return false;
+        }
+        roster_recovery_precommit.reset();
         return true;
     }
 
@@ -1242,6 +1653,8 @@ struct PQChainLockPersistence::Impl {
         GUARDED_BY(mutex);
     uint64_t highest_payment_audit_preseal_revision
         GUARDED_BY(mutex){0};
+    std::optional<RosterRecoveryPrecommit> roster_recovery_precommit
+        GUARDED_BY(mutex);
     bool catchup_used GUARDED_BY(mutex){false};
     bool failed GUARDED_BY(mutex){false};
 };
@@ -1313,6 +1726,13 @@ PQChainLockPersistence::LoadPaymentAuditPresealState() const
     return m_impl->payment_audit_preseal_state;
 }
 
+std::optional<RosterRecoveryPrecommit>
+PQChainLockPersistence::LoadRosterRecoveryPrecommit() const
+{
+    LOCK(m_impl->mutex);
+    return m_impl->roster_recovery_precommit;
+}
+
 bool PQChainLockPersistence::PersistBest(
     const FinalChainLock& chainlock,
     ChainLockPersistenceError* error)
@@ -1339,6 +1759,54 @@ bool PQChainLockPersistence::PersistCatchupBest(
     return m_impl->PersistBest(
         chainlock, error, /*catchup=*/true,
         btcc_cursor_reconciliation);
+}
+
+bool PQChainLockPersistence::PersistInitializedBest(
+    const FinalChainLock& chainlock,
+    ChainLockPersistenceError* error)
+{
+    LOCK(m_impl->mutex);
+    return m_impl->PersistBest(
+        chainlock, error, /*catchup=*/false, std::nullopt,
+        RosterRecoveryAdmission::INITIALIZE);
+}
+
+bool PQChainLockPersistence::PersistRecoveryCatchupBest(
+    const FinalChainLock& chainlock,
+    ChainLockPersistenceError* error,
+    const std::optional<BTCCCursorReconciliationProof>&
+        btcc_cursor_reconciliation)
+{
+    LOCK(m_impl->mutex);
+    return m_impl->PersistBest(
+        chainlock, error, /*catchup=*/true,
+        btcc_cursor_reconciliation,
+        RosterRecoveryAdmission::CURRENT_CATCHUP);
+}
+
+bool PQChainLockPersistence::PersistRosterRecoveryPrecommit(
+    const RosterRecoveryPrecommit& precommit,
+    ChainLockPersistenceError* error)
+{
+    LOCK(m_impl->mutex);
+    return m_impl->PersistRosterRecoveryPrecommit(precommit, error);
+}
+
+bool PQChainLockPersistence::ReplaceRosterRecoveryPrecommit(
+    const RosterRecoveryPrecommit& expected,
+    const RosterRecoveryPrecommit& replacement,
+    ChainLockPersistenceError* error)
+{
+    LOCK(m_impl->mutex);
+    return m_impl->ReplaceRosterRecoveryPrecommit(
+        expected, replacement, error);
+}
+
+bool PQChainLockPersistence::ClearRosterRecoveryPrecommit(
+    ChainLockPersistenceError* error)
+{
+    LOCK(m_impl->mutex);
+    return m_impl->ClearRosterRecoveryPrecommit(error);
 }
 
 bool PQChainLockPersistence::PersistBTCCPresealState(
