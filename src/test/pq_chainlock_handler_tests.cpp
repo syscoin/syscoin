@@ -330,6 +330,14 @@ namespace llmq::test {
 
 class CChainLocksHandlerTestAccess {
 public:
+    static pq::VerifiedPaymentAuditAdmission VerifiedPaymentAudit(
+        pq::FinalPaymentAudit audit,
+        uint8_t authorization_mask = 0x0f)
+    {
+        return pq::VerifiedPaymentAuditAdmission{
+            std::move(audit), authorization_mask};
+    }
+
     enum class CertificateStatus : uint8_t {
         VERIFIED = 0,
         MISSING,
@@ -947,6 +955,13 @@ BOOST_AUTO_TEST_CASE(
             CandidateFullValidationFloor(
                 request, activation_predecessor),
         declared_predecessor);
+    request.admission = llmq::pq::ChainLockCandidateAdmission::
+                            TRUSTED_UNSEALED_PERSISTENCE;
+    BOOST_CHECK_EQUAL(
+        llmq::test::CChainLocksHandlerTestAccess::
+            CandidateFullValidationFloor(
+                request, activation_predecessor),
+        declared_predecessor);
 
     // The skipped interval contains a superblock whose governance provenance
     // is absent. A floor derived from the unsigned local declaration would
@@ -963,6 +978,12 @@ BOOST_AUTO_TEST_CASE(
             CandidateTargetValidationMode(
                 llmq::pq::ChainLockCandidateAdmission::
                     TRUSTED_PERSISTENCE) ==
+        llmq::HistoricalIndexValidationMode::FULL_RECEIPT);
+    BOOST_CHECK(
+        llmq::test::CChainLocksHandlerTestAccess::
+            CandidateTargetValidationMode(
+                llmq::pq::ChainLockCandidateAdmission::
+                    TRUSTED_UNSEALED_PERSISTENCE) ==
         llmq::HistoricalIndexValidationMode::FULL_RECEIPT);
     BOOST_CHECK(
         llmq::test::CChainLocksHandlerTestAccess::
@@ -1096,7 +1117,6 @@ BOOST_AUTO_TEST_CASE(historical_roster_authorization_routes_are_explicit)
     using Transition = llmq::pq::RosterAuthorizationTransitionKind;
     constexpr uint8_t INVALID{0};
     constexpr uint8_t EXACT_NETWORK{1};
-    constexpr uint8_t ATTESTED_HISTORY{2};
     constexpr uint8_t NONE{0};
     constexpr uint8_t CURRENT_CATCHUP{1};
     constexpr uint8_t RECOVERY{2};
@@ -1130,7 +1150,7 @@ BOOST_AUTO_TEST_CASE(historical_roster_authorization_routes_are_explicit)
         BOOST_CHECK_EQUAL(Access::HistoricalRosterAuthorization(
                               Admission::PRESEAL_RECEIPT,
                               PRESEAL_RECEIPT, transition),
-                          reset ? EXACT_NETWORK : ATTESTED_HISTORY);
+                          EXACT_NETWORK);
     }
 
     const auto old_receipt{Access::HistoricalPreVerificationAdmission(
@@ -1148,6 +1168,8 @@ BOOST_AUTO_TEST_CASE(historical_roster_authorization_routes_are_explicit)
     BOOST_CHECK(!Access::HistoricalArchiveIdentity(newer_receipt));
     BOOST_CHECK(Access::HistoricalArchiveIdentity(
         Admission::RECEIPT_ARCHIVE));
+    BOOST_CHECK(Access::HistoricalArchiveIdentity(
+        Admission::TRUSTED_UNSEALED_PERSISTENCE));
 }
 
 BOOST_AUTO_TEST_CASE(receipt_archive_source_capability_is_exact)
@@ -1949,14 +1971,20 @@ BOOST_AUTO_TEST_CASE(
     const auto early_slot{MakePaymentAuditCandidate(epoch, 0x0e, 12)};
 
     PaymentAuditStore store{path, genesis_hash};
-    BOOST_REQUIRE(store.AcceptVerified(pinned) ==
+    BOOST_REQUIRE(store.AcceptVerified(
+                      llmq::test::CChainLocksHandlerTestAccess::VerifiedPaymentAudit(
+                          pinned)) ==
                   PaymentAuditStoreResult::ACCEPTED);
     BOOST_REQUIRE(store.PinReferencedWitness(
                       epoch, pinned.GetWitnessId(genesis_hash)) ==
                   PaymentAuditStoreResult::ACCEPTED);
-    BOOST_REQUIRE(store.AcceptVerified(late_slot) ==
+    BOOST_REQUIRE(store.AcceptVerified(
+                      llmq::test::CChainLocksHandlerTestAccess::VerifiedPaymentAudit(
+                          late_slot)) ==
                   PaymentAuditStoreResult::ACCEPTED);
-    BOOST_REQUIRE(store.AcceptVerified(early_slot) ==
+    BOOST_REQUIRE(store.AcceptVerified(
+                      llmq::test::CChainLocksHandlerTestAccess::VerifiedPaymentAudit(
+                          early_slot)) ==
                   PaymentAuditStoreResult::ACCEPTED);
 
     PaymentAuditCandidateMetadataCache cache;
@@ -2064,7 +2092,9 @@ BOOST_AUTO_TEST_CASE(
     const auto second{MakePaymentAuditCandidate(epoch, 0x0b, 21)};
 
     PaymentAuditStore store{path, genesis_hash};
-    BOOST_REQUIRE(store.AcceptVerified(first) ==
+    BOOST_REQUIRE(store.AcceptVerified(
+                      llmq::test::CChainLocksHandlerTestAccess::VerifiedPaymentAudit(
+                          first)) ==
                   PaymentAuditStoreResult::ACCEPTED);
     PaymentAuditCandidateMetadataCache cache;
     const auto initial{cache.GetOrBuild(store, genesis_hash, epoch)};
@@ -2073,7 +2103,9 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(store.IsCandidateRevisionCurrent(
         initial->candidate_revision));
 
-    BOOST_REQUIRE(store.AcceptVerified(second) ==
+    BOOST_REQUIRE(store.AcceptVerified(
+                      llmq::test::CChainLocksHandlerTestAccess::VerifiedPaymentAudit(
+                          second)) ==
                   PaymentAuditStoreResult::ACCEPTED);
     BOOST_CHECK(!store.IsCandidateRevisionCurrent(
         initial->candidate_revision));
@@ -2154,7 +2186,9 @@ BOOST_AUTO_TEST_CASE(
     // A negative decision is usable only while its exact archive revision is
     // still current. Installing the matching witness invalidates it before a
     // runtime can be retained or published.
-    BOOST_REQUIRE(store.AcceptVerified(completed) ==
+    BOOST_REQUIRE(store.AcceptVerified(
+                      llmq::test::CChainLocksHandlerTestAccess::VerifiedPaymentAudit(
+                          completed)) ==
                   PaymentAuditStoreResult::ACCEPTED);
     BOOST_CHECK(!store.IsCandidateRevisionCurrent(
         healthy_empty->candidate_revision));
@@ -2203,10 +2237,12 @@ BOOST_AUTO_TEST_CASE(
     constexpr uint32_t epoch{23};
     PaymentAuditStore store{path, genesis_hash};
     BOOST_REQUIRE(store.AcceptVerified(
-                      MakePaymentAuditCandidate(epoch, 0x07, 30)) ==
+                      llmq::test::CChainLocksHandlerTestAccess::VerifiedPaymentAudit(
+                          MakePaymentAuditCandidate(epoch, 0x07, 30))) ==
                   PaymentAuditStoreResult::ACCEPTED);
     BOOST_REQUIRE(store.AcceptVerified(
-                      MakePaymentAuditCandidate(epoch, 0x0b, 31)) ==
+                      llmq::test::CChainLocksHandlerTestAccess::VerifiedPaymentAudit(
+                          MakePaymentAuditCandidate(epoch, 0x0b, 31))) ==
                   PaymentAuditStoreResult::ACCEPTED);
 
     PaymentAuditCandidateMetadataCache source_cache;
@@ -2342,6 +2378,12 @@ BOOST_AUTO_TEST_CASE(staged_recovery_keeps_one_canonical_historical_target)
     llmq::pq::RosterRecoveryPrecommit precommit;
     precommit.admission =
         llmq::pq::RosterRecoveryAdmission::INITIALIZE;
+    precommit.recovery_authority_hash = NonNullHash(209'998);
+    precommit.recovery_authority_source.kind =
+        llmq::pq::RecoveryRosterAuthoritySourceKind::ACTIVATION;
+    precommit.recovery_authority_source.height = 864;
+    precommit.recovery_authority_source.block_hash =
+        NonNullHash(209'999);
     precommit.pending_seed.anchor_kind =
         llmq::pq::RosterBeaconAnchorKind::RECOVERY;
     precommit.pending_seed.state =
@@ -2370,13 +2412,6 @@ BOOST_AUTO_TEST_CASE(staged_recovery_keeps_one_canonical_historical_target)
         /*durable_predecessor_height=*/864,
         /*tip_height=*/869));
 
-    BOOST_CHECK(!llmq::StagedRecoveryRolloverTarget(
-        chainlock, btcc, precommit, /*tip_height=*/2'029));
-    const auto rollover{llmq::StagedRecoveryRolloverTarget(
-        chainlock, btcc, precommit, /*tip_height=*/2'030)};
-    BOOST_REQUIRE(rollover);
-    BOOST_CHECK_EQUAL(*rollover, 2'025);
-
     auto wrong_target{precommit};
     wrong_target.pending_seed.anchor_cursor.sys_height +=
         static_cast<int32_t>(chainlock.chainlock_period);
@@ -2384,6 +2419,75 @@ BOOST_AUTO_TEST_CASE(staged_recovery_keeps_one_canonical_historical_target)
         chainlock, btcc, wrong_target,
         /*durable_predecessor_height=*/864,
         /*tip_height=*/5'000));
+
+    const auto epoch_seven_target{
+        llmq::pq::CanonicalRosterRecoveryTargetHeight(
+            chainlock, btcc, /*epoch=*/7)};
+    const auto epoch_eleven_target{
+        llmq::pq::CanonicalRosterRecoveryTargetHeight(
+            chainlock, btcc, /*epoch=*/11)};
+    BOOST_REQUIRE(epoch_seven_target);
+    BOOST_REQUIRE(epoch_eleven_target);
+    const auto epoch_seven_signing{
+        llmq::pq::SigningHeightForTarget(
+            chainlock, *epoch_seven_target)};
+    const auto epoch_eleven_signing{
+        llmq::pq::SigningHeightForTarget(
+            chainlock, *epoch_eleven_target)};
+    BOOST_REQUIRE(epoch_seven_signing);
+    BOOST_REQUIRE(epoch_eleven_signing);
+
+    const auto before_disjoint{llmq::SelectStagedRecoverySigningWindow(
+        chainlock, btcc, precommit,
+        /*durable_predecessor_height=*/864,
+        *epoch_seven_signing - 1,
+        /*anchor_stably_inactive=*/true)};
+    BOOST_REQUIRE(before_disjoint);
+    BOOST_CHECK(!before_disjoint->rolls_pending_epoch);
+    BOOST_CHECK(before_disjoint->window == *first);
+
+    const auto epoch_seven{llmq::SelectStagedRecoverySigningWindow(
+        chainlock, btcc, precommit,
+        /*durable_predecessor_height=*/864,
+        *epoch_seven_signing,
+        /*anchor_stably_inactive=*/true)};
+    BOOST_REQUIRE(epoch_seven);
+    BOOST_CHECK(epoch_seven->rolls_pending_epoch);
+    BOOST_CHECK_EQUAL(
+        epoch_seven->window.target_height, *epoch_seven_target);
+
+    const auto epoch_eleven{llmq::SelectStagedRecoverySigningWindow(
+        chainlock, btcc, precommit,
+        /*durable_predecessor_height=*/864,
+        *epoch_eleven_signing,
+        /*anchor_stably_inactive=*/true)};
+    BOOST_REQUIRE(epoch_eleven);
+    BOOST_CHECK(epoch_eleven->rolls_pending_epoch);
+    BOOST_CHECK_EQUAL(
+        epoch_eleven->window.target_height, *epoch_eleven_target);
+
+    const auto active_anchor{llmq::SelectStagedRecoverySigningWindow(
+        chainlock, btcc, precommit,
+        /*durable_predecessor_height=*/864,
+        *epoch_eleven_signing,
+        /*anchor_stably_inactive=*/false)};
+    BOOST_REQUIRE(active_anchor);
+    BOOST_CHECK(!active_anchor->rolls_pending_epoch);
+    BOOST_CHECK(active_anchor->window == *first);
+
+    auto ready{precommit};
+    ready.pending_seed.state = llmq::pq::RosterBeaconState::READY;
+    ready.pending_seed.future_btc_hash = NonNullHash(210'002);
+    BOOST_REQUIRE(ready.IsStructurallyValid());
+    const auto ready_selection{
+        llmq::SelectStagedRecoverySigningWindow(
+            chainlock, btcc, ready,
+            /*durable_predecessor_height=*/864,
+            *epoch_eleven_signing,
+            /*anchor_stably_inactive=*/true)};
+    BOOST_REQUIRE(ready_selection);
+    BOOST_CHECK(!ready_selection->rolls_pending_epoch);
+    BOOST_CHECK(ready_selection->window == *first);
 }
 
 BOOST_AUTO_TEST_CASE(payment_audit_signing_height_is_exactly_window_bounded)

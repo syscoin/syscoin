@@ -9,6 +9,7 @@
 #include <llmq/btc_header_policy.h>
 
 #include <llmq/pq_payment_audit.h>
+#include <llmq/pq_roster_beacon.h>
 
 #include <chainparams.h>
 #include <common/args.h>
@@ -44,6 +45,11 @@
 
 namespace llmq::pq {
 namespace {
+
+static_assert(PAYMENT_AUDIT_FUTURE_BTC_HEIGHT_DELTA ==
+              ROSTER_BEACON_FUTURE_BTC_HEIGHT_DELTA);
+static_assert(PAYMENT_AUDIT_SEED_MIN_CONFIRMATIONS ==
+              ROSTER_BEACON_MIN_FUTURE_CONFIRMATIONS);
 
 constexpr int64_t MAX_BTC_HEADER_COMMAND_TIMEOUT{60};
 constexpr int64_t MAX_BTC_HEADER_FUTURE_TIME{2 * 60 * 60};
@@ -532,6 +538,239 @@ std::optional<BTCHeaderPolicyResult> CheckCandidateWithTip(
         candidate.confirmations, previous_was_reorged};
 }
 
+bool IsSameTip(const TipView& first, const TipView& second) noexcept
+{
+    return first.hash == second.hash && first.height == second.height;
+}
+
+struct StableInactiveAnchorFacts {
+    uint256 anchor_hash;
+    int32_t anchor_height{-1};
+    std::optional<BTCHeaderPolicyResult> replacement;
+    uint256 observed_active_hash;
+    uint256 stable_tip_hash;
+    int32_t stable_tip_height{-1};
+    int64_t required_maturity_height{-1};
+};
+
+struct StableInactiveReplacementRequest {
+    uint256 hash;
+    std::optional<uint256> previous_hash;
+};
+
+struct ActiveRangeCheckInternal {
+    BTCHeaderActiveRangeStatus status{BTCHeaderActiveRangeStatus::TRANSIENT};
+    std::optional<BTCHeaderActiveRange> range;
+    std::optional<StableInactiveAnchorFacts> stable_inactive;
+};
+
+ActiveRangeCheckInternal CheckPaymentAuditActiveRangeImpl(
+    const BTCHeaderCommandRunner& runner,
+    const BTCHeaderPolicyConfig& config,
+    const uint256& anchor_hash,
+    const std::optional<int32_t>& expected_anchor_height,
+    const std::optional<StableInactiveReplacementRequest>&
+        replacement_request,
+    int64_t now,
+    std::string& deny_reason)
+{
+    const auto transient = [&]() {
+        return ActiveRangeCheckInternal{
+            BTCHeaderActiveRangeStatus::TRANSIENT, std::nullopt,
+            std::nullopt};
+    };
+    const auto waiting = [&]() {
+        return ActiveRangeCheckInternal{
+            BTCHeaderActiveRangeStatus::WAITING, std::nullopt,
+            std::nullopt};
+    };
+
+    deny_reason.clear();
+    if (!config.IsValid() || !runner || anchor_hash.IsNull() ||
+        (expected_anchor_height && *expected_anchor_height < 0)) {
+        SetError(deny_reason, "btc-policy-invalid-audit-range");
+        return transient();
+    }
+
+    TipView first_tip;
+    if (!QueryTip(runner, config, now, first_tip, deny_reason)) {
+        return transient();
+    }
+
+    HeaderView anchor;
+    if (!QueryHeader(runner, anchor_hash, anchor, deny_reason)) {
+        if (deny_reason.empty()) {
+            SetError(deny_reason, "btc-audit-anchor-header-failed");
+        }
+        return transient();
+    }
+    if (anchor.height > first_tip.height ||
+        (expected_anchor_height &&
+         anchor.height != *expected_anchor_height)) {
+        SetError(deny_reason, "btc-audit-anchor-height-mismatch");
+        return transient();
+    }
+
+    uint256 first_active_anchor;
+    if (!QueryActiveHash(runner, anchor.height, first_active_anchor,
+                         deny_reason)) {
+        return transient();
+    }
+    if (first_active_anchor.IsNull()) {
+        SetError(deny_reason, "btc-audit-active-anchor-null");
+        return transient();
+    }
+
+    std::optional<BTCHeaderPolicyResult> replacement;
+
+    const auto finish_stable_view = [&](const uint256& first_future,
+                                        bool require_future)
+        -> std::optional<bool> {
+        uint256 second_active_anchor;
+        if (!QueryActiveHash(runner, anchor.height, second_active_anchor,
+                             deny_reason)) {
+            return std::nullopt;
+        }
+        uint256 second_future;
+        if (require_future &&
+            !QueryActiveHash(runner,
+                             anchor.height +
+                                 PAYMENT_AUDIT_FUTURE_BTC_HEIGHT_DELTA,
+                             second_future, deny_reason)) {
+            return std::nullopt;
+        }
+        uint256 second_active_replacement;
+        if (replacement) {
+            if (replacement->btc_height == anchor.height) {
+                second_active_replacement = second_active_anchor;
+            } else if (!QueryActiveHash(
+                           runner, replacement->btc_height,
+                           second_active_replacement, deny_reason)) {
+                return std::nullopt;
+            }
+        }
+        TipView final_tip;
+        if (!QueryTip(runner, config, now, final_tip, deny_reason)) {
+            return std::nullopt;
+        }
+        if (!IsSameTip(first_tip, final_tip)) {
+            SetError(deny_reason, "btc-audit-tip-view-changed");
+            return false;
+        }
+        if (second_active_anchor != first_active_anchor ||
+            (require_future && second_future != first_future) ||
+            (replacement &&
+             second_active_replacement != replacement->btc_hash)) {
+            SetError(deny_reason, "btc-audit-active-view-changed");
+            return false;
+        }
+        return true;
+    };
+
+    if (first_active_anchor != anchor_hash) {
+        if (anchor.height >
+            std::numeric_limits<int32_t>::max() -
+                static_cast<int64_t>(
+                    PAYMENT_AUDIT_FUTURE_BTC_HEIGHT_DELTA) -
+                static_cast<int64_t>(
+                    PAYMENT_AUDIT_SEED_MIN_CONFIRMATIONS - 1)) {
+            SetError(deny_reason,
+                     "btc-audit-inactive-anchor-maturity-overflow");
+            return transient();
+        }
+        if (replacement_request) {
+            replacement = CheckCandidateWithTip(
+                runner, config, first_tip, replacement_request->hash,
+                replacement_request->previous_hash, deny_reason);
+            if (!replacement) return transient();
+            if (replacement->confirmations !=
+                first_tip.height - replacement->btc_height + 1) {
+                SetError(
+                    deny_reason,
+                    "btc-rollover-replacement-tip-inconsistent");
+                return transient();
+            }
+        }
+        const auto stable{finish_stable_view({}, /*require_future=*/false)};
+        if (!stable || !*stable) return transient();
+
+        const int64_t stable_inactive_height{
+            anchor.height + PAYMENT_AUDIT_FUTURE_BTC_HEIGHT_DELTA +
+            PAYMENT_AUDIT_SEED_MIN_CONFIRMATIONS - 1};
+        if (first_tip.height < stable_inactive_height) {
+            SetError(
+                deny_reason,
+                strprintf("btc-audit-inactive-anchor-immature(tip=%d required=%d)",
+                          first_tip.height, stable_inactive_height));
+            return waiting();
+        }
+        SetError(deny_reason, "btc-audit-anchor-not-active-chain");
+        return ActiveRangeCheckInternal{
+            BTCHeaderActiveRangeStatus::STABLE_ANCHOR_INACTIVE,
+            std::nullopt,
+            StableInactiveAnchorFacts{
+                anchor_hash, static_cast<int32_t>(anchor.height),
+                replacement, first_active_anchor, first_tip.hash,
+                static_cast<int32_t>(first_tip.height),
+                stable_inactive_height}};
+    }
+
+    if (anchor.confirmations != first_tip.height - anchor.height + 1) {
+        SetError(deny_reason, "btc-audit-anchor-tip-inconsistent");
+        return transient();
+    }
+    if (anchor.height >
+        std::numeric_limits<int32_t>::max() -
+            static_cast<int64_t>(PAYMENT_AUDIT_FUTURE_BTC_HEIGHT_DELTA)) {
+        SetError(deny_reason, "btc-audit-future-height-overflow");
+        return transient();
+    }
+    const int64_t future_height{
+        anchor.height + PAYMENT_AUDIT_FUTURE_BTC_HEIGHT_DELTA};
+    const int64_t minimum_confirmations{
+        std::max<int64_t>(config.min_confirmations,
+                          PAYMENT_AUDIT_SEED_MIN_CONFIRMATIONS)};
+    if (first_tip.height < future_height + minimum_confirmations - 1) {
+        const auto stable{finish_stable_view({}, /*require_future=*/false)};
+        if (!stable || !*stable) return transient();
+        SetError(deny_reason,
+                 strprintf("btc-audit-future-unconfirmed(tip=%d future=%d min=%d)",
+                           first_tip.height, future_height,
+                           minimum_confirmations));
+        return waiting();
+    }
+
+    uint256 first_future;
+    if (!QueryActiveHash(runner, future_height, first_future, deny_reason)) {
+        return transient();
+    }
+    HeaderView future;
+    if (!QueryHeader(runner, first_future, future, deny_reason)) {
+        if (deny_reason.empty()) {
+            SetError(deny_reason, "btc-audit-future-header-failed");
+        }
+        return transient();
+    }
+    if (future.hash != first_future || future.height != future_height ||
+        future.confirmations != first_tip.height - future_height + 1 ||
+        future.confirmations < minimum_confirmations) {
+        SetError(deny_reason, "btc-audit-future-tip-inconsistent");
+        return transient();
+    }
+
+    const auto stable{finish_stable_view(first_future,
+                                         /*require_future=*/true)};
+    if (!stable || !*stable) return transient();
+
+    deny_reason.clear();
+    return ActiveRangeCheckInternal{
+        BTCHeaderActiveRangeStatus::READY,
+        BTCHeaderActiveRange{
+            anchor_hash, static_cast<int32_t>(anchor.height), first_future,
+            static_cast<int32_t>(future_height)},
+        std::nullopt};
+}
+
 } // namespace
 
 bool BTCHeaderPolicyConfig::IsValid() const noexcept
@@ -552,6 +791,68 @@ bool BTCHeaderPolicyConfig::IsValid() const noexcept
 BTCHeaderPolicy::BTCHeaderPolicy(BTCHeaderCommandRunner runner)
     : m_runner{std::move(runner)}
 {
+}
+
+BTCRecoveryPrecommitRolloverProof::BTCRecoveryPrecommitRolloverProof(
+    IssuerKey,
+    uint256 anchor_hash,
+    int32_t anchor_height,
+    uint256 replacement_hash,
+    int32_t replacement_height,
+    std::optional<uint256> previous_hash,
+    uint256 rollover_context_id,
+    uint256 observed_active_hash,
+    uint256 stable_tip_hash,
+    int32_t stable_tip_height,
+    int64_t required_maturity_height)
+    : m_anchor_hash{std::move(anchor_hash)},
+      m_anchor_height{anchor_height},
+      m_replacement_hash{std::move(replacement_hash)},
+      m_replacement_height{replacement_height},
+      m_previous_hash{std::move(previous_hash)},
+      m_rollover_context_id{std::move(rollover_context_id)},
+      m_observed_active_hash{std::move(observed_active_hash)},
+      m_stable_tip_hash{std::move(stable_tip_hash)},
+      m_stable_tip_height{stable_tip_height},
+      m_required_maturity_height{required_maturity_height}
+{
+}
+
+bool BTCRecoveryPrecommitRolloverProof::Authorizes(
+    const uint256& anchor_hash,
+    int32_t anchor_height,
+    const uint256& replacement_hash,
+    int32_t replacement_height,
+    const std::optional<uint256>& previous_hash,
+    const uint256& rollover_context_id) const noexcept
+{
+    if (anchor_hash.IsNull() || anchor_height < 0 ||
+        replacement_hash.IsNull() || replacement_height < 0 ||
+        rollover_context_id.IsNull() ||
+        anchor_height >
+            std::numeric_limits<int32_t>::max() -
+                static_cast<int64_t>(
+                    ROSTER_BEACON_FUTURE_BTC_HEIGHT_DELTA) -
+                static_cast<int64_t>(
+                    ROSTER_BEACON_MIN_FUTURE_CONFIRMATIONS - 1)) {
+        return false;
+    }
+    const int64_t required_maturity_height{
+        static_cast<int64_t>(anchor_height) +
+        ROSTER_BEACON_FUTURE_BTC_HEIGHT_DELTA +
+        ROSTER_BEACON_MIN_FUTURE_CONFIRMATIONS - 1};
+    return m_anchor_hash == anchor_hash &&
+           m_anchor_height == anchor_height &&
+           m_replacement_hash == replacement_hash &&
+           m_replacement_height == replacement_height &&
+           m_previous_hash == previous_hash &&
+           m_rollover_context_id == rollover_context_id &&
+           !m_observed_active_hash.IsNull() &&
+           m_observed_active_hash != anchor_hash &&
+           m_replacement_hash != anchor_hash &&
+           !m_stable_tip_hash.IsNull() &&
+           m_stable_tip_height >= required_maturity_height &&
+           m_required_maturity_height == required_maturity_height;
 }
 
 std::optional<BTCHeaderPolicyResult> BTCHeaderPolicy::SelectMiningHash(
@@ -610,81 +911,68 @@ BTCHeaderPolicy::CheckPaymentAuditActiveRange(
     int64_t now,
     std::string& deny_reason) const
 {
-    deny_reason.clear();
-    if (!config.IsValid() || !m_runner || anchor_hash.IsNull()) {
-        SetError(deny_reason, "btc-policy-invalid-audit-range");
+    auto checked{CheckPaymentAuditActiveRangeImpl(
+        m_runner, config, anchor_hash, std::nullopt, std::nullopt, now,
+        deny_reason)};
+    return checked.status == BTCHeaderActiveRangeStatus::READY
+        ? std::move(checked.range)
+        : std::nullopt;
+}
+
+BTCHeaderActiveRangeCheck
+BTCHeaderPolicy::ClassifyPaymentAuditActiveRange(
+    const BTCHeaderPolicyConfig& config,
+    const uint256& anchor_hash,
+    int32_t expected_anchor_height,
+    int64_t now,
+    std::string& deny_reason) const
+{
+    auto checked{CheckPaymentAuditActiveRangeImpl(
+        m_runner, config, anchor_hash, expected_anchor_height,
+        std::nullopt, now, deny_reason)};
+    return BTCHeaderActiveRangeCheck{
+        checked.status, std::move(checked.range)};
+}
+
+std::optional<BTCRecoveryPrecommitRolloverProof>
+BTCHeaderPolicy::AuthorizeStableInactiveAnchorReplacement(
+    const BTCHeaderPolicyConfig& config,
+    const uint256& anchor_hash,
+    int32_t expected_anchor_height,
+    const uint256& replacement_hash,
+    const std::optional<uint256>& previous_hash,
+    const uint256& rollover_context_id,
+    int64_t now,
+    std::string& deny_reason) const
+{
+    if (rollover_context_id.IsNull()) {
+        SetError(deny_reason, "btc-rollover-context-null");
         return std::nullopt;
     }
-
-    TipView tip;
-    if (!QueryTip(m_runner, config, now, tip, deny_reason)) {
-        return std::nullopt;
-    }
-
-    HeaderView anchor;
-    if (!QueryHeader(m_runner, anchor_hash, anchor, deny_reason)) {
+    auto checked{CheckPaymentAuditActiveRangeImpl(
+        m_runner, config, anchor_hash, expected_anchor_height,
+        StableInactiveReplacementRequest{replacement_hash, previous_hash},
+        now, deny_reason)};
+    if (checked.status !=
+            BTCHeaderActiveRangeStatus::STABLE_ANCHOR_INACTIVE ||
+        !checked.stable_inactive ||
+        !checked.stable_inactive->replacement) {
         if (deny_reason.empty()) {
-            SetError(deny_reason, "btc-audit-anchor-header-failed");
+            SetError(deny_reason,
+                     "btc-rollover-anchor-not-stably-inactive");
         }
         return std::nullopt;
     }
-    if (anchor.height > tip.height ||
-        anchor.confirmations != tip.height - anchor.height + 1) {
-        SetError(deny_reason, "btc-audit-anchor-tip-inconsistent");
-        return std::nullopt;
-    }
-    uint256 active_anchor;
-    if (!QueryActiveHash(m_runner, anchor.height, active_anchor,
-                         deny_reason)) {
-        return std::nullopt;
-    }
-    if (active_anchor != anchor_hash) {
-        SetError(deny_reason, "btc-audit-anchor-not-active-chain");
-        return std::nullopt;
-    }
-
-    if (anchor.height >
-        std::numeric_limits<int32_t>::max() -
-            static_cast<int64_t>(PAYMENT_AUDIT_FUTURE_BTC_HEIGHT_DELTA)) {
-        SetError(deny_reason, "btc-audit-future-height-overflow");
-        return std::nullopt;
-    }
-    const int64_t future_height{
-        anchor.height + PAYMENT_AUDIT_FUTURE_BTC_HEIGHT_DELTA};
-    const int64_t minimum_confirmations{
-        std::max<int64_t>(config.min_confirmations,
-                          PAYMENT_AUDIT_SEED_MIN_CONFIRMATIONS)};
-    if (tip.height < future_height + minimum_confirmations - 1) {
-        SetError(deny_reason,
-                 strprintf("btc-audit-future-unconfirmed(tip=%d future=%d min=%d)",
-                           tip.height, future_height,
-                           minimum_confirmations));
-        return std::nullopt;
-    }
-
-    uint256 future_hash;
-    if (!QueryActiveHash(m_runner, future_height, future_hash,
-                         deny_reason)) {
-        return std::nullopt;
-    }
-    HeaderView future;
-    if (!QueryHeader(m_runner, future_hash, future, deny_reason)) {
-        if (deny_reason.empty()) {
-            SetError(deny_reason, "btc-audit-future-header-failed");
-        }
-        return std::nullopt;
-    }
-    if (future.hash != future_hash || future.height != future_height ||
-        future.confirmations != tip.height - future_height + 1 ||
-        future.confirmations < minimum_confirmations) {
-        SetError(deny_reason, "btc-audit-future-tip-inconsistent");
-        return std::nullopt;
-    }
-
+    const auto& facts{*checked.stable_inactive};
+    const auto& replacement{*facts.replacement};
     deny_reason.clear();
-    return BTCHeaderActiveRange{
-        anchor_hash, static_cast<int32_t>(anchor.height), future_hash,
-        static_cast<int32_t>(future_height)};
+    return BTCRecoveryPrecommitRolloverProof{
+        BTCRecoveryPrecommitRolloverProof::IssuerKey{},
+        facts.anchor_hash, facts.anchor_height,
+        replacement.btc_hash, replacement.btc_height,
+        previous_hash, rollover_context_id,
+        facts.observed_active_hash, facts.stable_tip_hash,
+        facts.stable_tip_height, facts.required_maturity_height};
 }
 
 bool IsBTCHeaderPolicyEnabled()

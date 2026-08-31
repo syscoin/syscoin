@@ -34,6 +34,8 @@ static_assert(std::is_same_v<
               decltype(std::declval<const CollectedPaymentAuditFinalization&>()
                            .Certificate()),
               const FinalPaymentAudit&>);
+static_assert(!std::is_constructible_v<
+              VerifiedPaymentAuditAdmission, FinalPaymentAudit, uint8_t>);
 
 namespace llmq_tests {
 
@@ -61,6 +63,16 @@ public:
             }
         }
         return offset == audit.report_witnesses.size();
+    }
+};
+
+class PaymentAuditStoreTestAccess final {
+public:
+    static VerifiedPaymentAuditAdmission Admission(
+        FinalPaymentAudit audit, uint8_t authorization_mask)
+    {
+        return VerifiedPaymentAuditAdmission{
+            std::move(audit), authorization_mask};
     }
 };
 
@@ -848,62 +860,48 @@ BOOST_AUTO_TEST_CASE(response_prepared_context_matches_raw_and_is_exact)
     BOOST_CHECK((*alias_safe_check)());
 }
 
-BOOST_AUTO_TEST_CASE(preserved_archive_is_reverified_after_restart_and_reindex)
+BOOST_AUTO_TEST_CASE(verified_archive_capability_survives_restart)
 {
     const auto fixture{MakeFixture()};
     const fs::path archive_path{
         m_path_root / "pq_payment_audit_verify_restart"};
-    const fs::path reindex_path{
-        m_path_root / "pq_payment_audit_verify_reindex"};
     const uint256 witness_id{
         fixture->audit.GetWitnessId(fixture->genesis_hash)};
+    const uint256 logical_id{
+        fixture->audit.GetLogicalId(fixture->genesis_hash)};
 
-    // AcceptVerified is the archive's caller-side trust boundary. Persisting
-    // a structurally valid certificate must never substitute for checking
-    // its 801 signatures when a receipt is replayed.
+    // Test access stands in for the handler's completed COLLECTED/FULL
+    // boundary; network certificate bytes cannot mint this capability.
     {
         PaymentAuditStore archive{archive_path, fixture->genesis_hash};
         BOOST_REQUIRE(archive.IsHealthy());
-        BOOST_REQUIRE(archive.AcceptVerified(fixture->audit) ==
+        BOOST_REQUIRE(archive.AcceptVerified(
+                          llmq_tests::PaymentAuditStoreTestAccess::Admission(
+                              fixture->audit, 0x07)) ==
                       PaymentAuditStoreResult::ACCEPTED);
     }
 
-    FinalPaymentAudit preserved;
     {
         PaymentAuditStore restarted{archive_path, fixture->genesis_hash};
         BOOST_REQUIRE(restarted.IsHealthy());
-        const auto loaded{restarted.Get(witness_id)};
-        BOOST_REQUIRE(loaded);
-        preserved = *loaded;
+        const auto raw{restarted.Get(witness_id)};
+        const auto verified{
+            restarted.GetVerifiedWithCandidateRevision(witness_id)};
+        BOOST_REQUIRE(raw);
+        BOOST_REQUIRE(verified);
+        BOOST_CHECK(*raw == fixture->audit);
+        BOOST_CHECK(verified->Audit() == fixture->audit);
+        BOOST_CHECK(verified->LogicalId() == logical_id);
+        BOOST_CHECK(verified->WitnessId() == witness_id);
+        BOOST_CHECK_EQUAL(verified->AuthorizationMask(), 0x07);
+        BOOST_CHECK_NE(verified->Revision(), 0U);
 
-        PaymentAuditVerificationError error{
-            PaymentAuditVerificationError::NONE};
-        BOOST_CHECK(!VerifyFinalPaymentAudit(
-            fixture->genesis_hash, fixture->schedule, preserved,
-            fixture->rosters,
-            fixture->authorization, nullptr, &error));
-        BOOST_CHECK(error ==
-                    PaymentAuditVerificationError::INVALID_SIGNATURE);
-    }
-
-    // A fresh index/archive import has the same rule: the exact stored bytes
-    // are only an availability cache, never a persisted verification marker.
-    {
-        PaymentAuditStore reindexed{reindex_path, fixture->genesis_hash};
-        BOOST_REQUIRE(reindexed.IsHealthy());
-        BOOST_REQUIRE(reindexed.AcceptVerified(preserved) ==
-                      PaymentAuditStoreResult::ACCEPTED);
-        const auto loaded{reindexed.Get(witness_id)};
-        BOOST_REQUIRE(loaded);
-
-        PaymentAuditVerificationError error{
-            PaymentAuditVerificationError::NONE};
-        BOOST_CHECK(!VerifyFinalPaymentAudit(
-            fixture->genesis_hash, fixture->schedule, *loaded,
-            fixture->rosters,
-            fixture->authorization, nullptr, &error));
-        BOOST_CHECK(error ==
-                    PaymentAuditVerificationError::INVALID_SIGNATURE);
+        // The exact witness cannot silently acquire a different durable
+        // authorization fact on replay.
+        BOOST_CHECK(restarted.AcceptVerified(
+                        llmq_tests::PaymentAuditStoreTestAccess::Admission(
+                            fixture->audit, 0x0f)) ==
+                    PaymentAuditStoreResult::INVALID);
     }
 }
 

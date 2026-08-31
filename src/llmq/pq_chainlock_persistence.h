@@ -6,6 +6,7 @@
 #define SYSCOIN_LLMQ_PQ_CHAINLOCK_PERSISTENCE_H
 
 #include <dbwrapper.h>
+#include <llmq/pq_chainlock_verify.h>
 #include <llmq/pq_chainlock_store.h>
 #include <llmq/pq_payment_audit.h>
 
@@ -15,7 +16,13 @@
 #include <memory>
 #include <optional>
 
+namespace llmq {
+class CChainLocksHandler;
+}
+
 namespace llmq::pq {
+
+class BTCRecoveryPrecommitRolloverProof;
 
 /** These one-byte keys are part of the fail-closed on-disk schema. */
 inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_SCHEMA_KEY{1};
@@ -28,6 +35,8 @@ inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_PAYMENT_AUDIT_PRESEAL_KEY{7};
 inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_PAYMENT_AUDIT_PROSPECTIVE_PRESEAL_KEY{8};
 inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_ROSTER_RECOVERY_PRECOMMIT_KEY{9};
 inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_RECEIPT_ARCHIVE_AUTHORIZATION_KEY{10};
+inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_RECOVERY_AUTHORITY_KEY{11};
+inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_PAYMENT_AUDIT_SEAL_CONTEXT_KEY{12};
 
 inline constexpr uint16_t ROSTER_RECOVERY_PRECOMMIT_VERSION{1};
 
@@ -45,20 +54,24 @@ enum class RosterRecoveryAdmission : uint8_t {
  */
 struct RosterRecoveryPrecommit {
     static constexpr std::size_t WIRE_SIZE{
-        sizeof(uint16_t) + sizeof(uint8_t) + sizeof(int32_t) + 32 +
+        sizeof(uint16_t) + sizeof(uint8_t) + sizeof(int32_t) + 2 * 32 +
+        RecoveryRosterAuthoritySource::WIRE_SIZE +
         RosterBeaconSeed::WIRE_SIZE};
 
     uint16_t version{ROSTER_RECOVERY_PRECOMMIT_VERSION};
     RosterRecoveryAdmission admission{RosterRecoveryAdmission::INITIALIZE};
     int32_t predecessor_height{-1};
     uint256 predecessor_hash;
+    uint256 recovery_authority_hash;
+    RecoveryRosterAuthoritySource recovery_authority_source;
     RosterBeaconSeed pending_seed;
 
     SERIALIZE_METHODS(RosterRecoveryPrecommit, obj)
     {
         uint8_t admission{static_cast<uint8_t>(obj.admission)};
         READWRITE(obj.version, admission, obj.predecessor_height,
-                  obj.predecessor_hash, obj.pending_seed);
+                  obj.predecessor_hash, obj.recovery_authority_hash,
+                  obj.recovery_authority_source, obj.pending_seed);
         SER_READ(obj, obj.admission =
                           static_cast<RosterRecoveryAdmission>(admission));
         SER_READ(obj, if (!obj.IsStructurallyValid()) {
@@ -72,7 +85,13 @@ struct RosterRecoveryPrecommit {
                            const RosterRecoveryPrecommit&) = default;
 };
 
-static_assert(RosterRecoveryPrecommit::WIRE_SIZE == 151);
+static_assert(RosterRecoveryPrecommit::WIRE_SIZE == 700);
+
+/** Exact transition identity; Bitcoin replacement height is bound separately. */
+[[nodiscard]] uint256 GetRosterRecoveryPrecommitRolloverContextId(
+    const uint256& genesis_hash,
+    const RosterRecoveryPrecommit& expected,
+    const RosterRecoveryPrecommit& replacement);
 
 /**
  * Crash-durable bounds for one deferred BTCC/NEVM replay obligation.
@@ -198,6 +217,82 @@ struct PaymentAuditPresealState {
                            const PaymentAuditPresealState&) = default;
 };
 
+inline constexpr uint16_t PAYMENT_AUDIT_SEAL_CONTEXT_VERSION{1};
+
+/**
+ * Exact accepted seal context retained only across the bounded audit-carrier
+ * window. Roster bytes are rebuilt from the branch snapshots; a recovery
+ * authority is retained because it is the fixed membership source, not a
+ * cache of the derived rosters.
+ */
+class PaymentAuditSealContextCapsule final {
+public:
+    [[nodiscard]] uint32_t Epoch() const noexcept { return m_epoch; }
+    [[nodiscard]] int32_t CarrierEndHeightExclusive() const noexcept
+    {
+        return m_carrier_end_height_exclusive;
+    }
+    [[nodiscard]] const FinalChainLockRecordMetadata& Seal() const noexcept
+    {
+        return m_seal;
+    }
+    [[nodiscard]] uint8_t AuthorizationMask() const noexcept
+    {
+        return m_authorization_mask;
+    }
+    [[nodiscard]] const RecoveryRosterAuthorityPtr&
+    RecoveryAuthority() const noexcept
+    {
+        return m_recovery_authority;
+    }
+
+    [[nodiscard]] bool IsInternallyConsistent(
+        const uint256& genesis_hash,
+        const ChainLockFinalityStoreConfig& config) const noexcept;
+
+    friend bool operator==(const PaymentAuditSealContextCapsule& left,
+                           const PaymentAuditSealContextCapsule& right)
+    {
+        const bool same_authority{
+            (!left.m_recovery_authority && !right.m_recovery_authority) ||
+            (left.m_recovery_authority && right.m_recovery_authority &&
+             *left.m_recovery_authority == *right.m_recovery_authority)};
+        return left.m_version == right.m_version &&
+               left.m_epoch == right.m_epoch &&
+               left.m_carrier_end_height_exclusive ==
+                   right.m_carrier_end_height_exclusive &&
+               left.m_seal == right.m_seal &&
+               left.m_authorization_mask == right.m_authorization_mask &&
+               same_authority;
+    }
+
+private:
+    PaymentAuditSealContextCapsule(
+        uint32_t epoch,
+        int32_t carrier_end_height_exclusive,
+        FinalChainLockRecordMetadata seal,
+        uint8_t authorization_mask,
+        RecoveryRosterAuthorityPtr recovery_authority);
+
+    static bool BuildForVerifiedDurableCandidate(
+        const uint256& genesis_hash,
+        const ChainLockFinalityStoreConfig& config,
+        const FinalChainLock& chainlock,
+        const PreparedChainLockContextPtr& context,
+        std::optional<PaymentAuditSealContextCapsule>& capsule_out);
+
+    uint16_t m_version{PAYMENT_AUDIT_SEAL_CONTEXT_VERSION};
+    uint32_t m_epoch{0};
+    int32_t m_carrier_end_height_exclusive{-1};
+    FinalChainLockRecordMetadata m_seal;
+    uint8_t m_authorization_mask{0};
+    RecoveryRosterAuthorityPtr m_recovery_authority;
+
+    friend class ::llmq::CChainLocksHandler;
+    friend class PaymentAuditSealContextCapsuleTestAccess;
+    friend class PQChainLockPersistence;
+};
+
 enum class ChainLockPersistenceError : uint8_t {
     NONE = 0,
     INVALID_CHAINLOCK,
@@ -221,6 +316,8 @@ struct DurableFinalityStateView {
     std::optional<FinalChainLockRecordMetadata> unsealed_btcc;
     std::optional<ReceiptArchiveRosterAuthorization>
         receipt_archive_authorization;
+    std::optional<PaymentAuditSealContextCapsule>
+        payment_audit_seal_context;
 
     friend bool operator==(const DurableFinalityStateView&,
                            const DurableFinalityStateView&) = default;
@@ -256,6 +353,10 @@ public:
     LoadPaymentAuditPresealState() const;
     [[nodiscard]] std::optional<RosterRecoveryPrecommit>
     LoadRosterRecoveryPrecommit() const;
+    [[nodiscard]] RecoveryRosterAuthorityPtr
+    LoadRecoveryRosterAuthority() const;
+    [[nodiscard]] std::optional<PaymentAuditSealContextCapsule>
+    LoadPaymentAuditSealContext() const;
 
     /**
      * Synchronously replace the durable winner. An identical write is
@@ -263,16 +364,23 @@ public:
      */
     [[nodiscard]] bool PersistBest(
         const FinalChainLock& chainlock,
-        ChainLockPersistenceError* error = nullptr);
+        ChainLockPersistenceError* error = nullptr,
+        RecoveryRosterAuthorityPtr recovery_authority = nullptr,
+        std::optional<PaymentAuditSealContextCapsule>
+            payment_audit_seal_context = std::nullopt);
 
     /**
      * Atomically advance a normally verified durable winner and retire the
-     * exact gap authority that the new winner independently covers.
+     * exact receipt-gap authorization that it independently covers. Recovery
+     * authority remains retained while any durable certificate needs it.
      */
     [[nodiscard]] bool PersistBestCoveringReceiptArchive(
         const FinalChainLock& chainlock,
         const ReceiptArchiveRosterAuthorization& expected_authorization,
-        ChainLockPersistenceError* error = nullptr);
+        ChainLockPersistenceError* error = nullptr,
+        RecoveryRosterAuthorityPtr recovery_authority = nullptr,
+        std::optional<PaymentAuditSealContextCapsule>
+            payment_audit_seal_context = std::nullopt);
 
     /**
      * Retain a fully verified stale ADVANCE needed by an exact on-chain
@@ -280,16 +388,19 @@ public:
      */
     [[nodiscard]] bool PersistUnsealedBTCC(
         const FinalChainLock& chainlock,
-        ChainLockPersistenceError* error = nullptr);
+        ChainLockPersistenceError* error = nullptr,
+        RecoveryRosterAuthorityPtr recovery_authority = nullptr);
 
     /**
-     * Atomically install the exact verified receipt archive and consume the
-     * owner-bound roster authority retained by the catch-up winner.
+     * Atomically install the exact verified receipt archive and consume its
+     * owner-bound gap authorization. Recovery authority is retained or
+     * rebound when the resulting durable state still needs it.
      */
     [[nodiscard]] bool PersistAuthorizedUnsealedBTCC(
         const FinalChainLock& chainlock,
         const ReceiptArchiveRosterAuthorization& expected_authorization,
-        ChainLockPersistenceError* error = nullptr);
+        ChainLockPersistenceError* error = nullptr,
+        RecoveryRosterAuthorityPtr recovery_authority = nullptr);
 
     /** Atomically advance the winner and highest catch-up audit marker. */
     [[nodiscard]] bool PersistCatchupBest(
@@ -298,19 +409,31 @@ public:
         const std::optional<BTCCCursorReconciliationProof>&
             btcc_cursor_reconciliation = std::nullopt,
         const ReceiptArchiveRosterAuthorization*
-            consume_receipt_archive_authorization = nullptr);
+            consume_receipt_archive_authorization = nullptr,
+        RecoveryRosterAuthorityPtr recovery_authority = nullptr,
+        std::optional<PaymentAuditSealContextCapsule>
+            payment_audit_seal_context = std::nullopt);
 
     /**
      * Atomically install a verified first INITIALIZE winner, consuming a
-     * matching local marker when present. Plain PersistBest rejects it.
+     * matching local marker when present. A conflicting marker is consumed
+     * only with the exact store-minted verification capability. Plain
+     * PersistBest rejects every INITIALIZE transition.
      */
     [[nodiscard]] bool PersistInitializedBest(
         const FinalChainLock& chainlock,
-        ChainLockPersistenceError* error = nullptr);
+        ChainLockPersistenceError* error = nullptr,
+        RecoveryRosterAuthorityPtr recovery_authority = nullptr,
+        const VerifiedRecoveryResetPersistenceCapability*
+            verified_reset = nullptr,
+        std::optional<PaymentAuditSealContextCapsule>
+            payment_audit_seal_context = std::nullopt);
 
     /**
      * Atomically install a verified RECOVER winner, consuming a matching
-     * local marker when present. Plain PersistCatchupBest rejects it.
+     * local marker when present. A conflicting marker is consumed only with
+     * the exact store-minted verification capability. Plain
+     * PersistCatchupBest rejects every RECOVER transition.
      */
     [[nodiscard]] bool PersistRecoveryCatchupBest(
         const FinalChainLock& chainlock,
@@ -318,7 +441,12 @@ public:
         const std::optional<BTCCCursorReconciliationProof>&
             btcc_cursor_reconciliation = std::nullopt,
         const ReceiptArchiveRosterAuthorization*
-            consume_receipt_archive_authorization = nullptr);
+            consume_receipt_archive_authorization = nullptr,
+        RecoveryRosterAuthorityPtr recovery_authority = nullptr,
+        const VerifiedRecoveryResetPersistenceCapability*
+            verified_reset = nullptr,
+        std::optional<PaymentAuditSealContextCapsule>
+            payment_audit_seal_context = std::nullopt);
 
     /** Stage PENDING first; only its exact durable record may become READY. */
     [[nodiscard]] bool PersistRosterRecoveryPrecommit(
@@ -329,10 +457,6 @@ public:
     [[nodiscard]] bool ReplaceRosterRecoveryPrecommit(
         const RosterRecoveryPrecommit& expected,
         const RosterRecoveryPrecommit& replacement,
-        ChainLockPersistenceError* error = nullptr);
-
-    /** Explicitly abandon the staged recovery observation. */
-    [[nodiscard]] bool ClearRosterRecoveryPrecommit(
         ChainLockPersistenceError* error = nullptr);
 
     /** Atomically replace both deferred-NEVM branch obligations. */
@@ -354,8 +478,24 @@ public:
         ChainLockPersistenceError* error = nullptr);
 
 private:
+    /**
+     * The handler alone may abandon an unsigned epoch after obtaining an
+     * opaque Bitcoin-policy proof binding that exact old anchor and exact
+     * active replacement in one stable view. Keeping this outside the public
+     * persistence API prevents generic callers from turning the same-slot
+     * CAS into an epoch-reset primitive.
+     */
+    [[nodiscard]] bool ReplaceStablyInactiveRosterRecoveryPrecommit(
+        const RosterRecoveryPrecommit& expected,
+        const RosterRecoveryPrecommit& replacement,
+        const BTCRecoveryPrecommitRolloverProof& rollover_proof,
+        ChainLockPersistenceError* error = nullptr);
+
     struct Impl;
     const std::unique_ptr<Impl> m_impl;
+
+    friend class ::llmq::CChainLocksHandler;
+    friend class RosterRecoveryPrecommitRolloverTestAccess;
 };
 
 } // namespace llmq::pq

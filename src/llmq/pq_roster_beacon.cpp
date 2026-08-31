@@ -7,6 +7,7 @@
 #include <hash.h>
 #include <span.h>
 
+#include <algorithm>
 #include <limits>
 #include <utility>
 
@@ -214,8 +215,22 @@ bool IsExactRosterBeaconRotation(const RosterBeaconWindow& old_window,
         }
     }
     const auto& consumed{new_window.active.seeds.back()};
-    return (old_window.next.IsReady() && consumed == old_window.next) ||
-           IsExactRosterBeaconReveal(old_window.next, consumed);
+    const bool has_recovery{std::any_of(
+        new_window.active.seeds.begin(), new_window.active.seeds.end(),
+        [](const RosterBeaconSeed& seed) {
+            return seed.anchor_kind == RosterBeaconAnchorKind::RECOVERY;
+        })};
+    const uint256 expected_authority_hash{
+        has_recovery ? old_window.active.recovery_authority_hash
+                     : uint256{}};
+    return new_window.active.recovery_authority_hash ==
+               expected_authority_hash &&
+           new_window.active.recovery_authority_source ==
+               (has_recovery
+                    ? old_window.active.recovery_authority_source
+                    : RecoveryRosterAuthoritySource{}) &&
+           ((old_window.next.IsReady() && consumed == old_window.next) ||
+            IsExactRosterBeaconReveal(old_window.next, consumed));
 }
 
 std::optional<uint8_t> GetNormalRosterAuthorizationMask(
@@ -286,6 +301,16 @@ DeriveNormalRosterAuthorizationDecision(
                 input.previous.window.active.seeds[slot + 1];
         }
         new_window.active.seeds.back() = consumed;
+        if (std::none_of(
+                new_window.active.seeds.begin(),
+                new_window.active.seeds.end(),
+                [](const RosterBeaconSeed& seed) {
+                    return seed.anchor_kind ==
+                           RosterBeaconAnchorKind::RECOVERY;
+                })) {
+            new_window.active.recovery_authority_hash.SetNull();
+            new_window.active.recovery_authority_source = {};
+        }
         new_window.next = EmptyNormalSeed(input.newest_epoch + 1);
         kind = RosterAuthorizationTransitionKind::ROTATE;
     } else if (input.pending_reveal) {
@@ -371,6 +396,17 @@ bool IsRecoveryRosterBeaconWindow(const RosterBeaconWindow& window) noexcept
     return true;
 }
 
+bool HasRecoveryRosterBeacon(const RosterBeaconWindow& window) noexcept
+{
+    return window.IsStructurallyValid() &&
+           std::any_of(
+               window.active.seeds.begin(), window.active.seeds.end(),
+               [](const RosterBeaconSeed& seed) {
+                   return seed.anchor_kind ==
+                          RosterBeaconAnchorKind::RECOVERY;
+               });
+}
+
 bool RosterAuthorizationPriorState::IsStructurallyValid() const noexcept
 {
     return !state_hash.IsNull() && window.IsStructurallyValid();
@@ -389,12 +425,25 @@ bool RosterAuthorizationTransition::IsStructurallyValid() const noexcept
         return false;
     }
     if (kind == RosterAuthorizationTransitionKind::INITIALIZE) {
-        return !previous && IsRecoveryRosterBeaconWindow(new_window);
+        return !previous && IsRecoveryRosterBeaconWindow(new_window) &&
+               new_window.active.recovery_authority_source.kind ==
+                   RecoveryRosterAuthoritySourceKind::ACTIVATION;
     }
     if (kind == RosterAuthorizationTransitionKind::RECOVER) {
-        // Recovery is a threshold-authenticated reset whose state hash must
-        // be identical for fresh and already-synchronized verifiers.
-        return !previous && IsRecoveryRosterBeaconWindow(new_window);
+        if (!previous || !previous->IsStructurallyValid() ||
+            !IsRecoveryRosterBeaconWindow(new_window)) {
+            return false;
+        }
+        if (HasRecoveryRosterBeacon(previous->window)) {
+            return new_window.active.recovery_authority_hash ==
+                       previous->window.active.recovery_authority_hash &&
+                   new_window.active.recovery_authority_source ==
+                       previous->window.active.recovery_authority_source;
+        }
+        return new_window.active.recovery_authority_source.kind ==
+                   RecoveryRosterAuthoritySourceKind::NORMAL_ROSTERS &&
+               new_window.active.recovery_authority_source.normal_beacons ==
+                   previous->window.active.seeds;
     }
     if (!previous || !previous->IsStructurallyValid()) return false;
     if (kind == RosterAuthorizationTransitionKind::KEEP) {

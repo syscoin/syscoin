@@ -10,13 +10,42 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include <boost/test/unit_test.hpp>
 
 using namespace llmq::pq;
 
+static_assert(!std::is_constructible_v<
+              VerifiedPaymentAuditAdmission, FinalPaymentAudit, uint8_t>);
+static_assert(!std::is_constructible_v<
+              StoredVerifiedPaymentAudit, FinalPaymentAudit, uint256,
+              uint256, uint8_t, uint64_t>);
+
+namespace llmq_tests {
+
+class PaymentAuditStoreTestAccess final {
+public:
+    static VerifiedPaymentAuditAdmission Admission(
+        FinalPaymentAudit audit, uint8_t authorization_mask)
+    {
+        return VerifiedPaymentAuditAdmission{
+            std::move(audit), authorization_mask};
+    }
+};
+
+} // namespace llmq_tests
+
 namespace {
+
+VerifiedPaymentAuditAdmission Verified(
+    FinalPaymentAudit audit, uint8_t authorization_mask = 0x0f)
+{
+    return llmq_tests::PaymentAuditStoreTestAccess::Admission(
+        std::move(audit), authorization_mask);
+}
 
 struct TestWitnessKey {
     uint8_t prefix{0xa1};
@@ -347,7 +376,7 @@ BOOST_AUTO_TEST_CASE(archive_bounds_live_candidates_by_missing_quorum)
         candidates[slot] = Audit(epoch, masks[slot], 100 + slot);
         BOOST_CHECK(store.ProbeLiveCandidateSlot(epoch, masks[slot]) ==
                     PaymentAuditStoreResult::ACCEPTED);
-        BOOST_CHECK(store.AcceptVerified(candidates[slot]) ==
+        BOOST_CHECK(store.AcceptVerified(Verified(candidates[slot])) ==
                     PaymentAuditStoreResult::ACCEPTED);
         BOOST_CHECK(store.ProbeLiveCandidateSlot(epoch, masks[slot]) ==
                     PaymentAuditStoreResult::LIVE_CANDIDATE_SLOT_FULL);
@@ -367,13 +396,13 @@ BOOST_AUTO_TEST_CASE(archive_bounds_live_candidates_by_missing_quorum)
     BOOST_CHECK(store.ProbeLiveCandidateSlot(
                     epoch, replacement.selected_quorum_mask) ==
                 PaymentAuditStoreResult::LIVE_CANDIDATE_SLOT_FULL);
-    BOOST_CHECK(store.AcceptVerified(replacement) ==
+    BOOST_CHECK(store.AcceptVerified(Verified(replacement)) ==
                 PaymentAuditStoreResult::LIVE_CANDIDATE_SLOT_FULL);
 
     // The exact witness named by an on-chain dependency always admits,
     // evicting only the live candidate with the same 3-of-4 mask.
     BOOST_CHECK(store.AcceptVerified(
-                    replacement, /*required_witness=*/true) ==
+                    Verified(replacement), /*required_witness=*/true) ==
                 PaymentAuditStoreResult::ACCEPTED);
     BOOST_CHECK(!store.Has(replaced_id));
     BOOST_CHECK(store.Has(replacement_id));
@@ -407,12 +436,12 @@ BOOST_AUTO_TEST_CASE(candidate_snapshot_is_coherent_ordered_and_revisioned)
     BOOST_CHECK_EQUAL(empty->epoch, epoch);
     BOOST_CHECK(empty->ordered_candidates.empty());
 
-    BOOST_REQUIRE(store.AcceptVerified(pinned) ==
+    BOOST_REQUIRE(store.AcceptVerified(Verified(pinned)) ==
                   PaymentAuditStoreResult::ACCEPTED);
     const auto accepted_revision{store.ObserveCandidateRevision()};
     BOOST_REQUIRE(accepted_revision);
     BOOST_CHECK_EQUAL(*accepted_revision, *initial_revision + 1);
-    BOOST_CHECK(store.AcceptVerified(pinned) ==
+    BOOST_CHECK(store.AcceptVerified(Verified(pinned)) ==
                 PaymentAuditStoreResult::DUPLICATE_WITNESS);
     BOOST_CHECK(store.ObserveCandidateRevision() == accepted_revision);
 
@@ -421,9 +450,9 @@ BOOST_AUTO_TEST_CASE(candidate_snapshot_is_coherent_ordered_and_revisioned)
     const auto pinned_revision{store.ObserveCandidateRevision()};
     BOOST_REQUIRE(pinned_revision);
     BOOST_CHECK_EQUAL(*pinned_revision, *accepted_revision + 1);
-    BOOST_REQUIRE(store.AcceptVerified(late_slot) ==
+    BOOST_REQUIRE(store.AcceptVerified(Verified(late_slot)) ==
                   PaymentAuditStoreResult::ACCEPTED);
-    BOOST_REQUIRE(store.AcceptVerified(early_slot) ==
+    BOOST_REQUIRE(store.AcceptVerified(Verified(early_slot)) ==
                   PaymentAuditStoreResult::ACCEPTED);
 
     const auto snapshot{store.GetEpochCandidateSnapshot(epoch)};
@@ -455,7 +484,7 @@ BOOST_AUTO_TEST_CASE(candidate_snapshot_is_coherent_ordered_and_revisioned)
     rejected.report_witnesses[0]
         .authenticated_signature.signature[2] ^= 1;
     BOOST_REQUIRE(rejected.IsStructurallyValid());
-    BOOST_CHECK(store.AcceptVerified(rejected) ==
+    BOOST_CHECK(store.AcceptVerified(Verified(rejected)) ==
                 PaymentAuditStoreResult::LIVE_CANDIDATE_SLOT_FULL);
     BOOST_CHECK(store.IsCandidateRevisionCurrent(snapshot->revision));
 
@@ -493,7 +522,7 @@ BOOST_AUTO_TEST_CASE(candidate_revision_tracks_repairs_and_fails_closed)
     const uint256 witness_id{audit.GetWitnessId(genesis_hash)};
     {
         PaymentAuditStore store{repair_path, genesis_hash};
-        BOOST_REQUIRE(store.AcceptVerified(audit) ==
+        BOOST_REQUIRE(store.AcceptVerified(Verified(audit)) ==
                       PaymentAuditStoreResult::ACCEPTED);
     }
     ErasePresence(repair_path, genesis_hash, witness_id);
@@ -507,7 +536,7 @@ BOOST_AUTO_TEST_CASE(candidate_revision_tracks_repairs_and_fails_closed)
         const auto after{store.ObserveCandidateRevision()};
         BOOST_REQUIRE(after);
         BOOST_CHECK_EQUAL(*after, *before + 1);
-        BOOST_CHECK(store.AcceptVerified(audit) ==
+        BOOST_CHECK(store.AcceptVerified(Verified(audit)) ==
                     PaymentAuditStoreResult::DUPLICATE_WITNESS);
         BOOST_CHECK(store.ObserveCandidateRevision() == after);
     }
@@ -516,7 +545,7 @@ BOOST_AUTO_TEST_CASE(candidate_revision_tracks_repairs_and_fails_closed)
                                 "pq_payment_audit_store_revision_corrupt"};
     {
         PaymentAuditStore store{corrupt_path, genesis_hash};
-        BOOST_REQUIRE(store.AcceptVerified(audit) ==
+        BOOST_REQUIRE(store.AcceptVerified(Verified(audit)) ==
                       PaymentAuditStoreResult::ACCEPTED);
     }
     ErasePayloadAndPresence(corrupt_path, genesis_hash, witness_id,
@@ -534,7 +563,8 @@ BOOST_AUTO_TEST_CASE(candidate_revision_tracks_repairs_and_fails_closed)
     BOOST_CHECK(!corrupt.IsCandidateRevisionCurrent(*repaired_revision));
 }
 
-BOOST_AUTO_TEST_CASE(exact_witness_snapshot_is_atomic_and_revision_bound)
+BOOST_AUTO_TEST_CASE(
+    exact_verified_witness_capability_is_atomic_and_revision_bound)
 {
     const fs::path path{m_path_root /
                         "pq_payment_audit_store_witness_snapshot"};
@@ -545,23 +575,27 @@ BOOST_AUTO_TEST_CASE(exact_witness_snapshot_is_atomic_and_revision_bound)
     const uint256 witness_id{audit.GetWitnessId(genesis_hash)};
 
     PaymentAuditStore store{path, genesis_hash};
-    BOOST_CHECK(!store.GetWithCandidateRevision(NonNullHash(999)));
+    BOOST_CHECK(!store.GetVerifiedWithCandidateRevision(NonNullHash(999)));
     BOOST_REQUIRE(store.IsHealthy());
-    BOOST_REQUIRE(store.AcceptVerified(audit) ==
+    BOOST_REQUIRE(store.AcceptVerified(Verified(audit, 0x07)) ==
                   PaymentAuditStoreResult::ACCEPTED);
 
-    const auto exact{store.GetWithCandidateRevision(witness_id)};
+    const auto exact{store.GetVerifiedWithCandidateRevision(witness_id)};
     BOOST_REQUIRE(exact);
-    BOOST_CHECK(exact->audit == audit);
-    BOOST_CHECK_NE(exact->revision, 0U);
-    BOOST_CHECK(store.IsCandidateRevisionCurrent(exact->revision));
+    BOOST_CHECK(exact->Audit() == audit);
+    BOOST_CHECK(exact->LogicalId() == audit.GetLogicalId(genesis_hash));
+    BOOST_CHECK(exact->WitnessId() == witness_id);
+    BOOST_CHECK_EQUAL(exact->AuthorizationMask(), 0x07);
+    BOOST_CHECK_NE(exact->Revision(), 0U);
+    BOOST_CHECK(store.IsCandidateRevisionCurrent(exact->Revision()));
 
-    BOOST_REQUIRE(store.AcceptVerified(mutation) ==
+    BOOST_REQUIRE(store.AcceptVerified(Verified(mutation)) ==
                   PaymentAuditStoreResult::ACCEPTED);
-    BOOST_CHECK(!store.IsCandidateRevisionCurrent(exact->revision));
+    BOOST_CHECK(!store.IsCandidateRevisionCurrent(exact->Revision()));
 }
 
-BOOST_AUTO_TEST_CASE(exact_witness_snapshot_captures_repair_revision)
+BOOST_AUTO_TEST_CASE(
+    exact_verified_witness_capability_captures_repair_revision)
 {
     const fs::path path{m_path_root /
                         "pq_payment_audit_store_witness_snapshot_repair"};
@@ -571,7 +605,7 @@ BOOST_AUTO_TEST_CASE(exact_witness_snapshot_captures_repair_revision)
     const uint256 witness_id{audit.GetWitnessId(genesis_hash)};
     {
         PaymentAuditStore store{path, genesis_hash};
-        BOOST_REQUIRE(store.AcceptVerified(audit) ==
+        BOOST_REQUIRE(store.AcceptVerified(Verified(audit, 0x07)) ==
                       PaymentAuditStoreResult::ACCEPTED);
     }
     ErasePresence(path, genesis_hash, witness_id);
@@ -579,11 +613,50 @@ BOOST_AUTO_TEST_CASE(exact_witness_snapshot_captures_repair_revision)
     PaymentAuditStore repaired{path, genesis_hash};
     const auto before{repaired.ObserveCandidateRevision()};
     BOOST_REQUIRE(before);
-    const auto exact{repaired.GetWithCandidateRevision(witness_id)};
+    const auto exact{
+        repaired.GetVerifiedWithCandidateRevision(witness_id)};
     BOOST_REQUIRE(exact);
-    BOOST_CHECK(exact->audit == audit);
-    BOOST_CHECK_EQUAL(exact->revision, *before + 1);
-    BOOST_CHECK(repaired.IsCandidateRevisionCurrent(exact->revision));
+    BOOST_CHECK(exact->Audit() == audit);
+    BOOST_CHECK(exact->LogicalId() == audit.GetLogicalId(genesis_hash));
+    BOOST_CHECK(exact->WitnessId() == witness_id);
+    BOOST_CHECK_EQUAL(exact->AuthorizationMask(), 0x07);
+    BOOST_CHECK_EQUAL(exact->Revision(), *before + 1);
+    BOOST_CHECK(repaired.IsCandidateRevisionCurrent(exact->Revision()));
+}
+
+BOOST_AUTO_TEST_CASE(verified_admission_mask_is_exact_and_fail_closed)
+{
+    const fs::path path{m_path_root /
+                        "pq_payment_audit_store_admission_mask"};
+    const uint256 genesis_hash{NonNullHash(16)};
+    const auto audit{Audit(16, 0x07, 930)};
+    const uint256 witness_id{audit.GetWitnessId(genesis_hash)};
+
+    PaymentAuditStore store{path, genesis_hash};
+    BOOST_CHECK(store.AcceptVerified(Verified(audit, 0x03)) ==
+                PaymentAuditStoreResult::INVALID);
+    BOOST_CHECK(store.AcceptVerified(Verified(audit, 0x0b)) ==
+                PaymentAuditStoreResult::INVALID);
+    BOOST_CHECK(!store.Has(witness_id));
+
+    BOOST_REQUIRE(store.AcceptVerified(Verified(audit, 0x0f)) ==
+                  PaymentAuditStoreResult::ACCEPTED);
+    const auto revision{store.ObserveCandidateRevision()};
+    BOOST_REQUIRE(revision);
+    const auto stored{
+        store.GetVerifiedWithCandidateRevision(witness_id)};
+    BOOST_REQUIRE(stored);
+    BOOST_CHECK_EQUAL(stored->AuthorizationMask(), 0x0f);
+
+    // The same witness cannot be rebound to a different authorization
+    // context after its durable admission.
+    BOOST_CHECK(store.AcceptVerified(Verified(audit, 0x07)) ==
+                PaymentAuditStoreResult::INVALID);
+    BOOST_CHECK(store.ObserveCandidateRevision() == revision);
+    const auto unchanged{
+        store.GetVerifiedWithCandidateRevision(witness_id)};
+    BOOST_REQUIRE(unchanged);
+    BOOST_CHECK_EQUAL(unchanged->AuthorizationMask(), 0x0f);
 }
 
 BOOST_AUTO_TEST_CASE(pin_prunes_old_candidates_but_accepts_new_branch_candidate)
@@ -598,9 +671,9 @@ BOOST_AUTO_TEST_CASE(pin_prunes_old_candidates_but_accepts_new_branch_candidate)
     {
         PaymentAuditStore store{path, genesis_hash};
         BOOST_REQUIRE(store.IsHealthy());
-        BOOST_CHECK(store.AcceptVerified(first) ==
+        BOOST_CHECK(store.AcceptVerified(Verified(first)) ==
                     PaymentAuditStoreResult::ACCEPTED);
-        BOOST_CHECK(store.AcceptVerified(second) ==
+        BOOST_CHECK(store.AcceptVerified(Verified(second)) ==
                     PaymentAuditStoreResult::ACCEPTED);
         BOOST_CHECK(store.PinReferencedWitness(epoch, second_id) ==
                     PaymentAuditStoreResult::ACCEPTED);
@@ -613,7 +686,7 @@ BOOST_AUTO_TEST_CASE(pin_prunes_old_candidates_but_accepts_new_branch_candidate)
                     second_id);
 
         const auto unsolicited{Audit(epoch, 0x0d, 202)};
-        BOOST_CHECK(store.AcceptVerified(unsolicited) ==
+        BOOST_CHECK(store.AcceptVerified(Verified(unsolicited)) ==
                     PaymentAuditStoreResult::ACCEPTED);
         const auto with_unsolicited{
             store.GetEpochCandidateSnapshot(epoch)};
@@ -654,21 +727,21 @@ BOOST_AUTO_TEST_CASE(checkpoint_prunes_prefix_and_preserves_live_suffix)
     {
         PaymentAuditStore store{path, genesis_hash};
         BOOST_REQUIRE(store.IsHealthy());
-        BOOST_CHECK(store.AcceptVerified(old_first) ==
+        BOOST_CHECK(store.AcceptVerified(Verified(old_first)) ==
                     PaymentAuditStoreResult::ACCEPTED);
         BOOST_CHECK(store.PinReferencedWitness(9, pruned_ids[0]) ==
                     PaymentAuditStoreResult::ACCEPTED);
-        BOOST_CHECK(store.AcceptVerified(old_second) ==
+        BOOST_CHECK(store.AcceptVerified(Verified(old_second)) ==
                     PaymentAuditStoreResult::ACCEPTED);
         BOOST_CHECK(store.PinReferencedWitness(9, pruned_ids[1]) ==
                     PaymentAuditStoreResult::ACCEPTED);
-        BOOST_CHECK(store.AcceptVerified(boundary) ==
+        BOOST_CHECK(store.AcceptVerified(Verified(boundary)) ==
                     PaymentAuditStoreResult::ACCEPTED);
         BOOST_CHECK(store.PinReferencedWitness(10, pruned_ids[2]) ==
                     PaymentAuditStoreResult::ACCEPTED);
-        BOOST_CHECK(store.AcceptVerified(live_first) ==
+        BOOST_CHECK(store.AcceptVerified(Verified(live_first)) ==
                     PaymentAuditStoreResult::ACCEPTED);
-        BOOST_CHECK(store.AcceptVerified(live_second) ==
+        BOOST_CHECK(store.AcceptVerified(Verified(live_second)) ==
                     PaymentAuditStoreResult::ACCEPTED);
 
         BOOST_REQUIRE(store.PruneThroughCheckpoint(checkpoint));
@@ -684,7 +757,7 @@ BOOST_AUTO_TEST_CASE(checkpoint_prunes_prefix_and_preserves_live_suffix)
         BOOST_CHECK(old_epoch->ordered_candidates.empty());
         BOOST_CHECK(boundary_epoch->ordered_candidates.empty());
         BOOST_CHECK(store.AcceptVerified(
-                        old_first, /*required_witness=*/true) ==
+                        Verified(old_first), /*required_witness=*/true) ==
                     PaymentAuditStoreResult::INVALID);
         BOOST_CHECK(store.PinReferencedWitness(10, pruned_ids[2]) ==
                     PaymentAuditStoreResult::INVALID);
@@ -744,7 +817,7 @@ BOOST_AUTO_TEST_CASE(checkpoint_steps_are_bounded_logical_and_crash_resumable)
     {
         PaymentAuditStore store{path, genesis_hash};
         for (std::size_t index{0}; index < retired.size(); ++index) {
-            BOOST_REQUIRE(store.AcceptVerified(retired[index]) ==
+            BOOST_REQUIRE(store.AcceptVerified(Verified(retired[index])) ==
                           PaymentAuditStoreResult::ACCEPTED);
             BOOST_REQUIRE(store.PinReferencedWitness(
                               epoch, retired_ids[index]) ==
@@ -766,12 +839,13 @@ BOOST_AUTO_TEST_CASE(checkpoint_steps_are_bounded_logical_and_crash_resumable)
         BOOST_REQUIRE(hidden);
         BOOST_CHECK(hidden->ordered_candidates.empty());
         BOOST_CHECK(store.AcceptVerified(
-                        retired.front(), /*required_witness=*/true) ==
+                        Verified(retired.front()),
+                        /*required_witness=*/true) ==
                     PaymentAuditStoreResult::INVALID);
         BOOST_CHECK(store.PinReferencedWitness(
                         epoch, retired_ids.front()) ==
                     PaymentAuditStoreResult::INVALID);
-        BOOST_REQUIRE(store.AcceptVerified(suffix) ==
+        BOOST_REQUIRE(store.AcceptVerified(Verified(suffix)) ==
                       PaymentAuditStoreResult::ACCEPTED);
         BOOST_CHECK(store.Has(suffix_id));
     }
@@ -835,7 +909,7 @@ BOOST_AUTO_TEST_CASE(epoch_pruning_uses_numeric_not_leveldb_order)
     for (std::size_t index{0}; index < epochs.size(); ++index) {
         audits[index] = Audit(epochs[index], 0x07, 3'300 + index);
         witness_ids[index] = audits[index].GetWitnessId(genesis_hash);
-        BOOST_REQUIRE(store.AcceptVerified(audits[index]) ==
+        BOOST_REQUIRE(store.AcceptVerified(Verified(audits[index])) ==
                       PaymentAuditStoreResult::ACCEPTED);
     }
 
@@ -865,7 +939,7 @@ BOOST_AUTO_TEST_CASE(pending_checkpoint_revalidates_links_after_restart)
     const auto checkpoint{Checkpoint(epoch, 340, 57'000)};
     {
         PaymentAuditStore store{path, genesis_hash};
-        BOOST_REQUIRE(store.AcceptVerified(audit) ==
+        BOOST_REQUIRE(store.AcceptVerified(Verified(audit)) ==
                       PaymentAuditStoreResult::ACCEPTED);
         BOOST_REQUIRE(store.PinReferencedWitness(epoch, witness_id) ==
                       PaymentAuditStoreResult::ACCEPTED);
@@ -957,9 +1031,11 @@ BOOST_AUTO_TEST_CASE(checkpoint_is_strictly_monotonic_and_idempotent)
 
         BOOST_REQUIRE(store.PruneThroughCheckpoint(next));
         BOOST_CHECK(store.GetPruneCheckpoint() == next);
-        BOOST_CHECK(store.AcceptVerified(Audit(21, 0x07, 400)) ==
+        BOOST_CHECK(store.AcceptVerified(
+                        Verified(Audit(21, 0x07, 400))) ==
                     PaymentAuditStoreResult::INVALID);
-        BOOST_CHECK(store.AcceptVerified(Audit(22, 0x07, 401)) ==
+        BOOST_CHECK(store.AcceptVerified(
+                        Verified(Audit(22, 0x07, 401))) ==
                     PaymentAuditStoreResult::ACCEPTED);
     }
 
@@ -985,11 +1061,11 @@ BOOST_AUTO_TEST_CASE(repeated_checkpoints_bound_all_archive_record_classes)
             const auto second{Audit(epoch, 0x07, 501 + 2 * epoch)};
             const uint256 first_id{first.GetWitnessId(genesis_hash)};
             const uint256 second_id{second.GetWitnessId(genesis_hash)};
-            BOOST_REQUIRE(store.AcceptVerified(first) ==
+            BOOST_REQUIRE(store.AcceptVerified(Verified(first)) ==
                           PaymentAuditStoreResult::ACCEPTED);
             BOOST_REQUIRE(store.PinReferencedWitness(epoch, first_id) ==
                           PaymentAuditStoreResult::ACCEPTED);
-            BOOST_REQUIRE(store.AcceptVerified(second) ==
+            BOOST_REQUIRE(store.AcceptVerified(Verified(second)) ==
                           PaymentAuditStoreResult::ACCEPTED);
             BOOST_REQUIRE(store.PinReferencedWitness(epoch, second_id) ==
                           PaymentAuditStoreResult::ACCEPTED);
@@ -1032,7 +1108,7 @@ BOOST_AUTO_TEST_CASE(checkpoint_prune_fails_closed_on_dangling_index)
     const uint256 witness_id{audit.GetWitnessId(genesis_hash)};
     {
         PaymentAuditStore store{path, genesis_hash};
-        BOOST_REQUIRE(store.AcceptVerified(audit) ==
+        BOOST_REQUIRE(store.AcceptVerified(Verified(audit)) ==
                       PaymentAuditStoreResult::ACCEPTED);
     }
     ErasePayloadAndPresence(path, genesis_hash, witness_id,
@@ -1059,7 +1135,7 @@ BOOST_AUTO_TEST_CASE(checkpoint_prune_rejects_trailing_physical_key)
     const uint256 witness_id{audit.GetWitnessId(genesis_hash)};
     {
         PaymentAuditStore store{path, genesis_hash};
-        BOOST_REQUIRE(store.AcceptVerified(audit) ==
+        BOOST_REQUIRE(store.AcceptVerified(Verified(audit)) ==
                       PaymentAuditStoreResult::ACCEPTED);
     }
     AppendTrailingPresenceKey(path, genesis_hash, epoch, witness_id);
@@ -1086,7 +1162,7 @@ BOOST_AUTO_TEST_CASE(checkpoint_prune_rejects_trailing_physical_value)
     const uint256 witness_id{audit.GetWitnessId(genesis_hash)};
     {
         PaymentAuditStore store{path, genesis_hash};
-        BOOST_REQUIRE(store.AcceptVerified(audit) ==
+        BOOST_REQUIRE(store.AcceptVerified(Verified(audit)) ==
                       PaymentAuditStoreResult::ACCEPTED);
     }
     AppendTrailingPresenceValue(path, genesis_hash, epoch, witness_id);
@@ -1114,7 +1190,7 @@ BOOST_AUTO_TEST_CASE(required_response_repairs_missing_live_and_referenced_paylo
     {
         PaymentAuditStore store{path, genesis_hash};
         BOOST_REQUIRE(store.IsHealthy());
-        BOOST_CHECK(store.AcceptVerified(audit) ==
+        BOOST_CHECK(store.AcceptVerified(Verified(audit)) ==
                     PaymentAuditStoreResult::ACCEPTED);
     }
     ErasePayloadAndPresence(path, genesis_hash, witness_id,
@@ -1126,7 +1202,7 @@ BOOST_AUTO_TEST_CASE(required_response_repairs_missing_live_and_referenced_paylo
         BOOST_CHECK(!store.Get(witness_id));
         BOOST_CHECK(!store.Has(witness_id));
         BOOST_CHECK(store.AcceptVerified(
-                        audit, /*required_witness=*/true) ==
+                        Verified(audit), /*required_witness=*/true) ==
                     PaymentAuditStoreResult::ACCEPTED);
         BOOST_CHECK(store.Has(witness_id));
         BOOST_REQUIRE(store.Get(witness_id));
@@ -1139,7 +1215,7 @@ BOOST_AUTO_TEST_CASE(required_response_repairs_missing_live_and_referenced_paylo
         BOOST_REQUIRE(store.IsHealthy());
         BOOST_CHECK(!store.Has(witness_id));
         BOOST_CHECK(store.AcceptVerified(
-                        audit, /*required_witness=*/true) ==
+                        Verified(audit), /*required_witness=*/true) ==
                     PaymentAuditStoreResult::ACCEPTED);
         BOOST_CHECK(store.Has(witness_id));
         const auto restored{store.Get(witness_id)};

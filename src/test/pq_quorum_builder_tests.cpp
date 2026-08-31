@@ -779,16 +779,22 @@ BOOST_AUTO_TEST_CASE(root_capable_members_rank_ahead_when_they_fit)
     }
 }
 
+BOOST_AUTO_TEST_CASE(null_snapshot_fails_before_modifier_derivation)
+{
+    constexpr uint32_t EPOCH{4};
+    QuorumBuildError error{QuorumBuildError::NONE};
+    const auto roster{BuildTestRoster(
+        NonNullHash(11), BuildConfig(), EPOCH, NonNullHash(12),
+        CDeterministicMNList{}, {}, &error)};
+    BOOST_CHECK(!roster);
+    BOOST_CHECK_EQUAL(error, QuorumBuildError::SNAPSHOT_MISMATCH);
+}
+
 BOOST_AUTO_TEST_CASE(fewer_than_400_unsafe_cutoff_and_duplicate_keys_fail_closed)
 {
     constexpr uint32_t EPOCH{4};
     const uint256 genesis{NonNullHash(11)};
     QuorumBuildError error{QuorumBuildError::NONE};
-    BOOST_CHECK(!BuildTestRoster(
-        genesis, BuildConfig(), EPOCH, NonNullHash(12),
-        CDeterministicMNList{}, {}, &error));
-    BOOST_CHECK_EQUAL(error, QuorumBuildError::SNAPSHOT_MISMATCH);
-
     const auto too_small = Snapshot(2448, NonNullHash(12), QUORUM_SIZE - 1);
     BOOST_CHECK(!BuildTestRoster(
         genesis, BuildConfig(), EPOCH, NonNullHash(13), too_small, {},

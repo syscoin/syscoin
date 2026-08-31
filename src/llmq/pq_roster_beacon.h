@@ -25,8 +25,8 @@ inline constexpr std::string_view ROSTER_AUTHORIZATION_STATE_DOMAIN{
     "SYS_PQ_ROSTER_AUTHORIZATION_STATE_V1"};
 
 /**
- * The exact prior state used by continuous normal transitions. INITIALIZE and
- * RECOVER are universal reset checkpoints and never synthesize or bind one.
+ * The exact prior state used by continuous transitions and RECOVER.
+ * INITIALIZE alone starts without a predecessor authorization state.
  */
 struct RosterAuthorizationPriorState {
     uint256 state_hash;
@@ -163,6 +163,10 @@ ValidateNormalRosterAuthorizationDecision(
 
 /** Narrow activation/catch-up exception derived from one shared raw anchor. */
 [[nodiscard]] bool IsRecoveryRosterBeaconWindow(
+    const RosterBeaconWindow& window) noexcept;
+
+/** Whether any active slot is still fixed by a recovery authority. */
+[[nodiscard]] bool HasRecoveryRosterBeacon(
     const RosterBeaconWindow& window) noexcept;
 
 /** Commit every seed field under a roster-only, network-bound domain. */

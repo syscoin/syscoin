@@ -1909,24 +1909,74 @@ BOOST_FIXTURE_TEST_CASE(
         activation_predecessor->GetBlockHash();
     winner.statement.quorum_context_hash = GetRandHash();
     winner.statement.roster_transition =
-        llmq::pq::RosterAuthorizationTransitionKind::KEEP;
+        llmq::pq::RosterAuthorizationTransitionKind::INITIALIZE;
     const auto active_epochs{llmq::pq::ActiveEpochsAtHeight(
         config->chainlock_schedule, winner.statement.height)};
     BOOST_REQUIRE(active_epochs);
+    auto recovery_authority{
+        std::make_shared<llmq::pq::RecoveryRosterAuthority>()};
+    for (std::size_t slot{0}; slot < llmq::pq::ACTIVE_QUORUMS; ++slot) {
+        for (std::size_t member{0}; member < llmq::pq::QUORUM_SIZE; ++member) {
+            auto& entry{recovery_authority->slots[slot][member]};
+            entry.pro_tx_hash = GetRandHash();
+            entry.eligible = member < llmq::pq::QUORUM_MIN_VALID;
+            if (entry.eligible) {
+                llmq::pq::RecoveryRosterChildCommitment child_root;
+                child_root.global_key_version = 1;
+                child_root.commitment.generation = 1;
+                child_root.commitment.tree_id = GetRandHash();
+                child_root.commitment.root = GetRandHash();
+                entry.child_root = std::move(child_root);
+            }
+        }
+    }
+    BOOST_REQUIRE(recovery_authority->IsStructurallyValid());
+    const auto recovery_authority_hash{
+        llmq::pq::GetRecoveryRosterAuthorityHash(
+            consensus.hashGenesisBlock, *recovery_authority)};
+    BOOST_REQUIRE(recovery_authority_hash);
+    const llmq::pq::BTCCursor recovery_cursor{
+        winner.statement.height, winner.statement.block_hash, GetRandHash()};
+    uint256 recovery_future_hash{GetRandHash()};
+    while (recovery_future_hash == recovery_cursor.btc_hash) {
+        recovery_future_hash = GetRandHash();
+    }
     for (std::size_t slot{0}; slot < llmq::pq::ACTIVE_QUORUMS; ++slot) {
         auto& seed{winner.statement.roster_beacons.active.seeds[slot]};
+        seed.anchor_kind = llmq::pq::RosterBeaconAnchorKind::RECOVERY;
         seed.state = llmq::pq::RosterBeaconState::READY;
         seed.epoch = (*active_epochs)[slot].epoch;
-        seed.anchor_cursor = llmq::pq::BTCCursor{
-            1 + static_cast<int32_t>(slot), GetRandHash(), GetRandHash()};
-        seed.anchor_btc_height = 800'000 + static_cast<int32_t>(slot);
-        do {
-            seed.future_btc_hash = GetRandHash();
-        } while (seed.future_btc_hash == seed.anchor_cursor.btc_hash);
+        seed.anchor_cursor = recovery_cursor;
+        seed.anchor_btc_height = 800'000;
+        seed.future_btc_hash = recovery_future_hash;
     }
+    winner.statement.roster_beacons.active.recovery_authority_hash =
+        *recovery_authority_hash;
+    auto& recovery_source{
+        winner.statement.roster_beacons.active.recovery_authority_source};
+    recovery_source.kind =
+        llmq::pq::RecoveryRosterAuthoritySourceKind::ACTIVATION;
+    recovery_source.height = activation_predecessor->nHeight;
+    recovery_source.block_hash = activation_predecessor->GetBlockHash();
     winner.statement.roster_beacons.next.epoch =
         active_epochs->back().epoch + 1;
-    winner.statement.roster_authorization_state_hash = GetRandHash();
+    winner.statement.accepted_btcc_cursor = recovery_cursor;
+    winner.statement.btcc_advance = llmq::pq::BTCCAdvance::ADVANCE;
+    llmq::pq::RosterAuthorizationTransition authorization_transition;
+    authorization_transition.kind = winner.statement.roster_transition;
+    authorization_transition.target_height = winner.statement.height;
+    authorization_transition.target_block_hash = winner.statement.block_hash;
+    authorization_transition.predecessor_height =
+        winner.statement.previous_chainlock_height;
+    authorization_transition.predecessor_block_hash =
+        winner.statement.previous_chainlock_hash;
+    authorization_transition.new_window = winner.statement.roster_beacons;
+    const auto authorization_state_hash{
+        llmq::pq::GetRosterAuthorizationStateHash(
+            consensus.hashGenesisBlock, authorization_transition)};
+    BOOST_REQUIRE(authorization_state_hash);
+    winner.statement.roster_authorization_state_hash =
+        *authorization_state_hash;
     winner.statement.payment_probation_state_hash = GetRandHash();
     winner.selected_quorum_mask = 0b0111;
     winner.signatures.resize(llmq::pq::FINAL_SIGNATURE_COUNT);
@@ -1957,7 +2007,8 @@ BOOST_FIXTURE_TEST_CASE(
                 .wipe_data = true,
             },
             consensus.hashGenesisBlock, *config};
-        BOOST_REQUIRE(persistence.PersistBest(winner));
+        BOOST_REQUIRE(persistence.PersistInitializedBest(
+            winner, nullptr, recovery_authority));
     }
     {
         LOCK(::cs_main);

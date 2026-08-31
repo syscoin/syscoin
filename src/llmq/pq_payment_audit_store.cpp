@@ -21,8 +21,8 @@ constexpr uint8_t DB_PRESENCE_PREFIX{0xa4};
 constexpr uint8_t DB_CHECKPOINT_KEY{0xa5};
 constexpr uint8_t DB_PRUNE_INTENT_KEY{0xa6};
 // Changing the archive layout must fail closed against an old local DB.
-constexpr uint32_t SCHEMA_GUARD{0x50414131}; // "PAA1"
-constexpr uint32_t WITNESS_GUARD{0x50575231}; // "PWR1"
+constexpr uint32_t SCHEMA_GUARD{0x50415631}; // "PAV1"
+constexpr uint32_t WITNESS_GUARD{0x50575631}; // "PWV1"
 constexpr uint32_t EPOCH_GUARD{0x50455231}; // "PER1"
 constexpr uint32_t REFERENCE_GUARD{0x50524631}; // "PRF1"
 constexpr uint32_t PRESENCE_GUARD{0x50525031}; // "PRP1"
@@ -133,12 +133,13 @@ struct AuditRecord {
     uint256 logical_id;
     uint256 witness_id;
     FinalPaymentAudit audit;
+    uint8_t authorization_mask{0};
     uint32_t guard{WITNESS_GUARD};
 
     SERIALIZE_METHODS(AuditRecord, obj)
     {
         READWRITE(obj.version, obj.logical_id, obj.witness_id, obj.audit,
-                  obj.guard);
+                  obj.authorization_mask, obj.guard);
     }
 };
 
@@ -244,7 +245,8 @@ struct PruneIntentRecord {
 };
 
 constexpr std::size_t AUDIT_RECORD_MAX_SIZE{
-    2 * sizeof(uint32_t) + 2 * 32 + FinalPaymentAudit::WIRE_SIZE};
+    2 * sizeof(uint32_t) + sizeof(uint8_t) + 2 * 32 +
+    FinalPaymentAudit::WIRE_SIZE};
 constexpr std::size_t SCHEMA_VALUE_SIZE{
     4 * sizeof(uint32_t) + 4 * sizeof(uint16_t) + 32};
 constexpr std::size_t EPOCH_RECORD_MAX_SIZE{
@@ -380,6 +382,9 @@ bool IsRecordValid(const AuditRecord& record,
     return record.version == PaymentAuditStore::DB_FORMAT_VERSION &&
            record.guard == WITNESS_GUARD &&
            record.audit.IsStructurallyValid() &&
+           IsSigningRosterAuthorizationMask(record.authorization_mask) &&
+           (record.audit.selected_quorum_mask &
+            ~record.authorization_mask) == 0 &&
            record.logical_id == record.audit.GetLogicalId(genesis_hash) &&
            record.witness_id == record.audit.GetWitnessId(genesis_hash);
 }
@@ -820,11 +825,18 @@ PaymentAuditStoreResult PaymentAuditStore::ProbeLiveCandidateSlot(
 }
 
 PaymentAuditStoreResult PaymentAuditStore::AcceptVerified(
-    const FinalPaymentAudit& audit, bool required_witness)
+    VerifiedPaymentAuditAdmission admission,
+    bool required_witness)
 {
     LOCK(m_mutex);
     if (m_failure) return *m_failure;
-    if (!audit.IsStructurallyValid()) return PaymentAuditStoreResult::INVALID;
+    FinalPaymentAudit audit{std::move(admission.m_audit)};
+    const uint8_t authorization_mask{admission.m_authorization_mask};
+    if (!audit.IsStructurallyValid() ||
+        !IsSigningRosterAuthorizationMask(authorization_mask) ||
+        (audit.selected_quorum_mask & ~authorization_mask) != 0) {
+        return PaymentAuditStoreResult::INVALID;
+    }
 
     const uint256 logical_id{audit.GetLogicalId(m_genesis_hash)};
     const uint256 witness_id{audit.GetWitnessId(m_genesis_hash)};
@@ -894,6 +906,9 @@ PaymentAuditStoreResult PaymentAuditStore::AcceptVerified(
                 m_failure = PaymentAuditStoreResult::CORRUPT;
                 return *m_failure;
             }
+            if (existing.authorization_mask != authorization_mask) {
+                return PaymentAuditStoreResult::INVALID;
+            }
             if (!HasValidPresence(m_db, m_genesis_hash, epoch,
                                   witness_id)) {
                 if (!CanAdvanceCandidateRevision()) return *m_failure;
@@ -911,7 +926,8 @@ PaymentAuditStoreResult PaymentAuditStore::AcceptVerified(
         }
 
         const AuditRecord record{DB_FORMAT_VERSION, logical_id, witness_id,
-                                 audit, WITNESS_GUARD};
+                                 std::move(audit), authorization_mask,
+                                 WITNESS_GUARD};
         // A required historical dependency can repair a missing certificate
         // record without re-entering the bounded live-candidate set. The
         // reference marker and preferred epoch pointer were committed in the
@@ -1000,20 +1016,27 @@ std::optional<FinalPaymentAudit> PaymentAuditStore::Get(
     return GetLocked(witness_id);
 }
 
-std::optional<PaymentAuditWitnessSnapshot>
-PaymentAuditStore::GetWithCandidateRevision(
+std::optional<StoredVerifiedPaymentAudit>
+PaymentAuditStore::GetVerifiedWithCandidateRevision(
     const uint256& witness_id) const
 {
     LOCK(m_mutex);
-    auto audit{GetLocked(witness_id)};
+    uint8_t authorization_mask{0};
+    uint256 logical_id;
+    auto audit{GetLocked(witness_id, &authorization_mask,
+                         &logical_id)};
     if (!audit) return std::nullopt;
-    return PaymentAuditWitnessSnapshot{
-        std::move(*audit), m_candidate_revision};
+    return StoredVerifiedPaymentAudit{
+        std::move(*audit), std::move(logical_id), witness_id,
+        authorization_mask, m_candidate_revision};
 }
 
 std::optional<FinalPaymentAudit> PaymentAuditStore::GetLocked(
-    const uint256& witness_id) const
+    const uint256& witness_id, uint8_t* authorization_mask,
+    uint256* logical_id) const
 {
+    if (authorization_mask != nullptr) *authorization_mask = 0;
+    if (logical_id != nullptr) logical_id->SetNull();
     if (m_failure || witness_id.IsNull()) return std::nullopt;
     try {
         const WitnessKey key{DB_WITNESS_PREFIX, DB_FORMAT_VERSION,
@@ -1086,6 +1109,10 @@ std::optional<FinalPaymentAudit> PaymentAuditStore::GetLocked(
             }
             AdvanceCandidateRevision();
         }
+        if (authorization_mask != nullptr) {
+            *authorization_mask = record.authorization_mask;
+        }
+        if (logical_id != nullptr) *logical_id = record.logical_id;
         return record.audit;
     } catch (const std::exception&) {
         m_failure = PaymentAuditStoreResult::DATABASE_ERROR;

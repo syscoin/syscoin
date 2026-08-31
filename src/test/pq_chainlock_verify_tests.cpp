@@ -68,6 +68,12 @@ RosterBeaconWindow RecoveryWindow(uint32_t first_epoch)
         seed.epoch = first_epoch + static_cast<uint32_t>(slot);
         window.active.seeds[slot] = std::move(seed);
     }
+    window.active.recovery_authority_hash = NonNullHash(399'999);
+    window.active.recovery_authority_source.kind =
+        RecoveryRosterAuthoritySourceKind::ACTIVATION;
+    window.active.recovery_authority_source.height = 864;
+    window.active.recovery_authority_source.block_hash =
+        NonNullHash(400'000);
     window.next.epoch = first_epoch + ACTIVE_QUORUMS;
     return window;
 }
@@ -660,16 +666,6 @@ BOOST_AUTO_TEST_CASE(authorization_is_derived_from_authenticated_transition)
     BOOST_REQUIRE(keep_mask);
     BOOST_CHECK_EQUAL(*keep_mask, 0b1111);
 
-    auto attested_history{keep_authorization};
-    attested_history.admission =
-        RosterAuthorizationAdmission::ATTESTED_HISTORY;
-    attested_history.previous.reset();
-    attested_history.normal_input.reset();
-    const auto attested_mask{ValidateRosterAuthorizationState(
-        fixture->genesis_hash, keep_statement, attested_history, &error)};
-    BOOST_REQUIRE(attested_mask);
-    BOOST_CHECK_EQUAL(*attested_mask, 0b1111);
-
     fixture->chainlock.selected_quorum_mask = 0b1011;
     fixture->chainlock.signer_bitmaps[3] =
         fixture->chainlock.signer_bitmaps[2];
@@ -711,6 +707,16 @@ BOOST_AUTO_TEST_CASE(initialization_and_recovery_require_explicit_admission)
         RosterAuthorizationTransitionKind::RECOVER;
     auto recover{initialize};
     recover.admission = RosterAuthorizationAdmission::RECOVER;
+    recover.previous = fixture->authorization.previous;
+    auto& recovery_source{
+        statement.roster_beacons.active.recovery_authority_source};
+    recovery_source.kind =
+        RecoveryRosterAuthoritySourceKind::NORMAL_ROSTERS;
+    recovery_source.height = statement.previous_chainlock_height;
+    recovery_source.block_hash = statement.previous_chainlock_hash;
+    recovery_source.quorum_context_hash = NonNullHash(400'001);
+    recovery_source.normal_beacons =
+        recover.previous->window.active.seeds;
     SealRosterAuthorization(fixture->genesis_hash, statement, recover);
     const auto recovery_mask{ValidateRosterAuthorizationState(
         fixture->genesis_hash, statement, recover, &error)};

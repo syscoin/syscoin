@@ -76,6 +76,15 @@ ActiveRosterBeaconBundle ReadyBundle(uint32_t first_epoch,
     return bundle;
 }
 
+RecoveryRosterAuthoritySource ActivationAuthoritySource(uint64_t salt = 1)
+{
+    RecoveryRosterAuthoritySource source;
+    source.kind = RecoveryRosterAuthoritySourceKind::ACTIVATION;
+    source.height = 864;
+    source.block_hash = NonNullHash(40'000 + salt);
+    return source;
+}
+
 ActiveRosterBeaconBundle RecoveryBundle(uint32_t first_epoch,
                                         uint64_t salt = 1)
 {
@@ -85,6 +94,8 @@ ActiveRosterBeaconBundle RecoveryBundle(uint32_t first_epoch,
             first_epoch + static_cast<uint32_t>(slot), salt,
             RosterBeaconAnchorKind::RECOVERY);
     }
+    bundle.recovery_authority_hash = NonNullHash(41'000 + salt);
+    bundle.recovery_authority_source = ActivationAuthoritySource(salt);
     return bundle;
 }
 
@@ -371,7 +382,7 @@ BOOST_AUTO_TEST_CASE(active_bundle_and_window_have_exact_epoch_geometry)
     DataStream bundle_bytes;
     bundle_bytes << bundle;
     BOOST_CHECK_EQUAL(bundle_bytes.size(), ActiveRosterBeaconBundle::WIRE_SIZE);
-    BOOST_CHECK_EQUAL(ActiveRosterBeaconBundle::WIRE_SIZE, 450U);
+    BOOST_CHECK_EQUAL(ActiveRosterBeaconBundle::WIRE_SIZE, 999U);
 
     const auto bundle_hash{GetActiveRosterBeaconBundleHash(genesis, bundle)};
     BOOST_REQUIRE(bundle_hash);
@@ -381,6 +392,14 @@ BOOST_AUTO_TEST_CASE(active_bundle_and_window_have_exact_epoch_geometry)
     changed_bundle.seeds[0].future_btc_hash = NonNullHash(402);
     BOOST_CHECK(*bundle_hash != *GetActiveRosterBeaconBundleHash(
                                     genesis, changed_bundle));
+
+    auto unexpected_authority{bundle};
+    unexpected_authority.recovery_authority_hash = NonNullHash(403);
+    BOOST_CHECK(!unexpected_authority.IsStructurallyValid());
+    unexpected_authority = bundle;
+    unexpected_authority.recovery_authority_source =
+        ActivationAuthoritySource(404);
+    BOOST_CHECK(!unexpected_authority.IsStructurallyValid());
 
     auto invalid{bundle};
     invalid.seeds[1].state = RosterBeaconState::PENDING;
@@ -392,12 +411,31 @@ BOOST_AUTO_TEST_CASE(active_bundle_and_window_have_exact_epoch_geometry)
 
     auto recovery{RecoveryBundle(40, 8)};
     BOOST_CHECK(recovery.IsStructurallyValid());
+    BOOST_CHECK(RoundTrip(recovery) == recovery);
     for (std::size_t slot{1}; slot < ACTIVE_QUORUMS; ++slot) {
         BOOST_CHECK(recovery.seeds[slot].anchor_cursor ==
                     recovery.seeds.front().anchor_cursor);
         BOOST_CHECK(recovery.seeds[slot].future_btc_hash ==
                     recovery.seeds.front().future_btc_hash);
     }
+    const auto recovery_hash{
+        GetActiveRosterBeaconBundleHash(genesis, recovery)};
+    BOOST_REQUIRE(recovery_hash);
+    auto changed_recovery{recovery};
+    changed_recovery.recovery_authority_hash = NonNullHash(405);
+    BOOST_CHECK(*recovery_hash != *GetActiveRosterBeaconBundleHash(
+                                      genesis, changed_recovery));
+    changed_recovery = recovery;
+    changed_recovery.recovery_authority_source.block_hash =
+        NonNullHash(406);
+    BOOST_CHECK(*recovery_hash != *GetActiveRosterBeaconBundleHash(
+                                      genesis, changed_recovery));
+    changed_recovery = recovery;
+    changed_recovery.recovery_authority_hash.SetNull();
+    BOOST_CHECK(!changed_recovery.IsStructurallyValid());
+    changed_recovery = recovery;
+    changed_recovery.recovery_authority_source = {};
+    BOOST_CHECK(!changed_recovery.IsStructurallyValid());
 
     auto window{Window(40)};
     BOOST_REQUIRE(window.IsStructurallyValid());
@@ -405,13 +443,55 @@ BOOST_AUTO_TEST_CASE(active_bundle_and_window_have_exact_epoch_geometry)
     DataStream window_bytes;
     window_bytes << window;
     BOOST_CHECK_EQUAL(window_bytes.size(), RosterBeaconWindow::WIRE_SIZE);
-    BOOST_CHECK_EQUAL(RosterBeaconWindow::WIRE_SIZE, 562U);
+    BOOST_CHECK_EQUAL(RosterBeaconWindow::WIRE_SIZE, 1'111U);
     window.next = PendingSeed(44, 9);
     BOOST_CHECK(window.IsStructurallyValid());
     window.next = ReadySeed(44, 9);
     BOOST_CHECK(window.IsStructurallyValid());
     ++window.next.epoch;
     BOOST_CHECK(!window.IsStructurallyValid());
+}
+
+BOOST_AUTO_TEST_CASE(recovery_authority_sources_are_canonical_and_fixed_width)
+{
+    const auto activation{ActivationAuthoritySource(10)};
+    BOOST_REQUIRE(activation.IsStructurallyValid());
+    BOOST_CHECK(RoundTrip(activation) == activation);
+    DataStream activation_bytes;
+    activation_bytes << activation;
+    BOOST_CHECK_EQUAL(activation_bytes.size(),
+                      RecoveryRosterAuthoritySource::WIRE_SIZE);
+    BOOST_CHECK_EQUAL(RecoveryRosterAuthoritySource::WIRE_SIZE, 517U);
+
+    auto invalid{activation};
+    invalid.quorum_context_hash = NonNullHash(411);
+    BOOST_CHECK(!invalid.IsStructurallyValid());
+    invalid = activation;
+    invalid.height = -1;
+    BOOST_CHECK(!invalid.IsStructurallyValid());
+    invalid = activation;
+    invalid.block_hash.SetNull();
+    BOOST_CHECK(!invalid.IsStructurallyValid());
+
+    RecoveryRosterAuthoritySource normal;
+    normal.kind = RecoveryRosterAuthoritySourceKind::NORMAL_ROSTERS;
+    normal.height = 1'440;
+    normal.block_hash = NonNullHash(412);
+    normal.quorum_context_hash = NonNullHash(413);
+    normal.normal_beacons = ReadyBundle(40, 20).seeds;
+    BOOST_REQUIRE(normal.IsStructurallyValid());
+    BOOST_CHECK(RoundTrip(normal) == normal);
+
+    invalid = normal;
+    invalid.quorum_context_hash.SetNull();
+    BOOST_CHECK(!invalid.IsStructurallyValid());
+    invalid = normal;
+    invalid.normal_beacons[2].anchor_kind =
+        RosterBeaconAnchorKind::RECOVERY;
+    BOOST_CHECK(!invalid.IsStructurallyValid());
+    invalid = normal;
+    ++invalid.normal_beacons[2].epoch;
+    BOOST_CHECK(!invalid.IsStructurallyValid());
 }
 
 BOOST_AUTO_TEST_CASE(initialization_and_recovery_bind_the_complete_window)
@@ -430,30 +510,55 @@ BOOST_AUTO_TEST_CASE(initialization_and_recovery_bind_the_complete_window)
     invalid_initialize.previous = Prior(initial_window);
     BOOST_CHECK(!invalid_initialize.IsStructurallyValid());
 
-    auto recovered_window{RecoveryWindow(100, 20)};
+    auto recovered_window{RecoveryWindow(100)};
     const auto recovery{Transition(
-        RosterAuthorizationTransitionKind::RECOVER, recovered_window)};
+        RosterAuthorizationTransitionKind::RECOVER, recovered_window,
+        Prior(initial_window))};
     BOOST_REQUIRE(recovery.IsStructurallyValid());
     const auto pruned_state{
         GetRosterAuthorizationStateHash(genesis, recovery)};
     BOOST_REQUIRE(pruned_state);
 
-    auto linked_recovery{recovery};
-    linked_recovery.previous =
-        RosterAuthorizationPriorState{*initial_state, initial_window};
-    BOOST_CHECK(!linked_recovery.IsStructurallyValid());
-    BOOST_CHECK(!GetRosterAuthorizationStateHash(genesis, linked_recovery));
+    auto missing_recovery_prior{recovery};
+    missing_recovery_prior.previous.reset();
+    BOOST_CHECK(!missing_recovery_prior.IsStructurallyValid());
+    BOOST_CHECK(!GetRosterAuthorizationStateHash(
+        genesis, missing_recovery_prior));
+
+    auto changed_recovery_authority{recovery};
+    changed_recovery_authority.new_window.active
+        .recovery_authority_hash = NonNullHash(500'001);
+    BOOST_CHECK(!changed_recovery_authority.IsStructurallyValid());
+
+    const auto normal_prior{Window(40, 30)};
+    auto normal_recovery_window{RecoveryWindow(100, 20)};
+    auto& normal_source{
+        normal_recovery_window.active.recovery_authority_source};
+    normal_source.kind =
+        RecoveryRosterAuthoritySourceKind::NORMAL_ROSTERS;
+    normal_source.height = 1'440;
+    normal_source.block_hash = NonNullHash(500'002);
+    normal_source.quorum_context_hash = NonNullHash(500'003);
+    normal_source.normal_beacons = normal_prior.active.seeds;
+    auto normal_recovery{Transition(
+        RosterAuthorizationTransitionKind::RECOVER,
+        normal_recovery_window, Prior(normal_prior))};
+    BOOST_REQUIRE(normal_recovery.IsStructurallyValid());
+    normal_recovery.new_window.active.recovery_authority_source
+        .normal_beacons[0] = ReadySeed(40, 99);
+    BOOST_CHECK(!normal_recovery.IsStructurallyValid());
 
     recovered_window.next = PendingSeed(104, 21);
     auto pending_recovery{Transition(
-        RosterAuthorizationTransitionKind::RECOVER, recovered_window)};
+        RosterAuthorizationTransitionKind::RECOVER, recovered_window,
+        Prior(initial_window))};
     BOOST_CHECK(!pending_recovery.IsStructurallyValid());
 
     auto normal_initial{Transition(
         RosterAuthorizationTransitionKind::INITIALIZE, Window(0))};
     BOOST_CHECK(!normal_initial.IsStructurallyValid());
     auto misaligned{Transition(RosterAuthorizationTransitionKind::RECOVER,
-                               RecoveryWindow(1))};
+                               RecoveryWindow(1), Prior(initial_window))};
     BOOST_CHECK(!misaligned.IsStructurallyValid());
     auto mixed{RecoveryWindow(100, 20)};
     mixed.active.seeds[2] = ReadySeed(102, 22);

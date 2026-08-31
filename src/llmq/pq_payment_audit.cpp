@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <llmq/pq_payment_audit.h>
+#include <llmq/pq_roster_beacon.h>
 
 #include <primitives/block.h>
 #include <primitives/transaction.h>
@@ -496,8 +497,12 @@ bool PaymentAuditCommitment::IsStructurallyValid() const noexcept
 
 bool PaymentAuditStatement::IsStructurallyValid() const noexcept
 {
+    const RosterBeaconSeed* subject_beacon{FindRosterBeaconSeed(
+        seal_statement.roster_beacons.active,
+        commitment.subject_epoch)};
     return commitment.IsStructurallyValid() &&
-           seal_statement.IsStructurallyValid() &&
+           seal_statement.IsStructurallyValid() && subject_beacon != nullptr &&
+           subject_beacon->anchor_kind == RosterBeaconAnchorKind::NORMAL &&
            seal_statement.height == commitment.seal_height &&
            seal_statement.payment_probation_state_hash ==
                commitment.previous_probation_state_hash;
@@ -613,6 +618,8 @@ bool PaymentAuditReceipt::IsStructurallyValid() const noexcept
            !result_hash.IsNull() &&
            !next_probation_state_hash.IsNull() &&
            subject_roster_beacon.IsReady() &&
+           subject_roster_beacon.anchor_kind ==
+               RosterBeaconAnchorKind::NORMAL &&
            subject_roster_beacon.epoch == epoch;
 }
 

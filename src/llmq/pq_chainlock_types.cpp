@@ -181,6 +181,52 @@ bool RosterBeaconSeed::IsReady() const noexcept
     return state == RosterBeaconState::READY && IsStructurallyValid();
 }
 
+bool RecoveryRosterAuthoritySource::IsNull() const noexcept
+{
+    return kind == RecoveryRosterAuthoritySourceKind::NONE &&
+           height == -1 && block_hash.IsNull() &&
+           quorum_context_hash.IsNull() &&
+           std::all_of(normal_beacons.begin(), normal_beacons.end(),
+                       [](const RosterBeaconSeed& seed) {
+                           return seed == RosterBeaconSeed{};
+                       });
+}
+
+bool RecoveryRosterAuthoritySource::IsStructurallyValid() const noexcept
+{
+    const bool default_beacons{std::all_of(
+        normal_beacons.begin(), normal_beacons.end(),
+        [](const RosterBeaconSeed& seed) {
+            return seed == RosterBeaconSeed{};
+        })};
+    switch (kind) {
+    case RecoveryRosterAuthoritySourceKind::NONE:
+        return IsNull();
+    case RecoveryRosterAuthoritySourceKind::ACTIVATION:
+        return height >= 0 && !block_hash.IsNull() &&
+               quorum_context_hash.IsNull() && default_beacons;
+    case RecoveryRosterAuthoritySourceKind::NORMAL_ROSTERS:
+        if (height < 0 || block_hash.IsNull() ||
+            quorum_context_hash.IsNull() ||
+            !normal_beacons.front().IsReady()) {
+            return false;
+        }
+        for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+            const auto& seed{normal_beacons[slot]};
+            if (!seed.IsReady() ||
+                seed.anchor_kind != RosterBeaconAnchorKind::NORMAL ||
+                (slot > 0 &&
+                 (normal_beacons[slot - 1].epoch ==
+                      std::numeric_limits<uint32_t>::max() ||
+                  seed.epoch != normal_beacons[slot - 1].epoch + 1))) {
+                return false;
+            }
+        }
+        return true;
+    }
+    return false;
+}
+
 bool ActiveRosterBeaconBundle::IsStructurallyValid() const noexcept
 {
     if (version != ROSTER_BEACON_BUNDLE_VERSION ||
@@ -195,7 +241,13 @@ bool ActiveRosterBeaconBundle::IsStructurallyValid() const noexcept
             return false;
         }
     }
-    return true;
+    const bool has_recovery{std::any_of(
+        seeds.begin(), seeds.end(), [](const RosterBeaconSeed& seed) {
+            return seed.anchor_kind == RosterBeaconAnchorKind::RECOVERY;
+        })};
+    return recovery_authority_source.IsStructurallyValid() &&
+           has_recovery == !recovery_authority_hash.IsNull() &&
+           has_recovery == !recovery_authority_source.IsNull();
 }
 
 bool ActiveRosterBeaconBundle::IsForNewestEpoch(

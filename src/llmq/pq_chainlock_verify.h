@@ -17,8 +17,11 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <ios>
 #include <memory>
 #include <optional>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 namespace llmq::pq {
@@ -47,6 +50,91 @@ using FrozenQuorumRosters =
 // The complete roster set is roughly 500 KiB. Network and scheduler paths must
 // share an immutable heap allocation instead of embedding it in stack values.
 using FrozenQuorumRostersPtr = std::shared_ptr<const FrozenQuorumRosters>;
+
+/** Long-lived child commitment retained by one fixed recovery member. */
+struct RecoveryRosterChildCommitment {
+    uint32_t global_key_version{0};
+    ChildKeyTreeCommitment commitment;
+
+    SERIALIZE_METHODS(RecoveryRosterChildCommitment, obj)
+    {
+        READWRITE(obj.global_key_version, obj.commitment);
+    }
+
+    [[nodiscard]] bool IsStructurallyValid() const noexcept
+    {
+        return global_key_version != 0 && commitment.IsStructurallyValid();
+    }
+
+    friend bool operator==(const RecoveryRosterChildCommitment&,
+                           const RecoveryRosterChildCommitment&) = default;
+};
+
+/** One branch-independent signer entry keyed only by its fixed roster slot. */
+struct RecoveryRosterMember {
+    uint256 pro_tx_hash;
+    bool eligible{false};
+    std::optional<RecoveryRosterChildCommitment> child_root;
+
+    SERIALIZE_METHODS(RecoveryRosterMember, obj)
+    {
+        uint8_t eligible{obj.eligible ? uint8_t{1} : uint8_t{0}};
+        uint8_t has_child_root{obj.child_root ? uint8_t{1} : uint8_t{0}};
+        READWRITE(obj.pro_tx_hash, eligible, has_child_root);
+        SER_READ(obj, if (eligible > 1 || has_child_root > 1) {
+            throw std::ios_base::failure("non-canonical recovery roster member");
+        });
+        SER_READ(obj, obj.eligible = eligible != 0);
+        SER_WRITE(obj, if (obj.child_root) {
+            auto child_root{*obj.child_root};
+            READWRITE(child_root);
+        });
+        SER_READ(obj, if (has_child_root != 0) {
+            RecoveryRosterChildCommitment child_root;
+            READWRITE(child_root);
+            obj.child_root = std::move(child_root);
+        } else {
+            obj.child_root.reset();
+        });
+    }
+
+    friend bool operator==(const RecoveryRosterMember&,
+                           const RecoveryRosterMember&) = default;
+};
+
+inline constexpr uint16_t RECOVERY_ROSTER_AUTHORITY_VERSION{1};
+inline constexpr std::string_view RECOVERY_ROSTER_AUTHORITY_DOMAIN{
+    "SYS_PQ_RECOVERY_ROSTER_AUTHORITY_V1"};
+
+/**
+ * Canonical fixed authority for reset and recovery-origin roster slots.
+ * Slots are keyed by epoch modulo ACTIVE_QUORUMS, so retries and ordinary
+ * rotations never change which fixed signer table authorizes an epoch.
+ */
+struct RecoveryRosterAuthority {
+    uint16_t version{RECOVERY_ROSTER_AUTHORITY_VERSION};
+    std::array<std::array<RecoveryRosterMember, QUORUM_SIZE>, ACTIVE_QUORUMS>
+        slots;
+
+    SERIALIZE_METHODS(RecoveryRosterAuthority, obj)
+    {
+        READWRITE(obj.version);
+        for (auto& slot : obj.slots) {
+            for (auto& member : slot) READWRITE(member);
+        }
+    }
+
+    [[nodiscard]] bool IsStructurallyValid() const noexcept;
+    friend bool operator==(const RecoveryRosterAuthority&,
+                           const RecoveryRosterAuthority&) = default;
+};
+
+using RecoveryRosterAuthorityPtr =
+    std::shared_ptr<const RecoveryRosterAuthority>;
+
+[[nodiscard]] std::optional<uint256> GetRecoveryRosterAuthorityHash(
+    const uint256& genesis_hash,
+    const RecoveryRosterAuthority& authority) noexcept;
 
 enum class ChainLockVerificationError : uint8_t {
     NONE = 0,
@@ -77,14 +165,11 @@ enum class RosterAuthorizationAdmission : uint8_t {
     RECOVER = 2,
     /** Exact latest winner loaded from this node's authenticated fsynced DB. */
     TRUSTED_PERSISTENCE = 3,
-    /** Exact old statement already covered by a durable receipt checkpoint. */
-    ATTESTED_HISTORY = 4,
 };
 
 /**
- * Exact predecessor state supplied by the branch/finality layer. A live
- * normal transition always requires it. INITIALIZE and RECOVER are explicit
- * admission decisions rather than shapes inferred from the wire.
+ * Exact predecessor state supplied by the branch/finality layer. Live normal
+ * transitions and RECOVER require it; INITIALIZE alone starts without one.
  */
 struct RosterAuthorizationVerificationContext {
     RosterAuthorizationAdmission admission{
@@ -138,6 +223,11 @@ public:
     {
         return m_rosters;
     }
+    [[nodiscard]] const RecoveryRosterAuthorityPtr&
+    RecoveryAuthorityPtr() const noexcept
+    {
+        return m_recovery_authority;
+    }
 
 private:
     class BuildProvenance;
@@ -145,21 +235,25 @@ private:
 
     VerifiedRosterSet(uint256 genesis_hash,
                       FrozenQuorumRostersPtr rosters,
-                      BuildProvenancePtr build_provenance = nullptr);
+                      BuildProvenancePtr build_provenance = nullptr,
+                      RecoveryRosterAuthorityPtr recovery_authority = nullptr);
 
     [[nodiscard]] static BuildProvenancePtr NewBuildProvenance();
     [[nodiscard]] static std::shared_ptr<const VerifiedRosterSet>
     MintCanonicalBuild(std::unique_ptr<FrozenQuorumRosters> rosters,
-                       const FrozenQuorumRosterCache& cache);
+                       const FrozenQuorumRosterCache& cache,
+                       RecoveryRosterAuthorityPtr recovery_authority = nullptr);
     [[nodiscard]] bool WasBuiltBy(
         const FrozenQuorumRosterCache& cache) const noexcept;
 
     uint256 m_genesis_hash;
     FrozenQuorumRostersPtr m_rosters;
     BuildProvenancePtr m_build_provenance;
+    RecoveryRosterAuthorityPtr m_recovery_authority;
 
     friend class FrozenQuorumRosterCache;
     friend class PreparedChainLockContext;
+    friend class ChainLockStoreTestContextFactory;
 };
 
 using VerifiedRosterSetPtr = std::shared_ptr<const VerifiedRosterSet>;
@@ -187,14 +281,16 @@ public:
            ChainLockStatement statement,
            FrozenQuorumRostersPtr rosters,
            const RosterAuthorizationVerificationContext& authorization,
-           ChainLockVerificationError* error = nullptr);
+           ChainLockVerificationError* error = nullptr,
+           RecoveryRosterAuthorityPtr recovery_authority = nullptr);
 
     [[nodiscard]] static std::shared_ptr<const PreparedChainLockContext>
     Create(ChainLockScheduleConfig schedule,
            ChainLockStatement statement,
            VerifiedRosterSetPtr roster_set,
            const RosterAuthorizationVerificationContext& authorization,
-           ChainLockVerificationError* error = nullptr);
+           ChainLockVerificationError* error = nullptr,
+           RecoveryRosterAuthorityPtr recovery_authority = nullptr);
 
     [[nodiscard]] const uint256& GenesisHash() const noexcept
     {
@@ -224,6 +320,16 @@ public:
     {
         return m_authorization_mask;
     }
+    [[nodiscard]] const RosterAuthorizationVerificationContext&
+    Authorization() const noexcept
+    {
+        return m_authorization;
+    }
+    [[nodiscard]] const RecoveryRosterAuthorityPtr&
+    RecoveryAuthorityPtr() const noexcept
+    {
+        return m_recovery_authority;
+    }
     [[nodiscard]] std::optional<std::size_t> FindQuorumSlot(
         const ChainLockShareTranscript& transcript) const noexcept;
 
@@ -232,12 +338,18 @@ private:
         ChainLockScheduleConfig schedule,
         ChainLockStatement statement,
         VerifiedRosterSetPtr roster_set,
-        uint8_t authorization_mask);
+        RosterAuthorizationVerificationContext authorization,
+        uint8_t authorization_mask,
+        RecoveryRosterAuthorityPtr recovery_authority);
 
     ChainLockScheduleConfig m_schedule;
     ChainLockStatement m_statement;
     VerifiedRosterSetPtr m_roster_set;
+    RosterAuthorizationVerificationContext m_authorization;
     uint8_t m_authorization_mask{0};
+    RecoveryRosterAuthorityPtr m_recovery_authority;
+
+    friend class ChainLockStoreTestContextFactory;
 };
 
 using PreparedChainLockContextPtr =

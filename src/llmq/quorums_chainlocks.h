@@ -593,12 +593,20 @@ StagedRecoverySigningWindow(
     int32_t durable_predecessor_height,
     int32_t tip_height) noexcept;
 
-/** Return the next disjoint canonical target only after its signing lag. */
-[[nodiscard]] std::optional<int32_t> StagedRecoveryRolloverTarget(
+struct StagedRecoverySigningWindowSelection {
+    pq::ChainLockSigningWindow window;
+    bool rolls_pending_epoch{false};
+};
+
+/** Move only an unsigned, stably inactive attempt to a signable disjoint epoch. */
+[[nodiscard]] std::optional<StagedRecoverySigningWindowSelection>
+SelectStagedRecoverySigningWindow(
     const pq::ChainLockScheduleConfig& chainlock,
     const pq::BTCCScheduleConfig& btcc,
     const pq::RosterRecoveryPrecommit& precommit,
-    int32_t tip_height) noexcept;
+    int32_t durable_predecessor_height,
+    int32_t tip_height,
+    bool anchor_stably_inactive) noexcept;
 
 /** The live audit-signing interval starts after the seal and ends exclusively. */
 [[nodiscard]] bool IsPaymentAuditSigningHeightLive(
@@ -926,6 +934,12 @@ public:
                                           CChainLockSig& result) const;
     [[nodiscard]] CChainLockSigCPtr GetMostRecentChainLock() const;
     [[nodiscard]] CChainLockSigCPtr GetBestChainLock() const;
+    /** Build one target from the exact currently accepted roster authority. */
+    [[nodiscard]] pq::VerifiedRosterSetPtr GetVerifiedRosterSetForAccepted(
+        const pq::FinalChainLock& accepted,
+        int32_t target_height,
+        const CBlockIndex& target,
+        pq::QuorumBuildError* error = nullptr) const;
     /** Immutable/dynamic payload retained by live payment-audit machinery. */
     [[nodiscard]] std::size_t GetPaymentAuditRuntimePinnedBytes() const
         EXCLUSIVE_LOCKS_REQUIRED(!m_payment_audit_mutex);
@@ -1188,7 +1202,6 @@ private:
     enum class HistoricalRosterAuthorization : uint8_t {
         INVALID = 0,
         EXACT_NETWORK,
-        ATTESTED_HISTORY,
     };
 
     struct PendingPaymentAuditReceiptDependency {
@@ -1382,8 +1395,8 @@ private:
     // statements carry the bounded roster-beacon authorization state, while
     // the much larger immutable roster set remains shared by pointer.
     static_assert(sizeof(RuntimeVerificationContext) <= 64);
-    static_assert(sizeof(CurrentSigningContext) <= 1152);
-    static_assert(sizeof(CurrentSigningContexts) <= 2864);
+    static_assert(sizeof(CurrentSigningContext) <= 1696);
+    static_assert(sizeof(CurrentSigningContexts) <= 3960);
 
     [[nodiscard]] std::optional<pq::ChainLockCandidateContext>
     PrepareCandidate(
@@ -1507,14 +1520,33 @@ private:
         const pq::ChainLockStatement& statement,
         const CBlockIndex& candidate,
         const pq::FinalChainLockRecordMetadata* prior) const;
+    [[nodiscard]] pq::RecoveryRosterAuthorityPtr
+    DeriveRecoveryRosterAuthority(
+        pq::RosterAuthorizationTransitionKind transition,
+        const CBlockIndex& candidate,
+        const pq::FinalChainLockRecordMetadata* prior,
+        const pq::FrozenQuorumRosterCachePtr& roster_cache,
+        pq::RecoveryRosterAuthoritySource* source_out = nullptr,
+        pq::QuorumBuildError* error = nullptr) const;
+    [[nodiscard]] pq::RecoveryRosterAuthorityPtr
+    ResolveRecoveryRosterAuthority(
+        const pq::ChainLockStatement& statement,
+        const CBlockIndex& candidate,
+        const pq::FinalChainLockRecordMetadata* prior,
+        const pq::FrozenQuorumRosterCachePtr& roster_cache,
+        pq::QuorumBuildError* error = nullptr) const;
     [[nodiscard]] std::optional<RuntimeVerificationContext>
     BuildHistoricalPreVerificationContext(
         const pq::FinalChainLock& chainlock,
         const HistoricalAdmissionContext& expected,
+        const BTCCReceiptArchiveCapability*
+            receipt_archive_capability = nullptr,
         bool* definitively_invalid = nullptr) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_lookup_mutex,
                                  !m_persisted_mutex,
-                                 !m_btcc_preseal_mutex);
+                                 !m_btcc_preseal_mutex,
+                                 !m_needed_btcc_certificate_mutex,
+                                 !m_pending_btcc_receipt_mutex);
     [[nodiscard]] static HistoricalRosterAuthorization
     SelectHistoricalRosterAuthorization(
         pq::ChainLockCandidateAdmission candidate_admission,
@@ -1739,9 +1771,17 @@ private:
         const PaymentAuditHistoricalContext* historical = nullptr,
         uint64_t* roster_source_generation = nullptr,
         int32_t* reconstruction_floor = nullptr,
-        bool defer_historical_provenance = false,
-        bool publish_roster = false) const
+        bool defer_historical_provenance = false) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_lookup_mutex);
+    [[nodiscard]] PaymentAuditReceiptCertificateStatus
+    BuildStoredVerifiedPaymentAuditSubject(
+        const pq::StoredVerifiedPaymentAudit& stored,
+        const CBlockIndex& carrier_parent,
+        int32_t carrier_height,
+        pq::FrozenQuorumRoster& subject,
+        uint64_t& roster_source_generation,
+        int32_t& reconstruction_floor) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main, !m_lookup_mutex);
     [[nodiscard]] PaymentAuditReceiptCertificateStatus
     RecheckVerifiedPaymentAuditReceiptTransition(
         const VerifiedPaymentAuditReceiptTransition& verified,
@@ -1756,12 +1796,6 @@ private:
         const PaymentAuditHistoricalContext& expected)
         EXCLUSIVE_LOCKS_REQUIRED(
             !cs_main, !m_pending_payment_audit_receipt_mutex);
-    [[nodiscard]] bool VerifyPaymentAuditCertificateSignatures(
-        const pq::FinalPaymentAudit& audit,
-        const pq::VerifiedRosterSetPtr& roster_set,
-        const pq::RosterAuthorizationVerificationContext& authorization)
-        const
-        EXCLUSIVE_LOCKS_REQUIRED(!m_verification_mutex);
     void ProcessPaymentAuditHave(CNode* from, CDataStream& payload)
         EXCLUSIVE_LOCKS_REQUIRED(!cs_main,
                                  !m_lookup_mutex,
@@ -1909,8 +1943,7 @@ private:
                                  !m_btcc_preseal_mutex);
     /** Build the exact live capability; only the private scheduler calls it. */
     [[nodiscard]] std::optional<CurrentSigningContexts>
-    BuildCurrentSigningContexts(uint64_t admission_generation,
-                                bool attempt_recovery_rollover = false)
+    BuildCurrentSigningContexts(uint64_t admission_generation)
         EXCLUSIVE_LOCKS_REQUIRED(m_context_build_mutex,
                                  !m_lookup_mutex,
                                  !m_needed_btcc_certificate_mutex,

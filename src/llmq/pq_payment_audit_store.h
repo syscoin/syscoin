@@ -13,7 +13,19 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <utility>
 #include <vector>
+
+namespace llmq {
+class CChainLocksHandler;
+namespace test {
+class CChainLocksHandlerTestAccess;
+}
+}
+
+namespace llmq_tests {
+class PaymentAuditStoreTestAccess;
+}
 
 namespace llmq::pq {
 
@@ -81,7 +93,8 @@ struct PaymentAuditPruneProgress {
 /**
  * An archive candidate decoded and validated while the store lock was held.
  * The IDs passed IsRecordValid(), so callers can reuse them without hashing
- * the large witness again.
+ * the large witness again. This view carries bytes, not durable verification
+ * authority; consensus replay must request StoredVerifiedPaymentAudit.
  */
 struct PaymentAuditCandidateView {
     uint256 logical_id;
@@ -100,10 +113,97 @@ struct PaymentAuditCandidateSnapshot {
     std::vector<PaymentAuditCandidateView> ordered_candidates;
 };
 
-/** One exact archived witness and the revision observed under the same lock. */
-struct PaymentAuditWitnessSnapshot {
-    FinalPaymentAudit audit;
-    uint64_t revision{0};
+/**
+ * Process-local authority to durably archive one exact certificate whose
+ * signatures were already verified. Network bytes cannot construct this
+ * capability or select a different authorization mask after verification.
+ */
+class VerifiedPaymentAuditAdmission final {
+public:
+    VerifiedPaymentAuditAdmission(
+        const VerifiedPaymentAuditAdmission&) = delete;
+    VerifiedPaymentAuditAdmission& operator=(
+        const VerifiedPaymentAuditAdmission&) = delete;
+    VerifiedPaymentAuditAdmission(
+        VerifiedPaymentAuditAdmission&&) noexcept = default;
+    VerifiedPaymentAuditAdmission& operator=(
+        VerifiedPaymentAuditAdmission&&) noexcept = default;
+
+    [[nodiscard]] const FinalPaymentAudit& Audit() const noexcept
+    {
+        return m_audit;
+    }
+    [[nodiscard]] uint8_t AuthorizationMask() const noexcept
+    {
+        return m_authorization_mask;
+    }
+
+private:
+    VerifiedPaymentAuditAdmission(FinalPaymentAudit audit,
+                                  uint8_t authorization_mask)
+        : m_audit{std::move(audit)},
+          m_authorization_mask{authorization_mask}
+    {
+    }
+
+    FinalPaymentAudit m_audit;
+    uint8_t m_authorization_mask{0};
+
+    friend class ::llmq::CChainLocksHandler;
+    friend class ::llmq::test::CChainLocksHandlerTestAccess;
+    friend class ::llmq_tests::PaymentAuditStoreTestAccess;
+    friend class PaymentAuditStore;
+};
+
+/**
+ * Exact fsynced verification capability and archive revision observed under
+ * one store lock. Only PaymentAuditStore can construct it; Get() and candidate
+ * snapshots deliberately return non-authorizing certificate bytes.
+ */
+class StoredVerifiedPaymentAudit final {
+public:
+    [[nodiscard]] const FinalPaymentAudit& Audit() const noexcept
+    {
+        return m_audit;
+    }
+    [[nodiscard]] uint8_t AuthorizationMask() const noexcept
+    {
+        return m_authorization_mask;
+    }
+    [[nodiscard]] const uint256& LogicalId() const noexcept
+    {
+        return m_logical_id;
+    }
+    [[nodiscard]] const uint256& WitnessId() const noexcept
+    {
+        return m_witness_id;
+    }
+    [[nodiscard]] uint64_t Revision() const noexcept
+    {
+        return m_revision;
+    }
+
+private:
+    StoredVerifiedPaymentAudit(FinalPaymentAudit audit,
+                               uint256 logical_id,
+                               uint256 witness_id,
+                               uint8_t authorization_mask,
+                               uint64_t revision)
+        : m_audit{std::move(audit)},
+          m_logical_id{std::move(logical_id)},
+          m_witness_id{std::move(witness_id)},
+          m_authorization_mask{authorization_mask},
+          m_revision{revision}
+    {
+    }
+
+    FinalPaymentAudit m_audit;
+    uint256 m_logical_id;
+    uint256 m_witness_id;
+    uint8_t m_authorization_mask{0};
+    uint64_t m_revision{0};
+
+    friend class PaymentAuditStore;
 };
 
 /**
@@ -137,14 +237,14 @@ public:
         uint32_t epoch, uint8_t selected_quorum_mask) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     [[nodiscard]] PaymentAuditStoreResult AcceptVerified(
-        const FinalPaymentAudit& audit,
+        VerifiedPaymentAuditAdmission admission,
         bool required_witness = false)
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     [[nodiscard]] std::optional<FinalPaymentAudit> Get(
         const uint256& witness_id) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
-    [[nodiscard]] std::optional<PaymentAuditWitnessSnapshot>
-    GetWithCandidateRevision(const uint256& witness_id) const
+    [[nodiscard]] std::optional<StoredVerifiedPaymentAudit>
+    GetVerifiedWithCandidateRevision(const uint256& witness_id) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /**
      * The preferred applied witness plus at most four bounded live candidates,
@@ -213,7 +313,9 @@ private:
     };
 
     [[nodiscard]] std::optional<FinalPaymentAudit> GetLocked(
-        const uint256& witness_id) const
+        const uint256& witness_id,
+        uint8_t* authorization_mask = nullptr,
+        uint256* logical_id = nullptr) const
         EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
     void Initialize() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     [[nodiscard]] bool CanAdvanceCandidateRevision() const

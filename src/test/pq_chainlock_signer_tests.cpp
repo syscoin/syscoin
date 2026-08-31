@@ -30,11 +30,11 @@ uint256 NonNullHash(uint64_t value)
     return hash;
 }
 
-RosterBeaconWindow RecoveryWindow(uint32_t first_epoch)
+RosterBeaconWindow NormalWindow(uint32_t first_epoch)
 {
     RosterBeaconWindow window;
     RosterBeaconSeed shared;
-    shared.anchor_kind = RosterBeaconAnchorKind::RECOVERY;
+    shared.anchor_kind = RosterBeaconAnchorKind::NORMAL;
     shared.state = RosterBeaconState::READY;
     shared.anchor_cursor = BTCCursor{
         10'000, NonNullHash(100'000), NonNullHash(200'000)};
@@ -85,26 +85,48 @@ std::unique_ptr<SignerFixture> MakeFixture()
     fixture->statement.previous_chainlock_height = 2300;
     fixture->statement.previous_chainlock_hash = NonNullHash(8099);
     fixture->statement.payment_probation_state_hash = NonNullHash(8101);
-    fixture->statement.roster_beacons = RecoveryWindow(0);
+    fixture->statement.roster_beacons = NormalWindow(0);
     fixture->statement.roster_transition =
-        RosterAuthorizationTransitionKind::INITIALIZE;
+        RosterAuthorizationTransitionKind::KEEP;
     fixture->authorization.admission =
-        RosterAuthorizationAdmission::INITIALIZE;
+        RosterAuthorizationAdmission::LIVE;
     fixture->authorization.predecessor_height =
         fixture->statement.previous_chainlock_height;
     fixture->authorization.predecessor_block_hash =
         fixture->statement.previous_chainlock_hash;
-    RosterAuthorizationTransition transition;
-    transition.kind = fixture->statement.roster_transition;
-    transition.target_height = fixture->statement.height;
-    transition.target_block_hash = fixture->statement.block_hash;
-    transition.predecessor_height =
+    fixture->authorization.previous = RosterAuthorizationPriorState{
+        NonNullHash(8102), fixture->statement.roster_beacons};
+    NormalRosterAuthorizationInput normal;
+    normal.newest_epoch =
+        fixture->statement.roster_beacons.active.seeds.back().epoch;
+    normal.target_height = fixture->statement.height;
+    normal.target_block_hash = fixture->statement.block_hash;
+    normal.predecessor_height =
         fixture->statement.previous_chainlock_height;
-    transition.predecessor_block_hash =
+    normal.predecessor_block_hash =
         fixture->statement.previous_chainlock_hash;
-    transition.new_window = fixture->statement.roster_beacons;
+    normal.prior_authorization_height =
+        fixture->statement.previous_chainlock_height;
+    normal.prior_authorization_block_hash =
+        fixture->statement.previous_chainlock_hash;
+    normal.previous = *fixture->authorization.previous;
+    normal.previous_btcc_cursor =
+        fixture->statement.previous_btcc_cursor;
+    normal.accepted_btcc_cursor =
+        fixture->statement.accepted_btcc_cursor;
+    normal.btcc_advance = fixture->statement.btcc_advance;
+    normal.next_snapshot.epoch = normal.newest_epoch + 1;
+    normal.next_snapshot.height = 2'592;
+    fixture->authorization.normal_input = normal;
+    const auto decision{DeriveNormalRosterAuthorizationDecision(
+        fixture->genesis_hash, normal)};
+    BOOST_REQUIRE(decision);
+    BOOST_REQUIRE(decision->transition.kind ==
+                  RosterAuthorizationTransitionKind::KEEP);
+    fixture->statement.roster_beacons =
+        decision->transition.new_window;
     fixture->statement.roster_authorization_state_hash =
-        *GetRosterAuthorizationStateHash(fixture->genesis_hash, transition);
+        decision->state_hash;
 
     scheduled_wots::KeyGenerationSeed keygen_seed{};
     for (std::size_t i{0}; i < keygen_seed.size(); ++i) {
@@ -169,23 +191,27 @@ std::unique_ptr<SignerFixture> MakeFixture()
 PreparedChainLockContextPtr PrepareContext(const SignerFixture& fixture,
                                            ChainLockStatement statement)
 {
-    RosterAuthorizationTransition transition;
-    transition.kind = statement.roster_transition;
-    transition.target_height = statement.height;
-    transition.target_block_hash = statement.block_hash;
-    transition.predecessor_height = statement.previous_chainlock_height;
-    transition.predecessor_block_hash = statement.previous_chainlock_hash;
-    transition.previous = fixture.authorization.previous;
-    transition.new_window = statement.roster_beacons;
-    const auto authorization_hash{
-        GetRosterAuthorizationStateHash(fixture.genesis_hash, transition)};
-    BOOST_REQUIRE(authorization_hash);
-    statement.roster_authorization_state_hash = *authorization_hash;
+    auto authorization{fixture.authorization};
+    BOOST_REQUIRE(authorization.normal_input);
+    auto& normal{*authorization.normal_input};
+    normal.target_height = statement.height;
+    normal.target_block_hash = statement.block_hash;
+    normal.predecessor_height = statement.previous_chainlock_height;
+    normal.predecessor_block_hash = statement.previous_chainlock_hash;
+    normal.previous_btcc_cursor = statement.previous_btcc_cursor;
+    normal.accepted_btcc_cursor = statement.accepted_btcc_cursor;
+    normal.btcc_advance = statement.btcc_advance;
+    const auto decision{DeriveNormalRosterAuthorizationDecision(
+        fixture.genesis_hash, normal)};
+    BOOST_REQUIRE(decision);
+    BOOST_REQUIRE(decision->transition.kind == statement.roster_transition);
+    statement.roster_beacons = decision->transition.new_window;
+    statement.roster_authorization_state_hash = decision->state_hash;
     ChainLockVerificationError error{ChainLockVerificationError::NONE};
     auto context{PreparedChainLockContext::Create(
         fixture.genesis_hash, fixture.schedule, std::move(statement),
         std::make_shared<const FrozenQuorumRosters>(fixture.rosters),
-        fixture.authorization, &error)};
+        authorization, &error)};
     BOOST_REQUIRE(context);
     BOOST_CHECK(error == ChainLockVerificationError::NONE);
     return context;

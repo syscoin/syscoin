@@ -301,8 +301,11 @@ void CPQQuorumConnectionOverlay::UpdatedBlockTip(
     if (m_context && *m_context == context) return;
 
     pq::QuorumBuildError build_error{pq::QuorumBuildError::NONE};
-    const auto rosters{m_roster_cache->GetActive(
-        *target_height, *target, beacon_bundle, &build_error)};
+    const auto verified{
+        chainLocksHandler->GetVerifiedRosterSetForAccepted(
+            *accepted_chainlock, *target_height, *target, &build_error)};
+    const auto rosters{verified ? verified->RostersPtr()
+                                : pq::FrozenQuorumRostersPtr{}};
     if (!rosters) {
         // Consensus validation and share verification remain fail-closed. A
         // stale bounded connection set is harmless and can help recovery.
