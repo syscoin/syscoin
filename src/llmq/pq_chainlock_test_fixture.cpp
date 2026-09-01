@@ -308,12 +308,14 @@ bool ValidateFixture(const QuorumSnapshotFixture& fixture,
     const auto required_points{static_cast<std::size_t>(
         static_cast<uint64_t>(last_epoch) - first_epoch + 1)};
     if (fixture.quorum_bases.size() != required_points ||
-        fixture.snapshots.size() != required_points) {
+        (fixture.snapshots.size() != required_points &&
+         fixture.snapshots.size() != required_points + 1)) {
         SetError(error,
                  "PQ ChainLock fixture point count does not match window");
         return false;
     }
 
+    std::set<int32_t> required_snapshot_heights;
     for (uint32_t epoch{first_epoch};; ++epoch) {
         const auto base_height{
             EpochBaseHeight(expected_build_config.schedule, epoch)};
@@ -333,7 +335,19 @@ bool ValidateFixture(const QuorumSnapshotFixture& fixture,
             SetError(error, "PQ ChainLock fixture branch geometry mismatch");
             return false;
         }
+        required_snapshot_heights.insert(*expected_snapshot_height);
         if (epoch == last_epoch) break;
+    }
+
+    for (const auto& entry : snapshots) {
+        const int32_t height{entry.first};
+        if (required_snapshot_heights.contains(height)) continue;
+        if (fixture.snapshots.size() != required_points + 1 ||
+            height > fixture.branch_anchor.height) {
+            SetError(error,
+                     "PQ ChainLock fixture auxiliary snapshot is invalid");
+            return false;
+        }
     }
 
     for (const auto& [height, snapshot_ptr] : snapshots) {

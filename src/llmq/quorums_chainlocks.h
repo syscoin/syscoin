@@ -948,7 +948,7 @@ public:
     [[nodiscard]] std::optional<evo::AuxiliaryHistoryGCBlockIdentity>
     GetDurableFinalityTargetForStartup() const;
     enum class DurableFinalityRecoveryMode : uint8_t {
-        STRICT,
+        REQUIRE_VALIDATED,
         BLOCK_INDEX_REPLAY,
     };
     /**
@@ -964,7 +964,7 @@ public:
         const CBlockIndex*& durable_target,
         std::string& error,
         DurableFinalityRecoveryMode mode =
-            DurableFinalityRecoveryMode::STRICT,
+            DurableFinalityRecoveryMode::REQUIRE_VALIDATED,
         bool* replay_target_pending = nullptr) const
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     [[nodiscard]] bool GetRecentChainLockByHeight(

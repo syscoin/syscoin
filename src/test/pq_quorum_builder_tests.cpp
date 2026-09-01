@@ -1536,14 +1536,15 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_converges_concurrent_builds)
 
     const uint64_t build_hashes_before{
         GetQuorumRootTaggedHashCountForTesting()};
+    const auto beacon_bundle{BeaconBundleAtHeight(TARGET_HEIGHT)};
     std::array<VerifiedRosterSetPtr, 2> results;
     std::thread first{[&] {
-        results[0] = GetTestVerifiedActive(cache,
-                                           TARGET_HEIGHT, chain.Tip());
+        results[0] = cache->GetVerifiedActive(
+            TARGET_HEIGHT, chain.Tip(), beacon_bundle);
     }};
     std::thread second{[&] {
-        results[1] = GetTestVerifiedActive(cache,
-                                           TARGET_HEIGHT, chain.Tip());
+        results[1] = cache->GetVerifiedActive(
+            TARGET_HEIGHT, chain.Tip(), beacon_bundle);
     }};
     first.join();
     second.join();
@@ -1598,14 +1599,15 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_converges_concurrent_rotations)
 
     const uint64_t rotation_hashes_before{
         GetQuorumRootTaggedHashCountForTesting()};
+    const auto beacon_bundle{BeaconBundleAtHeight(ROTATED_TARGET)};
     std::array<VerifiedRosterSetPtr, 2> results;
     std::thread first{[&] {
-        results[0] = GetTestVerifiedActive(cache,
-                                           ROTATED_TARGET, chain.Tip());
+        results[0] = cache->GetVerifiedActive(
+            ROTATED_TARGET, chain.Tip(), beacon_bundle);
     }};
     std::thread second{[&] {
-        results[1] = GetTestVerifiedActive(cache,
-                                           ROTATED_TARGET, chain.Tip());
+        results[1] = cache->GetVerifiedActive(
+            ROTATED_TARGET, chain.Tip(), beacon_bundle);
     }};
     first.join();
     second.join();

@@ -109,11 +109,12 @@ static uint256 MakeOrderedSnapshotKey(uint8_t prefix, uint64_t ordinal)
     return key;
 }
 
-static CKeyID MakeAnchorKeyID(uint8_t seed)
+// SYSCOIN: Preserve the full synthetic discriminator until byte materialization.
+static CKeyID MakeAnchorKeyID(uint32_t seed)
 {
     CKeyID key_id;
     for (size_t i = 0; i < key_id.size(); ++i) {
-        key_id.begin()[i] = seed + i;
+        key_id.begin()[i] = static_cast<uint8_t>(seed + i);
     }
     return key_id;
 }

@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <boost/test/unit_test.hpp>
@@ -1375,6 +1376,44 @@ BOOST_AUTO_TEST_CASE(initialized_best_atomically_consumes_recovery_precommit)
         BOOST_CHECK(!persistence.LoadRosterRecoveryPrecommit());
         BOOST_CHECK(!persistence.PersistRosterRecoveryPrecommit(staged));
     }
+}
+
+BOOST_AUTO_TEST_CASE(
+    initial_recovery_authority_roundtrip_is_worker_stack_safe)
+{
+    const fs::path path{
+        m_path_root / "pqcl_initial_authority_worker_stack"};
+    const uint256 genesis{NonNullHash(820)};
+    const auto config{MakeConfig()};
+    auto initialized{std::make_shared<FinalChainLock>(MakeChainLock(
+        865, config.activation_predecessor_height,
+        NonNullHash(config.activation_predecessor_height), 820))};
+    const auto authority{
+        SetExactInitialization(*initialized, genesis, 820)};
+
+    bool persisted{false};
+    bool restarted{false};
+    ChainLockPersistenceError error{ChainLockPersistenceError::NONE};
+    // Network workers have a smaller stack than the Boost test runner. Keep
+    // both the write and startup-read paths safe on the real call shape.
+    std::thread worker{[&] {
+        {
+            PQChainLockPersistence persistence{
+                DiskParams(path), genesis, config};
+            persisted = persistence.PersistInitializedBest(
+                *initialized, &error, authority);
+        }
+        if (!persisted) return;
+        PQChainLockPersistence persistence{
+            DiskParams(path), genesis, config};
+        const auto loaded{persistence.LoadRecoveryRosterAuthority()};
+        restarted = loaded && *loaded == *authority;
+    }};
+    worker.join();
+
+    BOOST_CHECK(error == ChainLockPersistenceError::NONE);
+    BOOST_REQUIRE(persisted);
+    BOOST_CHECK(restarted);
 }
 
 BOOST_AUTO_TEST_CASE(catchup_best_atomically_consumes_recovery_precommit)

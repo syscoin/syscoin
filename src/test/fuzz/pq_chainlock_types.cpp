@@ -44,6 +44,31 @@ void SetFirstMembers(QuorumBitmap& bitmap, std::size_t count)
     }
 }
 
+RosterBeaconSeed ReadyRosterBeacon(uint32_t epoch)
+{
+    RosterBeaconSeed seed;
+    seed.state = RosterBeaconState::READY;
+    seed.epoch = epoch;
+    seed.anchor_cursor = BTCCursor{
+        1'000 + static_cast<int32_t>(epoch),
+        NonNullHash(100 + epoch), NonNullHash(200 + epoch)};
+    seed.anchor_btc_height = 800'000 + static_cast<int32_t>(epoch);
+    seed.future_btc_hash = NonNullHash(300 + epoch);
+    return seed;
+}
+
+RosterBeaconWindow ReadyRosterWindow(uint32_t first_epoch)
+{
+    RosterBeaconWindow window;
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        window.active.seeds[slot] =
+            ReadyRosterBeacon(first_epoch + static_cast<uint32_t>(slot));
+    }
+    window.next.epoch =
+        first_epoch + static_cast<uint32_t>(ACTIVE_QUORUMS);
+    return window;
+}
+
 void InitializeFinalChainLockFixture()
 {
     FinalChainLock chainlock;
@@ -52,6 +77,10 @@ void InitializeFinalChainLockFixture()
     chainlock.statement.previous_chainlock_height = 1440;
     chainlock.statement.previous_chainlock_hash = NonNullHash(2);
     chainlock.statement.quorum_context_hash = NonNullHash(3);
+    chainlock.statement.roster_transition =
+        RosterAuthorizationTransitionKind::KEEP;
+    chainlock.statement.roster_beacons = ReadyRosterWindow(2);
+    chainlock.statement.roster_authorization_state_hash = NonNullHash(5);
     chainlock.statement.payment_probation_state_hash = NonNullHash(4);
     chainlock.selected_quorum_mask = 0b1011;
     SetFirstMembers(chainlock.signer_bitmaps[0], QUORUM_THRESHOLD);
@@ -159,6 +188,9 @@ void InitializeFinalPaymentAuditFixture()
     seal.previous_chainlock_height = seal.height - 5;
     seal.previous_chainlock_hash = NonNullHash(19);
     seal.quorum_context_hash = NonNullHash(20);
+    seal.roster_transition = RosterAuthorizationTransitionKind::KEEP;
+    seal.roster_beacons = ReadyRosterWindow(3);
+    seal.roster_authorization_state_hash = NonNullHash(21);
     seal.payment_probation_state_hash =
         commitment.previous_probation_state_hash;
 

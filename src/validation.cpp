@@ -6009,7 +6009,7 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
                 ? llmq::CChainLocksHandler::DurableFinalityRecoveryMode::
                       BLOCK_INDEX_REPLAY
                 : llmq::CChainLocksHandler::DurableFinalityRecoveryMode::
-                      STRICT};
+                      REQUIRE_VALIDATED};
         if (!llmq::chainLocksHandler->GetDurableFinalityRecoveryFloor(
                 durable_active_floor, durable_target, durable_error,
                 recovery_mode,

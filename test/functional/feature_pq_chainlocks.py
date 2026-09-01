@@ -73,13 +73,14 @@ BTCC_RECEIPT_STATE_SIZE = 100
 BTCC_RECEIPT_WIRE_SIZE = 138
 PAYMENT_AUDIT_RECEIPT_STATE_SIZE = 136
 ROSTER_BEACON_SEED_WIRE_SIZE = 112
-CHAINLOCK_STATEMENT_WIRE_SIZE = 1_108
+RECOVERY_ROSTER_AUTHORITY_SOURCE_WIRE_SIZE = 517
+CHAINLOCK_STATEMENT_WIRE_SIZE = 1_657
 FINAL_CHAINLOCK_FIXED_WIRE_SIZE = (
     CHAINLOCK_STATEMENT_WIRE_SIZE + 1 + ACTIVE_QUORUMS * BITMAP_SIZE + 2
 )
-CHAINLOCK_SHARE_WIRE_SIZE = 2_426
-FINAL_CHAINLOCK_WIRE_SIZE = 1_000_959
-FINAL_PAYMENT_AUDIT_WIRE_SIZE = 1_041_358
+CHAINLOCK_SHARE_WIRE_SIZE = 2_975
+FINAL_CHAINLOCK_WIRE_SIZE = 1_001_508
+FINAL_PAYMENT_AUDIT_WIRE_SIZE = 1_041_907
 PAYMENT_AUDIT_RECEIPT_WIRE_SIZE = 369
 PAYMENT_AUDIT_RECEIPT_VERSION = 1
 PAYMENT_PROBATION_STATE_VERSION = 1
@@ -94,24 +95,26 @@ ROSTER_SNAPSHOT_LAG = 288
 FUTURE_HORIZON_EPOCHS = 8
 BTCC_CANDIDATE_ORIGIN = 2315
 BTCC_CANDIDATE_PERIOD = 10
-PAYMENT_AUDIT_EPOCH = 3
-PAYMENT_AUDIT_RESPONSE_HEIGHT = 2545
+PAYMENT_AUDIT_PREP_EPOCH = 3
+PAYMENT_AUDIT_PREP_RESPONSE_HEIGHT = 2545
+PAYMENT_AUDIT_PREP_ANCHOR_HEIGHT = 2575
+PAYMENT_AUDIT_PREP_CARRIER_HEIGHT = PAYMENT_AUDIT_PREP_ANCHOR_HEIGHT + 10
+PAYMENT_AUDIT_EPOCH = 4
+PAYMENT_AUDIT_RESPONSE_HEIGHT = 2825
 PAYMENT_AUDIT_RESPONSE_PREDECESSOR_HEIGHT = \
     PAYMENT_AUDIT_RESPONSE_HEIGHT - CHAINLOCK_PERIOD
-PAYMENT_AUDIT_RESPONSE_EXPIRY_HEIGHT = \
-    PAYMENT_AUDIT_RESPONSE_HEIGHT + SIGN_LAG + CHAINLOCK_PERIOD
-PAYMENT_AUDIT_ANCHOR_HEIGHT = 2575
+PAYMENT_AUDIT_ANCHOR_HEIGHT = 2855
 PAYMENT_AUDIT_ANCHOR_PREDECESSOR_HEIGHT = \
     PAYMENT_AUDIT_ANCHOR_HEIGHT - CHAINLOCK_PERIOD
 PAYMENT_AUDIT_SEED_CARRIER_HEIGHT = PAYMENT_AUDIT_ANCHOR_HEIGHT + 10
-PAYMENT_AUDIT_SEAL_HEIGHT = 2820
+PAYMENT_AUDIT_SEAL_HEIGHT = 3100
 PAYMENT_AUDIT_SEAL_PREDECESSOR_HEIGHT = \
     PAYMENT_AUDIT_SEAL_HEIGHT - CHAINLOCK_PERIOD
-PAYMENT_AUDIT_CARRIER_HEIGHT = 2835
-PAYMENT_AUDIT_POST_TARGET_HEIGHT = 2840
+PAYMENT_AUDIT_CARRIER_HEIGHT = 3115
+PAYMENT_AUDIT_POST_TARGET_HEIGHT = 3120
 PAYMENT_AUDIT_POST_PREDECESSOR_HEIGHT = \
     PAYMENT_AUDIT_POST_TARGET_HEIGHT - CHAINLOCK_PERIOD
-PAYMENT_AUDIT_POST_SIGNING_HEIGHT = 2845
+PAYMENT_AUDIT_POST_SIGNING_HEIGHT = 3125
 CURRENT_CATCHUP_PREDECESSOR_HEIGHT = \
     FIRST_ELIGIBLE_TARGET_HEIGHT + CHAINLOCK_PERIOD
 CURRENT_CATCHUP_TARGET_HEIGHT = \
@@ -239,6 +242,17 @@ def serialize_roster_beacon_seed(epoch, state=2):
     )
 
 
+def serialize_null_recovery_roster_authority_source():
+    payload = (
+        struct.pack("<Bi", 0, -1)
+        + ser_uint256(0)
+        + ser_uint256(0)
+        + serialize_roster_beacon_seed(0, state=0) * ACTIVE_QUORUMS
+    )
+    assert_equal(len(payload), RECOVERY_ROSTER_AUTHORITY_SOURCE_WIRE_SIZE)
+    return payload
+
+
 def serialize_roster_beacon_window(newest_epoch=3):
     first_epoch = newest_epoch - ACTIVE_QUORUMS + 1
     return (
@@ -247,6 +261,8 @@ def serialize_roster_beacon_window(newest_epoch=3):
             serialize_roster_beacon_seed(first_epoch + slot)
             for slot in range(ACTIVE_QUORUMS)
         )
+        + ser_uint256(0)
+        + serialize_null_recovery_roster_authority_source()
         + serialize_roster_beacon_seed(newest_epoch + 1, state=0)
     )
 
@@ -1213,9 +1229,10 @@ class PQChainLocksTest(SyscoinTestFramework):
         assert_equal(node.getblockhash(FIRST_ELIGIBLE_TARGET_HEIGHT),
                      target_hash)
         assert_equal(node.getbestblockhash(), canonical_tip)
-        with node.assert_debug_log(
-                ["PQ ChainLock test fixture matched snapshot height=2016"],
-                timeout=120):
+        with node.assert_debug_log([
+                "published PQ ChainLock signing context height=%d" %
+                FIRST_ELIGIBLE_TARGET_HEIGHT,
+        ], timeout=180):
             node.spork("SPORK_19_CHAINLOCKS_ENABLED", 0)
             force_finish_mnsync(node)
         self.assert_no_chainlock_rpcs(node)
@@ -1531,131 +1548,192 @@ class PQChainLocksTest(SyscoinTestFramework):
         # before mining so every superblock in the attested range receives
         # exact governance provenance, not only script validity.
         force_finish_mnsync(node)
-        self.mine_pq_to_height(PAYMENT_AUDIT_ANCHOR_HEIGHT + SIGN_LAG)
-
         genesis_hash = node.getblockhash(0)
         branch_anchor_hash = node.getblockhash(
             FIRST_ELIGIBLE_TARGET_HEIGHT)
-        response_predecessor_hash = node.getblockhash(
-            PAYMENT_AUDIT_RESPONSE_PREDECESSOR_HEIGHT)
-        response_hash = node.getblockhash(PAYMENT_AUDIT_RESPONSE_HEIGHT)
-        anchor_predecessor_hash = node.getblockhash(
-            PAYMENT_AUDIT_ANCHOR_PREDECESSOR_HEIGHT)
-        anchor_hash = node.getblockhash(PAYMENT_AUDIT_ANCHOR_HEIGHT)
-        prefix_base_heights = [
-            EPOCH_ORIGIN + epoch * EPOCH_BLOCKS
-            for epoch in range(ACTIVE_QUORUMS)
-        ]
-        prefix_snapshot_heights = [
-            height - ROSTER_SNAPSHOT_LAG
-            for height in prefix_base_heights
-        ]
-        prefix_base_hashes = [
-            node.getblockhash(height) for height in prefix_base_heights
-        ]
-        prefix_snapshot_hashes = [
-            node.getblockhash(height) for height in prefix_snapshot_heights
-        ]
-
         helper = os.path.join(
             self.config["environment"]["BUILDDIR"], "src", "test",
             "pq_chainlock_fixture" + self.config["environment"]["EXEEXT"],
         )
         assert os.path.isfile(helper), "missing pq_chainlock_fixture test helper"
-        prefix_snapshot_path = os.path.join(
-            self.options.tmpdir,
-            "pq-payment-audit-prefix-snapshots.dat",
-        )
-        prefix_bundle_path = os.path.join(
-            self.options.tmpdir, "pq-payment-audit-prefix-bundle.dat")
-        authorizer_path = os.path.join(
+        original_authorizer_path = os.path.join(
+            self.options.tmpdir, "pq-payment-audit-catchup-authorizer.dat")
+        transition_authorizer_path = os.path.join(
             self.options.tmpdir, "pq-payment-audit-authorizer.dat")
-        Path(authorizer_path).write_bytes(authorizer)
+        Path(original_authorizer_path).write_bytes(authorizer)
 
-        self.stop_node(0)
-        prefix_command = [
-            helper,
-            "payment-audit-prefix",
-            prefix_snapshot_path,
-            prefix_bundle_path,
-            genesis_hash,
-            str(FIRST_ELIGIBLE_TARGET_HEIGHT),
-            branch_anchor_hash,
-            str(EPOCH_ORIGIN),
-            str(REGISTRATION_CUTOFF_BLOCKS),
-            str(ROSTER_SNAPSHOT_LAG),
-            str(FUTURE_HORIZON_EPOCHS),
-            str(BTCC_CANDIDATE_ORIGIN),
-            str(PAYMENT_AUDIT_EPOCH),
-            str(PAYMENT_AUDIT_RESPONSE_PREDECESSOR_HEIGHT),
-            response_predecessor_hash,
-            response_hash,
-            self.payment_btcprev(PAYMENT_AUDIT_RESPONSE_HEIGHT),
-            str(PAYMENT_AUDIT_ANCHOR_PREDECESSOR_HEIGHT),
-            anchor_predecessor_hash,
-            anchor_hash,
-            self.payment_btcprev(PAYMENT_AUDIT_ANCHOR_HEIGHT),
-            *prefix_base_hashes,
-            *prefix_snapshot_hashes,
-            authorizer_path,
-        ]
-        subprocess.run(
-            prefix_command, check=True, capture_output=True, text=True,
-            timeout=3600 * self.options.timeout_factor,
-        )
-        prefix = self.read_payment_audit_prefix_bundle(prefix_bundle_path)
+        def build_and_admit_prefix(
+                label, audit_epoch, response_height, anchor_height,
+                authorizer_path, authorizer_carrier_height):
+            response_predecessor_height = response_height - CHAINLOCK_PERIOD
+            response_expiry_height = \
+                response_height + SIGN_LAG + CHAINLOCK_PERIOD
+            anchor_predecessor_height = anchor_height - CHAINLOCK_PERIOD
+            self.mine_pq_to_height(anchor_height + SIGN_LAG)
+            response_predecessor_hash = node.getblockhash(
+                response_predecessor_height)
+            response_hash = node.getblockhash(response_height)
+            anchor_predecessor_hash = node.getblockhash(
+                anchor_predecessor_height)
+            anchor_hash = node.getblockhash(anchor_height)
+            authorizer_carrier_hash = (
+                node.getblockhash(authorizer_carrier_height)
+                if authorizer_carrier_height is not None
+                else "%064x" % 0
+            )
+            base_heights = [
+                EPOCH_ORIGIN + epoch * EPOCH_BLOCKS
+                for epoch in range(audit_epoch + 1)
+            ]
+            snapshot_heights = [
+                height - ROSTER_SNAPSHOT_LAG for height in base_heights
+            ]
+            base_hashes = [
+                node.getblockhash(height) for height in base_heights
+            ]
+            snapshot_hashes = [
+                node.getblockhash(height) for height in snapshot_heights
+            ]
+            snapshot_path = os.path.join(
+                self.options.tmpdir,
+                "pq-payment-audit-%s-prefix-snapshots.dat" % label,
+            )
+            bundle_path = os.path.join(
+                self.options.tmpdir,
+                "pq-payment-audit-%s-prefix-bundle.dat" % label,
+            )
+            self.stop_node(0)
+            subprocess.run([
+                helper,
+                "payment-audit-prefix",
+                snapshot_path,
+                bundle_path,
+                genesis_hash,
+                str(FIRST_ELIGIBLE_TARGET_HEIGHT),
+                branch_anchor_hash,
+                str(EPOCH_ORIGIN),
+                str(REGISTRATION_CUTOFF_BLOCKS),
+                str(ROSTER_SNAPSHOT_LAG),
+                str(FUTURE_HORIZON_EPOCHS),
+                str(BTCC_CANDIDATE_ORIGIN),
+                str(audit_epoch),
+                str(response_predecessor_height),
+                response_predecessor_hash,
+                response_hash,
+                self.payment_btcprev(response_height),
+                str(anchor_predecessor_height),
+                anchor_predecessor_hash,
+                anchor_hash,
+                self.payment_btcprev(anchor_height),
+                authorizer_carrier_hash,
+                *base_hashes,
+                *snapshot_hashes,
+                authorizer_path,
+            ], check=True, capture_output=True, text=True,
+                timeout=3600 * self.options.timeout_factor)
+            prefix = self.read_payment_audit_prefix_bundle(bundle_path)
+            fixture_args = [
+                arg for arg in self.extra_args[0]
+                if not arg.startswith("-pqchainlocktestfixture=")
+            ] + ["-pqchainlocktestfixture=%s" % snapshot_path]
+            self.extra_args[0] = fixture_args
+            node.extra_args = list(fixture_args)
+            with node.assert_debug_log(
+                    ["Loaded branch-bound PQ ChainLock regtest fixture"]):
+                self.start_node(0, extra_args=fixture_args)
+            assert_equal(node.getblockcount(), anchor_height + SIGN_LAG)
+            node.spork("SPORK_19_CHAINLOCKS_ENABLED", 0)
+            force_finish_mnsync(node)
+            prefix_tip = node.getbestblockhash()
+            response_expiry_hash = node.getblockhash(response_expiry_height)
+            # Each response was absent when its fixed carrier was mined. The
+            # rewind publishes it within the live window without rewriting
+            # that already-validated null carrier.
+            node.invalidateblock(response_expiry_hash)
+            assert_equal(node.getblockcount(), response_expiry_height - 1)
+            self.admit_chainlock_artifact(
+                prefix["response"], response_height, response_hash,
+                "pq-audit-%s-response" % label)
+            node.reconsiderblock(response_expiry_hash)
+            self.wait_until(
+                lambda: node.getbestblockhash() == prefix_tip,
+                timeout=1200,
+            )
+            assert_equal(node.getblockcount(), anchor_height + SIGN_LAG)
+            _, response_carrier = self.read_btcc_receipt(
+                response_expiry_hash)
+            assert_equal(response_carrier["version"], 1)
+            assert_equal(response_carrier["target_height"], -1)
+            assert_equal(response_carrier["target_hash"], 0)
+            assert_equal(response_carrier["logical_hash"], 0)
+            assert_equal(response_carrier["cursor_height"], -1)
+            assert_equal(response_carrier["cursor_sys_hash"], 0)
+            assert_equal(response_carrier["cursor_btc_hash"], 0)
+            self.admit_chainlock_artifact(
+                prefix["anchor"], anchor_height, anchor_hash,
+                "pq-audit-%s-anchor" % label)
+            return {
+                "prefix": prefix,
+                "fixture_args": fixture_args,
+                "response_predecessor_hash": response_predecessor_hash,
+                "response_hash": response_hash,
+                "anchor_predecessor_hash": anchor_predecessor_hash,
+                "anchor_hash": anchor_hash,
+            }
 
-        prefix_fixture_args = [
-            arg for arg in self.extra_args[0]
-            if not arg.startswith("-pqchainlocktestfixture=")
-        ] + ["-pqchainlocktestfixture=%s" % prefix_snapshot_path]
-        self.extra_args[0] = prefix_fixture_args
-        node.extra_args = list(prefix_fixture_args)
-        with node.assert_debug_log(
-                ["Loaded branch-bound PQ ChainLock regtest fixture"]):
-            self.start_node(0, extra_args=prefix_fixture_args)
-        assert_equal(
-            node.getblockcount(),
-            PAYMENT_AUDIT_ANCHOR_HEIGHT + SIGN_LAG,
+        prep = build_and_admit_prefix(
+            "prep", PAYMENT_AUDIT_PREP_EPOCH,
+            PAYMENT_AUDIT_PREP_RESPONSE_HEIGHT,
+            PAYMENT_AUDIT_PREP_ANCHOR_HEIGHT,
+            original_authorizer_path,
+            None,
         )
-        node.spork("SPORK_19_CHAINLOCKS_ENABLED", 0)
-        force_finish_mnsync(node)
-        prefix_tip = node.getbestblockhash()
-        response_expiry_hash = node.getblockhash(
-            PAYMENT_AUDIT_RESPONSE_EXPIRY_HEIGHT)
-        # The response and anchor are separate current signing rounds. The
-        # rewind also publishes the spork update without mining past either
-        # certificate's one-window admission bound.
-        node.invalidateblock(response_expiry_hash)
+        Path(transition_authorizer_path).write_bytes(
+            prep["prefix"]["anchor"]["certificate"])
+        self.mine_pq_to_height(PAYMENT_AUDIT_PREP_CARRIER_HEIGHT)
+        transition_carrier_hash = node.getblockhash(
+            PAYMENT_AUDIT_PREP_CARRIER_HEIGHT)
+        _, transition_receipt = self.read_btcc_receipt(
+            transition_carrier_hash)
         assert_equal(
-            node.getblockcount(),
-            PAYMENT_AUDIT_RESPONSE_EXPIRY_HEIGHT - 1,
+            transition_receipt["target_height"],
+            PAYMENT_AUDIT_PREP_ANCHOR_HEIGHT,
         )
-        self.admit_chainlock_artifact(
-            prefix["response"], PAYMENT_AUDIT_RESPONSE_HEIGHT,
-            response_hash, "pq-audit-response")
+        assert_equal(
+            transition_receipt["target_hash"],
+            int(prep["anchor_hash"], 16),
+        )
+        assert_equal(
+            transition_receipt["logical_hash"],
+            prep["prefix"]["anchor"]["logical_hash"],
+        )
+        assert_equal(
+            transition_receipt["cursor_height"],
+            PAYMENT_AUDIT_PREP_ANCHOR_HEIGHT,
+        )
+        assert_equal(
+            transition_receipt["cursor_sys_hash"],
+            int(prep["anchor_hash"], 16),
+        )
+        assert_equal(
+            transition_receipt["cursor_btc_hash"],
+            int(self.payment_btcprev(
+                PAYMENT_AUDIT_PREP_ANCHOR_HEIGHT), 16),
+        )
 
-        node.reconsiderblock(response_expiry_hash)
-        self.wait_until(
-            lambda: node.getbestblockhash() == prefix_tip,
-            timeout=1200,
+        current = build_and_admit_prefix(
+            "current", PAYMENT_AUDIT_EPOCH,
+            PAYMENT_AUDIT_RESPONSE_HEIGHT,
+            PAYMENT_AUDIT_ANCHOR_HEIGHT,
+            transition_authorizer_path,
+            PAYMENT_AUDIT_PREP_CARRIER_HEIGHT,
         )
-        assert_equal(
-            node.getblockcount(),
-            PAYMENT_AUDIT_ANCHOR_HEIGHT + SIGN_LAG,
-        )
-        _, response_carrier = self.read_btcc_receipt(
-            response_expiry_hash)
-        assert_equal(response_carrier["version"], 1)
-        assert_equal(response_carrier["target_height"], -1)
-        assert_equal(response_carrier["target_hash"], 0)
-        assert_equal(response_carrier["logical_hash"], 0)
-        assert_equal(response_carrier["cursor_height"], -1)
-        assert_equal(response_carrier["cursor_sys_hash"], 0)
-        assert_equal(response_carrier["cursor_btc_hash"], 0)
-        self.admit_chainlock_artifact(
-            prefix["anchor"], PAYMENT_AUDIT_ANCHOR_HEIGHT,
-            anchor_hash, "pq-audit-anchor")
+        prefix = current["prefix"]
+        prefix_fixture_args = current["fixture_args"]
+        response_predecessor_hash = current["response_predecessor_hash"]
+        response_hash = current["response_hash"]
+        anchor_predecessor_hash = current["anchor_predecessor_hash"]
+        anchor_hash = current["anchor_hash"]
 
         self.mine_pq_to_height(PAYMENT_AUDIT_SEED_CARRIER_HEIGHT)
         seed_carrier_hash = node.getblockhash(
@@ -1690,7 +1768,7 @@ class PQChainLocksTest(SyscoinTestFramework):
         seal_hash = node.getblockhash(PAYMENT_AUDIT_SEAL_HEIGHT)
         base_heights = [
             EPOCH_ORIGIN + epoch * EPOCH_BLOCKS
-            for epoch in range(ACTIVE_QUORUMS + 1)
+            for epoch in range(PAYMENT_AUDIT_EPOCH + 2)
         ]
         snapshot_heights = [
             height - ROSTER_SNAPSHOT_LAG for height in base_heights
@@ -1732,9 +1810,10 @@ class PQChainLocksTest(SyscoinTestFramework):
             seal_hash,
             seed_carrier_hash,
             seed_receipt.hex(),
+            transition_carrier_hash,
             *base_hashes,
             *snapshot_hashes,
-            authorizer_path,
+            transition_authorizer_path,
         ]
         subprocess.run(
             command, check=True, capture_output=True, text=True,

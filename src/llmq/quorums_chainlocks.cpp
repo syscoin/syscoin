@@ -11678,6 +11678,11 @@ bool CChainLocksHandler::RefreshCurrentSigningContexts(
         }
         return false;
     }
+    LogPrint(BCLog::CHAINLOCKS,
+             "CChainLocksHandler::%s -- published PQ ChainLock signing "
+             "context height=%d variants=%u\n",
+             __func__, published->source.window.target_height,
+             static_cast<unsigned int>(published->count));
     return true;
 }
 

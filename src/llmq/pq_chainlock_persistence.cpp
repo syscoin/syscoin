@@ -15,6 +15,7 @@
 #include <exception>
 #include <ios>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -527,9 +528,8 @@ struct DiskPaymentAuditSealContext {
                 "non-canonical payment-audit seal authority flag");
         }
         if (has_authority != 0) {
-            RecoveryRosterAuthority authority;
-            ::Unserialize(stream, authority);
-            recovery_authority = std::move(authority);
+            recovery_authority.emplace();
+            ::Unserialize(stream, *recovery_authority);
         } else {
             recovery_authority.reset();
         }
@@ -734,7 +734,7 @@ uint256 GetRecoveryAuthorityChecksum(
     return writer.GetHash();
 }
 
-std::optional<DiskRecoveryRosterAuthority> MakeDiskRecoveryRosterAuthority(
+std::unique_ptr<DiskRecoveryRosterAuthority> MakeDiskRecoveryRosterAuthority(
     const uint256& schema_hash,
     const RecoveryAuthorityRequirement& requirement,
     const RecoveryRosterAuthority& authority,
@@ -742,16 +742,16 @@ std::optional<DiskRecoveryRosterAuthority> MakeDiskRecoveryRosterAuthority(
 {
     const auto authority_hash{
         GetRecoveryRosterAuthorityHash(genesis_hash, authority)};
-    if (!authority_hash) return std::nullopt;
-    DiskRecoveryRosterAuthority disk;
-    disk.schema_hash = schema_hash;
-    disk.owner_logical_id = requirement.owner_logical_id;
-    disk.owner_witness_id = requirement.owner_witness_id;
-    disk.authority_hash = *authority_hash;
-    disk.authority = authority;
-    disk.checksum = GetRecoveryAuthorityChecksum(
-        disk.schema_hash, disk.owner_logical_id, disk.owner_witness_id,
-        disk.authority_hash, disk.authority);
+    if (!authority_hash) return nullptr;
+    auto disk{std::make_unique<DiskRecoveryRosterAuthority>()};
+    disk->schema_hash = schema_hash;
+    disk->owner_logical_id = requirement.owner_logical_id;
+    disk->owner_witness_id = requirement.owner_witness_id;
+    disk->authority_hash = *authority_hash;
+    disk->authority = authority;
+    disk->checksum = GetRecoveryAuthorityChecksum(
+        disk->schema_hash, disk->owner_logical_id, disk->owner_witness_id,
+        disk->authority_hash, disk->authority);
     return disk;
 }
 
@@ -775,23 +775,23 @@ uint256 GetPaymentAuditSealContextChecksum(
     return writer.GetHash();
 }
 
-DiskPaymentAuditSealContext MakeDiskPaymentAuditSealContext(
+std::unique_ptr<DiskPaymentAuditSealContext> MakeDiskPaymentAuditSealContext(
     const uint256& schema_hash,
     const PaymentAuditSealContextCapsule& capsule)
 {
-    DiskPaymentAuditSealContext disk;
-    disk.schema_hash = schema_hash;
-    disk.epoch = capsule.Epoch();
-    disk.carrier_end_height_exclusive =
+    auto disk{std::make_unique<DiskPaymentAuditSealContext>()};
+    disk->schema_hash = schema_hash;
+    disk->epoch = capsule.Epoch();
+    disk->carrier_end_height_exclusive =
         capsule.CarrierEndHeightExclusive();
-    disk.seal_logical_id = capsule.Seal().logical_id;
-    disk.seal_witness_id = capsule.Seal().witness_id;
-    disk.seal_statement = capsule.Seal().statement;
-    disk.authorization_mask = capsule.AuthorizationMask();
+    disk->seal_logical_id = capsule.Seal().logical_id;
+    disk->seal_witness_id = capsule.Seal().witness_id;
+    disk->seal_statement = capsule.Seal().statement;
+    disk->authorization_mask = capsule.AuthorizationMask();
     if (capsule.RecoveryAuthority()) {
-        disk.recovery_authority = *capsule.RecoveryAuthority();
+        disk->recovery_authority = *capsule.RecoveryAuthority();
     }
-    disk.checksum =
+    disk->checksum =
         GetPaymentAuditSealContextChecksum(schema_hash, capsule);
     return disk;
 }
@@ -1279,20 +1279,20 @@ bool DoesRecoveryCertificateMatchPrecommit(
 }
 
 template <typename Value>
-std::optional<Value> ReadExactValue(CDBWrapper& db, const DiskKey& key)
+std::unique_ptr<Value> ReadExactValue(CDBWrapper& db, const DiskKey& key)
 {
     std::unique_ptr<CDBIterator> iterator{db.NewIterator()};
     iterator->Seek(key);
     if (!iterator->Valid()) {
         iterator->CheckStatus();
-        return std::nullopt;
+        return nullptr;
     }
 
     DiskKey found_key;
-    Value value;
+    auto value{std::make_unique<Value>()};
     if (!iterator->GetKeyExact(found_key) || found_key.type != key.type ||
-        !iterator->GetValueExact(value)) {
-        return std::nullopt;
+        !iterator->GetValueExact(*value)) {
+        return nullptr;
     }
     return value;
 }
@@ -1373,7 +1373,7 @@ struct PQChainLockPersistence::Impl {
         RecoveryRosterAuthorityPtr supplied_authority,
         const RecoveryRosterAuthorityPtr& retained_authority,
         RecoveryRosterAuthorityPtr& next_authority,
-        std::optional<DiskRecoveryRosterAuthority>& next_disk_authority,
+        std::unique_ptr<DiskRecoveryRosterAuthority>& next_disk_authority,
         ChainLockPersistenceError* error) const
     {
         std::optional<RecoveryAuthorityRequirement> requirement;
@@ -2261,7 +2261,7 @@ struct PQChainLockPersistence::Impl {
         }
 
         RecoveryRosterAuthorityPtr next_recovery_authority;
-        std::optional<DiskRecoveryRosterAuthority>
+        std::unique_ptr<DiskRecoveryRosterAuthority>
             next_disk_recovery_authority;
         if (!PrepareRecoveryAuthorityState(
                 &candidate,
@@ -2331,11 +2331,11 @@ struct PQChainLockPersistence::Impl {
                 const DiskKey seal_context_key{
                     PQ_CHAINLOCK_PERSISTENCE_PAYMENT_AUDIT_SEAL_CONTEXT_KEY};
                 if (next_payment_audit_seal_context) {
-                    batch.Write(
-                        seal_context_key,
+                    const auto disk_seal_context{
                         MakeDiskPaymentAuditSealContext(
                             schema_hash,
-                            *next_payment_audit_seal_context));
+                            *next_payment_audit_seal_context)};
+                    batch.Write(seal_context_key, *disk_seal_context);
                 } else {
                     batch.Erase(seal_context_key);
                 }
@@ -2395,7 +2395,7 @@ struct PQChainLockPersistence::Impl {
         }
 
         RecoveryRosterAuthorityPtr next_recovery_authority;
-        std::optional<DiskRecoveryRosterAuthority>
+        std::unique_ptr<DiskRecoveryRosterAuthority>
             next_disk_recovery_authority;
         if (!PrepareRecoveryAuthorityState(
                 best ? &*best : nullptr, &candidate,
@@ -2483,7 +2483,7 @@ struct PQChainLockPersistence::Impl {
         }
 
         RecoveryRosterAuthorityPtr next_recovery_authority;
-        std::optional<DiskRecoveryRosterAuthority>
+        std::unique_ptr<DiskRecoveryRosterAuthority>
             next_disk_recovery_authority;
         if (!PrepareRecoveryAuthorityState(
                 best ? &*best : nullptr, &candidate, std::nullopt,
