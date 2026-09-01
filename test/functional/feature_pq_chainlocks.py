@@ -678,8 +678,9 @@ class PQChainLocksTest(SyscoinTestFramework):
         # The transport peer is a relay, not necessarily the original signer.
         # This private-anchor test has no 400-operator active roster, so use a
         # stale statement to cover the multi-hop-safe no-punishment path. The
-        # fork-pinned live fixture must additionally exercise active-roster
-        # forwarding and collector verification of the original signer.
+        # fork-pinned live fixture additionally exercises active-roster ingress
+        # and collector verification of the original signer. Selected-sentry
+        # overlay relay is covered by the relay-plan and overlay unit tests.
         relay_marker = "pq-share-relay"
         relay_peer = self.authenticate_peer(
             self.connect_peer(relay_marker), relay_marker, identity
@@ -1444,14 +1445,15 @@ class PQChainLocksTest(SyscoinTestFramework):
             self.connect_peer(observer_marker), observer_marker,
             bundle["observer_identity"])
 
+        observer_share_count = observer.message_count["pqclshare"]
         sender.send_and_ping(
             msg_pqclshare(bundle["shares"][0]), timeout=180)
-        observer.wait_until(
-            lambda: observer.message_count["pqclshare"] >= 1,
-            timeout=180)
+        observer.sync_with_ping(timeout=180)
+        # This fixture is an authenticated collector without a local roster
+        # identity. Collection remains enabled, but only selected sentries may
+        # install the overlay and relay shares.
         assert_equal(
-            observer.last_message["pqclshare"].payload,
-            bundle["shares"][0])
+            observer.message_count["pqclshare"], observer_share_count)
 
         # A member slot is the vote identity. Later bytes cannot add weight
         # after the slot is verified, so discard them without blaming the

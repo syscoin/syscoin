@@ -3924,6 +3924,23 @@ BOOST_AUTO_TEST_CASE(share_relay_identity_is_independent_from_original_signer)
         llmq::BuildChainLockRelayRecipients(rosters)};
     BOOST_CHECK(!relay_recipients.contains(uint256{}));
 
+    const auto observer_plan{
+        llmq::BuildPQRelayPlan(rosters, uint256{})};
+    BOOST_REQUIRE(observer_plan);
+    BOOST_CHECK(observer_plan->local_pro_tx_hash.IsNull());
+    BOOST_CHECK(observer_plan->relay_members.empty());
+    BOOST_CHECK(observer_plan->authorized_recipients ==
+                relay_recipients);
+    const uint256 unselected_identity{NonNullHash(27)};
+    const auto unselected_plan{
+        llmq::BuildPQRelayPlan(rosters, unselected_identity)};
+    BOOST_REQUIRE(unselected_plan);
+    BOOST_CHECK(llmq::IsPQRelayPlanForIdentity(
+        *unselected_plan, unselected_identity));
+    BOOST_CHECK(unselected_plan->relay_members.empty());
+    BOOST_CHECK(unselected_plan->authorized_recipients ==
+                relay_recipients);
+
     BOOST_CHECK(original_signer != authenticated_relay);
     BOOST_CHECK(llmq::IsAuthorizedChainLockShareRelay(
         rosters, relay_recipients, authenticated_relay, transcript));

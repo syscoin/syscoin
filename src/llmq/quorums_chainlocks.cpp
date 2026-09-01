@@ -55,27 +55,6 @@ constexpr std::size_t PQ_CHAINLOCK_PREFIX_SIZE{
     pq::FINAL_SIGNATURE_COUNT * pq::AuthenticatedChildSignature::WIRE_SIZE};
 constexpr std::chrono::seconds PAYMENT_AUDIT_FINALIZATION_RETRY_INTERVAL{30};
 
-std::shared_ptr<const PQRelayPlan> BuildPQRelayPlanForActiveIdentity(
-    const std::array<pq::FrozenQuorumRoster, pq::ACTIVE_QUORUMS>& rosters)
-{
-    uint256 local_pro_tx_hash;
-    uint32_t local_key_version{0};
-    pq::GlobalPublicKey local_public_key{};
-    CService local_service;
-    if (!GetActiveMasternodeIdentity(
-            local_pro_tx_hash, local_key_version,
-            local_public_key, local_service)) {
-        return {};
-    }
-    PQRelayPlan plan;
-    plan.local_pro_tx_hash = local_pro_tx_hash;
-    plan.authorized_recipients = BuildChainLockRelayRecipients(rosters);
-    plan.relay_members =
-        GetPQQuorumUnionRelayConnections(rosters, local_pro_tx_hash);
-    if (plan.relay_members.empty()) return {};
-    return std::make_shared<const PQRelayPlan>(std::move(plan));
-}
-
 uint256 GetActiveMasternodeRelayIdentity()
 {
     uint256 local_pro_tx_hash;
@@ -90,11 +69,44 @@ uint256 GetActiveMasternodeRelayIdentity()
     return local_pro_tx_hash;
 }
 
+std::shared_ptr<const PQRelayPlan> BuildPQRelayPlanForCurrentIdentity(
+    const std::array<pq::FrozenQuorumRoster, pq::ACTIVE_QUORUMS>& rosters)
+{
+    return BuildPQRelayPlan(
+        rosters, GetActiveMasternodeRelayIdentity());
+}
+
 bool IsPQRelayPlanForActiveIdentity(
     const std::shared_ptr<const PQRelayPlan>& plan)
 {
-    return plan && IsPQRelayPlanForIdentity(
-                       *plan, GetActiveMasternodeRelayIdentity());
+    return plan && !plan->relay_members.empty() &&
+           IsPQRelayPlanForIdentity(
+               *plan, GetActiveMasternodeRelayIdentity());
+}
+
+bool IsPQRelayPlanForIdentityState(
+    const std::shared_ptr<const PQRelayPlan>& plan,
+    const uint256& active_identity)
+{
+    if (!plan || plan->authorized_recipients.empty()) return false;
+    if (active_identity.IsNull()) {
+        return plan->local_pro_tx_hash.IsNull() &&
+               plan->relay_members.empty();
+    }
+    return IsPQRelayPlanForIdentity(*plan, active_identity) &&
+           std::all_of(
+               plan->relay_members.begin(),
+               plan->relay_members.end(),
+               [&](const uint256& member) {
+                   return plan->authorized_recipients.contains(member);
+               });
+}
+
+bool IsPQRelayPlanForCurrentIdentityState(
+    const std::shared_ptr<const PQRelayPlan>& plan)
+{
+    return IsPQRelayPlanForIdentityState(
+        plan, GetActiveMasternodeRelayIdentity());
 }
 
 pq::RecoveryRosterAuthorityPtr RecoveryAuthorityForDurableState(
@@ -11642,7 +11654,8 @@ bool CChainLocksHandler::RefreshCurrentSigningContexts(
     const auto is_current = [this](
         const CurrentSigningContextsPtr& contexts) {
         return contexts &&
-               IsPQRelayPlanForActiveIdentity(contexts->relay_plan) &&
+               IsPQRelayPlanForCurrentIdentityState(
+                   contexts->relay_plan) &&
                IsCurrentSigningSource(contexts->source);
     };
     const auto apply_relay_plan = [](
@@ -11704,7 +11717,7 @@ bool CChainLocksHandler::RefreshCurrentSigningContexts(
         retire_replaced_if_exact();
         return false;
     }
-    built->relay_plan = BuildPQRelayPlanForActiveIdentity(
+    built->relay_plan = BuildPQRelayPlanForCurrentIdentity(
         built->roster_set->Rosters());
     if (!built->relay_plan) {
         retire_replaced_if_exact();
@@ -11867,7 +11880,7 @@ CChainLocksHandler::BuildPaymentAuditResponseDefinition(
     active_relays.erase(
         std::unique(active_relays.begin(), active_relays.end()),
         active_relays.end());
-    auto relay_plan{BuildPQRelayPlanForActiveIdentity(
+    auto relay_plan{BuildPQRelayPlanForCurrentIdentity(
         response_context->Rosters())};
     if (!relay_plan) return std::nullopt;
     return PaymentAuditResponseDefinition{
@@ -11879,7 +11892,8 @@ bool CChainLocksHandler::IsPaymentAuditResponseDefinitionSourceCurrent(
     const PaymentAuditResponseDefinition& definition) const
 {
     if (!m_store || !definition.response_context ||
-        !IsPQRelayPlanForActiveIdentity(definition.relay_plan)) {
+        !IsPQRelayPlanForCurrentIdentityState(
+            definition.relay_plan)) {
         return false;
     }
     const auto finalized{m_store->GetRecordByHeight(
@@ -12476,13 +12490,16 @@ bool CChainLocksHandler::ApplyPaymentAuditOverlay(
     if (!statement || relay_group_id.IsNull() ||
         relay_group_id !=
             pq::GetPaymentAuditLogicalId(m_genesis_hash, *statement) ||
-        !IsPQRelayPlanForActiveIdentity(relay_plan) ||
+        !IsPQRelayPlanForCurrentIdentityState(relay_plan) ||
         !IsQuorumRosterSourceGenerationCurrent(
             roster_source_generation) ||
         !IsCurrentPaymentAuditStatement(*statement)) {
         return false;
     }
+    const bool has_relay_identity{
+        IsPQRelayPlanForActiveIdentity(relay_plan)};
     if (pqQuorumConnectionOverlay != nullptr &&
+        has_relay_identity &&
         !pqQuorumConnectionOverlay->ApplyPaymentAuditContext(
             relay_group_id, relay_plan->relay_members,
             expected_runtime_generation)) {
@@ -12513,7 +12530,7 @@ bool CChainLocksHandler::ApplyPaymentAuditOverlay(
         return true;
     }
     exact = exact &&
-            IsPQRelayPlanForActiveIdentity(relay_plan) &&
+            IsPQRelayPlanForCurrentIdentityState(relay_plan) &&
             IsQuorumRosterSourceGenerationCurrent(
                 roster_source_generation) &&
             IsCurrentPaymentAuditStatement(*statement);
@@ -12556,8 +12573,8 @@ bool CChainLocksHandler::PreparePaymentAuditSigningRuntime()
         LOCK(m_payment_audit_mutex);
         if (m_payment_audit_runtime &&
             (!m_payment_audit_runtime->relay_plan ||
-             !IsPQRelayPlanForIdentity(
-                 *m_payment_audit_runtime->relay_plan,
+             !IsPQRelayPlanForIdentityState(
+                 m_payment_audit_runtime->relay_plan,
                  current_relay_identity) ||
              ShouldResetPaymentAuditRuntime(
                  m_payment_audit_runtime->finalized.has_value(),
@@ -12864,7 +12881,7 @@ bool CChainLocksHandler::PreparePaymentAuditSigningRuntime()
             !IsCurrentPaymentAuditStatement(statement)) {
             continue;
         }
-        auto relay_plan{BuildPQRelayPlanForActiveIdentity(
+        auto relay_plan{BuildPQRelayPlanForCurrentIdentity(
             *signing_rosters_ptr)};
         if (!relay_plan) continue;
         const uint256 relay_group_id{
@@ -12877,7 +12894,7 @@ bool CChainLocksHandler::PreparePaymentAuditSigningRuntime()
                 existing_candidates->candidate_revision) ||
             !IsQuorumRosterSourceGenerationCurrent(
                 roster_source_generation) ||
-            !IsPQRelayPlanForActiveIdentity(relay_plan)) {
+            !IsPQRelayPlanForCurrentIdentityState(relay_plan)) {
             return false;
         }
         uint64_t published_generation{0};
@@ -12895,7 +12912,7 @@ bool CChainLocksHandler::PreparePaymentAuditSigningRuntime()
                 existing_candidates->candidate_revision) ||
             !IsQuorumRosterSourceGenerationCurrent(
                 roster_source_generation) ||
-            !IsPQRelayPlanForActiveIdentity(relay_plan) ||
+            !IsPQRelayPlanForCurrentIdentityState(relay_plan) ||
             !ApplyPaymentAuditOverlay(published_generation) ||
             !m_payment_audit_store->IsCandidateRevisionCurrent(
                 existing_candidates->candidate_revision)) {
@@ -12986,7 +13003,7 @@ bool CChainLocksHandler::HasExactPaymentAuditRuntime(
     const std::shared_ptr<const PQRelayPlan>& relay_plan) const
 {
     if (!prepared_context ||
-        !IsPQRelayPlanForActiveIdentity(relay_plan)) {
+        !IsPQRelayPlanForCurrentIdentityState(relay_plan)) {
         return false;
     }
     LOCK(m_payment_audit_mutex);
@@ -15937,6 +15954,32 @@ ChainLockRelayRecipients BuildChainLockRelayRecipients(
         }
     }
     return recipients;
+}
+
+std::shared_ptr<const PQRelayPlan> BuildPQRelayPlan(
+    const std::array<pq::FrozenQuorumRoster, pq::ACTIVE_QUORUMS>& rosters,
+    const uint256& local_pro_tx_hash)
+{
+    PQRelayPlan plan;
+    plan.authorized_recipients = BuildChainLockRelayRecipients(rosters);
+    if (plan.authorized_recipients.empty()) return {};
+
+    if (local_pro_tx_hash.IsNull()) {
+        // Verification authority is roster-derived; absent local identity
+        // deliberately yields no connection or gossip capability.
+        return std::make_shared<const PQRelayPlan>(std::move(plan));
+    }
+    plan.local_pro_tx_hash = local_pro_tx_hash;
+    plan.relay_members = GetPQQuorumUnionRelayConnections(
+        rosters, local_pro_tx_hash);
+    if (!std::all_of(
+            plan.relay_members.begin(), plan.relay_members.end(),
+            [&](const uint256& member) {
+                return plan.authorized_recipients.contains(member);
+            })) {
+        return {};
+    }
+    return std::make_shared<const PQRelayPlan>(std::move(plan));
 }
 
 bool IsPQRelayPlanForIdentity(

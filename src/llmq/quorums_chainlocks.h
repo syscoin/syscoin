@@ -860,6 +860,11 @@ struct PQRelayPlan {
 [[nodiscard]] ChainLockRelayRecipients BuildChainLockRelayRecipients(
     const std::array<pq::FrozenQuorumRoster, pq::ACTIVE_QUORUMS>& rosters);
 
+/** Build shared authorization plus optional identity-bound relay topology. */
+[[nodiscard]] std::shared_ptr<const PQRelayPlan> BuildPQRelayPlan(
+    const std::array<pq::FrozenQuorumRoster, pq::ACTIVE_QUORUMS>& rosters,
+    const uint256& local_pro_tx_hash);
+
 /** Bind a prepared relay plan to the local identity that derived it. */
 [[nodiscard]] bool IsPQRelayPlanForIdentity(
     const PQRelayPlan& plan, const uint256& local_pro_tx_hash) noexcept;
