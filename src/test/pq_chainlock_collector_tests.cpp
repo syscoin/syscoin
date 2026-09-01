@@ -522,6 +522,80 @@ BOOST_AUTO_TEST_CASE(cloned_signer_cannot_add_quorum_weight)
     BOOST_CHECK_EQUAL(collector->ShareCounts()[0], 1U);
 }
 
+BOOST_AUTO_TEST_CASE(compact_share_round_trip_binds_exact_context_and_position)
+{
+    const auto fixture{MakeFixture()};
+    BOOST_REQUIRE(fixture);
+    const auto context{PrepareContext(*fixture)};
+    BOOST_REQUIRE(context);
+    const ChainLockShare share{SignFirstShare(*fixture)};
+
+    const auto first{PackChainLockShareSignerPosition(0, 0)};
+    const auto end_first{PackChainLockShareSignerPosition(0, 399)};
+    const auto start_second{PackChainLockShareSignerPosition(1, 0)};
+    const auto last{PackChainLockShareSignerPosition(3, 399)};
+    BOOST_REQUIRE(first);
+    BOOST_REQUIRE(end_first);
+    BOOST_REQUIRE(start_second);
+    BOOST_REQUIRE(last);
+    BOOST_CHECK_EQUAL(*first, 0U);
+    BOOST_CHECK_EQUAL(*end_first, 399U);
+    BOOST_CHECK_EQUAL(*start_second, 400U);
+    BOOST_CHECK_EQUAL(*last, 1'599U);
+    BOOST_CHECK(!PackChainLockShareSignerPosition(4, 0));
+    BOOST_CHECK(!PackChainLockShareSignerPosition(0, 400));
+
+    const auto compact{BuildCompactChainLockShare(share, *context)};
+    BOOST_REQUIRE(compact);
+    BOOST_CHECK(compact->statement_logical_id ==
+                context->StatementLogicalId());
+    BOOST_CHECK_EQUAL(compact->signer_position, 0U);
+    DataStream encoded;
+    encoded << *compact;
+    BOOST_CHECK_EQUAL(encoded.size(), CompactChainLockShare::WIRE_SIZE);
+
+    CompactChainLockShare decoded;
+    encoded >> decoded;
+    BOOST_CHECK(encoded.empty());
+    BOOST_CHECK(decoded == *compact);
+    const auto expanded{ExpandCompactChainLockShare(decoded, *context)};
+    BOOST_REQUIRE(expanded);
+    BOOST_CHECK(*expanded == share);
+
+    auto distinct_statement{fixture->statement};
+    distinct_statement.payment_probation_state_hash.begin()[0] ^= 1;
+    BOOST_CHECK(distinct_statement.quorum_context_hash ==
+                fixture->statement.quorum_context_hash);
+    BOOST_CHECK(GetLogicalChainLockId(
+                    fixture->genesis_hash, distinct_statement) !=
+                context->StatementLogicalId());
+    auto wrong_context{decoded};
+    wrong_context.statement_logical_id = GetLogicalChainLockId(
+        fixture->genesis_hash, distinct_statement);
+    BOOST_CHECK(!ExpandCompactChainLockShare(wrong_context, *context));
+
+    auto moved_signer{decoded};
+    moved_signer.signer_position =
+        *PackChainLockShareSignerPosition(0, 1);
+    const auto moved_share{
+        ExpandCompactChainLockShare(moved_signer, *context)};
+    BOOST_REQUIRE(moved_share);
+    ChainLockVerificationError error{ChainLockVerificationError::NONE};
+    BOOST_CHECK(!PrepareChainLockShareVerification(
+        *moved_share, *context, &error));
+    BOOST_CHECK(error != ChainLockVerificationError::NONE);
+
+    auto invalid_position{decoded};
+    invalid_position.signer_position =
+        static_cast<uint16_t>(ACTIVE_QUORUMS * QUORUM_SIZE);
+    BOOST_CHECK(!invalid_position.IsStructurallyValid());
+    DataStream invalid_encoded;
+    invalid_encoded << invalid_position;
+    CompactChainLockShare invalid_decoded;
+    BOOST_CHECK_THROW(invalid_encoded >> invalid_decoded,
+                      std::ios_base::failure);
+}
+
 BOOST_AUTO_TEST_CASE(pending_reservation_deduplicates_before_crypto)
 {
     auto fixture{MakeFixture()};

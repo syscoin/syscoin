@@ -79,6 +79,8 @@ static_assert(QUORUM_SIZE % 8 == 0);
 static_assert(QUORUM_THRESHOLD == 2 * QUORUM_MAX_BYZANTINE + 1);
 static_assert(2 * QUORUM_THRESHOLD - QUORUM_SIZE > QUORUM_MAX_BYZANTINE);
 static_assert(QUORUM_THRESHOLD <= QUORUM_SIZE - QUORUM_MAX_BYZANTINE);
+static_assert(ACTIVE_QUORUMS * QUORUM_SIZE <=
+              std::numeric_limits<uint16_t>::max());
 
 [[nodiscard]] inline constexpr bool IsValidChildKeyTreeGeneration(
     uint32_t generation) noexcept
@@ -615,6 +617,48 @@ struct ChainLockShare {
     friend bool operator==(const ChainLockShare&, const ChainLockShare&) = default;
 };
 
+struct ChainLockShareSignerPosition {
+    uint8_t quorum_slot{0};
+    uint16_t member_index{0};
+
+    friend bool operator==(const ChainLockShareSignerPosition&,
+                           const ChainLockShareSignerPosition&) = default;
+};
+
+/**
+ * Live P2P envelope for a share whose immutable statement and rosters are
+ * already published locally. Historical evidence retains the self-contained
+ * ChainLockShare above.
+ */
+struct CompactChainLockShare {
+    static constexpr std::size_t WIRE_SIZE{
+        32 + sizeof(uint16_t) + AuthenticatedChildSignature::WIRE_SIZE};
+    static_assert(WIRE_SIZE == 1'282);
+
+    uint256 statement_logical_id;
+    uint16_t signer_position{std::numeric_limits<uint16_t>::max()};
+    AuthenticatedChildSignature authenticated_signature;
+
+    SERIALIZE_METHODS(CompactChainLockShare, obj)
+    {
+        READWRITE(obj.statement_logical_id, obj.signer_position,
+                  obj.authenticated_signature);
+        SER_READ(obj, if (!obj.IsStructurallyValid()) {
+            throw std::ios_base::failure(
+                "non-canonical compact PQ ChainLock share");
+        });
+    }
+
+    [[nodiscard]] bool IsStructurallyValid() const noexcept;
+    [[nodiscard]] std::optional<ChainLockShareSignerPosition>
+    GetSignerPosition() const noexcept;
+    friend bool operator==(const CompactChainLockShare&,
+                           const CompactChainLockShare&) = default;
+};
+
+[[nodiscard]] std::optional<uint16_t> PackChainLockShareSignerPosition(
+    uint8_t quorum_slot, uint16_t member_index) noexcept;
+
 [[nodiscard]] std::size_t CountSet(const QuorumBitmap& bitmap);
 [[nodiscard]] bool IsSelectedQuorumMask(uint8_t mask);
 [[nodiscard]] bool IsSigningRosterAuthorizationMask(uint8_t mask);
@@ -717,6 +761,7 @@ FinalChainLock ReadFinalChainLock(Stream& stream, std::size_t payload_size)
 
 static_assert(FinalChainLockSerializedSize() < MAX_CHAINLOCK_SIZE);
 static_assert(ChainLockShare::WIRE_SIZE == 2'975);
+static_assert(CompactChainLockShare::WIRE_SIZE == 1'282);
 static_assert(FinalChainLockSerializedSize() == 1'001'508);
 
 } // namespace llmq::pq

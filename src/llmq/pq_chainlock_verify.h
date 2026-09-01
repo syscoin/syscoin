@@ -304,6 +304,10 @@ public:
     {
         return m_statement;
     }
+    [[nodiscard]] const uint256& StatementLogicalId() const noexcept
+    {
+        return m_statement_logical_id;
+    }
     [[nodiscard]] const FrozenQuorumRosters& Rosters() const noexcept
     {
         return m_roster_set->Rosters();
@@ -345,6 +349,7 @@ private:
     ChainLockScheduleConfig m_schedule;
     ChainLockStatement m_statement;
     VerifiedRosterSetPtr m_roster_set;
+    uint256 m_statement_logical_id;
     RosterAuthorizationVerificationContext m_authorization;
     uint8_t m_authorization_mask{0};
     RecoveryRosterAuthorityPtr m_recovery_authority;
@@ -435,6 +440,15 @@ PrepareChainLockShareVerification(
     const QuorumDescriptor& descriptor,
     uint16_t member_index,
     const uint256& member_pro_tx_hash);
+
+[[nodiscard]] std::optional<CompactChainLockShare>
+BuildCompactChainLockShare(
+    const ChainLockShare& share,
+    const PreparedChainLockContext& context);
+
+[[nodiscard]] std::optional<ChainLockShare> ExpandCompactChainLockShare(
+    const CompactChainLockShare& compact,
+    const PreparedChainLockContext& context);
 
 /**
  * Perform every bounded structural, roster, root, context, and signer mapping

@@ -1469,6 +1469,8 @@ private:
 
         [[nodiscard]] std::optional<CurrentSigningContext> Find(
             const pq::ChainLockStatement& statement) const;
+        [[nodiscard]] std::optional<CurrentSigningContext> Find(
+            const uint256& statement_logical_id) const;
     };
 
     using CurrentSigningContextsPtr =

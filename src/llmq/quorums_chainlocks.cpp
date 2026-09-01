@@ -3220,6 +3220,26 @@ CChainLocksHandler::CurrentSigningContexts::Find(
     return std::nullopt;
 }
 
+std::optional<CChainLocksHandler::CurrentSigningContext>
+CChainLocksHandler::CurrentSigningContexts::Find(
+    const uint256& statement_logical_id) const
+{
+    if (!roster_set) return std::nullopt;
+    for (std::size_t i{0}; i < count; ++i) {
+        if (prepared_contexts[i] &&
+            prepared_contexts[i]->StatementLogicalId() ==
+                statement_logical_id &&
+            prepared_contexts[i]->Statement() == statements[i] &&
+            prepared_contexts[i]->RosterSetPtr() == roster_set) {
+            return CurrentSigningContext{
+                static_cast<uint8_t>(i), statements[i],
+                roster_set->RostersPtr(),
+                prepared_contexts[i]->AuthorizationMask()};
+        }
+    }
+    return std::nullopt;
+}
+
 void CChainLocksHandler::SetQuorumRosterCache(
     pq::FrozenQuorumRosterCachePtr cache)
 {
@@ -13516,14 +13536,14 @@ void CChainLocksHandler::ProcessChainLockShare(CNode* from,
         punish(100, "unauthenticated-pq-clshare");
         return;
     }
-    if (payload.size() != pq::ChainLockShare::WIRE_SIZE) {
+    if (payload.size() != pq::CompactChainLockShare::WIRE_SIZE) {
         punish(100, "bad-pq-clshare-size");
         return;
     }
 
-    pq::ChainLockShare share;
+    pq::CompactChainLockShare compact;
     try {
-        payload >> share;
+        payload >> compact;
         if (!payload.empty()) {
             throw std::ios_base::failure("trailing PQ ChainLock share bytes");
         }
@@ -13535,10 +13555,22 @@ void CChainLocksHandler::ProcessChainLockShare(CNode* from,
     // build chain, receipt, roster, or collector context on a peer's behalf.
     auto contexts{GetPublishedCurrentSigningContexts(
         admission_generation)};
-    const auto current{contexts ? contexts->Find(share.GetStatement())
+    const auto current{contexts ? contexts->Find(
+                                      compact.statement_logical_id)
                                 : std::nullopt};
-    if (!current || !current->rosters || !contexts->relay_plan ||
-        !IsAuthorizedChainLockShareRelay(
+    if (!current || !current->rosters || !contexts->relay_plan) {
+        // An envelope can race publication of its exact immutable context.
+        // Local deterministic journal replay will announce it again.
+        return;
+    }
+    const auto& prepared_context{
+        contexts->prepared_contexts[current->variant_index]};
+    const auto expanded{prepared_context
+        ? pq::ExpandCompactChainLockShare(compact, *prepared_context)
+        : std::nullopt};
+    if (!expanded) return;
+    const pq::ChainLockShare& share{*expanded};
+    if (!IsAuthorizedChainLockShareRelay(
             *current->rosters,
             contexts->relay_plan->authorized_recipients,
             peer_identity, share.transcript)) {
@@ -16073,6 +16105,12 @@ void CChainLocksHandler::RelayChainLockShare(
     }
     const auto& relay_plan{signing_contexts->relay_plan};
     if (!IsPQRelayPlanForActiveIdentity(relay_plan)) return;
+    const auto& prepared_context{
+        signing_contexts->prepared_contexts[variant_index]};
+    const auto compact{prepared_context
+        ? pq::BuildCompactChainLockShare(share, *prepared_context)
+        : std::nullopt};
+    if (!compact) return;
 
     PQRelayIdentityGate relay_gate{excluded_identity};
     m_connman.ForEachNode([&](CNode* node) {
@@ -16090,7 +16128,7 @@ void CChainLocksHandler::RelayChainLockShare(
         }
         m_connman.PushMessage(
             node, CNetMsgMaker(node->GetCommonVersion())
-                      .Make(NetMsgType::PQCLSHARE, share));
+                      .Make(NetMsgType::PQCLSHARE, *compact));
     });
 }
 

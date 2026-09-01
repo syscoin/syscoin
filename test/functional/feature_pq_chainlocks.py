@@ -78,7 +78,8 @@ CHAINLOCK_STATEMENT_WIRE_SIZE = 1_657
 FINAL_CHAINLOCK_FIXED_WIRE_SIZE = (
     CHAINLOCK_STATEMENT_WIRE_SIZE + 1 + ACTIVE_QUORUMS * BITMAP_SIZE + 2
 )
-CHAINLOCK_SHARE_WIRE_SIZE = 2_975
+PQCLSHARE_WIRE_SIZE = 1_282
+SELF_CONTAINED_CHAINLOCK_SHARE_WIRE_SIZE = 2_975
 FINAL_CHAINLOCK_WIRE_SIZE = 1_001_508
 FINAL_PAYMENT_AUDIT_WIRE_SIZE = 1_041_907
 PAYMENT_AUDIT_RECEIPT_WIRE_SIZE = 369
@@ -319,31 +320,15 @@ def logical_id(genesis_hash, statement):
     )
 
 
-def serialize_share(statement_fields, quorum_epoch, quorum_base_hash,
-                    member_index, member_protx_hash):
-    height, block_hash, previous_height, previous_hash, context_hash = statement_fields
+def serialize_share(statement_logical_id, quorum_slot, member_index):
+    assert 0 <= quorum_slot < ACTIVE_QUORUMS
+    assert 0 <= member_index < QUORUM_SIZE
     payload = (
-        struct.pack("<HHi", CHAINLOCK_VERSION, CHILD_PROFILE, height)
-        + ser_uint256(block_hash)
-        + struct.pack("<i", previous_height)
-        + ser_uint256(previous_hash)
-        + ser_uint256(context_hash)
-        + struct.pack("<B", 1)  # RosterAuthorizationTransitionKind::KEEP
-        + serialize_roster_beacon_window()
-        + ser_uint256(0x41555448)
-        + struct.pack("<I", quorum_epoch)
-        + ser_uint256(quorum_base_hash)
-        + struct.pack("<H", member_index)
-        + ser_uint256(member_protx_hash)
-        + serialize_cursor()
-        + serialize_cursor()
-        + struct.pack("<B", 0)
-        + serialize_receipt_state()
-        + serialize_payment_audit_receipt_state()
-        + ser_uint256(empty_payment_probation_state_hash())
+        ser_uint256(statement_logical_id)
+        + struct.pack("<H", quorum_slot * QUORUM_SIZE + member_index)
         + serialize_authenticated_child_signature()
     )
-    assert_equal(len(payload), CHAINLOCK_SHARE_WIRE_SIZE)
+    assert_equal(len(payload), PQCLSHARE_WIRE_SIZE)
     return payload
 
 
@@ -667,13 +652,26 @@ class PQChainLocksTest(SyscoinTestFramework):
             0x42,
         )
 
-        canonical_share = serialize_share(
-            statement_fields, 3, 0x43, 0, identity
+        statement_id = logical_id(
+            int(node.getblockhash(0), 16),
+            serialize_statement(*statement_fields),
         )
+        canonical_share = serialize_share(statement_id, 0, 0)
         public_peer = self.connect_peer("pq-share-public")
         with node.assert_debug_log(["unauthenticated-pq-clshare"]):
             public_peer.send_message(msg_pqclshare(canonical_share))
             public_peer.wait_for_disconnect(timeout=10)
+
+        oversized_marker = "pq-share-full-width"
+        oversized_peer = self.authenticate_peer(
+            self.connect_peer(oversized_marker), oversized_marker, identity
+        )
+        former_full_width = canonical_share + bytes(
+            SELF_CONTAINED_CHAINLOCK_SHARE_WIRE_SIZE - PQCLSHARE_WIRE_SIZE
+        )
+        with node.assert_debug_log(["bad-pq-clshare-size"]):
+            oversized_peer.send_message(msg_pqclshare(former_full_width))
+            oversized_peer.wait_for_disconnect(timeout=10)
 
         # The transport peer is a relay, not necessarily the original signer.
         # This private-anchor test has no 400-operator active roster, so use a
@@ -685,9 +683,7 @@ class PQChainLocksTest(SyscoinTestFramework):
         relay_peer = self.authenticate_peer(
             self.connect_peer(relay_marker), relay_marker, identity
         )
-        relayed_share = serialize_share(
-            statement_fields, 3, 0x43, 0, 0x33
-        )
+        relayed_share = serialize_share(statement_id, 0, 1)
         relay_peer.send_and_ping(msg_pqclshare(relayed_share))
         assert relay_peer.is_connected
         assert_equal(
@@ -818,7 +814,7 @@ class PQChainLocksTest(SyscoinTestFramework):
         assert_equal(magic, SHARE_BUNDLE_MAGIC)
         assert_equal(version, SHARE_BUNDLE_VERSION)
         assert_equal(share_count, FINAL_SIGNATURE_COUNT)
-        assert_equal(share_size, CHAINLOCK_SHARE_WIRE_SIZE)
+        assert_equal(share_size, PQCLSHARE_WIRE_SIZE)
         assert_equal(certificate_size, FINAL_CHAINLOCK_WIRE_SIZE)
 
         offset = header_size

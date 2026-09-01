@@ -721,6 +721,8 @@ PreparedChainLockContext::PreparedChainLockContext(
     : m_schedule{schedule},
       m_statement{std::move(statement)},
       m_roster_set{std::move(roster_set)},
+      m_statement_logical_id{GetLogicalChainLockId(
+          m_roster_set->GenesisHash(), m_statement)},
       m_authorization{std::move(authorization)},
       m_authorization_mask{authorization_mask},
       m_recovery_authority{std::move(recovery_authority)}
@@ -927,6 +929,73 @@ ChainLockShareTranscript BuildChainLockShareTranscript(
     transcript.payment_probation_state_hash =
         chainlock.statement.payment_probation_state_hash;
     return transcript;
+}
+
+std::optional<CompactChainLockShare> BuildCompactChainLockShare(
+    const ChainLockShare& share,
+    const PreparedChainLockContext& context)
+{
+    if (!share.IsStructurallyValid() ||
+        share.GetStatement() != context.Statement()) {
+        return std::nullopt;
+    }
+    const auto quorum_slot{context.FindQuorumSlot(share.transcript)};
+    if (!quorum_slot || *quorum_slot >= ACTIVE_QUORUMS) {
+        return std::nullopt;
+    }
+    const auto& roster{context.Rosters()[*quorum_slot]};
+    if (share.transcript.member_index >= roster.members.size()) {
+        return std::nullopt;
+    }
+    const auto& member{roster.members[share.transcript.member_index]};
+    FinalChainLock shell;
+    shell.statement = context.Statement();
+    if (share.transcript != BuildChainLockShareTranscript(
+            shell, roster.descriptor, share.transcript.member_index,
+            member.pro_tx_hash)) {
+        return std::nullopt;
+    }
+    const auto signer_position{PackChainLockShareSignerPosition(
+        static_cast<uint8_t>(*quorum_slot),
+        share.transcript.member_index)};
+    if (!signer_position) return std::nullopt;
+
+    CompactChainLockShare compact;
+    compact.statement_logical_id = context.StatementLogicalId();
+    compact.signer_position = *signer_position;
+    compact.authenticated_signature = share.authenticated_signature;
+    return compact.IsStructurallyValid()
+        ? std::optional<CompactChainLockShare>{std::move(compact)}
+        : std::nullopt;
+}
+
+std::optional<ChainLockShare> ExpandCompactChainLockShare(
+    const CompactChainLockShare& compact,
+    const PreparedChainLockContext& context)
+{
+    if (!compact.IsStructurallyValid() ||
+        compact.statement_logical_id != context.StatementLogicalId()) {
+        return std::nullopt;
+    }
+    const auto signer{compact.GetSignerPosition()};
+    if (!signer || signer->quorum_slot >= context.Rosters().size()) {
+        return std::nullopt;
+    }
+    const auto& roster{context.Rosters()[signer->quorum_slot]};
+    if (signer->member_index >= roster.members.size()) {
+        return std::nullopt;
+    }
+    const auto& member{roster.members[signer->member_index]};
+    FinalChainLock shell;
+    shell.statement = context.Statement();
+    ChainLockShare share;
+    share.transcript = BuildChainLockShareTranscript(
+        shell, roster.descriptor, signer->member_index,
+        member.pro_tx_hash);
+    share.authenticated_signature = compact.authenticated_signature;
+    return share.IsStructurallyValid()
+        ? std::optional<ChainLockShare>{std::move(share)}
+        : std::nullopt;
 }
 
 std::optional<uint8_t> ValidateRosterAuthorizationState(

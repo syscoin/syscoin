@@ -354,6 +354,33 @@ bool ChainLockShare::IsStructurallyValid() const
            authenticated_signature.IsStructurallyValid();
 }
 
+std::optional<uint16_t> PackChainLockShareSignerPosition(
+    uint8_t quorum_slot, uint16_t member_index) noexcept
+{
+    if (quorum_slot >= ACTIVE_QUORUMS || member_index >= QUORUM_SIZE) {
+        return std::nullopt;
+    }
+    return static_cast<uint16_t>(
+        static_cast<std::size_t>(quorum_slot) * QUORUM_SIZE + member_index);
+}
+
+std::optional<ChainLockShareSignerPosition>
+CompactChainLockShare::GetSignerPosition() const noexcept
+{
+    if (signer_position >= ACTIVE_QUORUMS * QUORUM_SIZE) {
+        return std::nullopt;
+    }
+    return ChainLockShareSignerPosition{
+        static_cast<uint8_t>(signer_position / QUORUM_SIZE),
+        static_cast<uint16_t>(signer_position % QUORUM_SIZE)};
+}
+
+bool CompactChainLockShare::IsStructurallyValid() const noexcept
+{
+    return GetSignerPosition() &&
+           authenticated_signature.IsStructurallyValid();
+}
+
 ChainLockStatement ChainLockShare::GetStatement() const
 {
     ChainLockStatement statement;

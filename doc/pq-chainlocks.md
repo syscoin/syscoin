@@ -659,7 +659,8 @@ Authenticated-signature and complete wire sizes are:
 proof bytes per signer = 32 + 16 * 32 = 544
 authenticated signer   = 544 + 704 = 1,248 bytes
 3 * 267 * 1,248        = 999,648 bytes
-complete fixed wire    = 1,000,364 bytes
+statement/mask/bitmaps/count = 1,860 bytes
+complete fixed wire    = 1,001,508 bytes
 ```
 
 The fixed header and four 50-byte bitmaps keep the complete canonical encoding
@@ -728,6 +729,15 @@ Individual `PQCLSHARE` messages are sent only over authenticated quorum links
 and to explicitly participating collectors. Any node may assemble the canonical
 final object after collecting sufficient valid shares; there is no elected or
 trusted aggregator.
+
+The live message does not repeat the 1,657-byte statement in every share. Its
+fixed 1,282-byte envelope contains the 32-byte logical statement ID, one
+`uint16` packing `quorumSlot * 400 + memberIndex`, and the 1,248-byte
+authenticated child signature. A recipient accepts the ID only when it names
+one of its at-most-two already-published immutable signing contexts, then
+reconstructs the complete signed transcript from that statement and its frozen
+roster. The self-contained 2,975-byte `ChainLockShare` remains the historical
+form embedded in payment-audit evidence.
 
 All eligible child-key members across the four active rosters form one
 deterministic union relay overlay keyed by the quorum-context hash. A separate
@@ -1843,7 +1853,8 @@ Expected failures are fail-closed:
 - Golden bytes for global registration, rotation, child commitments/proofs,
   MNAUTH, quorum descriptors, share transcripts, and final CLSIG.
 - Exact size tests for the 704-byte child signature, 1,248-byte authenticated
-  signer, 1,831-byte share, and 1,000,364-byte final CLSIG; reject
+  signer, 1,282-byte live share envelope, 2,975-byte self-contained share, and
+  1,001,508-byte final CLSIG; reject
   one-byte-over, truncated, and length-confusion encodings.
 - Bitmap tests for 266/267/268 bits, including non-byte-aligned residual bits,
   duplicate/reordered slots, selected masks with 2/3/4 bits, and non-zero
@@ -1941,7 +1952,7 @@ Expected failures are fail-closed:
   with 801 valid signatures and adversarial invalid bundles.
 - `pq_chainlock_integration_tests` deterministically constructs all four
   400-member rosters and completes production collector/verifier acceptance
-  with 801 real scheduled-WOTS+ signatures and the exact 1,000,364-byte wire
+  with 801 real scheduled-WOTS+ signatures and the exact 1,001,508-byte wire
   object.
   `feature_pq_chainlocks.py` separately loads a checksummed, exact-branch
   regtest roster fixture, forwards real shares between authenticated peers,

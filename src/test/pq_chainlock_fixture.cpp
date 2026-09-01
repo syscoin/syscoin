@@ -1700,15 +1700,23 @@ bool WriteShareBundle(const fs::path& path,
     DataStream body;
     body << SHARE_BUNDLE_MAGIC << SHARE_BUNDLE_VERSION
          << static_cast<uint32_t>(fixture.shares.size())
-         << static_cast<uint32_t>(ChainLockShare::WIRE_SIZE)
+         << static_cast<uint32_t>(CompactChainLockShare::WIRE_SIZE)
          << static_cast<uint32_t>(certificate.size())
          << sender_identity << observer_identity
          << chainlock.GetLogicalId(fixture.args.genesis_hash)
          << chainlock.GetWitnessId(fixture.args.genesis_hash);
     for (const auto& share : fixture.shares) {
+        const auto compact{fixture.prepared_context
+            ? BuildCompactChainLockShare(
+                  share, *fixture.prepared_context)
+            : std::nullopt};
+        if (!compact) {
+            error = "unable to compact share";
+            return false;
+        }
         const std::size_t before{body.size()};
-        body << share;
-        if (body.size() - before != ChainLockShare::WIRE_SIZE) {
+        body << *compact;
+        if (body.size() - before != CompactChainLockShare::WIRE_SIZE) {
             error = "share size mismatch";
             return false;
         }
