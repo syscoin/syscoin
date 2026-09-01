@@ -116,7 +116,7 @@ Consensus::Params ValidConsensus()
     consensus.nPQRegistrationCutoffBlocks = 288;
     consensus.nPQFutureHorizonEpochs = 8;
     consensus.nPQRosterSnapshotLag = 288;
-    consensus.nPQBTCCCandidateOrigin = 2310;
+    consensus.nPQBTCCCandidateOrigin = 2305;
     consensus.nPQBTCCNEVMInjectionLag = llmq::pq::PQ_BTCC_NEVM_LAG;
     consensus.nPQBTCCReceiptAnchorHeight = 1000;
     consensus.hashPQBTCCReceiptAnchorBlock = NonNullHash(2);
@@ -2430,7 +2430,7 @@ BOOST_AUTO_TEST_CASE(startup_slot_consumption_is_limited_to_live_rounds)
         chainlock, /*startup_tip_height=*/885, /*target_height=*/885));
 }
 
-BOOST_AUTO_TEST_CASE(staged_recovery_keeps_one_canonical_historical_target)
+BOOST_AUTO_TEST_CASE(staged_initialization_is_fixed_and_catchup_rolls_forward)
 {
     const llmq::pq::ChainLockScheduleConfig chainlock{.epoch_origin = 0};
     const llmq::pq::BTCCScheduleConfig btcc{.candidate_origin = 865};
@@ -2447,14 +2447,8 @@ BOOST_AUTO_TEST_CASE(staged_recovery_keeps_one_canonical_historical_target)
     llmq::pq::RosterRecoveryPrecommit precommit;
     precommit.admission =
         llmq::pq::RosterRecoveryAdmission::INITIALIZE;
-    precommit.recovery_authority_hash = NonNullHash(209'998);
-    precommit.recovery_authority_source.kind =
-        llmq::pq::RecoveryRosterAuthoritySourceKind::ACTIVATION;
-    precommit.recovery_authority_source.height = 864;
-    precommit.recovery_authority_source.block_hash =
-        NonNullHash(209'999);
     precommit.pending_seed.anchor_kind =
-        llmq::pq::RosterBeaconAnchorKind::RECOVERY;
+        llmq::pq::RosterBeaconAnchorKind::NORMAL;
     precommit.pending_seed.state =
         llmq::pq::RosterBeaconState::PENDING;
     precommit.pending_seed.epoch = 3;
@@ -2497,6 +2491,17 @@ BOOST_AUTO_TEST_CASE(staged_recovery_keeps_one_canonical_historical_target)
             chainlock, btcc, /*epoch=*/11)};
     BOOST_REQUIRE(epoch_seven_target);
     BOOST_REQUIRE(epoch_eleven_target);
+
+    auto later_initialization{precommit};
+    later_initialization.pending_seed.epoch = 7;
+    later_initialization.pending_seed.anchor_cursor.sys_height =
+        *epoch_seven_target;
+    BOOST_REQUIRE(later_initialization.IsStructurallyValid());
+    BOOST_CHECK(!llmq::StagedRecoverySigningWindow(
+        chainlock, btcc, later_initialization,
+        /*durable_predecessor_height=*/864,
+        /*tip_height=*/5'000));
+
     const auto epoch_seven_signing{
         llmq::pq::SigningHeightForTarget(
             chainlock, *epoch_seven_target)};
@@ -2521,9 +2526,8 @@ BOOST_AUTO_TEST_CASE(staged_recovery_keeps_one_canonical_historical_target)
         *epoch_seven_signing,
         /*anchor_stably_inactive=*/true)};
     BOOST_REQUIRE(epoch_seven);
-    BOOST_CHECK(epoch_seven->rolls_pending_epoch);
-    BOOST_CHECK_EQUAL(
-        epoch_seven->window.target_height, *epoch_seven_target);
+    BOOST_CHECK(!epoch_seven->rolls_pending_epoch);
+    BOOST_CHECK(epoch_seven->window == *first);
 
     const auto epoch_eleven{llmq::SelectStagedRecoverySigningWindow(
         chainlock, btcc, precommit,
@@ -2531,9 +2535,8 @@ BOOST_AUTO_TEST_CASE(staged_recovery_keeps_one_canonical_historical_target)
         *epoch_eleven_signing,
         /*anchor_stably_inactive=*/true)};
     BOOST_REQUIRE(epoch_eleven);
-    BOOST_CHECK(epoch_eleven->rolls_pending_epoch);
-    BOOST_CHECK_EQUAL(
-        epoch_eleven->window.target_height, *epoch_eleven_target);
+    BOOST_CHECK(!epoch_eleven->rolls_pending_epoch);
+    BOOST_CHECK(epoch_eleven->window == *first);
 
     const auto active_anchor{llmq::SelectStagedRecoverySigningWindow(
         chainlock, btcc, precommit,
@@ -2557,6 +2560,56 @@ BOOST_AUTO_TEST_CASE(staged_recovery_keeps_one_canonical_historical_target)
     BOOST_REQUIRE(ready_selection);
     BOOST_CHECK(!ready_selection->rolls_pending_epoch);
     BOOST_CHECK(ready_selection->window == *first);
+
+    auto catchup{precommit};
+    catchup.admission =
+        llmq::pq::RosterRecoveryAdmission::CURRENT_CATCHUP;
+    catchup.predecessor_height = 864;
+    catchup.predecessor_hash = NonNullHash(210'003);
+    catchup.recovery_authority_hash = NonNullHash(210'004);
+    catchup.recovery_authority_source.kind =
+        llmq::pq::RecoveryRosterAuthoritySourceKind::NORMAL_ROSTERS;
+    catchup.recovery_authority_source.height = 864;
+    catchup.recovery_authority_source.block_hash = NonNullHash(210'005);
+    catchup.recovery_authority_source.quorum_context_hash =
+        NonNullHash(210'006);
+    for (std::size_t slot{0};
+         slot < llmq::pq::ACTIVE_QUORUMS; ++slot) {
+        auto& seed{
+            catchup.recovery_authority_source.normal_beacons[slot]};
+        seed.anchor_kind = llmq::pq::RosterBeaconAnchorKind::NORMAL;
+        seed.state = llmq::pq::RosterBeaconState::READY;
+        seed.epoch = static_cast<uint32_t>(slot);
+        seed.anchor_cursor = llmq::pq::BTCCursor{
+            864, NonNullHash(210'005), NonNullHash(210'007)};
+        seed.anchor_btc_height = 799'000;
+        seed.future_btc_hash = NonNullHash(210'008);
+    }
+    catchup.pending_seed.anchor_kind =
+        llmq::pq::RosterBeaconAnchorKind::RECOVERY;
+    BOOST_REQUIRE(catchup.IsStructurallyValid());
+
+    const auto rolled_epoch_seven{
+        llmq::SelectStagedRecoverySigningWindow(
+            chainlock, btcc, catchup,
+            /*durable_predecessor_height=*/864,
+            *epoch_seven_signing,
+            /*anchor_stably_inactive=*/true)};
+    BOOST_REQUIRE(rolled_epoch_seven);
+    BOOST_CHECK(rolled_epoch_seven->rolls_pending_epoch);
+    BOOST_CHECK_EQUAL(
+        rolled_epoch_seven->window.target_height, *epoch_seven_target);
+
+    const auto rolled_epoch_eleven{
+        llmq::SelectStagedRecoverySigningWindow(
+            chainlock, btcc, catchup,
+            /*durable_predecessor_height=*/864,
+            *epoch_eleven_signing,
+            /*anchor_stably_inactive=*/true)};
+    BOOST_REQUIRE(rolled_epoch_eleven);
+    BOOST_CHECK(rolled_epoch_eleven->rolls_pending_epoch);
+    BOOST_CHECK_EQUAL(
+        rolled_epoch_eleven->window.target_height, *epoch_eleven_target);
 }
 
 BOOST_AUTO_TEST_CASE(payment_audit_signing_height_is_exactly_window_bounded)
@@ -2681,7 +2734,7 @@ BOOST_AUTO_TEST_CASE(deployment_configuration_is_fail_closed)
     BOOST_CHECK(!llmq::MakePQChainLockFinalityStoreConfig(consensus));
 
     consensus = ValidConsensus();
-    consensus.nPQBTCCReceiptAnchorHeight = 2320;
+    consensus.nPQBTCCReceiptAnchorHeight = 2325;
     consensus.hashPQBTCCReceiptAnchorBlock = NonNullHash(5);
     BOOST_CHECK(llmq::MakePQChainLockFinalityStoreConfig(consensus));
 
@@ -2689,7 +2742,7 @@ BOOST_AUTO_TEST_CASE(deployment_configuration_is_fail_closed)
     BOOST_CHECK(llmq::MakePQChainLockFinalityStoreConfig(consensus));
     consensus.nDefaultAssumeValidHeight = 1001;
     BOOST_CHECK(llmq::MakePQChainLockFinalityStoreConfig(consensus));
-    consensus.nDefaultAssumeValidHeight = 2320;
+    consensus.nDefaultAssumeValidHeight = 2325;
     BOOST_CHECK(!llmq::MakePQChainLockFinalityStoreConfig(consensus));
 }
 
@@ -3619,7 +3672,7 @@ BOOST_AUTO_TEST_CASE(chainlock_recovery_survives_operational_kill_switch)
 BOOST_AUTO_TEST_CASE(updated_receipt_anchor_routes_exact_target_to_catchup)
 {
     constexpr int32_t local_best{2305};
-    constexpr int32_t receipt_anchor{2310};
+    constexpr int32_t receipt_anchor{2315};
     constexpr int32_t carrier{receipt_anchor +
                               static_cast<int32_t>(
                                   llmq::pq::PQ_BTCC_NEVM_LAG)};

@@ -702,7 +702,7 @@ class ZMQTest(SyscoinTestFramework):
         predecessor_hash = self.nodes[0].getblockhash(predecessor_height)
         activation_args = [
             '-pqactivationheight=%d' % (predecessor_height + 1),
-            '-pqbtcccandidateorigin=1000000',
+            '-pqbtcccandidateorigin=%d' % (predecessor_height + 1),
             '-pqbtccreceiptanchorheight=%d' % predecessor_height,
             '-pqbtccreceiptanchorblockhash=%s' % predecessor_hash,
             '-pqbtccreceiptanchorcursorheight=-1',

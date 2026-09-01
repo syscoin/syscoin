@@ -40,7 +40,7 @@ inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_PAYMENT_AUDIT_SEAL_CONTEXT_KEY
 
 inline constexpr uint16_t ROSTER_RECOVERY_PRECOMMIT_VERSION{1};
 
-/** The only two admission paths allowed to consume a recovery precommit. */
+/** The only two admission paths allowed to consume a roster precommit. */
 enum class RosterRecoveryAdmission : uint8_t {
     INITIALIZE = 0,
     CURRENT_CATCHUP = 1,
@@ -49,8 +49,11 @@ enum class RosterRecoveryAdmission : uint8_t {
 /**
  * Local signer-safety state, not network verification authority. It is first
  * fsynced as PENDING before the future Bitcoin block exists, then may advance
- * exactly once to READY before any share is produced. Normal roster handoffs
- * live entirely in the best ChainLock certificate and never use this record.
+ * exactly once to READY before any share is produced. INITIALIZE binds a
+ * normal roster seed without recovery authority; CURRENT_CATCHUP binds a
+ * recovery seed and the exact durable recovery authority. Normal roster
+ * handoffs live entirely in the best ChainLock certificate and never use this
+ * record.
  */
 struct RosterRecoveryPrecommit {
     static constexpr std::size_t WIRE_SIZE{
@@ -479,11 +482,11 @@ public:
 
 private:
     /**
-     * The handler alone may abandon an unsigned epoch after obtaining an
-     * opaque Bitcoin-policy proof binding that exact old anchor and exact
-     * active replacement in one stable view. Keeping this outside the public
-     * persistence API prevents generic callers from turning the same-slot
-     * CAS into an epoch-reset primitive.
+     * The handler alone may abandon an unsigned CURRENT_CATCHUP epoch after
+     * obtaining an opaque Bitcoin-policy proof binding that exact old anchor
+     * and exact active replacement in one stable view. INITIALIZE never rolls.
+     * Keeping this outside the public persistence API prevents generic callers
+     * from turning the same-slot CAS into an epoch-reset primitive.
      */
     [[nodiscard]] bool ReplaceStablyInactiveRosterRecoveryPrecommit(
         const RosterRecoveryPrecommit& expected,

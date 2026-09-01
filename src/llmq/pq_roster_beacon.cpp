@@ -396,6 +396,35 @@ bool IsRecoveryRosterBeaconWindow(const RosterBeaconWindow& window) noexcept
     return true;
 }
 
+bool IsInitialNormalRosterBeaconWindow(
+    const RosterBeaconWindow& window) noexcept
+{
+    if (!window.IsStructurallyValid() ||
+        window.active.seeds.back().epoch % ACTIVE_QUORUMS !=
+            ACTIVE_QUORUMS - 1 ||
+        !window.active.recovery_authority_hash.IsNull() ||
+        !window.active.recovery_authority_source.IsNull() ||
+        window.next.anchor_kind != RosterBeaconAnchorKind::NORMAL ||
+        window.next.state != RosterBeaconState::EMPTY) {
+        return false;
+    }
+    const auto& anchor{window.active.seeds.front()};
+    if (!anchor.IsReady() ||
+        anchor.anchor_kind != RosterBeaconAnchorKind::NORMAL) {
+        return false;
+    }
+    for (const auto& seed : window.active.seeds) {
+        if (!seed.IsReady() ||
+            seed.anchor_kind != RosterBeaconAnchorKind::NORMAL ||
+            seed.anchor_cursor != anchor.anchor_cursor ||
+            seed.anchor_btc_height != anchor.anchor_btc_height ||
+            seed.future_btc_hash != anchor.future_btc_hash) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool HasRecoveryRosterBeacon(const RosterBeaconWindow& window) noexcept
 {
     return window.IsStructurallyValid() &&
@@ -425,9 +454,7 @@ bool RosterAuthorizationTransition::IsStructurallyValid() const noexcept
         return false;
     }
     if (kind == RosterAuthorizationTransitionKind::INITIALIZE) {
-        return !previous && IsRecoveryRosterBeaconWindow(new_window) &&
-               new_window.active.recovery_authority_source.kind ==
-                   RecoveryRosterAuthoritySourceKind::ACTIVATION;
+        return !previous && IsInitialNormalRosterBeaconWindow(new_window);
     }
     if (kind == RosterAuthorizationTransitionKind::RECOVER) {
         if (!previous || !previous->IsStructurallyValid() ||

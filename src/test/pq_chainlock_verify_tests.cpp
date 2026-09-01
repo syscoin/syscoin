@@ -61,6 +61,7 @@ ActiveRosterBeaconBundle ReadyBundle(uint32_t first_epoch)
 RosterBeaconWindow RecoveryWindow(uint32_t first_epoch)
 {
     RosterBeaconWindow window;
+    const auto source_bundle{ReadyBundle(first_epoch)};
     auto shared_anchor{ReadySeed(first_epoch)};
     shared_anchor.anchor_kind = RosterBeaconAnchorKind::RECOVERY;
     for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
@@ -70,10 +71,27 @@ RosterBeaconWindow RecoveryWindow(uint32_t first_epoch)
     }
     window.active.recovery_authority_hash = NonNullHash(399'999);
     window.active.recovery_authority_source.kind =
-        RecoveryRosterAuthoritySourceKind::ACTIVATION;
+        RecoveryRosterAuthoritySourceKind::NORMAL_ROSTERS;
     window.active.recovery_authority_source.height = 864;
     window.active.recovery_authority_source.block_hash =
         NonNullHash(400'000);
+    window.active.recovery_authority_source.quorum_context_hash =
+        NonNullHash(400'001);
+    window.active.recovery_authority_source.normal_beacons =
+        source_bundle.seeds;
+    window.next.epoch = first_epoch + ACTIVE_QUORUMS;
+    return window;
+}
+
+RosterBeaconWindow InitializationWindow(uint32_t first_epoch)
+{
+    RosterBeaconWindow window;
+    const auto shared{ReadySeed(first_epoch)};
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        auto seed{shared};
+        seed.epoch = first_epoch + static_cast<uint32_t>(slot);
+        window.active.seeds[slot] = std::move(seed);
+    }
     window.next.epoch = first_epoch + ACTIVE_QUORUMS;
     return window;
 }
@@ -683,7 +701,7 @@ BOOST_AUTO_TEST_CASE(initialization_and_recovery_require_explicit_admission)
     auto statement{fixture->chainlock.statement};
     statement.roster_transition =
         RosterAuthorizationTransitionKind::INITIALIZE;
-    statement.roster_beacons = RecoveryWindow(/*first_epoch=*/0);
+    statement.roster_beacons = InitializationWindow(/*first_epoch=*/0);
 
     RosterAuthorizationVerificationContext initialize;
     initialize.admission = RosterAuthorizationAdmission::INITIALIZE;
@@ -705,6 +723,7 @@ BOOST_AUTO_TEST_CASE(initialization_and_recovery_require_explicit_admission)
 
     statement.roster_transition =
         RosterAuthorizationTransitionKind::RECOVER;
+    statement.roster_beacons = RecoveryWindow(/*first_epoch=*/0);
     auto recover{initialize};
     recover.admission = RosterAuthorizationAdmission::RECOVER;
     recover.previous = fixture->authorization.previous;

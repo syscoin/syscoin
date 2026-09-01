@@ -1607,9 +1607,8 @@ private:
         const pq::FinalChainLockRecordMetadata* prior) const;
     [[nodiscard]] pq::RecoveryRosterAuthorityPtr
     DeriveRecoveryRosterAuthority(
-        pq::RosterAuthorizationTransitionKind transition,
         const CBlockIndex& candidate,
-        const pq::FinalChainLockRecordMetadata* prior,
+        const pq::FinalChainLockRecordMetadata& prior,
         const pq::FrozenQuorumRosterCachePtr& roster_cache,
         pq::RecoveryRosterAuthoritySource* source_out = nullptr,
         pq::QuorumBuildError* error = nullptr) const;

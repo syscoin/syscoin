@@ -236,18 +236,6 @@ BuildActiveFrozenQuorumRosters(
     const uint256& source_quorum_context_hash,
     const VerifiedRosterSet& roster_set);
 
-/** Build bootstrap recovery membership from the exact activation predecessor. */
-[[nodiscard]] RecoveryRosterAuthorityPtr
-BuildInitialRecoveryRosterAuthority(
-    const uint256& genesis_hash,
-    const QuorumBuildConfig& config,
-    int32_t target_height,
-    const CBlockIndex& branch_tip,
-    int32_t activation_predecessor_height,
-    const uint256& activation_predecessor_hash,
-    const QuorumSnapshotLookup& snapshot_lookup,
-    QuorumBuildError* error = nullptr);
-
 /** Reproduce fixed recovery membership from its signed non-recursive source. */
 [[nodiscard]] RecoveryRosterAuthorityPtr
 BuildRecoveryRosterAuthorityFromSource(

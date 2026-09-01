@@ -503,8 +503,11 @@ For epoch `e`:
    base, and configuration checks ensure that every roster active at the first
    eligible target is already authorized by that predecessor height.
 3. Load the deterministic masternode list at the snapshot.
-4. Use the existing deterministic score ordering, with the epoch base block
-   hash as modifier, to select 400 roster slots.
+4. Use the existing deterministic score ordering with a domain-separated
+   modifier that commits the frozen roster snapshot, epoch, canonical BTCPREV
+   anchor, and delayed Bitcoin `H+37` hash to select 400 roster slots. The
+   miner-influenced epoch-base block hash remains descriptor context but is
+   deliberately excluded from the score modifier.
 5. For every slot, resolve the child-root metadata already frozen at the
    independent registration cutoff from the exact PQ-registry state at the
    roster snapshot.
@@ -785,10 +788,18 @@ and cursor floor. `S` may be older than `P`; the normal authorization transition
 is derived exactly from `S`, while schedule geometry is checked against `P`.
 This prevents multiple valid target heights in one declared-predecessor view
 without making a missed unsigned round permanent.
-Before the first winner, the predecessor height is `A-1`, its hash is obtained
-from the fully validated candidate branch, and its BTCC cursor is canonically
-null. The deployment therefore requires `A-1` to precede the first BTCC
-candidate source rather than silently inventing cursor state at activation.
+Before the first winner, the only admissible target is the first eligible
+target after `A-1`, which configuration also requires to be the canonical
+phase-3 BTCC target. Its predecessor hash is obtained from the fully validated
+candidate branch and its predecessor BTCC cursor is canonically null. The four
+initial roster snapshots and registration cutoffs are at or below `A-1`; all
+four ordinary `NORMAL` roster seeds use that one target's exact BTCPREV anchor
+and its real Bitcoin `H+37` hash. Initialization has no fixed activation
+authority, no alternate target or seed menu, and no epoch rollover. A pending
+initializer may follow a same-height active-branch replacement before it is
+READY, but after READY it remains bound to the exact target block and Bitcoin
+range. If the first certificate is delayed, base-chain mining and most-work
+fork choice continue while initialization remains pinned to that target.
 
 A distinct current `CATCHUP` admission handles a fresh node, a node that missed
 one or more certificates, or the rolling recovery statement above. It is
@@ -1549,15 +1560,17 @@ The boundary has deliberately narrow meaning:
   Its signed predecessor and target ancestry bind the actual branch. Invalid,
   incomplete, or merely first-seen data cannot pin a hash.
 - If finality is unavailable at activation, base-chain mining and fork choice
-  continue. Current-window catch-up can establish the first durable winner
-  later; a missed signing window does not permanently disable `LIVE`.
+  continue. The initializer remains pinned to the first target and may finish
+  once its real Bitcoin `H+37` value and threshold shares are available; it
+  cannot roll to a later attacker-selectable roster. The rolling `RECOVER`
+  path exists only after a durable PQ winner already exists.
 - Destructive DMN/PQ history GC is disabled until a durable enforced winner
   exists. Thereafter normal branch snapshots, inverse undo, rooted checkpoint
   segments, and restart journals provide the authenticated pruning boundary.
 
 Configuration checks require `A > 0`, `A >= DIP3`, registry preparation
-strictly before `A`, complete bootstrap-roster authorization by `A-1`, and the first
-BTCC candidate source strictly after `A-1`. Regtest exposes only
+strictly before `A`, complete bootstrap-roster authorization by `A-1`, and the
+first target after `A-1` to be the canonical phase-3 BTCC target. Regtest exposes only
 `-pqactivationheight`; there are no migration block-hash or state-root options.
 Public-network overrides remain forbidden and activation is release-disabled
 until a complete profile is compiled for that network.
@@ -1715,7 +1728,8 @@ operators time to install the activation release. The profile fixes only the
 height, schedules, roster parameters, and separate receipt assumption `R`; it
 does not predict a future block hash or state root. `A-1` must cover every
 initial roster authorization point and precede the first BTCC candidate source.
-`defaultAssumeValid` must remain below both `A` and `R`.
+`defaultAssumeValid` must remain below both `A` and `R`. All four initial
+registration cutoffs and roster snapshots must be at or below `A-1`.
 
 The boundary is unambiguous:
 
@@ -1725,9 +1739,11 @@ The boundary is unambiguous:
   `A`;
 - block `A` is the first block requiring PQ-only authorization and
   root-qualified payments; and
-- the first normal ChainLock target uses the actual active-branch block at
-  `A-1` as predecessor. A later catch-up target remains possible if the first
-  signing windows are missed.
+- the first normal ChainLock target is the unique first eligible target after
+  `A-1`, uses the actual active-branch block at `A-1` as predecessor, and builds
+  its four ordinary rosters from one exact BTCPREV/Bitcoin-`H+37` seed. It does
+  not roll to a later target. Later rolling recovery is available only after a
+  durable PQ winner exists.
 
 ### Stage D: final BLS-free activation release
 
@@ -2123,12 +2139,17 @@ Expected failures are fail-closed:
 - Before the first winner, accept the valid-most-work branch without a
   configured hash; prove that first-seen invalid data cannot pin `A-1`, while a
   fully verified durable certificate binds its candidate ancestry.
+- Prove that `INITIALIZE` accepts only the first canonical post-`A-1` target,
+  uses four ordinary pre-activation frozen snapshots with one exact delayed
+  Bitcoin seed, rejects activation authority and alternate targets, and never
+  rolls epochs. Separately prove that durable-prior `RECOVER` still rolls only
+  after its pending Bitcoin anchor is stably inactive.
 - Exercise higher-work pre-winner reorgs with `-checkpoints=0`, normal sync,
   headers-first sync, reindex, `-reindex-chainstate`, VerifyDB, roll-forward,
   and restart. After a winner is enforced, conflicting ancestry is rejected.
 - Reject `A <= 0`, `A < DIP3`, preparation at or after `A`, `A-1` before an initial
-  roster authorization point, a BTCC candidate source at or before `A-1`, and
-  a non-null initial predecessor cursor.
+  roster authorization point, a first post-`A-1` target that is not the
+  canonical phase-3 BTCC target, and a non-null initial predecessor cursor.
 - Differential replay below `A`: a legacy BLS build and opaque-codec build must
   produce identical transaction/block hashes, deterministic MN state, and PoSe
   state without consulting a release-pinned state root.

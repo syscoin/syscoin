@@ -1064,8 +1064,9 @@ class MasternodeInfo:
 
 class DashTestFramework(SyscoinTestFramework):
     PQ_ACTIVATION_PREDECESSOR_HEIGHT = 2304
-    # Generic MN/governance tests do not exercise AuxPoW/BTCC carriers.
-    PQ_BTCC_CANDIDATE_ORIGIN = 1_000_000
+    # Generic MN/governance tests do not exercise non-null BTCC receipts, but
+    # complete activation geometry still starts the canonical candidate here.
+    PQ_BTCC_CANDIDATE_ORIGIN = 2305
 
     def add_wallet_options(self, parser, *, descriptors=True, legacy=True):
         # Dash/MN functional tests are descriptor-only.

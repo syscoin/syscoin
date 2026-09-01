@@ -194,17 +194,11 @@ bool RecoveryRosterAuthoritySource::IsNull() const noexcept
 
 bool RecoveryRosterAuthoritySource::IsStructurallyValid() const noexcept
 {
-    const bool default_beacons{std::all_of(
-        normal_beacons.begin(), normal_beacons.end(),
-        [](const RosterBeaconSeed& seed) {
-            return seed == RosterBeaconSeed{};
-        })};
     switch (kind) {
     case RecoveryRosterAuthoritySourceKind::NONE:
         return IsNull();
     case RecoveryRosterAuthoritySourceKind::ACTIVATION:
-        return height >= 0 && !block_hash.IsNull() &&
-               quorum_context_hash.IsNull() && default_beacons;
+        return false;
     case RecoveryRosterAuthoritySourceKind::NORMAL_ROSTERS:
         if (height < 0 || block_hash.IsNull() ||
             quorum_context_hash.IsNull() ||

@@ -19,7 +19,7 @@ from test_framework.util import (
 class PQOperatorLifecycleTest(SyscoinTestFramework):
     CHAINLOCK_SEED = "11" * 32
     ACTIVATION_PREDECESSOR_HEIGHT = 2304
-    BTCC_CANDIDATE_ORIGIN = 2315
+    BTCC_CANDIDATE_ORIGIN = 2305
 
     def add_options(self, parser):
         self.add_wallet_options(parser, descriptors=True, legacy=False)

@@ -62,18 +62,20 @@ RosterBeaconWindow ReadyWindow(int32_t height)
     return window;
 }
 
-RosterBeaconWindow RecoveryWindow(int32_t height)
+RosterBeaconWindow InitializationWindow(int32_t height)
 {
-    auto window{ReadyWindow(height)};
-    for (auto& seed : window.active.seeds) {
-        seed.anchor_kind = RosterBeaconAnchorKind::RECOVERY;
+    RosterBeaconWindow window;
+    const auto schedule{MakeChainLockScheduleConfig(0)};
+    BOOST_REQUIRE(schedule);
+    const auto active{ActiveEpochsAtHeight(*schedule, height)};
+    BOOST_REQUIRE(active);
+    const auto shared{ReadySeed(active->front().epoch)};
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        auto seed{shared};
+        seed.epoch = (*active)[slot].epoch;
+        window.active.seeds[slot] = std::move(seed);
     }
-    window.active.recovery_authority_hash = NonNullHash(399'999);
-    window.active.recovery_authority_source.kind =
-        RecoveryRosterAuthoritySourceKind::ACTIVATION;
-    window.active.recovery_authority_source.height = 864;
-    window.active.recovery_authority_source.block_hash =
-        NonNullHash(400'000);
+    window.next.epoch = active->back().epoch + 1;
     return window;
 }
 
@@ -622,7 +624,7 @@ BOOST_AUTO_TEST_CASE(reset_capability_crosses_only_the_fully_verified_store_seam
     auto rejected{MakeChainLock(865, 864, NonNullHash(864), 31)};
     rejected.statement.roster_transition =
         RosterAuthorizationTransitionKind::INITIALIZE;
-    rejected.statement.roster_beacons = RecoveryWindow(865);
+    rejected.statement.roster_beacons = InitializationWindow(865);
     auto prepared{store.PrepareCandidate(rejected)};
     BOOST_REQUIRE(prepared);
     ChainLockFinalityError error{ChainLockFinalityError::NONE};
@@ -634,7 +636,7 @@ BOOST_AUTO_TEST_CASE(reset_capability_crosses_only_the_fully_verified_store_seam
     auto accepted{MakeChainLock(865, 864, NonNullHash(864), 32)};
     accepted.statement.roster_transition =
         RosterAuthorizationTransitionKind::INITIALIZE;
-    accepted.statement.roster_beacons = RecoveryWindow(865);
+    accepted.statement.roster_beacons = InitializationWindow(865);
     prepared = store.PrepareCandidate(accepted, &error);
     BOOST_REQUIRE(prepared);
     BOOST_CHECK(!store.AcceptVerified(

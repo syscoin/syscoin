@@ -195,7 +195,7 @@ BOOST_FIXTURE_TEST_CASE(
     consensus.nPQRosterSnapshotLag = 288;
     consensus.nPQFutureHorizonEpochs = 8;
     consensus.nPQActivationHeight = 2'305;
-    consensus.nPQBTCCCandidateOrigin = 2'310;
+    consensus.nPQBTCCCandidateOrigin = 2'305;
     consensus.nPQBTCCNEVMInjectionLag =
         static_cast<int>(llmq::pq::PQ_BTCC_NEVM_LAG);
     consensus.nPQBTCCReceiptAnchorHeight = 1'000;
@@ -1634,7 +1634,7 @@ BOOST_FIXTURE_TEST_CASE(
     consensus.hashPQBTCCReceiptAnchorState.SetNull();
     // No carrier is reached by this test. Enabling the valid schedule still
     // makes ordinary block connection commit the canonical probation root.
-    consensus.nPQBTCCCandidateOrigin = 3'750;
+    consensus.nPQBTCCCandidateOrigin = 3'745;
     BOOST_REQUIRE(llmq::MakePQChainLockFinalityStoreConfig(consensus));
 
     mineBlocks(1);
@@ -1839,7 +1839,7 @@ BOOST_FIXTURE_TEST_CASE(
     consensus.nPQRegistrationCutoffBlocks = 288;
     consensus.nPQRosterSnapshotLag = 288;
     consensus.nPQFutureHorizonEpochs = 8;
-    consensus.nPQBTCCCandidateOrigin = 2'310;
+    consensus.nPQBTCCCandidateOrigin = 2'305;
     consensus.nPQBTCCNEVMInjectionLag =
         static_cast<int>(llmq::pq::PQ_BTCC_NEVM_LAG);
     consensus.nPQActivationHeight = 2'305;
@@ -1913,28 +1913,6 @@ BOOST_FIXTURE_TEST_CASE(
     const auto active_epochs{llmq::pq::ActiveEpochsAtHeight(
         config->chainlock_schedule, winner.statement.height)};
     BOOST_REQUIRE(active_epochs);
-    auto recovery_authority{
-        std::make_shared<llmq::pq::RecoveryRosterAuthority>()};
-    for (std::size_t slot{0}; slot < llmq::pq::ACTIVE_QUORUMS; ++slot) {
-        for (std::size_t member{0}; member < llmq::pq::QUORUM_SIZE; ++member) {
-            auto& entry{recovery_authority->slots[slot][member]};
-            entry.pro_tx_hash = GetRandHash();
-            entry.eligible = member < llmq::pq::QUORUM_MIN_VALID;
-            if (entry.eligible) {
-                llmq::pq::RecoveryRosterChildCommitment child_root;
-                child_root.global_key_version = 1;
-                child_root.commitment.generation = 1;
-                child_root.commitment.tree_id = GetRandHash();
-                child_root.commitment.root = GetRandHash();
-                entry.child_root = std::move(child_root);
-            }
-        }
-    }
-    BOOST_REQUIRE(recovery_authority->IsStructurallyValid());
-    const auto recovery_authority_hash{
-        llmq::pq::GetRecoveryRosterAuthorityHash(
-            consensus.hashGenesisBlock, *recovery_authority)};
-    BOOST_REQUIRE(recovery_authority_hash);
     const llmq::pq::BTCCursor recovery_cursor{
         winner.statement.height, winner.statement.block_hash, GetRandHash()};
     uint256 recovery_future_hash{GetRandHash()};
@@ -1943,21 +1921,13 @@ BOOST_FIXTURE_TEST_CASE(
     }
     for (std::size_t slot{0}; slot < llmq::pq::ACTIVE_QUORUMS; ++slot) {
         auto& seed{winner.statement.roster_beacons.active.seeds[slot]};
-        seed.anchor_kind = llmq::pq::RosterBeaconAnchorKind::RECOVERY;
+        seed.anchor_kind = llmq::pq::RosterBeaconAnchorKind::NORMAL;
         seed.state = llmq::pq::RosterBeaconState::READY;
         seed.epoch = (*active_epochs)[slot].epoch;
         seed.anchor_cursor = recovery_cursor;
         seed.anchor_btc_height = 800'000;
         seed.future_btc_hash = recovery_future_hash;
     }
-    winner.statement.roster_beacons.active.recovery_authority_hash =
-        *recovery_authority_hash;
-    auto& recovery_source{
-        winner.statement.roster_beacons.active.recovery_authority_source};
-    recovery_source.kind =
-        llmq::pq::RecoveryRosterAuthoritySourceKind::ACTIVATION;
-    recovery_source.height = activation_predecessor->nHeight;
-    recovery_source.block_hash = activation_predecessor->GetBlockHash();
     winner.statement.roster_beacons.next.epoch =
         active_epochs->back().epoch + 1;
     winner.statement.accepted_btcc_cursor = recovery_cursor;
@@ -2007,8 +1977,7 @@ BOOST_FIXTURE_TEST_CASE(
                 .wipe_data = true,
             },
             consensus.hashGenesisBlock, *config};
-        BOOST_REQUIRE(persistence.PersistInitializedBest(
-            winner, nullptr, recovery_authority));
+        BOOST_REQUIRE(persistence.PersistInitializedBest(winner));
     }
     {
         LOCK(::cs_main);

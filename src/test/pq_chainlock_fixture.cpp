@@ -514,32 +514,6 @@ OperatorKeyState MakeOperatorState(
     return state;
 }
 
-OperatorKeyState MakeRecoveryAuthorityOperatorState(
-    const uint256& genesis_hash,
-    const QuorumBuildConfig& build_config,
-    const std::vector<scheduled_wots::PublicKey>& public_keys,
-    const uint256& pro_tx_hash,
-    const std::array<EpochIdentity, ACTIVE_QUORUMS>& epochs,
-    int32_t snapshot_height,
-    std::size_t member_index)
-{
-    auto state{MakeOperatorState(
-        genesis_hash, build_config, public_keys, pro_tx_hash,
-        epochs.back().epoch, snapshot_height, member_index)};
-    if (!state.IsStructurallyValid()) return {};
-
-    state.frozen_child_roots.clear();
-    for (const auto& identity : epochs) {
-        auto authorization{MakeAuthorization(
-            genesis_hash, public_keys, pro_tx_hash,
-            identity.epoch, member_index)};
-        authorization.record.global_key_version = identity.epoch + 1;
-        state.frozen_child_roots.push_back(
-            std::move(authorization.record));
-    }
-    return state;
-}
-
 bool GenerateMemberKeys(
     std::vector<scheduled_wots::PublicKey>& public_keys,
     std::vector<std::optional<scheduled_wots::SecretKey>>& secret_keys,
@@ -645,57 +619,6 @@ bool PopulatePaymentAuditSnapshots(PaymentAuditFixture& fixture)
         !fixture.chain.SetExactHash(source.height, source.block_hash)) {
         return false;
     }
-    if (source.kind == RecoveryRosterAuthoritySourceKind::ACTIVATION) {
-        const auto authority_target{NextEligibleChainLockTargetHeight(
-            fixture.args.build_config.schedule, source.height)};
-        const auto authority_epochs{authority_target
-            ? ActiveEpochsAtHeight(fixture.args.build_config.schedule,
-                                   *authority_target)
-            : std::optional<
-                  std::array<EpochIdentity, ACTIVE_QUORUMS>>{}};
-        if (!authority_epochs ||
-            authority_epochs->back().epoch >= MAX_FIXTURE_EPOCHS) {
-            return false;
-        }
-
-        test::FixtureSnapshot authority_snapshot;
-        authority_snapshot.branch_point = {source.height,
-                                           source.block_hash};
-        authority_snapshot.state.deterministic_mns =
-            Snapshot(source.height, source.block_hash);
-        auto authority_states{
-            std::make_shared<std::vector<OperatorKeyState>>()};
-        authority_states->reserve(QUORUM_MIN_VALID);
-        for (std::size_t member{0}; member < QUORUM_MIN_VALID;
-             ++member) {
-            const uint256 pro_tx_hash{NonNullHash(10'000 + member)};
-            auto state{MakeRecoveryAuthorityOperatorState(
-                fixture.args.genesis_hash, fixture.args.build_config,
-                fixture.public_keys, pro_tx_hash, *authority_epochs,
-                source.height, member)};
-            if (!state.IsStructurallyValid()) return false;
-            authority_states->push_back(std::move(state));
-        }
-        authority_snapshot.state.operator_key_states =
-            std::move(authority_states);
-
-        const auto existing{std::find_if(
-            fixture.snapshot_fixture.snapshots.begin(),
-            fixture.snapshot_fixture.snapshots.end(),
-            [&](const test::FixtureSnapshot& snapshot) {
-                return snapshot.branch_point.height == source.height;
-            })};
-        if (existing != fixture.snapshot_fixture.snapshots.end()) {
-            if (existing->branch_point.block_hash != source.block_hash) {
-                return false;
-            }
-            *existing = std::move(authority_snapshot);
-        } else {
-            fixture.snapshot_fixture.snapshots.push_back(
-                std::move(authority_snapshot));
-        }
-    }
-
     const auto recovery_target{NextEligibleChainLockTargetHeight(
         fixture.args.build_config.schedule,
         fixture.args.response_predecessor_height)};
@@ -1234,7 +1157,7 @@ bool BuildSnapshotsAndRosters(FullDimensionFixture& fixture)
                                fixture.args.target_btc_hash};
         for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
             RosterBeaconSeed seed;
-            seed.anchor_kind = RosterBeaconAnchorKind::RECOVERY;
+            seed.anchor_kind = RosterBeaconAnchorKind::NORMAL;
             seed.state = RosterBeaconState::READY;
             seed.epoch = (*active_epochs)[slot].epoch;
             seed.anchor_cursor = cursor;
@@ -1293,83 +1216,18 @@ bool BuildSnapshotsAndRosters(FullDimensionFixture& fixture)
         })};
     RecoveryRosterAuthorityPtr recovery_authority;
     if (has_recovery_seed) {
-        RecoveryRosterAuthoritySource authority_source;
-        if (fixture.args.authorizer) {
-            authority_source = beacon_window.active.recovery_authority_source;
-        } else {
-            authority_source.kind =
-                RecoveryRosterAuthoritySourceKind::ACTIVATION;
-            authority_source.height = fixture.args.predecessor_height;
-            authority_source.block_hash = fixture.args.predecessor_hash;
+        if (!fixture.args.authorizer) {
+            std::cerr << "recovery roster requires an authorizing statement\n";
+            return false;
         }
+        const RecoveryRosterAuthoritySource authority_source{
+            beacon_window.active.recovery_authority_source};
         if (!authority_source.IsStructurallyValid() ||
             authority_source.IsNull() ||
             !fixture.chain.SetExactHash(
                 authority_source.height, authority_source.block_hash)) {
             std::cerr << "invalid recovery authority source\n";
             return false;
-        }
-
-        if (authority_source.kind ==
-            RecoveryRosterAuthoritySourceKind::ACTIVATION) {
-            const auto authority_target{NextEligibleChainLockTargetHeight(
-                fixture.args.build_config.schedule,
-                authority_source.height)};
-            const auto authority_epochs{authority_target
-                ? ActiveEpochsAtHeight(
-                      fixture.args.build_config.schedule,
-                      *authority_target)
-                : std::optional<
-                      std::array<EpochIdentity, ACTIVE_QUORUMS>>{}};
-            if (!authority_epochs ||
-                authority_epochs->back().epoch >= MAX_FIXTURE_EPOCHS) {
-                std::cerr << "invalid recovery authority epochs\n";
-                return false;
-            }
-
-            test::FixtureSnapshot authority_snapshot;
-            authority_snapshot.branch_point = {
-                authority_source.height, authority_source.block_hash};
-            authority_snapshot.state.deterministic_mns = Snapshot(
-                authority_source.height, authority_source.block_hash);
-            auto authority_states{
-                std::make_shared<std::vector<OperatorKeyState>>()};
-            authority_states->reserve(QUORUM_MIN_VALID);
-            for (std::size_t member{0};
-                 member < QUORUM_MIN_VALID; ++member) {
-                const uint256 pro_tx_hash{NonNullHash(10'000 + member)};
-                auto state{MakeRecoveryAuthorityOperatorState(
-                    fixture.args.genesis_hash,
-                    fixture.args.build_config, fixture.public_keys,
-                    pro_tx_hash, *authority_epochs,
-                    authority_source.height, member)};
-                if (!state.IsStructurallyValid()) {
-                    std::cerr << "invalid recovery authority operator state\n";
-                    return false;
-                }
-                authority_states->push_back(std::move(state));
-            }
-            authority_snapshot.state.operator_key_states =
-                std::move(authority_states);
-
-            const auto existing{std::find_if(
-                fixture.snapshot_fixture.snapshots.begin(),
-                fixture.snapshot_fixture.snapshots.end(),
-                [&](const test::FixtureSnapshot& snapshot) {
-                    return snapshot.branch_point.height ==
-                           authority_source.height;
-                })};
-            if (existing != fixture.snapshot_fixture.snapshots.end()) {
-                if (existing->branch_point.block_hash !=
-                    authority_source.block_hash) {
-                    std::cerr << "conflicting recovery authority snapshot\n";
-                    return false;
-                }
-                *existing = std::move(authority_snapshot);
-            } else {
-                fixture.snapshot_fixture.snapshots.push_back(
-                    std::move(authority_snapshot));
-            }
         }
 
         const auto snapshot_lookup = [&](const CBlockIndex& index)

@@ -373,7 +373,7 @@ class DIP3Test(SyscoinTestFramework):
             if arg != '-pqfinalitypreparation=1'
         ] + [
             '-pqactivationheight=%d' % (predecessor_height + 1),
-            '-pqbtcccandidateorigin=1000000',
+            '-pqbtcccandidateorigin=%d' % (predecessor_height + 1),
             '-pqbtccreceiptanchorheight=%d' % predecessor_height,
             '-pqbtccreceiptanchorblockhash=%s' % predecessor_hash,
             '-pqbtccreceiptanchorcursorheight=-1',

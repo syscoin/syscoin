@@ -28,11 +28,7 @@ bool RosterRecoveryPrecommit::IsStructurallyValid() const noexcept
     if (version != ROSTER_RECOVERY_PRECOMMIT_VERSION ||
         (admission != RosterRecoveryAdmission::INITIALIZE &&
          admission != RosterRecoveryAdmission::CURRENT_CATCHUP) ||
-        recovery_authority_hash.IsNull() ||
-        recovery_authority_source.IsNull() ||
-        !recovery_authority_source.IsStructurallyValid() ||
         !pending_seed.IsStructurallyValid() ||
-        pending_seed.anchor_kind != RosterBeaconAnchorKind::RECOVERY ||
         (pending_seed.state != RosterBeaconState::PENDING &&
          !pending_seed.IsReady()) ||
         pending_seed.epoch % ACTIVE_QUORUMS != ACTIVE_QUORUMS - 1) {
@@ -40,15 +36,18 @@ bool RosterRecoveryPrecommit::IsStructurallyValid() const noexcept
     }
     if (admission == RosterRecoveryAdmission::INITIALIZE) {
         return predecessor_height == -1 && predecessor_hash.IsNull() &&
-               recovery_authority_source.kind ==
-                   RecoveryRosterAuthoritySourceKind::ACTIVATION;
+               recovery_authority_hash.IsNull() &&
+               recovery_authority_source.IsNull() &&
+               pending_seed.anchor_kind == RosterBeaconAnchorKind::NORMAL;
     }
     return predecessor_height >= 0 && !predecessor_hash.IsNull() &&
-           pending_seed.anchor_cursor.sys_height > predecessor_height &&
-           (recovery_authority_source.kind ==
-                RecoveryRosterAuthoritySourceKind::ACTIVATION ||
-            recovery_authority_source.kind ==
-                RecoveryRosterAuthoritySourceKind::NORMAL_ROSTERS);
+           !recovery_authority_hash.IsNull() &&
+           !recovery_authority_source.IsNull() &&
+           recovery_authority_source.IsStructurallyValid() &&
+           recovery_authority_source.kind ==
+               RecoveryRosterAuthoritySourceKind::NORMAL_ROSTERS &&
+           pending_seed.anchor_kind == RosterBeaconAnchorKind::RECOVERY &&
+           pending_seed.anchor_cursor.sys_height > predecessor_height;
 }
 
 uint256 GetRosterRecoveryPrecommitRolloverContextId(
@@ -57,7 +56,10 @@ uint256 GetRosterRecoveryPrecommitRolloverContextId(
     const RosterRecoveryPrecommit& replacement)
 {
     if (genesis_hash.IsNull() || !expected.IsStructurallyValid() ||
-        !replacement.IsStructurallyValid()) {
+        !replacement.IsStructurallyValid() ||
+        expected.admission != RosterRecoveryAdmission::CURRENT_CATCHUP ||
+        replacement.admission !=
+            RosterRecoveryAdmission::CURRENT_CATCHUP) {
         return {};
     }
     auto normalized_replacement{replacement};
@@ -1081,12 +1083,13 @@ bool IsValidRosterRecoveryPrecommit(
               config.chainlock_schedule, config.btcc_schedule,
               *anchor_epoch)
         : std::optional<int32_t>{}};
+    const auto initial_target{NextEligibleChainLockTargetHeight(
+        config.chainlock_schedule,
+        config.activation_predecessor_height)};
     return precommit.IsStructurallyValid() &&
            (precommit.admission != RosterRecoveryAdmission::INITIALIZE ||
-            (precommit.recovery_authority_source.kind ==
-                 RecoveryRosterAuthoritySourceKind::ACTIVATION &&
-             precommit.recovery_authority_source.height ==
-                 config.activation_predecessor_height)) &&
+            (initial_target &&
+             pending_seed.anchor_cursor.sys_height == *initial_target)) &&
            pending_seed.anchor_cursor.sys_height >
                config.activation_predecessor_height &&
            IsEligibleChainLockTarget(
@@ -1150,12 +1153,12 @@ bool IsExactRecoveryStatement(
     RosterRecoveryAdmission expected_admission) noexcept
 {
     if (!chainlock.IsStructurallyValid() ||
-        chainlock.statement.btcc_advance != BTCCAdvance::ADVANCE ||
-        !IsRecoveryRosterBeaconWindow(chainlock.statement.roster_beacons)) {
+        chainlock.statement.btcc_advance != BTCCAdvance::ADVANCE) {
         return false;
     }
+    const auto& window{chainlock.statement.roster_beacons};
     const auto& ready{
-        chainlock.statement.roster_beacons.active.seeds.back()};
+        window.active.seeds.back()};
     if (!ready.IsReady() ||
         ready.anchor_cursor.sys_height != chainlock.statement.height ||
         ready.anchor_cursor.sys_hash != chainlock.statement.block_hash ||
@@ -1164,10 +1167,12 @@ bool IsExactRecoveryStatement(
     }
     if (expected_admission == RosterRecoveryAdmission::INITIALIZE) {
         return chainlock.statement.roster_transition ==
-               RosterAuthorizationTransitionKind::INITIALIZE;
+                   RosterAuthorizationTransitionKind::INITIALIZE &&
+               IsInitialNormalRosterBeaconWindow(window);
     }
     return chainlock.statement.roster_transition ==
-           RosterAuthorizationTransitionKind::RECOVER;
+               RosterAuthorizationTransitionKind::RECOVER &&
+           IsRecoveryRosterBeaconWindow(window);
 }
 
 bool DoesRecoveryPrecommitMatchBest(
@@ -1176,7 +1181,9 @@ bool DoesRecoveryPrecommitMatchBest(
 {
     if (precommit.admission == RosterRecoveryAdmission::INITIALIZE) {
         return !best && precommit.predecessor_height == -1 &&
-               precommit.predecessor_hash.IsNull();
+               precommit.predecessor_hash.IsNull() &&
+               precommit.recovery_authority_hash.IsNull() &&
+               precommit.recovery_authority_source.IsNull();
     }
     if (!best ||
         precommit.predecessor_height !=
@@ -1231,14 +1238,24 @@ bool DoesRecoveryCertificateMatchPrecommit(
     const uint256& next_authority_hash) noexcept
 {
     if (!DoesRecoveryPrecommitMatchBest(precommit, durable_best) ||
-        !IsExactRecoveryStatement(chainlock, precommit.admission) ||
-        next_authority_hash.IsNull() ||
-        precommit.recovery_authority_hash != next_authority_hash ||
-        chainlock.statement.roster_beacons.active
-                .recovery_authority_hash != next_authority_hash ||
-        precommit.recovery_authority_source !=
-            chainlock.statement.roster_beacons.active
-                .recovery_authority_source) {
+        !IsExactRecoveryStatement(chainlock, precommit.admission)) {
+        return false;
+    }
+    const auto& next_bundle{
+        chainlock.statement.roster_beacons.active};
+    if (precommit.admission == RosterRecoveryAdmission::INITIALIZE) {
+        if (!next_authority_hash.IsNull() ||
+            !precommit.recovery_authority_hash.IsNull() ||
+            !precommit.recovery_authority_source.IsNull() ||
+            !next_bundle.recovery_authority_hash.IsNull() ||
+            !next_bundle.recovery_authority_source.IsNull()) {
+            return false;
+        }
+    } else if (next_authority_hash.IsNull() ||
+               precommit.recovery_authority_hash != next_authority_hash ||
+               next_bundle.recovery_authority_hash != next_authority_hash ||
+               precommit.recovery_authority_source !=
+                   next_bundle.recovery_authority_source) {
         return false;
     }
     const auto& ready{
@@ -1350,7 +1367,27 @@ struct PQChainLockPersistence::Impl {
         const auto next_target{NextEligibleChainLockTargetHeight(
             config.chainlock_schedule,
             statement.previous_chainlock_height)};
-        return next_target && statement.height == *next_target &&
+        const auto initializer_epoch{EpochForHeight(
+            config.chainlock_schedule, statement.height)};
+        const auto initializer_target{initializer_epoch
+            ? CanonicalRosterRecoveryTargetHeight(
+                  config.chainlock_schedule, config.btcc_schedule,
+                  *initializer_epoch)
+            : std::optional<int32_t>{}};
+        const bool exact_initializer{
+            statement.roster_transition !=
+                RosterAuthorizationTransitionKind::INITIALIZE ||
+            (statement.previous_chainlock_height ==
+                 config.activation_predecessor_height &&
+             initializer_epoch && initializer_target &&
+             statement.roster_beacons.active.seeds.back().epoch ==
+                 *initializer_epoch &&
+             statement.height == *initializer_target &&
+             IsExactRecoveryStatement(
+                 record.chainlock,
+                 RosterRecoveryAdmission::INITIALIZE))};
+        return exact_initializer && next_target &&
+               statement.height == *next_target &&
                statement.height > config.activation_predecessor_height &&
                statement.previous_chainlock_height >= config.activation_predecessor_height &&
                (statement.previous_chainlock_height != config.activation_predecessor_height ||
@@ -2680,7 +2717,11 @@ struct PQChainLockPersistence::Impl {
             new_seed.epoch)};
         const uint64_t first_disjoint_epoch{
             static_cast<uint64_t>(old_seed.epoch) + ACTIVE_QUORUMS};
-        if (old_seed.state != RosterBeaconState::PENDING ||
+        if (expected.admission !=
+                RosterRecoveryAdmission::CURRENT_CATCHUP ||
+            replacement.admission !=
+                RosterRecoveryAdmission::CURRENT_CATCHUP ||
+            old_seed.state != RosterBeaconState::PENDING ||
             new_seed.state != RosterBeaconState::PENDING ||
             !inactive_anchor_authorized ||
             !IsValidRosterRecoveryPrecommit(config, replacement) ||

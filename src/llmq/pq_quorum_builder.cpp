@@ -17,9 +17,6 @@
 namespace llmq::pq {
 namespace {
 
-constexpr std::string_view INITIAL_RECOVERY_AUTHORITY_MODIFIER_DOMAIN{
-    "SYS_PQ_INITIAL_RECOVERY_AUTHORITY_MODIFIER_V1"};
-
 struct ScoredMember {
     arith_uint256 score;
     CDeterministicMNCPtr dmn;
@@ -110,18 +107,6 @@ bool PrepareOperatorStateLookup(
 void SetBit(QuorumBitmap& bitmap, std::size_t member)
 {
     bitmap[member / 8] |= static_cast<uint8_t>(uint8_t{1} << (member % 8));
-}
-
-template <typename... Args>
-uint256 AuthorityTaggedHash(std::string_view domain,
-                            const uint256& genesis_hash,
-                            const Args&... args)
-{
-    CHashWriter writer{SER_GETHASH, 0};
-    writer.write(AsBytes(Span{domain.data(), domain.size()}));
-    writer << genesis_hash;
-    (writer << ... << args);
-    return writer.GetHash();
 }
 
 template <typename ResolveChildRoot>
@@ -737,163 +722,6 @@ RecoveryRosterAuthorityPtr CreateRecoveryRosterAuthority(
         source_statement.quorum_context_hash, roster_set);
 }
 
-RecoveryRosterAuthorityPtr BuildInitialRecoveryRosterAuthority(
-    const uint256& genesis_hash,
-    const QuorumBuildConfig& config,
-    int32_t target_height,
-    const CBlockIndex& branch_tip,
-    int32_t activation_predecessor_height,
-    const uint256& activation_predecessor_hash,
-    const QuorumSnapshotLookup& snapshot_lookup,
-    QuorumBuildError* error)
-{
-    SetError(error, QuorumBuildError::NONE);
-    if (genesis_hash.IsNull() || !config.IsValid() || !snapshot_lookup ||
-        activation_predecessor_height < 0 ||
-        activation_predecessor_hash.IsNull() ||
-        !IsEligibleChainLockTarget(config.schedule, target_height) ||
-        branch_tip.nHeight < target_height ||
-        activation_predecessor_height >= target_height) {
-        SetError(error, QuorumBuildError::INVALID_ARGUMENT);
-        return nullptr;
-    }
-    const CBlockIndex* target{branch_tip.GetAncestor(target_height)};
-    const CBlockIndex* source{
-        target != nullptr
-            ? target->GetAncestor(activation_predecessor_height)
-            : nullptr};
-    if (source == nullptr) {
-        SetError(error, QuorumBuildError::MISSING_BRANCH_ANCESTOR);
-        return nullptr;
-    }
-    if (source->GetBlockHash() != activation_predecessor_hash) {
-        SetError(error, QuorumBuildError::MISSING_BRANCH_ANCESTOR);
-        return nullptr;
-    }
-
-    std::optional<QuorumSnapshotState> snapshot_state;
-    try {
-        snapshot_state = snapshot_lookup(*source);
-    } catch (...) {
-        SetError(error, QuorumBuildError::SNAPSHOT_LOOKUP_FAILED);
-        return nullptr;
-    }
-    if (!snapshot_state || snapshot_state->deterministic_mns.IsNull() ||
-        snapshot_state->deterministic_mns.GetHeight() !=
-            activation_predecessor_height ||
-        snapshot_state->deterministic_mns.GetBlockHash() !=
-                source->GetBlockHash() ||
-        !snapshot_state->operator_key_states) {
-        SetError(error, QuorumBuildError::SNAPSHOT_MISMATCH);
-        return nullptr;
-    }
-    const auto operator_states_span{
-        std::span<const OperatorKeyState>{
-            snapshot_state->operator_key_states->data(),
-            snapshot_state->operator_key_states->size()}};
-    OperatorStateLookup operator_states{operator_states_span, {}};
-    if (!PrepareOperatorStateLookup(
-            operator_states_span, operator_states, error)) {
-        return nullptr;
-    }
-    const auto schedule_view{DeriveOperatorKeyScheduleView(
-        config.schedule, activation_predecessor_height,
-        config.registration_cutoff_blocks,
-        config.future_horizon_epochs)};
-    if (!schedule_view) {
-        SetError(error,
-                 QuorumBuildError::OPERATOR_STATE_SNAPSHOT_MISMATCH);
-        return nullptr;
-    }
-    for (const auto& state : operator_states_span) {
-        if (!state.IsAdvancedTo(*schedule_view)) {
-            SetError(error,
-                     QuorumBuildError::OPERATOR_STATE_SNAPSHOT_MISMATCH);
-            return nullptr;
-        }
-    }
-
-    const auto authority_target{NextEligibleChainLockTargetHeight(
-        config.schedule, activation_predecessor_height)};
-    const auto authority_epochs{authority_target
-        ? ActiveEpochsAtHeight(config.schedule, *authority_target)
-        : std::optional<std::array<EpochIdentity, ACTIVE_QUORUMS>>{}};
-    if (!authority_epochs) {
-        SetError(error, QuorumBuildError::INVALID_TARGET_HEIGHT);
-        return nullptr;
-    }
-    std::array<uint32_t, ACTIVE_QUORUMS> epoch_by_phase{};
-    std::array<bool, ACTIVE_QUORUMS> phase_assigned{};
-    for (const auto& identity : *authority_epochs) {
-        const std::size_t phase{identity.epoch % ACTIVE_QUORUMS};
-        if (phase_assigned[phase]) {
-            SetError(error, QuorumBuildError::INVALID_TARGET_HEIGHT);
-            return nullptr;
-        }
-        phase_assigned[phase] = true;
-        epoch_by_phase[phase] = identity.epoch;
-    }
-
-    auto authority{std::make_shared<RecoveryRosterAuthority>()};
-    for (std::size_t phase{0}; phase < ACTIVE_QUORUMS; ++phase) {
-        const uint32_t authority_epoch{epoch_by_phase[phase]};
-        // The exact durable snapshot fixes the candidate population. Its
-        // child block hash is provenance only and must not become cheap
-        // AuxPoW-grindable committee entropy.
-        const uint256 modifier{AuthorityTaggedHash(
-            INITIAL_RECOVERY_AUTHORITY_MODIFIER_DOMAIN, genesis_hash,
-            activation_predecessor_height, static_cast<uint8_t>(phase))};
-        auto selected{SelectRosterMembers(
-            snapshot_state->deterministic_mns, modifier, operator_states,
-            [authority_epoch](const OperatorKeyState* state,
-                              const uint256& pro_tx_hash)
-                -> std::optional<std::optional<FrozenChildRootRecord>> {
-                if (state == nullptr) {
-                    return std::optional<FrozenChildRootRecord>{};
-                }
-                const ChildRootResolution resolution{
-                    state->ResolveChildRoot(authority_epoch)};
-                if (resolution.status ==
-                    ChildRootResolutionStatus::FROZEN_ABSENT) {
-                    return std::optional<FrozenChildRootRecord>{};
-                }
-                if (resolution.status !=
-                        ChildRootResolutionStatus::FROZEN_PRESENT ||
-                    !resolution.record ||
-                    resolution.record->pro_tx_hash != pro_tx_hash ||
-                    resolution.record->epoch != authority_epoch) {
-                    return std::nullopt;
-                }
-                return std::move(resolution.record);
-            },
-            error)};
-        if (!selected) return nullptr;
-        for (std::size_t member_index{0};
-             member_index < QUORUM_SIZE; ++member_index) {
-            const auto& source{(*selected)[member_index]};
-            auto& member{authority->slots[phase][member_index]};
-            member.pro_tx_hash = source.dmn->proTxHash;
-            member.eligible = true;
-            if (source.child_root) {
-                member.child_root = RecoveryRosterChildCommitment{
-                    source.child_root->global_key_version,
-                    source.child_root->commitment};
-            }
-        }
-    }
-    if (!authority->IsStructurallyValid()) {
-        SetError(error, QuorumBuildError::INVALID_FROZEN_ROSTER);
-        return nullptr;
-    }
-
-    if (!RecoveryAuthorityCoversTarget(
-            *authority, config.schedule, target_height)) {
-        SetError(error, QuorumBuildError::CHILD_KEY_NOT_FROZEN);
-        return nullptr;
-    }
-    return authority;
-}
-
 RecoveryRosterAuthorityPtr BuildRecoveryRosterAuthorityFromSource(
     const uint256& genesis_hash,
     const QuorumBuildConfig& config,
@@ -909,11 +737,6 @@ RecoveryRosterAuthorityPtr BuildRecoveryRosterAuthorityFromSource(
                                    recovery_target_height)) {
         SetError(error, QuorumBuildError::INVALID_ARGUMENT);
         return nullptr;
-    }
-    if (source.kind == RecoveryRosterAuthoritySourceKind::ACTIVATION) {
-        return BuildInitialRecoveryRosterAuthority(
-            genesis_hash, config, recovery_target_height, branch_tip,
-            source.height, source.block_hash, snapshot_lookup, error);
     }
     if (source.kind !=
         RecoveryRosterAuthoritySourceKind::NORMAL_ROSTERS) {

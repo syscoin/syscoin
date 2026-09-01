@@ -286,15 +286,16 @@ static_assert(RosterBeaconSeed::WIRE_SIZE == 112);
 
 enum class RecoveryRosterAuthoritySourceKind : uint8_t {
     NONE = 0,
+    /** Reserved wire value from the unreleased activation-authority design. */
     ACTIVATION = 1,
     NORMAL_ROSTERS = 2,
 };
 
 /**
  * Non-recursive source from which fixed recovery membership is reproduced.
- * INITIALIZE names the exact activation predecessor. RECOVER snapshots one
- * fully normal, already-authorized roster context; mixed windows retain the
- * source that introduced their fixed authority.
+ * RECOVER snapshots one fully normal, already-authorized roster context;
+ * mixed windows retain the source that introduced their fixed authority.
+ * ACTIVATION is reserved and is never structurally valid.
  */
 struct RecoveryRosterAuthoritySource {
     static constexpr std::size_t WIRE_SIZE{

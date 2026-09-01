@@ -161,7 +161,11 @@ ValidateNormalRosterAuthorizationDecision(
     const RosterAuthorizationTransition& claimed_transition,
     const uint256& claimed_state_hash) noexcept;
 
-/** Narrow activation/catch-up exception derived from one shared raw anchor. */
+/** Canonical no-predecessor window selected by one shared delayed-Bitcoin seed. */
+[[nodiscard]] bool IsInitialNormalRosterBeaconWindow(
+    const RosterBeaconWindow& window) noexcept;
+
+/** Narrow prolonged-outage exception derived from one shared raw anchor. */
 [[nodiscard]] bool IsRecoveryRosterBeaconWindow(
     const RosterBeaconWindow& window) noexcept;
 

@@ -196,9 +196,22 @@ void SetFirstMembers(QuorumBitmap& bitmap, std::size_t count)
 RecoveryRosterAuthoritySource RecoveryAuthoritySource()
 {
     RecoveryRosterAuthoritySource source;
-    source.kind = RecoveryRosterAuthoritySourceKind::ACTIVATION;
-    source.height = 864;
+    source.kind = RecoveryRosterAuthoritySourceKind::NORMAL_ROSTERS;
+    source.height = 865;
     source.block_hash = NonNullHash(799'999);
+    source.quorum_context_hash = NonNullHash(799'998);
+    const uint256 future_hash{NonNullHash(799'997)};
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        auto& seed{source.normal_beacons[slot]};
+        seed.anchor_kind = RosterBeaconAnchorKind::NORMAL;
+        seed.state = RosterBeaconState::READY;
+        seed.epoch = slot;
+        seed.anchor_cursor = BTCCursor{
+            source.height, source.block_hash, NonNullHash(799'996)};
+        seed.anchor_btc_height = 900'000;
+        seed.future_btc_hash = future_hash;
+    }
+    BOOST_REQUIRE(source.IsStructurallyValid());
     return source;
 }
 
@@ -251,6 +264,18 @@ RosterBeaconSeed MakeRecoveryPendingSeed(uint32_t newest_epoch,
     return seed;
 }
 
+RosterBeaconSeed MakeInitializationPendingSeed(
+    uint32_t newest_epoch,
+    uint64_t salt,
+    int32_t anchor_height = 870)
+{
+    auto seed{MakeRecoveryPendingSeed(
+        newest_epoch, salt, anchor_height)};
+    seed.anchor_kind = RosterBeaconAnchorKind::NORMAL;
+    BOOST_REQUIRE(seed.IsStructurallyValid());
+    return seed;
+}
+
 RosterBeaconWindow MakeRecoveryWindow(const RosterBeaconSeed& pending,
                                       uint64_t salt)
 {
@@ -266,6 +291,26 @@ RosterBeaconWindow MakeRecoveryWindow(const RosterBeaconSeed& pending,
     }
     window.active.recovery_authority_hash = RecoveryAuthorityHash();
     window.active.recovery_authority_source = RecoveryAuthoritySource();
+    window.next.epoch = pending.epoch + 1;
+    BOOST_REQUIRE(window.IsStructurallyValid());
+    return window;
+}
+
+RosterBeaconWindow MakeInitializationWindow(
+    const RosterBeaconSeed& pending,
+    uint64_t salt)
+{
+    BOOST_REQUIRE(pending.anchor_kind == RosterBeaconAnchorKind::NORMAL);
+    BOOST_REQUIRE(pending.epoch >= ACTIVE_QUORUMS - 1);
+    RosterBeaconWindow window;
+    const uint256 future_hash{NonNullHash(720'000 + salt)};
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        auto& seed{window.active.seeds[slot]};
+        seed = pending;
+        seed.state = RosterBeaconState::READY;
+        seed.epoch = pending.epoch - (ACTIVE_QUORUMS - 1) + slot;
+        seed.future_btc_hash = future_hash;
+    }
     window.next.epoch = pending.epoch + 1;
     BOOST_REQUIRE(window.IsStructurallyValid());
     return window;
@@ -294,17 +339,33 @@ RosterRecoveryPrecommit MakeRecoveryPrecommit(
     uint64_t salt,
     int32_t predecessor_height = -1,
     uint256 predecessor_hash = {},
-    int32_t anchor_height = 870,
-    uint32_t epoch = 3)
+    int32_t anchor_height = -2,
+    uint32_t epoch = std::numeric_limits<uint32_t>::max())
 {
+    if (anchor_height == -2) {
+        anchor_height =
+            admission == RosterRecoveryAdmission::INITIALIZE
+            ? 865
+            : 2025;
+    }
+    if (epoch == std::numeric_limits<uint32_t>::max()) {
+        epoch = admission == RosterRecoveryAdmission::INITIALIZE
+            ? ACTIVE_QUORUMS - 1
+            : 2 * ACTIVE_QUORUMS - 1;
+    }
     RosterRecoveryPrecommit precommit;
     precommit.admission = admission;
     precommit.predecessor_height = predecessor_height;
     precommit.predecessor_hash = predecessor_hash;
-    precommit.recovery_authority_hash = RecoveryAuthorityHash();
-    precommit.recovery_authority_source = RecoveryAuthoritySource();
-    precommit.pending_seed =
-        MakeRecoveryPendingSeed(epoch, salt, anchor_height);
+    if (admission == RosterRecoveryAdmission::INITIALIZE) {
+        precommit.pending_seed =
+            MakeInitializationPendingSeed(epoch, salt, anchor_height);
+    } else {
+        precommit.recovery_authority_hash = RecoveryAuthorityHash();
+        precommit.recovery_authority_source = RecoveryAuthoritySource();
+        precommit.pending_seed =
+            MakeRecoveryPendingSeed(epoch, salt, anchor_height);
+    }
     BOOST_REQUIRE(precommit.IsStructurallyValid());
     return precommit;
 }
@@ -352,7 +413,9 @@ void SetRecoveryTransition(FinalChainLock& chainlock,
             ? RosterAuthorizationTransitionKind::INITIALIZE
             : RosterAuthorizationTransitionKind::RECOVER;
     chainlock.statement.roster_beacons =
-        MakeRecoveryWindow(precommit.pending_seed, salt);
+        precommit.admission == RosterRecoveryAdmission::INITIALIZE
+            ? MakeInitializationWindow(precommit.pending_seed, salt)
+            : MakeRecoveryWindow(precommit.pending_seed, salt);
     chainlock.statement.roster_beacons.active.recovery_authority_hash =
         precommit.recovery_authority_hash;
     chainlock.statement.roster_beacons.active.recovery_authority_source =
@@ -406,15 +469,9 @@ RecoveryRosterAuthorityPtr SetExactInitialization(
     const uint256& genesis_hash,
     uint64_t salt)
 {
-    const auto authority{MakeDefaultRecoveryAuthority(genesis_hash)};
-    const auto authority_hash{
-        GetRecoveryRosterAuthorityHash(genesis_hash, *authority)};
-    BOOST_REQUIRE(authority_hash);
-
     auto precommit{MakeRecoveryPrecommit(
         RosterRecoveryAdmission::INITIALIZE, salt, -1, {},
         chainlock.statement.height)};
-    precommit.recovery_authority_hash = *authority_hash;
     precommit.pending_seed.anchor_cursor.sys_hash =
         chainlock.statement.block_hash;
     precommit.pending_seed.anchor_cursor.btc_hash =
@@ -423,7 +480,7 @@ RecoveryRosterAuthorityPtr SetExactInitialization(
     SetRecoveryTransition(chainlock, precommit, salt);
     SetExactRosterAuthorizationStateHash(chainlock, genesis_hash);
     BOOST_REQUIRE(chainlock.IsStructurallyValid());
-    return authority;
+    return nullptr;
 }
 
 void SetExactContinuation(FinalChainLock& chainlock,
@@ -448,12 +505,26 @@ void SetExactContinuation(FinalChainLock& chainlock,
 
 void BindRecoveryPrecommitToPrior(
     RosterRecoveryPrecommit& precommit,
-    const FinalChainLock& prior)
+    const FinalChainLock& prior,
+    const uint256& genesis_hash)
 {
-    precommit.recovery_authority_hash =
-        prior.statement.roster_beacons.active.recovery_authority_hash;
-    precommit.recovery_authority_source =
-        prior.statement.roster_beacons.active.recovery_authority_source;
+    if (HasRecoveryRosterBeacon(prior.statement.roster_beacons)) {
+        precommit.recovery_authority_hash =
+            prior.statement.roster_beacons.active.recovery_authority_hash;
+        precommit.recovery_authority_source =
+            prior.statement.roster_beacons.active.recovery_authority_source;
+    } else {
+        precommit.recovery_authority_hash =
+            DefaultRecoveryAuthorityHash(genesis_hash);
+        auto& source{precommit.recovery_authority_source};
+        source.kind = RecoveryRosterAuthoritySourceKind::NORMAL_ROSTERS;
+        source.height = prior.statement.height;
+        source.block_hash = prior.statement.block_hash;
+        source.quorum_context_hash =
+            prior.statement.quorum_context_hash;
+        source.normal_beacons =
+            prior.statement.roster_beacons.active.seeds;
+    }
     BOOST_REQUIRE(precommit.IsStructurallyValid());
 }
 
@@ -464,7 +535,7 @@ void SetExactRecoveryTransitionFromPrior(
     const FinalChainLock& prior,
     uint64_t salt)
 {
-    BindRecoveryPrecommitToPrior(precommit, prior);
+    BindRecoveryPrecommitToPrior(precommit, prior, genesis_hash);
     chainlock.statement.previous_btcc_cursor =
         prior.statement.accepted_btcc_cursor;
     SetRecoveryTransition(chainlock, precommit, salt);
@@ -477,7 +548,7 @@ ChainLockFinalityStoreConfig MakeConfig()
 {
     ChainLockFinalityStoreConfig config;
     config.chainlock_schedule = *MakeChainLockScheduleConfig(0);
-    config.btcc_schedule.candidate_origin = 870;
+    config.btcc_schedule.candidate_origin = 865;
     config.activation_predecessor_height = 864;
     return config;
 }
@@ -883,7 +954,7 @@ BOOST_AUTO_TEST_CASE(roster_recovery_precommit_is_canonical_and_durable)
     auto staged{MakeRecoveryPrecommit(
         RosterRecoveryAdmission::CURRENT_CATCHUP, 1,
         prior.statement.height, prior.statement.block_hash)};
-    BindRecoveryPrecommitToPrior(staged, prior);
+    BindRecoveryPrecommitToPrior(staged, prior, genesis);
 
     {
         PQChainLockPersistence persistence{DiskParams(path), genesis, config};
@@ -960,9 +1031,54 @@ BOOST_AUTO_TEST_CASE(roster_recovery_precommit_is_canonical_and_durable)
     auto initialize{MakeRecoveryPrecommit(
         RosterRecoveryAdmission::INITIALIZE, 2)};
     BOOST_CHECK(initialize.IsStructurallyValid());
+    BOOST_CHECK_EQUAL(initialize.version,
+                      ROSTER_RECOVERY_PRECOMMIT_VERSION);
+    auto stale_version{initialize};
+    --stale_version.version;
+    BOOST_CHECK(!stale_version.IsStructurallyValid());
+    auto initialize_with_recovery_hash{initialize};
+    initialize_with_recovery_hash.recovery_authority_hash =
+        RecoveryAuthorityHash();
+    BOOST_CHECK(!initialize_with_recovery_hash.IsStructurallyValid());
+    auto initialize_with_recovery_source{initialize};
+    initialize_with_recovery_source.recovery_authority_source =
+        RecoveryAuthoritySource();
+    BOOST_CHECK(!initialize_with_recovery_source.IsStructurallyValid());
+    auto initialize_with_recovery_seed{initialize};
+    initialize_with_recovery_seed.pending_seed.anchor_kind =
+        RosterBeaconAnchorKind::RECOVERY;
+    BOOST_CHECK(!initialize_with_recovery_seed.IsStructurallyValid());
     initialize.predecessor_height = 864;
     initialize.predecessor_hash = NonNullHash(864);
     BOOST_CHECK(!initialize.IsStructurallyValid());
+
+    auto catchup_without_authority{staged};
+    catchup_without_authority.recovery_authority_hash.SetNull();
+    BOOST_CHECK(!catchup_without_authority.IsStructurallyValid());
+    catchup_without_authority = staged;
+    catchup_without_authority.recovery_authority_source = {};
+    BOOST_CHECK(!catchup_without_authority.IsStructurallyValid());
+    auto catchup_with_legacy_activation_source{staged};
+    auto& activation_source{
+        catchup_with_legacy_activation_source.recovery_authority_source};
+    activation_source = {};
+    activation_source.kind =
+        RecoveryRosterAuthoritySourceKind::ACTIVATION;
+    activation_source.height = config.activation_predecessor_height;
+    activation_source.block_hash = NonNullHash(864'001);
+    BOOST_CHECK(!activation_source.IsStructurallyValid());
+    BOOST_CHECK(
+        !catchup_with_legacy_activation_source.IsStructurallyValid());
+    {
+        PQChainLockPersistence persistence{
+            MemoryParams(path / "stale_precommit_version"),
+            genesis, config};
+        ChainLockPersistenceError error{ChainLockPersistenceError::NONE};
+        BOOST_CHECK(!persistence.PersistRosterRecoveryPrecommit(
+            stale_version, &error));
+        BOOST_CHECK(error == ChainLockPersistenceError::INVALID_CHAINLOCK);
+        BOOST_CHECK(!persistence.LoadRosterRecoveryPrecommit());
+    }
 
     auto wrong_epoch{staged};
     wrong_epoch.pending_seed.epoch = 7;
@@ -1023,7 +1139,7 @@ BOOST_AUTO_TEST_CASE(roster_recovery_precommit_replacement_is_exact_cas)
     auto staged{MakeRecoveryPrecommit(
         RosterRecoveryAdmission::CURRENT_CATCHUP, 811,
         prior.statement.height, prior.statement.block_hash)};
-    BindRecoveryPrecommitToPrior(staged, prior);
+    BindRecoveryPrecommitToPrior(staged, prior, genesis);
 
     auto same_slot{staged};
     same_slot.pending_seed.anchor_cursor.sys_hash = NonNullHash(812);
@@ -1094,7 +1210,7 @@ BOOST_AUTO_TEST_CASE(roster_recovery_precommit_replacement_is_exact_cas)
         const auto ready{persistence.LoadRosterRecoveryPrecommit()};
         BOOST_REQUIRE(ready);
         BOOST_CHECK(ready->pending_seed.IsReady());
-        BOOST_CHECK_EQUAL(ready->pending_seed.epoch, 3U);
+        BOOST_CHECK_EQUAL(ready->pending_seed.epoch, 7U);
     }
 }
 
@@ -1112,15 +1228,15 @@ BOOST_AUTO_TEST_CASE(
     auto staged{MakeRecoveryPrecommit(
         RosterRecoveryAdmission::CURRENT_CATCHUP, 819,
         prior.statement.height, prior.statement.block_hash)};
-    BindRecoveryPrecommitToPrior(staged, prior);
+    BindRecoveryPrecommitToPrior(staged, prior, genesis);
     const auto later_target{CanonicalRosterRecoveryTargetHeight(
-        config.chainlock_schedule, config.btcc_schedule, 7)};
+        config.chainlock_schedule, config.btcc_schedule, 11)};
     BOOST_REQUIRE(later_target);
     auto later{MakeRecoveryPrecommit(
         RosterRecoveryAdmission::CURRENT_CATCHUP, 820,
         prior.statement.height, prior.statement.block_hash,
-        *later_target, /*epoch=*/7)};
-    BindRecoveryPrecommitToPrior(later, prior);
+        *later_target, /*epoch=*/11)};
+    BindRecoveryPrecommitToPrior(later, prior, genesis);
     const std::optional<uint256> previous_btc_hash{
         prior.statement.accepted_btcc_cursor.btc_hash};
     const auto proof{MakeRolloverProof(
@@ -1286,17 +1402,18 @@ BOOST_AUTO_TEST_CASE(
     auto much_later{MakeRecoveryPrecommit(
         RosterRecoveryAdmission::INITIALIZE, 824, -1, {},
         *much_later_target, /*epoch=*/11)};
-    const auto initialize_proof{MakeRolloverProof(
-        genesis, initialize, much_later, std::nullopt, 823)};
+    BOOST_CHECK(GetRosterRecoveryPrecommitRolloverContextId(
+                    genesis, initialize, much_later)
+                    .IsNull());
     {
         PQChainLockPersistence persistence{
             DiskParams(initialize_path), genesis, config};
         BOOST_REQUIRE(
             persistence.PersistRosterRecoveryPrecommit(initialize));
-        BOOST_REQUIRE(Access::Replace(
-            persistence, initialize, much_later, initialize_proof));
+        BOOST_CHECK(!persistence.PersistRosterRecoveryPrecommit(
+            much_later));
         BOOST_CHECK(
-            persistence.LoadRosterRecoveryPrecommit() == much_later);
+            persistence.LoadRosterRecoveryPrecommit() == initialize);
     }
 }
 
@@ -1309,9 +1426,6 @@ BOOST_AUTO_TEST_CASE(initialized_best_atomically_consumes_recovery_precommit)
     auto staged{MakeRecoveryPrecommit(
         RosterRecoveryAdmission::INITIALIZE, 3, -1, {},
         /*anchor_height=*/865)};
-    const auto authority{MakeDefaultRecoveryAuthority(genesis)};
-    staged.recovery_authority_hash =
-        DefaultRecoveryAuthorityHash(genesis);
     auto initialized{MakeChainLock(
         865, config.activation_predecessor_height,
         NonNullHash(config.activation_predecessor_height), 82)};
@@ -1363,8 +1477,7 @@ BOOST_AUTO_TEST_CASE(initialized_best_atomically_consumes_recovery_precommit)
             wrong_cursor, &error));
         BOOST_CHECK(persistence.LoadRosterRecoveryPrecommit() == staged);
 
-        BOOST_REQUIRE(persistence.PersistInitializedBest(
-            initialized, nullptr, authority));
+        BOOST_REQUIRE(persistence.PersistInitializedBest(initialized));
         BOOST_CHECK(persistence.HasBest());
         BOOST_CHECK(!persistence.LoadRosterRecoveryPrecommit());
         BOOST_CHECK(persistence.PersistInitializedBest(initialized));
@@ -1379,7 +1492,7 @@ BOOST_AUTO_TEST_CASE(initialized_best_atomically_consumes_recovery_precommit)
 }
 
 BOOST_AUTO_TEST_CASE(
-    initial_recovery_authority_roundtrip_is_worker_stack_safe)
+    initial_normal_rosters_roundtrip_without_recovery_authority)
 {
     const fs::path path{
         m_path_root / "pqcl_initial_authority_worker_stack"};
@@ -1388,8 +1501,7 @@ BOOST_AUTO_TEST_CASE(
     auto initialized{std::make_shared<FinalChainLock>(MakeChainLock(
         865, config.activation_predecessor_height,
         NonNullHash(config.activation_predecessor_height), 820))};
-    const auto authority{
-        SetExactInitialization(*initialized, genesis, 820)};
+    SetExactInitialization(*initialized, genesis, 820);
 
     bool persisted{false};
     bool restarted{false};
@@ -1401,13 +1513,12 @@ BOOST_AUTO_TEST_CASE(
             PQChainLockPersistence persistence{
                 DiskParams(path), genesis, config};
             persisted = persistence.PersistInitializedBest(
-                *initialized, &error, authority);
+                *initialized, &error);
         }
         if (!persisted) return;
         PQChainLockPersistence persistence{
             DiskParams(path), genesis, config};
-        const auto loaded{persistence.LoadRecoveryRosterAuthority()};
-        restarted = loaded && *loaded == *authority;
+        restarted = !persistence.LoadRecoveryRosterAuthority();
     }};
     worker.join();
 
@@ -1426,21 +1537,27 @@ BOOST_AUTO_TEST_CASE(catchup_best_atomically_consumes_recovery_precommit)
     auto prior{MakeChainLock(
         865, config.activation_predecessor_height,
         NonNullHash(config.activation_predecessor_height), 83)};
-    const auto authority{SetExactInitialization(prior, genesis, 83)};
+    SetExactInitialization(prior, genesis, 83);
+    const auto authority{MakeDefaultRecoveryAuthority(genesis)};
     auto staged{MakeRecoveryPrecommit(
         RosterRecoveryAdmission::CURRENT_CATCHUP, 4,
         prior.statement.height, prior.statement.block_hash)};
-    BindRecoveryPrecommitToPrior(staged, prior);
+    BindRecoveryPrecommitToPrior(staged, prior, genesis);
     const auto future_target{CanonicalRosterRecoveryTargetHeight(
-        config.chainlock_schedule, config.btcc_schedule, 7)};
+        config.chainlock_schedule, config.btcc_schedule, 11)};
     BOOST_REQUIRE(future_target);
     auto future_staged{MakeRecoveryPrecommit(
         RosterRecoveryAdmission::CURRENT_CATCHUP, 40,
         prior.statement.height, prior.statement.block_hash,
-        *future_target, /*epoch=*/7)};
-    BindRecoveryPrecommitToPrior(future_staged, prior);
+        *future_target, /*epoch=*/11)};
+    BindRecoveryPrecommitToPrior(future_staged, prior, genesis);
     auto recovered{MakeChainLock(
-        870, prior.statement.height, prior.statement.block_hash, 84)};
+        staged.pending_seed.anchor_cursor.sys_height,
+        staged.pending_seed.anchor_cursor.sys_height -
+            static_cast<int32_t>(PQ_CL_PERIOD),
+        NonNullHash(staged.pending_seed.anchor_cursor.sys_height -
+                    PQ_CL_PERIOD),
+        84)};
     SetExactRecoveryTransitionFromPrior(
         recovered, staged, genesis, prior, 4);
     BOOST_REQUIRE(recovered.IsStructurallyValid());
@@ -1452,8 +1569,7 @@ BOOST_AUTO_TEST_CASE(catchup_best_atomically_consumes_recovery_precommit)
     {
         PQChainLockPersistence persistence{
             DiskParams(wrong_path), genesis, config};
-        BOOST_REQUIRE(persistence.PersistInitializedBest(
-            prior, nullptr, authority));
+        BOOST_REQUIRE(persistence.PersistInitializedBest(prior));
         BOOST_REQUIRE(
             persistence.PersistRosterRecoveryPrecommit(future_staged));
 
@@ -1466,8 +1582,7 @@ BOOST_AUTO_TEST_CASE(catchup_best_atomically_consumes_recovery_precommit)
     }
     {
         PQChainLockPersistence persistence{DiskParams(path), genesis, config};
-        BOOST_REQUIRE(persistence.PersistInitializedBest(
-            prior, nullptr, authority));
+        BOOST_REQUIRE(persistence.PersistInitializedBest(prior));
         BOOST_REQUIRE(
             persistence.PersistRosterRecoveryPrecommit(staged));
 
@@ -1500,10 +1615,12 @@ BOOST_AUTO_TEST_CASE(catchup_best_atomically_consumes_recovery_precommit)
             wrong_cursor, &error));
         BOOST_CHECK(persistence.LoadRosterRecoveryPrecommit() == staged);
 
-        BOOST_REQUIRE(
-            persistence.PersistRecoveryCatchupBest(
-                recovered, nullptr, std::nullopt, nullptr,
-                authority));
+        const bool persisted{persistence.PersistRecoveryCatchupBest(
+            recovered, &error, std::nullopt, nullptr, authority)};
+        BOOST_TEST_CONTEXT("persistence error " <<
+                           static_cast<int>(error)) {
+            BOOST_REQUIRE(persisted);
+        }
         BOOST_CHECK(!persistence.LoadRosterRecoveryPrecommit());
         BOOST_CHECK(persistence.HasCatchupMarker());
         BOOST_CHECK(persistence.PersistRecoveryCatchupBest(
@@ -1528,32 +1645,35 @@ BOOST_AUTO_TEST_CASE(
     auto initialized{MakeChainLock(
         865, config.activation_predecessor_height,
         NonNullHash(config.activation_predecessor_height), 831)};
-    const auto authority{SetExactInitialization(
-        initialized, genesis, 831)};
+    SetExactInitialization(initialized, genesis, 831);
+    const auto authority{MakeDefaultRecoveryAuthority(genesis)};
 
     auto recovery{MakeRecoveryPrecommit(
         RosterRecoveryAdmission::CURRENT_CATCHUP, 832,
         initialized.statement.height, initialized.statement.block_hash)};
     auto recovered{MakeChainLock(
-        870, initialized.statement.height,
-        initialized.statement.block_hash, 832)};
+        recovery.pending_seed.anchor_cursor.sys_height,
+        recovery.pending_seed.anchor_cursor.sys_height -
+            static_cast<int32_t>(PQ_CL_PERIOD),
+        NonNullHash(recovery.pending_seed.anchor_cursor.sys_height -
+                    PQ_CL_PERIOD),
+        832)};
     SetExactRecoveryTransitionFromPrior(
         recovered, recovery, genesis, initialized, 832);
 
     const auto later_target{CanonicalRosterRecoveryTargetHeight(
-        config.chainlock_schedule, config.btcc_schedule, 7)};
+        config.chainlock_schedule, config.btcc_schedule, 11)};
     BOOST_REQUIRE(later_target);
     auto later{MakeRecoveryPrecommit(
         RosterRecoveryAdmission::CURRENT_CATCHUP, 833,
         recovered.statement.height, recovered.statement.block_hash,
-        *later_target, /*epoch=*/7)};
-    BindRecoveryPrecommitToPrior(later, recovered);
+        *later_target, /*epoch=*/11)};
+    BindRecoveryPrecommitToPrior(later, recovered, genesis);
 
     {
         PQChainLockPersistence persistence{
             DiskParams(path), genesis, config};
-        BOOST_REQUIRE(persistence.PersistInitializedBest(
-            initialized, nullptr, authority));
+        BOOST_REQUIRE(persistence.PersistInitializedBest(initialized));
         BOOST_REQUIRE(persistence.PersistRosterRecoveryPrecommit(
             recovery));
         BOOST_REQUIRE(persistence.PersistRecoveryCatchupBest(
@@ -1588,8 +1708,6 @@ BOOST_AUTO_TEST_CASE(
     auto initialize_marker{MakeRecoveryPrecommit(
         RosterRecoveryAdmission::INITIALIZE, 41, -1, {},
         /*anchor_height=*/865)};
-    initialize_marker.recovery_authority_hash =
-        DefaultRecoveryAuthorityHash(genesis);
     auto initialized{MakeChainLock(
         865, config.activation_predecessor_height,
         NonNullHash(config.activation_predecessor_height), 841)};
@@ -1602,8 +1720,12 @@ BOOST_AUTO_TEST_CASE(
             MemoryParams(m_path_root / "pqcl_recovery_no_local_initialize"),
             genesis, config};
         BOOST_CHECK(!persistence.LoadRosterRecoveryPrecommit());
-        BOOST_REQUIRE(persistence.PersistInitializedBest(
-            initialized, nullptr, authority));
+        ChainLockPersistenceError error{ChainLockPersistenceError::NONE};
+        BOOST_CHECK(!persistence.PersistInitializedBest(
+            initialized, &error, authority));
+        BOOST_CHECK(error == ChainLockPersistenceError::INVALID_CHAINLOCK);
+        BOOST_CHECK(!persistence.LoadBest());
+        BOOST_REQUIRE(persistence.PersistInitializedBest(initialized));
         BOOST_CHECK(persistence.LoadBest() == initialized);
     }
 
@@ -1614,7 +1736,7 @@ BOOST_AUTO_TEST_CASE(
         RosterRecoveryAdmission::CURRENT_CATCHUP, 42,
         initialized.statement.height, initialized.statement.block_hash,
         *catchup_target, /*epoch=*/7)};
-    BindRecoveryPrecommitToPrior(catchup_marker, initialized);
+    BindRecoveryPrecommitToPrior(catchup_marker, initialized, genesis);
     auto recovered{MakeChainLock(
         *catchup_target,
         *catchup_target - static_cast<int32_t>(PQ_CL_PERIOD),
@@ -1626,8 +1748,7 @@ BOOST_AUTO_TEST_CASE(
         PQChainLockPersistence persistence{
             MemoryParams(m_path_root / "pqcl_recovery_no_local_catchup"),
             genesis, config};
-        BOOST_REQUIRE(persistence.PersistInitializedBest(
-            initialized, nullptr, authority));
+        BOOST_REQUIRE(persistence.PersistInitializedBest(initialized));
         BOOST_CHECK(!persistence.LoadRosterRecoveryPrecommit());
         BOOST_REQUIRE(persistence.PersistRecoveryCatchupBest(
             recovered, nullptr, std::nullopt, nullptr, authority));
@@ -1655,11 +1776,12 @@ BOOST_AUTO_TEST_CASE(ordinary_winner_atomically_discards_stale_catchup_precommit
     auto prior{MakeChainLock(
         865, config.activation_predecessor_height,
         NonNullHash(config.activation_predecessor_height), 85)};
-    const auto authority{SetExactInitialization(prior, genesis, 85)};
+    SetExactInitialization(prior, genesis, 85);
+    const auto authority{MakeDefaultRecoveryAuthority(genesis)};
     auto staged{MakeRecoveryPrecommit(
         RosterRecoveryAdmission::CURRENT_CATCHUP, 5,
         prior.statement.height, prior.statement.block_hash)};
-    BindRecoveryPrecommitToPrior(staged, prior);
+    BindRecoveryPrecommitToPrior(staged, prior, genesis);
     auto ordinary{MakeChainLock(
         870, prior.statement.height, prior.statement.block_hash, 86)};
     SetExactContinuation(ordinary, genesis, prior);
@@ -1669,8 +1791,7 @@ BOOST_AUTO_TEST_CASE(ordinary_winner_atomically_discards_stale_catchup_precommit
 
     {
         PQChainLockPersistence persistence{DiskParams(path), genesis, config};
-        BOOST_REQUIRE(persistence.PersistInitializedBest(
-            prior, nullptr, authority));
+        BOOST_REQUIRE(persistence.PersistInitializedBest(prior));
         BOOST_REQUIRE(persistence.PersistRosterRecoveryPrecommit(staged));
 
         auto rejected{prior};
@@ -1697,7 +1818,7 @@ BOOST_AUTO_TEST_CASE(ordinary_winner_atomically_discards_stale_catchup_precommit
             ordinary_successor.statement.block_hash,
             *replacement_target, /*epoch=*/7)};
         BindRecoveryPrecommitToPrior(
-            replacement, ordinary_successor);
+            replacement, ordinary_successor, genesis);
         BOOST_REQUIRE(
             persistence.PersistRosterRecoveryPrecommit(replacement));
         BOOST_CHECK(persistence.LoadRosterRecoveryPrecommit() == replacement);
@@ -1872,21 +1993,22 @@ BOOST_AUTO_TEST_CASE(
     const uint256 genesis{NonNullHash(201)};
     auto config{MakeConfig()};
     config.btcc_schedule.candidate_origin = 880;
+    config.activation_predecessor_height = 879;
     BOOST_REQUIRE(config.IsValid());
 
     auto predecessor{MakeChainLock(
-        865, config.activation_predecessor_height,
+        880, config.activation_predecessor_height,
         NonNullHash(config.activation_predecessor_height), 201)};
     const auto authority{
         SetExactInitialization(predecessor, genesis, 201)};
     auto owner{MakeChainLock(
-        885, 880, NonNullHash(880), 202)};
+        895, 890, NonNullHash(890), 202)};
     SetExactContinuation(owner, genesis, predecessor);
     auto archive{MakeChainLock(
-        880, 875, NonNullHash(875), 203)};
+        890, 885, NonNullHash(885), 203)};
     archive.statement.accepted_btcc_cursor = BTCCursor{
         archive.statement.height, archive.statement.block_hash,
-        NonNullHash(880'203)};
+        NonNullHash(890'203)};
     archive.statement.btcc_advance = BTCCAdvance::ADVANCE;
     BOOST_REQUIRE(archive.IsStructurallyValid());
 
@@ -1921,7 +2043,7 @@ BOOST_AUTO_TEST_CASE(
 
         const auto before_rejections{persistence.GetFinalityState()};
         auto second_catchup{MakeChainLock(
-            900, 895, NonNullHash(895), 204)};
+            910, 905, NonNullHash(905), 204)};
         SetExactContinuation(second_catchup, genesis, owner);
         ChainLockPersistenceError error{ChainLockPersistenceError::NONE};
         BOOST_CHECK(!persistence.PersistCatchupBest(
@@ -2096,8 +2218,8 @@ BOOST_AUTO_TEST_CASE(
     auto predecessor{MakeChainLock(
         865, config.activation_predecessor_height,
         NonNullHash(config.activation_predecessor_height), 217)};
-    const auto authority{
-        SetExactInitialization(predecessor, genesis, 217)};
+    SetExactInitialization(predecessor, genesis, 217);
+    const auto authority{MakeDefaultRecoveryAuthority(genesis)};
     auto first_catchup{MakeChainLock(
         875, 870, NonNullHash(870), 218)};
     SetExactContinuation(first_catchup, genesis, predecessor);
@@ -2109,7 +2231,7 @@ BOOST_AUTO_TEST_CASE(
         first_catchup.statement.height,
         first_catchup.statement.block_hash,
         *recovery_target, /*epoch=*/7)};
-    BindRecoveryPrecommitToPrior(staged, first_catchup);
+    BindRecoveryPrecommitToPrior(staged, first_catchup, genesis);
     auto recovered{MakeChainLock(
         *recovery_target,
         *recovery_target - static_cast<int32_t>(PQ_CL_PERIOD),
@@ -2122,8 +2244,7 @@ BOOST_AUTO_TEST_CASE(
     {
         PQChainLockPersistence persistence{
             DiskParams(path), genesis, config};
-        BOOST_REQUIRE(persistence.PersistInitializedBest(
-            predecessor, nullptr, authority));
+        BOOST_REQUIRE(persistence.PersistInitializedBest(predecessor));
         BOOST_REQUIRE(persistence.PersistCatchupBest(first_catchup));
         const auto before{persistence.GetFinalityState()};
         BOOST_REQUIRE(before.receipt_archive_authorization);
@@ -2279,7 +2400,8 @@ BOOST_AUTO_TEST_CASE(durable_record_view_is_coherent_and_idempotence_is_stable)
     const auto first_state{persistence.GetFinalityState()};
     BOOST_REQUIRE(first_state.best);
     BOOST_CHECK_EQUAL(first_state.certificate_revision, 1U);
-    BOOST_CHECK(!first_state.unsealed_btcc);
+    BOOST_REQUIRE(first_state.unsealed_btcc);
+    BOOST_CHECK(*first_state.best == *first_state.unsealed_btcc);
     BOOST_CHECK(first_state.best->logical_id == first.GetLogicalId(genesis));
     BOOST_CHECK(first_state.best->witness_id == first.GetWitnessId(genesis));
     BOOST_CHECK(first_state.best->statement == first.statement);
@@ -2304,7 +2426,8 @@ BOOST_AUTO_TEST_CASE(durable_record_view_is_coherent_and_idempotence_is_stable)
     BOOST_REQUIRE(advance_state.best);
     BOOST_REQUIRE(advance_state.unsealed_btcc);
     BOOST_CHECK_EQUAL(advance_state.certificate_revision, 2U);
-    BOOST_CHECK(*advance_state.best == *advance_state.unsealed_btcc);
+    BOOST_CHECK(*first_state.unsealed_btcc ==
+                *advance_state.unsealed_btcc);
     BOOST_CHECK(advance_state.best->logical_id ==
                 advance.GetLogicalId(genesis));
     BOOST_CHECK(advance_state.best->witness_id ==
@@ -2317,23 +2440,50 @@ BOOST_AUTO_TEST_CASE(unsealed_record_mutation_advances_certificate_revision)
     const fs::path path{m_path_root / "pqcl_unsealed_view"};
     const uint256 genesis{NonNullHash(63)};
     const auto config{MakeConfig()};
-    auto archived{MakeChainLock(870, 865, NonNullHash(865), 63)};
+    auto archived{MakeChainLock(875, 870, NonNullHash(870), 63)};
     archived.statement.accepted_btcc_cursor = BTCCursor{
         archived.statement.height, archived.statement.block_hash,
         NonNullHash(6300)};
     archived.statement.btcc_advance = BTCCAdvance::ADVANCE;
-    auto authorization_predecessor{MakeChainLock(
-        875, 870, archived.statement.block_hash, 640)};
+    auto initialized{MakeChainLock(
+        865, config.activation_predecessor_height,
+        NonNullHash(config.activation_predecessor_height), 639)};
     const auto authority{SetExactInitialization(
-        authorization_predecessor, genesis, 640)};
+        initialized, genesis, 639)};
+    auto intermediate{MakeChainLock(
+        870, initialized.statement.height,
+        initialized.statement.block_hash, 640)};
+    SetExactContinuation(intermediate, genesis, initialized);
+    auto authorization_boundary{MakeChainLock(
+        875, intermediate.statement.height,
+        intermediate.statement.block_hash, 641)};
+    authorization_boundary.statement.btcc_receipt_state =
+        BTCCReceiptState{
+            initialized.statement.accepted_btcc_cursor,
+            NonNullHash(630'001)};
+    SetExactContinuation(
+        authorization_boundary, genesis, intermediate);
+    auto authorization_predecessor{MakeChainLock(
+        880, authorization_boundary.statement.height,
+        authorization_boundary.statement.block_hash, 642)};
+    authorization_predecessor.statement.btcc_receipt_state =
+        authorization_boundary.statement.btcc_receipt_state;
+    SetExactContinuation(
+        authorization_predecessor, genesis, authorization_boundary);
     {
         PQChainLockPersistence persistence{DiskParams(path), genesis, config};
         BOOST_REQUIRE(persistence.PersistInitializedBest(
-            authorization_predecessor, nullptr, authority));
+            initialized, nullptr, authority));
+        BOOST_REQUIRE(persistence.PersistBest(intermediate));
+        BOOST_REQUIRE(persistence.PersistBest(
+            authorization_boundary));
+        BOOST_REQUIRE(persistence.PersistBest(
+            authorization_predecessor));
+        BOOST_CHECK(!persistence.LoadUnsealedBTCC());
         BOOST_REQUIRE(persistence.PersistUnsealedBTCC(archived));
 
         const auto state{persistence.GetFinalityState()};
-        BOOST_CHECK_EQUAL(state.certificate_revision, 2U);
+        BOOST_CHECK_EQUAL(state.certificate_revision, 5U);
         BOOST_REQUIRE(state.best);
         BOOST_CHECK(state.best->statement ==
                     authorization_predecessor.statement);
@@ -2368,8 +2518,13 @@ BOOST_AUTO_TEST_CASE(unsealed_record_mutation_advances_certificate_revision)
                     archived.statement);
 
         auto seal{MakeChainLock(
-            880, authorization_predecessor.statement.height,
+            885, authorization_predecessor.statement.height,
             authorization_predecessor.statement.block_hash, 64)};
+        seal.statement.previous_btcc_cursor =
+            authorization_predecessor.statement.accepted_btcc_cursor;
+        seal.statement.accepted_btcc_cursor =
+            archived.statement.accepted_btcc_cursor;
+        seal.statement.btcc_advance = BTCCAdvance::ADVANCE;
         seal.statement.btcc_receipt_state = BTCCReceiptState{
             archived.statement.accepted_btcc_cursor, NonNullHash(6302)};
         SetExactContinuation(
@@ -2397,7 +2552,7 @@ BOOST_AUTO_TEST_CASE(
         GetRecoveryRosterAuthorityHash(genesis, *authority)};
     BOOST_REQUIRE(authority_hash);
 
-    auto archived{MakeChainLock(870, 865, NonNullHash(865), 630)};
+    auto archived{MakeChainLock(875, 870, NonNullHash(870), 630)};
     archived.statement.roster_beacons = MakeRecoveryWindow(
         MakeRecoveryPendingSeed(3, 630, archived.statement.height),
         630);
@@ -2489,7 +2644,7 @@ BOOST_AUTO_TEST_CASE(marker_only_mutations_do_not_advance_certificate_revision)
     const auto empty_btcc_state{btcc_persistence.GetFinalityState()};
     BOOST_REQUIRE(btcc_persistence.PersistBTCCPresealState(
         BTCCPresealState{
-            MakePresealMarker(880, 880, 1, 64), std::nullopt}));
+            MakePresealMarker(875, 875, 1, 64), std::nullopt}));
     BOOST_CHECK(btcc_persistence.GetFinalityState() == empty_btcc_state);
     BOOST_REQUIRE(btcc_persistence.ClearBTCCPresealState());
     BOOST_CHECK(btcc_persistence.GetFinalityState() == empty_btcc_state);
@@ -2522,11 +2677,11 @@ BOOST_AUTO_TEST_CASE(active_and_prospective_preseals_survive_crash_cut)
     BOOST_REQUIRE(config.IsValid());
 
     const BTCCPresealMarker active_b_revision_1{
-        MakePresealMarker(880, 880, 1, 880)};
+        MakePresealMarker(875, 875, 1, 880)};
     const BTCCPresealMarker active_b_revision_2{
-        MakePresealMarker(880, 880, 2, 880)};
+        MakePresealMarker(875, 875, 2, 880)};
     const BTCCPresealMarker prospective_a_revision_2{
-        MakePresealMarker(890, 890, 2, 890)};
+        MakePresealMarker(885, 885, 2, 890)};
     const BTCCPresealState both{
         active_b_revision_2, prospective_a_revision_2};
 
@@ -2546,7 +2701,7 @@ BOOST_AUTO_TEST_CASE(active_and_prospective_preseals_survive_crash_cut)
         BOOST_CHECK(persistence.LoadBTCCPresealState() == both);
 
         const BTCCPresealMarker prospective_a_revision_3{
-            MakePresealMarker(890, 890, 3, 890)};
+            MakePresealMarker(885, 885, 3, 890)};
         const BTCCPresealState after_b_replay{
             std::nullopt, prospective_a_revision_3};
         BOOST_REQUIRE(
@@ -2556,7 +2711,7 @@ BOOST_AUTO_TEST_CASE(active_and_prospective_preseals_survive_crash_cut)
         PQChainLockPersistence persistence{
             DiskParams(path), genesis, config};
         const BTCCPresealState expected{
-            std::nullopt, MakePresealMarker(890, 890, 3, 890)};
+            std::nullopt, MakePresealMarker(885, 885, 3, 890)};
         BOOST_CHECK(persistence.LoadBTCCPresealState() == expected);
     }
 }
@@ -2570,7 +2725,7 @@ BOOST_AUTO_TEST_CASE(preseal_marker_revisions_and_dependencies_fail_closed)
         860, NonNullHash(860), BTCCReceiptState{}};
     BOOST_REQUIRE(config.IsValid());
 
-    const BTCCPresealMarker initial{MakePresealMarker(880, 880, 7, 1)};
+    const BTCCPresealMarker initial{MakePresealMarker(875, 875, 7, 1)};
     PQChainLockPersistence persistence{DiskParams(path), genesis, config};
     BOOST_REQUIRE(persistence.PersistBTCCPresealState(
         BTCCPresealState{initial, std::nullopt}));
@@ -2578,10 +2733,10 @@ BOOST_AUTO_TEST_CASE(preseal_marker_revisions_and_dependencies_fail_closed)
         BTCCPresealState{initial, std::nullopt}));
 
     auto changed_without_revision{initial};
-    changed_without_revision.terminal_carrier_height = 890;
-    changed_without_revision.terminal_carrier_hash = NonNullHash(890);
+    changed_without_revision.terminal_carrier_height = 885;
+    changed_without_revision.terminal_carrier_hash = NonNullHash(885);
     changed_without_revision.terminal_receipt =
-        MakePresealMarker(880, 890, 7, 2).terminal_receipt;
+        MakePresealMarker(875, 885, 7, 2).terminal_receipt;
     BOOST_CHECK(!persistence.PersistBTCCPresealState(
         BTCCPresealState{changed_without_revision, std::nullopt}));
 
@@ -2598,7 +2753,7 @@ BOOST_AUTO_TEST_CASE(preseal_marker_revisions_and_dependencies_fail_closed)
         BTCCPresealState{corrupt_receipt, std::nullopt}));
 
     BOOST_REQUIRE(persistence.ClearBTCCPresealState());
-    auto reused_revision{MakePresealMarker(900, 900, 8, 3)};
+    auto reused_revision{MakePresealMarker(895, 895, 8, 3)};
     BOOST_CHECK(!persistence.PersistBTCCPresealState(
         BTCCPresealState{reused_revision, std::nullopt}));
     reused_revision.revision = 9;
@@ -2709,7 +2864,7 @@ BOOST_AUTO_TEST_CASE(corrupt_preseal_marker_fails_closed)
     {
         PQChainLockPersistence persistence{DiskParams(path), genesis, config};
         BOOST_REQUIRE(persistence.PersistBTCCPresealState(
-            BTCCPresealState{MakePresealMarker(880, 880, 1, 4),
+            BTCCPresealState{MakePresealMarker(875, 875, 1, 4),
                              std::nullopt}));
     }
     {
@@ -2876,14 +3031,28 @@ BOOST_AUTO_TEST_CASE(durable_records_require_the_unique_successor_geometry)
     BOOST_CHECK(error == ChainLockPersistenceError::INVALID_CHAINLOCK);
     BOOST_CHECK(!persistence.LoadBest());
 
-    const auto predecessor{NextEligibleChainLockTargetHeight(
+    auto later_initialize{skipped};
+    SetExactInitialization(later_initialize, genesis, 60);
+    BOOST_CHECK(!persistence.PersistInitializedBest(
+        later_initialize, &error));
+    BOOST_CHECK(error == ChainLockPersistenceError::INVALID_CHAINLOCK);
+    BOOST_CHECK(!persistence.LoadBest());
+
+    const auto first_target{NextEligibleChainLockTargetHeight(
         config.chainlock_schedule, config.activation_predecessor_height)};
-    BOOST_REQUIRE(predecessor);
-    auto exact{MakeChainLock(
-        870, *predecessor, NonNullHash(*predecessor), 61)};
-    const auto authority{SetExactInitialization(exact, genesis, 61)};
+    BOOST_REQUIRE(first_target);
+    auto initialized{MakeChainLock(
+        *first_target, config.activation_predecessor_height,
+        NonNullHash(config.activation_predecessor_height), 61)};
+    const auto authority{
+        SetExactInitialization(initialized, genesis, 61)};
     BOOST_REQUIRE(persistence.PersistInitializedBest(
-        exact, &error, authority));
+        initialized, &error, authority));
+    BOOST_CHECK(error == ChainLockPersistenceError::NONE);
+    auto exact{MakeChainLock(
+        870, *first_target, initialized.statement.block_hash, 62)};
+    SetExactContinuation(exact, genesis, initialized);
+    BOOST_REQUIRE(persistence.PersistBest(exact, &error));
     BOOST_CHECK(error == ChainLockPersistenceError::NONE);
     BOOST_REQUIRE(persistence.LoadBest());
     BOOST_CHECK(*persistence.LoadBest() == exact);
@@ -2895,15 +3064,17 @@ BOOST_AUTO_TEST_CASE(unsealed_advance_survives_restart_until_descendant_seal)
     const uint256 genesis{NonNullHash(10)};
     const auto config{MakeConfig()};
 
-    auto advance{MakeChainLock(870, 865, NonNullHash(865), 10)};
+    auto advance{MakeChainLock(
+        865, config.activation_predecessor_height,
+        NonNullHash(config.activation_predecessor_height), 10)};
     advance.statement.accepted_btcc_cursor =
-        BTCCursor{870, advance.statement.block_hash, NonNullHash(8700)};
+        BTCCursor{865, advance.statement.block_hash, NonNullHash(8650)};
     advance.statement.btcc_advance = BTCCAdvance::ADVANCE;
     const auto authority{SetExactInitialization(advance, genesis, 10)};
     BOOST_REQUIRE(advance.IsStructurallyValid());
 
     auto before_seal{
-        MakeChainLock(875, 870, advance.statement.block_hash, 11)};
+        MakeChainLock(870, 865, advance.statement.block_hash, 11)};
     before_seal.statement.previous_btcc_cursor =
         advance.statement.accepted_btcc_cursor;
     before_seal.statement.accepted_btcc_cursor =
@@ -2929,14 +3100,14 @@ BOOST_AUTO_TEST_CASE(unsealed_advance_survives_restart_until_descendant_seal)
         BOOST_CHECK(*unsealed == advance);
         BOOST_CHECK(!persistence.HasCatchupMarker());
 
-        auto seal{MakeChainLock(880, 875,
+        auto seal{MakeChainLock(875, 870,
                                 before_seal.statement.block_hash, 12)};
         seal.statement.previous_btcc_cursor =
             advance.statement.accepted_btcc_cursor;
         seal.statement.accepted_btcc_cursor =
             advance.statement.accepted_btcc_cursor;
         seal.statement.btcc_receipt_state = BTCCReceiptState{
-            advance.statement.accepted_btcc_cursor, NonNullHash(8800)};
+            advance.statement.accepted_btcc_cursor, NonNullHash(8750)};
         SetExactContinuation(seal, genesis, before_seal);
         BOOST_REQUIRE(persistence.PersistBest(seal));
         BOOST_CHECK(!persistence.LoadUnsealedBTCC());
@@ -2955,22 +3126,24 @@ BOOST_AUTO_TEST_CASE(
     auto prior{MakeChainLock(
         865, config.activation_predecessor_height, NonNullHash(config.activation_predecessor_height), 13)};
     const auto authority{SetExactInitialization(prior, genesis, 13)};
-    auto advance{MakeChainLock(870, 865, prior.statement.block_hash, 14)};
+    auto bridge{MakeChainLock(870, 865, prior.statement.block_hash, 140)};
+    SetExactContinuation(bridge, genesis, prior);
+    auto advance{MakeChainLock(875, 870, bridge.statement.block_hash, 14)};
     advance.statement.accepted_btcc_cursor =
-        BTCCursor{870, advance.statement.block_hash, NonNullHash(87'014)};
+        BTCCursor{875, advance.statement.block_hash, NonNullHash(87'514)};
     advance.statement.btcc_advance = BTCCAdvance::ADVANCE;
-    SetExactContinuation(advance, genesis, prior);
+    SetExactContinuation(advance, genesis, bridge);
     auto premature{
-        MakeChainLock(875, 870, advance.statement.block_hash, 15)};
+        MakeChainLock(880, 875, advance.statement.block_hash, 15)};
     SetExactContinuation(premature, genesis, advance);
-    auto keep{MakeChainLock(875, 870, advance.statement.block_hash, 16)};
+    auto keep{MakeChainLock(880, 875, advance.statement.block_hash, 16)};
     keep.statement.previous_btcc_cursor =
         advance.statement.accepted_btcc_cursor;
     keep.statement.accepted_btcc_cursor =
         advance.statement.accepted_btcc_cursor;
     SetExactContinuation(keep, genesis, advance);
     auto recovery{
-        MakeChainLock(880, 875, keep.statement.block_hash, 17)};
+        MakeChainLock(885, 880, keep.statement.block_hash, 17)};
     SetExactContinuation(recovery, genesis, keep);
     recovery.statement.previous_btcc_cursor = {};
     recovery.statement.accepted_btcc_cursor = {};
@@ -2981,6 +3154,7 @@ BOOST_AUTO_TEST_CASE(
         PQChainLockPersistence persistence{DiskParams(path), genesis, config};
         BOOST_REQUIRE(persistence.PersistInitializedBest(
             prior, nullptr, authority));
+        BOOST_REQUIRE(persistence.PersistBest(bridge));
         BOOST_REQUIRE(persistence.PersistBest(advance));
         BOOST_REQUIRE(persistence.LoadUnsealedBTCC());
 
@@ -3186,6 +3360,11 @@ BOOST_AUTO_TEST_CASE(
         BuildPaymentAuditEpochSchedule(schedule_config, first_epoch)};
     BOOST_REQUIRE(first_schedule);
 
+    auto initialized{MakeChainLock(
+        865, config.activation_predecessor_height,
+        NonNullHash(config.activation_predecessor_height), 229)};
+    const auto authority{SetExactInitialization(
+        initialized, genesis, 229)};
     auto first{MakeChainLock(
         first_schedule->seal_height,
         first_schedule->seal_height -
@@ -3193,7 +3372,7 @@ BOOST_AUTO_TEST_CASE(
         NonNullHash(first_schedule->seal_height -
                     config.chainlock_schedule.chainlock_period),
         230)};
-    const auto authority{SetExactInitialization(first, genesis, 230)};
+    SetExactContinuation(first, genesis, initialized);
     constexpr uint8_t all_rosters_mask{
         static_cast<uint8_t>((uint16_t{1} << ACTIVE_QUORUMS) - 1)};
     const auto first_capsule{
@@ -3219,13 +3398,17 @@ BOOST_AUTO_TEST_CASE(
             genesis, config, second_epoch, second, all_rosters_mask,
             authority)};
 
+    ReceiptArchiveRosterAuthorization first_authorization;
     {
         PQChainLockPersistence persistence{DiskParams(path), genesis,
                                            config};
         ChainLockPersistenceError error{
             ChainLockPersistenceError::NONE};
-        const bool persisted{persistence.PersistInitializedBest(
-            first, &error, authority, nullptr, first_capsule)};
+        BOOST_REQUIRE(persistence.PersistInitializedBest(
+            initialized, nullptr, authority));
+        const bool persisted{persistence.PersistCatchupBest(
+            first, &error, std::nullopt, nullptr, nullptr,
+            first_capsule)};
         BOOST_TEST_CONTEXT("persistence error " <<
                            static_cast<int>(error)) {
             BOOST_REQUIRE(persisted);
@@ -3233,11 +3416,13 @@ BOOST_AUTO_TEST_CASE(
         BOOST_REQUIRE(persistence.LoadPaymentAuditSealContext());
         BOOST_CHECK(*persistence.LoadPaymentAuditSealContext() ==
                     first_capsule);
+        const auto state{persistence.GetFinalityState()};
+        BOOST_REQUIRE(state.receipt_archive_authorization);
+        first_authorization = *state.receipt_archive_authorization;
 
         // Byte-identical replay is a no-op and cannot clear the still-live
         // capsule merely because the caller omitted its optional input.
-        BOOST_REQUIRE(persistence.PersistInitializedBest(
-            first, nullptr, authority));
+        BOOST_REQUIRE(persistence.PersistCatchupBest(first));
         BOOST_CHECK(*persistence.LoadPaymentAuditSealContext() ==
                     first_capsule);
     }
@@ -3248,8 +3433,9 @@ BOOST_AUTO_TEST_CASE(
         BOOST_CHECK(*persistence.LoadPaymentAuditSealContext() ==
                     first_capsule);
 
-        BOOST_REQUIRE(persistence.PersistBest(
-            second, nullptr, nullptr, second_capsule));
+        BOOST_REQUIRE(persistence.PersistBestCoveringReceiptArchive(
+            second, first_authorization, nullptr, nullptr,
+            second_capsule));
         BOOST_REQUIRE(persistence.LoadPaymentAuditSealContext());
         BOOST_CHECK(*persistence.LoadPaymentAuditSealContext() ==
                     second_capsule);
