@@ -17,6 +17,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -26,6 +27,17 @@ class CDataStream;
 class CNode;
 class ChainstateManager;
 class PeerManager;
+
+struct MNAUTHConnectionSelectionCandidate {
+    int64_t peer_id{-1};
+    bool inbound{false};
+    bool disconnecting{false};
+};
+
+/** Select one stable socket in the deterministic direction when available. */
+[[nodiscard]] std::optional<int64_t> SelectPreferredMNAUTHConnection(
+    bool local_is_deterministic_initiator,
+    std::span<const MNAUTHConnectionSelectionCandidate> connections) noexcept;
 
 /** Map local/remote VERSION facts into canonical initiator/responder order. */
 [[nodiscard]] std::optional<llmq::pq::MNAUTHTranscript> BuildMNAUTHTranscript(

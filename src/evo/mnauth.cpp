@@ -25,6 +25,7 @@
 #include <validation.h>
 #include <version.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -311,6 +312,26 @@ bool EnqueueLocalSignature(CNode& node,
 }
 
 } // namespace
+
+std::optional<int64_t> SelectPreferredMNAUTHConnection(
+    bool local_is_deterministic_initiator,
+    std::span<const MNAUTHConnectionSelectionCandidate> connections) noexcept
+{
+    const bool preferred_inbound{!local_is_deterministic_initiator};
+    std::optional<int64_t> preferred;
+    std::optional<int64_t> fallback;
+    for (const auto& connection : connections) {
+        if (connection.disconnecting || connection.peer_id < 0) continue;
+        if (!fallback || connection.peer_id < *fallback) {
+            fallback = connection.peer_id;
+        }
+        if (connection.inbound == preferred_inbound &&
+            (!preferred || connection.peer_id < *preferred)) {
+            preferred = connection.peer_id;
+        }
+    }
+    return preferred ? preferred : fallback;
+}
 
 bool CMNAuth::ContextToken::IsStructurallyValid() const noexcept
 {
@@ -1524,29 +1545,53 @@ void CMNAuth::ProcessAsyncCompletions(AsyncProcessor& async,
                 GetActiveMasternodeIdentity(
                     local_pro_tx_hash, local_key_version,
                     local_public_key, local_service);
+                std::vector<CNode*> duplicate_nodes;
                 for (CNode* other : nodes_snapshot.Nodes()) {
-                    if (pnode->fDisconnect || other == pnode ||
-                        other->GetVerifiedProRegTxHash() !=
+                    if (other != pnode &&
+                        other->GetVerifiedProRegTxHash() ==
                             message.signer_pro_tx_hash) {
-                        continue;
+                        duplicate_nodes.push_back(other);
                     }
-                    if (!local_pro_tx_hash.IsNull()) {
-                        const uint256 deterministic_outbound =
-                            llmq::CLLMQUtils::DeterministicOutboundConnection(
-                                local_pro_tx_hash,
-                                message.signer_pro_tx_hash);
-                        if (deterministic_outbound == local_pro_tx_hash) {
-                            if (other->IsInboundConn()) {
-                                other->m_masternode_probe_connection = true;
-                            } else if (pnode->IsInboundConn()) {
-                                pnode->m_masternode_probe_connection = true;
-                            }
-                        } else if (!other->IsInboundConn()) {
+                }
+                if (local_pro_tx_hash.IsNull()) {
+                    if (std::any_of(
+                            duplicate_nodes.begin(), duplicate_nodes.end(),
+                            [](const CNode* other) {
+                                return !other->fDisconnect;
+                            })) {
+                        pnode->fDisconnect = true;
+                    }
+                } else {
+                    const uint256 deterministic_outbound =
+                        llmq::CLLMQUtils::DeterministicOutboundConnection(
+                            local_pro_tx_hash,
+                            message.signer_pro_tx_hash);
+                    std::vector<MNAUTHConnectionSelectionCandidate>
+                        candidates;
+                    candidates.reserve(duplicate_nodes.size() + 1);
+                    candidates.push_back({
+                        pnode->GetId(), pnode->IsInboundConn(),
+                        pnode->fDisconnect});
+                    for (const CNode* other : duplicate_nodes) {
+                        candidates.push_back({
+                            other->GetId(), other->IsInboundConn(),
+                            other->fDisconnect});
+                    }
+                    const auto preferred_peer_id{
+                        SelectPreferredMNAUTHConnection(
+                            deterministic_outbound == local_pro_tx_hash,
+                            candidates)};
+                    // Direction wins over age; the stable lowest NodeId then
+                    // prevents repeated authentication from churning it.
+                    for (CNode* other : duplicate_nodes) {
+                        if (!other->fDisconnect &&
+                            (!preferred_peer_id ||
+                             other->GetId() != *preferred_peer_id)) {
                             other->fDisconnect = true;
-                        } else if (!pnode->IsInboundConn()) {
-                            pnode->fDisconnect = true;
                         }
-                    } else {
+                    }
+                    if (!preferred_peer_id ||
+                        pnode->GetId() != *preferred_peer_id) {
                         pnode->fDisconnect = true;
                     }
                 }

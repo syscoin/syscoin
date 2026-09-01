@@ -321,6 +321,44 @@ private:
 
 BOOST_AUTO_TEST_SUITE(pq_mnauth_tests)
 
+BOOST_AUTO_TEST_CASE(
+    deterministic_duplicate_policy_selects_one_stable_connection)
+{
+    using Candidate = MNAUTHConnectionSelectionCandidate;
+    const auto select = [](
+        bool local_is_initiator,
+        std::initializer_list<Candidate> candidates) {
+        return SelectPreferredMNAUTHConnection(
+            local_is_initiator,
+            std::span<const Candidate>{
+                candidates.begin(), candidates.size()});
+    };
+
+    // The expected direction wins even when the wrong-direction socket is
+    // older, then the lowest NodeId wins within that direction.
+    BOOST_CHECK_EQUAL(*select(true, {{10, true}, {50, false}}), 50);
+    BOOST_CHECK_EQUAL(*select(true, {{41, true}, {19, true}}), 19);
+    BOOST_CHECK_EQUAL(*select(true, {{41, false}, {19, false}}), 19);
+    BOOST_CHECK_EQUAL(*select(false, {{10, false}, {50, true}}), 50);
+    BOOST_CHECK_EQUAL(*select(false, {{41, true}, {19, true}}), 19);
+    BOOST_CHECK_EQUAL(*select(false, {{41, false}, {19, false}}), 19);
+
+    // Disconnecting sockets cannot win, and input order has no effect.
+    BOOST_CHECK_EQUAL(
+        *select(true, {{5, false, true}, {20, false}, {3, true}}),
+        20);
+    BOOST_CHECK_EQUAL(
+        *select(true, {{3, true}, {20, false}, {5, false, true}}),
+        20);
+    BOOST_CHECK_EQUAL(
+        *select(false, {{5, true, true}, {20, true}, {3, false}}),
+        20);
+    BOOST_CHECK_EQUAL(
+        *select(false, {{3, false}, {20, true}, {5, true, true}}),
+        20);
+    BOOST_CHECK(!select(true, {}));
+}
+
 BOOST_AUTO_TEST_CASE(version_claim_and_connection_role_mapping_are_canonical)
 {
     CMNAuthVersionData regular;
