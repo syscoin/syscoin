@@ -1236,6 +1236,58 @@ private:
         uint256 witness_id;
     };
 
+    // MSVC rejects the deprecated free shared-pointer atomics in C++20,
+    // while supported older libc++ releases lack the specialization.
+    class AtomicPendingVerifiedHistoricalChainLock
+    {
+        using value_type =
+            std::shared_ptr<const PendingVerifiedHistoricalChainLock>;
+
+    public:
+        AtomicPendingVerifiedHistoricalChainLock() noexcept = default;
+
+        [[nodiscard]] value_type load() const noexcept
+        {
+#if defined(__cpp_lib_atomic_shared_ptr) && \
+    __cpp_lib_atomic_shared_ptr >= 201711L
+            return m_value.load();
+#else
+            return std::atomic_load(&m_value);
+#endif
+        }
+
+        void store(value_type desired) noexcept
+        {
+#if defined(__cpp_lib_atomic_shared_ptr) && \
+    __cpp_lib_atomic_shared_ptr >= 201711L
+            m_value.store(std::move(desired));
+#else
+            std::atomic_store(&m_value, std::move(desired));
+#endif
+        }
+
+        bool compare_exchange_strong(value_type& expected,
+                                     value_type desired) noexcept
+        {
+#if defined(__cpp_lib_atomic_shared_ptr) && \
+    __cpp_lib_atomic_shared_ptr >= 201711L
+            return m_value.compare_exchange_strong(
+                expected, std::move(desired));
+#else
+            return std::atomic_compare_exchange_strong(
+                &m_value, &expected, std::move(desired));
+#endif
+        }
+
+    private:
+#if defined(__cpp_lib_atomic_shared_ptr) && \
+    __cpp_lib_atomic_shared_ptr >= 201711L
+        std::atomic<value_type> m_value;
+#else
+        value_type m_value;
+#endif
+    };
+
     struct CurrentSigningContext {
         uint8_t variant_index{0};
         pq::ChainLockStatement statement;
@@ -2267,7 +2319,7 @@ private:
         GUARDED_BY(cs_main);
     BoundedActiveRangeFrontier m_btcc_replay_validation_frontier
         GUARDED_BY(cs_main);
-    mutable std::shared_ptr<const PendingVerifiedHistoricalChainLock>
+    mutable AtomicPendingVerifiedHistoricalChainLock
         m_pending_verified_historical;
     std::unique_ptr<CPQSignerJournal> m_signer_journal;
     Mutex m_signer_reconcile_mutex;

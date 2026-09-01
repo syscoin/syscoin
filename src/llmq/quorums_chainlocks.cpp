@@ -3143,9 +3143,7 @@ void CChainLocksHandler::Stop()
             m_pending_payment_audit_last_request =
                 std::chrono::microseconds{0};
         }
-        std::atomic_store(
-            &m_pending_verified_historical,
-            std::shared_ptr<const PendingVerifiedHistoricalChainLock>{});
+        m_pending_verified_historical.store({});
         m_retry_pending_btcc_block.store(false);
     }
 }
@@ -10055,7 +10053,7 @@ bool CChainLocksHandler::DoesHistoricalVerificationCapabilityMatch(
 std::shared_ptr<const CChainLocksHandler::PendingVerifiedHistoricalChainLock>
 CChainLocksHandler::GetPendingVerifiedHistoricalChainLock() const
 {
-    return std::atomic_load(&m_pending_verified_historical);
+    return m_pending_verified_historical.load();
 }
 
 bool CChainLocksHandler::RetainVerifiedHistoricalChainLock(
@@ -10072,8 +10070,8 @@ bool CChainLocksHandler::RetainVerifiedHistoricalChainLock(
     std::shared_ptr<const PendingVerifiedHistoricalChainLock> desired{
         std::move(pending)};
     std::shared_ptr<const PendingVerifiedHistoricalChainLock> empty;
-    if (std::atomic_compare_exchange_strong(
-            &m_pending_verified_historical, &empty, desired)) {
+    if (m_pending_verified_historical.compare_exchange_strong(
+            empty, desired)) {
         return true;
     }
     return empty && empty->logical_id == logical_id &&
@@ -10093,9 +10091,8 @@ void CChainLocksHandler::ContinueVerifiedHistoricalChainLock()
         pending.get(), &retain)};
     if (accepted || !retain) {
         auto expected{pending};
-        (void)std::atomic_compare_exchange_strong(
-            &m_pending_verified_historical, &expected,
-            std::shared_ptr<const PendingVerifiedHistoricalChainLock>{});
+        (void)m_pending_verified_historical.compare_exchange_strong(
+            expected, {});
     }
     if (!accepted && !retain) {
         LogPrint(BCLog::CHAINLOCKS,
