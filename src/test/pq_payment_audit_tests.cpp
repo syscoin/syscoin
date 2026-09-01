@@ -273,6 +273,17 @@ BOOST_AUTO_TEST_CASE(schedule_has_24_retrospective_rows_and_retry_window)
     BOOST_CHECK_EQUAL(schedule->seal_height, 1'370);
     BOOST_CHECK_EQUAL(schedule->carrier_start_height, 1'385);
     BOOST_CHECK_EQUAL(schedule->carrier_end_height_exclusive, 1'660);
+    BOOST_CHECK_EQUAL(PAYMENT_AUDIT_CARRIER_EPOCH_LOOKBACK, 2U);
+    const auto first_carrier_epoch{EpochForHeight(
+        config.chainlock, schedule->carrier_start_height)};
+    const auto last_live_epoch{EpochForHeight(
+        config.chainlock, schedule->carrier_end_height_exclusive - 1)};
+    BOOST_REQUIRE(first_carrier_epoch);
+    BOOST_REQUIRE(last_live_epoch);
+    BOOST_CHECK_EQUAL(*first_carrier_epoch, schedule->epoch + 1);
+    BOOST_CHECK_EQUAL(*last_live_epoch,
+                      schedule->epoch +
+                          PAYMENT_AUDIT_CARRIER_EPOCH_LOOKBACK);
     BOOST_CHECK_EQUAL(PAYMENT_AUDIT_FUTURE_BTC_HEIGHT_DELTA, 37U);
     BOOST_CHECK_EQUAL(PAYMENT_AUDIT_SEED_MIN_CONFIRMATIONS, 6U);
     BOOST_CHECK_GE(schedule->seal_height,

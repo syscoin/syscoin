@@ -369,7 +369,8 @@ std::optional<uint32_t> PaymentAuditReceiptSlotEpoch(
     }
     const auto carrier_epoch{EpochForHeight(config.chainlock, height)};
     if (!carrier_epoch) return std::nullopt;
-    for (uint32_t offset{1}; offset <= 2; ++offset) {
+    for (uint32_t offset{1};
+         offset <= PAYMENT_AUDIT_CARRIER_EPOCH_LOOKBACK; ++offset) {
         if (*carrier_epoch < offset) continue;
         const uint32_t subject_epoch{*carrier_epoch - offset};
         const auto window{

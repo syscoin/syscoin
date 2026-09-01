@@ -425,15 +425,98 @@ BOOST_AUTO_TEST_CASE(prior_epoch_summaries_survive_current_collection)
                           PAYMENT_AUDIT_ROW_COUNT);
         BOOST_CHECK_EQUAL(store.GetEpochSummaries(9).size(),
                           PAYMENT_AUDIT_ROW_COUNT);
+        BOOST_REQUIRE(store.ActivateEpoch(10) ==
+                      PaymentAuditStagingResult::ACCEPTED);
+        BOOST_CHECK(store.RetainedEpoch() == 9);
+        FreezeEpoch(store, genesis_hash, 10);
+        const auto retained{store.RetainedEpochs()};
+        BOOST_REQUIRE_EQUAL(retained.size(), 2U);
+        BOOST_CHECK_EQUAL(retained[0], 8U);
+        BOOST_CHECK_EQUAL(retained[1], 9U);
+        BOOST_CHECK_EQUAL(store.GetEpochSummaries(8).size(),
+                          PAYMENT_AUDIT_ROW_COUNT);
+        BOOST_CHECK_EQUAL(store.GetEpochSummaries(9).size(),
+                          PAYMENT_AUDIT_ROW_COUNT);
+        BOOST_CHECK_EQUAL(store.GetEpochSummaries(10).size(),
+                          PAYMENT_AUDIT_ROW_COUNT);
     }
     PaymentAuditStagingStore restarted{path, genesis_hash};
     BOOST_REQUIRE(restarted.IsHealthy());
-    BOOST_CHECK(restarted.RetainedEpoch() == 8);
+    BOOST_CHECK(restarted.ActiveEpoch() == 10);
+    BOOST_CHECK(restarted.RetainedEpoch() == 9);
+    const auto retained{restarted.RetainedEpochs()};
+    BOOST_REQUIRE_EQUAL(retained.size(), 2U);
+    BOOST_CHECK_EQUAL(retained[0], 8U);
+    BOOST_CHECK_EQUAL(retained[1], 9U);
     BOOST_CHECK_EQUAL(restarted.GetEpochSummaries(8).size(),
                       PAYMENT_AUDIT_ROW_COUNT);
     BOOST_REQUIRE(restarted.ClearRetainedEpoch(8) ==
                   PaymentAuditStagingResult::ACCEPTED);
     BOOST_CHECK(restarted.GetEpochSummaries(8).empty());
+    BOOST_CHECK(restarted.RetainedEpoch() == 9);
+    BOOST_CHECK_EQUAL(restarted.GetEpochSummaries(9).size(),
+                      PAYMENT_AUDIT_ROW_COUNT);
+    BOOST_CHECK_EQUAL(restarted.GetEpochSummaries(10).size(),
+                      PAYMENT_AUDIT_ROW_COUNT);
+}
+
+BOOST_AUTO_TEST_CASE(two_epoch_activation_jump_preserves_live_summaries)
+{
+    const fs::path path{m_path_root /
+                        "pq_payment_audit_staging_epoch_jump"};
+    const uint256 genesis_hash{NonNullHash(31)};
+    {
+        PaymentAuditStagingStore store{path, genesis_hash};
+        BOOST_REQUIRE(store.ActivateEpoch(20) ==
+                      PaymentAuditStagingResult::ACCEPTED);
+        FreezeEpoch(store, genesis_hash, 20);
+        BOOST_REQUIRE(store.ActivateEpoch(22) ==
+                      PaymentAuditStagingResult::ACCEPTED);
+        BOOST_CHECK(!store.RetainedEpoch());
+        const auto retained{store.RetainedEpochs()};
+        BOOST_REQUIRE_EQUAL(retained.size(), 1U);
+        BOOST_CHECK_EQUAL(retained.front(), 20U);
+        BOOST_CHECK_EQUAL(store.GetEpochSummaries(20).size(),
+                          PAYMENT_AUDIT_ROW_COUNT);
+    }
+    PaymentAuditStagingStore restarted{path, genesis_hash};
+    BOOST_REQUIRE(restarted.IsHealthy());
+    BOOST_CHECK(restarted.ActiveEpoch() == 22);
+    BOOST_CHECK_EQUAL(restarted.GetEpochSummaries(20).size(),
+                      PAYMENT_AUDIT_ROW_COUNT);
+    BOOST_REQUIRE(restarted.ActivateEpoch(23) ==
+                  PaymentAuditStagingResult::ACCEPTED);
+    BOOST_CHECK(restarted.GetEpochSummaries(20).empty());
+}
+
+BOOST_AUTO_TEST_CASE(retained_epochs_clear_independently)
+{
+    const fs::path path{m_path_root /
+                        "pq_payment_audit_staging_independent_clear"};
+    const uint256 genesis_hash{NonNullHash(32)};
+    PaymentAuditStagingStore store{path, genesis_hash};
+    BOOST_REQUIRE(store.ActivateEpoch(30) ==
+                  PaymentAuditStagingResult::ACCEPTED);
+    FreezeEpoch(store, genesis_hash, 30);
+    BOOST_REQUIRE(store.ActivateEpoch(31) ==
+                  PaymentAuditStagingResult::ACCEPTED);
+    FreezeEpoch(store, genesis_hash, 31);
+    BOOST_REQUIRE(store.ActivateEpoch(32) ==
+                  PaymentAuditStagingResult::ACCEPTED);
+    BOOST_CHECK(store.RetainedEpoch() == 31);
+
+    BOOST_REQUIRE(store.ClearRetainedEpoch(31) ==
+                  PaymentAuditStagingResult::ACCEPTED);
+    BOOST_CHECK(!store.RetainedEpoch());
+    BOOST_CHECK(store.GetEpochSummaries(31).empty());
+    BOOST_CHECK_EQUAL(store.GetEpochSummaries(30).size(),
+                      PAYMENT_AUDIT_ROW_COUNT);
+    const auto retained{store.RetainedEpochs()};
+    BOOST_REQUIRE_EQUAL(retained.size(), 1U);
+    BOOST_CHECK_EQUAL(retained.front(), 30U);
+    BOOST_REQUIRE(store.ClearRetainedEpoch(30) ==
+                  PaymentAuditStagingResult::ACCEPTED);
+    BOOST_CHECK(store.RetainedEpochs().empty());
 }
 
 BOOST_AUTO_TEST_CASE(incomplete_epoch_forces_selection_abstention)
@@ -533,7 +616,8 @@ BOOST_AUTO_TEST_CASE(startup_scan_is_physically_bounded)
                         "pq_payment_audit_staging_physical_bound"};
     const uint256 genesis_hash{NonNullHash(62)};
     constexpr std::size_t max_persisted_records{
-        2 + 2 * PAYMENT_AUDIT_ROW_COUNT +
+        2 + (1 + PaymentAuditStagingStore::MAX_RETAINED_EPOCHS) *
+                PAYMENT_AUDIT_ROW_COUNT +
         PaymentAuditStagingStore::MAX_OPEN_ROWS * (1 + QUORUM_SIZE)};
     {
         PaymentAuditStagingStore store{path, genesis_hash};

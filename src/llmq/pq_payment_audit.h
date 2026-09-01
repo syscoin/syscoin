@@ -37,6 +37,9 @@ inline constexpr uint32_t PAYMENT_AUDIT_FUTURE_BTC_HEIGHT_DELTA{37};
 inline constexpr uint32_t PAYMENT_AUDIT_SEED_MIN_CONFIRMATIONS{6};
 inline constexpr uint32_t PAYMENT_AUDIT_SEAL_DELAY{240};
 inline constexpr uint32_t PAYMENT_AUDIT_RECEIPT_DELAY{10};
+// A carrier window can extend from the subject's successor epoch into the
+// following epoch. Durable audit inputs must cover the same fixed lookback.
+inline constexpr uint32_t PAYMENT_AUDIT_CARRIER_EPOCH_LOOKBACK{2};
 inline constexpr std::size_t PAYMENT_AUDIT_SIGNATURE_COUNT{
     REQUIRED_QUORUMS * QUORUM_THRESHOLD};
 inline constexpr std::size_t PAYMENT_AUDIT_REPORT_ONLINE_THRESHOLD{

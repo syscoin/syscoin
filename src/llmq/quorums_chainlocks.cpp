@@ -12392,12 +12392,12 @@ bool CChainLocksHandler::PreparePaymentAuditSigningRuntime()
             m_payment_audit_staging_store->ActiveEpoch()}) {
         candidate_epochs.push_back(*active);
     }
-    if (const auto retained{
-            m_payment_audit_staging_store->RetainedEpoch()};
-        retained &&
-        std::find(candidate_epochs.begin(), candidate_epochs.end(),
-                  *retained) == candidate_epochs.end()) {
-        candidate_epochs.push_back(*retained);
+    for (const uint32_t retained :
+         m_payment_audit_staging_store->RetainedEpochs()) {
+        if (std::find(candidate_epochs.begin(), candidate_epochs.end(),
+                      retained) == candidate_epochs.end()) {
+            candidate_epochs.push_back(retained);
+        }
     }
     std::sort(candidate_epochs.begin(), candidate_epochs.end(),
               std::greater<uint32_t>{});

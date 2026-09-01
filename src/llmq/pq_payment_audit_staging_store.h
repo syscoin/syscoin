@@ -99,6 +99,8 @@ class PaymentAuditStagingStore final {
 public:
     static constexpr uint32_t DB_FORMAT_VERSION{1};
     static constexpr std::size_t MAX_OPEN_ROWS{2};
+    static constexpr std::size_t MAX_RETAINED_EPOCHS{
+        PAYMENT_AUDIT_CARRIER_EPOCH_LOOKBACK};
 
     PaymentAuditStagingStore(
         fs::path path,
@@ -114,10 +116,13 @@ public:
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     [[nodiscard]] std::optional<uint32_t> RetainedEpoch() const
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** Prior epochs that still have durable compact summaries. */
+    [[nodiscard]] std::vector<uint32_t> RetainedEpochs() const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /**
-     * Start one epoch, retain the immediately preceding epoch's compact
-     * summaries for its delayed B, and discard all obsolete/open old rows.
+     * Start one epoch, retain the two preceding epochs' compact summaries
+     * for their delayed B windows, and discard all obsolete/open old rows.
      */
     [[nodiscard]] PaymentAuditStagingResult ActivateEpoch(uint32_t epoch)
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);

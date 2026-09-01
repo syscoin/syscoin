@@ -36,13 +36,22 @@ constexpr std::string_view RESPONSE_DOMAIN{
     "SYS_PQ_PAYMENT_AUDIT_STAGING_RESPONSE_V1"};
 constexpr std::string_view SUMMARY_DOMAIN{
     "SYS_PQ_PAYMENT_AUDIT_STAGING_SUMMARY_V1"};
-// Active and retained epochs can each hold one summary per row; only the
-// active epoch can additionally own the bounded open-row response set.
+// The active and two carrier-live predecessor epochs can each hold one
+// summary per row; only the active epoch owns the bounded open responses.
 constexpr std::size_t MAX_PERSISTED_RECORDS{
-    2 + 2 * PAYMENT_AUDIT_ROW_COUNT +
+    2 + (1 + PaymentAuditStagingStore::MAX_RETAINED_EPOCHS) *
+            PAYMENT_AUDIT_ROW_COUNT +
     PaymentAuditStagingStore::MAX_OPEN_ROWS * (1 + QUORUM_SIZE)};
 
 using RowKey = std::pair<uint32_t, uint8_t>;
+
+bool IsSummaryEpochInRetentionWindow(uint32_t active_epoch,
+                                     uint32_t summary_epoch) noexcept
+{
+    return summary_epoch <= active_epoch &&
+           active_epoch - summary_epoch <=
+               PaymentAuditStagingStore::MAX_RETAINED_EPOCHS;
+}
 
 void WriteDomain(HashWriter& writer, std::string_view domain)
 {
@@ -493,8 +502,8 @@ struct PaymentAuditStagingStore::Impl {
         for (const auto& [key, summary] : summaries) {
             (void)summary;
             if (++counts[key.first] > PAYMENT_AUDIT_ROW_COUNT ||
-                (key.first != *active_epoch &&
-                 (!retained_epoch || key.first != *retained_epoch))) {
+                !IsSummaryEpochInRetentionWindow(
+                    *active_epoch, key.first)) {
                 return false;
             }
         }
@@ -680,6 +689,26 @@ std::optional<uint32_t> PaymentAuditStagingStore::RetainedEpoch() const
     return m_impl->failure ? std::nullopt : m_impl->retained_epoch;
 }
 
+std::vector<uint32_t> PaymentAuditStagingStore::RetainedEpochs() const
+{
+    LOCK(m_mutex);
+    std::vector<uint32_t> retained;
+    retained.reserve(MAX_RETAINED_EPOCHS);
+    if (m_impl->failure || !m_impl->active_epoch) return retained;
+    for (const auto& [key, summary] : m_impl->summaries) {
+        (void)summary;
+        if (key.first == *m_impl->active_epoch ||
+            !IsSummaryEpochInRetentionWindow(
+                *m_impl->active_epoch, key.first)) {
+            continue;
+        }
+        if (retained.empty() || retained.back() != key.first) {
+            retained.push_back(key.first);
+        }
+    }
+    return retained;
+}
+
 PaymentAuditStagingResult PaymentAuditStagingStore::ActivateEpoch(
     uint32_t epoch)
 {
@@ -702,8 +731,9 @@ PaymentAuditStagingResult PaymentAuditStagingStore::ActivateEpoch(
         std::vector<RowKey> erase_summaries;
         for (const auto& [key, summary] : m_impl->summaries) {
             (void)summary;
-            if (key.first != epoch &&
-                (!retained || key.first != *retained)) {
+            // Preserve every still-live compact epoch even if this activation
+            // jumps directly over the intervening collection epoch.
+            if (!IsSummaryEpochInRetentionWindow(epoch, key.first)) {
                 batch.Erase(SummaryDiskKey(key));
                 erase_summaries.push_back(key);
             }
@@ -1081,7 +1111,15 @@ PaymentAuditStagingResult PaymentAuditStagingStore::ClearRetainedEpoch(
 {
     LOCK(m_mutex);
     if (m_impl->failure) return *m_impl->failure;
-    if (!m_impl->retained_epoch || *m_impl->retained_epoch != epoch) {
+    const auto first{m_impl->summaries.lower_bound(RowKey{epoch, 0})};
+    const bool has_summary{first != m_impl->summaries.end() &&
+                           first->first.first == epoch};
+    const bool is_marker{m_impl->retained_epoch &&
+                         *m_impl->retained_epoch == epoch};
+    if (!m_impl->active_epoch || epoch == *m_impl->active_epoch ||
+        !IsSummaryEpochInRetentionWindow(
+            *m_impl->active_epoch, epoch) ||
+        (!has_summary && !is_marker)) {
         return PaymentAuditStagingResult::NOT_FOUND;
     }
     try {
@@ -1094,15 +1132,17 @@ PaymentAuditStagingResult PaymentAuditStagingStore::ClearRetainedEpoch(
                 erase.push_back(key);
             }
         }
+        const std::optional<uint32_t> retained{
+            is_marker ? std::nullopt : m_impl->retained_epoch};
         batch.Write(StateKey(), MakeState(
                                     m_genesis_hash,
-                                    m_impl->active_epoch, {}));
+                                    m_impl->active_epoch, retained));
         if (!m_impl->db.WriteBatch(batch, true)) {
             m_impl->Fail(PaymentAuditStagingResult::DATABASE_ERROR);
             return *m_impl->failure;
         }
         for (const auto& key : erase) m_impl->summaries.erase(key);
-        m_impl->retained_epoch.reset();
+        m_impl->retained_epoch = retained;
         return PaymentAuditStagingResult::ACCEPTED;
     } catch (const std::exception&) {
         m_impl->Fail(PaymentAuditStagingResult::DATABASE_ERROR);
