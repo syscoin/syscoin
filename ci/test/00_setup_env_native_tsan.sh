@@ -23,6 +23,7 @@ PQ_FULL_TREE_TESTS="feature_deterministicmns,feature_nevm_data"
 PQ_FULL_TREE_TESTS="${PQ_FULL_TREE_TESTS},rpc_masternode,rpc_mnauth"
 PQ_FULL_TREE_TESTS="${PQ_FULL_TREE_TESTS},feature_governance_objects,feature_governance"
 PQ_FULL_TREE_TESTS="${PQ_FULL_TREE_TESTS},feature_governance_dynamic,feature_btcheader_policy_auxpow"
+PQ_FULL_TREE_TESTS="${PQ_FULL_TREE_TESTS},feature_pq_chainlocks"
 export TEST_RUNNER_EXTRA="--exclude interface_zmq_nevm,rpc_bind,feature_bind_extra,feature_proxy,${PQ_FULL_TREE_TESTS}"
 export PYZMQ=true
 export NO_WERROR=1

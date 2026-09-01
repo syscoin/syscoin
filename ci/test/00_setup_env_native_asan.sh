@@ -35,7 +35,7 @@ PQ_FULL_TREE_TESTS="${PQ_FULL_TREE_TESTS},rpc_masternode,rpc_mnauth"
 PQ_FULL_TREE_TESTS="${PQ_FULL_TREE_TESTS},feature_governance_objects,feature_governance"
 PQ_FULL_TREE_TESTS="${PQ_FULL_TREE_TESTS},feature_governance_dynamic,feature_btcheader_policy_auxpow"
 # SYSCOIN: The full-dimension ChainLocks functional prevents this lane from
-# completing under AddressSanitizer; native macOS and TSan retain the test.
+# completing under AddressSanitizer; native macOS retains the test.
 export TEST_RUNNER_EXTRA="--exclude interface_zmq_nevm,rpc_bind,feature_bind_extra,feature_proxy,${PQ_FULL_TREE_TESTS},feature_pq_chainlocks"
 export SYSCOIN_CONFIG="--enable-c++20 --enable-usdt --enable-zmq --with-incompatible-bdb --with-gui=qt5 \
 CPPFLAGS='-DARENA_DEBUG -DDEBUG_LOCKORDER' \
