@@ -3940,6 +3940,47 @@ BOOST_AUTO_TEST_CASE(share_relay_identity_is_independent_from_original_signer)
         rosters, relay_recipients, rootless_relay, transcript));
 }
 
+BOOST_AUTO_TEST_CASE(
+    share_relay_egress_is_overlay_bounded_and_identity_deduplicated)
+{
+    const uint256 sender{NonNullHash(31)};
+    const uint256 planned_recipient{NonNullHash(32)};
+    const uint256 unplanned_recipient{NonNullHash(33)};
+    const uint256 unauthorized_identity{NonNullHash(34)};
+    const uint256 local_identity{NonNullHash(35)};
+    llmq::PQRelayPlan plan;
+    plan.local_pro_tx_hash = local_identity;
+    BOOST_CHECK(llmq::IsPQRelayPlanForIdentity(
+        plan, local_identity));
+    BOOST_CHECK(!llmq::IsPQRelayPlanForIdentity(
+        plan, NonNullHash(36)));
+    BOOST_CHECK(!llmq::IsPQRelayPlanForIdentity(plan, uint256{}));
+    plan.local_pro_tx_hash.SetNull();
+    BOOST_CHECK(!llmq::IsPQRelayPlanForIdentity(
+        plan, local_identity));
+
+    llmq::PQRelayIdentityGate gate{sender};
+
+    BOOST_CHECK(!gate.Admit(
+        uint256{}, /*authorized_recipient=*/true,
+        /*current_relay_member=*/true));
+    BOOST_CHECK(!gate.Admit(
+        sender, /*authorized_recipient=*/true,
+        /*current_relay_member=*/true));
+    BOOST_CHECK(!gate.Admit(
+        unplanned_recipient, /*authorized_recipient=*/true,
+        /*current_relay_member=*/false));
+    BOOST_CHECK(!gate.Admit(
+        unauthorized_identity, /*authorized_recipient=*/false,
+        /*current_relay_member=*/true));
+    BOOST_CHECK(gate.Admit(
+        planned_recipient, /*authorized_recipient=*/true,
+        /*current_relay_member=*/true));
+    BOOST_CHECK(!gate.Admit(
+        planned_recipient, /*authorized_recipient=*/true,
+        /*current_relay_member=*/true));
+}
+
 BOOST_FIXTURE_TEST_CASE(
     updated_receipt_anchor_is_a_valid_historical_range_boundary,
     TestChain100Setup)

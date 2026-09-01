@@ -29,6 +29,14 @@ using PQQuorumOverlayPlan = std::map<uint256, PQQuorumConnectionSet>;
 using PQChainLockPredecessorHeight =
     std::function<std::optional<int32_t>()>;
 
+struct PQQuorumOverlayPredecessor {
+    int32_t height{-1};
+    uint256 block_hash;
+
+    friend bool operator==(const PQQuorumOverlayPredecessor&,
+                           const PQQuorumOverlayPredecessor&) = default;
+};
+
 /** Resolve the current relay target, including a missed-window recovery. */
 [[nodiscard]] std::optional<int32_t> GetPQQuorumOverlayTargetHeight(
     const pq::ChainLockScheduleConfig& schedule,
@@ -63,6 +71,16 @@ using PQChainLockPredecessorHeight =
     const uint256& target_block_hash,
     const std::array<pq::FrozenQuorumRoster, pq::ACTIVE_QUORUMS>& rosters,
     const uint256& local_pro_tx_hash);
+
+/** Install the exact plan already derived by a prepared signing context. */
+[[nodiscard]] PQQuorumOverlayPlan BuildPreparedPQQuorumOverlayPlan(
+    const uint256& quorum_context_hash,
+    const PQQuorumConnectionSet& relay_members);
+
+/** Reject a prepared plan after its accepted predecessor changes. */
+[[nodiscard]] bool IsPreparedPQQuorumOverlaySourceCurrent(
+    const std::optional<PQQuorumOverlayPredecessor>& expected,
+    const std::optional<PQQuorumOverlayPredecessor>& accepted) noexcept;
 
 /**
  * Pure reconciliation policy shared by production wiring and rollover tests.
@@ -106,6 +124,20 @@ public:
 
     void UpdatedBlockTip(const CBlockIndex* new_tip, bool initial_download)
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    [[nodiscard]] bool ApplyPreparedContext(
+        const uint256& quorum_context_hash,
+        const PQQuorumConnectionSet& relay_members,
+        const std::optional<PQQuorumOverlayPredecessor>& accepted_predecessor)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    [[nodiscard]] bool ApplyPaymentAuditContext(
+        const uint256& group,
+        const PQQuorumConnectionSet& relay_members,
+        uint64_t runtime_generation)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    [[nodiscard]] bool RemovePaymentAuditContext(
+        const uint256& group,
+        uint64_t runtime_generation)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     void Clear() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
 private:
@@ -121,9 +153,21 @@ private:
     const pq::FrozenQuorumRosterCachePtr m_roster_cache;
     const PQChainLockPredecessorHeight m_predecessor_height;
     Mutex m_mutex;
+    struct PaymentAuditPlan {
+        uint256 group;
+        PQQuorumConnectionSet relay_members;
+        uint64_t runtime_generation{0};
+    };
+
+    void ReconcileLocked() EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
     void ClearLocked() EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
     PQQuorumOverlayReconciler m_reconciler GUARDED_BY(m_mutex);
+    PQQuorumOverlayPlan m_chainlock_plan GUARDED_BY(m_mutex);
+    std::optional<PaymentAuditPlan> m_payment_audit_plan
+        GUARDED_BY(m_mutex);
+    uint64_t m_retired_payment_audit_generation GUARDED_BY(m_mutex){0};
     std::optional<Context> m_context GUARDED_BY(m_mutex);
+    uint64_t m_revision GUARDED_BY(m_mutex){0};
 };
 
 extern CPQQuorumConnectionOverlay* pqQuorumConnectionOverlay;

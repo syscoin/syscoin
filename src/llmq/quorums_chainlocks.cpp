@@ -55,6 +55,48 @@ constexpr std::size_t PQ_CHAINLOCK_PREFIX_SIZE{
     pq::FINAL_SIGNATURE_COUNT * pq::AuthenticatedChildSignature::WIRE_SIZE};
 constexpr std::chrono::seconds PAYMENT_AUDIT_FINALIZATION_RETRY_INTERVAL{30};
 
+std::shared_ptr<const PQRelayPlan> BuildPQRelayPlanForActiveIdentity(
+    const std::array<pq::FrozenQuorumRoster, pq::ACTIVE_QUORUMS>& rosters)
+{
+    uint256 local_pro_tx_hash;
+    uint32_t local_key_version{0};
+    pq::GlobalPublicKey local_public_key{};
+    CService local_service;
+    if (!GetActiveMasternodeIdentity(
+            local_pro_tx_hash, local_key_version,
+            local_public_key, local_service)) {
+        return {};
+    }
+    PQRelayPlan plan;
+    plan.local_pro_tx_hash = local_pro_tx_hash;
+    plan.authorized_recipients = BuildChainLockRelayRecipients(rosters);
+    plan.relay_members =
+        GetPQQuorumUnionRelayConnections(rosters, local_pro_tx_hash);
+    if (plan.relay_members.empty()) return {};
+    return std::make_shared<const PQRelayPlan>(std::move(plan));
+}
+
+uint256 GetActiveMasternodeRelayIdentity()
+{
+    uint256 local_pro_tx_hash;
+    uint32_t local_key_version{0};
+    pq::GlobalPublicKey local_public_key{};
+    CService local_service;
+    if (!GetActiveMasternodeIdentity(
+            local_pro_tx_hash, local_key_version,
+            local_public_key, local_service)) {
+        return {};
+    }
+    return local_pro_tx_hash;
+}
+
+bool IsPQRelayPlanForActiveIdentity(
+    const std::shared_ptr<const PQRelayPlan>& plan)
+{
+    return plan && IsPQRelayPlanForIdentity(
+                       *plan, GetActiveMasternodeRelayIdentity());
+}
+
 pq::RecoveryRosterAuthorityPtr RecoveryAuthorityForDurableState(
     const uint256& genesis_hash,
     const pq::FinalChainLock& chainlock,
@@ -3758,9 +3800,12 @@ std::size_t CChainLocksHandler::GetPaymentAuditRuntimePinnedBytes() const
         const auto& runtime{*m_payment_audit_runtime};
         bytes += sizeof(PaymentAuditResponseRuntime);
         add_roster(runtime.signing_rosters);
-        if (runtime.relay_recipients) {
-            bytes += sizeof(ChainLockRelayRecipients) +
-                     memusage::DynamicUsage(*runtime.relay_recipients);
+        if (runtime.relay_plan) {
+            bytes += sizeof(PQRelayPlan) +
+                     memusage::DynamicUsage(
+                         runtime.relay_plan->authorized_recipients) +
+                     memusage::DynamicUsage(
+                         runtime.relay_plan->relay_members);
         }
         if (runtime.seal_chainlock) {
             bytes += memusage::DynamicUsage(
@@ -3786,6 +3831,13 @@ std::size_t CChainLocksHandler::GetPaymentAuditRuntimePinnedBytes() const
         for (const auto& row : m_payment_audit_network_context->rows) {
             add_chain_context(row.response_context);
             bytes += memusage::DynamicUsage(row.active_relays);
+            if (row.relay_plan) {
+                bytes += sizeof(PQRelayPlan) +
+                         memusage::DynamicUsage(
+                             row.relay_plan->authorized_recipients) +
+                         memusage::DynamicUsage(
+                             row.relay_plan->relay_members);
+            }
         }
     }
     return bytes;
@@ -10543,6 +10595,7 @@ CChainLocksHandler::BuildCurrentSigningContexts(
             *indexed_payment_audit_state;
         source.payment_probation_state_hash =
             indexed_target->pqPaymentProbationStateHash;
+        source.has_durable_chainlock = finality.best.has_value();
     }
 
     CurrentSigningContexts contexts;
@@ -11560,7 +11613,7 @@ CChainLocksHandler::GetPublishedCurrentSigningContexts(
         current->source.admission_generation != admission_generation ||
         current->count == 0 ||
         current->count > CurrentSigningContexts::MAX_VARIANTS ||
-        !current->roster_set || !current->relay_recipients) {
+        !current->roster_set || !current->relay_plan) {
         return {};
     }
     for (std::size_t i{0}; i < current->count; ++i) {
@@ -11588,11 +11641,34 @@ bool CChainLocksHandler::RefreshCurrentSigningContexts(
     }
     const auto is_current = [this](
         const CurrentSigningContextsPtr& contexts) {
-        return contexts && IsCurrentSigningSource(contexts->source);
+        return contexts &&
+               IsPQRelayPlanForActiveIdentity(contexts->relay_plan) &&
+               IsCurrentSigningSource(contexts->source);
+    };
+    const auto apply_relay_plan = [](
+        const CurrentSigningContextsPtr& contexts) {
+        if (pqQuorumConnectionOverlay == nullptr || !contexts ||
+            !IsPQRelayPlanForActiveIdentity(contexts->relay_plan)) {
+            return;
+        }
+        const std::optional<PQQuorumOverlayPredecessor> accepted_predecessor{
+            contexts->source.has_durable_chainlock
+                ? std::optional<PQQuorumOverlayPredecessor>{
+                      PQQuorumOverlayPredecessor{
+                          contexts->source.durable_predecessor.height,
+                          contexts->source.durable_predecessor.block_hash}}
+                : std::nullopt};
+        (void)pqQuorumConnectionOverlay->ApplyPreparedContext(
+            contexts->statements[0].quorum_context_hash,
+            contexts->relay_plan->relay_members,
+            accepted_predecessor);
     };
     auto cached{GetPublishedCurrentSigningContexts(admission_generation)};
     const bool initial_current{is_current(cached)};
-    if (initial_current) return true;
+    if (initial_current) {
+        apply_relay_plan(cached);
+        return true;
+    }
 
     LOCK(m_context_build_mutex);
     if (!IsShareAdmissionGenerationCurrent(admission_generation)) {
@@ -11600,7 +11676,10 @@ bool CChainLocksHandler::RefreshCurrentSigningContexts(
     }
     cached = GetPublishedCurrentSigningContexts(admission_generation);
     const bool cached_current{is_current(cached)};
-    if (cached_current) return true;
+    if (cached_current) {
+        apply_relay_plan(cached);
+        return true;
+    }
 
     uint64_t build_generation{0};
     CurrentSigningContextsPtr replaced;
@@ -11625,10 +11704,12 @@ bool CChainLocksHandler::RefreshCurrentSigningContexts(
         retire_replaced_if_exact();
         return false;
     }
-    built->relay_recipients =
-        std::make_shared<const ChainLockRelayRecipients>(
-            BuildChainLockRelayRecipients(
-                built->roster_set->Rosters()));
+    built->relay_plan = BuildPQRelayPlanForActiveIdentity(
+        built->roster_set->Rosters());
+    if (!built->relay_plan) {
+        retire_replaced_if_exact();
+        return false;
+    }
 
     std::array<std::unique_ptr<pq::ChainLockCollector>,
                CurrentSigningContexts::MAX_VARIANTS> collectors;
@@ -11675,6 +11756,10 @@ bool CChainLocksHandler::RefreshCurrentSigningContexts(
         }
         return false;
     }
+    // The first INITIALIZE context has no accepted predecessor for the
+    // tip-driven overlay path. Reapplying cached contexts also repairs a plan
+    // cleared by IBD or a racing tip callback before any share announcement.
+    apply_relay_plan(published);
     LogPrint(BCLog::CHAINLOCKS,
              "CChainLocksHandler::%s -- published PQ ChainLock signing "
              "context height=%d variants=%u\n",
@@ -11782,14 +11867,21 @@ CChainLocksHandler::BuildPaymentAuditResponseDefinition(
     active_relays.erase(
         std::unique(active_relays.begin(), active_relays.end()),
         active_relays.end());
+    auto relay_plan{BuildPQRelayPlanForActiveIdentity(
+        response_context->Rosters())};
+    if (!relay_plan) return std::nullopt;
     return PaymentAuditResponseDefinition{
-        *row, std::move(response_context), std::move(active_relays)};
+        *row, std::move(response_context), std::move(active_relays),
+        std::move(relay_plan)};
 }
 
 bool CChainLocksHandler::IsPaymentAuditResponseDefinitionSourceCurrent(
     const PaymentAuditResponseDefinition& definition) const
 {
-    if (!m_store || !definition.response_context) return false;
+    if (!m_store || !definition.response_context ||
+        !IsPQRelayPlanForActiveIdentity(definition.relay_plan)) {
+        return false;
+    }
     const auto finalized{m_store->GetRecordByHeight(
         definition.row.expected.response_height)};
     if (!finalized || !finalized->certificate ||
@@ -12245,7 +12337,7 @@ void CChainLocksHandler::MaybeCapturePaymentAuditResponse(
 }
 
 void CChainLocksHandler::RelayPaymentAuditResponse(
-    const pq::PaymentAuditResponse& response, NodeId except_peer)
+    const pq::PaymentAuditResponse& response, uint256 excluded_identity)
 {
     const auto context{GetPaymentAuditNetworkContext()};
     if (!context) return;
@@ -12257,20 +12349,26 @@ void CChainLocksHandler::RelayPaymentAuditResponse(
             break;
         }
     }
-    if (definition == nullptr ||
+    if (definition == nullptr || !definition->relay_plan ||
         definition->row.expected.subject_descriptor_hash !=
             response.subject_descriptor_hash ||
         !IsPaymentAuditResponseDefinitionSourceCurrent(*definition) ||
         !IsCurrentPaymentAuditNetworkRow(definition->row)) {
         return;
     }
+    PQRelayIdentityGate relay_gate{excluded_identity};
     m_connman.ForEachNode([&](CNode* node) {
-        if (node == nullptr || node->GetId() == except_peer ||
-            node->GetCommonVersion() < PQ_MNAUTH_PROTO_VERSION ||
-            !std::binary_search(
-                definition->active_relays.begin(),
-                definition->active_relays.end(),
-                node->GetVerifiedProRegTxHash())) {
+        if (node == nullptr || node->fDisconnect ||
+            node->GetCommonVersion() < PQ_MNAUTH_PROTO_VERSION) {
+            return;
+        }
+        const uint256 identity{node->GetVerifiedProRegTxHash()};
+        if (!relay_gate.Admit(
+                identity,
+                std::binary_search(
+                    definition->active_relays.begin(),
+                    definition->active_relays.end(), identity),
+                definition->relay_plan->relay_members.contains(identity))) {
             return;
         }
         m_connman.PushMessage(
@@ -12289,6 +12387,7 @@ void CChainLocksHandler::MaybeRelayPaymentAuditHave()
     const auto context{GetPaymentAuditNetworkContext()};
     if (!context) return;
     for (const auto& definition : context->rows) {
+        if (!definition.relay_plan) continue;
         const auto row{m_payment_audit_staging_store->GetOpenRowMetadata(
             definition.row.expected.epoch,
             definition.row.expected.row_index)};
@@ -12300,13 +12399,19 @@ void CChainLocksHandler::MaybeRelayPaymentAuditHave()
         }
         pq::PaymentAuditHave have{definition.row.expected};
         have.available_members = row->available_members;
+        PQRelayIdentityGate relay_gate;
         m_connman.ForEachNode([&](CNode* node) {
-            if (node == nullptr ||
-                node->GetCommonVersion() < PQ_MNAUTH_PROTO_VERSION ||
-                !std::binary_search(
-                    definition.active_relays.begin(),
-                    definition.active_relays.end(),
-                    node->GetVerifiedProRegTxHash())) {
+            if (node == nullptr || node->fDisconnect ||
+                node->GetCommonVersion() < PQ_MNAUTH_PROTO_VERSION) {
+                return;
+            }
+            const uint256 identity{node->GetVerifiedProRegTxHash()};
+            if (!relay_gate.Admit(
+                    identity,
+                    std::binary_search(
+                        definition.active_relays.begin(),
+                        definition.active_relays.end(), identity),
+                    definition.relay_plan->relay_members.contains(identity))) {
                 return;
             }
             m_connman.PushMessage(
@@ -12318,13 +12423,111 @@ void CChainLocksHandler::MaybeRelayPaymentAuditHave()
 
 void CChainLocksHandler::ResetPaymentAuditRuntime()
 {
+    ReleasePaymentAuditOverlay();
     m_payment_audit_runtime.reset();
     ++m_payment_audit_runtime_generation;
+}
+
+void CChainLocksHandler::ReleasePaymentAuditOverlay()
+{
+    if (pqQuorumConnectionOverlay == nullptr ||
+        !m_payment_audit_runtime ||
+        m_payment_audit_runtime->relay_group_id.IsNull()) {
+        return;
+    }
+    (void)pqQuorumConnectionOverlay->RemovePaymentAuditContext(
+        m_payment_audit_runtime->relay_group_id,
+        m_payment_audit_runtime_generation);
+}
+
+bool CChainLocksHandler::ApplyPaymentAuditOverlay(
+    uint64_t expected_runtime_generation)
+{
+    std::optional<pq::PaymentAuditStatement> statement;
+    std::shared_ptr<const PQRelayPlan> relay_plan;
+    uint256 relay_group_id;
+    uint64_t roster_source_generation{0};
+    bool already_finalized{false};
+    {
+        LOCK(m_payment_audit_mutex);
+        if (m_payment_audit_runtime_generation !=
+                expected_runtime_generation ||
+            !m_payment_audit_runtime ||
+            !m_payment_audit_runtime->statement ||
+            !m_payment_audit_runtime->relay_plan) {
+            return false;
+        }
+        statement = m_payment_audit_runtime->statement;
+        relay_plan = m_payment_audit_runtime->relay_plan;
+        relay_group_id = m_payment_audit_runtime->relay_group_id;
+        roster_source_generation =
+            m_payment_audit_runtime->roster_source_generation;
+        already_finalized =
+            m_payment_audit_runtime->finalized.has_value();
+    }
+    if (already_finalized) {
+        if (pqQuorumConnectionOverlay != nullptr &&
+            !relay_group_id.IsNull()) {
+            (void)pqQuorumConnectionOverlay->RemovePaymentAuditContext(
+                relay_group_id, expected_runtime_generation);
+        }
+        return true;
+    }
+    if (!statement || relay_group_id.IsNull() ||
+        relay_group_id !=
+            pq::GetPaymentAuditLogicalId(m_genesis_hash, *statement) ||
+        !IsPQRelayPlanForActiveIdentity(relay_plan) ||
+        !IsQuorumRosterSourceGenerationCurrent(
+            roster_source_generation) ||
+        !IsCurrentPaymentAuditStatement(*statement)) {
+        return false;
+    }
+    if (pqQuorumConnectionOverlay != nullptr &&
+        !pqQuorumConnectionOverlay->ApplyPaymentAuditContext(
+            relay_group_id, relay_plan->relay_members,
+            expected_runtime_generation)) {
+        return false;
+    }
+
+    bool exact{false};
+    bool finalized{false};
+    {
+        LOCK(m_payment_audit_mutex);
+        exact = m_payment_audit_runtime_generation ==
+                    expected_runtime_generation &&
+                m_payment_audit_runtime &&
+                m_payment_audit_runtime->statement == statement &&
+                m_payment_audit_runtime->relay_plan == relay_plan &&
+                m_payment_audit_runtime->relay_group_id ==
+                    relay_group_id &&
+                m_payment_audit_runtime->roster_source_generation ==
+                    roster_source_generation;
+        finalized = exact &&
+                    m_payment_audit_runtime->finalized.has_value();
+    }
+    if (finalized) {
+        if (pqQuorumConnectionOverlay != nullptr) {
+            (void)pqQuorumConnectionOverlay->RemovePaymentAuditContext(
+                relay_group_id, expected_runtime_generation);
+        }
+        return true;
+    }
+    exact = exact &&
+            IsPQRelayPlanForActiveIdentity(relay_plan) &&
+            IsQuorumRosterSourceGenerationCurrent(
+                roster_source_generation) &&
+            IsCurrentPaymentAuditStatement(*statement);
+    if (!exact && pqQuorumConnectionOverlay != nullptr) {
+        (void)pqQuorumConnectionOverlay->RemovePaymentAuditContext(
+            relay_group_id, expected_runtime_generation);
+    }
+    return exact;
 }
 
 uint64_t CChainLocksHandler::PublishPaymentAuditRuntime(
     PaymentAuditResponseRuntime runtime)
 {
+    ReleasePaymentAuditOverlay();
     ++m_payment_audit_runtime_generation;
     m_payment_audit_runtime.emplace(std::move(runtime));
     return m_payment_audit_runtime_generation;
@@ -12344,20 +12547,27 @@ bool CChainLocksHandler::PreparePaymentAuditSigningRuntime()
     const uint64_t current_admission_generation{
         GetShareAdmissionGeneration()};
     if (!roster_cache || current_admission_generation == 0) return false;
+    const uint256 current_relay_identity{
+        GetActiveMasternodeRelayIdentity()};
 
     std::optional<pq::PaymentAuditStatement> cached_statement;
+    uint64_t cached_runtime_generation{0};
     {
         LOCK(m_payment_audit_mutex);
         if (m_payment_audit_runtime &&
-            ShouldResetPaymentAuditRuntime(
-                m_payment_audit_runtime->finalized.has_value(),
-                m_payment_audit_runtime->finalized
-                    ? m_payment_audit_runtime->finalized
-                          ->admission_generation
-                    : 0,
-                current_admission_generation,
-                m_payment_audit_runtime->roster_source_generation,
-                current_roster_source_generation)) {
+            (!m_payment_audit_runtime->relay_plan ||
+             !IsPQRelayPlanForIdentity(
+                 *m_payment_audit_runtime->relay_plan,
+                 current_relay_identity) ||
+             ShouldResetPaymentAuditRuntime(
+                 m_payment_audit_runtime->finalized.has_value(),
+                 m_payment_audit_runtime->finalized
+                     ? m_payment_audit_runtime->finalized
+                           ->admission_generation
+                     : 0,
+                 current_admission_generation,
+                 m_payment_audit_runtime->roster_source_generation,
+                 current_roster_source_generation))) {
             ResetPaymentAuditRuntime();
         }
         if (m_payment_audit_runtime &&
@@ -12365,10 +12575,12 @@ bool CChainLocksHandler::PreparePaymentAuditSigningRuntime()
             m_payment_audit_runtime->statement &&
             m_payment_audit_runtime->seal_chainlock &&
             m_payment_audit_runtime->signing_rosters &&
-            m_payment_audit_runtime->relay_recipients &&
+            m_payment_audit_runtime->relay_plan &&
             pq::IsSigningRosterAuthorizationMask(
                 m_payment_audit_runtime->authorization_mask)) {
             cached_statement = m_payment_audit_runtime->statement;
+            cached_runtime_generation =
+                m_payment_audit_runtime_generation;
         }
     }
     if (cached_statement &&
@@ -12381,6 +12593,17 @@ bool CChainLocksHandler::PreparePaymentAuditSigningRuntime()
         if (!candidates->ContainsExactStatement(*cached_statement)) {
             if (!m_payment_audit_store->IsCandidateRevisionCurrent(
                     candidates->candidate_revision)) {
+                return false;
+            }
+            if (!ApplyPaymentAuditOverlay(
+                    cached_runtime_generation) ||
+                !m_payment_audit_store->IsCandidateRevisionCurrent(
+                    candidates->candidate_revision)) {
+                LOCK(m_payment_audit_mutex);
+                if (m_payment_audit_runtime_generation ==
+                    cached_runtime_generation) {
+                    ResetPaymentAuditRuntime();
+                }
                 return false;
             }
             return true;
@@ -12641,16 +12864,20 @@ bool CChainLocksHandler::PreparePaymentAuditSigningRuntime()
             !IsCurrentPaymentAuditStatement(statement)) {
             continue;
         }
-        auto relay_recipients{
-            std::make_shared<const ChainLockRelayRecipients>(
-                BuildChainLockRelayRecipients(*signing_rosters_ptr))};
+        auto relay_plan{BuildPQRelayPlanForActiveIdentity(
+            *signing_rosters_ptr)};
+        if (!relay_plan) continue;
+        const uint256 relay_group_id{
+            pq::GetPaymentAuditLogicalId(m_genesis_hash, statement)};
+        if (relay_group_id.IsNull()) continue;
 
         // Bind publication to both immutable sources. If either changes
         // across publication, retire only the runtime installed by this pass.
         if (!m_payment_audit_store->IsCandidateRevisionCurrent(
                 existing_candidates->candidate_revision) ||
             !IsQuorumRosterSourceGenerationCurrent(
-                roster_source_generation)) {
+                roster_source_generation) ||
+            !IsPQRelayPlanForActiveIdentity(relay_plan)) {
             return false;
         }
         uint64_t published_generation{0};
@@ -12659,7 +12886,7 @@ bool CChainLocksHandler::PreparePaymentAuditSigningRuntime()
             published_generation = PublishPaymentAuditRuntime(
                 PaymentAuditResponseRuntime{
                     *round, selected, statement, *seal_chainlock,
-                    signing_rosters_ptr, relay_recipients,
+                    signing_rosters_ptr, relay_plan, relay_group_id,
                     authorization_mask, roster_source_generation,
                     std::move(collector), std::nullopt, std::nullopt,
                     false, false});
@@ -12667,7 +12894,11 @@ bool CChainLocksHandler::PreparePaymentAuditSigningRuntime()
         if (!m_payment_audit_store->IsCandidateRevisionCurrent(
                 existing_candidates->candidate_revision) ||
             !IsQuorumRosterSourceGenerationCurrent(
-                roster_source_generation)) {
+                roster_source_generation) ||
+            !IsPQRelayPlanForActiveIdentity(relay_plan) ||
+            !ApplyPaymentAuditOverlay(published_generation) ||
+            !m_payment_audit_store->IsCandidateRevisionCurrent(
+                existing_candidates->candidate_revision)) {
             LOCK(m_payment_audit_mutex);
             if (m_payment_audit_runtime_generation ==
                 published_generation) {
@@ -12752,9 +12983,12 @@ bool CChainLocksHandler::HasExactPaymentAuditRuntime(
     uint64_t expected_runtime_generation,
     const pq::PaymentAuditStatement& statement,
     const pq::PreparedPaymentAuditContextPtr& prepared_context,
-    const std::shared_ptr<const ChainLockRelayRecipients>& recipients) const
+    const std::shared_ptr<const PQRelayPlan>& relay_plan) const
 {
-    if (!prepared_context || !recipients) return false;
+    if (!prepared_context ||
+        !IsPQRelayPlanForActiveIdentity(relay_plan)) {
+        return false;
+    }
     LOCK(m_payment_audit_mutex);
     const bool runtime_present{m_payment_audit_runtime.has_value()};
     const bool collector_present{
@@ -12775,8 +13009,8 @@ bool CChainLocksHandler::HasExactPaymentAuditRuntime(
                 prepared_context->RostersPtr() &&
             m_payment_audit_runtime->authorization_mask ==
                 prepared_context->AuthorizationMask(),
-        runtime_present && m_payment_audit_runtime->relay_recipients &&
-            m_payment_audit_runtime->relay_recipients == recipients);
+        runtime_present && m_payment_audit_runtime->relay_plan &&
+            m_payment_audit_runtime->relay_plan == relay_plan);
 }
 
 bool CChainLocksHandler::HasExactPaymentAuditFinalization(
@@ -12809,10 +13043,10 @@ bool CChainLocksHandler::HasExactPaymentAuditFinalization(
 void CChainLocksHandler::RelayPaymentAuditShare(
     const pq::PaymentAuditShare& share,
     const pq::PreparedPaymentAuditContextPtr& prepared_context,
-    const std::shared_ptr<const ChainLockRelayRecipients>& recipients,
+    const std::shared_ptr<const PQRelayPlan>& relay_plan,
     uint64_t runtime_generation,
     uint64_t admission_generation,
-    NodeId except_peer)
+    uint256 excluded_identity)
 {
     LOCK(m_share_lifecycle_mutex);
     if (!IsShareAdmissionGenerationCurrent(admission_generation)) return;
@@ -12822,18 +13056,24 @@ void CChainLocksHandler::RelayPaymentAuditShare(
     }
     if (!HasExactPaymentAuditRuntime(
             runtime_generation, share.transcript.statement,
-            prepared_context, recipients) ||
+            prepared_context, relay_plan) ||
         !IsCurrentPaymentAuditStatement(share.transcript.statement)) {
         return;
     }
+    PQRelayIdentityGate relay_gate{excluded_identity};
     m_connman.ForEachNode([&](CNode* node) {
         if (!IsShareAdmissionGenerationCurrent(admission_generation)) return;
-        if (node == nullptr || node->GetId() == except_peer ||
+        if (node == nullptr || node->fDisconnect ||
             node->GetCommonVersion() < PQ_MNAUTH_PROTO_VERSION) {
             return;
         }
         const uint256 identity{node->GetVerifiedProRegTxHash()};
-        if (identity.IsNull() || !recipients->contains(identity)) return;
+        if (!relay_gate.Admit(
+                identity,
+                relay_plan->authorized_recipients.contains(identity),
+                relay_plan->relay_members.contains(identity))) {
+            return;
+        }
         m_connman.PushMessage(
             node, CNetMsgMaker(node->GetCommonVersion())
                       .Make(NetMsgType::PQPOSESHARE, share));
@@ -12961,6 +13201,7 @@ CChainLocksHandler::CollectPaymentAuditShare(
                 outcome.finalized = finalized;
                 m_payment_audit_runtime->finalized =
                     std::move(finalized);
+                ReleasePaymentAuditOverlay();
                 m_payment_audit_runtime->finalization_last_attempt =
                     GetTime<std::chrono::microseconds>();
                 m_payment_audit_runtime->finalization_attempt_in_flight =
@@ -13013,7 +13254,7 @@ void CChainLocksHandler::ProcessPaymentAuditShare(
         punish("bad-pq-payment-audit-share-encoding");
         return;
     }
-    std::shared_ptr<const ChainLockRelayRecipients> relay_recipients;
+    std::shared_ptr<const PQRelayPlan> relay_plan;
     pq::PreparedPaymentAuditContextPtr prepared_context;
     uint64_t runtime_generation{0};
     {
@@ -13025,11 +13266,11 @@ void CChainLocksHandler::ProcessPaymentAuditShare(
             !m_payment_audit_runtime->collector ||
             !m_payment_audit_runtime->statement ||
             !m_payment_audit_runtime->signing_rosters ||
-            !m_payment_audit_runtime->relay_recipients) {
+            !m_payment_audit_runtime->relay_plan) {
             return;
         }
-        relay_recipients = m_payment_audit_runtime->relay_recipients;
-        if (!relay_recipients->contains(peer_identity) ||
+        relay_plan = m_payment_audit_runtime->relay_plan;
+        if (!relay_plan->authorized_recipients.contains(peer_identity) ||
             share.transcript.statement !=
                 *m_payment_audit_runtime->statement) {
             return;
@@ -13061,7 +13302,7 @@ void CChainLocksHandler::ProcessPaymentAuditShare(
     }
     if (!HasExactPaymentAuditRuntime(
             runtime_generation, share.transcript.statement,
-            prepared_context, relay_recipients) ||
+            prepared_context, relay_plan) ||
         !IsCurrentPaymentAuditStatement(share.transcript.statement)) {
         if (collection.finalized) {
             FinishPaymentAuditFinalizationAttempt(
@@ -13070,8 +13311,8 @@ void CChainLocksHandler::ProcessPaymentAuditShare(
         return;
     }
     RelayPaymentAuditShare(
-        share, prepared_context, relay_recipients,
-        runtime_generation, admission_generation, node_id);
+        share, prepared_context, relay_plan,
+        runtime_generation, admission_generation, peer_identity);
     if (!IsShareAdmissionGenerationCurrent(admission_generation)) {
         if (collection.finalized) {
             FinishPaymentAuditFinalizationAttempt(
@@ -13279,9 +13520,10 @@ void CChainLocksHandler::ProcessChainLockShare(CNode* from,
         admission_generation)};
     const auto current{contexts ? contexts->Find(share.GetStatement())
                                 : std::nullopt};
-    if (!current || !current->rosters || !contexts->relay_recipients ||
+    if (!current || !current->rosters || !contexts->relay_plan ||
         !IsAuthorizedChainLockShareRelay(
-            *current->rosters, *contexts->relay_recipients,
+            *current->rosters,
+            contexts->relay_plan->authorized_recipients,
             peer_identity, share.transcript)) {
         // Shares are multi-hop gossip. The authenticated transport peer must
         // belong to an active roster, while the signed transcript identifies
@@ -13331,7 +13573,7 @@ void CChainLocksHandler::ProcessChainLockShare(CNode* from,
         share, current->rosters, admission_generation);
     if (!collection_is_current()) return;
     RelayChainLockShare(share, contexts, current->variant_index,
-                        admission_generation, node_id);
+                        admission_generation, peer_identity);
 
     if (!IsShareAdmissionGenerationCurrent(admission_generation)) return;
     if (collection.finalized) {
@@ -14586,7 +14828,7 @@ void CChainLocksHandler::ProcessPaymentAuditResponse(
             if (result == pq::PaymentAuditStagingResult::ACCEPTED) {
                 // The WAL append precedes fan-out, while the lifecycle fence
                 // prevents Stop from splitting those two publications.
-                RelayPaymentAuditResponse(response, node_id);
+                RelayPaymentAuditResponse(response, peer_identity);
             }
         }
     }
@@ -15697,6 +15939,31 @@ ChainLockRelayRecipients BuildChainLockRelayRecipients(
     return recipients;
 }
 
+bool IsPQRelayPlanForIdentity(
+    const PQRelayPlan& plan, const uint256& local_pro_tx_hash) noexcept
+{
+    return !plan.local_pro_tx_hash.IsNull() &&
+           plan.local_pro_tx_hash == local_pro_tx_hash;
+}
+
+PQRelayIdentityGate::PQRelayIdentityGate(
+    const uint256& excluded_identity)
+    : m_excluded_identity{excluded_identity}
+{
+}
+
+bool PQRelayIdentityGate::Admit(
+    const uint256& identity, bool authorized_recipient,
+    bool current_relay_member)
+{
+    if (identity.IsNull() || !authorized_recipient ||
+        !current_relay_member ||
+        identity == m_excluded_identity) {
+        return false;
+    }
+    return m_admitted_identities.insert(identity).second;
+}
+
 bool IsAuthorizedChainLockShareRelay(
     const std::array<pq::FrozenQuorumRoster, pq::ACTIVE_QUORUMS>& rosters,
     const ChainLockRelayRecipients& relay_recipients,
@@ -15735,7 +16002,7 @@ void CChainLocksHandler::RelayChainLockShare(
     CurrentSigningContextsPtr signing_contexts,
     std::size_t variant_index,
     uint64_t admission_generation,
-    NodeId except_peer)
+    uint256 excluded_identity)
 {
     if (!signing_contexts ||
         !IsCurrentSigningSource(signing_contexts->source)) {
@@ -15761,17 +16028,23 @@ void CChainLocksHandler::RelayChainLockShare(
             return;
         }
     }
-    const auto& recipients{signing_contexts->relay_recipients};
-    if (!recipients) return;
+    const auto& relay_plan{signing_contexts->relay_plan};
+    if (!IsPQRelayPlanForActiveIdentity(relay_plan)) return;
 
+    PQRelayIdentityGate relay_gate{excluded_identity};
     m_connman.ForEachNode([&](CNode* node) {
         if (!IsShareAdmissionGenerationCurrent(admission_generation)) return;
-        if (node == nullptr || node->GetId() == except_peer ||
+        if (node == nullptr || node->fDisconnect ||
             node->GetCommonVersion() < PQ_MNAUTH_PROTO_VERSION) {
             return;
         }
         const uint256 identity{node->GetVerifiedProRegTxHash()};
-        if (identity.IsNull() || !recipients->contains(identity)) return;
+        if (!relay_gate.Admit(
+                identity,
+                relay_plan->authorized_recipients.contains(identity),
+                relay_plan->relay_members.contains(identity))) {
+            return;
+        }
         m_connman.PushMessage(
             node, CNetMsgMaker(node->GetCommonVersion())
                       .Make(NetMsgType::PQCLSHARE, share));
@@ -16116,7 +16389,7 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
     pq::PreparedPaymentAuditContextPtr signing_context;
     pq::QuorumBitmap reporter_observed_members{};
     pq::FrozenQuorumRostersPtr rosters;
-    std::shared_ptr<const ChainLockRelayRecipients> relay_recipients;
+    std::shared_ptr<const PQRelayPlan> relay_plan;
     std::optional<LocalPaymentAuditFinalization> finalization_to_process;
     uint64_t runtime_generation{0};
     uint8_t authorization_mask{0};
@@ -16128,7 +16401,7 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
             !m_payment_audit_runtime->statement ||
             !m_payment_audit_runtime->seal_chainlock ||
             !m_payment_audit_runtime->signing_rosters ||
-            !m_payment_audit_runtime->relay_recipients) {
+            !m_payment_audit_runtime->relay_plan) {
             return;
         }
         runtime_generation = m_payment_audit_runtime_generation;
@@ -16154,8 +16427,7 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
                 m_payment_audit_runtime->selected_row
                     .locally_observed_members;
             rosters = signing_context->RostersPtr();
-            relay_recipients =
-                m_payment_audit_runtime->relay_recipients;
+            relay_plan = m_payment_audit_runtime->relay_plan;
             authorization_mask =
                 signing_context->AuthorizationMask();
         }
@@ -16176,7 +16448,7 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
         SubmitPaymentAuditFinalizationAttempt(*finalization_to_process);
         return;
     }
-    if (!statement || !signing_context || !rosters || !relay_recipients ||
+    if (!statement || !signing_context || !rosters || !relay_plan ||
         !pq::IsSigningRosterAuthorizationMask(authorization_mask) ||
         !IsCurrentPaymentAuditStatement(*statement)) {
         return;
@@ -16316,7 +16588,7 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
             }
             if (!HasExactPaymentAuditRuntime(
                     runtime_generation, *statement, signing_context,
-                    relay_recipients) ||
+                    relay_plan) ||
                 !IsCurrentPaymentAuditStatement(*statement)) {
                 if (collection.finalized) {
                     FinishPaymentAuditFinalizationAttempt(
@@ -16325,7 +16597,7 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
                 return;
             }
             RelayPaymentAuditShare(
-                *signed_share.share, signing_context, relay_recipients,
+                *signed_share.share, signing_context, relay_plan,
                 runtime_generation, admission_generation);
             if (!IsShareAdmissionGenerationCurrent(admission_generation)) {
                 if (collection.finalized) {

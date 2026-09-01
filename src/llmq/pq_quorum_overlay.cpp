@@ -136,6 +136,24 @@ PQQuorumOverlayPlan BuildPQQuorumOverlayPlan(
     return plan;
 }
 
+PQQuorumOverlayPlan BuildPreparedPQQuorumOverlayPlan(
+    const uint256& quorum_context_hash,
+    const PQQuorumConnectionSet& relay_members)
+{
+    if (quorum_context_hash.IsNull() || relay_members.empty()) return {};
+    return {{quorum_context_hash, relay_members}};
+}
+
+bool IsPreparedPQQuorumOverlaySourceCurrent(
+    const std::optional<PQQuorumOverlayPredecessor>& expected,
+    const std::optional<PQQuorumOverlayPredecessor>& accepted) noexcept
+{
+    if (expected.has_value() != accepted.has_value()) return false;
+    return !expected ||
+           (expected->height == accepted->height &&
+            expected->block_hash == accepted->block_hash);
+}
+
 PQQuorumOverlayReconciler::PQQuorumOverlayReconciler(Install install,
                                                      Remove remove)
     : m_install{std::move(install)}, m_remove{std::move(remove)}
@@ -190,9 +208,32 @@ CPQQuorumConnectionOverlay::~CPQQuorumConnectionOverlay()
     Clear();
 }
 
+void CPQQuorumConnectionOverlay::ReconcileLocked()
+{
+    PQQuorumOverlayPlan combined{m_chainlock_plan};
+    if (m_payment_audit_plan) {
+        const bool inserted{combined.emplace(
+            m_payment_audit_plan->group,
+            m_payment_audit_plan->relay_members).second};
+        if (!inserted) {
+            // The audit group is domain-separated from ChainLock contexts.
+            // Treat a collision as an invalid lease, never as permission to
+            // replace the finality topology.
+            m_retired_payment_audit_generation = std::max(
+                m_retired_payment_audit_generation,
+                m_payment_audit_plan->runtime_generation);
+            m_payment_audit_plan.reset();
+        }
+    }
+    m_reconciler.Apply(combined);
+}
+
 void CPQQuorumConnectionOverlay::ClearLocked()
 {
+    ++m_revision;
     m_context.reset();
+    m_chainlock_plan.clear();
+    m_payment_audit_plan.reset();
     m_reconciler.Clear();
 }
 
@@ -200,6 +241,106 @@ void CPQQuorumConnectionOverlay::Clear()
 {
     LOCK(m_mutex);
     ClearLocked();
+}
+
+bool CPQQuorumConnectionOverlay::ApplyPreparedContext(
+    const uint256& quorum_context_hash,
+    const PQQuorumConnectionSet& relay_members,
+    const std::optional<PQQuorumOverlayPredecessor>& accepted_predecessor)
+{
+    const auto plan{BuildPreparedPQQuorumOverlayPlan(
+        quorum_context_hash, relay_members)};
+    if (plan.empty()) return false;
+    uint64_t observed_revision{0};
+    {
+        LOCK(m_mutex);
+        observed_revision = m_revision;
+    }
+    const auto accepted{chainLocksHandler
+        ? chainLocksHandler->GetBestChainLock()
+        : CChainLockSigCPtr{}};
+    const std::optional<PQQuorumOverlayPredecessor> current_predecessor{
+        accepted
+            ? std::optional<PQQuorumOverlayPredecessor>{
+                  PQQuorumOverlayPredecessor{
+                      accepted->statement.height,
+                      accepted->statement.block_hash}}
+            : std::nullopt};
+    if (!IsPreparedPQQuorumOverlaySourceCurrent(
+            accepted_predecessor, current_predecessor)) {
+        return false;
+    }
+    LOCK(m_mutex);
+    if (m_revision != observed_revision) return false;
+    if (m_chainlock_plan == plan) return true;
+    if (m_payment_audit_plan &&
+        plan.count(m_payment_audit_plan->group) != 0) {
+        return false;
+    }
+    m_chainlock_plan = plan;
+    ReconcileLocked();
+    // A later tip callback must compare its accepted context against the
+    // prepared plan instead of skipping on an older accepted-context cache.
+    m_context.reset();
+    ++m_revision;
+    return true;
+}
+
+bool CPQQuorumConnectionOverlay::ApplyPaymentAuditContext(
+    const uint256& group,
+    const PQQuorumConnectionSet& relay_members,
+    uint64_t runtime_generation)
+{
+    if (group.IsNull() || relay_members.empty() ||
+        runtime_generation == 0) {
+        return false;
+    }
+    LOCK(m_mutex);
+    if (runtime_generation <= m_retired_payment_audit_generation ||
+        m_chainlock_plan.count(group) != 0) {
+        return false;
+    }
+    if (m_payment_audit_plan) {
+        if (runtime_generation <
+            m_payment_audit_plan->runtime_generation) {
+            return false;
+        }
+        if (runtime_generation ==
+            m_payment_audit_plan->runtime_generation) {
+            return m_payment_audit_plan->group == group &&
+                   m_payment_audit_plan->relay_members == relay_members;
+        }
+        m_retired_payment_audit_generation = std::max(
+            m_retired_payment_audit_generation,
+            m_payment_audit_plan->runtime_generation);
+    }
+    m_payment_audit_plan = PaymentAuditPlan{
+        group, relay_members, runtime_generation};
+    ReconcileLocked();
+    ++m_revision;
+    return true;
+}
+
+bool CPQQuorumConnectionOverlay::RemovePaymentAuditContext(
+    const uint256& group,
+    uint64_t runtime_generation)
+{
+    if (group.IsNull() || runtime_generation == 0) return false;
+    LOCK(m_mutex);
+    if (m_payment_audit_plan) {
+        if (runtime_generation !=
+                m_payment_audit_plan->runtime_generation ||
+            m_payment_audit_plan->group != group) {
+            return false;
+        }
+    }
+    m_retired_payment_audit_generation = std::max(
+        m_retired_payment_audit_generation, runtime_generation);
+    if (!m_payment_audit_plan) return true;
+    m_payment_audit_plan.reset();
+    ReconcileLocked();
+    ++m_revision;
+    return true;
 }
 
 void CPQQuorumConnectionOverlay::UpdatedBlockTip(
@@ -213,6 +354,7 @@ void CPQQuorumConnectionOverlay::UpdatedBlockTip(
     // to active-chain updates.
     LOCK(cs_main);
     LOCK(m_mutex);
+    ++m_revision;
 
     if (initial_download || new_tip == nullptr || !m_roster_cache ||
         !deterministicMNManager || !predecessor_height) {
@@ -319,7 +461,15 @@ void CPQQuorumConnectionOverlay::UpdatedBlockTip(
     const auto plan{BuildPQQuorumOverlayPlan(
         genesis_hash, *target_height, target->GetBlockHash(), *rosters,
         *local_operator)};
-    m_reconciler.Apply(plan);
+    if (m_payment_audit_plan &&
+        plan.count(m_payment_audit_plan->group) != 0) {
+        m_retired_payment_audit_generation = std::max(
+            m_retired_payment_audit_generation,
+            m_payment_audit_plan->runtime_generation);
+        m_payment_audit_plan.reset();
+    }
+    m_chainlock_plan = plan;
+    ReconcileLocked();
     m_context = context;
     LogPrint(BCLog::NET_NETCONN,
              "PQ overlay updated at target=%d epoch=%u groups=%u\n",

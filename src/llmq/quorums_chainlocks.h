@@ -851,8 +851,33 @@ ExtractDeferredPaymentAuditReceipt(
 using ChainLockRelayRecipients =
     std::unordered_set<uint256, StaticSaltedHasher>;
 
+struct PQRelayPlan {
+    uint256 local_pro_tx_hash;
+    ChainLockRelayRecipients authorized_recipients;
+    ChainLockRelayRecipients relay_members;
+};
+
 [[nodiscard]] ChainLockRelayRecipients BuildChainLockRelayRecipients(
     const std::array<pq::FrozenQuorumRoster, pq::ACTIVE_QUORUMS>& rosters);
+
+/** Bind a prepared relay plan to the local identity that derived it. */
+[[nodiscard]] bool IsPQRelayPlanForIdentity(
+    const PQRelayPlan& plan, const uint256& local_pro_tx_hash) noexcept;
+
+/** Enforce the identity-level constraints for one PQ relay pass. */
+class PQRelayIdentityGate final {
+public:
+    explicit PQRelayIdentityGate(const uint256& excluded_identity = {});
+
+    /** Admit a live socket only once for an authorized current relay member. */
+    [[nodiscard]] bool Admit(const uint256& identity,
+                             bool authorized_recipient,
+                             bool current_relay_member);
+
+private:
+    const uint256 m_excluded_identity;
+    ChainLockRelayRecipients m_admitted_identities;
+};
 
 /**
  * Authenticate the transport relay independently from the share's original
@@ -1310,6 +1335,7 @@ private:
         pq::BTCCReceiptState btcc_receipt_state;
         pq::PaymentAuditReceiptState payment_audit_receipt_state;
         uint256 payment_probation_state_hash;
+        bool has_durable_chainlock{false};
         bool staged_recovery{false};
 
         friend bool operator==(const CurrentSigningSource&,
@@ -1434,7 +1460,7 @@ private:
             prepared_contexts{};
         std::size_t count{0};
         pq::VerifiedRosterSetPtr roster_set;
-        std::shared_ptr<const ChainLockRelayRecipients> relay_recipients;
+        std::shared_ptr<const PQRelayPlan> relay_plan;
 
         [[nodiscard]] std::optional<CurrentSigningContext> Find(
             const pq::ChainLockStatement& statement) const;
@@ -1895,7 +1921,7 @@ private:
                                  !m_btcc_preseal_mutex);
     void RelayPaymentAuditResponse(
         const pq::PaymentAuditResponse& response,
-        NodeId except_peer = -1)
+        uint256 excluded_identity = {})
         EXCLUSIVE_LOCKS_REQUIRED(!cs_main,
                                  !m_lookup_mutex,
                                  !m_payment_audit_mutex,
@@ -1908,10 +1934,10 @@ private:
     void RelayPaymentAuditShare(
         const pq::PaymentAuditShare& share,
         const pq::PreparedPaymentAuditContextPtr& prepared_context,
-        const std::shared_ptr<const ChainLockRelayRecipients>& recipients,
+        const std::shared_ptr<const PQRelayPlan>& relay_plan,
         uint64_t runtime_generation,
         uint64_t admission_generation,
-        NodeId except_peer = -1)
+        uint256 excluded_identity = {})
         EXCLUSIVE_LOCKS_REQUIRED(!m_share_lifecycle_mutex,
                                  !m_payment_audit_mutex,
                                  !m_btcc_preseal_mutex);
@@ -1919,7 +1945,7 @@ private:
         uint64_t expected_runtime_generation,
         const pq::PaymentAuditStatement& statement,
         const pq::PreparedPaymentAuditContextPtr& prepared_context,
-        const std::shared_ptr<const ChainLockRelayRecipients>& recipients)
+        const std::shared_ptr<const PQRelayPlan>& relay_plan)
         const EXCLUSIVE_LOCKS_REQUIRED(!m_payment_audit_mutex);
     [[nodiscard]] bool HasExactPaymentAuditFinalization(
         const LocalPaymentAuditFinalization& finalized) const
@@ -1947,6 +1973,7 @@ private:
         pq::PaymentAuditOpenRowMetadata row;
         pq::PreparedChainLockContextPtr response_context;
         std::vector<uint256> active_relays;
+        std::shared_ptr<const PQRelayPlan> relay_plan;
     };
     struct PaymentAuditNetworkContext {
         std::vector<PaymentAuditResponseDefinition> rows;
@@ -1957,7 +1984,8 @@ private:
         std::optional<pq::PaymentAuditStatement> statement;
         std::optional<pq::FinalChainLock> seal_chainlock;
         pq::FrozenQuorumRostersPtr signing_rosters;
-        std::shared_ptr<const ChainLockRelayRecipients> relay_recipients;
+        std::shared_ptr<const PQRelayPlan> relay_plan;
+        uint256 relay_group_id;
         uint8_t authorization_mask{0};
         uint64_t roster_source_generation{0};
         std::unique_ptr<pq::PaymentAuditCollector> collector;
@@ -1968,6 +1996,13 @@ private:
     };
     void ResetPaymentAuditRuntime()
         EXCLUSIVE_LOCKS_REQUIRED(m_payment_audit_mutex);
+    void ReleasePaymentAuditOverlay()
+        EXCLUSIVE_LOCKS_REQUIRED(m_payment_audit_mutex);
+    [[nodiscard]] bool ApplyPaymentAuditOverlay(
+        uint64_t expected_runtime_generation)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_payment_audit_mutex,
+                                 !m_lookup_mutex,
+                                 !m_btcc_preseal_mutex);
     [[nodiscard]] uint64_t PublishPaymentAuditRuntime(
         PaymentAuditResponseRuntime runtime)
         EXCLUSIVE_LOCKS_REQUIRED(m_payment_audit_mutex);
@@ -2201,7 +2236,7 @@ private:
                              CurrentSigningContextsPtr signing_contexts,
                              std::size_t variant_index,
                              uint64_t admission_generation,
-                             NodeId except_peer = -1)
+                             uint256 excluded_identity = {})
         EXCLUSIVE_LOCKS_REQUIRED(!m_share_lifecycle_mutex,
                                  !m_collector_mutex,
                                  !m_lookup_mutex,

@@ -4,6 +4,9 @@
 
 #include <llmq/pq_quorum_overlay.h>
 
+#include <net.h>
+#include <test/util/setup_common.h>
+
 #include <boost/test/unit_test.hpp>
 
 #include <algorithm>
@@ -206,6 +209,123 @@ BOOST_AUTO_TEST_CASE(plan_is_one_union_group_for_any_participating_signer)
     rosters[2].members[1].child_root.reset();
     BOOST_CHECK(BuildPQQuorumOverlayPlan(
         NonNullHash(50), 100, NonNullHash(51), rosters, local).empty());
+}
+
+BOOST_AUTO_TEST_CASE(prepared_context_plan_bootstraps_without_a_winner)
+{
+    const uint256 context_hash{NonNullHash(60)};
+    PQQuorumConnectionSet relay_members;
+    for (std::size_t member{0}; member < 10; ++member) {
+        relay_members.insert(NonNullHash(61 + member));
+    }
+
+    const auto plan{BuildPreparedPQQuorumOverlayPlan(
+        context_hash, relay_members)};
+    BOOST_REQUIRE_EQUAL(plan.size(), 1U);
+    BOOST_CHECK(plan.at(context_hash) == relay_members);
+    BOOST_CHECK(BuildPreparedPQQuorumOverlayPlan(
+        uint256{}, relay_members).empty());
+    BOOST_CHECK(BuildPreparedPQQuorumOverlayPlan(
+        context_hash, {}).empty());
+
+    const PQQuorumOverlayPredecessor predecessor{
+        59, NonNullHash(59)};
+    BOOST_CHECK(IsPreparedPQQuorumOverlaySourceCurrent(
+        std::nullopt, std::nullopt));
+    BOOST_CHECK(!IsPreparedPQQuorumOverlaySourceCurrent(
+        predecessor, std::nullopt));
+    BOOST_CHECK(!IsPreparedPQQuorumOverlaySourceCurrent(
+        std::nullopt, predecessor));
+    BOOST_CHECK(IsPreparedPQQuorumOverlaySourceCurrent(
+        predecessor, predecessor));
+    auto stale_predecessor{predecessor};
+    stale_predecessor.block_hash = NonNullHash(58);
+    BOOST_CHECK(!IsPreparedPQQuorumOverlaySourceCurrent(
+        predecessor, stale_predecessor));
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    prepared_context_plan_retries_after_a_clear, TestingSetup)
+{
+    const uint256 context_hash{NonNullHash(80)};
+    const uint256 relay_member{NonNullHash(81)};
+    const PQQuorumConnectionSet relay_members{relay_member};
+    CPQQuorumConnectionOverlay overlay{
+        *Assert(m_node.connman), {}, [] { return std::nullopt; }};
+
+    BOOST_REQUIRE(overlay.ApplyPreparedContext(
+        context_hash, relay_members, std::nullopt));
+    BOOST_CHECK(m_node.connman->IsMasternodeQuorumRelayMember(
+        relay_member));
+
+    const PQQuorumOverlayPredecessor stale_predecessor{
+        79, NonNullHash(79)};
+    BOOST_CHECK(!overlay.ApplyPreparedContext(
+        context_hash, relay_members, stale_predecessor));
+    BOOST_CHECK(!overlay.ApplyPreparedContext(
+        context_hash, {}, std::nullopt));
+    BOOST_CHECK(m_node.connman->IsMasternodeQuorumRelayMember(
+        relay_member));
+
+    overlay.Clear();
+    BOOST_CHECK(!m_node.connman->IsMasternodeQuorumRelayMember(
+        relay_member));
+    BOOST_REQUIRE(overlay.ApplyPreparedContext(
+        context_hash, relay_members, std::nullopt));
+    BOOST_CHECK(m_node.connman->IsMasternodeQuorumRelayMember(
+        relay_member));
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    payment_audit_plan_is_bounded_and_independent, TestingSetup)
+{
+    const uint256 chainlock_group_a{NonNullHash(90)};
+    const uint256 chainlock_group_b{NonNullHash(91)};
+    const uint256 chainlock_member_a{NonNullHash(92)};
+    const uint256 chainlock_member_b{NonNullHash(93)};
+    const uint256 audit_group_a{NonNullHash(94)};
+    const uint256 audit_group_b{NonNullHash(95)};
+    const uint256 audit_member_a{NonNullHash(96)};
+    const uint256 audit_member_b{NonNullHash(97)};
+    CPQQuorumConnectionOverlay overlay{
+        *Assert(m_node.connman), {}, [] { return std::nullopt; }};
+
+    BOOST_REQUIRE(overlay.ApplyPreparedContext(
+        chainlock_group_a, {chainlock_member_a}, std::nullopt));
+    BOOST_REQUIRE(overlay.ApplyPaymentAuditContext(
+        audit_group_a, {audit_member_a}, 7));
+    BOOST_REQUIRE(overlay.ApplyPreparedContext(
+        chainlock_group_b, {chainlock_member_b}, std::nullopt));
+    BOOST_CHECK(!m_node.connman->IsMasternodeQuorumRelayMember(
+        chainlock_member_a));
+    BOOST_CHECK(m_node.connman->IsMasternodeQuorumRelayMember(
+        chainlock_member_b));
+    BOOST_CHECK(m_node.connman->IsMasternodeQuorumRelayMember(
+        audit_member_a));
+
+    BOOST_CHECK(!overlay.RemovePaymentAuditContext(
+        audit_group_a, 6));
+    BOOST_REQUIRE(overlay.ApplyPaymentAuditContext(
+        audit_group_b, {audit_member_b}, 8));
+    BOOST_CHECK(!m_node.connman->IsMasternodeQuorumRelayMember(
+        audit_member_a));
+    BOOST_CHECK(m_node.connman->IsMasternodeQuorumRelayMember(
+        audit_member_b));
+    BOOST_CHECK(!overlay.RemovePaymentAuditContext(
+        audit_group_a, 7));
+    BOOST_CHECK(m_node.connman->IsMasternodeQuorumRelayMember(
+        audit_member_b));
+
+    BOOST_REQUIRE(overlay.RemovePaymentAuditContext(
+        audit_group_b, 8));
+    BOOST_CHECK(!m_node.connman->IsMasternodeQuorumRelayMember(
+        audit_member_b));
+    BOOST_CHECK(m_node.connman->IsMasternodeQuorumRelayMember(
+        chainlock_member_b));
+    BOOST_CHECK(!overlay.ApplyPaymentAuditContext(
+        audit_group_b, {audit_member_b}, 8));
+    BOOST_CHECK(!overlay.ApplyPaymentAuditContext(
+        audit_group_b, {}, 9));
 }
 
 BOOST_AUTO_TEST_CASE(reconciler_rolls_over_and_preserves_retry_groups)
