@@ -11,6 +11,7 @@
 #include <util/check.h>
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -23,6 +24,7 @@ namespace {
 
 std::vector<std::uint8_t> g_final_chainlock_fixture;
 std::vector<std::uint8_t> g_final_payment_audit_fixture;
+std::vector<std::uint8_t> g_compact_chainlock_share_fixture;
 
 uint256 NonNullHash(std::uint32_t value)
 {
@@ -280,6 +282,117 @@ void DecodePaymentAuditLengthBoundary(FuzzedDataProvider& provider)
     DecodeFinalPaymentAudit(oversized);
 }
 
+CompactChainLockShare ValidCompactChainLockShare()
+{
+    CompactChainLockShare share;
+    share.statement_logical_id = NonNullHash(400);
+    share.signer_position = 0;
+    share.authenticated_signature.key_proof.public_key[0] = 1;
+    return share;
+}
+
+std::vector<std::uint8_t> EncodeCompactChainLockShare(
+    const CompactChainLockShare& share)
+{
+    DataStream encoded;
+    encoded << share;
+    const auto bytes{MakeUCharSpan(encoded)};
+    return {bytes.begin(), bytes.end()};
+}
+
+void InitializeCompactChainLockShareFixture()
+{
+    const auto share{ValidCompactChainLockShare()};
+    Assert(share.IsStructurallyValid());
+    g_compact_chainlock_share_fixture = EncodeCompactChainLockShare(share);
+    Assert(g_compact_chainlock_share_fixture.size() ==
+           CompactChainLockShare::WIRE_SIZE);
+}
+
+void DecodeCompactChainLockShare(Span<const std::uint8_t> payload)
+{
+    SpanReader stream{0, payload};
+    try {
+        CompactChainLockShare share;
+        stream >> share;
+        if (!stream.empty()) {
+            throw std::ios_base::failure(
+                "trailing compact PQ ChainLock share bytes");
+        }
+        assert(payload.size() == CompactChainLockShare::WIRE_SIZE);
+        assert(share.IsStructurallyValid());
+
+        const auto canonical{EncodeCompactChainLockShare(share)};
+        assert(canonical.size() == payload.size());
+        assert(std::equal(canonical.begin(), canonical.end(),
+                          payload.begin()));
+    } catch (const std::ios_base::failure&) {
+    }
+}
+
+void DecodeMutatedCompactChainLockShare(FuzzedDataProvider& provider)
+{
+    auto encoded{g_compact_chainlock_share_fixture};
+    LIMITED_WHILE(provider.remaining_bytes() != 0, 8) {
+        const std::size_t offset{
+            provider.ConsumeIntegralInRange<std::size_t>(
+                0, encoded.size() - 1)};
+        encoded[offset] ^= provider.ConsumeIntegral<std::uint8_t>();
+    }
+    DecodeCompactChainLockShare(encoded);
+}
+
+void DecodeCompactChainLockShareLengthBoundary(
+    FuzzedDataProvider& provider)
+{
+    constexpr std::array<std::size_t, 3> SIZES{
+        CompactChainLockShare::WIRE_SIZE,
+        CompactChainLockShare::WIRE_SIZE - 1,
+        CompactChainLockShare::WIRE_SIZE + 1};
+    const std::size_t size{SIZES[
+        provider.ConsumeIntegralInRange<std::size_t>(
+            0, SIZES.size() - 1)]};
+    if (size <= g_compact_chainlock_share_fixture.size()) {
+        DecodeCompactChainLockShare(
+            Span<const std::uint8_t>{g_compact_chainlock_share_fixture}
+                .first(size));
+        return;
+    }
+    auto oversized{g_compact_chainlock_share_fixture};
+    oversized.push_back(0);
+    DecodeCompactChainLockShare(oversized);
+}
+
+void DecodeCompactChainLockShareSemanticBoundary(
+    FuzzedDataProvider& provider)
+{
+    CompactChainLockShare share{ValidCompactChainLockShare()};
+    constexpr std::array<uint16_t, 5> POSITIONS{
+        0, 399, 400, 1'599, 1'600};
+    share.signer_position = POSITIONS[
+        provider.ConsumeIntegralInRange<std::size_t>(
+            0, POSITIONS.size() - 1)];
+    switch (provider.ConsumeIntegralInRange<uint8_t>(0, 2)) {
+    case 0:
+        share.statement_logical_id.SetNull();
+        break;
+    case 1:
+        share.statement_logical_id = NonNullHash(401);
+        break;
+    case 2: {
+        const auto id{provider.ConsumeBytes<uint8_t>(
+            share.statement_logical_id.size())};
+        std::copy(id.begin(), id.end(),
+                  share.statement_logical_id.begin());
+        break;
+    }
+    }
+    if (provider.ConsumeBool()) {
+        share.authenticated_signature.key_proof = {};
+    }
+    DecodeCompactChainLockShare(EncodeCompactChainLockShare(share));
+}
+
 } // namespace
 
 FUZZ_TARGET(pq_chainlock_final_decode, .init = InitializeFinalChainLockFixture)
@@ -327,6 +440,31 @@ FUZZ_TARGET(pq_payment_audit_decode,
         break;
     default:
         DecodeFinalPaymentAudit(framed_input);
+        break;
+    }
+}
+
+FUZZ_TARGET(pq_chainlock_compact_decode,
+            .init = InitializeCompactChainLockShareFixture)
+{
+    if (buffer.empty()) {
+        DecodeCompactChainLockShare(buffer);
+        return;
+    }
+    const auto framed_input{buffer.subspan(1)};
+    FuzzedDataProvider provider{framed_input.data(), framed_input.size()};
+    switch (buffer.front() & 0x07) {
+    case 1:
+        DecodeMutatedCompactChainLockShare(provider);
+        break;
+    case 2:
+        DecodeCompactChainLockShareLengthBoundary(provider);
+        break;
+    case 3:
+        DecodeCompactChainLockShareSemanticBoundary(provider);
+        break;
+    default:
+        DecodeCompactChainLockShare(framed_input);
         break;
     }
 }

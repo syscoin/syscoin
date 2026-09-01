@@ -547,6 +547,7 @@ BOOST_AUTO_TEST_CASE(compact_share_round_trip_binds_exact_context_and_position)
 
     const auto compact{BuildCompactChainLockShare(share, *context)};
     BOOST_REQUIRE(compact);
+    BOOST_CHECK(!compact->statement_logical_id.IsNull());
     BOOST_CHECK(compact->statement_logical_id ==
                 context->StatementLogicalId());
     BOOST_CHECK_EQUAL(compact->signer_position, 0U);
@@ -593,6 +594,15 @@ BOOST_AUTO_TEST_CASE(compact_share_round_trip_binds_exact_context_and_position)
     invalid_encoded << invalid_position;
     CompactChainLockShare invalid_decoded;
     BOOST_CHECK_THROW(invalid_encoded >> invalid_decoded,
+                      std::ios_base::failure);
+
+    auto null_context{decoded};
+    null_context.statement_logical_id.SetNull();
+    BOOST_CHECK(!null_context.IsStructurallyValid());
+    DataStream null_encoded;
+    null_encoded << null_context;
+    CompactChainLockShare null_decoded;
+    BOOST_CHECK_THROW(null_encoded >> null_decoded,
                       std::ios_base::failure);
 }
 

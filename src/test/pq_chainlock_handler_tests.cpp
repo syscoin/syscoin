@@ -11,6 +11,7 @@
 #include <primitives/transaction.h>
 #include <script/script.h>
 #include <streams.h>
+#include <test/pq_test_util.h>
 #include <test/util/setup_common.h>
 #include <test/util/validation.h>
 
@@ -330,6 +331,25 @@ namespace llmq::test {
 
 class CChainLocksHandlerTestAccess {
 public:
+    static std::optional<uint8_t> FindCurrentSigningVariant(
+        const std::array<pq::PreparedChainLockContextPtr, 2>& variants,
+        pq::VerifiedRosterSetPtr roster_set,
+        const uint256& statement_logical_id)
+    {
+        CChainLocksHandler::CurrentSigningContexts contexts;
+        contexts.count = variants.size();
+        contexts.roster_set = std::move(roster_set);
+        for (std::size_t index{0}; index < variants.size(); ++index) {
+            if (!variants[index]) return std::nullopt;
+            contexts.statements[index] = variants[index]->Statement();
+            contexts.prepared_contexts[index] = variants[index];
+        }
+        const auto found{contexts.Find(statement_logical_id)};
+        return found
+            ? std::optional<uint8_t>{found->variant_index}
+            : std::nullopt;
+    }
+
     static pq::VerifiedPaymentAuditAdmission VerifiedPaymentAudit(
         pq::FinalPaymentAudit audit,
         uint8_t authorization_mask = 0x0f)
@@ -817,6 +837,55 @@ const auto ACCEPT_LIVE_SIGNING_CERTIFICATE = [](
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(pq_chainlock_handler_tests, BasicTestingSetup)
+
+BOOST_AUTO_TEST_CASE(current_signing_context_routes_advance_and_keep_ids)
+{
+    using Access = llmq::test::CChainLocksHandlerTestAccess;
+    using namespace llmq::pq;
+
+    const uint256 genesis_hash{NonNullHash(90'000)};
+    const auto schedule{MakeChainLockScheduleConfig(/*epoch_origin=*/0)};
+    BOOST_REQUIRE(schedule);
+    auto advance_statement{
+        MakeCatchupChainLock(2'000, 1'995, NonNullHash(90'001), 1)
+            .statement};
+    advance_statement.previous_btcc_cursor =
+        BTCCursor{1'900, NonNullHash(90'002), NonNullHash(90'003)};
+    advance_statement.accepted_btcc_cursor =
+        BTCCursor{1'905, NonNullHash(90'004), NonNullHash(90'005)};
+    advance_statement.btcc_advance = BTCCAdvance::ADVANCE;
+
+    auto keep_statement{advance_statement};
+    keep_statement.accepted_btcc_cursor =
+        keep_statement.previous_btcc_cursor;
+    keep_statement.btcc_advance = BTCCAdvance::KEEP;
+
+    const auto roster_set{
+        ChainLockStoreTestContextFactory::CreateRosterSet(genesis_hash)};
+    BOOST_REQUIRE(roster_set);
+    const std::array<PreparedChainLockContextPtr, 2> variants{
+        ChainLockStoreTestContextFactory::Create(
+            *schedule, advance_statement, roster_set),
+        ChainLockStoreTestContextFactory::Create(
+            *schedule, keep_statement, roster_set)};
+    BOOST_REQUIRE(variants[0]);
+    BOOST_REQUIRE(variants[1]);
+    BOOST_REQUIRE(variants[0]->StatementLogicalId() !=
+                  variants[1]->StatementLogicalId());
+
+    const auto advance_variant{Access::FindCurrentSigningVariant(
+        variants, roster_set, variants[0]->StatementLogicalId())};
+    const auto keep_variant{Access::FindCurrentSigningVariant(
+        variants, roster_set, variants[1]->StatementLogicalId())};
+    BOOST_REQUIRE(advance_variant);
+    BOOST_REQUIRE(keep_variant);
+    BOOST_CHECK_EQUAL(*advance_variant, 0U);
+    BOOST_CHECK_EQUAL(*keep_variant, 1U);
+    BOOST_CHECK(!Access::FindCurrentSigningVariant(
+        variants, roster_set, NonNullHash(90'006)));
+    BOOST_CHECK(!Access::FindCurrentSigningVariant(
+        variants, roster_set, uint256{}));
+}
 
 BOOST_AUTO_TEST_CASE(
     historical_index_validation_resumes_long_ranges_in_bounded_steps)

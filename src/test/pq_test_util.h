@@ -7,11 +7,50 @@
 
 #include <hash.h>
 #include <llmq/pq_child_key_tree.h>
+#include <llmq/pq_chainlock_verify.h>
 #include <llmq/pq_roster_beacon.h>
 #include <span.h>
 
 #include <cstdint>
+#include <memory>
 #include <string_view>
+#include <utility>
+
+namespace llmq::pq {
+
+/** Mint only the opaque verifier capabilities needed by seam tests. */
+class ChainLockStoreTestContextFactory final {
+public:
+    [[nodiscard]] static VerifiedRosterSetPtr CreateRosterSet(
+        const uint256& genesis_hash)
+    {
+        auto rosters{std::make_shared<const FrozenQuorumRosters>()};
+        return VerifiedRosterSetPtr{
+            new VerifiedRosterSet(genesis_hash, std::move(rosters))};
+    }
+
+    [[nodiscard]] static PreparedChainLockContextPtr Create(
+        ChainLockScheduleConfig schedule,
+        const ChainLockStatement& statement,
+        VerifiedRosterSetPtr roster_set)
+    {
+        if (!roster_set) return {};
+        return PreparedChainLockContextPtr{new PreparedChainLockContext(
+            std::move(schedule), statement, std::move(roster_set), {},
+            /*authorization_mask=*/0b1111, nullptr)};
+    }
+
+    [[nodiscard]] static PreparedChainLockContextPtr Create(
+        const uint256& genesis_hash,
+        ChainLockScheduleConfig schedule,
+        const ChainLockStatement& statement)
+    {
+        return Create(std::move(schedule), statement,
+                      CreateRosterSet(genesis_hash));
+    }
+};
+
+} // namespace llmq::pq
 
 namespace llmq::pq::test {
 

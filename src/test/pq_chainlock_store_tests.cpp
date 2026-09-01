@@ -4,6 +4,7 @@
 
 #include <llmq/pq_chainlock_store.h>
 
+#include <test/pq_test_util.h>
 #include <test/util/setup_common.h>
 
 #include <cstddef>
@@ -14,27 +15,6 @@
 #include <boost/test/unit_test.hpp>
 
 using namespace llmq::pq;
-
-namespace llmq::pq {
-
-/** Mint only the opaque verifier capability needed by store seam tests. */
-class ChainLockStoreTestContextFactory final {
-public:
-    [[nodiscard]] static PreparedChainLockContextPtr Create(
-        const uint256& genesis_hash,
-        ChainLockScheduleConfig schedule,
-        const ChainLockStatement& statement)
-    {
-        auto rosters{std::make_shared<const FrozenQuorumRosters>()};
-        auto roster_set{VerifiedRosterSetPtr{new VerifiedRosterSet(
-            genesis_hash, std::move(rosters))}};
-        return PreparedChainLockContextPtr{new PreparedChainLockContext(
-            std::move(schedule), statement, std::move(roster_set), {},
-            /*authorization_mask=*/0b1111, nullptr)};
-    }
-};
-
-} // namespace llmq::pq
 
 namespace {
 

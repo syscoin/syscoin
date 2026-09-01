@@ -377,7 +377,7 @@ CompactChainLockShare::GetSignerPosition() const noexcept
 
 bool CompactChainLockShare::IsStructurallyValid() const noexcept
 {
-    return GetSignerPosition() &&
+    return !statement_logical_id.IsNull() && GetSignerPosition() &&
            authenticated_signature.IsStructurallyValid();
 }
 
