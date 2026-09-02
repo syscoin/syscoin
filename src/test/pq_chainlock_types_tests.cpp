@@ -59,6 +59,9 @@ RosterBeaconWindow ReadyWindow(uint32_t first_epoch)
         window.active.seeds[slot] =
             ReadySeed(first_epoch + static_cast<uint32_t>(slot));
     }
+    window.active.recovery_authority_source.normal_beacon =
+        window.active.seeds.back();
+    window.active.recovery_authority_hash = NonNullHash(700 + first_epoch);
     window.next.epoch =
         first_epoch + static_cast<uint32_t>(ACTIVE_QUORUMS);
     return window;
@@ -75,9 +78,39 @@ ChainLockStatement ValidStatement()
     statement.payment_probation_state_hash = NonNullHash(4);
     statement.roster_transition =
         RosterAuthorizationTransitionKind::KEEP;
+    statement.roster_authorization_base = {
+        statement.previous_chainlock_height,
+        statement.previous_chainlock_hash,
+        NonNullHash(8)};
     statement.roster_beacons = ReadyWindow(2);
     statement.roster_authorization_state_hash = NonNullHash(5);
     return statement;
+}
+
+ChainLockShareTranscript ValidTranscript()
+{
+    const auto statement{ValidStatement()};
+    ChainLockShareTranscript transcript;
+    transcript.height = statement.height;
+    transcript.block_hash = statement.block_hash;
+    transcript.previous_chainlock_height =
+        statement.previous_chainlock_height;
+    transcript.previous_chainlock_hash =
+        statement.previous_chainlock_hash;
+    transcript.quorum_context_hash = statement.quorum_context_hash;
+    transcript.roster_transition = statement.roster_transition;
+    transcript.roster_beacons = statement.roster_beacons;
+    transcript.roster_authorization_state_hash =
+        statement.roster_authorization_state_hash;
+    transcript.roster_authorization_base =
+        statement.roster_authorization_base;
+    transcript.quorum_epoch = 5;
+    transcript.quorum_base_hash = NonNullHash(9);
+    transcript.member_index = 10;
+    transcript.member_pro_tx_hash = NonNullHash(10);
+    transcript.payment_probation_state_hash =
+        statement.payment_probation_state_hash;
+    return transcript;
 }
 
 FinalChainLock ValidChainLock()
@@ -172,6 +205,51 @@ BOOST_AUTO_TEST_CASE(cursor_and_descriptor_structure)
     BOOST_CHECK(RoundTrip(descriptor) == descriptor);
     descriptor.valid_count--;
     BOOST_CHECK(!descriptor.IsStructurallyValid());
+}
+
+BOOST_AUTO_TEST_CASE(initialization_alone_has_no_authorization_base)
+{
+    auto statement{ValidStatement()};
+    statement.roster_transition =
+        RosterAuthorizationTransitionKind::INITIALIZE;
+    statement.roster_authorization_base = {};
+    BOOST_CHECK(statement.IsStructurallyValid());
+    statement.roster_authorization_base = {
+        statement.previous_chainlock_height,
+        statement.previous_chainlock_hash,
+        NonNullHash(11)};
+    BOOST_CHECK(!statement.IsStructurallyValid());
+
+    auto transcript{ValidTranscript()};
+    transcript.roster_transition =
+        RosterAuthorizationTransitionKind::INITIALIZE;
+    transcript.roster_authorization_base = {};
+    BOOST_CHECK(transcript.IsStructurallyValid());
+    transcript.roster_authorization_base = {
+        transcript.previous_chainlock_height,
+        transcript.previous_chainlock_hash,
+        NonNullHash(12)};
+    BOOST_CHECK(!transcript.IsStructurallyValid());
+
+    const std::array continuous_kinds{
+        RosterAuthorizationTransitionKind::KEEP,
+        RosterAuthorizationTransitionKind::OBSERVE,
+        RosterAuthorizationTransitionKind::REVEAL,
+        RosterAuthorizationTransitionKind::ROTATE,
+        RosterAuthorizationTransitionKind::RECOVER};
+    for (const auto kind : continuous_kinds) {
+        auto statement{ValidStatement()};
+        statement.roster_transition = kind;
+        BOOST_CHECK(statement.IsStructurallyValid());
+        statement.roster_authorization_base = {};
+        BOOST_CHECK(!statement.IsStructurallyValid());
+
+        auto transcript{ValidTranscript()};
+        transcript.roster_transition = kind;
+        BOOST_CHECK(transcript.IsStructurallyValid());
+        transcript.roster_authorization_base = {};
+        BOOST_CHECK(!transcript.IsStructurallyValid());
+    }
 }
 
 BOOST_AUTO_TEST_CASE(final_chainlock_exact_geometry_and_roundtrip)
@@ -338,6 +416,8 @@ BOOST_AUTO_TEST_CASE(share_hash_binds_member_epoch_btcc_and_genesis)
     transcript.payment_probation_state_hash = NonNullHash(6);
     transcript.roster_transition =
         statement_template.roster_transition;
+    transcript.roster_authorization_base =
+        statement_template.roster_authorization_base;
     transcript.roster_beacons = statement_template.roster_beacons;
     transcript.roster_authorization_state_hash =
         statement_template.roster_authorization_state_hash;

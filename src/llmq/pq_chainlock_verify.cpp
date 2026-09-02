@@ -176,6 +176,25 @@ std::optional<uint8_t> GetAuthorizationMask(
         : ALL_ROSTERS_AUTHORIZATION_MASK;
 }
 
+bool ValidateAuthorizationSchedule(
+    const ChainLockScheduleConfig& schedule,
+    const RosterAuthorizationVerificationContext& authorization,
+    ChainLockVerificationError* error)
+{
+    if (!schedule.IsValid() ||
+        (authorization.admission !=
+             RosterAuthorizationAdmission::TRUSTED_PERSISTENCE &&
+         (!authorization.reset_policy ||
+          authorization.reset_policy->chainlock_schedule != schedule)) ||
+        (authorization.reset_policy &&
+         (!authorization.reset_policy->IsStructurallyValid() ||
+          authorization.reset_policy->chainlock_schedule != schedule))) {
+        SetError(error, ChainLockVerificationError::INVALID_AUTHORIZATION);
+        return false;
+    }
+    return true;
+}
+
 std::optional<uint8_t> ValidateRosterAuthorizationStateInternal(
     const uint256& genesis_hash,
     const ChainLockStatement& statement,
@@ -193,10 +212,61 @@ std::optional<uint8_t> ValidateRosterAuthorizationStateInternal(
     const bool externally_authenticated{
         context.admission ==
         RosterAuthorizationAdmission::TRUSTED_PERSISTENCE};
+    if (!externally_authenticated) {
+        if (!context.reset_policy ||
+            !context.reset_policy->IsStructurallyValid()) {
+            SetError(error,
+                     ChainLockVerificationError::INVALID_AUTHORIZATION);
+            return std::nullopt;
+        }
+        const auto reset_transition{
+            CanonicalRosterResetTransitionForTarget(
+                context.reset_policy->chainlock_schedule,
+                context.reset_policy->btcc_schedule,
+                context.reset_policy->activation_predecessor_height,
+                statement.height)};
+        const bool initializes{
+            statement.roster_transition ==
+                RosterAuthorizationTransitionKind::INITIALIZE ||
+            context.admission == RosterAuthorizationAdmission::INITIALIZE};
+        const bool recovers{
+            statement.roster_transition ==
+                RosterAuthorizationTransitionKind::RECOVER ||
+            context.admission == RosterAuthorizationAdmission::RECOVER};
+        const bool valid_initialize{
+            reset_transition &&
+            *reset_transition ==
+                RosterAuthorizationTransitionKind::INITIALIZE &&
+            statement.roster_transition ==
+                RosterAuthorizationTransitionKind::INITIALIZE &&
+            context.admission ==
+                RosterAuthorizationAdmission::INITIALIZE};
+        const bool valid_recover{
+            reset_transition &&
+            *reset_transition ==
+                RosterAuthorizationTransitionKind::RECOVER &&
+            statement.roster_transition ==
+                RosterAuthorizationTransitionKind::RECOVER &&
+            context.admission ==
+                RosterAuthorizationAdmission::RECOVER};
+        if ((initializes && !valid_initialize) ||
+            (recovers && !valid_recover) ||
+            (reset_transition &&
+             *reset_transition ==
+                 RosterAuthorizationTransitionKind::INITIALIZE &&
+             !valid_initialize)) {
+            SetError(error,
+                     ChainLockVerificationError::INVALID_AUTHORIZATION);
+            return std::nullopt;
+        }
+    }
     if (context.predecessor_height !=
             statement.previous_chainlock_height ||
         context.predecessor_block_hash !=
             statement.previous_chainlock_hash ||
+        (!externally_authenticated &&
+         context.authorization_base !=
+             statement.roster_authorization_base) ||
         context.predecessor_height < -1 ||
         ((context.predecessor_height == -1) !=
          context.predecessor_block_hash.IsNull()) ||
@@ -205,9 +275,22 @@ std::optional<uint8_t> ValidateRosterAuthorizationStateInternal(
         (context.admission != RosterAuthorizationAdmission::LIVE &&
          context.normal_input) ||
         (context.admission == RosterAuthorizationAdmission::INITIALIZE &&
-         context.previous) ||
+         (context.previous || statement.btcc_advance != BTCCAdvance::ADVANCE ||
+          !IsInitialNormalRosterBeaconWindow(
+              statement.roster_beacons))) ||
         (context.admission == RosterAuthorizationAdmission::RECOVER &&
-         !context.previous) ||
+         (!context.previous || statement.btcc_advance != BTCCAdvance::KEEP ||
+          statement.roster_beacons.active.recovery_authority_source.IsNull() ||
+          statement.roster_beacons.active.recovery_authority_hash.IsNull() ||
+          statement.roster_beacons.active.recovery_authority_source !=
+              context.previous->window.active.recovery_authority_source ||
+          statement.roster_beacons.active.recovery_authority_hash !=
+              context.previous->window.active.recovery_authority_hash ||
+          MakeRecoveryRosterBeaconWindow(
+              statement.roster_beacons.active.recovery_authority_source,
+              statement.roster_beacons.active.recovery_authority_hash,
+              statement.roster_beacons.active.seeds.back().epoch) !=
+              statement.roster_beacons)) ||
         (externally_authenticated && context.previous) ||
         (context.previous && !context.previous->IsStructurallyValid())) {
         SetError(error, ChainLockVerificationError::INVALID_AUTHORIZATION);
@@ -220,6 +303,7 @@ std::optional<uint8_t> ValidateRosterAuthorizationStateInternal(
     transition.target_block_hash = statement.block_hash;
     transition.predecessor_height = statement.previous_chainlock_height;
     transition.predecessor_block_hash = statement.previous_chainlock_hash;
+    transition.authorization_base = statement.roster_authorization_base;
     transition.previous = context.previous;
     transition.new_window = statement.roster_beacons;
 
@@ -231,6 +315,8 @@ std::optional<uint8_t> ValidateRosterAuthorizationStateInternal(
                 statement.previous_chainlock_height ||
             normal.predecessor_block_hash !=
                 statement.previous_chainlock_hash ||
+            normal.authorization_base !=
+                statement.roster_authorization_base ||
             normal.previous != *context.previous ||
             normal.previous_btcc_cursor !=
                 statement.previous_btcc_cursor ||
@@ -296,11 +382,35 @@ bool ValidateDescriptorBeaconBinding(
         GetRosterBeaconCommitmentHash(genesis_hash, seed)};
     if (descriptor.epoch != seed.epoch || !expected_hash ||
         descriptor.roster_beacon_hash != *expected_hash ||
-        !GetPQQuorumModifier(
-            genesis_hash, descriptor.epoch, descriptor.snapshot_height,
-            descriptor.snapshot_hash, seed)) {
+        (seed.anchor_kind == RosterBeaconAnchorKind::NORMAL &&
+         !GetPQQuorumModifier(
+             genesis_hash, descriptor.epoch, descriptor.snapshot_height,
+             descriptor.snapshot_hash, seed))) {
         SetError(error, ChainLockVerificationError::INVALID_ROSTER_BEACON);
         return false;
+    }
+    return true;
+}
+
+bool ValidateRecoveryDescriptorBinding(
+    const ChainLockStatement& statement,
+    const FrozenQuorumRosters& rosters,
+    ChainLockVerificationError* error)
+{
+    const bool reset{
+        statement.roster_transition ==
+            RosterAuthorizationTransitionKind::INITIALIZE ||
+        statement.roster_transition ==
+            RosterAuthorizationTransitionKind::RECOVER};
+    if (reset) {
+        // The reset may finalize through any three rosters, but its first
+        // normal ROTATE drops slot 0 and is authorized by retained 1/2/3.
+        for (std::size_t slot{1}; slot < ACTIVE_QUORUMS; ++slot) {
+            if (rosters[slot].descriptor.valid_count < QUORUM_MIN_VALID) {
+                SetError(error, ChainLockVerificationError::INVALID_ROSTER);
+                return false;
+            }
+        }
     }
     return true;
 }
@@ -432,6 +542,10 @@ bool ValidateStatementBindingInternal(
         return false;
     }
 
+    if (!ValidateRecoveryDescriptorBinding(statement, rosters, error)) {
+        return false;
+    }
+
     for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
         const auto& descriptor{rosters[slot].descriptor};
         if (!ValidateDescriptorBeaconBinding(
@@ -463,143 +577,56 @@ bool ValidateStatementBindingInternal(
     return true;
 }
 
-bool ValidateFrozenQuorumContextInternal(
-    const uint256& genesis_hash,
-    const ChainLockStatement& statement,
-    const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
-    const RosterAuthorizationVerificationContext& authorization,
-    uint8_t selected_quorum_mask,
-    uint8_t* authorization_mask_out,
-    ChainLockVerificationError* error)
-{
-    const auto authorization_mask{
-        ValidateRosterAuthorizationStateInternal(
-            genesis_hash, statement, authorization, error)};
-    if (!authorization_mask) return false;
-    if ((selected_quorum_mask & ~*authorization_mask) != 0) {
-        SetError(error, ChainLockVerificationError::INVALID_AUTHORIZATION);
-        return false;
-    }
-
-    // Preserve the raw validator's historical per-slot error ordering while
-    // the prevalidated capability is free to split intrinsic and contextual
-    // checks across two explicit construction boundaries.
-    std::map<uint256, std::pair<uint256, uint32_t>> tree_owners;
-    std::set<std::pair<uint32_t, uint256>> quorum_identities;
-    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
-        const auto& roster{rosters[slot]};
-        const auto& descriptor{roster.descriptor};
-        if (!IsDescriptorStructureValid(descriptor) ||
-            descriptor.base_height > statement.height ||
-            !quorum_identities.emplace(descriptor.epoch,
-                                       descriptor.base_hash).second ||
-            (slot != 0 &&
-             (descriptor.epoch <= rosters[slot - 1].descriptor.epoch ||
-              descriptor.base_height <=
-                  rosters[slot - 1].descriptor.base_height))) {
-            SetError(error, ChainLockVerificationError::INVALID_DESCRIPTOR);
-            return false;
-        }
-        if (!ValidateDescriptorBeaconBinding(
-                genesis_hash, statement, descriptor, slot, error)) {
-            return false;
-        }
-        if (IsSelected(selected_quorum_mask, slot) &&
-            descriptor.valid_count < QUORUM_MIN_VALID) {
-            SetError(error, ChainLockVerificationError::INVALID_DESCRIPTOR);
-            return false;
-        }
-        if (!ValidateRosterMembersAndRoots(
-                genesis_hash, roster, tree_owners, error)) {
-            return false;
-        }
-    }
-
-    std::array<QuorumDescriptor, ACTIVE_QUORUMS> descriptors;
-    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
-        descriptors[slot] = rosters[slot].descriptor;
-    }
-    if (GetQuorumContextHash(genesis_hash, statement.height,
-                             statement.block_hash, descriptors) !=
-        statement.quorum_context_hash) {
-        SetError(error,
-                 ChainLockVerificationError::QUORUM_CONTEXT_MISMATCH);
-        return false;
-    }
-    if (authorization_mask_out != nullptr) {
-        *authorization_mask_out = *authorization_mask;
-    }
-    SetError(error, ChainLockVerificationError::NONE);
-    return true;
-}
-
 bool ValidateRecoveryRosterAuthorityBinding(
     const uint256& genesis_hash,
     const ChainLockStatement& statement,
-    const FrozenQuorumRosters& rosters,
     const RecoveryRosterAuthorityPtr& authority,
     ChainLockVerificationError* error)
 {
-    const bool has_recovery{
-        HasRecoveryRosterBeacon(statement.roster_beacons)};
-    if (has_recovery != static_cast<bool>(authority)) {
+    const auto& bundle{statement.roster_beacons.active};
+    const bool has_source{!bundle.recovery_authority_source.IsNull()};
+    if (!has_source || !authority ||
+        bundle.recovery_authority_hash.IsNull()) {
         SetError(error, ChainLockVerificationError::INVALID_ROSTER_BEACON);
         return false;
     }
-    if (!has_recovery) return true;
     const auto authority_hash{
         GetRecoveryRosterAuthorityHash(genesis_hash, *authority)};
-    if (!authority_hash ||
-        *authority_hash != statement.roster_beacons.active
-                               .recovery_authority_hash) {
+    if (!authority_hash || *authority_hash != bundle.recovery_authority_hash ||
+        authority->normal_beacon !=
+            bundle.recovery_authority_source.normal_beacon) {
         SetError(error, ChainLockVerificationError::INVALID_ROSTER_BEACON);
         return false;
-    }
-    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
-        if (statement.roster_beacons.active.seeds[slot].anchor_kind !=
-            RosterBeaconAnchorKind::RECOVERY) {
-            continue;
-        }
-        const auto& roster{rosters[slot]};
-        const auto& fixed{
-            authority->slots[roster.descriptor.epoch % ACTIVE_QUORUMS]};
-        for (std::size_t member_index{0};
-             member_index < QUORUM_SIZE; ++member_index) {
-            const auto& source{fixed[member_index]};
-            const auto& member{roster.members[member_index]};
-            const bool expected_eligible{
-                source.eligible && source.child_root &&
-                source.child_root->commitment.CoversEpoch(
-                    roster.descriptor.epoch)};
-            if (member.pro_tx_hash != source.pro_tx_hash ||
-                member.eligible != expected_eligible ||
-                static_cast<bool>(member.child_root) !=
-                    expected_eligible) {
-                SetError(error,
-                         ChainLockVerificationError::INVALID_ROSTER);
-                return false;
-            }
-            if (expected_eligible &&
-                (member.child_root->pro_tx_hash != source.pro_tx_hash ||
-                 member.child_root->global_key_version !=
-                     source.child_root->global_key_version ||
-                 member.child_root->epoch != roster.descriptor.epoch ||
-                 member.child_root->commitment !=
-                     source.child_root->commitment)) {
-                SetError(error,
-                         ChainLockVerificationError::INVALID_ROSTER);
-                return false;
-            }
-        }
     }
     return true;
 }
 
 } // namespace
 
+bool RosterResetVerificationPolicy::IsStructurallyValid() const noexcept
+{
+    if (!chainlock_schedule.IsValid() || !btcc_schedule.IsValid() ||
+        activation_predecessor_height < -1) {
+        return false;
+    }
+    const auto first_target{NextEligibleChainLockTargetHeight(
+        chainlock_schedule, activation_predecessor_height)};
+    if (!first_target) return false;
+    const auto first_transition{CanonicalRosterResetTransitionForTarget(
+        chainlock_schedule, btcc_schedule,
+        activation_predecessor_height, *first_target)};
+    return first_transition &&
+           *first_transition ==
+               RosterAuthorizationTransitionKind::INITIALIZE;
+}
+
 bool RecoveryRosterAuthority::IsStructurallyValid() const noexcept
 {
-    if (version != RECOVERY_ROSTER_AUTHORITY_VERSION) return false;
+    if (version != RECOVERY_ROSTER_AUTHORITY_VERSION ||
+        !normal_beacon.IsReady() ||
+        normal_beacon.anchor_kind != RosterBeaconAnchorKind::NORMAL) {
+        return false;
+    }
 
     std::map<uint256, std::pair<uint256, uint32_t>> tree_owners;
     std::array<std::size_t, ACTIVE_QUORUMS> valid_counts{};
@@ -694,10 +721,13 @@ std::shared_ptr<const VerifiedRosterSet>
 VerifiedRosterSet::Create(
     const uint256& genesis_hash,
     FrozenQuorumRostersPtr rosters,
-    ChainLockVerificationError* error)
+    ChainLockVerificationError* error,
+    RecoveryRosterAuthorityPtr recovery_authority)
 {
     SetError(error, ChainLockVerificationError::NONE);
-    if (genesis_hash.IsNull() || !rosters) {
+    if (genesis_hash.IsNull() || !rosters ||
+        (recovery_authority &&
+         !recovery_authority->IsStructurallyValid())) {
         SetError(error, ChainLockVerificationError::INVALID_ARGUMENT);
         return nullptr;
     }
@@ -708,7 +738,8 @@ VerifiedRosterSet::Create(
         return nullptr;
     }
     return std::shared_ptr<const VerifiedRosterSet>{
-        new VerifiedRosterSet{genesis_hash, std::move(rosters)}};
+        new VerifiedRosterSet{genesis_hash, std::move(rosters), nullptr,
+                              std::move(recovery_authority)}};
 }
 
 PreparedChainLockContext::PreparedChainLockContext(
@@ -731,53 +762,6 @@ PreparedChainLockContext::PreparedChainLockContext(
 
 std::shared_ptr<const PreparedChainLockContext>
 PreparedChainLockContext::Create(
-    const uint256& genesis_hash,
-    ChainLockScheduleConfig schedule,
-    ChainLockStatement statement,
-    FrozenQuorumRostersPtr rosters,
-    const RosterAuthorizationVerificationContext& authorization,
-    ChainLockVerificationError* error,
-    RecoveryRosterAuthorityPtr recovery_authority)
-{
-    SetError(error, ChainLockVerificationError::NONE);
-    if (!schedule.IsValid() || !rosters) {
-        SetError(error, ChainLockVerificationError::INVALID_ARGUMENT);
-        return nullptr;
-    }
-    if (genesis_hash.IsNull()) {
-        SetError(error, ChainLockVerificationError::INVALID_ARGUMENT);
-        return nullptr;
-    }
-    if (!statement.IsStructurallyValid()) {
-        SetError(error, ChainLockVerificationError::INVALID_CHAINLOCK);
-        return nullptr;
-    }
-    if (HasRecoveryRosterBeacon(statement.roster_beacons) ||
-        recovery_authority) {
-        SetError(error, ChainLockVerificationError::INVALID_ROSTER_BEACON);
-        return nullptr;
-    }
-    // The raw factory preserves the single validation boundary for callers
-    // that do not yet hold an intrinsic roster capability.
-    rosters = std::make_shared<const FrozenQuorumRosters>(*rosters);
-    uint8_t authorization_mask{0};
-    if (!ValidateFrozenQuorumContextInternal(
-            genesis_hash, statement, *rosters, authorization,
-            /*selected_quorum_mask=*/0, &authorization_mask, error)) {
-        return nullptr;
-    }
-    VerifiedRosterSetPtr roster_set{new VerifiedRosterSet{
-        genesis_hash, std::move(rosters), nullptr,
-        recovery_authority}};
-    return std::shared_ptr<const PreparedChainLockContext>{
-        new PreparedChainLockContext{
-            schedule, std::move(statement), std::move(roster_set),
-            authorization, authorization_mask,
-            std::move(recovery_authority)}};
-}
-
-std::shared_ptr<const PreparedChainLockContext>
-PreparedChainLockContext::Create(
     ChainLockScheduleConfig schedule,
     ChainLockStatement statement,
     VerifiedRosterSetPtr roster_set,
@@ -790,16 +774,21 @@ PreparedChainLockContext::Create(
         SetError(error, ChainLockVerificationError::INVALID_ARGUMENT);
         return nullptr;
     }
+    if (!ValidateAuthorizationSchedule(schedule, authorization, error)) {
+        return nullptr;
+    }
     if (!recovery_authority) {
         recovery_authority = roster_set->RecoveryAuthorityPtr();
     }
     const auto& embedded_authority{roster_set->RecoveryAuthorityPtr()};
-    if ((recovery_authority &&
+    if ((HasRecoveryRosterBeacon(statement.roster_beacons) &&
+         !roster_set->m_build_provenance) ||
+        (recovery_authority &&
          (!embedded_authority ||
           *recovery_authority != *embedded_authority)) ||
         !ValidateRecoveryRosterAuthorityBinding(
             roster_set->GenesisHash(), statement,
-            roster_set->Rosters(), embedded_authority, error)) {
+            embedded_authority, error)) {
         SetError(error, ChainLockVerificationError::INVALID_ROSTER_BEACON);
         return nullptr;
     }
@@ -916,6 +905,8 @@ ChainLockShareTranscript BuildChainLockShareTranscript(
     transcript.roster_beacons = chainlock.statement.roster_beacons;
     transcript.roster_authorization_state_hash =
         chainlock.statement.roster_authorization_state_hash;
+    transcript.roster_authorization_base =
+        chainlock.statement.roster_authorization_base;
     transcript.quorum_epoch = descriptor.epoch;
     transcript.quorum_base_hash = descriptor.base_hash;
     transcript.member_index = member_index;
@@ -1009,24 +1000,6 @@ std::optional<uint8_t> ValidateRosterAuthorizationState(
         genesis_hash, statement, context, error);
 }
 
-bool ValidateFrozenQuorumContext(
-    const uint256& genesis_hash,
-    const ChainLockStatement& statement,
-    const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
-    const RosterAuthorizationVerificationContext& authorization,
-    ChainLockVerificationError* error)
-{
-    SetError(error, ChainLockVerificationError::NONE);
-    if (HasRecoveryRosterBeacon(statement.roster_beacons)) {
-        SetError(error, ChainLockVerificationError::INVALID_ROSTER_BEACON);
-        return false;
-    }
-    return ValidateFrozenQuorumContextInternal(
-        genesis_hash, statement, rosters, authorization,
-        /*selected_quorum_mask=*/0, /*authorization_mask_out=*/nullptr,
-        error);
-}
-
 namespace {
 
 std::optional<ScheduledWOTSCheck>
@@ -1090,35 +1063,6 @@ PrepareChainLockShareVerificationInternal(
 } // namespace
 
 std::optional<ScheduledWOTSCheck> PrepareChainLockShareVerification(
-    const uint256& genesis_hash,
-    const ChainLockScheduleConfig& schedule,
-    const ChainLockShare& share,
-    const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
-    const RosterAuthorizationVerificationContext& authorization,
-    ChainLockVerificationError* error)
-{
-    SetError(error, ChainLockVerificationError::NONE);
-    if (!share.IsStructurallyValid()) {
-        SetError(error, ChainLockVerificationError::INVALID_CHAINLOCK);
-        return std::nullopt;
-    }
-    if (HasRecoveryRosterBeacon(
-            share.GetStatement().roster_beacons)) {
-        SetError(error, ChainLockVerificationError::INVALID_ROSTER_BEACON);
-        return std::nullopt;
-    }
-    uint8_t authorization_mask{0};
-    if (!ValidateFrozenQuorumContextInternal(
-            genesis_hash, share.GetStatement(), rosters, authorization,
-            /*selected_quorum_mask=*/0, &authorization_mask, error)) {
-        return std::nullopt;
-    }
-    return PrepareChainLockShareVerificationInternal(
-        genesis_hash, schedule, share, rosters, authorization_mask,
-        FindQuorumSlot(share.transcript, rosters), error);
-}
-
-std::optional<ScheduledWOTSCheck> PrepareChainLockShareVerification(
     const ChainLockShare& share,
     const PreparedChainLockContext& context,
     ChainLockVerificationError* error)
@@ -1136,25 +1080,6 @@ std::optional<ScheduledWOTSCheck> PrepareChainLockShareVerification(
         context.GenesisHash(), context.Schedule(), share, context.Rosters(),
         context.AuthorizationMask(),
         context.FindQuorumSlot(share.transcript), error);
-}
-
-bool VerifyChainLockShare(
-    const uint256& genesis_hash,
-    const ChainLockScheduleConfig& schedule,
-    const ChainLockShare& share,
-    const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
-    const RosterAuthorizationVerificationContext& authorization,
-    ChainLockVerificationError* error)
-{
-    auto check{PrepareChainLockShareVerification(
-        genesis_hash, schedule, share, rosters, authorization, error)};
-    if (!check) return false;
-    if (!(*check)()) {
-        SetError(error, ChainLockVerificationError::INVALID_SIGNATURE);
-        return false;
-    }
-    SetError(error, ChainLockVerificationError::NONE);
-    return true;
 }
 
 namespace {
@@ -1231,34 +1156,6 @@ PrepareFinalChainLockVerificationInternal(
 
 } // namespace
 
-std::optional<PreparedChainLockVerification> PrepareFinalChainLockVerification(
-    const uint256& genesis_hash,
-    const ChainLockScheduleConfig& schedule,
-    const FinalChainLock& chainlock,
-    const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
-    const RosterAuthorizationVerificationContext& authorization,
-    ChainLockVerificationError* error)
-{
-    SetError(error, ChainLockVerificationError::NONE);
-    if (!chainlock.IsStructurallyValid()) {
-        SetError(error, ChainLockVerificationError::INVALID_CHAINLOCK);
-        return std::nullopt;
-    }
-    if (HasRecoveryRosterBeacon(
-            chainlock.statement.roster_beacons)) {
-        SetError(error, ChainLockVerificationError::INVALID_ROSTER_BEACON);
-        return std::nullopt;
-    }
-    if (!ValidateFrozenQuorumContextInternal(
-            genesis_hash, chainlock.statement, rosters, authorization,
-            chainlock.selected_quorum_mask,
-            /*authorization_mask_out=*/nullptr, error)) {
-        return std::nullopt;
-    }
-    return PrepareFinalChainLockVerificationInternal(
-        genesis_hash, schedule, chainlock, rosters, error);
-}
-
 std::optional<PreparedChainLockVerification>
 PrepareFinalChainLockVerification(
     const ChainLockScheduleConfig& schedule,
@@ -1272,9 +1169,12 @@ PrepareFinalChainLockVerification(
         SetError(error, ChainLockVerificationError::INVALID_CHAINLOCK);
         return std::nullopt;
     }
+    if (!ValidateAuthorizationSchedule(schedule, authorization, error)) {
+        return std::nullopt;
+    }
     if (!ValidateRecoveryRosterAuthorityBinding(
             roster_set.GenesisHash(), chainlock.statement,
-            roster_set.Rosters(), roster_set.RecoveryAuthorityPtr(),
+            roster_set.RecoveryAuthorityPtr(),
             error)) {
         return std::nullopt;
     }
@@ -1332,27 +1232,6 @@ bool VerifyScheduledWOTSChecks(std::vector<ScheduledWOTSCheck>&& checks,
     return control.Wait();
 }
 
-bool VerifyFinalChainLock(
-    const uint256& genesis_hash,
-    const ChainLockScheduleConfig& schedule,
-    const FinalChainLock& chainlock,
-    const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
-    const RosterAuthorizationVerificationContext& authorization,
-    ScheduledWOTSCheckQueue* queue,
-    ChainLockVerificationError* error)
-{
-    auto prepared = PrepareFinalChainLockVerification(
-        genesis_hash, schedule, chainlock, rosters, authorization,
-        error);
-    if (!prepared) return false;
-    if (!VerifyScheduledWOTSChecks(std::move(prepared->checks), queue)) {
-        SetError(error, ChainLockVerificationError::INVALID_SIGNATURE);
-        return false;
-    }
-    SetError(error, ChainLockVerificationError::NONE);
-    return true;
-}
-
 ChainLockVerifier::ChainLockVerifier(std::size_t worker_threads, unsigned int batch_size)
     : m_queue(batch_size == 0 ? 1 : batch_size)
 {
@@ -1371,26 +1250,6 @@ ChainLockVerifier::ChainLockVerifier(std::size_t worker_threads, unsigned int ba
 ChainLockVerifier::~ChainLockVerifier()
 {
     if (m_queue.HasThreads()) m_queue.StopWorkerThreads();
-}
-
-bool ChainLockVerifier::Verify(
-    const uint256& genesis_hash,
-    const ChainLockScheduleConfig& schedule,
-    const FinalChainLock& chainlock,
-    const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
-    const RosterAuthorizationVerificationContext& authorization,
-    ChainLockVerificationError* error)
-{
-    auto prepared = PrepareFinalChainLockVerification(
-        genesis_hash, schedule, chainlock, rosters, authorization,
-        error);
-    if (!prepared) return false;
-    if (!VerifyChecks(std::move(prepared->checks))) {
-        SetError(error, ChainLockVerificationError::INVALID_SIGNATURE);
-        return false;
-    }
-    SetError(error, ChainLockVerificationError::NONE);
-    return true;
 }
 
 bool ChainLockVerifier::VerifyChecks(std::vector<ScheduledWOTSCheck>&& checks)

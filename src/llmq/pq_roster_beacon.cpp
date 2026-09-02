@@ -41,15 +41,18 @@ bool IsExactCandidateBoundary(
         input.predecessor_height >= input.target_height ||
         input.predecessor_block_hash.IsNull() ||
         input.predecessor_block_hash == input.target_block_hash ||
-        input.prior_authorization_height < 0 ||
-        input.prior_authorization_height > input.predecessor_height ||
-        input.prior_authorization_block_hash.IsNull() ||
-        (input.prior_authorization_height == input.predecessor_height &&
-         input.prior_authorization_block_hash !=
+        !input.authorization_base.IsStructurallyValid() ||
+        input.authorization_base.IsNull() ||
+        input.authorization_base.height > input.predecessor_height ||
+        (input.authorization_base.height == input.predecessor_height &&
+         input.authorization_base.block_hash !=
              input.predecessor_block_hash) ||
         !input.previous.IsStructurallyValid() ||
         !input.previous_btcc_cursor.IsStructurallyValid() ||
         !input.accepted_btcc_cursor.IsStructurallyValid() ||
+        !input.recovery_authority_source.IsStructurallyValid() ||
+        input.recovery_authority_source.IsNull() ||
+        input.recovery_authority_hash.IsNull() ||
         (!input.previous_btcc_cursor.IsNull() &&
          input.previous_btcc_cursor.sys_height >
              input.predecessor_height)) {
@@ -78,16 +81,16 @@ bool IsExactNextSnapshotCoverage(
         return false;
     }
     const bool covered_by_height{
-        input.prior_authorization_height >= input.next_snapshot.height};
+        input.authorization_base.height >= input.next_snapshot.height};
     if (input.next_snapshot.prior_authorization_is_descendant !=
             covered_by_height ||
         covered_by_height != !input.next_snapshot.hash.IsNull()) {
         return false;
     }
     return !covered_by_height ||
-           input.next_snapshot.height != input.prior_authorization_height ||
+           input.next_snapshot.height != input.authorization_base.height ||
            input.next_snapshot.hash ==
-               input.prior_authorization_block_hash;
+               input.authorization_base.block_hash;
 }
 
 bool IsUsableObservationAnchor(
@@ -215,21 +218,7 @@ bool IsExactRosterBeaconRotation(const RosterBeaconWindow& old_window,
         }
     }
     const auto& consumed{new_window.active.seeds.back()};
-    const bool has_recovery{std::any_of(
-        new_window.active.seeds.begin(), new_window.active.seeds.end(),
-        [](const RosterBeaconSeed& seed) {
-            return seed.anchor_kind == RosterBeaconAnchorKind::RECOVERY;
-        })};
-    const uint256 expected_authority_hash{
-        has_recovery ? old_window.active.recovery_authority_hash
-                     : uint256{}};
-    return new_window.active.recovery_authority_hash ==
-               expected_authority_hash &&
-           new_window.active.recovery_authority_source ==
-               (has_recovery
-                    ? old_window.active.recovery_authority_source
-                    : RecoveryRosterAuthoritySource{}) &&
-           ((old_window.next.IsReady() && consumed == old_window.next) ||
+    return ((old_window.next.IsReady() && consumed == old_window.next) ||
             IsExactRosterBeaconReveal(old_window.next, consumed));
 }
 
@@ -301,16 +290,6 @@ DeriveNormalRosterAuthorizationDecision(
                 input.previous.window.active.seeds[slot + 1];
         }
         new_window.active.seeds.back() = consumed;
-        if (std::none_of(
-                new_window.active.seeds.begin(),
-                new_window.active.seeds.end(),
-                [](const RosterBeaconSeed& seed) {
-                    return seed.anchor_kind ==
-                           RosterBeaconAnchorKind::RECOVERY;
-                })) {
-            new_window.active.recovery_authority_hash.SetNull();
-            new_window.active.recovery_authority_source = {};
-        }
         new_window.next = EmptyNormalSeed(input.newest_epoch + 1);
         kind = RosterAuthorizationTransitionKind::ROTATE;
     } else if (input.pending_reveal) {
@@ -343,12 +322,40 @@ DeriveNormalRosterAuthorizationDecision(
         return std::nullopt;
     }
 
+    const bool recovery_authorized{std::any_of(
+        input.previous.window.active.seeds.begin(),
+        input.previous.window.active.seeds.end(),
+        [](const RosterBeaconSeed& seed) {
+            return seed.anchor_kind == RosterBeaconAnchorKind::RECOVERY;
+        })};
+    RecoveryRosterAuthoritySource expected_source{
+        input.previous.window.active.recovery_authority_source};
+    if (!recovery_authorized) {
+        const auto* newest_normal{
+            FindNewestNormalReadySeed(input.previous.window)};
+        if (newest_normal == nullptr) return std::nullopt;
+        expected_source.normal_beacon = *newest_normal;
+    }
+    const auto& previous_source{
+        input.previous.window.active.recovery_authority_source};
+    const auto& previous_hash{
+        input.previous.window.active.recovery_authority_hash};
+    if (input.recovery_authority_source != expected_source ||
+        (expected_source == previous_source &&
+         input.recovery_authority_hash != previous_hash)) {
+        return std::nullopt;
+    }
+    new_window.active.recovery_authority_source = expected_source;
+    new_window.active.recovery_authority_hash =
+        input.recovery_authority_hash;
+
     RosterAuthorizationTransition transition;
     transition.kind = kind;
     transition.target_height = input.target_height;
     transition.target_block_hash = input.target_block_hash;
     transition.predecessor_height = input.predecessor_height;
     transition.predecessor_block_hash = input.predecessor_block_hash;
+    transition.authorization_base = input.authorization_base;
     transition.previous = input.previous;
     transition.new_window = std::move(new_window);
     const auto mask{GetNormalRosterAuthorizationMask(kind)};
@@ -380,20 +387,56 @@ bool IsRecoveryRosterBeaconWindow(const RosterBeaconWindow& window) noexcept
         window.active.seeds.back().epoch % ACTIVE_QUORUMS !=
             ACTIVE_QUORUMS - 1 ||
         window.next.anchor_kind != RosterBeaconAnchorKind::NORMAL ||
-        window.next.state != RosterBeaconState::EMPTY) {
+        window.next.state != RosterBeaconState::EMPTY ||
+        window.active.recovery_authority_hash.IsNull() ||
+        window.active.recovery_authority_source.IsNull()) {
         return false;
     }
-    const auto& anchor{window.active.seeds.front()};
-    if (anchor.anchor_kind != RosterBeaconAnchorKind::RECOVERY) return false;
+    const auto& source{
+        window.active.recovery_authority_source.normal_beacon};
+    if (!source.IsReady() ||
+        source.anchor_kind != RosterBeaconAnchorKind::NORMAL) {
+        return false;
+    }
     for (const auto& seed : window.active.seeds) {
-        if (seed.anchor_kind != RosterBeaconAnchorKind::RECOVERY ||
-            seed.anchor_cursor != anchor.anchor_cursor ||
-            seed.anchor_btc_height != anchor.anchor_btc_height ||
-            seed.future_btc_hash != anchor.future_btc_hash) {
+        if (!seed.IsReady() ||
+            seed.anchor_kind != RosterBeaconAnchorKind::RECOVERY ||
+            seed.anchor_cursor != source.anchor_cursor ||
+            seed.anchor_btc_height != source.anchor_btc_height ||
+            seed.future_btc_hash != source.future_btc_hash) {
             return false;
         }
     }
     return true;
+}
+
+std::optional<RosterBeaconWindow> MakeRecoveryRosterBeaconWindow(
+    const RecoveryRosterAuthoritySource& source,
+    const uint256& recovery_authority_hash,
+    uint32_t newest_epoch) noexcept
+{
+    if (!source.IsStructurallyValid() || source.IsNull() ||
+        recovery_authority_hash.IsNull() ||
+        newest_epoch < ACTIVE_QUORUMS - 1 ||
+        newest_epoch == std::numeric_limits<uint32_t>::max() ||
+        newest_epoch % ACTIVE_QUORUMS != ACTIVE_QUORUMS - 1) {
+        return std::nullopt;
+    }
+    RosterBeaconWindow window;
+    window.active.recovery_authority_source = source;
+    window.active.recovery_authority_hash = recovery_authority_hash;
+    const uint32_t first_epoch{
+        newest_epoch - static_cast<uint32_t>(ACTIVE_QUORUMS - 1)};
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        auto seed{source.normal_beacon};
+        seed.anchor_kind = RosterBeaconAnchorKind::RECOVERY;
+        seed.epoch = first_epoch + static_cast<uint32_t>(slot);
+        window.active.seeds[slot] = std::move(seed);
+    }
+    window.next = EmptyNormalSeed(newest_epoch + 1);
+    return IsRecoveryRosterBeaconWindow(window)
+        ? std::optional<RosterBeaconWindow>{std::move(window)}
+        : std::nullopt;
 }
 
 bool IsInitialNormalRosterBeaconWindow(
@@ -402,8 +445,10 @@ bool IsInitialNormalRosterBeaconWindow(
     if (!window.IsStructurallyValid() ||
         window.active.seeds.back().epoch % ACTIVE_QUORUMS !=
             ACTIVE_QUORUMS - 1 ||
-        !window.active.recovery_authority_hash.IsNull() ||
-        !window.active.recovery_authority_source.IsNull() ||
+        window.active.recovery_authority_hash.IsNull() ||
+        window.active.recovery_authority_source.IsNull() ||
+        window.active.recovery_authority_source.normal_beacon !=
+            window.active.seeds.back() ||
         window.next.anchor_kind != RosterBeaconAnchorKind::NORMAL ||
         window.next.state != RosterBeaconState::EMPTY) {
         return false;
@@ -450,39 +495,35 @@ bool RosterAuthorizationTransition::IsStructurallyValid() const noexcept
         predecessor_height < -1 ||
         (!predecessor_block_hash.IsNull() &&
          predecessor_block_hash == target_block_hash) ||
+        !authorization_base.IsStructurallyValid() ||
+        (!authorization_base.IsNull() &&
+         (authorization_base.height >= target_height ||
+          authorization_base.block_hash == target_block_hash)) ||
         !new_window.IsStructurallyValid()) {
         return false;
     }
     if (kind == RosterAuthorizationTransitionKind::INITIALIZE) {
-        return !previous && IsInitialNormalRosterBeaconWindow(new_window);
+        return authorization_base.IsNull() && !previous &&
+               IsInitialNormalRosterBeaconWindow(new_window);
     }
     if (kind == RosterAuthorizationTransitionKind::RECOVER) {
-        if (!previous || !previous->IsStructurallyValid() ||
-            !IsRecoveryRosterBeaconWindow(new_window)) {
-            return false;
-        }
-        if (HasRecoveryRosterBeacon(previous->window)) {
-            return new_window.active.recovery_authority_hash ==
-                       previous->window.active.recovery_authority_hash &&
-                   new_window.active.recovery_authority_source ==
-                       previous->window.active.recovery_authority_source;
-        }
-        return new_window.active.recovery_authority_source.kind ==
-                   RecoveryRosterAuthoritySourceKind::NORMAL_ROSTERS &&
-               new_window.active.recovery_authority_source.normal_beacons ==
-                   previous->window.active.seeds;
+        return !authorization_base.IsNull() && previous &&
+               previous->IsStructurallyValid() &&
+               IsRecoveryRosterBeaconWindow(new_window);
     }
+    if (authorization_base.IsNull()) return false;
     if (!previous || !previous->IsStructurallyValid()) return false;
     if (kind == RosterAuthorizationTransitionKind::KEEP) {
-        return previous->window == new_window;
+        return previous->window.active.seeds == new_window.active.seeds &&
+               previous->window.next == new_window.next;
     }
     if (kind == RosterAuthorizationTransitionKind::OBSERVE) {
-        return previous->window.active == new_window.active &&
+        return previous->window.active.seeds == new_window.active.seeds &&
                IsExactRosterBeaconObservation(previous->window.next,
                                               new_window.next);
     }
     if (kind == RosterAuthorizationTransitionKind::REVEAL) {
-        return previous->window.active == new_window.active &&
+        return previous->window.active.seeds == new_window.active.seeds &&
                IsExactRosterBeaconReveal(previous->window.next,
                                           new_window.next);
     }
@@ -499,6 +540,20 @@ std::optional<uint256> GetRosterBeaconCommitmentHash(
     CHashWriter writer{SER_GETHASH, 0};
     WriteDomain(writer, ROSTER_BEACON_COMMITMENT_DOMAIN);
     writer << genesis_hash << seed;
+    return writer.GetHash();
+}
+
+std::optional<uint256> GetRecoveryRosterEntropyCommitment(
+    const uint256& genesis_hash,
+    const RosterBeaconSeed& normal_beacon) noexcept
+{
+    if (genesis_hash.IsNull() || !normal_beacon.IsReady() ||
+        normal_beacon.anchor_kind != RosterBeaconAnchorKind::NORMAL) {
+        return std::nullopt;
+    }
+    CHashWriter writer{SER_GETHASH, 0};
+    WriteDomain(writer, RECOVERY_ROSTER_ENTROPY_DOMAIN);
+    writer << genesis_hash << normal_beacon;
     return writer.GetHash();
 }
 
@@ -527,6 +582,24 @@ const RosterBeaconSeed* FindRosterBeaconSeed(
     return slot < bundle.seeds.size() ? &bundle.seeds[slot] : nullptr;
 }
 
+const RosterBeaconSeed* FindNewestNormalReadySeed(
+    const RosterBeaconWindow& window) noexcept
+{
+    if (!window.IsStructurallyValid()) return nullptr;
+    if (window.next.anchor_kind == RosterBeaconAnchorKind::NORMAL &&
+        window.next.IsReady()) {
+        return &window.next;
+    }
+    for (auto it{window.active.seeds.rbegin()};
+         it != window.active.seeds.rend(); ++it) {
+        if (it->anchor_kind == RosterBeaconAnchorKind::NORMAL &&
+            it->IsReady()) {
+            return &*it;
+        }
+    }
+    return nullptr;
+}
+
 std::optional<uint256> GetPQQuorumModifier(
     const uint256& genesis_hash,
     uint32_t epoch,
@@ -536,6 +609,7 @@ std::optional<uint256> GetPQQuorumModifier(
 {
     if (genesis_hash.IsNull() || snapshot_height < 0 ||
         snapshot_hash.IsNull() || !seed.IsReady() || seed.epoch != epoch ||
+        seed.anchor_kind != RosterBeaconAnchorKind::NORMAL ||
         snapshot_height >= seed.anchor_cursor.sys_height) {
         return std::nullopt;
     }
@@ -569,6 +643,47 @@ std::optional<int32_t> CanonicalRosterRecoveryTargetHeight(
     return std::nullopt;
 }
 
+std::optional<RosterAuthorizationTransitionKind>
+CanonicalRosterResetTransitionForTarget(
+    const ChainLockScheduleConfig& chainlock,
+    const BTCCScheduleConfig& btcc,
+    int32_t activation_predecessor_height,
+    int32_t target_height) noexcept
+{
+    if (!chainlock.IsValid() || !btcc.IsValid() ||
+        activation_predecessor_height < -1 ||
+        target_height <= activation_predecessor_height) {
+        return std::nullopt;
+    }
+    const auto first_target{NextEligibleChainLockTargetHeight(
+        chainlock, activation_predecessor_height)};
+    const auto first_epoch{first_target
+        ? EpochForHeight(chainlock, *first_target)
+        : std::optional<uint32_t>{}};
+    const auto first_canonical{first_epoch
+        ? CanonicalRosterRecoveryTargetHeight(
+              chainlock, btcc, *first_epoch)
+        : std::optional<int32_t>{}};
+    if (!first_target || !first_canonical ||
+        *first_target != *first_canonical) {
+        return std::nullopt;
+    }
+    if (target_height == *first_target) {
+        return RosterAuthorizationTransitionKind::INITIALIZE;
+    }
+    if (target_height < *first_target) return std::nullopt;
+
+    const auto target_epoch{EpochForHeight(chainlock, target_height)};
+    const auto canonical{target_epoch
+        ? CanonicalRosterRecoveryTargetHeight(
+              chainlock, btcc, *target_epoch)
+        : std::optional<int32_t>{}};
+    if (!canonical || *canonical != target_height) {
+        return std::nullopt;
+    }
+    return RosterAuthorizationTransitionKind::RECOVER;
+}
+
 std::optional<uint256> GetRosterAuthorizationStateHash(
     const uint256& genesis_hash,
     const RosterAuthorizationTransition& transition) noexcept
@@ -583,6 +698,7 @@ std::optional<uint256> GetRosterAuthorizationStateHash(
            << transition.target_height << transition.target_block_hash
            << transition.predecessor_height
            << transition.predecessor_block_hash
+           << transition.authorization_base
            << static_cast<uint8_t>(transition.previous.has_value());
     if (transition.previous) {
         writer << transition.previous->state_hash

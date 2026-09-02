@@ -51,95 +51,6 @@ struct BTCHeaderActiveRange {
 };
 
 class BTCHeaderPolicy;
-class PQChainLockPersistence;
-
-/** Proof that one exact durable Bitcoin anchor is stably inactive. */
-class BTCRecoveryPrecommitRolloverProof final {
-public:
-    BTCRecoveryPrecommitRolloverProof(
-        const BTCRecoveryPrecommitRolloverProof&) = default;
-    BTCRecoveryPrecommitRolloverProof(
-        BTCRecoveryPrecommitRolloverProof&&) = default;
-    BTCRecoveryPrecommitRolloverProof& operator=(
-        const BTCRecoveryPrecommitRolloverProof&) = default;
-    BTCRecoveryPrecommitRolloverProof& operator=(
-        BTCRecoveryPrecommitRolloverProof&&) = default;
-
-    [[nodiscard]] const uint256& AnchorHash() const noexcept
-    {
-        return m_anchor_hash;
-    }
-    [[nodiscard]] int32_t AnchorHeight() const noexcept
-    {
-        return m_anchor_height;
-    }
-    [[nodiscard]] const uint256& ReplacementHash() const noexcept
-    {
-        return m_replacement_hash;
-    }
-    [[nodiscard]] int32_t ReplacementHeight() const noexcept
-    {
-        return m_replacement_height;
-    }
-    [[nodiscard]] const uint256& ObservedActiveHash() const noexcept
-    {
-        return m_observed_active_hash;
-    }
-    [[nodiscard]] const uint256& StableTipHash() const noexcept
-    {
-        return m_stable_tip_hash;
-    }
-    [[nodiscard]] int32_t StableTipHeight() const noexcept
-    {
-        return m_stable_tip_height;
-    }
-    [[nodiscard]] int64_t RequiredMaturityHeight() const noexcept
-    {
-        return m_required_maturity_height;
-    }
-
-private:
-    class IssuerKey final {
-    private:
-        friend class BTCHeaderPolicy;
-        IssuerKey() = default;
-    };
-
-    friend class BTCHeaderPolicy;
-    friend class PQChainLockPersistence;
-
-    BTCRecoveryPrecommitRolloverProof(
-        IssuerKey,
-        uint256 anchor_hash,
-        int32_t anchor_height,
-        uint256 replacement_hash,
-        int32_t replacement_height,
-        std::optional<uint256> previous_hash,
-        uint256 rollover_context_id,
-        uint256 observed_active_hash,
-        uint256 stable_tip_hash,
-        int32_t stable_tip_height,
-        int64_t required_maturity_height);
-
-    [[nodiscard]] bool Authorizes(
-        const uint256& anchor_hash,
-        int32_t anchor_height,
-        const uint256& replacement_hash,
-        int32_t replacement_height,
-        const std::optional<uint256>& previous_hash,
-        const uint256& rollover_context_id) const noexcept;
-
-    uint256 m_anchor_hash;
-    int32_t m_anchor_height{-1};
-    uint256 m_replacement_hash;
-    int32_t m_replacement_height{-1};
-    std::optional<uint256> m_previous_hash;
-    uint256 m_rollover_context_id;
-    uint256 m_observed_active_hash;
-    uint256 m_stable_tip_hash;
-    int32_t m_stable_tip_height{-1};
-    int64_t m_required_maturity_height{-1};
-};
 
 enum class BTCHeaderActiveRangeStatus : uint8_t {
     READY = 0,
@@ -205,23 +116,6 @@ public:
         const BTCHeaderPolicyConfig& config,
         const uint256& anchor_hash,
         int32_t expected_anchor_height,
-        int64_t now,
-        std::string& deny_reason) const;
-
-    /**
-     * Bind one exact inactive durable anchor and its exact active replacement
-     * to the same repeated Bitcoin tip/fork view. The opaque result is the
-     * only capability accepted by the later-epoch persistence CAS.
-     */
-    [[nodiscard]] std::optional<
-        BTCRecoveryPrecommitRolloverProof>
-    AuthorizeStableInactiveAnchorReplacement(
-        const BTCHeaderPolicyConfig& config,
-        const uint256& anchor_hash,
-        int32_t expected_anchor_height,
-        const uint256& replacement_hash,
-        const std::optional<uint256>& previous_hash,
-        const uint256& rollover_context_id,
         int64_t now,
         std::string& deny_reason) const;
 

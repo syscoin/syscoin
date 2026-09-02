@@ -31,15 +31,6 @@ enum class PaymentAuditVerificationError : uint8_t {
 class PreparedPaymentAuditContext final {
 public:
     [[nodiscard]] static std::shared_ptr<const PreparedPaymentAuditContext>
-    Create(const uint256& genesis_hash,
-           PaymentAuditScheduleConfig schedule,
-           PaymentAuditStatement statement,
-           const FinalChainLock& seal_chainlock,
-           FrozenQuorumRostersPtr rosters,
-           const RosterAuthorizationVerificationContext& authorization,
-           PaymentAuditVerificationError* error = nullptr);
-
-    [[nodiscard]] static std::shared_ptr<const PreparedPaymentAuditContext>
     Create(PaymentAuditScheduleConfig schedule,
            PaymentAuditStatement statement,
            const FinalChainLock& seal_chainlock,
@@ -110,16 +101,6 @@ struct PreparedPaymentAuditVerification {
     std::vector<ScheduledWOTSCheck> checks;
 };
 
-[[nodiscard]] std::optional<ScheduledWOTSCheck>
-PreparePaymentAuditResponseVerification(
-    const uint256& genesis_hash,
-    const ChainLockScheduleConfig& schedule,
-    const PaymentAuditResponse& response,
-    const PaymentAuditHave& expected,
-    const FrozenQuorumRosters& response_rosters,
-    const RosterAuthorizationVerificationContext& authorization,
-    PaymentAuditVerificationError* error = nullptr);
-
 /** Prepare one response against its exact prevalidated ordinary ChainLock. */
 [[nodiscard]] std::optional<ScheduledWOTSCheck>
 PreparePaymentAuditResponseVerification(
@@ -143,14 +124,6 @@ PreparePaymentAuditResponseVerification(
     const PaymentAuditCommitment& commitment,
     const VerifiedRosterSet& response_rosters);
 
-[[nodiscard]] bool ValidatePaymentAuditContext(
-    const uint256& genesis_hash,
-    const PaymentAuditScheduleConfig& schedule,
-    const PaymentAuditStatement& statement,
-    const FrozenQuorumRosters& rosters,
-    const RosterAuthorizationVerificationContext& authorization,
-    PaymentAuditVerificationError* error = nullptr);
-
 /** Live-only gate: B must already have the exact ordinary ChainLock witness. */
 [[nodiscard]] bool ValidatePaymentAuditLiveSeal(
     const uint256& genesis_hash,
@@ -165,29 +138,11 @@ PreparePaymentAuditResponseVerification(
     uint16_t member_index,
     const uint256& member_pro_tx_hash);
 
-[[nodiscard]] std::optional<ScheduledWOTSCheck>
-PreparePaymentAuditShareVerification(
-    const uint256& genesis_hash,
-    const PaymentAuditScheduleConfig& schedule,
-    const PaymentAuditShare& share,
-    const FrozenQuorumRosters& rosters,
-    const RosterAuthorizationVerificationContext& authorization,
-    PaymentAuditVerificationError* error = nullptr);
-
 /** Prepare one share against an already validated exact live audit context. */
 [[nodiscard]] std::optional<ScheduledWOTSCheck>
 PreparePaymentAuditShareVerification(
     const PaymentAuditShare& share,
     const PreparedPaymentAuditContext& context,
-    PaymentAuditVerificationError* error = nullptr);
-
-[[nodiscard]] std::optional<PreparedPaymentAuditVerification>
-PrepareFinalPaymentAuditVerification(
-    const uint256& genesis_hash,
-    const PaymentAuditScheduleConfig& schedule,
-    const FinalPaymentAudit& audit,
-    const FrozenQuorumRosters& rosters,
-    const RosterAuthorizationVerificationContext& authorization,
     PaymentAuditVerificationError* error = nullptr);
 
 /** Prepare a final audit against an intrinsically verified seal roster set. */
@@ -197,15 +152,6 @@ PrepareFinalPaymentAuditVerification(
     const FinalPaymentAudit& audit,
     VerifiedRosterSetPtr roster_set,
     const RosterAuthorizationVerificationContext& authorization,
-    PaymentAuditVerificationError* error = nullptr);
-
-[[nodiscard]] bool VerifyFinalPaymentAudit(
-    const uint256& genesis_hash,
-    const PaymentAuditScheduleConfig& schedule,
-    const FinalPaymentAudit& audit,
-    const FrozenQuorumRosters& rosters,
-    const RosterAuthorizationVerificationContext& authorization,
-    ScheduledWOTSCheckQueue* queue = nullptr,
     PaymentAuditVerificationError* error = nullptr);
 
 } // namespace llmq::pq

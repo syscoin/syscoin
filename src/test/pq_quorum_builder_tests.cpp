@@ -135,6 +135,12 @@ ChainLockScheduleConfig Schedule()
     return schedule;
 }
 
+RosterResetVerificationPolicy ResetPolicy()
+{
+    return RosterResetVerificationPolicy{
+        Schedule(), BTCCScheduleConfig{.candidate_origin = 2305}, 2304};
+}
+
 QuorumBuildConfig BuildConfig(uint32_t snapshot_lag = 144)
 {
     QuorumBuildConfig config;
@@ -185,6 +191,67 @@ ActiveRosterBeaconBundle BeaconBundleAtHeight(int32_t target_height,
     const auto epochs{ActiveEpochsAtHeight(Schedule(), target_height)};
     BOOST_REQUIRE(epochs);
     return BeaconBundle(epochs->back().epoch, salt);
+}
+
+RecoveryRosterAuthoritySource RecoverySourceForChain(
+    const CBlockIndex& branch_tip,
+    uint32_t source_epoch,
+    uint64_t salt = 0)
+{
+    RecoveryRosterAuthoritySource source;
+    source.normal_beacon = ReadyBeaconSeed(source_epoch, salt);
+    const CBlockIndex* anchor{branch_tip.GetAncestor(
+        source.normal_beacon.anchor_cursor.sys_height)};
+    BOOST_REQUIRE(anchor);
+    source.normal_beacon.anchor_cursor.sys_hash = anchor->GetBlockHash();
+    BOOST_REQUIRE(source.IsStructurallyValid());
+    return source;
+}
+
+ActiveRosterBeaconBundle RecoveryBeaconBundleAtHeight(
+    int32_t target_height,
+    const RecoveryRosterAuthoritySource& source,
+    const uint256& authority_hash)
+{
+    const auto epochs{ActiveEpochsAtHeight(Schedule(), target_height)};
+    BOOST_REQUIRE(epochs);
+    const auto window{MakeRecoveryRosterBeaconWindow(
+        source, authority_hash, epochs->back().epoch)};
+    BOOST_REQUIRE(window);
+    return window->active;
+}
+
+RecoveryRosterAuthorityPtr BindSyntheticRecoveryAuthority(
+    const uint256& genesis_hash,
+    ActiveRosterBeaconBundle& bundle,
+    uint64_t salt)
+{
+    auto authority{std::make_shared<RecoveryRosterAuthority>()};
+    authority->normal_beacon = bundle.seeds.back();
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        for (std::size_t member{0}; member < QUORUM_SIZE; ++member) {
+            auto& entry{authority->slots[slot][member]};
+            entry.pro_tx_hash = NonNullHash(
+                salt + slot * QUORUM_SIZE + member + 1);
+            entry.eligible = true;
+            RecoveryRosterChildCommitment child_root;
+            child_root.global_key_version = 1;
+            child_root.commitment.generation = 1;
+            child_root.commitment.tree_id = NonNullHash(
+                salt + 10'000 + slot * QUORUM_SIZE + member);
+            child_root.commitment.root = NonNullHash(
+                salt + 20'000 + slot * QUORUM_SIZE + member);
+            entry.child_root = std::move(child_root);
+        }
+    }
+    BOOST_REQUIRE(authority->IsStructurallyValid());
+    const auto authority_hash{GetRecoveryRosterAuthorityHash(
+        genesis_hash, *authority)};
+    BOOST_REQUIRE(authority_hash);
+    bundle.recovery_authority_source.normal_beacon =
+        authority->normal_beacon;
+    bundle.recovery_authority_hash = *authority_hash;
+    return authority;
 }
 
 std::unique_ptr<FrozenQuorumRoster> BuildTestRoster(
@@ -283,6 +350,41 @@ std::vector<OperatorKeyState> KeyStates(uint32_t count,
         states.push_back(KeyState(
             Schedule(), NonNullHash(10'000 + member), epoch,
             snapshot_height, member + 1));
+    }
+    return states;
+}
+
+std::vector<OperatorKeyState> GlobalKeyStates(
+    uint32_t count,
+    uint32_t first_epoch,
+    int32_t snapshot_height)
+{
+    std::vector<OperatorKeyState> states;
+    states.reserve(count);
+    for (uint32_t member{0}; member < count; ++member) {
+        states.push_back(KeyState(
+            Schedule(), NonNullHash(10'000 + member), first_epoch,
+            snapshot_height, member + 1, /*include_child=*/false));
+    }
+    return states;
+}
+
+std::vector<OperatorKeyState> RecoveryTargetKeyStates(
+    uint32_t count,
+    int32_t target_height)
+{
+    const auto active_epochs{ActiveEpochsAtHeight(Schedule(), target_height)};
+    BOOST_REQUIRE(active_epochs);
+    auto states{GlobalKeyStates(count, /*first_epoch=*/0, target_height)};
+    for (auto& state : states) {
+        for (const auto& identity : *active_epochs) {
+            state.frozen_child_roots.push_back(FrozenChildRootRecord{
+                state.pro_tx_hash,
+                state.global_key.key_version,
+                identity.epoch,
+                state.global_key.child_key_commitment});
+        }
+        BOOST_REQUIRE(state.IsStructurallyValid());
     }
     return states;
 }
@@ -911,6 +1013,349 @@ BOOST_AUTO_TEST_CASE(active_builder_uses_canonical_branch_bases_and_snapshots)
         genesis, BuildConfig(SNAPSHOT_LAG), TARGET_HEIGHT, chain_a.Tip(),
         unavailable, &error));
     BOOST_CHECK_EQUAL(error, QuorumBuildError::SNAPSHOT_MISMATCH);
+}
+
+BOOST_AUTO_TEST_CASE(recovery_authority_is_fixed_by_pre_f_state)
+{
+    constexpr int32_t FIRST_TARGET{3465};
+    constexpr int32_t SECOND_TARGET{3470};
+    constexpr uint32_t SOURCE_EPOCH{6};
+    constexpr uint32_t SNAPSHOT_LAG{144};
+    constexpr uint32_t MEMBER_COUNT{QUORUM_SIZE + 20};
+    const uint256 genesis{NonNullHash(18'001)};
+    const auto config{BuildConfig(SNAPSHOT_LAG)};
+    IndexChain canonical(SECOND_TARGET, SECOND_TARGET + 1, 0);
+    IndexChain target_fork(SECOND_TARGET, 3300, 0xbeef);
+    IndexChain source_fork(SECOND_TARGET, 3100, 0xcafe);
+
+    const auto source{RecoverySourceForChain(
+        canonical.Tip(), SOURCE_EPOCH, 18'002)};
+    BOOST_CHECK(target_fork.At(source.normal_beacon.anchor_cursor.sys_height)
+                    .GetBlockHash() ==
+                source.normal_beacon.anchor_cursor.sys_hash);
+
+    const QuorumSnapshotLookup lookup = [&](const CBlockIndex& index) {
+        QuorumSnapshotState result;
+        result.deterministic_mns = Snapshot(
+            index.nHeight, index.GetBlockHash(), MEMBER_COUNT);
+        result.operator_key_states = SharedOperatorStates(
+            GlobalKeyStates(MEMBER_COUNT, /*first_epoch=*/0,
+                            index.nHeight));
+        return std::optional<QuorumSnapshotState>{std::move(result)};
+    };
+
+    QuorumBuildError error{QuorumBuildError::NONE};
+    const auto first{BuildRecoveryRosterAuthorityFromSource(
+        genesis, config, FIRST_TARGET, canonical.Tip(), source,
+        lookup, &error)};
+    BOOST_REQUIRE(first);
+    BOOST_CHECK(error == QuorumBuildError::NONE);
+    const auto later_target{BuildRecoveryRosterAuthorityFromSource(
+        genesis, config, SECOND_TARGET, canonical.Tip(), source,
+        lookup, &error)};
+    const auto target_branch{BuildRecoveryRosterAuthorityFromSource(
+        genesis, config, FIRST_TARGET, target_fork.Tip(), source,
+        lookup, &error)};
+    BOOST_REQUIRE(later_target);
+    BOOST_REQUIRE(target_branch);
+    BOOST_CHECK(*later_target == *first);
+    BOOST_CHECK(*target_branch == *first);
+    BOOST_CHECK(!BuildRecoveryRosterAuthorityFromSource(
+        genesis, config, FIRST_TARGET, source_fork.Tip(), source,
+        lookup, &error));
+    BOOST_CHECK(error == QuorumBuildError::MISSING_BRANCH_ANCESTOR);
+
+    auto changed_f{source};
+    changed_f.normal_beacon.future_btc_hash = NonNullHash(18'003);
+    const auto different_f{BuildRecoveryRosterAuthorityFromSource(
+        genesis, config, FIRST_TARGET, canonical.Tip(), changed_f,
+        lookup, &error)};
+    BOOST_REQUIRE(different_f);
+    BOOST_CHECK(*different_f != *first);
+
+    const QuorumSnapshotLookup changed_snapshot =
+        [&](const CBlockIndex& index) {
+            std::vector<CDeterministicMNCPtr> members;
+            members.reserve(MEMBER_COUNT);
+            for (uint32_t tag{0}; tag < MEMBER_COUNT; ++tag) {
+                members.push_back(Member(
+                    tag, false, true, NonNullHash(180'000 + tag)));
+            }
+            QuorumSnapshotState result;
+            result.deterministic_mns = SnapshotFromMembers(
+                index.nHeight, index.GetBlockHash(), members);
+            result.operator_key_states = SharedOperatorStates(
+                GlobalKeyStates(MEMBER_COUNT, /*first_epoch=*/0,
+                                index.nHeight));
+            return std::optional<QuorumSnapshotState>{std::move(result)};
+        };
+    const auto different_snapshot{BuildRecoveryRosterAuthorityFromSource(
+        genesis, config, FIRST_TARGET, canonical.Tip(), source,
+        changed_snapshot, &error)};
+    BOOST_REQUIRE(different_snapshot);
+    BOOST_CHECK(*different_snapshot != *first);
+}
+
+BOOST_AUTO_TEST_CASE(recovery_target_state_can_only_disable_fixed_members)
+{
+    constexpr int32_t TARGET_HEIGHT{3465};
+    constexpr uint32_t SOURCE_EPOCH{3};
+    constexpr uint32_t SNAPSHOT_LAG{144};
+    constexpr uint32_t SOURCE_MEMBERS{QUORUM_SIZE + 20};
+    constexpr uint32_t TARGET_MEMBERS{SOURCE_MEMBERS + 1};
+    const uint256 genesis{NonNullHash(18'100)};
+    const auto config{BuildConfig(SNAPSHOT_LAG)};
+    IndexChain chain(TARGET_HEIGHT, TARGET_HEIGHT + 1, 0);
+
+    const auto source{RecoverySourceForChain(
+        chain.Tip(), SOURCE_EPOCH, 18'101)};
+    const QuorumSnapshotLookup source_lookup = [&](const CBlockIndex& index) {
+        QuorumSnapshotState result;
+        result.deterministic_mns = Snapshot(
+            index.nHeight, index.GetBlockHash(), SOURCE_MEMBERS);
+        result.operator_key_states = SharedOperatorStates(
+            GlobalKeyStates(SOURCE_MEMBERS, /*first_epoch=*/0,
+                            index.nHeight));
+        return std::optional<QuorumSnapshotState>{std::move(result)};
+    };
+    QuorumBuildError error{QuorumBuildError::NONE};
+    const auto authority{BuildRecoveryRosterAuthorityFromSource(
+        genesis, config, TARGET_HEIGHT, chain.Tip(), source,
+        source_lookup, &error)};
+    BOOST_REQUIRE(authority);
+    const auto authority_hash{
+        GetRecoveryRosterAuthorityHash(genesis, *authority)};
+    BOOST_REQUIRE(authority_hash);
+    const auto recovery_bundle{RecoveryBeaconBundleAtHeight(
+        TARGET_HEIGHT, source, *authority_hash)};
+    const auto active_epochs{ActiveEpochsAtHeight(Schedule(), TARGET_HEIGHT)};
+    BOOST_REQUIRE(active_epochs);
+    BOOST_REQUIRE(recovery_bundle.IsForNewestEpoch(
+        active_epochs->back().epoch));
+    BOOST_REQUIRE(recovery_bundle.recovery_authority_source.normal_beacon ==
+                  authority->normal_beacon);
+    BOOST_REQUIRE(recovery_bundle.recovery_authority_hash == *authority_hash);
+    const auto source_snapshot_height{RegistrationCutoffHeight(
+        config.schedule, source.normal_beacon.epoch,
+        config.roster_snapshot_lag_blocks)};
+    BOOST_REQUIRE(source_snapshot_height);
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        BOOST_REQUIRE(recovery_bundle.seeds[slot].IsReady());
+        BOOST_REQUIRE(recovery_bundle.seeds[slot].anchor_kind ==
+                      RosterBeaconAnchorKind::RECOVERY);
+        BOOST_CHECK_EQUAL(recovery_bundle.seeds[slot].epoch,
+                          (*active_epochs)[slot].epoch);
+        BOOST_CHECK_LT(*source_snapshot_height,
+                       (*active_epochs)[slot].base_height);
+    }
+
+    const uint256 rotated_identity{
+        authority->slots[0].front().pro_tx_hash};
+    const auto target_states = [&](int32_t height) {
+        auto states{RecoveryTargetKeyStates(TARGET_MEMBERS, height)};
+        const auto it{std::find_if(
+            states.begin(), states.end(), [&](const OperatorKeyState& state) {
+                return state.pro_tx_hash == rotated_identity;
+            })};
+        BOOST_REQUIRE(it != states.end());
+        it->global_key.key_version = 2;
+        it->global_key.public_key[0] ^= 0x3f;
+        it->global_key.activated_height = height;
+        it->global_key.child_key_commitment.generation = 2;
+        it->global_key.child_key_commitment.first_epoch = 8;
+        it->global_key.child_key_commitment.tree_id = NonNullHash(181'001);
+        it->global_key.child_key_commitment.root = NonNullHash(181'002);
+        BOOST_REQUIRE(it->IsStructurallyValid());
+        return states;
+    };
+
+    const QuorumSnapshotLookup full_target = [&](const CBlockIndex& index) {
+        QuorumSnapshotState result;
+        result.deterministic_mns = Snapshot(
+            index.nHeight, index.GetBlockHash(), TARGET_MEMBERS);
+        result.operator_key_states = SharedOperatorStates(
+            target_states(index.nHeight));
+        return std::optional<QuorumSnapshotState>{std::move(result)};
+    };
+    const auto full_cache{FrozenQuorumRosterCache::Create(
+        genesis, config, full_target)};
+    BOOST_REQUIRE(full_cache);
+    const auto full{full_cache->GetVerifiedActiveWithRecoveryAuthority(
+        TARGET_HEIGHT, chain.Tip(), recovery_bundle, authority,
+        /*publish=*/true, &error)};
+    BOOST_REQUIRE_MESSAGE(full, "quorum build error=" << static_cast<int>(error));
+    for (const auto& roster : full->Rosters()) {
+        BOOST_CHECK_EQUAL(roster.descriptor.valid_count, QUORUM_SIZE);
+    }
+
+    const uint256 post_source_identity{
+        NonNullHash(10'000 + SOURCE_MEMBERS)};
+    for (const auto& roster : full->Rosters()) {
+        BOOST_CHECK(!ContainsMember(roster, post_source_identity));
+    }
+
+    const uint256 absent_identity{
+        authority->slots[0][1].pro_tx_hash};
+    const uint256 disabled_identity{
+        authority->slots[0][2].pro_tx_hash};
+    const QuorumSnapshotLookup disabled_target =
+        [&](const CBlockIndex& index) {
+            std::vector<CDeterministicMNCPtr> members;
+            members.reserve(TARGET_MEMBERS - 1);
+            for (uint32_t tag{0}; tag < TARGET_MEMBERS; ++tag) {
+                auto member{Member(tag)};
+                if (member->proTxHash != disabled_identity) {
+                    members.push_back(std::move(member));
+                }
+            }
+            QuorumSnapshotState result;
+            result.deterministic_mns = SnapshotFromMembers(
+                index.nHeight, index.GetBlockHash(), members);
+            auto states{target_states(index.nHeight)};
+            const auto absent{std::find_if(
+                states.begin(), states.end(),
+                [&](const OperatorKeyState& state) {
+                    return state.pro_tx_hash == absent_identity;
+                })};
+            BOOST_REQUIRE(absent != states.end());
+            absent->frozen_child_roots.clear();
+            BOOST_REQUIRE(absent->IsStructurallyValid());
+            result.operator_key_states = SharedOperatorStates(
+                std::move(states));
+            return std::optional<QuorumSnapshotState>{std::move(result)};
+        };
+    const auto disabled_cache{FrozenQuorumRosterCache::Create(
+        genesis, config, disabled_target)};
+    BOOST_REQUIRE(disabled_cache);
+    const auto disabled{disabled_cache->GetVerifiedActiveWithRecoveryAuthority(
+        TARGET_HEIGHT, chain.Tip(), recovery_bundle, authority,
+        /*publish=*/true, &error)};
+    BOOST_REQUIRE(disabled);
+
+    bool observed_absent_slot{false};
+    bool observed_disabled_slot{false};
+    for (std::size_t roster_slot{0};
+         roster_slot < ACTIVE_QUORUMS; ++roster_slot) {
+        for (std::size_t member_index{0};
+             member_index < QUORUM_SIZE; ++member_index) {
+            const auto& before{
+                full->Rosters()[roster_slot].members[member_index]};
+            const auto& after{
+                disabled->Rosters()[roster_slot].members[member_index]};
+            BOOST_CHECK(after.pro_tx_hash == before.pro_tx_hash);
+            if (after.pro_tx_hash == absent_identity) {
+                observed_absent_slot = true;
+                BOOST_REQUIRE(before.eligible);
+                BOOST_CHECK(!after.eligible);
+                BOOST_CHECK(!after.child_root);
+            }
+            if (after.pro_tx_hash == disabled_identity) {
+                observed_disabled_slot = true;
+                BOOST_REQUIRE(before.eligible);
+                BOOST_CHECK(!after.eligible);
+                BOOST_CHECK(!after.child_root);
+            }
+        }
+    }
+    BOOST_CHECK(observed_absent_slot);
+    BOOST_CHECK(observed_disabled_slot);
+}
+
+BOOST_AUTO_TEST_CASE(recovery_authority_requires_three_usable_phases)
+{
+    constexpr int32_t TARGET_HEIGHT{3465};
+    constexpr uint32_t SOURCE_EPOCH{6};
+    constexpr uint32_t SNAPSHOT_LAG{144};
+    const uint256 genesis{NonNullHash(18'200)};
+    IndexChain chain(TARGET_HEIGHT, TARGET_HEIGHT + 1, 0);
+    const auto source{RecoverySourceForChain(
+        chain.Tip(), SOURCE_EPOCH, 18'201)};
+    const QuorumSnapshotLookup lookup = [&](const CBlockIndex& index) {
+        QuorumSnapshotState result;
+        result.deterministic_mns = Snapshot(
+            index.nHeight, index.GetBlockHash(), QUORUM_SIZE);
+        result.operator_key_states = SharedOperatorStates(GlobalKeyStates(
+            QUORUM_MIN_VALID - 1, /*first_epoch=*/0, index.nHeight));
+        return std::optional<QuorumSnapshotState>{std::move(result)};
+    };
+
+    QuorumBuildError error{QuorumBuildError::NONE};
+    BOOST_CHECK(!BuildRecoveryRosterAuthorityFromSource(
+        genesis, BuildConfig(SNAPSHOT_LAG), TARGET_HEIGHT, chain.Tip(),
+        source, lookup, &error));
+    BOOST_CHECK(error == QuorumBuildError::CHILD_KEY_NOT_FROZEN);
+}
+
+BOOST_AUTO_TEST_CASE(normal_bundle_with_standby_source_requires_authority)
+{
+    constexpr int32_t TARGET_HEIGHT{3465};
+    constexpr uint32_t SOURCE_EPOCH{6};
+    constexpr uint32_t SNAPSHOT_LAG{144};
+    constexpr uint32_t MEMBER_COUNT{QUORUM_SIZE + 20};
+    const uint256 genesis{NonNullHash(18'300)};
+    const auto config{BuildConfig(SNAPSHOT_LAG)};
+    IndexChain chain(TARGET_HEIGHT, TARGET_HEIGHT + 1, 0);
+    const auto source{RecoverySourceForChain(
+        chain.Tip(), SOURCE_EPOCH, 18'301)};
+
+    const QuorumSnapshotLookup source_lookup = [&](const CBlockIndex& index) {
+        QuorumSnapshotState result;
+        result.deterministic_mns = Snapshot(
+            index.nHeight, index.GetBlockHash(), MEMBER_COUNT);
+        result.operator_key_states = SharedOperatorStates(
+            GlobalKeyStates(MEMBER_COUNT, /*first_epoch=*/0,
+                            index.nHeight));
+        return std::optional<QuorumSnapshotState>{std::move(result)};
+    };
+    QuorumBuildError error{QuorumBuildError::NONE};
+    const auto authority{BuildRecoveryRosterAuthorityFromSource(
+        genesis, config, TARGET_HEIGHT, chain.Tip(), source,
+        source_lookup, &error)};
+    BOOST_REQUIRE(authority);
+    const auto authority_hash{
+        GetRecoveryRosterAuthorityHash(genesis, *authority)};
+    BOOST_REQUIRE(authority_hash);
+
+    auto bundle{BeaconBundleAtHeight(TARGET_HEIGHT)};
+    bundle.recovery_authority_source = source;
+    bundle.recovery_authority_hash = *authority_hash;
+    BOOST_REQUIRE(bundle.IsStructurallyValid());
+    const QuorumSnapshotLookup normal_lookup = [&](const CBlockIndex& index) {
+        const auto epoch{EpochForHeight(
+            Schedule(), index.nHeight +
+                            static_cast<int32_t>(SNAPSHOT_LAG))};
+        BOOST_REQUIRE(epoch);
+        QuorumSnapshotState result;
+        result.deterministic_mns = Snapshot(
+            index.nHeight, index.GetBlockHash(), MEMBER_COUNT);
+        result.operator_key_states = SharedOperatorStates(
+            KeyStates(MEMBER_COUNT, *epoch, index.nHeight));
+        return std::optional<QuorumSnapshotState>{std::move(result)};
+    };
+    const auto cache{FrozenQuorumRosterCache::Create(
+        genesis, config, normal_lookup)};
+    BOOST_REQUIRE(cache);
+    BOOST_CHECK(!cache->GetVerifiedActive(
+        TARGET_HEIGHT, chain.Tip(), bundle, &error));
+    BOOST_CHECK(error == QuorumBuildError::INVALID_ROSTER_BEACON);
+
+    auto changed_source{source};
+    changed_source.normal_beacon.future_btc_hash = NonNullHash(18'302);
+    const auto wrong_authority{BuildRecoveryRosterAuthorityFromSource(
+        genesis, config, TARGET_HEIGHT, chain.Tip(), changed_source,
+        source_lookup, &error)};
+    BOOST_REQUIRE(wrong_authority);
+    BOOST_CHECK(!cache->GetVerifiedActiveWithRecoveryAuthority(
+        TARGET_HEIGHT, chain.Tip(), bundle, wrong_authority,
+        /*publish=*/true, &error));
+    BOOST_CHECK(error == QuorumBuildError::INVALID_ROSTER_BEACON);
+
+    const auto verified{cache->GetVerifiedActiveWithRecoveryAuthority(
+        TARGET_HEIGHT, chain.Tip(), bundle, authority,
+        /*publish=*/true, &error)};
+    BOOST_REQUIRE(verified);
+    BOOST_REQUIRE(verified->RecoveryAuthorityPtr());
+    BOOST_CHECK(*verified->RecoveryAuthorityPtr() == *authority);
 }
 
 BOOST_AUTO_TEST_CASE(active_roster_cache_reuses_exact_branch_contexts)
@@ -1735,12 +2180,21 @@ BOOST_AUTO_TEST_CASE(side_branch_context_is_self_contained_at_target)
     const uint32_t newest_epoch{active_epochs->back().epoch};
     RosterBeaconWindow roster_beacons;
     roster_beacons.active = BeaconBundle(newest_epoch);
+    const auto recovery_authority{BindSyntheticRecoveryAuthority(
+        genesis, roster_beacons.active, 60'100)};
     roster_beacons.next.epoch = newest_epoch + 1;
     BOOST_REQUIRE(roster_beacons.IsStructurallyValid());
-    const auto rosters = BuildActiveFrozenQuorumRosters(
-        genesis, BuildConfig(SNAPSHOT_LAG), TARGET_HEIGHT, side.Tip(),
-        roster_beacons.active, lookup);
-    BOOST_REQUIRE(rosters);
+    const auto roster_cache{FrozenQuorumRosterCache::Create(
+        genesis, BuildConfig(SNAPSHOT_LAG), lookup)};
+    BOOST_REQUIRE(roster_cache);
+    QuorumBuildError build_error{QuorumBuildError::NONE};
+    const auto roster_set{
+        roster_cache->GetVerifiedActiveWithRecoveryAuthority(
+            TARGET_HEIGHT, side.Tip(), roster_beacons.active,
+            recovery_authority, /*publish=*/false, &build_error)};
+    BOOST_REQUIRE_MESSAGE(
+        roster_set, "quorum build error=" << static_cast<int>(build_error));
+    const auto& rosters{roster_set->RostersPtr()};
     std::array<QuorumDescriptor, ACTIVE_QUORUMS> descriptors;
     for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
         descriptors[slot] = (*rosters)[slot].descriptor;
@@ -1754,6 +2208,10 @@ BOOST_AUTO_TEST_CASE(side_branch_context_is_self_contained_at_target)
         side.At(statement.previous_chainlock_height).GetBlockHash();
     statement.roster_transition =
         RosterAuthorizationTransitionKind::ROTATE;
+    statement.roster_authorization_base = {
+        statement.previous_chainlock_height,
+        statement.previous_chainlock_hash,
+        NonNullHash(60'003)};
     statement.roster_beacons = roster_beacons;
     statement.payment_probation_state_hash = NonNullHash(60'001);
     statement.quorum_context_hash = GetQuorumContextHash(
@@ -1765,6 +2223,8 @@ BOOST_AUTO_TEST_CASE(side_branch_context_is_self_contained_at_target)
     RosterAuthorizationVerificationContext live;
     live.predecessor_height = statement.previous_chainlock_height;
     live.predecessor_block_hash = statement.previous_chainlock_hash;
+    live.authorization_base = statement.roster_authorization_base;
+    live.reset_policy = ResetPolicy();
     live.previous = RosterAuthorizationPriorState{
         NonNullHash(60'002), previous_window};
     live.normal_input = test::MakeSyntheticNormalRosterAuthorizationInput(
@@ -1778,6 +2238,7 @@ BOOST_AUTO_TEST_CASE(side_branch_context_is_self_contained_at_target)
         transition.target_block_hash = value.block_hash;
         transition.predecessor_height = value.previous_chainlock_height;
         transition.predecessor_block_hash = value.previous_chainlock_hash;
+        transition.authorization_base = value.roster_authorization_base;
         transition.previous = previous;
         transition.new_window = value.roster_beacons;
         const auto hash{GetRosterAuthorizationStateHash(genesis, transition)};
@@ -1785,19 +2246,17 @@ BOOST_AUTO_TEST_CASE(side_branch_context_is_self_contained_at_target)
         value.roster_authorization_state_hash = *hash;
     };
     set_authorization_hash(statement);
-    const auto authorization_mask{
-        ValidateRosterAuthorizationState(genesis, statement, live)};
-    BOOST_REQUIRE(authorization_mask);
+    ChainLockVerificationError authorization_error{
+        ChainLockVerificationError::NONE};
+    const auto authorization_mask{ValidateRosterAuthorizationState(
+        genesis, statement, live, &authorization_error)};
+    BOOST_REQUIRE_MESSAGE(
+        authorization_mask,
+        "authorization error=" << static_cast<int>(authorization_error));
     BOOST_CHECK_EQUAL(*authorization_mask, 0b0111);
     BOOST_CHECK_EQUAL(
         *authorization_mask & (uint8_t{1} << (ACTIVE_QUORUMS - 1)), 0);
-    BOOST_CHECK(ValidateFrozenQuorumContext(
-        genesis, statement, *rosters, live));
     ChainLockVerificationError error{ChainLockVerificationError::NONE};
-    const auto roster_set{VerifiedRosterSet::Create(
-        genesis, rosters, &error)};
-    BOOST_REQUIRE(roster_set);
-    BOOST_CHECK(error == ChainLockVerificationError::NONE);
     const auto prepared{PreparedChainLockContext::Create(
         Schedule(), statement, roster_set, live, &error)};
     BOOST_REQUIRE(prepared);

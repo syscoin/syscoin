@@ -48,6 +48,21 @@ public:
         return Create(std::move(schedule), statement,
                       CreateRosterSet(genesis_hash));
     }
+
+    [[nodiscard]] static PreparedChainLockContextPtr
+    CreateTrustedPersistence(
+        const uint256& genesis_hash,
+        ChainLockScheduleConfig schedule,
+        const ChainLockStatement& statement)
+    {
+        RosterAuthorizationVerificationContext authorization;
+        authorization.admission =
+            RosterAuthorizationAdmission::TRUSTED_PERSISTENCE;
+        return PreparedChainLockContextPtr{new PreparedChainLockContext(
+            std::move(schedule), statement,
+            CreateRosterSet(genesis_hash), std::move(authorization),
+            /*authorization_mask=*/0b1111, nullptr)};
+    }
 };
 
 } // namespace llmq::pq
@@ -137,14 +152,15 @@ MakeSyntheticNormalRosterAuthorizationInput(
     input.predecessor_height = statement.previous_chainlock_height;
     input.predecessor_block_hash =
         statement.previous_chainlock_hash;
-    input.prior_authorization_height =
-        statement.previous_chainlock_height;
-    input.prior_authorization_block_hash =
-        statement.previous_chainlock_hash;
+    input.authorization_base = statement.roster_authorization_base;
     input.previous = previous;
     input.previous_btcc_cursor = statement.previous_btcc_cursor;
     input.accepted_btcc_cursor = statement.accepted_btcc_cursor;
     input.btcc_advance = statement.btcc_advance;
+    input.recovery_authority_source =
+        statement.roster_beacons.active.recovery_authority_source;
+    input.recovery_authority_hash =
+        statement.roster_beacons.active.recovery_authority_hash;
     input.next_snapshot = RosterBeaconSnapshotCoverage{
         input.newest_epoch + 1, statement.previous_chainlock_height + 1,
         {}, false};
@@ -188,8 +204,8 @@ MakeSyntheticNormalRosterAuthorizationInput(
         statement.roster_beacons.next.state ==
             RosterBeaconState::PENDING};
     if (observed_next) {
-        input.next_snapshot.height = input.prior_authorization_height;
-        input.next_snapshot.hash = input.prior_authorization_block_hash;
+        input.next_snapshot.height = input.authorization_base.height;
+        input.next_snapshot.hash = input.authorization_base.block_hash;
         input.next_snapshot.prior_authorization_is_descendant = true;
         input.accepted_anchor = ValidatedRosterBeaconAnchor{
             statement.roster_beacons.next.anchor_cursor,

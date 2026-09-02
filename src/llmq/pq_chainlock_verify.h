@@ -113,12 +113,14 @@ inline constexpr std::string_view RECOVERY_ROSTER_AUTHORITY_DOMAIN{
  */
 struct RecoveryRosterAuthority {
     uint16_t version{RECOVERY_ROSTER_AUTHORITY_VERSION};
+    /** Delayed normal F source whose pre-reveal snapshot fixed membership. */
+    RosterBeaconSeed normal_beacon;
     std::array<std::array<RecoveryRosterMember, QUORUM_SIZE>, ACTIVE_QUORUMS>
         slots;
 
     SERIALIZE_METHODS(RecoveryRosterAuthority, obj)
     {
-        READWRITE(obj.version);
+        READWRITE(obj.version, obj.normal_beacon);
         for (auto& slot : obj.slots) {
             for (auto& member : slot) READWRITE(member);
         }
@@ -167,15 +169,31 @@ enum class RosterAuthorizationAdmission : uint8_t {
     TRUSTED_PERSISTENCE = 3,
 };
 
+/** Local deployment constants that make reset admission objective. */
+struct RosterResetVerificationPolicy {
+    ChainLockScheduleConfig chainlock_schedule;
+    BTCCScheduleConfig btcc_schedule;
+    int32_t activation_predecessor_height{-1};
+
+    [[nodiscard]] bool IsStructurallyValid() const noexcept;
+    friend bool operator==(const RosterResetVerificationPolicy&,
+                           const RosterResetVerificationPolicy&) = default;
+};
+
 /**
- * Exact predecessor state supplied by the branch/finality layer. Live normal
- * transitions and RECOVER require it; INITIALIZE alone starts without one.
+ * Exact predecessor state supplied by the branch/finality layer. Only live
+ * normal transitions and RECOVER require it. INITIALIZE alone starts without
+ * a prior authorization state.
  */
 struct RosterAuthorizationVerificationContext {
     RosterAuthorizationAdmission admission{
         RosterAuthorizationAdmission::LIVE};
     int32_t predecessor_height{-1};
     uint256 predecessor_block_hash;
+    /** Exact fully verified certificate supplying `previous`. */
+    RosterAuthorizationBaseIdentity authorization_base;
+    /** Required for every network admission; omitted only for trusted DB replay. */
+    std::optional<RosterResetVerificationPolicy> reset_policy;
     std::optional<RosterAuthorizationPriorState> previous;
     /**
      * Exact chain/BTC facts prevalidated by the live handler. The verifier
@@ -209,7 +227,8 @@ public:
     [[nodiscard]] static std::shared_ptr<const VerifiedRosterSet>
     Create(const uint256& genesis_hash,
            FrozenQuorumRostersPtr rosters,
-           ChainLockVerificationError* error = nullptr);
+           ChainLockVerificationError* error = nullptr,
+           RecoveryRosterAuthorityPtr recovery_authority = nullptr);
 
     [[nodiscard]] const uint256& GenesisHash() const noexcept
     {
@@ -275,15 +294,6 @@ struct PQVerificationMemoryStats {
  */
 class PreparedChainLockContext final {
 public:
-    [[nodiscard]] static std::shared_ptr<const PreparedChainLockContext>
-    Create(const uint256& genesis_hash,
-           ChainLockScheduleConfig schedule,
-           ChainLockStatement statement,
-           FrozenQuorumRostersPtr rosters,
-           const RosterAuthorizationVerificationContext& authorization,
-           ChainLockVerificationError* error = nullptr,
-           RecoveryRosterAuthorityPtr recovery_authority = nullptr);
-
     [[nodiscard]] static std::shared_ptr<const PreparedChainLockContext>
     Create(ChainLockScheduleConfig schedule,
            ChainLockStatement statement,
@@ -388,36 +398,11 @@ struct PreparedChainLockVerification {
     std::vector<ScheduledWOTSCheck> checks;
 };
 
-/** Validate all four immutable rosters and their statement context. */
-[[nodiscard]] bool ValidateFrozenQuorumContext(
-    const uint256& genesis_hash,
-    const ChainLockStatement& statement,
-    const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
-    const RosterAuthorizationVerificationContext& authorization,
-    ChainLockVerificationError* error = nullptr);
-
-/** Cheap/contextual preparation for one private quorum share. */
-[[nodiscard]] std::optional<ScheduledWOTSCheck> PrepareChainLockShareVerification(
-    const uint256& genesis_hash,
-    const ChainLockScheduleConfig& schedule,
-    const ChainLockShare& share,
-    const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
-    const RosterAuthorizationVerificationContext& authorization,
-    ChainLockVerificationError* error = nullptr);
-
 /** Prepare one share against an already fully validated exact context. */
 [[nodiscard]] std::optional<ScheduledWOTSCheck>
 PrepareChainLockShareVerification(
     const ChainLockShare& share,
     const PreparedChainLockContext& context,
-    ChainLockVerificationError* error = nullptr);
-
-[[nodiscard]] bool VerifyChainLockShare(
-    const uint256& genesis_hash,
-    const ChainLockScheduleConfig& schedule,
-    const ChainLockShare& share,
-    const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
-    const RosterAuthorizationVerificationContext& authorization,
     ChainLockVerificationError* error = nullptr);
 
 /**
@@ -455,14 +440,6 @@ BuildCompactChainLockShare(
  * check and produce exactly FINAL_SIGNATURE_COUNT independent WOTS+ jobs.
  * No WOTS+ hash computation is performed by this function.
  */
-[[nodiscard]] std::optional<PreparedChainLockVerification> PrepareFinalChainLockVerification(
-    const uint256& genesis_hash,
-    const ChainLockScheduleConfig& schedule,
-    const FinalChainLock& chainlock,
-    const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
-    const RosterAuthorizationVerificationContext& authorization,
-    ChainLockVerificationError* error = nullptr);
-
 /** Prepare a final certificate against an intrinsically verified roster set. */
 [[nodiscard]] std::optional<PreparedChainLockVerification>
 PrepareFinalChainLockVerification(
@@ -487,15 +464,6 @@ PrepareFinalChainLockVerification(
 [[nodiscard]] bool VerifyScheduledWOTSChecks(std::vector<ScheduledWOTSCheck>&& checks,
                                             ScheduledWOTSCheckQueue* queue = nullptr);
 
-[[nodiscard]] bool VerifyFinalChainLock(
-    const uint256& genesis_hash,
-    const ChainLockScheduleConfig& schedule,
-    const FinalChainLock& chainlock,
-    const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
-    const RosterAuthorizationVerificationContext& authorization,
-    ScheduledWOTSCheckQueue* queue = nullptr,
-    ChainLockVerificationError* error = nullptr);
-
 /** RAII-owned queue. Destruction joins all workers; callers must not race it. */
 class ChainLockVerifier final {
 public:
@@ -506,15 +474,6 @@ public:
     ChainLockVerifier& operator=(const ChainLockVerifier&) = delete;
     ChainLockVerifier(ChainLockVerifier&&) = delete;
     ChainLockVerifier& operator=(ChainLockVerifier&&) = delete;
-
-    [[nodiscard]] bool Verify(
-        const uint256& genesis_hash,
-        const ChainLockScheduleConfig& schedule,
-        const FinalChainLock& chainlock,
-        const std::array<FrozenQuorumRoster, ACTIVE_QUORUMS>& rosters,
-        const RosterAuthorizationVerificationContext& authorization,
-        ChainLockVerificationError* error = nullptr)
-        EXCLUSIVE_LOCKS_REQUIRED(!m_preflight_mutex);
 
     [[nodiscard]] bool VerifyChecks(std::vector<ScheduledWOTSCheck>&& checks)
         EXCLUSIVE_LOCKS_REQUIRED(!m_preflight_mutex);

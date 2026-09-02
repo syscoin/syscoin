@@ -257,7 +257,15 @@ struct RosterBeaconSeed {
     RosterBeaconState state{RosterBeaconState::EMPTY};
     uint32_t epoch{0};
     BTCCursor anchor_cursor;
+    /**
+     * NORMAL: active-Bitcoin height of anchor_cursor.btc_hash.
+     * RECOVERY: copied from the last durable normal delayed-beacon source.
+     */
     int32_t anchor_btc_height{-1};
+    /**
+     * NORMAL READY: delayed active-Bitcoin F hash.
+     * RECOVERY READY: copied delayed F hash; recovery never invents entropy.
+     */
     uint256 future_btc_hash;
 
     SERIALIZE_METHODS(RosterBeaconSeed, obj)
@@ -284,39 +292,19 @@ struct RosterBeaconSeed {
 
 static_assert(RosterBeaconSeed::WIRE_SIZE == 112);
 
-enum class RecoveryRosterAuthoritySourceKind : uint8_t {
-    NONE = 0,
-    /** Reserved wire value from the unreleased activation-authority design. */
-    ACTIVATION = 1,
-    NORMAL_ROSTERS = 2,
-};
-
 /**
- * Non-recursive source from which fixed recovery membership is reproduced.
- * RECOVER snapshots one fully normal, already-authorized roster context;
- * mixed windows retain the source that introduced their fixed authority.
- * ACTIVATION is reserved and is never structurally valid.
+ * Exact normal READY seed whose pre-F snapshot produced the fixed standby
+ * authority. It is carried by the signed roster-authorization state so a
+ * recovery never depends on optional on-chain receipt publication.
  */
 struct RecoveryRosterAuthoritySource {
-    static constexpr std::size_t WIRE_SIZE{
-        sizeof(uint8_t) + sizeof(int32_t) + 2 * 32 +
-        ACTIVE_QUORUMS * RosterBeaconSeed::WIRE_SIZE};
+    static constexpr std::size_t WIRE_SIZE{RosterBeaconSeed::WIRE_SIZE};
 
-    RecoveryRosterAuthoritySourceKind kind{
-        RecoveryRosterAuthoritySourceKind::NONE};
-    int32_t height{-1};
-    uint256 block_hash;
-    uint256 quorum_context_hash;
-    std::array<RosterBeaconSeed, ACTIVE_QUORUMS> normal_beacons{};
+    RosterBeaconSeed normal_beacon;
 
     SERIALIZE_METHODS(RecoveryRosterAuthoritySource, obj)
     {
-        uint8_t kind{static_cast<uint8_t>(obj.kind)};
-        READWRITE(kind, obj.height, obj.block_hash,
-                  obj.quorum_context_hash);
-        for (auto& beacon : obj.normal_beacons) READWRITE(beacon);
-        SER_READ(obj, obj.kind =
-                          static_cast<RecoveryRosterAuthoritySourceKind>(kind));
+        READWRITE(obj.normal_beacon);
         SER_READ(obj, if (!obj.IsStructurallyValid()) {
             throw std::ios_base::failure(
                 "non-canonical recovery roster authority source");
@@ -329,7 +317,7 @@ struct RecoveryRosterAuthoritySource {
                            const RecoveryRosterAuthoritySource&) = default;
 };
 
-static_assert(RecoveryRosterAuthoritySource::WIRE_SIZE == 517);
+static_assert(RecoveryRosterAuthoritySource::WIRE_SIZE == 112);
 
 /** Oldest-to-newest READY beacon identities for the four active rosters. */
 struct ActiveRosterBeaconBundle {
@@ -339,7 +327,9 @@ struct ActiveRosterBeaconBundle {
 
     uint16_t version{ROSTER_BEACON_BUNDLE_VERSION};
     std::array<RosterBeaconSeed, ACTIVE_QUORUMS> seeds{};
+    /** Hash of the fixed standby authority selected by the carried source. */
     uint256 recovery_authority_hash;
+    /** Exact normal READY seed that selected the fixed standby authority. */
     RecoveryRosterAuthoritySource recovery_authority_source;
 
     SERIALIZE_METHODS(ActiveRosterBeaconBundle, obj)
@@ -360,7 +350,7 @@ struct ActiveRosterBeaconBundle {
                            const ActiveRosterBeaconBundle&) = default;
 };
 
-static_assert(ActiveRosterBeaconBundle::WIRE_SIZE == 999);
+static_assert(ActiveRosterBeaconBundle::WIRE_SIZE == 594);
 
 /** The active four READY beacons plus the next EMPTY/PENDING/READY record. */
 struct RosterBeaconWindow {
@@ -384,7 +374,7 @@ struct RosterBeaconWindow {
                            const RosterBeaconWindow&) = default;
 };
 
-static_assert(RosterBeaconWindow::WIRE_SIZE == 1'111);
+static_assert(RosterBeaconWindow::WIRE_SIZE == 706);
 
 enum class RosterAuthorizationTransitionKind : uint8_t {
     INITIALIZE = 0,
@@ -461,6 +451,27 @@ struct PaymentAuditReceiptState {
 
 static_assert(PaymentAuditReceiptState::WIRE_SIZE == 136);
 
+/** Exact certificate whose authenticated roster state authorizes a transition. */
+struct RosterAuthorizationBaseIdentity {
+    static constexpr std::size_t WIRE_SIZE{sizeof(int32_t) + 2 * 32};
+
+    int32_t height{-1};
+    uint256 block_hash;
+    uint256 logical_id;
+
+    SERIALIZE_METHODS(RosterAuthorizationBaseIdentity, obj)
+    {
+        READWRITE(obj.height, obj.block_hash, obj.logical_id);
+    }
+
+    [[nodiscard]] bool IsNull() const noexcept;
+    [[nodiscard]] bool IsStructurallyValid() const noexcept;
+    friend bool operator==(const RosterAuthorizationBaseIdentity&,
+                           const RosterAuthorizationBaseIdentity&) = default;
+};
+
+static_assert(RosterAuthorizationBaseIdentity::WIRE_SIZE == 68);
+
 struct QuorumDescriptor {
     uint16_t version{QUORUM_DESCRIPTOR_VERSION};
     uint32_t epoch{0};
@@ -501,6 +512,7 @@ struct ChainLockShareTranscript {
         RosterAuthorizationTransitionKind::INITIALIZE};
     RosterBeaconWindow roster_beacons;
     uint256 roster_authorization_state_hash;
+    RosterAuthorizationBaseIdentity roster_authorization_base;
     uint32_t quorum_epoch{0};
     uint256 quorum_base_hash;
     uint16_t member_index{std::numeric_limits<uint16_t>::max()};
@@ -521,6 +533,7 @@ struct ChainLockShareTranscript {
                   obj.previous_chainlock_height, obj.previous_chainlock_hash,
                   obj.quorum_context_hash, roster_transition,
                   obj.roster_beacons, obj.roster_authorization_state_hash,
+                  obj.roster_authorization_base,
                   obj.quorum_epoch, obj.quorum_base_hash,
                   obj.member_index, obj.member_pro_tx_hash,
                   obj.previous_btcc_cursor, obj.accepted_btcc_cursor,
@@ -541,6 +554,7 @@ struct ChainLockStatement {
     static constexpr std::size_t WIRE_SIZE{
         2 * sizeof(uint16_t) + 2 * sizeof(int32_t) + 3 * 32 +
         sizeof(uint8_t) + RosterBeaconWindow::WIRE_SIZE + 32 +
+        RosterAuthorizationBaseIdentity::WIRE_SIZE +
         2 * BTCCursor::WIRE_SIZE + sizeof(uint8_t) +
         BTCCReceiptState::WIRE_SIZE +
         PaymentAuditReceiptState::WIRE_SIZE + 32};
@@ -555,6 +569,7 @@ struct ChainLockStatement {
         RosterAuthorizationTransitionKind::INITIALIZE};
     RosterBeaconWindow roster_beacons;
     uint256 roster_authorization_state_hash;
+    RosterAuthorizationBaseIdentity roster_authorization_base;
     BTCCursor previous_btcc_cursor;
     BTCCursor accepted_btcc_cursor;
     BTCCAdvance btcc_advance{BTCCAdvance::KEEP};
@@ -571,6 +586,7 @@ struct ChainLockStatement {
                   obj.previous_chainlock_height, obj.previous_chainlock_hash,
                   obj.quorum_context_hash, roster_transition,
                   obj.roster_beacons, obj.roster_authorization_state_hash,
+                  obj.roster_authorization_base,
                   obj.previous_btcc_cursor,
                   obj.accepted_btcc_cursor, btcc_advance,
                   obj.btcc_receipt_state,
@@ -592,14 +608,10 @@ struct ChainLockStatement {
  */
 struct ChainLockShare {
     static constexpr std::size_t WIRE_SIZE{
-        2 * sizeof(uint16_t) + 2 * sizeof(int32_t) + 7 * 32 +
-        sizeof(uint8_t) + RosterBeaconWindow::WIRE_SIZE + 32 +
-        sizeof(uint32_t) + sizeof(uint16_t) + sizeof(int32_t) +
-        sizeof(uint8_t) + sizeof(int32_t) + 2 * 32 +
-        BTCCReceiptState::WIRE_SIZE +
-        PaymentAuditReceiptState::WIRE_SIZE + 32 +
+        ChainLockStatement::WIRE_SIZE + sizeof(uint32_t) +
+        sizeof(uint16_t) + 2 * 32 +
         AuthenticatedChildSignature::WIRE_SIZE};
-    static_assert(WIRE_SIZE == 2'975);
+    static_assert(WIRE_SIZE == 2'638);
 
     ChainLockShareTranscript transcript;
     AuthenticatedChildSignature authenticated_signature;
@@ -670,7 +682,7 @@ struct FinalChainLock {
         ACTIVE_QUORUMS * BITMAP_SIZE + sizeof(uint16_t) +
         FINAL_SIGNATURE_COUNT * AuthenticatedChildSignature::WIRE_SIZE};
     static_assert(WIRE_SIZE < MAX_CHAINLOCK_SIZE);
-    static_assert(WIRE_SIZE == 1'001'508);
+    static_assert(WIRE_SIZE == 1'001'171);
 
     ChainLockStatement statement;
     uint8_t selected_quorum_mask{0};
@@ -761,9 +773,9 @@ FinalChainLock ReadFinalChainLock(Stream& stream, std::size_t payload_size)
 }
 
 static_assert(FinalChainLockSerializedSize() < MAX_CHAINLOCK_SIZE);
-static_assert(ChainLockShare::WIRE_SIZE == 2'975);
+static_assert(ChainLockShare::WIRE_SIZE == 2'638);
 static_assert(CompactChainLockShare::WIRE_SIZE == 1'282);
-static_assert(FinalChainLockSerializedSize() == 1'001'508);
+static_assert(FinalChainLockSerializedSize() == 1'001'171);
 
 } // namespace llmq::pq
 

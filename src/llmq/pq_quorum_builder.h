@@ -140,7 +140,7 @@ public:
 private:
     struct Key {
         uint32_t newest_epoch{0};
-        uint256 newest_base_hash;
+        uint256 branch_context_hash;
         uint256 beacon_bundle_hash;
         uint256 recovery_authority_hash;
 
@@ -191,8 +191,8 @@ using FrozenQuorumRosterCachePtr =
  * The base height is derived from the fixed schedule, not accepted from a
  * caller. Payment state never enters validator selection. Root-capable
  * candidates rank ahead of keyless records, with each group ordered by the
- * epoch score derived from the exact READY delayed-Bitcoin seed. The branch
- * base hash remains descriptor identity only and never enters that score.
+ * epoch score derived from the exact NORMAL READY delayed-Bitcoin seed. The
+ * branch base hash remains descriptor identity only and never enters that score.
  * Missing operator state or a frozen-absent key leaves an otherwise selected
  * slot without a child key.
  */
@@ -222,21 +222,11 @@ BuildActiveFrozenQuorumRosters(
     const QuorumSnapshotLookup& snapshot_lookup,
     QuorumBuildError* error = nullptr);
 
-/** Materialize the fixed membership/key tables of one verified roster set. */
-[[nodiscard]] RecoveryRosterAuthorityPtr CreateRecoveryRosterAuthority(
-    const uint256& genesis_hash,
-    const ChainLockStatement& source_statement,
-    const VerifiedRosterSet& roster_set);
-
-/** Rebuild the same authority from a compact, exact normal-roster source. */
-[[nodiscard]] RecoveryRosterAuthorityPtr CreateRecoveryRosterAuthority(
-    const uint256& genesis_hash,
-    int32_t source_height,
-    const uint256& source_block_hash,
-    const uint256& source_quorum_context_hash,
-    const VerifiedRosterSet& roster_set);
-
-/** Reproduce fixed recovery membership from its signed non-recursive source. */
+/**
+ * Select and freeze four phase-domain standby rosters from the exact pre-F
+ * normal snapshot committed by source. Recovery targets reuse those positions;
+ * target state may disable, but never replace or reorder, a frozen member.
+ */
 [[nodiscard]] RecoveryRosterAuthorityPtr
 BuildRecoveryRosterAuthorityFromSource(
     const uint256& genesis_hash,

@@ -7,6 +7,7 @@
 #include <arith_uint256.h>
 #include <chain.h>
 #include <crypto/sha256.h>
+#include <hash.h>
 
 #include <algorithm>
 #include <map>
@@ -16,6 +17,9 @@
 
 namespace llmq::pq {
 namespace {
+
+inline constexpr std::string_view RECOVERY_ROSTER_PHASE_MODIFIER_DOMAIN{
+    "SYS_PQ_RECOVERY_ROSTER_PHASE_MODIFIER_V1"};
 
 struct ScoredMember {
     arith_uint256 score;
@@ -61,6 +65,30 @@ struct OperatorStateLookup {
 void SetError(QuorumBuildError* error, QuorumBuildError value)
 {
     if (error != nullptr) *error = value;
+}
+
+void WriteDomain(CHashWriter& writer, std::string_view domain)
+{
+    writer.write(AsBytes(Span{domain.data(), domain.size()}));
+}
+
+std::optional<uint256> GetRecoveryRosterPhaseModifier(
+    const uint256& genesis_hash,
+    const uint256& entropy_commitment,
+    uint8_t phase,
+    int32_t snapshot_height,
+    const uint256& snapshot_hash)
+{
+    if (genesis_hash.IsNull() || entropy_commitment.IsNull() ||
+        phase >= ACTIVE_QUORUMS || snapshot_height < 0 ||
+        snapshot_hash.IsNull()) {
+        return std::nullopt;
+    }
+    CHashWriter writer{SER_GETHASH, 0};
+    WriteDomain(writer, RECOVERY_ROSTER_PHASE_MODIFIER_DOMAIN);
+    writer << genesis_hash << entropy_commitment << phase
+           << snapshot_height << snapshot_hash;
+    return writer.GetHash();
 }
 
 bool PrepareOperatorStateLookup(
@@ -360,7 +388,8 @@ std::unique_ptr<FrozenQuorumRoster> BuildFrozenQuorumRoster(
     std::span<const OperatorKeyState> operator_key_states,
     QuorumBuildError* error)
 {
-    if (beacon_seed.anchor_kind != RosterBeaconAnchorKind::NORMAL) {
+    if (!beacon_seed.IsReady() ||
+        beacon_seed.anchor_kind != RosterBeaconAnchorKind::NORMAL) {
         SetError(error, QuorumBuildError::INVALID_ROSTER_BEACON);
         return nullptr;
     }
@@ -413,6 +442,173 @@ const FrozenQuorumRoster* FindReusableRoster(
     return nullptr;
 }
 
+std::optional<QuorumSnapshotState> LookupSnapshotExact(
+    const CBlockIndex& index,
+    const QuorumSnapshotLookup& snapshot_lookup,
+    QuorumBuildError* error)
+{
+    std::optional<QuorumSnapshotState> state;
+    try {
+        state = snapshot_lookup(index);
+    } catch (...) {
+        SetError(error, QuorumBuildError::SNAPSHOT_LOOKUP_FAILED);
+        return std::nullopt;
+    }
+    if (!state) {
+        SetError(error, QuorumBuildError::SNAPSHOT_LOOKUP_FAILED);
+        return std::nullopt;
+    }
+    if (state->deterministic_mns.IsNull() ||
+        state->deterministic_mns.GetHeight() != index.nHeight ||
+        state->deterministic_mns.GetBlockHash() != index.GetBlockHash() ||
+        !state->operator_key_states) {
+        SetError(error, QuorumBuildError::SNAPSHOT_MISMATCH);
+        return std::nullopt;
+    }
+    return state;
+}
+
+bool PrepareSnapshotOperatorLookup(
+    const QuorumBuildConfig& config,
+    const QuorumSnapshotState& state,
+    OperatorStateLookup& lookup,
+    QuorumBuildError* error)
+{
+    lookup.states = std::span<const OperatorKeyState>{
+        state.operator_key_states->data(),
+        state.operator_key_states->size()};
+    if (!PrepareOperatorStateLookup(lookup.states, lookup, error)) {
+        return false;
+    }
+    const auto schedule_view{DeriveOperatorKeyScheduleView(
+        config.schedule, state.deterministic_mns.GetHeight(),
+        config.registration_cutoff_blocks, config.future_horizon_epochs)};
+    if (!schedule_view ||
+        std::any_of(
+            lookup.states.begin(), lookup.states.end(),
+            [&](const OperatorKeyState& operator_state) {
+                return !operator_state.IsAdvancedTo(*schedule_view);
+            })) {
+        SetError(error,
+                 QuorumBuildError::OPERATOR_STATE_SNAPSHOT_MISMATCH);
+        return false;
+    }
+    return true;
+}
+
+const CBlockIndex* ResolveRecoverySourceSnapshot(
+    const QuorumBuildConfig& config,
+    const CBlockIndex& target_index,
+    const RecoveryRosterAuthoritySource& source,
+    QuorumBuildError* error)
+{
+    if (!source.IsStructurallyValid() || source.IsNull()) {
+        SetError(error, QuorumBuildError::INVALID_ROSTER_BEACON);
+        return nullptr;
+    }
+    const auto& normal_beacon{source.normal_beacon};
+    const auto snapshot_height{RegistrationCutoffHeight(
+        config.schedule, normal_beacon.epoch,
+        config.roster_snapshot_lag_blocks)};
+    if (!snapshot_height ||
+        *snapshot_height >= normal_beacon.anchor_cursor.sys_height ||
+        normal_beacon.anchor_cursor.sys_height > target_index.nHeight) {
+        SetError(error, QuorumBuildError::SNAPSHOT_MISMATCH);
+        return nullptr;
+    }
+    const CBlockIndex* anchor_index{target_index.GetAncestor(
+        normal_beacon.anchor_cursor.sys_height)};
+    if (anchor_index == nullptr ||
+        anchor_index->GetBlockHash() != normal_beacon.anchor_cursor.sys_hash) {
+        SetError(error, QuorumBuildError::MISSING_BRANCH_ANCESTOR);
+        return nullptr;
+    }
+    const CBlockIndex* snapshot_index{
+        anchor_index->GetAncestor(*snapshot_height)};
+    if (snapshot_index == nullptr) {
+        SetError(error, QuorumBuildError::MISSING_BRANCH_ANCESTOR);
+        return nullptr;
+    }
+    return snapshot_index;
+}
+
+std::unique_ptr<FrozenQuorumRoster> BuildRecoveryFrozenQuorumRoster(
+    const uint256& genesis_hash,
+    const EpochIdentity& identity,
+    const CBlockIndex& base_index,
+    const CBlockIndex& source_snapshot_index,
+    const RosterBeaconSeed& recovery_seed,
+    const std::array<RecoveryRosterMember, QUORUM_SIZE>& authority_slot,
+    const QuorumSnapshotState& current_state,
+    const OperatorStateLookup& current_operator_states,
+    QuorumBuildError* error)
+{
+    const auto beacon_hash{
+        GetRosterBeaconCommitmentHash(genesis_hash, recovery_seed)};
+    if (!beacon_hash ||
+        recovery_seed.anchor_kind != RosterBeaconAnchorKind::RECOVERY ||
+        recovery_seed.epoch != identity.epoch ||
+        source_snapshot_index.nHeight >= base_index.nHeight) {
+        SetError(error, QuorumBuildError::INVALID_ROSTER_BEACON);
+        return nullptr;
+    }
+
+    auto roster{std::make_unique<FrozenQuorumRoster>()};
+    auto& descriptor{roster->descriptor};
+    descriptor.epoch = identity.epoch;
+    descriptor.base_height = identity.base_height;
+    descriptor.base_hash = base_index.GetBlockHash();
+    descriptor.snapshot_height = source_snapshot_index.nHeight;
+    descriptor.snapshot_hash = source_snapshot_index.GetBlockHash();
+    descriptor.roster_beacon_hash = *beacon_hash;
+
+    for (std::size_t member_index{0};
+         member_index < QUORUM_SIZE; ++member_index) {
+        const auto& source{authority_slot[member_index]};
+        auto& member{roster->members[member_index]};
+        member.pro_tx_hash = source.pro_tx_hash;
+        if (!source.eligible || !source.child_root) continue;
+
+        const auto dmn{
+            current_state.deterministic_mns.GetMN(source.pro_tx_hash)};
+        const auto* operator_state{
+            current_operator_states.Find(source.pro_tx_hash)};
+        const auto child_root{operator_state != nullptr
+            ? operator_state->ResolveChildRoot(identity.epoch)
+            : ChildRootResolution{}};
+        if (!dmn || !CDeterministicMNList::IsMNValid(*dmn) ||
+            operator_state == nullptr ||
+            child_root.status !=
+                ChildRootResolutionStatus::FROZEN_PRESENT ||
+            !child_root.record ||
+            child_root.record->pro_tx_hash != source.pro_tx_hash ||
+            child_root.record->epoch != identity.epoch ||
+            child_root.record->global_key_version !=
+                source.child_root->global_key_version ||
+            child_root.record->commitment !=
+                source.child_root->commitment ||
+            !source.child_root->commitment.CoversEpoch(identity.epoch)) {
+            continue;
+        }
+
+        member.eligible = true;
+        member.child_root = *child_root.record;
+        SetBit(descriptor.valid_members, member_index);
+    }
+
+    descriptor.valid_count = static_cast<uint16_t>(
+        CountSet(descriptor.valid_members));
+    descriptor.member_root = ComputeQuorumMemberRoot(genesis_hash, *roster);
+    descriptor.child_key_root =
+        ComputeQuorumChildKeyRoot(genesis_hash, *roster);
+    if (descriptor.member_root.IsNull() ||
+        descriptor.child_key_root.IsNull()) {
+        SetError(error, QuorumBuildError::INVALID_FROZEN_ROSTER);
+        return nullptr;
+    }
+    return roster;
+}
+
 std::unique_ptr<FrozenQuorumRosters> BuildActiveFrozenQuorumRostersImpl(
     const uint256& genesis_hash,
     const QuorumBuildConfig& config,
@@ -437,8 +633,12 @@ std::unique_ptr<FrozenQuorumRosters> BuildActiveFrozenQuorumRostersImpl(
         SetError(error, QuorumBuildError::INVALID_TARGET_HEIGHT);
         return nullptr;
     }
-    if (branch_tip.nHeight < target_height ||
-        branch_tip.GetAncestor(target_height) == nullptr) {
+    if (branch_tip.nHeight < target_height) {
+        SetError(error, QuorumBuildError::MISSING_BRANCH_ANCESTOR);
+        return nullptr;
+    }
+    const CBlockIndex* target_index{branch_tip.GetAncestor(target_height)};
+    if (target_index == nullptr) {
         SetError(error, QuorumBuildError::MISSING_BRANCH_ANCESTOR);
         return nullptr;
     }
@@ -456,13 +656,26 @@ std::unique_ptr<FrozenQuorumRosters> BuildActiveFrozenQuorumRostersImpl(
         [](const RosterBeaconSeed& seed) {
             return seed.anchor_kind == RosterBeaconAnchorKind::RECOVERY;
         })};
-    if (has_recovery_seed != (recovery_authority != nullptr) ||
-        (recovery_authority != nullptr &&
-         !recovery_authority->IsStructurallyValid())) {
+    const bool carries_recovery_authority{
+        !beacon_bundle.recovery_authority_source.IsNull()};
+    if (carries_recovery_authority !=
+            (recovery_authority != nullptr) ||
+        (has_recovery_seed && !carries_recovery_authority)) {
         SetError(error, QuorumBuildError::INVALID_ROSTER_BEACON);
         return nullptr;
     }
+
+    const CBlockIndex* recovery_source_snapshot{nullptr};
+    std::optional<QuorumSnapshotState> current_state;
+    OperatorStateLookup current_operator_states{{}, {}};
     if (recovery_authority != nullptr) {
+        if (!recovery_authority->IsStructurallyValid() ||
+            beacon_bundle.recovery_authority_source.IsNull() ||
+            recovery_authority->normal_beacon !=
+                beacon_bundle.recovery_authority_source.normal_beacon) {
+            SetError(error, QuorumBuildError::INVALID_ROSTER_BEACON);
+            return nullptr;
+        }
         const auto authority_hash{GetRecoveryRosterAuthorityHash(
             genesis_hash, *recovery_authority)};
         if (!authority_hash ||
@@ -471,16 +684,54 @@ std::unique_ptr<FrozenQuorumRosters> BuildActiveFrozenQuorumRostersImpl(
             return nullptr;
         }
     }
+    if (has_recovery_seed) {
+        recovery_source_snapshot = ResolveRecoverySourceSnapshot(
+            config, *target_index,
+            beacon_bundle.recovery_authority_source, error);
+        if (recovery_source_snapshot == nullptr) return nullptr;
+        current_state = LookupSnapshotExact(*target_index, snapshot_lookup,
+                                            error);
+        if (!current_state ||
+            !PrepareSnapshotOperatorLookup(config, *current_state,
+                                           current_operator_states, error)) {
+            return nullptr;
+        }
+    }
 
     auto rosters{std::make_unique<FrozenQuorumRosters>()};
     std::map<uint256, std::pair<uint256, uint32_t>> tree_owners;
     for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
         const auto& identity{(*active_epochs)[slot]};
-        const CBlockIndex* base_index{branch_tip.GetAncestor(identity.base_height)};
+        const CBlockIndex* base_index{
+            target_index->GetAncestor(identity.base_height)};
+        if (base_index == nullptr) {
+            SetError(error, QuorumBuildError::MISSING_BRANCH_ANCESTOR);
+            return nullptr;
+        }
+        const auto& beacon_seed{beacon_bundle.seeds[slot]};
+        if (beacon_seed.anchor_kind == RosterBeaconAnchorKind::RECOVERY) {
+            auto roster{BuildRecoveryFrozenQuorumRoster(
+                genesis_hash, identity, *base_index,
+                *recovery_source_snapshot, beacon_seed,
+                recovery_authority
+                    ->slots[identity.epoch % ACTIVE_QUORUMS],
+                *current_state, current_operator_states, error)};
+            if (!roster) return nullptr;
+            if (!AddActiveChildRootsToSet(*roster, tree_owners)) {
+                SetError(error, QuorumBuildError::DUPLICATE_CHILD_KEY);
+                return nullptr;
+            }
+            (*rosters)[slot] = std::move(*roster);
+            continue;
+        }
+        if (beacon_seed.anchor_kind != RosterBeaconAnchorKind::NORMAL) {
+            SetError(error, QuorumBuildError::INVALID_ROSTER_BEACON);
+            return nullptr;
+        }
         const auto snapshot_height{
             RegistrationCutoffHeight(config.schedule, identity.epoch,
                                      config.roster_snapshot_lag_blocks)};
-        if (base_index == nullptr || !snapshot_height ||
+        if (!snapshot_height ||
             *snapshot_height >= identity.base_height) {
             SetError(error, QuorumBuildError::MISSING_BRANCH_ANCESTOR);
             return nullptr;
@@ -496,52 +747,6 @@ std::unique_ptr<FrozenQuorumRosters> BuildActiveFrozenQuorumRostersImpl(
             SetError(error, QuorumBuildError::INVALID_ROSTER_BEACON);
             return nullptr;
         }
-        if (beacon_bundle.seeds[slot].anchor_kind ==
-            RosterBeaconAnchorKind::RECOVERY) {
-            auto roster{std::make_unique<FrozenQuorumRoster>()};
-            auto& descriptor{roster->descriptor};
-            descriptor.epoch = identity.epoch;
-            descriptor.base_height = identity.base_height;
-            descriptor.base_hash = base_index->GetBlockHash();
-            descriptor.snapshot_height = *snapshot_height;
-            descriptor.snapshot_hash = snapshot_index->GetBlockHash();
-            descriptor.roster_beacon_hash = *beacon_hash;
-
-            const auto& authority_slot{
-                recovery_authority->slots[identity.epoch % ACTIVE_QUORUMS]};
-            for (std::size_t member_index{0};
-                 member_index < QUORUM_SIZE; ++member_index) {
-                const auto& source{authority_slot[member_index]};
-                auto& member{roster->members[member_index]};
-                member.pro_tx_hash = source.pro_tx_hash;
-                if (!source.eligible || !source.child_root) continue;
-                if (!source.child_root->commitment.CoversEpoch(
-                        identity.epoch)) {
-                    continue;
-                }
-                member.eligible = true;
-                member.child_root = FrozenChildRootRecord{
-                    source.pro_tx_hash,
-                    source.child_root->global_key_version,
-                    identity.epoch,
-                    source.child_root->commitment};
-                if (member.eligible) {
-                    SetBit(descriptor.valid_members, member_index);
-                }
-            }
-            descriptor.valid_count = static_cast<uint16_t>(
-                CountSet(descriptor.valid_members));
-            descriptor.member_root =
-                ComputeQuorumMemberRoot(genesis_hash, *roster);
-            descriptor.child_key_root =
-                ComputeQuorumChildKeyRoot(genesis_hash, *roster);
-            if (!AddActiveChildRootsToSet(*roster, tree_owners)) {
-                SetError(error, QuorumBuildError::DUPLICATE_CHILD_KEY);
-                return nullptr;
-            }
-            (*rosters)[slot] = std::move(*roster);
-            continue;
-        }
         const FrozenQuorumRoster* reusable{FindReusableRoster(
             genesis_hash, identity, *base_index, *snapshot_index,
             *beacon_hash, reusable_sets)};
@@ -553,30 +758,12 @@ std::unique_ptr<FrozenQuorumRosters> BuildActiveFrozenQuorumRostersImpl(
             (*rosters)[slot] = *reusable;
             continue;
         }
-        std::optional<QuorumSnapshotState> snapshot_state;
-        try {
-            snapshot_state = snapshot_lookup(*snapshot_index);
-        } catch (...) {
-            // Storage lookup failures must remain local/transient rather than
-            // escaping a consensus caller that already handles this result.
-            SetError(error, QuorumBuildError::SNAPSHOT_LOOKUP_FAILED);
-            return nullptr;
-        }
-        if (!snapshot_state) {
-            SetError(error, QuorumBuildError::SNAPSHOT_LOOKUP_FAILED);
-            return nullptr;
-        }
-        if (snapshot_state->deterministic_mns.IsNull() ||
-            snapshot_state->deterministic_mns.GetHeight() != *snapshot_height ||
-            snapshot_state->deterministic_mns.GetBlockHash() !=
-                snapshot_index->GetBlockHash() ||
-            !snapshot_state->operator_key_states) {
-            SetError(error, QuorumBuildError::SNAPSHOT_MISMATCH);
-            return nullptr;
-        }
+        auto snapshot_state{
+            LookupSnapshotExact(*snapshot_index, snapshot_lookup, error)};
+        if (!snapshot_state) return nullptr;
         auto roster{BuildFrozenQuorumRoster(
             genesis_hash, config, identity.epoch, base_index->GetBlockHash(),
-            beacon_bundle.seeds[slot],
+            beacon_seed,
             snapshot_state->deterministic_mns,
             std::span<const OperatorKeyState>{
                 snapshot_state->operator_key_states->data(),
@@ -589,17 +776,26 @@ std::unique_ptr<FrozenQuorumRosters> BuildActiveFrozenQuorumRostersImpl(
         }
         (*rosters)[slot] = std::move(*roster);
     }
-    const bool complete_recovery_window{std::all_of(
-        beacon_bundle.seeds.begin(), beacon_bundle.seeds.end(),
-        [](const RosterBeaconSeed& seed) {
-            return seed.anchor_kind == RosterBeaconAnchorKind::RECOVERY;
-        })};
-    if (complete_recovery_window &&
-        ((*rosters)[1].descriptor.valid_count < QUORUM_MIN_VALID ||
-         (*rosters)[2].descriptor.valid_count < QUORUM_MIN_VALID ||
-         (*rosters)[3].descriptor.valid_count < QUORUM_MIN_VALID)) {
-        SetError(error, QuorumBuildError::CHILD_KEY_NOT_FROZEN);
-        return nullptr;
+    const bool complete_recovery_window{
+        beacon_bundle.seeds.back().epoch % ACTIVE_QUORUMS ==
+            ACTIVE_QUORUMS - 1 &&
+        std::all_of(
+            beacon_bundle.seeds.begin(), beacon_bundle.seeds.end(),
+            [](const RosterBeaconSeed& seed) {
+                return seed.anchor_kind ==
+                       RosterBeaconAnchorKind::RECOVERY;
+            })};
+    if (complete_recovery_window) {
+        // RECOVER itself may use any three thresholds. The first normal
+        // rotation drops slot 0, so its retained slots 1/2/3 must all remain
+        // independently usable or recovery would immediately dead-end.
+        for (std::size_t slot{1}; slot < ACTIVE_QUORUMS; ++slot) {
+            if ((*rosters)[slot].descriptor.valid_count <
+                QUORUM_MIN_VALID) {
+                SetError(error, QuorumBuildError::CHILD_KEY_NOT_FROZEN);
+                return nullptr;
+            }
+        }
     }
     return rosters;
 }
@@ -626,38 +822,61 @@ FrozenQuorumRostersPtr BuildActiveFrozenQuorumRosters(
 
 namespace {
 
-RecoveryRosterAuthorityPtr CreateRecoveryRosterAuthorityImpl(
+RecoveryRosterAuthorityPtr BuildStandbyRecoveryAuthority(
     const uint256& genesis_hash,
-    int32_t source_height,
-    const uint256& source_block_hash,
-    const uint256& source_quorum_context_hash,
-    const FrozenQuorumRosters& rosters)
+    const QuorumBuildConfig& config,
+    const RosterBeaconSeed& normal_beacon,
+    const QuorumSnapshotState& source_state,
+    QuorumBuildError* error)
 {
-    if (genesis_hash.IsNull() || source_height < 0 ||
-        source_block_hash.IsNull() || source_quorum_context_hash.IsNull()) {
+    const auto entropy_commitment{GetRecoveryRosterEntropyCommitment(
+        genesis_hash, normal_beacon)};
+    if (!entropy_commitment) {
+        SetError(error, QuorumBuildError::INVALID_ROSTER_BEACON);
         return nullptr;
     }
-    std::array<QuorumDescriptor, ACTIVE_QUORUMS> descriptors;
-    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
-        descriptors[slot] = rosters[slot].descriptor;
-    }
-    if (GetQuorumContextHash(
-            genesis_hash, source_height, source_block_hash, descriptors) !=
-        source_quorum_context_hash) {
+    OperatorStateLookup operator_states{{}, {}};
+    if (!PrepareSnapshotOperatorLookup(
+            config, source_state, operator_states, error)) {
         return nullptr;
     }
+
     auto authority{std::make_shared<RecoveryRosterAuthority>()};
-    std::array<bool, ACTIVE_QUORUMS> assigned{};
-    for (const auto& roster : rosters) {
-        const std::size_t phase{roster.descriptor.epoch % ACTIVE_QUORUMS};
-        if (assigned[phase]) return nullptr;
-        assigned[phase] = true;
+    authority->normal_beacon = normal_beacon;
+    for (std::size_t phase{0}; phase < ACTIVE_QUORUMS; ++phase) {
+        const auto modifier{GetRecoveryRosterPhaseModifier(
+            genesis_hash, *entropy_commitment,
+            static_cast<uint8_t>(phase),
+            source_state.deterministic_mns.GetHeight(),
+            source_state.deterministic_mns.GetBlockHash())};
+        if (!modifier) {
+            SetError(error, QuorumBuildError::INVALID_ROSTER_BEACON);
+            return nullptr;
+        }
+        auto selected{SelectRosterMembers(
+            source_state.deterministic_mns, *modifier, operator_states,
+            [](const OperatorKeyState* state,
+                const uint256& pro_tx_hash)
+                -> std::optional<std::optional<FrozenChildRootRecord>> {
+                if (state == nullptr || !state->HasActiveGlobalKey()) {
+                    return std::optional<FrozenChildRootRecord>{};
+                }
+                return std::optional<FrozenChildRootRecord>{
+                    FrozenChildRootRecord{
+                        pro_tx_hash,
+                        state->global_key.key_version,
+                        state->global_key.child_key_commitment.first_epoch,
+                        state->global_key.child_key_commitment}};
+            },
+            error)};
+        if (!selected) return nullptr;
+
         for (std::size_t member_index{0};
              member_index < QUORUM_SIZE; ++member_index) {
-            const auto& source{roster.members[member_index]};
+            const auto& source{(*selected)[member_index]};
             auto& member{authority->slots[phase][member_index]};
-            member.pro_tx_hash = source.pro_tx_hash;
-            member.eligible = source.eligible;
+            member.pro_tx_hash = source.dmn->proTxHash;
+            member.eligible = true;
             if (source.child_root) {
                 member.child_root = RecoveryRosterChildCommitment{
                     source.child_root->global_key_version,
@@ -665,62 +884,14 @@ RecoveryRosterAuthorityPtr CreateRecoveryRosterAuthorityImpl(
             }
         }
     }
-    if (std::find(assigned.begin(), assigned.end(), false) !=
-            assigned.end() ||
-        !authority->IsStructurallyValid()) {
+    if (!authority->IsStructurallyValid()) {
+        SetError(error, QuorumBuildError::CHILD_KEY_NOT_FROZEN);
         return nullptr;
     }
     return authority;
 }
 
-bool RecoveryAuthorityCoversTarget(
-    const RecoveryRosterAuthority& authority,
-    const ChainLockScheduleConfig& schedule,
-    int32_t target_height) noexcept
-{
-    const auto target_epochs{ActiveEpochsAtHeight(schedule, target_height)};
-    if (!target_epochs) return false;
-    std::array<std::size_t, ACTIVE_QUORUMS> valid_by_phase{};
-    for (const auto& identity : *target_epochs) {
-        const auto& slot{authority.slots[identity.epoch % ACTIVE_QUORUMS]};
-        valid_by_phase[identity.epoch % ACTIVE_QUORUMS] =
-            std::count_if(slot.begin(), slot.end(),
-                          [&](const RecoveryRosterMember& member) {
-                              return member.eligible && member.child_root &&
-                                     member.child_root->commitment.CoversEpoch(
-                                         identity.epoch);
-                          });
-    }
-    return valid_by_phase[1] >= QUORUM_MIN_VALID &&
-           valid_by_phase[2] >= QUORUM_MIN_VALID &&
-           valid_by_phase[3] >= QUORUM_MIN_VALID;
-}
-
 } // namespace
-
-RecoveryRosterAuthorityPtr CreateRecoveryRosterAuthority(
-    const uint256& genesis_hash,
-    int32_t source_height,
-    const uint256& source_block_hash,
-    const uint256& source_quorum_context_hash,
-    const VerifiedRosterSet& roster_set)
-{
-    if (roster_set.GenesisHash() != genesis_hash) return nullptr;
-    return CreateRecoveryRosterAuthorityImpl(
-        genesis_hash, source_height, source_block_hash,
-        source_quorum_context_hash, roster_set.Rosters());
-}
-
-RecoveryRosterAuthorityPtr CreateRecoveryRosterAuthority(
-    const uint256& genesis_hash,
-    const ChainLockStatement& source_statement,
-    const VerifiedRosterSet& roster_set)
-{
-    if (!source_statement.IsStructurallyValid()) return nullptr;
-    return CreateRecoveryRosterAuthority(
-        genesis_hash, source_statement.height, source_statement.block_hash,
-        source_statement.quorum_context_hash, roster_set);
-}
 
 RecoveryRosterAuthorityPtr BuildRecoveryRosterAuthorityFromSource(
     const uint256& genesis_hash,
@@ -732,51 +903,35 @@ RecoveryRosterAuthorityPtr BuildRecoveryRosterAuthorityFromSource(
     QuorumBuildError* error)
 {
     SetError(error, QuorumBuildError::NONE);
-    if (!source.IsStructurallyValid() || source.IsNull() ||
+    if (genesis_hash.IsNull() || !config.IsValid() || !snapshot_lookup ||
+        !source.IsStructurallyValid() || source.IsNull() ||
         !IsEligibleChainLockTarget(config.schedule,
                                    recovery_target_height)) {
         SetError(error, QuorumBuildError::INVALID_ARGUMENT);
         return nullptr;
     }
-    if (source.kind !=
-        RecoveryRosterAuthoritySourceKind::NORMAL_ROSTERS) {
-        SetError(error, QuorumBuildError::INVALID_ARGUMENT);
-        return nullptr;
-    }
-    if (source.height >= recovery_target_height ||
-        branch_tip.nHeight < recovery_target_height) {
+    if (branch_tip.nHeight < recovery_target_height) {
         SetError(error, QuorumBuildError::INVALID_TARGET_HEIGHT);
         return nullptr;
     }
-    const CBlockIndex* source_index{branch_tip.GetAncestor(source.height)};
-    if (source_index == nullptr ||
-        source_index->GetBlockHash() != source.block_hash) {
+    const CBlockIndex* target_index{
+        branch_tip.GetAncestor(recovery_target_height)};
+    if (target_index == nullptr) {
         SetError(error, QuorumBuildError::MISSING_BRANCH_ANCESTOR);
         return nullptr;
     }
-    ActiveRosterBeaconBundle source_bundle;
-    source_bundle.seeds = source.normal_beacons;
-    if (!source_bundle.IsStructurallyValid()) {
-        SetError(error, QuorumBuildError::INVALID_ROSTER_BEACON);
-        return nullptr;
-    }
-    auto source_rosters{BuildActiveFrozenQuorumRosters(
-        genesis_hash, config, source.height, branch_tip, source_bundle,
-        snapshot_lookup, error)};
-    auto authority{source_rosters
-        ? CreateRecoveryRosterAuthorityImpl(
-              genesis_hash, source.height, source.block_hash,
-              source.quorum_context_hash, *source_rosters)
-        : nullptr};
+    const CBlockIndex* snapshot_index{ResolveRecoverySourceSnapshot(
+        config, *target_index, source, error)};
+    if (snapshot_index == nullptr) return nullptr;
+    auto source_state{
+        LookupSnapshotExact(*snapshot_index, snapshot_lookup, error)};
+    if (!source_state) return nullptr;
+    auto authority{BuildStandbyRecoveryAuthority(
+        genesis_hash, config, source.normal_beacon, *source_state, error)};
     if (!authority) {
         if (error != nullptr && *error == QuorumBuildError::NONE) {
             *error = QuorumBuildError::INVALID_FROZEN_ROSTER;
         }
-        return nullptr;
-    }
-    if (!RecoveryAuthorityCoversTarget(
-            *authority, config.schedule, recovery_target_height)) {
-        SetError(error, QuorumBuildError::CHILD_KEY_NOT_FROZEN);
         return nullptr;
     }
     return authority;
@@ -801,7 +956,9 @@ VerifiedRosterSet::MintCanonicalBuild(
     const FrozenQuorumRosterCache& cache,
     RecoveryRosterAuthorityPtr recovery_authority)
 {
-    if (!rosters || !cache.m_build_provenance) return nullptr;
+    if (!rosters || !cache.m_build_provenance) {
+        return nullptr;
+    }
     // Exclusive transfer prevents a producer alias from changing the bytes
     // whose roots were established during canonical construction.
     FrozenQuorumRostersPtr immutable_rosters{std::move(rosters)};
@@ -948,11 +1105,18 @@ VerifiedRosterSetPtr FrozenQuorumRosterCache::GetVerifiedActiveImpl(
         SetError(error, QuorumBuildError::MISSING_BRANCH_ANCESTOR);
         return nullptr;
     }
-    // A block hash commits its complete ancestry. Every other active base and
-    // snapshot is an ancestor of this newest base, so this key distinguishes
-    // forks exactly while allowing descendants after the base to share state.
-    // The bundle hash prevents a hit across different delayed-Bitcoin seeds.
-    const Key key{newest.epoch, newest_base->GetBlockHash(),
+    // Normal rosters are immutable from the newest base onward. Recovery
+    // eligibility is a disable-only overlay of target state, so its cache key
+    // must name that exact target rather than reuse an earlier descendant.
+    const bool uses_recovery_rosters{std::any_of(
+        beacon_bundle.seeds.begin(), beacon_bundle.seeds.end(),
+        [](const RosterBeaconSeed& seed) {
+            return seed.anchor_kind == RosterBeaconAnchorKind::RECOVERY;
+        })};
+    const uint256& branch_context_hash{uses_recovery_rosters
+        ? target->GetBlockHash()
+        : newest_base->GetBlockHash()};
+    const Key key{newest.epoch, branch_context_hash,
                   *beacon_bundle_hash, recovery_authority_hash};
 
     std::array<VerifiedRosterSetPtr,

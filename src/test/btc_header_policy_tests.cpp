@@ -18,16 +18,10 @@
 #include <map>
 #include <optional>
 #include <string>
-#include <type_traits>
 #include <utility>
 #include <vector>
 
 using namespace llmq::pq;
-
-static_assert(!std::is_default_constructible_v<
-              BTCRecoveryPrecommitRolloverProof>);
-static_assert(std::is_copy_constructible_v<
-              BTCRecoveryPrecommitRolloverProof>);
 
 namespace {
 
@@ -505,62 +499,6 @@ BOOST_AUTO_TEST_CASE(active_range_classifies_only_mature_stable_anchor_reorg)
     BOOST_CHECK_EQUAL(error, "btc-audit-anchor-height-mismatch");
 }
 
-BOOST_AUTO_TEST_CASE(rollover_proof_binds_one_stable_inactive_and_active_view)
-{
-    PolicySetup setup;
-    const uint256 observed_old_active{NonNullHash(10'100)};
-    const uint256 replacement{NonNullHash(10'140)};
-    const uint256 mature_tip{NonNullHash(142)};
-    setup.backend.best_hash = mature_tip;
-    setup.backend.headers[setup.tip].confirmations = -1;
-    setup.backend.headers.emplace(
-        observed_old_active, Header{100, 43, setup.NOW - 600});
-    setup.backend.headers.emplace(
-        replacement, Header{140, 3, setup.NOW - 90});
-    setup.backend.headers.emplace(
-        mature_tip, Header{142, 1, setup.NOW - 30});
-    setup.backend.active_hashes[100] = observed_old_active;
-    setup.backend.active_hashes.emplace(140, replacement);
-    setup.backend.active_hashes.emplace(142, mature_tip);
-    setup.backend.chain_tips = {ChainTip{mature_tip, 142, "active"}};
-
-    std::string error;
-    BOOST_CHECK(
-        !setup.Policy().AuthorizeStableInactiveAnchorReplacement(
-            setup.config, setup.tip, /*expected_anchor_height=*/100,
-            replacement, setup.previous, uint256{}, setup.NOW, error));
-    BOOST_CHECK_EQUAL(error, "btc-rollover-context-null");
-
-    const auto proof{
-        setup.Policy().AuthorizeStableInactiveAnchorReplacement(
-            setup.config, setup.tip, /*expected_anchor_height=*/100,
-            replacement, setup.previous, NonNullHash(10'200),
-            setup.NOW, error)};
-    BOOST_REQUIRE_MESSAGE(proof, error);
-    BOOST_CHECK(proof->AnchorHash() == setup.tip);
-    BOOST_CHECK_EQUAL(proof->AnchorHeight(), 100);
-    BOOST_CHECK(proof->ReplacementHash() == replacement);
-    BOOST_CHECK_EQUAL(proof->ReplacementHeight(), 140);
-    BOOST_CHECK(proof->ObservedActiveHash() == observed_old_active);
-    BOOST_CHECK(proof->StableTipHash() == mature_tip);
-    BOOST_CHECK_EQUAL(proof->StableTipHeight(), 142);
-    BOOST_CHECK_EQUAL(proof->RequiredMaturityHeight(), 142);
-
-    const uint256 future{NonNullHash(137)};
-    setup.backend.headers[setup.tip].confirmations = 43;
-    setup.backend.headers.emplace(
-        future, Header{137, 6, setup.NOW - 300});
-    setup.backend.active_hashes[100] = setup.tip;
-    setup.backend.active_hashes.emplace(137, future);
-    BOOST_CHECK(
-        !setup.Policy().AuthorizeStableInactiveAnchorReplacement(
-            setup.config, setup.tip, /*expected_anchor_height=*/100,
-            replacement, setup.previous, NonNullHash(10'200),
-            setup.NOW, error));
-    BOOST_CHECK_EQUAL(error,
-                      "btc-rollover-anchor-not-stably-inactive");
-}
-
 BOOST_AUTO_TEST_CASE(inactive_anchor_maturity_overflow_is_transient)
 {
     PolicySetup setup;
@@ -587,40 +525,6 @@ BOOST_AUTO_TEST_CASE(inactive_anchor_maturity_overflow_is_transient)
     BOOST_CHECK(checked.status == BTCHeaderActiveRangeStatus::TRANSIENT);
     BOOST_CHECK_EQUAL(
         error, "btc-audit-inactive-anchor-maturity-overflow");
-}
-
-BOOST_AUTO_TEST_CASE(rollover_proof_rejects_cross_view_replacement_reorg)
-{
-    PolicySetup setup;
-    const uint256 observed_old_active{NonNullHash(10'100)};
-    const uint256 replacement{NonNullHash(10'140)};
-    const uint256 replacement_after_reorg{NonNullHash(20'140)};
-    const uint256 mature_tip{NonNullHash(142)};
-    setup.backend.best_hash = mature_tip;
-    setup.backend.headers[setup.tip].confirmations = -1;
-    setup.backend.headers.emplace(
-        replacement, Header{140, 3, setup.NOW - 90});
-    setup.backend.headers.emplace(
-        mature_tip, Header{142, 1, setup.NOW - 30});
-    setup.backend.active_hashes[100] = observed_old_active;
-    setup.backend.active_hashes.emplace(140, replacement);
-    setup.backend.active_hashes.emplace(142, mature_tip);
-    setup.backend.chain_tips = {ChainTip{mature_tip, 142, "active"}};
-    setup.backend.before_call = [&](const std::vector<std::string>& args,
-                                    std::size_t method_call) {
-        if (args.front() == "getblockhash" && method_call == 5) {
-            setup.backend.active_hashes[140] =
-                replacement_after_reorg;
-        }
-    };
-
-    std::string error;
-    BOOST_CHECK(
-        !setup.Policy().AuthorizeStableInactiveAnchorReplacement(
-            setup.config, setup.tip, /*expected_anchor_height=*/100,
-            replacement, setup.previous, NonNullHash(10'200),
-            setup.NOW, error));
-    BOOST_CHECK_EQUAL(error, "btc-audit-active-view-changed");
 }
 
 BOOST_AUTO_TEST_CASE(active_range_rejects_mid_view_anchor_reorg)

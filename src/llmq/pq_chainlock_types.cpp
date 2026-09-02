@@ -160,6 +160,15 @@ bool RosterBeaconSeed::IsStructurallyValid() const noexcept
         !IsKnownRosterBeaconState(state)) {
         return false;
     }
+    if (anchor_kind == RosterBeaconAnchorKind::RECOVERY) {
+        if (!anchor_cursor.IsStructurallyValid() ||
+            anchor_cursor.IsNull() || !FutureBTCHeight()) {
+            return false;
+        }
+        return state == RosterBeaconState::READY &&
+               !future_btc_hash.IsNull() &&
+               future_btc_hash != anchor_cursor.btc_hash;
+    }
     if (state == RosterBeaconState::EMPTY) {
         return anchor_kind == RosterBeaconAnchorKind::NORMAL &&
                anchor_cursor.IsNull() && anchor_btc_height == -1 &&
@@ -183,42 +192,14 @@ bool RosterBeaconSeed::IsReady() const noexcept
 
 bool RecoveryRosterAuthoritySource::IsNull() const noexcept
 {
-    return kind == RecoveryRosterAuthoritySourceKind::NONE &&
-           height == -1 && block_hash.IsNull() &&
-           quorum_context_hash.IsNull() &&
-           std::all_of(normal_beacons.begin(), normal_beacons.end(),
-                       [](const RosterBeaconSeed& seed) {
-                           return seed == RosterBeaconSeed{};
-                       });
+    return normal_beacon == RosterBeaconSeed{};
 }
 
 bool RecoveryRosterAuthoritySource::IsStructurallyValid() const noexcept
 {
-    switch (kind) {
-    case RecoveryRosterAuthoritySourceKind::NONE:
-        return IsNull();
-    case RecoveryRosterAuthoritySourceKind::ACTIVATION:
-        return false;
-    case RecoveryRosterAuthoritySourceKind::NORMAL_ROSTERS:
-        if (height < 0 || block_hash.IsNull() ||
-            quorum_context_hash.IsNull() ||
-            !normal_beacons.front().IsReady()) {
-            return false;
-        }
-        for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
-            const auto& seed{normal_beacons[slot]};
-            if (!seed.IsReady() ||
-                seed.anchor_kind != RosterBeaconAnchorKind::NORMAL ||
-                (slot > 0 &&
-                 (normal_beacons[slot - 1].epoch ==
-                      std::numeric_limits<uint32_t>::max() ||
-                  seed.epoch != normal_beacons[slot - 1].epoch + 1))) {
-                return false;
-            }
-        }
-        return true;
-    }
-    return false;
+    return IsNull() ||
+           (normal_beacon.anchor_kind == RosterBeaconAnchorKind::NORMAL &&
+            normal_beacon.IsReady());
 }
 
 bool ActiveRosterBeaconBundle::IsStructurallyValid() const noexcept
@@ -235,13 +216,9 @@ bool ActiveRosterBeaconBundle::IsStructurallyValid() const noexcept
             return false;
         }
     }
-    const bool has_recovery{std::any_of(
-        seeds.begin(), seeds.end(), [](const RosterBeaconSeed& seed) {
-            return seed.anchor_kind == RosterBeaconAnchorKind::RECOVERY;
-        })};
-    return recovery_authority_source.IsStructurallyValid() &&
-           has_recovery == !recovery_authority_hash.IsNull() &&
-           has_recovery == !recovery_authority_source.IsNull();
+    if (!recovery_authority_source.IsStructurallyValid()) return false;
+    return recovery_authority_hash.IsNull() ==
+           recovery_authority_source.IsNull();
 }
 
 bool ActiveRosterBeaconBundle::IsForNewestEpoch(
@@ -260,9 +237,8 @@ bool RosterBeaconWindow::IsStructurallyValid() const noexcept
 
 bool BTCCReceiptState::IsStructurallyValid() const
 {
-    if (!cursor.IsStructurallyValid()) return false;
-    return cursor.IsNull() ? cumulative_hash.IsNull()
-                           : !cumulative_hash.IsNull();
+    return cursor.IsStructurallyValid() &&
+           (cursor.IsNull() == cumulative_hash.IsNull());
 }
 
 bool PaymentAuditReceiptCursor::IsNull() const noexcept
@@ -302,8 +278,22 @@ bool QuorumDescriptor::IsStructurallyValid() const
            !member_root.IsNull() && !child_key_root.IsNull();
 }
 
+bool RosterAuthorizationBaseIdentity::IsNull() const noexcept
+{
+    return height == -1 && block_hash.IsNull() && logical_id.IsNull();
+}
+
+bool RosterAuthorizationBaseIdentity::IsStructurallyValid() const noexcept
+{
+    return IsNull() ||
+           (height >= 0 && !block_hash.IsNull() && !logical_id.IsNull());
+}
+
 bool ChainLockShareTranscript::IsStructurallyValid() const
 {
+    const bool initializes{
+        roster_transition ==
+            RosterAuthorizationTransitionKind::INITIALIZE};
     return chainlock_version == CHAINLOCK_VERSION && child_profile == CHILD_SCHEDULED_WOTS_SHAKE_128_V1 &&
            height >= 0 && !block_hash.IsNull() && previous_chainlock_height < height &&
            (previous_chainlock_height >= 0 || previous_chainlock_hash.IsNull()) &&
@@ -312,6 +302,10 @@ bool ChainLockShareTranscript::IsStructurallyValid() const
            IsKnownRosterAuthorizationTransition(roster_transition) &&
            roster_beacons.IsStructurallyValid() &&
            !roster_authorization_state_hash.IsNull() &&
+           roster_authorization_base.IsStructurallyValid() &&
+           (initializes == roster_authorization_base.IsNull()) &&
+           (roster_authorization_base.IsNull() ||
+            roster_authorization_base.height < height) &&
            !quorum_base_hash.IsNull() &&
            member_index < QUORUM_SIZE && !member_pro_tx_hash.IsNull() &&
            IsCursorTransitionStructurallyValid(
@@ -325,6 +319,9 @@ bool ChainLockShareTranscript::IsStructurallyValid() const
 
 bool ChainLockStatement::IsStructurallyValid() const
 {
+    const bool initializes{
+        roster_transition ==
+            RosterAuthorizationTransitionKind::INITIALIZE};
     return version == CHAINLOCK_VERSION && child_profile == CHILD_SCHEDULED_WOTS_SHAKE_128_V1 && height >= 0 &&
            !block_hash.IsNull() && previous_chainlock_height < height &&
            (previous_chainlock_height >= 0 || previous_chainlock_hash.IsNull()) &&
@@ -333,6 +330,10 @@ bool ChainLockStatement::IsStructurallyValid() const
            IsKnownRosterAuthorizationTransition(roster_transition) &&
            roster_beacons.IsStructurallyValid() &&
            !roster_authorization_state_hash.IsNull() &&
+           roster_authorization_base.IsStructurallyValid() &&
+           (initializes == roster_authorization_base.IsNull()) &&
+           (roster_authorization_base.IsNull() ||
+            roster_authorization_base.height < height) &&
            IsCursorTransitionStructurallyValid(
                previous_chainlock_height, previous_btcc_cursor,
                accepted_btcc_cursor, btcc_advance) &&
@@ -389,6 +390,8 @@ ChainLockStatement ChainLockShare::GetStatement() const
     statement.roster_beacons = transcript.roster_beacons;
     statement.roster_authorization_state_hash =
         transcript.roster_authorization_state_hash;
+    statement.roster_authorization_base =
+        transcript.roster_authorization_base;
     statement.previous_btcc_cursor = transcript.previous_btcc_cursor;
     statement.accepted_btcc_cursor = transcript.accepted_btcc_cursor;
     statement.btcc_advance = transcript.btcc_advance;

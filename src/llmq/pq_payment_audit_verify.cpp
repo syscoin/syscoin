@@ -150,56 +150,6 @@ PreparedPaymentAuditContext::PreparedPaymentAuditContext(
 
 std::shared_ptr<const PreparedPaymentAuditContext>
 PreparedPaymentAuditContext::Create(
-    const uint256& genesis_hash,
-    PaymentAuditScheduleConfig schedule,
-    PaymentAuditStatement statement,
-    const FinalChainLock& seal_chainlock,
-    FrozenQuorumRostersPtr rosters,
-    const RosterAuthorizationVerificationContext& authorization,
-    PaymentAuditVerificationError* error)
-{
-    SetError(error, PaymentAuditVerificationError::NONE);
-    if (genesis_hash.IsNull() || !schedule.IsValid() ||
-        !statement.IsStructurallyValid() || !rosters) {
-        SetError(error, PaymentAuditVerificationError::INVALID_ARGUMENT);
-        return nullptr;
-    }
-    if (!ValidatePaymentAuditLiveSeal(
-            genesis_hash, statement, seal_chainlock, error)) {
-        return nullptr;
-    }
-    const auto audit_schedule{BuildPaymentAuditEpochSchedule(
-        schedule, statement.commitment.subject_epoch)};
-    if (!audit_schedule ||
-        audit_schedule->seal_height != statement.commitment.seal_height) {
-        SetError(error, PaymentAuditVerificationError::INVALID_ARGUMENT);
-        return nullptr;
-    }
-
-    ChainLockVerificationError chainlock_error{
-        ChainLockVerificationError::NONE};
-    auto seal_context{PreparedChainLockContext::Create(
-        genesis_hash, schedule.chainlock, statement.seal_statement,
-        std::move(rosters), authorization, &chainlock_error)};
-    if (!seal_context) {
-        SetError(error, PaymentAuditVerificationError::INVALID_CONTEXT);
-        return nullptr;
-    }
-    std::array<std::optional<uint8_t>, ACTIVE_QUORUMS> leaf_indices;
-    for (std::size_t slot{0}; slot < leaf_indices.size(); ++slot) {
-        leaf_indices[slot] = PaymentAuditLeafIndex(
-            schedule, statement.commitment.subject_epoch,
-            statement.commitment.seal_height,
-            seal_context->Rosters()[slot].descriptor.epoch);
-    }
-    return std::shared_ptr<const PreparedPaymentAuditContext>{
-        new PreparedPaymentAuditContext{
-            schedule, std::move(statement), std::move(seal_context),
-            std::move(leaf_indices)}};
-}
-
-std::shared_ptr<const PreparedPaymentAuditContext>
-PreparedPaymentAuditContext::Create(
     PaymentAuditScheduleConfig schedule,
     PaymentAuditStatement statement,
     const FinalChainLock& seal_chainlock,
@@ -251,34 +201,6 @@ std::optional<std::size_t> PreparedPaymentAuditContext::FindQuorumSlot(
     const PaymentAuditShareTranscript& transcript) const noexcept
 {
     return llmq::pq::FindQuorumSlot(transcript, Rosters());
-}
-
-std::optional<ScheduledWOTSCheck>
-PreparePaymentAuditResponseVerification(
-    const uint256& genesis_hash,
-    const ChainLockScheduleConfig& schedule,
-    const PaymentAuditResponse& response,
-    const PaymentAuditHave& expected,
-    const FrozenQuorumRosters& response_rosters,
-    const RosterAuthorizationVerificationContext& authorization,
-    PaymentAuditVerificationError* error)
-{
-    SetError(error, PaymentAuditVerificationError::NONE);
-    if (!ValidatePaymentAuditResponseEnvelope(
-            genesis_hash, response, expected, response_rosters, error)) {
-        return std::nullopt;
-    }
-    ChainLockVerificationError chainlock_error{
-        ChainLockVerificationError::NONE};
-    auto check{PrepareChainLockShareVerification(
-        genesis_hash, schedule, response.response, response_rosters,
-        authorization,
-        &chainlock_error)};
-    if (!check) {
-        SetPaymentAuditResponseChainLockError(chainlock_error, error);
-        return std::nullopt;
-    }
-    return check;
 }
 
 std::optional<ScheduledWOTSCheck>
@@ -335,35 +257,6 @@ bool MatchesVerifiedPaymentAuditSubject(
            GetPaymentAuditDescriptorHash(
                response_rosters.GenesisHash(), descriptor) ==
                commitment.subject_descriptor_hash;
-}
-
-bool ValidatePaymentAuditContext(
-    const uint256& genesis_hash,
-    const PaymentAuditScheduleConfig& schedule,
-    const PaymentAuditStatement& statement,
-    const FrozenQuorumRosters& rosters,
-    const RosterAuthorizationVerificationContext& authorization,
-    PaymentAuditVerificationError* error)
-{
-    SetError(error, PaymentAuditVerificationError::NONE);
-    const auto audit_schedule{BuildPaymentAuditEpochSchedule(
-        schedule, statement.commitment.subject_epoch)};
-    if (genesis_hash.IsNull() || !schedule.IsValid() ||
-        !statement.IsStructurallyValid() || !audit_schedule ||
-        audit_schedule->seal_height != statement.commitment.seal_height) {
-        SetError(error, PaymentAuditVerificationError::INVALID_ARGUMENT);
-        return false;
-    }
-    ChainLockVerificationError context_error{
-        ChainLockVerificationError::NONE};
-    if (!ValidateFrozenQuorumContext(genesis_hash,
-                                     statement.seal_statement, rosters,
-                                     authorization,
-                                     &context_error)) {
-        SetError(error, PaymentAuditVerificationError::INVALID_CONTEXT);
-        return false;
-    }
-    return true;
 }
 
 bool ValidatePaymentAuditLiveSeal(
@@ -444,40 +337,6 @@ PreparePaymentAuditShareVerificationInternal(
 }
 
 } // namespace
-
-std::optional<ScheduledWOTSCheck> PreparePaymentAuditShareVerification(
-    const uint256& genesis_hash,
-    const PaymentAuditScheduleConfig& schedule,
-    const PaymentAuditShare& share,
-    const FrozenQuorumRosters& rosters,
-    const RosterAuthorizationVerificationContext& authorization,
-    PaymentAuditVerificationError* error)
-{
-    SetError(error, PaymentAuditVerificationError::NONE);
-    if (!share.IsStructurallyValid()) {
-        SetError(error, PaymentAuditVerificationError::INVALID_AUDIT);
-        return std::nullopt;
-    }
-    if (!ValidatePaymentAuditContext(
-            genesis_hash, schedule, share.transcript.statement, rosters,
-            authorization, error)) {
-        return std::nullopt;
-    }
-    ChainLockVerificationError chainlock_error{
-        ChainLockVerificationError::NONE};
-    const auto authorization_mask{ValidateRosterAuthorizationState(
-        genesis_hash, share.transcript.statement.seal_statement,
-        authorization, &chainlock_error)};
-    if (!authorization_mask) {
-        SetError(error, PaymentAuditVerificationError::INVALID_CONTEXT);
-        return std::nullopt;
-    }
-    return PreparePaymentAuditShareVerificationInternal(
-        genesis_hash, schedule, share, rosters, *authorization_mask,
-        /*prepared_quorum_slot=*/std::nullopt,
-        /*prepared_leaf_index=*/std::nullopt,
-        /*context_prepared=*/false, error);
-}
 
 std::optional<ScheduledWOTSCheck> PreparePaymentAuditShareVerification(
     const PaymentAuditShare& share,
@@ -561,38 +420,6 @@ PrepareFinalPaymentAuditVerificationInternal(
 
 std::optional<PreparedPaymentAuditVerification>
 PrepareFinalPaymentAuditVerification(
-    const uint256& genesis_hash,
-    const PaymentAuditScheduleConfig& schedule,
-    const FinalPaymentAudit& audit,
-    const FrozenQuorumRosters& rosters,
-    const RosterAuthorizationVerificationContext& authorization,
-    PaymentAuditVerificationError* error)
-{
-    SetError(error, PaymentAuditVerificationError::NONE);
-    if (!audit.IsStructurallyValid()) {
-        SetError(error, PaymentAuditVerificationError::INVALID_AUDIT);
-        return std::nullopt;
-    }
-    if (!ValidatePaymentAuditContext(genesis_hash, schedule, audit.statement,
-                                     rosters, authorization, error)) {
-        return std::nullopt;
-    }
-    ChainLockVerificationError chainlock_error{
-        ChainLockVerificationError::NONE};
-    const auto authorization_mask{ValidateRosterAuthorizationState(
-        genesis_hash, audit.statement.seal_statement, authorization,
-        &chainlock_error)};
-    if (!authorization_mask ||
-        (audit.selected_quorum_mask & ~*authorization_mask) != 0) {
-        SetError(error, PaymentAuditVerificationError::INVALID_CONTEXT);
-        return std::nullopt;
-    }
-    return PrepareFinalPaymentAuditVerificationInternal(
-        genesis_hash, schedule, audit, rosters, error);
-}
-
-std::optional<PreparedPaymentAuditVerification>
-PrepareFinalPaymentAuditVerification(
     const PaymentAuditScheduleConfig& schedule,
     const FinalPaymentAudit& audit,
     VerifiedRosterSetPtr roster_set,
@@ -630,26 +457,6 @@ PrepareFinalPaymentAuditVerification(
     return PrepareFinalPaymentAuditVerificationInternal(
         seal_context->GenesisHash(), schedule, audit,
         seal_context->Rosters(), error);
-}
-
-bool VerifyFinalPaymentAudit(
-    const uint256& genesis_hash,
-    const PaymentAuditScheduleConfig& schedule,
-    const FinalPaymentAudit& audit,
-    const FrozenQuorumRosters& rosters,
-    const RosterAuthorizationVerificationContext& authorization,
-    ScheduledWOTSCheckQueue* queue,
-    PaymentAuditVerificationError* error)
-{
-    auto prepared{PrepareFinalPaymentAuditVerification(
-        genesis_hash, schedule, audit, rosters, authorization, error)};
-    if (!prepared) return false;
-    if (!VerifyScheduledWOTSChecks(std::move(prepared->checks), queue)) {
-        SetError(error, PaymentAuditVerificationError::INVALID_SIGNATURE);
-        return false;
-    }
-    SetError(error, PaymentAuditVerificationError::NONE);
-    return true;
 }
 
 } // namespace llmq::pq

@@ -8,7 +8,10 @@
 #include <llmq/pq_btcc.h>
 #include <uint256.h>
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
+#include <ios>
 #include <optional>
 #include <string_view>
 
@@ -23,10 +26,13 @@ inline constexpr std::string_view ROSTER_BEACON_BUNDLE_DOMAIN{
     "SYS_PQ_ROSTER_BEACON_BUNDLE_V1"};
 inline constexpr std::string_view ROSTER_AUTHORIZATION_STATE_DOMAIN{
     "SYS_PQ_ROSTER_AUTHORIZATION_STATE_V1"};
+inline constexpr std::string_view RECOVERY_ROSTER_ENTROPY_DOMAIN{
+    "SYS_PQ_RECOVERY_ENTROPY_V1"};
 
 /**
- * The exact prior state used by continuous transitions and RECOVER.
- * INITIALIZE alone starts without a predecessor authorization state.
+ * The exact prior state used by every transition except INITIALIZE. RECOVER
+ * resumes from the exact durable authorization base rather than the wire
+ * predecessor when finality has skipped otherwise eligible rounds.
  */
 struct RosterAuthorizationPriorState {
     uint256 state_hash;
@@ -46,6 +52,7 @@ struct RosterAuthorizationTransition {
     uint256 target_block_hash;
     int32_t predecessor_height{-1};
     uint256 predecessor_block_hash;
+    RosterAuthorizationBaseIdentity authorization_base;
     std::optional<RosterAuthorizationPriorState> previous;
     RosterBeaconWindow new_window;
 
@@ -104,8 +111,7 @@ struct NormalRosterAuthorizationInput {
     uint256 target_block_hash;
     int32_t predecessor_height{-1};
     uint256 predecessor_block_hash;
-    int32_t prior_authorization_height{-1};
-    uint256 prior_authorization_block_hash;
+    RosterAuthorizationBaseIdentity authorization_base;
     RosterAuthorizationPriorState previous;
     BTCCursor previous_btcc_cursor;
     BTCCursor accepted_btcc_cursor;
@@ -114,6 +120,9 @@ struct NormalRosterAuthorizationInput {
     std::optional<ValidatedRosterBeaconAnchor> accepted_anchor;
     std::optional<ValidatedRosterBeaconRange> pending_reveal;
     std::optional<ValidatedRosterBeaconRange> ready_rotation;
+    /** Exact fixed authority source/hash committed by the signed prior state. */
+    RecoveryRosterAuthoritySource recovery_authority_source;
+    uint256 recovery_authority_hash;
 };
 
 /** One normal-path decision; INITIALIZE and RECOVER never use this type. */
@@ -169,7 +178,14 @@ ValidateNormalRosterAuthorizationDecision(
 [[nodiscard]] bool IsRecoveryRosterBeaconWindow(
     const RosterBeaconWindow& window) noexcept;
 
-/** Whether any active slot is still fixed by a recovery authority. */
+/** Build the sole recovery window for an authenticated source and epoch. */
+[[nodiscard]] std::optional<RosterBeaconWindow>
+MakeRecoveryRosterBeaconWindow(
+    const RecoveryRosterAuthoritySource& source,
+    const uint256& recovery_authority_hash,
+    uint32_t newest_epoch) noexcept;
+
+/** Whether any active slot was seeded by objective recovery. */
 [[nodiscard]] bool HasRecoveryRosterBeacon(
     const RosterBeaconWindow& window) noexcept;
 
@@ -177,6 +193,11 @@ ValidateNormalRosterAuthorizationDecision(
 [[nodiscard]] std::optional<uint256> GetRosterBeaconCommitmentHash(
     const uint256& genesis_hash,
     const RosterBeaconSeed& seed) noexcept;
+
+/** Commit the complete delayed normal F source reused during recovery. */
+[[nodiscard]] std::optional<uint256> GetRecoveryRosterEntropyCommitment(
+    const uint256& genesis_hash,
+    const RosterBeaconSeed& normal_beacon) noexcept;
 
 [[nodiscard]] std::optional<uint256> GetActiveRosterBeaconBundleHash(
     const uint256& genesis_hash,
@@ -186,6 +207,10 @@ ValidateNormalRosterAuthorizationDecision(
 [[nodiscard]] const RosterBeaconSeed* FindRosterBeaconSeed(
     const ActiveRosterBeaconBundle& bundle,
     uint32_t epoch) noexcept;
+
+/** Newest normal READY seed authenticated by this complete window. */
+[[nodiscard]] const RosterBeaconSeed* FindNewestNormalReadySeed(
+    const RosterBeaconWindow& window) noexcept;
 
 /**
  * Miner-independent roster modifier. Base, carrier, and handoff block hashes
@@ -204,6 +229,21 @@ CanonicalRosterRecoveryTargetHeight(
     const ChainLockScheduleConfig& chainlock,
     const BTCCScheduleConfig& btcc,
     uint32_t epoch) noexcept;
+
+/**
+ * Map an initialization or recovery target to its sole discontinuous
+ * transition.
+ * The first eligible target after activation is INITIALIZE-only. Every later
+ * admissible reset is the unique joint ChainLock/BTCC target of phase 3 and is
+ * RECOVER-only from a durable authorization base; all other heights return
+ * null.
+ */
+[[nodiscard]] std::optional<RosterAuthorizationTransitionKind>
+CanonicalRosterResetTransitionForTarget(
+    const ChainLockScheduleConfig& chainlock,
+    const BTCCScheduleConfig& btcc,
+    int32_t activation_predecessor_height,
+    int32_t target_height) noexcept;
 
 /** Hash the next authorization state after validating the exact transition. */
 [[nodiscard]] std::optional<uint256> GetRosterAuthorizationStateHash(

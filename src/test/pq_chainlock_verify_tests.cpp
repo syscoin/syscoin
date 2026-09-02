@@ -55,32 +55,62 @@ ActiveRosterBeaconBundle ReadyBundle(uint32_t first_epoch)
         bundle.seeds[slot] =
             ReadySeed(first_epoch + static_cast<uint32_t>(slot));
     }
+    bundle.recovery_authority_source.normal_beacon = bundle.seeds.back();
+    bundle.recovery_authority_hash = NonNullHash(390'000 + first_epoch);
     return bundle;
 }
 
-RosterBeaconWindow RecoveryWindow(uint32_t first_epoch)
+RecoveryRosterAuthorityPtr BindRecoveryAuthority(
+    const uint256& genesis_hash,
+    ActiveRosterBeaconBundle& bundle,
+    uint64_t salt)
 {
-    RosterBeaconWindow window;
-    const auto source_bundle{ReadyBundle(first_epoch)};
-    auto shared_anchor{ReadySeed(first_epoch)};
-    shared_anchor.anchor_kind = RosterBeaconAnchorKind::RECOVERY;
+    auto authority{std::make_shared<RecoveryRosterAuthority>()};
+    authority->normal_beacon = bundle.seeds.back();
     for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
-        auto seed{shared_anchor};
-        seed.epoch = first_epoch + static_cast<uint32_t>(slot);
-        window.active.seeds[slot] = std::move(seed);
+        for (std::size_t member{0}; member < QUORUM_SIZE; ++member) {
+            auto& entry{authority->slots[slot][member]};
+            entry.pro_tx_hash =
+                NonNullHash(salt + slot * QUORUM_SIZE + member + 1);
+            entry.eligible = member < QUORUM_MIN_VALID;
+            if (!entry.eligible) continue;
+            RecoveryRosterChildCommitment child_root;
+            child_root.global_key_version = 1;
+            child_root.commitment.generation = 1;
+            child_root.commitment.tree_id = NonNullHash(
+                salt + 10'000 + slot * QUORUM_SIZE + member);
+            child_root.commitment.root = NonNullHash(
+                salt + 20'000 + slot * QUORUM_SIZE + member);
+            entry.child_root = std::move(child_root);
+        }
     }
-    window.active.recovery_authority_hash = NonNullHash(399'999);
-    window.active.recovery_authority_source.kind =
-        RecoveryRosterAuthoritySourceKind::NORMAL_ROSTERS;
-    window.active.recovery_authority_source.height = 864;
-    window.active.recovery_authority_source.block_hash =
-        NonNullHash(400'000);
-    window.active.recovery_authority_source.quorum_context_hash =
-        NonNullHash(400'001);
-    window.active.recovery_authority_source.normal_beacons =
-        source_bundle.seeds;
-    window.next.epoch = first_epoch + ACTIVE_QUORUMS;
-    return window;
+    BOOST_REQUIRE(authority->IsStructurallyValid());
+    const auto hash{GetRecoveryRosterAuthorityHash(
+        genesis_hash, *authority)};
+    BOOST_REQUIRE(hash);
+    bundle.recovery_authority_source.normal_beacon =
+        authority->normal_beacon;
+    bundle.recovery_authority_hash = *hash;
+    return authority;
+}
+
+RosterBeaconWindow RecoveryWindow(
+    uint32_t first_epoch,
+    const ActiveRosterBeaconBundle& durable_authority)
+{
+    const auto window{MakeRecoveryRosterBeaconWindow(
+        durable_authority.recovery_authority_source,
+        durable_authority.recovery_authority_hash,
+        first_epoch + static_cast<uint32_t>(ACTIVE_QUORUMS - 1))};
+    BOOST_REQUIRE(window);
+    return *window;
+}
+
+RosterResetVerificationPolicy ResetPolicy(
+    const ChainLockScheduleConfig& schedule)
+{
+    return RosterResetVerificationPolicy{
+        schedule, BTCCScheduleConfig{.candidate_origin = 865}, 864};
 }
 
 RosterBeaconWindow InitializationWindow(uint32_t first_epoch)
@@ -92,6 +122,10 @@ RosterBeaconWindow InitializationWindow(uint32_t first_epoch)
         seed.epoch = first_epoch + static_cast<uint32_t>(slot);
         window.active.seeds[slot] = std::move(seed);
     }
+    window.active.recovery_authority_source.normal_beacon =
+        window.active.seeds.back();
+    window.active.recovery_authority_hash =
+        NonNullHash(400'000 + first_epoch);
     window.next.epoch = first_epoch + ACTIVE_QUORUMS;
     return window;
 }
@@ -107,6 +141,7 @@ void SealRosterAuthorization(
     transition.target_block_hash = statement.block_hash;
     transition.predecessor_height = statement.previous_chainlock_height;
     transition.predecessor_block_hash = statement.previous_chainlock_hash;
+    transition.authorization_base = statement.roster_authorization_base;
     transition.previous = authorization.previous;
     transition.new_window = statement.roster_beacons;
     const auto state_hash{
@@ -140,16 +175,19 @@ struct VerificationFixture {
     FinalChainLock chainlock;
     std::array<FrozenQuorumRoster, ACTIVE_QUORUMS> rosters;
     RosterAuthorizationVerificationContext authorization;
+    RecoveryRosterAuthorityPtr recovery_authority;
 };
 
-std::unique_ptr<VerificationFixture> MakeVerificationFixture()
+std::unique_ptr<VerificationFixture> MakeVerificationFixture(
+    int32_t target_height = 2000)
 {
     // A by-value return leaves fixture-sized temporaries in MSVC caller frames.
     auto fixture_storage = std::make_unique<VerificationFixture>();
     auto& fixture = *fixture_storage;
-    fixture.chainlock.statement.height = 2000;
+    fixture.chainlock.statement.height = target_height;
     fixture.chainlock.statement.block_hash = NonNullHash(9100);
-    fixture.chainlock.statement.previous_chainlock_height = 1995;
+    fixture.chainlock.statement.previous_chainlock_height =
+        target_height - static_cast<int32_t>(PQ_CL_PERIOD);
     fixture.chainlock.statement.previous_chainlock_hash = NonNullHash(9099);
     fixture.chainlock.statement.quorum_context_hash = NonNullHash(1);
     fixture.chainlock.statement.payment_probation_state_hash = NonNullHash(2);
@@ -170,12 +208,23 @@ std::unique_ptr<VerificationFixture> MakeVerificationFixture()
         fixture.chainlock.statement.previous_chainlock_height;
     fixture.authorization.predecessor_block_hash =
         fixture.chainlock.statement.previous_chainlock_hash;
+    fixture.chainlock.statement.roster_authorization_base =
+        RosterAuthorizationBaseIdentity{
+            fixture.chainlock.statement.previous_chainlock_height,
+            fixture.chainlock.statement.previous_chainlock_hash,
+            NonNullHash(9098)};
+    fixture.authorization.authorization_base =
+        fixture.chainlock.statement.roster_authorization_base;
+    fixture.authorization.reset_policy = ResetPolicy(fixture.schedule);
     fixture.authorization.previous = RosterAuthorizationPriorState{
         NonNullHash(9050), previous_window};
     fixture.chainlock.statement.roster_transition =
         RosterAuthorizationTransitionKind::ROTATE;
     fixture.chainlock.statement.roster_beacons.active =
         ReadyBundle(first_epoch);
+    fixture.recovery_authority = BindRecoveryAuthority(
+        fixture.genesis_hash,
+        fixture.chainlock.statement.roster_beacons.active, 390'000);
     fixture.chainlock.statement.roster_beacons.next.epoch =
         active_epochs->back().epoch + 1;
     BOOST_REQUIRE(
@@ -262,6 +311,21 @@ std::unique_ptr<VerificationFixture> MakeVerificationFixture()
     return fixture_storage;
 }
 
+std::optional<PreparedChainLockVerification> PrepareWithDetachedRosters(
+    const VerificationFixture& fixture,
+    const FinalChainLock& chainlock,
+    FrozenQuorumRostersPtr rosters,
+    const RosterAuthorizationVerificationContext& authorization,
+    ChainLockVerificationError* error)
+{
+    const auto roster_set{VerifiedRosterSet::Create(
+        fixture.genesis_hash, std::move(rosters), error,
+        fixture.recovery_authority)};
+    if (!roster_set) return std::nullopt;
+    return PrepareFinalChainLockVerification(
+        fixture.schedule, chainlock, *roster_set, authorization, error);
+}
+
 void ClearMember(QuorumBitmap& bitmap, std::size_t member)
 {
     bitmap[member / 8] &=
@@ -298,9 +362,9 @@ BOOST_AUTO_TEST_CASE(preparation_recomputes_roots_context_and_canonical_mapping)
 {
     const auto fixture = MakeVerificationFixture();
     ChainLockVerificationError error{ChainLockVerificationError::INVALID_ARGUMENT};
-    auto prepared = PrepareFinalChainLockVerification(
-        fixture->genesis_hash, fixture->schedule, fixture->chainlock,
-        fixture->rosters,
+    auto prepared = PrepareWithDetachedRosters(
+        *fixture, fixture->chainlock,
+        std::make_shared<const FrozenQuorumRosters>(fixture->rosters),
         fixture->authorization, &error);
     BOOST_REQUIRE(prepared.has_value());
     BOOST_CHECK(error == ChainLockVerificationError::NONE);
@@ -348,7 +412,8 @@ BOOST_AUTO_TEST_CASE(verified_roster_preparation_reuses_intrinsic_validation)
     const uint64_t capability_hashes_before{
         GetQuorumRootTaggedHashCountForTesting()};
     const auto roster_set{VerifiedRosterSet::Create(
-        fixture->genesis_hash, rosters, &error)};
+        fixture->genesis_hash, rosters, &error,
+        fixture->recovery_authority)};
     BOOST_REQUIRE(roster_set);
     BOOST_CHECK(error == ChainLockVerificationError::NONE);
     BOOST_CHECK_EQUAL(GetQuorumRootTaggedHashCountForTesting() -
@@ -364,22 +429,6 @@ BOOST_AUTO_TEST_CASE(verified_roster_preparation_reuses_intrinsic_validation)
     BOOST_CHECK(error == ChainLockVerificationError::NONE);
     BOOST_CHECK_EQUAL(GetQuorumRootTaggedHashCountForTesting(),
                       prepared_hashes_before);
-
-    auto raw{PrepareFinalChainLockVerification(
-        fixture->genesis_hash, fixture->schedule, fixture->chainlock,
-        fixture->rosters, fixture->authorization, &error)};
-    BOOST_REQUIRE(raw);
-    BOOST_REQUIRE_EQUAL(prepared->checks.size(), raw->checks.size());
-    for (std::size_t i{0}; i < prepared->checks.size(); ++i) {
-        BOOST_CHECK(prepared->checks[i].GetPublicKey() ==
-                    raw->checks[i].GetPublicKey());
-        BOOST_CHECK_EQUAL(prepared->checks[i].GetLeafIndex(),
-                          raw->checks[i].GetLeafIndex());
-        BOOST_CHECK(prepared->checks[i].GetMessageBytes() ==
-                    raw->checks[i].GetMessageBytes());
-        BOOST_CHECK(prepared->checks[i].GetSignature() ==
-                    raw->checks[i].GetSignature());
-    }
 
     auto bad_context{fixture->chainlock};
     bad_context.statement.quorum_context_hash.begin()[0] ^= 1;
@@ -428,7 +477,8 @@ BOOST_AUTO_TEST_CASE(verified_roster_preparation_reuses_intrinsic_validation)
     const auto underfilled_rosters{
         std::make_shared<const FrozenQuorumRosters>(underfilled->rosters)};
     const auto underfilled_set{VerifiedRosterSet::Create(
-        underfilled->genesis_hash, underfilled_rosters, &error)};
+        underfilled->genesis_hash, underfilled_rosters, &error,
+        underfilled->recovery_authority)};
     BOOST_REQUIRE(underfilled_set);
     const uint64_t underfilled_hashes_before{
         GetQuorumRootTaggedHashCountForTesting()};
@@ -447,32 +497,33 @@ BOOST_AUTO_TEST_CASE(preparation_rejects_root_context_index_and_bitmap_corruptio
     {
         auto bad_member_root = MakeVerificationFixture();
         bad_member_root->rosters[0].descriptor.member_root.begin()[0] ^= 1;
-        BOOST_CHECK(!PrepareFinalChainLockVerification(
-            bad_member_root->genesis_hash, bad_member_root->schedule,
-            bad_member_root->chainlock,
-            bad_member_root->rosters, bad_member_root->authorization,
-            &error));
+        BOOST_CHECK(!PrepareWithDetachedRosters(
+            *bad_member_root, bad_member_root->chainlock,
+            std::make_shared<const FrozenQuorumRosters>(
+                bad_member_root->rosters),
+            bad_member_root->authorization, &error));
         BOOST_CHECK(error == ChainLockVerificationError::MEMBER_ROOT_MISMATCH);
     }
 
     {
         auto bad_child_root = MakeVerificationFixture();
         bad_child_root->rosters[0].descriptor.child_key_root.begin()[0] ^= 1;
-        BOOST_CHECK(!PrepareFinalChainLockVerification(
-            bad_child_root->genesis_hash, bad_child_root->schedule,
-            bad_child_root->chainlock,
-            bad_child_root->rosters, bad_child_root->authorization,
-            &error));
+        BOOST_CHECK(!PrepareWithDetachedRosters(
+            *bad_child_root, bad_child_root->chainlock,
+            std::make_shared<const FrozenQuorumRosters>(
+                bad_child_root->rosters),
+            bad_child_root->authorization, &error));
         BOOST_CHECK(error == ChainLockVerificationError::CHILD_KEY_ROOT_MISMATCH);
     }
 
     {
         auto bad_context = MakeVerificationFixture();
         bad_context->chainlock.statement.quorum_context_hash.begin()[0] ^= 1;
-        BOOST_CHECK(!PrepareFinalChainLockVerification(
-            bad_context->genesis_hash, bad_context->schedule,
-            bad_context->chainlock,
-            bad_context->rosters, bad_context->authorization, &error));
+        BOOST_CHECK(!PrepareWithDetachedRosters(
+            *bad_context, bad_context->chainlock,
+            std::make_shared<const FrozenQuorumRosters>(
+                bad_context->rosters),
+            bad_context->authorization, &error));
         BOOST_CHECK(error == ChainLockVerificationError::QUORUM_CONTEXT_MISMATCH);
     }
 
@@ -482,9 +533,9 @@ BOOST_AUTO_TEST_CASE(preparation_rejects_root_context_index_and_bitmap_corruptio
                     QUORUM_THRESHOLD - 1);
         SetMember(bad_index->chainlock.signer_bitmaps[0], QUORUM_MIN_VALID);
         BOOST_REQUIRE(bad_index->chainlock.IsStructurallyValid());
-        BOOST_CHECK(!PrepareFinalChainLockVerification(
-            bad_index->genesis_hash, bad_index->schedule,
-            bad_index->chainlock, bad_index->rosters,
+        BOOST_CHECK(!PrepareWithDetachedRosters(
+            *bad_index, bad_index->chainlock,
+            std::make_shared<const FrozenQuorumRosters>(bad_index->rosters),
             bad_index->authorization, &error));
         BOOST_CHECK(error == ChainLockVerificationError::INVALID_SIGNER);
     }
@@ -493,10 +544,11 @@ BOOST_AUTO_TEST_CASE(preparation_rejects_root_context_index_and_bitmap_corruptio
         auto bad_bitmap = MakeVerificationFixture();
         ClearMember(bad_bitmap->chainlock.signer_bitmaps[0],
                     QUORUM_THRESHOLD - 1);
-        BOOST_CHECK(!PrepareFinalChainLockVerification(
-            bad_bitmap->genesis_hash, bad_bitmap->schedule,
-            bad_bitmap->chainlock,
-            bad_bitmap->rosters, bad_bitmap->authorization, &error));
+        BOOST_CHECK(!PrepareWithDetachedRosters(
+            *bad_bitmap, bad_bitmap->chainlock,
+            std::make_shared<const FrozenQuorumRosters>(
+                bad_bitmap->rosters),
+            bad_bitmap->authorization, &error));
         BOOST_CHECK(error == ChainLockVerificationError::INVALID_CHAINLOCK);
     }
 }
@@ -507,18 +559,19 @@ BOOST_AUTO_TEST_CASE(preparation_rejects_mutated_child_membership_witness)
     auto bad_sibling = MakeVerificationFixture();
     bad_sibling->chainlock.signatures[0].key_proof.siblings[0]
         .begin()[0] ^= 1;
-    BOOST_CHECK(!PrepareFinalChainLockVerification(
-        bad_sibling->genesis_hash, bad_sibling->schedule,
-        bad_sibling->chainlock,
-        bad_sibling->rosters, bad_sibling->authorization, &error));
+    BOOST_CHECK(!PrepareWithDetachedRosters(
+        *bad_sibling, bad_sibling->chainlock,
+        std::make_shared<const FrozenQuorumRosters>(bad_sibling->rosters),
+        bad_sibling->authorization, &error));
     BOOST_CHECK(error == ChainLockVerificationError::INVALID_CHILD_PROOF);
 
     auto bad_public_key = MakeVerificationFixture();
     bad_public_key->chainlock.signatures[0].key_proof.public_key[0] ^= 1;
-    BOOST_CHECK(!PrepareFinalChainLockVerification(
-        bad_public_key->genesis_hash, bad_public_key->schedule,
-        bad_public_key->chainlock,
-        bad_public_key->rosters, bad_public_key->authorization, &error));
+    BOOST_CHECK(!PrepareWithDetachedRosters(
+        *bad_public_key, bad_public_key->chainlock,
+        std::make_shared<const FrozenQuorumRosters>(
+            bad_public_key->rosters),
+        bad_public_key->authorization, &error));
     BOOST_CHECK(error == ChainLockVerificationError::INVALID_CHILD_PROOF);
 }
 
@@ -528,11 +581,11 @@ BOOST_AUTO_TEST_CASE(preparation_rejects_duplicate_members_and_child_keys)
     auto duplicate_member = MakeVerificationFixture();
     duplicate_member->rosters[0].members.back().pro_tx_hash =
         duplicate_member->rosters[0].members[QUORUM_SIZE - 2].pro_tx_hash;
-    BOOST_CHECK(!PrepareFinalChainLockVerification(
-        duplicate_member->genesis_hash, duplicate_member->schedule,
-        duplicate_member->chainlock,
-        duplicate_member->rosters, duplicate_member->authorization,
-        &error));
+    BOOST_CHECK(!PrepareWithDetachedRosters(
+        *duplicate_member, duplicate_member->chainlock,
+        std::make_shared<const FrozenQuorumRosters>(
+            duplicate_member->rosters),
+        duplicate_member->authorization, &error));
     BOOST_CHECK(error == ChainLockVerificationError::DUPLICATE_MEMBER);
 
     auto duplicate_key = MakeVerificationFixture();
@@ -540,10 +593,11 @@ BOOST_AUTO_TEST_CASE(preparation_rejects_duplicate_members_and_child_keys)
         .child_root->commitment.tree_id =
         duplicate_key->rosters[0].members[0]
             .child_root->commitment.tree_id;
-    BOOST_CHECK(!PrepareFinalChainLockVerification(
-        duplicate_key->genesis_hash, duplicate_key->schedule,
-        duplicate_key->chainlock,
-        duplicate_key->rosters, duplicate_key->authorization, &error));
+    BOOST_CHECK(!PrepareWithDetachedRosters(
+        *duplicate_key, duplicate_key->chainlock,
+        std::make_shared<const FrozenQuorumRosters>(
+            duplicate_key->rosters),
+        duplicate_key->authorization, &error));
     BOOST_CHECK(error == ChainLockVerificationError::DUPLICATE_CHILD_KEY);
 }
 
@@ -620,9 +674,10 @@ BOOST_AUTO_TEST_CASE(authorization_is_derived_from_authenticated_transition)
         fixture->authorization, &error)};
     BOOST_REQUIRE(rotation_mask);
     BOOST_CHECK_EQUAL(*rotation_mask, 0b0111);
-    BOOST_CHECK(PrepareFinalChainLockVerification(
-        fixture->genesis_hash, fixture->schedule, fixture->chainlock,
-        fixture->rosters, fixture->authorization, &error));
+    BOOST_CHECK(PrepareWithDetachedRosters(
+        *fixture, fixture->chainlock,
+        std::make_shared<const FrozenQuorumRosters>(fixture->rosters),
+        fixture->authorization, &error));
 
     // A syntactically correct state-hash edge is not sufficient for LIVE:
     // the verifier must receive and recheck the exact external policy facts.
@@ -631,6 +686,13 @@ BOOST_AUTO_TEST_CASE(authorization_is_derived_from_authenticated_transition)
     BOOST_CHECK(!ValidateRosterAuthorizationState(
         fixture->genesis_hash, fixture->chainlock.statement,
         missing_normal_policy, &error));
+    BOOST_CHECK(error == ChainLockVerificationError::INVALID_AUTHORIZATION);
+
+    auto missing_reset_policy{fixture->authorization};
+    missing_reset_policy.reset_policy.reset();
+    BOOST_CHECK(!ValidateRosterAuthorizationState(
+        fixture->genesis_hash, fixture->chainlock.statement,
+        missing_reset_policy, &error));
     BOOST_CHECK(error == ChainLockVerificationError::INVALID_AUTHORIZATION);
 
     auto inactive_rotation{fixture->authorization};
@@ -671,6 +733,9 @@ BOOST_AUTO_TEST_CASE(authorization_is_derived_from_authenticated_transition)
         keep_statement.previous_chainlock_height;
     keep_authorization.predecessor_block_hash =
         keep_statement.previous_chainlock_hash;
+    keep_authorization.authorization_base =
+        keep_statement.roster_authorization_base;
+    keep_authorization.reset_policy = ResetPolicy(fixture->schedule);
     keep_authorization.previous = RosterAuthorizationPriorState{
         NonNullHash(9060), keep_statement.roster_beacons};
     keep_authorization.normal_input =
@@ -689,9 +754,10 @@ BOOST_AUTO_TEST_CASE(authorization_is_derived_from_authenticated_transition)
         fixture->chainlock.signer_bitmaps[2];
     fixture->chainlock.signer_bitmaps[2].fill(0);
     BOOST_REQUIRE(fixture->chainlock.IsStructurallyValid());
-    BOOST_CHECK(!PrepareFinalChainLockVerification(
-        fixture->genesis_hash, fixture->schedule, fixture->chainlock,
-        fixture->rosters, fixture->authorization, &error));
+    BOOST_CHECK(!PrepareWithDetachedRosters(
+        *fixture, fixture->chainlock,
+        std::make_shared<const FrozenQuorumRosters>(fixture->rosters),
+        fixture->authorization, &error));
     BOOST_CHECK(error == ChainLockVerificationError::INVALID_AUTHORIZATION);
 }
 
@@ -699,50 +765,159 @@ BOOST_AUTO_TEST_CASE(initialization_and_recovery_require_explicit_admission)
 {
     auto fixture{MakeVerificationFixture()};
     auto statement{fixture->chainlock.statement};
+    statement.height = 865;
+    statement.block_hash = NonNullHash(9101);
+    statement.previous_chainlock_height = 864;
+    statement.previous_chainlock_hash = NonNullHash(9102);
     statement.roster_transition =
         RosterAuthorizationTransitionKind::INITIALIZE;
+    statement.roster_authorization_base = {};
     statement.roster_beacons = InitializationWindow(/*first_epoch=*/0);
+    statement.previous_btcc_cursor = {};
+    statement.accepted_btcc_cursor = BTCCursor{
+        statement.height, statement.block_hash, NonNullHash(9103)};
+    statement.btcc_advance = BTCCAdvance::ADVANCE;
 
     RosterAuthorizationVerificationContext initialize;
     initialize.admission = RosterAuthorizationAdmission::INITIALIZE;
     initialize.predecessor_height = statement.previous_chainlock_height;
     initialize.predecessor_block_hash = statement.previous_chainlock_hash;
+    initialize.reset_policy = ResetPolicy(fixture->schedule);
     SealRosterAuthorization(fixture->genesis_hash, statement, initialize);
     ChainLockVerificationError error{ChainLockVerificationError::NONE};
     const auto initialize_mask{ValidateRosterAuthorizationState(
         fixture->genesis_hash, statement, initialize, &error)};
     BOOST_REQUIRE(initialize_mask);
     BOOST_CHECK_EQUAL(*initialize_mask, 0b1111);
+    BOOST_CHECK(statement.roster_beacons.active.recovery_authority_source
+                    .normal_beacon ==
+                statement.roster_beacons.active.seeds.back());
+    BOOST_CHECK(!statement.roster_beacons.active.recovery_authority_hash
+                     .IsNull());
 
     auto ordinary_live{initialize};
     ordinary_live.admission = RosterAuthorizationAdmission::LIVE;
-    ordinary_live.previous = fixture->authorization.previous;
+    ordinary_live.previous = RosterAuthorizationPriorState{
+        statement.roster_authorization_state_hash,
+        statement.roster_beacons};
+    ordinary_live.normal_input =
+        test::MakeSyntheticNormalRosterAuthorizationInput(
+            statement, *ordinary_live.previous);
     BOOST_CHECK(!ValidateRosterAuthorizationState(
         fixture->genesis_hash, statement, ordinary_live, &error));
     BOOST_CHECK(error == ChainLockVerificationError::INVALID_AUTHORIZATION);
 
+    const RosterAuthorizationBaseIdentity initialization_base{
+        statement.height, statement.block_hash,
+        GetLogicalChainLockId(fixture->genesis_hash, statement)};
+    const RosterAuthorizationPriorState initialization_prior{
+        statement.roster_authorization_state_hash,
+        statement.roster_beacons};
+
+    statement.height = 2025;
+    statement.block_hash = NonNullHash(9201);
+    statement.previous_chainlock_height = 2020;
+    statement.previous_chainlock_hash = NonNullHash(9202);
     statement.roster_transition =
         RosterAuthorizationTransitionKind::RECOVER;
-    statement.roster_beacons = RecoveryWindow(/*first_epoch=*/0);
+    statement.roster_authorization_base = initialization_base;
+    statement.roster_beacons = RecoveryWindow(
+        /*first_epoch=*/4, initialization_prior.window.active);
+    statement.previous_btcc_cursor = {};
+    statement.accepted_btcc_cursor = {};
+    statement.btcc_advance = BTCCAdvance::KEEP;
     auto recover{initialize};
     recover.admission = RosterAuthorizationAdmission::RECOVER;
-    recover.previous = fixture->authorization.previous;
-    auto& recovery_source{
-        statement.roster_beacons.active.recovery_authority_source};
-    recovery_source.kind =
-        RecoveryRosterAuthoritySourceKind::NORMAL_ROSTERS;
-    recovery_source.height = statement.previous_chainlock_height;
-    recovery_source.block_hash = statement.previous_chainlock_hash;
-    recovery_source.quorum_context_hash = NonNullHash(400'001);
-    recovery_source.normal_beacons =
-        recover.previous->window.active.seeds;
+    recover.predecessor_height = statement.previous_chainlock_height;
+    recover.predecessor_block_hash = statement.previous_chainlock_hash;
+    recover.authorization_base = initialization_base;
+    recover.previous = initialization_prior;
+    recover.normal_input.reset();
     SealRosterAuthorization(fixture->genesis_hash, statement, recover);
     const auto recovery_mask{ValidateRosterAuthorizationState(
         fixture->genesis_hash, statement, recover, &error)};
     BOOST_REQUIRE(recovery_mask);
     BOOST_CHECK_EQUAL(*recovery_mask, 0b1111);
+    BOOST_CHECK(statement.roster_beacons.active.recovery_authority_source ==
+                initialization_prior.window.active
+                    .recovery_authority_source);
+    BOOST_CHECK(statement.roster_beacons.active.recovery_authority_hash ==
+                initialization_prior.window.active
+                    .recovery_authority_hash);
+
+    auto later_initialize_statement{statement};
+    later_initialize_statement.roster_transition =
+        RosterAuthorizationTransitionKind::INITIALIZE;
+    later_initialize_statement.roster_beacons =
+        InitializationWindow(/*first_epoch=*/4);
+    later_initialize_statement.roster_authorization_base = {};
+    later_initialize_statement.accepted_btcc_cursor = BTCCursor{
+        later_initialize_statement.height,
+        later_initialize_statement.block_hash, NonNullHash(9203)};
+    later_initialize_statement.btcc_advance = BTCCAdvance::ADVANCE;
+    auto later_initialize{initialize};
+    later_initialize.predecessor_height =
+        later_initialize_statement.previous_chainlock_height;
+    later_initialize.predecessor_block_hash =
+        later_initialize_statement.previous_chainlock_hash;
+    SealRosterAuthorization(fixture->genesis_hash,
+                            later_initialize_statement,
+                            later_initialize);
     BOOST_CHECK(!ValidateRosterAuthorizationState(
-        fixture->genesis_hash, statement, ordinary_live, &error));
+        fixture->genesis_hash, later_initialize_statement,
+        later_initialize, &error));
+    BOOST_CHECK(error == ChainLockVerificationError::INVALID_AUTHORIZATION);
+
+    auto recovery_as_live{recover};
+    recovery_as_live.admission = RosterAuthorizationAdmission::LIVE;
+    recovery_as_live.normal_input =
+        test::MakeSyntheticNormalRosterAuthorizationInput(
+            statement, *recovery_as_live.previous);
+    BOOST_CHECK(!ValidateRosterAuthorizationState(
+        fixture->genesis_hash, statement, recovery_as_live, &error));
+    BOOST_CHECK(error == ChainLockVerificationError::INVALID_AUTHORIZATION);
+
+    auto off_target_statement{statement};
+    off_target_statement.height += 5;
+    off_target_statement.block_hash = NonNullHash(9302);
+    off_target_statement.previous_chainlock_height += 5;
+    off_target_statement.previous_chainlock_hash = NonNullHash(9303);
+    auto off_target_recovery{recover};
+    off_target_recovery.predecessor_height =
+        off_target_statement.previous_chainlock_height;
+    off_target_recovery.predecessor_block_hash =
+        off_target_statement.previous_chainlock_hash;
+    SealRosterAuthorization(fixture->genesis_hash,
+                            off_target_statement,
+                            off_target_recovery);
+    BOOST_CHECK(!ValidateRosterAuthorizationState(
+        fixture->genesis_hash, off_target_statement,
+        off_target_recovery, &error));
+    BOOST_CHECK(error == ChainLockVerificationError::INVALID_AUTHORIZATION);
+    auto missing_prior{recover};
+    missing_prior.previous.reset();
+    BOOST_CHECK(!ValidateRosterAuthorizationState(
+        fixture->genesis_hash, statement, missing_prior, &error));
+    BOOST_CHECK(error == ChainLockVerificationError::INVALID_AUTHORIZATION);
+
+    auto null_base_statement{statement};
+    null_base_statement.roster_authorization_base = {};
+    auto null_base{recover};
+    null_base.authorization_base = {};
+    BOOST_CHECK(!ValidateRosterAuthorizationState(
+        fixture->genesis_hash, null_base_statement, null_base, &error));
+    BOOST_CHECK(error == ChainLockVerificationError::INVALID_CHAINLOCK);
+
+    auto wrong_base{recover};
+    wrong_base.authorization_base.logical_id = NonNullHash(9400);
+    BOOST_CHECK(!ValidateRosterAuthorizationState(
+        fixture->genesis_hash, statement, wrong_base, &error));
+    BOOST_CHECK(error == ChainLockVerificationError::INVALID_AUTHORIZATION);
+
+    auto wrong_prior_state{recover};
+    wrong_prior_state.previous->state_hash = NonNullHash(9401);
+    BOOST_CHECK(!ValidateRosterAuthorizationState(
+        fixture->genesis_hash, statement, wrong_prior_state, &error));
     BOOST_CHECK(error == ChainLockVerificationError::INVALID_AUTHORIZATION);
 }
 
@@ -758,21 +933,272 @@ BOOST_AUTO_TEST_CASE(descriptors_bind_the_exact_active_beacon_seed)
     fixture->chainlock.statement.quorum_context_hash = GetQuorumContextHash(
         fixture->genesis_hash, fixture->chainlock.statement.height,
         fixture->chainlock.statement.block_hash, descriptors);
-    BOOST_CHECK(!ValidateFrozenQuorumContext(
-        fixture->genesis_hash, fixture->chainlock.statement,
-        fixture->rosters, fixture->authorization, &error));
+    const auto roster_set{VerifiedRosterSet::Create(
+        fixture->genesis_hash,
+        std::make_shared<const FrozenQuorumRosters>(fixture->rosters),
+        &error, fixture->recovery_authority)};
+    BOOST_REQUIRE(roster_set);
+    BOOST_CHECK(!PreparedChainLockContext::Create(
+        fixture->schedule, fixture->chainlock.statement, roster_set,
+        fixture->authorization, &error));
     BOOST_CHECK(error == ChainLockVerificationError::INVALID_ROSTER_BEACON);
 }
 
-BOOST_AUTO_TEST_CASE(full_verifier_reports_bad_signature_after_cheap_checks)
+BOOST_AUTO_TEST_CASE(initialization_requires_all_retained_rotation_rosters)
+{
+    auto fixture{MakeVerificationFixture(/*target_height=*/2025)};
+    auto& statement{fixture->chainlock.statement};
+    statement.previous_chainlock_height = 2024;
+    statement.previous_chainlock_hash = NonNullHash(9450);
+    statement.roster_transition =
+        RosterAuthorizationTransitionKind::INITIALIZE;
+    statement.roster_authorization_base = {};
+    statement.roster_beacons = InitializationWindow(
+        fixture->rosters.front().descriptor.epoch);
+    statement.previous_btcc_cursor = {};
+    statement.accepted_btcc_cursor = BTCCursor{
+        statement.height, statement.block_hash, NonNullHash(9451)};
+    statement.btcc_advance = BTCCAdvance::ADVANCE;
+    const auto recovery_authority{BindRecoveryAuthority(
+        fixture->genesis_hash, statement.roster_beacons.active, 945'100)};
+
+    auto& retained{fixture->rosters[1]};
+    constexpr std::size_t LAST_VALID_MEMBER{QUORUM_MIN_VALID - 1};
+    retained.members[LAST_VALID_MEMBER].eligible = false;
+    ClearMember(retained.descriptor.valid_members, LAST_VALID_MEMBER);
+    retained.descriptor.valid_count = QUORUM_MIN_VALID - 1;
+
+    std::array<QuorumDescriptor, ACTIVE_QUORUMS> descriptors;
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        const auto beacon_hash{GetRosterBeaconCommitmentHash(
+            fixture->genesis_hash,
+            statement.roster_beacons.active.seeds[slot])};
+        BOOST_REQUIRE(beacon_hash);
+        fixture->rosters[slot].descriptor.roster_beacon_hash =
+            *beacon_hash;
+        descriptors[slot] = fixture->rosters[slot].descriptor;
+    }
+    statement.quorum_context_hash = GetQuorumContextHash(
+        fixture->genesis_hash, statement.height,
+        statement.block_hash, descriptors);
+
+    RosterAuthorizationVerificationContext initialize;
+    initialize.admission = RosterAuthorizationAdmission::INITIALIZE;
+    initialize.predecessor_height = statement.previous_chainlock_height;
+    initialize.predecessor_block_hash = statement.previous_chainlock_hash;
+    initialize.reset_policy = RosterResetVerificationPolicy{
+        fixture->schedule,
+        BTCCScheduleConfig{.candidate_origin = 865},
+        /*activation_predecessor_height=*/2024};
+    SealRosterAuthorization(fixture->genesis_hash, statement, initialize);
+
+    ChainLockVerificationError error{ChainLockVerificationError::NONE};
+    const auto roster_set{VerifiedRosterSet::Create(
+        fixture->genesis_hash,
+        std::make_shared<const FrozenQuorumRosters>(fixture->rosters),
+        &error, recovery_authority)};
+    BOOST_REQUIRE(roster_set);
+    BOOST_CHECK(!PreparedChainLockContext::Create(
+        fixture->schedule, statement, roster_set, initialize, &error));
+    BOOST_CHECK_EQUAL(static_cast<int>(error),
+                      static_cast<int>(ChainLockVerificationError::INVALID_ROSTER));
+}
+
+BOOST_AUTO_TEST_CASE(recovery_binds_exact_durable_source_and_authority)
+{
+    auto fixture{MakeVerificationFixture(/*target_height=*/2025)};
+    auto& statement{fixture->chainlock.statement};
+    auto prior_window{InitializationWindow(/*first_epoch=*/0)};
+    const auto recovery_authority{BindRecoveryAuthority(
+        fixture->genesis_hash, prior_window.active, 500'100)};
+    const RosterAuthorizationPriorState prior{
+        NonNullHash(500'000), std::move(prior_window)};
+    const RosterAuthorizationBaseIdentity base{
+        865, NonNullHash(500'001), NonNullHash(500'002)};
+
+    statement.roster_transition =
+        RosterAuthorizationTransitionKind::RECOVER;
+    statement.roster_authorization_base = base;
+    statement.roster_beacons = RecoveryWindow(
+        /*first_epoch=*/4, prior.window.active);
+    statement.previous_btcc_cursor = {};
+    statement.accepted_btcc_cursor = {};
+    statement.btcc_advance = BTCCAdvance::KEEP;
+
+    RosterAuthorizationVerificationContext recovery;
+    recovery.admission = RosterAuthorizationAdmission::RECOVER;
+    recovery.predecessor_height = statement.previous_chainlock_height;
+    recovery.predecessor_block_hash = statement.previous_chainlock_hash;
+    recovery.authorization_base = base;
+    recovery.reset_policy = ResetPolicy(fixture->schedule);
+    recovery.previous = prior;
+    SealRosterAuthorization(fixture->genesis_hash, statement, recovery);
+
+    ChainLockVerificationError error{ChainLockVerificationError::NONE};
+    const auto mask{ValidateRosterAuthorizationState(
+        fixture->genesis_hash, statement, recovery, &error)};
+    BOOST_REQUIRE(mask);
+    BOOST_CHECK_EQUAL(*mask, 0b1111);
+    BOOST_CHECK(!recovery.normal_input);
+
+    auto different_source{prior.window.active};
+    different_source.recovery_authority_source.normal_beacon
+        .future_btc_hash = NonNullHash(500'003);
+    auto wrong_source_statement{statement};
+    wrong_source_statement.roster_beacons = RecoveryWindow(
+        /*first_epoch=*/4, different_source);
+    SealRosterAuthorization(fixture->genesis_hash,
+                            wrong_source_statement, recovery);
+    BOOST_CHECK(!ValidateRosterAuthorizationState(
+        fixture->genesis_hash, wrong_source_statement, recovery,
+        &error));
+    BOOST_CHECK(error == ChainLockVerificationError::INVALID_AUTHORIZATION);
+
+    auto different_authority{prior.window.active};
+    different_authority.recovery_authority_hash = NonNullHash(500'004);
+    auto wrong_authority_statement{statement};
+    wrong_authority_statement.roster_beacons = RecoveryWindow(
+        /*first_epoch=*/4, different_authority);
+    SealRosterAuthorization(fixture->genesis_hash,
+                            wrong_authority_statement, recovery);
+    BOOST_CHECK(!ValidateRosterAuthorizationState(
+        fixture->genesis_hash, wrong_authority_statement, recovery,
+        &error));
+    BOOST_CHECK(error == ChainLockVerificationError::INVALID_AUTHORIZATION);
+
+    auto wrong_advance{statement};
+    wrong_advance.accepted_btcc_cursor = BTCCursor{
+        statement.height, statement.block_hash, NonNullHash(500'005)};
+    wrong_advance.btcc_advance = BTCCAdvance::ADVANCE;
+    BOOST_REQUIRE(wrong_advance.IsStructurallyValid());
+    BOOST_CHECK(!ValidateRosterAuthorizationState(
+        fixture->genesis_hash, wrong_advance, recovery, &error));
+    BOOST_CHECK(error == ChainLockVerificationError::INVALID_AUTHORIZATION);
+
+    // Recovery contexts are accepted only after the canonical cache has
+    // minted a roster capability carrying the same fixed authority.
+    const auto detached_set{VerifiedRosterSet::Create(
+        fixture->genesis_hash,
+        std::make_shared<const FrozenQuorumRosters>(fixture->rosters),
+        &error, recovery_authority)};
+    BOOST_REQUIRE(detached_set);
+    BOOST_CHECK(!PreparedChainLockContext::Create(
+        fixture->schedule, statement, detached_set, recovery, &error,
+        recovery_authority));
+    BOOST_CHECK(error == ChainLockVerificationError::INVALID_ROSTER_BEACON);
+}
+
+BOOST_AUTO_TEST_CASE(later_recovery_uses_exact_prior_state_without_precommit)
+{
+    auto fixture{MakeVerificationFixture()};
+    const auto policy{ResetPolicy(fixture->schedule)};
+    const auto first_target{CanonicalRosterRecoveryTargetHeight(
+        policy.chainlock_schedule, policy.btcc_schedule,
+        /*epoch=*/7)};
+    const auto retry_target{CanonicalRosterRecoveryTargetHeight(
+        policy.chainlock_schedule, policy.btcc_schedule,
+        /*epoch=*/11)};
+    BOOST_REQUIRE(first_target);
+    BOOST_REQUIRE(retry_target);
+
+    const RosterAuthorizationPriorState initialization_prior{
+        NonNullHash(510'000), InitializationWindow(/*first_epoch=*/0)};
+    ChainLockStatement first{fixture->chainlock.statement};
+    first.height = *first_target;
+    first.block_hash = NonNullHash(510'001);
+    first.previous_chainlock_height = *first_target -
+        static_cast<int32_t>(PQ_CL_PERIOD);
+    first.previous_chainlock_hash = NonNullHash(510'002);
+    first.roster_transition =
+        RosterAuthorizationTransitionKind::RECOVER;
+    first.roster_authorization_base = RosterAuthorizationBaseIdentity{
+        865, NonNullHash(510'003), NonNullHash(510'004)};
+    first.roster_beacons = RecoveryWindow(
+        /*first_epoch=*/4, initialization_prior.window.active);
+    first.previous_btcc_cursor = {};
+    first.accepted_btcc_cursor = {};
+    first.btcc_advance = BTCCAdvance::KEEP;
+
+    RosterAuthorizationVerificationContext first_recovery;
+    first_recovery.admission = RosterAuthorizationAdmission::RECOVER;
+    first_recovery.predecessor_height =
+        first.previous_chainlock_height;
+    first_recovery.predecessor_block_hash =
+        first.previous_chainlock_hash;
+    first_recovery.authorization_base =
+        first.roster_authorization_base;
+    first_recovery.reset_policy = policy;
+    first_recovery.previous = initialization_prior;
+    SealRosterAuthorization(fixture->genesis_hash, first,
+                            first_recovery);
+
+    ChainLockVerificationError error{ChainLockVerificationError::NONE};
+    BOOST_REQUIRE(ValidateRosterAuthorizationState(
+        fixture->genesis_hash, first, first_recovery, &error));
+
+    const RosterAuthorizationPriorState first_prior{
+        first.roster_authorization_state_hash, first.roster_beacons};
+    ChainLockStatement retry{first};
+    retry.height = *retry_target;
+    retry.block_hash = NonNullHash(510'005);
+    retry.previous_chainlock_height = *retry_target -
+        static_cast<int32_t>(PQ_CL_PERIOD);
+    retry.previous_chainlock_hash = NonNullHash(510'006);
+    retry.roster_authorization_base = RosterAuthorizationBaseIdentity{
+        first.height, first.block_hash,
+        GetLogicalChainLockId(fixture->genesis_hash, first)};
+    retry.roster_beacons = RecoveryWindow(
+        /*first_epoch=*/8, first_prior.window.active);
+
+    RosterAuthorizationVerificationContext retry_recovery;
+    retry_recovery.admission = RosterAuthorizationAdmission::RECOVER;
+    retry_recovery.predecessor_height =
+        retry.previous_chainlock_height;
+    retry_recovery.predecessor_block_hash =
+        retry.previous_chainlock_hash;
+    retry_recovery.authorization_base = retry.roster_authorization_base;
+    retry_recovery.reset_policy = policy;
+    retry_recovery.previous = first_prior;
+    SealRosterAuthorization(fixture->genesis_hash, retry,
+                            retry_recovery);
+
+    const auto retry_mask{ValidateRosterAuthorizationState(
+        fixture->genesis_hash, retry, retry_recovery, &error)};
+    BOOST_REQUIRE(retry_mask);
+    BOOST_CHECK_EQUAL(*retry_mask, 0b1111);
+    BOOST_CHECK(retry.roster_beacons.active.recovery_authority_source ==
+                first_prior.window.active.recovery_authority_source);
+    BOOST_CHECK(retry.roster_beacons.active.recovery_authority_hash ==
+                first_prior.window.active.recovery_authority_hash);
+    BOOST_CHECK(retry.btcc_advance == BTCCAdvance::KEEP);
+    BOOST_CHECK(!retry_recovery.normal_input);
+
+    auto stale_prior{retry_recovery};
+    stale_prior.previous = initialization_prior;
+    BOOST_CHECK(!ValidateRosterAuthorizationState(
+        fixture->genesis_hash, retry, stale_prior, &error));
+    BOOST_CHECK(error == ChainLockVerificationError::INVALID_AUTHORIZATION);
+
+    auto wrong_base{retry_recovery};
+    wrong_base.authorization_base.logical_id = NonNullHash(510'007);
+    BOOST_CHECK(!ValidateRosterAuthorizationState(
+        fixture->genesis_hash, retry, wrong_base, &error));
+    BOOST_CHECK(error == ChainLockVerificationError::INVALID_AUTHORIZATION);
+}
+
+BOOST_AUTO_TEST_CASE(prepared_verifier_reports_bad_signature_after_cheap_checks)
 {
     const auto fixture = MakeVerificationFixture();
     ChainLockVerificationError error{ChainLockVerificationError::NONE};
-    BOOST_CHECK(!VerifyFinalChainLock(
-        fixture->genesis_hash, fixture->schedule, fixture->chainlock,
-        fixture->rosters, fixture->authorization,
-        /*queue=*/nullptr, &error));
-    BOOST_CHECK(error == ChainLockVerificationError::INVALID_SIGNATURE);
+    auto prepared{PrepareWithDetachedRosters(
+        *fixture, fixture->chainlock,
+        std::make_shared<const FrozenQuorumRosters>(fixture->rosters),
+        fixture->authorization, &error)};
+    BOOST_REQUIRE(prepared);
+    BOOST_CHECK(error == ChainLockVerificationError::NONE);
+    ChainLockVerifier verifier{/*worker_threads=*/0};
+    BOOST_CHECK(!verifier.VerifyChecks(
+        std::move(prepared->checks)));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
