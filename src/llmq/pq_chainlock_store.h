@@ -34,6 +34,10 @@ inline constexpr std::size_t DEFAULT_REJECTED_WITNESS_CACHE_SIZE{4096};
 inline constexpr std::size_t DEFAULT_RECENT_CHAINLOCKS_SIZE{8};
 inline constexpr std::size_t MAX_FINALITY_ID_CACHE_SIZE{65536};
 inline constexpr std::size_t MAX_RECENT_CHAINLOCKS_SIZE{64};
+// Two full 288-block roster epochs contain at most 116 ChainLock targets.
+// Twelve additional slots cover one trusted boundary plus bounded auxiliary
+// roots without making one-megabyte certificate retention unbounded.
+inline constexpr std::size_t VERIFIED_AUTHORIZATION_BASE_CAPACITY{128};
 
 /**
  * Bounded memoization for the expensive historical catch-up proof.
@@ -333,6 +337,8 @@ using ChainLockDurableReset = std::function<bool(
     const ReceiptArchiveRosterAuthorization*,
     const PreparedChainLockContextPtr&,
     const VerifiedRecoveryResetPersistenceCapability&)>;
+using ChainLockDurableAuthorizationBase =
+    std::function<bool(const FinalChainLock&)>;
 
 /** Small immutable token retained while the 801 WOTS+ checks run. */
 struct PreparedFinalChainLockCandidate {
@@ -360,6 +366,12 @@ struct FinalChainLockRecordMetadata {
      */
     [[nodiscard]] bool IsInternallyConsistent(
         const uint256& genesis_hash) const;
+
+    [[nodiscard]] RosterAuthorizationBaseIdentity AuthorizationBase() const
+        noexcept
+    {
+        return {statement.height, statement.block_hash, logical_id};
+    }
 
     friend bool operator==(const FinalChainLockRecordMetadata&,
                            const FinalChainLockRecordMetadata&) = default;
@@ -400,6 +412,22 @@ struct AcceptedFinalChainLockView {
     PreparedChainLockContextPtr verification_context;
 };
 
+/**
+ * A fully verified certificate retained for archive validation or exact
+ * startup reconstruction without itself becoming this node's finality winner.
+ *
+ * This view is not authority to advance live roster state from an older base;
+ * state-advancing transitions require the exact current durable best. Only the
+ * finality store exposes it after the exact statement/roster context and all
+ * certificate signatures have crossed its verification boundary.
+ */
+struct VerifiedRosterAuthorizationBaseView {
+    uint64_t base_revision{0};
+    FinalChainLockRecordMetadata metadata;
+    std::shared_ptr<const FinalChainLock> certificate;
+    PreparedChainLockContextPtr verification_context;
+};
+
 /** Coherent lightweight observation, including the pre-first-winner state. */
 struct ChainLockFinalityStateObservation {
     uint64_t state_revision{0};
@@ -421,7 +449,9 @@ public:
                                durable_receipt_archive = {},
                            ChainLockDurableCoveringAccept
                                durable_covering_accept = {},
-                           ChainLockDurableReset durable_reset = {});
+                           ChainLockDurableReset durable_reset = {},
+                           ChainLockDurableAuthorizationBase
+                               durable_authorization_base = {});
 
     ChainLockFinalityStore(const ChainLockFinalityStore&) = delete;
     ChainLockFinalityStore& operator=(const ChainLockFinalityStore&) = delete;
@@ -573,6 +603,33 @@ public:
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     [[nodiscard]] std::optional<AcceptedFinalChainLockView> GetRecordByHeight(
         int32_t height) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** Resolve one exact signed roster-authorization base capability. */
+    [[nodiscard]] std::optional<VerifiedRosterAuthorizationBaseView>
+    GetVerifiedRosterAuthorizationBase(
+        const RosterAuthorizationBaseIdentity& identity) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** Resolve only a fully verified base capability by its network ID. */
+    [[nodiscard]] std::optional<VerifiedRosterAuthorizationBaseView>
+    GetVerifiedRosterAuthorizationBaseByLogicalId(
+        const uint256& logical_id) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /**
+     * Retain a fully signature-verified certificate as authorization only.
+     * This never changes finality, BTCC/payment state, or recent-winner order.
+     */
+    [[nodiscard]] bool AcceptVerifiedRosterAuthorizationBase(
+        const FinalChainLock& chainlock,
+        bool signatures_valid,
+        PreparedChainLockContextPtr verification_context,
+        ChainLockFinalityError* error = nullptr)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** Import one exact locally fsynced base after full startup revalidation. */
+    [[nodiscard]] bool AcceptPersistedRosterAuthorizationBase(
+        const FinalChainLock& chainlock,
+        bool signatures_valid,
+        PreparedChainLockContextPtr verification_context,
+        ChainLockFinalityError* error = nullptr)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     [[nodiscard]] ChainLockFinalityStateObservation ObserveState() const
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     [[nodiscard]] std::shared_ptr<const FinalChainLock> GetUnsealedBTCC() const
@@ -596,6 +653,8 @@ public:
     [[nodiscard]] std::size_t SeenWitnessSizeForTesting() const
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     [[nodiscard]] std::size_t RejectedWitnessSizeForTesting() const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    [[nodiscard]] std::size_t AuthorizationBaseSizeForTesting() const
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
 private:
@@ -658,6 +717,15 @@ private:
         const PreparedChainLockContextPtr& verification_context,
         ChainLockFinalityError* error) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     void RememberAccepted(AcceptedRecord record) EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    void RememberAuthorizationBase(AcceptedRecord record)
+        EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    [[nodiscard]] bool AcceptRosterAuthorizationBaseInternal(
+        const FinalChainLock& chainlock,
+        bool signatures_valid,
+        PreparedChainLockContextPtr verification_context,
+        bool persisted_import,
+        ChainLockFinalityError* error)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     const uint256 m_genesis_hash;
     const ChainLockFinalityStoreConfig m_config;
@@ -668,15 +736,20 @@ private:
     const ChainLockDurableReceiptArchive m_durable_receipt_archive;
     const ChainLockDurableCoveringAccept m_durable_covering_accept;
     const ChainLockDurableReset m_durable_reset;
+    const ChainLockDurableAuthorizationBase m_durable_authorization_base;
 
     mutable Mutex m_mutex;
     uint64_t m_revision GUARDED_BY(m_mutex){0};
+    uint64_t m_authorization_base_revision GUARDED_BY(m_mutex){0};
     std::optional<AcceptedRecord> m_best GUARDED_BY(m_mutex);
     std::optional<AcceptedRecord> m_unsealed_btcc GUARDED_BY(m_mutex);
     std::map<int32_t, AcceptedRecord> m_recent_by_height GUARDED_BY(m_mutex);
     std::map<uint256, std::shared_ptr<const FinalChainLock>> m_recent_by_witness
         GUARDED_BY(m_mutex);
     std::deque<int32_t> m_recent_order GUARDED_BY(m_mutex);
+    std::map<uint256, AcceptedRecord> m_authorization_bases GUARDED_BY(m_mutex);
+    std::map<uint256, uint256> m_authorization_base_by_witness
+        GUARDED_BY(m_mutex);
     BoundedIdCache m_seen_logical GUARDED_BY(m_mutex);
     BoundedIdCache m_seen_witness GUARDED_BY(m_mutex);
     BoundedIdCache m_rejected_witness GUARDED_BY(m_mutex);

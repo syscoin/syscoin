@@ -93,6 +93,8 @@ FinalChainLock MakeChainLock(int32_t height,
     chainlock.statement.payment_probation_state_hash = NonNullHash(30'000);
     chainlock.statement.roster_transition =
         RosterAuthorizationTransitionKind::KEEP;
+    chainlock.statement.roster_authorization_base = {
+        previous_height, previous_hash, NonNullHash(39'000 + salt)};
     chainlock.statement.roster_beacons = ReadyWindow(height);
     chainlock.statement.roster_authorization_state_hash =
         NonNullHash(40'000 + salt);
@@ -380,6 +382,102 @@ BOOST_AUTO_TEST_CASE(best_record_view_shares_witness_and_tracks_store_revision)
     BOOST_CHECK(*first_view->certificate == first);
 }
 
+BOOST_AUTO_TEST_CASE(verified_authorization_base_is_exact_and_not_finality)
+{
+    const uint256 genesis{NonNullHash(109)};
+    const auto config{MakeConfig(/*cache_capacity=*/8,
+                                 /*recent_capacity=*/2)};
+    TestFinalityContext context;
+    ChainLockFinalityStore store{genesis, config, context};
+    const auto first{MakeChainLock(865, 864, NonNullHash(864), 109)};
+    const auto first_context{MakeVerificationContext(genesis, config, first)};
+    BOOST_REQUIRE(first_context);
+
+    ChainLockFinalityError error{ChainLockFinalityError::NONE};
+    BOOST_REQUIRE(store.AcceptVerifiedRosterAuthorizationBase(
+        first, /*signatures_valid=*/true, first_context, &error));
+    BOOST_CHECK(error == ChainLockFinalityError::NONE);
+    BOOST_CHECK(!store.GetBest());
+    BOOST_CHECK(!store.GetByHeight(first.statement.height));
+    BOOST_CHECK(!store.GetByLogicalId(first.GetLogicalId(genesis)));
+    BOOST_CHECK(store.AlreadyHaveWitness(first.GetWitnessId(genesis)));
+
+    const RosterAuthorizationBaseIdentity identity{
+        first.statement.height, first.statement.block_hash,
+        first.GetLogicalId(genesis)};
+    const auto retained{store.GetVerifiedRosterAuthorizationBase(identity)};
+    BOOST_REQUIRE(retained);
+    BOOST_CHECK(retained->metadata.AuthorizationBase() == identity);
+    BOOST_CHECK(retained->certificate && *retained->certificate == first);
+    BOOST_CHECK(retained->verification_context == first_context);
+
+    auto wrong{identity};
+    wrong.block_hash = NonNullHash(110);
+    BOOST_CHECK(!store.GetVerifiedRosterAuthorizationBase(wrong));
+    wrong = identity;
+    wrong.logical_id = NonNullHash(111);
+    BOOST_CHECK(!store.GetVerifiedRosterAuthorizationBase(wrong));
+
+    // A different accepted winner at the same height must not shadow the
+    // exact authorization-only certificate named by logical ID.
+    const auto same_height_winner{
+        MakeChainLock(865, 864, NonNullHash(864), 112)};
+    const auto prepared{store.PrepareCandidate(same_height_winner, &error)};
+    BOOST_REQUIRE(prepared);
+    BOOST_REQUIRE(store.AcceptVerified(
+        *prepared, same_height_winner, true, &error,
+        MakeVerificationContext(genesis, config, same_height_winner)));
+    BOOST_REQUIRE(store.GetVerifiedRosterAuthorizationBase(identity));
+    const RosterAuthorizationBaseIdentity winner_identity{
+        same_height_winner.statement.height,
+        same_height_winner.statement.block_hash,
+        same_height_winner.GetLogicalId(genesis)};
+    BOOST_REQUIRE(
+        store.GetVerifiedRosterAuthorizationBase(winner_identity));
+
+    auto second{MakeChainLock(870, 865, first.statement.block_hash, 110)};
+    auto third{MakeChainLock(875, 870, second.statement.block_hash, 111)};
+    BOOST_REQUIRE(store.AcceptVerifiedRosterAuthorizationBase(
+        second, true, MakeVerificationContext(genesis, config, second)));
+    BOOST_REQUIRE(store.AcceptVerifiedRosterAuthorizationBase(
+        third, true, MakeVerificationContext(genesis, config, third)));
+    BOOST_CHECK_EQUAL(store.AuthorizationBaseSizeForTesting(), 4U);
+    BOOST_CHECK(store.GetVerifiedRosterAuthorizationBase(identity));
+}
+
+BOOST_AUTO_TEST_CASE(persisted_authorization_base_requires_trusted_context)
+{
+    const uint256 genesis{NonNullHash(113)};
+    const auto config{MakeConfig()};
+    TestFinalityContext context;
+    ChainLockFinalityStore store{genesis, config, context};
+    const auto base{MakeChainLock(865, 864, NonNullHash(864), 113)};
+    ChainLockFinalityError error{ChainLockFinalityError::NONE};
+
+    BOOST_CHECK(!store.AcceptPersistedRosterAuthorizationBase(
+        base, /*signatures_valid=*/true,
+        MakeVerificationContext(genesis, config, base), &error));
+    BOOST_CHECK(error == ChainLockFinalityError::INVALID_PREPARATION_TOKEN);
+
+    const auto trusted{
+        ChainLockStoreTestContextFactory::CreateTrustedPersistence(
+            genesis, config.chainlock_schedule, base.statement)};
+    BOOST_REQUIRE(trusted);
+    BOOST_REQUIRE(store.AcceptPersistedRosterAuthorizationBase(
+        base, /*signatures_valid=*/true, trusted, &error));
+    BOOST_CHECK(error == ChainLockFinalityError::NONE);
+    BOOST_CHECK(!store.GetBest());
+
+    const RosterAuthorizationBaseIdentity identity{
+        base.statement.height, base.statement.block_hash,
+        base.GetLogicalId(genesis)};
+    const auto retained{store.GetVerifiedRosterAuthorizationBase(identity)};
+    BOOST_REQUIRE(retained);
+    BOOST_CHECK(retained->certificate && *retained->certificate == base);
+    BOOST_CHECK(retained->verification_context->Authorization().admission ==
+                RosterAuthorizationAdmission::TRUSTED_PERSISTENCE);
+}
+
 BOOST_AUTO_TEST_CASE(activation_height_is_not_finality_before_first_winner)
 {
     TestFinalityContext context;
@@ -624,6 +722,7 @@ BOOST_AUTO_TEST_CASE(reset_capability_crosses_only_the_fully_verified_store_seam
     auto rejected{MakeChainLock(865, 864, NonNullHash(864), 31)};
     rejected.statement.roster_transition =
         RosterAuthorizationTransitionKind::INITIALIZE;
+    rejected.statement.roster_authorization_base = {};
     rejected.statement.roster_beacons = InitializationWindow(865);
     auto prepared{store.PrepareCandidate(rejected)};
     BOOST_REQUIRE(prepared);
@@ -636,6 +735,7 @@ BOOST_AUTO_TEST_CASE(reset_capability_crosses_only_the_fully_verified_store_seam
     auto accepted{MakeChainLock(865, 864, NonNullHash(864), 32)};
     accepted.statement.roster_transition =
         RosterAuthorizationTransitionKind::INITIALIZE;
+    accepted.statement.roster_authorization_base = {};
     accepted.statement.roster_beacons = InitializationWindow(865);
     prepared = store.PrepareCandidate(accepted, &error);
     BOOST_REQUIRE(prepared);

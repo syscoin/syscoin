@@ -365,7 +365,8 @@ ChainLockFinalityStore::ChainLockFinalityStore(
     ChainLockDurableCatchup durable_catchup,
     ChainLockDurableReceiptArchive durable_receipt_archive,
     ChainLockDurableCoveringAccept durable_covering_accept,
-    ChainLockDurableReset durable_reset)
+    ChainLockDurableReset durable_reset,
+    ChainLockDurableAuthorizationBase durable_authorization_base)
     : m_genesis_hash(std::move(genesis_hash)),
       m_config(std::move(config)),
       m_context(context),
@@ -375,6 +376,8 @@ ChainLockFinalityStore::ChainLockFinalityStore(
       m_durable_receipt_archive(std::move(durable_receipt_archive)),
       m_durable_covering_accept(std::move(durable_covering_accept)),
       m_durable_reset(std::move(durable_reset)),
+      m_durable_authorization_base(
+          std::move(durable_authorization_base)),
       m_seen_logical(m_config.seen_logical_capacity),
       m_seen_witness(m_config.seen_witness_capacity),
       m_rejected_witness(m_config.rejected_witness_capacity)
@@ -689,9 +692,27 @@ ChainLockFinalityStore::PrepareCandidateInternal(
     bool has_local_chainlock{false};
     std::optional<BTCCursor> declared_predecessor_cursor;
     uint64_t revision{0};
+    const auto is_exact_retained_base = [&]()
+        EXCLUSIVE_LOCKS_REQUIRED(m_mutex) {
+        const auto retained_witness{
+            m_authorization_base_by_witness.find(witness_id)};
+        const auto retained_base{
+            retained_witness != m_authorization_base_by_witness.end()
+                ? m_authorization_bases.find(retained_witness->second)
+                : m_authorization_bases.end()};
+        return retained_base != m_authorization_bases.end() &&
+               retained_base->second.logical_id == logical_id &&
+               retained_base->second.witness_id == witness_id &&
+               retained_base->second.chainlock &&
+               *retained_base->second.chainlock == chainlock;
+    };
     {
         LOCK(m_mutex);
-        if (m_seen_witness.Contains(witness_id)) {
+        // An authorization-only certificate can later become locally
+        // admissible. Reuse only its exact witness reservation; every branch,
+        // state, and durability check below still runs again.
+        if (m_seen_witness.Contains(witness_id) &&
+            !is_exact_retained_base()) {
             SetError(error, ChainLockFinalityError::DUPLICATE_WITNESS);
             return std::nullopt;
         }
@@ -727,7 +748,8 @@ ChainLockFinalityStore::PrepareCandidateInternal(
             SetError(error, ChainLockFinalityError::CONTEXT_CHANGED);
             return std::nullopt;
         }
-        if (m_seen_witness.Contains(witness_id)) {
+        if (m_seen_witness.Contains(witness_id) &&
+            !is_exact_retained_base()) {
             SetError(error, ChainLockFinalityError::DUPLICATE_WITNESS);
             return std::nullopt;
         }
@@ -853,6 +875,118 @@ bool ChainLockFinalityStore::AcceptCatchupVerified(
         ChainLockCandidateAdmission::CATCHUP,
         /*persist=*/true, pre_durable, durable_authorization, nullptr,
         covering_authorization, verification_context, error);
+}
+
+bool ChainLockFinalityStore::AcceptVerifiedRosterAuthorizationBase(
+    const FinalChainLock& chainlock,
+    bool signatures_valid,
+    PreparedChainLockContextPtr verification_context,
+    ChainLockFinalityError* error)
+{
+    return AcceptRosterAuthorizationBaseInternal(
+        chainlock, signatures_valid, std::move(verification_context),
+        /*persisted_import=*/false, error);
+}
+
+bool ChainLockFinalityStore::AcceptPersistedRosterAuthorizationBase(
+    const FinalChainLock& chainlock,
+    bool signatures_valid,
+    PreparedChainLockContextPtr verification_context,
+    ChainLockFinalityError* error)
+{
+    return AcceptRosterAuthorizationBaseInternal(
+        chainlock, signatures_valid, std::move(verification_context),
+        /*persisted_import=*/true, error);
+}
+
+bool ChainLockFinalityStore::AcceptRosterAuthorizationBaseInternal(
+    const FinalChainLock& chainlock,
+    bool signatures_valid,
+    PreparedChainLockContextPtr verification_context,
+    bool persisted_import,
+    ChainLockFinalityError* error)
+{
+    SetError(error, ChainLockFinalityError::NONE);
+    const uint256 logical_id{chainlock.GetLogicalId(m_genesis_hash)};
+    const uint256 witness_id{chainlock.GetWitnessId(m_genesis_hash)};
+    const bool trusted_context{
+        verification_context &&
+        verification_context->Authorization().admission ==
+            RosterAuthorizationAdmission::TRUSTED_PERSISTENCE};
+    if (!chainlock.IsStructurallyValid() || logical_id.IsNull() ||
+        witness_id.IsNull() || !verification_context ||
+        trusted_context != persisted_import ||
+        verification_context->GenesisHash() != m_genesis_hash ||
+        verification_context->Schedule() != m_config.chainlock_schedule ||
+        verification_context->Statement() != chainlock.statement ||
+        verification_context->StatementLogicalId() != logical_id) {
+        SetError(error, ChainLockFinalityError::INVALID_PREPARATION_TOKEN);
+        return false;
+    }
+    if (!signatures_valid) {
+        LOCK(m_mutex);
+        m_rejected_witness.Insert(witness_id);
+        SetError(error, ChainLockFinalityError::INVALID_SIGNATURES);
+        return false;
+    }
+
+    const auto already_accepted = [&](const AcceptedRecord& record) {
+        return record.chainlock && record.logical_id == logical_id &&
+               record.chainlock->statement == chainlock.statement &&
+               record.verification_context &&
+               record.verification_context->StatementLogicalId() == logical_id;
+    };
+    bool retained_invalid{false};
+    const auto already_retained = [&]() EXCLUSIVE_LOCKS_REQUIRED(m_mutex) {
+        const auto recent{
+            m_recent_by_height.find(chainlock.statement.height)};
+        if (recent != m_recent_by_height.end() &&
+            already_accepted(recent->second)) {
+            RememberAuthorizationBase(recent->second);
+            return true;
+        }
+        if (m_unsealed_btcc && already_accepted(*m_unsealed_btcc)) {
+            RememberAuthorizationBase(*m_unsealed_btcc);
+            return true;
+        }
+        const auto existing{m_authorization_bases.find(logical_id)};
+        if (existing == m_authorization_bases.end()) return false;
+        if (!already_accepted(existing->second)) {
+            retained_invalid = true;
+            SetError(error,
+                     ChainLockFinalityError::INVALID_PREPARATION_TOKEN);
+        }
+        return true;
+    };
+    {
+        LOCK(m_mutex);
+        if (already_retained()) {
+            return !retained_invalid;
+        }
+    }
+
+    if (!persisted_import && m_durable_authorization_base) {
+        try {
+            if (!m_durable_authorization_base(chainlock)) {
+                SetError(error, ChainLockFinalityError::PERSISTENCE_FAILURE);
+                return false;
+            }
+        } catch (const std::exception&) {
+            SetError(error, ChainLockFinalityError::PERSISTENCE_FAILURE);
+            return false;
+        }
+    }
+
+    LOCK(m_mutex);
+    if (already_retained()) {
+        return !retained_invalid;
+    }
+    AcceptedRecord retained{
+        logical_id, witness_id,
+        std::make_shared<const FinalChainLock>(chainlock),
+        std::move(verification_context)};
+    RememberAuthorizationBase(std::move(retained));
+    return true;
 }
 
 bool ChainLockFinalityStore::AcceptVerifiedInternal(
@@ -1125,6 +1259,11 @@ bool ChainLockFinalityStore::AcceptVerifiedInternal(
         logical_id, witness_id,
         std::make_shared<const FinalChainLock>(chainlock),
         verification_context};
+    // Preserve the exact verified context for archive validation and startup
+    // reconstruction after the smaller relay cache expires. Retention does
+    // not let an older winner authorize a state-advancing transition; those
+    // paths require the exact current durable best.
+    RememberAuthorizationBase(accepted);
     if (archive_only) {
         m_unsealed_btcc = accepted;
     } else {
@@ -1144,11 +1283,69 @@ bool ChainLockFinalityStore::AcceptVerifiedInternal(
     return true;
 }
 
+void ChainLockFinalityStore::RememberAuthorizationBase(AcceptedRecord record)
+{
+    if (!record.chainlock || !record.verification_context ||
+        record.logical_id.IsNull() || record.witness_id.IsNull() ||
+        record.chainlock->GetLogicalId(m_genesis_hash) != record.logical_id ||
+        record.chainlock->GetWitnessId(m_genesis_hash) != record.witness_id ||
+        record.verification_context->GenesisHash() != m_genesis_hash ||
+        record.verification_context->Schedule() != m_config.chainlock_schedule ||
+        record.verification_context->Statement() != record.chainlock->statement ||
+        record.verification_context->StatementLogicalId() != record.logical_id) {
+        return;
+    }
+
+    const uint256 logical_id{record.logical_id};
+    const uint256 witness_id{record.witness_id};
+    const auto existing{m_authorization_bases.find(logical_id)};
+    if (existing != m_authorization_bases.end()) {
+        const auto old_witness{
+            m_authorization_base_by_witness.find(existing->second.witness_id)};
+        if (old_witness != m_authorization_base_by_witness.end() &&
+            old_witness->second == logical_id) {
+            m_authorization_base_by_witness.erase(old_witness);
+        }
+        existing->second = std::move(record);
+    } else {
+        m_authorization_bases.emplace(logical_id, std::move(record));
+    }
+    m_authorization_base_by_witness.insert_or_assign(witness_id, logical_id);
+    m_seen_logical.Insert(logical_id);
+    m_seen_witness.Insert(witness_id);
+
+    while (m_authorization_bases.size() >
+           VERIFIED_AUTHORIZATION_BASE_CAPACITY) {
+        const auto old{std::min_element(
+            m_authorization_bases.begin(), m_authorization_bases.end(),
+            [](const auto& left, const auto& right) {
+                const auto& lhs{left.second.chainlock->statement};
+                const auto& rhs{right.second.chainlock->statement};
+                return lhs.height != rhs.height
+                    ? lhs.height < rhs.height
+                    : left.first < right.first;
+            })};
+        if (old == m_authorization_bases.end()) break;
+        const uint256 old_logical{old->first};
+        const auto old_witness{
+            m_authorization_base_by_witness.find(old->second.witness_id)};
+        if (old_witness != m_authorization_base_by_witness.end() &&
+            old_witness->second == old_logical) {
+            m_authorization_base_by_witness.erase(old_witness);
+        }
+        m_authorization_bases.erase(old);
+    }
+    ++m_authorization_base_revision;
+}
+
 void ChainLockFinalityStore::RejectPrepared(
     const PreparedFinalChainLockCandidate& prepared)
 {
     LOCK(m_mutex);
-    if (!prepared.witness_id.IsNull()) m_rejected_witness.Insert(prepared.witness_id);
+    if (!prepared.witness_id.IsNull() &&
+        !m_authorization_base_by_witness.contains(prepared.witness_id)) {
+        m_rejected_witness.Insert(prepared.witness_id);
+    }
 }
 
 void ChainLockFinalityStore::RejectWitness(const FinalChainLock& chainlock)
@@ -1156,7 +1353,9 @@ void ChainLockFinalityStore::RejectWitness(const FinalChainLock& chainlock)
     const uint256 witness_id{chainlock.GetWitnessId(m_genesis_hash)};
     if (witness_id.IsNull()) return;
     LOCK(m_mutex);
-    m_rejected_witness.Insert(witness_id);
+    if (!m_authorization_base_by_witness.contains(witness_id)) {
+        m_rejected_witness.Insert(witness_id);
+    }
 }
 
 void ChainLockFinalityStore::AbandonPrepared(
@@ -1166,6 +1365,7 @@ void ChainLockFinalityStore::AbandonPrepared(
     // Accepted and explicitly rejected witnesses must remain deduplicated.
     if (m_rejected_witness.Contains(prepared.witness_id) ||
         m_recent_by_witness.find(prepared.witness_id) != m_recent_by_witness.end() ||
+        m_authorization_base_by_witness.contains(prepared.witness_id) ||
         (m_unsealed_btcc &&
          m_unsealed_btcc->witness_id == prepared.witness_id)) {
         return;
@@ -1180,6 +1380,7 @@ bool ChainLockFinalityStore::AlreadyHaveWitness(const uint256& witness_id) const
     return m_seen_witness.Contains(witness_id) ||
            m_rejected_witness.Contains(witness_id) ||
            m_recent_by_witness.find(witness_id) != m_recent_by_witness.end() ||
+           m_authorization_base_by_witness.contains(witness_id) ||
            (m_unsealed_btcc &&
             m_unsealed_btcc->witness_id == witness_id);
 }
@@ -1316,6 +1517,72 @@ ChainLockFinalityStore::GetRecordByHeight(int32_t height) const
         record->verification_context};
 }
 
+std::optional<VerifiedRosterAuthorizationBaseView>
+ChainLockFinalityStore::GetVerifiedRosterAuthorizationBase(
+    const RosterAuthorizationBaseIdentity& identity) const
+{
+    if (!identity.IsStructurallyValid() || identity.IsNull()) {
+        return std::nullopt;
+    }
+    LOCK(m_mutex);
+    const AcceptedRecord* record{nullptr};
+    const auto retained{m_authorization_bases.find(identity.logical_id)};
+    if (retained != m_authorization_bases.end()) {
+        record = &retained->second;
+    }
+    if (record == nullptr && m_unsealed_btcc &&
+        m_unsealed_btcc->logical_id == identity.logical_id) {
+        record = &*m_unsealed_btcc;
+    }
+    if (record == nullptr) {
+        const auto recent{m_recent_by_height.find(identity.height)};
+        if (recent != m_recent_by_height.end() &&
+            recent->second.logical_id == identity.logical_id) {
+            record = &recent->second;
+        }
+    }
+    if (record == nullptr || !record->verification_context ||
+        record->logical_id != identity.logical_id ||
+        record->chainlock->statement.height != identity.height ||
+        record->chainlock->statement.block_hash != identity.block_hash ||
+        record->verification_context->Statement() !=
+            record->chainlock->statement ||
+        record->verification_context->StatementLogicalId() !=
+            record->logical_id) {
+        return std::nullopt;
+    }
+    return VerifiedRosterAuthorizationBaseView{
+        m_authorization_base_revision,
+        FinalChainLockRecordMetadata{
+            record->logical_id, record->witness_id,
+            record->chainlock->statement},
+        record->chainlock, record->verification_context};
+}
+
+std::optional<VerifiedRosterAuthorizationBaseView>
+ChainLockFinalityStore::GetVerifiedRosterAuthorizationBaseByLogicalId(
+    const uint256& logical_id) const
+{
+    if (logical_id.IsNull()) return std::nullopt;
+    LOCK(m_mutex);
+    const auto retained{m_authorization_bases.find(logical_id)};
+    if (retained == m_authorization_bases.end()) return std::nullopt;
+    const auto& record{retained->second};
+    if (!record.chainlock || !record.verification_context ||
+        record.logical_id != logical_id ||
+        record.verification_context->Statement() !=
+            record.chainlock->statement ||
+        record.verification_context->StatementLogicalId() != logical_id) {
+        return std::nullopt;
+    }
+    return VerifiedRosterAuthorizationBaseView{
+        m_authorization_base_revision,
+        FinalChainLockRecordMetadata{
+            record.logical_id, record.witness_id,
+            record.chainlock->statement},
+        record.chainlock, record.verification_context};
+}
+
 ChainLockFinalityStateObservation
 ChainLockFinalityStore::ObserveState() const
 {
@@ -1411,6 +1678,12 @@ std::size_t ChainLockFinalityStore::RejectedWitnessSizeForTesting() const
 {
     LOCK(m_mutex);
     return m_rejected_witness.Size();
+}
+
+std::size_t ChainLockFinalityStore::AuthorizationBaseSizeForTesting() const
+{
+    LOCK(m_mutex);
+    return m_authorization_bases.size();
 }
 
 } // namespace llmq::pq

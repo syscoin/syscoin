@@ -15,14 +15,13 @@
 #include <ios>
 #include <memory>
 #include <optional>
+#include <vector>
 
 namespace llmq {
 class CChainLocksHandler;
 }
 
 namespace llmq::pq {
-
-class BTCRecoveryPrecommitRolloverProof;
 
 /** These one-byte keys are part of the fail-closed on-disk schema. */
 inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_SCHEMA_KEY{1};
@@ -37,46 +36,27 @@ inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_ROSTER_RECOVERY_PRECOMMIT_KEY{
 inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_RECEIPT_ARCHIVE_AUTHORIZATION_KEY{10};
 inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_RECOVERY_AUTHORITY_KEY{11};
 inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_PAYMENT_AUDIT_SEAL_CONTEXT_KEY{12};
+inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_AUTHORIZATION_BASE_KEY{13};
 
 inline constexpr uint16_t ROSTER_RECOVERY_PRECOMMIT_VERSION{1};
 
-/** The only two admission paths allowed to consume a roster precommit. */
-enum class RosterRecoveryAdmission : uint8_t {
-    INITIALIZE = 0,
-    CURRENT_CATCHUP = 1,
-};
-
 /**
- * Local signer-safety state, not network verification authority. It is first
- * fsynced as PENDING before the future Bitcoin block exists, then may advance
- * exactly once to READY before any share is produced. INITIALIZE binds a
- * normal roster seed without recovery authority; CURRENT_CATCHUP binds a
- * recovery seed and the exact durable recovery authority. Normal roster
- * handoffs live entirely in the best ChainLock certificate and never use this
- * record.
+ * Local INITIALIZE signer-safety state, not network verification authority.
+ * It is first fsynced as PENDING before the future Bitcoin block exists, then
+ * may advance exactly once to READY before any share is produced. Normal
+ * handoffs and outage recovery are authorized by durable ChainLock state and
+ * never use this record.
  */
 struct RosterRecoveryPrecommit {
     static constexpr std::size_t WIRE_SIZE{
-        sizeof(uint16_t) + sizeof(uint8_t) + sizeof(int32_t) + 2 * 32 +
-        RecoveryRosterAuthoritySource::WIRE_SIZE +
-        RosterBeaconSeed::WIRE_SIZE};
+        sizeof(uint16_t) + RosterBeaconSeed::WIRE_SIZE};
 
     uint16_t version{ROSTER_RECOVERY_PRECOMMIT_VERSION};
-    RosterRecoveryAdmission admission{RosterRecoveryAdmission::INITIALIZE};
-    int32_t predecessor_height{-1};
-    uint256 predecessor_hash;
-    uint256 recovery_authority_hash;
-    RecoveryRosterAuthoritySource recovery_authority_source;
     RosterBeaconSeed pending_seed;
 
     SERIALIZE_METHODS(RosterRecoveryPrecommit, obj)
     {
-        uint8_t admission{static_cast<uint8_t>(obj.admission)};
-        READWRITE(obj.version, admission, obj.predecessor_height,
-                  obj.predecessor_hash, obj.recovery_authority_hash,
-                  obj.recovery_authority_source, obj.pending_seed);
-        SER_READ(obj, obj.admission =
-                          static_cast<RosterRecoveryAdmission>(admission));
+        READWRITE(obj.version, obj.pending_seed);
         SER_READ(obj, if (!obj.IsStructurallyValid()) {
             throw std::ios_base::failure(
                 "non-canonical roster recovery precommit");
@@ -88,13 +68,7 @@ struct RosterRecoveryPrecommit {
                            const RosterRecoveryPrecommit&) = default;
 };
 
-static_assert(RosterRecoveryPrecommit::WIRE_SIZE == 700);
-
-/** Exact transition identity; Bitcoin replacement height is bound separately. */
-[[nodiscard]] uint256 GetRosterRecoveryPrecommitRolloverContextId(
-    const uint256& genesis_hash,
-    const RosterRecoveryPrecommit& expected,
-    const RosterRecoveryPrecommit& replacement);
+static_assert(RosterRecoveryPrecommit::WIRE_SIZE == 114);
 
 /**
  * Crash-durable bounds for one deferred BTCC/NEVM replay obligation.
@@ -350,6 +324,20 @@ public:
     [[nodiscard]] DurableFinalityStateView GetFinalityState() const;
     [[nodiscard]] std::optional<FinalChainLock> LoadBest() const;
     [[nodiscard]] std::optional<FinalChainLock> LoadUnsealedBTCC() const;
+    /**
+     * Certificates retained after live verification. Startup callers must
+     * rebuild their branch/roster context and reverify every signature before
+     * importing an in-memory authorization capability.
+     */
+    [[nodiscard]] std::vector<FinalChainLock>
+    LoadAuthorizationBases() const;
+    [[nodiscard]] std::optional<FinalChainLock>
+    LoadAuthorizationBase(const uint256& logical_id) const;
+    /** Compact coordinates needed to retain/rebuild older fixed authorities. */
+    [[nodiscard]] std::vector<RecoveryRosterAuthoritySource>
+    LoadAuthorizationBaseRecoverySources() const;
+    [[nodiscard]] std::optional<int32_t>
+    OldestAuthorizationBaseHeight() const;
     [[nodiscard]] bool HasCatchupMarker() const;
     [[nodiscard]] BTCCPresealState LoadBTCCPresealState() const;
     [[nodiscard]] PaymentAuditPresealState
@@ -393,6 +381,15 @@ public:
         const FinalChainLock& chainlock,
         ChainLockPersistenceError* error = nullptr,
         RecoveryRosterAuthorityPtr recovery_authority = nullptr);
+
+    /**
+     * Durably retain one certificate only after full network authorization
+     * and signature verification. This does not advance any finality or
+     * receipt state.
+     */
+    [[nodiscard]] bool PersistVerifiedAuthorizationBase(
+        const FinalChainLock& chainlock,
+        ChainLockPersistenceError* error = nullptr);
 
     /**
      * Atomically install the exact verified receipt archive and consume its
@@ -481,24 +478,10 @@ public:
         ChainLockPersistenceError* error = nullptr);
 
 private:
-    /**
-     * The handler alone may abandon an unsigned CURRENT_CATCHUP epoch after
-     * obtaining an opaque Bitcoin-policy proof binding that exact old anchor
-     * and exact active replacement in one stable view. INITIALIZE never rolls.
-     * Keeping this outside the public persistence API prevents generic callers
-     * from turning the same-slot CAS into an epoch-reset primitive.
-     */
-    [[nodiscard]] bool ReplaceStablyInactiveRosterRecoveryPrecommit(
-        const RosterRecoveryPrecommit& expected,
-        const RosterRecoveryPrecommit& replacement,
-        const BTCRecoveryPrecommitRolloverProof& rollover_proof,
-        ChainLockPersistenceError* error = nullptr);
-
     struct Impl;
     const std::unique_ptr<Impl> m_impl;
 
     friend class ::llmq::CChainLocksHandler;
-    friend class RosterRecoveryPrecommitRolloverTestAccess;
 };
 
 } // namespace llmq::pq

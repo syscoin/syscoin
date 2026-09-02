@@ -4,72 +4,38 @@
 
 #include <llmq/pq_chainlock_persistence.h>
 
-#include <llmq/btc_header_policy.h>
 #include <llmq/pq_roster_beacon.h>
 
 #include <hash.h>
 #include <streams.h>
 #include <sync.h>
 
+#include <algorithm>
 #include <array>
 #include <exception>
 #include <ios>
 #include <limits>
+#include <map>
 #include <memory>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace llmq::pq {
 
 bool RosterRecoveryPrecommit::IsStructurallyValid() const noexcept
 {
     if (version != ROSTER_RECOVERY_PRECOMMIT_VERSION ||
-        (admission != RosterRecoveryAdmission::INITIALIZE &&
-         admission != RosterRecoveryAdmission::CURRENT_CATCHUP) ||
         !pending_seed.IsStructurallyValid() ||
         (pending_seed.state != RosterBeaconState::PENDING &&
          !pending_seed.IsReady()) ||
         pending_seed.epoch % ACTIVE_QUORUMS != ACTIVE_QUORUMS - 1) {
         return false;
     }
-    if (admission == RosterRecoveryAdmission::INITIALIZE) {
-        return predecessor_height == -1 && predecessor_hash.IsNull() &&
-               recovery_authority_hash.IsNull() &&
-               recovery_authority_source.IsNull() &&
-               pending_seed.anchor_kind == RosterBeaconAnchorKind::NORMAL;
-    }
-    return predecessor_height >= 0 && !predecessor_hash.IsNull() &&
-           !recovery_authority_hash.IsNull() &&
-           !recovery_authority_source.IsNull() &&
-           recovery_authority_source.IsStructurallyValid() &&
-           recovery_authority_source.kind ==
-               RecoveryRosterAuthoritySourceKind::NORMAL_ROSTERS &&
-           pending_seed.anchor_kind == RosterBeaconAnchorKind::RECOVERY &&
-           pending_seed.anchor_cursor.sys_height > predecessor_height;
-}
-
-uint256 GetRosterRecoveryPrecommitRolloverContextId(
-    const uint256& genesis_hash,
-    const RosterRecoveryPrecommit& expected,
-    const RosterRecoveryPrecommit& replacement)
-{
-    if (genesis_hash.IsNull() || !expected.IsStructurallyValid() ||
-        !replacement.IsStructurallyValid() ||
-        expected.admission != RosterRecoveryAdmission::CURRENT_CATCHUP ||
-        replacement.admission !=
-            RosterRecoveryAdmission::CURRENT_CATCHUP) {
-        return {};
-    }
-    auto normalized_replacement{replacement};
-    // The paired Bitcoin-policy proof binds the observed replacement height.
-    normalized_replacement.pending_seed.anchor_btc_height = -1;
-    CHashWriter writer{SER_GETHASH, 0};
-    writer << std::string{
-                  "SYS_PQ_ROSTER_RECOVERY_ROLLOVER_CONTEXT_V1"}
-           << genesis_hash << expected << normalized_replacement;
-    return writer.GetHash();
+    return pending_seed.anchor_kind == RosterBeaconAnchorKind::NORMAL;
 }
 
 PaymentAuditSealContextCapsule::PaymentAuditSealContextCapsule(
@@ -119,8 +85,9 @@ bool PaymentAuditSealContextCapsule::IsInternallyConsistent(
         m_authorization_mask != expected_mask) {
         return false;
     }
+    const auto& active{m_seal.statement.roster_beacons.active};
     const bool needs_authority{
-        HasRecoveryRosterBeacon(m_seal.statement.roster_beacons)};
+        !active.recovery_authority_source.IsNull()};
     if (needs_authority != static_cast<bool>(m_recovery_authority)) {
         return false;
     }
@@ -129,8 +96,9 @@ bool PaymentAuditSealContextCapsule::IsInternallyConsistent(
         GetRecoveryRosterAuthorityHash(genesis_hash,
                                        *m_recovery_authority)};
     return authority_hash &&
-           *authority_hash == m_seal.statement.roster_beacons.active
-                                  .recovery_authority_hash;
+           *authority_hash == active.recovery_authority_hash &&
+           m_recovery_authority->normal_beacon ==
+               active.recovery_authority_source.normal_beacon;
 }
 
 bool PaymentAuditSealContextCapsule::BuildForVerifiedDurableCandidate(
@@ -228,6 +196,25 @@ struct DiskKey {
             throw std::ios_base::failure("non-canonical PQ ChainLock DB key");
         }
         ::Unserialize(stream, type);
+    }
+
+    friend bool operator==(const DiskKey&, const DiskKey&) = default;
+};
+
+/** Composite namespace for the bounded exact authorization-base archive. */
+struct DiskAuthorizationBaseKey {
+    uint8_t type{PQ_CHAINLOCK_PERSISTENCE_AUTHORIZATION_BASE_KEY};
+    uint256 logical_id;
+
+    SERIALIZE_METHODS(DiskAuthorizationBaseKey, obj)
+    {
+        READWRITE(obj.type, obj.logical_id);
+        SER_READ(obj, if (obj.type !=
+                              PQ_CHAINLOCK_PERSISTENCE_AUTHORIZATION_BASE_KEY ||
+                          obj.logical_id.IsNull()) {
+            throw std::ios_base::failure(
+                "non-canonical PQ authorization-base DB key");
+        });
     }
 };
 
@@ -856,9 +843,14 @@ bool AddRecoveryAuthorityRequirement(
     const uint256& logical_id,
     const uint256& witness_id,
     const ChainLockStatement& statement,
+    bool current_state,
     std::optional<RecoveryAuthorityRequirement>& requirement)
 {
-    if (!HasRecoveryRosterBeacon(statement.roster_beacons)) return true;
+    if ((!current_state &&
+         !HasRecoveryRosterBeacon(statement.roster_beacons)) ||
+        statement.roster_beacons.active.recovery_authority_hash.IsNull()) {
+        return true;
+    }
     const uint256& authority_hash{
         statement.roster_beacons.active.recovery_authority_hash};
     if (logical_id.IsNull() || witness_id.IsNull() ||
@@ -882,14 +874,20 @@ bool GetRecoveryAuthorityRequirement(
     const auto add_record = [&](const DiskRecord& record) {
         return AddRecoveryAuthorityRequirement(
             record.logical_id, record.witness_id,
-            record.chainlock.statement, requirement);
+            record.chainlock.statement, /*current_state=*/false,
+            requirement);
     };
     const auto add_metadata = [&](const FinalChainLockRecordMetadata& record) {
         return AddRecoveryAuthorityRequirement(
             record.logical_id, record.witness_id, record.statement,
+            /*current_state=*/false,
             requirement);
     };
-    return (best == nullptr || add_record(*best)) &&
+    return (best == nullptr ||
+            AddRecoveryAuthorityRequirement(
+                best->logical_id, best->witness_id,
+                best->chainlock.statement, /*current_state=*/true,
+                requirement)) &&
            (unsealed == nullptr || add_record(*unsealed)) &&
            (!receipt_archive_authorization ||
             (add_metadata(receipt_archive_authorization->owner) &&
@@ -961,7 +959,7 @@ DiskPaymentAuditPresealMarker MakePaymentAuditPresealMarker(
 }
 
 static_assert(DiskRecord::WIRE_SIZE < MAX_SIZE);
-static_assert(DiskRosterRecoveryPrecommit::WIRE_SIZE == 766);
+static_assert(DiskRosterRecoveryPrecommit::WIRE_SIZE == 180);
 static_assert(DiskReceiptArchiveRosterAuthorization::WIRE_SIZE < MAX_SIZE);
 static_assert(DiskBTCCPresealMarker::WIRE_SIZE == 384);
 static_assert(DiskPaymentAuditPresealMarker::WIRE_SIZE == 683);
@@ -1087,9 +1085,8 @@ bool IsValidRosterRecoveryPrecommit(
         config.chainlock_schedule,
         config.activation_predecessor_height)};
     return precommit.IsStructurallyValid() &&
-           (precommit.admission != RosterRecoveryAdmission::INITIALIZE ||
-            (initial_target &&
-             pending_seed.anchor_cursor.sys_height == *initial_target)) &&
+           initial_target &&
+           pending_seed.anchor_cursor.sys_height == *initial_target &&
            pending_seed.anchor_cursor.sys_height >
                config.activation_predecessor_height &&
            IsEligibleChainLockTarget(
@@ -1148,9 +1145,7 @@ bool SealsUnsealedBTCC(const FinalChainLock& seal,
            seal.statement.height >= carrier_height;
 }
 
-bool IsExactRecoveryStatement(
-    const FinalChainLock& chainlock,
-    RosterRecoveryAdmission expected_admission) noexcept
+bool IsExactRecoveryStatement(const FinalChainLock& chainlock) noexcept
 {
     if (!chainlock.IsStructurallyValid() ||
         chainlock.statement.btcc_advance != BTCCAdvance::ADVANCE) {
@@ -1165,52 +1160,16 @@ bool IsExactRecoveryStatement(
         chainlock.statement.accepted_btcc_cursor != ready.anchor_cursor) {
         return false;
     }
-    if (expected_admission == RosterRecoveryAdmission::INITIALIZE) {
-        return chainlock.statement.roster_transition ==
-                   RosterAuthorizationTransitionKind::INITIALIZE &&
-               IsInitialNormalRosterBeaconWindow(window);
-    }
     return chainlock.statement.roster_transition ==
-               RosterAuthorizationTransitionKind::RECOVER &&
-           IsRecoveryRosterBeaconWindow(window);
+               RosterAuthorizationTransitionKind::INITIALIZE &&
+           IsInitialNormalRosterBeaconWindow(window);
 }
 
 bool DoesRecoveryPrecommitMatchBest(
     const RosterRecoveryPrecommit& precommit,
     const std::optional<DiskRecord>& best) noexcept
 {
-    if (precommit.admission == RosterRecoveryAdmission::INITIALIZE) {
-        return !best && precommit.predecessor_height == -1 &&
-               precommit.predecessor_hash.IsNull() &&
-               precommit.recovery_authority_hash.IsNull() &&
-               precommit.recovery_authority_source.IsNull();
-    }
-    if (!best ||
-        precommit.predecessor_height !=
-            best->chainlock.statement.height ||
-        precommit.predecessor_hash !=
-            best->chainlock.statement.block_hash) {
-        return false;
-    }
-    const auto& best_bundle{
-        best->chainlock.statement.roster_beacons.active};
-    if (HasRecoveryRosterBeacon(
-            best->chainlock.statement.roster_beacons)) {
-        return precommit.recovery_authority_hash ==
-                   best_bundle.recovery_authority_hash &&
-               precommit.recovery_authority_source ==
-                   best_bundle.recovery_authority_source;
-    }
-    return precommit.recovery_authority_source.kind ==
-               RecoveryRosterAuthoritySourceKind::NORMAL_ROSTERS &&
-           precommit.recovery_authority_source.height ==
-               best->chainlock.statement.height &&
-           precommit.recovery_authority_source.block_hash ==
-               best->chainlock.statement.block_hash &&
-           precommit.recovery_authority_source.quorum_context_hash ==
-               best->chainlock.statement.quorum_context_hash &&
-           precommit.recovery_authority_source.normal_beacons ==
-               best_bundle.seeds;
+    return precommit.IsStructurallyValid() && !best;
 }
 
 bool IsExactRosterRecoveryResolution(
@@ -1218,13 +1177,6 @@ bool IsExactRosterRecoveryResolution(
     const RosterRecoveryPrecommit& ready) noexcept
 {
     return pending.version == ready.version &&
-           pending.admission == ready.admission &&
-           pending.predecessor_height == ready.predecessor_height &&
-           pending.predecessor_hash == ready.predecessor_hash &&
-           pending.recovery_authority_hash ==
-               ready.recovery_authority_hash &&
-           pending.recovery_authority_source ==
-               ready.recovery_authority_source &&
            IsExactRosterBeaconReveal(
                pending.pending_seed, ready.pending_seed);
 }
@@ -1233,33 +1185,19 @@ bool DoesRecoveryCertificateMatchPrecommit(
     const FinalChainLock& chainlock,
     const RosterRecoveryPrecommit& precommit,
     const std::optional<DiskRecord>& durable_best,
-    const uint256& genesis_hash,
-    const uint256& prior_authority_hash,
-    const uint256& next_authority_hash) noexcept
+    const uint256& genesis_hash) noexcept
 {
     if (!DoesRecoveryPrecommitMatchBest(precommit, durable_best) ||
-        !IsExactRecoveryStatement(chainlock, precommit.admission)) {
+        !IsExactRecoveryStatement(chainlock)) {
         return false;
     }
     const auto& next_bundle{
         chainlock.statement.roster_beacons.active};
-    if (precommit.admission == RosterRecoveryAdmission::INITIALIZE) {
-        if (!next_authority_hash.IsNull() ||
-            !precommit.recovery_authority_hash.IsNull() ||
-            !precommit.recovery_authority_source.IsNull() ||
-            !next_bundle.recovery_authority_hash.IsNull() ||
-            !next_bundle.recovery_authority_source.IsNull()) {
-            return false;
-        }
-    } else if (next_authority_hash.IsNull() ||
-               precommit.recovery_authority_hash != next_authority_hash ||
-               next_bundle.recovery_authority_hash != next_authority_hash ||
-               precommit.recovery_authority_source !=
-                   next_bundle.recovery_authority_source) {
+    const auto& ready{next_bundle.seeds.back()};
+    if (next_bundle.recovery_authority_hash.IsNull() ||
+        next_bundle.recovery_authority_source.normal_beacon != ready) {
         return false;
     }
-    const auto& ready{
-        chainlock.statement.roster_beacons.active.seeds.back()};
     const bool seed_matches{
         precommit.pending_seed.state == RosterBeaconState::PENDING
             ? IsExactRosterBeaconReveal(precommit.pending_seed, ready)
@@ -1274,20 +1212,10 @@ bool DoesRecoveryCertificateMatchPrecommit(
         chainlock.statement.previous_chainlock_height;
     transition.predecessor_block_hash =
         chainlock.statement.previous_chainlock_hash;
+    transition.authorization_base =
+        chainlock.statement.roster_authorization_base;
     transition.new_window = chainlock.statement.roster_beacons;
-    if (precommit.admission == RosterRecoveryAdmission::CURRENT_CATCHUP) {
-        if (!durable_best) return false;
-        if (durable_best->chainlock.statement.roster_beacons.active
-                .recovery_authority_hash != prior_authority_hash) {
-            return false;
-        }
-        transition.previous = RosterAuthorizationPriorState{
-            durable_best->chainlock.statement
-                .roster_authorization_state_hash,
-            durable_best->chainlock.statement.roster_beacons};
-    } else if (durable_best) {
-        return false;
-    }
+    if (durable_best) return false;
     const auto expected_state_hash{
         GetRosterAuthorizationStateHash(genesis_hash, transition)};
     return expected_state_hash &&
@@ -1295,8 +1223,8 @@ bool DoesRecoveryCertificateMatchPrecommit(
                chainlock.statement.roster_authorization_state_hash;
 }
 
-template <typename Value>
-std::unique_ptr<Value> ReadExactValue(CDBWrapper& db, const DiskKey& key)
+template <typename Value, typename Key>
+std::unique_ptr<Value> ReadExactValue(CDBWrapper& db, const Key& key)
 {
     std::unique_ptr<CDBIterator> iterator{db.NewIterator()};
     iterator->Seek(key);
@@ -1305,9 +1233,9 @@ std::unique_ptr<Value> ReadExactValue(CDBWrapper& db, const DiskKey& key)
         return nullptr;
     }
 
-    DiskKey found_key;
+    Key found_key;
     auto value{std::make_unique<Value>()};
-    if (!iterator->GetKeyExact(found_key) || found_key.type != key.type ||
+    if (!iterator->GetKeyExact(found_key) || found_key != key ||
         !iterator->GetValueExact(*value)) {
         return nullptr;
     }
@@ -1383,9 +1311,7 @@ struct PQChainLockPersistence::Impl {
              statement.roster_beacons.active.seeds.back().epoch ==
                  *initializer_epoch &&
              statement.height == *initializer_target &&
-             IsExactRecoveryStatement(
-                 record.chainlock,
-                 RosterRecoveryAdmission::INITIALIZE))};
+             IsExactRecoveryStatement(record.chainlock))};
         return exact_initializer && next_target &&
                statement.height == *next_target &&
                statement.height > config.activation_predecessor_height &&
@@ -1400,6 +1326,26 @@ struct PQChainLockPersistence::Impl {
         return FinalChainLockRecordMetadata{
             record.logical_id, record.witness_id,
             record.chainlock.statement};
+    }
+
+    static bool IsExactRecord(const DiskRecord& left,
+                              const DiskRecord& right) noexcept
+    {
+        return left.logical_id == right.logical_id &&
+               left.witness_id == right.witness_id &&
+               left.checksum == right.checksum &&
+               left.chainlock == right.chainlock;
+    }
+
+    static bool IsOlderAuthorizationBase(const DiskRecord& left,
+                                         const DiskRecord& right) noexcept
+    {
+        if (left.chainlock.statement.height !=
+            right.chainlock.statement.height) {
+            return left.chainlock.statement.height <
+                   right.chainlock.statement.height;
+        }
+        return left.logical_id < right.logical_id;
     }
 
     bool PrepareRecoveryAuthorityState(
@@ -1519,14 +1465,32 @@ struct PQChainLockPersistence::Impl {
         bool found_receipt_archive_authorization{false};
         bool found_recovery_authority{false};
         bool found_payment_audit_seal_context{false};
+        std::set<uint256> authorization_base_witnesses;
         {
             std::unique_ptr<CDBIterator> iterator{db.NewIterator()};
             for (iterator->SeekToFirst(); iterator->Valid(); iterator->Next()) {
                 any = true;
                 DiskKey key;
                 if (!iterator->GetKeyExact(key)) {
-                    throw std::runtime_error(
-                        "corrupt PQ ChainLock persistence key");
+                    DiskAuthorizationBaseKey base_key;
+                    DiskRecord record;
+                    if (!iterator->GetKeyExact(base_key) ||
+                        !iterator->GetValueExact(record) ||
+                        base_key.type !=
+                            PQ_CHAINLOCK_PERSISTENCE_AUTHORIZATION_BASE_KEY ||
+                        base_key.logical_id != record.logical_id ||
+                        !ValidateRecord(record) ||
+                        authorization_bases.contains(record.logical_id) ||
+                        !authorization_base_witnesses
+                             .insert(record.witness_id).second ||
+                        authorization_bases.size() >=
+                            VERIFIED_AUTHORIZATION_BASE_CAPACITY) {
+                        throw std::runtime_error(
+                            "corrupt PQ ChainLock authorization-base record");
+                    }
+                    authorization_bases.emplace(
+                        record.logical_id, std::move(record));
+                    continue;
                 }
                 if (key.type == PQ_CHAINLOCK_PERSISTENCE_SCHEMA_KEY) {
                     if (found_schema) {
@@ -1733,6 +1697,31 @@ struct PQChainLockPersistence::Impl {
             }
             unsealed = std::move(*unsealed_record);
         }
+        const auto best_base{best
+            ? authorization_bases.find(best->logical_id)
+            : authorization_bases.end()};
+        const auto unsealed_base{unsealed
+            ? authorization_bases.find(unsealed->logical_id)
+            : authorization_bases.end()};
+        if ((best_base != authorization_bases.end() &&
+             !IsExactRecord(best_base->second, *best)) ||
+            (unsealed_base != authorization_bases.end() &&
+             !IsExactRecord(unsealed_base->second, *unsealed))) {
+            throw std::runtime_error(
+                "conflicting live PQ ChainLock authorization-base record");
+        }
+        if (receipt_archive_authorization) {
+            const auto predecessor_base{authorization_bases.find(
+                receipt_archive_authorization->predecessor.logical_id)};
+            if (predecessor_base == authorization_bases.end() ||
+                predecessor_base->second.witness_id !=
+                    receipt_archive_authorization->predecessor.witness_id ||
+                predecessor_base->second.chainlock.statement !=
+                    receipt_archive_authorization->predecessor.statement) {
+                throw std::runtime_error(
+                    "missing receipt-archive authorization-base record");
+            }
+        }
 
         std::optional<RecoveryAuthorityRequirement> authority_requirement;
         if (!GetRecoveryAuthorityRequirement(
@@ -1924,8 +1913,7 @@ struct PQChainLockPersistence::Impl {
                      bool catchup = false,
                      const std::optional<BTCCCursorReconciliationProof>&
                          btcc_cursor_reconciliation = std::nullopt,
-                     std::optional<RosterRecoveryAdmission>
-                         consume_recovery_precommit = std::nullopt,
+                     bool consume_recovery_precommit = false,
                      const ReceiptArchiveRosterAuthorization*
                          consume_receipt_archive_authorization = nullptr,
                      bool verified_reset_convergence = false)
@@ -1954,20 +1942,12 @@ struct PQChainLockPersistence::Impl {
         }
 
         const auto transition{chainlock.statement.roster_transition};
-        if ((verified_reset_convergence && !consume_recovery_precommit) ||
-            (!consume_recovery_precommit &&
-             (transition == RosterAuthorizationTransitionKind::INITIALIZE ||
-              transition == RosterAuthorizationTransitionKind::RECOVER)) ||
-            (!consume_recovery_precommit &&
-             roster_recovery_precommit &&
-             roster_recovery_precommit->admission ==
-                 RosterRecoveryAdmission::INITIALIZE) ||
-            (consume_recovery_precommit ==
-                 RosterRecoveryAdmission::INITIALIZE &&
-             catchup) ||
-            (consume_recovery_precommit ==
-                 RosterRecoveryAdmission::CURRENT_CATCHUP &&
-             !catchup)) {
+        if ((!consume_recovery_precommit &&
+             transition == RosterAuthorizationTransitionKind::INITIALIZE) ||
+            (!consume_recovery_precommit && roster_recovery_precommit) ||
+            (consume_recovery_precommit &&
+             (transition != RosterAuthorizationTransitionKind::INITIALIZE ||
+              catchup))) {
             SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
             return false;
         }
@@ -2017,17 +1997,16 @@ struct PQChainLockPersistence::Impl {
                 std::move(supplied_payment_audit_seal_context);
         }
 
-        const bool needs_recovery_authority{HasRecoveryRosterBeacon(
-            candidate.chainlock.statement.roster_beacons)};
+        const bool needs_recovery_authority{
+            !candidate.chainlock.statement.roster_beacons.active
+                 .recovery_authority_hash.IsNull()};
         RecoveryRosterAuthorityPtr candidate_recovery_authority{
             std::move(supplied_recovery_authority)};
         if (!candidate_recovery_authority && needs_recovery_authority &&
             exact_best) {
             candidate_recovery_authority = recovery_authority;
         }
-        if (!candidate_recovery_authority && needs_recovery_authority &&
-            transition != RosterAuthorizationTransitionKind::INITIALIZE &&
-            transition != RosterAuthorizationTransitionKind::RECOVER) {
+        if (!candidate_recovery_authority && needs_recovery_authority) {
             candidate_recovery_authority = recovery_authority;
         }
         if (needs_recovery_authority !=
@@ -2088,8 +2067,7 @@ struct PQChainLockPersistence::Impl {
             if (consume_receipt_archive_authorization != nullptr ||
                 btcc_cursor_reconciliation.has_value() ||
                 (consume_recovery_precommit &&
-                 !IsExactRecoveryStatement(
-                     chainlock, *consume_recovery_precommit))) {
+                 !IsExactRecoveryStatement(chainlock))) {
                 SetError(error,
                          ChainLockPersistenceError::INVALID_CHAINLOCK);
                 return false;
@@ -2113,6 +2091,8 @@ struct PQChainLockPersistence::Impl {
             candidate.chainlock.statement.previous_chainlock_height;
         authorization_transition.predecessor_block_hash =
             candidate.chainlock.statement.previous_chainlock_hash;
+        authorization_transition.authorization_base =
+            candidate.chainlock.statement.roster_authorization_base;
         authorization_transition.new_window =
             candidate.chainlock.statement.roster_beacons;
         if (transition != RosterAuthorizationTransitionKind::INITIALIZE) {
@@ -2147,41 +2127,24 @@ struct PQChainLockPersistence::Impl {
             return false;
         }
         if (consume_recovery_precommit) {
-            if (!IsExactRecoveryStatement(
-                    chainlock, *consume_recovery_precommit) ||
+            if (!IsExactRecoveryStatement(chainlock) ||
                 (roster_recovery_precommit && !exact_best &&
                  !verified_reset_convergence &&
                  !DoesRecoveryCertificateMatchPrecommit(
                      chainlock, *roster_recovery_precommit, best,
-                     genesis_hash, prior_recovery_authority_hash,
-                     next_recovery_authority_hash)) ||
-                (*consume_recovery_precommit ==
-                     RosterRecoveryAdmission::INITIALIZE &&
-                 best && !exact_best)) {
+                     genesis_hash)) ||
+                (best && !exact_best)) {
                 SetError(error,
                          ChainLockPersistenceError::INVALID_CHAINLOCK);
                 return false;
             }
         }
-        const bool ordinary_invalidates_current_recovery{
-            !consume_recovery_precommit &&
-            transition != RosterAuthorizationTransitionKind::RECOVER &&
-            roster_recovery_precommit &&
-            roster_recovery_precommit->admission ==
-                RosterRecoveryAdmission::CURRENT_CATCHUP &&
-            (candidate.chainlock.statement.height >
-                 roster_recovery_precommit->predecessor_height ||
-             (candidate.chainlock.statement.height ==
-                  roster_recovery_precommit->predecessor_height &&
-              candidate.chainlock.statement.block_hash !=
-                  roster_recovery_precommit->predecessor_hash))};
         const bool advances_best{
             !best || candidate.chainlock.statement.height >
                          best->chainlock.statement.height};
         const bool erase_recovery_precommit{
-            (consume_recovery_precommit.has_value() &&
-             roster_recovery_precommit.has_value() && advances_best) ||
-            ordinary_invalidates_current_recovery};
+            (consume_recovery_precommit &&
+             roster_recovery_precommit.has_value() && advances_best)};
         const bool cursor_regresses{
             best && !IsDurableBTCCursorMonotonic(
                 best->chainlock.statement.accepted_btcc_cursor,
@@ -2311,9 +2274,87 @@ struct PQChainLockPersistence::Impl {
             return false;
         }
 
+        const auto candidate_base{
+            authorization_bases.find(candidate.logical_id)};
+        if (candidate_base != authorization_bases.end() &&
+            !IsExactRecord(candidate_base->second, candidate)) {
+            SetError(error, ChainLockPersistenceError::IO_FAILURE);
+            return false;
+        }
+        const DiskRecord* previous_best{best ? &*best : nullptr};
+        const auto previous_base{previous_best
+            ? authorization_bases.find(previous_best->logical_id)
+            : authorization_bases.end()};
+        if (previous_best && previous_base != authorization_bases.end() &&
+            !IsExactRecord(previous_base->second, *previous_best)) {
+            SetError(error, ChainLockPersistenceError::IO_FAILURE);
+            return false;
+        }
+        std::size_t next_authorization_base_count{
+            authorization_bases.size()};
+        const bool add_previous_best{
+            previous_best && previous_base == authorization_bases.end() &&
+            previous_best->logical_id != candidate.logical_id};
+        if (add_previous_best) ++next_authorization_base_count;
+
+        std::optional<uint256> evict_authorization_base;
+        if (next_authorization_base_count >
+            VERIFIED_AUTHORIZATION_BASE_CAPACITY) {
+            const DiskRecord* oldest{nullptr};
+            const auto is_protected = [&](const DiskRecord& record) {
+                const bool live_role{
+                    IsExactRecord(record, candidate) ||
+                    (next_unsealed &&
+                     IsExactRecord(record, *next_unsealed))};
+                const bool archive_role{
+                    next_receipt_archive_authorization &&
+                    record.logical_id ==
+                        next_receipt_archive_authorization->predecessor
+                            .logical_id &&
+                    record.witness_id ==
+                        next_receipt_archive_authorization->predecessor
+                            .witness_id &&
+                    record.chainlock.statement ==
+                        next_receipt_archive_authorization->predecessor
+                            .statement};
+                return live_role || archive_role;
+            };
+            const auto consider_oldest = [&](const DiskRecord& record) {
+                if (!is_protected(record) &&
+                    (!oldest ||
+                     IsOlderAuthorizationBase(record, *oldest))) {
+                    oldest = &record;
+                }
+            };
+            for (const auto& [logical_id, retained] :
+                 authorization_bases) {
+                (void)logical_id;
+                consider_oldest(retained);
+            }
+            if (add_previous_best) consider_oldest(*previous_best);
+            if (!oldest) {
+                SetError(error, ChainLockPersistenceError::IO_FAILURE);
+                return false;
+            }
+            evict_authorization_base = oldest->logical_id;
+        }
+
         try {
             CDBBatch batch{db};
             batch.Write(DiskKey{PQ_CHAINLOCK_PERSISTENCE_BEST_KEY}, candidate);
+            if (add_previous_best &&
+                evict_authorization_base != previous_best->logical_id) {
+                batch.Write(
+                    DiskAuthorizationBaseKey{
+                        PQ_CHAINLOCK_PERSISTENCE_AUTHORIZATION_BASE_KEY,
+                        previous_best->logical_id},
+                    *previous_best);
+            }
+            if (evict_authorization_base) {
+                batch.Erase(DiskAuthorizationBaseKey{
+                    PQ_CHAINLOCK_PERSISTENCE_AUTHORIZATION_BASE_KEY,
+                    *evict_authorization_base});
+            }
             const DiskKey unsealed_key{
                 PQ_CHAINLOCK_PERSISTENCE_UNSEALED_BTCC_KEY};
             if (next_unsealed) {
@@ -2387,6 +2428,14 @@ struct PQChainLockPersistence::Impl {
             SetError(error, ChainLockPersistenceError::IO_FAILURE);
             return false;
         }
+        if (add_previous_best &&
+            evict_authorization_base != previous_best->logical_id) {
+            authorization_bases.emplace(previous_best->logical_id,
+                                        *previous_best);
+        }
+        if (evict_authorization_base) {
+            authorization_bases.erase(*evict_authorization_base);
+        }
         best = std::move(candidate);
         unsealed = std::move(next_unsealed);
         receipt_archive_authorization =
@@ -2399,6 +2448,125 @@ struct PQChainLockPersistence::Impl {
             roster_recovery_precommit.reset();
         }
         ++certificate_revision;
+        return true;
+    }
+
+    bool PersistVerifiedAuthorizationBase(
+        const FinalChainLock& chainlock,
+        ChainLockPersistenceError* error)
+        EXCLUSIVE_LOCKS_REQUIRED(mutex)
+    {
+        SetError(error, ChainLockPersistenceError::NONE);
+        if (failed || !chainlock.IsStructurallyValid()) {
+            SetError(error, failed
+                                ? ChainLockPersistenceError::IO_FAILURE
+                                : ChainLockPersistenceError::INVALID_CHAINLOCK);
+            return false;
+        }
+
+        DiskRecord candidate{MakeRecord(chainlock)};
+        if (::GetSerializeSize(candidate) != DiskRecord::WIRE_SIZE ||
+            !ValidateRecord(candidate)) {
+            SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
+            return false;
+        }
+        const auto validate_live_collision = [&](const auto& live) {
+            return !live || live->logical_id != candidate.logical_id ||
+                   IsExactRecord(*live, candidate);
+        };
+        if (!validate_live_collision(best) ||
+            !validate_live_collision(unsealed)) {
+            SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
+            return false;
+        }
+        if ((best && IsExactRecord(*best, candidate)) ||
+            (unsealed && IsExactRecord(*unsealed, candidate))) {
+            return true;
+        }
+
+        const auto existing{authorization_bases.find(candidate.logical_id)};
+        if (existing != authorization_bases.end()) {
+            if (!IsExactRecord(existing->second, candidate)) {
+                SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
+                return false;
+            }
+            return true;
+        }
+        for (const auto& [logical_id, retained] : authorization_bases) {
+            if (logical_id != candidate.logical_id &&
+                retained.witness_id == candidate.witness_id) {
+                SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
+                return false;
+            }
+        }
+
+        std::optional<uint256> evict;
+        if (authorization_bases.size() >=
+            VERIFIED_AUTHORIZATION_BASE_CAPACITY) {
+            const DiskRecord* const live_best{best ? &*best : nullptr};
+            const DiskRecord* const live_unsealed{
+                unsealed ? &*unsealed : nullptr};
+            const FinalChainLockRecordMetadata* const archive_predecessor{
+                receipt_archive_authorization
+                    ? &receipt_archive_authorization->predecessor
+                    : nullptr};
+            const auto is_protected = [&](const DiskRecord& record) {
+                const bool live_role{
+                    (live_best && IsExactRecord(record, *live_best)) ||
+                    (live_unsealed &&
+                     IsExactRecord(record, *live_unsealed))};
+                const bool archive_role{
+                    archive_predecessor &&
+                    record.logical_id ==
+                        archive_predecessor->logical_id &&
+                    record.witness_id ==
+                        archive_predecessor->witness_id &&
+                    record.chainlock.statement ==
+                        archive_predecessor->statement};
+                return live_role || archive_role;
+            };
+            auto oldest{authorization_bases.end()};
+            for (auto it{authorization_bases.begin()};
+                 it != authorization_bases.end(); ++it) {
+                if (is_protected(it->second)) continue;
+                if (oldest == authorization_bases.end() ||
+                    IsOlderAuthorizationBase(it->second,
+                                               oldest->second)) {
+                    oldest = it;
+                }
+            }
+            if (oldest == authorization_bases.end()) {
+                SetError(error, ChainLockPersistenceError::IO_FAILURE);
+                return false;
+            }
+            evict = oldest->first;
+        }
+
+        try {
+            CDBBatch batch{db};
+            batch.Write(
+                DiskAuthorizationBaseKey{
+                    PQ_CHAINLOCK_PERSISTENCE_AUTHORIZATION_BASE_KEY,
+                    candidate.logical_id},
+                candidate);
+            if (evict) {
+                batch.Erase(DiskAuthorizationBaseKey{
+                    PQ_CHAINLOCK_PERSISTENCE_AUTHORIZATION_BASE_KEY,
+                    *evict});
+            }
+            if (!db.WriteBatch(batch, /*fSync=*/true)) {
+                failed = true;
+                SetError(error, ChainLockPersistenceError::IO_FAILURE);
+                return false;
+            }
+        } catch (const std::exception&) {
+            failed = true;
+            SetError(error, ChainLockPersistenceError::IO_FAILURE);
+            return false;
+        }
+        if (evict) authorization_bases.erase(*evict);
+        authorization_bases.emplace(candidate.logical_id,
+                                    std::move(candidate));
         return true;
     }
 
@@ -2428,6 +2596,13 @@ struct PQChainLockPersistence::Impl {
             unsealed->chainlock == candidate.chainlock};
         if (unsealed && !exact_unsealed) {
             SetError(error, ChainLockPersistenceError::HEIGHT_CONFLICT);
+            return false;
+        }
+        const auto candidate_base{
+            authorization_bases.find(candidate.logical_id)};
+        if (candidate_base != authorization_bases.end() &&
+            !IsExactRecord(candidate_base->second, candidate)) {
+            SetError(error, ChainLockPersistenceError::IO_FAILURE);
             return false;
         }
 
@@ -2640,14 +2815,7 @@ struct PQChainLockPersistence::Impl {
         }
         if (!IsValidRosterRecoveryPrecommit(config, replacement) ||
             !DoesRecoveryPrecommitMatchBest(replacement, best) ||
-            replacement.pending_seed.state != RosterBeaconState::PENDING ||
-            replacement.admission != expected.admission ||
-            replacement.predecessor_height != expected.predecessor_height ||
-            replacement.predecessor_hash != expected.predecessor_hash ||
-            replacement.recovery_authority_hash !=
-                expected.recovery_authority_hash ||
-            replacement.recovery_authority_source !=
-                expected.recovery_authority_source) {
+            replacement.pending_seed.state != RosterBeaconState::PENDING) {
             SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
             return false;
         }
@@ -2661,85 +2829,6 @@ struct PQChainLockPersistence::Impl {
             replacement.pending_seed.anchor_cursor.sys_height ==
                 expected.pending_seed.anchor_cursor.sys_height};
         if (!same_pending_slot) {
-            SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
-            return false;
-        }
-
-        const auto disk{
-            MakeDiskRosterRecoveryPrecommit(schema_hash, replacement)};
-        if (::GetSerializeSize(disk) !=
-            DiskRosterRecoveryPrecommit::WIRE_SIZE) {
-            SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
-            return false;
-        }
-        try {
-            CDBBatch batch{db};
-            batch.Write(
-                DiskKey{
-                    PQ_CHAINLOCK_PERSISTENCE_ROSTER_RECOVERY_PRECOMMIT_KEY},
-                disk);
-            if (!db.WriteBatch(batch, /*fSync=*/true)) {
-                failed = true;
-                SetError(error, ChainLockPersistenceError::IO_FAILURE);
-                return false;
-            }
-        } catch (const std::exception&) {
-            failed = true;
-            SetError(error, ChainLockPersistenceError::IO_FAILURE);
-            return false;
-        }
-        roster_recovery_precommit = replacement;
-        return true;
-    }
-
-    bool ReplaceStablyInactiveRosterRecoveryPrecommit(
-        const RosterRecoveryPrecommit& expected,
-        const RosterRecoveryPrecommit& replacement,
-        bool inactive_anchor_authorized,
-        ChainLockPersistenceError* error)
-        EXCLUSIVE_LOCKS_REQUIRED(mutex)
-    {
-        SetError(error, ChainLockPersistenceError::NONE);
-        if (failed) {
-            SetError(error, ChainLockPersistenceError::IO_FAILURE);
-            return false;
-        }
-        if (!roster_recovery_precommit ||
-            *roster_recovery_precommit != expected) {
-            SetError(error, ChainLockPersistenceError::HEIGHT_CONFLICT);
-            return false;
-        }
-
-        const auto& old_seed{expected.pending_seed};
-        const auto& new_seed{replacement.pending_seed};
-        const auto canonical_target{CanonicalRosterRecoveryTargetHeight(
-            config.chainlock_schedule, config.btcc_schedule,
-            new_seed.epoch)};
-        const uint64_t first_disjoint_epoch{
-            static_cast<uint64_t>(old_seed.epoch) + ACTIVE_QUORUMS};
-        if (expected.admission !=
-                RosterRecoveryAdmission::CURRENT_CATCHUP ||
-            replacement.admission !=
-                RosterRecoveryAdmission::CURRENT_CATCHUP ||
-            old_seed.state != RosterBeaconState::PENDING ||
-            new_seed.state != RosterBeaconState::PENDING ||
-            !inactive_anchor_authorized ||
-            !IsValidRosterRecoveryPrecommit(config, replacement) ||
-            !DoesRecoveryPrecommitMatchBest(replacement, best) ||
-            replacement.admission != expected.admission ||
-            replacement.predecessor_height != expected.predecessor_height ||
-            replacement.predecessor_hash != expected.predecessor_hash ||
-            replacement.recovery_authority_hash !=
-                expected.recovery_authority_hash ||
-            replacement.recovery_authority_source !=
-                expected.recovery_authority_source ||
-            static_cast<uint64_t>(new_seed.epoch) < first_disjoint_epoch ||
-            !canonical_target ||
-            *canonical_target != new_seed.anchor_cursor.sys_height ||
-            new_seed.anchor_cursor.sys_height <=
-                old_seed.anchor_cursor.sys_height ||
-            new_seed.anchor_cursor.btc_hash ==
-                old_seed.anchor_cursor.btc_hash) {
             SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
             return false;
         }
@@ -2913,6 +3002,7 @@ struct PQChainLockPersistence::Impl {
     mutable Mutex mutex;
     std::optional<DiskRecord> best GUARDED_BY(mutex);
     std::optional<DiskRecord> unsealed GUARDED_BY(mutex);
+    std::map<uint256, DiskRecord> authorization_bases GUARDED_BY(mutex);
     std::optional<ReceiptArchiveRosterAuthorization>
         receipt_archive_authorization GUARDED_BY(mutex);
     uint64_t certificate_revision GUARDED_BY(mutex){0};
@@ -2983,6 +3073,63 @@ std::optional<FinalChainLock> PQChainLockPersistence::LoadUnsealedBTCC() const
     return m_impl->unsealed->chainlock;
 }
 
+std::vector<FinalChainLock>
+PQChainLockPersistence::LoadAuthorizationBases() const
+{
+    LOCK(m_impl->mutex);
+    std::vector<FinalChainLock> result;
+    result.reserve(m_impl->authorization_bases.size());
+    for (const auto& [_, record] : m_impl->authorization_bases) {
+        result.push_back(record.chainlock);
+    }
+    std::sort(result.begin(), result.end(), [](const auto& left,
+                                               const auto& right) {
+        if (left.statement.height != right.statement.height) {
+            return left.statement.height < right.statement.height;
+        }
+        return left.statement.block_hash < right.statement.block_hash;
+    });
+    return result;
+}
+
+std::optional<FinalChainLock>
+PQChainLockPersistence::LoadAuthorizationBase(
+    const uint256& logical_id) const
+{
+    if (logical_id.IsNull()) return std::nullopt;
+    LOCK(m_impl->mutex);
+    const auto found{m_impl->authorization_bases.find(logical_id)};
+    return found == m_impl->authorization_bases.end()
+        ? std::nullopt
+        : std::optional<FinalChainLock>{found->second.chainlock};
+}
+
+std::vector<RecoveryRosterAuthoritySource>
+PQChainLockPersistence::LoadAuthorizationBaseRecoverySources() const
+{
+    LOCK(m_impl->mutex);
+    std::vector<RecoveryRosterAuthoritySource> result;
+    result.reserve(m_impl->authorization_bases.size());
+    for (const auto& [_, record] : m_impl->authorization_bases) {
+        const auto& source{record.chainlock.statement.roster_beacons.active
+                               .recovery_authority_source};
+        if (!source.IsNull()) result.push_back(source);
+    }
+    return result;
+}
+
+std::optional<int32_t>
+PQChainLockPersistence::OldestAuthorizationBaseHeight() const
+{
+    LOCK(m_impl->mutex);
+    std::optional<int32_t> oldest;
+    for (const auto& [_, record] : m_impl->authorization_bases) {
+        const int32_t height{record.chainlock.statement.height};
+        oldest = oldest ? std::min(*oldest, height) : height;
+    }
+    return oldest;
+}
+
 bool PQChainLockPersistence::HasCatchupMarker() const
 {
     LOCK(m_impl->mutex);
@@ -3048,7 +3195,8 @@ bool PQChainLockPersistence::PersistBestCoveringReceiptArchive(
     return m_impl->PersistBest(
         chainlock, error, std::move(recovery_authority),
         std::move(payment_audit_seal_context),
-        /*catchup=*/false, std::nullopt, std::nullopt,
+        /*catchup=*/false, std::nullopt,
+        /*consume_recovery_precommit=*/false,
         &expected_authorization);
 }
 
@@ -3060,6 +3208,14 @@ bool PQChainLockPersistence::PersistUnsealedBTCC(
     LOCK(m_impl->mutex);
     return m_impl->PersistUnsealedBTCC(
         chainlock, error, std::move(recovery_authority));
+}
+
+bool PQChainLockPersistence::PersistVerifiedAuthorizationBase(
+    const FinalChainLock& chainlock,
+    ChainLockPersistenceError* error)
+{
+    LOCK(m_impl->mutex);
+    return m_impl->PersistVerifiedAuthorizationBase(chainlock, error);
 }
 
 bool PQChainLockPersistence::PersistAuthorizedUnsealedBTCC(
@@ -3090,7 +3246,8 @@ bool PQChainLockPersistence::PersistCatchupBest(
         chainlock, error, std::move(recovery_authority),
         std::move(payment_audit_seal_context),
         /*catchup=*/true,
-        btcc_cursor_reconciliation, std::nullopt,
+        btcc_cursor_reconciliation,
+        /*consume_recovery_precommit=*/false,
         consume_receipt_archive_authorization);
 }
 
@@ -3121,7 +3278,7 @@ bool PQChainLockPersistence::PersistInitializedBest(
         chainlock, error, std::move(recovery_authority),
         std::move(payment_audit_seal_context),
         /*catchup=*/false, std::nullopt,
-        RosterRecoveryAdmission::INITIALIZE, nullptr,
+        /*consume_recovery_precommit=*/true, nullptr,
         verified_reset_convergence);
 }
 
@@ -3152,7 +3309,7 @@ bool PQChainLockPersistence::PersistRecoveryCatchupBest(
         std::move(payment_audit_seal_context),
         /*catchup=*/true,
         btcc_cursor_reconciliation,
-        RosterRecoveryAdmission::CURRENT_CATCHUP,
+        /*consume_recovery_precommit=*/false,
         consume_receipt_archive_authorization,
         verified_reset_convergence);
 }
@@ -3173,33 +3330,6 @@ bool PQChainLockPersistence::ReplaceRosterRecoveryPrecommit(
     LOCK(m_impl->mutex);
     return m_impl->ReplaceRosterRecoveryPrecommit(
         expected, replacement, error);
-}
-
-bool PQChainLockPersistence::
-ReplaceStablyInactiveRosterRecoveryPrecommit(
-    const RosterRecoveryPrecommit& expected,
-    const RosterRecoveryPrecommit& replacement,
-    const BTCRecoveryPrecommitRolloverProof& rollover_proof,
-    ChainLockPersistenceError* error)
-{
-    LOCK(m_impl->mutex);
-    std::optional<uint256> previous_btc_hash;
-    if (m_impl->best &&
-        !m_impl->best->chainlock.statement.accepted_btcc_cursor.IsNull()) {
-        previous_btc_hash = m_impl->best->chainlock.statement
-                                .accepted_btcc_cursor.btc_hash;
-    }
-    const uint256 rollover_context_id{
-        GetRosterRecoveryPrecommitRolloverContextId(
-            m_impl->genesis_hash, expected, replacement)};
-    const bool rollover_authorized{rollover_proof.Authorizes(
-        expected.pending_seed.anchor_cursor.btc_hash,
-        expected.pending_seed.anchor_btc_height,
-        replacement.pending_seed.anchor_cursor.btc_hash,
-        replacement.pending_seed.anchor_btc_height,
-        previous_btc_hash, rollover_context_id)};
-    return m_impl->ReplaceStablyInactiveRosterRecoveryPrecommit(
-        expected, replacement, rollover_authorized, error);
 }
 
 bool PQChainLockPersistence::PersistBTCCPresealState(
