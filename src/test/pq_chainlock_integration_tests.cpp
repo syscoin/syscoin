@@ -77,6 +77,40 @@ ActiveRosterBeaconBundle ReadyBundle(uint32_t first_epoch)
     return bundle;
 }
 
+RecoveryRosterAuthorityPtr BindRecoveryAuthority(
+    const uint256& genesis_hash,
+    ActiveRosterBeaconBundle& bundle,
+    uint64_t salt)
+{
+    auto authority{std::make_shared<RecoveryRosterAuthority>()};
+    authority->normal_beacon = bundle.seeds.back();
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        for (std::size_t member{0}; member < QUORUM_SIZE; ++member) {
+            auto& entry{authority->slots[slot][member]};
+            entry.pro_tx_hash =
+                NonNullHash(salt + slot * QUORUM_SIZE + member + 1);
+            entry.eligible = member < QUORUM_MIN_VALID;
+            if (!entry.eligible) continue;
+            RecoveryRosterChildCommitment child_root;
+            child_root.global_key_version = 1;
+            child_root.commitment.generation = 1;
+            child_root.commitment.tree_id = NonNullHash(
+                salt + 10'000 + slot * QUORUM_SIZE + member);
+            child_root.commitment.root = NonNullHash(
+                salt + 20'000 + slot * QUORUM_SIZE + member);
+            entry.child_root = std::move(child_root);
+        }
+    }
+    BOOST_REQUIRE(authority->IsStructurallyValid());
+    const auto authority_hash{
+        GetRecoveryRosterAuthorityHash(genesis_hash, *authority)};
+    BOOST_REQUIRE(authority_hash);
+    bundle.recovery_authority_source.normal_beacon =
+        authority->normal_beacon;
+    bundle.recovery_authority_hash = *authority_hash;
+    return authority;
+}
+
 CKeyID KeyId(uint64_t value)
 {
     CKeyID key;
@@ -236,6 +270,7 @@ struct FullDimensionFixture {
         CHILD_KEY_COUNT};
     std::map<uint256, std::size_t> member_indices;
     FrozenQuorumRostersPtr rosters;
+    RecoveryRosterAuthorityPtr recovery_authority;
     ChainLockStatement statement;
     RosterAuthorizationVerificationContext authorization;
     std::vector<ChainLockShare> shares;
@@ -320,11 +355,10 @@ bool BuildRostersAndStatement(FullDimensionFixture& fixture)
     const auto active_epochs{
         ActiveEpochsAtHeight(fixture.config.schedule, TARGET_HEIGHT)};
     if (!active_epochs || active_epochs->front().epoch == 0) return false;
-    const auto beacon_bundle{ReadyBundle(active_epochs->front().epoch)};
-    fixture.rosters = BuildActiveFrozenQuorumRosters(
-        fixture.genesis_hash, fixture.config, TARGET_HEIGHT,
-        fixture.chain->Tip(),
-        beacon_bundle,
+    auto beacon_bundle{ReadyBundle(active_epochs->front().epoch)};
+    fixture.recovery_authority = BindRecoveryAuthority(
+        fixture.genesis_hash, beacon_bundle, 900'000);
+    const QuorumSnapshotLookup snapshot_lookup{
         [&](const CBlockIndex& snapshot_index)
             -> std::optional<QuorumSnapshotState> {
             const auto epoch{
@@ -348,11 +382,20 @@ bool BuildRostersAndStatement(FullDimensionFixture& fixture)
             snapshot_state.operator_key_states =
                 std::move(operator_states);
             return snapshot_state;
-        },
-        &build_error);
-    if (!fixture.rosters || build_error != QuorumBuildError::NONE) {
+        }};
+    const auto roster_cache{FrozenQuorumRosterCache::Create(
+        fixture.genesis_hash, fixture.config, snapshot_lookup,
+        /*cache_results=*/false)};
+    if (!roster_cache) return false;
+    const auto canonical_roster_set{
+        roster_cache->GetVerifiedActiveWithRecoveryAuthority(
+            TARGET_HEIGHT, fixture.chain->Tip(), beacon_bundle,
+            fixture.recovery_authority, /*publish=*/false,
+            &build_error)};
+    if (!canonical_roster_set || build_error != QuorumBuildError::NONE) {
         return false;
     }
+    fixture.rosters = canonical_roster_set->RostersPtr();
 
     for (const auto& roster : *fixture.rosters) {
         if (roster.descriptor.valid_count != QUORUM_MIN_VALID ||
@@ -384,10 +427,24 @@ bool BuildRostersAndStatement(FullDimensionFixture& fixture)
     previous_window.active =
         ReadyBundle(active_epochs->front().epoch - 1);
     previous_window.next = ReadySeed(active_epochs->back().epoch);
+    previous_window.active.recovery_authority_source =
+        beacon_bundle.recovery_authority_source;
+    previous_window.active.recovery_authority_hash =
+        beacon_bundle.recovery_authority_hash;
     fixture.authorization.predecessor_height =
         fixture.statement.previous_chainlock_height;
     fixture.authorization.predecessor_block_hash =
         fixture.statement.previous_chainlock_hash;
+    fixture.authorization.reset_policy = RosterResetVerificationPolicy{
+        fixture.config.schedule,
+        BTCCScheduleConfig{.candidate_origin = BTCC_CANDIDATE_ORIGIN},
+        BTCC_CANDIDATE_ORIGIN - 1};
+    fixture.statement.roster_authorization_base = {
+        fixture.statement.previous_chainlock_height,
+        fixture.statement.previous_chainlock_hash,
+        NonNullHash(90'005)};
+    fixture.authorization.authorization_base =
+        fixture.statement.roster_authorization_base;
     fixture.authorization.previous = RosterAuthorizationPriorState{
         NonNullHash(90'004), previous_window};
     fixture.statement.roster_transition =
@@ -403,6 +460,8 @@ bool BuildRostersAndStatement(FullDimensionFixture& fixture)
         fixture.statement.previous_chainlock_height;
     transition.predecessor_block_hash =
         fixture.statement.previous_chainlock_hash;
+    transition.authorization_base =
+        fixture.statement.roster_authorization_base;
     transition.previous = fixture.authorization.previous;
     transition.new_window = fixture.statement.roster_beacons;
     const auto authorization_hash{
@@ -417,10 +476,15 @@ bool BuildRostersAndStatement(FullDimensionFixture& fixture)
     fixture.statement.quorum_context_hash = GetQuorumContextHash(
         fixture.genesis_hash, fixture.statement.height,
         fixture.statement.block_hash, descriptors);
-    return fixture.statement.IsStructurallyValid() &&
-           ValidateFrozenQuorumContext(
-               fixture.genesis_hash, fixture.statement, *fixture.rosters,
-               fixture.authorization);
+    if (!fixture.statement.IsStructurallyValid()) return false;
+    ChainLockVerificationError verification_error{
+        ChainLockVerificationError::NONE};
+    auto roster_set{VerifiedRosterSet::Create(
+        fixture.genesis_hash, fixture.rosters, &verification_error,
+        fixture.recovery_authority)};
+    return roster_set && PreparedChainLockContext::Create(
+        fixture.config.schedule, fixture.statement, std::move(roster_set),
+        fixture.authorization, &verification_error);
 }
 
 bool BuildAndSignShares(FullDimensionFixture& fixture)
@@ -643,11 +707,18 @@ BOOST_AUTO_TEST_CASE(full_dimension_builder_collector_wire_and_verifier)
     BOOST_REQUIRE_EQUAL(fixture->shares.size(), FINAL_SIGNATURE_COUNT);
 
     ShareCollectionError collection_error{ShareCollectionError::NONE};
+    ChainLockVerificationError context_error{
+        ChainLockVerificationError::NONE};
+    auto roster_set{VerifiedRosterSet::Create(
+        fixture->genesis_hash, fixture->rosters, &context_error,
+        fixture->recovery_authority)};
+    BOOST_REQUIRE(roster_set);
+    auto prepared_context{PreparedChainLockContext::Create(
+        fixture->config.schedule, fixture->statement, roster_set,
+        fixture->authorization, &context_error)};
+    BOOST_REQUIRE(prepared_context);
     auto collector{ChainLockCollector::Create(
-        fixture->genesis_hash, fixture->config.schedule,
-        fixture->statement, fixture->rosters,
-        fixture->authorization,
-        &collection_error)};
+        std::move(prepared_context), &collection_error)};
     BOOST_REQUIRE(collector);
     BOOST_CHECK(collection_error == ShareCollectionError::NONE);
     const auto collector_context{collector->GetPreparedContext()};
@@ -746,7 +817,7 @@ BOOST_AUTO_TEST_CASE(full_dimension_builder_collector_wire_and_verifier)
         ChainLockVerificationError::NONE};
     const auto detached_roster_set{VerifiedRosterSet::Create(
         fixture->genesis_hash, collector_context->RostersPtr(),
-        &detached_error)};
+        &detached_error, fixture->recovery_authority)};
     BOOST_REQUIRE(detached_roster_set);
     BOOST_CHECK(detached_error == ChainLockVerificationError::NONE);
     BOOST_CHECK(detached_roster_set != collector_context->RosterSetPtr());
@@ -774,11 +845,10 @@ BOOST_AUTO_TEST_CASE(full_dimension_builder_collector_wire_and_verifier)
     ChainLockVerificationError verification_error{
         ChainLockVerificationError::NONE};
     ChainLockVerifier verifier{/*worker_threads=*/TestWorkerCount()};
-    BOOST_CHECK(verifier.Verify(
-        fixture->genesis_hash, fixture->config.schedule, decoded,
-        *fixture->rosters,
-        fixture->authorization,
-        &verification_error));
+    auto prepared_final{PrepareFinalChainLockVerification(
+        decoded, *collector_context, &verification_error)};
+    BOOST_REQUIRE(prepared_final);
+    BOOST_CHECK(verifier.VerifyChecks(std::move(prepared_final->checks)));
     BOOST_CHECK(verification_error == ChainLockVerificationError::NONE);
     auto corrupted{decoded};
     corrupted.signatures.front().signature.front() ^= uint8_t{1};
@@ -787,11 +857,11 @@ BOOST_AUTO_TEST_CASE(full_dimension_builder_collector_wire_and_verifier)
         collector_context->RosterSetPtr(), AUTHORIZATION_MASK,
         true, true, true));
     verification_error = ChainLockVerificationError::NONE;
-    BOOST_CHECK(!verifier.Verify(
-        fixture->genesis_hash, fixture->config.schedule, corrupted,
-        *fixture->rosters, fixture->authorization, &verification_error));
-    BOOST_CHECK(verification_error ==
-                ChainLockVerificationError::INVALID_SIGNATURE);
+    auto prepared_corrupted{PrepareFinalChainLockVerification(
+        corrupted, *collector_context, &verification_error)};
+    BOOST_REQUIRE(prepared_corrupted);
+    BOOST_CHECK(!verifier.VerifyChecks(
+        std::move(prepared_corrupted->checks)));
 
     const auto expected_audit_schedule{BuildPaymentAuditEpochSchedule(
         PaymentAuditScheduleConfig{
@@ -810,13 +880,18 @@ BOOST_AUTO_TEST_CASE(full_dimension_builder_collector_wire_and_verifier)
     BOOST_REQUIRE_EQUAL(audit_shares.size(),
                         PAYMENT_AUDIT_SIGNATURE_COUNT);
 
+    const PaymentAuditScheduleConfig audit_config{
+        fixture->config.schedule,
+        BTCCScheduleConfig{.candidate_origin = BTCC_CANDIDATE_ORIGIN}};
+    PaymentAuditVerificationError audit_context_error{
+        PaymentAuditVerificationError::NONE};
+    auto prepared_audit_context{PreparedPaymentAuditContext::Create(
+        audit_config, *audit_statement, *final,
+        collector_context->RosterSetPtr(), fixture->authorization,
+        &audit_context_error)};
+    BOOST_REQUIRE(prepared_audit_context);
     auto audit_collector{PaymentAuditCollector::Create(
-        fixture->genesis_hash,
-        PaymentAuditScheduleConfig{
-            fixture->config.schedule,
-            BTCCScheduleConfig{.candidate_origin = BTCC_CANDIDATE_ORIGIN}},
-        *audit_statement, *final,
-        fixture->rosters, fixture->authorization, &collection_error)};
+        std::move(prepared_audit_context), &collection_error)};
     BOOST_REQUIRE(audit_collector);
     BOOST_CHECK(collection_error == ShareCollectionError::NONE);
     const auto audit_collector_context{
@@ -941,7 +1016,7 @@ BOOST_AUTO_TEST_CASE(full_dimension_builder_collector_wire_and_verifier)
         ChainLockVerificationError::NONE};
     const auto detached_audit_roster_set{VerifiedRosterSet::Create(
         fixture->genesis_hash, audit_collector_context->RostersPtr(),
-        &detached_audit_error)};
+        &detached_audit_error, fixture->recovery_authority)};
     BOOST_REQUIRE(detached_audit_roster_set);
     BOOST_CHECK(detached_audit_error ==
                 ChainLockVerificationError::NONE);
@@ -974,10 +1049,12 @@ BOOST_AUTO_TEST_CASE(full_dimension_builder_collector_wire_and_verifier)
 
     PaymentAuditVerificationError audit_error{
         PaymentAuditVerificationError::INVALID_ARGUMENT};
-    BOOST_CHECK(VerifyFinalPaymentAudit(
-        fixture->genesis_hash, audit_schedule,
-        decoded_audit, *fixture->rosters,
-        fixture->authorization, nullptr, &audit_error));
+    auto prepared_audit{PrepareFinalPaymentAuditVerification(
+        audit_schedule, decoded_audit,
+        audit_collector_context->RosterSetPtr(), fixture->authorization,
+        &audit_error)};
+    BOOST_REQUIRE(prepared_audit);
+    BOOST_CHECK(verifier.VerifyChecks(std::move(prepared_audit->checks)));
     BOOST_CHECK(audit_error == PaymentAuditVerificationError::NONE);
     auto corrupted_audit{decoded_audit};
     corrupted_audit.report_witnesses.front()
@@ -987,11 +1064,13 @@ BOOST_AUTO_TEST_CASE(full_dimension_builder_collector_wire_and_verifier)
         audit_collector_context->RosterSetPtr(), AUTHORIZATION_MASK,
         true, true, true, true));
     audit_error = PaymentAuditVerificationError::NONE;
-    BOOST_CHECK(!VerifyFinalPaymentAudit(
-        fixture->genesis_hash, audit_schedule, corrupted_audit,
-        *fixture->rosters, fixture->authorization, nullptr, &audit_error));
-    BOOST_CHECK(audit_error ==
-                PaymentAuditVerificationError::INVALID_SIGNATURE);
+    auto prepared_corrupted_audit{PrepareFinalPaymentAuditVerification(
+        audit_schedule, corrupted_audit,
+        audit_collector_context->RosterSetPtr(), fixture->authorization,
+        &audit_error)};
+    BOOST_REQUIRE(prepared_corrupted_audit);
+    BOOST_CHECK(!verifier.VerifyChecks(
+        std::move(prepared_corrupted_audit->checks)));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

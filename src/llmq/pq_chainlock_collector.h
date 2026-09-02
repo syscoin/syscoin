@@ -125,14 +125,6 @@ public:
     };
 
     static std::unique_ptr<ChainLockCollector> Create(
-        const uint256& genesis_hash,
-        ChainLockScheduleConfig schedule,
-        ChainLockStatement statement,
-        FrozenQuorumRostersPtr rosters,
-        const RosterAuthorizationVerificationContext& authorization,
-        ShareCollectionError* error = nullptr);
-
-    static std::unique_ptr<ChainLockCollector> Create(
         PreparedChainLockContextPtr context,
         ShareCollectionError* error = nullptr);
 

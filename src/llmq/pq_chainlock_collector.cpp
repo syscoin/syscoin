@@ -15,22 +15,6 @@ void SetError(ShareCollectionError* error, ShareCollectionError value)
     if (error != nullptr) *error = value;
 }
 
-ShareCollectionError MapVerificationError(ChainLockVerificationError error)
-{
-    switch (error) {
-    case ChainLockVerificationError::INVALID_PUBLIC_KEY:
-        return ShareCollectionError::INVALID_PUBLIC_KEY;
-    case ChainLockVerificationError::INVALID_SIGNATURE:
-        return ShareCollectionError::INVALID_SIGNATURE;
-    case ChainLockVerificationError::INVALID_SIGNER:
-        return ShareCollectionError::INVALID_MEMBER;
-    case ChainLockVerificationError::NONE:
-        return ShareCollectionError::LOCAL_ERROR;
-    default:
-        return ShareCollectionError::INVALID_CONTEXT;
-    }
-}
-
 ShareCollectionError MapReservedVerificationError(
     ChainLockVerificationError error)
 {
@@ -96,31 +80,6 @@ ChainLockCollector::ChainLockCollector(
     : m_context{std::move(context)},
       m_instance_token{std::make_shared<uint8_t>(0)}
 {
-}
-
-std::unique_ptr<ChainLockCollector> ChainLockCollector::Create(
-    const uint256& genesis_hash,
-    ChainLockScheduleConfig schedule,
-    ChainLockStatement statement,
-    FrozenQuorumRostersPtr rosters,
-    const RosterAuthorizationVerificationContext& authorization,
-    ShareCollectionError* error)
-{
-    SetError(error, ShareCollectionError::NONE);
-    if (genesis_hash.IsNull() || !schedule.IsValid() ||
-        !statement.IsStructurallyValid() || !rosters) {
-        SetError(error, ShareCollectionError::INVALID_ARGUMENT);
-        return nullptr;
-    }
-    ChainLockVerificationError verification_error{ChainLockVerificationError::NONE};
-    auto context{PreparedChainLockContext::Create(
-        genesis_hash, schedule, std::move(statement), std::move(rosters),
-        authorization, &verification_error)};
-    if (!context) {
-        SetError(error, MapVerificationError(verification_error));
-        return nullptr;
-    }
-    return Create(std::move(context), error);
 }
 
 std::unique_ptr<ChainLockCollector> ChainLockCollector::Create(

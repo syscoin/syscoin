@@ -29,23 +29,6 @@ void SetBit(QuorumBitmap& bitmap, std::size_t member)
         static_cast<uint8_t>(uint8_t{1} << (member % 8));
 }
 
-ShareCollectionError MapVerificationError(
-    PaymentAuditVerificationError error)
-{
-    switch (error) {
-    case PaymentAuditVerificationError::INVALID_SIGNATURE:
-        return ShareCollectionError::INVALID_SIGNATURE;
-    case PaymentAuditVerificationError::INVALID_PUBLIC_KEY:
-        return ShareCollectionError::INVALID_PUBLIC_KEY;
-    case PaymentAuditVerificationError::INVALID_SIGNER:
-        return ShareCollectionError::INVALID_MEMBER;
-    case PaymentAuditVerificationError::NONE:
-        return ShareCollectionError::LOCAL_ERROR;
-    default:
-        return ShareCollectionError::INVALID_CONTEXT;
-    }
-}
-
 ShareCollectionError MapReservedVerificationError(
     PaymentAuditVerificationError error)
 {
@@ -99,33 +82,6 @@ PaymentAuditCollector::PaymentAuditCollector(
     : m_context{std::move(context)},
       m_instance_token{std::make_shared<uint8_t>(0)}
 {
-}
-
-std::unique_ptr<PaymentAuditCollector> PaymentAuditCollector::Create(
-    const uint256& genesis_hash,
-    PaymentAuditScheduleConfig schedule,
-    PaymentAuditStatement statement,
-    const FinalChainLock& seal_chainlock,
-    FrozenQuorumRostersPtr rosters,
-    const RosterAuthorizationVerificationContext& authorization,
-    ShareCollectionError* error)
-{
-    SetError(error, ShareCollectionError::NONE);
-    if (genesis_hash.IsNull() || !schedule.IsValid() ||
-        !statement.IsStructurallyValid() || !rosters) {
-        SetError(error, ShareCollectionError::INVALID_ARGUMENT);
-        return nullptr;
-    }
-    PaymentAuditVerificationError verification_error{
-        PaymentAuditVerificationError::NONE};
-    auto context{PreparedPaymentAuditContext::Create(
-        genesis_hash, schedule, std::move(statement), seal_chainlock,
-        std::move(rosters), authorization, &verification_error)};
-    if (!context) {
-        SetError(error, MapVerificationError(verification_error));
-        return nullptr;
-    }
-    return Create(std::move(context), error);
 }
 
 std::unique_ptr<PaymentAuditCollector> PaymentAuditCollector::Create(

@@ -96,15 +96,6 @@ public:
     };
 
     static std::unique_ptr<PaymentAuditCollector> Create(
-        const uint256& genesis_hash,
-        PaymentAuditScheduleConfig schedule,
-        PaymentAuditStatement statement,
-        const FinalChainLock& seal_chainlock,
-        FrozenQuorumRostersPtr rosters,
-        const RosterAuthorizationVerificationContext& authorization,
-        ShareCollectionError* error = nullptr);
-
-    static std::unique_ptr<PaymentAuditCollector> Create(
         PreparedPaymentAuditContextPtr context,
         ShareCollectionError* error = nullptr);
 
