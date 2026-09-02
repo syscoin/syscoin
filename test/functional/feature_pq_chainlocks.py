@@ -73,15 +73,15 @@ BTCC_RECEIPT_STATE_SIZE = 100
 BTCC_RECEIPT_WIRE_SIZE = 138
 PAYMENT_AUDIT_RECEIPT_STATE_SIZE = 136
 ROSTER_BEACON_SEED_WIRE_SIZE = 112
-RECOVERY_ROSTER_AUTHORITY_SOURCE_WIRE_SIZE = 517
-CHAINLOCK_STATEMENT_WIRE_SIZE = 1_657
+RECOVERY_ROSTER_AUTHORITY_SOURCE_WIRE_SIZE = 112
+CHAINLOCK_STATEMENT_WIRE_SIZE = 1_320
 FINAL_CHAINLOCK_FIXED_WIRE_SIZE = (
     CHAINLOCK_STATEMENT_WIRE_SIZE + 1 + ACTIVE_QUORUMS * BITMAP_SIZE + 2
 )
 PQCLSHARE_WIRE_SIZE = 1_282
-SELF_CONTAINED_CHAINLOCK_SHARE_WIRE_SIZE = 2_975
-FINAL_CHAINLOCK_WIRE_SIZE = 1_001_508
-FINAL_PAYMENT_AUDIT_WIRE_SIZE = 1_041_907
+SELF_CONTAINED_CHAINLOCK_SHARE_WIRE_SIZE = 2_638
+FINAL_CHAINLOCK_WIRE_SIZE = 1_001_171
+FINAL_PAYMENT_AUDIT_WIRE_SIZE = 1_041_570
 PAYMENT_AUDIT_RECEIPT_WIRE_SIZE = 369
 PAYMENT_AUDIT_RECEIPT_VERSION = 1
 PAYMENT_PROBATION_STATE_VERSION = 1
@@ -243,13 +243,8 @@ def serialize_roster_beacon_seed(epoch, state=2):
     )
 
 
-def serialize_null_recovery_roster_authority_source():
-    payload = (
-        struct.pack("<Bi", 0, -1)
-        + ser_uint256(0)
-        + ser_uint256(0)
-        + serialize_roster_beacon_seed(0, state=0) * ACTIVE_QUORUMS
-    )
+def serialize_recovery_roster_authority_source(epoch):
+    payload = serialize_roster_beacon_seed(epoch)
     assert_equal(len(payload), RECOVERY_ROSTER_AUTHORITY_SOURCE_WIRE_SIZE)
     return payload
 
@@ -262,8 +257,8 @@ def serialize_roster_beacon_window(newest_epoch=3):
             serialize_roster_beacon_seed(first_epoch + slot)
             for slot in range(ACTIVE_QUORUMS)
         )
-        + ser_uint256(0)
-        + serialize_null_recovery_roster_authority_source()
+        + ser_uint256(0x5245434F)
+        + serialize_recovery_roster_authority_source(newest_epoch)
         + serialize_roster_beacon_seed(newest_epoch + 1, state=0)
     )
 
@@ -303,6 +298,9 @@ def serialize_statement(height, block_hash, previous_height, previous_hash,
         + struct.pack("<B", 1)  # RosterAuthorizationTransitionKind::KEEP
         + serialize_roster_beacon_window()
         + ser_uint256(0x41555448)
+        + struct.pack("<i", previous_height)
+        + ser_uint256(previous_hash)
+        + ser_uint256(0x42415345)
         + serialize_cursor()
         + serialize_cursor()
         + struct.pack("<B", 0)  # BTCCAdvance::KEEP

@@ -4,6 +4,7 @@
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Focused post-quantum deterministic-masternode operator lifecycle coverage."""
 
+from test_framework.auxpow_testing import mineAuxpowBlock
 from test_framework.messages import CTransaction, from_hex
 from test_framework.script import OP_RETURN
 from test_framework.test_framework import SyscoinTestFramework
@@ -320,7 +321,9 @@ class PQOperatorLifecycleTest(SyscoinTestFramework):
             "",
             masternode["funds_address"],
         )
-        self.generate(node, 1)
+        # Activation is deliberately aligned with the first authenticated
+        # BTCC candidate, so its Bitcoin prevhash must come from AuxPoW.
+        mineAuxpowBlock(node, None)
         info = node.protx_info(masternode["protx_hash"])
         assert_equal(info["state"]["service"], masternode["service"])
         assert_equal(info["state"]["PoSeBanHeight"], -1)

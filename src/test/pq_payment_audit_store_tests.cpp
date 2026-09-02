@@ -193,6 +193,9 @@ FinalPaymentAudit Audit(uint32_t epoch, uint8_t mask, uint64_t salt)
     seal.previous_chainlock_hash = NonNullHash(19 + salt);
     seal.quorum_context_hash = NonNullHash(20 + salt);
     seal.roster_transition = RosterAuthorizationTransitionKind::KEEP;
+    seal.roster_authorization_base = {
+        seal.previous_chainlock_height, seal.previous_chainlock_hash,
+        NonNullHash(22 + salt)};
     const uint32_t first_active_epoch{
         epoch >= ACTIVE_QUORUMS - 2
             ? epoch - static_cast<uint32_t>(ACTIVE_QUORUMS - 2)

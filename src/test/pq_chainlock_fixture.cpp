@@ -110,6 +110,16 @@ RosterAuthorizationVerificationContext SealLiveFixtureAuthorization(
     RosterAuthorizationVerificationContext authorization;
     authorization.predecessor_height = statement.previous_chainlock_height;
     authorization.predecessor_block_hash = statement.previous_chainlock_hash;
+    statement.roster_authorization_base = authorizer != nullptr
+        ? RosterAuthorizationBaseIdentity{
+              authorizer->height, authorizer->block_hash,
+              GetLogicalChainLockId(genesis_hash, *authorizer)}
+        : RosterAuthorizationBaseIdentity{
+              statement.previous_chainlock_height,
+              statement.previous_chainlock_hash,
+              statement.previous_chainlock_hash};
+    authorization.authorization_base =
+        statement.roster_authorization_base;
     authorization.previous = authorizer != nullptr
         ? RosterAuthorizationPriorState{
               authorizer->roster_authorization_state_hash,
@@ -123,10 +133,8 @@ RosterAuthorizationVerificationContext SealLiveFixtureAuthorization(
         test::MakeSyntheticNormalRosterAuthorizationInput(
             statement, *authorization.previous);
     if (authorizer != nullptr) {
-        authorization.normal_input->prior_authorization_height =
-            authorizer->height;
-        authorization.normal_input->prior_authorization_block_hash =
-            authorizer->block_hash;
+        authorization.normal_input->authorization_base =
+            statement.roster_authorization_base;
         if (authorization.normal_input->next_snapshot
                 .prior_authorization_is_descendant) {
             authorization.normal_input->next_snapshot.height =
@@ -141,6 +149,7 @@ RosterAuthorizationVerificationContext SealLiveFixtureAuthorization(
     transition.target_block_hash = statement.block_hash;
     transition.predecessor_height = statement.previous_chainlock_height;
     transition.predecessor_block_hash = statement.previous_chainlock_hash;
+    transition.authorization_base = statement.roster_authorization_base;
     transition.previous = authorization.previous;
     transition.new_window = statement.roster_beacons;
     const auto state_hash{GetRosterAuthorizationStateHash(
@@ -156,6 +165,7 @@ RosterAuthorizationVerificationContext FixtureAuthorizationFor(
     RosterAuthorizationVerificationContext authorization;
     authorization.predecessor_height = statement.previous_chainlock_height;
     authorization.predecessor_block_hash = statement.previous_chainlock_hash;
+    authorization.authorization_base = statement.roster_authorization_base;
     if (statement.roster_transition ==
         RosterAuthorizationTransitionKind::INITIALIZE) {
         authorization.admission = RosterAuthorizationAdmission::INITIALIZE;
@@ -174,10 +184,8 @@ RosterAuthorizationVerificationContext FixtureAuthorizationFor(
         test::MakeSyntheticNormalRosterAuthorizationInput(
             statement, *authorization.previous);
     if (authorizer != nullptr) {
-        authorization.normal_input->prior_authorization_height =
-            authorizer->height;
-        authorization.normal_input->prior_authorization_block_hash =
-            authorizer->block_hash;
+        authorization.normal_input->authorization_base =
+            statement.roster_authorization_base;
     }
     return authorization;
 }
@@ -608,15 +616,32 @@ bool PopulatePaymentAuditSnapshots(PaymentAuditFixture& fixture)
     }
 
     if (!fixture.args.authorizer ||
-        !HasRecoveryRosterBeacon(
-            fixture.args.authorizer->roster_beacons)) {
+        fixture.args.authorizer->roster_beacons.active
+            .recovery_authority_source.IsNull()) {
         return true;
+    }
+
+    for (const auto& seed :
+         fixture.args.authorizer->roster_beacons.active.seeds) {
+        if (!seed.IsReady() ||
+            !fixture.chain.SetExactHash(seed.anchor_cursor.sys_height,
+                                        seed.anchor_cursor.sys_hash)) {
+            return false;
+        }
+    }
+    const auto& next_seed{fixture.args.authorizer->roster_beacons.next};
+    if (next_seed.IsReady() &&
+        !fixture.chain.SetExactHash(next_seed.anchor_cursor.sys_height,
+                                    next_seed.anchor_cursor.sys_hash)) {
+        return false;
     }
 
     const auto& source{fixture.args.authorizer->roster_beacons.active
                            .recovery_authority_source};
     if (!source.IsStructurallyValid() || source.IsNull() ||
-        !fixture.chain.SetExactHash(source.height, source.block_hash)) {
+        !fixture.chain.SetExactHash(
+            source.normal_beacon.anchor_cursor.sys_height,
+            source.normal_beacon.anchor_cursor.sys_hash)) {
         return false;
     }
     const auto recovery_target{NextEligibleChainLockTargetHeight(
@@ -672,19 +697,29 @@ VerifiedRosterSetPtr BuildPaymentAuditRosters(
         /*cache_results=*/false)};
     if (!cache) return nullptr;
     QuorumBuildError build_error{QuorumBuildError::NONE};
-    const bool has_recovery_seed{std::any_of(
-        beacon_bundle.seeds.begin(), beacon_bundle.seeds.end(),
-        [](const RosterBeaconSeed& seed) {
-            return seed.anchor_kind == RosterBeaconAnchorKind::RECOVERY;
-        })};
-    if (has_recovery_seed && !fixture.recovery_authority) return nullptr;
-    const auto rosters{has_recovery_seed
+    const auto& source{beacon_bundle.recovery_authority_source};
+    if (source.IsNull()) return nullptr;
+    RecoveryRosterAuthorityPtr authority{fixture.recovery_authority};
+    const auto retained_hash{authority
+        ? GetRecoveryRosterAuthorityHash(
+              fixture.args.genesis_hash, *authority)
+        : std::optional<uint256>{}};
+    if (!authority || authority->normal_beacon != source.normal_beacon ||
+        !retained_hash ||
+        *retained_hash != beacon_bundle.recovery_authority_hash) {
+        authority = BuildRecoveryRosterAuthorityFromSource(
+            fixture.args.genesis_hash, fixture.args.build_config,
+            target_height, fixture.chain.Tip(), source,
+            [&](const CBlockIndex& index) {
+                return LookupPaymentAuditSnapshot(fixture, index);
+            },
+            &build_error);
+    }
+    const auto rosters{authority
         ? cache->GetVerifiedActiveWithRecoveryAuthority(
               target_height, fixture.chain.Tip(), beacon_bundle,
-              fixture.recovery_authority, /*publish=*/false, &build_error)
-        : cache->GetVerifiedActive(
-              target_height, fixture.chain.Tip(), beacon_bundle,
-              &build_error)};
+              authority, /*publish=*/false, &build_error)
+        : nullptr};
     return build_error == QuorumBuildError::NONE ? rosters : nullptr;
 }
 
@@ -699,10 +734,11 @@ std::array<QuorumDescriptor, ACTIVE_QUORUMS> Descriptors(
 }
 
 bool ClaimAuthorizedFixtureRosterTransition(
-    const QuorumBuildConfig& config,
+    const PaymentAuditFixture& fixture,
     ChainLockStatement& statement,
     const ChainLockStatement& authorizer)
 {
+    const auto& config{fixture.args.build_config};
     const auto newest_epoch{
         EpochForHeight(config.schedule, statement.height)};
     if (!newest_epoch ||
@@ -741,6 +777,45 @@ bool ClaimAuthorizedFixtureRosterTransition(
     const bool observe_next{
         statement.btcc_advance == BTCCAdvance::ADVANCE &&
         next_snapshot && authorizer.height >= *next_snapshot};
+    const auto bind_recovery_authority = [&] {
+        RecoveryRosterAuthoritySource expected_source{
+            previous.active.recovery_authority_source};
+        if (!HasRecoveryRosterBeacon(previous)) {
+            const auto* newest_normal{
+                FindNewestNormalReadySeed(previous)};
+            if (newest_normal == nullptr) return false;
+            expected_source.normal_beacon = *newest_normal;
+        }
+        if (expected_source.IsNull()) return false;
+        if (expected_source == previous.active.recovery_authority_source) {
+            statement.roster_beacons.active.recovery_authority_source =
+                expected_source;
+            statement.roster_beacons.active.recovery_authority_hash =
+                previous.active.recovery_authority_hash;
+            return !previous.active.recovery_authority_hash.IsNull();
+        }
+        QuorumBuildError authority_error{QuorumBuildError::NONE};
+        const auto authority{BuildRecoveryRosterAuthorityFromSource(
+            fixture.args.genesis_hash, config, statement.height,
+            fixture.chain.Tip(), expected_source,
+            [&](const CBlockIndex& index) {
+                return LookupPaymentAuditSnapshot(fixture, index);
+            },
+            &authority_error)};
+        const auto authority_hash{authority
+            ? GetRecoveryRosterAuthorityHash(
+                  fixture.args.genesis_hash, *authority)
+            : std::optional<uint256>{}};
+        if (!authority_hash ||
+            authority_error != QuorumBuildError::NONE) {
+            return false;
+        }
+        statement.roster_beacons.active.recovery_authority_source =
+            expected_source;
+        statement.roster_beacons.active.recovery_authority_hash =
+            *authority_hash;
+        return true;
+    };
 
     if (*newest_epoch == previous_newest) {
         if (previous.next.state == RosterBeaconState::PENDING) {
@@ -753,7 +828,8 @@ bool ClaimAuthorizedFixtureRosterTransition(
             statement.roster_transition =
                 RosterAuthorizationTransitionKind::OBSERVE;
         }
-        return statement.roster_beacons.IsStructurallyValid();
+        return bind_recovery_authority() &&
+               statement.roster_beacons.IsStructurallyValid();
     }
 
     if (previous.next.state == RosterBeaconState::EMPTY) return false;
@@ -775,7 +851,8 @@ bool ClaimAuthorizedFixtureRosterTransition(
             make_pending(statement.roster_beacons.next);
     }
     statement.roster_transition = RosterAuthorizationTransitionKind::ROTATE;
-    return statement.roster_beacons.IsStructurallyValid();
+    return bind_recovery_authority() &&
+           statement.roster_beacons.IsStructurallyValid();
 }
 
 struct PreparedPaymentChainLockStatement {
@@ -813,7 +890,7 @@ std::optional<PreparedPaymentChainLockStatement> MakeChainLockStatement(
     statement.payment_audit_receipt_state = payment_receipt_state;
     statement.payment_probation_state_hash = probation_state_hash;
     if (!ClaimAuthorizedFixtureRosterTransition(
-            fixture.args.build_config, statement, authorizer)) {
+            fixture, statement, authorizer)) {
         return std::nullopt;
     }
     const auto roster_set{BuildPaymentAuditRosters(
@@ -825,11 +902,15 @@ std::optional<PreparedPaymentChainLockStatement> MakeChainLockStatement(
     const auto authorization{SealLiveFixtureAuthorization(
         fixture.args.genesis_hash, statement,
         statement.roster_beacons.active, &authorizer)};
+    auto scheduled_authorization{authorization};
+    scheduled_authorization.reset_policy = RosterResetVerificationPolicy{
+        fixture.args.build_config.schedule, fixture.args.btcc_config,
+        fixture.args.btcc_config.candidate_origin - 1};
     ChainLockVerificationError verification_error{
         ChainLockVerificationError::NONE};
     const auto context{PreparedChainLockContext::Create(
         fixture.args.build_config.schedule, statement, roster_set,
-        authorization, &verification_error)};
+        scheduled_authorization, &verification_error)};
     if (!context ||
         verification_error != ChainLockVerificationError::NONE) {
         return std::nullopt;
@@ -1165,6 +1246,8 @@ bool BuildSnapshotsAndRosters(FullDimensionFixture& fixture)
             seed.future_btc_hash = fixture.args.future_btc_hash;
             beacon_window.active.seeds[slot] = std::move(seed);
         }
+        beacon_window.active.recovery_authority_source.normal_beacon =
+            beacon_window.active.seeds.back();
         beacon_window.next.epoch =
             beacon_window.active.seeds.back().epoch + 1;
     }
@@ -1215,66 +1298,58 @@ bool BuildSnapshotsAndRosters(FullDimensionFixture& fixture)
             return seed.anchor_kind == RosterBeaconAnchorKind::RECOVERY;
         })};
     RecoveryRosterAuthorityPtr recovery_authority;
-    if (has_recovery_seed) {
-        if (!fixture.args.authorizer) {
-            std::cerr << "recovery roster requires an authorizing statement\n";
-            return false;
-        }
-        const RecoveryRosterAuthoritySource authority_source{
-            beacon_window.active.recovery_authority_source};
-        if (!authority_source.IsStructurallyValid() ||
-            authority_source.IsNull() ||
-            !fixture.chain.SetExactHash(
-                authority_source.height, authority_source.block_hash)) {
-            std::cerr << "invalid recovery authority source\n";
-            return false;
-        }
+    const RecoveryRosterAuthoritySource authority_source{
+        beacon_window.active.recovery_authority_source};
+    if (!authority_source.IsStructurallyValid() ||
+        authority_source.IsNull() ||
+        !fixture.chain.SetExactHash(
+            authority_source.normal_beacon.anchor_cursor.sys_height,
+            authority_source.normal_beacon.anchor_cursor.sys_hash)) {
+        std::cerr << "invalid recovery authority source\n";
+        return false;
+    }
 
-        const auto snapshot_lookup = [&](const CBlockIndex& index)
-            -> std::optional<QuorumSnapshotState> {
-            for (const auto& snapshot :
-                 fixture.snapshot_fixture.snapshots) {
-                if (snapshot.branch_point.height == index.nHeight &&
-                    snapshot.branch_point.block_hash ==
-                        index.GetBlockHash()) {
-                    return snapshot.state;
-                }
+    const auto authority_snapshot_lookup = [&](const CBlockIndex& index)
+        -> std::optional<QuorumSnapshotState> {
+        for (const auto& snapshot : fixture.snapshot_fixture.snapshots) {
+            if (snapshot.branch_point.height == index.nHeight &&
+                snapshot.branch_point.block_hash == index.GetBlockHash()) {
+                return snapshot.state;
             }
-            return std::nullopt;
-        };
-        QuorumBuildError authority_error{QuorumBuildError::NONE};
-        recovery_authority = BuildRecoveryRosterAuthorityFromSource(
-            fixture.args.genesis_hash, fixture.args.build_config,
-            fixture.args.target_height, fixture.chain.Tip(),
-            authority_source, snapshot_lookup, &authority_error);
-        const auto authority_hash{recovery_authority
-            ? GetRecoveryRosterAuthorityHash(
-                  fixture.args.genesis_hash, *recovery_authority)
-            : std::optional<uint256>{}};
-        if (!authority_hash ||
-            authority_error != QuorumBuildError::NONE) {
-            std::cerr << "unable to derive recovery authority: "
-                      << static_cast<int>(authority_error) << '\n';
+        }
+        return std::nullopt;
+    };
+    QuorumBuildError authority_error{QuorumBuildError::NONE};
+    recovery_authority = BuildRecoveryRosterAuthorityFromSource(
+        fixture.args.genesis_hash, fixture.args.build_config,
+        fixture.args.target_height, fixture.chain.Tip(),
+        authority_source, authority_snapshot_lookup, &authority_error);
+    const auto authority_hash{recovery_authority
+        ? GetRecoveryRosterAuthorityHash(
+              fixture.args.genesis_hash, *recovery_authority)
+        : std::optional<uint256>{}};
+    if (!authority_hash || authority_error != QuorumBuildError::NONE) {
+        std::cerr << "unable to derive recovery authority: "
+                  << static_cast<int>(authority_error) << '\n';
+        return false;
+    }
+    if (fixture.args.authorizer) {
+        if (beacon_window.active.recovery_authority_hash !=
+                *authority_hash ||
+            beacon_window.active.recovery_authority_source !=
+                authority_source) {
+            std::cerr << "recovery authority commitment mismatch\n";
             return false;
         }
-        if (fixture.args.authorizer) {
-            if (beacon_window.active.recovery_authority_hash !=
-                    *authority_hash ||
-                beacon_window.active.recovery_authority_source !=
-                    authority_source) {
-                std::cerr << "recovery authority commitment mismatch\n";
-                return false;
-            }
-        } else {
-            beacon_window.active.recovery_authority_hash =
-                *authority_hash;
-            beacon_window.active.recovery_authority_source =
-                authority_source;
-        }
-        if (!IsRecoveryRosterBeaconWindow(beacon_window)) {
-            std::cerr << "invalid recovery roster beacon window\n";
-            return false;
-        }
+    } else {
+        beacon_window.active.recovery_authority_hash = *authority_hash;
+    }
+    if ((has_recovery_seed &&
+         !IsRecoveryRosterBeaconWindow(beacon_window)) ||
+        (!fixture.args.authorizer &&
+         !IsInitialNormalRosterBeaconWindow(beacon_window))) {
+        std::cerr << "invalid source-bound roster beacon window\n";
+        return false;
     }
 
     QuorumBuildError build_error{QuorumBuildError::NONE};
@@ -1429,20 +1504,30 @@ bool BuildSnapshotsAndRosters(FullDimensionFixture& fixture)
         fixture.statement.roster_authorization_state_hash = *state_hash;
         authorization = FixtureAuthorizationFor(fixture.statement);
     }
+    const int32_t reset_origin{
+        authority_source.normal_beacon.anchor_cursor.sys_height};
+    const int64_t reset_predecessor{
+        static_cast<int64_t>(reset_origin) -
+        fixture.args.build_config.schedule.chainlock_period};
+    if (reset_origin < 0 || reset_predecessor < -1 ||
+        reset_predecessor > std::numeric_limits<int32_t>::max()) {
+        std::cerr << "invalid fixture reset policy\n";
+        return false;
+    }
+    BTCCScheduleConfig reset_btcc;
+    reset_btcc.candidate_origin = reset_origin;
+    authorization.reset_policy = RosterResetVerificationPolicy{
+        fixture.args.build_config.schedule, reset_btcc,
+        static_cast<int32_t>(reset_predecessor)};
     if (!fixture.statement.IsStructurallyValid()) {
         std::cerr << "invalid full-dimension statement\n";
         return false;
     }
     ChainLockVerificationError verification_error{
         ChainLockVerificationError::NONE};
-    fixture.prepared_context = fixture.verified_rosters
-        ? PreparedChainLockContext::Create(
-              fixture.args.build_config.schedule, fixture.statement,
-              fixture.verified_rosters, authorization, &verification_error)
-        : PreparedChainLockContext::Create(
-              fixture.args.genesis_hash,
-              fixture.args.build_config.schedule, fixture.statement,
-              fixture.rosters, authorization, &verification_error);
+    fixture.prepared_context = PreparedChainLockContext::Create(
+        fixture.args.build_config.schedule, fixture.statement,
+        fixture.verified_rosters, authorization, &verification_error);
     if (!fixture.prepared_context ||
         verification_error != ChainLockVerificationError::NONE) {
         std::cerr << "full-dimension roster context rejected\n";

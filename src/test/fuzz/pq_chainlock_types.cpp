@@ -81,6 +81,9 @@ void InitializeFinalChainLockFixture()
     chainlock.statement.quorum_context_hash = NonNullHash(3);
     chainlock.statement.roster_transition =
         RosterAuthorizationTransitionKind::KEEP;
+    chainlock.statement.roster_authorization_base = {
+        chainlock.statement.previous_chainlock_height,
+        chainlock.statement.previous_chainlock_hash, NonNullHash(6)};
     chainlock.statement.roster_beacons = ReadyRosterWindow(2);
     chainlock.statement.roster_authorization_state_hash = NonNullHash(5);
     chainlock.statement.payment_probation_state_hash = NonNullHash(4);
@@ -191,6 +194,9 @@ void InitializeFinalPaymentAuditFixture()
     seal.previous_chainlock_hash = NonNullHash(19);
     seal.quorum_context_hash = NonNullHash(20);
     seal.roster_transition = RosterAuthorizationTransitionKind::KEEP;
+    seal.roster_authorization_base = {
+        seal.previous_chainlock_height, seal.previous_chainlock_hash,
+        NonNullHash(22)};
     seal.roster_beacons = ReadyRosterWindow(3);
     seal.roster_authorization_state_hash = NonNullHash(21);
     seal.payment_probation_state_hash =

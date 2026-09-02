@@ -134,6 +134,9 @@ ChainLockShare ResponseShare(int32_t height,
     transcript.quorum_base_hash = NonNullHash(branch_salt + 3);
     transcript.roster_transition =
         RosterAuthorizationTransitionKind::KEEP;
+    transcript.roster_authorization_base = {
+        transcript.previous_chainlock_height,
+        transcript.previous_chainlock_hash, NonNullHash(branch_salt + 9)};
     transcript.roster_beacons =
         ReadyRosterWindow(transcript.quorum_epoch);
     transcript.roster_authorization_state_hash =
