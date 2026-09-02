@@ -88,17 +88,20 @@ struct BranchLockDatabaseKey
     std::uint32_t db_version{CPQSignerJournal::DB_FORMAT_VERSION};
     uint256 genesis_hash;
     uint256 pro_tx_hash;
+    std::int32_t height{-1};
 
     BranchLockDatabaseKey(const uint256& genesis_hash_in,
-                          const uint256& pro_tx_hash_in)
-        : genesis_hash{genesis_hash_in}, pro_tx_hash{pro_tx_hash_in}
+                          const uint256& pro_tx_hash_in,
+                          std::int32_t height_in)
+        : genesis_hash{genesis_hash_in}, pro_tx_hash{pro_tx_hash_in},
+          height{height_in}
     {
     }
 
     SERIALIZE_METHODS(BranchLockDatabaseKey, obj)
     {
         READWRITE(obj.prefix, obj.db_version, obj.genesis_hash,
-                  obj.pro_tx_hash);
+                  obj.pro_tx_hash, obj.height);
     }
 };
 
@@ -120,17 +123,20 @@ struct AcceptedCertificateDatabaseKey
     std::uint32_t db_version{CPQSignerJournal::DB_FORMAT_VERSION};
     uint256 genesis_hash;
     uint256 pro_tx_hash;
+    std::int32_t height{-1};
 
     AcceptedCertificateDatabaseKey(const uint256& genesis_hash_in,
-                                   const uint256& pro_tx_hash_in)
-        : genesis_hash{genesis_hash_in}, pro_tx_hash{pro_tx_hash_in}
+                                   const uint256& pro_tx_hash_in,
+                                   std::int32_t height_in)
+        : genesis_hash{genesis_hash_in}, pro_tx_hash{pro_tx_hash_in},
+          height{height_in}
     {
     }
 
     SERIALIZE_METHODS(AcceptedCertificateDatabaseKey, obj)
     {
         READWRITE(obj.prefix, obj.db_version, obj.genesis_hash,
-                  obj.pro_tx_hash);
+                  obj.pro_tx_hash, obj.height);
     }
 };
 
@@ -212,9 +218,10 @@ bool IsValidAcceptedCertificate(const AcceptedCertificateValue& value)
 }
 
 bool IsValidBranchIdentity(const uint256& genesis_hash,
-                           const uint256& pro_tx_hash)
+                           const uint256& pro_tx_hash,
+                           std::int32_t height)
 {
-    return !genesis_hash.IsNull() && !pro_tx_hash.IsNull();
+    return !genesis_hash.IsNull() && !pro_tx_hash.IsNull() && height >= 0;
 }
 
 PQSignerJournalResult Result(PQSignerJournalOutcome outcome)
@@ -302,42 +309,44 @@ PQSignerJournalResult CPQSignerJournal::Reserve(
     const PQSignerBranchLock& candidate_lock,
     const std::optional<PQSignerBranchLock>& expected_lock)
 {
+    return ReserveImpl(key, message_hash, candidate_lock, expected_lock,
+                       /*require_accepted_certificate=*/false);
+}
+
+PQSignerJournalResult CPQSignerJournal::ReservePaymentAudit(
+    const PQSignerJournalKey& key,
+    const uint256& message_hash,
+    const PQSignerBranchLock& expected_certificate)
+{
+    return ReserveImpl(key, message_hash, expected_certificate, std::nullopt,
+                       /*require_accepted_certificate=*/true);
+}
+
+PQSignerJournalResult CPQSignerJournal::ReserveImpl(
+    const PQSignerJournalKey& key,
+    const uint256& message_hash,
+    const PQSignerBranchLock& statement_lock,
+    const std::optional<PQSignerBranchLock>& expected_vote,
+    bool require_accepted_certificate)
+{
     LOCK(m_mutex);
     if (m_failure) return Result(*m_failure);
     if (!IsValidKey(key) || message_hash.IsNull() ||
-        !candidate_lock.IsStructurallyValid() ||
-        candidate_lock.height != key.absolute_height ||
-        (expected_lock && !expected_lock->IsStructurallyValid())) {
+        !statement_lock.IsStructurallyValid() ||
+        statement_lock.height != key.absolute_height ||
+        (require_accepted_certificate !=
+         (key.purpose == PQSignerPurpose::PAYMENT_AUDIT)) ||
+        (expected_vote &&
+         (!expected_vote->IsStructurallyValid() ||
+          expected_vote->height != key.absolute_height))) {
         return Result(PQSignerJournalOutcome::INVALID_ARGUMENT);
     }
 
     try {
-        const BranchLockDatabaseKey branch_key{key.genesis_hash,
-                                               key.pro_tx_hash};
-        BranchLockValue durable_branch;
-        const bool branch_exists = m_db.Exists(branch_key);
-        if (branch_exists &&
-            (!m_db.Read(branch_key, durable_branch) ||
-             !IsValidBranchLock(durable_branch))) {
-            m_failure = PQSignerJournalOutcome::CORRUPT;
-            m_pending.clear();
-            return Result(*m_failure);
-        }
-        if (branch_exists != expected_lock.has_value() ||
-            (branch_exists && durable_branch.lock != *expected_lock)) {
-            return Result(PQSignerJournalOutcome::BRANCH_CONFLICT);
-        }
-        if (branch_exists &&
-            (candidate_lock.height < durable_branch.lock.height ||
-             (candidate_lock.height == durable_branch.lock.height &&
-              candidate_lock != durable_branch.lock))) {
-            return Result(PQSignerJournalOutcome::BRANCH_CONFLICT);
-        }
-
         const PQSignerJournalLeafKey leaf_key{key};
         const SlotDatabaseKey slot_key{key};
         SlotValue slot;
-        const bool slot_exists = m_db.Exists(slot_key);
+        const bool slot_exists{m_db.Exists(slot_key)};
         if (slot_exists) {
             if (!m_db.Read(slot_key, slot) || !IsValidSlot(slot) ||
                 PQSignerJournalLeafKey{slot.logical_key} != leaf_key) {
@@ -348,9 +357,91 @@ PQSignerJournalResult CPQSignerJournal::Reserve(
             if (slot.logical_key != key) {
                 return Result(PQSignerJournalOutcome::CONFLICT);
             }
+            // Startup quarantine deliberately burns a physical leaf without
+            // claiming that the operator cast a vote or accepted a seal.
             if (IsStartupConsumed(slot)) {
                 return Result(PQSignerJournalOutcome::CONSUMED);
             }
+        }
+
+        const BranchLockDatabaseKey vote_key{
+            key.genesis_hash, key.pro_tx_hash, key.absolute_height};
+        BranchLockValue durable_branch;
+        bool vote_exists{false};
+        if (require_accepted_certificate) {
+            const AcceptedCertificateDatabaseKey certificate_key{
+                key.genesis_hash, key.pro_tx_hash, key.absolute_height};
+            AcceptedCertificateValue durable_certificate;
+            if (!m_db.Exists(certificate_key)) {
+                if (slot_exists) {
+                    // A normal audit slot could only have been reserved after
+                    // this row existed. Missing authority is durable damage.
+                    m_failure = PQSignerJournalOutcome::CORRUPT;
+                    m_pending.clear();
+                    return Result(*m_failure);
+                }
+                return Result(PQSignerJournalOutcome::BRANCH_CONFLICT);
+            }
+            if (!m_db.Read(certificate_key, durable_certificate) ||
+                !IsValidAcceptedCertificate(durable_certificate) ||
+                durable_certificate.lock.height != key.absolute_height) {
+                m_failure = PQSignerJournalOutcome::CORRUPT;
+                m_pending.clear();
+                return Result(*m_failure);
+            }
+            if (durable_certificate.lock != statement_lock) {
+                return Result(PQSignerJournalOutcome::BRANCH_CONFLICT);
+            }
+        } else {
+            vote_exists = m_db.Exists(vote_key);
+            if (!vote_exists && slot_exists) {
+                // The first normal ChainLock slot and vote share one atomic
+                // batch. Only the startup tombstone handled above may lack it.
+                m_failure = PQSignerJournalOutcome::CORRUPT;
+                m_pending.clear();
+                return Result(*m_failure);
+            }
+            if (vote_exists &&
+                (!m_db.Read(vote_key, durable_branch) ||
+                 !IsValidBranchLock(durable_branch) ||
+                 durable_branch.lock.height != key.absolute_height)) {
+                m_failure = PQSignerJournalOutcome::CORRUPT;
+                m_pending.clear();
+                return Result(*m_failure);
+            }
+            if (!vote_exists) {
+                const AcceptedCertificateDatabaseKey certificate_key{
+                    key.genesis_hash, key.pro_tx_hash,
+                    key.absolute_height};
+                if (m_db.Exists(certificate_key)) {
+                    AcceptedCertificateValue durable_certificate;
+                    if (!m_db.Read(certificate_key,
+                                   durable_certificate) ||
+                        !IsValidAcceptedCertificate(
+                            durable_certificate) ||
+                        durable_certificate.lock.height !=
+                            key.absolute_height) {
+                        m_failure = PQSignerJournalOutcome::CORRUPT;
+                        m_pending.clear();
+                        return Result(*m_failure);
+                    }
+                    // A certificate reconciled before this operator's first
+                    // local vote fixes that vote. If the vote already existed,
+                    // the immutable local vote above remains authoritative.
+                    if (durable_certificate.lock != statement_lock) {
+                        return Result(
+                            PQSignerJournalOutcome::BRANCH_CONFLICT);
+                    }
+                }
+            }
+            if (vote_exists != expected_vote.has_value() ||
+                (vote_exists && durable_branch.lock != *expected_vote) ||
+                (vote_exists && durable_branch.lock != statement_lock)) {
+                return Result(PQSignerJournalOutcome::BRANCH_CONFLICT);
+            }
+        }
+
+        if (slot_exists) {
             if (slot.message_hash != message_hash) {
                 return Result(PQSignerJournalOutcome::CONFLICT);
             }
@@ -371,12 +462,13 @@ PQSignerJournalResult CPQSignerJournal::Reserve(
         reserved.logical_key = key;
         reserved.message_hash = message_hash;
 
-        // The physical leaf slot and operator-wide branch lock advance in one
-        // atomic batch. Sync=true is the burn-before-sign boundary.
+        // The first exact vote at a height and its physical leaf reservation
+        // share one fsync boundary. Audits write only their physical leaf; the
+        // accepted certificate row was independently fsynced on admission.
         CDBBatch batch{m_db};
         batch.Write(slot_key, reserved);
-        if (!branch_exists || candidate_lock.height > durable_branch.lock.height) {
-            batch.Write(branch_key, BranchLockValue{.lock = candidate_lock});
+        if (!require_accepted_certificate && !vote_exists) {
+            batch.Write(vote_key, BranchLockValue{.lock = statement_lock});
         }
         if (!m_db.WriteBatch(batch, /*fSync=*/true)) {
             m_failure = PQSignerJournalOutcome::DATABASE_ERROR;
@@ -451,17 +543,49 @@ bool CPQSignerJournal::ConsumeIfAbsent(
 
 std::optional<PQSignerBranchLock> CPQSignerJournal::GetBranchLock(
     const uint256& genesis_hash,
-    const uint256& pro_tx_hash)
+    const uint256& pro_tx_hash,
+    std::int32_t height)
 {
     LOCK(m_mutex);
-    if (m_failure || !IsValidBranchIdentity(genesis_hash, pro_tx_hash)) {
+    if (m_failure ||
+        !IsValidBranchIdentity(genesis_hash, pro_tx_hash, height)) {
         return std::nullopt;
     }
     try {
-        const BranchLockDatabaseKey key{genesis_hash, pro_tx_hash};
+        const BranchLockDatabaseKey key{genesis_hash, pro_tx_hash, height};
         if (!m_db.Exists(key)) return std::nullopt;
         BranchLockValue value;
-        if (!m_db.Read(key, value) || !IsValidBranchLock(value)) {
+        if (!m_db.Read(key, value) || !IsValidBranchLock(value) ||
+            value.lock.height != height) {
+            m_failure = PQSignerJournalOutcome::CORRUPT;
+            m_pending.clear();
+            return std::nullopt;
+        }
+        return value.lock;
+    } catch (const std::exception&) {
+        m_failure = PQSignerJournalOutcome::DATABASE_ERROR;
+        m_pending.clear();
+        return std::nullopt;
+    }
+}
+
+std::optional<PQSignerBranchLock> CPQSignerJournal::GetAcceptedCertificate(
+    const uint256& genesis_hash,
+    const uint256& pro_tx_hash,
+    std::int32_t height)
+{
+    LOCK(m_mutex);
+    if (m_failure ||
+        !IsValidBranchIdentity(genesis_hash, pro_tx_hash, height)) {
+        return std::nullopt;
+    }
+    try {
+        const AcceptedCertificateDatabaseKey key{
+            genesis_hash, pro_tx_hash, height};
+        if (!m_db.Exists(key)) return std::nullopt;
+        AcceptedCertificateValue value;
+        if (!m_db.Read(key, value) || !IsValidAcceptedCertificate(value) ||
+            value.lock.height != height) {
             m_failure = PQSignerJournalOutcome::CORRUPT;
             m_pending.clear();
             return std::nullopt;
@@ -481,7 +605,8 @@ PQSignerJournalResult CPQSignerJournal::ReconcileDurableAcceptedChainLock(
 {
     LOCK(m_mutex);
     if (m_failure) return Result(*m_failure);
-    if (!IsValidBranchIdentity(genesis_hash, pro_tx_hash) ||
+    if (!IsValidBranchIdentity(genesis_hash, pro_tx_hash,
+                               chainlock.statement.height) ||
         !chainlock.IsInternallyConsistent(genesis_hash)) {
         return Result(PQSignerJournalOutcome::INVALID_ARGUMENT);
     }
@@ -511,8 +636,8 @@ PQSignerJournalResult CPQSignerJournal::ReconcileDurableAcceptedChainLock(
     }
 
     try {
-        const AcceptedCertificateDatabaseKey certificate_key{genesis_hash,
-                                                             pro_tx_hash};
+        const AcceptedCertificateDatabaseKey certificate_key{
+            genesis_hash, pro_tx_hash, accepted.lock.height};
         AcceptedCertificateValue durable_certificate;
         const bool certificate_exists{m_db.Exists(certificate_key)};
         if (certificate_exists &&
@@ -523,55 +648,22 @@ PQSignerJournalResult CPQSignerJournal::ReconcileDurableAcceptedChainLock(
             return Result(*m_failure);
         }
 
-        const BranchLockDatabaseKey branch_key{genesis_hash, pro_tx_hash};
-        BranchLockValue durable_branch;
-        const bool branch_exists{m_db.Exists(branch_key)};
-        if (branch_exists &&
-            (!m_db.Read(branch_key, durable_branch) ||
-             !IsValidBranchLock(durable_branch))) {
-            m_failure = PQSignerJournalOutcome::CORRUPT;
-            m_pending.clear();
-            return Result(*m_failure);
-        }
-
         if (certificate_exists) {
-            if (accepted.lock.height < durable_certificate.lock.height ||
-                (accepted.lock.height == durable_certificate.lock.height &&
-                 accepted != durable_certificate)) {
-                // The finality persistence source supplied an older or
-                // conflicting winner. Continuing could turn a restored DB
-                // snapshot into authority to re-sign an adjudicated fork.
+            if (accepted != durable_certificate) {
+                // One height has one durable winner. A conflicting restored
+                // record is not authority to change either that winner or an
+                // independent local vote at the same height.
                 m_failure = PQSignerJournalOutcome::CORRUPT;
                 m_pending.clear();
                 return Result(*m_failure);
             }
-            if (accepted == durable_certificate) {
-                // The certificate marker and branch lock were committed in
-                // one batch. A missing/older/conflicting lock cannot be an
-                // interrupted reconciliation and therefore fails closed.
-                if (!branch_exists ||
-                    durable_branch.lock.height < accepted.lock.height ||
-                    (durable_branch.lock.height == accepted.lock.height &&
-                     durable_branch.lock != accepted.lock)) {
-                    m_failure = PQSignerJournalOutcome::CORRUPT;
-                    m_pending.clear();
-                    return Result(*m_failure);
-                }
-                m_last_successful_reconciliation = ReconciliationMemo{
-                    genesis_hash, pro_tx_hash, accepted.lock,
-                    accepted.logical_id, accepted.witness_id};
-                return Result(PQSignerJournalOutcome::CERTIFICATE_REPLAY);
-            }
+            m_last_successful_reconciliation = ReconciliationMemo{
+                genesis_hash, pro_tx_hash, accepted.lock,
+                accepted.logical_id, accepted.witness_id};
+            return Result(PQSignerJournalOutcome::CERTIFICATE_REPLAY);
         }
 
-        const bool rebase_branch{
-            !branch_exists || durable_branch.lock.height <= accepted.lock.height};
-        CDBBatch batch{m_db};
-        batch.Write(certificate_key, accepted);
-        if (rebase_branch) {
-            batch.Write(branch_key, BranchLockValue{.lock = accepted.lock});
-        }
-        if (!m_db.WriteBatch(batch, /*fSync=*/true)) {
+        if (!m_db.Write(certificate_key, accepted, /*fSync=*/true)) {
             m_failure = PQSignerJournalOutcome::DATABASE_ERROR;
             m_pending.clear();
             return Result(*m_failure);
@@ -579,9 +671,7 @@ PQSignerJournalResult CPQSignerJournal::ReconcileDurableAcceptedChainLock(
         m_last_successful_reconciliation = ReconciliationMemo{
             genesis_hash, pro_tx_hash, accepted.lock,
             accepted.logical_id, accepted.witness_id};
-        return Result(rebase_branch
-                          ? PQSignerJournalOutcome::CERTIFICATE_RECONCILED
-                          : PQSignerJournalOutcome::CERTIFICATE_RECORDED);
+        return Result(PQSignerJournalOutcome::CERTIFICATE_RECORDED);
     } catch (const std::exception&) {
         m_failure = PQSignerJournalOutcome::DATABASE_ERROR;
         m_pending.clear();

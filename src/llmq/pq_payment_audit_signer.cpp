@@ -66,7 +66,7 @@ PaymentAuditSigningResult PaymentAuditShareSigner::Sign(
     uint16_t member_index,
     const scheduled_wots::SecretKey& child_secret_key,
     const ChildKeyProof& child_key_proof,
-    const std::optional<PQSignerBranchLock>& expected_branch_lock,
+    const std::optional<PQSignerBranchLock>& expected_accepted_certificate,
     ChainLockSigningError* error)
 {
     SetError(error, ChainLockSigningError::NONE);
@@ -153,11 +153,12 @@ PaymentAuditSigningResult PaymentAuditShareSigner::Sign(
         seal_statement.height,
         seal_statement.block_hash,
         GetLogicalChainLockId(m_genesis_hash, seal_statement)};
-    if (!expected_branch_lock || *expected_branch_lock != seal_lock) {
+    if (!expected_accepted_certificate ||
+        *expected_accepted_certificate != seal_lock) {
         return Failure(error, ChainLockSigningError::JOURNAL_CONFLICT);
     }
-    const PQSignerJournalResult reservation{m_journal.Reserve(
-        journal_key, message_hash, seal_lock, expected_branch_lock)};
+    const PQSignerJournalResult reservation{m_journal.ReservePaymentAudit(
+        journal_key, message_hash, *expected_accepted_certificate)};
     if (reservation.outcome == PQSignerJournalOutcome::REPLAY) {
         if (!reservation.signature) {
             return Failure(error, ChainLockSigningError::JOURNAL_FAILURE);

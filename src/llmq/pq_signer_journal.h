@@ -26,6 +26,7 @@ namespace pq {
 struct FinalChainLockRecordMetadata;
 }
 namespace test {
+class PQPaymentAuditVerifyTestAccess;
 class PQSignerJournalTestAccess;
 }
 
@@ -108,12 +109,11 @@ struct PQSignerJournalLeafKey
 };
 
 /**
- * Operator-wide finality lock advanced atomically with each slot reservation.
+ * Operator-wide exact-statement lock for one ChainLock target height.
  *
- * This is intentionally independent of a child key and epoch. Quorum rotation
- * or a child-root rotation must not let one operator sign incompatible branches.
- * The caller proves ancestry under cs_main; the journal makes that proof
- * race-free by requiring the exact lock value that was checked.
+ * This is intentionally independent of a child key and epoch. Multiple roster
+ * appearances at the same height must therefore reuse the same statement, while
+ * a losing vote at one height cannot prevent signing a later target.
  */
 struct PQSignerBranchLock
 {
@@ -147,13 +147,11 @@ enum class PQSignerJournalOutcome : std::uint8_t {
     CONSUMED,
     /** No reservation exists for a requested signature commit. */
     NOT_RESERVED,
-    /** The candidate does not extend the exact durable operator branch lock. */
+    /** The candidate conflicts with the exact durable row for this height. */
     BRANCH_CONFLICT,
-    /** A durable accepted certificate replaced or initialized the branch lock. */
-    CERTIFICATE_RECONCILED,
     /** The exact certificate reconciliation was already committed. */
     CERTIFICATE_REPLAY,
-    /** The certificate was recorded, but a higher local branch lock remains. */
+    /** The certificate was recorded in its immutable per-height row. */
     CERTIFICATE_RECORDED,
     /** The key is structurally invalid; no database mutation occurred. */
     INVALID_ARGUMENT,
@@ -201,14 +199,25 @@ public:
     CPQSignerJournal& operator=(const CPQSignerJournal&) = delete;
 
     /**
-     * Fsync EMPTY -> RESERVED before returning RESERVED. REPLAY is the only
-     * outcome carrying a signature and never calls a cryptographic signer.
+     * Atomically fsync the first exact ChainLock vote at this target height and
+     * EMPTY -> RESERVED before returning RESERVED. REPLAY is the only outcome
+     * carrying a signature and never calls a cryptographic signer.
      */
     [[nodiscard]] PQSignerJournalResult Reserve(
         const PQSignerJournalKey& key,
         const uint256& message_hash,
         const PQSignerBranchLock& candidate_lock,
         const std::optional<PQSignerBranchLock>& expected_lock)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /**
+     * Reserve a payment-audit leaf only when the exact seal certificate has
+     * already been durably accepted. This never reads or writes a vote row.
+     */
+    [[nodiscard]] PQSignerJournalResult ReservePaymentAudit(
+        const PQSignerJournalKey& key,
+        const uint256& message_hash,
+        const PQSignerBranchLock& expected_certificate)
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /**
@@ -224,16 +233,24 @@ public:
     [[nodiscard]] bool IsHealthy() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /**
-     * Read the lock that a caller must validate as an ancestor before Reserve.
-     * A null result means no signature has been reserved for this operator;
-     * callers must separately require IsHealthy() to distinguish DB failure.
+     * Read the immutable local vote for one exact target height. A null result
+     * means no signature has been reserved at that height; callers must
+     * separately require IsHealthy() to distinguish DB failure.
      */
     [[nodiscard]] std::optional<PQSignerBranchLock> GetBranchLock(
         const uint256& genesis_hash,
-        const uint256& pro_tx_hash) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+        const uint256& pro_tx_hash,
+        std::int32_t height) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /** Read one immutable durably accepted certificate row by height. */
+    [[nodiscard]] std::optional<PQSignerBranchLock> GetAcceptedCertificate(
+        const uint256& genesis_hash,
+        const uint256& pro_tx_hash,
+        std::int32_t height) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
 private:
     friend class CChainLocksHandler;
+    friend class test::PQPaymentAuditVerifyTestAccess;
     friend class test::PQSignerJournalTestAccess;
 
     struct PendingReservation {
@@ -258,14 +275,22 @@ private:
 
     void Initialize() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
+    [[nodiscard]] PQSignerJournalResult ReserveImpl(
+        const PQSignerJournalKey& key,
+        const uint256& message_hash,
+        const PQSignerBranchLock& statement_lock,
+        const std::optional<PQSignerBranchLock>& expected_vote,
+        bool require_accepted_certificate)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
     /**
-     * Atomically record a fully verified, durably accepted certificate and
-     * rebase this operator's lock when the certificate is at least as high.
+     * Record a fully verified, durably accepted certificate in its immutable
+     * per-height row. Reconciliation never changes a local vote row.
      *
      * Only CChainLocksHandler can supply this authority, after finality-store
-     * acceptance has completed its certificate fsync. The test friend exists
-     * solely to exercise the crash and monotonicity invariants. Leaf-slot
-     * records are deliberately outside the batch and can never be refunded.
+     * acceptance has completed its certificate fsync. The test friends exist
+     * solely to exercise the durability boundary. Leaf-slot records are
+     * independent and can never be refunded.
      */
     [[nodiscard]] PQSignerJournalResult ReconcileDurableAcceptedChainLock(
         const uint256& genesis_hash,

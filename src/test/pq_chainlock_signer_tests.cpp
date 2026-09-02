@@ -49,6 +49,40 @@ RosterBeaconWindow NormalWindow(uint32_t first_epoch)
     return window;
 }
 
+RecoveryRosterAuthorityPtr BindRecoveryAuthority(
+    const uint256& genesis_hash,
+    ActiveRosterBeaconBundle& bundle,
+    uint64_t salt)
+{
+    auto authority{std::make_shared<RecoveryRosterAuthority>()};
+    authority->normal_beacon = bundle.seeds.back();
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        for (std::size_t member{0}; member < QUORUM_SIZE; ++member) {
+            auto& entry{authority->slots[slot][member]};
+            entry.pro_tx_hash =
+                NonNullHash(salt + slot * QUORUM_SIZE + member + 1);
+            entry.eligible = member < QUORUM_MIN_VALID;
+            if (!entry.eligible) continue;
+            RecoveryRosterChildCommitment child_root;
+            child_root.global_key_version = 1;
+            child_root.commitment.generation = 1;
+            child_root.commitment.tree_id = NonNullHash(
+                salt + 10'000 + slot * QUORUM_SIZE + member);
+            child_root.commitment.root = NonNullHash(
+                salt + 20'000 + slot * QUORUM_SIZE + member);
+            entry.child_root = std::move(child_root);
+        }
+    }
+    BOOST_REQUIRE(authority->IsStructurallyValid());
+    const auto authority_hash{
+        GetRecoveryRosterAuthorityHash(genesis_hash, *authority)};
+    BOOST_REQUIRE(authority_hash);
+    bundle.recovery_authority_source.normal_beacon =
+        authority->normal_beacon;
+    bundle.recovery_authority_hash = *authority_hash;
+    return authority;
+}
+
 void SetBit(QuorumBitmap& bitmap, std::size_t member)
 {
     bitmap[member / 8] |= static_cast<uint8_t>(uint8_t{1} << (member % 8));
@@ -72,6 +106,7 @@ struct SignerFixture {
     ChainLockStatement statement;
     std::array<FrozenQuorumRoster, ACTIVE_QUORUMS> rosters;
     RosterAuthorizationVerificationContext authorization;
+    RecoveryRosterAuthorityPtr recovery_authority;
     std::optional<scheduled_wots::SecretKey> child_secret_key;
     ChildKeyProof child_key_proof;
 };
@@ -80,12 +115,15 @@ std::unique_ptr<SignerFixture> MakeFixture()
 {
     // A by-value return leaves fixture-sized temporaries in MSVC caller frames.
     auto fixture{std::make_unique<SignerFixture>()};
-    fixture->statement.height = 2305;
+    fixture->statement.height = 2310;
     fixture->statement.block_hash = NonNullHash(8100);
-    fixture->statement.previous_chainlock_height = 2300;
+    fixture->statement.previous_chainlock_height = 2305;
     fixture->statement.previous_chainlock_hash = NonNullHash(8099);
     fixture->statement.payment_probation_state_hash = NonNullHash(8101);
     fixture->statement.roster_beacons = NormalWindow(0);
+    fixture->recovery_authority = BindRecoveryAuthority(
+        fixture->genesis_hash, fixture->statement.roster_beacons.active,
+        800'000);
     fixture->statement.roster_transition =
         RosterAuthorizationTransitionKind::KEEP;
     fixture->authorization.admission =
@@ -94,6 +132,15 @@ std::unique_ptr<SignerFixture> MakeFixture()
         fixture->statement.previous_chainlock_height;
     fixture->authorization.predecessor_block_hash =
         fixture->statement.previous_chainlock_hash;
+    fixture->authorization.reset_policy = RosterResetVerificationPolicy{
+        fixture->schedule,
+        BTCCScheduleConfig{.candidate_origin = 2305}, 2304};
+    fixture->statement.roster_authorization_base = {
+        fixture->statement.previous_chainlock_height,
+        fixture->statement.previous_chainlock_hash,
+        NonNullHash(8101)};
+    fixture->authorization.authorization_base =
+        fixture->statement.roster_authorization_base;
     fixture->authorization.previous = RosterAuthorizationPriorState{
         NonNullHash(8102), fixture->statement.roster_beacons};
     NormalRosterAuthorizationInput normal;
@@ -105,16 +152,20 @@ std::unique_ptr<SignerFixture> MakeFixture()
         fixture->statement.previous_chainlock_height;
     normal.predecessor_block_hash =
         fixture->statement.previous_chainlock_hash;
-    normal.prior_authorization_height =
-        fixture->statement.previous_chainlock_height;
-    normal.prior_authorization_block_hash =
-        fixture->statement.previous_chainlock_hash;
+    normal.authorization_base =
+        fixture->statement.roster_authorization_base;
     normal.previous = *fixture->authorization.previous;
     normal.previous_btcc_cursor =
         fixture->statement.previous_btcc_cursor;
     normal.accepted_btcc_cursor =
         fixture->statement.accepted_btcc_cursor;
     normal.btcc_advance = fixture->statement.btcc_advance;
+    normal.recovery_authority_source =
+        fixture->statement.roster_beacons.active
+            .recovery_authority_source;
+    normal.recovery_authority_hash =
+        fixture->statement.roster_beacons.active
+            .recovery_authority_hash;
     normal.next_snapshot.epoch = normal.newest_epoch + 1;
     normal.next_snapshot.height = 2'592;
     fixture->authorization.normal_input = normal;
@@ -208,9 +259,13 @@ PreparedChainLockContextPtr PrepareContext(const SignerFixture& fixture,
     statement.roster_beacons = decision->transition.new_window;
     statement.roster_authorization_state_hash = decision->state_hash;
     ChainLockVerificationError error{ChainLockVerificationError::NONE};
-    auto context{PreparedChainLockContext::Create(
-        fixture.genesis_hash, fixture.schedule, std::move(statement),
+    auto roster_set{VerifiedRosterSet::Create(
+        fixture.genesis_hash,
         std::make_shared<const FrozenQuorumRosters>(fixture.rosters),
+        &error, fixture.recovery_authority)};
+    BOOST_REQUIRE(roster_set);
+    auto context{PreparedChainLockContext::Create(
+        fixture.schedule, std::move(statement), std::move(roster_set),
         authorization, &error)};
     BOOST_REQUIRE(context);
     BOOST_CHECK(error == ChainLockVerificationError::NONE);
@@ -243,16 +298,17 @@ BOOST_AUTO_TEST_CASE(signs_after_durable_reservation_and_replays_exact_share)
     BOOST_CHECK(!first.replayed);
     BOOST_CHECK(error == ChainLockSigningError::NONE);
     ChainLockVerificationError verify_error{ChainLockVerificationError::INVALID_ARGUMENT};
-    BOOST_CHECK(VerifyChainLockShare(
-        fixture->genesis_hash, fixture->schedule, *first.share,
-        fixture->rosters,
-        fixture->authorization, &verify_error));
+    const auto verification{PrepareChainLockShareVerification(
+        *first.share, *context, &verify_error)};
+    BOOST_REQUIRE(verification);
+    BOOST_CHECK((*verification)());
 
     const auto replay{signer.Sign(
         *context, 0, 0,
         *fixture->child_secret_key, fixture->child_key_proof,
         journal.GetBranchLock(fixture->genesis_hash,
-                              fixture->local_pro_tx_hash),
+                              fixture->local_pro_tx_hash,
+                              fixture->statement.height),
         &error)};
     BOOST_REQUIRE(replay.share);
     BOOST_CHECK(replay.replayed);
@@ -285,7 +341,8 @@ BOOST_AUTO_TEST_CASE(refuses_equivocation_and_wrong_secret_key)
         *competing_context, 0, 0,
         *fixture->child_secret_key, fixture->child_key_proof,
         journal.GetBranchLock(fixture->genesis_hash,
-                              fixture->local_pro_tx_hash),
+                              fixture->local_pro_tx_hash,
+                              fixture->statement.height),
         &error).share);
     BOOST_CHECK(error == ChainLockSigningError::JOURNAL_CONFLICT);
 
@@ -306,7 +363,8 @@ BOOST_AUTO_TEST_CASE(refuses_equivocation_and_wrong_secret_key)
         *other_height_context, 0, 0,
         *other_secret_key, fixture->child_key_proof,
         journal.GetBranchLock(fixture->genesis_hash,
-                              fixture->local_pro_tx_hash),
+                              fixture->local_pro_tx_hash,
+                              other_height.height),
         &error).share);
     BOOST_CHECK(error == ChainLockSigningError::SECRET_KEY_MISMATCH);
 }
@@ -327,7 +385,8 @@ BOOST_AUTO_TEST_CASE(rejects_wrong_operator_before_journal_reservation)
         std::nullopt, &error).share);
     BOOST_CHECK(error == ChainLockSigningError::WRONG_OPERATOR);
     BOOST_CHECK(!journal.GetBranchLock(
-        fixture->genesis_hash, fixture->local_pro_tx_hash));
+        fixture->genesis_hash, fixture->local_pro_tx_hash,
+        fixture->statement.height));
 }
 
 BOOST_AUTO_TEST_CASE(rejects_invalid_schedule_before_leaf_reservation)
@@ -349,7 +408,8 @@ BOOST_AUTO_TEST_CASE(rejects_invalid_schedule_before_leaf_reservation)
         std::nullopt, &error).share);
     BOOST_CHECK(error == ChainLockSigningError::INVALID_SCHEDULE);
     BOOST_CHECK(!journal.GetBranchLock(
-        fixture->genesis_hash, fixture->local_pro_tx_hash));
+        fixture->genesis_hash, fixture->local_pro_tx_hash,
+        fixture->statement.height));
 }
 
 BOOST_AUTO_TEST_CASE(rejects_mismatched_prepared_context_before_reservation)
@@ -369,7 +429,8 @@ BOOST_AUTO_TEST_CASE(rejects_mismatched_prepared_context_before_reservation)
         fixture->child_key_proof, std::nullopt, &error).share);
     BOOST_CHECK(error == ChainLockSigningError::INVALID_CONTEXT);
     BOOST_CHECK(!journal.GetBranchLock(
-        wrong_genesis, fixture->local_pro_tx_hash));
+        wrong_genesis, fixture->local_pro_tx_hash,
+        fixture->statement.height));
 
     auto other_schedule{fixture->schedule};
     other_schedule.epoch_origin = 0;
@@ -382,7 +443,8 @@ BOOST_AUTO_TEST_CASE(rejects_mismatched_prepared_context_before_reservation)
         fixture->child_key_proof, std::nullopt, &error).share);
     BOOST_CHECK(error == ChainLockSigningError::INVALID_CONTEXT);
     BOOST_CHECK(!journal.GetBranchLock(
-        fixture->genesis_hash, fixture->local_pro_tx_hash));
+        fixture->genesis_hash, fixture->local_pro_tx_hash,
+        fixture->statement.height));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

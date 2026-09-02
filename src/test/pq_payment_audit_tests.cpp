@@ -63,6 +63,10 @@ void SealNormalKeepRosterAuthorization(
         active_epochs->back().epoch + 1;
     statement.roster_transition =
         RosterAuthorizationTransitionKind::KEEP;
+    statement.roster_authorization_base = {
+        statement.previous_chainlock_height,
+        statement.previous_chainlock_hash,
+        NonNullHash(399'000 + static_cast<uint64_t>(statement.height))};
 
     RosterAuthorizationTransition transition;
     transition.kind = statement.roster_transition;
@@ -72,6 +76,7 @@ void SealNormalKeepRosterAuthorization(
         statement.previous_chainlock_height;
     transition.predecessor_block_hash =
         statement.previous_chainlock_hash;
+    transition.authorization_base = statement.roster_authorization_base;
     transition.previous = RosterAuthorizationPriorState{
         NonNullHash(400'000 + static_cast<uint64_t>(statement.height)),
         statement.roster_beacons};

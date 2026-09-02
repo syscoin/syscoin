@@ -103,6 +103,21 @@ uint256 MakeHash(std::uint64_t value)
     return hash;
 }
 
+struct HeightAuthorityDatabaseKey
+{
+    std::uint8_t prefix{0};
+    std::uint32_t db_version{llmq::CPQSignerJournal::DB_FORMAT_VERSION};
+    uint256 genesis_hash;
+    uint256 pro_tx_hash;
+    std::int32_t height{-1};
+
+    SERIALIZE_METHODS(HeightAuthorityDatabaseKey, obj)
+    {
+        READWRITE(obj.prefix, obj.db_version, obj.genesis_hash,
+                  obj.pro_tx_hash, obj.height);
+    }
+};
+
 void SetFirstMembers(llmq::pq::QuorumBitmap& bitmap, std::size_t count)
 {
     bitmap.fill(0);
@@ -146,6 +161,10 @@ llmq::pq::FinalChainLock MakeCertificate(
         llmq::pq::RosterAuthorizationTransitionKind::KEEP;
     chainlock.statement.roster_beacons = MakeRosterBeaconWindow();
     chainlock.statement.roster_authorization_state_hash = MakeHash(45'000);
+    chainlock.statement.roster_authorization_base = {
+        chainlock.statement.previous_chainlock_height,
+        chainlock.statement.previous_chainlock_hash,
+        MakeHash(static_cast<std::uint64_t>(45'500 + height))};
     chainlock.statement.payment_probation_state_hash = MakeHash(50'000);
     chainlock.selected_quorum_mask = 0b1011;
     SetFirstMembers(chainlock.signer_bitmaps[0], llmq::pq::QUORUM_THRESHOLD);
@@ -185,12 +204,19 @@ llmq::PQSignerJournalResult ReserveSlot(
     const llmq::PQSignerJournalKey& key,
     const uint256& message_hash)
 {
-    const auto expected{journal.GetBranchLock(key.genesis_hash,
-                                              key.pro_tx_hash)};
-    auto candidate{MakeBranchLock(key)};
-    if (expected && expected->height == key.absolute_height) {
-        candidate = *expected;
+    if (key.purpose == llmq::PQSignerPurpose::PAYMENT_AUDIT) {
+        const auto accepted{journal.GetAcceptedCertificate(
+            key.genesis_hash, key.pro_tx_hash, key.absolute_height)};
+        if (accepted) {
+            return journal.ReservePaymentAudit(key, message_hash, *accepted);
+        }
+        return journal.ReservePaymentAudit(
+            key, message_hash, MakeBranchLock(key));
     }
+    const auto expected{journal.GetBranchLock(
+        key.genesis_hash, key.pro_tx_hash, key.absolute_height)};
+    auto candidate{MakeBranchLock(key)};
+    if (expected) candidate = *expected;
     return journal.Reserve(key, message_hash, candidate, expected);
 }
 
@@ -286,7 +312,8 @@ BOOST_AUTO_TEST_CASE(startup_consumption_burns_only_an_absent_physical_slot)
         BOOST_REQUIRE(
             llmq::test::PQSignerJournalTestAccess::ConsumeIfAbsent(journal,
                                                                    key));
-        BOOST_CHECK(!journal.GetBranchLock(key.genesis_hash, key.pro_tx_hash));
+        BOOST_CHECK(!journal.GetBranchLock(
+            key.genesis_hash, key.pro_tx_hash, key.absolute_height));
         CheckOutcome(ReserveSlot(journal, key, MakeHash(23)),
                      llmq::PQSignerJournalOutcome::CONSUMED);
 
@@ -385,7 +412,7 @@ BOOST_AUTO_TEST_CASE(competing_message_never_replaces_live_reservation)
     CheckOutcome(ReserveSlot(journal, key, competing_message), llmq::PQSignerJournalOutcome::CONFLICT);
 }
 
-BOOST_AUTO_TEST_CASE(operator_branch_lock_is_atomic_monotonic_and_persistent)
+BOOST_AUTO_TEST_CASE(operator_statement_locks_are_atomic_exact_and_per_height)
 {
     const fs::path path = m_path_root / "pq_signer_journal_branch_lock";
     auto first_key = MakeKey();
@@ -396,15 +423,22 @@ BOOST_AUTO_TEST_CASE(operator_branch_lock_is_atomic_monotonic_and_persistent)
         CheckOutcome(
             journal.Reserve(first_key, uint256{71}, first_lock, std::nullopt),
             llmq::PQSignerJournalOutcome::RESERVED);
-        BOOST_REQUIRE(journal.GetBranchLock(first_key.genesis_hash,
-                                            first_key.pro_tx_hash));
-        BOOST_CHECK(*journal.GetBranchLock(first_key.genesis_hash,
-                                           first_key.pro_tx_hash) == first_lock);
+        BOOST_REQUIRE(journal.GetBranchLock(
+            first_key.genesis_hash, first_key.pro_tx_hash,
+            first_key.absolute_height));
+        BOOST_CHECK(*journal.GetBranchLock(
+                        first_key.genesis_hash, first_key.pro_tx_hash,
+                        first_key.absolute_height) == first_lock);
 
         auto competing_lock = first_lock;
         competing_lock.block_hash = uint256{99};
+        auto competing_key = first_key;
+        ++competing_key.quorum_epoch;
+        competing_key.child_key_hash = MakeHash(98);
+        ++competing_key.leaf_index;
         CheckOutcome(
-            journal.Reserve(first_key, uint256{72}, competing_lock, first_lock),
+            journal.Reserve(competing_key, uint256{72}, competing_lock,
+                            first_lock),
             llmq::PQSignerJournalOutcome::BRANCH_CONFLICT);
 
         auto next_key = first_key;
@@ -413,23 +447,64 @@ BOOST_AUTO_TEST_CASE(operator_branch_lock_is_atomic_monotonic_and_persistent)
         const auto next_lock = MakeBranchLock(next_key);
         CheckOutcome(
             journal.Reserve(next_key, uint256{73}, next_lock, std::nullopt),
-            llmq::PQSignerJournalOutcome::BRANCH_CONFLICT);
-        CheckOutcome(
-            journal.Reserve(next_key, uint256{73}, next_lock, first_lock),
             llmq::PQSignerJournalOutcome::RESERVED);
+        BOOST_CHECK(*journal.GetBranchLock(
+                        next_key.genesis_hash, next_key.pro_tx_hash,
+                        next_key.absolute_height) == next_lock);
+        BOOST_CHECK(*journal.GetBranchLock(
+                        first_key.genesis_hash, first_key.pro_tx_hash,
+                        first_key.absolute_height) == first_lock);
     }
 
     llmq::CPQSignerJournal restarted{path};
-    const auto durable{restarted.GetBranchLock(first_key.genesis_hash,
-                                               first_key.pro_tx_hash)};
-    BOOST_REQUIRE(durable);
-    BOOST_CHECK(durable->height == first_key.absolute_height + 5);
+    const auto durable_first{restarted.GetBranchLock(
+        first_key.genesis_hash, first_key.pro_tx_hash,
+        first_key.absolute_height)};
+    const auto durable_next{restarted.GetBranchLock(
+        first_key.genesis_hash, first_key.pro_tx_hash,
+        first_key.absolute_height + 5)};
+    BOOST_REQUIRE(durable_first);
+    BOOST_REQUIRE(durable_next);
+    BOOST_CHECK(*durable_first == first_lock);
+    BOOST_CHECK(durable_next->height == first_key.absolute_height + 5);
     CheckOutcome(
-        restarted.Reserve(first_key, uint256{71}, first_lock, durable),
-        llmq::PQSignerJournalOutcome::BRANCH_CONFLICT);
+        restarted.Reserve(first_key, uint256{71}, first_lock, durable_first),
+        llmq::PQSignerJournalOutcome::CONSUMED);
 }
 
-BOOST_AUTO_TEST_CASE(durable_certificate_rebases_fork_without_refunding_slot)
+BOOST_AUTO_TEST_CASE(normal_slot_without_its_atomic_vote_fails_closed)
+{
+    const fs::path path = m_path_root / "pq_signer_journal_missing_vote";
+    const auto key{MakeKey()};
+    const uint256 message{MakeHash(74)};
+    {
+        llmq::CPQSignerJournal journal{path};
+        CheckOutcome(ReserveSlot(journal, key, message),
+                     llmq::PQSignerJournalOutcome::RESERVED);
+    }
+    {
+        CDBWrapper raw_db{DBParams{
+            .path = path,
+            .cache_bytes = 1 << 20,
+            .memory_only = false,
+            .wipe_data = false,
+            .obfuscate = false}};
+        BOOST_REQUIRE(raw_db.Erase(
+            HeightAuthorityDatabaseKey{
+                .prefix = 0x73,
+                .genesis_hash = key.genesis_hash,
+                .pro_tx_hash = key.pro_tx_hash,
+                .height = key.absolute_height},
+            /*fSync=*/true));
+    }
+
+    llmq::CPQSignerJournal restarted{path};
+    CheckOutcome(ReserveSlot(restarted, key, message),
+                 llmq::PQSignerJournalOutcome::CORRUPT);
+    BOOST_CHECK(!restarted.IsHealthy());
+}
+
+BOOST_AUTO_TEST_CASE(durable_certificate_never_rewrites_vote_or_refunds_slot)
 {
     const fs::path path = m_path_root / "pq_signer_journal_reconcile";
     const auto fork_a_key{MakeKey()};
@@ -483,26 +558,33 @@ BOOST_AUTO_TEST_CASE(durable_certificate_rebases_fork_without_refunding_slot)
                 invalid_metadata),
             llmq::PQSignerJournalOutcome::INVALID_ARGUMENT);
         BOOST_REQUIRE(journal.GetBranchLock(
-            fork_a_key.genesis_hash, fork_a_key.pro_tx_hash));
+            fork_a_key.genesis_hash, fork_a_key.pro_tx_hash,
+            fork_a_key.absolute_height));
         BOOST_CHECK(*journal.GetBranchLock(
-                        fork_a_key.genesis_hash, fork_a_key.pro_tx_hash) ==
+                        fork_a_key.genesis_hash, fork_a_key.pro_tx_hash,
+                        fork_a_key.absolute_height) ==
                     fork_a_lock);
     }
 
-    // Model a crash after the accepted certificate DB fsync but before the
-    // signer-journal batch. Startup full verification supplies the same winner
-    // to this idempotent reconciliation boundary.
+    // Startup full verification supplies the durably accepted winner to this
+    // idempotent boundary without changing the operator's losing local vote.
     {
         llmq::CPQSignerJournal restarted{path};
         CheckOutcome(
             llmq::test::PQSignerJournalTestAccess::Reconcile(
                 restarted, fork_a_key.genesis_hash, fork_a_key.pro_tx_hash,
                 fork_b_certificate),
-            llmq::PQSignerJournalOutcome::CERTIFICATE_RECONCILED);
-        const auto rebased{restarted.GetBranchLock(
-            fork_a_key.genesis_hash, fork_a_key.pro_tx_hash)};
-        BOOST_REQUIRE(rebased);
-        BOOST_CHECK(*rebased == fork_b_lock);
+            llmq::PQSignerJournalOutcome::CERTIFICATE_RECORDED);
+        const auto durable_vote{restarted.GetBranchLock(
+            fork_a_key.genesis_hash, fork_a_key.pro_tx_hash,
+            fork_a_key.absolute_height)};
+        const auto durable_certificate{restarted.GetAcceptedCertificate(
+            fork_a_key.genesis_hash, fork_a_key.pro_tx_hash,
+            fork_a_key.absolute_height)};
+        BOOST_REQUIRE(durable_vote);
+        BOOST_REQUIRE(durable_certificate);
+        BOOST_CHECK(*durable_vote == fork_a_lock);
+        BOOST_CHECK(*durable_certificate == fork_b_lock);
         BOOST_CHECK_EQUAL(
             llmq::test::PQSignerJournalTestAccess::ReconciliationMemoHits(
                 restarted),
@@ -528,17 +610,17 @@ BOOST_AUTO_TEST_CASE(durable_certificate_rebases_fork_without_refunding_slot)
                 restarted),
             1U);
 
-        // Reconciliation changes only the operator branch authority. The old
-        // child slot and exact signature remain permanently consumed.
+        // Reconciliation changes only accepted-certificate authority. The
+        // losing local vote and its exact signature remain immutable.
         const auto replay{restarted.Reserve(
-            fork_a_key, fork_a_message, fork_b_lock, fork_b_lock)};
+            fork_a_key, fork_a_message, fork_a_lock, fork_a_lock)};
         CheckOutcome(replay, llmq::PQSignerJournalOutcome::REPLAY);
         BOOST_REQUIRE(replay.signature.has_value());
         BOOST_CHECK(*replay.signature == fork_a_signature);
         CheckOutcome(
             restarted.Reserve(
-                fork_a_key, uint256{82}, fork_b_lock, fork_b_lock),
-            llmq::PQSignerJournalOutcome::CONFLICT);
+                fork_a_key, uint256{82}, fork_b_lock, fork_a_lock),
+            llmq::PQSignerJournalOutcome::BRANCH_CONFLICT);
 
         auto descendant_key{fork_a_key};
         descendant_key.absolute_height += 5;
@@ -550,7 +632,7 @@ BOOST_AUTO_TEST_CASE(durable_certificate_rebases_fork_without_refunding_slot)
         };
         CheckOutcome(
             restarted.Reserve(descendant_key, uint256{83}, descendant_lock,
-                              fork_b_lock),
+                              std::nullopt),
             llmq::PQSignerJournalOutcome::RESERVED);
         CheckOutcome(
             llmq::test::PQSignerJournalTestAccess::Reconcile(
@@ -582,11 +664,86 @@ BOOST_AUTO_TEST_CASE(durable_certificate_rebases_fork_without_refunding_slot)
         llmq::test::PQSignerJournalTestAccess::ReconciliationMemoHits(
             restarted_again),
         1U);
-    const auto durable{restarted_again.GetBranchLock(
-        fork_a_key.genesis_hash, fork_a_key.pro_tx_hash)};
-    BOOST_REQUIRE(durable);
-    BOOST_CHECK_EQUAL(durable->height, fork_a_key.absolute_height + 5);
-    BOOST_CHECK(durable->block_hash == MakeHash(50'005));
+    const auto durable_vote{restarted_again.GetBranchLock(
+        fork_a_key.genesis_hash, fork_a_key.pro_tx_hash,
+        fork_a_key.absolute_height)};
+    const auto durable_descendant_vote{restarted_again.GetBranchLock(
+        fork_a_key.genesis_hash, fork_a_key.pro_tx_hash,
+        fork_a_key.absolute_height + 5)};
+    const auto durable_certificate{restarted_again.GetAcceptedCertificate(
+        fork_a_key.genesis_hash, fork_a_key.pro_tx_hash,
+        fork_a_key.absolute_height)};
+    BOOST_REQUIRE(durable_vote);
+    BOOST_REQUIRE(durable_descendant_vote);
+    BOOST_REQUIRE(durable_certificate);
+    BOOST_CHECK(*durable_vote == fork_a_lock);
+    BOOST_CHECK(durable_descendant_vote->block_hash == MakeHash(50'005));
+    BOOST_CHECK(*durable_certificate == fork_b_lock);
+}
+
+BOOST_AUTO_TEST_CASE(accepted_certificate_fixes_a_later_first_vote)
+{
+    const fs::path path{
+        m_path_root / "pq_signer_journal_accepted_first"};
+    const auto base_key{MakeKey()};
+    const auto certificate{MakeCertificate(
+        base_key.absolute_height, MakeHash(65'000), 19)};
+    const auto accepted_lock{
+        CertificateLock(base_key.genesis_hash, certificate)};
+
+    auto conflicting_key{base_key};
+    ++conflicting_key.quorum_epoch;
+    conflicting_key.child_key_hash = MakeHash(65'001);
+    ++conflicting_key.leaf_index;
+    auto conflicting_lock{accepted_lock};
+    conflicting_lock.block_hash = MakeHash(65'002);
+    conflicting_lock.statement_hash = MakeHash(65'003);
+
+    auto exact_key{conflicting_key};
+    ++exact_key.quorum_epoch;
+    exact_key.child_key_hash = MakeHash(65'004);
+    ++exact_key.leaf_index;
+
+    {
+        llmq::CPQSignerJournal journal{path};
+        CheckOutcome(
+            llmq::test::PQSignerJournalTestAccess::Reconcile(
+                journal, base_key.genesis_hash, base_key.pro_tx_hash,
+                certificate),
+            llmq::PQSignerJournalOutcome::CERTIFICATE_RECORDED);
+        CheckOutcome(
+            journal.Reserve(conflicting_key, MakeHash(65'005),
+                            conflicting_lock, std::nullopt),
+            llmq::PQSignerJournalOutcome::BRANCH_CONFLICT);
+        BOOST_CHECK(!journal.GetBranchLock(
+            base_key.genesis_hash, base_key.pro_tx_hash,
+            base_key.absolute_height));
+
+        CheckOutcome(
+            journal.Reserve(exact_key, MakeHash(65'006), accepted_lock,
+                            std::nullopt),
+            llmq::PQSignerJournalOutcome::RESERVED);
+        const auto vote{journal.GetBranchLock(
+            base_key.genesis_hash, base_key.pro_tx_hash,
+            base_key.absolute_height)};
+        BOOST_REQUIRE(vote);
+        BOOST_CHECK(*vote == accepted_lock);
+    }
+
+    llmq::CPQSignerJournal restarted{path};
+    const auto durable_vote{restarted.GetBranchLock(
+        base_key.genesis_hash, base_key.pro_tx_hash,
+        base_key.absolute_height)};
+    BOOST_REQUIRE(durable_vote);
+    BOOST_CHECK(*durable_vote == accepted_lock);
+    CheckOutcome(
+        restarted.Reserve(conflicting_key, MakeHash(65'007),
+                          conflicting_lock, durable_vote),
+        llmq::PQSignerJournalOutcome::BRANCH_CONFLICT);
+    CheckOutcome(
+        restarted.Reserve(exact_key, MakeHash(65'006), accepted_lock,
+                          durable_vote),
+        llmq::PQSignerJournalOutcome::CONSUMED);
 }
 
 BOOST_AUTO_TEST_CASE(certificate_marker_detects_conflicting_durable_restore)
@@ -602,7 +759,7 @@ BOOST_AUTO_TEST_CASE(certificate_marker_detects_conflicting_durable_restore)
     CheckOutcome(
         llmq::test::PQSignerJournalTestAccess::Reconcile(
             journal, key.genesis_hash, key.pro_tx_hash, certificate),
-        llmq::PQSignerJournalOutcome::CERTIFICATE_RECONCILED);
+        llmq::PQSignerJournalOutcome::CERTIFICATE_RECORDED);
     CheckOutcome(
         llmq::test::PQSignerJournalTestAccess::Reconcile(
             journal, key.genesis_hash, key.pro_tx_hash,
@@ -621,7 +778,7 @@ BOOST_AUTO_TEST_CASE(certificate_marker_detects_conflicting_durable_restore)
     BOOST_CHECK(!journal.IsHealthy());
 }
 
-BOOST_AUTO_TEST_CASE(lower_certificate_never_rewinds_a_higher_local_vote)
+BOOST_AUTO_TEST_CASE(accepted_certificate_rows_are_independent_and_immutable)
 {
     const fs::path path = m_path_root / "pq_signer_journal_no_rewind";
     auto key{MakeKey()};
@@ -640,25 +797,36 @@ BOOST_AUTO_TEST_CASE(lower_certificate_never_rewinds_a_higher_local_vote)
         llmq::test::PQSignerJournalTestAccess::Reconcile(
             journal, key.genesis_hash, key.pro_tx_hash, lower_certificate),
         llmq::PQSignerJournalOutcome::CERTIFICATE_RECORDED);
-    BOOST_REQUIRE(journal.GetBranchLock(key.genesis_hash, key.pro_tx_hash));
-    BOOST_CHECK(*journal.GetBranchLock(key.genesis_hash, key.pro_tx_hash) ==
-                local_lock);
+    BOOST_REQUIRE(journal.GetBranchLock(
+        key.genesis_hash, key.pro_tx_hash, key.absolute_height));
+    BOOST_CHECK(*journal.GetBranchLock(
+                    key.genesis_hash, key.pro_tx_hash,
+                    key.absolute_height) == local_lock);
     CheckOutcome(
         llmq::test::PQSignerJournalTestAccess::Reconcile(
             journal, key.genesis_hash, key.pro_tx_hash, lower_certificate),
         llmq::PQSignerJournalOutcome::CERTIFICATE_REPLAY);
 
-    // A certificate at the local vote's height has adjudicated that fork and
-    // may replace it; the lower certificate alone could not.
+    // A certificate at the local vote's height is stored independently and
+    // cannot rewrite the one-time signer decision made at that height.
     CheckOutcome(
         llmq::test::PQSignerJournalTestAccess::Reconcile(
             journal, key.genesis_hash, key.pro_tx_hash,
             adjudicating_certificate),
-        llmq::PQSignerJournalOutcome::CERTIFICATE_RECONCILED);
-    const auto reconciled{journal.GetBranchLock(
-        key.genesis_hash, key.pro_tx_hash)};
-    BOOST_REQUIRE(reconciled);
-    BOOST_CHECK(*reconciled == CertificateLock(
+        llmq::PQSignerJournalOutcome::CERTIFICATE_RECORDED);
+    const auto durable_vote{journal.GetBranchLock(
+        key.genesis_hash, key.pro_tx_hash, key.absolute_height)};
+    BOOST_REQUIRE(durable_vote);
+    BOOST_CHECK(*durable_vote == local_lock);
+    const auto lower_accepted{journal.GetAcceptedCertificate(
+        key.genesis_hash, key.pro_tx_hash, key.absolute_height - 5)};
+    const auto same_height_accepted{journal.GetAcceptedCertificate(
+        key.genesis_hash, key.pro_tx_hash, key.absolute_height)};
+    BOOST_REQUIRE(lower_accepted);
+    BOOST_REQUIRE(same_height_accepted);
+    BOOST_CHECK(*lower_accepted == CertificateLock(
+        key.genesis_hash, lower_certificate));
+    BOOST_CHECK(*same_height_accepted == CertificateLock(
         key.genesis_hash, adjudicating_certificate));
     BOOST_CHECK_EQUAL(
         llmq::test::PQSignerJournalTestAccess::ReconciliationMemoHits(journal),
@@ -666,10 +834,11 @@ BOOST_AUTO_TEST_CASE(lower_certificate_never_rewinds_a_higher_local_vote)
     CheckOutcome(
         llmq::test::PQSignerJournalTestAccess::Reconcile(
             journal, key.genesis_hash, key.pro_tx_hash, lower_certificate),
-        llmq::PQSignerJournalOutcome::CORRUPT);
+        llmq::PQSignerJournalOutcome::CERTIFICATE_REPLAY);
     BOOST_CHECK_EQUAL(
         llmq::test::PQSignerJournalTestAccess::ReconciliationMemoHits(journal),
         1U);
+    BOOST_CHECK(journal.IsHealthy());
 }
 
 BOOST_AUTO_TEST_CASE(authorized_leaf_domain_is_exact_without_usage_counter)
@@ -694,6 +863,13 @@ BOOST_AUTO_TEST_CASE(authorized_leaf_domain_is_exact_without_usage_counter)
                      llmq::PQSignerJournalOutcome::RESERVED);
         CheckOutcome(ReserveSlot(journal, last_chainlock_key, uint256{2}),
                      llmq::PQSignerJournalOutcome::RESERVED);
+        const auto accepted_certificate{MakeCertificate(
+            first_key.absolute_height, MakeHash(110'000), 41)};
+        CheckOutcome(
+            llmq::test::PQSignerJournalTestAccess::Reconcile(
+                journal, first_key.genesis_hash, first_key.pro_tx_hash,
+                accepted_certificate),
+            llmq::PQSignerJournalOutcome::CERTIFICATE_RECORDED);
         CheckOutcome(ReserveSlot(journal, first_audit_key, uint256{3}),
                      llmq::PQSignerJournalOutcome::RESERVED);
         CheckOutcome(ReserveSlot(journal, last_audit_key, uint256{4}),
@@ -749,39 +925,103 @@ BOOST_AUTO_TEST_CASE(payment_audit_uses_distinct_slot_without_moving_branch_lock
     llmq::CPQSignerJournal journal{path};
     BOOST_REQUIRE(journal.IsHealthy());
     const auto chainlock_key{MakeKey()};
+    const auto accepted_certificate{MakeCertificate(
+        chainlock_key.absolute_height, MakeHash(120'000), 51)};
+    const auto seal_lock{CertificateLock(
+        chainlock_key.genesis_hash, accepted_certificate)};
     const uint256 chainlock_message{MakeHash(201)};
-    CheckOutcome(ReserveSlot(journal, chainlock_key, chainlock_message),
+    CheckOutcome(journal.Reserve(chainlock_key, chainlock_message,
+                                 seal_lock, std::nullopt),
                  llmq::PQSignerJournalOutcome::RESERVED);
     CheckOutcome(journal.StoreSignature(
                      chainlock_key, chainlock_message, MakeSignature(1)),
                  llmq::PQSignerJournalOutcome::STORED);
     const auto branch_lock{journal.GetBranchLock(
-        chainlock_key.genesis_hash, chainlock_key.pro_tx_hash)};
+        chainlock_key.genesis_hash, chainlock_key.pro_tx_hash,
+        chainlock_key.absolute_height)};
     BOOST_REQUIRE(branch_lock);
+    BOOST_CHECK(*branch_lock == seal_lock);
 
+    // A local vote alone is not proof that the seal became the durable winner.
     auto audit_key{chainlock_key};
     audit_key.purpose = llmq::PQSignerPurpose::PAYMENT_AUDIT;
     audit_key.leaf_index =
         llmq::pq::SCHEDULED_WOTS_PAYMENT_AUDIT_LEAF_BASE;
     const uint256 audit_message{MakeHash(202)};
-    CheckOutcome(journal.Reserve(audit_key, audit_message, *branch_lock,
-                                 branch_lock),
+    CheckOutcome(journal.ReservePaymentAudit(
+                     audit_key, audit_message, seal_lock),
+                 llmq::PQSignerJournalOutcome::BRANCH_CONFLICT);
+    CheckOutcome(
+        llmq::test::PQSignerJournalTestAccess::Reconcile(
+            journal, chainlock_key.genesis_hash,
+            chainlock_key.pro_tx_hash, accepted_certificate),
+        llmq::PQSignerJournalOutcome::CERTIFICATE_RECORDED);
+
+    CheckOutcome(journal.ReservePaymentAudit(
+                     audit_key, audit_message, seal_lock),
                  llmq::PQSignerJournalOutcome::RESERVED);
     CheckOutcome(journal.StoreSignature(
                      audit_key, audit_message, MakeSignature(2)),
                  llmq::PQSignerJournalOutcome::STORED);
     BOOST_CHECK(journal.GetBranchLock(chainlock_key.genesis_hash,
-                                      chainlock_key.pro_tx_hash) ==
+                                      chainlock_key.pro_tx_hash,
+                                      chainlock_key.absolute_height) ==
                 branch_lock);
-    CheckOutcome(journal.Reserve(audit_key, MakeHash(203), *branch_lock,
-                                 branch_lock),
+    CheckOutcome(journal.ReservePaymentAudit(
+                     audit_key, MakeHash(203), seal_lock),
                  llmq::PQSignerJournalOutcome::CONFLICT);
 
-    const auto replay{ReserveSlot(journal, chainlock_key,
-                                  chainlock_message)};
+    const auto replay{journal.Reserve(
+        chainlock_key, chainlock_message, seal_lock, branch_lock)};
     CheckOutcome(replay, llmq::PQSignerJournalOutcome::REPLAY);
     BOOST_REQUIRE(replay.signature);
     BOOST_CHECK(*replay.signature == MakeSignature(1));
+}
+
+BOOST_AUTO_TEST_CASE(audit_slot_without_accepted_certificate_fails_closed)
+{
+    const fs::path path{m_path_root / "pq_signer_journal_missing_seal"};
+    const auto base_key{MakeKey()};
+    const auto certificate{MakeCertificate(
+        base_key.absolute_height, MakeHash(130'000), 61)};
+    const auto seal_lock{CertificateLock(base_key.genesis_hash, certificate)};
+    auto audit_key{base_key};
+    audit_key.purpose = llmq::PQSignerPurpose::PAYMENT_AUDIT;
+    audit_key.leaf_index =
+        llmq::pq::SCHEDULED_WOTS_PAYMENT_AUDIT_LEAF_BASE;
+    const uint256 message{MakeHash(204)};
+    {
+        llmq::CPQSignerJournal journal{path};
+        CheckOutcome(
+            llmq::test::PQSignerJournalTestAccess::Reconcile(
+                journal, base_key.genesis_hash, base_key.pro_tx_hash,
+                certificate),
+            llmq::PQSignerJournalOutcome::CERTIFICATE_RECORDED);
+        CheckOutcome(journal.ReservePaymentAudit(
+                         audit_key, message, seal_lock),
+                     llmq::PQSignerJournalOutcome::RESERVED);
+    }
+    {
+        CDBWrapper raw_db{DBParams{
+            .path = path,
+            .cache_bytes = 1 << 20,
+            .memory_only = false,
+            .wipe_data = false,
+            .obfuscate = false}};
+        BOOST_REQUIRE(raw_db.Erase(
+            HeightAuthorityDatabaseKey{
+                .prefix = 0x74,
+                .genesis_hash = base_key.genesis_hash,
+                .pro_tx_hash = base_key.pro_tx_hash,
+                .height = base_key.absolute_height},
+            /*fSync=*/true));
+    }
+
+    llmq::CPQSignerJournal restarted{path};
+    CheckOutcome(restarted.ReservePaymentAudit(
+                     audit_key, message, seal_lock),
+                 llmq::PQSignerJournalOutcome::CORRUPT);
+    BOOST_CHECK(!restarted.IsHealthy());
 }
 
 BOOST_AUTO_TEST_CASE(all_key_dimensions_are_isolated)
@@ -825,10 +1065,10 @@ BOOST_AUTO_TEST_CASE(all_key_dimensions_are_isolated)
                  llmq::PQSignerJournalOutcome::RESERVED);
 
     other = base;
-    // Child-key changes do not reset the operator-wide branch lock.
+    // The physical WOTS leaf remains unique even across malformed metadata.
     other.absolute_height -= 5;
     CheckOutcome(ReserveSlot(journal, other, message_hash),
-                 llmq::PQSignerJournalOutcome::BRANCH_CONFLICT);
+                 llmq::PQSignerJournalOutcome::CONFLICT);
 }
 
 BOOST_AUTO_TEST_CASE(null_message_hash_never_consumes_a_slot)

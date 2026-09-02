@@ -33,7 +33,7 @@ public:
         uint16_t member_index,
         const scheduled_wots::SecretKey& child_secret_key,
         const ChildKeyProof& child_key_proof,
-        const std::optional<PQSignerBranchLock>& expected_branch_lock,
+        const std::optional<PQSignerBranchLock>& expected_accepted_certificate,
         ChainLockSigningError* error = nullptr);
 
 private:
