@@ -1450,6 +1450,27 @@ struct PQChainLockPersistence::Impl {
             Metadata(predecessor)};
     }
 
+    bool HasExactAuthorizationBase(const DiskRecord& owner) const
+        EXCLUSIVE_LOCKS_REQUIRED(mutex)
+    {
+        const auto& statement{owner.chainlock.statement};
+        if (statement.roster_transition ==
+            RosterAuthorizationTransitionKind::INITIALIZE) {
+            return statement.roster_authorization_base.IsNull();
+        }
+
+        const auto& identity{statement.roster_authorization_base};
+        if (identity.IsNull()) return false;
+        const auto matches = [&](const DiskRecord& candidate) {
+            return Metadata(candidate).AuthorizationBase() == identity;
+        };
+        if (best && matches(*best)) return true;
+        if (unsealed && matches(*unsealed)) return true;
+        const auto retained{authorization_bases.find(identity.logical_id)};
+        return retained != authorization_bases.end() &&
+               matches(retained->second);
+    }
+
     void InitializeOrLoad() EXCLUSIVE_LOCKS_REQUIRED(mutex)
     {
         bool any{false};
@@ -1709,6 +1730,10 @@ struct PQChainLockPersistence::Impl {
              !IsExactRecord(unsealed_base->second, *unsealed))) {
             throw std::runtime_error(
                 "conflicting live PQ ChainLock authorization-base record");
+        }
+        if (best && !HasExactAuthorizationBase(*best)) {
+            throw std::runtime_error(
+                "missing live PQ ChainLock authorization-base record");
         }
         if (receipt_archive_authorization) {
             const auto predecessor_base{authorization_bases.find(
@@ -2096,16 +2121,35 @@ struct PQChainLockPersistence::Impl {
         authorization_transition.new_window =
             candidate.chainlock.statement.roster_beacons;
         if (transition != RosterAuthorizationTransitionKind::INITIALIZE) {
-            if (!best) {
+            const DiskRecord* authorization_base{nullptr};
+            if (best &&
+                Metadata(*best).AuthorizationBase() ==
+                    authorization_transition.authorization_base) {
+                authorization_base = &*best;
+            } else if (
+                unsealed &&
+                Metadata(*unsealed).AuthorizationBase() ==
+                    authorization_transition.authorization_base) {
+                authorization_base = &*unsealed;
+            } else {
+                const auto retained{authorization_bases.find(
+                    authorization_transition.authorization_base.logical_id)};
+                if (retained != authorization_bases.end() &&
+                    Metadata(retained->second).AuthorizationBase() ==
+                        authorization_transition.authorization_base) {
+                    authorization_base = &retained->second;
+                }
+            }
+            if (authorization_base == nullptr) {
                 SetError(error,
                          ChainLockPersistenceError::INVALID_CHAINLOCK);
                 return false;
             }
             authorization_transition.previous =
                 RosterAuthorizationPriorState{
-                    best->chainlock.statement
+                    authorization_base->chainlock.statement
                         .roster_authorization_state_hash,
-                    best->chainlock.statement.roster_beacons};
+                    authorization_base->chainlock.statement.roster_beacons};
         }
         const auto expected_authorization_hash{
             GetRosterAuthorizationStateHash(
@@ -2295,17 +2339,51 @@ struct PQChainLockPersistence::Impl {
         const bool add_previous_best{
             previous_best && previous_base == authorization_bases.end() &&
             previous_best->logical_id != candidate.logical_id};
+        const DiskRecord* referenced_unsealed_base{
+            unsealed &&
+                    Metadata(*unsealed).AuthorizationBase() ==
+                        candidate.chainlock.statement
+                            .roster_authorization_base
+                ? &*unsealed
+                : nullptr};
+        const bool referenced_unsealed_survives{
+            referenced_unsealed_base && next_unsealed &&
+            IsExactRecord(*next_unsealed, *referenced_unsealed_base)};
+        const bool add_referenced_unsealed_base{
+            referenced_unsealed_base &&
+            !referenced_unsealed_survives &&
+            authorization_bases.find(
+                referenced_unsealed_base->logical_id) ==
+                authorization_bases.end() &&
+            (!previous_best ||
+             previous_best->logical_id !=
+                 referenced_unsealed_base->logical_id)};
         if (add_previous_best) ++next_authorization_base_count;
+        if (add_referenced_unsealed_base) {
+            ++next_authorization_base_count;
+        }
 
-        std::optional<uint256> evict_authorization_base;
-        if (next_authorization_base_count >
-            VERIFIED_AUTHORIZATION_BASE_CAPACITY) {
+        std::set<uint256> evict_authorization_bases;
+        while (next_authorization_base_count -
+                   evict_authorization_bases.size() >
+               VERIFIED_AUTHORIZATION_BASE_CAPACITY) {
             const DiskRecord* oldest{nullptr};
+            const auto matches_referenced_base = [this](
+                const DiskRecord& record, const DiskRecord& owner) {
+                const auto& identity{
+                    owner.chainlock.statement.roster_authorization_base};
+                return !identity.IsNull() &&
+                       Metadata(record).AuthorizationBase() == identity;
+            };
             const auto is_protected = [&](const DiskRecord& record) {
                 const bool live_role{
                     IsExactRecord(record, candidate) ||
+                    matches_referenced_base(record, candidate) ||
+                    (previous_best &&
+                     IsExactRecord(record, *previous_best)) ||
                     (next_unsealed &&
-                     IsExactRecord(record, *next_unsealed))};
+                     (IsExactRecord(record, *next_unsealed) ||
+                      matches_referenced_base(record, *next_unsealed)))};
                 const bool archive_role{
                     next_receipt_archive_authorization &&
                     record.logical_id ==
@@ -2320,7 +2398,9 @@ struct PQChainLockPersistence::Impl {
                 return live_role || archive_role;
             };
             const auto consider_oldest = [&](const DiskRecord& record) {
-                if (!is_protected(record) &&
+                if (!evict_authorization_bases.contains(
+                        record.logical_id) &&
+                    !is_protected(record) &&
                     (!oldest ||
                      IsOlderAuthorizationBase(record, *oldest))) {
                     oldest = &record;
@@ -2332,28 +2412,42 @@ struct PQChainLockPersistence::Impl {
                 consider_oldest(retained);
             }
             if (add_previous_best) consider_oldest(*previous_best);
+            if (add_referenced_unsealed_base) {
+                consider_oldest(*referenced_unsealed_base);
+            }
             if (!oldest) {
                 SetError(error, ChainLockPersistenceError::IO_FAILURE);
                 return false;
             }
-            evict_authorization_base = oldest->logical_id;
+            evict_authorization_bases.insert(oldest->logical_id);
         }
 
         try {
             CDBBatch batch{db};
             batch.Write(DiskKey{PQ_CHAINLOCK_PERSISTENCE_BEST_KEY}, candidate);
             if (add_previous_best &&
-                evict_authorization_base != previous_best->logical_id) {
+                !evict_authorization_bases.contains(
+                    previous_best->logical_id)) {
                 batch.Write(
                     DiskAuthorizationBaseKey{
                         PQ_CHAINLOCK_PERSISTENCE_AUTHORIZATION_BASE_KEY,
                         previous_best->logical_id},
                     *previous_best);
             }
-            if (evict_authorization_base) {
+            if (add_referenced_unsealed_base &&
+                !evict_authorization_bases.contains(
+                    referenced_unsealed_base->logical_id)) {
+                batch.Write(
+                    DiskAuthorizationBaseKey{
+                        PQ_CHAINLOCK_PERSISTENCE_AUTHORIZATION_BASE_KEY,
+                        referenced_unsealed_base->logical_id},
+                    *referenced_unsealed_base);
+            }
+            for (const auto& evict_authorization_base :
+                 evict_authorization_bases) {
                 batch.Erase(DiskAuthorizationBaseKey{
                     PQ_CHAINLOCK_PERSISTENCE_AUTHORIZATION_BASE_KEY,
-                    *evict_authorization_base});
+                    evict_authorization_base});
             }
             const DiskKey unsealed_key{
                 PQ_CHAINLOCK_PERSISTENCE_UNSEALED_BTCC_KEY};
@@ -2429,12 +2523,21 @@ struct PQChainLockPersistence::Impl {
             return false;
         }
         if (add_previous_best &&
-            evict_authorization_base != previous_best->logical_id) {
+            !evict_authorization_bases.contains(
+                previous_best->logical_id)) {
             authorization_bases.emplace(previous_best->logical_id,
                                         *previous_best);
         }
-        if (evict_authorization_base) {
-            authorization_bases.erase(*evict_authorization_base);
+        if (add_referenced_unsealed_base &&
+            !evict_authorization_bases.contains(
+                referenced_unsealed_base->logical_id)) {
+            authorization_bases.emplace(
+                referenced_unsealed_base->logical_id,
+                *referenced_unsealed_base);
+        }
+        for (const auto& evict_authorization_base :
+             evict_authorization_bases) {
+            authorization_bases.erase(evict_authorization_base);
         }
         best = std::move(candidate);
         unsealed = std::move(next_unsealed);
@@ -2506,6 +2609,15 @@ struct PQChainLockPersistence::Impl {
             const DiskRecord* const live_best{best ? &*best : nullptr};
             const DiskRecord* const live_unsealed{
                 unsealed ? &*unsealed : nullptr};
+            const auto matches_referenced_base = [this](
+                const DiskRecord& record, const DiskRecord* owner) {
+                return owner != nullptr &&
+                       !owner->chainlock.statement.roster_authorization_base
+                            .IsNull() &&
+                       Metadata(record).AuthorizationBase() ==
+                           owner->chainlock.statement
+                               .roster_authorization_base;
+            };
             const FinalChainLockRecordMetadata* const archive_predecessor{
                 receipt_archive_authorization
                     ? &receipt_archive_authorization->predecessor
@@ -2513,8 +2625,11 @@ struct PQChainLockPersistence::Impl {
             const auto is_protected = [&](const DiskRecord& record) {
                 const bool live_role{
                     (live_best && IsExactRecord(record, *live_best)) ||
+                    matches_referenced_base(record, live_best) ||
                     (live_unsealed &&
-                     IsExactRecord(record, *live_unsealed))};
+                     IsExactRecord(record, *live_unsealed)) ||
+                    matches_referenced_base(record, live_unsealed) ||
+                    matches_referenced_base(record, &candidate)};
                 const bool archive_role{
                     archive_predecessor &&
                     record.logical_id ==

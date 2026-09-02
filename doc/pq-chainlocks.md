@@ -770,9 +770,14 @@ Durable CLSIG storage is exactly one best certificate plus at most one fully
 verified `ADVANCE` certificate that has not yet been sealed by a descendant
 BTCC receipt. The live store keeps the most recent eight certificates in RAM
 for bounded relay and exact lookup; it is not a historical signature archive.
-Normal `LIVE` admission requires the receiver's exact durable winner as
-predecessor, including the exact accepted BTCC cursor, and requires the target
-to be the first eligible height after that predecessor. It also restores the
+Normal `LIVE` admission requires the receiver's exact durable winner as the
+block-finality predecessor, including the exact accepted BTCC cursor, and
+requires the target to be the first eligible height after that predecessor.
+The signed roster-authorization base is a separate certificate identity. It
+normally names that winner, but a higher same-ancestry certificate may name an
+older fully verified retained base when dual derivation from the retained base
+and the receiver's current winner produces the same active roster bundle and a
+compatible next-beacon state. It also restores the
 released bounded-reorg rule: the target must be the latest signable height for
 the active tip, and the candidate and active chain must share the block at one
 signing lag before the target. With the fixed five-block cadence and lag, a
@@ -782,10 +787,14 @@ Collectors and their deterministic relay overlay follow the current signing
 window. If the immediate successor of the durable winner misses its window,
 nodes do not keep signing that expired height: they move to the latest target
 `H`, declare the active block at `H - chainlock_period` as wire predecessor `P`,
-and produce the unique `H = N(P)` recovery statement. The durable winner `S`
-remains the independently authenticated roster-state, ancestry, receipt-state,
-and cursor floor. `S` may be older than `P`; the normal authorization transition
-is derived exactly from `S`, while schedule geometry is checked against `P`.
+and produce the unique `H = N(P)` recovery statement. The explicitly named
+certificate `S` remains the independently authenticated roster-state source,
+while the receiver's durable winner remains the ancestry, receipt-state, and
+cursor floor. `S` may be older than both that winner and `P`; the signed normal
+authorization transition is derived exactly from `S`, while a receiver with a
+newer winner independently projects its state to the same target and admits
+the rebase only if the two roster results converge. Schedule geometry is
+checked against `P`.
 This prevents multiple valid target heights in one declared-predecessor view
 without making a missed unsigned round permanent.
 Before the first winner, the only admissible target is the first eligible
@@ -817,6 +826,16 @@ after its own declared predecessor. Catch-up can therefore skip certificates
 missing from the local store, but no certificate skips forward within its
 signed predecessor view and no expired certificate becomes valid merely
 because it is locally known or active.
+
+An older authorization base is evidence, not authority by itself. The receiver
+must possess the exact fully verified base certificate and derive both the
+wire transition from that base and the canonical transition from its current
+winner. Both derivations must authorize the selected quorum mask and produce
+the identical active roster bundle, including recovery authority. The
+next-beacon states must also match, except that current `CATCHUP` may remove one
+provisional `PENDING`/`READY` observation only through the existing
+candidate-bound null-carrier reconciliation proof. A carried cursor, a
+different recovery source, or an unrelated future-beacon result never rebases.
 
 An uncovered crash-durable BTCC pre-seal marker adds only two
 prolonged-outage admissions outside that ordinary current window:
@@ -1111,9 +1130,11 @@ BTCCursor {
 
 Every ChainLock transcript contains the complete currently accepted cursor,
 even when it does not advance. A syncing node can learn the advertised cursor
-from one recent CLSIG. Normal `LIVE` admission still requires the exact durable
-predecessor; only the constrained current-quorum `CATCHUP` path in Section 7.4
-may rebase across a missing certificate interval.
+from one recent CLSIG. Normal `LIVE` still requires the exact durable
+block-finality predecessor. `LIVE` and the constrained current-quorum
+`CATCHUP` path in Section 7.4 may use an older explicitly named
+roster-authorization base only after the dual-derivation convergence proof;
+this never weakens the durable receipt or cursor floor.
 
 `btccAdvance` has two canonical values:
 
@@ -1782,14 +1803,20 @@ The implementation must preserve these invariants:
 10. Historical base-chain replay depends on valid-most-work chain data below
     height `A`; there is no configured historical block or state commitment.
     Assuming pruned receipt certificates requires exact release-pinned `R`;
-    resuming after a gap requires exact current-window `LIVE` predecessor
+    resuming after a gap requires exact current-window block-predecessor
     chaining, bounded-current `CATCHUP`, or the exact-terminal/covering
-    exception bound by a durable pre-seal marker.
+    exception bound by a durable pre-seal marker. An older roster-state base is
+    usable only when retained as a fully verified certificate and its result
+    converges with a canonical projection from the current winner.
 11. ECDSA alone cannot replace an already active global PQ key.
 12. No final-production code path invokes BLS or DKG cryptography.
-13. Every `LIVE` CLSIG names the exact locally durable predecessor certificate.
-    Before the first certificate, normal `LIVE` names height `A-1`, the actual
-    candidate-branch block at that height, and a null BTCC cursor.
+13. Every `LIVE` CLSIG names the exact locally durable block predecessor. Its
+    roster-authorization base normally names that certificate; a higher
+    same-branch statement may name an older exact verified base only when dual
+    derivation preserves the current active authority and future-beacon state,
+    apart from the candidate-bound null-carrier exception. Before the first
+    certificate, normal `LIVE` names height `A-1`, the actual candidate-branch
+    block at that height, and a null BTCC cursor.
     Trusted startup restoration may reinstall only this node's checksummed,
     fsynced winner; network `CATCHUP` is a distinct admission that authenticates
     either an ordinary certificate inside the current fork window or the
@@ -1962,6 +1989,13 @@ Expected failures are fail-closed:
 - A fully authenticated catch-up object that fails only because of local disk,
   validation-state, or concurrent-context conditions does not punish its peer;
   exact `LIVE` predecessor chaining resumes after acceptance.
+- With a common durable base `S`, deliver a valid height-`H` `KEEP` certificate
+  to only one store, then deliver a valid height-`H+5` statement based on `S`
+  to both. The store that retained `H` must dual-derive the same active roster
+  bundle, preserve every durable side-state floor, and converge on `H+5`.
+  Reject a missing exact base, a divergent active/recovery authority, an
+  unrelated next-beacon mutation, and provisional-observation rollback without
+  the exact candidate-bound reconciliation proof.
 - Verification queue, per-peer bytes, duplicate flood, and cancellation DoS
   tests under ASan, UBSan, and TSan.
 - End-to-end CPU, memory, and bandwidth benchmarks on minimum supported hardware

@@ -765,7 +765,8 @@ ChainLockFinalityStore::PrepareCandidateInternal(
     }
 
     return PreparedFinalChainLockCandidate{
-        logical_id, witness_id, chainlock.statement, predecessor,
+        logical_id, witness_id, chainlock.statement,
+        chainlock.selected_quorum_mask, predecessor,
         has_local_chainlock, declared_predecessor_cursor, *context,
         admission, revision};
 }
@@ -1008,6 +1009,7 @@ bool ChainLockFinalityStore::AcceptVerifiedInternal(
     const uint256 witness_id{chainlock.GetWitnessId(m_genesis_hash)};
     if (!chainlock.IsStructurallyValid() || prepared.logical_id != logical_id ||
         prepared.witness_id != witness_id || prepared.statement != chainlock.statement ||
+        prepared.selected_quorum_mask != chainlock.selected_quorum_mask ||
         prepared.admission != admission ||
         (receipt_archive_authorization != nullptr &&
          (admission != ChainLockCandidateAdmission::RECEIPT_ARCHIVE &&
@@ -1260,9 +1262,9 @@ bool ChainLockFinalityStore::AcceptVerifiedInternal(
         std::make_shared<const FinalChainLock>(chainlock),
         verification_context};
     // Preserve the exact verified context for archive validation and startup
-    // reconstruction after the smaller relay cache expires. Retention does
-    // not let an older winner authorize a state-advancing transition; those
-    // paths require the exact current durable best.
+    // reconstruction after the smaller relay cache expires. Retention alone
+    // never authorizes a stale-base state advance; the integration must also
+    // prove convergence with the current durable winner.
     RememberAuthorizationBase(accepted);
     if (archive_only) {
         m_unsealed_btcc = accepted;
@@ -1298,6 +1300,8 @@ void ChainLockFinalityStore::RememberAuthorizationBase(AcceptedRecord record)
 
     const uint256 logical_id{record.logical_id};
     const uint256 witness_id{record.witness_id};
+    const RosterAuthorizationBaseIdentity referenced_base{
+        record.chainlock->statement.roster_authorization_base};
     const auto existing{m_authorization_bases.find(logical_id)};
     if (existing != m_authorization_bases.end()) {
         const auto old_witness{
@@ -1314,17 +1318,40 @@ void ChainLockFinalityStore::RememberAuthorizationBase(AcceptedRecord record)
     m_seen_logical.Insert(logical_id);
     m_seen_witness.Insert(witness_id);
 
+    std::set<uint256> protected_ids{logical_id};
+    if (!referenced_base.IsNull()) {
+        protected_ids.insert(referenced_base.logical_id);
+    }
+    if (m_best && m_best->chainlock) {
+        protected_ids.insert(m_best->logical_id);
+        const auto& base{
+            m_best->chainlock->statement.roster_authorization_base};
+        if (!base.IsNull()) protected_ids.insert(base.logical_id);
+    }
+    if (m_unsealed_btcc && m_unsealed_btcc->chainlock) {
+        protected_ids.insert(m_unsealed_btcc->logical_id);
+        const auto& base{
+            m_unsealed_btcc->chainlock->statement.roster_authorization_base};
+        if (!base.IsNull()) protected_ids.insert(base.logical_id);
+    }
+
     while (m_authorization_bases.size() >
            VERIFIED_AUTHORIZATION_BASE_CAPACITY) {
-        const auto old{std::min_element(
-            m_authorization_bases.begin(), m_authorization_bases.end(),
-            [](const auto& left, const auto& right) {
-                const auto& lhs{left.second.chainlock->statement};
-                const auto& rhs{right.second.chainlock->statement};
-                return lhs.height != rhs.height
-                    ? lhs.height < rhs.height
-                    : left.first < right.first;
-            })};
+        auto old{m_authorization_bases.end()};
+        for (auto it{m_authorization_bases.begin()};
+             it != m_authorization_bases.end(); ++it) {
+            if (protected_ids.count(it->first) != 0) continue;
+            if (old == m_authorization_bases.end()) {
+                old = it;
+                continue;
+            }
+            const auto& lhs{it->second.chainlock->statement};
+            const auto& rhs{old->second.chainlock->statement};
+            if (lhs.height < rhs.height ||
+                (lhs.height == rhs.height && it->first < old->first)) {
+                old = it;
+            }
+        }
         if (old == m_authorization_bases.end()) break;
         const uint256 old_logical{old->first};
         const auto old_witness{

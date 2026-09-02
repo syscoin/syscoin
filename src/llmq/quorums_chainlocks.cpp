@@ -9688,17 +9688,6 @@ CChainLocksHandler::BuildRuntimeVerificationContext(
                   prepared.predecessor.block_hash))) {
             return std::nullopt;
         }
-        const auto current_authorization_base{best
-            ? std::optional<pq::RosterAuthorizationBaseIdentity>{
-                  best->metadata.AuthorizationBase()}
-            : std::nullopt};
-        if (!IsStateAdvancingAuthorizationBaseCurrent(
-                prepared.admission,
-                prepared.statement.roster_transition,
-                prepared.statement.roster_authorization_base,
-                current_authorization_base)) {
-            return std::nullopt;
-        }
         if (authorized_receipt_archive) {
             if (!best || best->metadata.statement.height <
                              receipt_archive_capability->authorization
@@ -9759,6 +9748,17 @@ CChainLocksHandler::BuildRuntimeVerificationContext(
                     : nullptr)};
             if (!derived) return std::nullopt;
             authorization = *derived;
+            if (!IsStateAdvancingAuthorizationBaseAdmissible(
+                    prepared.admission,
+                    prepared.selected_quorum_mask,
+                    prepared.statement, *candidate, best,
+                    exact_authorization_prior
+                        ? &*exact_authorization_prior
+                        : nullptr,
+                    authorization,
+                    prepared.context.btcc_cursor_reconciliation)) {
+                return std::nullopt;
+            }
         } else {
             return std::nullopt;
         }
@@ -9940,16 +9940,20 @@ CChainLocksHandler::BuildHistoricalPreVerificationContext(
             expected.admission, chainlock.statement.height,
             best ? std::optional<int32_t>{best->metadata.statement.height}
                  : std::nullopt)};
-    const auto current_authorization_base{best
-        ? std::optional<pq::RosterAuthorizationBaseIdentity>{
-              best->metadata.AuthorizationBase()}
-        : std::nullopt};
-    if (!IsStateAdvancingAuthorizationBaseCurrent(
-            candidate_admission,
-            chainlock.statement.roster_transition,
-            chainlock.statement.roster_authorization_base,
-            current_authorization_base)) {
-        return std::nullopt;
+    std::optional<pq::BTCCCursorReconciliationProof>
+        preverification_reconciliation;
+    if (candidate_admission ==
+            pq::ChainLockCandidateAdmission::CATCHUP &&
+        best) {
+        LOCK(cs_main);
+        const auto canonical{SelectCurrentChainLockBTCC(
+            m_genesis_hash, *m_config, *candidate, &best->metadata)};
+        if (canonical) {
+            (void)MatchesCurrentChainLockBTCCSelection(
+                *canonical, chainlock.statement,
+                best->metadata.statement.accepted_btcc_cursor,
+                &preverification_reconciliation);
+        }
     }
     const bool authorized_preseal_receipt{
         candidate_admission ==
@@ -10017,6 +10021,14 @@ CChainLocksHandler::BuildHistoricalPreVerificationContext(
                                       : nullptr);
     }
     if (!authorization) return std::nullopt;
+    if (!IsStateAdvancingAuthorizationBaseAdmissible(
+            candidate_admission, chainlock.selected_quorum_mask,
+            chainlock.statement, *candidate, best,
+            exact_authorization_prior ? &*exact_authorization_prior
+                                      : nullptr,
+            *authorization, preverification_reconciliation)) {
+        return std::nullopt;
+    }
     pq::QuorumBuildError build_error{pq::QuorumBuildError::NONE};
     pq::RecoveryRosterAuthorityPtr recovery_authority;
     if (!chainlock.statement.roster_beacons.active
@@ -10121,22 +10133,208 @@ bool CChainLocksHandler::IsHistoricalArchiveIdentity(
                                       TRUSTED_UNSEALED_PERSISTENCE;
 }
 
-bool CChainLocksHandler::IsStateAdvancingAuthorizationBaseCurrent(
+bool CChainLocksHandler::IsStateAdvancingAuthorizationBaseAdmissible(
     pq::ChainLockCandidateAdmission candidate_admission,
-    pq::RosterAuthorizationTransitionKind transition,
-    const pq::RosterAuthorizationBaseIdentity& statement_base,
-    const std::optional<pq::RosterAuthorizationBaseIdentity>&
-        current_base) noexcept
+    uint8_t selected_quorum_mask,
+    const pq::ChainLockStatement& statement,
+    const CBlockIndex& candidate,
+    const std::optional<pq::AcceptedFinalChainLockView>& current,
+    const pq::VerifiedRosterAuthorizationBaseView* exact_prior,
+    const pq::RosterAuthorizationVerificationContext&
+        exact_authorization,
+    const std::optional<pq::BTCCCursorReconciliationProof>&
+        btcc_cursor_reconciliation) const
 {
     if (candidate_admission != pq::ChainLockCandidateAdmission::LIVE &&
         candidate_admission != pq::ChainLockCandidateAdmission::CATCHUP) {
         return true;
     }
-    return current_base
-        ? statement_base == *current_base
-        : transition ==
-                  pq::RosterAuthorizationTransitionKind::INITIALIZE &&
-              statement_base.IsNull();
+    if (!current) {
+        return statement.roster_transition ==
+                   pq::RosterAuthorizationTransitionKind::INITIALIZE &&
+               statement.roster_authorization_base.IsNull();
+    }
+    if (statement.roster_authorization_base ==
+        current->metadata.AuthorizationBase()) {
+        return true;
+    }
+    if (!exact_prior || !m_config ||
+        statement.roster_transition ==
+            pq::RosterAuthorizationTransitionKind::INITIALIZE ||
+        !current->metadata.IsInternallyConsistent(m_genesis_hash) ||
+        !exact_prior->metadata.IsInternallyConsistent(m_genesis_hash) ||
+        exact_prior->metadata.AuthorizationBase() !=
+            statement.roster_authorization_base ||
+        exact_prior->metadata.statement.height >=
+            current->metadata.statement.height ||
+        current->metadata.statement.height >= statement.height) {
+        return false;
+    }
+
+    {
+        LOCK(cs_main);
+        const CBlockIndex* current_ancestor{
+            candidate.GetAncestor(current->metadata.statement.height)};
+        const CBlockIndex* base_ancestor{
+            candidate.GetAncestor(exact_prior->metadata.statement.height)};
+        if (current_ancestor == nullptr ||
+            current_ancestor->GetBlockHash() !=
+                current->metadata.statement.block_hash ||
+            base_ancestor == nullptr ||
+            base_ancestor->GetBlockHash() !=
+                exact_prior->metadata.statement.block_hash) {
+            return false;
+        }
+    }
+
+    pq::ChainLockVerificationError verification_error{
+        pq::ChainLockVerificationError::NONE};
+    const auto exact_mask{pq::ValidateRosterAuthorizationState(
+        m_genesis_hash, statement, exact_authorization,
+        &verification_error)};
+    if (!exact_mask ||
+        (selected_quorum_mask & ~*exact_mask) != 0) {
+        return false;
+    }
+
+    if (statement.roster_transition ==
+        pq::RosterAuthorizationTransitionKind::RECOVER) {
+        if (candidate_admission !=
+            pq::ChainLockCandidateAdmission::CATCHUP) {
+            return false;
+        }
+        const auto target_epoch{pq::EpochForHeight(
+            m_config->chainlock_schedule, statement.height)};
+        const auto canonical{target_epoch
+            ? pq::CanonicalRosterRecoveryTargetHeight(
+                  m_config->chainlock_schedule,
+                  m_config->btcc_schedule, *target_epoch)
+            : std::optional<int32_t>{}};
+        const auto& candidate_bundle{
+            statement.roster_beacons.active};
+        const auto& current_bundle{
+            current->metadata.statement.roster_beacons.active};
+        if (!target_epoch || !canonical ||
+            *canonical != statement.height ||
+            candidate_bundle.recovery_authority_source.IsNull() ||
+            candidate_bundle.recovery_authority_hash.IsNull() ||
+            candidate_bundle.recovery_authority_source !=
+                current_bundle.recovery_authority_source ||
+            candidate_bundle.recovery_authority_hash !=
+                current_bundle.recovery_authority_hash) {
+            return false;
+        }
+        const auto expected_window{pq::MakeRecoveryRosterBeaconWindow(
+            current_bundle.recovery_authority_source,
+            current_bundle.recovery_authority_hash, *target_epoch)};
+        if (!expected_window ||
+            *expected_window != statement.roster_beacons) {
+            return false;
+        }
+
+        auto projected_statement{statement};
+        projected_statement.roster_authorization_base =
+            current->metadata.AuthorizationBase();
+        pq::RosterAuthorizationTransition projected_transition;
+        projected_transition.kind =
+            pq::RosterAuthorizationTransitionKind::RECOVER;
+        projected_transition.target_height = statement.height;
+        projected_transition.target_block_hash = statement.block_hash;
+        projected_transition.predecessor_height =
+            statement.previous_chainlock_height;
+        projected_transition.predecessor_block_hash =
+            statement.previous_chainlock_hash;
+        projected_transition.authorization_base =
+            projected_statement.roster_authorization_base;
+        projected_transition.previous =
+            pq::RosterAuthorizationPriorState{
+                current->metadata.statement
+                    .roster_authorization_state_hash,
+                current->metadata.statement.roster_beacons};
+        projected_transition.new_window = statement.roster_beacons;
+        const auto projected_state_hash{
+            pq::GetRosterAuthorizationStateHash(
+                m_genesis_hash, projected_transition)};
+        if (!projected_state_hash) return false;
+        projected_statement.roster_authorization_state_hash =
+            *projected_state_hash;
+
+        pq::RosterAuthorizationVerificationContext projected;
+        projected.admission =
+            pq::RosterAuthorizationAdmission::RECOVER;
+        projected.predecessor_height =
+            statement.previous_chainlock_height;
+        projected.predecessor_block_hash =
+            statement.previous_chainlock_hash;
+        projected.authorization_base =
+            projected_statement.roster_authorization_base;
+        projected.reset_policy =
+            MakeRosterResetVerificationPolicy(*m_config);
+        projected.previous = projected_transition.previous;
+        const auto projected_mask{pq::ValidateRosterAuthorizationState(
+            m_genesis_hash, projected_statement, projected,
+            &verification_error)};
+        return projected_mask &&
+               (selected_quorum_mask & ~*projected_mask) == 0;
+    }
+
+    constexpr std::array<pq::RosterAuthorizationTransitionKind, 4>
+        normal_transitions{
+            pq::RosterAuthorizationTransitionKind::KEEP,
+            pq::RosterAuthorizationTransitionKind::OBSERVE,
+            pq::RosterAuthorizationTransitionKind::REVEAL,
+            pq::RosterAuthorizationTransitionKind::ROTATE};
+    for (const auto requested : normal_transitions) {
+        const auto input{BuildNormalRosterAuthorizationInput(
+            statement, current->metadata, requested,
+            RosterBeaconEvidence::THRESHOLD_CERTIFICATE)};
+        const auto decision{input
+            ? pq::DeriveNormalRosterAuthorizationDecision(
+                  m_genesis_hash, *input)
+            : std::optional<pq::NormalRosterAuthorizationDecision>{}};
+        if (!decision ||
+            decision->transition.new_window.active !=
+                statement.roster_beacons.active ||
+            (selected_quorum_mask &
+             ~decision->authorization_mask) != 0) {
+            continue;
+        }
+        if (decision->transition.new_window.next ==
+            statement.roster_beacons.next) {
+            return true;
+        }
+        const auto& projected_next{
+            decision->transition.new_window.next};
+        const auto& candidate_next{statement.roster_beacons.next};
+        const bool inverse_observation{
+            candidate_admission ==
+                pq::ChainLockCandidateAdmission::CATCHUP &&
+            btcc_cursor_reconciliation &&
+            btcc_cursor_reconciliation->IsStructurallyValid() &&
+            candidate_next.anchor_kind ==
+                pq::RosterBeaconAnchorKind::NORMAL &&
+            candidate_next.state == pq::RosterBeaconState::EMPTY &&
+            projected_next.anchor_kind ==
+                pq::RosterBeaconAnchorKind::NORMAL &&
+            (projected_next.state == pq::RosterBeaconState::PENDING ||
+             projected_next.state == pq::RosterBeaconState::READY) &&
+            candidate_next.epoch == projected_next.epoch &&
+            projected_next.anchor_cursor ==
+                btcc_cursor_reconciliation->skipped_cursor &&
+            btcc_cursor_reconciliation->skipped_cursor ==
+                current->metadata.statement.accepted_btcc_cursor &&
+            btcc_cursor_reconciliation->previous_receipt_state ==
+                current->metadata.statement.btcc_receipt_state &&
+            statement.btcc_receipt_state ==
+                btcc_cursor_reconciliation->current_receipt_state &&
+            statement.height >=
+                btcc_cursor_reconciliation->carrier_height &&
+            statement.accepted_btcc_cursor ==
+                btcc_cursor_reconciliation->current_receipt_state.cursor &&
+            statement.btcc_advance == pq::BTCCAdvance::KEEP};
+        if (inverse_observation) return true;
+    }
+    return false;
 }
 
 bool CChainLocksHandler::IsHistoricalVerificationCapabilityCurrent(

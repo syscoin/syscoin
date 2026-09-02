@@ -835,6 +835,181 @@ BOOST_AUTO_TEST_CASE(authorization_base_exact_lookup_survives_restart)
     }
 }
 
+BOOST_AUTO_TEST_CASE(
+    authorization_base_capacity_retains_incoming_referenced_base)
+{
+    const fs::path path{
+        m_path_root / "pqcl_authorization_base_referenced_capacity"};
+    const uint256 genesis{NonNullHash(822)};
+    const auto config{MakeConfig()};
+    auto referenced{MakeChainLock(
+        865, config.activation_predecessor_height,
+        NonNullHash(config.activation_predecessor_height), 822)};
+    BOOST_REQUIRE(SetExactInitialization(referenced, genesis, 822));
+
+    uint256 oldest_unprotected_id;
+    {
+        PQChainLockPersistence persistence{DiskParams(path), genesis, config};
+        BOOST_REQUIRE(
+            persistence.PersistVerifiedAuthorizationBase(referenced));
+        for (std::size_t index{0};
+             index + 1 < VERIFIED_AUTHORIZATION_BASE_CAPACITY;
+             ++index) {
+            const int32_t height{
+                870 + static_cast<int32_t>(index * PQ_CL_PERIOD)};
+            auto retained{MakeChainLock(
+                height, height - static_cast<int32_t>(PQ_CL_PERIOD),
+                NonNullHash(8'220'000 + index), 8'230'000 + index)};
+            SetExactContinuation(retained, genesis, referenced);
+            if (index == 0) {
+                oldest_unprotected_id = retained.GetLogicalId(genesis);
+            }
+            BOOST_REQUIRE(
+                persistence.PersistVerifiedAuthorizationBase(retained));
+        }
+        BOOST_REQUIRE_EQUAL(
+            persistence.LoadAuthorizationBases().size(),
+            VERIFIED_AUTHORIZATION_BASE_CAPACITY);
+
+        const int32_t incoming_height{
+            870 + static_cast<int32_t>(
+                      VERIFIED_AUTHORIZATION_BASE_CAPACITY * PQ_CL_PERIOD)};
+        auto incoming{MakeChainLock(
+            incoming_height,
+            incoming_height - static_cast<int32_t>(PQ_CL_PERIOD),
+            NonNullHash(8'240'000), 8'240'001)};
+        SetExactContinuation(incoming, genesis, referenced);
+        BOOST_REQUIRE(
+            persistence.PersistVerifiedAuthorizationBase(incoming));
+
+        BOOST_CHECK_EQUAL(
+            persistence.LoadAuthorizationBases().size(),
+            VERIFIED_AUTHORIZATION_BASE_CAPACITY);
+        BOOST_REQUIRE(persistence.LoadAuthorizationBase(
+            referenced.GetLogicalId(genesis)));
+        BOOST_REQUIRE(persistence.LoadAuthorizationBase(
+            incoming.GetLogicalId(genesis)));
+        BOOST_CHECK(
+            !persistence.LoadAuthorizationBase(oldest_unprotected_id));
+    }
+    {
+        PQChainLockPersistence persistence{DiskParams(path), genesis, config};
+        BOOST_CHECK_EQUAL(
+            persistence.LoadAuthorizationBases().size(),
+            VERIFIED_AUTHORIZATION_BASE_CAPACITY);
+        BOOST_REQUIRE(persistence.LoadAuthorizationBase(
+            referenced.GetLogicalId(genesis)));
+        BOOST_CHECK(
+            !persistence.LoadAuthorizationBase(oldest_unprotected_id));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(
+    best_capacity_retains_previous_and_disappearing_unsealed_bases)
+{
+    const fs::path path{
+        m_path_root / "pqcl_best_dual_base_capacity"};
+    const uint256 genesis{NonNullHash(823)};
+    const auto config{MakeConfig()};
+
+    auto initialized{MakeChainLock(
+        865, config.activation_predecessor_height,
+        NonNullHash(config.activation_predecessor_height), 823)};
+    const auto authority{SetExactInitialization(initialized, genesis, 823)};
+    auto intermediate{MakeChainLock(
+        870, initialized.statement.height,
+        initialized.statement.block_hash, 824)};
+    SetExactContinuation(intermediate, genesis, initialized);
+    auto boundary{MakeChainLock(
+        875, intermediate.statement.height,
+        intermediate.statement.block_hash, 825)};
+    SetExactContinuation(boundary, genesis, intermediate);
+    auto previous_best{MakeChainLock(
+        880, boundary.statement.height,
+        boundary.statement.block_hash, 826)};
+    SetExactContinuation(previous_best, genesis, boundary);
+
+    auto unsealed{MakeChainLock(
+        875, 870, NonNullHash(870), 827)};
+    unsealed.statement.previous_btcc_cursor =
+        initialized.statement.accepted_btcc_cursor;
+    unsealed.statement.accepted_btcc_cursor = BTCCursor{
+        unsealed.statement.height, unsealed.statement.block_hash,
+        NonNullHash(8'250'000)};
+    unsealed.statement.btcc_advance = BTCCAdvance::ADVANCE;
+    SetExactContinuation(unsealed, genesis, initialized);
+
+    auto winner{MakeChainLock(
+        885, previous_best.statement.height,
+        previous_best.statement.block_hash, 828)};
+    winner.statement.previous_btcc_cursor =
+        previous_best.statement.accepted_btcc_cursor;
+    winner.statement.accepted_btcc_cursor =
+        unsealed.statement.accepted_btcc_cursor;
+    winner.statement.btcc_advance = BTCCAdvance::ADVANCE;
+    winner.statement.btcc_receipt_state = BTCCReceiptState{
+        unsealed.statement.accepted_btcc_cursor,
+        NonNullHash(8'260'000)};
+    SetExactContinuation(winner, genesis, unsealed);
+
+    {
+        PQChainLockPersistence persistence{DiskParams(path), genesis, config};
+        BOOST_REQUIRE(persistence.PersistInitializedBest(
+            initialized, nullptr, authority));
+        BOOST_REQUIRE(persistence.PersistBest(intermediate));
+        BOOST_REQUIRE(persistence.PersistBest(boundary));
+        BOOST_REQUIRE(persistence.PersistBest(previous_best));
+        BOOST_REQUIRE(persistence.PersistUnsealedBTCC(unsealed));
+
+        for (std::size_t index{0};
+             index + 3 < VERIFIED_AUTHORIZATION_BASE_CAPACITY;
+             ++index) {
+            auto retained{MakeChainLock(
+                870, initialized.statement.height,
+                NonNullHash(8'270'000 + index), 8'280'000 + index)};
+            ChainLockPersistenceError error{
+                ChainLockPersistenceError::NONE};
+            BOOST_REQUIRE_MESSAGE(
+                persistence.PersistVerifiedAuthorizationBase(
+                    retained, &error),
+                "authorization-base index " << index << ", error "
+                                              << static_cast<int>(error));
+        }
+        BOOST_REQUIRE_EQUAL(
+            persistence.LoadAuthorizationBases().size(),
+            VERIFIED_AUTHORIZATION_BASE_CAPACITY);
+        BOOST_CHECK(!persistence.LoadAuthorizationBase(
+            previous_best.GetLogicalId(genesis)));
+        BOOST_CHECK(!persistence.LoadAuthorizationBase(
+            unsealed.GetLogicalId(genesis)));
+
+        BOOST_REQUIRE(persistence.PersistBest(winner));
+        BOOST_REQUIRE(persistence.LoadBest());
+        BOOST_CHECK(*persistence.LoadBest() == winner);
+        BOOST_CHECK(!persistence.LoadUnsealedBTCC());
+        BOOST_CHECK_EQUAL(
+            persistence.LoadAuthorizationBases().size(),
+            VERIFIED_AUTHORIZATION_BASE_CAPACITY);
+        BOOST_REQUIRE(persistence.LoadAuthorizationBase(
+            previous_best.GetLogicalId(genesis)));
+        BOOST_REQUIRE(persistence.LoadAuthorizationBase(
+            unsealed.GetLogicalId(genesis)));
+    }
+    {
+        PQChainLockPersistence persistence{DiskParams(path), genesis, config};
+        BOOST_REQUIRE(persistence.LoadBest());
+        BOOST_CHECK(*persistence.LoadBest() == winner);
+        BOOST_CHECK(!persistence.LoadUnsealedBTCC());
+        BOOST_CHECK_EQUAL(
+            persistence.LoadAuthorizationBases().size(),
+            VERIFIED_AUTHORIZATION_BASE_CAPACITY);
+        BOOST_REQUIRE(persistence.LoadAuthorizationBase(
+            previous_best.GetLogicalId(genesis)));
+        BOOST_REQUIRE(persistence.LoadAuthorizationBase(
+            unsealed.GetLogicalId(genesis)));
+    }
+}
+
 BOOST_AUTO_TEST_CASE(roster_recovery_precommit_is_canonical_and_durable)
 {
     const fs::path path{m_path_root / "pqcl_roster_recovery_precommit"};
@@ -1363,6 +1538,56 @@ BOOST_AUTO_TEST_CASE(roundtrip_survives_restart)
         BOOST_CHECK(state.best->logical_id == next.GetLogicalId(genesis));
         BOOST_CHECK(state.best->witness_id == next.GetWitnessId(genesis));
         BOOST_CHECK(state.best->statement == next.statement);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(stale_base_rebase_hashes_against_the_exact_retained_prior)
+{
+    const fs::path path{m_path_root / "pqcl_exact_stale_base_rebase"};
+    const uint256 genesis{NonNullHash(2'001)};
+    const auto config{MakeConfig()};
+
+    auto base{MakeChainLock(
+        865, config.activation_predecessor_height,
+        NonNullHash(config.activation_predecessor_height), 2'001)};
+    const auto authority{SetExactInitialization(base, genesis, 2'001)};
+
+    auto hidden{MakeChainLock(
+        870, base.statement.height, base.statement.block_hash, 2'002)};
+    SetExactContinuation(hidden, genesis, base);
+
+    auto higher{MakeChainLock(
+        875, hidden.statement.height, hidden.statement.block_hash, 2'003)};
+    SetExactContinuation(higher, genesis, base);
+    const RosterAuthorizationBaseIdentity base_identity{
+        base.statement.height, base.statement.block_hash,
+        base.GetLogicalId(genesis)};
+    BOOST_REQUIRE(higher.statement.roster_authorization_base ==
+                  base_identity);
+
+    {
+        PQChainLockPersistence persistence{DiskParams(path), genesis, config};
+        BOOST_REQUIRE(persistence.PersistInitializedBest(
+            base, nullptr, authority));
+        BOOST_REQUIRE(persistence.PersistBest(hidden));
+        BOOST_REQUIRE(persistence.LoadAuthorizationBase(
+            base.GetLogicalId(genesis)));
+        BOOST_REQUIRE(persistence.PersistBest(higher));
+        const auto best{persistence.LoadBest()};
+        BOOST_REQUIRE(best);
+        BOOST_CHECK(*best == higher);
+        BOOST_REQUIRE(persistence.LoadAuthorizationBase(
+            base.GetLogicalId(genesis)));
+    }
+    {
+        PQChainLockPersistence persistence{DiskParams(path), genesis, config};
+        const auto best{persistence.LoadBest()};
+        BOOST_REQUIRE(best);
+        BOOST_CHECK(*best == higher);
+        const auto retained{
+            persistence.LoadAuthorizationBase(base.GetLogicalId(genesis))};
+        BOOST_REQUIRE(retained);
+        BOOST_CHECK(*retained == base);
     }
 }
 

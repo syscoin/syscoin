@@ -739,6 +739,13 @@ BOOST_AUTO_TEST_CASE(reset_capability_crosses_only_the_fully_verified_store_seam
     accepted.statement.roster_beacons = InitializationWindow(865);
     prepared = store.PrepareCandidate(accepted, &error);
     BOOST_REQUIRE(prepared);
+    auto wrong_mask_preparation{*prepared};
+    wrong_mask_preparation.selected_quorum_mask = 0b1011;
+    BOOST_CHECK(!store.AcceptVerified(
+        wrong_mask_preparation, accepted, /*signatures_valid=*/true,
+        &error, MakeVerificationContext(genesis, config, accepted)));
+    BOOST_CHECK(error == ChainLockFinalityError::INVALID_PREPARATION_TOKEN);
+    BOOST_CHECK_EQUAL(reset_callbacks, 0U);
     BOOST_CHECK(!store.AcceptVerified(
         *prepared, accepted, /*signatures_valid=*/true, &error));
     BOOST_CHECK(error == ChainLockFinalityError::INVALID_PREPARATION_TOKEN);

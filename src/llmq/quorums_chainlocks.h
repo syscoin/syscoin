@@ -1628,12 +1628,17 @@ private:
         std::optional<int32_t> best_height) noexcept;
     [[nodiscard]] static bool IsHistoricalArchiveIdentity(
         pq::ChainLockCandidateAdmission candidate_admission) noexcept;
-    [[nodiscard]] static bool IsStateAdvancingAuthorizationBaseCurrent(
+    [[nodiscard]] bool IsStateAdvancingAuthorizationBaseAdmissible(
         pq::ChainLockCandidateAdmission candidate_admission,
-        pq::RosterAuthorizationTransitionKind transition,
-        const pq::RosterAuthorizationBaseIdentity& statement_base,
-        const std::optional<pq::RosterAuthorizationBaseIdentity>&
-            current_base) noexcept;
+        uint8_t selected_quorum_mask,
+        const pq::ChainLockStatement& statement,
+        const CBlockIndex& candidate,
+        const std::optional<pq::AcceptedFinalChainLockView>& current,
+        const pq::VerifiedRosterAuthorizationBaseView* exact_prior,
+        const pq::RosterAuthorizationVerificationContext&
+            exact_authorization,
+        const std::optional<pq::BTCCCursorReconciliationProof>&
+            btcc_cursor_reconciliation) const;
     [[nodiscard]] bool IsHistoricalVerificationCapabilityCurrent(
         const RuntimeVerificationContext& verification,
         const HistoricalAdmissionContext& expected) const

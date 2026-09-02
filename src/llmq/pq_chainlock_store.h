@@ -345,6 +345,7 @@ struct PreparedFinalChainLockCandidate {
     uint256 logical_id;
     uint256 witness_id;
     ChainLockStatement statement;
+    uint8_t selected_quorum_mask{0};
     ChainLockPredecessor predecessor;
     bool has_local_chainlock{false};
     std::optional<BTCCursor> declared_predecessor_btcc_cursor;
@@ -416,10 +417,12 @@ struct AcceptedFinalChainLockView {
  * A fully verified certificate retained for archive validation or exact
  * startup reconstruction without itself becoming this node's finality winner.
  *
- * This view is not authority to advance live roster state from an older base;
- * state-advancing transitions require the exact current durable best. Only the
- * finality store exposes it after the exact statement/roster context and all
- * certificate signatures have crossed its verification boundary.
+ * This view is evidence, not authority by itself. A live/catch-up consumer may
+ * use an older view only after independently proving that the higher
+ * same-branch transition converges with the current durable authorization
+ * state. Only the finality store exposes it after the exact statement/roster
+ * context and all certificate signatures have crossed its verification
+ * boundary.
  */
 struct VerifiedRosterAuthorizationBaseView {
     uint64_t base_revision{0};
