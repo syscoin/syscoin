@@ -158,9 +158,8 @@ bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, s
                 pindexNew->nTime          = diskindex.nTime;
                 pindexNew->nBits          = diskindex.nBits;
                 pindexNew->nNonce         = diskindex.nNonce;
-                // SYSCOIN: Restore the branch-bound BTC parent commitment and
-                // receipt accumulator before ChainLock import or NEVM replay
-                // can inspect the reconstructed block index.
+                // SYSCOIN: Restore BTCPREV and the receipt accumulators before
+                // ChainLock import or NEVM replay inspects the block index.
                 pindexNew->btcpPrevCommitment = diskindex.btcpPrevCommitment;
                 pindexNew->pqBTCCReceiptCursorHeight = diskindex.pqBTCCReceiptCursorHeight;
                 pindexNew->pqBTCCReceiptCursorSysHash = diskindex.pqBTCCReceiptCursorSysHash;

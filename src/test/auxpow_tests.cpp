@@ -387,6 +387,41 @@ BOOST_FIXTURE_TEST_CASE (check_auxpow, BasicTestingSetup)
   BOOST_CHECK (builder2.get ().check (hashAux, ourChainId, params));
 }
 
+BOOST_FIXTURE_TEST_CASE (auxpow_parent_wrapper_is_not_child_hash_committed,
+                         BasicTestingSetup)
+{
+  const Consensus::Params& params = Params ().GetConsensus ();
+  const int32_t ourChainId = params.nAuxpowChainId;
+  const uint256 anchor = ArithToUint256 (arith_uint256 (77));
+
+  CBlockHeader child;
+  child.SetBaseVersion (2, ourChainId);
+  child.SetAuxpowVersion (true);
+  child.hashMerkleRoot = ArithToUint256 (arith_uint256 (123));
+  const uint256 childHash = child.GetHash ();
+
+  CAuxpowBuilder builder(5, 42);
+  builder.parentBlock.hashPrevBlock = anchor;
+  const int nonce = 7;
+  const unsigned height = 3;
+  const int index = CAuxPow::getExpectedIndex (nonce, ourChainId, height);
+  const valtype auxRoot = builder.buildAuxpowChain (childHash, height, index);
+  const valtype data = CAuxpowBuilder::buildCoinbaseData (
+      true, auxRoot, height, nonce);
+  builder.setCoinbase (CScript () << data);
+
+  const CAuxPow first = builder.get ();
+  ++builder.parentBlock.nNonce;
+  const CAuxPow second = builder.get ();
+
+  BOOST_REQUIRE (first.check (childHash, ourChainId, params));
+  BOOST_REQUIRE (second.check (childHash, ourChainId, params));
+  BOOST_CHECK (first.getParentPrevBlockHash () == anchor);
+  BOOST_CHECK (second.getParentPrevBlockHash () == anchor);
+  BOOST_CHECK (first.getParentBlockHash () != second.getParentBlockHash ());
+  BOOST_CHECK (child.GetHash () == childHash);
+}
+
 /* ************************************************************************** */
 
 /**

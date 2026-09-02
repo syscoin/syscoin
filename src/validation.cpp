@@ -4143,31 +4143,34 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     };
     if (!fJustCheck) revoke_btcc_index_provenance();
 
-    // SYSCOIN: Persist BTCPREV commitment in block index only for consensus-relevant
-    // PQ candidate heights. Reuse the contextual-validation cache in the common
-    // accept->connect flow; otherwise fall back to reparsing.
+    // SYSCOIN: Persist K only for consensus-relevant candidates. A non-null
+    // mismatch means the block-index record and retained block body disagree,
+    // so never repair it by overwrite.
     if (!fJustCheck) {
         const auto& consensus = params.GetConsensus();
         const bool btcp_required = llmq::pq::IsBTCPREVCommitmentHeight(consensus, pindex->nHeight) &&
                                    block.auxpow;
         if (btcp_required) {
             const uint256& btcp_expected = block.auxpow->getParentPrevBlockHash();
-            if (pindex->m_btcp_prev_contextually_validated &&
-                pindex->m_btcp_prev_contextual_commitment == btcp_expected) {
-                if (pindex->btcpPrevCommitment != btcp_expected) {
-                    revoke_btcc_index_provenance();
-                    pindex->btcpPrevCommitment = btcp_expected;
-                    m_blockman.m_dirty_blockindex.insert(pindex);
+            uint256 btcp{btcp_expected};
+            if (!(pindex->m_btcp_prev_contextually_validated &&
+                  pindex->m_btcp_prev_contextual_commitment ==
+                      btcp_expected)) {
+                if (!ExtractBTCPREVCommitment(block, btcp) ||
+                    btcp != btcp_expected) {
+                    return state.Error(
+                        "btcp-prev-contextual-cache-inconsistent");
                 }
-            } else {
-                uint256 btcp;
-                if (ExtractBTCPREVCommitment(block, btcp) &&
-                    btcp == btcp_expected &&
-                    pindex->btcpPrevCommitment != btcp) {
-                    revoke_btcc_index_provenance();
-                    pindex->btcpPrevCommitment = btcp;
-                    m_blockman.m_dirty_blockindex.insert(pindex);
-                }
+            }
+            if (!pindex->btcpPrevCommitment.IsNull() &&
+                pindex->btcpPrevCommitment != btcp) {
+                return state.Error(
+                    "btcp-block-index-metadata-mismatch");
+            }
+            if (pindex->btcpPrevCommitment.IsNull()) {
+                revoke_btcc_index_provenance();
+                pindex->btcpPrevCommitment = btcp;
+                m_blockman.m_dirty_blockindex.insert(pindex);
             }
         }
     }
@@ -9093,16 +9096,43 @@ void ChainstateManager::BackfillRecentBTCPREVCommitments()
         if (!llmq::pq::IsBTCPREVCommitmentHeight(consensus, h)) continue;
         CBlockIndex* pindex = ActiveChain()[h];
         if (!pindex) continue;
-        if (!pindex->btcpPrevCommitment.IsNull()) continue;
         if (!(pindex->nStatus & BLOCK_HAVE_DATA)) continue;
 
         CBlock block;
         if (!m_blockman.ReadBlockFromDisk(block, *pindex)) continue;
         if (!block.auxpow) continue;
 
+        BlockValidationState validation_state;
+        if (!CheckBlock(block, validation_state, consensus,
+                        /*fCheckPOW=*/true, /*fCheckMerkleRoot=*/true) ||
+            !CheckBTCPREVCommitment(block, validation_state, h,
+                                    consensus)) {
+            LogPrintf("%s: retained candidate failed validation at height "
+                      "%d: %s\n", __func__, h,
+                      validation_state.ToString());
+            continue;
+        }
+
         uint256 btcp;
         if (!ExtractBTCPREVCommitment(block, btcp)) continue;
         if (btcp != block.auxpow->getParentPrevBlockHash()) continue;
+        if (!pindex->btcpPrevCommitment.IsNull() &&
+            pindex->btcpPrevCommitment != btcp) {
+            LogPrintf("%s: retained block disagrees with block-index Bitcoin "
+                      "metadata at height %d\n", __func__, h);
+            constexpr uint32_t provenance_mask{
+                BLOCK_PQ_BTCC_INDEX_VALIDATED |
+                BLOCK_PQ_RECEIPT_INDEX_VALIDATED};
+            if (pindex->nStatus & provenance_mask) {
+                NotePQProvenanceRevoked();
+                pindex->nStatus = static_cast<BlockStatus>(
+                    pindex->nStatus & ~provenance_mask);
+            }
+            pindex->btcpPrevCommitment.SetNull();
+            m_blockman.m_dirty_blockindex.insert(pindex);
+            continue;
+        }
+        if (pindex->btcpPrevCommitment == btcp) continue;
 
         pindex->btcpPrevCommitment = btcp;
         m_blockman.m_dirty_blockindex.insert(pindex);

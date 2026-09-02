@@ -36,6 +36,7 @@
 #include <tinyformat.h>
 
 #include <array> // SYSCOIN: synthetic PQ activation fixtures.
+#include <cstdint> // SYSCOIN: synthetic recovery-authority fixture.
 #include <vector>
 
 #include <boost/test/unit_test.hpp>
@@ -66,6 +67,47 @@ bool ReplayDeferredForTest(Chainstate& chainstate,
 void AssertMainLockHeldForTest() NO_THREAD_SAFETY_ANALYSIS
 {
     AssertLockHeld(::cs_main);
+}
+
+// SYSCOIN: deterministic identities for the synthetic recovery authority.
+uint256 SyntheticPQHash(uint64_t value)
+{
+    uint256 hash;
+    for (std::size_t byte{0}; byte < sizeof(value); ++byte) {
+        hash.begin()[byte] =
+            static_cast<uint8_t>(value >> (8 * byte));
+    }
+    if (hash.IsNull()) hash.begin()[0] = 1;
+    return hash;
+}
+
+// SYSCOIN: build the source-bound authority persisted by the restart fixture.
+llmq::pq::RecoveryRosterAuthorityPtr SyntheticRecoveryAuthority(
+    const llmq::pq::RosterBeaconSeed& source)
+{
+    auto authority{
+        std::make_shared<llmq::pq::RecoveryRosterAuthority>()};
+    authority->normal_beacon = source;
+    for (std::size_t slot{0}; slot < llmq::pq::ACTIVE_QUORUMS; ++slot) {
+        for (std::size_t member{0}; member < llmq::pq::QUORUM_SIZE;
+             ++member) {
+            auto& entry{authority->slots[slot][member]};
+            entry.pro_tx_hash = SyntheticPQHash(
+                1'000'000 + slot * llmq::pq::QUORUM_SIZE + member);
+            entry.eligible = member < llmq::pq::QUORUM_MIN_VALID;
+            if (!entry.eligible) continue;
+            llmq::pq::RecoveryRosterChildCommitment child_root;
+            child_root.global_key_version = 1;
+            child_root.commitment.generation = 1;
+            child_root.commitment.tree_id = SyntheticPQHash(
+                2'000'000 + slot * llmq::pq::QUORUM_SIZE + member);
+            child_root.commitment.root = SyntheticPQHash(
+                3'000'000 + slot * llmq::pq::QUORUM_SIZE + member);
+            entry.child_root = std::move(child_root);
+        }
+    }
+    BOOST_REQUIRE(authority->IsStructurallyValid());
+    return authority;
 }
 } // namespace
 
@@ -1928,6 +1970,16 @@ BOOST_FIXTURE_TEST_CASE(
         seed.anchor_btc_height = 800'000;
         seed.future_btc_hash = recovery_future_hash;
     }
+    const auto recovery_authority{SyntheticRecoveryAuthority(
+        winner.statement.roster_beacons.active.seeds.back())};
+    const auto recovery_authority_hash{
+        llmq::pq::GetRecoveryRosterAuthorityHash(
+            consensus.hashGenesisBlock, *recovery_authority)};
+    BOOST_REQUIRE(recovery_authority_hash);
+    winner.statement.roster_beacons.active.recovery_authority_source
+        .normal_beacon = recovery_authority->normal_beacon;
+    winner.statement.roster_beacons.active.recovery_authority_hash =
+        *recovery_authority_hash;
     winner.statement.roster_beacons.next.epoch =
         active_epochs->back().epoch + 1;
     winner.statement.accepted_btcc_cursor = recovery_cursor;
@@ -1977,7 +2029,8 @@ BOOST_FIXTURE_TEST_CASE(
                 .wipe_data = true,
             },
             consensus.hashGenesisBlock, *config};
-        BOOST_REQUIRE(persistence.PersistInitializedBest(winner));
+        BOOST_REQUIRE(persistence.PersistInitializedBest(
+            winner, nullptr, recovery_authority));
     }
     {
         LOCK(::cs_main);
