@@ -618,6 +618,10 @@ PQChainLockShareTranscript {
     int32   previousChainLockHeight;
     uint256 previousChainLockHash;
     uint256 quorumContextHash;
+    uint8   rosterTransition;
+    RosterBeaconWindow rosterBeacons;
+    uint256 rosterAuthorizationStateHash;
+    RosterAuthorizationBaseIdentity rosterAuthorizationBase;
     uint32  quorumEpoch;
     uint256 quorumBaseHash;
     uint16  memberIndex;
@@ -626,6 +630,8 @@ PQChainLockShareTranscript {
     BTCCursor acceptedBTCCursor;
     uint8   btccAdvance;
     BTCCReceiptState btccReceiptState;
+    PaymentAuditReceiptState paymentAuditReceiptState;
+    uint256 paymentProbationStateHash;
 }
 ```
 
@@ -662,13 +668,20 @@ PQChainLock {
     int32   previousChainLockHeight;
     uint256 previousChainLockHash;
     uint256 quorumContextHash;
+    uint8   rosterTransition;
+    RosterBeaconWindow rosterBeacons;
+    uint256 rosterAuthorizationStateHash;
+    RosterAuthorizationBaseIdentity rosterAuthorizationBase;
     BTCCursor previousBTCCursor;
     BTCCursor acceptedBTCCursor;
     uint8   btccAdvance;              // KEEP or ADVANCE
     BTCCReceiptState btccReceiptState;
+    PaymentAuditReceiptState paymentAuditReceiptState;
+    uint256 paymentProbationStateHash;
     uint8   selectedQuorumMask;       // exactly three of four bits
     bitset400 signerBitmap[4];        // 50 bytes each
-    AuthenticatedChildSignature signatures[801]; // canonical order below
+    uint16  signatureCount;           // exactly 801
+    AuthenticatedChildSignature signatures[signatureCount]; // canonical order below
 }
 
 AuthenticatedChildSignature {
