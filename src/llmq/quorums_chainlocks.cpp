@@ -666,7 +666,8 @@ uint256 PresealAdmissionToken(
 
 std::optional<int32_t> OldestRosterSnapshotHeight(
     const pq::QuorumBuildConfig& config,
-    int32_t target_height)
+    int32_t target_height,
+    uint32_t snapshot_lag)
 {
     const auto active_epochs{
         pq::ActiveEpochsAtHeight(config.schedule, target_height)};
@@ -675,13 +676,21 @@ std::optional<int32_t> OldestRosterSnapshotHeight(
     for (const auto& identity : *active_epochs) {
         const auto snapshot{pq::RegistrationCutoffHeight(
             config.schedule, identity.epoch,
-            config.roster_snapshot_lag_blocks)};
+            snapshot_lag)};
         if (!snapshot) return std::nullopt;
         oldest = std::min(oldest, *snapshot);
     }
     return oldest == std::numeric_limits<int32_t>::max()
         ? std::nullopt
         : std::optional<int32_t>{oldest};
+}
+
+std::optional<int32_t> OldestRosterSnapshotHeight(
+    const pq::QuorumBuildConfig& config,
+    int32_t target_height)
+{
+    return OldestRosterSnapshotHeight(
+        config, target_height, config.roster_snapshot_lag_blocks);
 }
 
 std::optional<int32_t> RecoverySourceSnapshotHeight(
@@ -699,19 +708,38 @@ std::optional<int32_t> RecoverySourceSnapshotHeight(
 bool BTCCPresealAuxiliaryRetentionFloor(
     const pq::BTCCPresealState& state,
     const pq::QuorumBuildConfig& config,
+    const pq::ChainLockFinalityStoreConfig& finality_config,
     std::optional<int32_t>& floor)
 {
     floor.reset();
     const auto inspect = [&](const auto& marker) {
         if (!marker) return true;
+        const auto initial_target{pq::NextEligibleChainLockTargetHeight(
+            finality_config.chainlock_schedule,
+            finality_config.activation_predecessor_height)};
+        const auto ordinary_target{pq::BTCCSourceHeightForNEVMInjection(
+            finality_config.btcc_schedule,
+            marker->earliest_carrier_height)};
+        const auto earliest_target{
+            marker->predecessor_receipt_state.cursor.IsNull()
+                ? initial_target
+                : ordinary_target};
+        if (!earliest_target) return false;
         const auto roster_floor{OldestRosterSnapshotHeight(
-            config, marker->terminal_receipt.chainlock_target_height)};
-        if (!roster_floor || marker->earliest_carrier_height <= 0) {
+            config, *earliest_target)};
+        // RECOVER uses the older operator-key cutoff while selecting the
+        // same dynamically rescored identities. Until the marker is sealed,
+        // retain whichever input snapshot is older.
+        const auto recovery_key_floor{OldestRosterSnapshotHeight(
+            config, *earliest_target,
+            config.registration_cutoff_blocks)};
+        if (!roster_floor || !recovery_key_floor ||
+            marker->earliest_carrier_height <= 0) {
             return false;
         }
         const int32_t marker_floor{std::min(
             static_cast<int32_t>(marker->earliest_carrier_height - 1),
-            *roster_floor)};
+            std::min(*roster_floor, *recovery_key_floor))};
         floor = floor ? std::min(*floor, marker_floor) : marker_floor;
         return true;
     };
@@ -1027,6 +1055,23 @@ std::optional<pq::ChainLockSigningWindow> StagedRecoverySigningWindowImpl(
 }
 
 } // namespace
+
+std::optional<int32_t> GetBTCCPresealAuxiliaryRetentionFloor(
+    const pq::BTCCPresealState& state,
+    const pq::QuorumBuildConfig& quorum_config,
+    const pq::ChainLockFinalityStoreConfig& finality_config)
+{
+    if (!state.IsStructurallyValid() || !quorum_config.IsValid() ||
+        !finality_config.IsValid()) {
+        return std::nullopt;
+    }
+    std::optional<int32_t> floor;
+    if (!BTCCPresealAuxiliaryRetentionFloor(
+            state, quorum_config, finality_config, floor)) {
+        return std::nullopt;
+    }
+    return floor;
+}
 
 std::optional<pq::ChainLockSigningWindow> StagedRecoverySigningWindow(
     const pq::ChainLockScheduleConfig& chainlock,
@@ -2260,19 +2305,27 @@ MakePQQuorumBuildConfig(const Consensus::Params& consensus)
     if (!config.IsValid()) return std::nullopt;
     if (consensus.nPQBTCCNEVMInjectionLag < 0) return std::nullopt;
     const uint64_t current_catchup_lag{
-        static_cast<uint64_t>(config.schedule.sign_lag)};
+        static_cast<uint64_t>(config.schedule.sign_lag) +
+        config.schedule.chainlock_period - 1};
     const uint64_t historical_admission_lag{std::max<uint64_t>(
         static_cast<uint32_t>(consensus.nPQBTCCNEVMInjectionLag),
         current_catchup_lag)};
-    const uint64_t preseal_snapshot_window{
+    const uint64_t normal_snapshot_window{
         static_cast<uint64_t>(config.schedule.active_epochs) *
             config.schedule.epoch_blocks +
         config.roster_snapshot_lag_blocks +
         historical_admission_lag};
+    const uint64_t recovery_snapshot_window{
+        static_cast<uint64_t>(config.schedule.active_epochs - 1) *
+            config.schedule.epoch_blocks +
+        config.registration_cutoff_blocks +
+        pq::GetBTCCScheduleConfig(consensus).candidate_period +
+        historical_admission_lag};
     // A first missing-certificate marker is created only at its receipt
-    // carrier. Its complete four-roster snapshot set must still be present
-    // in the ordinary DMN window so the durable replay floor can take over.
-    if (preseal_snapshot_window >
+    // carrier. Both the normal roster snapshots and a RECOVER roster's older
+    // operator-key cutoff must still be in the ordinary inclusive DMN window
+    // so the durable replay floor can take over.
+    if (std::max(normal_snapshot_window, recovery_snapshot_window) >
         static_cast<uint64_t>(CDeterministicMNManager::LIST_CACHE_SIZE)) {
         return std::nullopt;
     }
@@ -6357,10 +6410,12 @@ bool CChainLocksHandler::PersistBTCCPresealStateLocked(
         return false;
     }
     if (!durable.IsEmpty()) {
-        std::optional<int32_t> auxiliary_floor;
-        if (!deterministicMNManager || !m_quorum_build_config ||
-            !BTCCPresealAuxiliaryRetentionFloor(
-                durable, *m_quorum_build_config, auxiliary_floor) ||
+        const auto auxiliary_floor{
+            m_quorum_build_config && m_config
+                ? GetBTCCPresealAuxiliaryRetentionFloor(
+                      durable, *m_quorum_build_config, *m_config)
+                : std::nullopt};
+        if (!deterministicMNManager || !m_quorum_build_config || !m_config ||
             !auxiliary_floor ||
             !deterministicMNManager->FlushPendingSnapshotsToDisk(
                 /*fSync=*/true)) {
@@ -6552,12 +6607,15 @@ void CChainLocksHandler::UpdatePresealAuxiliaryRetention(
         return;
     }
 
-    std::optional<int32_t> btcc_floor;
+    const std::optional<int32_t> btcc_floor{
+        m_quorum_build_config && m_config
+            ? GetBTCCPresealAuxiliaryRetentionFloor(
+                  btcc_state, *m_quorum_build_config, *m_config)
+            : std::nullopt};
     std::optional<int32_t> payment_audit_floor;
     const bool valid{
         m_quorum_build_config && m_config &&
-        BTCCPresealAuxiliaryRetentionFloor(
-            btcc_state, *m_quorum_build_config, btcc_floor) &&
+        (btcc_state.IsEmpty() || btcc_floor.has_value()) &&
         PaymentAuditPresealAuxiliaryRetentionFloor(
             payment_audit_state, *m_config, *m_quorum_build_config,
             payment_audit_floor)};

@@ -3082,6 +3082,13 @@ BOOST_AUTO_TEST_CASE(deployment_configuration_is_fail_closed)
     consensus.nPQRosterSnapshotLag = 289;
     BOOST_CHECK(!llmq::MakePQQuorumBuildConfig(consensus));
 
+    consensus = ValidConsensus();
+    consensus.nPQPreparationHeight = 500;
+    consensus.nPQRegistrationCutoffBlocks = 844;
+    BOOST_CHECK(llmq::MakePQQuorumBuildConfig(consensus));
+    consensus.nPQRegistrationCutoffBlocks = 845;
+    BOOST_CHECK(!llmq::MakePQQuorumBuildConfig(consensus));
+
     consensus.nPQActivationHeight = std::numeric_limits<int>::max();
     BOOST_CHECK(!llmq::MakePQChainLockFinalityStoreConfig(consensus));
 
@@ -3147,6 +3154,83 @@ BOOST_AUTO_TEST_CASE(deployment_configuration_is_fail_closed)
     BOOST_CHECK(llmq::MakePQChainLockFinalityStoreConfig(consensus));
     consensus.nDefaultAssumeValidHeight = 2325;
     BOOST_CHECK(!llmq::MakePQChainLockFinalityStoreConfig(consensus));
+}
+
+BOOST_AUTO_TEST_CASE(btcc_preseal_recovery_floor_is_lower_only)
+{
+    auto expanded_consensus{ValidConsensus()};
+    expanded_consensus.nPQPreparationHeight = 500;
+    expanded_consensus.nPQRegistrationCutoffBlocks = 844;
+    const auto quorum_config{
+        llmq::MakePQQuorumBuildConfig(expanded_consensus)};
+    const auto finality_config{
+        llmq::MakePQChainLockFinalityStoreConfig(ValidConsensus())};
+    BOOST_REQUIRE(quorum_config);
+    BOOST_REQUIRE(finality_config);
+
+    constexpr int32_t first_target{2305};
+    constexpr int32_t first_carrier{
+        first_target + static_cast<int32_t>(
+                           llmq::pq::PQ_BTCC_NEVM_LAG)};
+    const llmq::pq::BTCCursor cursor{
+        first_target - 10, NonNullHash(3'100'001),
+        NonNullHash(3'100'002)};
+    const llmq::pq::BTCCReceiptState predecessor{
+        cursor, NonNullHash(3'100'003), first_target - 10,
+        first_carrier - 10};
+    BOOST_REQUIRE(predecessor.IsStructurallyValid());
+    llmq::pq::BTCCReceipt first_receipt;
+    first_receipt.chainlock_target_height = first_target;
+    first_receipt.chainlock_target_hash = NonNullHash(3'100'004);
+    first_receipt.chainlock_logical_id = NonNullHash(3'100'005);
+    first_receipt.accepted_cursor = cursor;
+    BOOST_REQUIRE(first_receipt.IsStructurallyValid());
+    llmq::pq::BTCCPresealMarker marker{
+        first_carrier, NonNullHash(3'100'006), predecessor,
+        first_carrier, NonNullHash(3'100'006), predecessor,
+        first_receipt, 1};
+    const auto initial_floor{
+        llmq::GetBTCCPresealAuxiliaryRetentionFloor(
+            llmq::pq::BTCCPresealState{marker, std::nullopt},
+            *quorum_config, *finality_config)};
+    BOOST_REQUIRE(initial_floor);
+    BOOST_CHECK_EQUAL(*initial_floor, 596);
+
+    const llmq::pq::BTCCReceiptState terminal_parent{
+        cursor, NonNullHash(3'100'007), first_target, first_carrier};
+    BOOST_REQUIRE(terminal_parent.IsStructurallyValid());
+    marker.terminal_carrier_height = first_carrier + 10;
+    marker.terminal_carrier_hash = NonNullHash(3'100'008);
+    marker.terminal_parent_receipt_state = terminal_parent;
+    marker.terminal_receipt.chainlock_target_height = first_target + 10;
+    marker.terminal_receipt.chainlock_target_hash =
+        NonNullHash(3'100'009);
+    marker.terminal_receipt.chainlock_logical_id =
+        NonNullHash(3'100'010);
+    BOOST_REQUIRE(marker.IsStructurallyValid());
+    const auto advanced_floor{
+        llmq::GetBTCCPresealAuxiliaryRetentionFloor(
+            llmq::pq::BTCCPresealState{marker, std::nullopt},
+            *quorum_config, *finality_config)};
+    BOOST_REQUIRE(advanced_floor);
+    BOOST_CHECK_EQUAL(*advanced_floor, *initial_floor);
+
+    // INITIALIZE may use a later carrier, but its roster dependency remains
+    // the one fixed activation target rather than carrier-lag arithmetic.
+    marker.predecessor_receipt_state = {};
+    marker.terminal_parent_receipt_state = {};
+    marker.earliest_carrier_height = first_carrier + 10;
+    marker.earliest_carrier_hash = NonNullHash(3'100'011);
+    marker.terminal_carrier_height = marker.earliest_carrier_height;
+    marker.terminal_carrier_hash = marker.earliest_carrier_hash;
+    marker.terminal_receipt = first_receipt;
+    BOOST_REQUIRE(marker.IsStructurallyValid());
+    const auto late_initial_floor{
+        llmq::GetBTCCPresealAuxiliaryRetentionFloor(
+            llmq::pq::BTCCPresealState{marker, std::nullopt},
+            *quorum_config, *finality_config)};
+    BOOST_REQUIRE(late_initial_floor);
+    BOOST_CHECK_EQUAL(*late_initial_floor, *initial_floor);
 }
 
 BOOST_AUTO_TEST_CASE(live_chainlock_candidates_are_current_and_one_window_bound)

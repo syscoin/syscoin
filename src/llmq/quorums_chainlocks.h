@@ -771,6 +771,13 @@ MakePQChainLockFinalityStoreConfig(const Consensus::Params& consensus);
 [[nodiscard]] std::optional<pq::QuorumBuildConfig>
 MakePQQuorumBuildConfig(const Consensus::Params& consensus);
 
+/** Oldest exact roster/key snapshot needed by a durable BTCC replay marker. */
+[[nodiscard]] std::optional<int32_t>
+GetBTCCPresealAuxiliaryRetentionFloor(
+    const pq::BTCCPresealState& state,
+    const pq::QuorumBuildConfig& quorum_config,
+    const pq::ChainLockFinalityStoreConfig& finality_config);
+
 /** Bounded worker policy used by the live fixed-profile signature verifier. */
 [[nodiscard]] std::size_t GetPQChainLockVerifierThreads(
     unsigned int hardware_threads) noexcept;
