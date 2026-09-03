@@ -1177,7 +1177,8 @@ public:
         const pq::PaymentAuditReceipt& receipt,
         const CBlockIndex& carrier)
         EXCLUSIVE_LOCKS_REQUIRED(
-            cs_main, !m_pending_payment_audit_receipt_mutex);
+            cs_main, !m_pending_payment_audit_receipt_mutex,
+            !m_needed_btcc_certificate_mutex);
     [[nodiscard]] bool IsPendingPaymentAuditReceiptCertificate(
         const uint256& witness_id) const
         EXCLUSIVE_LOCKS_REQUIRED(
@@ -1269,6 +1270,7 @@ public:
                                  !m_btcc_preseal_mutex,
                                  !m_needed_btcc_certificate_mutex,
                                  !m_pending_btcc_receipt_mutex,
+                                 !m_pending_payment_audit_receipt_mutex,
                                  !m_signer_reconcile_mutex);
 
     void NotifyHeaderTip(const CBlockIndex* new_tip)
@@ -1278,6 +1280,7 @@ public:
                                  !m_verification_mutex,
                                  !m_collector_mutex,
                                  !m_signer_reconcile_mutex,
+                                 !m_needed_btcc_certificate_mutex,
                                  !m_pending_btcc_receipt_mutex,
                                  !m_pending_payment_audit_receipt_mutex,
                                  !m_btcc_preseal_mutex);
@@ -1288,6 +1291,7 @@ public:
                                  !m_verification_mutex,
                                  !m_collector_mutex,
                                  !m_signer_reconcile_mutex,
+                                 !m_needed_btcc_certificate_mutex,
                                  !m_pending_btcc_receipt_mutex,
                                  !m_pending_payment_audit_receipt_mutex,
                                  !m_btcc_preseal_mutex);
@@ -1346,6 +1350,26 @@ private:
 
         friend bool operator==(const PaymentAuditHistoricalContext&,
                                const PaymentAuditHistoricalContext&) = default;
+    };
+
+    /** One exact historical audit seal whose objective base is already held. */
+    struct PendingPaymentAuditSealDependency {
+        PendingPaymentAuditReceiptDependency owner;
+        pq::ChainLockStatement statement;
+        pq::RosterAuthorizationBaseIdentity objective_base;
+        uint256 logical_id;
+        uint256 source_token;
+
+        friend bool operator==(
+            const PendingPaymentAuditSealDependency&,
+            const PendingPaymentAuditSealDependency&) = default;
+    };
+
+    /** Immutable request capability retained while the seal signatures run. */
+    struct PaymentAuditSealFetchCapability {
+        PendingPaymentAuditSealDependency dependency;
+        std::optional<pq::VerifiedRosterAuthorizationBaseView>
+            objective_base;
     };
 
     struct RuntimeVerificationContext {
@@ -1516,6 +1540,7 @@ private:
     enum class NeededBTCCCertificateSource : uint8_t {
         LIVE_FRONTIER = 0,
         PRESEAL_REPLAY = 1,
+        PAYMENT_AUDIT_SEAL = 2,
     };
 
     struct NeededBTCCCertificate {
@@ -1701,7 +1726,9 @@ private:
     /** Resolve authority only from the newest receipt on this exact branch. */
     [[nodiscard]] std::optional<ObjectiveRosterAuthorizationContext>
     ResolveObjectiveRosterAuthorizationContext(
-        const CBlockIndex& candidate) const
+        const CBlockIndex& candidate,
+        const pq::VerifiedRosterAuthorizationBaseView* exact_base = nullptr)
+        const
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     [[nodiscard]] std::optional<pq::NormalRosterAuthorizationInput>
     BuildNormalRosterAuthorizationInput(
@@ -1774,6 +1801,7 @@ private:
                                  !m_btcc_preseal_mutex,
                                  !m_needed_btcc_certificate_mutex,
                                  !m_pending_btcc_receipt_mutex,
+                                 !m_pending_payment_audit_receipt_mutex,
                                  !m_signer_reconcile_mutex);
     [[nodiscard]] bool IsConfiguredForVerification() const
         EXCLUSIVE_LOCKS_REQUIRED(!m_lookup_mutex);
@@ -1824,7 +1852,8 @@ private:
                                  !m_btcc_preseal_mutex,
                                  !m_btc_header_policy_mutex,
                                  !m_needed_btcc_certificate_mutex,
-                                 !m_pending_btcc_receipt_mutex);
+                                 !m_pending_btcc_receipt_mutex,
+                                 !m_pending_payment_audit_receipt_mutex);
     struct LocalChainLockFinalization {
         pq::CollectedChainLockFinalizationPtr proof;
         CurrentSigningContextsPtr signing_contexts;
@@ -1853,6 +1882,7 @@ private:
                                  !m_btcc_preseal_mutex,
                                  !m_needed_btcc_certificate_mutex,
                                  !m_pending_btcc_receipt_mutex,
+                                 !m_pending_payment_audit_receipt_mutex,
                                  !m_signer_reconcile_mutex);
     [[nodiscard]] bool ProcessNewChainLockInternal(
         NodeId from,
@@ -1871,6 +1901,7 @@ private:
                                  !m_btcc_preseal_mutex,
                                  !m_needed_btcc_certificate_mutex,
                                  !m_pending_btcc_receipt_mutex,
+                                 !m_pending_payment_audit_receipt_mutex,
                                  !m_signer_reconcile_mutex);
     [[nodiscard]] ChainLockShareCollectionOutcome CollectChainLockShare(
         const pq::ChainLockShare& share,
@@ -1896,12 +1927,14 @@ private:
                                  !m_btcc_preseal_mutex,
                                  !m_needed_btcc_certificate_mutex,
                                  !m_pending_btcc_receipt_mutex,
+                                 !m_pending_payment_audit_receipt_mutex,
                                  !m_signer_reconcile_mutex);
     void ProcessPaymentAuditCertificate(CNode* from, CDataStream& payload)
         EXCLUSIVE_LOCKS_REQUIRED(!cs_main,
                                  !m_payment_audit_mutex,
                                  !m_lookup_mutex,
                                  !m_verification_mutex,
+                                 !m_needed_btcc_certificate_mutex,
                                  !m_pending_payment_audit_receipt_mutex,
                                  !m_btcc_preseal_mutex);
     struct LocalPaymentAuditFinalization {
@@ -1922,6 +1955,7 @@ private:
                                  !m_payment_audit_mutex,
                                  !m_lookup_mutex,
                                  !m_verification_mutex,
+                                 !m_needed_btcc_certificate_mutex,
                                  !m_pending_payment_audit_receipt_mutex,
                                  !m_btcc_preseal_mutex);
     void ProcessPaymentAuditCertificateInternal(
@@ -1933,6 +1967,7 @@ private:
                                  !m_payment_audit_mutex,
                                  !m_lookup_mutex,
                                  !m_verification_mutex,
+                                 !m_needed_btcc_certificate_mutex,
                                  !m_pending_payment_audit_receipt_mutex,
                                  !m_btcc_preseal_mutex);
     void FinishPaymentAuditFinalizationAttempt(
@@ -1949,12 +1984,14 @@ private:
                                  !m_payment_audit_mutex,
                                  !m_lookup_mutex,
                                  !m_verification_mutex,
+                                 !m_needed_btcc_certificate_mutex,
                                  !m_pending_payment_audit_receipt_mutex,
                                  !m_btcc_preseal_mutex);
     enum class PaymentAuditRosterBuildStatus : uint8_t {
         VALID = 0,
         INVALID,
         LOCAL_ERROR,
+        MISSING_SEAL,
     };
     [[nodiscard]] static std::optional<
         pq::VerifiedRosterAuthorizationBaseView>
@@ -1972,7 +2009,9 @@ private:
         const PaymentAuditHistoricalContext* historical = nullptr,
         uint64_t* roster_source_generation = nullptr,
         int32_t* reconstruction_floor = nullptr,
-        bool defer_historical_provenance = false) const
+        bool defer_historical_provenance = false,
+        std::optional<PendingPaymentAuditSealDependency>*
+            missing_seal = nullptr) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_lookup_mutex);
     [[nodiscard]] PaymentAuditReceiptCertificateStatus
     BuildStoredVerifiedPaymentAuditSubject(
@@ -2032,6 +2071,7 @@ private:
                                  !m_lookup_mutex,
                                  !m_payment_audit_mutex,
                                  !m_verification_mutex,
+                                 !m_needed_btcc_certificate_mutex,
                                  !m_pending_payment_audit_receipt_mutex,
                                  !m_btcc_preseal_mutex);
     void MaybeCapturePaymentAuditResponse(
@@ -2088,6 +2128,7 @@ private:
                                  !m_verification_mutex,
                                  !m_share_signing_mutex,
                                  !m_signer_reconcile_mutex,
+                                 !m_needed_btcc_certificate_mutex,
                                  !m_pending_payment_audit_receipt_mutex,
                                  !m_btcc_preseal_mutex,
                                  !m_btc_header_policy_mutex);
@@ -2265,6 +2306,9 @@ private:
         std::optional<NeededBTCCCertificate>& current,
         NeededBTCCCertificateSource source,
         const std::optional<uint256>& source_token = std::nullopt);
+    [[nodiscard]] static bool EraseNeededBTCCCertificateByLogicalId(
+        std::optional<NeededBTCCCertificate>& current,
+        const uint256& logical_id);
     [[nodiscard]] static std::optional<uint256>
     SelectRequiredBTCCCertificate(
         const std::optional<uint256>& pending,
@@ -2275,13 +2319,78 @@ private:
     void RequestNeededPaymentAuditCertificate()
         EXCLUSIVE_LOCKS_REQUIRED(
             !m_pending_payment_audit_receipt_mutex,
+            !m_needed_btcc_certificate_mutex,
             !m_btcc_preseal_mutex);
     [[nodiscard]] bool RevalidatePendingPaymentAuditReceiptDependency()
         EXCLUSIVE_LOCKS_REQUIRED(
-            !m_pending_payment_audit_receipt_mutex);
+            !m_pending_payment_audit_receipt_mutex,
+            !m_needed_btcc_certificate_mutex);
     [[nodiscard]] bool RevalidatePendingPaymentAuditReceiptDependencyLocked()
         EXCLUSIVE_LOCKS_REQUIRED(
-            cs_main, !m_pending_payment_audit_receipt_mutex);
+            cs_main, !m_pending_payment_audit_receipt_mutex,
+            !m_needed_btcc_certificate_mutex);
+    [[nodiscard]] static std::optional<PendingPaymentAuditSealDependency>
+    MakePendingPaymentAuditSealDependency(
+        const uint256& genesis_hash,
+        const PendingPaymentAuditReceiptDependency& owner,
+        const pq::ChainLockStatement& statement,
+        const std::optional<pq::RosterAuthorizationBaseIdentity>&
+            objective_base);
+    [[nodiscard]] static bool PublishPendingPaymentAuditSealDependency(
+        std::optional<PendingPaymentAuditSealDependency>& current,
+        const PendingPaymentAuditSealDependency& dependency);
+    [[nodiscard]] static bool DoesPaymentAuditSealSourceMatch(
+        const PaymentAuditSealFetchCapability& capability,
+        const std::optional<PendingPaymentAuditReceiptDependency>& pending,
+        const std::optional<PendingPaymentAuditSealDependency>& seal,
+        const std::optional<NeededBTCCCertificate>& needed) noexcept;
+    [[nodiscard]] bool StagePendingPaymentAuditSealDependency(
+        const PendingPaymentAuditSealDependency& dependency)
+        EXCLUSIVE_LOCKS_REQUIRED(
+            !m_pending_payment_audit_receipt_mutex,
+            !m_needed_btcc_certificate_mutex);
+    [[nodiscard]] std::optional<PaymentAuditSealFetchCapability>
+    GetPaymentAuditSealFetchCapability(const uint256& logical_id) const
+        EXCLUSIVE_LOCKS_REQUIRED(
+            !m_pending_payment_audit_receipt_mutex,
+            !m_needed_btcc_certificate_mutex);
+    [[nodiscard]] bool IsPaymentAuditSealFetchCapabilityCurrent(
+        const PaymentAuditSealFetchCapability& capability) const
+        EXCLUSIVE_LOCKS_REQUIRED(
+            !m_pending_payment_audit_receipt_mutex,
+            !m_needed_btcc_certificate_mutex);
+    [[nodiscard]] bool AuthorizePaymentAuditSealPersistence(
+        const PaymentAuditSealFetchCapability& capability,
+        const std::function<bool()>& persist_record,
+        pq::ChainLockFinalityError* error) const
+        EXCLUSIVE_LOCKS_REQUIRED(
+            !m_pending_payment_audit_receipt_mutex,
+            !m_needed_btcc_certificate_mutex);
+    void CompletePaymentAuditSealFetch(
+        const PaymentAuditSealFetchCapability& capability)
+        EXCLUSIVE_LOCKS_REQUIRED(
+            !m_pending_payment_audit_receipt_mutex,
+            !m_needed_btcc_certificate_mutex);
+    [[nodiscard]] std::optional<RuntimeVerificationContext>
+    BuildPaymentAuditSealVerificationContext(
+        const PaymentAuditSealFetchCapability& capability,
+        bool publish_roster) const
+        EXCLUSIVE_LOCKS_REQUIRED(
+            !m_lookup_mutex,
+            !m_pending_payment_audit_receipt_mutex,
+            !m_needed_btcc_certificate_mutex);
+    [[nodiscard]] std::optional<bool> ProcessPaymentAuditSealCertificate(
+        NodeId from,
+        const pq::FinalChainLock& chainlock,
+        BlockValidationState& state,
+        bool* peer_fault)
+        EXCLUSIVE_LOCKS_REQUIRED(
+            m_chainlock_admission_mutex,
+            !cs_main,
+            !m_verification_mutex,
+            !m_lookup_mutex,
+            !m_pending_payment_audit_receipt_mutex,
+            !m_needed_btcc_certificate_mutex);
     [[nodiscard]] HistoricalAdmissionContext
     GetHistoricalAdmission(const pq::ChainLockStatement& statement,
                            const uint256& logical_id) const
@@ -2543,6 +2652,9 @@ private:
     mutable Mutex m_pending_payment_audit_receipt_mutex;
     std::optional<PendingPaymentAuditReceiptDependency>
         m_pending_payment_audit_receipt
+            GUARDED_BY(m_pending_payment_audit_receipt_mutex);
+    std::optional<PendingPaymentAuditSealDependency>
+        m_pending_payment_audit_seal
             GUARDED_BY(m_pending_payment_audit_receipt_mutex);
     std::chrono::microseconds m_pending_payment_audit_last_request
         GUARDED_BY(m_pending_payment_audit_receipt_mutex){0};

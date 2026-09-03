@@ -3260,7 +3260,8 @@ void CChainLocksHandler::Start()
         scheduler->scheduleEvery([this]() EXCLUSIVE_LOCKS_REQUIRED(
             !cs_main, !m_chainlock_admission_mutex,
             !m_share_lifecycle_mutex, !m_pending_btcc_receipt_mutex,
-            !m_needed_btcc_certificate_mutex) {
+            !m_pending_payment_audit_receipt_mutex,
+            !m_needed_btcc_certificate_mutex, !m_btcc_preseal_mutex) {
             while (TryImportPersistedRosterAuthorizationBase() ==
                    PersistedChainLockImport::ACCEPTED) {
             }
@@ -3875,14 +3876,15 @@ void CChainLocksHandler::QuarantineInvalidPersistedChainLock(
 bool CChainLocksHandler::AlreadyHave(const uint256& logical_id) const
 {
     if (!m_store || logical_id.IsNull()) return false;
-    return static_cast<bool>(m_store->GetByLogicalId(logical_id));
+    return static_cast<bool>(
+        m_store->GetServableByLogicalId(logical_id));
 }
 
 bool CChainLocksHandler::GetChainLockByHash(const uint256& logical_id,
                                             CChainLockSig& result) const
 {
     if (!m_store || logical_id.IsNull()) return false;
-    const auto found{m_store->GetByLogicalId(logical_id)};
+    const auto found{m_store->GetServableByLogicalId(logical_id)};
     if (!found) return false;
     result = *found;
     return true;
@@ -5289,6 +5291,8 @@ bool CChainLocksHandler::IsNeededBTCCReceiptCertificate(
     return (m_pending_btcc_receipt &&
             m_pending_btcc_receipt->logical_id == logical_id) ||
            (m_needed_btcc_certificate &&
+            m_needed_btcc_certificate->source !=
+                NeededBTCCCertificateSource::PAYMENT_AUDIT_SEAL &&
             m_needed_btcc_certificate->logical_id == logical_id);
 }
 
@@ -5327,11 +5331,16 @@ CChainLocksHandler::GetBTCCReceiptArchiveCapability(
         capability.source_token = m_pending_btcc_receipt->carrier_hash;
     } else if (m_needed_btcc_certificate &&
                m_needed_btcc_certificate->logical_id == logical_id) {
-        capability.source =
-            m_needed_btcc_certificate->source ==
-                    NeededBTCCCertificateSource::LIVE_FRONTIER
-                ? BTCCReceiptArchiveSource::LIVE_FRONTIER
-                : BTCCReceiptArchiveSource::PRESEAL_REPLAY;
+        switch (m_needed_btcc_certificate->source) {
+        case NeededBTCCCertificateSource::LIVE_FRONTIER:
+            capability.source = BTCCReceiptArchiveSource::LIVE_FRONTIER;
+            break;
+        case NeededBTCCCertificateSource::PRESEAL_REPLAY:
+            capability.source = BTCCReceiptArchiveSource::PRESEAL_REPLAY;
+            break;
+        case NeededBTCCCertificateSource::PAYMENT_AUDIT_SEAL:
+            return std::nullopt;
+        }
         capability.source_token =
             m_needed_btcc_certificate->source_token;
     } else {
@@ -5519,6 +5528,20 @@ bool CChainLocksHandler::EraseNeededBTCCCertificate(
     return true;
 }
 
+bool CChainLocksHandler::EraseNeededBTCCCertificateByLogicalId(
+    std::optional<NeededBTCCCertificate>& current,
+    const uint256& logical_id)
+{
+    if (!current || logical_id.IsNull() ||
+        current->logical_id != logical_id ||
+        current->source ==
+            NeededBTCCCertificateSource::PAYMENT_AUDIT_SEAL) {
+        return false;
+    }
+    current.reset();
+    return true;
+}
+
 std::optional<uint256>
 CChainLocksHandler::SelectRequiredBTCCCertificate(
     const std::optional<uint256>& pending,
@@ -5552,12 +5575,9 @@ void CChainLocksHandler::ClearNeededBTCCCertificate(
 void CChainLocksHandler::ClearNeededBTCCCertificate(
     const uint256& logical_id)
 {
-    if (logical_id.IsNull()) return;
     LOCK(m_needed_btcc_certificate_mutex);
-    if (m_needed_btcc_certificate &&
-        m_needed_btcc_certificate->logical_id == logical_id) {
-        m_needed_btcc_certificate.reset();
-    }
+    (void)EraseNeededBTCCCertificateByLogicalId(
+        m_needed_btcc_certificate, logical_id);
 }
 
 void CChainLocksHandler::NotePendingPaymentAuditReceiptCertificate(
@@ -5579,6 +5599,14 @@ void CChainLocksHandler::NotePendingPaymentAuditReceiptCertificate(
         m_pending_payment_audit_receipt->carrier_parent_hash ==
             carrier.pprev->GetBlockHash()) {
         return;
+    }
+    if (m_pending_payment_audit_seal) {
+        LOCK(m_needed_btcc_certificate_mutex);
+        (void)EraseNeededBTCCCertificate(
+            m_needed_btcc_certificate,
+            NeededBTCCCertificateSource::PAYMENT_AUDIT_SEAL,
+            m_pending_payment_audit_seal->source_token);
+        m_pending_payment_audit_seal.reset();
     }
     m_pending_payment_audit_receipt =
         PendingPaymentAuditReceiptDependency{
@@ -7125,6 +7153,14 @@ bool CChainLocksHandler::RevalidatePendingPaymentAuditReceiptDependencyLocked()
                  "payment-audit carrier %s witness %s\n",
                  __func__, replacement->carrier_hash.ToString(),
                  replacement->receipt.audit_witness_id.ToString());
+        if (m_pending_payment_audit_seal) {
+            LOCK(m_needed_btcc_certificate_mutex);
+            (void)EraseNeededBTCCCertificate(
+                m_needed_btcc_certificate,
+                NeededBTCCCertificateSource::PAYMENT_AUDIT_SEAL,
+                m_pending_payment_audit_seal->source_token);
+            m_pending_payment_audit_seal.reset();
+        }
         m_pending_payment_audit_receipt = std::move(replacement);
         m_pending_payment_audit_last_request =
             std::chrono::microseconds{0};
@@ -7179,6 +7215,14 @@ bool CChainLocksHandler::RevalidatePendingPaymentAuditReceiptDependencyLocked()
                 }
             }
         }
+        if (m_pending_payment_audit_seal) {
+            LOCK(m_needed_btcc_certificate_mutex);
+            (void)EraseNeededBTCCCertificate(
+                m_needed_btcc_certificate,
+                NeededBTCCCertificateSource::PAYMENT_AUDIT_SEAL,
+                m_pending_payment_audit_seal->source_token);
+            m_pending_payment_audit_seal.reset();
+        }
         m_pending_payment_audit_receipt.reset();
         m_pending_payment_audit_last_request =
             std::chrono::microseconds{0};
@@ -7186,9 +7230,362 @@ bool CChainLocksHandler::RevalidatePendingPaymentAuditReceiptDependencyLocked()
     }
     // Never synthesize receipt authorization from a deferred map key. If the
     // deferred set is empty, the old singleton no longer has a carrier.
+    if (m_pending_payment_audit_seal) {
+        LOCK(m_needed_btcc_certificate_mutex);
+        (void)EraseNeededBTCCCertificate(
+            m_needed_btcc_certificate,
+            NeededBTCCCertificateSource::PAYMENT_AUDIT_SEAL,
+            m_pending_payment_audit_seal->source_token);
+        m_pending_payment_audit_seal.reset();
+    }
     m_pending_payment_audit_receipt.reset();
     m_pending_payment_audit_last_request = std::chrono::microseconds{0};
     return false;
+}
+
+std::optional<CChainLocksHandler::PendingPaymentAuditSealDependency>
+CChainLocksHandler::MakePendingPaymentAuditSealDependency(
+    const uint256& genesis_hash,
+    const PendingPaymentAuditReceiptDependency& owner,
+    const pq::ChainLockStatement& statement,
+    const std::optional<pq::RosterAuthorizationBaseIdentity>& objective_base)
+{
+    if (genesis_hash.IsNull() || !owner.receipt.IsStructurallyValid() ||
+        owner.receipt.IsNull() || owner.carrier_hash.IsNull() ||
+        owner.carrier_parent_hash.IsNull() ||
+        !statement.IsStructurallyValid() ||
+        owner.receipt.seal_height != statement.height ||
+        owner.receipt.seal_block_hash != statement.block_hash) {
+        return std::nullopt;
+    }
+    const bool initializes{
+        statement.roster_transition ==
+        pq::RosterAuthorizationTransitionKind::INITIALIZE};
+    if ((initializes &&
+         (objective_base || !statement.roster_authorization_base.IsNull())) ||
+        (!initializes &&
+         (!objective_base || objective_base->IsNull() ||
+          *objective_base != statement.roster_authorization_base))) {
+        return std::nullopt;
+    }
+    const uint256 logical_id{
+        pq::GetLogicalChainLockId(genesis_hash, statement)};
+    if (logical_id.IsNull()) return std::nullopt;
+
+    CHashWriter writer{SER_GETHASH, 0};
+    writer << std::string{"SYS_PQ_PAYMENT_AUDIT_SEAL_FETCH_V1"}
+           << owner.receipt << owner.carrier_hash
+           << owner.carrier_parent_hash << statement
+           << (objective_base ? *objective_base
+                              : pq::RosterAuthorizationBaseIdentity{})
+           << logical_id;
+    const uint256 source_token{writer.GetHash()};
+    if (source_token.IsNull()) return std::nullopt;
+    return PendingPaymentAuditSealDependency{
+        owner, statement,
+        objective_base.value_or(
+            pq::RosterAuthorizationBaseIdentity{}),
+        logical_id, source_token};
+}
+
+bool CChainLocksHandler::PublishPendingPaymentAuditSealDependency(
+    std::optional<PendingPaymentAuditSealDependency>& current,
+    const PendingPaymentAuditSealDependency& dependency)
+{
+    if (dependency.logical_id.IsNull() || dependency.source_token.IsNull()) {
+        return false;
+    }
+    if (current == dependency) return false;
+    current = dependency;
+    return true;
+}
+
+bool CChainLocksHandler::DoesPaymentAuditSealSourceMatch(
+    const PaymentAuditSealFetchCapability& capability,
+    const std::optional<PendingPaymentAuditReceiptDependency>& pending,
+    const std::optional<PendingPaymentAuditSealDependency>& seal,
+    const std::optional<NeededBTCCCertificate>& needed) noexcept
+{
+    const auto& dependency{capability.dependency};
+    const bool exact_base{
+        dependency.objective_base.IsNull()
+            ? !capability.objective_base
+            : capability.objective_base &&
+                capability.objective_base->certificate &&
+                capability.objective_base->verification_context &&
+                capability.objective_base->metadata.AuthorizationBase() ==
+                    dependency.objective_base &&
+                capability.objective_base->metadata.IsInternallyConsistent(
+                    capability.objective_base->verification_context
+                        ->GenesisHash()) &&
+                capability.objective_base->certificate->statement ==
+                    capability.objective_base->metadata.statement &&
+                capability.objective_base->verification_context
+                        ->Statement() ==
+                    capability.objective_base->metadata.statement};
+    return exact_base && pending && *pending == dependency.owner && seal &&
+        *seal == dependency && needed &&
+        needed->source ==
+            NeededBTCCCertificateSource::PAYMENT_AUDIT_SEAL &&
+        needed->logical_id == dependency.logical_id &&
+        needed->source_token == dependency.source_token;
+}
+
+bool CChainLocksHandler::StagePendingPaymentAuditSealDependency(
+    const PendingPaymentAuditSealDependency& dependency)
+{
+    if (!m_store) return false;
+    if (m_store->GetServableByLogicalId(dependency.logical_id)) {
+        return false;
+    }
+    std::optional<pq::VerifiedRosterAuthorizationBaseView> objective_base;
+    if (!dependency.objective_base.IsNull()) {
+        objective_base = m_store->GetVerifiedRosterAuthorizationBase(
+            dependency.objective_base);
+        if (!objective_base) return false;
+    }
+    LOCK(m_pending_payment_audit_receipt_mutex);
+    if (!m_pending_payment_audit_receipt ||
+        *m_pending_payment_audit_receipt != dependency.owner) {
+        return false;
+    }
+    LOCK(m_needed_btcc_certificate_mutex);
+    if (m_pending_payment_audit_seal &&
+        m_pending_payment_audit_seal->source_token !=
+            dependency.source_token) {
+        (void)EraseNeededBTCCCertificate(
+            m_needed_btcc_certificate,
+            NeededBTCCCertificateSource::PAYMENT_AUDIT_SEAL,
+            m_pending_payment_audit_seal->source_token);
+    }
+    (void)PublishPendingPaymentAuditSealDependency(
+        m_pending_payment_audit_seal, dependency);
+    (void)PublishNeededBTCCCertificate(
+        m_needed_btcc_certificate,
+        NeededBTCCCertificateSource::PAYMENT_AUDIT_SEAL,
+        dependency.logical_id, dependency.source_token);
+    return DoesPaymentAuditSealSourceMatch(
+        PaymentAuditSealFetchCapability{
+            dependency, std::move(objective_base)},
+        m_pending_payment_audit_receipt,
+        m_pending_payment_audit_seal,
+        m_needed_btcc_certificate);
+}
+
+std::optional<CChainLocksHandler::PaymentAuditSealFetchCapability>
+CChainLocksHandler::GetPaymentAuditSealFetchCapability(
+    const uint256& logical_id) const
+{
+    if (!m_store || logical_id.IsNull()) return std::nullopt;
+    std::optional<PendingPaymentAuditSealDependency> dependency;
+    {
+        LOCK(m_pending_payment_audit_receipt_mutex);
+        LOCK(m_needed_btcc_certificate_mutex);
+        if (!m_pending_payment_audit_seal ||
+            m_pending_payment_audit_seal->logical_id != logical_id) {
+            return std::nullopt;
+        }
+        dependency = m_pending_payment_audit_seal;
+    }
+    std::optional<pq::VerifiedRosterAuthorizationBaseView> objective_base;
+    if (!dependency->objective_base.IsNull()) {
+        objective_base = m_store->GetVerifiedRosterAuthorizationBase(
+            dependency->objective_base);
+        if (!objective_base) return std::nullopt;
+    }
+    PaymentAuditSealFetchCapability capability{
+        *dependency, std::move(objective_base)};
+    LOCK(m_pending_payment_audit_receipt_mutex);
+    LOCK(m_needed_btcc_certificate_mutex);
+    if (!DoesPaymentAuditSealSourceMatch(
+            capability, m_pending_payment_audit_receipt,
+            m_pending_payment_audit_seal,
+            m_needed_btcc_certificate)) {
+        return std::nullopt;
+    }
+    return capability;
+}
+
+bool CChainLocksHandler::IsPaymentAuditSealFetchCapabilityCurrent(
+    const PaymentAuditSealFetchCapability& capability) const
+{
+    const auto current{GetPaymentAuditSealFetchCapability(
+        capability.dependency.logical_id)};
+    if (!current || current->dependency != capability.dependency ||
+        current->objective_base.has_value() !=
+            capability.objective_base.has_value()) {
+        return false;
+    }
+    return !current->objective_base ||
+        current->objective_base->metadata ==
+            capability.objective_base->metadata;
+}
+
+bool CChainLocksHandler::AuthorizePaymentAuditSealPersistence(
+    const PaymentAuditSealFetchCapability& capability,
+    const std::function<bool()>& persist_record,
+    pq::ChainLockFinalityError* error) const
+{
+    if (!persist_record || !m_store) {
+        if (error != nullptr) {
+            *error = pq::ChainLockFinalityError::CONTEXT_CHANGED;
+        }
+        return false;
+    }
+    LOCK(m_pending_payment_audit_receipt_mutex);
+    LOCK(m_needed_btcc_certificate_mutex);
+    const bool source_current{DoesPaymentAuditSealSourceMatch(
+        capability, m_pending_payment_audit_receipt,
+        m_pending_payment_audit_seal,
+        m_needed_btcc_certificate)};
+    if (!source_current) {
+        if (error != nullptr) {
+            *error = pq::ChainLockFinalityError::CONTEXT_CHANGED;
+        }
+        return false;
+    }
+    return persist_record();
+}
+
+void CChainLocksHandler::CompletePaymentAuditSealFetch(
+    const PaymentAuditSealFetchCapability& capability)
+{
+    LOCK(m_pending_payment_audit_receipt_mutex);
+    LOCK(m_needed_btcc_certificate_mutex);
+    if (!DoesPaymentAuditSealSourceMatch(
+            capability, m_pending_payment_audit_receipt,
+            m_pending_payment_audit_seal,
+            m_needed_btcc_certificate)) {
+        return;
+    }
+    (void)EraseNeededBTCCCertificate(
+        m_needed_btcc_certificate,
+        NeededBTCCCertificateSource::PAYMENT_AUDIT_SEAL,
+        capability.dependency.source_token);
+    m_pending_payment_audit_seal.reset();
+    m_pending_payment_audit_last_request =
+        std::chrono::microseconds{0};
+}
+
+std::optional<CChainLocksHandler::RuntimeVerificationContext>
+CChainLocksHandler::BuildPaymentAuditSealVerificationContext(
+    const PaymentAuditSealFetchCapability& capability,
+    bool publish_roster) const
+{
+    if (!m_config || !m_quorum_build_config || !m_store) {
+        return std::nullopt;
+    }
+    const auto& dependency{capability.dependency};
+    const auto rebuilt{MakePendingPaymentAuditSealDependency(
+        m_genesis_hash, dependency.owner, dependency.statement,
+        dependency.objective_base.IsNull()
+            ? std::optional<pq::RosterAuthorizationBaseIdentity>{}
+            : std::optional<pq::RosterAuthorizationBaseIdentity>{
+                  dependency.objective_base})};
+    if (!rebuilt || *rebuilt != dependency) return std::nullopt;
+
+    uint64_t roster_source_generation{0};
+    const auto roster_cache{
+        GetQuorumRosterCache(&roster_source_generation)};
+    if (!roster_cache) return std::nullopt;
+
+    const CBlockIndex* seal{nullptr};
+    std::optional<pq::RosterAuthorizationVerificationContext>
+        authorization;
+    {
+        LOCK(cs_main);
+        const auto historical{ResolvePendingPaymentAuditContext(
+            dependency.owner.receipt.audit_witness_id)};
+        if (!historical || historical->dependency != dependency.owner) {
+            return std::nullopt;
+        }
+        const pq::PaymentAuditScheduleConfig audit_config{
+            m_config->chainlock_schedule, m_config->btcc_schedule};
+        const auto audit_schedule{pq::BuildPaymentAuditEpochSchedule(
+            audit_config, dependency.owner.receipt.epoch)};
+        seal = m_chainman.m_blockman.LookupBlockIndex(
+            dependency.statement.block_hash);
+        const CBlockIndex* carrier{
+            m_chainman.m_blockman.LookupBlockIndex(
+                dependency.owner.carrier_hash)};
+        if (!audit_schedule ||
+            audit_schedule->seal_height != dependency.statement.height ||
+            !pq::PaymentAuditCarrierWindow{
+                 dependency.owner.receipt.epoch,
+                 audit_schedule->carrier_start_height,
+                 audit_schedule->carrier_end_height_exclusive}
+                 .Contains(dependency.owner.receipt.carrier_height) ||
+            carrier == nullptr || carrier->pprev == nullptr ||
+            carrier->nHeight != dependency.owner.receipt.carrier_height ||
+            carrier->pprev->GetBlockHash() !=
+                dependency.owner.carrier_parent_hash ||
+            carrier->GetAncestor(dependency.statement.height) != seal ||
+            ClassifyPaymentAuditSealContextCached(
+                seal, dependency.statement.height,
+                dependency.statement.previous_chainlock_height,
+                dependency.statement.previous_chainlock_hash,
+                PaymentAuditSealValidation::THRESHOLD_ATTESTED_HISTORY) !=
+                PaymentAuditContextStatus::READY) {
+            return std::nullopt;
+        }
+        const auto indexed_btcc{IndexedBTCCReceiptState(*seal)};
+        const auto indexed_audit{IndexedPaymentAuditReceiptState(*seal)};
+        pq::BTCCValidationError btcc_error{pq::BTCCValidationError::NONE};
+        if (!indexed_btcc || !indexed_audit ||
+            *indexed_btcc != dependency.statement.btcc_receipt_state ||
+            *indexed_audit !=
+                dependency.statement.payment_audit_receipt_state ||
+            seal->pqPaymentProbationStateHash !=
+                dependency.statement.payment_probation_state_hash ||
+            !pq::ValidateBTCCursorTransition(
+                m_config->btcc_schedule, *seal,
+                dependency.statement.previous_btcc_cursor,
+                dependency.statement.accepted_btcc_cursor,
+                dependency.statement.btcc_advance, &btcc_error)) {
+            return std::nullopt;
+        }
+
+        std::optional<ObjectiveRosterAuthorizationContext> objective;
+        if (dependency.statement.roster_transition !=
+            pq::RosterAuthorizationTransitionKind::INITIALIZE) {
+            if (!capability.objective_base) return std::nullopt;
+            objective = ResolveObjectiveRosterAuthorizationContext(
+                *seal, &*capability.objective_base);
+            if (!objective || !objective->base ||
+                objective->base->metadata.AuthorizationBase() !=
+                    dependency.objective_base) {
+                return std::nullopt;
+            }
+        } else if (capability.objective_base ||
+                   !dependency.objective_base.IsNull()) {
+            return std::nullopt;
+        }
+        authorization = BuildNetworkRosterAuthorizationContext(
+            dependency.statement, *seal,
+            objective ? &*objective : nullptr);
+    }
+    if (!authorization || seal == nullptr) return std::nullopt;
+
+    pq::QuorumBuildError build_error{pq::QuorumBuildError::NONE};
+    const auto roster_set{publish_roster
+        ? roster_cache->GetVerifiedActive(
+              dependency.statement.height, *seal,
+              dependency.statement.roster_beacons.active,
+              &build_error)
+        : roster_cache->GetVerifiedActiveNoPublish(
+              dependency.statement.height, *seal,
+              dependency.statement.roster_beacons.active,
+              &build_error)};
+    if (!roster_set) return std::nullopt;
+    pq::ChainLockVerificationError verification_error{
+        pq::ChainLockVerificationError::NONE};
+    auto prepared{pq::PreparedChainLockContext::Create(
+        m_config->chainlock_schedule, dependency.statement,
+        roster_set, *authorization, &verification_error)};
+    if (!prepared) return std::nullopt;
+    return RuntimeVerificationContext{
+        std::move(prepared), HistoricalAdmissionContext{},
+        roster_source_generation};
 }
 
 CChainLocksHandler::HistoricalAdmissionContext
@@ -8371,6 +8768,25 @@ void CChainLocksHandler::RequestNeededPaymentAuditCertificate()
         if (IsPaymentAuditPresealActive()) return;
     }
     (void)RevalidatePendingPaymentAuditReceiptDependency();
+    std::optional<uint256> seal_logical_id;
+    {
+        LOCK(m_pending_payment_audit_receipt_mutex);
+        if (m_pending_payment_audit_seal) {
+            seal_logical_id =
+                m_pending_payment_audit_seal->logical_id;
+        }
+    }
+    if (seal_logical_id) {
+        const auto capability{
+            GetPaymentAuditSealFetchCapability(*seal_logical_id)};
+        if (capability && m_store &&
+            m_store->GetServableByLogicalId(*seal_logical_id)) {
+            CompletePaymentAuditSealFetch(*capability);
+        }
+        // GETCLSIG is owned by the single needed-certificate scheduler lane.
+        // Never re-request the large audit until its exact seal is available.
+        return;
+    }
     std::optional<uint256> witness_id;
     const auto now{GetTime<std::chrono::microseconds>()};
     {
@@ -9417,7 +9833,8 @@ pq::AcceptedBranchRelation CChainLocksHandler::QueryAcceptedBranch(
 
 std::optional<CChainLocksHandler::ObjectiveRosterAuthorizationContext>
 CChainLocksHandler::ResolveObjectiveRosterAuthorizationContext(
-    const CBlockIndex& candidate) const
+    const CBlockIndex& candidate,
+    const pq::VerifiedRosterAuthorizationBaseView* exact_base) const
 {
     AssertLockHeld(cs_main);
     if (!m_config || !m_store || candidate.nHeight < 0 ||
@@ -9473,8 +9890,10 @@ CChainLocksHandler::ResolveObjectiveRosterAuthorizationContext(
         carrier->pqBTCCReceiptLogicalId)};
     if (!receipt || receipt->IsNull()) return std::nullopt;
 
-    auto base{m_store->GetVerifiedRosterAuthorizationBaseByLogicalId(
-        receipt->chainlock_logical_id)};
+    auto base{exact_base != nullptr
+        ? std::optional<pq::VerifiedRosterAuthorizationBaseView>{*exact_base}
+        : m_store->GetVerifiedRosterAuthorizationBaseByLogicalId(
+              receipt->chainlock_logical_id)};
     if (!base || !base->metadata.IsInternallyConsistent(m_genesis_hash) ||
         base->metadata.logical_id != carrier->pqBTCCReceiptLogicalId ||
         base->metadata.statement.height != receipted_target_height ||
@@ -14263,7 +14682,9 @@ CChainLocksHandler::BuildPaymentAuditVerificationRosters(
     const PaymentAuditHistoricalContext* historical,
     uint64_t* roster_source_generation_out,
     int32_t* reconstruction_floor_out,
-    bool defer_historical_provenance) const
+    bool defer_historical_provenance,
+    std::optional<PendingPaymentAuditSealDependency>*
+        missing_seal) const
 {
     if (status != nullptr) {
         *status = PaymentAuditRosterBuildStatus::INVALID;
@@ -14277,6 +14698,7 @@ CChainLocksHandler::BuildPaymentAuditVerificationRosters(
     if (reconstruction_floor_out != nullptr) {
         *reconstruction_floor_out = -1;
     }
+    if (missing_seal != nullptr) missing_seal->reset();
     if (!statement.IsStructurallyValid() ||
         (historical != nullptr && require_live_transition_finality)) {
         return nullptr;
@@ -14432,8 +14854,38 @@ CChainLocksHandler::BuildPaymentAuditVerificationRosters(
               *m_store, m_genesis_hash, statement.seal_statement)
         : std::optional<pq::VerifiedRosterAuthorizationBaseView>{}};
     if (!accepted_seal_record) {
+        if (historical == nullptr || m_store == nullptr) {
+            if (status != nullptr) {
+                *status = PaymentAuditRosterBuildStatus::LOCAL_ERROR;
+            }
+            return nullptr;
+        }
+        std::optional<pq::RosterAuthorizationBaseIdentity> objective_base;
+        if (statement.seal_statement.roster_transition !=
+            pq::RosterAuthorizationTransitionKind::INITIALIZE) {
+            const auto objective{
+                ResolveObjectiveRosterAuthorizationContext(*seal)};
+            if (!objective || !objective->base) {
+                if (status != nullptr) {
+                    *status = PaymentAuditRosterBuildStatus::LOCAL_ERROR;
+                }
+                return nullptr;
+            }
+            objective_base = objective->base->metadata.AuthorizationBase();
+            if (*objective_base !=
+                statement.seal_statement.roster_authorization_base) {
+                return nullptr;
+            }
+        }
+        const auto dependency{MakePendingPaymentAuditSealDependency(
+            m_genesis_hash, historical->dependency,
+            statement.seal_statement, objective_base)};
+        if (!dependency) return nullptr;
+        if (missing_seal != nullptr) {
+            *missing_seal = *dependency;
+        }
         if (status != nullptr) {
-            *status = PaymentAuditRosterBuildStatus::LOCAL_ERROR;
+            *status = PaymentAuditRosterBuildStatus::MISSING_SEAL;
         }
         return nullptr;
     }
@@ -14801,6 +15253,8 @@ void CChainLocksHandler::ProcessPaymentAuditCertificateInternal(
     pq::RosterAuthorizationVerificationContext authorization;
     uint64_t roster_source_generation{0};
     pq::VerifiedRosterSetPtr rosters;
+    std::optional<PendingPaymentAuditSealDependency>
+        missing_seal;
     if (local_certificate) {
         if (!local_finalization || historical ||
             !is_exact_local_runtime() ||
@@ -14831,7 +15285,8 @@ void CChainLocksHandler::ProcessPaymentAuditCertificateInternal(
             historical ? &*historical : nullptr,
             &roster_source_generation,
             /*reconstruction_floor=*/nullptr,
-            /*defer_historical_provenance=*/historical.has_value());
+            /*defer_historical_provenance=*/historical.has_value(),
+            &missing_seal);
         const auto derived_mask{rosters
             ? pq::ValidateRosterAuthorizationState(
                   m_genesis_hash, audit.statement.seal_statement,
@@ -14853,6 +15308,20 @@ void CChainLocksHandler::ProcessPaymentAuditCertificateInternal(
         }
     }
     if (!rosters) {
+        if (roster_status ==
+            PaymentAuditRosterBuildStatus::MISSING_SEAL) {
+            if (historical && missing_seal &&
+                StagePendingPaymentAuditSealDependency(*missing_seal)) {
+                // The peer supplied the exact requested audit. Its locally
+                // missing seal is a separate dependency, not a source
+                // failure; leave the receipt pending and permit an immediate
+                // retry once that seal is admitted.
+                complete_request(witness_id);
+                return;
+            }
+            fail_request();
+            return;
+        }
         if (roster_status == PaymentAuditRosterBuildStatus::LOCAL_ERROR) {
             fail_request();
             return;
@@ -15595,6 +16064,137 @@ bool CChainLocksHandler::ProcessCollectedChainLock(
         /*peer_fault=*/nullptr, &finalized);
 }
 
+std::optional<bool>
+CChainLocksHandler::ProcessPaymentAuditSealCertificate(
+    NodeId from,
+    const pq::FinalChainLock& chainlock,
+    BlockValidationState& state,
+    bool* peer_fault)
+{
+    const uint256 logical_id{chainlock.GetLogicalId(m_genesis_hash)};
+    const uint256 witness_id{chainlock.GetWitnessId(m_genesis_hash)};
+    const auto capability{
+        GetPaymentAuditSealFetchCapability(logical_id)};
+    if (!capability) return std::nullopt;
+    if (chainlock.statement != capability->dependency.statement ||
+        logical_id != capability->dependency.logical_id ||
+        witness_id.IsNull()) {
+        if (peer_fault != nullptr) *peer_fault = true;
+        FailPeerResponse(from, logical_id);
+        return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK,
+                             "pq-clsig-invalid-payment-audit-seal");
+    }
+    if (m_store->GetServableByLogicalId(logical_id)) {
+        CompletePaymentAuditSealFetch(*capability);
+        CompletePeerResponse(from, logical_id);
+        return true;
+    }
+    if (m_store->AlreadyHaveWitness(witness_id)) {
+        CompletePeerResponse(from, logical_id);
+        return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK,
+                             "pq-clsig-duplicate-witness");
+    }
+
+    ScopedFinalitySnapshotVerificationRetention snapshot_retention{
+        deterministicMNManager.get()};
+    const auto verification{
+        BuildPaymentAuditSealVerificationContext(
+            *capability, /*publish_roster=*/false)};
+    if (!verification) {
+        CompletePeerResponse(from, logical_id);
+        return state.Error("pq-clsig-payment-audit-seal-context-unavailable");
+    }
+    pq::ChainLockVerificationError verification_error{
+        pq::ChainLockVerificationError::NONE};
+    auto checks{pq::PrepareFinalChainLockVerification(
+        chainlock, *verification->prepared_context,
+        &verification_error)};
+    if (!checks) {
+        m_store->RejectWitness(chainlock);
+        if (peer_fault != nullptr) *peer_fault = true;
+        FailPeerResponse(from, logical_id);
+        return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK,
+                             "pq-clsig-invalid-payment-audit-seal-context");
+    }
+    if (peer_fault != nullptr) *peer_fault = true;
+    bool signatures_valid{false};
+    {
+        LOCK(m_verification_mutex);
+        signatures_valid =
+            m_verifier.VerifyChecks(std::move(checks->checks));
+    }
+    if (!signatures_valid) {
+        m_store->RejectWitness(chainlock);
+        FailPeerResponse(from, logical_id);
+        return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK,
+                             "pq-clsig-invalid-payment-audit-seal-signatures");
+    }
+    if (peer_fault != nullptr) *peer_fault = false;
+
+    pq::ChainLockFinalityError finality_error{
+        pq::ChainLockFinalityError::NONE};
+    bool index_persistence_failed{false};
+    const bool accepted{
+        m_chainman.ActiveChainstate().RunWithStableActiveChain([&] {
+            if (!IsPaymentAuditSealFetchCapabilityCurrent(*capability)) {
+                finality_error =
+                    pq::ChainLockFinalityError::CONTEXT_CHANGED;
+                return false;
+            }
+            const auto current{
+                BuildPaymentAuditSealVerificationContext(
+                    *capability, /*publish_roster=*/true)};
+            if (!current ||
+                current->prepared_context->AuthorizationMask() !=
+                    verification->prepared_context->AuthorizationMask() ||
+                Descriptors(current->prepared_context->Rosters()) !=
+                    Descriptors(
+                        verification->prepared_context->Rosters())) {
+                finality_error =
+                    pq::ChainLockFinalityError::CONTEXT_CHANGED;
+                return false;
+            }
+            if (!FlushBTCCIndexStateForDurableAcceptance(chainlock)) {
+                index_persistence_failed = true;
+                return false;
+            }
+            const auto authorize_durable = [&] (
+                const std::function<bool()>& persist_record,
+                pq::ChainLockFinalityError* error) {
+                return AuthorizePaymentAuditSealPersistence(
+                    *capability, persist_record, error);
+            };
+            return m_store->AcceptVerifiedRosterAuthorizationBase(
+                chainlock, /*signatures_valid=*/true,
+                current->prepared_context, &finality_error,
+                authorize_durable);
+        })};
+    if (index_persistence_failed) {
+        CompletePeerResponse(from, logical_id);
+        m_persistence_failed.store(true);
+        DisableShareAdmission();
+        return state.Error(
+            "pq-clsig-payment-audit-seal-index-persistence-failed");
+    }
+    if (!accepted) {
+        CompletePeerResponse(from, logical_id);
+        return state.Invalid(
+            BlockValidationResult::BLOCK_CHAINLOCK,
+            strprintf("pq-clsig-payment-audit-seal-%s",
+                      FinalityErrorString(finality_error)));
+    }
+
+    CompletePaymentAuditSealFetch(*capability);
+    m_peerman.RelayInv(CInv{MSG_CLSIG, logical_id});
+    CompletePeerResponse(from, logical_id);
+    ForgetAllRequests(logical_id);
+    LogPrint(BCLog::CHAINLOCKS,
+             "CChainLocksHandler::%s accepted payment-audit seal CLSIG "
+             "%s at height %d as authorization only\n",
+             __func__, witness_id.ToString(), chainlock.statement.height);
+    return true;
+}
+
 bool CChainLocksHandler::ProcessNewChainLockInternal(
     NodeId from,
     const pq::FinalChainLock& chainlock,
@@ -15643,6 +16243,11 @@ bool CChainLocksHandler::ProcessNewChainLockInternal(
         }
         return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK,
                              "pq-clsig-verifier-busy");
+    }
+
+    if (const auto payment_seal{ProcessPaymentAuditSealCertificate(
+            from, chainlock, state, peer_fault)}) {
+        return *payment_seal;
     }
 
     const auto current_best{m_store->GetBestRecord()};
@@ -16582,8 +17187,8 @@ CChainLocksHandler::TryImportPersistedUnsealedBTCC()
         return PersistedChainLockImport::PENDING;
     }
 
-    const uint256 logical_id{persisted.GetLogicalId(m_genesis_hash)};
-    if (m_store->GetByLogicalId(logical_id)) {
+    const auto imported_unsealed{m_store->GetUnsealedBTCC()};
+    if (imported_unsealed && *imported_unsealed == persisted) {
         const auto publication{
             BeginChainLockAuxiliarySnapshotPublication()};
         if (!publication) {

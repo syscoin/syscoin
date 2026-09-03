@@ -195,6 +195,41 @@ BOOST_AUTO_TEST_CASE(pq_chainlock_request_admission_is_bounded)
     BOOST_CHECK(!tracker.RequestedBy(second_peer));
 }
 
+BOOST_AUTO_TEST_CASE(
+    payment_audit_local_dependency_does_not_cooldown_exact_provider)
+{
+    const NodeId peer{12};
+    const uint256 audit_id{uint256S("12")};
+    const auto now{std::chrono::microseconds{100}};
+    const auto expiry{std::chrono::microseconds{200}};
+
+    ChainLockRequestTracker deferred;
+    BOOST_REQUIRE(deferred.Announce(
+        peer, audit_id,
+        ChainLockRequestTracker::SourcePriority::AUTHENTICATED_OUTBOUND,
+        /*required=*/true));
+    BOOST_REQUIRE(deferred.Request(peer, now, expiry));
+    deferred.ReceivedResponse(peer, audit_id);
+    BOOST_REQUIRE(deferred.Announce(
+        peer, audit_id,
+        ChainLockRequestTracker::SourcePriority::AUTHENTICATED_OUTBOUND,
+        /*required=*/true));
+    BOOST_CHECK(deferred.Request(peer, now, expiry));
+
+    ChainLockRequestTracker failed;
+    BOOST_REQUIRE(failed.Announce(
+        peer, audit_id,
+        ChainLockRequestTracker::SourcePriority::AUTHENTICATED_OUTBOUND,
+        /*required=*/true));
+    BOOST_REQUIRE(failed.Request(peer, now, expiry));
+    BOOST_REQUIRE(failed.ReceivedFailure(peer, audit_id, now));
+    BOOST_REQUIRE(failed.Announce(
+        peer, audit_id,
+        ChainLockRequestTracker::SourcePriority::AUTHENTICATED_OUTBOUND,
+        /*required=*/true));
+    BOOST_CHECK(!failed.Request(peer, now, expiry));
+}
+
 BOOST_AUTO_TEST_CASE(pq_chainlock_request_timeout_and_disconnect_cleanup)
 {
     ChainLockRequestTracker tracker;
