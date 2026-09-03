@@ -59,6 +59,8 @@ void SealNormalKeepRosterAuthorization(
         statement.roster_beacons.active.seeds[slot] =
             SubjectBeacon((*active_epochs)[slot].epoch);
     }
+    statement.roster_beacons.active.recovery_authority_source.normal_beacon =
+        statement.roster_beacons.active.seeds.back();
     statement.roster_beacons.next.epoch =
         active_epochs->back().epoch + 1;
     statement.roster_transition =
