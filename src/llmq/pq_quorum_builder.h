@@ -16,6 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <ios>
 #include <memory>
 #include <optional>
 #include <span>
@@ -60,7 +61,172 @@ enum class QuorumBuildError : uint8_t {
     SNAPSHOT_MISMATCH,
     INVALID_ROSTER_BEACON,
     INVALID_FROZEN_ROSTER,
+    RECOVERY_UNIVERSE_LOOKUP_FAILED,
+    INVALID_RECOVERY_UNIVERSE,
 };
+
+inline constexpr uint16_t RECOVERY_UNIVERSE_CAPSULE_VERSION{1};
+inline constexpr std::size_t RECOVERY_UNIVERSE_MAX_MEMBERS{65'535};
+
+/**
+ * The immutable identity-and-lineage projection used by recovery scoring.
+ * Current key availability is deliberately absent: it is resolved at each
+ * recovery group's own cutoff so later groups can regain liveness.
+ */
+struct RecoveryUniverseMember {
+    static constexpr std::size_t DISK_SIZE{2 * uint256::size() +
+                                           uint256::size() +
+                                           sizeof(uint32_t)};
+
+    uint256 pro_tx_hash;
+    uint256 confirmed_hash_with_pro_reg_tx_hash;
+    COutPoint collateral_outpoint;
+
+    SERIALIZE_METHODS(RecoveryUniverseMember, obj)
+    {
+        READWRITE(obj.pro_tx_hash,
+                  obj.confirmed_hash_with_pro_reg_tx_hash,
+                  obj.collateral_outpoint);
+        SER_READ(obj, if (!obj.IsStructurallyValid()) {
+            throw std::ios_base::failure(
+                "invalid recovery-universe member");
+        });
+    }
+
+    [[nodiscard]] bool IsStructurallyValid() const noexcept;
+    friend bool operator==(const RecoveryUniverseMember&,
+                           const RecoveryUniverseMember&) = default;
+};
+
+static_assert(RecoveryUniverseMember::DISK_SIZE == 100);
+
+/**
+ * Local-only frozen recovery identity universe. The source and exact branch
+ * snapshot are part of the capsule identity; every recovery group re-scores
+ * the complete member vector with that group's epoch.
+ */
+class RecoveryUniverseCapsule final {
+public:
+    static constexpr std::size_t MAX_SERIALIZED_SIZE{
+        sizeof(uint16_t) + uint256::size() +
+        RecoveryRosterAuthoritySource::WIRE_SIZE + sizeof(int32_t) +
+        uint256::size() + sizeof(uint32_t) +
+        RECOVERY_UNIVERSE_MAX_MEMBERS *
+            RecoveryUniverseMember::DISK_SIZE +
+        3 * uint256::size()};
+
+    static constexpr std::size_t MIN_SERIALIZED_SIZE{
+        MAX_SERIALIZED_SIZE -
+        (RECOVERY_UNIVERSE_MAX_MEMBERS - QUORUM_SIZE) *
+            RecoveryUniverseMember::DISK_SIZE};
+
+    /** Decode only bytes obtained from authenticated local persistence. */
+    [[nodiscard]] static std::optional<RecoveryUniverseCapsule>
+    DecodeTrustedPersistence(
+        Span<const uint8_t> encoded,
+        QuorumBuildError* error = nullptr);
+
+    [[nodiscard]] std::vector<uint8_t> Encode() const;
+    [[nodiscard]] const uint256& GenesisHash() const noexcept
+    {
+        return m_genesis_hash;
+    }
+    [[nodiscard]] const RecoveryRosterAuthoritySource& Source() const noexcept
+    {
+        return m_source;
+    }
+    [[nodiscard]] int32_t SourceSnapshotHeight() const noexcept
+    {
+        return m_source_snapshot_height;
+    }
+    [[nodiscard]] const uint256& SourceSnapshotHash() const noexcept
+    {
+        return m_source_snapshot_hash;
+    }
+    [[nodiscard]] const uint256& SourceId() const noexcept
+    {
+        return m_source_id;
+    }
+    [[nodiscard]] std::span<const RecoveryUniverseMember> Members() const
+        noexcept
+    {
+        return m_members;
+    }
+    [[nodiscard]] const uint256& MembersHash() const noexcept
+    {
+        return m_members_hash;
+    }
+    [[nodiscard]] const uint256& CapsuleId() const noexcept
+    {
+        return m_capsule_id;
+    }
+    [[nodiscard]] bool IsStructurallyValid() const noexcept;
+    [[nodiscard]] bool Matches(
+        const uint256& expected_genesis_hash,
+        const RecoveryRosterAuthoritySource& expected_source,
+        const CBlockIndex& expected_source_snapshot) const noexcept;
+    friend bool operator==(const RecoveryUniverseCapsule& lhs,
+                           const RecoveryUniverseCapsule& rhs)
+    {
+        return lhs.m_version == rhs.m_version &&
+               lhs.m_genesis_hash == rhs.m_genesis_hash &&
+               lhs.m_source == rhs.m_source &&
+               lhs.m_source_snapshot_height == rhs.m_source_snapshot_height &&
+               lhs.m_source_snapshot_hash == rhs.m_source_snapshot_hash &&
+               lhs.m_source_id == rhs.m_source_id &&
+               lhs.m_members == rhs.m_members &&
+               lhs.m_members_hash == rhs.m_members_hash &&
+               lhs.m_capsule_id == rhs.m_capsule_id;
+    }
+
+private:
+    RecoveryUniverseCapsule(
+        uint256 genesis_hash,
+        RecoveryRosterAuthoritySource source,
+        int32_t source_snapshot_height,
+        uint256 source_snapshot_hash,
+        uint256 source_id,
+        std::vector<RecoveryUniverseMember> members,
+        uint256 members_hash,
+        uint256 capsule_id);
+
+    uint16_t m_version{RECOVERY_UNIVERSE_CAPSULE_VERSION};
+    uint256 m_genesis_hash;
+    RecoveryRosterAuthoritySource m_source;
+    int32_t m_source_snapshot_height{-1};
+    uint256 m_source_snapshot_hash;
+    uint256 m_source_id;
+    std::vector<RecoveryUniverseMember> m_members;
+    uint256 m_members_hash;
+    uint256 m_capsule_id;
+
+    friend class RecoveryUniverseCapsuleFactory;
+};
+
+static_assert(RecoveryUniverseCapsule::MAX_SERIALIZED_SIZE == 6'553'782);
+static_assert(RecoveryUniverseCapsule::MIN_SERIALIZED_SIZE == 40'282);
+
+using RecoveryUniverseCapsulePtr =
+    std::shared_ptr<const RecoveryUniverseCapsule>;
+/** Authenticated local-persistence lookup by source ID; never use a peer. */
+using RecoveryUniverseLookup = std::function<RecoveryUniverseCapsulePtr(
+    const uint256&)>;
+
+[[nodiscard]] uint256 GetRecoveryUniverseSourceId(
+    const uint256& genesis_hash,
+    const RecoveryRosterAuthoritySource& source);
+
+[[nodiscard]] uint256 GetRecoveryUniverseMembersHash(
+    const uint256& genesis_hash,
+    std::span<const RecoveryUniverseMember> members);
+
+[[nodiscard]] uint256 GetRecoveryUniverseCapsuleId(
+    const uint256& genesis_hash,
+    const RecoveryRosterAuthoritySource& source,
+    int32_t source_snapshot_height,
+    const uint256& source_snapshot_hash,
+    const uint256& members_hash,
+    std::size_t member_count);
 
 /**
  * State looked up at an exact block on the branch supplied by the caller.
@@ -91,7 +257,8 @@ public:
         uint256 genesis_hash,
         QuorumBuildConfig config,
         QuorumSnapshotLookup snapshot_lookup,
-        bool cache_results = true);
+        bool cache_results = true,
+        RecoveryUniverseLookup recovery_universe_lookup = {});
 
     [[nodiscard]] FrozenQuorumRostersPtr GetActive(
         int32_t target_height,
@@ -129,6 +296,15 @@ public:
         const CBlockIndex& branch_tip,
         QuorumBuildError* error = nullptr) const;
 
+    /**
+     * Return a matching trusted persisted capsule, or capture it from the
+     * exact raw snapshot when persistence does not have it yet.
+     */
+    [[nodiscard]] RecoveryUniverseCapsulePtr GetOrCaptureRecoveryUniverse(
+        const RecoveryRosterAuthoritySource& source,
+        const CBlockIndex& branch_tip,
+        QuorumBuildError* error = nullptr) const;
+
     [[nodiscard]] const uint256& GenesisHash() const noexcept
     {
         return m_genesis_hash;
@@ -156,7 +332,8 @@ private:
     FrozenQuorumRosterCache(uint256 genesis_hash,
                             QuorumBuildConfig config,
                             QuorumSnapshotLookup snapshot_lookup,
-                            bool cache_results);
+                            bool cache_results,
+                            RecoveryUniverseLookup recovery_universe_lookup);
 
     [[nodiscard]] VerifiedRosterSetPtr GetVerifiedActiveImpl(
         int32_t target_height,
@@ -170,6 +347,7 @@ private:
     const QuorumBuildConfig m_config;
     const QuorumSnapshotLookup m_snapshot_lookup;
     const bool m_cache_results;
+    const RecoveryUniverseLookup m_recovery_universe_lookup;
     // A verified set may seed unchecked roster reuse only for the immutable
     // builder configuration and snapshot source that created it.
     const VerifiedRosterSet::BuildProvenancePtr m_build_provenance;
@@ -222,6 +400,15 @@ BuildActiveFrozenQuorumRosters(
     int32_t target_height,
     const CBlockIndex& branch_tip,
     const ActiveRosterBeaconBundle& beacon_bundle,
+    const QuorumSnapshotLookup& snapshot_lookup,
+    QuorumBuildError* error = nullptr);
+
+/** Create a source capsule only after the exact normal source is usable. */
+[[nodiscard]] RecoveryUniverseCapsulePtr BuildRecoveryUniverseCapsule(
+    const uint256& genesis_hash,
+    const QuorumBuildConfig& config,
+    const RecoveryRosterAuthoritySource& source,
+    const CBlockIndex& branch_tip,
     const QuorumSnapshotLookup& snapshot_lookup,
     QuorumBuildError* error = nullptr);
 

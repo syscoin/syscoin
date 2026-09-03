@@ -8,23 +8,60 @@
 #include <chain.h>
 #include <crypto/sha256.h>
 #include <hash.h>
+#include <streams.h>
 
 #include <algorithm>
 #include <map>
 #include <memory>
 #include <set>
+#include <stdexcept>
 #include <utility>
 
 namespace llmq::pq {
+
+class RecoveryUniverseCapsuleFactory final {
+public:
+    [[nodiscard]] static RecoveryUniverseCapsulePtr Create(
+        uint256 genesis_hash,
+        RecoveryRosterAuthoritySource source,
+        int32_t source_snapshot_height,
+        uint256 source_snapshot_hash,
+        uint256 source_id,
+        std::vector<RecoveryUniverseMember> members,
+        uint256 members_hash,
+        uint256 capsule_id)
+    {
+        auto capsule{std::shared_ptr<const RecoveryUniverseCapsule>{
+            new RecoveryUniverseCapsule{
+                std::move(genesis_hash), std::move(source),
+                source_snapshot_height, std::move(source_snapshot_hash),
+                std::move(source_id), std::move(members),
+                std::move(members_hash),
+                std::move(capsule_id)}}};
+        return capsule->IsStructurallyValid() ? capsule : nullptr;
+    }
+};
+
 namespace {
 
 inline constexpr std::string_view RECOVERY_ROSTER_MODIFIER_DOMAIN{
     "SYS_PQ_RECOVERY_ROSTER_MODIFIER_V1"};
+inline constexpr std::string_view RECOVERY_UNIVERSE_MEMBERS_DOMAIN{
+    "SYS_PQ_RECOVERY_UNIVERSE_MEMBERS_V1"};
+inline constexpr std::string_view RECOVERY_UNIVERSE_SOURCE_ID_DOMAIN{
+    "SYS_PQ_RECOVERY_UNIVERSE_SOURCE_ID_V1"};
+inline constexpr std::string_view RECOVERY_UNIVERSE_CAPSULE_DOMAIN{
+    "SYS_PQ_RECOVERY_UNIVERSE_CAPSULE_V1"};
 
 struct ScoredMember {
     arith_uint256 score;
     CDeterministicMNCPtr dmn;
     std::optional<FrozenChildRootRecord> child_root;
+};
+
+struct ScoredRecoveryUniverseMember {
+    arith_uint256 score;
+    const RecoveryUniverseMember* member{nullptr};
 };
 
 enum class CandidateDisposition : uint8_t {
@@ -222,6 +259,44 @@ std::optional<std::vector<ScoredMember>> SelectRosterMembers(
     return candidates;
 }
 
+std::optional<std::vector<ScoredRecoveryUniverseMember>>
+SelectRecoveryUniverseMembers(
+    const RecoveryUniverseCapsule& universe,
+    const uint256& modifier,
+    QuorumBuildError* error)
+{
+    if (modifier.IsNull()) {
+        SetError(error, QuorumBuildError::INVALID_RECOVERY_UNIVERSE);
+        return std::nullopt;
+    }
+    std::vector<ScoredRecoveryUniverseMember> candidates;
+    candidates.reserve(universe.Members().size());
+    for (const auto& member : universe.Members()) {
+        uint256 score_hash;
+        CSHA256 hasher;
+        hasher.Write(member.confirmed_hash_with_pro_reg_tx_hash.begin(),
+                     member.confirmed_hash_with_pro_reg_tx_hash.size());
+        hasher.Write(modifier.begin(), modifier.size());
+        hasher.Finalize(score_hash.begin());
+        candidates.push_back({UintToArith256(score_hash), &member});
+    }
+    if (candidates.size() < QUORUM_SIZE) {
+        SetError(error, QuorumBuildError::INSUFFICIENT_ELIGIBLE_MEMBERS);
+        return std::nullopt;
+    }
+    const auto score_less = [](const ScoredRecoveryUniverseMember& lhs,
+                               const ScoredRecoveryUniverseMember& rhs) {
+        if (lhs.score != rhs.score) return lhs.score > rhs.score;
+        return rhs.member->collateral_outpoint <
+               lhs.member->collateral_outpoint;
+    };
+    std::partial_sort(candidates.begin(),
+                      candidates.begin() + QUORUM_SIZE,
+                      candidates.end(), score_less);
+    candidates.resize(QUORUM_SIZE);
+    return candidates;
+}
+
 CandidateKeyResolution ResolveNormalCandidate(
     const OperatorKeyState* state,
     const uint256& pro_tx_hash,
@@ -308,6 +383,223 @@ bool HasPresentChildRoot(const ChildRootResolution& resolution) noexcept
 }
 
 } // namespace
+
+uint256 GetRecoveryUniverseSourceId(
+    const uint256& genesis_hash,
+    const RecoveryRosterAuthoritySource& source)
+{
+    if (genesis_hash.IsNull() || source.IsNull() ||
+        !source.IsStructurallyValid()) {
+        return {};
+    }
+    CHashWriter writer{SER_GETHASH, 0};
+    WriteDomain(writer, RECOVERY_UNIVERSE_SOURCE_ID_DOMAIN);
+    writer << genesis_hash << source;
+    return writer.GetHash();
+}
+
+uint256 GetRecoveryUniverseMembersHash(
+    const uint256& genesis_hash,
+    std::span<const RecoveryUniverseMember> members)
+{
+    if (genesis_hash.IsNull() ||
+        members.size() > RECOVERY_UNIVERSE_MAX_MEMBERS) {
+        return {};
+    }
+    CHashWriter writer{SER_GETHASH, 0};
+    WriteDomain(writer, RECOVERY_UNIVERSE_MEMBERS_DOMAIN);
+    writer << genesis_hash << static_cast<uint32_t>(members.size());
+    for (const auto& member : members) writer << member;
+    return writer.GetHash();
+}
+
+uint256 GetRecoveryUniverseCapsuleId(
+    const uint256& genesis_hash,
+    const RecoveryRosterAuthoritySource& source,
+    int32_t source_snapshot_height,
+    const uint256& source_snapshot_hash,
+    const uint256& members_hash,
+    std::size_t member_count)
+{
+    if (genesis_hash.IsNull() || source.IsNull() ||
+        !source.IsStructurallyValid() || source_snapshot_height < 0 ||
+        source_snapshot_hash.IsNull() || members_hash.IsNull() ||
+        member_count < QUORUM_SIZE ||
+        member_count > RECOVERY_UNIVERSE_MAX_MEMBERS) {
+        return {};
+    }
+    CHashWriter writer{SER_GETHASH, 0};
+    WriteDomain(writer, RECOVERY_UNIVERSE_CAPSULE_DOMAIN);
+    writer << genesis_hash << RECOVERY_UNIVERSE_CAPSULE_VERSION
+           << GetRecoveryUniverseSourceId(genesis_hash, source)
+           << source_snapshot_height << source_snapshot_hash
+           << static_cast<uint32_t>(member_count) << members_hash;
+    return writer.GetHash();
+}
+
+bool RecoveryUniverseMember::IsStructurallyValid() const noexcept
+{
+    // Raw roster scoring requires a confirmed DMN but hashes the cached
+    // lineage value verbatim. Do not silently narrow that accepted set here.
+    return !pro_tx_hash.IsNull() && !collateral_outpoint.IsNull();
+}
+
+RecoveryUniverseCapsule::RecoveryUniverseCapsule(
+    uint256 genesis_hash,
+    RecoveryRosterAuthoritySource source,
+    int32_t source_snapshot_height,
+    uint256 source_snapshot_hash,
+    uint256 source_id,
+    std::vector<RecoveryUniverseMember> members,
+    uint256 members_hash,
+    uint256 capsule_id)
+    : m_genesis_hash{std::move(genesis_hash)},
+      m_source{std::move(source)},
+      m_source_snapshot_height{source_snapshot_height},
+      m_source_snapshot_hash{std::move(source_snapshot_hash)},
+      m_source_id{std::move(source_id)},
+      m_members{std::move(members)},
+      m_members_hash{std::move(members_hash)},
+      m_capsule_id{std::move(capsule_id)}
+{
+}
+
+std::vector<uint8_t> RecoveryUniverseCapsule::Encode() const
+{
+    if (!IsStructurallyValid()) {
+        throw std::logic_error("invalid recovery-universe capsule");
+    }
+    DataStream stream{SER_DISK};
+    stream.reserve(sizeof(uint16_t) + uint256::size() +
+                   RecoveryRosterAuthoritySource::WIRE_SIZE +
+                   sizeof(int32_t) + uint256::size() + sizeof(uint32_t) +
+                   m_members.size() * RecoveryUniverseMember::DISK_SIZE +
+                   3 * uint256::size());
+    stream << m_version << m_genesis_hash << m_source
+           << m_source_snapshot_height << m_source_snapshot_hash << m_source_id
+           << static_cast<uint32_t>(m_members.size());
+    for (const auto& member : m_members) stream << member;
+    stream << m_members_hash << m_capsule_id;
+    if (stream.size() < MIN_SERIALIZED_SIZE ||
+        stream.size() > MAX_SERIALIZED_SIZE) {
+        throw std::logic_error("recovery-universe capsule size invariant");
+    }
+    return {UCharCast(stream.data()),
+            UCharCast(stream.data() + stream.size())};
+}
+
+std::optional<RecoveryUniverseCapsule>
+RecoveryUniverseCapsule::DecodeTrustedPersistence(
+    Span<const uint8_t> encoded,
+    QuorumBuildError* error)
+{
+    SetError(error, QuorumBuildError::NONE);
+    if (encoded.size() < MIN_SERIALIZED_SIZE ||
+        encoded.size() > MAX_SERIALIZED_SIZE) {
+        SetError(error, QuorumBuildError::INVALID_RECOVERY_UNIVERSE);
+        return std::nullopt;
+    }
+
+    uint16_t version{0};
+    uint256 genesis_hash;
+    RecoveryRosterAuthoritySource source;
+    int32_t source_snapshot_height{-1};
+    uint256 source_snapshot_hash;
+    uint256 source_id;
+    std::vector<RecoveryUniverseMember> members;
+    uint256 members_hash;
+    uint256 capsule_id;
+    try {
+        SpanReader reader{SER_DISK, 0, encoded};
+        reader >> version >> genesis_hash >> source
+               >> source_snapshot_height >> source_snapshot_hash >> source_id;
+        if (version != RECOVERY_UNIVERSE_CAPSULE_VERSION ||
+            genesis_hash.IsNull() || source.IsNull() ||
+            !source.IsStructurallyValid() || source_snapshot_height < 0 ||
+            source_snapshot_hash.IsNull() ||
+            source_id != GetRecoveryUniverseSourceId(
+                genesis_hash, source)) {
+            SetError(error, QuorumBuildError::INVALID_RECOVERY_UNIVERSE);
+            return std::nullopt;
+        }
+        uint32_t member_count{0};
+        reader >> member_count;
+        if (member_count < QUORUM_SIZE ||
+            member_count > RECOVERY_UNIVERSE_MAX_MEMBERS) {
+            SetError(error, QuorumBuildError::INVALID_RECOVERY_UNIVERSE);
+            return std::nullopt;
+        }
+        members.reserve(member_count);
+        for (uint32_t index{0}; index < member_count; ++index) {
+            RecoveryUniverseMember member;
+            reader >> member;
+            members.push_back(std::move(member));
+        }
+        reader >> members_hash >> capsule_id;
+        if (!reader.empty()) {
+            SetError(error, QuorumBuildError::INVALID_RECOVERY_UNIVERSE);
+            return std::nullopt;
+        }
+    } catch (const std::ios_base::failure&) {
+        SetError(error, QuorumBuildError::INVALID_RECOVERY_UNIVERSE);
+        return std::nullopt;
+    }
+
+    RecoveryUniverseCapsule capsule{
+        std::move(genesis_hash), std::move(source),
+        source_snapshot_height, std::move(source_snapshot_hash),
+        std::move(source_id), std::move(members),
+        std::move(members_hash),
+        std::move(capsule_id)};
+    capsule.m_version = version;
+    if (!capsule.IsStructurallyValid()) {
+        SetError(error, QuorumBuildError::INVALID_RECOVERY_UNIVERSE);
+        return std::nullopt;
+    }
+    return capsule;
+}
+
+bool RecoveryUniverseCapsule::IsStructurallyValid() const noexcept
+{
+    if (m_version != RECOVERY_UNIVERSE_CAPSULE_VERSION ||
+        m_genesis_hash.IsNull() || m_source.IsNull() ||
+        !m_source.IsStructurallyValid() || m_source_snapshot_height < 0 ||
+        m_source_snapshot_hash.IsNull() || m_members.size() < QUORUM_SIZE ||
+        m_members.size() > RECOVERY_UNIVERSE_MAX_MEMBERS) {
+        return false;
+    }
+    std::set<COutPoint> collateral_outpoints;
+    const RecoveryUniverseMember* previous{nullptr};
+    for (const auto& member : m_members) {
+        if (!member.IsStructurallyValid() ||
+            (previous != nullptr &&
+             !(previous->pro_tx_hash < member.pro_tx_hash)) ||
+            !collateral_outpoints.insert(member.collateral_outpoint).second) {
+            return false;
+        }
+        previous = &member;
+    }
+    const uint256 expected_members_hash{GetRecoveryUniverseMembersHash(
+        m_genesis_hash, m_members)};
+    return !expected_members_hash.IsNull() &&
+           m_source_id == GetRecoveryUniverseSourceId(
+               m_genesis_hash, m_source) &&
+           m_members_hash == expected_members_hash &&
+           m_capsule_id == GetRecoveryUniverseCapsuleId(
+               m_genesis_hash, m_source, m_source_snapshot_height,
+               m_source_snapshot_hash, m_members_hash, m_members.size());
+}
+
+bool RecoveryUniverseCapsule::Matches(
+    const uint256& expected_genesis_hash,
+    const RecoveryRosterAuthoritySource& expected_source,
+    const CBlockIndex& expected_source_snapshot) const noexcept
+{
+    return m_genesis_hash == expected_genesis_hash &&
+           m_source == expected_source &&
+           m_source_snapshot_height == expected_source_snapshot.nHeight &&
+           m_source_snapshot_hash == expected_source_snapshot.GetBlockHash();
+}
 
 bool QuorumBuildConfig::IsValid() const noexcept
 {
@@ -602,6 +894,83 @@ bool HasUsableNormalRecoverySource(
     return selected && HasUniqueSelectedChildRoots(*selected, error);
 }
 
+RecoveryUniverseCapsulePtr BuildRecoveryUniverseCapsuleFromPrepared(
+    const uint256& genesis_hash,
+    const RecoveryRosterAuthoritySource& source,
+    const CBlockIndex& source_snapshot_index,
+    const QuorumSnapshotState& source_state,
+    const OperatorStateLookup& source_operator_states,
+    QuorumBuildError* error)
+{
+    std::vector<RecoveryUniverseMember> members;
+    members.reserve(std::min<std::size_t>(
+        source_state.deterministic_mns.GetAllMNsCount(),
+        RECOVERY_UNIVERSE_MAX_MEMBERS));
+
+    bool invalid_masternode_state{false};
+    bool over_capacity{false};
+    source_state.deterministic_mns.ForEachMNShared(
+        false, [&](const CDeterministicMNCPtr& dmn) {
+            if (!dmn || !dmn->pdmnState || dmn->proTxHash.IsNull() ||
+                dmn->collateralOutpoint.IsNull()) {
+                invalid_masternode_state = true;
+                return;
+            }
+            if (!CDeterministicMNList::IsMNValid(*dmn) ||
+                dmn->pdmnState->confirmedHash.IsNull()) {
+                return;
+            }
+            const auto* operator_state{
+                source_operator_states.Find(dmn->proTxHash)};
+            if (operator_state == nullptr ||
+                operator_state->has_global_key == 0) {
+                return;
+            }
+            if (members.size() ==
+                RECOVERY_UNIVERSE_MAX_MEMBERS) {
+                over_capacity = true;
+                return;
+            }
+            members.push_back(RecoveryUniverseMember{
+                dmn->proTxHash,
+                dmn->pdmnState->confirmedHashWithProRegTxHash,
+                dmn->collateralOutpoint});
+        });
+    if (invalid_masternode_state) {
+        SetError(error, QuorumBuildError::INVALID_MASTERNODE_STATE);
+        return nullptr;
+    }
+    if (over_capacity) {
+        SetError(error, QuorumBuildError::INVALID_RECOVERY_UNIVERSE);
+        return nullptr;
+    }
+    if (members.size() < QUORUM_SIZE) {
+        SetError(error, QuorumBuildError::INSUFFICIENT_ELIGIBLE_MEMBERS);
+        return nullptr;
+    }
+    std::sort(members.begin(), members.end(),
+              [](const RecoveryUniverseMember& lhs,
+                 const RecoveryUniverseMember& rhs) {
+                  return lhs.pro_tx_hash < rhs.pro_tx_hash;
+              });
+    const uint256 members_hash{GetRecoveryUniverseMembersHash(
+        genesis_hash, members)};
+    const uint256 source_id{GetRecoveryUniverseSourceId(
+        genesis_hash, source)};
+    const uint256 capsule_id{GetRecoveryUniverseCapsuleId(
+        genesis_hash, source, source_snapshot_index.nHeight,
+        source_snapshot_index.GetBlockHash(), members_hash,
+        members.size())};
+    auto capsule{RecoveryUniverseCapsuleFactory::Create(
+        genesis_hash, source, source_snapshot_index.nHeight,
+        source_snapshot_index.GetBlockHash(), source_id, std::move(members),
+        members_hash, capsule_id)};
+    if (!capsule) {
+        SetError(error, QuorumBuildError::INVALID_RECOVERY_UNIVERSE);
+    }
+    return capsule;
+}
+
 std::unique_ptr<FrozenQuorumRoster> BuildRecoveryFrozenQuorumRoster(
     const uint256& genesis_hash,
     const EpochIdentity& identity,
@@ -609,8 +978,9 @@ std::unique_ptr<FrozenQuorumRoster> BuildRecoveryFrozenQuorumRoster(
     const CBlockIndex& source_snapshot_index,
     const RosterBeaconSeed& normal_source,
     const RosterBeaconSeed& recovery_seed,
-    const QuorumSnapshotState& source_state,
-    const OperatorStateLookup& source_operator_states,
+    const RecoveryUniverseCapsule* recovery_universe,
+    const QuorumSnapshotState* source_state,
+    const OperatorStateLookup* source_operator_states,
     const QuorumSnapshotState& key_state,
     const OperatorStateLookup& key_operator_states,
     const QuorumSnapshotState& target_state,
@@ -643,18 +1013,47 @@ std::unique_ptr<FrozenQuorumRoster> BuildRecoveryFrozenQuorumRoster(
         SetError(error, QuorumBuildError::INVALID_ROSTER_BEACON);
         return nullptr;
     }
-    auto selected{SelectRosterMembers(
-        source_state.deterministic_mns, *modifier,
-        source_operator_states,
-        [](const OperatorKeyState* state, const uint256&) {
-            return CandidateKeyResolution{
-                state != nullptr && state->has_global_key != 0
-                    ? CandidateDisposition::INCLUDE
-                    : CandidateDisposition::EXCLUDE,
-                std::nullopt};
-        },
-        error)};
-    if (!selected) return nullptr;
+    std::vector<uint256> selected_pro_tx_hashes;
+    selected_pro_tx_hashes.reserve(QUORUM_SIZE);
+    if (recovery_universe != nullptr) {
+        const RecoveryRosterAuthoritySource expected_source{normal_source};
+        if (source_state != nullptr || source_operator_states != nullptr ||
+            recovery_universe->GenesisHash() != genesis_hash ||
+            recovery_universe->Source() != expected_source ||
+            recovery_universe->SourceSnapshotHeight() !=
+                source_snapshot_index.nHeight ||
+            recovery_universe->SourceSnapshotHash() !=
+                source_snapshot_index.GetBlockHash()) {
+            SetError(error, QuorumBuildError::INVALID_RECOVERY_UNIVERSE);
+            return nullptr;
+        }
+        const auto selected{SelectRecoveryUniverseMembers(
+            *recovery_universe, *modifier, error)};
+        if (!selected) return nullptr;
+        for (const auto& candidate : *selected) {
+            selected_pro_tx_hashes.push_back(candidate.member->pro_tx_hash);
+        }
+    } else {
+        if (source_state == nullptr || source_operator_states == nullptr) {
+            SetError(error, QuorumBuildError::INVALID_ARGUMENT);
+            return nullptr;
+        }
+        const auto selected{SelectRosterMembers(
+            source_state->deterministic_mns, *modifier,
+            *source_operator_states,
+            [](const OperatorKeyState* state, const uint256&) {
+                return CandidateKeyResolution{
+                    state != nullptr && state->has_global_key != 0
+                        ? CandidateDisposition::INCLUDE
+                        : CandidateDisposition::EXCLUDE,
+                    std::nullopt};
+            },
+            error)};
+        if (!selected) return nullptr;
+        for (const auto& candidate : *selected) {
+            selected_pro_tx_hashes.push_back(candidate.dmn->proTxHash);
+        }
+    }
 
     auto roster{std::make_unique<FrozenQuorumRoster>()};
     auto& descriptor{roster->descriptor};
@@ -667,7 +1066,7 @@ std::unique_ptr<FrozenQuorumRoster> BuildRecoveryFrozenQuorumRoster(
 
     for (std::size_t member_index{0};
          member_index < QUORUM_SIZE; ++member_index) {
-        const uint256& pro_tx_hash{(*selected)[member_index].dmn->proTxHash};
+        const uint256& pro_tx_hash{selected_pro_tx_hashes[member_index]};
         auto& member{roster->members[member_index]};
         member.pro_tx_hash = pro_tx_hash;
 
@@ -718,6 +1117,7 @@ std::unique_ptr<FrozenQuorumRosters> BuildActiveFrozenQuorumRostersImpl(
     const CBlockIndex& branch_tip,
     const ActiveRosterBeaconBundle& beacon_bundle,
     const QuorumSnapshotLookup& snapshot_lookup,
+    const RecoveryUniverseLookup& recovery_universe_lookup,
     std::span<const VerifiedRosterSetPtr> reusable_sets,
     QuorumBuildError* error)
 {
@@ -771,6 +1171,7 @@ std::unique_ptr<FrozenQuorumRosters> BuildActiveFrozenQuorumRostersImpl(
     const bool prevalidate_source{
         has_recovery_seed || !source_is_active_normal_seed};
     const CBlockIndex* recovery_source_snapshot{nullptr};
+    RecoveryUniverseCapsulePtr recovery_universe;
     std::optional<QuorumSnapshotState> recovery_source_state;
     OperatorStateLookup recovery_source_operator_states{{}, {}};
     if (prevalidate_source) {
@@ -778,17 +1179,40 @@ std::unique_ptr<FrozenQuorumRosters> BuildActiveFrozenQuorumRostersImpl(
             config, *target_index,
             beacon_bundle.recovery_authority_source, error);
         if (recovery_source_snapshot == nullptr) return nullptr;
-        recovery_source_state = LookupSnapshotExact(
-            *recovery_source_snapshot, snapshot_lookup, error);
-        if (!recovery_source_state ||
-            !PrepareSnapshotOperatorLookup(
-                config, *recovery_source_state,
-                recovery_source_operator_states, error) ||
-            !HasUsableNormalRecoverySource(
-                genesis_hash, beacon_bundle.recovery_authority_source,
-                *recovery_source_snapshot, *recovery_source_state,
-                recovery_source_operator_states, error)) {
-            return nullptr;
+        if (recovery_universe_lookup) {
+            try {
+                recovery_universe = recovery_universe_lookup(
+                    GetRecoveryUniverseSourceId(
+                        genesis_hash,
+                        beacon_bundle.recovery_authority_source));
+            } catch (...) {
+                SetError(error,
+                         QuorumBuildError::RECOVERY_UNIVERSE_LOOKUP_FAILED);
+                return nullptr;
+            }
+            if (recovery_universe &&
+                !recovery_universe->Matches(
+                    genesis_hash,
+                    beacon_bundle.recovery_authority_source,
+                    *recovery_source_snapshot)) {
+                SetError(error,
+                         QuorumBuildError::INVALID_RECOVERY_UNIVERSE);
+                return nullptr;
+            }
+        }
+        if (!recovery_universe) {
+            recovery_source_state = LookupSnapshotExact(
+                *recovery_source_snapshot, snapshot_lookup, error);
+            if (!recovery_source_state ||
+                !PrepareSnapshotOperatorLookup(
+                    config, *recovery_source_state,
+                    recovery_source_operator_states, error) ||
+                !HasUsableNormalRecoverySource(
+                    genesis_hash, beacon_bundle.recovery_authority_source,
+                    *recovery_source_snapshot, *recovery_source_state,
+                    recovery_source_operator_states, error)) {
+                return nullptr;
+            }
         }
     }
 
@@ -864,8 +1288,11 @@ std::unique_ptr<FrozenQuorumRosters> BuildActiveFrozenQuorumRostersImpl(
                 genesis_hash, identity, *base_index,
                 *recovery_source_snapshot,
                 beacon_bundle.recovery_authority_source.normal_beacon,
-                beacon_seed, *recovery_source_state,
-                recovery_source_operator_states,
+                beacon_seed, recovery_universe.get(),
+                recovery_source_state ? &*recovery_source_state : nullptr,
+                recovery_source_state
+                    ? &recovery_source_operator_states
+                    : nullptr,
                 *recovery_key_state, recovery_key_operator_states,
                 *target_state, target_operator_states, error)};
             if (!roster) return nullptr;
@@ -965,21 +1392,58 @@ FrozenQuorumRostersPtr BuildActiveFrozenQuorumRosters(
 {
     auto rosters{BuildActiveFrozenQuorumRostersImpl(
         genesis_hash, config, target_height, branch_tip, beacon_bundle,
-        snapshot_lookup,
+        snapshot_lookup, /*recovery_universe_lookup=*/{},
         /*reusable_sets=*/{}, error)};
     if (!rosters) return nullptr;
     return FrozenQuorumRostersPtr{std::move(rosters)};
+}
+
+RecoveryUniverseCapsulePtr BuildRecoveryUniverseCapsule(
+    const uint256& genesis_hash,
+    const QuorumBuildConfig& config,
+    const RecoveryRosterAuthoritySource& source,
+    const CBlockIndex& branch_tip,
+    const QuorumSnapshotLookup& snapshot_lookup,
+    QuorumBuildError* error)
+{
+    SetError(error, QuorumBuildError::NONE);
+    if (genesis_hash.IsNull() || !snapshot_lookup) {
+        SetError(error, QuorumBuildError::INVALID_ARGUMENT);
+        return nullptr;
+    }
+    if (!config.IsValid()) {
+        SetError(error, QuorumBuildError::INVALID_SCHEDULE);
+        return nullptr;
+    }
+    const CBlockIndex* source_snapshot{ResolveRecoverySourceSnapshot(
+        config, branch_tip, source, error)};
+    if (source_snapshot == nullptr) return nullptr;
+    auto source_state{LookupSnapshotExact(
+        *source_snapshot, snapshot_lookup, error)};
+    OperatorStateLookup source_operator_states{{}, {}};
+    if (!source_state || !PrepareSnapshotOperatorLookup(
+            config, *source_state, source_operator_states, error) ||
+        !HasUsableNormalRecoverySource(
+            genesis_hash, source, *source_snapshot, *source_state,
+            source_operator_states, error)) {
+        return nullptr;
+    }
+    return BuildRecoveryUniverseCapsuleFromPrepared(
+        genesis_hash, source, *source_snapshot, *source_state,
+        source_operator_states, error);
 }
 
 FrozenQuorumRosterCache::FrozenQuorumRosterCache(
     uint256 genesis_hash,
     QuorumBuildConfig config,
     QuorumSnapshotLookup snapshot_lookup,
-    bool cache_results)
+    bool cache_results,
+    RecoveryUniverseLookup recovery_universe_lookup)
     : m_genesis_hash{std::move(genesis_hash)},
       m_config{config},
       m_snapshot_lookup{std::move(snapshot_lookup)},
       m_cache_results{cache_results},
+      m_recovery_universe_lookup{std::move(recovery_universe_lookup)},
       m_build_provenance{VerifiedRosterSet::NewBuildProvenance()}
 {
 }
@@ -1013,7 +1477,8 @@ FrozenQuorumRosterCache::Create(
     uint256 genesis_hash,
     QuorumBuildConfig config,
     QuorumSnapshotLookup snapshot_lookup,
-    bool cache_results)
+    bool cache_results,
+    RecoveryUniverseLookup recovery_universe_lookup)
 {
     if (genesis_hash.IsNull() || !config.IsValid() || !snapshot_lookup) {
         return nullptr;
@@ -1021,7 +1486,7 @@ FrozenQuorumRosterCache::Create(
     return std::shared_ptr<const FrozenQuorumRosterCache>{
         new FrozenQuorumRosterCache{
             std::move(genesis_hash), config, std::move(snapshot_lookup),
-            cache_results}};
+            cache_results, std::move(recovery_universe_lookup)}};
 }
 
 FrozenQuorumRostersPtr FrozenQuorumRosterCache::GetActive(
@@ -1068,7 +1533,7 @@ VerifiedRosterSetPtr FrozenQuorumRosterCache::GetVerifiedActiveImpl(
     if (!m_cache_results) {
         auto built{BuildActiveFrozenQuorumRostersImpl(
             m_genesis_hash, m_config, target_height, branch_tip,
-            beacon_bundle, m_snapshot_lookup,
+            beacon_bundle, m_snapshot_lookup, m_recovery_universe_lookup,
             /*reusable_sets=*/{}, error)};
         if (!built) return nullptr;
         auto roster_set{VerifiedRosterSet::MintCanonicalBuild(
@@ -1146,7 +1611,7 @@ VerifiedRosterSetPtr FrozenQuorumRosterCache::GetVerifiedActiveImpl(
 
     auto built{BuildActiveFrozenQuorumRostersImpl(
         m_genesis_hash, m_config, target_height, branch_tip,
-        beacon_bundle, m_snapshot_lookup,
+        beacon_bundle, m_snapshot_lookup, m_recovery_universe_lookup,
         reusable_sets, error)};
     if (!built) return nullptr;
     auto verified{VerifiedRosterSet::MintCanonicalBuild(
@@ -1208,32 +1673,54 @@ std::optional<bool> FrozenQuorumRosterCache::EvaluateNormalRecoverySource(
     const CBlockIndex& branch_tip,
     QuorumBuildError* error) const
 {
+    QuorumBuildError capture_error{QuorumBuildError::NONE};
+    if (GetOrCaptureRecoveryUniverse(source, branch_tip, &capture_error)) {
+        SetError(error, QuorumBuildError::NONE);
+        return true;
+    }
+    if (capture_error == QuorumBuildError::INSUFFICIENT_ELIGIBLE_MEMBERS ||
+        capture_error == QuorumBuildError::DUPLICATE_CHILD_KEY ||
+        capture_error == QuorumBuildError::CHILD_KEY_NOT_FROZEN) {
+        SetError(error, capture_error);
+        return false;
+    }
+    SetError(error, capture_error);
+    return std::nullopt;
+}
+
+RecoveryUniverseCapsulePtr
+FrozenQuorumRosterCache::GetOrCaptureRecoveryUniverse(
+    const RecoveryRosterAuthoritySource& source,
+    const CBlockIndex& branch_tip,
+    QuorumBuildError* error) const
+{
     SetError(error, QuorumBuildError::NONE);
     const CBlockIndex* source_snapshot{ResolveRecoverySourceSnapshot(
         m_config, branch_tip, source, error)};
-    if (source_snapshot == nullptr) return std::nullopt;
-
-    auto state{LookupSnapshotExact(
-        *source_snapshot, m_snapshot_lookup, error)};
-    OperatorStateLookup operator_states{{}, {}};
-    if (!state || !PrepareSnapshotOperatorLookup(
-                      m_config, *state, operator_states, error)) {
-        return std::nullopt;
+    if (source_snapshot == nullptr) return nullptr;
+    if (m_recovery_universe_lookup) {
+        RecoveryUniverseCapsulePtr persisted;
+        try {
+            persisted = m_recovery_universe_lookup(
+                GetRecoveryUniverseSourceId(m_genesis_hash, source));
+        } catch (...) {
+            SetError(error,
+                     QuorumBuildError::RECOVERY_UNIVERSE_LOOKUP_FAILED);
+            return nullptr;
+        }
+        if (persisted) {
+            if (!persisted->Matches(
+                    m_genesis_hash, source, *source_snapshot)) {
+                SetError(error,
+                         QuorumBuildError::INVALID_RECOVERY_UNIVERSE);
+                return nullptr;
+            }
+            return persisted;
+        }
     }
-    QuorumBuildError usability_error{QuorumBuildError::NONE};
-    if (HasUsableNormalRecoverySource(
-            m_genesis_hash, source, *source_snapshot, *state,
-            operator_states, &usability_error)) {
-        return true;
-    }
-    if (usability_error == QuorumBuildError::INSUFFICIENT_ELIGIBLE_MEMBERS ||
-        usability_error == QuorumBuildError::DUPLICATE_CHILD_KEY ||
-        usability_error == QuorumBuildError::CHILD_KEY_NOT_FROZEN) {
-        SetError(error, usability_error);
-        return false;
-    }
-    SetError(error, usability_error);
-    return std::nullopt;
+    return BuildRecoveryUniverseCapsule(
+        m_genesis_hash, m_config, source, branch_tip,
+        m_snapshot_lookup, error);
 }
 
 uint8_t GetSigningRosterAuthorizationMask(
