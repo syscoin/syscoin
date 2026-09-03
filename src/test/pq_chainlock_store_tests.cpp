@@ -462,7 +462,19 @@ BOOST_AUTO_TEST_CASE(verified_authorization_base_is_exact_and_not_finality)
     const auto config{MakeConfig(/*cache_capacity=*/8,
                                  /*recent_capacity=*/2)};
     TestFinalityContext context;
-    ChainLockFinalityStore store{genesis, config, context};
+    std::size_t durable_calls{0};
+    PreparedChainLockContextPtr persisted_context;
+    ChainLockFinalityStore store{
+        genesis, config, context, {}, {}, {}, {}, {}, {},
+        [&](const FinalChainLock& durable,
+            const PreparedChainLockContextPtr& durable_context) {
+            ++durable_calls;
+            BOOST_REQUIRE(durable_context);
+            BOOST_CHECK(durable.statement ==
+                        durable_context->Statement());
+            persisted_context = durable_context;
+            return true;
+        }};
     const auto first{MakeChainLock(865, 864, NonNullHash(864), 109)};
     const auto first_context{MakeVerificationContext(genesis, config, first)};
     BOOST_REQUIRE(first_context);
@@ -471,6 +483,8 @@ BOOST_AUTO_TEST_CASE(verified_authorization_base_is_exact_and_not_finality)
     BOOST_REQUIRE(store.AcceptVerifiedRosterAuthorizationBase(
         first, /*signatures_valid=*/true, first_context, &error));
     BOOST_CHECK(error == ChainLockFinalityError::NONE);
+    BOOST_CHECK_EQUAL(durable_calls, 1U);
+    BOOST_CHECK(persisted_context == first_context);
     BOOST_CHECK(!store.GetBest());
     BOOST_CHECK(!store.GetByHeight(first.statement.height));
     BOOST_CHECK(!store.GetByLogicalId(first.GetLogicalId(genesis)));

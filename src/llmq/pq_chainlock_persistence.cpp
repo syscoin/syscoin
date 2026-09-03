@@ -379,41 +379,69 @@ uint256 GetSchemaHash(const DiskSchema& schema)
 uint256 GetRecordChecksum(const uint256& schema_hash,
                           const uint256& logical_id,
                           const uint256& witness_id,
-                          const FinalChainLock& chainlock)
+                          const FinalChainLock& chainlock,
+                          const std::vector<uint8_t>& roster_context)
 {
     HashWriter writer{SER_GETHASH, 0};
     WriteDomain(writer, RECORD_HASH_DOMAIN);
-    writer << schema_hash << logical_id << witness_id << chainlock;
+    writer << schema_hash << logical_id << witness_id << chainlock
+           << roster_context;
     return writer.GetHash();
 }
 
 struct DiskRecord {
-    static constexpr std::size_t WIRE_SIZE{
+    static constexpr std::size_t FIXED_SIZE{
         sizeof(uint16_t) + 4 * 32 + FinalChainLock::WIRE_SIZE};
+    static constexpr std::size_t MIN_WIRE_SIZE{
+        FIXED_SIZE + GetSizeOfCompactSize(
+                         DurableRosterContext::MIN_SERIALIZED_SIZE) +
+        DurableRosterContext::MIN_SERIALIZED_SIZE};
+    static constexpr std::size_t MAX_WIRE_SIZE{
+        FIXED_SIZE + GetSizeOfCompactSize(
+                         DurableRosterContext::MAX_SERIALIZED_SIZE) +
+        DurableRosterContext::MAX_SERIALIZED_SIZE};
 
     uint16_t record_version{RECORD_VERSION};
     uint256 schema_hash;
     uint256 logical_id;
     uint256 witness_id;
     FinalChainLock chainlock;
+    std::vector<uint8_t> encoded_roster_context;
     uint256 checksum;
+    std::optional<DurableRosterContext> decoded_roster_context;
 
     template <typename Stream>
     void Serialize(Stream& stream) const
     {
         ::SerializeMany(stream, record_version, schema_hash, logical_id,
-                        witness_id, chainlock, checksum);
+                        witness_id, chainlock);
+        WriteCompactSize(stream, encoded_roster_context.size());
+        if (!encoded_roster_context.empty()) {
+            stream.write(MakeByteSpan(encoded_roster_context));
+        }
+        ::Serialize(stream, checksum);
     }
 
     template <typename Stream>
     void Unserialize(Stream& stream)
     {
-        if (stream.size() != WIRE_SIZE) {
+        if (stream.size() < MIN_WIRE_SIZE ||
+            stream.size() > MAX_WIRE_SIZE) {
             throw std::ios_base::failure(
                 "invalid PQ ChainLock DB record size");
         }
         ::UnserializeMany(stream, record_version, schema_hash, logical_id,
-                          witness_id, chainlock, checksum);
+                          witness_id, chainlock);
+        const std::size_t context_size{ReadCompactSize(stream)};
+        if (context_size < DurableRosterContext::MIN_SERIALIZED_SIZE ||
+            context_size > DurableRosterContext::MAX_SERIALIZED_SIZE ||
+            stream.size() != context_size + sizeof(checksum)) {
+            throw std::ios_base::failure(
+                "invalid durable roster-context size");
+        }
+        encoded_roster_context.resize(context_size);
+        stream.read(MakeWritableByteSpan(encoded_roster_context));
+        ::Unserialize(stream, checksum);
     }
 };
 
@@ -854,7 +882,7 @@ DiskPaymentAuditPresealMarker MakePaymentAuditPresealMarker(
     return disk;
 }
 
-static_assert(DiskRecord::WIRE_SIZE < MAX_SIZE);
+static_assert(DiskRecord::MAX_WIRE_SIZE < MAX_SIZE);
 static_assert(DiskRosterRecoveryPrecommit::WIRE_SIZE == 180);
 static_assert(DiskReceiptArchiveRosterAuthorization::WIRE_SIZE < MAX_SIZE);
 static_assert(DiskBTCCPresealMarker::WIRE_SIZE == 500);
@@ -1179,19 +1207,37 @@ struct PQChainLockPersistence::Impl {
         InitializeOrLoad();
     }
 
-    DiskRecord MakeRecord(const FinalChainLock& chainlock) const
+    std::optional<DiskRecord> MakeRecord(
+        const FinalChainLock& chainlock,
+        const PreparedChainLockContextPtr& context) const
     {
+        if (!context || context->GenesisHash() != genesis_hash ||
+            context->Schedule() != config.chainlock_schedule ||
+            context->Statement() != chainlock.statement ||
+            context->StatementLogicalId() !=
+                chainlock.GetLogicalId(genesis_hash)) {
+            return std::nullopt;
+        }
         DiskRecord record;
         record.schema_hash = schema_hash;
         record.logical_id = chainlock.GetLogicalId(genesis_hash);
         record.witness_id = chainlock.GetWitnessId(genesis_hash);
         record.chainlock = chainlock;
+        try {
+            record.decoded_roster_context =
+                DurableRosterContext::Capture(*context);
+            record.encoded_roster_context =
+                record.decoded_roster_context->Encode();
+        } catch (const std::exception&) {
+            return std::nullopt;
+        }
         record.checksum = GetRecordChecksum(
-            schema_hash, record.logical_id, record.witness_id, chainlock);
+            schema_hash, record.logical_id, record.witness_id, chainlock,
+            record.encoded_roster_context);
         return record;
     }
 
-    bool ValidateRecord(const DiskRecord& record) const
+    bool ValidateRecord(DiskRecord& record) const
     {
         if (record.record_version != RECORD_VERSION ||
             record.schema_hash != schema_hash ||
@@ -1204,7 +1250,17 @@ struct PQChainLockPersistence::Impl {
                 record.chainlock.GetWitnessId(genesis_hash) ||
             record.checksum != GetRecordChecksum(
                 schema_hash, record.logical_id, record.witness_id,
-                record.chainlock)) {
+                record.chainlock, record.encoded_roster_context)) {
+            return false;
+        }
+
+        if (!record.decoded_roster_context) {
+            record.decoded_roster_context =
+                DurableRosterContext::DecodeTrustedPersistence(
+                    record.encoded_roster_context);
+        }
+        if (!record.decoded_roster_context ||
+            record.decoded_roster_context->GenesisHash() != genesis_hash) {
             return false;
         }
 
@@ -1238,6 +1294,17 @@ struct PQChainLockPersistence::Impl {
                  statement.previous_btcc_cursor.IsNull()));
     }
 
+    DurableChainLockRecord PublicRecord(const DiskRecord& record) const
+    {
+        if (!record.decoded_roster_context) {
+            throw std::logic_error(
+                "validated durable record missing roster context");
+        }
+        return DurableChainLockRecord{
+            record.chainlock, *record.decoded_roster_context,
+            record.checksum};
+    }
+
     FinalChainLockRecordMetadata Metadata(const DiskRecord& record) const
     {
         return FinalChainLockRecordMetadata{
@@ -1251,7 +1318,9 @@ struct PQChainLockPersistence::Impl {
         return left.logical_id == right.logical_id &&
                left.witness_id == right.witness_id &&
                left.checksum == right.checksum &&
-               left.chainlock == right.chainlock;
+               left.chainlock == right.chainlock &&
+               left.encoded_roster_context ==
+                   right.encoded_roster_context;
     }
 
     static bool IsOlderAuthorizationBase(const DiskRecord& left,
@@ -1765,6 +1834,7 @@ struct PQChainLockPersistence::Impl {
     }
 
     bool PersistBest(const FinalChainLock& chainlock,
+                     const PreparedChainLockContextPtr& context,
                      ChainLockPersistenceError* error,
                      std::optional<PaymentAuditSealContextCapsule>
                          supplied_payment_audit_seal_context,
@@ -1810,8 +1880,15 @@ struct PQChainLockPersistence::Impl {
             return false;
         }
 
-        DiskRecord candidate{MakeRecord(chainlock)};
-        if (::GetSerializeSize(candidate) != DiskRecord::WIRE_SIZE) {
+        auto candidate_record{MakeRecord(chainlock, context)};
+        if (!candidate_record) {
+            SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
+            return false;
+        }
+        DiskRecord candidate{std::move(*candidate_record)};
+        const std::size_t candidate_size{::GetSerializeSize(candidate)};
+        if (candidate_size < DiskRecord::MIN_WIRE_SIZE ||
+            candidate_size > DiskRecord::MAX_WIRE_SIZE) {
             SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
             return false;
         }
@@ -1819,11 +1896,7 @@ struct PQChainLockPersistence::Impl {
             SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
             return false;
         }
-        const bool exact_best{
-            best && candidate.witness_id == best->witness_id &&
-            candidate.logical_id == best->logical_id &&
-            candidate.checksum == best->checksum &&
-            candidate.chainlock == best->chainlock};
+        const bool exact_best{best && IsExactRecord(candidate, *best)};
 
         std::optional<PaymentAuditSealContextCapsule>
             next_payment_audit_seal_context{payment_audit_seal_context};
@@ -2329,6 +2402,7 @@ struct PQChainLockPersistence::Impl {
 
     bool PersistVerifiedAuthorizationBase(
         const FinalChainLock& chainlock,
+        const PreparedChainLockContextPtr& context,
         ChainLockPersistenceError* error)
         EXCLUSIVE_LOCKS_REQUIRED(mutex)
     {
@@ -2340,8 +2414,15 @@ struct PQChainLockPersistence::Impl {
             return false;
         }
 
-        DiskRecord candidate{MakeRecord(chainlock)};
-        if (::GetSerializeSize(candidate) != DiskRecord::WIRE_SIZE ||
+        auto candidate_record{MakeRecord(chainlock, context)};
+        if (!candidate_record) {
+            SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
+            return false;
+        }
+        DiskRecord candidate{std::move(*candidate_record)};
+        const std::size_t candidate_size{::GetSerializeSize(candidate)};
+        if (candidate_size < DiskRecord::MIN_WIRE_SIZE ||
+            candidate_size > DiskRecord::MAX_WIRE_SIZE ||
             !ValidateRecord(candidate)) {
             SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
             return false;
@@ -2460,6 +2541,7 @@ struct PQChainLockPersistence::Impl {
 
     bool PersistUnsealedBTCC(
         const FinalChainLock& chainlock,
+        const PreparedChainLockContextPtr& context,
         ChainLockPersistenceError* error)
         EXCLUSIVE_LOCKS_REQUIRED(mutex)
     {
@@ -2470,17 +2552,21 @@ struct PQChainLockPersistence::Impl {
                                    : ChainLockPersistenceError::INVALID_CHAINLOCK);
             return false;
         }
-        DiskRecord candidate{MakeRecord(chainlock)};
-        if (::GetSerializeSize(candidate) != DiskRecord::WIRE_SIZE ||
+        auto candidate_record{MakeRecord(chainlock, context)};
+        if (!candidate_record) {
+            SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
+            return false;
+        }
+        DiskRecord candidate{std::move(*candidate_record)};
+        const std::size_t candidate_size{::GetSerializeSize(candidate)};
+        if (candidate_size < DiskRecord::MIN_WIRE_SIZE ||
+            candidate_size > DiskRecord::MAX_WIRE_SIZE ||
             !ValidateRecord(candidate)) {
             SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
             return false;
         }
         const bool exact_unsealed{
-            unsealed && unsealed->logical_id == candidate.logical_id &&
-            unsealed->witness_id == candidate.witness_id &&
-            unsealed->checksum == candidate.checksum &&
-            unsealed->chainlock == candidate.chainlock};
+            unsealed && IsExactRecord(candidate, *unsealed)};
         if (unsealed && !exact_unsealed) {
             SetError(error, ChainLockPersistenceError::HEIGHT_CONFLICT);
             return false;
@@ -2522,6 +2608,7 @@ struct PQChainLockPersistence::Impl {
 
     bool PersistAuthorizedUnsealedBTCC(
         const FinalChainLock& chainlock,
+        const PreparedChainLockContextPtr& context,
         const ReceiptArchiveRosterAuthorization& expected_authorization,
         ChainLockPersistenceError* error)
         EXCLUSIVE_LOCKS_REQUIRED(mutex)
@@ -2535,8 +2622,15 @@ struct PQChainLockPersistence::Impl {
             return false;
         }
 
-        DiskRecord candidate{MakeRecord(chainlock)};
-        if (::GetSerializeSize(candidate) != DiskRecord::WIRE_SIZE ||
+        auto candidate_record{MakeRecord(chainlock, context)};
+        if (!candidate_record) {
+            SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
+            return false;
+        }
+        DiskRecord candidate{std::move(*candidate_record)};
+        const std::size_t candidate_size{::GetSerializeSize(candidate)};
+        if (candidate_size < DiskRecord::MIN_WIRE_SIZE ||
+            candidate_size > DiskRecord::MAX_WIRE_SIZE ||
             !ValidateRecord(candidate) ||
             !receipt_archive_authorization ||
             *receipt_archive_authorization != expected_authorization ||
@@ -2556,11 +2650,7 @@ struct PQChainLockPersistence::Impl {
             return false;
         }
 
-        if (unsealed &&
-            (unsealed->logical_id != candidate.logical_id ||
-             unsealed->witness_id != candidate.witness_id ||
-             unsealed->checksum != candidate.checksum ||
-             unsealed->chainlock != candidate.chainlock)) {
+        if (unsealed && !IsExactRecord(*unsealed, candidate)) {
             SetError(error, ChainLockPersistenceError::HEIGHT_CONFLICT);
             return false;
         }
@@ -2914,49 +3004,53 @@ DurableFinalityStateView PQChainLockPersistence::GetFinalityState() const
     return view;
 }
 
-std::optional<FinalChainLock> PQChainLockPersistence::LoadBest() const
+std::optional<DurableChainLockRecord>
+PQChainLockPersistence::LoadBest() const
 {
     LOCK(m_impl->mutex);
     if (!m_impl->best) return std::nullopt;
-    return m_impl->best->chainlock;
+    return m_impl->PublicRecord(*m_impl->best);
 }
 
-std::optional<FinalChainLock> PQChainLockPersistence::LoadUnsealedBTCC() const
+std::optional<DurableChainLockRecord>
+PQChainLockPersistence::LoadUnsealedBTCC() const
 {
     LOCK(m_impl->mutex);
     if (!m_impl->unsealed) return std::nullopt;
-    return m_impl->unsealed->chainlock;
+    return m_impl->PublicRecord(*m_impl->unsealed);
 }
 
-std::vector<FinalChainLock>
+std::vector<DurableChainLockRecord>
 PQChainLockPersistence::LoadAuthorizationBases() const
 {
     LOCK(m_impl->mutex);
-    std::vector<FinalChainLock> result;
+    std::vector<DurableChainLockRecord> result;
     result.reserve(m_impl->authorization_bases.size());
     for (const auto& [_, record] : m_impl->authorization_bases) {
-        result.push_back(record.chainlock);
+        result.push_back(m_impl->PublicRecord(record));
     }
     std::sort(result.begin(), result.end(), [](const auto& left,
                                                const auto& right) {
-        if (left.statement.height != right.statement.height) {
-            return left.statement.height < right.statement.height;
+        if (left.ChainLock().statement.height !=
+            right.ChainLock().statement.height) {
+            return left.ChainLock().statement.height <
+                   right.ChainLock().statement.height;
         }
-        return left.statement.block_hash < right.statement.block_hash;
+        return left.ChainLock().statement.block_hash <
+               right.ChainLock().statement.block_hash;
     });
     return result;
 }
 
-std::optional<FinalChainLock>
+std::optional<DurableChainLockRecord>
 PQChainLockPersistence::LoadAuthorizationBase(
     const uint256& logical_id) const
 {
     if (logical_id.IsNull()) return std::nullopt;
     LOCK(m_impl->mutex);
     const auto found{m_impl->authorization_bases.find(logical_id)};
-    return found == m_impl->authorization_bases.end()
-        ? std::nullopt
-        : std::optional<FinalChainLock>{found->second.chainlock};
+    if (found == m_impl->authorization_bases.end()) return std::nullopt;
+    return m_impl->PublicRecord(found->second);
 }
 
 std::vector<RecoveryRosterAuthoritySource>
@@ -3020,17 +3114,20 @@ PQChainLockPersistence::LoadPaymentAuditSealContext() const
 
 bool PQChainLockPersistence::PersistBest(
     const FinalChainLock& chainlock,
+    const PreparedChainLockContextPtr& context,
     ChainLockPersistenceError* error,
     std::optional<PaymentAuditSealContextCapsule>
         payment_audit_seal_context)
 {
     LOCK(m_impl->mutex);
     return m_impl->PersistBest(
-        chainlock, error, std::move(payment_audit_seal_context));
+        chainlock, context, error,
+        std::move(payment_audit_seal_context));
 }
 
 bool PQChainLockPersistence::PersistBestCoveringReceiptArchive(
     const FinalChainLock& chainlock,
+    const PreparedChainLockContextPtr& context,
     const ReceiptArchiveRosterAuthorization& expected_authorization,
     ChainLockPersistenceError* error,
     std::optional<PaymentAuditSealContextCapsule>
@@ -3038,7 +3135,8 @@ bool PQChainLockPersistence::PersistBestCoveringReceiptArchive(
 {
     LOCK(m_impl->mutex);
     return m_impl->PersistBest(
-        chainlock, error, std::move(payment_audit_seal_context),
+        chainlock, context, error,
+        std::move(payment_audit_seal_context),
         /*catchup=*/false, std::nullopt,
         /*consume_recovery_precommit=*/false,
         &expected_authorization);
@@ -3046,32 +3144,37 @@ bool PQChainLockPersistence::PersistBestCoveringReceiptArchive(
 
 bool PQChainLockPersistence::PersistUnsealedBTCC(
     const FinalChainLock& chainlock,
+    const PreparedChainLockContextPtr& context,
     ChainLockPersistenceError* error)
 {
     LOCK(m_impl->mutex);
-    return m_impl->PersistUnsealedBTCC(chainlock, error);
+    return m_impl->PersistUnsealedBTCC(chainlock, context, error);
 }
 
 bool PQChainLockPersistence::PersistVerifiedAuthorizationBase(
     const FinalChainLock& chainlock,
+    const PreparedChainLockContextPtr& context,
     ChainLockPersistenceError* error)
 {
     LOCK(m_impl->mutex);
-    return m_impl->PersistVerifiedAuthorizationBase(chainlock, error);
+    return m_impl->PersistVerifiedAuthorizationBase(
+        chainlock, context, error);
 }
 
 bool PQChainLockPersistence::PersistAuthorizedUnsealedBTCC(
     const FinalChainLock& chainlock,
+    const PreparedChainLockContextPtr& context,
     const ReceiptArchiveRosterAuthorization& expected_authorization,
     ChainLockPersistenceError* error)
 {
     LOCK(m_impl->mutex);
     return m_impl->PersistAuthorizedUnsealedBTCC(
-        chainlock, expected_authorization, error);
+        chainlock, context, expected_authorization, error);
 }
 
 bool PQChainLockPersistence::PersistCatchupBest(
     const FinalChainLock& chainlock,
+    const PreparedChainLockContextPtr& context,
     ChainLockPersistenceError* error,
     const std::optional<BTCCCursorReconciliationProof>&
         btcc_cursor_reconciliation,
@@ -3082,7 +3185,8 @@ bool PQChainLockPersistence::PersistCatchupBest(
 {
     LOCK(m_impl->mutex);
     return m_impl->PersistBest(
-        chainlock, error, std::move(payment_audit_seal_context),
+        chainlock, context, error,
+        std::move(payment_audit_seal_context),
         /*catchup=*/true,
         btcc_cursor_reconciliation,
         /*consume_recovery_precommit=*/false,
@@ -3091,6 +3195,7 @@ bool PQChainLockPersistence::PersistCatchupBest(
 
 bool PQChainLockPersistence::PersistInitializedBest(
     const FinalChainLock& chainlock,
+    const PreparedChainLockContextPtr& context,
     ChainLockPersistenceError* error,
     const VerifiedRecoveryResetPersistenceCapability* verified_reset,
     std::optional<PaymentAuditSealContextCapsule>
@@ -3112,7 +3217,8 @@ bool PQChainLockPersistence::PersistInitializedBest(
     }
     LOCK(m_impl->mutex);
     return m_impl->PersistBest(
-        chainlock, error, std::move(payment_audit_seal_context),
+        chainlock, context, error,
+        std::move(payment_audit_seal_context),
         /*catchup=*/false, std::nullopt,
         /*consume_recovery_precommit=*/true, nullptr,
         verified_reset_convergence);
@@ -3120,6 +3226,7 @@ bool PQChainLockPersistence::PersistInitializedBest(
 
 bool PQChainLockPersistence::PersistRecoveryCatchupBest(
     const FinalChainLock& chainlock,
+    const PreparedChainLockContextPtr& context,
     ChainLockPersistenceError* error,
     const std::optional<BTCCCursorReconciliationProof>&
         btcc_cursor_reconciliation,
@@ -3140,7 +3247,8 @@ bool PQChainLockPersistence::PersistRecoveryCatchupBest(
     }
     LOCK(m_impl->mutex);
     return m_impl->PersistBest(
-        chainlock, error, std::move(payment_audit_seal_context),
+        chainlock, context, error,
+        std::move(payment_audit_seal_context),
         /*catchup=*/true,
         btcc_cursor_reconciliation,
         /*consume_recovery_precommit=*/false,

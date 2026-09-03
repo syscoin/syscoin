@@ -1012,7 +1012,8 @@ bool ChainLockFinalityStore::AcceptRosterAuthorizationBaseInternal(
 
     if (!persisted_import && m_durable_authorization_base) {
         try {
-            if (!m_durable_authorization_base(chainlock)) {
+            if (!m_durable_authorization_base(chainlock,
+                                              verification_context)) {
                 SetError(error, ChainLockFinalityError::PERSISTENCE_FAILURE);
                 return false;
             }

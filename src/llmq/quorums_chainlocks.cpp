@@ -2707,11 +2707,11 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
                     (chainlock.statement.roster_transition ==
                              pq::RosterAuthorizationTransitionKind::INITIALIZE
                          ? m_persistence->PersistInitializedBest(
-                               chainlock, nullptr,
+                               chainlock, context, nullptr,
                                /*verified_reset=*/nullptr,
                                std::move(seal_context))
                          : m_persistence->PersistBest(
-                               chainlock, nullptr,
+                               chainlock, context, nullptr,
                                std::move(seal_context)))};
                 if (persisted) {
                     persisted =
@@ -2727,12 +2727,13 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
                 return persisted;
             },
             [this](const pq::FinalChainLock& chainlock,
-                   const pq::PreparedChainLockContextPtr&) {
+                   const pq::PreparedChainLockContextPtr& context) {
                 const auto publication{
                     BeginChainLockAuxiliarySnapshotPublication()};
                 bool persisted{
                     publication && m_persistence &&
-                    m_persistence->PersistUnsealedBTCC(chainlock, nullptr)};
+                    m_persistence->PersistUnsealedBTCC(
+                        chainlock, context, nullptr)};
                 if (persisted) {
                     persisted =
                         CompleteChainLockAuxiliarySnapshotPublication(
@@ -2764,12 +2765,12 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
                     switch (chainlock.statement.roster_transition) {
                     case pq::RosterAuthorizationTransitionKind::INITIALIZE:
                         return m_persistence->PersistInitializedBest(
-                            chainlock, &persistence_error,
+                            chainlock, context, &persistence_error,
                             /*verified_reset=*/nullptr,
                             seal_context);
                     case pq::RosterAuthorizationTransitionKind::RECOVER:
                         return m_persistence->PersistRecoveryCatchupBest(
-                            chainlock, &persistence_error,
+                            chainlock, context, &persistence_error,
                             btcc_cursor_reconciliation,
                             covering_authorization,
                             /*verified_reset=*/nullptr,
@@ -2779,7 +2780,7 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
                     case pq::RosterAuthorizationTransitionKind::REVEAL:
                     case pq::RosterAuthorizationTransitionKind::ROTATE:
                         return m_persistence->PersistCatchupBest(
-                            chainlock, &persistence_error,
+                            chainlock, context, &persistence_error,
                             btcc_cursor_reconciliation,
                             covering_authorization,
                             seal_context);
@@ -2821,13 +2822,13 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
             [this](
                 const pq::FinalChainLock& chainlock,
                 const pq::ReceiptArchiveRosterAuthorization& authorization,
-                const pq::PreparedChainLockContextPtr&) {
+                const pq::PreparedChainLockContextPtr& context) {
                 const auto publication{
                     BeginChainLockAuxiliarySnapshotPublication()};
                 bool persisted{
                     publication && m_persistence &&
                     m_persistence->PersistAuthorizedUnsealedBTCC(
-                        chainlock, authorization, nullptr)};
+                        chainlock, context, authorization, nullptr)};
                 if (persisted) {
                     persisted =
                         CompleteChainLockAuxiliarySnapshotPublication(
@@ -2856,7 +2857,7 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
                 bool persisted{
                     publication && m_persistence &&
                     m_persistence->PersistBestCoveringReceiptArchive(
-                        chainlock, authorization, nullptr,
+                        chainlock, context, authorization, nullptr,
                         std::move(seal_context))};
                 if (persisted) {
                     persisted =
@@ -2895,13 +2896,13 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
                     switch (chainlock.statement.roster_transition) {
                     case pq::RosterAuthorizationTransitionKind::INITIALIZE:
                         persisted = m_persistence->PersistInitializedBest(
-                            chainlock, &persistence_error,
+                            chainlock, context, &persistence_error,
                             &verified_reset, seal_context);
                         break;
                     case pq::RosterAuthorizationTransitionKind::RECOVER:
                         persisted =
                             m_persistence->PersistRecoveryCatchupBest(
-                                chainlock, &persistence_error,
+                                chainlock, context, &persistence_error,
                                 btcc_cursor_reconciliation,
                                 covering_authorization,
                                 &verified_reset, seal_context);
@@ -2942,13 +2943,14 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
                 }
                 return persisted;
             },
-            [this](const pq::FinalChainLock& chainlock) {
+            [this](const pq::FinalChainLock& chainlock,
+                   const pq::PreparedChainLockContextPtr& context) {
                 const auto publication{
                     BeginChainLockAuxiliarySnapshotPublication()};
                 bool persisted{
                     publication && m_persistence &&
                     m_persistence->PersistVerifiedAuthorizationBase(
-                        chainlock)};
+                        chainlock, context)};
                 if (persisted) {
                     persisted =
                         CompleteChainLockAuxiliarySnapshotPublication(
@@ -9679,14 +9681,11 @@ CChainLocksHandler::BuildRuntimeVerificationContext(
     bool* definitively_invalid,
     bool publish_roster,
     const BTCCReceiptArchiveCapability*
-        receipt_archive_capability) const
+        receipt_archive_capability,
+    const pq::DurableChainLockRecord* trusted_record) const
 {
     if (definitively_invalid != nullptr) *definitively_invalid = false;
     if (!m_config || !m_quorum_build_config) return std::nullopt;
-    uint64_t roster_source_generation{0};
-    const auto roster_cache{
-        GetQuorumRosterCache(&roster_source_generation)};
-    if (!roster_cache) return std::nullopt;
 
     const CBlockIndex* candidate{nullptr};
     const pq::ChainLockCandidateContextRequest request{
@@ -9735,16 +9734,22 @@ CChainLocksHandler::BuildRuntimeVerificationContext(
     const bool trusted_persistence{
         prepared.admission ==
         pq::ChainLockCandidateAdmission::TRUSTED_PERSISTENCE};
-    std::optional<pq::FinalChainLock> exact_persisted_record;
+    std::optional<pq::DurableChainLockRecord> exact_persisted_record;
     if (trusted_persistence && !m_persistence) return std::nullopt;
     if (trusted_persistence && m_persistence) {
-        const auto matches_prepared = [&](const pq::FinalChainLock& record) {
-            return record.statement == prepared.statement &&
-                   record.GetLogicalId(m_genesis_hash) ==
+        const auto matches_prepared = [&](
+            const pq::DurableChainLockRecord& record) {
+            const auto& certificate{record.ChainLock()};
+            return certificate.statement == prepared.statement &&
+                   certificate.GetLogicalId(m_genesis_hash) ==
                        prepared.logical_id &&
-                   record.GetWitnessId(m_genesis_hash) ==
+                   certificate.GetWitnessId(m_genesis_hash) ==
                        prepared.witness_id;
         };
+        if (trusted_record == nullptr ||
+            !matches_prepared(*trusted_record)) {
+            return std::nullopt;
+        }
         const auto persisted_best{m_persistence->LoadBest()};
         if (persisted_best && matches_prepared(*persisted_best)) {
             exact_persisted_record = persisted_best;
@@ -9755,7 +9760,11 @@ CChainLocksHandler::BuildRuntimeVerificationContext(
                 exact_persisted_record = base;
             }
         }
-        if (!exact_persisted_record) return std::nullopt;
+        if (!exact_persisted_record ||
+            exact_persisted_record->RecordIdentity() !=
+                trusted_record->RecordIdentity()) {
+            return std::nullopt;
+        }
     }
     const bool trusted_unsealed{
         prepared.admission == pq::ChainLockCandidateAdmission::
@@ -9763,14 +9772,16 @@ CChainLocksHandler::BuildRuntimeVerificationContext(
     const auto persisted_unsealed{
         trusted_unsealed && m_persistence
             ? m_persistence->LoadUnsealedBTCC()
-            : std::optional<pq::FinalChainLock>{}};
+            : std::optional<pq::DurableChainLockRecord>{}};
     const bool exact_persisted_unsealed{
-        persisted_unsealed &&
-        persisted_unsealed->statement == prepared.statement &&
-        persisted_unsealed->GetLogicalId(m_genesis_hash) ==
+        persisted_unsealed && trusted_record != nullptr &&
+        persisted_unsealed->ChainLock().statement == prepared.statement &&
+        persisted_unsealed->ChainLock().GetLogicalId(m_genesis_hash) ==
             prepared.logical_id &&
-        persisted_unsealed->GetWitnessId(m_genesis_hash) ==
-            prepared.witness_id};
+        persisted_unsealed->ChainLock().GetWitnessId(m_genesis_hash) ==
+            prepared.witness_id &&
+        persisted_unsealed->RecordIdentity() ==
+            trusted_record->RecordIdentity()};
     const bool network_receipt_archive{
         prepared.admission ==
             pq::ChainLockCandidateAdmission::RECEIPT_ARCHIVE};
@@ -9888,6 +9899,29 @@ CChainLocksHandler::BuildRuntimeVerificationContext(
             return std::nullopt;
         }
     }
+    if (trusted_persistence || trusted_unsealed) {
+        pq::ChainLockVerificationError verification_error{
+            pq::ChainLockVerificationError::NONE};
+        auto prepared_context{
+            pq::PreparedChainLockContext::CreateFromTrustedPersistence(
+                m_config->chainlock_schedule, prepared.statement,
+                trusted_record->RosterContext(), authorization,
+                &verification_error)};
+        if (!prepared_context) {
+            if (definitively_invalid != nullptr) {
+                *definitively_invalid = true;
+            }
+            return std::nullopt;
+        }
+        return RuntimeVerificationContext{
+            std::move(prepared_context), historical,
+            /*roster_source_generation=*/0};
+    }
+
+    uint64_t roster_source_generation{0};
+    const auto roster_cache{
+        GetQuorumRosterCache(&roster_source_generation)};
+    if (!roster_cache) return std::nullopt;
     pq::QuorumBuildError build_error{pq::QuorumBuildError::NONE};
     const auto roster_set{publish_roster
         ? roster_cache->GetVerifiedActive(
@@ -15990,15 +16024,18 @@ bool CChainLocksHandler::ProcessNewChainLockInternal(
 CChainLocksHandler::PersistedChainLockImport
 CChainLocksHandler::TryImportPersistedRosterAuthorizationBase()
 {
-    pq::FinalChainLock persisted;
+    std::optional<pq::DurableChainLockRecord> persisted_record;
     {
         LOCK(m_persisted_mutex);
         if (m_persisted_invalid) return PersistedChainLockImport::INVALID;
         if (m_pending_persisted_authorization_bases.empty()) {
             return PersistedChainLockImport::NONE;
         }
-        persisted = m_pending_persisted_authorization_bases.front();
+        persisted_record =
+            m_pending_persisted_authorization_bases.front();
     }
+    const pq::FinalChainLock& persisted{
+        persisted_record->ChainLock()};
     if (!ShouldAttemptPersistedChainLockImport(
             m_chainman.IsPQParticipationAllowed(),
             IsConfiguredForVerification())) {
@@ -16016,8 +16053,12 @@ CChainLocksHandler::TryImportPersistedRosterAuthorizationBase()
         const uint256 witness_id{persisted.GetWitnessId(m_genesis_hash)};
         const auto durable{
             m_persistence->LoadAuthorizationBase(logical_id)};
-        return durable && *durable == persisted &&
-               durable->GetWitnessId(m_genesis_hash) == witness_id;
+        return durable &&
+               durable->RecordIdentity() ==
+                   persisted_record->RecordIdentity() &&
+               durable->ChainLock() == persisted &&
+               durable->ChainLock().GetWitnessId(m_genesis_hash) ==
+                   witness_id;
     };
     if (!exact_record_is_still_durable()) {
         QuarantineInvalidPersistedChainLock(
@@ -16045,7 +16086,9 @@ CChainLocksHandler::TryImportPersistedRosterAuthorizationBase()
     bool context_definitively_invalid{false};
     const auto verification_context{BuildRuntimeVerificationContext(
         *prepared, &context_definitively_invalid,
-        /*publish_roster=*/false)};
+        /*publish_roster=*/false,
+        /*receipt_archive_capability=*/nullptr,
+        &*persisted_record)};
     if (!verification_context) {
         m_store->AbandonPrepared(*prepared);
         if (context_definitively_invalid) {
@@ -16073,7 +16116,6 @@ CChainLocksHandler::TryImportPersistedRosterAuthorizationBase()
             "failed authorization-base roster/signature verification");
         return PersistedChainLockImport::INVALID;
     }
-
     // Close the disk-to-context race without rewriting the already fsynced
     // row. Only the exact persisted witness may mint the in-memory capability.
     if (!exact_record_is_still_durable()) {
@@ -16096,7 +16138,9 @@ CChainLocksHandler::TryImportPersistedRosterAuthorizationBase()
     {
         LOCK(m_persisted_mutex);
         if (m_pending_persisted_authorization_bases.empty() ||
-            m_pending_persisted_authorization_bases.front() != persisted) {
+            m_pending_persisted_authorization_bases.front()
+                    .RecordIdentity() !=
+                persisted_record->RecordIdentity()) {
             queue_mismatch = true;
         } else {
             m_pending_persisted_authorization_bases.erase(
@@ -16118,7 +16162,7 @@ CChainLocksHandler::TryImportPersistedRosterAuthorizationBase()
 CChainLocksHandler::PersistedChainLockImport
 CChainLocksHandler::TryImportPersistedChainLock()
 {
-    pq::FinalChainLock persisted;
+    std::optional<pq::DurableChainLockRecord> persisted_record;
     {
         LOCK(m_persisted_mutex);
         if (m_persisted_invalid) return PersistedChainLockImport::INVALID;
@@ -16130,8 +16174,10 @@ CChainLocksHandler::TryImportPersistedChainLock()
             return PersistedChainLockImport::PENDING;
         }
         if (!m_pending_persisted) return PersistedChainLockImport::NONE;
-        persisted = *m_pending_persisted;
+        persisted_record = *m_pending_persisted;
     }
+    const pq::FinalChainLock& persisted{
+        persisted_record->ChainLock()};
     if (!ShouldAttemptPersistedChainLockImport(
             m_chainman.IsPQParticipationAllowed(),
             IsConfiguredForVerification())) {
@@ -16142,6 +16188,20 @@ CChainLocksHandler::TryImportPersistedChainLock()
     if (!admission_lock) return PersistedChainLockImport::PENDING;
     ScopedFinalitySnapshotVerificationRetention snapshot_retention{
         deterministicMNManager.get()};
+
+    const auto exact_record_is_still_durable = [&] {
+        if (!m_persistence) return false;
+        const auto durable{m_persistence->LoadBest()};
+        return durable &&
+               durable->RecordIdentity() ==
+                   persisted_record->RecordIdentity() &&
+               durable->ChainLock() == persisted;
+    };
+    if (!exact_record_is_still_durable()) {
+        QuarantineInvalidPersistedChainLock(
+            "best record changed during startup import");
+        return PersistedChainLockImport::INVALID;
+    }
 
     pq::ChainLockFinalityError finality_error{
         pq::ChainLockFinalityError::NONE};
@@ -16162,7 +16222,10 @@ CChainLocksHandler::TryImportPersistedChainLock()
 
     bool context_definitively_invalid{false};
     const auto verification_context{BuildRuntimeVerificationContext(
-        *prepared, &context_definitively_invalid)};
+        *prepared, &context_definitively_invalid,
+        /*publish_roster=*/false,
+        /*receipt_archive_capability=*/nullptr,
+        &*persisted_record)};
     if (!verification_context) {
         m_store->AbandonPrepared(*prepared);
         if (context_definitively_invalid) {
@@ -16187,6 +16250,12 @@ CChainLocksHandler::TryImportPersistedChainLock()
         m_store->RejectPrepared(*prepared);
         QuarantineInvalidPersistedChainLock(
             "failed full roster/signature verification");
+        return PersistedChainLockImport::INVALID;
+    }
+    if (!exact_record_is_still_durable()) {
+        m_store->AbandonPrepared(*prepared);
+        QuarantineInvalidPersistedChainLock(
+            "best record changed after verification");
         return PersistedChainLockImport::INVALID;
     }
     const bool persisted_requires_historical_enforcement{
@@ -16250,7 +16319,10 @@ CChainLocksHandler::TryImportPersistedChainLock()
                     : uint256{};
         }
         if (m_pending_persisted &&
-            m_pending_persisted->GetWitnessId(m_genesis_hash) ==
+            m_pending_persisted->RecordIdentity() ==
+                persisted_record->RecordIdentity() &&
+            m_pending_persisted->ChainLock().GetWitnessId(
+                m_genesis_hash) ==
                 persisted_witness) {
             m_pending_persisted.reset();
         }
@@ -16286,7 +16358,7 @@ CChainLocksHandler::TryImportPersistedChainLock()
 CChainLocksHandler::PersistedChainLockImport
 CChainLocksHandler::TryImportPersistedUnsealedBTCC()
 {
-    pq::FinalChainLock persisted;
+    std::optional<pq::DurableChainLockRecord> persisted_record;
     {
         LOCK(m_persisted_mutex);
         if (m_persisted_invalid) return PersistedChainLockImport::INVALID;
@@ -16297,8 +16369,10 @@ CChainLocksHandler::TryImportPersistedUnsealedBTCC()
             !m_pending_persisted_authorization_bases.empty()) {
             return PersistedChainLockImport::PENDING;
         }
-        persisted = *m_pending_persisted_unsealed_btcc;
+        persisted_record = *m_pending_persisted_unsealed_btcc;
     }
+    const pq::FinalChainLock& persisted{
+        persisted_record->ChainLock()};
     if (!ShouldAttemptPersistedChainLockImport(
             m_chainman.IsPQParticipationAllowed(),
             IsConfiguredForVerification())) {
@@ -16333,8 +16407,11 @@ CChainLocksHandler::TryImportPersistedUnsealedBTCC()
     // exact witness identity before selecting reduced historical provenance.
     const auto exact_unsealed{
         m_persistence ? m_persistence->LoadUnsealedBTCC()
-                      : std::optional<pq::FinalChainLock>{}};
-    if (!exact_unsealed || *exact_unsealed != persisted) {
+                      : std::optional<pq::DurableChainLockRecord>{}};
+    if (!exact_unsealed ||
+        exact_unsealed->RecordIdentity() !=
+            persisted_record->RecordIdentity() ||
+        exact_unsealed->ChainLock() != persisted) {
         return PersistedChainLockImport::PENDING;
     }
 
@@ -16358,7 +16435,10 @@ CChainLocksHandler::TryImportPersistedUnsealedBTCC()
 
     bool context_definitively_invalid{false};
     const auto verification_context{BuildRuntimeVerificationContext(
-        *prepared, &context_definitively_invalid)};
+        *prepared, &context_definitively_invalid,
+        /*publish_roster=*/false,
+        /*receipt_archive_capability=*/nullptr,
+        &*persisted_record)};
     if (!verification_context) {
         m_store->AbandonPrepared(*prepared);
         if (context_definitively_invalid) {
@@ -16396,8 +16476,11 @@ CChainLocksHandler::TryImportPersistedUnsealedBTCC()
 
     const auto rechecked_unsealed{
         m_persistence ? m_persistence->LoadUnsealedBTCC()
-                      : std::optional<pq::FinalChainLock>{}};
-    if (!rechecked_unsealed || *rechecked_unsealed != persisted) {
+                      : std::optional<pq::DurableChainLockRecord>{}};
+    if (!rechecked_unsealed ||
+        rechecked_unsealed->RecordIdentity() !=
+            persisted_record->RecordIdentity() ||
+        rechecked_unsealed->ChainLock() != persisted) {
         (void)CompleteChainLockAuxiliarySnapshotPublication(*publication);
         m_store->AbandonPrepared(*prepared);
         return PersistedChainLockImport::PENDING;
@@ -16421,7 +16504,10 @@ CChainLocksHandler::TryImportPersistedUnsealedBTCC()
     {
         LOCK(m_persisted_mutex);
         if (m_pending_persisted_unsealed_btcc &&
-            m_pending_persisted_unsealed_btcc->GetWitnessId(m_genesis_hash) ==
+            m_pending_persisted_unsealed_btcc->RecordIdentity() ==
+                persisted_record->RecordIdentity() &&
+            m_pending_persisted_unsealed_btcc->ChainLock().GetWitnessId(
+                m_genesis_hash) ==
                 persisted.GetWitnessId(m_genesis_hash)) {
             m_pending_persisted_unsealed_btcc.reset();
             m_persisted_unsealed_auth_pending = false;

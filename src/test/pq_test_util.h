@@ -76,6 +76,47 @@ public:
             CreateRosterSet(genesis_hash), std::move(authorization),
             /*authorization_mask=*/0b1111)};
     }
+
+    /** Intrinsically valid generic rosters for local persistence seam tests. */
+    [[nodiscard]] static PreparedChainLockContextPtr CreateDurable(
+        const uint256& genesis_hash,
+        ChainLockScheduleConfig schedule,
+        const ChainLockStatement& statement)
+    {
+        auto rosters{std::make_unique<FrozenQuorumRosters>()};
+        for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+            auto& roster{(*rosters)[slot]};
+            auto& descriptor{roster.descriptor};
+            descriptor.epoch = static_cast<uint32_t>(slot);
+            descriptor.base_height = static_cast<int32_t>(slot + 1);
+            descriptor.snapshot_height = static_cast<int32_t>(slot);
+            descriptor.base_hash.begin()[0] =
+                static_cast<uint8_t>(1 + slot);
+            descriptor.snapshot_hash.begin()[0] =
+                static_cast<uint8_t>(11 + slot);
+            descriptor.roster_beacon_hash.begin()[0] =
+                static_cast<uint8_t>(21 + slot);
+            for (std::size_t member{0}; member < QUORUM_SIZE; ++member) {
+                auto& frozen{roster.members[member]};
+                const uint64_t identity{
+                    1 + slot * QUORUM_SIZE + member};
+                for (std::size_t byte{0}; byte < sizeof(identity); ++byte) {
+                    frozen.pro_tx_hash.begin()[byte] =
+                        static_cast<uint8_t>(identity >> (8 * byte));
+                }
+            }
+            descriptor.member_root =
+                ComputeQuorumMemberRoot(genesis_hash, roster);
+            descriptor.child_key_root =
+                ComputeQuorumChildKeyRoot(genesis_hash, roster);
+        }
+        ChainLockVerificationError error{ChainLockVerificationError::NONE};
+        auto roster_set{VerifiedRosterSet::Create(
+            genesis_hash, FrozenQuorumRostersPtr{std::move(rosters)},
+            &error)};
+        if (!roster_set) return {};
+        return Create(schedule, statement, std::move(roster_set));
+    }
 };
 
 } // namespace llmq::pq

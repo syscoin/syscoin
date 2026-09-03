@@ -338,7 +338,8 @@ using ChainLockDurableReset = std::function<bool(
     const PreparedChainLockContextPtr&,
     const VerifiedRecoveryResetPersistenceCapability&)>;
 using ChainLockDurableAuthorizationBase =
-    std::function<bool(const FinalChainLock&)>;
+    std::function<bool(const FinalChainLock&,
+                       const PreparedChainLockContextPtr&)>;
 
 /** Small immutable token retained while the 801 WOTS+ checks run. */
 struct PreparedFinalChainLockCandidate {

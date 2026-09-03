@@ -15,6 +15,7 @@
 #include <ios>
 #include <memory>
 #include <optional>
+#include <utility>
 #include <vector>
 
 namespace llmq {
@@ -279,14 +280,61 @@ struct DurableFinalityStateView {
 };
 
 /**
+ * One exact certificate and the immutable roster bytes that verified it.
+ * The checksum-derived local record identity commits both values and closes
+ * the startup disk-to-verification race without rebuilding old snapshots.
+ */
+class DurableChainLockRecord final {
+public:
+    DurableChainLockRecord(FinalChainLock chainlock,
+                           DurableRosterContext roster_context,
+                           uint256 record_identity)
+        : m_chainlock{std::move(chainlock)},
+          m_roster_context{std::move(roster_context)},
+          m_record_identity{std::move(record_identity)}
+    {
+    }
+
+    [[nodiscard]] const FinalChainLock& ChainLock() const noexcept
+    {
+        return m_chainlock;
+    }
+    [[nodiscard]] const DurableRosterContext& RosterContext() const noexcept
+    {
+        return m_roster_context;
+    }
+    [[nodiscard]] const uint256& RecordIdentity() const noexcept
+    {
+        return m_record_identity;
+    }
+
+    friend bool operator==(const DurableChainLockRecord& record,
+                           const FinalChainLock& chainlock)
+    {
+        return record.m_chainlock == chainlock;
+    }
+    friend bool operator==(const FinalChainLock& chainlock,
+                           const DurableChainLockRecord& record)
+    {
+        return chainlock == record.m_chainlock;
+    }
+
+private:
+    FinalChainLock m_chainlock;
+    DurableRosterContext m_roster_context;
+    uint256 m_record_identity;
+};
+
+/**
  * Durable storage for the single best post-quantum ChainLock certificate.
  *
  * The database schema binds the record to the network genesis, complete
  * finality configuration, height-only activation boundary, historical receipt
  * assumption, and fixed cryptographic profile.
  * Construction validates every database key and every byte of the record;
- * callers must still perform full branch, roster, and signature verification
- * before importing LoadBest() into live finality state.
+ * callers must still recheck branch provenance, bind the decoded roster
+ * context through the trusted-persistence boundary, and reverify every
+ * signature before importing LoadBest() into live finality state.
  */
 class PQChainLockPersistence final {
 public:
@@ -300,16 +348,18 @@ public:
 
     [[nodiscard]] bool HasBest() const;
     [[nodiscard]] DurableFinalityStateView GetFinalityState() const;
-    [[nodiscard]] std::optional<FinalChainLock> LoadBest() const;
-    [[nodiscard]] std::optional<FinalChainLock> LoadUnsealedBTCC() const;
+    [[nodiscard]] std::optional<DurableChainLockRecord> LoadBest() const;
+    [[nodiscard]] std::optional<DurableChainLockRecord>
+    LoadUnsealedBTCC() const;
     /**
      * Certificates retained after live verification. Startup callers must
-     * rebuild their branch/roster context and reverify every signature before
-     * importing an in-memory authorization capability.
+     * recheck branch and authorization provenance, decode the exact persisted
+     * roster bytes, and reverify every signature before importing an in-memory
+     * authorization capability.
      */
-    [[nodiscard]] std::vector<FinalChainLock>
+    [[nodiscard]] std::vector<DurableChainLockRecord>
     LoadAuthorizationBases() const;
-    [[nodiscard]] std::optional<FinalChainLock>
+    [[nodiscard]] std::optional<DurableChainLockRecord>
     LoadAuthorizationBase(const uint256& logical_id) const;
     /** Compact coordinates needed to retain/rebuild older recovery rosters. */
     [[nodiscard]] std::vector<RecoveryRosterAuthoritySource>
@@ -331,6 +381,7 @@ public:
      */
     [[nodiscard]] bool PersistBest(
         const FinalChainLock& chainlock,
+        const PreparedChainLockContextPtr& context,
         ChainLockPersistenceError* error = nullptr,
         std::optional<PaymentAuditSealContextCapsule>
             payment_audit_seal_context = std::nullopt);
@@ -342,6 +393,7 @@ public:
      */
     [[nodiscard]] bool PersistBestCoveringReceiptArchive(
         const FinalChainLock& chainlock,
+        const PreparedChainLockContextPtr& context,
         const ReceiptArchiveRosterAuthorization& expected_authorization,
         ChainLockPersistenceError* error = nullptr,
         std::optional<PaymentAuditSealContextCapsule>
@@ -353,6 +405,7 @@ public:
      */
     [[nodiscard]] bool PersistUnsealedBTCC(
         const FinalChainLock& chainlock,
+        const PreparedChainLockContextPtr& context,
         ChainLockPersistenceError* error = nullptr);
 
     /**
@@ -362,6 +415,7 @@ public:
      */
     [[nodiscard]] bool PersistVerifiedAuthorizationBase(
         const FinalChainLock& chainlock,
+        const PreparedChainLockContextPtr& context,
         ChainLockPersistenceError* error = nullptr);
 
     /**
@@ -371,12 +425,14 @@ public:
      */
     [[nodiscard]] bool PersistAuthorizedUnsealedBTCC(
         const FinalChainLock& chainlock,
+        const PreparedChainLockContextPtr& context,
         const ReceiptArchiveRosterAuthorization& expected_authorization,
         ChainLockPersistenceError* error = nullptr);
 
     /** Atomically advance the winner and highest catch-up audit marker. */
     [[nodiscard]] bool PersistCatchupBest(
         const FinalChainLock& chainlock,
+        const PreparedChainLockContextPtr& context,
         ChainLockPersistenceError* error = nullptr,
         const std::optional<BTCCCursorReconciliationProof>&
             btcc_cursor_reconciliation = std::nullopt,
@@ -393,6 +449,7 @@ public:
      */
     [[nodiscard]] bool PersistInitializedBest(
         const FinalChainLock& chainlock,
+        const PreparedChainLockContextPtr& context,
         ChainLockPersistenceError* error = nullptr,
         const VerifiedRecoveryResetPersistenceCapability*
             verified_reset = nullptr,
@@ -407,6 +464,7 @@ public:
      */
     [[nodiscard]] bool PersistRecoveryCatchupBest(
         const FinalChainLock& chainlock,
+        const PreparedChainLockContextPtr& context,
         ChainLockPersistenceError* error = nullptr,
         const std::optional<BTCCCursorReconciliationProof>&
             btcc_cursor_reconciliation = std::nullopt,

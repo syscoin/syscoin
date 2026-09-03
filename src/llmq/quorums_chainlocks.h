@@ -1662,7 +1662,9 @@ private:
         bool* definitively_invalid = nullptr,
         bool publish_roster = false,
         const BTCCReceiptArchiveCapability*
-            receipt_archive_capability = nullptr) const
+            receipt_archive_capability = nullptr,
+        const pq::DurableChainLockRecord*
+            trusted_record = nullptr) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_lookup_mutex,
                                  !m_persisted_mutex,
                                  !m_btcc_preseal_mutex,
@@ -2442,11 +2444,12 @@ private:
     mutable Mutex m_chainlock_admission_mutex;
     mutable Mutex m_verification_mutex;
     mutable Mutex m_persisted_mutex;
-    std::optional<pq::FinalChainLock> m_pending_persisted
+    std::optional<pq::DurableChainLockRecord> m_pending_persisted
         GUARDED_BY(m_persisted_mutex);
-    std::optional<pq::FinalChainLock> m_pending_persisted_unsealed_btcc
+    std::optional<pq::DurableChainLockRecord>
+        m_pending_persisted_unsealed_btcc
         GUARDED_BY(m_persisted_mutex);
-    std::vector<pq::FinalChainLock>
+    std::vector<pq::DurableChainLockRecord>
         m_pending_persisted_authorization_bases
             GUARDED_BY(m_persisted_mutex);
     // Exact witness which was fully reverified through the bounded

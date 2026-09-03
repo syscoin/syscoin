@@ -23,6 +23,7 @@
 #include <random.h>
 #include <rpc/blockchain.h>
 #include <sync.h>
+#include <test/pq_test_util.h> // SYSCOIN: durable roster-context fixture.
 #include <test/util/chainstate.h>
 #include <test/util/logging.h>
 #include <test/util/random.h>
@@ -2003,7 +2004,13 @@ BOOST_FIXTURE_TEST_CASE(
                 .wipe_data = true,
             },
             consensus.hashGenesisBlock, *config};
-        BOOST_REQUIRE(persistence.PersistInitializedBest(winner));
+        const auto context{
+            llmq::pq::ChainLockStoreTestContextFactory::CreateDurable(
+                consensus.hashGenesisBlock, config->chainlock_schedule,
+                winner.statement)};
+        BOOST_REQUIRE(context);
+        BOOST_REQUIRE(persistence.PersistInitializedBest(
+            winner, context));
     }
     {
         LOCK(::cs_main);
