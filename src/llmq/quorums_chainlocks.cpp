@@ -56,7 +56,7 @@ constexpr std::size_t PQ_CHAINLOCK_PREFIX_SIZE{
     pq::FINAL_SIGNATURE_COUNT * pq::AuthenticatedChildSignature::WIRE_SIZE};
 constexpr std::chrono::seconds PAYMENT_AUDIT_FINALIZATION_RETRY_INTERVAL{30};
 
-std::optional<int32_t> BTCCCertificateServeUntilHeight(
+std::optional<int32_t> BTCCCertificateServeUntilHeightInternal(
     const pq::ChainLockFinalityStoreConfig& config,
     const pq::BTCCReceipt& receipt) noexcept
 {
@@ -68,7 +68,8 @@ std::optional<int32_t> BTCCCertificateServeUntilHeight(
     const int64_t serve_until{
         static_cast<int64_t>(receipt.chainlock_target_height) +
         static_cast<int64_t>(config.recent_chainlocks_capacity) *
-            config.chainlock_schedule.chainlock_period};
+            config.chainlock_schedule.chainlock_period +
+        static_cast<int64_t>(config.chainlock_schedule.sign_lag)};
     if (serve_until < 0 ||
         serve_until > std::numeric_limits<int32_t>::max()) {
         return std::nullopt;
@@ -1143,6 +1144,13 @@ std::optional<pq::ChainLockSigningWindow> StagedRecoverySigningWindowImpl(
 }
 
 } // namespace
+
+std::optional<int32_t> BTCCCertificateServeUntilHeight(
+    const pq::ChainLockFinalityStoreConfig& config,
+    const pq::BTCCReceipt& receipt) noexcept
+{
+    return BTCCCertificateServeUntilHeightInternal(config, receipt);
+}
 
 std::optional<int32_t> GetBTCCPresealAuxiliaryRetentionFloor(
     const pq::BTCCPresealState& state,

@@ -3121,6 +3121,49 @@ BOOST_AUTO_TEST_CASE(payment_audit_signing_height_is_exactly_window_bounded)
 }
 
 BOOST_AUTO_TEST_CASE(
+    btcc_certificate_history_expiry_includes_signing_lag)
+{
+    using namespace llmq::pq;
+
+    auto config{CatchupStoreConfig()};
+    config.recent_chainlocks_capacity = DEFAULT_RECENT_CHAINLOCKS_SIZE;
+    BOOST_REQUIRE(config.IsValid());
+    constexpr int32_t TARGET{870};
+    BTCCReceipt receipt;
+    receipt.chainlock_target_height = TARGET;
+    receipt.chainlock_target_hash = NonNullHash(210'400);
+    receipt.chainlock_logical_id = NonNullHash(210'401);
+    receipt.accepted_cursor = {
+        TARGET, receipt.chainlock_target_hash, NonNullHash(210'402)};
+    BOOST_REQUIRE(receipt.IsStructurallyValid());
+
+    const auto serve_until{
+        llmq::BTCCCertificateServeUntilHeight(config, receipt)};
+    BOOST_REQUIRE(serve_until);
+    BOOST_CHECK_EQUAL(
+        *serve_until,
+        TARGET +
+            static_cast<int32_t>(config.recent_chainlocks_capacity) *
+                config.chainlock_schedule.chainlock_period +
+            config.chainlock_schedule.sign_lag);
+    BOOST_CHECK_EQUAL(*serve_until, TARGET + 45);
+
+    config.recent_chainlocks_capacity = 1;
+    BOOST_REQUIRE(config.IsValid());
+    const auto single_slot{
+        llmq::BTCCCertificateServeUntilHeight(config, receipt)};
+    BOOST_REQUIRE(single_slot);
+    BOOST_CHECK_EQUAL(*single_slot, TARGET + 10);
+
+    receipt.chainlock_target_height =
+        std::numeric_limits<int32_t>::max() - 9;
+    receipt.accepted_cursor.sys_height =
+        receipt.chainlock_target_height;
+    BOOST_REQUIRE(receipt.IsStructurallyValid());
+    BOOST_CHECK(!llmq::BTCCCertificateServeUntilHeight(config, receipt));
+}
+
+BOOST_AUTO_TEST_CASE(
     payment_audit_seal_resolution_survives_eviction_and_restart)
 {
     using Access = llmq::test::CChainLocksHandlerTestAccess;

@@ -697,6 +697,11 @@ StagedRecoverySigningWindow(
     uint32_t subject_epoch,
     int32_t startup_tip_height) noexcept;
 
+/** Earliest header height at which a retained BTCC seal may be unavailable. */
+[[nodiscard]] std::optional<int32_t> BTCCCertificateServeUntilHeight(
+    const pq::ChainLockFinalityStoreConfig& config,
+    const pq::BTCCReceipt& receipt) noexcept;
+
 /** Prevent delayed partition signatures from finalizing a stale or deep fork. */
 [[nodiscard]] bool IsLiveChainLockCandidateAdmissible(
     const pq::ChainLockScheduleConfig& schedule,
