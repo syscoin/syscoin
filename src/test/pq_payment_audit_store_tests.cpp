@@ -145,6 +145,8 @@ RosterBeaconWindow ReadyRosterWindow(uint32_t first_epoch)
         window.active.seeds[slot] = ReadyRosterBeacon(
             first_epoch + static_cast<uint32_t>(slot));
     }
+    window.active.recovery_authority_source.normal_beacon =
+        window.active.seeds.back();
     window.next.epoch = first_epoch + ACTIVE_QUORUMS;
     BOOST_REQUIRE(window.IsStructurallyValid());
     return window;
