@@ -334,12 +334,28 @@ DeriveNormalRosterAuthorizationDecision(
         if (newest_normal == nullptr) return std::nullopt;
         RecoveryRosterAuthoritySource candidate{*newest_normal};
         if (candidate != expected_source) {
-            if (!input.recovery_source_evaluation ||
-                input.recovery_source_evaluation->source != candidate) {
-                return std::nullopt;
-            }
-            if (input.recovery_source_evaluation->usable) {
-                expected_source = std::move(candidate);
+            if (input.recovery_source_evaluation) {
+                if (input.recovery_source_evaluation->source != candidate) {
+                    return std::nullopt;
+                }
+                if (input.recovery_source_evaluation->usable) {
+                    expected_source = std::move(candidate);
+                }
+            } else {
+                // A signed normal predecessor may already have retained the
+                // older source after evaluating this exact READY candidate as
+                // unusable. Carry that decision without rescanning its frozen
+                // snapshot on every KEEP. A newly introduced candidate, or
+                // the first candidate after recovery drains, still requires
+                // an explicit evaluation on this transition.
+                const auto* previous_newest{
+                    HasRecoveryRosterBeacon(input.previous.window)
+                        ? nullptr
+                        : FindNewestNormalReadySeed(input.previous.window)};
+                if (previous_newest == nullptr ||
+                    *previous_newest != *newest_normal) {
+                    return std::nullopt;
+                }
             }
         } else if (input.recovery_source_evaluation) {
             return std::nullopt;

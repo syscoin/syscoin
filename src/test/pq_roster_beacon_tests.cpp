@@ -1035,6 +1035,39 @@ BOOST_AUTO_TEST_CASE(normal_reveal_requires_exact_active_h37_and_six_confirmatio
     BOOST_CHECK(retained->transition.new_window.active
                     .recovery_authority_source ==
                 pending_window.active.recovery_authority_source);
+
+    auto keep_after_retained{NormalInput(
+        retained->transition.new_window, /*newest_epoch=*/43)};
+    keep_after_retained.recovery_authority_source =
+        retained->transition.new_window.active.recovery_authority_source;
+    keep_after_retained.recovery_source_evaluation.reset();
+    const auto kept_after_retained{
+        DeriveNormalRosterAuthorizationDecision(
+            genesis, keep_after_retained)};
+    BOOST_REQUIRE(kept_after_retained);
+    BOOST_CHECK(kept_after_retained->transition.kind ==
+                RosterAuthorizationTransitionKind::KEEP);
+    BOOST_CHECK(kept_after_retained->transition.new_window.active
+                    .recovery_authority_source ==
+                pending_window.active.recovery_authority_source);
+
+    auto rotate_after_retained{NormalInput(
+        retained->transition.new_window, /*newest_epoch=*/44)};
+    rotate_after_retained.ready_rotation =
+        RevealRange(retained->transition.new_window.next);
+    rotate_after_retained.recovery_authority_source =
+        retained->transition.new_window.active.recovery_authority_source;
+    rotate_after_retained.recovery_source_evaluation.reset();
+    const auto rotated_after_retained{
+        DeriveNormalRosterAuthorizationDecision(
+            genesis, rotate_after_retained)};
+    BOOST_REQUIRE(rotated_after_retained);
+    BOOST_CHECK(rotated_after_retained->transition.kind ==
+                RosterAuthorizationTransitionKind::ROTATE);
+    BOOST_CHECK(rotated_after_retained->transition.new_window.active
+                    .recovery_authority_source ==
+                pending_window.active.recovery_authority_source);
+
     auto false_advance{insufficient_roots};
     false_advance.recovery_authority_source =
         input.recovery_authority_source;
@@ -1225,6 +1258,10 @@ BOOST_AUTO_TEST_CASE(normal_transitions_carry_recovery_authority_until_drained)
             input.recovery_source_evaluation =
                 NormalRosterAuthorizationInput::RecoverySourceEvaluation{
                     input.recovery_authority_source, true};
+            auto unevaluated_drain{input};
+            unevaluated_drain.recovery_source_evaluation.reset();
+            BOOST_CHECK(!DeriveNormalRosterAuthorizationDecision(
+                genesis, unevaluated_drain));
         }
         if (newest_epoch == 104) {
             auto changed_source{input};
