@@ -1335,6 +1335,7 @@ bool BuildSnapshotsAndRosters(FullDimensionFixture& fixture)
                 fixture.args.genesis_hash,
                 fixture.args.build_config.schedule,
                 BTCCScheduleConfig{authorizer.height},
+                authorizer.previous_chainlock_height,
                 fixture.args.target_height, fixture.args.target_hash,
                 fixture.statement.btcc_receipt_state, receipt)};
             if (!applied) {
@@ -1752,12 +1753,16 @@ std::optional<BTCCReceiptState> ApplyAuthorizerReceiptState(
     const auto& carrier{
         fixture.chain.indices[static_cast<int32_t>(carrier_height)]};
     if (!ValidateBTCCReceiptOnBranch(
-            fixture.args.btcc_config, carrier, receipt)) {
+            fixture.args.build_config.schedule, fixture.args.btcc_config,
+            authorizer.previous_chainlock_height, carrier,
+            authorizer.btcc_receipt_state, receipt)) {
         return std::nullopt;
     }
     return ApplyBTCCReceiptState(
         fixture.args.genesis_hash, fixture.args.build_config.schedule,
-        fixture.args.btcc_config, static_cast<int32_t>(carrier_height),
+        fixture.args.btcc_config,
+        authorizer.previous_chainlock_height,
+        static_cast<int32_t>(carrier_height),
         fixture.args.authorizer_receipt_carrier_hash,
         authorizer.btcc_receipt_state, receipt);
 }
@@ -2015,7 +2020,9 @@ std::optional<PaymentAuditArtifacts> BuildPaymentAuditArtifacts(
         static_cast<int32_t>(fixture.args.btcc_config.nevm_injection_lag)};
     const auto btcc_receipt_state{ApplyBTCCReceiptState(
         fixture.args.genesis_hash, fixture.args.build_config.schedule,
-        fixture.args.btcc_config, seed_carrier_height,
+        fixture.args.btcc_config,
+        anchor_chainlock->statement.previous_chainlock_height,
+        seed_carrier_height,
         fixture.args.seed_carrier_hash,
         anchor_chainlock->statement.btcc_receipt_state,
         fixture.args.seed_receipt)};

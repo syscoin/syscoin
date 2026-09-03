@@ -146,8 +146,9 @@ enum class BTCCValidationError : uint8_t {
 /**
  * Advance only when the ChainLock target itself is a scheduled BTC candidate.
  * If that exact block has no BTCPREV commitment (or the target is between BTC
- * slots), retain the previous cursor. This makes every ADVANCE uniquely
- * receiptable at target+10 and prevents stale-certificate rollover.
+ * slots), retain the previous cursor. Non-initial ADVANCE certificates remain
+ * uniquely receiptable at target+10; INITIALIZE alone is retryable until the
+ * receipt accumulator has its first non-null entry.
  */
 [[nodiscard]] std::optional<BTCCSelection> SelectBTCCForChainLock(
     const BTCCScheduleConfig& config,
@@ -159,14 +160,30 @@ enum class BTCCValidationError : uint8_t {
 [[nodiscard]] std::optional<int32_t> BTCCSourceHeightForNEVMInjection(
     const BTCCScheduleConfig& config, int32_t current_height) noexcept;
 
-/** Fixed candidate-aligned carrier cadence, ten blocks after its source. */
+/** Candidate-aligned carrier cadence; ordinary receipts target carrier-10. */
 [[nodiscard]] bool IsBTCCReceiptCarrierHeight(
     const BTCCScheduleConfig& config, int32_t height) noexcept;
 
+/**
+ * Return whether this target is receiptable at this carrier. Ordinary
+ * certificates retain their exact H+10 slot. Before the first receipt only,
+ * the unique INITIALIZE target remains eligible at later carrier slots.
+ */
+[[nodiscard]] bool IsBTCCReceiptTargetForCarrier(
+    const ChainLockScheduleConfig& chainlock_schedule,
+    const BTCCScheduleConfig& btcc_schedule,
+    int32_t activation_predecessor_height,
+    const BTCCReceiptState& previous,
+    int32_t carrier_height,
+    int32_t receipt_target_height) noexcept;
+
 /** Validate the compact receipt's target/cursor against one Syscoin branch. */
 [[nodiscard]] bool ValidateBTCCReceiptOnBranch(
-    const BTCCScheduleConfig& config,
+    const ChainLockScheduleConfig& chainlock_schedule,
+    const BTCCScheduleConfig& btcc_schedule,
+    int32_t activation_predecessor_height,
     const CBlockIndex& carrier,
+    const BTCCReceiptState& previous,
     const BTCCReceipt& receipt);
 
 /** Update the branch-local receipt state; null carrier slots are no-ops. */
@@ -174,6 +191,7 @@ enum class BTCCValidationError : uint8_t {
     const uint256& genesis_hash,
     const ChainLockScheduleConfig& chainlock_schedule,
     const BTCCScheduleConfig& btcc_schedule,
+    int32_t activation_predecessor_height,
     int32_t carrier_height,
     const uint256& carrier_hash,
     const BTCCReceiptState& previous,
@@ -188,6 +206,7 @@ enum class BTCCValidationError : uint8_t {
     const uint256& genesis_hash,
     const ChainLockScheduleConfig& chainlock_schedule,
     const BTCCScheduleConfig& btcc_schedule,
+    int32_t activation_predecessor_height,
     const CBlockIndex& carrier,
     const BTCCReceiptState& previous,
     const BTCCReceiptState& current,

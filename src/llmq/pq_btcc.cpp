@@ -396,19 +396,61 @@ bool IsBTCCReceiptCarrierHeight(const BTCCScheduleConfig& config,
     return BTCCSourceHeightForNEVMInjection(config, height).has_value();
 }
 
-bool ValidateBTCCReceiptOnBranch(const BTCCScheduleConfig& config,
-                                 const CBlockIndex& carrier,
-                                 const BTCCReceipt& receipt)
+bool IsBTCCReceiptTargetForCarrier(
+    const ChainLockScheduleConfig& chainlock_schedule,
+    const BTCCScheduleConfig& btcc_schedule,
+    int32_t activation_predecessor_height,
+    const BTCCReceiptState& previous,
+    int32_t carrier_height,
+    int32_t receipt_target_height) noexcept
 {
-    if (!config.IsValid() ||
-        !IsBTCCReceiptCarrierHeight(config, carrier.nHeight) ||
+    if (!chainlock_schedule.IsValid() || !btcc_schedule.IsValid() ||
+        activation_predecessor_height < -1 ||
+        !previous.IsStructurallyValid() ||
+        !IsBTCCReceiptCarrierHeight(btcc_schedule, carrier_height) ||
+        !IsEligibleChainLockTarget(
+            chainlock_schedule, receipt_target_height)) {
+        return false;
+    }
+
+    const auto initial_target{NextEligibleChainLockTargetHeight(
+        chainlock_schedule, activation_predecessor_height)};
+    const auto initial_signing_height{initial_target
+        ? SigningHeightForTarget(chainlock_schedule, *initial_target)
+        : std::optional<int32_t>{}};
+    if (previous == BTCCReceiptState{}) {
+        return initial_target && initial_signing_height &&
+               IsBTCCCandidateHeight(btcc_schedule, *initial_target) &&
+               receipt_target_height == *initial_target &&
+               static_cast<int64_t>(*initial_signing_height) +
+                       PQ_BTCC_RECEIPT_PROPAGATION_BUFFER <=
+                   carrier_height;
+    }
+
+    const auto ordinary_target{BTCCSourceHeightForNEVMInjection(
+        btcc_schedule, carrier_height)};
+    return ordinary_target && receipt_target_height == *ordinary_target;
+}
+
+bool ValidateBTCCReceiptOnBranch(
+    const ChainLockScheduleConfig& chainlock_schedule,
+    const BTCCScheduleConfig& btcc_schedule,
+    int32_t activation_predecessor_height,
+    const CBlockIndex& carrier,
+    const BTCCReceiptState& previous,
+    const BTCCReceipt& receipt)
+{
+    if (!chainlock_schedule.IsValid() || !btcc_schedule.IsValid() ||
+        !previous.IsStructurallyValid() ||
+        !IsBTCCReceiptCarrierHeight(btcc_schedule, carrier.nHeight) ||
         !receipt.IsStructurallyValid()) {
         return false;
     }
     if (receipt.IsNull()) return true;
-    const auto source_height{
-        BTCCSourceHeightForNEVMInjection(config, carrier.nHeight)};
-    if (!source_height || receipt.chainlock_target_height != *source_height) {
+    if (!IsBTCCReceiptTargetForCarrier(
+            chainlock_schedule, btcc_schedule,
+            activation_predecessor_height, previous, carrier.nHeight,
+            receipt.chainlock_target_height)) {
         return false;
     }
     const CBlockIndex* target{
@@ -427,6 +469,7 @@ std::optional<BTCCReceiptState> ApplyBTCCReceiptState(
     const uint256& genesis_hash,
     const ChainLockScheduleConfig& chainlock_schedule,
     const BTCCScheduleConfig& btcc_schedule,
+    int32_t activation_predecessor_height,
     int32_t carrier_height,
     const uint256& carrier_hash,
     const BTCCReceiptState& previous,
@@ -439,11 +482,10 @@ std::optional<BTCCReceiptState> ApplyBTCCReceiptState(
         return std::nullopt;
     }
     if (receipt.IsNull()) return previous;
-    const auto source_height{
-        BTCCSourceHeightForNEVMInjection(btcc_schedule, carrier_height)};
-    if (!source_height || receipt.chainlock_target_height != *source_height ||
-        !IsEligibleChainLockTarget(
-            chainlock_schedule, receipt.chainlock_target_height) ||
+    if (!IsBTCCReceiptTargetForCarrier(
+            chainlock_schedule, btcc_schedule,
+            activation_predecessor_height, previous, carrier_height,
+            receipt.chainlock_target_height) ||
         receipt.chainlock_target_height <=
             previous.latest_chainlock_target_height ||
         carrier_height <= previous.latest_receipt_carrier_height) {
@@ -455,15 +497,6 @@ std::optional<BTCCReceiptState> ApplyBTCCReceiptState(
             previous, receipt, BTCCAdvance::ADVANCE)) {
         return std::nullopt;
     }
-    const auto signing_height{SigningHeightForTarget(
-        chainlock_schedule, receipt.chainlock_target_height)};
-    if (!signing_height ||
-        static_cast<int64_t>(*signing_height) +
-                PQ_BTCC_RECEIPT_PROPAGATION_BUFFER !=
-            carrier_height) {
-        return std::nullopt;
-    }
-
     HashWriter writer{SER_GETHASH, 0};
     writer.write(AsBytes(Span{PQ_BTCC_RECEIPT_STATE_DOMAIN.data(),
                               PQ_BTCC_RECEIPT_STATE_DOMAIN.size()}));
@@ -478,6 +511,7 @@ std::optional<BTCCReceipt> ReconstructBTCCReceipt(
     const uint256& genesis_hash,
     const ChainLockScheduleConfig& chainlock_schedule,
     const BTCCScheduleConfig& btcc_schedule,
+    int32_t activation_predecessor_height,
     const CBlockIndex& carrier,
     const BTCCReceiptState& previous,
     const BTCCReceiptState& current,
@@ -492,25 +526,28 @@ std::optional<BTCCReceipt> ReconstructBTCCReceipt(
 
     BTCCReceipt receipt;
     if (!receipt_logical_id.IsNull()) {
-        const auto source_height{BTCCSourceHeightForNEVMInjection(
-            btcc_schedule, carrier.nHeight)};
-        if (!source_height || current.cursor.IsNull() ||
-            current.latest_chainlock_target_height != *source_height ||
+        const int32_t receipt_target_height{
+            current.latest_chainlock_target_height};
+        if (current.cursor.IsNull() || receipt_target_height < 0 ||
             current.latest_receipt_carrier_height != carrier.nHeight) {
             return std::nullopt;
         }
-        receipt.chainlock_target_height = *source_height;
-        const CBlockIndex* target{carrier.GetAncestor(*source_height)};
+        receipt.chainlock_target_height = receipt_target_height;
+        const CBlockIndex* target{
+            carrier.GetAncestor(receipt_target_height)};
         if (target == nullptr) return std::nullopt;
         receipt.chainlock_target_hash = target->GetBlockHash();
         receipt.chainlock_logical_id = receipt_logical_id;
         receipt.accepted_cursor = current.cursor;
     }
-    if (!ValidateBTCCReceiptOnBranch(btcc_schedule, carrier, receipt)) {
+    if (!ValidateBTCCReceiptOnBranch(
+            chainlock_schedule, btcc_schedule,
+            activation_predecessor_height, carrier, previous, receipt)) {
         return std::nullopt;
     }
     const auto applied{ApplyBTCCReceiptState(
-        genesis_hash, chainlock_schedule, btcc_schedule, carrier.nHeight,
+        genesis_hash, chainlock_schedule, btcc_schedule,
+        activation_predecessor_height, carrier.nHeight,
         carrier.GetBlockHash(), previous, receipt)};
     return applied && *applied == current
                ? std::optional<BTCCReceipt>{receipt}

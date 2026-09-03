@@ -306,16 +306,28 @@ bool ChainLockFinalityStoreConfig::IsValid() const noexcept
          btcc_receipt_assumption_anchor.receipt_state == BTCCReceiptState{})};
     const auto& anchor_state{
         btcc_receipt_assumption_anchor.receipt_state};
-    const auto anchor_source{
-        BTCCSourceHeightForNEVMInjection(
-            btcc_schedule, anchor_state.latest_receipt_carrier_height)};
+    const auto anchor_source{BTCCSourceHeightForNEVMInjection(
+        btcc_schedule, anchor_state.latest_receipt_carrier_height)};
+    const auto initial_target{NextEligibleChainLockTargetHeight(
+        chainlock_schedule, activation_predecessor_height)};
+    const auto initial_signing_height{initial_target
+        ? SigningHeightForTarget(chainlock_schedule, *initial_target)
+        : std::optional<int32_t>{}};
+    const bool valid_receipt_position{
+        (anchor_source &&
+         *anchor_source == anchor_state.latest_chainlock_target_height) ||
+        (initial_target && initial_signing_height &&
+         IsBTCCCandidateHeight(btcc_schedule, *initial_target) &&
+         anchor_state.latest_chainlock_target_height == *initial_target &&
+         static_cast<int64_t>(*initial_signing_height) +
+                 PQ_BTCC_RECEIPT_PROPAGATION_BUFFER <=
+             anchor_state.latest_receipt_carrier_height)};
     const bool valid_receipt_anchor_state{
         btcc_receipt_assumption_anchor.IsDisabled() ||
         anchor_state == BTCCReceiptState{} ||
-        (anchor_source &&
+        (valid_receipt_position &&
          IsBTCCCandidateHeight(
              btcc_schedule, anchor_state.cursor.sys_height) &&
-         *anchor_source == anchor_state.latest_chainlock_target_height &&
          IsEligibleChainLockTarget(
              chainlock_schedule,
              anchor_state.latest_chainlock_target_height))};

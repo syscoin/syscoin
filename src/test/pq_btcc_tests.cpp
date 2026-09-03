@@ -304,7 +304,11 @@ BOOST_AUTO_TEST_CASE(receipt_wire_format_and_null_form_are_canonical)
 
 BOOST_AUTO_TEST_CASE(receipt_target_and_cursor_are_bound_to_carrier_branch)
 {
+    const auto chainlock_schedule{MakeChainLockScheduleConfig(0)};
+    BOOST_REQUIRE(chainlock_schedule);
     const BTCCScheduleConfig config{.candidate_origin = 0};
+    constexpr int32_t ACTIVATION_PREDECESSOR_HEIGHT{869};
+    const BTCCReceiptState previous;
     IndexChain chain{881};
     chain.At(870).btcpPrevCommitment = NonNullHash(22001);
 
@@ -314,20 +318,27 @@ BOOST_AUTO_TEST_CASE(receipt_target_and_cursor_are_bound_to_carrier_branch)
     receipt.chainlock_logical_id = NonNullHash(22002);
     receipt.accepted_cursor = Cursor(chain, 870);
     BOOST_REQUIRE(receipt.IsStructurallyValid());
-    BOOST_CHECK(ValidateBTCCReceiptOnBranch(config, chain.At(880), receipt));
+    BOOST_CHECK(ValidateBTCCReceiptOnBranch(
+        *chainlock_schedule, config, ACTIVATION_PREDECESSOR_HEIGHT,
+        chain.At(880), previous, receipt));
 
     auto wrong_target{receipt};
     wrong_target.chainlock_target_hash = NonNullHash(22003);
     BOOST_CHECK(!ValidateBTCCReceiptOnBranch(
-        config, chain.At(880), wrong_target));
+        *chainlock_schedule, config, ACTIVATION_PREDECESSOR_HEIGHT,
+        chain.At(880), previous, wrong_target));
 
     auto wrong_sys{receipt};
     wrong_sys.accepted_cursor.sys_hash = NonNullHash(22004);
-    BOOST_CHECK(!ValidateBTCCReceiptOnBranch(config, chain.At(880), wrong_sys));
+    BOOST_CHECK(!ValidateBTCCReceiptOnBranch(
+        *chainlock_schedule, config, ACTIVATION_PREDECESSOR_HEIGHT,
+        chain.At(880), previous, wrong_sys));
 
     auto wrong_btc{receipt};
     wrong_btc.accepted_cursor.btc_hash = NonNullHash(22005);
-    BOOST_CHECK(!ValidateBTCCReceiptOnBranch(config, chain.At(880), wrong_btc));
+    BOOST_CHECK(!ValidateBTCCReceiptOnBranch(
+        *chainlock_schedule, config, ACTIVATION_PREDECESSOR_HEIGHT,
+        chain.At(880), previous, wrong_btc));
 
     auto unscheduled{receipt};
     unscheduled.accepted_cursor.sys_height = 871;
@@ -335,7 +346,8 @@ BOOST_AUTO_TEST_CASE(receipt_target_and_cursor_are_bound_to_carrier_branch)
     unscheduled.accepted_cursor.btc_hash = NonNullHash(22006);
     chain.At(871).btcpPrevCommitment = unscheduled.accepted_cursor.btc_hash;
     BOOST_CHECK(!ValidateBTCCReceiptOnBranch(
-        config, chain.At(880), unscheduled));
+        *chainlock_schedule, config, ACTIVATION_PREDECESSOR_HEIGHT,
+        chain.At(880), previous, unscheduled));
 
     auto stale_slot{receipt};
     stale_slot.chainlock_target_height = 860;
@@ -343,7 +355,8 @@ BOOST_AUTO_TEST_CASE(receipt_target_and_cursor_are_bound_to_carrier_branch)
     stale_slot.accepted_cursor = Cursor(chain, 860);
     chain.At(860).btcpPrevCommitment = stale_slot.accepted_cursor.btc_hash;
     BOOST_CHECK(!ValidateBTCCReceiptOnBranch(
-        config, chain.At(880), stale_slot));
+        *chainlock_schedule, config, ACTIVATION_PREDECESSOR_HEIGHT,
+        chain.At(880), previous, stale_slot));
 }
 
 BOOST_AUTO_TEST_CASE(receipt_state_is_monotonic_and_fixed_cadence)
@@ -352,6 +365,7 @@ BOOST_AUTO_TEST_CASE(receipt_state_is_monotonic_and_fixed_cadence)
     BOOST_REQUIRE(chainlock_schedule);
     const BTCCScheduleConfig btcc_schedule{.candidate_origin = 0};
     BOOST_REQUIRE(btcc_schedule.IsValid());
+    constexpr int32_t ACTIVATION_PREDECESSOR_HEIGHT{869};
 
     const uint256 genesis{NonNullHash(21000)};
     const BTCCReceiptState empty;
@@ -374,10 +388,12 @@ BOOST_AUTO_TEST_CASE(receipt_state_is_monotonic_and_fixed_cadence)
     // H+5 is the signing height. The fixed carrier is H+10 so certificates
     // have a deterministic five-block propagation window.
     BOOST_CHECK(!ApplyBTCCReceiptState(
-        genesis, *chainlock_schedule, btcc_schedule, 870,
+        genesis, *chainlock_schedule, btcc_schedule,
+        ACTIVATION_PREDECESSOR_HEIGHT, 870,
         NonNullHash(21005), empty, first));
     const auto accepted{ApplyBTCCReceiptState(
-        genesis, *chainlock_schedule, btcc_schedule, 880,
+        genesis, *chainlock_schedule, btcc_schedule,
+        ACTIVATION_PREDECESSOR_HEIGHT, 880,
         NonNullHash(21006), empty, first)};
     BOOST_REQUIRE(accepted);
     BOOST_CHECK(accepted->cursor == first.accepted_cursor);
@@ -388,7 +404,8 @@ BOOST_AUTO_TEST_CASE(receipt_state_is_monotonic_and_fixed_cadence)
     BTCCReceipt null_receipt;
     BOOST_CHECK(!BTCCReceiptAdvancesCursor(*accepted, null_receipt));
     const auto kept{ApplyBTCCReceiptState(
-        genesis, *chainlock_schedule, btcc_schedule, 890,
+        genesis, *chainlock_schedule, btcc_schedule,
+        ACTIVATION_PREDECESSOR_HEIGHT, 890,
         NonNullHash(21007), *accepted, null_receipt)};
     BOOST_REQUIRE(kept);
     BOOST_CHECK(*kept == *accepted);
@@ -404,7 +421,8 @@ BOOST_AUTO_TEST_CASE(receipt_state_is_monotonic_and_fixed_cadence)
     BOOST_CHECK(!IsExactBTCCReceiptTransition(
         *accepted, keep_receipt, BTCCAdvance::ADVANCE));
     const auto receipted_keep{ApplyBTCCReceiptState(
-        genesis, *chainlock_schedule, btcc_schedule, 890,
+        genesis, *chainlock_schedule, btcc_schedule,
+        ACTIVATION_PREDECESSOR_HEIGHT, 890,
         NonNullHash(21017), *accepted, keep_receipt)};
     BOOST_REQUIRE(receipted_keep);
     BOOST_CHECK(receipted_keep->cursor == accepted->cursor);
@@ -415,14 +433,13 @@ BOOST_AUTO_TEST_CASE(receipt_state_is_monotonic_and_fixed_cadence)
     auto wrong_keep{keep_receipt};
     wrong_keep.accepted_cursor.sys_hash = NonNullHash(21018);
     BOOST_CHECK(!ApplyBTCCReceiptState(
-        genesis, *chainlock_schedule, btcc_schedule, 890,
+        genesis, *chainlock_schedule, btcc_schedule,
+        ACTIVATION_PREDECESSOR_HEIGHT, 890,
         NonNullHash(21019), *accepted, wrong_keep));
 
     BOOST_CHECK(!ApplyBTCCReceiptState(
-        genesis, *chainlock_schedule, btcc_schedule, 890,
-        NonNullHash(21008), empty, first));
-    BOOST_CHECK(!ApplyBTCCReceiptState(
-        genesis, *chainlock_schedule, btcc_schedule, 900,
+        genesis, *chainlock_schedule, btcc_schedule,
+        ACTIVATION_PREDECESSOR_HEIGHT, 900,
         NonNullHash(21009), *accepted, first));
 
     BTCCReceipt second;
@@ -437,11 +454,110 @@ BOOST_AUTO_TEST_CASE(receipt_state_is_monotonic_and_fixed_cadence)
     BOOST_CHECK(!IsExactBTCCReceiptTransition(
         *receipted_keep, second, BTCCAdvance::KEEP));
     const auto advanced{ApplyBTCCReceiptState(
-        genesis, *chainlock_schedule, btcc_schedule, 900,
+        genesis, *chainlock_schedule, btcc_schedule,
+        ACTIVATION_PREDECESSOR_HEIGHT, 900,
         NonNullHash(21014), *receipted_keep, second)};
     BOOST_REQUIRE(advanced);
     BOOST_CHECK(advanced->cursor == second.accepted_cursor);
     BOOST_CHECK(advanced->cumulative_hash != accepted->cumulative_hash);
+}
+
+BOOST_AUTO_TEST_CASE(initial_receipt_retries_after_null_fixed_carrier)
+{
+    const auto chainlock_schedule{MakeChainLockScheduleConfig(0)};
+    BOOST_REQUIRE(chainlock_schedule);
+    const BTCCScheduleConfig btcc_schedule{.candidate_origin = 865};
+    BOOST_REQUIRE(btcc_schedule.IsValid());
+    constexpr int32_t ACTIVATION_PREDECESSOR_HEIGHT{864};
+    const auto initial_target{NextEligibleChainLockTargetHeight(
+        *chainlock_schedule, ACTIVATION_PREDECESSOR_HEIGHT)};
+    BOOST_REQUIRE(initial_target);
+    const auto signing_height{
+        SigningHeightForTarget(*chainlock_schedule, *initial_target)};
+    BOOST_REQUIRE(signing_height);
+    const int32_t fixed_carrier{
+        *signing_height +
+        static_cast<int32_t>(PQ_BTCC_RECEIPT_PROPAGATION_BUFFER)};
+    const int32_t retry_carrier{
+        fixed_carrier + static_cast<int32_t>(btcc_schedule.candidate_period)};
+
+    const uint256 genesis{NonNullHash(22500)};
+    IndexChain chain{896};
+    chain.At(*initial_target).btcpPrevCommitment = NonNullHash(22501);
+
+    const BTCCReceiptState empty;
+    const BTCCReceipt null_receipt;
+    const auto after_null{ApplyBTCCReceiptState(
+        genesis, *chainlock_schedule, btcc_schedule,
+        ACTIVATION_PREDECESSOR_HEIGHT, fixed_carrier,
+        chain.At(fixed_carrier).GetBlockHash(), empty, null_receipt)};
+    BOOST_REQUIRE(after_null);
+    BOOST_CHECK(*after_null == empty);
+
+    BTCCReceipt initial;
+    initial.chainlock_target_height = *initial_target;
+    initial.chainlock_target_hash = chain.At(*initial_target).GetBlockHash();
+    initial.chainlock_logical_id = NonNullHash(22502);
+    initial.accepted_cursor = Cursor(chain, *initial_target);
+    BOOST_REQUIRE(initial.IsStructurallyValid());
+    BOOST_CHECK(ValidateBTCCReceiptOnBranch(
+        *chainlock_schedule, btcc_schedule,
+        ACTIVATION_PREDECESSOR_HEIGHT, chain.At(retry_carrier),
+        *after_null, initial));
+
+    const auto receipted{ApplyBTCCReceiptState(
+        genesis, *chainlock_schedule, btcc_schedule,
+        ACTIVATION_PREDECESSOR_HEIGHT, retry_carrier,
+        chain.At(retry_carrier).GetBlockHash(), *after_null, initial)};
+    BOOST_REQUIRE(receipted);
+    BOOST_CHECK_EQUAL(receipted->latest_chainlock_target_height,
+                      *initial_target);
+    BOOST_CHECK_EQUAL(receipted->latest_receipt_carrier_height,
+                      retry_carrier);
+
+    const auto reconstructed{ReconstructBTCCReceipt(
+        genesis, *chainlock_schedule, btcc_schedule,
+        ACTIVATION_PREDECESSOR_HEIGHT, chain.At(retry_carrier),
+        *after_null, *receipted, initial.chainlock_logical_id)};
+    BOOST_REQUIRE(reconstructed);
+    BOOST_CHECK(*reconstructed == initial);
+
+    const int32_t non_initial_target{
+        *initial_target + static_cast<int32_t>(btcc_schedule.candidate_period)};
+    chain.At(non_initial_target).btcpPrevCommitment = NonNullHash(22503);
+    BTCCReceipt non_initial{initial};
+    non_initial.chainlock_target_height = non_initial_target;
+    non_initial.chainlock_target_hash =
+        chain.At(non_initial_target).GetBlockHash();
+    non_initial.chainlock_logical_id = NonNullHash(22504);
+    non_initial.accepted_cursor = Cursor(chain, non_initial_target);
+    BOOST_REQUIRE(non_initial.IsStructurallyValid());
+    BOOST_CHECK(!IsBTCCReceiptTargetForCarrier(
+        *chainlock_schedule, btcc_schedule,
+        ACTIVATION_PREDECESSOR_HEIGHT, empty, retry_carrier,
+        non_initial_target));
+    BOOST_CHECK(!ValidateBTCCReceiptOnBranch(
+        *chainlock_schedule, btcc_schedule,
+        ACTIVATION_PREDECESSOR_HEIGHT, chain.At(retry_carrier),
+        empty, non_initial));
+    BOOST_CHECK(!ApplyBTCCReceiptState(
+        genesis, *chainlock_schedule, btcc_schedule,
+        ACTIVATION_PREDECESSOR_HEIGHT, retry_carrier,
+        chain.At(retry_carrier).GetBlockHash(), empty, non_initial));
+
+    BOOST_CHECK(!IsBTCCReceiptTargetForCarrier(
+        *chainlock_schedule, btcc_schedule,
+        ACTIVATION_PREDECESSOR_HEIGHT, *receipted,
+        retry_carrier + static_cast<int32_t>(btcc_schedule.candidate_period),
+        *initial_target));
+    BOOST_CHECK(!ApplyBTCCReceiptState(
+        genesis, *chainlock_schedule, btcc_schedule,
+        ACTIVATION_PREDECESSOR_HEIGHT,
+        retry_carrier + static_cast<int32_t>(btcc_schedule.candidate_period),
+        chain.At(retry_carrier +
+                 static_cast<int32_t>(btcc_schedule.candidate_period))
+            .GetBlockHash(),
+        *receipted, initial));
 }
 
 BOOST_AUTO_TEST_CASE(indexed_receipt_reconstruction_is_exact_and_prune_safe)
@@ -450,6 +566,7 @@ BOOST_AUTO_TEST_CASE(indexed_receipt_reconstruction_is_exact_and_prune_safe)
     BOOST_REQUIRE(chainlock_schedule);
     const BTCCScheduleConfig btcc_schedule{.candidate_origin = 0};
     BOOST_REQUIRE(btcc_schedule.IsValid());
+    constexpr int32_t ACTIVATION_PREDECESSOR_HEIGHT{869};
 
     const uint256 genesis{NonNullHash(23000)};
     IndexChain chain{891};
@@ -462,28 +579,33 @@ BOOST_AUTO_TEST_CASE(indexed_receipt_reconstruction_is_exact_and_prune_safe)
     receipt.accepted_cursor = Cursor(chain, 870);
     const BTCCReceiptState previous;
     const auto current{ApplyBTCCReceiptState(
-        genesis, *chainlock_schedule, btcc_schedule, 880,
+        genesis, *chainlock_schedule, btcc_schedule,
+        ACTIVATION_PREDECESSOR_HEIGHT, 880,
         chain.At(880).GetBlockHash(), previous, receipt)};
     BOOST_REQUIRE(current);
 
     const auto reconstructed{ReconstructBTCCReceipt(
-        genesis, *chainlock_schedule, btcc_schedule, chain.At(880),
-        previous, *current, receipt.chainlock_logical_id)};
+        genesis, *chainlock_schedule, btcc_schedule,
+        ACTIVATION_PREDECESSOR_HEIGHT, chain.At(880), previous,
+        *current, receipt.chainlock_logical_id)};
     BOOST_REQUIRE(reconstructed);
     BOOST_CHECK(*reconstructed == receipt);
 
     BOOST_CHECK(!ReconstructBTCCReceipt(
-        genesis, *chainlock_schedule, btcc_schedule, chain.At(880),
-        previous, *current, NonNullHash(23003)));
+        genesis, *chainlock_schedule, btcc_schedule,
+        ACTIVATION_PREDECESSOR_HEIGHT, chain.At(880), previous,
+        *current, NonNullHash(23003)));
     auto wrong_state{*current};
     wrong_state.cumulative_hash = NonNullHash(23004);
     BOOST_CHECK(!ReconstructBTCCReceipt(
-        genesis, *chainlock_schedule, btcc_schedule, chain.At(880),
-        previous, wrong_state, receipt.chainlock_logical_id));
+        genesis, *chainlock_schedule, btcc_schedule,
+        ACTIVATION_PREDECESSOR_HEIGHT, chain.At(880), previous,
+        wrong_state, receipt.chainlock_logical_id));
 
     const auto null_receipt{ReconstructBTCCReceipt(
-        genesis, *chainlock_schedule, btcc_schedule, chain.At(890),
-        *current, *current, uint256{})};
+        genesis, *chainlock_schedule, btcc_schedule,
+        ACTIVATION_PREDECESSOR_HEIGHT, chain.At(890), *current,
+        *current, uint256{})};
     BOOST_REQUIRE(null_receipt);
     BOOST_CHECK(null_receipt->IsNull());
 
@@ -493,12 +615,14 @@ BOOST_AUTO_TEST_CASE(indexed_receipt_reconstruction_is_exact_and_prune_safe)
     keep.chainlock_logical_id = NonNullHash(23005);
     keep.accepted_cursor = current->cursor;
     const auto kept_state{ApplyBTCCReceiptState(
-        genesis, *chainlock_schedule, btcc_schedule, 890,
+        genesis, *chainlock_schedule, btcc_schedule,
+        ACTIVATION_PREDECESSOR_HEIGHT, 890,
         chain.At(890).GetBlockHash(), *current, keep)};
     BOOST_REQUIRE(kept_state);
     const auto reconstructed_keep{ReconstructBTCCReceipt(
-        genesis, *chainlock_schedule, btcc_schedule, chain.At(890),
-        *current, *kept_state, keep.chainlock_logical_id)};
+        genesis, *chainlock_schedule, btcc_schedule,
+        ACTIVATION_PREDECESSOR_HEIGHT, chain.At(890), *current,
+        *kept_state, keep.chainlock_logical_id)};
     BOOST_REQUIRE(reconstructed_keep);
     BOOST_CHECK(*reconstructed_keep == keep);
 }

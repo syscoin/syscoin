@@ -1918,7 +1918,9 @@ BOOST_AUTO_TEST_CASE(
     live_signing_frontier_resumes_at_exact_missing_btcc_certificate)
 {
     using Access = llmq::test::CChainLocksHandlerTestAccess;
-    const auto config{LiveSigningFrontierConfig()};
+    auto config{LiveSigningFrontierConfig()};
+    config.activation_predecessor_height = 869;
+    BOOST_REQUIRE(config.IsValid());
     const uint256 genesis{NonNullHash(202'000)};
     LiveSigningIndexChain chain{891};
     const auto floor{chain.Predecessor(864)};
@@ -1934,7 +1936,8 @@ BOOST_AUTO_TEST_CASE(
         source.nHeight, source.GetBlockHash(), source.btcpPrevCommitment};
     const auto applied{llmq::pq::ApplyBTCCReceiptState(
         genesis, config.chainlock_schedule, config.btcc_schedule,
-        carrier.nHeight, carrier.GetBlockHash(), {}, receipt)};
+        config.activation_predecessor_height, carrier.nHeight,
+        carrier.GetBlockHash(), {}, receipt)};
     BOOST_REQUIRE(applied);
     chain.SetReceiptStateFrom(carrier.nHeight, *applied);
     carrier.pqBTCCReceiptLogicalId = receipt.chainlock_logical_id;
@@ -3314,7 +3317,8 @@ BOOST_AUTO_TEST_CASE(
     receipt.accepted_cursor = advance.statement.accepted_btcc_cursor;
     const auto applied{llmq::pq::ApplyBTCCReceiptState(
         genesis, config.chainlock_schedule, config.btcc_schedule,
-        carrier_target.nHeight, carrier_target.GetBlockHash(), {}, receipt)};
+        /*activation_predecessor_height=*/869, carrier_target.nHeight,
+        carrier_target.GetBlockHash(), {}, receipt)};
     BOOST_REQUIRE(applied);
     carrier_target.pqBTCCReceiptCursorHeight = applied->cursor.sys_height;
     carrier_target.pqBTCCReceiptCursorSysHash = applied->cursor.sys_hash;
@@ -4778,6 +4782,9 @@ BOOST_FIXTURE_TEST_CASE(
     base.statement.previous_btcc_cursor = {};
     base.statement.accepted_btcc_cursor = base_cursor;
     base.statement.btcc_advance = BTCCAdvance::ADVANCE;
+    base.statement.roster_transition =
+        RosterAuthorizationTransitionKind::INITIALIZE;
+    base.statement.roster_authorization_base = {};
     BOOST_REQUIRE(base.IsStructurallyValid());
 
     BTCCReceipt base_receipt;
@@ -4788,7 +4795,8 @@ BOOST_FIXTURE_TEST_CASE(
     BOOST_REQUIRE(base_receipt.IsStructurallyValid());
     const auto receipted_state{ApplyBTCCReceiptState(
         genesis, config->chainlock_schedule, config->btcc_schedule,
-        CANDIDATE_HEIGHT, chain[CANDIDATE_HEIGHT]->GetBlockHash(),
+        config->activation_predecessor_height, CANDIDATE_HEIGHT,
+        chain[CANDIDATE_HEIGHT]->GetBlockHash(),
         BTCCReceiptState{}, base_receipt)};
     BOOST_REQUIRE(receipted_state);
     for (int32_t height{CANDIDATE_HEIGHT}; height <= TIP_HEIGHT; ++height) {
@@ -4836,6 +4844,38 @@ BOOST_FIXTURE_TEST_CASE(
     auto* store{Access::Store(*handler)};
     BOOST_REQUIRE(store);
     install(*store, base);
+
+    constexpr int32_t LATE_INITIAL_CARRIER{
+        BASE_HEIGHT + 2 * static_cast<int32_t>(PQ_BTCC_CANDIDATE_PERIOD)};
+    CBlockIndex& late_parent{*chain[LATE_INITIAL_CARRIER - 1]};
+    const auto saved_cursor_height{late_parent.pqBTCCReceiptCursorHeight};
+    const auto saved_cursor_sys_hash{late_parent.pqBTCCReceiptCursorSysHash};
+    const auto saved_cursor_btc_hash{late_parent.pqBTCCReceiptCursorBTCHash};
+    const auto saved_state_hash{late_parent.pqBTCCReceiptStateHash};
+    const auto saved_target_height{
+        late_parent.pqBTCCReceiptLatestTargetHeight};
+    const auto saved_carrier_height{
+        late_parent.pqBTCCReceiptLatestCarrierHeight};
+    late_parent.pqBTCCReceiptCursorHeight = -1;
+    late_parent.pqBTCCReceiptCursorSysHash.SetNull();
+    late_parent.pqBTCCReceiptCursorBTCHash.SetNull();
+    late_parent.pqBTCCReceiptStateHash.SetNull();
+    late_parent.pqBTCCReceiptLatestTargetHeight = -1;
+    late_parent.pqBTCCReceiptLatestCarrierHeight = -1;
+
+    const auto late_initial_receipt{Access::BTCCReceiptForCarrier(
+        *handler, LATE_INITIAL_CARRIER, late_parent)};
+    BOOST_REQUIRE(late_initial_receipt == base_receipt);
+    BOOST_CHECK(Access::IsVerifiedBTCCReceipt(
+        *handler, late_initial_receipt, *chain[LATE_INITIAL_CARRIER]));
+
+    late_parent.pqBTCCReceiptCursorHeight = saved_cursor_height;
+    late_parent.pqBTCCReceiptCursorSysHash = saved_cursor_sys_hash;
+    late_parent.pqBTCCReceiptCursorBTCHash = saved_cursor_btc_hash;
+    late_parent.pqBTCCReceiptStateHash = saved_state_hash;
+    late_parent.pqBTCCReceiptLatestTargetHeight = saved_target_height;
+    late_parent.pqBTCCReceiptLatestCarrierHeight = saved_carrier_height;
+
     install(*store, current);
     BOOST_REQUIRE(store->GetVerifiedRosterAuthorizationBase(
         RosterAuthorizationBaseIdentity{
@@ -4976,7 +5016,8 @@ BOOST_FIXTURE_TEST_CASE(
     recovery_receipt.accepted_cursor = base_cursor;
     const auto recovery_receipted_state{ApplyBTCCReceiptState(
         genesis, config->chainlock_schedule, config->btcc_schedule,
-        RECOVERY_CARRIER, chain[RECOVERY_CARRIER]->GetBlockHash(),
+        config->activation_predecessor_height, RECOVERY_CARRIER,
+        chain[RECOVERY_CARRIER]->GetBlockHash(),
         *receipted_state, recovery_receipt)};
     BOOST_REQUIRE(recovery_receipted_state);
     chain[RECOVERY_CARRIER]->pqBTCCReceiptCursorHeight =

@@ -566,6 +566,25 @@ BTCCPresealMarker MakeKeepPresealMarker(uint64_t revision,
         receipt, revision};
 }
 
+BTCCPresealMarker MakeLateInitialPresealMarker(uint64_t revision,
+                                               uint64_t salt)
+{
+    constexpr int32_t INITIAL_TARGET{865};
+    constexpr int32_t LATE_CARRIER{885};
+    BTCCReceipt receipt;
+    receipt.chainlock_target_height = INITIAL_TARGET;
+    receipt.chainlock_target_hash = NonNullHash(565'000 + salt);
+    receipt.chainlock_logical_id = NonNullHash(566'000 + salt);
+    receipt.accepted_cursor = BTCCursor{
+        INITIAL_TARGET, receipt.chainlock_target_hash,
+        NonNullHash(567'000 + salt)};
+    BOOST_REQUIRE(receipt.IsStructurallyValid());
+    return BTCCPresealMarker{
+        LATE_CARRIER, NonNullHash(568'000 + salt), BTCCReceiptState{},
+        LATE_CARRIER, NonNullHash(568'000 + salt), BTCCReceiptState{},
+        receipt, revision};
+}
+
 BTCCPresealMarker MakeAdvanceThenKeepPresealMarker(uint64_t revision,
                                                    uint64_t salt)
 {
@@ -2460,7 +2479,7 @@ BOOST_AUTO_TEST_CASE(active_and_prospective_preseals_survive_crash_cut)
     const BTCCPresealMarker active_b_revision_2{
         MakePresealMarker(875, 875, 2, 880)};
     const BTCCPresealMarker prospective_a_revision_2{
-        MakePresealMarker(885, 885, 2, 890)};
+        MakePresealMarker(875, 885, 2, 890)};
     const BTCCPresealState both{
         active_b_revision_2, prospective_a_revision_2};
 
@@ -2480,7 +2499,7 @@ BOOST_AUTO_TEST_CASE(active_and_prospective_preseals_survive_crash_cut)
         BOOST_CHECK(persistence.LoadBTCCPresealState() == both);
 
         const BTCCPresealMarker prospective_a_revision_3{
-            MakePresealMarker(885, 885, 3, 890)};
+            MakePresealMarker(875, 885, 3, 890)};
         const BTCCPresealState after_b_replay{
             std::nullopt, prospective_a_revision_3};
         BOOST_REQUIRE(
@@ -2490,7 +2509,7 @@ BOOST_AUTO_TEST_CASE(active_and_prospective_preseals_survive_crash_cut)
         PQChainLockPersistence persistence{
             DiskParams(path), genesis, config};
         const BTCCPresealState expected{
-            std::nullopt, MakePresealMarker(885, 885, 3, 890)};
+            std::nullopt, MakePresealMarker(875, 885, 3, 890)};
         BOOST_CHECK(persistence.LoadBTCCPresealState() == expected);
     }
 }
@@ -2522,6 +2541,50 @@ BOOST_AUTO_TEST_CASE(exact_keep_preseal_survives_restart)
             NonNullHash(570'000);
         BOOST_CHECK(!persistence.PersistBTCCPresealState(
             BTCCPresealState{cursor_substitution, std::nullopt}));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(late_initial_preseal_survives_restart)
+{
+    const fs::path path{m_path_root / "pqcl_preseal_late_initial"};
+    const uint256 genesis{NonNullHash(31)};
+    auto config{MakeConfig()};
+    auto late_anchor_config{config};
+    late_anchor_config.btcc_receipt_assumption_anchor =
+        BTCCReceiptAssumptionAnchor{
+            885, NonNullHash(885),
+            BTCCReceiptState{
+                BTCCursor{865, NonNullHash(570'000),
+                           NonNullHash(570'001)},
+                NonNullHash(570'002), 865, 885}};
+    BOOST_CHECK(late_anchor_config.IsValid());
+
+    config.btcc_receipt_assumption_anchor = BTCCReceiptAssumptionAnchor{
+        860, NonNullHash(860), BTCCReceiptState{}};
+    BOOST_REQUIRE(config.IsValid());
+    const BTCCPresealMarker marker{MakeLateInitialPresealMarker(1, 31)};
+    const BTCCPresealState expected{marker, std::nullopt};
+
+    {
+        PQChainLockPersistence persistence{
+            DiskParams(path), genesis, config};
+        BOOST_REQUIRE(persistence.PersistBTCCPresealState(expected));
+    }
+    {
+        PQChainLockPersistence persistence{
+            DiskParams(path), genesis, config};
+        BOOST_CHECK(persistence.LoadBTCCPresealState() == expected);
+
+        auto non_initial_first{marker};
+        non_initial_first.revision = 2;
+        non_initial_first.terminal_receipt.chainlock_target_height = 875;
+        non_initial_first.terminal_receipt.chainlock_target_hash =
+            NonNullHash(569'000);
+        non_initial_first.terminal_receipt.accepted_cursor = BTCCursor{
+            875, non_initial_first.terminal_receipt.chainlock_target_hash,
+            NonNullHash(569'001)};
+        BOOST_CHECK(!persistence.PersistBTCCPresealState(
+            BTCCPresealState{non_initial_first, std::nullopt}));
     }
 }
 
@@ -2595,7 +2658,7 @@ BOOST_AUTO_TEST_CASE(preseal_marker_revisions_and_dependencies_fail_closed)
         BTCCPresealState{corrupt_receipt, std::nullopt}));
 
     BOOST_REQUIRE(persistence.ClearBTCCPresealState());
-    auto reused_revision{MakePresealMarker(895, 895, 8, 3)};
+    auto reused_revision{MakePresealMarker(875, 895, 8, 3)};
     BOOST_CHECK(!persistence.PersistBTCCPresealState(
         BTCCPresealState{reused_revision, std::nullopt}));
     reused_revision.revision = 9;

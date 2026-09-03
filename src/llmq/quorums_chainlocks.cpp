@@ -413,6 +413,7 @@ struct PaymentAuditSeedReceiptContext {
 PaymentAuditSeedReceiptContext GetPaymentAuditSeedReceiptContext(
     const uint256& genesis_hash,
     const pq::PaymentAuditScheduleConfig& config,
+    int32_t activation_predecessor_height,
     const pq::PaymentAuditEpochSchedule& schedule,
     const CBlockIndex& seal)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main)
@@ -451,8 +452,9 @@ PaymentAuditSeedReceiptContext GetPaymentAuditSeedReceiptContext(
         return {PaymentAuditContextStatus::LOCAL_ERROR, std::nullopt};
     }
     const auto receipt{pq::ReconstructBTCCReceipt(
-        genesis_hash, config.chainlock, config.btcc, *carrier, *previous,
-        *current, carrier->pqBTCCReceiptLogicalId)};
+        genesis_hash, config.chainlock, config.btcc,
+        activation_predecessor_height, *carrier, *previous, *current,
+        carrier->pqBTCCReceiptLogicalId)};
     if (!receipt) {
         return {PaymentAuditContextStatus::LOCAL_ERROR, std::nullopt};
     }
@@ -461,9 +463,11 @@ PaymentAuditSeedReceiptContext GetPaymentAuditSeedReceiptContext(
     }
     const auto seed_point{
         pq::PaymentAuditSeedPointFromBTCCReceipt(*receipt)};
-    if (!seed_point ||
-        seed_point->target_height != schedule.anchor_height) {
+    if (!seed_point) {
         return {PaymentAuditContextStatus::LOCAL_ERROR, std::nullopt};
+    }
+    if (seed_point->target_height != schedule.anchor_height) {
+        return {PaymentAuditContextStatus::READY, std::nullopt};
     }
     return {PaymentAuditContextStatus::READY, seed_point};
 }
@@ -1823,7 +1827,8 @@ BuildCandidateBoundNullCarrierReconciliation(
     }
     const auto receipt{pq::ReconstructBTCCReceipt(
         genesis_hash, config.chainlock_schedule, config.btcc_schedule,
-        *carrier, *previous_state, *current_state,
+        config.activation_predecessor_height, *carrier, *previous_state,
+        *current_state,
         carrier->pqBTCCReceiptLogicalId)};
     if (!receipt || !receipt->IsNull()) return std::nullopt;
 
@@ -4410,7 +4415,8 @@ CChainLocksHandler::BuildStoredVerifiedPaymentAuditSubject(
     const auto indexed_btcc{IndexedBTCCReceiptState(*seal)};
     const auto indexed_audit{IndexedPaymentAuditReceiptState(*seal)};
     const auto seed_context{GetPaymentAuditSeedReceiptContext(
-        m_genesis_hash, schedule_config, *epoch_schedule, *seal)};
+        m_genesis_hash, schedule_config,
+        m_config->activation_predecessor_height, *epoch_schedule, *seal)};
     if (!indexed_btcc || !indexed_audit) {
         return PaymentAuditReceiptCertificateStatus::LOCAL_ERROR;
     }
@@ -4627,7 +4633,8 @@ CChainLocksHandler::RecheckVerifiedPaymentAuditReceiptTransition(
     const auto indexed_btcc{IndexedBTCCReceiptState(*seal)};
     const auto indexed_audit{IndexedPaymentAuditReceiptState(*seal)};
     const auto seed_context{GetPaymentAuditSeedReceiptContext(
-        m_genesis_hash, schedule_config, *epoch_schedule, *seal)};
+        m_genesis_hash, schedule_config,
+        m_config->activation_predecessor_height, *epoch_schedule, *seal)};
     if (!indexed_btcc || !indexed_audit) {
         return PaymentAuditReceiptCertificateStatus::LOCAL_ERROR;
     }
@@ -4927,7 +4934,21 @@ pq::BTCCReceipt CChainLocksHandler::GetBTCCReceiptForCarrier(
     const auto source_height{pq::BTCCSourceHeightForNEVMInjection(
         m_config->btcc_schedule, carrier_height)};
     if (!source_height) return null_receipt;
-    const auto chainlock{m_store->GetByHeight(*source_height)};
+    const bool needs_initial_receipt{*previous_state == pq::BTCCReceiptState{}};
+    const auto initial_target{needs_initial_receipt
+        ? pq::NextEligibleChainLockTargetHeight(
+              m_config->chainlock_schedule,
+              m_config->activation_predecessor_height)
+        : std::optional<int32_t>{}};
+    const int32_t receipt_target_height{
+        initial_target ? *initial_target : *source_height};
+    if (!pq::IsBTCCReceiptTargetForCarrier(
+            m_config->chainlock_schedule, m_config->btcc_schedule,
+            m_config->activation_predecessor_height, *previous_state,
+            carrier_height, receipt_target_height)) {
+        return null_receipt;
+    }
+    const auto chainlock{m_store->GetByHeight(receipt_target_height)};
     if (!chainlock) return null_receipt;
 
     const auto& statement{chainlock->statement};
@@ -4936,22 +4957,18 @@ pq::BTCCReceipt CChainLocksHandler::GetBTCCReceiptForCarrier(
         statement.accepted_btcc_cursor == previous_state->cursor};
     const bool advance{
         statement.btcc_advance == pq::BTCCAdvance::ADVANCE &&
-        statement.accepted_btcc_cursor.sys_height == *source_height &&
+        statement.accepted_btcc_cursor.sys_height ==
+            receipt_target_height &&
         !statement.accepted_btcc_cursor.IsNull() &&
         (previous_state->cursor.IsNull() ||
          statement.accepted_btcc_cursor.sys_height >
              previous_state->cursor.sys_height)};
-    if (statement.height != *source_height ||
+    if (statement.height != receipt_target_height ||
         statement.btcc_receipt_state != *previous_state ||
+        (needs_initial_receipt &&
+         statement.roster_transition !=
+             pq::RosterAuthorizationTransitionKind::INITIALIZE) ||
         (!keep && !advance)) {
-        return null_receipt;
-    }
-    const auto signing_height{pq::SigningHeightForTarget(
-        m_config->chainlock_schedule, statement.height)};
-    if (!signing_height ||
-        static_cast<int64_t>(*signing_height) +
-                pq::PQ_BTCC_RECEIPT_PROPAGATION_BUFFER !=
-            carrier_height) {
         return null_receipt;
     }
     const CBlockIndex* target{
@@ -4999,6 +5016,12 @@ CChainLocksHandler::CheckBTCCReceiptCertificate(
     if (!previous_state) {
         return BTCCReceiptCertificateStatus::INVALID;
     }
+    if (!pq::ValidateBTCCReceiptOnBranch(
+            m_config->chainlock_schedule, m_config->btcc_schedule,
+            m_config->activation_predecessor_height, carrier,
+            *previous_state, receipt)) {
+        return BTCCReceiptCertificateStatus::INVALID;
+    }
     const auto& statement{chainlock->statement};
     const bool keep{
         statement.btcc_advance == pq::BTCCAdvance::KEEP &&
@@ -5016,15 +5039,10 @@ CChainLocksHandler::CheckBTCCReceiptCertificate(
         statement.block_hash != receipt.chainlock_target_hash ||
         statement.accepted_btcc_cursor != receipt.accepted_cursor ||
         statement.btcc_receipt_state != *previous_state ||
+        (*previous_state == pq::BTCCReceiptState{} &&
+         statement.roster_transition !=
+             pq::RosterAuthorizationTransitionKind::INITIALIZE) ||
         (!keep && !advance)) {
-        return BTCCReceiptCertificateStatus::INVALID;
-    }
-    const auto signing_height{pq::SigningHeightForTarget(
-        m_config->chainlock_schedule, statement.height)};
-    if (!signing_height ||
-        static_cast<int64_t>(*signing_height) +
-                pq::PQ_BTCC_RECEIPT_PROPAGATION_BUFFER !=
-            carrier.nHeight) {
         return BTCCReceiptCertificateStatus::INVALID;
     }
     const CBlockIndex* target{carrier.GetAncestor(statement.height)};
@@ -5599,6 +5617,10 @@ bool CChainLocksHandler::BeginBTCCPreseal(
     const pq::BTCCReceipt& missing_receipt)
 {
     AssertLockHeld(cs_main);
+    const auto predecessor_state{
+        carrier.pprev == nullptr
+            ? std::optional<pq::BTCCReceiptState>{}
+            : IndexedBTCCReceiptState(*carrier.pprev)};
     if (!m_chainman.CanBeginPQHistoryAuthentication() ||
         !m_config || !m_persistence || m_persistence_failed.load() ||
         carrier.nHeight <=
@@ -5606,17 +5628,15 @@ bool CChainLocksHandler::BeginBTCCPreseal(
         missing_receipt.IsNull() ||
         !missing_receipt.IsStructurallyValid() ||
         missing_receipt.chainlock_target_height <= m_config->activation_predecessor_height ||
-        !pq::ValidateBTCCReceiptOnBranch(m_config->btcc_schedule, carrier,
-                                         missing_receipt) ||
+        !predecessor_state ||
+        !pq::ValidateBTCCReceiptOnBranch(
+            m_config->chainlock_schedule, m_config->btcc_schedule,
+            m_config->activation_predecessor_height, carrier,
+            *predecessor_state, missing_receipt) ||
         !pq::IsBTCCReceiptCarrierHeight(m_config->btcc_schedule,
                                         carrier.nHeight)) {
         return false;
     }
-    const auto predecessor_state{
-        carrier.pprev == nullptr
-            ? std::optional<pq::BTCCReceiptState>{}
-            : IndexedBTCCReceiptState(*carrier.pprev)};
-    if (!predecessor_state) return false;
 
     LOCK(m_btcc_preseal_mutex);
     pq::BTCCPresealState next{m_btcc_preseal_state};
@@ -7601,13 +7621,21 @@ bool CChainLocksHandler::RecoverActiveBTCCPresealBounded(
             const CBlockIndex* carrier{active_chain[height]};
             CBlock block;
             pq::BTCCReceipt receipt;
+            const auto predecessor_state{
+                carrier == nullptr || carrier->pprev == nullptr
+                    ? std::optional<pq::BTCCReceiptState>{}
+                    : IndexedBTCCReceiptState(*carrier->pprev)};
             // Keep the durable branch obligations unchanged until every
             // carrier in the exact active prefix has been inspected.
             if (carrier == nullptr ||
+                !predecessor_state ||
                 !m_chainman.m_blockman.ReadBlockFromDisk(block, *carrier) ||
                 !ExtractBTCCReceipt(block, receipt) ||
                 !pq::ValidateBTCCReceiptOnBranch(
-                    m_config->btcc_schedule, *carrier, receipt)) {
+                    m_config->chainlock_schedule,
+                    m_config->btcc_schedule,
+                    m_config->activation_predecessor_height, *carrier,
+                    *predecessor_state, receipt)) {
                 (void)m_btcc_preseal_recovery_runtime.frontier.CommitThrough(
                     active_chain, height - 1);
                 return false;
@@ -7617,15 +7645,6 @@ bool CChainLocksHandler::RecoverActiveBTCCPresealBounded(
                 CheckBTCCReceiptCertificate(receipt, *carrier) ==
                     BTCCReceiptCertificateStatus::VERIFIED) {
                 continue;
-            }
-            const auto predecessor_state{
-                carrier->pprev == nullptr
-                    ? std::optional<pq::BTCCReceiptState>{}
-                    : IndexedBTCCReceiptState(*carrier->pprev)};
-            if (!predecessor_state) {
-                (void)m_btcc_preseal_recovery_runtime.frontier.CommitThrough(
-                    active_chain, height - 1);
-                return false;
             }
             auto& recovered{m_btcc_preseal_recovery_runtime.recovered};
             if (!recovered) {
@@ -8250,14 +8269,16 @@ CChainLocksHandler::RecomputeBTCCReceiptStateCached(
         pq::BTCCReceipt receipt;
         if (!ExtractBTCCReceipt(block, receipt) ||
             !pq::ValidateBTCCReceiptOnBranch(
-                m_config->btcc_schedule, *carrier, receipt)) {
+                m_config->chainlock_schedule, m_config->btcc_schedule,
+                m_config->activation_predecessor_height, *carrier,
+                frontier.state, receipt)) {
             return std::nullopt;
         }
         const auto next{pq::ApplyBTCCReceiptState(
             m_chainman.GetConsensus().hashGenesisBlock,
             m_config->chainlock_schedule, m_config->btcc_schedule,
-            carrier->nHeight, carrier->GetBlockHash(), frontier.state,
-            receipt)};
+            m_config->activation_predecessor_height, carrier->nHeight,
+            carrier->GetBlockHash(), frontier.state, receipt)};
         if (!next) return std::nullopt;
         frontier.state = *next;
         frontier.next_carrier_height +=
@@ -9195,8 +9216,10 @@ CChainLocksHandler::ResolveObjectiveRosterAuthorizationContext(
     }
     const auto receipt{pq::ReconstructBTCCReceipt(
         m_genesis_hash, m_config->chainlock_schedule,
-        m_config->btcc_schedule, *carrier, *previous_state,
-        *carrier_state, carrier->pqBTCCReceiptLogicalId)};
+        m_config->btcc_schedule,
+        m_config->activation_predecessor_height, *carrier,
+        *previous_state, *carrier_state,
+        carrier->pqBTCCReceiptLogicalId)};
     if (!receipt || receipt->IsNull()) return std::nullopt;
 
     auto base{m_store->GetVerifiedRosterAuthorizationBaseByLogicalId(
@@ -10498,7 +10521,8 @@ bool CChainLocksHandler::AdvanceLiveSigningValidationFrontier(
                 previous_state && current_state
                     ? pq::ReconstructBTCCReceipt(
                           genesis_hash, config.chainlock_schedule,
-                          config.btcc_schedule, *index,
+                          config.btcc_schedule,
+                          config.activation_predecessor_height, *index,
                           *previous_state, *current_state,
                           index->pqBTCCReceiptLogicalId)
                     : std::optional<pq::BTCCReceipt>{}};
@@ -11788,7 +11812,8 @@ bool CChainLocksHandler::CheckPaymentAuditSeedSigningPolicy(
             return false;
         }
         const auto seed_context{GetPaymentAuditSeedReceiptContext(
-            m_genesis_hash, schedule_config, *schedule, *seal)};
+            m_genesis_hash, schedule_config,
+            m_config->activation_predecessor_height, *schedule, *seal)};
         return seed_context.status == PaymentAuditContextStatus::READY &&
                seed_context.seed_point &&
                *seed_context.seed_point == statement.commitment.seed.anchor;
@@ -12998,7 +13023,9 @@ bool CChainLocksHandler::PreparePaymentAuditSigningRuntime()
             const auto seed_context{
                 seal != nullptr
                     ? GetPaymentAuditSeedReceiptContext(
-                          m_genesis_hash, schedule_config, *schedule, *seal)
+                          m_genesis_hash, schedule_config,
+                          m_config->activation_predecessor_height,
+                          *schedule, *seal)
                     : PaymentAuditSeedReceiptContext{}};
             active_context =
                 tip != nullptr &&
@@ -13268,7 +13295,8 @@ bool CChainLocksHandler::IsCurrentPaymentAuditStatement(
     const auto indexed_audit{IndexedPaymentAuditReceiptState(*active)};
     const auto seed_context{
         GetPaymentAuditSeedReceiptContext(
-            m_genesis_hash, schedule_config, *schedule, *active)};
+            m_genesis_hash, schedule_config,
+            m_config->activation_predecessor_height, *schedule, *active)};
     pq::BTCCValidationError btcc_error{pq::BTCCValidationError::NONE};
     return indexed_btcc &&
            *indexed_btcc == statement.seal_statement.btcc_receipt_state &&
@@ -14032,7 +14060,8 @@ CChainLocksHandler::BuildPaymentAuditVerificationRosters(
         return nullptr;
     }
     const auto seed_context{GetPaymentAuditSeedReceiptContext(
-        m_genesis_hash, schedule_config, *epoch_schedule, *seal)};
+        m_genesis_hash, schedule_config,
+        m_config->activation_predecessor_height, *epoch_schedule, *seal)};
     if (seed_context.status != PaymentAuditContextStatus::READY) {
         if (status != nullptr &&
             seed_context.status == PaymentAuditContextStatus::LOCAL_ERROR) {

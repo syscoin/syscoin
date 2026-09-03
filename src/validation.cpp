@@ -2137,12 +2137,15 @@ static bool ConnectBTCCReceiptState(ChainstateManager& chainman,
     if (llmq::pq::IsBTCCReceiptCarrierHeight(btcc_schedule,
                                               index.nHeight)) {
         if (!llmq::pq::ValidateBTCCReceiptOnBranch(
-                btcc_schedule, index, receipt)) {
+                *chainlock_schedule, btcc_schedule,
+                finality_config->activation_predecessor_height,
+                index, previous, receipt)) {
             return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
                                  "bad-btcc-receipt-branch");
         }
         const auto applied{llmq::pq::ApplyBTCCReceiptState(
             consensus.hashGenesisBlock, *chainlock_schedule, btcc_schedule,
+            finality_config->activation_predecessor_height,
             index.nHeight, index.GetBlockHash(), previous, receipt)};
         if (!applied) {
             return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,

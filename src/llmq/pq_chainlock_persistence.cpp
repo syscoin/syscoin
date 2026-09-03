@@ -873,11 +873,6 @@ bool IsValidBTCCPresealMarker(
             config.btcc_schedule, marker.terminal_carrier_height)) {
         return false;
     }
-    const auto source_height{BTCCSourceHeightForNEVMInjection(
-        config.btcc_schedule, marker.terminal_carrier_height)};
-    const auto signing_height{SigningHeightForTarget(
-        config.chainlock_schedule,
-        marker.terminal_receipt.chainlock_target_height)};
     const auto& predecessor{marker.predecessor_receipt_state};
     const auto& terminal_parent{marker.terminal_parent_receipt_state};
     const bool exact_keep{IsExactBTCCReceiptTransition(
@@ -888,8 +883,11 @@ bool IsValidBTCCPresealMarker(
             BTCCAdvance::ADVANCE) &&
         marker.terminal_receipt.chainlock_target_hash ==
             marker.terminal_receipt.accepted_cursor.sys_hash};
-    if (!source_height || !signing_height ||
-        marker.terminal_receipt.chainlock_target_height != *source_height ||
+    if (!IsBTCCReceiptTargetForCarrier(
+            config.chainlock_schedule, config.btcc_schedule,
+            config.activation_predecessor_height, terminal_parent,
+            marker.terminal_carrier_height,
+            marker.terminal_receipt.chainlock_target_height) ||
         marker.terminal_receipt.chainlock_target_height <=
             config.activation_predecessor_height ||
         marker.terminal_receipt.chainlock_target_height <=
@@ -910,10 +908,7 @@ bool IsValidBTCCPresealMarker(
         (marker.terminal_carrier_height ==
              marker.earliest_carrier_height &&
          marker.terminal_carrier_hash !=
-             marker.earliest_carrier_hash) ||
-        static_cast<int64_t>(*signing_height) +
-                PQ_BTCC_RECEIPT_PROPAGATION_BUFFER !=
-            marker.terminal_carrier_height) {
+             marker.earliest_carrier_hash)) {
         return false;
     }
     return predecessor.cursor.IsNull() ||
