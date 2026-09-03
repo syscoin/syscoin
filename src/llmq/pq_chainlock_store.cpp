@@ -11,6 +11,7 @@
 #include <limits>
 #include <iterator>
 #include <stdexcept>
+#include <tuple>
 #include <utility>
 
 namespace llmq::pq {
@@ -1764,6 +1765,74 @@ ChainLockFinalityStore::GetVerifiedRosterAuthorizationBaseByLogicalId(
             record.logical_id, record.witness_id,
             record.chainlock->statement},
         record.chainlock, record.verification_context};
+}
+
+std::vector<VerifiedRosterAuthorizationBaseView>
+ChainLockFinalityStore::GetVerifiedRosterAuthorizationBasesForTarget(
+    int32_t height, const uint256& block_hash) const
+{
+    if (height < 0 || block_hash.IsNull()) return {};
+    LOCK(m_mutex);
+    std::vector<const AcceptedRecord*> selected;
+    for (const auto& [logical_id, record] : m_authorization_bases) {
+        if (!record.chainlock || record.chainlock->statement.height != height ||
+            record.chainlock->statement.block_hash != block_hash ||
+            !record.verification_context) {
+            continue;
+        }
+        selected.push_back(&record);
+    }
+    std::sort(selected.begin(), selected.end(), [](const auto* lhs,
+                                                    const auto* rhs) {
+        return lhs->logical_id < rhs->logical_id;
+    });
+    std::vector<VerifiedRosterAuthorizationBaseView> result;
+    result.reserve(selected.size());
+    for (const AcceptedRecord* record : selected) {
+        result.push_back(VerifiedRosterAuthorizationBaseView{
+            m_authorization_base_revision,
+            FinalChainLockRecordMetadata{
+                record->logical_id, record->witness_id,
+                record->chainlock->statement},
+            record->chainlock, record->verification_context});
+    }
+    return result;
+}
+
+std::vector<VerifiedRosterAuthorizationBaseView>
+ChainLockFinalityStore::GetVerifiedRosterResetAuthorizationBasesAbove(
+    int32_t height) const
+{
+    LOCK(m_mutex);
+    std::vector<const AcceptedRecord*> selected;
+    for (const auto& [logical_id, record] : m_authorization_bases) {
+        (void)logical_id;
+        if (!record.chainlock || !record.verification_context ||
+            record.chainlock->statement.height <= height ||
+            (record.chainlock->statement.roster_transition !=
+                 RosterAuthorizationTransitionKind::INITIALIZE &&
+             record.chainlock->statement.roster_transition !=
+                 RosterAuthorizationTransitionKind::RECOVER)) {
+            continue;
+        }
+        selected.push_back(&record);
+    }
+    std::sort(selected.begin(), selected.end(), [](const auto* lhs,
+                                                    const auto* rhs) {
+        return std::tie(lhs->chainlock->statement.height, lhs->logical_id) <
+            std::tie(rhs->chainlock->statement.height, rhs->logical_id);
+    });
+    std::vector<VerifiedRosterAuthorizationBaseView> result;
+    result.reserve(selected.size());
+    for (const AcceptedRecord* record : selected) {
+        result.push_back(VerifiedRosterAuthorizationBaseView{
+            m_authorization_base_revision,
+            FinalChainLockRecordMetadata{
+                record->logical_id, record->witness_id,
+                record->chainlock->statement},
+            record->chainlock, record->verification_context});
+    }
+    return result;
 }
 
 ChainLockFinalityStateObservation

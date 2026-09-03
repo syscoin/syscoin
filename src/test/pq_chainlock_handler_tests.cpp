@@ -487,6 +487,16 @@ public:
                 {}}).has_value();
     }
 
+    static uint8_t HistoricalAdmissionFor(
+        const CChainLocksHandler& handler,
+        const pq::FinalChainLock& chainlock)
+    {
+        LOCK(::cs_main);
+        return static_cast<uint8_t>(handler.GetHistoricalAdmissionLocked(
+            chainlock.statement,
+            chainlock.GetLogicalId(handler.m_genesis_hash)).admission);
+    }
+
     static std::optional<uint8_t> FindCurrentSigningVariant(
         const std::array<pq::PreparedChainLockContextPtr, 2>& variants,
         pq::VerifiedRosterSetPtr roster_set,
@@ -657,6 +667,29 @@ public:
     {
         LOCK(handler.m_pending_payment_audit_receipt_mutex);
         return handler.m_pending_payment_audit_seal.has_value();
+    }
+
+    static bool HasPendingPaymentAuditReceipt(
+        const CChainLocksHandler& handler)
+    {
+        LOCK(handler.m_pending_payment_audit_receipt_mutex);
+        return handler.m_pending_payment_audit_receipt.has_value();
+    }
+
+    static bool HasNeededPaymentAuditSeal(
+        const CChainLocksHandler& handler)
+    {
+        LOCK(handler.m_needed_btcc_certificate_mutex);
+        return handler.m_needed_btcc_certificate &&
+            handler.m_needed_btcc_certificate->source ==
+                CChainLocksHandler::NeededBTCCCertificateSource::
+                    PAYMENT_AUDIT_SEAL;
+    }
+
+    static void ClearPaymentAuditDependenciesForStop(
+        CChainLocksHandler& handler)
+    {
+        handler.ClearPendingPaymentAuditDependenciesForStop();
     }
 
     static bool PublishPaymentAuditSealDependency(
@@ -1686,7 +1719,7 @@ BOOST_AUTO_TEST_CASE(
     historical_verification_capability_is_exact_source_bound)
 {
     using Access = llmq::test::CChainLocksHandlerTestAccess;
-    constexpr uint8_t PRESEAL_CATCHUP{3};
+    constexpr uint8_t PRESEAL_CATCHUP{4};
     const uint256 marker{NonNullHash(199'500)};
 
     BOOST_CHECK(Access::HistoricalCapabilityMatches(
@@ -1713,9 +1746,10 @@ BOOST_AUTO_TEST_CASE(historical_roster_authorization_routes_are_explicit)
     constexpr uint8_t EXACT_NETWORK{1};
     constexpr uint8_t NONE{0};
     constexpr uint8_t CURRENT_CATCHUP{1};
-    constexpr uint8_t RECOVERY{2};
-    constexpr uint8_t PRESEAL_CATCHUP{3};
-    constexpr uint8_t PRESEAL_RECEIPT{4};
+    constexpr uint8_t RETAINED_SUCCESSOR{2};
+    constexpr uint8_t RECOVERY{3};
+    constexpr uint8_t PRESEAL_CATCHUP{4};
+    constexpr uint8_t PRESEAL_RECEIPT{5};
     const std::array transitions{
         Transition::INITIALIZE, Transition::KEEP, Transition::OBSERVE,
         Transition::REVEAL, Transition::ROTATE, Transition::RECOVER};
@@ -1732,6 +1766,10 @@ BOOST_AUTO_TEST_CASE(historical_roster_authorization_routes_are_explicit)
                           EXACT_NETWORK);
         BOOST_CHECK_EQUAL(Access::HistoricalRosterAuthorization(
                               Admission::CATCHUP, CURRENT_CATCHUP,
+                              transition),
+                          reset ? INVALID : EXACT_NETWORK);
+        BOOST_CHECK_EQUAL(Access::HistoricalRosterAuthorization(
+                              Admission::CATCHUP, RETAINED_SUCCESSOR,
                               transition),
                           reset ? INVALID : EXACT_NETWORK);
         BOOST_CHECK_EQUAL(Access::HistoricalRosterAuthorization(
@@ -5357,6 +5395,27 @@ BOOST_FIXTURE_TEST_CASE(
     BOOST_CHECK(Access::StateAdvancingAuthorizationBaseAdmissible(
         *handler, ChainLockCandidateAdmission::CATCHUP, candidate));
 
+    // The active tip is far past this exact next edge. Before the locally
+    // verified authorization record exists it is no longer generic catch-up;
+    // afterwards only the retained capability opens the dedicated path.
+    BOOST_CHECK_EQUAL(Access::HistoricalAdmissionFor(*handler, candidate),
+                      0U);
+    const auto candidate_context{context_for(candidate)};
+    BOOST_REQUIRE(candidate_context);
+    BOOST_REQUIRE(store->AcceptVerifiedRosterAuthorizationBase(
+        candidate, /*signatures_valid=*/true, candidate_context));
+    constexpr uint8_t RETAINED_SUCCESSOR_ADMISSION{2};
+    BOOST_CHECK_EQUAL(Access::HistoricalAdmissionFor(*handler, candidate),
+                      RETAINED_SUCCESSOR_ADMISSION);
+    const auto retained_catchup{
+        Access::PrepareRuntimeCandidateWithoutStoreAdmission(
+            *handler, candidate, ChainLockCandidateAdmission::CATCHUP)};
+    BOOST_REQUIRE(retained_catchup);
+    BOOST_CHECK(retained_catchup->context.block_known);
+    BOOST_CHECK(retained_catchup->context.scripts_validated);
+    BOOST_CHECK(retained_catchup->context.special_transactions_validated);
+    BOOST_CHECK(retained_catchup->context.btcc_transition_validated);
+
     // A scheduled receipt may carry an exact KEEP certificate. Its statement
     // is bound to the carrier-parent receipt state just like ADVANCE.
     install(*store, candidate);
@@ -5844,6 +5903,8 @@ BOOST_FIXTURE_TEST_CASE(
     BOOST_REQUIRE(Access::StagePaymentAuditSealDependency(
         *handler, audit_seal.statement, audit_objective_base));
     BOOST_CHECK(Access::HasPendingPaymentAuditSeal(*handler));
+    BOOST_CHECK(Access::HasPendingPaymentAuditReceipt(*handler));
+    BOOST_CHECK(Access::HasNeededPaymentAuditSeal(*handler));
     const auto stale_capability{Access::PaymentAuditSealCapability(
         *handler, audit_seal.GetLogicalId(genesis))};
     BOOST_REQUIRE(
@@ -5851,6 +5912,11 @@ BOOST_FIXTURE_TEST_CASE(
     BOOST_CHECK(!Access::HasPaymentAuditSealCapability(
         Access::PaymentAuditSealCapability(
             *handler, NonNullHash(927'508))));
+
+    Access::ClearPaymentAuditDependenciesForStop(*handler);
+    BOOST_CHECK(!Access::HasPendingPaymentAuditSeal(*handler));
+    BOOST_CHECK(!Access::HasPendingPaymentAuditReceipt(*handler));
+    BOOST_CHECK(!Access::HasNeededPaymentAuditSeal(*handler));
 
     auto replacement_receipt{audit_receipt};
     replacement_receipt.audit_witness_id = NonNullHash(927'509);
@@ -5897,7 +5963,24 @@ BOOST_FIXTURE_TEST_CASE(
     BOOST_CHECK(!store->GetBest());
     BOOST_REQUIRE(Access::ResolvePaymentAuditSealRecord(
         *store, genesis, audit_seal.statement));
+    BOOST_CHECK(handler->AlreadyHave(audit_seal.GetLogicalId(genesis)));
+    llmq::CChainLockSig served_seal;
+    BOOST_REQUIRE(handler->GetChainLockByHash(
+        audit_seal.GetLogicalId(genesis), served_seal));
+    BOOST_CHECK(served_seal == audit_seal);
 
     Access::CompletePaymentAuditSealFetch(*handler, capability);
     BOOST_CHECK(!Access::HasPendingPaymentAuditSeal(*handler));
+    BOOST_CHECK(handler->AlreadyHave(audit_seal.GetLogicalId(genesis)));
+
+    // If the exact seal wins the race between roster lookup and dependency
+    // staging, the audit response remains successful and no stale GETCLSIG
+    // lane is published.
+    Access::SetPendingPaymentAuditReceipt(
+        *handler, audit_receipt, audit_carrier_hash,
+        audit_carrier_parent_hash);
+    BOOST_REQUIRE(Access::StagePaymentAuditSealDependency(
+        *handler, audit_seal.statement, audit_objective_base));
+    BOOST_CHECK(!Access::HasPendingPaymentAuditSeal(*handler));
+    BOOST_CHECK(!Access::HasNeededPaymentAuditSeal(*handler));
 }

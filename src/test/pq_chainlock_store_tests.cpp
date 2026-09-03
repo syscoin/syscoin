@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <map>
 #include <optional>
+#include <tuple>
 #include <vector>
 
 #include <boost/test/unit_test.hpp>
@@ -588,6 +589,80 @@ BOOST_AUTO_TEST_CASE(verified_authorization_base_is_exact_and_not_finality)
 }
 
 BOOST_AUTO_TEST_CASE(
+    authorization_only_record_can_promote_to_live_and_catchup)
+{
+    const uint256 genesis{NonNullHash(113'500)};
+    const auto config{MakeConfig()};
+
+    {
+        TestFinalityContext context;
+        ChainLockFinalityStore store{genesis, config, context};
+        const auto candidate{MakeChainLock(
+            865, config.activation_predecessor_height,
+            NonNullHash(config.activation_predecessor_height), 113'501)};
+        BOOST_REQUIRE(store.AcceptVerifiedRosterAuthorizationBase(
+            candidate, /*signatures_valid=*/true,
+            MakeVerificationContext(genesis, config, candidate)));
+        BOOST_CHECK(!store.GetByLogicalId(candidate.GetLogicalId(genesis)));
+        BOOST_REQUIRE(store.GetServableByLogicalId(
+            candidate.GetLogicalId(genesis)));
+        auto alternate{candidate};
+        alternate.statement.quorum_context_hash = NonNullHash(113'504);
+        BOOST_REQUIRE(alternate.IsStructurallyValid());
+        BOOST_REQUIRE(store.AcceptVerifiedRosterAuthorizationBase(
+            alternate, /*signatures_valid=*/true,
+            MakeVerificationContext(genesis, config, alternate)));
+        const auto same_target{
+            store.GetVerifiedRosterAuthorizationBasesForTarget(
+                candidate.statement.height,
+                candidate.statement.block_hash)};
+        BOOST_REQUIRE_EQUAL(same_target.size(), 2U);
+        BOOST_CHECK(same_target[0].metadata.logical_id <
+                    same_target[1].metadata.logical_id);
+        BOOST_CHECK((same_target[0].metadata.logical_id ==
+                         candidate.GetLogicalId(genesis) ||
+                     same_target[1].metadata.logical_id ==
+                         candidate.GetLogicalId(genesis)));
+
+        auto prepared{store.PrepareCandidate(candidate)};
+        BOOST_REQUIRE(prepared);
+        BOOST_REQUIRE(store.AcceptVerified(
+            *prepared, candidate, /*signatures_valid=*/true));
+        BOOST_REQUIRE(store.GetBest());
+        BOOST_CHECK(*store.GetBest() == candidate);
+    }
+
+    {
+        TestFinalityContext context;
+        ChainLockFinalityStore store{genesis, config, context};
+        const auto local{MakeChainLock(
+            865, config.activation_predecessor_height,
+            NonNullHash(config.activation_predecessor_height), 113'502)};
+        auto prepared{store.PrepareCandidate(local)};
+        BOOST_REQUIRE(prepared);
+        BOOST_REQUIRE(store.AcceptVerified(
+            *prepared, local, /*signatures_valid=*/true));
+
+        const auto catchup{MakeChainLock(
+            885, 880, NonNullHash(880), 113'503)};
+        BOOST_REQUIRE(store.AcceptVerifiedRosterAuthorizationBase(
+            catchup, /*signatures_valid=*/true,
+            MakeVerificationContext(genesis, config, catchup)));
+        BOOST_REQUIRE(store.GetServableByLogicalId(
+            catchup.GetLogicalId(genesis)));
+
+        prepared = store.PrepareCatchupCandidate(catchup);
+        BOOST_REQUIRE(prepared);
+        BOOST_REQUIRE(store.AcceptCatchupVerified(
+            *prepared, catchup, /*signatures_valid=*/true,
+            [] { return true; }, {}, nullptr, nullptr,
+            MakeVerificationContext(genesis, config, catchup)));
+        BOOST_REQUIRE(store.GetBest());
+        BOOST_CHECK(*store.GetBest() == catchup);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(
     verified_authorization_base_reference_survives_capacity_churn)
 {
     const uint256 genesis{NonNullHash(114)};
@@ -655,6 +730,18 @@ BOOST_AUTO_TEST_CASE(
     BOOST_REQUIRE(
         store.GetVerifiedRosterAuthorizationBaseByLogicalId(
             newest_logical_id));
+    const auto resets{
+        store.GetVerifiedRosterResetAuthorizationBasesAbove(
+            config.activation_predecessor_height)};
+    BOOST_REQUIRE_EQUAL(
+        resets.size(), VERIFIED_AUTHORIZATION_BASE_CAPACITY - 1);
+    for (std::size_t index{1}; index < resets.size(); ++index) {
+        BOOST_CHECK(std::tie(
+                        resets[index - 1].metadata.statement.height,
+                        resets[index - 1].metadata.logical_id) <
+                    std::tie(resets[index].metadata.statement.height,
+                             resets[index].metadata.logical_id));
+    }
 }
 
 BOOST_AUTO_TEST_CASE(

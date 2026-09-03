@@ -45,12 +45,13 @@ public:
     [[nodiscard]] static PreparedChainLockContextPtr Create(
         ChainLockScheduleConfig schedule,
         const ChainLockStatement& statement,
-        VerifiedRosterSetPtr roster_set)
+        VerifiedRosterSetPtr roster_set,
+        uint8_t authorization_mask = 0b1111)
     {
         if (!roster_set) return {};
         return PreparedChainLockContextPtr{new PreparedChainLockContext(
             std::move(schedule), statement, std::move(roster_set), {},
-            /*authorization_mask=*/0b1111)};
+            authorization_mask)};
     }
 
     [[nodiscard]] static PreparedChainLockContextPtr Create(

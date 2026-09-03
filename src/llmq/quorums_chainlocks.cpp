@@ -1169,6 +1169,32 @@ std::optional<int32_t> GetBTCCPresealAuxiliaryRetentionFloor(
     return floor;
 }
 
+bool CanReuseRetainedChainLockVerification(
+    const pq::VerifiedRosterAuthorizationBaseView& retained,
+    const pq::FinalChainLock& chainlock,
+    const pq::PreparedChainLockContext& current,
+    const uint256& genesis_hash,
+    const pq::ChainLockScheduleConfig& schedule)
+{
+    const uint256 logical_id{chainlock.GetLogicalId(genesis_hash)};
+    const uint256 witness_id{chainlock.GetWitnessId(genesis_hash)};
+    const auto& prior{retained.verification_context};
+    return retained.certificate && prior &&
+        retained.metadata.logical_id == logical_id &&
+        retained.metadata.witness_id == witness_id &&
+        *retained.certificate == chainlock &&
+        prior->GenesisHash() == genesis_hash &&
+        prior->Schedule() == schedule &&
+        prior->Statement() == chainlock.statement &&
+        prior->StatementLogicalId() == logical_id &&
+        current.GenesisHash() == genesis_hash &&
+        current.Schedule() == schedule &&
+        current.Statement() == chainlock.statement &&
+        current.StatementLogicalId() == logical_id &&
+        prior->AuthorizationMask() == current.AuthorizationMask() &&
+        prior->Rosters() == current.Rosters();
+}
+
 std::optional<pq::ChainLockSigningWindow> StagedRecoverySigningWindow(
     const pq::ChainLockScheduleConfig& chainlock,
     const pq::BTCCScheduleConfig& btcc,
@@ -3348,12 +3374,7 @@ void CChainLocksHandler::Stop()
             m_pending_btcc_receipt.reset();
             m_pending_btcc_last_request = std::chrono::microseconds{0};
         }
-        {
-            LOCK(m_pending_payment_audit_receipt_mutex);
-            m_pending_payment_audit_receipt.reset();
-            m_pending_payment_audit_last_request =
-                std::chrono::microseconds{0};
-        }
+        ClearPendingPaymentAuditDependenciesForStop();
         m_pending_verified_historical.store({});
         m_retry_pending_btcc_block.store(false);
     }
@@ -7343,11 +7364,14 @@ bool CChainLocksHandler::StagePendingPaymentAuditSealDependency(
     const PendingPaymentAuditSealDependency& dependency)
 {
     if (!m_store) return false;
-    if (m_store->GetServableByLogicalId(dependency.logical_id)) {
+    const auto already_servable{
+        m_store->GetServableByLogicalId(dependency.logical_id)};
+    if (already_servable &&
+        already_servable->statement != dependency.statement) {
         return false;
     }
     std::optional<pq::VerifiedRosterAuthorizationBaseView> objective_base;
-    if (!dependency.objective_base.IsNull()) {
+    if (!already_servable && !dependency.objective_base.IsNull()) {
         objective_base = m_store->GetVerifiedRosterAuthorizationBase(
             dependency.objective_base);
         if (!objective_base) return false;
@@ -7358,6 +7382,18 @@ bool CChainLocksHandler::StagePendingPaymentAuditSealDependency(
         return false;
     }
     LOCK(m_needed_btcc_certificate_mutex);
+    if (already_servable) {
+        if (m_pending_payment_audit_seal) {
+            (void)EraseNeededBTCCCertificate(
+                m_needed_btcc_certificate,
+                NeededBTCCCertificateSource::PAYMENT_AUDIT_SEAL,
+                m_pending_payment_audit_seal->source_token);
+            m_pending_payment_audit_seal.reset();
+        }
+        m_pending_payment_audit_last_request =
+            std::chrono::microseconds{0};
+        return true;
+    }
     if (m_pending_payment_audit_seal &&
         m_pending_payment_audit_seal->source_token !=
             dependency.source_token) {
@@ -7378,6 +7414,25 @@ bool CChainLocksHandler::StagePendingPaymentAuditSealDependency(
         m_pending_payment_audit_receipt,
         m_pending_payment_audit_seal,
         m_needed_btcc_certificate);
+}
+
+void CChainLocksHandler::ClearPendingPaymentAuditDependenciesForStop()
+{
+    LOCK(m_pending_payment_audit_receipt_mutex);
+    LOCK(m_needed_btcc_certificate_mutex);
+    const std::optional<uint256> seal_token{
+        m_pending_payment_audit_seal
+            ? std::optional<uint256>{
+                  m_pending_payment_audit_seal->source_token}
+            : std::nullopt};
+    (void)EraseNeededBTCCCertificate(
+        m_needed_btcc_certificate,
+        NeededBTCCCertificateSource::PAYMENT_AUDIT_SEAL,
+        seal_token);
+    m_pending_payment_audit_seal.reset();
+    m_pending_payment_audit_receipt.reset();
+    m_pending_payment_audit_last_request =
+        std::chrono::microseconds{0};
 }
 
 std::optional<CChainLocksHandler::PaymentAuditSealFetchCapability>
@@ -7957,7 +8012,20 @@ CChainLocksHandler::GetHistoricalAdmissionLocked(
             target->btcpPrevCommitment)) {
         return {HistoricalAdmission::RECOVERY, {}};
     }
-    if (exact_local_successor) return {};
+    if (exact_local_successor) {
+        // A certificate retained after authorization-only verification may
+        // later become the exact next durable state edge after its live round
+        // has passed. Its local immutable capability, not peer input, permits
+        // catch-up admission; the current branch/context is still rebuilt.
+        const auto retained{
+            m_store->GetVerifiedRosterAuthorizationBaseByLogicalId(
+                logical_id)};
+        if (target_is_active && retained && retained->certificate &&
+            retained->metadata.statement == statement) {
+            return {HistoricalAdmission::RETAINED_SUCCESSOR, {}};
+        }
+        return {};
+    }
     if (!m_config->btcc_receipt_assumption_anchor.IsDisabled() &&
         IsCurrentChainLockCatchupCandidateAdmissible(
             m_config->chainlock_schedule, *tip, *target)) {
@@ -8004,7 +8072,126 @@ void CChainLocksHandler::RequestCatchupChainLock()
         }
         m_catchup_last_request = now;
     }
+    std::vector<std::pair<int32_t, uint256>> retained_candidates;
+    {
+        LOCK(cs_main);
+        const CBlockIndex* tip{m_chainman.ActiveTip()};
+        const auto latest{tip == nullptr
+                              ? std::nullopt
+                              : pq::LatestEligibleChainLockTargetHeight(
+                                    m_config->chainlock_schedule,
+                                    tip->nHeight)};
+        const auto best{m_store->GetBestRecord()};
+        const int32_t local_height{
+            best ? best->metadata.statement.height
+                 : m_config->activation_predecessor_height};
+        if (!latest || *latest <= local_height) return;
+        std::set<uint256> selected_ids;
+        const auto append = [&](
+            const pq::VerifiedRosterAuthorizationBaseView& candidate) {
+            if (candidate.certificate &&
+                !m_store->GetByLogicalId(
+                    candidate.metadata.logical_id) &&
+                selected_ids.insert(
+                    candidate.metadata.logical_id).second) {
+                retained_candidates.emplace_back(
+                    candidate.metadata.statement.height,
+                    candidate.metadata.logical_id);
+            }
+        };
+
+        // The first missing durable edge must be installed before a later
+        // reset or latest-round certificate. This also recovers the canonical
+        // INITIALIZE edge when the active tip has advanced beyond its round.
+        const auto next{pq::NextEligibleChainLockTargetHeight(
+            m_config->chainlock_schedule, local_height)};
+        const CBlockIndex* next_target{
+            next && *next <= tip->nHeight
+                ? m_chainman.ActiveChain()[*next]
+                : nullptr};
+        if (next_target != nullptr) {
+            for (const auto& candidate :
+                 m_store->GetVerifiedRosterAuthorizationBasesForTarget(
+                     *next, next_target->GetBlockHash())) {
+                append(candidate);
+            }
+        }
+
+        // INITIALIZE and RECOVER remain objectively admissible after their
+        // target stops being the latest round. Try only retained reset rows
+        // that are still on the active branch and classify as an exact reset.
+        for (const auto& candidate :
+             m_store->GetVerifiedRosterResetAuthorizationBasesAbove(
+                 local_height)) {
+            const auto& statement{candidate.metadata.statement};
+            const CBlockIndex* target{
+                m_chainman.ActiveChain()[statement.height]};
+            if (target == nullptr ||
+                target->GetBlockHash() != statement.block_hash ||
+                GetHistoricalAdmissionLocked(
+                    statement, candidate.metadata.logical_id).admission !=
+                    HistoricalAdmission::RECOVERY) {
+                continue;
+            }
+            append(candidate);
+        }
+
+        const CBlockIndex* latest_target{
+            m_chainman.ActiveChain()[*latest]};
+        if (latest_target != nullptr) {
+            for (const auto& candidate :
+                 m_store->GetVerifiedRosterAuthorizationBasesForTarget(
+                     *latest, latest_target->GetBlockHash())) {
+                append(candidate);
+            }
+        }
+        std::sort(retained_candidates.begin(), retained_candidates.end());
+    }
+    for (const auto& [height, logical_id] : retained_candidates) {
+        (void)height;
+        if (TryPromoteRetainedChainLock(logical_id) ==
+            RetainedChainLockPromotion::ACCEPTED) {
+            return;
+        }
+    }
     (void)GetCLSIGFromPeers();
+}
+
+CChainLocksHandler::RetainedChainLockPromotion
+CChainLocksHandler::TryPromoteRetainedChainLock(
+    const uint256& logical_id)
+{
+    if (!m_store || logical_id.IsNull() ||
+        m_store->GetByLogicalId(logical_id)) {
+        return RetainedChainLockPromotion::ABSENT;
+    }
+    const auto retained{
+        m_store->GetVerifiedRosterAuthorizationBaseByLogicalId(logical_id)};
+    if (!retained || !retained->certificate ||
+        retained->metadata.logical_id != logical_id ||
+        retained->metadata.witness_id.IsNull() ||
+        retained->certificate->GetLogicalId(m_genesis_hash) != logical_id ||
+        retained->certificate->GetWitnessId(m_genesis_hash) !=
+            retained->metadata.witness_id) {
+        return RetainedChainLockPromotion::ABSENT;
+    }
+
+    BlockValidationState state;
+    bool peer_fault{false};
+    const bool accepted{ProcessNewChainLockInternal(
+        /*from=*/-1, *retained->certificate, state, &peer_fault,
+        /*local_finalization=*/nullptr, /*continuation=*/nullptr,
+        /*retain_continuation=*/nullptr,
+        /*retained_local_promotion=*/true)};
+    LogPrint(BCLog::CHAINLOCKS,
+             "CChainLocksHandler::%s -- local retained CLSIG %s "
+             "promotion %s (%s)\n",
+             __func__, logical_id.ToString(),
+             accepted ? "accepted" : "deferred",
+             accepted ? "ok" : state.ToString());
+    return accepted && m_store->GetByLogicalId(logical_id)
+        ? RetainedChainLockPromotion::ACCEPTED
+        : RetainedChainLockPromotion::DEFERRED;
 }
 
 void CChainLocksHandler::MaybeReplayPaymentAuditPreseal()
@@ -8757,6 +8944,13 @@ void CChainLocksHandler::RequestNeededBTCCCertificate()
         logical_id = m_needed_btcc_certificate->logical_id;
         m_needed_btcc_certificate->last_request = now;
     }
+    // The requested ID is exact. If its fully verified bytes are already
+    // retained locally, a second download cannot repair a transient current
+    // context; retry local admission at this lane's bounded cadence instead.
+    if (TryPromoteRetainedChainLock(*logical_id) !=
+        RetainedChainLockPromotion::ABSENT) {
+        return;
+    }
     m_connman.ForEachNode([&](CNode* node) {
         if (!SupportsPQChainLocks(node->GetCommonVersion())) return;
         CNetMsgMaker maker{node->GetCommonVersion()};
@@ -9156,6 +9350,7 @@ CChainLocksHandler::BuildCandidateContext(
         request.admission == pq::ChainLockCandidateAdmission::LIVE ||
         (catchup &&
          (historical.admission == HistoricalAdmission::CURRENT_CATCHUP ||
+          historical.admission == HistoricalAdmission::RETAINED_SUCCESSOR ||
           historical.admission == HistoricalAdmission::RECOVERY))};
     const bool declared_predecessor_is_local{
         request.statement.previous_chainlock_height ==
@@ -9190,6 +9385,7 @@ CChainLocksHandler::BuildCandidateContext(
     const bool exact_catchup_target{
         !catchup ||
         historical.admission == HistoricalAdmission::CURRENT_CATCHUP ||
+        historical.admission == HistoricalAdmission::RETAINED_SUCCESSOR ||
         historical.admission == HistoricalAdmission::RECOVERY ||
         historical.admission == HistoricalAdmission::PRESEAL_CATCHUP ||
         historical.admission == HistoricalAdmission::PRESEAL_RECEIPT};
@@ -9335,6 +9531,8 @@ CChainLocksHandler::BuildCandidateContext(
              (catchup &&
               (historical.admission ==
                    HistoricalAdmission::CURRENT_CATCHUP ||
+               historical.admission ==
+                   HistoricalAdmission::RETAINED_SUCCESSOR ||
                historical.admission ==
                    HistoricalAdmission::RECOVERY)));
     }
@@ -10382,6 +10580,8 @@ CChainLocksHandler::BuildRuntimeVerificationContext(
             (historical.admission ==
                  HistoricalAdmission::CURRENT_CATCHUP ||
              historical.admission ==
+                 HistoricalAdmission::RETAINED_SUCCESSOR ||
+             historical.admission ==
                  HistoricalAdmission::RECOVERY ||
              historical.admission ==
                  HistoricalAdmission::PRESEAL_CATCHUP ||
@@ -10681,6 +10881,8 @@ CChainLocksHandler::BuildHistoricalPreVerificationContext(
         if ((expected.admission ==
                  HistoricalAdmission::CURRENT_CATCHUP ||
              expected.admission ==
+                 HistoricalAdmission::RETAINED_SUCCESSOR ||
+             expected.admission ==
                  HistoricalAdmission::RECOVERY) &&
             !active_candidate &&
             !(candidate->nStatus & BLOCK_HAVE_DATA)) {
@@ -10841,6 +11043,7 @@ CChainLocksHandler::SelectHistoricalRosterAuthorization(
             ? HistoricalRosterAuthorization::EXACT_NETWORK
             : HistoricalRosterAuthorization::INVALID;
     case HistoricalAdmission::CURRENT_CATCHUP:
+    case HistoricalAdmission::RETAINED_SUCCESSOR:
         return reset_transition
             ? HistoricalRosterAuthorization::INVALID
             : HistoricalRosterAuthorization::EXACT_NETWORK;
@@ -16217,10 +16420,16 @@ bool CChainLocksHandler::ProcessNewChainLockInternal(
     bool* peer_fault,
     const LocalChainLockFinalization* local_finalization,
     const PendingVerifiedHistoricalChainLock* continuation,
-    bool* retain_continuation)
+    bool* retain_continuation,
+    bool retained_local_promotion)
 {
     if (peer_fault != nullptr) *peer_fault = false;
     if (retain_continuation != nullptr) *retain_continuation = false;
+    if (retained_local_promotion &&
+        (from != -1 || local_finalization != nullptr ||
+         continuation != nullptr || retain_continuation != nullptr)) {
+        return state.Error("pq-clsig-invalid-retained-promotion");
+    }
     if (!IsChainLockVerificationAvailable()) {
         return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK,
                              "pq-clsig-not-configured");
@@ -16260,9 +16469,11 @@ bool CChainLocksHandler::ProcessNewChainLockInternal(
                              "pq-clsig-verifier-busy");
     }
 
-    if (const auto payment_seal{ProcessPaymentAuditSealCertificate(
-            from, chainlock, state, peer_fault)}) {
-        return *payment_seal;
+    if (!retained_local_promotion) {
+        if (const auto payment_seal{ProcessPaymentAuditSealCertificate(
+                from, chainlock, state, peer_fault)}) {
+            return *payment_seal;
+        }
     }
 
     const auto current_best{m_store->GetBestRecord()};
@@ -16304,6 +16515,7 @@ bool CChainLocksHandler::ProcessNewChainLockInternal(
     }
     const bool catchup{
         historical.admission == HistoricalAdmission::CURRENT_CATCHUP ||
+        historical.admission == HistoricalAdmission::RETAINED_SUCCESSOR ||
         historical.admission == HistoricalAdmission::RECOVERY ||
         historical.admission == HistoricalAdmission::PRESEAL_CATCHUP ||
         preseal_receipt_rebase};
@@ -16322,6 +16534,12 @@ bool CChainLocksHandler::ProcessNewChainLockInternal(
     std::optional<RuntimeVerificationContext> historical_preverification;
     std::optional<ScopedFinalitySnapshotVerificationRetention>
         snapshot_verification_retention;
+    const auto retained_authorization{
+        m_store->GetVerifiedRosterAuthorizationBaseByLogicalId(logical_id)};
+    const bool exact_retained_authorization{
+        retained_authorization && retained_authorization->certificate &&
+        retained_authorization->metadata.witness_id == witness_id &&
+        *retained_authorization->certificate == chainlock};
 
     if (!historical_admission) {
         prepared = archive_only
@@ -16348,8 +16566,9 @@ bool CChainLocksHandler::ProcessNewChainLockInternal(
 
         // SYSCOIN: The early admission gate bounds marker-range
         // classification to one candidate. Authenticate the exact roster and
-        // all 801 signatures before retained disk/carrier replay work; the
-        // statement cannot choose its own beacon authorization.
+        // all 801 signatures before retained disk/carrier replay work, or
+        // reuse only the byte-exact locally verified certificate under an
+        // identical freshly derived context.
         if (historical_admission) {
             if (continuation != nullptr) {
                 historical_preverification = continuation->verification;
@@ -16360,7 +16579,8 @@ bool CChainLocksHandler::ProcessNewChainLockInternal(
                         "pq-clsig-stale-verification-capability");
                 }
                 historical_capability_reusable = true;
-            } else if (m_store->AlreadyHaveWitness(witness_id)) {
+            } else if (m_store->AlreadyHaveWitness(witness_id) &&
+                       !exact_retained_authorization) {
                 CompletePeerResponse(from, logical_id);
                 return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK,
                                      "pq-clsig-duplicate-witness");
@@ -16377,33 +16597,48 @@ bool CChainLocksHandler::ProcessNewChainLockInternal(
                         BlockValidationResult::BLOCK_CHAINLOCK,
                         "pq-clsig-context-unavailable");
                 }
-                pq::ChainLockVerificationError verification_error{
-                    pq::ChainLockVerificationError::NONE};
-                auto signature_checks{pq::PrepareFinalChainLockVerification(
-                    chainlock,
-                    *historical_preverification->prepared_context,
-                    &verification_error)};
-                if (!signature_checks) {
-                    m_store->RejectWitness(chainlock);
+                const bool reuse_retained{
+                    exact_retained_authorization &&
+                    CanReuseRetainedChainLockVerification(
+                        *retained_authorization, chainlock,
+                        *historical_preverification->prepared_context,
+                        m_genesis_hash, m_config->chainlock_schedule)};
+                if (retained_local_promotion && !reuse_retained) {
+                    CompletePeerResponse(from, logical_id);
+                    return state.Invalid(
+                        BlockValidationResult::BLOCK_CHAINLOCK,
+                        "pq-clsig-stale-retained-capability");
+                }
+                if (!reuse_retained) {
+                    pq::ChainLockVerificationError verification_error{
+                        pq::ChainLockVerificationError::NONE};
+                    auto signature_checks{
+                        pq::PrepareFinalChainLockVerification(
+                            chainlock,
+                            *historical_preverification->prepared_context,
+                            &verification_error)};
+                    if (!signature_checks) {
+                        m_store->RejectWitness(chainlock);
+                        if (peer_fault != nullptr) *peer_fault = true;
+                        FailPeerResponse(from, logical_id);
+                        return state.Invalid(
+                            BlockValidationResult::BLOCK_CHAINLOCK,
+                            "pq-clsig-invalid-context");
+                    }
                     if (peer_fault != nullptr) *peer_fault = true;
-                    FailPeerResponse(from, logical_id);
-                    return state.Invalid(
-                        BlockValidationResult::BLOCK_CHAINLOCK,
-                        "pq-clsig-invalid-context");
-                }
-                if (peer_fault != nullptr) *peer_fault = true;
-                bool signatures_valid{false};
-                {
-                    LOCK(m_verification_mutex);
-                    signatures_valid = m_verifier.VerifyChecks(
-                        std::move(signature_checks->checks));
-                }
-                if (!signatures_valid) {
-                    m_store->RejectWitness(chainlock);
-                    FailPeerResponse(from, logical_id);
-                    return state.Invalid(
-                        BlockValidationResult::BLOCK_CHAINLOCK,
-                        "pq-clsig-invalid-signatures");
+                    bool signatures_valid{false};
+                    {
+                        LOCK(m_verification_mutex);
+                        signatures_valid = m_verifier.VerifyChecks(
+                            std::move(signature_checks->checks));
+                    }
+                    if (!signatures_valid) {
+                        m_store->RejectWitness(chainlock);
+                        FailPeerResponse(from, logical_id);
+                        return state.Invalid(
+                            BlockValidationResult::BLOCK_CHAINLOCK,
+                            "pq-clsig-invalid-signatures");
+                    }
                 }
                 historical_capability_reusable = true;
                 if (peer_fault != nullptr) {
@@ -16594,8 +16829,21 @@ bool CChainLocksHandler::ProcessNewChainLockInternal(
                         IsShareAdmissionGenerationCurrent(
                             local_finalization->admission_generation),
                     collector_generation_current)};
-            if (verification_path ==
-                FinalChainLockVerificationPath::FULL) {
+            const bool reuse_retained{
+                exact_retained_authorization &&
+                CanReuseRetainedChainLockVerification(
+                    *retained_authorization, chainlock,
+                    *verification_context->prepared_context,
+                    m_genesis_hash, m_config->chainlock_schedule)};
+            if (retained_local_promotion && !reuse_retained) {
+                m_store->AbandonPrepared(*prepared);
+                CompletePeerResponse(from, logical_id);
+                return state.Invalid(
+                    BlockValidationResult::BLOCK_CHAINLOCK,
+                    "pq-clsig-stale-retained-capability");
+            }
+            if (!reuse_retained && verification_path ==
+                                      FinalChainLockVerificationPath::FULL) {
                 pq::ChainLockVerificationError verification_error{
                     pq::ChainLockVerificationError::NONE};
                 auto signature_checks{pq::PrepareFinalChainLockVerification(

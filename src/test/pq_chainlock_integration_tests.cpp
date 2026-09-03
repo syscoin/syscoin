@@ -762,6 +762,50 @@ BOOST_AUTO_TEST_CASE(full_dimension_builder_collector_wire_and_verifier)
     BOOST_CHECK(encoded.empty());
     BOOST_CHECK(decoded == *final);
 
+    const auto retained_certificate{
+        std::make_shared<const FinalChainLock>(decoded)};
+    VerifiedRosterAuthorizationBaseView retained{
+        /*state_revision=*/1,
+        FinalChainLockRecordMetadata{
+            decoded.GetLogicalId(fixture->genesis_hash),
+            decoded.GetWitnessId(fixture->genesis_hash),
+            decoded.statement},
+        retained_certificate, collector_context};
+    BOOST_CHECK(llmq::CanReuseRetainedChainLockVerification(
+        retained, decoded, *collector_context,
+        fixture->genesis_hash, fixture->config.schedule));
+
+    auto wrong_witness{retained};
+    wrong_witness.metadata.witness_id = NonNullHash(900'010);
+    BOOST_CHECK(!llmq::CanReuseRetainedChainLockVerification(
+        wrong_witness, decoded, *collector_context,
+        fixture->genesis_hash, fixture->config.schedule));
+
+    const auto changed_mask_context{
+        ChainLockStoreTestContextFactory::Create(
+            fixture->config.schedule, decoded.statement,
+            collector_context->RosterSetPtr(), /*authorization_mask=*/0b1111)};
+    BOOST_REQUIRE(changed_mask_context);
+    BOOST_CHECK(!llmq::CanReuseRetainedChainLockVerification(
+        retained, decoded, *changed_mask_context,
+        fixture->genesis_hash, fixture->config.schedule));
+
+    const auto changed_roster_context{
+        ChainLockStoreTestContextFactory::Create(
+            fixture->config.schedule, decoded.statement,
+            ChainLockStoreTestContextFactory::CreateRosterSet(
+                fixture->genesis_hash), AUTHORIZATION_MASK)};
+    BOOST_REQUIRE(changed_roster_context);
+    BOOST_CHECK(!llmq::CanReuseRetainedChainLockVerification(
+        retained, decoded, *changed_roster_context,
+        fixture->genesis_hash, fixture->config.schedule));
+
+    auto changed_certificate{decoded};
+    changed_certificate.signatures.front().signature.front() ^= uint8_t{1};
+    BOOST_CHECK(!llmq::CanReuseRetainedChainLockVerification(
+        retained, changed_certificate, *collector_context,
+        fixture->genesis_hash, fixture->config.schedule));
+
     const auto full_path = [&](const FinalChainLock* certificate,
                                const uint256& genesis_hash,
                                const ChainLockScheduleConfig& schedule,

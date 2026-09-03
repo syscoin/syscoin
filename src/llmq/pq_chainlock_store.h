@@ -628,6 +628,15 @@ public:
     GetVerifiedRosterAuthorizationBaseByLogicalId(
         const uint256& logical_id) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** Find retained authorization certificates for one exact chain target. */
+    [[nodiscard]] std::vector<VerifiedRosterAuthorizationBaseView>
+    GetVerifiedRosterAuthorizationBasesForTarget(
+        int32_t height, const uint256& block_hash) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** Bounded oldest-first reset candidates not yet applied as finality. */
+    [[nodiscard]] std::vector<VerifiedRosterAuthorizationBaseView>
+    GetVerifiedRosterResetAuthorizationBasesAbove(int32_t height) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /**
      * Retain a fully signature-verified certificate as authorization only.
      * This never changes finality, BTCC/payment state, or recent-winner order.

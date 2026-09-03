@@ -618,6 +618,14 @@ SelectFinalChainLockVerificationPath(
     bool admission_generation_current,
     bool collector_generation_current) noexcept;
 
+/** Reuse prior WOTS verification only across an identical validated context. */
+[[nodiscard]] bool CanReuseRetainedChainLockVerification(
+    const pq::VerifiedRosterAuthorizationBaseView& retained,
+    const pq::FinalChainLock& chainlock,
+    const pq::PreparedChainLockContext& current,
+    const uint256& genesis_hash,
+    const pq::ChainLockScheduleConfig& schedule);
+
 enum class FinalPaymentAuditVerificationPath : uint8_t {
     FULL = 0,
     COLLECTED,
@@ -1038,7 +1046,8 @@ public:
                                  !m_collector_mutex,
                                  !m_payment_audit_mutex,
                                  !m_pending_btcc_receipt_mutex,
-                                 !m_pending_payment_audit_receipt_mutex);
+                                 !m_pending_payment_audit_receipt_mutex,
+                                 !m_needed_btcc_certificate_mutex);
 
     /**
      * Install the immutable branch-bound roster service. An absent service
@@ -1320,6 +1329,7 @@ private:
     enum class HistoricalAdmission : uint8_t {
         NONE = 0,
         CURRENT_CATCHUP,
+        RETAINED_SUCCESSOR,
         RECOVERY,
         PRESEAL_CATCHUP,
         PRESEAL_RECEIPT,
@@ -1896,7 +1906,8 @@ private:
         bool* peer_fault,
         const LocalChainLockFinalization* local_finalization,
         const PendingVerifiedHistoricalChainLock* continuation = nullptr,
-        bool* retain_continuation = nullptr)
+        bool* retain_continuation = nullptr,
+        bool retained_local_promotion = false)
         EXCLUSIVE_LOCKS_REQUIRED(!cs_main,
                                  !m_chainlock_admission_mutex,
                                  !m_verification_mutex,
@@ -2262,7 +2273,16 @@ private:
         EXCLUSIVE_LOCKS_REQUIRED(!m_btc_header_policy_mutex,
                                  !m_payment_audit_mutex);
     void RequestNeededBTCCCertificate()
-        EXCLUSIVE_LOCKS_REQUIRED(!m_pending_btcc_receipt_mutex,
+        EXCLUSIVE_LOCKS_REQUIRED(!cs_main,
+                                 !m_chainlock_admission_mutex,
+                                 !m_verification_mutex,
+                                 !m_collector_mutex,
+                                 !m_lookup_mutex,
+                                 !m_persisted_mutex,
+                                 !m_btcc_preseal_mutex,
+                                 !m_signer_reconcile_mutex,
+                                 !m_pending_btcc_receipt_mutex,
+                                 !m_pending_payment_audit_receipt_mutex,
                                  !m_needed_btcc_certificate_mutex);
     void NoteNeededBTCCCertificate(
         NeededBTCCCertificateSource source,
@@ -2333,6 +2353,10 @@ private:
     [[nodiscard]] bool RevalidatePendingPaymentAuditReceiptDependencyLocked()
         EXCLUSIVE_LOCKS_REQUIRED(
             cs_main, !m_pending_payment_audit_receipt_mutex,
+            !m_needed_btcc_certificate_mutex);
+    void ClearPendingPaymentAuditDependenciesForStop()
+        EXCLUSIVE_LOCKS_REQUIRED(
+            !m_pending_payment_audit_receipt_mutex,
             !m_needed_btcc_certificate_mutex);
     [[nodiscard]] static std::optional<PendingPaymentAuditSealDependency>
     MakePendingPaymentAuditSealDependency(
@@ -2419,7 +2443,33 @@ private:
         EXCLUSIVE_LOCKS_REQUIRED(!m_persisted_mutex,
                                  !m_lookup_mutex,
                                  !m_catchup_mutex,
-                                 !m_btcc_preseal_mutex);
+                                 !m_btcc_preseal_mutex,
+                                 !m_chainlock_admission_mutex,
+                                 !m_verification_mutex,
+                                 !m_collector_mutex,
+                                 !m_pending_btcc_receipt_mutex,
+                                 !m_pending_payment_audit_receipt_mutex,
+                                 !m_needed_btcc_certificate_mutex,
+                                 !m_signer_reconcile_mutex);
+    enum class RetainedChainLockPromotion : uint8_t {
+        ABSENT = 0,
+        DEFERRED,
+        ACCEPTED,
+    };
+    /** Re-run admission for an exact locally verified authorization record. */
+    [[nodiscard]] RetainedChainLockPromotion TryPromoteRetainedChainLock(
+        const uint256& logical_id)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs_main,
+                                 !m_chainlock_admission_mutex,
+                                 !m_verification_mutex,
+                                 !m_collector_mutex,
+                                 !m_lookup_mutex,
+                                 !m_persisted_mutex,
+                                 !m_btcc_preseal_mutex,
+                                 !m_pending_btcc_receipt_mutex,
+                                 !m_pending_payment_audit_receipt_mutex,
+                                 !m_needed_btcc_certificate_mutex,
+                                 !m_signer_reconcile_mutex);
     void MaybeReplayBTCCPreseal()
         EXCLUSIVE_LOCKS_REQUIRED(!m_btcc_preseal_mutex,
                                  !m_needed_btcc_certificate_mutex);
