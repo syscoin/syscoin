@@ -16162,6 +16162,13 @@ CChainLocksHandler::ProcessPaymentAuditSealCertificate(
                     pq::ChainLockFinalityError::CONTEXT_CHANGED;
                 return false;
             }
+            pq::RecoveryUniverseCapsulePtr recovery_universe;
+            if (!CaptureRecoveryUniverseForDurableCandidate(
+                    chainlock, recovery_universe)) {
+                finality_error =
+                    pq::ChainLockFinalityError::CONTEXT_CHANGED;
+                return false;
+            }
             if (!FlushBTCCIndexStateForDurableAcceptance(chainlock)) {
                 index_persistence_failed = true;
                 return false;
@@ -16175,7 +16182,7 @@ CChainLocksHandler::ProcessPaymentAuditSealCertificate(
             return m_store->AcceptVerifiedRosterAuthorizationBase(
                 chainlock, /*signatures_valid=*/true,
                 current->prepared_context, &finality_error,
-                authorize_durable);
+                recovery_universe, authorize_durable);
         })};
     if (index_persistence_failed) {
         CompletePeerResponse(from, logical_id);
