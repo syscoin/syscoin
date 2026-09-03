@@ -307,6 +307,25 @@ BuildPaymentAuditEpochSchedule(const PaymentAuditScheduleConfig& config,
     return schedule;
 }
 
+std::optional<int32_t> PaymentAuditProtectionCarrierEnd(
+    const PaymentAuditScheduleConfig& config,
+    int32_t owner_height) noexcept
+{
+    const auto owner_epoch{EpochForHeight(config.chainlock, owner_height)};
+    if (!owner_epoch) return std::nullopt;
+    for (uint32_t offset{1};
+         offset <= PAYMENT_AUDIT_CARRIER_EPOCH_LOOKBACK; ++offset) {
+        if (*owner_epoch < offset) continue;
+        const auto schedule{BuildPaymentAuditEpochSchedule(
+            config, *owner_epoch - offset)};
+        if (schedule && owner_height >= schedule->seal_height &&
+            owner_height < schedule->carrier_end_height_exclusive) {
+            return schedule->carrier_end_height_exclusive;
+        }
+    }
+    return std::nullopt;
+}
+
 std::optional<uint8_t> PaymentAuditLeafIndex(
     const PaymentAuditScheduleConfig& config,
     uint32_t subject_epoch,

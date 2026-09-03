@@ -42,23 +42,6 @@ bool IsRecoveryUniverseCapabilityForStatement(
                GetRecoveryUniverseSourceId(genesis_hash, source);
 }
 
-std::optional<int32_t> PaymentAuditSealCarrierEnd(
-    const ChainLockFinalityStoreConfig& config,
-    const ChainLockStatement& statement) noexcept
-{
-    const auto seal_epoch{
-        EpochForHeight(config.chainlock_schedule, statement.height)};
-    if (!seal_epoch || *seal_epoch == 0) return std::nullopt;
-    const auto schedule{BuildPaymentAuditEpochSchedule(
-        PaymentAuditScheduleConfig{
-            config.chainlock_schedule, config.btcc_schedule},
-        *seal_epoch - 1)};
-    if (!schedule || schedule->seal_height != statement.height) {
-        return std::nullopt;
-    }
-    return schedule->carrier_end_height_exclusive;
-}
-
 bool IsReceiptableChainLock(const FinalChainLock& chainlock,
                             const ChainLockFinalityStoreConfig& config) noexcept
 {
@@ -968,11 +951,13 @@ bool ChainLockFinalityStore::AcceptVerifiedRosterAuthorizationBase(
     bool signatures_valid,
     PreparedChainLockContextPtr verification_context,
     ChainLockFinalityError* error,
-    RecoveryUniverseCapsulePtr recovery_universe)
+    RecoveryUniverseCapsulePtr recovery_universe,
+    ChainLockDurableAuthorization durable_authorization)
 {
     return AcceptRosterAuthorizationBaseInternal(
         chainlock, signatures_valid, std::move(verification_context),
-        /*persisted_import=*/false, std::move(recovery_universe), error);
+        /*persisted_import=*/false, std::move(recovery_universe), error,
+        std::move(durable_authorization));
 }
 
 bool ChainLockFinalityStore::AcceptPersistedRosterAuthorizationBase(
@@ -983,7 +968,8 @@ bool ChainLockFinalityStore::AcceptPersistedRosterAuthorizationBase(
 {
     return AcceptRosterAuthorizationBaseInternal(
         chainlock, signatures_valid, std::move(verification_context),
-        /*persisted_import=*/true, nullptr, error);
+        /*persisted_import=*/true, nullptr, error,
+        /*durable_authorization=*/{});
 }
 
 bool ChainLockFinalityStore::AcceptRosterAuthorizationBaseInternal(
@@ -992,7 +978,8 @@ bool ChainLockFinalityStore::AcceptRosterAuthorizationBaseInternal(
     PreparedChainLockContextPtr verification_context,
     bool persisted_import,
     RecoveryUniverseCapsulePtr recovery_universe,
-    ChainLockFinalityError* error)
+    ChainLockFinalityError* error,
+    ChainLockDurableAuthorization durable_authorization)
 {
     SetError(error, ChainLockFinalityError::NONE);
     const uint256 logical_id{chainlock.GetLogicalId(m_genesis_hash)};
@@ -1032,11 +1019,13 @@ bool ChainLockFinalityStore::AcceptRosterAuthorizationBaseInternal(
             m_recent_by_height.find(chainlock.statement.height)};
         if (recent != m_recent_by_height.end() &&
             already_accepted(recent->second)) {
-            RememberAuthorizationBase(recent->second);
+            RememberAuthorizationBase(
+                recent->second, persisted_import);
             return true;
         }
         if (m_unsealed_btcc && already_accepted(*m_unsealed_btcc)) {
-            RememberAuthorizationBase(*m_unsealed_btcc);
+            RememberAuthorizationBase(
+                *m_unsealed_btcc, persisted_import);
             return true;
         }
         const auto existing{m_authorization_bases.find(logical_id)};
@@ -1055,12 +1044,30 @@ bool ChainLockFinalityStore::AcceptRosterAuthorizationBaseInternal(
         }
     }
 
+    if (persisted_import && durable_authorization) {
+        SetError(error, ChainLockFinalityError::INVALID_PREPARATION_TOKEN);
+        return false;
+    }
+    if (!persisted_import && durable_authorization &&
+        !m_durable_authorization_base) {
+        SetError(error, ChainLockFinalityError::PERSISTENCE_FAILURE);
+        return false;
+    }
     if (!persisted_import && m_durable_authorization_base) {
+        const auto persist_record = [&] {
+            return m_durable_authorization_base(
+                chainlock, verification_context, recovery_universe);
+        };
         try {
-            if (!m_durable_authorization_base(
-                    chainlock, verification_context,
-                    recovery_universe)) {
-                SetError(error, ChainLockFinalityError::PERSISTENCE_FAILURE);
+            const bool persisted{durable_authorization
+                ? durable_authorization(persist_record, error)
+                : persist_record()};
+            if (!persisted) {
+                if (error != nullptr &&
+                    *error == ChainLockFinalityError::NONE) {
+                    SetError(error,
+                             ChainLockFinalityError::PERSISTENCE_FAILURE);
+                }
                 return false;
             }
         } catch (const std::exception&) {
@@ -1077,7 +1084,8 @@ bool ChainLockFinalityStore::AcceptRosterAuthorizationBaseInternal(
         logical_id, witness_id,
         std::make_shared<const FinalChainLock>(chainlock),
         std::move(verification_context)};
-    RememberAuthorizationBase(std::move(retained));
+    RememberAuthorizationBase(
+        std::move(retained), persisted_import);
     return true;
 }
 
@@ -1381,7 +1389,9 @@ bool ChainLockFinalityStore::AcceptVerifiedInternal(
     return true;
 }
 
-void ChainLockFinalityStore::RememberAuthorizationBase(AcceptedRecord record)
+void ChainLockFinalityStore::RememberAuthorizationBase(
+    AcceptedRecord record,
+    bool unordered_startup_import)
 {
     if (!record.chainlock || !record.verification_context ||
         record.logical_id.IsNull() || record.witness_id.IsNull() ||
@@ -1397,10 +1407,6 @@ void ChainLockFinalityStore::RememberAuthorizationBase(AcceptedRecord record)
     const uint256 logical_id{record.logical_id};
     const uint256 witness_id{record.witness_id};
     const int32_t incoming_height{record.chainlock->statement.height};
-    const bool trusted_startup_import{
-        !m_best &&
-        record.verification_context->Authorization().admission ==
-            RosterAuthorizationAdmission::TRUSTED_PERSISTENCE};
     const RosterAuthorizationBaseIdentity referenced_base{
         record.chainlock->statement.roster_authorization_base};
     const auto existing{m_authorization_bases.find(logical_id)};
@@ -1436,7 +1442,7 @@ void ChainLockFinalityStore::RememberAuthorizationBase(AcceptedRecord record)
         if (!base.IsNull()) protected_ids.insert(base.logical_id);
     }
     const std::optional<int32_t> retention_height{
-        trusted_startup_import
+        unordered_startup_import
             ? std::nullopt
             : std::optional<int32_t>{
                   m_best && m_best->chainlock
@@ -1446,12 +1452,20 @@ void ChainLockFinalityStore::RememberAuthorizationBase(AcceptedRecord record)
     for (const auto& [retained_id, retained] : m_authorization_bases) {
         const auto carrier_end{
             retained.chainlock
-                ? PaymentAuditSealCarrierEnd(
-                      m_config, retained.chainlock->statement)
+                ? PaymentAuditProtectionCarrierEnd(
+                      PaymentAuditScheduleConfig{
+                          m_config.chainlock_schedule,
+                          m_config.btcc_schedule},
+                      retained.chainlock->statement.height)
                 : std::nullopt};
         if (carrier_end &&
             (!retention_height || *retention_height < *carrier_end)) {
             protected_ids.insert(retained_id);
+            const auto& seal_base{
+                retained.chainlock->statement.roster_authorization_base};
+            if (!seal_base.IsNull()) {
+                protected_ids.insert(seal_base.logical_id);
+            }
         }
     }
 
@@ -1481,6 +1495,11 @@ void ChainLockFinalityStore::RememberAuthorizationBase(AcceptedRecord record)
             m_authorization_base_by_witness.erase(old_witness);
         }
         m_authorization_bases.erase(old);
+    }
+    if (m_authorization_bases.size() >
+        VERIFIED_AUTHORIZATION_BASE_CAPACITY) {
+        throw std::logic_error{
+            "authorization-base retention capacity invariant"};
     }
     ++m_authorization_base_revision;
 }
@@ -1786,6 +1805,26 @@ std::shared_ptr<const FinalChainLock> ChainLockFinalityStore::GetByLogicalId(
     }
     if (m_unsealed_btcc && m_unsealed_btcc->logical_id == logical_id) {
         return m_unsealed_btcc->chainlock;
+    }
+    return nullptr;
+}
+
+std::shared_ptr<const FinalChainLock>
+ChainLockFinalityStore::GetServableByLogicalId(
+    const uint256& logical_id) const
+{
+    if (logical_id.IsNull()) return nullptr;
+    LOCK(m_mutex);
+    for (const auto& [height, record] : m_recent_by_height) {
+        (void)height;
+        if (record.logical_id == logical_id) return record.chainlock;
+    }
+    if (m_unsealed_btcc && m_unsealed_btcc->logical_id == logical_id) {
+        return m_unsealed_btcc->chainlock;
+    }
+    const auto retained{m_authorization_bases.find(logical_id)};
+    if (retained != m_authorization_bases.end()) {
+        return retained->second.chainlock;
     }
     return nullptr;
 }

@@ -2663,6 +2663,36 @@ struct PQChainLockPersistence::Impl {
             ++next_authorization_base_count;
         }
 
+        std::set<uint256> payment_audit_protected_ids;
+        const auto protect_unexpired_payment_audit_seal =
+            [&](const DiskRecord& record) {
+                const auto carrier_end{PaymentAuditProtectionCarrierEnd(
+                    PaymentAuditScheduleConfig{
+                        config.chainlock_schedule, config.btcc_schedule},
+                    record.chainlock.statement.height)};
+                if (!carrier_end ||
+                    candidate.chainlock.statement.height >= *carrier_end) {
+                    return;
+                }
+                payment_audit_protected_ids.insert(record.logical_id);
+                const auto& base{
+                    record.chainlock.statement.roster_authorization_base};
+                if (!base.IsNull()) {
+                    payment_audit_protected_ids.insert(base.logical_id);
+                }
+            };
+        for (const auto& [logical_id, retained] : authorization_bases) {
+            (void)logical_id;
+            protect_unexpired_payment_audit_seal(retained);
+        }
+        if (add_previous_best) {
+            protect_unexpired_payment_audit_seal(*previous_best);
+        }
+        if (add_departing_unsealed_base) {
+            protect_unexpired_payment_audit_seal(
+                *departing_unsealed_base);
+        }
+
         std::set<uint256> evict_authorization_bases;
         while (next_authorization_base_count -
                    evict_authorization_bases.size() >
@@ -2698,10 +2728,12 @@ struct PQChainLockPersistence::Impl {
                         next_receipt_archive_authorization->predecessor
                             .statement};
                 const bool payment_audit_seal_role{
-                    next_payment_audit_seal_context &&
-                    MatchesMetadata(
-                        record,
-                        next_payment_audit_seal_context->Seal())};
+                    payment_audit_protected_ids.contains(
+                        record.logical_id) ||
+                    (next_payment_audit_seal_context &&
+                     MatchesMetadata(
+                         record,
+                         next_payment_audit_seal_context->Seal()))};
                 return live_role || archive_role ||
                        payment_audit_seal_role;
             };
@@ -2941,6 +2973,33 @@ struct PQChainLockPersistence::Impl {
             }
         }
 
+        const int32_t retention_height{best
+            ? std::max(best->chainlock.statement.height,
+                       candidate.chainlock.statement.height)
+            : candidate.chainlock.statement.height};
+        std::set<uint256> payment_audit_protected_ids;
+        const auto protect_unexpired_payment_audit_seal =
+            [&](const DiskRecord& record) {
+                const auto carrier_end{PaymentAuditProtectionCarrierEnd(
+                    PaymentAuditScheduleConfig{
+                        config.chainlock_schedule, config.btcc_schedule},
+                    record.chainlock.statement.height)};
+                if (!carrier_end || retention_height >= *carrier_end) {
+                    return;
+                }
+                payment_audit_protected_ids.insert(record.logical_id);
+                const auto& base{
+                    record.chainlock.statement.roster_authorization_base};
+                if (!base.IsNull()) {
+                    payment_audit_protected_ids.insert(base.logical_id);
+                }
+            };
+        for (const auto& [logical_id, retained] : authorization_bases) {
+            (void)logical_id;
+            protect_unexpired_payment_audit_seal(retained);
+        }
+        protect_unexpired_payment_audit_seal(candidate);
+
         std::optional<uint256> evict;
         if (authorization_bases.size() >=
             VERIFIED_AUTHORIZATION_BASE_CAPACITY) {
@@ -2981,8 +3040,10 @@ struct PQChainLockPersistence::Impl {
                     record.chainlock.statement ==
                         archive_predecessor->statement};
                 const bool payment_audit_seal_role{
-                    payment_audit_seal &&
-                    MatchesMetadata(record, *payment_audit_seal)};
+                    payment_audit_protected_ids.contains(
+                        record.logical_id) ||
+                    (payment_audit_seal &&
+                     MatchesMetadata(record, *payment_audit_seal))};
                 return live_role || archive_role ||
                        payment_audit_seal_role;
             };

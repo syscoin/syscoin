@@ -191,6 +191,11 @@ struct PaymentAuditEpochSchedule {
 BuildPaymentAuditEpochSchedule(const PaymentAuditScheduleConfig& config,
                                uint32_t epoch) noexcept;
 
+/** Exclusive end of the audit window whose durable owner contains height. */
+[[nodiscard]] std::optional<int32_t> PaymentAuditProtectionCarrierEnd(
+    const PaymentAuditScheduleConfig& config,
+    int32_t owner_height) noexcept;
+
 /** Canonical one-time WOTS+ audit leaf for a child active at the seal. */
 [[nodiscard]] std::optional<uint8_t> PaymentAuditLeafIndex(
     const PaymentAuditScheduleConfig& config,

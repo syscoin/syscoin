@@ -291,6 +291,19 @@ BOOST_AUTO_TEST_CASE(schedule_has_24_retrospective_rows_and_retry_window)
     BOOST_CHECK_EQUAL(*last_live_epoch,
                       schedule->epoch +
                           PAYMENT_AUDIT_CARRIER_EPOCH_LOOKBACK);
+    for (const int32_t owner_height : {
+             schedule->seal_height,
+             schedule->carrier_start_height,
+             static_cast<int32_t>(config.chainlock.epoch_blocks) *
+                 static_cast<int32_t>(schedule->epoch + 2U),
+             schedule->carrier_end_height_exclusive - 1}) {
+        const auto carrier_end{
+            PaymentAuditProtectionCarrierEnd(config, owner_height)};
+        BOOST_REQUIRE(carrier_end);
+        BOOST_CHECK_EQUAL(*carrier_end,
+                          schedule->carrier_end_height_exclusive);
+    }
+    BOOST_CHECK(!PaymentAuditProtectionCarrierEnd(config, 864));
     BOOST_CHECK_EQUAL(PAYMENT_AUDIT_FUTURE_BTC_HEIGHT_DELTA, 37U);
     BOOST_CHECK_EQUAL(PAYMENT_AUDIT_SEED_MIN_CONFIRMATIONS, 6U);
     BOOST_CHECK_GE(schedule->seal_height,
@@ -328,6 +341,11 @@ BOOST_AUTO_TEST_CASE(schedule_has_24_retrospective_rows_and_retry_window)
 
     const auto next{BuildPaymentAuditEpochSchedule(config, 4)};
     BOOST_REQUIRE(next);
+    const auto next_carrier_end{PaymentAuditProtectionCarrierEnd(
+        config, schedule->carrier_end_height_exclusive)};
+    BOOST_REQUIRE(next_carrier_end);
+    BOOST_CHECK_EQUAL(*next_carrier_end,
+                      next->carrier_end_height_exclusive);
     BOOST_CHECK_LE(schedule->carrier_end_height_exclusive,
                    next->carrier_start_height);
 }

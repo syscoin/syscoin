@@ -637,7 +637,8 @@ public:
         bool signatures_valid,
         PreparedChainLockContextPtr verification_context,
         ChainLockFinalityError* error = nullptr,
-        RecoveryUniverseCapsulePtr recovery_universe = nullptr)
+        RecoveryUniverseCapsulePtr recovery_universe = nullptr,
+        ChainLockDurableAuthorization durable_authorization = {})
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /** Import one exact locally fsynced base after full startup revalidation. */
     [[nodiscard]] bool AcceptPersistedRosterAuthorizationBase(
@@ -657,6 +658,10 @@ public:
         int32_t height) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     [[nodiscard]] std::shared_ptr<const FinalChainLock> GetByLogicalId(
         const uint256& logical_id) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** Exact CLSIG inventory, including authorization-only retained records. */
+    [[nodiscard]] std::shared_ptr<const FinalChainLock>
+    GetServableByLogicalId(const uint256& logical_id) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /** Oldest-to-newest bounded snapshot of fully verified winners. */
     [[nodiscard]] std::vector<std::shared_ptr<const FinalChainLock>> GetRecent() const
@@ -734,7 +739,9 @@ private:
         const RecoveryUniverseCapsulePtr& recovery_universe,
         ChainLockFinalityError* error) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     void RememberAccepted(AcceptedRecord record) EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
-    void RememberAuthorizationBase(AcceptedRecord record)
+    void RememberAuthorizationBase(
+        AcceptedRecord record,
+        bool unordered_startup_import = false)
         EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
     [[nodiscard]] bool AcceptRosterAuthorizationBaseInternal(
         const FinalChainLock& chainlock,
@@ -742,7 +749,8 @@ private:
         PreparedChainLockContextPtr verification_context,
         bool persisted_import,
         RecoveryUniverseCapsulePtr recovery_universe,
-        ChainLockFinalityError* error)
+        ChainLockFinalityError* error,
+        ChainLockDurableAuthorization durable_authorization)
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     const uint256 m_genesis_hash;

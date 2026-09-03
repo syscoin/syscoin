@@ -538,6 +538,10 @@ BOOST_AUTO_TEST_CASE(verified_authorization_base_is_exact_and_not_finality)
     BOOST_CHECK(!store.GetBest());
     BOOST_CHECK(!store.GetByHeight(first.statement.height));
     BOOST_CHECK(!store.GetByLogicalId(first.GetLogicalId(genesis)));
+    BOOST_REQUIRE(
+        store.GetServableByLogicalId(first.GetLogicalId(genesis)));
+    BOOST_CHECK(*store.GetServableByLogicalId(
+                    first.GetLogicalId(genesis)) == first);
     BOOST_CHECK(store.AlreadyHaveWitness(first.GetWitnessId(genesis)));
 
     const RosterAuthorizationBaseIdentity identity{
@@ -647,7 +651,7 @@ BOOST_AUTO_TEST_CASE(
 }
 
 BOOST_AUTO_TEST_CASE(
-    payment_audit_seal_authorization_survives_live_capacity_churn)
+    payment_audit_window_owner_and_base_survive_live_capacity_churn)
 {
     const uint256 genesis{NonNullHash(115)};
     const auto config{MakeConfig()};
@@ -659,51 +663,112 @@ BOOST_AUTO_TEST_CASE(
     TestFinalityContext context;
     ChainLockFinalityStore store{genesis, config, context};
 
-    const auto seal{MakeChainLock(
-        schedule->seal_height,
+    std::size_t protected_owners{0};
+    std::size_t possible_base_changes{0};
+    for (int32_t height{schedule->seal_height};
+         height < schedule->carrier_end_height_exclusive;
+         ++height) {
+        if (IsEligibleChainLockTarget(config.chainlock_schedule, height)) {
+            ++protected_owners;
+        }
+        if (IsBTCCCandidateHeight(config.btcc_schedule, height) &&
+            height + static_cast<int32_t>(PAYMENT_AUDIT_RECEIPT_DELAY) <
+                schedule->carrier_end_height_exclusive) {
+            ++possible_base_changes;
+        }
+    }
+    BOOST_CHECK_EQUAL(protected_owners, 58U);
+    BOOST_CHECK_LE(possible_base_changes, 29U);
+    BOOST_CHECK_LT(protected_owners + possible_base_changes + 3,
+                   VERIFIED_AUTHORIZATION_BASE_CAPACITY);
+
+    for (std::size_t index{0};
+         index < VERIFIED_AUTHORIZATION_BASE_CAPACITY - 2;
+         ++index) {
+        const int32_t height{
+            870 + static_cast<int32_t>(index * PQ_CL_PERIOD)};
+        const auto filler{MakeChainLock(
+            height, height - static_cast<int32_t>(PQ_CL_PERIOD),
+            NonNullHash(height - static_cast<int32_t>(PQ_CL_PERIOD)),
+            500'000 + index)};
+        BOOST_REQUIRE(store.AcceptVerifiedRosterAuthorizationBase(
+            filler, /*signatures_valid=*/true,
+            MakeVerificationContext(genesis, config, filler)));
+    }
+
+    auto base{MakeChainLock(
         schedule->seal_height -
             config.chainlock_schedule.chainlock_period,
+        schedule->seal_height -
+            2 * config.chainlock_schedule.chainlock_period,
         NonNullHash(schedule->seal_height -
+                    2 * config.chainlock_schedule.chainlock_period),
+        114)};
+    BOOST_REQUIRE(store.AcceptVerifiedRosterAuthorizationBase(
+        base, /*signatures_valid=*/true,
+        MakeVerificationContext(genesis, config, base)));
+    const RosterAuthorizationBaseIdentity base_identity{
+        base.statement.height, base.statement.block_hash,
+        base.GetLogicalId(genesis)};
+
+    const int32_t owner_height{
+        static_cast<int32_t>(config.chainlock_schedule.epoch_blocks) *
+        static_cast<int32_t>(schedule->epoch + 2U)};
+    BOOST_REQUIRE_GT(owner_height, schedule->seal_height);
+    BOOST_REQUIRE_LT(owner_height,
+                     schedule->carrier_end_height_exclusive);
+    auto owner{MakeChainLock(
+        owner_height,
+        owner_height - config.chainlock_schedule.chainlock_period,
+        NonNullHash(owner_height -
                     config.chainlock_schedule.chainlock_period),
         115)};
+    owner.statement.roster_authorization_base = base_identity;
     BOOST_REQUIRE(store.AcceptVerifiedRosterAuthorizationBase(
-        seal, /*signatures_valid=*/true,
-        MakeVerificationContext(genesis, config, seal)));
+        owner, /*signatures_valid=*/true,
+        MakeVerificationContext(genesis, config, owner)));
 
     const int32_t churn_height{
-        seal.statement.height +
-        2 * static_cast<int32_t>(
-                config.chainlock_schedule.chainlock_period)};
+        schedule->carrier_end_height_exclusive -
+        static_cast<int32_t>(config.chainlock_schedule.chainlock_period)};
     BOOST_REQUIRE_LT(churn_height,
                      schedule->carrier_end_height_exclusive);
-    for (std::size_t index{0};
-         index <= VERIFIED_AUTHORIZATION_BASE_CAPACITY + 8;
-         ++index) {
-        const auto retained{MakeChainLock(
-            churn_height, churn_height -
-                config.chainlock_schedule.chainlock_period,
-            NonNullHash(510'000 + index), 520'000 + index)};
-        BOOST_REQUIRE(store.AcceptVerifiedRosterAuthorizationBase(
-            retained, /*signatures_valid=*/true,
-            MakeVerificationContext(genesis, config, retained)));
-    }
+    const auto retained{MakeChainLock(
+        churn_height, churn_height -
+            config.chainlock_schedule.chainlock_period,
+        NonNullHash(churn_height -
+                    config.chainlock_schedule.chainlock_period),
+        520'000)};
+    BOOST_REQUIRE(store.AcceptVerifiedRosterAuthorizationBase(
+        retained, /*signatures_valid=*/true,
+        MakeVerificationContext(genesis, config, retained)));
     BOOST_REQUIRE(store.GetVerifiedRosterAuthorizationBaseByLogicalId(
-        seal.GetLogicalId(genesis)));
+        owner.GetLogicalId(genesis)));
+    BOOST_REQUIRE(store.GetVerifiedRosterAuthorizationBase(base_identity));
     BOOST_CHECK_EQUAL(store.AuthorizationBaseSizeForTesting(),
                       VERIFIED_AUTHORIZATION_BASE_CAPACITY);
 
-    const auto expired{MakeChainLock(
-        schedule->carrier_end_height_exclusive,
-        schedule->carrier_end_height_exclusive -
-            config.chainlock_schedule.chainlock_period,
-        NonNullHash(schedule->carrier_end_height_exclusive -
-                    config.chainlock_schedule.chainlock_period),
-        530'000)};
-    BOOST_REQUIRE(store.AcceptVerifiedRosterAuthorizationBase(
-        expired, /*signatures_valid=*/true,
-        MakeVerificationContext(genesis, config, expired)));
+    for (std::size_t index{0};
+         index < VERIFIED_AUTHORIZATION_BASE_CAPACITY + 4;
+         ++index) {
+        const int32_t height{
+            schedule->carrier_end_height_exclusive +
+            static_cast<int32_t>(index * PQ_CL_PERIOD)};
+        const auto expired{MakeChainLock(
+            height,
+            height - config.chainlock_schedule.chainlock_period,
+            NonNullHash(height -
+                        config.chainlock_schedule.chainlock_period),
+            530'000 + index)};
+        BOOST_REQUIRE(store.AcceptVerifiedRosterAuthorizationBase(
+            expired, /*signatures_valid=*/true,
+            MakeVerificationContext(genesis, config, expired)));
+    }
     BOOST_CHECK(!store.GetVerifiedRosterAuthorizationBaseByLogicalId(
-        seal.GetLogicalId(genesis)));
+        owner.GetLogicalId(genesis)));
+    BOOST_CHECK(!store.GetVerifiedRosterAuthorizationBase(base_identity));
+    BOOST_CHECK_EQUAL(store.AuthorizationBaseSizeForTesting(),
+                      VERIFIED_AUTHORIZATION_BASE_CAPACITY);
 }
 
 BOOST_AUTO_TEST_CASE(
@@ -736,7 +801,7 @@ BOOST_AUTO_TEST_CASE(
         static_cast<int32_t>(
             config.chainlock_schedule.chainlock_period)};
     for (std::size_t index{0};
-         index <= VERIFIED_AUTHORIZATION_BASE_CAPACITY + 8;
+         index < VERIFIED_AUTHORIZATION_BASE_CAPACITY - 1;
          ++index) {
         const auto retained{MakeChainLock(
             later_height, later_height -
@@ -752,6 +817,60 @@ BOOST_AUTO_TEST_CASE(
         seal.GetLogicalId(genesis)));
     BOOST_CHECK_EQUAL(store.AuthorizationBaseSizeForTesting(),
                       VERIFIED_AUTHORIZATION_BASE_CAPACITY);
+}
+
+BOOST_AUTO_TEST_CASE(
+    persisted_best_role_keeps_startup_authorization_cache_bounded)
+{
+    const uint256 genesis{NonNullHash(117)};
+    const auto config{MakeConfig()};
+    TestFinalityContext context;
+    ChainLockFinalityStore store{genesis, config, context};
+
+    std::optional<uint256> oldest_logical_id;
+    for (std::size_t index{0};
+         index < VERIFIED_AUTHORIZATION_BASE_CAPACITY;
+         ++index) {
+        const int32_t height{
+            870 + static_cast<int32_t>(index * PQ_CL_PERIOD)};
+        const auto retained{MakeChainLock(
+            height, height - static_cast<int32_t>(PQ_CL_PERIOD),
+            NonNullHash(height - static_cast<int32_t>(PQ_CL_PERIOD)),
+            560'000 + index)};
+        if (!oldest_logical_id) {
+            oldest_logical_id = retained.GetLogicalId(genesis);
+        }
+        BOOST_REQUIRE(store.AcceptPersistedRosterAuthorizationBase(
+            retained, /*signatures_valid=*/true,
+            ChainLockStoreTestContextFactory::CreateTrustedPersistence(
+                genesis, config.chainlock_schedule,
+                retained.statement)));
+    }
+    BOOST_CHECK_EQUAL(store.AuthorizationBaseSizeForTesting(),
+                      VERIFIED_AUTHORIZATION_BASE_CAPACITY);
+
+    const auto best{MakeChainLock(
+        /*height=*/10'000, /*previous_height=*/9'995,
+        NonNullHash(9'995), 570'000)};
+    auto prepared{store.PreparePersistedCandidate(best)};
+    BOOST_REQUIRE(prepared);
+    const auto best_context{
+        ChainLockStoreTestContextFactory::CreateTrustedPersistence(
+            genesis, config.chainlock_schedule, best.statement)};
+    BOOST_REQUIRE(best_context);
+    BOOST_REQUIRE(store.AcceptPersistedVerified(
+        *prepared, best, /*signatures_valid=*/true,
+        /*error=*/nullptr, best_context));
+
+    BOOST_REQUIRE(store.GetBest());
+    BOOST_CHECK(*store.GetBest() == best);
+    BOOST_CHECK_EQUAL(store.AuthorizationBaseSizeForTesting(),
+                      VERIFIED_AUTHORIZATION_BASE_CAPACITY);
+    BOOST_REQUIRE(store.GetVerifiedRosterAuthorizationBaseByLogicalId(
+        best.GetLogicalId(genesis)));
+    BOOST_REQUIRE(oldest_logical_id);
+    BOOST_CHECK(!store.GetVerifiedRosterAuthorizationBaseByLogicalId(
+        *oldest_logical_id));
 }
 
 BOOST_AUTO_TEST_CASE(persisted_authorization_base_requires_trusted_context)
@@ -1749,6 +1868,86 @@ BOOST_AUTO_TEST_CASE(historical_durable_authorization_is_the_fsync_seam)
         MakeVerificationContext(genesis, config, candidate)));
     BOOST_REQUIRE(success_store.GetBest());
     BOOST_CHECK(*success_store.GetBest() == candidate);
+}
+
+BOOST_AUTO_TEST_CASE(
+    authorization_base_durable_guard_precedes_fsync_and_publication)
+{
+    const uint256 genesis{NonNullHash(4'071)};
+    const auto config{MakeConfig()};
+    const auto candidate{MakeChainLock(
+        885, 880, NonNullHash(880), 4'071)};
+    const auto verification_context{
+        MakeVerificationContext(genesis, config, candidate)};
+    BOOST_REQUIRE(verification_context);
+
+    TestFinalityContext unavailable_context;
+    ChainLockFinalityStore unavailable{
+        genesis, config, unavailable_context};
+    ChainLockFinalityError error{ChainLockFinalityError::NONE};
+    bool unavailable_guard_called{false};
+    BOOST_CHECK(!unavailable.AcceptVerifiedRosterAuthorizationBase(
+        candidate, /*signatures_valid=*/true, verification_context,
+        &error, /*recovery_universe=*/nullptr,
+        [&](const std::function<bool()>&,
+            ChainLockFinalityError*) {
+            unavailable_guard_called = true;
+            return true;
+        }));
+    BOOST_CHECK(!unavailable_guard_called);
+    BOOST_CHECK(error == ChainLockFinalityError::PERSISTENCE_FAILURE);
+
+    TestFinalityContext rejected_context;
+    std::size_t durable_writes{0};
+    ChainLockFinalityStore rejected{
+        genesis, config, rejected_context, {}, {}, {}, {}, {}, {},
+        [&](const FinalChainLock&,
+            const PreparedChainLockContextPtr&,
+            const RecoveryUniverseCapsulePtr&) {
+            ++durable_writes;
+            return true;
+        }};
+    error = ChainLockFinalityError::NONE;
+    bool authorization_called{false};
+    BOOST_CHECK(!rejected.AcceptVerifiedRosterAuthorizationBase(
+        candidate, /*signatures_valid=*/true, verification_context,
+        &error, /*recovery_universe=*/nullptr,
+        [&](const std::function<bool()>&,
+            ChainLockFinalityError* callback_error) {
+            authorization_called = true;
+            BOOST_CHECK_EQUAL(durable_writes, 0U);
+            if (callback_error != nullptr) {
+                *callback_error = ChainLockFinalityError::CONTEXT_CHANGED;
+            }
+            return false;
+        }));
+    BOOST_CHECK(authorization_called);
+    BOOST_CHECK(error == ChainLockFinalityError::CONTEXT_CHANGED);
+    BOOST_CHECK_EQUAL(durable_writes, 0U);
+    BOOST_CHECK(!rejected.GetServableByLogicalId(
+        candidate.GetLogicalId(genesis)));
+
+    TestFinalityContext accepted_context;
+    ChainLockFinalityStore accepted{
+        genesis, config, accepted_context, {}, {}, {}, {}, {}, {},
+        [&](const FinalChainLock&,
+            const PreparedChainLockContextPtr&,
+            const RecoveryUniverseCapsulePtr&) {
+            ++durable_writes;
+            return true;
+        }};
+    BOOST_REQUIRE(accepted.AcceptVerifiedRosterAuthorizationBase(
+        candidate, /*signatures_valid=*/true, verification_context,
+        &error, /*recovery_universe=*/nullptr,
+        [&](const std::function<bool()>& persist_record,
+            ChainLockFinalityError*) {
+            BOOST_CHECK_EQUAL(durable_writes, 0U);
+            return persist_record();
+        }));
+    BOOST_CHECK_EQUAL(durable_writes, 1U);
+    BOOST_REQUIRE(accepted.GetServableByLogicalId(
+        candidate.GetLogicalId(genesis)));
+    BOOST_CHECK(!accepted.GetBest());
 }
 
 BOOST_AUTO_TEST_CASE(preseal_receipt_at_updated_anchor_rebases_as_catchup)
