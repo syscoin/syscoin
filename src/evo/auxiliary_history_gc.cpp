@@ -551,6 +551,10 @@ MakeAuxiliaryHistoryGCDeployment(const Consensus::Params& consensus)
            << consensus.hashPQBTCCReceiptAnchorCursorSysBlock
            << consensus.hashPQBTCCReceiptAnchorCursorBTCBlock
            << consensus.hashPQBTCCReceiptAnchorState
+           << static_cast<int32_t>(
+                  consensus.nPQBTCCReceiptAnchorLatestTargetHeight)
+           << static_cast<int32_t>(
+                  consensus.nPQBTCCReceiptAnchorLatestCarrierHeight)
            << static_cast<int32_t>(consensus.nCLReceiptStartBlock)
            << CDeterministicMNListInverse::VERSION
            << CDeterministicMNManager::LIST_CACHE_SIZE

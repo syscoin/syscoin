@@ -182,8 +182,6 @@ llmq::pq::FinalPaymentAudit MakePaymentAuditCandidate(
         first_active_epoch + ACTIVE_QUORUMS;
     seal.roster_beacons.active.recovery_authority_source.normal_beacon =
         seal.roster_beacons.active.seeds.back();
-    seal.roster_beacons.active.recovery_authority_hash =
-        NonNullHash(1'150 + salt);
     seal.roster_transition = RosterAuthorizationTransitionKind::KEEP;
     seal.roster_authorization_state_hash = NonNullHash(1'200 + salt);
     seal.roster_authorization_base = {
@@ -262,8 +260,6 @@ llmq::pq::FinalChainLock MakeCatchupChainLock(
     chainlock.statement.roster_beacons.active
         .recovery_authority_source.normal_beacon =
         chainlock.statement.roster_beacons.active.seeds.back();
-    chainlock.statement.roster_beacons.active.recovery_authority_hash =
-        NonNullHash(24'000 + salt);
     chainlock.statement.roster_transition =
         llmq::pq::RosterAuthorizationTransitionKind::KEEP;
     chainlock.statement.roster_authorization_state_hash =
@@ -387,6 +383,51 @@ public:
     static pq::ChainLockFinalityStore* Store(CChainLocksHandler& handler)
     {
         return handler.m_store.get();
+    }
+
+    static pq::BTCCReceipt BTCCReceiptForCarrier(
+        const CChainLocksHandler& handler,
+        int32_t carrier_height,
+        const CBlockIndex& carrier_parent)
+    {
+        LOCK(::cs_main);
+        return handler.GetBTCCReceiptForCarrier(
+            carrier_height, carrier_parent);
+    }
+
+    static bool IsVerifiedBTCCReceipt(
+        const CChainLocksHandler& handler,
+        const pq::BTCCReceipt& receipt,
+        const CBlockIndex& carrier)
+    {
+        LOCK(::cs_main);
+        return handler.CheckBTCCReceiptCertificate(receipt, carrier) ==
+               CChainLocksHandler::BTCCReceiptCertificateStatus::VERIFIED;
+    }
+
+    struct ObjectiveRosterAuthorizationSummary {
+        pq::ObjectiveRosterAuthorizationMode mode{
+            pq::ObjectiveRosterAuthorizationMode::PAUSE};
+        std::optional<pq::RosterAuthorizationBaseIdentity> base;
+        std::optional<pq::RecoveryRosterAuthoritySource> recovery_source;
+    };
+
+    static std::optional<ObjectiveRosterAuthorizationSummary>
+    ObjectiveRosterAuthorization(
+        const CChainLocksHandler& handler,
+        const CBlockIndex& candidate)
+    {
+        LOCK(::cs_main);
+        const auto context{
+            handler.ResolveObjectiveRosterAuthorizationContext(candidate)};
+        if (!context) return std::nullopt;
+        return ObjectiveRosterAuthorizationSummary{
+            context->mode,
+            context->base
+                ? std::optional<pq::RosterAuthorizationBaseIdentity>{
+                      context->base->metadata.AuthorizationBase()}
+                : std::nullopt,
+            context->recovery_source};
     }
 
     static bool HasRuntimeVerificationContext(
@@ -659,19 +700,6 @@ public:
                 source, current_revision);
     }
 
-    static std::optional<pq::ChainLockSigningWindow>
-    OutageRecoveryWindow(
-        const pq::ChainLockScheduleConfig& chainlock,
-        const pq::BTCCScheduleConfig& btcc,
-        uint32_t durable_authorization_epoch,
-        int32_t durable_predecessor_height,
-        int32_t tip_height)
-    {
-        return CChainLocksHandler::OutageRecoverySigningWindow(
-            chainlock, btcc, durable_authorization_epoch,
-            durable_predecessor_height, tip_height);
-    }
-
     static bool ExactHistoricalResetCandidate(
         const pq::ChainLockStatement& statement,
         const pq::ChainLockScheduleConfig& chainlock,
@@ -752,22 +780,30 @@ public:
     {
         if (!handler.m_store) return false;
         const auto current{handler.m_store->GetBestRecord()};
-        const auto exact_prior{
-            chainlock.statement.roster_authorization_base.IsNull()
-                ? std::optional<pq::VerifiedRosterAuthorizationBaseView>{}
-                : handler.m_store->GetVerifiedRosterAuthorizationBase(
-                      chainlock.statement.roster_authorization_base)};
         const CBlockIndex* candidate{nullptr};
+        std::optional<
+            CChainLocksHandler::ObjectiveRosterAuthorizationContext>
+            objective;
         {
             LOCK(::cs_main);
             candidate = handler.m_chainman.m_blockman.LookupBlockIndex(
                 chainlock.statement.block_hash);
+            if (candidate != nullptr &&
+                chainlock.statement.roster_transition !=
+                    pq::RosterAuthorizationTransitionKind::INITIALIZE) {
+                objective = handler
+                    .ResolveObjectiveRosterAuthorizationContext(*candidate);
+            }
         }
         if (candidate == nullptr) return false;
+        const auto exact_prior{
+            objective && objective->base
+                ? objective->base
+                : std::optional<pq::VerifiedRosterAuthorizationBaseView>{}};
         const auto authorization{
             handler.BuildNetworkRosterAuthorizationContext(
                 chainlock.statement, *candidate,
-                exact_prior ? &*exact_prior : nullptr)};
+                objective ? &*objective : nullptr)};
         return authorization &&
                handler.IsStateAdvancingAuthorizationBaseAdmissible(
                    admission, chainlock.selected_quorum_mask,
@@ -983,6 +1019,10 @@ struct LiveSigningIndexChain {
             index.pqBTCCReceiptCursorSysHash = state.cursor.sys_hash;
             index.pqBTCCReceiptCursorBTCHash = state.cursor.btc_hash;
             index.pqBTCCReceiptStateHash = state.cumulative_hash;
+            index.pqBTCCReceiptLatestTargetHeight =
+                state.latest_chainlock_target_height;
+            index.pqBTCCReceiptLatestCarrierHeight =
+                state.latest_receipt_carrier_height;
         }
     }
 
@@ -1055,7 +1095,6 @@ BOOST_AUTO_TEST_CASE(historical_reset_admission_distinguishes_initialize_and_rec
             static_cast<uint32_t>(slot);
     }
     initial_window.active.recovery_authority_source.normal_beacon = normal;
-    initial_window.active.recovery_authority_hash = NonNullHash(89'004);
     initial_window.next.epoch = ACTIVE_QUORUMS;
     BOOST_REQUIRE(IsInitialNormalRosterBeaconWindow(initial_window));
 
@@ -1096,7 +1135,6 @@ BOOST_AUTO_TEST_CASE(historical_reset_admission_distinguishes_initialize_and_rec
         initialize.height, initialize.block_hash, NonNullHash(89'008)};
     const auto recovery_window{MakeRecoveryRosterBeaconWindow(
         initial_window.active.recovery_authority_source,
-        initial_window.active.recovery_authority_hash,
         /*newest_epoch=*/7)};
     BOOST_REQUIRE(recovery_window);
     recover.roster_beacons = *recovery_window;
@@ -1130,9 +1168,8 @@ BOOST_AUTO_TEST_CASE(historical_reset_admission_distinguishes_initialize_and_rec
         NonNullHash(89'010)));
 }
 
-BOOST_AUTO_TEST_CASE(outage_recovery_window_remains_canonical_after_its_signing_height)
+BOOST_AUTO_TEST_CASE(objective_recovery_mode_is_mutually_exclusive_at_one_target)
 {
-    using Access = llmq::test::CChainLocksHandlerTestAccess;
     using namespace llmq::pq;
 
     const auto chainlock{MakeChainLockScheduleConfig(/*epoch_origin=*/0)};
@@ -1141,30 +1178,35 @@ BOOST_AUTO_TEST_CASE(outage_recovery_window_remains_canonical_after_its_signing_
     const auto canonical{CanonicalRosterRecoveryTargetHeight(
         *chainlock, btcc, /*epoch=*/7)};
     BOOST_REQUIRE(canonical);
-    constexpr int32_t DURABLE_PREDECESSOR{865};
-    const int32_t later_tip{
-        *canonical + static_cast<int32_t>(chainlock->sign_lag) + 20};
-    const auto ordinary_latest{CurrentChainLockSigningWindow(
-        *chainlock, DURABLE_PREDECESSOR, later_tip)};
-    BOOST_REQUIRE(ordinary_latest);
-    BOOST_REQUIRE_GT(ordinary_latest->target_height, *canonical);
+    const auto old_epoch_base{EpochBaseHeight(*chainlock, /*epoch=*/3)};
+    const auto fresh_epoch_base{EpochBaseHeight(*chainlock, /*epoch=*/6)};
+    BOOST_REQUIRE(old_epoch_base);
+    BOOST_REQUIRE(fresh_epoch_base);
+    const auto old_receipt{NextEligibleChainLockTargetHeight(
+        *chainlock, *old_epoch_base - 1)};
+    const auto fresh_receipt{NextEligibleChainLockTargetHeight(
+        *chainlock, *fresh_epoch_base - 1)};
+    BOOST_REQUIRE(old_receipt);
+    BOOST_REQUIRE(fresh_receipt);
 
-    const auto recovery{Access::OutageRecoveryWindow(
-        *chainlock, btcc, /*durable_authorization_epoch=*/3,
-        DURABLE_PREDECESSOR, later_tip)};
-    BOOST_REQUIRE(recovery);
-    BOOST_CHECK_EQUAL(recovery->target_height, *canonical);
-    BOOST_CHECK_EQUAL(
-        recovery->declared_predecessor_height,
-        *canonical - static_cast<int32_t>(chainlock->chainlock_period));
+    const auto recover{GetObjectiveRosterAuthorizationMode(
+        *chainlock, btcc, /*target_epoch=*/7, *canonical,
+        *old_receipt)};
+    const auto normal{GetObjectiveRosterAuthorizationMode(
+        *chainlock, btcc, /*target_epoch=*/7, *canonical,
+        *fresh_receipt)};
+    BOOST_REQUIRE(recover);
+    BOOST_REQUIRE(normal);
+    BOOST_CHECK(*recover == ObjectiveRosterAuthorizationMode::RECOVER);
+    BOOST_CHECK(*normal == ObjectiveRosterAuthorizationMode::NORMAL);
 
-    BOOST_CHECK(!Access::OutageRecoveryWindow(
-        *chainlock, btcc, /*durable_authorization_epoch=*/6,
-        DURABLE_PREDECESSOR, later_tip));
-    BOOST_CHECK(!Access::OutageRecoveryWindow(
-        *chainlock, btcc, /*durable_authorization_epoch=*/3,
-        DURABLE_PREDECESSOR,
-        *canonical + static_cast<int32_t>(chainlock->sign_lag) - 1));
+    const int32_t noncanonical{
+        *canonical - static_cast<int32_t>(chainlock->chainlock_period)};
+    const auto paused{GetObjectiveRosterAuthorizationMode(
+        *chainlock, btcc, /*target_epoch=*/7, noncanonical,
+        *old_receipt)};
+    BOOST_REQUIRE(paused);
+    BOOST_CHECK(*paused == ObjectiveRosterAuthorizationMode::PAUSE);
 }
 
 BOOST_AUTO_TEST_CASE(current_signing_context_routes_advance_and_keep_ids)
@@ -2133,11 +2175,15 @@ BOOST_AUTO_TEST_CASE(auxiliary_gc_authority_rejects_stale_lifecycle_proofs)
 
     // A certificate already crossing its durability seam during shutdown
     // must retain history, but it cannot revive destructive authority.
-    BOOST_CHECK(gate.ArmPublication([&] {
+    const auto stopped_publication{gate.ArmPublication([&] {
         publication_hold = true;
         return true;
-    }));
+    })};
+    BOOST_REQUIRE(stopped_publication);
     BOOST_CHECK(publication_hold);
+    BOOST_CHECK(!gate.ObserveReady());
+    BOOST_CHECK(gate.CompletePublication(*stopped_publication) ==
+                Gate::MutationResult::APPLIED);
     BOOST_CHECK(!gate.ObserveReady());
 
     BOOST_REQUIRE(gate.Start(revoke));
@@ -2181,10 +2227,11 @@ BOOST_AUTO_TEST_CASE(auxiliary_gc_authority_newer_barrier_invalidates_proof)
     BOOST_REQUIRE(gate.SetHealthy(true, revoke));
     const auto before_barrier{gate.ObserveReady()};
     BOOST_REQUIRE(before_barrier);
-    BOOST_REQUIRE(gate.ArmPublication([&] {
+    const auto publication{gate.ArmPublication([&] {
         publication_hold = true;
         return true;
-    }));
+    })};
+    BOOST_REQUIRE(publication);
 
     BOOST_CHECK(gate.TryPublish(*before_barrier, [&] {
         authority = true;
@@ -2194,6 +2241,14 @@ BOOST_AUTO_TEST_CASE(auxiliary_gc_authority_newer_barrier_invalidates_proof)
     BOOST_CHECK(!authority);
     BOOST_CHECK(publication_hold);
 
+    // A negative proof observed before the barrier may revoke old authority,
+    // but it cannot invalidate the in-flight writer's completion capability.
+    BOOST_CHECK(gate.Revoke(revoke) == Gate::MutationResult::APPLIED);
+    BOOST_CHECK(!gate.ObserveReady());
+    BOOST_REQUIRE(gate.SetHealthy(true, revoke));
+    BOOST_CHECK(!gate.ObserveReady());
+    BOOST_CHECK(gate.CompletePublication(*publication) ==
+                Gate::MutationResult::APPLIED);
     const auto after_barrier{gate.ObserveReady()};
     BOOST_REQUIRE(after_barrier);
     const auto competing_proof{after_barrier};
@@ -2226,6 +2281,50 @@ BOOST_AUTO_TEST_CASE(auxiliary_gc_authority_newer_barrier_invalidates_proof)
     const auto after_revoke{gate.ObserveReady()};
     BOOST_REQUIRE(after_revoke);
     BOOST_CHECK_NE(*after_revoke, *competing_proof);
+}
+
+BOOST_AUTO_TEST_CASE(auxiliary_gc_authority_overlapping_publications_complete_last)
+{
+    using Gate = llmq::AuxiliaryHistoryGCAuthorizationGate;
+    Gate gate;
+    bool authority{true};
+    std::size_t arms{0};
+    std::size_t revocations{0};
+    const auto revoke = [&] {
+        ++revocations;
+        authority = false;
+        return true;
+    };
+    const auto arm = [&] {
+        ++arms;
+        return true;
+    };
+
+    BOOST_REQUIRE(gate.Start(revoke));
+    BOOST_REQUIRE(gate.SetHealthy(true, revoke));
+    const auto stale_proof{gate.ObserveReady()};
+    BOOST_REQUIRE(stale_proof);
+
+    const auto first{gate.ArmPublication(arm)};
+    const auto second{gate.ArmPublication(arm)};
+    BOOST_REQUIRE(first);
+    BOOST_REQUIRE(second);
+    BOOST_CHECK_EQUAL(*first, *second);
+    BOOST_CHECK_EQUAL(arms, 2U);
+    BOOST_CHECK(!gate.ObserveReady());
+    BOOST_CHECK(gate.TryPublish(*stale_proof, [] { return true; }) ==
+                Gate::MutationResult::STALE);
+
+    BOOST_CHECK(!gate.SetHealthy(false, revoke));
+    BOOST_REQUIRE(gate.SetHealthy(true, revoke));
+    BOOST_CHECK(!gate.ObserveReady());
+    BOOST_CHECK(gate.CompletePublication(*first) ==
+                Gate::MutationResult::APPLIED);
+    BOOST_CHECK(!gate.ObserveReady());
+    BOOST_CHECK(gate.CompletePublication(*second) ==
+                Gate::MutationResult::APPLIED);
+    BOOST_CHECK(gate.ObserveReady());
+    BOOST_CHECK_EQUAL(revocations, 2U);
 }
 
 BOOST_AUTO_TEST_CASE(auxiliary_gc_authority_failure_is_sticky)
@@ -2884,7 +2983,10 @@ BOOST_AUTO_TEST_CASE(
         NonNullHash(config.activation_predecessor_height), 210'501)};
     auto accept = [&](const FinalChainLock& chainlock) {
         const auto prepared{store.PrepareCandidate(chainlock)};
-        BOOST_REQUIRE(prepared);
+        BOOST_REQUIRE_MESSAGE(
+            prepared,
+            "failed to prepare fixture CLSIG at height " <<
+                chainlock.statement.height);
         const auto verified{ChainLockStoreTestContextFactory::Create(
             genesis, config.chainlock_schedule, chainlock.statement)};
         BOOST_REQUIRE(verified);
@@ -3218,6 +3320,10 @@ BOOST_AUTO_TEST_CASE(
     carrier_target.pqBTCCReceiptCursorSysHash = applied->cursor.sys_hash;
     carrier_target.pqBTCCReceiptCursorBTCHash = applied->cursor.btc_hash;
     carrier_target.pqBTCCReceiptStateHash = applied->cumulative_hash;
+    carrier_target.pqBTCCReceiptLatestTargetHeight =
+        applied->latest_chainlock_target_height;
+    carrier_target.pqBTCCReceiptLatestCarrierHeight =
+        applied->latest_receipt_carrier_height;
     carrier_target.pqBTCCReceiptLogicalId = receipt.chainlock_logical_id;
     const auto at_nonnull_carrier{llmq::SelectCurrentChainLockBTCC(
         genesis, config, carrier_target, &keep_metadata)};
@@ -4530,7 +4636,7 @@ BOOST_FIXTURE_TEST_CASE(
     constexpr int32_t CURRENT_HEIGHT{2'310};
     constexpr int32_t CANDIDATE_HEIGHT{2'315};
     constexpr int32_t RECOVERY_HEIGHT{3'465};
-    constexpr int32_t TIP_HEIGHT{3'470};
+    constexpr int32_t TIP_HEIGHT{3'475};
     const uint256 probation_root{NonNullHash(920'000)};
 
     auto& chainman{*Assert(m_node.chainman)};
@@ -4608,7 +4714,6 @@ BOOST_FIXTURE_TEST_CASE(
     base_window.next.epoch = active_epochs->back().epoch + 1;
     base_window.active.recovery_authority_source.normal_beacon =
         base_window.active.seeds.back();
-    base_window.active.recovery_authority_hash = NonNullHash(922'000);
     BOOST_REQUIRE(base_window.IsStructurallyValid());
 
     const uint256 genesis{chainman.GetConsensus().hashGenesisBlock};
@@ -4646,8 +4751,14 @@ BOOST_FIXTURE_TEST_CASE(
     };
     const auto install = [&](ChainLockFinalityStore& store,
                              const FinalChainLock& chainlock) {
-        const auto prepared{store.PrepareCandidate(chainlock)};
-        BOOST_REQUIRE(prepared);
+        ChainLockFinalityError prepare_error{ChainLockFinalityError::NONE};
+        const auto prepared{
+            store.PrepareCandidate(chainlock, &prepare_error)};
+        BOOST_REQUIRE_MESSAGE(
+            prepared,
+            "failed to prepare fixture CLSIG at height " <<
+                chainlock.statement.height << " with error " <<
+                static_cast<int>(prepare_error));
         const auto context{context_for(chainlock)};
         BOOST_REQUIRE(context);
         BOOST_REQUIRE(store.AcceptVerified(
@@ -4661,13 +4772,50 @@ BOOST_FIXTURE_TEST_CASE(
     base.statement.block_hash = chain[BASE_HEIGHT]->GetBlockHash();
     base.statement.roster_beacons = base_window;
     base.statement.payment_probation_state_hash = probation_root;
+    const BTCCursor base_cursor{
+        BASE_HEIGHT, base.statement.block_hash, NonNullHash(923'500)};
+    chain[BASE_HEIGHT]->btcpPrevCommitment = base_cursor.btc_hash;
+    base.statement.previous_btcc_cursor = {};
+    base.statement.accepted_btcc_cursor = base_cursor;
+    base.statement.btcc_advance = BTCCAdvance::ADVANCE;
     BOOST_REQUIRE(base.IsStructurallyValid());
+
+    BTCCReceipt base_receipt;
+    base_receipt.chainlock_target_height = BASE_HEIGHT;
+    base_receipt.chainlock_target_hash = base.statement.block_hash;
+    base_receipt.chainlock_logical_id = base.GetLogicalId(genesis);
+    base_receipt.accepted_cursor = base_cursor;
+    BOOST_REQUIRE(base_receipt.IsStructurallyValid());
+    const auto receipted_state{ApplyBTCCReceiptState(
+        genesis, config->chainlock_schedule, config->btcc_schedule,
+        CANDIDATE_HEIGHT, chain[CANDIDATE_HEIGHT]->GetBlockHash(),
+        BTCCReceiptState{}, base_receipt)};
+    BOOST_REQUIRE(receipted_state);
+    for (int32_t height{CANDIDATE_HEIGHT}; height <= TIP_HEIGHT; ++height) {
+        chain[height]->pqBTCCReceiptCursorHeight =
+            receipted_state->cursor.sys_height;
+        chain[height]->pqBTCCReceiptCursorSysHash =
+            receipted_state->cursor.sys_hash;
+        chain[height]->pqBTCCReceiptCursorBTCHash =
+            receipted_state->cursor.btc_hash;
+        chain[height]->pqBTCCReceiptStateHash =
+            receipted_state->cumulative_hash;
+        chain[height]->pqBTCCReceiptLatestTargetHeight =
+            receipted_state->latest_chainlock_target_height;
+        chain[height]->pqBTCCReceiptLatestCarrierHeight =
+            receipted_state->latest_receipt_carrier_height;
+    }
+    chain[CANDIDATE_HEIGHT]->pqBTCCReceiptLogicalId =
+        base_receipt.chainlock_logical_id;
 
     auto current{MakeCatchupChainLock(
         CURRENT_HEIGHT, BASE_HEIGHT, base.statement.block_hash,
         924'000)};
     current.statement.block_hash = chain[CURRENT_HEIGHT]->GetBlockHash();
     current.statement.payment_probation_state_hash = probation_root;
+    current.statement.previous_btcc_cursor = base_cursor;
+    current.statement.accepted_btcc_cursor = base_cursor;
+    current.statement.btcc_advance = BTCCAdvance::KEEP;
     set_exact_continuation(current, base);
 
     auto candidate{MakeCatchupChainLock(
@@ -4676,6 +4824,10 @@ BOOST_FIXTURE_TEST_CASE(
     candidate.statement.block_hash =
         chain[CANDIDATE_HEIGHT]->GetBlockHash();
     candidate.statement.payment_probation_state_hash = probation_root;
+    candidate.statement.previous_btcc_cursor = base_cursor;
+    candidate.statement.accepted_btcc_cursor = base_cursor;
+    candidate.statement.btcc_advance = BTCCAdvance::KEEP;
+    candidate.statement.btcc_receipt_state = *receipted_state;
     set_exact_continuation(candidate, base);
 
     FullReceiptCatchupContext store_context;
@@ -4694,6 +4846,26 @@ BOOST_FIXTURE_TEST_CASE(
     BOOST_CHECK(Access::StateAdvancingAuthorizationBaseAdmissible(
         *handler, ChainLockCandidateAdmission::CATCHUP, candidate));
 
+    // A scheduled receipt may carry an exact KEEP certificate. Its statement
+    // is bound to the carrier-parent receipt state just like ADVANCE.
+    install(*store, candidate);
+    constexpr int32_t KEEP_CARRIER{CANDIDATE_HEIGHT +
+        static_cast<int32_t>(PQ_BTCC_NEVM_LAG)};
+    const auto keep_receipt{Access::BTCCReceiptForCarrier(
+        *handler, KEEP_CARRIER, *chain[KEEP_CARRIER - 1])};
+    BOOST_REQUIRE(!keep_receipt.IsNull());
+    BOOST_CHECK_EQUAL(keep_receipt.chainlock_target_height,
+                      CANDIDATE_HEIGHT);
+    BOOST_CHECK(keep_receipt.accepted_cursor == base_cursor);
+    BOOST_CHECK(Access::IsVerifiedBTCCReceipt(
+        *handler, keep_receipt, *chain[KEEP_CARRIER]));
+
+    Access::ResetFinalityStoreWithContext(*handler, store_context);
+    store = Access::Store(*handler);
+    BOOST_REQUIRE(store);
+    install(*store, base);
+    install(*store, current);
+
     const auto recovery_epoch{EpochForHeight(
         config->chainlock_schedule, RECOVERY_HEIGHT)};
     BOOST_REQUIRE(recovery_epoch);
@@ -4704,7 +4876,6 @@ BOOST_FIXTURE_TEST_CASE(
     BOOST_REQUIRE_EQUAL(*canonical_recovery, RECOVERY_HEIGHT);
     const auto recovery_window{MakeRecoveryRosterBeaconWindow(
         base_window.active.recovery_authority_source,
-        base_window.active.recovery_authority_hash,
         *recovery_epoch)};
     BOOST_REQUIRE(recovery_window);
     auto recovery{MakeCatchupChainLock(
@@ -4713,6 +4884,10 @@ BOOST_FIXTURE_TEST_CASE(
     recovery.statement.block_hash =
         chain[RECOVERY_HEIGHT]->GetBlockHash();
     recovery.statement.payment_probation_state_hash = probation_root;
+    recovery.statement.previous_btcc_cursor = base_cursor;
+    recovery.statement.accepted_btcc_cursor = base_cursor;
+    recovery.statement.btcc_advance = BTCCAdvance::KEEP;
+    recovery.statement.btcc_receipt_state = *receipted_state;
     recovery.statement.roster_transition =
         RosterAuthorizationTransitionKind::RECOVER;
     recovery.statement.roster_beacons = *recovery_window;
@@ -4740,6 +4915,17 @@ BOOST_FIXTURE_TEST_CASE(
         recovery.statement.roster_authorization_state_hash = *state_hash;
     }
     BOOST_REQUIRE(recovery.IsStructurallyValid());
+    const auto recovery_objective{
+        Access::ObjectiveRosterAuthorization(
+            *handler, *chain[RECOVERY_HEIGHT])};
+    BOOST_REQUIRE(recovery_objective);
+    BOOST_CHECK(recovery_objective->mode ==
+                ObjectiveRosterAuthorizationMode::RECOVER);
+    BOOST_REQUIRE(recovery_objective->base);
+    const RosterAuthorizationBaseIdentity expected_base{
+        base.statement.height, base.statement.block_hash,
+        base.GetLogicalId(genesis)};
+    BOOST_CHECK(*recovery_objective->base == expected_base);
     BOOST_CHECK(Access::StateAdvancingAuthorizationBaseAdmissible(
         *handler, ChainLockCandidateAdmission::CATCHUP, recovery));
     BOOST_CHECK(!Access::StateAdvancingAuthorizationBaseAdmissible(
@@ -4748,10 +4934,11 @@ BOOST_FIXTURE_TEST_CASE(
     auto wrong_recovery_source{recovery};
     auto& wrong_bundle{
         wrong_recovery_source.statement.roster_beacons.active};
-    wrong_bundle.recovery_authority_hash = NonNullHash(925'501);
+    wrong_bundle.recovery_authority_source.normal_beacon.future_btc_hash =
+        NonNullHash(925'501);
     const auto wrong_window{MakeRecoveryRosterBeaconWindow(
         wrong_bundle.recovery_authority_source,
-        wrong_bundle.recovery_authority_hash, *recovery_epoch)};
+        *recovery_epoch)};
     BOOST_REQUIRE(wrong_window);
     wrong_recovery_source.statement.roster_beacons = *wrong_window;
     BOOST_CHECK(!Access::StateAdvancingAuthorizationBaseAdmissible(
@@ -4764,16 +4951,84 @@ BOOST_FIXTURE_TEST_CASE(
     BOOST_CHECK(!Access::StateAdvancingAuthorizationBaseAdmissible(
         *handler, ChainLockCandidateAdmission::LIVE, missing_base));
 
+    const auto hidden_recovery_next_round{
+        Access::ObjectiveRosterAuthorization(
+            *handler,
+            *chain[RECOVERY_HEIGHT +
+                   static_cast<int32_t>(PQ_CL_PERIOD)])};
+    BOOST_REQUIRE(hidden_recovery_next_round);
+    BOOST_CHECK(hidden_recovery_next_round->mode ==
+                ObjectiveRosterAuthorizationMode::PAUSE);
+    BOOST_CHECK(!hidden_recovery_next_round->base);
+
+    const auto recovery_context{context_for(recovery)};
+    BOOST_REQUIRE(recovery_context);
+    BOOST_REQUIRE(store->AcceptVerifiedRosterAuthorizationBase(
+        recovery, /*signatures_valid=*/true, recovery_context));
+    constexpr int32_t RECOVERY_CARRIER{RECOVERY_HEIGHT +
+        static_cast<int32_t>(PQ_BTCC_NEVM_LAG)};
+    BTCCReceipt recovery_receipt;
+    recovery_receipt.chainlock_target_height = RECOVERY_HEIGHT;
+    recovery_receipt.chainlock_target_hash =
+        recovery.statement.block_hash;
+    recovery_receipt.chainlock_logical_id =
+        recovery.GetLogicalId(genesis);
+    recovery_receipt.accepted_cursor = base_cursor;
+    const auto recovery_receipted_state{ApplyBTCCReceiptState(
+        genesis, config->chainlock_schedule, config->btcc_schedule,
+        RECOVERY_CARRIER, chain[RECOVERY_CARRIER]->GetBlockHash(),
+        *receipted_state, recovery_receipt)};
+    BOOST_REQUIRE(recovery_receipted_state);
+    chain[RECOVERY_CARRIER]->pqBTCCReceiptCursorHeight =
+        recovery_receipted_state->cursor.sys_height;
+    chain[RECOVERY_CARRIER]->pqBTCCReceiptCursorSysHash =
+        recovery_receipted_state->cursor.sys_hash;
+    chain[RECOVERY_CARRIER]->pqBTCCReceiptCursorBTCHash =
+        recovery_receipted_state->cursor.btc_hash;
+    chain[RECOVERY_CARRIER]->pqBTCCReceiptStateHash =
+        recovery_receipted_state->cumulative_hash;
+    chain[RECOVERY_CARRIER]->pqBTCCReceiptLatestTargetHeight =
+        recovery_receipted_state->latest_chainlock_target_height;
+    chain[RECOVERY_CARRIER]->pqBTCCReceiptLatestCarrierHeight =
+        recovery_receipted_state->latest_receipt_carrier_height;
+    chain[RECOVERY_CARRIER]->pqBTCCReceiptLogicalId =
+        recovery_receipt.chainlock_logical_id;
+
+    const auto receipted_recovery{
+        Access::ObjectiveRosterAuthorization(
+            *handler, *chain[RECOVERY_CARRIER])};
+    BOOST_REQUIRE(receipted_recovery);
+    BOOST_CHECK(receipted_recovery->mode ==
+                ObjectiveRosterAuthorizationMode::NORMAL);
+    BOOST_REQUIRE(receipted_recovery->base);
+    const RosterAuthorizationBaseIdentity expected_recovery_base{
+        recovery.statement.height, recovery.statement.block_hash,
+        recovery.GetLogicalId(genesis)};
+    BOOST_CHECK(*receipted_recovery->base == expected_recovery_base);
+    BOOST_REQUIRE(receipted_recovery->recovery_source);
+    BOOST_CHECK(*receipted_recovery->recovery_source ==
+                base_window.active.recovery_authority_source);
+
     // A stale-base certificate cannot discard an unconsumed observation just
     // because both histories still have the same active signer authority.
-    auto observed_current{current};
+    auto observed_current{MakeCatchupChainLock(
+        CANDIDATE_HEIGHT, CURRENT_HEIGHT, current.statement.block_hash,
+        926'500)};
+    observed_current.statement.block_hash =
+        chain[CANDIDATE_HEIGHT]->GetBlockHash();
+    observed_current.statement.payment_probation_state_hash = probation_root;
+    observed_current.statement.btcc_receipt_state = *receipted_state;
+    observed_current.statement.roster_authorization_base = {
+        base.statement.height, base.statement.block_hash,
+        base.GetLogicalId(genesis)};
+    observed_current.statement.roster_beacons = base_window;
     auto& observed_next{observed_current.statement.roster_beacons.next};
     observed_next.state = RosterBeaconState::PENDING;
     observed_next.anchor_cursor = {
-        CURRENT_HEIGHT, observed_current.statement.block_hash,
+        CANDIDATE_HEIGHT, observed_current.statement.block_hash,
         NonNullHash(927'000)};
     observed_next.anchor_btc_height = 800'000;
-    observed_current.statement.previous_btcc_cursor = {};
+    observed_current.statement.previous_btcc_cursor = base_cursor;
     observed_current.statement.accepted_btcc_cursor =
         observed_next.anchor_cursor;
     observed_current.statement.btcc_advance = BTCCAdvance::ADVANCE;
@@ -4801,18 +5056,33 @@ BOOST_FIXTURE_TEST_CASE(
             *state_hash;
     }
     BOOST_REQUIRE(observed_current.IsStructurallyValid());
-    chain[CURRENT_HEIGHT]->btcpPrevCommitment =
+    chain[CANDIDATE_HEIGHT]->btcpPrevCommitment =
         observed_next.anchor_cursor.btc_hash;
 
-    auto superseding{candidate};
-    superseding.statement.previous_chainlock_hash =
-        observed_current.statement.block_hash;
+    constexpr int32_t RECONCILIATION_HEIGHT{CANDIDATE_HEIGHT + 2 *
+        static_cast<int32_t>(PQ_CL_PERIOD)};
+    auto superseding{MakeCatchupChainLock(
+        RECONCILIATION_HEIGHT,
+        RECONCILIATION_HEIGHT - static_cast<int32_t>(PQ_CL_PERIOD),
+        chain[RECONCILIATION_HEIGHT -
+              static_cast<int32_t>(PQ_CL_PERIOD)]->GetBlockHash(),
+        925'100)};
+    superseding.statement.block_hash =
+        chain[RECONCILIATION_HEIGHT]->GetBlockHash();
+    superseding.statement.payment_probation_state_hash = probation_root;
+    superseding.statement.previous_btcc_cursor = base_cursor;
+    superseding.statement.accepted_btcc_cursor = base_cursor;
+    superseding.statement.btcc_advance = BTCCAdvance::KEEP;
+    superseding.statement.btcc_receipt_state = *receipted_state;
     set_exact_continuation(superseding, base);
 
     Access::ResetFinalityStoreWithContext(*handler, store_context);
     store = Access::Store(*handler);
     BOOST_REQUIRE(store);
     install(*store, base);
+    install(*store, current);
+    BOOST_REQUIRE(IsEligibleChainLockTarget(
+        config->chainlock_schedule, observed_current.statement.height));
     install(*store, observed_current);
     BOOST_CHECK(!Access::StateAdvancingAuthorizationBaseAdmissible(
         *handler, ChainLockCandidateAdmission::CATCHUP, superseding));
@@ -4820,12 +5090,14 @@ BOOST_FIXTURE_TEST_CASE(
     // The existing candidate-bound null-carrier proof is the sole exception:
     // it authenticates rollback of the provisional cursor and its next seed.
     BTCCCursorReconciliationProof reconciliation;
-    reconciliation.carrier_height = CANDIDATE_HEIGHT;
+    reconciliation.carrier_height = RECONCILIATION_HEIGHT;
     reconciliation.carrier_hash = superseding.statement.block_hash;
     reconciliation.carrier_parent_hash =
-        chain[CANDIDATE_HEIGHT - 1]->GetBlockHash();
+        chain[RECONCILIATION_HEIGHT - 1]->GetBlockHash();
     reconciliation.skipped_cursor =
         observed_current.statement.accepted_btcc_cursor;
+    reconciliation.previous_receipt_state = *receipted_state;
+    reconciliation.current_receipt_state = *receipted_state;
     BOOST_REQUIRE(reconciliation.IsStructurallyValid());
     BOOST_CHECK(Access::StateAdvancingAuthorizationBaseAdmissible(
         *handler, ChainLockCandidateAdmission::CATCHUP, superseding,
@@ -4834,12 +5106,11 @@ BOOST_FIXTURE_TEST_CASE(
         *handler, ChainLockCandidateAdmission::LIVE, superseding,
         reconciliation));
 
-    // A structurally valid recovery state has different active authority and
+    // A structurally valid recovery state has a different signed source and
     // therefore cannot use the stale-base convergence exception.
     auto incompatible_current{current};
     const auto incompatible_recovery_window{MakeRecoveryRosterBeaconWindow(
         base_window.active.recovery_authority_source,
-        base_window.active.recovery_authority_hash,
         base_window.active.seeds.back().epoch)};
     BOOST_REQUIRE(incompatible_recovery_window);
     incompatible_current.statement.roster_transition =

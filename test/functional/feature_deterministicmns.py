@@ -380,6 +380,8 @@ class DIP3Test(SyscoinTestFramework):
             '-pqbtccreceiptanchorcursorsyshash=%s' % ('0' * 64),
             '-pqbtccreceiptanchorcursorbtchash=%s' % ('0' * 64),
             '-pqbtccreceiptanchorstatehash=%s' % ('0' * 64),
+            '-pqbtccreceiptanchorlatesttargetheight=-1',
+            '-pqbtccreceiptanchorlatestcarrierheight=-1',
         ]
         self.stop_controller_node()
         self.nodes[0].extra_args = list(self.extra_args)

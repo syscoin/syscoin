@@ -2068,10 +2068,12 @@ static llmq::pq::BTCCReceiptState IndexedBTCCReceiptState(
         llmq::pq::BTCCursor{index->pqBTCCReceiptCursorHeight,
                             index->pqBTCCReceiptCursorSysHash,
                             index->pqBTCCReceiptCursorBTCHash},
-        index->pqBTCCReceiptStateHash};
+        index->pqBTCCReceiptStateHash,
+        index->pqBTCCReceiptLatestTargetHeight,
+        index->pqBTCCReceiptLatestCarrierHeight};
 }
 
-// SYSCOIN: A missing exact ADVANCE certificate is a retryable dependency, not
+// SYSCOIN: A missing exact receipt certificate is a retryable dependency, not
 // block invalidity, while its prospective replay obligation is durable.
 static constexpr std::string_view BTCC_RECEIPT_CERTIFICATE_PENDING{
     "pq-btcc-receipt-certificate-pending"};
@@ -2219,11 +2221,19 @@ static bool ConnectBTCCReceiptState(ChainstateManager& chainman,
         index.pqBTCCReceiptCursorSysHash != next.cursor.sys_hash ||
         index.pqBTCCReceiptCursorBTCHash != next.cursor.btc_hash ||
         index.pqBTCCReceiptStateHash != next.cumulative_hash ||
+        index.pqBTCCReceiptLatestTargetHeight !=
+            next.latest_chainlock_target_height ||
+        index.pqBTCCReceiptLatestCarrierHeight !=
+            next.latest_receipt_carrier_height ||
         index.pqBTCCReceiptLogicalId != receipt_logical_id};
     index.pqBTCCReceiptCursorHeight = next.cursor.sys_height;
     index.pqBTCCReceiptCursorSysHash = next.cursor.sys_hash;
     index.pqBTCCReceiptCursorBTCHash = next.cursor.btc_hash;
     index.pqBTCCReceiptStateHash = next.cumulative_hash;
+    index.pqBTCCReceiptLatestTargetHeight =
+        next.latest_chainlock_target_height;
+    index.pqBTCCReceiptLatestCarrierHeight =
+        next.latest_receipt_carrier_height;
     index.pqBTCCReceiptLogicalId = receipt_logical_id;
     *receipt_state_changed = changed;
     return true;
@@ -3298,8 +3308,9 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
         LogPrintf("ConnectNEVMCommitment: skipping validation result...\n");
     }
     // SYSCOIN: Geth exposes BTCPrevHash immediately and has no provisional
-    // distinction. A real receipt is forwarded with its exact hash or the
-    // entire block notification is deferred; it is never rewritten to zero.
+    // distinction. Only an authenticated cursor ADVANCE is forwarded; a
+    // non-null KEEP receipt authenticates finality state without replaying an
+    // already-applied external checkpoint.
     uint256 btcPrevHashForNEVM{};
     llmq::pq::BTCCReceipt receipt;
     const auto btcc_schedule{
@@ -3310,6 +3321,10 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
             btcc_schedule, static_cast<int32_t>(nHeight)) &&
         ExtractBTCCReceipt(block, receipt)};
     const bool nonnull_receipt{has_receipt && !receipt.IsNull()};
+    const bool receipt_advances_cursor{
+        nonnull_receipt && pindex->pprev != nullptr &&
+        llmq::pq::BTCCReceiptAdvancesCursor(
+            IndexedBTCCReceiptState(pindex->pprev), receipt)};
     bool receipt_live_verified{false};
     bool defer_btcc_nevm{false};
     {
@@ -3327,7 +3342,9 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
     if (nonnull_receipt) {
         if (btcc_prefix_authenticated ||
             receipt_live_verified) {
-            btcPrevHashForNEVM = receipt.accepted_cursor.btc_hash;
+            if (receipt_advances_cursor) {
+                btcPrevHashForNEVM = receipt.accepted_cursor.btc_hash;
+            }
         } else if (!defer_btcc_nevm) {
             return state.Error("pq-btcc-nevm-receipt-unauthenticated");
         }
@@ -4175,7 +4192,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         }
     }
 
-    // SYSCOIN: A live non-null carrier needs its exact ADVANCE certificate.
+    // SYSCOIN: A live non-null carrier needs its exact receipt certificate.
     // Historical sync may instead fsync a branch-local authentication marker
     // before compact replay: Core keeps validating the committed accumulator,
     // while NEVM delivery and public readiness wait for a covering certificate.
@@ -6131,7 +6148,7 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
                            state.GetRejectReason() ==
                                PAYMENT_AUDIT_RECEIPT_CERTIFICATE_PENDING) {
                     // SYSCOIN: The block is neither valid nor invalid until its
-                    // exact ADVANCE certificate arrives. Quarantine every
+                    // exact receipt certificate arrives. Quarantine every
                     // currently eligible tip through this carrier so an
                     // attacker-selected nonexistent ID cannot monopolize the
                     // work selector. Acceptance of that exact logical object

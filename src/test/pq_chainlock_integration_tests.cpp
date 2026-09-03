@@ -77,38 +77,10 @@ ActiveRosterBeaconBundle ReadyBundle(uint32_t first_epoch)
     return bundle;
 }
 
-RecoveryRosterAuthorityPtr BindRecoveryAuthority(
-    const uint256& genesis_hash,
-    ActiveRosterBeaconBundle& bundle,
-    uint64_t salt)
+void BindRecoverySource(ActiveRosterBeaconBundle& bundle)
 {
-    auto authority{std::make_shared<RecoveryRosterAuthority>()};
-    authority->normal_beacon = bundle.seeds.back();
-    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
-        for (std::size_t member{0}; member < QUORUM_SIZE; ++member) {
-            auto& entry{authority->slots[slot][member]};
-            entry.pro_tx_hash =
-                NonNullHash(salt + slot * QUORUM_SIZE + member + 1);
-            entry.eligible = member < QUORUM_MIN_VALID;
-            if (!entry.eligible) continue;
-            RecoveryRosterChildCommitment child_root;
-            child_root.global_key_version = 1;
-            child_root.commitment.generation = 1;
-            child_root.commitment.tree_id = NonNullHash(
-                salt + 10'000 + slot * QUORUM_SIZE + member);
-            child_root.commitment.root = NonNullHash(
-                salt + 20'000 + slot * QUORUM_SIZE + member);
-            entry.child_root = std::move(child_root);
-        }
-    }
-    BOOST_REQUIRE(authority->IsStructurallyValid());
-    const auto authority_hash{
-        GetRecoveryRosterAuthorityHash(genesis_hash, *authority)};
-    BOOST_REQUIRE(authority_hash);
     bundle.recovery_authority_source.normal_beacon =
-        authority->normal_beacon;
-    bundle.recovery_authority_hash = *authority_hash;
-    return authority;
+        bundle.seeds.back();
 }
 
 CKeyID KeyId(uint64_t value)
@@ -270,7 +242,6 @@ struct FullDimensionFixture {
         CHILD_KEY_COUNT};
     std::map<uint256, std::size_t> member_indices;
     FrozenQuorumRostersPtr rosters;
-    RecoveryRosterAuthorityPtr recovery_authority;
     ChainLockStatement statement;
     RosterAuthorizationVerificationContext authorization;
     std::vector<ChainLockShare> shares;
@@ -356,8 +327,7 @@ bool BuildRostersAndStatement(FullDimensionFixture& fixture)
         ActiveEpochsAtHeight(fixture.config.schedule, TARGET_HEIGHT)};
     if (!active_epochs || active_epochs->front().epoch == 0) return false;
     auto beacon_bundle{ReadyBundle(active_epochs->front().epoch)};
-    fixture.recovery_authority = BindRecoveryAuthority(
-        fixture.genesis_hash, beacon_bundle, 900'000);
+    BindRecoverySource(beacon_bundle);
     const QuorumSnapshotLookup snapshot_lookup{
         [&](const CBlockIndex& snapshot_index)
             -> std::optional<QuorumSnapshotState> {
@@ -388,9 +358,8 @@ bool BuildRostersAndStatement(FullDimensionFixture& fixture)
         /*cache_results=*/false)};
     if (!roster_cache) return false;
     const auto canonical_roster_set{
-        roster_cache->GetVerifiedActiveWithRecoveryAuthority(
+        roster_cache->GetVerifiedActiveNoPublish(
             TARGET_HEIGHT, fixture.chain->Tip(), beacon_bundle,
-            fixture.recovery_authority, /*publish=*/false,
             &build_error)};
     if (!canonical_roster_set || build_error != QuorumBuildError::NONE) {
         return false;
@@ -429,8 +398,6 @@ bool BuildRostersAndStatement(FullDimensionFixture& fixture)
     previous_window.next = ReadySeed(active_epochs->back().epoch);
     previous_window.active.recovery_authority_source =
         beacon_bundle.recovery_authority_source;
-    previous_window.active.recovery_authority_hash =
-        beacon_bundle.recovery_authority_hash;
     fixture.authorization.predecessor_height =
         fixture.statement.previous_chainlock_height;
     fixture.authorization.predecessor_block_hash =
@@ -480,8 +447,7 @@ bool BuildRostersAndStatement(FullDimensionFixture& fixture)
     ChainLockVerificationError verification_error{
         ChainLockVerificationError::NONE};
     auto roster_set{VerifiedRosterSet::Create(
-        fixture.genesis_hash, fixture.rosters, &verification_error,
-        fixture.recovery_authority)};
+        fixture.genesis_hash, fixture.rosters, &verification_error)};
     return roster_set && PreparedChainLockContext::Create(
         fixture.config.schedule, fixture.statement, std::move(roster_set),
         fixture.authorization, &verification_error);
@@ -710,8 +676,7 @@ BOOST_AUTO_TEST_CASE(full_dimension_builder_collector_wire_and_verifier)
     ChainLockVerificationError context_error{
         ChainLockVerificationError::NONE};
     auto roster_set{VerifiedRosterSet::Create(
-        fixture->genesis_hash, fixture->rosters, &context_error,
-        fixture->recovery_authority)};
+        fixture->genesis_hash, fixture->rosters, &context_error)};
     BOOST_REQUIRE(roster_set);
     auto prepared_context{PreparedChainLockContext::Create(
         fixture->config.schedule, fixture->statement, roster_set,
@@ -817,7 +782,7 @@ BOOST_AUTO_TEST_CASE(full_dimension_builder_collector_wire_and_verifier)
         ChainLockVerificationError::NONE};
     const auto detached_roster_set{VerifiedRosterSet::Create(
         fixture->genesis_hash, collector_context->RostersPtr(),
-        &detached_error, fixture->recovery_authority)};
+        &detached_error)};
     BOOST_REQUIRE(detached_roster_set);
     BOOST_CHECK(detached_error == ChainLockVerificationError::NONE);
     BOOST_CHECK(detached_roster_set != collector_context->RosterSetPtr());
@@ -1016,7 +981,7 @@ BOOST_AUTO_TEST_CASE(full_dimension_builder_collector_wire_and_verifier)
         ChainLockVerificationError::NONE};
     const auto detached_audit_roster_set{VerifiedRosterSet::Create(
         fixture->genesis_hash, audit_collector_context->RostersPtr(),
-        &detached_audit_error, fixture->recovery_authority)};
+        &detached_audit_error)};
     BOOST_REQUIRE(detached_audit_roster_set);
     BOOST_CHECK(detached_audit_error ==
                 ChainLockVerificationError::NONE);

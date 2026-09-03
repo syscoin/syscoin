@@ -204,6 +204,15 @@ public:
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex)
     {
         LOCK(m_mutex);
+        if (m_state == State::PUBLISHING) {
+            m_publication_resume_state = State::STARTING;
+            if (!revoke()) {
+                m_state = State::FAILED;
+                m_publications_in_flight = 0;
+                return false;
+            }
+            return true;
+        }
         if (m_state == State::FAILED || !AdvanceLocked()) {
             m_state = State::FAILED;
             (void)revoke();
@@ -222,6 +231,14 @@ public:
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex)
     {
         LOCK(m_mutex);
+        if (m_state == State::PUBLISHING) {
+            m_publication_resume_state = State::STOPPED;
+            if (!revoke()) {
+                m_state = State::FAILED;
+                m_publications_in_flight = 0;
+            }
+            return;
+        }
         if (m_state != State::FAILED) {
             if (AdvanceLocked()) {
                 m_state = State::STOPPED;
@@ -240,6 +257,7 @@ public:
         if (m_state != State::FAILED) {
             (void)AdvanceLocked();
             m_state = State::FAILED;
+            m_publications_in_flight = 0;
         }
         (void)revoke();
     }
@@ -250,6 +268,20 @@ public:
     {
         LOCK(m_mutex);
         if (m_state == State::STOPPED || m_state == State::FAILED) {
+            return false;
+        }
+        if (m_state == State::PUBLISHING) {
+            if (m_publication_resume_state == State::STOPPED) return false;
+            if (healthy) {
+                m_publication_resume_state = State::READY;
+                return true;
+            }
+            if (m_publication_resume_state == State::STARTING) return false;
+            m_publication_resume_state = State::STARTING;
+            if (!revoke()) {
+                m_state = State::FAILED;
+                m_publications_in_flight = 0;
+            }
             return false;
         }
         if (healthy) {
@@ -272,17 +304,66 @@ public:
         return false;
     }
 
+    /**
+     * Enter a non-publishable state until every overlapping durable write has
+     * installed the retention floor protecting the snapshots it references.
+     */
     template <typename Arm>
-    [[nodiscard]] bool ArmPublication(Arm&& arm)
+    [[nodiscard]] std::optional<Token> ArmPublication(Arm&& arm)
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex)
     {
         LOCK(m_mutex);
-        if (!AdvanceLocked()) m_state = State::FAILED;
+        if (m_state == State::FAILED) {
+            // A late attempt may still strengthen retention, but failure is
+            // sticky and receives no capability that could reopen the gate.
+            (void)arm();
+            return std::nullopt;
+        }
+        if (m_state == State::PUBLISHING) {
+            if (m_publications_in_flight ==
+                std::numeric_limits<uint64_t>::max()) {
+                m_state = State::FAILED;
+                m_publications_in_flight = 0;
+                (void)arm();
+                return std::nullopt;
+            }
+            if (!arm()) {
+                m_state = State::FAILED;
+                m_publications_in_flight = 0;
+                return std::nullopt;
+            }
+            ++m_publications_in_flight;
+            return m_generation;
+        }
+        if (!AdvanceLocked()) {
+            m_state = State::FAILED;
+            (void)arm();
+            return std::nullopt;
+        }
+        m_publication_resume_state = m_state;
+        m_state = State::PUBLISHING;
+        m_publications_in_flight = 1;
         if (!arm()) {
             m_state = State::FAILED;
-            return false;
+            m_publications_in_flight = 0;
+            return std::nullopt;
         }
-        return m_state != State::FAILED;
+        return m_generation;
+    }
+
+    [[nodiscard]] MutationResult CompletePublication(Token token)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex)
+    {
+        LOCK(m_mutex);
+        if (m_state != State::PUBLISHING || token != m_generation ||
+            m_publications_in_flight == 0) {
+            return MutationResult::STALE;
+        }
+        --m_publications_in_flight;
+        if (m_publications_in_flight == 0) {
+            m_state = m_publication_resume_state;
+        }
+        return MutationResult::APPLIED;
     }
 
     [[nodiscard]] std::optional<Token> ObserveReady() const
@@ -299,6 +380,14 @@ public:
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex)
     {
         LOCK(m_mutex);
+        if (m_state == State::PUBLISHING) {
+            if (!revoke()) {
+                m_state = State::FAILED;
+                m_publications_in_flight = 0;
+                return MutationResult::FAILED;
+            }
+            return MutationResult::APPLIED;
+        }
         if (!AdvanceLocked()) m_state = State::FAILED;
         if (!revoke()) m_state = State::FAILED;
         return m_state == State::FAILED ? MutationResult::FAILED
@@ -328,6 +417,7 @@ private:
     enum class State : uint8_t {
         STOPPED = 0,
         STARTING,
+        PUBLISHING,
         READY,
         FAILED,
     };
@@ -343,6 +433,8 @@ private:
 
     mutable Mutex m_mutex;
     State m_state GUARDED_BY(m_mutex){State::STOPPED};
+    State m_publication_resume_state GUARDED_BY(m_mutex){State::STOPPED};
+    uint64_t m_publications_in_flight GUARDED_BY(m_mutex){0};
     uint64_t m_generation GUARDED_BY(m_mutex){0};
 };
 
@@ -1040,7 +1132,7 @@ public:
                                  !m_lookup_mutex,
                                  !m_verification_mutex);
 
-    /** Build the fixed-cadence carrier from a fully verified recent ADVANCE. */
+    /** Build the fixed-cadence carrier from a fully verified exact-slot CLSIG. */
     [[nodiscard]] pq::BTCCReceipt GetBTCCReceiptForCarrier(
         int32_t carrier_height,
         const CBlockIndex& carrier_parent) const
@@ -1052,7 +1144,7 @@ public:
         INVALID,
     };
 
-    /** Bind a non-null receipt to the exact locally verified ADVANCE winner. */
+    /** Bind a non-null receipt to the exact locally verified CLSIG winner. */
     [[nodiscard]] BTCCReceiptCertificateStatus CheckBTCCReceiptCertificate(
         const pq::BTCCReceipt& receipt,
         const CBlockIndex& carrier) const
@@ -1325,6 +1417,7 @@ private:
         pq::BTCCReceiptState btcc_receipt_state;
         pq::PaymentAuditReceiptState payment_audit_receipt_state;
         uint256 payment_probation_state_hash;
+        pq::RosterAuthorizationBaseIdentity objective_authorization_base;
         bool has_durable_chainlock{false};
         bool staged_recovery{false};
         bool outage_recovery{false};
@@ -1579,6 +1672,17 @@ private:
         SIGNER_POLICY,
         THRESHOLD_CERTIFICATE,
     };
+    struct ObjectiveRosterAuthorizationContext {
+        pq::ObjectiveRosterAuthorizationMode mode{
+            pq::ObjectiveRosterAuthorizationMode::PAUSE};
+        std::optional<pq::VerifiedRosterAuthorizationBaseView> base;
+        std::optional<pq::RecoveryRosterAuthoritySource> recovery_source;
+    };
+    /** Resolve authority only from the newest receipt on this exact branch. */
+    [[nodiscard]] std::optional<ObjectiveRosterAuthorizationContext>
+    ResolveObjectiveRosterAuthorizationContext(
+        const CBlockIndex& candidate) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     [[nodiscard]] std::optional<pq::NormalRosterAuthorizationInput>
     BuildNormalRosterAuthorizationInput(
         const pq::ChainLockStatement& statement,
@@ -1590,20 +1694,7 @@ private:
     BuildNetworkRosterAuthorizationContext(
         const pq::ChainLockStatement& statement,
         const CBlockIndex& candidate,
-        const pq::VerifiedRosterAuthorizationBaseView* prior) const;
-    [[nodiscard]] pq::RecoveryRosterAuthorityPtr
-    DeriveRecoveryRosterAuthority(
-        const CBlockIndex& candidate,
-        const pq::RecoveryRosterAuthoritySource& source,
-        const pq::FrozenQuorumRosterCachePtr& roster_cache,
-        pq::QuorumBuildError* error = nullptr) const;
-    [[nodiscard]] pq::RecoveryRosterAuthorityPtr
-    ResolveRecoveryRosterAuthority(
-        const pq::ChainLockStatement& statement,
-        const CBlockIndex& candidate,
-        const pq::FinalChainLockRecordMetadata* prior,
-        const pq::FrozenQuorumRosterCachePtr& roster_cache,
-        pq::QuorumBuildError* error = nullptr) const;
+        const ObjectiveRosterAuthorizationContext* objective) const;
     [[nodiscard]] std::optional<RuntimeVerificationContext>
     BuildHistoricalPreVerificationContext(
         const pq::FinalChainLock& chainlock,
@@ -2069,13 +2160,6 @@ private:
     [[nodiscard]] static bool IsLiveSigningValidationRevisionCurrent(
         const CurrentSigningSource& source,
         uint64_t provenance_revocation_revision) noexcept;
-    [[nodiscard]] static std::optional<pq::ChainLockSigningWindow>
-    OutageRecoverySigningWindow(
-        const pq::ChainLockScheduleConfig& chainlock,
-        const pq::BTCCScheduleConfig& btcc,
-        uint32_t durable_authorization_epoch,
-        int32_t durable_predecessor_height,
-        int32_t tip_height) noexcept;
     [[nodiscard]] static bool HasExactLiveSigningTargetEndpoint(
         const CBlockIndex& target)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
@@ -2251,7 +2335,10 @@ private:
             completed_archive,
         bool completed_probation) noexcept;
     void UpdateDurableChainLockAuxiliaryRetention();
-    [[nodiscard]] bool FlushChainLockAuxiliarySnapshotsForDurability();
+    [[nodiscard]] std::optional<AuxiliaryHistoryGCAuthorizationGate::Token>
+    BeginChainLockAuxiliarySnapshotPublication();
+    [[nodiscard]] bool CompleteChainLockAuxiliarySnapshotPublication(
+        AuxiliaryHistoryGCAuthorizationGate::Token token);
     void MaybeReleaseFinalitySnapshotPublicationRetention()
         EXCLUSIVE_LOCKS_REQUIRED(!m_persisted_mutex);
     /**

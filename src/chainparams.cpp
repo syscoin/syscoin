@@ -30,13 +30,15 @@ constexpr const char* PQ_ACTIVATION_HEIGHT_ARG{"-pqactivationheight"};
 
 // SYSCOIN: This release-updatable receipt-crypto assumption must never be
 // inferred from or overwrite the PQ consensus activation height.
-constexpr std::array<const char*, 6> PQ_BTCC_RECEIPT_ANCHOR_ARGS{
+constexpr std::array<const char*, 8> PQ_BTCC_RECEIPT_ANCHOR_ARGS{
     "-pqbtccreceiptanchorheight",
     "-pqbtccreceiptanchorblockhash",
     "-pqbtccreceiptanchorcursorheight",
     "-pqbtccreceiptanchorcursorsyshash",
     "-pqbtccreceiptanchorcursorbtchash",
     "-pqbtccreceiptanchorstatehash",
+    "-pqbtccreceiptanchorlatesttargetheight",
+    "-pqbtccreceiptanchorlatestcarrierheight",
 };
 
 bool HasPQBTCCReceiptAnchorArg(const ArgsManager& args)
@@ -167,7 +169,7 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
                          PQ_BTCC_RECEIPT_ANCHOR_ARGS.end(),
                          [&](const char* name) { return args.IsArgSet(name); })) {
             throw std::runtime_error(
-                "The six PQ BTCC receipt anchor arguments must be specified together");
+                "The eight PQ BTCC receipt anchor arguments must be specified together");
         }
         int32_t height;
         const std::string height_value = GetSinglePQDeploymentArg(
@@ -194,11 +196,39 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
             args, PQ_BTCC_RECEIPT_ANCHOR_ARGS[4], has_cursor)};
         const uint256 receipt_state_hash{ParsePQBTCCReceiptAnchorHash(
             args, PQ_BTCC_RECEIPT_ANCHOR_ARGS[5], has_cursor)};
+        int32_t latest_target_height;
+        const std::string latest_target_value = GetSinglePQDeploymentArg(
+            args, PQ_BTCC_RECEIPT_ANCHOR_ARGS[6]);
+        if (!ParseInt32(latest_target_value, &latest_target_height) ||
+            latest_target_height < -1 || latest_target_height > height) {
+            throw std::runtime_error(strprintf(
+                "%s must be -1 or a height not above the receipt anchor",
+                PQ_BTCC_RECEIPT_ANCHOR_ARGS[6]));
+        }
+        int32_t latest_carrier_height;
+        const std::string latest_carrier_value = GetSinglePQDeploymentArg(
+            args, PQ_BTCC_RECEIPT_ANCHOR_ARGS[7]);
+        if (!ParseInt32(latest_carrier_value, &latest_carrier_height) ||
+            latest_carrier_height < -1 || latest_carrier_height > height) {
+            throw std::runtime_error(strprintf(
+                "%s must be -1 or a height not above the receipt anchor",
+                PQ_BTCC_RECEIPT_ANCHOR_ARGS[7]));
+        }
         if (!has_cursor && (!cursor_sys_hash.IsNull() ||
                             !cursor_btc_hash.IsNull() ||
-                            !receipt_state_hash.IsNull())) {
+                            !receipt_state_hash.IsNull() ||
+                            latest_target_height != -1 ||
+                            latest_carrier_height != -1)) {
             throw std::runtime_error(
-                "A null PQ BTCC receipt-anchor cursor requires three zero hashes");
+                "A null PQ BTCC receipt-anchor cursor requires three zero "
+                "hashes and two -1 receipt heights");
+        }
+        if (has_cursor &&
+            (latest_target_height < cursor_height ||
+             latest_carrier_height <= latest_target_height)) {
+            throw std::runtime_error(
+                "A non-null PQ BTCC receipt anchor requires a latest target "
+                "at or above its cursor and a later carrier height");
         }
         options.pqbtccreceiptanchor =
             CChainParams::RegTestOptions::PQBTCCReceiptAnchorOptions{
@@ -209,6 +239,8 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
                 cursor_sys_hash,
                 cursor_btc_hash,
                 receipt_state_hash,
+                latest_target_height,
+                latest_carrier_height,
             };
     }
     options.pqpreparationheight = args.GetIntArg(

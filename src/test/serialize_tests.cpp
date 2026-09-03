@@ -322,6 +322,8 @@ BOOST_AUTO_TEST_CASE(cdiskblockindex_btcp_prev_serialization)
             index.pqBTCCReceiptCursorSysHash = uint256S(std::string(64, '2'));
             index.pqBTCCReceiptCursorBTCHash = uint256S(std::string(64, '3'));
             index.pqBTCCReceiptStateHash = uint256S(std::string(64, '4'));
+            index.pqBTCCReceiptLatestTargetHeight = 40;
+            index.pqBTCCReceiptLatestCarrierHeight = 42;
             index.pqBTCCReceiptLogicalId = uint256S(std::string(64, 'a'));
             index.pqPaymentAuditReceiptCursorHeight = 41;
             index.pqPaymentAuditReceiptCursorEpoch = 7;
@@ -371,7 +373,7 @@ BOOST_AUTO_TEST_CASE(cdiskblockindex_btcp_prev_serialization)
     }
     BOOST_CHECK(with_receipt_state_version > with_btcp_prev_version);
     BOOST_CHECK_EQUAL(with_receipt_state_ser.size() - with_btcp_prev_ser.size(),
-                      300U);
+                      308U);
 
     CDiskBlockIndex without_btcp_prev_roundtrip;
     DataStream without_btcp_prev_read{without_btcp_prev_ser};
@@ -396,6 +398,12 @@ BOOST_AUTO_TEST_CASE(cdiskblockindex_btcp_prev_serialization)
                 with_receipt_state.pqBTCCReceiptCursorBTCHash);
     BOOST_CHECK(with_receipt_state_roundtrip.pqBTCCReceiptStateHash ==
                 with_receipt_state.pqBTCCReceiptStateHash);
+    BOOST_CHECK_EQUAL(
+        with_receipt_state_roundtrip.pqBTCCReceiptLatestTargetHeight,
+        with_receipt_state.pqBTCCReceiptLatestTargetHeight);
+    BOOST_CHECK_EQUAL(
+        with_receipt_state_roundtrip.pqBTCCReceiptLatestCarrierHeight,
+        with_receipt_state.pqBTCCReceiptLatestCarrierHeight);
     BOOST_CHECK(with_receipt_state_roundtrip.pqBTCCReceiptLogicalId ==
                 with_receipt_state.pqBTCCReceiptLogicalId);
     BOOST_CHECK_EQUAL(

@@ -115,15 +115,6 @@ public:
         QuorumBuildError* error = nullptr) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
-    [[nodiscard]] VerifiedRosterSetPtr GetVerifiedActiveWithRecoveryAuthority(
-        int32_t target_height,
-        const CBlockIndex& branch_tip,
-        const ActiveRosterBeaconBundle& beacon_bundle,
-        RecoveryRosterAuthorityPtr recovery_authority,
-        bool publish,
-        QuorumBuildError* error = nullptr) const
-        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
-
     /** Always invoke the source; independent reconstruction must not self-hit. */
     [[nodiscard]] std::optional<QuorumSnapshotState> LookupSnapshot(
         const CBlockIndex& index) const;
@@ -142,7 +133,6 @@ private:
         uint32_t newest_epoch{0};
         uint256 branch_context_hash;
         uint256 beacon_bundle_hash;
-        uint256 recovery_authority_hash;
 
         friend bool operator==(const Key&, const Key&) = default;
     };
@@ -162,7 +152,6 @@ private:
         int32_t target_height,
         const CBlockIndex& branch_tip,
         const ActiveRosterBeaconBundle& beacon_bundle,
-        RecoveryRosterAuthorityPtr recovery_authority,
         bool publish,
         QuorumBuildError* error) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
@@ -208,9 +197,11 @@ using FrozenQuorumRosterCachePtr =
 
 /**
  * Build the four oldest-to-newest active rosters on one explicit branch from
- * the exact corresponding READY beacon bundle. The lookup is invoked only
- * with ancestors of branch_tip, then its returned height/hash and exact
- * registry schedule revision are checked.
+ * the exact corresponding READY beacon bundle. Recovery rosters select their
+ * identities from the authenticated pre-F source, freeze keys at the shared
+ * cutoff before the oldest recovery epoch, and use target state only to
+ * disable those fixed entries. Every lookup is an ancestor of branch_tip and
+ * its returned height, hash, and registry schedule revision are checked.
  */
 [[nodiscard]] FrozenQuorumRostersPtr
 BuildActiveFrozenQuorumRosters(
@@ -219,21 +210,6 @@ BuildActiveFrozenQuorumRosters(
     int32_t target_height,
     const CBlockIndex& branch_tip,
     const ActiveRosterBeaconBundle& beacon_bundle,
-    const QuorumSnapshotLookup& snapshot_lookup,
-    QuorumBuildError* error = nullptr);
-
-/**
- * Select and freeze four phase-domain standby rosters from the exact pre-F
- * normal snapshot committed by source. Recovery targets reuse those positions;
- * target state may disable, but never replace or reorder, a frozen member.
- */
-[[nodiscard]] RecoveryRosterAuthorityPtr
-BuildRecoveryRosterAuthorityFromSource(
-    const uint256& genesis_hash,
-    const QuorumBuildConfig& config,
-    int32_t recovery_target_height,
-    const CBlockIndex& branch_tip,
-    const RecoveryRosterAuthoritySource& source,
     const QuorumSnapshotLookup& snapshot_lookup,
     QuorumBuildError* error = nullptr);
 

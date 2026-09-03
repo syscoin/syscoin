@@ -216,9 +216,8 @@ bool ActiveRosterBeaconBundle::IsStructurallyValid() const noexcept
             return false;
         }
     }
-    if (!recovery_authority_source.IsStructurallyValid()) return false;
-    return recovery_authority_hash.IsNull() ==
-           recovery_authority_source.IsNull();
+    return recovery_authority_source.IsStructurallyValid() &&
+           !recovery_authority_source.IsNull();
 }
 
 bool ActiveRosterBeaconBundle::IsForNewestEpoch(
@@ -237,8 +236,14 @@ bool RosterBeaconWindow::IsStructurallyValid() const noexcept
 
 bool BTCCReceiptState::IsStructurallyValid() const
 {
-    return cursor.IsStructurallyValid() &&
-           (cursor.IsNull() == cumulative_hash.IsNull());
+    if (!cursor.IsStructurallyValid()) return false;
+    if (cumulative_hash.IsNull()) {
+        return cursor.IsNull() && latest_chainlock_target_height == -1 &&
+               latest_receipt_carrier_height == -1;
+    }
+    return !cursor.IsNull() && latest_chainlock_target_height >= 0 &&
+           latest_receipt_carrier_height > latest_chainlock_target_height &&
+           cursor.sys_height <= latest_chainlock_target_height;
 }
 
 bool PaymentAuditReceiptCursor::IsNull() const noexcept

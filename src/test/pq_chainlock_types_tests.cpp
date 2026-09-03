@@ -61,7 +61,6 @@ RosterBeaconWindow ReadyWindow(uint32_t first_epoch)
     }
     window.active.recovery_authority_source.normal_beacon =
         window.active.seeds.back();
-    window.active.recovery_authority_hash = NonNullHash(700 + first_epoch);
     window.next.epoch =
         first_epoch + static_cast<uint32_t>(ACTIVE_QUORUMS);
     return window;

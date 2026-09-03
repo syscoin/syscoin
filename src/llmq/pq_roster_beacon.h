@@ -120,9 +120,8 @@ struct NormalRosterAuthorizationInput {
     std::optional<ValidatedRosterBeaconAnchor> accepted_anchor;
     std::optional<ValidatedRosterBeaconRange> pending_reveal;
     std::optional<ValidatedRosterBeaconRange> ready_rotation;
-    /** Exact fixed authority source/hash committed by the signed prior state. */
+    /** Exact pre-reveal recovery source committed by the signed prior state. */
     RecoveryRosterAuthoritySource recovery_authority_source;
-    uint256 recovery_authority_hash;
 };
 
 /** One normal-path decision; INITIALIZE and RECOVER never use this type. */
@@ -174,15 +173,14 @@ ValidateNormalRosterAuthorizationDecision(
 [[nodiscard]] bool IsInitialNormalRosterBeaconWindow(
     const RosterBeaconWindow& window) noexcept;
 
-/** Narrow prolonged-outage exception derived from one shared raw anchor. */
+/** Canonical prolonged-outage view derived from one authenticated source. */
 [[nodiscard]] bool IsRecoveryRosterBeaconWindow(
     const RosterBeaconWindow& window) noexcept;
 
-/** Build the sole recovery window for an authenticated source and epoch. */
+/** Build the sole recovery window for an authenticated source and target epoch. */
 [[nodiscard]] std::optional<RosterBeaconWindow>
 MakeRecoveryRosterBeaconWindow(
     const RecoveryRosterAuthoritySource& source,
-    const uint256& recovery_authority_hash,
     uint32_t newest_epoch) noexcept;
 
 /** Whether any active slot was seeded by objective recovery. */
@@ -229,6 +227,27 @@ CanonicalRosterRecoveryTargetHeight(
     const ChainLockScheduleConfig& chainlock,
     const BTCCScheduleConfig& btcc,
     uint32_t epoch) noexcept;
+
+enum class ObjectiveRosterAuthorizationMode : uint8_t {
+    NORMAL = 0,
+    RECOVER = 1,
+    PAUSE = 2,
+};
+
+/**
+ * Select the sole branch-objective mode for an eligible post-initialization
+ * target. Fresh receipt progress permits normal transitions. Stale progress
+ * pauses every non-canonical target and permits recovery only at the canonical
+ * phase-3 target. Missing receipt progress remains paused until INITIALIZE is
+ * objectively receipted.
+ */
+[[nodiscard]] std::optional<ObjectiveRosterAuthorizationMode>
+GetObjectiveRosterAuthorizationMode(
+    const ChainLockScheduleConfig& chainlock,
+    const BTCCScheduleConfig& btcc,
+    uint32_t target_epoch,
+    int32_t target_height,
+    std::optional<int32_t> latest_receipted_target_height) noexcept;
 
 /**
  * Map an initialization or recovery target to its sole discontinuous

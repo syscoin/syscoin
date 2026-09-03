@@ -24,20 +24,27 @@ bool ValidCapacity(std::size_t value, std::size_t maximum)
     return value > 0 && value <= maximum;
 }
 
-bool IsReceiptableAdvance(const FinalChainLock& chainlock,
-                          const ChainLockFinalityStoreConfig& config) noexcept
+bool IsReceiptableChainLock(const FinalChainLock& chainlock,
+                            const ChainLockFinalityStoreConfig& config) noexcept
 {
     const auto& statement{chainlock.statement};
+    if (!IsBTCCCandidateHeight(config.btcc_schedule, statement.height)) {
+        return false;
+    }
+    if (statement.btcc_advance == BTCCAdvance::KEEP) {
+        return !statement.accepted_btcc_cursor.IsNull() &&
+               statement.accepted_btcc_cursor ==
+                   statement.previous_btcc_cursor;
+    }
     return statement.btcc_advance == BTCCAdvance::ADVANCE &&
-           statement.height == statement.accepted_btcc_cursor.sys_height &&
-           IsBTCCCandidateHeight(config.btcc_schedule, statement.height);
+           statement.height == statement.accepted_btcc_cursor.sys_height;
 }
 
 bool SealsUnsealedBTCC(const FinalChainLock& seal,
                        const FinalChainLock& unsealed,
                        const ChainLockFinalityStoreConfig& config) noexcept
 {
-    if (!IsReceiptableAdvance(unsealed, config)) return false;
+    if (!IsReceiptableChainLock(unsealed, config)) return false;
     const int64_t carrier_height{
         static_cast<int64_t>(unsealed.statement.height) +
         config.btcc_schedule.nevm_injection_lag};
@@ -136,13 +143,22 @@ bool IsDurableBTCCReceiptStateMonotonic(
         !candidate.IsStructurallyValid()) {
         return false;
     }
-    if (previous.cursor.IsNull()) return true;
+    if (candidate == previous) return true;
+    if (previous.cursor.IsNull()) return !candidate.cursor.IsNull();
     if (candidate.cursor.IsNull() ||
-        candidate.cursor.sys_height < previous.cursor.sys_height) {
+        candidate.cursor.sys_height < previous.cursor.sys_height ||
+        (candidate.cursor.sys_height == previous.cursor.sys_height &&
+         candidate.cursor != previous.cursor)) {
         return false;
     }
-    return candidate.cursor.sys_height != previous.cursor.sys_height ||
-           candidate == previous;
+    // A non-null KEEP receipt advances the authenticated receipt prefix while
+    // retaining the exact cursor identity. Both exact-slot coordinates must
+    // still move forward together.
+    return candidate.latest_chainlock_target_height >
+               previous.latest_chainlock_target_height &&
+           candidate.latest_receipt_carrier_height >
+               previous.latest_receipt_carrier_height &&
+           candidate.cumulative_hash != previous.cumulative_hash;
 }
 
 bool IsDurablePaymentAuditStateMonotonic(
@@ -270,8 +286,8 @@ bool BTCCReceiptAssumptionAnchor::IsStructurallyValid() const noexcept
     if (IsDisabled()) return true;
     return height >= 0 && !block_hash.IsNull() &&
            receipt_state.IsStructurallyValid() &&
-           (receipt_state.cursor.IsNull() ||
-            receipt_state.cursor.sys_height <= height);
+           receipt_state.cursor.sys_height <= height &&
+           receipt_state.latest_receipt_carrier_height <= height;
 }
 
 bool ChainLockFinalityStoreConfig::IsValid() const noexcept
@@ -288,6 +304,21 @@ bool ChainLockFinalityStoreConfig::IsValid() const noexcept
              btcc_schedule, btcc_receipt_assumption_anchor.height) ||
         (btcc_receipt_assumption_anchor.height < first_receipt_carrier &&
          btcc_receipt_assumption_anchor.receipt_state == BTCCReceiptState{})};
+    const auto& anchor_state{
+        btcc_receipt_assumption_anchor.receipt_state};
+    const auto anchor_source{
+        BTCCSourceHeightForNEVMInjection(
+            btcc_schedule, anchor_state.latest_receipt_carrier_height)};
+    const bool valid_receipt_anchor_state{
+        btcc_receipt_assumption_anchor.IsDisabled() ||
+        anchor_state == BTCCReceiptState{} ||
+        (anchor_source &&
+         IsBTCCCandidateHeight(
+             btcc_schedule, anchor_state.cursor.sys_height) &&
+         *anchor_source == anchor_state.latest_chainlock_target_height &&
+         IsEligibleChainLockTarget(
+             chainlock_schedule,
+             anchor_state.latest_chainlock_target_height))};
     return chainlock_schedule.IsValid() && btcc_schedule.IsValid() &&
            btcc_schedule.candidate_period %
                    chainlock_schedule.chainlock_period ==
@@ -300,6 +331,7 @@ bool ChainLockFinalityStoreConfig::IsValid() const noexcept
            activation_predecessor_height < btcc_schedule.candidate_origin &&
            btcc_receipt_assumption_anchor.IsStructurallyValid() &&
            valid_receipt_anchor_height &&
+           valid_receipt_anchor_state &&
            ValidCapacity(seen_logical_capacity, MAX_FINALITY_ID_CACHE_SIZE) &&
            ValidCapacity(seen_witness_capacity, MAX_FINALITY_ID_CACHE_SIZE) &&
            ValidCapacity(rejected_witness_capacity, MAX_FINALITY_ID_CACHE_SIZE) &&
@@ -462,7 +494,7 @@ bool ChainLockFinalityStore::CheckCurrentStoreState(
             return false;
         }
     } else if (admission == ChainLockCandidateAdmission::RECEIPT_ARCHIVE) {
-        if (!IsReceiptableAdvance(chainlock, m_config) ||
+        if (!IsReceiptableChainLock(chainlock, m_config) ||
             statement.height <= m_config.activation_predecessor_height ||
             (m_best && statement.height >= predecessor.height)) {
             SetError(error, ChainLockFinalityError::STALE_HEIGHT);
@@ -473,7 +505,7 @@ bool ChainLockFinalityStore::CheckCurrentStoreState(
         // The integration admits this token only after reloading and matching
         // the exact fsynced unsealed witness. Keep it archive-only and below
         // the already restored durable winner.
-        if (!m_best || !IsReceiptableAdvance(chainlock, m_config) ||
+        if (!m_best || !IsReceiptableChainLock(chainlock, m_config) ||
             statement.height <= m_config.activation_predecessor_height ||
             statement.height >= predecessor.height) {
             SetError(error, ChainLockFinalityError::STALE_HEIGHT);
@@ -485,7 +517,7 @@ bool ChainLockFinalityStore::CheckCurrentStoreState(
         // special archive, but never a record above the durable winner. A newer
         // exact terminal certificate must use marker-authorized CATCHUP so the
         // persisted best/unsealed restart invariant remains coherent.
-        if (!IsReceiptableAdvance(chainlock, m_config) ||
+        if (!IsReceiptableChainLock(chainlock, m_config) ||
             statement.height <= m_config.activation_predecessor_height || !m_best ||
             statement.height >= predecessor.height) {
             SetError(error, ChainLockFinalityError::STALE_HEIGHT);
@@ -1274,7 +1306,7 @@ bool ChainLockFinalityStore::AcceptVerifiedInternal(
                               m_config)) {
             m_unsealed_btcc.reset();
         }
-        if (IsReceiptableAdvance(chainlock, m_config)) {
+        if (IsReceiptableChainLock(chainlock, m_config)) {
             m_unsealed_btcc = accepted;
         }
         m_best = accepted;

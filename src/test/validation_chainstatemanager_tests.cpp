@@ -69,46 +69,6 @@ void AssertMainLockHeldForTest() NO_THREAD_SAFETY_ANALYSIS
     AssertLockHeld(::cs_main);
 }
 
-// SYSCOIN: deterministic identities for the synthetic recovery authority.
-uint256 SyntheticPQHash(uint64_t value)
-{
-    uint256 hash;
-    for (std::size_t byte{0}; byte < sizeof(value); ++byte) {
-        hash.begin()[byte] =
-            static_cast<uint8_t>(value >> (8 * byte));
-    }
-    if (hash.IsNull()) hash.begin()[0] = 1;
-    return hash;
-}
-
-// SYSCOIN: build the source-bound authority persisted by the restart fixture.
-llmq::pq::RecoveryRosterAuthorityPtr SyntheticRecoveryAuthority(
-    const llmq::pq::RosterBeaconSeed& source)
-{
-    auto authority{
-        std::make_shared<llmq::pq::RecoveryRosterAuthority>()};
-    authority->normal_beacon = source;
-    for (std::size_t slot{0}; slot < llmq::pq::ACTIVE_QUORUMS; ++slot) {
-        for (std::size_t member{0}; member < llmq::pq::QUORUM_SIZE;
-             ++member) {
-            auto& entry{authority->slots[slot][member]};
-            entry.pro_tx_hash = SyntheticPQHash(
-                1'000'000 + slot * llmq::pq::QUORUM_SIZE + member);
-            entry.eligible = member < llmq::pq::QUORUM_MIN_VALID;
-            if (!entry.eligible) continue;
-            llmq::pq::RecoveryRosterChildCommitment child_root;
-            child_root.global_key_version = 1;
-            child_root.commitment.generation = 1;
-            child_root.commitment.tree_id = SyntheticPQHash(
-                2'000'000 + slot * llmq::pq::QUORUM_SIZE + member);
-            child_root.commitment.root = SyntheticPQHash(
-                3'000'000 + slot * llmq::pq::QUORUM_SIZE + member);
-            entry.child_root = std::move(child_root);
-        }
-    }
-    BOOST_REQUIRE(authority->IsStructurallyValid());
-    return authority;
-}
 } // namespace
 
 BOOST_FIXTURE_TEST_CASE(persisted_reindex_marker_forces_clean_block_index, ChainTestingSetup)
@@ -1593,6 +1553,10 @@ BOOST_FIXTURE_TEST_CASE(
         uint256 receipt_anchor_cursor_btc{
             consensus.hashPQBTCCReceiptAnchorCursorBTCBlock};
         uint256 receipt_anchor_state{consensus.hashPQBTCCReceiptAnchorState};
+        int receipt_anchor_latest_target{
+            consensus.nPQBTCCReceiptAnchorLatestTargetHeight};
+        int receipt_anchor_latest_carrier{
+            consensus.nPQBTCCReceiptAnchorLatestCarrierHeight};
         ~RestoreConsensus()
         {
             consensus.DIP0003Height = dip3_height;
@@ -1612,6 +1576,10 @@ BOOST_FIXTURE_TEST_CASE(
             consensus.hashPQBTCCReceiptAnchorCursorBTCBlock =
                 receipt_anchor_cursor_btc;
             consensus.hashPQBTCCReceiptAnchorState = receipt_anchor_state;
+            consensus.nPQBTCCReceiptAnchorLatestTargetHeight =
+                receipt_anchor_latest_target;
+            consensus.nPQBTCCReceiptAnchorLatestCarrierHeight =
+                receipt_anchor_latest_carrier;
         }
     } restore{consensus};
 
@@ -1639,6 +1607,8 @@ BOOST_FIXTURE_TEST_CASE(
     consensus.hashPQBTCCReceiptAnchorCursorSysBlock.SetNull();
     consensus.hashPQBTCCReceiptAnchorCursorBTCBlock.SetNull();
     consensus.hashPQBTCCReceiptAnchorState.SetNull();
+    consensus.nPQBTCCReceiptAnchorLatestTargetHeight = -1;
+    consensus.nPQBTCCReceiptAnchorLatestCarrierHeight = -1;
 
     llmq::pq::PQRegistryConfig registry_config;
     BOOST_REQUIRE(
@@ -1674,6 +1644,8 @@ BOOST_FIXTURE_TEST_CASE(
     consensus.hashPQBTCCReceiptAnchorCursorSysBlock.SetNull();
     consensus.hashPQBTCCReceiptAnchorCursorBTCBlock.SetNull();
     consensus.hashPQBTCCReceiptAnchorState.SetNull();
+    consensus.nPQBTCCReceiptAnchorLatestTargetHeight = -1;
+    consensus.nPQBTCCReceiptAnchorLatestCarrierHeight = -1;
     // No carrier is reached by this test. Enabling the valid schedule still
     // makes ordinary block connection commit the canonical probation root.
     consensus.nPQBTCCCandidateOrigin = 3'745;
@@ -1841,6 +1813,10 @@ BOOST_FIXTURE_TEST_CASE(
         uint256 receipt_anchor_cursor_btc{
             consensus.hashPQBTCCReceiptAnchorCursorBTCBlock};
         uint256 receipt_anchor_state{consensus.hashPQBTCCReceiptAnchorState};
+        int receipt_anchor_latest_target{
+            consensus.nPQBTCCReceiptAnchorLatestTargetHeight};
+        int receipt_anchor_latest_carrier{
+            consensus.nPQBTCCReceiptAnchorLatestCarrierHeight};
         ~RestoreConsensus()
         {
             consensus.DIP0003Height = dip3_height;
@@ -1861,6 +1837,10 @@ BOOST_FIXTURE_TEST_CASE(
             consensus.hashPQBTCCReceiptAnchorCursorBTCBlock =
                 receipt_anchor_cursor_btc;
             consensus.hashPQBTCCReceiptAnchorState = receipt_anchor_state;
+            consensus.nPQBTCCReceiptAnchorLatestTargetHeight =
+                receipt_anchor_latest_target;
+            consensus.nPQBTCCReceiptAnchorLatestCarrierHeight =
+                receipt_anchor_latest_carrier;
         }
     } restore{consensus};
 
@@ -1891,6 +1871,8 @@ BOOST_FIXTURE_TEST_CASE(
     consensus.hashPQBTCCReceiptAnchorCursorSysBlock.SetNull();
     consensus.hashPQBTCCReceiptAnchorCursorBTCBlock.SetNull();
     consensus.hashPQBTCCReceiptAnchorState.SetNull();
+    consensus.nPQBTCCReceiptAnchorLatestTargetHeight = -1;
+    consensus.nPQBTCCReceiptAnchorLatestCarrierHeight = -1;
 
     const auto config{
         llmq::MakePQChainLockFinalityStoreConfig(consensus)};
@@ -1970,16 +1952,8 @@ BOOST_FIXTURE_TEST_CASE(
         seed.anchor_btc_height = 800'000;
         seed.future_btc_hash = recovery_future_hash;
     }
-    const auto recovery_authority{SyntheticRecoveryAuthority(
-        winner.statement.roster_beacons.active.seeds.back())};
-    const auto recovery_authority_hash{
-        llmq::pq::GetRecoveryRosterAuthorityHash(
-            consensus.hashGenesisBlock, *recovery_authority)};
-    BOOST_REQUIRE(recovery_authority_hash);
     winner.statement.roster_beacons.active.recovery_authority_source
-        .normal_beacon = recovery_authority->normal_beacon;
-    winner.statement.roster_beacons.active.recovery_authority_hash =
-        *recovery_authority_hash;
+        .normal_beacon = winner.statement.roster_beacons.active.seeds.back();
     winner.statement.roster_beacons.next.epoch =
         active_epochs->back().epoch + 1;
     winner.statement.accepted_btcc_cursor = recovery_cursor;
@@ -2029,8 +2003,7 @@ BOOST_FIXTURE_TEST_CASE(
                 .wipe_data = true,
             },
             consensus.hashGenesisBlock, *config};
-        BOOST_REQUIRE(persistence.PersistInitializedBest(
-            winner, nullptr, recovery_authority));
+        BOOST_REQUIRE(persistence.PersistInitializedBest(winner));
     }
     {
         LOCK(::cs_main);

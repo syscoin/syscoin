@@ -34,7 +34,6 @@ inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_PAYMENT_AUDIT_PRESEAL_KEY{7};
 inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_PAYMENT_AUDIT_PROSPECTIVE_PRESEAL_KEY{8};
 inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_ROSTER_RECOVERY_PRECOMMIT_KEY{9};
 inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_RECEIPT_ARCHIVE_AUTHORIZATION_KEY{10};
-inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_RECOVERY_AUTHORITY_KEY{11};
 inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_PAYMENT_AUDIT_SEAL_CONTEXT_KEY{12};
 inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_AUTHORIZATION_BASE_KEY{13};
 
@@ -75,9 +74,8 @@ static_assert(RosterRecoveryPrecommit::WIRE_SIZE == 114);
  *
  * The earliest carrier is the block-pruning floor. The terminal receipt is
  * the exact certificate dependency currently needed to extend the
- * authenticated prefix; its predecessor state lets replay recompute the
- * complete marker range without treating a later certificate as an arbitrary
- * finality rebase.
+ * authenticated prefix. The two parent states bind both ends of the replay
+ * range, so its terminal KEEP cannot substitute an unrelated cursor.
  */
 struct BTCCPresealMarker {
     int32_t earliest_carrier_height{-1};
@@ -85,6 +83,7 @@ struct BTCCPresealMarker {
     BTCCReceiptState predecessor_receipt_state;
     int32_t terminal_carrier_height{-1};
     uint256 terminal_carrier_hash;
+    BTCCReceiptState terminal_parent_receipt_state;
     BTCCReceipt terminal_receipt;
     uint64_t revision{0};
 
@@ -95,6 +94,7 @@ struct BTCCPresealMarker {
                predecessor_receipt_state.IsStructurallyValid() &&
                terminal_carrier_height >= earliest_carrier_height &&
                !terminal_carrier_hash.IsNull() &&
+               terminal_parent_receipt_state.IsStructurallyValid() &&
                terminal_receipt.IsStructurallyValid() &&
                !terminal_receipt.IsNull() && revision > 0;
     }
@@ -198,9 +198,8 @@ inline constexpr uint16_t PAYMENT_AUDIT_SEAL_CONTEXT_VERSION{1};
 
 /**
  * Exact accepted seal context retained only across the bounded audit-carrier
- * window. Roster bytes are rebuilt from the branch snapshots; a recovery
- * authority is retained because it is the fixed membership source, not a
- * cache of the derived rosters.
+ * window. Roster bytes are rebuilt from branch snapshots and the immutable
+ * recovery source committed by the retained seal statement.
  */
 class PaymentAuditSealContextCapsule final {
 public:
@@ -217,39 +216,19 @@ public:
     {
         return m_authorization_mask;
     }
-    [[nodiscard]] const RecoveryRosterAuthorityPtr&
-    RecoveryAuthority() const noexcept
-    {
-        return m_recovery_authority;
-    }
-
     [[nodiscard]] bool IsInternallyConsistent(
         const uint256& genesis_hash,
         const ChainLockFinalityStoreConfig& config) const noexcept;
 
-    friend bool operator==(const PaymentAuditSealContextCapsule& left,
-                           const PaymentAuditSealContextCapsule& right)
-    {
-        const bool same_authority{
-            (!left.m_recovery_authority && !right.m_recovery_authority) ||
-            (left.m_recovery_authority && right.m_recovery_authority &&
-             *left.m_recovery_authority == *right.m_recovery_authority)};
-        return left.m_version == right.m_version &&
-               left.m_epoch == right.m_epoch &&
-               left.m_carrier_end_height_exclusive ==
-                   right.m_carrier_end_height_exclusive &&
-               left.m_seal == right.m_seal &&
-               left.m_authorization_mask == right.m_authorization_mask &&
-               same_authority;
-    }
+    friend bool operator==(const PaymentAuditSealContextCapsule&,
+                           const PaymentAuditSealContextCapsule&) = default;
 
 private:
     PaymentAuditSealContextCapsule(
         uint32_t epoch,
         int32_t carrier_end_height_exclusive,
         FinalChainLockRecordMetadata seal,
-        uint8_t authorization_mask,
-        RecoveryRosterAuthorityPtr recovery_authority);
+        uint8_t authorization_mask);
 
     static bool BuildForVerifiedDurableCandidate(
         const uint256& genesis_hash,
@@ -263,7 +242,6 @@ private:
     int32_t m_carrier_end_height_exclusive{-1};
     FinalChainLockRecordMetadata m_seal;
     uint8_t m_authorization_mask{0};
-    RecoveryRosterAuthorityPtr m_recovery_authority;
 
     friend class ::llmq::CChainLocksHandler;
     friend class PaymentAuditSealContextCapsuleTestAccess;
@@ -333,7 +311,7 @@ public:
     LoadAuthorizationBases() const;
     [[nodiscard]] std::optional<FinalChainLock>
     LoadAuthorizationBase(const uint256& logical_id) const;
-    /** Compact coordinates needed to retain/rebuild older fixed authorities. */
+    /** Compact coordinates needed to retain/rebuild older recovery rosters. */
     [[nodiscard]] std::vector<RecoveryRosterAuthoritySource>
     LoadAuthorizationBaseRecoverySources() const;
     [[nodiscard]] std::optional<int32_t>
@@ -344,8 +322,6 @@ public:
     LoadPaymentAuditPresealState() const;
     [[nodiscard]] std::optional<RosterRecoveryPrecommit>
     LoadRosterRecoveryPrecommit() const;
-    [[nodiscard]] RecoveryRosterAuthorityPtr
-    LoadRecoveryRosterAuthority() const;
     [[nodiscard]] std::optional<PaymentAuditSealContextCapsule>
     LoadPaymentAuditSealContext() const;
 
@@ -356,31 +332,28 @@ public:
     [[nodiscard]] bool PersistBest(
         const FinalChainLock& chainlock,
         ChainLockPersistenceError* error = nullptr,
-        RecoveryRosterAuthorityPtr recovery_authority = nullptr,
         std::optional<PaymentAuditSealContextCapsule>
             payment_audit_seal_context = std::nullopt);
 
     /**
      * Atomically advance a normally verified durable winner and retire the
      * exact receipt-gap authorization that it independently covers. Recovery
-     * authority remains retained while any durable certificate needs it.
+     * source coordinates remain committed by each retained certificate.
      */
     [[nodiscard]] bool PersistBestCoveringReceiptArchive(
         const FinalChainLock& chainlock,
         const ReceiptArchiveRosterAuthorization& expected_authorization,
         ChainLockPersistenceError* error = nullptr,
-        RecoveryRosterAuthorityPtr recovery_authority = nullptr,
         std::optional<PaymentAuditSealContextCapsule>
             payment_audit_seal_context = std::nullopt);
 
     /**
-     * Retain a fully verified stale ADVANCE needed by an exact on-chain
-     * receipt without changing the finality winner.
+     * Retain a fully verified stale exact-slot KEEP or ADVANCE needed by an
+     * on-chain receipt without changing the finality winner.
      */
     [[nodiscard]] bool PersistUnsealedBTCC(
         const FinalChainLock& chainlock,
-        ChainLockPersistenceError* error = nullptr,
-        RecoveryRosterAuthorityPtr recovery_authority = nullptr);
+        ChainLockPersistenceError* error = nullptr);
 
     /**
      * Durably retain one certificate only after full network authorization
@@ -393,14 +366,13 @@ public:
 
     /**
      * Atomically install the exact verified receipt archive and consume its
-     * owner-bound gap authorization. Recovery authority is retained or
-     * rebound when the resulting durable state still needs it.
+     * owner-bound gap authorization. Recovery source coordinates remain
+     * committed by the resulting durable records.
      */
     [[nodiscard]] bool PersistAuthorizedUnsealedBTCC(
         const FinalChainLock& chainlock,
         const ReceiptArchiveRosterAuthorization& expected_authorization,
-        ChainLockPersistenceError* error = nullptr,
-        RecoveryRosterAuthorityPtr recovery_authority = nullptr);
+        ChainLockPersistenceError* error = nullptr);
 
     /** Atomically advance the winner and highest catch-up audit marker. */
     [[nodiscard]] bool PersistCatchupBest(
@@ -410,7 +382,6 @@ public:
             btcc_cursor_reconciliation = std::nullopt,
         const ReceiptArchiveRosterAuthorization*
             consume_receipt_archive_authorization = nullptr,
-        RecoveryRosterAuthorityPtr recovery_authority = nullptr,
         std::optional<PaymentAuditSealContextCapsule>
             payment_audit_seal_context = std::nullopt);
 
@@ -423,7 +394,6 @@ public:
     [[nodiscard]] bool PersistInitializedBest(
         const FinalChainLock& chainlock,
         ChainLockPersistenceError* error = nullptr,
-        RecoveryRosterAuthorityPtr recovery_authority = nullptr,
         const VerifiedRecoveryResetPersistenceCapability*
             verified_reset = nullptr,
         std::optional<PaymentAuditSealContextCapsule>
@@ -442,7 +412,6 @@ public:
             btcc_cursor_reconciliation = std::nullopt,
         const ReceiptArchiveRosterAuthorization*
             consume_receipt_archive_authorization = nullptr,
-        RecoveryRosterAuthorityPtr recovery_authority = nullptr,
         const VerifiedRecoveryResetPersistenceCapability*
             verified_reset = nullptr,
         std::optional<PaymentAuditSealContextCapsule>

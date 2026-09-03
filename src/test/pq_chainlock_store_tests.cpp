@@ -58,6 +58,8 @@ RosterBeaconWindow ReadyWindow(int32_t height)
     for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
         window.active.seeds[slot] = ReadySeed((*active)[slot].epoch);
     }
+    window.active.recovery_authority_source.normal_beacon =
+        window.active.seeds.back();
     window.next.epoch = active->back().epoch + 1;
     return window;
 }
@@ -75,6 +77,8 @@ RosterBeaconWindow InitializationWindow(int32_t height)
         seed.epoch = (*active)[slot].epoch;
         window.active.seeds[slot] = std::move(seed);
     }
+    window.active.recovery_authority_source.normal_beacon =
+        window.active.seeds.back();
     window.next.epoch = active->back().epoch + 1;
     return window;
 }
@@ -223,6 +227,76 @@ private:
 
 BOOST_FIXTURE_TEST_SUITE(pq_chainlock_store_tests, BasicTestingSetup)
 
+BOOST_AUTO_TEST_CASE(receipt_assumption_anchor_binds_exact_latest_slot)
+{
+    auto config{MakeConfig()};
+    config.btcc_receipt_assumption_anchor = BTCCReceiptAssumptionAnchor{
+        880, NonNullHash(880),
+        BTCCReceiptState{
+            MakeCursor(870, 1), NonNullHash(2), 870, 880}};
+    BOOST_REQUIRE(config.IsValid());
+
+    auto wrong_target{config};
+    wrong_target.btcc_receipt_assumption_anchor.receipt_state
+        .latest_chainlock_target_height = 865;
+    BOOST_CHECK(!wrong_target.IsValid());
+
+    auto impossible_cursor{config};
+    impossible_cursor.btcc_receipt_assumption_anchor.receipt_state
+        .cursor.sys_height = 865;
+    BOOST_REQUIRE(impossible_cursor.btcc_receipt_assumption_anchor
+                      .receipt_state.IsStructurallyValid());
+    BOOST_CHECK(!impossible_cursor.IsValid());
+
+    auto wrong_carrier{config};
+    wrong_carrier.btcc_receipt_assumption_anchor.height = 890;
+    wrong_carrier.btcc_receipt_assumption_anchor.receipt_state
+        .latest_receipt_carrier_height = 890;
+    BOOST_CHECK(!wrong_carrier.IsValid());
+
+    auto carrier_after_anchor{config};
+    carrier_after_anchor.btcc_receipt_assumption_anchor.height = 879;
+    BOOST_CHECK(!carrier_after_anchor.IsValid());
+}
+
+BOOST_AUTO_TEST_CASE(durable_btcc_receipt_state_accepts_exact_keep_progress)
+{
+    const BTCCursor cursor{MakeCursor(870, 10)};
+    const BTCCReceiptState previous{
+        cursor, NonNullHash(11), 870, 880};
+    const BTCCReceiptState keep{
+        cursor, NonNullHash(12), 875, 885};
+    BOOST_REQUIRE(previous.IsStructurallyValid());
+    BOOST_REQUIRE(keep.IsStructurallyValid());
+    BOOST_CHECK(IsDurableBTCCReceiptStateMonotonic(previous, previous));
+    BOOST_CHECK(IsDurableBTCCReceiptStateMonotonic(previous, keep));
+
+    auto alternate_cursor{keep};
+    alternate_cursor.cursor.sys_hash = NonNullHash(13);
+    BOOST_CHECK(!IsDurableBTCCReceiptStateMonotonic(
+        previous, alternate_cursor));
+
+    auto stale_target{keep};
+    stale_target.latest_chainlock_target_height =
+        previous.latest_chainlock_target_height;
+    BOOST_CHECK(!IsDurableBTCCReceiptStateMonotonic(previous, stale_target));
+
+    auto stale_carrier{keep};
+    stale_carrier.latest_receipt_carrier_height =
+        previous.latest_receipt_carrier_height;
+    BOOST_CHECK(!IsDurableBTCCReceiptStateMonotonic(previous, stale_carrier));
+
+    auto stale_accumulator{keep};
+    stale_accumulator.cumulative_hash = previous.cumulative_hash;
+    BOOST_CHECK(!IsDurableBTCCReceiptStateMonotonic(
+        previous, stale_accumulator));
+
+    BOOST_CHECK(!IsDurableBTCCReceiptStateMonotonic(keep, previous));
+    BOOST_CHECK(IsDurableBTCCReceiptStateMonotonic({}, {}));
+    BOOST_CHECK(IsDurableBTCCReceiptStateMonotonic({}, previous));
+    BOOST_CHECK(!IsDurableBTCCReceiptStateMonotonic(previous, {}));
+}
+
 BOOST_AUTO_TEST_CASE(catchup_historical_proof_scans_once_per_branch_context)
 {
     int64_t now_ms{0};
@@ -233,9 +307,9 @@ BOOST_AUTO_TEST_CASE(catchup_historical_proof_scans_once_per_branch_context)
     const uint256 context_a{NonNullHash(503)};
     const uint256 context_b{NonNullHash(504)};
     const BTCCReceiptState proof_a{
-        MakeCursor(870, 501), NonNullHash(505)};
+        MakeCursor(870, 501), NonNullHash(505), 870, 880};
     const BTCCReceiptState proof_b{
-        MakeCursor(880, 502), NonNullHash(506)};
+        MakeCursor(880, 502), NonNullHash(506), 880, 890};
     std::size_t scans{0};
 
     auto first{cache.GetOrCompute(branch_a, context_a, [&] {
@@ -443,6 +517,69 @@ BOOST_AUTO_TEST_CASE(verified_authorization_base_is_exact_and_not_finality)
         third, true, MakeVerificationContext(genesis, config, third)));
     BOOST_CHECK_EQUAL(store.AuthorizationBaseSizeForTesting(), 4U);
     BOOST_CHECK(store.GetVerifiedRosterAuthorizationBase(identity));
+}
+
+BOOST_AUTO_TEST_CASE(
+    verified_authorization_base_reference_survives_capacity_churn)
+{
+    const uint256 genesis{NonNullHash(114)};
+    const auto config{MakeConfig()};
+    TestFinalityContext context;
+    ChainLockFinalityStore store{genesis, config, context};
+
+    const auto source{MakeChainLock(
+        865, config.activation_predecessor_height,
+        NonNullHash(config.activation_predecessor_height), 114)};
+    const auto source_context{
+        MakeVerificationContext(genesis, config, source)};
+    BOOST_REQUIRE(source_context);
+    BOOST_REQUIRE(store.AcceptVerifiedRosterAuthorizationBase(
+        source, /*signatures_valid=*/true, source_context));
+    const RosterAuthorizationBaseIdentity source_identity{
+        source.statement.height, source.statement.block_hash,
+        source.GetLogicalId(genesis)};
+
+    uint256 newest_logical_id;
+    for (std::size_t index{1};
+         index <= VERIFIED_AUTHORIZATION_BASE_CAPACITY + 8;
+         ++index) {
+        const uint32_t newest_epoch{
+            static_cast<uint32_t>(ACTIVE_QUORUMS - 1 +
+                                  index * ACTIVE_QUORUMS)};
+        const auto target{CanonicalRosterRecoveryTargetHeight(
+            config.chainlock_schedule, config.btcc_schedule,
+            newest_epoch)};
+        BOOST_REQUIRE(target);
+        auto recovery{MakeChainLock(
+            *target, *target - static_cast<int32_t>(PQ_CL_PERIOD),
+            NonNullHash(410'000 + index), 420'000 + index)};
+        const auto recovery_window{MakeRecoveryRosterBeaconWindow(
+            source.statement.roster_beacons.active
+                .recovery_authority_source,
+            newest_epoch)};
+        BOOST_REQUIRE(recovery_window);
+        recovery.statement.roster_transition =
+            RosterAuthorizationTransitionKind::RECOVER;
+        recovery.statement.roster_beacons = *recovery_window;
+        recovery.statement.roster_authorization_base = source_identity;
+        BOOST_REQUIRE(recovery.IsStructurallyValid());
+        const auto recovery_context{
+            MakeVerificationContext(genesis, config, recovery)};
+        BOOST_REQUIRE(recovery_context);
+        BOOST_REQUIRE(store.AcceptVerifiedRosterAuthorizationBase(
+            recovery, /*signatures_valid=*/true, recovery_context));
+        newest_logical_id = recovery.GetLogicalId(genesis);
+        BOOST_REQUIRE(
+            store.GetVerifiedRosterAuthorizationBase(source_identity));
+    }
+
+    BOOST_CHECK_EQUAL(store.AuthorizationBaseSizeForTesting(),
+                      VERIFIED_AUTHORIZATION_BASE_CAPACITY);
+    BOOST_REQUIRE(
+        store.GetVerifiedRosterAuthorizationBase(source_identity));
+    BOOST_REQUIRE(
+        store.GetVerifiedRosterAuthorizationBaseByLogicalId(
+            newest_logical_id));
 }
 
 BOOST_AUTO_TEST_CASE(persisted_authorization_base_requires_trusted_context)
@@ -1128,7 +1265,7 @@ BOOST_AUTO_TEST_CASE(
 
     const BTCCursor durable_cursor{MakeCursor(870, 420)};
     const BTCCReceiptState durable_receipt{
-        durable_cursor, NonNullHash(421)};
+        durable_cursor, NonNullHash(421), 870, 880};
     const PaymentAuditReceiptState durable_payment{
         MakePaymentAuditReceiptState(870, 1, 422)};
     const uint256 durable_probation{NonNullHash(423)};

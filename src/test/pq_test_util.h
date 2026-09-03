@@ -37,7 +37,7 @@ public:
         if (!roster_set) return {};
         return PreparedChainLockContextPtr{new PreparedChainLockContext(
             std::move(schedule), statement, std::move(roster_set), {},
-            /*authorization_mask=*/0b1111, nullptr)};
+            /*authorization_mask=*/0b1111)};
     }
 
     [[nodiscard]] static PreparedChainLockContextPtr Create(
@@ -61,7 +61,7 @@ public:
         return PreparedChainLockContextPtr{new PreparedChainLockContext(
             std::move(schedule), statement,
             CreateRosterSet(genesis_hash), std::move(authorization),
-            /*authorization_mask=*/0b1111, nullptr)};
+            /*authorization_mask=*/0b1111)};
     }
 };
 
@@ -159,8 +159,6 @@ MakeSyntheticNormalRosterAuthorizationInput(
     input.btcc_advance = statement.btcc_advance;
     input.recovery_authority_source =
         statement.roster_beacons.active.recovery_authority_source;
-    input.recovery_authority_hash =
-        statement.roster_beacons.active.recovery_authority_hash;
     input.next_snapshot = RosterBeaconSnapshotCoverage{
         input.newest_epoch + 1, statement.previous_chainlock_height + 1,
         {}, false};

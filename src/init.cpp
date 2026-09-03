@@ -681,7 +681,7 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-pqbtcccandidateorigin=<n>", "PQ BTCC candidate origin used for regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
     argsman.AddArg("-pqbtccnevminjectionlag=<n>", "PQ BTCC NEVM injection lag used for regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
     // SYSCOIN: Regtest-only override for the release-pinned receipt-crypto
-    // assumption. All six values are required together and never alter the
+    // assumption. All eight values are required together and never alter the
     // height-only PQ activation boundary.
     argsman.AddArg("-pqbtccreceiptanchorheight=<n>", "Historical PQ BTCC receipt assumption carrier height; regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
     argsman.AddArg("-pqbtccreceiptanchorblockhash=<hex>", "Exact block hash at the PQ BTCC receipt assumption height; regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
@@ -689,6 +689,8 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-pqbtccreceiptanchorcursorsyshash=<hex>", "Last receipted Syscoin cursor hash at the PQ BTCC assumption boundary; regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
     argsman.AddArg("-pqbtccreceiptanchorcursorbtchash=<hex>", "Last receipted Bitcoin hash at the PQ BTCC assumption boundary; regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
     argsman.AddArg("-pqbtccreceiptanchorstatehash=<hex>", "Cumulative PQ BTCC receipt-state hash at the assumption boundary; regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-pqbtccreceiptanchorlatesttargetheight=<n>", "Newest non-null PQ BTCC receipt target at the assumption boundary (-1 for none); regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-pqbtccreceiptanchorlatestcarrierheight=<n>", "Newest non-null PQ BTCC receipt carrier at the assumption boundary (-1 for none); regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
     // SYSCOIN END: Regtest PQ deployment arguments.
     argsman.AddArg("-btcheadermanaged", strprintf("Start and supervise the pinned local Bitcoin headers-only node (default: %u)", DEFAULT_BTC_HEADER_MANAGED), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-btcheaderbinary=<path>", "Path to managed bitcoind; otherwise search bundled btcheadernode locations", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -1429,7 +1431,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     // assigns the complete height-based profile. Regtest additionally has an
     // explicit registry preparation state with finality disabled.
     const auto& consensus{chainparams.GetConsensus()};
-    static constexpr std::array<const char*, 15> REGTEST_PQ_DEPLOYMENT_ARGS{
+    static constexpr std::array<const char*, 17> REGTEST_PQ_DEPLOYMENT_ARGS{
         "-pqactivationheight",
         "-pqfinalitypreparation",
         "-pqpreparationheight", "-pqchainlockepochorigin",
@@ -1441,8 +1443,10 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         "-pqbtccreceiptanchorcursorsyshash",
         "-pqbtccreceiptanchorcursorbtchash",
         "-pqbtccreceiptanchorstatehash",
+        "-pqbtccreceiptanchorlatesttargetheight",
+        "-pqbtccreceiptanchorlatestcarrierheight",
     };
-    static constexpr std::array<const char*, 9> REGTEST_PQ_FINALITY_ARGS{
+    static constexpr std::array<const char*, 11> REGTEST_PQ_FINALITY_ARGS{
         "-pqactivationheight", "-pqbtcccandidateorigin",
         "-pqbtccnevminjectionlag",
         "-pqbtccreceiptanchorheight", "-pqbtccreceiptanchorblockhash",
@@ -1450,6 +1454,8 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         "-pqbtccreceiptanchorcursorsyshash",
         "-pqbtccreceiptanchorcursorbtchash",
         "-pqbtccreceiptanchorstatehash",
+        "-pqbtccreceiptanchorlatesttargetheight",
+        "-pqbtccreceiptanchorlatestcarrierheight",
     };
     const bool regtest_pq_arg_supplied{
         chainparams.GetChainType() == ChainType::REGTEST &&
@@ -1488,7 +1494,9 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         consensus.nPQBTCCReceiptAnchorCursorHeight == -1 &&
         consensus.hashPQBTCCReceiptAnchorCursorSysBlock.IsNull() &&
         consensus.hashPQBTCCReceiptAnchorCursorBTCBlock.IsNull() &&
-        consensus.hashPQBTCCReceiptAnchorState.IsNull()};
+        consensus.hashPQBTCCReceiptAnchorState.IsNull() &&
+        consensus.nPQBTCCReceiptAnchorLatestTargetHeight == -1 &&
+        consensus.nPQBTCCReceiptAnchorLatestCarrierHeight == -1};
     const bool complete_pq_profile{
         llmq::MakePQChainLockFinalityStoreConfig(consensus).has_value() &&
         llmq::MakePQQuorumBuildConfig(consensus).has_value()};
@@ -1513,6 +1521,8 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         consensus.hashPQBTCCReceiptAnchorCursorSysBlock.IsNull() &&
         consensus.hashPQBTCCReceiptAnchorCursorBTCBlock.IsNull() &&
         consensus.hashPQBTCCReceiptAnchorState.IsNull() &&
+        consensus.nPQBTCCReceiptAnchorLatestTargetHeight == -1 &&
+        consensus.nPQBTCCReceiptAnchorLatestCarrierHeight == -1 &&
         llmq::MakePQQuorumBuildConfig(consensus).has_value() &&
         !llmq::MakePQChainLockFinalityStoreConfig(consensus).has_value()};
     if (operator_commitment_test_stub &&

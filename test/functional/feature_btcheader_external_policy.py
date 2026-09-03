@@ -251,6 +251,8 @@ class BTCHeaderPolicyAuxpowTest(SyscoinTestFramework):
             f'-pqbtccreceiptanchorcursorsyshash={"0" * 64}',
             f'-pqbtccreceiptanchorcursorbtchash={"0" * 64}',
             f'-pqbtccreceiptanchorstatehash={"0" * 64}',
+            "-pqbtccreceiptanchorlatesttargetheight=-1",
+            "-pqbtccreceiptanchorlatestcarrierheight=-1",
         ]
         # SYSCOIN: a configured migration must not start with finality silently
         # disabled. Without the receipt boundary a fresh node could enter

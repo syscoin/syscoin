@@ -137,38 +137,9 @@ ActiveRosterBeaconBundle ReadyBundle(uint32_t first_epoch)
     return bundle;
 }
 
-RecoveryRosterAuthorityPtr BindRecoveryAuthority(
-    const uint256& genesis_hash,
-    ActiveRosterBeaconBundle& bundle,
-    uint64_t salt)
+void BindRecoverySource(ActiveRosterBeaconBundle& bundle)
 {
-    auto authority{std::make_shared<RecoveryRosterAuthority>()};
-    authority->normal_beacon = bundle.seeds.back();
-    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
-        for (std::size_t member{0}; member < QUORUM_SIZE; ++member) {
-            auto& entry{authority->slots[slot][member]};
-            entry.pro_tx_hash =
-                NonNullHash(salt + slot * QUORUM_SIZE + member + 1);
-            entry.eligible = member < QUORUM_MIN_VALID;
-            if (!entry.eligible) continue;
-            RecoveryRosterChildCommitment child_root;
-            child_root.global_key_version = 1;
-            child_root.commitment.generation = 1;
-            child_root.commitment.tree_id = NonNullHash(
-                salt + 10'000 + slot * QUORUM_SIZE + member);
-            child_root.commitment.root = NonNullHash(
-                salt + 20'000 + slot * QUORUM_SIZE + member);
-            entry.child_root = std::move(child_root);
-        }
-    }
-    BOOST_REQUIRE(authority->IsStructurallyValid());
-    const auto authority_hash{
-        GetRecoveryRosterAuthorityHash(genesis_hash, *authority)};
-    BOOST_REQUIRE(authority_hash);
-    bundle.recovery_authority_source.normal_beacon =
-        authority->normal_beacon;
-    bundle.recovery_authority_hash = *authority_hash;
-    return authority;
+    bundle.recovery_authority_source.normal_beacon = bundle.seeds.back();
 }
 
 void SealRosterAuthorization(
@@ -229,7 +200,6 @@ struct AuditVerificationFixture {
     FinalPaymentAudit audit;
     FrozenQuorumRosters rosters;
     RosterAuthorizationVerificationContext authorization;
-    RecoveryRosterAuthorityPtr recovery_authority;
 };
 
 std::unique_ptr<AuditVerificationFixture> MakeFixture()
@@ -253,9 +223,7 @@ std::unique_ptr<AuditVerificationFixture> MakeFixture()
     BOOST_REQUIRE(active_epochs);
     const uint32_t first_epoch{active_epochs->front().epoch};
     fixture->seal.statement.roster_beacons.active = ReadyBundle(first_epoch);
-    fixture->recovery_authority = BindRecoveryAuthority(
-        fixture->genesis_hash,
-        fixture->seal.statement.roster_beacons.active, 1'000'000);
+    BindRecoverySource(fixture->seal.statement.roster_beacons.active);
     fixture->seal.statement.roster_beacons.next.epoch =
         active_epochs->back().epoch + 1;
     RosterBeaconWindow previous_window;
@@ -264,9 +232,6 @@ std::unique_ptr<AuditVerificationFixture> MakeFixture()
     previous_window.active.recovery_authority_source =
         fixture->seal.statement.roster_beacons.active
             .recovery_authority_source;
-    previous_window.active.recovery_authority_hash =
-        fixture->seal.statement.roster_beacons.active
-            .recovery_authority_hash;
     fixture->authorization.predecessor_height =
         fixture->seal.statement.previous_chainlock_height;
     fixture->authorization.predecessor_block_hash =
@@ -402,7 +367,6 @@ struct ResponseVerificationFixture {
     PaymentAuditHave expected;
     PreparedChainLockContextPtr context;
     RosterAuthorizationVerificationContext authorization;
-    RecoveryRosterAuthorityPtr recovery_authority;
 };
 
 std::unique_ptr<ResponseVerificationFixture> MakeResponseFixture()
@@ -437,9 +401,7 @@ std::unique_ptr<ResponseVerificationFixture> MakeResponseFixture()
     BOOST_REQUIRE_EQUAL(active_epochs->back().epoch, SUBJECT_EPOCH);
     const uint32_t first_epoch{active_epochs->front().epoch};
     fixture->statement.roster_beacons.active = ReadyBundle(first_epoch);
-    fixture->recovery_authority = BindRecoveryAuthority(
-        fixture->genesis_hash, fixture->statement.roster_beacons.active,
-        1'100'000);
+    BindRecoverySource(fixture->statement.roster_beacons.active);
     fixture->statement.roster_beacons.next.epoch =
         active_epochs->back().epoch + 1;
     fixture->authorization.predecessor_height =
@@ -549,7 +511,7 @@ std::unique_ptr<ResponseVerificationFixture> MakeResponseFixture()
     auto roster_set{VerifiedRosterSet::Create(
         fixture->genesis_hash,
         std::make_shared<const FrozenQuorumRosters>(fixture->rosters),
-        &roster_error, fixture->recovery_authority)};
+        &roster_error)};
     BOOST_REQUIRE(roster_set);
     fixture->context = PreparedChainLockContext::Create(
         fixture->schedule.chainlock, fixture->statement,
@@ -574,7 +536,7 @@ BOOST_AUTO_TEST_CASE(fresh_archive_preflight_needs_no_old_chainlock_store)
     auto roster_set{VerifiedRosterSet::Create(
         fixture->genesis_hash,
         std::make_shared<const FrozenQuorumRosters>(fixture->rosters),
-        &roster_error, fixture->recovery_authority)};
+        &roster_error)};
     BOOST_REQUIRE(roster_set);
     const auto prepared{PrepareFinalPaymentAuditVerification(
         fixture->schedule, fixture->audit, std::move(roster_set),
@@ -615,8 +577,7 @@ BOOST_AUTO_TEST_CASE(final_preparation_reuses_verified_seal_rosters)
     const uint64_t capability_hashes_before{
         GetQuorumRootTaggedHashCountForTesting()};
     const auto roster_set{VerifiedRosterSet::Create(
-        fixture->genesis_hash, rosters, &roster_error,
-        fixture->recovery_authority)};
+        fixture->genesis_hash, rosters, &roster_error)};
     BOOST_REQUIRE(roster_set);
     BOOST_CHECK(roster_error == ChainLockVerificationError::NONE);
     BOOST_CHECK_EQUAL(GetQuorumRootTaggedHashCountForTesting() -
@@ -685,8 +646,7 @@ BOOST_AUTO_TEST_CASE(final_preparation_reuses_verified_seal_rosters)
     const auto underfilled_rosters{
         std::make_shared<const FrozenQuorumRosters>(underfilled->rosters)};
     const auto underfilled_set{VerifiedRosterSet::Create(
-        underfilled->genesis_hash, underfilled_rosters, &roster_error,
-        underfilled->recovery_authority)};
+        underfilled->genesis_hash, underfilled_rosters, &roster_error)};
     BOOST_REQUIRE(underfilled_set);
     const uint64_t underfilled_hashes_before{
         GetQuorumRootTaggedHashCountForTesting()};
@@ -707,8 +667,7 @@ BOOST_AUTO_TEST_CASE(collected_finalization_binds_exact_bytes_and_context)
     ChainLockVerificationError roster_error{
         ChainLockVerificationError::INVALID_ARGUMENT};
     auto roster_set{VerifiedRosterSet::Create(
-        fixture->genesis_hash, rosters, &roster_error,
-        fixture->recovery_authority)};
+        fixture->genesis_hash, rosters, &roster_error)};
     BOOST_REQUIRE(roster_set);
     BOOST_CHECK(roster_error == ChainLockVerificationError::NONE);
     PaymentAuditVerificationError audit_error{
@@ -753,7 +712,7 @@ BOOST_AUTO_TEST_CASE(verified_response_rosters_bind_subject_without_rebuild)
     const auto roster_set{VerifiedRosterSet::Create(
         fixture->genesis_hash,
         std::make_shared<const FrozenQuorumRosters>(fixture->rosters),
-        &roster_error, fixture->recovery_authority)};
+        &roster_error)};
     BOOST_REQUIRE(roster_set);
     BOOST_CHECK(roster_error == ChainLockVerificationError::NONE);
 
@@ -811,7 +770,7 @@ BOOST_AUTO_TEST_CASE(preparation_rejects_wrong_seal_context_and_membership)
         wrong_seal_and_context->genesis_hash,
         std::make_shared<const FrozenQuorumRosters>(
             wrong_seal_and_context->rosters),
-        &roster_error, wrong_seal_and_context->recovery_authority)};
+        &roster_error)};
     BOOST_REQUIRE(wrong_seal_rosters);
     wrong_seal_and_context->seal.statement.block_hash = NonNullHash(501);
     BOOST_CHECK(!PreparedPaymentAuditContext::Create(
@@ -826,7 +785,7 @@ BOOST_AUTO_TEST_CASE(preparation_rejects_wrong_seal_context_and_membership)
     BOOST_CHECK(!VerifiedRosterSet::Create(
         wrong_context->genesis_hash,
         std::make_shared<const FrozenQuorumRosters>(wrong_context->rosters),
-        &roster_error, wrong_context->recovery_authority));
+        &roster_error));
     BOOST_CHECK(roster_error ==
                 ChainLockVerificationError::MEMBER_ROOT_MISMATCH);
 
@@ -837,7 +796,7 @@ BOOST_AUTO_TEST_CASE(preparation_rejects_wrong_seal_context_and_membership)
     auto wrong_proof_rosters{VerifiedRosterSet::Create(
         wrong_proof->genesis_hash,
         std::make_shared<const FrozenQuorumRosters>(wrong_proof->rosters),
-        &roster_error, wrong_proof->recovery_authority)};
+        &roster_error)};
     BOOST_REQUIRE(wrong_proof_rosters);
     BOOST_CHECK(!PrepareFinalPaymentAuditVerification(
         wrong_proof->schedule, wrong_proof->audit,
@@ -855,7 +814,7 @@ BOOST_AUTO_TEST_CASE(full_verifier_reports_invalid_signature_after_preflight)
     auto roster_set{VerifiedRosterSet::Create(
         fixture->genesis_hash,
         std::make_shared<const FrozenQuorumRosters>(fixture->rosters),
-        &roster_error, fixture->recovery_authority)};
+        &roster_error)};
     BOOST_REQUIRE(roster_set);
     auto prepared{PrepareFinalPaymentAuditVerification(
         fixture->schedule, fixture->audit, std::move(roster_set),
@@ -908,7 +867,7 @@ BOOST_AUTO_TEST_CASE(response_prepared_context_is_exact)
     auto alternate_roster_set{VerifiedRosterSet::Create(
         fixture->genesis_hash,
         std::make_shared<const FrozenQuorumRosters>(fixture->rosters),
-        &roster_error, fixture->recovery_authority)};
+        &roster_error)};
     BOOST_REQUIRE(alternate_roster_set);
     auto alternate_context{PreparedChainLockContext::Create(
         fixture->schedule.chainlock, alternate_statement,
@@ -925,8 +884,7 @@ BOOST_AUTO_TEST_CASE(response_prepared_context_is_exact)
         std::make_shared<FrozenQuorumRosters>(fixture->rosters)};
     FrozenQuorumRostersPtr aliased_rosters{mutable_rosters};
     auto alias_safe_set{VerifiedRosterSet::Create(
-        fixture->genesis_hash, aliased_rosters, &roster_error,
-        fixture->recovery_authority)};
+        fixture->genesis_hash, aliased_rosters, &roster_error)};
     BOOST_REQUIRE(alias_safe_set);
     auto alias_safe_context{PreparedChainLockContext::Create(
         fixture->schedule.chainlock, fixture->statement,
@@ -1047,8 +1005,7 @@ BOOST_AUTO_TEST_CASE(real_scheduled_wots_share_verifies_and_enters_collector)
     const uint64_t root_hashes_before{
         GetQuorumRootTaggedHashCountForTesting()};
     auto roster_set{VerifiedRosterSet::Create(
-        fixture->genesis_hash, rosters, &roster_error,
-        fixture->recovery_authority)};
+        fixture->genesis_hash, rosters, &roster_error)};
     BOOST_REQUIRE(roster_set);
     BOOST_CHECK(roster_error == ChainLockVerificationError::NONE);
     BOOST_CHECK_EQUAL(GetQuorumRootTaggedHashCountForTesting() -
@@ -1266,8 +1223,7 @@ BOOST_AUTO_TEST_CASE(real_scheduled_wots_share_verifies_and_enters_collector)
     ChainLockVerificationError alias_roster_error{
         ChainLockVerificationError::NONE};
     auto alias_safe_set{VerifiedRosterSet::Create(
-        fixture->genesis_hash, aliased_rosters, &alias_roster_error,
-        fixture->recovery_authority)};
+        fixture->genesis_hash, aliased_rosters, &alias_roster_error)};
     BOOST_REQUIRE(alias_safe_set);
     auto alias_safe_context{PreparedPaymentAuditContext::Create(
         fixture->schedule, fixture->audit.statement, fixture->seal,
@@ -1533,7 +1489,7 @@ BOOST_AUTO_TEST_CASE(audit_selection_cannot_exceed_predecessor_authorization)
     auto roster_set{VerifiedRosterSet::Create(
         fixture->genesis_hash,
         std::make_shared<const FrozenQuorumRosters>(fixture->rosters),
-        &roster_error, fixture->recovery_authority)};
+        &roster_error)};
     BOOST_REQUIRE(roster_set);
     auto invalid_authorization{fixture->authorization};
     invalid_authorization.admission =

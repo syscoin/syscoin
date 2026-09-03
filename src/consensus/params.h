@@ -128,6 +128,8 @@ struct Params {
     uint256 hashPQBTCCReceiptAnchorCursorSysBlock;
     uint256 hashPQBTCCReceiptAnchorCursorBTCBlock;
     uint256 hashPQBTCCReceiptAnchorState;
+    int nPQBTCCReceiptAnchorLatestTargetHeight{-1};
+    int nPQBTCCReceiptAnchorLatestCarrierHeight{-1};
     // SYSCOIN: end post-quantum migration and receipt policy.
     // Bridge V2 vault-manager cutover (independent of nCLReceiptStartBlock).
     int nBridgeV2StartBlock{std::numeric_limits<int>::max()};

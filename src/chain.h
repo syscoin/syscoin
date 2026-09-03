@@ -234,13 +234,15 @@ public:
     // Persisted in the block index so BTCC cursor validation and lagged NEVM forwarding can
     // deterministically map sysHash -> BTCPREV without reading block data from disk.
     uint256 btcpPrevCommitment{};
-    // SYSCOIN: branch-local authenticated BTCC receipt accumulator. The four
-    // fields are canonical-null together until a verified ADVANCE receipt is
-    // connected; PQ ChainLocks sign this state to seal historical receipts.
+    // SYSCOIN: branch-local authenticated BTCC receipt accumulator. The cursor
+    // and hashes are canonical-null until a verified non-null receipt is
+    // connected; the two heights retain its newest target and carrier.
     int32_t pqBTCCReceiptCursorHeight{-1};
     uint256 pqBTCCReceiptCursorSysHash{};
     uint256 pqBTCCReceiptCursorBTCHash{};
     uint256 pqBTCCReceiptStateHash{};
+    int32_t pqBTCCReceiptLatestTargetHeight{-1};
+    int32_t pqBTCCReceiptLatestCarrierHeight{-1};
     // Exact logical id physically carried by this block's non-null BTCC
     // receipt. It is null outside carrier blocks and for canonical null
     // receipts. The cumulative state binds this value, while retaining it in
@@ -260,7 +262,7 @@ public:
     uint256 pqPaymentProbationStateHash{};
     // SYSCOIN: Runtime-only authorization for forwarding this carrier's BTC
     // cursor to NEVM. Receipt bytes and their accumulator remain persistent,
-    // but an off-chain ADVANCE certificate must be verified again after a
+    // but an off-chain non-null receipt certificate must be verified after a
     // restart before its checkpoint is exposed to Geth.
     bool m_pq_btcc_receipt_live_verified{false};
     // SYSCOIN: memory-only cache populated after contextual BTCPREV validation so
@@ -510,6 +512,8 @@ public:
                 !obj.pqBTCCReceiptCursorSysHash.IsNull() ||
                 !obj.pqBTCCReceiptCursorBTCHash.IsNull() ||
                 !obj.pqBTCCReceiptStateHash.IsNull() ||
+                obj.pqBTCCReceiptLatestTargetHeight != -1 ||
+                obj.pqBTCCReceiptLatestCarrierHeight != -1 ||
                 !obj.pqBTCCReceiptLogicalId.IsNull()) {
                 _nVersion = DISK_INDEX_VERSION_PQ_RECEIPT_STATE;
             } else if (!obj.btcpPrevCommitment.IsNull()) {
@@ -546,6 +550,8 @@ public:
                       obj.pqBTCCReceiptCursorSysHash,
                       obj.pqBTCCReceiptCursorBTCHash,
                       obj.pqBTCCReceiptStateHash,
+                      obj.pqBTCCReceiptLatestTargetHeight,
+                      obj.pqBTCCReceiptLatestCarrierHeight,
                       obj.pqBTCCReceiptLogicalId,
                       obj.pqPaymentAuditReceiptCursorHeight,
                       obj.pqPaymentAuditReceiptCursorEpoch,

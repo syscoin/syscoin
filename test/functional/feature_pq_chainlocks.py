@@ -69,19 +69,19 @@ CHILD_KEY_PROOF_SIZE = 32 + CHILD_KEY_TREE_DEPTH * 32
 AUTHENTICATED_CHILD_SIGNATURE_SIZE = CHILD_KEY_PROOF_SIZE + CHILD_SIGNATURE_SIZE
 FINAL_SIGNATURE_COUNT = REQUIRED_QUORUMS * QUORUM_THRESHOLD
 BITMAP_SIZE = QUORUM_SIZE // 8
-BTCC_RECEIPT_STATE_SIZE = 100
+BTCC_RECEIPT_STATE_SIZE = 108
 BTCC_RECEIPT_WIRE_SIZE = 138
 PAYMENT_AUDIT_RECEIPT_STATE_SIZE = 136
 ROSTER_BEACON_SEED_WIRE_SIZE = 112
 RECOVERY_ROSTER_AUTHORITY_SOURCE_WIRE_SIZE = 112
-CHAINLOCK_STATEMENT_WIRE_SIZE = 1_320
+CHAINLOCK_STATEMENT_WIRE_SIZE = 1_296
 FINAL_CHAINLOCK_FIXED_WIRE_SIZE = (
     CHAINLOCK_STATEMENT_WIRE_SIZE + 1 + ACTIVE_QUORUMS * BITMAP_SIZE + 2
 )
 PQCLSHARE_WIRE_SIZE = 1_282
-SELF_CONTAINED_CHAINLOCK_SHARE_WIRE_SIZE = 2_638
-FINAL_CHAINLOCK_WIRE_SIZE = 1_001_171
-FINAL_PAYMENT_AUDIT_WIRE_SIZE = 1_041_570
+SELF_CONTAINED_CHAINLOCK_SHARE_WIRE_SIZE = 2_614
+FINAL_CHAINLOCK_WIRE_SIZE = 1_001_147
+FINAL_PAYMENT_AUDIT_WIRE_SIZE = 1_041_546
 PAYMENT_AUDIT_RECEIPT_WIRE_SIZE = 369
 PAYMENT_AUDIT_RECEIPT_VERSION = 1
 PAYMENT_PROBATION_STATE_VERSION = 1
@@ -209,7 +209,7 @@ def serialize_cursor(sys_height=-1, sys_hash=0, btc_hash=0):
 
 
 def serialize_receipt_state():
-    payload = serialize_cursor() + ser_uint256(0)
+    payload = serialize_cursor() + ser_uint256(0) + struct.pack("<ii", -1, -1)
     assert_equal(len(payload), BTCC_RECEIPT_STATE_SIZE)
     return payload
 
@@ -257,7 +257,6 @@ def serialize_roster_beacon_window(newest_epoch=3):
             serialize_roster_beacon_seed(first_epoch + slot)
             for slot in range(ACTIVE_QUORUMS)
         )
-        + ser_uint256(0x5245434F)
         + serialize_recovery_roster_authority_source(newest_epoch)
         + serialize_roster_beacon_seed(newest_epoch + 1, state=0)
     )
@@ -594,6 +593,8 @@ class PQChainLocksTest(SyscoinTestFramework):
             "-pqbtccreceiptanchorcursorsyshash=%s" % ("0" * 64),
             "-pqbtccreceiptanchorcursorbtchash=%s" % ("0" * 64),
             "-pqbtccreceiptanchorstatehash=%s" % ("0" * 64),
+            "-pqbtccreceiptanchorlatesttargetheight=-1",
+            "-pqbtccreceiptanchorlatestcarrierheight=-1",
         ]
         self.stop_node(0)
         self.extra_args[0] = pq_args
@@ -938,12 +939,17 @@ class PQChainLocksTest(SyscoinTestFramework):
         cumulative_hash = uint256_from_str(
             receipt_state[offset:offset + 32])
         offset += 32
+        latest_target_height, latest_carrier_height = struct.unpack_from(
+            "<ii", receipt_state, offset)
+        offset += struct.calcsize("<ii")
         assert_equal(offset, len(receipt_state))
         return {
             "cursor_height": cursor_height,
             "cursor_sys_hash": cursor_sys_hash,
             "cursor_btc_hash": cursor_btc_hash,
             "cumulative_hash": cumulative_hash,
+            "latest_target_height": latest_target_height,
+            "latest_carrier_height": latest_carrier_height,
         }
 
     @staticmethod

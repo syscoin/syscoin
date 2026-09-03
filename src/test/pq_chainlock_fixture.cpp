@@ -450,7 +450,6 @@ struct PaymentAuditFixture {
     std::vector<std::optional<scheduled_wots::SecretKey>> secret_keys;
     std::map<uint256, std::size_t> member_indices;
     test::QuorumSnapshotFixture snapshot_fixture;
-    RecoveryRosterAuthorityPtr recovery_authority;
 };
 
 struct PaymentAuditPostArguments {
@@ -644,32 +643,7 @@ bool PopulatePaymentAuditSnapshots(PaymentAuditFixture& fixture)
             source.normal_beacon.anchor_cursor.sys_hash)) {
         return false;
     }
-    const auto recovery_target{NextEligibleChainLockTargetHeight(
-        fixture.args.build_config.schedule,
-        fixture.args.response_predecessor_height)};
-    if (!recovery_target) return false;
-    const auto snapshot_lookup = [&](const CBlockIndex& index)
-        -> std::optional<QuorumSnapshotState> {
-        for (const auto& snapshot : fixture.snapshot_fixture.snapshots) {
-            if (snapshot.branch_point.height == index.nHeight &&
-                snapshot.branch_point.block_hash == index.GetBlockHash()) {
-                return snapshot.state;
-            }
-        }
-        return std::nullopt;
-    };
-    QuorumBuildError authority_error{QuorumBuildError::NONE};
-    fixture.recovery_authority = BuildRecoveryRosterAuthorityFromSource(
-        fixture.args.genesis_hash, fixture.args.build_config,
-        *recovery_target, fixture.chain.Tip(), source, snapshot_lookup,
-        &authority_error);
-    const auto authority_hash{fixture.recovery_authority
-        ? GetRecoveryRosterAuthorityHash(
-              fixture.args.genesis_hash, *fixture.recovery_authority)
-        : std::optional<uint256>{}};
-    return authority_error == QuorumBuildError::NONE && authority_hash &&
-           *authority_hash == fixture.args.authorizer->roster_beacons.active
-                                  .recovery_authority_hash;
+    return true;
 }
 
 std::optional<QuorumSnapshotState> LookupPaymentAuditSnapshot(
@@ -699,27 +673,8 @@ VerifiedRosterSetPtr BuildPaymentAuditRosters(
     QuorumBuildError build_error{QuorumBuildError::NONE};
     const auto& source{beacon_bundle.recovery_authority_source};
     if (source.IsNull()) return nullptr;
-    RecoveryRosterAuthorityPtr authority{fixture.recovery_authority};
-    const auto retained_hash{authority
-        ? GetRecoveryRosterAuthorityHash(
-              fixture.args.genesis_hash, *authority)
-        : std::optional<uint256>{}};
-    if (!authority || authority->normal_beacon != source.normal_beacon ||
-        !retained_hash ||
-        *retained_hash != beacon_bundle.recovery_authority_hash) {
-        authority = BuildRecoveryRosterAuthorityFromSource(
-            fixture.args.genesis_hash, fixture.args.build_config,
-            target_height, fixture.chain.Tip(), source,
-            [&](const CBlockIndex& index) {
-                return LookupPaymentAuditSnapshot(fixture, index);
-            },
-            &build_error);
-    }
-    const auto rosters{authority
-        ? cache->GetVerifiedActiveWithRecoveryAuthority(
-              target_height, fixture.chain.Tip(), beacon_bundle,
-              authority, /*publish=*/false, &build_error)
-        : nullptr};
+    const auto rosters{cache->GetVerifiedActiveNoPublish(
+        target_height, fixture.chain.Tip(), beacon_bundle, &build_error)};
     return build_error == QuorumBuildError::NONE ? rosters : nullptr;
 }
 
@@ -777,7 +732,7 @@ bool ClaimAuthorizedFixtureRosterTransition(
     const bool observe_next{
         statement.btcc_advance == BTCCAdvance::ADVANCE &&
         next_snapshot && authorizer.height >= *next_snapshot};
-    const auto bind_recovery_authority = [&] {
+    const auto bind_recovery_source = [&] {
         RecoveryRosterAuthoritySource expected_source{
             previous.active.recovery_authority_source};
         if (!HasRecoveryRosterBeacon(previous)) {
@@ -787,33 +742,8 @@ bool ClaimAuthorizedFixtureRosterTransition(
             expected_source.normal_beacon = *newest_normal;
         }
         if (expected_source.IsNull()) return false;
-        if (expected_source == previous.active.recovery_authority_source) {
-            statement.roster_beacons.active.recovery_authority_source =
-                expected_source;
-            statement.roster_beacons.active.recovery_authority_hash =
-                previous.active.recovery_authority_hash;
-            return !previous.active.recovery_authority_hash.IsNull();
-        }
-        QuorumBuildError authority_error{QuorumBuildError::NONE};
-        const auto authority{BuildRecoveryRosterAuthorityFromSource(
-            fixture.args.genesis_hash, config, statement.height,
-            fixture.chain.Tip(), expected_source,
-            [&](const CBlockIndex& index) {
-                return LookupPaymentAuditSnapshot(fixture, index);
-            },
-            &authority_error)};
-        const auto authority_hash{authority
-            ? GetRecoveryRosterAuthorityHash(
-                  fixture.args.genesis_hash, *authority)
-            : std::optional<uint256>{}};
-        if (!authority_hash ||
-            authority_error != QuorumBuildError::NONE) {
-            return false;
-        }
         statement.roster_beacons.active.recovery_authority_source =
             expected_source;
-        statement.roster_beacons.active.recovery_authority_hash =
-            *authority_hash;
         return true;
     };
 
@@ -828,7 +758,7 @@ bool ClaimAuthorizedFixtureRosterTransition(
             statement.roster_transition =
                 RosterAuthorizationTransitionKind::OBSERVE;
         }
-        return bind_recovery_authority() &&
+        return bind_recovery_source() &&
                statement.roster_beacons.IsStructurallyValid();
     }
 
@@ -851,7 +781,7 @@ bool ClaimAuthorizedFixtureRosterTransition(
             make_pending(statement.roster_beacons.next);
     }
     statement.roster_transition = RosterAuthorizationTransitionKind::ROTATE;
-    return bind_recovery_authority() &&
+    return bind_recovery_source() &&
            statement.roster_beacons.IsStructurallyValid();
 }
 
@@ -1297,7 +1227,6 @@ bool BuildSnapshotsAndRosters(FullDimensionFixture& fixture)
         [](const RosterBeaconSeed& seed) {
             return seed.anchor_kind == RosterBeaconAnchorKind::RECOVERY;
         })};
-    RecoveryRosterAuthorityPtr recovery_authority;
     const RecoveryRosterAuthoritySource authority_source{
         beacon_window.active.recovery_authority_source};
     if (!authority_source.IsStructurallyValid() ||
@@ -1305,44 +1234,15 @@ bool BuildSnapshotsAndRosters(FullDimensionFixture& fixture)
         !fixture.chain.SetExactHash(
             authority_source.normal_beacon.anchor_cursor.sys_height,
             authority_source.normal_beacon.anchor_cursor.sys_hash)) {
-        std::cerr << "invalid recovery authority source\n";
-        return false;
-    }
-
-    const auto authority_snapshot_lookup = [&](const CBlockIndex& index)
-        -> std::optional<QuorumSnapshotState> {
-        for (const auto& snapshot : fixture.snapshot_fixture.snapshots) {
-            if (snapshot.branch_point.height == index.nHeight &&
-                snapshot.branch_point.block_hash == index.GetBlockHash()) {
-                return snapshot.state;
-            }
-        }
-        return std::nullopt;
-    };
-    QuorumBuildError authority_error{QuorumBuildError::NONE};
-    recovery_authority = BuildRecoveryRosterAuthorityFromSource(
-        fixture.args.genesis_hash, fixture.args.build_config,
-        fixture.args.target_height, fixture.chain.Tip(),
-        authority_source, authority_snapshot_lookup, &authority_error);
-    const auto authority_hash{recovery_authority
-        ? GetRecoveryRosterAuthorityHash(
-              fixture.args.genesis_hash, *recovery_authority)
-        : std::optional<uint256>{}};
-    if (!authority_hash || authority_error != QuorumBuildError::NONE) {
-        std::cerr << "unable to derive recovery authority: "
-                  << static_cast<int>(authority_error) << '\n';
+        std::cerr << "invalid recovery source\n";
         return false;
     }
     if (fixture.args.authorizer) {
-        if (beacon_window.active.recovery_authority_hash !=
-                *authority_hash ||
-            beacon_window.active.recovery_authority_source !=
+        if (beacon_window.active.recovery_authority_source !=
                 authority_source) {
-            std::cerr << "recovery authority commitment mismatch\n";
+            std::cerr << "recovery source mismatch\n";
             return false;
         }
-    } else {
-        beacon_window.active.recovery_authority_hash = *authority_hash;
     }
     if ((has_recovery_seed &&
          !IsRecoveryRosterBeaconWindow(beacon_window)) ||
@@ -1364,25 +1264,17 @@ bool BuildSnapshotsAndRosters(FullDimensionFixture& fixture)
             }
             return std::nullopt;
         };
-    if (recovery_authority) {
-        const auto cache{FrozenQuorumRosterCache::Create(
-            fixture.args.genesis_hash, fixture.args.build_config,
-            snapshot_lookup, /*cache_results=*/false)};
-        fixture.verified_rosters = cache
-            ? cache->GetVerifiedActiveWithRecoveryAuthority(
-                  fixture.args.target_height, fixture.chain.Tip(),
-                  beacon_window.active, recovery_authority,
-                  /*publish=*/false, &build_error)
-            : nullptr;
-        fixture.rosters = fixture.verified_rosters
-            ? fixture.verified_rosters->RostersPtr()
-            : nullptr;
-    } else {
-        fixture.rosters = BuildActiveFrozenQuorumRosters(
-            fixture.args.genesis_hash, fixture.args.build_config,
-            fixture.args.target_height, fixture.chain.Tip(),
-            beacon_window.active, snapshot_lookup, &build_error);
-    }
+    const auto cache{FrozenQuorumRosterCache::Create(
+        fixture.args.genesis_hash, fixture.args.build_config,
+        snapshot_lookup, /*cache_results=*/false)};
+    fixture.verified_rosters = cache
+        ? cache->GetVerifiedActiveNoPublish(
+              fixture.args.target_height, fixture.chain.Tip(),
+              beacon_window.active, &build_error)
+        : nullptr;
+    fixture.rosters = fixture.verified_rosters
+        ? fixture.verified_rosters->RostersPtr()
+        : nullptr;
     if (!fixture.rosters || build_error != QuorumBuildError::NONE) {
         std::cerr << "unable to build active rosters: "
                   << static_cast<int>(build_error) << '\n';

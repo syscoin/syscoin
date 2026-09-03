@@ -281,14 +281,10 @@ std::optional<uint8_t> ValidateRosterAuthorizationStateInternal(
         (context.admission == RosterAuthorizationAdmission::RECOVER &&
          (!context.previous || statement.btcc_advance != BTCCAdvance::KEEP ||
           statement.roster_beacons.active.recovery_authority_source.IsNull() ||
-          statement.roster_beacons.active.recovery_authority_hash.IsNull() ||
           statement.roster_beacons.active.recovery_authority_source !=
               context.previous->window.active.recovery_authority_source ||
-          statement.roster_beacons.active.recovery_authority_hash !=
-              context.previous->window.active.recovery_authority_hash ||
           MakeRecoveryRosterBeaconWindow(
               statement.roster_beacons.active.recovery_authority_source,
-              statement.roster_beacons.active.recovery_authority_hash,
               statement.roster_beacons.active.seeds.back().epoch) !=
               statement.roster_beacons)) ||
         (externally_authenticated && context.previous) ||
@@ -577,30 +573,6 @@ bool ValidateStatementBindingInternal(
     return true;
 }
 
-bool ValidateRecoveryRosterAuthorityBinding(
-    const uint256& genesis_hash,
-    const ChainLockStatement& statement,
-    const RecoveryRosterAuthorityPtr& authority,
-    ChainLockVerificationError* error)
-{
-    const auto& bundle{statement.roster_beacons.active};
-    const bool has_source{!bundle.recovery_authority_source.IsNull()};
-    if (!has_source || !authority ||
-        bundle.recovery_authority_hash.IsNull()) {
-        SetError(error, ChainLockVerificationError::INVALID_ROSTER_BEACON);
-        return false;
-    }
-    const auto authority_hash{
-        GetRecoveryRosterAuthorityHash(genesis_hash, *authority)};
-    if (!authority_hash || *authority_hash != bundle.recovery_authority_hash ||
-        authority->normal_beacon !=
-            bundle.recovery_authority_source.normal_beacon) {
-        SetError(error, ChainLockVerificationError::INVALID_ROSTER_BEACON);
-        return false;
-    }
-    return true;
-}
-
 } // namespace
 
 bool RosterResetVerificationPolicy::IsStructurallyValid() const noexcept
@@ -620,80 +592,15 @@ bool RosterResetVerificationPolicy::IsStructurallyValid() const noexcept
                RosterAuthorizationTransitionKind::INITIALIZE;
 }
 
-bool RecoveryRosterAuthority::IsStructurallyValid() const noexcept
-{
-    if (version != RECOVERY_ROSTER_AUTHORITY_VERSION ||
-        !normal_beacon.IsReady() ||
-        normal_beacon.anchor_kind != RosterBeaconAnchorKind::NORMAL) {
-        return false;
-    }
-
-    std::map<uint256, std::pair<uint256, uint32_t>> tree_owners;
-    std::array<std::size_t, ACTIVE_QUORUMS> valid_counts{};
-    for (std::size_t slot_index{0};
-         slot_index < ACTIVE_QUORUMS; ++slot_index) {
-        const auto& slot{slots[slot_index]};
-        std::set<uint256> members;
-        std::size_t valid_members{0};
-        for (const auto& member : slot) {
-            if (member.pro_tx_hash.IsNull() ||
-                !members.insert(member.pro_tx_hash).second) {
-                return false;
-            }
-            if (!member.child_root) continue;
-            if (!member.child_root->IsStructurallyValid()) return false;
-            const auto [owner, inserted]{tree_owners.emplace(
-                member.child_root->commitment.tree_id,
-                std::pair{member.pro_tx_hash,
-                          member.child_root->commitment.generation})};
-            if (!inserted &&
-                owner->second !=
-                    std::pair{member.pro_tx_hash,
-                              member.child_root->commitment.generation}) {
-                return false;
-            }
-            if (member.eligible) ++valid_members;
-        }
-        valid_counts[slot_index] = valid_members;
-    }
-    // A reset ends at phase 3. Its first normal ROTATE is authorized by the
-    // retained phase-1/2/3 rosters, so all three must remain usable.
-    return valid_counts[1] >= QUORUM_MIN_VALID &&
-           valid_counts[2] >= QUORUM_MIN_VALID &&
-           valid_counts[3] >= QUORUM_MIN_VALID;
-}
-
-std::optional<uint256> GetRecoveryRosterAuthorityHash(
-    const uint256& genesis_hash,
-    const RecoveryRosterAuthority& authority) noexcept
-{
-    if (genesis_hash.IsNull() || !authority.IsStructurallyValid()) {
-        return std::nullopt;
-    }
-    try {
-        CHashWriter writer{SER_GETHASH, 0};
-        WriteDomain(writer, RECOVERY_ROSTER_AUTHORITY_DOMAIN);
-        writer << genesis_hash << authority;
-        return writer.GetHash();
-    } catch (const std::exception&) {
-        return std::nullopt;
-    }
-}
-
 class VerifiedRosterSet::BuildProvenance final {};
 
 VerifiedRosterSet::VerifiedRosterSet(
     uint256 genesis_hash,
     FrozenQuorumRostersPtr rosters,
-    BuildProvenancePtr build_provenance,
-    RecoveryRosterAuthorityPtr recovery_authority)
+    BuildProvenancePtr build_provenance)
     : m_genesis_hash{std::move(genesis_hash)},
       m_rosters{std::move(rosters)},
-      m_build_provenance{std::move(build_provenance)},
-      m_recovery_authority{recovery_authority
-          ? std::make_shared<const RecoveryRosterAuthority>(
-                *recovery_authority)
-          : nullptr}
+      m_build_provenance{std::move(build_provenance)}
 {
     g_live_roster_contexts.fetch_add(1, std::memory_order_relaxed);
 }
@@ -721,13 +628,10 @@ std::shared_ptr<const VerifiedRosterSet>
 VerifiedRosterSet::Create(
     const uint256& genesis_hash,
     FrozenQuorumRostersPtr rosters,
-    ChainLockVerificationError* error,
-    RecoveryRosterAuthorityPtr recovery_authority)
+    ChainLockVerificationError* error)
 {
     SetError(error, ChainLockVerificationError::NONE);
-    if (genesis_hash.IsNull() || !rosters ||
-        (recovery_authority &&
-         !recovery_authority->IsStructurallyValid())) {
+    if (genesis_hash.IsNull() || !rosters) {
         SetError(error, ChainLockVerificationError::INVALID_ARGUMENT);
         return nullptr;
     }
@@ -738,8 +642,7 @@ VerifiedRosterSet::Create(
         return nullptr;
     }
     return std::shared_ptr<const VerifiedRosterSet>{
-        new VerifiedRosterSet{genesis_hash, std::move(rosters), nullptr,
-                              std::move(recovery_authority)}};
+        new VerifiedRosterSet{genesis_hash, std::move(rosters)}};
 }
 
 PreparedChainLockContext::PreparedChainLockContext(
@@ -747,16 +650,14 @@ PreparedChainLockContext::PreparedChainLockContext(
     ChainLockStatement statement,
     VerifiedRosterSetPtr roster_set,
     RosterAuthorizationVerificationContext authorization,
-    uint8_t authorization_mask,
-    RecoveryRosterAuthorityPtr recovery_authority)
+    uint8_t authorization_mask)
     : m_schedule{schedule},
       m_statement{std::move(statement)},
       m_roster_set{std::move(roster_set)},
       m_statement_logical_id{GetLogicalChainLockId(
           m_roster_set->GenesisHash(), m_statement)},
       m_authorization{std::move(authorization)},
-      m_authorization_mask{authorization_mask},
-      m_recovery_authority{std::move(recovery_authority)}
+      m_authorization_mask{authorization_mask}
 {
 }
 
@@ -766,8 +667,7 @@ PreparedChainLockContext::Create(
     ChainLockStatement statement,
     VerifiedRosterSetPtr roster_set,
     const RosterAuthorizationVerificationContext& authorization,
-    ChainLockVerificationError* error,
-    RecoveryRosterAuthorityPtr recovery_authority)
+    ChainLockVerificationError* error)
 {
     SetError(error, ChainLockVerificationError::NONE);
     if (!schedule.IsValid() || !roster_set) {
@@ -777,22 +677,11 @@ PreparedChainLockContext::Create(
     if (!ValidateAuthorizationSchedule(schedule, authorization, error)) {
         return nullptr;
     }
-    if (!recovery_authority) {
-        recovery_authority = roster_set->RecoveryAuthorityPtr();
-    }
-    const auto& embedded_authority{roster_set->RecoveryAuthorityPtr()};
-    if ((HasRecoveryRosterBeacon(statement.roster_beacons) &&
-         !roster_set->m_build_provenance) ||
-        (recovery_authority &&
-         (!embedded_authority ||
-          *recovery_authority != *embedded_authority)) ||
-        !ValidateRecoveryRosterAuthorityBinding(
-            roster_set->GenesisHash(), statement,
-            embedded_authority, error)) {
+    if (HasRecoveryRosterBeacon(statement.roster_beacons) &&
+        !roster_set->m_build_provenance) {
         SetError(error, ChainLockVerificationError::INVALID_ROSTER_BEACON);
         return nullptr;
     }
-    recovery_authority = embedded_authority;
     uint8_t authorization_mask{0};
     if (!ValidateStatementBindingInternal(
             roster_set->GenesisHash(), statement, roster_set->Rosters(),
@@ -803,8 +692,7 @@ PreparedChainLockContext::Create(
     return std::shared_ptr<const PreparedChainLockContext>{
         new PreparedChainLockContext{
             schedule, std::move(statement), std::move(roster_set),
-            authorization, authorization_mask,
-            std::move(recovery_authority)}};
+            authorization, authorization_mask}};
 }
 
 std::optional<std::size_t> PreparedChainLockContext::FindQuorumSlot(
@@ -1172,10 +1060,9 @@ PrepareFinalChainLockVerification(
     if (!ValidateAuthorizationSchedule(schedule, authorization, error)) {
         return std::nullopt;
     }
-    if (!ValidateRecoveryRosterAuthorityBinding(
-            roster_set.GenesisHash(), chainlock.statement,
-            roster_set.RecoveryAuthorityPtr(),
-            error)) {
+    if (HasRecoveryRosterBeacon(chainlock.statement.roster_beacons) &&
+        !roster_set.HasCanonicalBuildProvenance()) {
+        SetError(error, ChainLockVerificationError::INVALID_ROSTER_BEACON);
         return std::nullopt;
     }
     if (!ValidateStatementBindingInternal(

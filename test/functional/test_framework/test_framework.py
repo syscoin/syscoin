@@ -1199,6 +1199,8 @@ class DashTestFramework(SyscoinTestFramework):
             "-pqbtccreceiptanchorcursorsyshash=%s" % ("0" * 64),
             "-pqbtccreceiptanchorcursorbtchash=%s" % ("0" * 64),
             "-pqbtccreceiptanchorstatehash=%s" % ("0" * 64),
+            "-pqbtccreceiptanchorlatesttargetheight=-1",
+            "-pqbtccreceiptanchorlatestcarrierheight=-1",
         ]
         for index, args in enumerate(self.extra_args):
             self.extra_args[index] = [

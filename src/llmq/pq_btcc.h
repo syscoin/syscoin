@@ -51,8 +51,8 @@ struct BTCCScheduleConfig {
     const Consensus::Params& consensus) noexcept;
 
 /**
- * Compact on-chain proof reference for one already-accepted ADVANCE
- * ChainLock. The fixed-size multi-megabyte certificate remains in the bounded finality
+ * Compact on-chain proof reference for one already-accepted ChainLock. The
+ * fixed-size certificate remains in the bounded finality
  * archive/relay layer; blocks carry only this exact fixed-width reference.
  *
  * A versioned all-zero/default body is the canonical null receipt. Carrier
@@ -83,6 +83,21 @@ struct BTCCReceipt {
 };
 
 static_assert(BTCCReceipt::WIRE_SIZE == 138);
+
+/**
+ * A non-null receipt authenticates an exact ChainLock slot, but only ADVANCE
+ * changes the Bitcoin cursor exposed to NEVM. KEEP receipts remain stateful
+ * for finality recovery without replaying the same external checkpoint.
+ */
+[[nodiscard]] bool BTCCReceiptAdvancesCursor(
+    const BTCCReceiptState& previous,
+    const BTCCReceipt& receipt) noexcept;
+
+/** Match the one KEEP or ADVANCE transition authenticated by a receipt. */
+[[nodiscard]] bool IsExactBTCCReceiptTransition(
+    const BTCCReceiptState& previous,
+    const BTCCReceipt& receipt,
+    BTCCAdvance advance) noexcept;
 
 /** Deterministic signer choice embedded in one ChainLock statement. */
 struct BTCCSelection {

@@ -162,6 +162,8 @@ public:
             uint256 cursor_sys_hash;
             uint256 cursor_btc_hash;
             uint256 receipt_state_hash;
+            int latest_target_height;
+            int latest_carrier_height;
         };
 
         std::unordered_map<Consensus::DeploymentPos, VersionBitsParameters> version_bits_parameters{};

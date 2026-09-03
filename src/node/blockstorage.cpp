@@ -165,6 +165,10 @@ bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, s
                 pindexNew->pqBTCCReceiptCursorSysHash = diskindex.pqBTCCReceiptCursorSysHash;
                 pindexNew->pqBTCCReceiptCursorBTCHash = diskindex.pqBTCCReceiptCursorBTCHash;
                 pindexNew->pqBTCCReceiptStateHash = diskindex.pqBTCCReceiptStateHash;
+                pindexNew->pqBTCCReceiptLatestTargetHeight =
+                    diskindex.pqBTCCReceiptLatestTargetHeight;
+                pindexNew->pqBTCCReceiptLatestCarrierHeight =
+                    diskindex.pqBTCCReceiptLatestCarrierHeight;
                 pindexNew->pqBTCCReceiptLogicalId =
                     diskindex.pqBTCCReceiptLogicalId;
                 pindexNew->pqPaymentAuditReceiptCursorHeight =

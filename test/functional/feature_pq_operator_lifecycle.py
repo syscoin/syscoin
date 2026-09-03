@@ -301,6 +301,8 @@ class PQOperatorLifecycleTest(SyscoinTestFramework):
             "-pqbtccreceiptanchorcursorsyshash=%s" % ("0" * 64),
             "-pqbtccreceiptanchorcursorbtchash=%s" % ("0" * 64),
             "-pqbtccreceiptanchorstatehash=%s" % ("0" * 64),
+            "-pqbtccreceiptanchorlatesttargetheight=-1",
+            "-pqbtccreceiptanchorlatestcarrierheight=-1",
         ]
         self.stop_node(0)
         node.extra_args = list(self.extra_args)

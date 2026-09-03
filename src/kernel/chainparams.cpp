@@ -626,6 +626,10 @@ public:
                 opts.pqbtccreceiptanchor->cursor_btc_hash;
             consensus.hashPQBTCCReceiptAnchorState =
                 opts.pqbtccreceiptanchor->receipt_state_hash;
+            consensus.nPQBTCCReceiptAnchorLatestTargetHeight =
+                opts.pqbtccreceiptanchor->latest_target_height;
+            consensus.nPQBTCCReceiptAnchorLatestCarrierHeight =
+                opts.pqbtccreceiptanchor->latest_carrier_height;
         }
         // Deferred by default; set via -bridgev2startheight for tests/private nets.
         consensus.nBridgeV2StartBlock = opts.bridgev2startblock;

@@ -179,7 +179,7 @@ enum class ChainLockCandidateAdmission : uint8_t {
     RECEIPT_ARCHIVE,
     PRESEAL_RECEIPT,
     CATCHUP,
-    /** Exact locally fsynced unsealed ADVANCE reloaded during startup. */
+    /** Exact locally fsynced unsealed KEEP/ADVANCE reloaded at startup. */
     TRUSTED_UNSEALED_PERSISTENCE,
 };
 
@@ -494,7 +494,7 @@ public:
         ChainLockFinalityError* error = nullptr)
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
-    /** Prepare the exact ADVANCE named by a durable pre-seal marker. */
+    /** Prepare the exact receiptable certificate named by a durable marker. */
     [[nodiscard]] std::optional<PreparedFinalChainLockCandidate>
     PreparePresealReceiptCandidate(
         const FinalChainLock& chainlock,

@@ -49,38 +49,10 @@ RosterBeaconWindow NormalWindow(uint32_t first_epoch)
     return window;
 }
 
-RecoveryRosterAuthorityPtr BindRecoveryAuthority(
-    const uint256& genesis_hash,
-    ActiveRosterBeaconBundle& bundle,
-    uint64_t salt)
+void BindRecoverySource(ActiveRosterBeaconBundle& bundle)
 {
-    auto authority{std::make_shared<RecoveryRosterAuthority>()};
-    authority->normal_beacon = bundle.seeds.back();
-    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
-        for (std::size_t member{0}; member < QUORUM_SIZE; ++member) {
-            auto& entry{authority->slots[slot][member]};
-            entry.pro_tx_hash =
-                NonNullHash(salt + slot * QUORUM_SIZE + member + 1);
-            entry.eligible = member < QUORUM_MIN_VALID;
-            if (!entry.eligible) continue;
-            RecoveryRosterChildCommitment child_root;
-            child_root.global_key_version = 1;
-            child_root.commitment.generation = 1;
-            child_root.commitment.tree_id = NonNullHash(
-                salt + 10'000 + slot * QUORUM_SIZE + member);
-            child_root.commitment.root = NonNullHash(
-                salt + 20'000 + slot * QUORUM_SIZE + member);
-            entry.child_root = std::move(child_root);
-        }
-    }
-    BOOST_REQUIRE(authority->IsStructurallyValid());
-    const auto authority_hash{
-        GetRecoveryRosterAuthorityHash(genesis_hash, *authority)};
-    BOOST_REQUIRE(authority_hash);
     bundle.recovery_authority_source.normal_beacon =
-        authority->normal_beacon;
-    bundle.recovery_authority_hash = *authority_hash;
-    return authority;
+        bundle.seeds.back();
 }
 
 void SetBit(QuorumBitmap& bitmap, std::size_t member)
@@ -106,7 +78,6 @@ struct SignerFixture {
     ChainLockStatement statement;
     std::array<FrozenQuorumRoster, ACTIVE_QUORUMS> rosters;
     RosterAuthorizationVerificationContext authorization;
-    RecoveryRosterAuthorityPtr recovery_authority;
     std::optional<scheduled_wots::SecretKey> child_secret_key;
     ChildKeyProof child_key_proof;
 };
@@ -121,9 +92,7 @@ std::unique_ptr<SignerFixture> MakeFixture()
     fixture->statement.previous_chainlock_hash = NonNullHash(8099);
     fixture->statement.payment_probation_state_hash = NonNullHash(8101);
     fixture->statement.roster_beacons = NormalWindow(0);
-    fixture->recovery_authority = BindRecoveryAuthority(
-        fixture->genesis_hash, fixture->statement.roster_beacons.active,
-        800'000);
+    BindRecoverySource(fixture->statement.roster_beacons.active);
     fixture->statement.roster_transition =
         RosterAuthorizationTransitionKind::KEEP;
     fixture->authorization.admission =
@@ -163,9 +132,6 @@ std::unique_ptr<SignerFixture> MakeFixture()
     normal.recovery_authority_source =
         fixture->statement.roster_beacons.active
             .recovery_authority_source;
-    normal.recovery_authority_hash =
-        fixture->statement.roster_beacons.active
-            .recovery_authority_hash;
     normal.next_snapshot.epoch = normal.newest_epoch + 1;
     normal.next_snapshot.height = 2'592;
     fixture->authorization.normal_input = normal;
@@ -262,7 +228,7 @@ PreparedChainLockContextPtr PrepareContext(const SignerFixture& fixture,
     auto roster_set{VerifiedRosterSet::Create(
         fixture.genesis_hash,
         std::make_shared<const FrozenQuorumRosters>(fixture.rosters),
-        &error, fixture.recovery_authority)};
+        &error)};
     BOOST_REQUIRE(roster_set);
     auto context{PreparedChainLockContext::Create(
         fixture.schedule, std::move(statement), std::move(roster_set),
