@@ -1158,6 +1158,8 @@ BOOST_AUTO_TEST_CASE(recovery_capsule_matches_raw_selection_across_groups)
         encoded, &error)};
     BOOST_REQUIRE(decoded);
     BOOST_CHECK(*decoded == *capsule);
+    const auto restarted_capsule{
+        std::make_shared<const RecoveryUniverseCapsule>(*decoded)};
 
     std::atomic<unsigned> pruned_source_reads{0};
     const QuorumSnapshotLookup pruned_lookup = [&](const CBlockIndex& index) {
@@ -1168,9 +1170,9 @@ BOOST_AUTO_TEST_CASE(recovery_capsule_matches_raw_selection_across_groups)
         return raw_lookup(index);
     };
     const RecoveryUniverseLookup capsule_lookup =
-        [capsule](const uint256& source_id) {
-            return source_id == capsule->SourceId()
-                ? capsule
+        [restarted_capsule](const uint256& source_id) {
+            return source_id == restarted_capsule->SourceId()
+                ? restarted_capsule
                 : RecoveryUniverseCapsulePtr{};
         };
     const auto raw_cache{FrozenQuorumRosterCache::Create(
@@ -1182,7 +1184,7 @@ BOOST_AUTO_TEST_CASE(recovery_capsule_matches_raw_selection_across_groups)
     const auto persisted{capsule_cache->GetOrCaptureRecoveryUniverse(
         source, canonical.Tip(), &error)};
     BOOST_REQUIRE(persisted);
-    BOOST_CHECK(*persisted == *capsule);
+    BOOST_CHECK(*persisted == *restarted_capsule);
     BOOST_CHECK_EQUAL(pruned_source_reads.load(), 0U);
 
     for (const int32_t target : {FIRST_TARGET, SECOND_TARGET}) {
@@ -1202,9 +1204,24 @@ BOOST_AUTO_TEST_CASE(recovery_capsule_matches_raw_selection_across_groups)
     const auto second_group{raw_cache->GetVerifiedActive(
         SECOND_TARGET, canonical.Tip(),
         RecoveryBeaconBundleAtHeight(SECOND_TARGET, source), &error)};
+    const auto restarted_first_group{capsule_cache->GetVerifiedActive(
+        FIRST_TARGET, canonical.Tip(),
+        RecoveryBeaconBundleAtHeight(FIRST_TARGET, source), &error)};
+    const auto restarted_second_group{capsule_cache->GetVerifiedActive(
+        SECOND_TARGET, canonical.Tip(),
+        RecoveryBeaconBundleAtHeight(SECOND_TARGET, source), &error)};
     BOOST_REQUIRE(first_group);
     BOOST_REQUIRE(second_group);
+    BOOST_REQUIRE(restarted_first_group);
+    BOOST_REQUIRE(restarted_second_group);
     BOOST_CHECK(first_group->Rosters() != second_group->Rosters());
+    BOOST_CHECK(restarted_first_group->Rosters() !=
+                restarted_second_group->Rosters());
+    BOOST_CHECK(first_group->Rosters() ==
+                restarted_first_group->Rosters());
+    BOOST_CHECK(second_group->Rosters() ==
+                restarted_second_group->Rosters());
+    BOOST_CHECK_EQUAL(pruned_source_reads.load(), 0U);
 }
 
 BOOST_AUTO_TEST_CASE(recovery_capsule_decode_is_strict_and_bounded)
