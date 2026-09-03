@@ -1467,8 +1467,23 @@ public:
     bool IsBaseBlockSyncComplete() const
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
-    /** A preseal can begin only before the one-way public IBD latch closes. */
+    /** A preseal can begin before readiness or continue while already pending. */
     bool CanBeginPQHistoryAuthentication() const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /**
+     * Permit bounded historical replay after the exact branch has advanced
+     * beyond the protocol owner's guaranteed certificate-serving window.
+     */
+    bool CanBeginPQHistoryAuthentication(
+        const CBlockIndex& branch_point,
+        int32_t certificate_serve_until_height) const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Enter PENDING using the same exact expired-history proof. */
+    [[nodiscard]] bool TryEnterPendingPQHistoryAuthentication(
+        const CBlockIndex& branch_point,
+        int32_t certificate_serve_until_height)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     bool HasCompletedInitialBlockDownload() const noexcept

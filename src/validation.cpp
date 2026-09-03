@@ -2185,7 +2185,8 @@ static bool ConnectBTCCReceiptState(ChainstateManager& chainman,
                     // recomputed receipt accumulator.
                     const bool preseal_allowed{
                         allow_historical_preseal &&
-                        chainman.CanBeginPQHistoryAuthentication()};
+                        llmq::chainLocksHandler
+                            ->CanBeginBTCCPreseal(index, receipt)};
                     if (!preseal_allowed ||
                         !llmq::chainLocksHandler->BeginBTCCPreseal(
                             index, receipt)) {
@@ -2387,7 +2388,8 @@ static bool ConnectPaymentAuditReceiptState(
                         ->IsPaymentAuditPrefixAuthenticated(index)};
                 const bool preseal_allowed{
                     allow_historical_preseal &&
-                    chainman.CanBeginPQHistoryAuthentication()};
+                    llmq::chainLocksHandler
+                        ->CanBeginPaymentAuditPreseal(index, receipt)};
                 if (!prefix_authenticated && !preseal_allowed) {
                     llmq::chainLocksHandler
                         ->NotePendingPaymentAuditReceiptCertificate(
@@ -2953,17 +2955,49 @@ bool ChainstateManager::CanBeginPQHistoryAuthentication() const
 {
     AssertLockHeld(cs_main);
     // SYSCOIN BEGIN: Never begin live finality authentication from a
-    // structurally replayed but locally unpinned legacy prefix.
+    // structurally replayed but locally unpinned legacy prefix. Once a
+    // preseal is active it may extend while the node catches up.
     return IsPQParticipationAllowed() &&
-           !m_cached_finished_ibd.load(std::memory_order_relaxed);
+           (m_pq_history_auth_state == PQHistoryAuthState::PENDING ||
+            !m_cached_finished_ibd.load(std::memory_order_relaxed));
     // SYSCOIN END: Public PQ activation participation gate.
+}
+
+bool ChainstateManager::CanBeginPQHistoryAuthentication(
+    const CBlockIndex& branch_point,
+    int32_t certificate_serve_until_height) const
+{
+    AssertLockHeld(cs_main);
+    if (CanBeginPQHistoryAuthentication()) return true;
+    const CBlockIndex* best_header{m_best_header};
+    return IsPQParticipationAllowed() &&
+           certificate_serve_until_height >= 0 &&
+           best_header != nullptr &&
+           best_header->nHeight >= certificate_serve_until_height &&
+           best_header->nHeight >= branch_point.nHeight &&
+           best_header->GetAncestor(branch_point.nHeight) == &branch_point;
+}
+
+bool ChainstateManager::TryEnterPendingPQHistoryAuthentication(
+    const CBlockIndex& branch_point,
+    int32_t certificate_serve_until_height)
+{
+    AssertLockHeld(cs_main);
+    if (!CanBeginPQHistoryAuthentication(
+            branch_point, certificate_serve_until_height)) {
+        return false;
+    }
+    m_pq_history_auth_state = PQHistoryAuthState::PENDING;
+    return true;
 }
 
 bool ChainstateManager::PublishPQHistoryAuthState(PQHistoryAuthState state)
 {
     AssertLockHeld(cs_main);
     if (state != PQHistoryAuthState::READY &&
-        m_cached_finished_ibd.load(std::memory_order_relaxed)) {
+        m_cached_finished_ibd.load(std::memory_order_relaxed) &&
+        !(state == PQHistoryAuthState::PENDING &&
+          m_pq_history_auth_state == PQHistoryAuthState::PENDING)) {
         return false;
     }
     m_pq_history_auth_state = state;

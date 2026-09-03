@@ -1190,6 +1190,10 @@ public:
      * The durable marker remains afterward as a separate Geth replay
      * obligation until the authenticated blocks have actually been delivered.
      */
+    [[nodiscard]] bool CanBeginBTCCPreseal(
+        const CBlockIndex& carrier,
+        const pq::BTCCReceipt& missing_receipt) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     [[nodiscard]] bool BeginBTCCPreseal(
         const CBlockIndex& carrier,
         const pq::BTCCReceipt& missing_receipt)
@@ -1215,6 +1219,10 @@ public:
         const CBlockIndex& carrier,
         pq::PQPaymentProbationTransitionContext& context) const
         EXCLUSIVE_LOCKS_REQUIRED(cs_main, !m_lookup_mutex);
+    [[nodiscard]] bool CanBeginPaymentAuditPreseal(
+        const CBlockIndex& carrier,
+        const pq::PaymentAuditReceipt& missing_receipt) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     [[nodiscard]] bool BeginPaymentAuditPreseal(
         const CBlockIndex& carrier,
         const pq::PaymentAuditReceipt& missing_receipt,

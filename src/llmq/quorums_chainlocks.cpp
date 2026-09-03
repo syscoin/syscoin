@@ -56,6 +56,45 @@ constexpr std::size_t PQ_CHAINLOCK_PREFIX_SIZE{
     pq::FINAL_SIGNATURE_COUNT * pq::AuthenticatedChildSignature::WIRE_SIZE};
 constexpr std::chrono::seconds PAYMENT_AUDIT_FINALIZATION_RETRY_INTERVAL{30};
 
+std::optional<int32_t> BTCCCertificateServeUntilHeight(
+    const pq::ChainLockFinalityStoreConfig& config,
+    const pq::BTCCReceipt& receipt) noexcept
+{
+    if (!config.IsValid() || !receipt.IsStructurallyValid()) {
+        return std::nullopt;
+    }
+    // The target remains in the relay inventory until this many newer
+    // cadence slots could have displaced it from the bounded recent set.
+    const int64_t serve_until{
+        static_cast<int64_t>(receipt.chainlock_target_height) +
+        static_cast<int64_t>(config.recent_chainlocks_capacity) *
+            config.chainlock_schedule.chainlock_period};
+    if (serve_until < 0 ||
+        serve_until > std::numeric_limits<int32_t>::max()) {
+        return std::nullopt;
+    }
+    return static_cast<int32_t>(serve_until);
+}
+
+std::optional<int32_t> PaymentAuditCertificateServeUntilHeight(
+    const pq::ChainLockFinalityStoreConfig& config,
+    const pq::PaymentAuditReceipt& receipt) noexcept
+{
+    if (!config.IsValid() || !receipt.IsStructurallyValid()) {
+        return std::nullopt;
+    }
+    // Window-owner retention keeps this exact seal and its authorization
+    // base servable until the next audit seal starts a new window.
+    const auto schedule{pq::BuildPaymentAuditEpochSchedule(
+        {config.chainlock_schedule, config.btcc_schedule},
+        receipt.epoch)};
+    if (!schedule || receipt.carrier_height < schedule->carrier_start_height ||
+        receipt.carrier_height >= schedule->carrier_end_height_exclusive) {
+        return std::nullopt;
+    }
+    return schedule->carrier_end_height_exclusive;
+}
+
 pq::RosterResetVerificationPolicy MakeRosterResetVerificationPolicy(
     const pq::ChainLockFinalityStoreConfig& config)
 {
@@ -5744,6 +5783,19 @@ CChainLocksHandler::BuildCompactPaymentAuditTransitionContext(
     return PaymentAuditContextStatus::READY;
 }
 
+bool CChainLocksHandler::CanBeginBTCCPreseal(
+    const CBlockIndex& carrier,
+    const pq::BTCCReceipt& missing_receipt) const
+{
+    AssertLockHeld(cs_main);
+    if (!m_config) return false;
+    const auto serve_until{
+        BTCCCertificateServeUntilHeight(*m_config, missing_receipt)};
+    return serve_until &&
+        m_chainman.CanBeginPQHistoryAuthentication(
+            carrier, *serve_until);
+}
+
 bool CChainLocksHandler::BeginBTCCPreseal(
     const CBlockIndex& carrier,
     const pq::BTCCReceipt& missing_receipt)
@@ -5753,8 +5805,14 @@ bool CChainLocksHandler::BeginBTCCPreseal(
         carrier.pprev == nullptr
             ? std::optional<pq::BTCCReceiptState>{}
             : IndexedBTCCReceiptState(*carrier.pprev)};
-    if (!m_chainman.CanBeginPQHistoryAuthentication() ||
-        !m_config || !m_persistence || m_persistence_failed.load() ||
+    const auto serve_until{
+        m_config
+            ? BTCCCertificateServeUntilHeight(*m_config, missing_receipt)
+            : std::nullopt};
+    if (!serve_until ||
+        !m_chainman.CanBeginPQHistoryAuthentication(
+            carrier, *serve_until) ||
+        !m_persistence || m_persistence_failed.load() ||
         carrier.nHeight <=
             m_config->btcc_receipt_assumption_anchor.height ||
         missing_receipt.IsNull() ||
@@ -5774,9 +5832,9 @@ bool CChainLocksHandler::BeginBTCCPreseal(
     pq::BTCCPresealState next{m_btcc_preseal_state};
     const auto persist_pending = [&](const pq::BTCCPresealState& state)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_btcc_preseal_mutex) {
-        return PersistBTCCPresealStateLocked(state) &&
-               m_chainman.PublishPQHistoryAuthState(
-                   PQHistoryAuthState::PENDING);
+        return m_chainman.TryEnterPendingPQHistoryAuthentication(
+                   carrier, *serve_until) &&
+               PersistBTCCPresealStateLocked(state);
     };
     const auto fresh_marker = [&] {
         return pq::BTCCPresealMarker{
@@ -5885,6 +5943,20 @@ bool CChainLocksHandler::BeginBTCCPreseal(
     return true;
 }
 
+bool CChainLocksHandler::CanBeginPaymentAuditPreseal(
+    const CBlockIndex& carrier,
+    const pq::PaymentAuditReceipt& missing_receipt) const
+{
+    AssertLockHeld(cs_main);
+    if (!m_config) return false;
+    const auto serve_until{
+        PaymentAuditCertificateServeUntilHeight(
+            *m_config, missing_receipt)};
+    return serve_until &&
+        m_chainman.CanBeginPQHistoryAuthentication(
+            carrier, *serve_until);
+}
+
 bool CChainLocksHandler::BeginPaymentAuditPreseal(
     const CBlockIndex& carrier,
     const pq::PaymentAuditReceipt& missing_receipt,
@@ -5892,8 +5964,15 @@ bool CChainLocksHandler::BeginPaymentAuditPreseal(
     const uint256& predecessor_probation_state_hash)
 {
     AssertLockHeld(cs_main);
-    if (!m_chainman.CanBeginPQHistoryAuthentication() ||
-        !m_config || !m_quorum_build_config || !m_persistence ||
+    const auto serve_until{
+        m_config
+            ? PaymentAuditCertificateServeUntilHeight(
+                  *m_config, missing_receipt)
+            : std::nullopt};
+    if (!serve_until ||
+        !m_chainman.CanBeginPQHistoryAuthentication(
+            carrier, *serve_until) ||
+        !m_quorum_build_config || !m_persistence ||
         m_persistence_failed.load() || deterministicMNManager == nullptr ||
         carrier.pprev == nullptr || missing_receipt.IsNull() ||
         !missing_receipt.IsStructurallyValid() ||
@@ -5925,9 +6004,9 @@ bool CChainLocksHandler::BeginPaymentAuditPreseal(
     const auto persist_pending = [&] (
         const pq::PaymentAuditPresealState& state)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_btcc_preseal_mutex) {
-        return PersistPaymentAuditPresealStateLocked(state) &&
-               m_chainman.PublishPQHistoryAuthState(
-                   PQHistoryAuthState::PENDING);
+        return m_chainman.TryEnterPendingPQHistoryAuthentication(
+                   carrier, *serve_until) &&
+               PersistPaymentAuditPresealStateLocked(state);
     };
     const auto marker_index = [&](const auto& marker, bool terminal)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main) -> const CBlockIndex* {

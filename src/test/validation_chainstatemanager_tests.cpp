@@ -165,6 +165,30 @@ BOOST_FIXTURE_TEST_CASE(pq_history_auth_state_gates_public_ibd,
         BOOST_CHECK(chainman.GetPQHistoryAuthState() ==
                     PQHistoryAuthState::READY);
     }
+
+    {
+        LOCK(::cs_main);
+        const CBlockIndex* tip{chainman.ActiveTip()};
+        BOOST_REQUIRE(tip != nullptr);
+        const CBlockIndex* branch_point{tip->pprev};
+        BOOST_REQUIRE(branch_point != nullptr);
+        CBlockIndex unrelated;
+        unrelated.nHeight = branch_point->nHeight;
+        BOOST_CHECK(!chainman.CanBeginPQHistoryAuthentication(
+            unrelated, tip->nHeight));
+        BOOST_CHECK(!chainman.CanBeginPQHistoryAuthentication(
+            *branch_point, tip->nHeight + 1));
+        BOOST_CHECK(chainman.CanBeginPQHistoryAuthentication(
+            *branch_point, tip->nHeight));
+        BOOST_CHECK(chainman.TryEnterPendingPQHistoryAuthentication(
+            *branch_point, tip->nHeight));
+        BOOST_CHECK(chainman.CanBeginPQHistoryAuthentication());
+        BOOST_CHECK(chainman.PublishPQHistoryAuthState(
+            PQHistoryAuthState::PENDING));
+        BOOST_CHECK(chainman.PublishPQHistoryAuthState(
+            PQHistoryAuthState::READY));
+        BOOST_CHECK(!chainman.CanBeginPQHistoryAuthentication());
+    }
     SyncWithValidationInterfaceQueue();
 }
 
