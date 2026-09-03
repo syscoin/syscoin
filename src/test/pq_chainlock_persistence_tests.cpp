@@ -216,6 +216,53 @@ RosterBeaconWindow MakeNormalWindow()
     return window;
 }
 
+RecoveryUniverseCapsulePtr MakePersistenceRecoveryUniverse(
+    const uint256& genesis_hash,
+    const RecoveryRosterAuthoritySource& source)
+{
+    if (source.IsNull() || !source.IsStructurallyValid()) return nullptr;
+    std::vector<RecoveryUniverseMember> members;
+    members.reserve(QUORUM_SIZE);
+    for (std::size_t index{0}; index < QUORUM_SIZE; ++index) {
+        members.push_back(RecoveryUniverseMember{
+            NonNullHash(8'000'000 + index),
+            NonNullHash(8'100'000 + index),
+            COutPoint{NonNullHash(8'200'000 + index),
+                      static_cast<uint32_t>(index)}});
+    }
+    std::sort(members.begin(), members.end(),
+              [](const auto& left, const auto& right) {
+                  return left.pro_tx_hash < right.pro_tx_hash;
+              });
+    const int32_t snapshot_height{
+        source.normal_beacon.anchor_cursor.sys_height - 1};
+    const uint256 snapshot_hash{NonNullHash(
+        8'300'000 + source.normal_beacon.epoch)};
+    const uint256 source_id{
+        GetRecoveryUniverseSourceId(genesis_hash, source)};
+    const uint256 members_hash{
+        GetRecoveryUniverseMembersHash(genesis_hash, members)};
+    const uint256 capsule_id{GetRecoveryUniverseCapsuleId(
+        genesis_hash, source, snapshot_height, snapshot_hash,
+        members_hash, members.size())};
+    BOOST_REQUIRE(!source_id.IsNull());
+    BOOST_REQUIRE(!members_hash.IsNull());
+    BOOST_REQUIRE(!capsule_id.IsNull());
+
+    DataStream stream{SER_DISK};
+    stream << RECOVERY_UNIVERSE_CAPSULE_VERSION << genesis_hash << source
+           << snapshot_height << snapshot_hash << source_id
+           << static_cast<uint32_t>(members.size());
+    for (const auto& member : members) stream << member;
+    stream << members_hash << capsule_id;
+    const auto encoded{std::vector<uint8_t>{
+        UCharCast(stream.data()), UCharCast(stream.data() + stream.size())}};
+    const auto capsule{
+        RecoveryUniverseCapsule::DecodeTrustedPersistence(encoded)};
+    BOOST_REQUIRE(capsule);
+    return std::make_shared<const RecoveryUniverseCapsule>(*capsule);
+}
+
 RosterRecoveryPrecommit MakeInitializationPrecommit(
     uint64_t salt,
     int32_t anchor_height = 865,
@@ -517,6 +564,55 @@ uint256 GetRawDiskRecordChecksum(const RawDiskRecord& record)
     writer << record.schema_hash << record.logical_id << record.witness_id
            << record.chainlock << record.roster_context;
     return writer.GetHash();
+}
+
+struct RawRecoveryUniverseKey {
+    uint8_t type{PQ_CHAINLOCK_PERSISTENCE_RECOVERY_UNIVERSE_KEY};
+    uint256 source_id;
+
+    SERIALIZE_METHODS(RawRecoveryUniverseKey, obj)
+    {
+        READWRITE(obj.type, obj.source_id);
+    }
+};
+
+struct RawRecoveryUniverseRecord {
+    uint16_t version{1};
+    uint256 schema_hash;
+    uint256 source_id;
+    std::vector<uint8_t> encoded_capsule;
+    uint256 checksum;
+
+    SERIALIZE_METHODS(RawRecoveryUniverseRecord, obj)
+    {
+        READWRITE(obj.version, obj.schema_hash, obj.source_id,
+                  obj.encoded_capsule, obj.checksum);
+    }
+};
+
+uint256 GetRawRecoveryUniverseChecksum(
+    const RawRecoveryUniverseRecord& record)
+{
+    static constexpr std::string_view domain{
+        "SYS_PQ_RECOVERY_UNIVERSE_RECORD_V1"};
+    HashWriter writer{SER_GETHASH, 0};
+    writer.write(AsBytes(Span{domain.data(), domain.size()}));
+    writer << record.schema_hash << record.source_id
+           << record.encoded_capsule;
+    return writer.GetHash();
+}
+
+RawRecoveryUniverseRecord MakeRawRecoveryUniverseRecord(
+    const uint256& schema_hash,
+    const RecoveryUniverseCapsulePtr& capsule)
+{
+    BOOST_REQUIRE(capsule);
+    RawRecoveryUniverseRecord record;
+    record.schema_hash = schema_hash;
+    record.source_id = capsule->SourceId();
+    record.encoded_capsule = capsule->Encode();
+    record.checksum = GetRawRecoveryUniverseChecksum(record);
+    return record;
 }
 
 struct RawTruncatedBTCCPresealMarker {
@@ -935,6 +1031,12 @@ public:
     {
         return m_persistence.LoadPaymentAuditSealContext();
     }
+    [[nodiscard]] auto LoadRecoveryUniverse(
+        const RecoveryRosterAuthoritySource& source) const
+    {
+        return m_persistence.LoadRecoveryUniverse(
+            GetRecoveryUniverseSourceId(m_genesis_hash, source));
+    }
 
     [[nodiscard]] bool PersistBest(
         const FinalChainLock& chainlock,
@@ -942,7 +1044,8 @@ public:
         std::optional<PaymentAuditSealContextCapsule> seal = std::nullopt)
     {
         return m_persistence.PersistBest(
-            chainlock, Context(chainlock), error, std::move(seal));
+            chainlock, Context(chainlock), error, std::move(seal),
+            RecoveryUniverse(chainlock));
     }
     [[nodiscard]] bool PersistBestWithContext(
         const FinalChainLock& chainlock,
@@ -960,7 +1063,7 @@ public:
     {
         return m_persistence.PersistBestCoveringReceiptArchive(
             chainlock, Context(chainlock), authorization, error,
-            std::move(seal));
+            std::move(seal), RecoveryUniverse(chainlock));
     }
     [[nodiscard]] bool PersistBestCoveringReceiptArchiveWithContext(
         const FinalChainLock& chainlock,
@@ -978,14 +1081,16 @@ public:
         ChainLockPersistenceError* error = nullptr)
     {
         return m_persistence.PersistUnsealedBTCC(
-            chainlock, Context(chainlock), error);
+            chainlock, Context(chainlock), error,
+            RecoveryUniverse(chainlock));
     }
     [[nodiscard]] bool PersistVerifiedAuthorizationBase(
         const FinalChainLock& chainlock,
         ChainLockPersistenceError* error = nullptr)
     {
         return m_persistence.PersistVerifiedAuthorizationBase(
-            chainlock, Context(chainlock), error);
+            chainlock, Context(chainlock), error,
+            RecoveryUniverse(chainlock));
     }
     [[nodiscard]] bool PersistAuthorizedUnsealedBTCC(
         const FinalChainLock& chainlock,
@@ -993,7 +1098,8 @@ public:
         ChainLockPersistenceError* error = nullptr)
     {
         return m_persistence.PersistAuthorizedUnsealedBTCC(
-            chainlock, Context(chainlock), authorization, error);
+            chainlock, Context(chainlock), authorization, error,
+            RecoveryUniverse(chainlock));
     }
     [[nodiscard]] bool PersistCatchupBest(
         const FinalChainLock& chainlock,
@@ -1005,7 +1111,8 @@ public:
     {
         return m_persistence.PersistCatchupBest(
             chainlock, Context(chainlock), error, reconciliation,
-            authorization, std::move(seal));
+            authorization, std::move(seal),
+            RecoveryUniverse(chainlock));
     }
     [[nodiscard]] bool PersistCatchupBestWithContext(
         const FinalChainLock& chainlock,
@@ -1025,7 +1132,7 @@ public:
     {
         return m_persistence.PersistInitializedBest(
             chainlock, Context(chainlock), error, reset,
-            std::move(seal));
+            std::move(seal), RecoveryUniverse(chainlock));
     }
     [[nodiscard]] bool PersistRecoveryCatchupBest(
         const FinalChainLock& chainlock,
@@ -1038,7 +1145,8 @@ public:
     {
         return m_persistence.PersistRecoveryCatchupBest(
             chainlock, Context(chainlock), error, reconciliation,
-            authorization, reset, std::move(seal));
+            authorization, reset, std::move(seal),
+            RecoveryUniverse(chainlock));
     }
 
     [[nodiscard]] bool PersistRosterRecoveryPrecommit(
@@ -1079,6 +1187,15 @@ public:
     }
 
 private:
+    [[nodiscard]] RecoveryUniverseCapsulePtr RecoveryUniverse(
+        const FinalChainLock& chainlock) const
+    {
+        return MakePersistenceRecoveryUniverse(
+            m_genesis_hash,
+            chainlock.statement.roster_beacons.active
+                .recovery_authority_source);
+    }
+
     uint256 m_genesis_hash;
     ChainLockFinalityStoreConfig m_config;
     ProductionPQChainLockPersistence m_persistence;
@@ -1142,6 +1259,258 @@ BOOST_AUTO_TEST_CASE(empty_database_initializes_fixed_schema)
     BOOST_CHECK_EQUAL(state.certificate_revision, 0U);
     BOOST_CHECK(!state.best);
     BOOST_CHECK(!state.unsealed_btcc);
+}
+
+BOOST_AUTO_TEST_CASE(
+    recovery_universe_is_required_and_restarts_through_o1_lookup)
+{
+    const uint256 genesis{NonNullHash(4'100'000)};
+    const auto config{MakeConfig()};
+    const fs::path path{m_path_root / "pqcl_recovery_universe_required"};
+    auto chainlock{MakeChainLock(
+        865, config.activation_predecessor_height,
+        NonNullHash(config.activation_predecessor_height), 4'100'001)};
+    SetExactInitialization(chainlock, genesis, 4'100'001);
+    const auto context{ChainLockStoreTestContextFactory::CreateDurable(
+        genesis, config.chainlock_schedule, chainlock.statement)};
+    BOOST_REQUIRE(context);
+    const auto capsule{MakePersistenceRecoveryUniverse(
+        genesis, chainlock.statement.roster_beacons.active
+                     .recovery_authority_source)};
+    BOOST_REQUIRE(capsule);
+
+    auto other{chainlock};
+    SetExactInitialization(other, genesis, 4'100'002);
+    const auto wrong_capsule{MakePersistenceRecoveryUniverse(
+        genesis, other.statement.roster_beacons.active
+                     .recovery_authority_source)};
+    BOOST_REQUIRE(wrong_capsule);
+    BOOST_REQUIRE(wrong_capsule->SourceId() != capsule->SourceId());
+
+    {
+        ProductionPQChainLockPersistence persistence{
+            DiskParams(path), genesis, config};
+        ChainLockPersistenceError error{ChainLockPersistenceError::NONE};
+        BOOST_CHECK(!persistence.PersistInitializedBest(
+            chainlock, context, &error));
+        BOOST_CHECK(error == ChainLockPersistenceError::INVALID_CHAINLOCK);
+        BOOST_CHECK(!persistence.HasBest());
+        BOOST_CHECK(!persistence.LoadRecoveryUniverse(capsule->SourceId()));
+
+        BOOST_CHECK(!persistence.PersistInitializedBest(
+            chainlock, context, &error,
+            /*verified_reset=*/nullptr, std::nullopt, wrong_capsule));
+        BOOST_CHECK(error == ChainLockPersistenceError::INVALID_CHAINLOCK);
+        BOOST_CHECK(!persistence.HasBest());
+
+        BOOST_REQUIRE(persistence.PersistInitializedBest(
+            chainlock, context, &error,
+            /*verified_reset=*/nullptr, std::nullopt, capsule));
+        const auto loaded{
+            persistence.LoadRecoveryUniverse(capsule->SourceId())};
+        BOOST_REQUIRE(loaded);
+        BOOST_CHECK(*loaded == *capsule);
+    }
+
+    ProductionPQChainLockPersistence reopened{
+        DiskParams(path), genesis, config};
+    const auto loaded{reopened.LoadRecoveryUniverse(capsule->SourceId())};
+    BOOST_REQUIRE(loaded);
+    BOOST_CHECK(*loaded == *capsule);
+    BOOST_REQUIRE(reopened.LoadBest());
+}
+
+BOOST_AUTO_TEST_CASE(recovery_universe_corruption_fails_closed)
+{
+    enum class Mutation : uint8_t {
+        MISSING,
+        INNER_CORRUPT_WITH_VALID_OUTER_CHECKSUM,
+        KEY_SOURCE_MISMATCH,
+        ORPHAN,
+    };
+    const std::array mutations{
+        Mutation::MISSING,
+        Mutation::INNER_CORRUPT_WITH_VALID_OUTER_CHECKSUM,
+        Mutation::KEY_SOURCE_MISMATCH,
+        Mutation::ORPHAN};
+    const uint256 genesis{NonNullHash(4'110'000)};
+    const auto config{MakeConfig()};
+
+    for (std::size_t index{0}; index < mutations.size(); ++index) {
+        const fs::path path{m_path_root / fs::PathFromString(
+            strprintf("pqcl_recovery_universe_corrupt_%u", index))};
+        auto chainlock{MakeChainLock(
+            865, config.activation_predecessor_height,
+            NonNullHash(config.activation_predecessor_height),
+            4'110'001 + index)};
+        SetExactInitialization(chainlock, genesis, 4'110'001 + index);
+        const auto context{ChainLockStoreTestContextFactory::CreateDurable(
+            genesis, config.chainlock_schedule, chainlock.statement)};
+        const auto capsule{MakePersistenceRecoveryUniverse(
+            genesis, chainlock.statement.roster_beacons.active
+                         .recovery_authority_source)};
+        BOOST_REQUIRE(context);
+        BOOST_REQUIRE(capsule);
+        {
+            ProductionPQChainLockPersistence persistence{
+                DiskParams(path), genesis, config};
+            BOOST_REQUIRE(persistence.PersistInitializedBest(
+                chainlock, context, nullptr,
+                /*verified_reset=*/nullptr, std::nullopt, capsule));
+        }
+
+        {
+            CDBWrapper raw{DiskParams(path)};
+            const RawRecoveryUniverseKey universe_key{
+                PQ_CHAINLOCK_PERSISTENCE_RECOVERY_UNIVERSE_KEY,
+                capsule->SourceId()};
+            RawRecoveryUniverseRecord universe;
+            BOOST_REQUIRE(raw.Read(universe_key, universe));
+            switch (mutations[index]) {
+            case Mutation::MISSING:
+                BOOST_REQUIRE(raw.Erase(universe_key, true));
+                break;
+            case Mutation::INNER_CORRUPT_WITH_VALID_OUTER_CHECKSUM:
+                BOOST_REQUIRE(!universe.encoded_capsule.empty());
+                universe.encoded_capsule.back() ^= 1;
+                universe.checksum =
+                    GetRawRecoveryUniverseChecksum(universe);
+                BOOST_REQUIRE(raw.Write(universe_key, universe, true));
+                break;
+            case Mutation::KEY_SOURCE_MISMATCH:
+                BOOST_REQUIRE(raw.Erase(universe_key));
+                BOOST_REQUIRE(raw.Write(
+                    RawRecoveryUniverseKey{
+                        PQ_CHAINLOCK_PERSISTENCE_RECOVERY_UNIVERSE_KEY,
+                        NonNullHash(4'119'999)},
+                    universe, true));
+                break;
+            case Mutation::ORPHAN:
+            {
+                auto orphan_source{
+                    chainlock.statement.roster_beacons.active
+                        .recovery_authority_source};
+                orphan_source.normal_beacon.future_btc_hash =
+                    NonNullHash(4'119'998);
+                const auto orphan_capsule{MakePersistenceRecoveryUniverse(
+                    genesis, orphan_source)};
+                BOOST_REQUIRE(orphan_capsule);
+                const auto orphan_record{MakeRawRecoveryUniverseRecord(
+                    universe.schema_hash, orphan_capsule)};
+                BOOST_REQUIRE(raw.Write(
+                    RawRecoveryUniverseKey{
+                        PQ_CHAINLOCK_PERSISTENCE_RECOVERY_UNIVERSE_KEY,
+                        orphan_capsule->SourceId()},
+                    orphan_record, true));
+                break;
+            }
+            }
+        }
+        BOOST_TEST_CONTEXT("mutation=" << static_cast<unsigned>(index)) {
+            BOOST_CHECK_THROW(
+                ProductionPQChainLockPersistence(
+                    DiskParams(path), genesis, config),
+                std::runtime_error);
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(recovery_universe_namespace_is_hard_bounded)
+{
+    const uint256 genesis{NonNullHash(4'120'000)};
+    const auto config{MakeConfig()};
+    const fs::path path{m_path_root / "pqcl_recovery_universe_overcap"};
+    auto chainlock{MakeChainLock(
+        865, config.activation_predecessor_height,
+        NonNullHash(config.activation_predecessor_height), 4'120'001)};
+    SetExactInitialization(chainlock, genesis, 4'120'001);
+    const auto context{ChainLockStoreTestContextFactory::CreateDurable(
+        genesis, config.chainlock_schedule, chainlock.statement)};
+    const auto first_capsule{MakePersistenceRecoveryUniverse(
+        genesis, chainlock.statement.roster_beacons.active
+                     .recovery_authority_source)};
+    BOOST_REQUIRE(context);
+    BOOST_REQUIRE(first_capsule);
+    {
+        ProductionPQChainLockPersistence persistence{
+            DiskParams(path), genesis, config};
+        BOOST_REQUIRE(persistence.PersistInitializedBest(
+            chainlock, context, nullptr,
+            /*verified_reset=*/nullptr, std::nullopt, first_capsule));
+    }
+
+    {
+        CDBWrapper raw{DiskParams(path)};
+        RawDiskRecord best;
+        BOOST_REQUIRE(raw.Read(
+            RawDiskKey{PQ_CHAINLOCK_PERSISTENCE_BEST_KEY}, best));
+        auto source{first_capsule->Source()};
+        for (std::size_t index{1};
+             index <= RECOVERY_UNIVERSE_DURABLE_OWNER_CAPACITY; ++index) {
+            source.normal_beacon.future_btc_hash =
+                NonNullHash(4'121'000 + index);
+            BOOST_REQUIRE(source.IsStructurallyValid());
+            const auto capsule{
+                MakePersistenceRecoveryUniverse(genesis, source)};
+            const auto record{
+                MakeRawRecoveryUniverseRecord(best.schema_hash, capsule)};
+            BOOST_REQUIRE(raw.Write(
+                RawRecoveryUniverseKey{
+                    PQ_CHAINLOCK_PERSISTENCE_RECOVERY_UNIVERSE_KEY,
+                    capsule->SourceId()},
+                record,
+                index == RECOVERY_UNIVERSE_DURABLE_OWNER_CAPACITY));
+        }
+    }
+    BOOST_CHECK_THROW(
+        ProductionPQChainLockPersistence(
+            DiskParams(path), genesis, config),
+        std::runtime_error);
+}
+
+BOOST_AUTO_TEST_CASE(
+    recovery_universe_eviction_is_atomic_with_last_owner)
+{
+    const uint256 genesis{NonNullHash(4'130'000)};
+    const auto config{MakeConfig()};
+    const fs::path path{m_path_root / "pqcl_recovery_universe_eviction"};
+    std::vector<RecoveryRosterAuthoritySource> sources;
+    sources.reserve(VERIFIED_AUTHORIZATION_BASE_CAPACITY + 1);
+    {
+        PQChainLockPersistence persistence{
+            DiskParams(path), genesis, config};
+        for (std::size_t index{0};
+             index <= VERIFIED_AUTHORIZATION_BASE_CAPACITY; ++index) {
+            auto chainlock{MakeChainLock(
+                865, config.activation_predecessor_height,
+                NonNullHash(config.activation_predecessor_height),
+                4'130'001 + index)};
+            SetExactInitialization(
+                chainlock, genesis, 4'130'001 + index);
+            sources.push_back(
+                chainlock.statement.roster_beacons.active
+                    .recovery_authority_source);
+            BOOST_REQUIRE(
+                persistence.PersistVerifiedAuthorizationBase(chainlock));
+        }
+        const auto bases{persistence.LoadAuthorizationBases()};
+        BOOST_REQUIRE_EQUAL(
+            bases.size(), VERIFIED_AUTHORIZATION_BASE_CAPACITY);
+        std::size_t missing{0};
+        for (const auto& source : sources) {
+            if (!persistence.LoadRecoveryUniverse(source)) ++missing;
+        }
+        BOOST_CHECK_EQUAL(missing, 1U);
+    }
+
+    PQChainLockPersistence reopened{DiskParams(path), genesis, config};
+    BOOST_REQUIRE_EQUAL(reopened.LoadAuthorizationBases().size(),
+                        VERIFIED_AUTHORIZATION_BASE_CAPACITY);
+    std::size_t missing{0};
+    for (const auto& source : sources) {
+        if (!reopened.LoadRecoveryUniverse(source)) ++missing;
+    }
+    BOOST_CHECK_EQUAL(missing, 1U);
 }
 
 BOOST_AUTO_TEST_CASE(authorization_base_exact_lookup_survives_restart)
@@ -1844,9 +2213,17 @@ BOOST_AUTO_TEST_CASE(
         ProductionPQChainLockPersistence persistence{
             DiskParams(path), genesis, config};
         BOOST_REQUIRE(persistence.PersistInitializedBest(
-            initialized, initialized_context));
+            initialized, initialized_context, nullptr,
+            /*verified_reset=*/nullptr, std::nullopt,
+            MakePersistenceRecoveryUniverse(
+                genesis, initialized.statement.roster_beacons.active
+                             .recovery_authority_source)));
         BOOST_REQUIRE(persistence.PersistRecoveryCatchupBest(
-            recovered, recovery_context));
+            recovered, recovery_context, nullptr, std::nullopt, nullptr,
+            /*verified_reset=*/nullptr, std::nullopt,
+            MakePersistenceRecoveryUniverse(
+                genesis, recovered.statement.roster_beacons.active
+                             .recovery_authority_source)));
     }
 
     ProductionPQChainLockPersistence persistence{
@@ -3299,7 +3676,11 @@ BOOST_AUTO_TEST_CASE(durable_certificate_requires_exact_prepared_context)
             genesis, config.chainlock_schedule, chainlock.statement)};
     BOOST_REQUIRE(exact_context);
     BOOST_REQUIRE(persistence.PersistInitializedBest(
-        chainlock, exact_context, &error));
+        chainlock, exact_context, &error,
+        /*verified_reset=*/nullptr, std::nullopt,
+        MakePersistenceRecoveryUniverse(
+            genesis, chainlock.statement.roster_beacons.active
+                         .recovery_authority_source)));
     const auto loaded{persistence.LoadBest()};
     BOOST_REQUIRE(loaded);
     BOOST_CHECK(loaded->ChainLock() == chainlock);
@@ -3335,7 +3716,11 @@ BOOST_AUTO_TEST_CASE(durable_roster_context_corruption_fails_closed)
             ProductionPQChainLockPersistence persistence{
                 DiskParams(path), genesis, config};
             BOOST_REQUIRE(persistence.PersistInitializedBest(
-                chainlock, context));
+                chainlock, context, nullptr,
+                /*verified_reset=*/nullptr, std::nullopt,
+                MakePersistenceRecoveryUniverse(
+                    genesis, chainlock.statement.roster_beacons.active
+                                 .recovery_authority_source)));
         }
         {
             CDBWrapper raw{DiskParams(path)};

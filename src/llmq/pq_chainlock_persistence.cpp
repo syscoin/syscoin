@@ -185,6 +185,8 @@ inline constexpr std::string_view RECEIPT_ARCHIVE_AUTHORIZATION_HASH_DOMAIN{
     "SYS_PQ_RECEIPT_ARCHIVE_AUTHORIZATION_V1"};
 inline constexpr std::string_view PAYMENT_AUDIT_SEAL_CONTEXT_HASH_DOMAIN{
     "SYS_PQ_PAYMENT_AUDIT_SEAL_CONTEXT_V1"};
+inline constexpr std::string_view RECOVERY_UNIVERSE_RECORD_HASH_DOMAIN{
+    "SYS_PQ_RECOVERY_UNIVERSE_RECORD_V1"};
 
 void SetError(ChainLockPersistenceError* error,
               ChainLockPersistenceError value)
@@ -231,6 +233,23 @@ struct DiskAuthorizationBaseKey {
                           obj.logical_id.IsNull()) {
             throw std::ios_base::failure(
                 "non-canonical PQ authorization-base DB key");
+        });
+    }
+};
+
+/** Composite namespace for deduplicated local recovery universes. */
+struct DiskRecoveryUniverseKey {
+    uint8_t type{PQ_CHAINLOCK_PERSISTENCE_RECOVERY_UNIVERSE_KEY};
+    uint256 source_id;
+
+    SERIALIZE_METHODS(DiskRecoveryUniverseKey, obj)
+    {
+        READWRITE(obj.type, obj.source_id);
+        SER_READ(obj, if (obj.type !=
+                              PQ_CHAINLOCK_PERSISTENCE_RECOVERY_UNIVERSE_KEY ||
+                          obj.source_id.IsNull()) {
+            throw std::ios_base::failure(
+                "non-canonical recovery-universe DB key");
         });
     }
 };
@@ -389,6 +408,17 @@ uint256 GetRecordChecksum(const uint256& schema_hash,
     return writer.GetHash();
 }
 
+uint256 GetRecoveryUniverseRecordChecksum(
+    const uint256& schema_hash,
+    const uint256& source_id,
+    const std::vector<uint8_t>& encoded_capsule)
+{
+    HashWriter writer{SER_GETHASH, 0};
+    WriteDomain(writer, RECOVERY_UNIVERSE_RECORD_HASH_DOMAIN);
+    writer << schema_hash << source_id << encoded_capsule;
+    return writer.GetHash();
+}
+
 struct DiskRecord {
     static constexpr std::size_t FIXED_SIZE{
         sizeof(uint16_t) + 4 * 32 + FinalChainLock::WIRE_SIZE};
@@ -441,6 +471,60 @@ struct DiskRecord {
         }
         encoded_roster_context.resize(context_size);
         stream.read(MakeWritableByteSpan(encoded_roster_context));
+        ::Unserialize(stream, checksum);
+    }
+};
+
+struct DiskRecoveryUniverse {
+    static constexpr uint16_t VERSION{1};
+    static constexpr std::size_t FIXED_SIZE{
+        sizeof(uint16_t) + 3 * uint256::size()};
+    static constexpr std::size_t MIN_WIRE_SIZE{
+        FIXED_SIZE +
+        GetSizeOfCompactSize(RecoveryUniverseCapsule::MIN_SERIALIZED_SIZE) +
+        RecoveryUniverseCapsule::MIN_SERIALIZED_SIZE};
+    static constexpr std::size_t MAX_WIRE_SIZE{
+        FIXED_SIZE +
+        GetSizeOfCompactSize(RecoveryUniverseCapsule::MAX_SERIALIZED_SIZE) +
+        RecoveryUniverseCapsule::MAX_SERIALIZED_SIZE};
+
+    uint16_t version{VERSION};
+    uint256 schema_hash;
+    uint256 source_id;
+    std::vector<uint8_t> encoded_capsule;
+    uint256 checksum;
+
+    template <typename Stream>
+    void Serialize(Stream& stream) const
+    {
+        ::SerializeMany(stream, version, schema_hash, source_id);
+        WriteCompactSize(stream, encoded_capsule.size());
+        if (!encoded_capsule.empty()) {
+            stream.write(MakeByteSpan(encoded_capsule));
+        }
+        ::Serialize(stream, checksum);
+    }
+
+    template <typename Stream>
+    void Unserialize(Stream& stream)
+    {
+        if (stream.size() < MIN_WIRE_SIZE ||
+            stream.size() > MAX_WIRE_SIZE) {
+            throw std::ios_base::failure(
+                "invalid recovery-universe record size");
+        }
+        ::UnserializeMany(stream, version, schema_hash, source_id);
+        const std::size_t capsule_size{ReadCompactSize(stream)};
+        if (capsule_size <
+                RecoveryUniverseCapsule::MIN_SERIALIZED_SIZE ||
+            capsule_size >
+                RecoveryUniverseCapsule::MAX_SERIALIZED_SIZE ||
+            stream.size() != capsule_size + sizeof(checksum)) {
+            throw std::ios_base::failure(
+                "invalid recovery-universe capsule size");
+        }
+        encoded_capsule.resize(capsule_size);
+        stream.read(MakeWritableByteSpan(encoded_capsule));
         ::Unserialize(stream, checksum);
     }
 };
@@ -883,6 +967,9 @@ DiskPaymentAuditPresealMarker MakePaymentAuditPresealMarker(
 }
 
 static_assert(DiskRecord::MAX_WIRE_SIZE < MAX_SIZE);
+static_assert(DiskRecoveryUniverse::MAX_WIRE_SIZE < MAX_SIZE);
+static_assert(RECOVERY_UNIVERSE_DURABLE_OWNER_CAPACITY ==
+              VERIFIED_AUTHORIZATION_BASE_CAPACITY + 5);
 static_assert(DiskRosterRecoveryPrecommit::WIRE_SIZE == 180);
 static_assert(DiskReceiptArchiveRosterAuthorization::WIRE_SIZE < MAX_SIZE);
 static_assert(DiskBTCCPresealMarker::WIRE_SIZE == 500);
@@ -1374,6 +1461,230 @@ struct PQChainLockPersistence::Impl {
         return true;
     }
 
+    using AuthorizationBaseView =
+        std::map<uint256, const DiskRecord*>;
+
+    struct RecoveryUniverseMutation {
+        RecoveryUniverseCapsulePtr addition;
+        std::optional<DiskRecoveryUniverse> addition_record;
+        std::set<uint256> erasures;
+    };
+
+    std::optional<DiskRecoveryUniverse> MakeRecoveryUniverseRecord(
+        const RecoveryUniverseCapsulePtr& capsule) const
+    {
+        if (!capsule || !capsule->IsStructurallyValid() ||
+            capsule->GenesisHash() != genesis_hash ||
+            capsule->SourceId().IsNull() ||
+            capsule->SourceId() != GetRecoveryUniverseSourceId(
+                genesis_hash, capsule->Source())) {
+            return std::nullopt;
+        }
+        DiskRecoveryUniverse record;
+        record.schema_hash = schema_hash;
+        record.source_id = capsule->SourceId();
+        try {
+            record.encoded_capsule = capsule->Encode();
+        } catch (const std::exception&) {
+            return std::nullopt;
+        }
+        record.checksum = GetRecoveryUniverseRecordChecksum(
+            schema_hash, record.source_id, record.encoded_capsule);
+        const std::size_t size{::GetSerializeSize(record)};
+        if (size < DiskRecoveryUniverse::MIN_WIRE_SIZE ||
+            size > DiskRecoveryUniverse::MAX_WIRE_SIZE) {
+            return std::nullopt;
+        }
+        return record;
+    }
+
+    RecoveryUniverseCapsulePtr DecodeRecoveryUniverseRecord(
+        const DiskRecoveryUniverse& record) const
+    {
+        if (record.version != DiskRecoveryUniverse::VERSION ||
+            record.schema_hash != schema_hash || record.source_id.IsNull() ||
+            record.checksum != GetRecoveryUniverseRecordChecksum(
+                schema_hash, record.source_id,
+                record.encoded_capsule)) {
+            return nullptr;
+        }
+        const auto decoded{
+            RecoveryUniverseCapsule::DecodeTrustedPersistence(
+                record.encoded_capsule)};
+        if (!decoded || decoded->GenesisHash() != genesis_hash ||
+            decoded->SourceId() != record.source_id) {
+            return nullptr;
+        }
+        return std::make_shared<const RecoveryUniverseCapsule>(*decoded);
+    }
+
+    bool CollectRecoverySource(
+        const ChainLockStatement& statement,
+        std::map<uint256, RecoveryRosterAuthoritySource>& required) const
+    {
+        if (!IsRecoverySourceBoundWindow(statement.roster_beacons)) {
+            return false;
+        }
+        const auto& source{
+            statement.roster_beacons.active.recovery_authority_source};
+        if (source.IsNull()) return true;
+        const uint256 source_id{
+            GetRecoveryUniverseSourceId(genesis_hash, source)};
+        if (source_id.IsNull()) return false;
+        const auto [it, inserted]{required.emplace(source_id, source)};
+        return inserted || it->second == source;
+    }
+
+    std::optional<RecoveryUniverseMutation>
+    PrepareRecoveryUniverseMutation(
+        const DiskRecord* next_best,
+        const DiskRecord* next_unsealed,
+        const AuthorizationBaseView& next_authorization_bases,
+        const std::optional<ReceiptArchiveRosterAuthorization>&
+            next_receipt_archive_authorization,
+        const std::optional<PaymentAuditSealContextCapsule>&
+            next_payment_audit_seal_context,
+        RecoveryUniverseCapsulePtr supplied,
+        ChainLockPersistenceError* error) const
+        EXCLUSIVE_LOCKS_REQUIRED(mutex)
+    {
+        std::map<uint256, RecoveryRosterAuthoritySource> required;
+        const auto collect_record = [&](const DiskRecord* record) {
+            return record == nullptr ||
+                   CollectRecoverySource(record->chainlock.statement,
+                                         required);
+        };
+        if (!collect_record(next_best) || !collect_record(next_unsealed)) {
+            SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
+            return std::nullopt;
+        }
+        for (const auto& [_, record] : next_authorization_bases) {
+            if (record == nullptr || !collect_record(record)) {
+                SetError(error,
+                         ChainLockPersistenceError::INVALID_CHAINLOCK);
+                return std::nullopt;
+            }
+        }
+        if (next_receipt_archive_authorization &&
+            (!CollectRecoverySource(
+                 next_receipt_archive_authorization->owner.statement,
+                 required) ||
+             !CollectRecoverySource(
+                 next_receipt_archive_authorization->predecessor.statement,
+                 required))) {
+            SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
+            return std::nullopt;
+        }
+        if (next_payment_audit_seal_context &&
+            !CollectRecoverySource(
+                next_payment_audit_seal_context->Seal().statement,
+                required)) {
+            SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
+            return std::nullopt;
+        }
+        if (required.size() > RECOVERY_UNIVERSE_DURABLE_OWNER_CAPACITY) {
+            SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
+            return std::nullopt;
+        }
+
+        RecoveryUniverseMutation mutation;
+        if (supplied) {
+            const auto disk{MakeRecoveryUniverseRecord(supplied)};
+            const auto required_it{required.find(supplied->SourceId())};
+            const auto existing{recovery_universes.find(
+                supplied->SourceId())};
+            if (!disk || required_it == required.end() ||
+                required_it->second != supplied->Source() ||
+                (existing != recovery_universes.end() &&
+                 *existing->second != *supplied)) {
+                SetError(error,
+                         ChainLockPersistenceError::INVALID_CHAINLOCK);
+                return std::nullopt;
+            }
+            if (existing == recovery_universes.end()) {
+                mutation.addition = std::move(supplied);
+                mutation.addition_record = std::move(*disk);
+            }
+        }
+
+        for (const auto& [source_id, source] : required) {
+            const auto existing{recovery_universes.find(source_id)};
+            if (existing != recovery_universes.end()) {
+                if (!existing->second ||
+                    existing->second->Source() != source) {
+                    SetError(error,
+                             ChainLockPersistenceError::IO_FAILURE);
+                    return std::nullopt;
+                }
+                continue;
+            }
+            if (!mutation.addition ||
+                mutation.addition->SourceId() != source_id ||
+                mutation.addition->Source() != source) {
+                SetError(error,
+                         ChainLockPersistenceError::INVALID_CHAINLOCK);
+                return std::nullopt;
+            }
+        }
+        for (const auto& [source_id, _] : recovery_universes) {
+            if (!required.contains(source_id)) {
+                mutation.erasures.insert(source_id);
+            }
+        }
+        const std::size_t retained_count{
+            recovery_universes.size() - mutation.erasures.size() +
+            (mutation.addition ? 1U : 0U)};
+        if (retained_count != required.size() ||
+            retained_count > RECOVERY_UNIVERSE_DURABLE_OWNER_CAPACITY) {
+            SetError(error, ChainLockPersistenceError::IO_FAILURE);
+            return std::nullopt;
+        }
+        return mutation;
+    }
+
+    bool ApplyRecoveryUniverseMutation(
+        CDBBatch& batch,
+        const RecoveryUniverseMutation& mutation,
+        ChainLockPersistenceError* error) const
+    {
+        if (mutation.addition) {
+            if (!mutation.addition_record ||
+                mutation.addition_record->source_id !=
+                    mutation.addition->SourceId()) {
+                SetError(error,
+                         ChainLockPersistenceError::IO_FAILURE);
+                return false;
+            }
+            batch.Write(
+                DiskRecoveryUniverseKey{
+                    PQ_CHAINLOCK_PERSISTENCE_RECOVERY_UNIVERSE_KEY,
+                    mutation.addition->SourceId()},
+                *mutation.addition_record);
+        } else if (mutation.addition_record) {
+            SetError(error, ChainLockPersistenceError::IO_FAILURE);
+            return false;
+        }
+        for (const auto& source_id : mutation.erasures) {
+            batch.Erase(DiskRecoveryUniverseKey{
+                PQ_CHAINLOCK_PERSISTENCE_RECOVERY_UNIVERSE_KEY,
+                source_id});
+        }
+        return true;
+    }
+
+    void CommitRecoveryUniverseMutation(
+        const RecoveryUniverseMutation& mutation)
+        EXCLUSIVE_LOCKS_REQUIRED(mutex)
+    {
+        for (const auto& source_id : mutation.erasures) {
+            recovery_universes.erase(source_id);
+        }
+        if (mutation.addition) {
+            recovery_universes.emplace(
+                mutation.addition->SourceId(), mutation.addition);
+        }
+    }
+
     bool ValidateReceiptArchiveAuthorization(
         const ReceiptArchiveRosterAuthorization& authorization,
         const DiskRecord* durable_best) const
@@ -1470,22 +1781,42 @@ struct PQChainLockPersistence::Impl {
                 if (!iterator->GetKeyExact(key)) {
                     DiskAuthorizationBaseKey base_key;
                     DiskRecord record;
-                    if (!iterator->GetKeyExact(base_key) ||
-                        !iterator->GetValueExact(record) ||
-                        base_key.type !=
-                            PQ_CHAINLOCK_PERSISTENCE_AUTHORIZATION_BASE_KEY ||
-                        base_key.logical_id != record.logical_id ||
-                        !ValidateRecord(record) ||
-                        authorization_bases.contains(record.logical_id) ||
-                        !authorization_base_witnesses
-                             .insert(record.witness_id).second ||
-                        authorization_bases.size() >=
-                            VERIFIED_AUTHORIZATION_BASE_CAPACITY) {
-                        throw std::runtime_error(
-                            "corrupt PQ ChainLock authorization-base record");
+                    if (iterator->GetKeyExact(base_key)) {
+                        if (!iterator->GetValueExact(record) ||
+                            base_key.logical_id != record.logical_id ||
+                            !ValidateRecord(record) ||
+                            authorization_bases.contains(record.logical_id) ||
+                            !authorization_base_witnesses
+                                 .insert(record.witness_id).second ||
+                            authorization_bases.size() >=
+                                VERIFIED_AUTHORIZATION_BASE_CAPACITY) {
+                            throw std::runtime_error(
+                                "corrupt PQ ChainLock authorization-base record");
+                        }
+                        authorization_bases.emplace(
+                            record.logical_id, std::move(record));
+                        continue;
                     }
-                    authorization_bases.emplace(
-                        record.logical_id, std::move(record));
+
+                    DiskRecoveryUniverseKey universe_key;
+                    DiskRecoveryUniverse disk_universe;
+                    if (!iterator->GetKeyExact(universe_key) ||
+                        !iterator->GetValueExact(disk_universe) ||
+                        universe_key.source_id != disk_universe.source_id ||
+                        recovery_universes.contains(universe_key.source_id) ||
+                        recovery_universes.size() >=
+                            RECOVERY_UNIVERSE_DURABLE_OWNER_CAPACITY) {
+                        throw std::runtime_error(
+                            "corrupt recovery-universe record");
+                    }
+                    auto capsule{
+                        DecodeRecoveryUniverseRecord(disk_universe)};
+                    if (!capsule) {
+                        throw std::runtime_error(
+                            "corrupt recovery-universe record");
+                    }
+                    recovery_universes.emplace(
+                        universe_key.source_id, std::move(capsule));
                     continue;
                 }
                 if (key.type == PQ_CHAINLOCK_PERSISTENCE_SCHEMA_KEY) {
@@ -1879,6 +2210,23 @@ struct PQChainLockPersistence::Impl {
         highest_payment_audit_preseal_revision =
             HighestPaymentAuditPresealRevision(
                 payment_audit_preseal_state);
+
+        AuthorizationBaseView authorization_view;
+        for (const auto& [logical_id, record] : authorization_bases) {
+            authorization_view.emplace(logical_id, &record);
+        }
+        ChainLockPersistenceError recovery_error{
+            ChainLockPersistenceError::NONE};
+        const auto recovery_mutation{PrepareRecoveryUniverseMutation(
+            best ? &*best : nullptr, unsealed ? &*unsealed : nullptr,
+            authorization_view, receipt_archive_authorization,
+            payment_audit_seal_context,
+            /*supplied=*/nullptr, &recovery_error)};
+        if (!recovery_mutation || recovery_mutation->addition ||
+            !recovery_mutation->erasures.empty()) {
+            throw std::runtime_error(
+                "incomplete or orphaned recovery-universe persistence");
+        }
         if (best || unsealed) certificate_revision = 1;
     }
 
@@ -1893,7 +2241,8 @@ struct PQChainLockPersistence::Impl {
                      bool consume_recovery_precommit = false,
                      const ReceiptArchiveRosterAuthorization*
                          consume_receipt_archive_authorization = nullptr,
-                     bool verified_reset_convergence = false)
+                     bool verified_reset_convergence = false,
+                     RecoveryUniverseCapsulePtr recovery_universe = nullptr)
         EXCLUSIVE_LOCKS_REQUIRED(mutex)
     {
         SetError(error, ChainLockPersistenceError::NONE);
@@ -2006,6 +2355,26 @@ struct PQChainLockPersistence::Impl {
                  !IsExactRecoveryStatement(chainlock))) {
                 SetError(error,
                          ChainLockPersistenceError::INVALID_CHAINLOCK);
+                return false;
+            }
+
+            AuthorizationBaseView authorization_view;
+            for (const auto& [logical_id, retained] :
+                 authorization_bases) {
+                authorization_view.emplace(logical_id, &retained);
+            }
+            const auto recovery_mutation{
+                PrepareRecoveryUniverseMutation(
+                    &*best, unsealed ? &*unsealed : nullptr,
+                    authorization_view, receipt_archive_authorization,
+                    payment_audit_seal_context,
+                    std::move(recovery_universe), error)};
+            if (!recovery_mutation || recovery_mutation->addition ||
+                !recovery_mutation->erasures.empty()) {
+                if (recovery_mutation) {
+                    SetError(error,
+                             ChainLockPersistenceError::IO_FAILURE);
+                }
                 return false;
             }
 
@@ -2340,8 +2709,37 @@ struct PQChainLockPersistence::Impl {
             evict_authorization_bases.insert(oldest->logical_id);
         }
 
+        AuthorizationBaseView next_authorization_bases;
+        for (const auto& [logical_id, retained] : authorization_bases) {
+            if (!evict_authorization_bases.contains(logical_id)) {
+                next_authorization_bases.emplace(logical_id, &retained);
+            }
+        }
+        if (add_previous_best &&
+            !evict_authorization_bases.contains(previous_best->logical_id)) {
+            next_authorization_bases[previous_best->logical_id] =
+                previous_best;
+        }
+        if (add_departing_unsealed_base &&
+            !evict_authorization_bases.contains(
+                departing_unsealed_base->logical_id)) {
+            next_authorization_bases[departing_unsealed_base->logical_id] =
+                departing_unsealed_base;
+        }
+        const auto recovery_mutation{PrepareRecoveryUniverseMutation(
+            &candidate, next_unsealed ? &*next_unsealed : nullptr,
+            next_authorization_bases,
+            next_receipt_archive_authorization,
+            next_payment_audit_seal_context,
+            std::move(recovery_universe), error)};
+        if (!recovery_mutation) return false;
+
         try {
             CDBBatch batch{db};
+            if (!ApplyRecoveryUniverseMutation(
+                    batch, *recovery_mutation, error)) {
+                return false;
+            }
             batch.Write(DiskKey{PQ_CHAINLOCK_PERSISTENCE_BEST_KEY}, candidate);
             if (add_previous_best &&
                 !evict_authorization_bases.contains(
@@ -2459,6 +2857,7 @@ struct PQChainLockPersistence::Impl {
         if (erase_recovery_precommit) {
             roster_recovery_precommit.reset();
         }
+        CommitRecoveryUniverseMutation(*recovery_mutation);
         ++certificate_revision;
         return true;
     }
@@ -2466,7 +2865,8 @@ struct PQChainLockPersistence::Impl {
     bool PersistVerifiedAuthorizationBase(
         const FinalChainLock& chainlock,
         const PreparedChainLockContextPtr& context,
-        ChainLockPersistenceError* error)
+        ChainLockPersistenceError* error,
+        RecoveryUniverseCapsulePtr recovery_universe)
         EXCLUSIVE_LOCKS_REQUIRED(mutex)
     {
         SetError(error, ChainLockPersistenceError::NONE);
@@ -2582,8 +2982,26 @@ struct PQChainLockPersistence::Impl {
             evict = oldest->first;
         }
 
+        AuthorizationBaseView next_authorization_bases;
+        for (const auto& [logical_id, retained] : authorization_bases) {
+            if (!evict || logical_id != *evict) {
+                next_authorization_bases.emplace(logical_id, &retained);
+            }
+        }
+        next_authorization_bases[candidate.logical_id] = &candidate;
+        const auto recovery_mutation{PrepareRecoveryUniverseMutation(
+            best ? &*best : nullptr, unsealed ? &*unsealed : nullptr,
+            next_authorization_bases, receipt_archive_authorization,
+            payment_audit_seal_context,
+            std::move(recovery_universe), error)};
+        if (!recovery_mutation) return false;
+
         try {
             CDBBatch batch{db};
+            if (!ApplyRecoveryUniverseMutation(
+                    batch, *recovery_mutation, error)) {
+                return false;
+            }
             batch.Write(
                 DiskAuthorizationBaseKey{
                     PQ_CHAINLOCK_PERSISTENCE_AUTHORIZATION_BASE_KEY,
@@ -2607,13 +3025,15 @@ struct PQChainLockPersistence::Impl {
         if (evict) authorization_bases.erase(*evict);
         authorization_bases.emplace(candidate.logical_id,
                                     std::move(candidate));
+        CommitRecoveryUniverseMutation(*recovery_mutation);
         return true;
     }
 
     bool PersistUnsealedBTCC(
         const FinalChainLock& chainlock,
         const PreparedChainLockContextPtr& context,
-        ChainLockPersistenceError* error)
+        ChainLockPersistenceError* error,
+        RecoveryUniverseCapsulePtr recovery_universe)
         EXCLUSIVE_LOCKS_REQUIRED(mutex)
     {
         SetError(error, ChainLockPersistenceError::NONE);
@@ -2658,8 +3078,22 @@ struct PQChainLockPersistence::Impl {
         }
         if (exact_unsealed) return true;
 
+        AuthorizationBaseView authorization_view;
+        for (const auto& [logical_id, retained] : authorization_bases) {
+            authorization_view.emplace(logical_id, &retained);
+        }
+        const auto recovery_mutation{PrepareRecoveryUniverseMutation(
+            best ? &*best : nullptr, &candidate, authorization_view,
+            receipt_archive_authorization, payment_audit_seal_context,
+            std::move(recovery_universe), error)};
+        if (!recovery_mutation) return false;
+
         try {
             CDBBatch batch{db};
+            if (!ApplyRecoveryUniverseMutation(
+                    batch, *recovery_mutation, error)) {
+                return false;
+            }
             batch.Write(DiskKey{PQ_CHAINLOCK_PERSISTENCE_UNSEALED_BTCC_KEY},
                         candidate);
             if (!db.WriteBatch(batch, /*fSync=*/true)) {
@@ -2673,6 +3107,7 @@ struct PQChainLockPersistence::Impl {
             return false;
         }
         unsealed = std::move(candidate);
+        CommitRecoveryUniverseMutation(*recovery_mutation);
         ++certificate_revision;
         return true;
     }
@@ -2681,7 +3116,8 @@ struct PQChainLockPersistence::Impl {
         const FinalChainLock& chainlock,
         const PreparedChainLockContextPtr& context,
         const ReceiptArchiveRosterAuthorization& expected_authorization,
-        ChainLockPersistenceError* error)
+        ChainLockPersistenceError* error,
+        RecoveryUniverseCapsulePtr recovery_universe)
         EXCLUSIVE_LOCKS_REQUIRED(mutex)
     {
         SetError(error, ChainLockPersistenceError::NONE);
@@ -2732,8 +3168,23 @@ struct PQChainLockPersistence::Impl {
             return false;
         }
 
+        AuthorizationBaseView authorization_view;
+        for (const auto& [logical_id, retained] : authorization_bases) {
+            authorization_view.emplace(logical_id, &retained);
+        }
+        const auto recovery_mutation{PrepareRecoveryUniverseMutation(
+            best ? &*best : nullptr, &candidate, authorization_view,
+            /*next_receipt_archive_authorization=*/std::nullopt,
+            payment_audit_seal_context,
+            std::move(recovery_universe), error)};
+        if (!recovery_mutation) return false;
+
         try {
             CDBBatch batch{db};
+            if (!ApplyRecoveryUniverseMutation(
+                    batch, *recovery_mutation, error)) {
+                return false;
+            }
             if (!unsealed) {
                 batch.Write(
                     DiskKey{PQ_CHAINLOCK_PERSISTENCE_UNSEALED_BTCC_KEY},
@@ -2754,6 +3205,7 @@ struct PQChainLockPersistence::Impl {
 
         if (!unsealed) unsealed = std::move(candidate);
         receipt_archive_authorization.reset();
+        CommitRecoveryUniverseMutation(*recovery_mutation);
         ++certificate_revision;
         return true;
     }
@@ -3020,6 +3472,8 @@ struct PQChainLockPersistence::Impl {
     std::optional<DiskRecord> best GUARDED_BY(mutex);
     std::optional<DiskRecord> unsealed GUARDED_BY(mutex);
     std::map<uint256, DiskRecord> authorization_bases GUARDED_BY(mutex);
+    std::map<uint256, RecoveryUniverseCapsulePtr> recovery_universes
+        GUARDED_BY(mutex);
     std::optional<ReceiptArchiveRosterAuthorization>
         receipt_archive_authorization GUARDED_BY(mutex);
     uint64_t certificate_revision GUARDED_BY(mutex){0};
@@ -3183,17 +3637,33 @@ PQChainLockPersistence::LoadPaymentAuditSealContext() const
     return m_impl->payment_audit_seal_context;
 }
 
+RecoveryUniverseCapsulePtr
+PQChainLockPersistence::LoadRecoveryUniverse(
+    const uint256& source_id) const
+{
+    if (source_id.IsNull()) return nullptr;
+    LOCK(m_impl->mutex);
+    const auto found{m_impl->recovery_universes.find(source_id)};
+    return found == m_impl->recovery_universes.end()
+        ? nullptr
+        : found->second;
+}
+
 bool PQChainLockPersistence::PersistBest(
     const FinalChainLock& chainlock,
     const PreparedChainLockContextPtr& context,
     ChainLockPersistenceError* error,
     std::optional<PaymentAuditSealContextCapsule>
-        payment_audit_seal_context)
+        payment_audit_seal_context,
+    RecoveryUniverseCapsulePtr recovery_universe)
 {
     LOCK(m_impl->mutex);
     return m_impl->PersistBest(
         chainlock, context, error,
-        std::move(payment_audit_seal_context));
+        std::move(payment_audit_seal_context), /*catchup=*/false,
+        std::nullopt, /*consume_recovery_precommit=*/false, nullptr,
+        /*verified_reset_convergence=*/false,
+        std::move(recovery_universe));
 }
 
 bool PQChainLockPersistence::PersistBestCoveringReceiptArchive(
@@ -3202,7 +3672,8 @@ bool PQChainLockPersistence::PersistBestCoveringReceiptArchive(
     const ReceiptArchiveRosterAuthorization& expected_authorization,
     ChainLockPersistenceError* error,
     std::optional<PaymentAuditSealContextCapsule>
-        payment_audit_seal_context)
+        payment_audit_seal_context,
+    RecoveryUniverseCapsulePtr recovery_universe)
 {
     LOCK(m_impl->mutex);
     return m_impl->PersistBest(
@@ -3210,37 +3681,44 @@ bool PQChainLockPersistence::PersistBestCoveringReceiptArchive(
         std::move(payment_audit_seal_context),
         /*catchup=*/false, std::nullopt,
         /*consume_recovery_precommit=*/false,
-        &expected_authorization);
+        &expected_authorization,
+        /*verified_reset_convergence=*/false,
+        std::move(recovery_universe));
 }
 
 bool PQChainLockPersistence::PersistUnsealedBTCC(
     const FinalChainLock& chainlock,
     const PreparedChainLockContextPtr& context,
-    ChainLockPersistenceError* error)
+    ChainLockPersistenceError* error,
+    RecoveryUniverseCapsulePtr recovery_universe)
 {
     LOCK(m_impl->mutex);
-    return m_impl->PersistUnsealedBTCC(chainlock, context, error);
+    return m_impl->PersistUnsealedBTCC(
+        chainlock, context, error, std::move(recovery_universe));
 }
 
 bool PQChainLockPersistence::PersistVerifiedAuthorizationBase(
     const FinalChainLock& chainlock,
     const PreparedChainLockContextPtr& context,
-    ChainLockPersistenceError* error)
+    ChainLockPersistenceError* error,
+    RecoveryUniverseCapsulePtr recovery_universe)
 {
     LOCK(m_impl->mutex);
     return m_impl->PersistVerifiedAuthorizationBase(
-        chainlock, context, error);
+        chainlock, context, error, std::move(recovery_universe));
 }
 
 bool PQChainLockPersistence::PersistAuthorizedUnsealedBTCC(
     const FinalChainLock& chainlock,
     const PreparedChainLockContextPtr& context,
     const ReceiptArchiveRosterAuthorization& expected_authorization,
-    ChainLockPersistenceError* error)
+    ChainLockPersistenceError* error,
+    RecoveryUniverseCapsulePtr recovery_universe)
 {
     LOCK(m_impl->mutex);
     return m_impl->PersistAuthorizedUnsealedBTCC(
-        chainlock, context, expected_authorization, error);
+        chainlock, context, expected_authorization, error,
+        std::move(recovery_universe));
 }
 
 bool PQChainLockPersistence::PersistCatchupBest(
@@ -3252,7 +3730,8 @@ bool PQChainLockPersistence::PersistCatchupBest(
     const ReceiptArchiveRosterAuthorization*
         consume_receipt_archive_authorization,
     std::optional<PaymentAuditSealContextCapsule>
-        payment_audit_seal_context)
+        payment_audit_seal_context,
+    RecoveryUniverseCapsulePtr recovery_universe)
 {
     LOCK(m_impl->mutex);
     return m_impl->PersistBest(
@@ -3261,7 +3740,9 @@ bool PQChainLockPersistence::PersistCatchupBest(
         /*catchup=*/true,
         btcc_cursor_reconciliation,
         /*consume_recovery_precommit=*/false,
-        consume_receipt_archive_authorization);
+        consume_receipt_archive_authorization,
+        /*verified_reset_convergence=*/false,
+        std::move(recovery_universe));
 }
 
 bool PQChainLockPersistence::PersistInitializedBest(
@@ -3270,7 +3751,8 @@ bool PQChainLockPersistence::PersistInitializedBest(
     ChainLockPersistenceError* error,
     const VerifiedRecoveryResetPersistenceCapability* verified_reset,
     std::optional<PaymentAuditSealContextCapsule>
-        payment_audit_seal_context)
+        payment_audit_seal_context,
+    RecoveryUniverseCapsulePtr recovery_universe)
 {
     const bool verified_reset_convergence{
         verified_reset != nullptr &&
@@ -3292,7 +3774,7 @@ bool PQChainLockPersistence::PersistInitializedBest(
         std::move(payment_audit_seal_context),
         /*catchup=*/false, std::nullopt,
         /*consume_recovery_precommit=*/true, nullptr,
-        verified_reset_convergence);
+        verified_reset_convergence, std::move(recovery_universe));
 }
 
 bool PQChainLockPersistence::PersistRecoveryCatchupBest(
@@ -3305,7 +3787,8 @@ bool PQChainLockPersistence::PersistRecoveryCatchupBest(
         consume_receipt_archive_authorization,
     const VerifiedRecoveryResetPersistenceCapability* verified_reset,
     std::optional<PaymentAuditSealContextCapsule>
-        payment_audit_seal_context)
+        payment_audit_seal_context,
+    RecoveryUniverseCapsulePtr recovery_universe)
 {
     const bool verified_reset_convergence{
         verified_reset != nullptr && verified_reset->Authorizes(
@@ -3324,7 +3807,7 @@ bool PQChainLockPersistence::PersistRecoveryCatchupBest(
         btcc_cursor_reconciliation,
         /*consume_recovery_precommit=*/false,
         consume_receipt_archive_authorization,
-        verified_reset_convergence);
+        verified_reset_convergence, std::move(recovery_universe));
 }
 
 bool PQChainLockPersistence::PersistRosterRecoveryPrecommit(

@@ -9,6 +9,7 @@
 #include <llmq/pq_chainlock_verify.h>
 #include <llmq/pq_chainlock_store.h>
 #include <llmq/pq_payment_audit.h>
+#include <llmq/pq_quorum_builder.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -37,6 +38,11 @@ inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_ROSTER_RECOVERY_PRECOMMIT_KEY{
 inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_RECEIPT_ARCHIVE_AUTHORIZATION_KEY{10};
 inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_PAYMENT_AUDIT_SEAL_CONTEXT_KEY{12};
 inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_AUTHORIZATION_BASE_KEY{13};
+inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_RECOVERY_UNIVERSE_KEY{14};
+
+/** One capsule for every independently bounded durable finality owner. */
+inline constexpr std::size_t RECOVERY_UNIVERSE_DURABLE_OWNER_CAPACITY{
+    VERIFIED_AUTHORIZATION_BASE_CAPACITY + 5};
 
 inline constexpr uint16_t ROSTER_RECOVERY_PRECOMMIT_VERSION{1};
 
@@ -374,6 +380,9 @@ public:
     LoadRosterRecoveryPrecommit() const;
     [[nodiscard]] std::optional<PaymentAuditSealContextCapsule>
     LoadPaymentAuditSealContext() const;
+    /** O(1) authenticated local-persistence lookup for roster construction. */
+    [[nodiscard]] RecoveryUniverseCapsulePtr LoadRecoveryUniverse(
+        const uint256& source_id) const;
 
     /**
      * Synchronously replace the durable winner. An identical write is
@@ -384,7 +393,8 @@ public:
         const PreparedChainLockContextPtr& context,
         ChainLockPersistenceError* error = nullptr,
         std::optional<PaymentAuditSealContextCapsule>
-            payment_audit_seal_context = std::nullopt);
+            payment_audit_seal_context = std::nullopt,
+        RecoveryUniverseCapsulePtr recovery_universe = nullptr);
 
     /**
      * Atomically advance a normally verified durable winner and retire the
@@ -397,7 +407,8 @@ public:
         const ReceiptArchiveRosterAuthorization& expected_authorization,
         ChainLockPersistenceError* error = nullptr,
         std::optional<PaymentAuditSealContextCapsule>
-            payment_audit_seal_context = std::nullopt);
+            payment_audit_seal_context = std::nullopt,
+        RecoveryUniverseCapsulePtr recovery_universe = nullptr);
 
     /**
      * Retain a fully verified stale exact-slot KEEP or ADVANCE needed by an
@@ -406,7 +417,8 @@ public:
     [[nodiscard]] bool PersistUnsealedBTCC(
         const FinalChainLock& chainlock,
         const PreparedChainLockContextPtr& context,
-        ChainLockPersistenceError* error = nullptr);
+        ChainLockPersistenceError* error = nullptr,
+        RecoveryUniverseCapsulePtr recovery_universe = nullptr);
 
     /**
      * Durably retain one certificate only after full network authorization
@@ -416,7 +428,8 @@ public:
     [[nodiscard]] bool PersistVerifiedAuthorizationBase(
         const FinalChainLock& chainlock,
         const PreparedChainLockContextPtr& context,
-        ChainLockPersistenceError* error = nullptr);
+        ChainLockPersistenceError* error = nullptr,
+        RecoveryUniverseCapsulePtr recovery_universe = nullptr);
 
     /**
      * Atomically install the exact verified receipt archive and consume its
@@ -427,7 +440,8 @@ public:
         const FinalChainLock& chainlock,
         const PreparedChainLockContextPtr& context,
         const ReceiptArchiveRosterAuthorization& expected_authorization,
-        ChainLockPersistenceError* error = nullptr);
+        ChainLockPersistenceError* error = nullptr,
+        RecoveryUniverseCapsulePtr recovery_universe = nullptr);
 
     /** Atomically advance the winner and highest catch-up audit marker. */
     [[nodiscard]] bool PersistCatchupBest(
@@ -439,7 +453,8 @@ public:
         const ReceiptArchiveRosterAuthorization*
             consume_receipt_archive_authorization = nullptr,
         std::optional<PaymentAuditSealContextCapsule>
-            payment_audit_seal_context = std::nullopt);
+            payment_audit_seal_context = std::nullopt,
+        RecoveryUniverseCapsulePtr recovery_universe = nullptr);
 
     /**
      * Atomically install a verified first INITIALIZE winner, consuming a
@@ -454,7 +469,8 @@ public:
         const VerifiedRecoveryResetPersistenceCapability*
             verified_reset = nullptr,
         std::optional<PaymentAuditSealContextCapsule>
-            payment_audit_seal_context = std::nullopt);
+            payment_audit_seal_context = std::nullopt,
+        RecoveryUniverseCapsulePtr recovery_universe = nullptr);
 
     /**
      * Atomically install a verified RECOVER winner, consuming a matching
@@ -473,7 +489,8 @@ public:
         const VerifiedRecoveryResetPersistenceCapability*
             verified_reset = nullptr,
         std::optional<PaymentAuditSealContextCapsule>
-            payment_audit_seal_context = std::nullopt);
+            payment_audit_seal_context = std::nullopt,
+        RecoveryUniverseCapsulePtr recovery_universe = nullptr);
 
     /** Stage PENDING first; only its exact durable record may become READY. */
     [[nodiscard]] bool PersistRosterRecoveryPrecommit(
