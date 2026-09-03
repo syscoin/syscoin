@@ -36,6 +36,7 @@
 
 #include <tinyformat.h>
 
+#include <algorithm> // SYSCOIN: synthetic recovery-universe fixture.
 #include <array> // SYSCOIN: synthetic PQ activation fixtures.
 #include <cstdint> // SYSCOIN: synthetic recovery-authority fixture.
 #include <vector>
@@ -69,6 +70,59 @@ void AssertMainLockHeldForTest() NO_THREAD_SAFETY_ANALYSIS
 {
     AssertLockHeld(::cs_main);
 }
+
+// SYSCOIN BEGIN: Durable recovery-universe fixture.
+uint256 RecoveryFixtureHash(uint64_t value)
+{
+    uint256 hash;
+    for (std::size_t byte{0}; byte < sizeof(value); ++byte) {
+        hash.begin()[byte] = static_cast<uint8_t>(value >> (8 * byte));
+    }
+    if (hash.IsNull()) hash.begin()[0] = 1;
+    return hash;
+}
+
+llmq::pq::RecoveryUniverseCapsulePtr MakeRecoveryUniverseFixture(
+    const uint256& genesis_hash,
+    const llmq::pq::RecoveryRosterAuthoritySource& source,
+    const CBlockIndex& source_snapshot)
+{
+    std::vector<llmq::pq::RecoveryUniverseMember> members;
+    members.reserve(llmq::pq::QUORUM_SIZE);
+    for (std::size_t index{0}; index < llmq::pq::QUORUM_SIZE; ++index) {
+        members.push_back(llmq::pq::RecoveryUniverseMember{
+            RecoveryFixtureHash(1 + index),
+            RecoveryFixtureHash(1'000 + index),
+            COutPoint{RecoveryFixtureHash(2'000 + index),
+                      static_cast<uint32_t>(index)}});
+    }
+    std::sort(members.begin(), members.end(),
+              [](const auto& left, const auto& right) {
+                  return left.pro_tx_hash < right.pro_tx_hash;
+              });
+    const uint256 source_id{
+        llmq::pq::GetRecoveryUniverseSourceId(genesis_hash, source)};
+    const uint256 members_hash{
+        llmq::pq::GetRecoveryUniverseMembersHash(genesis_hash, members)};
+    const uint256 capsule_id{llmq::pq::GetRecoveryUniverseCapsuleId(
+        genesis_hash, source, source_snapshot.nHeight,
+        source_snapshot.GetBlockHash(), members_hash, members.size())};
+
+    DataStream stream{SER_DISK};
+    stream << llmq::pq::RECOVERY_UNIVERSE_CAPSULE_VERSION << genesis_hash
+           << source << source_snapshot.nHeight
+           << source_snapshot.GetBlockHash() << source_id
+           << static_cast<uint32_t>(members.size());
+    for (const auto& member : members) stream << member;
+    stream << members_hash << capsule_id;
+    const std::vector<uint8_t> encoded{
+        UCharCast(stream.data()), UCharCast(stream.data() + stream.size())};
+    const auto decoded{
+        llmq::pq::RecoveryUniverseCapsule::DecodeTrustedPersistence(encoded)};
+    if (!decoded) return nullptr;
+    return std::make_shared<const llmq::pq::RecoveryUniverseCapsule>(*decoded);
+}
+// SYSCOIN END: Durable recovery-universe fixture.
 
 } // namespace
 
@@ -2033,8 +2087,25 @@ BOOST_FIXTURE_TEST_CASE(
                 consensus.hashGenesisBlock, config->chainlock_schedule,
                 winner.statement)};
         BOOST_REQUIRE(context);
+        const auto source_snapshot_height{
+            llmq::pq::RegistrationCutoffHeight(
+                config->chainlock_schedule,
+                winner.statement.roster_beacons.active
+                    .recovery_authority_source.normal_beacon.epoch,
+                consensus.nPQRosterSnapshotLag)};
+        BOOST_REQUIRE(source_snapshot_height);
+        const CBlockIndex* source_snapshot{
+            durable_target->GetAncestor(*source_snapshot_height)};
+        BOOST_REQUIRE(source_snapshot != nullptr);
+        const auto recovery_universe{MakeRecoveryUniverseFixture(
+            consensus.hashGenesisBlock,
+            winner.statement.roster_beacons.active.recovery_authority_source,
+            *source_snapshot)};
+        BOOST_REQUIRE(recovery_universe);
         BOOST_REQUIRE(persistence.PersistInitializedBest(
-            winner, context));
+            winner, context, /*error=*/nullptr, /*verified_reset=*/nullptr,
+            /*payment_audit_seal_context=*/std::nullopt,
+            recovery_universe));
     }
     {
         LOCK(::cs_main);
