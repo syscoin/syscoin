@@ -46,8 +46,9 @@ The design fixes the following decisions:
   ChainLock may keep the previous cursor (a null advance), so a missing bound
   candidate does not halt Syscoin finality.
 - A scheduled candidate can reach NEVM only through its fixed `H + 10`
-  on-chain receipt. Live admission verifies the receipt's exact `ADVANCE`
-  CLSIG; historical sync authenticates a recomputed compact receipt prefix
+  on-chain receipt. Live admission verifies the receipt's exact `KEEP` or
+  `ADVANCE` CLSIG; only `ADVANCE` forwards a new Bitcoin hash to NEVM.
+  Historical sync authenticates a recomputed compact receipt prefix
   with a release anchor and either current-window catch-up or the narrowly
   marker-bound prolonged-outage recovery below, instead of retaining every old
   multi-megabyte certificate.
@@ -558,6 +559,29 @@ The four active quorum slots at target height are the four fixed epochs selected
 by the consensus epoch function, not "the last four successful quorums." This
 property makes lifetime and leaf assignment deterministic.
 
+Recovery keeps the last authenticated normal delayed-beacon source fixed while
+ordinary finality is unavailable. That source fixes both the entropy and the
+pre-reveal deterministic-masternode identity universe. The universe contains
+only identities that were valid and already had an authenticated PQ global-key
+lineage in that exact source snapshot; a first-time registration
+after the delayed Bitcoin value is known cannot enter the outage. Each absolute
+recovery epoch then selects a fresh 400-member identity roster from that same
+universe with a domain-separated modifier that binds the epoch and source
+snapshot; child-root availability is deliberately excluded from selection and
+ordering.
+
+All recovery epochs in one four-roster group use the registration cutoff of the
+group's oldest epoch as a common key cutoff. A selected identity may register
+or repair its scheduled child root before that cutoff. The exact identity and
+root captured there are immutable for the attempt. State at the ChainLock
+target can only disable that slot when the identity is no longer valid or its
+root differs; it cannot replace, reorder, or backfill the slot. A later recovery
+group changes the absolute epochs and therefore selects fresh deterministic
+rosters from the same authenticated universe. Once a normal rotation succeeds,
+the recovery seeds drain from the four-slot window and a later normal source
+can replace the retained source. No materialized recovery-authority table or
+Bitcoin RPC is part of this construction.
+
 The quorum-context hash is:
 
 ```text
@@ -609,15 +633,15 @@ quorum or slot.
 
 `height` is eligible only when it is on the absolute five-block schedule. The
 signer waits `PQ_CL_SIGN_LAG` blocks and signs only a block locally valid through
-scripts and all consensus-special processing. For a durable predecessor `S`,
-the normal signable height is its first eligible successor while that height is
-current. If the round expires without a durable certificate, signing advances
-to the latest target `H` with active immediate scheduled predecessor
-`P = H - chainlock_period`; `S` remains the state and ancestry floor for the
-recovery statement.
+scripts and all consensus-special processing. Post-initialization signing also
+requires the branch-objective receipt mode described below. Fresh receipt
+progress permits the next normal target; stale progress pauses ordinary rounds
+and permits only the canonical phase-3 recovery target. The exact receipted
+certificate is the roster-state source, while the durable local winner remains
+the wire predecessor and ancestry floor.
 
 The canonical `PQChainLockShare`, including its member identity, outer
-depth-16 child-key proof, and scheduled signature, is exactly 1,831 bytes.
+depth-16 child-key proof, and scheduled signature, is exactly 2,614 bytes.
 
 ### 7.2 Final raw CLSIG
 
@@ -662,8 +686,8 @@ Authenticated-signature and complete wire sizes are:
 proof bytes per signer = 32 + 16 * 32 = 544
 authenticated signer   = 544 + 704 = 1,248 bytes
 3 * 267 * 1,248        = 999,648 bytes
-statement/mask/bitmaps/count = 1,860 bytes
-complete fixed wire    = 1,001,508 bytes
+statement/mask/bitmaps/count = 1,499 bytes
+complete fixed wire    = 1,001,147 bytes
 ```
 
 The fixed header and four 50-byte bitmaps keep the complete canonical encoding
@@ -720,11 +744,24 @@ verification.
 The threshold is the standard `2f+1` for `n=400`, `f=133`. Within a common
 roster, two 267-member sets intersect in at least 134 slots, which is greater
 than `f`; conflicting thresholds therefore require at least one non-Byzantine
-signer to equivocate under the `<1/3` assumption. Any two three-of-four quorum
-masks share at least two rosters, yielding at least 268 double-signing
-member/epoch slots. This is not a claim of 801 unique operators: active rosters
-may overlap, which is why the burn journal is keyed operator-wide and branch
-conflicts remain correlated.
+signer to equivocate when that selected roster contains at most 133 Byzantine
+members. Any two three-of-four quorum masks over the same four rosters share at
+least two rosters, yielding at least 268 double-signing member/epoch slots.
+This is not a claim of 801 unique operators: active rosters may overlap, which
+is why the burn journal is keyed operator-wide and branch conflicts remain
+correlated.
+
+That deterministic intersection proof does not extend across differently
+composed normal rotations or recovery views. Cross-view safety uses the same
+bounded-certificate-propagation model as the one-phase ChainLock protocol: a
+complete valid certificate must reach honest participants before they sign a
+later view on a conflicting branch, and every selected roster is assumed to
+contain at most 133 Byzantine members. A global population fraction below one
+third does not by itself deterministically imply that per-roster bound.
+Same-branch delayed certificates converge through the exact-base/current-state
+projection rule; fully asynchronous conflicting-branch safety would require a
+separate transferable view-lock or prepare/commit protocol and is not claimed
+here.
 
 ### 7.4 P2P availability
 
@@ -733,13 +770,13 @@ and to explicitly participating collectors. Any node may assemble the canonical
 final object after collecting sufficient valid shares; there is no elected or
 trusted aggregator.
 
-The live message does not repeat the 1,657-byte statement in every share. Its
+The live message does not repeat the 1,296-byte statement in every share. Its
 fixed 1,282-byte envelope contains the 32-byte logical statement ID, one
 `uint16` packing `quorumSlot * 400 + memberIndex`, and the 1,248-byte
 authenticated child signature. A recipient accepts the ID only when it names
 one of its at-most-two already-published immutable signing contexts, then
 reconstructs the complete signed transcript from that statement and its frozen
-roster. The self-contained 2,975-byte `ChainLockShare` remains the historical
+roster. The self-contained 2,614-byte `ChainLockShare` remains the historical
 form embedded in payment-audit evidence.
 
 All eligible child-key members across the four active rosters form one
@@ -767,36 +804,54 @@ mutate `nPoSePenalty`, `nPoSeBanHeight`, or `nPoSeRevivedHeight`.
 
 The final `CLSIG` is available to ordinary full nodes and through `GETCLSIG`.
 Durable CLSIG storage is exactly one best certificate plus at most one fully
-verified `ADVANCE` certificate that has not yet been sealed by a descendant
-BTCC receipt. The live store keeps the most recent eight certificates in RAM
-for bounded relay and exact lookup; it is not a historical signature archive.
+verified exact-slot `KEEP` or `ADVANCE` certificate awaiting its fixed BTCC
+carrier. The live store keeps the most recent eight certificates in RAM for
+bounded relay and exact lookup; it is not a historical signature archive.
+
 Normal `LIVE` admission requires the receiver's exact durable winner as the
-block-finality predecessor, including the exact accepted BTCC cursor, and
-requires the target to be the first eligible height after that predecessor.
-The signed roster-authorization base is a separate certificate identity. It
-normally names that winner, but a higher same-ancestry certificate may name an
-older fully verified retained base when dual derivation from the retained base
-and the receiver's current winner produces the same active roster bundle and a
-compatible next-beacon state. It also restores the
-released bounded-reorg rule: the target must be the latest signable height for
-the active tip, and the candidate and active chain must share the block at one
-signing lag before the target. With the fixed five-block cadence and lag, a
-target is 5--9 blocks behind the tip and the shared boundary is 10--14 blocks
-behind it. A withheld certificate expires when the next signing window opens.
-Collectors and their deterministic relay overlay follow the current signing
-window. If the immediate successor of the durable winner misses its window,
-nodes do not keep signing that expired height: they move to the latest target
-`H`, declare the active block at `H - chainlock_period` as wire predecessor `P`,
-and produce the unique `H = N(P)` recovery statement. The explicitly named
-certificate `S` remains the independently authenticated roster-state source,
-while the receiver's durable winner remains the ancestry, receipt-state, and
-cursor floor. `S` may be older than both that winner and `P`; the signed normal
-authorization transition is derived exactly from `S`, while a receiver with a
-newer winner independently projects its state to the same target and admits
-the rebase only if the two roster results converge. Schedule geometry is
-checked against `P`.
-This prevents multiple valid target heights in one declared-predecessor view
-without making a missed unsigned round permanent.
+block-finality predecessor, including the exact accepted BTCC cursor, and the
+target must be the first eligible height after that predecessor. The signed
+roster-authorization base is a separate certificate identity selected from
+the candidate branch's authenticated receipt state. The latest non-null
+carrier names the exact already-verified certificate whose roster state may
+authorize the next statement. A higher same-ancestry local winner remains the
+wire predecessor and the ancestry, receipt-state, and cursor floor; it cannot
+replace that objective authorization base. When the two differ, admission
+also projects from the current winner and requires the resulting active roster
+bundle and next-beacon state to converge.
+
+Every post-initialization target derives one mode from the latest receipted
+target on its own fully validated branch:
+
+- `NORMAL` when receipt progress is in the target epoch or its predecessor;
+- `RECOVER` only at the unique phase-3 recovery target when receipt progress
+  is more than one epoch stale; or
+- `PAUSE` at every other target, including while the first initialization
+  certificate has not yet been receipted.
+
+The modes are mutually exclusive and apply equally to local signing and peer
+verification. A candidate's signatures or claimed roster fields cannot select
+its mode or authorization base.
+
+At a `RECOVER` target, the latest receipted certificate supplies the exact
+normal pre-reveal source. That source fixes the entropy and identity snapshot;
+only source-snapshot identities with an already established authenticated PQ
+global-key lineage participate. The absolute epochs of the new four-roster group
+domain-separate fresh roster selections. Root availability never affects
+selection or ordering. The oldest
+epoch's registration cutoff freezes each selected identity's child root, and
+target state may only disable a fixed entry, never replace or backfill it. The
+recovery statement must retain the receipted Bitcoin cursor with `KEEP`.
+
+A verified recovery certificate remains non-objective until its exact
+non-null `KEEP` receipt is carried at `H+10`. Before that receipt, all other
+targets remain paused, so a hidden certificate cannot privately switch the
+roster state or trigger a competing normal rotation. Once receipted, normal
+signing resumes and ordinary rotations drain the recovery rosters. If an
+attempt never reaches threshold, the next phase-3 group selects four fresh
+absolute-epoch rosters from the same authenticated source. Recovery therefore
+needs neither Bitcoin RPC on full nodes nor approval from the failed active
+rosters.
 Before the first winner, the only admissible target is the first eligible
 target after `A-1`, which configuration also requires to be the canonical
 phase-3 BTCC target. Its predecessor hash is obtained from the fully validated
@@ -831,7 +886,7 @@ An older authorization base is evidence, not authority by itself. The receiver
 must possess the exact fully verified base certificate and derive both the
 wire transition from that base and the canonical transition from its current
 winner. Both derivations must authorize the selected quorum mask and produce
-the identical active roster bundle, including recovery authority. The
+the identical active roster bundle, including the recovery source. The
 next-beacon states must also match, except that current `CATCHUP` may remove one
 provisional `PENDING`/`READY` observation only through the existing
 candidate-bound null-carrier reconciliation proof. A carried cursor, a
@@ -840,9 +895,10 @@ different recovery source, or an unrelated future-beacon result never rebases.
 An uncovered crash-durable BTCC pre-seal marker adds only two
 prolonged-outage admissions outside that ordinary current window:
 
-- the exact terminal receipt's `ADVANCE` certificate, whose target is
-  `T = terminalCarrier - 10`; below the durable winner it is stored only as the
-  receipt archive, while above that winner it follows catch-up acceptance; or
+- the exact terminal receipt's `KEEP` or `ADVANCE` certificate, whose target
+  is `T = terminalCarrier - 10`; below the durable winner it is stored only as
+  the receipt archive, while above that winner it follows catch-up acceptance;
+  or
 - a certificate whose target is on the active branch at or above the terminal
   carrier and descends through every uncovered durable marker whose terminal
   lies on that active branch.
@@ -853,13 +909,13 @@ certificate, waive a signature, or turn a losing branch into the active one.
 Truncated or incomplete marker records lack the terminal dependency and fail
 closed rather than being upgraded by inference.
 
-Ordinary current catch-up first derives the unique normal roster transition
-from the exact durable authorization predecessor `S`; it never treats the
-candidate's own roster statement as an authorization edge. Historical paths
-with an independently durable covering receipt use their exact authenticated
-boundary. Each path then rebuilds the four exact rosters from the candidate
-branch and verifies all 801 signatures under the single bounded verifier. An
-unselected unauthorized
+Ordinary current catch-up derives the unique normal roster transition from the
+exact receipt-selected authorization predecessor `S`; objective recovery
+derives the canonical target-epoch recovery view from that same independently
+authenticated boundary. Neither path treats the candidate's own roster
+statement as an authorization edge. Each path then rebuilds the four exact rosters from the
+candidate branch and verifies all 801 signatures under the single bounded
+verifier. An unselected unauthorized
 newest descriptor may have a snapshot above that predecessor, but it remains
 fully structure-, root-, and context-bound and its slot cannot contribute a
 share or final signature. Only then may admission read retained carrier bodies
@@ -907,17 +963,18 @@ and cannot cross its active target, invalidate that target's side-branch
 ancestry, or cross the active fork of a validated winner whose enforcement was
 interrupted by a crash.
 
-This is intentionally a current-quorum bootstrap, not a portable proof that
-every historical quorum transition produced a certificate. Its security claim
-is the intersection of a fully validated branch inside the current bounded
-fork window and a valid three-of-four certificate from the rosters
-deterministically derived at the catch-up target. The exception is additionally bound to the exact durable
-carrier range that caused execution to pause. It does not retroactively recover
-historical ChainLock transition security. Recovery still requires an honest
-peer to serve either the exact terminal certificate or a valid active-branch
-certificate covering the terminal carrier; the marker is not a substitute for
-those 801 signatures. The separate release-pinned receipt anchor bounds this
-relaxation and is mandatory whenever BTCC receipts are enabled.
+Historical catch-up is not a portable proof that every omitted quorum
+transition produced a certificate. Its security claim is the intersection of
+a fully validated branch inside the current bounded fork window, the exact
+receipt-selected authorization boundary, and a valid three-of-four
+certificate from the deterministically derived target rosters. A preseal
+exception is additionally bound to the exact durable carrier range that caused
+execution to pause. It does not retroactively recover historical ChainLock
+transition security. Catch-up still requires an honest peer to serve either
+the exact terminal certificate or a valid active-branch certificate covering
+the terminal carrier; the marker is not a substitute for those 801
+signatures. The separate release-pinned receipt anchor bounds this relaxation
+and is mandatory whenever BTCC receipts are enabled.
 
 Restart restoration from the node's own checksummed, fsynced latest-winner
 database remains separate from network catch-up. It revalidates the target
@@ -927,7 +984,7 @@ certificate record, so a crash cannot publish a winner whose branch metadata
 was never made durable. After restoration or catch-up, exact `LIVE`
 predecessor chaining resumes.
 
-The exact 1,000,364-byte certificate every five blocks is a material bandwidth
+The exact 1,001,147-byte certificate every five blocks is a material bandwidth
 and verification cost. It must be benchmarked under adversarial load. Its size
 being below a protocol cap is not evidence of production viability.
 
@@ -1190,20 +1247,25 @@ BTCCReceipt {                      // 138 bytes
 ```
 
 The default body is the exact null receipt. A non-null body is valid only when
-it names the `ADVANCE` certificate for `H = C - 10`, its target is that branch's
-ancestor, and its accepted cursor names the same source block and persisted
-`btcpPrevCommitment`. Scheduled BTCPREV heights require AuxPoW; a direct-mined
-block cannot omit the parent binding. `KEEP`, a missing certificate at its one
-carrier slot, or a backend outage therefore produces a null receipt and leaves
-the previously accepted NEVM Bitcoin checkpoint unchanged.
+it names the exact certificate for `H = C - 10` and its target is that branch's
+ancestor. An `ADVANCE` certificate must accept the cursor at `H`; a `KEEP`
+certificate must retain the exact cursor in the carrier parent's receipt
+state. In either case that cursor's Syscoin ancestor and persisted
+`btcpPrevCommitment` are checked. Scheduled BTCPREV heights require AuxPoW; a
+direct-mined block cannot omit the parent binding. A missing certificate at
+its one carrier slot or an unauthenticated backend result produces a null
+receipt. A non-null `KEEP` authenticates finality progress but remains a
+zero/no-op toward NEVM, so an already-applied Bitcoin checkpoint is not sent
+again.
 
 An off-chain winner may temporarily carry an accepted Bitcoin cursor that is
 newer than the indexed receipt cursor. Before that cursor's fixed carrier, the
 next signing round keeps using the durable cursor; a descendant tip cannot be
 used as premature evidence. At or after the carrier, the ChainLock target's own
-ancestry makes the outcome objective. A non-null carrier advances the indexed
-cursor normally. A canonical null carrier instead makes current-window signers
-resume from the indexed cursor. A node whose durable winner is still ahead may
+ancestry makes the outcome objective. Every non-null carrier advances the
+authenticated receipt prefix; only `ADVANCE` changes its Bitcoin cursor, while
+`KEEP` retains it. A canonical null carrier instead leaves the whole receipt
+state unchanged. A node whose durable winner is still ahead may
 accept that reconciliation only after reconstructing the exact null carrier
 from fully validated block-index provenance and binding the resulting proof to
 the candidate, store recheck, and certificate fsync. This also covers a node
@@ -1224,16 +1286,18 @@ Each carrier updates a branch-local state:
 BTCCReceiptState {
     BTCCursor cursor;
     uint256   cumulativeHash;
+    int32     latestChainLockTargetHeight;
+    int32     latestReceiptCarrierHeight;
 }
 ```
 
 The hash commits the prior state, carrier height/hash, and exact receipt. Every
 ChainLock statement signs the indexed state at its target. Once a fully
 verified descendant ChainLock covers the carrier, that threshold statement
-seals the ordered prefix. A non-null outcome makes the original 1,000,364-byte
+seals the ordered prefix. A non-null outcome makes the original 1,001,147-byte
 receipt certificate prunable; a canonical null outcome objectively retires the
 unreceipted cursor. Until the carrier outcome is covered, a locally accepted
-exact `ADVANCE` remains durably retained and servable. The block index retains
+exact `KEEP` or `ADVANCE` remains durably retained and servable. The block index retains
 each carrier's exact receipt logical ID beside the cumulative cursor/state,
 allowing the receipt bytes to be
 reconstructed and checked against that accumulator after the block body is
@@ -1328,7 +1392,7 @@ replacement for those random-access roster snapshots.
 After base IBD, recovery follows Section 7.4. Ordinary catch-up is limited to
 the current latest signable target on the active branch or a competing branch
 that shares its `H - sign_lag` boundary. An older uncovered
-marker can instead be authenticated only by its exact terminal `ADVANCE` at
+marker can instead be authenticated only by its exact terminal `KEEP` or `ADVANCE` at
 `T = C - 10`, or by a fully valid active-branch certificate at or above `C`
 that descends through the terminal carrier. For the covering form, the node
 recomputes the retained receipt range from the marker's recorded predecessor
@@ -1390,7 +1454,7 @@ only for the exact epoch, row, frozen descriptor, member slot, ordinary
 ChainLock statement, and child-key proof.
 
 Authenticated roster peers reconcile each open row with a fixed 125-byte
-`PQPOSEHAVE` bitmap and 1,870-byte `PQPOSERESP` objects. A response is written
+`PQPOSEHAVE` bitmap and 2,653-byte `PQPOSERESP` objects. A response is written
 to the staging WAL before relay. At the deadline the store issues a real fsync
 barrier, replaces raw shares with a checksummed local 400-bit summary, and
 refuses later mutation. At most two raw rows are open and 24 summaries are
@@ -1422,9 +1486,9 @@ previous payment-state root.
 Observation is deliberately not a common bitmap: every one of the 801 audit
 signers carries its own frozen 400-bit report. This avoids fragmenting the
 one-time audit slot when honest signers observed slightly different response
-sets. Each audit share is 2,230 bytes. Each final report witness is exactly
+sets. Each audit share is 3,013 bytes. Each final report witness is exactly
 1,298 bytes: one 50-byte report bitmap plus one 1,248-byte authenticated child
-signature. The final `PQPOSECERT` is 1,040,763 bytes: exactly 267
+signature. The final `PQPOSECERT` is 1,041,546 bytes: exactly 267
 reporter/signature witnesses from each of three selected active rosters,
 announced and requested by exact witness ID.
 
@@ -1494,7 +1558,7 @@ defers only the dependent branch. Store or database corruption is a local error
 and is never converted into peer misbehavior or permanent block invalidity.
 
 Historical IBD and marker-bound replay do not require an already pruned
-1,040,763-byte certificate. If the full witness is absent, the node rederives
+1,041,546-byte certificate. If the full witness is absent, the node rederives
 the subject roster from the historical snapshot, applies the committed
 `online_members` bitmap, and requires both
 the resulting probation root and cumulative receipt state to match the block
@@ -1541,7 +1605,7 @@ fsync cannot clear the obligation or expose provisional state as authenticated.
 
 Consequently, a fresh node replays the on-chain receipt chain, obtains one
 later covering CLSIG through the ordinary P2P path, and discards covered audit
-certificates; it does not download or retain a permanent 1,040,763-byte-per-epoch
+certificates; it does not download or retain a permanent 1,041,546-byte-per-epoch
 audit archive. Full certificates are stored and served only while live or not
 yet covered. Null or inconclusive audits remain fail-open no-ops for new misses.
 
@@ -1864,7 +1928,7 @@ Expected failures are fail-closed:
 | Null K+10 BTCC receipt for a payment-audit anchor | Produce no audit for that epoch; never substitute K's retained certificate or the prior cursor |
 | Missing historical BTCC receipt certificate during IBD | Fsync the earliest/terminal pre-seal and required snapshots, retain replay data, continue base Syscoin sync, and pause signing/Geth from the earliest carrier |
 | Prolonged-outage recovery certificate absent or withheld | Keep requesting the exact terminal logical ID or a valid covering active-branch CLSIG; the marker alone grants no recovery, so signing/Geth remain paused while base sync continues |
-| Old, off-branch, below-terminal, or wrong terminal certificate | Reject; a marker authorizes only exact terminal `ADVANCE` at `T=C-10` or an active-branch certificate covering its terminal carrier |
+| Old, off-branch, below-terminal, or wrong terminal certificate | Reject; a marker authorizes only its exact terminal `KEEP`/`ADVANCE` at `T=C-10` or an active-branch certificate covering its terminal carrier |
 | Marker revision/branch changes across historical verification or fsync | Abort publication and rebuild; never persist a winner under a stale marker token |
 | Replay marker survives a prolonged outage | Keep the lower-only block floor and retained DMN/PQ branch snapshots; accept unbounded disk growth and synchronous DMN write latency until recovery |
 | Geth unavailable or reports the wrong applied hash | Keep the replay marker and skip paired execution notifications; never substitute a null checkpoint, while base Syscoin may continue |
@@ -1896,8 +1960,8 @@ Expected failures are fail-closed:
 - Golden bytes for global registration, rotation, child commitments/proofs,
   MNAUTH, quorum descriptors, share transcripts, and final CLSIG.
 - Exact size tests for the 704-byte child signature, 1,248-byte authenticated
-  signer, 1,282-byte live share envelope, 2,975-byte self-contained share, and
-  1,001,508-byte final CLSIG; reject
+  signer, 1,282-byte live share envelope, 2,614-byte self-contained share, and
+  1,001,147-byte final CLSIG; reject
   one-byte-over, truncated, and length-confusion encodings.
 - Bitmap tests for 266/267/268 bits, including non-byte-aligned residual bits,
   duplicate/reordered slots, selected masks with 2/3/4 bits, and non-zero
@@ -1958,7 +2022,7 @@ Expected failures are fail-closed:
 
 - Default CI P2P coverage must negotiate protocol 70018, enforce authenticated
   share admission, exercise CLSIG inventory/request tracking, and decode an
-  exact 1,000,364-byte certificate with 801 authenticated signature slots
+  exact 1,001,147-byte certificate with 801 authenticated signature slots
   without changing the 400/267/3-of-4 consensus geometry.
 - Exactly 267 valid signatures in each of any three active quorums.
 - Parallel verification produces identical results at every thread count.
@@ -1993,7 +2057,7 @@ Expected failures are fail-closed:
   to only one store, then deliver a valid height-`H+5` statement based on `S`
   to both. The store that retained `H` must dual-derive the same active roster
   bundle, preserve every durable side-state floor, and converge on `H+5`.
-  Reject a missing exact base, a divergent active/recovery authority, an
+  Reject a missing exact base, a divergent active/recovery source, an
   unrelated next-beacon mutation, and provisional-observation rollback without
   the exact candidate-bound reconciliation proof.
 - Verification queue, per-peer bytes, duplicate flood, and cancellation DoS
@@ -2002,7 +2066,7 @@ Expected failures are fail-closed:
   with 801 valid signatures and adversarial invalid bundles.
 - `pq_chainlock_integration_tests` deterministically constructs all four
   400-member rosters and completes production collector/verifier acceptance
-  with 801 real scheduled-WOTS+ signatures and the exact 1,001,508-byte wire
+  with 801 real scheduled-WOTS+ signatures and the exact 1,001,147-byte wire
   object.
   `feature_pq_chainlocks.py` separately loads a checksummed, exact-branch
   regtest roster fixture, forwards real shares between authenticated peers,
@@ -2057,8 +2121,8 @@ Expected failures are fail-closed:
 - Exactly 267 audit signatures in each of exactly three active rosters, with
   one common base statement, 801 signer-bound report bitmaps, exact 134-of-267
   per-roster classification, and no common-bitmap convergence requirement.
-- Exact 1,870-byte response, 2,230-byte share, 1,298-byte report witness, and
-  1,040,763-byte final audit bounds; exact-witness-ID
+- Exact 2,653-byte response, 3,013-byte share, 1,298-byte report witness, and
+  1,041,546-byte final audit bounds; exact-witness-ID
   requested retrieval, at most four live unapplied witness candidates (one per
   three-of-four reporter mask), one-large-object-per-pass upload accounting,
   timeout, and wrong-ID handling.
@@ -2118,7 +2182,7 @@ Expected failures are fail-closed:
   the earliest carrier/predecessor state, terminal carrier/exact receipt, and
   increasing revision. A later missing receipt advances only the terminal;
   malformed, truncated, or incomplete state fails closed.
-- The marker admits the exact terminal `ADVANCE` at `T=C-10` as archive below
+- The marker admits the exact terminal `KEEP` or `ADVANCE` at `T=C-10` as archive below
   the durable winner or catch-up above it, and admits a later certificate only
   when its active-branch target is at/above and descends through every uncovered
   marker terminal on that branch. Wrong logical ID/receipt, arbitrary old,
@@ -2232,7 +2296,7 @@ The following must be resolved in code and release artifacts before activation:
   compact-replay, active/prospective pre-seal, covering-CLSIG checkpoint, and
   atomic pruning lifecycle, including proof that normal multi-year operation
   retains only a live/uncovered certificate suffix rather than accumulating
-  1,040,763 bytes every epoch;
+  1,041,546 bytes every epoch;
 - operational sizing, alerts, and recovery tests for synchronous replay-snapshot
   writes and the intentionally unbounded block/DMN/PQ retention during a
   prolonged certificate or Geth outage;
@@ -2283,7 +2347,7 @@ Activation remains disabled until the complete Section 14 matrix passes on all
 supported platforms, the payment-audit replay/checkpoint rules receive
 independent consensus/security review, the scheduled-WOTS+ construction
 receives independent cryptographic review, and the 801-signature/proof verifier
-and 1,000,364-byte relay path meet explicit resource targets. Shadow success
+and 1,001,147-byte relay path meet explicit resource targets. Shadow success
 alone is not cryptographic validation.
 
 ## 16. References and security caveat
