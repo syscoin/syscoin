@@ -198,9 +198,9 @@ struct PaymentAuditPresealState {
 inline constexpr uint16_t PAYMENT_AUDIT_SEAL_CONTEXT_VERSION{1};
 
 /**
- * Exact accepted seal context retained only across the bounded audit-carrier
- * window. Roster bytes are rebuilt from branch snapshots and the immutable
- * recovery source committed by the retained seal statement.
+ * Locator and retention lease for the exact accepted seal record across the
+ * bounded audit-carrier window. The record itself owns the immutable roster
+ * bytes; missing or mismatched record state is a local fail-closed error.
  */
 class PaymentAuditSealContextCapsule final {
 public:

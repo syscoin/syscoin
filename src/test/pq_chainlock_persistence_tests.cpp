@@ -481,6 +481,16 @@ struct RawDiskKey {
     SERIALIZE_METHODS(RawDiskKey, obj) { READWRITE(obj.type); }
 };
 
+struct RawAuthorizationBaseKey {
+    uint8_t type{PQ_CHAINLOCK_PERSISTENCE_AUTHORIZATION_BASE_KEY};
+    uint256 logical_id;
+
+    SERIALIZE_METHODS(RawAuthorizationBaseKey, obj)
+    {
+        READWRITE(obj.type, obj.logical_id);
+    }
+};
+
 struct RawDiskRecord {
     uint16_t version{1};
     uint256 schema_hash;
@@ -934,6 +944,14 @@ public:
         return m_persistence.PersistBest(
             chainlock, Context(chainlock), error, std::move(seal));
     }
+    [[nodiscard]] bool PersistBestWithContext(
+        const FinalChainLock& chainlock,
+        const PreparedChainLockContextPtr& context,
+        ChainLockPersistenceError* error = nullptr)
+    {
+        return m_persistence.PersistBest(
+            chainlock, context, error);
+    }
     [[nodiscard]] bool PersistBestCoveringReceiptArchive(
         const FinalChainLock& chainlock,
         const ReceiptArchiveRosterAuthorization& authorization,
@@ -942,6 +960,17 @@ public:
     {
         return m_persistence.PersistBestCoveringReceiptArchive(
             chainlock, Context(chainlock), authorization, error,
+            std::move(seal));
+    }
+    [[nodiscard]] bool PersistBestCoveringReceiptArchiveWithContext(
+        const FinalChainLock& chainlock,
+        const PreparedChainLockContextPtr& context,
+        const ReceiptArchiveRosterAuthorization& authorization,
+        ChainLockPersistenceError* error,
+        std::optional<PaymentAuditSealContextCapsule> seal)
+    {
+        return m_persistence.PersistBestCoveringReceiptArchive(
+            chainlock, context, authorization, error,
             std::move(seal));
     }
     [[nodiscard]] bool PersistUnsealedBTCC(
@@ -977,6 +1006,16 @@ public:
         return m_persistence.PersistCatchupBest(
             chainlock, Context(chainlock), error, reconciliation,
             authorization, std::move(seal));
+    }
+    [[nodiscard]] bool PersistCatchupBestWithContext(
+        const FinalChainLock& chainlock,
+        const PreparedChainLockContextPtr& context,
+        ChainLockPersistenceError* error,
+        std::optional<PaymentAuditSealContextCapsule> seal)
+    {
+        return m_persistence.PersistCatchupBest(
+            chainlock, context, error, std::nullopt,
+            /*authorization=*/nullptr, std::move(seal));
     }
     [[nodiscard]] bool PersistInitializedBest(
         const FinalChainLock& chainlock,
@@ -3812,6 +3851,9 @@ BOOST_AUTO_TEST_CASE(
                     config.chainlock_schedule.chainlock_period),
         230)};
     SetExactContinuation(first, genesis, initialized);
+    const auto first_context{MakeStatementBoundDurableContext(
+        genesis, config.chainlock_schedule, first)};
+    BOOST_REQUIRE(first_context);
     constexpr uint8_t all_rosters_mask{
         static_cast<uint8_t>((uint16_t{1} << ACTIVE_QUORUMS) - 1)};
     const auto first_capsule{
@@ -3831,6 +3873,9 @@ BOOST_AUTO_TEST_CASE(
                     config.chainlock_schedule.chainlock_period),
         231)};
     SetExactContinuation(second, genesis, first);
+    const auto second_context{MakeStatementBoundDurableContext(
+        genesis, config.chainlock_schedule, second)};
+    BOOST_REQUIRE(second_context);
     const auto second_capsule{
         PaymentAuditSealContextCapsuleTestAccess::Make(
             genesis, config, second_epoch, second, all_rosters_mask)};
@@ -3842,9 +3887,8 @@ BOOST_AUTO_TEST_CASE(
         ChainLockPersistenceError error{
             ChainLockPersistenceError::NONE};
         BOOST_REQUIRE(persistence.PersistInitializedBest(initialized));
-        const bool persisted{persistence.PersistCatchupBest(
-            first, &error, std::nullopt, nullptr,
-            first_capsule)};
+        const bool persisted{persistence.PersistCatchupBestWithContext(
+            first, first_context, &error, first_capsule)};
         BOOST_TEST_CONTEXT("persistence error " <<
                            static_cast<int>(error)) {
             BOOST_REQUIRE(persisted);
@@ -3858,7 +3902,8 @@ BOOST_AUTO_TEST_CASE(
 
         // Byte-identical replay is a no-op and cannot clear the still-live
         // capsule merely because the caller omitted its optional input.
-        BOOST_REQUIRE(persistence.PersistCatchupBest(first));
+        BOOST_REQUIRE(persistence.PersistBestWithContext(
+            first, first_context));
         BOOST_CHECK(*persistence.LoadPaymentAuditSealContext() ==
                     first_capsule);
     }
@@ -3869,16 +3914,66 @@ BOOST_AUTO_TEST_CASE(
         BOOST_CHECK(*persistence.LoadPaymentAuditSealContext() ==
                     first_capsule);
 
-        BOOST_REQUIRE(persistence.PersistBestCoveringReceiptArchive(
-            second, first_authorization, nullptr,
-            second_capsule));
+        BOOST_REQUIRE(
+            persistence.PersistBestCoveringReceiptArchiveWithContext(
+                second, second_context, first_authorization, nullptr,
+                second_capsule));
         BOOST_REQUIRE(persistence.LoadPaymentAuditSealContext());
         BOOST_CHECK(*persistence.LoadPaymentAuditSealContext() ==
                     second_capsule);
 
-        BOOST_REQUIRE(persistence.PersistBest(second));
+        BOOST_REQUIRE(persistence.PersistBestWithContext(
+            second, second_context));
         BOOST_CHECK(*persistence.LoadPaymentAuditSealContext() ==
                     second_capsule);
+    }
+
+    auto live_best{second};
+    {
+        PQChainLockPersistence persistence{DiskParams(path), genesis,
+                                           config};
+        for (std::size_t offset{1}; offset <= 2; ++offset) {
+            const int32_t height{
+                second.statement.height +
+                static_cast<int32_t>(offset) *
+                    static_cast<int32_t>(
+                        config.chainlock_schedule.chainlock_period)};
+            auto next{MakeChainLock(
+                height, live_best.statement.height,
+                live_best.statement.block_hash, 231 + offset)};
+            SetExactContinuation(next, genesis, live_best);
+            BOOST_REQUIRE(persistence.PersistBest(next));
+            live_best = std::move(next);
+        }
+
+        const int32_t churn_height{
+            live_best.statement.height +
+            static_cast<int32_t>(
+                config.chainlock_schedule.chainlock_period)};
+        for (std::size_t index{0};
+             index <= VERIFIED_AUTHORIZATION_BASE_CAPACITY + 8;
+             ++index) {
+            auto retained{MakeChainLock(
+                churn_height, live_best.statement.height,
+                live_best.statement.block_hash, 900'000 + index)};
+            BOOST_REQUIRE(
+                persistence.PersistVerifiedAuthorizationBase(retained));
+        }
+        const auto retained_seal{persistence.LoadAuthorizationBase(
+            second.GetLogicalId(genesis))};
+        BOOST_REQUIRE(retained_seal);
+        BOOST_CHECK(retained_seal->ChainLock() == second);
+        BOOST_CHECK_EQUAL(
+            persistence.LoadAuthorizationBases().size(),
+            VERIFIED_AUTHORIZATION_BASE_CAPACITY);
+    }
+    {
+        PQChainLockPersistence persistence{DiskParams(path), genesis,
+                                           config};
+        const auto retained_seal{persistence.LoadAuthorizationBase(
+            second.GetLogicalId(genesis))};
+        BOOST_REQUIRE(retained_seal);
+        BOOST_CHECK(retained_seal->ChainLock() == second);
     }
 
     RawPaymentAuditSealContextV1 stale_capsule;
@@ -3893,22 +3988,45 @@ BOOST_AUTO_TEST_CASE(
     {
         PQChainLockPersistence persistence{DiskParams(path), genesis,
                                            config};
-        auto after_window{MakeChainLock(
-            second_schedule->carrier_end_height_exclusive,
-            second_schedule->carrier_end_height_exclusive -
-                config.chainlock_schedule.chainlock_period,
-            NonNullHash(
-                second_schedule->carrier_end_height_exclusive -
-                config.chainlock_schedule.chainlock_period),
-            232)};
-        SetExactContinuation(after_window, genesis, second);
-        BOOST_REQUIRE(persistence.PersistBest(after_window));
+        PaymentAuditPresealState pending;
+        pending.active = MakePaymentAuditPresealMarker(
+            config, second_epoch, /*revision=*/1, /*salt=*/232);
+        pending.active->terminal_receipt.seal_block_hash =
+            second.statement.block_hash;
+        BOOST_REQUIRE(pending.IsStructurallyValid());
+        BOOST_REQUIRE(
+            persistence.PersistPaymentAuditPresealState(pending));
+        std::size_t advance{0};
+        while (live_best.statement.height <
+               second_schedule->carrier_end_height_exclusive) {
+            const auto next_height{NextEligibleChainLockTargetHeight(
+                config.chainlock_schedule,
+                live_best.statement.height)};
+            BOOST_REQUIRE(next_height);
+            BOOST_REQUIRE_LE(
+                *next_height,
+                second_schedule->carrier_end_height_exclusive);
+            auto next{MakeChainLock(
+                *next_height, live_best.statement.height,
+                live_best.statement.block_hash, 910'000 + advance++)};
+            SetExactContinuation(next, genesis, live_best);
+            BOOST_REQUIRE(persistence.PersistBest(next));
+            live_best = std::move(next);
+        }
+        BOOST_CHECK_EQUAL(
+            live_best.statement.height,
+            second_schedule->carrier_end_height_exclusive);
         BOOST_CHECK(!persistence.LoadPaymentAuditSealContext());
+        BOOST_CHECK(persistence.LoadPaymentAuditPresealState() ==
+                    pending);
+        BOOST_CHECK(!persistence.LoadAuthorizationBase(
+            second.GetLogicalId(genesis)));
     }
     {
         PQChainLockPersistence persistence{DiskParams(path), genesis,
                                            config};
         BOOST_CHECK(!persistence.LoadPaymentAuditSealContext());
+        BOOST_CHECK(!persistence.LoadPaymentAuditPresealState().IsEmpty());
     }
     {
         CDBWrapper raw{DiskParams(path)};
@@ -3920,6 +4038,102 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_THROW(
         PQChainLockPersistence(DiskParams(path), genesis, config),
         std::runtime_error);
+}
+
+BOOST_AUTO_TEST_CASE(payment_audit_seal_capsule_requires_exact_roster_record)
+{
+    enum class Mutation : uint8_t { MISSING, WRONG_ROSTERS };
+    const std::array mutations{Mutation::MISSING,
+                               Mutation::WRONG_ROSTERS};
+    const auto config{MakePaymentAuditConfig()};
+    const PaymentAuditScheduleConfig schedule_config{
+        config.chainlock_schedule, config.btcc_schedule};
+    constexpr uint32_t epoch{3};
+    const auto schedule{
+        BuildPaymentAuditEpochSchedule(schedule_config, epoch)};
+    BOOST_REQUIRE(schedule);
+    constexpr uint8_t all_rosters_mask{
+        static_cast<uint8_t>((uint16_t{1} << ACTIVE_QUORUMS) - 1)};
+
+    for (std::size_t index{0}; index < mutations.size(); ++index) {
+        const fs::path path{
+            m_path_root /
+            fs::PathFromString(strprintf(
+                "pqcl_payment_audit_seal_exact_%u", index))};
+        const uint256 genesis{NonNullHash(240 + index)};
+        auto initialized{MakeChainLock(
+            865, config.activation_predecessor_height,
+            NonNullHash(config.activation_predecessor_height),
+            240 + index)};
+        SetExactInitialization(initialized, genesis, 240 + index);
+        auto seal{MakeChainLock(
+            schedule->seal_height,
+            schedule->seal_height -
+                config.chainlock_schedule.chainlock_period,
+            NonNullHash(schedule->seal_height -
+                        config.chainlock_schedule.chainlock_period),
+            250 + index)};
+        SetExactContinuation(seal, genesis, initialized);
+        const auto seal_context{MakeStatementBoundDurableContext(
+            genesis, config.chainlock_schedule, seal)};
+        BOOST_REQUIRE(seal_context);
+        const auto capsule{
+            PaymentAuditSealContextCapsuleTestAccess::Make(
+                genesis, config, epoch, seal, all_rosters_mask)};
+
+        auto first_successor{MakeChainLock(
+            seal.statement.height +
+                config.chainlock_schedule.chainlock_period,
+            seal.statement.height, seal.statement.block_hash,
+            260 + index)};
+        SetExactContinuation(first_successor, genesis, seal);
+        auto second_successor{MakeChainLock(
+            first_successor.statement.height +
+                config.chainlock_schedule.chainlock_period,
+            first_successor.statement.height,
+            first_successor.statement.block_hash, 270 + index)};
+        SetExactContinuation(
+            second_successor, genesis, first_successor);
+
+        {
+            PQChainLockPersistence persistence{
+                DiskParams(path), genesis, config};
+            BOOST_REQUIRE(
+                persistence.PersistInitializedBest(initialized));
+            BOOST_REQUIRE(persistence.PersistCatchupBestWithContext(
+                seal, seal_context, nullptr, capsule));
+            BOOST_REQUIRE(persistence.PersistBest(first_successor));
+            BOOST_REQUIRE(persistence.PersistBest(second_successor));
+            BOOST_REQUIRE(persistence.LoadAuthorizationBase(
+                seal.GetLogicalId(genesis)));
+        }
+        {
+            CDBWrapper raw{DiskParams(path)};
+            const RawAuthorizationBaseKey seal_key{
+                PQ_CHAINLOCK_PERSISTENCE_AUTHORIZATION_BASE_KEY,
+                seal.GetLogicalId(genesis)};
+            if (mutations[index] == Mutation::MISSING) {
+                BOOST_REQUIRE(raw.Erase(seal_key, /*fSync=*/true));
+            } else {
+                RawDiskRecord seal_record;
+                RawDiskRecord best_record;
+                BOOST_REQUIRE(raw.Read(seal_key, seal_record));
+                BOOST_REQUIRE(raw.Read(
+                    RawDiskKey{PQ_CHAINLOCK_PERSISTENCE_BEST_KEY},
+                    best_record));
+                BOOST_REQUIRE(seal_record.roster_context !=
+                              best_record.roster_context);
+                seal_record.roster_context = best_record.roster_context;
+                seal_record.checksum =
+                    GetRawDiskRecordChecksum(seal_record);
+                BOOST_REQUIRE(raw.Write(
+                    seal_key, seal_record, /*fSync=*/true));
+            }
+        }
+        BOOST_CHECK_THROW(
+            PQChainLockPersistence(DiskParams(path), genesis, config),
+            std::runtime_error);
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

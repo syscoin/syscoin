@@ -1312,6 +1312,30 @@ struct PQChainLockPersistence::Impl {
             record.chainlock.statement};
     }
 
+    static bool MatchesMetadata(
+        const DiskRecord& record,
+        const FinalChainLockRecordMetadata& metadata) noexcept
+    {
+        return record.logical_id == metadata.logical_id &&
+               record.witness_id == metadata.witness_id &&
+               record.chainlock.statement == metadata.statement;
+    }
+
+    const DiskRecord* FindExactRetainedRecord(
+        const FinalChainLockRecordMetadata& metadata) const
+        EXCLUSIVE_LOCKS_REQUIRED(mutex)
+    {
+        if (best && MatchesMetadata(*best, metadata)) return &*best;
+        if (unsealed && MatchesMetadata(*unsealed, metadata)) {
+            return &*unsealed;
+        }
+        const auto retained{authorization_bases.find(metadata.logical_id)};
+        return retained != authorization_bases.end() &&
+                       MatchesMetadata(retained->second, metadata)
+            ? &retained->second
+            : nullptr;
+    }
+
     static bool IsExactRecord(const DiskRecord& left,
                               const DiskRecord& right) noexcept
     {
@@ -1733,6 +1757,31 @@ struct PQChainLockPersistence::Impl {
                 throw std::runtime_error(
                     "corrupt payment-audit seal context");
             }
+            const DiskRecord* const seal_record{
+                FindExactRetainedRecord(loaded.Seal())};
+            RosterAuthorizationVerificationContext authorization;
+            authorization.admission =
+                RosterAuthorizationAdmission::TRUSTED_PERSISTENCE;
+            authorization.predecessor_height =
+                loaded.Seal().statement.previous_chainlock_height;
+            authorization.predecessor_block_hash =
+                loaded.Seal().statement.previous_chainlock_hash;
+            ChainLockVerificationError verification_error{
+                ChainLockVerificationError::NONE};
+            const auto seal_context{
+                seal_record && seal_record->decoded_roster_context
+                    ? PreparedChainLockContext::CreateFromTrustedPersistence(
+                          config.chainlock_schedule,
+                          loaded.Seal().statement,
+                          *seal_record->decoded_roster_context,
+                          authorization, &verification_error)
+                    : PreparedChainLockContextPtr{}};
+            if (!seal_context ||
+                seal_context->AuthorizationMask() !=
+                    loaded.AuthorizationMask()) {
+                throw std::runtime_error(
+                    "missing exact payment-audit seal context");
+            }
             payment_audit_seal_context = std::move(loaded);
         }
 
@@ -1926,6 +1975,14 @@ struct PQChainLockPersistence::Impl {
             }
             next_payment_audit_seal_context =
                 std::move(supplied_payment_audit_seal_context);
+        }
+        if (next_payment_audit_seal_context &&
+            !MatchesMetadata(
+                candidate, next_payment_audit_seal_context->Seal()) &&
+            FindExactRetainedRecord(
+                next_payment_audit_seal_context->Seal()) == nullptr) {
+            SetError(error, ChainLockPersistenceError::IO_FAILURE);
+            return false;
         }
 
         if (!ValidateDurableRecoverySources(
@@ -2250,7 +2307,13 @@ struct PQChainLockPersistence::Impl {
                     record.chainlock.statement ==
                         next_receipt_archive_authorization->predecessor
                             .statement};
-                return live_role || archive_role;
+                const bool payment_audit_seal_role{
+                    next_payment_audit_seal_context &&
+                    MatchesMetadata(
+                        record,
+                        next_payment_audit_seal_context->Seal())};
+                return live_role || archive_role ||
+                       payment_audit_seal_role;
             };
             const auto consider_oldest = [&](const DiskRecord& record) {
                 if (!evict_authorization_bases.contains(
@@ -2476,6 +2539,10 @@ struct PQChainLockPersistence::Impl {
                 receipt_archive_authorization
                     ? &receipt_archive_authorization->predecessor
                     : nullptr};
+            const FinalChainLockRecordMetadata* const payment_audit_seal{
+                payment_audit_seal_context
+                    ? &payment_audit_seal_context->Seal()
+                    : nullptr};
             const auto is_protected = [&](const DiskRecord& record) {
                 const bool live_role{
                     (live_best && IsExactRecord(record, *live_best)) ||
@@ -2492,7 +2559,11 @@ struct PQChainLockPersistence::Impl {
                         archive_predecessor->witness_id &&
                     record.chainlock.statement ==
                         archive_predecessor->statement};
-                return live_role || archive_role;
+                const bool payment_audit_seal_role{
+                    payment_audit_seal &&
+                    MatchesMetadata(record, *payment_audit_seal)};
+                return live_role || archive_role ||
+                       payment_audit_seal_role;
             };
             auto oldest{authorization_bases.end()};
             for (auto it{authorization_bases.begin()};

@@ -4,6 +4,8 @@
 
 #include <llmq/pq_chainlock_store.h>
 
+#include <llmq/pq_payment_audit.h>
+
 #include <algorithm>
 #include <chrono>
 #include <limits>
@@ -22,6 +24,23 @@ void SetError(ChainLockFinalityError* error, ChainLockFinalityError value)
 bool ValidCapacity(std::size_t value, std::size_t maximum)
 {
     return value > 0 && value <= maximum;
+}
+
+std::optional<int32_t> PaymentAuditSealCarrierEnd(
+    const ChainLockFinalityStoreConfig& config,
+    const ChainLockStatement& statement) noexcept
+{
+    const auto seal_epoch{
+        EpochForHeight(config.chainlock_schedule, statement.height)};
+    if (!seal_epoch || *seal_epoch == 0) return std::nullopt;
+    const auto schedule{BuildPaymentAuditEpochSchedule(
+        PaymentAuditScheduleConfig{
+            config.chainlock_schedule, config.btcc_schedule},
+        *seal_epoch - 1)};
+    if (!schedule || schedule->seal_height != statement.height) {
+        return std::nullopt;
+    }
+    return schedule->carrier_end_height_exclusive;
 }
 
 bool IsReceiptableChainLock(const FinalChainLock& chainlock,
@@ -1345,6 +1364,11 @@ void ChainLockFinalityStore::RememberAuthorizationBase(AcceptedRecord record)
 
     const uint256 logical_id{record.logical_id};
     const uint256 witness_id{record.witness_id};
+    const int32_t incoming_height{record.chainlock->statement.height};
+    const bool trusted_startup_import{
+        !m_best &&
+        record.verification_context->Authorization().admission ==
+            RosterAuthorizationAdmission::TRUSTED_PERSISTENCE};
     const RosterAuthorizationBaseIdentity referenced_base{
         record.chainlock->statement.roster_authorization_base};
     const auto existing{m_authorization_bases.find(logical_id)};
@@ -1378,6 +1402,25 @@ void ChainLockFinalityStore::RememberAuthorizationBase(AcceptedRecord record)
         const auto& base{
             m_unsealed_btcc->chainlock->statement.roster_authorization_base};
         if (!base.IsNull()) protected_ids.insert(base.logical_id);
+    }
+    const std::optional<int32_t> retention_height{
+        trusted_startup_import
+            ? std::nullopt
+            : std::optional<int32_t>{
+                  m_best && m_best->chainlock
+                      ? std::max(incoming_height,
+                                 m_best->chainlock->statement.height)
+                      : incoming_height}};
+    for (const auto& [retained_id, retained] : m_authorization_bases) {
+        const auto carrier_end{
+            retained.chainlock
+                ? PaymentAuditSealCarrierEnd(
+                      m_config, retained.chainlock->statement)
+                : std::nullopt};
+        if (carrier_end &&
+            (!retention_height || *retention_height < *carrier_end)) {
+            protected_ids.insert(retained_id);
+        }
     }
 
     while (m_authorization_bases.size() >

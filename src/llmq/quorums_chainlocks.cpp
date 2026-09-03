@@ -6602,10 +6602,6 @@ void CChainLocksHandler::UpdateDurableChainLockAuxiliaryRetention()
             inspect(std::optional<pq::FinalChainLockRecordMetadata>{
                 durable.receipt_archive_authorization->predecessor});
         }
-        if (durable.payment_audit_seal_context) {
-            inspect(std::optional<pq::FinalChainLockRecordMetadata>{
-                durable.payment_audit_seal_context->Seal()});
-        }
         if (const auto authorization_base_height{
                 m_persistence->OldestAuthorizationBaseHeight()}) {
             inspect_height(*authorization_base_height);
@@ -14182,25 +14178,14 @@ CChainLocksHandler::BuildPaymentAuditVerificationRosters(
         ? ResolvePaymentAuditSealRecord(
               *m_store, m_genesis_hash, statement.seal_statement)
         : std::optional<pq::VerifiedRosterAuthorizationBaseView>{}};
-    const auto accepted_seal{accepted_seal_record
-        ? accepted_seal_record->certificate
-        : CChainLockSigCPtr{}};
-    const bool exact_accepted_seal{
-        accepted_seal &&
-        accepted_seal->statement == statement.seal_statement};
-    pq::PreparedChainLockContextPtr seal_context{
-        exact_accepted_seal && accepted_seal_record &&
-                accepted_seal_record->verification_context &&
-                accepted_seal_record->verification_context->Statement() ==
-                    statement.seal_statement
-            ? accepted_seal_record->verification_context
-            : pq::PreparedChainLockContextPtr{}};
-    const bool independently_covered_history{
-        historical_carrier != nullptr &&
-        IsPaymentAuditPrefixAuthenticated(*historical_carrier)};
-    if (!exact_accepted_seal && !independently_covered_history) {
+    if (!accepted_seal_record) {
+        if (status != nullptr) {
+            *status = PaymentAuditRosterBuildStatus::LOCAL_ERROR;
+        }
         return nullptr;
     }
+    const auto seal_context{
+        accepted_seal_record->verification_context};
     const CBlockIndex* response{
         seal->GetAncestor(round->response_height)};
     const auto response_status{ClassifyPaymentAuditResponseContext(
@@ -14213,56 +14198,6 @@ CChainLocksHandler::BuildPaymentAuditVerificationRosters(
         return nullptr;
     }
 
-    if (!seal_context && independently_covered_history && m_persistence) {
-        const auto capsule{
-            m_persistence->LoadPaymentAuditSealContext()};
-        if (capsule &&
-            capsule->IsInternallyConsistent(m_genesis_hash, *m_config) &&
-            capsule->Epoch() == statement.commitment.seed.epoch &&
-            capsule->CarrierEndHeightExclusive() ==
-                epoch_schedule->carrier_end_height_exclusive &&
-            historical_carrier->nHeight >=
-                epoch_schedule->carrier_start_height &&
-            historical_carrier->nHeight <
-                capsule->CarrierEndHeightExclusive() &&
-            capsule->Seal().statement == statement.seal_statement) {
-            pq::QuorumBuildError build_error{
-                pq::QuorumBuildError::NONE};
-            const auto roster_set{roster_cache->GetVerifiedActiveNoPublish(
-                statement.seal_statement.height, *seal,
-                statement.seal_statement.roster_beacons.active,
-                &build_error)};
-            if (roster_set) {
-                pq::RosterAuthorizationVerificationContext
-                    trusted_authorization;
-                trusted_authorization.admission =
-                    pq::RosterAuthorizationAdmission::
-                        TRUSTED_PERSISTENCE;
-                trusted_authorization.predecessor_height =
-                    statement.seal_statement
-                        .previous_chainlock_height;
-                trusted_authorization.predecessor_block_hash =
-                    statement.seal_statement
-                        .previous_chainlock_hash;
-                pq::ChainLockVerificationError verification_error{
-                    pq::ChainLockVerificationError::NONE};
-                auto rebuilt{pq::PreparedChainLockContext::Create(
-                    m_config->chainlock_schedule,
-                    statement.seal_statement, roster_set,
-                    trusted_authorization, &verification_error)};
-                if (rebuilt && rebuilt->AuthorizationMask() ==
-                                   capsule->AuthorizationMask()) {
-                    seal_context = std::move(rebuilt);
-                }
-            }
-        }
-    }
-    if (!seal_context) {
-        if (status != nullptr) {
-            *status = PaymentAuditRosterBuildStatus::LOCAL_ERROR;
-        }
-        return nullptr;
-    }
     const auto seal_rosters{seal_context->RosterSetPtr()};
     if (!seal_rosters) {
         if (status != nullptr) {
