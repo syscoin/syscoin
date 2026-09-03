@@ -80,7 +80,7 @@ The current quorum geometry remains the starting point:
 | Constant | Proposed value | Meaning |
 | --- | ---: | --- |
 | `PQ_QUORUM_SIZE` | 400 | Ordered roster slots per epoch |
-| `PQ_QUORUM_MIN_VALID` | 300 | Minimum certified child keys for a usable quorum |
+| `PQ_QUORUM_MIN_VALID` | 300 | Minimum valid child roots in a selected recovery roster; a normal roster requires all 400 |
 | `PQ_QUORUM_THRESHOLD` | 267 | Required signatures in one quorum (`2f+1`, `f=133`) |
 | `PQ_ACTIVE_QUORUMS` | 4 | Consecutive active epochs |
 | `PQ_REQUIRED_QUORUMS` | 3 | Quorums required in a final CLSIG |
@@ -549,11 +549,14 @@ unused leaves with a tagged empty-slot hash, hashes leaves and internal nodes
 under distinct tags, and binds the tree kind, epoch, and slot in every leaf.
 Leaves include the slot index to prevent reordering and duplicate counting.
 
-An epoch always materializes. If it has fewer than 300 valid child roots, its
-descriptor is retained but the quorum is unusable and can never contribute to
-a ChainLock. No old quorum lifetime is extended. Missing commitments do not
-recreate DKG PoSe punishment unless a separate future consensus rule explicitly
-defines such punishment.
+A normal epoch materializes only when its selected 400 identities all have
+usable child roots. Recovery first fixes the selected 400 identities from the
+authenticated source universe and then resolves their child roots; unavailable
+entries are never replaced or backfilled. A selected recovery roster with fewer
+than 300 valid child roots is unusable and cannot contribute to a ChainLock.
+No old quorum lifetime is extended. Missing commitments do not recreate DKG
+PoSe punishment unless a separate future consensus rule explicitly defines
+such punishment.
 
 The four active quorum slots at target height are the four fixed epochs selected
 by the consensus epoch function, not "the last four successful quorums." This
@@ -803,10 +806,18 @@ mutate `nPoSePenalty`, `nPoSeBanHeight`, or `nPoSeRevivedHeight`.
 `validMembers` records frozen child-key eligibility; it is not a blame bitmap.
 
 The final `CLSIG` is available to ordinary full nodes and through `GETCLSIG`.
-Durable CLSIG storage is exactly one best certificate plus at most one fully
+Durable CLSIG storage contains exactly one best certificate, at most one fully
 verified exact-slot `KEEP` or `ADVANCE` certificate awaiting its fixed BTCC
-carrier. The live store keeps the most recent eight certificates in RAM for
-bounded relay and exact lookup; it is not a historical signature archive.
+carrier, and at most 128 exact fully verified roster-authorization records.
+The last category includes a payment-audit seal fetched only to reconstruct an
+audit roster. It is servable by an exact targeted `GETCLSIG`, but does not
+advance finality, enforcement, receipt state, or recent-winner order. Ordinary
+inventory dedup treats that retained witness as already present; if it later
+becomes currently admissible, the handler promotes the local verified object
+after rederiving its current branch and authorization context instead of
+downloading or verifying its 801 signatures again. The live store separately
+keeps the most recent eight applied certificates in RAM for bounded relay and
+exact lookup; it is not a historical signature archive.
 
 Normal `LIVE` admission requires the receiver's exact durable winner as the
 block-finality predecessor, including the exact accepted BTCC cursor, and the
@@ -865,12 +876,13 @@ READY, but after READY it remains bound to the exact target block and Bitcoin
 range. If the first certificate is delayed, base-chain mining and most-work
 fork choice continue while initialization remains pinned to that target.
 
-A distinct current `CATCHUP` admission handles a fresh node, a node that missed
-one or more certificates, or the rolling recovery statement above. It is
-allowed only after base block sync has completed on a fully executed best-work
-AuxPoW branch, ordinary assume-valid shortcuts are no longer in the candidate
-range, and any snapshot background validation has completed. Public IBD may
-remain true while this final authentication tail is resolved. The candidate
+A distinct current `CATCHUP` admission handles an already participating node
+that was offline or missed one or more certificates, or the rolling recovery
+statement above. It is allowed only after base block sync has completed on a
+fully executed best-work AuxPoW branch, ordinary assume-valid shortcuts are no
+longer in the candidate range, and any snapshot background validation has
+completed. Public IBD may remain true while this final authentication tail is
+resolved. The candidate
 must be exactly the latest signable target and share the active chain's
 `H - sign_lag` boundary. It may be the active target or a current competing
 branch, so the first valid recovery certificate can cause the same bounded
@@ -983,6 +995,18 @@ signatures. Durable acceptance orders the receipt-state index flush before the
 certificate record, so a crash cannot publish a winner whose branch metadata
 was never made durable. After restoration or catch-up, exact `LIVE`
 predecessor chaining resumes.
+
+A node that already completed IBD does not reopen historical authentication
+merely because a peer advertises a header ahead of its tip. An exact missing
+certificate may move `READY` back to `PENDING` only after the best header
+descends through the branch-local carrier and reaches the first height at which
+that certificate may have left the bounded serving set. For a BTCC receipt at
+target `T`, that height is
+`T + recentCapacity * chainlockPeriod + signLag`; the signing lag is required
+because a newer target cannot evict `T` before its own certificate can exist.
+For a payment audit it is the audit window's exclusive carrier end. Once
+entered, the exact crash-durable marker may sustain `PENDING` while the node
+catches up, but unrelated ancestry and an early header fail closed.
 
 The exact 1,001,147-byte certificate every five blocks is a material bandwidth
 and verification cost. It must be benchmarked under adversarial load. Its size
@@ -1331,16 +1355,26 @@ greater-than-1,728-block null-receipt tail and proves the marker's earliest and
 latest snapshots survive restart.
 
 This retention is temporary and purpose-specific. The replay marker owns the
-lower-only block floor and replay snapshot retention; durable best/unsealed
-certificates separately own the roster snapshot floors needed to reverify
-them. Outside replay, only exact roster-cutoff DMN snapshots at or above that
-floor are synchronously written on every branch; ordinary non-cutoff snapshots
-remain in the bounded, lossy cache. More than 1,728 same-height non-cutoff
-side-branch writes therefore cannot evict the persisted branch-local roster
-cutoffs, but need not themselves survive restart. An in-flight
-verification/publication temporarily suppresses snapshot pruning. Once those
-obligations clear, normal compaction may discard old snapshots and sealed
-certificates. The design does not retain every historical CLSIG forever.
+lower-only block floor and replay snapshot retention. Before the first durable
+PQ certificate, the activation floor retains the four initialization roster
+snapshots. Each accepted durable certificate thereafter stores its exact
+verified four-roster context. Every durable record whose active roster window
+names a recovery-authority source also owns the exact deduplicated capsule of
+that authenticated source identity universe, regardless of the record's
+transition kind. The capsule replaces only the old source-identity snapshot:
+each recovery group's registration-cutoff snapshot and signed-target liveness
+snapshot remain retained while required. These objects replace an indefinitely
+old source roster-snapshot floor without turning candidate fields into
+authority. Ownership is capped at 131 distinct source IDs: at most 128 retained
+authorization bases plus the durable best, unsealed BTCC, and receipt-archive
+owner; referenced predecessors and seals are already retained rows. Startup
+accepts exactly the capsules reachable from those owners and fails closed on a
+missing, mismatched, or orphaned capsule. Outside replay, ordinary non-cutoff
+snapshots remain in the bounded, lossy cache. More than 1,728 same-height
+non-cutoff side-branch writes therefore need not survive restart. An in-flight
+verification/publication temporarily suppresses snapshot pruning. Once all
+durable obligations clear, normal compaction may discard old snapshots and
+sealed certificates. The design does not retain every historical CLSIG forever.
 
 The 1,728 full-list entries are a random-access availability and performance
 window, not a rollback-depth limit. Every connected post-DIP3 child also writes
@@ -1363,16 +1397,26 @@ Fresh sync, full reindex, and `-reindex-chainstate` build the inverse database
 inductively. Existing pre-journal datadirs cannot prove or backfill the pruned
 prefix from the bounded full-list cache and must reindex once with this format.
 
-The inverse database is append-only today, including accepted side branches.
-Measured records are 245 bytes with no DMN changes and 251 bytes for one small
-state update before LevelDB overhead; a three-DMN 1,731-block test occupied
-about 301 bytes per record. This is roughly 63 MB/year at 2.5-minute blocks for
-that light workload, but it is not a fixed bound: mass PoSe/state updates can
-touch thousands of DMNs and plausibly raise journal growth into gigabytes per
-year. The append-only PQ-registry history and its full periodic checkpoints can
-also dominate this cost. Production activation therefore requires metrics,
-capacity policy, compaction evidence, and finality-safe checkpoint/GC design;
-pruning either history back to 1,728 would recreate the rollback defect.
+The physical inverse and PQ snapshot histories are not append-only. Once an
+active `ENFORCED_DURABLE_CHAINLOCK` authorizes irreversible maintenance, the
+DMN store can prune an inverse prefix below an exact authenticated boundary.
+The full boundary snapshot and its inverse closure remain durable, binding the
+state hash, history commitment, and record hash. The PQ store similarly prunes
+historical snapshot records below authenticated interval checkpoints whose
+rooted lineage commitments and bounded erase manifests are verified before
+deletion. The logical branch-local set of accepted tree IDs remains append-only
+and capped by `MAX_PQ_USED_TREE_IDS`; deleting historical snapshot records never
+permits reuse of a tree ID.
+
+Both stores use the same versioned crash-durable `INTENT`/`WATERMARK` journal.
+Bounded erase batches resume after restart, while malformed, non-monotonic, or
+incompletely authenticated state fails closed. Replay floors, in-flight
+finality verification or publication, ambiguous/off-branch finality, invalid
+retained windows, and pre-DIP3 recovery veto destructive GC. The active and
+recovery random-access windows and every fixed durable dependency survive.
+Normal disk growth is therefore checkpointed and compacted; an unresolved
+replay or finality obligation deliberately suspends deletion and may grow
+without bound until that obligation clears.
 
 This does not synthesize deleted Core history. Sequential rollback still needs
 the corresponding `blk` and `rev` records, so the arbitrary-depth property is
@@ -1557,6 +1601,29 @@ state so the transition begins at the following payment. A missing live witness
 defers only the dependent branch. Store or database corruption is a local error
 and is never converted into peer misbehavior or permanent block invalidity.
 
+If an exact requested historical audit is present but the ordinary seal needed
+to derive its reporter rosters is no longer in the recent winner set, that
+pending carrier owns one `PAYMENT_AUDIT_SEAL` request lane. The immutable audit
+statement supplies the exact seal statement and logical ID; any objective
+authorization base it requires must already be locally verified.
+`GETCLSIG(id)` may return
+only that exact certificate. The receiver rebuilds the current branch-bound
+context, verifies all 801 signatures, rechecks the carrier/source token at the
+fsync boundary, and stores the seal as authorization only. If recovery rosters
+were used, the same atomic record retains their exact authenticated source
+universe. A replaced carrier, authorization base, branch, or token cannot clear
+or reuse the lane. If another path installed the byte-identical seal while the
+audit response was being checked, staging succeeds without a peer-failure
+cooldown and the audit is retried immediately from the local row.
+
+Every audit-window owner and the authorization base named by its seal remain
+servable until that window's exclusive carrier end. Expiry is clocked only by
+the durable best ChainLock; an authorization-only or archive-only certificate
+at a future height cannot age out older live dependencies. The fixed 128-record
+cap exceeds the protocol maximum of simultaneously live owners and bases, and
+startup imports are order-independent. Once durable finality crosses the
+carrier end, ordinary bounded eviction may remove both records.
+
 Historical IBD and marker-bound replay do not require an already pruned
 1,041,546-byte certificate. If the full witness is absent, the node rederives
 the subject roster from the historical snapshot, applies the committed
@@ -1603,11 +1670,16 @@ NEVM notifications from the provisional boundary are gated fail-closed. A
 crash, marker revision, branch change, or failed state/checkpoint/certificate
 fsync cannot clear the obligation or expose provisional state as authenticated.
 
-Consequently, a fresh node replays the on-chain receipt chain, obtains one
-later covering CLSIG through the ordinary P2P path, and discards covered audit
-certificates; it does not download or retain a permanent 1,041,546-byte-per-epoch
-audit archive. Full certificates are stored and served only while live or not
-yet covered. Null or inconclusive audits remain fail-open no-ops for new misses.
+Consequently, an already authorized participating node that restarts or falls
+behind replays the on-chain receipt chain, obtains one later covering CLSIG
+through the ordinary P2P path, and discards covered audit certificates; it does
+not download or retain a permanent 1,041,546-byte-per-epoch audit archive. A
+fresh, full-reindex, or snapshot-reconstruction node may perform the same replay
+only provisionally inside historical-replay quarantine. It cannot request or
+restore the covering CLSIG or become authoritative until a separately
+authenticated checkpoint or snapshot release ends that quarantine. Full
+certificates are stored and served only while live or not yet covered. Null or
+inconclusive audits remain fail-open no-ops for new misses.
 
 The protocol proves possession and use of the registered child key during one
 of 24 deadlines selected only later. It does not mathematically prove that an
@@ -1800,9 +1872,10 @@ operated as though it enforces either legacy or PQ finality.
 ### Stage B: four complete shadow epochs
 
 The network must complete at least four consecutive usable shadow epochs so the
-later activation boundary has a full four-quorum PQ active set. Each must have
-at least 300 valid registered roots and repeatedly demonstrate 267-member
-shares. Activation remains unassigned during this phase. Missing the
+later activation boundary has a full four-quorum PQ active set. Each normal
+roster must have all 400 selected identities backed by valid registered roots
+and repeatedly demonstrate 267-member shares. Activation remains unassigned
+during this phase. Missing the
 coverage/readiness criteria delays selecting `A` and the complete activation
 profile; it does not alter the eventual fixed epoch rules.
 
@@ -1834,10 +1907,12 @@ The boundary is unambiguous:
 
 Publish the BLS-free activation release only with the complete manifest. The
 only remaining legacy support is the isolated opaque decoder/state-transition
-module for heights below `A`. Nodes sync from genesis without a centrally
-distributed state snapshot and follow valid-most-work history until a fully
-verified durable PQ certificate establishes finality. An all-sentinel release
-remains a non-authoritative compatibility-replay/sync
+module for heights below `A`. A transition-release datadir may validate from
+genesis, import the fsynced `A-1` handoff, and follow valid-most-work history
+until a fully verified durable PQ certificate establishes finality. A clean
+BLS-free datadir may reconstruct the same history only in quarantine until a
+separately authenticated checkpoint or snapshot release makes it live. An
+all-sentinel release remains a non-authoritative compatibility-replay/sync
 build, and a partially populated public profile must never start. The future
 preparation release must identify its no-finality profile explicitly rather
 than weakening that partial-profile check.
@@ -1912,9 +1987,9 @@ Expected failures are fail-closed:
 
 | Failure | Required behavior |
 | --- | --- |
-| Missing/late child-root commitment or cache | Member invalid/offline for that epoch; epoch still advances |
-| Fewer than 300 valid roots | Quorum unusable; no lifetime extension |
-| Fewer than 267 shares | That quorum cannot contribute; with exactly 300 valid roots only 33 may be offline |
+| Missing/late child-root commitment or cache in a normal roster | Normal roster construction fails; epoch still advances and no filler is selected |
+| Fewer than 300 valid roots after resolving a selected recovery roster | Recovery quorum unusable; no replacement, backfill, or lifetime extension |
+| Fewer than 267 shares | That quorum cannot contribute; with exactly 300 valid recovery roots only 33 may be offline |
 | Fewer than three usable active quorums | ChainLock finality and bridge pause; base chain continues |
 | Journal uncertainty/corruption | Affected signer stops for the child epoch |
 | Same physical leaf with changed logical metadata or message | Return the exact cached original only; otherwise refuse |
@@ -1983,7 +2058,8 @@ Expected failures are fail-closed:
   generation-17 rotation/recovery rejection, and losing-fork
   registration/rotation.
 - Active/frozen root immutability after global rotation/revocation.
-- Exactly 299/300 valid keys and networks with fewer than 400 eligible members.
+- Normal-roster 399/400 rooted boundaries, recovery-roster 299/300 valid-key
+  boundaries, and networks with fewer than 400 eligible members.
 - Fixed epoch advance when an epoch is unusable; no fallback to last successful
   quorum.
 - Four-epoch bootstrap and all epoch-boundary/reorg positions. Bootstrap
@@ -1998,6 +2074,11 @@ Expected failures are fail-closed:
 - Restart-import one checksummed durable latest winner only into an empty store,
   fully reverify its branch/rosters/signatures, and prove that P2P admission
   cannot invoke the import exception.
+- Recovery-capsule tests compare raw-source and capsule-derived rosters after
+  source pruning, retain each required registration-cutoff and signed-target
+  snapshot, enforce the 131-source cap with atomic last-owner eviction, reject
+  missing, mismatched, and orphaned startup capsules, and restart an
+  authorization-only recovery audit seal from its exact persisted context.
 
 ### Signer journal tests
 
@@ -2153,11 +2234,14 @@ Expected failures are fail-closed:
   batch; exact replay is idempotent, regressions and equal-epoch conflicts are
   rejected, every certificate/index at or below the boundary disappears, and
   the live suffix remains readable after crash/restart.
-- Fresh sync, full reindex, `-reindex-chainstate`, and roll-forward recovery
-  replay a long on-chain receipt prefix without its covered full witnesses,
-  remain signing/readiness-gated until one later P2P CLSIG covers the prefix,
-  and reproduce the same accumulator, probation root, and checkpoint as a node
-  that originally verified every certificate.
+- An already participating roll-forward recovery replays a long on-chain
+  receipt prefix without its covered full witnesses, remains
+  signing/readiness-gated until one later P2P CLSIG covers the prefix, and
+  reproduces the same accumulator, probation root, and checkpoint as a node
+  that originally verified every certificate. Fresh sync, full reindex,
+  `-reindex-chainstate`, and snapshot reconstruction reproduce those values
+  provisionally but remain P2P/restoration-gated until a separately
+  authenticated checkpoint or snapshot release ends quarantine.
 - The six-epoch storage-bound regression seals and checkpoints five audit
   prefixes, rejects retrieval/admission/pinning of their retired epochs, and
   leaves only the sixth live/uncovered suffix after restart. This exercises the
@@ -2312,11 +2396,14 @@ The following must be resolved in code and release artifacts before activation:
   reindex policy before any deterministic-MN record/state layout changes; the
   current field mask rejects later state fields, but mutable DMN serializers
   must never acquire new disk meaning under the existing schema number;
-- operational sizing, metrics, alerts, corruption drills, and a
-  finality-safe checkpoint/GC policy for the append-only DMN inverse and PQ
-  registry histories. Validate both normal update rates and adversarial
-  mass-PoSe/state-update amplification; never reduce retained rollback history
-  to the 1,728 full-snapshot cache horizon;
+- operational sizing, metrics, alerts, corruption drills, and adversarial soak
+  evidence for the implemented journaled DMN-inverse and rooted PQ-snapshot GC.
+  Validate normal update rates, mass-PoSe/state-update amplification, bounded
+  batch restart, moving-tip progress, and every finality/replay veto; never
+  reduce retained rollback history to the 1,728 full-snapshot cache horizon;
+- recovery-capsule RAM and disk sizing at the 6,553,782-byte encoded per-source
+  maximum and the 131-source ownership ceiling (858,545,442 bytes, about
+  819 MiB, before database and container overhead);
 - production benchmark calibration, independent review, metrics/alert policy,
   and adversarial soak evidence for the implemented bounded asynchronous
   MNAUTH executors, reconnect-resistant actual-keyed-netgroup/global
