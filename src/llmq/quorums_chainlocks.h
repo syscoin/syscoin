@@ -1035,6 +1035,9 @@ public:
      */
     void SetQuorumRosterCache(pq::FrozenQuorumRosterCachePtr cache)
         EXCLUSIVE_LOCKS_REQUIRED(!m_lookup_mutex);
+    /** Local-only O(1) source used while constructing the roster cache. */
+    [[nodiscard]] pq::RecoveryUniverseLookup
+    GetRecoveryUniversePersistenceLookup() const;
 
     [[nodiscard]] bool AlreadyHave(const uint256& logical_id) const;
     [[nodiscard]] bool GetChainLockByHash(const uint256& logical_id,
@@ -2341,6 +2344,10 @@ private:
     BeginChainLockAuxiliarySnapshotPublication();
     [[nodiscard]] bool CompleteChainLockAuxiliarySnapshotPublication(
         AuxiliaryHistoryGCAuthorizationGate::Token token);
+    [[nodiscard]] bool CaptureRecoveryUniverseForDurableCandidate(
+        const pq::FinalChainLock& chainlock,
+        pq::RecoveryUniverseCapsulePtr& capsule) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_lookup_mutex);
     void MaybeReleaseFinalitySnapshotPublicationRetention()
         EXCLUSIVE_LOCKS_REQUIRED(!m_persisted_mutex);
     /**

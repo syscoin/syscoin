@@ -17,6 +17,7 @@
 #include <logging.h>
 #include <validation.h>
 
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -103,23 +104,25 @@ void InitLLMQSystem(CConnman& connman,
         LogPrintf("Loaded branch-bound PQ ChainLock regtest fixture\n");
     }
 
+    // SYSCOIN: This processor structurally replays legacy commitments for
+    // compatibility sync below the height-only PQ activation boundary.
+    // It has no live P2P or mining path.
+    auto block_processor{std::make_unique<CQuorumBlockProcessor>()};
+    auto chainlocks_handler{
+        std::make_unique<CChainLocksHandler>(connman, peerman, chainman)};
+
     pq::FrozenQuorumRosterCachePtr roster_cache;
     if (quorum_build_config) {
         roster_cache = pq::FrozenQuorumRosterCache::Create(
             chainman.GetConsensus().hashGenesisBlock,
             *quorum_build_config, std::move(snapshot_lookup),
-            /*cache_results=*/!fixture_enabled);
+            /*cache_results=*/!fixture_enabled,
+            chainlocks_handler->GetRecoveryUniversePersistenceLookup());
         if (!roster_cache) {
             throw std::runtime_error(
                 "cannot initialize PQ quorum roster cache");
         }
     }
-
-    // SYSCOIN: This processor structurally replays legacy commitments for
-    // compatibility sync below the height-only PQ activation boundary.
-    // It has no live P2P or mining path.
-    quorumBlockProcessor = new CQuorumBlockProcessor();
-    chainLocksHandler = new CChainLocksHandler(connman, peerman, chainman);
     // SYSCOIN: Frozen SLH rosters need only deterministic share-relay
     // connectivity; there is no DKG or threshold-key lifecycle.
     const auto& consensus{chainman.GetConsensus()};
@@ -128,16 +131,20 @@ void InitLLMQSystem(CConnman& connman,
                 Consensus::PQActivationResult::VALID
             ? std::optional<int32_t>{consensus.nPQActivationHeight - 1}
             : std::nullopt};
-    pqQuorumConnectionOverlay = new CPQQuorumConnectionOverlay(
+    CChainLocksHandler* const handler_ptr{chainlocks_handler.get()};
+    auto connection_overlay{std::make_unique<CPQQuorumConnectionOverlay>(
         connman, roster_cache,
-        [initial_predecessor_height]() -> std::optional<int32_t> {
-            const auto best{chainLocksHandler
-                                ? chainLocksHandler->GetBestChainLock()
-                                : nullptr};
+        [handler_ptr,
+         initial_predecessor_height]() -> std::optional<int32_t> {
+            const auto best{handler_ptr->GetBestChainLock()};
             return best ? std::optional<int32_t>{best->statement.height}
                         : initial_predecessor_height;
-        });
-    chainLocksHandler->SetQuorumRosterCache(std::move(roster_cache));
+        })};
+    chainlocks_handler->SetQuorumRosterCache(std::move(roster_cache));
+
+    quorumBlockProcessor = block_processor.release();
+    chainLocksHandler = chainlocks_handler.release();
+    pqQuorumConnectionOverlay = connection_overlay.release();
 }
 
 void DestroyLLMQSystem()

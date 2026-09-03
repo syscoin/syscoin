@@ -2702,17 +2702,22 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
                 const auto publication{seal_context_ready
                     ? BeginChainLockAuxiliarySnapshotPublication()
                     : std::nullopt};
+                pq::RecoveryUniverseCapsulePtr recovery_universe;
                 bool persisted{
                     publication && m_persistence &&
+                    CaptureRecoveryUniverseForDurableCandidate(
+                        chainlock, recovery_universe) &&
                     (chainlock.statement.roster_transition ==
                              pq::RosterAuthorizationTransitionKind::INITIALIZE
                          ? m_persistence->PersistInitializedBest(
                                chainlock, context, nullptr,
                                /*verified_reset=*/nullptr,
-                               std::move(seal_context))
+                               std::move(seal_context),
+                               std::move(recovery_universe))
                          : m_persistence->PersistBest(
                                chainlock, context, nullptr,
-                               std::move(seal_context)))};
+                               std::move(seal_context),
+                               std::move(recovery_universe)))};
                 if (persisted) {
                     persisted =
                         CompleteChainLockAuxiliarySnapshotPublication(
@@ -2730,10 +2735,14 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
                    const pq::PreparedChainLockContextPtr& context) {
                 const auto publication{
                     BeginChainLockAuxiliarySnapshotPublication()};
+                pq::RecoveryUniverseCapsulePtr recovery_universe;
                 bool persisted{
                     publication && m_persistence &&
+                    CaptureRecoveryUniverseForDurableCandidate(
+                        chainlock, recovery_universe) &&
                     m_persistence->PersistUnsealedBTCC(
-                        chainlock, context, nullptr)};
+                        chainlock, context, nullptr,
+                        std::move(recovery_universe))};
                 if (persisted) {
                     persisted =
                         CompleteChainLockAuxiliarySnapshotPublication(
@@ -2755,6 +2764,7 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
                     pq::ChainLockPersistenceError::NONE};
                 std::optional<pq::PaymentAuditSealContextCapsule>
                     seal_context;
+                pq::RecoveryUniverseCapsulePtr recovery_universe;
                 const bool seal_context_ready{
                     pq::PaymentAuditSealContextCapsule::
                         BuildForVerifiedDurableCandidate(
@@ -2767,14 +2777,14 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
                         return m_persistence->PersistInitializedBest(
                             chainlock, context, &persistence_error,
                             /*verified_reset=*/nullptr,
-                            seal_context);
+                            seal_context, recovery_universe);
                     case pq::RosterAuthorizationTransitionKind::RECOVER:
                         return m_persistence->PersistRecoveryCatchupBest(
                             chainlock, context, &persistence_error,
                             btcc_cursor_reconciliation,
                             covering_authorization,
                             /*verified_reset=*/nullptr,
-                            seal_context);
+                            seal_context, recovery_universe);
                     case pq::RosterAuthorizationTransitionKind::KEEP:
                     case pq::RosterAuthorizationTransitionKind::OBSERVE:
                     case pq::RosterAuthorizationTransitionKind::REVEAL:
@@ -2783,13 +2793,17 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
                             chainlock, context, &persistence_error,
                             btcc_cursor_reconciliation,
                             covering_authorization,
-                            seal_context);
+                            seal_context, recovery_universe);
                     }
                     return false;
                 };
                 const auto publication{
                     BeginChainLockAuxiliarySnapshotPublication()};
-                bool persisted{publication && m_persistence && persist()};
+                bool persisted{
+                    publication && m_persistence &&
+                    CaptureRecoveryUniverseForDurableCandidate(
+                        chainlock, recovery_universe) &&
+                    persist()};
                 if (!persisted) {
                     // A stale semantic CAS is a rejected candidate, not a
                     // failed database. Only an actual durability failure may
@@ -2825,10 +2839,14 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
                 const pq::PreparedChainLockContextPtr& context) {
                 const auto publication{
                     BeginChainLockAuxiliarySnapshotPublication()};
+                pq::RecoveryUniverseCapsulePtr recovery_universe;
                 bool persisted{
                     publication && m_persistence &&
+                    CaptureRecoveryUniverseForDurableCandidate(
+                        chainlock, recovery_universe) &&
                     m_persistence->PersistAuthorizedUnsealedBTCC(
-                        chainlock, context, authorization, nullptr)};
+                        chainlock, context, authorization, nullptr,
+                        std::move(recovery_universe))};
                 if (persisted) {
                     persisted =
                         CompleteChainLockAuxiliarySnapshotPublication(
@@ -2854,11 +2872,15 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
                 const auto publication{seal_context_ready
                     ? BeginChainLockAuxiliarySnapshotPublication()
                     : std::nullopt};
+                pq::RecoveryUniverseCapsulePtr recovery_universe;
                 bool persisted{
                     publication && m_persistence &&
+                    CaptureRecoveryUniverseForDurableCandidate(
+                        chainlock, recovery_universe) &&
                     m_persistence->PersistBestCoveringReceiptArchive(
                         chainlock, context, authorization, nullptr,
-                        std::move(seal_context))};
+                        std::move(seal_context),
+                        std::move(recovery_universe))};
                 if (persisted) {
                     persisted =
                         CompleteChainLockAuxiliarySnapshotPublication(
@@ -2891,13 +2913,17 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
                 const auto publication{seal_context_ready
                     ? BeginChainLockAuxiliarySnapshotPublication()
                     : std::nullopt};
+                pq::RecoveryUniverseCapsulePtr recovery_universe;
                 bool persisted{false};
-                if (publication && m_persistence) {
+                if (publication && m_persistence &&
+                    CaptureRecoveryUniverseForDurableCandidate(
+                        chainlock, recovery_universe)) {
                     switch (chainlock.statement.roster_transition) {
                     case pq::RosterAuthorizationTransitionKind::INITIALIZE:
                         persisted = m_persistence->PersistInitializedBest(
                             chainlock, context, &persistence_error,
-                            &verified_reset, seal_context);
+                            &verified_reset, seal_context,
+                            recovery_universe);
                         break;
                     case pq::RosterAuthorizationTransitionKind::RECOVER:
                         persisted =
@@ -2905,7 +2931,8 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
                                 chainlock, context, &persistence_error,
                                 btcc_cursor_reconciliation,
                                 covering_authorization,
-                                &verified_reset, seal_context);
+                                &verified_reset, seal_context,
+                                recovery_universe);
                         break;
                     case pq::RosterAuthorizationTransitionKind::KEEP:
                     case pq::RosterAuthorizationTransitionKind::OBSERVE:
@@ -2947,10 +2974,14 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
                    const pq::PreparedChainLockContextPtr& context) {
                 const auto publication{
                     BeginChainLockAuxiliarySnapshotPublication()};
+                pq::RecoveryUniverseCapsulePtr recovery_universe;
                 bool persisted{
                     publication && m_persistence &&
+                    CaptureRecoveryUniverseForDurableCandidate(
+                        chainlock, recovery_universe) &&
                     m_persistence->PersistVerifiedAuthorizationBase(
-                        chainlock, context)};
+                        chainlock, context, nullptr,
+                        std::move(recovery_universe))};
                 if (persisted) {
                     persisted =
                         CompleteChainLockAuxiliarySnapshotPublication(
@@ -3250,6 +3281,17 @@ void CChainLocksHandler::SetQuorumRosterCache(
     }
     m_payment_audit_receipt_cache.Clear();
     m_verified_payment_audit_transition_cache->Clear();
+}
+
+pq::RecoveryUniverseLookup
+CChainLocksHandler::GetRecoveryUniversePersistenceLookup() const
+{
+    if (!m_persistence) return {};
+    return [this](const uint256& source_id) {
+        return m_persistence
+            ? m_persistence->LoadRecoveryUniverse(source_id)
+            : nullptr;
+    };
 }
 
 pq::FrozenQuorumRosterCachePtr
@@ -6665,6 +6707,32 @@ CChainLocksHandler::BeginChainLockAuxiliarySnapshotPublication()
         return std::nullopt;
     }
     return token;
+}
+
+bool CChainLocksHandler::CaptureRecoveryUniverseForDurableCandidate(
+    const pq::FinalChainLock& chainlock,
+    pq::RecoveryUniverseCapsulePtr& capsule) const
+{
+    capsule.reset();
+    const auto& source{
+        chainlock.statement.roster_beacons.active
+            .recovery_authority_source};
+    if (source.IsNull()) return true;
+    if (!source.IsStructurallyValid()) return false;
+
+    const auto roster_cache{GetQuorumRosterCache()};
+    if (!roster_cache) return false;
+    LOCK(cs_main);
+    const CBlockIndex* target{m_chainman.m_blockman.LookupBlockIndex(
+        chainlock.statement.block_hash)};
+    if (target == nullptr ||
+        target->nHeight != chainlock.statement.height) {
+        return false;
+    }
+    pq::QuorumBuildError error{pq::QuorumBuildError::NONE};
+    capsule = roster_cache->GetOrCaptureRecoveryUniverse(
+        source, *target, &error);
+    return static_cast<bool>(capsule);
 }
 
 bool CChainLocksHandler::CompleteChainLockAuxiliarySnapshotPublication(
