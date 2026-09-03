@@ -27,6 +27,17 @@ struct ScoredMember {
     std::optional<FrozenChildRootRecord> child_root;
 };
 
+enum class CandidateDisposition : uint8_t {
+    EXCLUDE,
+    INCLUDE,
+    INVALID,
+};
+
+struct CandidateKeyResolution {
+    CandidateDisposition disposition{CandidateDisposition::INVALID};
+    std::optional<FrozenChildRootRecord> child_root;
+};
+
 /**
  * Registry snapshots are already strictly ordered. Preserve insertion-order
  * independence for synthetic callers without rebuilding a tree map on the
@@ -136,14 +147,12 @@ void SetBit(QuorumBitmap& bitmap, std::size_t member)
     bitmap[member / 8] |= static_cast<uint8_t>(uint8_t{1} << (member % 8));
 }
 
-template <typename ResolveChildRoot>
+template <typename ResolveCandidate>
 std::optional<std::vector<ScoredMember>> SelectRosterMembers(
     const CDeterministicMNList& snapshot,
     const uint256& modifier,
     const OperatorStateLookup& operator_states,
-    ResolveChildRoot&& resolve_child_root,
-    bool prefer_child_roots,
-    bool require_established_global_key_lineage,
+    ResolveCandidate&& resolve_candidate,
     QuorumBuildError* error)
 {
     std::vector<ScoredMember> candidates;
@@ -160,9 +169,13 @@ std::optional<std::vector<ScoredMember>> SelectRosterMembers(
             dmn->pdmnState->confirmedHash.IsNull()) {
             return;
         }
-        const auto* state{operator_states.Find(dmn->proTxHash)};
-        if (require_established_global_key_lineage &&
-            (state == nullptr || state->has_global_key == 0)) {
+        auto resolution{resolve_candidate(
+            operator_states.Find(dmn->proTxHash), dmn->proTxHash)};
+        if (resolution.disposition == CandidateDisposition::EXCLUDE) {
+            return;
+        }
+        if (resolution.disposition != CandidateDisposition::INCLUDE) {
+            invalid_child_state = true;
             return;
         }
 
@@ -175,14 +188,9 @@ std::optional<std::vector<ScoredMember>> SelectRosterMembers(
                      dmn->pdmnState->confirmedHashWithProRegTxHash.size());
         hasher.Write(modifier.begin(), modifier.size());
         hasher.Finalize(score_hash.begin());
-        const auto child_root{resolve_child_root(state, dmn->proTxHash)};
-        if (!child_root) {
-            invalid_child_state = true;
-            return;
-        }
-
         candidates.push_back(
-            {UintToArith256(score_hash), dmn, std::move(*child_root)});
+            {UintToArith256(score_hash), dmn,
+             std::move(resolution.child_root)});
     });
     if (invalid_masternode_state) {
         SetError(error, QuorumBuildError::INVALID_MASTERNODE_STATE);
@@ -197,12 +205,8 @@ std::optional<std::vector<ScoredMember>> SelectRosterMembers(
         return std::nullopt;
     }
 
-    const auto score_less = [prefer_child_roots](const ScoredMember& lhs,
-                                                 const ScoredMember& rhs) {
-        if (prefer_child_roots &&
-            lhs.child_root.has_value() != rhs.child_root.has_value()) {
-            return lhs.child_root.has_value();
-        }
+    const auto score_less = [](const ScoredMember& lhs,
+                               const ScoredMember& rhs) {
         if (lhs.score != rhs.score) return lhs.score > rhs.score;
         // This is the direct form of the legacy reverse-iterator tie break,
         // which places the larger outpoint first. Deterministic-MN lists
@@ -216,6 +220,63 @@ std::optional<std::vector<ScoredMember>> SelectRosterMembers(
                       candidates.end(), score_less);
     candidates.resize(QUORUM_SIZE);
     return candidates;
+}
+
+CandidateKeyResolution ResolveNormalCandidate(
+    const OperatorKeyState* state,
+    const uint256& pro_tx_hash,
+    uint32_t epoch)
+{
+    if (state == nullptr || !state->HasActiveGlobalKey()) {
+        return {CandidateDisposition::EXCLUDE, std::nullopt};
+    }
+    const ChildRootResolution resolution{state->ResolveChildRoot(epoch)};
+    if (resolution.status == ChildRootResolutionStatus::FROZEN_ABSENT) {
+        return {CandidateDisposition::EXCLUDE, std::nullopt};
+    }
+    if (resolution.status != ChildRootResolutionStatus::FROZEN_PRESENT ||
+        !resolution.record ||
+        resolution.record->pro_tx_hash != pro_tx_hash ||
+        resolution.record->epoch != epoch) {
+        return {CandidateDisposition::INVALID, std::nullopt};
+    }
+    return {CandidateDisposition::INCLUDE, resolution.record};
+}
+
+std::optional<std::vector<ScoredMember>> SelectNormalRosterMembers(
+    const CDeterministicMNList& snapshot,
+    const uint256& modifier,
+    const OperatorStateLookup& operator_states,
+    uint32_t epoch,
+    QuorumBuildError* error)
+{
+    return SelectRosterMembers(
+        snapshot, modifier, operator_states,
+        [epoch](const OperatorKeyState* state, const uint256& pro_tx_hash) {
+            return ResolveNormalCandidate(state, pro_tx_hash, epoch);
+        },
+        error);
+}
+
+bool HasUniqueSelectedChildRoots(
+    std::span<const ScoredMember> selected,
+    QuorumBuildError* error)
+{
+    std::map<uint256, std::pair<uint256, uint32_t>> tree_owners;
+    for (const auto& candidate : selected) {
+        if (!candidate.child_root ||
+            !tree_owners.emplace(
+                candidate.child_root->commitment.tree_id,
+                std::pair{candidate.dmn->proTxHash,
+                          candidate.child_root->commitment.generation})
+                 .second) {
+            SetError(error, candidate.child_root
+                                ? QuorumBuildError::DUPLICATE_CHILD_KEY
+                                : QuorumBuildError::CHILD_KEY_NOT_FROZEN);
+            return false;
+        }
+    }
+    return true;
 }
 
 bool AddActiveChildRootsToSet(const FrozenQuorumRoster& roster,
@@ -321,32 +382,11 @@ std::unique_ptr<FrozenQuorumRoster> BuildFrozenQuorumRosterWithModifier(
         }
     }
 
-    auto selected{SelectRosterMembers(
-        snapshot, modifier, operator_states,
-        [epoch](const OperatorKeyState* state, const uint256& pro_tx_hash)
-            -> std::optional<std::optional<FrozenChildRootRecord>> {
-            if (state == nullptr) {
-                return std::optional<FrozenChildRootRecord>{};
-            }
-            const ChildRootResolution resolution{
-                state->ResolveChildRoot(epoch)};
-            if (resolution.status ==
-                ChildRootResolutionStatus::FROZEN_ABSENT) {
-                return std::optional<FrozenChildRootRecord>{};
-            }
-            if (resolution.status !=
-                    ChildRootResolutionStatus::FROZEN_PRESENT ||
-                !resolution.record ||
-                resolution.record->pro_tx_hash != pro_tx_hash ||
-                resolution.record->epoch != epoch) {
-                return std::nullopt;
-            }
-            return std::move(resolution.record);
-        },
-        /*prefer_child_roots=*/true,
-        /*require_established_global_key_lineage=*/false,
-        error)};
-    if (!selected) return nullptr;
+    auto selected{SelectNormalRosterMembers(
+        snapshot, modifier, operator_states, epoch, error)};
+    if (!selected || !HasUniqueSelectedChildRoots(*selected, error)) {
+        return nullptr;
+    }
 
     auto roster{std::make_unique<FrozenQuorumRoster>()};
     roster->descriptor.epoch = epoch;
@@ -357,7 +397,6 @@ std::unique_ptr<FrozenQuorumRoster> BuildFrozenQuorumRosterWithModifier(
     roster->descriptor.roster_beacon_hash = beacon_hash;
 
     std::set<uint256> selected_members;
-    std::map<uint256, std::pair<uint256, uint32_t>> tree_owners;
     for (std::size_t slot{0}; slot < QUORUM_SIZE; ++slot) {
         auto& member = roster->members[slot];
         member.pro_tx_hash = (*selected)[slot].dmn->proTxHash;
@@ -367,14 +406,6 @@ std::unique_ptr<FrozenQuorumRoster> BuildFrozenQuorumRosterWithModifier(
             return nullptr;
         }
         member.eligible = true;
-        if (!(*selected)[slot].child_root) continue;
-        if (!tree_owners.emplace(
-                (*selected)[slot].child_root->commitment.tree_id,
-                std::pair{member.pro_tx_hash,
-                          (*selected)[slot].child_root->commitment.generation}).second) {
-            SetError(error, QuorumBuildError::DUPLICATE_CHILD_KEY);
-            return nullptr;
-        }
         member.child_root = std::move((*selected)[slot].child_root);
         SetBit(roster->descriptor.valid_members, slot);
     }
@@ -549,6 +580,28 @@ const CBlockIndex* ResolveRecoverySourceSnapshot(
     return snapshot_index;
 }
 
+bool HasUsableNormalRecoverySource(
+    const uint256& genesis_hash,
+    const RecoveryRosterAuthoritySource& source,
+    const CBlockIndex& source_snapshot_index,
+    const QuorumSnapshotState& source_state,
+    const OperatorStateLookup& source_operator_states,
+    QuorumBuildError* error)
+{
+    const auto modifier{GetPQQuorumModifier(
+        genesis_hash, source.normal_beacon.epoch,
+        source_snapshot_index.nHeight,
+        source_snapshot_index.GetBlockHash(), source.normal_beacon)};
+    if (!modifier) {
+        SetError(error, QuorumBuildError::INVALID_ROSTER_BEACON);
+        return false;
+    }
+    const auto selected{SelectNormalRosterMembers(
+        source_state.deterministic_mns, *modifier,
+        source_operator_states, source.normal_beacon.epoch, error)};
+    return selected && HasUniqueSelectedChildRoots(*selected, error);
+}
+
 std::unique_ptr<FrozenQuorumRoster> BuildRecoveryFrozenQuorumRoster(
     const uint256& genesis_hash,
     const EpochIdentity& identity,
@@ -593,12 +646,14 @@ std::unique_ptr<FrozenQuorumRoster> BuildRecoveryFrozenQuorumRoster(
     auto selected{SelectRosterMembers(
         source_state.deterministic_mns, *modifier,
         source_operator_states,
-        [](const OperatorKeyState*, const uint256&)
-            -> std::optional<std::optional<FrozenChildRootRecord>> {
-            return std::optional<FrozenChildRootRecord>{};
+        [](const OperatorKeyState* state, const uint256&) {
+            return CandidateKeyResolution{
+                state != nullptr && state->has_global_key != 0
+                    ? CandidateDisposition::INCLUDE
+                    : CandidateDisposition::EXCLUDE,
+                std::nullopt};
         },
-        /*prefer_child_roots=*/false,
-        /*require_established_global_key_lineage=*/true, error)};
+        error)};
     if (!selected) return nullptr;
 
     auto roster{std::make_unique<FrozenQuorumRoster>()};
@@ -702,20 +757,23 @@ std::unique_ptr<FrozenQuorumRosters> BuildActiveFrozenQuorumRostersImpl(
         [](const RosterBeaconSeed& seed) {
             return seed.anchor_kind == RosterBeaconAnchorKind::RECOVERY;
         })};
-    if (has_recovery_seed &&
-        beacon_bundle.recovery_authority_source.IsNull()) {
+    if (beacon_bundle.recovery_authority_source.IsNull()) {
         SetError(error, QuorumBuildError::INVALID_ROSTER_BEACON);
         return nullptr;
     }
 
+    const bool source_is_active_normal_seed{std::any_of(
+        beacon_bundle.seeds.begin(), beacon_bundle.seeds.end(),
+        [&](const RosterBeaconSeed& seed) {
+            return seed.anchor_kind == RosterBeaconAnchorKind::NORMAL &&
+                   seed == beacon_bundle.recovery_authority_source.normal_beacon;
+        })};
+    const bool prevalidate_source{
+        has_recovery_seed || !source_is_active_normal_seed};
     const CBlockIndex* recovery_source_snapshot{nullptr};
     std::optional<QuorumSnapshotState> recovery_source_state;
-    std::optional<QuorumSnapshotState> recovery_key_state;
-    std::optional<QuorumSnapshotState> target_state;
     OperatorStateLookup recovery_source_operator_states{{}, {}};
-    OperatorStateLookup recovery_key_operator_states{{}, {}};
-    OperatorStateLookup target_operator_states{{}, {}};
-    if (has_recovery_seed) {
+    if (prevalidate_source) {
         recovery_source_snapshot = ResolveRecoverySourceSnapshot(
             config, *target_index,
             beacon_bundle.recovery_authority_source, error);
@@ -725,10 +783,20 @@ std::unique_ptr<FrozenQuorumRosters> BuildActiveFrozenQuorumRostersImpl(
         if (!recovery_source_state ||
             !PrepareSnapshotOperatorLookup(
                 config, *recovery_source_state,
+                recovery_source_operator_states, error) ||
+            !HasUsableNormalRecoverySource(
+                genesis_hash, beacon_bundle.recovery_authority_source,
+                *recovery_source_snapshot, *recovery_source_state,
                 recovery_source_operator_states, error)) {
             return nullptr;
         }
+    }
 
+    std::optional<QuorumSnapshotState> recovery_key_state;
+    std::optional<QuorumSnapshotState> target_state;
+    OperatorStateLookup recovery_key_operator_states{{}, {}};
+    OperatorStateLookup target_operator_states{{}, {}};
+    if (has_recovery_seed) {
         const auto recovery_seed{std::find_if(
             beacon_bundle.seeds.begin(), beacon_bundle.seeds.end(),
             [](const RosterBeaconSeed& seed) {
@@ -1133,6 +1201,39 @@ std::optional<QuorumSnapshotState>
 FrozenQuorumRosterCache::LookupSnapshot(const CBlockIndex& index) const
 {
     return m_snapshot_lookup(index);
+}
+
+std::optional<bool> FrozenQuorumRosterCache::EvaluateNormalRecoverySource(
+    const RecoveryRosterAuthoritySource& source,
+    const CBlockIndex& branch_tip,
+    QuorumBuildError* error) const
+{
+    SetError(error, QuorumBuildError::NONE);
+    const CBlockIndex* source_snapshot{ResolveRecoverySourceSnapshot(
+        m_config, branch_tip, source, error)};
+    if (source_snapshot == nullptr) return std::nullopt;
+
+    auto state{LookupSnapshotExact(
+        *source_snapshot, m_snapshot_lookup, error)};
+    OperatorStateLookup operator_states{{}, {}};
+    if (!state || !PrepareSnapshotOperatorLookup(
+                      m_config, *state, operator_states, error)) {
+        return std::nullopt;
+    }
+    QuorumBuildError usability_error{QuorumBuildError::NONE};
+    if (HasUsableNormalRecoverySource(
+            m_genesis_hash, source, *source_snapshot, *state,
+            operator_states, &usability_error)) {
+        return true;
+    }
+    if (usability_error == QuorumBuildError::INSUFFICIENT_ELIGIBLE_MEMBERS ||
+        usability_error == QuorumBuildError::DUPLICATE_CHILD_KEY ||
+        usability_error == QuorumBuildError::CHILD_KEY_NOT_FROZEN) {
+        SetError(error, usability_error);
+        return false;
+    }
+    SetError(error, usability_error);
+    return std::nullopt;
 }
 
 uint8_t GetSigningRosterAuthorizationMask(

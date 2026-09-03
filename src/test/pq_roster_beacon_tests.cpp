@@ -190,6 +190,12 @@ NormalRosterAuthorizationInput NormalInput(
     input.recovery_authority_source = recovery_authorized
         ? previous_window.active.recovery_authority_source
         : RecoveryRosterAuthoritySource{*source};
+    if (input.recovery_authority_source !=
+        previous_window.active.recovery_authority_source) {
+        input.recovery_source_evaluation =
+            NormalRosterAuthorizationInput::RecoverySourceEvaluation{
+                input.recovery_authority_source, true};
+    }
     return input;
 }
 
@@ -998,6 +1004,9 @@ BOOST_AUTO_TEST_CASE(normal_reveal_requires_exact_active_h37_and_six_confirmatio
     revealed_source.state = RosterBeaconState::READY;
     revealed_source.future_btc_hash = input.pending_reveal->future_hash;
     input.recovery_authority_source.normal_beacon = revealed_source;
+    input.recovery_source_evaluation =
+        NormalRosterAuthorizationInput::RecoverySourceEvaluation{
+            input.recovery_authority_source, true};
 
     const auto decision{
         DeriveNormalRosterAuthorizationDecision(genesis, input)};
@@ -1011,6 +1020,30 @@ BOOST_AUTO_TEST_CASE(normal_reveal_requires_exact_active_h37_and_six_confirmatio
                     .recovery_authority_source.normal_beacon ==
                 decision->transition.new_window.next);
     BOOST_CHECK_EQUAL(decision->authorization_mask, 0b1111);
+
+    auto insufficient_roots{input};
+    insufficient_roots.recovery_source_evaluation->usable = false;
+    insufficient_roots.recovery_authority_source =
+        pending_window.active.recovery_authority_source;
+    const auto retained{DeriveNormalRosterAuthorizationDecision(
+        genesis, insufficient_roots)};
+    BOOST_REQUIRE(retained);
+    BOOST_CHECK(retained->transition.kind ==
+                RosterAuthorizationTransitionKind::REVEAL);
+    BOOST_CHECK(retained->transition.new_window.next ==
+                decision->transition.new_window.next);
+    BOOST_CHECK(retained->transition.new_window.active
+                    .recovery_authority_source ==
+                pending_window.active.recovery_authority_source);
+    auto false_advance{insufficient_roots};
+    false_advance.recovery_authority_source =
+        input.recovery_authority_source;
+    BOOST_CHECK(!DeriveNormalRosterAuthorizationDecision(
+        genesis, false_advance));
+    auto unevaluated{input};
+    unevaluated.recovery_source_evaluation.reset();
+    BOOST_CHECK(!DeriveNormalRosterAuthorizationDecision(
+        genesis, unevaluated));
 
     auto stale_source{input};
     stale_source.recovery_authority_source =
@@ -1135,6 +1168,9 @@ BOOST_AUTO_TEST_CASE(normal_rotation_can_atomically_reveal_pending_seed)
     revealed_source.state = RosterBeaconState::READY;
     revealed_source.future_btc_hash = input.pending_reveal->future_hash;
     input.recovery_authority_source.normal_beacon = revealed_source;
+    input.recovery_source_evaluation =
+        NormalRosterAuthorizationInput::RecoverySourceEvaluation{
+            input.recovery_authority_source, true};
     const auto decision{
         DeriveNormalRosterAuthorizationDecision(genesis, input)};
     BOOST_REQUIRE(decision);
@@ -1186,6 +1222,9 @@ BOOST_AUTO_TEST_CASE(normal_transitions_carry_recovery_authority_until_drained)
             // The rotation that removes the final recovery roster also
             // commits the already-authenticated normal seed it consumes.
             input.recovery_authority_source.normal_beacon = window.next;
+            input.recovery_source_evaluation =
+                NormalRosterAuthorizationInput::RecoverySourceEvaluation{
+                    input.recovery_authority_source, true};
         }
         if (newest_epoch == 104) {
             auto changed_source{input};

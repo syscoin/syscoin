@@ -330,11 +330,22 @@ DeriveNormalRosterAuthorizationDecision(
     RecoveryRosterAuthoritySource expected_source{
         input.previous.window.active.recovery_authority_source};
     if (!recovery_authorized) {
-        // Commit newly authenticated entropy in the same state edge. This
-        // keeps a receipted REVEAL and the recovery source it names atomic.
         const auto* newest_normal{FindNewestNormalReadySeed(new_window)};
         if (newest_normal == nullptr) return std::nullopt;
-        expected_source.normal_beacon = *newest_normal;
+        RecoveryRosterAuthoritySource candidate{*newest_normal};
+        if (candidate != expected_source) {
+            if (!input.recovery_source_evaluation ||
+                input.recovery_source_evaluation->source != candidate) {
+                return std::nullopt;
+            }
+            if (input.recovery_source_evaluation->usable) {
+                expected_source = std::move(candidate);
+            }
+        } else if (input.recovery_source_evaluation) {
+            return std::nullopt;
+        }
+    } else if (input.recovery_source_evaluation) {
+        return std::nullopt;
     }
     if (input.recovery_authority_source != expected_source) {
         return std::nullopt;

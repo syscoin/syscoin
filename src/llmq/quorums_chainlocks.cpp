@@ -9286,6 +9286,7 @@ CChainLocksHandler::BuildNormalRosterAuthorizationInput(
     input.recovery_authority_source =
         statement.roster_beacons.active.recovery_authority_source;
 
+    const CBlockIndex* candidate_index{nullptr};
     {
         LOCK(cs_main);
         const CBlockIndex* candidate{
@@ -9293,6 +9294,7 @@ CChainLocksHandler::BuildNormalRosterAuthorizationInput(
         if (candidate == nullptr || candidate->nHeight != statement.height) {
             return std::nullopt;
         }
+        candidate_index = candidate;
         const CBlockIndex* wire_predecessor{
             candidate->GetAncestor(statement.previous_chainlock_height)};
         const CBlockIndex* authorization_predecessor{
@@ -9361,6 +9363,59 @@ CChainLocksHandler::BuildNormalRosterAuthorizationInput(
             pq::RosterAuthorizationTransitionKind::REVEAL ||
         requested_transition ==
             pq::RosterAuthorizationTransitionKind::ROTATE};
+    const auto finalize_recovery_source = [&]() {
+        if (!range_required) return true;
+
+        auto candidate_seed{input.previous.window.next};
+        if (!candidate_seed.IsReady()) {
+            if (!input.pending_reveal ||
+                candidate_seed.state != pq::RosterBeaconState::PENDING) {
+                return false;
+            }
+            candidate_seed.state = pq::RosterBeaconState::READY;
+            candidate_seed.future_btc_hash =
+                input.pending_reveal->future_hash;
+        }
+
+        auto prospective_active{input.previous.window.active.seeds};
+        if (rotates) {
+            for (std::size_t slot{0}; slot + 1 < pq::ACTIVE_QUORUMS;
+                 ++slot) {
+                prospective_active[slot] = prospective_active[slot + 1];
+            }
+            prospective_active.back() = candidate_seed;
+        }
+        if (std::any_of(
+                prospective_active.begin(), prospective_active.end(),
+                [](const pq::RosterBeaconSeed& seed) {
+                    return seed.anchor_kind ==
+                           pq::RosterBeaconAnchorKind::RECOVERY;
+                })) {
+            return true;
+        }
+
+        const pq::RecoveryRosterAuthoritySource candidate_source{
+            candidate_seed};
+        if (candidate_source ==
+            input.previous.window.active.recovery_authority_source) {
+            return true;
+        }
+        const auto roster_cache{GetQuorumRosterCache()};
+        if (!roster_cache || candidate_index == nullptr) return false;
+        pq::QuorumBuildError build_error{pq::QuorumBuildError::NONE};
+        const auto usable{roster_cache->EvaluateNormalRecoverySource(
+            candidate_source, *candidate_index, &build_error)};
+        if (!usable) return false;
+        input.recovery_source_evaluation =
+            pq::NormalRosterAuthorizationInput::RecoverySourceEvaluation{
+                candidate_source, *usable};
+        if (evidence == RosterBeaconEvidence::SIGNER_POLICY) {
+            input.recovery_authority_source = *usable
+                ? candidate_source
+                : input.previous.window.active.recovery_authority_source;
+        }
+        return true;
+    };
     if (!observation_required && !range_required) return input;
 
     if (evidence == RosterBeaconEvidence::THRESHOLD_CERTIFICATE) {
@@ -9390,7 +9445,10 @@ CChainLocksHandler::BuildNormalRosterAuthorizationInput(
             if (!anchor) return std::nullopt;
             input.accepted_anchor = *anchor;
         }
-        return input;
+        return finalize_recovery_source()
+            ? std::optional<pq::NormalRosterAuthorizationInput>{
+                  std::move(input)}
+            : std::nullopt;
     }
 
     std::string reason;
@@ -9463,7 +9521,10 @@ CChainLocksHandler::BuildNormalRosterAuthorizationInput(
             return std::nullopt;
         }
     }
-    return input;
+    return finalize_recovery_source()
+        ? std::optional<pq::NormalRosterAuthorizationInput>{
+              std::move(input)}
+        : std::nullopt;
 }
 
 std::optional<pq::RosterAuthorizationVerificationContext>
@@ -10879,32 +10940,6 @@ CChainLocksHandler::BuildCurrentSigningContexts(
         auto input{BuildNormalRosterAuthorizationInput(
             statement, authorization_base, requested,
             RosterBeaconEvidence::SIGNER_POLICY)};
-        const bool resulting_recovery{
-            requested == pq::RosterAuthorizationTransitionKind::ROTATE
-                ? std::any_of(
-                      std::next(previous_window.active.seeds.begin()),
-                      previous_window.active.seeds.end(),
-                      [](const pq::RosterBeaconSeed& seed) {
-                          return seed.anchor_kind ==
-                                 pq::RosterBeaconAnchorKind::RECOVERY;
-                      })
-                : pq::HasRecoveryRosterBeacon(previous_window)};
-        const bool authenticates_new_ready_source{
-            requested == pq::RosterAuthorizationTransitionKind::REVEAL ||
-            requested == pq::RosterAuthorizationTransitionKind::ROTATE};
-        if (input && !resulting_recovery &&
-            authenticates_new_ready_source) {
-            auto consumed{previous_window.next};
-            if (!consumed.IsReady()) {
-                if (!input->pending_reveal) return false;
-                consumed.state = pq::RosterBeaconState::READY;
-                consumed.future_btc_hash =
-                    input->pending_reveal->future_hash;
-            }
-            auto advanced_source{recovery_authority_source};
-            advanced_source.normal_beacon = std::move(consumed);
-            input->recovery_authority_source = advanced_source;
-        }
         auto decision{input
             ? pq::DeriveNormalRosterAuthorizationDecision(
                   m_genesis_hash, *input)

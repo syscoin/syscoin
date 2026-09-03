@@ -119,6 +119,16 @@ public:
     [[nodiscard]] std::optional<QuorumSnapshotState> LookupSnapshot(
         const CBlockIndex& index) const;
 
+    /**
+     * Evaluate a newly authenticated normal recovery source against its exact
+     * branch snapshot. False is an objective lack of 400 unique frozen roots;
+     * nullopt denotes unavailable or inconsistent local source state.
+     */
+    [[nodiscard]] std::optional<bool> EvaluateNormalRecoverySource(
+        const RecoveryRosterAuthoritySource& source,
+        const CBlockIndex& branch_tip,
+        QuorumBuildError* error = nullptr) const;
+
     [[nodiscard]] const uint256& GenesisHash() const noexcept
     {
         return m_genesis_hash;
@@ -178,12 +188,12 @@ using FrozenQuorumRosterCachePtr =
 /**
  * Build one canonical 400-slot roster from an exact deterministic-MN snapshot.
  * The base height is derived from the fixed schedule, not accepted from a
- * caller. Payment state never enters validator selection. Root-capable
- * candidates rank ahead of keyless records, with each group ordered by the
- * epoch score derived from the exact NORMAL READY delayed-Bitcoin seed. The
- * branch base hash remains descriptor identity only and never enters that score.
- * Missing operator state or a frozen-absent key leaves an otherwise selected
- * slot without a child key.
+ * caller. Payment state never enters validator selection. Every selected
+ * member must have an exact frozen child root for the roster epoch; dormant
+ * legacy records and payment probation do not fill or reorder PQ roster slots.
+ * Candidates are ordered by the epoch score derived from the exact NORMAL
+ * READY delayed-Bitcoin seed. The branch base hash remains descriptor identity
+ * only and never enters that score.
  */
 [[nodiscard]] std::unique_ptr<FrozenQuorumRoster> BuildFrozenQuorumRoster(
     const uint256& genesis_hash,
@@ -200,8 +210,10 @@ using FrozenQuorumRosterCachePtr =
  * the exact corresponding READY beacon bundle. Recovery rosters select their
  * identities from the authenticated pre-F source, freeze keys at the shared
  * cutoff before the oldest recovery epoch, and use target state only to
- * disable those fixed entries. Every lookup is an ancestor of branch_tip and
- * its returned height, hash, and registry schedule revision are checked.
+ * disable those fixed entries. A newly revealed source that is not active yet
+ * is accepted only after its exact snapshot can build a complete normal
+ * 400-root roster. Every lookup is an ancestor of branch_tip and its returned
+ * height, hash, and registry schedule revision are checked.
  */
 [[nodiscard]] FrozenQuorumRostersPtr
 BuildActiveFrozenQuorumRosters(

@@ -120,6 +120,19 @@ struct NormalRosterAuthorizationInput {
     std::optional<ValidatedRosterBeaconAnchor> accepted_anchor;
     std::optional<ValidatedRosterBeaconRange> pending_reveal;
     std::optional<ValidatedRosterBeaconRange> ready_rotation;
+    /**
+     * Caller-derived result for a newly authenticated recovery source. The
+     * source identity binds the fact to the exact frozen snapshot that was
+     * checked; absence means this transition does not consider a new source.
+     */
+    struct RecoverySourceEvaluation {
+        RecoveryRosterAuthoritySource source;
+        bool usable{false};
+
+        friend bool operator==(const RecoverySourceEvaluation&,
+                               const RecoverySourceEvaluation&) = default;
+    };
+    std::optional<RecoverySourceEvaluation> recovery_source_evaluation;
     /** Exact pre-reveal recovery source committed by the signed prior state. */
     RecoveryRosterAuthoritySource recovery_authority_source;
 };

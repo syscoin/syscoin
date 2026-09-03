@@ -499,10 +499,24 @@ OperatorKeyState MakeOperatorState(
         build_config.future_horizon_epochs)};
     if (!view) return {};
 
-    auto authorization{MakeAuthorization(
-        genesis_hash, public_keys, pro_tx_hash, epoch, member_index)};
+    auto authorization = [&] {
+        if (member_index < QUORUM_MIN_VALID) {
+            return MakeAuthorization(
+                genesis_hash, public_keys, pro_tx_hash, epoch,
+                member_index);
+        }
+        scheduled_wots::PublicKey public_key{};
+        const uint256 material{NonNullHash(
+            static_cast<uint64_t>(epoch) * QUORUM_SIZE + member_index + 1,
+            0x524f4f54)};
+        std::copy(material.begin(), material.end(), public_key.begin());
+        return test::MakeSyntheticChildAuthorization(
+            genesis_hash, pro_tx_hash, epoch, public_key,
+            AuthorizationDiscriminator(epoch, member_index));
+    }();
     const uint32_t key_version{epoch + 1};
-    const std::size_t key_index{ChildKeyIndex(epoch, member_index)};
+    const std::size_t key_index{
+        static_cast<std::size_t>(epoch) * QUORUM_SIZE + member_index};
     authorization.record.global_key_version = key_version;
 
     OperatorKeyState state{OperatorKeyState::ForOperator(pro_tx_hash)};
@@ -601,8 +615,8 @@ bool PopulatePaymentAuditSnapshots(PaymentAuditFixture& fixture)
             *snapshot_height, fixture.args.snapshot_hashes[epoch]);
         auto operator_states{
             std::make_shared<std::vector<OperatorKeyState>>()};
-        operator_states->reserve(QUORUM_MIN_VALID);
-        for (std::size_t member{0}; member < QUORUM_MIN_VALID; ++member) {
+        operator_states->reserve(QUORUM_SIZE);
+        for (std::size_t member{0}; member < QUORUM_SIZE; ++member) {
             const uint256 pro_tx_hash{NonNullHash(10'000 + member)};
             auto state{MakeOperatorState(
                 fixture.args.genesis_hash, fixture.args.build_config,
@@ -1205,8 +1219,8 @@ bool BuildSnapshotsAndRosters(FullDimensionFixture& fixture)
             Snapshot(*snapshot_height, fixture.args.snapshot_hashes[slot]);
         auto operator_states{
             std::make_shared<std::vector<OperatorKeyState>>()};
-        operator_states->reserve(QUORUM_MIN_VALID);
-        for (std::size_t member{0}; member < QUORUM_MIN_VALID; ++member) {
+        operator_states->reserve(QUORUM_SIZE);
+        for (std::size_t member{0}; member < QUORUM_SIZE; ++member) {
             const uint256 pro_tx_hash{NonNullHash(10'000 + member)};
             auto state{MakeOperatorState(
                 fixture.args.genesis_hash, fixture.args.build_config,
@@ -1282,8 +1296,8 @@ bool BuildSnapshotsAndRosters(FullDimensionFixture& fixture)
     }
 
     for (const auto& roster : *fixture.rosters) {
-        if (roster.descriptor.valid_count != QUORUM_MIN_VALID ||
-            CountSet(roster.descriptor.valid_members) != QUORUM_MIN_VALID ||
+        if (roster.descriptor.valid_count != QUORUM_SIZE ||
+            CountSet(roster.descriptor.valid_members) != QUORUM_SIZE ||
             std::count_if(
                 roster.members.begin(), roster.members.end(),
                 [](const FrozenQuorumMember& member) {
@@ -1293,7 +1307,7 @@ bool BuildSnapshotsAndRosters(FullDimensionFixture& fixture)
                 roster.members.begin(), roster.members.end(),
                 [](const FrozenQuorumMember& member) {
                     return member.eligible && member.child_root.has_value();
-                }) != static_cast<std::ptrdiff_t>(QUORUM_MIN_VALID)) {
+                }) != static_cast<std::ptrdiff_t>(QUORUM_SIZE)) {
             std::cerr << "unexpected full-dimension roster shape\n";
             return false;
         }

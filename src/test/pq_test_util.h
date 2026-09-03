@@ -172,6 +172,12 @@ MakeSyntheticNormalRosterAuthorizationInput(
     input.btcc_advance = statement.btcc_advance;
     input.recovery_authority_source =
         statement.roster_beacons.active.recovery_authority_source;
+    if (input.recovery_authority_source !=
+        previous.window.active.recovery_authority_source) {
+        input.recovery_source_evaluation =
+            NormalRosterAuthorizationInput::RecoverySourceEvaluation{
+                input.recovery_authority_source, true};
+    }
     input.next_snapshot = RosterBeaconSnapshotCoverage{
         input.newest_epoch + 1, statement.previous_chainlock_height + 1,
         {}, false};
