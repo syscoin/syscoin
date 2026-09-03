@@ -140,6 +140,8 @@ llmq::pq::RosterBeaconWindow MakeRosterBeaconWindow()
         seed.anchor_btc_height = 800'000 + static_cast<int32_t>(slot);
         seed.future_btc_hash = MakeHash(30'000 + slot);
     }
+    window.active.recovery_authority_source.normal_beacon =
+        window.active.seeds.back();
     window.next.epoch = llmq::pq::ACTIVE_QUORUMS;
     return window;
 }
