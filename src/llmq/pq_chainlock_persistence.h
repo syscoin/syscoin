@@ -40,9 +40,13 @@ inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_PAYMENT_AUDIT_SEAL_CONTEXT_KEY
 inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_AUTHORIZATION_BASE_KEY{13};
 inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_RECOVERY_UNIVERSE_KEY{14};
 
-/** One capsule for every independently bounded durable finality owner. */
+/**
+ * One capsule for every independently bounded durable source owner: the
+ * retained authorization rows, current best, current unsealed receipt target,
+ * and receipt-archive owner metadata.
+ */
 inline constexpr std::size_t RECOVERY_UNIVERSE_DURABLE_OWNER_CAPACITY{
-    VERIFIED_AUTHORIZATION_BASE_CAPACITY + 5};
+    VERIFIED_AUTHORIZATION_BASE_CAPACITY + 3};
 
 inline constexpr uint16_t ROSTER_RECOVERY_PRECOMMIT_VERSION{1};
 
