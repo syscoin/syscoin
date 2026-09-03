@@ -2744,7 +2744,8 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
             m_genesis_hash, *m_config,
             static_cast<const pq::ChainLockFinalityContext&>(*this),
             [this](const pq::FinalChainLock& chainlock,
-                   const pq::PreparedChainLockContextPtr& context) {
+                   const pq::PreparedChainLockContextPtr& context,
+                   const pq::RecoveryUniverseCapsulePtr& recovery_universe) {
                 std::optional<pq::PaymentAuditSealContextCapsule>
                     seal_context;
                 const bool seal_context_ready{
@@ -2755,11 +2756,8 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
                 const auto publication{seal_context_ready
                     ? BeginChainLockAuxiliarySnapshotPublication()
                     : std::nullopt};
-                pq::RecoveryUniverseCapsulePtr recovery_universe;
                 bool persisted{
                     publication && m_persistence &&
-                    CaptureRecoveryUniverseForDurableCandidate(
-                        chainlock, recovery_universe) &&
                     (chainlock.statement.roster_transition ==
                              pq::RosterAuthorizationTransitionKind::INITIALIZE
                          ? m_persistence->PersistInitializedBest(
@@ -2785,14 +2783,12 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
                 return persisted;
             },
             [this](const pq::FinalChainLock& chainlock,
-                   const pq::PreparedChainLockContextPtr& context) {
+                   const pq::PreparedChainLockContextPtr& context,
+                   const pq::RecoveryUniverseCapsulePtr& recovery_universe) {
                 const auto publication{
                     BeginChainLockAuxiliarySnapshotPublication()};
-                pq::RecoveryUniverseCapsulePtr recovery_universe;
                 bool persisted{
                     publication && m_persistence &&
-                    CaptureRecoveryUniverseForDurableCandidate(
-                        chainlock, recovery_universe) &&
                     m_persistence->PersistUnsealedBTCC(
                         chainlock, context, nullptr,
                         std::move(recovery_universe))};
@@ -2812,12 +2808,12 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
                        btcc_cursor_reconciliation,
                    const pq::ReceiptArchiveRosterAuthorization*
                        covering_authorization,
-                   const pq::PreparedChainLockContextPtr& context) {
+                   const pq::PreparedChainLockContextPtr& context,
+                   const pq::RecoveryUniverseCapsulePtr& recovery_universe) {
                 pq::ChainLockPersistenceError persistence_error{
                     pq::ChainLockPersistenceError::NONE};
                 std::optional<pq::PaymentAuditSealContextCapsule>
                     seal_context;
-                pq::RecoveryUniverseCapsulePtr recovery_universe;
                 const bool seal_context_ready{
                     pq::PaymentAuditSealContextCapsule::
                         BuildForVerifiedDurableCandidate(
@@ -2854,8 +2850,6 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
                     BeginChainLockAuxiliarySnapshotPublication()};
                 bool persisted{
                     publication && m_persistence &&
-                    CaptureRecoveryUniverseForDurableCandidate(
-                        chainlock, recovery_universe) &&
                     persist()};
                 if (!persisted) {
                     // A stale semantic CAS is a rejected candidate, not a
@@ -2889,14 +2883,12 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
             [this](
                 const pq::FinalChainLock& chainlock,
                 const pq::ReceiptArchiveRosterAuthorization& authorization,
-                const pq::PreparedChainLockContextPtr& context) {
+                const pq::PreparedChainLockContextPtr& context,
+                const pq::RecoveryUniverseCapsulePtr& recovery_universe) {
                 const auto publication{
                     BeginChainLockAuxiliarySnapshotPublication()};
-                pq::RecoveryUniverseCapsulePtr recovery_universe;
                 bool persisted{
                     publication && m_persistence &&
-                    CaptureRecoveryUniverseForDurableCandidate(
-                        chainlock, recovery_universe) &&
                     m_persistence->PersistAuthorizedUnsealedBTCC(
                         chainlock, context, authorization, nullptr,
                         std::move(recovery_universe))};
@@ -2914,7 +2906,8 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
             [this](
                 const pq::FinalChainLock& chainlock,
                 const pq::ReceiptArchiveRosterAuthorization& authorization,
-                const pq::PreparedChainLockContextPtr& context) {
+                const pq::PreparedChainLockContextPtr& context,
+                const pq::RecoveryUniverseCapsulePtr& recovery_universe) {
                 std::optional<pq::PaymentAuditSealContextCapsule>
                     seal_context;
                 const bool seal_context_ready{
@@ -2925,11 +2918,8 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
                 const auto publication{seal_context_ready
                     ? BeginChainLockAuxiliarySnapshotPublication()
                     : std::nullopt};
-                pq::RecoveryUniverseCapsulePtr recovery_universe;
                 bool persisted{
                     publication && m_persistence &&
-                    CaptureRecoveryUniverseForDurableCandidate(
-                        chainlock, recovery_universe) &&
                     m_persistence->PersistBestCoveringReceiptArchive(
                         chainlock, context, authorization, nullptr,
                         std::move(seal_context),
@@ -2952,6 +2942,7 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
                 const pq::ReceiptArchiveRosterAuthorization*
                     covering_authorization,
                 const pq::PreparedChainLockContextPtr& context,
+                const pq::RecoveryUniverseCapsulePtr& recovery_universe,
                 const pq::VerifiedRecoveryResetPersistenceCapability&
                     verified_reset) {
                 pq::ChainLockPersistenceError persistence_error{
@@ -2966,11 +2957,8 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
                 const auto publication{seal_context_ready
                     ? BeginChainLockAuxiliarySnapshotPublication()
                     : std::nullopt};
-                pq::RecoveryUniverseCapsulePtr recovery_universe;
                 bool persisted{false};
-                if (publication && m_persistence &&
-                    CaptureRecoveryUniverseForDurableCandidate(
-                        chainlock, recovery_universe)) {
+                if (publication && m_persistence) {
                     switch (chainlock.statement.roster_transition) {
                     case pq::RosterAuthorizationTransitionKind::INITIALIZE:
                         persisted = m_persistence->PersistInitializedBest(
@@ -3024,14 +3012,12 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
                 return persisted;
             },
             [this](const pq::FinalChainLock& chainlock,
-                   const pq::PreparedChainLockContextPtr& context) {
+                   const pq::PreparedChainLockContextPtr& context,
+                   const pq::RecoveryUniverseCapsulePtr& recovery_universe) {
                 const auto publication{
                     BeginChainLockAuxiliarySnapshotPublication()};
-                pq::RecoveryUniverseCapsulePtr recovery_universe;
                 bool persisted{
                     publication && m_persistence &&
-                    CaptureRecoveryUniverseForDurableCandidate(
-                        chainlock, recovery_universe) &&
                     m_persistence->PersistVerifiedAuthorizationBase(
                         chainlock, context, nullptr,
                         std::move(recovery_universe))};
@@ -15722,6 +15708,14 @@ bool CChainLocksHandler::ProcessNewChainLockInternal(
                         m_store->AbandonPrepared(*prepared);
                         return false;
                     }
+                    pq::RecoveryUniverseCapsulePtr recovery_universe;
+                    if (!CaptureRecoveryUniverseForDurableCandidate(
+                            chainlock, recovery_universe)) {
+                        finality_error =
+                            pq::ChainLockFinalityError::CONTEXT_CHANGED;
+                        m_store->AbandonPrepared(*prepared);
+                        return false;
+                    }
                     const auto sync_index = [&] {
                         const bool flushed{
                             FlushBTCCIndexStateForDurableAcceptance(
@@ -15770,7 +15764,8 @@ bool CChainLocksHandler::ProcessNewChainLockInternal(
                             coverage_authorization
                                 ? &*coverage_authorization
                                 : nullptr,
-                            verification_context->prepared_context);
+                            verification_context->prepared_context,
+                            recovery_universe);
                     }
                     return m_store->AcceptPresealReceiptVerified(
                         *prepared, chainlock, /*signatures_valid=*/true,
@@ -15779,7 +15774,8 @@ bool CChainLocksHandler::ProcessNewChainLockInternal(
                         verification_context->prepared_context,
                         receipt_archive_capability
                             ? &receipt_archive_capability->authorization
-                            : nullptr);
+                            : nullptr,
+                        recovery_universe);
                 });
             historical_acceptance_complete = true;
             // Retained disk/carrier replay cannot escape globally serialized
@@ -15903,6 +15899,12 @@ bool CChainLocksHandler::ProcessNewChainLockInternal(
                 ? std::optional<
                       pq::ReceiptArchiveRosterAuthorization>{}
                 : GetReceiptArchiveCoverageAuthorization(*prepared)};
+        pq::RecoveryUniverseCapsulePtr recovery_universe;
+        if (!CaptureRecoveryUniverseForDurableCandidate(
+                chainlock, recovery_universe)) {
+            finality_error = pq::ChainLockFinalityError::CONTEXT_CHANGED;
+            return false;
+        }
         if (!FlushBTCCIndexStateForDurableAcceptance(chainlock)) {
             index_persistence_failed = true;
             return false;
@@ -15918,17 +15920,20 @@ bool CChainLocksHandler::ProcessNewChainLockInternal(
                 *prepared, chainlock, /*signatures_valid=*/true,
                 receipt_archive_capability->authorization,
                 authorize_durable, &finality_error,
-                verification_context->prepared_context);
+                verification_context->prepared_context,
+                recovery_universe);
         }
         return coverage_authorization
             ? m_store->AcceptVerifiedCoveringReceiptArchive(
                   *prepared, chainlock, /*signatures_valid=*/true,
                   *coverage_authorization, &finality_error,
-                  verification_context->prepared_context)
+                  verification_context->prepared_context,
+                  recovery_universe)
             : m_store->AcceptVerified(
                   *prepared, chainlock, /*signatures_valid=*/true,
                   &finality_error,
-                  verification_context->prepared_context);
+                  verification_context->prepared_context,
+                  recovery_universe);
     };
     if (!historical_acceptance_complete) {
         accepted = m_chainman.ActiveChainstate().RunWithStableActiveChain(

@@ -5,13 +5,17 @@
 #include <llmq/pq_chainlock_store.h>
 #include <llmq/pq_payment_audit.h>
 
+#include <streams.h>
+
 #include <test/pq_test_util.h>
 #include <test/util/setup_common.h>
 
 #include <cstddef>
 #include <cstdint>
+#include <algorithm>
 #include <map>
 #include <optional>
+#include <vector>
 
 #include <boost/test/unit_test.hpp>
 
@@ -82,6 +86,50 @@ RosterBeaconWindow InitializationWindow(int32_t height)
         window.active.seeds.back();
     window.next.epoch = active->back().epoch + 1;
     return window;
+}
+
+RecoveryUniverseCapsulePtr RecoveryUniverseFor(
+    const uint256& genesis_hash,
+    const RosterBeaconWindow& window,
+    uint64_t salt)
+{
+    const auto& source{window.active.recovery_authority_source};
+    std::vector<RecoveryUniverseMember> members;
+    members.reserve(QUORUM_SIZE);
+    for (std::size_t index{0}; index < QUORUM_SIZE; ++index) {
+        members.push_back(RecoveryUniverseMember{
+            NonNullHash(salt + index + 1),
+            NonNullHash(salt + QUORUM_SIZE + index + 1),
+            COutPoint{NonNullHash(
+                          salt + 2 * QUORUM_SIZE + index + 1),
+                      static_cast<uint32_t>(index)}});
+    }
+    std::sort(members.begin(), members.end(),
+              [](const auto& left, const auto& right) {
+                  return left.pro_tx_hash < right.pro_tx_hash;
+              });
+    const int32_t snapshot_height{
+        source.normal_beacon.anchor_cursor.sys_height - 1};
+    const uint256 snapshot_hash{NonNullHash(salt + 10'000)};
+    const uint256 source_id{
+        GetRecoveryUniverseSourceId(genesis_hash, source)};
+    const uint256 members_hash{
+        GetRecoveryUniverseMembersHash(genesis_hash, members)};
+    const uint256 capsule_id{GetRecoveryUniverseCapsuleId(
+        genesis_hash, source, snapshot_height, snapshot_hash,
+        members_hash, members.size())};
+    DataStream stream{SER_DISK};
+    stream << RECOVERY_UNIVERSE_CAPSULE_VERSION << genesis_hash << source
+           << snapshot_height << snapshot_hash << source_id
+           << static_cast<uint32_t>(members.size());
+    for (const auto& member : members) stream << member;
+    stream << members_hash << capsule_id;
+    const auto encoded{std::vector<uint8_t>{
+        UCharCast(stream.data()), UCharCast(stream.data() + stream.size())}};
+    const auto capsule{
+        RecoveryUniverseCapsule::DecodeTrustedPersistence(encoded)};
+    BOOST_REQUIRE(capsule);
+    return std::make_shared<const RecoveryUniverseCapsule>(*capsule);
 }
 
 FinalChainLock MakeChainLock(int32_t height,
@@ -468,7 +516,8 @@ BOOST_AUTO_TEST_CASE(verified_authorization_base_is_exact_and_not_finality)
     ChainLockFinalityStore store{
         genesis, config, context, {}, {}, {}, {}, {}, {},
         [&](const FinalChainLock& durable,
-            const PreparedChainLockContextPtr& durable_context) {
+            const PreparedChainLockContextPtr& durable_context,
+            const RecoveryUniverseCapsulePtr&) {
             ++durable_calls;
             BOOST_REQUIRE(durable_context);
             BOOST_CHECK(durable.statement ==
@@ -914,14 +963,20 @@ BOOST_AUTO_TEST_CASE(durable_accept_failure_leaves_store_unchanged)
     TestFinalityContext context;
     bool allow_persistence{false};
     std::size_t callback_count{0};
+    RecoveryUniverseCapsulePtr expected_recovery_universe;
     ChainLockFinalityStore store{
         genesis, config, context,
         [&](const FinalChainLock&,
-            const PreparedChainLockContextPtr&) {
+            const PreparedChainLockContextPtr&,
+            const RecoveryUniverseCapsulePtr& recovery_universe) {
             ++callback_count;
+            BOOST_CHECK(recovery_universe == expected_recovery_universe);
             return allow_persistence;
         }};
     const auto chainlock{MakeChainLock(865, 864, NonNullHash(864), 30)};
+    expected_recovery_universe = RecoveryUniverseFor(
+        genesis, chainlock.statement.roster_beacons, 30'000'000);
+    BOOST_REQUIRE(expected_recovery_universe);
     ChainLockFinalityError error{ChainLockFinalityError::NONE};
 
     auto prepared{store.PrepareCandidate(chainlock, &error)};
@@ -929,7 +984,8 @@ BOOST_AUTO_TEST_CASE(durable_accept_failure_leaves_store_unchanged)
     const auto verification_context{
         MakeVerificationContext(genesis, config, chainlock)};
     BOOST_CHECK(!store.AcceptVerified(
-        *prepared, chainlock, true, &error, verification_context));
+        *prepared, chainlock, true, &error, verification_context,
+        expected_recovery_universe));
     BOOST_CHECK(error == ChainLockFinalityError::PERSISTENCE_FAILURE);
     BOOST_CHECK(!store.GetBest());
     BOOST_CHECK(!store.GetBestRecord());
@@ -941,7 +997,8 @@ BOOST_AUTO_TEST_CASE(durable_accept_failure_leaves_store_unchanged)
     prepared = store.PrepareCandidate(chainlock, &error);
     BOOST_REQUIRE(prepared);
     BOOST_CHECK(store.AcceptVerified(
-        *prepared, chainlock, true, &error, verification_context));
+        *prepared, chainlock, true, &error, verification_context,
+        expected_recovery_universe));
     BOOST_CHECK(store.GetBest() && *store.GetBest() == chainlock);
     BOOST_REQUIRE(store.GetBestRecord());
     BOOST_CHECK_EQUAL(store.GetBestRecord()->state_revision, 1U);
@@ -955,10 +1012,12 @@ BOOST_AUTO_TEST_CASE(reset_capability_crosses_only_the_fully_verified_store_seam
     TestFinalityContext context;
     std::size_t ordinary_callbacks{0};
     std::size_t reset_callbacks{0};
+    RecoveryUniverseCapsulePtr expected_recovery_universe;
     ChainLockFinalityStore store{
         genesis, config, context,
         [&](const FinalChainLock&,
-            const PreparedChainLockContextPtr&) {
+            const PreparedChainLockContextPtr&,
+            const RecoveryUniverseCapsulePtr&) {
             ++ordinary_callbacks;
             return true;
         },
@@ -967,6 +1026,7 @@ BOOST_AUTO_TEST_CASE(reset_capability_crosses_only_the_fully_verified_store_seam
             const std::optional<BTCCCursorReconciliationProof>& reconciliation,
             const ReceiptArchiveRosterAuthorization* authorization,
             const PreparedChainLockContextPtr& verification_context,
+            const RecoveryUniverseCapsulePtr& recovery_universe,
             const VerifiedRecoveryResetPersistenceCapability&) {
             ++reset_callbacks;
             BOOST_CHECK(chainlock.statement.roster_transition ==
@@ -976,6 +1036,7 @@ BOOST_AUTO_TEST_CASE(reset_capability_crosses_only_the_fully_verified_store_seam
             BOOST_REQUIRE(verification_context);
             BOOST_CHECK(verification_context->Statement() ==
                         chainlock.statement);
+            BOOST_CHECK(recovery_universe == expected_recovery_universe);
             return true;
         }};
 
@@ -1016,9 +1077,12 @@ BOOST_AUTO_TEST_CASE(reset_capability_crosses_only_the_fully_verified_store_seam
     BOOST_REQUIRE(prepared);
     const auto verification_context{
         MakeVerificationContext(genesis, config, accepted)};
+    expected_recovery_universe = RecoveryUniverseFor(
+        genesis, accepted.statement.roster_beacons, 31'000'000);
+    BOOST_REQUIRE(expected_recovery_universe);
     BOOST_REQUIRE(store.AcceptVerified(
         *prepared, accepted, /*signatures_valid=*/true, &error,
-        verification_context));
+        verification_context, expected_recovery_universe));
     BOOST_CHECK_EQUAL(reset_callbacks, 1U);
     BOOST_CHECK_EQUAL(ordinary_callbacks, 0U);
     BOOST_REQUIRE(store.GetBest());
@@ -1114,7 +1178,8 @@ BOOST_AUTO_TEST_CASE(persisted_latest_restore_is_separate_from_live_admission)
     ChainLockFinalityStore store{
         genesis, MakeConfig(), context,
         [&](const FinalChainLock&,
-            const PreparedChainLockContextPtr&) {
+            const PreparedChainLockContextPtr&,
+            const RecoveryUniverseCapsulePtr&) {
             ++durable_callback_count;
             return true;
         }};
@@ -1162,7 +1227,8 @@ BOOST_AUTO_TEST_CASE(catchup_rebases_repeatably_across_missing_predecessors)
         [&](const FinalChainLock&,
             const std::optional<BTCCCursorReconciliationProof>&,
             const ReceiptArchiveRosterAuthorization* authorization,
-            const PreparedChainLockContextPtr&) {
+            const PreparedChainLockContextPtr&,
+            const RecoveryUniverseCapsulePtr&) {
             ++catchup_writes;
             if (authorization == nullptr) {
                 ++null_covering_authorizations;
@@ -1303,7 +1369,8 @@ BOOST_AUTO_TEST_CASE(
     ChainLockFinalityStore store{
         genesis, config, context,
         [&](const FinalChainLock&,
-            const PreparedChainLockContextPtr&) {
+            const PreparedChainLockContextPtr&,
+            const RecoveryUniverseCapsulePtr&) {
             ++live_writes;
             return true;
         },
@@ -1311,7 +1378,8 @@ BOOST_AUTO_TEST_CASE(
         [&](const FinalChainLock&,
             const std::optional<BTCCCursorReconciliationProof>&,
             const ReceiptArchiveRosterAuthorization*,
-            const PreparedChainLockContextPtr&) {
+            const PreparedChainLockContextPtr&,
+            const RecoveryUniverseCapsulePtr&) {
             ++catchup_writes;
             return true;
         }};
@@ -1381,7 +1449,8 @@ BOOST_AUTO_TEST_CASE(
         [&](const FinalChainLock&,
             const std::optional<BTCCCursorReconciliationProof>&,
             const ReceiptArchiveRosterAuthorization*,
-            const PreparedChainLockContextPtr&) {
+            const PreparedChainLockContextPtr&,
+            const RecoveryUniverseCapsulePtr&) {
             ++catchup_writes;
             return true;
         }};
@@ -1472,7 +1541,8 @@ BOOST_AUTO_TEST_CASE(
         [&](const FinalChainLock&,
             const std::optional<BTCCCursorReconciliationProof>& reconciliation,
             const ReceiptArchiveRosterAuthorization*,
-            const PreparedChainLockContextPtr&) {
+            const PreparedChainLockContextPtr&,
+            const RecoveryUniverseCapsulePtr&) {
             ahead_reconciliation = reconciliation.has_value();
             return true;
         }};
@@ -1481,7 +1551,8 @@ BOOST_AUTO_TEST_CASE(
         [&](const FinalChainLock&,
             const std::optional<BTCCCursorReconciliationProof>& reconciliation,
             const ReceiptArchiveRosterAuthorization*,
-            const PreparedChainLockContextPtr&) {
+            const PreparedChainLockContextPtr&,
+            const RecoveryUniverseCapsulePtr&) {
             caught_up_reconciliation = reconciliation.has_value();
             return true;
         }};
@@ -1490,7 +1561,8 @@ BOOST_AUTO_TEST_CASE(
         [&](const FinalChainLock&,
             const std::optional<BTCCCursorReconciliationProof>& reconciliation,
             const ReceiptArchiveRosterAuthorization*,
-            const PreparedChainLockContextPtr&) {
+            const PreparedChainLockContextPtr&,
+            const RecoveryUniverseCapsulePtr&) {
             behind_reconciliation = reconciliation.has_value();
             return true;
         }};
@@ -1622,7 +1694,8 @@ BOOST_AUTO_TEST_CASE(historical_durable_authorization_is_the_fsync_seam)
         [&](const FinalChainLock&,
             const std::optional<BTCCCursorReconciliationProof>&,
             const ReceiptArchiveRosterAuthorization*,
-            const PreparedChainLockContextPtr&) {
+            const PreparedChainLockContextPtr&,
+            const RecoveryUniverseCapsulePtr&) {
             ++durable_writes;
             return true;
         }};
@@ -1656,7 +1729,8 @@ BOOST_AUTO_TEST_CASE(historical_durable_authorization_is_the_fsync_seam)
         [&](const FinalChainLock&,
             const std::optional<BTCCCursorReconciliationProof>&,
             const ReceiptArchiveRosterAuthorization*,
-            const PreparedChainLockContextPtr&) {
+            const PreparedChainLockContextPtr&,
+            const RecoveryUniverseCapsulePtr&) {
             ++durable_writes;
             return true;
         }};
@@ -1691,14 +1765,16 @@ BOOST_AUTO_TEST_CASE(preseal_receipt_at_updated_anchor_rebases_as_catchup)
     ChainLockFinalityStore store{
         genesis, config, context, {},
         [&](const FinalChainLock&,
-            const PreparedChainLockContextPtr&) {
+            const PreparedChainLockContextPtr&,
+            const RecoveryUniverseCapsulePtr&) {
             ++archive_writes;
             return true;
         },
         [&](const FinalChainLock&,
             const std::optional<BTCCCursorReconciliationProof>&,
             const ReceiptArchiveRosterAuthorization*,
-            const PreparedChainLockContextPtr&) {
+            const PreparedChainLockContextPtr&,
+            const RecoveryUniverseCapsulePtr&) {
             ++catchup_writes;
             return true;
         }};
@@ -1742,7 +1818,8 @@ BOOST_AUTO_TEST_CASE(preseal_receipt_at_updated_anchor_rebases_as_catchup)
         genesis, config, archive_context, {}, {}, {},
         [&](const FinalChainLock&,
             const ReceiptArchiveRosterAuthorization&,
-            const PreparedChainLockContextPtr&) {
+            const PreparedChainLockContextPtr&,
+            const RecoveryUniverseCapsulePtr&) {
             ++archive_writes;
             return true;
         }};
@@ -1796,7 +1873,8 @@ BOOST_AUTO_TEST_CASE(receipt_archive_is_verified_without_rebasing_best)
         genesis, config, context, {}, {}, {},
         [&](const FinalChainLock&,
             const ReceiptArchiveRosterAuthorization&,
-            const PreparedChainLockContextPtr&) {
+            const PreparedChainLockContextPtr&,
+            const RecoveryUniverseCapsulePtr&) {
             ++archive_writes;
             return true;
         }};
@@ -1870,7 +1948,8 @@ BOOST_AUTO_TEST_CASE(
     ChainLockFinalityStore store{
         genesis, MakeConfig(), context, {},
         [&](const FinalChainLock&,
-            const PreparedChainLockContextPtr&) {
+            const PreparedChainLockContextPtr&,
+            const RecoveryUniverseCapsulePtr&) {
             ++archive_writes;
             return true;
         }};
@@ -1928,14 +2007,16 @@ BOOST_AUTO_TEST_CASE(covered_receipt_gap_uses_dedicated_durable_callback)
     ChainLockFinalityStore store{
         genesis, config, context,
         [&](const FinalChainLock&,
-            const PreparedChainLockContextPtr&) {
+            const PreparedChainLockContextPtr&,
+            const RecoveryUniverseCapsulePtr&) {
             ++ordinary_writes;
             return true;
         },
         {}, {}, {},
         [&](const FinalChainLock&,
             const ReceiptArchiveRosterAuthorization&,
-            const PreparedChainLockContextPtr&) {
+            const PreparedChainLockContextPtr&,
+            const RecoveryUniverseCapsulePtr&) {
             ++covering_writes;
             return true;
         }};

@@ -26,6 +26,22 @@ bool ValidCapacity(std::size_t value, std::size_t maximum)
     return value > 0 && value <= maximum;
 }
 
+bool IsRecoveryUniverseCapabilityForStatement(
+    const uint256& genesis_hash,
+    const ChainLockStatement& statement,
+    const RecoveryUniverseCapsulePtr& capsule) noexcept
+{
+    if (!capsule) return true;
+    const auto& source{
+        statement.roster_beacons.active.recovery_authority_source};
+    return !source.IsNull() && source.IsStructurallyValid() &&
+           capsule->IsStructurallyValid() &&
+           capsule->GenesisHash() == genesis_hash &&
+           capsule->Source() == source &&
+           capsule->SourceId() ==
+               GetRecoveryUniverseSourceId(genesis_hash, source);
+}
+
 std::optional<int32_t> PaymentAuditSealCarrierEnd(
     const ChainLockFinalityStoreConfig& config,
     const ChainLockStatement& statement) noexcept
@@ -839,12 +855,13 @@ bool ChainLockFinalityStore::AcceptVerified(
     const FinalChainLock& chainlock,
     bool signatures_valid,
     ChainLockFinalityError* error,
-    PreparedChainLockContextPtr verification_context)
+    PreparedChainLockContextPtr verification_context,
+    RecoveryUniverseCapsulePtr recovery_universe)
 {
     return AcceptVerifiedInternal(
         prepared, chainlock, signatures_valid,
         ChainLockCandidateAdmission::LIVE, /*persist=*/true, {}, {}, nullptr,
-        nullptr, verification_context, error);
+        nullptr, verification_context, recovery_universe, error);
 }
 
 bool ChainLockFinalityStore::AcceptVerifiedCoveringReceiptArchive(
@@ -853,12 +870,13 @@ bool ChainLockFinalityStore::AcceptVerifiedCoveringReceiptArchive(
     bool signatures_valid,
     const ReceiptArchiveRosterAuthorization& authorization,
     ChainLockFinalityError* error,
-    PreparedChainLockContextPtr verification_context)
+    PreparedChainLockContextPtr verification_context,
+    RecoveryUniverseCapsulePtr recovery_universe)
 {
     return AcceptVerifiedInternal(
         prepared, chainlock, signatures_valid,
         ChainLockCandidateAdmission::LIVE, /*persist=*/true, {}, {}, nullptr,
-        &authorization, verification_context, error);
+        &authorization, verification_context, recovery_universe, error);
 }
 
 bool ChainLockFinalityStore::AcceptPersistedVerified(
@@ -872,7 +890,7 @@ bool ChainLockFinalityStore::AcceptPersistedVerified(
         prepared, chainlock, signatures_valid,
         ChainLockCandidateAdmission::TRUSTED_PERSISTENCE,
         /*persist=*/false, {}, {}, nullptr, nullptr,
-        verification_context, error);
+        verification_context, nullptr, error);
 }
 
 bool ChainLockFinalityStore::AcceptReceiptArchiveVerified(
@@ -882,13 +900,14 @@ bool ChainLockFinalityStore::AcceptReceiptArchiveVerified(
     const ReceiptArchiveRosterAuthorization& authorization,
     ChainLockDurableAuthorization durable_authorization,
     ChainLockFinalityError* error,
-    PreparedChainLockContextPtr verification_context)
+    PreparedChainLockContextPtr verification_context,
+    RecoveryUniverseCapsulePtr recovery_universe)
 {
     return AcceptVerifiedInternal(
         prepared, chainlock, signatures_valid,
         ChainLockCandidateAdmission::RECEIPT_ARCHIVE,
         /*persist=*/true, {}, durable_authorization, &authorization, nullptr,
-        verification_context, error);
+        verification_context, recovery_universe, error);
 }
 
 bool ChainLockFinalityStore::AcceptTrustedUnsealedVerified(
@@ -902,7 +921,7 @@ bool ChainLockFinalityStore::AcceptTrustedUnsealedVerified(
         prepared, chainlock, signatures_valid,
         ChainLockCandidateAdmission::TRUSTED_UNSEALED_PERSISTENCE,
         /*persist=*/false, {}, {}, nullptr, nullptr,
-        verification_context, error);
+        verification_context, nullptr, error);
 }
 
 bool ChainLockFinalityStore::AcceptPresealReceiptVerified(
@@ -914,14 +933,15 @@ bool ChainLockFinalityStore::AcceptPresealReceiptVerified(
     ChainLockFinalityError* error,
     PreparedChainLockContextPtr verification_context,
     const ReceiptArchiveRosterAuthorization*
-        receipt_archive_authorization)
+        receipt_archive_authorization,
+    RecoveryUniverseCapsulePtr recovery_universe)
 {
     return AcceptVerifiedInternal(
         prepared, chainlock, signatures_valid,
         ChainLockCandidateAdmission::PRESEAL_RECEIPT,
         /*persist=*/true, pre_durable, durable_authorization,
         receipt_archive_authorization, nullptr,
-        verification_context, error);
+        verification_context, recovery_universe, error);
 }
 
 bool ChainLockFinalityStore::AcceptCatchupVerified(
@@ -932,24 +952,27 @@ bool ChainLockFinalityStore::AcceptCatchupVerified(
     ChainLockDurableAuthorization durable_authorization,
     ChainLockFinalityError* error,
     const ReceiptArchiveRosterAuthorization* covering_authorization,
-    PreparedChainLockContextPtr verification_context)
+    PreparedChainLockContextPtr verification_context,
+    RecoveryUniverseCapsulePtr recovery_universe)
 {
     return AcceptVerifiedInternal(
         prepared, chainlock, signatures_valid,
         ChainLockCandidateAdmission::CATCHUP,
         /*persist=*/true, pre_durable, durable_authorization, nullptr,
-        covering_authorization, verification_context, error);
+        covering_authorization, verification_context, recovery_universe,
+        error);
 }
 
 bool ChainLockFinalityStore::AcceptVerifiedRosterAuthorizationBase(
     const FinalChainLock& chainlock,
     bool signatures_valid,
     PreparedChainLockContextPtr verification_context,
-    ChainLockFinalityError* error)
+    ChainLockFinalityError* error,
+    RecoveryUniverseCapsulePtr recovery_universe)
 {
     return AcceptRosterAuthorizationBaseInternal(
         chainlock, signatures_valid, std::move(verification_context),
-        /*persisted_import=*/false, error);
+        /*persisted_import=*/false, std::move(recovery_universe), error);
 }
 
 bool ChainLockFinalityStore::AcceptPersistedRosterAuthorizationBase(
@@ -960,7 +983,7 @@ bool ChainLockFinalityStore::AcceptPersistedRosterAuthorizationBase(
 {
     return AcceptRosterAuthorizationBaseInternal(
         chainlock, signatures_valid, std::move(verification_context),
-        /*persisted_import=*/true, error);
+        /*persisted_import=*/true, nullptr, error);
 }
 
 bool ChainLockFinalityStore::AcceptRosterAuthorizationBaseInternal(
@@ -968,6 +991,7 @@ bool ChainLockFinalityStore::AcceptRosterAuthorizationBaseInternal(
     bool signatures_valid,
     PreparedChainLockContextPtr verification_context,
     bool persisted_import,
+    RecoveryUniverseCapsulePtr recovery_universe,
     ChainLockFinalityError* error)
 {
     SetError(error, ChainLockFinalityError::NONE);
@@ -979,6 +1003,8 @@ bool ChainLockFinalityStore::AcceptRosterAuthorizationBaseInternal(
             RosterAuthorizationAdmission::TRUSTED_PERSISTENCE};
     if (!chainlock.IsStructurallyValid() || logical_id.IsNull() ||
         witness_id.IsNull() || !verification_context ||
+        !IsRecoveryUniverseCapabilityForStatement(
+            m_genesis_hash, chainlock.statement, recovery_universe) ||
         trusted_context != persisted_import ||
         verification_context->GenesisHash() != m_genesis_hash ||
         verification_context->Schedule() != m_config.chainlock_schedule ||
@@ -1031,8 +1057,9 @@ bool ChainLockFinalityStore::AcceptRosterAuthorizationBaseInternal(
 
     if (!persisted_import && m_durable_authorization_base) {
         try {
-            if (!m_durable_authorization_base(chainlock,
-                                              verification_context)) {
+            if (!m_durable_authorization_base(
+                    chainlock, verification_context,
+                    recovery_universe)) {
                 SetError(error, ChainLockFinalityError::PERSISTENCE_FAILURE);
                 return false;
             }
@@ -1066,6 +1093,7 @@ bool ChainLockFinalityStore::AcceptVerifiedInternal(
         receipt_archive_authorization,
     const ReceiptArchiveRosterAuthorization* covering_authorization,
     const PreparedChainLockContextPtr& verification_context,
+    const RecoveryUniverseCapsulePtr& recovery_universe,
     ChainLockFinalityError* error)
 {
     SetError(error, ChainLockFinalityError::NONE);
@@ -1075,6 +1103,8 @@ bool ChainLockFinalityStore::AcceptVerifiedInternal(
         prepared.witness_id != witness_id || prepared.statement != chainlock.statement ||
         prepared.selected_quorum_mask != chainlock.selected_quorum_mask ||
         prepared.admission != admission ||
+        !IsRecoveryUniverseCapabilityForStatement(
+            m_genesis_hash, chainlock.statement, recovery_universe) ||
         (receipt_archive_authorization != nullptr &&
          (admission != ChainLockCandidateAdmission::RECEIPT_ARCHIVE &&
           admission != ChainLockCandidateAdmission::PRESEAL_RECEIPT)) ||
@@ -1278,27 +1308,29 @@ bool ChainLockFinalityStore::AcceptVerifiedInternal(
                           rechecked->btcc_cursor_reconciliation,
                           covering_authorization,
                           verification_context,
+                          recovery_universe,
                           *verified_reset_capability)
                 : receipt_archive_authorization != nullptr
                     ? m_durable_receipt_archive(
                           chainlock, *receipt_archive_authorization,
-                          verification_context)
+                          verification_context, recovery_universe)
                 : covering_authorization &&
                           admission == ChainLockCandidateAdmission::LIVE
                     ? m_durable_covering_accept(
                           chainlock, *covering_authorization,
-                          verification_context)
+                          verification_context, recovery_universe)
                 : archive_only
-                    ? m_durable_archive(chainlock,
-                                        verification_context)
+                    ? m_durable_archive(chainlock, verification_context,
+                                        recovery_universe)
                     : catchup_accept
                           ? m_durable_catchup(
                                 chainlock,
                                 rechecked->btcc_cursor_reconciliation,
                                 covering_authorization,
-                                verification_context)
+                                verification_context, recovery_universe)
                           : m_durable_accept(chainlock,
-                                             verification_context)};
+                                             verification_context,
+                                             recovery_universe)};
             if (!persisted) {
                 SetError(error, ChainLockFinalityError::PERSISTENCE_FAILURE);
                 return false;

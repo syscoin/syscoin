@@ -9,6 +9,7 @@
 #include <llmq/pq_chainlock_schedule.h>
 #include <llmq/pq_chainlock_types.h>
 #include <llmq/pq_chainlock_verify.h>
+#include <llmq/pq_quorum_builder.h>
 #include <sync.h>
 
 #include <cstddef>
@@ -314,20 +315,23 @@ private:
 };
 
 using ChainLockDurableAccept = std::function<bool(
-    const FinalChainLock&, const PreparedChainLockContextPtr&)>;
+    const FinalChainLock&, const PreparedChainLockContextPtr&,
+    const RecoveryUniverseCapsulePtr&)>;
 using ChainLockDurableArchive = std::function<bool(
-    const FinalChainLock&, const PreparedChainLockContextPtr&)>;
+    const FinalChainLock&, const PreparedChainLockContextPtr&,
+    const RecoveryUniverseCapsulePtr&)>;
 using ChainLockDurableReceiptArchive = std::function<bool(
     const FinalChainLock&, const ReceiptArchiveRosterAuthorization&,
-    const PreparedChainLockContextPtr&)>;
+    const PreparedChainLockContextPtr&, const RecoveryUniverseCapsulePtr&)>;
 using ChainLockDurableCoveringAccept = std::function<bool(
     const FinalChainLock&, const ReceiptArchiveRosterAuthorization&,
-    const PreparedChainLockContextPtr&)>;
+    const PreparedChainLockContextPtr&, const RecoveryUniverseCapsulePtr&)>;
 using ChainLockDurableCatchup = std::function<bool(
     const FinalChainLock&,
     const std::optional<BTCCCursorReconciliationProof>&,
     const ReceiptArchiveRosterAuthorization*,
-    const PreparedChainLockContextPtr&)>;
+    const PreparedChainLockContextPtr&,
+    const RecoveryUniverseCapsulePtr&)>;
 using ChainLockPreDurableCatchup = std::function<bool()>;
 using ChainLockDurableAuthorization = std::function<bool(
     const std::function<bool()>&, ChainLockFinalityError*)>;
@@ -336,10 +340,12 @@ using ChainLockDurableReset = std::function<bool(
     const std::optional<BTCCCursorReconciliationProof>&,
     const ReceiptArchiveRosterAuthorization*,
     const PreparedChainLockContextPtr&,
+    const RecoveryUniverseCapsulePtr&,
     const VerifiedRecoveryResetPersistenceCapability&)>;
 using ChainLockDurableAuthorizationBase =
     std::function<bool(const FinalChainLock&,
-                       const PreparedChainLockContextPtr&)>;
+                       const PreparedChainLockContextPtr&,
+                       const RecoveryUniverseCapsulePtr&)>;
 
 /** Small immutable token retained while the 801 WOTS+ checks run. */
 struct PreparedFinalChainLockCandidate {
@@ -519,7 +525,8 @@ public:
         const FinalChainLock& chainlock,
         bool signatures_valid,
         ChainLockFinalityError* error = nullptr,
-        PreparedChainLockContextPtr verification_context = nullptr)
+        PreparedChainLockContextPtr verification_context = nullptr,
+        RecoveryUniverseCapsulePtr recovery_universe = nullptr)
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /** Accept LIVE while atomically retiring an independently covered gap. */
@@ -529,7 +536,8 @@ public:
         bool signatures_valid,
         const ReceiptArchiveRosterAuthorization& authorization,
         ChainLockFinalityError* error = nullptr,
-        PreparedChainLockContextPtr verification_context = nullptr)
+        PreparedChainLockContextPtr verification_context = nullptr,
+        RecoveryUniverseCapsulePtr recovery_universe = nullptr)
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /** Install a fully reverified token produced by PreparePersistedCandidate. */
@@ -548,7 +556,8 @@ public:
         const ReceiptArchiveRosterAuthorization& authorization,
         ChainLockDurableAuthorization durable_authorization = {},
         ChainLockFinalityError* error = nullptr,
-        PreparedChainLockContextPtr verification_context = nullptr)
+        PreparedChainLockContextPtr verification_context = nullptr,
+        RecoveryUniverseCapsulePtr recovery_universe = nullptr)
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /** Import the exact locally fsynced unsealed record without rewriting it. */
@@ -569,7 +578,8 @@ public:
         ChainLockFinalityError* error = nullptr,
         PreparedChainLockContextPtr verification_context = nullptr,
         const ReceiptArchiveRosterAuthorization*
-            receipt_archive_authorization = nullptr)
+            receipt_archive_authorization = nullptr,
+        RecoveryUniverseCapsulePtr recovery_universe = nullptr)
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     [[nodiscard]] bool AcceptCatchupVerified(
@@ -581,7 +591,8 @@ public:
         ChainLockFinalityError* error = nullptr,
         const ReceiptArchiveRosterAuthorization*
             covering_authorization = nullptr,
-        PreparedChainLockContextPtr verification_context = nullptr)
+        PreparedChainLockContextPtr verification_context = nullptr,
+        RecoveryUniverseCapsulePtr recovery_universe = nullptr)
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     void RejectPrepared(const PreparedFinalChainLockCandidate& prepared)
@@ -625,7 +636,8 @@ public:
         const FinalChainLock& chainlock,
         bool signatures_valid,
         PreparedChainLockContextPtr verification_context,
-        ChainLockFinalityError* error = nullptr)
+        ChainLockFinalityError* error = nullptr,
+        RecoveryUniverseCapsulePtr recovery_universe = nullptr)
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /** Import one exact locally fsynced base after full startup revalidation. */
     [[nodiscard]] bool AcceptPersistedRosterAuthorizationBase(
@@ -719,6 +731,7 @@ private:
         const ReceiptArchiveRosterAuthorization*
             covering_authorization,
         const PreparedChainLockContextPtr& verification_context,
+        const RecoveryUniverseCapsulePtr& recovery_universe,
         ChainLockFinalityError* error) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     void RememberAccepted(AcceptedRecord record) EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
     void RememberAuthorizationBase(AcceptedRecord record)
@@ -728,6 +741,7 @@ private:
         bool signatures_valid,
         PreparedChainLockContextPtr verification_context,
         bool persisted_import,
+        RecoveryUniverseCapsulePtr recovery_universe,
         ChainLockFinalityError* error)
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
