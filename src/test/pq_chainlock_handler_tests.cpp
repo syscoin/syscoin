@@ -5189,4 +5189,150 @@ BOOST_FIXTURE_TEST_CASE(
     BOOST_CHECK(!Access::StateAdvancingAuthorizationBaseAdmissible(
         *handler, ChainLockCandidateAdmission::CATCHUP, superseding,
         reconciliation));
+
+    // A REVEAL may retain the older authenticated recovery source when the
+    // newly READY source has fewer than 400 rooted members. Once receipted,
+    // that exact signed choice remains the objective source for the next
+    // transition; it must not be replaced by the rejected newest seed.
+    RosterBeaconWindow pending_source_window{base_window};
+    auto& pending_source{pending_source_window.next};
+    pending_source.state = RosterBeaconState::PENDING;
+    pending_source.anchor_cursor = base_cursor;
+    pending_source.anchor_btc_height = 800'000;
+    BOOST_REQUIRE(pending_source_window.IsStructurallyValid());
+
+    const int32_t retained_height{CANDIDATE_HEIGHT};
+    const int32_t retained_predecessor_height{CURRENT_HEIGHT};
+    const RosterAuthorizationBaseIdentity retained_authorization_base{
+        retained_predecessor_height,
+        chain[retained_predecessor_height]->GetBlockHash(),
+        NonNullHash(927'500)};
+    NormalRosterAuthorizationInput retained_input;
+    const auto retained_epoch{EpochForHeight(
+        config->chainlock_schedule, retained_height)};
+    BOOST_REQUIRE(retained_epoch);
+    retained_input.newest_epoch = *retained_epoch;
+    retained_input.target_height = retained_height;
+    retained_input.target_block_hash = chain[retained_height]->GetBlockHash();
+    retained_input.predecessor_height = retained_predecessor_height;
+    retained_input.predecessor_block_hash =
+        chain[retained_predecessor_height]->GetBlockHash();
+    retained_input.authorization_base = retained_authorization_base;
+    retained_input.previous = RosterAuthorizationPriorState{
+        NonNullHash(927'501), pending_source_window};
+    retained_input.previous_btcc_cursor = base_cursor;
+    retained_input.accepted_btcc_cursor = base_cursor;
+    retained_input.btcc_advance = BTCCAdvance::KEEP;
+    retained_input.next_snapshot.epoch = *retained_epoch + 1;
+    const auto* quorum_config{Access::QuorumConfig(*handler)};
+    BOOST_REQUIRE(quorum_config);
+    const auto retained_snapshot_height{RegistrationCutoffHeight(
+        config->chainlock_schedule, retained_input.next_snapshot.epoch,
+        quorum_config->roster_snapshot_lag_blocks)};
+    BOOST_REQUIRE(retained_snapshot_height);
+    BOOST_REQUIRE(retained_authorization_base.height >=
+                  *retained_snapshot_height);
+    retained_input.next_snapshot.height = *retained_snapshot_height;
+    retained_input.next_snapshot.hash =
+        chain[*retained_snapshot_height]->GetBlockHash();
+    retained_input.next_snapshot.prior_authorization_is_descendant = true;
+    const auto future_height{pending_source.FutureBTCHeight()};
+    BOOST_REQUIRE(future_height);
+    retained_input.pending_reveal = ValidatedRosterBeaconRange{
+        pending_source.anchor_cursor.btc_hash,
+        pending_source.anchor_btc_height,
+        NonNullHash(927'502),
+        *future_height,
+        *future_height +
+            static_cast<int32_t>(ROSTER_BEACON_MIN_FUTURE_CONFIRMATIONS - 1),
+        true};
+    auto rejected_source{pending_source};
+    rejected_source.state = RosterBeaconState::READY;
+    rejected_source.future_btc_hash =
+        retained_input.pending_reveal->future_hash;
+    retained_input.recovery_source_evaluation =
+        NormalRosterAuthorizationInput::RecoverySourceEvaluation{
+            RecoveryRosterAuthoritySource{rejected_source}, false};
+    retained_input.recovery_authority_source =
+        base_window.active.recovery_authority_source;
+    const auto retained_decision{DeriveNormalRosterAuthorizationDecision(
+        genesis, retained_input)};
+    BOOST_REQUIRE(retained_decision);
+    BOOST_REQUIRE(retained_decision->transition.kind ==
+                  RosterAuthorizationTransitionKind::REVEAL);
+    BOOST_REQUIRE(retained_decision->transition.new_window.active
+                      .recovery_authority_source ==
+                  base_window.active.recovery_authority_source);
+    BOOST_REQUIRE(FindNewestNormalReadySeed(
+                      retained_decision->transition.new_window) != nullptr);
+    BOOST_REQUIRE(FindNewestNormalReadySeed(
+                      retained_decision->transition.new_window)->epoch ==
+                  rejected_source.epoch);
+
+    auto retained_source_base{MakeCatchupChainLock(
+        retained_height, retained_predecessor_height,
+        chain[retained_predecessor_height]->GetBlockHash(), 927'503)};
+    retained_source_base.statement.block_hash =
+        chain[retained_height]->GetBlockHash();
+    retained_source_base.statement.previous_btcc_cursor = base_cursor;
+    retained_source_base.statement.accepted_btcc_cursor = base_cursor;
+    retained_source_base.statement.btcc_advance = BTCCAdvance::KEEP;
+    retained_source_base.statement.btcc_receipt_state = *receipted_state;
+    retained_source_base.statement.payment_probation_state_hash =
+        probation_root;
+    retained_source_base.statement.roster_transition =
+        retained_decision->transition.kind;
+    retained_source_base.statement.roster_beacons =
+        retained_decision->transition.new_window;
+    retained_source_base.statement.roster_authorization_state_hash =
+        retained_decision->state_hash;
+    retained_source_base.statement.roster_authorization_base =
+        retained_authorization_base;
+    BOOST_REQUIRE(retained_source_base.IsStructurallyValid());
+
+    Access::ResetFinalityStoreWithContext(*handler, store_context);
+    store = Access::Store(*handler);
+    BOOST_REQUIRE(store);
+    const auto retained_context{context_for(retained_source_base)};
+    BOOST_REQUIRE(retained_context);
+    BOOST_REQUIRE(store->AcceptVerifiedRosterAuthorizationBase(
+        retained_source_base, /*signatures_valid=*/true,
+        retained_context));
+
+    constexpr int32_t RETAINED_SOURCE_CARRIER{
+        CANDIDATE_HEIGHT + static_cast<int32_t>(PQ_BTCC_NEVM_LAG)};
+    BTCCReceipt retained_source_receipt;
+    retained_source_receipt.chainlock_target_height = retained_height;
+    retained_source_receipt.chainlock_target_hash =
+        retained_source_base.statement.block_hash;
+    retained_source_receipt.chainlock_logical_id =
+        retained_source_base.GetLogicalId(genesis);
+    retained_source_receipt.accepted_cursor = base_cursor;
+    const auto retained_source_receipt_state{ApplyBTCCReceiptState(
+        genesis, config->chainlock_schedule, config->btcc_schedule,
+        config->activation_predecessor_height, RETAINED_SOURCE_CARRIER,
+        chain[RETAINED_SOURCE_CARRIER]->GetBlockHash(), *receipted_state,
+        retained_source_receipt)};
+    BOOST_REQUIRE(retained_source_receipt_state);
+    chain[RETAINED_SOURCE_CARRIER]->pqBTCCReceiptCursorHeight =
+        retained_source_receipt_state->cursor.sys_height;
+    chain[RETAINED_SOURCE_CARRIER]->pqBTCCReceiptCursorSysHash =
+        retained_source_receipt_state->cursor.sys_hash;
+    chain[RETAINED_SOURCE_CARRIER]->pqBTCCReceiptCursorBTCHash =
+        retained_source_receipt_state->cursor.btc_hash;
+    chain[RETAINED_SOURCE_CARRIER]->pqBTCCReceiptStateHash =
+        retained_source_receipt_state->cumulative_hash;
+    chain[RETAINED_SOURCE_CARRIER]->pqBTCCReceiptLatestTargetHeight =
+        retained_source_receipt_state->latest_chainlock_target_height;
+    chain[RETAINED_SOURCE_CARRIER]->pqBTCCReceiptLatestCarrierHeight =
+        retained_source_receipt_state->latest_receipt_carrier_height;
+    chain[RETAINED_SOURCE_CARRIER]->pqBTCCReceiptLogicalId =
+        retained_source_receipt.chainlock_logical_id;
+
+    const auto retained_objective{Access::ObjectiveRosterAuthorization(
+        *handler, *chain[RETAINED_SOURCE_CARRIER])};
+    BOOST_REQUIRE(retained_objective);
+    BOOST_REQUIRE(retained_objective->recovery_source);
+    BOOST_CHECK(*retained_objective->recovery_source ==
+                base_window.active.recovery_authority_source);
 }

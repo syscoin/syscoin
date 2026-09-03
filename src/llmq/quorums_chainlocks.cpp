@@ -9240,14 +9240,10 @@ CChainLocksHandler::ResolveObjectiveRosterAuthorizationContext(
     pq::RecoveryRosterAuthoritySource source{
         base->metadata.statement.roster_beacons.active
             .recovery_authority_source};
-    if (!pq::HasRecoveryRosterBeacon(
-            base->metadata.statement.roster_beacons)) {
-        const auto* newest{pq::FindNewestNormalReadySeed(
-            base->metadata.statement.roster_beacons)};
-        if (newest == nullptr || source.normal_beacon != *newest) {
-            return std::nullopt;
-        }
-    }
+    // The signed authorization transition may deliberately retain an older
+    // usable source after rejecting a newly READY source with fewer than 400
+    // rooted members. Re-deriving the source from the newest seed here would
+    // discard that authenticated decision after its receipt is connected.
     if (!source.IsStructurallyValid() || source.IsNull()) {
         return std::nullopt;
     }
