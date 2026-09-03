@@ -36,11 +36,17 @@ struct FrozenQuorumMember {
     uint256 pro_tx_hash;
     bool eligible{false};
     std::optional<FrozenChildRootRecord> child_root;
+
+    friend bool operator==(const FrozenQuorumMember&,
+                           const FrozenQuorumMember&) = default;
 };
 
 struct FrozenQuorumRoster {
     QuorumDescriptor descriptor;
     std::array<FrozenQuorumMember, QUORUM_SIZE> members;
+
+    friend bool operator==(const FrozenQuorumRoster&,
+                           const FrozenQuorumRoster&) = default;
 };
 
 using FrozenQuorumRosters =
@@ -176,11 +182,80 @@ private:
     BuildProvenancePtr m_build_provenance;
 
     friend class FrozenQuorumRosterCache;
+    friend class DurableRosterContext;
     friend class PreparedChainLockContext;
     friend class ChainLockStoreTestContextFactory;
 };
 
 using VerifiedRosterSetPtr = std::shared_ptr<const VerifiedRosterSet>;
+
+class PreparedChainLockContext;
+
+/**
+ * Local, versioned copy of the exact rosters that authenticated one durable
+ * certificate. This format is never accepted from the network. Its strict
+ * decoder is the sole bridge from an authenticated fsynced record back into
+ * an intrinsically verified roster capability after raw snapshot GC.
+ */
+class DurableRosterContext final {
+public:
+    static constexpr uint16_t FORMAT_VERSION{1};
+    static constexpr std::size_t DESCRIPTOR_SIZE{
+        4 * sizeof(uint16_t) + sizeof(uint32_t) +
+        2 * sizeof(int32_t) + 5 * 32 + BITMAP_SIZE};
+    static constexpr std::size_t CHILD_ROOT_SIZE{
+        32 + 2 * sizeof(uint32_t) + ChildKeyTreeCommitment::WIRE_SIZE};
+    static constexpr std::size_t MEMBER_MIN_SIZE{32 + 2 * sizeof(uint8_t)};
+    static constexpr std::size_t MEMBER_MAX_SIZE{
+        MEMBER_MIN_SIZE + CHILD_ROOT_SIZE};
+    static constexpr std::size_t MIN_SERIALIZED_SIZE{
+        sizeof(uint16_t) + 32 +
+        ACTIVE_QUORUMS *
+            (DESCRIPTOR_SIZE + QUORUM_SIZE * MEMBER_MIN_SIZE)};
+    static constexpr std::size_t MAX_SERIALIZED_SIZE{
+        sizeof(uint16_t) + 32 +
+        ACTIVE_QUORUMS *
+            (DESCRIPTOR_SIZE + QUORUM_SIZE * MEMBER_MAX_SIZE)};
+
+    /** Capture only bytes already bound by a fully prepared context. */
+    [[nodiscard]] static DurableRosterContext Capture(
+        const PreparedChainLockContext& context);
+
+    /** Decode only a value obtained from the authenticated local DB. */
+    [[nodiscard]] static std::optional<DurableRosterContext>
+    DecodeTrustedPersistence(
+        Span<const uint8_t> encoded,
+        ChainLockVerificationError* error = nullptr);
+
+    [[nodiscard]] std::vector<uint8_t> Encode() const;
+    [[nodiscard]] const uint256& GenesisHash() const noexcept
+    {
+        return m_roster_set->GenesisHash();
+    }
+    [[nodiscard]] const FrozenQuorumRosters& Rosters() const noexcept
+    {
+        return m_roster_set->Rosters();
+    }
+    [[nodiscard]] const FrozenQuorumRostersPtr& RostersPtr() const noexcept
+    {
+        return m_roster_set->RostersPtr();
+    }
+
+private:
+    explicit DurableRosterContext(VerifiedRosterSetPtr roster_set)
+        : m_roster_set{std::move(roster_set)}
+    {
+    }
+
+    VerifiedRosterSetPtr m_roster_set;
+
+    friend class PreparedChainLockContext;
+};
+
+static_assert(DurableRosterContext::DESCRIPTOR_SIZE == 230);
+static_assert(DurableRosterContext::CHILD_ROOT_SIZE == 120);
+static_assert(DurableRosterContext::MIN_SERIALIZED_SIZE == 55'354);
+static_assert(DurableRosterContext::MAX_SERIALIZED_SIZE == 247'354);
 
 /** Current immutable roster capabilities and in-flight verifier payload. */
 struct PQVerificationMemoryStats {
@@ -205,6 +280,19 @@ public:
            VerifiedRosterSetPtr roster_set,
            const RosterAuthorizationVerificationContext& authorization,
            ChainLockVerificationError* error = nullptr);
+
+    /**
+     * Rebind a roster capsule read from the authenticated local DB. This does
+     * not mint live canonical-builder provenance and is valid only for the
+     * existing TRUSTED_PERSISTENCE authorization boundary.
+     */
+    [[nodiscard]] static std::shared_ptr<const PreparedChainLockContext>
+    CreateFromTrustedPersistence(
+        ChainLockScheduleConfig schedule,
+        ChainLockStatement statement,
+        const DurableRosterContext& durable_rosters,
+        const RosterAuthorizationVerificationContext& authorization,
+        ChainLockVerificationError* error = nullptr);
 
     [[nodiscard]] const uint256& GenesisHash() const noexcept
     {
@@ -247,6 +335,15 @@ public:
         const ChainLockShareTranscript& transcript) const noexcept;
 
 private:
+    [[nodiscard]] static std::shared_ptr<const PreparedChainLockContext>
+    CreateInternal(
+        ChainLockScheduleConfig schedule,
+        ChainLockStatement statement,
+        VerifiedRosterSetPtr roster_set,
+        const RosterAuthorizationVerificationContext& authorization,
+        bool trusted_persistence_rosters,
+        ChainLockVerificationError* error);
+
     PreparedChainLockContext(
         ChainLockScheduleConfig schedule,
         ChainLockStatement statement,

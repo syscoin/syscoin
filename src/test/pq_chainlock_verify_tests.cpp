@@ -294,6 +294,47 @@ void SetMember(QuorumBitmap& bitmap, std::size_t member)
     bitmap[member / 8] |= static_cast<uint8_t>(uint8_t{1} << (member % 8));
 }
 
+constexpr std::size_t DURABLE_HEADER_SIZE{sizeof(uint16_t) + 32};
+constexpr std::size_t DESCRIPTOR_MEMBER_ROOT_OFFSET{164};
+constexpr std::size_t DESCRIPTOR_CHILD_ROOT_OFFSET{196};
+constexpr std::size_t MEMBER_ELIGIBLE_OFFSET{32};
+constexpr std::size_t MEMBER_CHILD_PRESENT_OFFSET{33};
+constexpr std::size_t MEMBER_CHILD_TREE_ID_OFFSET{90};
+
+std::optional<std::array<std::size_t, ACTIVE_QUORUMS>>
+DurableRosterOffsets(Span<const uint8_t> encoded)
+{
+    std::array<std::size_t, ACTIVE_QUORUMS> offsets{};
+    std::size_t cursor{DURABLE_HEADER_SIZE};
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        if (cursor + DurableRosterContext::DESCRIPTOR_SIZE >
+            encoded.size()) {
+            return std::nullopt;
+        }
+        offsets[slot] = cursor;
+        cursor += DurableRosterContext::DESCRIPTOR_SIZE;
+        for (std::size_t member{0}; member < QUORUM_SIZE; ++member) {
+            if (cursor + DurableRosterContext::MEMBER_MIN_SIZE >
+                encoded.size()) {
+                return std::nullopt;
+            }
+            const uint8_t has_child_root{
+                encoded[cursor + MEMBER_CHILD_PRESENT_OFFSET]};
+            if (has_child_root > 1) return std::nullopt;
+            cursor += DurableRosterContext::MEMBER_MIN_SIZE;
+            if (has_child_root != 0) {
+                if (cursor + DurableRosterContext::CHILD_ROOT_SIZE >
+                    encoded.size()) {
+                    return std::nullopt;
+                }
+                cursor += DurableRosterContext::CHILD_ROOT_SIZE;
+            }
+        }
+    }
+    if (cursor != encoded.size()) return std::nullopt;
+    return offsets;
+}
+
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(pq_chainlock_verify_tests, BasicTestingSetup)
@@ -313,6 +354,225 @@ BOOST_AUTO_TEST_CASE(roster_context_memory_counter_tracks_capability_lifetime)
     roster_set.reset();
     BOOST_CHECK_EQUAL(
         GetPQVerificationMemoryStats().live_roster_contexts, baseline);
+}
+
+BOOST_AUTO_TEST_CASE(durable_roster_context_roundtrip_and_strict_bounds)
+{
+    const auto fixture{MakeVerificationFixture()};
+    ChainLockVerificationError error{ChainLockVerificationError::NONE};
+    const auto roster_set{VerifiedRosterSet::Create(
+        fixture->genesis_hash,
+        std::make_shared<const FrozenQuorumRosters>(fixture->rosters),
+        &error)};
+    BOOST_REQUIRE(roster_set);
+    const auto prepared{PreparedChainLockContext::Create(
+        fixture->schedule, fixture->chainlock.statement, roster_set,
+        fixture->authorization, &error)};
+    BOOST_REQUIRE(prepared);
+    const auto durable{DurableRosterContext::Capture(*prepared)};
+
+    const auto encoded{durable.Encode()};
+    BOOST_CHECK_GE(encoded.size(),
+                   DurableRosterContext::MIN_SERIALIZED_SIZE);
+    BOOST_CHECK_LE(encoded.size(),
+                   DurableRosterContext::MAX_SERIALIZED_SIZE);
+    const auto decoded{DurableRosterContext::DecodeTrustedPersistence(
+        encoded, &error)};
+    BOOST_REQUIRE(decoded);
+    BOOST_CHECK(error == ChainLockVerificationError::NONE);
+    BOOST_CHECK(decoded->GenesisHash() == durable.GenesisHash());
+    BOOST_CHECK(decoded->Rosters() == durable.Rosters());
+    BOOST_CHECK(decoded->Encode() == encoded);
+
+    auto truncated{encoded};
+    truncated.pop_back();
+    BOOST_CHECK(!DurableRosterContext::DecodeTrustedPersistence(
+        truncated, &error));
+    BOOST_CHECK(error == ChainLockVerificationError::INVALID_ARGUMENT);
+
+    auto trailing{encoded};
+    trailing.push_back(0);
+    BOOST_CHECK(!DurableRosterContext::DecodeTrustedPersistence(
+        trailing, &error));
+    BOOST_CHECK(error == ChainLockVerificationError::INVALID_ARGUMENT);
+
+    std::vector<uint8_t> oversized(
+        DurableRosterContext::MAX_SERIALIZED_SIZE + 1, 0);
+    BOOST_CHECK(!DurableRosterContext::DecodeTrustedPersistence(
+        oversized, &error));
+    BOOST_CHECK(error == ChainLockVerificationError::INVALID_ARGUMENT);
+}
+
+BOOST_AUTO_TEST_CASE(durable_roster_context_rejects_noncanonical_content)
+{
+    const auto fixture{MakeVerificationFixture()};
+    ChainLockVerificationError error{ChainLockVerificationError::NONE};
+    const auto roster_set{VerifiedRosterSet::Create(
+        fixture->genesis_hash,
+        std::make_shared<const FrozenQuorumRosters>(fixture->rosters),
+        &error)};
+    BOOST_REQUIRE(roster_set);
+    const auto prepared{PreparedChainLockContext::Create(
+        fixture->schedule, fixture->chainlock.statement, roster_set,
+        fixture->authorization, &error)};
+    BOOST_REQUIRE(prepared);
+    const auto durable{DurableRosterContext::Capture(*prepared)};
+    const auto encoded{durable.Encode()};
+    const auto roster_offsets{DurableRosterOffsets(encoded)};
+    BOOST_REQUIRE(roster_offsets);
+    BOOST_REQUIRE(fixture->rosters[0].members[0].child_root);
+    BOOST_REQUIRE(fixture->rosters[0].members[1].child_root);
+    const std::size_t descriptor{(*roster_offsets)[0]};
+    const std::size_t first_member{
+        descriptor + DurableRosterContext::DESCRIPTOR_SIZE};
+    const std::size_t second_member{
+        first_member + DurableRosterContext::MEMBER_MAX_SIZE};
+
+    auto wrong_format{encoded};
+    ++wrong_format[0];
+    BOOST_CHECK(!DurableRosterContext::DecodeTrustedPersistence(
+        wrong_format, &error));
+    BOOST_CHECK(error == ChainLockVerificationError::INVALID_ARGUMENT);
+
+    auto bad_descriptor{encoded};
+    ++bad_descriptor[descriptor];
+    BOOST_CHECK(!DurableRosterContext::DecodeTrustedPersistence(
+        bad_descriptor, &error));
+    BOOST_CHECK(error == ChainLockVerificationError::INVALID_DESCRIPTOR);
+
+    auto noncanonical_flag{encoded};
+    noncanonical_flag[first_member + MEMBER_ELIGIBLE_OFFSET] = 2;
+    BOOST_CHECK(!DurableRosterContext::DecodeTrustedPersistence(
+        noncanonical_flag, &error));
+    BOOST_CHECK(error == ChainLockVerificationError::INVALID_ARGUMENT);
+
+    auto noncanonical_presence{encoded};
+    noncanonical_presence[
+        first_member + MEMBER_CHILD_PRESENT_OFFSET] = 2;
+    BOOST_CHECK(!DurableRosterContext::DecodeTrustedPersistence(
+        noncanonical_presence, &error));
+    BOOST_CHECK(error == ChainLockVerificationError::INVALID_ARGUMENT);
+
+    auto bad_member_root{encoded};
+    bad_member_root[descriptor + DESCRIPTOR_MEMBER_ROOT_OFFSET] ^= 1;
+    BOOST_CHECK(!DurableRosterContext::DecodeTrustedPersistence(
+        bad_member_root, &error));
+    BOOST_CHECK(error == ChainLockVerificationError::MEMBER_ROOT_MISMATCH);
+
+    auto bad_child_root{encoded};
+    bad_child_root[descriptor + DESCRIPTOR_CHILD_ROOT_OFFSET] ^= 1;
+    BOOST_CHECK(!DurableRosterContext::DecodeTrustedPersistence(
+        bad_child_root, &error));
+    BOOST_CHECK(error == ChainLockVerificationError::CHILD_KEY_ROOT_MISMATCH);
+
+    auto duplicate_member{encoded};
+    std::copy_n(duplicate_member.begin() + first_member, 32,
+                duplicate_member.begin() + second_member);
+    BOOST_CHECK(!DurableRosterContext::DecodeTrustedPersistence(
+        duplicate_member, &error));
+    BOOST_CHECK(error == ChainLockVerificationError::DUPLICATE_MEMBER);
+
+    auto duplicate_child_key{encoded};
+    std::copy_n(
+        duplicate_child_key.begin() + first_member +
+            MEMBER_CHILD_TREE_ID_OFFSET,
+        32,
+        duplicate_child_key.begin() + second_member +
+            MEMBER_CHILD_TREE_ID_OFFSET);
+    BOOST_CHECK(!DurableRosterContext::DecodeTrustedPersistence(
+        duplicate_child_key, &error));
+    BOOST_CHECK(error == ChainLockVerificationError::DUPLICATE_CHILD_KEY);
+}
+
+BOOST_AUTO_TEST_CASE(durable_recovery_requires_explicit_trusted_path)
+{
+    auto fixture{MakeVerificationFixture(/*target_height=*/2025)};
+    auto& statement{fixture->chainlock.statement};
+    const RosterAuthorizationPriorState prior{
+        NonNullHash(520'000), InitializationWindow(/*first_epoch=*/0)};
+    statement.roster_transition =
+        RosterAuthorizationTransitionKind::RECOVER;
+    statement.roster_authorization_base = {
+        statement.previous_chainlock_height,
+        statement.previous_chainlock_hash,
+        NonNullHash(520'001)};
+    statement.roster_beacons = RecoveryWindow(
+        fixture->rosters.front().descriptor.epoch,
+        prior.window.active);
+    statement.previous_btcc_cursor = {};
+    statement.accepted_btcc_cursor = {};
+    statement.btcc_advance = BTCCAdvance::KEEP;
+
+    RosterAuthorizationVerificationContext recovery;
+    recovery.admission = RosterAuthorizationAdmission::RECOVER;
+    recovery.predecessor_height = statement.previous_chainlock_height;
+    recovery.predecessor_block_hash = statement.previous_chainlock_hash;
+    recovery.authorization_base = statement.roster_authorization_base;
+    recovery.reset_policy = ResetPolicy(fixture->schedule);
+    recovery.previous = prior;
+    SealRosterAuthorization(fixture->genesis_hash, statement, recovery);
+
+    std::array<QuorumDescriptor, ACTIVE_QUORUMS> descriptors;
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        const auto beacon_hash{GetRosterBeaconCommitmentHash(
+            fixture->genesis_hash,
+            statement.roster_beacons.active.seeds[slot])};
+        BOOST_REQUIRE(beacon_hash);
+        fixture->rosters[slot].descriptor.roster_beacon_hash =
+            *beacon_hash;
+        descriptors[slot] = fixture->rosters[slot].descriptor;
+    }
+    statement.quorum_context_hash = GetQuorumContextHash(
+        fixture->genesis_hash, statement.height,
+        statement.block_hash, descriptors);
+
+    // The test-only canonical builder stands in for the production snapshot
+    // builder. The durable decoder itself never receives that provenance.
+    const auto canonical_recovery_set{
+        ChainLockStoreTestContextFactory::CreateCanonicalRosterSet(
+            fixture->genesis_hash,
+            std::make_shared<const FrozenQuorumRosters>(
+                fixture->rosters))};
+    BOOST_REQUIRE(canonical_recovery_set);
+    const auto recovery_prepared{PreparedChainLockContext::Create(
+        fixture->schedule, statement, canonical_recovery_set,
+        recovery)};
+    BOOST_REQUIRE(recovery_prepared);
+    const auto recovery_durable{
+        DurableRosterContext::Capture(*recovery_prepared)};
+    const auto recovery_bytes{recovery_durable.Encode()};
+
+    ChainLockVerificationError error{ChainLockVerificationError::NONE};
+    const auto durable{DurableRosterContext::DecodeTrustedPersistence(
+        recovery_bytes, &error)};
+    BOOST_REQUIRE(durable);
+    BOOST_CHECK(error == ChainLockVerificationError::NONE);
+
+    const auto detached_recovery_set{VerifiedRosterSet::Create(
+        fixture->genesis_hash,
+        std::make_shared<const FrozenQuorumRosters>(fixture->rosters))};
+    BOOST_REQUIRE(detached_recovery_set);
+    BOOST_CHECK(!detached_recovery_set->HasCanonicalBuildProvenance());
+
+    BOOST_CHECK(!PreparedChainLockContext::Create(
+        fixture->schedule, statement, detached_recovery_set,
+        recovery, &error));
+    BOOST_CHECK(error == ChainLockVerificationError::INVALID_ROSTER_BEACON);
+
+    RosterAuthorizationVerificationContext trusted;
+    trusted.admission = RosterAuthorizationAdmission::TRUSTED_PERSISTENCE;
+    trusted.predecessor_height = statement.previous_chainlock_height;
+    trusted.predecessor_block_hash = statement.previous_chainlock_hash;
+    const auto reloaded{PreparedChainLockContext::CreateFromTrustedPersistence(
+        fixture->schedule, statement, *durable, trusted, &error)};
+    BOOST_REQUIRE(reloaded);
+    BOOST_CHECK(error == ChainLockVerificationError::NONE);
+    BOOST_CHECK(!reloaded->RosterSetPtr()->HasCanonicalBuildProvenance());
+    BOOST_CHECK(reloaded->Rosters() == fixture->rosters);
+
+    BOOST_CHECK(!PreparedChainLockContext::CreateFromTrustedPersistence(
+        fixture->schedule, statement, *durable, recovery, &error));
+    BOOST_CHECK(error == ChainLockVerificationError::INVALID_AUTHORIZATION);
 }
 
 BOOST_AUTO_TEST_CASE(preparation_recomputes_roots_context_and_canonical_mapping)

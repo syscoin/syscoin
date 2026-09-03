@@ -29,6 +29,19 @@ public:
             new VerifiedRosterSet(genesis_hash, std::move(rosters))};
     }
 
+    [[nodiscard]] static VerifiedRosterSetPtr CreateCanonicalRosterSet(
+        const uint256& genesis_hash,
+        FrozenQuorumRostersPtr rosters,
+        ChainLockVerificationError* error = nullptr)
+    {
+        auto detached{VerifiedRosterSet::Create(
+            genesis_hash, std::move(rosters), error)};
+        if (!detached) return {};
+        return VerifiedRosterSetPtr{new VerifiedRosterSet(
+            genesis_hash, detached->RostersPtr(),
+            VerifiedRosterSet::NewBuildProvenance())};
+    }
+
     [[nodiscard]] static PreparedChainLockContextPtr Create(
         ChainLockScheduleConfig schedule,
         const ChainLockStatement& statement,

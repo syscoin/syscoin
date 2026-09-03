@@ -6,6 +6,7 @@
 
 #include <hash.h>
 #include <memusage.h>
+#include <streams.h>
 
 #include <algorithm>
 #include <array>
@@ -520,6 +521,52 @@ bool ValidateRosterSetInternal(
     return true;
 }
 
+template <typename Stream>
+void SerializeDurableRosters(Stream& stream,
+                             const uint256& genesis_hash,
+                             const FrozenQuorumRosters& rosters)
+{
+    stream << DurableRosterContext::FORMAT_VERSION << genesis_hash;
+    for (const auto& roster : rosters) {
+        stream << roster.descriptor;
+        for (const auto& member : roster.members) {
+            const uint8_t eligible{static_cast<uint8_t>(member.eligible)};
+            const uint8_t has_child_root{
+                static_cast<uint8_t>(member.child_root.has_value())};
+            stream << member.pro_tx_hash << eligible << has_child_root;
+            if (member.child_root) stream << *member.child_root;
+        }
+    }
+}
+
+template <typename Stream>
+void UnserializeDurableRosters(Stream& stream,
+                               uint16_t& version,
+                               uint256& genesis_hash,
+                               FrozenQuorumRosters& rosters)
+{
+    stream >> version >> genesis_hash;
+    for (auto& roster : rosters) {
+        stream >> roster.descriptor;
+        for (auto& member : roster.members) {
+            uint8_t eligible{0};
+            uint8_t has_child_root{0};
+            stream >> member.pro_tx_hash >> eligible >> has_child_root;
+            if (eligible > 1 || has_child_root > 1) {
+                throw std::ios_base::failure(
+                    "non-canonical durable roster member flags");
+            }
+            member.eligible = eligible != 0;
+            member.child_root.reset();
+            if (has_child_root != 0) {
+                FrozenChildRootRecord child_root;
+                stream >> child_root;
+                member.child_root = std::move(child_root);
+            }
+        }
+    }
+}
+
 bool ValidateStatementBindingInternal(
     const uint256& genesis_hash,
     const ChainLockStatement& statement,
@@ -645,6 +692,69 @@ VerifiedRosterSet::Create(
         new VerifiedRosterSet{genesis_hash, std::move(rosters)}};
 }
 
+DurableRosterContext DurableRosterContext::Capture(
+    const PreparedChainLockContext& context)
+{
+    // Prepared contexts already own immutable, intrinsically verified bytes;
+    // persistence must not repeat the 8,184 roster-root hashes.
+    return DurableRosterContext{context.RosterSetPtr()};
+}
+
+std::optional<DurableRosterContext>
+DurableRosterContext::DecodeTrustedPersistence(
+    Span<const uint8_t> encoded,
+    ChainLockVerificationError* error)
+{
+    SetError(error, ChainLockVerificationError::NONE);
+    if (encoded.size() < MIN_SERIALIZED_SIZE ||
+        encoded.size() > MAX_SERIALIZED_SIZE) {
+        SetError(error, ChainLockVerificationError::INVALID_ARGUMENT);
+        return std::nullopt;
+    }
+
+    auto rosters{std::make_unique<FrozenQuorumRosters>()};
+    uint16_t version{0};
+    uint256 genesis_hash;
+    try {
+        SpanReader reader{SER_DISK, 0, encoded};
+        UnserializeDurableRosters(
+            reader, version, genesis_hash, *rosters);
+        if (!reader.empty()) {
+            SetError(error, ChainLockVerificationError::INVALID_ARGUMENT);
+            return std::nullopt;
+        }
+    } catch (const std::ios_base::failure&) {
+        SetError(error, ChainLockVerificationError::INVALID_ARGUMENT);
+        return std::nullopt;
+    }
+    if (version != FORMAT_VERSION) {
+        SetError(error, ChainLockVerificationError::INVALID_ARGUMENT);
+        return std::nullopt;
+    }
+
+    if (!ValidateRosterSetInternal(genesis_hash, *rosters, error)) {
+        return std::nullopt;
+    }
+    FrozenQuorumRostersPtr immutable_rosters{std::move(rosters)};
+    auto roster_set{std::shared_ptr<const VerifiedRosterSet>{
+        new VerifiedRosterSet{
+            genesis_hash, std::move(immutable_rosters)}}};
+    return DurableRosterContext{std::move(roster_set)};
+}
+
+std::vector<uint8_t> DurableRosterContext::Encode() const
+{
+    DataStream stream{SER_DISK};
+    stream.reserve(MAX_SERIALIZED_SIZE);
+    SerializeDurableRosters(stream, GenesisHash(), Rosters());
+    if (stream.size() < MIN_SERIALIZED_SIZE ||
+        stream.size() > MAX_SERIALIZED_SIZE) {
+        throw std::logic_error("durable roster context size invariant");
+    }
+    return {UCharCast(stream.data()),
+            UCharCast(stream.data() + stream.size())};
+}
+
 PreparedChainLockContext::PreparedChainLockContext(
     ChainLockScheduleConfig schedule,
     ChainLockStatement statement,
@@ -669,8 +779,43 @@ PreparedChainLockContext::Create(
     const RosterAuthorizationVerificationContext& authorization,
     ChainLockVerificationError* error)
 {
+    return CreateInternal(schedule, std::move(statement),
+                          std::move(roster_set), authorization,
+                          /*trusted_persistence_rosters=*/false, error);
+}
+
+std::shared_ptr<const PreparedChainLockContext>
+PreparedChainLockContext::CreateFromTrustedPersistence(
+    ChainLockScheduleConfig schedule,
+    ChainLockStatement statement,
+    const DurableRosterContext& durable_rosters,
+    const RosterAuthorizationVerificationContext& authorization,
+    ChainLockVerificationError* error)
+{
+    if (authorization.admission !=
+        RosterAuthorizationAdmission::TRUSTED_PERSISTENCE) {
+        SetError(error, ChainLockVerificationError::INVALID_AUTHORIZATION);
+        return nullptr;
+    }
+    return CreateInternal(
+        schedule, std::move(statement), durable_rosters.m_roster_set,
+        authorization, /*trusted_persistence_rosters=*/true, error);
+}
+
+std::shared_ptr<const PreparedChainLockContext>
+PreparedChainLockContext::CreateInternal(
+    ChainLockScheduleConfig schedule,
+    ChainLockStatement statement,
+    VerifiedRosterSetPtr roster_set,
+    const RosterAuthorizationVerificationContext& authorization,
+    bool trusted_persistence_rosters,
+    ChainLockVerificationError* error)
+{
     SetError(error, ChainLockVerificationError::NONE);
-    if (!schedule.IsValid() || !roster_set) {
+    if (!schedule.IsValid() || !roster_set ||
+        (trusted_persistence_rosters &&
+         authorization.admission !=
+             RosterAuthorizationAdmission::TRUSTED_PERSISTENCE)) {
         SetError(error, ChainLockVerificationError::INVALID_ARGUMENT);
         return nullptr;
     }
@@ -678,7 +823,8 @@ PreparedChainLockContext::Create(
         return nullptr;
     }
     if (HasRecoveryRosterBeacon(statement.roster_beacons) &&
-        !roster_set->m_build_provenance) {
+        !roster_set->m_build_provenance &&
+        !trusted_persistence_rosters) {
         SetError(error, ChainLockVerificationError::INVALID_ROSTER_BEACON);
         return nullptr;
     }
