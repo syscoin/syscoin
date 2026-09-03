@@ -968,6 +968,29 @@ FinalChainLock MakeBTCCWinner(const DurableBTCCIndexState& index_state,
 using ProductionPQChainLockPersistence =
     llmq::pq::PQChainLockPersistence;
 
+class UnusedFinalityContext final : public ChainLockFinalityContext {
+public:
+    std::optional<ChainLockCandidateContext> PrepareCandidate(
+        const ChainLockCandidateContextRequest&) const override
+    {
+        return std::nullopt;
+    }
+
+    std::optional<ChainLockCandidateContext> RecheckCandidate(
+        const ChainLockCandidateContextRequest&,
+        const ChainLockCandidateContext&) const override
+    {
+        return std::nullopt;
+    }
+
+    AcceptedBranchRelation QueryAcceptedBranch(
+        int32_t, const uint256&, int32_t,
+        const uint256&) const override
+    {
+        return AcceptedBranchRelation::UNKNOWN;
+    }
+};
+
 /** Keep legacy state-machine fixtures focused while exercising the new seam. */
 class PersistenceHarness final {
 public:
@@ -2490,6 +2513,126 @@ BOOST_AUTO_TEST_CASE(
         PrepareFinalChainLockVerification(recovered, *trusted, &error)};
     BOOST_REQUIRE(prepared);
     BOOST_CHECK_EQUAL(prepared->checks.size(), FINAL_SIGNATURE_COUNT);
+}
+
+BOOST_AUTO_TEST_CASE(
+    recovery_authorization_base_store_seam_persists_exact_capsule)
+{
+    const uint256 genesis{NonNullHash(84'200)};
+    const auto config{MakeConfig()};
+    const fs::path path{
+        m_path_root / "pqcl_recovery_authorization_base_store_seam"};
+    auto initialized{MakeChainLock(
+        865, config.activation_predecessor_height,
+        NonNullHash(config.activation_predecessor_height), 84'201)};
+    SetExactInitialization(initialized, genesis, 84'201);
+    const auto initialized_context{MakeStatementBoundDurableContext(
+        genesis, config.chainlock_schedule, initialized)};
+    BOOST_REQUIRE(initialized_context);
+
+    const auto recovery_target{CanonicalRosterRecoveryTargetHeight(
+        config.chainlock_schedule, config.btcc_schedule, 7)};
+    BOOST_REQUIRE(recovery_target);
+    auto recovered{MakeChainLock(
+        *recovery_target,
+        *recovery_target - static_cast<int32_t>(PQ_CL_PERIOD),
+        NonNullHash(*recovery_target - PQ_CL_PERIOD), 84'202)};
+    SetExactRecoveryTransitionFromPrior(
+        recovered, genesis, initialized, /*newest_epoch=*/7);
+    const auto recovery_context{MakeStatementBoundDurableContext(
+        genesis, config.chainlock_schedule, recovered)};
+    BOOST_REQUIRE(recovery_context);
+    BOOST_REQUIRE(recovered.IsStructurallyValid());
+    const auto recovery_capsule{MakePersistenceRecoveryUniverse(
+        genesis, recovered.statement.roster_beacons.active
+                     .recovery_authority_source)};
+    BOOST_REQUIRE(recovery_capsule);
+    const uint256 recovered_logical_id{recovered.GetLogicalId(genesis)};
+
+    {
+        ProductionPQChainLockPersistence persistence{
+            DiskParams(path), genesis, config};
+        BOOST_REQUIRE(persistence.PersistInitializedBest(
+            initialized, initialized_context, nullptr,
+            /*verified_reset=*/nullptr, std::nullopt,
+            MakePersistenceRecoveryUniverse(
+                genesis, initialized.statement.roster_beacons.active
+                             .recovery_authority_source)));
+
+        UnusedFinalityContext finality_context;
+        std::size_t recovery_durable_calls{0};
+        ChainLockFinalityStore store{
+            genesis, config, finality_context, {}, {}, {}, {}, {}, {},
+            [&](const FinalChainLock& chainlock,
+                const PreparedChainLockContextPtr& context,
+                const RecoveryUniverseCapsulePtr& capsule) {
+                BOOST_CHECK(chainlock == recovered);
+                BOOST_CHECK(context == recovery_context);
+                BOOST_REQUIRE(capsule);
+                BOOST_CHECK(capsule == recovery_capsule);
+                ++recovery_durable_calls;
+                return persistence.PersistVerifiedAuthorizationBase(
+                    chainlock, context, nullptr, capsule);
+            }};
+        ChainLockFinalityError error{ChainLockFinalityError::NONE};
+        BOOST_REQUIRE(store.AcceptVerifiedRosterAuthorizationBase(
+            recovered, /*signatures_valid=*/true, recovery_context,
+            &error, recovery_capsule));
+        BOOST_CHECK(error == ChainLockFinalityError::NONE);
+        BOOST_CHECK_EQUAL(recovery_durable_calls, 1U);
+        BOOST_CHECK(!store.GetBest());
+        BOOST_REQUIRE(
+            store.GetServableByLogicalId(recovered_logical_id));
+
+        const auto durable{
+            persistence.LoadAuthorizationBase(recovered_logical_id)};
+        BOOST_REQUIRE(durable);
+        BOOST_CHECK(durable->ChainLock() == recovered);
+        const auto persisted_capsule{
+            persistence.LoadRecoveryUniverse(
+                recovery_capsule->SourceId())};
+        BOOST_REQUIRE(persisted_capsule);
+        BOOST_CHECK(*persisted_capsule == *recovery_capsule);
+    }
+
+    ProductionPQChainLockPersistence reopened{
+        DiskParams(path), genesis, config};
+    const auto durable{
+        reopened.LoadAuthorizationBase(recovered_logical_id)};
+    BOOST_REQUIRE(durable);
+    const auto persisted_capsule{
+        reopened.LoadRecoveryUniverse(recovery_capsule->SourceId())};
+    BOOST_REQUIRE(persisted_capsule);
+    BOOST_CHECK(*persisted_capsule == *recovery_capsule);
+
+    RosterAuthorizationVerificationContext authorization;
+    authorization.predecessor_height =
+        recovered.statement.previous_chainlock_height;
+    authorization.predecessor_block_hash =
+        recovered.statement.previous_chainlock_hash;
+    authorization.admission =
+        RosterAuthorizationAdmission::TRUSTED_PERSISTENCE;
+    ChainLockVerificationError verification_error{
+        ChainLockVerificationError::NONE};
+    const auto trusted{PreparedChainLockContext::CreateFromTrustedPersistence(
+        config.chainlock_schedule, durable->ChainLock().statement,
+        durable->RosterContext(), authorization, &verification_error)};
+    BOOST_REQUIRE(trusted);
+    BOOST_CHECK(verification_error == ChainLockVerificationError::NONE);
+
+    UnusedFinalityContext finality_context;
+    ChainLockFinalityStore restarted{
+        genesis, config, finality_context};
+    ChainLockFinalityError import_error{ChainLockFinalityError::NONE};
+    BOOST_REQUIRE(restarted.AcceptPersistedRosterAuthorizationBase(
+        durable->ChainLock(), /*signatures_valid=*/true, trusted,
+        &import_error));
+    BOOST_CHECK(import_error == ChainLockFinalityError::NONE);
+    BOOST_CHECK(!restarted.GetBest());
+    const auto servable{
+        restarted.GetServableByLogicalId(recovered_logical_id)};
+    BOOST_REQUIRE(servable);
+    BOOST_CHECK(*servable == recovered);
 }
 
 BOOST_AUTO_TEST_CASE(corrupt_roster_recovery_precommit_fails_closed)
