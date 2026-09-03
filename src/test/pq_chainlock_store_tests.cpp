@@ -595,6 +595,13 @@ BOOST_AUTO_TEST_CASE(
     TestFinalityContext context;
     ChainLockFinalityStore store{genesis, config, context};
 
+    const auto retention_best{MakeChainLock(
+        1'000'000, 999'995, NonNullHash(999'995), 113'999)};
+    auto prepared{store.PreparePersistedCandidate(retention_best)};
+    BOOST_REQUIRE(prepared);
+    BOOST_REQUIRE(store.AcceptPersistedVerified(
+        *prepared, retention_best, /*signatures_valid=*/true));
+
     const auto source{MakeChainLock(
         865, config.activation_predecessor_height,
         NonNullHash(config.activation_predecessor_height), 114)};
@@ -663,6 +670,18 @@ BOOST_AUTO_TEST_CASE(
     TestFinalityContext context;
     ChainLockFinalityStore store{genesis, config, context};
 
+    auto live_best{MakeChainLock(
+        schedule->seal_height,
+        schedule->seal_height -
+            config.chainlock_schedule.chainlock_period,
+        NonNullHash(schedule->seal_height -
+                    config.chainlock_schedule.chainlock_period),
+        499'999)};
+    auto prepared{store.PreparePersistedCandidate(live_best)};
+    BOOST_REQUIRE(prepared);
+    BOOST_REQUIRE(store.AcceptPersistedVerified(
+        *prepared, live_best, /*signatures_valid=*/true));
+
     std::size_t protected_owners{0};
     std::size_t possible_base_changes{0};
     for (int32_t height{schedule->seal_height};
@@ -683,7 +702,7 @@ BOOST_AUTO_TEST_CASE(
                    VERIFIED_AUTHORIZATION_BASE_CAPACITY);
 
     for (std::size_t index{0};
-         index < VERIFIED_AUTHORIZATION_BASE_CAPACITY - 2;
+         index < VERIFIED_AUTHORIZATION_BASE_CAPACITY - 3;
          ++index) {
         const int32_t height{
             870 + static_cast<int32_t>(index * PQ_CL_PERIOD)};
@@ -748,18 +767,51 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(store.AuthorizationBaseSizeForTesting(),
                       VERIFIED_AUTHORIZATION_BASE_CAPACITY);
 
+    const auto future_authorization{MakeChainLock(
+        schedule->carrier_end_height_exclusive +
+            config.chainlock_schedule.chainlock_period,
+        schedule->carrier_end_height_exclusive,
+        NonNullHash(schedule->carrier_end_height_exclusive),
+        529'999)};
+    BOOST_REQUIRE(store.AcceptVerifiedRosterAuthorizationBase(
+        future_authorization, /*signatures_valid=*/true,
+        MakeVerificationContext(
+            genesis, config, future_authorization)));
+    BOOST_REQUIRE(store.GetVerifiedRosterAuthorizationBaseByLogicalId(
+        owner.GetLogicalId(genesis)));
+    BOOST_REQUIRE(store.GetVerifiedRosterAuthorizationBase(base_identity));
+
+    while (live_best.statement.height <
+           schedule->carrier_end_height_exclusive) {
+        const auto next_height{NextEligibleChainLockTargetHeight(
+            config.chainlock_schedule, live_best.statement.height)};
+        BOOST_REQUIRE(next_height);
+        BOOST_REQUIRE_LE(*next_height,
+                         schedule->carrier_end_height_exclusive);
+        auto next{MakeChainLock(
+            *next_height, live_best.statement.height,
+            live_best.statement.block_hash,
+            530'000 + static_cast<uint64_t>(*next_height))};
+        auto next_prepared{store.PrepareCandidate(next)};
+        BOOST_REQUIRE(next_prepared);
+        BOOST_REQUIRE(store.AcceptVerified(
+            *next_prepared, next, /*signatures_valid=*/true));
+        live_best = std::move(next);
+    }
+    BOOST_CHECK_EQUAL(live_best.statement.height,
+                      schedule->carrier_end_height_exclusive);
+
     for (std::size_t index{0};
          index < VERIFIED_AUTHORIZATION_BASE_CAPACITY + 4;
          ++index) {
-        const int32_t height{
-            schedule->carrier_end_height_exclusive +
-            static_cast<int32_t>(index * PQ_CL_PERIOD)};
         const auto expired{MakeChainLock(
-            height,
-            height - config.chainlock_schedule.chainlock_period,
-            NonNullHash(height -
-                        config.chainlock_schedule.chainlock_period),
-            530'000 + index)};
+            schedule->carrier_end_height_exclusive -
+                config.chainlock_schedule.chainlock_period,
+            schedule->carrier_end_height_exclusive -
+                2 * config.chainlock_schedule.chainlock_period,
+            NonNullHash(schedule->carrier_end_height_exclusive -
+                        2 * config.chainlock_schedule.chainlock_period),
+            600'000 + index)};
         BOOST_REQUIRE(store.AcceptVerifiedRosterAuthorizationBase(
             expired, /*signatures_valid=*/true,
             MakeVerificationContext(genesis, config, expired)));

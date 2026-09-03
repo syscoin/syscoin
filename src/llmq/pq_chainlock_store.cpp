@@ -1020,12 +1020,18 @@ bool ChainLockFinalityStore::AcceptRosterAuthorizationBaseInternal(
         if (recent != m_recent_by_height.end() &&
             already_accepted(recent->second)) {
             RememberAuthorizationBase(
-                recent->second, persisted_import);
+                recent->second,
+                persisted_import
+                    ? AuthorizationBaseRetentionClock::UNORDERED_STARTUP
+                    : AuthorizationBaseRetentionClock::DURABLE_BEST);
             return true;
         }
         if (m_unsealed_btcc && already_accepted(*m_unsealed_btcc)) {
             RememberAuthorizationBase(
-                *m_unsealed_btcc, persisted_import);
+                *m_unsealed_btcc,
+                persisted_import
+                    ? AuthorizationBaseRetentionClock::UNORDERED_STARTUP
+                    : AuthorizationBaseRetentionClock::DURABLE_BEST);
             return true;
         }
         const auto existing{m_authorization_bases.find(logical_id)};
@@ -1085,7 +1091,10 @@ bool ChainLockFinalityStore::AcceptRosterAuthorizationBaseInternal(
         std::make_shared<const FinalChainLock>(chainlock),
         std::move(verification_context)};
     RememberAuthorizationBase(
-        std::move(retained), persisted_import);
+        std::move(retained),
+        persisted_import
+            ? AuthorizationBaseRetentionClock::UNORDERED_STARTUP
+            : AuthorizationBaseRetentionClock::DURABLE_BEST);
     return true;
 }
 
@@ -1369,7 +1378,11 @@ bool ChainLockFinalityStore::AcceptVerifiedInternal(
     // reconstruction after the smaller relay cache expires. Retention alone
     // never authorizes a stale-base state advance; the integration must also
     // prove convergence with the current durable winner.
-    RememberAuthorizationBase(accepted);
+    RememberAuthorizationBase(
+        accepted,
+        archive_only
+            ? AuthorizationBaseRetentionClock::DURABLE_BEST
+            : AuthorizationBaseRetentionClock::INCOMING_BEST);
     if (archive_only) {
         m_unsealed_btcc = accepted;
     } else {
@@ -1391,7 +1404,7 @@ bool ChainLockFinalityStore::AcceptVerifiedInternal(
 
 void ChainLockFinalityStore::RememberAuthorizationBase(
     AcceptedRecord record,
-    bool unordered_startup_import)
+    AuthorizationBaseRetentionClock retention_clock)
 {
     if (!record.chainlock || !record.verification_context ||
         record.logical_id.IsNull() || record.witness_id.IsNull() ||
@@ -1441,14 +1454,18 @@ void ChainLockFinalityStore::RememberAuthorizationBase(
             m_unsealed_btcc->chainlock->statement.roster_authorization_base};
         if (!base.IsNull()) protected_ids.insert(base.logical_id);
     }
-    const std::optional<int32_t> retention_height{
-        unordered_startup_import
-            ? std::nullopt
-            : std::optional<int32_t>{
-                  m_best && m_best->chainlock
-                      ? std::max(incoming_height,
-                                 m_best->chainlock->statement.height)
-                      : incoming_height}};
+    std::optional<int32_t> retention_height;
+    if (retention_clock ==
+        AuthorizationBaseRetentionClock::INCOMING_BEST) {
+        retention_height = m_best && m_best->chainlock
+            ? std::max(incoming_height,
+                       m_best->chainlock->statement.height)
+            : incoming_height;
+    } else if (retention_clock ==
+                   AuthorizationBaseRetentionClock::DURABLE_BEST &&
+               m_best && m_best->chainlock) {
+        retention_height = m_best->chainlock->statement.height;
+    }
     for (const auto& [retained_id, retained] : m_authorization_bases) {
         const auto carrier_end{
             retained.chainlock

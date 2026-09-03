@@ -1689,10 +1689,29 @@ BOOST_AUTO_TEST_CASE(
     const uint256 source_logical_id{source.GetLogicalId(genesis)};
     uint256 newest_logical_id;
 
+    const uint32_t final_newest_epoch{
+        static_cast<uint32_t>(
+            ACTIVE_QUORUMS - 1 +
+            (VERIFIED_AUTHORIZATION_BASE_CAPACITY + 8) *
+                ACTIVE_QUORUMS)};
+    const auto final_target{CanonicalRosterRecoveryTargetHeight(
+        config.chainlock_schedule, config.btcc_schedule,
+        final_newest_epoch)};
+    BOOST_REQUIRE(final_target);
+
     {
         PQChainLockPersistence persistence{DiskParams(path), genesis, config};
-        BOOST_REQUIRE(
-            persistence.PersistVerifiedAuthorizationBase(source));
+        BOOST_REQUIRE(persistence.PersistInitializedBest(source));
+        const int32_t retention_best_height{
+            *final_target + 10 * static_cast<int32_t>(PQ_CL_PERIOD)};
+        auto retention_best{MakeChainLock(
+            retention_best_height,
+            retention_best_height - static_cast<int32_t>(PQ_CL_PERIOD),
+            NonNullHash(retention_best_height -
+                        static_cast<int32_t>(PQ_CL_PERIOD)),
+            8'250'999)};
+        SetExactContinuation(retention_best, genesis, source);
+        BOOST_REQUIRE(persistence.PersistBest(retention_best));
         for (std::size_t index{1};
              index <= VERIFIED_AUTHORIZATION_BASE_CAPACITY + 8;
              ++index) {
@@ -1759,10 +1778,19 @@ BOOST_AUTO_TEST_CASE(
     {
         PQChainLockPersistence persistence{DiskParams(path), genesis,
                                            config};
-        BOOST_REQUIRE(persistence.PersistVerifiedAuthorizationBase(
-            objective_base));
+        BOOST_REQUIRE(persistence.PersistInitializedBest(objective_base));
+        auto intermediate{MakeChainLock(
+            870, objective_base.statement.height,
+            objective_base.statement.block_hash, 8'251'001)};
+        SetExactContinuation(intermediate, genesis, objective_base);
+        BOOST_REQUIRE(persistence.PersistBest(intermediate));
+        auto live_best{MakeChainLock(
+            875, intermediate.statement.height,
+            intermediate.statement.block_hash, 8'251'002)};
+        SetExactContinuation(live_best, genesis, intermediate);
+        BOOST_REQUIRE(persistence.PersistBest(live_best));
         for (std::size_t index{0};
-             index + 1 < VERIFIED_AUTHORIZATION_BASE_CAPACITY;
+             index + 2 < VERIFIED_AUTHORIZATION_BASE_CAPACITY;
              ++index) {
             const int32_t height{
                 870 + static_cast<int32_t>(index * PQ_CL_PERIOD)};
@@ -1824,16 +1852,44 @@ BOOST_AUTO_TEST_CASE(
         BOOST_REQUIRE(persistence.LoadAuthorizationBase(
             window_owner->GetLogicalId(genesis)));
 
+        const int32_t future_height{
+            schedule->carrier_end_height_exclusive +
+            static_cast<int32_t>(PQ_CL_PERIOD)};
+        auto future_authorization{MakeChainLock(
+            future_height,
+            future_height - static_cast<int32_t>(PQ_CL_PERIOD),
+            NonNullHash(future_height -
+                        static_cast<int32_t>(PQ_CL_PERIOD)),
+            8'253'999)};
+        SetExactContinuation(
+            future_authorization, genesis, new_base);
+        BOOST_REQUIRE(
+            persistence.PersistVerifiedAuthorizationBase(
+                future_authorization));
+        BOOST_REQUIRE(
+            persistence.LoadAuthorizationBase(objective_base_id));
+        BOOST_REQUIRE(persistence.LoadAuthorizationBase(
+            window_owner->GetLogicalId(genesis)));
+
+        auto expiry_best{MakeChainLock(
+            schedule->carrier_end_height_exclusive,
+            schedule->carrier_end_height_exclusive -
+                static_cast<int32_t>(PQ_CL_PERIOD),
+            NonNullHash(schedule->carrier_end_height_exclusive -
+                        static_cast<int32_t>(PQ_CL_PERIOD)),
+            8'254'000)};
+        SetExactContinuation(expiry_best, genesis, new_base);
+        BOOST_REQUIRE(persistence.PersistBest(expiry_best));
+
         for (std::size_t index{0};
              index < VERIFIED_AUTHORIZATION_BASE_CAPACITY + 4;
              ++index) {
-            const int32_t height{
-                schedule->carrier_end_height_exclusive +
-                static_cast<int32_t>(index * PQ_CL_PERIOD)};
             auto retained{MakeChainLock(
-                height, height - static_cast<int32_t>(PQ_CL_PERIOD),
+                schedule->carrier_end_height_exclusive -
+                    static_cast<int32_t>(PQ_CL_PERIOD),
+                schedule->carrier_end_height_exclusive -
+                    2 * static_cast<int32_t>(PQ_CL_PERIOD),
                 NonNullHash(8'254'000 + index), 8'255'000 + index)};
-            SetExactContinuation(retained, genesis, new_base);
             BOOST_REQUIRE(
                 persistence.PersistVerifiedAuthorizationBase(retained));
         }
@@ -4533,6 +4589,25 @@ BOOST_AUTO_TEST_CASE(
         BOOST_CHECK_EQUAL(
             persistence.LoadAuthorizationBases().size(),
             VERIFIED_AUTHORIZATION_BASE_CAPACITY);
+
+        const int32_t future_height{
+            second_schedule->carrier_end_height_exclusive +
+            static_cast<int32_t>(PQ_CL_PERIOD)};
+        auto future_authorization{MakeChainLock(
+            future_height,
+            future_height - static_cast<int32_t>(PQ_CL_PERIOD),
+            NonNullHash(future_height -
+                        static_cast<int32_t>(PQ_CL_PERIOD)),
+            909'999)};
+        SetExactContinuation(
+            future_authorization, genesis, live_best);
+        BOOST_REQUIRE(
+            persistence.PersistVerifiedAuthorizationBase(
+                future_authorization));
+        BOOST_REQUIRE(persistence.LoadAuthorizationBase(
+            second.GetLogicalId(genesis)));
+        BOOST_REQUIRE(persistence.LoadAuthorizationBase(
+            first.GetLogicalId(genesis)));
     }
     {
         PQChainLockPersistence persistence{DiskParams(path), genesis,
@@ -4590,13 +4665,12 @@ BOOST_AUTO_TEST_CASE(
         for (std::size_t index{0};
              index < VERIFIED_AUTHORIZATION_BASE_CAPACITY + 4;
              ++index) {
-            const int32_t height{
-                live_best.statement.height +
-                static_cast<int32_t>(index * PQ_CL_PERIOD)};
             auto post_expiry{MakeChainLock(
-                height, height - static_cast<int32_t>(PQ_CL_PERIOD),
-                NonNullHash(height -
-                            static_cast<int32_t>(PQ_CL_PERIOD)),
+                second_schedule->carrier_end_height_exclusive -
+                    static_cast<int32_t>(PQ_CL_PERIOD),
+                second_schedule->carrier_end_height_exclusive -
+                    2 * static_cast<int32_t>(PQ_CL_PERIOD),
+                NonNullHash(920'000 + index),
                 920'000 + index)};
             BOOST_REQUIRE(
                 persistence.PersistVerifiedAuthorizationBase(post_expiry));

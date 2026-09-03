@@ -701,6 +701,14 @@ private:
         PreparedChainLockContextPtr verification_context;
     };
 
+    // Non-rebasing admission cannot expire dependencies against a height the
+    // durable finality state has not reached.
+    enum class AuthorizationBaseRetentionClock {
+        DURABLE_BEST,
+        INCOMING_BEST,
+        UNORDERED_STARTUP,
+    };
+
     [[nodiscard]] ChainLockPredecessor CurrentPredecessor() const
         EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
     [[nodiscard]] bool IsPreparedPredecessorCurrent(
@@ -741,7 +749,7 @@ private:
     void RememberAccepted(AcceptedRecord record) EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
     void RememberAuthorizationBase(
         AcceptedRecord record,
-        bool unordered_startup_import = false)
+        AuthorizationBaseRetentionClock retention_clock)
         EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
     [[nodiscard]] bool AcceptRosterAuthorizationBaseInternal(
         const FinalChainLock& chainlock,

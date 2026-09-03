@@ -2973,10 +2973,10 @@ struct PQChainLockPersistence::Impl {
             }
         }
 
-        const int32_t retention_height{best
-            ? std::max(best->chainlock.statement.height,
-                       candidate.chainlock.statement.height)
-            : candidate.chainlock.statement.height};
+        const std::optional<int32_t> retention_height{best
+            ? std::optional<int32_t>{
+                  best->chainlock.statement.height}
+            : std::nullopt};
         std::set<uint256> payment_audit_protected_ids;
         const auto protect_unexpired_payment_audit_seal =
             [&](const DiskRecord& record) {
@@ -2984,7 +2984,9 @@ struct PQChainLockPersistence::Impl {
                     PaymentAuditScheduleConfig{
                         config.chainlock_schedule, config.btcc_schedule},
                     record.chainlock.statement.height)};
-                if (!carrier_end || retention_height >= *carrier_end) {
+                if (!carrier_end ||
+                    (retention_height &&
+                     *retention_height >= *carrier_end)) {
                     return;
                 }
                 payment_audit_protected_ids.insert(record.logical_id);
