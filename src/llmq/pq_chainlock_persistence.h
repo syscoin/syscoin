@@ -289,6 +289,20 @@ struct DurableFinalityStateView {
                            const DurableFinalityStateView&) = default;
 };
 
+/** Compact auxiliary snapshots still required by a retained recovery roster. */
+struct RecoveryRosterRetentionDependency {
+    int32_t target_height{-1};
+    uint32_t first_epoch{0};
+
+    friend bool operator==(const RecoveryRosterRetentionDependency&,
+                           const RecoveryRosterRetentionDependency&) = default;
+};
+
+/** Extract one recovery group's key/target dependency; reject mixed groups. */
+[[nodiscard]] bool GetRecoveryRosterRetentionDependency(
+    const ChainLockStatement& statement,
+    std::optional<RecoveryRosterRetentionDependency>& dependency) noexcept;
+
 /**
  * One exact certificate and the immutable roster bytes that verified it.
  * The checksum-derived local record identity commits both values and closes
@@ -371,9 +385,10 @@ public:
     LoadAuthorizationBases() const;
     [[nodiscard]] std::optional<DurableChainLockRecord>
     LoadAuthorizationBase(const uint256& logical_id) const;
-    /** Compact coordinates needed to retain/rebuild older recovery rosters. */
-    [[nodiscard]] std::vector<RecoveryRosterAuthoritySource>
-    LoadAuthorizationBaseRecoverySources() const;
+    /** Compact coordinates needed by every durable recovery-roster owner. */
+    [[nodiscard]] std::optional<
+        std::vector<RecoveryRosterRetentionDependency>>
+    LoadRecoveryRosterRetentionDependencies() const;
     [[nodiscard]] std::optional<int32_t>
     OldestAuthorizationBaseHeight() const;
     [[nodiscard]] bool HasCatchupMarker() const;

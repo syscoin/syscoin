@@ -693,16 +693,59 @@ std::optional<int32_t> OldestRosterSnapshotHeight(
         config, target_height, config.roster_snapshot_lag_blocks);
 }
 
-std::optional<int32_t> RecoverySourceSnapshotHeight(
+std::optional<int32_t> FirstObjectiveRecoveryKeySnapshotHeight(
     const pq::QuorumBuildConfig& config,
-    const pq::RecoveryRosterAuthoritySource& source)
+    const pq::ChainLockFinalityStoreConfig& finality_config,
+    const pq::BTCCPresealMarker& marker)
 {
-    if (!source.IsStructurallyValid() || source.IsNull()) {
+    const int32_t receipted_target{
+        marker.predecessor_receipt_state
+            .latest_chainlock_target_height};
+    const auto receipt_epoch{pq::EpochForHeight(
+        config.schedule, receipted_target)};
+    const auto carrier_epoch{pq::EpochForHeight(
+        config.schedule, marker.earliest_carrier_height)};
+    if (!receipt_epoch || !carrier_epoch ||
+        *receipt_epoch > std::numeric_limits<uint32_t>::max() - 2) {
         return std::nullopt;
     }
+
+    uint64_t recovery_epoch{std::max<uint64_t>(
+        static_cast<uint64_t>(*receipt_epoch) + 2,
+        *carrier_epoch)};
+    const uint64_t phase{
+        static_cast<uint64_t>(pq::ACTIVE_QUORUMS - 1)};
+    const uint64_t remainder{
+        recovery_epoch % pq::ACTIVE_QUORUMS};
+    recovery_epoch +=
+        (phase + pq::ACTIVE_QUORUMS - remainder) %
+        pq::ACTIVE_QUORUMS;
+    if (recovery_epoch > std::numeric_limits<uint32_t>::max()) {
+        return std::nullopt;
+    }
+    auto canonical{pq::CanonicalRosterRecoveryTargetHeight(
+        config.schedule, finality_config.btcc_schedule,
+        static_cast<uint32_t>(recovery_epoch))};
+    if (!canonical) return std::nullopt;
+    if (*canonical < marker.earliest_carrier_height) {
+        recovery_epoch += pq::ACTIVE_QUORUMS;
+        if (recovery_epoch > std::numeric_limits<uint32_t>::max()) {
+            return std::nullopt;
+        }
+        canonical = pq::CanonicalRosterRecoveryTargetHeight(
+            config.schedule, finality_config.btcc_schedule,
+            static_cast<uint32_t>(recovery_epoch));
+        if (!canonical ||
+            *canonical < marker.earliest_carrier_height) {
+            return std::nullopt;
+        }
+    }
+    const uint32_t first_epoch{
+        static_cast<uint32_t>(recovery_epoch) -
+        static_cast<uint32_t>(pq::ACTIVE_QUORUMS - 1)};
     return pq::RegistrationCutoffHeight(
-        config.schedule, source.normal_beacon.epoch,
-        config.roster_snapshot_lag_blocks);
+        config.schedule, first_epoch,
+        config.registration_cutoff_blocks);
 }
 
 bool BTCCPresealAuxiliaryRetentionFloor(
@@ -727,19 +770,25 @@ bool BTCCPresealAuxiliaryRetentionFloor(
         if (!earliest_target) return false;
         const auto roster_floor{OldestRosterSnapshotHeight(
             config, *earliest_target)};
-        // RECOVER uses the older operator-key cutoff while selecting the
-        // same dynamically rescored identities. Until the marker is sealed,
-        // retain whichever input snapshot is older.
-        const auto recovery_key_floor{OldestRosterSnapshotHeight(
-            config, *earliest_target,
-            config.registration_cutoff_blocks)};
-        if (!roster_floor || !recovery_key_floor ||
-            marker->earliest_carrier_height <= 0) {
+        if (!roster_floor || marker->earliest_carrier_height <= 0) {
             return false;
         }
-        const int32_t marker_floor{std::min(
+        int32_t marker_floor{std::min(
             static_cast<int32_t>(marker->earliest_carrier_height - 1),
-            std::min(*roster_floor, *recovery_key_floor))};
+            *roster_floor)};
+        // INITIALIZE is the only admissible mode until its first receipt, so
+        // it has no recovery-key dependency. An established outage retains
+        // the key cutoff for the first phase-3 recovery target that can cover
+        // the deferred carrier; a canonical target in [E, C) is too early to
+        // authenticate that carrier and the next four-epoch group is used.
+        if (!marker->predecessor_receipt_state.cursor.IsNull()) {
+            const auto recovery_key_floor{
+                FirstObjectiveRecoveryKeySnapshotHeight(
+                    config, finality_config, *marker)};
+            if (!recovery_key_floor) return false;
+            marker_floor = std::min(marker_floor,
+                                    *recovery_key_floor);
+        }
         floor = floor ? std::min(*floor, marker_floor) : marker_floor;
         return true;
     };
@@ -6654,31 +6703,38 @@ void CChainLocksHandler::UpdateDurableChainLockAuxiliaryRetention()
         floor = floor ? std::min(*floor, *candidate_floor)
                       : *candidate_floor;
     };
-    const auto inspect_recovery_source =
-        [&](const pq::RecoveryRosterAuthoritySource& source) {
-            if (source.IsNull() || !valid) return;
-            if (!m_quorum_build_config || !floor) {
+    const auto inspect_recovery_roster =
+        [&](const pq::RecoveryRosterRetentionDependency& dependency) {
+            if (!valid) return;
+            if (!m_quorum_build_config || !floor ||
+                dependency.target_height < 0) {
                 valid = false;
                 return;
             }
-            const auto source_floor{RecoverySourceSnapshotHeight(
-                *m_quorum_build_config, source)};
-            if (!source_floor) {
+            const auto key_floor{pq::RegistrationCutoffHeight(
+                m_quorum_build_config->schedule,
+                dependency.first_epoch,
+                m_quorum_build_config->registration_cutoff_blocks)};
+            if (!key_floor) {
                 valid = false;
                 return;
             }
-            floor = std::min(*floor, *source_floor);
+            // The capsule replaces the source snapshot only. Recovery still
+            // resolves child keys at R and liveness at the signed target; a
+            // lower-only floor through R retains both snapshots.
+            floor = std::min(*floor, *key_floor);
         };
-    const auto inspect = [&](const auto& chainlock,
-                             bool retain_recovery_source = true) {
+    const auto inspect = [&](const auto& chainlock) {
         if (!chainlock || !valid) return;
         inspect_height(chainlock->statement.height);
         if (!valid) return;
-        if (retain_recovery_source) {
-            inspect_recovery_source(
-                chainlock->statement.roster_beacons.active
-                    .recovery_authority_source);
+        std::optional<pq::RecoveryRosterRetentionDependency> dependency;
+        if (!pq::GetRecoveryRosterRetentionDependency(
+                chainlock->statement, dependency)) {
+            valid = false;
+            return;
         }
+        if (dependency) inspect_recovery_roster(*dependency);
     };
     if (m_persistence) {
         const auto durable{m_persistence->GetFinalityState()};
@@ -6692,9 +6748,15 @@ void CChainLocksHandler::UpdateDurableChainLockAuxiliaryRetention()
                 m_persistence->OldestAuthorizationBaseHeight()}) {
             inspect_height(*authorization_base_height);
         }
-        for (const auto& source :
-             m_persistence->LoadAuthorizationBaseRecoverySources()) {
-            inspect_recovery_source(source);
+        const auto dependencies{
+            m_persistence
+                ->LoadRecoveryRosterRetentionDependencies()};
+        if (!dependencies) {
+            valid = false;
+        } else {
+            for (const auto& dependency : *dependencies) {
+                inspect_recovery_roster(dependency);
+            }
         }
     }
     if (!found_durable && m_config) {

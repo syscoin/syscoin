@@ -3194,7 +3194,7 @@ BOOST_AUTO_TEST_CASE(btcc_preseal_recovery_floor_is_lower_only)
             llmq::pq::BTCCPresealState{marker, std::nullopt},
             *quorum_config, *finality_config)};
     BOOST_REQUIRE(initial_floor);
-    BOOST_CHECK_EQUAL(*initial_floor, 596);
+    BOOST_CHECK_EQUAL(*initial_floor, 1152);
 
     const llmq::pq::BTCCReceiptState terminal_parent{
         cursor, NonNullHash(3'100'007), first_target, first_carrier};
@@ -3231,6 +3231,79 @@ BOOST_AUTO_TEST_CASE(btcc_preseal_recovery_floor_is_lower_only)
             *quorum_config, *finality_config)};
     BOOST_REQUIRE(late_initial_floor);
     BOOST_CHECK_EQUAL(*late_initial_floor, *initial_floor);
+
+    // The first recovery group must cover the carrier C itself, not merely
+    // its ordinary receipt source E=C-10. Equality uses the current group;
+    // once C passes that canonical target, the next four-epoch group owns R.
+    const auto canonical{llmq::pq::CanonicalRosterRecoveryTargetHeight(
+        finality_config->chainlock_schedule,
+        finality_config->btcc_schedule, /*epoch=*/7)};
+    BOOST_REQUIRE(canonical);
+    const auto current_recovery_floor{llmq::pq::RegistrationCutoffHeight(
+        quorum_config->schedule, /*epoch=*/4,
+        quorum_config->registration_cutoff_blocks)};
+    BOOST_REQUIRE(current_recovery_floor);
+    marker.predecessor_receipt_state = predecessor;
+    const auto set_carrier = [&](int32_t carrier_height) {
+        marker.earliest_carrier_height = carrier_height;
+        marker.earliest_carrier_hash =
+            NonNullHash(3'200'000 + carrier_height);
+        marker.terminal_carrier_height = carrier_height;
+        marker.terminal_carrier_hash = marker.earliest_carrier_hash;
+        marker.terminal_parent_receipt_state = predecessor;
+        marker.terminal_receipt = first_receipt;
+        BOOST_REQUIRE(marker.IsStructurallyValid());
+        return llmq::GetBTCCPresealAuxiliaryRetentionFloor(
+            llmq::pq::BTCCPresealState{marker, std::nullopt},
+            *quorum_config, *finality_config);
+    };
+    const auto before_recovery{set_carrier(*canonical - 10)};
+    const auto exact_recovery{set_carrier(*canonical)};
+    const auto after_recovery{set_carrier(*canonical + 10)};
+    BOOST_REQUIRE(before_recovery);
+    BOOST_REQUIRE(exact_recovery);
+    BOOST_REQUIRE(after_recovery);
+    BOOST_CHECK_EQUAL(*before_recovery, *current_recovery_floor);
+    BOOST_CHECK_EQUAL(*exact_recovery, *current_recovery_floor);
+    BOOST_CHECK_EQUAL(*after_recovery, 2304);
+
+    // All four receipt-epoch phases map to the first phase-3 epoch at least
+    // two epochs later. The chosen carrier equals that canonical target, so
+    // R belongs to the current recovery group in every case.
+    for (uint32_t phase{0}; phase < llmq::pq::ACTIVE_QUORUMS; ++phase) {
+        const uint32_t receipt_epoch{8 + phase};
+        const auto receipt_base{llmq::pq::EpochBaseHeight(
+            quorum_config->schedule, receipt_epoch)};
+        BOOST_REQUIRE(receipt_base);
+        const int32_t receipt_target{*receipt_base + 5};
+        marker.predecessor_receipt_state = llmq::pq::BTCCReceiptState{
+            llmq::pq::BTCCursor{
+                receipt_target, NonNullHash(3'300'000 + phase),
+                NonNullHash(3'310'000 + phase)},
+            NonNullHash(3'320'000 + phase), receipt_target,
+            receipt_target + 10};
+        BOOST_REQUIRE(marker.predecessor_receipt_state.IsStructurallyValid());
+        const uint32_t minimum_epoch{receipt_epoch + 2};
+        const uint32_t recovery_epoch{static_cast<uint32_t>(
+            minimum_epoch +
+            (llmq::pq::ACTIVE_QUORUMS - 1 +
+             llmq::pq::ACTIVE_QUORUMS -
+             minimum_epoch % llmq::pq::ACTIVE_QUORUMS) %
+                llmq::pq::ACTIVE_QUORUMS)};
+        const auto recovery_target{
+            llmq::pq::CanonicalRosterRecoveryTargetHeight(
+                finality_config->chainlock_schedule,
+                finality_config->btcc_schedule, recovery_epoch)};
+        const auto recovery_floor{llmq::pq::RegistrationCutoffHeight(
+            quorum_config->schedule,
+            recovery_epoch - (llmq::pq::ACTIVE_QUORUMS - 1),
+            quorum_config->registration_cutoff_blocks)};
+        BOOST_REQUIRE(recovery_target);
+        BOOST_REQUIRE(recovery_floor);
+        const auto phase_floor{set_carrier(*recovery_target)};
+        BOOST_REQUIRE(phase_floor);
+        BOOST_CHECK_EQUAL(*phase_floor, *recovery_floor);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(live_chainlock_candidates_are_current_and_one_window_bound)

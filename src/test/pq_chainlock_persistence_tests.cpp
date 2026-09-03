@@ -1007,9 +1007,10 @@ public:
     {
         return m_persistence.LoadAuthorizationBase(logical_id);
     }
-    [[nodiscard]] auto LoadAuthorizationBaseRecoverySources() const
+    [[nodiscard]] auto LoadRecoveryRosterRetentionDependencies() const
     {
-        return m_persistence.LoadAuthorizationBaseRecoverySources();
+        return m_persistence
+            .LoadRecoveryRosterRetentionDependencies();
     }
     [[nodiscard]] bool HasCatchupMarker() const
     {
@@ -1259,6 +1260,43 @@ BOOST_AUTO_TEST_CASE(empty_database_initializes_fixed_schema)
     BOOST_CHECK_EQUAL(state.certificate_revision, 0U);
     BOOST_CHECK(!state.best);
     BOOST_CHECK(!state.unsealed_btcc);
+}
+
+BOOST_AUTO_TEST_CASE(recovery_roster_retention_dependency_is_group_exact)
+{
+    const uint256 genesis{NonNullHash(4'090'000)};
+    const auto config{MakeConfig()};
+    auto initialized{MakeChainLock(
+        865, config.activation_predecessor_height,
+        NonNullHash(config.activation_predecessor_height), 4'090'001)};
+    SetExactInitialization(initialized, genesis, 4'090'001);
+
+    const auto recovery_target{CanonicalRosterRecoveryTargetHeight(
+        config.chainlock_schedule, config.btcc_schedule, /*epoch=*/7)};
+    BOOST_REQUIRE(recovery_target);
+    auto recovered{MakeChainLock(
+        *recovery_target,
+        *recovery_target - static_cast<int32_t>(PQ_CL_PERIOD),
+        NonNullHash(*recovery_target - PQ_CL_PERIOD), 4'090'002)};
+    SetExactRecoveryTransitionFromPrior(
+        recovered, genesis, initialized, /*newest_epoch=*/7);
+
+    std::optional<RecoveryRosterRetentionDependency> dependency;
+    BOOST_REQUIRE(GetRecoveryRosterRetentionDependency(
+        recovered.statement, dependency));
+    BOOST_REQUIRE(dependency);
+    const RecoveryRosterRetentionDependency expected{
+        recovered.statement.height, /*first_epoch=*/4};
+    BOOST_CHECK(*dependency == expected);
+
+    auto mixed{recovered.statement};
+    mixed.roster_beacons.active.seeds.front().epoch = 8;
+    BOOST_CHECK(!GetRecoveryRosterRetentionDependency(mixed, dependency));
+    BOOST_CHECK(!dependency);
+
+    BOOST_REQUIRE(GetRecoveryRosterRetentionDependency(
+        initialized.statement, dependency));
+    BOOST_CHECK(!dependency);
 }
 
 BOOST_AUTO_TEST_CASE(
@@ -1522,8 +1560,6 @@ BOOST_AUTO_TEST_CASE(authorization_base_exact_lookup_survives_restart)
         865, config.activation_predecessor_height,
         NonNullHash(config.activation_predecessor_height), 820)};
     SetExactInitialization(base, genesis, 820);
-    const auto recovery_source{base.statement.roster_beacons.active
-                                   .recovery_authority_source};
     BOOST_REQUIRE(base.IsStructurallyValid());
     const uint256 logical_id{base.GetLogicalId(genesis)};
 
@@ -1534,10 +1570,11 @@ BOOST_AUTO_TEST_CASE(authorization_base_exact_lookup_survives_restart)
         BOOST_REQUIRE(exact);
         BOOST_CHECK(*exact == base);
         BOOST_CHECK(!persistence.LoadAuthorizationBase(NonNullHash(821)));
-        const auto sources{
-            persistence.LoadAuthorizationBaseRecoverySources()};
-        BOOST_REQUIRE_EQUAL(sources.size(), 1U);
-        BOOST_CHECK(sources.front() == recovery_source);
+        const auto dependencies{
+            persistence
+                .LoadRecoveryRosterRetentionDependencies()};
+        BOOST_REQUIRE(dependencies);
+        BOOST_CHECK(dependencies->empty());
 
         auto precommit{MakeInitializationPrecommit(
             820, base.statement.height)};
@@ -1561,10 +1598,11 @@ BOOST_AUTO_TEST_CASE(authorization_base_exact_lookup_survives_restart)
         const auto exact{persistence.LoadAuthorizationBase(logical_id)};
         BOOST_REQUIRE(exact);
         BOOST_CHECK(*exact == base);
-        const auto sources{
-            persistence.LoadAuthorizationBaseRecoverySources()};
-        BOOST_REQUIRE_EQUAL(sources.size(), 1U);
-        BOOST_CHECK(sources.front() == recovery_source);
+        const auto dependencies{
+            persistence
+                .LoadRecoveryRosterRetentionDependencies()};
+        BOOST_REQUIRE(dependencies);
+        BOOST_CHECK(dependencies->empty());
     }
 }
 
@@ -2224,6 +2262,14 @@ BOOST_AUTO_TEST_CASE(
             MakePersistenceRecoveryUniverse(
                 genesis, recovered.statement.roster_beacons.active
                              .recovery_authority_source)));
+        const auto dependencies{
+            persistence.LoadRecoveryRosterRetentionDependencies()};
+        BOOST_REQUIRE(dependencies);
+        BOOST_CHECK(std::find(
+                        dependencies->begin(), dependencies->end(),
+                        RecoveryRosterRetentionDependency{
+                            recovered.statement.height,
+                            /*first_epoch=*/4}) != dependencies->end());
     }
 
     ProductionPQChainLockPersistence persistence{
@@ -2231,6 +2277,16 @@ BOOST_AUTO_TEST_CASE(
     const auto loaded{persistence.LoadBest()};
     BOOST_REQUIRE(loaded);
     BOOST_REQUIRE(loaded->ChainLock() == recovered);
+    const auto restarted_dependencies{
+        persistence.LoadRecoveryRosterRetentionDependencies()};
+    BOOST_REQUIRE(restarted_dependencies);
+    BOOST_CHECK(std::find(
+                    restarted_dependencies->begin(),
+                    restarted_dependencies->end(),
+                    RecoveryRosterRetentionDependency{
+                        recovered.statement.height,
+                        /*first_epoch=*/4}) !=
+                restarted_dependencies->end());
 
     RosterAuthorizationVerificationContext authorization;
     authorization.predecessor_height =

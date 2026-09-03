@@ -38,6 +38,27 @@ bool RosterRecoveryPrecommit::IsStructurallyValid() const noexcept
     return pending_seed.anchor_kind == RosterBeaconAnchorKind::NORMAL;
 }
 
+bool GetRecoveryRosterRetentionDependency(
+    const ChainLockStatement& statement,
+    std::optional<RecoveryRosterRetentionDependency>& dependency) noexcept
+{
+    dependency.reset();
+    std::optional<uint32_t> first_epoch;
+    for (const auto& seed : statement.roster_beacons.active.seeds) {
+        if (seed.anchor_kind != RosterBeaconAnchorKind::RECOVERY) continue;
+        const uint32_t candidate{
+            seed.epoch - seed.epoch % static_cast<uint32_t>(ACTIVE_QUORUMS)};
+        if (first_epoch && *first_epoch != candidate) return false;
+        first_epoch = candidate;
+    }
+    if (first_epoch) {
+        if (statement.height < 0) return false;
+        dependency = RecoveryRosterRetentionDependency{
+            statement.height, *first_epoch};
+    }
+    return true;
+}
+
 namespace {
 
 bool IsRecoverySourceBoundWindow(
@@ -3578,16 +3599,41 @@ PQChainLockPersistence::LoadAuthorizationBase(
     return m_impl->PublicRecord(found->second);
 }
 
-std::vector<RecoveryRosterAuthoritySource>
-PQChainLockPersistence::LoadAuthorizationBaseRecoverySources() const
+std::optional<std::vector<RecoveryRosterRetentionDependency>>
+PQChainLockPersistence::LoadRecoveryRosterRetentionDependencies() const
 {
     LOCK(m_impl->mutex);
-    std::vector<RecoveryRosterAuthoritySource> result;
-    result.reserve(m_impl->authorization_bases.size());
+    std::vector<RecoveryRosterRetentionDependency> result;
+    result.reserve(m_impl->authorization_bases.size() + 6);
+    const auto inspect = [&](const ChainLockStatement& statement) {
+        std::optional<RecoveryRosterRetentionDependency> dependency;
+        if (!GetRecoveryRosterRetentionDependency(statement, dependency)) {
+            return false;
+        }
+        if (dependency && std::find(result.begin(), result.end(),
+                                    *dependency) == result.end()) {
+            result.push_back(*dependency);
+        }
+        return true;
+    };
+    if ((m_impl->best &&
+         !inspect(m_impl->best->chainlock.statement)) ||
+        (m_impl->unsealed &&
+         !inspect(m_impl->unsealed->chainlock.statement))) {
+        return std::nullopt;
+    }
     for (const auto& [_, record] : m_impl->authorization_bases) {
-        const auto& source{record.chainlock.statement.roster_beacons.active
-                               .recovery_authority_source};
-        if (!source.IsNull()) result.push_back(source);
+        if (!inspect(record.chainlock.statement)) return std::nullopt;
+    }
+    if (m_impl->receipt_archive_authorization &&
+        (!inspect(m_impl->receipt_archive_authorization->owner.statement) ||
+         !inspect(m_impl->receipt_archive_authorization->predecessor
+                      .statement))) {
+        return std::nullopt;
+    }
+    if (m_impl->payment_audit_seal_context &&
+        !inspect(m_impl->payment_audit_seal_context->Seal().statement)) {
+        return std::nullopt;
     }
     return result;
 }
