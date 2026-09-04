@@ -19,6 +19,7 @@
 #include <util/time.h>
 #include <uint256.h>
 #include <univalue.h>
+#include <validationinterface.h>
 
 #include <test/util/setup_common.h>
 
@@ -598,6 +599,243 @@ public:
   }
 
 };
+
+// SYSCOIN BEGIN: Helpers for exercising multiple mutable AuxPoW wrappers that
+// share one pure child-header identity.
+static CBlock BuildAuxpowChildTemplate(
+    node::NodeContext& node,
+    const std::optional<uint256>& btc_prev = std::nullopt)
+{
+  CTxMemPool mempool{MemPoolOptionsForTest(node)};
+  AuxpowMinerForTest miner;
+  CScript script_pub_key;
+  uint256 target;
+  LOCK(miner.cs);
+  const CBlock* block{miner.getCurrentBlock(
+      *Assert(node.chainman), mempool, script_pub_key, target, btc_prev)};
+  if (block == nullptr) {
+    throw std::runtime_error("failed to create AuxPoW child template");
+  }
+  return *block;
+}
+
+static CScript CurrentAuxpowTag(ChainstateManager& chainman)
+{
+  LOCK(cs_main);
+  const CBlockIndex* tip{Assert(chainman.ActiveTip())};
+  int ref_height{tip->nHeight - 5};
+  ref_height -= ref_height % 10;
+  const CBlockIndex* ref{Assert(tip->GetAncestor(ref_height))};
+  return AuxpowMiner::createScriptPubKey(ref->GetBlockHash(), ref->nHeight);
+}
+
+static std::shared_ptr<CBlock> BuildAuxpowWrapper(
+    const CBlock& child,
+    const uint256& parent_prev,
+    const CScript& syscoin_tag)
+{
+  auto block{std::make_shared<CBlock>(child)};
+  const uint256 child_hash{block->GetHash()};
+  CAuxpowBuilder builder{/*baseVersion=*/5, /*chainId=*/42};
+  builder.parentBlock.hashPrevBlock = parent_prev;
+
+  constexpr unsigned merkle_height{0};
+  constexpr int nonce{7};
+  const int index{CAuxPow::getExpectedIndex(
+      nonce, Params().GetConsensus().nAuxpowChainId, merkle_height)};
+  const valtype aux_root{
+      builder.buildAuxpowChain(child_hash, merkle_height, index)};
+  const valtype data{CAuxpowBuilder::buildCoinbaseData(
+      /*header=*/true, aux_root, merkle_height, nonce)};
+  builder.setCoinbase(CScript{} << data);
+
+  CMutableTransaction parent_coinbase{*builder.parentBlock.vtx[0]};
+  parent_coinbase.vout.emplace_back(/*nValue=*/0, syscoin_tag);
+  builder.parentBlock.vtx[0] =
+      MakeTransactionRef(std::move(parent_coinbase));
+  builder.parentBlock.hashMerkleRoot = BlockMerkleRoot(builder.parentBlock);
+  mineBlock(builder.parentBlock, /*ok=*/true, block->nBits);
+  block->SetAuxpow(builder.getUnique());
+  block->fChecked = false;
+  return block;
+}
+
+struct NexusAuxpowWrapperSetup : TestChain100Setup {
+  NexusAuxpowWrapperSetup()
+      : TestChain100Setup(ChainType::REGTEST,
+                          {"-dip3params=101:101"}) {}
+};
+
+struct BTCPREVAuxpowWrapperSetup : TestChain100Setup {
+  BTCPREVAuxpowWrapperSetup()
+      : TestChain100Setup(
+            ChainType::REGTEST,
+            {"-dip3params=101:101", "-pqbtcccandidateorigin=101"}) {}
+};
+
+class AuxpowConnectedObserver final : public CValidationInterface {
+public:
+  explicit AuxpowConnectedObserver(const uint256& target) : target{target} {}
+
+  void BlockConnected(ChainstateRole,
+                      const std::shared_ptr<const CBlock>& block,
+                      const CBlockIndex* index) override
+  {
+    if (index->GetBlockHash() != target) return;
+    connected = true;
+    if (block->auxpow) {
+      had_auxpow = true;
+      parent_prev = block->auxpow->getParentPrevBlockHash();
+    }
+  }
+
+  const uint256 target;
+  bool connected{false};
+  bool had_auxpow{false};
+  uint256 parent_prev;
+};
+BOOST_FIXTURE_TEST_CASE(
+    auxpow_btcp_mismatch_does_not_poison_child_header,
+    BTCPREVAuxpowWrapperSetup)
+{
+  ChainstateManager& chainman{*Assert(m_node.chainman)};
+  const uint256 committed{ArithToUint256(arith_uint256{101})};
+  const uint256 mismatched{ArithToUint256(arith_uint256{202})};
+  const CBlock child{BuildAuxpowChildTemplate(m_node, committed)};
+  uint256 extracted;
+  BOOST_REQUIRE(ExtractBTCPREVCommitment(child, extracted));
+  BOOST_REQUIRE(extracted == committed);
+
+  const CScript tag{CurrentAuxpowTag(chainman)};
+  const auto bad{BuildAuxpowWrapper(child, mismatched, tag)};
+  const auto good{BuildAuxpowWrapper(child, committed, tag)};
+  BOOST_REQUIRE(bad->GetHash() == good->GetHash());
+
+  LOCK(cs_main);
+  CBlockIndex* index{nullptr};
+  bool is_new{false};
+  BlockValidationState bad_state;
+  BOOST_REQUIRE(!chainman.AcceptBlock(
+      bad, bad_state, &index, /*fRequested=*/true, /*dbp=*/nullptr,
+      &is_new, /*min_pow_checked=*/true));
+  BOOST_REQUIRE(index != nullptr);
+  BOOST_CHECK(bad_state.GetResult() == BlockValidationResult::BLOCK_MUTATED);
+  BOOST_CHECK_EQUAL(bad_state.GetRejectReason(), "bad-btcp-mismatch");
+  BOOST_CHECK(!(index->nStatus & BLOCK_FAILED_MASK));
+  BOOST_CHECK(!(index->nStatus & BLOCK_HAVE_DATA));
+  BOOST_CHECK(!is_new);
+
+  BlockValidationState good_state;
+  CBlockIndex* good_index{nullptr};
+  BOOST_REQUIRE(chainman.AcceptBlock(
+      good, good_state, &good_index, /*fRequested=*/true, /*dbp=*/nullptr,
+      &is_new, /*min_pow_checked=*/true));
+  BOOST_CHECK(good_index == index);
+  BOOST_CHECK(is_new);
+  BOOST_CHECK(good_index->nStatus & BLOCK_HAVE_DATA);
+  BOOST_CHECK(!(good_index->nStatus & BLOCK_FAILED_MASK));
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    auxpow_known_header_rechecks_first_storable_wrapper,
+    NexusAuxpowWrapperSetup)
+{
+  ChainstateManager& chainman{*Assert(m_node.chainman)};
+  const CBlock child{BuildAuxpowChildTemplate(m_node)};
+  const uint256 parent_prev{ArithToUint256(arith_uint256{303})};
+  const CScript good_tag{CurrentAuxpowTag(chainman)};
+  const CScript bad_tag{AuxpowMiner::createScriptPubKey(
+      ArithToUint256(arith_uint256{404}), /*nHeight=*/90)};
+  const auto good{BuildAuxpowWrapper(child, parent_prev, good_tag)};
+  const auto bad{BuildAuxpowWrapper(child, parent_prev, bad_tag)};
+  BOOST_REQUIRE(good->GetHash() == bad->GetHash());
+
+  BlockValidationState header_state;
+  const CBlockIndex* index{nullptr};
+  BOOST_REQUIRE(chainman.ProcessNewBlockHeaders(
+      {good->GetBlockHeader()}, /*min_pow_checked=*/true, header_state,
+      &index));
+  BOOST_REQUIRE(index != nullptr);
+
+  LOCK(cs_main);
+  bool is_new{false};
+  CBlockIndex* bad_index{nullptr};
+  BlockValidationState bad_state;
+  BOOST_REQUIRE(!chainman.AcceptBlock(
+      bad, bad_state, &bad_index, /*fRequested=*/true, /*dbp=*/nullptr,
+      &is_new, /*min_pow_checked=*/true));
+  BOOST_CHECK(bad_index == index);
+  BOOST_CHECK(bad_state.GetResult() == BlockValidationResult::BLOCK_MUTATED);
+  BOOST_CHECK_EQUAL(bad_state.GetRejectReason(), "bad-auxpow-tag");
+  BOOST_CHECK(!(index->nStatus & BLOCK_FAILED_MASK));
+  BOOST_CHECK(!(index->nStatus & BLOCK_HAVE_DATA));
+
+  BlockValidationState good_state;
+  CBlockIndex* good_index{nullptr};
+  BOOST_REQUIRE(chainman.AcceptBlock(
+      good, good_state, &good_index, /*fRequested=*/true, /*dbp=*/nullptr,
+      &is_new, /*min_pow_checked=*/true));
+  BOOST_CHECK(good_index == index);
+  BOOST_CHECK(is_new);
+  BOOST_CHECK(good_index->nStatus & BLOCK_HAVE_DATA);
+  BOOST_CHECK(!(good_index->nStatus & BLOCK_FAILED_MASK));
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    auxpow_duplicate_activation_uses_persisted_wrapper,
+    NexusAuxpowWrapperSetup)
+{
+  ChainstateManager& chainman{*Assert(m_node.chainman)};
+  const CBlock child{BuildAuxpowChildTemplate(m_node)};
+  const CScript tag{CurrentAuxpowTag(chainman)};
+  const uint256 persisted_parent_prev{
+      ArithToUint256(arith_uint256{505})};
+  const uint256 alternate_parent_prev{
+      ArithToUint256(arith_uint256{606})};
+  const CScript alternate_tag{AuxpowMiner::createScriptPubKey(
+      ArithToUint256(arith_uint256{707}), /*nHeight=*/90)};
+  const auto persisted{
+      BuildAuxpowWrapper(child, persisted_parent_prev, tag)};
+  const auto alternate{
+      BuildAuxpowWrapper(child, alternate_parent_prev, alternate_tag)};
+  BOOST_REQUIRE(persisted->GetHash() == alternate->GetHash());
+
+  {
+    LOCK(cs_main);
+    BlockValidationState state;
+    CBlockIndex* index{nullptr};
+    bool is_new{false};
+    BOOST_REQUIRE(chainman.AcceptBlock(
+        persisted, state, &index, /*fRequested=*/true, /*dbp=*/nullptr,
+        &is_new, /*min_pow_checked=*/true));
+    BOOST_REQUIRE(index != nullptr);
+    BOOST_REQUIRE(is_new);
+    BOOST_REQUIRE(index->nStatus & BLOCK_HAVE_DATA);
+    BOOST_REQUIRE(chainman.ActiveTip()->GetBlockHash() !=
+                  persisted->GetHash());
+  }
+
+  auto observer{
+      std::make_shared<AuxpowConnectedObserver>(persisted->GetHash())};
+  RegisterSharedValidationInterface(observer);
+  bool is_new{true};
+  const bool processed{chainman.ProcessNewBlock(
+      alternate, /*force_processing=*/true, /*min_pow_checked=*/true,
+      &is_new)};
+  SyncWithValidationInterfaceQueue();
+  UnregisterSharedValidationInterface(observer);
+
+  BOOST_REQUIRE(processed);
+  BOOST_CHECK(!is_new);
+  BOOST_REQUIRE(observer->connected);
+  BOOST_REQUIRE(observer->had_auxpow);
+  BOOST_CHECK(observer->parent_prev == persisted_parent_prev);
+  BOOST_CHECK(observer->parent_prev != alternate_parent_prev);
+  BOOST_CHECK(WITH_LOCK(cs_main,
+                        return chainman.ActiveTip()->GetBlockHash()) ==
+              persisted->GetHash());
+}
+// SYSCOIN END: Mutable AuxPoW wrapper regression coverage.
 
 BOOST_FIXTURE_TEST_CASE (auxpow_miner_blockRegeneration, TestChain100Setup)
 {

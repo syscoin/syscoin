@@ -2024,7 +2024,9 @@ static bool CheckBTCPREVCommitment(const CBlock& block,
                              "bad-btcp-null");
     }
     if (committed != block.auxpow->getParentPrevBlockHash()) {
-        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+        // SYSCOIN: AuxPoW is not committed by the child block hash. Reject this
+        // representation without poisoning another valid wrapper for it.
+        return state.Invalid(BlockValidationResult::BLOCK_MUTATED,
                              "bad-btcp-mismatch");
     }
     return true;
@@ -7340,6 +7342,81 @@ arith_uint256 CalculateHeadersWork(const std::vector<CBlockHeader>& headers)
     return total_work;
 }
 
+// SYSCOIN BEGIN: Validate the mutable parent-chain wrapper independently from
+// the pure child-header identity used by the block index.
+static bool CheckContextualAuxPowTag(const CBlockHeader& block,
+                                     BlockValidationState& state,
+                                     const Consensus::Params& consensus,
+                                     const CBlockIndex* pindexPrev)
+    EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    assert(pindexPrev != nullptr);
+    const int nHeight{pindexPrev->nHeight + 1};
+    if (nHeight < consensus.nNexusStartBlock || !block.IsAuxpow()) {
+        return true;
+    }
+    if (!block.auxpow) {
+        return state.Invalid(BlockValidationResult::BLOCK_MUTATED,
+                             "missing-auxpow", "Missing AuxPoW data");
+    }
+    const CTransactionRef coinbaseTx{block.auxpow->getCoinbaseTx()};
+    if (!coinbaseTx) {
+        return state.Invalid(BlockValidationResult::BLOCK_MUTATED,
+                             "missing-auxpow-cb",
+                             "Missing AuxPoW coinbase data");
+    }
+
+    int nActiveHeight{pindexPrev->nHeight - 5};
+    nActiveHeight -= nActiveHeight % 10;
+    const CBlockIndex* refIndex{pindexPrev->GetAncestor(nActiveHeight)};
+    if (!refIndex) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                             "bad-auxpow-ref",
+                             "Referenced mod-10 block missing");
+    }
+
+    CDataStream expectedData{SER_NETWORK, PROTOCOL_VERSION};
+    expectedData << refIndex->GetBlockHash()
+                 << static_cast<uint32_t>(refIndex->nHeight);
+    const auto expectedBytes{MakeUCharSpan(expectedData)};
+    const unsigned char* const sysHeaderBegin{pchSyscoinHeader};
+    const unsigned char* const sysHeaderEnd{
+        sysHeaderBegin + sizeof(pchSyscoinHeader)};
+    const size_t tagLen{static_cast<size_t>(sysHeaderEnd - sysHeaderBegin)};
+    bool foundSysTag{false};
+
+    for (const auto& txout : coinbaseTx->vout) {
+        if (!txout.scriptPubKey.IsUnspendable()) continue;
+        const auto pcHead{std::search(txout.scriptPubKey.begin(),
+                                      txout.scriptPubKey.end(),
+                                      sysHeaderBegin, sysHeaderEnd)};
+        if (pcHead == txout.scriptPubKey.end()) continue;
+        const auto pc{std::search(pcHead + tagLen,
+                                  txout.scriptPubKey.end(),
+                                  expectedBytes.begin(),
+                                  expectedBytes.end())};
+        if (pc == txout.scriptPubKey.end()) {
+            return state.Invalid(BlockValidationResult::BLOCK_MUTATED,
+                                 "bad-auxpow-tag",
+                                 "SYSCOIN AuxPoW tag mismatch (hash or height)");
+        }
+        if (foundSysTag) {
+            return state.Invalid(BlockValidationResult::BLOCK_MUTATED,
+                                 "multiple-syscoin-tags",
+                                 "Multiple SYSCOIN AuxPoW tags detected");
+        }
+        foundSysTag = true;
+    }
+
+    if (!foundSysTag) {
+        return state.Invalid(BlockValidationResult::BLOCK_MUTATED,
+                             "missing-syscoin-tag",
+                             "No SYSCOIN AuxPoW tag detected");
+    }
+    return true;
+}
+// SYSCOIN END: Contextual AuxPoW wrapper validation.
+
 /** Context-dependent validity checks.
  *  By "context", we mean only the previous block headers, but not the UTXO
  *  set; UTXO-related validity checks are done in ConnectBlock().
@@ -7412,58 +7489,7 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
                 return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, strprintf("bad-version(0x%08x)", baseVer),
                                     strprintf("rejected nVersion=0x%08x block", block.nVersion));
     }
-    bool fNexusActive = nHeight >= consensusParams.nNexusStartBlock;
-    if (fNexusActive && block.IsAuxpow())
-    {
-        if (!block.auxpow)
-            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "missing-auxpow", "Missing AuxPoW data");
-        const CTransactionRef coinbaseTx = block.auxpow->getCoinbaseTx();
-        if (!coinbaseTx)
-            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "missing-auxpow-cb", "Missing AuxPoW coinbase data");
-        int nActiveHeight = pindexPrev->nHeight - 5;
-        nActiveHeight -= nActiveHeight % 10;
-        const CBlockIndex* refIndex = pindexPrev->GetAncestor(nActiveHeight);
-        if (!refIndex)
-            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-auxpow-ref", "Referenced mod-10 block missing");
-
-        uint256 expectedTagHash = refIndex->GetBlockHash();
-        uint32_t expectedTagHeight = refIndex->nHeight;
-        
-        bool foundSysTag = false;
-        
-        const unsigned char* const sysHeaderBegin = pchSyscoinHeader;
-        const unsigned char* const sysHeaderEnd = sysHeaderBegin + sizeof(pchSyscoinHeader);
-        size_t tagLen = sysHeaderEnd - sysHeaderBegin;
-        
-        for (const auto &txout : coinbaseTx->vout)
-        {
-            if (txout.scriptPubKey.IsUnspendable())
-            {
-                auto pcHead = std::search(txout.scriptPubKey.begin(), txout.scriptPubKey.end(), sysHeaderBegin, sysHeaderEnd);
-                if (pcHead != txout.scriptPubKey.end())
-                {
-                    // Combine hash + height into one data chunk for validation
-                    CDataStream ssData(SER_NETWORK, PROTOCOL_VERSION);
-                    ssData << expectedTagHash;
-                    ssData << expectedTagHeight;
-                    const auto &bytesVec = MakeUCharSpan(ssData);
-                    auto pc = std::search(pcHead + tagLen, txout.scriptPubKey.end(), bytesVec.begin(), bytesVec.end());
-        
-                    if (pc == txout.scriptPubKey.end())
-                        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-auxpow-tag", "SYSCOIN AuxPoW tag mismatch (hash or height)");
-        
-                    if (foundSysTag)
-                        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "multiple-syscoin-tags", "Multiple SYSCOIN AuxPoW tags detected");
-        
-                    foundSysTag = true;
-                }
-            }
-        }
-        
-        if (!foundSysTag)
-            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "missing-syscoin-tag", "No SYSCOIN AuxPoW tag detected");           
-    }
-    return true;
+    return CheckContextualAuxPowTag(block, state, consensusParams, pindexPrev);
 }
 
 /** NOTE: This function is not currently invoked by ConnectBlock(), so we
@@ -7624,6 +7650,18 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
                 LogPrintf("ERROR: %s: block %s is marked conflicting\n", __func__, hash.ToString());
                 return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK, "duplicate");
             }
+            // SYSCOIN BEGIN: A full block for a known child-header ID must
+            // validate the mutable AuxPoW wrapper that can become its stored
+            // representation.
+            if (bForBlock && !(pindex->nStatus & BLOCK_HAVE_DATA) &&
+                !CheckContextualAuxPowTag(block, state, GetConsensus(),
+                                          pindex->pprev)) {
+                LogPrint(BCLog::VALIDATION,
+                         "%s: contextual AuxPoW wrapper check failed for %s: %s\n",
+                         __func__, hash.ToString(), state.ToString());
+                return false;
+            }
+            // SYSCOIN END: Validate a known header's first storable wrapper.
             return true;
         }
 
@@ -7918,6 +7956,8 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
 bool ChainstateManager::ProcessNewBlock(const std::shared_ptr<const CBlock>& block, bool force_processing, bool min_pow_checked, bool* new_block)
 {
     AssertLockNotHeld(cs_main);
+    // SYSCOIN: Track whether this exact AuxPoW wrapper became canonical data.
+    bool accepted_new_block{false};
 
     {
         CBlockIndex *pindex = nullptr;
@@ -7936,7 +7976,9 @@ bool ChainstateManager::ProcessNewBlock(const std::shared_ptr<const CBlock>& blo
         bool ret = CheckBlock(*block, state, GetConsensus(), true, true);
         if (ret) {
             // Store to disk
-            ret = AcceptBlock(block, state, &pindex, force_processing, nullptr, new_block, min_pow_checked);
+            ret = AcceptBlock(block, state, &pindex, force_processing, nullptr,
+                              &accepted_new_block, min_pow_checked);
+            if (new_block) *new_block = accepted_new_block;
         }
         if (!ret) {
             GetMainSignals().BlockChecked(*block, state);
@@ -7946,16 +7988,23 @@ bool ChainstateManager::ProcessNewBlock(const std::shared_ptr<const CBlock>& blo
 
     NotifyHeaderTip(*this);
 
+    // SYSCOIN BEGIN: AcceptBlock may ignore an alternate representation for
+    // an already stored child hash. Only the representation just persisted is
+    // safe to substitute for the canonical disk block during connection.
+    const std::shared_ptr<const CBlock> activation_block{
+        accepted_new_block ? block : std::shared_ptr<const CBlock>{}};
     BlockValidationState state; // Only used to report errors, not invalidity - ignore it
-    if (!ActiveChainstate().ActivateBestChain(state, block)) {
+    if (!ActiveChainstate().ActivateBestChain(state, activation_block)) {
         return error("%s: ActivateBestChain failed (%s)", __func__, state.ToString());
     }
 
     Chainstate* bg_chain{WITH_LOCK(cs_main, return BackgroundSyncInProgress() ? m_ibd_chainstate.get() : nullptr)};
     BlockValidationState bg_state;
-    if (bg_chain && !bg_chain->ActivateBestChain(bg_state, block)) {
+    if (bg_chain && !bg_chain->ActivateBestChain(bg_state,
+                                                  activation_block)) {
         return error("%s: [background] ActivateBestChain failed (%s)", __func__, bg_state.ToString());
      }
+    // SYSCOIN END: Never activate an unpersisted alternate AuxPoW wrapper.
 
     return true;
 }
