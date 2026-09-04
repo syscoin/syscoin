@@ -745,10 +745,17 @@ BOOST_AUTO_TEST_CASE(read_views_share_state_but_preserve_exact_block_identity)
     PQRegistryError error;
 
     PQRegistryReadView genesis_view;
+    BOOST_CHECK(!genesis_view.IsStructurallyValid());
+    BOOST_CHECK(!genesis_view.RecomputeConsensusStateRoot(genesis));
     const uint256 genesis_block{NonNullHash(302)};
     BOOST_REQUIRE(manager.GetReadView(
         genesis_block, uint256{}, 0, genesis_view, error));
     BOOST_CHECK(genesis_view.IsValid());
+    BOOST_CHECK(genesis_view.IsStructurallyValid());
+    const auto genesis_root{
+        genesis_view.RecomputeConsensusStateRoot(genesis)};
+    BOOST_REQUIRE(genesis_root);
+    BOOST_CHECK(*genesis_root == genesis_view.ConsensusStateRoot());
     BOOST_CHECK_EQUAL(genesis_view.Height(), 0);
     BOOST_CHECK(genesis_view.BlockHash() == genesis_block);
     BOOST_CHECK(genesis_view.PreviousBlockHash().IsNull());
@@ -800,6 +807,13 @@ BOOST_AUTO_TEST_CASE(read_views_share_state_but_preserve_exact_block_identity)
     BOOST_CHECK(steady_b_view.PreviousBlockHash() == cutoff.GetHash());
     BOOST_CHECK(steady_a_view.ConsensusStateRoot() ==
                 steady_b_view.ConsensusStateRoot());
+    for (const auto* view : {&preparation_view, &cutoff_view,
+                             &steady_a_view, &steady_b_view}) {
+        BOOST_REQUIRE(view->IsStructurallyValid());
+        const auto recomputed{view->RecomputeConsensusStateRoot(genesis)};
+        BOOST_REQUIRE(recomputed);
+        BOOST_CHECK(*recomputed == view->ConsensusStateRoot());
+    }
     const std::size_t retained_operator_count{cutoff_view.OperatorCount()};
     cutoff_view = {};
     steady_a_view = {};

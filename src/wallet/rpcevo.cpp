@@ -491,9 +491,9 @@ static llmq::pq::OperatorKeyState GetActivePQOperator(
     const uint256& pro_tx_hash,
     const llmq::pq::GlobalPublicKey& public_key)
 {
-    llmq::pq::PQRegistrySnapshot snapshot;
+    llmq::pq::PQRegistryReadView snapshot;
     std::string error;
-    if (tip == nullptr || !deterministicMNManager->GetPQRegistrySnapshot(
+    if (tip == nullptr || !deterministicMNManager->GetPQRegistryReadView(
                               tip, snapshot, error)) {
         throw JSONRPCError(RPC_INTERNAL_ERROR,
                            "Unable to read active PQ operator registry: " + error);
@@ -1165,9 +1165,9 @@ static RPCHelpMan protx_register_operator_key()
                                        "Masternode not found at active tip");
                 }
 
-                llmq::pq::PQRegistrySnapshot snapshot;
+                llmq::pq::PQRegistryReadView snapshot;
                 std::string registry_error;
-                if (!deterministicMNManager->GetPQRegistrySnapshot(
+                if (!deterministicMNManager->GetPQRegistryReadView(
                         tip, snapshot, registry_error)) {
                     throw JSONRPCError(
                         RPC_INTERNAL_ERROR,

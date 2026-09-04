@@ -32,24 +32,6 @@ ShareCollectionError MapReservedVerificationError(
     }
 }
 
-void SetBit(QuorumBitmap& bitmap, uint16_t member_index)
-{
-    bitmap[member_index / 8] |=
-        static_cast<uint8_t>(uint8_t{1} << (member_index % 8));
-}
-
-bool IsBitSet(const QuorumBitmap& bitmap, uint16_t member_index)
-{
-    return (bitmap[member_index / 8] &
-            static_cast<uint8_t>(uint8_t{1} << (member_index % 8))) != 0;
-}
-
-void ClearBit(QuorumBitmap& bitmap, uint16_t member_index)
-{
-    bitmap[member_index / 8] &=
-        static_cast<uint8_t>(~(uint8_t{1} << (member_index % 8)));
-}
-
 } // namespace
 
 CollectedChainLockFinalization::CollectedChainLockFinalization(
@@ -130,7 +112,7 @@ ChainLockCollector::ReserveShareVerification(
         return std::nullopt;
     }
     const auto& member{roster.members[member_index]};
-    if (!IsBitSet(roster.descriptor.valid_members, member_index) ||
+    if (!IsQuorumMemberSet(roster.descriptor.valid_members, member_index) ||
         !member.eligible || !member.child_root ||
         member.pro_tx_hash != share.transcript.member_pro_tx_hash) {
         SetError(error, ShareCollectionError::INVALID_MEMBER);
@@ -139,7 +121,7 @@ ChainLockCollector::ReserveShareVerification(
 
     auto& quorum_shares{m_shares[*slot]};
     if (quorum_shares.contains(member_index) ||
-        IsBitSet(m_pending_shares[*slot], member_index)) {
+        IsQuorumMemberSet(m_pending_shares[*slot], member_index)) {
         // An accepted or in-flight signer slot can contribute only one vote.
         // Later bytes cannot add weight and are not evidence against the
         // transport relay that delivered them, so skip their crypto work.
@@ -147,7 +129,7 @@ ChainLockCollector::ReserveShareVerification(
         return std::nullopt;
     }
 
-    SetBit(m_pending_shares[*slot], member_index);
+    SetQuorumMember(m_pending_shares[*slot], member_index);
     return ShareVerificationReservation{
         m_context, m_instance_token, share, *slot, member_index};
 }
@@ -204,11 +186,11 @@ ShareCollectionResult ChainLockCollector::CompleteShareVerification(
     }
 
     auto& pending{m_pending_shares[reservation.m_quorum_slot]};
-    if (!IsBitSet(pending, reservation.m_member_index)) {
+    if (!IsQuorumMemberSet(pending, reservation.m_member_index)) {
         SetError(error, ShareCollectionError::LOCAL_ERROR);
         return ShareCollectionResult::REJECTED;
     }
-    ClearBit(pending, reservation.m_member_index);
+    ClearQuorumMember(pending, reservation.m_member_index);
 
     if (reservation.m_verification_state !=
         ShareVerificationReservation::VerificationState::VALID) {
@@ -306,7 +288,7 @@ ChainLockCollector::BuildFinalCertificate() const
         std::size_t added{0};
         for (const auto& [member_index, signature] : m_shares[slot]) {
             if (added == QUORUM_THRESHOLD) break;
-            SetBit(result.signer_bitmaps[slot], member_index);
+            SetQuorumMember(result.signer_bitmaps[slot], member_index);
             result.signatures.push_back(signature);
             ++added;
         }

@@ -39,12 +39,6 @@ PaymentAuditSigningResult Failure(ChainLockSigningError* error,
     return {};
 }
 
-bool IsBitSet(const QuorumBitmap& bitmap, std::size_t member)
-{
-    return (bitmap[member / 8] &
-            static_cast<uint8_t>(uint8_t{1} << (member % 8))) != 0;
-}
-
 } // namespace
 
 PaymentAuditShareSigner::PaymentAuditShareSigner(
@@ -112,7 +106,7 @@ PaymentAuditSigningResult PaymentAuditShareSigner::Sign(
         return Failure(error, ChainLockSigningError::INACTIVE_QUORUM);
     }
     if (member_index >= QUORUM_SIZE ||
-        !IsBitSet(roster.descriptor.valid_members, member_index)) {
+        !IsQuorumMemberSet(roster.descriptor.valid_members, member_index)) {
         return Failure(error, ChainLockSigningError::INVALID_MEMBER);
     }
     const auto& member{roster.members[member_index]};

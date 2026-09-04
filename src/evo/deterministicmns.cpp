@@ -37,6 +37,10 @@ constexpr std::string_view PQ_DMN_MUHASH_STATE_DOMAIN{
 // SYSCOIN BEGIN: Incremental branch-local deterministic-state commitment.
 constexpr std::string_view PQ_LEGACY_STATE_ELEMENT_DOMAIN{
     "SYS_PQ_LEGACY_DMN_STATE_ELEMENT_V1"};
+constexpr std::string_view PQ_GOVERNANCE_AUTHORITY_ELEMENT_DOMAIN{
+    "SYS_PQ_GOVERNANCE_DMN_AUTHORITY_ELEMENT_V1"};
+constexpr std::string_view PQ_GOVERNANCE_AUTHORITY_STATE_DOMAIN{
+    "SYS_PQ_GOVERNANCE_DMN_AUTHORITY_STATE_V1"};
 // SYSCOIN END: Incremental branch-local deterministic-state commitment.
 constexpr std::string_view DMN_INVERSE_BASE_DOMAIN{
     "SYS_DMN_INVERSE_BASE_V1"};
@@ -83,6 +87,19 @@ DataStream SerializePQLegacyStateElement(const CDeterministicMN& dmn)
            << static_cast<uint64_t>(dmn.GetInternalId())
            << dmn.collateralOutpoint << dmn.nOperatorReward;
     dmn.pdmnState->SerializePQStateDiagnosticV1(stream);
+    return stream;
+}
+
+DataStream SerializePQGovernanceAuthorityElement(
+    const CDeterministicMN& dmn)
+{
+    DataStream stream;
+    stream.write(AsBytes(Span{
+        PQ_GOVERNANCE_AUTHORITY_ELEMENT_DOMAIN.data(),
+        PQ_GOVERNANCE_AUTHORITY_ELEMENT_DOMAIN.size()}));
+    stream << dmn.proTxHash << dmn.collateralOutpoint
+           << dmn.pdmnState->keyIDVoting
+           << CDeterministicMNList::IsMNValid(dmn);
     return stream;
 }
 // SYSCOIN END: Incremental branch-local deterministic-state commitment.
@@ -1224,17 +1241,6 @@ bool CDeterministicMNManager::GetPaymentProbationStateView(
     return m_payment_probation->GetStateView(state_hash, view);
 }
 
-bool CDeterministicMNManager::GetPaymentProbationState(
-    const CBlockIndex* pindex,
-    llmq::pq::PQPaymentProbationState& state) const
-{
-    const uint256 state_hash{
-        pindex == nullptr || pindex->pqPaymentProbationStateHash.IsNull()
-            ? m_payment_probation->EmptyStateHash()
-            : pindex->pqPaymentProbationStateHash};
-    return m_payment_probation->GetState(state_hash, state);
-}
-
 llmq::pq::PQPaymentProbationTransitionOutcome
 CDeterministicMNManager::ApplyPaymentProbationTransition(
     const CBlockIndex& carrier_parent,
@@ -1793,7 +1799,7 @@ void CDeterministicMN::ToJson(interfaces::Chain& chain, UniValue& obj) const
     obj.pushKV("collateralIndex", (int)collateralOutpoint.n);
 
     std::map<COutPoint, Coin> coins;
-    coins[collateralOutpoint]; 
+    coins[collateralOutpoint];
     chain.findCoins(coins);
     const Coin &coin = coins.at(collateralOutpoint);
     if (!coin.IsSpent()) {
@@ -1868,6 +1874,27 @@ uint256 CDeterministicMNList::GetOrComputePQLegacyStateHash(
         m_pq_legacy_state_hash_genesis = genesis_hash;
     }
     return *m_pq_legacy_state_hash;
+}
+
+uint256 CDeterministicMNList::GetOrComputePQGovernanceAuthorityHash(
+    const uint256& genesis_hash) const
+{
+    if (!m_pq_governance_authority_hash ||
+        m_pq_governance_authority_hash_genesis != genesis_hash) {
+        MuHash3072 content{m_pq_governance_authority_content_hash};
+        uint256 content_hash;
+        content.Finalize(content_hash);
+
+        CHashWriter writer{SER_GETHASH, 0};
+        writer.write(AsBytes(Span{
+            PQ_GOVERNANCE_AUTHORITY_STATE_DOMAIN.data(),
+            PQ_GOVERNANCE_AUTHORITY_STATE_DOMAIN.size()}));
+        writer << genesis_hash << static_cast<uint32_t>(mnMap.size())
+               << content_hash;
+        m_pq_governance_authority_hash = writer.GetHash();
+        m_pq_governance_authority_hash_genesis = genesis_hash;
+    }
+    return *m_pq_governance_authority_hash;
 }
 // SYSCOIN END: Incremental branch-local deterministic-state diagnostics.
 
@@ -2137,7 +2164,7 @@ void CDeterministicMNList::PoSePunish(const uint256& proTxHash, int penalty)
 
     LogPrint(BCLog::MNLIST, "CDeterministicMNList::%s -- punished MN %s, penalty %d->%d (max=%d)\n",
                 __func__, proTxHash.ToString(), dmn->pdmnState->nPoSePenalty, newState->nPoSePenalty, maxPenalty);
-    
+
 
     if (newState->nPoSePenalty >= maxPenalty && !newState->IsBanned()) {
         if(!newState->vchNEVMAddress.empty()) {
@@ -2146,7 +2173,7 @@ void CDeterministicMNList::PoSePunish(const uint256& proTxHash, int penalty)
         newState->BanIfNotBanned(nHeight);
         LogPrint(BCLog::MNLIST, "CDeterministicMNList::%s -- banned MN %s at height %d\n",
                     __func__, proTxHash.ToString(), nHeight);
-    
+
     }
     UpdateMN(proTxHash, newState);
 }
@@ -2414,6 +2441,8 @@ void CDeterministicMNList::AddMN(const CDeterministicMNCPtr& dmn, bool fBumpTota
     }
     // SYSCOIN: Precompute the authenticated element before publishing the new entry.
     const DataStream content{SerializePQLegacyStateElement(*dmn)};
+    const DataStream governance_content{
+        SerializePQGovernanceAuthorityElement(*dmn)};
 
     // All mnUniquePropertyMap's updates must be atomic.
     // Using this temporary map as a checkpoint to rollback to in case of any issues.
@@ -2448,12 +2477,15 @@ void CDeterministicMNList::AddMN(const CDeterministicMNCPtr& dmn, bool fBumpTota
     mnInternalIdMap = mnInternalIdMap.set(dmn->GetInternalId(), dmn->proTxHash);
     // SYSCOIN: Keep the branch-local commitment synchronized with the list.
     m_pq_legacy_content_hash.Insert(MakeUCharSpan(content));
+    m_pq_governance_authority_content_hash.Insert(
+        MakeUCharSpan(governance_content));
     if (fBumpTotalCount) {
         // nTotalRegisteredCount acts more like a checkpoint, not as a limit,
         nTotalRegisteredCount = std::max(dmn->GetInternalId() + 1, (uint64_t)nTotalRegisteredCount);
     }
     m_tracked_changes.emplace(dmn->proTxHash);
     m_pq_legacy_state_hash.reset();
+    m_pq_governance_authority_hash.reset();
 }
 
 // SYSCOIN BEGIN: Current-entry-safe deterministic-state mutation and commitment.
@@ -2476,6 +2508,9 @@ void CDeterministicMNList::UpdateMN(const uint256& proTxHash, const std::shared_
     dmn->pdmnState = pdmnState;
     const DataStream old_content{SerializePQLegacyStateElement(*oldDmn)};
     const DataStream new_content{SerializePQLegacyStateElement(*dmn)};
+    const bool governance_authority_changed{
+        oldDmn->pdmnState->keyIDVoting != pdmnState->keyIDVoting ||
+        IsMNValid(*oldDmn) != IsMNValid(*dmn)};
 
     // All mnUniquePropertyMap's updates must be atomic.
     // Using this temporary map as a checkpoint to rollback to in case of any issues.
@@ -2504,6 +2539,17 @@ void CDeterministicMNList::UpdateMN(const uint256& proTxHash, const std::shared_
     mnMap = mnMap.set(entryProTxHash, dmn);
     m_pq_legacy_content_hash.Remove(MakeUCharSpan(old_content));
     m_pq_legacy_content_hash.Insert(MakeUCharSpan(new_content));
+    if (governance_authority_changed) {
+        const DataStream old_governance_content{
+            SerializePQGovernanceAuthorityElement(*oldDmn)};
+        const DataStream new_governance_content{
+            SerializePQGovernanceAuthorityElement(*dmn)};
+        m_pq_governance_authority_content_hash.Remove(
+            MakeUCharSpan(old_governance_content));
+        m_pq_governance_authority_content_hash.Insert(
+            MakeUCharSpan(new_governance_content));
+        m_pq_governance_authority_hash.reset();
+    }
     m_tracked_changes.emplace(entryProTxHash);
     m_pq_legacy_state_hash.reset();
 }
@@ -2529,6 +2575,8 @@ void CDeterministicMNList::RemoveMN(const uint256& proTxHash)
     }
     // SYSCOIN: Precompute the authenticated element before removing the entry.
     const DataStream content{SerializePQLegacyStateElement(*dmn)};
+    const DataStream governance_content{
+        SerializePQGovernanceAuthorityElement(*dmn)};
 
     // All mnUniquePropertyMap's updates must be atomic.
     // Using this temporary map as a checkpoint to rollback to in case of any issues.
@@ -2563,8 +2611,11 @@ void CDeterministicMNList::RemoveMN(const uint256& proTxHash)
     mnInternalIdMap = mnInternalIdMap.erase(dmn->GetInternalId());
     // SYSCOIN: Keep the branch-local commitment synchronized with the list.
     m_pq_legacy_content_hash.Remove(MakeUCharSpan(content));
+    m_pq_governance_authority_content_hash.Remove(
+        MakeUCharSpan(governance_content));
     m_tracked_changes.emplace(proTxHash);
     m_pq_legacy_state_hash.reset();
+    m_pq_governance_authority_hash.reset();
 }
 
 std::string CDeterministicMNListNEVMAddressDiff::ToString() const {
@@ -2784,7 +2835,7 @@ bool CDeterministicMNManager::ProcessBlock(const CBlock& block, const CBlockInde
         } else {
             m_evoDb->WriteCache(pindex->GetBlockHash(), std::move(newList));
         }
-       
+
     // SYSCOIN: EvoDB failures are local availability errors, not evidence
     // that every peer must reject this otherwise-valid block as consensus bad.
     } catch (const dbwrapper_error& e) {
@@ -3170,7 +3221,7 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
                 LogPrint(BCLog::MNLIST, "CDeterministicMNManager::%s -- MN %s added at height %d: %s\n",
                         __func__, tx.GetHash().ToString(), nHeight, proTx.ToString());
                 break;
-            } 
+            }
             case(SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE): {
                 CProUpServTx proTx;
                 if (!GetTxPayload(tx, proTx)) {
@@ -3193,7 +3244,7 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
                     if (proTx.vchNEVMAddress.size() != 20) {
                         return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-protx-invalid-nevmaddress-size");
                     }
-                    if (newList.HasUniqueProperty(proTx.vchNEVMAddress) && 
+                    if (newList.HasUniqueProperty(proTx.vchNEVMAddress) &&
                         newList.GetUniquePropertyMN(proTx.vchNEVMAddress)->proTxHash != proTx.proTxHash) {
                         return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-protx-dup-nevm-address");
                     }
@@ -3232,27 +3283,27 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
                         LogPrint(BCLog::MNLIST, "CDeterministicMNManager::%s -- MN %s revived at height %d\n",
                                 __func__, proTx.proTxHash.ToString(), nHeight);
                     }
-                } 
-                
+                }
+
                 newList.UpdateMN(proTx.proTxHash, newState);
                 LogPrint(BCLog::MNLIST, "CDeterministicMNManager::%s -- MN %s updated at height %d: %s\n",
                         __func__, proTx.proTxHash.ToString(), nHeight, proTx.ToString());
                 break;
-            } 
+            }
             case(SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR): {
                 CProUpRegTx proTx;
                 if (!GetTxPayload(tx, proTx)) {
                     return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-protx-payload");
                 }
-            
+
                 CDeterministicMNCPtr dmn = newList.GetMN(proTx.proTxHash);
                 if (!dmn) {
                     return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-protx-hash");
                 }
-            
-            
+
+
                 auto newState = std::make_shared<CDeterministicMNState>(*dmn->pdmnState);
-            
+
                 // SYSCOIN: The released lazy BLS wrapper compared the group
                 // value when a v1 key was reserialized as v2. Preserve that
                 // replay semantic without restoring BLS group operations.
@@ -3275,15 +3326,15 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
                 if (proTx.nVersion == CProUpRegTx::PQ_VERSION) {
                     newState->nVersion = proTx.nVersion;
                 }
-            
+
                 newState->keyIDVoting = proTx.keyIDVoting;
                 newState->scriptPayout = proTx.scriptPayout;
                 newList.UpdateMN(proTx.proTxHash, newState);
-            
+
                 LogPrint(BCLog::MNLIST, "CDeterministicMNManager::%s -- MN %s updated at height %d: %s\n",
                          __func__, proTx.proTxHash.ToString(), nHeight, proTx.ToString());
                 break;
-            }            
+            }
             case(SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE): {
                 CProUpRevTx proTx;
                 if (!GetTxPayload(tx, proTx)) {
@@ -3304,7 +3355,7 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
                 newList.UpdateMN(proTx.proTxHash, newState);
                 LogPrint(BCLog::MNLIST, "CDeterministicMNManager::%s -- MN %s revoked operator key at height %d: %s\n",
                         __func__, proTx.proTxHash.ToString(), nHeight, proTx.ToString());
-                break; 
+                break;
             }
         }
     }
@@ -3326,7 +3377,7 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
             }
         }
     }
-    
+
     // The payee for the current block was determined by the previous block's list, but it might have disappeared in the
     // current block. We still pay that MN one last time however.
     if (auto dmn = payee ? newList.GetMN(payee->proTxHash) : nullptr) {
@@ -3553,15 +3604,22 @@ bool CDeterministicMNManager::VerifyPersistedPQRegistrySnapshot(
     }
     if (pindex->nHeight < config.preparation_height) return true;
 
-    llmq::pq::PQRegistrySnapshot snapshot;
+    llmq::pq::PQRegistryReadView snapshot;
     std::string error;
-    if (!GetPQRegistrySnapshot(pindex, snapshot, error)) {
+    if (!GetPQRegistryReadView(pindex, snapshot, error)) {
         LogPrintf("%s -- %s\n", __func__, error);
         return false;
     }
-    return snapshot.height == pindex->nHeight &&
-           snapshot.block_hash == pindex->GetBlockHash() &&
-           snapshot.IsStructurallyValid();
+    const auto recomputed_root{snapshot.RecomputeConsensusStateRoot(
+        Params().GetConsensus().hashGenesisBlock)};
+    const uint256 previous_hash{pindex->pprev == nullptr
+        ? uint256{}
+        : pindex->pprev->GetBlockHash()};
+    return snapshot.Height() == pindex->nHeight &&
+           snapshot.BlockHash() == pindex->GetBlockHash() &&
+           snapshot.PreviousBlockHash() == previous_hash &&
+           snapshot.IsStructurallyValid() && recomputed_root &&
+           *recomputed_root == snapshot.ConsensusStateRoot();
 }
 
 bool CDeterministicMNManager::VerifyPersistedSnapshot(const CBlockIndex* pindex)

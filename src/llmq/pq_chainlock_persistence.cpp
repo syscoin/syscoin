@@ -215,11 +215,6 @@ void SetError(ChainLockPersistenceError* error,
     if (error != nullptr) *error = value;
 }
 
-void WriteDomain(HashWriter& writer, std::string_view domain)
-{
-    writer.write(AsBytes(Span{domain.data(), domain.size()}));
-}
-
 struct DiskKey {
     uint8_t type{0};
 

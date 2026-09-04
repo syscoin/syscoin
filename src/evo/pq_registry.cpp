@@ -228,6 +228,33 @@ bool IsStrictlySortedOperators(
     return true;
 }
 
+bool IsStructurallyValidSnapshotState(
+    int32_t height,
+    const uint256& block_hash,
+    const uint256& consensus_state_root,
+    std::span<const OperatorKeyState> operator_states) noexcept
+{
+    if (height < 0 || block_hash.IsNull() ||
+        consensus_state_root.IsNull() ||
+        operator_states.size() > MAX_PQ_OPERATOR_STATES ||
+        !IsStrictlySortedOperators(operator_states)) {
+        return false;
+    }
+    for (std::size_t index{0}; index < operator_states.size(); ++index) {
+        const auto& state{operator_states[index]};
+        if (state.schedule_initialized == 0 ||
+            (state.has_global_key != 0 &&
+             state.global_key.activated_height >
+                 static_cast<uint32_t>(height)) ||
+            state.revoked_height > static_cast<uint32_t>(height) ||
+            (index != 0 &&
+             state.schedule != operator_states[0].schedule)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool ApplySparseOperatorDelta(
     std::vector<OperatorKeyState>& current,
     std::span<const uint256> removed,
@@ -924,6 +951,14 @@ bool PQRegistryReadView::IsValid() const noexcept
            m_snapshot->state->indexes;
 }
 
+bool PQRegistryReadView::IsStructurallyValid() const noexcept
+{
+    return IsValid() && IsStructurallyValidSnapshotState(
+        m_snapshot->height, m_snapshot->block_hash,
+        m_snapshot->state->consensus_state_root,
+        *m_snapshot->state->operator_states);
+}
+
 int32_t PQRegistryReadView::Height() const noexcept
 {
     return IsValid() ? m_snapshot->height : -1;
@@ -942,6 +977,17 @@ uint256 PQRegistryReadView::PreviousBlockHash() const noexcept
 uint256 PQRegistryReadView::ConsensusStateRoot() const noexcept
 {
     return IsValid() ? m_snapshot->state->consensus_state_root : uint256{};
+}
+
+std::optional<uint256> PQRegistryReadView::RecomputeConsensusStateRoot(
+    const uint256& genesis_hash) const
+{
+    if (!IsValid() ||
+        !IsStrictlySortedOperators(*m_snapshot->state->operator_states)) {
+        return std::nullopt;
+    }
+    return GetCanonicalPQKeyConsensusStateHash(
+        genesis_hash, *m_snapshot->state->operator_states);
 }
 
 std::size_t PQRegistryReadView::OperatorCount() const noexcept
@@ -1076,24 +1122,9 @@ PQRegistryDeploymentResult GetPQRegistryConfig(
 
 bool PQRegistrySnapshot::IsStructurallyValid() const noexcept
 {
-    if (version != PQ_REGISTRY_SNAPSHOT_VERSION || height < 0 ||
-        block_hash.IsNull() || consensus_state_root.IsNull() ||
-        operator_states.size() > MAX_PQ_OPERATOR_STATES ||
-        !IsStrictlySortedOperators(operator_states)) {
-        return false;
-    }
-    for (std::size_t index{0}; index < operator_states.size(); ++index) {
-        const auto& state{operator_states[index]};
-        if (state.schedule_initialized == 0 ||
-            (state.has_global_key != 0 &&
-             state.global_key.activated_height >
-                 static_cast<uint32_t>(height)) ||
-            state.revoked_height > static_cast<uint32_t>(height) ||
-            (index != 0 && state.schedule != operator_states[0].schedule)) {
-            return false;
-        }
-    }
-    return true;
+    return version == PQ_REGISTRY_SNAPSHOT_VERSION &&
+           IsStructurallyValidSnapshotState(
+               height, block_hash, consensus_state_root, operator_states);
 }
 
 bool PQRegistrySnapshot::IsEmpty() const noexcept

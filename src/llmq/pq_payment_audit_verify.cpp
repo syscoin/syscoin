@@ -15,12 +15,6 @@ void SetError(PaymentAuditVerificationError* error,
     if (error != nullptr) *error = value;
 }
 
-bool IsBitSet(const QuorumBitmap& bitmap, std::size_t member)
-{
-    return (bitmap[member / 8] &
-            static_cast<uint8_t>(uint8_t{1} << (member % 8))) != 0;
-}
-
 bool IsSelected(uint8_t mask, std::size_t slot)
 {
     return (mask & (uint8_t{1} << slot)) != 0;
@@ -85,7 +79,7 @@ bool ValidatePaymentAuditResponseEnvelope(
         response.row_index != expected.row_index ||
         response.subject_descriptor_hash !=
             expected.subject_descriptor_hash ||
-        response.response.transcript.height != expected.response_height ||
+        response.response.GetStatement().height != expected.response_height ||
         GetLogicalChainLockId(genesis_hash,
                               response.response.GetStatement()) !=
             expected.response_chainlock_logical_id) {
@@ -325,7 +319,7 @@ PreparePaymentAuditShareVerificationInternal(
               roster.descriptor.epoch)};
     const std::size_t member_index{share.transcript.member_index};
     if (roster.descriptor.valid_count < QUORUM_MIN_VALID ||
-        !IsBitSet(roster.descriptor.valid_members, member_index) ||
+        !IsQuorumMemberSet(roster.descriptor.valid_members, member_index) ||
         !leaf_index) {
         SetError(error, PaymentAuditVerificationError::INVALID_SIGNER);
         return std::nullopt;
@@ -387,8 +381,8 @@ PrepareFinalPaymentAuditVerificationInternal(
         }
         for (std::size_t member_index{0}; member_index < QUORUM_SIZE;
              ++member_index) {
-            if (!IsBitSet(audit.signer_bitmaps[slot], member_index)) continue;
-            if (!IsBitSet(roster.descriptor.valid_members, member_index) ||
+            if (!IsQuorumMemberSet(audit.signer_bitmaps[slot], member_index)) continue;
+            if (!IsQuorumMemberSet(roster.descriptor.valid_members, member_index) ||
                 report_index >= audit.report_witnesses.size()) {
                 SetError(error, PaymentAuditVerificationError::INVALID_SIGNER);
                 return std::nullopt;

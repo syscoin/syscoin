@@ -75,11 +75,6 @@ void SetError(ChainLockVerificationError* error, ChainLockVerificationError valu
     if (error != nullptr) *error = value;
 }
 
-void WriteDomain(CHashWriter& writer, std::string_view domain)
-{
-    writer.write(AsBytes(Span{domain.data(), domain.size()}));
-}
-
 uint256 GetScheduledWOTSSuccessCacheKey(
     const scheduled_wots::PublicKey& public_key,
     uint8_t leaf_index,
@@ -89,16 +84,6 @@ uint256 GetScheduledWOTSSuccessCacheKey(
     CHashWriter writer{SER_GETHASH, 0};
     WriteDomain(writer, SUCCESS_CACHE_DOMAIN);
     writer << public_key << leaf_index << message << signature;
-    return writer.GetHash();
-}
-
-template <typename... Args>
-uint256 TaggedHash(std::string_view domain, const uint256& genesis_hash, const Args&... args)
-{
-    CHashWriter writer{SER_GETHASH, 0};
-    WriteDomain(writer, domain);
-    writer << genesis_hash;
-    (writer << ... << args);
     return writer.GetHash();
 }
 
@@ -127,17 +112,6 @@ uint256 ComputeFixedMerkleRoot(const uint256& genesis_hash,
     g_quorum_root_tagged_hashes.fetch_add(
         TAGGED_HASHES_PER_FIXED_ROOT, std::memory_order_relaxed);
     return hashes[0];
-}
-
-bool IsBitSet(const QuorumBitmap& bitmap, std::size_t member)
-{
-    return (bitmap[member / 8] &
-            static_cast<uint8_t>(uint8_t{1} << (member % 8))) != 0;
-}
-
-void SetBit(QuorumBitmap& bitmap, std::size_t member)
-{
-    bitmap[member / 8] |= static_cast<uint8_t>(uint8_t{1} << (member % 8));
 }
 
 bool IsDescriptorStructureValid(const QuorumDescriptor& descriptor)
@@ -493,7 +467,9 @@ bool ValidateRosterMembersAndRoots(
                 SetError(error, ChainLockVerificationError::INVALID_ROSTER);
                 return false;
             }
-            if (member.eligible) SetBit(expected_valid_members, member_index);
+            if (member.eligible) {
+                SetQuorumMember(expected_valid_members, member_index);
+            }
         }
     }
     if (expected_valid_members != descriptor.valid_members) {
@@ -1044,31 +1020,11 @@ ChainLockShareTranscript BuildChainLockShareTranscript(
     const uint256& member_pro_tx_hash)
 {
     ChainLockShareTranscript transcript;
-    transcript.chainlock_version = chainlock.statement.version;
-    transcript.child_profile = chainlock.statement.child_profile;
-    transcript.height = chainlock.statement.height;
-    transcript.block_hash = chainlock.statement.block_hash;
-    transcript.previous_chainlock_height = chainlock.statement.previous_chainlock_height;
-    transcript.previous_chainlock_hash = chainlock.statement.previous_chainlock_hash;
-    transcript.quorum_context_hash = chainlock.statement.quorum_context_hash;
-    transcript.roster_transition = chainlock.statement.roster_transition;
-    transcript.roster_beacons = chainlock.statement.roster_beacons;
-    transcript.roster_authorization_state_hash =
-        chainlock.statement.roster_authorization_state_hash;
-    transcript.roster_authorization_base =
-        chainlock.statement.roster_authorization_base;
+    transcript.statement = chainlock.statement;
     transcript.quorum_epoch = descriptor.epoch;
     transcript.quorum_base_hash = descriptor.base_hash;
     transcript.member_index = member_index;
     transcript.member_pro_tx_hash = member_pro_tx_hash;
-    transcript.previous_btcc_cursor = chainlock.statement.previous_btcc_cursor;
-    transcript.accepted_btcc_cursor = chainlock.statement.accepted_btcc_cursor;
-    transcript.btcc_advance = chainlock.statement.btcc_advance;
-    transcript.btcc_receipt_state = chainlock.statement.btcc_receipt_state;
-    transcript.payment_audit_receipt_state =
-        chainlock.statement.payment_audit_receipt_state;
-    transcript.payment_probation_state_hash =
-        chainlock.statement.payment_probation_state_hash;
     return transcript;
 }
 
@@ -1171,14 +1127,14 @@ PrepareChainLockShareVerificationInternal(
 
     const auto& roster{rosters[*quorum_slot]};
     const auto leaf_index{ChainLockLeafIndex(
-        schedule, roster.descriptor.epoch, share.transcript.height)};
+        schedule, roster.descriptor.epoch, share.GetStatement().height)};
     if (roster.descriptor.valid_count < QUORUM_MIN_VALID || !leaf_index) {
         SetError(error, ChainLockVerificationError::INVALID_DESCRIPTOR);
         return std::nullopt;
     }
     const std::size_t member_index{share.transcript.member_index};
     if (member_index >= QUORUM_SIZE ||
-        !IsBitSet(roster.descriptor.valid_members, member_index)) {
+        !IsQuorumMemberSet(roster.descriptor.valid_members, member_index)) {
         SetError(error, ChainLockVerificationError::INVALID_SIGNER);
         return std::nullopt;
     }
@@ -1255,8 +1211,8 @@ PrepareFinalChainLockVerificationInternal(
             return std::nullopt;
         }
         for (std::size_t member_index{0}; member_index < QUORUM_SIZE; ++member_index) {
-            if (!IsBitSet(chainlock.signer_bitmaps[slot], member_index)) continue;
-            if (!IsBitSet(roster.descriptor.valid_members, member_index) ||
+            if (!IsQuorumMemberSet(chainlock.signer_bitmaps[slot], member_index)) continue;
+            if (!IsQuorumMemberSet(roster.descriptor.valid_members, member_index) ||
                 !roster.members[member_index].child_root ||
                 signature_index >= chainlock.signatures.size()) {
                 SetError(error, ChainLockVerificationError::INVALID_SIGNER);

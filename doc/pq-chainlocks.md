@@ -626,18 +626,23 @@ PQChainLockShareTranscript {
     RosterBeaconWindow rosterBeacons;
     uint256 rosterAuthorizationStateHash;
     RosterAuthorizationBaseIdentity rosterAuthorizationBase;
-    uint32  quorumEpoch;
-    uint256 quorumBaseHash;
-    uint16  memberIndex;
-    uint256 memberProTxHash;
     BTCCursor previousBTCCursor;
     BTCCursor acceptedBTCCursor;
     uint8   btccAdvance;
     BTCCReceiptState btccReceiptState;
     PaymentAuditReceiptState paymentAuditReceiptState;
     uint256 paymentProbationStateHash;
+    uint32  quorumEpoch;
+    uint256 quorumBaseHash;
+    uint16  memberIndex;
+    uint256 memberProTxHash;
 }
 ```
+
+The 1,366-byte canonical encoding is the complete common ChainLock statement
+first, followed by the four signer-specific fields. This lets collectors
+retain and compare one statement object without reconstructing it from an
+interleaved member transcript.
 
 The signature input is the canonical transcript prefixed with
 `SYS_PQ_CHAINLOCK_SHARE_V1` and the genesis hash. Binding the epoch, base hash,

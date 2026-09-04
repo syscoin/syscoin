@@ -1758,10 +1758,11 @@ BOOST_FIXTURE_TEST_CASE(
     const uint256 expected_probation_root{
         rollback_base->pqPaymentProbationStateHash};
     BOOST_REQUIRE(!expected_probation_root.IsNull());
-    llmq::pq::PQPaymentProbationState expected_probation;
-    BOOST_REQUIRE(deterministicMNManager->GetPaymentProbationState(
+    llmq::pq::PQPaymentProbationStateView expected_probation;
+    BOOST_REQUIRE(deterministicMNManager->GetPaymentProbationStateView(
         rollback_base, expected_probation));
-    BOOST_CHECK(expected_probation ==
+    BOOST_REQUIRE(expected_probation.State());
+    BOOST_CHECK(*expected_probation.State() ==
                 llmq::pq::PQPaymentProbationState{});
 
     constexpr int extra_depth{
@@ -1851,10 +1852,12 @@ BOOST_FIXTURE_TEST_CASE(
                 expected_registry_root);
     BOOST_CHECK(recovered_base->pqPaymentProbationStateHash ==
                 expected_probation_root);
-    llmq::pq::PQPaymentProbationState recovered_probation;
-    BOOST_REQUIRE(deterministicMNManager->GetPaymentProbationState(
+    llmq::pq::PQPaymentProbationStateView recovered_probation;
+    BOOST_REQUIRE(deterministicMNManager->GetPaymentProbationStateView(
         recovered_base, recovered_probation));
-    BOOST_CHECK(recovered_probation == expected_probation);
+    BOOST_REQUIRE(recovered_probation.State());
+    BOOST_CHECK(*recovered_probation.State() ==
+                *expected_probation.State());
     BOOST_REQUIRE(deterministicMNManager->VerifyPersistedSnapshot(
         recovered_base));
     BOOST_REQUIRE(deterministicMNManager->VerifyPersistedPQRegistrySnapshot(

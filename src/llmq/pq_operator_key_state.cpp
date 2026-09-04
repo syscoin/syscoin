@@ -16,11 +16,6 @@
 namespace llmq::pq {
 namespace {
 
-void WriteDomain(CHashWriter& writer, std::string_view domain)
-{
-    writer.write(AsBytes(Span{domain.data(), domain.size()}));
-}
-
 bool IsZeroRecord(const GlobalKeyRecord& record)
 {
     return record == GlobalKeyRecord{};
@@ -549,20 +544,6 @@ ChildRootResolution OperatorKeyState::ResolveChildRoot(
             global_key.child_key_commitment,
         },
     };
-}
-
-std::optional<uint256> GetOperatorKeyStateHash(
-    const uint256& genesis_hash,
-    const OperatorKeyState& state)
-{
-    if (genesis_hash.IsNull() || !state.IsStructurallyValid() ||
-        !HasExpectedTreeIds(genesis_hash, state)) {
-        return std::nullopt;
-    }
-    CHashWriter writer{SER_GETHASH, 0};
-    WriteDomain(writer, OPERATOR_KEY_STATE_DOMAIN);
-    writer << genesis_hash << state;
-    return writer.GetHash();
 }
 
 std::optional<uint256> GetPQKeyConsensusStateHash(

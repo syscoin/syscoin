@@ -19,46 +19,6 @@ namespace {
 
 constexpr int64_t MAX_HEIGHT{std::numeric_limits<int32_t>::max()};
 
-void WriteDomain(CHashWriter& writer, std::string_view domain)
-{
-    writer.write(AsBytes(Span{domain.data(), domain.size()}));
-}
-
-template <typename... Args>
-uint256 TaggedHash(std::string_view domain,
-                   const uint256& genesis_hash,
-                   const Args&... args)
-{
-    CHashWriter writer{SER_GETHASH, 0};
-    WriteDomain(writer, domain);
-    writer << genesis_hash;
-    (writer << ... << args);
-    return writer.GetHash();
-}
-
-bool IsBitSet(const QuorumBitmap& bitmap, std::size_t index)
-{
-    return (bitmap[index / 8] &
-            static_cast<uint8_t>(uint8_t{1} << (index % 8))) != 0;
-}
-
-void SetBit(QuorumBitmap& bitmap, std::size_t index)
-{
-    bitmap[index / 8] |=
-        static_cast<uint8_t>(uint8_t{1} << (index % 8));
-}
-
-bool IsSubset(const QuorumBitmap& subset,
-              const QuorumBitmap& superset)
-{
-    for (std::size_t byte{0}; byte < subset.size(); ++byte) {
-        if ((subset[byte] & static_cast<uint8_t>(~superset[byte])) != 0) {
-            return false;
-        }
-    }
-    return true;
-}
-
 uint64_t SelectionWord(const uint256& hash)
 {
     uint64_t value{0};
@@ -182,7 +142,7 @@ bool PaymentAuditResponse::IsStructurallyValid() const noexcept
            row_index < PAYMENT_AUDIT_ROW_COUNT &&
            !subject_descriptor_hash.IsNull() &&
            response.IsStructurallyValid() &&
-           response.transcript.btcc_advance == BTCCAdvance::ADVANCE;
+           response.GetStatement().btcc_advance == BTCCAdvance::ADVANCE;
 }
 
 bool PaymentAuditScheduleConfig::IsValid() const noexcept
@@ -373,12 +333,6 @@ BuildPaymentAuditCarrierWindow(const PaymentAuditScheduleConfig& config,
                                      schedule->carrier_end_height_exclusive};
 }
 
-bool IsPaymentAuditCarrierHeight(const PaymentAuditScheduleConfig& config,
-                                 int32_t height) noexcept
-{
-    return PaymentAuditReceiptSlotEpoch(config, height).has_value();
-}
-
 std::optional<uint32_t> PaymentAuditReceiptSlotEpoch(
     const PaymentAuditScheduleConfig& config, int32_t height) noexcept
 {
@@ -532,8 +486,9 @@ bool PaymentAuditShareTranscript::IsStructurallyValid() const noexcept
 {
     return statement.IsStructurallyValid() && !quorum_base_hash.IsNull() &&
            member_index < QUORUM_SIZE && !member_pro_tx_hash.IsNull() &&
-           IsSubset(reporter_observed_members,
-                    statement.commitment.subject_valid_members);
+           IsQuorumBitmapSubset(
+               reporter_observed_members,
+               statement.commitment.subject_valid_members);
 }
 
 bool PaymentAuditShare::IsStructurallyValid() const noexcept
@@ -550,7 +505,7 @@ uint256 PaymentAuditShare::GetId(const uint256& genesis_hash) const
 bool PaymentAuditReportWitness::IsStructurallyValid(
     const QuorumBitmap& subject_valid_members) const noexcept
 {
-    return IsSubset(observed_members, subject_valid_members) &&
+    return IsQuorumBitmapSubset(observed_members, subject_valid_members) &&
            authenticated_signature.IsStructurallyValid();
 }
 
@@ -597,13 +552,13 @@ std::optional<std::size_t> FinalPaymentAudit::SignatureOffset(
     if (quorum_slot >= ACTIVE_QUORUMS || member_index >= QUORUM_SIZE ||
         !IsStructurallyValid() ||
         (selected_quorum_mask & (uint8_t{1} << quorum_slot)) == 0 ||
-        !IsBitSet(signer_bitmaps[quorum_slot], member_index)) {
+        !IsQuorumMemberSet(signer_bitmaps[quorum_slot], member_index)) {
         return std::nullopt;
     }
     std::size_t offset{0};
     for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
         for (std::size_t member{0}; member < QUORUM_SIZE; ++member) {
-            if (!IsBitSet(signer_bitmaps[slot], member)) continue;
+            if (!IsQuorumMemberSet(signer_bitmaps[slot], member)) continue;
             if (slot == quorum_slot && member == member_index) return offset;
             ++offset;
         }
@@ -681,12 +636,12 @@ ClassifyPaymentAuditReports(const FinalPaymentAudit& audit) noexcept
         }
         std::array<uint16_t, QUORUM_SIZE> positive_reports{};
         for (std::size_t reporter{0}; reporter < QUORUM_SIZE; ++reporter) {
-            if (!IsBitSet(audit.signer_bitmaps[slot], reporter)) continue;
+            if (!IsQuorumMemberSet(audit.signer_bitmaps[slot], reporter)) continue;
             if (offset >= audit.report_witnesses.size()) return std::nullopt;
             const auto& observed{
                 audit.report_witnesses[offset++].observed_members};
             for (std::size_t subject{0}; subject < QUORUM_SIZE; ++subject) {
-                if (IsBitSet(observed, subject)) {
+                if (IsQuorumMemberSet(observed, subject)) {
                     ++positive_reports[subject];
                 }
             }
@@ -694,9 +649,9 @@ ClassifyPaymentAuditReports(const FinalPaymentAudit& audit) noexcept
         for (std::size_t subject{0}; subject < QUORUM_SIZE; ++subject) {
             if (positive_reports[subject] >=
                 PAYMENT_AUDIT_REPORT_ONLINE_THRESHOLD) {
-                SetBit(classification.online_by_reporter_roster[slot],
-                       subject);
-                SetBit(classification.online_members, subject);
+                SetQuorumMember(
+                    classification.online_by_reporter_roster[slot], subject);
+                SetQuorumMember(classification.online_members, subject);
             }
         }
     }
@@ -704,9 +659,9 @@ ClassifyPaymentAuditReports(const FinalPaymentAudit& audit) noexcept
 
     const auto& valid{audit.statement.commitment.subject_valid_members};
     for (std::size_t subject{0}; subject < QUORUM_SIZE; ++subject) {
-        if (IsBitSet(valid, subject) &&
-            !IsBitSet(classification.online_members, subject)) {
-            SetBit(classification.missed_members, subject);
+        if (IsQuorumMemberSet(valid, subject) &&
+            !IsQuorumMemberSet(classification.online_members, subject)) {
+            SetQuorumMember(classification.missed_members, subject);
         }
     }
     classification.online_count = static_cast<uint16_t>(

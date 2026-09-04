@@ -60,11 +60,6 @@ bool IsStructurallyCanonicalCompactSignature(
            s_nonzero && r_below_order && !s_above_half_order;
 }
 
-void WriteDomain(CHashWriter& writer, std::string_view domain)
-{
-    writer.write(AsBytes(Span{domain.data(), domain.size()}));
-}
-
 template <typename Payload>
 bool DecodeStrict(const std::vector<unsigned char>& encoded,
                   std::size_t minimum_size,

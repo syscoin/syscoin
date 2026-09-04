@@ -126,33 +126,34 @@ ChainLockShare ResponseShare(int32_t height,
 {
     ChainLockShare share;
     auto& transcript{share.transcript};
-    transcript.height = height;
-    transcript.block_hash =
+    auto& statement{transcript.statement};
+    statement.height = height;
+    statement.block_hash =
         NonNullHash(branch_salt + static_cast<uint64_t>(height));
-    transcript.previous_chainlock_height = height - 5;
-    transcript.previous_chainlock_hash = NonNullHash(branch_salt + 1);
-    transcript.quorum_context_hash = NonNullHash(branch_salt + 2);
+    statement.previous_chainlock_height = height - 5;
+    statement.previous_chainlock_hash = NonNullHash(branch_salt + 1);
+    statement.quorum_context_hash = NonNullHash(branch_salt + 2);
     transcript.quorum_epoch = 7;
     transcript.quorum_base_hash = NonNullHash(branch_salt + 3);
-    transcript.roster_transition =
+    statement.roster_transition =
         RosterAuthorizationTransitionKind::KEEP;
-    transcript.roster_authorization_base = {
-        transcript.previous_chainlock_height,
-        transcript.previous_chainlock_hash, NonNullHash(branch_salt + 9)};
-    transcript.roster_beacons =
+    statement.roster_authorization_base = {
+        statement.previous_chainlock_height,
+        statement.previous_chainlock_hash, NonNullHash(branch_salt + 9)};
+    statement.roster_beacons =
         ReadyRosterWindow(transcript.quorum_epoch);
-    transcript.roster_authorization_state_hash =
+    statement.roster_authorization_state_hash =
         NonNullHash(branch_salt + 8);
     transcript.member_index = member;
     transcript.member_pro_tx_hash = NonNullHash(branch_salt + 100 + member);
-    transcript.previous_btcc_cursor =
+    statement.previous_btcc_cursor =
         BTCCursor{height - 10, NonNullHash(branch_salt + 4),
                   NonNullHash(branch_salt + 5)};
-    transcript.accepted_btcc_cursor =
-        BTCCursor{height, transcript.block_hash,
+    statement.accepted_btcc_cursor =
+        BTCCursor{height, statement.block_hash,
                   NonNullHash(branch_salt + 6)};
-    transcript.btcc_advance = BTCCAdvance::ADVANCE;
-    transcript.payment_probation_state_hash = NonNullHash(branch_salt + 7);
+    statement.btcc_advance = BTCCAdvance::ADVANCE;
+    statement.payment_probation_state_hash = NonNullHash(branch_salt + 7);
     share.authenticated_signature.key_proof.public_key[0] = 1;
     share.authenticated_signature.signature[0] =
         static_cast<uint8_t>(member % 255 + 1);

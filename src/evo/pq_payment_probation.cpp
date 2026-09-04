@@ -19,25 +19,6 @@ void SetError(PQPaymentProbationError* error,
     if (error != nullptr) *error = value;
 }
 
-bool IsBitSet(const QuorumBitmap& bitmap, std::size_t member) noexcept
-{
-    return (bitmap[member / 8] &
-            static_cast<uint8_t>(uint8_t{1} << (member % 8))) != 0;
-}
-
-std::size_t BitmapCount(const QuorumBitmap& bitmap) noexcept
-{
-    std::size_t count{0};
-    for (const uint8_t byte : bitmap) {
-        uint8_t value{byte};
-        while (value != 0) {
-            value &= static_cast<uint8_t>(value - 1);
-            ++count;
-        }
-    }
-    return count;
-}
-
 bool IsStrictlySortedUnique(std::span<const uint256> values) noexcept
 {
     if (values.size() > MAX_PQ_PAYMENT_PROBATION_ENTRIES) return false;
@@ -73,15 +54,15 @@ auto FindEntry(Records& entries, const uint256& pro_tx_hash)
 PQPaymentProbationError ValidateTransitionRosterContext(
     const PQPaymentProbationTransitionContext& context) noexcept
 {
-    if (BitmapCount(context.roster_valid_members) < QUORUM_MIN_VALID) {
+    if (CountSet(context.roster_valid_members) < QUORUM_MIN_VALID) {
         return PQPaymentProbationError::INVALID_BITMAP;
     }
     for (std::size_t member{0}; member < QUORUM_SIZE; ++member) {
         if (context.frozen_roster[member].IsNull()) {
             return PQPaymentProbationError::INVALID_ROSTER;
         }
-        if (IsBitSet(context.observed_members, member) &&
-            !IsBitSet(context.roster_valid_members, member)) {
+        if (IsQuorumMemberSet(context.observed_members, member) &&
+            !IsQuorumMemberSet(context.roster_valid_members, member)) {
             return PQPaymentProbationError::INVALID_BITMAP;
         }
     }
@@ -393,7 +374,7 @@ ApplyPQPaymentProbationTransitionImpl(
     std::vector<RosterTransition> roster_transitions;
     roster_transitions.reserve(QUORUM_SIZE);
     for (std::size_t member{0}; member < QUORUM_SIZE; ++member) {
-        if (!IsBitSet(context.roster_valid_members, member)) continue;
+        if (!IsQuorumMemberSet(context.roster_valid_members, member)) continue;
         const auto& pro_tx_hash{context.frozen_roster[member]};
         const auto membership_status{membership.Lookup(pro_tx_hash)};
         if (membership_status != PQPaymentProbationMembership::ABSENT &&
@@ -404,7 +385,8 @@ ApplyPQPaymentProbationTransitionImpl(
             return std::nullopt;
         }
         roster_transitions.push_back({pro_tx_hash,
-                                      IsBitSet(context.observed_members, member),
+                                      IsQuorumMemberSet(context.observed_members,
+                                                        member),
                                       membership_status !=
                                           PQPaymentProbationMembership::ABSENT,
                                       membership_status ==

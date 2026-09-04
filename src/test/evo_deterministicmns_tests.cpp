@@ -1748,6 +1748,60 @@ BOOST_AUTO_TEST_CASE(pq_dmn_muhash_state_v1_empty_vector)
         "0a456800d383b162a7dc448dbdf04b3d0f0d04f5f6e2105523ae87ba892bd898");
 }
 
+BOOST_AUTO_TEST_CASE(
+    pq_governance_authority_commitment_tracks_only_authority_content)
+{
+    const uint256 genesis_hash{MakeSnapshotKey(60'102)};
+    CDeterministicMNList list{MakeNontrivialAnchorSnapshot(
+        MakeSnapshotKey(60'103), 4323, false)};
+    const uint256 expected{
+        list.GetOrComputePQGovernanceAuthorityHash(genesis_hash)};
+
+    // Exact-tip coordinates and routine payment bookkeeping are not inputs to
+    // either governance authority map.
+    list.SetBlockHash(MakeSnapshotKey(60'104));
+    list.SetHeight(4324);
+    BOOST_CHECK(list.GetOrComputePQGovernanceAuthorityHash(genesis_hash) ==
+                expected);
+    const auto member{list.GetMNByInternalId(9)};
+    BOOST_REQUIRE(member);
+    auto paid_state{
+        std::make_shared<CDeterministicMNState>(*member->pdmnState)};
+    ++paid_state->nLastPaidHeight;
+    ++paid_state->nPoSePenalty;
+    list.UpdateMN(member->proTxHash, paid_state);
+    BOOST_CHECK(list.GetOrComputePQGovernanceAuthorityHash(genesis_hash) ==
+                expected);
+
+    auto voting_state{
+        std::make_shared<CDeterministicMNState>(*paid_state)};
+    voting_state->keyIDVoting.begin()[0] ^= 1;
+    list.UpdateMN(member->proTxHash, voting_state);
+    BOOST_CHECK(list.GetOrComputePQGovernanceAuthorityHash(genesis_hash) !=
+                expected);
+    list.UpdateMN(member->proTxHash, paid_state);
+    BOOST_CHECK(list.GetOrComputePQGovernanceAuthorityHash(genesis_hash) ==
+                expected);
+
+    auto banned_state{
+        std::make_shared<CDeterministicMNState>(*paid_state)};
+    banned_state->BanIfNotBanned(list.GetHeight());
+    list.UpdateMN(member->proTxHash, banned_state);
+    BOOST_CHECK(list.GetOrComputePQGovernanceAuthorityHash(genesis_hash) !=
+                expected);
+    list.UpdateMN(member->proTxHash, paid_state);
+    BOOST_CHECK(list.GetOrComputePQGovernanceAuthorityHash(genesis_hash) ==
+                expected);
+
+    CDataStream encoded{SER_DISK, PROTOCOL_VERSION};
+    encoded << list;
+    CDeterministicMNList decoded;
+    encoded >> decoded;
+    BOOST_CHECK(
+        decoded.GetOrComputePQGovernanceAuthorityHash(genesis_hash) ==
+        expected);
+}
+
 BOOST_AUTO_TEST_CASE(pq_legacy_state_commitment_uses_current_update_entry)
 {
     const uint256 genesis_hash{MakeSnapshotKey(60'010)};

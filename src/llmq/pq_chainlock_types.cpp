@@ -10,22 +10,6 @@
 namespace llmq::pq {
 namespace {
 
-void WriteDomain(CHashWriter& writer, std::string_view domain)
-{
-    // Raw fixed tags avoid CompactSize ambiguity at consensus transcript boundaries.
-    writer.write(AsBytes(Span{domain.data(), domain.size()}));
-}
-
-template <typename... Args>
-uint256 TaggedHash(std::string_view domain, const uint256& genesis_hash, const Args&... args)
-{
-    CHashWriter writer{SER_GETHASH, 0};
-    WriteDomain(writer, domain);
-    writer << genesis_hash;
-    (writer << ... << args);
-    return writer.GetHash();
-}
-
 bool IsKnownAdvance(BTCCAdvance advance)
 {
     return advance == BTCCAdvance::KEEP || advance == BTCCAdvance::ADVANCE;
@@ -315,30 +299,8 @@ bool RosterAuthorizationBaseIdentity::IsStructurallyValid() const noexcept
 
 bool ChainLockShareTranscript::IsStructurallyValid() const
 {
-    const bool initializes{
-        roster_transition ==
-            RosterAuthorizationTransitionKind::INITIALIZE};
-    return chainlock_version == CHAINLOCK_VERSION && child_profile == CHILD_SCHEDULED_WOTS_SHAKE_128_V1 &&
-           height >= 0 && !block_hash.IsNull() && previous_chainlock_height < height &&
-           (previous_chainlock_height >= 0 || previous_chainlock_hash.IsNull()) &&
-           (previous_chainlock_height < 0 || !previous_chainlock_hash.IsNull()) &&
-           !quorum_context_hash.IsNull() &&
-           IsKnownRosterAuthorizationTransition(roster_transition) &&
-           roster_beacons.IsStructurallyValid() &&
-           !roster_authorization_state_hash.IsNull() &&
-           roster_authorization_base.IsStructurallyValid() &&
-           (initializes == roster_authorization_base.IsNull()) &&
-           (roster_authorization_base.IsNull() ||
-            roster_authorization_base.height < height) &&
-           !quorum_base_hash.IsNull() &&
-           member_index < QUORUM_SIZE && !member_pro_tx_hash.IsNull() &&
-           IsCursorTransitionStructurallyValid(
-               previous_chainlock_height, previous_btcc_cursor,
-               accepted_btcc_cursor, btcc_advance) &&
-           IsReceiptStateCompatible(accepted_btcc_cursor,
-                                    btcc_receipt_state) &&
-           payment_audit_receipt_state.IsStructurallyValid() &&
-           !payment_probation_state_hash.IsNull();
+    return statement.IsStructurallyValid() && !quorum_base_hash.IsNull() &&
+           member_index < QUORUM_SIZE && !member_pro_tx_hash.IsNull();
 }
 
 bool ChainLockStatement::IsStructurallyValid() const
@@ -398,33 +360,6 @@ bool CompactChainLockShare::IsStructurallyValid() const noexcept
 {
     return !statement_logical_id.IsNull() && GetSignerPosition() &&
            authenticated_signature.IsStructurallyValid();
-}
-
-ChainLockStatement ChainLockShare::GetStatement() const
-{
-    ChainLockStatement statement;
-    statement.version = transcript.chainlock_version;
-    statement.child_profile = transcript.child_profile;
-    statement.height = transcript.height;
-    statement.block_hash = transcript.block_hash;
-    statement.previous_chainlock_height = transcript.previous_chainlock_height;
-    statement.previous_chainlock_hash = transcript.previous_chainlock_hash;
-    statement.quorum_context_hash = transcript.quorum_context_hash;
-    statement.roster_transition = transcript.roster_transition;
-    statement.roster_beacons = transcript.roster_beacons;
-    statement.roster_authorization_state_hash =
-        transcript.roster_authorization_state_hash;
-    statement.roster_authorization_base =
-        transcript.roster_authorization_base;
-    statement.previous_btcc_cursor = transcript.previous_btcc_cursor;
-    statement.accepted_btcc_cursor = transcript.accepted_btcc_cursor;
-    statement.btcc_advance = transcript.btcc_advance;
-    statement.btcc_receipt_state = transcript.btcc_receipt_state;
-    statement.payment_audit_receipt_state =
-        transcript.payment_audit_receipt_state;
-    statement.payment_probation_state_hash =
-        transcript.payment_probation_state_hash;
-    return statement;
 }
 
 uint256 ChainLockShare::GetId(const uint256& genesis_hash) const
@@ -488,16 +423,16 @@ std::optional<std::size_t> FinalChainLock::SignatureOffset(uint8_t quorum_slot,
         (selected_quorum_mask & (uint8_t{1} << quorum_slot)) == 0) {
         return std::nullopt;
     }
-    const uint8_t member_mask{static_cast<uint8_t>(uint8_t{1} << (member_index % 8))};
-    if ((signer_bitmaps[quorum_slot][member_index / 8] & member_mask) == 0) return std::nullopt;
+    if (!IsQuorumMemberSet(signer_bitmaps[quorum_slot], member_index)) {
+        return std::nullopt;
+    }
 
     std::size_t offset{0};
     for (uint8_t slot{0}; slot < quorum_slot; ++slot) {
         if ((selected_quorum_mask & (uint8_t{1} << slot)) != 0) offset += QUORUM_THRESHOLD;
     }
     for (uint16_t member{0}; member < member_index; ++member) {
-        if ((signer_bitmaps[quorum_slot][member / 8] &
-             static_cast<uint8_t>(uint8_t{1} << (member % 8))) != 0) {
+        if (IsQuorumMemberSet(signer_bitmaps[quorum_slot], member)) {
             ++offset;
         }
     }

@@ -47,8 +47,6 @@ struct ChildKeyTreeConfig {
     [[nodiscard]] static std::optional<ChildKeyTreeConfig> FromCommitment(
         const uint256& genesis_hash,
         const ChildKeyTreeCommitment& commitment) noexcept;
-    [[nodiscard]] bool MatchesCommitment(
-        const ChildKeyTreeCommitment& commitment) const noexcept;
 };
 
 struct ChildKeyTreeProof {

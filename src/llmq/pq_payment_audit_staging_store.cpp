@@ -53,34 +53,6 @@ bool IsSummaryEpochInRetentionWindow(uint32_t active_epoch,
                PaymentAuditStagingStore::MAX_RETAINED_EPOCHS;
 }
 
-void WriteDomain(HashWriter& writer, std::string_view domain)
-{
-    writer.write(AsBytes(Span{domain.data(), domain.size()}));
-}
-
-bool IsBitSet(const QuorumBitmap& bitmap, std::size_t member) noexcept
-{
-    return (bitmap[member / 8] &
-            static_cast<uint8_t>(uint8_t{1} << (member % 8))) != 0;
-}
-
-void SetBit(QuorumBitmap& bitmap, std::size_t member) noexcept
-{
-    bitmap[member / 8] |=
-        static_cast<uint8_t>(uint8_t{1} << (member % 8));
-}
-
-bool IsSubset(const QuorumBitmap& subset,
-              const QuorumBitmap& superset) noexcept
-{
-    for (std::size_t i{0}; i < subset.size(); ++i) {
-        if ((subset[i] & static_cast<uint8_t>(~superset[i])) != 0) {
-            return false;
-        }
-    }
-    return true;
-}
-
 struct DiskKey {
     uint8_t type{0};
     uint32_t epoch{0};
@@ -383,15 +355,16 @@ bool ResponseMatchesRow(const uint256& genesis_hash,
         response.row_index != row.expected.row_index ||
         response.subject_descriptor_hash !=
             row.expected.subject_descriptor_hash ||
-        response.response.transcript.height !=
+        response.response.GetStatement().height !=
             row.expected.response_height ||
         response.response.GetStatement().block_hash !=
             row.response_block_hash ||
         response.response.GetStatement().btcc_advance !=
             row.response_advance ||
         response.response.transcript.member_index >= QUORUM_SIZE ||
-        !IsBitSet(row.subject_valid_members,
-                  response.response.transcript.member_index)) {
+        !IsQuorumMemberSet(
+            row.subject_valid_members,
+            response.response.transcript.member_index)) {
         return false;
     }
     return GetLogicalChainLockId(
@@ -459,7 +432,8 @@ bool PaymentAuditFrozenRowSummary::IsStructurallyValid() const noexcept
            response_advance == BTCCAdvance::ADVANCE &&
            CountSet(subject_valid_members) >= QUORUM_MIN_VALID &&
            CountSet(subject_valid_members) <= QUORUM_SIZE &&
-           IsSubset(locally_observed_members, subject_valid_members);
+           IsQuorumBitmapSubset(locally_observed_members,
+                                subject_valid_members);
 }
 
 struct PaymentAuditStagingStore::Impl {
@@ -869,7 +843,7 @@ PaymentAuditStagingResult PaymentAuditStagingStore::AddVerifiedResponse(
     }
     try {
         QuorumBitmap updated_members{state.available_members};
-        SetBit(updated_members, member);
+        SetQuorumMember(updated_members, member);
         CDBBatch batch{m_impl->db};
         batch.Write(ResponseDiskKey(key, member),
                     MakeDiskResponse(m_genesis_hash, key, member,
@@ -995,18 +969,6 @@ PaymentAuditStagingStore::GetOpenRow(uint32_t epoch,
                : std::optional<PaymentAuditStagingRow>{found->second.row};
 }
 
-std::vector<PaymentAuditStagingRow>
-PaymentAuditStagingStore::GetOpenRows(uint32_t epoch) const
-{
-    LOCK(m_mutex);
-    std::vector<PaymentAuditStagingRow> result;
-    if (m_impl->failure) return result;
-    for (const auto& [key, state] : m_impl->open_rows) {
-        if (key.first == epoch) result.push_back(state.row);
-    }
-    return result;
-}
-
 std::optional<PaymentAuditOpenRowMetadata>
 PaymentAuditStagingStore::GetOpenRowMetadata(
     uint32_t epoch,
@@ -1072,7 +1034,7 @@ PaymentAuditStagingStore::GetVerifiedResponses(
     std::vector<PaymentAuditResponse> result;
     result.reserve(CountSet(requested_members));
     for (const auto& [member, response] : found->second.row.responses) {
-        if (IsBitSet(requested_members, member)) {
+        if (IsQuorumMemberSet(requested_members, member)) {
             result.push_back(response);
         }
     }

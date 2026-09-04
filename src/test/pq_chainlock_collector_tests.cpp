@@ -368,7 +368,7 @@ BOOST_AUTO_TEST_CASE(prepared_context_is_exact_reusable_and_owned)
     BOOST_CHECK(verification_error ==
                 ChainLockVerificationError::INVALID_AUTHORIZATION);
     auto wrong_statement{share};
-    wrong_statement.transcript.block_hash = NonNullHash(7998);
+    wrong_statement.transcript.statement.block_hash = NonNullHash(7998);
     BOOST_CHECK(!PrepareChainLockShareVerification(
         wrong_statement, *context, &verification_error));
     BOOST_CHECK(verification_error ==
@@ -525,6 +525,20 @@ BOOST_AUTO_TEST_CASE(compact_share_round_trip_binds_exact_context_and_position)
     const auto context{PrepareContext(*fixture)};
     BOOST_REQUIRE(context);
     const ChainLockShare share{SignFirstShare(*fixture)};
+    ChainLockVerificationError error{ChainLockVerificationError::NONE};
+
+    DataStream full_encoded;
+    full_encoded << share;
+    BOOST_CHECK_EQUAL(full_encoded.size(), ChainLockShare::WIRE_SIZE);
+    ChainLockShare full_decoded;
+    full_encoded >> full_decoded;
+    BOOST_CHECK(full_encoded.empty());
+    BOOST_CHECK(full_decoded == share);
+    auto full_check{PrepareChainLockShareVerification(
+        full_decoded, *context, &error)};
+    BOOST_REQUIRE(full_check);
+    BOOST_CHECK(error == ChainLockVerificationError::NONE);
+    BOOST_CHECK((*full_check)());
 
     const auto first{PackChainLockShareSignerPosition(0, 0)};
     const auto end_first{PackChainLockShareSignerPosition(0, 399)};
@@ -541,7 +555,7 @@ BOOST_AUTO_TEST_CASE(compact_share_round_trip_binds_exact_context_and_position)
     BOOST_CHECK(!PackChainLockShareSignerPosition(4, 0));
     BOOST_CHECK(!PackChainLockShareSignerPosition(0, 400));
 
-    const auto compact{BuildCompactChainLockShare(share, *context)};
+    const auto compact{BuildCompactChainLockShare(full_decoded, *context)};
     BOOST_REQUIRE(compact);
     BOOST_CHECK(!compact->statement_logical_id.IsNull());
     BOOST_CHECK(compact->statement_logical_id ==
@@ -558,6 +572,11 @@ BOOST_AUTO_TEST_CASE(compact_share_round_trip_binds_exact_context_and_position)
     const auto expanded{ExpandCompactChainLockShare(decoded, *context)};
     BOOST_REQUIRE(expanded);
     BOOST_CHECK(*expanded == share);
+    auto expanded_check{PrepareChainLockShareVerification(
+        *expanded, *context, &error)};
+    BOOST_REQUIRE(expanded_check);
+    BOOST_CHECK(error == ChainLockVerificationError::NONE);
+    BOOST_CHECK((*expanded_check)());
 
     auto distinct_statement{fixture->statement};
     distinct_statement.payment_probation_state_hash.begin()[0] ^= 1;
@@ -577,7 +596,6 @@ BOOST_AUTO_TEST_CASE(compact_share_round_trip_binds_exact_context_and_position)
     const auto moved_share{
         ExpandCompactChainLockShare(moved_signer, *context)};
     BOOST_REQUIRE(moved_share);
-    ChainLockVerificationError error{ChainLockVerificationError::NONE};
     BOOST_CHECK(!PrepareChainLockShareVerification(
         *moved_share, *context, &error));
     BOOST_CHECK(error != ChainLockVerificationError::NONE);
@@ -754,7 +772,7 @@ BOOST_AUTO_TEST_CASE(rejects_wrong_statement_member_and_signature)
     ShareCollectionError error{ShareCollectionError::NONE};
 
     auto wrong_statement{valid};
-    wrong_statement.transcript.block_hash = NonNullHash(9999);
+    wrong_statement.transcript.statement.block_hash = NonNullHash(9999);
     BOOST_CHECK(collector->AddVerifiedShare(wrong_statement, &error) ==
                 ShareCollectionResult::REJECTED);
     BOOST_CHECK(error == ShareCollectionError::STATEMENT_MISMATCH);

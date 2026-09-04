@@ -212,8 +212,11 @@ public:
         std::string& error)
     {
         CGovernanceManager::pq_authority_map_t authorities;
-        if (!CGovernanceManager::BuildPQGovernanceAuthorityMap(
-                tip, mn_list, snapshot, authorities, error)) {
+        CGovernanceManager::delegated_authority_map_t delegated;
+        std::size_t valid_mn_count{0};
+        if (!CGovernanceManager::BuildPQGovernanceAuthoritySnapshot(
+                tip, mn_list, snapshot, authorities, delegated,
+                valid_mn_count, error)) {
             view.clear();
             return false;
         }
@@ -230,13 +233,17 @@ public:
     static bool BuildDelegatedAuthorityView(
         const CBlockIndex& tip,
         const CDeterministicMNList& mn_list,
+        const llmq::pq::PQRegistrySnapshot& snapshot,
         std::size_t& authority_count,
         std::string& error)
     {
+        CGovernanceManager::pq_authority_map_t pq_authorities;
         CGovernanceManager::delegated_authority_map_t authorities;
+        std::size_t valid_mn_count{0};
         const bool result{
-            CGovernanceManager::BuildDelegatedGovernanceAuthorityMap(
-                tip, mn_list, authorities, error)};
+            CGovernanceManager::BuildPQGovernanceAuthoritySnapshot(
+                tip, mn_list, snapshot, pq_authorities, authorities,
+                valid_mn_count, error)};
         authority_count = authorities.size();
         return result;
     }
@@ -287,26 +294,27 @@ public:
     static void RememberAuthorityContent(
         CGovernanceManager& manager,
         const CBlockIndex& tip,
-        const uint256& dmn_state_hash,
+        const uint256& dmn_content_hash,
         const uint256& registry_state_root)
     {
         LOCK(manager.cs);
         manager.m_pq_authority_tip_hash = tip.GetBlockHash();
         manager.m_pq_authority_tip_height = tip.nHeight;
         manager.m_pq_authority_snapshot_valid = true;
-        manager.m_pq_authority_dmn_state_hash = dmn_state_hash;
+        manager.m_pq_authority_dmn_content_hash = dmn_content_hash;
         manager.m_pq_authority_registry_state_root = registry_state_root;
+        manager.m_pq_trigger_state_initialized = true;
     }
 
     static bool TryReuseAuthorityContent(
         CGovernanceManager& manager,
         const CBlockIndex& tip,
-        const uint256& dmn_state_hash,
+        const uint256& dmn_content_hash,
         const uint256& registry_state_root)
     {
         LOCK(manager.cs);
         return manager.TryReusePQGovernanceSnapshot(
-            tip, dmn_state_hash, registry_state_root);
+            tip, dmn_content_hash, registry_state_root);
     }
 
     static AuthoritySnapshotCacheStats AuthoritySnapshotStats(
@@ -314,7 +322,7 @@ public:
     {
         LOCK(manager.cs);
         return {manager.m_pq_authority_snapshot_builds,
-                manager.m_pq_exact_snapshot_reuses};
+                manager.m_pq_authority_snapshot_reuses};
     }
 
     static bool IsStraightExtension(
@@ -2675,7 +2683,8 @@ BOOST_AUTO_TEST_CASE(
 
     std::size_t delegated_authority_count{1};
     BOOST_CHECK(!Access::BuildDelegatedAuthorityView(
-        tip, CDeterministicMNList{}, delegated_authority_count, error));
+        tip, CDeterministicMNList{}, registry_snapshot,
+        delegated_authority_count, error));
     BOOST_CHECK_EQUAL(delegated_authority_count, 0U);
     BOOST_CHECK(error.find("exact tip") != std::string::npos);
 }
@@ -2729,59 +2738,119 @@ BOOST_FIXTURE_TEST_CASE(
 
 // SYSCOIN BEGIN: exact governance authority snapshot cache coverage.
 BOOST_FIXTURE_TEST_CASE(
-    governance_exact_tip_content_reuse_is_constant_time_and_branch_safe,
+    governance_authority_content_reuse_is_constant_time_and_branch_safe,
     TestChain100Setup)
 {
     using Access = governance_tests::CGovernanceManagerTestAccess;
     BOOST_REQUIRE(governance != nullptr);
-    const CBlockIndex* tip{
+    CBlockIndex* tip{
         WITH_LOCK(::cs_main, return m_node.chainman->ActiveTip())};
     BOOST_REQUIRE(tip != nullptr);
     BOOST_REQUIRE(tip->pprev != nullptr);
 
-    const uint256 dmn_state_hash{InsecureRand256()};
+    const uint256 dmn_content_hash{InsecureRand256()};
     const uint256 registry_state_root{InsecureRand256()};
-    BOOST_REQUIRE(!dmn_state_hash.IsNull());
+    BOOST_REQUIRE(!dmn_content_hash.IsNull());
     BOOST_REQUIRE(!registry_state_root.IsNull());
     Access::RememberAuthorityContent(
-        *governance, *tip, dmn_state_hash, registry_state_root);
+        *governance, *tip, dmn_content_hash, registry_state_root);
     governance->ObserveChainTip(tip);
     BOOST_REQUIRE(Access::PublishReadyForTip(*governance, *tip));
 
+    const auto initial_context{
+        Access::ValidationContextEpoch(*governance)};
+    BOOST_REQUIRE(initial_context);
     const auto before{Access::AuthoritySnapshotStats(*governance)};
     BOOST_CHECK(Access::TryReuseAuthorityContent(
-        *governance, *tip, dmn_state_hash, registry_state_root));
+        *governance, *tip, dmn_content_hash, registry_state_root));
     BOOST_CHECK(Access::TryReuseAuthorityContent(
-        *governance, *tip, dmn_state_hash, registry_state_root));
+        *governance, *tip, dmn_content_hash, registry_state_root));
     const auto repeated{Access::AuthoritySnapshotStats(*governance)};
     BOOST_CHECK_EQUAL(repeated.builds, before.builds);
     BOOST_CHECK_EQUAL(repeated.reuses, before.reuses + 2);
 
-    // Either authenticated content identity changing invalidates the shortcut,
-    // including voting/delegation state in the DMN identity and PQ authority
-    // in the registry identity.
-    BOOST_CHECK(!Access::TryReuseAuthorityContent(
-        *governance, *tip, InsecureRand256(), registry_state_root));
-    BOOST_CHECK(!Access::TryReuseAuthorityContent(
-        *governance, *tip, dmn_state_hash, InsecureRand256()));
+    uint256 child_hash{InsecureRand256()};
+    CBlockIndex child;
+    child.nHeight = tip->nHeight + 1;
+    child.pprev = tip;
+    child.phashBlock = &child_hash;
+    governance->ObserveChainTip(&child);
+    BOOST_REQUIRE(Access::TryReuseAuthorityContent(
+        *governance, child, dmn_content_hash, registry_state_root));
+    BOOST_CHECK(Access::IsRememberedTip(*governance, child));
+    BOOST_CHECK_EQUAL(governance->GetCachedBlockHeight(), child.nHeight);
+    BOOST_REQUIRE(Access::ValidationContextEpoch(*governance));
+    BOOST_CHECK_EQUAL(
+        *Access::ValidationContextEpoch(*governance), *initial_context);
 
+    // Crossing a trigger height keeps the immutable authority maps but must
+    // invalidate queued validation/page contexts.
+    uint256 trigger_hash{InsecureRand256()};
+    Access::InsertFutureTriggerForVoting(
+        *governance, trigger_hash, child.nHeight + 1);
+    uint256 boundary_hash{InsecureRand256()};
+    CBlockIndex boundary;
+    boundary.nHeight = child.nHeight + 1;
+    boundary.pprev = &child;
+    boundary.phashBlock = &boundary_hash;
+    governance->ObserveChainTip(&boundary);
+    BOOST_REQUIRE(Access::TryReuseAuthorityContent(
+        *governance, boundary, dmn_content_hash, registry_state_root));
+    BOOST_REQUIRE(Access::ValidationContextEpoch(*governance));
+    BOOST_CHECK_EQUAL(
+        *Access::ValidationContextEpoch(*governance),
+        *initial_context + 1);
+
+    // Either authenticated content identity changing rejects the shortcut;
+    // the caller consequently takes the normal one-scan rebuild path.
+    uint256 changed_hash{InsecureRand256()};
+    CBlockIndex changed;
+    changed.nHeight = boundary.nHeight + 1;
+    changed.pprev = &boundary;
+    changed.phashBlock = &changed_hash;
+    governance->ObserveChainTip(&changed);
+    BOOST_CHECK(!Access::TryReuseAuthorityContent(
+        *governance, changed, InsecureRand256(), registry_state_root));
+
+    Access::RememberAuthorityContent(
+        *governance, boundary, dmn_content_hash, registry_state_root);
+    governance->ObserveChainTip(&boundary);
+    BOOST_REQUIRE(Access::PublishReadyForTip(*governance, boundary));
+    governance->ObserveChainTip(&changed);
+    BOOST_CHECK(!Access::TryReuseAuthorityContent(
+        *governance, changed, dmn_content_hash, InsecureRand256()));
+
+    Access::RememberAuthorityContent(
+        *governance, boundary, dmn_content_hash, registry_state_root);
+    governance->ObserveChainTip(&boundary);
+    BOOST_REQUIRE(Access::PublishReadyForTip(*governance, boundary));
     uint256 sibling_hash{InsecureRand256()};
     CBlockIndex sibling;
-    sibling.nHeight = tip->nHeight;
-    sibling.pprev = tip->pprev;
+    sibling.nHeight = boundary.nHeight + 1;
+    sibling.pprev = &boundary;
     sibling.phashBlock = &sibling_hash;
+    governance->ObserveChainTip(&sibling);
+    governance->ObserveChainTip(&boundary);
+    // Observing another branch and returning A-B-A must not revive A's former
+    // publication without the normal recovery rebuild.
     BOOST_CHECK(!Access::TryReuseAuthorityContent(
-        *governance, sibling, dmn_state_hash, registry_state_root));
+        *governance, boundary, dmn_content_hash, registry_state_root));
 
-    // Observing another branch and returning to the same tip must not revive
-    // the former publication without the normal full recovery pass.
-    governance->ObserveChainTip(tip->pprev);
-    governance->ObserveChainTip(tip);
+    // Nor may an unvalidated branch observation be skipped as A-B-C merely
+    // because C happens to be another direct child of remembered A.
+    uint256 alternate_hash{InsecureRand256()};
+    CBlockIndex alternate;
+    alternate.nHeight = sibling.nHeight;
+    alternate.pprev = &boundary;
+    alternate.phashBlock = &alternate_hash;
+    governance->ObserveChainTip(&sibling);
+    governance->ObserveChainTip(&alternate);
     BOOST_CHECK(!Access::TryReuseAuthorityContent(
-        *governance, *tip, dmn_state_hash, registry_state_root));
+        *governance, alternate, dmn_content_hash, registry_state_root));
+
     const auto invalidated{Access::AuthoritySnapshotStats(*governance)};
     BOOST_CHECK_EQUAL(invalidated.builds, before.builds);
-    BOOST_CHECK_EQUAL(invalidated.reuses, repeated.reuses);
+    BOOST_CHECK_EQUAL(invalidated.reuses, repeated.reuses + 2);
 }
 
 BOOST_FIXTURE_TEST_CASE(

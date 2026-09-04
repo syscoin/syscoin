@@ -438,6 +438,10 @@ private:
     struct PQGovernanceReadinessState {
         std::optional<PQGovernanceTipIdentity> observed_tip;
         std::optional<PQGovernanceTipIdentity> ready_tip;
+        // Set only when the observed tip moved directly from a published
+        // ready parent. This one-transition capability prevents an A-B-C
+        // observation from reusing A merely because C also descends from A.
+        std::optional<PQGovernanceTipIdentity> reusable_parent;
         uint64_t validation_context_epoch{1};
     };
 
@@ -561,7 +565,7 @@ private:
     int32_t m_pq_authority_tip_height GUARDED_BY(cs){-1};
     bool m_pq_authority_snapshot_valid GUARDED_BY(cs){false};
     // SYSCOIN BEGIN: Authenticated governance snapshot identities.
-    uint256 m_pq_authority_dmn_state_hash GUARDED_BY(cs);
+    uint256 m_pq_authority_dmn_content_hash GUARDED_BY(cs);
     uint256 m_pq_authority_registry_state_root GUARDED_BY(cs);
     // SYSCOIN END: Authenticated governance snapshot identities.
     std::size_t m_governance_valid_mn_count GUARDED_BY(cs){0};
@@ -572,7 +576,7 @@ private:
     uint64_t m_pq_full_revalidations GUARDED_BY(cs){0};
     // SYSCOIN BEGIN: Governance snapshot cache work counters.
     uint64_t m_pq_authority_snapshot_builds GUARDED_BY(cs){0};
-    uint64_t m_pq_exact_snapshot_reuses GUARDED_BY(cs){0};
+    uint64_t m_pq_authority_snapshot_reuses GUARDED_BY(cs){0};
     // SYSCOIN END: Governance snapshot cache work counters.
     uint64_t m_persisted_vote_bytes GUARDED_BY(cs){0};
 
@@ -795,31 +799,31 @@ private:
         const CBlockIndex& validation_tip);
 
     template <typename RegistrySnapshot>
-    [[nodiscard]] static bool BuildPQGovernanceAuthorityMapImpl(
+    [[nodiscard]] static bool BuildPQGovernanceAuthoritySnapshotImpl(
         const CBlockIndex& validation_tip,
         const CDeterministicMNList& validation_mn_list,
         const RegistrySnapshot& registry_snapshot,
-        pq_authority_map_t& authorities,
+        pq_authority_map_t& pq_authorities,
+        delegated_authority_map_t& delegated_authorities,
+        std::size_t& valid_mn_count,
         std::string& error);
 
-    [[nodiscard]] static bool BuildPQGovernanceAuthorityMap(
+    [[nodiscard]] static bool BuildPQGovernanceAuthoritySnapshot(
         const CBlockIndex& validation_tip,
         const CDeterministicMNList& validation_mn_list,
         const llmq::pq::PQRegistrySnapshot& registry_snapshot,
-        pq_authority_map_t& authorities,
+        pq_authority_map_t& pq_authorities,
+        delegated_authority_map_t& delegated_authorities,
+        std::size_t& valid_mn_count,
         std::string& error);
 
-    [[nodiscard]] static bool BuildPQGovernanceAuthorityMap(
+    [[nodiscard]] static bool BuildPQGovernanceAuthoritySnapshot(
         const CBlockIndex& validation_tip,
         const CDeterministicMNList& validation_mn_list,
         const llmq::pq::PQRegistryReadView& registry_snapshot,
-        pq_authority_map_t& authorities,
-        std::string& error);
-
-    [[nodiscard]] static bool BuildDelegatedGovernanceAuthorityMap(
-        const CBlockIndex& validation_tip,
-        const CDeterministicMNList& validation_mn_list,
-        delegated_authority_map_t& authorities,
+        pq_authority_map_t& pq_authorities,
+        delegated_authority_map_t& delegated_authorities,
+        std::size_t& valid_mn_count,
         std::string& error);
 
     [[nodiscard]] bool IsStraightPQGovernanceExtension(
@@ -833,7 +837,7 @@ private:
     // SYSCOIN BEGIN: Exact authenticated governance snapshot reuse.
     [[nodiscard]] bool TryReusePQGovernanceSnapshot(
         const CBlockIndex& validation_tip,
-        const uint256& dmn_state_hash,
+        const uint256& dmn_content_hash,
         const uint256& registry_state_root)
         EXCLUSIVE_LOCKS_REQUIRED(cs);
     // SYSCOIN END: Exact authenticated governance snapshot reuse.

@@ -17,11 +17,6 @@ namespace {
 inline constexpr std::string_view PQ_QUORUM_MODIFIER_DOMAIN{
     "SYS_PQ_QUORUM_MODIFIER_V1"};
 
-void WriteDomain(CHashWriter& writer, std::string_view domain)
-{
-    writer.write(AsBytes(Span{domain.data(), domain.size()}));
-}
-
 bool IsKnownTransitionKind(
     RosterAuthorizationTransitionKind kind) noexcept
 {

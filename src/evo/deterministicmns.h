@@ -111,9 +111,15 @@ private:
     // Block identity remains outside this set so unchanged lists share O(1)
     // content across blocks while each mutation updates one exact element.
     MuHash3072 m_pq_legacy_content_hash;
+    // Authenticated identity of only the DMN fields that select governance
+    // authorities. Ordinary payment/service updates must not force an O(N)
+    // governance rebuild at every straight chain extension.
+    MuHash3072 m_pq_governance_authority_content_hash;
     // Memory-only cache for branch-local deterministic-state diagnostics.
     mutable std::optional<uint256> m_pq_legacy_state_hash;
     mutable uint256 m_pq_legacy_state_hash_genesis;
+    mutable std::optional<uint256> m_pq_governance_authority_hash;
+    mutable uint256 m_pq_governance_authority_hash_genesis;
     // Memory-only mutation keys for compact inverse-journal construction.
     // BuildNewListFromBlock resets this after copying the parent list.
     std::set<uint256> m_tracked_changes;
@@ -152,7 +158,9 @@ public:
         mnInternalIdMap = MnInternalIdMap();
         // SYSCOIN: Rebuild the memory-only commitment through AddMN below.
         m_pq_legacy_content_hash = MuHash3072{};
+        m_pq_governance_authority_content_hash = MuHash3072{};
         m_pq_legacy_state_hash.reset();
+        m_pq_governance_authority_hash.reset();
         m_tracked_changes.clear();
         s >> blockHash;
         s >> nHeight;
@@ -171,7 +179,9 @@ public:
         mnInternalIdMap = MnInternalIdMap();
         // SYSCOIN: Clear the memory-only deterministic-state commitment.
         m_pq_legacy_content_hash = MuHash3072{};
+        m_pq_governance_authority_content_hash = MuHash3072{};
         m_pq_legacy_state_hash.reset();
+        m_pq_governance_authority_hash.reset();
         m_tracked_changes.clear();
         blockHash.SetNull();
         nHeight = -1;
@@ -256,6 +266,9 @@ public:
     /** SYSCOIN: Stable versioned digest for branch-local diagnostics. */
     [[nodiscard]] uint256 GetPQLegacyStateHash(const uint256& genesis_hash) const;
     [[nodiscard]] uint256 GetOrComputePQLegacyStateHash(
+        const uint256& genesis_hash) const;
+    /** Stable authenticated identity of governance-relevant DMN content. */
+    [[nodiscard]] uint256 GetOrComputePQGovernanceAuthorityHash(
         const uint256& genesis_hash) const;
 
     [[nodiscard]] bool IsMNValid(const uint256& proTxHash) const;
@@ -1046,12 +1059,6 @@ public:
         const CBlockIndex& carrier_parent,
         const llmq::pq::PQPaymentProbationTransitionContext& context)
         EXCLUSIVE_LOCKS_REQUIRED(!cs, cs_main);
-
-    /** Compatibility copying API retained for tests. */
-    bool GetPaymentProbationState(
-        const CBlockIndex* pindex,
-        llmq::pq::PQPaymentProbationState& state) const
-        EXCLUSIVE_LOCKS_REQUIRED(!cs);
 
     /** Publish one receipt-derived state before the block index root is durable. */
     bool CommitPaymentProbationState(

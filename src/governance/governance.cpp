@@ -589,6 +589,13 @@ void CGovernanceManager::ObserveChainTip(const CBlockIndex* tip)
         auto next{std::make_shared<PQGovernanceReadinessState>(
             current ? *current : PQGovernanceReadinessState{})};
         if (next->observed_tip == observed) return;
+        next->reusable_parent.reset();
+        if (tip != nullptr && tip->pprev != nullptr && current &&
+            current->observed_tip &&
+            current->ready_tip == current->observed_tip &&
+            *current->observed_tip == PQGovernanceTipIdentity{*tip->pprev}) {
+            next->reusable_parent = current->observed_tip;
+        }
         if (!observed && next->observed_tip) {
             if (next->validation_context_epoch ==
                 std::numeric_limits<uint64_t>::max()) {
@@ -627,6 +634,7 @@ bool CGovernanceManager::AdvancePQGovernanceValidationContext()
             ++next->validation_context_epoch;
         }
         next->ready_tip.reset();
+        next->reusable_parent.reset();
         const bool valid_epoch{
             next->validation_context_epoch != 0};
         std::shared_ptr<const PQGovernanceReadinessState> desired{
@@ -647,9 +655,10 @@ void CGovernanceManager::MarkPQGovernanceUnavailableForTip(
     auto current{
         m_pq_governance_readiness.load(std::memory_order_acquire)};
     while (current && current->observed_tip == expected_tip) {
-        if (!current->ready_tip) return;
+        if (!current->ready_tip && !current->reusable_parent) return;
         auto next{std::make_shared<PQGovernanceReadinessState>(*current)};
         next->ready_tip.reset();
+        next->reusable_parent.reset();
         std::shared_ptr<const PQGovernanceReadinessState> desired{
             std::move(next)};
         if (m_pq_governance_readiness.compare_exchange_weak(
@@ -679,6 +688,7 @@ bool CGovernanceManager::PublishPQGovernanceReadyForTip(
                 std::numeric_limits<uint64_t>::max()) {
                 next->validation_context_epoch = 0;
                 next->ready_tip.reset();
+                next->reusable_parent.reset();
                 std::shared_ptr<const PQGovernanceReadinessState> desired{
                     std::move(next)};
                 if (m_pq_governance_readiness.compare_exchange_weak(
@@ -692,6 +702,7 @@ bool CGovernanceManager::PublishPQGovernanceReadyForTip(
             ++next->validation_context_epoch;
         }
         next->ready_tip = expected_tip;
+        next->reusable_parent.reset();
         std::shared_ptr<const PQGovernanceReadinessState> desired{
             std::move(next)};
         if (m_pq_governance_readiness.compare_exchange_weak(
@@ -4381,7 +4392,7 @@ void CGovernanceManager::RememberFailedPQGovernanceTip(
     m_pq_authority_tip_height = validation_tip.nHeight;
     m_pq_authority_snapshot_valid = false;
     // SYSCOIN: A failed tip invalidates both authenticated snapshot identities.
-    m_pq_authority_dmn_state_hash.SetNull();
+    m_pq_authority_dmn_content_hash.SetNull();
     m_pq_authority_registry_state_root.SetNull();
 }
 
@@ -4642,14 +4653,18 @@ UniValue CGovernanceManager::ToJson() const
 }
 
 template <typename RegistrySnapshot>
-bool CGovernanceManager::BuildPQGovernanceAuthorityMapImpl(
+bool CGovernanceManager::BuildPQGovernanceAuthoritySnapshotImpl(
     const CBlockIndex& validation_tip,
     const CDeterministicMNList& validation_mn_list,
     const RegistrySnapshot& registry_snapshot,
-    pq_authority_map_t& authorities,
+    pq_authority_map_t& pq_authorities,
+    delegated_authority_map_t& delegated_authorities,
+    std::size_t& valid_mn_count,
     std::string& error)
 {
-    authorities.clear();
+    pq_authorities.clear();
+    delegated_authorities.clear();
+    valid_mn_count = 0;
     if (validation_mn_list.IsNull() ||
         validation_mn_list.GetHeight() != validation_tip.nHeight ||
         validation_mn_list.GetBlockHash() !=
@@ -4664,17 +4679,23 @@ bool CGovernanceManager::BuildPQGovernanceAuthorityMapImpl(
     bool unique{true};
     validation_mn_list.ForEachMN(
         /*onlyValid=*/true, [&](const CDeterministicMN& dmn) {
+            ++valid_mn_count;
+            unique &= delegated_authorities.emplace(
+                dmn.collateralOutpoint,
+                dmn.pdmnState->keyIDVoting).second;
             const llmq::pq::OperatorKeyState* state{
                 registry_snapshot.FindOperator(dmn.proTxHash)};
             if (state == nullptr || !state->HasActiveGlobalKey()) return;
-            unique &= authorities.emplace(
+            unique &= pq_authorities.emplace(
                 dmn.collateralOutpoint,
                 PQGovernanceAuthority{
                     dmn.proTxHash, state->global_key.key_version})
                           .second;
         });
     if (!unique) {
-        authorities.clear();
+        pq_authorities.clear();
+        delegated_authorities.clear();
+        valid_mn_count = 0;
         error = "duplicate collateral in governance authority snapshot";
         return false;
     }
@@ -4682,59 +4703,32 @@ bool CGovernanceManager::BuildPQGovernanceAuthorityMapImpl(
     return true;
 }
 
-bool CGovernanceManager::BuildPQGovernanceAuthorityMap(
+bool CGovernanceManager::BuildPQGovernanceAuthoritySnapshot(
     const CBlockIndex& validation_tip,
     const CDeterministicMNList& validation_mn_list,
     const llmq::pq::PQRegistrySnapshot& registry_snapshot,
-    pq_authority_map_t& authorities,
+    pq_authority_map_t& pq_authorities,
+    delegated_authority_map_t& delegated_authorities,
+    std::size_t& valid_mn_count,
     std::string& error)
 {
-    return BuildPQGovernanceAuthorityMapImpl(
-        validation_tip, validation_mn_list, registry_snapshot, authorities,
-        error);
+    return BuildPQGovernanceAuthoritySnapshotImpl(
+        validation_tip, validation_mn_list, registry_snapshot,
+        pq_authorities, delegated_authorities, valid_mn_count, error);
 }
 
-bool CGovernanceManager::BuildPQGovernanceAuthorityMap(
+bool CGovernanceManager::BuildPQGovernanceAuthoritySnapshot(
     const CBlockIndex& validation_tip,
     const CDeterministicMNList& validation_mn_list,
     const llmq::pq::PQRegistryReadView& registry_snapshot,
-    pq_authority_map_t& authorities,
+    pq_authority_map_t& pq_authorities,
+    delegated_authority_map_t& delegated_authorities,
+    std::size_t& valid_mn_count,
     std::string& error)
 {
-    return BuildPQGovernanceAuthorityMapImpl(
-        validation_tip, validation_mn_list, registry_snapshot, authorities,
-        error);
-}
-
-bool CGovernanceManager::BuildDelegatedGovernanceAuthorityMap(
-    const CBlockIndex& validation_tip,
-    const CDeterministicMNList& validation_mn_list,
-    delegated_authority_map_t& authorities,
-    std::string& error)
-{
-    authorities.clear();
-    if (validation_mn_list.IsNull() ||
-        validation_mn_list.GetHeight() != validation_tip.nHeight ||
-        validation_mn_list.GetBlockHash() !=
-            validation_tip.GetBlockHash()) {
-        error = "delegated governance authority input does not match the exact tip";
-        return false;
-    }
-
-    bool unique{true};
-    validation_mn_list.ForEachMN(
-        /*onlyValid=*/true, [&](const CDeterministicMN& dmn) {
-            unique &= authorities.emplace(
-                dmn.collateralOutpoint,
-                dmn.pdmnState->keyIDVoting).second;
-        });
-    if (!unique) {
-        authorities.clear();
-        error = "duplicate collateral in delegated governance authority snapshot";
-        return false;
-    }
-    error.clear();
-    return true;
+    return BuildPQGovernanceAuthoritySnapshotImpl(
+        validation_tip, validation_mn_list, registry_snapshot,
+        pq_authorities, delegated_authorities, valid_mn_count, error);
 }
 
 bool CGovernanceManager::IsStraightPQGovernanceExtension(
@@ -4759,28 +4753,67 @@ bool CGovernanceManager::IsRememberedPQGovernanceTip(
 // SYSCOIN BEGIN: Exact authenticated governance snapshot reuse.
 bool CGovernanceManager::TryReusePQGovernanceSnapshot(
     const CBlockIndex& validation_tip,
-    const uint256& dmn_state_hash,
+    const uint256& dmn_content_hash,
     const uint256& registry_state_root)
 {
     AssertLockHeld(cs);
-    if (dmn_state_hash.IsNull() || registry_state_root.IsNull() ||
-        !IsRememberedPQGovernanceTip(validation_tip) ||
-        m_pq_authority_dmn_state_hash != dmn_state_hash ||
+    if (dmn_content_hash.IsNull() || registry_state_root.IsNull() ||
+        !m_pq_authority_snapshot_valid ||
+        m_pq_authority_dmn_content_hash != dmn_content_hash ||
         m_pq_authority_registry_state_root != registry_state_root) {
         return false;
     }
 
-    // A-B-A observation deliberately clears readiness, even though A's exact
-    // block and content identities match. Only a continuously published A may
-    // reuse its authority maps; every reorg/recovery transition rebuilds.
     const PQGovernanceTipIdentity expected_tip{validation_tip};
     const auto readiness{
         m_pq_governance_readiness.load(std::memory_order_acquire)};
-    if (!readiness || readiness->observed_tip != expected_tip ||
-        readiness->ready_tip != expected_tip) {
+    if (!readiness || readiness->observed_tip != expected_tip) {
         return false;
     }
-    ++m_pq_exact_snapshot_reuses;
+
+    // A repeated callback for the exact continuously-ready tip is idempotent.
+    if (IsRememberedPQGovernanceTip(validation_tip)) {
+        if (readiness->ready_tip != expected_tip) return false;
+        ++m_pq_authority_snapshot_reuses;
+        return true;
+    }
+
+    // A straight extension may inherit immutable authority maps only from the
+    // exact parent publication that immediately preceded this observation.
+    // The one-transition capability is consumed by publication and is lost on
+    // any A-B-C or A-B-A observation, failed validation, or disconnect.
+    if (!m_pq_trigger_state_initialized ||
+        !IsStraightPQGovernanceExtension(validation_tip) ||
+        readiness->ready_tip || !readiness->reusable_parent ||
+        *readiness->reusable_parent !=
+            PQGovernanceTipIdentity{*validation_tip.pprev}) {
+        return false;
+    }
+
+    bool trigger_boundary_crossed{false};
+    for (const auto& [hash, trigger] : mapTrigger) {
+        const auto object{mapObjects.find(hash)};
+        if (trigger && object != mapObjects.end() &&
+            IsGovernancePageObjectEligible(
+                hash, object->second, m_pq_authority_tip_height) &&
+            trigger->GetBlockHeight() <= validation_tip.nHeight) {
+            trigger_boundary_crossed = true;
+            break;
+        }
+    }
+
+    nCachedBlockHeight.store(validation_tip.nHeight,
+                             std::memory_order_relaxed);
+    m_pq_authority_tip_hash = validation_tip.GetBlockHash();
+    m_pq_authority_tip_height = validation_tip.nHeight;
+    if (!PublishPQGovernanceReadyForTip(
+            validation_tip, trigger_boundary_crossed)) {
+        m_pq_authority_snapshot_valid = false;
+        m_pq_authority_dmn_content_hash.SetNull();
+        m_pq_authority_registry_state_root.SetNull();
+        return false;
+    }
+    ++m_pq_authority_snapshot_reuses;
     return true;
 }
 // SYSCOIN END: Exact authenticated governance snapshot reuse.
@@ -5099,15 +5132,17 @@ bool CGovernanceManager::RevalidatePQGovernanceImpl(
 
     // SYSCOIN BEGIN: Authenticated O(1) governance snapshot reuse.
     // These authenticated O(1) identities cover every input to both authority
-    // maps: the DMN state hash commits voting/delegation keys and validity,
-    // while the registry root commits PQ operator authority. Exact content at
-    // an exact continuously-ready tip therefore needs no repeated O(N) scan.
-    const uint256 dmn_state_hash{mn_list.GetOrComputePQLegacyStateHash(
-        Params().GetConsensus().hashGenesisBlock)};
+    // maps: the stable DMN digest commits proTx/collateral identities, voting
+    // keys, and validity, while the registry root commits PQ authority. A
+    // continuously observed straight extension with unchanged identities can
+    // therefore advance exact-tip readiness without another O(N) scan.
+    const uint256 dmn_content_hash{
+        mn_list.GetOrComputePQGovernanceAuthorityHash(
+            Params().GetConsensus().hashGenesisBlock)};
     const uint256 registry_state_root{
         registry_snapshot.ConsensusStateRoot()};
     if (TryReusePQGovernanceSnapshot(
-            validation_tip, dmn_state_hash, registry_state_root)) {
+            validation_tip, dmn_content_hash, registry_state_root)) {
         return true;
     }
     MarkPQGovernanceUnavailableForTip(validation_tip);
@@ -5115,27 +5150,18 @@ bool CGovernanceManager::RevalidatePQGovernanceImpl(
     // SYSCOIN END: Authenticated O(1) governance snapshot reuse.
 
     pq_authority_map_t next_authorities;
-    if (!BuildPQGovernanceAuthorityMap(
-            validation_tip, mn_list, registry_snapshot,
-            next_authorities, registry_error)) {
+    delegated_authority_map_t next_delegated_authorities;
+    std::size_t next_valid_mn_count{0};
+    if (!BuildPQGovernanceAuthoritySnapshot(
+            validation_tip, mn_list, registry_snapshot, next_authorities,
+            next_delegated_authorities, next_valid_mn_count,
+            registry_error)) {
         RememberFailedPQGovernanceTip(validation_tip);
         LogPrint(BCLog::GOBJECT,
                  "CGovernanceManager::%s invalid authority snapshot: %s\n",
                  __func__, registry_error);
         return false;
     }
-    delegated_authority_map_t next_delegated_authorities;
-    if (!BuildDelegatedGovernanceAuthorityMap(
-            validation_tip, mn_list, next_delegated_authorities,
-            registry_error)) {
-        RememberFailedPQGovernanceTip(validation_tip);
-        LogPrint(BCLog::GOBJECT,
-                 "CGovernanceManager::%s invalid delegated authority snapshot: %s\n",
-                 __func__, registry_error);
-        return false;
-    }
-    const std::size_t next_valid_mn_count{
-        mn_list.GetValidMNsCount()};
 
     const bool straight_extension{
         IsStraightPQGovernanceExtension(validation_tip)};
@@ -5260,7 +5286,7 @@ bool CGovernanceManager::RevalidatePQGovernanceImpl(
     m_pq_authority_tip_hash = validation_tip.GetBlockHash();
     m_pq_authority_tip_height = validation_tip.nHeight;
     // SYSCOIN: Publish the authenticated identities for exact snapshot reuse.
-    m_pq_authority_dmn_state_hash = dmn_state_hash;
+    m_pq_authority_dmn_content_hash = dmn_content_hash;
     m_pq_authority_registry_state_root = registry_state_root;
     m_pq_authority_snapshot_valid = true;
     return PublishPQGovernanceReadyForTip(

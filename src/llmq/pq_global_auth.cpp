@@ -26,21 +26,6 @@ bool HasNonZeroByte(const Range& range) noexcept
     return std::any_of(range.begin(), range.end(), [](uint8_t byte) { return byte != 0; });
 }
 
-void WriteDomain(CHashWriter& writer, std::string_view domain)
-{
-    writer.write(AsBytes(Span{domain.data(), domain.size()}));
-}
-
-template <typename... Args>
-uint256 TaggedHash(std::string_view domain, const uint256& genesis_hash, const Args&... args)
-{
-    CHashWriter writer{SER_GETHASH, 0};
-    WriteDomain(writer, domain);
-    writer << genesis_hash;
-    (writer << ... << args);
-    return writer.GetHash();
-}
-
 std::size_t ExpectedAddressSize(EndpointNetwork network) noexcept
 {
     switch (network) {

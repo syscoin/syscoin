@@ -157,13 +157,6 @@ bool IsPQRelayPlanForCurrentIdentityState(
         plan, GetActiveMasternodeRelayIdentity());
 }
 
-bool IsBitmapBitSet(const pq::QuorumBitmap& bitmap,
-                    std::size_t member) noexcept
-{
-    return (bitmap[member / 8] &
-            static_cast<uint8_t>(uint8_t{1} << (member % 8))) != 0;
-}
-
 bool HasBitmapBits(const pq::QuorumBitmap& bitmap) noexcept
 {
     return std::any_of(bitmap.begin(), bitmap.end(),
@@ -1428,12 +1421,9 @@ bool PaymentAuditCandidateMetadataSnapshot::IsStructurallyValid() const noexcept
         }
         const auto& valid_members{
             candidate.statement.commitment.subject_valid_members};
-        for (std::size_t byte{0}; byte < candidate.online_members.size();
-             ++byte) {
-            if ((candidate.online_members[byte] &
-                 static_cast<uint8_t>(~valid_members[byte])) != 0) {
-                return false;
-            }
+        if (!pq::IsQuorumBitmapSubset(candidate.online_members,
+                                      valid_members)) {
+            return false;
         }
         for (std::size_t prior{0}; prior < index; ++prior) {
             if (ordered_candidates[prior].witness_id ==
@@ -5822,12 +5812,10 @@ CChainLocksHandler::BuildCompactPaymentAuditTransitionContext(
         receipt.epoch, receipt.carrier_height, receipt.result_hash};
     context.roster_valid_members = subject->descriptor.valid_members;
     context.observed_members = receipt.online_members;
-    for (std::size_t byte{0}; byte < pq::BITMAP_SIZE; ++byte) {
-        if ((context.observed_members[byte] &
-             static_cast<uint8_t>(~context.roster_valid_members[byte])) != 0) {
-            context = {};
-            return PaymentAuditContextStatus::INVALID;
-        }
+    if (!pq::IsQuorumBitmapSubset(context.observed_members,
+                                  context.roster_valid_members)) {
+        context = {};
+        return PaymentAuditContextStatus::INVALID;
     }
     for (std::size_t member{0}; member < pq::QUORUM_SIZE; ++member) {
         context.frozen_roster[member] =
@@ -11796,8 +11784,13 @@ CChainLocksHandler::BuildCurrentSigningContexts(
         recovery_authority_source.normal_beacon =
             staged_recovery->pending_seed;
     }
-    if (!recovery_authority_source.IsStructurallyValid() ||
-        recovery_authority_source.IsNull()) {
+    const bool requires_recovery_authority_source{
+        objective_authorization.has_value() ||
+        (staged_recovery && staged_recovery->pending_seed.IsReady())};
+    if ((requires_recovery_authority_source &&
+         recovery_authority_source.IsNull()) ||
+        (!recovery_authority_source.IsNull() &&
+         !recovery_authority_source.IsStructurallyValid())) {
         return std::nullopt;
     }
 
@@ -13475,11 +13468,11 @@ void CChainLocksHandler::MaybeCapturePaymentAuditResponse(
         !m_payment_audit_staging_store->IsHealthy() ||
         share.GetStatement().btcc_advance != pq::BTCCAdvance::ADVANCE ||
         share.GetStatement().accepted_btcc_cursor.sys_height !=
-            share.transcript.height) {
+            share.GetStatement().height) {
         return;
     }
     const auto epoch{pq::EpochForHeight(
-        m_config->chainlock_schedule, share.transcript.height)};
+        m_config->chainlock_schedule, share.GetStatement().height)};
     if (!epoch) return;
     const pq::PaymentAuditScheduleConfig schedule_config{
         m_config->chainlock_schedule, m_config->btcc_schedule};
@@ -13489,7 +13482,7 @@ void CChainLocksHandler::MaybeCapturePaymentAuditResponse(
     std::optional<uint8_t> row_index;
     for (uint8_t index{0}; index < pq::PAYMENT_AUDIT_ROW_COUNT; ++index) {
         if (schedule->rows[index].response_height ==
-            share.transcript.height) {
+            share.GetStatement().height) {
             row_index = index;
             break;
         }
@@ -13502,8 +13495,8 @@ void CChainLocksHandler::MaybeCapturePaymentAuditResponse(
         LOCK(cs_main);
         const CBlockIndex* tip{m_chainman.ActiveTip()};
         const CBlockIndex* response_index{
-            tip != nullptr && tip->nHeight >= share.transcript.height
-                ? tip->GetAncestor(share.transcript.height)
+            tip != nullptr && tip->nHeight >= share.GetStatement().height
+                ? tip->GetAncestor(share.GetStatement().height)
                 : nullptr};
         if (tip == nullptr || response_index == nullptr ||
             tip->nHeight >= row_schedule.deadline_height ||
@@ -15881,9 +15874,9 @@ void CChainLocksHandler::ProcessPaymentAuditHave(
         return;
     }
     for (std::size_t member{0}; member < pq::QUORUM_SIZE; ++member) {
-        if (IsBitmapBitSet(have.available_members, member) &&
-            !IsBitmapBitSet(definition->row.subject_valid_members,
-                            member)) {
+        if (pq::IsQuorumMemberSet(have.available_members, member) &&
+            !pq::IsQuorumMemberSet(definition->row.subject_valid_members,
+                                   member)) {
             punish("bad-pq-payment-audit-have-bitmap");
             return;
         }
@@ -16017,7 +16010,7 @@ void CChainLocksHandler::ProcessPaymentAuditResponse(
                        m_config->chainlock_schedule,
                        statement.previous_chainlock_height)
                  : std::nullopt};
-    if (response.response.transcript.height !=
+    if (response.response.GetStatement().height !=
             definition->row.expected.response_height ||
         !expected_target || statement.height != *expected_target ||
         statement.block_hash != definition->row.response_block_hash ||
@@ -16040,7 +16033,7 @@ void CChainLocksHandler::ProcessPaymentAuditResponse(
         response.epoch, response.row_index)};
     if (!current ||
         !SamePaymentAuditOpenRowIdentity(*current, definition->row) ||
-        IsBitmapBitSet(current->available_members, member) ||
+        pq::IsQuorumMemberSet(current->available_members, member) ||
         !IsCurrentPaymentAuditNetworkRow(definition->row)) {
         return;
     }
@@ -16096,7 +16089,7 @@ void CChainLocksHandler::ProcessPaymentAuditResponse(
         if (peer_fault) {
             punish_response = true;
         } else {
-            if (IsBitmapBitSet(latest->available_members, member)) return;
+            if (pq::IsQuorumMemberSet(latest->available_members, member)) return;
             pq::PaymentAuditStagingResult result{
                 pq::PaymentAuditStagingResult::NOT_FOUND};
             {

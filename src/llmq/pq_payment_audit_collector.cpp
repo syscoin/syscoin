@@ -17,18 +17,6 @@ void SetError(ShareCollectionError* error, ShareCollectionError value)
     if (error != nullptr) *error = value;
 }
 
-bool IsBitSet(const QuorumBitmap& bitmap, std::size_t member)
-{
-    return (bitmap[member / 8] &
-            static_cast<uint8_t>(uint8_t{1} << (member % 8))) != 0;
-}
-
-void SetBit(QuorumBitmap& bitmap, std::size_t member)
-{
-    bitmap[member / 8] |=
-        static_cast<uint8_t>(uint8_t{1} << (member % 8));
-}
-
 ShareCollectionError MapReservedVerificationError(
     PaymentAuditVerificationError error)
 {
@@ -44,12 +32,6 @@ ShareCollectionError MapReservedVerificationError(
     default:
         return ShareCollectionError::LOCAL_ERROR;
     }
-}
-
-void ClearBit(QuorumBitmap& bitmap, std::size_t member)
-{
-    bitmap[member / 8] &=
-        static_cast<uint8_t>(~(uint8_t{1} << (member % 8)));
 }
 
 } // namespace
@@ -128,7 +110,7 @@ PaymentAuditCollector::ReserveShareVerification(
     const auto& roster{m_context->Rosters()[*slot]};
     const auto& member{roster.members[member_index]};
     if (roster.descriptor.valid_count < QUORUM_MIN_VALID ||
-        !IsBitSet(roster.descriptor.valid_members, member_index) ||
+        !IsQuorumMemberSet(roster.descriptor.valid_members, member_index) ||
         !member.eligible || !member.child_root ||
         member.pro_tx_hash != share.transcript.member_pro_tx_hash) {
         SetError(error, ShareCollectionError::INVALID_MEMBER);
@@ -136,12 +118,12 @@ PaymentAuditCollector::ReserveShareVerification(
     }
     auto& quorum_shares{m_shares[*slot]};
     if (quorum_shares.contains(member_index) ||
-        IsBitSet(m_pending_shares[*slot], member_index)) {
+        IsQuorumMemberSet(m_pending_shares[*slot], member_index)) {
         SetError(error, ShareCollectionError::DUPLICATE);
         return std::nullopt;
     }
 
-    SetBit(m_pending_shares[*slot], member_index);
+    SetQuorumMember(m_pending_shares[*slot], member_index);
     return ShareVerificationReservation{
         m_context, m_instance_token, share, *slot, member_index};
 }
@@ -198,11 +180,11 @@ ShareCollectionResult PaymentAuditCollector::CompleteShareVerification(
     }
 
     auto& pending{m_pending_shares[reservation.m_quorum_slot]};
-    if (!IsBitSet(pending, reservation.m_member_index)) {
+    if (!IsQuorumMemberSet(pending, reservation.m_member_index)) {
         SetError(error, ShareCollectionError::LOCAL_ERROR);
         return ShareCollectionResult::REJECTED;
     }
-    ClearBit(pending, reservation.m_member_index);
+    ClearQuorumMember(pending, reservation.m_member_index);
 
     if (reservation.m_verification_state !=
         ShareVerificationReservation::VerificationState::VALID) {
@@ -316,7 +298,7 @@ PaymentAuditCollector::BuildFinalCertificate() const
         std::size_t added{0};
         for (const auto& [member_index, witness] : m_shares[slot]) {
             if (added == QUORUM_THRESHOLD) break;
-            SetBit(result.signer_bitmaps[slot], member_index);
+            SetQuorumMember(result.signer_bitmaps[slot], member_index);
             result.report_witnesses.push_back(witness);
             ++added;
         }

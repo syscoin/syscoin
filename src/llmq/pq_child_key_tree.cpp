@@ -26,11 +26,6 @@ constexpr uint16_t CHILD_KEY_TREE_CACHE_VERSION{1};
 constexpr std::string_view CHILD_KEY_TREE_CACHE_DOMAIN{
     "SYS_PQ_CHILD_TREE_CACHE_V1"};
 
-void WriteDomain(CHashWriter& writer, std::string_view domain)
-{
-    writer.write(AsBytes(Span{domain.data(), domain.size()}));
-}
-
 class WorkerJoinGuard final
 {
 public:
@@ -220,15 +215,6 @@ std::optional<ChildKeyTreeConfig> ChildKeyTreeConfig::FromCommitment(
     };
     return config.IsValid() ? std::optional<ChildKeyTreeConfig>{config}
                             : std::nullopt;
-}
-
-bool ChildKeyTreeConfig::MatchesCommitment(
-    const ChildKeyTreeCommitment& commitment) const noexcept
-{
-    return IsValid() && commitment.IsStructurallyValid() &&
-           tree_id == commitment.tree_id &&
-           generation == commitment.generation &&
-           first_epoch == commitment.first_epoch && depth == commitment.depth;
 }
 
 uint256 GetChildKeyTreeLeafHash(const ChildKeyTreeConfig& config,

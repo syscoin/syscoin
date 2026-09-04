@@ -1915,19 +1915,6 @@ ChainLockFinalityStore::GetServableByLogicalId(
     return nullptr;
 }
 
-std::vector<std::shared_ptr<const FinalChainLock>>
-ChainLockFinalityStore::GetRecent() const
-{
-    LOCK(m_mutex);
-    std::vector<std::shared_ptr<const FinalChainLock>> result;
-    result.reserve(m_recent_by_height.size());
-    for (const auto& [height, record] : m_recent_by_height) {
-        (void)height;
-        result.push_back(record.chainlock);
-    }
-    return result;
-}
-
 std::size_t ChainLockFinalityStore::RecentSizeForTesting() const
 {
     LOCK(m_mutex);
@@ -1944,12 +1931,6 @@ std::size_t ChainLockFinalityStore::SeenWitnessSizeForTesting() const
 {
     LOCK(m_mutex);
     return m_seen_witness.Size();
-}
-
-std::size_t ChainLockFinalityStore::RejectedWitnessSizeForTesting() const
-{
-    LOCK(m_mutex);
-    return m_rejected_witness.Size();
 }
 
 std::size_t ChainLockFinalityStore::AuthorizationBaseSizeForTesting() const

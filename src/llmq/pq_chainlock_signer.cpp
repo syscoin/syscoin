@@ -99,8 +99,7 @@ ChainLockSigningResult ChainLockShareSigner::Sign(
         return Failure(error, ChainLockSigningError::INACTIVE_QUORUM);
     }
     if (member_index >= QUORUM_SIZE ||
-        (roster.descriptor.valid_members[member_index / 8] &
-         static_cast<uint8_t>(uint8_t{1} << (member_index % 8))) == 0) {
+        !IsQuorumMemberSet(roster.descriptor.valid_members, member_index)) {
         return Failure(error, ChainLockSigningError::INVALID_MEMBER);
     }
     const auto& member{roster.members[member_index]};

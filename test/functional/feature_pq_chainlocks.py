@@ -96,6 +96,7 @@ ROSTER_SNAPSHOT_LAG = 288
 FUTURE_HORIZON_EPOCHS = 8
 BTCC_CANDIDATE_ORIGIN = 2315
 BTCC_CANDIDATE_PERIOD = 10
+BTCC_NEVM_LAG = 10
 PAYMENT_AUDIT_PREP_EPOCH = 3
 PAYMENT_AUDIT_PREP_RESPONSE_HEIGHT = 2545
 PAYMENT_AUDIT_PREP_ANCHOR_HEIGHT = 2575
@@ -117,7 +118,7 @@ PAYMENT_AUDIT_POST_PREDECESSOR_HEIGHT = \
     PAYMENT_AUDIT_POST_TARGET_HEIGHT - CHAINLOCK_PERIOD
 PAYMENT_AUDIT_POST_SIGNING_HEIGHT = 3125
 CURRENT_CATCHUP_PREDECESSOR_HEIGHT = \
-    FIRST_ELIGIBLE_TARGET_HEIGHT + CHAINLOCK_PERIOD
+    FIRST_ELIGIBLE_TARGET_HEIGHT + 2 * CHAINLOCK_PERIOD
 CURRENT_CATCHUP_TARGET_HEIGHT = \
     CURRENT_CATCHUP_PREDECESSOR_HEIGHT + CHAINLOCK_PERIOD
 CURRENT_CATCHUP_TIP_HEIGHT = CURRENT_CATCHUP_TARGET_HEIGHT + SIGN_LAG
@@ -1083,10 +1084,9 @@ class PQChainLocksTest(SyscoinTestFramework):
         assert_equal(magic, PAYMENT_AUDIT_PREFIX_BUNDLE_MAGIC)
         assert_equal(version, PAYMENT_AUDIT_PREFIX_BUNDLE_VERSION)
         offset = struct.calcsize("<QH")
-        response, offset = cls._read_chainlock_artifact(body, offset)
-        anchor, offset = cls._read_chainlock_artifact(body, offset)
+        chainlock, offset = cls._read_chainlock_artifact(body, offset)
         assert_equal(offset, len(body))
-        return {"response": response, "anchor": anchor}
+        return chainlock
 
     @classmethod
     def read_post_chainlock_bundle(cls, path):
@@ -1567,17 +1567,6 @@ class PQChainLocksTest(SyscoinTestFramework):
         def build_and_admit_prefix(
                 label, audit_epoch, response_height, anchor_height,
                 authorizer_path, authorizer_carrier_height):
-            response_predecessor_height = response_height - CHAINLOCK_PERIOD
-            response_expiry_height = \
-                response_height + SIGN_LAG + CHAINLOCK_PERIOD
-            anchor_predecessor_height = anchor_height - CHAINLOCK_PERIOD
-            self.mine_pq_to_height(anchor_height + SIGN_LAG)
-            response_predecessor_hash = node.getblockhash(
-                response_predecessor_height)
-            response_hash = node.getblockhash(response_height)
-            anchor_predecessor_hash = node.getblockhash(
-                anchor_predecessor_height)
-            anchor_hash = node.getblockhash(anchor_height)
             authorizer_carrier_hash = (
                 node.getblockhash(authorizer_carrier_height)
                 if authorizer_carrier_height is not None
@@ -1590,97 +1579,121 @@ class PQChainLocksTest(SyscoinTestFramework):
             snapshot_heights = [
                 height - ROSTER_SNAPSHOT_LAG for height in base_heights
             ]
-            base_hashes = [
-                node.getblockhash(height) for height in base_heights
-            ]
-            snapshot_hashes = [
-                node.getblockhash(height) for height in snapshot_heights
-            ]
-            snapshot_path = os.path.join(
+            def build_and_admit_stage(
+                    stage, target_height, stage_authorizer_path,
+                    stage_authorizer_carrier_hash):
+                predecessor_height = target_height - CHAINLOCK_PERIOD
+                self.mine_pq_to_height(target_height + SIGN_LAG)
+                predecessor_hash = node.getblockhash(predecessor_height)
+                target_hash = node.getblockhash(target_height)
+                base_hashes = [
+                    node.getblockhash(height) for height in base_heights
+                ]
+                snapshot_hashes = [
+                    node.getblockhash(height) for height in snapshot_heights
+                ]
+                snapshot_path = os.path.join(
+                    self.options.tmpdir,
+                    "pq-payment-audit-%s-%s-snapshots.dat" %
+                    (label, stage),
+                )
+                bundle_path = os.path.join(
+                    self.options.tmpdir,
+                    "pq-payment-audit-%s-%s-bundle.dat" % (label, stage),
+                )
+                self.stop_node(0)
+                subprocess.run([
+                    helper,
+                    "payment-audit-prefix",
+                    snapshot_path,
+                    bundle_path,
+                    genesis_hash,
+                    str(FIRST_ELIGIBLE_TARGET_HEIGHT),
+                    branch_anchor_hash,
+                    str(EPOCH_ORIGIN),
+                    str(REGISTRATION_CUTOFF_BLOCKS),
+                    str(ROSTER_SNAPSHOT_LAG),
+                    str(FUTURE_HORIZON_EPOCHS),
+                    str(BTCC_CANDIDATE_ORIGIN),
+                    str(audit_epoch),
+                    str(predecessor_height),
+                    predecessor_hash,
+                    target_hash,
+                    self.payment_btcprev(target_height),
+                    stage_authorizer_carrier_hash,
+                    *base_hashes,
+                    *snapshot_hashes,
+                    stage_authorizer_path,
+                ], check=True, capture_output=True, text=True,
+                    timeout=3600 * self.options.timeout_factor)
+                artifact = self.read_payment_audit_prefix_bundle(bundle_path)
+                fixture_args = [
+                    arg for arg in self.extra_args[0]
+                    if not arg.startswith("-pqchainlocktestfixture=")
+                ] + ["-pqchainlocktestfixture=%s" % snapshot_path]
+                self.extra_args[0] = fixture_args
+                node.extra_args = list(fixture_args)
+                with node.assert_debug_log(
+                        ["Loaded branch-bound PQ ChainLock regtest fixture"]):
+                    self.start_node(0, extra_args=fixture_args)
+                assert_equal(node.getblockcount(), target_height + SIGN_LAG)
+                node.spork("SPORK_19_CHAINLOCKS_ENABLED", 0)
+                force_finish_mnsync(node)
+                self.admit_chainlock_artifact(
+                    artifact, target_height, target_hash,
+                    "pq-audit-%s-%s" % (label, stage))
+                return {
+                    "artifact": artifact,
+                    "fixture_args": fixture_args,
+                    "predecessor_hash": predecessor_hash,
+                    "target_hash": target_hash,
+                }
+
+            response = build_and_admit_stage(
+                "response", response_height, authorizer_path,
+                authorizer_carrier_hash)
+            response_authorizer_path = os.path.join(
                 self.options.tmpdir,
-                "pq-payment-audit-%s-prefix-snapshots.dat" % label,
+                "pq-payment-audit-%s-response-authorizer.dat" % label,
             )
-            bundle_path = os.path.join(
-                self.options.tmpdir,
-                "pq-payment-audit-%s-prefix-bundle.dat" % label,
-            )
-            self.stop_node(0)
-            subprocess.run([
-                helper,
-                "payment-audit-prefix",
-                snapshot_path,
-                bundle_path,
-                genesis_hash,
-                str(FIRST_ELIGIBLE_TARGET_HEIGHT),
-                branch_anchor_hash,
-                str(EPOCH_ORIGIN),
-                str(REGISTRATION_CUTOFF_BLOCKS),
-                str(ROSTER_SNAPSHOT_LAG),
-                str(FUTURE_HORIZON_EPOCHS),
-                str(BTCC_CANDIDATE_ORIGIN),
-                str(audit_epoch),
-                str(response_predecessor_height),
-                response_predecessor_hash,
-                response_hash,
-                self.payment_btcprev(response_height),
-                str(anchor_predecessor_height),
-                anchor_predecessor_hash,
-                anchor_hash,
-                self.payment_btcprev(anchor_height),
-                authorizer_carrier_hash,
-                *base_hashes,
-                *snapshot_hashes,
-                authorizer_path,
-            ], check=True, capture_output=True, text=True,
-                timeout=3600 * self.options.timeout_factor)
-            prefix = self.read_payment_audit_prefix_bundle(bundle_path)
-            fixture_args = [
-                arg for arg in self.extra_args[0]
-                if not arg.startswith("-pqchainlocktestfixture=")
-            ] + ["-pqchainlocktestfixture=%s" % snapshot_path]
-            self.extra_args[0] = fixture_args
-            node.extra_args = list(fixture_args)
-            with node.assert_debug_log(
-                    ["Loaded branch-bound PQ ChainLock regtest fixture"]):
-                self.start_node(0, extra_args=fixture_args)
-            assert_equal(node.getblockcount(), anchor_height + SIGN_LAG)
-            node.spork("SPORK_19_CHAINLOCKS_ENABLED", 0)
-            force_finish_mnsync(node)
-            prefix_tip = node.getbestblockhash()
-            response_expiry_hash = node.getblockhash(response_expiry_height)
-            # Each response was absent when its fixed carrier was mined. The
-            # rewind publishes it within the live window without rewriting
-            # that already-validated null carrier.
-            node.invalidateblock(response_expiry_hash)
-            assert_equal(node.getblockcount(), response_expiry_height - 1)
-            self.admit_chainlock_artifact(
-                prefix["response"], response_height, response_hash,
-                "pq-audit-%s-response" % label)
-            node.reconsiderblock(response_expiry_hash)
-            self.wait_until(
-                lambda: node.getbestblockhash() == prefix_tip,
-                timeout=1200,
-            )
-            assert_equal(node.getblockcount(), anchor_height + SIGN_LAG)
-            _, response_carrier = self.read_btcc_receipt(
-                response_expiry_hash)
-            assert_equal(response_carrier["version"], 1)
-            assert_equal(response_carrier["target_height"], -1)
-            assert_equal(response_carrier["target_hash"], 0)
-            assert_equal(response_carrier["logical_hash"], 0)
-            assert_equal(response_carrier["cursor_height"], -1)
-            assert_equal(response_carrier["cursor_sys_hash"], 0)
-            assert_equal(response_carrier["cursor_btc_hash"], 0)
-            self.admit_chainlock_artifact(
-                prefix["anchor"], anchor_height, anchor_hash,
-                "pq-audit-%s-anchor" % label)
+            Path(response_authorizer_path).write_bytes(
+                response["artifact"]["certificate"])
+            response_carrier_height = response_height + BTCC_NEVM_LAG
+            self.mine_pq_to_height(response_carrier_height)
+            response_carrier_hash = node.getblockhash(
+                response_carrier_height)
+            _, response_receipt = self.read_btcc_receipt(
+                response_carrier_hash)
+            assert_equal(response_receipt["version"], 1)
+            assert_equal(response_receipt["target_height"], response_height)
+            assert_equal(
+                response_receipt["target_hash"],
+                int(response["target_hash"], 16))
+            assert_equal(
+                response_receipt["logical_hash"],
+                response["artifact"]["logical_hash"])
+            assert_equal(response_receipt["cursor_height"], response_height)
+            assert_equal(
+                response_receipt["cursor_sys_hash"],
+                int(response["target_hash"], 16))
+            assert_equal(
+                response_receipt["cursor_btc_hash"],
+                int(self.payment_btcprev(response_height), 16))
+
+            anchor = build_and_admit_stage(
+                "anchor", anchor_height, response_authorizer_path,
+                response_carrier_hash)
             return {
-                "prefix": prefix,
-                "fixture_args": fixture_args,
-                "response_predecessor_hash": response_predecessor_hash,
-                "response_hash": response_hash,
-                "anchor_predecessor_hash": anchor_predecessor_hash,
-                "anchor_hash": anchor_hash,
+                "prefix": {
+                    "response": response["artifact"],
+                    "anchor": anchor["artifact"],
+                },
+                "fixture_args": anchor["fixture_args"],
+                "response_predecessor_hash": response["predecessor_hash"],
+                "response_hash": response["target_hash"],
+                "response_carrier_hash": response_carrier_hash,
+                "anchor_predecessor_hash": anchor["predecessor_hash"],
+                "anchor_hash": anchor["target_hash"],
             }
 
         prep = build_and_admit_prefix(
@@ -1688,7 +1701,7 @@ class PQChainLocksTest(SyscoinTestFramework):
             PAYMENT_AUDIT_PREP_RESPONSE_HEIGHT,
             PAYMENT_AUDIT_PREP_ANCHOR_HEIGHT,
             original_authorizer_path,
-            None,
+            FIRST_ELIGIBLE_TARGET_HEIGHT + BTCC_NEVM_LAG,
         )
         Path(transition_authorizer_path).write_bytes(
             prep["prefix"]["anchor"]["certificate"])
@@ -1734,6 +1747,7 @@ class PQChainLocksTest(SyscoinTestFramework):
         prefix_fixture_args = current["fixture_args"]
         response_predecessor_hash = current["response_predecessor_hash"]
         response_hash = current["response_hash"]
+        response_carrier_hash = current["response_carrier_hash"]
         anchor_predecessor_hash = current["anchor_predecessor_hash"]
         anchor_hash = current["anchor_hash"]
 
@@ -1813,6 +1827,7 @@ class PQChainLocksTest(SyscoinTestFramework):
             seed_carrier_hash,
             seed_receipt.hex(),
             transition_carrier_hash,
+            response_carrier_hash,
             *base_hashes,
             *snapshot_hashes,
             transition_authorizer_path,
@@ -1822,10 +1837,10 @@ class PQChainLocksTest(SyscoinTestFramework):
             timeout=7200 * self.options.timeout_factor,
         )
         bundle = self.read_payment_audit_bundle(bundle_path)
-        seal_authorizer_path = os.path.join(
-            self.options.tmpdir, "pq-payment-audit-seal-authorizer.dat")
-        Path(seal_authorizer_path).write_bytes(
-            bundle["seal"]["certificate"])
+        post_authorizer_path = os.path.join(
+            self.options.tmpdir, "pq-payment-audit-post-authorizer.dat")
+        Path(post_authorizer_path).write_bytes(
+            prefix["anchor"]["certificate"])
         assert_equal(
             bundle["response"]["logical_hash"],
             prefix["response"]["logical_hash"],
@@ -1890,7 +1905,7 @@ class PQChainLocksTest(SyscoinTestFramework):
             "seed_receipt": seed_receipt,
             "base_hashes": base_hashes,
             "snapshot_hashes": snapshot_hashes,
-            "seal_authorizer_path": seal_authorizer_path,
+            "post_authorizer_path": post_authorizer_path,
         }
 
     def admit_chainlock_artifact(self, artifact, height, block_hash, marker):
@@ -2062,7 +2077,7 @@ class PQChainLocksTest(SyscoinTestFramework):
             "%064x" % bundle["probation_state_hash"],
             *context["base_hashes"],
             *context["snapshot_hashes"],
-            context["seal_authorizer_path"],
+            context["post_authorizer_path"],
         ]
         subprocess.run(
             command, check=True, capture_output=True, text=True,
@@ -2296,9 +2311,9 @@ class PQChainLocksTest(SyscoinTestFramework):
             node.getblockheader(side_target)["height"],
             CURRENT_CATCHUP_TARGET_HEIGHT,
         )
-        # Restart below both versions of the fixed receipt carrier. The
-        # durable authorizer is then imported before either branch reconnects
-        # height 2325, so neither valid carrier is mistaken for missing proof.
+        # Restart below both versions of the target while retaining their
+        # shared receipt carrier. The durable authorizer is imported before
+        # either branch reconnects the first normally authorized target.
         node.invalidateblock(canonical_target)
         node.invalidateblock(side_target)
         assert_equal(node.getblockcount(), CURRENT_CATCHUP_TARGET_HEIGHT - 1)
@@ -2397,7 +2412,6 @@ class PQChainLocksTest(SyscoinTestFramework):
         assert_equal(node.getblockcount(), CURRENT_CATCHUP_TIP_HEIGHT)
         assert node.getblock(side_target)["confirmations"] > 0
         assert_equal(node.getblock(canonical_target)["confirmations"], -1)
-        return catchup["certificate"]
 
     def run_test(self):
         preparation_state, activation_predecessor = self.configure_private_migration()
@@ -2408,9 +2422,8 @@ class PQChainLocksTest(SyscoinTestFramework):
         self.test_no_winner_survives_restart(preparation_state)
         authorizer = self.test_full_dimension_collection(
             activation_predecessor)
-        catchup_authorizer = self.test_current_catchup_side_branch_reorg(
-            authorizer)
-        self.test_payment_audit_receipt(catchup_authorizer)
+        self.test_current_catchup_side_branch_reorg(authorizer)
+        self.test_payment_audit_receipt(authorizer)
 
 
 if __name__ == "__main__":

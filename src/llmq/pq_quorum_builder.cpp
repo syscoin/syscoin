@@ -115,11 +115,6 @@ void SetError(QuorumBuildError* error, QuorumBuildError value)
     if (error != nullptr) *error = value;
 }
 
-void WriteDomain(CHashWriter& writer, std::string_view domain)
-{
-    writer.write(AsBytes(Span{domain.data(), domain.size()}));
-}
-
 std::optional<uint256> GetRecoveryRosterModifier(
     const uint256& genesis_hash,
     const uint256& entropy_commitment,
@@ -177,11 +172,6 @@ bool PrepareOperatorStateLookup(
         return false;
     }
     return true;
-}
-
-void SetBit(QuorumBitmap& bitmap, std::size_t member)
-{
-    bitmap[member / 8] |= static_cast<uint8_t>(uint8_t{1} << (member % 8));
 }
 
 template <typename ResolveCandidate>
@@ -702,7 +692,7 @@ std::unique_ptr<FrozenQuorumRoster> BuildFrozenQuorumRosterWithModifier(
         }
         member.eligible = true;
         member.child_root = std::move((*selected)[slot].child_root);
-        SetBit(roster->descriptor.valid_members, slot);
+        SetQuorumMember(roster->descriptor.valid_members, slot);
     }
 
     roster->descriptor.valid_count =
@@ -1098,7 +1088,7 @@ std::unique_ptr<FrozenQuorumRoster> BuildRecoveryFrozenQuorumRoster(
             continue;
         }
         member.eligible = true;
-        SetBit(descriptor.valid_members, member_index);
+        SetQuorumMember(descriptor.valid_members, member_index);
     }
 
     descriptor.valid_count = static_cast<uint16_t>(

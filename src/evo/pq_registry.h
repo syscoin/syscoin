@@ -321,10 +321,13 @@ public:
     PQRegistryReadView() = default;
 
     [[nodiscard]] bool IsValid() const noexcept;
+    [[nodiscard]] bool IsStructurallyValid() const noexcept;
     [[nodiscard]] int32_t Height() const noexcept;
     [[nodiscard]] uint256 BlockHash() const noexcept;
     [[nodiscard]] uint256 PreviousBlockHash() const noexcept;
     [[nodiscard]] uint256 ConsensusStateRoot() const noexcept;
+    [[nodiscard]] std::optional<uint256> RecomputeConsensusStateRoot(
+        const uint256& genesis_hash) const;
     [[nodiscard]] std::size_t OperatorCount() const noexcept;
     [[nodiscard]] const OperatorKeyState* FindOperator(
         const uint256& pro_tx_hash) const noexcept;

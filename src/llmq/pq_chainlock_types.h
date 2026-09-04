@@ -11,6 +11,7 @@
 #include <uint256.h>
 
 #include <array>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <ios>
@@ -20,6 +21,24 @@
 #include <vector>
 
 namespace llmq::pq {
+
+inline void WriteDomain(HashWriter& writer, std::string_view domain)
+{
+    // Consensus transcript tags are raw bytes, without CompactSize framing.
+    writer.write(AsBytes(Span{domain.data(), domain.size()}));
+}
+
+template <typename... Args>
+uint256 TaggedHash(std::string_view domain,
+                   const uint256& genesis_hash,
+                   const Args&... args)
+{
+    CHashWriter writer{SER_GETHASH, 0};
+    WriteDomain(writer, domain);
+    writer << genesis_hash;
+    (writer << ... << args);
+    return writer.GetHash();
+}
 
 inline constexpr uint16_t GLOBAL_KEY_RECORD_VERSION{1};
 inline constexpr uint16_t CHILD_KEY_TREE_COMMITMENT_VERSION{1};
@@ -110,6 +129,43 @@ using GlobalSignature = std::array<uint8_t, GLOBAL_SIGNATURE_SIZE>;
 using ChildPublicKey = std::array<uint8_t, CHILD_PUBLIC_KEY_SIZE>;
 using ChildSignature = std::array<uint8_t, CHILD_SIGNATURE_SIZE>;
 using QuorumBitmap = std::array<uint8_t, BITMAP_SIZE>;
+
+[[nodiscard]] inline bool IsQuorumMemberSet(
+    const QuorumBitmap& bitmap, std::size_t member) noexcept
+{
+    return member < QUORUM_SIZE &&
+           (bitmap[member / 8] &
+            static_cast<uint8_t>(uint8_t{1} << (member % 8))) != 0;
+}
+
+inline void SetQuorumMember(QuorumBitmap& bitmap,
+                            std::size_t member) noexcept
+{
+    assert(member < QUORUM_SIZE);
+    if (member >= QUORUM_SIZE) return;
+    bitmap[member / 8] |=
+        static_cast<uint8_t>(uint8_t{1} << (member % 8));
+}
+
+inline void ClearQuorumMember(QuorumBitmap& bitmap,
+                              std::size_t member) noexcept
+{
+    assert(member < QUORUM_SIZE);
+    if (member >= QUORUM_SIZE) return;
+    bitmap[member / 8] &=
+        static_cast<uint8_t>(~(uint8_t{1} << (member % 8)));
+}
+
+[[nodiscard]] inline bool IsQuorumBitmapSubset(
+    const QuorumBitmap& subset, const QuorumBitmap& superset) noexcept
+{
+    for (std::size_t byte{0}; byte < BITMAP_SIZE; ++byte) {
+        if ((subset[byte] & static_cast<uint8_t>(~superset[byte])) != 0) {
+            return false;
+        }
+    }
+    return true;
+}
 
 /** One fixed 2^16-epoch commitment authorized by the global operator key. */
 struct ChildKeyTreeCommitment {
@@ -511,56 +567,6 @@ struct QuorumDescriptor {
     friend bool operator==(const QuorumDescriptor&, const QuorumDescriptor&) = default;
 };
 
-struct ChainLockShareTranscript {
-    uint16_t chainlock_version{CHAINLOCK_VERSION};
-    uint16_t child_profile{CHILD_SCHEDULED_WOTS_SHAKE_128_V1};
-    int32_t height{-1};
-    uint256 block_hash;
-    int32_t previous_chainlock_height{-1};
-    uint256 previous_chainlock_hash;
-    uint256 quorum_context_hash;
-    RosterAuthorizationTransitionKind roster_transition{
-        RosterAuthorizationTransitionKind::INITIALIZE};
-    RosterBeaconWindow roster_beacons;
-    uint256 roster_authorization_state_hash;
-    RosterAuthorizationBaseIdentity roster_authorization_base;
-    uint32_t quorum_epoch{0};
-    uint256 quorum_base_hash;
-    uint16_t member_index{std::numeric_limits<uint16_t>::max()};
-    uint256 member_pro_tx_hash;
-    BTCCursor previous_btcc_cursor;
-    BTCCursor accepted_btcc_cursor;
-    BTCCAdvance btcc_advance{BTCCAdvance::KEEP};
-    BTCCReceiptState btcc_receipt_state;
-    PaymentAuditReceiptState payment_audit_receipt_state;
-    uint256 payment_probation_state_hash;
-
-    SERIALIZE_METHODS(ChainLockShareTranscript, obj)
-    {
-        uint8_t btcc_advance{static_cast<uint8_t>(obj.btcc_advance)};
-        uint8_t roster_transition{
-            static_cast<uint8_t>(obj.roster_transition)};
-        READWRITE(obj.chainlock_version, obj.child_profile, obj.height, obj.block_hash,
-                  obj.previous_chainlock_height, obj.previous_chainlock_hash,
-                  obj.quorum_context_hash, roster_transition,
-                  obj.roster_beacons, obj.roster_authorization_state_hash,
-                  obj.roster_authorization_base,
-                  obj.quorum_epoch, obj.quorum_base_hash,
-                  obj.member_index, obj.member_pro_tx_hash,
-                  obj.previous_btcc_cursor, obj.accepted_btcc_cursor,
-                  btcc_advance, obj.btcc_receipt_state,
-                  obj.payment_audit_receipt_state,
-                  obj.payment_probation_state_hash);
-        SER_READ(obj, obj.btcc_advance = static_cast<BTCCAdvance>(btcc_advance));
-        SER_READ(obj, obj.roster_transition =
-                          static_cast<RosterAuthorizationTransitionKind>(
-                              roster_transition));
-    }
-
-    [[nodiscard]] bool IsStructurallyValid() const;
-    friend bool operator==(const ChainLockShareTranscript&, const ChainLockShareTranscript&) = default;
-};
-
 struct ChainLockStatement {
     static constexpr std::size_t WIRE_SIZE{
         2 * sizeof(uint16_t) + 2 * sizeof(int32_t) + 3 * 32 +
@@ -613,14 +619,34 @@ struct ChainLockStatement {
     friend bool operator==(const ChainLockStatement&, const ChainLockStatement&) = default;
 };
 
+struct ChainLockShareTranscript {
+    static constexpr std::size_t WIRE_SIZE{
+        ChainLockStatement::WIRE_SIZE + sizeof(uint32_t) +
+        sizeof(uint16_t) + 2 * 32};
+
+    ChainLockStatement statement;
+    uint32_t quorum_epoch{0};
+    uint256 quorum_base_hash;
+    uint16_t member_index{std::numeric_limits<uint16_t>::max()};
+    uint256 member_pro_tx_hash;
+
+    SERIALIZE_METHODS(ChainLockShareTranscript, obj)
+    {
+        READWRITE(obj.statement, obj.quorum_epoch, obj.quorum_base_hash,
+                  obj.member_index, obj.member_pro_tx_hash);
+    }
+
+    [[nodiscard]] bool IsStructurallyValid() const;
+    friend bool operator==(const ChainLockShareTranscript&, const ChainLockShareTranscript&) = default;
+};
+
 /**
  * One member's fixed-width ChainLock vote. Shares are restricted to
  * authenticated quorum links; the final CLSIG remains the public object.
  */
 struct ChainLockShare {
     static constexpr std::size_t WIRE_SIZE{
-        ChainLockStatement::WIRE_SIZE + sizeof(uint32_t) +
-        sizeof(uint16_t) + 2 * 32 +
+        ChainLockShareTranscript::WIRE_SIZE +
         AuthenticatedChildSignature::WIRE_SIZE};
     static_assert(WIRE_SIZE == 2'614);
 
@@ -636,7 +662,10 @@ struct ChainLockShare {
     }
 
     [[nodiscard]] bool IsStructurallyValid() const;
-    [[nodiscard]] ChainLockStatement GetStatement() const;
+    [[nodiscard]] const ChainLockStatement& GetStatement() const noexcept
+    {
+        return transcript.statement;
+    }
     [[nodiscard]] uint256 GetId(const uint256& genesis_hash) const;
     friend bool operator==(const ChainLockShare&, const ChainLockShare&) = default;
 };
@@ -784,6 +813,7 @@ FinalChainLock ReadFinalChainLock(Stream& stream, std::size_t payload_size)
 }
 
 static_assert(FinalChainLockSerializedSize() < MAX_CHAINLOCK_SIZE);
+static_assert(ChainLockShareTranscript::WIRE_SIZE == 1'366);
 static_assert(ChainLockShare::WIRE_SIZE == 2'614);
 static_assert(CompactChainLockShare::WIRE_SIZE == 1'282);
 static_assert(FinalChainLockSerializedSize() == 1'001'147);

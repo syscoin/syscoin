@@ -207,9 +207,6 @@ BuildPaymentAuditEpochSchedule(const PaymentAuditScheduleConfig& config,
 BuildPaymentAuditCarrierWindow(const PaymentAuditScheduleConfig& config,
                                uint32_t epoch) noexcept;
 
-[[nodiscard]] bool IsPaymentAuditCarrierHeight(
-    const PaymentAuditScheduleConfig& config, int32_t height) noexcept;
-
 /** Return the epoch owning this canonical null-or-audit carrier slot. */
 [[nodiscard]] std::optional<uint32_t> PaymentAuditReceiptSlotEpoch(
     const PaymentAuditScheduleConfig& config, int32_t height) noexcept;

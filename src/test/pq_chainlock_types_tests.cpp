@@ -4,10 +4,12 @@
 
 #include <llmq/pq_chainlock_types.h>
 
+#include <hash.h>
 #include <streams.h>
 #include <test/util/setup_common.h>
 #include <uint256.h>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -89,27 +91,12 @@ ChainLockStatement ValidStatement()
 
 ChainLockShareTranscript ValidTranscript()
 {
-    const auto statement{ValidStatement()};
     ChainLockShareTranscript transcript;
-    transcript.height = statement.height;
-    transcript.block_hash = statement.block_hash;
-    transcript.previous_chainlock_height =
-        statement.previous_chainlock_height;
-    transcript.previous_chainlock_hash =
-        statement.previous_chainlock_hash;
-    transcript.quorum_context_hash = statement.quorum_context_hash;
-    transcript.roster_transition = statement.roster_transition;
-    transcript.roster_beacons = statement.roster_beacons;
-    transcript.roster_authorization_state_hash =
-        statement.roster_authorization_state_hash;
-    transcript.roster_authorization_base =
-        statement.roster_authorization_base;
+    transcript.statement = ValidStatement();
     transcript.quorum_epoch = 5;
     transcript.quorum_base_hash = NonNullHash(9);
     transcript.member_index = 10;
     transcript.member_pro_tx_hash = NonNullHash(10);
-    transcript.payment_probation_state_hash =
-        statement.payment_probation_state_hash;
     return transcript;
 }
 
@@ -146,6 +133,27 @@ T RoundTrip(const T& value)
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(pq_chainlock_types_tests, BasicTestingSetup)
+
+BOOST_AUTO_TEST_CASE(quorum_bitmap_helpers_are_bounded)
+{
+    QuorumBitmap bitmap{};
+    SetQuorumMember(bitmap, 0);
+    SetQuorumMember(bitmap, QUORUM_SIZE - 1);
+    BOOST_CHECK(IsQuorumMemberSet(bitmap, 0));
+    BOOST_CHECK(IsQuorumMemberSet(bitmap, QUORUM_SIZE - 1));
+    BOOST_CHECK(!IsQuorumMemberSet(bitmap, 1));
+    BOOST_CHECK(!IsQuorumMemberSet(bitmap, QUORUM_SIZE));
+
+    QuorumBitmap superset{bitmap};
+    SetQuorumMember(superset, 1);
+    BOOST_CHECK(IsQuorumBitmapSubset(bitmap, superset));
+    BOOST_CHECK(!IsQuorumBitmapSubset(superset, bitmap));
+
+    ClearQuorumMember(bitmap, 0);
+    BOOST_CHECK(!IsQuorumMemberSet(bitmap, 0));
+    BOOST_CHECK(IsQuorumMemberSet(bitmap, QUORUM_SIZE - 1));
+    BOOST_CHECK_EQUAL(CountSet(bitmap), 1U);
+}
 
 BOOST_AUTO_TEST_CASE(child_key_tree_id_is_canonical_and_domain_separated)
 {
@@ -273,13 +281,13 @@ BOOST_AUTO_TEST_CASE(initialization_alone_has_no_authorization_base)
     BOOST_CHECK(!statement.IsStructurallyValid());
 
     auto transcript{ValidTranscript()};
-    transcript.roster_transition =
+    transcript.statement.roster_transition =
         RosterAuthorizationTransitionKind::INITIALIZE;
-    transcript.roster_authorization_base = {};
+    transcript.statement.roster_authorization_base = {};
     BOOST_CHECK(transcript.IsStructurallyValid());
-    transcript.roster_authorization_base = {
-        transcript.previous_chainlock_height,
-        transcript.previous_chainlock_hash,
+    transcript.statement.roster_authorization_base = {
+        transcript.statement.previous_chainlock_height,
+        transcript.statement.previous_chainlock_hash,
         NonNullHash(12)};
     BOOST_CHECK(!transcript.IsStructurallyValid());
 
@@ -297,11 +305,60 @@ BOOST_AUTO_TEST_CASE(initialization_alone_has_no_authorization_base)
         BOOST_CHECK(!statement.IsStructurallyValid());
 
         auto transcript{ValidTranscript()};
-        transcript.roster_transition = kind;
+        transcript.statement.roster_transition = kind;
         BOOST_CHECK(transcript.IsStructurallyValid());
-        transcript.roster_authorization_base = {};
+        transcript.statement.roster_authorization_base = {};
         BOOST_CHECK(!transcript.IsStructurallyValid());
     }
+}
+
+BOOST_AUTO_TEST_CASE(chainlock_share_exact_geometry_and_roundtrip)
+{
+    ChainLockShare share;
+    share.transcript = ValidTranscript();
+    share.authenticated_signature.key_proof.public_key[0] = 1;
+    share.authenticated_signature.signature[0] = 1;
+    BOOST_REQUIRE(share.IsStructurallyValid());
+    BOOST_CHECK_EQUAL(&share.GetStatement(), &share.transcript.statement);
+
+    DataStream statement_stream;
+    statement_stream << share.GetStatement();
+    DataStream share_stream;
+    share_stream << share;
+    BOOST_CHECK_EQUAL(statement_stream.size(), ChainLockStatement::WIRE_SIZE);
+    BOOST_CHECK_EQUAL(share_stream.size(), ChainLockShare::WIRE_SIZE);
+    BOOST_REQUIRE_GE(share_stream.size(), statement_stream.size());
+    BOOST_CHECK(std::equal(statement_stream.begin(), statement_stream.end(),
+                           share_stream.begin()));
+
+    ChainLockShare decoded;
+    share_stream >> decoded;
+    BOOST_CHECK(share_stream.empty());
+    BOOST_CHECK(decoded == share);
+    BOOST_CHECK(decoded.GetStatement() == share.GetStatement());
+
+    share.transcript.statement.block_hash.SetNull();
+    BOOST_REQUIRE(!share.IsStructurallyValid());
+    DataStream malformed_stream;
+    malformed_stream << share;
+    BOOST_CHECK_THROW(malformed_stream >> decoded, std::ios_base::failure);
+}
+
+BOOST_AUTO_TEST_CASE(chainlock_share_transcript_canonical_vector)
+{
+    const ChainLockShareTranscript transcript{ValidTranscript()};
+    const uint256 genesis_hash{NonNullHash(100)};
+
+    DataStream encoded;
+    encoded << transcript;
+    BOOST_REQUIRE_EQUAL(encoded.size(), ChainLockShareTranscript::WIRE_SIZE);
+
+    BOOST_CHECK_EQUAL(
+        Hash(encoded).ToString(),
+        "0f6fb29cd0c06b13e87714fcd29ab51aa9e0ff9be54b430fed26d08cd2f357e9");
+    BOOST_CHECK_EQUAL(
+        GetChainLockShareHash(genesis_hash, transcript).ToString(),
+        "e52748a867df8b19ca58f53d2422853df2e19d2b6c1a8329d19e3d5f1aeee274");
 }
 
 BOOST_AUTO_TEST_CASE(final_chainlock_exact_geometry_and_roundtrip)
@@ -454,25 +511,12 @@ BOOST_AUTO_TEST_CASE(logical_and_witness_ids_are_separated)
 
 BOOST_AUTO_TEST_CASE(share_hash_binds_member_epoch_btcc_and_genesis)
 {
-    const ChainLockStatement statement_template{ValidStatement()};
     ChainLockShareTranscript transcript;
-    transcript.height = 1445;
-    transcript.block_hash = NonNullHash(1);
-    transcript.previous_chainlock_height = 1440;
-    transcript.previous_chainlock_hash = NonNullHash(2);
-    transcript.quorum_context_hash = NonNullHash(3);
+    transcript.statement = ValidStatement();
     transcript.quorum_epoch = 5;
     transcript.quorum_base_hash = NonNullHash(4);
     transcript.member_index = 10;
     transcript.member_pro_tx_hash = NonNullHash(5);
-    transcript.payment_probation_state_hash = NonNullHash(6);
-    transcript.roster_transition =
-        statement_template.roster_transition;
-    transcript.roster_authorization_base =
-        statement_template.roster_authorization_base;
-    transcript.roster_beacons = statement_template.roster_beacons;
-    transcript.roster_authorization_state_hash =
-        statement_template.roster_authorization_state_hash;
     BOOST_REQUIRE(transcript.IsStructurallyValid());
 
     const uint256 genesis = NonNullHash(100);
@@ -484,7 +528,7 @@ BOOST_AUTO_TEST_CASE(share_hash_binds_member_epoch_btcc_and_genesis)
     changed.quorum_epoch++;
     BOOST_CHECK(baseline != GetChainLockShareHash(genesis, changed));
     changed = transcript;
-    changed.btcc_advance = BTCCAdvance::ADVANCE;
+    changed.statement.btcc_advance = BTCCAdvance::ADVANCE;
     BOOST_CHECK(baseline != GetChainLockShareHash(genesis, changed));
     BOOST_CHECK(!changed.IsStructurallyValid());
 

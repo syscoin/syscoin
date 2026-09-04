@@ -672,17 +672,11 @@ public:
     [[nodiscard]] std::shared_ptr<const FinalChainLock>
     GetServableByLogicalId(const uint256& logical_id) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
-    /** Oldest-to-newest bounded snapshot of fully verified winners. */
-    [[nodiscard]] std::vector<std::shared_ptr<const FinalChainLock>> GetRecent() const
-        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
-
     [[nodiscard]] std::size_t RecentSizeForTesting() const
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     [[nodiscard]] std::size_t SeenLogicalSizeForTesting() const
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     [[nodiscard]] std::size_t SeenWitnessSizeForTesting() const
-        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
-    [[nodiscard]] std::size_t RejectedWitnessSizeForTesting() const
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     [[nodiscard]] std::size_t AuthorizationBaseSizeForTesting() const
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);

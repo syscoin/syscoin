@@ -315,6 +315,14 @@ bool ValidateFixture(const QuorumSnapshotFixture& fixture,
         return false;
     }
 
+    const auto auxiliary_snapshot_height{
+        fixture.snapshots.size() == required_points + 1 &&
+                last_epoch < std::numeric_limits<uint32_t>::max()
+            ? RegistrationCutoffHeight(
+                  expected_build_config.schedule, last_epoch + 1,
+                  expected_build_config.roster_snapshot_lag_blocks)
+            : std::optional<int32_t>{}};
+
     std::set<int32_t> required_snapshot_heights;
     for (uint32_t epoch{first_epoch};; ++epoch) {
         const auto base_height{
@@ -342,8 +350,9 @@ bool ValidateFixture(const QuorumSnapshotFixture& fixture,
     for (const auto& entry : snapshots) {
         const int32_t height{entry.first};
         if (required_snapshot_heights.contains(height)) continue;
-        if (fixture.snapshots.size() != required_points + 1 ||
-            height > fixture.branch_anchor.height) {
+        if (!auxiliary_snapshot_height ||
+            height != *auxiliary_snapshot_height ||
+            height > fixture.max_active_tip_height) {
             SetError(error,
                      "PQ ChainLock fixture auxiliary snapshot is invalid");
             return false;

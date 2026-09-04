@@ -210,10 +210,6 @@ struct OperatorKeyState {
                            const OperatorKeyState&) = default;
 };
 
-[[nodiscard]] std::optional<uint256> GetOperatorKeyStateHash(
-    const uint256& genesis_hash,
-    const OperatorKeyState& state);
-
 [[nodiscard]] std::optional<uint256> GetPQKeyConsensusStateHash(
     const uint256& genesis_hash,
     std::span<const OperatorKeyState> operator_states);

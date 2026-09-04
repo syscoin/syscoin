@@ -157,8 +157,6 @@ public:
     [[nodiscard]] std::optional<PaymentAuditStagingRow> GetOpenRow(
         uint32_t epoch, uint8_t row_index) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
-    [[nodiscard]] std::vector<PaymentAuditStagingRow> GetOpenRows(
-        uint32_t epoch) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     [[nodiscard]] std::optional<PaymentAuditOpenRowMetadata>
     GetOpenRowMetadata(uint32_t epoch, uint8_t row_index) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);

@@ -19,6 +19,10 @@
 #include <node/context.h>
 #include <rpc/server_util.h>
 #include <index/txindex.h>
+
+// SYSCOIN: zero-copy PQ registry RPC views.
+#include <span>
+
 UniValue BuildDMNListEntry(
     const node::NodeContext& node,
     const CDeterministicMN& dmn,
@@ -196,7 +200,7 @@ static RPCHelpMan protx_operator_key_info()
             const uint256 pro_tx_hash =
                 ParseHashV(request.params[0], "proTxHash");
 
-            llmq::pq::PQRegistrySnapshot snapshot;
+            llmq::pq::PQRegistryReadView snapshot;
             {
                 LOCK(cs_main);
                 const CBlockIndex* tip = node.chainman->ActiveChain().Tip();
@@ -205,7 +209,7 @@ static RPCHelpMan protx_operator_key_info()
                                        "Active chain tip is unavailable");
                 }
                 std::string error;
-                if (!deterministicMNManager->GetPQRegistrySnapshot(
+                if (!deterministicMNManager->GetPQRegistryReadView(
                         tip, snapshot, error)) {
                     throw JSONRPCError(
                         RPC_MISC_ERROR,
@@ -254,7 +258,8 @@ static RPCHelpMan protx_migration_info()
                 EnsureAnyNodeContext(request.context);
 
             CDeterministicMNList mn_list;
-            llmq::pq::PQRegistrySnapshot pq_snapshot;
+            llmq::pq::PQRegistryReadView pq_snapshot;
+            bool pq_registry_enabled{false};
             int tip_height{-1};
             uint256 tip_block_hash;
             {
@@ -279,8 +284,9 @@ static RPCHelpMan protx_migration_info()
                                        "Invalid PQ registry configuration");
                 }
                 if (deployment == llmq::pq::PQRegistryDeploymentResult::VALID) {
+                    pq_registry_enabled = true;
                     std::string error;
-                    if (!deterministicMNManager->GetPQRegistrySnapshot(
+                    if (!deterministicMNManager->GetPQRegistryReadView(
                             tip, pq_snapshot, error)) {
                         throw JSONRPCError(
                             RPC_INTERNAL_ERROR,
@@ -291,8 +297,11 @@ static RPCHelpMan protx_migration_info()
             }
 
             const uint256 genesis_hash = Params().GetConsensus().hashGenesisBlock;
-            const auto pq_root = pq_snapshot.RecomputeConsensusStateRoot(
-                genesis_hash);
+            const auto pq_root{pq_registry_enabled
+                ? pq_snapshot.RecomputeConsensusStateRoot(genesis_hash)
+                : llmq::pq::GetCanonicalPQKeyConsensusStateHash(
+                      genesis_hash,
+                      std::span<const llmq::pq::OperatorKeyState>{})};
             if (!pq_root) {
                 throw JSONRPCError(RPC_INTERNAL_ERROR,
                                    "Unable to derive PQ registry state root");
