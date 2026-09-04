@@ -662,8 +662,20 @@ static std::shared_ptr<CBlock> BuildAuxpowWrapper(
 
 struct NexusAuxpowWrapperSetup : TestChain100Setup {
   NexusAuxpowWrapperSetup()
-      : TestChain100Setup(ChainType::REGTEST,
-                          {"-dip3params=101:101"}) {}
+      : TestChain100Setup(ChainType::REGTEST),
+        consensus{const_cast<Consensus::Params&>(Params().GetConsensus())},
+        original_nexus_start{consensus.nNexusStartBlock}
+  {
+    consensus.nNexusStartBlock = 101;
+  }
+
+  ~NexusAuxpowWrapperSetup()
+  {
+    consensus.nNexusStartBlock = original_nexus_start;
+  }
+
+  Consensus::Params& consensus;
+  const int original_nexus_start;
 };
 
 class AuxpowConnectedObserver final : public CValidationInterface {
