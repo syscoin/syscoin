@@ -766,6 +766,14 @@ CPU and memory exhaustion. The remaining independent checks are parallelized
 only after the preflight succeeds. Relay occurs only after complete
 verification.
 
+The successful-member cache occupies one entry per public key, scheduled leaf,
+and message, retaining the first successfully verified exact signature hash
+until that entry is evicted. Alternate signatures always undergo verification
+and never replace or refresh an occupied entry, even when valid. Invalid
+signatures are never cached. This prevents a Byzantine signer's valid signature
+variants from consuming additional slots for the same member statement while
+preserving cached honest checks from an otherwise invalid certificate.
+
 The threshold is the standard `2f+1` for `n=400`, `f=133`. Within a common
 roster, two 267-member sets intersect in at least 134 slots, which is greater
 than `f`; conflicting thresholds therefore require at least one non-Byzantine

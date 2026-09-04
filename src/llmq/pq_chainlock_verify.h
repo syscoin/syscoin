@@ -390,6 +390,7 @@ private:
     scheduled_wots::Message m_message;
     scheduled_wots::Signature m_signature;
     uint256 m_success_cache_key;
+    uint256 m_success_cache_signature_hash;
     ScheduledWOTSSuccessCache* m_success_cache{nullptr};
     std::atomic<bool>* m_accumulated_result{nullptr};
 

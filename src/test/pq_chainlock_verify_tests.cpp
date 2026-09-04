@@ -12,10 +12,12 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <future>
 #include <limits>
 #include <memory>
 #include <optional>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -1059,6 +1061,137 @@ BOOST_AUTO_TEST_CASE(success_cache_is_exact_bounded_and_failure_preserving)
                           std::numeric_limits<std::size_t>::max()),
         std::invalid_argument);
     memory_cleanse(seed.data(), seed.size());
+}
+
+BOOST_AUTO_TEST_CASE(success_cache_pins_first_valid_signature_per_statement)
+{
+    constexpr std::size_t CACHE_CAPACITY{2};
+    constexpr std::size_t VARIANT_COUNT{6};
+    scheduled_wots::KeyGenerationSeed seed{};
+    for (std::size_t i{0}; i < seed.size(); ++i) seed[i] = 37 + i;
+    auto secret_key{scheduled_wots::GenerateSecretKey(seed)};
+    BOOST_REQUIRE(secret_key);
+    scheduled_wots::PublicKey public_key{};
+    BOOST_REQUIRE(secret_key->GetPublicKey(public_key));
+    scheduled_wots::Message message{};
+    message[0] = 19;
+    std::array<scheduled_wots::Signature, CACHE_CAPACITY + 1> originals;
+    for (std::size_t leaf{0}; leaf < originals.size(); ++leaf) {
+        BOOST_REQUIRE(scheduled_wots::SignDeterministic(
+            *secret_key, leaf, message, originals[leaf]));
+    }
+
+    std::array<scheduled_wots::Signature, VARIANT_COUNT> variants;
+    for (std::size_t i{0}; i < variants.size(); ++i) {
+        // SK.prf changes the randomizer without changing the public tree, so
+        // these are valid Byzantine encodings of one verification statement.
+        seed[scheduled_wots::N] ^= static_cast<uint8_t>(i + 1);
+        auto variant_key{scheduled_wots::GenerateSecretKey(seed)};
+        seed[scheduled_wots::N] ^= static_cast<uint8_t>(i + 1);
+        BOOST_REQUIRE(variant_key);
+        scheduled_wots::PublicKey variant_public_key{};
+        BOOST_REQUIRE(variant_key->GetPublicKey(variant_public_key));
+        BOOST_REQUIRE(variant_public_key == public_key);
+        BOOST_REQUIRE(scheduled_wots::SignDeterministic(
+            *variant_key, 0, message, variants[i]));
+        BOOST_REQUIRE(variants[i] != originals[0]);
+        for (std::size_t previous{0}; previous < i; ++previous) {
+            BOOST_REQUIRE(variants[i] != variants[previous]);
+        }
+    }
+    memory_cleanse(seed.data(), seed.size());
+
+    const auto check_one = [&](ChainLockVerifier& verifier, uint8_t leaf,
+                               const scheduled_wots::Signature& signature,
+                               bool expected_valid, uint64_t expected_misses) {
+        const uint64_t before{verifier.GetSuccessCacheMissCountForTesting()};
+        std::vector<ScheduledWOTSCheck> checks;
+        checks.emplace_back(public_key, leaf, message, signature);
+        BOOST_CHECK_EQUAL(verifier.VerifyChecks(std::move(checks)),
+                          expected_valid);
+        BOOST_CHECK(checks.empty());
+        BOOST_CHECK_EQUAL(
+            verifier.GetSuccessCacheMissCountForTesting() - before,
+            expected_misses);
+    };
+    const auto variant_batch = [&] {
+        std::vector<ScheduledWOTSCheck> checks;
+        for (const auto& signature : variants) {
+            checks.emplace_back(public_key, 0, message, signature);
+        }
+        return checks;
+    };
+
+    for (const std::size_t worker_threads : {0U, 2U}) {
+        BOOST_TEST_CONTEXT("worker_threads=" << worker_threads) {
+            ChainLockVerifier verifier{worker_threads, /*batch_size=*/1,
+                                       CACHE_CAPACITY};
+            check_one(verifier, 0, originals[0], true, 1);
+            check_one(verifier, 1, originals[1], true, 1);
+
+            // More variants than cache slots and preflight jobs exercise the
+            // queue without letting alternate successes evict either base.
+            for (int retry{0}; retry < 2; ++retry) {
+                const uint64_t before{
+                    verifier.GetSuccessCacheMissCountForTesting()};
+                BOOST_CHECK(verifier.VerifyChecks(variant_batch()));
+                BOOST_CHECK_EQUAL(
+                    verifier.GetSuccessCacheMissCountForTesting() - before,
+                    VARIANT_COUNT);
+                check_one(verifier, 0, originals[0], true, 0);
+                check_one(verifier, 1, originals[1], true, 0);
+            }
+
+            auto invalid_variant{variants[0]};
+            invalid_variant[0] ^= 1;
+            auto invalid_new_base{originals[2]};
+            invalid_new_base[0] ^= 1;
+            for (int retry{0}; retry < 2; ++retry) {
+                check_one(verifier, 0, invalid_variant, false, 1);
+                check_one(verifier, 2, invalid_new_base, false, 1);
+            }
+            check_one(verifier, 0, originals[0], true, 0);
+            check_one(verifier, 1, originals[1], true, 0);
+
+            check_one(verifier, 2, originals[2], true, 1);
+            check_one(verifier, 1, originals[1], true, 0);
+            check_one(verifier, 0, originals[0], true, 1);
+
+            ChainLockVerifier competing{worker_threads, /*batch_size=*/1,
+                                        CACHE_CAPACITY};
+            std::promise<void> start;
+            const auto start_signal{start.get_future().share()};
+            std::array<bool, VARIANT_COUNT> results{};
+            std::array<std::thread, VARIANT_COUNT> threads;
+            for (std::size_t i{0}; i < variants.size(); ++i) {
+                threads[i] = std::thread([&, i, start_signal] {
+                    start_signal.wait();
+                    std::vector<ScheduledWOTSCheck> checks;
+                    checks.emplace_back(public_key, 0, message, variants[i]);
+                    results[i] = competing.VerifyChecks(std::move(checks));
+                });
+            }
+            start.set_value();
+            for (auto& thread : threads) thread.join();
+            BOOST_CHECK(std::all_of(results.begin(), results.end(),
+                                    [](bool valid) { return valid; }));
+            // Singleton preflights race first insertion without acquiring
+            // queue control; exactly one successful encoding must survive.
+            std::size_t hits{0};
+            for (const auto& signature : variants) {
+                const uint64_t before{
+                    competing.GetSuccessCacheMissCountForTesting()};
+                std::vector<ScheduledWOTSCheck> checks;
+                checks.emplace_back(public_key, 0, message, signature);
+                BOOST_CHECK(competing.VerifyChecks(std::move(checks)));
+                const uint64_t misses{
+                    competing.GetSuccessCacheMissCountForTesting() - before};
+                BOOST_CHECK_LE(misses, 1U);
+                if (misses == 0) ++hits;
+            }
+            BOOST_CHECK_EQUAL(hits, 1U);
+        }
+    }
 }
 
 BOOST_AUTO_TEST_CASE(authorization_is_derived_from_authenticated_transition)

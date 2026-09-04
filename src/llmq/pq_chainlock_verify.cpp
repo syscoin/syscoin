@@ -18,7 +18,7 @@
 #include <set>
 #include <stdexcept>
 #include <string_view>
-#include <unordered_set>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -78,12 +78,11 @@ void SetError(ChainLockVerificationError* error, ChainLockVerificationError valu
 uint256 GetScheduledWOTSSuccessCacheKey(
     const scheduled_wots::PublicKey& public_key,
     uint8_t leaf_index,
-    const scheduled_wots::Message& message,
-    const scheduled_wots::Signature& signature)
+    const scheduled_wots::Message& message)
 {
     CHashWriter writer{SER_GETHASH, 0};
     WriteDomain(writer, SUCCESS_CACHE_DOMAIN);
-    writer << public_key << leaf_index << message << signature;
+    writer << public_key << leaf_index << message;
     return writer.GetHash();
 }
 
@@ -639,25 +638,32 @@ public:
         m_entries.reserve(m_capacity);
     }
 
-    [[nodiscard]] bool Contains(const uint256& key)
+    [[nodiscard]] bool Contains(const uint256& key,
+                                const uint256& signature_hash)
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex)
     {
         LOCK(m_mutex);
-        if (m_entries.contains(key)) return true;
+        const auto entry{m_entries.find(key)};
+        if (entry != m_entries.end() && entry->second == signature_hash) {
+            return true;
+        }
         ++m_misses;
         return false;
     }
 
-    void Insert(const uint256& key) noexcept
+    void Insert(const uint256& key, const uint256& signature_hash) noexcept
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex)
     {
         LOCK(m_mutex);
+        // A secret-key holder can vary R and produce other valid signatures
+        // for this statement. Keep the first success while resident so those
+        // variants cannot consume more slots or refresh eviction order.
         if (m_entries.contains(key)) return;
         if (m_entries.size() == m_capacity) {
             m_entries.erase(m_order[m_next]);
         }
         try {
-            if (!m_entries.insert(key).second) return;
+            if (!m_entries.emplace(key, signature_hash).second) return;
         } catch (const std::bad_alloc&) {
             // A cache optimization must never turn a valid certificate into
             // a process failure. The check remains valid but uncached.
@@ -677,7 +683,7 @@ public:
 private:
     const std::size_t m_capacity;
     mutable Mutex m_mutex;
-    std::unordered_set<uint256, SaltedTxidHasher> m_entries GUARDED_BY(m_mutex);
+    std::unordered_map<uint256, uint256, SaltedTxidHasher> m_entries GUARDED_BY(m_mutex);
     std::vector<uint256> m_order GUARDED_BY(m_mutex);
     std::size_t m_next GUARDED_BY(m_mutex){0};
     uint64_t m_misses GUARDED_BY(m_mutex){0};
@@ -923,11 +929,13 @@ ScheduledWOTSCheck::ScheduledWOTSCheck(
 bool ScheduledWOTSCheck::operator()() const
 {
     if (m_success_cache != nullptr &&
-        m_success_cache->Contains(m_success_cache_key)) return true;
+        m_success_cache->Contains(m_success_cache_key,
+                                  m_success_cache_signature_hash)) return true;
     const bool valid{scheduled_wots::Verify(
         m_public_key, m_leaf_index, m_message, m_signature)};
     if (valid && m_success_cache != nullptr) {
-        m_success_cache->Insert(m_success_cache_key);
+        m_success_cache->Insert(m_success_cache_key,
+                                m_success_cache_signature_hash);
     }
     if (!valid && m_accumulated_result != nullptr) {
         m_accumulated_result->store(false, std::memory_order_release);
@@ -945,11 +953,12 @@ void ScheduledWOTSCheck::UseSuccessCache(
     if (m_success_cache == nullptr) return;
     // The prepared message is the domain-separated hash of the complete
     // per-member transcript. Together with the public key and scheduled leaf,
-    // this binds the logical statement, roster slot, member and signature
-    // without retaining their larger source objects. Compute only for the
-    // certificate verifier; ordinary live-share checks do not use the cache.
+    // this binds the logical statement, roster slot and member. Occupancy is
+    // per statement, but a hit still requires the exact successful signature.
+    // Ordinary live-share checks do not use the cache.
     m_success_cache_key = GetScheduledWOTSSuccessCacheKey(
-        m_public_key, m_leaf_index, m_message, m_signature);
+        m_public_key, m_leaf_index, m_message);
+    m_success_cache_signature_hash = Hash(m_signature);
 }
 
 void ScheduledWOTSCheck::AccumulateResult(std::atomic<bool>* result) noexcept
