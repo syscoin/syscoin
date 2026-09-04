@@ -632,7 +632,9 @@ static CScript CurrentAuxpowTag(ChainstateManager& chainman)
 static std::shared_ptr<CBlock> BuildAuxpowWrapper(
     const CBlock& child,
     const uint256& parent_prev,
-    const CScript& syscoin_tag)
+    const CScript& syscoin_tag,
+    bool valid_parent_pow = true,
+    bool valid_auxpow_proof = true)
 {
   auto block{std::make_shared<CBlock>(child)};
   const uint256 child_hash{block->GetHash()};
@@ -654,7 +656,8 @@ static std::shared_ptr<CBlock> BuildAuxpowWrapper(
   builder.parentBlock.vtx[0] =
       MakeTransactionRef(std::move(parent_coinbase));
   builder.parentBlock.hashMerkleRoot = BlockMerkleRoot(builder.parentBlock);
-  mineBlock(builder.parentBlock, /*ok=*/true, block->nBits);
+  mineBlock(builder.parentBlock, /*ok=*/valid_parent_pow, block->nBits);
+  if (!valid_auxpow_proof) ++builder.auxpowChainIndex;
   block->SetAuxpow(builder.getUnique());
   block->fChecked = false;
   return block;
@@ -803,6 +806,125 @@ BOOST_FIXTURE_TEST_CASE(
   BOOST_CHECK(is_new);
   BOOST_CHECK(good_index->nStatus & BLOCK_HAVE_DATA);
   BOOST_CHECK(!(good_index->nStatus & BLOCK_FAILED_MASK));
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    auxpow_bad_proof_does_not_poison_known_child_header,
+    NexusAuxpowWrapperSetup)
+{
+  ChainstateManager& chainman{*Assert(m_node.chainman)};
+  const CBlock child{BuildAuxpowChildTemplate(m_node)};
+  const uint256 parent_prev{ArithToUint256(arith_uint256{454})};
+  const CScript tag{CurrentAuxpowTag(chainman)};
+  const auto good{BuildAuxpowWrapper(child, parent_prev, tag)};
+  const auto bad_parent_pow{BuildAuxpowWrapper(
+      child, parent_prev, tag, /*valid_parent_pow=*/false)};
+  const auto bad_auxpow_proof{BuildAuxpowWrapper(
+      child, parent_prev, tag, /*valid_parent_pow=*/true,
+      /*valid_auxpow_proof=*/false)};
+  BOOST_REQUIRE(good->GetHash() == bad_parent_pow->GetHash());
+  BOOST_REQUIRE(good->GetHash() == bad_auxpow_proof->GetHash());
+  BOOST_REQUIRE(!CheckProofOfWork(
+      bad_parent_pow->auxpow->getParentBlockHash(),
+      bad_parent_pow->nBits, Params().GetConsensus()));
+  BOOST_REQUIRE(!bad_auxpow_proof->auxpow->check(
+      bad_auxpow_proof->GetHash(), bad_auxpow_proof->GetChainId(),
+      Params().GetConsensus()));
+
+  BlockValidationState header_state;
+  const CBlockIndex* index{nullptr};
+  BOOST_REQUIRE(chainman.ProcessNewBlockHeaders(
+      {good->GetBlockHeader()}, /*min_pow_checked=*/true, header_state,
+      &index));
+  BOOST_REQUIRE(index != nullptr);
+
+  LOCK(cs_main);
+  for (const auto& bad : {bad_parent_pow, bad_auxpow_proof}) {
+    bool is_new{true};
+    CBlockIndex* bad_index{nullptr};
+    BlockValidationState bad_state;
+    BOOST_REQUIRE(!chainman.AcceptBlock(
+        bad, bad_state, &bad_index, /*fRequested=*/true,
+        /*dbp=*/nullptr, &is_new, /*min_pow_checked=*/true));
+    BOOST_CHECK(bad_index == index);
+    BOOST_CHECK(bad_state.GetResult() ==
+                BlockValidationResult::BLOCK_MUTATED);
+    BOOST_CHECK_EQUAL(bad_state.GetRejectReason(), "high-hash");
+    BOOST_CHECK(!(index->nStatus & BLOCK_FAILED_MASK));
+    BOOST_CHECK(!(index->nStatus & BLOCK_HAVE_DATA));
+    BOOST_CHECK(!is_new);
+  }
+
+  bool is_new{false};
+  CBlockIndex* good_index{nullptr};
+  BlockValidationState good_state;
+  BOOST_REQUIRE(chainman.AcceptBlock(
+      good, good_state, &good_index, /*fRequested=*/true,
+      /*dbp=*/nullptr, &is_new, /*min_pow_checked=*/true));
+  BOOST_CHECK(good_index == index);
+  BOOST_CHECK(is_new);
+  BOOST_CHECK(good_index->nStatus & BLOCK_HAVE_DATA);
+  BOOST_CHECK(!(good_index->nStatus & BLOCK_FAILED_MASK));
+
+  auto invalid_target{std::make_shared<CBlock>(*good)};
+  invalid_target->nBits = 0;
+  invalid_target->fChecked = false;
+  CBlockIndex* invalid_target_index{nullptr};
+  BlockValidationState invalid_target_state;
+  BOOST_REQUIRE(!chainman.AcceptBlock(
+      invalid_target, invalid_target_state, &invalid_target_index,
+      /*fRequested=*/true, /*dbp=*/nullptr, /*fNewBlock=*/nullptr,
+      /*min_pow_checked=*/true));
+  BOOST_CHECK(invalid_target_state.GetResult() ==
+              BlockValidationResult::BLOCK_INVALID_HEADER);
+  BOOST_CHECK(invalid_target_index == nullptr);
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    auxpow_presence_mismatch_preserves_child_failure_provenance,
+    NexusAuxpowWrapperSetup)
+{
+  CBlock direct{BuildAuxpowChildTemplate(m_node)};
+  direct.SetAuxpow(nullptr);
+  mineBlock(direct, /*ok=*/true);
+  direct.auxpow = std::make_shared<CAuxPow>();
+  direct.fChecked = false;
+
+  BlockValidationState unexpected_wrapper_state;
+  BOOST_REQUIRE(!CheckBlock(
+      direct, unexpected_wrapper_state, Params().GetConsensus(),
+      /*fCheckPOW=*/true, /*fCheckMerkleRoot=*/true));
+  BOOST_CHECK(unexpected_wrapper_state.GetResult() ==
+              BlockValidationResult::BLOCK_MUTATED);
+
+  CBlock missing_wrapper{BuildAuxpowChildTemplate(m_node)};
+  missing_wrapper.SetAuxpow(nullptr);
+  missing_wrapper.SetOldBaseVersion(
+      /*nBaseVersion=*/2,
+      Params().GetConsensus().nAuxpowOldChainId + 32);
+  missing_wrapper.SetAuxpowVersion(true);
+  missing_wrapper.fChecked = false;
+
+  BlockValidationState invalid_old_chain_id_state;
+  BOOST_REQUIRE(!CheckBlock(
+      missing_wrapper, invalid_old_chain_id_state,
+      Params().GetConsensus(), /*fCheckPOW=*/true,
+      /*fCheckMerkleRoot=*/true));
+  BOOST_CHECK(invalid_old_chain_id_state.GetResult() ==
+              BlockValidationResult::BLOCK_INVALID_HEADER);
+
+  missing_wrapper.SetAuxpowVersion(false);
+  missing_wrapper.SetOldBaseVersion(
+      /*nBaseVersion=*/2,
+      Params().GetConsensus().nAuxpowOldChainId);
+  missing_wrapper.SetAuxpowVersion(true);
+  missing_wrapper.fChecked = false;
+  BlockValidationState missing_wrapper_state;
+  BOOST_REQUIRE(!CheckBlock(
+      missing_wrapper, missing_wrapper_state, Params().GetConsensus(),
+      /*fCheckPOW=*/true, /*fCheckMerkleRoot=*/true));
+  BOOST_CHECK(missing_wrapper_state.GetResult() ==
+              BlockValidationResult::BLOCK_MUTATED);
 }
 
 BOOST_FIXTURE_TEST_CASE(

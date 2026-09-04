@@ -1919,7 +1919,16 @@ PackageMempoolAcceptResult ProcessNewPackage(Chainstate& active_chainstate, CTxM
 //
 // CBlock and CBlockIndex
 //
-bool CheckProofOfWork(const CBlockHeader& block, const Consensus::Params& params)
+// SYSCOIN BEGIN: AuxPoW is mutable outside the pure child-header identity.
+enum class BlockProofOfWorkResult {
+    VALID,
+    INVALID_CHILD_HEADER,
+    INVALID_AUXPOW_WRAPPER,
+};
+
+BlockProofOfWorkResult CheckBlockProofOfWork(
+    const CBlockHeader& block,
+    const Consensus::Params& params)
 {
     /* Except for legacy blocks with full version 1, ensure that
        the chain ID is correct.  Legacy blocks are not allowed since
@@ -1928,47 +1937,68 @@ bool CheckProofOfWork(const CBlockHeader& block, const Consensus::Params& params
     const int32_t nChainID = block.GetChainId();
     if (!block.IsLegacy() && params.fStrictChainId) {
         if(nChainID > 0) {
-            if(nChainID != params.nAuxpowChainId)
-                return error("%s : block does not have our chain ID"
-                        " (got %d, expected %d, full nVersion %d)",
-                        __func__, nChainID,
-                        params.nAuxpowChainId, block.nVersion);
-        } else if(block.auxpow) {
+            if(nChainID != params.nAuxpowChainId) {
+                error("%s : block does not have our chain ID"
+                      " (got %d, expected %d, full nVersion %d)",
+                      __func__, nChainID,
+                      params.nAuxpowChainId, block.nVersion);
+                return BlockProofOfWorkResult::INVALID_CHILD_HEADER;
+            }
+        } else if(block.IsAuxpow()) {
             const int32_t nOldChainID = block.GetOldChainId();
-            if(nOldChainID != params.nAuxpowOldChainId)
-                return error("%s : block does not have our old chain ID"
-                        " (got %d, expected %d, full nVersion %d)",
-                        __func__, nOldChainID,
-                        params.nAuxpowOldChainId, block.nVersion);
+            if(nOldChainID != params.nAuxpowOldChainId) {
+                error("%s : block does not have our old chain ID"
+                      " (got %d, expected %d, full nVersion %d)",
+                      __func__, nOldChainID,
+                      params.nAuxpowOldChainId, block.nVersion);
+                return BlockProofOfWorkResult::INVALID_CHILD_HEADER;
+            }
         }
     }
 
-
-    /* If there is no auxpow, just check the block hash.  */
-    if (!block.auxpow)
-    {
-        if (block.IsAuxpow())
-            return error("%s : no auxpow on block with auxpow version",
-                         __func__);
-
-        if (!CheckProofOfWork(block.GetHash(), block.nBits, params))
-            return error("%s : non-AUX proof of work failed", __func__);
-
-        return true;
+    /* A direct-PoW child commits both its target and proof hash. Validate
+       those immutable fields before classifying an unexpected wrapper. */
+    if (!block.IsAuxpow()) {
+        if (!CheckProofOfWork(block.GetHash(), block.nBits, params)) {
+            error("%s : non-AUX proof of work failed", __func__);
+            return BlockProofOfWorkResult::INVALID_CHILD_HEADER;
+        }
+        if (block.auxpow) {
+            error("%s : auxpow on block with non-auxpow version", __func__);
+            return BlockProofOfWorkResult::INVALID_AUXPOW_WRAPPER;
+        }
+        return BlockProofOfWorkResult::VALID;
     }
 
-    /* We have auxpow.  Check it.  */
-    if (!block.IsAuxpow())
-        return error("%s : auxpow on block with non-auxpow version", __func__);
+    if (!block.auxpow) {
+        error("%s : no auxpow on block with auxpow version", __func__);
+        return BlockProofOfWorkResult::INVALID_AUXPOW_WRAPPER;
+    }
 
-    if (!CheckProofOfWork(block.auxpow->getParentBlockHash(), block.nBits, params))
-        return error("%s : AUX proof of work failed", __func__);
-    if (!block.auxpow->check(block.GetHash(), block.GetChainId(), params))
-        return error("%s : AUX POW is not valid", __func__);
+    if (!CheckProofOfWork(
+            block.auxpow->getParentBlockHash(), block.nBits, params)) {
+        error("%s : AUX proof of work failed", __func__);
+        // Zero satisfies every valid nonzero target. If it fails too, nBits
+        // itself is malformed and therefore the immutable child is invalid.
+        return CheckProofOfWork(uint256{}, block.nBits, params)
+            ? BlockProofOfWorkResult::INVALID_AUXPOW_WRAPPER
+            : BlockProofOfWorkResult::INVALID_CHILD_HEADER;
+    }
+    if (!block.auxpow->check(
+            block.GetHash(), block.GetChainId(), params)) {
+        error("%s : AUX POW is not valid", __func__);
+        return BlockProofOfWorkResult::INVALID_AUXPOW_WRAPPER;
+    }
 
-
-    return true;
+    return BlockProofOfWorkResult::VALID;
 }
+
+bool CheckProofOfWork(const CBlockHeader& block, const Consensus::Params& params)
+{
+    return CheckBlockProofOfWork(block, params) ==
+           BlockProofOfWorkResult::VALID;
+}
+// SYSCOIN END: Keep mutable wrapper failures out of child-index invalidity.
 
 // SYSCOIN BEGIN: PQ receipt validation and branch-state transitions.
 static bool CheckDirectBlockNotAuxpowParent(const CBlock& block, BlockValidationState& state,
@@ -7193,8 +7223,21 @@ void ChainstateManager::ReceivedBlockTransactions(const CBlock& block, CBlockInd
 static bool CheckBlockHeader(const CBlockHeader& block, BlockValidationState& state, const Consensus::Params& consensusParams, bool fCheckPOW = true)
 {
     // Check proof of work matches claimed amount
-    if (fCheckPOW && !CheckProofOfWork(block, consensusParams))
-        return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "high-hash", "proof of work failed");
+    if (fCheckPOW) {
+        // SYSCOIN BEGIN: A bad parent wrapper must not poison the pure child ID.
+        const auto pow_result{CheckBlockProofOfWork(block, consensusParams)};
+        if (pow_result == BlockProofOfWorkResult::INVALID_CHILD_HEADER) {
+            return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
+                                 "high-hash", "proof of work failed");
+        }
+        if (pow_result ==
+            BlockProofOfWorkResult::INVALID_AUXPOW_WRAPPER) {
+            return state.Invalid(BlockValidationResult::BLOCK_MUTATED,
+                                 "high-hash",
+                                 "auxiliary proof of work failed");
+        }
+        // SYSCOIN END: Preserve child validity across mutable wrappers.
+    }
 
     return true;
 }
