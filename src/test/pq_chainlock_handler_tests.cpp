@@ -3318,6 +3318,12 @@ BOOST_AUTO_TEST_CASE(deployment_configuration_is_fail_closed)
     BOOST_CHECK(!llmq::MakePQQuorumBuildConfig(consensus));
 
     consensus = ValidConsensus();
+    consensus.nPQRosterSnapshotLag = llmq::pq::PQ_CL_SIGN_LAG - 1;
+    BOOST_CHECK(!llmq::MakePQQuorumBuildConfig(consensus));
+    consensus.nPQRosterSnapshotLag = llmq::pq::PQ_CL_SIGN_LAG;
+    BOOST_CHECK(llmq::MakePQQuorumBuildConfig(consensus));
+
+    consensus = ValidConsensus();
     consensus.nPQPreparationHeight = 500;
     consensus.nPQRegistrationCutoffBlocks = 844;
     BOOST_CHECK(llmq::MakePQQuorumBuildConfig(consensus));

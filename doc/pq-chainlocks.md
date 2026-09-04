@@ -493,6 +493,9 @@ For epoch `e`:
    precedes it by the deployment's snapshot lag. The independently configured
    registration cutoff must be at or before this snapshot (`cutoffLag >=
    snapshotLag`), so every key resolved from the snapshot is already frozen.
+   The snapshot must also be at or before the earliest target's signing-boundary
+   anchor (`snapshotLag >= signLag`), preventing sibling targets from selecting
+   different rosters after their common authority boundary.
 2. Derive a non-serialized authorization mask from the statement's exact
    predecessor boundary. For bootstrap epochs zero through three, the
    authorization point is the descriptor's exact epoch-base block; for every

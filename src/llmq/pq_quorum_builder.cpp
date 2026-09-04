@@ -603,9 +603,12 @@ bool RecoveryUniverseCapsule::Matches(
 
 bool QuorumBuildConfig::IsValid() const noexcept
 {
-    // Keeping the snapshot within its epoch leaves at most one branch-derived
-    // roster after a finalized predecessor, preserving threshold intersection.
+    // The snapshot must not be newer than the earliest target's signing
+    // boundary, and keeping it within its epoch leaves at most one
+    // branch-derived roster after a finalized predecessor. Together these
+    // preserve threshold intersection across sibling targets.
     if (!schedule.IsValid() || roster_snapshot_lag_blocks == 0 ||
+        roster_snapshot_lag_blocks < schedule.sign_lag ||
         roster_snapshot_lag_blocks > schedule.epoch_blocks ||
         registration_cutoff_blocks < roster_snapshot_lag_blocks ||
         future_horizon_epochs < ACTIVE_QUORUMS ||

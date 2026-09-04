@@ -877,6 +877,15 @@ BOOST_AUTO_TEST_CASE(rootless_candidates_never_fill_normal_roster)
     BOOST_CHECK_EQUAL(error, QuorumBuildError::INSUFFICIENT_ELIGIBLE_MEMBERS);
 }
 
+BOOST_AUTO_TEST_CASE(snapshot_lag_covers_signing_boundary)
+{
+    auto too_recent{BuildConfig(Schedule().sign_lag - 1)};
+    BOOST_CHECK(!too_recent.IsValid());
+
+    auto boundary{BuildConfig(Schedule().sign_lag)};
+    BOOST_CHECK(boundary.IsValid());
+}
+
 BOOST_AUTO_TEST_CASE(null_snapshot_fails_before_modifier_derivation)
 {
     constexpr uint32_t EPOCH{4};
