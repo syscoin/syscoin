@@ -666,13 +666,6 @@ struct NexusAuxpowWrapperSetup : TestChain100Setup {
                           {"-dip3params=101:101"}) {}
 };
 
-struct BTCPREVAuxpowWrapperSetup : TestChain100Setup {
-  BTCPREVAuxpowWrapperSetup()
-      : TestChain100Setup(
-            ChainType::REGTEST,
-            {"-dip3params=101:101", "-pqbtcccandidateorigin=101"}) {}
-};
-
 class AuxpowConnectedObserver final : public CValidationInterface {
 public:
   explicit AuxpowConnectedObserver(const uint256& target) : target{target} {}
@@ -696,15 +689,34 @@ public:
 };
 BOOST_FIXTURE_TEST_CASE(
     auxpow_btcp_mismatch_does_not_poison_child_header,
-    BTCPREVAuxpowWrapperSetup)
+    NexusAuxpowWrapperSetup)
 {
   ChainstateManager& chainman{*Assert(m_node.chainman)};
   const uint256 committed{ArithToUint256(arith_uint256{101})};
   const uint256 mismatched{ArithToUint256(arith_uint256{202})};
-  const CBlock child{BuildAuxpowChildTemplate(m_node, committed)};
+  CBlock child{BuildAuxpowChildTemplate(m_node)};
+  CDataStream btcp_data{SER_NETWORK, PROTOCOL_VERSION};
+  btcp_data << BTCPREV_MAGIC_BYTES << committed;
+  const auto btcp_bytes{MakeUCharSpan(btcp_data)};
+  node::RegenerateCommitments(
+      child, chainman,
+      std::vector<unsigned char>{btcp_bytes.begin(), btcp_bytes.end()});
   uint256 extracted;
   BOOST_REQUIRE(ExtractBTCPREVCommitment(child, extracted));
   BOOST_REQUIRE(extracted == committed);
+
+  auto& consensus{
+      const_cast<Consensus::Params&>(Params().GetConsensus())};
+  struct RestoreCandidateOrigin {
+    Consensus::Params& consensus;
+    const int origin{consensus.nPQBTCCCandidateOrigin};
+    ~RestoreCandidateOrigin()
+    {
+      consensus.nPQBTCCCandidateOrigin = origin;
+    }
+  } restore{consensus};
+  consensus.nPQBTCCCandidateOrigin = 101;
+  BOOST_REQUIRE(llmq::pq::IsBTCPREVCommitmentHeight(consensus, 101));
 
   const CScript tag{CurrentAuxpowTag(chainman)};
   const auto bad{BuildAuxpowWrapper(child, mismatched, tag)};
