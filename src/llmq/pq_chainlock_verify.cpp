@@ -484,6 +484,15 @@ bool ValidateRosterMembersAndRoots(
                          ChainLockVerificationError::DUPLICATE_CHILD_KEY);
                 return false;
             }
+            const auto expected_tree_id{GetChildKeyTreeId(
+                genesis_hash, member.pro_tx_hash,
+                child.commitment.generation,
+                child.commitment.first_epoch)};
+            if (!expected_tree_id ||
+                child.commitment.tree_id != *expected_tree_id) {
+                SetError(error, ChainLockVerificationError::INVALID_ROSTER);
+                return false;
+            }
             if (member.eligible) SetBit(expected_valid_members, member_index);
         }
     }

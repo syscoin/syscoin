@@ -11,6 +11,7 @@
 #include <llmq/pq_roster_beacon.h>
 #include <span.h>
 
+#include <cassert>
 #include <cstdint>
 #include <memory>
 #include <string_view>
@@ -156,9 +157,11 @@ inline SyntheticChildAuthorization MakeSyntheticChildAuthorization(
     ChildKeyTreeCommitment commitment;
     commitment.generation = 1;
     commitment.first_epoch = 0;
-    commitment.tree_id = SyntheticHash(
-        "SYS_PQ_TEST_TREE_ID_V1", genesis_hash, pro_tx_hash,
-        discriminator, 0);
+    const auto tree_id{GetChildKeyTreeId(
+        genesis_hash, pro_tx_hash, commitment.generation,
+        commitment.first_epoch)};
+    assert(tree_id);
+    commitment.tree_id = *tree_id;
 
     const ChildKeyTreeConfig config{
         genesis_hash,

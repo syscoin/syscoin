@@ -2422,6 +2422,17 @@ BOOST_AUTO_TEST_CASE(active_roster_cache_mint_matches_public_validation)
         if (!epoch) return std::optional<QuorumSnapshotState>{};
         auto states{std::make_shared<std::vector<OperatorKeyState>>(
             KeyStates(QUORUM_SIZE, *epoch, index.nHeight))};
+        for (auto& state : *states) {
+            const auto tree_id{GetChildKeyTreeId(
+                genesis, state.pro_tx_hash,
+                state.global_key.child_key_commitment.generation,
+                state.global_key.child_key_commitment.first_epoch)};
+            BOOST_REQUIRE(tree_id);
+            state.global_key.child_key_commitment.tree_id = *tree_id;
+            for (auto& frozen : state.frozen_child_roots) {
+                frozen.commitment.tree_id = *tree_id;
+            }
+        }
         source_aliases.push_back(states);
 
         QuorumSnapshotState result;

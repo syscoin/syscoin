@@ -465,6 +465,32 @@ BOOST_AUTO_TEST_CASE(durable_roster_context_rejects_noncanonical_content)
         bad_child_root, &error));
     BOOST_CHECK(error == ChainLockVerificationError::CHILD_KEY_ROOT_MISMATCH);
 
+    auto nonderived_tree_id{encoded};
+    auto altered_rosters{fixture->rosters};
+    auto& altered_roster{altered_rosters[0]};
+    auto& altered_child{*altered_roster.members[0].child_root};
+    const uint256 wrong_tree_id{NonNullHash(999'999)};
+    BOOST_REQUIRE(wrong_tree_id != altered_child.commitment.tree_id);
+    altered_child.commitment.tree_id = wrong_tree_id;
+    altered_roster.descriptor.child_key_root =
+        ComputeQuorumChildKeyRoot(fixture->genesis_hash, altered_roster);
+    std::copy(wrong_tree_id.begin(), wrong_tree_id.end(),
+              nonderived_tree_id.begin() + first_member +
+                  MEMBER_CHILD_TREE_ID_OFFSET);
+    std::copy(altered_roster.descriptor.child_key_root.begin(),
+              altered_roster.descriptor.child_key_root.end(),
+              nonderived_tree_id.begin() + descriptor +
+                  DESCRIPTOR_CHILD_ROOT_OFFSET);
+    BOOST_CHECK(!DurableRosterContext::DecodeTrustedPersistence(
+        nonderived_tree_id, &error));
+    BOOST_CHECK(error == ChainLockVerificationError::INVALID_ROSTER);
+
+    BOOST_CHECK(!VerifiedRosterSet::Create(
+        fixture->genesis_hash,
+        std::make_shared<const FrozenQuorumRosters>(altered_rosters),
+        &error));
+    BOOST_CHECK(error == ChainLockVerificationError::INVALID_ROSTER);
+
     auto duplicate_member{encoded};
     std::copy_n(duplicate_member.begin() + first_member, 32,
                 duplicate_member.begin() + second_member);
