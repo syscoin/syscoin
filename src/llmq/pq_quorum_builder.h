@@ -317,7 +317,8 @@ public:
 private:
     struct Key {
         uint32_t newest_epoch{0};
-        uint256 branch_context_hash;
+        uint256 newest_base_hash;
+        uint256 signing_boundary_hash;
         uint256 beacon_bundle_hash;
 
         friend bool operator==(const Key&, const Key&) = default;
@@ -387,11 +388,12 @@ using FrozenQuorumRosterCachePtr =
  * Build the four oldest-to-newest active rosters on one explicit branch from
  * the exact corresponding READY beacon bundle. Recovery rosters select their
  * identities from the authenticated pre-F source, freeze keys at the shared
- * cutoff before the oldest recovery epoch, and use target state only to
- * disable those fixed entries. A newly revealed source that is not active yet
- * is accepted only after its exact snapshot can build a complete normal
- * 400-root roster. Every lookup is an ancestor of branch_tip and its returned
- * height, hash, and registry schedule revision are checked.
+ * cutoff before the oldest recovery epoch, and use state at the target's
+ * H-sign_lag fork anchor only to disable those fixed entries. A newly revealed
+ * source that is not active yet is accepted only after its exact snapshot can
+ * build a complete normal 400-root roster. Every lookup is an ancestor of
+ * branch_tip and its returned height, hash, and registry schedule revision are
+ * checked.
  */
 [[nodiscard]] FrozenQuorumRostersPtr
 BuildActiveFrozenQuorumRosters(

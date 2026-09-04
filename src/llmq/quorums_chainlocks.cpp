@@ -10049,7 +10049,23 @@ CChainLocksHandler::ResolveObjectiveRosterAuthorizationContext(
     }
     const auto target_epoch{pq::EpochForHeight(
         m_config->chainlock_schedule, candidate.nHeight)};
-    const auto receipt_state{IndexedBTCCReceiptState(candidate)};
+    if (candidate.nHeight <
+        static_cast<int32_t>(m_config->chainlock_schedule.sign_lag)) {
+        return std::nullopt;
+    }
+    const int32_t authority_height{
+        candidate.nHeight -
+        static_cast<int32_t>(m_config->chainlock_schedule.sign_lag)};
+    const CBlockIndex* authority_anchor{
+        candidate.GetAncestor(authority_height)};
+    if (authority_anchor == nullptr ||
+        (authority_anchor->nStatus & BLOCK_FAILED_MASK)) {
+        return std::nullopt;
+    }
+    // Competing targets in one signing round share this anchor. Freezing
+    // roster authority here prevents target-local receipts from selecting
+    // different normal and recovery signer sets for the same round.
+    const auto receipt_state{IndexedBTCCReceiptState(*authority_anchor)};
     if (!target_epoch || !receipt_state) return std::nullopt;
 
     const std::optional<int32_t> latest_target{
@@ -10072,9 +10088,10 @@ CChainLocksHandler::ResolveObjectiveRosterAuthorizationContext(
         receipt_state->latest_receipt_carrier_height};
     const int32_t receipted_target_height{
         receipt_state->latest_chainlock_target_height};
-    const CBlockIndex* carrier{candidate.GetAncestor(carrier_height)};
+    const CBlockIndex* carrier{
+        authority_anchor->GetAncestor(carrier_height)};
     const CBlockIndex* receipted_target{
-        candidate.GetAncestor(receipted_target_height)};
+        authority_anchor->GetAncestor(receipted_target_height)};
     if (carrier == nullptr || carrier->pprev == nullptr ||
         receipted_target == nullptr ||
         (carrier->nStatus & BLOCK_FAILED_MASK) ||

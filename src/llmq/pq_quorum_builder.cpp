@@ -983,8 +983,8 @@ std::unique_ptr<FrozenQuorumRoster> BuildRecoveryFrozenQuorumRoster(
     const OperatorStateLookup* source_operator_states,
     const QuorumSnapshotState& key_state,
     const OperatorStateLookup& key_operator_states,
-    const QuorumSnapshotState& target_state,
-    const OperatorStateLookup& target_operator_states,
+    const QuorumSnapshotState& signing_boundary_state,
+    const OperatorStateLookup& signing_boundary_operator_states,
     QuorumBuildError* error)
 {
     const auto beacon_hash{
@@ -1081,16 +1081,17 @@ std::unique_ptr<FrozenQuorumRoster> BuildRecoveryFrozenQuorumRoster(
         }
 
         member.child_root = *key_child_root.record;
-        const auto target_dmn{
-            target_state.deterministic_mns.GetMN(pro_tx_hash)};
-        const auto* target_operator_state{
-            target_operator_states.Find(pro_tx_hash)};
-        const auto target_child_root{target_operator_state != nullptr
-            ? target_operator_state->ResolveChildRoot(identity.epoch)
+        const auto boundary_dmn{
+            signing_boundary_state.deterministic_mns.GetMN(pro_tx_hash)};
+        const auto* boundary_operator_state{
+            signing_boundary_operator_states.Find(pro_tx_hash)};
+        const auto boundary_child_root{boundary_operator_state != nullptr
+            ? boundary_operator_state->ResolveChildRoot(identity.epoch)
             : ChildRootResolution{}};
-        if (!target_dmn || !CDeterministicMNList::IsMNValid(*target_dmn) ||
-            !HasPresentChildRoot(target_child_root) ||
-            *target_child_root.record != *key_child_root.record) {
+        if (!boundary_dmn ||
+            !CDeterministicMNList::IsMNValid(*boundary_dmn) ||
+            !HasPresentChildRoot(boundary_child_root) ||
+            *boundary_child_root.record != *key_child_root.record) {
             continue;
         }
         member.eligible = true;
@@ -1217,9 +1218,9 @@ std::unique_ptr<FrozenQuorumRosters> BuildActiveFrozenQuorumRostersImpl(
     }
 
     std::optional<QuorumSnapshotState> recovery_key_state;
-    std::optional<QuorumSnapshotState> target_state;
+    std::optional<QuorumSnapshotState> signing_boundary_state;
     OperatorStateLookup recovery_key_operator_states{{}, {}};
-    OperatorStateLookup target_operator_states{{}, {}};
+    OperatorStateLookup signing_boundary_operator_states{{}, {}};
     if (has_recovery_seed) {
         const auto recovery_seed{std::find_if(
             beacon_bundle.seeds.begin(), beacon_bundle.seeds.end(),
@@ -1260,14 +1261,23 @@ std::unique_ptr<FrozenQuorumRosters> BuildActiveFrozenQuorumRostersImpl(
         }
         recovery_key_state = LookupSnapshotExact(
             *recovery_key_snapshot, snapshot_lookup, error);
-        target_state = LookupSnapshotExact(
-            *target_index, snapshot_lookup, error);
-        if (!recovery_key_state || !target_state ||
+        const int32_t signing_boundary_height{
+            target_height - static_cast<int32_t>(config.schedule.sign_lag)};
+        const CBlockIndex* signing_boundary_index{
+            target_index->GetAncestor(signing_boundary_height)};
+        if (signing_boundary_index == nullptr) {
+            SetError(error, QuorumBuildError::MISSING_BRANCH_ANCESTOR);
+            return nullptr;
+        }
+        signing_boundary_state = LookupSnapshotExact(
+            *signing_boundary_index, snapshot_lookup, error);
+        if (!recovery_key_state || !signing_boundary_state ||
             !PrepareSnapshotOperatorLookup(
                 config, *recovery_key_state,
                 recovery_key_operator_states, error) ||
             !PrepareSnapshotOperatorLookup(
-                config, *target_state, target_operator_states, error)) {
+                config, *signing_boundary_state,
+                signing_boundary_operator_states, error)) {
             return nullptr;
         }
     }
@@ -1294,7 +1304,8 @@ std::unique_ptr<FrozenQuorumRosters> BuildActiveFrozenQuorumRostersImpl(
                     ? &recovery_source_operator_states
                     : nullptr,
                 *recovery_key_state, recovery_key_operator_states,
-                *target_state, target_operator_states, error)};
+                *signing_boundary_state,
+                signing_boundary_operator_states, error)};
             if (!roster) return nullptr;
             if (!AddActiveChildRootsToSet(*roster, tree_owners)) {
                 SetError(error, QuorumBuildError::DUPLICATE_CHILD_KEY);
@@ -1576,18 +1587,28 @@ VerifiedRosterSetPtr FrozenQuorumRosterCache::GetVerifiedActiveImpl(
         SetError(error, QuorumBuildError::MISSING_BRANCH_ANCESTOR);
         return nullptr;
     }
-    // Normal rosters are immutable from the newest base onward. Recovery
-    // eligibility is a disable-only overlay of target state, so its cache key
-    // must name that exact target rather than reuse an earlier descendant.
+    // Descriptor identity always binds the newest epoch base. Recovery also
+    // applies a disable-only overlay from the shared signing-round boundary.
     const bool uses_recovery_rosters{std::any_of(
         beacon_bundle.seeds.begin(), beacon_bundle.seeds.end(),
         [](const RosterBeaconSeed& seed) {
             return seed.anchor_kind == RosterBeaconAnchorKind::RECOVERY;
         })};
-    const uint256& branch_context_hash{uses_recovery_rosters
-        ? target->GetBlockHash()
-        : newest_base->GetBlockHash()};
-    const Key key{newest.epoch, branch_context_hash,
+    const int32_t signing_boundary_height{
+        target_height -
+        static_cast<int32_t>(m_config.schedule.sign_lag)};
+    uint256 signing_boundary_hash;
+    if (uses_recovery_rosters) {
+        const CBlockIndex* signing_boundary{
+            target->GetAncestor(signing_boundary_height)};
+        if (signing_boundary == nullptr) {
+            SetError(error, QuorumBuildError::MISSING_BRANCH_ANCESTOR);
+            return nullptr;
+        }
+        signing_boundary_hash = signing_boundary->GetBlockHash();
+    }
+    const Key key{newest.epoch, newest_base->GetBlockHash(),
+                  signing_boundary_hash,
                   *beacon_bundle_hash};
 
     std::array<VerifiedRosterSetPtr,

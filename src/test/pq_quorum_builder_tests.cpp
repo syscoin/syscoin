@@ -1117,6 +1117,116 @@ BOOST_AUTO_TEST_CASE(recovery_retries_roll_over_the_pre_f_identity_universe)
     BOOST_CHECK(changed_by_f);
 }
 
+BOOST_AUTO_TEST_CASE(
+    recovery_sibling_cache_preserves_branch_bound_descriptors)
+{
+    constexpr uint32_t RECOVERY_EPOCH{19};
+    constexpr int32_t TARGET_HEIGHT{6915};
+    constexpr uint32_t SOURCE_EPOCH{3};
+    constexpr uint32_t SNAPSHOT_LAG{144};
+    constexpr uint32_t MEMBER_COUNT{QUORUM_SIZE + 30};
+    const uint256 genesis{NonNullHash(18'015)};
+    const auto config{BuildConfig(SNAPSHOT_LAG)};
+    const BTCCScheduleConfig btcc{.candidate_origin = 2305};
+    const auto canonical{CanonicalRosterRecoveryTargetHeight(
+        config.schedule, btcc, RECOVERY_EPOCH)};
+    const auto newest_base_height{
+        EpochBaseHeight(config.schedule, RECOVERY_EPOCH)};
+    BOOST_REQUIRE(canonical);
+    BOOST_REQUIRE(newest_base_height);
+    BOOST_REQUIRE_EQUAL(*canonical, TARGET_HEIGHT);
+    BOOST_REQUIRE_EQUAL(TARGET_HEIGHT - *newest_base_height, 3);
+
+    const int32_t signing_boundary_height{
+        TARGET_HEIGHT - static_cast<int32_t>(config.schedule.sign_lag)};
+    BOOST_REQUIRE_LT(signing_boundary_height, *newest_base_height);
+    IndexChain first(TARGET_HEIGHT, TARGET_HEIGHT + 1, 0);
+    IndexChain sibling(
+        TARGET_HEIGHT, signing_boundary_height + 1, 18'016);
+    BOOST_CHECK(first.At(signing_boundary_height).GetBlockHash() ==
+                sibling.At(signing_boundary_height).GetBlockHash());
+    BOOST_CHECK(first.At(*newest_base_height).GetBlockHash() !=
+                sibling.At(*newest_base_height).GetBlockHash());
+
+    const auto source{RecoverySourceForChain(
+        first.Tip(), SOURCE_EPOCH, 18'017)};
+    const auto source_snapshot_height{RegistrationCutoffHeight(
+        config.schedule, SOURCE_EPOCH, SNAPSHOT_LAG)};
+    BOOST_REQUIRE(source_snapshot_height);
+    const auto recovery_bundle{
+        RecoveryBeaconBundleAtHeight(TARGET_HEIGHT, source)};
+
+    std::optional<uint256> target_local_disabled;
+    const QuorumSnapshotLookup lookup = [&](const CBlockIndex& index) {
+        QuorumSnapshotState result;
+        if (target_local_disabled && index.nHeight == TARGET_HEIGHT &&
+            index.GetBlockHash() == sibling.Tip().GetBlockHash()) {
+            std::vector<CDeterministicMNCPtr> members;
+            members.reserve(MEMBER_COUNT - 1);
+            for (uint32_t tag{0}; tag < MEMBER_COUNT; ++tag) {
+                auto member{Member(tag)};
+                if (member->proTxHash != *target_local_disabled) {
+                    members.push_back(std::move(member));
+                }
+            }
+            result.deterministic_mns = SnapshotFromMembers(
+                index.nHeight, index.GetBlockHash(), members);
+        } else {
+            result.deterministic_mns = Snapshot(
+                index.nHeight, index.GetBlockHash(), MEMBER_COUNT);
+        }
+        result.operator_key_states = index.nHeight == *source_snapshot_height
+            ? SharedOperatorStates(KeyStates(
+                  MEMBER_COUNT, SOURCE_EPOCH, index.nHeight))
+            : SharedOperatorStates(
+                  RecoveryTargetKeyStates(MEMBER_COUNT, index.nHeight));
+        return std::optional<QuorumSnapshotState>{std::move(result)};
+    };
+
+    QuorumBuildError error{QuorumBuildError::NONE};
+    const auto first_uncached{BuildActiveFrozenQuorumRosters(
+        genesis, config, TARGET_HEIGHT, first.Tip(), recovery_bundle,
+        lookup, &error)};
+    BOOST_REQUIRE_MESSAGE(
+        first_uncached, "quorum build error=" << static_cast<int>(error));
+    target_local_disabled =
+        first_uncached->front().members.front().pro_tx_hash;
+    const auto sibling_uncached{BuildActiveFrozenQuorumRosters(
+        genesis, config, TARGET_HEIGHT, sibling.Tip(), recovery_bundle,
+        lookup, &error)};
+    BOOST_REQUIRE_MESSAGE(
+        sibling_uncached, "quorum build error=" << static_cast<int>(error));
+
+    const auto check_siblings = [&](const FrozenQuorumRosters& lhs,
+                                    const FrozenQuorumRosters& rhs) {
+        for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+            BOOST_CHECK(lhs[slot].members == rhs[slot].members);
+            auto normalized{rhs[slot].descriptor};
+            if (slot == ACTIVE_QUORUMS - 1) {
+                BOOST_CHECK(lhs[slot].descriptor.base_hash !=
+                            normalized.base_hash);
+                normalized.base_hash = lhs[slot].descriptor.base_hash;
+            }
+            BOOST_CHECK(lhs[slot].descriptor == normalized);
+        }
+    };
+    check_siblings(*first_uncached, *sibling_uncached);
+
+    const auto cache{FrozenQuorumRosterCache::Create(
+        genesis, config, lookup)};
+    BOOST_REQUIRE(cache);
+    const auto first_cached{cache->GetVerifiedActive(
+        TARGET_HEIGHT, first.Tip(), recovery_bundle, &error)};
+    const auto sibling_cached{cache->GetVerifiedActive(
+        TARGET_HEIGHT, sibling.Tip(), recovery_bundle, &error)};
+    BOOST_REQUIRE(first_cached);
+    BOOST_REQUIRE(sibling_cached);
+    BOOST_CHECK(first_cached != sibling_cached);
+    BOOST_CHECK(first_cached->Rosters() == *first_uncached);
+    BOOST_CHECK(sibling_cached->Rosters() == *sibling_uncached);
+    check_siblings(first_cached->Rosters(), sibling_cached->Rosters());
+}
+
 BOOST_AUTO_TEST_CASE(recovery_capsule_matches_raw_selection_across_groups)
 {
     constexpr int32_t FIRST_TARGET{3465};
@@ -1642,7 +1752,8 @@ BOOST_AUTO_TEST_CASE(recovery_cutoff_pose_state_does_not_disable_revived_target)
     BOOST_CHECK(revived->Rosters().front().members[revived_slot].child_root);
 }
 
-BOOST_AUTO_TEST_CASE(recovery_keys_freeze_at_cutoff_and_target_only_disables)
+BOOST_AUTO_TEST_CASE(
+    recovery_keys_freeze_at_cutoff_and_signing_boundary_only_disables)
 {
     constexpr int32_t TARGET_HEIGHT{3465};
     constexpr uint32_t SOURCE_EPOCH{3};
@@ -1651,6 +1762,8 @@ BOOST_AUTO_TEST_CASE(recovery_keys_freeze_at_cutoff_and_target_only_disables)
     constexpr uint32_t TARGET_MEMBERS{SOURCE_MEMBERS + 1};
     const uint256 genesis{NonNullHash(18'100)};
     const auto config{BuildConfig(SNAPSHOT_LAG)};
+    const int32_t signing_boundary_height{
+        TARGET_HEIGHT - static_cast<int32_t>(config.schedule.sign_lag)};
     IndexChain chain(TARGET_HEIGHT, TARGET_HEIGHT + 1, 0);
 
     const auto source{RecoverySourceForChain(
@@ -1772,7 +1885,7 @@ BOOST_AUTO_TEST_CASE(recovery_keys_freeze_at_cutoff_and_target_only_disables)
             members.reserve(count);
             for (uint32_t tag{0}; tag < count; ++tag) {
                 auto member{Member(tag)};
-                if (index.nHeight != TARGET_HEIGHT ||
+                if (index.nHeight != signing_boundary_height ||
                     member->proTxHash != disabled_identity) {
                     members.push_back(std::move(member));
                 }
@@ -1792,7 +1905,7 @@ BOOST_AUTO_TEST_CASE(recovery_keys_freeze_at_cutoff_and_target_only_disables)
                         return state.pro_tx_hash == missing_at_cutoff;
                     }), states.end());
             }
-            if (index.nHeight == TARGET_HEIGHT) {
+            if (index.nHeight == signing_boundary_height) {
                 const auto state{std::find_if(
                     states.begin(), states.end(),
                     [&](const OperatorKeyState& candidate) {

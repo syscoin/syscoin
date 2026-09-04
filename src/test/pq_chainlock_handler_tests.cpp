@@ -5149,7 +5149,7 @@ BOOST_FIXTURE_TEST_CASE(
     constexpr int32_t CURRENT_HEIGHT{2'310};
     constexpr int32_t CANDIDATE_HEIGHT{2'315};
     constexpr int32_t RECOVERY_HEIGHT{3'465};
-    constexpr int32_t TIP_HEIGHT{3'475};
+    constexpr int32_t TIP_HEIGHT{3'480};
     const uint256 probation_root{NonNullHash(920'000)};
 
     auto& chainman{*Assert(m_node.chainman)};
@@ -5390,9 +5390,16 @@ BOOST_FIXTURE_TEST_CASE(
         RosterAuthorizationBaseIdentity{
             base.statement.height, base.statement.block_hash,
             base.GetLogicalId(genesis)}));
-    BOOST_CHECK(Access::StateAdvancingAuthorizationBaseAdmissible(
+    const auto at_initial_receipt_carrier{
+        Access::ObjectiveRosterAuthorization(
+            *handler, *chain[CANDIDATE_HEIGHT])};
+    BOOST_REQUIRE(at_initial_receipt_carrier);
+    BOOST_CHECK(at_initial_receipt_carrier->mode ==
+                ObjectiveRosterAuthorizationMode::PAUSE);
+    BOOST_CHECK(!at_initial_receipt_carrier->base);
+    BOOST_CHECK(!Access::StateAdvancingAuthorizationBaseAdmissible(
         *handler, ChainLockCandidateAdmission::LIVE, candidate));
-    BOOST_CHECK(Access::StateAdvancingAuthorizationBaseAdmissible(
+    BOOST_CHECK(!Access::StateAdvancingAuthorizationBaseAdmissible(
         *handler, ChainLockCandidateAdmission::CATCHUP, candidate));
 
     // The active tip is far past this exact next edge. Before the locally
@@ -5436,9 +5443,106 @@ BOOST_FIXTURE_TEST_CASE(
     install(*store, base);
     install(*store, current);
 
+    // A receipt carried by only one target sibling must not change roster
+    // authority until that carrier reaches the next round's shared boundary.
+    constexpr int32_t RECENT_HEIGHT{
+        RECOVERY_HEIGHT - static_cast<int32_t>(PQ_BTCC_NEVM_LAG)};
+    auto recent{MakeCatchupChainLock(
+        RECENT_HEIGHT, CURRENT_HEIGHT,
+        current.statement.block_hash, 925'250)};
+    recent.statement.block_hash = chain[RECENT_HEIGHT]->GetBlockHash();
+    recent.statement.payment_probation_state_hash = probation_root;
+    recent.statement.previous_btcc_cursor = base_cursor;
+    recent.statement.accepted_btcc_cursor = base_cursor;
+    recent.statement.btcc_advance = BTCCAdvance::KEEP;
+    recent.statement.btcc_receipt_state = *receipted_state;
+    set_exact_continuation(recent, base);
+    const auto recent_context{context_for(recent)};
+    BOOST_REQUIRE(recent_context);
+    BOOST_REQUIRE(store->AcceptVerifiedRosterAuthorizationBase(
+        recent, /*signatures_valid=*/true, recent_context));
+
+    uint256 receipt_sibling_hash{NonNullHash(925'251)};
+    CBlockIndex receipt_sibling;
+    receipt_sibling.nHeight = RECOVERY_HEIGHT;
+    receipt_sibling.phashBlock = &receipt_sibling_hash;
+    receipt_sibling.pprev = chain[RECOVERY_HEIGHT - 1];
+    receipt_sibling.BuildSkip();
+    {
+        LOCK(::cs_main);
+        receipt_sibling.nStatus = static_cast<BlockStatus>(
+            BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA |
+            BLOCK_PQ_BTCC_INDEX_VALIDATED |
+            BLOCK_PQ_RECEIPT_INDEX_VALIDATED |
+            BLOCK_GOVERNANCE_VALIDATED);
+    }
+
+    BTCCReceipt recent_receipt;
+    recent_receipt.chainlock_target_height = RECENT_HEIGHT;
+    recent_receipt.chainlock_target_hash = recent.statement.block_hash;
+    recent_receipt.chainlock_logical_id = recent.GetLogicalId(genesis);
+    recent_receipt.accepted_cursor = base_cursor;
+    const auto recent_receipted_state{ApplyBTCCReceiptState(
+        genesis, config->chainlock_schedule, config->btcc_schedule,
+        config->activation_predecessor_height, RECOVERY_HEIGHT,
+        receipt_sibling.GetBlockHash(), *receipted_state, recent_receipt)};
+    BOOST_REQUIRE(recent_receipted_state);
+    receipt_sibling.pqBTCCReceiptCursorHeight =
+        recent_receipted_state->cursor.sys_height;
+    receipt_sibling.pqBTCCReceiptCursorSysHash =
+        recent_receipted_state->cursor.sys_hash;
+    receipt_sibling.pqBTCCReceiptCursorBTCHash =
+        recent_receipted_state->cursor.btc_hash;
+    receipt_sibling.pqBTCCReceiptStateHash =
+        recent_receipted_state->cumulative_hash;
+    receipt_sibling.pqBTCCReceiptLatestTargetHeight =
+        recent_receipted_state->latest_chainlock_target_height;
+    receipt_sibling.pqBTCCReceiptLatestCarrierHeight =
+        recent_receipted_state->latest_receipt_carrier_height;
+    receipt_sibling.pqBTCCReceiptLogicalId =
+        recent_receipt.chainlock_logical_id;
+
+    BOOST_CHECK(chain[RECOVERY_HEIGHT]
+                    ->pqBTCCReceiptLogicalId.IsNull());
+    BOOST_CHECK(!receipt_sibling.pqBTCCReceiptLogicalId.IsNull());
+    BOOST_CHECK(chain[RECOVERY_HEIGHT]->pqBTCCReceiptStateHash !=
+                receipt_sibling.pqBTCCReceiptStateHash);
+    const auto plain_target_objective{
+        Access::ObjectiveRosterAuthorization(
+            *handler, *chain[RECOVERY_HEIGHT])};
+    const auto receipt_target_objective{
+        Access::ObjectiveRosterAuthorization(*handler, receipt_sibling)};
+    BOOST_REQUIRE(plain_target_objective);
+    BOOST_REQUIRE(receipt_target_objective);
+    BOOST_REQUIRE(plain_target_objective->base);
+    BOOST_REQUIRE(receipt_target_objective->base);
+    const RosterAuthorizationBaseIdentity expected_base{
+        base.statement.height, base.statement.block_hash,
+        base.GetLogicalId(genesis)};
+    BOOST_CHECK(plain_target_objective->mode ==
+                ObjectiveRosterAuthorizationMode::RECOVER);
+    BOOST_CHECK(receipt_target_objective->mode ==
+                plain_target_objective->mode);
+    BOOST_CHECK(receipt_target_objective->base ==
+                plain_target_objective->base);
+    BOOST_CHECK(*receipt_target_objective->base == expected_base);
+    BOOST_CHECK(receipt_target_objective->recovery_source ==
+                plain_target_objective->recovery_source);
+
     const auto recovery_epoch{EpochForHeight(
         config->chainlock_schedule, RECOVERY_HEIGHT)};
     BOOST_REQUIRE(recovery_epoch);
+    BOOST_REQUIRE(plain_target_objective->recovery_source);
+    BOOST_REQUIRE(receipt_target_objective->recovery_source);
+    const auto plain_target_window{MakeRecoveryRosterBeaconWindow(
+        *plain_target_objective->recovery_source, *recovery_epoch)};
+    const auto receipt_target_window{MakeRecoveryRosterBeaconWindow(
+        *receipt_target_objective->recovery_source, *recovery_epoch)};
+    BOOST_REQUIRE(plain_target_window);
+    BOOST_REQUIRE(receipt_target_window);
+    BOOST_CHECK(plain_target_window->active ==
+                receipt_target_window->active);
+
     const auto canonical_recovery{CanonicalRosterRecoveryTargetHeight(
         config->chainlock_schedule, config->btcc_schedule,
         *recovery_epoch)};
@@ -5492,9 +5596,6 @@ BOOST_FIXTURE_TEST_CASE(
     BOOST_CHECK(recovery_objective->mode ==
                 ObjectiveRosterAuthorizationMode::RECOVER);
     BOOST_REQUIRE(recovery_objective->base);
-    const RosterAuthorizationBaseIdentity expected_base{
-        base.statement.height, base.statement.block_hash,
-        base.GetLogicalId(genesis)};
     BOOST_CHECK(*recovery_objective->base == expected_base);
     BOOST_CHECK(Access::StateAdvancingAuthorizationBaseAdmissible(
         *handler, ChainLockCandidateAdmission::CATCHUP, recovery));
@@ -5550,34 +5651,48 @@ BOOST_FIXTURE_TEST_CASE(
         chain[RECOVERY_CARRIER]->GetBlockHash(),
         *receipted_state, recovery_receipt)};
     BOOST_REQUIRE(recovery_receipted_state);
-    chain[RECOVERY_CARRIER]->pqBTCCReceiptCursorHeight =
-        recovery_receipted_state->cursor.sys_height;
-    chain[RECOVERY_CARRIER]->pqBTCCReceiptCursorSysHash =
-        recovery_receipted_state->cursor.sys_hash;
-    chain[RECOVERY_CARRIER]->pqBTCCReceiptCursorBTCHash =
-        recovery_receipted_state->cursor.btc_hash;
-    chain[RECOVERY_CARRIER]->pqBTCCReceiptStateHash =
-        recovery_receipted_state->cumulative_hash;
-    chain[RECOVERY_CARRIER]->pqBTCCReceiptLatestTargetHeight =
-        recovery_receipted_state->latest_chainlock_target_height;
-    chain[RECOVERY_CARRIER]->pqBTCCReceiptLatestCarrierHeight =
-        recovery_receipted_state->latest_receipt_carrier_height;
+    for (int32_t height{RECOVERY_CARRIER};
+         height <= TIP_HEIGHT; ++height) {
+        chain[height]->pqBTCCReceiptCursorHeight =
+            recovery_receipted_state->cursor.sys_height;
+        chain[height]->pqBTCCReceiptCursorSysHash =
+            recovery_receipted_state->cursor.sys_hash;
+        chain[height]->pqBTCCReceiptCursorBTCHash =
+            recovery_receipted_state->cursor.btc_hash;
+        chain[height]->pqBTCCReceiptStateHash =
+            recovery_receipted_state->cumulative_hash;
+        chain[height]->pqBTCCReceiptLatestTargetHeight =
+            recovery_receipted_state->latest_chainlock_target_height;
+        chain[height]->pqBTCCReceiptLatestCarrierHeight =
+            recovery_receipted_state->latest_receipt_carrier_height;
+    }
     chain[RECOVERY_CARRIER]->pqBTCCReceiptLogicalId =
         recovery_receipt.chainlock_logical_id;
 
-    const auto receipted_recovery{
+    const auto at_recovery_receipt_carrier{
         Access::ObjectiveRosterAuthorization(
             *handler, *chain[RECOVERY_CARRIER])};
-    BOOST_REQUIRE(receipted_recovery);
-    BOOST_CHECK(receipted_recovery->mode ==
+    BOOST_REQUIRE(at_recovery_receipt_carrier);
+    BOOST_CHECK(at_recovery_receipt_carrier->mode ==
+                ObjectiveRosterAuthorizationMode::PAUSE);
+    BOOST_CHECK(!at_recovery_receipt_carrier->base);
+
+    constexpr int32_t NORMAL_RESUME_TARGET{
+        RECOVERY_CARRIER + static_cast<int32_t>(PQ_CL_PERIOD)};
+    const auto after_recovery_receipt_boundary{
+        Access::ObjectiveRosterAuthorization(
+            *handler, *chain[NORMAL_RESUME_TARGET])};
+    BOOST_REQUIRE(after_recovery_receipt_boundary);
+    BOOST_CHECK(after_recovery_receipt_boundary->mode ==
                 ObjectiveRosterAuthorizationMode::NORMAL);
-    BOOST_REQUIRE(receipted_recovery->base);
+    BOOST_REQUIRE(after_recovery_receipt_boundary->base);
     const RosterAuthorizationBaseIdentity expected_recovery_base{
         recovery.statement.height, recovery.statement.block_hash,
         recovery.GetLogicalId(genesis)};
-    BOOST_CHECK(*receipted_recovery->base == expected_recovery_base);
-    BOOST_REQUIRE(receipted_recovery->recovery_source);
-    BOOST_CHECK(*receipted_recovery->recovery_source ==
+    BOOST_CHECK(*after_recovery_receipt_boundary->base ==
+                expected_recovery_base);
+    BOOST_REQUIRE(after_recovery_receipt_boundary->recovery_source);
+    BOOST_CHECK(*after_recovery_receipt_boundary->recovery_source ==
                 base_window.active.recovery_authority_source);
 
     // A stale-base certificate cannot discard an unconsumed observation just
@@ -5722,8 +5837,9 @@ BOOST_FIXTURE_TEST_CASE(
 
     // A REVEAL may retain the older authenticated recovery source when the
     // newly READY source has fewer than 400 rooted members. Once receipted,
-    // that exact signed choice remains the objective source for the next
-    // transition; it must not be replaced by the rejected newest seed.
+    // that exact signed choice remains the objective source once its carrier
+    // reaches the next round boundary; it must not be replaced by the rejected
+    // newest seed.
     RosterBeaconWindow pending_source_window{base_window};
     auto& pending_source{pending_source_window.next};
     pending_source.state = RosterBeaconState::PENDING;
@@ -5844,23 +5960,28 @@ BOOST_FIXTURE_TEST_CASE(
         chain[RETAINED_SOURCE_CARRIER]->GetBlockHash(), *receipted_state,
         retained_source_receipt)};
     BOOST_REQUIRE(retained_source_receipt_state);
-    chain[RETAINED_SOURCE_CARRIER]->pqBTCCReceiptCursorHeight =
-        retained_source_receipt_state->cursor.sys_height;
-    chain[RETAINED_SOURCE_CARRIER]->pqBTCCReceiptCursorSysHash =
-        retained_source_receipt_state->cursor.sys_hash;
-    chain[RETAINED_SOURCE_CARRIER]->pqBTCCReceiptCursorBTCHash =
-        retained_source_receipt_state->cursor.btc_hash;
-    chain[RETAINED_SOURCE_CARRIER]->pqBTCCReceiptStateHash =
-        retained_source_receipt_state->cumulative_hash;
-    chain[RETAINED_SOURCE_CARRIER]->pqBTCCReceiptLatestTargetHeight =
-        retained_source_receipt_state->latest_chainlock_target_height;
-    chain[RETAINED_SOURCE_CARRIER]->pqBTCCReceiptLatestCarrierHeight =
-        retained_source_receipt_state->latest_receipt_carrier_height;
+    constexpr int32_t RETAINED_SOURCE_AUTHORITY_TARGET{
+        RETAINED_SOURCE_CARRIER + static_cast<int32_t>(PQ_CL_PERIOD)};
+    for (int32_t height{RETAINED_SOURCE_CARRIER};
+         height <= RETAINED_SOURCE_AUTHORITY_TARGET; ++height) {
+        chain[height]->pqBTCCReceiptCursorHeight =
+            retained_source_receipt_state->cursor.sys_height;
+        chain[height]->pqBTCCReceiptCursorSysHash =
+            retained_source_receipt_state->cursor.sys_hash;
+        chain[height]->pqBTCCReceiptCursorBTCHash =
+            retained_source_receipt_state->cursor.btc_hash;
+        chain[height]->pqBTCCReceiptStateHash =
+            retained_source_receipt_state->cumulative_hash;
+        chain[height]->pqBTCCReceiptLatestTargetHeight =
+            retained_source_receipt_state->latest_chainlock_target_height;
+        chain[height]->pqBTCCReceiptLatestCarrierHeight =
+            retained_source_receipt_state->latest_receipt_carrier_height;
+    }
     chain[RETAINED_SOURCE_CARRIER]->pqBTCCReceiptLogicalId =
         retained_source_receipt.chainlock_logical_id;
 
     const auto retained_objective{Access::ObjectiveRosterAuthorization(
-        *handler, *chain[RETAINED_SOURCE_CARRIER])};
+        *handler, *chain[RETAINED_SOURCE_AUTHORITY_TARGET])};
     BOOST_REQUIRE(retained_objective);
     BOOST_REQUIRE(retained_objective->recovery_source);
     BOOST_CHECK(*retained_objective->recovery_source ==

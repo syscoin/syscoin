@@ -763,6 +763,8 @@ than `f`; conflicting thresholds therefore require at least one non-Byzantine
 signer to equivocate when that selected roster contains at most 133 Byzantine
 members. Any two three-of-four quorum masks over the same four rosters share at
 least two rosters, yielding at least 268 double-signing member/epoch slots.
+Here, the same roster means the same ordered identities, frozen keys, and
+eligibility; its branch-bound descriptor may carry a different epoch-base hash.
 This is not a claim of 801 unique operators: active rosters may overlap, which
 is why the burn journal is keyed operator-wide and branch conflicts remain
 correlated.
@@ -836,16 +838,17 @@ Normal `LIVE` admission requires the receiver's exact durable winner as the
 block-finality predecessor, including the exact accepted BTCC cursor, and the
 target must be the first eligible height after that predecessor. The signed
 roster-authorization base is a separate certificate identity selected from
-the candidate branch's authenticated receipt state. The latest non-null
-carrier names the exact already-verified certificate whose roster state may
-authorize the next statement. A higher same-ancestry local winner remains the
-wire predecessor and the ancestry, receipt-state, and cursor floor; it cannot
-replace that objective authorization base. When the two differ, admission
-also projects from the current winner and requires the resulting active roster
+the candidate branch's authenticated receipt state at the current round's
+`H-sign_lag` fork anchor. The latest non-null carrier at or before that anchor
+names the exact already-verified certificate whose roster state may authorize
+the next statement. A higher same-ancestry local winner remains the wire
+predecessor and the ancestry, receipt-state, and cursor floor; it cannot
+replace that objective authorization base. When the two differ, admission also
+projects from the current winner and requires the resulting active roster
 bundle and next-beacon state to converge.
 
 Every post-initialization target derives one mode from the latest receipted
-target on its own fully validated branch:
+target in the fully validated receipt state at its `H-sign_lag` fork anchor:
 
 - `NORMAL` when receipt progress is in the target epoch or its predecessor;
 - `RECOVER` only at the unique phase-3 recovery target when receipt progress
@@ -855,7 +858,15 @@ target on its own fully validated branch:
 
 The modes are mutually exclusive and apply equally to local signing and peer
 verification. A candidate's signatures or claimed roster fields cannot select
-its mode or authorization base.
+its mode or authorization base. Admissible sibling targets in one signing
+round share that anchor and therefore share their mode, authorization base,
+ordered signer identities, frozen keys, and eligibility. A full descriptor
+remains branch-bound: when an epoch base lies between the fork anchor and the
+target, its `base_hash` may differ without changing the signer set. Roster
+caches therefore bind both the signing boundary and newest epoch-base hash.
+The target's current receipt accumulator remains signed and fully verified,
+but target-local receipts and deterministic-MN changes affect roster authority
+only in the next signing round.
 
 At a `RECOVER` target, the latest receipted certificate supplies the exact
 normal pre-reveal source. That source fixes the entropy and identity snapshot;
@@ -864,18 +875,19 @@ global-key lineage participate. The absolute epochs of the new four-roster group
 domain-separate fresh roster selections. Root availability never affects
 selection or ordering. The oldest
 epoch's registration cutoff freezes each selected identity's child root, and
-target state may only disable a fixed entry, never replace or backfill it. The
-recovery statement must retain the receipted Bitcoin cursor with `KEEP`.
+state at the `H-sign_lag` fork anchor may only disable a fixed entry, never
+replace or backfill it. The recovery statement must retain the receipted
+Bitcoin cursor with `KEEP`.
 
 A verified recovery certificate remains non-objective until its exact
-non-null `KEEP` receipt is carried at `H+10`. Before that receipt, all other
-targets remain paused, so a hidden certificate cannot privately switch the
-roster state or trigger a competing normal rotation. Once receipted, normal
-signing resumes and ordinary rotations drain the recovery rosters. If an
-attempt never reaches threshold, the next phase-3 group selects four fresh
-absolute-epoch rosters from the same authenticated source. Recovery therefore
-needs neither Bitcoin RPC on full nodes nor approval from the failed active
-rosters.
+non-null `KEEP` receipt is carried at `H+10` and reaches the next round's fork
+anchor. Before that, all other targets remain paused, so a hidden certificate
+cannot privately switch the roster state or trigger a competing normal
+rotation. Normal signing then resumes and ordinary rotations drain the
+recovery rosters. If an attempt never reaches threshold, the next phase-3 group
+selects four fresh absolute-epoch rosters from the same authenticated source.
+Recovery therefore needs neither Bitcoin RPC on full nodes nor approval from
+the failed active rosters.
 Before the first winner, the only admissible target is the first eligible
 target after `A-1`, which configuration also requires to be the canonical
 phase-3 BTCC target. Its predecessor hash is obtained from the fully validated

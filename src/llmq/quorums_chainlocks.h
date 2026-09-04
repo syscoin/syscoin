@@ -1738,7 +1738,7 @@ private:
         std::optional<pq::VerifiedRosterAuthorizationBaseView> base;
         std::optional<pq::RecoveryRosterAuthoritySource> recovery_source;
     };
-    /** Resolve authority only from the newest receipt on this exact branch. */
+    /** Resolve authority from the receipt state at this round's fork anchor. */
     [[nodiscard]] std::optional<ObjectiveRosterAuthorizationContext>
     ResolveObjectiveRosterAuthorizationContext(
         const CBlockIndex& candidate,
