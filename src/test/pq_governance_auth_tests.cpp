@@ -66,6 +66,7 @@ slhdsa::SecretKey DeterministicGlobalKey(uint8_t domain)
 }
 
 GlobalKeyRecord GlobalKeyFor(const slhdsa::SecretKey& key,
+                             const uint256& pro_tx_hash,
                              uint32_t key_version,
                              uint32_t activated_height)
 {
@@ -75,8 +76,12 @@ GlobalKeyRecord GlobalKeyFor(const slhdsa::SecretKey& key,
     BOOST_REQUIRE(key.GetPublicKey(record.public_key));
     record.child_key_commitment.generation = key_version;
     record.child_key_commitment.first_epoch = 7;
-    record.child_key_commitment.tree_id.begin()[0] =
-        static_cast<uint8_t>(0x80 + key_version);
+    const auto tree_id{GetChildKeyTreeId(
+        Params().GetConsensus().hashGenesisBlock, pro_tx_hash,
+        record.child_key_commitment.generation,
+        record.child_key_commitment.first_epoch)};
+    BOOST_REQUIRE(tree_id);
+    record.child_key_commitment.tree_id = *tree_id;
     record.child_key_commitment.root.begin()[0] =
         static_cast<uint8_t>(0x90 + key_version);
     BOOST_REQUIRE(record.IsStructurallyValid());
@@ -112,16 +117,13 @@ OperatorKeyState CurrentOperatorState(const uint256& pro_tx_hash,
 
 PQRegistrySnapshot CurrentRegistrySnapshot(
     const CBlockIndex& tip,
-    const OperatorKeyState& state,
-    std::vector<uint256> used_tree_ids)
+    const OperatorKeyState& state)
 {
     PQRegistrySnapshot snapshot;
     snapshot.height = tip.nHeight;
     snapshot.block_hash = tip.GetBlockHash();
     snapshot.previous_block_hash = tip.pprev->GetBlockHash();
     snapshot.operator_states = {state};
-    std::sort(used_tree_ids.begin(), used_tree_ids.end());
-    snapshot.used_tree_ids = std::move(used_tree_ids);
     const auto root{snapshot.RecomputeConsensusStateRoot(
         Params().GetConsensus().hashGenesisBlock)};
     BOOST_REQUIRE(root);
@@ -255,7 +257,7 @@ BOOST_FIXTURE_TEST_CASE(
 
     auto signing_secret{DeterministicGlobalKey(0x20)};
     const auto signing_key{GlobalKeyFor(
-        signing_secret, /*key_version=*/1,
+        signing_secret, pro_tx_hash, /*key_version=*/1,
         static_cast<uint32_t>(activation_height - 1))};
     GovernanceAuthorization authorization;
     authorization.signed_height = branch[1].nHeight;
@@ -274,8 +276,7 @@ BOOST_FIXTURE_TEST_CASE(
     const auto current_state{
         CurrentOperatorState(pro_tx_hash, signing_key, /*active=*/true)};
     const auto current_snapshot{CurrentRegistrySnapshot(
-        branch.back(), current_state,
-        {signing_key.child_key_commitment.tree_id})};
+        branch.back(), current_state)};
     std::string error;
     BOOST_CHECK(VerifyGovernanceAuthorizationForBranch(
         branch.back(), mn_list, current_snapshot, collateral,
@@ -304,13 +305,11 @@ BOOST_FIXTURE_TEST_CASE(
 
     auto replacement_secret{DeterministicGlobalKey(0x60)};
     const auto replacement_key{GlobalKeyFor(
-        replacement_secret, /*key_version=*/2,
+        replacement_secret, pro_tx_hash, /*key_version=*/2,
         static_cast<uint32_t>(branch[2].nHeight))};
     const auto rotated_snapshot{CurrentRegistrySnapshot(
         branch.back(),
-        CurrentOperatorState(pro_tx_hash, replacement_key, /*active=*/true),
-        {signing_key.child_key_commitment.tree_id,
-         replacement_key.child_key_commitment.tree_id})};
+        CurrentOperatorState(pro_tx_hash, replacement_key, /*active=*/true))};
     BOOST_CHECK(!VerifyGovernanceAuthorizationForBranch(
         branch.back(), mn_list, rotated_snapshot, collateral,
         GovernanceAuthPurpose::TRIGGER, payload_hash, encoded, error));
@@ -321,8 +320,7 @@ BOOST_FIXTURE_TEST_CASE(
         branch.back(),
         CurrentOperatorState(
             pro_tx_hash, signing_key, /*active=*/false,
-            static_cast<uint32_t>(branch[2].nHeight)),
-        {signing_key.child_key_commitment.tree_id})};
+            static_cast<uint32_t>(branch[2].nHeight)))};
     BOOST_CHECK(!VerifyGovernanceAuthorizationForBranch(
         branch.back(), mn_list, revoked_snapshot, collateral,
         GovernanceAuthPurpose::TRIGGER, payload_hash, encoded, error));

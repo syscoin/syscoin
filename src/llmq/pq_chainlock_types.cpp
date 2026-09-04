@@ -88,6 +88,25 @@ bool IsReceiptStateCompatible(const BTCCursor& accepted,
 
 } // namespace
 
+std::optional<uint256> GetChildKeyTreeId(
+    const uint256& genesis_hash,
+    const uint256& pro_tx_hash,
+    uint32_t generation,
+    uint32_t first_epoch) noexcept
+{
+    if (genesis_hash.IsNull() || pro_tx_hash.IsNull() ||
+        !IsValidChildKeyTreeGeneration(generation) ||
+        static_cast<uint64_t>(first_epoch) + CHILD_KEY_TREE_LEAF_COUNT - 1 >
+            std::numeric_limits<uint32_t>::max()) {
+        return std::nullopt;
+    }
+    const uint256 tree_id{TaggedHash(
+        CHILD_KEY_TREE_ID_DOMAIN, genesis_hash, pro_tx_hash, generation,
+        first_epoch)};
+    return tree_id.IsNull() ? std::nullopt
+                            : std::optional<uint256>{tree_id};
+}
+
 bool ChildKeyTreeCommitment::IsStructurallyValid() const noexcept
 {
     if (version != CHILD_KEY_TREE_COMMITMENT_VERSION ||

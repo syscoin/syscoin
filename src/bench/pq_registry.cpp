@@ -117,10 +117,8 @@ std::size_t CheckpointDynamicMemoryUsage(
     for (const auto& state : checkpoint.checkpoint_operator_states) {
         usage += memusage::DynamicUsage(state.frozen_child_roots);
     }
-    usage += memusage::DynamicUsage(checkpoint.tree_ids);
     usage += memusage::DynamicUsage(checkpoint.operator_states);
     usage += memusage::DynamicUsage(checkpoint.removed_operators);
-    usage += memusage::DynamicUsage(checkpoint.block_tree_ids);
     return usage;
 }
 
@@ -170,12 +168,6 @@ struct MaxCheckpointFixture {
         snapshot.block_hash = OrderedHash(0x02, 2);
         snapshot.previous_block_hash = OrderedHash(0x02, 1);
         snapshot.operator_states.reserve(MAX_PQ_OPERATOR_STATES);
-        snapshot.used_tree_ids.reserve(MAX_PQ_USED_TREE_IDS);
-
-        for (uint32_t index{0}; index < MAX_PQ_USED_TREE_IDS; ++index) {
-            snapshot.used_tree_ids.push_back(
-                OrderedHash(0x20, index + 1));
-        }
 
         const auto schedule{
             OperatorKeyScheduleState::FromView(*schedule_view)};
@@ -191,8 +183,10 @@ struct MaxCheckpointFixture {
                 static_cast<uint32_t>(config.preparation_height);
             state.global_key.child_key_commitment.generation = 1;
             state.global_key.child_key_commitment.first_epoch = 0;
-            state.global_key.child_key_commitment.tree_id =
-                snapshot.used_tree_ids[index];
+            const auto tree_id{GetChildKeyTreeId(
+                genesis_hash, state.pro_tx_hash, 1, 0)};
+            Require(tree_id.has_value(), "child-key tree ID");
+            state.global_key.child_key_commitment.tree_id = *tree_id;
             state.global_key.child_key_commitment.root =
                 OrderedHash(0x30, index + 1);
             state.schedule_initialized = 1;
@@ -223,7 +217,6 @@ struct MaxCheckpointFixture {
         checkpoint.previous_consensus_state_root = *state_root;
         checkpoint.checkpoint_operator_states =
             std::move(snapshot.operator_states);
-        checkpoint.tree_ids = std::move(snapshot.used_tree_ids);
         checkpoint.consensus_state_root = *state_root;
         Require(checkpoint.IsStructurallyValid(), "disk checkpoint");
 
@@ -252,7 +245,6 @@ void ConfigureMaxCheckpointBench(benchmark::Bench& bench,
 {
     std::cout << "PQ registry maximum-checkpoint fixture: operators="
               << MAX_PQ_OPERATOR_STATES
-              << " tree_ids=" << MAX_PQ_USED_TREE_IDS
               << " frozen_roots_per_operator="
               << fixture.frozen_roots_per_operator
               << " serialized_bytes=" << fixture.serialized_bytes
@@ -262,7 +254,6 @@ void ConfigureMaxCheckpointBench(benchmark::Bench& bench,
         .epochIterations(1)
         .unit("checkpoint")
         .context("operators", std::to_string(MAX_PQ_OPERATOR_STATES))
-        .context("tree_ids", std::to_string(MAX_PQ_USED_TREE_IDS))
         .context("frozen_roots_per_operator",
                  std::to_string(fixture.frozen_roots_per_operator))
         .context("serialized_bytes",

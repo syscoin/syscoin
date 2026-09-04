@@ -36,7 +36,6 @@ namespace llmq::pq::test {
 struct PQRegistryReconstructionStats {
     uint64_t authenticated_records{0};
     uint64_t reused_records{0};
-    uint64_t tree_id_hashes{0};
     uint64_t state_hashes{0};
     std::size_t cached_views{0};
     std::size_t cached_payment_views{0};
@@ -55,7 +54,6 @@ public:
         LOCK(manager.m_mutex);
         return {manager.m_reconstruction_authenticated_records,
                 manager.m_reconstruction_reused_records,
-                manager.m_reconstruction_tree_id_hashes,
                 manager.m_reconstruction_state_hashes,
                 manager.m_snapshot_cache.size(),
                 manager.m_payment_eligibility_cache.size(),
@@ -72,7 +70,6 @@ public:
         LOCK(manager.m_mutex);
         manager.m_reconstruction_authenticated_records = 0;
         manager.m_reconstruction_reused_records = 0;
-        manager.m_reconstruction_tree_id_hashes = 0;
         manager.m_reconstruction_state_hashes = 0;
         manager.m_gc_context_authentications = 0;
     }
@@ -265,6 +262,8 @@ GlobalSignature SignDigest(const slhdsa::SecretKey& key,
 }
 
 ChildKeyTreeCommitment CommitmentAt(const PQRegistryConfig& config,
+                                    const uint256& genesis,
+                                    const uint256& pro_tx_hash,
                                     int32_t height,
                                     uint32_t generation,
                                     uint32_t tag)
@@ -276,7 +275,10 @@ ChildKeyTreeCommitment CommitmentAt(const PQRegistryConfig& config,
     ChildKeyTreeCommitment commitment;
     commitment.generation = generation;
     commitment.first_epoch = view->first_mutable_epoch;
-    commitment.tree_id = NonNullHash(50'000 + tag);
+    const auto tree_id{GetChildKeyTreeId(
+        genesis, pro_tx_hash, generation, commitment.first_epoch)};
+    BOOST_REQUIRE(tree_id);
+    commitment.tree_id = *tree_id;
     commitment.root = NonNullHash(60'000 + tag);
     BOOST_REQUIRE(commitment.IsStructurallyValid());
     return commitment;
@@ -677,7 +679,6 @@ BOOST_AUTO_TEST_CASE(local_failures_are_not_candidate_failures)
         PQRegistryResult::DMN_REMOVED_IN_BLOCK,
         PQRegistryResult::DUPLICATE_OPERATOR_UPDATE,
         PQRegistryResult::DUPLICATE_GLOBAL_KEY,
-        PQRegistryResult::DUPLICATE_CHILD_TREE_ID,
         PQRegistryResult::INVALID_GLOBAL_KEY_PAYLOAD,
         PQRegistryResult::INVALID_PROVIDER_REVOCATION_PAYLOAD,
         PQRegistryResult::TRANSACTION_INPUTS_HASH_MISMATCH,
@@ -696,7 +697,7 @@ BOOST_AUTO_TEST_CASE(empty_registry_consensus_root_is_frozen)
     const auto root{empty.RecomputeConsensusStateRoot(NonNullHash(3))};
     BOOST_REQUIRE(root);
     BOOST_CHECK(*root == uint256S(
-        "30baf90ece972a64ce79c3661c960928329f13f802a66a7e2fb906eb8b2e5728"));
+        "952f29534176f375e3cdd686f65cc66143a28d3a965d65566b7ed13a8cbce87c"));
 }
 
 BOOST_AUTO_TEST_CASE(configuration_requires_real_preparation_window)
@@ -897,7 +898,8 @@ BOOST_AUTO_TEST_CASE(initial_root_registration_prepares_purely_and_commits_exact
     CKey owner_key;
     owner_key.MakeNewKey(/*fCompressed=*/true);
     const CKeyID owner_key_id{owner_key.GetPubKey().GetID()};
-    const auto commitment{CommitmentAt(config, 1295, 1, 1)};
+    const auto commitment{CommitmentAt(
+        config, genesis, pro_tx_hash, 1295, 1, 1)};
     const auto registration{GlobalRegistration(
         genesis, pro_tx_hash, key, owner_key, commitment, 2)};
     const auto block{Block(parent, 1,
@@ -952,10 +954,6 @@ BOOST_AUTO_TEST_CASE(initial_root_registration_prepares_purely_and_commits_exact
     BOOST_CHECK(state.HasActiveGlobalKey());
     BOOST_CHECK_EQUAL(state.global_key.activated_height, 1295U);
     BOOST_CHECK(state.global_key.child_key_commitment == commitment);
-    BOOST_REQUIRE_EQUAL(snapshot.used_tree_ids.size(), 1U);
-    BOOST_REQUIRE_EQUAL(snapshot.block_tree_ids.size(), 1U);
-    BOOST_CHECK(snapshot.used_tree_ids.front() == commitment.tree_id);
-    BOOST_CHECK(snapshot.block_tree_ids.front() == commitment.tree_id);
     BOOST_CHECK(state.ResolveChildRoot(0).status ==
                 ChildRootResolutionStatus::MUTABLE_PRESENT);
 
@@ -966,8 +964,6 @@ BOOST_AUTO_TEST_CASE(initial_root_registration_prepares_purely_and_commits_exact
     BOOST_CHECK(first_disk.operator_states == snapshot.operator_states);
     BOOST_CHECK(first_disk.checkpoint_operator_states ==
                 snapshot.operator_states);
-    BOOST_CHECK(first_disk.tree_ids == snapshot.used_tree_ids);
-    BOOST_CHECK(first_disk.block_tree_ids == snapshot.block_tree_ids);
     BOOST_CHECK(first_disk.removed_operators.empty());
     const auto empty_root{
         PQRegistrySnapshot{}.RecomputeConsensusStateRoot(genesis)};
@@ -995,7 +991,6 @@ BOOST_AUTO_TEST_CASE(initial_root_registration_prepares_purely_and_commits_exact
     BOOST_REQUIRE(manager.GetMempoolView(
         block.GetHash(), 1295, requested, mempool_view, error));
     BOOST_CHECK_EQUAL(mempool_view.operator_state_count, 1U);
-    BOOST_CHECK_EQUAL(mempool_view.used_tree_id_count, 1U);
     BOOST_CHECK_EQUAL(mempool_view.operators.size(), requested.size());
     BOOST_CHECK_EQUAL(mempool_view.has_next_block_schedule, 1U);
     const auto next_schedule{DeriveOperatorKeyScheduleView(
@@ -1178,7 +1173,6 @@ BOOST_AUTO_TEST_CASE(prepared_write_failure_does_not_publish_and_can_retry)
         steady.GetHash(), cutoff.GetHash(),
         config.preparation_height + 2, steady_view, error));
     BOOST_CHECK(cutoff_view.SharesStateWith(steady_view));
-    BOOST_CHECK(cutoff_view.SharesTreeHistoryWith(steady_view));
     BOOST_CHECK(cutoff_view.ConsensusStateRoot() ==
                 steady_view.ConsensusStateRoot());
     PQRegistryDiskSnapshot steady_disk;
@@ -1187,8 +1181,6 @@ BOOST_AUTO_TEST_CASE(prepared_write_failure_does_not_publish_and_can_retry)
     BOOST_CHECK_EQUAL(steady_disk.is_checkpoint, 0U);
     BOOST_CHECK(steady_disk.operator_states.empty());
     BOOST_CHECK(steady_disk.removed_operators.empty());
-    BOOST_CHECK(steady_disk.tree_ids.empty());
-    BOOST_CHECK(steady_disk.block_tree_ids.empty());
     BOOST_CHECK(steady_disk.previous_consensus_state_root ==
                 cutoff_view.ConsensusStateRoot());
     BOOST_CHECK(steady_disk.consensus_state_root ==
@@ -1207,7 +1199,7 @@ BOOST_AUTO_TEST_CASE(mempool_prepass_defers_owner_and_slh_authorization)
     const CKeyID owner_key_id{owner_key.GetPubKey().GetID()};
     const auto valid{GlobalRegistration(
         genesis, pro_tx_hash, key, owner_key,
-        CommitmentAt(config, 1295, 1, 201), 201)};
+        CommitmentAt(config, genesis, pro_tx_hash, 1295, 1, 201), 201)};
     const auto corrupted{CorruptAuthorization(valid)};
     PQRegistryManager manager(MemoryDB(2), genesis, config);
     PQRegistryError error;
@@ -1269,7 +1261,7 @@ BOOST_AUTO_TEST_CASE(mempool_prepass_defers_owner_and_slh_authorization)
     BOOST_CHECK(error.result ==
                 PQRegistryResult::OPERATOR_STATE_TRANSITION_FAILED);
     BOOST_CHECK(error.state_result ==
-                OperatorKeyStateResult::GLOBAL_REGISTRATION_AUTH_FAILED);
+                OperatorKeyStateResult::INVALID_CHILD_ROOT_COMMITMENT);
 
     CMutableTransaction exhausted_generation{*valid};
     BOOST_REQUIRE(GetTxPayload(exhausted_generation, skipped_payload));
@@ -1283,7 +1275,7 @@ BOOST_AUTO_TEST_CASE(mempool_prepass_defers_owner_and_slh_authorization)
     BOOST_CHECK_EQUAL(owner_calls, 3U);
 }
 
-BOOST_AUTO_TEST_CASE(branches_preserve_exact_tree_history_and_cutoff_roots)
+BOOST_AUTO_TEST_CASE(branches_preserve_exact_cutoff_roots)
 {
     const auto config{FastConfig()};
     const uint256 genesis{NonNullHash(11)};
@@ -1297,7 +1289,8 @@ BOOST_AUTO_TEST_CASE(branches_preserve_exact_tree_history_and_cutoff_roots)
     const CKeyID owner_key_id{owner_key.GetPubKey().GetID()};
     PQRegistryManager manager(MemoryDB(3), genesis, config);
     PQRegistryError error;
-    const auto old_commitment{CommitmentAt(config, 1295, 1, 11)};
+    const auto old_commitment{CommitmentAt(
+        config, genesis, pro_tx_hash, 1295, 1, 11)};
     const auto registration{Block(
         NonNullHash(13), 10,
         {OrdinaryTransaction(10),
@@ -1312,8 +1305,10 @@ BOOST_AUTO_TEST_CASE(branches_preserve_exact_tree_history_and_cutoff_roots)
         registered, error));
     const GlobalKeyRecord current{OnlyOperator(registered).global_key};
 
-    const auto commitment_a{CommitmentAt(config, 1296, 2, 12)};
-    const auto commitment_b{CommitmentAt(config, 1296, 2, 13)};
+    const auto commitment_a{CommitmentAt(
+        config, genesis, pro_tx_hash, 1296, 2, 12)};
+    const auto commitment_b{CommitmentAt(
+        config, genesis, pro_tx_hash, 1296, 2, 13)};
     const auto branch_a{Block(
         registration.GetHash(), 20,
         {OrdinaryTransaction(20),
@@ -1348,14 +1343,6 @@ BOOST_AUTO_TEST_CASE(branches_preserve_exact_tree_history_and_cutoff_roots)
         key_only_branch.GetHash(), registration.GetHash(), 1296, key_only,
         error));
     BOOST_CHECK(a.consensus_state_root != b.consensus_state_root);
-    BOOST_CHECK(a.HasUsedTreeId(old_commitment.tree_id));
-    BOOST_CHECK(a.HasUsedTreeId(commitment_a.tree_id));
-    BOOST_CHECK(!a.HasUsedTreeId(commitment_b.tree_id));
-    BOOST_CHECK(b.HasUsedTreeId(old_commitment.tree_id));
-    BOOST_CHECK(b.HasUsedTreeId(commitment_b.tree_id));
-    BOOST_CHECK(!b.HasUsedTreeId(commitment_a.tree_id));
-    BOOST_CHECK_EQUAL(key_only.used_tree_ids.size(), 1U);
-    BOOST_CHECK(key_only.block_tree_ids.empty());
 
     PQRegistryReadView registered_view;
     PQRegistryReadView a_view;
@@ -1372,10 +1359,6 @@ BOOST_AUTO_TEST_CASE(branches_preserve_exact_tree_history_and_cutoff_roots)
         key_only_branch.GetHash(), registration.GetHash(), 1296,
         key_only_view, error));
     BOOST_CHECK(!registered_view.SharesStateWith(key_only_view));
-    BOOST_CHECK(registered_view.SharesTreeHistoryWith(key_only_view));
-    BOOST_CHECK(!registered_view.SharesTreeHistoryWith(a_view));
-    BOOST_CHECK(!registered_view.SharesTreeHistoryWith(b_view));
-    BOOST_CHECK(!a_view.SharesTreeHistoryWith(b_view));
 
     const auto& state_a{OnlyOperator(a)};
     const auto frozen{state_a.ResolveChildRoot(0)};
@@ -1410,7 +1393,8 @@ BOOST_AUTO_TEST_CASE(payment_eligibility_reuses_unchanged_registry_state)
         {OrdinaryTransaction(164),
          GlobalRegistration(
              genesis, pro_tx_hash, key, owner_key,
-             CommitmentAt(config, 1295, 1, 165), 165)})};
+             CommitmentAt(
+                 config, genesis, pro_tx_hash, 1295, 1, 165), 165)})};
     const auto cutoff{Block(
         registration.GetHash(), 166, {OrdinaryTransaction(166)})};
     const auto steady{Block(
@@ -1458,7 +1442,6 @@ BOOST_AUTO_TEST_CASE(payment_eligibility_reuses_unchanged_registry_state)
     BOOST_REQUIRE(manager.GetReadView(
         steady.GetHash(), cutoff.GetHash(), 1297, steady_view, error));
     BOOST_CHECK(cutoff_view.SharesStateWith(steady_view));
-    BOOST_CHECK(cutoff_view.SharesTreeHistoryWith(steady_view));
     BOOST_CHECK(steady_root == cutoff_view.ConsensusStateRoot());
     BOOST_CHECK_EQUAL(cutoff_view.OperatorCount(), 1U);
 
@@ -1468,8 +1451,6 @@ BOOST_AUTO_TEST_CASE(payment_eligibility_reuses_unchanged_registry_state)
     BOOST_CHECK_EQUAL(steady_delta.is_checkpoint, 0U);
     BOOST_CHECK(steady_delta.operator_states.empty());
     BOOST_CHECK(steady_delta.removed_operators.empty());
-    BOOST_CHECK(steady_delta.tree_ids.empty());
-    BOOST_CHECK(steady_delta.block_tree_ids.empty());
     BOOST_CHECK(steady_delta.consensus_state_root ==
                 cutoff_view.ConsensusStateRoot());
 
@@ -1480,7 +1461,7 @@ BOOST_AUTO_TEST_CASE(payment_eligibility_reuses_unchanged_registry_state)
     BOOST_CHECK(next_epoch != first);
 }
 
-BOOST_AUTO_TEST_CASE(removal_drops_operator_but_retains_tree_id)
+BOOST_AUTO_TEST_CASE(removal_drops_operator_state)
 {
     const auto config{FastConfig()};
     const uint256 genesis{NonNullHash(21)};
@@ -1489,7 +1470,8 @@ BOOST_AUTO_TEST_CASE(removal_drops_operator_but_retains_tree_id)
     CKey owner_key;
     owner_key.MakeNewKey(/*fCompressed=*/true);
     const CKeyID owner_key_id{owner_key.GetPubKey().GetID()};
-    const auto commitment{CommitmentAt(config, 1295, 1, 21)};
+    const auto commitment{CommitmentAt(
+        config, genesis, pro_tx_hash, 1295, 1, 21)};
     PQRegistryManager manager(MemoryDB(4), genesis, config);
     PQRegistryError error;
     const auto registration{Block(
@@ -1525,7 +1507,6 @@ BOOST_AUTO_TEST_CASE(removal_drops_operator_but_retains_tree_id)
         removed.GetHash(), registration.GetHash(), 1296, removed_view,
         error));
     BOOST_CHECK(!registered_view.SharesStateWith(removed_view));
-    BOOST_CHECK(registered_view.SharesTreeHistoryWith(removed_view));
 
     PQRegistryDiskSnapshot delta;
     BOOST_REQUIRE(SnapshotDB(manager).ReadCache(
@@ -1538,8 +1519,6 @@ BOOST_AUTO_TEST_CASE(removal_drops_operator_but_retains_tree_id)
     BOOST_REQUIRE(manager.GetSnapshot(
         removed.GetHash(), registration.GetHash(), 1296, snapshot, error));
     BOOST_CHECK(snapshot.operator_states.empty());
-    BOOST_REQUIRE_EQUAL(snapshot.used_tree_ids.size(), 1U);
-    BOOST_CHECK(snapshot.used_tree_ids.front() == commitment.tree_id);
 }
 
 BOOST_AUTO_TEST_CASE(removal_merge_is_exact_check_only_is_pure_and_forks_reconstruct)
@@ -1567,13 +1546,13 @@ BOOST_AUTO_TEST_CASE(removal_merge_is_exact_check_only_is_pure_and_forks_reconst
         {OrdinaryTransaction(407),
          GlobalRegistration(
              genesis, first, first_key, owner_key,
-             CommitmentAt(config, 1295, 1, 401), 408),
+             CommitmentAt(config, genesis, first, 1295, 1, 401), 408),
          GlobalRegistration(
              genesis, middle, middle_key, owner_key,
-             CommitmentAt(config, 1295, 1, 402), 409),
+             CommitmentAt(config, genesis, middle, 1295, 1, 402), 409),
          GlobalRegistration(
              genesis, last, last_key, owner_key,
-             CommitmentAt(config, 1295, 1, 403), 410)})};
+             CommitmentAt(config, genesis, last, 1295, 1, 403), 410)})};
     PQRegistryManager manager(MemoryDB(401), genesis, config);
     PQRegistryError error;
     BOOST_REQUIRE(manager.ProcessBlock(
@@ -1598,7 +1577,8 @@ BOOST_AUTO_TEST_CASE(removal_merge_is_exact_check_only_is_pure_and_forks_reconst
         {OrdinaryTransaction(413),
          GlobalRotation(
              genesis, first, first_state->global_key, first_key,
-             replacement_key, CommitmentAt(config, 1296, 2, 404), 414)})};
+             replacement_key,
+             CommitmentAt(config, genesis, first, 1296, 2, 404), 414)})};
     const std::vector<uint256> conflicting_net_removed{first};
     BOOST_CHECK(!manager.ProcessBlock(
         conflicting_removal, 1296,
@@ -1676,7 +1656,6 @@ BOOST_AUTO_TEST_CASE(removal_merge_is_exact_check_only_is_pure_and_forks_reconst
         rootless_removal.GetHash(), sibling.GetHash(), 1297, rootless_view,
         error));
     BOOST_CHECK(sibling_view.SharesStateWith(rootless_view));
-    BOOST_CHECK(sibling_view.SharesTreeHistoryWith(rootless_view));
     BOOST_CHECK(sibling_view.ConsensusStateRoot() ==
                 rootless_view.ConsensusStateRoot());
     PQRegistryDiskSnapshot rootless_disk;
@@ -1685,8 +1664,6 @@ BOOST_AUTO_TEST_CASE(removal_merge_is_exact_check_only_is_pure_and_forks_reconst
     BOOST_CHECK_EQUAL(rootless_disk.is_checkpoint, 0U);
     BOOST_CHECK(rootless_disk.operator_states.empty());
     BOOST_CHECK(rootless_disk.removed_operators.empty());
-    BOOST_CHECK(rootless_disk.tree_ids.empty());
-    BOOST_CHECK(rootless_disk.block_tree_ids.empty());
     BOOST_CHECK(rootless_disk.previous_consensus_state_root ==
                 sibling_view.ConsensusStateRoot());
     BOOST_CHECK(rootless_disk.consensus_state_root ==
@@ -1744,7 +1721,8 @@ BOOST_AUTO_TEST_CASE(revocation_requires_delayed_fresh_owner_recovery)
     CKey owner_key;
     owner_key.MakeNewKey(/*fCompressed=*/true);
     const CKeyID owner_key_id{owner_key.GetPubKey().GetID()};
-    const auto first_tree{CommitmentAt(config, 1295, 1, 111)};
+    const auto first_tree{CommitmentAt(
+        config, genesis, pro_tx_hash, 1295, 1, 111)};
     PQRegistryManager manager(MemoryDB(5), genesis, config);
     PQRegistryError error;
     const auto registration{Block(
@@ -1778,7 +1756,6 @@ BOOST_AUTO_TEST_CASE(revocation_requires_delayed_fresh_owner_recovery)
     BOOST_CHECK(OnlyOperator(historical).HasActiveGlobalKey());
     BOOST_CHECK(!OnlyOperator(revoked).HasActiveGlobalKey());
     BOOST_CHECK(OnlyOperator(revoked).frozen_child_roots.empty());
-    BOOST_CHECK(revoked.HasUsedTreeId(first_tree.tree_id));
 
     PQRegistryReadView historical_view;
     PQRegistryReadView revoked_view;
@@ -1795,7 +1772,8 @@ BOOST_AUTO_TEST_CASE(revocation_requires_delayed_fresh_owner_recovery)
     BOOST_CHECK(!revoked_view.FindActiveOperatorByGlobalKey(
         OnlyOperator(revoked).global_key.public_key));
 
-    const auto recovery_tree{CommitmentAt(config, 1297, 2, 112)};
+    const auto recovery_tree{CommitmentAt(
+        config, genesis, pro_tx_hash, 1297, 2, 112)};
     const auto recovery{Block(
         revoke.GetHash(), 114,
         {OrdinaryTransaction(114),
@@ -1811,7 +1789,7 @@ BOOST_AUTO_TEST_CASE(revocation_requires_delayed_fresh_owner_recovery)
                 OperatorKeyStateResult::GLOBAL_RECOVERY_NOT_ALLOWED);
 }
 
-BOOST_AUTO_TEST_CASE(restart_reconstructs_frozen_root_and_tree_history)
+BOOST_AUTO_TEST_CASE(restart_reconstructs_frozen_root)
 {
     const auto config{FastConfig()};
     const uint256 genesis{NonNullHash(71)};
@@ -1820,7 +1798,8 @@ BOOST_AUTO_TEST_CASE(restart_reconstructs_frozen_root_and_tree_history)
     CKey owner_key;
     owner_key.MakeNewKey(/*fCompressed=*/true);
     const CKeyID owner_key_id{owner_key.GetPubKey().GetID()};
-    const auto commitment{CommitmentAt(config, 1295, 1, 71)};
+    const auto commitment{CommitmentAt(
+        config, genesis, pro_tx_hash, 1295, 1, 71)};
     auto db{MemoryDB(6)};
     db.path = m_path_root / "pq_registry_root_restart";
     db.memory_only = false;
@@ -1868,7 +1847,6 @@ BOOST_AUTO_TEST_CASE(restart_reconstructs_frozen_root_and_tree_history)
         PQRegistrySnapshot snapshot;
         BOOST_REQUIRE(restarted.GetSnapshot(
             steady_hash, cutoff_hash, 1297, snapshot, error));
-        BOOST_CHECK(snapshot.HasUsedTreeId(commitment.tree_id));
         const auto frozen{OnlyOperator(snapshot).ResolveChildRoot(0)};
         BOOST_REQUIRE(frozen.record);
         BOOST_CHECK(frozen.status ==
@@ -1942,8 +1920,6 @@ BOOST_AUTO_TEST_CASE(restart_reconstructs_frozen_root_and_tree_history)
         BOOST_CHECK(checkpoint_disk.operator_states.empty());
         BOOST_REQUIRE_EQUAL(
             checkpoint_disk.checkpoint_operator_states.size(), 1U);
-        BOOST_REQUIRE_EQUAL(checkpoint_disk.tree_ids.size(), 1U);
-        BOOST_CHECK(checkpoint_disk.block_tree_ids.empty());
 
         BOOST_REQUIRE(restarted.ProcessBlock(
             checkpoint,
@@ -1963,7 +1939,6 @@ BOOST_AUTO_TEST_CASE(restart_reconstructs_frozen_root_and_tree_history)
         checkpoint_hash, checkpoint_previous_hash,
         config.preparation_height + PQ_REGISTRY_CHECKPOINT_INTERVAL,
         checkpoint_snapshot, error));
-    BOOST_CHECK(checkpoint_snapshot.HasUsedTreeId(commitment.tree_id));
     BOOST_CHECK(checkpoint_snapshot.RecomputeConsensusStateRoot(genesis) ==
                 checkpoint_snapshot.consensus_state_root);
 }
@@ -2013,7 +1988,6 @@ BOOST_AUTO_TEST_CASE(cold_reconstruction_reuses_long_no_op_suffix)
     const auto stats{test::PQRegistryManagerTestAccess::Stats(reader)};
     BOOST_CHECK_EQUAL(stats.authenticated_records, record_count);
     BOOST_CHECK_EQUAL(stats.reused_records, record_count - 1);
-    BOOST_CHECK_EQUAL(stats.tree_id_hashes, 1U);
     BOOST_CHECK_EQUAL(stats.state_hashes, 1U);
     BOOST_CHECK_EQUAL(stats.cached_views,
                       PQ_REGISTRY_SNAPSHOT_CACHE_SIZE);
@@ -2024,7 +1998,6 @@ BOOST_AUTO_TEST_CASE(cold_reconstruction_reuses_long_no_op_suffix)
         config.preparation_height + static_cast<int32_t>(record_count) - 2,
         parent, error));
     BOOST_CHECK(tip.SharesStateWith(parent));
-    BOOST_CHECK(tip.SharesTreeHistoryWith(parent));
     BOOST_CHECK_EQUAL(
         test::PQRegistryManagerTestAccess::Stats(reader)
             .authenticated_records,
@@ -2213,7 +2186,8 @@ BOOST_AUTO_TEST_CASE(cold_sequential_undo_reuses_authenticated_replay_tail)
     owner_key.MakeNewKey(/*fCompressed=*/true);
     const CKeyID owner_key_id{owner_key.GetPubKey().GetID()};
     const auto commitment{CommitmentAt(
-        config, config.preparation_height, 1, 701)};
+        config, genesis, pro_tx_hash,
+        config.preparation_height, 1, 701)};
     auto db{MemoryDB(701)};
     db.path = m_path_root / "pq_registry_cold_sequential_undo";
     db.memory_only = false;
@@ -2303,8 +2277,6 @@ BOOST_AUTO_TEST_CASE(cold_sequential_undo_reuses_authenticated_replay_tail)
     BOOST_CHECK(steady.ConsensusStateRoot() == roots[2]);
     BOOST_CHECK(!preparation.SharesStateWith(cutoff));
     BOOST_CHECK(cutoff.SharesStateWith(steady));
-    BOOST_CHECK(preparation.SharesTreeHistoryWith(cutoff));
-    BOOST_CHECK(cutoff.SharesTreeHistoryWith(steady));
     BOOST_CHECK_EQUAL(preparation.OperatorCount(), 1U);
     BOOST_CHECK_EQUAL(cutoff.OperatorCount(), 1U);
     BOOST_CHECK_EQUAL(steady.OperatorCount(), 1U);
@@ -2381,7 +2353,9 @@ BOOST_AUTO_TEST_CASE(reconstruction_rejects_broken_root_link)
         NonNullHash(103), 100,
         {OrdinaryTransaction(100),
          GlobalRegistration(genesis, pro_tx_hash, key, owner_key,
-                            CommitmentAt(config, 1295, 1, 101), 101)})};
+                            CommitmentAt(
+                                config, genesis, pro_tx_hash,
+                                1295, 1, 101), 101)})};
     BOOST_REQUIRE(manager.ProcessBlock(
         registration, 1295, Member(genesis, pro_tx_hash, owner_key_id), {},
         false, error));
@@ -2415,7 +2389,8 @@ BOOST_AUTO_TEST_CASE(rejects_early_noncanonical_mismatched_and_duplicate_updates
     CKey owner_key;
     owner_key.MakeNewKey(/*fCompressed=*/true);
     const CKeyID owner_key_id{owner_key.GetPubKey().GetID()};
-    const auto commitment{CommitmentAt(config, 1295, 1, 31)};
+    const auto commitment{CommitmentAt(
+        config, genesis, pro_tx_hash, 1295, 1, 31)};
     PQRegistryManager manager(MemoryDB(8), genesis, config);
     PQRegistryError error;
 
@@ -2488,7 +2463,7 @@ BOOST_AUTO_TEST_CASE(rejects_early_noncanonical_mismatched_and_duplicate_updates
     BOOST_CHECK(error.pro_tx_hash == pro_tx_hash);
 }
 
-BOOST_AUTO_TEST_CASE(global_keys_and_tree_ids_are_unique)
+BOOST_AUTO_TEST_CASE(global_keys_are_unique_and_tree_ids_are_derived)
 {
     const auto config{FastConfig()};
     const uint256 genesis{NonNullHash(81)};
@@ -2499,8 +2474,10 @@ BOOST_AUTO_TEST_CASE(global_keys_and_tree_ids_are_unique)
     CKey owner_key;
     owner_key.MakeNewKey(/*fCompressed=*/true);
     const CKeyID owner_key_id{owner_key.GetPubKey().GetID()};
-    const auto first_tree{CommitmentAt(config, 1295, 1, 81)};
-    const auto second_tree{CommitmentAt(config, 1295, 1, 82)};
+    const auto first_tree{CommitmentAt(
+        config, genesis, first, 1295, 1, 81)};
+    const auto second_tree{CommitmentAt(
+        config, genesis, second, 1295, 1, 82)};
     const auto callbacks{Members(genesis, {first, second}, {first, second},
                                  owner_key_id)};
 
@@ -2518,19 +2495,21 @@ BOOST_AUTO_TEST_CASE(global_keys_and_tree_ids_are_unique)
     BOOST_CHECK_EQUAL(error.transaction_index, 2U);
     BOOST_CHECK(error.pro_tx_hash == second);
 
-    PQRegistryManager duplicate_tree_manager(MemoryDB(10), genesis, config);
+    PQRegistryManager wrong_tree_manager(MemoryDB(10), genesis, config);
     auto reused_tree{first_tree};
     reused_tree.root = NonNullHash(99'999);
-    const auto duplicate_tree_block{Block(
+    const auto wrong_tree_block{Block(
         NonNullHash(85), 83,
         {OrdinaryTransaction(83),
          GlobalRegistration(genesis, first, key, owner_key, first_tree, 84),
          GlobalRegistration(genesis, second, other_key, owner_key,
                             reused_tree, 85)})};
-    BOOST_CHECK(!duplicate_tree_manager.ProcessBlock(
-        duplicate_tree_block, 1295, callbacks, {}, false, error));
+    BOOST_CHECK(!wrong_tree_manager.ProcessBlock(
+        wrong_tree_block, 1295, callbacks, {}, false, error));
     BOOST_CHECK(error.result ==
-                PQRegistryResult::DUPLICATE_CHILD_TREE_ID);
+                PQRegistryResult::OPERATOR_STATE_TRANSITION_FAILED);
+    BOOST_CHECK(error.state_result ==
+                OperatorKeyStateResult::INVALID_CHILD_ROOT_COMMITMENT);
     BOOST_CHECK_EQUAL(error.transaction_index, 2U);
     BOOST_CHECK(error.pro_tx_hash == second);
 }
@@ -2553,9 +2532,12 @@ BOOST_AUTO_TEST_CASE(batch_overlay_global_key_handoffs_are_ordered)
     CKey owner_key;
     owner_key.MakeNewKey(/*fCompressed=*/true);
     const CKeyID owner_key_id{owner_key.GetPubKey().GetID()};
-    const auto first_tree{CommitmentAt(config, 1295, 1, 501)};
-    const auto second_tree{CommitmentAt(config, 1295, 1, 502)};
-    const auto third_tree{CommitmentAt(config, 1295, 1, 503)};
+    const auto first_tree{CommitmentAt(
+        config, genesis, first, 1295, 1, 501)};
+    const auto second_tree{CommitmentAt(
+        config, genesis, second, 1295, 1, 502)};
+    const auto third_tree{CommitmentAt(
+        config, genesis, third, 1295, 1, 503)};
     const auto registration{Block(
         NonNullHash(505), 506,
         {OrdinaryTransaction(506),
@@ -2583,8 +2565,10 @@ BOOST_AUTO_TEST_CASE(batch_overlay_global_key_handoffs_are_ordered)
     const GlobalKeyRecord third_current{
         RequiredOperator(parent, third).global_key};
 
-    const auto first_next_tree{CommitmentAt(config, 1296, 2, 504)};
-    const auto second_next_tree{CommitmentAt(config, 1296, 2, 505)};
+    const auto first_next_tree{CommitmentAt(
+        config, genesis, first, 1296, 2, 504)};
+    const auto second_next_tree{CommitmentAt(
+        config, genesis, second, 1296, 2, 505)};
     const auto first_to_replacement{GlobalRotation(
         genesis, first, first_current, first_key, replacement_key,
         first_next_tree, 510)};
@@ -2647,7 +2631,7 @@ BOOST_AUTO_TEST_CASE(batch_overlay_global_key_handoffs_are_ordered)
 
     const auto first_to_second{GlobalRotation(
         genesis, first, first_current, first_key, second_key,
-        CommitmentAt(config, 1296, 2, 506), 514)};
+        CommitmentAt(config, genesis, first, 1296, 2, 506), 514)};
     const auto swap{Block(
         registration.GetHash(), 515,
         {OrdinaryTransaction(515), first_to_second, second_to_first})};
@@ -2660,7 +2644,7 @@ BOOST_AUTO_TEST_CASE(batch_overlay_global_key_handoffs_are_ordered)
 
     const auto third_to_first{GlobalRotation(
         genesis, third, third_current, third_key, first_key,
-        CommitmentAt(config, 1296, 2, 507), 516)};
+        CommitmentAt(config, genesis, third, 1296, 2, 507), 516)};
     const auto third_claimant{Block(
         registration.GetHash(), 517,
         {OrdinaryTransaction(517), first_to_replacement,
@@ -2674,7 +2658,7 @@ BOOST_AUTO_TEST_CASE(batch_overlay_global_key_handoffs_are_ordered)
         !SnapshotDB(manager).ExistsCache(third_claimant.GetHash()));
 }
 
-BOOST_AUTO_TEST_CASE(removal_releases_global_key_next_block_but_not_tree_id)
+BOOST_AUTO_TEST_CASE(removal_releases_global_key_next_block)
 {
     const auto config{FastConfig()};
     const uint256 genesis{NonNullHash(521)};
@@ -2688,8 +2672,10 @@ BOOST_AUTO_TEST_CASE(removal_releases_global_key_next_block_but_not_tree_id)
     CKey owner_key;
     owner_key.MakeNewKey(/*fCompressed=*/true);
     const CKeyID owner_key_id{owner_key.GetPubKey().GetID()};
-    const auto removed_tree{CommitmentAt(config, 1295, 1, 521)};
-    const auto surviving_tree{CommitmentAt(config, 1295, 1, 522)};
+    const auto removed_tree{CommitmentAt(
+        config, genesis, removed_operator, 1295, 1, 521)};
+    const auto surviving_tree{CommitmentAt(
+        config, genesis, surviving_operator, 1295, 1, 522)};
     const auto registration{Block(
         NonNullHash(524), 525,
         {OrdinaryTransaction(525),
@@ -2716,7 +2702,9 @@ BOOST_AUTO_TEST_CASE(removal_releases_global_key_next_block_but_not_tree_id)
     BOOST_REQUIRE(surviving_key.GetPublicKey(surviving_public_key));
     const auto same_block_claim{GlobalRotation(
         genesis, surviving_operator, surviving_current, surviving_key,
-        removed_key, CommitmentAt(config, 1296, 2, 523), 528)};
+        removed_key,
+        CommitmentAt(
+            config, genesis, surviving_operator, 1296, 2, 523), 528)};
     const auto claim_while_removing{Block(
         registration.GetHash(), 529,
         {OrdinaryTransaction(529), same_block_claim})};
@@ -2742,8 +2730,6 @@ BOOST_AUTO_TEST_CASE(removal_releases_global_key_next_block_but_not_tree_id)
         removal.GetHash(), registration.GetHash(), 1296, after_removal,
         error));
     BOOST_CHECK(after_removal.FindOperator(removed_operator) == nullptr);
-    BOOST_CHECK(after_removal.HasUsedTreeId(removed_tree.tree_id));
-    BOOST_CHECK(after_removal.HasUsedTreeId(surviving_tree.tree_id));
     PQRegistryReadView removal_view;
     BOOST_REQUIRE(manager.GetReadView(
         removal.GetHash(), registration.GetHash(), 1296, removal_view,
@@ -2757,7 +2743,8 @@ BOOST_AUTO_TEST_CASE(removal_releases_global_key_next_block_but_not_tree_id)
 
     const GlobalKeyRecord surviving_after_removal{
         RequiredOperator(after_removal, surviving_operator).global_key};
-    const auto claimed_tree{CommitmentAt(config, 1297, 2, 524)};
+    const auto claimed_tree{CommitmentAt(
+        config, genesis, surviving_operator, 1297, 2, 524)};
     const auto next_block_claim{GlobalRotation(
         genesis, surviving_operator, surviving_after_removal,
         surviving_key, removed_key, claimed_tree, 531)};
@@ -2775,9 +2762,6 @@ BOOST_AUTO_TEST_CASE(removal_releases_global_key_next_block_but_not_tree_id)
         error));
     BOOST_CHECK(RequiredOperator(claimed_snapshot, surviving_operator)
                     .global_key.public_key == removed_public_key);
-    BOOST_CHECK(claimed_snapshot.HasUsedTreeId(removed_tree.tree_id));
-    BOOST_CHECK(claimed_snapshot.HasUsedTreeId(surviving_tree.tree_id));
-    BOOST_CHECK(claimed_snapshot.HasUsedTreeId(claimed_tree.tree_id));
     PQRegistryReadView claimed_view;
     BOOST_REQUIRE(manager.GetReadView(
         claimed.GetHash(), removal.GetHash(), 1297, claimed_view, error));
@@ -2788,24 +2772,27 @@ BOOST_AUTO_TEST_CASE(removal_releases_global_key_next_block_but_not_tree_id)
     BOOST_CHECK(!claimed_view.FindRetainedGlobalKeyOwner(
         surviving_public_key));
 
-    auto reused_tree{CommitmentAt(config, 1297, 2, 525)};
+    auto reused_tree{CommitmentAt(
+        config, genesis, surviving_operator, 1297, 2, 525)};
     reused_tree.tree_id = removed_tree.tree_id;
     BOOST_REQUIRE(reused_tree.IsStructurallyValid());
-    const auto burned_tree_claim{GlobalRotation(
+    const auto mismatched_tree_claim{GlobalRotation(
         genesis, surviving_operator, surviving_after_removal,
         surviving_key, unused_key, reused_tree, 533)};
-    const auto burned_tree_sibling{Block(
+    const auto mismatched_tree_sibling{Block(
         removal.GetHash(), 534,
-        {OrdinaryTransaction(534), burned_tree_claim})};
+        {OrdinaryTransaction(534), mismatched_tree_claim})};
     BOOST_CHECK(!manager.ProcessBlock(
-        burned_tree_sibling, 1297, surviving_callbacks, {},
+        mismatched_tree_sibling, 1297, surviving_callbacks, {},
         /*fJustCheck=*/false, error));
     BOOST_CHECK(error.result ==
-                PQRegistryResult::DUPLICATE_CHILD_TREE_ID);
+                PQRegistryResult::OPERATOR_STATE_TRANSITION_FAILED);
+    BOOST_CHECK(error.state_result ==
+                OperatorKeyStateResult::INVALID_CHILD_ROOT_COMMITMENT);
     BOOST_CHECK_EQUAL(error.transaction_index, 1U);
     BOOST_CHECK(error.pro_tx_hash == surviving_operator);
     BOOST_CHECK(!SnapshotDB(manager).ExistsCache(
-        burned_tree_sibling.GetHash()));
+        mismatched_tree_sibling.GetHash()));
 }
 
 BOOST_AUTO_TEST_CASE(mixed_batch_merge_is_canonical_across_permutations)
@@ -2832,9 +2819,12 @@ BOOST_AUTO_TEST_CASE(mixed_batch_merge_is_canonical_across_permutations)
     CKey owner_key;
     owner_key.MakeNewKey(/*fCompressed=*/true);
     const CKeyID owner_key_id{owner_key.GetPubKey().GetID()};
-    const auto first_tree{CommitmentAt(config, 1295, 1, 541)};
-    const auto removed_tree{CommitmentAt(config, 1295, 1, 542)};
-    const auto last_tree{CommitmentAt(config, 1295, 1, 543)};
+    const auto first_tree{CommitmentAt(
+        config, genesis, first, 1295, 1, 541)};
+    const auto removed_tree{CommitmentAt(
+        config, genesis, removed, 1295, 1, 542)};
+    const auto last_tree{CommitmentAt(
+        config, genesis, last, 1295, 1, 543)};
     const auto registration{Block(
         NonNullHash(546), 547,
         {OrdinaryTransaction(547),
@@ -2859,9 +2849,12 @@ BOOST_AUTO_TEST_CASE(mixed_batch_merge_is_canonical_across_permutations)
         RequiredOperator(parent, first).global_key};
     const GlobalKeyRecord last_current{
         RequiredOperator(parent, last).global_key};
-    const auto first_next_tree{CommitmentAt(config, 1296, 2, 544)};
-    const auto added_tree{CommitmentAt(config, 1296, 1, 545)};
-    const auto last_next_tree{CommitmentAt(config, 1296, 2, 546)};
+    const auto first_next_tree{CommitmentAt(
+        config, genesis, first, 1296, 2, 544)};
+    const auto added_tree{CommitmentAt(
+        config, genesis, added, 1296, 1, 545)};
+    const auto last_next_tree{CommitmentAt(
+        config, genesis, last, 1296, 2, 546)};
     const auto update_first{GlobalRotation(
         genesis, first, first_current, first_key, first_replacement,
         first_next_tree, 551)};
@@ -2913,10 +2906,6 @@ BOOST_AUTO_TEST_CASE(mixed_batch_merge_is_canonical_across_permutations)
         ascending_snapshot, error));
     BOOST_CHECK(descending_snapshot.operator_states ==
                 ascending_snapshot.operator_states);
-    BOOST_CHECK(descending_snapshot.used_tree_ids ==
-                ascending_snapshot.used_tree_ids);
-    BOOST_CHECK(descending_snapshot.block_tree_ids ==
-                ascending_snapshot.block_tree_ids);
     BOOST_CHECK(descending_snapshot.consensus_state_root ==
                 ascending_snapshot.consensus_state_root);
 
@@ -2943,24 +2932,11 @@ BOOST_AUTO_TEST_CASE(mixed_batch_merge_is_canonical_across_permutations)
     BOOST_CHECK(RequiredOperator(descending_snapshot, last).global_key ==
                 expected_last);
 
-    std::vector<uint256> expected_new_tree_ids{
-        first_next_tree.tree_id, added_tree.tree_id,
-        last_next_tree.tree_id};
-    std::sort(expected_new_tree_ids.begin(), expected_new_tree_ids.end());
-    BOOST_CHECK(descending_snapshot.block_tree_ids == expected_new_tree_ids);
-    std::vector<uint256> expected_used_tree_ids{
-        first_tree.tree_id, removed_tree.tree_id, last_tree.tree_id,
-        first_next_tree.tree_id, added_tree.tree_id,
-        last_next_tree.tree_id};
-    std::sort(expected_used_tree_ids.begin(), expected_used_tree_ids.end());
-    BOOST_CHECK(descending_snapshot.used_tree_ids == expected_used_tree_ids);
-
     const auto check_disk_delta = [&](const CBlock& block) {
         PQRegistryDiskSnapshot disk;
         BOOST_REQUIRE(SnapshotDB(manager).ReadCache(
             block.GetHash(), disk));
         BOOST_CHECK_EQUAL(disk.is_checkpoint, 0U);
-        BOOST_CHECK(disk.tree_ids.empty());
         BOOST_CHECK(disk.removed_operators ==
                     std::vector<uint256>{removed});
         std::vector<uint256> changed_operators;
@@ -2968,7 +2944,6 @@ BOOST_AUTO_TEST_CASE(mixed_batch_merge_is_canonical_across_permutations)
             changed_operators.push_back(state.pro_tx_hash);
         }
         BOOST_CHECK(changed_operators == resulting_operators);
-        BOOST_CHECK(disk.block_tree_ids == expected_new_tree_ids);
         BOOST_CHECK(disk.previous_consensus_state_root ==
                     parent.consensus_state_root);
         BOOST_CHECK(disk.consensus_state_root ==
@@ -3100,13 +3075,16 @@ BOOST_AUTO_TEST_CASE(membership_reconciliation_is_checkpoint_only)
         NonNullHash(555), 551,
         {GlobalRegistration(
              genesis, first, first_key, owner_key,
-             CommitmentAt(config, config.preparation_height, 1, 551), 552),
+             CommitmentAt(config, genesis, first,
+                          config.preparation_height, 1, 551), 552),
          GlobalRegistration(
              genesis, target, target_key, owner_key,
-             CommitmentAt(config, config.preparation_height, 1, 552), 553),
+             CommitmentAt(config, genesis, target,
+                          config.preparation_height, 1, 552), 553),
          GlobalRegistration(
              genesis, removed, removed_key, owner_key,
-             CommitmentAt(config, config.preparation_height, 1, 553),
+             CommitmentAt(config, genesis, removed,
+                          config.preparation_height, 1, 553),
              554)})};
     PQRegistryManager manager(MemoryDB(551), genesis, config);
     PQRegistryError error;
@@ -3151,7 +3129,8 @@ BOOST_AUTO_TEST_CASE(membership_reconciliation_is_checkpoint_only)
     const auto rotation{GlobalRotation(
         genesis, target, RequiredOperator(parent, target).global_key,
         target_key, replacement_key,
-        CommitmentAt(config, height, 2, 554), block_id++)};
+        CommitmentAt(config, genesis, target, height, 2, 554),
+        block_id++)};
     auto rotated{Block(ordinary.GetHash(), block_id++, {rotation})};
     BOOST_REQUIRE(manager.ProcessBlock(
         rotated, height++, callbacks, {}, /*fJustCheck=*/false, error));
@@ -3242,9 +3221,11 @@ BOOST_AUTO_TEST_CASE(checkpoint_retains_and_authenticates_exact_block_delta)
 
     uint32_t block_id{70'000};
     const auto updated_initial{CommitmentAt(
-        config, config.preparation_height, 1, block_id++)};
+        config, genesis, updated,
+        config.preparation_height, 1, block_id++)};
     const auto removed_initial{CommitmentAt(
-        config, config.preparation_height, 1, block_id++)};
+        config, genesis, removed,
+        config.preparation_height, 1, block_id++)};
     const uint256 preparation_parent{NonNullHash(block_id++)};
     const uint32_t preparation_id{block_id++};
     const uint32_t updated_registration_id{block_id++};
@@ -3285,9 +3266,9 @@ BOOST_AUTO_TEST_CASE(checkpoint_retains_and_authenticates_exact_block_delta)
     BOOST_REQUIRE(manager.GetSnapshot(
         cursor, cursor_parent, checkpoint_height - 1, parent, error));
     const auto updated_next{CommitmentAt(
-        config, checkpoint_height, 2, block_id++)};
+        config, genesis, updated, checkpoint_height, 2, block_id++)};
     const auto added_initial{CommitmentAt(
-        config, checkpoint_height, 1, block_id++)};
+        config, genesis, added, checkpoint_height, 1, block_id++)};
     const auto rotation{GlobalRotation(
         genesis, updated, RequiredOperator(parent, updated).global_key,
         updated_key, replacement_key, updated_next, block_id++)};
@@ -3319,9 +3300,6 @@ BOOST_AUTO_TEST_CASE(checkpoint_retains_and_authenticates_exact_block_delta)
     BOOST_CHECK(delta_operators == resulting_members);
     BOOST_CHECK(original.checkpoint_operator_states ==
                 expected.operator_states);
-    BOOST_CHECK(original.tree_ids == expected.used_tree_ids);
-    BOOST_CHECK(original.block_tree_ids == expected.block_tree_ids);
-    BOOST_REQUIRE_EQUAL(original.block_tree_ids.size(), 2U);
 
     test::PQRegistryManagerTestAccess::ResetReconstructionStats(manager);
     test::PQRegistryManagerTestAccess::DropCachedSnapshot(
@@ -3360,10 +3338,25 @@ BOOST_AUTO_TEST_CASE(checkpoint_retains_and_authenticates_exact_block_delta)
     missing_removal_delta.removed_operators.clear();
     reject_tamper(std::move(missing_removal_delta));
 
-    auto missing_tree_delta{original};
-    missing_tree_delta.block_tree_ids.erase(
-        missing_tree_delta.block_tree_ids.begin());
-    reject_tamper(std::move(missing_tree_delta));
+    auto wrong_tree_id{original};
+    auto& changed_delta{wrong_tree_id.operator_states.front()};
+    const auto changed_checkpoint{std::find_if(
+        wrong_tree_id.checkpoint_operator_states.begin(),
+        wrong_tree_id.checkpoint_operator_states.end(),
+        [&](const OperatorKeyState& state) {
+            return state.pro_tx_hash == changed_delta.pro_tx_hash;
+        })};
+    BOOST_REQUIRE(changed_checkpoint !=
+                  wrong_tree_id.checkpoint_operator_states.end());
+    const uint256 invalid_tree_id{NonNullHash(999'998)};
+    BOOST_REQUIRE(invalid_tree_id !=
+                  changed_delta.global_key.child_key_commitment.tree_id);
+    // Keep the sparse and checkpoint copies mutually consistent so the
+    // canonical state hash must reject the non-derived commitment identity.
+    changed_delta.global_key.child_key_commitment.tree_id = invalid_tree_id;
+    changed_checkpoint->global_key.child_key_commitment.tree_id =
+        invalid_tree_id;
+    reject_tamper(std::move(wrong_tree_id));
 
     test::PQRegistryManagerTestAccess::DropCachedSnapshot(
         manager, checkpoint.GetHash());
@@ -3385,7 +3378,8 @@ BOOST_AUTO_TEST_CASE(direct_validation_matches_single_transaction_block_checks)
     CKey owner_key;
     owner_key.MakeNewKey(/*fCompressed=*/true);
     const CKeyID owner_key_id{owner_key.GetPubKey().GetID()};
-    const auto first_tree{CommitmentAt(config, 1295, 1, 301)};
+    const auto first_tree{CommitmentAt(
+        config, genesis, pro_tx_hash, 1295, 1, 301)};
     PQRegistryManager manager(MemoryDB(301), genesis, config);
     PQRegistryError error;
     const auto registration{Block(
@@ -3403,7 +3397,8 @@ BOOST_AUTO_TEST_CASE(direct_validation_matches_single_transaction_block_checks)
         registration.GetHash(), registration.hashPrevBlock, 1295, parent,
         error));
     const GlobalKeyRecord current{OnlyOperator(parent).global_key};
-    const auto next_tree{CommitmentAt(config, 1296, 2, 303)};
+    const auto next_tree{CommitmentAt(
+        config, genesis, pro_tx_hash, 1296, 2, 303)};
     const auto valid{GlobalRotation(
         genesis, pro_tx_hash, current, key, replacement_key, next_tree,
         303)};
@@ -3446,14 +3441,15 @@ BOOST_AUTO_TEST_CASE(direct_validation_matches_single_transaction_block_checks)
                  /*expected_ok=*/false,
                  PQRegistryResult::INVALID_GLOBAL_KEY_PAYLOAD);
 
-    auto reused_tree{CommitmentAt(config, 1296, 1, 305)};
+    auto reused_tree{CommitmentAt(
+        config, genesis, second_pro_tx_hash, 1296, 1, 305)};
     reused_tree.tree_id = first_tree.tree_id;
     BOOST_REQUIRE(reused_tree.IsStructurallyValid());
     check_parity(GlobalRegistration(
                      genesis, second_pro_tx_hash, duplicate_tree_key,
                      owner_key, reused_tree, 305),
                  /*expected_ok=*/false,
-                 PQRegistryResult::DUPLICATE_CHILD_TREE_ID);
+                 PQRegistryResult::OPERATOR_STATE_TRANSITION_FAILED);
 }
 
 BOOST_AUTO_TEST_CASE(direct_validation_stops_at_target_membership_failure)
@@ -3467,7 +3463,7 @@ BOOST_AUTO_TEST_CASE(direct_validation_stops_at_target_membership_failure)
     owner_key.MakeNewKey(/*fCompressed=*/true);
     const auto registration{GlobalRegistration(
         genesis, pro_tx_hash, key, owner_key,
-        CommitmentAt(config, 1295, 1, 311), 311)};
+        CommitmentAt(config, genesis, pro_tx_hash, 1295, 1, 311), 311)};
     PQRegistryManager manager(MemoryDB(311), genesis, config);
     PQRegistryError error;
     std::string calls;
@@ -3564,13 +3560,13 @@ BOOST_AUTO_TEST_CASE(direct_validation_does_not_visit_unrelated_operators)
         NonNullHash(325), 321,
         {GlobalRegistration(
              genesis, first, first_key, owner_key,
-             CommitmentAt(config, 1295, 1, 321), 322),
+             CommitmentAt(config, genesis, first, 1295, 1, 321), 322),
          GlobalRegistration(
              genesis, target, target_key, owner_key,
-             CommitmentAt(config, 1295, 1, 322), 323),
+             CommitmentAt(config, genesis, target, 1295, 1, 322), 323),
          GlobalRegistration(
              genesis, third, third_key, owner_key,
-             CommitmentAt(config, 1295, 1, 323), 324)})};
+             CommitmentAt(config, genesis, third, 1295, 1, 323), 324)})};
     PQRegistryManager manager(MemoryDB(321), genesis, config);
     PQRegistryError error;
     BOOST_REQUIRE(manager.ProcessBlock(
@@ -3590,7 +3586,8 @@ BOOST_AUTO_TEST_CASE(direct_validation_does_not_visit_unrelated_operators)
     BOOST_REQUIRE(target_state != parent.operator_states.end());
     const auto rotation{GlobalRotation(
         genesis, target, target_state->global_key, target_key,
-        replacement_key, CommitmentAt(config, 1296, 2, 324), 325)};
+        replacement_key,
+        CommitmentAt(config, genesis, target, 1296, 2, 324), 325)};
 
     std::vector<uint256> before_calls;
     std::vector<uint256> after_calls;
@@ -3639,7 +3636,7 @@ BOOST_AUTO_TEST_CASE(direct_validation_rejects_key_retained_after_revocation)
         NonNullHash(334), 331,
         {GlobalRegistration(
             genesis, first, retained_key, owner_key,
-            CommitmentAt(config, 1295, 1, 331), 332)})};
+            CommitmentAt(config, genesis, first, 1295, 1, 331), 332)})};
     BOOST_REQUIRE(manager.ProcessBlock(
         registration, 1295,
         Member(genesis, first, owner_key_id), {},
@@ -3671,7 +3668,7 @@ BOOST_AUTO_TEST_CASE(direct_validation_rejects_key_retained_after_revocation)
 
     const auto collision{GlobalRegistration(
         genesis, second, retained_key, owner_key,
-        CommitmentAt(config, 1297, 1, 332), 335)};
+        CommitmentAt(config, genesis, second, 1297, 1, 332), 335)};
     auto callbacks{Members(genesis, {first, second}, {first, second},
                            owner_key_id)};
     std::size_t owner_calls{0};

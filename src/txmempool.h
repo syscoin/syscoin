@@ -443,7 +443,6 @@ private:
         std::array<uint8_t, 32> public_key{};
         PQChildTreeReservation commitment;
         bool introduces_operator{true};
-        bool introduces_tree{true};
     };
 
     struct PackageProviderConflictStats {
@@ -473,10 +472,8 @@ private:
     // A PQ revoke excludes every provider mutation for the operator in its block.
     std::map<uint256, uint256> mapPQRevocations; // proTxHash -> transaction
     std::map<std::array<uint8_t, 32>, uint256> mapPQGlobalKeys;
-    std::map<uint256, uint256> mapPQTreeIds;
     std::map<uint256, PQGlobalReservation> mapPQGlobalReservations;
     std::size_t m_pq_operator_introductions{0};
-    std::size_t m_pq_tree_introductions{0};
     std::map<CService, uint256> mapProTxAddresses;
     std::map<std::vector<unsigned char>, uint256> mapProTxNEVMAddresses;
     std::map<CKeyID, uint256> mapProTxPubKeyIDs;

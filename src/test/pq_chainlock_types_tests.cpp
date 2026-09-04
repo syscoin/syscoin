@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <ios>
+#include <limits>
 #include <vector>
 
 #include <boost/test/unit_test.hpp>
@@ -145,6 +146,58 @@ T RoundTrip(const T& value)
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(pq_chainlock_types_tests, BasicTestingSetup)
+
+BOOST_AUTO_TEST_CASE(child_key_tree_id_is_canonical_and_domain_separated)
+{
+    const uint256 genesis{NonNullHash(1)};
+    const uint256 pro_tx_hash{NonNullHash(2)};
+    constexpr uint32_t generation{3};
+    constexpr uint32_t first_epoch{7};
+
+    const auto tree_id{GetChildKeyTreeId(
+        genesis, pro_tx_hash, generation, first_epoch)};
+    BOOST_REQUIRE(tree_id);
+    BOOST_CHECK(*tree_id == uint256S(
+        "913a44fbcd47c051b2ac2ca455fd1d503a16390b24113bf166655ffbe4508a9f"));
+    BOOST_CHECK(tree_id == GetChildKeyTreeId(
+                               genesis, pro_tx_hash, generation,
+                               first_epoch));
+
+    const auto other_genesis{GetChildKeyTreeId(
+        NonNullHash(3), pro_tx_hash, generation, first_epoch)};
+    const auto other_operator{GetChildKeyTreeId(
+        genesis, NonNullHash(3), generation, first_epoch)};
+    const auto other_generation{GetChildKeyTreeId(
+        genesis, pro_tx_hash, generation + 1, first_epoch)};
+    const auto other_first_epoch{GetChildKeyTreeId(
+        genesis, pro_tx_hash, generation, first_epoch + 1)};
+    BOOST_REQUIRE(other_genesis);
+    BOOST_REQUIRE(other_operator);
+    BOOST_REQUIRE(other_generation);
+    BOOST_REQUIRE(other_first_epoch);
+    BOOST_CHECK(*tree_id != *other_genesis);
+    BOOST_CHECK(*tree_id != *other_operator);
+    BOOST_CHECK(*tree_id != *other_generation);
+    BOOST_CHECK(*tree_id != *other_first_epoch);
+
+    BOOST_CHECK(!GetChildKeyTreeId(
+        uint256{}, pro_tx_hash, generation, first_epoch));
+    BOOST_CHECK(!GetChildKeyTreeId(
+        genesis, uint256{}, generation, first_epoch));
+    BOOST_CHECK(!GetChildKeyTreeId(
+        genesis, pro_tx_hash, /*generation=*/0, first_epoch));
+    BOOST_CHECK(!GetChildKeyTreeId(
+        genesis, pro_tx_hash, CHILD_KEY_TREE_MAX_GENERATION + 1,
+        first_epoch));
+    constexpr uint32_t last_valid_first_epoch{
+        std::numeric_limits<uint32_t>::max() -
+        static_cast<uint32_t>(CHILD_KEY_TREE_LEAF_COUNT - 1)};
+    BOOST_CHECK(GetChildKeyTreeId(
+        genesis, pro_tx_hash, generation, last_valid_first_epoch));
+    BOOST_CHECK(!GetChildKeyTreeId(
+        genesis, pro_tx_hash, generation,
+        last_valid_first_epoch + 1));
+}
 
 BOOST_AUTO_TEST_CASE(records_and_commitment_canonicality)
 {

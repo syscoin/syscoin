@@ -305,8 +305,8 @@ BOOST_AUTO_TEST_CASE(PQOperatorUpdateConflicts)
     pool.addUnchecked(entry.FromTx(global));
     BOOST_CHECK(pool.existsProviderTxConflict(CTransaction{same_key},
                                                active_tip));
-    BOOST_CHECK(pool.existsProviderTxConflict(CTransaction{same_tree},
-                                               active_tip));
+    BOOST_CHECK(!pool.existsProviderTxConflict(CTransaction{same_tree},
+                                                active_tip));
     BOOST_CHECK(!pool.existsProviderTxConflict(CTransaction{distinct_global},
                                                 active_tip));
     pool.removeRecursive(CTransaction{global}, REMOVAL_REASON_DUMMY);
@@ -316,8 +316,8 @@ BOOST_AUTO_TEST_CASE(PQOperatorUpdateConflicts)
     pool.addUnchecked(entry.FromTx(global));
     pool.addUnchecked(entry.FromTx(same_key));
     pool.removeRecursive(CTransaction{same_key}, REMOVAL_REASON_DUMMY);
-    BOOST_CHECK(pool.existsProviderTxConflict(CTransaction{same_tree},
-                                               active_tip));
+    BOOST_CHECK(!pool.existsProviderTxConflict(CTransaction{same_tree},
+                                                active_tip));
     pool.removeRecursive(CTransaction{global}, REMOVAL_REASON_DUMMY);
     BOOST_CHECK(!pool.existsProviderTxConflict(CTransaction{same_tree},
                                                 active_tip));
@@ -336,10 +336,8 @@ BOOST_AUTO_TEST_CASE(PQOperatorUpdateConflicts)
         {MakeTransactionRef(global), MakeTransactionRef(same_key)});
     BOOST_REQUIRE(conflict_index);
     BOOST_CHECK_EQUAL(*conflict_index, 1U);
-    conflict_index = find_package_conflict(
-        {MakeTransactionRef(global), MakeTransactionRef(same_tree)});
-    BOOST_REQUIRE(conflict_index);
-    BOOST_CHECK_EQUAL(*conflict_index, 1U);
+    BOOST_CHECK(!find_package_conflict(
+        {MakeTransactionRef(global), MakeTransactionRef(same_tree)}));
 
     pool.addUnchecked(entry.FromTx(global));
     conflict_index = find_package_conflict({MakeTransactionRef(same_key)});
@@ -418,7 +416,7 @@ BOOST_AUTO_TEST_CASE(PQOperatorUpdateConflicts)
          MakeTransactionRef(registration_a)}));
 
     // Removing an unchecked duplicate must leave the first provider index
-    // owner intact, just as for global-key and tree-id reservations above.
+    // owner intact, just as for global-key reservations above.
     pool.addUnchecked(entry.FromTx(registration_a));
     pool.addUnchecked(entry.FromTx(registration_owner_conflict));
     pool.removeRecursive(CTransaction{registration_owner_conflict},
@@ -456,7 +454,6 @@ BOOST_AUTO_TEST_CASE(PQOperatorUpdateConflicts)
         PQMempoolMNList(replaced_operator, replaced_collateral)};
     llmq::pq::PQRegistryMempoolView replacement_view;
     replacement_view.operator_state_count = 1;
-    replacement_view.used_tree_id_count = 1;
     replacement_view.operators.push_back({
         .pro_tx_hash = replaced_operator,
         .state_exists = 1,
@@ -792,10 +789,9 @@ BOOST_AUTO_TEST_CASE(PQRegistryMempoolCapacity)
     const std::vector<CTransactionRef> both{
         MakeTransactionRef(global_a), MakeTransactionRef(global_b)};
 
-    auto missing_view = [&](size_t operator_count, size_t tree_count) {
+    auto missing_view = [&](size_t operator_count) {
         llmq::pq::PQRegistryMempoolView view;
         view.operator_state_count = operator_count;
-        view.used_tree_id_count = tree_count;
         view.operators = {
             {.pro_tx_hash = operator_a,
              .state_exists = 0,
@@ -813,8 +809,7 @@ BOOST_AUTO_TEST_CASE(PQRegistryMempoolCapacity)
         return view;
     };
 
-    auto view{missing_view(llmq::pq::MAX_PQ_OPERATOR_STATES - 1,
-                           llmq::pq::MAX_PQ_USED_TREE_IDS - 1)};
+    auto view{missing_view(llmq::pq::MAX_PQ_OPERATOR_STATES - 1)};
     BOOST_CHECK(!pool.FindPackageProviderTxConflict(
         {both.front()}, active_tip, view));
     const auto boundary_conflict{pool.FindPackageProviderTxConflict(
@@ -822,10 +817,9 @@ BOOST_AUTO_TEST_CASE(PQRegistryMempoolCapacity)
     BOOST_REQUIRE(boundary_conflict);
     BOOST_CHECK_EQUAL(*boundary_conflict, 1U);
 
-    // A rotation that retains the exact current commitment consumes neither
-    // permanent counter, even when both registries are exactly full.
-    view = missing_view(llmq::pq::MAX_PQ_OPERATOR_STATES,
-                        llmq::pq::MAX_PQ_USED_TREE_IDS);
+    // A rotation that retains the exact current commitment consumes no new
+    // operator slot, even when the registry is exactly full.
+    view = missing_view(llmq::pq::MAX_PQ_OPERATOR_STATES);
     auto current_a{std::find_if(
         view.operators.begin(), view.operators.end(), [&](const auto& state) {
             return state.pro_tx_hash == operator_a;
@@ -841,20 +835,6 @@ BOOST_AUTO_TEST_CASE(PQRegistryMempoolCapacity)
     BOOST_REQUIRE(full_operator_conflict);
     BOOST_CHECK_EQUAL(*full_operator_conflict, 0U);
 
-    // Existing operator state does not hide a newly consumed tree-id slot.
-    auto current_b{std::find_if(
-        view.operators.begin(), view.operators.end(), [&](const auto& state) {
-            return state.pro_tx_hash == operator_b;
-        })};
-    BOOST_REQUIRE(current_b != view.operators.end());
-    current_b->state_exists = 1;
-    current_b->has_global_key = 1;
-    current_b->current_commitment = PQMempoolCommitment(12);
-    const auto full_tree_conflict{pool.FindPackageProviderTxConflict(
-        {both.back()}, active_tip, view)};
-    BOOST_REQUIRE(full_tree_conflict);
-    BOOST_CHECK_EQUAL(*full_tree_conflict, 0U);
-
     // Malformed over-cap summaries fail closed without unsigned wraparound.
     view.operator_state_count = llmq::pq::MAX_PQ_OPERATOR_STATES + 1;
     const auto over_cap_conflict{pool.FindPackageProviderTxConflict(
@@ -867,7 +847,7 @@ BOOST_AUTO_TEST_CASE(PQRegistryMempoolCapacity)
     child.vin[0].prevout = COutPoint{global_a.GetHash(), 0};
     pool.addUnchecked(entry.FromTx(global_a));
     pool.addUnchecked(entry.FromTx(child));
-    auto aged_view{missing_view(0, 0)};
+    auto aged_view{missing_view(0)};
     aged_view.has_next_block_schedule = 1;
     aged_view.next_first_mutable_epoch = 1;
     BOOST_CHECK(PQMempoolTestAccess::RebuildPQRegistryReservations(

@@ -24,11 +24,9 @@ using ChainLockMasterSeed =
     ChainLockMasterSeed& output) noexcept;
 
 /**
- * Derive a child key in a pre-transaction Merkle-tree domain.
- *
- * tree_id is committed on-chain and lets an operator build the tree before a
- * new ProRegTx has a transaction id. The quorum descriptor and share
- * transcript still bind the resulting key to the actual proTxHash.
+ * Derive a child key in the on-chain Merkle-tree domain. Consensus derives
+ * tree_id from the operator identity and tree schedule; the quorum descriptor
+ * and share transcript also bind the resulting key to the proTxHash.
  */
 [[nodiscard]] std::optional<ChildPublicKey> DeriveCommittedChildPublicKey(
     std::span<const uint8_t> chainlock_master_seed,

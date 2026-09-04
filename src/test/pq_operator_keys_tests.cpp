@@ -139,42 +139,41 @@ BOOST_AUTO_TEST_CASE(canonical_registry_hash_matches_generic_hash)
     });
 
     const uint256 genesis{NonNullHash(3)};
-    const uint256 tree_set_hash{NonNullHash(4)};
     const auto canonical{GetCanonicalPQKeyConsensusStateHash(
-        genesis, states, tree_set_hash)};
+        genesis, states)};
     const auto generic{
-        GetPQKeyConsensusStateHash(genesis, states, tree_set_hash)};
+        GetPQKeyConsensusStateHash(genesis, states)};
     BOOST_REQUIRE(canonical);
     BOOST_CHECK(*canonical == uint256S(
-        "1d28a6d663a0bf27878d13411dd08ebb1ab16b87230dd765ad133902477b57af"));
+        "f672dbd6383697c1e49dcab37fef63c857797ab2dfecd8ea9e2f8096a6eabeb8"));
     BOOST_CHECK(canonical == generic);
 
     const std::vector<OperatorKeyState> empty;
     const auto canonical_empty{GetCanonicalPQKeyConsensusStateHash(
-        genesis, empty, tree_set_hash)};
+        genesis, empty)};
     BOOST_REQUIRE(canonical_empty);
     BOOST_CHECK(*canonical_empty == uint256S(
-        "173231d09337676e7cb9f9ee23a8a1b9d38da9eccb1d93edaab059a689d9af33"));
+        "952f29534176f375e3cdd686f65cc66143a28d3a965d65566b7ed13a8cbce87c"));
     BOOST_CHECK(canonical_empty == GetPQKeyConsensusStateHash(
-                                       genesis, empty, tree_set_hash));
+                                       genesis, empty));
 
     std::reverse(states.begin(), states.end());
     BOOST_CHECK(!GetCanonicalPQKeyConsensusStateHash(
-        genesis, states, tree_set_hash));
+        genesis, states));
     BOOST_CHECK(GetPQKeyConsensusStateHash(
-                    genesis, states, tree_set_hash) == canonical);
+                    genesis, states) == canonical);
 
     states[1] = states[0];
     BOOST_CHECK(!GetCanonicalPQKeyConsensusStateHash(
-        genesis, states, tree_set_hash));
+        genesis, states));
     BOOST_CHECK(!GetPQKeyConsensusStateHash(
-        genesis, states, tree_set_hash));
+        genesis, states));
 
     std::vector<OperatorKeyState> invalid(1);
     BOOST_CHECK(!GetCanonicalPQKeyConsensusStateHash(
-        genesis, invalid, tree_set_hash));
+        genesis, invalid));
     BOOST_CHECK(!GetPQKeyConsensusStateHash(
-        genesis, invalid, tree_set_hash));
+        genesis, invalid));
 }
 
 BOOST_AUTO_TEST_CASE(global_key_is_private_and_signing_is_purpose_scoped)

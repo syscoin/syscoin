@@ -176,7 +176,6 @@ struct OperatorKeyState {
     }
     [[nodiscard]] bool IsAdvancedTo(
         const OperatorKeyScheduleView& view) const noexcept;
-    [[nodiscard]] bool UsesTreeId(const uint256& tree_id) const noexcept;
 
     [[nodiscard]] OperatorKeyStateResult Advance(
         const OperatorKeyScheduleView& view);
@@ -217,8 +216,7 @@ struct OperatorKeyState {
 
 [[nodiscard]] std::optional<uint256> GetPQKeyConsensusStateHash(
     const uint256& genesis_hash,
-    std::span<const OperatorKeyState> operator_states,
-    const uint256& used_tree_id_set_hash);
+    std::span<const OperatorKeyState> operator_states);
 
 /**
  * Hash states already strictly ordered and unique by proTxHash without
@@ -226,8 +224,7 @@ struct OperatorKeyState {
  */
 [[nodiscard]] std::optional<uint256> GetCanonicalPQKeyConsensusStateHash(
     const uint256& genesis_hash,
-    std::span<const OperatorKeyState> operator_states,
-    const uint256& used_tree_id_set_hash);
+    std::span<const OperatorKeyState> operator_states);
 
 } // namespace llmq::pq
 

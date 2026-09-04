@@ -507,7 +507,7 @@ void Chainstate::MaybeUpdateMempoolForReorg(
     // a valid later entry. Peers may relay still-valid transactions again.
     m_mempool->RemoveProviderTransactionsForReorg();
     // The active branch can change whether a pending tx86 consumes a new
-    // operator/tree slot. Reclassify before admitting another transaction so
+    // operator slot. Reclassify before admitting another transaction so
     // permanent registry capacity is reserved against the exact new tip.
     m_mempool->RebuildPQRegistryReservations(m_chain.Tip());
     // Re-limit mempool size, in case we added any transactions

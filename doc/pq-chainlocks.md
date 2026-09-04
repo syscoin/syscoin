@@ -95,7 +95,6 @@ The current quorum geometry remains the starting point:
 | `SCHEDULED_WOTS_USAGE_CAP` | 235 | Exact authorized leaf domain; leaves 235 through 255 are invalid |
 | `CHILD_KEY_TREE_DEPTH` | 16 | One commitment covers 65,536 consecutive epochs |
 | `CHILD_KEY_TREE_MAX_GENERATION` | 16 | One initial root plus at most 15 exceptional replacements per operator |
-| `MAX_PQ_USED_TREE_IDS` | 1,000,000 | Branch-local append-only tree-ID safety bound |
 | `CHILD_KEY_PROOF_SIZE` | 544 bytes | 32-byte key plus sixteen 32-byte siblings |
 | `MAX_PQ_CLSIG_BYTES` | 4,000,000 | Hard wire and allocation limit, including framing |
 
@@ -188,8 +187,8 @@ After a global PQ key is active, ECDSA alone must not be able to replace it.
 Otherwise a future attacker that forges the ECDSA authorization could replace
 the PQ trust root. Active rotation and revocation require a valid signature
 from the currently active global SLH-DSA key. Revocation marks it inactive in
-the containing block and clears that snapshot's retained child-key material;
-the append-only used-tree-ID history remains. Recovery is delayed for one full
+the containing block and clears that snapshot's retained child-key material.
+Recovery is delayed for one full
 four-quorum active window and then requires both the ECDSA owner signature and
 a proof of possession by a different new key at exactly the revoked key's
 version plus one. It also starts a fresh child-tree generation; owner
@@ -276,30 +275,34 @@ never sign:
 - a provider/governance transaction; or
 - a BTCC-only message outside the ChainLock transcript.
 
-The reference signer imports an independent 32-byte `chainlockSeed`. It hashes
-the network genesis hash, a nonzero random 256-bit `treeId`, tree generation,
+The reference signer imports an independent 32-byte `chainlockSeed`. Consensus
+derives `treeId` by hashing `SYS_PQ_CHILD_TREE_ID_V1`, the network genesis
+hash, `proTxHash`, tree generation, and first covered epoch. The child KDF then
+hashes the network genesis hash, this deterministic `treeId`, tree generation,
 absolute epoch, and child profile under `SYS_PQ_SWOTS_CHILD_ID_V1`. Three
 label-separated HMAC-SHA256 derivations under `SYS_PQ_SWOTS_CHILD_KDF_V1`
 produce `SK.seed`, `SK.prf`, and `PK.seed`; the first 16 bytes of each form the
-exact 48-byte child key-generation seed. The actual `proTxHash` is
-independently bound by every frozen roster leaf and share transcript; `treeId`
-is never a substitute for operator identity. This pre-transaction identity
-lets a public tree be built before a new transaction hash exists without
-creating a transferable signing authority.
+exact 48-byte child key-generation seed. The actual `proTxHash` is also bound
+directly by every frozen roster leaf and share transcript.
+
+```text
+treeId = SHA256d(raw("SYS_PQ_CHILD_TREE_ID_V1") || genesisHash ||
+                 proTxHash || LE32(generation) || LE32(firstEpoch))
+```
 
 The ChainLock seed is never derived from the global SLH secret, so a key-only
 global rotation preserves the current child commitment and cannot strand
 frozen quorums. A root rotation requires current-PQ authorization, increments the
-generation, uses a fresh `treeId` and root, and begins exactly at the first
-mutable epoch. Owner recovery has the same fresh-root rules after its delay.
-Consensus keeps an exact, branch-local append-only set of every accepted
-`treeId`; an operator removal or revocation never makes an ID reusable.
+generation, uses the exact deterministic `treeId` and a fresh root, and begins
+exactly at the first mutable epoch. Owner recovery has the same fresh-root
+rules after its delay. Including `proTxHash`, generation, and `firstEpoch` in
+the ID separates operator incarnations, successive roots, and rescheduled
+roots without retaining an unbounded historical-ID set.
 Generation starts at one and is consensus-bounded at 16 for the lifetime of a
 `proTxHash`. Thus one depth-16 root may be replaced exceptionally at most 15
 times. Key-only global rotations remain valid at generation 16, but another
 root-changing rotation or owner recovery does not. An exhausted or revoked
-operator must use normal deterministic-masternode replacement rather than
-bypassing the append-only tree-ID history.
+operator must use normal deterministic-masternode replacement.
 
 ## 4. Canonical serialization and domains
 
@@ -320,6 +323,7 @@ SYS_PQ_PROVIDER_SERVICE_V1
 SYS_PQ_PROVIDER_REVOKE_V1
 SYS_PQ_GOV_TRIGGER_V1
 SYS_PQ_GOV_VOTE_V1
+SYS_PQ_CHILD_TREE_ID_V1
 SYS_PQ_SWOTS_CHILD_ID_V1
 SYS_PQ_SWOTS_CHILD_KDF_V1
 SYS_PQ_CHILD_TREE_LEAF_V1
@@ -341,7 +345,6 @@ SYS_PQ_QUORUM_CHILD_NODE_V1
 SYS_PQ_BTCC_RECEIPT_STATE_V1
 SYS_PQ_OPERATOR_KEY_STATE_V1
 SYS_PQ_KEY_CONSENSUS_STATE_V1
-SYS_PQ_USED_TREE_ID_SET_V1
 ```
 
 The final implementation must define one helper for each transcript and publish
@@ -377,7 +380,7 @@ ChildKeyTreeCommitment {
     uint16  depth;               // exactly 16
     uint32  generation;          // 1..16, increments on root change
     uint32  firstEpoch;          // first covered absolute epoch
-    uint256 treeId;              // nonzero random, never reused on the branch
+    uint256 treeId;              // H(domain, genesis, proTxHash, generation, firstEpoch)
     uint256 root;                // complete 2^16-leaf Merkle root
 }
 ```
@@ -412,8 +415,8 @@ reintroducing an ECDSA-only PQ trust-root replacement path.
 
 Rotation additionally binds the complete old record and is signed by the old
 global key. A key-only rotation preserves the child commitment. A root-changing
-rotation must be a generation successor with a fresh tree ID/root and starts at
-the schedule's first mutable epoch. It never changes a root frozen into an
+rotation must be a generation successor with the exact derived tree ID, a new
+root, and the schedule's first mutable epoch. It never changes a root frozen into an
 active or already selected quorum.
 
 `protx_rotate_operator_key` therefore preserves the root by default. An
@@ -465,14 +468,12 @@ rotation cannot rewrite them. Revocation makes the current operator ineligible
 and clears its live frozen records, while an exact earlier branch snapshot
 remains independently reconstructible.
 
-The PQ registry stores sorted operator states and an exact, sorted,
-branch-local append-only set of accepted tree IDs. A disk checkpoint contains
-the full sets; intermediate blocks contain only changed/removed operators and
-new tree IDs. Every sparse link binds its parent block hash, previous state
+The PQ registry stores sorted operator states. A disk checkpoint contains the
+full operator set; intermediate blocks contain only changed/removed operators.
+Every sparse link binds its parent block hash, previous state
 root, schedule revision, and resulting state root. Reorg rollback selects the
-immutable parent snapshot. Removing an operator does not remove a used tree ID.
-The 16-generation per-operator consensus limit prevents one funded identity
-from consuming the registry's global one-million-ID safety bound through cheap
+immutable parent snapshot. Deterministic tree IDs eliminate historical
+namespace storage while the 16-generation per-operator consensus limit bounds
 successive root rotations. Root rotation still pays and validates an ordinary
 tx86 transaction; there is no periodic transaction or coordinator.
 
@@ -1429,9 +1430,8 @@ The full boundary snapshot and its inverse closure remain durable, binding the
 state hash, history commitment, and record hash. The PQ store similarly prunes
 historical snapshot records below authenticated interval checkpoints whose
 rooted lineage commitments and bounded erase manifests are verified before
-deletion. The logical branch-local set of accepted tree IDs remains append-only
-and capped by `MAX_PQ_USED_TREE_IDS`; deleting historical snapshot records never
-permits reuse of a tree ID.
+deletion. Tree-ID namespace separation is reconstructed directly from each
+commitment's deterministic tuple and therefore needs no retained history.
 
 Both stores use the same versioned crash-durable `INTENT`/`WATERMARK` journal.
 Bounded erase batches resume after restart, while malformed, non-monotonic, or
@@ -2077,7 +2077,7 @@ Expected failures are fail-closed:
   while owner recovery is rejected before PQ revocation plus the full
   1,152-block delay.
 - Registration immediately before/after cutoff; wrong depth/profile/cap,
-  generation, first epoch, zero/reused tree ID, and root encodings.
+  generation, first epoch, mismatched deterministic tree ID, and root encodings.
 - Key-only and root-changing global rotation before/after cutoff, owner recovery
   delay, fresh-root enforcement, generation 15-to-16 acceptance,
   generation-17 rotation/recovery rejection, and losing-fork

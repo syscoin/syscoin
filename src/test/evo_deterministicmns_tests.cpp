@@ -1374,15 +1374,18 @@ BOOST_AUTO_TEST_CASE(payment_projection_stops_at_frozen_epoch_boundary)
         MakeLegacyReplayMN(50, 30), MakeLegacyReplayMN(51, 31),
         MakeLegacyReplayMN(52, 32)};
     std::vector<llmq::pq::OperatorKeyState> operator_states;
-    std::vector<uint256> tree_ids;
     for (std::size_t index{0}; index < members.size(); ++index) {
         llmq::pq::GlobalKeyRecord key;
         key.key_version = 1;
         key.public_key[0] = static_cast<uint8_t>(index + 1);
         key.child_key_commitment.generation = 1;
         key.child_key_commitment.first_epoch = 0;
-        key.child_key_commitment.tree_id =
-            MakeSnapshotKey(91'000 + static_cast<int>(index));
+        const auto tree_id{llmq::pq::GetChildKeyTreeId(
+            consensus.hashGenesisBlock, members[index]->proTxHash,
+            key.child_key_commitment.generation,
+            key.child_key_commitment.first_epoch)};
+        BOOST_REQUIRE(tree_id);
+        key.child_key_commitment.tree_id = *tree_id;
         key.child_key_commitment.root =
             MakeSnapshotKey(92'000 + static_cast<int>(index));
         llmq::pq::GlobalSignature proof{};
@@ -1401,14 +1404,12 @@ BOOST_AUTO_TEST_CASE(payment_projection_stops_at_frozen_epoch_boundary)
                       llmq::pq::OperatorKeyStateResult::OK);
         BOOST_REQUIRE(state.ResolveChildRoot(0).status ==
                       llmq::pq::ChildRootResolutionStatus::FROZEN_PRESENT);
-        tree_ids.push_back(key.child_key_commitment.tree_id);
         operator_states.push_back(std::move(state));
     }
     std::sort(operator_states.begin(), operator_states.end(),
               [](const auto& left, const auto& right) {
                   return left.pro_tx_hash < right.pro_tx_hash;
               });
-    std::sort(tree_ids.begin(), tree_ids.end());
 
     ScopedDiskDBPath db_path;
     DBParams manager_db{
@@ -1436,7 +1437,7 @@ BOOST_AUTO_TEST_CASE(payment_projection_stops_at_frozen_epoch_boundary)
         BOOST_REQUIRE(empty_root);
         // SYSCOIN: Seed the same bounded authenticated checkpoint segment used
         // by production replay; a synthetic C-1 root cannot authorize C's
-        // sparse operator and tree-id transition.
+        // sparse operator transition.
         uint256 previous_registry_hash{
             MakeSnapshotKey(preparation_height - 1)};
         for (int height{preparation_height}; height < checkpoint_height;
@@ -1461,7 +1462,6 @@ BOOST_AUTO_TEST_CASE(payment_projection_stops_at_frozen_epoch_boundary)
         checkpoint.block_hash = checkpoint_hash;
         checkpoint.previous_block_hash = checkpoint_parent_hash;
         checkpoint.operator_states = operator_states;
-        checkpoint.used_tree_ids = tree_ids;
         const auto checkpoint_root{checkpoint.RecomputeConsensusStateRoot(
             consensus.hashGenesisBlock)};
         BOOST_REQUIRE(checkpoint_root);
@@ -1477,8 +1477,6 @@ BOOST_AUTO_TEST_CASE(payment_projection_stops_at_frozen_epoch_boundary)
             *empty_root;
         checkpoint_disk.operator_states = operator_states;
         checkpoint_disk.checkpoint_operator_states = operator_states;
-        checkpoint_disk.tree_ids = tree_ids;
-        checkpoint_disk.block_tree_ids = tree_ids;
         checkpoint_disk.consensus_state_root = *checkpoint_root;
         BOOST_REQUIRE(checkpoint_disk.IsStructurallyValid());
         BOOST_REQUIRE(registry.WriteExactSnapshotForTesting(

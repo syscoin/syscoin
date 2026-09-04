@@ -76,19 +76,44 @@ bool StartsAtMutableCutoff(
            commitment.first_epoch == view.first_mutable_epoch;
 }
 
+bool HasExpectedTreeId(const uint256& genesis_hash,
+                       const uint256& pro_tx_hash,
+                       const ChildKeyTreeCommitment& commitment) noexcept
+{
+    const auto expected{GetChildKeyTreeId(
+        genesis_hash, pro_tx_hash, commitment.generation,
+        commitment.first_epoch)};
+    return expected && commitment.tree_id == *expected;
+}
+
+bool HasExpectedTreeIds(const uint256& genesis_hash,
+                        const OperatorKeyState& state) noexcept
+{
+    if (state.has_global_key == 0) return true;
+    if (!HasExpectedTreeId(
+            genesis_hash, state.pro_tx_hash,
+            state.global_key.child_key_commitment)) {
+        return false;
+    }
+    return std::all_of(
+        state.frozen_child_roots.begin(), state.frozen_child_roots.end(),
+        [&](const FrozenChildRootRecord& record) {
+            return HasExpectedTreeId(
+                genesis_hash, state.pro_tx_hash, record.commitment);
+        });
+}
+
 template <typename StateAt>
 std::optional<uint256> HashCanonicalOperatorKeyStates(
     const uint256& genesis_hash,
     std::size_t state_count,
-    const uint256& used_tree_id_set_hash,
     StateAt&& state_at)
 {
-    if (genesis_hash.IsNull() || used_tree_id_set_hash.IsNull()) {
-        return std::nullopt;
-    }
+    if (genesis_hash.IsNull()) return std::nullopt;
     for (std::size_t index{0}; index < state_count; ++index) {
         const auto& state{state_at(index)};
         if (!state.IsStructurallyValid() ||
+            !HasExpectedTreeIds(genesis_hash, state) ||
             (index != 0 &&
              !(state_at(index - 1).pro_tx_hash < state.pro_tx_hash))) {
             return std::nullopt;
@@ -102,7 +127,6 @@ std::optional<uint256> HashCanonicalOperatorKeyStates(
     for (std::size_t index{0}; index < state_count; ++index) {
         writer << state_at(index);
     }
-    writer << used_tree_id_set_hash;
     return writer.GetHash();
 }
 
@@ -262,17 +286,6 @@ bool OperatorKeyState::IsAdvancedTo(
     return schedule_initialized != 0 && schedule.IsCompatible(view);
 }
 
-bool OperatorKeyState::UsesTreeId(const uint256& tree_id) const noexcept
-{
-    if (tree_id.IsNull() || has_global_key == 0) return false;
-    if (global_key.child_key_commitment.tree_id == tree_id) return true;
-    return std::any_of(
-        frozen_child_roots.begin(), frozen_child_roots.end(),
-        [&](const auto& record) {
-            return record.commitment.tree_id == tree_id;
-        });
-}
-
 OperatorKeyStateResult OperatorKeyState::Advance(
     const OperatorKeyScheduleView& view)
 {
@@ -359,7 +372,9 @@ OperatorKeyStateResult OperatorKeyState::ApplyInitialGlobalKey(
     if (HasActiveGlobalKey()) {
         return OperatorKeyStateResult::GLOBAL_KEY_ALREADY_REGISTERED;
     }
-    if (!StartsAtMutableCutoff(candidate.child_key_commitment, view)) {
+    if (!StartsAtMutableCutoff(candidate.child_key_commitment, view) ||
+        !HasExpectedTreeId(
+            genesis_hash, pro_tx_hash, candidate.child_key_commitment)) {
         return OperatorKeyStateResult::INVALID_CHILD_ROOT_COMMITMENT;
     }
     if (has_global_key != 0) {
@@ -436,7 +451,10 @@ OperatorKeyStateResult OperatorKeyState::ApplyGlobalKeyRotation(
     }
     if (candidate.child_key_commitment !=
             global_key.child_key_commitment &&
-        !StartsAtMutableCutoff(candidate.child_key_commitment, view)) {
+        (!StartsAtMutableCutoff(candidate.child_key_commitment, view) ||
+         !HasExpectedTreeId(
+             genesis_hash, pro_tx_hash,
+             candidate.child_key_commitment))) {
         return OperatorKeyStateResult::INVALID_CHILD_ROOT_COMMITMENT;
     }
     if (!GetGlobalRotationAuthorizationHash(
@@ -537,7 +555,8 @@ std::optional<uint256> GetOperatorKeyStateHash(
     const uint256& genesis_hash,
     const OperatorKeyState& state)
 {
-    if (genesis_hash.IsNull() || !state.IsStructurallyValid()) {
+    if (genesis_hash.IsNull() || !state.IsStructurallyValid() ||
+        !HasExpectedTreeIds(genesis_hash, state)) {
         return std::nullopt;
     }
     CHashWriter writer{SER_GETHASH, 0};
@@ -548,12 +567,9 @@ std::optional<uint256> GetOperatorKeyStateHash(
 
 std::optional<uint256> GetPQKeyConsensusStateHash(
     const uint256& genesis_hash,
-    std::span<const OperatorKeyState> operator_states,
-    const uint256& used_tree_id_set_hash)
+    std::span<const OperatorKeyState> operator_states)
 {
-    if (genesis_hash.IsNull() || used_tree_id_set_hash.IsNull()) {
-        return std::nullopt;
-    }
+    if (genesis_hash.IsNull()) return std::nullopt;
     std::vector<const OperatorKeyState*> ordered;
     ordered.reserve(operator_states.size());
     for (const auto& state : operator_states) {
@@ -566,7 +582,7 @@ std::optional<uint256> GetPQKeyConsensusStateHash(
             return lhs->pro_tx_hash < rhs->pro_tx_hash;
         });
     return HashCanonicalOperatorKeyStates(
-        genesis_hash, ordered.size(), used_tree_id_set_hash,
+        genesis_hash, ordered.size(),
         [&](std::size_t index) -> const OperatorKeyState& {
             return *ordered[index];
         });
@@ -574,11 +590,10 @@ std::optional<uint256> GetPQKeyConsensusStateHash(
 
 std::optional<uint256> GetCanonicalPQKeyConsensusStateHash(
     const uint256& genesis_hash,
-    std::span<const OperatorKeyState> operator_states,
-    const uint256& used_tree_id_set_hash)
+    std::span<const OperatorKeyState> operator_states)
 {
     return HashCanonicalOperatorKeyStates(
-        genesis_hash, operator_states.size(), used_tree_id_set_hash,
+        genesis_hash, operator_states.size(),
         [&](std::size_t index) -> const OperatorKeyState& {
             return operator_states[index];
         });

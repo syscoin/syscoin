@@ -54,8 +54,6 @@ inline constexpr std::size_t
     256U * 1024U * 1024U};
 inline constexpr std::size_t PQ_PAYMENT_ELIGIBILITY_CACHE_SIZE{8};
 inline constexpr std::size_t MAX_PQ_OPERATOR_STATES{65'535};
-inline constexpr std::size_t MAX_PQ_TREE_IDS_PER_BLOCK{65'535};
-inline constexpr std::size_t MAX_PQ_USED_TREE_IDS{1'000'000};
 inline constexpr std::size_t PQ_REGISTRY_GC_MAX_SCANNED_VALUE_BYTES{
     16U * 1024U * 1024U};
 /** Exact maximum serialized size of one fully populated operator state. */
@@ -73,8 +71,6 @@ static_assert(PQ_OPERATOR_KEY_STATE_MAX_SERIALIZED_SIZE == 4'024);
 /** Active reservations plus one standard package, without an unbounded copy. */
 inline constexpr std::size_t MAX_PQ_MEMPOOL_OPERATOR_REQUESTS{
     MAX_PQ_OPERATOR_STATES + 64};
-inline constexpr std::string_view USED_TREE_ID_SET_DOMAIN{
-    "SYS_PQ_USED_TREE_ID_SET_V1"};
 
 struct PQRegistryConfig {
     int32_t preparation_height{-1};
@@ -115,22 +111,17 @@ enum class PQRegistryDeploymentResult : uint8_t {
     const Consensus::Params& params,
     PQRegistryConfig& config) noexcept;
 
-/** Exact, branch-local operator state plus append-only tree-id history. */
+/** Exact, branch-local operator state. */
 struct PQRegistrySnapshot {
     uint16_t version{PQ_REGISTRY_SNAPSHOT_VERSION};
     int32_t height{-1};
     uint256 block_hash;
     uint256 previous_block_hash;
     std::vector<OperatorKeyState> operator_states;
-    /** Sorted, append-only on this branch; survives operator removal. */
-    std::vector<uint256> used_tree_ids;
-    /** Sorted ids first accepted by this exact block. */
-    std::vector<uint256> block_tree_ids;
     uint256 consensus_state_root;
 
     [[nodiscard]] bool IsStructurallyValid() const noexcept;
     [[nodiscard]] bool IsEmpty() const noexcept;
-    [[nodiscard]] bool HasUsedTreeId(const uint256& tree_id) const noexcept;
     [[nodiscard]] const OperatorKeyState* FindOperator(
         const uint256& pro_tx_hash) const noexcept;
     [[nodiscard]] std::optional<uint256> RecomputeConsensusStateRoot(
@@ -141,9 +132,9 @@ struct PQRegistrySnapshot {
 
 /**
  * One sparse branch journal record. Every record retains its exact operator
- * and tree-id delta. Checkpoints additionally retain the full resulting sets
- * so replay can authenticate the sparse transition before accepting the
- * checkpoint as a reconstruction base.
+ * delta. Checkpoints additionally retain the full resulting set so replay can
+ * authenticate the sparse transition before accepting the checkpoint as a
+ * reconstruction base.
  */
 struct PQRegistryDiskSnapshot {
     /** Exact decoder envelope implied by every fixed-width collection cap. */
@@ -156,11 +147,8 @@ struct PQRegistryDiskSnapshot {
         sizeof(uint16_t) + MAX_PQ_OPERATOR_STATES * uint256::size() +
         sizeof(uint16_t) +
         MAX_PQ_OPERATOR_STATES *
-            PQ_OPERATOR_KEY_STATE_MAX_SERIALIZED_SIZE +
-        sizeof(uint32_t) + MAX_PQ_USED_TREE_IDS * uint256::size() +
-        sizeof(uint16_t) +
-        MAX_PQ_TREE_IDS_PER_BLOCK * uint256::size() + uint256::size()};
-    static_assert(MAX_SERIALIZED_SIZE == 563'620'067);
+            PQ_OPERATOR_KEY_STATE_MAX_SERIALIZED_SIZE + uint256::size()};
+    static_assert(MAX_SERIALIZED_SIZE == 529'522'941);
 
     uint16_t version{PQ_REGISTRY_DISK_VERSION};
     uint8_t is_checkpoint{0};
@@ -174,10 +162,6 @@ struct PQRegistryDiskSnapshot {
     std::vector<uint256> removed_operators;
     /** Full resulting operator set at checkpoints; empty otherwise. */
     std::vector<OperatorKeyState> checkpoint_operator_states;
-    /** Full append-only set at checkpoints; empty on sparse records. */
-    std::vector<uint256> tree_ids;
-    /** Exact additions made by this block, including checkpoint blocks. */
-    std::vector<uint256> block_tree_ids;
     uint256 consensus_state_root;
 
     SERIALIZE_METHODS(PQRegistryDiskSnapshot, obj)
@@ -222,32 +206,6 @@ struct PQRegistryDiskSnapshot {
                           checkpoint_operator_count));
         for (auto& state : obj.checkpoint_operator_states) READWRITE(state);
 
-        uint32_t tree_id_count{
-            static_cast<uint32_t>(obj.tree_ids.size())};
-        SER_WRITE(obj, if (obj.tree_ids.size() > MAX_PQ_USED_TREE_IDS ||
-                           (obj.is_checkpoint == 0 &&
-                            obj.tree_ids.size() >
-                                MAX_PQ_TREE_IDS_PER_BLOCK)) {
-            throw std::ios_base::failure("too many PQ child-tree ids");
-        });
-        READWRITE(tree_id_count);
-        SER_READ(obj, if (tree_id_count > MAX_PQ_USED_TREE_IDS ||
-                          (obj.is_checkpoint == 0 && tree_id_count >
-                               MAX_PQ_TREE_IDS_PER_BLOCK)) {
-            throw std::ios_base::failure("too many PQ child-tree ids");
-        });
-        SER_READ(obj, obj.tree_ids.resize(tree_id_count));
-        for (auto& tree_id : obj.tree_ids) READWRITE(tree_id);
-        uint16_t block_tree_id_count{
-            static_cast<uint16_t>(obj.block_tree_ids.size())};
-        SER_WRITE(obj, if (obj.block_tree_ids.size() >
-                           MAX_PQ_TREE_IDS_PER_BLOCK) {
-            throw std::ios_base::failure(
-                "too many block PQ child-tree ids");
-        });
-        READWRITE(block_tree_id_count);
-        SER_READ(obj, obj.block_tree_ids.resize(block_tree_id_count));
-        for (auto& tree_id : obj.block_tree_ids) READWRITE(tree_id);
         READWRITE(obj.consensus_state_root);
         SER_READ(obj, if (!obj.IsStructurallyValid()) {
             throw std::ios_base::failure("invalid PQ registry disk snapshot");
@@ -273,7 +231,6 @@ enum class PQRegistryResult : uint8_t {
     DMN_REMOVED_IN_BLOCK,
     DUPLICATE_OPERATOR_UPDATE,
     DUPLICATE_GLOBAL_KEY,
-    DUPLICATE_CHILD_TREE_ID,
     INVALID_GLOBAL_KEY_PAYLOAD,
     INVALID_PROVIDER_REVOCATION_PAYLOAD,
     TRANSACTION_INPUTS_HASH_MISMATCH,
@@ -320,10 +277,7 @@ struct PQRegistryCallbacks {
 };
 
 /**
- * Bounded registry state needed to reserve mempool capacity. The complete
- * append-only tree-id set can contain one million entries, so admission only
- * copies its size and the current commitment for explicitly requested
- * operators.
+ * Bounded registry state needed to reserve mempool capacity.
  */
 struct PQRegistryMempoolOperatorState {
     uint256 pro_tx_hash;
@@ -339,7 +293,6 @@ struct PQRegistryMempoolView {
     uint8_t has_next_block_schedule{0};
     uint32_t next_first_mutable_epoch{0};
     std::size_t operator_state_count{0};
-    std::size_t used_tree_id_count{0};
     /** One entry per requested proTxHash, in the same strictly sorted order. */
     std::vector<PQRegistryMempoolOperatorState> operators;
 
@@ -373,8 +326,6 @@ public:
     [[nodiscard]] uint256 PreviousBlockHash() const noexcept;
     [[nodiscard]] uint256 ConsensusStateRoot() const noexcept;
     [[nodiscard]] std::size_t OperatorCount() const noexcept;
-    [[nodiscard]] std::size_t UsedTreeIdCount() const noexcept;
-    [[nodiscard]] bool HasUsedTreeId(const uint256& tree_id) const noexcept;
     [[nodiscard]] const OperatorKeyState* FindOperator(
         const uint256& pro_tx_hash) const noexcept;
     [[nodiscard]] std::optional<uint256> FindRetainedGlobalKeyOwner(
@@ -385,8 +336,6 @@ public:
     [[nodiscard]] std::shared_ptr<const std::vector<OperatorKeyState>>
     ShareOperatorStates() const noexcept;
     [[nodiscard]] bool SharesStateWith(
-        const PQRegistryReadView& other) const noexcept;
-    [[nodiscard]] bool SharesTreeHistoryWith(
         const PQRegistryReadView& other) const noexcept;
 
 private:
@@ -489,8 +438,6 @@ private:
     mutable uint64_t m_reconstruction_authenticated_records
         GUARDED_BY(m_mutex){0};
     mutable uint64_t m_reconstruction_reused_records
-        GUARDED_BY(m_mutex){0};
-    mutable uint64_t m_reconstruction_tree_id_hashes
         GUARDED_BY(m_mutex){0};
     mutable uint64_t m_reconstruction_state_hashes
         GUARDED_BY(m_mutex){0};

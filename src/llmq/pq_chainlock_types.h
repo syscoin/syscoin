@@ -69,6 +69,7 @@ inline constexpr std::size_t FINAL_SIGNATURE_COUNT{REQUIRED_QUORUMS * QUORUM_THR
 inline constexpr std::size_t MAX_CHAINLOCK_SIZE{4'000'000};
 inline constexpr std::string_view GLOBAL_REGISTER_DOMAIN{"SYS_PQ_GLOBAL_REGISTER_V1"};
 inline constexpr std::string_view GLOBAL_ROTATE_DOMAIN{"SYS_PQ_GLOBAL_ROTATE_V1"};
+inline constexpr std::string_view CHILD_KEY_TREE_ID_DOMAIN{"SYS_PQ_CHILD_TREE_ID_V1"};
 inline constexpr std::string_view CHILD_ROOT_LEAF_DOMAIN{"SYS_PQ_CHILD_ROOT_LEAF_V1"};
 inline constexpr std::string_view QUORUM_CONTEXT_DOMAIN{"SYS_PQ_QUORUM_CONTEXT_V1"};
 inline constexpr std::string_view CHAINLOCK_SHARE_DOMAIN{"SYS_PQ_CHAINLOCK_SHARE_V1"};
@@ -96,6 +97,13 @@ static_assert(ACTIVE_QUORUMS * QUORUM_SIZE <=
     return generation >= 1 &&
            generation < CHILD_KEY_TREE_MAX_GENERATION;
 }
+
+/** Consensus-assigned namespace for one operator's child-key tree. */
+[[nodiscard]] std::optional<uint256> GetChildKeyTreeId(
+    const uint256& genesis_hash,
+    const uint256& pro_tx_hash,
+    uint32_t generation,
+    uint32_t first_epoch) noexcept;
 
 using GlobalPublicKey = std::array<uint8_t, GLOBAL_PUBLIC_KEY_SIZE>;
 using GlobalSignature = std::array<uint8_t, GLOBAL_SIGNATURE_SIZE>;

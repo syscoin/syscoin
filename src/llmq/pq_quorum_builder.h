@@ -231,8 +231,7 @@ using RecoveryUniverseLookup = std::function<RecoveryUniverseCapsulePtr(
 /**
  * State looked up at an exact block on the branch supplied by the caller.
  * The deterministic list is structurally shared internally; registry
- * operators retain the exact immutable registry allocation without also
- * pinning its potentially much larger tree-ID history.
+ * operators retain the exact immutable registry allocation.
  */
 struct QuorumSnapshotState {
     CDeterministicMNList deterministic_mns;

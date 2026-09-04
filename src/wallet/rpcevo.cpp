@@ -37,7 +37,6 @@
 #include <util/translation.h>
 #include <node/context.h>
 #include <node/transaction.h>
-#include <random.h>
 #include <wallet/rpc/spend.h>
 #include <wallet/rpc/wallet.h>
 #include <llmq/quorums_utils.h>
@@ -166,16 +165,21 @@ static void ParseChainLockMasterSeed(
 
 static llmq::pq::ChildKeyTreeCommitment BuildChildKeyTreeCommitment(
     const llmq::pq::ChainLockMasterSeed& chainlock_seed,
+    const uint256& pro_tx_hash,
     uint32_t generation,
-    uint32_t first_epoch,
-    std::span<const uint256> used_tree_ids)
+    uint32_t first_epoch)
 {
-    // SYSCOIN: bound the append-only child-tree namespace per operator.
     if (!llmq::pq::IsValidChildKeyTreeGeneration(generation)) {
         throw JSONRPCError(RPC_INVALID_PARAMETER,
                            "Child-key tree generation is outside the consensus range");
     }
-    uint256 tree_id;
+    const auto tree_id{llmq::pq::GetChildKeyTreeId(
+        Params().GetConsensus().hashGenesisBlock, pro_tx_hash, generation,
+        first_epoch)};
+    if (!tree_id) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER,
+                           "Unable to derive the child-key tree ID");
+    }
     uint256 fixture_root;
     const bool use_test_stub{
         gArgs.GetBoolArg("-pqoperatorcommitmentteststub", false)};
@@ -235,26 +239,18 @@ static llmq::pq::ChildKeyTreeCommitment BuildChildKeyTreeCommitment(
                 "PQ operator commitment test fixture does not match the "
                 "requested seed or schedule");
         }
-        tree_id = uint256S(fields[2]);
         fixture_root = uint256S(fields[5]);
-        if (tree_id.IsNull() || fixture_root.IsNull() ||
-            std::binary_search(used_tree_ids.begin(), used_tree_ids.end(),
-                               tree_id)) {
+        if (uint256S(fields[2]) != *tree_id || fixture_root.IsNull()) {
             throw JSONRPCError(
                 RPC_INVALID_PARAMETER,
-                "PQ operator commitment test fixture is null or already used");
+                "PQ operator commitment test fixture has the wrong tree ID "
+                "or a null root");
         }
-    } else {
-        do {
-            tree_id = GetRandHash();
-        } while (tree_id.IsNull() ||
-                 std::binary_search(used_tree_ids.begin(), used_tree_ids.end(),
-                                    tree_id));
     }
 
     const llmq::pq::ChildKeyTreeConfig config{
         Params().GetConsensus().hashGenesisBlock,
-        tree_id,
+        *tree_id,
         generation,
         first_epoch,
         llmq::pq::CHILD_KEY_TREE_DEPTH,
@@ -297,7 +293,7 @@ static llmq::pq::ChildKeyTreeCommitment BuildChildKeyTreeCommitment(
     llmq::pq::ChildKeyTreeCommitment commitment;
     commitment.generation = generation;
     commitment.first_epoch = first_epoch;
-    commitment.tree_id = tree_id;
+    commitment.tree_id = *tree_id;
     commitment.root = fixture_root.IsNull() ? tree->GetRoot() : fixture_root;
     if (!commitment.IsStructurallyValid()) {
         throw JSONRPCError(RPC_INTERNAL_ERROR,
@@ -1155,7 +1151,6 @@ static RPCHelpMan protx_register_operator_key()
             uint32_t tree_generation{1};
             uint32_t first_epoch{0};
             std::optional<llmq::pq::GlobalKeyRecord> previous_key;
-            std::vector<uint256> used_tree_ids;
             {
                 LOCK(cs_main);
                 const CBlockIndex* tip = node.chainman->ActiveTip();
@@ -1178,7 +1173,6 @@ static RPCHelpMan protx_register_operator_key()
                         RPC_INTERNAL_ERROR,
                         "Unable to read PQ registry snapshot: " + registry_error);
                 }
-                used_tree_ids = snapshot.used_tree_ids;
                 if (const auto* state = snapshot.FindOperator(pro_tx_hash)) {
                     if (state->HasActiveGlobalKey()) {
                         throw JSONRPCError(
@@ -1193,7 +1187,7 @@ static RPCHelpMan protx_register_operator_key()
                         }
                         key_version = state->global_key.key_version + 1;
                         previous_key = state->global_key;
-                        // SYSCOIN: recovery must start a fresh bounded tree.
+                        // SYSCOIN: recovery advances to a fresh tree generation.
                         if (!llmq::pq::CanAdvanceChildKeyTreeGeneration(
                                 state->global_key.child_key_commitment.generation)) {
                             throw JSONRPCError(
@@ -1224,7 +1218,7 @@ static RPCHelpMan protx_register_operator_key()
             }
 
             const auto child_commitment = BuildChildKeyTreeCommitment(
-                chainlock_seed, tree_generation, first_epoch, used_tree_ids);
+                chainlock_seed, pro_tx_hash, tree_generation, first_epoch);
 
             CKey owner_key;
             if (!pwallet->GetKey(dmn->pdmnState->keyIDOwner, owner_key)) {
@@ -1344,7 +1338,6 @@ static RPCHelpMan protx_rotate_operator_key()
             llmq::pq::OperatorKeyState operator_state;
             uint32_t replacement_tree_generation{0};
             uint32_t replacement_first_epoch{0};
-            std::vector<uint256> used_tree_ids;
             {
                 LOCK(cs_main);
                 const CBlockIndex* tip = node.chainman->ActiveTip();
@@ -1372,16 +1365,6 @@ static RPCHelpMan protx_rotate_operator_key()
                     replacement_tree_generation =
                         current_commitment.generation + 1;
 
-                    llmq::pq::PQRegistrySnapshot snapshot;
-                    std::string registry_error;
-                    if (!deterministicMNManager->GetPQRegistrySnapshot(
-                            tip, snapshot, registry_error)) {
-                        throw JSONRPCError(
-                            RPC_INTERNAL_ERROR,
-                            "Unable to read PQ registry snapshot: " +
-                                registry_error);
-                    }
-                    used_tree_ids = snapshot.used_tree_ids;
                     llmq::pq::PQRegistryConfig config;
                     if (llmq::pq::GetPQRegistryConfig(
                             Params().GetConsensus(), config) !=
@@ -1426,8 +1409,9 @@ static RPCHelpMan protx_rotate_operator_key()
                 payload.candidate.child_key_commitment =
                     BuildChildKeyTreeCommitment(
                         replacement_chainlock_seed,
+                        pro_tx_hash,
                         replacement_tree_generation,
-                        replacement_first_epoch, used_tree_ids);
+                        replacement_first_epoch);
                 if (payload.candidate.child_key_commitment.root ==
                     operator_state.global_key.child_key_commitment.root) {
                     throw JSONRPCError(

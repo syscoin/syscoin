@@ -615,10 +615,6 @@ bool CTxMemPool::addUnchecked(
                 if (current != nullptr) {
                     reservation.introduces_operator =
                         current->state_exists == 0;
-                    reservation.introduces_tree =
-                        current->state_exists == 0 ||
-                        current->has_global_key == 0 ||
-                        current->current_commitment != commitment;
                 }
             } else {
                 LogPrint(BCLog::MEMPOOL,
@@ -627,14 +623,11 @@ bool CTxMemPool::addUnchecked(
             }
         }
         mapPQGlobalKeys.emplace(reservation.public_key, tx_hash);
-        mapPQTreeIds.emplace(reservation.commitment.tree_id, tx_hash);
         const auto [position, inserted]{mapPQGlobalReservations.emplace(
             tx_hash, std::move(reservation))};
         if (inserted) {
             m_pq_operator_introductions +=
                 position->second.introduces_operator ? 1 : 0;
-            m_pq_tree_introductions +=
-                position->second.introduces_tree ? 1 : 0;
         }
     }
     if (pq_operator_hash) {
@@ -768,21 +761,10 @@ void CTxMemPool::removeUnchecked(txiter it, MemPoolRemovalReason reason)
         if (key != mapPQGlobalKeys.end() && key->second == tx_hash) {
             mapPQGlobalKeys.erase(key);
         }
-        const auto tree{mapPQTreeIds.find(
-            global_reservation->second.commitment.tree_id)};
-        if (tree != mapPQTreeIds.end() && tree->second == tx_hash) {
-            mapPQTreeIds.erase(tree);
-        }
         if (global_reservation->second.introduces_operator) {
             Assume(m_pq_operator_introductions != 0);
             if (m_pq_operator_introductions != 0) {
                 --m_pq_operator_introductions;
-            }
-        }
-        if (global_reservation->second.introduces_tree) {
-            Assume(m_pq_tree_introductions != 0);
-            if (m_pq_tree_introductions != 0) {
-                --m_pq_tree_introductions;
             }
         }
         mapPQGlobalReservations.erase(global_reservation);
@@ -1200,11 +1182,6 @@ void CTxMemPool::removeProTxConflicts(
         if (key != mapPQGlobalKeys.end() && key->second != tx_hash) {
             pq_conflicts.emplace(key->second);
         }
-        const auto tree{mapPQTreeIds.find(
-            global_payload->candidate.child_key_commitment.tree_id)};
-        if (tree != mapPQTreeIds.end() && tree->second != tx_hash) {
-            pq_conflicts.emplace(tree->second);
-        }
         const auto refs{
             mapProTxRefs.equal_range(global_payload->pro_tx_hash)};
         for (auto ref = refs.first; ref != refs.second; ++ref) {
@@ -1417,7 +1394,6 @@ std::optional<size_t> CTxMemPool::FindPackageProviderTxConflict(
         package_provider_reference_txids;
     std::set<uint256> package_pq_revocations;
     std::set<std::array<uint8_t, 32>> package_global_keys;
-    std::set<uint256> package_tree_ids;
     std::set<CService> package_provider_addresses;
     std::set<std::vector<unsigned char>> package_provider_nevm_addresses;
     std::set<CKeyID> package_provider_owner_keys;
@@ -1508,7 +1484,6 @@ std::optional<size_t> CTxMemPool::FindPackageProviderTxConflict(
         };
 
     size_t package_operator_introductions{0};
-    size_t package_tree_introductions{0};
     for (size_t index{0}; index < package.size(); ++index) {
         if (!package[index]) continue;
         const CTransaction& tx{*package[index]};
@@ -1570,43 +1545,26 @@ std::optional<size_t> CTxMemPool::FindPackageProviderTxConflict(
         }
 
         if (global) {
-            const auto& commitment{global->candidate.child_key_commitment};
             if (package_global_keys.count(global->candidate.public_key) != 0 ||
-                mapPQGlobalKeys.count(global->candidate.public_key) != 0 ||
-                package_tree_ids.count(commitment.tree_id) != 0 ||
-                mapPQTreeIds.count(commitment.tree_id) != 0) {
+                mapPQGlobalKeys.count(global->candidate.public_key) != 0) {
                 return index;
             }
             package_global_keys.insert(global->candidate.public_key);
-            package_tree_ids.insert(commitment.tree_id);
             const auto* current{
                 registry_view.FindOperator(global->pro_tx_hash)};
             if (current == nullptr) return index;
             const bool introduces_operator{current->state_exists == 0};
-            const bool introduces_tree{
-                current->state_exists == 0 ||
-                current->has_global_key == 0 ||
-                current->current_commitment != commitment};
             const size_t next_operator_introductions{
                 package_operator_introductions +
                 (introduces_operator ? 1U : 0U)};
-            const size_t next_tree_introductions{
-                package_tree_introductions +
-                (introduces_tree ? 1U : 0U)};
             if (!HasPQRegistryCapacity(
                     registry_view.operator_state_count,
                     m_pq_operator_introductions,
                     next_operator_introductions,
-                    llmq::pq::MAX_PQ_OPERATOR_STATES) ||
-                !HasPQRegistryCapacity(
-                    registry_view.used_tree_id_count,
-                    m_pq_tree_introductions,
-                    next_tree_introductions,
-                    llmq::pq::MAX_PQ_USED_TREE_IDS)) {
+                    llmq::pq::MAX_PQ_OPERATOR_STATES)) {
                 return index;
             }
             package_operator_introductions = next_operator_introductions;
-            package_tree_introductions = next_tree_introductions;
         }
 
         if (tx.nVersion == SYSCOIN_TX_VERSION_MN_REGISTER) {
@@ -1700,7 +1658,6 @@ bool CTxMemPool::RebuildPQRegistryReservations(
 
     if (mapPQGlobalReservations.empty()) {
         m_pq_operator_introductions = 0;
-        m_pq_tree_introductions = 0;
         return true;
     }
 
@@ -1787,31 +1744,12 @@ bool CTxMemPool::RebuildPQRegistryReservations(
     }
 
     m_pq_operator_introductions = 0;
-    m_pq_tree_introductions = 0;
     for (auto& [_, reservation] : mapPQGlobalReservations) {
         const auto* current{view.FindOperator(reservation.pro_tx_hash)};
         reservation.introduces_operator =
             current == nullptr || current->state_exists == 0;
-        bool same_commitment{false};
-        if (current != nullptr && current->has_global_key != 0) {
-            const auto& candidate{reservation.commitment};
-            const auto& existing{current->current_commitment};
-            same_commitment =
-                candidate.version == existing.version &&
-                candidate.profile == existing.profile &&
-                candidate.usage_cap == existing.usage_cap &&
-                candidate.depth == existing.depth &&
-                candidate.generation == existing.generation &&
-                candidate.first_epoch == existing.first_epoch &&
-                candidate.tree_id == existing.tree_id &&
-                candidate.root == existing.root;
-        }
-        reservation.introduces_tree =
-            current == nullptr || current->state_exists == 0 ||
-            current->has_global_key == 0 || !same_commitment;
         m_pq_operator_introductions +=
             reservation.introduces_operator ? 1 : 0;
-        m_pq_tree_introductions += reservation.introduces_tree ? 1 : 0;
     }
 
     struct OrderedReservation {
@@ -1838,12 +1776,7 @@ bool CTxMemPool::RebuildPQRegistryReservations(
             ? llmq::pq::MAX_PQ_OPERATOR_STATES -
                   view.operator_state_count
             : 0};
-    const size_t available_trees{
-        view.used_tree_id_count <= llmq::pq::MAX_PQ_USED_TREE_IDS
-            ? llmq::pq::MAX_PQ_USED_TREE_IDS - view.used_tree_id_count
-            : 0};
     size_t retained_operators{0};
-    size_t retained_trees{0};
     std::vector<uint256> overflow;
     for (const auto& item : ordered) {
         const auto reservation{mapPQGlobalReservations.find(item.txid)};
@@ -1851,16 +1784,12 @@ bool CTxMemPool::RebuildPQRegistryReservations(
         const bool operator_overflow{
             reservation->second.introduces_operator &&
             retained_operators >= available_operators};
-        const bool tree_overflow{
-            reservation->second.introduces_tree &&
-            retained_trees >= available_trees};
-        if (operator_overflow || tree_overflow) {
+        if (operator_overflow) {
             overflow.push_back(item.txid);
             continue;
         }
         retained_operators +=
             reservation->second.introduces_operator ? 1 : 0;
-        retained_trees += reservation->second.introduces_tree ? 1 : 0;
     }
     for (const auto& txid : overflow) {
         const auto entry{mapTx.find(txid)};
@@ -2235,9 +2164,7 @@ bool CTxMemPool::existsProviderTxConflict(
         return true;
     }
     if (global &&
-        (mapPQGlobalKeys.count(global->candidate.public_key) != 0 ||
-         mapPQTreeIds.count(
-             global->candidate.child_key_commitment.tree_id) != 0)) {
+        mapPQGlobalKeys.count(global->candidate.public_key) != 0) {
         return true;
     }
 
@@ -2304,18 +2231,10 @@ bool CTxMemPool::existsProviderTxConflict(
         const auto* current{view.FindOperator(global->pro_tx_hash)};
         if (current == nullptr) return true;
         const bool introduces_operator{current->state_exists == 0};
-        const bool introduces_tree{
-            current->state_exists == 0 || current->has_global_key == 0 ||
-            current->current_commitment !=
-                global->candidate.child_key_commitment};
         if (!HasPQRegistryCapacity(
                 view.operator_state_count, m_pq_operator_introductions,
                 introduces_operator ? 1 : 0,
-                llmq::pq::MAX_PQ_OPERATOR_STATES) ||
-            !HasPQRegistryCapacity(
-                view.used_tree_id_count, m_pq_tree_introductions,
-                introduces_tree ? 1 : 0,
-                llmq::pq::MAX_PQ_USED_TREE_IDS)) {
+                llmq::pq::MAX_PQ_OPERATOR_STATES)) {
             return true;
         }
     }
@@ -2544,7 +2463,6 @@ size_t CTxMemPool::DynamicMemoryUsage() const {
            memusage::DynamicUsage(mapPQUpdateCollateralByTx) +
            memusage::DynamicUsage(mapPQRevocations) +
            memusage::DynamicUsage(mapPQGlobalKeys) +
-           memusage::DynamicUsage(mapPQTreeIds) +
            memusage::DynamicUsage(mapPQGlobalReservations) +
            memusage::DynamicUsage(mapProTxAddresses) +
            memusage::DynamicUsage(mapProTxNEVMAddresses) +
