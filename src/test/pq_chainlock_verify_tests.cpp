@@ -880,6 +880,161 @@ BOOST_AUTO_TEST_CASE(real_signature_check_and_owned_queue_lifecycle)
     memory_cleanse(seed.data(), seed.size());
 }
 
+BOOST_AUTO_TEST_CASE(success_cache_is_exact_bounded_and_failure_preserving)
+{
+    constexpr std::size_t CHECK_COUNT{8};
+    scheduled_wots::KeyGenerationSeed seed{};
+    for (std::size_t i{0}; i < seed.size(); ++i) seed[i] = 91 + i;
+    auto secret_key{scheduled_wots::GenerateSecretKey(seed)};
+    BOOST_REQUIRE(secret_key);
+    scheduled_wots::PublicKey public_key{};
+    BOOST_REQUIRE(secret_key->GetPublicKey(public_key));
+
+    std::array<scheduled_wots::Message, CHECK_COUNT> messages;
+    std::array<scheduled_wots::Signature, CHECK_COUNT> signatures;
+    for (std::size_t i{0}; i < CHECK_COUNT; ++i) {
+        for (std::size_t byte{0}; byte < messages[i].size(); ++byte) {
+            messages[i][byte] = static_cast<uint8_t>(17 * i + byte);
+        }
+        BOOST_REQUIRE(scheduled_wots::SignDeterministic(
+            *secret_key, static_cast<uint8_t>(i), messages[i],
+            signatures[i]));
+    }
+
+    const auto make_check = [&](std::size_t index) {
+        return ScheduledWOTSCheck{
+            public_key, static_cast<uint8_t>(index), messages[index],
+            signatures[index]};
+    };
+    const auto make_batch = [&] {
+        std::vector<ScheduledWOTSCheck> checks;
+        checks.reserve(CHECK_COUNT);
+        for (std::size_t i{0}; i < CHECK_COUNT; ++i) {
+            checks.push_back(make_check(i));
+        }
+        return checks;
+    };
+
+    {
+        ChainLockVerifier verifier{/*worker_threads=*/2, /*batch_size=*/1,
+                                   /*success_cache_capacity=*/16};
+        auto bad_batch{make_batch()};
+        auto bad_signature{signatures[0]};
+        bad_signature[0] ^= 1;
+        bad_batch[0] = ScheduledWOTSCheck{
+            public_key, /*leaf_index=*/0, messages[0], bad_signature};
+
+        const uint64_t before{verifier.GetSuccessCacheMissCountForTesting()};
+        BOOST_CHECK(!verifier.VerifyChecks(std::move(bad_batch)));
+        BOOST_CHECK(bad_batch.empty());
+
+        // Irrespective of where randomized preflight finds the bad member,
+        // every successful check already performed is retained. Completing
+        // the original valid set therefore performs each success exactly once
+        // across both calls, plus the one failed mutation.
+        for (std::size_t i{0}; i < CHECK_COUNT; ++i) {
+            std::vector<ScheduledWOTSCheck> check;
+            check.push_back(make_check(i));
+            BOOST_CHECK(verifier.VerifyChecks(std::move(check)));
+        }
+        BOOST_CHECK_EQUAL(
+            verifier.GetSuccessCacheMissCountForTesting() - before,
+            CHECK_COUNT + 1);
+
+        const uint64_t repeat_before{
+            verifier.GetSuccessCacheMissCountForTesting()};
+        auto repeated_bad_batch{make_batch()};
+        repeated_bad_batch[0] = ScheduledWOTSCheck{
+            public_key, /*leaf_index=*/0, messages[0], bad_signature};
+        BOOST_CHECK(!verifier.VerifyChecks(std::move(repeated_bad_batch)));
+        BOOST_CHECK_EQUAL(
+            verifier.GetSuccessCacheMissCountForTesting() - repeat_before,
+            1U);
+
+        const uint64_t valid_repeat_before{
+            verifier.GetSuccessCacheMissCountForTesting()};
+        BOOST_CHECK(verifier.VerifyChecks(make_batch()));
+        BOOST_CHECK_EQUAL(
+            verifier.GetSuccessCacheMissCountForTesting() - valid_repeat_before,
+            0U);
+
+        // No component of the exact check identity may borrow the cached
+        // success, and failures are never cached.
+        auto wrong_message{messages[0]};
+        wrong_message[0] ^= 1;
+        for (int retry{0}; retry < 2; ++retry) {
+            const uint64_t mismatch_before{
+                verifier.GetSuccessCacheMissCountForTesting()};
+            std::vector<ScheduledWOTSCheck> mismatch;
+            mismatch.emplace_back(public_key, /*leaf_index=*/0,
+                                  wrong_message, signatures[0]);
+            BOOST_CHECK(!verifier.VerifyChecks(std::move(mismatch)));
+            BOOST_CHECK_EQUAL(
+                verifier.GetSuccessCacheMissCountForTesting() - mismatch_before,
+                1U);
+        }
+
+        std::vector<ScheduledWOTSCheck> wrong_leaf;
+        wrong_leaf.emplace_back(public_key, /*leaf_index=*/1, messages[0],
+                                signatures[0]);
+        BOOST_CHECK(!verifier.VerifyChecks(std::move(wrong_leaf)));
+
+        auto wrong_public_key{public_key};
+        wrong_public_key[0] ^= 1;
+        std::vector<ScheduledWOTSCheck> wrong_key;
+        wrong_key.emplace_back(wrong_public_key, /*leaf_index=*/0,
+                               messages[0], signatures[0]);
+        BOOST_CHECK(!verifier.VerifyChecks(std::move(wrong_key)));
+    }
+
+    {
+        ChainLockVerifier verifier{/*worker_threads=*/0, /*batch_size=*/1,
+                                   /*success_cache_capacity=*/2};
+        std::vector<ScheduledWOTSCheck> first;
+        first.push_back(make_check(0));
+        BOOST_CHECK(verifier.VerifyChecks(std::move(first)));
+
+        std::vector<ScheduledWOTSCheck> second;
+        second.push_back(make_check(1));
+        BOOST_CHECK(verifier.VerifyChecks(std::move(second)));
+
+        std::vector<ScheduledWOTSCheck> third;
+        third.push_back(make_check(2));
+        BOOST_CHECK(verifier.VerifyChecks(std::move(third)));
+
+        const uint64_t eviction_before{
+            verifier.GetSuccessCacheMissCountForTesting()};
+        std::vector<ScheduledWOTSCheck> retained;
+        retained.push_back(make_check(1));
+        BOOST_CHECK(verifier.VerifyChecks(std::move(retained)));
+        BOOST_CHECK_EQUAL(
+            verifier.GetSuccessCacheMissCountForTesting() - eviction_before,
+            0U);
+
+        std::vector<ScheduledWOTSCheck> evicted;
+        evicted.push_back(make_check(0));
+        BOOST_CHECK(verifier.VerifyChecks(std::move(evicted)));
+        BOOST_CHECK_EQUAL(
+            verifier.GetSuccessCacheMissCountForTesting() - eviction_before,
+            1U);
+    }
+
+    BOOST_CHECK_THROW(
+        ChainLockVerifier(/*worker_threads=*/0, /*batch_size=*/1,
+                          /*success_cache_capacity=*/0),
+        std::invalid_argument);
+    BOOST_CHECK_THROW(
+        ChainLockVerifier(
+            /*worker_threads=*/0, /*batch_size=*/1,
+            ChainLockVerifier::DEFAULT_SUCCESS_CACHE_CAPACITY + 1),
+        std::invalid_argument);
+    BOOST_CHECK_THROW(
+        ChainLockVerifier(/*worker_threads=*/0, /*batch_size=*/1,
+                          std::numeric_limits<std::size_t>::max()),
+        std::invalid_argument);
+    memory_cleanse(seed.data(), seed.size());
+}
+
 BOOST_AUTO_TEST_CASE(authorization_is_derived_from_authenticated_transition)
 {
     auto fixture = MakeVerificationFixture();

@@ -7,16 +7,20 @@
 #include <hash.h>
 #include <memusage.h>
 #include <streams.h>
+#include <util/hasher.h>
 
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <limits>
 #include <map>
+#include <new>
 #include <set>
 #include <stdexcept>
 #include <string_view>
+#include <unordered_set>
 #include <utility>
+#include <vector>
 
 namespace llmq::pq {
 namespace {
@@ -25,6 +29,8 @@ constexpr std::size_t MERKLE_LEAF_COUNT{512};
 constexpr uint64_t TAGGED_HASHES_PER_FIXED_ROOT{
     2 * MERKLE_LEAF_COUNT - 1};
 constexpr std::size_t SERIAL_PREFLIGHT_CHECKS{4};
+constexpr std::string_view SUCCESS_CACHE_DOMAIN{
+    "SYS_PQ_SCHEDULED_WOTS_SUCCESS_CACHE_V1"};
 constexpr uint8_t ALL_ROSTERS_AUTHORIZATION_MASK{
     static_cast<uint8_t>((uint8_t{1} << ACTIVE_QUORUMS) - 1)};
 constexpr uint8_t PRE_ROTATION_AUTHORIZATION_MASK{
@@ -72,6 +78,18 @@ void SetError(ChainLockVerificationError* error, ChainLockVerificationError valu
 void WriteDomain(CHashWriter& writer, std::string_view domain)
 {
     writer.write(AsBytes(Span{domain.data(), domain.size()}));
+}
+
+uint256 GetScheduledWOTSSuccessCacheKey(
+    const scheduled_wots::PublicKey& public_key,
+    uint8_t leaf_index,
+    const scheduled_wots::Message& message,
+    const scheduled_wots::Signature& signature)
+{
+    CHashWriter writer{SER_GETHASH, 0};
+    WriteDomain(writer, SUCCESS_CACHE_DOMAIN);
+    writer << public_key << leaf_index << message << signature;
+    return writer.GetHash();
 }
 
 template <typename... Args>
@@ -622,6 +640,64 @@ bool ValidateStatementBindingInternal(
 
 } // namespace
 
+class ScheduledWOTSSuccessCache final {
+public:
+    explicit ScheduledWOTSSuccessCache(std::size_t capacity)
+        : m_capacity{capacity}
+    {
+        if (m_capacity == 0 ||
+            m_capacity > ChainLockVerifier::DEFAULT_SUCCESS_CACHE_CAPACITY) {
+            throw std::invalid_argument(
+                "PQ scheduled-WOTS success cache capacity is out of range");
+        }
+        m_order.resize(m_capacity);
+        m_entries.reserve(m_capacity);
+    }
+
+    [[nodiscard]] bool Contains(const uint256& key)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex)
+    {
+        LOCK(m_mutex);
+        if (m_entries.contains(key)) return true;
+        ++m_misses;
+        return false;
+    }
+
+    void Insert(const uint256& key) noexcept
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex)
+    {
+        LOCK(m_mutex);
+        if (m_entries.contains(key)) return;
+        if (m_entries.size() == m_capacity) {
+            m_entries.erase(m_order[m_next]);
+        }
+        try {
+            if (!m_entries.insert(key).second) return;
+        } catch (const std::bad_alloc&) {
+            // A cache optimization must never turn a valid certificate into
+            // a process failure. The check remains valid but uncached.
+            return;
+        }
+        m_order[m_next] = key;
+        m_next = (m_next + 1) % m_capacity;
+    }
+
+    [[nodiscard]] uint64_t MissCount() const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex)
+    {
+        LOCK(m_mutex);
+        return m_misses;
+    }
+
+private:
+    const std::size_t m_capacity;
+    mutable Mutex m_mutex;
+    std::unordered_set<uint256, SaltedTxidHasher> m_entries GUARDED_BY(m_mutex);
+    std::vector<uint256> m_order GUARDED_BY(m_mutex);
+    std::size_t m_next GUARDED_BY(m_mutex){0};
+    uint64_t m_misses GUARDED_BY(m_mutex){0};
+};
+
 bool RosterResetVerificationPolicy::IsStructurallyValid() const noexcept
 {
     if (!chainlock_schedule.IsValid() || !btcc_schedule.IsValid() ||
@@ -861,8 +937,39 @@ ScheduledWOTSCheck::ScheduledWOTSCheck(
 
 bool ScheduledWOTSCheck::operator()() const
 {
-    return scheduled_wots::Verify(m_public_key, m_leaf_index, m_message,
-                                  m_signature);
+    if (m_success_cache != nullptr &&
+        m_success_cache->Contains(m_success_cache_key)) return true;
+    const bool valid{scheduled_wots::Verify(
+        m_public_key, m_leaf_index, m_message, m_signature)};
+    if (valid && m_success_cache != nullptr) {
+        m_success_cache->Insert(m_success_cache_key);
+    }
+    if (!valid && m_accumulated_result != nullptr) {
+        m_accumulated_result->store(false, std::memory_order_release);
+        // Complete the independent queued jobs so their successes remain
+        // reusable even though the enclosing certificate will be rejected.
+        return true;
+    }
+    return valid;
+}
+
+void ScheduledWOTSCheck::UseSuccessCache(
+    ScheduledWOTSSuccessCache* cache) noexcept
+{
+    m_success_cache = cache;
+    if (m_success_cache == nullptr) return;
+    // The prepared message is the domain-separated hash of the complete
+    // per-member transcript. Together with the public key and scheduled leaf,
+    // this binds the logical statement, roster slot, member and signature
+    // without retaining their larger source objects. Compute only for the
+    // certificate verifier; ordinary live-share checks do not use the cache.
+    m_success_cache_key = GetScheduledWOTSSuccessCacheKey(
+        m_public_key, m_leaf_index, m_message, m_signature);
+}
+
+void ScheduledWOTSCheck::AccumulateResult(std::atomic<bool>* result) noexcept
+{
+    m_accumulated_result = result;
 }
 
 const scheduled_wots::PublicKey&
@@ -1262,11 +1369,22 @@ bool VerifyScheduledWOTSChecks(std::vector<ScheduledWOTSCheck>&& checks,
     }
     CCheckQueueControl<ScheduledWOTSCheck> control{queue};
     control.Add(std::move(checks));
+    // CCheckQueue moves each element but intentionally leaves the source
+    // vector sized. Consume those moved-from checks so verifier-local pointers
+    // cannot escape through the caller's rvalue vector.
+    checks.clear();
     return control.Wait();
 }
 
-ChainLockVerifier::ChainLockVerifier(std::size_t worker_threads, unsigned int batch_size)
-    : m_queue(batch_size == 0 ? 1 : batch_size)
+ChainLockVerifier::ChainLockVerifier(std::size_t worker_threads,
+                                     unsigned int batch_size,
+                                     std::size_t success_cache_capacity)
+    // 4,096 entries retain five complete 801-member certificate sets. Older
+    // and accepted logical IDs are filtered before crypto, so retaining the
+    // unbounded historical window here would only waste memory.
+    : m_success_cache{std::make_unique<ScheduledWOTSSuccessCache>(
+          success_cache_capacity)},
+      m_queue(batch_size == 0 ? 1 : batch_size)
 {
     if (worker_threads > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
         throw std::invalid_argument("PQ ChainLock worker count exceeds int range");
@@ -1287,6 +1405,9 @@ ChainLockVerifier::~ChainLockVerifier()
 
 bool ChainLockVerifier::VerifyChecks(std::vector<ScheduledWOTSCheck>&& checks)
 {
+    for (auto& check : checks) {
+        check.UseSuccessCache(m_success_cache.get());
+    }
     {
         const ScopedVerificationPinnedBytes pinned{
             memusage::DynamicUsage(checks)};
@@ -1304,7 +1425,12 @@ bool ChainLockVerifier::VerifyChecks(std::vector<ScheduledWOTSCheck>&& checks)
                 index = static_cast<std::size_t>(
                     m_preflight_rng.randrange(checks.size()));
             }
-            if (!checks[index]()) return false;
+            if (!checks[index]()) {
+                // Consume the rvalue batch even on early rejection so no
+                // check retaining this verifier's cache pointer can escape.
+                checks.clear();
+                return false;
+            }
             if (index != checks.size() - 1) {
                 checks[index] = std::move(checks.back());
             }
@@ -1312,7 +1438,16 @@ bool ChainLockVerifier::VerifyChecks(std::vector<ScheduledWOTSCheck>&& checks)
         }
         if (checks.empty()) return true;
     }
-    return VerifyScheduledWOTSChecks(std::move(checks), &m_queue);
+    std::atomic<bool> all_valid{true};
+    for (auto& check : checks) check.AccumulateResult(&all_valid);
+    const bool queue_completed{
+        VerifyScheduledWOTSChecks(std::move(checks), &m_queue)};
+    return queue_completed && all_valid.load(std::memory_order_acquire);
+}
+
+uint64_t ChainLockVerifier::GetSuccessCacheMissCountForTesting() const
+{
+    return m_success_cache->MissCount();
 }
 
 } // namespace llmq::pq

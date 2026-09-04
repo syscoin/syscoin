@@ -15,6 +15,7 @@
 #include <sync.h>
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -25,6 +26,7 @@
 namespace llmq::pq {
 
 class FrozenQuorumRosterCache;
+class ScheduledWOTSSuccessCache;
 
 /**
  * Deterministic state for one roster slot at the epoch snapshot.
@@ -380,10 +382,18 @@ public:
     [[nodiscard]] const scheduled_wots::Signature& GetSignature() const noexcept;
 
 private:
+    void UseSuccessCache(ScheduledWOTSSuccessCache* cache) noexcept;
+    void AccumulateResult(std::atomic<bool>* result) noexcept;
+
     scheduled_wots::PublicKey m_public_key;
     uint8_t m_leaf_index{0};
     scheduled_wots::Message m_message;
     scheduled_wots::Signature m_signature;
+    uint256 m_success_cache_key;
+    ScheduledWOTSSuccessCache* m_success_cache{nullptr};
+    std::atomic<bool>* m_accumulated_result{nullptr};
+
+    friend class ChainLockVerifier;
 };
 
 using ScheduledWOTSCheckQueue = CCheckQueue<ScheduledWOTSCheck>;
@@ -461,7 +471,12 @@ PrepareFinalChainLockVerification(
 /** RAII-owned queue. Destruction joins all workers; callers must not race it. */
 class ChainLockVerifier final {
 public:
-    explicit ChainLockVerifier(std::size_t worker_threads, unsigned int batch_size = 8);
+    static constexpr std::size_t DEFAULT_SUCCESS_CACHE_CAPACITY{4'096};
+
+    explicit ChainLockVerifier(
+        std::size_t worker_threads,
+        unsigned int batch_size = 8,
+        std::size_t success_cache_capacity = DEFAULT_SUCCESS_CACHE_CAPACITY);
     ~ChainLockVerifier();
 
     ChainLockVerifier(const ChainLockVerifier&) = delete;
@@ -472,9 +487,13 @@ public:
     [[nodiscard]] bool VerifyChecks(std::vector<ScheduledWOTSCheck>&& checks)
         EXCLUSIVE_LOCKS_REQUIRED(!m_preflight_mutex);
 
+    [[nodiscard]] uint64_t GetSuccessCacheMissCountForTesting() const;
+
 private:
     mutable Mutex m_preflight_mutex;
     FastRandomContext m_preflight_rng GUARDED_BY(m_preflight_mutex);
+    // Declared before the queue so it outlives destruction of queued checks.
+    std::unique_ptr<ScheduledWOTSSuccessCache> m_success_cache;
     ScheduledWOTSCheckQueue m_queue;
 };
 
