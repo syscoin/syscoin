@@ -301,7 +301,9 @@ OperatorKeyState KeyState(const ChainLockScheduleConfig& schedule,
     const auto view = DeriveOperatorKeyScheduleView(
         schedule, snapshot_height, /*registration_cutoff_blocks=*/144,
         /*future_horizon_epochs=*/8);
-    BOOST_REQUIRE(view);
+    // Concurrent cache lookups share this fixture; Boost's checkpoint logger
+    // must remain on the main test thread.
+    if (!view) throw std::runtime_error{"invalid operator key schedule"};
 
     OperatorKeyState state = OperatorKeyState::ForOperator(pro_tx_hash);
     state.has_global_key = 1;
@@ -326,7 +328,9 @@ OperatorKeyState KeyState(const ChainLockScheduleConfig& schedule,
             state.global_key.child_key_commitment,
         });
     }
-    BOOST_REQUIRE(state.IsStructurallyValid());
+    if (!state.IsStructurallyValid()) {
+        throw std::runtime_error{"invalid operator key state"};
+    }
     return state;
 }
 
