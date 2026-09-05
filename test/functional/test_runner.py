@@ -87,6 +87,8 @@ EXTENDED_SCRIPTS = [
     # These tests are not run by default.
     # Longest test should go first, to favor running tests in parallel
     'feature_pruning.py',
+    # SYSCOIN: full-size certificate history must exceed authorization retention.
+    'feature_pq_chainlocks_pruned_sync.py --descriptors',
     'feature_dbcrash.py',
     'feature_index_prune.py',
     'wallet_pruning.py --legacy-wallet',

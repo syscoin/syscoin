@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <llmq/pq_chainlock_collector.h>
+#include <llmq/pq_chainlock_store.h>
 #include <llmq/pq_chainlock_test_fixture.h>
 #include <llmq/pq_btcc.h>
 #include <llmq/pq_payment_audit_collector.h>
@@ -27,11 +28,13 @@
 #include <cstdint>
 #include <exception>
 #include <functional>
+#include <iomanip>
 #include <iostream>
 #include <map>
 #include <memory>
 #include <optional>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -48,8 +51,10 @@ namespace {
 
 constexpr std::size_t MAX_TEST_WORKERS{8};
 constexpr std::size_t MAX_FIXTURE_EPOCHS{6};
+constexpr std::size_t MAX_CATCHUP_FIXTURE_EPOCHS{12};
+constexpr std::size_t MAX_FIXTURE_KEY_EPOCHS{MAX_CATCHUP_FIXTURE_EPOCHS};
 constexpr std::size_t CHILD_KEY_COUNT{
-    MAX_FIXTURE_EPOCHS * QUORUM_MIN_VALID};
+    MAX_FIXTURE_KEY_EPOCHS * QUORUM_MIN_VALID};
 constexpr uint64_t SHARE_BUNDLE_MAGIC{0x315246534c435150ULL};
 constexpr uint16_t SHARE_BUNDLE_VERSION{1};
 constexpr std::size_t MAX_SHARE_BUNDLE_BYTES{8U << 20};
@@ -389,7 +394,7 @@ struct FullDimensionFixture {
     GeneratorArguments args;
     IndexChain chain;
     std::vector<scheduled_wots::PublicKey> public_keys;
-    std::vector<std::optional<scheduled_wots::SecretKey>> secret_keys;
+    std::vector<std::shared_ptr<const scheduled_wots::SecretKey>> secret_keys;
     std::map<uint256, std::size_t> member_indices;
     test::QuorumSnapshotFixture snapshot_fixture;
     FrozenQuorumRostersPtr rosters;
@@ -424,9 +429,13 @@ struct PaymentAuditArguments {
     uint256 authorizer_receipt_carrier_hash;
     uint256 response_receipt_carrier_hash;
     std::size_t epoch_count{MAX_FIXTURE_EPOCHS};
-    std::array<uint256, MAX_FIXTURE_EPOCHS> base_hashes;
-    std::array<uint256, MAX_FIXTURE_EPOCHS> snapshot_hashes;
+    std::array<uint256, MAX_FIXTURE_KEY_EPOCHS> base_hashes;
+    std::array<uint256, MAX_FIXTURE_KEY_EPOCHS> snapshot_hashes;
     std::optional<ChainLockStatement> authorizer;
+    std::optional<ChainLockStatement> receipt_authorizer;
+    uint256 receipt_authorizer_carrier_hash;
+    std::optional<ChainLockStatement> durable_best;
+    bool chainlock_step{false};
 };
 
 struct PaymentAuditFixture {
@@ -448,7 +457,7 @@ struct PaymentAuditFixture {
     PaymentAuditArguments args;
     IndexChain chain;
     std::vector<scheduled_wots::PublicKey> public_keys;
-    std::vector<std::optional<scheduled_wots::SecretKey>> secret_keys;
+    std::vector<std::shared_ptr<const scheduled_wots::SecretKey>> secret_keys;
     std::map<uint256, std::size_t> member_indices;
     test::QuorumSnapshotFixture snapshot_fixture;
 };
@@ -466,8 +475,8 @@ struct PaymentAuditPostArguments {
     BTCCReceiptState btcc_receipt_state;
     PaymentAuditReceiptState payment_audit_receipt_state;
     uint256 payment_probation_state_hash;
-    std::array<uint256, MAX_FIXTURE_EPOCHS> base_hashes;
-    std::array<uint256, MAX_FIXTURE_EPOCHS> snapshot_hashes;
+    std::array<uint256, MAX_FIXTURE_KEY_EPOCHS> base_hashes;
+    std::array<uint256, MAX_FIXTURE_KEY_EPOCHS> snapshot_hashes;
     std::optional<ChainLockStatement> authorizer;
 };
 
@@ -538,28 +547,42 @@ OperatorKeyState MakeOperatorState(
 
 bool GenerateMemberKeys(
     std::vector<scheduled_wots::PublicKey>& public_keys,
-    std::vector<std::optional<scheduled_wots::SecretKey>>& secret_keys,
-    std::map<uint256, std::size_t>& member_indices)
+    std::vector<std::shared_ptr<const scheduled_wots::SecretKey>>& secret_keys,
+    std::map<uint256, std::size_t>& member_indices,
+    std::size_t key_epochs = MAX_FIXTURE_EPOCHS)
 {
     if (public_keys.size() != CHILD_KEY_COUNT ||
-        secret_keys.size() != CHILD_KEY_COUNT) {
+        secret_keys.size() != CHILD_KEY_COUNT ||
+        key_epochs > MAX_FIXTURE_KEY_EPOCHS) {
         return false;
     }
     for (std::size_t member{0}; member < QUORUM_MIN_VALID; ++member) {
         member_indices.emplace(NonNullHash(10'000 + member), member);
     }
-    return ParallelFor(CHILD_KEY_COUNT, [&](std::size_t key_index) {
+    // Long history regressions sign many independent scheduled leaves. Keep
+    // their immutable public authentication trees instead of rebuilding all
+    // child keys for every certificate; signature generation stays unchanged.
+    static std::vector<std::shared_ptr<const scheduled_wots::SecretKey>>
+        cached_keys(CHILD_KEY_COUNT);
+    const std::size_t key_count{key_epochs * QUORUM_MIN_VALID};
+    if (!ParallelFor(key_count, [&](std::size_t key_index) {
+        if (cached_keys[key_index]) return true;
         scheduled_wots::KeyGenerationSeed seed{};
         FillKeySeed(key_index, seed);
         auto secret_key{scheduled_wots::GenerateSecretKey(seed)};
         memory_cleanse(seed.data(), seed.size());
-        if (!secret_key ||
-            !secret_key->GetPublicKey(public_keys[key_index])) {
+        if (!secret_key) return false;
+        cached_keys[key_index] =
+            std::make_shared<scheduled_wots::SecretKey>(std::move(*secret_key));
+        return true;
+    })) return false;
+    secret_keys = cached_keys;
+    for (std::size_t key_index{0}; key_index < key_count; ++key_index) {
+        if (!secret_keys[key_index]->GetPublicKey(public_keys[key_index])) {
             return false;
         }
-        secret_keys[key_index] = std::move(*secret_key);
-        return true;
-    });
+    }
+    return true;
 }
 
 bool GenerateMemberKeys(FullDimensionFixture& fixture)
@@ -594,7 +617,7 @@ bool PopulatePaymentAuditSnapshots(PaymentAuditFixture& fixture)
     if (base_count < ACTIVE_QUORUMS ||
         base_count > MAX_FIXTURE_EPOCHS ||
         snapshot_count < base_count ||
-        snapshot_count > MAX_FIXTURE_EPOCHS ||
+        snapshot_count > MAX_FIXTURE_KEY_EPOCHS ||
         snapshot_count - base_count > 1) {
         return false;
     }
@@ -858,11 +881,21 @@ std::optional<PreparedPaymentChainLockStatement> MakeChainLockStatement(
     statement.payment_probation_state_hash = probation_state_hash;
     if (!ClaimAuthorizedFixtureRosterTransition(
             fixture, statement, authorizer)) {
+        if (fixture.args.chainlock_step) {
+            std::cerr << "ChainLock step cannot derive roster transition at "
+                      << height << " from " << authorizer.height << '\n';
+        }
         return std::nullopt;
     }
     const auto roster_set{BuildPaymentAuditRosters(
         fixture, height, statement.roster_beacons.active)};
-    if (!roster_set) return std::nullopt;
+    if (!roster_set) {
+        if (fixture.args.chainlock_step) {
+            std::cerr << "ChainLock step cannot build rosters at "
+                      << height << '\n';
+        }
+        return std::nullopt;
+    }
     statement.quorum_context_hash = GetQuorumContextHash(
         fixture.args.genesis_hash, height, block_hash,
         Descriptors(roster_set->Rosters()));
@@ -880,6 +913,11 @@ std::optional<PreparedPaymentChainLockStatement> MakeChainLockStatement(
         scheduled_authorization, &verification_error)};
     if (!context ||
         verification_error != ChainLockVerificationError::NONE) {
+        if (fixture.args.chainlock_step) {
+            std::cerr << "ChainLock step context rejected at " << height
+                      << " transition=" << static_cast<int>(statement.roster_transition)
+                      << " error=" << static_cast<int>(verification_error) << '\n';
+        }
         return std::nullopt;
     }
     return PreparedPaymentChainLockStatement{
@@ -1813,6 +1851,8 @@ std::optional<FinalChainLock> BuildPaymentAuditPrefixArtifact(
         return std::nullopt;
     }
     const auto& authorizer{*fixture.args.authorizer};
+    const auto& receipt_authorizer{fixture.args.receipt_authorizer
+        ? *fixture.args.receipt_authorizer : authorizer};
     const auto target_height{NextEligibleChainLockTargetHeight(
         fixture.args.build_config.schedule,
         fixture.args.response_predecessor_height)};
@@ -1845,27 +1885,73 @@ std::optional<FinalChainLock> BuildPaymentAuditPrefixArtifact(
             .btcpPrevCommitment =
                 authorizer.btcc_receipt_state.cursor.btc_hash;
     }
+    if (!fixture.chain.SetExactHash(receipt_authorizer.height,
+                                   receipt_authorizer.block_hash)) {
+        return std::nullopt;
+    }
+    for (const BTCCursor* cursor : {
+             &receipt_authorizer.accepted_btcc_cursor,
+             &receipt_authorizer.btcc_receipt_state.cursor}) {
+        if (!cursor->IsNull()) {
+            if (!fixture.chain.SetExactHash(cursor->sys_height,
+                                            cursor->sys_hash)) {
+                return std::nullopt;
+            }
+            fixture.chain.indices[cursor->sys_height].btcpPrevCommitment =
+                cursor->btc_hash;
+        }
+    }
     const auto authorizer_receipt_state{ApplyChainLockReceiptState(
-        fixture, authorizer,
-        fixture.args.authorizer_receipt_carrier_hash)};
+        fixture, receipt_authorizer,
+        fixture.args.receipt_authorizer
+            ? fixture.args.receipt_authorizer_carrier_hash
+            : fixture.args.authorizer_receipt_carrier_hash)};
     if (!authorizer_receipt_state) return std::nullopt;
 
     const BTCCursor target_cursor{
         *target_height, fixture.args.response_hash,
         fixture.args.response_btc_hash};
-    const BTCCursor indexed_cursor{authorizer_receipt_state->cursor};
+    BTCCursor previous_cursor{authorizer_receipt_state->cursor};
+    if (fixture.args.durable_best) {
+        const auto& best{*fixture.args.durable_best};
+        if (!fixture.chain.SetExactHash(best.height, best.block_hash)) {
+            return std::nullopt;
+        }
+        const auto& durable_cursor{best.accepted_btcc_cursor};
+        if (!IsDurableBTCCursorMonotonic(durable_cursor, previous_cursor)) {
+            // An accepted ADVANCE is carried ten blocks later. The intervening
+            // KEEP must retain that durable cursor, not regress to the receipt
+            // index. This is SelectCurrentChainLockBTCC's pre-carrier branch.
+            const int64_t carrier_height{
+                static_cast<int64_t>(durable_cursor.sys_height) +
+                fixture.args.btcc_config.nevm_injection_lag};
+            if (*target_height >= carrier_height ||
+                *authorizer_receipt_state != best.btcc_receipt_state ||
+                (!previous_cursor.IsNull() &&
+                 previous_cursor.sys_height == durable_cursor.sys_height) ||
+                !fixture.chain.SetExactHash(durable_cursor.sys_height,
+                                            durable_cursor.sys_hash)) {
+                return std::nullopt;
+            }
+            fixture.chain.indices[durable_cursor.sys_height]
+                .btcpPrevCommitment = durable_cursor.btc_hash;
+            previous_cursor = durable_cursor;
+        }
+    }
     const auto selection{SelectBTCCForChainLock(
         fixture.args.btcc_config,
-        fixture.chain.indices[*target_height], indexed_cursor)};
-    if (!selection || selection->cursor != target_cursor ||
-        selection->advance != BTCCAdvance::ADVANCE) {
+        fixture.chain.indices[*target_height], previous_cursor)};
+    if (!selection ||
+        (!fixture.args.chainlock_step &&
+         (selection->cursor != target_cursor ||
+          selection->advance != BTCCAdvance::ADVANCE))) {
         return std::nullopt;
     }
     const auto statement{MakeChainLockStatement(
         fixture, *target_height, fixture.args.response_hash,
         fixture.args.response_predecessor_height,
         fixture.args.response_predecessor_hash,
-        indexed_cursor, selection->cursor, selection->advance,
+        previous_cursor, selection->cursor, selection->advance,
         *authorizer_receipt_state,
         authorizer.payment_audit_receipt_state,
         authorizer.payment_probation_state_hash, authorizer)};
@@ -2353,7 +2439,9 @@ std::optional<GeneratorArguments> ParseArguments(int argc, char* argv[],
 std::optional<PaymentAuditArguments> ParsePaymentAuditPrefixArguments(
     int argc, char* argv[], std::string& error)
 {
-    constexpr int FIXED_ARGUMENT_COUNT{19};
+    const bool chainlock_step{argc > 1 &&
+        std::string_view{argv[1]} == "chainlock-step"};
+    const int FIXED_ARGUMENT_COUNT{chainlock_step ? 22 : 19};
     if (argc < FIXED_ARGUMENT_COUNT +
                    static_cast<int>(2 * ACTIVE_QUORUMS) ||
         (argc - FIXED_ARGUMENT_COUNT) % 2 != 0) {
@@ -2369,6 +2457,7 @@ std::optional<PaymentAuditArguments> ParsePaymentAuditPrefixArguments(
     }
 
     PaymentAuditArguments args;
+    args.chainlock_step = chainlock_step;
     args.epoch_count = static_cast<std::size_t>(
         (argc - FIXED_ARGUMENT_COUNT) / 2);
     if (args.epoch_count < ACTIVE_QUORUMS ||
@@ -2421,13 +2510,35 @@ std::optional<PaymentAuditArguments> ParsePaymentAuditPrefixArguments(
             args.authorizer, error)) {
         return std::nullopt;
     }
+    if (chainlock_step) {
+        if (!ReadAuthorizingChainLock(
+                fs::u8path(argv[BASE_ARGUMENT + 2 * args.epoch_count + 1]),
+                args.receipt_authorizer, error)) {
+            return std::nullopt;
+        }
+        args.receipt_authorizer_carrier_hash = uint256S(
+            argv[BASE_ARGUMENT + 2 * args.epoch_count + 2]);
+        if (args.receipt_authorizer_carrier_hash.IsNull()) {
+            error = "null ChainLock step receipt carrier";
+            return std::nullopt;
+        }
+        if (!ReadAuthorizingChainLock(
+                fs::u8path(argv[BASE_ARGUMENT + 2 * args.epoch_count + 3]),
+                args.durable_best, error) ||
+            args.durable_best->height > args.response_predecessor_height) {
+            error = "invalid ChainLock step durable best";
+            return std::nullopt;
+        }
+    }
 
     const PaymentAuditScheduleConfig schedule_config{
         args.build_config.schedule, args.btcc_config};
     const auto schedule{BuildPaymentAuditEpochSchedule(
         schedule_config, args.audit_epoch)};
+    const auto step_epoch_end{EpochEndHeightExclusive(
+        args.build_config.schedule, args.audit_epoch)};
     const int32_t max_tip{
-        schedule
+        chainlock_step && step_epoch_end ? *step_epoch_end - 1 : schedule
             ? schedule->anchor_height +
                   static_cast<int32_t>(args.btcc_config.nevm_injection_lag)
             : -1};
@@ -2448,8 +2559,11 @@ std::optional<PaymentAuditArguments> ParsePaymentAuditPrefixArguments(
         last_active->back().epoch != args.epoch_count - 1 ||
         static_cast<uint64_t>(args.audit_epoch) + 1 != args.epoch_count ||
         !target ||
-        (*target != schedule->rows.back().response_height &&
-         *target != schedule->anchor_height) ||
+        (chainlock_step
+             ? static_cast<int64_t>(*target) +
+                       args.build_config.schedule.sign_lag > max_tip
+             : (*target != schedule->rows.back().response_height &&
+                *target != schedule->anchor_height)) ||
         !args.authorizer ||
         (args.authorizer->btcc_advance == BTCCAdvance::ADVANCE &&
          args.authorizer_receipt_carrier_hash.IsNull()) ||
@@ -2474,8 +2588,11 @@ int GeneratePaymentAuditPrefix(const PaymentAuditArguments& args)
             "unable to derive payment audit prefix schedule");
     }
     const int32_t max_tip{
-        schedule->anchor_height +
-        static_cast<int32_t>(args.btcc_config.nevm_injection_lag)};
+        args.chainlock_step
+            ? *EpochEndHeightExclusive(args.build_config.schedule,
+                                      args.audit_epoch) - 1
+            : schedule->anchor_height +
+                  static_cast<int32_t>(args.btcc_config.nevm_injection_lag)};
     auto fixture{std::make_unique<PaymentAuditFixture>(
         args, max_tip, args.epoch_count)};
     const auto next_snapshot{RegistrationCutoffHeight(
@@ -2489,8 +2606,8 @@ int GeneratePaymentAuditPrefix(const PaymentAuditArguments& args)
     const bool retains_nonempty_next{
         !rotates && args.authorizer->roster_beacons.next.state !=
                         RosterBeaconState::EMPTY};
-    if (observes_next || retains_nonempty_next) {
-        if (args.epoch_count == MAX_FIXTURE_EPOCHS) {
+    if (args.chainlock_step || observes_next || retains_nonempty_next) {
+        if (args.epoch_count == MAX_FIXTURE_EPOCHS && !args.chainlock_step) {
             throw std::runtime_error(
                 "payment audit prefix needs an auxiliary snapshot");
         }
@@ -2499,7 +2616,8 @@ int GeneratePaymentAuditPrefix(const PaymentAuditArguments& args)
         fixture->snapshot_fixture.snapshots.resize(args.epoch_count + 1);
     }
     if (!GenerateMemberKeys(fixture->public_keys, fixture->secret_keys,
-                            fixture->member_indices) ||
+                            fixture->member_indices,
+                            fixture->snapshot_fixture.snapshots.size()) ||
         !PopulatePaymentAuditSnapshots(*fixture)) {
         throw std::runtime_error(
             "unable to construct payment audit prefix fixture");
@@ -2970,7 +3088,7 @@ int GeneratePaymentAuditPost(const PaymentAuditPostArguments& args)
     return 0;
 }
 
-int Generate(const GeneratorArguments& args)
+int Generate(const GeneratorArguments& args, bool retain_epoch_snapshots = false)
 {
     auto fixture{std::make_unique<FullDimensionFixture>(args)};
     if (!GenerateMemberKeys(*fixture)) {
@@ -3019,6 +3137,47 @@ int Generate(const GeneratorArguments& args)
             "production verifier rejected generated certificate");
     }
 
+    if (retain_epoch_snapshots) {
+        const auto epoch{EpochForHeight(args.build_config.schedule,
+                                       args.target_height)};
+        const auto epoch_end{epoch ? EpochEndHeightExclusive(
+            args.build_config.schedule, *epoch) : std::nullopt};
+        const auto auxiliary_height{epoch ? RegistrationCutoffHeight(
+            args.build_config.schedule, *epoch + 1,
+            args.build_config.roster_snapshot_lag_blocks) : std::nullopt};
+        uint256 auxiliary_hash;
+        if (auxiliary_height) {
+            for (const auto& point : fixture->snapshot_fixture.quorum_bases) {
+                if (point.height == *auxiliary_height) {
+                    auxiliary_hash = point.block_hash;
+                }
+            }
+            for (const auto& snapshot : fixture->snapshot_fixture.snapshots) {
+                if (snapshot.branch_point.height == *auxiliary_height) {
+                    auxiliary_hash = snapshot.branch_point.block_hash;
+                }
+            }
+        }
+        if (!epoch || !epoch_end || !auxiliary_height ||
+            auxiliary_hash.IsNull()) {
+            throw std::runtime_error("missing streaming auxiliary snapshot");
+        }
+        auto& auxiliary{fixture->snapshot_fixture.snapshots.emplace_back()};
+        auxiliary.branch_point = {*auxiliary_height, auxiliary_hash};
+        auxiliary.state.deterministic_mns = Snapshot(
+            *auxiliary_height, auxiliary_hash);
+        auto states{std::make_shared<std::vector<OperatorKeyState>>()};
+        states->reserve(QUORUM_SIZE);
+        for (std::size_t member{0}; member < QUORUM_SIZE; ++member) {
+            states->push_back(MakeOperatorState(
+                args.genesis_hash, args.build_config, fixture->public_keys,
+                NonNullHash(10'000 + member), *epoch + 1,
+                *auxiliary_height, member));
+        }
+        auxiliary.state.operator_key_states = std::move(states);
+        fixture->snapshot_fixture.max_active_tip_height = *epoch_end - 1;
+    }
+
     std::string error;
     if (!test::WriteQuorumSnapshotFixture(
             args.snapshot_output, fixture->snapshot_fixture, error)) {
@@ -3032,14 +3191,140 @@ int Generate(const GeneratorArguments& args)
     return 0;
 }
 
-} // namespace
+int GenerateCatchupSnapshots(int argc, char* argv[])
+{
+    constexpr int FIXED_ARGUMENTS{12};
+    if (argc < FIXED_ARGUMENTS + 2 * static_cast<int>(ACTIVE_QUORUMS) ||
+        (argc - FIXED_ARGUMENTS) % 2 != 0) {
+        throw std::runtime_error(
+            "usage: pq_chainlock_fixture catchup-snapshots SNAPSHOT_OUT "
+            "GENESIS BRANCH_HEIGHT BRANCH_HASH EPOCH_ORIGIN CUTOFF "
+            "SNAPSHOT_LAG FUTURE_HORIZON MAX_TIP SIGNING_ANCHOR_HASH "
+            "BASE... SNAPSHOT...");
+    }
+    test::QuorumSnapshotFixture fixture;
+    const fs::path output{fs::u8path(argv[2])};
+    fixture.genesis_hash = uint256S(argv[3]);
+    fixture.branch_anchor.block_hash = uint256S(argv[5]);
+    const uint256 signing_anchor_hash{uint256S(argv[11])};
+    const std::size_t epochs{static_cast<std::size_t>(
+        (argc - FIXED_ARGUMENTS) / 2)};
+    if (!output.is_absolute() || fixture.genesis_hash.IsNull() ||
+        fixture.branch_anchor.block_hash.IsNull() ||
+        signing_anchor_hash.IsNull() || epochs > MAX_CATCHUP_FIXTURE_EPOCHS ||
+        !ParseInt32(argv[4], &fixture.branch_anchor.height) ||
+        !ParseInt32(argv[6], &fixture.build_config.schedule.epoch_origin) ||
+        !ParseUInt32(argv[7], &fixture.build_config.registration_cutoff_blocks) ||
+        !ParseUInt32(argv[8], &fixture.build_config.roster_snapshot_lag_blocks) ||
+        !ParseUInt32(argv[9], &fixture.build_config.future_horizon_epochs) ||
+        !ParseInt32(argv[10], &fixture.max_active_tip_height) ||
+        !fixture.build_config.IsValid()) {
+        throw std::runtime_error("invalid catch-up snapshot arguments");
+    }
+    const auto& schedule{fixture.build_config.schedule};
+    const auto target{LatestEligibleChainLockTargetHeight(
+        schedule, fixture.max_active_tip_height)};
+    const auto first{ActiveEpochsAtHeight(schedule, fixture.branch_anchor.height)};
+    const auto last{ActiveEpochsAtHeight(schedule, fixture.max_active_tip_height)};
+    if (!target || !first || !last || first->front().epoch != 0 ||
+        last->back().epoch + 1 != epochs) {
+        throw std::runtime_error("invalid catch-up snapshot epoch window");
+    }
+    std::vector<scheduled_wots::PublicKey> public_keys(CHILD_KEY_COUNT);
+    std::vector<std::shared_ptr<const scheduled_wots::SecretKey>>
+        secret_keys(CHILD_KEY_COUNT);
+    std::map<uint256, std::size_t> member_indices;
+    if (!GenerateMemberKeys(public_keys, secret_keys, member_indices, epochs)) {
+        throw std::runtime_error("unable to derive catch-up snapshot keys");
+    }
+    const auto add_snapshot = [&](uint32_t epoch, int32_t height,
+                                  const uint256& block_hash) {
+        auto& snapshot{fixture.snapshots.emplace_back()};
+        snapshot.branch_point = {height, block_hash};
+        snapshot.state.deterministic_mns = Snapshot(height, block_hash);
+        auto states{std::make_shared<std::vector<OperatorKeyState>>()};
+        states->reserve(QUORUM_SIZE);
+        for (std::size_t member{0}; member < QUORUM_SIZE; ++member) {
+            states->push_back(MakeOperatorState(
+                fixture.genesis_hash, fixture.build_config, public_keys,
+                NonNullHash(10'000 + member), epoch, height, member));
+        }
+        snapshot.state.operator_key_states = std::move(states);
+    };
+    for (uint32_t epoch{0}; epoch < epochs; ++epoch) {
+        const auto base{EpochBaseHeight(schedule, epoch)};
+        const auto cutoff{RegistrationCutoffHeight(
+            schedule, epoch, fixture.build_config.roster_snapshot_lag_blocks)};
+        if (!base || !cutoff) {
+            throw std::runtime_error("invalid catch-up snapshot coordinates");
+        }
+        fixture.quorum_bases.push_back({
+            *base, uint256S(argv[FIXED_ARGUMENTS + epoch])});
+        add_snapshot(epoch, *cutoff,
+            uint256S(argv[FIXED_ARGUMENTS + epochs + epoch]));
+    }
+    const int32_t signing_anchor{*target - static_cast<int32_t>(schedule.sign_lag)};
+    add_snapshot(last->back().epoch, signing_anchor, signing_anchor_hash);
+    // Recovery freezes all four child-root identities at its first cutoff.
+    // Advance that exact state normally, without synthetic key replacements
+    // during the recovery window, including at the live H-5 boundary.
+    const uint32_t recovery_first{last->front().epoch};
+    const auto recovery_keys{
+        fixture.snapshots.at(recovery_first).state.operator_key_states};
+    for (std::size_t point{recovery_first + 1};
+         point < fixture.snapshots.size(); ++point) {
+        auto& snapshot{fixture.snapshots[point]};
+        const auto view{DeriveOperatorKeyScheduleView(
+            schedule, snapshot.branch_point.height,
+            fixture.build_config.registration_cutoff_blocks,
+            fixture.build_config.future_horizon_epochs)};
+        if (!view) throw std::runtime_error("invalid recovery snapshot view");
+        auto states{std::make_shared<std::vector<OperatorKeyState>>(*recovery_keys)};
+        for (auto& state : *states) {
+            if (state.Advance(*view) != OperatorKeyStateResult::OK) {
+                throw std::runtime_error("unable to advance recovery snapshot keys");
+            }
+        }
+        snapshot.state.operator_key_states = std::move(states);
+    }
+    for (std::size_t member{0}; member < QUORUM_SIZE; ++member) {
+        for (const auto& identity : *last) {
+            const auto before{(*recovery_keys)[member].ResolveChildRoot(identity.epoch)};
+            const auto after{(*fixture.snapshots.back().state.operator_key_states)[member]
+                .ResolveChildRoot(identity.epoch)};
+            if (!before.record || before.record != after.record) {
+                throw std::runtime_error("recovery snapshot changed a frozen child root");
+            }
+        }
+    }
+    std::string error;
+    if (!test::ValidateQuorumSnapshotFixture(fixture, error)) {
+        throw std::runtime_error("invalid catch-up snapshot fixture: " + error);
+    }
+    // The extra live point must not turn the loader into an arbitrary-height
+    // snapshot provider. Its branch hash is checked again by the daemon.
+    auto off_anchor{fixture};
+    ++off_anchor.snapshots.back().branch_point.height;
+    if (test::ValidateQuorumSnapshotFixture(off_anchor, error) ||
+        error != "PQ ChainLock fixture auxiliary snapshot is invalid") {
+        throw std::runtime_error("accepted off-anchor catch-up snapshot");
+    }
+    if (!test::WriteQuorumSnapshotFixture(output, fixture, error)) {
+        throw std::runtime_error("unable to write catch-up snapshots: " + error);
+    }
+    return 0;
+}
 
-int main(int argc, char* argv[])
+int RunCommand(int argc, char* argv[], bool stream = false)
 {
     try {
         std::string error;
+        if (argc > 1 && std::string_view{argv[1]} == "catchup-snapshots") {
+            return GenerateCatchupSnapshots(argc, argv);
+        }
         if (argc > 1 &&
-            std::string_view{argv[1]} == "payment-audit-prefix") {
+            (std::string_view{argv[1]} == "payment-audit-prefix" ||
+             std::string_view{argv[1]} == "chainlock-step")) {
             const auto args{
                 ParsePaymentAuditPrefixArguments(argc, argv, error)};
             if (!args) {
@@ -3071,9 +3356,38 @@ int main(int argc, char* argv[])
             std::cerr << error << '\n';
             return 1;
         }
-        return Generate(*args);
+        return Generate(*args, stream);
     } catch (const std::exception& exception) {
         std::cerr << exception.what() << '\n';
         return 1;
     }
+}
+
+} // namespace
+
+int main(int argc, char* argv[])
+{
+    if (argc != 2 || std::string_view{argv[1]} != "stream") {
+        return RunCommand(argc, argv);
+    }
+    std::string line;
+    while (std::getline(std::cin, line)) {
+        std::istringstream input{line};
+        std::vector<std::string> arguments{argv[0]};
+        for (std::string argument; input >> std::quoted(argument);) {
+            arguments.push_back(std::move(argument));
+        }
+        if (!input.eof() || arguments.size() == 1) {
+            std::cerr << "invalid quoted fixture command\n";
+            return 1;
+        }
+        std::vector<char*> pointers;
+        pointers.reserve(arguments.size());
+        for (auto& argument : arguments) pointers.push_back(argument.data());
+        const int result{RunCommand(static_cast<int>(pointers.size()),
+                                    pointers.data(), true)};
+        if (result != 0) return result;
+        std::cout << "OK\n" << std::flush;
+    }
+    return std::cin.eof() ? 0 : 1;
 }

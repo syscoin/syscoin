@@ -308,20 +308,29 @@ bool ValidateFixture(const QuorumSnapshotFixture& fixture,
     const auto required_points{static_cast<std::size_t>(
         static_cast<uint64_t>(last_epoch) - first_epoch + 1)};
     if (fixture.quorum_bases.size() != required_points ||
-        (fixture.snapshots.size() != required_points &&
-         fixture.snapshots.size() != required_points + 1)) {
+        fixture.snapshots.size() < required_points ||
+        fixture.snapshots.size() > required_points + 2) {
         SetError(error,
                  "PQ ChainLock fixture point count does not match window");
         return false;
     }
 
     const auto auxiliary_snapshot_height{
-        fixture.snapshots.size() == required_points + 1 &&
-                last_epoch < std::numeric_limits<uint32_t>::max()
+        last_epoch < std::numeric_limits<uint32_t>::max()
             ? RegistrationCutoffHeight(
                   expected_build_config.schedule, last_epoch + 1,
                   expected_build_config.roster_snapshot_lag_blocks)
             : std::optional<int32_t>{}};
+    // Recovery readiness consumes the exact live signing anchor in addition
+    // to epoch cutoffs. It remains a declared, active-branch snapshot, never
+    // an injected authorization result or certificate.
+    const auto latest_target{LatestEligibleChainLockTargetHeight(
+        expected_build_config.schedule, fixture.max_active_tip_height)};
+    const auto signing_anchor_height{
+        latest_target
+            ? std::optional<int32_t>{*latest_target -
+                  static_cast<int32_t>(expected_build_config.schedule.sign_lag)}
+            : std::nullopt};
 
     std::set<int32_t> required_snapshot_heights;
     for (uint32_t epoch{first_epoch};; ++epoch) {
@@ -350,8 +359,9 @@ bool ValidateFixture(const QuorumSnapshotFixture& fixture,
     for (const auto& entry : snapshots) {
         const int32_t height{entry.first};
         if (required_snapshot_heights.contains(height)) continue;
-        if (!auxiliary_snapshot_height ||
-            height != *auxiliary_snapshot_height ||
+        if (((!auxiliary_snapshot_height ||
+              height != *auxiliary_snapshot_height) &&
+             (!signing_anchor_height || height != *signing_anchor_height)) ||
             height > fixture.max_active_tip_height) {
             SetError(error,
                      "PQ ChainLock fixture auxiliary snapshot is invalid");
