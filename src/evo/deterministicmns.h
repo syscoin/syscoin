@@ -1196,6 +1196,7 @@ public:
     void FailNextAuxiliaryHistoryGCCompleteForTesting();
     /** SYSCOIN: Verify rejected and check-only blocks never reach PQ publication. */
     void FailNextPQRegistryWriteThroughForTesting();
+    void FailNextPQPaymentEligibilityCacheIndexInsertForTesting();
     /** SYSCOIN: Lower a replay floor, or erase it only after the durable marker clears. */
     int UpdateReplaySnapshotRetentionFloor(
         std::optional<int32_t> floor) EXCLUSIVE_LOCKS_REQUIRED(!cs);

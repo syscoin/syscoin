@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <atomic>
 #include <exception>
+#include <new>
 #include <string>
 #include <type_traits>
 #include <unordered_set>
@@ -4117,6 +4118,17 @@ bool PQRegistryManager::GetReadView(
     return true;
 }
 
+PQPaymentEligibleProTxHashesPtr PQRegistryManager::FindCachedPaymentEligibility(
+    const PaymentEligibilityCacheKey& key) const
+{
+    const auto cached{m_payment_eligibility_cache_index.find(key)};
+    if (cached == m_payment_eligibility_cache_index.end()) return nullptr;
+    m_payment_eligibility_cache.splice(
+        m_payment_eligibility_cache.end(), m_payment_eligibility_cache,
+        cached->second);
+    return cached->second->second;
+}
+
 bool PQRegistryManager::GetPaymentEligibleProTxHashes(
     const uint256& block_hash,
     const uint256& previous_block_hash,
@@ -4158,15 +4170,8 @@ bool PQRegistryManager::GetPaymentEligibleProTxHashes(
             }
             return false;
         }
-        const auto eligibility_cached{
-            m_payment_eligibility_cache_index.find(key)};
-        if (eligibility_cached != m_payment_eligibility_cache_index.end()) {
-            eligible = eligibility_cached->second->second;
-            m_payment_eligibility_cache.splice(
-                m_payment_eligibility_cache.end(),
-                m_payment_eligibility_cache, eligibility_cached->second);
-            eligibility_cached->second =
-                std::prev(m_payment_eligibility_cache.end());
+        if (auto cached{FindCachedPaymentEligibility(key)}) {
+            eligible = std::move(cached);
             return true;
         }
     }
@@ -4194,25 +4199,35 @@ bool PQRegistryManager::GetPaymentEligibleProTxHashes(
             eligible.reset();
             return false;
         }
-        const auto winner{m_payment_eligibility_cache_index.find(key)};
-        if (winner != m_payment_eligibility_cache_index.end()) {
-            eligible = winner->second->second;
-            m_payment_eligibility_cache.splice(
-                m_payment_eligibility_cache.end(),
-                m_payment_eligibility_cache, winner->second);
-            winner->second = std::prev(m_payment_eligibility_cache.end());
+        if (auto cached{FindCachedPaymentEligibility(key)}) {
+            eligible = std::move(cached);
             return true;
         }
-        eligible = derived;
         m_payment_eligibility_cache.emplace_back(key, std::move(derived));
-        m_payment_eligibility_cache_index[key] =
-            std::prev(m_payment_eligibility_cache.end());
+        const auto inserted{std::prev(m_payment_eligibility_cache.end())};
+        try {
+            if (std::exchange(
+                    m_fail_next_payment_eligibility_index_insert_for_testing,
+                    false)) {
+                throw std::bad_alloc{};
+            }
+            if (!m_payment_eligibility_cache_index.emplace(key, inserted).second) {
+                m_payment_eligibility_cache.pop_back();
+                return SetError(error, PQRegistryResult::INTERNAL_ERROR);
+            }
+        } catch (...) {
+            // An orphan's later eviction could erase a successful retry's
+            // index entry for the same key.
+            m_payment_eligibility_cache.pop_back();
+            throw;
+        }
         while (m_payment_eligibility_cache.size() >
                PQ_PAYMENT_ELIGIBILITY_CACHE_SIZE) {
             m_payment_eligibility_cache_index.erase(
                 m_payment_eligibility_cache.front().first);
             m_payment_eligibility_cache.pop_front();
         }
+        eligible = inserted->second;
     }
     return true;
 }
@@ -4346,6 +4361,12 @@ void PQRegistryManager::FailNextSnapshotWriteThroughForTesting()
 {
     LOCK(m_mutex);
     m_snapshot_db->FailNextWriteThroughForTesting();
+}
+
+void PQRegistryManager::FailNextPaymentEligibilityCacheIndexInsertForTesting()
+{
+    LOCK(m_mutex);
+    m_fail_next_payment_eligibility_index_insert_for_testing = true;
 }
 
 bool PQRegistryManager::WriteExactSnapshotForTesting(

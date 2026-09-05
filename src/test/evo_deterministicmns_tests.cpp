@@ -1532,6 +1532,45 @@ BOOST_AUTO_TEST_CASE(payment_projection_stops_at_frozen_epoch_boundary)
     second_parent.pprev = &first_parent;
     second_parent.phashBlock = &branch_hash_at(second_parent_height);
 
+    CBlock candidate{MakeProviderMutationBlock({})};
+    candidate.hashPrevBlock = first_parent.GetBlockHash();
+    candidate.nTime = static_cast<uint32_t>(first_parent_height + 1);
+    candidate.nNonce = static_cast<uint32_t>(first_parent_height + 1);
+    const uint256 candidate_hash{candidate.GetHash()};
+    CBlockIndex candidate_index;
+    candidate_index.nHeight = first_parent_height + 1;
+    candidate_index.pprev = &first_parent;
+    candidate_index.phashBlock = &candidate_hash;
+    CCoinsView base_view;
+    CCoinsViewCache view{&base_view};
+    const llmq::CFinalCommitmentTxPayload no_legacy_commitment;
+
+    // A failed cache allocation says nothing about this block's validity,
+    // and neither checking nor connecting may publish a partial payee view.
+    for (const bool just_check : {true, false}) {
+        manager.FailNextPQPaymentEligibilityCacheIndexInsertForTesting();
+        BlockValidationState failed_state;
+        CDeterministicMNListNEVMAddressDiff failed_diff;
+        BOOST_CHECK(!manager.ProcessBlock(
+            candidate, &candidate_index, failed_state, view,
+            no_legacy_commitment, failed_diff, just_check, /*ibd=*/true));
+        BOOST_CHECK(failed_state.IsError());
+        BOOST_CHECK(!failed_state.IsInvalid());
+        BOOST_CHECK_EQUAL(failed_state.GetRejectReason(),
+                          "failed-pq-payment-eligibility-state");
+        const auto failed_stats{manager.GetMNPayeeCacheStatsForTesting()};
+        BOOST_CHECK_EQUAL(failed_stats.entries, 0U);
+        BOOST_CHECK_EQUAL(failed_stats.builds, 0U);
+        BOOST_CHECK_EQUAL(candidate_index.nStatus & BLOCK_FAILED_MASK, 0U);
+    }
+    BlockValidationState retry_state;
+    CDeterministicMNListNEVMAddressDiff retry_diff;
+    BOOST_REQUIRE_MESSAGE(manager.ProcessBlock(
+        candidate, &candidate_index, retry_state, view,
+        no_legacy_commitment, retry_diff, /*fJustCheck=*/true,
+        /*ibd=*/true), retry_state.ToString());
+    BOOST_CHECK(retry_state.IsValid());
+
     std::vector<CDeterministicMNCPtr> projection;
     BOOST_REQUIRE(manager.GetProjectedMNPayeesForBlock(
         &first_parent, 20, projection));

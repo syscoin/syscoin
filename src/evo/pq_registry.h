@@ -423,6 +423,8 @@ private:
         GUARDED_BY(m_mutex);
     mutable PaymentEligibilityCacheMap m_payment_eligibility_cache_index
         GUARDED_BY(m_mutex);
+    mutable bool m_fail_next_payment_eligibility_index_insert_for_testing
+        GUARDED_BY(m_mutex){false};
     std::optional<evo::AuxiliaryHistoryGCComponent> m_gc_floor_component
         GUARDED_BY(m_mutex);
     std::optional<evo::PQRegistryGCClosure> m_gc_floor
@@ -478,6 +480,9 @@ private:
     std::optional<ValidatedGCPass> m_validated_gc_pass
         GUARDED_BY(m_mutex);
 
+    [[nodiscard]] PQPaymentEligibleProTxHashesPtr FindCachedPaymentEligibility(
+        const PaymentEligibilityCacheKey& key) const
+        EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
     [[nodiscard]] bool ReadDiskSnapshot(
         const uint256& block_hash,
         PQRegistryDiskSnapshot& snapshot,
@@ -710,6 +715,8 @@ public:
 
     /** Narrow seams used by deterministic-manager failure/fixture tests. */
     void FailNextSnapshotWriteThroughForTesting()
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    void FailNextPaymentEligibilityCacheIndexInsertForTesting()
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     [[nodiscard]] bool WriteExactSnapshotForTesting(
         const uint256& block_hash,

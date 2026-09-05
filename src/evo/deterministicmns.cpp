@@ -3017,7 +3017,17 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
                               "bad-pq-payment-eligibility-configuration");
     }
     CDeterministicMNCPtr payee;
-    if (!GetMNPayeeForBlock(pindexPrev, payee)) {
+    try {
+        if (!GetMNPayeeForBlock(pindexPrev, payee)) {
+            return _state.Error("failed-pq-payment-eligibility-state");
+        }
+    } catch (const std::exception& e) {
+        // A local payee-state failure must not reach ProcessBlock's
+        // consensus-invalid exception handler.
+        LogPrintf("%s -- failed to load payment eligibility at "
+                  "height=%d parent=%s: %s\n",
+                  __func__, nHeight,
+                  pindexPrev->GetBlockHash().ToString(), e.what());
         return _state.Error("failed-pq-payment-eligibility-state");
     }
     if (payment_eligibility ==
@@ -3790,6 +3800,14 @@ void CDeterministicMNManager::FailNextPQRegistryWriteThroughForTesting()
         throw std::runtime_error(error);
     }
     registry->FailNextSnapshotWriteThroughForTesting();
+}
+
+void CDeterministicMNManager::FailNextPQPaymentEligibilityCacheIndexInsertForTesting()
+{
+    std::string error;
+    auto* registry{GetOrCreatePQRegistry(error)};
+    if (registry == nullptr) throw std::runtime_error(error);
+    registry->FailNextPaymentEligibilityCacheIndexInsertForTesting();
 }
 
 void CDeterministicMNManager::UpdatedBlockTip(const CBlockIndex* pindex) {

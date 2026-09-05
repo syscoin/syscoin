@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <ios>
 #include <limits>
+#include <new>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -48,6 +49,28 @@ struct PQRegistryReconstructionStats {
 
 class PQRegistryManagerTestAccess {
 public:
+    static bool PaymentEligibilityCacheIsConsistent(
+        const PQRegistryManager& manager)
+    {
+        LOCK(manager.m_mutex);
+        if (manager.m_payment_eligibility_cache.size() >
+                PQ_PAYMENT_ELIGIBILITY_CACHE_SIZE ||
+            manager.m_payment_eligibility_cache.size() !=
+                manager.m_payment_eligibility_cache_index.size()) {
+            return false;
+        }
+        for (auto entry{manager.m_payment_eligibility_cache.begin()};
+             entry != manager.m_payment_eligibility_cache.end(); ++entry) {
+            const auto indexed{
+                manager.m_payment_eligibility_cache_index.find(entry->first)};
+            if (indexed == manager.m_payment_eligibility_cache_index.end() ||
+                indexed->second != entry) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     static PQRegistryReconstructionStats Stats(
         const PQRegistryManager& manager)
     {
@@ -1473,6 +1496,94 @@ BOOST_AUTO_TEST_CASE(payment_eligibility_reuses_unchanged_registry_state)
         steady.GetHash(), cutoff.GetHash(), 1297, 1, next_epoch, error));
     BOOST_REQUIRE(next_epoch);
     BOOST_CHECK(next_epoch != first);
+}
+
+BOOST_AUTO_TEST_CASE(payment_eligibility_index_allocation_failure_is_retryable)
+{
+    const auto config{FastConfig()};
+    const uint256 genesis{NonNullHash(181)};
+    const uint256 pro_tx_hash{NonNullHash(182)};
+    auto key{DeterministicKey(85)};
+    CKey owner_key;
+    owner_key.MakeNewKey(/*fCompressed=*/true);
+    const auto callbacks{
+        Member(genesis, pro_tx_hash, owner_key.GetPubKey().GetID())};
+    const auto registration{Block(
+        NonNullHash(183), 184,
+        {OrdinaryTransaction(184),
+         GlobalRegistration(
+             genesis, pro_tx_hash, key, owner_key,
+             CommitmentAt(
+                 config, genesis, pro_tx_hash, 1295, 1, 185), 185)})};
+    const auto cutoff{Block(
+        registration.GetHash(), 186, {OrdinaryTransaction(186)})};
+    PQRegistryManager manager(MemoryDB(181), genesis, config);
+    PQRegistryError error;
+    BOOST_REQUIRE(manager.ProcessBlock(
+        registration, 1295, callbacks, {}, false, error));
+    BOOST_REQUIRE(manager.ProcessBlock(
+        cutoff, 1296, callbacks, {}, false, error));
+    const auto get_eligible = [&](uint32_t epoch,
+                                  PQPaymentEligibleProTxHashesPtr& eligible) {
+        return manager.GetPaymentEligibleProTxHashes(
+            cutoff.GetHash(), registration.GetHash(), 1296, epoch,
+            eligible, error);
+    };
+    const auto cache_consistent = [&] {
+        return test::PQRegistryManagerTestAccess::
+            PaymentEligibilityCacheIsConsistent(manager);
+    };
+
+    std::array<PQPaymentEligibleProTxHashesPtr,
+               PQ_PAYMENT_ELIGIBILITY_CACHE_SIZE> original;
+    for (uint32_t epoch{0}; epoch < original.size(); ++epoch) {
+        BOOST_REQUIRE(get_eligible(epoch, original[epoch]));
+        BOOST_REQUIRE(original[epoch]);
+    }
+    BOOST_REQUIRE(std::binary_search(
+        original[0]->begin(), original[0]->end(), pro_tx_hash));
+    BOOST_REQUIRE(cache_consistent());
+
+    manager.FailNextPaymentEligibilityCacheIndexInsertForTesting();
+    PQPaymentEligibleProTxHashesPtr failed{original[0]};
+    constexpr uint32_t failed_epoch{PQ_PAYMENT_ELIGIBILITY_CACHE_SIZE};
+    BOOST_CHECK_THROW(get_eligible(failed_epoch, failed), std::bad_alloc);
+    BOOST_CHECK(!failed);
+    BOOST_CHECK(cache_consistent());
+    BOOST_CHECK_EQUAL(test::PQRegistryManagerTestAccess::Stats(manager)
+                          .cached_payment_views,
+                      original.size());
+    for (uint32_t epoch{0}; epoch < original.size(); ++epoch) {
+        PQPaymentEligibleProTxHashesPtr retained;
+        BOOST_REQUIRE(get_eligible(epoch, retained));
+        BOOST_CHECK(retained == original[epoch]);
+    }
+
+    PQPaymentEligibleProTxHashesPtr retried;
+    BOOST_REQUIRE(get_eligible(failed_epoch, retried));
+    BOOST_REQUIRE(retried);
+    BOOST_CHECK(cache_consistent());
+    PQPaymentEligibleProTxHashesPtr repeated;
+    BOOST_REQUIRE(get_eligible(failed_epoch, repeated));
+    BOOST_CHECK(repeated == retried);
+
+    for (uint32_t epoch{failed_epoch + 1};
+         epoch <= failed_epoch + PQ_PAYMENT_ELIGIBILITY_CACHE_SIZE; ++epoch) {
+        PQPaymentEligibleProTxHashesPtr inserted;
+        BOOST_REQUIRE(get_eligible(epoch, inserted));
+        BOOST_CHECK(cache_consistent());
+        BOOST_CHECK_EQUAL(test::PQRegistryManagerTestAccess::Stats(manager)
+                              .cached_payment_views,
+                          PQ_PAYMENT_ELIGIBILITY_CACHE_SIZE);
+    }
+    PQPaymentEligibleProTxHashesPtr rebuilt;
+    BOOST_REQUIRE(get_eligible(failed_epoch, rebuilt));
+    BOOST_REQUIRE(rebuilt);
+    BOOST_CHECK(rebuilt != retried);
+    BOOST_CHECK(*rebuilt == *retried);
+    BOOST_CHECK(cache_consistent());
+    BOOST_REQUIRE(get_eligible(failed_epoch, repeated));
+    BOOST_CHECK(repeated == rebuilt);
 }
 
 BOOST_AUTO_TEST_CASE(removal_drops_operator_state)

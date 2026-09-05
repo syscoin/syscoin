@@ -2343,6 +2343,11 @@ Expected failures are fail-closed:
 - Exact 400-member subject descriptor, 300-member conclusiveness gate, one miss
   remaining payable, second unrecovered miss withholding payment, and the
   all-withheld deterministic fallback.
+- Failed payment-eligibility cache insertion preserves the list/index bijection,
+  bounded size, and existing entries, publishes no partial result, and permits
+  retry. A local lookup exception during block checking or connection is an
+  availability error, never consensus-invalid; actual empty eligibility after
+  activation remains consensus-invalid.
 - Probation state remains exact and branch-pinned but is absent from roster
   selection inputs. Snapshots that differ only in misses/withholding build
   byte-identical rosters, and a reorg restores probation and roster state
