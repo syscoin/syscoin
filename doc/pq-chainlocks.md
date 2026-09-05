@@ -844,8 +844,8 @@ The final `CLSIG` is available to ordinary full nodes and through `GETCLSIG`.
 Durable CLSIG storage contains exactly one best certificate, at most one fully
 verified exact-slot `KEEP` or `ADVANCE` certificate awaiting its fixed BTCC
 carrier, at most 128 exact fully verified roster-authorization records, and
-at most two dedicated current/fallback historical-sync records described in
-Section 7.4. Historical-sync records retain their explicit PoW-backed provenance;
+at most two dedicated current/fallback historical-sync serving records and one
+replaceable bootstrap record described in Section 7.4. Historical-sync records retain their explicit PoW-backed provenance;
 their presence does not make them ordinarily admitted certificates or finality.
 The ordinary authorization category includes a payment-audit seal fetched only to reconstruct an
 audit roster. It is servable by an exact targeted `GETCLSIG`, but does not
@@ -1012,6 +1012,25 @@ without granting B ordinary admission; runtime historical coverage must still
 be revalidated. If an obsolete local INITIALIZE precommit exists, only an
 exact checked ordinary successor can consume it atomically with the first
 durable winner, leaving burned journal leaves unchanged.
+
+An importing node stages its verified B in one separate, replaceable bootstrap
+role. Advancing the exact receipt-selected B may replace this role repeatedly
+while D is absent or stale; it does not consume either protected serving slot.
+The bootstrap role has no retention promise to peers and cannot be the sole
+authorization dependency of a durable best or unsealed owner. Its record hash
+is role-bound, and replacing or invalidating it revokes the exact runtime
+capability without changing D or journal burns.
+
+Only fully verified ordinary C acceptance promotes bootstrap B into the
+protected serving set. Under the existing finality-publication locks, the
+handler binds C to the current B, frozen E, actual D, precommit, and both
+serving record identities, and checks that C descends through their carriers
+and endpoints. Persistence rechecks that snapshot and atomically writes C,
+promotes B, retains any serving base still needed by the resulting durable
+owners, and clears bootstrap. LIVE and catch-up retain their existing cursor,
+receipt-archive, and verified recovery capabilities. After successful
+publication, the handler rebinds only that same verified B to its new serving
+record identity; B's PoW-history trust and frozen endpoint do not change.
 
 When D is absent, the first durable winner may also be a canonical `RECOVER`
 certificate. This requires a current verified historical B, an active target
@@ -1442,7 +1461,7 @@ The hash commits the prior state, carrier height/hash, and exact receipt. Every
 ChainLock statement signs the indexed state at its target. Once a fully
 verified descendant ChainLock covers the carrier, that threshold statement
 seals the ordered prefix. A non-null outcome makes the original 1,001,147-byte
-receipt certificate prunable once no current/fallback historical-sync or other
+receipt certificate prunable once no serving/bootstrap historical-sync or other
 durable dependency still owns it; a canonical null outcome objectively retires the
 unreceipted cursor. Until the carrier outcome is covered, a locally accepted
 exact `KEEP` or `ADVANCE` remains durably retained and servable. The block index retains
@@ -1489,9 +1508,9 @@ transition kind. The capsule replaces only the old source-identity snapshot:
 each recovery group's registration-cutoff snapshot and signed-target liveness
 snapshot remain retained while required. These objects replace an indefinitely
 old source roster-snapshot floor without turning candidate fields into
-authority. Ownership is capped at 133 distinct source IDs: at most 128 retained
+authority. Ownership is capped at 134 distinct source IDs: at most 128 retained
 authorization bases plus the durable best, unsealed BTCC, and receipt-archive
-owner, plus the two historical-sync slots; referenced predecessors and seals
+owner, plus the two historical-sync serving slots and one bootstrap role; referenced predecessors and seals
 are already retained rows. Startup
 accepts exactly the capsules reachable from those owners and fails closed on a
 missing, mismatched, or orphaned capsule. Outside replay, ordinary non-cutoff
@@ -2206,7 +2225,7 @@ Expected failures are fail-closed:
   cannot invoke the import exception.
 - Recovery-capsule tests compare raw-source and capsule-derived rosters after
   source pruning, retain each required registration-cutoff and signed-target
-  snapshot, enforce the 133-source cap with atomic last-owner eviction, reject
+  snapshot, enforce the 134-source cap with atomic last-owner eviction, reject
   missing, mismatched, and orphaned startup capsules, and restart an
   authorization-only recovery audit seal from its exact persisted context.
 
@@ -2295,6 +2314,11 @@ Expected failures are fail-closed:
   reject a separately valid wrong B without promoting either historical
   record into ordinary authorization. Exercise exact-precommit atomic
   consumption, current/fallback carrier-based handoff, stale CAS, and corruption.
+- Repeatedly interrupt fresh and returning imports across more than two exact
+  receipt-selected bases, including peerless restart after each import. D must
+  remain absent or unchanged until fully verified C atomically promotes the
+  latest bootstrap B. Check protected serving dependencies, stale proof and
+  actual-D rejection, role-bound corruption, and capsule retention/cleanup.
 - A previously seen B/C inventory remains downloadable only while it is an
   exact pending historical/catch-up request. An invalid witness must not
   cancel honest alternate providers; accepted finality or an expired context
@@ -2579,8 +2603,8 @@ The following must be resolved in code and release artifacts before activation:
   batch restart, moving-tip progress, and every finality/replay veto; never
   reduce retained rollback history to the 1,728 full-snapshot cache horizon;
 - recovery-capsule RAM and disk sizing at the 6,553,782-byte encoded per-source
-  maximum and the 133-source ownership ceiling (871,653,006 bytes, about
-  831 MiB, before database and container overhead);
+  maximum and the 134-source ownership ceiling (878,206,788 bytes, about
+  838 MiB, before database and container overhead);
 - production benchmark calibration, independent review, metrics/alert policy,
   and adversarial soak evidence for the implemented bounded asynchronous
   MNAUTH executors, reconnect-resistant actual-keyed-netgroup/global

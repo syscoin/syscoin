@@ -26,6 +26,7 @@
 namespace llmq::pq {
 
 class PQChainLockPersistence;
+class VerifiedHistoricalSyncSuccessor;
 
 inline constexpr std::size_t DEFAULT_SEEN_LOGICAL_CACHE_SIZE{4096};
 inline constexpr std::size_t DEFAULT_SEEN_WITNESS_CACHE_SIZE{4096};
@@ -346,6 +347,15 @@ using ChainLockDurableAuthorizationBase =
     std::function<bool(const FinalChainLock&,
                        const PreparedChainLockContextPtr&,
                        const RecoveryUniverseCapsulePtr&)>;
+using ChainLockDurableHistoricalSyncAccept = std::function<bool(
+    const FinalChainLock&,
+    const std::optional<BTCCCursorReconciliationProof>&,
+    const ReceiptArchiveRosterAuthorization*,
+    const PreparedChainLockContextPtr&,
+    const RecoveryUniverseCapsulePtr&,
+    const VerifiedRecoveryResetPersistenceCapability*,
+    const VerifiedHistoricalSyncSuccessor&,
+    bool)>;
 
 /** Small immutable token retained while the 801 WOTS+ checks run. */
 struct PreparedFinalChainLockCandidate {
@@ -461,7 +471,9 @@ public:
                                durable_covering_accept = {},
                            ChainLockDurableReset durable_reset = {},
                            ChainLockDurableAuthorizationBase
-                               durable_authorization_base = {});
+                               durable_authorization_base = {},
+                           ChainLockDurableHistoricalSyncAccept
+                               durable_historical_sync_accept = {});
 
     ChainLockFinalityStore(const ChainLockFinalityStore&) = delete;
     ChainLockFinalityStore& operator=(const ChainLockFinalityStore&) = delete;
@@ -526,7 +538,9 @@ public:
         bool signatures_valid,
         ChainLockFinalityError* error = nullptr,
         PreparedChainLockContextPtr verification_context = nullptr,
-        RecoveryUniverseCapsulePtr recovery_universe = nullptr)
+        RecoveryUniverseCapsulePtr recovery_universe = nullptr,
+        const VerifiedHistoricalSyncSuccessor*
+            historical_sync_successor = nullptr)
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /** Accept LIVE while atomically retiring an independently covered gap. */
@@ -537,7 +551,9 @@ public:
         const ReceiptArchiveRosterAuthorization& authorization,
         ChainLockFinalityError* error = nullptr,
         PreparedChainLockContextPtr verification_context = nullptr,
-        RecoveryUniverseCapsulePtr recovery_universe = nullptr)
+        RecoveryUniverseCapsulePtr recovery_universe = nullptr,
+        const VerifiedHistoricalSyncSuccessor*
+            historical_sync_successor = nullptr)
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /** Install a fully reverified token produced by PreparePersistedCandidate. */
@@ -592,7 +608,9 @@ public:
         const ReceiptArchiveRosterAuthorization*
             covering_authorization = nullptr,
         PreparedChainLockContextPtr verification_context = nullptr,
-        RecoveryUniverseCapsulePtr recovery_universe = nullptr)
+        RecoveryUniverseCapsulePtr recovery_universe = nullptr,
+        const VerifiedHistoricalSyncSuccessor*
+            historical_sync_successor = nullptr)
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     void RejectPrepared(const PreparedFinalChainLockCandidate& prepared)
@@ -748,7 +766,10 @@ private:
             covering_authorization,
         const PreparedChainLockContextPtr& verification_context,
         const RecoveryUniverseCapsulePtr& recovery_universe,
-        ChainLockFinalityError* error) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+        ChainLockFinalityError* error,
+        const VerifiedHistoricalSyncSuccessor*
+            historical_sync_successor = nullptr)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     void RememberAccepted(AcceptedRecord record) EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
     void RememberAuthorizationBase(
         AcceptedRecord record,
@@ -774,6 +795,7 @@ private:
     const ChainLockDurableCoveringAccept m_durable_covering_accept;
     const ChainLockDurableReset m_durable_reset;
     const ChainLockDurableAuthorizationBase m_durable_authorization_base;
+    const ChainLockDurableHistoricalSyncAccept m_durable_historical_sync_accept;
 
     mutable Mutex m_mutex;
     uint64_t m_revision GUARDED_BY(m_mutex){0};

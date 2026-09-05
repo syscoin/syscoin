@@ -515,7 +515,7 @@ public:
             ? std::make_shared<const CChainLocksHandler::HistoricalSyncAuthorization>(
                   CChainLocksHandler::HistoricalSyncAuthorization{
                       *boundary, base, provenance_revision.value_or(
-                          handler.m_chainman.GetPQProvenanceRevocationRevision())})
+                          handler.m_chainman.GetPQProvenanceRevocationRevision()), {}})
             : nullptr;
     }
 
@@ -523,6 +523,25 @@ public:
     {
         LOCK(::cs_main);
         return static_cast<bool>(handler.GetPoWHistoricalSyncAuthorization());
+    }
+
+    static std::unique_ptr<pq::PQChainLockPersistence> ExchangePersistence(
+        CChainLocksHandler& handler,
+        std::unique_ptr<pq::PQChainLockPersistence> persistence)
+    {
+        return std::exchange(handler.m_persistence, std::move(persistence));
+    }
+
+    static std::optional<pq::VerifiedHistoricalSyncSuccessor>
+    PrepareHistoricalSyncSuccessor(
+        const CChainLocksHandler& handler, const pq::FinalChainLock& chainlock)
+    {
+        LOCK(::cs_main);
+        std::optional<pq::VerifiedHistoricalSyncSuccessor> proof;
+        if (!handler.PrepareHistoricalSyncSuccessor(chainlock, proof)) {
+            return std::nullopt;
+        }
+        return proof;
     }
 
     static bool HasNoFinalityWinner(const CChainLocksHandler& handler)
@@ -6090,6 +6109,95 @@ BOOST_FIXTURE_TEST_CASE(
         BOOST_CHECK(normal_objective->mode == ObjectiveRosterAuthorizationMode::NORMAL);
         BOOST_REQUIRE(normal_objective->base);
         BOOST_CHECK(*normal_objective->base == normal_view->metadata.AuthorizationBase());
+
+        {
+            // Use the existing initializer-convergence proof path to exercise
+            // exact candidate resolution without fabricating a promotion token.
+            auto persistence{std::make_unique<PQChainLockPersistence>(
+                DBParams{.path = m_path_root / "historical-successor-proof",
+                         .cache_bytes = 4U << 20,
+                         .memory_only = true},
+                genesis, *config)};
+            RosterRecoveryPrecommit precommit;
+            precommit.pending_seed = base_window.active.seeds.back();
+            precommit.pending_seed.state = RosterBeaconState::PENDING;
+            precommit.pending_seed.anchor_cursor = base_cursor;
+            precommit.pending_seed.future_btc_hash.SetNull();
+            BOOST_REQUIRE(precommit.IsStructurallyValid());
+            BOOST_REQUIRE(persistence->PersistRosterRecoveryPrecommit(precommit));
+            auto original_persistence{
+                Access::ExchangePersistence(*handler, std::move(persistence))};
+            BOOST_REQUIRE(Access::HasHistoricalSyncAuthorization(*handler));
+
+            const auto current_target{LatestEligibleChainLockTargetHeight(
+                config->chainlock_schedule, TIP_HEIGHT)};
+            BOOST_REQUIRE(current_target);
+            BOOST_REQUIRE_GT(*current_target, normal_boundary.coverage_height);
+            CBlockIndex* competing{nullptr};
+            {
+                LOCK(::cs_main);
+                auto header{chain[*current_target]->GetBlockHeader()};
+                header.nNonce += 4'000'000;
+                competing = chainman.m_blockman.AddToBlockIndex(
+                    header, chainman.m_best_header);
+                BOOST_REQUIRE(competing);
+                competing->nStatus = chain[*current_target]->nStatus;
+                competing->pqPaymentProbationStateHash = probation_root;
+                set_indexed_receipt(*competing, *normal_state);
+                BOOST_CHECK(!chainman.ActiveChain().Contains(competing));
+                BOOST_REQUIRE(llmq::IsCurrentChainLockCatchupCandidateAdmissible(
+                    config->chainlock_schedule, *chainman.ActiveTip(), *competing));
+            }
+            const int32_t previous_height{
+                *current_target - static_cast<int32_t>(PQ_CL_PERIOD)};
+            auto successor{MakeCatchupChainLock(
+                *current_target, previous_height,
+                chain[previous_height]->GetBlockHash(), 925'602)};
+            successor.statement.block_hash = competing->GetBlockHash();
+            successor.statement.payment_probation_state_hash = probation_root;
+            successor.statement.previous_btcc_cursor = base_cursor;
+            successor.statement.accepted_btcc_cursor = base_cursor;
+            successor.statement.btcc_receipt_state = *normal_state;
+            set_exact_continuation(successor, normal_base);
+            const auto successor_proof{
+                Access::PrepareHistoricalSyncSuccessor(*handler, successor)};
+            BOOST_REQUIRE(successor_proof);
+            BOOST_CHECK(successor_proof->Boundary() == normal_boundary);
+            BOOST_CHECK(successor_proof->CandidateLogicalId() ==
+                        successor.GetLogicalId(genesis));
+            BOOST_CHECK(successor_proof->Precommit() == precommit);
+            BOOST_CHECK(Access::HasNoFinalityWinner(*handler));
+
+            auto mismatched_height{successor};
+            mismatched_height.statement.height += static_cast<int32_t>(PQ_CL_PERIOD);
+            BOOST_CHECK(!Access::PrepareHistoricalSyncSuccessor(
+                *handler, mismatched_height));
+            auto unknown_target{successor};
+            unknown_target.statement.block_hash = NonNullHash(925'603);
+            BOOST_CHECK(!Access::PrepareHistoricalSyncSuccessor(*handler, unknown_target));
+            auto unrelated_base{successor};
+            unrelated_base.statement.roster_authorization_base.logical_id = NonNullHash(925'604);
+            BOOST_CHECK(!Access::PrepareHistoricalSyncSuccessor(*handler, unrelated_base));
+
+            const uint32_t competing_status{WITH_LOCK(::cs_main,
+                return competing->nStatus)};
+            {
+                LOCK(::cs_main);
+                competing->nStatus |= BLOCK_FAILED_VALID;
+            }
+            BOOST_CHECK(!Access::PrepareHistoricalSyncSuccessor(*handler, successor));
+            {
+                LOCK(::cs_main);
+                competing->nStatus = competing_status;
+            }
+            Access::SetHistoricalSyncAuthorization(
+                *handler, normal_boundary, *normal_view, wrong_revision);
+            BOOST_CHECK(!Access::PrepareHistoricalSyncSuccessor(*handler, successor));
+            Access::SetHistoricalSyncAuthorization(*handler, normal_boundary, *normal_view);
+            BOOST_REQUIRE(Access::PrepareHistoricalSyncSuccessor(*handler, successor));
+            Access::ExchangePersistence(*handler, std::move(original_persistence));
+        }
+
         auto unnecessary_recovery{fresh_recovery};
         unnecessary_recovery.statement.btcc_receipt_state = *normal_state;
         set_recovery_base(unnecessary_recovery, normal_base);

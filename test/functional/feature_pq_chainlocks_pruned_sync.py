@@ -26,6 +26,7 @@ from feature_pq_chainlocks import (
     CHAINLOCK_STATEMENT_WIRE_SIZE,
     EPOCH_BLOCKS,
     EPOCH_ORIGIN,
+    FINAL_SIGNATURE_COUNT,
     FIRST_ELIGIBLE_TARGET_HEIGHT,
     FUTURE_HORIZON_EPOCHS,
     PQChainLocksTest,
@@ -44,6 +45,7 @@ from test_framework.util import assert_equal, force_finish_mnsync, p2p_port
 
 
 AUTHORIZATION_BASE_CAPACITY = 128
+INTERRUPTED_IMPORT_CHECKPOINTS = ((2355, 2335), (2375, 2355), (2395, 2375), (2405, 2385))
 OUTAGE_RECOVERY_TARGET = 4615  # First usable recovery window here is epochs 8..11.
 OUTAGE_STARTUP_HEIGHT = OUTAGE_RECOVERY_TARGET - SIGN_LAG
 POST_RECOVERY_NORMAL_TARGET = OUTAGE_RECOVERY_TARGET + BTCC_CANDIDATE_PERIOD + SIGN_LAG
@@ -55,11 +57,17 @@ class CertificateProbe(P2PInterface):
     def __init__(self):
         super().__init__()
         self.certificate_inventory = set()
+        self.requested_certificates = set()
 
     def on_inv(self, message):
         self.certificate_inventory.update(
             inv.hash for inv in message.inv if inv.type == MSG_CLSIG)
         super().on_inv(message)
+
+    def on_getclsig(self, message):
+        if message.logical_id is not None:
+            self.requested_certificates.add(message.logical_id)
+        super().on_getclsig(message)
 
 
 class PQPrunedSyncTest(PQChainLocksTest):
@@ -222,6 +230,177 @@ class PQPrunedSyncTest(PQChainLocksTest):
         for node in receivers:
             node.setmocktime(now)
 
+    @staticmethod
+    def certificate_height(artifact):
+        return struct.unpack_from("<i", artifact["certificate"], 4)[0]
+
+    @staticmethod
+    def historical_import_message(artifact, coverage):
+        return "imported PoW historical authority %064x through %d without advancing finality" % (
+            artifact["logical_hash"], coverage)
+
+    def assert_unchanged_finality(self, node, durable):
+        if durable is None:
+            assert_equal(self.best_id(node), None)
+        else:
+            self.assert_exact_winner(node, durable, self.certificate_height(durable))
+
+    def selected_historical_base(self, tip):
+        target = tip - SIGN_LAG
+        target -= (target - EPOCH_ORIGIN) % CHAINLOCK_PERIOD
+        coverage = target - SIGN_LAG
+        path, carrier_hash = self.receipt_at(coverage)
+        _, receipt = self.read_btcc_receipt(carrier_hash)
+        artifact, saved_path = self.certificates[receipt["logical_hash"]]
+        assert_equal(saved_path, path)
+        assert_equal(self.certificate_height(artifact), receipt["target_height"])
+        assert_equal("%064x" % receipt["target_hash"],
+                     self.nodes[0].getblockhash(receipt["target_height"]))
+        carrier = self.nodes[0].getblockheader(carrier_hash)["height"]
+        assert carrier <= coverage
+        return artifact, coverage, carrier, carrier_hash
+
+    def assert_source_evicted(self, artifact):
+        peer = self.fetch_from_source(artifact["logical_hash"])
+        with p2p_lock:
+            assert artifact["logical_hash"] not in peer.certificate_inventory, \
+                "certificate at %d has not actually been evicted" % self.certificate_height(artifact)
+            assert "clsig" not in peer.last_message
+        self.nodes[0].disconnect_p2ps()
+
+    def preload_isolated_headers(self, receivers, tip):
+        source = self.nodes[0]
+        block_hashes = [source.getblockhash(height) for height in range(tip + 1)]
+        known_headers = {node.index: node.getblockchaininfo()["headers"] for node in receivers}
+        # An already-synchronized returning node needs the later header frontier
+        # before it can classify missing old receipts as historical replay.
+        for height in range(min(known_headers.values()) + 1, tip + 1):
+            header = source.getblockheader(block_hashes[height], False)
+            for node in receivers:
+                if height > known_headers[node.index]:
+                    assert_equal(node.submitheader(header), None)
+        for node in receivers:
+            assert_equal(node.getblockchaininfo()["headers"], tip)
+            assert_equal(node.getpeerinfo(), [])
+        return block_hashes
+
+    def replay_isolated_blocks(self, node, block_hashes, tip):
+        assert_equal(node.getpeerinfo(), [])
+        assert_equal(node.getbestblockhash(), block_hashes[node.getblockcount()])
+        for height in range(node.getblockcount() + 1, tip + 1):
+            # Forward the complete wire block, including AuxPoW and receipt
+            # sidecars, through ordinary validation without a CLSIG source.
+            raw = self.nodes[0].getblock(block_hashes[height], 0)
+            result = node.submitblock(raw)
+            assert result in (None, "inconclusive"), (node.index, height, result)
+        self.wait_until(lambda: node.getbestblockhash() == block_hashes[tip], timeout=180)
+        assert_equal(node.getblockcount(), tip)
+        assert_equal(node.getpeerinfo(), [])
+        force_finish_mnsync(node)
+        self.tick_receivers([node])
+
+    def import_selected_historical_base(self, node, artifact, coverage, durable, phase):
+        logical_id = "%064x" % artifact["logical_hash"]
+        imported = self.historical_import_message(artifact, coverage)
+        rejected = "CLSIG %s at %d deferred/rejected:" % (
+            logical_id, self.certificate_height(artifact))
+        busy = rejected + " pq-clsig-verifier-busy"
+        for attempt in range(4):
+            offset = node.debug_log_size(encoding="utf8")
+            peer = self.certificate_provider(
+                node, "interrupted-%d-%d-%d" % (node.index, phase, attempt),
+                0xca00 + 0x100 * node.index + 0x10 * phase + attempt, CertificateProbe())
+
+            def selected():
+                self.tick_receivers([node])
+                with p2p_lock:
+                    return artifact["logical_hash"] in peer.requested_certificates
+
+            self.wait_until(selected, timeout=180)
+            self.assert_unchanged_finality(node, durable)
+            self.request_chainlock(peer, artifact["logical_hash"])
+            peer.send_message(msg_clsig(artifact["certificate"]))
+            outcome = None
+
+            def imported_or_rejected():
+                nonlocal outcome
+                self.tick_receivers([node])
+                with node.debug_log_path.open(encoding="utf8") as log:
+                    log.seek(offset)
+                    for line in log:
+                        if imported in line or rejected in line:
+                            outcome = line.strip()
+                            return True
+                return False
+
+            self.wait_until(imported_or_rejected, timeout=120)
+            self.assert_unchanged_finality(node, durable)
+            node.disconnect_p2ps()
+            assert_equal(node.getpeerinfo(), [])
+            if imported in outcome:
+                return
+            assert busy in outcome, outcome
+        raise AssertionError("historical verifier stayed busy for %s" % logical_id)
+
+    def restart_isolated_historical_base(self, node, args, artifact, coverage, durable):
+        tip_hash = node.getbestblockhash()
+        assert_equal(node.getpeerinfo(), [])
+        self.stop_node(node.index)
+        with node.assert_debug_log([self.historical_import_message(artifact, coverage)], timeout=180):
+            self.start_node(node.index, extra_args=args + ["-connect=0"])
+            assert_equal(node.getpeerinfo(), [])
+            force_finish_mnsync(node)
+            self.tick_receivers([node])
+        assert_equal(node.getbestblockhash(), tip_hash)
+        assert_equal(node.getpeerinfo(), [])
+        self.assert_unchanged_finality(node, durable)
+
+    def assert_interrupted_historical_imports(self, initial, latest, receiver_args):
+        source_tip = self.nodes[0].getblockcount()
+        checkpoints = list(INTERRUPTED_IMPORT_CHECKPOINTS) + [(source_tip, 3085)]
+        selected = [self.selected_historical_base(tip) for tip, _ in checkpoints]
+        assert len(checkpoints) > 2
+        assert_equal(self.certificate_height(initial), FIRST_ELIGIBLE_TARGET_HEIGHT)
+        assert_equal(len({base[0]["logical_hash"] for base in selected}), len(checkpoints))
+        assert all(left[2] < right[2] for left, right in zip(selected, selected[1:]))
+        for (_, expected_height), (artifact, _, _, _) in zip(checkpoints, selected):
+            assert_equal(self.certificate_height(artifact), expected_height)
+            assert artifact["logical_hash"] != initial["logical_hash"]
+            assert artifact["logical_hash"] != latest["logical_hash"]
+        for artifact, _, _, _ in selected[:-1]:
+            self.assert_source_evicted(artifact)
+
+        self.log.info("Repeated interrupted imports: fresh D absent, returning D remains at %d",
+                      self.certificate_height(initial))
+        self.add_nodes(1, offset=2, extra_args=[receiver_args])
+        for index in (1, 2):
+            self.start_node(index, extra_args=receiver_args + ["-connect=0"])
+            self.nodes[index].spork("SPORK_19_CHAINLOCKS_ENABLED", 0)
+            assert_equal(self.nodes[index].getpeerinfo(), [])
+        receivers = [(self.nodes[1], initial), (self.nodes[2], None)]
+        self.wait_until(lambda: self.best_id(self.nodes[1]) == "%064x" % initial["logical_hash"],
+                        timeout=120)
+        block_hashes = self.preload_isolated_headers([node for node, _ in receivers], source_tip)
+        for phase, ((tip, _), (artifact, coverage, carrier, carrier_hash)) in enumerate(
+                zip(checkpoints, selected)):
+            self.log.info("Interrupted import %d: tip=%d coverage=%d receipt=%d base=%d",
+                          phase + 1, tip, coverage, carrier, self.certificate_height(artifact))
+            for node, durable in receivers:
+                self.replay_isolated_blocks(node, block_hashes, tip)
+                assert_equal(node.getblockhash(carrier), carrier_hash)
+                self.assert_unchanged_finality(node, durable)
+                self.import_selected_historical_base(node, artifact, coverage, durable, phase)
+                self.restart_isolated_historical_base(node, receiver_args, artifact, coverage, durable)
+
+        self.stop_node(1)
+        fresh = self.nodes[2]
+        assert latest["certificate"][ROSTER_TRANSITION_OFFSET] not in (0, 5)
+        self.submit_expected_certificate(
+            fresh, latest, self.certificate_height(latest), "interrupted-final-winner", 0xcaf0)
+        self.assert_exact_winner(fresh, latest, self.certificate_height(latest))
+        fresh.disconnect_p2ps()
+        assert_equal(fresh.getpeerinfo(), [])
+
     def generate_outage_snapshots(self):
         node = self.nodes[0]
         tip = OUTAGE_RECOVERY_TARGET + SIGN_LAG
@@ -254,12 +433,11 @@ class PQPrunedSyncTest(PQChainLocksTest):
         _, carrier_hash = self.receipt_at(coverage)
         _, receipt = self.read_btcc_receipt(carrier_hash)
         self.log.info("Restart caught-up receiver without peers or a later receipt carrier")
-        self.disconnect_nodes(2, 0)
+        fresh.disconnect_p2ps()
+        assert_equal(fresh.getpeerinfo(), [])
         self.stop_node(2)
-        with fresh.assert_debug_log([
-                "imported PoW historical authority %064x" % receipt["logical_hash"],
-                "through %d without advancing finality" % coverage,
-        ], timeout=120):
+        artifact = self.certificates[receipt["logical_hash"]][0]
+        with fresh.assert_debug_log([self.historical_import_message(artifact, coverage)], timeout=120):
             self.start_node(2, extra_args=receiver_args + ["-connect=0"])
             assert_equal(fresh.getpeerinfo(), [])
             force_finish_mnsync(fresh)
@@ -415,8 +593,8 @@ class PQPrunedSyncTest(PQChainLocksTest):
         self.assert_first_recovery_acceptance(
             shares_path, receiver_args, operator_args, journal_args, report_path, initial_id)
 
-    def certificate_provider(self, node, marker, identity):
-        peer = node.add_p2p_connection(P2PInterface(), uacomment=marker)
+    def certificate_provider(self, node, marker, identity, peer=None):
+        peer = node.add_p2p_connection(peer if peer is not None else P2PInterface(), uacomment=marker)
         peer.wait_for_verack()
         assert node.mnauth(self.peer_id(node, marker), "%064x" % identity,
                            "%064x" % 0x22, 1)
@@ -450,6 +628,7 @@ class PQPrunedSyncTest(PQChainLocksTest):
         best = node.getbestchainlock()
         assert_equal(best["logicalid"], "%064x" % artifact["logical_hash"])
         assert_equal(best["witnessid"], "%064x" % artifact["witness_hash"])
+        assert_equal(best["signature_count"], FINAL_SIGNATURE_COUNT)
         assert_equal(best["height"], target)
         assert_equal(best["blockhash"], node.getblockhash(target))
 
@@ -528,6 +707,13 @@ class PQPrunedSyncTest(PQChainLocksTest):
             stale, recovery, OUTAGE_RECOVERY_TARGET, "returning-recovery-valid", 0xc910)
         self.assert_exact_winner(stale, recovery, OUTAGE_RECOVERY_TARGET)
         stale.disconnect_p2ps()
+        self.log.info("Restart returning receiver after RECOVER without peers or a later receipt")
+        base, coverage, _, _ = self.selected_historical_base(stale.getblockcount())
+        assert_equal(coverage, OUTAGE_RECOVERY_TARGET - SIGN_LAG)
+        self.restart_isolated_historical_base(
+            stale, receiver_args, base, coverage, recovery)
+        self.assert_exact_winner(stale, recovery, OUTAGE_RECOVERY_TARGET)
+        assert_equal(stale.getblockcount(), OUTAGE_RECOVERY_TARGET + SIGN_LAG)
         self.stop_node(1)
         self.assert_post_recovery_normal_round(recovery, operator_args)
 
@@ -644,45 +830,18 @@ class PQPrunedSyncTest(PQChainLocksTest):
                 target += CHAINLOCK_PERIOD
 
         self.log.info("Checking actual GETCLSIG eviction, including the authorization archive")
-        old = self.fetch_from_source(initial["logical_hash"])
-        with p2p_lock:
-            assert initial["logical_hash"] not in old.certificate_inventory, \
-                "initial certificate has not actually been evicted"
-            assert "clsig" not in old.last_message
+        self.assert_source_evicted(initial)
         newest = self.fetch_from_source(latest["logical_hash"])
         newest.wait_until(lambda: newest.message_count["clsig"] > 0, timeout=120)
         assert_equal(newest.last_message["clsig"].payload, latest["certificate"])
         self.nodes[0].disconnect_p2ps()
 
-        self.log.info("Fresh receiver joins after eviction; no finality DB or verified base is supplied")
+        self.log.info("Receivers join after eviction; no finality DB or verified base is supplied")
         receiver_args = self.fixture_args() + ["-pqchainlocktestfixture=%s" % self.latest_snapshot]
-        self.start_receiver(2, receiver_args)
+        self.assert_interrupted_historical_imports(initial, latest, receiver_args)
         expected = "%064x" % latest["logical_hash"]
-        self.log.info("Base blocks synced to %s; expecting authenticated finality %s",
+        self.log.info("Base blocks synced to %s; authenticated finality %s",
                       self.nodes[2].getbestblockhash(), expected)
-
-        fresh = self.nodes[2]
-        self.wait_until(lambda: self.best_id(fresh) == expected or any(
-            peer.get("bytesrecv_per_msg", {}).get("clsig", 0)
-            >= len(latest["certificate"]) for peer in fresh.getpeerinfo()), timeout=60)
-        last_clock_update = 0
-
-        def finality_caught_up():
-            nonlocal last_clock_update
-            now = int(time.time())
-            if now != last_clock_update:
-                # Expiring the early-fetch cooldown must not freeze later
-                # ordinary retry deadlines while waiting for authentication.
-                self.tick_receivers([self.nodes[2]])
-                last_clock_update = now
-            return self.best_id(self.nodes[2]) == expected
-
-        try:
-            self.wait_until(finality_caught_up, timeout=180)
-        finally:
-            self.log.info("Receiver %d: tip=%d finality=%s IBD=%s", fresh.index,
-                          fresh.getblockcount(), self.best_id(fresh),
-                          fresh.getblockchaininfo()["initialblockdownload"])
         assert not self.nodes[2].getblockchaininfo()["initialblockdownload"]
         self.assert_isolated_historical_restart(receiver_args, expected)
         self.stop_node(2)

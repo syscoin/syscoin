@@ -2483,11 +2483,15 @@ private:
         pq::HistoricalSyncBoundary boundary;
         pq::VerifiedRosterAuthorizationBaseView base;
         uint64_t provenance_revision{0};
+        uint256 record_identity;
     };
     std::shared_ptr<const HistoricalSyncAuthorization> m_historical_sync
         GUARDED_BY(cs_main);
     std::array<std::shared_ptr<const pq::FinalChainLock>, 2>
         m_historical_sync_servable GUARDED_BY(cs_main);
+    std::shared_ptr<const pq::FinalChainLock> m_historical_sync_bootstrap_servable
+        GUARDED_BY(cs_main);
+    void RefreshHistoricalSyncServableRecords() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     uint256 m_historical_sync_requested GUARDED_BY(cs_main);
     // An untrusted fetch hint only; receipt import never validates this candidate.
     std::optional<pq::RosterAuthorizationBaseIdentity> m_catchup_candidate_hint
@@ -2498,6 +2502,14 @@ private:
     std::chrono::microseconds m_historical_sync_last_request GUARDED_BY(cs_main){0};
     [[nodiscard]] std::shared_ptr<const HistoricalSyncAuthorization>
     GetPoWHistoricalSyncAuthorization() const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    [[nodiscard]] bool PrepareHistoricalSyncSuccessor(
+        const pq::FinalChainLock& chainlock,
+        std::optional<pq::VerifiedHistoricalSyncSuccessor>& proof) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    void CompleteHistoricalSyncSuccessor(
+        const pq::VerifiedHistoricalSyncSuccessor& proof,
+        const std::shared_ptr<const HistoricalSyncAuthorization>& imported)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     [[nodiscard]] bool IsPoWHistoricalPrefixCovered(
         const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);

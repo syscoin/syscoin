@@ -429,7 +429,8 @@ ChainLockFinalityStore::ChainLockFinalityStore(
     ChainLockDurableReceiptArchive durable_receipt_archive,
     ChainLockDurableCoveringAccept durable_covering_accept,
     ChainLockDurableReset durable_reset,
-    ChainLockDurableAuthorizationBase durable_authorization_base)
+    ChainLockDurableAuthorizationBase durable_authorization_base,
+    ChainLockDurableHistoricalSyncAccept durable_historical_sync_accept)
     : m_genesis_hash(std::move(genesis_hash)),
       m_config(std::move(config)),
       m_context(context),
@@ -441,6 +442,8 @@ ChainLockFinalityStore::ChainLockFinalityStore(
       m_durable_reset(std::move(durable_reset)),
       m_durable_authorization_base(
           std::move(durable_authorization_base)),
+      m_durable_historical_sync_accept(
+          std::move(durable_historical_sync_accept)),
       m_seen_logical(m_config.seen_logical_capacity),
       m_seen_witness(m_config.seen_witness_capacity),
       m_rejected_witness(m_config.rejected_witness_capacity)
@@ -840,12 +843,14 @@ bool ChainLockFinalityStore::AcceptVerified(
     bool signatures_valid,
     ChainLockFinalityError* error,
     PreparedChainLockContextPtr verification_context,
-    RecoveryUniverseCapsulePtr recovery_universe)
+    RecoveryUniverseCapsulePtr recovery_universe,
+    const VerifiedHistoricalSyncSuccessor* historical_sync_successor)
 {
     return AcceptVerifiedInternal(
         prepared, chainlock, signatures_valid,
         ChainLockCandidateAdmission::LIVE, /*persist=*/true, {}, {}, nullptr,
-        nullptr, verification_context, recovery_universe, error);
+        nullptr, verification_context, recovery_universe, error,
+        historical_sync_successor);
 }
 
 bool ChainLockFinalityStore::AcceptVerifiedCoveringReceiptArchive(
@@ -855,12 +860,14 @@ bool ChainLockFinalityStore::AcceptVerifiedCoveringReceiptArchive(
     const ReceiptArchiveRosterAuthorization& authorization,
     ChainLockFinalityError* error,
     PreparedChainLockContextPtr verification_context,
-    RecoveryUniverseCapsulePtr recovery_universe)
+    RecoveryUniverseCapsulePtr recovery_universe,
+    const VerifiedHistoricalSyncSuccessor* historical_sync_successor)
 {
     return AcceptVerifiedInternal(
         prepared, chainlock, signatures_valid,
         ChainLockCandidateAdmission::LIVE, /*persist=*/true, {}, {}, nullptr,
-        &authorization, verification_context, recovery_universe, error);
+        &authorization, verification_context, recovery_universe, error,
+        historical_sync_successor);
 }
 
 bool ChainLockFinalityStore::AcceptPersistedVerified(
@@ -937,14 +944,15 @@ bool ChainLockFinalityStore::AcceptCatchupVerified(
     ChainLockFinalityError* error,
     const ReceiptArchiveRosterAuthorization* covering_authorization,
     PreparedChainLockContextPtr verification_context,
-    RecoveryUniverseCapsulePtr recovery_universe)
+    RecoveryUniverseCapsulePtr recovery_universe,
+    const VerifiedHistoricalSyncSuccessor* historical_sync_successor)
 {
     return AcceptVerifiedInternal(
         prepared, chainlock, signatures_valid,
         ChainLockCandidateAdmission::CATCHUP,
         /*persist=*/true, pre_durable, durable_authorization, nullptr,
         covering_authorization, verification_context, recovery_universe,
-        error);
+        error, historical_sync_successor);
 }
 
 bool ChainLockFinalityStore::AcceptVerifiedRosterAuthorizationBase(
@@ -1112,7 +1120,8 @@ bool ChainLockFinalityStore::AcceptVerifiedInternal(
     const ReceiptArchiveRosterAuthorization* covering_authorization,
     const PreparedChainLockContextPtr& verification_context,
     const RecoveryUniverseCapsulePtr& recovery_universe,
-    ChainLockFinalityError* error)
+    ChainLockFinalityError* error,
+    const VerifiedHistoricalSyncSuccessor* historical_sync_successor)
 {
     SetError(error, ChainLockFinalityError::NONE);
     const uint256 logical_id{chainlock.GetLogicalId(m_genesis_hash)};
@@ -1141,6 +1150,13 @@ bool ChainLockFinalityStore::AcceptVerifiedInternal(
          (verification_context->GenesisHash() != m_genesis_hash ||
           verification_context->Schedule() != m_config.chainlock_schedule ||
           verification_context->Statement() != chainlock.statement)) ||
+        (historical_sync_successor != nullptr &&
+         (!persist ||
+          (admission != ChainLockCandidateAdmission::LIVE &&
+           admission != ChainLockCandidateAdmission::CATCHUP) ||
+          chainlock.statement.roster_transition ==
+              RosterAuthorizationTransitionKind::INITIALIZE ||
+          !m_durable_historical_sync_accept || !verification_context)) ||
         (covering_authorization != nullptr &&
          (admission != ChainLockCandidateAdmission::LIVE &&
           admission != ChainLockCandidateAdmission::CATCHUP)) ||
@@ -1168,9 +1184,11 @@ bool ChainLockFinalityStore::AcceptVerifiedInternal(
         (admission == ChainLockCandidateAdmission::LIVE ||
          admission == ChainLockCandidateAdmission::CATCHUP) &&
         static_cast<bool>(m_durable_reset)};
+    const bool use_historical_sync_successor{
+        historical_sync_successor != nullptr};
     const bool requires_durable_context{
         persist &&
-        (use_durable_reset ||
+        (use_durable_reset || use_historical_sync_successor ||
          ((covering_authorization != nullptr &&
           admission == ChainLockCandidateAdmission::LIVE &&
           static_cast<bool>(m_durable_covering_accept)) ||
@@ -1298,7 +1316,7 @@ bool ChainLockFinalityStore::AcceptVerifiedInternal(
     const bool catchup_accept{
         admission == ChainLockCandidateAdmission::CATCHUP};
     const bool has_durable_callback{
-        use_durable_reset
+        use_historical_sync_successor || use_durable_reset
             ? true
         : receipt_archive_authorization != nullptr
             ? static_cast<bool>(m_durable_receipt_archive)
@@ -1311,7 +1329,10 @@ bool ChainLockFinalityStore::AcceptVerifiedInternal(
                            : static_cast<bool>(m_durable_accept)};
     std::optional<VerifiedRecoveryResetPersistenceCapability>
         verified_reset_capability;
-    if (use_durable_reset) {
+    if (use_durable_reset ||
+        (use_historical_sync_successor &&
+         chainlock.statement.roster_transition ==
+             RosterAuthorizationTransitionKind::RECOVER)) {
         verified_reset_capability =
             VerifiedRecoveryResetPersistenceCapability{
                 logical_id, witness_id,
@@ -1320,7 +1341,18 @@ bool ChainLockFinalityStore::AcceptVerifiedInternal(
     const auto persist_record = [&] {
         try {
             const bool persisted{
-                use_durable_reset
+                use_historical_sync_successor
+                    ? m_durable_historical_sync_accept(
+                          chainlock,
+                          rechecked->btcc_cursor_reconciliation,
+                          covering_authorization,
+                          verification_context,
+                          recovery_universe,
+                          verified_reset_capability
+                              ? &*verified_reset_capability : nullptr,
+                          *historical_sync_successor,
+                          catchup_accept)
+                : use_durable_reset
                     ? m_durable_reset(
                           chainlock,
                           rechecked->btcc_cursor_reconciliation,

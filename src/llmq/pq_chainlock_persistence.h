@@ -11,6 +11,7 @@
 #include <llmq/pq_payment_audit.h>
 #include <llmq/pq_quorum_builder.h>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <ios>
@@ -41,14 +42,16 @@ inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_AUTHORIZATION_BASE_KEY{13};
 inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_RECOVERY_UNIVERSE_KEY{14};
 inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_HISTORICAL_SYNC_KEY{15};
 inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_HISTORICAL_SYNC_FALLBACK_KEY{16};
+inline constexpr uint8_t PQ_CHAINLOCK_PERSISTENCE_HISTORICAL_SYNC_BOOTSTRAP_KEY{17};
 
 /**
  * One capsule for every independently bounded durable source owner: the
  * retained authorization rows, current best, current unsealed receipt target,
- * receipt-archive owner metadata, and both historical synchronization anchors.
+ * receipt-archive owner metadata, both serving historical synchronization
+ * anchors, and one replaceable bootstrap boundary.
  */
 inline constexpr std::size_t RECOVERY_UNIVERSE_DURABLE_OWNER_CAPACITY{
-    VERIFIED_AUTHORIZATION_BASE_CAPACITY + 5};
+    VERIFIED_AUTHORIZATION_BASE_CAPACITY + 6};
 
 inline constexpr uint16_t ROSTER_RECOVERY_PRECOMMIT_VERSION{1};
 
@@ -394,24 +397,33 @@ class VerifiedHistoricalSyncSuccessor final {
 public:
     const HistoricalSyncBoundary& Boundary() const noexcept { return m_boundary; }
     const uint256& CandidateLogicalId() const noexcept { return m_candidate_logical_id; }
-    const RosterRecoveryPrecommit& Precommit() const noexcept { return m_precommit; }
+    const std::optional<RosterRecoveryPrecommit>& Precommit() const noexcept { return m_precommit; }
     uint64_t SlotsRevision() const noexcept { return m_slots_revision; }
+    const uint256& BootstrapRecordIdentity() const noexcept { return m_bootstrap_record_identity; }
+    const std::array<uint256, 2>& CoveredServingRecords() const noexcept { return m_covered_serving_records; }
 
 private:
     VerifiedHistoricalSyncSuccessor(HistoricalSyncBoundary boundary,
                                    uint256 candidate_logical_id,
-                                   RosterRecoveryPrecommit precommit,
-                                   uint64_t slots_revision)
+                                   std::optional<RosterRecoveryPrecommit> precommit,
+                                   uint64_t slots_revision,
+                                   uint256 bootstrap_record_identity = {},
+                                   std::array<uint256, 2> covered_serving_records = {})
         : m_boundary{std::move(boundary)},
           m_candidate_logical_id{std::move(candidate_logical_id)},
-          m_precommit{std::move(precommit)}, m_slots_revision{slots_revision} {}
+          m_precommit{std::move(precommit)}, m_slots_revision{slots_revision},
+          m_bootstrap_record_identity{std::move(bootstrap_record_identity)},
+          m_covered_serving_records{std::move(covered_serving_records)} {}
     HistoricalSyncBoundary m_boundary;
     uint256 m_candidate_logical_id;
-    RosterRecoveryPrecommit m_precommit;
+    std::optional<RosterRecoveryPrecommit> m_precommit;
     uint64_t m_slots_revision;
+    uint256 m_bootstrap_record_identity;
+    std::array<uint256, 2> m_covered_serving_records;
 
     friend class ::llmq::CChainLocksHandler;
     friend class HistoricalSyncBoundaryPersistenceTestAccess;
+    friend class ChainLockStoreHistoricalSyncTestAccess;
 };
 
 /**
@@ -453,6 +465,11 @@ public:
     /** Current then fallback; neither is imported as TRUSTED_PERSISTENCE. */
     [[nodiscard]] std::vector<DurableHistoricalSyncBoundary>
     LoadHistoricalSyncBoundaries(uint64_t* revision = nullptr) const;
+    /** Replaceable import state; never a serving or live-owner dependency. */
+    [[nodiscard]] std::optional<DurableHistoricalSyncBoundary>
+    LoadHistoricalSyncBootstrap(uint64_t* revision = nullptr) const;
+    [[nodiscard]] bool IsHistoricalSyncRecordCurrent(
+        const HistoricalSyncBoundary& boundary, const uint256& record_identity) const;
     /** Compact coordinates needed by every durable recovery-roster owner. */
     [[nodiscard]] std::optional<
         std::vector<RecoveryRosterRetentionDependency>>
@@ -615,7 +632,11 @@ private:
         const VerifiedHistoricalSyncSuccessor& proof,
         ChainLockPersistenceError* error = nullptr,
         std::optional<PaymentAuditSealContextCapsule> payment_audit_seal_context = std::nullopt,
-        RecoveryUniverseCapsulePtr recovery_universe = nullptr);
+        RecoveryUniverseCapsulePtr recovery_universe = nullptr,
+        const std::optional<BTCCCursorReconciliationProof>& btcc_cursor_reconciliation = std::nullopt,
+        const std::optional<ReceiptArchiveRosterAuthorization>& covering_authorization = std::nullopt,
+        const VerifiedRecoveryResetPersistenceCapability* verified_reset = nullptr,
+        bool catchup = true);
 
     [[nodiscard]] bool PersistHistoricalSyncBoundary(
         const FinalChainLock& chainlock,
@@ -624,6 +645,18 @@ private:
         uint64_t expected_revision,
         const std::optional<FinalChainLockRecordMetadata>& covering_finality,
         RecoveryUniverseCapsulePtr recovery_universe,
+        ChainLockPersistenceError* error = nullptr);
+
+    [[nodiscard]] bool PersistHistoricalSyncBootstrap(
+        const FinalChainLock& chainlock,
+        const PreparedChainLockContextPtr& context,
+        const HistoricalSyncBoundary& boundary,
+        uint64_t expected_revision,
+        RecoveryUniverseCapsulePtr recovery_universe,
+        ChainLockPersistenceError* error = nullptr);
+
+    [[nodiscard]] bool InvalidateHistoricalSyncBootstrap(
+        const uint256& record_identity, uint64_t expected_revision,
         ChainLockPersistenceError* error = nullptr);
 
     /** Handler must revoke the supporting branch capability before removal. */

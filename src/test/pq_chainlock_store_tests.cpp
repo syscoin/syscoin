@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <llmq/pq_chainlock_persistence.h>
 #include <llmq/pq_chainlock_store.h>
 #include <llmq/pq_payment_audit.h>
 
@@ -21,6 +22,22 @@
 #include <boost/test/unit_test.hpp>
 
 using namespace llmq::pq;
+
+namespace llmq::pq {
+
+class ChainLockStoreHistoricalSyncTestAccess {
+public:
+    static VerifiedHistoricalSyncSuccessor Create(
+        const uint256& genesis_hash, const FinalChainLock& chainlock)
+    {
+        // The store treats this proof as opaque; persistence tests verify
+        // the historical boundary and slot-revision contents themselves.
+        return VerifiedHistoricalSyncSuccessor{
+            {}, chainlock.GetLogicalId(genesis_hash), std::nullopt, 1};
+    }
+};
+
+} // namespace llmq::pq
 
 namespace {
 
@@ -1345,6 +1362,316 @@ BOOST_AUTO_TEST_CASE(reset_capability_crosses_only_the_fully_verified_store_seam
     BOOST_CHECK_EQUAL(ordinary_callbacks, 0U);
     BOOST_REQUIRE(store.GetBest());
     BOOST_CHECK(*store.GetBest() == accepted);
+}
+
+BOOST_AUTO_TEST_CASE(historical_successor_requires_the_fully_verified_store_seam)
+{
+    const uint256 genesis{NonNullHash(32)};
+    const auto config{MakeConfig()};
+    TestFinalityContext context;
+    std::size_t ordinary_callbacks{0};
+    std::size_t historical_callbacks{0};
+    const VerifiedHistoricalSyncSuccessor* expected_proof{nullptr};
+    ChainLockFinalityStore store{
+        genesis, config, context,
+        [&](const FinalChainLock&,
+            const PreparedChainLockContextPtr&,
+            const RecoveryUniverseCapsulePtr&) {
+            ++ordinary_callbacks;
+            return true;
+        },
+        {}, {}, {}, {}, {}, {},
+        [&](const FinalChainLock& chainlock,
+            const std::optional<BTCCCursorReconciliationProof>& reconciliation,
+            const ReceiptArchiveRosterAuthorization* authorization,
+            const PreparedChainLockContextPtr& verification_context,
+            const RecoveryUniverseCapsulePtr& recovery_universe,
+            const VerifiedRecoveryResetPersistenceCapability* reset,
+            const VerifiedHistoricalSyncSuccessor& proof,
+            bool catchup) {
+            ++historical_callbacks;
+            BOOST_CHECK(&proof == expected_proof);
+            BOOST_CHECK(proof.CandidateLogicalId() ==
+                        chainlock.GetLogicalId(genesis));
+            BOOST_REQUIRE(verification_context);
+            BOOST_CHECK(verification_context->Statement() ==
+                        chainlock.statement);
+            BOOST_CHECK(!reconciliation);
+            BOOST_CHECK(authorization == nullptr);
+            BOOST_CHECK(!recovery_universe);
+            BOOST_CHECK(reset == nullptr);
+            BOOST_CHECK(!catchup);
+            return true;
+        }};
+    ChainLockFinalityError error{ChainLockFinalityError::NONE};
+    const auto rejected{MakeChainLock(865, 864, NonNullHash(864), 320)};
+    const auto rejected_proof{
+        ChainLockStoreHistoricalSyncTestAccess::Create(genesis, rejected)};
+    auto prepared{store.PrepareCandidate(rejected)};
+    BOOST_REQUIRE(prepared);
+    BOOST_CHECK(!store.AcceptVerified(
+        *prepared, rejected, false, &error,
+        MakeVerificationContext(genesis, config, rejected), nullptr,
+        &rejected_proof));
+    BOOST_CHECK(error == ChainLockFinalityError::INVALID_SIGNATURES);
+    BOOST_CHECK_EQUAL(historical_callbacks, 0U);
+
+    const auto candidate{MakeChainLock(865, 864, NonNullHash(864), 321)};
+    const auto proof{
+        ChainLockStoreHistoricalSyncTestAccess::Create(genesis, candidate)};
+    const auto verification_context{
+        MakeVerificationContext(genesis, config, candidate)};
+    prepared = store.PrepareCandidate(candidate);
+    BOOST_REQUIRE(prepared);
+    BOOST_CHECK(!store.AcceptVerified(
+        *prepared, candidate, true, &error, nullptr, nullptr, &proof));
+    BOOST_CHECK(error == ChainLockFinalityError::INVALID_PREPARATION_TOKEN);
+    ++context.generation;
+    BOOST_CHECK(!store.AcceptVerified(
+        *prepared, candidate, true, &error, verification_context, nullptr,
+        &proof));
+    BOOST_CHECK(error == ChainLockFinalityError::CONTEXT_CHANGED);
+    --context.generation;
+    BOOST_CHECK_EQUAL(historical_callbacks, 0U);
+    BOOST_CHECK(!store.GetBest());
+
+    TestFinalityContext unavailable_context;
+    ChainLockFinalityStore unavailable{genesis, config, unavailable_context};
+    const auto unavailable_prepared{unavailable.PrepareCandidate(candidate)};
+    BOOST_REQUIRE(unavailable_prepared);
+    BOOST_CHECK(!unavailable.AcceptVerified(
+        *unavailable_prepared, candidate, true, &error,
+        verification_context, nullptr, &proof));
+    BOOST_CHECK(error == ChainLockFinalityError::INVALID_PREPARATION_TOKEN);
+    BOOST_CHECK(!unavailable.GetBest());
+
+    auto initializer{MakeChainLock(865, 864, NonNullHash(864), 322)};
+    initializer.statement.roster_transition =
+        RosterAuthorizationTransitionKind::INITIALIZE;
+    initializer.statement.roster_authorization_base = {};
+    initializer.statement.roster_beacons = InitializationWindow(865);
+    const auto initializer_proof{
+        ChainLockStoreHistoricalSyncTestAccess::Create(genesis, initializer)};
+    const auto initializer_prepared{store.PrepareCandidate(initializer)};
+    BOOST_REQUIRE(initializer_prepared);
+    BOOST_CHECK(!store.AcceptVerified(
+        *initializer_prepared, initializer, true, &error,
+        MakeVerificationContext(genesis, config, initializer), nullptr,
+        &initializer_proof));
+    BOOST_CHECK(error == ChainLockFinalityError::INVALID_PREPARATION_TOKEN);
+    BOOST_CHECK_EQUAL(historical_callbacks, 0U);
+
+    const auto stale{MakeChainLock(865, 864, NonNullHash(864), 324)};
+    const auto stale_proof{
+        ChainLockStoreHistoricalSyncTestAccess::Create(genesis, stale)};
+    const auto stale_prepared{store.PrepareCandidate(stale)};
+    BOOST_REQUIRE(stale_prepared);
+    expected_proof = &proof;
+    BOOST_REQUIRE(store.AcceptVerified(
+        *prepared, candidate, true, &error, verification_context, nullptr,
+        &proof));
+    BOOST_CHECK_EQUAL(historical_callbacks, 1U);
+    BOOST_CHECK_EQUAL(ordinary_callbacks, 0U);
+
+    BOOST_CHECK(!store.AcceptVerified(
+        *stale_prepared, stale, true, &error,
+        MakeVerificationContext(genesis, config, stale), nullptr, &stale_proof));
+    BOOST_CHECK(error == ChainLockFinalityError::CONTEXT_CHANGED);
+    BOOST_CHECK_EQUAL(historical_callbacks, 1U);
+    const auto next{MakeChainLock(870, 865, candidate.statement.block_hash, 323)};
+    prepared = store.PrepareCandidate(next);
+    BOOST_REQUIRE(prepared);
+    BOOST_REQUIRE(store.AcceptVerified(
+        *prepared, next, true, &error,
+        MakeVerificationContext(genesis, config, next)));
+    BOOST_CHECK_EQUAL(ordinary_callbacks, 1U);
+    BOOST_CHECK_EQUAL(historical_callbacks, 1U);
+    BOOST_REQUIRE(store.GetBest());
+    BOOST_CHECK(*store.GetBest() == next);
+}
+
+BOOST_AUTO_TEST_CASE(historical_successor_preserves_catchup_capabilities_and_retry)
+{
+    const uint256 genesis{NonNullHash(33)};
+    const auto config{MakeConfig()};
+    const auto prior{MakeChainLock(865, 864, NonNullHash(864), 330)};
+    auto advance{MakeChainLock(870, 865, prior.statement.block_hash, 331)};
+    advance.statement.accepted_btcc_cursor =
+        BTCCursor{870, advance.statement.block_hash, NonNullHash(33'100)};
+    advance.statement.btcc_advance = BTCCAdvance::ADVANCE;
+    auto local{MakeChainLock(875, 870, advance.statement.block_hash, 332)};
+    local.statement.previous_btcc_cursor = advance.statement.accepted_btcc_cursor;
+    local.statement.accepted_btcc_cursor = advance.statement.accepted_btcc_cursor;
+    const auto candidate{MakeChainLock(880, 875, local.statement.block_hash, 333)};
+    const auto proof{
+        ChainLockStoreHistoricalSyncTestAccess::Create(genesis, candidate)};
+    const auto verification_context{
+        MakeVerificationContext(genesis, config, candidate)};
+    const auto recovery_universe{RecoveryUniverseFor(
+        genesis, candidate.statement.roster_beacons, 33'000'000)};
+    const auto reconciliation{MakeReconciliationProof(local, 333)};
+    const ReceiptArchiveRosterAuthorization authorization{
+        {local.GetLogicalId(genesis), local.GetWitnessId(genesis),
+         local.statement},
+        candidate.GetLogicalId(genesis), candidate.GetWitnessId(genesis),
+        {prior.GetLogicalId(genesis), prior.GetWitnessId(genesis),
+         prior.statement}};
+    BOOST_REQUIRE(authorization.IsInternallyConsistent(genesis));
+    TestFinalityContext context;
+    bool allow_persistence{false};
+    bool inside_authorization{false};
+    std::size_t historical_callbacks{0};
+    ChainLockFinalityStore store{
+        genesis, config, context, {}, {}, {}, {}, {}, {}, {},
+        [&](const FinalChainLock& accepted,
+            const std::optional<BTCCCursorReconciliationProof>& actual_reconciliation,
+            const ReceiptArchiveRosterAuthorization* actual_authorization,
+            const PreparedChainLockContextPtr& actual_context,
+            const RecoveryUniverseCapsulePtr& actual_universe,
+            const VerifiedRecoveryResetPersistenceCapability* reset,
+            const VerifiedHistoricalSyncSuccessor& actual_proof,
+            bool catchup) {
+            ++historical_callbacks;
+            BOOST_CHECK(inside_authorization);
+            BOOST_CHECK(accepted == candidate);
+            BOOST_CHECK(actual_reconciliation == reconciliation);
+            BOOST_CHECK(actual_authorization == &authorization);
+            BOOST_CHECK(actual_context == verification_context);
+            BOOST_CHECK(actual_universe == recovery_universe);
+            BOOST_CHECK(reset == nullptr);
+            BOOST_CHECK(&actual_proof == &proof);
+            BOOST_CHECK(catchup);
+            return allow_persistence;
+        }};
+    auto prepared{store.PreparePersistedCandidate(local)};
+    BOOST_REQUIRE(prepared);
+    BOOST_REQUIRE(store.AcceptPersistedVerified(*prepared, local, true));
+    context.btcc_cursor_reconciliation = reconciliation;
+    prepared = store.PrepareCatchupCandidate(candidate);
+    BOOST_REQUIRE(prepared);
+    ChainLockFinalityError error{ChainLockFinalityError::NONE};
+    BOOST_CHECK(!store.AcceptCatchupVerified(
+        *prepared, candidate, true,
+        [&] { ++context.generation; return true; }, {},
+        &error, &authorization, verification_context, recovery_universe, &proof));
+    BOOST_CHECK(error == ChainLockFinalityError::CONTEXT_CHANGED);
+    BOOST_CHECK_EQUAL(historical_callbacks, 0U);
+    --context.generation;
+    BOOST_CHECK(!store.AcceptCatchupVerified(
+        *prepared, candidate, true, [] { return true; },
+        [](const std::function<bool()>&, ChainLockFinalityError* callback_error) {
+            *callback_error = ChainLockFinalityError::CONTEXT_CHANGED;
+            return false;
+        },
+        &error, &authorization, verification_context, recovery_universe, &proof));
+    BOOST_CHECK(error == ChainLockFinalityError::CONTEXT_CHANGED);
+    BOOST_CHECK_EQUAL(historical_callbacks, 0U);
+
+    const auto durable_authorization = [&](
+        const std::function<bool()>& persist_record, ChainLockFinalityError*) {
+        inside_authorization = true;
+        const bool persisted{persist_record()};
+        inside_authorization = false;
+        return persisted;
+    };
+    BOOST_CHECK(!store.AcceptCatchupVerified(
+        *prepared, candidate, true, [] { return true; }, durable_authorization,
+        &error, &authorization, verification_context, recovery_universe, &proof));
+    BOOST_CHECK(error == ChainLockFinalityError::PERSISTENCE_FAILURE);
+    BOOST_CHECK_EQUAL(historical_callbacks, 1U);
+    BOOST_REQUIRE(store.GetBest());
+    BOOST_CHECK(*store.GetBest() == local);
+    store.AbandonPrepared(*prepared);
+    prepared = store.PrepareCatchupCandidate(candidate);
+    BOOST_REQUIRE(prepared);
+    allow_persistence = true;
+    BOOST_REQUIRE(store.AcceptCatchupVerified(
+        *prepared, candidate, true, [] { return true; }, durable_authorization,
+        &error, &authorization, verification_context, recovery_universe, &proof));
+    BOOST_CHECK_EQUAL(historical_callbacks, 2U);
+    BOOST_REQUIRE(store.GetBest());
+    BOOST_CHECK(*store.GetBest() == candidate);
+}
+
+BOOST_AUTO_TEST_CASE(historical_successor_mints_recover_capability_without_reset_sink)
+{
+    const uint256 genesis{NonNullHash(34)};
+    const auto config{MakeConfig()};
+    constexpr uint32_t newest_epoch{7};
+    const auto target{CanonicalRosterRecoveryTargetHeight(
+        config.chainlock_schedule, config.btcc_schedule, newest_epoch)};
+    BOOST_REQUIRE(target);
+    const auto prior{MakeChainLock(
+        *target - 5, *target - 10, NonNullHash(34'100), 340)};
+    const auto predecessor{MakeChainLock(
+        *target - 15, *target - 20, NonNullHash(34'200), 342)};
+    auto candidate{MakeChainLock(
+        *target, prior.statement.height, prior.statement.block_hash, 341)};
+    const auto window{MakeRecoveryRosterBeaconWindow(
+        prior.statement.roster_beacons.active.recovery_authority_source,
+        newest_epoch)};
+    BOOST_REQUIRE(window);
+    candidate.statement.roster_transition =
+        RosterAuthorizationTransitionKind::RECOVER;
+    candidate.statement.roster_beacons = *window;
+    BOOST_REQUIRE(candidate.IsStructurallyValid());
+    const auto proof{
+        ChainLockStoreHistoricalSyncTestAccess::Create(genesis, candidate)};
+    const auto verification_context{
+        MakeVerificationContext(genesis, config, candidate)};
+    const ReceiptArchiveRosterAuthorization covering_authorization{
+        {prior.GetLogicalId(genesis), prior.GetWitnessId(genesis), prior.statement},
+        candidate.GetLogicalId(genesis), candidate.GetWitnessId(genesis),
+        {predecessor.GetLogicalId(genesis), predecessor.GetWitnessId(genesis),
+         predecessor.statement}};
+    BOOST_REQUIRE(covering_authorization.IsInternallyConsistent(genesis));
+    for (const unsigned mode : {0U, 1U, 2U}) {
+        const bool catchup{mode == 2};
+        const auto* expected_authorization{
+            mode == 0 ? nullptr : &covering_authorization};
+        TestFinalityContext context;
+        std::size_t historical_callbacks{0};
+        ChainLockFinalityStore store{
+            genesis, config, context, {}, {}, {}, {}, {}, {}, {},
+            [&](const FinalChainLock& accepted,
+                const std::optional<BTCCCursorReconciliationProof>& reconciliation,
+                const ReceiptArchiveRosterAuthorization* authorization,
+                const PreparedChainLockContextPtr& actual_context,
+                const RecoveryUniverseCapsulePtr&,
+                const VerifiedRecoveryResetPersistenceCapability* reset,
+                const VerifiedHistoricalSyncSuccessor& actual_proof,
+                bool actual_catchup) {
+                ++historical_callbacks;
+                BOOST_CHECK(accepted == candidate);
+                BOOST_CHECK(!reconciliation);
+                BOOST_CHECK(authorization == expected_authorization);
+                BOOST_CHECK(actual_context == verification_context);
+                BOOST_CHECK(reset != nullptr);
+                BOOST_CHECK(&actual_proof == &proof);
+                BOOST_CHECK_EQUAL(actual_catchup, catchup);
+                return true;
+            }};
+        auto prepared{store.PreparePersistedCandidate(prior)};
+        BOOST_REQUIRE(prepared);
+        BOOST_REQUIRE(store.AcceptPersistedVerified(*prepared, prior, true));
+        prepared = catchup ? store.PrepareCatchupCandidate(candidate)
+                           : store.PrepareCandidate(candidate);
+        BOOST_REQUIRE(prepared);
+        BOOST_REQUIRE(catchup
+            ? store.AcceptCatchupVerified(
+                  *prepared, candidate, true, [] { return true; }, {}, nullptr,
+                  expected_authorization, verification_context, nullptr, &proof)
+            : expected_authorization != nullptr
+                ? store.AcceptVerifiedCoveringReceiptArchive(
+                      *prepared, candidate, true, *expected_authorization, nullptr,
+                      verification_context, nullptr, &proof)
+                : store.AcceptVerified(
+                      *prepared, candidate, true, nullptr, verification_context,
+                      nullptr, &proof));
+        BOOST_CHECK_EQUAL(historical_callbacks, 1U);
+        BOOST_REQUIRE(store.GetBest());
+        BOOST_CHECK(*store.GetBest() == candidate);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(precontext_crypto_rejection_is_deduplicated)
