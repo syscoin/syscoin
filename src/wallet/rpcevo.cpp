@@ -16,6 +16,7 @@
 #include <validation.h>
 
 #include <wallet/coincontrol.h>
+#include <wallet/pq_key_schedule.h>
 #include <wallet/spend.h>
 #include <wallet/rpc/util.h>
 
@@ -47,6 +48,7 @@
 #include <util/string.h>
 
 #include <algorithm>
+#include <functional>
 #include <limits>
 #include <optional>
 #include <span>
@@ -413,6 +415,64 @@ static void EnsurePQPreparationRPCActive(int current_height)
     }
 }
 
+static uint32_t NextPQFirstMutableEpoch(node::NodeContext& node)
+{
+    LOCK(cs_main);
+    const CBlockIndex* tip{node.chainman->ActiveTip()};
+    if (tip == nullptr) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR,
+                           "Active chain tip is unavailable");
+    }
+    EnsurePQPreparationRPCActive(tip->nHeight);
+    llmq::pq::PQRegistryConfig config;
+    if (llmq::pq::GetPQRegistryConfig(Params().GetConsensus(), config) !=
+        llmq::pq::PQRegistryDeploymentResult::VALID) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR,
+                           "PQ registry configuration is invalid");
+    }
+    const auto view{llmq::pq::DeriveOperatorKeyScheduleView(
+        config.schedule, tip->nHeight + 1,
+        config.registration_cutoff_blocks, config.future_horizon_epochs)};
+    if (!view) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR,
+                           "Unable to derive the next-block PQ key schedule");
+    }
+    return view->first_mutable_epoch;
+}
+
+static llmq::pq::ChildKeyTreeCommitment BuildCurrentChildKeyTreeCommitment(
+    node::NodeContext& node,
+    const llmq::pq::ChainLockMasterSeed& chainlock_seed,
+    const uint256& pro_tx_hash,
+    uint32_t generation)
+{
+    const auto commitment{BuildCurrentPQChildKeyCommitment(
+        [&]() { return NextPQFirstMutableEpoch(node); },
+        [&](uint32_t first_epoch) {
+            return BuildChildKeyTreeCommitment(
+                chainlock_seed, pro_tx_hash, generation, first_epoch);
+        })};
+    if (!commitment) {
+        throw JSONRPCError(
+            RPC_MISC_ERROR,
+            "PQ registration cutoff changed repeatedly during child-key tree "
+            "construction; retry the RPC");
+    }
+    return *commitment;
+}
+
+static void EnsureCurrentChildKeyCommitmentSchedule(
+    node::NodeContext& node,
+    const llmq::pq::ChildKeyTreeCommitment& commitment)
+{
+    if (commitment.first_epoch != NextPQFirstMutableEpoch(node)) {
+        throw JSONRPCError(
+            RPC_MISC_ERROR,
+            "PQ registration cutoff changed during transaction preparation; "
+            "retry the RPC");
+    }
+}
+
 template<typename SpecialTxPayload>
 static void FundSpecialTx(wallet::CWallet& pwallet, CMutableTransaction& tx, const SpecialTxPayload& payload, const CTxDestination& fundDest)
 {
@@ -577,7 +637,8 @@ static void SignGlobalKeyRotationPayload(
                            "Failed to sign PQ global-key rotation");
     }
 }
-static UniValue SignAndSendSpecialTx(const node::JSONRPCRequest& request, const wallet::CWallet& pwallet, const CMutableTransaction& tx, bool fSubmit = true)
+static UniValue SignAndSendSpecialTx(const node::JSONRPCRequest& request, const wallet::CWallet& pwallet, const CMutableTransaction& tx, bool fSubmit = true,
+                                    const std::function<void()>& check_prepared = {})
 {
     CDataStream ds(SER_NETWORK, PROTOCOL_VERSION);
     ds << tx;
@@ -588,6 +649,9 @@ static UniValue SignAndSendSpecialTx(const node::JSONRPCRequest& request, const 
     signRequest.params.setArray();
     signRequest.params.push_back(HexStr(ds));
     UniValue signResult = signrawtransactionwithwallet().HandleRequest(signRequest);
+    // Funding and wallet signing can cross a cutoff after the expensive tree
+    // build. Check even the offline result before exposing stale signed hex.
+    if (check_prepared) check_prepared();
     if (!fSubmit) {
         return signResult["hex"].get_str();
     }
@@ -1149,7 +1213,6 @@ static RPCHelpMan protx_register_operator_key()
             CDeterministicMNCPtr dmn;
             uint32_t key_version{1};
             uint32_t tree_generation{1};
-            uint32_t first_epoch{0};
             std::optional<llmq::pq::GlobalKeyRecord> previous_key;
             {
                 LOCK(cs_main);
@@ -1198,27 +1261,10 @@ static RPCHelpMan protx_register_operator_key()
                             state->global_key.child_key_commitment.generation + 1;
                     }
                 }
-                llmq::pq::PQRegistryConfig config;
-                if (llmq::pq::GetPQRegistryConfig(
-                        Params().GetConsensus(), config) !=
-                    llmq::pq::PQRegistryDeploymentResult::VALID) {
-                    throw JSONRPCError(RPC_INTERNAL_ERROR,
-                                       "PQ registry configuration is invalid");
-                }
-                const auto view = llmq::pq::DeriveOperatorKeyScheduleView(
-                    config.schedule, tip->nHeight + 1,
-                    config.registration_cutoff_blocks,
-                    config.future_horizon_epochs);
-                if (!view) {
-                    throw JSONRPCError(
-                        RPC_INTERNAL_ERROR,
-                        "Unable to derive the next-block PQ key schedule");
-                }
-                first_epoch = view->first_mutable_epoch;
             }
 
-            const auto child_commitment = BuildChildKeyTreeCommitment(
-                chainlock_seed, pro_tx_hash, tree_generation, first_epoch);
+            const auto child_commitment = BuildCurrentChildKeyTreeCommitment(
+                node, chainlock_seed, pro_tx_hash, tree_generation);
 
             CKey owner_key;
             if (!pwallet->GetKey(dmn->pdmnState->keyIDOwner, owner_key)) {
@@ -1264,7 +1310,9 @@ static RPCHelpMan protx_register_operator_key()
 
             const bool submit = request.params[4].isNull() ||
                                 request.params[4].get_bool();
-            return SignAndSendSpecialTx(request, *pwallet, tx, submit);
+            return SignAndSendSpecialTx(request, *pwallet, tx, submit, [&]() {
+                EnsureCurrentChildKeyCommitmentSchedule(node, child_commitment);
+            });
         },
     };
 }
@@ -1337,7 +1385,6 @@ static RPCHelpMan protx_rotate_operator_key()
             CDeterministicMNCPtr dmn;
             llmq::pq::OperatorKeyState operator_state;
             uint32_t replacement_tree_generation{0};
-            uint32_t replacement_first_epoch{0};
             {
                 LOCK(cs_main);
                 const CBlockIndex* tip = node.chainman->ActiveTip();
@@ -1364,26 +1411,6 @@ static RPCHelpMan protx_rotate_operator_key()
                     }
                     replacement_tree_generation =
                         current_commitment.generation + 1;
-
-                    llmq::pq::PQRegistryConfig config;
-                    if (llmq::pq::GetPQRegistryConfig(
-                            Params().GetConsensus(), config) !=
-                        llmq::pq::PQRegistryDeploymentResult::VALID) {
-                        throw JSONRPCError(
-                            RPC_INTERNAL_ERROR,
-                            "PQ registry configuration is invalid");
-                    }
-                    const auto view{
-                        llmq::pq::DeriveOperatorKeyScheduleView(
-                            config.schedule, tip->nHeight + 1,
-                            config.registration_cutoff_blocks,
-                            config.future_horizon_epochs)};
-                    if (!view) {
-                        throw JSONRPCError(
-                            RPC_INTERNAL_ERROR,
-                            "Unable to derive the next-block PQ key schedule");
-                    }
-                    replacement_first_epoch = view->first_mutable_epoch;
                 }
             }
             if (operator_state.global_key.key_version ==
@@ -1407,11 +1434,11 @@ static RPCHelpMan protx_rotate_operator_key()
                 operator_state.global_key.child_key_commitment;
             if (rotate_child_root) {
                 payload.candidate.child_key_commitment =
-                    BuildChildKeyTreeCommitment(
+                    BuildCurrentChildKeyTreeCommitment(
+                        node,
                         replacement_chainlock_seed,
                         pro_tx_hash,
-                        replacement_tree_generation,
-                        replacement_first_epoch);
+                        replacement_tree_generation);
                 if (payload.candidate.child_key_commitment.root ==
                     operator_state.global_key.child_key_commitment.root) {
                     throw JSONRPCError(
@@ -1446,7 +1473,12 @@ static RPCHelpMan protx_rotate_operator_key()
 
             const bool submit = request.params[4].isNull() ||
                                 request.params[4].get_bool();
-            return SignAndSendSpecialTx(request, *pwallet, tx, submit);
+            return SignAndSendSpecialTx(request, *pwallet, tx, submit, [&]() {
+                if (rotate_child_root) {
+                    EnsureCurrentChildKeyCommitmentSchedule(
+                        node, payload.candidate.child_key_commitment);
+                }
+            });
         },
     };
 }
