@@ -11835,6 +11835,7 @@ bool Chainstate::CheckBTCHeaderNodeHealth(bool recover, std::string& reason)
             return RecordBTCHeaderHealthFailure(
                 now, reason.empty() ? stalled : reason, reason);
         }
+        ++g_btcheader_restart_failures;
         return RecordBTCHeaderHealthFailure(
             now, "btcheader-watchdog-restarted-stalled-backend", reason);
     }
