@@ -47,15 +47,13 @@ hash_file() {
 resolve_command_path() {
     local command_name="$1"
     local resolved_path
-    resolved_path="$(command -v "$command_name" 2>/dev/null || true)"
-    [[ -n "$resolved_path" ]] || return 1
-    if command -v realpath >/dev/null 2>&1; then
-        realpath "$resolved_path"
-    elif command -v readlink >/dev/null 2>&1; then
-        readlink -f "$resolved_path" 2>/dev/null || printf '%s\n' "$resolved_path"
-    else
-        printf '%s\n' "$resolved_path"
-    fi
+    local resolved_dir
+    resolved_path="$(command -v "$command_name" 2>/dev/null)" || return 1
+    [[ -f "$resolved_path" && -x "$resolved_path" ]] || return 1
+    # Compiler symlinks can select a multicall frontend or the C++ link driver.
+    # Normalize the directory without changing the executable entry point.
+    resolved_dir="$(CDPATH= cd -- "$(dirname "$resolved_path")" && pwd -P)" || return 1
+    printf '%s/%s\n' "$resolved_dir" "$(basename "$resolved_path")"
 }
 
 first_existing_file() {
@@ -90,13 +88,13 @@ detect_compiler() {
     local env_bin="${env_value%% *}"
     if [[ -n "$env_bin" ]] && command -v "$env_bin" >/dev/null 2>&1; then
         resolve_command_path "$env_bin"
-        return 0
+        return
     fi
     local candidate
     for candidate in "$@"; do
         if command -v "$candidate" >/dev/null 2>&1; then
             resolve_command_path "$candidate"
-            return 0
+            return
         fi
     done
     return 1
