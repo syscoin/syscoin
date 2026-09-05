@@ -65,6 +65,14 @@ public:
         return CChainLocksHandler::ShouldExtendPoWHistoricalCoverageForGovernance(
             established, selected, frontier, chain, revision, genesis, config);
     }
+
+    static std::optional<int32_t> FrozenCoverageForDurableRebind(
+        const pq::HistoricalSyncBoundary& established,
+        const pq::HistoricalSyncBoundary& selected)
+    {
+        return CChainLocksHandler::FrozenHistoricalCoverageForDurableRebind(
+            established, selected);
+    }
 };
 
 } // namespace llmq::test
@@ -153,6 +161,16 @@ struct History {
         return receipt;
     }
 
+    void SetDurablePrior(int32_t height)
+    {
+        prior = {height, hashes[height], coverage.receipt.accepted_cursor};
+        coverage.durable_prior = {
+            height, hashes[height],
+            height == coverage.receipt.chainlock_target_height
+                ? coverage.receipt.chainlock_logical_id
+                : TestHash(30'000 + height)};
+    }
+
     bool Advance(Access::Frontier& frontier, uint64_t& examined,
                  const HistoricalSyncBoundary* boundary,
                  const std::function<bool(const BTCCReceipt&)>& check,
@@ -164,6 +182,59 @@ struct History {
                                genesis, revision, boundary, check, examined, budget);
     }
 };
+
+void CheckDurablyKnownBaseCoversDeferredGovernance(int32_t durable_height)
+{
+    int32_t superblock{900};
+    while (!CSuperblock::IsValidBlockHeight(superblock)) ++superblock;
+    History history{static_cast<std::size_t>(superblock + 6)};
+    LOCK(cs_main);
+    history.SetDurablePrior(durable_height);
+    history.coverage.coverage_height = superblock;
+    history.coverage.coverage_hash = history.hashes[superblock];
+    history.blocks[superblock].nStatus &= ~BLOCK_GOVERNANCE_VALIDATED;
+    const auto actual_finality{history.prior};
+    const auto historical_status{history.blocks[superblock].nStatus};
+    const int32_t target{superblock + 5};
+    const auto budget{history.blocks.size()};
+    Access::Frontier frontier;
+    uint64_t examined{0};
+    unsigned int certificate_checks{0};
+    const auto unavailable = [&](const BTCCReceipt&) {
+        ++certificate_checks;
+        return false;
+    };
+    BOOST_REQUIRE(history.coverage.IsStructurallyValid());
+    BOOST_REQUIRE_LE(history.coverage.receipt.chainlock_target_height,
+                     history.prior.height);
+    BOOST_REQUIRE_GT(history.coverage.coverage_height, history.prior.height);
+    BOOST_REQUIRE_LT(history.coverage.coverage_height, target);
+    BOOST_CHECK(!history.Advance(frontier, examined, nullptr,
+                                 [](const auto&) { return true; }, target, 1, budget));
+    BOOST_CHECK_EQUAL(frontier.validated_through_height, superblock - 1);
+
+    BOOST_REQUIRE(history.Advance(frontier, examined, &history.coverage,
+                                   unavailable, target, 1, budget));
+    BOOST_CHECK_EQUAL(frontier.validated_through_height, target);
+    BOOST_CHECK_EQUAL(certificate_checks, 0U);
+    BOOST_CHECK(frontier.durable_predecessor == actual_finality);
+    BOOST_CHECK(history.prior == actual_finality);
+    BOOST_CHECK_EQUAL(history.blocks[superblock].nStatus, historical_status);
+
+    auto shorter{history.coverage};
+    shorter.coverage_height = superblock - 1;
+    shorter.coverage_hash = history.hashes[superblock - 1];
+    BOOST_CHECK(!history.Advance(frontier, examined, &shorter,
+                                 [](const auto&) { return true; }, target, 1, budget));
+    BOOST_CHECK_EQUAL(frontier.validated_through_height, superblock - 1);
+    BOOST_REQUIRE(history.Advance(frontier, examined, &history.coverage,
+                                   unavailable, target, 1, budget));
+    BOOST_CHECK(!history.Advance(frontier, examined, nullptr,
+                                 [](const auto&) { return true; }, target, 1, budget));
+    BOOST_CHECK_EQUAL(frontier.validated_through_height, superblock - 1);
+    BOOST_CHECK_EQUAL(history.blocks[superblock].nStatus, historical_status);
+    BOOST_CHECK(history.prior == actual_finality);
+}
 
 } // namespace
 
@@ -401,6 +472,280 @@ BOOST_AUTO_TEST_CASE(pow_history_covers_deferred_governance_but_not_live_governa
     BOOST_CHECK(!history.Advance(frontier, examined, nullptr,
                                   [](const auto&) { return true; }, target, 1, budget));
     BOOST_CHECK_EQUAL(frontier.validated_through_height, superblock - 1);
+}
+
+BOOST_AUTO_TEST_CASE(durable_receipted_base_covers_deferred_historical_governance)
+{
+    CheckDurablyKnownBaseCoversDeferredGovernance(875);
+}
+
+BOOST_AUTO_TEST_CASE(older_receipted_base_covers_deferred_historical_governance)
+{
+    for (const int32_t durable_height : {885, 895}) {
+        BOOST_TEST_CONTEXT("durable height " << durable_height) {
+            CheckDurablyKnownBaseCoversDeferredGovernance(durable_height);
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(durably_known_prefix_requires_exact_boundary_above_actual_finality)
+{
+    History history;
+    history.SetDurablePrior(895);
+    history.coverage.coverage_height = 899;
+    history.coverage.coverage_hash = history.hashes[899];
+    const std::vector<std::function<void(HistoricalSyncBoundary&)>> corruptions{
+        [](auto& boundary) { boundary.durable_prior.block_hash = TestHash(70'001); },
+        [](auto& boundary) { --boundary.durable_prior.height; },
+        [](auto& boundary) { boundary.durable_prior = {}; },
+        [](auto& boundary) { boundary.receipt.chainlock_target_hash = TestHash(70'002); },
+        [](auto& boundary) { boundary.receipt.chainlock_logical_id = TestHash(70'003); },
+        [](auto& boundary) { boundary.receipt.accepted_cursor.btc_hash = TestHash(70'004); },
+        [](auto& boundary) { boundary.carrier_hash = TestHash(70'005); },
+        [](auto& boundary) { --boundary.carrier_height; },
+        [](auto& boundary) { boundary.coverage_hash = TestHash(70'006); },
+        [](auto& boundary) { boundary.receipt_state.cumulative_hash = TestHash(70'007); },
+        [](auto& boundary) { boundary.payment_audit_state.cumulative_hash = TestHash(70'008); },
+        [](auto& boundary) { boundary.probation_state_hash = TestHash(70'009); },
+        [&](auto& boundary) {
+            boundary.coverage_height = history.prior.height;
+            boundary.coverage_hash = history.prior.block_hash;
+        },
+        [&](auto& boundary) {
+            boundary.coverage_height = history.prior.height - 1;
+            boundary.coverage_hash = history.hashes[boundary.coverage_height];
+        },
+        [&](auto& boundary) {
+            boundary.coverage_height = 900;
+            boundary.coverage_hash = history.hashes[900];
+        },
+        [&](auto& boundary) {
+            boundary.coverage_height = 901;
+            boundary.coverage_hash = history.hashes[901];
+        },
+    };
+    LOCK(cs_main);
+    Access::Frontier valid_frontier;
+    uint64_t valid_examined{0};
+    BOOST_REQUIRE(history.Advance(valid_frontier, valid_examined, &history.coverage,
+                                   [](const auto&) { return false; }));
+    for (std::size_t i{0}; i < corruptions.size(); ++i) {
+        BOOST_TEST_CONTEXT("boundary corruption " << i) {
+            Access::Frontier frontier;
+            uint64_t examined{0};
+            auto boundary{history.coverage};
+            corruptions[i](boundary);
+            BOOST_CHECK(!history.Advance(frontier, examined, &boundary,
+                                         [](const auto&) { return true; }));
+            BOOST_CHECK(!frontier.initialized);
+            BOOST_CHECK_EQUAL(examined, 0U);
+        }
+    }
+
+    for (const int32_t height : {875, 885, 899}) {
+        BOOST_TEST_CONTEXT("off-branch boundary anchor " << height) {
+            Access::Frontier frontier;
+            uint64_t examined{0};
+            const auto block_hash{history.hashes[height]};
+            history.hashes[height] = TestHash(71'000 + height);
+            BOOST_CHECK(!history.Advance(frontier, examined, &history.coverage,
+                                         [](const auto&) { return true; }));
+            BOOST_CHECK(!frontier.initialized);
+            BOOST_CHECK_EQUAL(examined, 0U);
+            history.hashes[height] = block_hash;
+        }
+    }
+
+    history.SetDurablePrior(875);
+    auto different_durable_certificate{history.coverage};
+    different_durable_certificate.durable_prior.logical_id = TestHash(72'000);
+    Access::Frontier frontier;
+    uint64_t examined{0};
+    BOOST_CHECK(!history.Advance(frontier, examined, &different_durable_certificate,
+                                 [](const auto&) { return true; }));
+    BOOST_CHECK(!frontier.initialized);
+    BOOST_CHECK_EQUAL(examined, 0U);
+}
+
+BOOST_AUTO_TEST_CASE(durably_known_prefix_keeps_covered_and_live_block_provenance)
+{
+    History history;
+    history.SetDurablePrior(895);
+    history.coverage.coverage_height = 899;
+    history.coverage.coverage_hash = history.hashes[899];
+    const std::vector<std::function<uint32_t(uint32_t)>> corruptions{
+        [](uint32_t status) { return status & ~BLOCK_PQ_RECEIPT_INDEX_VALIDATED; },
+        [](uint32_t status) { return status | BLOCK_ASSUMED_VALID; },
+        [](uint32_t status) { return status | BLOCK_FAILED_VALID; },
+        [](uint32_t status) { return (status & ~BLOCK_VALID_MASK) | BLOCK_VALID_CHAIN; },
+    };
+    LOCK(cs_main);
+    Access::Frontier valid_frontier;
+    uint64_t valid_examined{0};
+    BOOST_REQUIRE(history.Advance(valid_frontier, valid_examined, &history.coverage,
+                                   [](const auto&) { return false; }, 905));
+    for (const int32_t height : {875, 885, 896, 899, 900, 905}) {
+        for (std::size_t i{0}; i < corruptions.size(); ++i) {
+            BOOST_TEST_CONTEXT("block height " << height << ", corruption " << i) {
+                Access::Frontier frontier;
+                uint64_t examined{0};
+                const auto status{history.blocks[height].nStatus};
+                history.blocks[height].nStatus = corruptions[i](status);
+                BOOST_CHECK(!history.Advance(frontier, examined, &history.coverage,
+                                             [](const auto&) { return true; }, 905));
+                BOOST_CHECK_LT(frontier.validated_through_height, height);
+                history.blocks[height].nStatus = status;
+            }
+        }
+    }
+
+    for (const int32_t height : {875, 885, 899}) {
+        Access::Frontier frontier;
+        uint64_t examined{0};
+        const auto status{history.blocks[height].nStatus};
+        history.blocks[height].nStatus &= ~BLOCK_PQ_BTCC_INDEX_VALIDATED;
+        BOOST_REQUIRE(history.Advance(frontier, examined, &history.coverage,
+                                       [](const auto&) { return false; }, 905));
+        history.blocks[height].nStatus = status;
+    }
+
+    const auto live{history.AddReceipt(895, 905)};
+    Access::Frontier frontier;
+    uint64_t examined{0};
+    uint256 requested;
+    BOOST_CHECK(!history.Advance(frontier, examined, &history.coverage,
+        [&](const auto& receipt) {
+            requested = receipt.chainlock_logical_id;
+            return false;
+        }, 910));
+    BOOST_CHECK_EQUAL(frontier.validated_through_height, 904);
+    BOOST_CHECK(requested == live.chainlock_logical_id);
+    BOOST_REQUIRE(history.Advance(frontier, examined, &history.coverage,
+        [&](const auto& receipt) { return receipt == live; }, 910));
+    BOOST_CHECK_EQUAL(frontier.validated_through_height, 910);
+    BOOST_CHECK(frontier.durable_predecessor == history.prior);
+}
+
+BOOST_AUTO_TEST_CASE(durable_rebind_freezes_only_the_existing_same_receipt_interval)
+{
+    History history;
+    const auto established{history.coverage};
+    history.coverage.coverage_height = 919;
+    history.coverage.coverage_hash = history.hashes[919];
+    for (const int32_t durable_height : {875, 885}) {
+        history.SetDurablePrior(durable_height);
+        BOOST_CHECK(Access::FrozenCoverageForDurableRebind(established, history.coverage) ==
+                    established.coverage_height);
+    }
+    const auto selected{history.coverage};
+    const std::vector<std::function<void(HistoricalSyncBoundary&)>> changes{
+        [&](auto& boundary) { boundary.durable_prior = established.durable_prior; },
+        [](auto& boundary) { boundary.durable_prior = {}; },
+        [&](auto& boundary) {
+            boundary.durable_prior = {860, history.hashes[860], TestHash(30'860)};
+        },
+        [&](auto& boundary) {
+            boundary.durable_prior = {889, history.hashes[889], TestHash(30'889)};
+        },
+        [&](auto& boundary) {
+            boundary.durable_prior = {895, history.hashes[895], TestHash(30'895)};
+        },
+        [&](auto& boundary) {
+            boundary.coverage_height = established.coverage_height;
+            boundary.coverage_hash = established.coverage_hash;
+        },
+        [&](auto& boundary) {
+            boundary.coverage_height = established.coverage_height - 1;
+            boundary.coverage_hash = history.hashes[boundary.coverage_height];
+        },
+        [](auto& boundary) { boundary.receipt.chainlock_logical_id = TestHash(73'000); },
+        [](auto& boundary) { boundary.carrier_hash = TestHash(73'001); },
+        [](auto& boundary) { boundary.carrier_height = -1; },
+        [](auto& boundary) { boundary.coverage_hash.SetNull(); },
+    };
+    for (std::size_t i{0}; i < changes.size(); ++i) {
+        BOOST_TEST_CONTEXT("durable rebind change " << i) {
+            auto changed{selected};
+            changes[i](changed);
+            BOOST_CHECK(!Access::FrozenCoverageForDurableRebind(established, changed));
+        }
+    }
+    auto invalid_established{established};
+    invalid_established.coverage_hash.SetNull();
+    BOOST_CHECK(!Access::FrozenCoverageForDurableRebind(invalid_established, selected));
+
+    const auto newer{history.AddReceipt(885, 895)};
+    auto newer_base{selected};
+    newer_base.receipt = newer;
+    newer_base.receipt_state = history.receipt_state;
+    newer_base.carrier_height = 895;
+    newer_base.carrier_hash = history.hashes[895];
+    BOOST_REQUIRE(newer_base.IsStructurallyValid());
+    BOOST_CHECK(!Access::FrozenCoverageForDurableRebind(established, newer_base));
+}
+
+BOOST_AUTO_TEST_CASE(durable_advance_rebinds_frozen_prefix_without_covering_live_suffix)
+{
+    int32_t superblock{900};
+    while (!CSuperblock::IsValidBlockHeight(superblock)) ++superblock;
+    for (const int32_t durable_height : {875, 895}) {
+        BOOST_TEST_CONTEXT("new durable height " << durable_height) {
+            History history{static_cast<std::size_t>(superblock + 16)};
+            LOCK(cs_main);
+            history.coverage.coverage_height = superblock;
+            history.coverage.coverage_hash = history.hashes[superblock];
+            history.blocks[superblock].nStatus &= ~BLOCK_GOVERNANCE_VALIDATED;
+            const auto established{history.coverage};
+            int32_t live_carrier{superblock + 1};
+            while (!IsBTCCReceiptCarrierHeight(history.config.btcc_schedule, live_carrier)) {
+                ++live_carrier;
+            }
+            const int32_t target{live_carrier + 5};
+            const auto budget{history.blocks.size()};
+            Access::Frontier frontier;
+            uint64_t examined{0};
+            const auto unavailable = [](const BTCCReceipt&) { return false; };
+            BOOST_REQUIRE(history.Advance(frontier, examined, &established,
+                                           unavailable, target, 1, budget));
+            const auto old_token{frontier.historical_coverage_token};
+
+            history.SetDurablePrior(durable_height);
+            const auto actual_finality{history.prior};
+            const auto before{examined};
+            BOOST_CHECK(!history.Advance(frontier, examined, &established,
+                                         unavailable, target, 1, budget));
+            BOOST_CHECK(!frontier.initialized);
+            BOOST_CHECK_EQUAL(examined, before);
+
+            const auto rebound{history.coverage};
+            BOOST_REQUIRE(history.Advance(frontier, examined, &rebound,
+                                           unavailable, target, 1, budget));
+            BOOST_CHECK(frontier.durable_predecessor == actual_finality);
+            BOOST_CHECK_EQUAL(rebound.coverage_height, established.coverage_height);
+            BOOST_CHECK(rebound.coverage_hash == established.coverage_hash);
+            BOOST_CHECK(frontier.historical_coverage_token != old_token);
+            BOOST_CHECK(!(history.blocks[superblock].nStatus & BLOCK_GOVERNANCE_VALIDATED));
+
+            const auto live_target{BTCCSourceHeightForNEVMInjection(
+                history.config.btcc_schedule, live_carrier)};
+            BOOST_REQUIRE(live_target);
+            const auto live{history.AddReceipt(*live_target, live_carrier)};
+            uint256 requested;
+            BOOST_CHECK(!history.Advance(frontier, examined, &rebound,
+                [&](const auto& receipt) {
+                    requested = receipt.chainlock_logical_id;
+                    return false;
+                }, target, 2, budget));
+            BOOST_CHECK_EQUAL(frontier.validated_through_height, live_carrier - 1);
+            BOOST_CHECK(requested == live.chainlock_logical_id);
+            BOOST_REQUIRE(history.Advance(frontier, examined, &rebound,
+                [&](const auto& receipt) { return receipt == live; }, target, 2, budget));
+            BOOST_CHECK_EQUAL(frontier.validated_through_height, target);
+            BOOST_CHECK(frontier.durable_predecessor == actual_finality);
+            BOOST_CHECK(history.prior == actual_finality);
+            BOOST_CHECK_EQUAL(rebound.coverage_height, superblock);
+        }
+    }
 }
 
 BOOST_AUTO_TEST_CASE(budgeted_history_scan_preserves_its_frozen_boundary)

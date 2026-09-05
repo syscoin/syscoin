@@ -954,9 +954,9 @@ provisional `PENDING`/`READY` observation only through the existing
 candidate-bound null-carrier reconciliation proof. A carried cursor, a
 different recovery source, or an unrelated future-beacon result never rebases.
 
-When bounded certificate retention has removed the authorization edges between
-the receiver's actual durable winner `D` and the current roster base, a separate
-PoW-backed historical import is available. After full base replay and any
+A separate PoW-backed historical import supports both missing authorization
+edges above the receiver's actual durable winner `D` and deferred historical
+validation checks in the replayed prefix above D. After full base replay and any
 snapshot background validation, the local active chain selects the latest
 non-null receipt at the current signing lookback `E = H - sign_lag`. The receipt
 fixes one exact certificate `B` by logical ID, target, and accepted cursor;
@@ -979,6 +979,12 @@ covers only that historical prefix, including deferred historical governance
 outcome checks. It does not set individual verification bits, advance D,
 finalize B's carrier or E, or refund any signer-journal reservation. Above E,
 scripts, receipt provenance, and ordinary governance checks remain required.
+Incomplete masternode synchronization can legitimately leave a historical
+superblock with only its maximum-value bounds checked, without exact governance
+provenance. This does not waive ordinary deterministic-masternode state, payee,
+script, or receipt validation; prefix coverage discharges only the specifically
+deferred historical checks, not those independent requirements.
+
 A later certificate `C` must descend through E and D, use B as its exact
 receipt-selected authorization base, pass the ordinary roster-state decision,
 and supply all 801 signatures. The temporary D-to-B history gap does not waive
@@ -986,17 +992,32 @@ C's live-window, branch, or state-transition checks.
 Once actual D reaches or passes B, the missing-base exception ends: later
 stale-base statements must satisfy the existing convergence checks against D.
 
+That forward-authority exception still requires `D < B`; historical-prefix
+coverage does not. A returning node may use the exact receipt-selected `B <= D`
+when `E > D`, with B, D, the carrier, and E on the required validated branch.
+For `B = D`, the receipt must open the exact accepted and durable certificate,
+including its logical ID, block hash, and accepted cursor. B's canonical roster
+and signature evidence remain mandatory. This coverage neither replaces the
+current authority nor bypasses ordinary stale-base convergence, and an already
+ordinary B need not acquire a new serving role merely to cover the prefix.
+While E remains above D, the capability must name the exact current durable
+identity; a changed D requires reselecting and verifying that binding.
+
 The same prefix coverage can release the historical signing gate without
 waiting for a completed newer C. A fresh or returning sentry can therefore
 participate in the ordinary future recovery window once its scheduled roster,
 keys, suffix validation, and journal are ready; finality still requires the
-normal threshold. Normal tip extension preserves the frozen endpoint. A
-newly buried governance obligation can extend E only after the bounded scan
-has reached the old endpoint and the next block is specifically blocked by
-that deferred governance check; a scan-budget limit cannot move E. A
-supporting reorg or provenance revocation invalidates the capability and any
-prepared context using it. Missing B or unavailable live signers may still
-delay recovery.
+normal threshold. Normal tip extension preserves an established runtime
+capability's frozen endpoint. A newly buried governance obligation can extend
+that capability's E only after the bounded scan has reached the old endpoint
+and the next block is specifically blocked by that deferred governance check;
+a scan-budget limit cannot move E. A same-D restart rebuilds runtime coverage
+by reselecting and fully reverifying the current lookback, which may have a
+later E. Separately, a rebind of the same B and carrier to an advanced D still
+below E preserves and revalidates the established E; advancing finality alone
+cannot enlarge the historically trusted interval. A supporting reorg or
+provenance revocation invalidates the capability and any prepared context
+using it. Missing B or unavailable live signers may still delay recovery.
 
 Providers separately retain the exact accepted receipt-selected certificate
 in two dedicated current/fallback slots. These supplement, rather than replace,
@@ -2292,6 +2313,14 @@ Expected failures are fail-closed:
   production signer and collector. Signing-context publication alone is not
   sufficient. Its actual D and the fresh receiver's absent finality must remain
   unchanged until an ordinary threshold certificate is accepted.
+- Also return with the last receipted B already equal to D, replay a later
+  superblock while masternode synchronization is genuinely incomplete, and
+  require its bounds-only governance validation without modifying status bits.
+  After base sync, scoped coverage with E above D must permit real local recovery
+  shares before any newer CLSIG; D stays unchanged and prior journal burns remain
+  preserved. Complete RECOVER, restart peerless, and accept the next normal round.
+  Cover B below D, exact durable-identity mismatch, and frozen-E rebind separately,
+  without weakening the forward-authority or live-suffix rejection checks.
 - Complete the returning operator's recovery shares into an actual 801-signature
   certificate, preserving its contributions in the selected three quorum
   thresholds and verifying its fourth share as well. A bad witness must leave

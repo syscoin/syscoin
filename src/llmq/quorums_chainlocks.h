@@ -2472,6 +2472,9 @@ private:
         const CBlockIndex& active_tip,
         const pq::ChainLockScheduleConfig& schedule,
         std::optional<int32_t> coverage_height);
+    [[nodiscard]] static std::optional<int32_t> FrozenHistoricalCoverageForDurableRebind(
+        const pq::HistoricalSyncBoundary& established,
+        const pq::HistoricalSyncBoundary& selected);
     [[nodiscard]] std::optional<pq::HistoricalSyncBoundary>
     SelectPoWHistoricalSyncBoundary(
         std::optional<int32_t> coverage_height = std::nullopt) const
@@ -2480,6 +2483,7 @@ private:
     SelectDurablyCoveredHistoricalSyncBoundary() const
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     struct HistoricalSyncAuthorization {
+        // Prefix coverage does not imply the separate D < B authority-gap permission.
         pq::HistoricalSyncBoundary boundary;
         pq::VerifiedRosterAuthorizationBaseView base;
         uint64_t provenance_revision{0};

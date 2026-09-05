@@ -268,6 +268,12 @@ class PQPrunedSyncTest(PQChainLocksTest):
             assert "clsig" not in peer.last_message
         self.nodes[0].disconnect_p2ps()
 
+    def disconnect_isolated_p2ps(self, node):
+        node.disconnect_p2ps()
+        # The framework's subversion filter misses our custom peer comments;
+        # transport closure does not prove asynchronous RPC peer removal.
+        self.wait_until(lambda: node.getpeerinfo() == [], timeout=10)
+
     def preload_isolated_headers(self, receivers, tip):
         source = self.nodes[0]
         block_hashes = [source.getblockhash(height) for height in range(tip + 1)]
@@ -284,10 +290,12 @@ class PQPrunedSyncTest(PQChainLocksTest):
             assert_equal(node.getpeerinfo(), [])
         return block_hashes
 
-    def replay_isolated_blocks(self, node, block_hashes, tip):
+    def replay_isolated_blocks(self, node, block_hashes, tip, finish_mnsync=True):
         assert_equal(node.getpeerinfo(), [])
         assert_equal(node.getbestblockhash(), block_hashes[node.getblockcount()])
         for height in range(node.getblockcount() + 1, tip + 1):
+            if not finish_mnsync:
+                assert not node.mnsync("status")["IsSynced"], (node.index, height)
             # Forward the complete wire block, including AuxPoW and receipt
             # sidecars, through ordinary validation without a CLSIG source.
             raw = self.nodes[0].getblock(block_hashes[height], 0)
@@ -296,8 +304,11 @@ class PQPrunedSyncTest(PQChainLocksTest):
         self.wait_until(lambda: node.getbestblockhash() == block_hashes[tip], timeout=180)
         assert_equal(node.getblockcount(), tip)
         assert_equal(node.getpeerinfo(), [])
-        force_finish_mnsync(node)
-        self.tick_receivers([node])
+        if finish_mnsync:
+            force_finish_mnsync(node)
+            self.tick_receivers([node])
+        else:
+            assert not node.mnsync("status")["IsSynced"]
 
     def import_selected_historical_base(self, node, artifact, coverage, durable, phase):
         logical_id = "%064x" % artifact["logical_hash"]
@@ -335,8 +346,7 @@ class PQPrunedSyncTest(PQChainLocksTest):
 
             self.wait_until(imported_or_rejected, timeout=120)
             self.assert_unchanged_finality(node, durable)
-            node.disconnect_p2ps()
-            assert_equal(node.getpeerinfo(), [])
+            self.disconnect_isolated_p2ps(node)
             if imported in outcome:
                 return
             assert busy in outcome, outcome
@@ -398,8 +408,7 @@ class PQPrunedSyncTest(PQChainLocksTest):
         self.submit_expected_certificate(
             fresh, latest, self.certificate_height(latest), "interrupted-final-winner", 0xcaf0)
         self.assert_exact_winner(fresh, latest, self.certificate_height(latest))
-        fresh.disconnect_p2ps()
-        assert_equal(fresh.getpeerinfo(), [])
+        self.disconnect_isolated_p2ps(fresh)
 
     def generate_outage_snapshots(self):
         node = self.nodes[0]
@@ -433,8 +442,7 @@ class PQPrunedSyncTest(PQChainLocksTest):
         _, carrier_hash = self.receipt_at(coverage)
         _, receipt = self.read_btcc_receipt(carrier_hash)
         self.log.info("Restart caught-up receiver without peers or a later receipt carrier")
-        fresh.disconnect_p2ps()
-        assert_equal(fresh.getpeerinfo(), [])
+        self.disconnect_isolated_p2ps(fresh)
         self.stop_node(2)
         artifact = self.certificates[receipt["logical_hash"]][0]
         with fresh.assert_debug_log([self.historical_import_message(artifact, coverage)], timeout=120):
@@ -444,6 +452,119 @@ class PQPrunedSyncTest(PQChainLocksTest):
         assert_equal(fresh.getpeerinfo(), [])
         assert_equal(self.best_id(fresh), expected_id)
         assert_equal(fresh.getblockcount(), target + SIGN_LAG)
+
+    def prepare_equal_base_outage(self, receiver_args, latest_id):
+        returning = self.nodes[2]
+        self.start_node(2, extra_args=receiver_args + ["-connect=0", "-debug=mnpayments"])
+        self.wait_until(lambda: self.best_id(returning) == latest_id, timeout=120)
+        base, coverage, carrier, carrier_hash = self.selected_historical_base(OUTAGE_STARTUP_HEIGHT)
+        assert_equal("%064x" % base["logical_hash"], latest_id)
+        assert_equal(self.certificate_height(base), 3105)
+        assert_equal(carrier, 3115)
+        assert_equal(coverage, 4600)
+        self.assert_exact_winner(returning, base, self.certificate_height(base))
+        superblock = 3120
+        assert_equal(self.nodes[0].getgovernanceinfo()["superblockcycle"], 10)
+        assert self.certificate_height(base) < carrier < superblock <= coverage
+        assert returning.getblockcount() < superblock
+        self.log.info("Equal-base outage: durable B=D=3105, receipt=3115, deferred superblock=3120, E=4600")
+        block_hashes = self.preload_isolated_headers([returning], OUTAGE_STARTUP_HEIGHT)
+        assert_equal(returning.mnsync("reset"), "success")
+        self.replay_isolated_blocks(returning, block_hashes, superblock - 1, finish_mnsync=False)
+        # With no peers, regtest's fast sync cannot race this real ConnectBlock.
+        # Its own bounds-only log proves the omitted check was not fabricated.
+        with returning.assert_debug_log([
+                "IsBlockValueValid -- WARNING: Not enough data, checked superblock max bounds only"]):
+            self.replay_isolated_blocks(returning, block_hashes, superblock, finish_mnsync=False)
+        self.replay_isolated_blocks(returning, block_hashes, coverage, finish_mnsync=False)
+        assert_equal(returning.getblockhash(carrier), carrier_hash)
+        self.assert_exact_winner(returning, base, self.certificate_height(base))
+        # Only the frozen historical prefix gets bounds-only governance checks.
+        # The future live suffix, including superblock 4610, is validated exactly.
+        force_finish_mnsync(returning)
+        self.replay_isolated_blocks(returning, block_hashes, OUTAGE_STARTUP_HEIGHT)
+        self.assert_exact_winner(returning, base, self.certificate_height(base))
+        assert_equal(self.best_id(self.nodes[0]), latest_id)
+        self.equal_base = base
+        self.equal_base_coverage = coverage
+        self.stop_node(2)
+
+    def assert_equal_base_outage_signing(self, operator_args, latest_id):
+        returning = self.nodes[2]
+        cache_dir = returning.chain_path / "llmq" / "pq-child-key-trees"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(self.operator["cache_path"], cache_dir / self.operator["cache_filename"])
+        # The two history variants exercise the same deterministic operator only
+        # sequentially; the stale receiver stays stopped until these shares exist.
+        assert not self.nodes[1].running
+        returning_args = operator_args + [
+            "-connect=0", "-listen=1", "-externalip=127.0.0.1:%d" % p2p_port(1)]
+        self.start_node(2, extra_args=returning_args)
+        force_finish_mnsync(returning)
+        startup_marker = "captured PQ signer startup tip height=%d proTxHash=%s" % (
+            OUTAGE_STARTUP_HEIGHT, self.operator["pro_tx_hash"])
+
+        def startup_ready():
+            self.tick_receivers([returning])
+            return startup_marker in returning.debug_log_path.read_text(encoding="utf8")
+
+        self.wait_until(startup_ready, timeout=180)
+        assert_equal(returning.masternode_status()["state"], "READY")
+        self.assert_exact_winner(returning, self.equal_base, self.certificate_height(self.equal_base))
+        offset = returning.debug_log_size(encoding="utf8")
+        self.mine_pq_to_height(OUTAGE_RECOVERY_TARGET + SIGN_LAG)
+        block_hashes = self.preload_isolated_headers([returning], OUTAGE_RECOVERY_TARGET + SIGN_LAG)
+        self.replay_isolated_blocks(returning, block_hashes, OUTAGE_RECOVERY_TARGET + SIGN_LAG)
+        shares = {}
+        marker = "PQ fixture collected local share="
+
+        def shares_ready():
+            nonlocal offset
+            self.tick_receivers([returning])
+            self.assert_exact_winner(returning, self.equal_base, self.certificate_height(self.equal_base))
+            with returning.debug_log_path.open(encoding="utf8") as log:
+                log.seek(offset)
+                for line in log.read().splitlines():
+                    if marker not in line:
+                        continue
+                    payload = bytes.fromhex(line.split(marker, 1)[1].strip())
+                    if struct.unpack_from("<i", payload, 4)[0] != OUTAGE_RECOVERY_TARGET:
+                        continue
+                    assert_equal(payload[ROSTER_TRANSITION_OFFSET], 5)
+                    epoch = struct.unpack_from("<I", payload, CHAINLOCK_STATEMENT_WIRE_SIZE)[0]
+                    assert_equal(shares.setdefault(epoch, payload.hex()), payload.hex())
+                offset = log.tell()
+            return len(shares) == ACTIVE_QUORUMS
+
+        try:
+            self.wait_until(shares_ready, timeout=180)
+        finally:
+            self.log.info("Equal-base returning signer: tip=%d D=%s recovered_epochs=%s",
+                          returning.getblockcount(), self.best_id(returning), sorted(shares))
+        assert_equal(sorted(shares), [8, 9, 10, 11])
+        assert self.historical_import_message(self.equal_base, self.equal_base_coverage) in \
+            returning.debug_log_path.read_text(encoding="utf8")
+        assert not returning.getblockchaininfo()["initialblockdownload"]
+        assert_equal(self.best_id(self.nodes[0]), latest_id)
+        assert_equal(returning.getpeerinfo(), [])
+        self.equal_base_shares_path = self.root / "equal-base-outage-local-shares.json"
+        self.equal_base_shares_path.write_text(json.dumps(list(shares.values())), encoding="utf8")
+        self.stop_node(2)
+        self.equal_base_report_path = self.root / "equal-base-outage-journal-verification.json"
+        self.equal_base_journal_args = [
+            "verify-operator-journal", returning.chain_path / "llmq" / "pq-signer-journal",
+            self.operator_path, self.genesis, OUTAGE_RECOVERY_TARGET,
+            block_hashes[OUTAGE_RECOVERY_TARGET],
+        ]
+        self.fixture_command([
+            *self.equal_base_journal_args, self.equal_base_shares_path, self.equal_base_report_path])
+        report = json.loads(self.equal_base_report_path.read_text(encoding="utf8"))
+        assert_equal(report["signed_slots"], ACTIVE_QUORUMS)
+        assert_equal(report["epochs"], [8, 9, 10, 11])
+        assert_equal(report["height"], OUTAGE_RECOVERY_TARGET)
+        assert_equal(report["block_hash"], block_hashes[OUTAGE_RECOVERY_TARGET])
+        assert_equal(report["pro_tx_hash"], self.operator["pro_tx_hash"])
+        self.log.info("B=D returning signer produced four journal-verified recovery shares before any newer CLSIG")
 
     def assert_outage_signing(self, initial_id, latest_id):
         self.log.info("No new certificates: roll to recovery epochs 8..11 and target %d",
@@ -459,6 +580,7 @@ class PQPrunedSyncTest(PQChainLocksTest):
             "-masternodeslhprivkey=%s" % self.operator["global_secret_key"],
             "-masternodechainlockseed=%s" % self.operator["chainlock_seed"],
         ]
+        self.prepare_equal_base_outage(receiver_args, latest_id)
         stale.extra_args = list(receiver_args)
         self.start_node(1, extra_args=receiver_args)
         assert_equal(self.best_id(stale), initial_id)
@@ -475,10 +597,11 @@ class PQPrunedSyncTest(PQChainLocksTest):
         # its one-time startup floor cannot race an intermediate download tip.
         self.disconnect_nodes(1, 0)
         self.stop_node(1)
+        self.assert_equal_base_outage_signing(operator_args, latest_id)
+        assert not self.nodes[2].running
         stale.extra_args = list(operator_args)
-        self.start_node(1, extra_args=operator_args)
+        self.start_node(1, extra_args=operator_args + ["-connect=0"])
         force_finish_mnsync(stale)
-        self.connect_nodes(1, 0)
         startup_marker = "captured PQ signer startup tip height=%d proTxHash=%s" % (
             OUTAGE_STARTUP_HEIGHT, self.operator["pro_tx_hash"])
 
@@ -493,6 +616,7 @@ class PQPrunedSyncTest(PQChainLocksTest):
         self.log.info("Returning signer captured startup at %d; opening future recovery slot",
                       OUTAGE_STARTUP_HEIGHT)
         signature_offset = stale.debug_log_size(encoding="utf8")
+        self.connect_nodes(1, 0)
         self.mine_pq_to_height(OUTAGE_RECOVERY_TARGET + SIGN_LAG)
         self.sync_blocks([self.nodes[0], *receivers], timeout=180)
         expected = "published PQ ChainLock signing context height=%d" % OUTAGE_RECOVERY_TARGET
@@ -540,6 +664,11 @@ class PQPrunedSyncTest(PQChainLocksTest):
 
         self.wait_until(signatures_ready, timeout=180)
         assert_equal(sorted(shares), [8, 9, 10, 11])
+        equal_shares = json.loads(self.equal_base_shares_path.read_text(encoding="utf8"))
+        equal_statement = bytes.fromhex(equal_shares[0])[:CHAINLOCK_STATEMENT_WIRE_SIZE]
+        assert all(bytes.fromhex(share)[:CHAINLOCK_STATEMENT_WIRE_SIZE] == equal_statement
+                   for share in shares.values())
+        assert_equal(sorted(shares.values()), sorted(equal_shares))
         # These are public shares emitted only after real daemon signing and
         # collector verification, not signatures supplied by the helper.
         shares_path = self.root / "outage-local-shares.json"
@@ -650,6 +779,44 @@ class PQPrunedSyncTest(PQChainLocksTest):
         # selects three quorum thresholds, preserving their three local shares.
         assert_equal(included, REQUIRED_QUORUMS)
 
+    def assert_equal_base_recovery_acceptance(self, recovery, receiver_args):
+        returning = self.nodes[2]
+        restart_tip = self.nodes[0].getblockcount()
+        assert_equal(restart_tip, OUTAGE_RECOVERY_TARGET + SIGN_LAG)
+        base, coverage, _, _ = self.selected_historical_base(restart_tip)
+        assert_equal(base["logical_hash"], self.equal_base["logical_hash"])
+        assert_equal(coverage, OUTAGE_RECOVERY_TARGET - SIGN_LAG)
+        # RPC startup restores D before the scheduler revalidates its historical
+        # prefix; the one-shot certificate provider must wait for that barrier.
+        with returning.assert_debug_log([
+                self.historical_import_message(base, coverage),
+                "published PQ ChainLock signing context height=%d" % OUTAGE_RECOVERY_TARGET],
+                timeout=180):
+            self.start_node(2, extra_args=receiver_args + ["-connect=0"])
+            force_finish_mnsync(returning)
+            self.tick_receivers([returning])
+        assert_equal(returning.getblockcount(), restart_tip)
+        assert_equal(returning.getpeerinfo(), [])
+        self.wait_until(lambda: self.best_id(returning) == "%064x" % self.equal_base["logical_hash"],
+                        timeout=120)
+        self.assert_exact_winner(returning, self.equal_base, self.certificate_height(self.equal_base))
+        self.submit_expected_certificate(
+            returning, recovery, OUTAGE_RECOVERY_TARGET, "equal-base-recovery-valid", 0xc920)
+        self.assert_exact_winner(returning, recovery, OUTAGE_RECOVERY_TARGET)
+        returning.disconnect_p2ps()
+        self.stop_node(2)
+        self.fixture_command([
+            *self.equal_base_journal_args, self.equal_base_shares_path, self.equal_base_report_path])
+        assert_equal(json.loads(self.equal_base_report_path.read_text(encoding="utf8"))["signed_slots"],
+                     ACTIVE_QUORUMS)
+        self.start_node(2, extra_args=receiver_args + ["-connect=0"])
+        force_finish_mnsync(returning)
+        self.wait_until(lambda: self.best_id(returning) == "%064x" % recovery["logical_hash"],
+                        timeout=120)
+        self.assert_exact_winner(returning, recovery, OUTAGE_RECOVERY_TARGET)
+        assert_equal(returning.getblockcount(), OUTAGE_RECOVERY_TARGET + SIGN_LAG)
+        assert_equal(returning.getpeerinfo(), [])
+
     def assert_first_recovery_acceptance(
             self, shares_path, receiver_args, operator_args, journal_args, report_path, initial_id):
         fresh = self.nodes[3]
@@ -661,6 +828,7 @@ class PQPrunedSyncTest(PQChainLocksTest):
         recovery = self.read_full_dimension_bundle(bundle)
         assert_equal(recovery["certificate"][ROSTER_TRANSITION_OFFSET], 5)
         self.assert_captured_shares_preserved(recovery, shares_path)
+        self.assert_captured_shares_preserved(recovery, self.equal_base_shares_path)
         assert_equal(self.best_id(fresh), None)
         self.disconnect_nodes(3, 0)
 
@@ -693,6 +861,7 @@ class PQPrunedSyncTest(PQChainLocksTest):
         assert_equal(fresh.getblockcount(), OUTAGE_RECOVERY_TARGET + SIGN_LAG)
         assert_equal(fresh.getpeerinfo(), [])
 
+        self.assert_equal_base_recovery_acceptance(recovery, receiver_args)
         self.remember(recovery, OUTAGE_RECOVERY_TARGET)
         # Deliver the state edge while it is still above the returning node's
         # frozen prefix. A later historical import cannot stand in for D.
@@ -706,7 +875,7 @@ class PQPrunedSyncTest(PQChainLocksTest):
         self.submit_expected_certificate(
             stale, recovery, OUTAGE_RECOVERY_TARGET, "returning-recovery-valid", 0xc910)
         self.assert_exact_winner(stale, recovery, OUTAGE_RECOVERY_TARGET)
-        stale.disconnect_p2ps()
+        self.disconnect_isolated_p2ps(stale)
         self.log.info("Restart returning receiver after RECOVER without peers or a later receipt")
         base, coverage, _, _ = self.selected_historical_base(stale.getblockcount())
         assert_equal(coverage, OUTAGE_RECOVERY_TARGET - SIGN_LAG)
@@ -732,13 +901,15 @@ class PQPrunedSyncTest(PQChainLocksTest):
         operator_args = [arg for arg in operator_args
                          if not arg.startswith("-pqchainlocktestfixture=")] + [
                              "-pqchainlocktestfixture=%s" % snapshot]
-        fresh, stale = self.nodes[3], self.nodes[1]
+        fresh, stale, equal_base = self.nodes[3], self.nodes[1], self.nodes[2]
         self.stop_node(3)
+        self.stop_node(2)
         self.start_node(3, extra_args=receiver_args)
+        self.start_node(2, extra_args=receiver_args)
         self.start_node(1, extra_args=receiver_args)
-        for index in (1, 3):
+        for index in (1, 2, 3):
             self.connect_nodes(index, 0)
-        receivers = [stale, fresh]
+        receivers = [stale, fresh, equal_base]
         self.sync_blocks([self.nodes[0], *receivers], timeout=180)
         for node in receivers:
             force_finish_mnsync(node)

@@ -5438,7 +5438,8 @@ bool CChainLocksHandler::IsRequiredChainLockCatchupCertificate(
         const CBlockIndex* carrier{receipt
             ? anchor->GetAncestor(receipt->latest_receipt_carrier_height) : nullptr};
         if (carrier && carrier->pqBTCCReceiptLogicalId == logical_id &&
-            receipt->latest_chainlock_target_height >
+            receipt->latest_chainlock_target_height > m_config->activation_predecessor_height &&
+            anchor->nHeight >
                 (best ? best->metadata.statement.height : m_config->activation_predecessor_height)) {
             return true;
         }
@@ -8457,7 +8458,12 @@ CChainLocksHandler::SelectPoWHistoricalSyncBoundary(
     const CBlockIndex* carrier{authority->GetAncestor(
         selected->latest_receipt_carrier_height)};
     if (!carrier || !carrier->pprev ||
-        carrier->pqBTCCReceiptLogicalId.IsNull()) {
+        carrier->pqBTCCReceiptLogicalId.IsNull() ||
+        (carrier->nStatus & BLOCK_FAILED_MASK) || carrier->IsAssumedValid() ||
+        !carrier->IsValid(BLOCK_VALID_SCRIPTS) || !HasFullReceiptIndexProvenance(*carrier) ||
+        (carrier->pprev->nStatus & BLOCK_FAILED_MASK) || carrier->pprev->IsAssumedValid() ||
+        !carrier->pprev->IsValid(BLOCK_VALID_SCRIPTS) ||
+        !HasFullReceiptIndexProvenance(*carrier->pprev)) {
         return std::nullopt;
     }
     const auto before{IndexedBTCCReceiptState(*carrier->pprev)};
@@ -8467,7 +8473,20 @@ CChainLocksHandler::SelectPoWHistoricalSyncBoundary(
         m_genesis_hash, m_config->chainlock_schedule,
         m_config->btcc_schedule, m_config->activation_predecessor_height,
         *carrier, *before, *after, carrier->pqBTCCReceiptLogicalId)};
-    if (!receipt || receipt->IsNull() || receipt->chainlock_target_height <= floor) {
+    if (!receipt || receipt->IsNull() ||
+        receipt->chainlock_target_height <= m_config->activation_predecessor_height ||
+        (durable && receipt->chainlock_target_height == floor &&
+         (receipt->chainlock_logical_id != durable->logical_id ||
+          receipt->chainlock_target_hash != durable->statement.block_hash ||
+          receipt->accepted_cursor != durable->statement.accepted_btcc_cursor))) {
+        return std::nullopt;
+    }
+    // The prefix can contain deferred checks after D even when B is already
+    // authenticated. Only state-advancing admission may grant the D < B exception.
+    const CBlockIndex* base{carrier->GetAncestor(receipt->chainlock_target_height)};
+    if (!base || base->GetBlockHash() != receipt->chainlock_target_hash ||
+        (base->nStatus & BLOCK_FAILED_MASK) || base->IsAssumedValid() ||
+        !base->IsValid(BLOCK_VALID_SCRIPTS) || !HasFullReceiptIndexProvenance(*base)) {
         return std::nullopt;
     }
     pq::HistoricalSyncBoundary result;
@@ -8480,9 +8499,40 @@ CChainLocksHandler::SelectPoWHistoricalSyncBoundary(
     result.receipt_state = *covered_btcc;
     result.payment_audit_state = *covered_audit;
     result.probation_state_hash = coverage->pqPaymentProbationStateHash;
-    return result.IsStructurallyValid()
-        ? std::optional<pq::HistoricalSyncBoundary>{std::move(result)}
-        : std::nullopt;
+    if (!result.IsStructurallyValid()) return std::nullopt;
+    if (!coverage_height) {
+        const auto bootstrap{m_persistence->LoadHistoricalSyncBootstrap()};
+        const pq::HistoricalSyncBoundary* established{m_historical_sync
+            ? &m_historical_sync->boundary : (bootstrap ? &bootstrap->boundary : nullptr)};
+        if (established) {
+            const auto frozen_height{FrozenHistoricalCoverageForDurableRebind(*established, result)};
+            if (frozen_height) {
+                auto frozen{SelectPoWHistoricalSyncBoundary(*frozen_height)};
+                auto rebound{*established};
+                rebound.durable_prior = result.durable_prior;
+                if (frozen && *frozen == rebound) return frozen;
+                return std::nullopt;
+            }
+        }
+    }
+    return result;
+}
+
+std::optional<int32_t> CChainLocksHandler::FrozenHistoricalCoverageForDurableRebind(
+    const pq::HistoricalSyncBoundary& established,
+    const pq::HistoricalSyncBoundary& selected)
+{
+    // Updating the real finality floor does not itself authorize a larger
+    // historical interval. Reselect and verify the old E against the new D.
+    if (!established.IsStructurallyValid() || !selected.IsStructurallyValid() ||
+        selected.durable_prior.IsNull() ||
+        selected.durable_prior.height <= established.durable_prior.height ||
+        selected.durable_prior.height >= established.coverage_height ||
+        established.coverage_height >= selected.coverage_height ||
+        established.receipt != selected.receipt ||
+        established.carrier_height != selected.carrier_height ||
+        established.carrier_hash != selected.carrier_hash) return std::nullopt;
+    return established.coverage_height;
 }
 
 std::optional<pq::DurableHistoricalSyncBoundary>
@@ -8671,6 +8721,10 @@ CChainLocksHandler::GetPoWHistoricalSyncAuthorization() const
     const auto durable{m_persistence->GetFinalityState().best};
     if (accepted.has_value() != durable.has_value() ||
         (accepted && accepted->metadata != *durable)) return {};
+    if (boundary.coverage_height > (durable ? durable->statement.height
+                                          : m_config->activation_predecessor_height) &&
+        boundary.durable_prior != (durable ? durable->AuthorizationBase()
+                                          : pq::RosterAuthorizationBaseIdentity{})) return {};
     if (!boundary.durable_prior.IsNull()) {
         const CBlockIndex* prior{tip->GetAncestor(
             boundary.durable_prior.height)};
@@ -8702,13 +8756,26 @@ bool CChainLocksHandler::PrepareHistoricalSyncSuccessor(
             m_historical_sync->base.metadata.AuthorizationBase()) return true;
     const auto imported{GetPoWHistoricalSyncAuthorization()};
     if (!imported) return false;
+    const auto durable{m_persistence->GetFinalityState().best};
+    if (durable && imported->base.metadata.statement.height <= durable->statement.height) {
+        const auto& base{imported->base.metadata};
+        if (base.AuthorizationBase() == durable->AuthorizationBase()) return true;
+        const auto ordinary{m_store->GetVerifiedRosterAuthorizationBaseByLogicalId(base.logical_id)};
+        if (ordinary && ordinary->metadata.statement == base.statement &&
+            ordinary->verification_context &&
+            ordinary->verification_context->Authorization().admission !=
+                pq::RosterAuthorizationAdmission::POW_HISTORY) {
+            // Ordinary B already owns the new edge's dependency. Prefix-only
+            // evidence must not rotate protected serving records unnecessarily.
+            return true;
+        }
+    }
     const auto precommit{m_persistence->LoadRosterRecoveryPrecommit()};
     uint64_t revision{0};
     const auto bootstrap{m_persistence->LoadHistoricalSyncBootstrap(&revision)};
     const bool promote_bootstrap{bootstrap &&
         bootstrap->record.RecordIdentity() == imported->record_identity &&
         bootstrap->boundary == imported->boundary};
-    const auto durable{m_persistence->GetFinalityState().best};
     if (!promote_bootstrap && (durable || !precommit)) return true;
     const auto& boundary{imported->boundary};
     const CBlockIndex* target{m_chainman.m_blockman.LookupBlockIndex(chainlock.statement.block_hash)};
@@ -8823,7 +8890,8 @@ std::optional<bool> CChainLocksHandler::ProcessPoWHistoricalSyncCertificate(
             return std::nullopt;
         }
         const auto previous{GetPoWHistoricalSyncAuthorization()};
-        if (previous && previous->boundary.receipt == boundary->receipt &&
+        if (previous && previous->boundary.durable_prior == boundary->durable_prior &&
+            previous->boundary.receipt == boundary->receipt &&
             previous->boundary.carrier_hash == boundary->carrier_hash &&
             !ShouldExtendPoWHistoricalCoverageForGovernance(
                 previous->boundary, *boundary, signing_frontier,
@@ -8956,7 +9024,8 @@ bool CChainLocksHandler::RefreshPoWHistoricalSyncBoundary()
         const auto imported{GetPoWHistoricalSyncAuthorization()};
         // Descendant blocks do not create a new historical trust decision.
         // Keep E frozen so budgeted validation can finish across scheduler ticks.
-        if (imported && imported->boundary.receipt == boundary->receipt &&
+        if (imported && imported->boundary.durable_prior == boundary->durable_prior &&
+            imported->boundary.receipt == boundary->receipt &&
             imported->boundary.carrier_hash == boundary->carrier_hash &&
             !ShouldExtendPoWHistoricalCoverageForGovernance(
                 imported->boundary, *boundary, signing_frontier,
@@ -12514,6 +12583,13 @@ bool CChainLocksHandler::AdvanceLiveSigningValidationFrontier(
         const auto& coverage{*historical_coverage};
         const CBlockIndex* endpoint{active_chain[coverage.coverage_height]};
         const CBlockIndex* carrier{active_chain[coverage.carrier_height]};
+        const CBlockIndex* base{active_chain[coverage.receipt.chainlock_target_height]};
+        const auto historical_provenance = [](const CBlockIndex* index)
+            EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+            return index && !(index->nStatus & BLOCK_FAILED_MASK) &&
+                !index->IsAssumedValid() && index->IsValid(BLOCK_VALID_SCRIPTS) &&
+                HasFullReceiptIndexProvenance(*index);
+        };
         const bool prior_matches{coverage.durable_prior.IsNull()
             ? durable_predecessor.height == config.activation_predecessor_height &&
                   durable_predecessor.btcc_cursor.IsNull()
@@ -12534,8 +12610,17 @@ bool CChainLocksHandler::AdvanceLiveSigningValidationFrontier(
                   *carrier_prior, *carrier_state, carrier->pqBTCCReceiptLogicalId)
             : std::nullopt};
         if (!coverage.IsStructurallyValid() || !prior_matches ||
-            coverage.receipt.chainlock_target_height <= durable_predecessor.height ||
+            coverage.coverage_height <= durable_predecessor.height ||
             coverage.coverage_height >= target.nHeight ||
+            coverage.receipt.chainlock_target_height <= config.activation_predecessor_height ||
+            (!coverage.durable_prior.IsNull() && !historical_provenance(active_floor)) ||
+            !historical_provenance(base) || !historical_provenance(carrier) ||
+            !historical_provenance(carrier ? carrier->pprev : nullptr) ||
+            !historical_provenance(endpoint) ||
+            base->GetBlockHash() != coverage.receipt.chainlock_target_hash ||
+            (coverage.receipt.chainlock_target_height == durable_predecessor.height &&
+             (coverage.durable_prior.logical_id != coverage.receipt.chainlock_logical_id ||
+              durable_predecessor.btcc_cursor != coverage.receipt.accepted_cursor)) ||
             endpoint == nullptr || endpoint->GetBlockHash() != coverage.coverage_hash ||
             carrier == nullptr || carrier->GetBlockHash() != coverage.carrier_hash ||
             !receipt_state || *receipt_state != coverage.receipt_state ||
