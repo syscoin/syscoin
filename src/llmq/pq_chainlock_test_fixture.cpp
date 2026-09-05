@@ -13,7 +13,6 @@
 #include <streams.h>
 #include <sync.h>
 #include <util/readwritefile.h>
-#include <util/system.h>
 #include <validation.h>
 
 #include <algorithm>
