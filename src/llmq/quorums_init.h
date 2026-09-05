@@ -21,7 +21,7 @@ void InitLLMQSystem(CConnman& connman,
 void DestroyLLMQSystem();
 
 // Manage the PQ ChainLock service lifecycle.
-void StartLLMQSystem();
+void StartLLMQSystem() LOCKS_EXCLUDED(cs_main);
 void StopLLMQSystem();
 } // namespace llmq
 

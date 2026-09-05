@@ -57,6 +57,7 @@ namespace llmq {
 
 namespace test {
 class CChainLocksHandlerTestAccess;
+class HistoricalSyncFrontierTestAccess;
 }
 
 namespace pq {
@@ -1025,7 +1026,7 @@ public:
     CChainLocksHandler& operator=(const CChainLocksHandler&) = delete;
 
     void Start()
-        EXCLUSIVE_LOCKS_REQUIRED(!m_lifecycle_mutex,
+        EXCLUSIVE_LOCKS_REQUIRED(!cs_main, !m_lifecycle_mutex,
                                  !m_share_lifecycle_mutex,
                                  !m_persisted_mutex,
                                  !m_lookup_mutex,
@@ -1187,6 +1188,9 @@ public:
         const uint256& logical_id) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_pending_btcc_receipt_mutex,
                                  !m_needed_btcc_certificate_mutex);
+    /** Download permission only; never receipt/archive admission authority. */
+    [[nodiscard]] bool IsRequiredChainLockCatchupCertificate(
+        const uint256& logical_id) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     void NotePendingPaymentAuditReceiptCertificate(
         const pq::PaymentAuditReceipt& receipt,
         const CBlockIndex& carrier)
@@ -1276,6 +1280,7 @@ public:
         BlockValidationState& state,
         bool* peer_fault = nullptr)
         EXCLUSIVE_LOCKS_REQUIRED(!cs_main,
+                                 !m_context_build_mutex,
                                  !m_chainlock_admission_mutex,
                                  !m_verification_mutex,
                                  !m_collector_mutex,
@@ -1325,6 +1330,7 @@ public:
 
 private:
     friend class test::CChainLocksHandlerTestAccess;
+    friend class test::HistoricalSyncFrontierTestAccess;
 
     enum class HistoricalAdmission : uint8_t {
         NONE = 0,
@@ -1466,6 +1472,7 @@ private:
         uint64_t persistence_certificate_revision{0};
         uint64_t provenance_revocation_revision{0};
         uint256 mutable_signing_context_token;
+        uint256 historical_coverage_token;
         pq::ChainLockPredecessor durable_predecessor;
         pq::ChainLockSigningWindow window;
         uint256 target_hash;
@@ -1484,14 +1491,15 @@ private:
     };
 
     /**
-     * Process-local proof of one fully checked active-chain suffix. A verified
-     * non-null carrier remains proven if its certificate leaves the bounded
-     * store: accepted certificates and this handler's config are immutable.
-     * Stop, branch changes, and provenance revocation discard the proof.
+     * Process-local validation of an active suffix, optionally using explicit
+     * PoW-history authorization for an older prefix. Individually checked
+     * carriers survive certificate eviction; historical coverage remains
+     * separately token-bound. Branch/provenance changes revoke either path.
      */
     struct LiveSigningValidationFrontier {
         bool initialized{false};
         uint64_t provenance_revocation_revision{0};
+        uint256 historical_coverage_token;
         pq::ChainLockPredecessor durable_predecessor;
         int32_t validated_through_height{-1};
         uint256 validated_through_hash;
@@ -1781,6 +1789,9 @@ private:
         std::optional<int32_t> best_height) noexcept;
     [[nodiscard]] static bool IsHistoricalArchiveIdentity(
         pq::ChainLockCandidateAdmission candidate_admission) noexcept;
+    [[nodiscard]] static bool IsHistoricalAuthorizationBaseAheadOfDurableWinner(
+        const pq::FinalChainLockRecordMetadata* current,
+        const pq::FinalChainLockRecordMetadata& historical_base) noexcept;
     [[nodiscard]] bool IsStateAdvancingAuthorizationBaseAdmissible(
         pq::ChainLockCandidateAdmission candidate_admission,
         uint8_t selected_quorum_mask,
@@ -1808,6 +1819,7 @@ private:
         const RuntimeVerificationContext& verification);
     void ContinueVerifiedHistoricalChainLock()
         EXCLUSIVE_LOCKS_REQUIRED(!cs_main,
+                                 !m_context_build_mutex,
                                  !m_chainlock_admission_mutex,
                                  !m_verification_mutex,
                                  !m_collector_mutex,
@@ -1889,6 +1901,7 @@ private:
         BlockValidationState& state)
         EXCLUSIVE_LOCKS_REQUIRED(m_share_lifecycle_mutex,
                                  !cs_main,
+                                 !m_context_build_mutex,
                                  !m_chainlock_admission_mutex,
                                  !m_verification_mutex,
                                  !m_collector_mutex,
@@ -1909,6 +1922,7 @@ private:
         bool* retain_continuation = nullptr,
         bool retained_local_promotion = false)
         EXCLUSIVE_LOCKS_REQUIRED(!cs_main,
+                                 !m_context_build_mutex,
                                  !m_chainlock_admission_mutex,
                                  !m_verification_mutex,
                                  !m_collector_mutex,
@@ -2232,7 +2246,16 @@ private:
             certificate_status,
         uint64_t& examined_blocks,
         std::size_t block_budget =
-            HistoricalIndexValidationCache::BLOCK_BUDGET)
+            HistoricalIndexValidationCache::BLOCK_BUDGET,
+        const pq::HistoricalSyncBoundary* historical_coverage = nullptr)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    [[nodiscard]] static bool ShouldExtendPoWHistoricalCoverageForGovernance(
+        const pq::HistoricalSyncBoundary& established,
+        const pq::HistoricalSyncBoundary& selected,
+        const LiveSigningValidationFrontier& frontier,
+        const CChain& active_chain, uint64_t provenance_revision,
+        const uint256& genesis_hash,
+        const pq::ChainLockFinalityStoreConfig& config)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     [[nodiscard]] static bool IsLiveSigningValidationRevisionCurrent(
         const CurrentSigningSource& source,
@@ -2274,6 +2297,7 @@ private:
                                  !m_payment_audit_mutex);
     void RequestNeededBTCCCertificate()
         EXCLUSIVE_LOCKS_REQUIRED(!cs_main,
+                                 !m_context_build_mutex,
                                  !m_chainlock_admission_mutex,
                                  !m_verification_mutex,
                                  !m_collector_mutex,
@@ -2439,8 +2463,72 @@ private:
         bool has_durable_best,
         bool target_is_active,
         const uint256& target_btcp_prev) noexcept;
+    [[nodiscard]] static const CBlockIndex* ResolvePoWHistoricalSelectionTip(
+        const CBlockIndex& active_tip,
+        const pq::ChainLockScheduleConfig& schedule,
+        std::optional<int32_t> coverage_height);
+    [[nodiscard]] std::optional<pq::HistoricalSyncBoundary>
+    SelectPoWHistoricalSyncBoundary(
+        std::optional<int32_t> coverage_height = std::nullopt) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    [[nodiscard]] std::optional<pq::DurableHistoricalSyncBoundary>
+    SelectDurablyCoveredHistoricalSyncBoundary() const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    struct HistoricalSyncAuthorization {
+        pq::HistoricalSyncBoundary boundary;
+        pq::VerifiedRosterAuthorizationBaseView base;
+        uint64_t provenance_revision{0};
+    };
+    std::shared_ptr<const HistoricalSyncAuthorization> m_historical_sync
+        GUARDED_BY(cs_main);
+    std::array<std::shared_ptr<const pq::FinalChainLock>, 2>
+        m_historical_sync_servable GUARDED_BY(cs_main);
+    uint256 m_historical_sync_requested GUARDED_BY(cs_main);
+    // An untrusted fetch hint only; receipt import never validates this candidate.
+    std::optional<pq::RosterAuthorizationBaseIdentity> m_catchup_candidate_hint
+        GUARDED_BY(cs_main);
+    // Reauthorize once, but retain alternate providers until acceptance or
+    // context expiry; an invalid witness must not retire the expected ID.
+    bool m_catchup_retry_requested GUARDED_BY(cs_main){false};
+    std::chrono::microseconds m_historical_sync_last_request GUARDED_BY(cs_main){0};
+    [[nodiscard]] std::shared_ptr<const HistoricalSyncAuthorization>
+    GetPoWHistoricalSyncAuthorization() const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    [[nodiscard]] bool IsPoWHistoricalPrefixCovered(
+        const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    [[nodiscard]] std::optional<bool> ProcessPoWHistoricalSyncCertificate(
+        NodeId from, const pq::FinalChainLock& certificate,
+        BlockValidationState& state, bool* peer_fault)
+        EXCLUSIVE_LOCKS_REQUIRED(m_chainlock_admission_mutex, !cs_main,
+                                 !m_context_build_mutex,
+                                 !m_lookup_mutex, !m_verification_mutex,
+                                 !m_needed_btcc_certificate_mutex);
+    /** Shares the existing GETCLSIG transport; no historical inventory stream. */
+    bool RefreshPoWHistoricalSyncBoundary()
+        EXCLUSIVE_LOCKS_REQUIRED(!cs_main, !m_chainlock_admission_mutex,
+                                 !m_context_build_mutex,
+                                 !m_verification_mutex, !m_collector_mutex,
+                                 !m_lookup_mutex, !m_persisted_mutex,
+                                 !m_btcc_preseal_mutex,
+                                 !m_needed_btcc_certificate_mutex,
+                                 !m_pending_btcc_receipt_mutex,
+                                 !m_pending_payment_audit_receipt_mutex,
+                                 !m_signer_reconcile_mutex);
+    void MaintainHistoricalSyncRetention()
+        EXCLUSIVE_LOCKS_REQUIRED(!cs_main, !m_chainlock_admission_mutex);
+    static bool IsHistoricalSyncRetentionMutationReady(
+        const pq::FinalChainLockRecordMetadata* accepted,
+        const pq::FinalChainLockRecordMetadata* durable, const CChain& active_chain)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    void RevokeReorgedHistoricalSyncAuthorization();
+    [[nodiscard]] std::optional<pq::VerifiedPoWHistoricalBoundary>
+    ValidatePoWHistoricalSyncBoundary(
+        const pq::HistoricalSyncBoundary& boundary,
+        const pq::FinalChainLock& certificate) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     void RequestCatchupChainLock()
         EXCLUSIVE_LOCKS_REQUIRED(!m_persisted_mutex,
+                                 !m_context_build_mutex,
                                  !m_lookup_mutex,
                                  !m_catchup_mutex,
                                  !m_btcc_preseal_mutex,
@@ -2460,6 +2548,7 @@ private:
     [[nodiscard]] RetainedChainLockPromotion TryPromoteRetainedChainLock(
         const uint256& logical_id)
         EXCLUSIVE_LOCKS_REQUIRED(!cs_main,
+                                 !m_context_build_mutex,
                                  !m_chainlock_admission_mutex,
                                  !m_verification_mutex,
                                  !m_collector_mutex,
@@ -2535,6 +2624,8 @@ private:
      */
     [[nodiscard]] bool FlushBTCCIndexStateForDurableAcceptance(
         const pq::FinalChainLock& chainlock) const LOCKS_EXCLUDED(cs_main);
+    [[nodiscard]] bool FlushBTCCIndexStateForDurableAcceptanceLocked(
+        const pq::FinalChainLock& chainlock) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     void RelayChainLockShare(const pq::ChainLockShare& share,
                              CurrentSigningContextsPtr signing_contexts,
                              std::size_t variant_index,

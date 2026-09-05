@@ -18,12 +18,18 @@
 #include <optional>
 #include <stdexcept>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 #include <boost/test/unit_test.hpp>
 
 using namespace llmq::pq;
+
+static_assert(!std::is_default_constructible_v<VerifiedPoWHistoricalBoundary>);
+static_assert(!std::is_constructible_v<
+    VerifiedPoWHistoricalBoundary, const uint256&, ChainLockScheduleConfig,
+    const uint256&, const uint256&>);
 
 namespace {
 
@@ -340,6 +346,32 @@ DurableRosterOffsets(Span<const uint8_t> encoded)
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(pq_chainlock_verify_tests, BasicTestingSetup)
+
+BOOST_AUTO_TEST_CASE(pow_history_admission_cannot_be_asserted_by_an_enum)
+{
+    const auto fixture{MakeVerificationFixture()};
+    auto authorization{fixture->authorization};
+    authorization.admission = RosterAuthorizationAdmission::POW_HISTORY;
+    authorization.previous.reset();
+    authorization.normal_input.reset();
+    ChainLockVerificationError error{ChainLockVerificationError::NONE};
+    BOOST_CHECK(!authorization.HasPoWHistoryAuthorization(
+        fixture->genesis_hash, fixture->chainlock.statement));
+    BOOST_CHECK(authorization.PoWHistoryBoundaryCommitment().IsNull());
+    BOOST_CHECK(!ValidateRosterAuthorizationState(
+        fixture->genesis_hash, fixture->chainlock.statement,
+        authorization, &error));
+    BOOST_CHECK(error == ChainLockVerificationError::INVALID_AUTHORIZATION);
+    const auto rosters{
+        ChainLockStoreTestContextFactory::CreateCanonicalRosterSet(
+            fixture->genesis_hash,
+            std::make_shared<const FrozenQuorumRosters>(fixture->rosters))};
+    BOOST_REQUIRE(rosters);
+    BOOST_CHECK(!PreparedChainLockContext::Create(
+        fixture->schedule, fixture->chainlock.statement,
+        rosters, authorization, &error));
+    BOOST_CHECK(error == ChainLockVerificationError::INVALID_AUTHORIZATION);
+}
 
 BOOST_AUTO_TEST_CASE(roster_context_memory_counter_tracks_capability_lifetime)
 {

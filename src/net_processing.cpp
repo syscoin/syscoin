@@ -7242,8 +7242,10 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 const bool required_chainlock{
                     inv.type == MSG_CLSIG &&
                     llmq::chainLocksHandler != nullptr &&
-                    llmq::chainLocksHandler
-                        ->IsRequiredBTCCReceiptCertificate(inv.hash)};
+                    (llmq::chainLocksHandler
+                         ->IsRequiredBTCCReceiptCertificate(inv.hash) ||
+                     llmq::chainLocksHandler
+                         ->IsRequiredChainLockCatchupCertificate(inv.hash))};
                 const bool required_payment_audit{
                     inv.type == MSG_PQPOSECERT &&
                     llmq::chainLocksHandler != nullptr &&
@@ -9898,14 +9900,16 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
         //
         // Message: getdata (transactions)
         //
-        // SYSCOIN: A branch replacement can retire a pending BTCC receipt
-        // without receiving its certificate. Remove every non-in-flight
-        // provider immediately so stale work cannot keep the priority path.
+        // SYSCOIN: A branch/window replacement can retire a receipt or an
+        // exact catch-up download without receiving its certificate. Remove
+        // stale providers so they cannot keep the priority path.
         if (const auto required{m_clsig_requests.RequiredLogicalId()};
             required &&
             (llmq::chainLocksHandler == nullptr ||
-             !llmq::chainLocksHandler
-                  ->IsRequiredBTCCReceiptCertificate(*required))) {
+             (!llmq::chainLocksHandler
+                   ->IsRequiredBTCCReceiptCertificate(*required) &&
+              !llmq::chainLocksHandler
+                   ->IsRequiredChainLockCatchupCertificate(*required)))) {
             m_clsig_requests.ClearRequired(*required);
         }
         if (const auto required{

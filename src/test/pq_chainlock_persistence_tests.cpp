@@ -27,6 +27,44 @@ using namespace llmq::pq;
 
 namespace llmq::pq {
 
+class HistoricalSyncBoundaryPersistenceTestAccess {
+public:
+    static bool Persist(
+        PQChainLockPersistence& persistence, const FinalChainLock& chainlock,
+        const PreparedChainLockContextPtr& context,
+        const HistoricalSyncBoundary& boundary, uint64_t revision,
+        const std::optional<FinalChainLockRecordMetadata>& covering = std::nullopt,
+        ChainLockPersistenceError* error = nullptr)
+    {
+        return persistence.PersistHistoricalSyncBoundary(
+            chainlock, context, boundary, revision, covering, nullptr, error);
+    }
+
+    static bool Invalidate(PQChainLockPersistence& persistence,
+                           const uint256& identity, uint64_t revision,
+                           ChainLockPersistenceError* error = nullptr)
+    {
+        return persistence.InvalidateHistoricalSyncBoundary(identity, revision, error);
+    }
+
+    static VerifiedHistoricalSyncSuccessor SuccessorProof(
+        HistoricalSyncBoundary boundary, uint256 candidate_logical_id,
+        RosterRecoveryPrecommit precommit, uint64_t revision)
+    {
+        return VerifiedHistoricalSyncSuccessor{
+            std::move(boundary), std::move(candidate_logical_id),
+            std::move(precommit), revision};
+    }
+
+    static bool PersistSuccessor(
+        PQChainLockPersistence& persistence, const FinalChainLock& chainlock,
+        const PreparedChainLockContextPtr& context,
+        const VerifiedHistoricalSyncSuccessor& proof)
+    {
+        return persistence.PersistBestAfterHistoricalSync(chainlock, context, proof);
+    }
+};
+
 class PaymentAuditSealContextCapsuleTestAccess {
 public:
     static PaymentAuditSealContextCapsule Make(
@@ -399,6 +437,28 @@ void SetExactContinuation(FinalChainLock& chainlock,
     BOOST_REQUIRE(chainlock.IsStructurallyValid());
 }
 
+HistoricalSyncBoundary MakeHistoricalSyncBoundary(
+    const uint256& genesis, const ChainLockFinalityStoreConfig& config,
+    const FinalChainLock& chainlock)
+{
+    HistoricalSyncBoundary result;
+    result.carrier_height = chainlock.statement.height + config.btcc_schedule.nevm_injection_lag;
+    result.carrier_hash = NonNullHash(9'800'000 + result.carrier_height);
+    result.receipt.chainlock_target_height = chainlock.statement.height;
+    result.receipt.chainlock_target_hash = chainlock.statement.block_hash;
+    result.receipt.chainlock_logical_id = chainlock.GetLogicalId(genesis);
+    result.receipt.accepted_cursor = chainlock.statement.accepted_btcc_cursor;
+    result.coverage_height = result.carrier_height;
+    result.coverage_hash = result.carrier_hash;
+    result.receipt_state.cursor = result.receipt.accepted_cursor;
+    result.receipt_state.cumulative_hash = NonNullHash(9'900'000 + result.carrier_height);
+    result.receipt_state.latest_chainlock_target_height = chainlock.statement.height;
+    result.receipt_state.latest_receipt_carrier_height = result.carrier_height;
+    result.probation_state_hash = chainlock.statement.payment_probation_state_hash;
+    BOOST_REQUIRE(result.IsStructurallyValid());
+    return result;
+}
+
 RecoveryRosterAuthoritySource RecoverySourceFromPrior(
     const FinalChainLock& prior)
 {
@@ -552,6 +612,18 @@ struct RawDiskRecord {
         READWRITE(obj.version, obj.schema_hash, obj.logical_id,
                   obj.witness_id, obj.chainlock, obj.roster_context,
                   obj.checksum);
+    }
+};
+
+struct RawHistoricalSyncRecord {
+    uint16_t version{1};
+    HistoricalSyncBoundary boundary;
+    std::vector<unsigned char> certificate;
+    uint256 checksum;
+
+    SERIALIZE_METHODS(RawHistoricalSyncRecord, obj)
+    {
+        READWRITE(obj.version, obj.boundary, obj.certificate, obj.checksum);
     }
 };
 
@@ -1283,6 +1355,468 @@ BOOST_AUTO_TEST_CASE(empty_database_initializes_fixed_schema)
     BOOST_CHECK_EQUAL(state.certificate_revision, 0U);
     BOOST_CHECK(!state.best);
     BOOST_CHECK(!state.unsealed_btcc);
+}
+
+BOOST_AUTO_TEST_CASE(historical_sync_boundaries_preserve_provenance_and_fallback)
+{
+    const fs::path path{m_path_root / "pqcl_historical_sync_boundary"};
+    const uint256 genesis{NonNullHash(9'700'001)};
+    const auto config{MakeConfig()};
+    auto first{MakeChainLock(865, config.activation_predecessor_height,
+                            NonNullHash(config.activation_predecessor_height), 9'700'002)};
+    SetExactInitialization(first, genesis, 9'700'002);
+    auto second{MakeChainLock(885, 880, NonNullHash(880), 9'700'003)};
+    SetExactContinuation(second, genesis, first);
+    auto third{MakeChainLock(905, 900, NonNullHash(900), 9'700'004)};
+    SetExactContinuation(third, genesis, second);
+    const auto context = [&](const FinalChainLock& chainlock) {
+        return ChainLockStoreTestContextFactory::CreateDurable(
+            genesis, config.chainlock_schedule, chainlock.statement);
+    };
+    const auto first_boundary{MakeHistoricalSyncBoundary(genesis, config, first)};
+    const auto second_boundary{MakeHistoricalSyncBoundary(genesis, config, second)};
+    const auto third_boundary{MakeHistoricalSyncBoundary(genesis, config, third)};
+    uint256 first_identity;
+    uint256 second_identity;
+    {
+        ProductionPQChainLockPersistence persistence{DiskParams(path), genesis, config};
+        uint64_t revision{99};
+        BOOST_CHECK(persistence.LoadHistoricalSyncBoundaries(&revision).empty());
+        BOOST_CHECK_EQUAL(revision, 0U);
+        // A statement-shaped context alone cannot establish historical authority.
+        BOOST_CHECK(!HistoricalSyncBoundaryPersistenceTestAccess::Persist(
+            persistence, first, context(first), first_boundary, revision));
+        for (const auto* chainlock : {&first, &second, &third}) {
+            BOOST_REQUIRE(persistence.PersistVerifiedAuthorizationBase(
+                *chainlock, context(*chainlock), nullptr,
+                MakePersistenceRecoveryUniverse(genesis,
+                    chainlock->statement.roster_beacons.active.recovery_authority_source)));
+        }
+        BOOST_REQUIRE(HistoricalSyncBoundaryPersistenceTestAccess::Persist(
+            persistence, first, context(first), first_boundary, revision));
+        auto retained{persistence.LoadHistoricalSyncBoundaries(&revision)};
+        BOOST_REQUIRE_EQUAL(retained.size(), 1U);
+        first_identity = retained[0].record.RecordIdentity();
+        BOOST_CHECK(!persistence.HasBest());
+        BOOST_REQUIRE(HistoricalSyncBoundaryPersistenceTestAccess::Persist(
+            persistence, second, context(second), second_boundary, revision));
+        retained = persistence.LoadHistoricalSyncBoundaries(&revision);
+        BOOST_REQUIRE_EQUAL(retained.size(), 2U);
+        second_identity = retained[0].record.RecordIdentity();
+        BOOST_CHECK(retained[0].record.ChainLock() == second);
+        BOOST_CHECK(retained[1].record.ChainLock() == first);
+        BOOST_CHECK(retained[1].record.RecordIdentity() == first_identity);
+        ChainLockPersistenceError stale_error{ChainLockPersistenceError::NONE};
+        BOOST_CHECK(!HistoricalSyncBoundaryPersistenceTestAccess::Persist(
+            persistence, second, context(second), second_boundary, revision - 1,
+            std::nullopt, &stale_error));
+        BOOST_CHECK(stale_error == ChainLockPersistenceError::HEIGHT_CONFLICT);
+        BOOST_CHECK(!HistoricalSyncBoundaryPersistenceTestAccess::Invalidate(
+            persistence, second_identity, revision - 1, &stale_error));
+        BOOST_CHECK(stale_error == ChainLockPersistenceError::HEIGHT_CONFLICT);
+        BOOST_REQUIRE(HistoricalSyncBoundaryPersistenceTestAccess::Persist(
+            persistence, second, context(second), second_boundary, revision));
+        BOOST_CHECK(!HistoricalSyncBoundaryPersistenceTestAccess::Persist(
+            persistence, third, context(third), third_boundary, revision));
+        BOOST_CHECK(!HistoricalSyncBoundaryPersistenceTestAccess::Invalidate(
+            persistence, second_identity, revision - 1));
+        BOOST_CHECK(!HistoricalSyncBoundaryPersistenceTestAccess::Invalidate(
+            persistence, NonNullHash(9'700'009), revision));
+        auto wrong{second_boundary};
+        wrong.receipt.chainlock_logical_id = NonNullHash(9'700'010);
+        BOOST_CHECK(!HistoricalSyncBoundaryPersistenceTestAccess::Persist(
+            persistence, second, context(second), wrong, revision));
+        BOOST_CHECK_EQUAL(persistence.LoadAuthorizationBases().size(), 3U);
+        for (std::size_t index{0}; index < VERIFIED_AUTHORIZATION_BASE_CAPACITY; ++index) {
+            auto unrelated{MakeChainLock(
+                865, config.activation_predecessor_height,
+                NonNullHash(config.activation_predecessor_height), 10'000'000 + index)};
+            SetExactInitialization(unrelated, genesis, 10'000'000 + index);
+            auto recent{MakeChainLock(925, 920, NonNullHash(920), 11'000'000 + index)};
+            SetExactContinuation(recent, genesis, unrelated);
+            BOOST_REQUIRE(persistence.PersistVerifiedAuthorizationBase(
+                recent, context(recent), nullptr,
+                MakePersistenceRecoveryUniverse(genesis,
+                    recent.statement.roster_beacons.active.recovery_authority_source)));
+        }
+        BOOST_CHECK(!persistence.LoadAuthorizationBase(first.GetLogicalId(genesis)));
+        BOOST_CHECK(!persistence.LoadAuthorizationBase(second.GetLogicalId(genesis)));
+        BOOST_REQUIRE(persistence.OldestAuthorizationBaseHeight());
+        BOOST_CHECK_EQUAL(*persistence.OldestAuthorizationBaseHeight(), first.statement.height);
+        BOOST_CHECK(persistence.LoadRecoveryUniverse(GetRecoveryUniverseSourceId(
+            genesis, first.statement.roster_beacons.active.recovery_authority_source)));
+    }
+    {
+        ProductionPQChainLockPersistence reopened{DiskParams(path), genesis, config};
+        uint64_t revision;
+        auto retained{reopened.LoadHistoricalSyncBoundaries(&revision)};
+        BOOST_REQUIRE_EQUAL(retained.size(), 2U);
+        BOOST_CHECK(retained[0].record.RecordIdentity() == second_identity);
+        BOOST_CHECK(retained[1].record.RecordIdentity() == first_identity);
+        BOOST_CHECK(!reopened.HasBest());
+        BOOST_CHECK_EQUAL(reopened.LoadAuthorizationBases().size(),
+                          VERIFIED_AUTHORIZATION_BASE_CAPACITY);
+        BOOST_CHECK(!reopened.LoadAuthorizationBase(first.GetLogicalId(genesis)));
+        BOOST_CHECK(reopened.LoadRecoveryUniverse(GetRecoveryUniverseSourceId(
+            genesis, first.statement.roster_beacons.active.recovery_authority_source)));
+        BOOST_REQUIRE(HistoricalSyncBoundaryPersistenceTestAccess::Invalidate(
+            reopened, second_identity, revision));
+        retained = reopened.LoadHistoricalSyncBoundaries(&revision);
+        BOOST_REQUIRE_EQUAL(retained.size(), 1U);
+        BOOST_CHECK(retained[0].record.RecordIdentity() == first_identity);
+        BOOST_REQUIRE(HistoricalSyncBoundaryPersistenceTestAccess::Invalidate(
+            reopened, first_identity, revision));
+        BOOST_CHECK(reopened.LoadHistoricalSyncBoundaries().empty());
+        BOOST_CHECK(!reopened.LoadRecoveryUniverse(GetRecoveryUniverseSourceId(
+            genesis, first.statement.roster_beacons.active.recovery_authority_source)));
+        BOOST_REQUIRE(reopened.OldestAuthorizationBaseHeight());
+        BOOST_CHECK_EQUAL(*reopened.OldestAuthorizationBaseHeight(), 925);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(historical_sync_handoff_requires_replacement_carrier_coverage)
+{
+    const fs::path path{m_path_root / "pqcl_historical_sync_handoff"};
+    const uint256 genesis{NonNullHash(12'000'001)};
+    const auto config{MakeConfig()};
+    auto first{MakeChainLock(865, config.activation_predecessor_height,
+                            NonNullHash(config.activation_predecessor_height), 12'000'002)};
+    SetExactInitialization(first, genesis, 12'000'002);
+    auto second{MakeChainLock(885, 880, NonNullHash(880), 12'000'003)};
+    SetExactContinuation(second, genesis, first);
+    auto third{MakeChainLock(905, 900, NonNullHash(900), 12'000'004)};
+    SetExactContinuation(third, genesis, second);
+    const auto context = [&](const FinalChainLock& chainlock) {
+        return ChainLockStoreTestContextFactory::CreateDurable(
+            genesis, config.chainlock_schedule, chainlock.statement);
+    };
+    ProductionPQChainLockPersistence persistence{DiskParams(path), genesis, config};
+    for (const auto* chainlock : {&first, &second, &third}) {
+        BOOST_REQUIRE(persistence.PersistVerifiedAuthorizationBase(
+            *chainlock, context(*chainlock), nullptr,
+            MakePersistenceRecoveryUniverse(genesis,
+                chainlock->statement.roster_beacons.active.recovery_authority_source)));
+    }
+    uint64_t revision{0};
+    BOOST_REQUIRE(HistoricalSyncBoundaryPersistenceTestAccess::Persist(
+        persistence, first, context(first), MakeHistoricalSyncBoundary(genesis, config, first), revision));
+    (void)persistence.LoadHistoricalSyncBoundaries(&revision);
+    BOOST_REQUIRE(HistoricalSyncBoundaryPersistenceTestAccess::Persist(
+        persistence, second, context(second), MakeHistoricalSyncBoundary(genesis, config, second), revision));
+    (void)persistence.LoadHistoricalSyncBoundaries(&revision);
+    auto replacement{MakeHistoricalSyncBoundary(genesis, config, third)};
+    const FinalChainLockRecordMetadata fake_cover{
+        third.GetLogicalId(genesis), third.GetWitnessId(genesis), third.statement};
+    BOOST_CHECK(!HistoricalSyncBoundaryPersistenceTestAccess::Persist(
+        persistence, third, context(third), replacement, revision, fake_cover));
+    BOOST_REQUIRE(persistence.PersistBest(second, context(second)));
+    const auto second_best{persistence.GetFinalityState().best};
+    BOOST_REQUIRE(second_best);
+    replacement.durable_prior = second_best->AuthorizationBase();
+    // B's target is not its receipt carrier: accepting B cannot retire A.
+    BOOST_CHECK(!HistoricalSyncBoundaryPersistenceTestAccess::Persist(
+        persistence, third, context(third), replacement, revision, second_best));
+    BOOST_REQUIRE(persistence.PersistBest(third, context(third)));
+    const auto third_best{persistence.GetFinalityState().best};
+    BOOST_REQUIRE(third_best);
+    replacement.durable_prior = third_best->AuthorizationBase();
+    BOOST_CHECK(!HistoricalSyncBoundaryPersistenceTestAccess::Persist(
+        persistence, third, context(third), replacement, revision, second_best));
+    BOOST_REQUIRE(HistoricalSyncBoundaryPersistenceTestAccess::Persist(
+        persistence, third, context(third), replacement, revision, third_best));
+    const auto retained{persistence.LoadHistoricalSyncBoundaries()};
+    BOOST_REQUIRE_EQUAL(retained.size(), 2U);
+    BOOST_CHECK(retained[0].record.ChainLock() == third);
+    BOOST_CHECK(retained[1].record.ChainLock() == second);
+    BOOST_CHECK(persistence.GetFinalityState().best == third_best);
+}
+
+BOOST_AUTO_TEST_CASE(historical_sync_successor_consumes_only_exact_obsolete_initializer)
+{
+    const fs::path path{m_path_root / "pqcl_historical_initializer_handoff"};
+    const uint256 genesis{NonNullHash(12'500'001)};
+    const auto config{MakeConfig()};
+    const auto staged{MakeInitializationPrecommit(12'500'002)};
+    auto base{MakeChainLock(865, config.activation_predecessor_height,
+                           NonNullHash(config.activation_predecessor_height), 12'500'003)};
+    SetExactInitialization(base, genesis, 12'500'003);
+    auto successor{MakeChainLock(885, 880, NonNullHash(880), 12'500'004)};
+    SetExactContinuation(successor, genesis, base);
+    const auto base_context{ChainLockStoreTestContextFactory::CreateDurable(
+        genesis, config.chainlock_schedule, base.statement)};
+    const auto successor_rosters{ChainLockStoreTestContextFactory::CreateDurable(
+        genesis, config.chainlock_schedule, successor.statement)->RosterSetPtr()};
+    RosterAuthorizationVerificationContext authorization;
+    authorization.admission = RosterAuthorizationAdmission::LIVE;
+    authorization.authorization_base = successor.statement.roster_authorization_base;
+    authorization.previous = RosterAuthorizationPriorState{
+        base.statement.roster_authorization_state_hash, base.statement.roster_beacons};
+    const auto context = [&](const FinalChainLock& candidate,
+                             const RosterAuthorizationVerificationContext& auth) {
+        return ChainLockStoreTestContextFactory::Create(
+            config.chainlock_schedule, candidate.statement, successor_rosters,
+            0b1111, auth);
+    };
+    const auto boundary{MakeHistoricalSyncBoundary(genesis, config, base)};
+    {
+        ProductionPQChainLockPersistence persistence{DiskParams(path), genesis, config};
+        BOOST_REQUIRE(persistence.PersistRosterRecoveryPrecommit(staged));
+        BOOST_REQUIRE(persistence.PersistVerifiedAuthorizationBase(
+            base, base_context, nullptr, MakePersistenceRecoveryUniverse(genesis,
+                base.statement.roster_beacons.active.recovery_authority_source)));
+        const auto absent_boundary_proof{HistoricalSyncBoundaryPersistenceTestAccess::SuccessorProof(
+            boundary, successor.GetLogicalId(genesis), staged, 0)};
+        BOOST_CHECK(!HistoricalSyncBoundaryPersistenceTestAccess::PersistSuccessor(
+            persistence, successor, context(successor, authorization), absent_boundary_proof));
+        BOOST_REQUIRE(HistoricalSyncBoundaryPersistenceTestAccess::Persist(
+            persistence, base, base_context, boundary, 0));
+        uint64_t revision{0};
+        BOOST_REQUIRE_EQUAL(persistence.LoadHistoricalSyncBoundaries(&revision).size(), 1U);
+        BOOST_CHECK(!persistence.HasBest());
+        BOOST_CHECK(persistence.LoadRosterRecoveryPrecommit() == staged);
+        const auto proof{HistoricalSyncBoundaryPersistenceTestAccess::SuccessorProof(
+            boundary, successor.GetLogicalId(genesis), staged, revision)};
+        const auto successor_context{context(successor, authorization)};
+        // Neither merely importing B nor the ordinary unscoped writer can
+        // retire an initializer. Only the publication-scoped successor can.
+        BOOST_CHECK(!persistence.PersistBest(successor, successor_context));
+        for (unsigned mutation{0}; mutation < 6; ++mutation) {
+            auto wrong_boundary{boundary};
+            auto wrong_precommit{staged};
+            auto wrong_id{successor.GetLogicalId(genesis)};
+            uint64_t wrong_revision{revision};
+            if (mutation == 0) {
+                wrong_boundary.carrier_hash = NonNullHash(12'500'010);
+                wrong_boundary.coverage_hash = wrong_boundary.carrier_hash;
+            }
+            if (mutation == 1) {
+                wrong_boundary.coverage_height += 5;
+                wrong_boundary.coverage_hash = NonNullHash(12'500'011);
+            }
+            if (mutation == 2) wrong_id = NonNullHash(12'500'012);
+            if (mutation == 3) ++wrong_precommit.pending_seed.anchor_btc_height;
+            if (mutation == 4) ++wrong_revision;
+            if (mutation == 5) wrong_boundary.durable_prior = successor.statement.roster_authorization_base;
+            BOOST_REQUIRE(wrong_boundary.IsStructurallyValid());
+            const auto wrong{HistoricalSyncBoundaryPersistenceTestAccess::SuccessorProof(
+                wrong_boundary, wrong_id, wrong_precommit, wrong_revision)};
+            BOOST_CHECK(!HistoricalSyncBoundaryPersistenceTestAccess::PersistSuccessor(
+                persistence, successor, successor_context, wrong));
+            BOOST_CHECK(!persistence.HasBest());
+            BOOST_CHECK(persistence.LoadRosterRecoveryPrecommit() == staged);
+        }
+        for (unsigned mutation{0}; mutation < 4; ++mutation) {
+            auto wrong{authorization};
+            if (mutation == 0) wrong.authorization_base.logical_id = NonNullHash(12'500'013);
+            if (mutation == 1) wrong.previous.reset();
+            if (mutation == 2) wrong.admission = RosterAuthorizationAdmission::TRUSTED_PERSISTENCE;
+            if (mutation == 3) wrong.admission = RosterAuthorizationAdmission::POW_HISTORY;
+            BOOST_CHECK(!HistoricalSyncBoundaryPersistenceTestAccess::PersistSuccessor(
+                persistence, successor, context(successor, wrong), proof));
+            BOOST_CHECK(persistence.LoadRosterRecoveryPrecommit() == staged);
+        }
+        auto too_early{MakeChainLock(boundary.coverage_height, base.statement.height,
+                                    base.statement.block_hash, 12'500'015)};
+        SetExactContinuation(too_early, genesis, base);
+        const auto too_early_proof{HistoricalSyncBoundaryPersistenceTestAccess::SuccessorProof(
+            boundary, too_early.GetLogicalId(genesis), staged, revision)};
+        BOOST_CHECK(!HistoricalSyncBoundaryPersistenceTestAccess::PersistSuccessor(
+            persistence, too_early, context(too_early, authorization), too_early_proof));
+        BOOST_REQUIRE(HistoricalSyncBoundaryPersistenceTestAccess::PersistSuccessor(
+            persistence, successor, successor_context, proof));
+        BOOST_REQUIRE(persistence.LoadBest());
+        BOOST_CHECK(persistence.LoadBest()->ChainLock() == successor);
+        BOOST_CHECK(!persistence.LoadRosterRecoveryPrecommit());
+        BOOST_CHECK(persistence.HasCatchupMarker());
+        BOOST_CHECK(persistence.PersistBest(successor, successor_context));
+        BOOST_CHECK(!HistoricalSyncBoundaryPersistenceTestAccess::PersistSuccessor(
+            persistence, successor, successor_context, proof));
+    }
+    {
+        // The seam seeded B through the ordinary archive to create its disk
+        // bytes. A real historical import has only the dedicated B record.
+        CDBWrapper raw{DiskParams(path)};
+        BOOST_REQUIRE(raw.Erase(RawAuthorizationBaseKey{
+            PQ_CHAINLOCK_PERSISTENCE_AUTHORIZATION_BASE_KEY,
+            base.GetLogicalId(genesis)}, /*fSync=*/true));
+    }
+    {
+        ProductionPQChainLockPersistence reopened{DiskParams(path), genesis, config};
+        BOOST_REQUIRE(reopened.LoadBest());
+        BOOST_CHECK(reopened.LoadBest()->ChainLock() == successor);
+        BOOST_CHECK(!reopened.LoadRosterRecoveryPrecommit());
+        BOOST_CHECK(reopened.HasCatchupMarker());
+        BOOST_CHECK(!reopened.LoadAuthorizationBase(base.GetLogicalId(genesis)));
+        BOOST_REQUIRE_EQUAL(reopened.LoadHistoricalSyncBoundaries().size(), 1U);
+        BOOST_CHECK(reopened.LoadHistoricalSyncBoundaries()[0].record.ChainLock() == base);
+        uint64_t revision{0};
+        auto retained{reopened.LoadHistoricalSyncBoundaries(&revision)};
+        const auto base_identity{retained.front().record.RecordIdentity()};
+        ChainLockPersistenceError error{ChainLockPersistenceError::NONE};
+        BOOST_CHECK(!HistoricalSyncBoundaryPersistenceTestAccess::Invalidate(
+            reopened, base_identity, revision, &error));
+        BOOST_CHECK(error == ChainLockPersistenceError::HEIGHT_CONFLICT);
+
+        auto intermediate{MakeChainLock(875, 870, NonNullHash(870), 12'500'016)};
+        SetExactContinuation(intermediate, genesis, base);
+        const auto intermediate_context{ChainLockStoreTestContextFactory::CreateDurable(
+            genesis, config.chainlock_schedule, intermediate.statement)};
+        BOOST_REQUIRE(reopened.PersistVerifiedAuthorizationBase(
+            intermediate, intermediate_context, nullptr, MakePersistenceRecoveryUniverse(genesis,
+                intermediate.statement.roster_beacons.active.recovery_authority_source)));
+        const auto durable{reopened.GetFinalityState().best};
+        BOOST_REQUIRE(durable);
+        auto intermediate_boundary{MakeHistoricalSyncBoundary(genesis, config, intermediate)};
+        intermediate_boundary.durable_prior = durable->AuthorizationBase();
+        BOOST_REQUIRE(HistoricalSyncBoundaryPersistenceTestAccess::Persist(
+            reopened, intermediate, intermediate_context, intermediate_boundary, revision));
+        retained = reopened.LoadHistoricalSyncBoundaries(&revision);
+        BOOST_REQUIRE_EQUAL(retained.size(), 2U);
+        BOOST_CHECK(retained.back().record.RecordIdentity() == base_identity);
+
+        auto successor_boundary{MakeHistoricalSyncBoundary(genesis, config, successor)};
+        successor_boundary.durable_prior = durable->AuthorizationBase();
+        BOOST_REQUIRE_EQUAL(durable->statement.height, intermediate_boundary.carrier_height);
+        // C covers B1's carrier, but C still names B0. Rotating to C/B1 must
+        // not erase the sole B0 dependency and make the next restart fail.
+        BOOST_CHECK(!HistoricalSyncBoundaryPersistenceTestAccess::Persist(
+            reopened, successor, context(successor, authorization), successor_boundary,
+            revision, durable, &error));
+        BOOST_CHECK(error == ChainLockPersistenceError::HEIGHT_CONFLICT);
+        BOOST_CHECK(!HistoricalSyncBoundaryPersistenceTestAccess::Invalidate(
+            reopened, base_identity, revision, &error));
+        BOOST_CHECK(error == ChainLockPersistenceError::HEIGHT_CONFLICT);
+        uint64_t unchanged_revision{0};
+        const auto unchanged{reopened.LoadHistoricalSyncBoundaries(&unchanged_revision)};
+        BOOST_CHECK_EQUAL(unchanged_revision, revision);
+        BOOST_REQUIRE_EQUAL(unchanged.size(), 2U);
+        BOOST_CHECK(unchanged.back().record.RecordIdentity() == base_identity);
+        BOOST_CHECK(reopened.GetFinalityState().best == durable);
+        BOOST_REQUIRE(HistoricalSyncBoundaryPersistenceTestAccess::Invalidate(
+            reopened, retained.front().record.RecordIdentity(), revision));
+        BOOST_REQUIRE_EQUAL(reopened.LoadHistoricalSyncBoundaries().size(), 1U);
+        BOOST_CHECK(reopened.LoadHistoricalSyncBoundaries().front().record.RecordIdentity() == base_identity);
+    }
+    {
+        ProductionPQChainLockPersistence reopened{DiskParams(path), genesis, config};
+        BOOST_REQUIRE(reopened.LoadBest());
+        BOOST_CHECK(reopened.LoadBest()->ChainLock() == successor);
+        BOOST_CHECK(!reopened.LoadAuthorizationBase(base.GetLogicalId(genesis)));
+    }
+    const fs::path wrong_path{m_path_root / "pqcl_wrong_historical_dependency"};
+    auto wrong_base{MakeChainLock(865, config.activation_predecessor_height,
+                                 NonNullHash(config.activation_predecessor_height), 12'500'020)};
+    SetExactInitialization(wrong_base, genesis, 12'500'020);
+    const auto wrong_context{ChainLockStoreTestContextFactory::CreateDurable(
+        genesis, config.chainlock_schedule, wrong_base.statement)};
+    {
+        ProductionPQChainLockPersistence wrong{DiskParams(wrong_path), genesis, config};
+        BOOST_REQUIRE(wrong.PersistVerifiedAuthorizationBase(
+            wrong_base, wrong_context, nullptr, MakePersistenceRecoveryUniverse(genesis,
+                wrong_base.statement.roster_beacons.active.recovery_authority_source)));
+        BOOST_REQUIRE(HistoricalSyncBoundaryPersistenceTestAccess::Persist(
+            wrong, wrong_base, wrong_context,
+            MakeHistoricalSyncBoundary(genesis, config, wrong_base), 0));
+    }
+    {
+        CDBWrapper raw_wrong{DiskParams(wrong_path)};
+        CDBWrapper raw{DiskParams(path)};
+        const RawDiskKey key{PQ_CHAINLOCK_PERSISTENCE_HISTORICAL_SYNC_KEY};
+        RawHistoricalSyncRecord wrong;
+        BOOST_REQUIRE(raw_wrong.Read(key, wrong));
+        BOOST_REQUIRE(raw.Write(key, wrong, /*fSync=*/true));
+    }
+    BOOST_CHECK_EXCEPTION(
+        ProductionPQChainLockPersistence(DiskParams(path), genesis, config),
+        std::runtime_error, [](const std::runtime_error& error) {
+            return std::string{error.what()} ==
+                "missing live PQ ChainLock authorization-base record";
+        });
+}
+
+BOOST_AUTO_TEST_CASE(historical_sync_context_is_rejected_by_ordinary_writers)
+{
+    const uint256 genesis{NonNullHash(12'600'001)};
+    const auto config{MakeConfig()};
+    auto base{MakeChainLock(865, config.activation_predecessor_height,
+                           NonNullHash(config.activation_predecessor_height), 12'600'002)};
+    SetExactInitialization(base, genesis, 12'600'002);
+    const auto ordinary{ChainLockStoreTestContextFactory::CreateDurable(
+        genesis, config.chainlock_schedule, base.statement)};
+    RosterAuthorizationVerificationContext authorization;
+    authorization.admission = RosterAuthorizationAdmission::POW_HISTORY;
+    const auto historical{ChainLockStoreTestContextFactory::Create(
+        config.chainlock_schedule, base.statement, ordinary->RosterSetPtr(), 0b1111, authorization)};
+    ProductionPQChainLockPersistence persistence{
+        MemoryParams(m_path_root / "pqcl_historical_no_upgrade"), genesis, config};
+    ChainLockPersistenceError error{ChainLockPersistenceError::NONE};
+    BOOST_CHECK(!persistence.PersistInitializedBest(base, historical, &error));
+    BOOST_CHECK(error == ChainLockPersistenceError::INVALID_CHAINLOCK);
+    BOOST_CHECK(!persistence.PersistVerifiedAuthorizationBase(base, historical, &error));
+    BOOST_CHECK(error == ChainLockPersistenceError::INVALID_CHAINLOCK);
+    BOOST_CHECK(!persistence.PersistUnsealedBTCC(base, historical, &error));
+    BOOST_CHECK(error == ChainLockPersistenceError::INVALID_CHAINLOCK);
+    auto successor{MakeChainLock(885, 880, NonNullHash(880), 12'600'003)};
+    SetExactContinuation(successor, genesis, base);
+    const auto historical_successor{ChainLockStoreTestContextFactory::Create(
+        config.chainlock_schedule, successor.statement, ordinary->RosterSetPtr(), 0b1111, authorization)};
+    BOOST_CHECK(!persistence.PersistBest(successor, historical_successor, &error));
+    BOOST_CHECK(error == ChainLockPersistenceError::INVALID_CHAINLOCK);
+    BOOST_CHECK(!persistence.PersistCatchupBest(successor, historical_successor, &error));
+    BOOST_CHECK(error == ChainLockPersistenceError::INVALID_CHAINLOCK);
+    BOOST_CHECK(!persistence.HasBest());
+    BOOST_CHECK(!persistence.LoadUnsealedBTCC());
+    BOOST_CHECK(persistence.LoadAuthorizationBases().empty());
+}
+
+BOOST_AUTO_TEST_CASE(historical_sync_corruption_fails_closed)
+{
+    const uint256 genesis{NonNullHash(13'000'001)};
+    const auto config{MakeConfig()};
+    auto chainlock{MakeChainLock(865, config.activation_predecessor_height,
+                                NonNullHash(config.activation_predecessor_height), 13'000'002)};
+    SetExactInitialization(chainlock, genesis, 13'000'002);
+    const auto context{ChainLockStoreTestContextFactory::CreateDurable(
+        genesis, config.chainlock_schedule, chainlock.statement)};
+    for (unsigned mutation{0}; mutation < 4; ++mutation) {
+        const fs::path path{m_path_root / fs::PathFromString(
+            strprintf("pqcl_historical_sync_corrupt_%u", mutation))};
+        {
+            ProductionPQChainLockPersistence persistence{DiskParams(path), genesis, config};
+            BOOST_REQUIRE(persistence.PersistVerifiedAuthorizationBase(
+                chainlock, context, nullptr, MakePersistenceRecoveryUniverse(genesis,
+                    chainlock.statement.roster_beacons.active.recovery_authority_source)));
+            BOOST_REQUIRE(HistoricalSyncBoundaryPersistenceTestAccess::Persist(
+                persistence, chainlock, context,
+                MakeHistoricalSyncBoundary(genesis, config, chainlock), 0));
+        }
+        {
+            CDBWrapper raw{DiskParams(path)};
+            const RawDiskKey key{PQ_CHAINLOCK_PERSISTENCE_HISTORICAL_SYNC_KEY};
+            RawHistoricalSyncRecord disk;
+            BOOST_REQUIRE(raw.Read(key, disk));
+            RawDiskRecord certificate;
+            CDataStream stream{disk.certificate, SER_DISK, 0};
+            stream >> certificate;
+            BOOST_REQUIRE(stream.empty());
+            if (mutation == 0) {
+                disk.checksum = NonNullHash(13'000'010);
+            } else {
+                if (mutation == 1) disk.boundary.receipt.chainlock_target_hash = NonNullHash(13'000'011);
+                if (mutation == 2) --disk.boundary.coverage_height;
+                if (mutation == 3) disk.certificate.pop_back();
+                CHashWriter writer{SER_GETHASH, 0};
+                writer << std::string{"SYS_PQ_HISTORICAL_SYNC_RECORD_V1"}
+                       << certificate.schema_hash << disk.version
+                       << disk.boundary << certificate.checksum;
+                disk.checksum = writer.GetHash();
+            }
+            BOOST_REQUIRE(raw.Write(key, disk, /*fSync=*/true));
+        }
+        BOOST_CHECK_THROW(
+            ProductionPQChainLockPersistence(DiskParams(path), genesis, config),
+            std::runtime_error);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(recovery_roster_retention_dependency_is_group_exact)

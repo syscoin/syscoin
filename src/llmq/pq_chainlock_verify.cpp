@@ -159,6 +159,7 @@ std::optional<uint8_t> GetAuthorizationMask(
         }
         break;
     case RosterAuthorizationAdmission::TRUSTED_PERSISTENCE:
+    case RosterAuthorizationAdmission::POW_HISTORY:
         break;
     default:
         return std::nullopt;
@@ -173,9 +174,13 @@ bool ValidateAuthorizationSchedule(
     const RosterAuthorizationVerificationContext& authorization,
     ChainLockVerificationError* error)
 {
+    const bool pow_history{
+        authorization.admission == RosterAuthorizationAdmission::POW_HISTORY};
     if (!schedule.IsValid() ||
+        (pow_history && !authorization.HasPoWHistorySchedule(schedule)) ||
         (authorization.admission !=
              RosterAuthorizationAdmission::TRUSTED_PERSISTENCE &&
+         !pow_history &&
          (!authorization.reset_policy ||
           authorization.reset_policy->chainlock_schedule != schedule)) ||
         (authorization.reset_policy &&
@@ -201,9 +206,17 @@ std::optional<uint8_t> ValidateRosterAuthorizationStateInternal(
         SetError(error, ChainLockVerificationError::INVALID_CHAINLOCK);
         return std::nullopt;
     }
+    const bool pow_history{
+        context.admission == RosterAuthorizationAdmission::POW_HISTORY};
+    if (pow_history &&
+        !context.HasPoWHistoryAuthorization(genesis_hash, statement)) {
+        SetError(error, ChainLockVerificationError::INVALID_AUTHORIZATION);
+        return std::nullopt;
+    }
     const bool externally_authenticated{
         context.admission ==
-        RosterAuthorizationAdmission::TRUSTED_PERSISTENCE};
+            RosterAuthorizationAdmission::TRUSTED_PERSISTENCE ||
+        pow_history};
     if (!externally_authenticated) {
         if (!context.reset_policy ||
             !context.reset_policy->IsStructurallyValid()) {
@@ -336,12 +349,10 @@ std::optional<uint8_t> ValidateRosterAuthorizationStateInternal(
         return std::nullopt;
     }
 
-    // These two narrow integration boundaries already authenticate the exact
-    // complete statement: either its local fsynced record or a durable
-    // descendant receipt checkpoint. The predecessor certificate may have
-    // been pruned, so recomputing its state-hash edge is intentionally
-    // impossible here. Ordinary network/live admission never selects these
-    // modes and must prove the transition below.
+    // The exact statement is bound either by its authenticated local record
+    // or by a separately scoped PoW-history capability. That historical trust
+    // substitutes only for the unavailable predecessor edge, not the roster
+    // commitments or certificate signatures checked by the caller.
     if (externally_authenticated) {
         SetError(error, ChainLockVerificationError::NONE);
         return authorization_mask;
@@ -822,6 +833,65 @@ std::vector<uint8_t> DurableRosterContext::Encode() const
             UCharCast(stream.data() + stream.size())};
 }
 
+VerifiedPoWHistoricalBoundary::VerifiedPoWHistoricalBoundary(
+    const uint256& genesis_hash,
+    ChainLockScheduleConfig schedule,
+    const uint256& statement_logical_id,
+    const uint256& boundary_commitment)
+    : m_genesis_hash{genesis_hash}, m_schedule{schedule},
+      m_statement_logical_id{statement_logical_id},
+      m_boundary_commitment{boundary_commitment}
+{
+}
+
+const uint256& VerifiedPoWHistoricalBoundary::GenesisHash() const noexcept
+{
+    return m_genesis_hash;
+}
+
+const ChainLockScheduleConfig& VerifiedPoWHistoricalBoundary::Schedule()
+    const noexcept
+{
+    return m_schedule;
+}
+
+const uint256& VerifiedPoWHistoricalBoundary::StatementLogicalId() const noexcept
+{
+    return m_statement_logical_id;
+}
+
+const uint256& VerifiedPoWHistoricalBoundary::BoundaryCommitment() const noexcept
+{
+    return m_boundary_commitment;
+}
+
+bool RosterAuthorizationVerificationContext::HasPoWHistoryAuthorization(
+    const uint256& genesis_hash,
+    const ChainLockStatement& statement) const
+{
+    return admission == RosterAuthorizationAdmission::POW_HISTORY &&
+           m_pow_history &&
+           m_pow_history->GenesisHash() == genesis_hash &&
+           m_pow_history->StatementLogicalId() ==
+               GetLogicalChainLockId(genesis_hash, statement);
+}
+
+bool RosterAuthorizationVerificationContext::HasPoWHistorySchedule(
+    const ChainLockScheduleConfig& schedule) const noexcept
+{
+    return admission == RosterAuthorizationAdmission::POW_HISTORY &&
+           m_pow_history && m_pow_history->Schedule() == schedule;
+}
+
+uint256 RosterAuthorizationVerificationContext::PoWHistoryBoundaryCommitment()
+    const noexcept
+{
+    return admission == RosterAuthorizationAdmission::POW_HISTORY &&
+                   m_pow_history
+        ? m_pow_history->BoundaryCommitment()
+        : uint256{};
+}
+
 PreparedChainLockContext::PreparedChainLockContext(
     ChainLockScheduleConfig schedule,
     ChainLockStatement statement,
@@ -846,6 +916,35 @@ PreparedChainLockContext::Create(
     const RosterAuthorizationVerificationContext& authorization,
     ChainLockVerificationError* error)
 {
+    return CreateInternal(schedule, std::move(statement),
+                          std::move(roster_set), authorization,
+                          /*trusted_persistence_rosters=*/false, error);
+}
+
+std::shared_ptr<const PreparedChainLockContext>
+PreparedChainLockContext::CreateFromPoWHistory(
+    ChainLockScheduleConfig schedule,
+    ChainLockStatement statement,
+    VerifiedRosterSetPtr roster_set,
+    const VerifiedPoWHistoricalBoundary& boundary,
+    ChainLockVerificationError* error)
+{
+    if (!roster_set || !roster_set->HasCanonicalBuildProvenance() ||
+        boundary.BoundaryCommitment().IsNull() ||
+        roster_set->GenesisHash() != boundary.GenesisHash() ||
+        schedule != boundary.Schedule() ||
+        GetLogicalChainLockId(boundary.GenesisHash(), statement) !=
+            boundary.StatementLogicalId()) {
+        SetError(error, ChainLockVerificationError::INVALID_AUTHORIZATION);
+        return nullptr;
+    }
+    RosterAuthorizationVerificationContext authorization;
+    authorization.admission = RosterAuthorizationAdmission::POW_HISTORY;
+    authorization.predecessor_height = statement.previous_chainlock_height;
+    authorization.predecessor_block_hash = statement.previous_chainlock_hash;
+    authorization.authorization_base = statement.roster_authorization_base;
+    authorization.m_pow_history =
+        std::make_shared<const VerifiedPoWHistoricalBoundary>(boundary);
     return CreateInternal(schedule, std::move(statement),
                           std::move(roster_set), authorization,
                           /*trusted_persistence_rosters=*/false, error);

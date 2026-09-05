@@ -146,6 +146,7 @@ SYSCOIN_TESTS =\
   test/pq_chainlock_collector_tests.cpp \
   test/pq_chainlock_integration_tests.cpp \
   test/pq_chainlock_handler_tests.cpp \
+  test/pq_historical_sync_frontier_tests.cpp \
   test/pq_chainlock_persistence_tests.cpp \
   test/pq_btcc_tests.cpp \
   test/pq_payment_audit_tests.cpp \

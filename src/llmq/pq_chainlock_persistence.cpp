@@ -26,6 +26,22 @@
 
 namespace llmq::pq {
 
+bool HistoricalSyncBoundary::IsStructurallyValid() const noexcept
+{
+    return durable_prior.IsStructurallyValid() && carrier_height >= 0 &&
+           !carrier_hash.IsNull() && receipt.IsStructurallyValid() &&
+           !receipt.IsNull() &&
+           receipt.chainlock_target_height < carrier_height &&
+           coverage_height >= carrier_height && !coverage_hash.IsNull() &&
+           receipt_state.IsStructurallyValid() &&
+           payment_audit_state.IsStructurallyValid() &&
+           receipt_state.latest_chainlock_target_height ==
+               receipt.chainlock_target_height &&
+           receipt_state.latest_receipt_carrier_height == carrier_height &&
+           receipt_state.cursor == receipt.accepted_cursor &&
+           (coverage_height != carrier_height || coverage_hash == carrier_hash);
+}
+
 bool RosterRecoveryPrecommit::IsStructurallyValid() const noexcept
 {
     if (version != ROSTER_RECOVERY_PRECOMMIT_VERSION ||
@@ -490,6 +506,57 @@ struct DiskRecord {
         ::Unserialize(stream, checksum);
     }
 };
+
+struct DiskHistoricalSyncBoundary {
+    static constexpr uint16_t VERSION{1};
+    static constexpr std::size_t FIXED_SIZE{
+        sizeof(uint16_t) + HistoricalSyncBoundary::WIRE_SIZE + 32};
+    uint16_t version{VERSION};
+    HistoricalSyncBoundary boundary;
+    DiskRecord record;
+    uint256 checksum;
+
+    template <typename Stream>
+    void Serialize(Stream& stream) const
+    {
+        ::SerializeMany(stream, version, boundary);
+        WriteCompactSize(stream, ::GetSerializeSize(record));
+        ::SerializeMany(stream, record, checksum);
+    }
+
+    template <typename Stream>
+    void Unserialize(Stream& stream)
+    {
+        if (stream.size() < FIXED_SIZE + DiskRecord::MIN_WIRE_SIZE ||
+            stream.size() > FIXED_SIZE + 9 + DiskRecord::MAX_WIRE_SIZE) {
+            throw std::ios_base::failure("invalid historical sync record size");
+        }
+        ::UnserializeMany(stream, version, boundary);
+        const std::size_t size{ReadCompactSize(stream)};
+        if (size < DiskRecord::MIN_WIRE_SIZE ||
+            size > DiskRecord::MAX_WIRE_SIZE || stream.size() != size + 32) {
+            throw std::ios_base::failure("invalid historical sync certificate size");
+        }
+        std::vector<unsigned char> bytes(size);
+        stream.read(MakeWritableByteSpan(bytes));
+        CDataStream certificate{bytes, SER_DISK, 0};
+        certificate >> record;
+        if (!certificate.empty()) {
+            throw std::ios_base::failure("trailing historical sync certificate bytes");
+        }
+        ::Unserialize(stream, checksum);
+    }
+};
+
+uint256 HistoricalSyncRecordChecksum(const uint256& schema_hash,
+                                    const DiskHistoricalSyncBoundary& record)
+{
+    CHashWriter writer{SER_GETHASH, 0};
+    writer << std::string{"SYS_PQ_HISTORICAL_SYNC_RECORD_V1"}
+           << schema_hash << record.version << record.boundary
+           << record.record.checksum;
+    return writer.GetHash();
+}
 
 struct DiskRecoveryUniverse {
     static constexpr uint16_t VERSION{1};
@@ -985,7 +1052,7 @@ DiskPaymentAuditPresealMarker MakePaymentAuditPresealMarker(
 static_assert(DiskRecord::MAX_WIRE_SIZE < MAX_SIZE);
 static_assert(DiskRecoveryUniverse::MAX_WIRE_SIZE < MAX_SIZE);
 static_assert(RECOVERY_UNIVERSE_DURABLE_OWNER_CAPACITY ==
-              VERIFIED_AUTHORIZATION_BASE_CAPACITY + 3);
+              VERIFIED_AUTHORIZATION_BASE_CAPACITY + 5);
 static_assert(DiskRosterRecoveryPrecommit::WIRE_SIZE == 180);
 static_assert(DiskReceiptArchiveRosterAuthorization::WIRE_SIZE < MAX_SIZE);
 static_assert(DiskBTCCPresealMarker::WIRE_SIZE == 500);
@@ -1292,7 +1359,19 @@ std::unique_ptr<Value> ReadExactValue(CDBWrapper& db, const Key& key)
 
 } // namespace
 
+uint256 GetHistoricalSyncBoundaryHash(
+    const uint256& genesis_hash, const ChainLockFinalityStoreConfig& config,
+    const HistoricalSyncBoundary& boundary)
+{
+    CHashWriter writer{SER_GETHASH, 0};
+    writer << std::string{"SYS_PQ_HISTORICAL_SYNC_BOUNDARY_V1"}
+           << GetSchemaHash(MakeSchema(genesis_hash, config)) << boundary;
+    return writer.GetHash();
+}
+
 struct PQChainLockPersistence::Impl {
+    using HistoricalSyncSlots =
+        std::array<std::optional<DiskHistoricalSyncBoundary>, 2>;
     Impl(DBParams db_params,
          uint256 genesis_hash,
          ChainLockFinalityStoreConfig config)
@@ -1338,6 +1417,17 @@ struct PQChainLockPersistence::Impl {
             schema_hash, record.logical_id, record.witness_id, chainlock,
             record.encoded_roster_context);
         return record;
+    }
+
+    std::optional<DiskRecord> MakeOrdinaryRecord(
+        const FinalChainLock& chainlock,
+        const PreparedChainLockContextPtr& context) const
+    {
+        if (!context || context->Authorization().admission ==
+                            RosterAuthorizationAdmission::POW_HISTORY) {
+            return std::nullopt;
+        }
+        return MakeRecord(chainlock, context);
     }
 
     bool ValidateRecord(DiskRecord& record) const
@@ -1406,6 +1496,28 @@ struct PQChainLockPersistence::Impl {
         return DurableChainLockRecord{
             record.chainlock, *record.decoded_roster_context,
             record.checksum};
+    }
+
+    bool ValidateHistoricalSyncRecord(DiskHistoricalSyncBoundary& disk) const
+    {
+        const auto& boundary{disk.boundary};
+        const auto& statement{disk.record.chainlock.statement};
+        return disk.version == DiskHistoricalSyncBoundary::VERSION &&
+               boundary.IsStructurallyValid() &&
+               ValidateRecord(disk.record) &&
+               IsReceiptableChainLock(disk.record.chainlock, config) &&
+               IsBTCCReceiptCarrierHeight(config.btcc_schedule,
+                                          boundary.carrier_height) &&
+               boundary.receipt.chainlock_target_height == statement.height &&
+               boundary.receipt.chainlock_target_hash == statement.block_hash &&
+               boundary.receipt.chainlock_logical_id == disk.record.logical_id &&
+               boundary.receipt.accepted_cursor == statement.accepted_btcc_cursor &&
+               (statement.roster_transition ==
+                    RosterAuthorizationTransitionKind::INITIALIZE ||
+                static_cast<int64_t>(statement.height) +
+                    config.btcc_schedule.nevm_injection_lag ==
+                    boundary.carrier_height) &&
+               disk.checksum == HistoricalSyncRecordChecksum(schema_hash, disk);
     }
 
     FinalChainLockRecordMetadata Metadata(const DiskRecord& record) const
@@ -1561,7 +1673,8 @@ struct PQChainLockPersistence::Impl {
         const std::optional<PaymentAuditSealContextCapsule>&
             next_payment_audit_seal_context,
         RecoveryUniverseCapsulePtr supplied,
-        ChainLockPersistenceError* error) const
+        ChainLockPersistenceError* error,
+        const HistoricalSyncSlots* next_historical_sync = nullptr) const
         EXCLUSIVE_LOCKS_REQUIRED(mutex)
     {
         std::map<uint256, RecoveryRosterAuthoritySource> required;
@@ -1573,6 +1686,13 @@ struct PQChainLockPersistence::Impl {
         if (!collect_record(next_best) || !collect_record(next_unsealed)) {
             SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
             return std::nullopt;
+        }
+        for (const auto& sync : next_historical_sync
+                                    ? *next_historical_sync : historical_sync) {
+            if (sync && !collect_record(&sync->record)) {
+                SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
+                return std::nullopt;
+            }
         }
         for (const auto& [_, record] : next_authorization_bases) {
             if (record == nullptr || !collect_record(record)) {
@@ -1753,7 +1873,9 @@ struct PQChainLockPersistence::Impl {
             Metadata(predecessor)};
     }
 
-    bool HasExactAuthorizationBase(const DiskRecord& owner) const
+    bool HasExactAuthorizationBase(
+        const DiskRecord& owner,
+        const HistoricalSyncSlots* proposed_historical_sync = nullptr) const
         EXCLUSIVE_LOCKS_REQUIRED(mutex)
     {
         const auto& statement{owner.chainlock.statement};
@@ -1770,8 +1892,28 @@ struct PQChainLockPersistence::Impl {
         if (best && matches(*best)) return true;
         if (unsealed && matches(*unsealed)) return true;
         const auto retained{authorization_bases.find(identity.logical_id)};
-        return retained != authorization_bases.end() &&
-               matches(retained->second);
+        if (retained != authorization_bases.end() && matches(retained->second)) return true;
+        for (const auto& sync : proposed_historical_sync
+                                   ? *proposed_historical_sync : historical_sync) {
+            if (!sync || !matches(sync->record) ||
+                statement.height <= sync->boundary.coverage_height) continue;
+            const auto& prior{sync->record.chainlock.statement};
+            RosterAuthorizationTransition transition;
+            transition.kind = statement.roster_transition;
+            transition.target_height = statement.height;
+            transition.target_block_hash = statement.block_hash;
+            transition.predecessor_height = statement.previous_chainlock_height;
+            transition.predecessor_block_hash = statement.previous_chainlock_hash;
+            transition.authorization_base = identity;
+            transition.previous = RosterAuthorizationPriorState{
+                prior.roster_authorization_state_hash, prior.roster_beacons};
+            transition.new_window = statement.roster_beacons;
+            const auto expected{GetRosterAuthorizationStateHash(genesis_hash, transition)};
+            // This checks C's durable dependency, not B's admission. The
+            // dedicated record never enters the ordinary startup archive.
+            if (expected && *expected == statement.roster_authorization_state_hash) return true;
+        }
+        return false;
     }
 
     void InitializeOrLoad() EXCLUSIVE_LOCKS_REQUIRED(mutex)
@@ -1788,6 +1930,7 @@ struct PQChainLockPersistence::Impl {
         bool found_roster_recovery_precommit{false};
         bool found_receipt_archive_authorization{false};
         bool found_payment_audit_seal_context{false};
+        std::array<bool, 2> found_historical_sync{};
         std::set<uint256> authorization_base_witnesses;
         {
             std::unique_ptr<CDBIterator> iterator{db.NewIterator()};
@@ -1910,6 +2053,14 @@ struct PQChainLockPersistence::Impl {
                             "duplicate payment-audit seal context");
                     }
                     found_payment_audit_seal_context = true;
+                } else if (key.type == PQ_CHAINLOCK_PERSISTENCE_HISTORICAL_SYNC_KEY ||
+                           key.type == PQ_CHAINLOCK_PERSISTENCE_HISTORICAL_SYNC_FALLBACK_KEY) {
+                    const std::size_t slot{
+                        key.type == PQ_CHAINLOCK_PERSISTENCE_HISTORICAL_SYNC_KEY ? 0U : 1U};
+                    if (found_historical_sync[slot]) {
+                        throw std::runtime_error("duplicate historical sync boundary");
+                    }
+                    found_historical_sync[slot] = true;
                 } else {
                     throw std::runtime_error(
                         "unknown PQ ChainLock persistence key");
@@ -1956,6 +2107,25 @@ struct PQChainLockPersistence::Impl {
             }
             best = std::move(*record);
         }
+
+        for (std::size_t slot{0}; slot < historical_sync.size(); ++slot) {
+            if (!found_historical_sync[slot]) continue;
+            const DiskKey key{slot == 0
+                ? PQ_CHAINLOCK_PERSISTENCE_HISTORICAL_SYNC_KEY
+                : PQ_CHAINLOCK_PERSISTENCE_HISTORICAL_SYNC_FALLBACK_KEY};
+            auto record{ReadExactValue<DiskHistoricalSyncBoundary>(db, key)};
+            if (!record || !ValidateHistoricalSyncRecord(*record)) {
+                throw std::runtime_error("corrupt historical sync boundary");
+            }
+            historical_sync[slot] = std::move(*record);
+        }
+        if (historical_sync[1] &&
+            (!historical_sync[0] ||
+             historical_sync[1]->boundary.carrier_height >=
+                 historical_sync[0]->boundary.carrier_height)) {
+            throw std::runtime_error("invalid historical sync fallback order");
+        }
+        if (historical_sync[0]) historical_sync_revision = 1;
 
         if (found_roster_recovery_precommit) {
             const DiskKey precommit_key{
@@ -2258,7 +2428,8 @@ struct PQChainLockPersistence::Impl {
                      const ReceiptArchiveRosterAuthorization*
                          consume_receipt_archive_authorization = nullptr,
                      bool verified_reset_convergence = false,
-                     RecoveryUniverseCapsulePtr recovery_universe = nullptr)
+                     RecoveryUniverseCapsulePtr recovery_universe = nullptr,
+                     const VerifiedHistoricalSyncSuccessor* historical_successor = nullptr)
         EXCLUSIVE_LOCKS_REQUIRED(mutex)
     {
         SetError(error, ChainLockPersistenceError::NONE);
@@ -2284,9 +2455,46 @@ struct PQChainLockPersistence::Impl {
         }
 
         const auto transition{chainlock.statement.roster_transition};
+        bool supersedes_initialization_precommit{false};
+        if (historical_successor) {
+            const auto& boundary{historical_successor->Boundary()};
+            if (!best && roster_recovery_precommit && context &&
+                context->Statement() == chainlock.statement &&
+                boundary.IsStructurallyValid() && boundary.durable_prior.IsNull() &&
+                historical_successor->SlotsRevision() == historical_sync_revision &&
+                historical_successor->Precommit() == *roster_recovery_precommit &&
+                historical_successor->CandidateLogicalId() == chainlock.GetLogicalId(genesis_hash) &&
+                chainlock.statement.height > boundary.coverage_height &&
+                transition != RosterAuthorizationTransitionKind::INITIALIZE &&
+                context->Authorization().admission ==
+                    (transition == RosterAuthorizationTransitionKind::RECOVER
+                         ? RosterAuthorizationAdmission::RECOVER
+                         : RosterAuthorizationAdmission::LIVE) &&
+                context->Authorization().authorization_base ==
+                    chainlock.statement.roster_authorization_base) {
+                for (const auto& sync : historical_sync) {
+                    if (!sync || sync->boundary != boundary ||
+                        Metadata(sync->record).AuthorizationBase() !=
+                            chainlock.statement.roster_authorization_base) continue;
+                    const auto& prior{sync->record.chainlock.statement};
+                    supersedes_initialization_precommit =
+                        context->Authorization().previous ==
+                            std::optional<RosterAuthorizationPriorState>{
+                                RosterAuthorizationPriorState{
+                                    prior.roster_authorization_state_hash,
+                                    prior.roster_beacons}};
+                    break;
+                }
+            }
+            if (!supersedes_initialization_precommit) {
+                SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
+                return false;
+            }
+        }
         if ((!consume_recovery_precommit &&
              transition == RosterAuthorizationTransitionKind::INITIALIZE) ||
-            (!consume_recovery_precommit && roster_recovery_precommit) ||
+            (!consume_recovery_precommit && roster_recovery_precommit &&
+             !supersedes_initialization_precommit) ||
             (consume_recovery_precommit &&
              (transition != RosterAuthorizationTransitionKind::INITIALIZE ||
               catchup))) {
@@ -2294,7 +2502,7 @@ struct PQChainLockPersistence::Impl {
             return false;
         }
 
-        auto candidate_record{MakeRecord(chainlock, context)};
+        auto candidate_record{MakeOrdinaryRecord(chainlock, context)};
         if (!candidate_record) {
             SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
             return false;
@@ -2436,6 +2644,31 @@ struct PQChainLockPersistence::Impl {
                     authorization_base = &retained->second;
                 }
             }
+            if (authorization_base == nullptr &&
+                context->Authorization().admission !=
+                    RosterAuthorizationAdmission::POW_HISTORY &&
+                context->Authorization().admission !=
+                    RosterAuthorizationAdmission::TRUSTED_PERSISTENCE &&
+                context->Authorization().authorization_base ==
+                    authorization_transition.authorization_base) {
+                for (const auto& sync : historical_sync) {
+                    if (!sync || Metadata(sync->record).AuthorizationBase() !=
+                                     authorization_transition.authorization_base) {
+                        continue;
+                    }
+                    const auto& state{sync->record.chainlock.statement};
+                    if (context->Authorization().previous ==
+                        std::optional<RosterAuthorizationPriorState>{
+                            RosterAuthorizationPriorState{
+                                state.roster_authorization_state_hash,
+                                state.roster_beacons}}) {
+                        // C was independently verified under this exact scoped
+                        // base; B itself never becomes an ordinary DB import.
+                        authorization_base = &sync->record;
+                        break;
+                    }
+                }
+            }
             if (authorization_base == nullptr) {
                 SetError(error,
                          ChainLockPersistenceError::INVALID_CHAINLOCK);
@@ -2483,7 +2716,7 @@ struct PQChainLockPersistence::Impl {
             !best || candidate.chainlock.statement.height >
                          best->chainlock.statement.height};
         const bool erase_recovery_precommit{
-            (consume_recovery_precommit &&
+            ((consume_recovery_precommit || supersedes_initialization_precommit) &&
              roster_recovery_precommit.has_value() && advances_best)};
         const bool cursor_regresses{
             best && !IsDurableBTCCursorMonotonic(
@@ -2925,7 +3158,7 @@ struct PQChainLockPersistence::Impl {
             return false;
         }
 
-        auto candidate_record{MakeRecord(chainlock, context)};
+        auto candidate_record{MakeOrdinaryRecord(chainlock, context)};
         if (!candidate_record) {
             SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
             return false;
@@ -3122,7 +3355,7 @@ struct PQChainLockPersistence::Impl {
                                    : ChainLockPersistenceError::INVALID_CHAINLOCK);
             return false;
         }
-        auto candidate_record{MakeRecord(chainlock, context)};
+        auto candidate_record{MakeOrdinaryRecord(chainlock, context)};
         if (!candidate_record) {
             SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
             return false;
@@ -3208,7 +3441,7 @@ struct PQChainLockPersistence::Impl {
             return false;
         }
 
-        auto candidate_record{MakeRecord(chainlock, context)};
+        auto candidate_record{MakeOrdinaryRecord(chainlock, context)};
         if (!candidate_record) {
             SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
             return false;
@@ -3541,6 +3774,161 @@ struct PQChainLockPersistence::Impl {
             PaymentAuditPresealState{}, error);
     }
 
+    bool WriteHistoricalSyncSlots(HistoricalSyncSlots next,
+                                 RecoveryUniverseCapsulePtr recovery_universe,
+                                 ChainLockPersistenceError* error)
+        EXCLUSIVE_LOCKS_REQUIRED(mutex)
+    {
+        const auto removes_live_base = [&](const std::optional<DiskRecord>& owner)
+            EXCLUSIVE_LOCKS_REQUIRED(mutex) {
+            return owner && HasExactAuthorizationBase(*owner) &&
+                !HasExactAuthorizationBase(*owner, &next);
+        };
+        // Carrier coverage permits retiring serving history, not the only B
+        // still needed to reconstruct a durable owner's authorization edge.
+        if (removes_live_base(best) || removes_live_base(unsealed)) {
+            SetError(error, ChainLockPersistenceError::HEIGHT_CONFLICT);
+            return false;
+        }
+        AuthorizationBaseView authorization_view;
+        for (const auto& [id, record] : authorization_bases) {
+            authorization_view.emplace(id, &record);
+        }
+        const auto mutation{PrepareRecoveryUniverseMutation(
+            best ? &*best : nullptr, unsealed ? &*unsealed : nullptr,
+            authorization_view, receipt_archive_authorization,
+            payment_audit_seal_context, std::move(recovery_universe), error, &next)};
+        if (!mutation) return false;
+        try {
+            CDBBatch batch{db};
+            if (!ApplyRecoveryUniverseMutation(batch, *mutation, error)) return false;
+            for (std::size_t slot{0}; slot < next.size(); ++slot) {
+                const DiskKey key{slot == 0
+                    ? PQ_CHAINLOCK_PERSISTENCE_HISTORICAL_SYNC_KEY
+                    : PQ_CHAINLOCK_PERSISTENCE_HISTORICAL_SYNC_FALLBACK_KEY};
+                if (next[slot]) batch.Write(key, *next[slot]);
+                else batch.Erase(key);
+            }
+            if (!db.WriteBatch(batch, /*fSync=*/true)) {
+                failed = true;
+                SetError(error, ChainLockPersistenceError::IO_FAILURE);
+                return false;
+            }
+        } catch (const std::exception&) {
+            failed = true;
+            SetError(error, ChainLockPersistenceError::IO_FAILURE);
+            return false;
+        }
+        historical_sync = std::move(next);
+        ++historical_sync_revision;
+        CommitRecoveryUniverseMutation(*mutation);
+        return true;
+    }
+
+    bool PersistHistoricalSyncBoundary(
+        const FinalChainLock& chainlock, const PreparedChainLockContextPtr& context,
+        const HistoricalSyncBoundary& boundary, uint64_t expected_revision,
+        const std::optional<FinalChainLockRecordMetadata>& covering_finality,
+        RecoveryUniverseCapsulePtr recovery_universe,
+        ChainLockPersistenceError* error) EXCLUSIVE_LOCKS_REQUIRED(mutex)
+    {
+        SetError(error, ChainLockPersistenceError::NONE);
+        if (failed || historical_sync_revision == std::numeric_limits<uint64_t>::max()) {
+            SetError(error, ChainLockPersistenceError::IO_FAILURE);
+            return false;
+        }
+        if (expected_revision != historical_sync_revision) {
+            SetError(error, ChainLockPersistenceError::HEIGHT_CONFLICT);
+            return false;
+        }
+        if (!context || !boundary.IsStructurallyValid() ||
+            boundary.durable_prior != (best ? Metadata(*best).AuthorizationBase()
+                                           : RosterAuthorizationBaseIdentity{}) ||
+            (covering_finality && (!best || !MatchesMetadata(*best, *covering_finality)))) {
+            SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
+            return false;
+        }
+        auto record{MakeRecord(chainlock, context)};
+        if (!record) {
+            SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
+            return false;
+        }
+        if (context->Authorization().admission == RosterAuthorizationAdmission::POW_HISTORY) {
+            if (context->Authorization().PoWHistoryBoundaryCommitment() !=
+                GetHistoricalSyncBoundaryHash(genesis_hash, config, boundary)) {
+                SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
+                return false;
+            }
+        } else {
+            const auto retained{FindExactRetainedRecord(Metadata(*record))};
+            if (!retained || !IsExactRecord(*retained, *record)) {
+                SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
+                return false;
+            }
+        }
+        DiskHistoricalSyncBoundary incoming;
+        incoming.boundary = boundary;
+        incoming.record = std::move(*record);
+        incoming.checksum = HistoricalSyncRecordChecksum(schema_hash, incoming);
+        if (!ValidateHistoricalSyncRecord(incoming)) {
+            SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
+            return false;
+        }
+        const auto& current{historical_sync[0]};
+        if (current && current->checksum == incoming.checksum) return true;
+        HistoricalSyncSlots next{historical_sync};
+        const bool same_receipt{current &&
+            current->boundary.carrier_height == boundary.carrier_height &&
+            current->boundary.carrier_hash == boundary.carrier_hash &&
+            current->boundary.receipt == boundary.receipt};
+        if (same_receipt) {
+            if (boundary.coverage_height < current->boundary.coverage_height) {
+                SetError(error, ChainLockPersistenceError::STALE_HEIGHT);
+                return false;
+            }
+        } else if (current) {
+            if (boundary.carrier_height <= current->boundary.carrier_height ||
+                (historical_sync[1] &&
+                 (!covering_finality || covering_finality->statement.height <
+                                           current->boundary.carrier_height))) {
+                SetError(error, ChainLockPersistenceError::STALE_HEIGHT);
+                return false;
+            }
+            // The handler proves ancestry against this exact durable winner.
+            // B's signature covers its target, not its later receipt carrier.
+            next[1] = current;
+        }
+        next[0] = std::move(incoming);
+        return WriteHistoricalSyncSlots(std::move(next), std::move(recovery_universe), error);
+    }
+
+    bool InvalidateHistoricalSyncBoundary(const uint256& record_identity,
+                                         uint64_t expected_revision,
+                                         ChainLockPersistenceError* error)
+        EXCLUSIVE_LOCKS_REQUIRED(mutex)
+    {
+        SetError(error, ChainLockPersistenceError::NONE);
+        if (failed || historical_sync_revision == std::numeric_limits<uint64_t>::max()) {
+            SetError(error, ChainLockPersistenceError::IO_FAILURE);
+            return false;
+        }
+        if (record_identity.IsNull() || expected_revision != historical_sync_revision) {
+            SetError(error, ChainLockPersistenceError::HEIGHT_CONFLICT);
+            return false;
+        }
+        HistoricalSyncSlots next{historical_sync};
+        if (next[0] && next[0]->checksum == record_identity) {
+            next[0] = std::move(next[1]);
+            next[1].reset();
+        } else if (next[1] && next[1]->checksum == record_identity) {
+            next[1].reset();
+        } else {
+            SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
+            return false;
+        }
+        return WriteHistoricalSyncSlots(std::move(next), nullptr, error);
+    }
+
     const uint256 genesis_hash;
     const ChainLockFinalityStoreConfig config;
     const DiskSchema schema;
@@ -3551,6 +3939,8 @@ struct PQChainLockPersistence::Impl {
     std::optional<DiskRecord> best GUARDED_BY(mutex);
     std::optional<DiskRecord> unsealed GUARDED_BY(mutex);
     std::map<uint256, DiskRecord> authorization_bases GUARDED_BY(mutex);
+    HistoricalSyncSlots historical_sync GUARDED_BY(mutex);
+    uint64_t historical_sync_revision GUARDED_BY(mutex){0};
     std::map<uint256, RecoveryUniverseCapsulePtr> recovery_universes
         GUARDED_BY(mutex);
     std::optional<ReceiptArchiveRosterAuthorization>
@@ -3657,6 +4047,45 @@ PQChainLockPersistence::LoadAuthorizationBase(
     return m_impl->PublicRecord(found->second);
 }
 
+std::vector<DurableHistoricalSyncBoundary>
+PQChainLockPersistence::LoadHistoricalSyncBoundaries(uint64_t* revision) const
+{
+    LOCK(m_impl->mutex);
+    if (revision != nullptr) *revision = m_impl->historical_sync_revision;
+    std::vector<DurableHistoricalSyncBoundary> result;
+    result.reserve(2);
+    for (const auto& sync : m_impl->historical_sync) {
+        if (!sync) continue;
+        result.push_back(DurableHistoricalSyncBoundary{
+            sync->boundary,
+            DurableChainLockRecord{sync->record.chainlock,
+                                   *sync->record.decoded_roster_context,
+                                   sync->checksum}});
+    }
+    return result;
+}
+
+bool PQChainLockPersistence::PersistHistoricalSyncBoundary(
+    const FinalChainLock& chainlock, const PreparedChainLockContextPtr& context,
+    const HistoricalSyncBoundary& boundary, uint64_t expected_revision,
+    const std::optional<FinalChainLockRecordMetadata>& covering_finality,
+    RecoveryUniverseCapsulePtr recovery_universe,
+    ChainLockPersistenceError* error)
+{
+    LOCK(m_impl->mutex);
+    return m_impl->PersistHistoricalSyncBoundary(
+        chainlock, context, boundary, expected_revision, covering_finality,
+        std::move(recovery_universe), error);
+}
+
+bool PQChainLockPersistence::InvalidateHistoricalSyncBoundary(
+    const uint256& record_identity, uint64_t expected_revision,
+    ChainLockPersistenceError* error)
+{
+    LOCK(m_impl->mutex);
+    return m_impl->InvalidateHistoricalSyncBoundary(record_identity, expected_revision, error);
+}
+
 std::optional<std::vector<RecoveryRosterRetentionDependency>>
 PQChainLockPersistence::LoadRecoveryRosterRetentionDependencies() const
 {
@@ -3683,6 +4112,9 @@ PQChainLockPersistence::LoadRecoveryRosterRetentionDependencies() const
     for (const auto& [_, record] : m_impl->authorization_bases) {
         if (!inspect(record.chainlock.statement)) return std::nullopt;
     }
+    for (const auto& sync : m_impl->historical_sync) {
+        if (sync && !inspect(sync->record.chainlock.statement)) return std::nullopt;
+    }
     if (m_impl->receipt_archive_authorization &&
         (!inspect(m_impl->receipt_archive_authorization->owner.statement) ||
          !inspect(m_impl->receipt_archive_authorization->predecessor
@@ -3703,6 +4135,11 @@ PQChainLockPersistence::OldestAuthorizationBaseHeight() const
     std::optional<int32_t> oldest;
     for (const auto& [_, record] : m_impl->authorization_bases) {
         const int32_t height{record.chainlock.statement.height};
+        oldest = oldest ? std::min(*oldest, height) : height;
+    }
+    for (const auto& sync : m_impl->historical_sync) {
+        if (!sync) continue;
+        const int32_t height{sync->record.chainlock.statement.height};
         oldest = oldest ? std::min(*oldest, height) : height;
     }
     return oldest;
@@ -3768,6 +4205,22 @@ bool PQChainLockPersistence::PersistBest(
         std::nullopt, /*consume_recovery_precommit=*/false, nullptr,
         /*verified_reset_convergence=*/false,
         std::move(recovery_universe));
+}
+
+bool PQChainLockPersistence::PersistBestAfterHistoricalSync(
+    const FinalChainLock& chainlock,
+    const PreparedChainLockContextPtr& context,
+    const VerifiedHistoricalSyncSuccessor& proof,
+    ChainLockPersistenceError* error,
+    std::optional<PaymentAuditSealContextCapsule> payment_audit_seal_context,
+    RecoveryUniverseCapsulePtr recovery_universe)
+{
+    LOCK(m_impl->mutex);
+    return m_impl->PersistBest(
+        chainlock, context, error, std::move(payment_audit_seal_context),
+        /*catchup=*/true, std::nullopt, /*consume_recovery_precommit=*/false,
+        nullptr, /*verified_reset_convergence=*/false,
+        std::move(recovery_universe), &proof);
 }
 
 bool PQChainLockPersistence::PersistBestCoveringReceiptArchive(

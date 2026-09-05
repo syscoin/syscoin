@@ -23,6 +23,10 @@
 #include <utility>
 #include <vector>
 
+namespace llmq {
+class CChainLocksHandler;
+}
+
 namespace llmq::pq {
 
 class FrozenQuorumRosterCache;
@@ -86,6 +90,8 @@ enum class RosterAuthorizationAdmission : uint8_t {
     RECOVER = 2,
     /** Exact latest winner loaded from this node's authenticated fsynced DB. */
     TRUSTED_PERSISTENCE = 3,
+    /** Exact receipt-selected historical statement; never a live admission. */
+    POW_HISTORY = 4,
 };
 
 /** Local deployment constants that make reset admission objective. */
@@ -97,6 +103,31 @@ struct RosterResetVerificationPolicy {
     [[nodiscard]] bool IsStructurallyValid() const noexcept;
     friend bool operator==(const RosterResetVerificationPolicy&,
                            const RosterResetVerificationPolicy&) = default;
+};
+
+/**
+ * Proof of the handler's independent selected-history checks. The verifier
+ * cannot manufacture one from a peer's statement or an arbitrary hash.
+ */
+class VerifiedPoWHistoricalBoundary final {
+public:
+    [[nodiscard]] const uint256& GenesisHash() const noexcept;
+    [[nodiscard]] const ChainLockScheduleConfig& Schedule() const noexcept;
+    [[nodiscard]] const uint256& StatementLogicalId() const noexcept;
+    [[nodiscard]] const uint256& BoundaryCommitment() const noexcept;
+
+private:
+    VerifiedPoWHistoricalBoundary(
+        const uint256& genesis_hash,
+        ChainLockScheduleConfig schedule,
+        const uint256& statement_logical_id,
+        const uint256& boundary_commitment);
+
+    uint256 m_genesis_hash;
+    ChainLockScheduleConfig m_schedule;
+    uint256 m_statement_logical_id;
+    uint256 m_boundary_commitment;
+    friend class ::llmq::CChainLocksHandler;
 };
 
 /**
@@ -120,6 +151,19 @@ struct RosterAuthorizationVerificationContext {
      * caller cannot authorize LIVE by supplying only a matching state hash.
      */
     std::optional<NormalRosterAuthorizationInput> normal_input;
+
+    [[nodiscard]] bool HasPoWHistoryAuthorization(
+        const uint256& genesis_hash,
+        const ChainLockStatement& statement) const;
+    [[nodiscard]] bool HasPoWHistorySchedule(
+        const ChainLockScheduleConfig& schedule) const noexcept;
+    [[nodiscard]] uint256 PoWHistoryBoundaryCommitment() const noexcept;
+
+private:
+    // A raw admission enum cannot grant historical trust. Only the handler's
+    // independently selected/replayed boundary can mint this exact binding.
+    std::shared_ptr<const VerifiedPoWHistoricalBoundary> m_pow_history;
+    friend class PreparedChainLockContext;
 };
 
 /**
@@ -338,6 +382,14 @@ public:
 
 private:
     [[nodiscard]] static std::shared_ptr<const PreparedChainLockContext>
+    CreateFromPoWHistory(
+        ChainLockScheduleConfig schedule,
+        ChainLockStatement statement,
+        VerifiedRosterSetPtr roster_set,
+        const VerifiedPoWHistoricalBoundary& boundary,
+        ChainLockVerificationError* error = nullptr);
+
+    [[nodiscard]] static std::shared_ptr<const PreparedChainLockContext>
     CreateInternal(
         ChainLockScheduleConfig schedule,
         ChainLockStatement statement,
@@ -361,6 +413,7 @@ private:
     uint8_t m_authorization_mask{0};
 
     friend class ChainLockStoreTestContextFactory;
+    friend class ::llmq::CChainLocksHandler;
 };
 
 using PreparedChainLockContextPtr =

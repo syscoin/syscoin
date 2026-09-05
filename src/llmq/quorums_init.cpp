@@ -157,8 +157,16 @@ void DestroyLLMQSystem()
     quorumBlockProcessor = nullptr;
 }
 
+// SYSCOIN: Check the startup boundary before entering the service's negative
+// lock contract without imposing it on the unrelated node/GUI startup APIs.
+static void AssertFinalityStartupUnlocked() ASSERT_EXCLUSIVE_LOCK(!cs_main)
+{
+    AssertLockNotHeld(cs_main);
+}
+
 void StartLLMQSystem()
 {
+    AssertFinalityStartupUnlocked();
     if (chainLocksHandler) {
         chainLocksHandler->Start();
     }

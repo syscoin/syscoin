@@ -904,6 +904,15 @@ public:
             target_is_active, target_btcp_prev);
     }
 
+    static const CBlockIndex* HistoricalSelectionTip(
+        const CBlockIndex& active_tip,
+        const pq::ChainLockScheduleConfig& schedule,
+        std::optional<int32_t> coverage_height)
+    {
+        return CChainLocksHandler::ResolvePoWHistoricalSelectionTip(
+            active_tip, schedule, coverage_height);
+    }
+
     static bool HistoricalCapabilityMatches(
         uint8_t verified_admission,
         const uint256& verified_marker,
@@ -1252,6 +1261,41 @@ const auto ACCEPT_LIVE_SIGNING_CERTIFICATE = [](
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(pq_chainlock_handler_tests, BasicTestingSetup)
+
+BOOST_AUTO_TEST_CASE(historical_selection_keeps_frozen_active_ancestry)
+{
+    using Access = llmq::test::CChainLocksHandlerTestAccess;
+    const auto schedule{llmq::pq::MakeChainLockScheduleConfig(0)};
+    BOOST_REQUIRE(schedule);
+    LiveSigningIndexChain chain{2'101};
+    constexpr int32_t COVERAGE{2'000};
+    const auto* selected{Access::HistoricalSelectionTip(
+        chain.At(2'010), *schedule, COVERAGE)};
+    BOOST_REQUIRE(selected);
+    BOOST_CHECK(selected == &chain.At(2'010));
+    BOOST_CHECK(Access::HistoricalSelectionTip(
+        chain.At(2'100), *schedule, COVERAGE) == selected);
+    BOOST_CHECK(Access::HistoricalSelectionTip(
+        chain.At(2'100), *schedule, std::nullopt) == &chain.At(2'100));
+    BOOST_CHECK(!Access::HistoricalSelectionTip(
+        chain.At(2'009), *schedule, COVERAGE));
+    BOOST_CHECK(!Access::HistoricalSelectionTip(
+        chain.At(2'100), *schedule, COVERAGE + 1));
+    BOOST_CHECK(!Access::HistoricalSelectionTip(
+        chain.At(2'100), *schedule, -1));
+    BOOST_CHECK(!Access::HistoricalSelectionTip(
+        chain.At(2'100), *schedule, std::numeric_limits<int32_t>::max()));
+
+    LiveSigningIndexChain sibling{2'101};
+    sibling.RehashFrom(COVERAGE, 200'000);
+    const auto* replaced{Access::HistoricalSelectionTip(
+        sibling.At(2'100), *schedule, COVERAGE)};
+    BOOST_REQUIRE(replaced);
+    // The selector must rederive from the current branch, so the validator's
+    // exact frozen-boundary comparison rejects a replaced supporting prefix.
+    BOOST_CHECK(replaced->GetAncestor(COVERAGE)->GetBlockHash() !=
+                selected->GetAncestor(COVERAGE)->GetBlockHash());
+}
 
 BOOST_AUTO_TEST_CASE(historical_reset_admission_distinguishes_initialize_and_recover)
 {
@@ -5429,11 +5473,84 @@ BOOST_FIXTURE_TEST_CASE(
     BOOST_CHECK(retained_catchup->context.special_transactions_validated);
     BOOST_CHECK(retained_catchup->context.btcc_transition_validated);
 
+    // Diagnostic: the receipt-selected authorization base is fully verified
+    // locally, but is one state edge ahead of the durable winner. The same
+    // otherwise-valid catch-up is rejected until that base itself becomes the
+    // durable winner.
+    constexpr int32_t KEEP_CARRIER{CANDIDATE_HEIGHT +
+        static_cast<int32_t>(PQ_BTCC_NEVM_LAG)};
+    BTCCReceipt candidate_receipt;
+    candidate_receipt.chainlock_target_height = CANDIDATE_HEIGHT;
+    candidate_receipt.chainlock_target_hash =
+        candidate.statement.block_hash;
+    candidate_receipt.chainlock_logical_id =
+        candidate.GetLogicalId(genesis);
+    candidate_receipt.accepted_cursor = base_cursor;
+    BOOST_REQUIRE(candidate_receipt.IsStructurallyValid());
+    const auto candidate_receipted_state{ApplyBTCCReceiptState(
+        genesis, config->chainlock_schedule, config->btcc_schedule,
+        config->activation_predecessor_height, KEEP_CARRIER,
+        chain[KEEP_CARRIER]->GetBlockHash(), *receipted_state,
+        candidate_receipt)};
+    BOOST_REQUIRE(candidate_receipted_state);
+    for (int32_t height{KEEP_CARRIER}; height <= TIP_HEIGHT; ++height) {
+        chain[height]->pqBTCCReceiptCursorHeight =
+            candidate_receipted_state->cursor.sys_height;
+        chain[height]->pqBTCCReceiptCursorSysHash =
+            candidate_receipted_state->cursor.sys_hash;
+        chain[height]->pqBTCCReceiptCursorBTCHash =
+            candidate_receipted_state->cursor.btc_hash;
+        chain[height]->pqBTCCReceiptStateHash =
+            candidate_receipted_state->cumulative_hash;
+        chain[height]->pqBTCCReceiptLatestTargetHeight =
+            candidate_receipted_state->latest_chainlock_target_height;
+        chain[height]->pqBTCCReceiptLatestCarrierHeight =
+            candidate_receipted_state->latest_receipt_carrier_height;
+    }
+    chain[KEEP_CARRIER]->pqBTCCReceiptLogicalId =
+        candidate_receipt.chainlock_logical_id;
+
+    const int32_t forward_height{KEEP_CARRIER +
+        static_cast<int32_t>(config->chainlock_schedule.sign_lag)};
+    auto forward{MakeCatchupChainLock(
+        forward_height,
+        forward_height - static_cast<int32_t>(PQ_CL_PERIOD),
+        chain[forward_height - static_cast<int32_t>(PQ_CL_PERIOD)]
+            ->GetBlockHash(),
+        925'050)};
+    forward.statement.block_hash = chain[forward_height]->GetBlockHash();
+    forward.statement.payment_probation_state_hash = probation_root;
+    forward.statement.previous_btcc_cursor = base_cursor;
+    forward.statement.accepted_btcc_cursor = base_cursor;
+    forward.statement.btcc_advance = BTCCAdvance::KEEP;
+    forward.statement.btcc_receipt_state = *candidate_receipted_state;
+    set_exact_continuation(forward, candidate);
+    BOOST_REQUIRE(forward.IsStructurallyValid());
+
+    const auto forward_objective{Access::ObjectiveRosterAuthorization(
+        *handler, *chain[forward_height])};
+    BOOST_REQUIRE(forward_objective);
+    BOOST_REQUIRE(forward_objective->base);
+    BOOST_CHECK(forward_objective->mode ==
+                ObjectiveRosterAuthorizationMode::NORMAL);
+    const RosterAuthorizationBaseIdentity candidate_base{
+        candidate.statement.height, candidate.statement.block_hash,
+        candidate.GetLogicalId(genesis)};
+    BOOST_CHECK(*forward_objective->base == candidate_base);
+    const auto old_durable{store->GetBestRecord()};
+    BOOST_REQUIRE(old_durable);
+    BOOST_CHECK_EQUAL(old_durable->metadata.statement.height, CURRENT_HEIGHT);
+    BOOST_CHECK(candidate.statement.height >
+                old_durable->metadata.statement.height);
+    BOOST_CHECK(candidate.statement.height < forward.statement.height);
+    BOOST_CHECK(!Access::StateAdvancingAuthorizationBaseAdmissible(
+        *handler, ChainLockCandidateAdmission::CATCHUP, forward));
+
     // A scheduled receipt may carry an exact KEEP certificate. Its statement
     // is bound to the carrier-parent receipt state just like ADVANCE.
     install(*store, candidate);
-    constexpr int32_t KEEP_CARRIER{CANDIDATE_HEIGHT +
-        static_cast<int32_t>(PQ_BTCC_NEVM_LAG)};
+    BOOST_CHECK(Access::StateAdvancingAuthorizationBaseAdmissible(
+        *handler, ChainLockCandidateAdmission::CATCHUP, forward));
     const auto keep_receipt{Access::BTCCReceiptForCarrier(
         *handler, KEEP_CARRIER, *chain[KEEP_CARRIER - 1])};
     BOOST_REQUIRE(!keep_receipt.IsNull());
@@ -5442,6 +5559,22 @@ BOOST_FIXTURE_TEST_CASE(
     BOOST_CHECK(keep_receipt.accepted_cursor == base_cursor);
     BOOST_CHECK(Access::IsVerifiedBTCCReceipt(
         *handler, keep_receipt, *chain[KEEP_CARRIER]));
+
+    for (int32_t height{KEEP_CARRIER}; height <= TIP_HEIGHT; ++height) {
+        chain[height]->pqBTCCReceiptCursorHeight =
+            receipted_state->cursor.sys_height;
+        chain[height]->pqBTCCReceiptCursorSysHash =
+            receipted_state->cursor.sys_hash;
+        chain[height]->pqBTCCReceiptCursorBTCHash =
+            receipted_state->cursor.btc_hash;
+        chain[height]->pqBTCCReceiptStateHash =
+            receipted_state->cumulative_hash;
+        chain[height]->pqBTCCReceiptLatestTargetHeight =
+            receipted_state->latest_chainlock_target_height;
+        chain[height]->pqBTCCReceiptLatestCarrierHeight =
+            receipted_state->latest_receipt_carrier_height;
+    }
+    chain[KEEP_CARRIER]->pqBTCCReceiptLogicalId.SetNull();
 
     Access::ResetFinalityStoreWithContext(*handler, store_context);
     store = Access::Store(*handler);

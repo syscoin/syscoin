@@ -47,11 +47,12 @@ public:
         ChainLockScheduleConfig schedule,
         const ChainLockStatement& statement,
         VerifiedRosterSetPtr roster_set,
-        uint8_t authorization_mask = 0b1111)
+        uint8_t authorization_mask = 0b1111,
+        RosterAuthorizationVerificationContext authorization = {})
     {
         if (!roster_set) return {};
         return PreparedChainLockContextPtr{new PreparedChainLockContext(
-            std::move(schedule), statement, std::move(roster_set), {},
+            std::move(schedule), statement, std::move(roster_set), std::move(authorization),
             authorization_mask)};
     }
 

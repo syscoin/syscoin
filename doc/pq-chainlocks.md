@@ -37,26 +37,29 @@ The design fixes the following decisions:
 - A final ChainLock contains raw signatures: exactly 267 member signatures from
   each of exactly three of the four active quorums.
 - The final ChainLock is carried by the existing `CLSIG`/`GETCLSIG` live P2P
-  path. No DA service, SNARK, Flock proof, or historical signature archive is
+  path. No DA service, SNARK, Flock proof, or unbounded historical signature archive is
   part of the security model.
 - ChainLocks continue to target one absolute eligible height every five blocks.
-  A syncing node needs the latest valid ChainLock, not every historical
-  ChainLock, because that ChainLock fixes its Syscoin ancestry.
+  A syncing node does not download every historical ChainLock. After old
+  authorization edges are pruned, it needs the exact receipt-selected base
+  certificate described in Section 7.4, followed by ordinary verification of
+  any newer finality certificate. The latest certificate alone does not prove
+  its missing roster-authorization history.
 - Bitcoin checkpoint acceptance is a cursor in the ChainLock transcript. A
   ChainLock may keep the previous cursor (a null advance), so a missing bound
   candidate does not halt Syscoin finality.
 - A scheduled candidate can reach NEVM only through its fixed `H + 10`
   on-chain receipt. Live admission verifies the receipt's exact `KEEP` or
   `ADVANCE` CLSIG; only `ADVANCE` forwards a new Bitcoin hash to NEVM.
-  Historical sync authenticates a recomputed compact receipt prefix
-  with a release anchor and either current-window catch-up or the narrowly
-  marker-bound prolonged-outage recovery below, instead of retaining every old
-  multi-megabyte certificate.
+  Historical sync uses the configured receipt baseline and the explicit
+  PoW-backed historical boundary below, or the existing exact marker-bound
+  verification path, instead of retaining every old full certificate.
 - A payment-audit certificate is required while its receipt is live, but it is
   not a permanent historical dependency. `PaymentAuditReceipt` commits the
   classified 400-member bitmap on chain; historical IBD may replay that compact
-  prefix provisionally, then authenticate it with a normally verified covering
-  CLSIG and prune the covered full audit certificates.
+  prefix provisionally, then cover it with a normally verified CLSIG or the
+  explicitly trusted PoW-history endpoint below. This historical coverage is
+  distinct from individually verifying the omitted audit certificates.
 - The first PQ-only block is selected by height `A`. Below it, opaque legacy
   replay follows the ordinary valid-most-work chain. At and above it, legacy
   authority is retired and PQ roots are required. Before the first durable PQ
@@ -905,7 +908,7 @@ recovery rosters. If an attempt never reaches threshold, the next phase-3 group
 selects four fresh absolute-epoch rosters from the same authenticated source.
 Recovery therefore needs neither Bitcoin RPC on full nodes nor approval from
 the failed active rosters.
-Before the first winner, the only admissible target is the first eligible
+Before the network's first winner, the only admissible target is the first eligible
 target after `A-1`, which configuration also requires to be the canonical
 phase-3 BTCC target. Its predecessor hash is obtained from the fully validated
 candidate branch and its predecessor BTCC cursor is canonically null. The four
@@ -919,8 +922,9 @@ range. If the first certificate is delayed, base-chain mining and most-work
 fork choice continue while initialization remains pinned to that target.
 
 A distinct current `CATCHUP` admission handles an already participating node
-that was offline or missed one or more certificates, or the rolling recovery
-statement above. It is allowed only after base block sync has completed on a
+that was offline or missed one or more certificates, a fresh node with an
+authenticated historical boundary, or the rolling recovery statement above.
+It is allowed only after base block sync has completed on a
 fully executed best-work AuxPoW branch, ordinary assume-valid shortcuts are no
 longer in the candidate range, and any snapshot background validation has
 completed. Public IBD may remain true while this final authentication tail is
@@ -936,7 +940,8 @@ missing from the local store, but no certificate skips forward within its
 signed predecessor view and no expired certificate becomes valid merely
 because it is locally known or active.
 
-An older authorization base is evidence, not authority by itself. The receiver
+Without the PoW-history boundary below, an older authorization base is
+evidence, not authority by itself. The receiver
 must possess the exact fully verified base certificate and derive both the
 wire transition from that base and the canonical transition from its current
 winner. Both derivations must authorize the selected quorum mask and produce
@@ -945,6 +950,65 @@ next-beacon states must also match, except that current `CATCHUP` may remove one
 provisional `PENDING`/`READY` observation only through the existing
 candidate-bound null-carrier reconciliation proof. A carried cursor, a
 different recovery source, or an unrelated future-beacon result never rebases.
+
+When bounded certificate retention has removed the authorization edges between
+the receiver's actual durable winner `D` and the current roster base, a separate
+PoW-backed historical import is available. After full base replay and any
+snapshot background validation, the local active chain selects the latest
+non-null receipt at the current signing lookback `E = H - sign_lag`. The receipt
+fixes one exact certificate `B` by logical ID, target, and accepted cursor;
+peer-supplied certificate fields cannot choose this boundary. The existing
+exact-ID `GETCLSIG` path fetches B. The node reconstructs B's canonical rosters,
+checks its complete statement against the indexed chain state, and verifies
+all 801 signatures before publishing historical authorization.
+
+This deliberately trusts the selected, fully replayed PoW history for the
+missing roster-state edges. It is not a cryptographic proof that those omitted
+edges were signed, and B's own threshold signatures do not prove its earlier
+authorization. The assumption is that this independently selected history is
+the intended chain; most-work selection alone does not make that assumption
+unconditional. No Bitcoin RPC check or new certificate-history transport is
+introduced for ordinary full nodes.
+
+The imported capability binds the exact receipt carrier, E's block hash,
+BTCC/payment receipt states, payment-probation commitment, and actual D. It
+covers only that historical prefix, including deferred historical governance
+outcome checks. It does not set individual verification bits, advance D,
+finalize B's carrier or E, or refund any signer-journal reservation. Above E,
+scripts, receipt provenance, and ordinary governance checks remain required.
+A later certificate `C` must descend through E and D, use B as its exact
+receipt-selected authorization base, pass the ordinary roster-state decision,
+and supply all 801 signatures. The temporary D-to-B history gap does not waive
+C's live-window, branch, or state-transition checks.
+Once actual D reaches or passes B, the missing-base exception ends: later
+stale-base statements must satisfy the existing convergence checks against D.
+
+The same prefix coverage can release the historical signing gate without
+waiting for a completed newer C. A fresh or returning sentry can therefore
+participate in the ordinary future recovery window once its scheduled roster,
+keys, suffix validation, and journal are ready; finality still requires the
+normal threshold. Normal tip extension preserves the frozen endpoint. A
+newly buried governance obligation can extend E only after the bounded scan
+has reached the old endpoint and the next block is specifically blocked by
+that deferred governance check; a scan-budget limit cannot move E. A
+supporting reorg or provenance revocation invalidates the capability and any
+prepared context using it. Missing B or unavailable live signers may still
+delay recovery.
+
+Providers separately retain the exact accepted receipt-selected certificate
+in two dedicated current/fallback slots. These supplement, rather than replace,
+the bounded recent/authorization archives and outstanding replay obligations.
+Replacing B0 with B1 does not release B0 until an actually durable descendant
+covers **B1's carrier**, not merely B1's target. Required roster snapshots and
+recovery-universe capsules remain pinned. A slot mutation also cannot remove
+the sole exact base of a durable best/unsealed record; pending or off-branch
+durable restoration suspends destructive cleanup. Stored historical bytes are never
+promoted into the ordinary authorization archive or `TRUSTED_PERSISTENCE`.
+Restart recognizes an exact historical B dependency committed by a durable C
+without granting B ordinary admission; runtime historical coverage must still
+be revalidated. If an obsolete local INITIALIZE precommit exists, only an
+exact checked ordinary successor can consume it atomically with the first
+durable winner, leaving burned journal leaves unchanged.
 
 An uncovered crash-durable BTCC pre-seal marker adds only two
 prolonged-outage admissions outside that ordinary current window:
@@ -976,7 +1040,8 @@ share or final signature. Only then may admission read retained carrier bodies
 or perform other chain-age-dependent receipt I/O. Ordinary current catch-up accepts the exact
 indexed receipt state only after proving every index after the receipt
 assumption boundary in range was fully validated without an assume-valid
-shortcut. A marker-authorized covering certificate additionally starts from
+shortcut. Without a PoW-backed endpoint covering the old marker range, a
+marker-authorized covering certificate additionally starts from
 the durable state immediately before the earliest carrier, rereads and
 validates every retained carrier through the candidate, recomputes the
 accumulator, and requires exact equality with the candidate's indexed and
@@ -1027,8 +1092,9 @@ execution to pause. It does not retroactively recover historical ChainLock
 transition security. Catch-up still requires an honest peer to serve either
 the exact terminal certificate or a valid active-branch certificate covering
 the terminal carrier; the marker is not a substitute for those 801
-signatures. The separate release-pinned receipt anchor bounds this relaxation
-and is mandatory whenever BTCC receipts are enabled.
+signatures. The configured release-pinned receipt baseline remains a deployment
+requirement; the separately checked PoW-history endpoint can cover later
+pruned authorization history without requiring a new release checkpoint.
 
 Restart restoration from the node's own checksummed, fsynced latest-winner
 database remains separate from network catch-up. It revalidates the target
@@ -1257,7 +1323,9 @@ from one recent CLSIG. Normal `LIVE` still requires the exact durable
 block-finality predecessor. `LIVE` and the constrained current-quorum
 `CATCHUP` path in Section 7.4 may use an older explicitly named
 roster-authorization base only after the dual-derivation convergence proof;
-this never weakens the durable receipt or cursor floor.
+the separate PoW-history path may supply an exact missing B for later ordinary
+C verification. Neither path weakens the node's actual durable receipt or
+cursor floor.
 
 `btccAdvance` has two canonical values:
 
@@ -1361,7 +1429,8 @@ The hash commits the prior state, carrier height/hash, and exact receipt. Every
 ChainLock statement signs the indexed state at its target. Once a fully
 verified descendant ChainLock covers the carrier, that threshold statement
 seals the ordered prefix. A non-null outcome makes the original 1,001,147-byte
-receipt certificate prunable; a canonical null outcome objectively retires the
+receipt certificate prunable once no current/fallback historical-sync or other
+durable dependency still owns it; a canonical null outcome objectively retires the
 unreceipted cursor. Until the carrier outcome is covered, a locally accepted
 exact `KEEP` or `ADVANCE` remains durably retained and servable. The block index retains
 each carrier's exact receipt logical ID beside the cumulative cursor/state,
@@ -1407,9 +1476,10 @@ transition kind. The capsule replaces only the old source-identity snapshot:
 each recovery group's registration-cutoff snapshot and signed-target liveness
 snapshot remain retained while required. These objects replace an indefinitely
 old source roster-snapshot floor without turning candidate fields into
-authority. Ownership is capped at 131 distinct source IDs: at most 128 retained
+authority. Ownership is capped at 133 distinct source IDs: at most 128 retained
 authorization bases plus the durable best, unsealed BTCC, and receipt-archive
-owner; referenced predecessors and seals are already retained rows. Startup
+owner, plus the two historical-sync slots; referenced predecessors and seals
+are already retained rows. Startup
 accepts exactly the capsules reachable from those owners and fails closed on a
 missing, mismatched, or orphaned capsule. Outside replay, ordinary non-cutoff
 snapshots remain in the bounded, lossy cache. More than 1,728 same-height
@@ -1476,8 +1546,10 @@ replacement for those random-access roster snapshots.
 
 After base IBD, recovery follows Section 7.4. Ordinary catch-up is limited to
 the current latest signable target on the active branch or a competing branch
-that shares its `H - sign_lag` boundary. An older uncovered
-marker can instead be authenticated only by its exact terminal `KEEP` or `ADVANCE` at
+that shares its `H - sign_lag` boundary. The independently selected B/E
+historical capability can first cover an old marker prefix without advancing
+finality. Without that coverage, an older uncovered marker can instead be
+authenticated by its exact terminal `KEEP` or `ADVANCE` at
 `T = C - 10`, or by a fully valid active-branch certificate at or above `C`
 that descends through the terminal carrier. For the covering form, the node
 recomputes the retained receipt range from the marker's recorded predecessor
@@ -1491,7 +1563,9 @@ while the prefix is uncovered, but new signing is paused and the paired Geth
 path skips all execution notifications from the earliest marker onward. It
 fails closed rather than substituting a zero checkpoint. Once the exact or
 covering certificate is fully verified and durably accepted, base finality and
-signing may resume even if Geth is absent. The NEVM replay obligation remains
+signing may resume even if Geth is absent. A verified PoW-history endpoint can
+also release the covered prefix's signing gate without a newer finality
+certificate; all suffix and local signer checks still apply. The NEVM replay obligation remains
 until Geth is available: Syscoin replays exact carrier values from the earliest
 active boundary, proceeds beyond the authenticated terminal only through null
 or individually verified receipts, and clears the marker only after Geth
@@ -1501,9 +1575,11 @@ be on another branch. Disconnect/reorg notifications observe the same applied
 boundary, and replay rechecks the exact branch around external notifications.
 
 The marker supplies authorization bounds, not the missing certificate. An
-honest peer must still serve the exact terminal or a valid covering certificate;
-withholding or a prolonged quorum outage can therefore pause signing and Geth
-indefinitely while base Syscoin continues. Keeping recovery possible during
+honest peer must still serve the receipt-selected B for historical coverage,
+or the exact terminal or a valid covering certificate for the marker path.
+The boundary permits future recovery signing during an outage, but cannot
+replace unavailable certificate bytes or the required live signers. Unresolved
+obligations can therefore pause progress while base Syscoin continues. Keeping recovery possible during
 that outage intentionally permits unbounded block-file and DMN/PQ database
 growth, and synchronous DMN persistence adds per-block I/O and latency. Disk
 exhaustion or an fsync failure stops the affected transition fail-closed.
@@ -2117,7 +2193,7 @@ Expected failures are fail-closed:
   cannot invoke the import exception.
 - Recovery-capsule tests compare raw-source and capsule-derived rosters after
   source pruning, retain each required registration-cutoff and signed-target
-  snapshot, enforce the 131-source cap with atomic last-owner eviction, reject
+  snapshot, enforce the 133-source cap with atomic last-owner eviction, reject
   missing, mismatched, and orphaned startup capsules, and restart an
   authorization-only recovery audit seal from its exact persisted context.
 
@@ -2175,6 +2251,23 @@ Expected failures are fail-closed:
 - A fully authenticated catch-up object that fails only because of local disk,
   validation-state, or concurrent-context conditions does not punish its peer;
   exact `LIVE` predecessor chaining resumes after acceptance.
+- After actual bounded archive eviction, a fresh node and a returning node
+  select and verify the exact retained B, preserve their actual D while
+  importing historical coverage, and accept an ordinary later C. During a
+  prolonged outage, verify future signing-context readiness without first
+  supplying a completed newer C.
+- Historical coverage must reject a wrong receipt/B, signature, branch,
+  endpoint state, or snapshot provenance. Missing governance or receipt
+  validation above E must not fall back to historical coverage. Reorging E
+  invalidates prepared work; normal descendant extension does not.
+- Restart a durable C whose B exists only in a dedicated historical slot;
+  reject a separately valid wrong B without promoting either historical
+  record into ordinary authorization. Exercise exact-precommit atomic
+  consumption, current/fallback carrier-based handoff, stale CAS, and corruption.
+- A previously seen B/C inventory remains downloadable only while it is an
+  exact pending historical/catch-up request. An invalid witness must not
+  cancel honest alternate providers; accepted finality or an expired context
+  retires the request without widening receipt/archive admission.
 - With a common durable base `S`, deliver a valid height-`H` `KEEP` certificate
   to only one store, then deliver a valid height-`H+5` statement based on `S`
   to both. The store that retained `H` must dual-derive the same active roster
@@ -2443,8 +2536,8 @@ The following must be resolved in code and release artifacts before activation:
   batch restart, moving-tip progress, and every finality/replay veto; never
   reduce retained rollback history to the 1,728 full-snapshot cache horizon;
 - recovery-capsule RAM and disk sizing at the 6,553,782-byte encoded per-source
-  maximum and the 131-source ownership ceiling (858,545,442 bytes, about
-  819 MiB, before database and container overhead);
+  maximum and the 133-source ownership ceiling (871,653,006 bytes, about
+  831 MiB, before database and container overhead);
 - production benchmark calibration, independent review, metrics/alert policy,
   and adversarial soak evidence for the implemented bounded asynchronous
   MNAUTH executors, reconnect-resistant actual-keyed-netgroup/global

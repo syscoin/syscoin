@@ -869,6 +869,74 @@ BOOST_AUTO_TEST_CASE(pq_chainlock_retired_dependency_drops_stale_sources)
     BOOST_CHECK_EQUAL(tracker.Size(), 0U);
 }
 
+BOOST_AUTO_TEST_CASE(pq_chainlock_known_catchup_retry_preserves_honest_alternates)
+{
+    ChainLockRequestTracker tracker;
+    const uint256 current_certificate{uint256S("36")};
+    const NodeId bad_provider{1310};
+    const NodeId honest_provider{1311};
+    const NodeId standby_provider{1312};
+    const auto now{std::chrono::microseconds{100}};
+    const auto expiry{std::chrono::microseconds{200}};
+
+    // C arrived before its historical base B. Completing that deferred fetch
+    // leaves C known to the peer, but does not make C locally accepted.
+    BOOST_REQUIRE(tracker.Announce(
+        bad_provider, current_certificate,
+        ChainLockRequestTracker::SourcePriority::AUTHENTICATED_OUTBOUND,
+        /*required=*/false, uint256S("e001")));
+    BOOST_REQUIRE(tracker.Request(bad_provider, now, expiry));
+    tracker.ReceivedResponse(bad_provider, current_certificate);
+    BOOST_CHECK_EQUAL(tracker.Size(), 0U);
+    BOOST_CHECK(!ShouldProcessPQCertificateAnnouncement(
+        /*peer_already_knows=*/true, /*required_dependency=*/false));
+    BOOST_REQUIRE(ShouldProcessPQCertificateAnnouncement(
+        /*peer_already_knows=*/true, /*required_dependency=*/true));
+
+    BOOST_REQUIRE(tracker.Announce(
+        bad_provider, current_certificate,
+        ChainLockRequestTracker::SourcePriority::AUTHENTICATED_OUTBOUND,
+        /*required=*/true, uint256S("e001")));
+    BOOST_REQUIRE(tracker.Announce(
+        honest_provider, current_certificate,
+        ChainLockRequestTracker::SourcePriority::OUTBOUND,
+        /*required=*/true, uint256S("e002")));
+    BOOST_REQUIRE(tracker.Announce(
+        standby_provider, current_certificate,
+        ChainLockRequestTracker::SourcePriority::INBOUND,
+        /*required=*/true, uint256S("e003")));
+    BOOST_REQUIRE(tracker.Request(bad_provider, now, expiry));
+    BOOST_REQUIRE(tracker.Request(honest_provider, now, expiry));
+
+    // A matching logical ID with an invalid witness fails only that source.
+    // It must not retire the required ID and cancel the honest hedge.
+    BOOST_REQUIRE(tracker.ReceivedFailure(
+        bad_provider, current_certificate, now));
+    BOOST_REQUIRE(tracker.RequiredLogicalId());
+    BOOST_CHECK(*tracker.RequiredLogicalId() == current_certificate);
+    BOOST_CHECK(tracker.IsRequested(honest_provider, current_certificate));
+    BOOST_CHECK(!tracker.TakeCancelled(honest_provider, current_certificate, now));
+    const auto alternate{tracker.Request(standby_provider, now, expiry)};
+    BOOST_REQUIRE(alternate);
+    BOOST_CHECK(*alternate == current_certificate);
+
+    tracker.ClearRequired(uint256S("37"));
+    BOOST_CHECK(tracker.IsRequested(honest_provider, current_certificate));
+    BOOST_CHECK(tracker.IsRequested(standby_provider, current_certificate));
+
+    // Acceptance or expiry of this exact round finally retires every lane;
+    // a late payload remains recognizable once, without another retry.
+    tracker.ClearRequired(current_certificate);
+    BOOST_CHECK(!tracker.RequiredLogicalId());
+    BOOST_CHECK_EQUAL(tracker.Size(), 0U);
+    BOOST_CHECK(!tracker.IsRequested(honest_provider, current_certificate));
+    BOOST_CHECK(!tracker.IsRequested(standby_provider, current_certificate));
+    BOOST_CHECK(tracker.TakeCancelled(honest_provider, current_certificate, now));
+    BOOST_CHECK(tracker.TakeCancelled(standby_provider, current_certificate, now));
+    BOOST_CHECK(!tracker.TakeCancelled(honest_provider, current_certificate, now));
+    BOOST_CHECK(!tracker.Request(honest_provider, now, expiry));
+}
+
 BOOST_AUTO_TEST_CASE(pq_chainlock_upload_authorization_is_consume_once)
 {
     ChainLockUploadTracker tracker;
