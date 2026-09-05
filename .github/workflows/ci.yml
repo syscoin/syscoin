@@ -254,6 +254,9 @@ jobs:
           path: ~/AppData/Local/vcpkg/archives
           key: ${{ github.job }}-vcpkg-binary-${{ hashFiles('vcpkg_commit', 'msbuild_version', 'build_msvc/vcpkg.json') }}
 
+      - name: Test generated MSVC configuration
+        run: py -3 -B build_msvc\test_msvc_config.py
+
       - name: Generate project files
         run: py -3 build_msvc\msvc-autogen.py
 
@@ -277,6 +280,10 @@ jobs:
 
       - name: Run unit tests
         run: src\test_syscoin.exe -l test_suite
+
+      - name: Smoke-test external Bitcoin header command
+        timeout-minutes: 10
+        run: py -3 test\functional\test_runner.py feature_btcheader_external_command.py --jobs=1 --ci --tmpdirprefix=$env:RUNNER_TEMP --combinedlogslen=99999999 --require-backend
 
       - name: Run benchmarks
         # SYSCOIN: Full-depth PQ trees are explicit performance workloads. Keep

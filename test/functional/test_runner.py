@@ -406,6 +406,7 @@ BASE_SCRIPTS = [
     # argv-based independent Bitcoin policy override used by BTCC roles.
     'feature_btcheader_policy_auxpow.py --descriptors',
     'feature_btcheader_external_policy.py',
+    'feature_btcheader_external_command.py',
     'feature_btcheader_watchdog.py',
     'auxpow_mining.py --segwit',
     'auxpow_invalidpow.py',

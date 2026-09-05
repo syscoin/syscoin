@@ -651,4 +651,12 @@ BOOST_AUTO_TEST_CASE(active_range_ready_repeats_both_active_hashes)
     BOOST_CHECK_EQUAL(setup.backend.method_calls["getblockchaininfo"], 2U);
 }
 
+#ifdef _MSC_VER
+// Guard on the toolchain so removing the feature flag cannot hide the test.
+BOOST_AUTO_TEST_CASE(native_msvc_external_command_support)
+{
+    BOOST_CHECK(BTCHeaderCommandSupportAvailable());
+}
+#endif
+
 BOOST_AUTO_TEST_SUITE_END()

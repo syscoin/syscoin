@@ -43,6 +43,11 @@
 #include <thread>
 #include <utility>
 
+#ifdef WIN32
+#include <codecvt>
+#include <locale>
+#endif
+
 namespace llmq::pq {
 namespace {
 
@@ -231,15 +236,26 @@ bool RunBoundedCommand(const std::vector<std::string>& command,
         SetError(error, "btcheadercmd-not-set");
         return false;
     }
-    std::vector<std::string> args;
-    args.assign(command.begin() + 1, command.end());
-
     bp::ipstream stdout_stream;
     bp::ipstream stderr_stream;
     try {
+#ifdef WIN32
+        // Syscoin arguments are UTF-8, while the narrow Windows process API
+        // uses the system ANSI code page. Convert every entry before launch.
+        std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>, wchar_t> utf8;
+        const std::wstring executable{utf8.from_bytes(command.front())};
+        std::vector<std::wstring> args;
+        args.reserve(command.size() - 1);
+        for (auto arg = command.begin() + 1; arg != command.end(); ++arg) {
+            args.push_back(utf8.from_bytes(*arg));
+        }
+#else
+        const std::string& executable{command.front()};
+        const std::vector<std::string> args{command.begin() + 1, command.end()};
+#endif
         bp::group process_group;
         bp::child process(
-            bp::exe = command.front(), bp::args = args,
+            bp::exe = executable, bp::args = args,
             bp::std_out > stdout_stream, bp::std_err > stderr_stream,
             process_group);
         std::string stderr_output;
