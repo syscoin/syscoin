@@ -497,6 +497,40 @@ public:
             chainlock.GetLogicalId(handler.m_genesis_hash)).admission);
     }
 
+    static std::unique_ptr<pq::ChainLockFinalityStore> ExchangeFinalityStore(
+        CChainLocksHandler& handler,
+        std::unique_ptr<pq::ChainLockFinalityStore> store)
+    {
+        return std::exchange(handler.m_store, std::move(store));
+    }
+
+    static void SetHistoricalSyncAuthorization(
+        CChainLocksHandler& handler,
+        const std::optional<pq::HistoricalSyncBoundary>& boundary,
+        const pq::VerifiedRosterAuthorizationBaseView& base,
+        std::optional<uint64_t> provenance_revision = std::nullopt)
+    {
+        LOCK(::cs_main);
+        handler.m_historical_sync = boundary
+            ? std::make_shared<const CChainLocksHandler::HistoricalSyncAuthorization>(
+                  CChainLocksHandler::HistoricalSyncAuthorization{
+                      *boundary, base, provenance_revision.value_or(
+                          handler.m_chainman.GetPQProvenanceRevocationRevision())})
+            : nullptr;
+    }
+
+    static bool HasHistoricalSyncAuthorization(const CChainLocksHandler& handler)
+    {
+        LOCK(::cs_main);
+        return static_cast<bool>(handler.GetPoWHistoricalSyncAuthorization());
+    }
+
+    static bool HasNoFinalityWinner(const CChainLocksHandler& handler)
+    {
+        return handler.m_store && !handler.m_store->GetBestRecord() &&
+               handler.m_persistence && !handler.m_persistence->HasBest();
+    }
+
     static std::optional<uint8_t> FindCurrentSigningVariant(
         const std::array<pq::PreparedChainLockContextPtr, 2>& variants,
         pq::VerifiedRosterSetPtr roster_set,
@@ -895,13 +929,15 @@ public:
         const uint256& activation_predecessor_hash,
         bool has_durable_best,
         bool target_is_active,
-        const uint256& target_btcp_prev)
+        const uint256& target_btcp_prev,
+        bool has_verified_historical_recovery = false)
     {
         return CChainLocksHandler::IsExactHistoricalResetCandidate(
             statement, chainlock, btcc,
             activation_predecessor_height,
             activation_predecessor_hash, has_durable_best,
-            target_is_active, target_btcp_prev);
+            target_is_active, target_btcp_prev,
+            has_verified_historical_recovery);
     }
 
     static const CBlockIndex* HistoricalSelectionTip(
@@ -1350,6 +1386,16 @@ BOOST_AUTO_TEST_CASE(historical_reset_admission_distinguishes_initialize_and_rec
         initialize, *chainlock, btcc, ACTIVATION_PREDECESSOR,
         activation_hash, /*has_durable_best=*/true,
         /*target_is_active=*/true, initial_btcp));
+    BOOST_CHECK(Access::ExactHistoricalResetCandidate(
+        initialize, *chainlock, btcc, ACTIVATION_PREDECESSOR,
+        activation_hash, /*has_durable_best=*/false,
+        /*target_is_active=*/true, initial_btcp,
+        /*has_verified_historical_recovery=*/true));
+    BOOST_CHECK(!Access::ExactHistoricalResetCandidate(
+        initialize, *chainlock, btcc, ACTIVATION_PREDECESSOR,
+        activation_hash, /*has_durable_best=*/true,
+        /*target_is_active=*/true, initial_btcp,
+        /*has_verified_historical_recovery=*/true));
 
     const auto recovery_target{CanonicalRosterRecoveryTargetHeight(
         *chainlock, btcc, /*epoch=*/7)};
@@ -1386,6 +1432,32 @@ BOOST_AUTO_TEST_CASE(historical_reset_admission_distinguishes_initialize_and_rec
         activation_hash, /*has_durable_best=*/false,
         /*target_is_active=*/true, NonNullHash(89'010)));
 
+    BOOST_CHECK(Access::ExactHistoricalResetCandidate(
+        recover, *chainlock, btcc, ACTIVATION_PREDECESSOR,
+        activation_hash, /*has_durable_best=*/false,
+        /*target_is_active=*/true, NonNullHash(89'010),
+        /*has_verified_historical_recovery=*/true));
+    BOOST_CHECK(!Access::ExactHistoricalResetCandidate(
+        recover, *chainlock, btcc, ACTIVATION_PREDECESSOR,
+        activation_hash, /*has_durable_best=*/false,
+        /*target_is_active=*/false, NonNullHash(89'010),
+        /*has_verified_historical_recovery=*/true));
+    auto noncanonical_recovery{recover};
+    noncanonical_recovery.height += static_cast<int32_t>(PQ_CL_PERIOD);
+    BOOST_REQUIRE(noncanonical_recovery.IsStructurallyValid());
+    BOOST_CHECK(!Access::ExactHistoricalResetCandidate(
+        noncanonical_recovery, *chainlock, btcc, ACTIVATION_PREDECESSOR,
+        activation_hash, /*has_durable_best=*/false,
+        /*target_is_active=*/true, NonNullHash(89'010),
+        /*has_verified_historical_recovery=*/true));
+    auto wrong_window{recover};
+    wrong_window.roster_beacons = initial_window;
+    BOOST_CHECK(!Access::ExactHistoricalResetCandidate(
+        wrong_window, *chainlock, btcc, ACTIVATION_PREDECESSOR,
+        activation_hash, /*has_durable_best=*/false,
+        /*target_is_active=*/true, NonNullHash(89'010),
+        /*has_verified_historical_recovery=*/true));
+
     auto advancing_recovery{recover};
     advancing_recovery.accepted_btcc_cursor = BTCCursor{
         advancing_recovery.height, advancing_recovery.block_hash,
@@ -1397,6 +1469,11 @@ BOOST_AUTO_TEST_CASE(historical_reset_admission_distinguishes_initialize_and_rec
         ACTIVATION_PREDECESSOR, activation_hash,
         /*has_durable_best=*/true, /*target_is_active=*/true,
         NonNullHash(89'010)));
+    BOOST_CHECK(!Access::ExactHistoricalResetCandidate(
+        advancing_recovery, *chainlock, btcc,
+        ACTIVATION_PREDECESSOR, activation_hash,
+        /*has_durable_best=*/false, /*target_is_active=*/true,
+        NonNullHash(89'010), /*has_verified_historical_recovery=*/true));
 }
 
 BOOST_AUTO_TEST_CASE(objective_recovery_mode_is_mutually_exclusive_at_one_target)
@@ -5790,6 +5867,243 @@ BOOST_FIXTURE_TEST_CASE(
     BOOST_CHECK(hidden_recovery_next_round->mode ==
                 ObjectiveRosterAuthorizationMode::PAUSE);
     BOOST_CHECK(!hidden_recovery_next_round->base);
+
+    {
+        // Keep B's verified capability, but remove every ordinary winner and
+        // archive view so only the imported historical edge can authorize C.
+        const auto historical_base{store->GetVerifiedRosterAuthorizationBase(expected_base)};
+        BOOST_REQUIRE(historical_base);
+        auto original_store{Access::ExchangeFinalityStore(*handler, nullptr)};
+        Access::ResetFinalityStoreWithContext(*handler, store_context);
+        BOOST_REQUIRE(Access::HasNoFinalityWinner(*handler));
+        BOOST_CHECK(!Access::Store(*handler)->GetVerifiedRosterAuthorizationBase(expected_base));
+
+        const auto set_recovery_base = [&](FinalChainLock& child, const FinalChainLock& prior) {
+            child.statement.roster_authorization_base = {
+                prior.statement.height, prior.statement.block_hash, prior.GetLogicalId(genesis)};
+            RosterAuthorizationTransition transition;
+            transition.kind = RosterAuthorizationTransitionKind::RECOVER;
+            transition.target_height = child.statement.height;
+            transition.target_block_hash = child.statement.block_hash;
+            transition.predecessor_height = child.statement.previous_chainlock_height;
+            transition.predecessor_block_hash = child.statement.previous_chainlock_hash;
+            transition.authorization_base = child.statement.roster_authorization_base;
+            transition.previous = RosterAuthorizationPriorState{
+                prior.statement.roster_authorization_state_hash, prior.statement.roster_beacons};
+            transition.new_window = child.statement.roster_beacons;
+            const auto state_hash{GetRosterAuthorizationStateHash(genesis, transition)};
+            BOOST_REQUIRE(state_hash);
+            child.statement.roster_authorization_state_hash = *state_hash;
+            BOOST_REQUIRE(child.IsStructurallyValid());
+        };
+        auto fresh_recovery{recovery};
+        fresh_recovery.statement.previous_chainlock_height =
+            RECOVERY_HEIGHT - static_cast<int32_t>(PQ_CL_PERIOD);
+        fresh_recovery.statement.previous_chainlock_hash =
+            chain[fresh_recovery.statement.previous_chainlock_height]->GetBlockHash();
+        set_recovery_base(fresh_recovery, base);
+
+        constexpr int32_t COVERAGE_HEIGHT{
+            RECOVERY_HEIGHT - 2 * static_cast<int32_t>(PQ_BTCC_NEVM_LAG)};
+        HistoricalSyncBoundary boundary;
+        boundary.carrier_height = CANDIDATE_HEIGHT;
+        boundary.carrier_hash = chain[CANDIDATE_HEIGHT]->GetBlockHash();
+        boundary.receipt = base_receipt;
+        boundary.coverage_height = COVERAGE_HEIGHT;
+        boundary.coverage_hash = chain[COVERAGE_HEIGHT]->GetBlockHash();
+        boundary.receipt_state = *receipted_state;
+        boundary.probation_state_hash = probation_root;
+        BOOST_REQUIRE(boundary.IsStructurallyValid());
+        BOOST_REQUIRE(boundary.durable_prior.IsNull());
+        constexpr uint8_t RECOVERY_ADMISSION{3};
+        const auto check_rejected = [&](const FinalChainLock& child) {
+            BOOST_CHECK_NE(Access::HistoricalAdmissionFor(*handler, child), RECOVERY_ADMISSION);
+            BOOST_CHECK(Access::HasNoFinalityWinner(*handler));
+        };
+        const auto check_recovery = [&] {
+            BOOST_REQUIRE(Access::HasHistoricalSyncAuthorization(*handler));
+            BOOST_CHECK_EQUAL(Access::HistoricalAdmissionFor(*handler, fresh_recovery), RECOVERY_ADMISSION);
+            BOOST_CHECK(Access::HasNoFinalityWinner(*handler));
+        };
+
+        check_rejected(fresh_recovery);
+        Access::SetHistoricalSyncAuthorization(*handler, boundary, *historical_base);
+        const auto imported_objective{Access::ObjectiveRosterAuthorization(
+            *handler, *chain[RECOVERY_HEIGHT])};
+        BOOST_REQUIRE(imported_objective);
+        BOOST_CHECK(imported_objective->mode == ObjectiveRosterAuthorizationMode::RECOVER);
+        BOOST_REQUIRE(imported_objective->base);
+        BOOST_CHECK(*imported_objective->base == expected_base);
+        check_recovery();
+
+        Access::SetHistoricalSyncAuthorization(*handler, std::nullopt, *historical_base);
+        BOOST_CHECK(!Access::HasHistoricalSyncAuthorization(*handler));
+        check_rejected(fresh_recovery);
+        const uint64_t wrong_revision{WITH_LOCK(::cs_main,
+            return chainman.GetPQProvenanceRevocationRevision() + 1)};
+        Access::SetHistoricalSyncAuthorization(*handler, boundary, *historical_base, wrong_revision);
+        BOOST_CHECK(!Access::HasHistoricalSyncAuthorization(*handler));
+        check_rejected(fresh_recovery);
+        Access::SetHistoricalSyncAuthorization(*handler, boundary, *historical_base);
+
+        const uint32_t coverage_status{WITH_LOCK(::cs_main, return chain[COVERAGE_HEIGHT]->nStatus)};
+        {
+            LOCK(::cs_main);
+            chain[COVERAGE_HEIGHT]->nStatus &= ~BLOCK_PQ_RECEIPT_INDEX_VALIDATED;
+        }
+        BOOST_CHECK(!Access::HasHistoricalSyncAuthorization(*handler));
+        check_rejected(fresh_recovery);
+        {
+            LOCK(::cs_main);
+            chain[COVERAGE_HEIGHT]->nStatus = coverage_status;
+        }
+        check_recovery();
+
+        auto wrong_base{fresh_recovery};
+        wrong_base.statement.roster_authorization_base.logical_id = NonNullHash(925'600);
+        BOOST_REQUIRE(wrong_base.IsStructurallyValid());
+        check_rejected(wrong_base);
+        for (const int32_t height : {RECOVERY_HEIGHT, RECOVERY_HEIGHT + static_cast<int32_t>(PQ_CL_PERIOD)}) {
+            auto overlapping{boundary};
+            overlapping.coverage_height = height;
+            overlapping.coverage_hash = chain[height]->GetBlockHash();
+            BOOST_REQUIRE(overlapping.IsStructurallyValid());
+            Access::SetHistoricalSyncAuthorization(*handler, overlapping, *historical_base);
+            BOOST_REQUIRE(Access::HasHistoricalSyncAuthorization(*handler));
+            check_rejected(fresh_recovery);
+        }
+        Access::SetHistoricalSyncAuthorization(*handler, boundary, *historical_base);
+
+        const auto set_indexed_receipt = [](CBlockIndex& index, const BTCCReceiptState& state) {
+            index.pqBTCCReceiptCursorHeight = state.cursor.sys_height;
+            index.pqBTCCReceiptCursorSysHash = state.cursor.sys_hash;
+            index.pqBTCCReceiptCursorBTCHash = state.cursor.btc_hash;
+            index.pqBTCCReceiptStateHash = state.cumulative_hash;
+            index.pqBTCCReceiptLatestTargetHeight = state.latest_chainlock_target_height;
+            index.pqBTCCReceiptLatestCarrierHeight = state.latest_receipt_carrier_height;
+        };
+        CBlockIndex* sibling{nullptr};
+        {
+            LOCK(::cs_main);
+            auto header{chain[RECOVERY_HEIGHT]->GetBlockHeader()};
+            header.nNonce += 1'000'000;
+            sibling = chainman.m_blockman.AddToBlockIndex(header, chainman.m_best_header);
+            BOOST_REQUIRE(sibling);
+            sibling->nStatus = chain[RECOVERY_HEIGHT]->nStatus;
+            sibling->pqPaymentProbationStateHash = probation_root;
+            set_indexed_receipt(*sibling, *receipted_state);
+        }
+        auto off_branch{fresh_recovery};
+        off_branch.statement.block_hash = sibling->GetBlockHash();
+        set_recovery_base(off_branch, base);
+        BOOST_REQUIRE(Access::HasHistoricalSyncAuthorization(*handler));
+        check_rejected(off_branch);
+
+        std::vector<CBlockIndex*> replacement{chain[COVERAGE_HEIGHT - 1]};
+        {
+            LOCK(::cs_main);
+            for (int32_t height{COVERAGE_HEIGHT}; height <= TIP_HEIGHT; ++height) {
+                auto header{chain[height]->GetBlockHeader()};
+                header.hashPrevBlock = replacement.back()->GetBlockHash();
+                header.nNonce += 2'000'000;
+                auto* index{chainman.m_blockman.AddToBlockIndex(header, chainman.m_best_header)};
+                BOOST_REQUIRE(index);
+                index->nStatus = chain[height]->nStatus;
+                index->nTx = chain[height]->nTx;
+                index->nChainTx = chain[height]->nChainTx;
+                index->pqPaymentProbationStateHash = probation_root;
+                set_indexed_receipt(*index, *receipted_state);
+                replacement.push_back(index);
+            }
+            chainman.ActiveChainstate().m_chain.SetTip(*replacement.back());
+        }
+        auto reorged{fresh_recovery};
+        reorged.statement.block_hash =
+            replacement[RECOVERY_HEIGHT - COVERAGE_HEIGHT + 1]->GetBlockHash();
+        reorged.statement.previous_chainlock_hash =
+            replacement[reorged.statement.previous_chainlock_height - COVERAGE_HEIGHT + 1]->GetBlockHash();
+        set_recovery_base(reorged, base);
+        BOOST_CHECK(!Access::HasHistoricalSyncAuthorization(*handler));
+        check_rejected(reorged);
+        {
+            LOCK(::cs_main);
+            chainman.ActiveChainstate().m_chain.SetTip(*chain[TIP_HEIGHT]);
+        }
+        check_recovery();
+
+        const auto other_context{context_for(base)};
+        BOOST_REQUIRE(other_context != historical_base->verification_context);
+        BOOST_REQUIRE(Access::Store(*handler)->AcceptVerifiedRosterAuthorizationBase(
+            base, /*signatures_valid=*/true, other_context));
+        BOOST_REQUIRE(Access::HasHistoricalSyncAuthorization(*handler));
+        check_rejected(fresh_recovery);
+        Access::ResetFinalityStoreWithContext(*handler, store_context);
+        check_recovery();
+
+        // A recent receipt selects NORMAL even at the canonical reset target.
+        // Matching a verified B and its branch cannot override that decision.
+        constexpr int32_t NORMAL_BASE_HEIGHT{COVERAGE_HEIGHT};
+        constexpr int32_t NORMAL_CARRIER{
+            NORMAL_BASE_HEIGHT + static_cast<int32_t>(PQ_BTCC_NEVM_LAG)};
+        auto normal_base{MakeCatchupChainLock(
+            NORMAL_BASE_HEIGHT, NORMAL_BASE_HEIGHT - static_cast<int32_t>(PQ_CL_PERIOD),
+            chain[NORMAL_BASE_HEIGHT - static_cast<int32_t>(PQ_CL_PERIOD)]->GetBlockHash(), 925'601)};
+        normal_base.statement.block_hash = chain[NORMAL_BASE_HEIGHT]->GetBlockHash();
+        normal_base.statement.previous_btcc_cursor = base_cursor;
+        normal_base.statement.accepted_btcc_cursor = base_cursor;
+        normal_base.statement.btcc_receipt_state = *receipted_state;
+        normal_base.statement.payment_probation_state_hash = probation_root;
+        set_exact_continuation(normal_base, base);
+        BOOST_REQUIRE(Access::Store(*handler)->AcceptVerifiedRosterAuthorizationBase(
+            normal_base, /*signatures_valid=*/true, context_for(normal_base)));
+        const auto normal_view{Access::Store(*handler)->GetVerifiedRosterAuthorizationBaseByLogicalId(
+            normal_base.GetLogicalId(genesis))};
+        BOOST_REQUIRE(normal_view);
+        Access::ResetFinalityStoreWithContext(*handler, store_context);
+        BTCCReceipt normal_receipt;
+        normal_receipt.chainlock_target_height = NORMAL_BASE_HEIGHT;
+        normal_receipt.chainlock_target_hash = normal_base.statement.block_hash;
+        normal_receipt.chainlock_logical_id = normal_base.GetLogicalId(genesis);
+        normal_receipt.accepted_cursor = base_cursor;
+        const auto normal_state{ApplyBTCCReceiptState(
+            genesis, config->chainlock_schedule, config->btcc_schedule,
+            config->activation_predecessor_height, NORMAL_CARRIER,
+            chain[NORMAL_CARRIER]->GetBlockHash(), *receipted_state, normal_receipt)};
+        BOOST_REQUIRE(normal_state);
+        const uint256 old_carrier_id{chain[NORMAL_CARRIER]->pqBTCCReceiptLogicalId};
+        for (int32_t height{NORMAL_CARRIER}; height <= TIP_HEIGHT; ++height) {
+            set_indexed_receipt(*chain[height], *normal_state);
+        }
+        chain[NORMAL_CARRIER]->pqBTCCReceiptLogicalId = normal_receipt.chainlock_logical_id;
+        auto normal_boundary{boundary};
+        normal_boundary.carrier_height = NORMAL_CARRIER;
+        normal_boundary.carrier_hash = chain[NORMAL_CARRIER]->GetBlockHash();
+        normal_boundary.receipt = normal_receipt;
+        normal_boundary.coverage_height = NORMAL_CARRIER;
+        normal_boundary.coverage_hash = normal_boundary.carrier_hash;
+        normal_boundary.receipt_state = *normal_state;
+        BOOST_REQUIRE(normal_boundary.IsStructurallyValid());
+        Access::SetHistoricalSyncAuthorization(*handler, normal_boundary, *normal_view);
+        BOOST_REQUIRE(Access::HasHistoricalSyncAuthorization(*handler));
+        const auto normal_objective{Access::ObjectiveRosterAuthorization(*handler, *chain[RECOVERY_HEIGHT])};
+        BOOST_REQUIRE(normal_objective);
+        BOOST_CHECK(normal_objective->mode == ObjectiveRosterAuthorizationMode::NORMAL);
+        BOOST_REQUIRE(normal_objective->base);
+        BOOST_CHECK(*normal_objective->base == normal_view->metadata.AuthorizationBase());
+        auto unnecessary_recovery{fresh_recovery};
+        unnecessary_recovery.statement.btcc_receipt_state = *normal_state;
+        set_recovery_base(unnecessary_recovery, normal_base);
+        check_rejected(unnecessary_recovery);
+
+        for (int32_t height{NORMAL_CARRIER}; height <= TIP_HEIGHT; ++height) {
+            set_indexed_receipt(*chain[height], *receipted_state);
+        }
+        chain[NORMAL_CARRIER]->pqBTCCReceiptLogicalId = old_carrier_id;
+        Access::SetHistoricalSyncAuthorization(*handler, boundary, *historical_base);
+        check_recovery();
+        Access::SetHistoricalSyncAuthorization(*handler, std::nullopt, *historical_base);
+        Access::ExchangeFinalityStore(*handler, std::move(original_store));
+    }
 
     const auto recovery_context{context_for(recovery)};
     BOOST_REQUIRE(recovery_context);

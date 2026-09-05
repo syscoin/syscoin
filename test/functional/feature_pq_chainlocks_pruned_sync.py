@@ -29,8 +29,10 @@ from feature_pq_chainlocks import (
     FIRST_ELIGIBLE_TARGET_HEIGHT,
     FUTURE_HORIZON_EPOCHS,
     PQChainLocksTest,
+    QUORUM_SIZE,
     RECOVERY_ANCHOR_BTC_HEIGHT,
     RECOVERY_FUTURE_BTC_HASH,
+    REQUIRED_QUORUMS,
     REGISTRATION_CUTOFF_BLOCKS,
     ROSTER_SNAPSHOT_LAG,
     SIGN_LAG,
@@ -44,6 +46,7 @@ from test_framework.util import assert_equal, force_finish_mnsync, p2p_port
 AUTHORIZATION_BASE_CAPACITY = 128
 OUTAGE_RECOVERY_TARGET = 4615  # First usable recovery window here is epochs 8..11.
 OUTAGE_STARTUP_HEIGHT = OUTAGE_RECOVERY_TARGET - SIGN_LAG
+POST_RECOVERY_NORMAL_TARGET = OUTAGE_RECOVERY_TARGET + BTCC_CANDIDATE_PERIOD + SIGN_LAG
 ROSTER_TRANSITION_OFFSET = struct.calcsize("<HHi32si32s32s")
 ROSTER_CHANGING_TRANSITIONS = (2, 3, 4)  # OBSERVE, REVEAL, ROTATE
 
@@ -106,11 +109,7 @@ class PQPrunedSyncTest(PQChainLocksTest):
         path.write_bytes(artifact["certificate"])
         self.certificates[artifact["logical_hash"]] = (artifact, path)
         marker = "pruned-sync-%d" % height
-        peer = self.authenticate_peer(self.connect_peer(marker), marker, 0xc100 + height)
-        self.request_chainlock(peer, artifact["logical_hash"])
-        peer.send_message(msg_clsig(artifact["certificate"]))
-        self.wait_until(lambda: self.best_id(self.nodes[0]) == "%064x" % artifact["logical_hash"],
-                        timeout=60)
+        self.submit_expected_certificate(self.nodes[0], artifact, height, marker, 0xc100 + height)
         best = self.nodes[0].getbestchainlock()
         assert_equal(best["height"], height)
         assert_equal(best["blockhash"], self.nodes[0].getblockhash(height))
@@ -413,6 +412,204 @@ class PQPrunedSyncTest(PQChainLocksTest):
         self.fixture_command([*journal_args, shares_path, report_path])
         self.log.info("Verified %d durable recovery signatures for target %d without a newer CLSIG",
                       report["signed_slots"], OUTAGE_RECOVERY_TARGET)
+        self.assert_first_recovery_acceptance(
+            shares_path, receiver_args, operator_args, journal_args, report_path, initial_id)
+
+    def certificate_provider(self, node, marker, identity):
+        peer = node.add_p2p_connection(P2PInterface(), uacomment=marker)
+        peer.wait_for_verack()
+        assert node.mnauth(self.peer_id(node, marker), "%064x" % identity,
+                           "%064x" % 0x22, 1)
+        return peer
+
+    def submit_expected_certificate(self, node, artifact, target, marker, identity):
+        expected = "%064x" % artifact["logical_hash"]
+        busy = "CLSIG %s at %d deferred/rejected: pq-clsig-verifier-busy" % (expected, target)
+        for attempt in range(4):
+            offset = node.debug_log_size(encoding="utf8")
+            peer = self.certificate_provider(node, "%s-%d" % (marker, attempt), identity + attempt)
+            self.request_chainlock(peer, artifact["logical_hash"])
+            peer.send_message(msg_clsig(artifact["certificate"]))
+
+            def accepted_or_busy():
+                if self.best_id(node) == expected:
+                    return True
+                with node.debug_log_path.open(encoding="utf8") as log:
+                    log.seek(offset)
+                    return busy in log.read()
+
+            self.wait_until(accepted_or_busy, timeout=120)
+            if self.best_id(node) == expected:
+                return
+            # Historical maintenance shares the bounded verifier. Only this
+            # exact transient permits retry; a new peer avoids INV suppression.
+            node.disconnect_p2ps()
+        raise AssertionError("certificate verifier stayed busy for %s" % expected)
+
+    def assert_exact_winner(self, node, artifact, target):
+        best = node.getbestchainlock()
+        assert_equal(best["logicalid"], "%064x" % artifact["logical_hash"])
+        assert_equal(best["witnessid"], "%064x" % artifact["witness_hash"])
+        assert_equal(best["height"], target)
+        assert_equal(best["blockhash"], node.getblockhash(target))
+
+    def assert_captured_shares_preserved(self, artifact, shares_path):
+        captured = [bytes.fromhex(share) for share in
+                    json.loads(shares_path.read_text(encoding="utf8"))]
+        positions = [struct.unpack_from("<I32sH32s", share, CHAINLOCK_STATEMENT_WIRE_SIZE)
+                     for share in captured]
+        first_epoch = min(position[0] for position in positions)
+        included = 0
+        for share, (epoch, _, member, _) in zip(captured, positions):
+            assert_equal(share[:CHAINLOCK_STATEMENT_WIRE_SIZE],
+                         artifact["certificate"][:CHAINLOCK_STATEMENT_WIRE_SIZE])
+            compact = (artifact["logical_hash"].to_bytes(32, "little")
+                       + struct.pack("<H", (epoch - first_epoch) * QUORUM_SIZE + member)
+                       + share[CHAINLOCK_STATEMENT_WIRE_SIZE + struct.calcsize("<I32sH32s"):])
+            included += compact in artifact["shares"]
+        # The helper verifies all four transcripts. The wire certificate
+        # selects three quorum thresholds, preserving their three local shares.
+        assert_equal(included, REQUIRED_QUORUMS)
+
+    def assert_first_recovery_acceptance(
+            self, shares_path, receiver_args, operator_args, journal_args, report_path, initial_id):
+        fresh = self.nodes[3]
+        authorizer, _ = self.receipt_at(OUTAGE_RECOVERY_TARGET - SIGN_LAG)
+        bundle = self.root / "outage-complete-bundle.dat"
+        self.log.info("Completing the four daemon recovery shares into a real 801-signature certificate")
+        self.fixture_command([
+            "catchup-complete", shares_path, authorizer, BTCC_CANDIDATE_ORIGIN, bundle])
+        recovery = self.read_full_dimension_bundle(bundle)
+        assert_equal(recovery["certificate"][ROSTER_TRANSITION_OFFSET], 5)
+        self.assert_captured_shares_preserved(recovery, shares_path)
+        assert_equal(self.best_id(fresh), None)
+        self.disconnect_nodes(3, 0)
+
+        # A bad witness for the exact authorized statement must neither install
+        # finality nor undo the returning operator's durable one-time burns.
+        bad = bytearray(recovery["certificate"])
+        bad[-1] ^= 1
+        provider = self.certificate_provider(fresh, "first-recovery-invalid", 0xc901)
+        self.request_chainlock(provider, recovery["logical_hash"])
+        with fresh.assert_debug_log(["pq-clsig-invalid-signatures"], timeout=120):
+            provider.send_message(msg_clsig(bytes(bad)))
+        assert_equal(self.best_id(fresh), None)
+        self.fixture_command([*journal_args, shares_path, report_path])
+        assert_equal(json.loads(report_path.read_text(encoding="utf8"))["signed_slots"],
+                     ACTIVE_QUORUMS)
+        fresh.disconnect_p2ps()
+
+        self.log.info("Fresh receiver accepts RECOVER as its first durable winner, not the imported base")
+        self.submit_expected_certificate(
+            fresh, recovery, OUTAGE_RECOVERY_TARGET, "first-recovery-valid", 0xc902)
+        self.assert_exact_winner(fresh, recovery, OUTAGE_RECOVERY_TARGET)
+        fresh.disconnect_p2ps()
+        self.stop_node(3)
+        self.start_node(3, extra_args=receiver_args + ["-connect=0"])
+        assert_equal(fresh.getpeerinfo(), [])
+        force_finish_mnsync(fresh)
+        self.wait_until(lambda: self.best_id(fresh) == "%064x" % recovery["logical_hash"],
+                        timeout=120)
+        self.assert_exact_winner(fresh, recovery, OUTAGE_RECOVERY_TARGET)
+        assert_equal(fresh.getblockcount(), OUTAGE_RECOVERY_TARGET + SIGN_LAG)
+        assert_equal(fresh.getpeerinfo(), [])
+
+        self.remember(recovery, OUTAGE_RECOVERY_TARGET)
+        # Deliver the state edge while it is still above the returning node's
+        # frozen prefix. A later historical import cannot stand in for D.
+        stale = self.nodes[1]
+        with stale.assert_debug_log(["imported PoW historical authority"], timeout=120):
+            self.start_node(1, extra_args=receiver_args + ["-connect=0"])
+            force_finish_mnsync(stale)
+            self.tick_receivers([stale])
+        assert_equal(stale.getpeerinfo(), [])
+        assert_equal(self.best_id(stale), initial_id)
+        self.submit_expected_certificate(
+            stale, recovery, OUTAGE_RECOVERY_TARGET, "returning-recovery-valid", 0xc910)
+        self.assert_exact_winner(stale, recovery, OUTAGE_RECOVERY_TARGET)
+        stale.disconnect_p2ps()
+        self.stop_node(1)
+        self.assert_post_recovery_normal_round(recovery, operator_args)
+
+    def assert_post_recovery_normal_round(self, recovery, operator_args):
+        target = POST_RECOVERY_NORMAL_TARGET
+        self.mine_pq_to_height(target - SIGN_LAG)
+        authorizer, carrier = self.receipt_at(target - SIGN_LAG)
+        _, receipt = self.read_btcc_receipt(carrier)
+        assert_equal(receipt["logical_hash"], recovery["logical_hash"])
+        snapshot = self.root / "snapshots-post-recovery.dat"
+        self.fixture_command([
+            "catchup-extend", snapshot, target + SIGN_LAG,
+            self.nodes[0].getblockhash(target - SIGN_LAG)])
+        self.install_snapshot(snapshot)
+        receiver_args = list(self.extra_args[0])
+        operator_args = [arg for arg in operator_args
+                         if not arg.startswith("-pqchainlocktestfixture=")] + [
+                             "-pqchainlocktestfixture=%s" % snapshot]
+        fresh, stale = self.nodes[3], self.nodes[1]
+        self.stop_node(3)
+        self.start_node(3, extra_args=receiver_args)
+        self.start_node(1, extra_args=receiver_args)
+        for index in (1, 3):
+            self.connect_nodes(index, 0)
+        receivers = [stale, fresh]
+        self.sync_blocks([self.nodes[0], *receivers], timeout=180)
+        for node in receivers:
+            force_finish_mnsync(node)
+        self.disconnect_nodes(1, 0)
+        self.stop_node(1)
+        self.start_node(1, extra_args=operator_args)
+        force_finish_mnsync(stale)
+        self.connect_nodes(1, 0)
+        startup_marker = "captured PQ signer startup tip height=%d proTxHash=%s" % (
+            target - SIGN_LAG, self.operator["pro_tx_hash"])
+
+        def startup_ready():
+            self.tick_receivers(receivers)
+            return startup_marker in stale.debug_log_path.read_text(encoding="utf8")
+
+        self.wait_until(startup_ready, timeout=180)
+        self.wait_until(lambda: self.best_id(stale) == "%064x" % recovery["logical_hash"],
+                        timeout=120)
+        offset = stale.debug_log_size(encoding="utf8")
+        self.log.info("Recovery receipt selects ordinary signing for target %d", target)
+        self.mine_pq_to_height(target + SIGN_LAG)
+        self.sync_blocks([self.nodes[0], *receivers], timeout=180)
+        shares = {}
+        marker = "PQ fixture collected local share="
+
+        def normal_shares_ready():
+            nonlocal offset
+            self.tick_receivers(receivers)
+            with stale.debug_log_path.open(encoding="utf8") as log:
+                log.seek(offset)
+                for line in log.read().splitlines():
+                    if marker not in line:
+                        continue
+                    payload = bytes.fromhex(line.split(marker, 1)[1].strip())
+                    if struct.unpack_from("<i", payload, 4)[0] != target:
+                        continue
+                    assert payload[ROSTER_TRANSITION_OFFSET] not in (0, 5)
+                    epoch = struct.unpack_from("<I", payload, CHAINLOCK_STATEMENT_WIRE_SIZE)[0]
+                    assert_equal(shares.setdefault(epoch, payload.hex()), payload.hex())
+                offset = log.tell()
+            return len(shares) == ACTIVE_QUORUMS
+
+        self.wait_until(normal_shares_ready, timeout=180)
+        assert_equal(sorted(shares), [8, 9, 10, 11])
+        shares_path = self.root / "post-recovery-local-shares.json"
+        shares_path.write_text(json.dumps(list(shares.values())), encoding="utf8")
+        bundle = self.root / "post-recovery-complete-bundle.dat"
+        self.fixture_command([
+            "catchup-complete", shares_path, authorizer, BTCC_CANDIDATE_ORIGIN, bundle])
+        normal = self.read_full_dimension_bundle(bundle)
+        assert normal["certificate"][ROSTER_TRANSITION_OFFSET] not in (0, 5)
+        self.assert_captured_shares_preserved(normal, shares_path)
+        self.remember(normal, target)
+        for node in receivers:
+            self.wait_until(lambda: self.best_id(node) == "%064x" % normal["logical_hash"],
+                            timeout=120)
+            self.assert_exact_winner(node, normal, target)
 
     def run_scenario(self):
         _, predecessor = self.configure_private_migration()

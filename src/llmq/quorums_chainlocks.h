@@ -2466,7 +2466,8 @@ private:
         const uint256& activation_predecessor_hash,
         bool has_durable_best,
         bool target_is_active,
-        const uint256& target_btcp_prev) noexcept;
+        const uint256& target_btcp_prev,
+        bool has_verified_historical_recovery) noexcept;
     [[nodiscard]] static const CBlockIndex* ResolvePoWHistoricalSelectionTip(
         const CBlockIndex& active_tip,
         const pq::ChainLockScheduleConfig& schedule,

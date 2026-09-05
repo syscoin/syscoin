@@ -2954,6 +2954,236 @@ BOOST_AUTO_TEST_CASE(
 }
 
 BOOST_AUTO_TEST_CASE(
+    historical_sync_recovery_becomes_first_durable_winner_and_restarts)
+{
+    const uint256 genesis{NonNullHash(84'050)};
+    const auto config{MakeConfig()};
+    const auto staged{MakeInitializationPrecommit(84'051)};
+    auto base{MakeChainLock(
+        865, config.activation_predecessor_height,
+        NonNullHash(config.activation_predecessor_height), 84'052)};
+    SetExactInitialization(base, genesis, 84'052);
+    const auto base_context{MakeStatementBoundDurableContext(
+        genesis, config.chainlock_schedule, base)};
+    BOOST_REQUIRE(base_context);
+    const auto boundary{MakeHistoricalSyncBoundary(genesis, config, base)};
+    BOOST_REQUIRE(boundary.durable_prior.IsNull());
+    const auto universe{MakePersistenceRecoveryUniverse(
+        genesis, RecoverySourceFromPrior(base))};
+    BOOST_REQUIRE(universe);
+
+    const auto recovery_target{CanonicalRosterRecoveryTargetHeight(
+        config.chainlock_schedule, config.btcc_schedule, 7)};
+    BOOST_REQUIRE(recovery_target);
+    auto recovered{MakeChainLock(
+        *recovery_target,
+        *recovery_target - static_cast<int32_t>(PQ_CL_PERIOD),
+        NonNullHash(*recovery_target - PQ_CL_PERIOD), 84'053)};
+    SetExactRecoveryTransitionFromPrior(
+        recovered, genesis, base, /*newest_epoch=*/7);
+    const auto bound_rosters{MakeStatementBoundDurableContext(
+        genesis, config.chainlock_schedule, recovered)};
+    BOOST_REQUIRE(bound_rosters);
+    RosterAuthorizationVerificationContext authorization;
+    authorization.admission = RosterAuthorizationAdmission::RECOVER;
+    authorization.predecessor_height =
+        recovered.statement.previous_chainlock_height;
+    authorization.predecessor_block_hash =
+        recovered.statement.previous_chainlock_hash;
+    authorization.authorization_base =
+        recovered.statement.roster_authorization_base;
+    authorization.reset_policy = RosterResetVerificationPolicy{
+        config.chainlock_schedule, config.btcc_schedule,
+        config.activation_predecessor_height};
+    authorization.previous = RosterAuthorizationPriorState{
+        base.statement.roster_authorization_state_hash,
+        base.statement.roster_beacons};
+    ChainLockVerificationError verification_error{ChainLockVerificationError::NONE};
+    const auto recovery_context{PreparedChainLockContext::Create(
+        config.chainlock_schedule, recovered.statement,
+        bound_rosters->RosterSetPtr(), authorization, &verification_error)};
+    BOOST_REQUIRE(recovery_context);
+    BOOST_CHECK(verification_error == ChainLockVerificationError::NONE);
+    const auto prepared{PrepareFinalChainLockVerification(
+        recovered, *recovery_context, &verification_error)};
+    BOOST_REQUIRE(prepared);
+    BOOST_CHECK_EQUAL(prepared->checks.size(), FINAL_SIGNATURE_COUNT);
+
+    for (const bool has_precommit : {false, true}) {
+        BOOST_TEST_CONTEXT("obsolete initializer precommit=" << has_precommit) {
+            const fs::path path{m_path_root / (has_precommit
+                ? "pqcl_historical_first_recovery_with_precommit"
+                : "pqcl_historical_first_recovery_without_precommit")};
+            const std::optional<RosterRecoveryPrecommit> expected_precommit{
+                has_precommit ? std::optional{staged} : std::nullopt};
+            uint256 base_identity;
+            {
+                ProductionPQChainLockPersistence persistence{DiskParams(path), genesis, config};
+                if (has_precommit) {
+                    BOOST_REQUIRE(persistence.PersistRosterRecoveryPrecommit(staged));
+                }
+                BOOST_REQUIRE(persistence.PersistVerifiedAuthorizationBase(
+                    base, base_context, nullptr, universe));
+                BOOST_REQUIRE(HistoricalSyncBoundaryPersistenceTestAccess::Persist(
+                    persistence, base, base_context, boundary, 0));
+                const auto retained{persistence.LoadHistoricalSyncBoundaries()};
+                BOOST_REQUIRE_EQUAL(retained.size(), 1U);
+                base_identity = retained.front().record.RecordIdentity();
+                BOOST_CHECK(!persistence.HasBest());
+                BOOST_CHECK(!persistence.HasCatchupMarker());
+                BOOST_CHECK(persistence.LoadRosterRecoveryPrecommit() == expected_precommit);
+            }
+            {
+                // The archive only seeds the import seam. Remove it before
+                // admission so RECOVER must resolve B from historical storage.
+                CDBWrapper raw{DiskParams(path)};
+                BOOST_REQUIRE(raw.Erase(RawAuthorizationBaseKey{
+                    PQ_CHAINLOCK_PERSISTENCE_AUTHORIZATION_BASE_KEY,
+                    base.GetLogicalId(genesis)}, /*fSync=*/true));
+            }
+            {
+                ProductionPQChainLockPersistence persistence{DiskParams(path), genesis, config};
+                uint64_t revision{0};
+                const auto retained{persistence.LoadHistoricalSyncBoundaries(&revision)};
+                BOOST_REQUIRE_EQUAL(retained.size(), 1U);
+                BOOST_CHECK(retained.front().record.RecordIdentity() == base_identity);
+                BOOST_CHECK(persistence.LoadAuthorizationBases().empty());
+                const auto check_uncommitted = [&] {
+                    BOOST_CHECK(!persistence.HasBest());
+                    BOOST_CHECK(!persistence.LoadBest());
+                    BOOST_CHECK(!persistence.LoadUnsealedBTCC());
+                    BOOST_CHECK(!persistence.HasCatchupMarker());
+                    BOOST_CHECK(persistence.LoadRosterRecoveryPrecommit() == expected_precommit);
+                    uint64_t current_revision{0};
+                    const auto current{persistence.LoadHistoricalSyncBoundaries(&current_revision)};
+                    BOOST_REQUIRE_EQUAL(current.size(), 1U);
+                    BOOST_CHECK_EQUAL(current_revision, revision);
+                    BOOST_CHECK(current.front().boundary == boundary);
+                    BOOST_CHECK(current.front().record.RecordIdentity() == base_identity);
+                };
+                check_uncommitted();
+                const auto proof{HistoricalSyncBoundaryPersistenceTestAccess::SuccessorProof(
+                    boundary, recovered.GetLogicalId(genesis), staged, revision)};
+                const auto persist = [&](const FinalChainLock& candidate,
+                                         const PreparedChainLockContextPtr& context) {
+                    return has_precommit
+                        ? HistoricalSyncBoundaryPersistenceTestAccess::PersistSuccessor(
+                              persistence, candidate, context, proof)
+                        : persistence.PersistRecoveryCatchupBest(candidate, context);
+                };
+                auto bad_child_proof{recovered};
+                bad_child_proof.signatures.front().key_proof.siblings.front() =
+                    NonNullHash(84'054);
+                BOOST_CHECK(!PrepareFinalChainLockVerification(
+                    bad_child_proof, *recovery_context, &verification_error));
+                BOOST_CHECK(verification_error == ChainLockVerificationError::INVALID_CHILD_PROOF);
+                check_uncommitted();
+
+                for (unsigned mutation{0}; mutation < 5; ++mutation) {
+                    auto wrong{authorization};
+                    if (mutation == 0) wrong.authorization_base.logical_id = NonNullHash(84'055);
+                    if (mutation == 1) wrong.previous.reset();
+                    if (mutation == 2) wrong.previous->state_hash = NonNullHash(84'056);
+                    if (mutation == 3) wrong.admission = RosterAuthorizationAdmission::TRUSTED_PERSISTENCE;
+                    if (mutation == 4) wrong.admission = RosterAuthorizationAdmission::POW_HISTORY;
+                    const auto wrong_context{ChainLockStoreTestContextFactory::Create(
+                        config.chainlock_schedule, recovered.statement,
+                        bound_rosters->RosterSetPtr(), 0b1111, wrong)};
+                    BOOST_CHECK(!persist(recovered, wrong_context));
+                    check_uncommitted();
+                }
+                auto mismatched{recovered};
+                mismatched.statement.block_hash = NonNullHash(84'057);
+                BOOST_CHECK(!persist(mismatched, recovery_context));
+                check_uncommitted();
+
+                if (has_precommit) {
+                    BOOST_CHECK(!persistence.PersistRecoveryCatchupBest(recovered, recovery_context));
+                    check_uncommitted();
+                    for (unsigned mutation{0}; mutation < 6; ++mutation) {
+                        auto wrong_boundary{boundary};
+                        auto wrong_precommit{staged};
+                        auto wrong_id{recovered.GetLogicalId(genesis)};
+                        uint64_t wrong_revision{revision};
+                        if (mutation == 0) {
+                            wrong_boundary.carrier_hash = NonNullHash(84'058);
+                            wrong_boundary.coverage_hash = wrong_boundary.carrier_hash;
+                        }
+                        if (mutation == 1) {
+                            wrong_boundary.coverage_height += 5;
+                            wrong_boundary.coverage_hash = NonNullHash(84'059);
+                        }
+                        if (mutation == 2) wrong_id = NonNullHash(84'060);
+                        if (mutation == 3) ++wrong_precommit.pending_seed.anchor_btc_height;
+                        if (mutation == 4) ++wrong_revision;
+                        if (mutation == 5) wrong_boundary.durable_prior = authorization.authorization_base;
+                        BOOST_REQUIRE(wrong_boundary.IsStructurallyValid());
+                        const auto wrong{HistoricalSyncBoundaryPersistenceTestAccess::SuccessorProof(
+                            wrong_boundary, wrong_id, wrong_precommit, wrong_revision)};
+                        BOOST_CHECK(!HistoricalSyncBoundaryPersistenceTestAccess::PersistSuccessor(
+                            persistence, recovered, recovery_context, wrong));
+                        check_uncommitted();
+                    }
+                }
+                BOOST_REQUIRE(persist(recovered, recovery_context));
+                const auto best{persistence.LoadBest()};
+                BOOST_REQUIRE(best);
+                BOOST_CHECK(best->ChainLock() == recovered);
+                BOOST_CHECK(!persistence.LoadRosterRecoveryPrecommit());
+                BOOST_CHECK(persistence.HasCatchupMarker());
+                BOOST_CHECK(persistence.LoadAuthorizationBases().empty());
+                BOOST_CHECK(persistence.PersistRecoveryCatchupBest(recovered, recovery_context));
+            }
+            {
+                ProductionPQChainLockPersistence reopened{DiskParams(path), genesis, config};
+                const auto best{reopened.LoadBest()};
+                BOOST_REQUIRE(best);
+                BOOST_CHECK(best->ChainLock() == recovered);
+                BOOST_CHECK(best->ChainLock().GetLogicalId(genesis) == recovered.GetLogicalId(genesis));
+                BOOST_CHECK(best->ChainLock().GetWitnessId(genesis) == recovered.GetWitnessId(genesis));
+                BOOST_CHECK(!reopened.LoadRosterRecoveryPrecommit());
+                BOOST_CHECK(reopened.HasCatchupMarker());
+                BOOST_CHECK(reopened.LoadAuthorizationBases().empty());
+                uint64_t revision{0};
+                const auto retained{reopened.LoadHistoricalSyncBoundaries(&revision)};
+                BOOST_REQUIRE_EQUAL(retained.size(), 1U);
+                BOOST_CHECK(retained.front().boundary == boundary);
+                BOOST_CHECK(retained.front().record.RecordIdentity() == base_identity);
+                BOOST_CHECK(retained.front().record.ChainLock() == base);
+                const auto retained_universe{reopened.LoadRecoveryUniverse(universe->SourceId())};
+                BOOST_REQUIRE(retained_universe);
+                BOOST_CHECK(*retained_universe == *universe);
+                const auto dependencies{reopened.LoadRecoveryRosterRetentionDependencies()};
+                BOOST_REQUIRE(dependencies);
+                BOOST_CHECK(std::find(dependencies->begin(), dependencies->end(),
+                    RecoveryRosterRetentionDependency{recovered.statement.height, /*first_epoch=*/4}) !=
+                    dependencies->end());
+
+                RosterAuthorizationVerificationContext trusted_authorization;
+                trusted_authorization.admission = RosterAuthorizationAdmission::TRUSTED_PERSISTENCE;
+                trusted_authorization.predecessor_height = recovered.statement.previous_chainlock_height;
+                trusted_authorization.predecessor_block_hash = recovered.statement.previous_chainlock_hash;
+                const auto trusted{PreparedChainLockContext::CreateFromTrustedPersistence(
+                    config.chainlock_schedule, recovered.statement,
+                    best->RosterContext(), trusted_authorization, &verification_error)};
+                BOOST_REQUIRE(trusted);
+                const auto restarted{PrepareFinalChainLockVerification(
+                    recovered, *trusted, &verification_error)};
+                BOOST_REQUIRE(restarted);
+                BOOST_CHECK_EQUAL(restarted->checks.size(), FINAL_SIGNATURE_COUNT);
+                BOOST_CHECK(verification_error == ChainLockVerificationError::NONE);
+
+                ChainLockPersistenceError persistence_error{ChainLockPersistenceError::NONE};
+                BOOST_CHECK(!HistoricalSyncBoundaryPersistenceTestAccess::Invalidate(
+                    reopened, base_identity, revision, &persistence_error));
+                BOOST_CHECK(persistence_error == ChainLockPersistenceError::HEIGHT_CONFLICT);
+                BOOST_CHECK(reopened.LoadBest()->ChainLock() == recovered);
+            }
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(
     recovery_certificate_restart_uses_exact_trusted_roster_context)
 {
     const uint256 genesis{NonNullHash(84'100)};

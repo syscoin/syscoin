@@ -1013,6 +1013,16 @@ be revalidated. If an obsolete local INITIALIZE precommit exists, only an
 exact checked ordinary successor can consume it atomically with the first
 durable winner, leaving burned journal leaves unchanged.
 
+When D is absent, the first durable winner may also be a canonical `RECOVER`
+certificate. This requires a current verified historical B, an active target
+strictly above and descending through its frozen coverage endpoint, the exact
+B identity in the statement, and receipt-selected objective `RECOVER` authority
+bound to the same verified B context. Uncovered replay markers keep their
+existing gates. B does not become D, change the activation-predecessor floor,
+or waive ordinary roster, suffix, cursor, and 801-signature verification.
+Objective `NORMAL` or `PAUSE`, a revoked boundary, or a different B cannot use
+this first-recovery admission. Ordinary current catch-up still rejects resets.
+
 An uncovered crash-durable BTCC pre-seal marker adds only two
 prolonged-outage admissions outside that ordinary current window:
 
@@ -2263,6 +2273,13 @@ Expected failures are fail-closed:
   production signer and collector. Signing-context publication alone is not
   sufficient. Its actual D and the fresh receiver's absent finality must remain
   unchanged until an ordinary threshold certificate is accepted.
+- Complete the returning operator's recovery shares into an actual 801-signature
+  certificate, preserving its contributions in the selected three quorum
+  thresholds and verifying its fourth share as well. A bad witness must leave
+  the fresh receiver's D absent and the operator's journal burns unchanged;
+  the valid RECOVER becomes the exact first D. Restart without peers before
+  producing another carrier, then receipt RECOVER and complete the next normal
+  round. Cover both empty and obsolete initialization precommits in persistence.
 - Verify each returning-operator contribution against the exact published
   recovery statement: the journal's operator, child epoch, and physical leaf
   must identify the scheduled slot; its signed message hash and stored signature

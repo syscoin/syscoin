@@ -3194,6 +3194,88 @@ int Generate(const GeneratorArguments& args, bool retain_epoch_snapshots = false
     return 0;
 }
 
+struct CatchupFixtureState {
+    test::QuorumSnapshotFixture fixture;
+    std::vector<scheduled_wots::PublicKey> public_keys;
+    std::vector<std::shared_ptr<const scheduled_wots::SecretKey>> secret_keys;
+    std::map<uint256, std::size_t> member_indices;
+    uint32_t first_epoch{0};
+    uint32_t last_epoch{0};
+};
+
+std::optional<CatchupFixtureState>& CachedCatchupFixture()
+{
+    static std::optional<CatchupFixtureState> fixture;
+    return fixture;
+}
+
+std::map<uint32_t, test::SyntheticChildAuthorization> CatchupAuthorizations(
+    const uint256& genesis_hash,
+    const std::vector<scheduled_wots::PublicKey>& public_keys,
+    std::size_t member_index, uint32_t first_epoch, uint32_t last_epoch)
+{
+    const uint256 pro_tx_hash{NonNullHash(10'000 + member_index)};
+    ChildKeyTreeCommitment commitment;
+    commitment.generation = 1;
+    commitment.first_epoch = 0;
+    const auto tree_id{GetChildKeyTreeId(
+        genesis_hash, pro_tx_hash, commitment.generation, commitment.first_epoch)};
+    if (!tree_id || first_epoch > last_epoch ||
+        last_epoch >= MAX_CATCHUP_FIXTURE_EPOCHS) {
+        throw std::runtime_error("invalid catch-up helper child-tree window");
+    }
+    commitment.tree_id = *tree_id;
+    const ChildKeyTreeConfig config{
+        genesis_hash, *tree_id, commitment.generation,
+        commitment.first_epoch, commitment.depth};
+    std::map<uint32_t, test::SyntheticChildAuthorization> authorizations;
+    std::map<uint32_t, uint256> nodes;
+    for (uint32_t epoch{first_epoch}; epoch <= last_epoch; ++epoch) {
+        auto& proof{authorizations[epoch].proof};
+        if (member_index < QUORUM_MIN_VALID) {
+            proof.public_key = public_keys.at(ChildKeyIndex(epoch, member_index));
+        } else {
+            const uint256 material{NonNullHash(
+                static_cast<uint64_t>(epoch) * QUORUM_SIZE + member_index + 1,
+                0x524f4f54)};
+            std::copy(material.begin(), material.end(), proof.public_key.begin());
+        }
+        nodes.emplace(epoch, GetChildKeyTreeLeafHash(config, epoch, proof.public_key));
+    }
+    // Every participating epoch shares one committed root. Omitted subtrees
+    // are synthetic, but paths between live leaves and all WOTS signatures
+    // are checked by the ordinary production verifier.
+    for (uint16_t level{1}; level <= config.depth; ++level) {
+        const auto node_hash = [&](uint32_t index) {
+            const auto found{nodes.find(index)};
+            return found != nodes.end() ? found->second : test::SyntheticHash(
+                "SYS_PQ_CATCHUP_HELPER_SUBTREE_V1", genesis_hash, pro_tx_hash,
+                (static_cast<uint64_t>(first_epoch) << 32) | index, level);
+        };
+        for (auto& [epoch, authorization] : authorizations) {
+            authorization.proof.siblings[level - 1] =
+                node_hash((epoch >> (level - 1)) ^ 1U);
+        }
+        std::map<uint32_t, uint256> parents;
+        for (const auto& [index, hash] : nodes) {
+            const uint32_t parent{index >> 1};
+            parents.emplace(parent, GetChildKeyTreeNodeHash(
+                config, level, node_hash(parent * 2), node_hash(parent * 2 + 1)));
+        }
+        nodes = std::move(parents);
+    }
+    commitment.root = nodes.at(0);
+    for (auto& [epoch, authorization] : authorizations) {
+        authorization.record = FrozenChildRootRecord{
+            pro_tx_hash, first_epoch + 1, epoch, commitment};
+        if (!VerifyCommittedChildKeyProof(
+                genesis_hash, commitment, epoch, authorization.proof)) {
+            throw std::runtime_error("invalid catch-up helper child proof");
+        }
+    }
+    return authorizations;
+}
+
 void PrepareCatchupOperator(
     test::QuorumSnapshotFixture& fixture,
     uint32_t first_epoch,
@@ -3618,6 +3700,22 @@ int GenerateCatchupSnapshots(
     // Advance that exact state normally, without synthetic key replacements
     // during the recovery window, including at the live H-5 boundary.
     const uint32_t recovery_first{last->front().epoch};
+    auto helper_states{std::make_shared<std::vector<OperatorKeyState>>(
+        *fixture.snapshots.at(recovery_first).state.operator_key_states)};
+    for (std::size_t member{0}; member < QUORUM_SIZE; ++member) {
+        const auto authorizations{CatchupAuthorizations(
+            fixture.genesis_hash, public_keys, member,
+            recovery_first, last->back().epoch)};
+        auto& state{helper_states->at(member)};
+        const auto& commitment{authorizations.at(recovery_first).record.commitment};
+        state.global_key.child_key_commitment = commitment;
+        state.frozen_child_roots.front().commitment = commitment;
+        if (!state.IsStructurallyValid()) {
+            throw std::runtime_error("invalid catch-up helper key state");
+        }
+    }
+    fixture.snapshots.at(recovery_first).state.operator_key_states =
+        std::move(helper_states);
     if (!operator_output.empty()) {
         if (!operator_service) {
             throw std::runtime_error("missing catch-up operator service");
@@ -3668,6 +3766,305 @@ int GenerateCatchupSnapshots(
     if (!test::WriteQuorumSnapshotFixture(output, fixture, error)) {
         throw std::runtime_error("unable to write catch-up snapshots: " + error);
     }
+    CachedCatchupFixture() = CatchupFixtureState{
+        std::move(fixture), std::move(public_keys), std::move(secret_keys),
+        std::move(member_indices), recovery_first, last->back().epoch};
+    return 0;
+}
+
+int CompleteCatchupChainLock(int argc, char* argv[])
+{
+    if (argc != 6 || !CachedCatchupFixture() ||
+        !CachedCatchupFixture()->fixture.local_operator) {
+        throw std::runtime_error(
+            "usage after catchup-operator in the same stream: "
+            "catchup-complete SHARES_JSON AUTHORIZER_CLSIG BTCC_ORIGIN BUNDLE_OUT");
+    }
+    const auto& cached{*CachedCatchupFixture()};
+    const auto& snapshots{cached.fixture};
+    const fs::path shares_path{fs::u8path(argv[2])};
+    const fs::path authorizer_path{fs::u8path(argv[3])};
+    const fs::path output{fs::u8path(argv[5])};
+    int32_t btcc_origin{-1};
+    if (!shares_path.is_absolute() || !authorizer_path.is_absolute() ||
+        !output.is_absolute() || !ParseInt32(argv[4], &btcc_origin) ||
+        btcc_origin < 0) {
+        throw std::runtime_error("invalid catch-up completion arguments");
+    }
+    const auto [read_ok, contents]{ReadBinaryFile(shares_path, 32U << 10)};
+    UniValue encoded_shares;
+    if (!read_ok || !encoded_shares.read(contents) ||
+        !encoded_shares.isArray() || encoded_shares.size() < REQUIRED_QUORUMS ||
+        encoded_shares.size() > ACTIVE_QUORUMS) {
+        throw std::runtime_error("invalid catch-up captured shares");
+    }
+    std::map<uint32_t, ChainLockShare> captured;
+    for (const auto& encoded : encoded_shares.getValues()) {
+        const auto bytes{TryParseHex<uint8_t>(encoded.get_str())};
+        if (!bytes || bytes->size() != ChainLockShare::WIRE_SIZE) {
+            throw std::runtime_error("invalid catch-up captured share size");
+        }
+        DataStream stream{MakeByteSpan(*bytes)};
+        ChainLockShare share;
+        stream >> share;
+        DataStream canonical;
+        canonical << share;
+        if (!stream.empty() || !share.IsStructurallyValid() ||
+            HexStr(MakeUCharSpan(canonical)) != HexStr(*bytes) ||
+            share.transcript.member_pro_tx_hash != snapshots.local_operator->pro_tx_hash ||
+            share.transcript.quorum_epoch < cached.first_epoch ||
+            share.transcript.quorum_epoch > cached.last_epoch ||
+            (!captured.empty() &&
+             captured.begin()->second.GetStatement() != share.GetStatement()) ||
+            !captured.emplace(share.transcript.quorum_epoch, share).second) {
+            throw std::runtime_error("catch-up captured shares disagree with the frozen operator");
+        }
+    }
+    const auto& statement{captured.begin()->second.GetStatement()};
+    const auto target{LatestEligibleChainLockTargetHeight(
+        snapshots.build_config.schedule, snapshots.max_active_tip_height)};
+    if (!target || statement.height != *target ||
+        (statement.roster_transition == RosterAuthorizationTransitionKind::RECOVER &&
+         captured.size() != ACTIVE_QUORUMS)) {
+        throw std::runtime_error("catch-up completion target or recovery share count mismatch");
+    }
+    std::optional<ChainLockStatement> authorizer;
+    std::string error;
+    if (!ReadAuthorizingChainLock(authorizer_path, authorizer, error) ||
+        !authorizer || statement.roster_authorization_base !=
+            RosterAuthorizationBaseIdentity{
+                authorizer->height, authorizer->block_hash,
+                GetLogicalChainLockId(snapshots.genesis_hash, *authorizer)}) {
+        throw std::runtime_error("catch-up completion authorizer mismatch: " + error);
+    }
+    GeneratorArguments args;
+    args.genesis_hash = snapshots.genesis_hash;
+    args.target_height = snapshots.max_active_tip_height;
+    args.build_config = snapshots.build_config;
+    auto fixture{std::make_unique<FullDimensionFixture>(std::move(args))};
+    fixture->statement = statement;
+    fixture->member_indices = cached.member_indices;
+    const auto bind = [&](int32_t height, const uint256& hash) {
+        if (!fixture->chain.SetExactHash(height, hash)) {
+            throw std::runtime_error("catch-up completion has inconsistent branch anchors");
+        }
+    };
+    bind(snapshots.branch_anchor.height, snapshots.branch_anchor.block_hash);
+    bind(statement.height, statement.block_hash);
+    bind(statement.previous_chainlock_height, statement.previous_chainlock_hash);
+    bind(authorizer->height, authorizer->block_hash);
+    for (const auto& point : snapshots.quorum_bases) bind(point.height, point.block_hash);
+    for (const auto& snapshot : snapshots.snapshots) {
+        bind(snapshot.branch_point.height, snapshot.branch_point.block_hash);
+    }
+    for (const auto* window : std::array<const RosterBeaconWindow*, 2>{
+             &statement.roster_beacons, &authorizer->roster_beacons}) {
+        for (const auto& seed : window->active.seeds) {
+            if (seed.anchor_cursor.sys_height >= 0) {
+                bind(seed.anchor_cursor.sys_height, seed.anchor_cursor.sys_hash);
+            }
+        }
+        if (window->next.anchor_cursor.sys_height >= 0) {
+            bind(window->next.anchor_cursor.sys_height, window->next.anchor_cursor.sys_hash);
+        }
+        const auto& source{window->active.recovery_authority_source};
+        if (!source.IsNull()) {
+            bind(source.normal_beacon.anchor_cursor.sys_height,
+                 source.normal_beacon.anchor_cursor.sys_hash);
+        }
+    }
+    const auto cache{FrozenQuorumRosterCache::Create(
+        snapshots.genesis_hash, snapshots.build_config,
+        [&](const CBlockIndex& index) -> std::optional<QuorumSnapshotState> {
+            for (const auto& snapshot : snapshots.snapshots) {
+                if (snapshot.branch_point.height == index.nHeight &&
+                    snapshot.branch_point.block_hash == index.GetBlockHash()) {
+                    return snapshot.state;
+                }
+            }
+            return std::nullopt;
+        }, /*cache_results=*/false)};
+    QuorumBuildError build_error{QuorumBuildError::NONE};
+    fixture->verified_rosters = cache ? cache->GetVerifiedActiveNoPublish(
+        statement.height, fixture->chain.Tip(), statement.roster_beacons.active,
+        &build_error) : nullptr;
+    fixture->rosters = fixture->verified_rosters
+        ? fixture->verified_rosters->RostersPtr() : nullptr;
+    if (!fixture->rosters || build_error != QuorumBuildError::NONE ||
+        GetQuorumContextHash(snapshots.genesis_hash, statement.height,
+            statement.block_hash, Descriptors(*fixture->rosters)) !=
+                statement.quorum_context_hash) {
+        throw std::runtime_error("catch-up completion roster mismatch: " +
+                                 std::to_string(static_cast<int>(build_error)));
+    }
+    auto authorization{FixtureAuthorizationFor(statement, &*authorizer)};
+    if (statement.roster_transition == RosterAuthorizationTransitionKind::RECOVER) {
+        authorization.admission = RosterAuthorizationAdmission::RECOVER;
+        authorization.normal_input.reset();
+    } else if (authorization.normal_input &&
+               authorization.normal_input->next_snapshot.prior_authorization_is_descendant) {
+        authorization.normal_input->next_snapshot.height = authorizer->height;
+        authorization.normal_input->next_snapshot.hash = authorizer->block_hash;
+    }
+    BTCCScheduleConfig btcc;
+    btcc.candidate_origin = btcc_origin;
+    authorization.reset_policy = RosterResetVerificationPolicy{
+        snapshots.build_config.schedule, btcc, btcc_origin - 1};
+    ChainLockVerificationError verification_error{ChainLockVerificationError::NONE};
+    fixture->prepared_context = PreparedChainLockContext::Create(
+        snapshots.build_config.schedule, statement, fixture->verified_rosters,
+        authorization, &verification_error);
+    if (!fixture->prepared_context || verification_error != ChainLockVerificationError::NONE) {
+        throw std::runtime_error("catch-up completion authorization rejected: " +
+                                 std::to_string(static_cast<int>(verification_error)));
+    }
+    ShareCollectionError collection_error{ShareCollectionError::NONE};
+    auto collector{ChainLockCollector::Create(fixture->prepared_context, &collection_error)};
+    if (!collector) throw std::runtime_error("unable to create catch-up production collector");
+    const auto collect = [&](const ChainLockShare& share) {
+        if (collector->AddVerifiedShare(share, &collection_error) !=
+                ShareCollectionResult::ACCEPTED || collection_error != ShareCollectionError::NONE) {
+            throw std::runtime_error("catch-up production collector rejected share: " +
+                                     std::to_string(static_cast<int>(collection_error)));
+        }
+    };
+    // Verify every captured daemon share, including the fourth quorum that
+    // is not required in the final certificate. Never re-sign its operator.
+    for (const auto& [epoch, share] : captured) collect(share);
+    struct SignerPosition {
+        std::size_t share_index;
+        std::size_t quorum_slot;
+        uint16_t member_index;
+        std::size_t operator_index;
+    };
+    std::vector<SignerPosition> positions;
+    fixture->shares.reserve(FINAL_SIGNATURE_COUNT);
+    std::size_t selected_quorums{0};
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS && selected_quorums < REQUIRED_QUORUMS; ++slot) {
+        if ((fixture->prepared_context->AuthorizationMask() & (1U << slot)) == 0) continue;
+        const auto& roster{(*fixture->rosters)[slot]};
+        const auto local_share{captured.find(roster.descriptor.epoch)};
+        if (local_share == captured.end()) {
+            throw std::runtime_error("catch-up completion lacks an authorized local share");
+        }
+        fixture->shares.push_back(local_share->second);
+        std::size_t selected{1};
+        for (std::size_t member{0}; member < QUORUM_SIZE && selected < QUORUM_THRESHOLD; ++member) {
+            const auto& identity{roster.members[member]};
+            const auto signer{cached.member_indices.find(identity.pro_tx_hash)};
+            if (signer == cached.member_indices.end() || signer->second == 0 ||
+                !identity.eligible || !identity.child_root) continue;
+            positions.push_back({fixture->shares.size(), slot,
+                                 static_cast<uint16_t>(member), signer->second});
+            fixture->shares.emplace_back();
+            ++selected;
+        }
+        if (selected != QUORUM_THRESHOLD) {
+            throw std::runtime_error("insufficient catch-up helper signers");
+        }
+        ++selected_quorums;
+    }
+    FinalChainLock shell;
+    shell.statement = statement;
+    if (fixture->shares.size() != FINAL_SIGNATURE_COUNT ||
+        !ParallelFor(positions.size(), [&](std::size_t index) {
+            const auto& position{positions[index]};
+            const auto& roster{(*fixture->rosters)[position.quorum_slot]};
+            const auto& member{roster.members[position.member_index]};
+            const auto authorizations{CatchupAuthorizations(
+                snapshots.genesis_hash, cached.public_keys, position.operator_index,
+                cached.first_epoch, cached.last_epoch)};
+            const auto& child{authorizations.at(roster.descriptor.epoch)};
+            if (!member.child_root || *member.child_root != child.record) return false;
+            auto& share{fixture->shares[position.share_index]};
+            share.transcript = BuildChainLockShareTranscript(
+                shell, roster.descriptor, position.member_index, member.pro_tx_hash);
+            share.authenticated_signature.key_proof = child.proof;
+            const uint256 hash{GetChainLockShareHash(snapshots.genesis_hash, share.transcript)};
+            scheduled_wots::Message message;
+            std::copy(hash.begin(), hash.end(), message.begin());
+            const auto leaf{ChainLockLeafIndex(
+                snapshots.build_config.schedule, roster.descriptor.epoch, statement.height)};
+            const auto& key{cached.secret_keys.at(
+                ChildKeyIndex(roster.descriptor.epoch, position.operator_index))};
+            return leaf && key && scheduled_wots::SignDeterministic(
+                *key, *leaf, message, share.authenticated_signature.signature);
+        })) {
+        throw std::runtime_error("unable to sign catch-up helper shares");
+    }
+    for (const auto& position : positions) collect(fixture->shares[position.share_index]);
+    const auto finalized{collector->FinalizeCollection()};
+    if (!finalized || !finalized->Certificate().IsStructurallyValid()) {
+        throw std::runtime_error("catch-up collector did not finalize 801 shares");
+    }
+    const auto& certificate{finalized->Certificate()};
+    auto prepared{PrepareFinalChainLockVerification(
+        certificate, *fixture->prepared_context, &verification_error)};
+    ChainLockVerifier verifier{WorkerCount()};
+    if (!prepared || verification_error != ChainLockVerificationError::NONE ||
+        !verifier.VerifyChecks(std::move(prepared->checks)) ||
+        !WriteShareBundle(output, *fixture, certificate, error)) {
+        throw std::runtime_error("catch-up final certificate verification or write failed: " + error);
+    }
+    return 0;
+}
+
+int ExtendCatchupSnapshots(int argc, char* argv[])
+{
+    if (argc != 5 || !CachedCatchupFixture()) {
+        throw std::runtime_error(
+            "usage after catchup-operator in the same stream: "
+            "catchup-extend SNAPSHOT_OUT MAX_TIP SIGNING_ANCHOR_HASH");
+    }
+    auto& cached{*CachedCatchupFixture()};
+    auto fixture{cached.fixture};
+    const fs::path output{fs::u8path(argv[2])};
+    const uint256 anchor_hash{uint256S(argv[4])};
+    int32_t max_tip{-1};
+    const auto& schedule{fixture.build_config.schedule};
+    if (!output.is_absolute() || anchor_hash.IsNull() ||
+        !ParseInt32(argv[3], &max_tip) || max_tip <= fixture.max_active_tip_height) {
+        throw std::runtime_error("invalid catch-up extension arguments");
+    }
+    const auto target{LatestEligibleChainLockTargetHeight(schedule, max_tip)};
+    const auto active{ActiveEpochsAtHeight(schedule, max_tip)};
+    if (!target || !active || active->front().epoch != cached.first_epoch ||
+        active->back().epoch != cached.last_epoch ||
+        fixture.snapshots.size() != fixture.quorum_bases.size() + 1) {
+        throw std::runtime_error("catch-up extension changes the frozen recovery window");
+    }
+    const int32_t anchor_height{*target - static_cast<int32_t>(schedule.sign_lag)};
+    auto& auxiliary{fixture.snapshots.back()};
+    const auto view{DeriveOperatorKeyScheduleView(
+        schedule, anchor_height, fixture.build_config.registration_cutoff_blocks,
+        fixture.build_config.future_horizon_epochs)};
+    if (!view || anchor_height <= auxiliary.branch_point.height) {
+        throw std::runtime_error("invalid catch-up extension signing anchor");
+    }
+    auto states{std::make_shared<std::vector<OperatorKeyState>>(
+        *auxiliary.state.operator_key_states)};
+    for (auto& state : *states) {
+        const auto before{state};
+        if (state.Advance(*view) != OperatorKeyStateResult::OK) {
+            throw std::runtime_error("unable to advance catch-up extension keys");
+        }
+        for (const auto& epoch : *active) {
+            const auto frozen{before.ResolveChildRoot(epoch.epoch)};
+            if (!frozen.record || frozen.record != state.ResolveChildRoot(epoch.epoch).record) {
+                throw std::runtime_error("catch-up extension changed a frozen child root");
+            }
+        }
+    }
+    auxiliary.branch_point = {anchor_height, anchor_hash};
+    auxiliary.state.deterministic_mns = Snapshot(anchor_height, anchor_hash);
+    auxiliary.state.operator_key_states = std::move(states);
+    fixture.max_active_tip_height = max_tip;
+    std::string error;
+    if (!test::ValidateQuorumSnapshotFixture(fixture, error) ||
+        !test::WriteQuorumSnapshotFixture(output, fixture, error)) {
+        throw std::runtime_error("invalid catch-up extension fixture: " + error);
+    }
+    cached.fixture = std::move(fixture);
     return 0;
 }
 
@@ -3675,6 +4072,12 @@ int RunCommand(int argc, char* argv[], bool stream = false)
 {
     try {
         std::string error;
+        if (argc > 1 && std::string_view{argv[1]} == "catchup-complete") {
+            return CompleteCatchupChainLock(argc, argv);
+        }
+        if (argc > 1 && std::string_view{argv[1]} == "catchup-extend") {
+            return ExtendCatchupSnapshots(argc, argv);
+        }
         if (argc > 1 && std::string_view{argv[1]} == "verify-operator-journal") {
             return VerifyCatchupOperatorJournal(argc, argv);
         }

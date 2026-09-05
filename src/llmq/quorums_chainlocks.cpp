@@ -7746,7 +7746,8 @@ bool CChainLocksHandler::IsExactHistoricalResetCandidate(
     const uint256& activation_predecessor_hash,
     bool has_durable_best,
     bool target_is_active,
-    const uint256& target_btcp_prev) noexcept
+    const uint256& target_btcp_prev,
+    bool has_verified_historical_recovery) noexcept
 {
     if (!target_is_active || !statement.IsStructurallyValid()) return false;
     const auto target_epoch{
@@ -7778,7 +7779,7 @@ bool CChainLocksHandler::IsExactHistoricalResetCandidate(
                statement.accepted_btcc_cursor == newest.anchor_cursor &&
                statement.btcc_advance == pq::BTCCAdvance::ADVANCE;
     }
-    return has_durable_best &&
+    return (has_durable_best || has_verified_historical_recovery) &&
            *reset_transition ==
                pq::RosterAuthorizationTransitionKind::RECOVER &&
            pq::IsRecoveryRosterBeaconWindow(statement.roster_beacons) &&
@@ -8083,13 +8084,37 @@ CChainLocksHandler::GetHistoricalAdmissionLocked(
     }
     if (has_uncovered_active_marker) return {};
 
+    bool has_verified_historical_recovery{false};
+    if (!best && target_is_active &&
+        statement.roster_transition ==
+            pq::RosterAuthorizationTransitionKind::RECOVER) {
+        const auto recovery_authority{GetPoWHistoricalSyncAuthorization()};
+        const CBlockIndex* covered{recovery_authority &&
+                target->nHeight > recovery_authority->boundary.coverage_height
+            ? target->GetAncestor(recovery_authority->boundary.coverage_height)
+            : nullptr};
+        if (covered != nullptr &&
+            covered->GetBlockHash() == recovery_authority->boundary.coverage_hash &&
+            statement.roster_authorization_base ==
+                recovery_authority->base.metadata.AuthorizationBase()) {
+            // B authorizes the first recovery edge; it does not become D or
+            // move the activation-predecessor floor before that edge verifies.
+            const auto objective{ResolveObjectiveRosterAuthorizationContext(*target)};
+            has_verified_historical_recovery = objective &&
+                objective->mode == pq::ObjectiveRosterAuthorizationMode::RECOVER &&
+                objective->base &&
+                objective->base->metadata == recovery_authority->base.metadata &&
+                objective->base->verification_context ==
+                    recovery_authority->base.verification_context;
+        }
+    }
     if (IsExactHistoricalResetCandidate(
             statement, m_config->chainlock_schedule,
             m_config->btcc_schedule,
             m_config->activation_predecessor_height,
             activation_predecessor != nullptr ? activation_predecessor->GetBlockHash() : uint256{},
             best.has_value(), target_is_active,
-            target->btcpPrevCommitment)) {
+            target->btcpPrevCommitment, has_verified_historical_recovery)) {
         return {HistoricalAdmission::RECOVERY, {}};
     }
     if (exact_local_successor) {
