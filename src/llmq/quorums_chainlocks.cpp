@@ -2621,6 +2621,15 @@ bool ShouldRetryLocalChainLockShareRelay(
            result == pq::ShareCollectionResult::DUPLICATE;
 }
 
+bool ShouldRelayLocalPaymentAuditShare(
+    bool journal_replayed, pq::ShareCollectionResult result,
+    bool accepted_duplicate) noexcept
+{
+    return result == pq::ShareCollectionResult::ACCEPTED ||
+           (journal_replayed && accepted_duplicate &&
+            result == pq::ShareCollectionResult::DUPLICATE);
+}
+
 FinalChainLockVerificationPath SelectFinalChainLockVerificationPath(
     const pq::CollectedChainLockFinalization* collected,
     const pq::FinalChainLock* certificate,
@@ -15197,7 +15206,7 @@ bool CChainLocksHandler::PreparePaymentAuditSigningRuntime()
                     signing_rosters_ptr, relay_plan, relay_group_id,
                     authorization_mask, roster_source_generation,
                     std::move(collector), std::nullopt, std::nullopt,
-                    false, false});
+                    false});
         }
         if (!m_payment_audit_store->IsCandidateRevisionCurrent(
                 existing_candidates->candidate_revision) ||
@@ -19238,7 +19247,6 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
             finalization_to_process =
                 m_payment_audit_runtime->finalized;
         } else {
-            if (m_payment_audit_runtime->local_signing_complete) return;
             signing_context = m_payment_audit_runtime->collector
                                   ->GetPreparedContext();
             if (!signing_context) return;
@@ -19286,18 +19294,7 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
             });
         if (local_member) break;
     }
-    if (!local_member) {
-        LOCK(m_payment_audit_mutex);
-        if (m_payment_audit_runtime_generation == runtime_generation &&
-            m_payment_audit_runtime &&
-            m_payment_audit_runtime->collector &&
-            m_payment_audit_runtime->collector->GetPreparedContext() ==
-                signing_context &&
-            m_payment_audit_runtime->statement == statement) {
-            m_payment_audit_runtime->local_signing_complete = true;
-        }
-        return;
-    }
+    if (!local_member) return;
 
     const auto& seal_statement{statement->seal_statement};
     const PQSignerBranchLock seal_lock{
@@ -19343,8 +19340,6 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
         pq::PaymentAuditScheduleConfig{m_config->chainlock_schedule,
                                        m_config->btcc_schedule},
         *m_signer_journal};
-    bool signing_material_missing{false};
-    bool collection_incomplete{false};
     for (std::size_t slot{0}; slot < rosters->size(); ++slot) {
         if ((authorization_mask & (uint8_t{1} << slot)) == 0) continue;
         const auto& roster{(*rosters)[slot]};
@@ -19358,7 +19353,6 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
             auto signing_material{GetActiveMasternodeChildSigningMaterial(
                 m_genesis_hash, local_pro_tx_hash, *member.child_root)};
             if (!signing_material) {
-                signing_material_missing = true;
                 LogPrint(BCLog::CHAINLOCKS,
                          "CChainLocksHandler::%s -- committed scheduled-WOTS child "
                          "key cache is unavailable for payment-audit epoch "
@@ -19410,11 +19404,12 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
                 *signed_share.share, *statement, admission_generation,
                 runtime_generation)};
             if (collection.stale || collection.closed) return;
-            if (collection.result !=
-                pq::ShareCollectionResult::ACCEPTED) {
-                collection_incomplete =
-                    collection_incomplete ||
-                    !collection.accepted_duplicate;
+            // The five-second scheduler also retries our durable shares:
+            // peers can miss the first relay before authentication or runtime
+            // publication. Only an accepted exact journal replay may repeat.
+            if (!ShouldRelayLocalPaymentAuditShare(
+                    signed_share.replayed, collection.result,
+                    collection.accepted_duplicate)) {
                 continue;
             }
             if (!HasExactPaymentAuditRuntime(
@@ -19449,18 +19444,6 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
                     *collection.finalized);
                 return;
             }
-        }
-    }
-
-    if (!signing_material_missing && !collection_incomplete) {
-        LOCK(m_payment_audit_mutex);
-        if (m_payment_audit_runtime_generation == runtime_generation &&
-            m_payment_audit_runtime &&
-            m_payment_audit_runtime->collector &&
-            m_payment_audit_runtime->collector->GetPreparedContext() ==
-                signing_context &&
-            m_payment_audit_runtime->statement == statement) {
-            m_payment_audit_runtime->local_signing_complete = true;
         }
     }
 }

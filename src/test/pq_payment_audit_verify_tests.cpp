@@ -7,10 +7,13 @@
 #include <llmq/pq_payment_audit_store.h>
 #include <llmq/pq_payment_audit_verify.h>
 #include <llmq/pq_chainlock_store.h>
+#include <llmq/quorums_chainlocks.h>
 
 #include <crypto/scheduled_wots/scheduled_wots.h>
+#include <streams.h>
 #include <test/pq_test_util.h>
 #include <test/util/setup_common.h>
+#include <version.h>
 
 #include <algorithm>
 #include <cstddef>
@@ -1477,6 +1480,132 @@ BOOST_AUTO_TEST_CASE(real_scheduled_wots_share_verifies_and_enters_collector)
     BOOST_CHECK(!journal.GetBranchLock(
         fixture->genesis_hash, member.pro_tx_hash,
         fixture->seal.statement.height));
+}
+
+BOOST_AUTO_TEST_CASE(delayed_delivery_replays_journaled_audit_share_without_resigning)
+{
+    auto fixture{MakeFixture()};
+    scheduled_wots::KeyGenerationSeed seed{};
+    for (std::size_t i{0}; i < seed.size(); ++i) {
+        seed[i] = static_cast<uint8_t>(i + 1);
+    }
+    auto secret_key{scheduled_wots::GenerateSecretKey(seed)};
+    BOOST_REQUIRE(secret_key);
+    scheduled_wots::PublicKey public_key{};
+    BOOST_REQUIRE(secret_key->GetPublicKey(public_key));
+
+    const auto& member{fixture->rosters[0].members[0]};
+    const auto authorization{test::MakeSyntheticChildAuthorization(
+        fixture->genesis_hash, member.pro_tx_hash,
+        fixture->rosters[0].descriptor.epoch, public_key, 90'002)};
+    fixture->rosters[0].members[0].child_root = authorization.record;
+    fixture->rosters[0].descriptor.child_key_root =
+        ComputeQuorumChildKeyRoot(fixture->genesis_hash,
+                                  fixture->rosters[0]);
+    std::array<QuorumDescriptor, ACTIVE_QUORUMS> descriptors;
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        descriptors[slot] = fixture->rosters[slot].descriptor;
+    }
+    fixture->seal.statement.quorum_context_hash = GetQuorumContextHash(
+        fixture->genesis_hash, fixture->seal.statement.height,
+        fixture->seal.statement.block_hash, descriptors);
+    fixture->audit.statement.seal_statement = fixture->seal.statement;
+    auto roster_set{VerifiedRosterSet::Create(
+        fixture->genesis_hash,
+        std::make_shared<const FrozenQuorumRosters>(fixture->rosters))};
+    BOOST_REQUIRE(roster_set);
+    auto context{PreparedPaymentAuditContext::Create(
+        fixture->schedule, fixture->audit.statement, fixture->seal,
+        roster_set, fixture->authorization)};
+    BOOST_REQUIRE(context);
+    auto local_collector{PaymentAuditCollector::Create(context)};
+    auto recipient_collector{PaymentAuditCollector::Create(context)};
+    BOOST_REQUIRE(local_collector);
+    BOOST_REQUIRE(recipient_collector);
+
+    const auto journal_path{
+        m_path_root / "pq_payment_audit_delayed_delivery"};
+    const auto& observed{
+        fixture->audit.report_witnesses[0].observed_members};
+    PaymentAuditShare original_share;
+    {
+        llmq::CPQSignerJournal journal{journal_path};
+        const auto reconciled{
+            llmq::test::PQPaymentAuditVerifyTestAccess::Reconcile(
+                journal, fixture->genesis_hash, member.pro_tx_hash,
+                fixture->seal)};
+        BOOST_REQUIRE(reconciled.outcome ==
+                      llmq::PQSignerJournalOutcome::CERTIFICATE_RECORDED);
+        const auto accepted_seal{journal.GetAcceptedCertificate(
+            fixture->genesis_hash, member.pro_tx_hash,
+            fixture->seal.statement.height)};
+        BOOST_REQUIRE(accepted_seal);
+        PaymentAuditShareSigner signer{
+            fixture->genesis_hash, member.pro_tx_hash,
+            fixture->schedule, journal};
+        const auto signed_share{signer.Sign(
+            *context, observed, 0, 0, *secret_key,
+            authorization.proof, accepted_seal)};
+        BOOST_REQUIRE(signed_share.share);
+        BOOST_CHECK(!signed_share.replayed);
+        original_share = *signed_share.share;
+        const auto result{local_collector->AddVerifiedShare(original_share)};
+        BOOST_REQUIRE(result == ShareCollectionResult::ACCEPTED);
+        BOOST_CHECK(llmq::ShouldRelayLocalPaymentAuditShare(
+            signed_share.replayed, result, /*accepted_duplicate=*/false));
+    }
+
+    // Local acceptance cannot stand in for delivery: the first packet is lost,
+    // and even reopening the journal must preserve the only signed report.
+    BOOST_CHECK_EQUAL(local_collector->ShareCounts()[0], 1U);
+    BOOST_CHECK_EQUAL(recipient_collector->ShareCounts()[0], 0U);
+    llmq::CPQSignerJournal restarted_journal{journal_path};
+    const auto accepted_seal{restarted_journal.GetAcceptedCertificate(
+        fixture->genesis_hash, member.pro_tx_hash,
+        fixture->seal.statement.height)};
+    BOOST_REQUIRE(accepted_seal);
+    PaymentAuditShareSigner replay_signer{
+        fixture->genesis_hash, member.pro_tx_hash,
+        fixture->schedule, restarted_journal};
+    const auto replay{replay_signer.Sign(
+        *context, observed, 0, 0, *secret_key,
+        authorization.proof, accepted_seal)};
+    BOOST_REQUIRE(replay.share);
+    BOOST_REQUIRE(replay.replayed);
+    CDataStream original_wire{SER_NETWORK, PROTOCOL_VERSION};
+    CDataStream replay_wire{SER_NETWORK, PROTOCOL_VERSION};
+    original_wire << original_share;
+    replay_wire << *replay.share;
+    BOOST_CHECK_EQUAL_COLLECTIONS(
+        original_wire.begin(), original_wire.end(),
+        replay_wire.begin(), replay_wire.end());
+
+    ShareCollectionError collection_error{ShareCollectionError::NONE};
+    const auto local_result{local_collector->AddVerifiedShare(
+        *replay.share, &collection_error)};
+    BOOST_REQUIRE(local_result == ShareCollectionResult::DUPLICATE);
+    BOOST_CHECK(collection_error == ShareCollectionError::DUPLICATE);
+    const bool accepted_duplicate{
+        local_collector->HasAcceptedShare(replay.share->transcript)};
+    BOOST_REQUIRE(accepted_duplicate);
+    BOOST_REQUIRE(llmq::ShouldRelayLocalPaymentAuditShare(
+        replay.replayed, local_result, accepted_duplicate));
+    BOOST_CHECK_EQUAL(local_collector->ShareCounts()[0], 1U);
+    BOOST_REQUIRE(recipient_collector->AddVerifiedShare(
+                      *replay.share, &collection_error) ==
+                  ShareCollectionResult::ACCEPTED);
+    BOOST_CHECK(collection_error == ShareCollectionError::NONE);
+    BOOST_CHECK_EQUAL(recipient_collector->ShareCounts()[0], 1U);
+    BOOST_CHECK(recipient_collector->HasAcceptedShare(
+        original_share.transcript));
+
+    auto competing_observed{observed};
+    competing_observed[0] ^= 1;
+    ChainLockSigningError signing_error{ChainLockSigningError::NONE};
+    BOOST_CHECK(!replay_signer.Sign(
+        *context, competing_observed, 0, 0, *secret_key,
+        authorization.proof, accepted_seal, &signing_error).share);
+    BOOST_CHECK(signing_error == ChainLockSigningError::JOURNAL_CONFLICT);
 }
 
 BOOST_AUTO_TEST_CASE(audit_selection_cannot_exceed_predecessor_authorization)

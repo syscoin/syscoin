@@ -4343,6 +4343,26 @@ BOOST_AUTO_TEST_CASE(local_chainlock_share_retry_is_journal_replay_only)
         /*journal_replayed=*/true, ShareCollectionResult::REJECTED));
 }
 
+BOOST_AUTO_TEST_CASE(local_payment_audit_share_retry_requires_accepted_journal_replay)
+{
+    using llmq::pq::ShareCollectionResult;
+    for (const bool journal_replayed : {false, true}) {
+        for (const bool accepted_duplicate : {false, true}) {
+            BOOST_CHECK(llmq::ShouldRelayLocalPaymentAuditShare(
+                journal_replayed, ShareCollectionResult::ACCEPTED,
+                accepted_duplicate));
+            BOOST_CHECK(!llmq::ShouldRelayLocalPaymentAuditShare(
+                journal_replayed, ShareCollectionResult::REJECTED,
+                accepted_duplicate));
+            BOOST_CHECK_EQUAL(llmq::ShouldRelayLocalPaymentAuditShare(
+                                  journal_replayed,
+                                  ShareCollectionResult::DUPLICATE,
+                                  accepted_duplicate),
+                              journal_replayed && accepted_duplicate);
+        }
+    }
+}
+
 BOOST_AUTO_TEST_CASE(payment_audit_finalization_retry_is_rate_limited)
 {
     using Microseconds = std::chrono::microseconds;

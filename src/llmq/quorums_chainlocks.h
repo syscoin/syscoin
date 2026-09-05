@@ -597,6 +597,11 @@ private:
 [[nodiscard]] bool ShouldRetryLocalChainLockShareRelay(
     bool journal_replayed, pq::ShareCollectionResult result) noexcept;
 
+/** An in-flight duplicate is not proof that the local share was accepted. */
+[[nodiscard]] bool ShouldRelayLocalPaymentAuditShare(
+    bool journal_replayed, pq::ShareCollectionResult result,
+    bool accepted_duplicate) noexcept;
+
 enum class FinalChainLockVerificationPath : uint8_t {
     FULL = 0,
     COLLECTED,
@@ -2186,7 +2191,6 @@ private:
         std::optional<LocalPaymentAuditFinalization> finalized;
         std::optional<std::chrono::microseconds> finalization_last_attempt;
         bool finalization_attempt_in_flight{false};
-        bool local_signing_complete{false};
     };
     void ResetPaymentAuditRuntime()
         EXCLUSIVE_LOCKS_REQUIRED(m_payment_audit_mutex);
