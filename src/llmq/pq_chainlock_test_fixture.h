@@ -18,7 +18,7 @@ class ChainstateManager;
 
 namespace llmq::pq::test {
 
-inline constexpr uint16_t QUORUM_SNAPSHOT_FIXTURE_VERSION{1};
+inline constexpr uint16_t QUORUM_SNAPSHOT_FIXTURE_VERSION{2};
 inline constexpr std::size_t MAX_QUORUM_SNAPSHOT_FIXTURE_BYTES{8U << 20};
 inline constexpr std::size_t MAX_QUORUM_SNAPSHOT_FIXTURE_POINTS{16};
 
@@ -35,6 +35,11 @@ struct FixtureSnapshot {
     QuorumSnapshotState state;
 };
 
+struct FixtureOperatorService {
+    uint256 pro_tx_hash;
+    CService service;
+};
+
 /**
  * An exact-branch, height-bounded roster fixture for daemon functional tests.
  * It is never a certificate or an alternate validation result: the existing
@@ -48,6 +53,7 @@ struct QuorumSnapshotFixture {
     int32_t max_active_tip_height{-1};
     std::vector<FixtureBranchPoint> quorum_bases;
     std::vector<FixtureSnapshot> snapshots;
+    std::optional<FixtureOperatorService> local_operator;
 };
 
 /** Validate the complete in-memory shape without touching disk. */
@@ -72,6 +78,14 @@ LoadQuorumSnapshotFixture(
     const QuorumBuildConfig& expected_build_config,
     ChainstateManager& chainman,
     std::string& error) noexcept;
+
+/**
+ * The loaded regtest population at the exact active tip, for local operator
+ * identity discovery. This does not extend the historical roster lookup:
+ * only ordinary key-schedule advancement from a declared snapshot is allowed.
+ */
+[[nodiscard]] std::optional<QuorumSnapshotState>
+LookupActiveQuorumSnapshotFixture(const CBlockIndex& index) noexcept;
 
 } // namespace llmq::pq::test
 

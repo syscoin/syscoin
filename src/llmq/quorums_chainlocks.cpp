@@ -3569,6 +3569,9 @@ bool CChainLocksHandler::InitializeSignerStartupTip(
     // an external single-active fence.
     m_signer_startup_pro_tx_hash = local_pro_tx_hash;
     m_signer_startup_tip_height = tip->nHeight;
+    LogPrint(BCLog::CHAINLOCKS,
+             "CChainLocksHandler::%s -- captured PQ signer startup tip height=%d proTxHash=%s\n",
+             __func__, tip->nHeight, local_pro_tx_hash.ToString());
     return true;
 }
 
@@ -19135,6 +19138,21 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
             // local announcement at the exact still-published capability and
             // preseal state, rather than relying on the pre-collection fence.
             if (!exact_signing_capability_is_current()) return;
+            LogPrint(BCLog::CHAINLOCKS,
+                     "CChainLocksHandler::%s -- signed and collected PQ ChainLock share "
+                     "height=%d epoch=%u proTxHash=%s logicalid=%s replayed=%d\n",
+                     __func__, statement.height, roster.descriptor.epoch,
+                     local_pro_tx_hash.ToString(),
+                     pq::GetLogicalChainLockId(m_genesis_hash, statement).ToString(),
+                     signed_share.replayed);
+            if (gArgs.IsArgSet("-pqchainlocktestfixture")) {
+                // Public test evidence binds the journal's signed hash to
+                // the exact statement accepted by the production collector.
+                CDataStream fixture_share{SER_NETWORK, PROTOCOL_VERSION};
+                fixture_share << *signed_share.share;
+                LogPrint(BCLog::CHAINLOCKS,
+                         "PQ fixture collected local share=%s\n", HexStr(fixture_share));
+            }
             MaybeCapturePaymentAuditResponse(
                 *signed_share.share, signing_context->RostersPtr(),
                 admission_generation);

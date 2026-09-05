@@ -7,6 +7,7 @@
 
 #include <common/args.h>
 #include <hash.h> // SYSCOIN: recognize deterministic regtest stub commitments.
+#include <llmq/pq_chainlock_test_fixture.h>
 #include <net.h>
 #include <netbase.h>
 #include <protocol.h>
@@ -661,6 +662,56 @@ void ClearActiveIdentity() EXCLUSIVE_LOCKS_REQUIRED(activeMasternodeInfoCs)
     activeMasternodeInfo.outpoint.SetNull();
 }
 
+class ActiveOperatorSnapshot {
+public:
+    bool Load(const CBlockIndex& index, std::string& error)
+    {
+        // The daemon signing regression must use the same branch-bound
+        // population as its roster builder, without replacing signer gates.
+        if (gArgs.IsArgSet("-pqchainlocktestfixture")) {
+            auto fixture{llmq::pq::test::LookupActiveQuorumSnapshotFixture(index)};
+            if (!fixture || !fixture->operator_key_states) {
+                error = "active block is outside the PQ operator fixture";
+                return false;
+            }
+            deterministic_mns = std::move(fixture->deterministic_mns);
+            m_fixture_operators = std::move(fixture->operator_key_states);
+            return true;
+        }
+        deterministic_mns = deterministicMNManager->GetListForBlock(&index);
+        return deterministicMNManager->GetPQRegistryReadView(
+            &index, m_registry, error);
+    }
+
+    const llmq::pq::OperatorKeyState* FindOperator(const uint256& pro_tx_hash) const
+    {
+        if (!m_fixture_operators) return m_registry.FindOperator(pro_tx_hash);
+        const auto found{std::find_if(m_fixture_operators->begin(), m_fixture_operators->end(),
+            [&](const auto& state) { return state.pro_tx_hash == pro_tx_hash; })};
+        return found == m_fixture_operators->end() ? nullptr : &*found;
+    }
+
+    const llmq::pq::OperatorKeyState* FindActiveOperator(
+        const llmq::pq::GlobalPublicKey& public_key) const
+    {
+        if (!m_fixture_operators) {
+            const auto pro_tx_hash{m_registry.FindActiveOperatorByGlobalKey(public_key)};
+            return pro_tx_hash ? m_registry.FindOperator(*pro_tx_hash) : nullptr;
+        }
+        const auto found{std::find_if(m_fixture_operators->begin(), m_fixture_operators->end(),
+            [&](const auto& state) {
+                return state.HasActiveGlobalKey() && state.global_key.public_key == public_key;
+            })};
+        return found == m_fixture_operators->end() ? nullptr : &*found;
+    }
+
+    CDeterministicMNList deterministic_mns;
+
+private:
+    llmq::pq::PQRegistryReadView m_registry;
+    std::shared_ptr<const std::vector<llmq::pq::OperatorKeyState>> m_fixture_operators;
+};
+
 // SYSCOIN BEGIN: Active PQ child-tree cache requests and regtest stubs.
 void RequestActiveChildKeyTrees(
     const llmq::pq::OperatorKeyState& operator_state)
@@ -986,7 +1037,6 @@ void CActiveMasternodeManager::Init(const CBlockIndex* pindex)
         state = MASTERNODE_ERROR;
         return;
     }
-    CDeterministicMNList mnList = deterministicMNManager->GetListForBlock(pindex);
     if (!activeMasternodeInfo.operatorKeyManager ||
         !activeMasternodeInfo.operatorKeyManager->IsValid()) {
         state = MASTERNODE_ERROR;
@@ -994,27 +1044,25 @@ void CActiveMasternodeManager::Init(const CBlockIndex* pindex)
         return;
     }
 
-    llmq::pq::PQRegistryReadView pq_snapshot;
+    ActiveOperatorSnapshot snapshot;
     std::string registry_error;
-    if (!deterministicMNManager->GetPQRegistryReadView(
-            pindex, pq_snapshot, registry_error)) {
+    if (!snapshot.Load(*pindex, registry_error)) {
         state = MASTERNODE_ERROR;
         strError = "Unable to load the active PQ operator registry: " +
                    registry_error;
         return;
     }
 
-    const auto local_pro_tx_hash{pq_snapshot.FindActiveOperatorByGlobalKey(
-        activeMasternodeInfo.operatorKeyManager->GetGlobalPublicKey())};
     const llmq::pq::OperatorKeyState* local_operator{
-        local_pro_tx_hash ? pq_snapshot.FindOperator(*local_pro_tx_hash)
-                          : nullptr};
+        snapshot.FindActiveOperator(
+            activeMasternodeInfo.operatorKeyManager->GetGlobalPublicKey())};
     if (local_operator == nullptr ||
         !activeMasternodeInfo.operatorKeyManager->Matches(
             local_operator->global_key)) {
         return;
     }
 
+    const auto& mnList{snapshot.deterministic_mns};
     CDeterministicMNCPtr dmn = mnList.GetMN(local_operator->pro_tx_hash);
     if (!dmn) {
         // MN not appeared on the chain yet
@@ -1082,7 +1130,10 @@ void CActiveMasternodeManager::UpdatedBlockTip(const CBlockIndex* pindexNew, con
     if (!deterministicMNManager || !deterministicMNManager->IsDIP3Enforced(pindexNew->nHeight)) return;
 
     if (state == MASTERNODE_READY) {
-        auto newMNList = deterministicMNManager->GetListForBlock(pindexNew);
+        ActiveOperatorSnapshot snapshot;
+        std::string registry_error;
+        const bool snapshot_ready{snapshot.Load(*pindexNew, registry_error)};
+        const auto& newMNList{snapshot.deterministic_mns};
         if (!newMNList.IsMNValid(activeMasternodeInfo.proTxHash)) {
             // MN disappeared from MN list
             state = MASTERNODE_REMOVED;
@@ -1093,13 +1144,8 @@ void CActiveMasternodeManager::UpdatedBlockTip(const CBlockIndex* pindexNew, con
         }
 
         auto newDmn = newMNList.GetMN(activeMasternodeInfo.proTxHash);
-        llmq::pq::PQRegistryReadView pq_snapshot;
-        std::string registry_error;
-        const auto* operator_state =
-            deterministicMNManager->GetPQRegistryReadView(
-                pindexNew, pq_snapshot, registry_error)
-                ? pq_snapshot.FindOperator(activeMasternodeInfo.proTxHash)
-                : nullptr;
+        const auto* operator_state = snapshot_ready
+            ? snapshot.FindOperator(activeMasternodeInfo.proTxHash) : nullptr;
         if (operator_state == nullptr || !operator_state->HasActiveGlobalKey() ||
             !activeMasternodeInfo.operatorKeyManager ||
             !activeMasternodeInfo.operatorKeyManager->Matches(

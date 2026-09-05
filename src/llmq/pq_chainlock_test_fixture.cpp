@@ -5,12 +5,15 @@
 #include <llmq/pq_chainlock_test_fixture.h>
 
 #include <chain.h>
+#include <chainparams.h>
+#include <common/args.h>
 #include <hash.h>
 #include <logging.h>
 #include <span.h>
 #include <streams.h>
 #include <sync.h>
 #include <util/readwritefile.h>
+#include <util/system.h>
 #include <validation.h>
 
 #include <algorithm>
@@ -28,6 +31,9 @@ namespace {
 constexpr uint64_t FIXTURE_MAGIC{0x3158464c43515053ULL}; // "SPQCLFX1"
 constexpr std::string_view FIXTURE_CHECKSUM_DOMAIN{
     "SYS_PQ_CHAINLOCK_SNAPSHOT_FIXTURE_V1"};
+
+std::weak_ptr<const QuorumSnapshotFixture> loaded_fixture GUARDED_BY(cs_main);
+ChainstateManager* fixture_chainman GUARDED_BY(cs_main){nullptr};
 
 uint256 SyntheticMemberHash(uint64_t value)
 {
@@ -131,6 +137,11 @@ void SerializeFixtureBody(DataStream& stream,
     SerializeBuildConfig(stream, fixture.build_config);
     SerializeBranchPoint(stream, fixture.branch_anchor);
     stream << fixture.max_active_tip_height;
+    stream << static_cast<uint8_t>(fixture.local_operator.has_value());
+    if (fixture.local_operator) {
+        stream << fixture.local_operator->pro_tx_hash
+               << fixture.local_operator->service;
+    }
     stream << static_cast<uint8_t>(fixture.quorum_bases.size());
     for (const auto& base : fixture.quorum_bases) {
         SerializeBranchPoint(stream, base);
@@ -169,6 +180,17 @@ bool UnserializeFixtureBody(DataStream& stream,
     UnserializeBuildConfig(stream, fixture.build_config);
     UnserializeBranchPoint(stream, fixture.branch_anchor);
     stream >> fixture.max_active_tip_height;
+    uint8_t has_local_operator{0};
+    stream >> has_local_operator;
+    if (has_local_operator > 1) {
+        SetError(error, "invalid PQ ChainLock fixture operator flag");
+        return false;
+    }
+    if (has_local_operator != 0) {
+        fixture.local_operator.emplace();
+        stream >> fixture.local_operator->pro_tx_hash
+               >> fixture.local_operator->service;
+    }
     uint8_t base_count{0};
     stream >> base_count;
     if (base_count < ACTIVE_QUORUMS ||
@@ -237,6 +259,14 @@ bool ValidateFixture(const QuorumSnapshotFixture& fixture,
     if (!expected_build_config.IsValid() ||
         fixture.build_config != expected_build_config) {
         SetError(error, "PQ ChainLock fixture deployment profile mismatch");
+        return false;
+    }
+    if (fixture.local_operator &&
+        (fixture.local_operator->pro_tx_hash != SyntheticMemberHash(10'000) ||
+         !fixture.local_operator->service.IsIPv4() ||
+         !fixture.local_operator->service.IsLocal() ||
+         fixture.local_operator->service.GetPort() == 0)) {
+        SetError(error, "invalid PQ ChainLock fixture local operator service");
         return false;
     }
     if (fixture.branch_anchor.height < 0 ||
@@ -524,6 +554,12 @@ std::optional<QuorumSnapshotLookup> LoadQuorumSnapshotFixture(
             return std::nullopt;
         }
 
+        {
+            LOCK(cs_main);
+            loaded_fixture = fixture;
+            fixture_chainman = &chainman;
+        }
+
         return QuorumSnapshotLookup{
             [fixture = std::move(fixture), &chainman](const CBlockIndex& index)
                 -> std::optional<QuorumSnapshotState> {
@@ -559,6 +595,57 @@ std::optional<QuorumSnapshotLookup> LoadQuorumSnapshotFixture(
             }};
     } catch (const std::exception& exception) {
         SetError(error, exception.what());
+        return std::nullopt;
+    }
+}
+
+std::optional<QuorumSnapshotState> LookupActiveQuorumSnapshotFixture(
+    const CBlockIndex& index) noexcept
+{
+    try {
+        LOCK(cs_main);
+        const auto fixture{loaded_fixture.lock()};
+        if (!fixture || fixture_chainman == nullptr ||
+            !gArgs.IsArgSet("-pqchainlocktestfixture") ||
+            Params().GetChainType() != ChainType::REGTEST ||
+            !Params().MineBlocksOnDemand() ||
+            fixture_chainman->ActiveTip() != &index ||
+            !BranchMatchesFixture(*fixture, index)) {
+            return std::nullopt;
+        }
+        const FixtureSnapshot* latest{nullptr};
+        for (const auto& snapshot : fixture->snapshots) {
+            if (snapshot.branch_point.height <= index.nHeight &&
+                (latest == nullptr || snapshot.branch_point.height >
+                                          latest->branch_point.height)) {
+                latest = &snapshot;
+            }
+        }
+        const auto view{DeriveOperatorKeyScheduleView(
+            fixture->build_config.schedule, index.nHeight,
+            fixture->build_config.registration_cutoff_blocks,
+            fixture->build_config.future_horizon_epochs)};
+        if (latest == nullptr || !latest->state.operator_key_states || !view) {
+            return std::nullopt;
+        }
+        auto states{std::make_shared<std::vector<OperatorKeyState>>(
+            *latest->state.operator_key_states)};
+        for (auto& state : *states) {
+            if (state.Advance(*view) != OperatorKeyStateResult::OK) {
+                return std::nullopt;
+            }
+        }
+        auto mns{SyntheticDeterministicMNList(
+            index.nHeight, index.GetBlockHash())};
+        if (fixture->local_operator) {
+            const auto dmn{mns.GetMN(fixture->local_operator->pro_tx_hash)};
+            if (!dmn) return std::nullopt;
+            auto state{std::make_shared<CDeterministicMNState>(*dmn->pdmnState)};
+            state->addr = fixture->local_operator->service;
+            mns.UpdateMN(dmn->proTxHash, std::move(state));
+        }
+        return QuorumSnapshotState{std::move(mns), std::move(states)};
+    } catch (...) {
         return std::nullopt;
     }
 }

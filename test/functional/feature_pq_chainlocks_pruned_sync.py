@@ -13,6 +13,7 @@ The final assertions require successful catch-up, not rejection of the peer.
 import json
 from pathlib import Path
 import selectors
+import shutil
 import struct
 import subprocess
 import time
@@ -22,6 +23,7 @@ from feature_pq_chainlocks import (
     BTCC_CANDIDATE_ORIGIN,
     BTCC_CANDIDATE_PERIOD,
     CHAINLOCK_PERIOD,
+    CHAINLOCK_STATEMENT_WIRE_SIZE,
     EPOCH_BLOCKS,
     EPOCH_ORIGIN,
     FIRST_ELIGIBLE_TARGET_HEIGHT,
@@ -36,11 +38,12 @@ from feature_pq_chainlocks import (
 from test_framework.authproxy import JSONRPCException
 from test_framework.messages import MSG_CLSIG, msg_clsig, msg_getclsig
 from test_framework.p2p import P2PInterface, p2p_lock
-from test_framework.util import assert_equal, force_finish_mnsync
+from test_framework.util import assert_equal, force_finish_mnsync, p2p_port
 
 
 AUTHORIZATION_BASE_CAPACITY = 128
 OUTAGE_RECOVERY_TARGET = 4615  # First usable recovery window here is epochs 8..11.
+OUTAGE_STARTUP_HEIGHT = OUTAGE_RECOVERY_TARGET - SIGN_LAG
 ROSTER_TRANSITION_OFFSET = struct.calcsize("<HHi32si32s32s")
 ROSTER_CHANGING_TRANSITIONS = (2, 3, 4)  # OBSERVE, REVEAL, ROTATE
 
@@ -223,13 +226,17 @@ class PQPrunedSyncTest(PQChainLocksTest):
     def generate_outage_snapshots(self):
         node = self.nodes[0]
         tip = OUTAGE_RECOVERY_TARGET + SIGN_LAG
-        self.mine_pq_to_height(tip)
+        # The first recovery slot must open after synchronized signer startup;
+        # starting at tip would correctly tombstone that already-open slot.
+        self.mine_pq_to_height(OUTAGE_STARTUP_HEIGHT)
         epoch = (tip - EPOCH_ORIGIN) // EPOCH_BLOCKS
         assert_equal(epoch, 11)
         bases = [EPOCH_ORIGIN + value * EPOCH_BLOCKS for value in range(epoch + 1)]
         snapshot = self.root / "snapshots-outage.dat"
+        self.operator_path = self.root / "outage-operator.json"
         self.fixture_command([
-            "catchup-snapshots", snapshot, self.genesis,
+            "catchup-operator", snapshot, self.operator_path,
+            "127.0.0.1:%d" % p2p_port(1), self.genesis,
             FIRST_ELIGIBLE_TARGET_HEIGHT, self.branch_anchor,
             EPOCH_ORIGIN, REGISTRATION_CUTOFF_BLOCKS,
             ROSTER_SNAPSHOT_LAG, FUTURE_HORIZON_EPOCHS, tip,
@@ -237,6 +244,7 @@ class PQPrunedSyncTest(PQChainLocksTest):
             *[node.getblockhash(height) for height in bases],
             *[node.getblockhash(height - ROSTER_SNAPSHOT_LAG) for height in bases],
         ])
+        self.operator = json.loads(self.operator_path.read_text(encoding="utf8"))
         self.install_snapshot(snapshot)
         return list(self.extra_args[0])
 
@@ -260,17 +268,23 @@ class PQPrunedSyncTest(PQChainLocksTest):
         assert_equal(self.best_id(fresh), expected_id)
         assert_equal(fresh.getblockcount(), target + SIGN_LAG)
 
-    def assert_outage_contexts(self, initial_id, latest_id):
+    def assert_outage_signing(self, initial_id, latest_id):
         self.log.info("No new certificates: roll to recovery epochs 8..11 and target %d",
                       OUTAGE_RECOVERY_TARGET)
         receiver_args = self.generate_outage_snapshots()
         assert_equal(self.best_id(self.nodes[0]), latest_id)
         self.log.info("Stale participant resumes; fresh receiver joins during the long outage")
         stale = self.nodes[1]
+        cache_dir = stale.chain_path / "llmq" / "pq-child-key-trees"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(self.operator["cache_path"], cache_dir / self.operator["cache_filename"])
+        operator_args = receiver_args + self.btc_backend_args + [
+            "-masternodeslhprivkey=%s" % self.operator["global_secret_key"],
+            "-masternodechainlockseed=%s" % self.operator["chainlock_seed"],
+        ]
         stale.extra_args = list(receiver_args)
         self.start_node(1, extra_args=receiver_args)
         assert_equal(self.best_id(stale), initial_id)
-        force_finish_mnsync(stale)
         self.connect_nodes(1, 0)
         self.sync_blocks([self.nodes[0], stale], timeout=180)
         force_finish_mnsync(stale)
@@ -279,6 +293,31 @@ class PQPrunedSyncTest(PQChainLocksTest):
         self.connect_nodes(1, 0)
         self.start_receiver(3, receiver_args)
         receivers = [stale, self.nodes[3]]
+        # Regtest can finish mnsync automatically during block download.
+        # Enable the local signer only at the fixed synchronized height so
+        # its one-time startup floor cannot race an intermediate download tip.
+        self.disconnect_nodes(1, 0)
+        self.stop_node(1)
+        stale.extra_args = list(operator_args)
+        self.start_node(1, extra_args=operator_args)
+        force_finish_mnsync(stale)
+        self.connect_nodes(1, 0)
+        startup_marker = "captured PQ signer startup tip height=%d proTxHash=%s" % (
+            OUTAGE_STARTUP_HEIGHT, self.operator["pro_tx_hash"])
+
+        def startup_captured():
+            self.tick_receivers(receivers)
+            return startup_marker in stale.debug_log_path.read_text(encoding="utf8")
+
+        self.wait_until(startup_captured, timeout=180)
+        assert_equal(stale.masternode_status()["state"], "READY")
+        assert_equal(self.best_id(stale), initial_id)
+        assert_equal(self.best_id(self.nodes[3]), None)
+        self.log.info("Returning signer captured startup at %d; opening future recovery slot",
+                      OUTAGE_STARTUP_HEIGHT)
+        signature_offset = stale.debug_log_size(encoding="utf8")
+        self.mine_pq_to_height(OUTAGE_RECOVERY_TARGET + SIGN_LAG)
+        self.sync_blocks([self.nodes[0], *receivers], timeout=180)
         expected = "published PQ ChainLock signing context height=%d" % OUTAGE_RECOVERY_TARGET
         offsets = {node.index: 0 for node in receivers}
         published = set()
@@ -302,15 +341,78 @@ class PQPrunedSyncTest(PQChainLocksTest):
                 self.log.info("Outage receiver %d: tip=%d finality=%s context_ready=%s",
                               node.index, node.getblockcount(), self.best_id(node),
                               node.index in published)
-        # This checks the daemon's signer/collector context publication, not
-        # a local operator signature: the fixture has no registered signer.
-        # Imported historical authority must not itself become finality.
+        shares = {}
+        share_marker = "PQ fixture collected local share="
+
+        def signatures_ready():
+            nonlocal signature_offset
+            self.tick_receivers(receivers)
+            with stale.debug_log_path.open(encoding="utf8") as log:
+                log.seek(signature_offset)
+                for line in log.read().splitlines():
+                    if share_marker not in line:
+                        continue
+                    payload = bytes.fromhex(line.split(share_marker, 1)[1].strip())
+                    if struct.unpack_from("<i", payload, 4)[0] != OUTAGE_RECOVERY_TARGET:
+                        continue
+                    epoch = struct.unpack_from("<I", payload, CHAINLOCK_STATEMENT_WIRE_SIZE)[0]
+                    previous = shares.setdefault(epoch, payload.hex())
+                    assert_equal(previous, payload.hex())
+                signature_offset = log.tell()
+            return len(shares) == ACTIVE_QUORUMS
+
+        self.wait_until(signatures_ready, timeout=180)
+        assert_equal(sorted(shares), [8, 9, 10, 11])
+        # These are public shares emitted only after real daemon signing and
+        # collector verification, not signatures supplied by the helper.
+        shares_path = self.root / "outage-local-shares.json"
+        shares_path.write_text(json.dumps(list(shares.values())), encoding="utf8")
         assert_equal(self.best_id(stale), initial_id)
         assert_equal(self.best_id(self.nodes[3]), None)
         assert_equal(self.best_id(self.nodes[0]), latest_id)
         for node in receivers:
             assert_equal(node.getblockcount(), OUTAGE_RECOVERY_TARGET + SIGN_LAG)
             assert not node.getblockchaininfo()["initialblockdownload"]
+        target_hash = stale.getblockhash(OUTAGE_RECOVERY_TARGET)
+        self.disconnect_nodes(1, 0)
+        self.stop_node(1)
+        report_path = self.root / "outage-journal-verification.json"
+        journal_args = [
+            "verify-operator-journal", stale.chain_path / "llmq" / "pq-signer-journal",
+            self.operator_path, self.genesis, OUTAGE_RECOVERY_TARGET, target_hash,
+        ]
+        self.fixture_command([*journal_args, shares_path, report_path])
+        report = json.loads(report_path.read_text(encoding="utf8"))
+        assert_equal(report["signed_slots"], ACTIVE_QUORUMS)
+        assert_equal(report["epochs"], [8, 9, 10, 11])
+        assert_equal(report["height"], OUTAGE_RECOVERY_TARGET)
+        assert_equal(report["block_hash"], target_hash)
+        assert_equal(report["pro_tx_hash"], self.operator["pro_tx_hash"])
+
+        protected_report = stale.chain_path / "llmq" / "pq-signer-journal" / "CURRENT"
+        current_contents = protected_report.read_bytes()
+        rejected = subprocess.run(
+            [str(self.helper), *map(str, journal_args), str(shares_path), str(protected_report)],
+            capture_output=True, text=True, timeout=60)
+        assert rejected.returncode != 0, "journal audit accepted a destructive report path"
+        assert_equal(protected_report.read_bytes(), current_contents)
+
+        # The audit must bind the signature to the exact public transcript,
+        # not merely find some valid signature next to the target vote row.
+        for label, offset in (("statement", 8), ("signature", -1)):
+            changed = [bytes.fromhex(share) for share in shares.values()]
+            corrupted = bytearray(changed[0])
+            corrupted[offset] ^= 1
+            changed[0] = bytes(corrupted)
+            bad_path = self.root / ("outage-tampered-%s.json" % label)
+            bad_path.write_text(json.dumps([share.hex() for share in changed]), encoding="utf8")
+            rejected = subprocess.run(
+                [str(self.helper), *map(str, journal_args), str(bad_path), str(report_path)],
+                capture_output=True, text=True, timeout=60)
+            assert rejected.returncode != 0, "journal audit accepted tampered %s" % label
+        self.fixture_command([*journal_args, shares_path, report_path])
+        self.log.info("Verified %d durable recovery signatures for target %d without a newer CLSIG",
+                      report["signed_slots"], OUTAGE_RECOVERY_TARGET)
 
     def run_scenario(self):
         _, predecessor = self.configure_private_migration()
@@ -387,13 +489,14 @@ class PQPrunedSyncTest(PQChainLocksTest):
         assert not self.nodes[2].getblockchaininfo()["initialblockdownload"]
         self.assert_isolated_historical_restart(receiver_args, expected)
         self.stop_node(2)
-        self.assert_outage_contexts("%064x" % initial["logical_hash"], expected)
+        self.assert_outage_signing("%064x" % initial["logical_hash"], expected)
 
     def run_test(self):
         self.root = Path(self.options.tmpdir)
         self.certificates = {}
         helper = Path(self.config["environment"]["BUILDDIR"]) / "src/test" / (
             "pq_chainlock_fixture" + self.config["environment"]["EXEEXT"])
+        self.helper = helper
         with (self.root / "fixture-stream.log").open("w", encoding="utf8") as errors:
             self.signer = subprocess.Popen([str(helper), "stream"], stdin=subprocess.PIPE,
                                            stdout=subprocess.PIPE, stderr=errors,

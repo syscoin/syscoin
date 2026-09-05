@@ -9,10 +9,12 @@
 #include <llmq/pq_payment_audit_collector.h>
 #include <llmq/pq_quorum_builder.h>
 #include <llmq/pq_signer_journal.h>
+#include <masternode/pq_operatorkeys.h>
 
 #include <chain.h>
 #include <evo/pq_payment_probation.h>
 #include <hash.h>
+#include <netbase.h>
 #include <span.h>
 #include <streams.h>
 #include <support/cleanse.h>
@@ -20,6 +22,7 @@
 #include <util/readwritefile.h>
 #include <util/strencodings.h>
 #include <util/translation.h>
+#include <univalue.h>
 
 #include <algorithm>
 #include <array>
@@ -3191,7 +3194,353 @@ int Generate(const GeneratorArguments& args, bool retain_epoch_snapshots = false
     return 0;
 }
 
-int GenerateCatchupSnapshots(int argc, char* argv[])
+void PrepareCatchupOperator(
+    test::QuorumSnapshotFixture& fixture,
+    uint32_t first_epoch,
+    uint32_t last_epoch,
+    const fs::path& output,
+    const CService& service)
+{
+    if (!output.is_absolute() || !service.IsIPv4() ||
+        !service.IsLocal() || service.GetPort() == 0) {
+        throw std::runtime_error("invalid catch-up operator output or service");
+    }
+    slhdsa::KeyGenerationSeed global_seed{};
+    for (std::size_t i{0}; i < global_seed.size(); ++i) {
+        global_seed[i] = static_cast<uint8_t>(0x51 + i);
+    }
+    auto global_key{slhdsa::GenerateSecretKey(global_seed)};
+    memory_cleanse(global_seed.data(), global_seed.size());
+    std::array<uint8_t, slhdsa::SECRET_KEY_SIZE> encoded_global_key{};
+    if (!global_key || !global_key->Export(encoded_global_key)) {
+        throw std::runtime_error("unable to derive catch-up operator SLH key");
+    }
+    ChainLockMasterSeed master_seed{};
+    for (std::size_t i{0}; i < master_seed.size(); ++i) {
+        master_seed[i] = static_cast<uint8_t>(0xa1 + i);
+    }
+    const std::string master_seed_hex{HexStr(master_seed)};
+    LocalOperatorKeyManager key_manager{
+        std::move(*global_key), std::move(master_seed)};
+    const uint256 pro_tx_hash{NonNullHash(10'000)};
+    ChildKeyTreeCommitment commitment;
+    commitment.generation = 1;
+    commitment.first_epoch = 0;
+    const auto tree_id{GetChildKeyTreeId(
+        fixture.genesis_hash, pro_tx_hash, commitment.generation,
+        commitment.first_epoch)};
+    if (!tree_id) throw std::runtime_error("invalid catch-up operator tree ID");
+    commitment.tree_id = *tree_id;
+    const ChildKeyTreeConfig config{
+        fixture.genesis_hash, *tree_id, commitment.generation,
+        commitment.first_epoch, commitment.depth};
+    const std::size_t leaf_count{config.LeafCount()};
+    std::vector<uint256> nodes(2 * leaf_count - 1);
+    const std::size_t leaf_base{leaf_count - 1};
+    // Unused fixture leaves need no expensive private keys. The participating
+    // epochs use the daemon's exact independent-seed KDF, and its ordinary
+    // cache loader verifies this entire public tree before producing proofs.
+    for (std::size_t leaf{0}; leaf < leaf_count; ++leaf) {
+        ChildPublicKey public_key{};
+        const uint256 material{test::SyntheticHash(
+            "SYS_PQ_CATCHUP_UNUSED_CHILD_V1", fixture.genesis_hash,
+            pro_tx_hash, leaf, 0)};
+        std::copy(material.begin(), material.end(), public_key.begin());
+        nodes[leaf_base + leaf] = GetChildKeyTreeLeafHash(
+            config, static_cast<uint32_t>(leaf), public_key);
+    }
+    std::map<uint32_t, ChildPublicKey> live_keys;
+    for (uint32_t epoch{first_epoch}; epoch <= last_epoch; ++epoch) {
+        auto child{key_manager.DeriveCommittedChildKey(
+            fixture.genesis_hash, *tree_id, commitment.generation, epoch)};
+        ChildPublicKey public_key{};
+        if (!child || !child->GetPublicKey(public_key)) {
+            throw std::runtime_error("unable to derive catch-up operator child");
+        }
+        live_keys.emplace(epoch, public_key);
+        nodes[leaf_base + epoch] = GetChildKeyTreeLeafHash(
+            config, epoch, public_key);
+    }
+    for (uint16_t level{1}; level <= config.depth; ++level) {
+        const std::size_t parent_count{leaf_count >> level};
+        const std::size_t parent_base{parent_count - 1};
+        const std::size_t child_base{2 * parent_count - 1};
+        for (std::size_t node{0}; node < parent_count; ++node) {
+            const std::size_t left{child_base + 2 * node};
+            nodes[parent_base + node] = GetChildKeyTreeNodeHash(
+                config, level, nodes[left], nodes[left + 1]);
+        }
+    }
+    commitment.root = nodes.front();
+    constexpr uint16_t cache_version{1};
+    CHashWriter checksum{SER_GETHASH, 0};
+    WriteDomain(checksum, "SYS_PQ_CHILD_TREE_CACHE_V1");
+    checksum << cache_version << config.genesis_hash << config.tree_id
+             << config.generation << config.first_epoch << config.depth
+             << commitment.root << static_cast<uint32_t>(nodes.size());
+    DataStream cache;
+    cache << cache_version << config.genesis_hash << config.tree_id
+          << config.generation << config.first_epoch << config.depth
+          << commitment.root << static_cast<uint32_t>(nodes.size());
+    for (const auto& node : nodes) {
+        checksum << node;
+        cache << node;
+    }
+    cache << checksum.GetHash();
+    const std::string cache_filename{
+        commitment.tree_id.ToString() + "-" +
+        std::to_string(commitment.generation) + "-" +
+        commitment.root.ToString() + ".dat"};
+    const fs::path cache_path{fs::path{output.parent_path()} / fs::u8path(cache_filename)};
+    if (!WriteBinaryFile(cache_path, cache.str())) {
+        throw std::runtime_error("unable to write catch-up operator public cache");
+    }
+    const auto loaded{ChildKeyTree::Load(cache_path, config, commitment.root)};
+    if (!loaded) throw std::runtime_error("catch-up operator cache failed reload");
+    for (const auto& [epoch, public_key] : live_keys) {
+        const auto proof{loaded->GetConsensusProof(public_key, epoch)};
+        if (!proof || !VerifyCommittedChildKeyProof(
+                fixture.genesis_hash, commitment, epoch, *proof)) {
+            throw std::runtime_error("catch-up operator cache has invalid live proof");
+        }
+    }
+    auto states{std::make_shared<std::vector<OperatorKeyState>>(
+        *fixture.snapshots.at(first_epoch).state.operator_key_states)};
+    auto& state{states->at(0)};
+    if (state.pro_tx_hash != pro_tx_hash ||
+        state.frozen_child_roots.size() != 1 ||
+        state.frozen_child_roots.front().epoch != first_epoch) {
+        throw std::runtime_error("unexpected catch-up operator frozen identity");
+    }
+    state.global_key.public_key = key_manager.GetGlobalPublicKey();
+    state.global_key.child_key_commitment = commitment;
+    state.frozen_child_roots.front().commitment = commitment;
+    if (!state.IsStructurallyValid()) {
+        throw std::runtime_error("invalid catch-up operator key state");
+    }
+    fixture.snapshots.at(first_epoch).state.operator_key_states = std::move(states);
+    fixture.local_operator = test::FixtureOperatorService{pro_tx_hash, service};
+    UniValue result{UniValue::VOBJ};
+    result.pushKV("pro_tx_hash", pro_tx_hash.ToString());
+    result.pushKV("global_secret_key", HexStr(encoded_global_key));
+    result.pushKV("global_public_key", HexStr(key_manager.GetGlobalPublicKey()));
+    result.pushKV("chainlock_seed", master_seed_hex);
+    result.pushKV("cache_filename", cache_filename);
+    result.pushKV("cache_path", fs::PathToString(cache_path));
+    result.pushKV("genesis_hash", fixture.genesis_hash.ToString());
+    result.pushKV("tree_id", commitment.tree_id.ToString());
+    result.pushKV("generation", commitment.generation);
+    result.pushKV("tree_first_epoch", commitment.first_epoch);
+    result.pushKV("tree_root", commitment.root.ToString());
+    result.pushKV("epoch_origin", fixture.build_config.schedule.epoch_origin);
+    result.pushKV("first_epoch", first_epoch);
+    result.pushKV("last_epoch", last_epoch);
+    result.pushKV("service", service.ToStringAddrPort());
+    memory_cleanse(encoded_global_key.data(), encoded_global_key.size());
+    if (!WriteBinaryFile(output, result.write(2) + "\n")) {
+        throw std::runtime_error("unable to write catch-up operator identity");
+    }
+}
+
+int VerifyCatchupOperatorJournal(int argc, char* argv[])
+{
+    if (argc != 9) {
+        throw std::runtime_error(
+            "usage: pq_chainlock_fixture verify-operator-journal JOURNAL_DIR "
+            "OPERATOR_JSON GENESIS TARGET_HEIGHT TARGET_HASH SHARES_JSON REPORT_OUT");
+    }
+    const fs::path journal_path{fs::u8path(argv[2])};
+    const fs::path operator_path{fs::u8path(argv[3])};
+    const fs::path shares_path{fs::u8path(argv[7])};
+    const fs::path report_path{fs::u8path(argv[8])};
+    const uint256 genesis_hash{uint256S(argv[4])};
+    const uint256 target_hash{uint256S(argv[6])};
+    int32_t target_height{-1};
+    if (!journal_path.is_absolute() || !operator_path.is_absolute() ||
+        !shares_path.is_absolute() || !report_path.is_absolute() || genesis_hash.IsNull() ||
+        target_hash.IsNull() || !ParseInt32(argv[5], &target_height) ||
+        target_height < 0 || !fs::is_regular_file(journal_path / "CURRENT")) {
+        throw std::runtime_error("invalid existing operator journal arguments");
+    }
+    const fs::path canonical_journal{fs::canonical(journal_path)};
+    const fs::path canonical_report{fs::weakly_canonical(report_path)};
+    const auto journal_component{std::mismatch(
+        canonical_journal.begin(), canonical_journal.end(),
+        canonical_report.begin(), canonical_report.end()).first};
+    // A report must not alias the evidence being inspected, including
+    // through symlinks into the journal or hard links to an existing file.
+    if (journal_component == canonical_journal.end() ||
+        (fs::exists(report_path) && fs::hard_link_count(report_path) > 1)) {
+        throw std::runtime_error("operator journal report aliases protected evidence");
+    }
+    const auto [read_ok, contents]{ReadBinaryFile(operator_path, 16U << 10)};
+    UniValue identity;
+    if (!read_ok || !identity.read(contents) || !identity.isObject() ||
+        uint256S(identity["genesis_hash"].get_str()) != genesis_hash) {
+        throw std::runtime_error("invalid catch-up operator identity document");
+    }
+    const uint256 pro_tx_hash{uint256S(identity["pro_tx_hash"].get_str())};
+    const auto encoded_seed{TryParseHex<uint8_t>(identity["chainlock_seed"].get_str())};
+    ChainLockMasterSeed seed{};
+    if (!encoded_seed || !ImportChainLockMasterSeed(*encoded_seed, seed)) {
+        throw std::runtime_error("invalid catch-up operator child seed");
+    }
+    ChildKeyTreeCommitment commitment;
+    commitment.tree_id = uint256S(identity["tree_id"].get_str());
+    commitment.generation = identity["generation"].getInt<uint32_t>();
+    commitment.first_epoch = identity["tree_first_epoch"].getInt<uint32_t>();
+    commitment.root = uint256S(identity["tree_root"].get_str());
+    const auto tree_id{GetChildKeyTreeId(
+        genesis_hash, pro_tx_hash, commitment.generation, commitment.first_epoch)};
+    const auto config{ChildKeyTreeConfig::FromCommitment(genesis_hash, commitment)};
+    const auto tree{config ? ChildKeyTree::Load(
+        fs::u8path(identity["cache_path"].get_str()), *config, commitment.root)
+                           : std::nullopt};
+    if (!tree_id || *tree_id != commitment.tree_id || !tree) {
+        throw std::runtime_error("invalid catch-up operator committed public cache");
+    }
+    ChainLockScheduleConfig schedule;
+    schedule.epoch_origin = identity["epoch_origin"].getInt<int32_t>();
+    const uint32_t first_epoch{identity["first_epoch"].getInt<uint32_t>()};
+    const uint32_t last_epoch{identity["last_epoch"].getInt<uint32_t>()};
+    const auto [shares_read, shares_contents]{ReadBinaryFile(shares_path, 32U << 10)};
+    UniValue serialized_shares;
+    if (!shares_read || !serialized_shares.read(shares_contents) ||
+        !serialized_shares.isArray() || serialized_shares.empty() ||
+        serialized_shares.size() > ACTIVE_QUORUMS) {
+        throw std::runtime_error("invalid captured operator share document");
+    }
+    std::map<uint32_t, ChainLockShare> captured_shares;
+    for (const auto& encoded_share : serialized_shares.getValues()) {
+        const auto bytes{TryParseHex<uint8_t>(encoded_share.get_str())};
+        if (!bytes || bytes->size() != ChainLockShare::WIRE_SIZE) {
+            throw std::runtime_error("invalid captured operator share size");
+        }
+        DataStream stream{MakeByteSpan(*bytes)};
+        ChainLockShare share;
+        stream >> share;
+        DataStream canonical;
+        canonical << share;
+        const auto& statement{share.GetStatement()};
+        if (!stream.empty() || !share.IsStructurallyValid() ||
+            HexStr(MakeUCharSpan(canonical)) != HexStr(*bytes) ||
+            statement.height != target_height || statement.block_hash != target_hash ||
+            statement.roster_transition != RosterAuthorizationTransitionKind::RECOVER ||
+            statement.btcc_advance != BTCCAdvance::KEEP ||
+            share.transcript.member_pro_tx_hash != pro_tx_hash ||
+            share.transcript.quorum_epoch < first_epoch ||
+            share.transcript.quorum_epoch > last_epoch ||
+            (!captured_shares.empty() &&
+             captured_shares.begin()->second.GetStatement() != statement) ||
+            !captured_shares.emplace(share.transcript.quorum_epoch, share).second) {
+            throw std::runtime_error("captured operator share does not match the recovery target");
+        }
+    }
+    // Inspect existing rows directly, without constructing a signer journal:
+    // that avoids its schema-initialization path and never reserves a leaf.
+    CDBWrapper db{DBParams{
+        .path = journal_path, .cache_bytes = 1U << 20,
+        .memory_only = false, .wipe_data = false, .obfuscate = false}};
+    const auto expected_schema{std::make_tuple(
+        llmq::CPQSignerJournal::DB_FORMAT_VERSION, uint32_t{0x50514a31},
+        uint16_t{CHILD_SCHEDULED_WOTS_SHAKE_128_V1},
+        uint16_t{llmq::PQ_CHILD_USAGE_CAP},
+        uint32_t{llmq::PQ_CHILD_SIGNATURE_SIZE})};
+    auto schema{expected_schema};
+    if (!db.Read(uint8_t{0x70}, schema) || schema != expected_schema) {
+        throw std::runtime_error("unsupported operator journal schema");
+    }
+    std::tuple<uint32_t, llmq::PQSignerBranchLock, uint32_t> branch_value;
+    if (!db.Read(std::make_tuple(
+            uint8_t{0x73}, llmq::CPQSignerJournal::DB_FORMAT_VERSION,
+            genesis_hash, pro_tx_hash, target_height), branch_value)) {
+        throw std::runtime_error("operator journal lacks the target branch vote");
+    }
+    const auto& [branch_version, branch, branch_guard]{branch_value};
+    if (branch_version != llmq::CPQSignerJournal::DB_FORMAT_VERSION ||
+        branch_guard != 0x42524c31 || !branch.IsStructurallyValid() ||
+        branch.height != target_height || branch.block_hash != target_hash) {
+        throw std::runtime_error("operator journal target branch vote mismatch");
+    }
+    if (GetLogicalChainLockId(
+            genesis_hash, captured_shares.begin()->second.GetStatement()) !=
+        branch.statement_hash) {
+        throw std::runtime_error("captured operator statement differs from the durable branch vote");
+    }
+    std::set<uint32_t> signed_epochs;
+    std::unique_ptr<CDBIterator> iterator{db.NewIterator()};
+    for (iterator->Seek(uint8_t{0x72}); iterator->Valid(); iterator->Next()) {
+        uint8_t prefix{0};
+        if (!iterator->GetKey(prefix)) {
+            throw std::runtime_error("unreadable operator journal key");
+        }
+        if (prefix != 0x72) break;
+        std::tuple<uint8_t, uint32_t, llmq::PQSignerJournalLeafKey> physical{
+            0, 0, llmq::PQSignerJournalLeafKey{llmq::PQSignerJournalKey{}}};
+        std::tuple<uint32_t, uint8_t, llmq::PQSignerJournalKey, uint256,
+                   llmq::PQChildSignature, uint32_t> value;
+        if (!iterator->GetKeyExact(physical) || !iterator->GetValueExact(value)) {
+            throw std::runtime_error("invalid operator journal slot encoding");
+        }
+        const auto& [version, state, logical, message_hash, signature, guard]{value};
+        if (logical.genesis_hash != genesis_hash ||
+            logical.pro_tx_hash != pro_tx_hash ||
+            logical.absolute_height != target_height) continue;
+        const auto captured{captured_shares.find(logical.quorum_epoch)};
+        if (captured == captured_shares.end()) {
+            throw std::runtime_error("operator journal target slot lacks its captured share");
+        }
+        const auto& share{captured->second};
+        const auto expected_leaf{ChainLockLeafIndex(
+            schedule, logical.quorum_epoch, target_height)};
+        const auto public_key{DeriveCommittedChildPublicKey(
+            seed, genesis_hash, commitment.tree_id, commitment.generation,
+            logical.quorum_epoch)};
+        const auto proof{public_key ? tree->GetConsensusProof(
+            *public_key, logical.quorum_epoch) : std::nullopt};
+        if (version != llmq::CPQSignerJournal::DB_FORMAT_VERSION ||
+            std::get<1>(physical) != version || guard != 0x534c5431 ||
+            std::get<2>(physical) != llmq::PQSignerJournalLeafKey{logical} ||
+            state != 2 || logical.child_profile != CHILD_SCHEDULED_WOTS_SHAKE_128_V1 ||
+            logical.purpose != llmq::PQSignerPurpose::CHAINLOCK ||
+            logical.quorum_epoch < first_epoch || logical.quorum_epoch > last_epoch ||
+            !expected_leaf || logical.leaf_index != *expected_leaf ||
+            !public_key || logical.child_key_hash != ::Hash(*public_key) ||
+            message_hash != GetChainLockShareHash(genesis_hash, share.transcript) ||
+            signature != share.authenticated_signature.signature || !proof ||
+            *proof != share.authenticated_signature.key_proof ||
+            !VerifyCommittedChildKeyProof(
+                genesis_hash, commitment, logical.quorum_epoch, *proof) ||
+            !scheduled_wots::Verify(*public_key, logical.leaf_index,
+                std::span<const uint8_t>{message_hash.begin(), message_hash.size()},
+                signature) ||
+            !signed_epochs.insert(logical.quorum_epoch).second) {
+            throw std::runtime_error("operator journal slot lacks a valid durable signature");
+        }
+    }
+    iterator->CheckStatus();
+    memory_cleanse(seed.data(), seed.size());
+    if (signed_epochs.empty() || signed_epochs.size() != captured_shares.size()) {
+        throw std::runtime_error("operator journal signed slots do not match captured shares");
+    }
+    UniValue report{UniValue::VOBJ};
+    report.pushKV("signed_slots", static_cast<uint64_t>(signed_epochs.size()));
+    report.pushKV("height", target_height);
+    report.pushKV("block_hash", target_hash.ToString());
+    report.pushKV("logicalid", branch.statement_hash.ToString());
+    report.pushKV("pro_tx_hash", pro_tx_hash.ToString());
+    UniValue epochs{UniValue::VARR};
+    for (const auto epoch : signed_epochs) epochs.push_back(epoch);
+    report.pushKV("epochs", std::move(epochs));
+    if (!WriteBinaryFile(report_path, report.write(2) + "\n")) {
+        throw std::runtime_error("unable to write operator journal verification report");
+    }
+    return 0;
+}
+
+int GenerateCatchupSnapshots(
+    int argc, char* argv[], const fs::path& operator_output = {},
+    std::optional<CService> operator_service = std::nullopt)
 {
     constexpr int FIXED_ARGUMENTS{12};
     if (argc < FIXED_ARGUMENTS + 2 * static_cast<int>(ACTIVE_QUORUMS) ||
@@ -3269,6 +3618,13 @@ int GenerateCatchupSnapshots(int argc, char* argv[])
     // Advance that exact state normally, without synthetic key replacements
     // during the recovery window, including at the live H-5 boundary.
     const uint32_t recovery_first{last->front().epoch};
+    if (!operator_output.empty()) {
+        if (!operator_service) {
+            throw std::runtime_error("missing catch-up operator service");
+        }
+        PrepareCatchupOperator(fixture, recovery_first, last->back().epoch,
+                               operator_output, *operator_service);
+    }
     const auto recovery_keys{
         fixture.snapshots.at(recovery_first).state.operator_key_states};
     for (std::size_t point{recovery_first + 1};
@@ -3319,8 +3675,20 @@ int RunCommand(int argc, char* argv[], bool stream = false)
 {
     try {
         std::string error;
+        if (argc > 1 && std::string_view{argv[1]} == "verify-operator-journal") {
+            return VerifyCatchupOperatorJournal(argc, argv);
+        }
         if (argc > 1 && std::string_view{argv[1]} == "catchup-snapshots") {
             return GenerateCatchupSnapshots(argc, argv);
+        }
+        if (argc > 5 && std::string_view{argv[1]} == "catchup-operator") {
+            const fs::path output{fs::u8path(argv[3])};
+            const auto service{Lookup(argv[4], 0, false)};
+            std::vector<char*> arguments{argv[0], argv[1], argv[2]};
+            for (int arg{5}; arg < argc; ++arg) arguments.push_back(argv[arg]);
+            return GenerateCatchupSnapshots(
+                static_cast<int>(arguments.size()), arguments.data(),
+                output, service);
         }
         if (argc > 1 &&
             (std::string_view{argv[1]} == "payment-audit-prefix" ||

@@ -843,8 +843,11 @@ mutate `nPoSePenalty`, `nPoSeBanHeight`, or `nPoSeRevivedHeight`.
 The final `CLSIG` is available to ordinary full nodes and through `GETCLSIG`.
 Durable CLSIG storage contains exactly one best certificate, at most one fully
 verified exact-slot `KEEP` or `ADVANCE` certificate awaiting its fixed BTCC
-carrier, and at most 128 exact fully verified roster-authorization records.
-The last category includes a payment-audit seal fetched only to reconstruct an
+carrier, at most 128 exact fully verified roster-authorization records, and
+at most two dedicated current/fallback historical-sync records described in
+Section 7.4. Historical-sync records retain their explicit PoW-backed provenance;
+their presence does not make them ordinarily admitted certificates or finality.
+The ordinary authorization category includes a payment-audit seal fetched only to reconstruct an
 audit roster. It is servable by an exact targeted `GETCLSIG`, but does not
 advance finality, enforcement, receipt state, or recent-winner order. Ordinary
 inventory dedup treats that retained witness as already present; if it later
@@ -2254,8 +2257,19 @@ Expected failures are fail-closed:
 - After actual bounded archive eviction, a fresh node and a returning node
   select and verify the exact retained B, preserve their actual D while
   importing historical coverage, and accept an ordinary later C. During a
-  prolonged outage, verify future signing-context readiness without first
-  supplying a completed newer C.
+  separate prolonged outage with no completed newer C available, the returning
+  operator must clear the historical signing gate, prepare its ordinary recovery
+  context, and contribute actual local scheduled-WOTS+ shares through the
+  production signer and collector. Signing-context publication alone is not
+  sufficient. Its actual D and the fresh receiver's absent finality must remain
+  unchanged until an ordinary threshold certificate is accepted.
+- Verify each returning-operator contribution against the exact published
+  recovery statement: the journal's operator, child epoch, and physical leaf
+  must identify the scheduled slot; its signed message hash and stored signature
+  must match the reconstructed signer-bound share transcript; and the child
+  public key, outer proof, and WOTS+ signature must verify against the frozen
+  root. Require production-collector acceptance of that same share, not only a
+  non-empty journal or a signing log line.
 - Historical coverage must reject a wrong receipt/B, signature, branch,
   endpoint state, or snapshot provenance. Missing governance or receipt
   validation above E must not fall back to historical coverage. Reorging E
@@ -2290,6 +2304,13 @@ Expected failures are fail-closed:
   CLSIG retrieval, restart import, transaction finality, and rejection of a
   previously validated greater-work competing branch. Neither layer reduces
   the 400/267/3-of-4 geometry or injects a prebuilt final certificate.
+- The pruned-sync returning-operator regression must use a real local SLH-DSA
+  key, production child-key derivation for every exercised epoch, normal cache
+  loading and proof validation, the durable signer journal, and the production
+  collector. Its deterministic-masternode/PQ registration population remains
+  an exact-branch test fixture, and unused outer-tree leaves may be synthetic.
+  This isolates real local signing after historical catch-up; it does not prove
+  an actual masternode registration or complete operator-lifecycle flow.
 
 ### MNAUTH tests
 
