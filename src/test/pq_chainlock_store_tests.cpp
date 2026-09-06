@@ -14,7 +14,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <future>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <tuple>
 #include <vector>
@@ -1278,6 +1282,117 @@ BOOST_AUTO_TEST_CASE(durable_accept_failure_leaves_store_unchanged)
     BOOST_REQUIRE(store.GetBestRecord());
     BOOST_CHECK_EQUAL(store.GetBestRecord()->state_revision, 1U);
     BOOST_CHECK_EQUAL(callback_count, 2U);
+}
+
+BOOST_AUTO_TEST_CASE(durable_snapshot_is_coherent_with_accepted_publication)
+{
+    const uint256 genesis{NonNullHash(30)};
+    const auto config{MakeConfig()};
+    TestFinalityContext context;
+    std::mutex durable_mutex;
+    std::optional<FinalChainLockRecordMetadata> durable_state;
+    std::promise<bool> durable_written;
+    auto durable_written_future{durable_written.get_future()};
+    std::promise<void> release_publication;
+    auto publication_release{release_publication.get_future()};
+    std::atomic_bool publication_paused{false};
+    bool callback_reached{false};
+    ChainLockFinalityStore store{
+        genesis, config, context,
+        [&](const FinalChainLock& chainlock,
+            const PreparedChainLockContextPtr&,
+            const RecoveryUniverseCapsulePtr&) {
+            {
+                std::lock_guard lock{durable_mutex};
+                durable_state = FinalChainLockRecordMetadata{
+                    chainlock.GetLogicalId(genesis),
+                    chainlock.GetWitnessId(genesis), chainlock.statement};
+            }
+            callback_reached = true;
+            publication_paused.store(true);
+            durable_written.set_value(true);
+            publication_release.wait();
+            publication_paused.store(false);
+            return true;
+        }};
+
+    std::optional<FinalChainLockRecordMetadata> observed_durable;
+    std::size_t snapshot_reads{0};
+    const auto read_durable = [&] {
+        std::lock_guard lock{durable_mutex};
+        observed_durable = durable_state;
+        ++snapshot_reads;
+    };
+    BOOST_CHECK(!store.GetBestRecordWithDurableSnapshot(read_durable));
+    BOOST_CHECK(!observed_durable);
+    BOOST_CHECK_EQUAL(snapshot_reads, 1U);
+
+    const auto chainlock{MakeChainLock(865, 864, NonNullHash(864), 30)};
+    const auto recovery_universe{RecoveryUniverseFor(
+        genesis, chainlock.statement.roster_beacons, 30'000'000)};
+    const auto verification_context{
+        MakeVerificationContext(genesis, config, chainlock)};
+    const auto prepared{store.PrepareCandidate(chainlock)};
+    BOOST_REQUIRE(prepared);
+    const auto split_read_accepted{store.GetBestRecord()};
+    auto acceptance{std::async(std::launch::async, [&] {
+        const bool accepted{store.AcceptVerified(
+            *prepared, chainlock, true, nullptr, verification_context,
+            recovery_universe)};
+        if (!callback_reached) durable_written.set_value(false);
+        return accepted;
+    })};
+    if (!durable_written_future.get()) {
+        BOOST_CHECK(acceptance.get());
+        return;
+    }
+
+    std::optional<FinalChainLockRecordMetadata> split_read_durable;
+    {
+        std::lock_guard lock{durable_mutex};
+        split_read_durable = durable_state;
+    }
+
+    std::promise<void> reader_started;
+    auto reader_started_future{reader_started.get_future()};
+    bool read_during_publication{false};
+    auto snapshot{std::async(std::launch::async, [&] {
+        reader_started.set_value();
+        return store.GetBestRecordWithDurableSnapshot([&] {
+            read_during_publication = publication_paused.load();
+            read_durable();
+        });
+    })};
+    reader_started_future.wait();
+    // The writer owns the store lock while disk is newer than accepted state.
+    const bool reader_blocked{
+        snapshot.wait_for(std::chrono::seconds{0}) == std::future_status::timeout};
+    release_publication.set_value();
+    const bool accepted{acceptance.get()};
+    const auto concurrent_snapshot{snapshot.get()};
+
+    BOOST_REQUIRE(accepted);
+    // Separate reads deterministically straddle the paused disk publication.
+    BOOST_CHECK(!split_read_accepted);
+    BOOST_REQUIRE(split_read_durable);
+    BOOST_CHECK(reader_blocked);
+    BOOST_CHECK(!read_during_publication);
+    BOOST_REQUIRE(concurrent_snapshot);
+    BOOST_REQUIRE(observed_durable);
+    BOOST_CHECK(concurrent_snapshot->metadata == *observed_durable);
+    BOOST_CHECK(concurrent_snapshot->metadata.statement == chainlock.statement);
+    BOOST_CHECK(concurrent_snapshot->verification_context == verification_context);
+    BOOST_CHECK_EQUAL(concurrent_snapshot->state_revision, 1U);
+    BOOST_CHECK_EQUAL(snapshot_reads, 2U);
+
+    const auto stable_snapshot{store.GetBestRecordWithDurableSnapshot(read_durable)};
+    BOOST_REQUIRE(stable_snapshot);
+    BOOST_CHECK(stable_snapshot->metadata == *observed_durable);
+    BOOST_CHECK(stable_snapshot->metadata == concurrent_snapshot->metadata);
+    BOOST_CHECK_EQUAL(stable_snapshot->state_revision, concurrent_snapshot->state_revision);
+    BOOST_CHECK_EQUAL(snapshot_reads, 3U);
+    BOOST_REQUIRE(store.GetBestRecord());
+    BOOST_CHECK(store.GetBestRecord()->metadata == stable_snapshot->metadata);
 }
 
 BOOST_AUTO_TEST_CASE(reset_capability_crosses_only_the_fully_verified_store_seam)

@@ -3424,6 +3424,7 @@ void CChainLocksHandler::Stop()
         {
             LOCK(cs_main);
             m_historical_sync.reset();
+            m_historical_sync_revalidation_input.store({});
             m_historical_sync_servable = {};
             m_historical_sync_bootstrap_servable.reset();
             m_historical_sync_requested.SetNull();
@@ -3499,10 +3500,62 @@ CChainLocksHandler::GetRecoveryUniversePersistenceLookup() const
 {
     if (!m_persistence) return {};
     return [this](const uint256& source_id) {
-        return m_persistence
+        const auto persisted{m_persistence
             ? m_persistence->LoadRecoveryUniverse(source_id)
-            : nullptr;
+            : nullptr};
+        if (persisted) return persisted;
+        const auto input{m_historical_sync_revalidation_input.load()};
+        return input && input->recovery_universe &&
+                input->recovery_universe->GenesisHash() == m_genesis_hash &&
+                input->recovery_universe->SourceId() == source_id
+            ? input->recovery_universe : nullptr;
     };
+}
+
+void CChainLocksHandler::RetainHistoricalSyncRevalidationInput(
+    const HistoricalSyncAuthorization& imported)
+{
+    AssertLockHeld(cs_main);
+    const auto& certificate{imported.base.certificate};
+    const auto& boundary{imported.boundary};
+    const CBlockIndex* target{certificate
+        ? m_chainman.ActiveChain()[certificate->statement.height] : nullptr};
+    const CBlockIndex* carrier{
+        m_chainman.ActiveChain()[boundary.carrier_height]};
+    if (!m_persistence || !certificate || !target || !carrier ||
+        !boundary.IsStructurallyValid() ||
+        certificate->statement.height != boundary.receipt.chainlock_target_height ||
+        certificate->statement.block_hash != boundary.receipt.chainlock_target_hash ||
+        target->GetBlockHash() != certificate->statement.block_hash ||
+        certificate->GetLogicalId(m_genesis_hash) != boundary.receipt.chainlock_logical_id ||
+        carrier->GetBlockHash() != boundary.carrier_hash ||
+        carrier->pqBTCCReceiptLogicalId != boundary.receipt.chainlock_logical_id ||
+        (target->nStatus & BLOCK_FAILED_MASK) || (carrier->nStatus & BLOCK_FAILED_MASK)) {
+        m_historical_sync_revalidation_input.store({});
+        UpdateDurableChainLockAuxiliaryRetention();
+        return;
+    }
+    pq::RecoveryUniverseCapsulePtr recovery_universe;
+    const auto& source{
+        certificate->statement.roster_beacons.active.recovery_authority_source};
+    if (!source.IsNull()) {
+        // The bootstrap may own the last persisted capsule; retain its bytes
+        // before revocation removes that reachability root.
+        recovery_universe = GetRecoveryUniversePersistenceLookup()(
+            pq::GetRecoveryUniverseSourceId(m_genesis_hash, source));
+        const CBlockIndex* source_snapshot{recovery_universe
+            ? target->GetAncestor(recovery_universe->SourceSnapshotHeight()) : nullptr};
+        if (!source_snapshot ||
+            !recovery_universe->Matches(m_genesis_hash, source, *source_snapshot)) {
+            m_historical_sync_revalidation_input.store({});
+            UpdateDurableChainLockAuxiliaryRetention();
+            return;
+        }
+    }
+    m_historical_sync_revalidation_input.store(
+        std::make_shared<const HistoricalSyncRevalidationInput>(
+            HistoricalSyncRevalidationInput{certificate, std::move(recovery_universe)}));
+    UpdateDurableChainLockAuxiliaryRetention();
 }
 
 pq::FrozenQuorumRosterCachePtr
@@ -3913,8 +3966,11 @@ bool CChainLocksHandler::HasPendingPQHistoryAuthentication(bool allow_historical
 void CChainLocksHandler::RefreshPQHistoryAuthState()
 {
     bool pending{true};
+    bool resume_participation{false};
     {
         LOCK(cs_main);
+        // Scheduler and validation callbacks may observe revocation in either order.
+        RevokeReorgedHistoricalSyncAuthorizationLocked();
         pending = HasPendingPQHistoryAuthentication();
         if (!m_chainman.PublishPQHistoryAuthState(
                 pending ? PQHistoryAuthState::PENDING
@@ -3926,7 +3982,11 @@ void CChainLocksHandler::RefreshPQHistoryAuthState()
                 "completed");
             return;
         }
+        if (!pending) {
+            resume_participation = m_historical_sync_reauthentication_pending.exchange(false);
+        }
     }
+    if (resume_participation) CheckActiveState();
     if (!pending) {
         const bool completed_before{
             m_chainman.HasCompletedInitialBlockDownload()};
@@ -6541,8 +6601,10 @@ bool CChainLocksHandler::IsPaymentAuditCheckpointAuthenticated(
         m_persistence_failed.load()) {
         return false;
     }
-    const auto accepted{m_store->GetBestRecord()};
-    const auto durable{m_persistence->GetFinalityState().best};
+    std::optional<pq::FinalChainLockRecordMetadata> durable;
+    const auto accepted{m_store->GetBestRecordWithDurableSnapshot([&] {
+        durable = m_persistence->GetFinalityState().best;
+    })};
     if (!accepted || !durable || accepted->metadata != *durable) {
         return false;
     }
@@ -7059,6 +7121,11 @@ void CChainLocksHandler::UpdateDurableChainLockAuxiliaryRetention()
             floor = std::min(m_config->activation_predecessor_height,
                              *first_roster_floor);
         }
+    }
+    if (const auto input{m_historical_sync_revalidation_input.load()}) {
+        // A volatile candidate can only lower the durable retention floor;
+        // its bytes cannot replace the no-finality activation floor.
+        inspect(input->certificate);
     }
     if (!valid) {
         // A durable certificate without reconstructible roster coordinates
@@ -8230,7 +8297,149 @@ const CBlockIndex* CChainLocksHandler::ResolvePoWHistoricalSelectionTip(
 void CChainLocksHandler::RevokeReorgedHistoricalSyncAuthorization()
 {
     LOCK(cs_main);
+    RevokeReorgedHistoricalSyncAuthorizationLocked();
+}
+
+bool CChainLocksHandler::TryReenterHistoricalSyncAuthentication(
+    const HistoricalSyncAuthorization& imported)
+{
+    AssertLockHeld(cs_main);
+    if (!m_config || !m_store || !m_persistence || m_persistence_failed.load() ||
+        !m_payment_audit_store || !m_payment_audit_staging_store ||
+        !m_payment_audit_store->IsHealthy() || !m_payment_audit_staging_store->IsHealthy() ||
+        (m_chainman.IsSnapshotActive() && !m_chainman.IsSnapshotValidated())) return false;
+    {
+        LOCK(m_persisted_mutex);
+        if (m_pending_persisted || m_pending_persisted_unsealed_btcc ||
+            !m_pending_persisted_authorization_bases.empty() || m_persisted_invalid ||
+            m_persisted_best_auth_pending || m_persisted_unsealed_auth_pending) return false;
+    }
+    const auto& boundary{imported.boundary};
+    const auto& base{imported.base};
+    if (!boundary.IsStructurallyValid() || !base.certificate || !base.verification_context ||
+        base.certificate->statement != base.metadata.statement ||
+        base.verification_context->Statement() != base.metadata.statement ||
+        base.verification_context->StatementLogicalId() != base.metadata.logical_id ||
+        base.metadata.logical_id != boundary.receipt.chainlock_logical_id ||
+        base.certificate->GetLogicalId(m_genesis_hash) != base.metadata.logical_id ||
+        base.metadata.statement.height != boundary.receipt.chainlock_target_height ||
+        base.metadata.statement.block_hash != boundary.receipt.chainlock_target_hash) return false;
+    std::optional<pq::FinalChainLockRecordMetadata> durable;
+    const auto accepted{m_store->GetBestRecordWithDurableSnapshot([&] {
+        durable = m_persistence->GetFinalityState().best;
+    })};
+    if (!IsHistoricalSyncRetentionMutationReady(
+            accepted ? &accepted->metadata : nullptr,
+            durable ? &*durable : nullptr, m_chainman.ActiveChain())) return false;
+    const CBlockIndex* old_end{m_chainman.m_blockman.LookupBlockIndex(boundary.coverage_hash)};
+    const CBlockIndex* tip{m_chainman.ActiveTip()};
+    const CBlockIndex* previous_floor{boundary.durable_prior.IsNull() ? nullptr
+        : m_chainman.m_blockman.LookupBlockIndex(boundary.durable_prior.block_hash)};
+    const CBlockIndex* current_floor{durable
+        ? m_chainman.ActiveChain()[durable->statement.height] : nullptr};
+    if (!old_end || old_end->nHeight != boundary.coverage_height || !tip ||
+        (!boundary.durable_prior.IsNull() &&
+         (!previous_floor || previous_floor->nHeight != boundary.durable_prior.height)) ||
+        (durable && (!current_floor || current_floor->GetBlockHash() != durable->statement.block_hash)) ||
+        (durable && durable->statement.height == boundary.durable_prior.height &&
+         durable->AuthorizationBase() != boundary.durable_prior)) return false;
+
+    const auto pending_archive{m_payment_audit_store->GetPendingPruneCheckpoint()};
+    const auto pending_probation{deterministicMNManager
+        ? deterministicMNManager->GetPendingPaymentProbationGCRequest() : std::nullopt};
+    const auto completed_archive{m_payment_audit_store->GetPruneCheckpoint()};
+    const std::optional<pq::PaymentAuditStoreCheckpoint> checkpoint{pending_archive
+        ? pending_archive : pending_probation
+            ? std::optional<pq::PaymentAuditStoreCheckpoint>{pending_probation->checkpoint}
+            : completed_archive};
+    if (checkpoint) {
+        const CBlockIndex* authorizer{m_chainman.m_blockman.LookupBlockIndex(
+            checkpoint->authorizing_target_hash)};
+        if (!checkpoint->IsStructurallyValid() || !authorizer ||
+            authorizer->nHeight != checkpoint->authorizing_target_height ||
+            !IsPaymentAuditCheckpointAuthenticated(*checkpoint, *authorizer)) return false;
+    }
+
+    pq::BTCCPresealState btcc;
+    pq::PaymentAuditPresealState payment;
+    {
+        LOCK(m_btcc_preseal_mutex);
+        btcc = m_btcc_preseal_state;
+        payment = m_payment_audit_preseal_state;
+    }
+    const auto previously_covered = [&](const auto& marker)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main) -> const CBlockIndex* {
+        if (!marker || !marker->IsStructurallyValid() ||
+            marker->terminal_carrier_height <= m_config->activation_predecessor_height ||
+            marker->terminal_carrier_height > old_end->nHeight) return nullptr;
+        const CBlockIndex* terminal{old_end->GetAncestor(marker->terminal_carrier_height)};
+        return terminal && terminal->GetBlockHash() == marker->terminal_carrier_hash
+            ? terminal : nullptr;
+    };
+    const auto active_terminal = [&](const auto& marker)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main) -> const CBlockIndex* {
+        if (!marker || !marker->IsStructurallyValid()) return nullptr;
+        const CBlockIndex* terminal{m_chainman.ActiveChain()[marker->terminal_carrier_height]};
+        return terminal && terminal->GetBlockHash() == marker->terminal_carrier_hash
+            ? terminal : nullptr;
+    };
+    bool revoked_dependency{false};
+    const auto recognize_unresolved = [&](const auto& marker)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+        if (!previously_covered(marker)) return false;
+        revoked_dependency = true;
+        return true;
+    };
+    const auto inspect_btcc = [&](const auto& marker) EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+        if (!marker) return true;
+        const CBlockIndex* terminal{active_terminal(marker)};
+        if (terminal && (IsBTCCPrefixAuthenticated(*terminal) ||
+            CheckBTCCReceiptCertificate(marker->terminal_receipt, *terminal) ==
+                BTCCReceiptCertificateStatus::VERIFIED)) return true;
+        if (!terminal && marker->IsStructurallyValid()) {
+            const CBlockIndex* old_carrier{m_chainman.m_blockman.LookupBlockIndex(
+                marker->terminal_carrier_hash)};
+            // A receipt just beyond E can have been authenticated by D=C-10
+            // without finalizing C. Its old-branch witness remains independent
+            // evidence when both C and E disconnect, but cannot trigger reentry.
+            if (old_carrier && old_carrier->nHeight == marker->terminal_carrier_height &&
+                old_carrier->nHeight > old_end->nHeight &&
+                old_carrier->GetAncestor(old_end->nHeight) == old_end &&
+                old_carrier->pqBTCCReceiptLogicalId == marker->terminal_receipt.chainlock_logical_id &&
+                CheckBTCCReceiptCertificate(marker->terminal_receipt, *old_carrier) ==
+                    BTCCReceiptCertificateStatus::VERIFIED) return true;
+        }
+        return recognize_unresolved(marker);
+    };
+    const auto inspect_payment = [&](const auto& marker) EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+        if (!marker) return true;
+        const CBlockIndex* terminal{active_terminal(marker)};
+        if (terminal && IsPaymentAuditPrefixAuthenticated(*terminal)) return true;
+        return recognize_unresolved(marker);
+    };
+    // Explain every unresolved marker, not just one coincident revoked dependency.
+    if (!inspect_btcc(btcc.active) || !inspect_btcc(btcc.prospective) ||
+        !inspect_payment(payment.active) || !inspect_payment(payment.prospective) ||
+        !revoked_dependency) return false;
+    return m_chainman.TryReenterPendingPQHistoryAuthentication(PQHistoryReauthentication{
+        m_chainman, *old_end, *tip, previous_floor, current_floor,
+        PresealAdmissionToken(btcc, payment), imported.provenance_revision});
+}
+
+void CChainLocksHandler::RevokeReorgedHistoricalSyncAuthorizationLocked()
+{
+    AssertLockHeld(cs_main);
     if (m_historical_sync && !GetPoWHistoricalSyncAuthorization()) {
+        RetainHistoricalSyncRevalidationInput(*m_historical_sync);
+        if (TryReenterHistoricalSyncAuthentication(*m_historical_sync)) {
+            m_historical_sync_reauthentication_pending.store(true);
+            // Close without the terminal-failure latch; old signing tokens stay revoked.
+            while (!m_share_admission_gate.TryPublishEnabled(
+                m_share_admission_gate.Observe(), false)) {}
+            (void)m_auxiliary_history_gc_auth_gate.SetHealthy(false, [this] {
+                return RevokeAuxiliaryHistoryGCAuthorization();
+            });
+        }
         m_historical_sync.reset();
         m_historical_sync_requested.SetNull();
         m_historical_sync_last_request = std::chrono::microseconds{0};
@@ -8299,9 +8508,7 @@ void CChainLocksHandler::MaintainHistoricalSyncRetention()
     if (!admission_lock) return;
     (void)m_chainman.ActiveChainstate().RunWithStableActiveChain([&] {
         LOCK(cs_main);
-        if (m_historical_sync && !GetPoWHistoricalSyncAuthorization()) {
-            m_historical_sync.reset();
-        }
+        RevokeReorgedHistoricalSyncAuthorizationLocked();
         uint64_t revision{0};
         auto retained{m_persistence->LoadHistoricalSyncBoundaries(&revision)};
         const bool replayed{m_chainman.IsBaseBlockSyncComplete() &&
@@ -8812,8 +9019,10 @@ CChainLocksHandler::GetPoWHistoricalSyncAuthorization() const
         end->pqPaymentProbationStateHash != boundary.probation_state_hash) {
         return {};
     }
-    const auto accepted{m_store->GetBestRecord()};
-    const auto durable{m_persistence->GetFinalityState().best};
+    std::optional<pq::FinalChainLockRecordMetadata> durable;
+    const auto accepted{m_store->GetBestRecordWithDurableSnapshot([&] {
+        durable = m_persistence->GetFinalityState().best;
+    })};
     if (accepted.has_value() != durable.has_value() ||
         (accepted && accepted->metadata != *durable)) return {};
     if (boundary.coverage_height > (durable ? durable->statement.height
@@ -8937,6 +9146,7 @@ void CChainLocksHandler::CompleteHistoricalSyncSuccessor(
             break;
         }
     }
+    RevokeReorgedHistoricalSyncAuthorizationLocked();
     m_historical_sync.reset();
     m_historical_sync_requested.SetNull();
     m_historical_sync_last_request = std::chrono::microseconds{0};
@@ -8973,6 +9183,7 @@ std::optional<bool> CChainLocksHandler::ProcessPoWHistoricalSyncCertificate(
     }
     {
         LOCK(cs_main);
+        RevokeReorgedHistoricalSyncAuthorizationLocked();
         boundary = SelectPoWHistoricalSyncBoundary();
         if (!boundary && from == -1) {
             const auto covered{SelectDurablyCoveredHistoricalSyncBoundary()};
@@ -9116,6 +9327,11 @@ bool CChainLocksHandler::RefreshPoWHistoricalSyncBoundary()
             }
         }
         if (!boundary) return false;
+        const auto revalidation{m_historical_sync_revalidation_input.load()};
+        const bool has_revalidation_input{revalidation && revalidation->certificate &&
+            revalidation->certificate->GetLogicalId(m_genesis_hash) ==
+                boundary->receipt.chainlock_logical_id};
+        if (!local && has_revalidation_input) local = revalidation->certificate;
         const auto imported{GetPoWHistoricalSyncAuthorization()};
         // Descendant blocks do not create a new historical trust decision.
         // Keep E frozen so budgeted validation can finish across scheduler ticks.
@@ -9125,9 +9341,16 @@ bool CChainLocksHandler::RefreshPoWHistoricalSyncBoundary()
             !ShouldExtendPoWHistoricalCoverageForGovernance(
                 imported->boundary, *boundary, signing_frontier,
                 m_chainman.ActiveChain(), m_chainman.GetPQProvenanceRevocationRevision(),
-                m_genesis_hash, *m_config)) return false;
+                m_genesis_hash, *m_config)) {
+            if (revalidation) {
+                m_historical_sync_revalidation_input.store({});
+                UpdateDurableChainLockAuxiliaryRetention();
+            }
+            return false;
+        }
         const auto now{GetTime<std::chrono::microseconds>()};
-        if (m_historical_sync_requested == boundary->receipt.chainlock_logical_id &&
+        if (!has_revalidation_input &&
+            m_historical_sync_requested == boundary->receipt.chainlock_logical_id &&
             m_historical_sync_last_request.count() &&
             now - m_historical_sync_last_request < std::chrono::seconds{60}) {
             // Do not reauthorize an upload still inside the network's
@@ -9166,6 +9389,12 @@ bool CChainLocksHandler::RefreshPoWHistoricalSyncBoundary()
     if (local) {
         BlockValidationState state;
         (void)ProcessNewChainLock(-1, *local, state);
+        LOCK(cs_main);
+        if (m_historical_sync_revalidation_input.load() &&
+            GetPoWHistoricalSyncAuthorization()) {
+            m_historical_sync_revalidation_input.store({});
+            UpdateDurableChainLockAuxiliaryRetention();
+        }
     } else {
         m_connman.ForEachNode([&](CNode* node) {
             if (!SupportsPQChainLocks(node->GetCommonVersion())) return;
@@ -20005,7 +20234,8 @@ void CChainLocksHandler::CheckActiveState()
         pending = IsPersistedChainLockPending();
         verification_available = IsChainLockVerificationAvailable();
         if (m_share_admission_gate.TryPublishEnabled(
-                observation, verification_available && operational)) {
+                observation, verification_available && operational &&
+                    !m_historical_sync_reauthentication_pending.load())) {
             break;
         }
     }
@@ -20022,10 +20252,15 @@ void CChainLocksHandler::CheckActiveState()
     // SYSCOIN: Backend health can fail without passing through the share
     // gate's permanent-failure path. Publish that transition through the same
     // generation gate as certificate durability and handler lifecycle.
-    (void)m_auxiliary_history_gc_auth_gate.SetHealthy(
-        deterministicMNManager && configured && verification_available &&
-            enforce,
-        [this] { return RevokeAuxiliaryHistoryGCAuthorization(); });
+    {
+        // Serialize this observation with revocation; a stale health evaluation
+        // must not reopen GC after the pending transition closed its gate.
+        LOCK(cs_main);
+        (void)m_auxiliary_history_gc_auth_gate.SetHealthy(
+            deterministicMNManager && configured && verification_available &&
+                enforce && !m_historical_sync_reauthentication_pending.load(),
+            [this] { return RevokeAuxiliaryHistoryGCAuthorization(); });
+    }
 }
 
 bool CChainLocksHandler::GetCLSIGFromPeers()

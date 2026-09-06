@@ -94,6 +94,52 @@ enum class PQHistoryAuthState : uint8_t {
     PENDING,
     READY,
 };
+namespace llmq {
+class CChainLocksHandler;
+namespace test {
+class PQHistoryReauthenticationTestAccess;
+}
+}
+
+/** Recognition of a previously authenticated dependency being revoked. */
+class PQHistoryReauthentication final {
+private:
+    struct BlockIdentity {
+        int32_t height{-1};
+        uint256 hash;
+    };
+    static BlockIdentity Capture(const CBlockIndex& index)
+    {
+        return {index.nHeight, index.phashBlock ? *index.phashBlock : uint256{}};
+    }
+    static std::optional<BlockIdentity> Capture(const CBlockIndex* index)
+    {
+        return index ? std::optional<BlockIdentity>{Capture(*index)} : std::nullopt;
+    }
+    PQHistoryReauthentication(
+        const ChainstateManager& owner, const CBlockIndex& old_coverage,
+        const CBlockIndex& selected_tip, const CBlockIndex* previous_durable_floor,
+        const CBlockIndex* current_durable_floor, const uint256& dependency_token,
+        uint64_t old_provenance_revision)
+        : m_owner{&owner}, m_old_coverage{Capture(old_coverage)},
+          m_selected_tip{Capture(selected_tip)},
+          m_previous_durable_floor{Capture(previous_durable_floor)},
+          m_current_durable_floor{Capture(current_durable_floor)},
+          m_dependency_token{dependency_token},
+          m_old_provenance_revision{old_provenance_revision} {}
+
+    // Only identity is compared; the owner pointer is never dereferenced.
+    const ChainstateManager* m_owner;
+    BlockIdentity m_old_coverage;
+    BlockIdentity m_selected_tip;
+    std::optional<BlockIdentity> m_previous_durable_floor;
+    std::optional<BlockIdentity> m_current_durable_floor;
+    uint256 m_dependency_token;
+    uint64_t m_old_provenance_revision;
+    friend class ChainstateManager;
+    friend class llmq::CChainLocksHandler;
+    friend class llmq::test::PQHistoryReauthenticationTestAccess;
+};
 // SYSCOIN: Quarantine legacy provider mutations while still permitting the
 // independently PQ-authenticated global-key preparation transaction.
 [[nodiscard]] bool IsPQActivationQuarantinedProviderTxVersion(
@@ -1163,6 +1209,7 @@ private:
         bool min_pow_checked,
         bool bForBlock = true) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     friend Chainstate;
+    friend class llmq::test::PQHistoryReauthenticationTestAccess;
 
     /** Most recent headers presync progress update, for rate-limiting. */
     std::chrono::time_point<std::chrono::steady_clock> m_last_presync_update GUARDED_BY(::cs_main) {};
@@ -1493,6 +1540,11 @@ public:
 
     /** Publish the aggregate PQ-history state without performing I/O/callbacks. */
     [[nodiscard]] bool PublishPQHistoryAuthState(PQHistoryAuthState state)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Recover recognized coverage revocation without reopening public IBD. */
+    [[nodiscard]] bool TryReenterPendingPQHistoryAuthentication(
+        const PQHistoryReauthentication& proof)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** Re-evaluate the one-way public IBD latch after publishing READY. */

@@ -1703,6 +1703,22 @@ std::optional<AcceptedFinalChainLockView>
 ChainLockFinalityStore::GetBestRecord() const
 {
     LOCK(m_mutex);
+    return GetBestRecordLocked();
+}
+
+std::optional<AcceptedFinalChainLockView>
+ChainLockFinalityStore::GetBestRecordWithDurableSnapshot(
+    const std::function<void()>& read_durable_state) const
+{
+    LOCK(m_mutex);
+    read_durable_state();
+    return GetBestRecordLocked();
+}
+
+std::optional<AcceptedFinalChainLockView>
+ChainLockFinalityStore::GetBestRecordLocked() const
+{
+    AssertLockHeld(m_mutex);
     if (!m_best) return std::nullopt;
     return AcceptedFinalChainLockView{
         m_revision,

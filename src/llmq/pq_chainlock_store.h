@@ -635,6 +635,15 @@ public:
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     [[nodiscard]] std::optional<AcceptedFinalChainLockView> GetBestRecord() const
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /**
+     * Read durable state and its accepted winner without crossing publication.
+     * The read-only callback follows acceptance's store-to-persistence lock
+     * order; it must not reenter this store or acquire cs_main.
+     */
+    [[nodiscard]] std::optional<AcceptedFinalChainLockView>
+    GetBestRecordWithDurableSnapshot(
+        const std::function<void()>& read_durable_state) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     [[nodiscard]] std::optional<AcceptedFinalChainLockView> GetRecordByHeight(
         int32_t height) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /** Resolve one exact signed roster-authorization base capability. */
@@ -732,6 +741,8 @@ private:
     };
 
     [[nodiscard]] ChainLockPredecessor CurrentPredecessor() const
+        EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    [[nodiscard]] std::optional<AcceptedFinalChainLockView> GetBestRecordLocked() const
         EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
     [[nodiscard]] bool IsPreparedPredecessorCurrent(
         const ChainLockPredecessor& predecessor,

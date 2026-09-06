@@ -1413,13 +1413,13 @@ private:
 
     // MSVC rejects the deprecated free shared-pointer atomics in C++20,
     // while supported older libc++ releases lack the specialization.
-    class AtomicPendingVerifiedHistoricalChainLock
+    template <typename T>
+    class AtomicSharedConstPtr
     {
-        using value_type =
-            std::shared_ptr<const PendingVerifiedHistoricalChainLock>;
+        using value_type = std::shared_ptr<const T>;
 
     public:
-        AtomicPendingVerifiedHistoricalChainLock() noexcept = default;
+        AtomicSharedConstPtr() noexcept = default;
 
         [[nodiscard]] value_type load() const noexcept
         {
@@ -1462,6 +1462,8 @@ private:
         value_type m_value;
 #endif
     };
+    using AtomicPendingVerifiedHistoricalChainLock =
+        AtomicSharedConstPtr<PendingVerifiedHistoricalChainLock>;
 
     struct CurrentSigningContext {
         uint8_t variant_index{0};
@@ -2491,6 +2493,15 @@ private:
         uint64_t provenance_revision{0};
         uint256 record_identity;
     };
+    struct HistoricalSyncRevalidationInput {
+        std::shared_ptr<const pq::FinalChainLock> certificate;
+        pq::RecoveryUniverseCapsulePtr recovery_universe;
+    };
+    // Revoked B is only revalidation input, never a serving or authorization role.
+    AtomicSharedConstPtr<HistoricalSyncRevalidationInput>
+        m_historical_sync_revalidation_input;
+    void RetainHistoricalSyncRevalidationInput(
+        const HistoricalSyncAuthorization& imported) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     std::shared_ptr<const HistoricalSyncAuthorization> m_historical_sync
         GUARDED_BY(cs_main);
     std::array<std::shared_ptr<const pq::FinalChainLock>, 2>
@@ -2516,7 +2527,7 @@ private:
     void CompleteHistoricalSyncSuccessor(
         const pq::VerifiedHistoricalSyncSuccessor& proof,
         const std::shared_ptr<const HistoricalSyncAuthorization>& imported)
-        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main, !m_persisted_mutex, !m_btcc_preseal_mutex);
     [[nodiscard]] bool IsPoWHistoricalPrefixCovered(
         const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     [[nodiscard]] std::optional<bool> ProcessPoWHistoricalSyncCertificate(
@@ -2525,7 +2536,8 @@ private:
         EXCLUSIVE_LOCKS_REQUIRED(m_chainlock_admission_mutex, !cs_main,
                                  !m_context_build_mutex,
                                  !m_lookup_mutex, !m_verification_mutex,
-                                 !m_needed_btcc_certificate_mutex);
+                                 !m_needed_btcc_certificate_mutex,
+                                 !m_persisted_mutex, !m_btcc_preseal_mutex);
     /** Shares the existing GETCLSIG transport; no historical inventory stream. */
     bool RefreshPoWHistoricalSyncBoundary()
         EXCLUSIVE_LOCKS_REQUIRED(!cs_main, !m_chainlock_admission_mutex,
@@ -2538,7 +2550,8 @@ private:
                                  !m_pending_payment_audit_receipt_mutex,
                                  !m_signer_reconcile_mutex);
     void MaintainHistoricalSyncRetention()
-        EXCLUSIVE_LOCKS_REQUIRED(!cs_main, !m_chainlock_admission_mutex);
+        EXCLUSIVE_LOCKS_REQUIRED(!cs_main, !m_chainlock_admission_mutex,
+                                 !m_persisted_mutex, !m_btcc_preseal_mutex);
     static bool IsHistoricalSyncRetentionMutationReady(
         const pq::FinalChainLockRecordMetadata* accepted,
         const pq::FinalChainLockRecordMetadata* durable, const CChain& active_chain)
@@ -2548,7 +2561,13 @@ private:
         const pq::FinalChainLockRecordMetadata* accepted,
         const pq::FinalChainLockRecordMetadata* durable, const CChain& active_chain)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
-    void RevokeReorgedHistoricalSyncAuthorization();
+    void RevokeReorgedHistoricalSyncAuthorization()
+        EXCLUSIVE_LOCKS_REQUIRED(!m_persisted_mutex, !m_btcc_preseal_mutex);
+    void RevokeReorgedHistoricalSyncAuthorizationLocked()
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main, !m_persisted_mutex, !m_btcc_preseal_mutex);
+    [[nodiscard]] bool TryReenterHistoricalSyncAuthentication(
+        const HistoricalSyncAuthorization& imported)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main, !m_persisted_mutex, !m_btcc_preseal_mutex);
     [[nodiscard]] std::optional<pq::VerifiedPoWHistoricalBoundary>
     ValidatePoWHistoricalSyncBoundary(
         const pq::HistoricalSyncBoundary& boundary,
@@ -2709,6 +2728,7 @@ private:
                                  !m_btcc_preseal_mutex);
     void RefreshPQHistoryAuthState()
         EXCLUSIVE_LOCKS_REQUIRED(!m_persisted_mutex,
+                                 !m_lookup_mutex,
                                  !m_btcc_preseal_mutex);
     void QuarantineInvalidPersistedChainLock(const std::string& reason)
         EXCLUSIVE_LOCKS_REQUIRED(!m_persisted_mutex);
@@ -2862,6 +2882,7 @@ private:
     // Lifecycle, operational state, and terminal faults publish atomically so
     // no false->true interval can revive work from an older handler state.
     ShareAdmissionGate m_share_admission_gate;
+    std::atomic_bool m_historical_sync_reauthentication_pending{false};
     AuxiliaryHistoryGCAuthorizationGate m_auxiliary_history_gc_auth_gate;
     std::atomic_bool m_persistence_failed{false};
     std::atomic_bool m_enforced{false};

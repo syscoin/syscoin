@@ -39,6 +39,7 @@
 #include <algorithm> // SYSCOIN: synthetic recovery-universe fixture.
 #include <array> // SYSCOIN: synthetic PQ activation fixtures.
 #include <cstdint> // SYSCOIN: synthetic recovery-authority fixture.
+#include <type_traits>
 #include <vector>
 
 #include <boost/test/unit_test.hpp>
@@ -46,6 +47,38 @@
 using node::BlockManager;
 using node::KernelNotifications;
 using node::SnapshotMetadata;
+
+namespace llmq::test {
+class PQHistoryReauthenticationTestAccess {
+public:
+    static PQHistoryReauthentication Make(
+        const ChainstateManager& owner, const CBlockIndex& old_coverage,
+        const CBlockIndex& selected_tip,
+        const CBlockIndex* previous_floor, const CBlockIndex* current_floor,
+        const uint256& dependency_token, uint64_t old_revision)
+    {
+        return PQHistoryReauthentication{owner, old_coverage, selected_tip,
+            previous_floor, current_floor, dependency_token, old_revision};
+    }
+
+    static void RemoveOwner(PQHistoryReauthentication& proof)
+    {
+        proof.m_owner = nullptr;
+    }
+
+    static void ReplaceCoverageHash(PQHistoryReauthentication& proof,
+                                    const uint256& hash)
+    {
+        proof.m_old_coverage.hash = hash;
+    }
+
+    static void RevokeProvenance(ChainstateManager& chainman)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+    {
+        chainman.NotePQProvenanceRevoked();
+    }
+};
+} // namespace llmq::test
 
 namespace {
 struct DeferredNEVMReplaySetup : TestChain100Setup {
@@ -242,6 +275,107 @@ BOOST_FIXTURE_TEST_CASE(pq_history_auth_state_gates_public_ibd,
         BOOST_CHECK(chainman.PublishPQHistoryAuthState(
             PQHistoryAuthState::READY));
         BOOST_CHECK(!chainman.CanBeginPQHistoryAuthentication());
+    }
+    SyncWithValidationInterfaceQueue();
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    recognized_pq_history_revocation_reenters_pending,
+    TestChain100Setup)
+{
+    using Access = llmq::test::PQHistoryReauthenticationTestAccess;
+    static_assert(!std::is_default_constructible_v<PQHistoryReauthentication>);
+    static_assert(!std::is_constructible_v<PQHistoryReauthentication,
+        const ChainstateManager&, const CBlockIndex&, const CBlockIndex&,
+        const CBlockIndex*, const CBlockIndex*, const uint256&, uint64_t>);
+    auto& chainman{static_cast<TestChainstateManager&>(
+        *Assert(m_node.chainman))};
+    chainman.ResetIbd(PQHistoryAuthState::READY);
+    BOOST_REQUIRE(!chainman.IsInitialBlockDownload());
+    {
+        LOCK(::cs_main);
+        CBlockIndex* original_tip{chainman.ActiveTip()};
+        BOOST_REQUIRE(original_tip && original_tip->nHeight >= 100);
+        struct RestoreTip {
+            CChain& chain;
+            CBlockIndex* tip;
+            ~RestoreTip() { chain.SetTip(*tip); }
+        } restore{chainman.ActiveChain(), original_tip};
+        const CBlockIndex* coverage{original_tip->GetAncestor(90)};
+        const CBlockIndex* earlier_floor{original_tip->GetAncestor(70)};
+        const CBlockIndex* floor{original_tip->GetAncestor(80)};
+        BOOST_REQUIRE(coverage && earlier_floor && floor);
+        const uint256 dependency{RecoveryFixtureHash(910'001)};
+        const auto make = [&](const CBlockIndex& selected,
+                              const CBlockIndex* previous,
+                              const CBlockIndex* current)
+            EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+            return Access::Make(chainman, *coverage, selected, previous,
+                current, dependency,
+                chainman.GetPQProvenanceRevocationRevision());
+        };
+        const auto check_reentry = [&](const PQHistoryReauthentication& proof)
+            EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+            BOOST_REQUIRE(chainman.TryReenterPendingPQHistoryAuthentication(proof));
+            BOOST_CHECK(chainman.GetPQHistoryAuthState() == PQHistoryAuthState::PENDING);
+            BOOST_CHECK(chainman.HasCompletedInitialBlockDownload());
+            BOOST_CHECK(!chainman.IsInitialBlockDownload());
+            BOOST_CHECK(chainman.TryReenterPendingPQHistoryAuthentication(proof));
+            BOOST_CHECK(chainman.PublishPQHistoryAuthState(PQHistoryAuthState::PENDING));
+            BOOST_CHECK(chainman.PublishPQHistoryAuthState(PQHistoryAuthState::READY));
+            BOOST_CHECK(!chainman.PublishPQHistoryAuthState(PQHistoryAuthState::PENDING));
+        };
+        const auto unchanged{make(*original_tip, floor, floor)};
+        BOOST_CHECK(!chainman.TryReenterPendingPQHistoryAuthentication(unchanged));
+
+        // A selected tip below E revokes coverage even while best_header still
+        // points to the old branch. Authentication follows ActiveTip, not headers.
+        CBlockIndex* replacement_tip{original_tip->GetAncestor(89)};
+        BOOST_REQUIRE(replacement_tip);
+        chainman.ActiveChain().SetTip(*replacement_tip);
+        BOOST_CHECK(!chainman.TryReenterPendingPQHistoryAuthentication(unchanged));
+        const auto revoked{make(*replacement_tip, floor, floor)};
+        auto wrong_owner{revoked};
+        Access::RemoveOwner(wrong_owner);
+        BOOST_CHECK(!chainman.TryReenterPendingPQHistoryAuthentication(wrong_owner));
+        auto unknown_coverage{revoked};
+        Access::ReplaceCoverageHash(unknown_coverage, RecoveryFixtureHash(910'002));
+        BOOST_CHECK(!chainman.TryReenterPendingPQHistoryAuthentication(unknown_coverage));
+        const auto no_dependency{Access::Make(chainman, *coverage,
+            *replacement_tip, floor, floor, {},
+            chainman.GetPQProvenanceRevocationRevision())};
+        BOOST_CHECK(!chainman.TryReenterPendingPQHistoryAuthentication(no_dependency));
+        const auto future_revision{Access::Make(chainman, *coverage,
+            *replacement_tip, floor, floor, dependency,
+            chainman.GetPQProvenanceRevocationRevision() + 1)};
+        BOOST_CHECK(!chainman.TryReenterPendingPQHistoryAuthentication(future_revision));
+        check_reentry(revoked);
+        BOOST_CHECK(!chainman.TryReenterPendingPQHistoryAuthentication(
+            make(*replacement_tip, floor, earlier_floor)));
+        BOOST_CHECK(!chainman.TryReenterPendingPQHistoryAuthentication(
+            make(*replacement_tip, floor, nullptr)));
+        BOOST_CHECK(!chainman.TryReenterPendingPQHistoryAuthentication(
+            make(*replacement_tip, floor, coverage)));
+        CBlockIndex* below_floor{original_tip->GetAncestor(79)};
+        BOOST_REQUIRE(below_floor);
+        chainman.ActiveChain().SetTip(*below_floor);
+        BOOST_CHECK(!chainman.TryReenterPendingPQHistoryAuthentication(
+            make(*below_floor, floor, floor)));
+        chainman.ActiveChain().SetTip(*replacement_tip);
+        check_reentry(make(*replacement_tip, nullptr, nullptr));
+
+        chainman.ActiveChain().SetTip(*original_tip);
+        BOOST_CHECK(!chainman.TryReenterPendingPQHistoryAuthentication(
+            make(*original_tip, floor, floor)));
+        BOOST_CHECK(!chainman.TryReenterPendingPQHistoryAuthentication(
+            make(*original_tip, floor, earlier_floor)));
+        check_reentry(make(*original_tip, earlier_floor, floor));
+        check_reentry(make(*original_tip, nullptr, floor));
+        BOOST_CHECK(!chainman.TryReenterPendingPQHistoryAuthentication(
+            make(*original_tip, floor, coverage)));
+        const auto provenance_revoked{make(*original_tip, floor, floor)};
+        Access::RevokeProvenance(chainman);
+        check_reentry(provenance_revoked);
     }
     SyncWithValidationInterfaceQueue();
 }

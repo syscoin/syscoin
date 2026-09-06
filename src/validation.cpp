@@ -3081,6 +3081,60 @@ bool ChainstateManager::TryEnterPendingPQHistoryAuthentication(
     return true;
 }
 
+bool ChainstateManager::TryReenterPendingPQHistoryAuthentication(
+    const PQHistoryReauthentication& proof)
+{
+    AssertLockHeld(cs_main);
+    if (proof.m_owner != this || !IsPQParticipationAllowed() ||
+        (m_pq_history_auth_state != PQHistoryAuthState::READY &&
+         m_pq_history_auth_state != PQHistoryAuthState::PENDING) ||
+        proof.m_dependency_token.IsNull() ||
+        proof.m_old_provenance_revision > GetPQProvenanceRevocationRevision()) {
+        return false;
+    }
+    const auto resolve = [this](const PQHistoryReauthentication::BlockIdentity& identity)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main) -> const CBlockIndex* {
+        if (identity.height < 0 || identity.hash.IsNull()) return nullptr;
+        const CBlockIndex* index{m_blockman.LookupBlockIndex(identity.hash)};
+        return index && index->nHeight == identity.height ? index : nullptr;
+    };
+    const CBlockIndex* old_coverage{resolve(proof.m_old_coverage)};
+    const CBlockIndex* selected_tip{resolve(proof.m_selected_tip)};
+    const CBlockIndex* previous_floor{proof.m_previous_durable_floor
+        ? resolve(*proof.m_previous_durable_floor) : nullptr};
+    const CBlockIndex* current_floor{proof.m_current_durable_floor
+        ? resolve(*proof.m_current_durable_floor) : nullptr};
+    if (!old_coverage || !selected_tip || selected_tip != ActiveTip() ||
+        (proof.m_previous_durable_floor && !previous_floor) ||
+        (proof.m_current_durable_floor && !current_floor)) {
+        return false;
+    }
+    // Rebinding coverage cannot erase or replace the previous durable floor.
+    if (previous_floor &&
+        (!current_floor ||
+         current_floor->GetAncestor(previous_floor->nHeight) != previous_floor ||
+         old_coverage->GetAncestor(previous_floor->nHeight) != previous_floor)) {
+        return false;
+    }
+    if (current_floor &&
+        (old_coverage->nHeight <= current_floor->nHeight ||
+         old_coverage->GetAncestor(current_floor->nHeight) != current_floor ||
+         selected_tip->GetAncestor(current_floor->nHeight) != current_floor)) {
+        return false;
+    }
+    const bool floor_advanced{current_floor &&
+        (!previous_floor || current_floor->nHeight > previous_floor->nHeight)};
+    // The best header may lead the branch actually selected for replay.
+    // A frozen endpoint, provenance revision, or its bound D must have changed.
+    if (selected_tip->GetAncestor(old_coverage->nHeight) == old_coverage &&
+        proof.m_old_provenance_revision == GetPQProvenanceRevocationRevision() &&
+        !floor_advanced) {
+        return false;
+    }
+    m_pq_history_auth_state = PQHistoryAuthState::PENDING;
+    return true;
+}
+
 bool ChainstateManager::PublishPQHistoryAuthState(PQHistoryAuthState state)
 {
     AssertLockHeld(cs_main);
