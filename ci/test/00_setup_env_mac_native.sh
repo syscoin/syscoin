@@ -11,15 +11,9 @@ export PIP_PACKAGES="zmq"
 export PIP_INSTALL_FLAGS="--break-system-packages"
 export GOAL="install"
 export SYSCOIN_CONFIG="--with-gui --with-miniupnpc --with-natpmp --enable-reduce-exports"
-# SYSCOIN: Each full PQ operator tree saturates all four hosted macOS CPUs, so
-# running several masternode fixtures under -j10 can starve registration RPCs.
-# Exclude the remaining full-tree fixtures; the focused lifecycle uses its
-# production-generated regtest commitment and stays in the parallel batch.
-PQ_FULL_TREE_TESTS="feature_deterministicmns,feature_nevm_data"
-PQ_FULL_TREE_TESTS="${PQ_FULL_TREE_TESTS},rpc_masternode,rpc_mnauth"
-PQ_FULL_TREE_TESTS="${PQ_FULL_TREE_TESTS},feature_governance_objects,feature_governance"
-PQ_FULL_TREE_TESTS="${PQ_FULL_TREE_TESTS},feature_governance_dynamic,feature_btcheader_policy_auxpow"
-export TEST_RUNNER_EXTRA="--exclude interface_zmq_nevm,${PQ_FULL_TREE_TESTS}"
+# SYSCOIN: Generic MN/governance fixtures use lightweight test commitments,
+# so include them in the regular functional batch.
+export TEST_RUNNER_EXTRA="--exclude interface_zmq_nevm"
 export CI_OS_NAME="macos"
 export NO_DEPENDS=1
 export OSX_SDK=""

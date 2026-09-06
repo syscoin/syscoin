@@ -27,16 +27,11 @@ export GOAL="install"
 export CCACHE_MAXSIZE=300M
 # SYSCOIN: Docker's network can expose AF_INET6 to Python while libevent cannot resolve
 # or bind ::1. Keep the bind tests in normal CI and skip them in this lane.
-# SYSCOIN: Full 65,536-leaf scheduled-WOTS fixtures take multiple hours when instrumented.
-# Exclude the remaining full-tree masternode setups; focused crypto and
-# ChainLock tests cover the real worker/signing paths.
-PQ_FULL_TREE_TESTS="feature_deterministicmns,feature_nevm_data"
-PQ_FULL_TREE_TESTS="${PQ_FULL_TREE_TESTS},rpc_masternode,rpc_mnauth"
-PQ_FULL_TREE_TESTS="${PQ_FULL_TREE_TESTS},feature_governance_objects,feature_governance"
-PQ_FULL_TREE_TESTS="${PQ_FULL_TREE_TESTS},feature_governance_dynamic,feature_btcheader_policy_auxpow"
+# SYSCOIN: Generic MN/governance fixtures use lightweight test commitments,
+# so include them in the instrumented functional batch.
 # SYSCOIN: The full-dimension ChainLocks functional prevents this lane from
 # completing under AddressSanitizer; native macOS retains the test.
-export TEST_RUNNER_EXTRA="--exclude interface_zmq_nevm,rpc_bind,feature_bind_extra,feature_proxy,${PQ_FULL_TREE_TESTS},feature_pq_chainlocks"
+export TEST_RUNNER_EXTRA="--exclude interface_zmq_nevm,rpc_bind,feature_bind_extra,feature_proxy,feature_pq_chainlocks"
 export SYSCOIN_CONFIG="--enable-c++20 --enable-usdt --enable-zmq --with-incompatible-bdb --with-gui=qt5 \
 CPPFLAGS='-DARENA_DEBUG -DDEBUG_LOCKORDER' \
 --with-sanitizers=address,float-divide-by-zero,integer,undefined \

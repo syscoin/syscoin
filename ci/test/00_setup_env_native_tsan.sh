@@ -16,14 +16,8 @@ CC=clang-18 CXX='clang++-18 -stdlib=libc++' CXXFLAGS='-g' \
 CPPFLAGS='-DARENA_DEBUG -DDEBUG_LOCKORDER -DDEBUG_LOCKCONTENTION -D_LIBCPP_REMOVE_TRANSITIVE_INCLUDES'"
 # SYSCOIN: Docker's network can expose AF_INET6 to Python while libevent cannot resolve
 # or bind ::1. Keep the bind tests in normal CI and skip them in this lane.
-# SYSCOIN: Full 65,536-leaf scheduled-WOTS fixtures take multiple hours when instrumented.
-# Exclude the remaining full-tree masternode setups; focused crypto and
-# ChainLock tests cover the real worker/signing paths.
-PQ_FULL_TREE_TESTS="feature_deterministicmns,feature_nevm_data"
-PQ_FULL_TREE_TESTS="${PQ_FULL_TREE_TESTS},rpc_masternode,rpc_mnauth"
-PQ_FULL_TREE_TESTS="${PQ_FULL_TREE_TESTS},feature_governance_objects,feature_governance"
-PQ_FULL_TREE_TESTS="${PQ_FULL_TREE_TESTS},feature_governance_dynamic,feature_btcheader_policy_auxpow"
-PQ_FULL_TREE_TESTS="${PQ_FULL_TREE_TESTS},feature_pq_chainlocks"
-export TEST_RUNNER_EXTRA="--exclude interface_zmq_nevm,rpc_bind,feature_bind_extra,feature_proxy,${PQ_FULL_TREE_TESTS}"
+# SYSCOIN: Generic MN/governance fixtures use lightweight test commitments.
+# Keep the full-dimension ChainLocks functional in native macOS coverage.
+export TEST_RUNNER_EXTRA="--exclude interface_zmq_nevm,rpc_bind,feature_bind_extra,feature_proxy,feature_pq_chainlocks"
 export PYZMQ=true
 export NO_WERROR=1
