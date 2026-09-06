@@ -2548,29 +2548,38 @@ BOOST_FIXTURE_TEST_CASE(
     in_addr ipv4_addr;
     ipv4_addr.s_addr = 0xa0b0c006;
     const CAddress address{CService{ipv4_addr, 7782}, NODE_NETWORK};
-    CNode node{
-        /*id=*/7, /*sock=*/nullptr, address,
-        /*nKeyedNetGroupIn=*/6, /*nLocalHostNonceIn=*/7, CAddress{},
-        /*addrNameIn=*/std::string{}, ConnectionType::INBOUND,
-        /*inbound_onion=*/false};
-    node.SetCommonVersion(GOVERNANCE_PAGE_PROTO_VERSION - 1);
-    m_node.peerman->InitializeNode(node, NODE_NETWORK);
+    const auto process_invalid_filter = [&](const NodeId node_id, CDataStream& request) {
+        CNode node{
+            node_id, /*sock=*/nullptr, address,
+            /*nKeyedNetGroupIn=*/6, /*nLocalHostNonceIn=*/7, CAddress{},
+            /*addrNameIn=*/std::string{}, ConnectionType::INBOUND,
+            /*inbound_onion=*/false};
+        node.SetCommonVersion(GOVERNANCE_PAGE_PROTO_VERSION - 1);
+        m_node.peerman->InitializeNode(node, NODE_NETWORK);
 
-    CDataStream request{
+        governance->ProcessMessage(
+            &node, NetMsgType::MNGOVERNANCESYNC, request,
+            *m_node.connman, *m_node.peerman);
+
+        BOOST_CHECK(request.empty());
+        BOOST_CHECK(m_node.peerman->IsBanned(node.GetId()));
+        m_node.peerman->FinalizeNode(node);
+    };
+
+    CDataStream excessive_hash_funcs{
         SER_NETWORK, GOVERNANCE_PAGE_PROTO_VERSION - 1};
-    request << uint256::ONEV;
-    request << std::vector<unsigned char>{0xff};
-    request << std::numeric_limits<unsigned int>::max();
-    request << static_cast<unsigned int>(0);
-    request << static_cast<unsigned char>(BLOOM_UPDATE_NONE);
+    excessive_hash_funcs << uint256::ONEV;
+    excessive_hash_funcs << std::vector<unsigned char>{0xff};
+    excessive_hash_funcs << std::numeric_limits<unsigned int>::max();
+    excessive_hash_funcs << static_cast<unsigned int>(0);
+    excessive_hash_funcs << static_cast<unsigned char>(BLOOM_UPDATE_NONE);
+    process_invalid_filter(/*node_id=*/7, excessive_hash_funcs);
 
-    governance->ProcessMessage(
-        &node, NetMsgType::MNGOVERNANCESYNC, request,
-        *m_node.connman, *m_node.peerman);
-
-    BOOST_CHECK(request.empty());
-    BOOST_CHECK(m_node.peerman->IsBanned(node.GetId()));
-    m_node.peerman->FinalizeNode(node);
+    CDataStream oversized_declaration{
+        SER_NETWORK, GOVERNANCE_PAGE_PROTO_VERSION - 1};
+    oversized_declaration << uint256::ONEV;
+    WriteCompactSize(oversized_declaration, MAX_VECTOR_ALLOCATE);
+    process_invalid_filter(/*node_id=*/8, oversized_declaration);
 }
 
 BOOST_AUTO_TEST_CASE(

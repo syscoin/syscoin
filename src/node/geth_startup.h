@@ -28,10 +28,13 @@ public:
     void Observe(bool bootstrap_status_present, bool geth_running, Clock::time_point now)
     {
         m_bootstrap_active = bootstrap_status_present && geth_running;
-        if (m_bootstrap_active && !m_bootstrap_started) {
-            m_bootstrap_started = true;
-            m_bootstrap_start = now;
-            m_bootstrap_deadline = now + m_bootstrap_timeout;
+        if (m_bootstrap_active) {
+            if (!m_bootstrap_started) {
+                m_bootstrap_started = true;
+                m_bootstrap_start = now;
+                m_bootstrap_deadline = now + m_bootstrap_timeout;
+            }
+            m_bootstrap_completed = false;
         } else if (!bootstrap_status_present && geth_running && m_bootstrap_started && !m_bootstrap_completed) {
             m_bootstrap_completed = true;
             m_normal_start = now;

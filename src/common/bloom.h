@@ -8,6 +8,7 @@
 #include <serialize.h>
 #include <span.h>
 
+#include <ios>
 #include <vector>
 
 class COutPoint;
@@ -18,6 +19,12 @@ class CKeyID;
 //! 20,000 items with fp rate < 0.1% or 10,000 items and <0.0001%
 static constexpr unsigned int MAX_BLOOM_FILTER_SIZE = 36000; // bytes
 static constexpr unsigned int MAX_HASH_FUNCS = 50;
+
+class CBloomFilterSizeError final : public std::ios_base::failure
+{
+public:
+    CBloomFilterSizeError() : std::ios_base::failure("bloom filter size exceeds protocol limit") {}
+};
 
 /**
  * First two bits of nFlags control how much IsRelevantAndUpdate actually updates
@@ -69,7 +76,19 @@ public:
     CBloomFilter(const unsigned int nElements, const double nFPRate, const unsigned int nTweak, unsigned char nFlagsIn);
     CBloomFilter() : nHashFuncs(0), nTweak(0), nFlags(0) {}
 
-    SERIALIZE_METHODS(CBloomFilter, obj) { READWRITE(obj.vData, obj.nHashFuncs, obj.nTweak, obj.nFlags); }
+    SERIALIZE_METHODS(CBloomFilter, obj)
+    {
+        if constexpr (Operation::ForRead()) {
+            obj.vData.clear();
+            const uint64_t size = ReadCompactSize(s, /*range_check=*/false);
+            if (size > MAX_BLOOM_FILTER_SIZE) throw CBloomFilterSizeError{};
+            obj.vData.resize(size);
+            if (!obj.vData.empty()) s.read(MakeWritableByteSpan(obj.vData));
+        } else {
+            READWRITE(obj.vData);
+        }
+        READWRITE(obj.nHashFuncs, obj.nTweak, obj.nFlags);
+    }
 
     void insert(Span<const unsigned char> vKey);
     void insert(const COutPoint& outpoint);

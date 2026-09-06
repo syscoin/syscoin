@@ -19,6 +19,7 @@ from test_framework.messages import (
     msg_getdata,
     msg_mempool,
     msg_version,
+    ser_compact_size,
 )
 from test_framework.p2p import (
     P2PInterface,
@@ -90,6 +91,13 @@ class P2PBloomFilter(P2PInterface):
             self._merkleblock_received = value
 
 
+class OversizedBloomFilterDeclaration:
+    msgtype = b"filterload"
+
+    def serialize(self):
+        return ser_compact_size(MAX_BLOOM_FILTER_SIZE + 1)
+
+
 class FilterTest(SyscoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 1
@@ -106,6 +114,10 @@ class FilterTest(SyscoinTestFramework):
         self.log.info('Check that too large filter is rejected')
         with self.nodes[0].assert_debug_log(['Misbehaving']):
             filter_peer.send_and_ping(msg_filterload(data=b'\xbb'*(MAX_BLOOM_FILTER_SIZE+1)))
+
+        self.log.info('Check that an oversized declaration is rejected before its payload')
+        with self.nodes[0].assert_debug_log(['Misbehaving']):
+            filter_peer.send_and_ping(OversizedBloomFilterDeclaration())
 
         self.log.info('Check that max size filter is accepted')
         with self.nodes[0].assert_debug_log([], unexpected_msgs=['Misbehaving']):

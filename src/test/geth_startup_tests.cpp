@@ -28,6 +28,24 @@ BOOST_AUTO_TEST_CASE(bootstrap_completion_starts_fresh_normal_timeout)
     BOOST_CHECK(wait.Expired(start + Seconds{102}));
 }
 
+BOOST_AUTO_TEST_CASE(bootstrap_status_flicker_does_not_consume_final_completion_grace)
+{
+    using Seconds = GethStartupWaitState::Seconds;
+    const GethStartupWaitState::Clock::time_point start{};
+    GethStartupWaitState wait{start, Seconds{30}, Seconds{7200}};
+
+    wait.Observe(/*bootstrap_status_present=*/true, /*geth_running=*/true, start + Seconds{2});
+    wait.Observe(/*bootstrap_status_present=*/false, /*geth_running=*/true, start + Seconds{72});
+    wait.Observe(/*bootstrap_status_present=*/true, /*geth_running=*/true, start + Seconds{73});
+    BOOST_CHECK(wait.BootstrapActive());
+
+    wait.Observe(/*bootstrap_status_present=*/false, /*geth_running=*/true, start + Seconds{200});
+    BOOST_CHECK(!wait.BootstrapActive());
+    BOOST_CHECK_EQUAL(wait.ActiveElapsed(start + Seconds{229}).count(), 29);
+    BOOST_CHECK(!wait.Expired(start + Seconds{229}));
+    BOOST_CHECK(wait.Expired(start + Seconds{230}));
+}
+
 BOOST_AUTO_TEST_CASE(dead_geth_does_not_gain_post_bootstrap_grace)
 {
     using Seconds = GethStartupWaitState::Seconds;
