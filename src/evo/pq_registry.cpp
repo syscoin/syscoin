@@ -1100,7 +1100,9 @@ bool PQRegistryConfig::IsValid() const noexcept
         future_horizon_epochs < ACTIVE_QUORUMS ||
         future_horizon_epochs > MAX_OPERATOR_SCHEDULE_EPOCHS ||
         preparation_height >= schedule.epoch_origin ||
-        (!recovery_refresh.IsDisabled() && !recovery_refresh.IsValid(schedule, btcc_schedule))) {
+        !IsRecoveryRefreshOperatorScheduleValid(
+            schedule, btcc_schedule, recovery_refresh,
+            registration_cutoff_blocks, future_horizon_epochs)) {
         return false;
     }
     const auto epoch_zero_cutoff{RegistrationCutoffHeight(

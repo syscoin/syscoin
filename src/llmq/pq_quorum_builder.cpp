@@ -608,8 +608,9 @@ bool QuorumBuildConfig::IsValid() const noexcept
     // branch-derived roster after a finalized predecessor. Together these
     // preserve threshold intersection across sibling targets.
     if (!schedule.IsValid() || roster_snapshot_lag_blocks == 0 ||
-        (!recovery_refresh.IsDisabled() &&
-         !recovery_refresh.IsValid(schedule, btcc_schedule)) ||
+        !IsRecoveryRefreshOperatorScheduleValid(
+            schedule, btcc_schedule, recovery_refresh,
+            registration_cutoff_blocks, future_horizon_epochs) ||
         roster_snapshot_lag_blocks < schedule.sign_lag ||
         roster_snapshot_lag_blocks > schedule.epoch_blocks ||
         registration_cutoff_blocks < roster_snapshot_lag_blocks ||

@@ -41,6 +41,13 @@ struct RecoveryRefreshConfig {
 [[nodiscard]] RecoveryRefreshConfig GetRecoveryRefreshConfig(
     const Consensus::Params& consensus) noexcept;
 
+// An enabled profile must expose all four recovery epochs at its fixed key
+// snapshot; a long-lived commitment cannot bypass the operator lookup horizon.
+[[nodiscard]] bool IsRecoveryRefreshOperatorScheduleValid(
+    const ChainLockScheduleConfig& chainlock, const BTCCScheduleConfig& btcc,
+    const RecoveryRefreshConfig& config, uint32_t registration_cutoff_blocks,
+    uint32_t future_horizon_epochs) noexcept;
+
 struct RecoveryRefreshCoordinates {
     uint32_t group{0};
     uint32_t first_epoch{0};

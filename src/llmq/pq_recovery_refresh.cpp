@@ -8,6 +8,7 @@
 #include <auxpow.h>
 #include <chain.h>
 #include <consensus/params.h>
+#include <llmq/pq_operator_key_state.h>
 #include <llmq/pq_roster_beacon.h>
 #include <pow.h>
 #include <primitives/block.h>
@@ -112,6 +113,64 @@ std::optional<RecoveryRefreshCoordinates> DeriveRecoveryRefreshCoordinates(
         group, first_epoch, static_cast<int32_t>(reference), static_cast<int32_t>(snapshot),
         static_cast<int32_t>(entropy), static_cast<int32_t>(carrier), *target,
         static_cast<int32_t>(authority)};
+}
+
+bool IsRecoveryRefreshOperatorScheduleValid(
+    const ChainLockScheduleConfig& chainlock, const BTCCScheduleConfig& btcc,
+    const RecoveryRefreshConfig& config, uint32_t registration_cutoff_blocks,
+    uint32_t future_horizon_epochs) noexcept
+{
+    if (config.IsDisabled()) return true;
+    if (!config.IsValid(chainlock, btcc)) return false;
+
+    const uint64_t complete_groups{
+        (uint64_t{std::numeric_limits<int32_t>::max()} - chainlock.epoch_origin) /
+        GROUP_BLOCKS};
+    if (complete_groups == 0) return false;
+    const uint64_t last_group{complete_groups - 1};
+    const int64_t preparation_offset{
+        int64_t{config.activation_height} + config.snapshot_lag_blocks +
+        config.readiness_window_blocks - chainlock.epoch_origin};
+    const uint64_t preparation_group{preparation_offset <= 0 ? 0 :
+        (static_cast<uint64_t>(preparation_offset) + GROUP_BLOCKS - 1) / GROUP_BLOCKS};
+    const uint64_t btcc_group{btcc.candidate_origin <= chainlock.epoch_origin ? 0 :
+        static_cast<uint64_t>(btcc.candidate_origin - chainlock.epoch_origin) / GROUP_BLOCKS};
+    uint64_t first_group{std::max(preparation_group, btcc_group)};
+    if (first_group > last_group) return false;
+    auto first{DeriveRecoveryRefreshCoordinates(
+        chainlock, btcc, config, static_cast<uint32_t>(first_group))};
+    // BTCC may start too late for its first group's canonical target. With the
+    // fixed cadences, the next group either has a joint target or none ever do.
+    if (!first && first_group < last_group) {
+        first = DeriveRecoveryRefreshCoordinates(
+            chainlock, btcc, config, static_cast<uint32_t>(++first_group));
+    }
+    if (!first) return false;
+
+    const auto fits = [&](const RecoveryRefreshCoordinates& coordinates) {
+        const auto view{DeriveOperatorKeyScheduleView(
+            chainlock, coordinates.snapshot_height,
+            registration_cutoff_blocks, future_horizon_epochs)};
+        return view && coordinates.first_epoch >= view->first_retained_frozen_epoch &&
+            uint64_t{coordinates.first_epoch} + ACTIVE_QUORUMS - 1 <=
+                view->last_admissible_epoch;
+    };
+    if (!fits(*first)) return false;
+
+    // The early view is clamped until its retained history is fully populated;
+    // afterwards its relative horizon repeats every group. Check both regimes
+    // and the final representable group, where a cutoff can overflow the height.
+    const uint64_t periodic_group{std::clamp(
+        (uint64_t{config.snapshot_lag_blocks} +
+            (ACTIVE_QUORUMS - 1) * chainlock.epoch_blocks + GROUP_BLOCKS - 1) / GROUP_BLOCKS,
+        first_group, last_group)};
+    for (const uint64_t group : {periodic_group, last_group}) {
+        if (group == first_group) continue;
+        const auto coordinates{DeriveRecoveryRefreshCoordinates(
+            chainlock, btcc, config, static_cast<uint32_t>(group))};
+        if (!coordinates || !fits(*coordinates)) return false;
+    }
+    return true;
 }
 
 std::optional<RecoveryRefreshCoordinates> RecoveryRefreshCoordinatesForCarrierHeight(

@@ -598,6 +598,12 @@ starting block's target, not merely a count of blocks after a difficulty drop.
 Public profiles remain disabled. Regtest can set all eight profile values with
 `-pqrecoveryrefresh=start:snapshot-lag:entropy-delay:carrier-delay:carrier-depth:snapshot-work:carrier-work:readiness-window`.
 
+Registry and roster configuration validation also require all four recovery
+epochs to fit the operator-state lookup window at `S_q`. A long-lived child-key
+commitment does not bypass that window. The shared check covers the initial
+schedule, its repeating groups, and checked height limits; an incompatible
+snapshot lag / registration cutoff / future horizon is rejected before use.
+
 At `S_q`, the universe contains mature, valid identities with an active global
 PQ key, all four required child roots, and an explicit tx87 readiness declaration
 for `q`. The current global key signs the exact `R_q` ancestor hash, key version,

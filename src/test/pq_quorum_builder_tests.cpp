@@ -552,6 +552,110 @@ struct IndexChain {
 
 BOOST_AUTO_TEST_SUITE(pq_quorum_builder_tests)
 
+BOOST_AUTO_TEST_CASE(pow_refresh_requires_snapshot_key_horizon_and_excludes_missing_roots)
+{
+    constexpr uint32_t GROUP{2};
+    constexpr uint32_t MEMBER_COUNT{QUORUM_SIZE + 1};
+    const uint256 genesis{NonNullHash(18'910)};
+    auto config{BuildConfig(288)};
+    config.future_horizon_epochs = 4;
+    config.btcc_schedule = ResetPolicy().btcc_schedule;
+    config.recovery_refresh = RecoveryRefreshConfig{
+        .activation_height = 2305,
+        .grace_groups = 1,
+        .snapshot_lag_blocks = 864,
+        .entropy_delay_blocks = 60,
+        .carrier_delay_blocks = 60,
+        .carrier_min_depth_blocks = 5,
+        .snapshot_min_work_blocks = 60,
+        .carrier_min_work_blocks = 5,
+        .readiness_window_blocks = 128,
+    };
+    BOOST_REQUIRE(config.recovery_refresh.IsValid(
+        config.schedule, config.btcc_schedule));
+    BOOST_CHECK(!config.IsValid());
+    const auto coordinates{DeriveRecoveryRefreshCoordinates(
+        config.schedule, config.btcc_schedule, config.recovery_refresh, GROUP)};
+    BOOST_REQUIRE(coordinates);
+    const auto last_epoch{coordinates->first_epoch + ACTIVE_QUORUMS - 1};
+    const auto too_short{DeriveOperatorKeyScheduleView(
+        config.schedule, coordinates->snapshot_height,
+        config.registration_cutoff_blocks, config.future_horizon_epochs)};
+    BOOST_REQUIRE(too_short);
+    BOOST_CHECK_EQUAL(too_short->last_admissible_epoch + 1, last_epoch);
+
+    config.future_horizon_epochs = 5;
+    BOOST_REQUIRE(config.IsValid());
+    const auto snapshot_view{DeriveOperatorKeyScheduleView(
+        config.schedule, coordinates->snapshot_height,
+        config.registration_cutoff_blocks, config.future_horizon_epochs)};
+    BOOST_REQUIRE(snapshot_view);
+    BOOST_CHECK_EQUAL(snapshot_view->last_admissible_epoch, last_epoch);
+    auto disabled{config};
+    disabled.future_horizon_epochs = 4;
+    disabled.recovery_refresh = {};
+    BOOST_CHECK(disabled.IsValid());
+
+    IndexChain chain(coordinates->target_height, coordinates->target_height + 1, 0);
+    for (auto& index : chain.indices) {
+        index.nBits = 0x207fffff;
+        index.nChainWork = GetBlockProof(index) * (index.nHeight + 1);
+        LOCK(cs_main);
+        index.nStatus = BLOCK_VALID_SCRIPTS;
+    }
+    auto& carrier{chain.indices[coordinates->carrier_height]};
+    carrier.pqRecoveryRefreshWorkValidated = true;
+    carrier.pqRecoveryRefreshGroup = GROUP;
+    carrier.pqRecoveryRefreshEntropyBlockHash =
+        chain.At(coordinates->entropy_height).GetBlockHash();
+    carrier.pqRecoveryRefreshParentWorkHash = NonNullHash(18'911);
+    carrier.pqRecoveryRefreshCommitmentHash = NonNullHash(18'912);
+
+    auto keys{GlobalKeyStates(MEMBER_COUNT, 0, coordinates->snapshot_height)};
+    for (auto& state : keys) {
+        state.schedule = OperatorKeyScheduleState::FromView(*snapshot_view);
+        state.recovery_readiness = RecoveryReadinessRecord{
+            GROUP, state.global_key.key_version,
+            coordinates->readiness_reference_height,
+            chain.At(coordinates->readiness_reference_height).GetBlockHash(),
+            coordinates->snapshot_height};
+        BOOST_REQUIRE(state.IsStructurallyValid());
+        for (uint32_t epoch{coordinates->first_epoch}; epoch <= last_epoch; ++epoch) {
+            BOOST_REQUIRE(state.ResolveChildRoot(epoch).status ==
+                          ChildRootResolutionStatus::MUTABLE_PRESENT);
+        }
+    }
+    // An admissible schedule does not excuse an operator whose tree genuinely
+    // omits one required epoch; the membership filter must still reject it.
+    keys.back().global_key.child_key_commitment.first_epoch = coordinates->first_epoch + 1;
+    BOOST_REQUIRE(keys.back().IsStructurallyValid());
+    BOOST_CHECK(keys.back().ResolveChildRoot(coordinates->first_epoch).status ==
+                ChildRootResolutionStatus::MUTABLE_ABSENT);
+    const auto shared_keys{SharedOperatorStates(std::move(keys))};
+    const QuorumSnapshotLookup lookup = [&](const CBlockIndex& index) {
+        if (index.nHeight != coordinates->snapshot_height) {
+            return std::optional<QuorumSnapshotState>{};
+        }
+        QuorumSnapshotState state;
+        state.deterministic_mns = Snapshot(
+            index.nHeight, index.GetBlockHash(), MEMBER_COUNT);
+        state.operator_key_states = shared_keys;
+        return std::optional<QuorumSnapshotState>{std::move(state)};
+    };
+    auto incompatible{config};
+    incompatible.future_horizon_epochs = 4;
+    BOOST_CHECK(!FrozenQuorumRosterCache::Create(genesis, incompatible, lookup));
+    const auto cache{FrozenQuorumRosterCache::Create(genesis, config, lookup)};
+    BOOST_REQUIRE(cache);
+    QuorumBuildError error{};
+    const auto capsule{cache->BuildPoWRefreshUniverse(GROUP, chain.Tip(), &error)};
+    BOOST_REQUIRE_MESSAGE(capsule, "quorum build error=" << static_cast<int>(error));
+    BOOST_CHECK_EQUAL(capsule->Members().size(), QUORUM_SIZE);
+    for (const auto& member : capsule->Members()) {
+        BOOST_CHECK(member.pro_tx_hash != NonNullHash(10'000 + MEMBER_COUNT - 1));
+    }
+}
+
 BOOST_AUTO_TEST_CASE(pow_refresh_selects_only_fresh_ready_members_and_binds_immutable_source)
 {
     constexpr uint32_t GROUP{2};

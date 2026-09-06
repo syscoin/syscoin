@@ -1328,6 +1328,59 @@ BOOST_AUTO_TEST_CASE(configuration_requires_real_preparation_window)
                 PQRegistryDeploymentResult::INVALID_CONFIGURATION);
 }
 
+BOOST_AUTO_TEST_CASE(configuration_requires_refresh_roots_inside_snapshot_key_horizon)
+{
+    auto config{Config()};
+    config.registration_cutoff_blocks = 288;
+    config.future_horizon_epochs = 4;
+    config.btcc_schedule.candidate_origin = 2305;
+    config.recovery_refresh = RecoveryRefreshConfig{
+        .activation_height = 1100,
+        .grace_groups = 1,
+        .snapshot_lag_blocks = 864,
+        .entropy_delay_blocks = 60,
+        .carrier_delay_blocks = 60,
+        .carrier_min_depth_blocks = 5,
+        .snapshot_min_work_blocks = 60,
+        .carrier_min_work_blocks = 5,
+        .readiness_window_blocks = 128,
+    };
+    BOOST_REQUIRE(config.recovery_refresh.IsValid(
+        config.schedule, config.btcc_schedule));
+    BOOST_CHECK(!config.IsValid());
+    config.future_horizon_epochs = 5;
+    BOOST_CHECK(config.IsValid());
+
+    Consensus::Params params{};
+    params.DIP0003Height = 500;
+    params.nPQPreparationHeight = config.preparation_height;
+    params.nPQActivationHeight = 1100;
+    params.nPQChainLockEpochOrigin = config.schedule.epoch_origin;
+    params.nPQRegistrationCutoffBlocks = config.registration_cutoff_blocks;
+    params.nPQFutureHorizonEpochs = 4;
+    params.nPQBTCCCandidateOrigin = config.btcc_schedule.candidate_origin;
+    params.nPQRecoveryRefreshActivationHeight = config.recovery_refresh.activation_height;
+    params.nPQRecoveryRefreshGraceGroups = config.recovery_refresh.grace_groups;
+    params.nPQRecoveryRefreshSnapshotLagBlocks = config.recovery_refresh.snapshot_lag_blocks;
+    params.nPQRecoveryRefreshEntropyDelayBlocks = config.recovery_refresh.entropy_delay_blocks;
+    params.nPQRecoveryRefreshCarrierDelayBlocks = config.recovery_refresh.carrier_delay_blocks;
+    params.nPQRecoveryRefreshCarrierMinDepthBlocks = config.recovery_refresh.carrier_min_depth_blocks;
+    params.nPQRecoveryRefreshSnapshotMinWorkBlocks = config.recovery_refresh.snapshot_min_work_blocks;
+    params.nPQRecoveryRefreshCarrierMinWorkBlocks = config.recovery_refresh.carrier_min_work_blocks;
+    params.nPQRecoveryReadinessWindowBlocks = config.recovery_refresh.readiness_window_blocks;
+    PQRegistryConfig from_consensus;
+    BOOST_CHECK(GetPQRegistryConfig(params, from_consensus) ==
+                PQRegistryDeploymentResult::INVALID_CONFIGURATION);
+    params.nPQFutureHorizonEpochs = 5;
+    BOOST_CHECK(GetPQRegistryConfig(params, from_consensus) ==
+                PQRegistryDeploymentResult::VALID);
+    BOOST_CHECK(from_consensus == config);
+
+    config.future_horizon_epochs = 4;
+    config.recovery_refresh = {};
+    BOOST_CHECK(config.IsValid());
+}
+
 BOOST_AUTO_TEST_CASE(read_views_share_state_but_preserve_exact_block_identity)
 {
     const auto config{FastConfig()};

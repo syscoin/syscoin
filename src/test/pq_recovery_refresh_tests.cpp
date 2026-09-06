@@ -8,6 +8,7 @@
 #include <auxpow.h>
 #include <chain.h>
 #include <chainparams.h>
+#include <llmq/pq_operator_key_state.h>
 #include <llmq/pq_roster_beacon.h>
 #include <pow.h>
 #include <primitives/block.h>
@@ -240,6 +241,82 @@ BOOST_AUTO_TEST_CASE(config_coordinates_activation_and_one_grace_attempt)
         refreshed->target_height, last_receipt));
     BOOST_CHECK(GetRecoveryRefreshMode(chainlock, btcc, disabled,
         refreshed->target_height, last_receipt) == RecoveryRefreshMode::FROZEN_SOURCE);
+}
+
+BOOST_AUTO_TEST_CASE(operator_horizon_covers_complete_refresh_group)
+{
+    const ChainLockScheduleConfig chainlock{.epoch_origin = 1440};
+    const BTCCScheduleConfig btcc{.candidate_origin = 2305};
+    auto config{RefreshConfig()};
+    config.activation_height = 2305;
+    config.snapshot_lag_blocks = 864;
+    config.readiness_window_blocks = 128;
+    BOOST_REQUIRE(config.IsValid(chainlock, btcc));
+    BOOST_CHECK(!IsRecoveryRefreshOperatorScheduleValid(chainlock, btcc, config, 288, 4));
+    BOOST_CHECK(IsRecoveryRefreshOperatorScheduleValid(chainlock, btcc, config, 288, 5));
+    for (const uint32_t group : {2U, 4U, 5U, 6U, 1000U, 1'000'000U}) {
+        const auto coordinates{DeriveRecoveryRefreshCoordinates(chainlock, btcc, config, group)};
+        BOOST_REQUIRE(coordinates);
+        const auto short_view{DeriveOperatorKeyScheduleView(chainlock, coordinates->snapshot_height, 288, 4)};
+        const auto complete_view{DeriveOperatorKeyScheduleView(chainlock, coordinates->snapshot_height, 288, 5)};
+        BOOST_REQUIRE(short_view && complete_view);
+        BOOST_CHECK_EQUAL(short_view->last_admissible_epoch + 1, coordinates->first_epoch + ACTIVE_QUORUMS - 1);
+        BOOST_CHECK_EQUAL(complete_view->last_admissible_epoch, coordinates->first_epoch + ACTIVE_QUORUMS - 1);
+        BOOST_CHECK_LE(complete_view->first_retained_frozen_epoch, coordinates->first_epoch);
+        if (group == 4) {
+            BOOST_CHECK_EQUAL(coordinates->snapshot_height, 5184);
+            BOOST_CHECK_EQUAL(short_view->first_mutable_epoch, 15);
+            BOOST_CHECK_EQUAL(short_view->last_admissible_epoch, 18);
+        }
+    }
+    config.snapshot_lag_blocks = 576;
+    BOOST_CHECK(IsRecoveryRefreshOperatorScheduleValid(chainlock, btcc, config, 288, 4));
+    config = {};
+    BOOST_CHECK(IsRecoveryRefreshOperatorScheduleValid(chainlock, {}, config, 288, 4));
+}
+
+BOOST_AUTO_TEST_CASE(operator_horizon_checks_early_and_late_schedule_boundaries)
+{
+    const ChainLockScheduleConfig chainlock{.epoch_origin = 14'400};
+    BTCCScheduleConfig btcc{.candidate_origin = 0};
+    auto config{RefreshConfig()};
+    config.snapshot_lag_blocks = 864;
+    const auto early{DeriveRecoveryRefreshCoordinates(chainlock, btcc, config, 0)};
+    BOOST_REQUIRE(early);
+    const auto early_view{DeriveOperatorKeyScheduleView(chainlock, early->snapshot_height, 288, 4)};
+    BOOST_REQUIRE(early_view);
+    BOOST_CHECK_EQUAL(early_view->has_current_epoch, 0);
+    BOOST_CHECK_EQUAL(early_view->last_admissible_epoch, ACTIVE_QUORUMS - 1);
+    // Epoch-zero clipping hides this incompatibility if only the first
+    // available group is checked.
+    BOOST_CHECK(!IsRecoveryRefreshOperatorScheduleValid(chainlock, btcc, config, 288, 4));
+    BOOST_CHECK(IsRecoveryRefreshOperatorScheduleValid(chainlock, btcc, config, 288, 5));
+    btcc.candidate_origin = 1'000'000;
+    BOOST_CHECK(IsRecoveryRefreshOperatorScheduleValid(chainlock, btcc, config, 288, 5));
+    ++btcc.candidate_origin;
+    BOOST_CHECK(!IsRecoveryRefreshOperatorScheduleValid(chainlock, btcc, config, 288, 5));
+
+    btcc.candidate_origin = 0;
+    config = RefreshConfig();
+    const auto first{DeriveRecoveryRefreshCoordinates(chainlock, btcc, config, 0)};
+    BOOST_REQUIRE(first);
+    BOOST_REQUIRE(DeriveOperatorKeyScheduleView(chainlock, first->snapshot_height, 2304, 4));
+    constexpr uint32_t last_group{
+        (std::numeric_limits<int32_t>::max() - 14'400) / (ACTIVE_QUORUMS * PQ_EPOCH_BLOCKS) - 1};
+    const auto last{DeriveRecoveryRefreshCoordinates(chainlock, btcc, config, last_group)};
+    BOOST_REQUIRE(last);
+    BOOST_CHECK(!DeriveOperatorKeyScheduleView(chainlock, last->snapshot_height, 2304, 4));
+    BOOST_CHECK(!IsRecoveryRefreshOperatorScheduleValid(chainlock, btcc, config, 2304, 4));
+    BOOST_CHECK(IsRecoveryRefreshOperatorScheduleValid(chainlock, btcc, config, 288, 4));
+    config.activation_height = std::numeric_limits<int32_t>::max();
+    BOOST_CHECK(!IsRecoveryRefreshOperatorScheduleValid(chainlock, btcc, config, 288, 4));
+    config = RefreshConfig();
+    config.snapshot_lag_blocks = std::numeric_limits<uint32_t>::max();
+    BOOST_CHECK(!IsRecoveryRefreshOperatorScheduleValid(chainlock, btcc, config, 288, 4));
+    config = RefreshConfig();
+    BOOST_CHECK(!IsRecoveryRefreshOperatorScheduleValid(chainlock, btcc, config, 288, 0));
+    BOOST_CHECK(!IsRecoveryRefreshOperatorScheduleValid(chainlock, btcc, config, 288,
+        std::numeric_limits<uint32_t>::max()));
 }
 
 BOOST_AUTO_TEST_CASE(commitment_framing_is_bounded_unique_and_optional)
