@@ -541,6 +541,8 @@ void SetExactPostRecoveryRotation(FinalChainLock& chainlock,
     window.active.seeds.back() = std::move(normal_seed);
     window.next = {};
     window.next.epoch = window.active.seeds.back().epoch + 1;
+    window.next.readiness_group_floor_plus_one =
+        window.active.seeds.back().readiness_group_floor_plus_one;
     chainlock.statement.roster_transition =
         RosterAuthorizationTransitionKind::ROTATE;
     SetExactRosterAuthorizationStateHash(

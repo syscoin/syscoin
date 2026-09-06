@@ -287,12 +287,41 @@ SelectRecoveryUniverseMembers(
     return candidates;
 }
 
+bool HasAdmissionReadiness(
+    const OperatorKeyState& state,
+    const QuorumBuildConfig& config,
+    const CBlockIndex& snapshot_index,
+    uint32_t floor_plus_one)
+{
+    if (floor_plus_one == 0) return true;
+    const auto& record{state.recovery_readiness};
+    if (!record || record->group < floor_plus_one - 1 ||
+        record->included_height > snapshot_index.nHeight) {
+        return false;
+    }
+    const auto coordinates{DeriveRecoveryRefreshCoordinates(
+        config.schedule, config.btcc_schedule, config.recovery_refresh,
+        record->group)};
+    if (!coordinates) return false;
+    const CBlockIndex* reference{
+        snapshot_index.GetAncestor(coordinates->readiness_reference_height)};
+    return reference && state.IsRecoveryReady(
+        record->group, reference->nHeight, reference->GetBlockHash(),
+        coordinates->snapshot_height);
+}
+
 CandidateKeyResolution ResolveNormalCandidate(
     const OperatorKeyState* state,
     const uint256& pro_tx_hash,
-    uint32_t epoch)
+    uint32_t epoch,
+    const QuorumBuildConfig& config,
+    uint32_t readiness_floor_plus_one,
+    const CBlockIndex* snapshot_index)
 {
-    if (state == nullptr || !state->HasActiveGlobalKey()) {
+    if (state == nullptr || !state->HasActiveGlobalKey() ||
+        (readiness_floor_plus_one != 0 &&
+         (!snapshot_index || !HasAdmissionReadiness(
+             *state, config, *snapshot_index, readiness_floor_plus_one)))) {
         return {CandidateDisposition::EXCLUDE, std::nullopt};
     }
     const ChildRootResolution resolution{state->ResolveChildRoot(epoch)};
@@ -313,12 +342,20 @@ std::optional<std::vector<ScoredMember>> SelectNormalRosterMembers(
     const uint256& modifier,
     const OperatorStateLookup& operator_states,
     uint32_t epoch,
+    const QuorumBuildConfig& config,
+    uint32_t readiness_floor_plus_one,
+    const CBlockIndex* snapshot_index,
     QuorumBuildError* error)
 {
+    if (readiness_floor_plus_one != 0 && !snapshot_index) {
+        SetError(error, QuorumBuildError::MISSING_BRANCH_ANCESTOR);
+        return std::nullopt;
+    }
     return SelectRosterMembers(
         snapshot, modifier, operator_states,
-        [epoch](const OperatorKeyState* state, const uint256& pro_tx_hash) {
-            return ResolveNormalCandidate(state, pro_tx_hash, epoch);
+        [&](const OperatorKeyState* state, const uint256& pro_tx_hash) {
+            return ResolveNormalCandidate(state, pro_tx_hash, epoch, config,
+                readiness_floor_plus_one, snapshot_index);
         },
         error);
 }
@@ -635,9 +672,11 @@ std::unique_ptr<FrozenQuorumRoster> BuildFrozenQuorumRosterWithModifier(
     const uint256& base_hash,
     const uint256& modifier,
     const uint256& beacon_hash,
+    uint32_t readiness_floor_plus_one,
     const CDeterministicMNList& snapshot,
     std::span<const OperatorKeyState> operator_key_states,
-    QuorumBuildError* error)
+    QuorumBuildError* error,
+    const CBlockIndex* snapshot_index)
 {
     SetError(error, QuorumBuildError::NONE);
     if (genesis_hash.IsNull() || base_hash.IsNull() || modifier.IsNull() ||
@@ -651,7 +690,9 @@ std::unique_ptr<FrozenQuorumRoster> BuildFrozenQuorumRosterWithModifier(
     }
     const auto base_height{EpochBaseHeight(config.schedule, epoch)};
     if (!base_height || snapshot.IsNull() ||
-        snapshot.GetHeight() >= *base_height || snapshot.GetBlockHash().IsNull()) {
+        snapshot.GetHeight() >= *base_height || snapshot.GetBlockHash().IsNull() ||
+        (snapshot_index && (snapshot_index->nHeight != snapshot.GetHeight() ||
+                            snapshot_index->GetBlockHash() != snapshot.GetBlockHash()))) {
         SetError(error, QuorumBuildError::SNAPSHOT_MISMATCH);
         return nullptr;
     }
@@ -681,7 +722,8 @@ std::unique_ptr<FrozenQuorumRoster> BuildFrozenQuorumRosterWithModifier(
     }
 
     auto selected{SelectNormalRosterMembers(
-        snapshot, modifier, operator_states, epoch, error)};
+        snapshot, modifier, operator_states, epoch, config,
+        readiness_floor_plus_one, snapshot_index, error)};
     if (!selected || !HasUniqueSelectedChildRoots(*selected, error)) {
         return nullptr;
     }
@@ -732,7 +774,8 @@ std::unique_ptr<FrozenQuorumRoster> BuildFrozenQuorumRoster(
     const RosterBeaconSeed& beacon_seed,
     const CDeterministicMNList& snapshot,
     std::span<const OperatorKeyState> operator_key_states,
-    QuorumBuildError* error)
+    QuorumBuildError* error,
+    const CBlockIndex* snapshot_index)
 {
     if (!beacon_seed.IsReady() ||
         beacon_seed.anchor_kind != RosterBeaconAnchorKind::NORMAL) {
@@ -754,7 +797,8 @@ std::unique_ptr<FrozenQuorumRoster> BuildFrozenQuorumRoster(
     }
     return BuildFrozenQuorumRosterWithModifier(
         genesis_hash, config, epoch, base_hash, *modifier, *beacon_hash,
-        snapshot, operator_key_states, error);
+        beacon_seed.readiness_group_floor_plus_one,
+        snapshot, operator_key_states, error, snapshot_index);
 }
 
 namespace {
@@ -907,6 +951,7 @@ const CBlockIndex* ResolveRecoverySourceSnapshot(
 
 bool HasUsableNormalRecoverySource(
     const uint256& genesis_hash,
+    const QuorumBuildConfig& config,
     const RecoveryRosterAuthoritySource& source,
     const CBlockIndex& source_snapshot_index,
     const QuorumSnapshotState& source_state,
@@ -923,12 +968,16 @@ bool HasUsableNormalRecoverySource(
     }
     const auto selected{SelectNormalRosterMembers(
         source_state.deterministic_mns, *modifier,
-        source_operator_states, source.normal_beacon.epoch, error)};
+        source_operator_states, source.normal_beacon.epoch, config,
+        source.normal_beacon.readiness_group_floor_plus_one,
+        &source_snapshot_index, error)};
     return selected && HasUniqueSelectedChildRoots(*selected, error);
 }
 
 std::optional<std::vector<RecoveryUniverseMember>> CollectRecoveryUniverseMembers(
+    const QuorumBuildConfig& config,
     const std::optional<RecoveryRefreshCoordinates>& coordinates,
+    uint32_t readiness_floor_plus_one,
     const CBlockIndex& source_snapshot_index,
     const QuorumSnapshotState& source_state,
     const OperatorStateLookup& source_operator_states,
@@ -977,6 +1026,11 @@ std::optional<std::vector<RecoveryUniverseMember>> CollectRecoveryUniverseMember
                         coordinates->first_epoch + slot)};
                     if (!HasPresentChildRoot(root)) return;
                 }
+            } else if (!HasAdmissionReadiness(*operator_state, config,
+                           source_snapshot_index, readiness_floor_plus_one)) {
+                // A normal source remains usable for later grace recovery;
+                // advancing its entropy must not reopen the old population.
+                return;
             }
             if (members.size() ==
                 RECOVERY_UNIVERSE_MAX_MEMBERS) {
@@ -1025,7 +1079,8 @@ RecoveryUniverseCapsulePtr BuildRecoveryUniverseCapsuleFromPrepared(
         SetError(error, QuorumBuildError::INVALID_ROSTER_BEACON);
         return nullptr;
     }
-    auto members{CollectRecoveryUniverseMembers(coordinates,
+    auto members{CollectRecoveryUniverseMembers(config, coordinates,
+        source.normal_beacon.readiness_group_floor_plus_one,
         source_snapshot_index, source_state, source_operator_states, error)};
     if (!members) return nullptr;
     const uint256 members_hash{GetRecoveryUniverseMembersHash(
@@ -1260,7 +1315,7 @@ std::unique_ptr<FrozenQuorumRosters> BuildActiveFrozenQuorumRostersImpl(
                 (beacon_bundle.recovery_authority_source.kind ==
                      RecoveryRosterSourceKind::NORMAL_BEACON &&
                  !HasUsableNormalRecoverySource(
-                    genesis_hash, beacon_bundle.recovery_authority_source,
+                    genesis_hash, config, beacon_bundle.recovery_authority_source,
                     *recovery_source_snapshot, *recovery_source_state,
                     recovery_source_operator_states, error))) {
                 return nullptr;
@@ -1416,7 +1471,7 @@ std::unique_ptr<FrozenQuorumRosters> BuildActiveFrozenQuorumRostersImpl(
             std::span<const OperatorKeyState>{
                 snapshot_state->operator_key_states->data(),
                 snapshot_state->operator_key_states->size()},
-            error)};
+            error, snapshot_index)};
         if (!roster) return nullptr;
         if (!AddActiveChildRootsToSet(*roster, tree_owners)) {
             SetError(error, QuorumBuildError::DUPLICATE_CHILD_KEY);
@@ -1493,7 +1548,7 @@ RecoveryUniverseCapsulePtr BuildRecoveryUniverseCapsule(
             config, *source_state, source_operator_states, error) ||
         (source.kind == RecoveryRosterSourceKind::NORMAL_BEACON &&
          !HasUsableNormalRecoverySource(
-            genesis_hash, source, *source_snapshot, *source_state,
+            genesis_hash, config, source, *source_snapshot, *source_state,
             source_operator_states, error))) {
         return nullptr;
     }
@@ -1800,7 +1855,7 @@ RecoveryUniverseCapsulePtr FrozenQuorumRosterCache::BuildPoWRefreshUniverse(
     if (!state || !PrepareSnapshotOperatorLookup(m_config, *state, operators, error)) {
         return nullptr;
     }
-    auto members{CollectRecoveryUniverseMembers(coordinates, *snapshot, *state,
+    auto members{CollectRecoveryUniverseMembers(m_config, coordinates, 0, *snapshot, *state,
         operators, error)};
     if (!members) return nullptr;
     const auto root{GetRecoveryUniverseMembersHash(m_genesis_hash, *members)};

@@ -112,6 +112,8 @@ RosterAuthorizationVerificationContext SealLiveFixtureAuthorization(
     if (authorizer == nullptr) {
         statement.roster_beacons.active = bundle;
         statement.roster_beacons.next.epoch = bundle.seeds.back().epoch + 1;
+        statement.roster_beacons.next.readiness_group_floor_plus_one =
+            bundle.seeds.back().readiness_group_floor_plus_one;
         statement.roster_transition = RosterAuthorizationTransitionKind::KEEP;
     }
 
@@ -802,7 +804,7 @@ bool ClaimAuthorizedFixtureRosterTransition(
             const auto* newest_normal{
                 FindNewestNormalReadySeed(statement.roster_beacons)};
             if (newest_normal == nullptr) return false;
-            expected_source.normal_beacon = *newest_normal;
+            expected_source = RecoveryRosterAuthoritySource{*newest_normal};
         }
         if (expected_source.IsNull()) return false;
         statement.roster_beacons.active.recovery_authority_source =
@@ -839,6 +841,8 @@ bool ClaimAuthorizedFixtureRosterTransition(
         RosterBeaconAnchorKind::NORMAL;
     statement.roster_beacons.next.state = RosterBeaconState::EMPTY;
     statement.roster_beacons.next.epoch = *newest_epoch + 1;
+    statement.roster_beacons.next.readiness_group_floor_plus_one =
+        consumed.readiness_group_floor_plus_one;
     if (observe_next) {
         statement.roster_beacons.next =
             make_pending(statement.roster_beacons.next);

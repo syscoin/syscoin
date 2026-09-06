@@ -5690,6 +5690,8 @@ BOOST_FIXTURE_TEST_CASE(
     BOOST_REQUIRE(recovery_epoch);
     const auto window{MakeRecoveryRosterBeaconWindow(*objective->recovery_source, *recovery_epoch)};
     BOOST_REQUIRE(window);
+    BOOST_CHECK_EQUAL(window->active.seeds.front().readiness_group_floor_plus_one, GROUP + 1);
+    BOOST_CHECK_EQUAL(window->next.readiness_group_floor_plus_one, GROUP + 1);
     auto recovery{MakeCatchupChainLock(recovery_height, recovery_height - PQ_CL_PERIOD,
         chain[recovery_height - PQ_CL_PERIOD]->GetBlockHash(), 966'004)};
     recovery.statement.block_hash = chain[recovery_height]->GetBlockHash();
@@ -5848,6 +5850,8 @@ BOOST_FIXTURE_TEST_CASE(
     rotate.statement.roster_beacons.active.seeds.back() = reveal.statement.roster_beacons.next;
     rotate.statement.roster_beacons.next = {};
     rotate.statement.roster_beacons.next.epoch = *recovery_epoch + 2;
+    rotate.statement.roster_beacons.next.readiness_group_floor_plus_one =
+        rotate.statement.roster_beacons.active.seeds.back().readiness_group_floor_plus_one;
     bind_transition(rotate, &reveal);
     const auto rotation_authorization{Access::NetworkRosterAuthorization(*handler, rotate.statement)};
     BOOST_REQUIRE(rotation_authorization);
@@ -5859,6 +5863,7 @@ BOOST_FIXTURE_TEST_CASE(
         rotate.statement.roster_beacons.active.seeds.end(),
         [](const RosterBeaconSeed& seed) { return seed.IsRecovery(); }), 3);
     BOOST_CHECK(rotate.statement.roster_beacons.active.recovery_authority_source == *objective->recovery_source);
+    BOOST_CHECK_EQUAL(rotate.statement.roster_beacons.next.readiness_group_floor_plus_one, GROUP + 1);
 }
 
 BOOST_FIXTURE_TEST_CASE(
@@ -6170,6 +6175,8 @@ BOOST_FIXTURE_TEST_CASE(
             window.active.recovery_authority_source.normal_beacon = window.next;
             window.next = {};
             window.next.epoch = *target_epoch + 1;
+            window.next.readiness_group_floor_plus_one =
+                window.active.seeds.back().readiness_group_floor_plus_one;
             next.statement.roster_transition = RosterAuthorizationTransitionKind::ROTATE;
         } else if (window.next.state == RosterBeaconState::EMPTY) {
             window.next.state = RosterBeaconState::PENDING;

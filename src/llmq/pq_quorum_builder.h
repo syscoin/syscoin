@@ -206,8 +206,8 @@ private:
     friend class RecoveryUniverseCapsuleFactory;
 };
 
-static_assert(RecoveryUniverseCapsule::MAX_SERIALIZED_SIZE == 6'554'023);
-static_assert(RecoveryUniverseCapsule::MIN_SERIALIZED_SIZE == 40'523);
+static_assert(RecoveryUniverseCapsule::MAX_SERIALIZED_SIZE == 6'554'027);
+static_assert(RecoveryUniverseCapsule::MIN_SERIALIZED_SIZE == 40'527);
 
 using RecoveryUniverseCapsulePtr =
     std::shared_ptr<const RecoveryUniverseCapsule>;
@@ -379,6 +379,8 @@ using FrozenQuorumRosterCachePtr =
  * Candidates are ordered by the epoch score derived from the exact NORMAL
  * READY delayed-Bitcoin seed. The branch base hash remains descriptor identity
  * only and never enters that score.
+ * A readiness-gated seed additionally requires its exact snapshot index so
+ * readiness declarations can be checked against that snapshot's ancestry.
  */
 [[nodiscard]] std::unique_ptr<FrozenQuorumRoster> BuildFrozenQuorumRoster(
     const uint256& genesis_hash,
@@ -388,7 +390,8 @@ using FrozenQuorumRosterCachePtr =
     const RosterBeaconSeed& beacon_seed,
     const CDeterministicMNList& snapshot,
     std::span<const OperatorKeyState> operator_key_states,
-    QuorumBuildError* error = nullptr);
+    QuorumBuildError* error = nullptr,
+    const CBlockIndex* snapshot_index = nullptr);
 
 /**
  * Build the four oldest-to-newest active rosters on one explicit branch from

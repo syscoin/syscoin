@@ -274,6 +274,15 @@ BOOST_AUTO_TEST_CASE(initialization_alone_has_no_authorization_base)
         RosterAuthorizationTransitionKind::INITIALIZE;
     statement.roster_authorization_base = {};
     BOOST_CHECK(statement.IsStructurallyValid());
+    auto gated_initialize{statement};
+    for (auto& seed : gated_initialize.roster_beacons.active.seeds) {
+        seed.readiness_group_floor_plus_one = 1;
+    }
+    gated_initialize.roster_beacons.next.readiness_group_floor_plus_one = 1;
+    gated_initialize.roster_beacons.active.recovery_authority_source
+        .normal_beacon.readiness_group_floor_plus_one = 1;
+    BOOST_REQUIRE(gated_initialize.roster_beacons.IsStructurallyValid());
+    BOOST_CHECK(!gated_initialize.IsStructurallyValid());
     statement.roster_authorization_base = {
         statement.previous_chainlock_height,
         statement.previous_chainlock_hash,
@@ -355,10 +364,10 @@ BOOST_AUTO_TEST_CASE(chainlock_share_transcript_canonical_vector)
 
     BOOST_CHECK_EQUAL(
         Hash(encoded).ToString(),
-        "455298cf1562507bace1553d5667c63b5e6d635410700e342439ad30d360cdc7");
+        "d9c6e5e7a8a27d4bcc7697d71b8cd9066db0529857b8dbc9190cd718fee98ceb");
     BOOST_CHECK_EQUAL(
         GetChainLockShareHash(genesis_hash, transcript).ToString(),
-        "7377b7a6acd0a66610737d603ed25245ef0679e53d6767241e9ca97971dcad10");
+        "d86da46889b7fc417e05be38002633e6a095fe0b8c86fb7d15e5d5d44d21bc69");
 }
 
 BOOST_AUTO_TEST_CASE(final_chainlock_exact_geometry_and_roundtrip)

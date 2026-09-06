@@ -161,11 +161,14 @@ bool RosterBeaconSeed::IsStructurallyValid() const noexcept
 {
     if (version != ROSTER_BEACON_VERSION ||
         !IsKnownRosterBeaconAnchorKind(anchor_kind) ||
-        !IsKnownRosterBeaconState(state)) {
+        !IsKnownRosterBeaconState(state) ||
+        (readiness_group_floor_plus_one != 0 &&
+         readiness_group_floor_plus_one - 1 > epoch / ACTIVE_QUORUMS)) {
         return false;
     }
     if (anchor_kind == RosterBeaconAnchorKind::POW_RECOVERY) {
-        return state == RosterBeaconState::READY && anchor_cursor.IsNull() &&
+        return readiness_group_floor_plus_one != 0 &&
+               state == RosterBeaconState::READY && anchor_cursor.IsNull() &&
                anchor_btc_height == -1 && future_btc_hash.IsNull() &&
                !recovery_entropy_hash.IsNull();
     }
@@ -252,12 +255,21 @@ bool ActiveRosterBeaconBundle::IsStructurallyValid() const noexcept
     for (std::size_t slot{1}; slot < ACTIVE_QUORUMS; ++slot) {
         if (!seeds[slot].IsReady() ||
             first_epoch + slot > std::numeric_limits<uint32_t>::max() ||
-            seeds[slot].epoch != first_epoch + slot) {
+            seeds[slot].epoch != first_epoch + slot ||
+            seeds[slot].readiness_group_floor_plus_one !=
+                seeds.front().readiness_group_floor_plus_one) {
             return false;
         }
     }
-    return recovery_authority_source.IsStructurallyValid() &&
-           !recovery_authority_source.IsNull();
+    if (!recovery_authority_source.IsStructurallyValid() ||
+        recovery_authority_source.IsNull()) {
+        return false;
+    }
+    const uint32_t source_floor{
+        recovery_authority_source.kind == RecoveryRosterSourceKind::POW_REFRESH
+            ? recovery_authority_source.refresh.group + 1
+            : recovery_authority_source.normal_beacon.readiness_group_floor_plus_one};
+    return seeds.front().readiness_group_floor_plus_one == source_floor;
 }
 
 bool ActiveRosterBeaconBundle::IsForNewestEpoch(
@@ -269,6 +281,8 @@ bool ActiveRosterBeaconBundle::IsForNewestEpoch(
 bool RosterBeaconWindow::IsStructurallyValid() const noexcept
 {
     return active.IsStructurallyValid() && next.IsStructurallyValid() &&
+           next.readiness_group_floor_plus_one ==
+               active.seeds.front().readiness_group_floor_plus_one &&
            active.seeds.back().epoch <
                std::numeric_limits<uint32_t>::max() &&
            next.epoch == active.seeds.back().epoch + 1;
@@ -352,6 +366,8 @@ bool ChainLockStatement::IsStructurallyValid() const
            !quorum_context_hash.IsNull() &&
            IsKnownRosterAuthorizationTransition(roster_transition) &&
            roster_beacons.IsStructurallyValid() &&
+           (!initializes ||
+            roster_beacons.active.seeds.front().readiness_group_floor_plus_one == 0) &&
            !roster_authorization_state_hash.IsNull() &&
            roster_authorization_base.IsStructurallyValid() &&
            (initializes == roster_authorization_base.IsNull()) &&

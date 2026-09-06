@@ -512,7 +512,10 @@ For epoch `e`:
    `0011` fails closed. The block at `A-1` is at or after the fourth bootstrap
    base, and configuration checks ensure that every roster active at the first
    eligible target is already authorized by that predecessor height.
-3. Load the deterministic masternode list at the snapshot.
+3. Load the deterministic masternode list at the snapshot. After a successful
+   PoW refresh, apply the authenticated readiness-admission floor described
+   below before scoring candidates; ordinary masternode and key eligibility
+   still apply.
 4. Use the existing deterministic score ordering with a domain-separated
    modifier that commits the frozen roster snapshot, epoch, canonical BTCPREV
    anchor, and delayed Bitcoin `H+37` hash to select 400 roster slots. The
@@ -634,6 +637,32 @@ operator-wide journal burns, and the durable winner's ancestry floor are
 unchanged. A later successful normal source can replace the retained source
 only once recovery rosters no longer own it and the new source is usable.
 
+An accepted refresh for group `q` sets the signed
+`readiness_group_floor_plus_one` to `q+1` in all four active seeds and the next
+normal seed. Zero means no post-refresh admission gate and is required at
+initialization. All five seeds and the retained source carry the same floor.
+Normal observation, reveal, rotation, and source advancement preserve it even
+after every recovery roster has drained; grace recovery also preserves it.
+Only a verified later PoW refresh may raise it. The serialized seed commitment
+binds this admission policy into roster identity, caches, and persistence,
+without changing the ordinary delayed-Bitcoin score modifier.
+
+For a gated normal roster, an eligible operator must have a readiness record
+for some group `g >= q`, authenticated by its current global key version at the
+normal roster snapshot. The record must name the exact `R_g` ancestor and have
+been included in `(R_g, min(S_g, normal_snapshot)]`. Thus the newly selected
+normal rosters cannot reintroduce old operators that never declared readiness
+for the recovered population. A new normal-source recovery capsule applies the
+same gate, so a subsequent grace recovery cannot reopen that population either.
+
+This is persistent admission, not a periodically expiring lease. An unchanged
+key does not need a new declaration every group. Newcomers and returning
+operators can join with an authenticated declaration in a later valid group's
+readiness window; global key rotation or revocation clears the old declaration,
+so a replacement key must declare readiness again. Operators should coordinate
+key rotations with those scheduled windows. The floor proves neither honesty
+nor continuing availability: an admitted operator can still go offline later.
+
 This is work-backed, producer-biasable selection, not unbiased Bitcoin
 randomness. A producer can try several valid parent-work samples before
 committing `G_q`; burial makes the choice stable but does not remove that earlier
@@ -664,6 +693,31 @@ where each descriptor is serialized completely in the prescribed order.
 
 PQ remains undeployed, so these are the first-release v1 encodings; there is no
 compatibility decoder or migration path for superseded development layouts.
+The readiness-floor field changes v1 serialization and its signed and database
+hashes in place. All test binaries must be rebuilt together, and development
+datadirs and persisted fixtures from the superseded layout must be reset or
+regenerated; they cannot be reused with the new layout.
+
+The canonical roster seed is 148 bytes, with the admission floor immediately
+after the epoch:
+
+```text
+RosterBeaconSeed {
+    uint16  version;
+    uint8   anchorKind;
+    uint8   state;
+    uint32  epoch;
+    uint32  readinessGroupFloorPlusOne;
+    BTCCursor anchorCursor;
+    int32   anchorBTCHeight;
+    uint256 futureBTCHash;
+    uint256 recoveryEntropyHash;
+}
+```
+
+The recovery source is 357 bytes, the active bundle is 951 bytes, and the
+complete four-active-plus-next roster window is 1,099 bytes. The common
+ChainLock statement is 1,721 bytes.
 
 ### 7.1 Share transcript
 
@@ -695,7 +749,7 @@ PQChainLockShareTranscript {
 }
 ```
 
-The 1,767-byte canonical encoding is the complete common ChainLock statement
+The 1,791-byte canonical encoding is the complete common ChainLock statement
 first, followed by the four signer-specific fields. This lets collectors
 retain and compare one statement object without reconstructing it from an
 interleaved member transcript.
@@ -716,7 +770,7 @@ fixes recovery membership. The durable local winner remains the wire
 predecessor and ancestry floor.
 
 The canonical `PQChainLockShare`, including its member identity, outer
-depth-16 child-key proof, and scheduled signature, is exactly 3,015 bytes.
+depth-16 child-key proof, and scheduled signature, is exactly 3,039 bytes.
 
 ### 7.2 Final raw CLSIG
 
@@ -768,8 +822,8 @@ Authenticated-signature and complete wire sizes are:
 proof bytes per signer = 32 + 16 * 32 = 544
 authenticated signer   = 544 + 704 = 1,248 bytes
 3 * 267 * 1,248        = 999,648 bytes
-statement/mask/bitmaps/count = 1,900 bytes
-complete fixed wire    = 1,001,548 bytes
+statement/mask/bitmaps/count = 1,924 bytes
+complete fixed wire    = 1,001,572 bytes
 ```
 
 The fixed header and four 50-byte bitmaps keep the complete canonical encoding
@@ -862,13 +916,13 @@ and to explicitly participating collectors. Any node may assemble the canonical
 final object after collecting sufficient valid shares; there is no elected or
 trusted aggregator.
 
-The live message does not repeat the 1,296-byte statement in every share. Its
+The live message does not repeat the 1,721-byte statement in every share. Its
 fixed 1,282-byte envelope contains the 32-byte logical statement ID, one
 `uint16` packing `quorumSlot * 400 + memberIndex`, and the 1,248-byte
 authenticated child signature. A recipient accepts the ID only when it names
 one of its at-most-two already-published immutable signing contexts, then
 reconstructs the complete signed transcript from that statement and its frozen
-roster. The self-contained 2,614-byte `ChainLockShare` remains the historical
+roster. The self-contained 3,039-byte `ChainLockShare` remains the historical
 form embedded in payment-audit evidence.
 
 All eligible child-key members across the four active rosters form one
@@ -1244,7 +1298,7 @@ For a payment audit it is the audit window's exclusive carrier end. Once
 entered, the exact crash-durable marker may sustain `PENDING` while the node
 catches up, but unrelated ancestry and an early header fail closed.
 
-The exact 1,001,548-byte certificate every five blocks is a material bandwidth
+The exact 1,001,572-byte certificate every five blocks is a material bandwidth
 and verification cost. It must be benchmarked under adversarial load. Its size
 being below a protocol cap is not evidence of production viability.
 
@@ -1556,7 +1610,7 @@ BTCCReceiptState {
 The hash commits the prior state, carrier height/hash, and exact receipt. Every
 ChainLock statement signs the indexed state at its target. Once a fully
 verified descendant ChainLock covers the carrier, that threshold statement
-seals the ordered prefix. A non-null outcome makes the original 1,001,548-byte
+seals the ordered prefix. A non-null outcome makes the original 1,001,572-byte
 receipt certificate prunable once no serving/bootstrap historical-sync or other
 durable dependency still owns it; a canonical null outcome objectively retires the
 unreceipted cursor. Until the carrier outcome is covered, a locally accepted
@@ -1620,6 +1674,10 @@ non-cutoff side-branch writes therefore need not survive restart. An in-flight
 verification/publication temporarily suppresses snapshot pruning. Once all
 durable obligations clear, normal compaction may discard old snapshots and
 sealed certificates. The design does not retain every historical CLSIG forever.
+
+The normal admission floor needs no additional old block-body retention. Its
+readiness record remains in ordinary operator snapshots until key mutation,
+and pruned nodes retain the block-index ancestry used to check its reference.
 
 The 1,728 full-list entries are a random-access availability and performance
 window, not a rollback-depth limit. Every connected post-DIP3 child also writes
@@ -1748,7 +1806,7 @@ only for the exact epoch, row, frozen descriptor, member slot, ordinary
 ChainLock statement, and child-key proof.
 
 Authenticated roster peers reconcile each open row with a fixed 125-byte
-`PQPOSEHAVE` bitmap and 2,653-byte `PQPOSERESP` objects. A response is written
+`PQPOSEHAVE` bitmap and 3,078-byte `PQPOSERESP` objects. A response is written
 to the staging WAL before relay. At the deadline the store issues a real fsync
 barrier, replaces raw shares with a checksummed local 400-bit summary, and
 refuses later mutation. At most two raw rows are open and 24 summaries are
@@ -1780,9 +1838,9 @@ previous payment-state root.
 Observation is deliberately not a common bitmap: every one of the 801 audit
 signers carries its own frozen 400-bit report. This avoids fragmenting the
 one-time audit slot when honest signers observed slightly different response
-sets. Each audit share is 3,013 bytes. Each final report witness is exactly
+sets. Each audit share is 3,438 bytes. Each final report witness is exactly
 1,298 bytes: one 50-byte report bitmap plus one 1,248-byte authenticated child
-signature. The final `PQPOSECERT` is 1,041,546 bytes: exactly 267
+signature. The final `PQPOSECERT` is 1,041,971 bytes: exactly 267
 reporter/signature witnesses from each of three selected active rosters,
 announced and requested by exact witness ID.
 
@@ -1829,7 +1887,7 @@ appearances. Missing or inconclusive audits never create a bounded penalty or
 recovery time.
 
 The only on-chain audit data is `pqar || PaymentAuditReceipt`, a fixed
-261-byte tagged segment (four-byte marker plus 257-byte receipt) placed before
+409-byte tagged segment (four-byte marker plus 405-byte receipt) placed before
 the ordinary `btcr` receipt and optional `btcp` suffix. Each receipt slot from
 the first carrier at least ten blocks after B until the next audit seal may
 carry the oldest applicable audit; honest miners retry throughout the roughly
@@ -1875,7 +1933,7 @@ startup imports are order-independent. Once durable finality crosses the
 carrier end, ordinary bounded eviction may remove both records.
 
 Historical IBD and marker-bound replay do not require an already pruned
-1,041,546-byte certificate. If the full witness is absent, the node rederives
+1,041,971-byte certificate. If the full witness is absent, the node rederives
 the subject roster from the historical snapshot, applies the committed
 `online_members` bitmap, and requires both
 the resulting probation root and cumulative receipt state to match the block
@@ -1923,7 +1981,7 @@ fsync cannot clear the obligation or expose provisional state as authenticated.
 Consequently, an already authorized participating node that restarts or falls
 behind replays the on-chain receipt chain, obtains one later covering CLSIG
 through the ordinary P2P path, and discards covered audit certificates; it does
-not download or retain a permanent 1,041,546-byte-per-epoch audit archive. A
+not download or retain a permanent 1,041,971-byte-per-epoch audit archive. A
 fresh, full-reindex, or snapshot-reconstruction node may perform the same replay
 only provisionally inside historical-replay quarantine. It cannot request or
 restore the covering CLSIG or become authoritative until a separately
@@ -2285,8 +2343,8 @@ Expected failures are fail-closed:
 - Golden bytes for global registration, rotation, child commitments/proofs,
   MNAUTH, quorum descriptors, share transcripts, and final CLSIG.
 - Exact size tests for the 704-byte child signature, 1,248-byte authenticated
-  signer, 1,282-byte live share envelope, 2,614-byte self-contained share, and
-  1,001,548-byte final CLSIG; reject
+  signer, 1,282-byte live share envelope, 3,039-byte self-contained share, and
+  1,001,572-byte final CLSIG; reject
   one-byte-over, truncated, and length-confusion encodings.
 - Bitmap tests for 266/267/268 bits, including non-byte-aligned residual bits,
   duplicate/reordered slots, selected masks with 2/3/4 bits, and non-zero
@@ -2353,7 +2411,7 @@ Expected failures are fail-closed:
 
 - Default CI P2P coverage must negotiate protocol 70018, enforce authenticated
   share admission, exercise CLSIG inventory/request tracking, and decode an
-  exact 1,001,548-byte certificate with 801 authenticated signature slots
+  exact 1,001,572-byte certificate with 801 authenticated signature slots
   without changing the 400/267/3-of-4 consensus geometry.
 - Exactly 267 valid signatures in each of any three active quorums.
 - Parallel verification produces identical results at every thread count.
@@ -2463,7 +2521,7 @@ Expected failures are fail-closed:
   with 801 valid signatures and adversarial invalid bundles.
 - `pq_chainlock_integration_tests` deterministically constructs all four
   400-member rosters and completes production collector/verifier acceptance
-  with 801 real scheduled-WOTS+ signatures and the exact 1,001,548-byte wire
+  with 801 real scheduled-WOTS+ signatures and the exact 1,001,572-byte wire
   object.
   `feature_pq_chainlocks.py` separately loads a checksummed, exact-branch
   regtest roster fixture, forwards real shares between authenticated peers,
@@ -2530,12 +2588,12 @@ Expected failures are fail-closed:
 - Exactly 267 audit signatures in each of exactly three active rosters, with
   one common base statement, 801 signer-bound report bitmaps, exact 134-of-267
   per-roster classification, and no common-bitmap convergence requirement.
-- Exact 3,054-byte response, 3,414-byte share, 1,298-byte report witness, and
-  1,041,947-byte final audit bounds; exact-witness-ID
+- Exact 3,078-byte response, 3,438-byte share, 1,298-byte report witness, and
+  1,041,971-byte final audit bounds; exact-witness-ID
   requested retrieval, at most four live unapplied witness candidates (one per
   three-of-four reporter mask), one-large-object-per-pass upload accounting,
   timeout, and wrong-ID handling.
-- Exact 401-byte null/non-null receipt and 405-byte tagged coinbase segment,
+- Exact 405-byte null/non-null receipt and 409-byte tagged coinbase segment,
   with the canonical 50-byte `online_members` suffix and fixed ordering before
   BTCC/BTCPREV. The null bitmap must be zero; unsupported versions, truncation,
   a mutated bitmap, certificate/bitmap disagreement, off-branch, stale-epoch,
@@ -2708,7 +2766,7 @@ The following must be resolved in code and release artifacts before activation:
   compact-replay, active/prospective pre-seal, covering-CLSIG checkpoint, and
   atomic pruning lifecycle, including proof that normal multi-year operation
   retains only a live/uncovered certificate suffix rather than accumulating
-  1,041,546 bytes every epoch;
+  1,041,971 bytes every epoch;
 - operational sizing, alerts, and recovery tests for synchronous replay-snapshot
   writes and the intentionally unbounded block/DMN/PQ retention during a
   prolonged certificate or Geth outage;
@@ -2729,8 +2787,8 @@ The following must be resolved in code and release artifacts before activation:
   Validate normal update rates, mass-PoSe/state-update amplification, bounded
   batch restart, moving-tip progress, and every finality/replay veto; never
   reduce retained rollback history to the 1,728 full-snapshot cache horizon;
-- recovery-capsule RAM and disk sizing at the 6,553,782-byte encoded per-source
-  maximum and the 134-source ownership ceiling (878,206,788 bytes, about
+- recovery-capsule RAM and disk sizing at the 6,554,027-byte encoded per-source
+  maximum and the 134-source ownership ceiling (878,239,618 bytes, about
   838 MiB, before database and container overhead);
 - production benchmark calibration, independent review, metrics/alert policy,
   and adversarial soak evidence for the implemented bounded asynchronous
@@ -2762,7 +2820,7 @@ Activation remains disabled until the complete Section 14 matrix passes on all
 supported platforms, the payment-audit replay/checkpoint rules receive
 independent consensus/security review, the scheduled-WOTS+ construction
 receives independent cryptographic review, and the 801-signature/proof verifier
-and 1,001,548-byte relay path meet explicit resource targets. Shadow success
+and 1,001,572-byte relay path meet explicit resource targets. Shadow success
 alone is not cryptographic validation.
 
 ## 16. References and security caveat

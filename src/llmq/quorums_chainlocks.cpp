@@ -392,7 +392,7 @@ std::unique_ptr<pq::FrozenQuorumRoster> BuildHistoricalFrozenRoster(
         std::span<const pq::OperatorKeyState>{
             snapshot_state->operator_key_states->data(),
             snapshot_state->operator_key_states->size()},
-        error);
+        error, snapshot);
 }
 
 std::optional<pq::BTCCReceiptState> IndexedBTCCReceiptState(
@@ -12560,6 +12560,8 @@ bool CChainLocksHandler::IsStateAdvancingAuthorizationBaseAdmissible(
             (projected_next.state == pq::RosterBeaconState::PENDING ||
              projected_next.state == pq::RosterBeaconState::READY) &&
             candidate_next.epoch == projected_next.epoch &&
+            candidate_next.readiness_group_floor_plus_one ==
+                projected_next.readiness_group_floor_plus_one &&
             projected_next.anchor_cursor ==
                 btcc_cursor_reconciliation->skipped_cursor &&
             btcc_cursor_reconciliation->skipped_cursor ==

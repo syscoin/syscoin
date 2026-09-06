@@ -787,6 +787,290 @@ BOOST_AUTO_TEST_CASE(pow_refresh_selects_only_fresh_ready_members_and_binds_immu
     BOOST_CHECK(error == QuorumBuildError::INVALID_RECOVERY_UNIVERSE);
 }
 
+BOOST_AUTO_TEST_CASE(pow_refresh_readiness_survives_normal_rotation_and_restart)
+{
+    constexpr uint32_t GROUP{2};
+    constexpr uint32_t OLD_MEMBERS{QUORUM_SIZE};
+    constexpr uint32_t ALL_MEMBERS{2 * QUORUM_SIZE};
+    constexpr uint32_t ROTATIONS{ACTIVE_QUORUMS + 1};
+    const uint256 genesis{NonNullHash(18'920)};
+    auto config{BuildConfig()};
+    config.btcc_schedule = ResetPolicy().btcc_schedule;
+    config.recovery_refresh = RecoveryRefreshConfig{
+        .activation_height = 2305,
+        .grace_groups = 1,
+        .snapshot_lag_blocks = 144,
+        .entropy_delay_blocks = 60,
+        .carrier_delay_blocks = 60,
+        .carrier_min_depth_blocks = 5,
+        .snapshot_min_work_blocks = 60,
+        .carrier_min_work_blocks = 5,
+        .readiness_window_blocks = 128};
+    BOOST_REQUIRE(config.IsValid());
+    const auto coordinates{DeriveRecoveryRefreshCoordinates(
+        config.schedule, config.btcc_schedule, config.recovery_refresh, GROUP)};
+    BOOST_REQUIRE(coordinates);
+    const auto target_after_rotation = [&](uint32_t rotation) {
+        if (rotation == 0) return coordinates->target_height;
+        const auto base{EpochBaseHeight(config.schedule,
+            coordinates->first_epoch + ACTIVE_QUORUMS - 1 + rotation)};
+        BOOST_REQUIRE(base);
+        const auto target{NextEligibleChainLockTargetHeight(config.schedule, *base - 1)};
+        BOOST_REQUIRE(target);
+        return *target;
+    };
+    const int32_t last_target{target_after_rotation(ROTATIONS)};
+    const auto grace_target{CanonicalRosterRecoveryTargetHeight(
+        config.schedule, config.btcc_schedule,
+        coordinates->first_epoch + 4 * ACTIVE_QUORUMS - 1)};
+    BOOST_REQUIRE(grace_target);
+    BOOST_REQUIRE_GT(*grace_target, last_target);
+    IndexChain chain(*grace_target, *grace_target + 1, 0);
+    for (auto& index : chain.indices) {
+        index.nBits = 0x207fffff;
+        index.nChainWork = GetBlockProof(index) * (index.nHeight + 1);
+        LOCK(cs_main);
+        index.nStatus = BLOCK_VALID_SCRIPTS;
+    }
+    auto& carrier{chain.indices[coordinates->carrier_height]};
+    carrier.pqRecoveryRefreshWorkValidated = true;
+    carrier.pqRecoveryRefreshGroup = GROUP;
+    carrier.pqRecoveryRefreshEntropyBlockHash =
+        chain.At(coordinates->entropy_height).GetBlockHash();
+    carrier.pqRecoveryRefreshParentWorkHash = NonNullHash(18'921);
+    carrier.pqRecoveryRefreshCommitmentHash = NonNullHash(18'922);
+
+    enum class OldReadinessCase {
+        MISSING, VALID, STALE, WRONG_BRANCH, LATE,
+        KEY_ROTATED, KEY_RENEWED, WRONG_KEY_VERSION,
+    };
+    OldReadinessCase old_readiness{OldReadinessCase::MISSING};
+    const QuorumSnapshotLookup lookup = [&](const CBlockIndex& index) {
+        QuorumSnapshotState state;
+        state.deterministic_mns = Snapshot(
+            index.nHeight, index.GetBlockHash(), ALL_MEMBERS);
+        auto keys{RecoveryTargetKeyStates(ALL_MEMBERS, index.nHeight)};
+        // Both populations retain valid keys throughout. Only the second
+        // population has demonstrated availability for the successful recovery.
+        if (index.nHeight >= coordinates->snapshot_height) {
+            for (uint32_t tag{OLD_MEMBERS}; tag < ALL_MEMBERS; ++tag) {
+                keys[tag].recovery_readiness = RecoveryReadinessRecord{
+                    GROUP, keys[tag].global_key.key_version,
+                    coordinates->readiness_reference_height,
+                    chain.At(coordinates->readiness_reference_height).GetBlockHash(),
+                    coordinates->snapshot_height};
+            }
+        }
+        if (old_readiness != OldReadinessCase::MISSING) {
+            const auto renewed{DeriveRecoveryRefreshCoordinates(
+                config.schedule, config.btcc_schedule, config.recovery_refresh,
+                old_readiness == OldReadinessCase::STALE ? GROUP - 1 : GROUP + 1)};
+            BOOST_REQUIRE(renewed);
+            const int32_t included{renewed->snapshot_height +
+                (old_readiness == OldReadinessCase::LATE ? 1 : 0)};
+            if (index.nHeight >= included) {
+                for (uint32_t tag{0}; tag < OLD_MEMBERS; ++tag) {
+                    auto& key{keys[tag]};
+                    if (old_readiness == OldReadinessCase::KEY_ROTATED ||
+                        old_readiness == OldReadinessCase::KEY_RENEWED) {
+                        ++key.global_key.key_version;
+                    }
+                    if (old_readiness == OldReadinessCase::KEY_ROTATED) continue;
+                    key.recovery_readiness = RecoveryReadinessRecord{
+                        renewed->group,
+                        key.global_key.key_version +
+                            (old_readiness == OldReadinessCase::WRONG_KEY_VERSION ? 1 : 0),
+                        renewed->readiness_reference_height,
+                        old_readiness == OldReadinessCase::WRONG_BRANCH
+                            ? NonNullHash(18'924)
+                            : chain.At(renewed->readiness_reference_height).GetBlockHash(),
+                        included};
+                }
+            }
+        }
+        state.operator_key_states = SharedOperatorStates(std::move(keys));
+        return std::optional<QuorumSnapshotState>{std::move(state)};
+    };
+    const auto cache{FrozenQuorumRosterCache::Create(genesis, config, lookup)};
+    BOOST_REQUIRE(cache);
+    QuorumBuildError error{};
+    const auto capsule{cache->BuildPoWRefreshUniverse(
+        GROUP, chain.At(coordinates->target_height), &error)};
+    BOOST_REQUIRE_MESSAGE(capsule, "quorum build error=" << static_cast<int>(error));
+    BOOST_REQUIRE_EQUAL(capsule->Members().size(), QUORUM_SIZE);
+    const auto decoded{RecoveryUniverseCapsule::DecodeTrustedPersistence(capsule->Encode(), &error)};
+    BOOST_REQUIRE(decoded);
+    const auto restored{std::make_shared<const RecoveryUniverseCapsule>(*decoded)};
+    const RecoveryUniverseLookup persisted = [restored](const uint256& id) {
+        return id == restored->SourceId() ? restored : RecoveryUniverseCapsulePtr{};
+    };
+    std::set<uint256> available;
+    for (uint32_t tag{OLD_MEMBERS}; tag < ALL_MEMBERS; ++tag) {
+        available.insert(NonNullHash(10'000 + tag));
+    }
+    auto bundle{RecoveryBeaconBundleAtHeight(
+        coordinates->target_height, capsule->Source())};
+    for (uint32_t rotation{0}; rotation <= ROTATIONS; ++rotation) {
+        BOOST_TEST_CONTEXT("normal rotations after recovery=" << rotation) {
+            const int32_t target{target_after_rotation(rotation)};
+            if (rotation > 0) {
+                for (std::size_t slot{0}; slot + 1 < ACTIVE_QUORUMS; ++slot) {
+                    bundle.seeds[slot] = bundle.seeds[slot + 1];
+                }
+                bundle.seeds.back() = RecoverySourceForChain(
+                    chain.At(target), bundle.seeds.back().epoch + 1,
+                    18'923 + rotation).normal_beacon;
+                bundle.seeds.back().readiness_group_floor_plus_one = GROUP + 1;
+                if (rotation >= ACTIVE_QUORUMS) {
+                    // A usable normal source replaces the recovery source
+                    // when its last roster drains; eligibility must outlive it.
+                    bundle.recovery_authority_source =
+                        RecoveryRosterAuthoritySource{bundle.seeds.back()};
+                }
+            }
+            BOOST_REQUIRE(bundle.IsStructurallyValid());
+            for (const auto& seed : bundle.seeds) {
+                BOOST_CHECK_EQUAL(seed.readiness_group_floor_plus_one, GROUP + 1);
+            }
+            const auto warm{cache->GetVerifiedActive(target, chain.At(target), bundle, &error)};
+            BOOST_REQUIRE_MESSAGE(warm, "quorum build error=" << static_cast<int>(error));
+            const auto raw{BuildActiveFrozenQuorumRosters(
+                genesis, config, target, chain.At(target), bundle, lookup, &error)};
+            BOOST_REQUIRE_MESSAGE(raw, "quorum build error=" << static_cast<int>(error));
+            BOOST_CHECK(SameRosterSet(warm->Rosters(), *raw));
+            const auto restarted{FrozenQuorumRosterCache::Create(
+                genesis, config, lookup, true, persisted)};
+            BOOST_REQUIRE(restarted);
+            const auto cold{restarted->GetVerifiedActive(
+                target, chain.At(target), bundle, &error)};
+            BOOST_REQUIRE_MESSAGE(cold, "quorum build error=" << static_cast<int>(error));
+            BOOST_CHECK(SameRosterSet(warm->Rosters(), cold->Rosters()));
+
+            const uint8_t mask{rotation == 0 ? uint8_t{0b1111} :
+                *GetNormalRosterAuthorizationMask(RosterAuthorizationTransitionKind::ROTATE)};
+            for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+                const auto& roster{warm->Rosters()[slot]};
+                const auto ready_count{std::count_if(
+                    roster.members.begin(), roster.members.end(),
+                    [&](const FrozenQuorumMember& member) {
+                        return member.eligible && available.contains(member.pro_tx_hash);
+                    })};
+                BOOST_CHECK_EQUAL(roster.descriptor.valid_count, QUORUM_SIZE);
+                BOOST_CHECK_EQUAL(ready_count, QUORUM_SIZE);
+                if ((mask & (uint8_t{1} << slot)) != 0) {
+                    BOOST_CHECK_GE(ready_count, QUORUM_THRESHOLD);
+                }
+            }
+        }
+    }
+
+    auto ungated{bundle};
+    for (auto& seed : ungated.seeds) seed.readiness_group_floor_plus_one = 0;
+    ungated.recovery_authority_source.normal_beacon.readiness_group_floor_plus_one = 0;
+    BOOST_REQUIRE(ungated.IsStructurallyValid());
+    const auto control{cache->GetVerifiedActive(last_target, chain.At(last_target), ungated, &error)};
+    BOOST_REQUIRE_MESSAGE(control, "quorum build error=" << static_cast<int>(error));
+    for (const auto& roster : control->Rosters()) {
+        BOOST_CHECK(std::any_of(roster.members.begin(), roster.members.end(),
+            [&](const FrozenQuorumMember& member) {
+                return !available.contains(member.pro_tx_hash);
+            }));
+    }
+    const auto regated{cache->GetVerifiedActive(last_target, chain.At(last_target), bundle, &error)};
+    BOOST_REQUIRE(regated);
+    BOOST_CHECK(!SameRosterSet(control->Rosters(), regated->Rosters()));
+    const auto& descriptor{regated->Rosters().back().descriptor};
+    const auto& snapshot_index{chain.At(descriptor.snapshot_height)};
+    const auto snapshot{lookup(snapshot_index)};
+    BOOST_REQUIRE(snapshot);
+    BOOST_CHECK(!BuildFrozenQuorumRoster(genesis, config, descriptor.epoch,
+        descriptor.base_hash, bundle.seeds.back(), snapshot->deterministic_mns,
+        *snapshot->operator_key_states, &error));
+    BOOST_CHECK(error == QuorumBuildError::MISSING_BRANCH_ANCESTOR);
+    const auto standalone{BuildFrozenQuorumRoster(genesis, config, descriptor.epoch,
+        descriptor.base_hash, bundle.seeds.back(), snapshot->deterministic_mns,
+        *snapshot->operator_key_states, &error, &snapshot_index)};
+    BOOST_REQUIRE(standalone);
+    BOOST_CHECK(standalone->descriptor == descriptor);
+    IndexChain sibling(snapshot_index.nHeight, snapshot_index.nHeight, 18'930);
+    BOOST_CHECK(!BuildFrozenQuorumRoster(genesis, config, descriptor.epoch,
+        descriptor.base_hash, bundle.seeds.back(), snapshot->deterministic_mns,
+        *snapshot->operator_key_states, &error, &sibling.Tip()));
+    BOOST_CHECK(error == QuorumBuildError::SNAPSHOT_MISMATCH);
+
+    const auto normal_source{bundle.recovery_authority_source};
+    BOOST_REQUIRE(normal_source.kind == RecoveryRosterSourceKind::NORMAL_BEACON);
+    const auto source_usable{cache->EvaluateNormalRecoverySource(normal_source, chain.Tip(), &error)};
+    BOOST_REQUIRE(source_usable);
+    BOOST_REQUIRE(*source_usable);
+    const auto normal_capsule{cache->GetOrCaptureRecoveryUniverse(normal_source, chain.Tip(), &error)};
+    BOOST_REQUIRE_MESSAGE(normal_capsule, "quorum build error=" << static_cast<int>(error));
+    BOOST_CHECK_EQUAL(normal_capsule->Members().size(), QUORUM_SIZE);
+    for (const auto& member : normal_capsule->Members()) {
+        BOOST_CHECK(available.contains(member.pro_tx_hash));
+    }
+    const auto grace_bundle{RecoveryBeaconBundleAtHeight(*grace_target, normal_source)};
+    const auto grace{cache->GetVerifiedActive(*grace_target, chain.Tip(), grace_bundle, &error)};
+    BOOST_REQUIRE_MESSAGE(grace, "quorum build error=" << static_cast<int>(error));
+    const auto raw_grace{BuildActiveFrozenQuorumRosters(
+        genesis, config, *grace_target, chain.Tip(), grace_bundle, lookup, &error)};
+    BOOST_REQUIRE(raw_grace);
+    BOOST_CHECK(SameRosterSet(grace->Rosters(), *raw_grace));
+    const auto decoded_normal{RecoveryUniverseCapsule::DecodeTrustedPersistence(
+        normal_capsule->Encode(), &error)};
+    BOOST_REQUIRE(decoded_normal);
+    const auto restored_normal{std::make_shared<const RecoveryUniverseCapsule>(*decoded_normal)};
+    const auto grace_restart{FrozenQuorumRosterCache::Create(genesis, config, lookup, true,
+        [restored_normal](const uint256& id) {
+            return id == restored_normal->SourceId()
+                ? restored_normal : RecoveryUniverseCapsulePtr{};
+        })};
+    BOOST_REQUIRE(grace_restart);
+    const auto cold_grace{grace_restart->GetVerifiedActive(
+        *grace_target, chain.Tip(), grace_bundle, &error)};
+    BOOST_REQUIRE(cold_grace);
+    BOOST_CHECK(SameRosterSet(grace->Rosters(), cold_grace->Rosters()));
+    for (const auto& roster : grace->Rosters()) {
+        BOOST_CHECK_EQUAL(roster.descriptor.valid_count, QUORUM_SIZE);
+        for (const auto& member : roster.members) {
+            BOOST_CHECK(available.contains(member.pro_tx_hash));
+        }
+    }
+
+    for (const auto readiness : {OldReadinessCase::MISSING, OldReadinessCase::STALE,
+                                 OldReadinessCase::WRONG_BRANCH, OldReadinessCase::LATE,
+                                 OldReadinessCase::KEY_ROTATED, OldReadinessCase::VALID,
+                                 OldReadinessCase::KEY_RENEWED}) {
+        BOOST_TEST_CONTEXT("normal admission readiness=" << static_cast<int>(readiness)) {
+            old_readiness = readiness;
+            const auto independently_built{BuildActiveFrozenQuorumRosters(
+                genesis, config, last_target, chain.At(last_target), bundle, lookup, &error)};
+            BOOST_REQUIRE_MESSAGE(independently_built, "quorum build error=" << static_cast<int>(error));
+            const auto admitted{std::count_if(
+                independently_built->back().members.begin(), independently_built->back().members.end(),
+                [&](const FrozenQuorumMember& member) {
+                    return !available.contains(member.pro_tx_hash);
+                })};
+            const bool renewed{readiness == OldReadinessCase::VALID ||
+                               readiness == OldReadinessCase::KEY_RENEWED};
+            if (renewed) {
+                BOOST_CHECK_GT(admitted, 0);
+            } else {
+                BOOST_CHECK_EQUAL(admitted, 0);
+            }
+            const auto independent_capsule{BuildRecoveryUniverseCapsule(
+                genesis, config, normal_source, chain.Tip(), lookup, &error)};
+            BOOST_REQUIRE_MESSAGE(independent_capsule, "quorum build error=" << static_cast<int>(error));
+            BOOST_CHECK_EQUAL(independent_capsule->Members().size(),
+                              renewed ? ALL_MEMBERS : QUORUM_SIZE);
+        }
+    }
+    old_readiness = OldReadinessCase::WRONG_KEY_VERSION;
+    BOOST_CHECK(!BuildActiveFrozenQuorumRosters(
+        genesis, config, last_target, chain.At(last_target), bundle, lookup, &error));
+    BOOST_CHECK(error == QuorumBuildError::INVALID_OPERATOR_STATE);
+}
+
 BOOST_AUTO_TEST_CASE(base_hash_cannot_grind_fixed_snapshot_and_beacon)
 {
     const uint256 genesis{NonNullHash(1)};

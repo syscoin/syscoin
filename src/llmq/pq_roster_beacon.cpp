@@ -163,10 +163,12 @@ bool IsStillActiveReadySeed(
                ROSTER_BEACON_MIN_FUTURE_CONFIRMATIONS;
 }
 
-RosterBeaconSeed EmptyNormalSeed(uint32_t epoch) noexcept
+RosterBeaconSeed EmptyNormalSeed(
+    uint32_t epoch, uint32_t readiness_group_floor_plus_one) noexcept
 {
     RosterBeaconSeed seed;
     seed.epoch = epoch;
+    seed.readiness_group_floor_plus_one = readiness_group_floor_plus_one;
     return seed;
 }
 
@@ -180,6 +182,8 @@ bool IsExactRosterBeaconObservation(const RosterBeaconSeed& empty,
            pending.state == RosterBeaconState::PENDING &&
            empty.version == pending.version &&
            empty.anchor_kind == pending.anchor_kind &&
+           empty.readiness_group_floor_plus_one ==
+               pending.readiness_group_floor_plus_one &&
            empty.epoch == pending.epoch;
 }
 
@@ -191,6 +195,8 @@ bool IsExactRosterBeaconReveal(const RosterBeaconSeed& pending,
            pending.version == ready.version &&
            pending.anchor_kind == ready.anchor_kind &&
            pending.epoch == ready.epoch &&
+           pending.readiness_group_floor_plus_one ==
+               ready.readiness_group_floor_plus_one &&
            pending.anchor_cursor == ready.anchor_cursor &&
            pending.anchor_btc_height == ready.anchor_btc_height;
 }
@@ -284,7 +290,8 @@ DeriveNormalRosterAuthorizationDecision(
                 input.previous.window.active.seeds[slot + 1];
         }
         new_window.active.seeds.back() = consumed;
-        new_window.next = EmptyNormalSeed(input.newest_epoch + 1);
+        new_window.next = EmptyNormalSeed(
+            input.newest_epoch + 1, consumed.readiness_group_floor_plus_one);
         kind = RosterAuthorizationTransitionKind::ROTATE;
     } else if (input.pending_reveal) {
         if (input.ready_rotation) return std::nullopt;
@@ -423,6 +430,7 @@ std::optional<RosterBeaconSeed> MakeRecoveryRosterBeaconSeed(
         if (epoch / ACTIVE_QUORUMS < source.refresh.group) return std::nullopt;
         RosterBeaconSeed seed;
         seed.epoch = epoch;
+        seed.readiness_group_floor_plus_one = source.refresh.group + 1;
         seed.anchor_kind = RosterBeaconAnchorKind::POW_RECOVERY;
         seed.state = RosterBeaconState::READY;
         seed.recovery_entropy_hash = source.refresh.seed;
@@ -431,7 +439,7 @@ std::optional<RosterBeaconSeed> MakeRecoveryRosterBeaconSeed(
     auto seed{source.normal_beacon};
     seed.anchor_kind = RosterBeaconAnchorKind::RECOVERY;
     seed.epoch = epoch;
-    return seed;
+    return seed.IsReady() ? std::optional<RosterBeaconSeed>{seed} : std::nullopt;
 }
 
 std::optional<RosterBeaconWindow> MakeRecoveryRosterBeaconWindow(
@@ -454,7 +462,9 @@ std::optional<RosterBeaconWindow> MakeRecoveryRosterBeaconWindow(
         if (!seed) return std::nullopt;
         window.active.seeds[slot] = *seed;
     }
-    window.next = EmptyNormalSeed(newest_epoch + 1);
+    window.next = EmptyNormalSeed(
+        newest_epoch + 1,
+        window.active.seeds.back().readiness_group_floor_plus_one);
     return IsRecoveryRosterBeaconWindow(window)
         ? std::optional<RosterBeaconWindow>{std::move(window)}
         : std::nullopt;
@@ -464,6 +474,7 @@ bool IsInitialNormalRosterBeaconWindow(
     const RosterBeaconWindow& window) noexcept
 {
     if (!window.IsStructurallyValid() ||
+        window.active.seeds.front().readiness_group_floor_plus_one != 0 ||
         window.active.seeds.back().epoch % ACTIVE_QUORUMS !=
             ACTIVE_QUORUMS - 1 ||
         window.active.recovery_authority_source.IsNull() ||
@@ -528,6 +539,8 @@ bool RosterAuthorizationTransition::IsStructurallyValid() const noexcept
     if (kind == RosterAuthorizationTransitionKind::RECOVER) {
         return !authorization_base.IsNull() && previous &&
                previous->IsStructurallyValid() &&
+               new_window.active.seeds.front().readiness_group_floor_plus_one >=
+                   previous->window.active.seeds.front().readiness_group_floor_plus_one &&
                IsRecoveryRosterBeaconWindow(new_window);
     }
     if (authorization_base.IsNull()) return false;

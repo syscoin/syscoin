@@ -143,7 +143,7 @@ struct PaymentAuditResponse {
                            const PaymentAuditResponse&) = default;
 };
 
-static_assert(PaymentAuditResponse::WIRE_SIZE == 3'054);
+static_assert(PaymentAuditResponse::WIRE_SIZE == 3'078);
 
 struct PaymentAuditScheduleConfig {
     ChainLockScheduleConfig chainlock;
@@ -374,7 +374,7 @@ struct PaymentAuditStatement {
                            const PaymentAuditStatement&) = default;
 };
 
-static_assert(PaymentAuditStatement::WIRE_SIZE == 2'046);
+static_assert(PaymentAuditStatement::WIRE_SIZE == 2'070);
 
 struct PaymentAuditShareTranscript {
     static constexpr std::size_t WIRE_SIZE{
@@ -404,7 +404,7 @@ struct PaymentAuditShareTranscript {
                            const PaymentAuditShareTranscript&) = default;
 };
 
-static_assert(PaymentAuditShareTranscript::WIRE_SIZE == 2'166);
+static_assert(PaymentAuditShareTranscript::WIRE_SIZE == 2'190);
 
 struct PaymentAuditShare {
     static constexpr std::size_t WIRE_SIZE{
@@ -429,7 +429,7 @@ struct PaymentAuditShare {
                            const PaymentAuditShare&) = default;
 };
 
-static_assert(PaymentAuditShare::WIRE_SIZE == 3'414);
+static_assert(PaymentAuditShare::WIRE_SIZE == 3'438);
 
 /** One signer-bound report, aligned with signer_bitmaps canonical order. */
 struct PaymentAuditReportWitness {
@@ -502,7 +502,7 @@ struct FinalPaymentAudit {
                            const FinalPaymentAudit&) = default;
 };
 
-static_assert(FinalPaymentAudit::WIRE_SIZE == 1'041'947);
+static_assert(FinalPaymentAudit::WIRE_SIZE == 1'041'971);
 static_assert(FinalPaymentAudit::WIRE_SIZE <
               MAX_PAYMENT_AUDIT_CERTIFICATE_SIZE);
 
@@ -547,7 +547,7 @@ struct PaymentAuditReceipt {
                            const PaymentAuditReceipt&) = default;
 };
 
-static_assert(PaymentAuditReceipt::WIRE_SIZE == 401);
+static_assert(PaymentAuditReceipt::WIRE_SIZE == 405);
 
 /** Deterministic classification derived only from the exact 801 reports. */
 struct PaymentAuditClassification {

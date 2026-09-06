@@ -86,7 +86,7 @@ struct RosterRecoveryPrecommit {
                            const RosterRecoveryPrecommit&) = default;
 };
 
-static_assert(RosterRecoveryPrecommit::WIRE_SIZE == 146);
+static_assert(RosterRecoveryPrecommit::WIRE_SIZE == 150);
 
 /**
  * Crash-durable bounds for one deferred BTCC/NEVM replay obligation.

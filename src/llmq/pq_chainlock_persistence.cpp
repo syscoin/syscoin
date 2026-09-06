@@ -1063,10 +1063,10 @@ static_assert(DiskRecord::MAX_WIRE_SIZE < MAX_SIZE);
 static_assert(DiskRecoveryUniverse::MAX_WIRE_SIZE < MAX_SIZE);
 static_assert(RECOVERY_UNIVERSE_DURABLE_OWNER_CAPACITY ==
               VERIFIED_AUTHORIZATION_BASE_CAPACITY + 6);
-static_assert(DiskRosterRecoveryPrecommit::WIRE_SIZE == 212);
+static_assert(DiskRosterRecoveryPrecommit::WIRE_SIZE == 216);
 static_assert(DiskReceiptArchiveRosterAuthorization::WIRE_SIZE < MAX_SIZE);
 static_assert(DiskBTCCPresealMarker::WIRE_SIZE == 500);
-static_assert(DiskPaymentAuditPresealMarker::WIRE_SIZE == 715);
+static_assert(DiskPaymentAuditPresealMarker::WIRE_SIZE == 719);
 
 bool IsValidBTCCPresealMarker(
     const ChainLockFinalityStoreConfig& config,
