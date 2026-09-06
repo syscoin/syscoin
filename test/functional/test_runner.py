@@ -81,6 +81,7 @@ TEST_FRAMEWORK_MODULES = [
     "ripemd160",
     "script",
     "segwit_addr",
+    "test_dash_mining",
 ]
 
 EXTENDED_SCRIPTS = [

@@ -23,6 +23,10 @@ import copy
 from typing import List
 from .address import create_deterministic_address_bcrt1_p2tr_op_true
 from .authproxy import JSONRPCException
+from .auxpow_testing import (
+    createAuxBlockWithBTCPREVIfRequired,
+    mineAuxpowBlockWithMethods,
+)
 from test_framework.masternodes import check_banned, check_punished
 from . import coverage
 from .p2p import NetworkThread
@@ -1067,6 +1071,46 @@ class DashTestFramework(SyscoinTestFramework):
     # Generic MN/governance tests do not exercise non-null BTCC receipts, but
     # complete activation geometry still starts the canonical candidate here.
     PQ_BTCC_CANDIDATE_ORIGIN = 2305
+    PQ_BTCC_CANDIDATE_PERIOD = 10
+
+    def generate(self, generator, nblocks, *, sync_fun=None):
+        return self.generatetoaddress(
+            generator, nblocks, generator.get_deterministic_priv_key().address,
+            sync_fun=sync_fun)
+
+    def generatetoaddress(self, generator, nblocks, address, *, sync_fun=None):
+        """Mine fixture blocks; RPC argument/nonce-budget tests use the node RPC."""
+        # Restart overrides need not update TestNode.extra_args. The launched
+        # arguments contain the schedule actually installed by this framework.
+        origin = next((
+            int(arg.split("=", 1)[1]) for arg in reversed(generator.process.args)
+            if arg.startswith("-pqbtcccandidateorigin=")), None)
+        period = self.PQ_BTCC_CANDIDATE_PERIOD
+        if (origin is None or not 0 <= origin <= 2**31 - 1 - period or
+                nblocks <= 0):
+            return super().generatetoaddress(
+                generator, nblocks, address, sync_fun=sync_fun)
+
+        blocks = []
+        while len(blocks) < nblocks:
+            height = generator.getblockcount() + 1
+            candidate_height = origin + max(
+                0, (height - origin + period - 1) // period) * period
+            ordinary_count = min(nblocks - len(blocks), candidate_height - height)
+            if ordinary_count:
+                # Never let a normal RPC batch cross a candidate: it can mine
+                # a prefix before failing and lose the caller's block hashes.
+                mined = generator.generatetoaddress(
+                    ordinary_count, address, invalid_call=False)
+                blocks.extend(mined)
+                if len(mined) != ordinary_count:
+                    break
+            else:
+                blocks.append(mineAuxpowBlockWithMethods(
+                    lambda: createAuxBlockWithBTCPREVIfRequired(generator, address),
+                    generator.submitauxblock))
+        sync_fun() if sync_fun else self.sync_all()
+        return blocks
 
     def add_wallet_options(self, parser, *, descriptors=True, legacy=True):
         # Dash/MN functional tests are descriptor-only.

@@ -13,8 +13,11 @@ GOVERNANCE_PROPAGATION_TIMEOUT = 60
 
 class SyscoinGovernanceTest (DashTestFramework):
     def set_test_params(self):
-        # using adjusted v20 deployment params to test an edge case where superblock maturity window is equal to deployment window size
-        self.set_dash_test_params(6, 5, fast_dip3_enforcement=True)
+        # PQ preparation crosses regtest's default NEVM activation. Keep this
+        # fixture's 25-block governance cadence and original adaptive budget.
+        self.set_dash_test_params(
+            6, 5, extra_args=[["-nevmstartheight=10000"] for _ in range(6)],
+            fast_dip3_enforcement=True)
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()
@@ -134,7 +137,9 @@ class SyscoinGovernanceTest (DashTestFramework):
         assert_equal(governance_info['proposalfee'], 150.0)
         assert_equal(governance_info['superblockcycle'], 25)
         assert_equal(governance_info['superblockmaturitywindow'], 5)
-        assert_equal(governance_info['lastsuperblock'], 125)
+        initial_height = self.nodes[0].getblockcount()
+        assert_equal(governance_info['lastsuperblock'],
+                     initial_height - initial_height % governance_info['superblockcycle'])
         assert_equal(governance_info['nextsuperblock'], governance_info['lastsuperblock'] + governance_info['superblockcycle'])
         assert_equal(governance_info['governancebudget'], self.budget)
 
@@ -163,10 +168,13 @@ class SyscoinGovernanceTest (DashTestFramework):
 
         assert_equal(len(self.nodes[0].gobject_list_prepared()), 0)
 
-        # PQ operator registration adds setup blocks that legacy governance
-        # did not need. Align to the intended proposal schedule explicitly
-        # instead of assuming setup always ends three blocks before it.
+        # PQ activation can finish after this cycle's proposal slot. The next
+        # cycle+5 slot leaves room for collateral confirmation and the isolated
+        # trigger race before the same cycle's maturity window.
         proposal_setup_height = governance_info['lastsuperblock'] + 5
+        if proposal_setup_height < initial_height:
+            proposal_setup_height += sb_cycle
+        first_superblock_height = proposal_setup_height - 5 + sb_cycle
         setup_blocks = proposal_setup_height - self.nodes[0].getblockcount()
         assert setup_blocks >= 0
         if setup_blocks:
@@ -292,7 +300,8 @@ class SyscoinGovernanceTest (DashTestFramework):
 
         # Move until 1 block before the Superblock maturity window starts
         n = sb_immaturity_window - block_count % sb_cycle
-        assert block_count + n < 150
+        assert_equal(block_count + n, first_superblock_height - sb_maturity_window)
+        assert n > 0
         for _ in range(n - 1):
             self.generate(self.nodes[0], 1)
             self.bump_mocktime(1)
@@ -359,7 +368,7 @@ class SyscoinGovernanceTest (DashTestFramework):
         self.bump_mocktime(1)
         self.generate(self.nodes[0], 1, sync_fun=self.no_op)
         self.sync_all(nodes=non_isolated_nodes)
-        assert_equal(self.nodes[0].getblockcount(), 145)
+        assert_equal(self.nodes[0].getblockcount(), first_superblock_height - sb_maturity_window)
 
         # The "winner" should submit new trigger and vote for it, but payee which is same as last is isolated so non-isolated nodes will not be in payee list
         has_trigger = wait_until_helper_internal(lambda: len(self.nodes[0].gobject_list("valid", "triggers")) >= 1, timeout=5, do_assert=False)
@@ -487,6 +496,7 @@ class SyscoinGovernanceTest (DashTestFramework):
             self.bump_mocktime(1)
             self.sync_blocks()
 
+        assert_equal(self.nodes[0].getblockcount(), first_superblock_height)
         self.check_superblock()
         self.check_superblockbudget()
 
@@ -516,7 +526,7 @@ class SyscoinGovernanceTest (DashTestFramework):
         n = sb_height - block_count
         if n > 0:
             self.generate_synced_blocks(n)
-        assert_equal(self.nodes[0].getblockcount(), 175)
+        assert_equal(self.nodes[0].getblockcount(), first_superblock_height + sb_cycle)
         self.check_superblock()
         self.check_superblockbudget()
         # Mine and check a couple more superblocks
