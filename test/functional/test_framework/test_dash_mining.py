@@ -2,7 +2,7 @@
 # Copyright (c) 2026 The Syscoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
-"""Exercise shared Dash mining without an expensive masternode deployment."""
+"""Exercise shared fixture mining without an expensive masternode deployment."""
 
 from types import SimpleNamespace
 import unittest
@@ -28,6 +28,11 @@ class RecordingMiningNode:
 
     def get_deterministic_priv_key(self):
         return SimpleNamespace(address="deterministic-mining-address")
+
+    def generate(self, nblocks, *, invalid_call):
+        return self.generatetoaddress(
+            nblocks, self.get_deterministic_priv_key().address,
+            invalid_call=invalid_call)
 
     def generatetoaddress(self, nblocks, address, *, invalid_call):
         assert invalid_call is False
@@ -123,6 +128,25 @@ class TestDashMining(unittest.TestCase):
             ("ordinary", 6, 9), ("auxpow", 15, 1), ("ordinary", 16, 1),
         ])
         self.framework.sync_all.assert_called_once_with()
+
+    def test_deterministic_masternode_fixture_mines_activation_and_later_candidates(self):
+        # Check the actual independent fixture's wiring: testing Dash alone
+        # cannot detect a consumer still using the generic direct-mining path.
+        from feature_deterministicmns import DIP3Test
+
+        framework = object.__new__(DIP3Test)
+        framework.sync_all = Mock()
+        node = RecordingMiningNode(
+            args=["-pqbtcccandidateorigin=2305"],
+            candidates=[2305, 2315], height=2304)
+        hashes = framework.generate(node, 12)
+        self.assert_hashes_and_payouts(
+            node, hashes, 2305, 12, node.get_deterministic_priv_key().address)
+        self.assertEqual([(kind, height, count) for kind, height, count, _ in node.calls], [
+            ("auxpow", 2305, 1), ("ordinary", 2306, 9),
+            ("auxpow", 2315, 1), ("ordinary", 2316, 1),
+        ])
+        framework.sync_all.assert_called_once_with()
 
     def test_no_op_sync_and_origin_zero_skip_genesis(self):
         node = RecordingMiningNode(

@@ -1066,11 +1066,9 @@ class MasternodeInfo:
         self.operatorPayoutAddress = operatorPayoutAddress
 
 
-class DashTestFramework(SyscoinTestFramework):
-    PQ_ACTIVATION_PREDECESSOR_HEIGHT = 2304
-    # Generic MN/governance tests do not exercise non-null BTCC receipts, but
-    # complete activation geometry still starts the canonical candidate here.
-    PQ_BTCC_CANDIDATE_ORIGIN = 2305
+class AuxPoWMiningMixin:
+    """Opt fixture mining into scheduled AuxPoW without changing its lifecycle."""
+
     PQ_BTCC_CANDIDATE_PERIOD = 10
 
     def generate(self, generator, nblocks, *, sync_fun=None):
@@ -1111,6 +1109,13 @@ class DashTestFramework(SyscoinTestFramework):
                     generator.submitauxblock))
         sync_fun() if sync_fun else self.sync_all()
         return blocks
+
+
+class DashTestFramework(AuxPoWMiningMixin, SyscoinTestFramework):
+    PQ_ACTIVATION_PREDECESSOR_HEIGHT = 2304
+    # Generic MN/governance tests do not exercise non-null BTCC receipts, but
+    # complete activation geometry still starts the canonical candidate here.
+    PQ_BTCC_CANDIDATE_ORIGIN = 2305
 
     def add_wallet_options(self, parser, *, descriptors=True, legacy=True):
         # Dash/MN functional tests are descriptor-only.

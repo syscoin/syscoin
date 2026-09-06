@@ -8,12 +8,14 @@
 #
 from test_framework.blocktools import create_block, create_coinbase, get_masternode_payment, add_witness_commitment
 from test_framework.messages import CTransaction, from_hex, COIN, CTxOut
-from test_framework.test_framework import SyscoinTestFramework
+from test_framework.test_framework import AuxPoWMiningMixin, SyscoinTestFramework
 from test_framework.util import p2p_port, Decimal, force_finish_mnsync, assert_equal, get_rpc_proxy, MAX_INITIAL_BROADCAST_DELAY
 class Masternode(object):
     pass
 
-class DIP3Test(SyscoinTestFramework):
+class DIP3Test(AuxPoWMiningMixin, SyscoinTestFramework):
+    PQ_BTCC_CANDIDATE_ORIGIN = 2305
+
     def add_options(self, parser):
         # This test is descriptor-only; do not expose legacy wallet mode.
         self.add_wallet_options(parser, descriptors=True, legacy=False)
@@ -170,6 +172,10 @@ class DIP3Test(SyscoinTestFramework):
 
         # SYSCOIN BEGIN: Preserve the root-bearing MN across spend and reorg coverage.
         self.log.info("test that MNs disappear from the list when the ProTx collateral is spent")
+        # The custom double-spend block will extend this exact tip after the
+        # spends are disconnected. Align before creating them so no automatic
+        # mining can consume resurrected spends during the reorg scenario.
+        self.mine_scheduled_candidate()
         spend_mns_count = 3
         # Keep the one root-bearing payment MN available after activation;
         # the list-only records intentionally remain payment-ineligible.
@@ -197,6 +203,7 @@ class DIP3Test(SyscoinTestFramework):
 
         self.log.info("test mn payment enforcement with deterministic MNs")
         for i in range(20):
+            self.mine_scheduled_candidate()
             node = self.nodes[i % len(self.nodes)]
             self.test_invalid_mn_payment(node)
             self.generate(self.nodes[0], 1)
@@ -234,6 +241,7 @@ class DIP3Test(SyscoinTestFramework):
         self.update_mn_payee(payment_mn, multisig)
         found_multisig_payee = False
         for i in range(len(mns)):
+            self.mine_scheduled_candidate()
             bt = self.nodes[0].getblocktemplate({'rules': ['segwit']})
             expected_payee = bt['masternode'][0]['payee']
             expected_amount = bt['masternode'][0]['amount']
@@ -361,7 +369,7 @@ class DIP3Test(SyscoinTestFramework):
         self.generate(node, 1, sync_fun=self.no_op)
 
     def activate_pq_profile(self):
-        predecessor_height = 2304
+        predecessor_height = self.PQ_BTCC_CANDIDATE_ORIGIN - 1
         assert self.nodes[0].getblockcount() <= predecessor_height
         self.generatetoaddress(
             self.nodes[0],
@@ -485,9 +493,22 @@ class DIP3Test(SyscoinTestFramework):
         self.nodes[0].sendrawtransaction(rawtx)
         return dummy_txin
 
+    def is_btcp_candidate(self, height):
+        return (height >= self.PQ_BTCC_CANDIDATE_ORIGIN and
+                (height - self.PQ_BTCC_CANDIDATE_ORIGIN) % self.PQ_BTCC_CANDIDATE_PERIOD == 0)
+
+    def mine_scheduled_candidate(self):
+        # getblocktemplate produces ordinary block templates. Mine required
+        # AuxPoW blocks before starting scenarios that craft or inspect one.
+        if self.is_btcp_candidate(self.nodes[0].getblockcount() + 1):
+            self.generate(self.nodes[0], 1)
+
     def mine_block(self, node, vtx=None, mn_payee=None, mn_amount=None, use_mnmerkleroot_from_tip=False, expected_error=None):
         if vtx is None:
             vtx = []
+        # Never advance the chain here: the caller may have prepared a
+        # conflicting transaction against the current, rewound UTXO set.
+        assert not self.is_btcp_candidate(node.getblockcount() + 1)
         bt = node.getblocktemplate({'rules': ['segwit']})
         height = bt['height']
         tip_hash = bt['previousblockhash']
