@@ -3786,7 +3786,7 @@ bool CChainLocksHandler::IsPersistedChainLockPending() const
            m_persisted_invalid;
 }
 
-bool CChainLocksHandler::HasPendingPQHistoryAuthentication() const
+bool CChainLocksHandler::HasPendingPQHistoryAuthentication(bool allow_historical_prefix) const
 {
     AssertLockHeld(cs_main);
     if (!m_config) return false;
@@ -3886,7 +3886,7 @@ bool CChainLocksHandler::HasPendingPQHistoryAuthentication() const
         if (!marker) return false;
         const CBlockIndex* terminal{terminal_on_active(marker)};
         if (terminal == nullptr) return true;
-        if (IsPoWHistoricalPrefixCovered(*terminal)) return false;
+        if (allow_historical_prefix && IsPoWHistoricalPrefixCovered(*terminal)) return false;
         return !IsBTCCPrefixAuthenticated(*terminal) &&
                CheckBTCCReceiptCertificate(marker->terminal_receipt,
                                            *terminal) !=
@@ -3897,7 +3897,7 @@ bool CChainLocksHandler::HasPendingPQHistoryAuthentication() const
         if (!marker) return false;
         const CBlockIndex* terminal{terminal_on_active(marker)};
         return terminal == nullptr ||
-               (!IsPoWHistoricalPrefixCovered(*terminal) &&
+               (!(allow_historical_prefix && IsPoWHistoricalPrefixCovered(*terminal)) &&
                 !IsPaymentAuditPrefixAuthenticated(*terminal));
     };
     return btcc_unresolved(btcc.active) ||
@@ -8244,6 +8244,47 @@ bool CChainLocksHandler::IsHistoricalSyncRetentionMutationReady(
         !(winner->nStatus & BLOCK_FAILED_MASK);
 }
 
+bool CChainLocksHandler::IsHistoricalSyncBootstrapCovered(
+    const pq::HistoricalSyncBoundary& boundary,
+    const pq::FinalChainLockRecordMetadata* accepted,
+    const pq::FinalChainLockRecordMetadata* durable, const CChain& active_chain)
+{
+    AssertLockHeld(cs_main);
+    if (!boundary.IsStructurallyValid() || !durable ||
+        durable->statement.height < boundary.coverage_height ||
+        !IsHistoricalSyncRetentionMutationReady(accepted, durable, active_chain)) return false;
+    const auto& statement{durable->statement};
+    const CBlockIndex* winner{active_chain[statement.height]};
+    const CBlockIndex* carrier{active_chain[boundary.carrier_height]};
+    const CBlockIndex* end{active_chain[boundary.coverage_height]};
+    const CBlockIndex* base{active_chain[boundary.receipt.chainlock_target_height]};
+    const auto fully_valid = [](const CBlockIndex* index)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+        return index && !index->IsAssumedValid() && index->IsValid(BLOCK_VALID_SCRIPTS) &&
+            !(index->nStatus & BLOCK_CONFLICT_CHAINLOCK) && HasFullReceiptIndexProvenance(*index);
+    };
+    if (!fully_valid(winner) || !fully_valid(carrier) || !fully_valid(end) ||
+        !fully_valid(base) || base->GetBlockHash() != boundary.receipt.chainlock_target_hash ||
+        carrier->GetBlockHash() != boundary.carrier_hash ||
+        carrier->pqBTCCReceiptLogicalId != boundary.receipt.chainlock_logical_id ||
+        end->GetBlockHash() != boundary.coverage_hash) return false;
+    if (!boundary.durable_prior.IsNull()) {
+        const CBlockIndex* prior{active_chain[boundary.durable_prior.height]};
+        if (!prior || prior->nHeight > winner->nHeight ||
+            prior->GetBlockHash() != boundary.durable_prior.block_hash) return false;
+    }
+    const auto end_receipts{IndexedBTCCReceiptState(*end)};
+    const auto end_audit{IndexedPaymentAuditReceiptState(*end)};
+    const auto winner_receipts{IndexedBTCCReceiptState(*winner)};
+    const auto winner_audit{IndexedPaymentAuditReceiptState(*winner)};
+    return end_receipts && *end_receipts == boundary.receipt_state &&
+        end_audit && *end_audit == boundary.payment_audit_state &&
+        end->pqPaymentProbationStateHash == boundary.probation_state_hash &&
+        winner_receipts && *winner_receipts == statement.btcc_receipt_state &&
+        winner_audit && *winner_audit == statement.payment_audit_receipt_state &&
+        winner->pqPaymentProbationStateHash == statement.payment_probation_state_hash;
+}
+
 void CChainLocksHandler::MaintainHistoricalSyncRetention()
 {
     if (!m_config || !m_store || !m_persistence ||
@@ -8301,6 +8342,18 @@ void CChainLocksHandler::MaintainHistoricalSyncRetention()
         retained = m_persistence->LoadHistoricalSyncBoundaries(&revision);
         if (const auto bootstrap{m_persistence->LoadHistoricalSyncBootstrap()}) {
             const auto& boundary{bootstrap->boundary};
+            const auto base_is_independent = [&]() EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+                if (durable && durable->statement.btcc_receipt_state.latest_chainlock_target_height >
+                        boundary.receipt.chainlock_target_height) return true;
+                const auto ordinary{m_store->GetVerifiedRosterAuthorizationBaseByLogicalId(
+                    boundary.receipt.chainlock_logical_id)};
+                if (ordinary && ordinary->verification_context &&
+                    ordinary->verification_context->Authorization().admission != pq::RosterAuthorizationAdmission::POW_HISTORY &&
+                    ordinary->metadata.statement == bootstrap->record.ChainLock().statement) return true;
+                return std::any_of(retained.begin(), retained.end(), [&](const auto& serving) {
+                    return serving.record.ChainLock().statement == bootstrap->record.ChainLock().statement;
+                });
+            };
             const CBlockIndex* carrier{tip->GetAncestor(boundary.carrier_height)};
             const CBlockIndex* end{tip->GetAncestor(boundary.coverage_height)};
             if (!carrier || !end || carrier->GetBlockHash() != boundary.carrier_hash ||
@@ -8320,6 +8373,42 @@ void CChainLocksHandler::MaintainHistoricalSyncRetention()
                 }
                 (void)m_persistence->LoadHistoricalSyncBoundaries(&revision);
                 UpdateDurableChainLockAuxiliaryRetention();
+            } else if (IsHistoricalSyncBootstrapCovered(boundary,
+                           accepted ? &accepted->metadata : nullptr,
+                           durable ? &*durable : nullptr, m_chainman.ActiveChain()) &&
+                       base_is_independent() &&
+                       !HasPendingPQHistoryAuthentication(/*allow_historical_prefix=*/false)) {
+                // C may advance normally when B was already durable. Keep E
+                // until asynchronous payment checkpoint publication makes
+                // every remaining replay marker independent of this prefix.
+                const auto publication{BeginChainLockAuxiliarySnapshotPublication()};
+                if (!publication) return false;
+                pq::ChainLockPersistenceError error{pq::ChainLockPersistenceError::NONE};
+                const bool retired{m_persistence->RetireCoveredHistoricalSyncBootstrap(
+                    bootstrap->record.RecordIdentity(), revision, *durable, &error)};
+                if (!CompleteChainLockAuxiliarySnapshotPublication(*publication)) return false;
+                if (error == pq::ChainLockPersistenceError::IO_FAILURE) {
+                    m_persistence_failed.store(true);
+                    DisableShareAdmission();
+                    return false;
+                }
+                if (retired) {
+                    if (m_historical_sync && m_historical_sync->record_identity ==
+                            bootstrap->record.RecordIdentity()) {
+                        m_historical_sync.reset();
+                    }
+                    if (m_historical_sync_requested == boundary.receipt.chainlock_logical_id) {
+                        m_historical_sync_requested.SetNull();
+                        m_historical_sync_last_request = std::chrono::microseconds{0};
+                    }
+                    retained = m_persistence->LoadHistoricalSyncBoundaries(&revision);
+                    cache_records();
+                    LogPrint(BCLog::CHAINLOCKS,
+                             "CChainLocksHandler::%s retired covered historical bootstrap "
+                             "B=%d E=%d with durable D=%d\n", __func__,
+                             boundary.receipt.chainlock_target_height, boundary.coverage_height,
+                             durable->statement.height);
+                }
             }
         }
         if (!accepted || !durable || accepted->metadata != *durable) return true;

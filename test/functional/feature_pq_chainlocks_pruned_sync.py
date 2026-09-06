@@ -803,6 +803,16 @@ class PQPrunedSyncTest(PQChainLocksTest):
         self.submit_expected_certificate(
             returning, recovery, OUTAGE_RECOVERY_TARGET, "equal-base-recovery-valid", 0xc920)
         self.assert_exact_winner(returning, recovery, OUTAGE_RECOVERY_TARGET)
+        retired = "retired covered historical bootstrap B=%d E=%d with durable D=%d" % (
+            self.certificate_height(self.equal_base), coverage, OUTAGE_RECOVERY_TARGET)
+
+        def retired_without_new_finality():
+            self.tick_receivers([returning])
+            self.assert_exact_winner(returning, recovery, OUTAGE_RECOVERY_TARGET)
+            return retired in returning.debug_log_path.read_text(encoding="utf8")
+
+        self.wait_until(retired_without_new_finality, timeout=180)
+        assert not returning.getblockchaininfo()["initialblockdownload"]
         returning.disconnect_p2ps()
         self.stop_node(2)
         self.fixture_command([

@@ -3954,7 +3954,8 @@ struct PQChainLockPersistence::Impl {
             CDBBatch batch{db};
             if (!ApplyRecoveryUniverseMutation(batch, *mutation, error)) return false;
             WriteHistoricalSyncRecords(batch, next, next_bootstrap);
-            if (!db.WriteBatch(batch, /*fSync=*/true)) {
+            if (std::exchange(fail_next_historical_sync_write_for_testing, false) ||
+                !db.WriteBatch(batch, /*fSync=*/true)) {
                 failed = true;
                 SetError(error, ChainLockPersistenceError::IO_FAILURE);
                 return false;
@@ -4164,6 +4165,49 @@ struct PQChainLockPersistence::Impl {
         return WriteHistoricalSyncState(historical_sync, std::nullopt, nullptr, error);
     }
 
+    bool RetireCoveredHistoricalSyncBootstrap(
+        const uint256& record_identity, uint64_t expected_revision,
+        const FinalChainLockRecordMetadata& covering_finality,
+        ChainLockPersistenceError* error) EXCLUSIVE_LOCKS_REQUIRED(mutex)
+    {
+        SetError(error, ChainLockPersistenceError::NONE);
+        if (failed) {
+            SetError(error, ChainLockPersistenceError::IO_FAILURE);
+            return false;
+        }
+        // Best publication does not advance the historical-role revision.
+        // Bind retirement to both snapshots, including the exact witness.
+        if (!best || !MatchesMetadata(*best, covering_finality) ||
+            !historical_bootstrap ||
+            covering_finality.statement.height < historical_bootstrap->boundary.coverage_height ||
+            (covering_finality.statement.height == historical_bootstrap->boundary.coverage_height &&
+             covering_finality.statement.block_hash != historical_bootstrap->boundary.coverage_hash)) {
+            SetError(error, ChainLockPersistenceError::HEIGHT_CONFLICT);
+            return false;
+        }
+        const auto& base{historical_bootstrap->record};
+        const auto same_base = [&](const DiskRecord& retained) {
+            return retained.logical_id == base.logical_id &&
+                retained.chainlock.statement == base.chainlock.statement;
+        };
+        const auto archived{authorization_bases.find(base.logical_id)};
+        const bool independently_retained{
+            same_base(*best) || (unsealed && same_base(*unsealed)) ||
+            (archived != authorization_bases.end() && same_base(archived->second)) ||
+            std::any_of(historical_sync.begin(), historical_sync.end(), [&](const auto& retained) {
+                return retained && same_base(retained->record);
+            })};
+        // C == E can sign B's carrier before the next round selects B as its
+        // roster base. Coverage alone must not erase that sole certificate.
+        if (!independently_retained &&
+            covering_finality.statement.btcc_receipt_state.latest_chainlock_target_height <=
+                base.chainlock.statement.height) {
+            SetError(error, ChainLockPersistenceError::HEIGHT_CONFLICT);
+            return false;
+        }
+        return InvalidateHistoricalSyncBootstrap(record_identity, expected_revision, error);
+    }
+
     const uint256 genesis_hash;
     const ChainLockFinalityStoreConfig config;
     const DiskSchema schema;
@@ -4176,6 +4220,7 @@ struct PQChainLockPersistence::Impl {
     std::map<uint256, DiskRecord> authorization_bases GUARDED_BY(mutex);
     HistoricalSyncSlots historical_sync GUARDED_BY(mutex);
     std::optional<DiskHistoricalSyncBoundary> historical_bootstrap GUARDED_BY(mutex);
+    bool fail_next_historical_sync_write_for_testing GUARDED_BY(mutex){false};
     uint64_t historical_sync_revision GUARDED_BY(mutex){0};
     std::map<uint256, RecoveryUniverseCapsulePtr> recovery_universes
         GUARDED_BY(mutex);
@@ -4364,6 +4409,22 @@ bool PQChainLockPersistence::InvalidateHistoricalSyncBootstrap(
 {
     LOCK(m_impl->mutex);
     return m_impl->InvalidateHistoricalSyncBootstrap(record_identity, expected_revision, error);
+}
+
+bool PQChainLockPersistence::RetireCoveredHistoricalSyncBootstrap(
+    const uint256& record_identity, uint64_t expected_revision,
+    const FinalChainLockRecordMetadata& covering_finality,
+    ChainLockPersistenceError* error)
+{
+    LOCK(m_impl->mutex);
+    return m_impl->RetireCoveredHistoricalSyncBootstrap(
+        record_identity, expected_revision, covering_finality, error);
+}
+
+void PQChainLockPersistence::FailNextHistoricalSyncWriteForTesting()
+{
+    LOCK(m_impl->mutex);
+    m_impl->fail_next_historical_sync_write_for_testing = true;
 }
 
 bool PQChainLockPersistence::InvalidateHistoricalSyncBoundary(

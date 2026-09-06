@@ -22,6 +22,9 @@
 
 namespace llmq {
 class CChainLocksHandler;
+namespace test {
+class CChainLocksHandlerTestAccess;
+}
 }
 
 namespace llmq::pq {
@@ -659,6 +662,14 @@ private:
         const uint256& record_identity, uint64_t expected_revision,
         ChainLockPersistenceError* error = nullptr);
 
+    /** Handler proves active ancestry and independent replay authentication. */
+    [[nodiscard]] bool RetireCoveredHistoricalSyncBootstrap(
+        const uint256& record_identity, uint64_t expected_revision,
+        const FinalChainLockRecordMetadata& covering_finality,
+        ChainLockPersistenceError* error = nullptr);
+
+    void FailNextHistoricalSyncWriteForTesting();
+
     /** Handler must revoke the supporting branch capability before removal. */
     [[nodiscard]] bool InvalidateHistoricalSyncBoundary(
         const uint256& record_identity, uint64_t expected_revision,
@@ -669,6 +680,7 @@ private:
 
     friend class ::llmq::CChainLocksHandler;
     friend class HistoricalSyncBoundaryPersistenceTestAccess;
+    friend class ::llmq::test::CChainLocksHandlerTestAccess;
 };
 
 } // namespace llmq::pq

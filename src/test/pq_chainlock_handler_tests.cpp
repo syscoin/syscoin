@@ -508,15 +508,75 @@ public:
         CChainLocksHandler& handler,
         const std::optional<pq::HistoricalSyncBoundary>& boundary,
         const pq::VerifiedRosterAuthorizationBaseView& base,
-        std::optional<uint64_t> provenance_revision = std::nullopt)
+        std::optional<uint64_t> provenance_revision = std::nullopt,
+        uint256 record_identity = {})
     {
         LOCK(::cs_main);
         handler.m_historical_sync = boundary
             ? std::make_shared<const CChainLocksHandler::HistoricalSyncAuthorization>(
                   CChainLocksHandler::HistoricalSyncAuthorization{
                       *boundary, base, provenance_revision.value_or(
-                          handler.m_chainman.GetPQProvenanceRevocationRevision()), {}})
+                          handler.m_chainman.GetPQProvenanceRevocationRevision()), record_identity})
             : nullptr;
+    }
+
+    static uint256 PersistHistoricalBootstrap(
+        CChainLocksHandler& handler, const pq::FinalChainLock& base,
+        const pq::PreparedChainLockContextPtr& context,
+        const pq::HistoricalSyncBoundary& boundary)
+    {
+        uint64_t revision{0};
+        (void)handler.m_persistence->LoadHistoricalSyncBootstrap(&revision);
+        BOOST_REQUIRE(handler.m_persistence->PersistHistoricalSyncBootstrap(
+            base, context, boundary, revision, nullptr));
+        return handler.m_persistence->LoadHistoricalSyncBootstrap()->record.RecordIdentity();
+    }
+
+    static void MaintainHistoricalRetention(CChainLocksHandler& handler)
+        EXCLUSIVE_LOCKS_REQUIRED(!::cs_main)
+    {
+        handler.MaintainHistoricalSyncRetention();
+    }
+
+    static void SetHistoricalRequest(CChainLocksHandler& handler, const uint256& logical_id)
+    {
+        LOCK(::cs_main);
+        handler.m_historical_sync_requested = logical_id;
+        handler.m_historical_sync_last_request = std::chrono::microseconds{1};
+    }
+
+    static bool HasHistoricalRequest(const CChainLocksHandler& handler)
+    {
+        LOCK(::cs_main);
+        return !handler.m_historical_sync_requested.IsNull() || handler.m_historical_sync_last_request.count() != 0;
+    }
+
+    static void SetReplayMarkers(CChainLocksHandler& handler,
+                                const pq::BTCCPresealState& btcc,
+                                const pq::PaymentAuditPresealState& payment)
+    {
+        LOCK(::cs_main);
+        LOCK(handler.m_btcc_preseal_mutex);
+        BOOST_REQUIRE(handler.m_persistence->PersistBTCCPresealState(btcc));
+        BOOST_REQUIRE(handler.m_persistence->PersistPaymentAuditPresealState(payment));
+        handler.m_btcc_preseal_state = btcc;
+        handler.m_payment_audit_preseal_state = payment;
+    }
+
+    static bool PendingHistory(const CChainLocksHandler& handler, bool allow_prefix = true)
+    {
+        LOCK(::cs_main);
+        return handler.HasPendingPQHistoryAuthentication(allow_prefix);
+    }
+
+    static void RefreshHistory(CChainLocksHandler& handler)
+    {
+        handler.RefreshPQHistoryAuthState();
+    }
+
+    static pq::PaymentAuditStore& AuditStore(CChainLocksHandler& handler)
+    {
+        return *Assert(handler.m_payment_audit_store);
     }
 
     static bool HasHistoricalSyncAuthorization(const CChainLocksHandler& handler)
@@ -5361,7 +5421,7 @@ BOOST_FIXTURE_TEST_CASE(
     using namespace llmq::pq;
     constexpr int32_t BASE_HEIGHT{2'305};
     constexpr int32_t CARRIER_HEIGHT{2'315};
-    constexpr int32_t TIP_HEIGHT{2'360};
+    constexpr int32_t TIP_HEIGHT{2'840};
     const uint256 probation_root{NonNullHash(943'000)};
     auto& chainman{*Assert(m_node.chainman)};
     const uint256 genesis{chainman.GetConsensus().hashGenesisBlock};
@@ -5487,7 +5547,9 @@ BOOST_FIXTURE_TEST_CASE(
                 BOOST_REQUIRE(durable->PersistInitializedBest(
                     candidate, context, nullptr, nullptr, std::nullopt, universe));
             } else {
-                BOOST_REQUIRE(durable->PersistBest(candidate, context, nullptr, std::nullopt, universe));
+                const auto& source{candidate.statement.roster_beacons.active.recovery_authority_source};
+                BOOST_REQUIRE(durable->PersistBest(candidate, context, nullptr, std::nullopt,
+                    SelectorRecoveryUniverse(genesis, source, chain[source.normal_beacon.anchor_cursor.sys_height - 1]->GetBlockHash())));
             }
         }
     };
@@ -5497,6 +5559,22 @@ BOOST_FIXTURE_TEST_CASE(
     receipt.chainlock_target_hash = base.statement.block_hash;
     receipt.chainlock_logical_id = base.GetLogicalId(genesis);
     receipt.accepted_cursor = base.statement.accepted_btcc_cursor;
+    auto payment_receipt{NonNullPaymentAuditReceipt(1)};
+    const auto payment_schedule{BuildPaymentAuditEpochSchedule(
+        PaymentAuditScheduleConfig{config->chainlock_schedule, config->btcc_schedule}, *epoch)};
+    BOOST_REQUIRE(payment_schedule);
+    BOOST_REQUIRE_LT(payment_schedule->carrier_start_height, TIP_HEIGHT - 5);
+    payment_receipt.epoch = *epoch;
+    payment_receipt.seal_height = payment_schedule->seal_height;
+    payment_receipt.seal_block_hash = chain[payment_receipt.seal_height]->GetBlockHash();
+    payment_receipt.carrier_height = payment_schedule->carrier_start_height;
+    payment_receipt.subject_roster_beacon = SubjectBeacon(*epoch);
+    payment_receipt.next_probation_state_hash = probation_root;
+    BOOST_REQUIRE(payment_receipt.IsStructurallyValid());
+    const PaymentAuditReceiptState payment_state{
+        {payment_receipt.carrier_height, payment_receipt.epoch, payment_receipt.seal_block_hash,
+         payment_receipt.audit_logical_id, payment_receipt.audit_witness_id}, NonNullHash(945'002)};
+    BOOST_REQUIRE(payment_state.IsStructurallyValid());
     const auto stamp_receipt = [&](const BTCCReceipt& opening) {
         const auto state{ApplyBTCCReceiptState(genesis, config->chainlock_schedule,
             config->btcc_schedule, config->activation_predecessor_height, CARRIER_HEIGHT,
@@ -5510,6 +5588,14 @@ BOOST_FIXTURE_TEST_CASE(
             index.pqBTCCReceiptStateHash = state->cumulative_hash;
             index.pqBTCCReceiptLatestTargetHeight = state->latest_chainlock_target_height;
             index.pqBTCCReceiptLatestCarrierHeight = state->latest_receipt_carrier_height;
+            if (height >= payment_receipt.carrier_height) {
+                index.pqPaymentAuditReceiptCursorHeight = payment_state.cursor.carrier_height;
+                index.pqPaymentAuditReceiptCursorEpoch = payment_state.cursor.epoch;
+                index.pqPaymentAuditReceiptCursorSealHash = payment_state.cursor.seal_block_hash;
+                index.pqPaymentAuditReceiptCursorLogicalId = payment_state.cursor.audit_logical_id;
+                index.pqPaymentAuditReceiptCursorWitnessId = payment_state.cursor.audit_witness_id;
+                index.pqPaymentAuditReceiptStateHash = payment_state.cumulative_hash;
+            }
         }
         chain[CARRIER_HEIGHT]->pqBTCCReceiptLogicalId = opening.chainlock_logical_id;
         return *state;
@@ -5525,6 +5611,10 @@ BOOST_FIXTURE_TEST_CASE(
     BOOST_REQUIRE(local);
     BOOST_CHECK(*local == base);
     BOOST_CHECK(!Access::HasHistoricalSyncAuthorization(*handler));
+    const auto bootstrap_identity{Access::PersistHistoricalBootstrap(*handler, base,
+        ChainLockStoreTestContextFactory::CreateDurable(genesis, config->chainlock_schedule, base.statement), *equal_boundary)};
+    Access::MaintainHistoricalRetention(*handler);
+    BOOST_REQUIRE(durable->LoadHistoricalSyncBootstrap());
     auto wrong_opening{receipt};
     wrong_opening.chainlock_logical_id = NonNullHash(946'000);
     stamp_receipt(wrong_opening);
@@ -5541,7 +5631,9 @@ BOOST_FIXTURE_TEST_CASE(
         next.statement.previous_btcc_cursor = base.statement.accepted_btcc_cursor;
         next.statement.accepted_btcc_cursor = base.statement.accepted_btcc_cursor;
         next.statement.roster_beacons = current.statement.roster_beacons;
-        if (height >= CARRIER_HEIGHT) next.statement.btcc_receipt_state = receipt_state;
+        if (height >= CARRIER_HEIGHT) {
+            next.statement.btcc_receipt_state = receipt_state;
+        }
         bind_transition(next, &current);
         install(next, true);
         current = std::move(next);
@@ -5605,6 +5697,94 @@ BOOST_FIXTURE_TEST_CASE(
         LOCK(::cs_main);
         BOOST_CHECK(!(chain[2'330]->nStatus & BLOCK_GOVERNANCE_VALIDATED));
     }
+
+    BOOST_REQUIRE(durable->PersistBest(unpublished,
+        ChainLockStoreTestContextFactory::CreateDurable(genesis, config->chainlock_schedule, unpublished.statement)));
+    current = unpublished;
+    for (int32_t height{2'335}; height <= equal_boundary->coverage_height + 5;
+         height += static_cast<int32_t>(PQ_CL_PERIOD)) {
+        auto next{MakeCatchupChainLock(height, current.statement.height,
+                                      current.statement.block_hash, 949'000 + height)};
+        next.statement.block_hash = chain[height]->GetBlockHash();
+        next.statement.payment_probation_state_hash = probation_root;
+        next.statement.previous_btcc_cursor = base.statement.accepted_btcc_cursor;
+        next.statement.accepted_btcc_cursor = base.statement.accepted_btcc_cursor;
+        next.statement.btcc_receipt_state = receipt_state;
+        if (height >= payment_receipt.carrier_height) next.statement.payment_audit_receipt_state = payment_state;
+        next.statement.roster_beacons = current.statement.roster_beacons;
+        auto& window{next.statement.roster_beacons};
+        const auto target_epoch{EpochForHeight(config->chainlock_schedule, height)};
+        BOOST_REQUIRE(target_epoch);
+        if (*target_epoch > window.active.seeds.back().epoch) {
+            BOOST_REQUIRE(window.next.IsReady());
+            for (std::size_t slot{0}; slot + 1 < ACTIVE_QUORUMS; ++slot) window.active.seeds[slot] = window.active.seeds[slot + 1];
+            window.active.seeds.back() = window.next;
+            window.active.recovery_authority_source.normal_beacon = window.next;
+            window.next = {};
+            window.next.epoch = *target_epoch + 1;
+            next.statement.roster_transition = RosterAuthorizationTransitionKind::ROTATE;
+        } else if (window.next.state == RosterBeaconState::EMPTY) {
+            window.next.state = RosterBeaconState::PENDING;
+            window.next.anchor_cursor = base.statement.accepted_btcc_cursor;
+            window.next.anchor_btc_height = 800'000;
+            next.statement.roster_transition = RosterAuthorizationTransitionKind::OBSERVE;
+        } else if (window.next.state == RosterBeaconState::PENDING) {
+            window.next.state = RosterBeaconState::READY;
+            window.next.future_btc_hash = NonNullHash(949'001);
+            next.statement.roster_transition = RosterAuthorizationTransitionKind::REVEAL;
+        }
+        bind_transition(next, &current);
+        install(next, true);
+        current = std::move(next);
+    }
+    const auto base_view{store->GetVerifiedRosterAuthorizationBaseByLogicalId(base.GetLogicalId(genesis))};
+    BOOST_REQUIRE(base_view);
+    Access::SetHistoricalSyncAuthorization(*handler, *equal_boundary, *base_view, std::nullopt, bootstrap_identity);
+    Access::SetHistoricalRequest(*handler, base.GetLogicalId(genesis));
+    BOOST_REQUIRE(Access::HasHistoricalSyncAuthorization(*handler));
+    BTCCPresealState btcc_markers;
+    btcc_markers.active = BTCCPresealMarker{
+        CARRIER_HEIGHT, chain[CARRIER_HEIGHT]->GetBlockHash(), BTCCReceiptState{},
+        CARRIER_HEIGHT, chain[CARRIER_HEIGHT]->GetBlockHash(), BTCCReceiptState{}, receipt, 1};
+    PaymentAuditPresealState payment_markers;
+    payment_markers.active = PaymentAuditPresealMarker{
+        payment_receipt.carrier_height, chain[payment_receipt.carrier_height]->GetBlockHash(), PaymentAuditReceiptState{}, probation_root,
+        payment_receipt.carrier_height, chain[payment_receipt.carrier_height]->GetBlockHash(), payment_receipt, 1};
+    Access::SetReplayMarkers(*handler, btcc_markers, payment_markers);
+    BOOST_CHECK(!Access::PendingHistory(*handler));
+    BOOST_CHECK(Access::PendingHistory(*handler, /*allow_prefix=*/false));
+    Access::RefreshHistory(*handler);
+    BOOST_CHECK(WITH_LOCK(::cs_main, return chainman.GetPQHistoryAuthState()) == PQHistoryAuthState::READY);
+    Access::MaintainHistoricalRetention(*handler);
+    BOOST_REQUIRE(durable->LoadHistoricalSyncBootstrap());
+    BOOST_CHECK(Access::HasHistoricalSyncAuthorization(*handler));
+    BOOST_CHECK(Access::HasHistoricalRequest(*handler));
+
+    const auto before_retirement{durable->GetFinalityState()};
+    const PaymentAuditStoreCheckpoint checkpoint{
+        payment_receipt.epoch, current.statement.height, current.statement.block_hash,
+        payment_state, probation_root, current.statement.height, current.statement.block_hash,
+        current.GetLogicalId(genesis), current.GetWitnessId(genesis)};
+    auto& audit_store{Access::AuditStore(*handler)};
+    BOOST_REQUIRE(audit_store.PruneThroughCheckpointStep(checkpoint).status == PaymentAuditPruneStatus::IN_PROGRESS);
+    BOOST_REQUIRE(audit_store.GetPendingPruneCheckpoint());
+    BOOST_CHECK(!audit_store.GetPruneCheckpoint());
+    Access::MaintainHistoricalRetention(*handler);
+    BOOST_REQUIRE(durable->LoadHistoricalSyncBootstrap());
+    BOOST_CHECK(Access::PendingHistory(*handler, /*allow_prefix=*/false));
+    BOOST_REQUIRE(audit_store.PruneThroughCheckpoint(checkpoint));
+    BOOST_CHECK(!Access::PendingHistory(*handler, /*allow_prefix=*/false));
+    Access::MaintainHistoricalRetention(*handler);
+    BOOST_CHECK(!durable->LoadHistoricalSyncBootstrap());
+    BOOST_CHECK(!Access::HasHistoricalSyncAuthorization(*handler));
+    BOOST_CHECK(!Access::HasHistoricalRequest(*handler));
+    BOOST_CHECK(!durable->IsHistoricalSyncRecordCurrent(*equal_boundary, bootstrap_identity));
+    BOOST_CHECK(durable->GetFinalityState().best == before_retirement.best);
+    BOOST_CHECK(durable->GetFinalityState().unsealed_btcc == before_retirement.unsealed_btcc);
+    BOOST_CHECK(durable->LoadBTCCPresealState() == btcc_markers);
+    BOOST_CHECK(durable->LoadPaymentAuditPresealState() == payment_markers);
+    Access::RefreshHistory(*handler);
+    BOOST_CHECK(WITH_LOCK(::cs_main, return chainman.GetPQHistoryAuthState()) == PQHistoryAuthState::READY);
 }
 
 BOOST_FIXTURE_TEST_CASE(

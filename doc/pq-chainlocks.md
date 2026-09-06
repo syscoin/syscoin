@@ -1053,6 +1053,22 @@ receipt-archive, and verified recovery capabilities. After successful
 publication, the handler rebinds only that same verified B to its new serving
 record identity; B's PoW-history trust and frozen endpoint do not change.
 
+When B was already D, or is an older ordinarily authenticated base, C can
+advance finality without promoting the bootstrap role. Retention maintenance
+then retires that local role only after the exact accepted and durable winner
+covers E on the active, fully validated branch and independently authenticates
+the remaining replay markers. If D's signed latest receipt still selects B,
+the exact B statement must also survive in another durable role; otherwise
+retirement waits until finality signs a later receipt. This preserves a sole
+roster-base dependency even when C lands exactly at E. An in-progress payment-audit
+checkpoint keeps the bootstrap evidence until its completed archive boundary
+authenticates the covered payment markers without the historical-prefix
+exemption. The fsynced retirement compares both the bootstrap identity/revision
+and the exact durable winner; only successful publication revokes its runtime
+capability and recomputes the auxiliary retention floor. Protected serving
+slots and their carrier/authorization dependencies remain unchanged, while
+replay markers and other durable owners continue to retain their own history.
+
 When D is absent, the first durable winner may also be a canonical `RECOVER`
 certificate. This requires a current verified historical B, an active target
 strictly above and descending through its frozen coverage endpoint, the exact
@@ -2348,6 +2364,11 @@ Expected failures are fail-closed:
   remain absent or unchanged until fully verified C atomically promotes the
   latest bootstrap B. Check protected serving dependencies, stale proof and
   actual-D rejection, role-bound corruption, and capsule retention/cleanup.
+- With B already at or below D, preserve bootstrap while E remains uncovered.
+  After ordinary C covers E, retain it through pending payment-checkpoint
+  work, then retire only the local role without regressing READY or changing
+  serving slots, finality, or replay markers. Reject stale winner/role CAS and
+  verify a failed write preserves the restart evidence and retention floor.
 - A previously seen B/C inventory remains downloadable only while it is an
   exact pending historical/catch-up request. An invalid witness must not
   cancel honest alternate providers; accepted finality or an expired context

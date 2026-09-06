@@ -36,6 +36,15 @@ public:
         return CChainLocksHandler::IsHistoricalSyncRetentionMutationReady(accepted, durable, chain);
     }
 
+    static bool BootstrapCovered(
+        const pq::HistoricalSyncBoundary& boundary,
+        const pq::FinalChainLockRecordMetadata* accepted,
+        const pq::FinalChainLockRecordMetadata* durable, const CChain& chain)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+    {
+        return CChainLocksHandler::IsHistoricalSyncBootstrapCovered(boundary, accepted, durable, chain);
+    }
+
     static bool Advance(
         Frontier& frontier, const CChain& chain, const CBlockIndex& target,
         const pq::ChainLockPredecessor& prior,
@@ -281,6 +290,80 @@ BOOST_AUTO_TEST_CASE(pending_or_offbranch_durable_winner_preserves_historical_de
     BOOST_CHECK(Access::RetentionMutationReady(&durable, &durable, history.chain));
     history.blocks[900].nStatus |= BLOCK_FAILED_VALID;
     BOOST_CHECK(!Access::RetentionMutationReady(&durable, &durable, history.chain));
+}
+
+BOOST_AUTO_TEST_CASE(bootstrap_retirement_requires_exact_durable_prefix_coverage)
+{
+    History history;
+    LOCK(cs_main);
+    for (const int32_t prior_height : {875, 880}) {
+        history.SetDurablePrior(prior_height);
+        FinalChainLockRecordMetadata durable;
+        durable.logical_id = TestHash(41'000);
+        durable.witness_id = TestHash(41'001);
+        durable.statement.btcc_receipt_state = history.receipt_state;
+        durable.statement.payment_probation_state_hash = history.coverage.probation_state_hash;
+        const auto covered = [&](const FinalChainLockRecordMetadata* accepted)
+            EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+            return Access::BootstrapCovered(history.coverage, accepted, &durable, history.chain);
+        };
+        // Both B == D and B < D still need the imported prefix while E > D.
+        for (const int32_t height : {prior_height, 885, 889, 900}) {
+            durable.statement.height = height;
+            durable.statement.block_hash = history.hashes[height];
+            BOOST_CHECK(covered(&durable) == (height >= history.coverage.coverage_height));
+        }
+        BOOST_CHECK(!covered(nullptr));
+        BOOST_CHECK(!Access::BootstrapCovered(history.coverage, &durable, nullptr, history.chain));
+        auto unpublished{durable};
+        unpublished.witness_id = TestHash(41'002);
+        BOOST_CHECK(!covered(&unpublished));
+
+        const auto boundary{history.coverage};
+        const std::vector<std::function<void(HistoricalSyncBoundary&)>> corruptions{
+            [](auto& value) { value.carrier_hash = TestHash(41'003); },
+            [](auto& value) { value.coverage_hash = TestHash(41'004); },
+            [](auto& value) { value.receipt.chainlock_target_hash = TestHash(41'005); },
+            [](auto& value) { value.receipt.chainlock_logical_id = TestHash(41'006); },
+            [](auto& value) { value.receipt_state.cumulative_hash = TestHash(41'007); },
+            [](auto& value) { value.payment_audit_state.cumulative_hash = TestHash(41'008); },
+            [](auto& value) { value.probation_state_hash = TestHash(41'009); },
+            [](auto& value) { value.durable_prior.block_hash = TestHash(41'010); },
+        };
+        for (const auto& corrupt : corruptions) {
+            corrupt(history.coverage);
+            BOOST_CHECK(!covered(&durable));
+            history.coverage = boundary;
+        }
+        const std::vector<std::function<uint32_t(uint32_t)>> weak_provenance{
+            [](uint32_t status) { return status & ~BLOCK_PQ_RECEIPT_INDEX_VALIDATED; },
+            [](uint32_t status) { return status | BLOCK_ASSUMED_VALID; },
+            [](uint32_t status) { return status | BLOCK_FAILED_VALID; },
+            [](uint32_t status) { return status | BLOCK_CONFLICT_CHAINLOCK; },
+            [](uint32_t status) { return (status & ~BLOCK_VALID_MASK) | BLOCK_VALID_CHAIN; },
+        };
+        for (const int32_t height : {875, 885, 889, 900}) {
+            const uint32_t status{history.blocks[height].nStatus};
+            for (const auto& corrupt : weak_provenance) {
+                history.blocks[height].nStatus = corrupt(status);
+                BOOST_CHECK(!covered(&durable));
+                history.blocks[height].nStatus = status;
+            }
+        }
+        auto wrong_winner{durable};
+        wrong_winner.statement.block_hash = TestHash(41'011);
+        BOOST_CHECK(!Access::BootstrapCovered(history.coverage, &wrong_winner, &wrong_winner, history.chain));
+        wrong_winner = durable;
+        wrong_winner.statement.btcc_receipt_state.cumulative_hash = TestHash(41'012);
+        BOOST_CHECK(!Access::BootstrapCovered(history.coverage, &wrong_winner, &wrong_winner, history.chain));
+        wrong_winner = durable;
+        wrong_winner.statement.payment_probation_state_hash = TestHash(41'013);
+        BOOST_CHECK(!Access::BootstrapCovered(history.coverage, &wrong_winner, &wrong_winner, history.chain));
+        history.chain.SetTip(history.blocks[899]);
+        BOOST_CHECK(!covered(&durable));
+        history.chain.SetTip(history.blocks.back());
+        BOOST_CHECK(covered(&durable));
+    }
 }
 
 BOOST_AUTO_TEST_CASE(covered_history_resumes_without_a_newer_certificate)

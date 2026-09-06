@@ -2541,6 +2541,11 @@ private:
         const pq::FinalChainLockRecordMetadata* accepted,
         const pq::FinalChainLockRecordMetadata* durable, const CChain& active_chain)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    static bool IsHistoricalSyncBootstrapCovered(
+        const pq::HistoricalSyncBoundary& boundary,
+        const pq::FinalChainLockRecordMetadata* accepted,
+        const pq::FinalChainLockRecordMetadata* durable, const CChain& active_chain)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     void RevokeReorgedHistoricalSyncAuthorization();
     [[nodiscard]] std::optional<pq::VerifiedPoWHistoricalBoundary>
     ValidatePoWHistoricalSyncBoundary(
@@ -2695,7 +2700,8 @@ private:
                                  !m_btcc_preseal_mutex);
     [[nodiscard]] bool IsPersistedChainLockPending() const
         EXCLUSIVE_LOCKS_REQUIRED(!m_persisted_mutex);
-    [[nodiscard]] bool HasPendingPQHistoryAuthentication() const
+    [[nodiscard]] bool HasPendingPQHistoryAuthentication(
+        bool allow_historical_prefix = true) const
         EXCLUSIVE_LOCKS_REQUIRED(cs_main,
                                  !m_persisted_mutex,
                                  !m_btcc_preseal_mutex);
