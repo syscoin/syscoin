@@ -815,7 +815,12 @@ BOOST_AUTO_TEST_CASE(PQReadinessConflictsAreIndexedWithoutNewKeyReservations)
     BOOST_CHECK(!pool.existsProviderTxConflict(CTransaction(spend), tip));
 
     llmq::pq::PQRegistryMempoolView registry_view;
-    registry_view.operators = {{.pro_tx_hash = pro_tx_hash, .state_exists = 1}};
+    registry_view.operators = {{
+        .pro_tx_hash = pro_tx_hash,
+        .state_exists = 1,
+        .has_global_key = 0,
+        .current_commitment = {},
+    }};
     const auto mn_list{PQMempoolMNList(pro_tx_hash, collateral)};
     const auto find_conflict = [&](const std::vector<CTransactionRef>& package)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main, pool.cs) {

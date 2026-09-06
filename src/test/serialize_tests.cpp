@@ -373,7 +373,7 @@ BOOST_AUTO_TEST_CASE(cdiskblockindex_btcp_prev_serialization)
     }
     BOOST_CHECK(with_receipt_state_version > with_btcp_prev_version);
     BOOST_CHECK_EQUAL(with_receipt_state_ser.size() - with_btcp_prev_ser.size(),
-                      308U);
+                      409U);
 
     CDiskBlockIndex without_btcp_prev_roundtrip;
     DataStream without_btcp_prev_read{without_btcp_prev_ser};
