@@ -254,8 +254,11 @@ bool RunBoundedCommand(const std::vector<std::string>& command,
         const std::vector<std::string> args{command.begin() + 1, command.end()};
 #endif
         bp::group process_group;
+        // Windows output redirection leaves stdin invalid unless supplied;
+        // a null device gives noninteractive backends and descendants valid EOF.
         bp::child process(
             bp::exe = executable, bp::args = args,
+            bp::std_in < bp::null,
             bp::std_out > stdout_stream, bp::std_err > stderr_stream,
             process_group);
         std::string stderr_output;
