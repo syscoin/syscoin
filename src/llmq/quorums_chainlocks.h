@@ -1631,18 +1631,18 @@ private:
     // the much larger immutable roster set remains shared by pointer.
     static_assert(sizeof(RuntimeVerificationContext) <= 64);
     static_assert(sizeof(CurrentSigningContext) <= 1768);
-    static_assert(sizeof(CurrentSigningContexts) <= 4096);
+    static_assert(sizeof(CurrentSigningContexts) <= 8192);
 
     [[nodiscard]] std::optional<pq::ChainLockCandidateContext>
     PrepareCandidate(
         const pq::ChainLockCandidateContextRequest& request) const override
-        EXCLUSIVE_LOCKS_REQUIRED(!m_persisted_mutex,
+        EXCLUSIVE_LOCKS_REQUIRED(!m_lookup_mutex, !m_persisted_mutex,
                                  !m_btcc_preseal_mutex);
     [[nodiscard]] std::optional<pq::ChainLockCandidateContext>
     RecheckCandidate(
         const pq::ChainLockCandidateContextRequest& request,
         const pq::ChainLockCandidateContext& prepared) const override
-        EXCLUSIVE_LOCKS_REQUIRED(!m_persisted_mutex,
+        EXCLUSIVE_LOCKS_REQUIRED(!m_lookup_mutex, !m_persisted_mutex,
                                  !m_btcc_preseal_mutex);
     [[nodiscard]] pq::AcceptedBranchRelation QueryAcceptedBranch(
         int32_t height,
@@ -1668,7 +1668,7 @@ private:
     BuildCandidateContext(
         const pq::ChainLockCandidateContextRequest& request,
         const CBlockIndex** candidate = nullptr) const
-        EXCLUSIVE_LOCKS_REQUIRED(!m_persisted_mutex,
+        EXCLUSIVE_LOCKS_REQUIRED(!m_lookup_mutex, !m_persisted_mutex,
                                  !m_btcc_preseal_mutex);
     [[nodiscard]] PaymentAuditContextStatus
     ClassifyHistoricalReceiptIndexRangeCached(
@@ -1750,6 +1750,7 @@ private:
             pq::ObjectiveRosterAuthorizationMode::PAUSE};
         std::optional<pq::VerifiedRosterAuthorizationBaseView> base;
         std::optional<pq::RecoveryRosterAuthoritySource> recovery_source;
+        std::shared_ptr<const pq::VerifiedPoWRefreshAuthority> refresh_authority;
     };
     /** Resolve authority from the receipt state at this round's fork anchor. */
     [[nodiscard]] std::optional<ObjectiveRosterAuthorizationContext>
@@ -1757,7 +1758,8 @@ private:
         const CBlockIndex& candidate,
         const pq::VerifiedRosterAuthorizationBaseView* exact_base = nullptr)
         const
-        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_lookup_mutex);
     [[nodiscard]] std::optional<pq::NormalRosterAuthorizationInput>
     BuildNormalRosterAuthorizationInput(
         const pq::ChainLockStatement& statement,
@@ -2292,7 +2294,7 @@ private:
                                  !m_btcc_preseal_mutex);
     [[nodiscard]] bool CheckBTCHeaderSigningPolicy(
         const pq::ChainLockStatement& statement)
-        EXCLUSIVE_LOCKS_REQUIRED(!m_btc_header_policy_mutex,
+        EXCLUSIVE_LOCKS_REQUIRED(!m_lookup_mutex, !m_btc_header_policy_mutex,
                                  !m_needed_btcc_certificate_mutex,
                                  !m_btcc_preseal_mutex);
     [[nodiscard]] bool CheckPaymentAuditSeedSigningPolicy(
@@ -2451,12 +2453,12 @@ private:
     [[nodiscard]] HistoricalAdmissionContext
     GetHistoricalAdmission(const pq::ChainLockStatement& statement,
                            const uint256& logical_id) const
-        EXCLUSIVE_LOCKS_REQUIRED(!m_persisted_mutex,
+        EXCLUSIVE_LOCKS_REQUIRED(!m_lookup_mutex, !m_persisted_mutex,
                                  !m_btcc_preseal_mutex);
     [[nodiscard]] HistoricalAdmissionContext
     GetHistoricalAdmissionLocked(const pq::ChainLockStatement& statement,
                                  const uint256& logical_id) const
-        EXCLUSIVE_LOCKS_REQUIRED(cs_main, !m_persisted_mutex,
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main, !m_lookup_mutex, !m_persisted_mutex,
                                  !m_btcc_preseal_mutex);
     [[nodiscard]] static bool IsExactHistoricalResetCandidate(
         const pq::ChainLockStatement& statement,

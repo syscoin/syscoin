@@ -260,6 +260,13 @@ public:
     uint256 pqPaymentAuditReceiptCursorWitnessId{};
     uint256 pqPaymentAuditReceiptStateHash{};
     uint256 pqPaymentProbationStateHash{};
+    // A work sample is authoritative only after its exact immutable carrier
+    // was connected with full validation; no AuxPoW-wrapper lookup replaces it.
+    uint32_t pqRecoveryRefreshGroup{0};
+    uint256 pqRecoveryRefreshEntropyBlockHash{};
+    uint256 pqRecoveryRefreshParentWorkHash{};
+    uint256 pqRecoveryRefreshCommitmentHash{};
+    bool pqRecoveryRefreshWorkValidated{false};
     // SYSCOIN: Runtime-only authorization for forwarding this carrier's BTC
     // cursor to NEVM. Receipt bytes and their accumulator remain persistent,
     // but an off-chain non-null receipt certificate must be verified after a
@@ -514,7 +521,12 @@ public:
                 !obj.pqBTCCReceiptStateHash.IsNull() ||
                 obj.pqBTCCReceiptLatestTargetHeight != -1 ||
                 obj.pqBTCCReceiptLatestCarrierHeight != -1 ||
-                !obj.pqBTCCReceiptLogicalId.IsNull()) {
+                !obj.pqBTCCReceiptLogicalId.IsNull() ||
+                obj.pqRecoveryRefreshGroup != 0 ||
+                !obj.pqRecoveryRefreshEntropyBlockHash.IsNull() ||
+                !obj.pqRecoveryRefreshParentWorkHash.IsNull() ||
+                !obj.pqRecoveryRefreshCommitmentHash.IsNull() ||
+                obj.pqRecoveryRefreshWorkValidated) {
                 _nVersion = DISK_INDEX_VERSION_PQ_RECEIPT_STATE;
             } else if (!obj.btcpPrevCommitment.IsNull()) {
                 _nVersion = DISK_INDEX_VERSION_BTCPREV;
@@ -559,7 +571,12 @@ public:
                       obj.pqPaymentAuditReceiptCursorLogicalId,
                       obj.pqPaymentAuditReceiptCursorWitnessId,
                       obj.pqPaymentAuditReceiptStateHash,
-                      obj.pqPaymentProbationStateHash);
+                      obj.pqPaymentProbationStateHash,
+                      obj.pqRecoveryRefreshGroup,
+                      obj.pqRecoveryRefreshEntropyBlockHash,
+                      obj.pqRecoveryRefreshParentWorkHash,
+                      obj.pqRecoveryRefreshCommitmentHash,
+                      obj.pqRecoveryRefreshWorkValidated);
         }
     }
 

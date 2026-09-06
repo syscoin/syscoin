@@ -1483,6 +1483,118 @@ static RPCHelpMan protx_rotate_operator_key()
     };
 }
 
+static RPCHelpMan protx_recovery_ready()
+{
+    return RPCHelpMan{
+        "protx_recovery_ready",
+        "\nDeclares PQ recovery readiness for one four-epoch recovery group. The current operator key signs the fixed branch reference and transaction inputs; this does not rotate keys, revive PoSe, or change payments.\n",
+        {
+            {"proTxHash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO,
+             "The deterministic masternode ProRegTx hash."},
+            {"operatorKey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO,
+             "The current 64-byte SLH-DSA operator secret key."},
+            {"group", RPCArg::Type::NUM, RPCArg::Optional::NO,
+             "Recovery group index q, covering epochs 4q through 4q+3."},
+            {"feeSourceAddress", RPCArg::Type::STR, RPCArg::Default{""},
+             "Wallet fee address; defaults to the masternode payout address."},
+            {"submit", RPCArg::Type::BOOL, RPCArg::Default{true},
+             "Broadcast when true; otherwise return signed transaction hex."},
+        },
+        RPCResult{RPCResult::Type::STR_HEX, "", "Transaction hash or signed transaction hex"},
+        RPCExamples{HelpExampleCli("protx_recovery_ready", "<proTxHash> <operator-key> <group>")},
+        [&](const RPCHelpMan&, const node::JSONRPCRequest& request) -> UniValue {
+            auto pwallet = GetWalletForJSONRPCRequest(request);
+            if (!pwallet) return NullUniValue;
+            EnsureWalletIsUnlocked(*pwallet);
+            pwallet->BlockUntilSyncedToCurrentChain();
+            node::NodeContext& node = GetWalletNodeContext(*pwallet);
+            const uint256 pro_tx_hash{ParseHashV(request.params[0], "proTxHash")};
+            auto operator_key{ParseSLHSecretKey(request.params[1].get_str(), "operatorKey")};
+            const int64_t group{request.params[2].getInt<int64_t>()};
+            if (group < 0 || group > std::numeric_limits<uint32_t>::max() / 4) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Recovery group is out of range");
+            }
+
+            CDeterministicMNCPtr dmn;
+            llmq::pq::OperatorKeyState operator_state;
+            llmq::pq::RecoveryReadinessTxPayload payload;
+            {
+                LOCK(cs_main);
+                const CBlockIndex* tip{node.chainman->ActiveTip()};
+                if (tip == nullptr) {
+                    throw JSONRPCError(RPC_INTERNAL_ERROR, "Active chain tip is unavailable");
+                }
+                EnsurePQProviderRPCActive(tip->nHeight);
+                llmq::pq::PQRegistryConfig config;
+                if (llmq::pq::GetPQRegistryConfig(Params().GetConsensus(), config) !=
+                    llmq::pq::PQRegistryDeploymentResult::VALID) {
+                    throw JSONRPCError(RPC_MISC_ERROR, "PQ registry is not configured");
+                }
+                const auto coordinates{llmq::pq::DeriveRecoveryRefreshCoordinates(
+                    config.schedule, config.btcc_schedule, config.recovery_refresh,
+                    static_cast<uint32_t>(group))};
+                if (!coordinates || tip->nHeight + 1 < config.recovery_refresh.activation_height ||
+                    tip->nHeight < coordinates->readiness_reference_height ||
+                    tip->nHeight >= coordinates->snapshot_height) {
+                    throw JSONRPCError(RPC_INVALID_PARAMETER,
+                                       "The next block is outside this group's readiness window");
+                }
+                const CBlockIndex* reference{tip->GetAncestor(coordinates->readiness_reference_height)};
+                if (reference == nullptr) {
+                    throw JSONRPCError(RPC_INTERNAL_ERROR, "Readiness reference block is unavailable");
+                }
+                dmn = deterministicMNManager->GetListForBlock(tip).GetMN(pro_tx_hash);
+                if (!dmn) {
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "Masternode not found at active tip");
+                }
+                operator_state = GetActivePQOperator(tip, pro_tx_hash, operator_key);
+                payload.readiness.pro_tx_hash = pro_tx_hash;
+                payload.readiness.global_key_version = operator_state.global_key.key_version;
+                payload.readiness.group = static_cast<uint32_t>(group);
+                payload.readiness.reference_height = coordinates->readiness_reference_height;
+                payload.readiness.reference_hash = reference->GetBlockHash();
+            }
+            payload.readiness.transaction_inputs_hash = uint256::ONEV;
+            payload.signature[0] = 1;
+            CMutableTransaction tx;
+            tx.nVersion = llmq::pq::PQ_RECOVERY_READINESS_TX_VERSION;
+            CTxDestination fee_source;
+            if (!request.params[3].isNull() && !request.params[3].get_str().empty()) {
+                fee_source = DecodeDestination(request.params[3].get_str());
+                if (!IsValidDestination(fee_source)) {
+                    throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid fee source address");
+                }
+            } else if (!ExtractDestination(dmn->pdmnState->scriptPayout, fee_source)) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER,
+                                   "Masternode payout script has no usable fee address");
+            }
+            FundSpecialTx(*pwallet, tx, payload, fee_source);
+            payload.readiness.transaction_inputs_hash = CalcTxInputsHash(CTransaction(tx));
+            const auto digest{llmq::pq::GetRecoveryReadinessAuthorizationHash(
+                Params().GetConsensus().hashGenesisBlock, operator_state.global_key,
+                payload.readiness)};
+            if (!digest || !slhdsa::SignDeterministic(
+                    operator_key, std::span<const uint8_t>{digest->begin(), digest->size()},
+                    llmq::pq::GetGlobalAuthContext(llmq::pq::GlobalAuthPurpose::RECOVERY_READINESS),
+                    payload.signature)) {
+                throw JSONRPCError(RPC_INTERNAL_ERROR, "Failed to sign PQ recovery readiness");
+            }
+            SetTxPayload(tx, payload);
+            const bool submit{request.params[4].isNull() || request.params[4].get_bool()};
+            return SignAndSendSpecialTx(request, *pwallet, tx, submit, [&]() {
+                LOCK(cs_main);
+                TxValidationState state;
+                if (!deterministicMNManager->CheckPQTransaction(
+                        CTransaction(tx), node.chainman->ActiveTip(), state,
+                        /*fJustCheck=*/false, /*check_sigs=*/true)) {
+                    throw JSONRPCError(RPC_INVALID_PARAMETER,
+                                       "Readiness declaration is no longer valid: " + state.ToString());
+                }
+            });
+        },
+    };
+}
+
 // SYSCOIN: provider service updates use the registered global SLH key.
 static RPCHelpMan protx_update_service()
 {
@@ -2033,6 +2145,7 @@ Span<const CRPCCommand> wallet::GetEvoWalletRPCCommands()
         {"evowallet", &protx_generate_operator_keypair},
         {"evowallet", &protx_register_operator_key},
         {"evowallet", &protx_rotate_operator_key},
+        {"evowallet", &protx_recovery_ready},
         {"evowallet", &protx_update_service},
         {"evowallet", &protx_update_registrar},
         {"evowallet", &protx_revoke},

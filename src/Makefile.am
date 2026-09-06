@@ -546,6 +546,8 @@ libsyscoin_node_a_SOURCES = \
   llmq/pq_mnauth.h \
   llmq/pq_operator_key_state.cpp \
   llmq/pq_operator_key_state.h \
+  llmq/pq_recovery_refresh.cpp \
+  llmq/pq_recovery_refresh.h \
   llmq/pq_roster_beacon.cpp \
   llmq/pq_roster_beacon.h \
   llmq/pq_quorum_builder.cpp \

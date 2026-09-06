@@ -152,4 +152,17 @@ bool DecodeGlobalKeyTxPayload(const std::vector<unsigned char>& encoded,
                         GlobalKeyTxPayload::WIRE_SIZE, payload);
 }
 
+bool RecoveryReadinessTxPayload::IsTriviallyValid(int32_t transaction_version) const noexcept
+{
+    return transaction_version == SPECIALTX_TYPE && readiness.IsStructurallyValid() &&
+           HasAuthorization(signature);
+}
+
+bool DecodeRecoveryReadinessTxPayload(const std::vector<unsigned char>& encoded,
+                                     RecoveryReadinessTxPayload& payload) noexcept
+{
+    return DecodeStrict(encoded, RecoveryReadinessTxPayload::WIRE_SIZE,
+                        RecoveryReadinessTxPayload::WIRE_SIZE, payload);
+}
+
 } // namespace llmq::pq

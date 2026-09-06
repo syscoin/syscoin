@@ -9,6 +9,7 @@
 #include <evo/evodb.h>
 #include <evo/pq_providertx.h>
 #include <llmq/pq_operator_key_state.h>
+#include <llmq/pq_recovery_refresh.h>
 
 #include <primitives/block.h>
 #include <saltedhasher.h>
@@ -66,8 +67,9 @@ inline constexpr std::size_t PQ_OPERATOR_KEY_STATE_MAX_SERIALIZED_SIZE{
     sizeof(uint16_t) +
     MAX_RETAINED_FROZEN_CHILD_ROOTS *
         (uint256::size() + 2 * sizeof(uint32_t) +
-         ChildKeyTreeCommitment::WIRE_SIZE)};
-static_assert(PQ_OPERATOR_KEY_STATE_MAX_SERIALIZED_SIZE == 4'024);
+        ChildKeyTreeCommitment::WIRE_SIZE) + sizeof(uint8_t) +
+    RecoveryReadinessRecord::WIRE_SIZE};
+static_assert(PQ_OPERATOR_KEY_STATE_MAX_SERIALIZED_SIZE == 4'073);
 /** Active reservations plus one standard package, without an unbounded copy. */
 inline constexpr std::size_t MAX_PQ_MEMPOOL_OPERATOR_REQUESTS{
     MAX_PQ_OPERATOR_STATES + 64};
@@ -77,6 +79,8 @@ struct PQRegistryConfig {
     ChainLockScheduleConfig schedule;
     uint32_t registration_cutoff_blocks{0};
     uint32_t future_horizon_epochs{0};
+    BTCCScheduleConfig btcc_schedule;
+    RecoveryRefreshConfig recovery_refresh;
 
     [[nodiscard]] bool IsValid() const noexcept;
     friend bool operator==(const PQRegistryConfig&,
@@ -148,7 +152,7 @@ struct PQRegistryDiskSnapshot {
         sizeof(uint16_t) +
         MAX_PQ_OPERATOR_STATES *
             PQ_OPERATOR_KEY_STATE_MAX_SERIALIZED_SIZE + uint256::size()};
-    static_assert(MAX_SERIALIZED_SIZE == 529'522'941);
+    static_assert(MAX_SERIALIZED_SIZE == 535'945'371);
 
     uint16_t version{PQ_REGISTRY_DISK_VERSION};
     uint8_t is_checkpoint{0};
@@ -232,6 +236,8 @@ enum class PQRegistryResult : uint8_t {
     DUPLICATE_OPERATOR_UPDATE,
     DUPLICATE_GLOBAL_KEY,
     INVALID_GLOBAL_KEY_PAYLOAD,
+    INVALID_RECOVERY_READINESS_PAYLOAD,
+    INVALID_RECOVERY_READINESS,
     INVALID_PROVIDER_REVOCATION_PAYLOAD,
     TRANSACTION_INPUTS_HASH_MISMATCH,
     OWNER_AUTHORIZATION_FAILED,
@@ -272,6 +278,7 @@ struct PQRegistryCallbacks {
     std::function<bool(const GlobalKeyTxPayload&,
                        const uint256& owner_authorization_hash)>
         verify_initial_owner_authorization;
+    std::function<std::optional<uint256>(int32_t)> lookup_block_hash{};
 
     [[nodiscard]] bool HasMembershipCallbacks() const noexcept;
 };
@@ -290,6 +297,8 @@ struct PQRegistryMempoolOperatorState {
 };
 
 struct PQRegistryMempoolView {
+    int32_t tip_height{-1};
+    PQRegistryConfig config;
     uint8_t has_next_block_schedule{0};
     uint32_t next_first_mutable_epoch{0};
     std::size_t operator_state_count{0};

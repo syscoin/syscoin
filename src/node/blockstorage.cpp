@@ -185,6 +185,11 @@ bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, s
                     diskindex.pqPaymentAuditReceiptStateHash;
                 pindexNew->pqPaymentProbationStateHash =
                     diskindex.pqPaymentProbationStateHash;
+                pindexNew->pqRecoveryRefreshGroup = diskindex.pqRecoveryRefreshGroup;
+                pindexNew->pqRecoveryRefreshEntropyBlockHash = diskindex.pqRecoveryRefreshEntropyBlockHash;
+                pindexNew->pqRecoveryRefreshParentWorkHash = diskindex.pqRecoveryRefreshParentWorkHash;
+                pindexNew->pqRecoveryRefreshCommitmentHash = diskindex.pqRecoveryRefreshCommitmentHash;
+                pindexNew->pqRecoveryRefreshWorkValidated = diskindex.pqRecoveryRefreshWorkValidated;
                 pindexNew->nStatus        = diskindex.nStatus;
                 pindexNew->nTx            = diskindex.nTx;
 

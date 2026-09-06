@@ -22,6 +22,7 @@
 namespace llmq::pq {
 
 struct ProviderRevokeAuthorization;
+struct RecoveryReadinessAuthorization;
 
 inline constexpr uint16_t OPERATOR_KEY_STATE_VERSION{1};
 inline constexpr std::size_t MAX_OPERATOR_SCHEDULE_EPOCHS{32};
@@ -88,6 +89,28 @@ enum class OperatorKeyStateResult : uint8_t {
     PROVIDER_REVOCATION_AUTH_FAILED,
     INVALID_CHILD_ROOT_COMMITMENT,
     STATE_CAP_EXCEEDED,
+    RECOVERY_READINESS_AUTH_FAILED,
+    INVALID_RECOVERY_READINESS,
+};
+
+struct RecoveryReadinessRecord {
+    static constexpr std::size_t WIRE_SIZE{4 * sizeof(uint32_t) + uint256::size()};
+
+    uint32_t group{0};
+    uint32_t global_key_version{0};
+    int32_t reference_height{-1};
+    uint256 reference_hash;
+    int32_t included_height{-1};
+
+    SERIALIZE_METHODS(RecoveryReadinessRecord, obj)
+    {
+        READWRITE(obj.group, obj.global_key_version, obj.reference_height,
+                  obj.reference_hash, obj.included_height);
+    }
+
+    [[nodiscard]] bool IsStructurallyValid() const noexcept;
+    friend bool operator==(const RecoveryReadinessRecord&,
+                           const RecoveryReadinessRecord&) = default;
 };
 
 enum class ChildRootResolutionStatus : uint8_t {
@@ -125,6 +148,7 @@ struct OperatorKeyState {
     uint8_t schedule_initialized{0};
     OperatorKeyScheduleState schedule;
     std::vector<FrozenChildRootRecord> frozen_child_roots;
+    std::optional<RecoveryReadinessRecord> recovery_readiness;
 
     SERIALIZE_METHODS(OperatorKeyState, obj)
     {
@@ -162,6 +186,14 @@ struct OperatorKeyState {
         });
         SER_READ(obj, obj.frozen_child_roots.resize(frozen_count));
         for (auto& record : obj.frozen_child_roots) READWRITE(record);
+        uint8_t has_readiness{static_cast<uint8_t>(obj.recovery_readiness.has_value())};
+        READWRITE(has_readiness);
+        SER_READ(obj, if (has_readiness > 1) {
+            throw std::ios_base::failure("invalid PQ recovery-readiness presence flag");
+        });
+        SER_READ(obj, obj.recovery_readiness = has_readiness
+            ? std::optional<RecoveryReadinessRecord>{RecoveryReadinessRecord{}} : std::nullopt);
+        if (has_readiness) READWRITE(*obj.recovery_readiness);
         SER_READ(obj, if (!obj.IsStructurallyValid()) {
             throw std::ios_base::failure("invalid PQ operator-key state");
         });
@@ -203,6 +235,18 @@ struct OperatorKeyState {
         const ProviderRevokeAuthorization& authorization,
         const GlobalSignature& current_global_key_signature,
         bool check_sigs = true);
+
+    [[nodiscard]] OperatorKeyStateResult ApplyRecoveryReadiness(
+        const OperatorKeyScheduleView& view,
+        const uint256& genesis_hash,
+        const RecoveryReadinessAuthorization& authorization,
+        const GlobalSignature& signature,
+        int32_t snapshot_height,
+        bool check_sigs = true);
+
+    [[nodiscard]] bool IsRecoveryReady(
+        uint32_t group, int32_t reference_height,
+        const uint256& reference_hash, int32_t snapshot_height) const noexcept;
 
     [[nodiscard]] ChildRootResolution ResolveChildRoot(
         uint32_t epoch) const;

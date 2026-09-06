@@ -361,6 +361,8 @@ bool ChainLockFinalityStoreConfig::IsValid() const noexcept
            activation_predecessor_height >= -1 &&
            activation_predecessor_height < btcc_schedule.candidate_origin &&
            btcc_receipt_assumption_anchor.IsStructurallyValid() &&
+           (recovery_refresh.IsDisabled() ||
+            recovery_refresh.IsValid(chainlock_schedule, btcc_schedule)) &&
            valid_receipt_anchor_height &&
            valid_receipt_anchor_state &&
            ValidCapacity(seen_logical_capacity, MAX_FINALITY_ID_CACHE_SIZE) &&

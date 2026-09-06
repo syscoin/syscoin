@@ -6,6 +6,7 @@
 #define SYSCOIN_EVO_PQ_PROVIDERTX_H
 
 #include <llmq/pq_chainlock_types.h>
+#include <llmq/pq_global_auth.h>
 
 #include <primitives/transaction.h>
 #include <pubkey.h>
@@ -24,6 +25,7 @@ namespace llmq::pq {
 
 inline constexpr int32_t PQ_GLOBAL_KEY_TX_VERSION{SYSCOIN_TX_VERSION_PQ_GLOBAL_KEY};
 inline constexpr uint16_t PQ_GLOBAL_KEY_PAYLOAD_VERSION{1};
+inline constexpr int32_t PQ_RECOVERY_READINESS_TX_VERSION{SYSCOIN_TX_VERSION_PQ_RECOVERY_READINESS};
 inline constexpr std::size_t COMPACT_ECDSA_SIGNATURE_SIZE{65};
 inline constexpr std::string_view PQ_GLOBAL_OWNER_REGISTER_DOMAIN{
     "SYS_PQ_GLOBAL_OWNER_REGISTER_V1"};
@@ -98,10 +100,39 @@ GetGlobalOwnerRegistrationAuthorizationHash(
 
 static_assert(GlobalKeyTxPayload::WIRE_SIZE == 8'112);
 
+struct RecoveryReadinessTxPayload {
+    static constexpr int32_t SPECIALTX_TYPE{PQ_RECOVERY_READINESS_TX_VERSION};
+    static constexpr std::size_t WIRE_SIZE{
+        RecoveryReadinessAuthorization::WIRE_SIZE + GLOBAL_SIGNATURE_SIZE};
+
+    RecoveryReadinessAuthorization readiness;
+    GlobalSignature signature{};
+
+    SERIALIZE_METHODS(RecoveryReadinessTxPayload, obj)
+    {
+        SER_WRITE(obj, if (!obj.IsTriviallyValid(SPECIALTX_TYPE)) {
+            throw std::ios_base::failure("non-canonical PQ recovery-readiness payload");
+        });
+        READWRITE(obj.readiness, obj.signature);
+        SER_READ(obj, if (!obj.IsTriviallyValid(SPECIALTX_TYPE)) {
+            throw std::ios_base::failure("non-canonical PQ recovery-readiness payload");
+        });
+    }
+
+    [[nodiscard]] bool IsTriviallyValid(int32_t transaction_version) const noexcept;
+    friend bool operator==(const RecoveryReadinessTxPayload&,
+                           const RecoveryReadinessTxPayload&) = default;
+};
+
+static_assert(RecoveryReadinessTxPayload::WIRE_SIZE == 7'966);
+
 /** Strict decoders reject truncation, oversize input, and trailing bytes. */
 [[nodiscard]] bool DecodeGlobalKeyTxPayload(
     const std::vector<unsigned char>& encoded,
     GlobalKeyTxPayload& payload) noexcept;
+[[nodiscard]] bool DecodeRecoveryReadinessTxPayload(
+    const std::vector<unsigned char>& encoded,
+    RecoveryReadinessTxPayload& payload) noexcept;
 
 } // namespace llmq::pq
 

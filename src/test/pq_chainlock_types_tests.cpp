@@ -355,10 +355,10 @@ BOOST_AUTO_TEST_CASE(chainlock_share_transcript_canonical_vector)
 
     BOOST_CHECK_EQUAL(
         Hash(encoded).ToString(),
-        "0f6fb29cd0c06b13e87714fcd29ab51aa9e0ff9be54b430fed26d08cd2f357e9");
+        "455298cf1562507bace1553d5667c63b5e6d635410700e342439ad30d360cdc7");
     BOOST_CHECK_EQUAL(
         GetChainLockShareHash(genesis_hash, transcript).ToString(),
-        "e52748a867df8b19ca58f53d2422853df2e19d2b6c1a8329d19e3d5f1aeee274");
+        "7377b7a6acd0a66610737d603ed25245ef0679e53d6767241e9ca97971dcad10");
 }
 
 BOOST_AUTO_TEST_CASE(final_chainlock_exact_geometry_and_roundtrip)

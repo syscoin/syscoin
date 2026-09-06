@@ -61,7 +61,7 @@ bool GetRecoveryRosterRetentionDependency(
     dependency.reset();
     std::optional<uint32_t> first_epoch;
     for (const auto& seed : statement.roster_beacons.active.seeds) {
-        if (seed.anchor_kind != RosterBeaconAnchorKind::RECOVERY) continue;
+        if (!seed.IsRecovery()) continue;
         const uint32_t candidate{
             seed.epoch - seed.epoch % static_cast<uint32_t>(ACTIVE_QUORUMS)};
         if (first_epoch && *first_epoch != candidate) return false;
@@ -71,6 +71,12 @@ bool GetRecoveryRosterRetentionDependency(
         if (statement.height < 0) return false;
         dependency = RecoveryRosterRetentionDependency{
             statement.height, *first_epoch};
+        const auto& source{statement.roster_beacons.active.recovery_authority_source};
+        if (source.kind == RecoveryRosterSourceKind::POW_REFRESH &&
+            source.refresh.group == *first_epoch / ACTIVE_QUORUMS) {
+            if (!source.IsStructurallyValid()) return false;
+            dependency->key_snapshot_height = source.refresh.snapshot_height;
+        }
     }
     return true;
 }
@@ -84,23 +90,15 @@ bool IsRecoverySourceBoundWindow(
         !HasRecoveryRosterBeacon(window)) {
         return window.IsStructurallyValid();
     }
-    const auto& source{
-        window.active.recovery_authority_source.normal_beacon};
-    if (!source.IsReady() ||
-        source.anchor_kind != RosterBeaconAnchorKind::NORMAL) {
-        return false;
-    }
     bool reached_normal_suffix{false};
     for (const auto& seed : window.active.seeds) {
         if (seed.anchor_kind == RosterBeaconAnchorKind::NORMAL) {
             reached_normal_suffix = true;
             continue;
         }
-        if (reached_normal_suffix ||
-            seed.anchor_kind != RosterBeaconAnchorKind::RECOVERY ||
-            seed.anchor_cursor != source.anchor_cursor ||
-            seed.anchor_btc_height != source.anchor_btc_height ||
-            seed.future_btc_hash != source.future_btc_hash) {
+        const auto expected{MakeRecoveryRosterBeaconSeed(
+            window.active.recovery_authority_source, seed.epoch)};
+        if (reached_normal_suffix || !expected || seed != *expected) {
             return false;
         }
     }
@@ -287,12 +285,13 @@ struct DiskRecoveryUniverseKey {
 };
 
 struct DiskSchema {
-    static constexpr std::size_t WIRE_SIZE{298};
+    static constexpr std::size_t WIRE_SIZE{330};
 
     std::array<uint8_t, 8> magic{SCHEMA_MAGIC};
     uint16_t schema_version{SCHEMA_VERSION};
     uint256 genesis_hash;
     uint256 schema_hash;
+    uint256 recovery_refresh_config_hash;
 
     int32_t epoch_origin{-1};
     uint32_t epoch_blocks{0};
@@ -335,6 +334,7 @@ struct DiskSchema {
     {
         ::SerializeMany(
             stream, magic, schema_version, genesis_hash, schema_hash,
+            recovery_refresh_config_hash,
             epoch_origin,
             epoch_blocks, chainlock_period, sign_lag, active_epochs,
             btcc_candidate_origin, btcc_candidate_period,
@@ -360,6 +360,7 @@ struct DiskSchema {
         }
         ::UnserializeMany(
             stream, magic, schema_version, genesis_hash, schema_hash,
+            recovery_refresh_config_hash,
             epoch_origin,
             epoch_blocks, chainlock_period, sign_lag, active_epochs,
             btcc_candidate_origin, btcc_candidate_period,
@@ -393,6 +394,13 @@ DiskSchema MakeSchema(const uint256& genesis_hash,
 
     DiskSchema schema;
     schema.genesis_hash = genesis_hash;
+    const auto& refresh{config.recovery_refresh};
+    schema.recovery_refresh_config_hash = TaggedHash(
+        "SYS_PQ_RECOVERY_REFRESH_CONFIG_V1", genesis_hash,
+        refresh.activation_height, refresh.grace_groups, refresh.snapshot_lag_blocks,
+        refresh.entropy_delay_blocks, refresh.carrier_delay_blocks,
+        refresh.carrier_min_depth_blocks, refresh.snapshot_min_work_blocks,
+        refresh.carrier_min_work_blocks, refresh.readiness_window_blocks);
     schema.epoch_origin = config.chainlock_schedule.epoch_origin;
     schema.epoch_blocks = config.chainlock_schedule.epoch_blocks;
     schema.chainlock_period = config.chainlock_schedule.chainlock_period;
@@ -1055,10 +1063,10 @@ static_assert(DiskRecord::MAX_WIRE_SIZE < MAX_SIZE);
 static_assert(DiskRecoveryUniverse::MAX_WIRE_SIZE < MAX_SIZE);
 static_assert(RECOVERY_UNIVERSE_DURABLE_OWNER_CAPACITY ==
               VERIFIED_AUTHORIZATION_BASE_CAPACITY + 6);
-static_assert(DiskRosterRecoveryPrecommit::WIRE_SIZE == 180);
+static_assert(DiskRosterRecoveryPrecommit::WIRE_SIZE == 212);
 static_assert(DiskReceiptArchiveRosterAuthorization::WIRE_SIZE < MAX_SIZE);
 static_assert(DiskBTCCPresealMarker::WIRE_SIZE == 500);
-static_assert(DiskPaymentAuditPresealMarker::WIRE_SIZE == 683);
+static_assert(DiskPaymentAuditPresealMarker::WIRE_SIZE == 715);
 
 bool IsValidBTCCPresealMarker(
     const ChainLockFinalityStoreConfig& config,

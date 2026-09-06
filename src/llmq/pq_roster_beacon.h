@@ -223,6 +223,9 @@ MakeRecoveryRosterBeaconWindow(
 [[nodiscard]] const RosterBeaconSeed* FindNewestNormalReadySeed(
     const RosterBeaconWindow& window) noexcept;
 
+[[nodiscard]] std::optional<RosterBeaconSeed> MakeRecoveryRosterBeaconSeed(
+    const RecoveryRosterAuthoritySource& source, uint32_t epoch) noexcept;
+
 /**
  * Miner-independent roster modifier. Base, carrier, and handoff block hashes
  * are intentionally absent; branch identity remains in the descriptor.

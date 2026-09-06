@@ -61,11 +61,32 @@ std::optional<llmq::pq::GlobalKeyTxPayload> GetPQGlobalKeyPayload(
     return payload;
 }
 
+std::optional<llmq::pq::RecoveryReadinessTxPayload> GetPQReadinessPayload(
+    const CTransaction& tx)
+{
+    if (tx.nVersion != SYSCOIN_TX_VERSION_PQ_RECOVERY_READINESS) {
+        return std::nullopt;
+    }
+    std::vector<unsigned char> encoded;
+    int output_index{-1};
+    llmq::pq::RecoveryReadinessTxPayload payload;
+    if (!GetSyscoinData(tx, encoded, output_index) ||
+        !llmq::pq::DecodeRecoveryReadinessTxPayload(encoded, payload)) {
+        return std::nullopt;
+    }
+    return payload;
+}
+
 std::optional<uint256> GetPQOperatorUpdate(const CTransaction& tx)
 {
     if (tx.nVersion == SYSCOIN_TX_VERSION_PQ_GLOBAL_KEY) {
         const auto payload{GetPQGlobalKeyPayload(tx)};
         return payload ? std::optional<uint256>{payload->pro_tx_hash}
+                       : std::nullopt;
+    }
+    if (tx.nVersion == SYSCOIN_TX_VERSION_PQ_RECOVERY_READINESS) {
+        const auto payload{GetPQReadinessPayload(tx)};
+        return payload ? std::optional<uint256>{payload->readiness.pro_tx_hash}
                        : std::nullopt;
     }
     if (tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE) {
@@ -80,7 +101,8 @@ std::optional<uint256> GetPQOperatorUpdate(const CTransaction& tx)
 
 bool IsStandalonePQRegistryTx(const CTransaction& tx)
 {
-    return tx.nVersion == SYSCOIN_TX_VERSION_PQ_GLOBAL_KEY;
+    return tx.nVersion == SYSCOIN_TX_VERSION_PQ_GLOBAL_KEY ||
+           tx.nVersion == SYSCOIN_TX_VERSION_PQ_RECOVERY_READINESS;
 }
 
 std::optional<uint256> GetProviderMutation(const CTransaction& tx)
@@ -105,7 +127,8 @@ bool IsBranchBoundProviderTransaction(const CTransaction& tx) noexcept
            tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE ||
            tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR ||
            tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE ||
-           tx.nVersion == SYSCOIN_TX_VERSION_PQ_GLOBAL_KEY;
+           tx.nVersion == SYSCOIN_TX_VERSION_PQ_GLOBAL_KEY ||
+           tx.nVersion == SYSCOIN_TX_VERSION_PQ_RECOVERY_READINESS;
 }
 
 bool SpendsOutpoint(const CTransaction& tx,
@@ -1492,6 +1515,10 @@ std::optional<size_t> CTxMemPool::FindPackageProviderTxConflict(
             return index;
         }
         const auto pq_operator_update{GetPQOperatorUpdate(tx)};
+        if (tx.nVersion == SYSCOIN_TX_VERSION_PQ_RECOVERY_READINESS &&
+            !pq_operator_update) {
+            return index;
+        }
         const auto provider_mutation{GetProviderMutation(tx)};
         const bool is_pq_revoke{
             tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE &&
@@ -1499,7 +1526,7 @@ std::optional<size_t> CTxMemPool::FindPackageProviderTxConflict(
 
         // Registry updates require the target DMN to survive the complete
         // block. Ordinary provider mutations may precede a collateral spend,
-        // but tx86/revoke cannot coexist with one in either transaction order.
+        // but registry updates cannot coexist with one in either order.
         for (const auto& input : tx.vin) {
             const auto dmn{mn_list.GetMNByCollateral(input.prevout)};
             if (dmn && has_pq_operator_update(dmn->proTxHash)) {
@@ -1656,14 +1683,23 @@ bool CTxMemPool::RebuildPQRegistryReservations(
     AssertLockHeld(cs_main);
     AssertLockHeld(cs);
 
-    if (mapPQGlobalReservations.empty()) {
+    std::set<uint256> requested_set;
+    std::vector<uint256> registry_txids;
+    for (const auto& [txid, reservation] : mapPQGlobalReservations) {
+        requested_set.insert(reservation.pro_tx_hash);
+        registry_txids.push_back(txid);
+    }
+    for (const auto& [pro_tx_hash, txid] : mapPQOperatorUpdates) {
+        const auto entry{mapTx.find(txid)};
+        if (entry != mapTx.end() &&
+            entry->GetTx().nVersion == SYSCOIN_TX_VERSION_PQ_RECOVERY_READINESS) {
+            requested_set.insert(pro_tx_hash);
+            registry_txids.push_back(txid);
+        }
+    }
+    if (requested_set.empty()) {
         m_pq_operator_introductions = 0;
         return true;
-    }
-
-    std::set<uint256> requested_set;
-    for (const auto& [_, reservation] : mapPQGlobalReservations) {
-        requested_set.insert(reservation.pro_tx_hash);
     }
     llmq::pq::PQRegistryMempoolView view;
     std::string error;
@@ -1679,12 +1715,7 @@ bool CTxMemPool::RebuildPQRegistryReservations(
         LogPrint(BCLog::MEMPOOL,
                  "%s: dropping PQ reservations after view failure: %s\n",
                  __func__, error);
-        std::vector<uint256> txids;
-        txids.reserve(mapPQGlobalReservations.size());
-        for (const auto& [txid, _] : mapPQGlobalReservations) {
-            txids.push_back(txid);
-        }
-        for (const auto& txid : txids) {
+        for (const auto& txid : registry_txids) {
             const auto entry{mapTx.find(txid)};
             if (entry != mapTx.end()) {
                 removeRecursive(entry->GetTx(),
@@ -1704,6 +1735,26 @@ bool CTxMemPool::RebuildPQRegistryReservations(
     AssertLockHeld(cs);
 
     std::vector<uint256> aged;
+    // An omitted declaration expires even on an ordinary forward tip. Aging
+    // only key reservations leaves tx87 to poison every subsequent template.
+    for (const auto& [_, txid] : mapPQOperatorUpdates) {
+        const auto entry{mapTx.find(txid)};
+        if (entry == mapTx.end() ||
+            entry->GetTx().nVersion != SYSCOIN_TX_VERSION_PQ_RECOVERY_READINESS) {
+            continue;
+        }
+        const auto payload{GetPQReadinessPayload(entry->GetTx())};
+        const auto coordinates{payload
+            ? llmq::pq::DeriveRecoveryRefreshCoordinates(
+                  view.config.schedule, view.config.btcc_schedule,
+                  view.config.recovery_refresh, payload->readiness.group)
+            : std::nullopt};
+        if (!coordinates || view.tip_height < 0 ||
+            view.tip_height >= coordinates->snapshot_height ||
+            payload->readiness.reference_height != coordinates->readiness_reference_height) {
+            aged.push_back(txid);
+        }
+    }
     for (const auto& [txid, reservation] : mapPQGlobalReservations) {
         const auto* current{view.FindOperator(reservation.pro_tx_hash)};
         bool same_commitment{false};
@@ -2143,6 +2194,10 @@ bool CTxMemPool::existsProviderTxConflict(
         return true;
     }
     const auto pq_operator_update{GetPQOperatorUpdate(tx)};
+    if (tx.nVersion == SYSCOIN_TX_VERSION_PQ_RECOVERY_READINESS &&
+        !pq_operator_update) {
+        return true;
+    }
     const auto provider_mutation{GetProviderMutation(tx)};
     const bool is_pq_revoke{
         tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE &&

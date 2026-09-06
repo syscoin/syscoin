@@ -142,6 +142,21 @@ CMutableTransaction PQRevokeTransaction(const uint256& pro_tx_hash)
     return tx;
 }
 
+CMutableTransaction PQReadinessTransaction(const uint256& pro_tx_hash)
+{
+    auto tx{PQMempoolBaseTransaction(SYSCOIN_TX_VERSION_PQ_RECOVERY_READINESS, 87)};
+    llmq::pq::RecoveryReadinessTxPayload payload;
+    payload.readiness.pro_tx_hash = pro_tx_hash;
+    payload.readiness.global_key_version = 1;
+    payload.readiness.group = 1;
+    payload.readiness.reference_height = 1000;
+    payload.readiness.reference_hash = PQMempoolHash(88);
+    payload.readiness.transaction_inputs_hash = CalcTxInputsHash(CTransaction(tx));
+    payload.signature[0] = 1;
+    SetTxPayload(tx, payload);
+    return tx;
+}
+
 CMutableTransaction PQServiceTransaction(
     const uint256& pro_tx_hash,
     const CService& service = {},
@@ -776,6 +791,130 @@ BOOST_AUTO_TEST_CASE(PQOperatorUpdateConflicts)
     pool.removeRecursive(CTransaction{retained_ordinary},
                          REMOVAL_REASON_DUMMY);
 }
+
+BOOST_AUTO_TEST_CASE(PQReadinessConflictsAreIndexedWithoutNewKeyReservations)
+{
+    CTxMemPool& pool{*Assert(m_node.mempool)};
+    LOCK2(cs_main, pool.cs);
+    TestMemPoolEntryHelper entry;
+    const auto* tip{m_node.chainman->ActiveTip()};
+    const uint256 pro_tx_hash{PQMempoolHash(870)};
+    const COutPoint collateral{PQMempoolHash(871), 0};
+    const auto ready{PQReadinessTransaction(pro_tx_hash)};
+    const auto global{PQGlobalKeyTransaction(pro_tx_hash)};
+    const auto revoke{PQRevokeTransaction(pro_tx_hash)};
+    BOOST_CHECK(IsMasternodeTx(ready.nVersion));
+    BOOST_CHECK(IsPQActivationQuarantinedProviderTxVersion(ready.nVersion));
+    BOOST_REQUIRE(pool.addUnchecked(entry.FromTx(ready), true, nullptr, collateral));
+    BOOST_CHECK(pool.existsProviderTxConflict(CTransaction(global), tip));
+    BOOST_CHECK(pool.existsProviderTxConflict(CTransaction(revoke), tip));
+    auto spend{PQMempoolBaseTransaction(2, 872)};
+    spend.vin[0].prevout = collateral;
+    BOOST_CHECK(pool.existsProviderTxConflict(CTransaction(spend), tip));
+    pool.removeRecursive(CTransaction(ready), REMOVAL_REASON_DUMMY);
+    BOOST_CHECK(!pool.existsProviderTxConflict(CTransaction(spend), tip));
+
+    llmq::pq::PQRegistryMempoolView registry_view;
+    registry_view.operators = {{.pro_tx_hash = pro_tx_hash, .state_exists = 1}};
+    const auto mn_list{PQMempoolMNList(pro_tx_hash, collateral)};
+    const auto find_conflict = [&](const std::vector<CTransactionRef>& package)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main, pool.cs) {
+        return PQMempoolTestAccess::FindPackageProviderTxConflict(pool, package, mn_list, registry_view);
+    };
+    BOOST_CHECK(!find_conflict({MakeTransactionRef(ready)}));
+    BOOST_CHECK(find_conflict({MakeTransactionRef(ready), MakeTransactionRef(global)}) == 1U);
+    BOOST_CHECK(find_conflict({MakeTransactionRef(global), MakeTransactionRef(ready)}) == 1U);
+    BOOST_CHECK(find_conflict({MakeTransactionRef(ready), MakeTransactionRef(revoke)}) == 1U);
+    BOOST_CHECK(find_conflict({MakeTransactionRef(revoke), MakeTransactionRef(ready)}) == 1U);
+    BOOST_CHECK(find_conflict({MakeTransactionRef(ready), MakeTransactionRef(spend)}) == 1U);
+    BOOST_CHECK(find_conflict({MakeTransactionRef(spend), MakeTransactionRef(ready)}) == 1U);
+    pool.addUnchecked(entry.FromTx(ready));
+    PQMempoolTestAccess::RemoveProTxConflicts(pool, CTransaction(global), mn_list);
+    BOOST_CHECK(!pool.exists(GenTxid::Txid(ready.GetHash())));
+}
+
+BOOST_AUTO_TEST_CASE(PQReadinessExpiresAtForwardSnapshotTipWithoutKeyReservations)
+{
+    CTxMemPool& pool{*Assert(m_node.mempool)};
+    LOCK2(cs_main, pool.cs);
+    TestMemPoolEntryHelper entry;
+    llmq::pq::PQRegistryMempoolView view;
+    view.config.schedule.epoch_origin = 1440;
+    view.config.btcc_schedule.candidate_origin = 1440;
+    view.config.recovery_refresh = {
+        .activation_height = 1000,
+        .grace_groups = 1,
+        .snapshot_lag_blocks = 140,
+        .entropy_delay_blocks = 2,
+        .carrier_delay_blocks = 2,
+        .carrier_min_depth_blocks = 2,
+        .snapshot_min_work_blocks = 1,
+        .carrier_min_work_blocks = 1,
+        .readiness_window_blocks = 4,
+    };
+    const auto coordinates{llmq::pq::DeriveRecoveryRefreshCoordinates(
+        view.config.schedule, view.config.btcc_schedule,
+        view.config.recovery_refresh, 0)};
+    BOOST_REQUIRE(coordinates);
+    const auto next_coordinates{llmq::pq::DeriveRecoveryRefreshCoordinates(
+        view.config.schedule, view.config.btcc_schedule,
+        view.config.recovery_refresh, 1)};
+    BOOST_REQUIRE(next_coordinates);
+    auto ready{PQReadinessTransaction(PQMempoolHash(880))};
+    llmq::pq::RecoveryReadinessTxPayload payload;
+    BOOST_REQUIRE(GetTxPayload(ready, payload));
+    payload.readiness.group = 0;
+    payload.readiness.reference_height = coordinates->readiness_reference_height;
+    SetTxPayload(ready, payload);
+    auto child{PQMempoolBaseTransaction(2, 881)};
+    child.vin[0].prevout = COutPoint{ready.GetHash(), 0};
+    auto later{PQReadinessTransaction(PQMempoolHash(882))};
+    later.vin[0].prevout = COutPoint{PQMempoolHash(883), 0};
+    BOOST_REQUIRE(GetTxPayload(later, payload));
+    payload.readiness.reference_height = next_coordinates->readiness_reference_height;
+    payload.readiness.transaction_inputs_hash = CalcTxInputsHash(CTransaction(later));
+    SetTxPayload(later, payload);
+    const auto ordinary{PQMempoolBaseTransaction(2, 884)};
+    const auto revoke{PQRevokeTransaction(PQMempoolHash(885))};
+    pool.addUnchecked(entry.FromTx(ready));
+    pool.addUnchecked(entry.FromTx(child));
+    pool.addUnchecked(entry.FromTx(later));
+    pool.addUnchecked(entry.FromTx(ordinary));
+    pool.addUnchecked(entry.FromTx(revoke));
+    BOOST_REQUIRE_EQUAL(pool.size(), 5U);
+
+    view.tip_height = coordinates->snapshot_height - 1;
+    BOOST_CHECK(PQMempoolTestAccess::RebuildPQRegistryReservations(pool, view));
+    BOOST_CHECK_EQUAL(pool.size(), 5U);
+    // Next height S remains admissible; after an omitted declaration's block S
+    // connects, both the declaration and its funding descendants must leave.
+    view.tip_height = coordinates->snapshot_height;
+    BOOST_CHECK(PQMempoolTestAccess::RebuildPQRegistryReservations(pool, view));
+    BOOST_CHECK_EQUAL(pool.size(), 3U);
+    BOOST_CHECK(!pool.exists(GenTxid::Txid(ready.GetHash())));
+    BOOST_CHECK(!pool.exists(GenTxid::Txid(child.GetHash())));
+    BOOST_CHECK(pool.exists(GenTxid::Txid(later.GetHash())));
+    BOOST_CHECK(pool.exists(GenTxid::Txid(ordinary.GetHash())));
+    BOOST_CHECK(pool.exists(GenTxid::Txid(revoke.GetHash())));
+    view.tip_height = next_coordinates->snapshot_height - 1;
+    BOOST_CHECK(PQMempoolTestAccess::RebuildPQRegistryReservations(pool, view));
+    BOOST_CHECK(pool.exists(GenTxid::Txid(later.GetHash())));
+    view.tip_height = next_coordinates->snapshot_height;
+    BOOST_CHECK(PQMempoolTestAccess::RebuildPQRegistryReservations(pool, view));
+    BOOST_CHECK(!pool.exists(GenTxid::Txid(later.GetHash())));
+
+    // The production tip entry point may not skip a readiness-only pool. A
+    // failed exact-tip view drops registry transactions, not unrelated entries.
+    pool.addUnchecked(entry.FromTx(ready));
+    pool.addUnchecked(entry.FromTx(child));
+    BOOST_CHECK(!pool.RebuildPQRegistryReservations(nullptr));
+    BOOST_CHECK(!pool.exists(GenTxid::Txid(ready.GetHash())));
+    BOOST_CHECK(!pool.exists(GenTxid::Txid(child.GetHash())));
+    BOOST_CHECK_EQUAL(pool.size(), 2U);
+    pool.removeRecursive(CTransaction(ordinary), REMOVAL_REASON_DUMMY);
+    pool.removeRecursive(CTransaction(revoke), REMOVAL_REASON_DUMMY);
+}
+
 BOOST_AUTO_TEST_CASE(PQRegistryMempoolCapacity)
 {
     CTxMemPool& pool = *Assert(m_node.mempool);

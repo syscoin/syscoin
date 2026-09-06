@@ -100,7 +100,19 @@ void SerializeBuildConfig(DataStream& stream,
            << config.schedule.active_epochs
            << config.roster_snapshot_lag_blocks
            << config.registration_cutoff_blocks
-           << config.future_horizon_epochs;
+           << config.future_horizon_epochs
+           << config.btcc_schedule.candidate_origin
+           << config.btcc_schedule.candidate_period
+           << config.btcc_schedule.nevm_injection_lag
+           << config.recovery_refresh.activation_height
+           << config.recovery_refresh.grace_groups
+           << config.recovery_refresh.snapshot_lag_blocks
+           << config.recovery_refresh.entropy_delay_blocks
+           << config.recovery_refresh.carrier_delay_blocks
+           << config.recovery_refresh.carrier_min_depth_blocks
+           << config.recovery_refresh.snapshot_min_work_blocks
+           << config.recovery_refresh.carrier_min_work_blocks
+           << config.recovery_refresh.readiness_window_blocks;
 }
 
 void UnserializeBuildConfig(DataStream& stream,
@@ -113,7 +125,19 @@ void UnserializeBuildConfig(DataStream& stream,
            >> config.schedule.active_epochs
            >> config.roster_snapshot_lag_blocks
            >> config.registration_cutoff_blocks
-           >> config.future_horizon_epochs;
+           >> config.future_horizon_epochs
+           >> config.btcc_schedule.candidate_origin
+           >> config.btcc_schedule.candidate_period
+           >> config.btcc_schedule.nevm_injection_lag
+           >> config.recovery_refresh.activation_height
+           >> config.recovery_refresh.grace_groups
+           >> config.recovery_refresh.snapshot_lag_blocks
+           >> config.recovery_refresh.entropy_delay_blocks
+           >> config.recovery_refresh.carrier_delay_blocks
+           >> config.recovery_refresh.carrier_min_depth_blocks
+           >> config.recovery_refresh.snapshot_min_work_blocks
+           >> config.recovery_refresh.carrier_min_work_blocks
+           >> config.recovery_refresh.readiness_window_blocks;
 }
 
 void SerializeBranchPoint(DataStream& stream,

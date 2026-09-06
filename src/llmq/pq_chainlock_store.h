@@ -124,6 +124,7 @@ struct ChainLockFinalityStoreConfig {
     std::size_t seen_witness_capacity{DEFAULT_SEEN_WITNESS_CACHE_SIZE};
     std::size_t rejected_witness_capacity{DEFAULT_REJECTED_WITNESS_CACHE_SIZE};
     std::size_t recent_chainlocks_capacity{DEFAULT_RECENT_CHAINLOCKS_SIZE};
+    RecoveryRefreshConfig recovery_refresh{};
 
     [[nodiscard]] bool IsValid() const noexcept;
 };

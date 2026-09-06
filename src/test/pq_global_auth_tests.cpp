@@ -5,6 +5,8 @@
 #include <llmq/pq_global_auth.h>
 
 #include <crypto/slhdsa/slhdsa.h>
+#include <evo/pq_providertx.h>
+#include <streams.h>
 
 #include <boost/test/unit_test.hpp>
 
@@ -78,6 +80,71 @@ NetworkEndpoint Endpoint(uint8_t last_byte, uint16_t port)
 } // namespace
 
 BOOST_AUTO_TEST_SUITE(pq_global_auth_tests)
+
+BOOST_AUTO_TEST_CASE(recovery_readiness_binds_group_branch_key_inputs_and_domain)
+{
+    const uint256 genesis{NonNullHash(700)};
+    auto key{DeterministicKey()};
+    auto current{CandidateFor(key, 1)};
+    current.activated_height = 1440;
+    RecoveryReadinessAuthorization authorization;
+    authorization.pro_tx_hash = NonNullHash(701);
+    authorization.global_key_version = current.key_version;
+    authorization.group = 3;
+    authorization.reference_height = 4'000;
+    authorization.reference_hash = NonNullHash(702);
+    authorization.transaction_inputs_hash = NonNullHash(703);
+    const auto digest{GetRecoveryReadinessAuthorizationHash(genesis, current, authorization)};
+    BOOST_REQUIRE(digest);
+    const auto signature{Sign(key, GlobalAuthPurpose::RECOVERY_READINESS, *digest)};
+    BOOST_CHECK(VerifyRecoveryReadinessAuthorization(genesis, current, authorization, signature));
+    BOOST_CHECK(!VerifyRecoveryReadinessAuthorization(NonNullHash(704), current, authorization, signature));
+    const auto wrong_purpose{Sign(key, GlobalAuthPurpose::PROVIDER_REVOKE, *digest)};
+    BOOST_CHECK(!VerifyRecoveryReadinessAuthorization(genesis, current, authorization, wrong_purpose));
+
+    const auto check_changed = [&](const RecoveryReadinessAuthorization& changed) {
+        const auto changed_digest{GetRecoveryReadinessAuthorizationHash(genesis, current, changed)};
+        BOOST_CHECK(!changed_digest || *changed_digest != *digest);
+        BOOST_CHECK(!VerifyRecoveryReadinessAuthorization(genesis, current, changed, signature));
+    };
+    auto changed{authorization};
+    ++changed.group;
+    check_changed(changed);
+    changed = authorization;
+    ++changed.reference_height;
+    check_changed(changed);
+    changed = authorization;
+    changed.reference_hash = NonNullHash(705);
+    check_changed(changed);
+    changed = authorization;
+    changed.pro_tx_hash = NonNullHash(706);
+    check_changed(changed);
+    changed = authorization;
+    changed.transaction_inputs_hash = NonNullHash(707);
+    check_changed(changed);
+    changed = authorization;
+    ++changed.global_key_version;
+    check_changed(changed);
+    auto changed_key{current};
+    changed_key.public_key[0] ^= 1;
+    BOOST_CHECK(!VerifyRecoveryReadinessAuthorization(genesis, changed_key, authorization, signature));
+
+    RecoveryReadinessTxPayload payload{authorization, signature};
+    CDataStream stream{SER_NETWORK, 0};
+    stream << payload;
+    const auto wire_bytes{MakeUCharSpan(stream)};
+    std::vector<unsigned char> encoded{wire_bytes.begin(), wire_bytes.end()};
+    BOOST_CHECK_EQUAL(encoded.size(), RecoveryReadinessTxPayload::WIRE_SIZE);
+    RecoveryReadinessTxPayload decoded;
+    BOOST_REQUIRE(DecodeRecoveryReadinessTxPayload(encoded, decoded));
+    BOOST_CHECK(decoded == payload);
+    encoded.push_back(0);
+    BOOST_CHECK(!DecodeRecoveryReadinessTxPayload(encoded, decoded));
+    encoded.pop_back();
+    encoded.pop_back();
+    BOOST_CHECK(!DecodeRecoveryReadinessTxPayload(encoded, decoded));
+    BOOST_CHECK(!payload.IsTriviallyValid(PQ_GLOBAL_KEY_TX_VERSION));
+}
 
 BOOST_AUTO_TEST_CASE(canonical_global_authorizations_and_domain_separation)
 {

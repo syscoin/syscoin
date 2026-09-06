@@ -571,6 +571,16 @@ bool RecoveryUniverseCapsule::IsStructurallyValid() const noexcept
     }
     const uint256 expected_members_hash{GetRecoveryUniverseMembersHash(
         m_genesis_hash, m_members)};
+    if (m_source.kind == RecoveryRosterSourceKind::POW_REFRESH &&
+        (m_source.refresh.universe_root != expected_members_hash ||
+         m_source.refresh.snapshot_height != m_source_snapshot_height ||
+         m_source.refresh.snapshot_hash != m_source_snapshot_hash ||
+         GetRecoveryRefreshEntropyHash(m_genesis_hash, expected_members_hash,
+             m_source.refresh.group, m_source_snapshot_hash,
+             m_source.refresh.entropy_block_hash,
+             m_source.refresh.parent_work_hash) != m_source.refresh.seed)) {
+        return false;
+    }
     return !expected_members_hash.IsNull() &&
            m_source_id == GetRecoveryUniverseSourceId(
                m_genesis_hash, m_source) &&
@@ -598,6 +608,8 @@ bool QuorumBuildConfig::IsValid() const noexcept
     // branch-derived roster after a finalized predecessor. Together these
     // preserve threshold intersection across sibling targets.
     if (!schedule.IsValid() || roster_snapshot_lag_blocks == 0 ||
+        (!recovery_refresh.IsDisabled() &&
+         !recovery_refresh.IsValid(schedule, btcc_schedule)) ||
         roster_snapshot_lag_blocks < schedule.sign_lag ||
         roster_snapshot_lag_blocks > schedule.epoch_blocks ||
         registration_cutoff_blocks < roster_snapshot_lag_blocks ||
@@ -830,6 +842,7 @@ bool PrepareSnapshotOperatorLookup(
 }
 
 const CBlockIndex* ResolveRecoverySourceSnapshot(
+    const uint256& genesis_hash,
     const QuorumBuildConfig& config,
     const CBlockIndex& target_index,
     const RecoveryRosterAuthoritySource& source,
@@ -838,6 +851,32 @@ const CBlockIndex* ResolveRecoverySourceSnapshot(
     if (!source.IsStructurallyValid() || source.IsNull()) {
         SetError(error, QuorumBuildError::INVALID_ROSTER_BEACON);
         return nullptr;
+    }
+    if (source.kind == RecoveryRosterSourceKind::POW_REFRESH) {
+        const auto coordinates{DeriveRecoveryRefreshCoordinates(
+            config.schedule, config.btcc_schedule, config.recovery_refresh,
+            source.refresh.group)};
+        if (!coordinates || target_index.nHeight < coordinates->authority_height ||
+            source.refresh.snapshot_height != coordinates->snapshot_height ||
+            source.refresh.entropy_height != coordinates->entropy_height ||
+            source.refresh.carrier_height != coordinates->carrier_height) {
+            SetError(error, QuorumBuildError::SNAPSHOT_MISMATCH);
+            return nullptr;
+        }
+        const auto* authority{target_index.GetAncestor(coordinates->authority_height)};
+        const auto sample{authority ? ValidateIndexedRecoveryRefreshWork(
+            config.schedule, config.btcc_schedule, config.recovery_refresh,
+            *coordinates, *authority) : std::nullopt};
+        if (!sample || sample->SnapshotHash() != source.refresh.snapshot_hash ||
+            sample->EntropyBlockHash() != source.refresh.entropy_block_hash ||
+            sample->CarrierHash() != source.refresh.carrier_block_hash ||
+            sample->ParentWorkHash() != source.refresh.parent_work_hash ||
+            GetRecoveryRefreshEntropyHash(genesis_hash,
+                source.refresh.universe_root, *sample) != source.refresh.seed) {
+            SetError(error, QuorumBuildError::INVALID_ROSTER_BEACON);
+            return nullptr;
+        }
+        return target_index.GetAncestor(coordinates->snapshot_height);
     }
     const auto& normal_beacon{source.normal_beacon};
     const auto snapshot_height{RegistrationCutoffHeight(
@@ -887,14 +926,21 @@ bool HasUsableNormalRecoverySource(
     return selected && HasUniqueSelectedChildRoots(*selected, error);
 }
 
-RecoveryUniverseCapsulePtr BuildRecoveryUniverseCapsuleFromPrepared(
-    const uint256& genesis_hash,
-    const RecoveryRosterAuthoritySource& source,
+std::optional<std::vector<RecoveryUniverseMember>> CollectRecoveryUniverseMembers(
+    const std::optional<RecoveryRefreshCoordinates>& coordinates,
     const CBlockIndex& source_snapshot_index,
     const QuorumSnapshotState& source_state,
     const OperatorStateLookup& source_operator_states,
     QuorumBuildError* error)
 {
+    const CBlockIndex* reference{coordinates
+        ? source_snapshot_index.GetAncestor(coordinates->readiness_reference_height)
+        : nullptr};
+    if (coordinates && (!reference ||
+        source_snapshot_index.nHeight != coordinates->snapshot_height)) {
+        SetError(error, QuorumBuildError::SNAPSHOT_MISMATCH);
+        return std::nullopt;
+    }
     std::vector<RecoveryUniverseMember> members;
     members.reserve(std::min<std::size_t>(
         source_state.deterministic_mns.GetAllMNsCount(),
@@ -919,6 +965,18 @@ RecoveryUniverseCapsulePtr BuildRecoveryUniverseCapsuleFromPrepared(
                 operator_state->has_global_key == 0) {
                 return;
             }
+            if (coordinates) {
+                if (!operator_state->IsRecoveryReady(
+                        coordinates->group, reference->nHeight,
+                        reference->GetBlockHash(), source_snapshot_index.nHeight)) {
+                    return;
+                }
+                for (uint32_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+                    const auto root{operator_state->ResolveChildRoot(
+                        coordinates->first_epoch + slot)};
+                    if (!HasPresentChildRoot(root)) return;
+                }
+            }
             if (members.size() ==
                 RECOVERY_UNIVERSE_MAX_MEMBERS) {
                 over_capacity = true;
@@ -931,32 +989,59 @@ RecoveryUniverseCapsulePtr BuildRecoveryUniverseCapsuleFromPrepared(
         });
     if (invalid_masternode_state) {
         SetError(error, QuorumBuildError::INVALID_MASTERNODE_STATE);
-        return nullptr;
+        return std::nullopt;
     }
     if (over_capacity) {
         SetError(error, QuorumBuildError::INVALID_RECOVERY_UNIVERSE);
-        return nullptr;
+        return std::nullopt;
     }
     if (members.size() < QUORUM_SIZE) {
         SetError(error, QuorumBuildError::INSUFFICIENT_ELIGIBLE_MEMBERS);
-        return nullptr;
+        return std::nullopt;
     }
     std::sort(members.begin(), members.end(),
               [](const RecoveryUniverseMember& lhs,
                  const RecoveryUniverseMember& rhs) {
                   return lhs.pro_tx_hash < rhs.pro_tx_hash;
               });
+    return members;
+}
+
+RecoveryUniverseCapsulePtr BuildRecoveryUniverseCapsuleFromPrepared(
+    const uint256& genesis_hash,
+    const QuorumBuildConfig& config,
+    const RecoveryRosterAuthoritySource& source,
+    const CBlockIndex& source_snapshot_index,
+    const QuorumSnapshotState& source_state,
+    const OperatorStateLookup& source_operator_states,
+    QuorumBuildError* error)
+{
+    const auto coordinates{source.kind == RecoveryRosterSourceKind::POW_REFRESH
+        ? DeriveRecoveryRefreshCoordinates(config.schedule, config.btcc_schedule,
+              config.recovery_refresh, source.refresh.group)
+        : std::nullopt};
+    if (source.kind == RecoveryRosterSourceKind::POW_REFRESH && !coordinates) {
+        SetError(error, QuorumBuildError::INVALID_ROSTER_BEACON);
+        return nullptr;
+    }
+    auto members{CollectRecoveryUniverseMembers(coordinates,
+        source_snapshot_index, source_state, source_operator_states, error)};
+    if (!members) return nullptr;
     const uint256 members_hash{GetRecoveryUniverseMembersHash(
-        genesis_hash, members)};
+        genesis_hash, *members)};
+    if (coordinates && source.refresh.universe_root != members_hash) {
+        SetError(error, QuorumBuildError::INVALID_RECOVERY_UNIVERSE);
+        return nullptr;
+    }
     const uint256 source_id{GetRecoveryUniverseSourceId(
         genesis_hash, source)};
     const uint256 capsule_id{GetRecoveryUniverseCapsuleId(
         genesis_hash, source, source_snapshot_index.nHeight,
         source_snapshot_index.GetBlockHash(), members_hash,
-        members.size())};
+        members->size())};
     auto capsule{RecoveryUniverseCapsuleFactory::Create(
         genesis_hash, source, source_snapshot_index.nHeight,
-        source_snapshot_index.GetBlockHash(), source_id, std::move(members),
+        source_snapshot_index.GetBlockHash(), source_id, std::move(*members),
         members_hash, capsule_id)};
     if (!capsule) {
         SetError(error, QuorumBuildError::INVALID_RECOVERY_UNIVERSE);
@@ -969,11 +1054,9 @@ std::unique_ptr<FrozenQuorumRoster> BuildRecoveryFrozenQuorumRoster(
     const EpochIdentity& identity,
     const CBlockIndex& base_index,
     const CBlockIndex& source_snapshot_index,
-    const RosterBeaconSeed& normal_source,
+    const RecoveryRosterAuthoritySource& source,
     const RosterBeaconSeed& recovery_seed,
-    const RecoveryUniverseCapsule* recovery_universe,
-    const QuorumSnapshotState* source_state,
-    const OperatorStateLookup* source_operator_states,
+    const RecoveryUniverseCapsule& recovery_universe,
     const QuorumSnapshotState& key_state,
     const OperatorStateLookup& key_operator_states,
     const QuorumSnapshotState& signing_boundary_state,
@@ -982,70 +1065,42 @@ std::unique_ptr<FrozenQuorumRoster> BuildRecoveryFrozenQuorumRoster(
 {
     const auto beacon_hash{
         GetRosterBeaconCommitmentHash(genesis_hash, recovery_seed)};
-    const auto entropy_commitment{
-        GetRecoveryRosterEntropyCommitment(genesis_hash, normal_source)};
-    auto expected_recovery_seed{normal_source};
-    expected_recovery_seed.anchor_kind = RosterBeaconAnchorKind::RECOVERY;
-    expected_recovery_seed.epoch = identity.epoch;
+    const auto entropy_commitment{source.kind == RecoveryRosterSourceKind::POW_REFRESH
+        ? std::optional<uint256>{source.refresh.seed}
+        : GetRecoveryRosterEntropyCommitment(genesis_hash, source.normal_beacon)};
+    const auto expected_recovery_seed{MakeRecoveryRosterBeaconSeed(source, identity.epoch)};
     if (!beacon_hash ||
         !entropy_commitment ||
-        !normal_source.IsReady() ||
-        normal_source.anchor_kind != RosterBeaconAnchorKind::NORMAL ||
-        recovery_seed != expected_recovery_seed ||
+        !expected_recovery_seed || recovery_seed != *expected_recovery_seed ||
         source_snapshot_index.nHeight >= base_index.nHeight ||
         key_state.deterministic_mns.GetHeight() >= base_index.nHeight) {
         SetError(error, QuorumBuildError::INVALID_ROSTER_BEACON);
         return nullptr;
     }
 
-    const auto modifier{GetRecoveryRosterModifier(
-        genesis_hash, *entropy_commitment,
-        identity.epoch, source_snapshot_index.nHeight,
-        source_snapshot_index.GetBlockHash())};
+    const auto modifier{source.kind == RecoveryRosterSourceKind::POW_REFRESH
+        ? GetRecoveryRefreshRosterModifier(genesis_hash, *entropy_commitment,
+              identity.epoch / ACTIVE_QUORUMS, identity.epoch)
+        : GetRecoveryRosterModifier(genesis_hash, *entropy_commitment,
+              identity.epoch, source_snapshot_index.nHeight,
+              source_snapshot_index.GetBlockHash())};
     if (!modifier) {
         SetError(error, QuorumBuildError::INVALID_ROSTER_BEACON);
         return nullptr;
     }
     std::vector<uint256> selected_pro_tx_hashes;
     selected_pro_tx_hashes.reserve(QUORUM_SIZE);
-    if (recovery_universe != nullptr) {
-        const RecoveryRosterAuthoritySource expected_source{normal_source};
-        if (source_state != nullptr || source_operator_states != nullptr ||
-            recovery_universe->GenesisHash() != genesis_hash ||
-            recovery_universe->Source() != expected_source ||
-            recovery_universe->SourceSnapshotHeight() !=
-                source_snapshot_index.nHeight ||
-            recovery_universe->SourceSnapshotHash() !=
-                source_snapshot_index.GetBlockHash()) {
-            SetError(error, QuorumBuildError::INVALID_RECOVERY_UNIVERSE);
-            return nullptr;
-        }
-        const auto selected{SelectRecoveryUniverseMembers(
-            *recovery_universe, *modifier, error)};
-        if (!selected) return nullptr;
-        for (const auto& candidate : *selected) {
-            selected_pro_tx_hashes.push_back(candidate.member->pro_tx_hash);
-        }
-    } else {
-        if (source_state == nullptr || source_operator_states == nullptr) {
-            SetError(error, QuorumBuildError::INVALID_ARGUMENT);
-            return nullptr;
-        }
-        const auto selected{SelectRosterMembers(
-            source_state->deterministic_mns, *modifier,
-            *source_operator_states,
-            [](const OperatorKeyState* state, const uint256&) {
-                return CandidateKeyResolution{
-                    state != nullptr && state->has_global_key != 0
-                        ? CandidateDisposition::INCLUDE
-                        : CandidateDisposition::EXCLUDE,
-                    std::nullopt};
-            },
-            error)};
-        if (!selected) return nullptr;
-        for (const auto& candidate : *selected) {
-            selected_pro_tx_hashes.push_back(candidate.dmn->proTxHash);
-        }
+    if (recovery_universe.GenesisHash() != genesis_hash ||
+        recovery_universe.Source() != source ||
+        recovery_universe.SourceSnapshotHeight() != source_snapshot_index.nHeight ||
+        recovery_universe.SourceSnapshotHash() != source_snapshot_index.GetBlockHash()) {
+        SetError(error, QuorumBuildError::INVALID_RECOVERY_UNIVERSE);
+        return nullptr;
+    }
+    const auto selected{SelectRecoveryUniverseMembers(recovery_universe, *modifier, error)};
+    if (!selected) return nullptr;
+    for (const auto& candidate : *selected) {
+        selected_pro_tx_hashes.push_back(candidate.member->pro_tx_hash);
     }
 
     auto roster{std::make_unique<FrozenQuorumRoster>()};
@@ -1149,7 +1204,7 @@ std::unique_ptr<FrozenQuorumRosters> BuildActiveFrozenQuorumRostersImpl(
     const bool has_recovery_seed{std::any_of(
         beacon_bundle.seeds.begin(), beacon_bundle.seeds.end(),
         [](const RosterBeaconSeed& seed) {
-            return seed.anchor_kind == RosterBeaconAnchorKind::RECOVERY;
+            return seed.IsRecovery();
         })};
     if (beacon_bundle.recovery_authority_source.IsNull()) {
         SetError(error, QuorumBuildError::INVALID_ROSTER_BEACON);
@@ -1170,7 +1225,7 @@ std::unique_ptr<FrozenQuorumRosters> BuildActiveFrozenQuorumRostersImpl(
     OperatorStateLookup recovery_source_operator_states{{}, {}};
     if (prevalidate_source) {
         recovery_source_snapshot = ResolveRecoverySourceSnapshot(
-            config, *target_index,
+            genesis_hash, config, *target_index,
             beacon_bundle.recovery_authority_source, error);
         if (recovery_source_snapshot == nullptr) return nullptr;
         if (recovery_universe_lookup) {
@@ -1201,12 +1256,21 @@ std::unique_ptr<FrozenQuorumRosters> BuildActiveFrozenQuorumRostersImpl(
                 !PrepareSnapshotOperatorLookup(
                     config, *recovery_source_state,
                     recovery_source_operator_states, error) ||
-                !HasUsableNormalRecoverySource(
+                (beacon_bundle.recovery_authority_source.kind ==
+                     RecoveryRosterSourceKind::NORMAL_BEACON &&
+                 !HasUsableNormalRecoverySource(
                     genesis_hash, beacon_bundle.recovery_authority_source,
                     *recovery_source_snapshot, *recovery_source_state,
-                    recovery_source_operator_states, error)) {
+                    recovery_source_operator_states, error))) {
                 return nullptr;
             }
+            recovery_universe = BuildRecoveryUniverseCapsuleFromPrepared(
+                genesis_hash, config, beacon_bundle.recovery_authority_source,
+                *recovery_source_snapshot, *recovery_source_state,
+                recovery_source_operator_states, error);
+            if (!recovery_universe) return nullptr;
+            recovery_source_state.reset();
+            recovery_source_operator_states = {{}, {}};
         }
     }
 
@@ -1218,7 +1282,7 @@ std::unique_ptr<FrozenQuorumRosters> BuildActiveFrozenQuorumRostersImpl(
         const auto recovery_seed{std::find_if(
             beacon_bundle.seeds.begin(), beacon_bundle.seeds.end(),
             [](const RosterBeaconSeed& seed) {
-                return seed.anchor_kind == RosterBeaconAnchorKind::RECOVERY;
+                return seed.IsRecovery();
             })};
         const uint32_t recovery_first_epoch{
             recovery_seed->epoch -
@@ -1226,8 +1290,7 @@ std::unique_ptr<FrozenQuorumRosters> BuildActiveFrozenQuorumRostersImpl(
         if (std::any_of(
                 recovery_seed, beacon_bundle.seeds.end(),
                 [recovery_first_epoch](const RosterBeaconSeed& seed) {
-                    return seed.anchor_kind ==
-                               RosterBeaconAnchorKind::RECOVERY &&
+                    return seed.IsRecovery() &&
                            seed.epoch - seed.epoch %
                                static_cast<uint32_t>(ACTIVE_QUORUMS) !=
                                recovery_first_epoch;
@@ -1237,9 +1300,14 @@ std::unique_ptr<FrozenQuorumRosters> BuildActiveFrozenQuorumRostersImpl(
         }
         const auto recovery_first_base{EpochBaseHeight(
             config.schedule, recovery_first_epoch)};
-        const auto recovery_key_cutoff{RegistrationCutoffHeight(
-            config.schedule, recovery_first_epoch,
-            config.registration_cutoff_blocks)};
+        const auto recovery_key_cutoff{
+            beacon_bundle.recovery_authority_source.kind ==
+                    RecoveryRosterSourceKind::POW_REFRESH &&
+                beacon_bundle.recovery_authority_source.refresh.group ==
+                    recovery_first_epoch / ACTIVE_QUORUMS
+                ? std::optional<int32_t>{recovery_source_snapshot->nHeight}
+                : RegistrationCutoffHeight(config.schedule, recovery_first_epoch,
+                      config.registration_cutoff_blocks)};
         if (!recovery_first_base || !recovery_key_cutoff ||
             *recovery_key_cutoff < recovery_source_snapshot->nHeight ||
             *recovery_key_cutoff >= *recovery_first_base) {
@@ -1286,16 +1354,12 @@ std::unique_ptr<FrozenQuorumRosters> BuildActiveFrozenQuorumRostersImpl(
             return nullptr;
         }
         const auto& beacon_seed{beacon_bundle.seeds[slot]};
-        if (beacon_seed.anchor_kind == RosterBeaconAnchorKind::RECOVERY) {
+        if (beacon_seed.IsRecovery()) {
             auto roster{BuildRecoveryFrozenQuorumRoster(
                 genesis_hash, identity, *base_index,
                 *recovery_source_snapshot,
-                beacon_bundle.recovery_authority_source.normal_beacon,
-                beacon_seed, recovery_universe.get(),
-                recovery_source_state ? &*recovery_source_state : nullptr,
-                recovery_source_state
-                    ? &recovery_source_operator_states
-                    : nullptr,
+                beacon_bundle.recovery_authority_source,
+                beacon_seed, *recovery_universe,
                 *recovery_key_state, recovery_key_operator_states,
                 *signing_boundary_state,
                 signing_boundary_operator_states, error)};
@@ -1365,8 +1429,7 @@ std::unique_ptr<FrozenQuorumRosters> BuildActiveFrozenQuorumRostersImpl(
         std::all_of(
             beacon_bundle.seeds.begin(), beacon_bundle.seeds.end(),
             [](const RosterBeaconSeed& seed) {
-                return seed.anchor_kind ==
-                       RosterBeaconAnchorKind::RECOVERY;
+                return seed.IsRecovery();
             })};
     if (complete_recovery_window) {
         // RECOVER itself may use any three thresholds. The first normal
@@ -1420,20 +1483,21 @@ RecoveryUniverseCapsulePtr BuildRecoveryUniverseCapsule(
         return nullptr;
     }
     const CBlockIndex* source_snapshot{ResolveRecoverySourceSnapshot(
-        config, branch_tip, source, error)};
+        genesis_hash, config, branch_tip, source, error)};
     if (source_snapshot == nullptr) return nullptr;
     auto source_state{LookupSnapshotExact(
         *source_snapshot, snapshot_lookup, error)};
     OperatorStateLookup source_operator_states{{}, {}};
     if (!source_state || !PrepareSnapshotOperatorLookup(
             config, *source_state, source_operator_states, error) ||
-        !HasUsableNormalRecoverySource(
+        (source.kind == RecoveryRosterSourceKind::NORMAL_BEACON &&
+         !HasUsableNormalRecoverySource(
             genesis_hash, source, *source_snapshot, *source_state,
-            source_operator_states, error)) {
+            source_operator_states, error))) {
         return nullptr;
     }
     return BuildRecoveryUniverseCapsuleFromPrepared(
-        genesis_hash, source, *source_snapshot, *source_state,
+        genesis_hash, config, source, *source_snapshot, *source_state,
         source_operator_states, error);
 }
 
@@ -1574,6 +1638,14 @@ VerifiedRosterSetPtr FrozenQuorumRosterCache::GetVerifiedActiveImpl(
         SetError(error, QuorumBuildError::INVALID_ROSTER_BEACON);
         return nullptr;
     }
+    // Cached identities cannot preserve authority after G's full-validation
+    // provenance is revoked, including while its source drains into normal
+    // rosters or is reused by a later grace attempt.
+    if (beacon_bundle.recovery_authority_source.kind == RecoveryRosterSourceKind::POW_REFRESH &&
+        !ResolveRecoverySourceSnapshot(m_genesis_hash, m_config, *target,
+            beacon_bundle.recovery_authority_source, error)) {
+        return nullptr;
+    }
     const CBlockIndex* newest_base{
         target->GetAncestor(newest.base_height)};
     if (newest_base == nullptr) {
@@ -1585,7 +1657,7 @@ VerifiedRosterSetPtr FrozenQuorumRosterCache::GetVerifiedActiveImpl(
     const bool uses_recovery_rosters{std::any_of(
         beacon_bundle.seeds.begin(), beacon_bundle.seeds.end(),
         [](const RosterBeaconSeed& seed) {
-            return seed.anchor_kind == RosterBeaconAnchorKind::RECOVERY;
+            return seed.IsRecovery();
         })};
     const int32_t signing_boundary_height{
         target_height -
@@ -1702,6 +1774,54 @@ std::optional<bool> FrozenQuorumRosterCache::EvaluateNormalRecoverySource(
     return std::nullopt;
 }
 
+RecoveryUniverseCapsulePtr FrozenQuorumRosterCache::BuildPoWRefreshUniverse(
+    uint32_t group, const CBlockIndex& branch_tip, QuorumBuildError* error) const
+{
+    SetError(error, QuorumBuildError::NONE);
+    const auto coordinates{DeriveRecoveryRefreshCoordinates(m_config.schedule,
+        m_config.btcc_schedule, m_config.recovery_refresh, group)};
+    if (!coordinates || branch_tip.nHeight < coordinates->authority_height) {
+        SetError(error, QuorumBuildError::INVALID_SCHEDULE);
+        return nullptr;
+    }
+    const auto* authority{branch_tip.GetAncestor(coordinates->authority_height)};
+    const auto sample{authority ? ValidateIndexedRecoveryRefreshWork(
+        m_config.schedule, m_config.btcc_schedule, m_config.recovery_refresh,
+        *coordinates, *authority) : std::nullopt};
+    if (!sample) {
+        SetError(error, QuorumBuildError::INVALID_ROSTER_BEACON);
+        return nullptr;
+    }
+    const auto* snapshot{branch_tip.GetAncestor(coordinates->snapshot_height)};
+    auto state{snapshot ? LookupSnapshotExact(*snapshot, m_snapshot_lookup, error)
+                        : std::nullopt};
+    OperatorStateLookup operators{{}, {}};
+    if (!state || !PrepareSnapshotOperatorLookup(m_config, *state, operators, error)) {
+        return nullptr;
+    }
+    auto members{CollectRecoveryUniverseMembers(coordinates, *snapshot, *state,
+        operators, error)};
+    if (!members) return nullptr;
+    const auto root{GetRecoveryUniverseMembersHash(m_genesis_hash, *members)};
+    const auto seed{GetRecoveryRefreshEntropyHash(m_genesis_hash, root, *sample)};
+    if (!seed) {
+        SetError(error, QuorumBuildError::INVALID_ROSTER_BEACON);
+        return nullptr;
+    }
+    RecoveryRosterAuthoritySource source;
+    source.kind = RecoveryRosterSourceKind::POW_REFRESH;
+    source.refresh = RecoveryRefreshSource{group, coordinates->snapshot_height,
+        sample->SnapshotHash(), root, coordinates->entropy_height,
+        sample->EntropyBlockHash(), coordinates->carrier_height,
+        sample->CarrierHash(), sample->ParentWorkHash(), *seed};
+    const auto source_id{GetRecoveryUniverseSourceId(m_genesis_hash, source)};
+    const auto capsule_id{GetRecoveryUniverseCapsuleId(m_genesis_hash, source,
+        snapshot->nHeight, snapshot->GetBlockHash(), root, members->size())};
+    return RecoveryUniverseCapsuleFactory::Create(m_genesis_hash, source,
+        snapshot->nHeight, snapshot->GetBlockHash(), source_id,
+        std::move(*members), root, capsule_id);
+}
+
 RecoveryUniverseCapsulePtr
 FrozenQuorumRosterCache::GetOrCaptureRecoveryUniverse(
     const RecoveryRosterAuthoritySource& source,
@@ -1710,7 +1830,7 @@ FrozenQuorumRosterCache::GetOrCaptureRecoveryUniverse(
 {
     SetError(error, QuorumBuildError::NONE);
     const CBlockIndex* source_snapshot{ResolveRecoverySourceSnapshot(
-        m_config, branch_tip, source, error)};
+        m_genesis_hash, m_config, branch_tip, source, error)};
     if (source_snapshot == nullptr) return nullptr;
     if (m_recovery_universe_lookup) {
         RecoveryUniverseCapsulePtr persisted;

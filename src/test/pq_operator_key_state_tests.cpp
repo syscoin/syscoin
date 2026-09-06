@@ -10,6 +10,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <cstddef>
+#include <array>
 #include <cstdint>
 #include <ostream>
 
@@ -115,6 +116,89 @@ OperatorKeyState RegisteredState(const uint256& genesis,
 } // namespace
 
 BOOST_AUTO_TEST_SUITE(pq_operator_key_state_tests)
+
+BOOST_AUTO_TEST_CASE(recovery_readiness_is_explicit_frozen_and_key_scoped)
+{
+    const uint256 genesis{NonNullHash(700)};
+    const uint256 pro_tx_hash{NonNullHash(701)};
+    const auto initial_view{View(1000)};
+    const auto initial{Candidate(genesis, pro_tx_hash, 1, 1, 0, 70)};
+    auto state{RegisteredState(genesis, pro_tx_hash, initial_view, initial)};
+    const auto inclusion_view{View(1295)};
+    BOOST_REQUIRE(state.Advance(inclusion_view) == OperatorKeyStateResult::OK);
+    RecoveryReadinessAuthorization authorization;
+    authorization.pro_tx_hash = pro_tx_hash;
+    authorization.global_key_version = 1;
+    authorization.group = 1;
+    authorization.reference_height = 1290;
+    authorization.reference_hash = NonNullHash(702);
+    authorization.transaction_inputs_hash = NonNullHash(703);
+    constexpr int32_t snapshot_height{1296};
+    BOOST_CHECK(!state.IsRecoveryReady(1, 1290, authorization.reference_hash, snapshot_height));
+    const auto before{state};
+    BOOST_CHECK(state.ApplyRecoveryReadiness(inclusion_view, genesis, authorization,
+        DummySignature(), snapshot_height) == OperatorKeyStateResult::RECOVERY_READINESS_AUTH_FAILED);
+    BOOST_CHECK(state == before);
+    BOOST_REQUIRE(state.ApplyRecoveryReadiness(inclusion_view, genesis, authorization,
+        DummySignature(), snapshot_height, /*check_sigs=*/false) == OperatorKeyStateResult::OK);
+    BOOST_CHECK(state.global_key == before.global_key);
+    BOOST_CHECK(state.frozen_child_roots == before.frozen_child_roots);
+    BOOST_CHECK(state.schedule == before.schedule);
+    BOOST_CHECK(state.IsRecoveryReady(1, 1290, authorization.reference_hash, snapshot_height));
+    BOOST_CHECK(!state.IsRecoveryReady(2, 1290, authorization.reference_hash, snapshot_height));
+    BOOST_CHECK(!state.IsRecoveryReady(1, 1290, NonNullHash(704), snapshot_height));
+    const auto before_hash{GetPQKeyConsensusStateHash(genesis, std::array{before})};
+    const auto ready_hash{GetPQKeyConsensusStateHash(genesis, std::array{state})};
+    BOOST_REQUIRE(before_hash && ready_hash);
+    BOOST_CHECK(*before_hash != *ready_hash);
+
+    DataStream stream;
+    stream << state;
+    OperatorKeyState decoded;
+    stream >> decoded;
+    BOOST_CHECK(stream.empty());
+    BOOST_CHECK(decoded == state);
+    CDataStream encoded{SER_NETWORK, 0};
+    encoded << state;
+    const auto wire_bytes{MakeUCharSpan(encoded)};
+    std::vector<unsigned char> bytes{wire_bytes.begin(), wire_bytes.end()};
+    bytes[bytes.size() - RecoveryReadinessRecord::WIRE_SIZE - 1] = 2;
+    CDataStream bad_flag{bytes, SER_NETWORK, 0};
+    BOOST_CHECK_THROW(bad_flag >> decoded, std::ios_base::failure);
+    BOOST_CHECK(state.ApplyRecoveryReadiness(inclusion_view, genesis, authorization,
+        DummySignature(), snapshot_height, /*check_sigs=*/false) == OperatorKeyStateResult::INVALID_RECOVERY_READINESS);
+
+    auto at_reference{before};
+    BOOST_REQUIRE(at_reference.Advance(View(1295)) == OperatorKeyStateResult::OK);
+    auto same_height_reference{authorization};
+    same_height_reference.reference_height = inclusion_view.block_height;
+    BOOST_CHECK(at_reference.ApplyRecoveryReadiness(inclusion_view, genesis, same_height_reference,
+        DummySignature(), snapshot_height, /*check_sigs=*/false) == OperatorKeyStateResult::INVALID_RECOVERY_READINESS);
+    const auto cutoff_view{View(snapshot_height)};
+    BOOST_REQUIRE(state.Advance(cutoff_view) == OperatorKeyStateResult::OK);
+    BOOST_REQUIRE(state.ApplyRecoveryReadiness(cutoff_view, genesis, authorization,
+        DummySignature(), snapshot_height, /*check_sigs=*/false) == OperatorKeyStateResult::OK);
+    const auto frozen{state};
+    const auto later_view{View(snapshot_height + 1)};
+    BOOST_REQUIRE(state.Advance(later_view) == OperatorKeyStateResult::OK);
+    BOOST_CHECK(state.ApplyRecoveryReadiness(later_view, genesis, authorization,
+        DummySignature(), snapshot_height, /*check_sigs=*/false) == OperatorKeyStateResult::INVALID_RECOVERY_READINESS);
+    BOOST_CHECK(frozen.IsRecoveryReady(1, 1290, authorization.reference_hash, snapshot_height));
+    BOOST_CHECK(state.HasActiveGlobalKey());
+    BOOST_CHECK(state.ResolveChildRoot(0).record == frozen.ResolveChildRoot(0).record);
+
+    auto replacement{initial};
+    replacement.key_version = 2;
+    replacement.public_key[0]++;
+    BOOST_REQUIRE(state.ApplyGlobalKeyRotation(later_view, genesis, replacement,
+        NonNullHash(705), DummySignature(), /*check_sigs=*/false) == OperatorKeyStateResult::OK);
+    BOOST_CHECK(!state.recovery_readiness);
+    auto revoked{frozen};
+    BOOST_REQUIRE(revoked.ApplyProviderRevocation(cutoff_view, genesis,
+        RevokeAuthorization(pro_tx_hash, 1, 706), DummySignature(),
+        /*check_sigs=*/false) == OperatorKeyStateResult::OK);
+    BOOST_CHECK(!revoked.recovery_readiness);
+}
 
 BOOST_AUTO_TEST_CASE(schedule_view_uses_exclusive_canonical_cutoff)
 {

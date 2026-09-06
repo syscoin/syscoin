@@ -37,5 +37,9 @@ FUZZ_TARGET(pq_providertx_decode)
         assert(global.IsTriviallyValid(PQ_GLOBAL_KEY_TX_VERSION));
         AssertCanonicalRoundTrip(input, global);
     }
-
+    RecoveryReadinessTxPayload readiness;
+    if (DecodeRecoveryReadinessTxPayload(input, readiness)) {
+        assert(readiness.IsTriviallyValid(PQ_RECOVERY_READINESS_TX_VERSION));
+        AssertCanonicalRoundTrip(input, readiness);
+    }
 }

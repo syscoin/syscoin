@@ -34,7 +34,8 @@ bool CheckSpecialTx(node::BlockManager &blockman, const CTransaction& tx, const 
         case SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE:
             return CheckProUpRevTx(tx, pindexPrev, state, fJustCheck,
                                    check_sigs, validation_context);
-        case SYSCOIN_TX_VERSION_PQ_GLOBAL_KEY: {
+        case SYSCOIN_TX_VERSION_PQ_GLOBAL_KEY:
+        case SYSCOIN_TX_VERSION_PQ_RECOVERY_READINESS: {
             if (!deterministicMNManager) {
                 // SYSCOIN: Missing node-local auxiliary state is not a
                 // transaction consensus failure.
@@ -73,10 +74,11 @@ bool ProcessSpecialTxsInBlock(ChainstateManager &chainman, const CBlock& block, 
         for (const auto& ptr_tx : block.vtx) {
             TxValidationState txstate;
             // The registry below owns the consensus authorization and state
-            // transition for tx86 and post-PQ provider revocations. Its first
+            // transition for tx86/87 and post-PQ provider revocations. Its first
             // pass remains structural so an SLH signature is verified once.
             const bool registry_owned{
                 ptr_tx->nVersion == SYSCOIN_TX_VERSION_PQ_GLOBAL_KEY ||
+                ptr_tx->nVersion == SYSCOIN_TX_VERSION_PQ_RECOVERY_READINESS ||
                 ptr_tx->nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE};
             const auto tx_validation_context{
                 registry_owned

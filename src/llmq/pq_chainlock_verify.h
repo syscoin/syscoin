@@ -130,6 +130,25 @@ private:
     friend class ::llmq::CChainLocksHandler;
 };
 
+class VerifiedPoWRefreshAuthority final {
+public:
+    [[nodiscard]] bool Authorizes(const uint256& genesis_hash,
+                                 const ChainLockStatement& statement) const noexcept;
+
+private:
+    VerifiedPoWRefreshAuthority(uint256 genesis_hash, int32_t target_height,
+                               uint256 target_hash,
+                               RecoveryRosterAuthoritySource source)
+        : m_genesis_hash{std::move(genesis_hash)}, m_target_height{target_height},
+          m_target_hash{std::move(target_hash)}, m_source{std::move(source)} {}
+
+    uint256 m_genesis_hash;
+    int32_t m_target_height;
+    uint256 m_target_hash;
+    RecoveryRosterAuthoritySource m_source;
+    friend class ::llmq::CChainLocksHandler;
+};
+
 /**
  * Exact predecessor state supplied by the branch/finality layer. Only live
  * normal transitions and RECOVER require it. INITIALIZE alone starts without
@@ -158,12 +177,18 @@ struct RosterAuthorizationVerificationContext {
     [[nodiscard]] bool HasPoWHistorySchedule(
         const ChainLockScheduleConfig& schedule) const noexcept;
     [[nodiscard]] uint256 PoWHistoryBoundaryCommitment() const noexcept;
+    [[nodiscard]] bool HasPoWRefreshAuthority(const uint256& genesis_hash,
+        const ChainLockStatement& statement) const noexcept;
 
 private:
     // A raw admission enum cannot grant historical trust. Only the handler's
     // independently selected/replayed boundary can mint this exact binding.
     std::shared_ptr<const VerifiedPoWHistoricalBoundary> m_pow_history;
+    // New source authority is minted only after the handler derives the exact
+    // indexed-work source and independently reconstructs its ready population.
+    std::shared_ptr<const VerifiedPoWRefreshAuthority> m_pow_refresh;
     friend class PreparedChainLockContext;
+    friend class ::llmq::CChainLocksHandler;
 };
 
 /**

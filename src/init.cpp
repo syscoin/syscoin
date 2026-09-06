@@ -674,6 +674,7 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-pqregistrationcutoffblocks=<n>", "PQ child-key registration cutoff lag used for regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
     argsman.AddArg("-pqrostersnapshotlag=<n>", "PQ deterministic-roster snapshot lag used for regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS); // SYSCOIN: Expose the branch-bound PQ roster lag only to regtest fixtures.
     argsman.AddArg("-pqfuturehorizonepochs=<n>", "PQ child-key future registration horizon used for regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-pqrecoveryrefresh=<start>:<snapshot-lag>:<entropy-delay>:<carrier-delay>:<carrier-depth>:<snapshot-work>:<carrier-work>:<readiness-window>", "Explicit PoW recovery-refresh test profile; regtest only, disabled by default", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
     argsman.AddArg("-pqchainlocktestfixture=<path>", "Load a bounded branch-bound quorum snapshot fixture for full-dimension ChainLock functional tests; mine-on-demand regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-pqoperatorcommitmenttestfixture=<genesis>:<chainlockseedhash>:<treeid>:<generation>:<firstepoch>:<root>", "Use an exact precomputed depth-16 operator commitment whose tree ID matches the target operator and schedule; mine-on-demand regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST); // SYSCOIN: Keep low-core lifecycle tests on real signatures without rebuilding 65,536 child keys.
     argsman.AddArg("-pqoperatorcommitmenttestfixtureverify", "Rebuild and verify the configured PQ operator commitment test fixture", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
@@ -1431,7 +1432,8 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     // assigns the complete height-based profile. Regtest additionally has an
     // explicit registry preparation state with finality disabled.
     const auto& consensus{chainparams.GetConsensus()};
-    static constexpr std::array<const char*, 17> REGTEST_PQ_DEPLOYMENT_ARGS{
+    static constexpr std::array<const char*, 18> REGTEST_PQ_DEPLOYMENT_ARGS{
+        "-pqrecoveryrefresh",
         "-pqactivationheight",
         "-pqfinalitypreparation",
         "-pqpreparationheight", "-pqchainlockepochorigin",
@@ -1446,7 +1448,8 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         "-pqbtccreceiptanchorlatesttargetheight",
         "-pqbtccreceiptanchorlatestcarrierheight",
     };
-    static constexpr std::array<const char*, 11> REGTEST_PQ_FINALITY_ARGS{
+    static constexpr std::array<const char*, 12> REGTEST_PQ_FINALITY_ARGS{
+        "-pqrecoveryrefresh",
         "-pqactivationheight", "-pqbtcccandidateorigin",
         "-pqbtccnevminjectionlag",
         "-pqbtccreceiptanchorheight", "-pqbtccreceiptanchorblockhash",

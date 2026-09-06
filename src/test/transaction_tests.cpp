@@ -1055,6 +1055,32 @@ BOOST_AUTO_TEST_CASE(syscoin_pq_btcc_activation_is_independent)
         regtest_genesis_origin->GetConsensus(), 10));
 }
 
+BOOST_AUTO_TEST_CASE(syscoin_pq_recovery_refresh_is_regtest_only)
+{
+    ArgsManager override_args;
+    override_args.ForceSetArg("-pqrecoveryrefresh", "1100:4:2:2:2:1:1:20");
+    for (const auto chain : {ChainType::MAIN, ChainType::TESTNET, ChainType::SIGNET}) {
+        const auto public_params{CreateChainParams(ArgsManager{}, chain)};
+        BOOST_CHECK_EQUAL(public_params->GetConsensus().nPQRecoveryRefreshActivationHeight, -1);
+        BOOST_CHECK_EQUAL(public_params->GetConsensus().nPQRecoveryRefreshGraceGroups, 0U);
+        BOOST_CHECK_EXCEPTION(CreateChainParams(override_args, chain), std::runtime_error,
+            [](const std::runtime_error& error) {
+                return std::string{error.what()} == "PQ deployment overrides are valid only on regtest";
+            });
+    }
+    const auto regtest{CreateChainParams(override_args, ChainType::REGTEST)};
+    const auto& consensus{regtest->GetConsensus()};
+    BOOST_CHECK_EQUAL(consensus.nPQRecoveryRefreshActivationHeight, 1100);
+    BOOST_CHECK_EQUAL(consensus.nPQRecoveryRefreshGraceGroups, 1U);
+    BOOST_CHECK_EQUAL(consensus.nPQRecoveryRefreshSnapshotLagBlocks, 4U);
+    BOOST_CHECK_EQUAL(consensus.nPQRecoveryRefreshEntropyDelayBlocks, 2U);
+    BOOST_CHECK_EQUAL(consensus.nPQRecoveryRefreshCarrierDelayBlocks, 2U);
+    BOOST_CHECK_EQUAL(consensus.nPQRecoveryRefreshCarrierMinDepthBlocks, 2U);
+    BOOST_CHECK_EQUAL(consensus.nPQRecoveryRefreshSnapshotMinWorkBlocks, 1U);
+    BOOST_CHECK_EQUAL(consensus.nPQRecoveryRefreshCarrierMinWorkBlocks, 1U);
+    BOOST_CHECK_EQUAL(consensus.nPQRecoveryReadinessWindowBlocks, 20U);
+}
+
 struct BridgeV2CutoverTestingSetup : BasicTestingSetup {
     BridgeV2CutoverTestingSetup()
         : BasicTestingSetup(ChainType::REGTEST, {"-bridgev2startheight=1000"}) {}

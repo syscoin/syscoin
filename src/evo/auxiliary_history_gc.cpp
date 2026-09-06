@@ -542,6 +542,15 @@ MakeAuxiliaryHistoryGCDeployment(const Consensus::Params& consensus)
            << consensus.nPQRegistrationCutoffBlocks
            << static_cast<int32_t>(consensus.nPQRosterSnapshotLag)
            << consensus.nPQFutureHorizonEpochs
+           << consensus.nPQRecoveryRefreshActivationHeight
+           << consensus.nPQRecoveryRefreshGraceGroups
+           << consensus.nPQRecoveryRefreshSnapshotLagBlocks
+           << consensus.nPQRecoveryRefreshEntropyDelayBlocks
+           << consensus.nPQRecoveryRefreshCarrierDelayBlocks
+           << consensus.nPQRecoveryRefreshCarrierMinDepthBlocks
+           << consensus.nPQRecoveryRefreshSnapshotMinWorkBlocks
+           << consensus.nPQRecoveryRefreshCarrierMinWorkBlocks
+           << consensus.nPQRecoveryReadinessWindowBlocks
            << static_cast<int32_t>(consensus.nPQBTCCCandidateOrigin)
            << static_cast<int32_t>(consensus.nPQBTCCNEVMInjectionLag)
            << static_cast<int32_t>(consensus.nPQBTCCReceiptAnchorHeight)

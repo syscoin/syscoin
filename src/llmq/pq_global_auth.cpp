@@ -118,6 +118,9 @@ std::span<const uint8_t> GetGlobalAuthContext(GlobalAuthPurpose purpose) noexcep
     case GlobalAuthPurpose::GOVERNANCE_PROPOSAL_VOTE:
         context = GOVERNANCE_PROPOSAL_VOTE_DOMAIN;
         break;
+    case GlobalAuthPurpose::RECOVERY_READINESS:
+        context = RECOVERY_READINESS_DOMAIN;
+        break;
     }
     return {reinterpret_cast<const uint8_t*>(context.data()), context.size()};
 }
@@ -131,6 +134,39 @@ static_assert(GOVERNANCE_TRIGGER_DOMAIN.size() <= slhdsa::MAX_CONTEXT_SIZE);
 static_assert(GOVERNANCE_VOTE_DOMAIN.size() <= slhdsa::MAX_CONTEXT_SIZE);
 static_assert(GOVERNANCE_PROPOSAL_VOTE_DOMAIN.size() <=
               slhdsa::MAX_CONTEXT_SIZE);
+static_assert(RECOVERY_READINESS_DOMAIN.size() <= slhdsa::MAX_CONTEXT_SIZE);
+
+bool RecoveryReadinessAuthorization::IsStructurallyValid() const noexcept
+{
+    return version == VERSION && !pro_tx_hash.IsNull() && global_key_version != 0 &&
+           group <= std::numeric_limits<uint32_t>::max() / ACTIVE_QUORUMS &&
+           reference_height >= 0 && !reference_hash.IsNull() &&
+           !transaction_inputs_hash.IsNull();
+}
+
+std::optional<uint256> GetRecoveryReadinessAuthorizationHash(
+    const uint256& genesis_hash,
+    const GlobalKeyRecord& current,
+    const RecoveryReadinessAuthorization& authorization)
+{
+    if (genesis_hash.IsNull() || !IsStoredGlobalKeyRecordStructurallyValid(current) ||
+        !authorization.IsStructurallyValid() ||
+        authorization.global_key_version != current.key_version) return std::nullopt;
+    CHashWriter writer{SER_GETHASH, 0};
+    WriteDomain(writer, RECOVERY_READINESS_DOMAIN);
+    writer << genesis_hash << PublicKeyHash(current) << authorization;
+    return writer.GetHash();
+}
+
+bool VerifyRecoveryReadinessAuthorization(
+    const uint256& genesis_hash,
+    const GlobalKeyRecord& current,
+    const RecoveryReadinessAuthorization& authorization,
+    const GlobalSignature& signature)
+{
+    const auto digest{GetRecoveryReadinessAuthorizationHash(genesis_hash, current, authorization)};
+    return digest && VerifyDigest(current, GlobalAuthPurpose::RECOVERY_READINESS, *digest, signature);
+}
 
 bool GovernanceAuthorization::IsHeaderStructurallyValid() const noexcept
 {

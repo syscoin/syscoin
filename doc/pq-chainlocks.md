@@ -431,7 +431,7 @@ once generation 16 is active; ordinary key-only rotation remains available.
 
 ### 5.2 Fixed-depth child-key commitment
 
-There is no per-epoch registry or recurring wallet/controller transaction. One
+Child-key maintenance needs no per-epoch registry or recurring wallet/controller transaction. One
 tx86 registration or recovery authorizes a complete depth-16 Merkle root. A
 normal global-key rotation preserves that root unless the current PQ key
 explicitly authorizes its generation successor.
@@ -478,7 +478,9 @@ root, schedule revision, and resulting state root. Reorg rollback selects the
 immutable parent snapshot. Deterministic tree IDs eliminate historical
 namespace storage while the 16-generation per-operator consensus limit bounds
 successive root rotations. Root rotation still pays and validates an ordinary
-tx86 transaction; there is no periodic transaction or coordinator.
+tx86 transaction; there is no periodic key transaction or coordinator. The
+separate recovery-readiness declaration below is group-scoped and does not
+replace or rebuild this tree.
 
 Every registry snapshot is branch-local and authenticated by its parent link,
 block identity, and resulting state root. No one snapshot is elevated into a
@@ -569,28 +571,70 @@ The four active quorum slots at target height are the four fixed epochs selected
 by the consensus epoch function, not "the last four successful quorums." This
 property makes lifetime and leaf assignment deterministic.
 
-Recovery keeps the last authenticated normal delayed-beacon source fixed while
-ordinary finality is unavailable. That source fixes both the entropy and the
-pre-reveal deterministic-masternode identity universe. The universe contains
-only identities that were valid and already had an authenticated PQ global-key
-lineage in that exact source snapshot; a first-time registration
-after the delayed Bitcoin value is known cannot enter the outage. Each absolute
-recovery epoch then selects a fresh 400-member identity roster from that same
-universe with a domain-separated modifier that binds the epoch and source
-snapshot; child-root availability is deliberately excluded from selection and
-ordering.
+The first stale four-epoch group gets one grace attempt using the exact source
+in the receipted authorization base. Its frozen identity universe is re-scored
+for the current epochs, with child keys resolved at the oldest epoch's
+registration cutoff. This source may be a normal delayed-Bitcoin source or a
+previously accepted PoW-refresh source. Normal receipt progress starts a new
+grace interval; local observations and timers do not.
 
-All recovery epochs in one four-roster group use the registration cutoff of the
-group's oldest epoch as a common key cutoff. A selected identity may register
-or repair its scheduled child root before that cutoff. The exact identity and
-root captured there are immutable for the attempt. State at the ChainLock
-target can only disable that slot when the identity is no longer valid or its
-root differs; it cannot replace, reorder, or backfill the slot. A later recovery
-group changes the absolute epochs and therefore selects fresh deterministic
-rosters from the same authenticated universe. Once a normal rotation succeeds,
-the recovery seeds drain from the four-slot window and a later normal source
-can replace the retained source. No materialized recovery-authority table or
-Bitcoin RPC is part of this construction.
+With the separately gated refresh profile enabled, later stale groups use only
+their own `POW_REFRESH` source. For absolute group `q`, the chain fixes:
+
+```text
+R_q = S_q - readiness_window
+S_q = base(4q) - snapshot_lag
+F_q = S_q + entropy_delay
+G_q = F_q + carrier_delay
+A_q = H_q - sign_lag
+R_q < S_q < F_q < G_q < A_q < H_q
+```
+
+`H_q` is the existing canonical joint ChainLock/BTCC target in epoch `4q+3`.
+The whole preparation window starts at or after refresh activation. Explicit
+minimum cumulative-work conditions cover `S_q` to `F_q` and `G_q` to `A_q`,
+and `G_q` also has a minimum burial depth. Work is measured against the fixed
+starting block's target, not merely a count of blocks after a difficulty drop.
+Public profiles remain disabled. Regtest can set all eight profile values with
+`-pqrecoveryrefresh=start:snapshot-lag:entropy-delay:carrier-delay:carrier-depth:snapshot-work:carrier-work:readiness-window`.
+
+At `S_q`, the universe contains mature, valid identities with an active global
+PQ key, all four required child roots, and an explicit tx87 readiness declaration
+for `q`. The current global key signs the exact `R_q` ancestor hash, key version,
+group, and transaction inputs. Inclusion must be strictly after `R_q` and no
+later than `S_q`; later inclusion, key rotation, or a different branch cannot
+refresh that declaration. `protx_recovery_ready` renews readiness without
+rotating a key/tree or modifying PoSe, payouts, or NEVM service state. Readiness
+is an additional eligibility filter, not evidence of honesty or a promise of
+future availability. Censorship of honest renewals affects the ready population.
+
+`G_q` may carry one canonical bounded `pqrw` commitment containing an AuxPoW
+proof binding the exact child block `F_q`, validated at `F_q`'s child difficulty.
+This is a merged-work sample over `F_q`, not necessarily its accepted
+BTCPREV/Nexus wrapper and not an authenticated Bitcoin parent or tip.
+The seed binds the domain, genesis, group, `S_q` hash, sorted universe root,
+`F_q` hash, and committed parent-work hash. Verifiers never use whichever mutable
+AuxPoW wrapper they happened to receive first for `F_q`. The source and beacon
+have explicit PoW discriminators and no fabricated Bitcoin cursor. Missing
+proofs or insufficient work make this group unavailable; they do not select the
+old committee as a fallback or prevent ordinary base-chain mining. Malformed
+present commitments fail block validation.
+
+The selected identities and `S_q` child keys stay fixed for the attempt and its
+normal drain. Signing-boundary state can only disable a slot; it cannot replace,
+reorder, or backfill one. The first normal rotation still requires usable slots
+1/2/3, each with at least 300 valid roots. All thresholds, leaf assignments,
+operator-wide journal burns, and the durable winner's ancestry floor are
+unchanged. A later successful normal source can replace the retained source
+only once recovery rosters no longer own it and the new source is usable.
+
+This is work-backed, producer-biasable selection, not unbiased Bitcoin
+randomness. A producer can try several valid parent-work samples before
+committing `G_q`; burial makes the choice stable but does not remove that earlier
+bias. Safety still assumes PoW common-prefix stability, at most 133 Byzantine
+members in each selected ready roster, and bounded propagation of complete
+certificates across views. Neither a global honest fraction nor readiness alone
+proves those assumptions.
 
 The quorum-context hash is:
 
@@ -611,6 +655,9 @@ known or active.
 where each descriptor is serialized completely in the prescribed order.
 
 ## 7. ChainLock messages
+
+PQ remains undeployed, so these are the first-release v1 encodings; there is no
+compatibility decoder or migration path for superseded development layouts.
 
 ### 7.1 Share transcript
 
@@ -642,7 +689,7 @@ PQChainLockShareTranscript {
 }
 ```
 
-The 1,366-byte canonical encoding is the complete common ChainLock statement
+The 1,767-byte canonical encoding is the complete common ChainLock statement
 first, followed by the four signer-specific fields. This lets collectors
 retain and compare one statement object without reconstructing it from an
 interleaved member transcript.
@@ -658,11 +705,12 @@ scripts and all consensus-special processing. Post-initialization signing also
 requires the branch-objective receipt mode described below. Fresh receipt
 progress permits the next normal target; stale progress pauses ordinary rounds
 and permits only the canonical phase-3 recovery target. The exact receipted
-certificate is the roster-state source, while the durable local winner remains
-the wire predecessor and ancestry floor.
+certificate fixes the authorization base; a scheduled refresh independently
+fixes recovery membership. The durable local winner remains the wire
+predecessor and ancestry floor.
 
 The canonical `PQChainLockShare`, including its member identity, outer
-depth-16 child-key proof, and scheduled signature, is exactly 2,614 bytes.
+depth-16 child-key proof, and scheduled signature, is exactly 3,015 bytes.
 
 ### 7.2 Final raw CLSIG
 
@@ -714,8 +762,8 @@ Authenticated-signature and complete wire sizes are:
 proof bytes per signer = 32 + 16 * 32 = 544
 authenticated signer   = 544 + 704 = 1,248 bytes
 3 * 267 * 1,248        = 999,648 bytes
-statement/mask/bitmaps/count = 1,499 bytes
-complete fixed wire    = 1,001,147 bytes
+statement/mask/bitmaps/count = 1,900 bytes
+complete fixed wire    = 1,001,548 bytes
 ```
 
 The fixed header and four 50-byte bitmaps keep the complete canonical encoding
@@ -891,16 +939,16 @@ The target's current receipt accumulator remains signed and fully verified,
 but target-local receipts and deterministic-MN changes affect roster authority
 only in the next signing round.
 
-At a `RECOVER` target, the latest receipted certificate supplies the exact
-normal pre-reveal source. That source fixes the entropy and identity snapshot;
-only source-snapshot identities with an already established authenticated PQ
-global-key lineage participate. The absolute epochs of the new four-roster group
-domain-separate fresh roster selections. Root availability never affects
-selection or ordering. The oldest
-epoch's registration cutoff freezes each selected identity's child root, and
-state at the `H-sign_lag` fork anchor may only disable a fixed entry, never
-replace or backfill it. The recovery statement must retain the receipted
-Bitcoin cursor with `KEEP`.
+At a `RECOVER` target, the latest receipted certificate fixes the exact
+authorization base. The grace attempt reuses its authenticated source; later
+attempts under the enabled refresh profile use their own `S_q` ready universe
+and `G_q` work commitment. Absolute group and epoch numbers domain-separate
+the roster selections. Once the source universe is frozen, subsequent root
+availability never changes ordering. Child keys are fixed at the oldest
+epoch's registration cutoff for grace, or at `S_q` for a fresh attempt. State
+at the `H-sign_lag` fork anchor may only disable a fixed entry, never replace
+or backfill it. The recovery statement retains the receipted Bitcoin cursor
+with `KEEP`.
 
 A verified recovery certificate remains non-objective until its exact
 non-null `KEEP` receipt is carried at `H+10` and reaches the next round's fork
@@ -908,7 +956,8 @@ anchor. Before that, all other targets remain paused, so a hidden certificate
 cannot privately switch the roster state or trigger a competing normal
 rotation. Normal signing then resumes and ordinary rotations drain the
 recovery rosters. If an attempt never reaches threshold, the next phase-3 group
-selects four fresh absolute-epoch rosters from the same authenticated source.
+selects four fresh absolute-epoch rosters from that group's objective source.
+The disabled refresh profile retains its fixed source across attempts.
 Recovery therefore needs neither Bitcoin RPC on full nodes nor approval from
 the failed active rosters.
 Before the network's first winner, the only admissible target is the first eligible
@@ -953,6 +1002,10 @@ next-beacon states must also match, except that current `CATCHUP` may remove one
 provisional `PENDING`/`READY` observation only through the existing
 candidate-bound null-carrier reconciliation proof. A carried cursor, a
 different recovery source, or an unrelated future-beacon result never rebases.
+The sole source-change exception is the scheduled PoW-refresh mode: the handler
+must independently derive the exact indexed-work source and ready universe
+before minting a target-bound authorization capability. A peer's source fields
+or raw recovery admission enum cannot grant that authority.
 
 A separate PoW-backed historical import supports both missing authorization
 edges above the receiver's actual durable winner `D` and deferred historical
@@ -1185,7 +1238,7 @@ For a payment audit it is the audit window's exclusive carrier end. Once
 entered, the exact crash-durable marker may sustain `PENDING` while the node
 catches up, but unrelated ancestry and an early header fail closed.
 
-The exact 1,001,147-byte certificate every five blocks is a material bandwidth
+The exact 1,001,548-byte certificate every five blocks is a material bandwidth
 and verification cost. It must be benchmarked under adversarial load. Its size
 being below a protocol cap is not evidence of production viability.
 
@@ -1497,7 +1550,7 @@ BTCCReceiptState {
 The hash commits the prior state, carrier height/hash, and exact receipt. Every
 ChainLock statement signs the indexed state at its target. Once a fully
 verified descendant ChainLock covers the carrier, that threshold statement
-seals the ordered prefix. A non-null outcome makes the original 1,001,147-byte
+seals the ordered prefix. A non-null outcome makes the original 1,001,548-byte
 receipt certificate prunable once no serving/bootstrap historical-sync or other
 durable dependency still owns it; a canonical null outcome objectively retires the
 unreceipted cursor. Until the carrier outcome is covered, a locally accepted
@@ -1542,7 +1595,8 @@ verified four-roster context. Every durable record whose active roster window
 names a recovery-authority source also owns the exact deduplicated capsule of
 that authenticated source identity universe, regardless of the record's
 transition kind. The capsule replaces only the old source-identity snapshot:
-each recovery group's registration-cutoff snapshot and signed-target liveness
+each grace group's registration-cutoff snapshot (or a refreshed group's `S_q`
+key snapshot) and signed-target liveness
 snapshot remain retained while required. These objects replace an indefinitely
 old source roster-snapshot floor without turning candidate fields into
 authority. Ownership is capped at 134 distinct source IDs: at most 128 retained
@@ -1550,7 +1604,11 @@ authorization bases plus the durable best, unsealed BTCC, and receipt-archive
 owner, plus the two historical-sync serving slots and one bootstrap role; referenced predecessors and seals
 are already retained rows. Startup
 accepts exactly the capsules reachable from those owners and fails closed on a
-missing, mismatched, or orphaned capsule. Outside replay, ordinary non-cutoff
+missing, mismatched, or orphaned capsule. Exact refresh `S_q` snapshots also write
+through before the attempt. The stalled durable-winner floor protects later
+snapshots and registry history; the existing publication barrier synchronizes
+them before a new certificate and its capsule are committed. Failed attempts
+do not create orphan capsules or an unbounded staged-owner list. Outside replay, ordinary non-cutoff
 snapshots remain in the bounded, lossy cache. More than 1,728 same-height
 non-cutoff side-branch writes therefore need not survive restart. An in-flight
 verification/publication temporarily suppresses snapshot pruning. Once all
@@ -2222,7 +2280,7 @@ Expected failures are fail-closed:
   MNAUTH, quorum descriptors, share transcripts, and final CLSIG.
 - Exact size tests for the 704-byte child signature, 1,248-byte authenticated
   signer, 1,282-byte live share envelope, 2,614-byte self-contained share, and
-  1,001,147-byte final CLSIG; reject
+  1,001,548-byte final CLSIG; reject
   one-byte-over, truncated, and length-confusion encodings.
 - Bitmap tests for 266/267/268 bits, including non-byte-aligned residual bits,
   duplicate/reordered slots, selected masks with 2/3/4 bits, and non-zero
@@ -2289,7 +2347,7 @@ Expected failures are fail-closed:
 
 - Default CI P2P coverage must negotiate protocol 70018, enforce authenticated
   share admission, exercise CLSIG inventory/request tracking, and decode an
-  exact 1,001,147-byte certificate with 801 authenticated signature slots
+  exact 1,001,548-byte certificate with 801 authenticated signature slots
   without changing the 400/267/3-of-4 consensus geometry.
 - Exactly 267 valid signatures in each of any three active quorums.
 - Parallel verification produces identical results at every thread count.
@@ -2369,6 +2427,19 @@ Expected failures are fail-closed:
   work, then retire only the local role without regressing READY or changing
   serving slots, finality, or replay markers. Reject stale winner/role CAS and
   verify a failed write preserves the restart evidence and retention floor.
+- Rolling-refresh registry coverage retains 400 old registrations, authenticates
+  400 newly registered operators and their group-bound readiness declarations,
+  and reconstructs the frozen snapshot after dropping caches. Only the new
+  ready population may enter all four refreshed rosters; stale, late, and
+  wrong-branch declarations must not qualify. Independent work-commitment
+  tests validate the proof before the registry test's validated-index seam.
+- Handler coverage independently derives the fresh source, rejects a missing
+  or revoked work carrier and forged candidate capability, rebases over an
+  intervening unreceipted D, and requires RECOVER's receipt before NORMAL.
+  Keep the source through the first normal rotation and until all recovery
+  rosters drain. This handler test uses signature/persistence test seams;
+  real-signature collector and peerless restart coverage is exercised by the
+  separate integration and pruned-sync tests below.
 - A previously seen B/C inventory remains downloadable only while it is an
   exact pending historical/catch-up request. An invalid witness must not
   cancel honest alternate providers; accepted finality or an expired context
@@ -2386,7 +2457,7 @@ Expected failures are fail-closed:
   with 801 valid signatures and adversarial invalid bundles.
 - `pq_chainlock_integration_tests` deterministically constructs all four
   400-member rosters and completes production collector/verifier acceptance
-  with 801 real scheduled-WOTS+ signatures and the exact 1,001,147-byte wire
+  with 801 real scheduled-WOTS+ signatures and the exact 1,001,548-byte wire
   object.
   `feature_pq_chainlocks.py` separately loads a checksummed, exact-branch
   regtest roster fixture, forwards real shares between authenticated peers,
@@ -2453,12 +2524,12 @@ Expected failures are fail-closed:
 - Exactly 267 audit signatures in each of exactly three active rosters, with
   one common base statement, 801 signer-bound report bitmaps, exact 134-of-267
   per-roster classification, and no common-bitmap convergence requirement.
-- Exact 2,653-byte response, 3,013-byte share, 1,298-byte report witness, and
-  1,041,546-byte final audit bounds; exact-witness-ID
+- Exact 3,054-byte response, 3,414-byte share, 1,298-byte report witness, and
+  1,041,947-byte final audit bounds; exact-witness-ID
   requested retrieval, at most four live unapplied witness candidates (one per
   three-of-four reporter mask), one-large-object-per-pass upload accounting,
   timeout, and wrong-ID handling.
-- Exact 257-byte null/non-null receipt and 261-byte tagged coinbase segment,
+- Exact 401-byte null/non-null receipt and 405-byte tagged coinbase segment,
   with the canonical 50-byte `online_members` suffix and fixed ordering before
   BTCC/BTCPREV. The null bitmap must be zero; unsupported versions, truncation,
   a mutated bitmap, certificate/bitmap disagreement, off-branch, stale-epoch,
@@ -2685,7 +2756,7 @@ Activation remains disabled until the complete Section 14 matrix passes on all
 supported platforms, the payment-audit replay/checkpoint rules receive
 independent consensus/security review, the scheduled-WOTS+ construction
 receives independent cryptographic review, and the 801-signature/proof verifier
-and 1,001,147-byte relay path meet explicit resource targets. Shadow success
+and 1,001,548-byte relay path meet explicit resource targets. Shadow success
 alone is not cryptographic validation.
 
 ## 16. References and security caveat

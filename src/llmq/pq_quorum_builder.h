@@ -9,6 +9,7 @@
 #include <llmq/pq_chainlock_schedule.h>
 #include <llmq/pq_chainlock_verify.h>
 #include <llmq/pq_operator_key_state.h>
+#include <llmq/pq_recovery_refresh.h>
 #include <llmq/pq_roster_beacon.h>
 #include <sync.h>
 
@@ -38,6 +39,8 @@ struct QuorumBuildConfig {
     uint32_t roster_snapshot_lag_blocks{0};
     uint32_t registration_cutoff_blocks{0};
     uint32_t future_horizon_epochs{0};
+    BTCCScheduleConfig btcc_schedule{};
+    RecoveryRefreshConfig recovery_refresh{};
 
     [[nodiscard]] bool IsValid() const noexcept;
     friend bool operator==(const QuorumBuildConfig&,
@@ -203,8 +206,8 @@ private:
     friend class RecoveryUniverseCapsuleFactory;
 };
 
-static_assert(RecoveryUniverseCapsule::MAX_SERIALIZED_SIZE == 6'553'782);
-static_assert(RecoveryUniverseCapsule::MIN_SERIALIZED_SIZE == 40'282);
+static_assert(RecoveryUniverseCapsule::MAX_SERIALIZED_SIZE == 6'554'023);
+static_assert(RecoveryUniverseCapsule::MIN_SERIALIZED_SIZE == 40'523);
 
 using RecoveryUniverseCapsulePtr =
     std::shared_ptr<const RecoveryUniverseCapsule>;
@@ -302,6 +305,10 @@ public:
     [[nodiscard]] RecoveryUniverseCapsulePtr GetOrCaptureRecoveryUniverse(
         const RecoveryRosterAuthoritySource& source,
         const CBlockIndex& branch_tip,
+        QuorumBuildError* error = nullptr) const;
+
+    [[nodiscard]] RecoveryUniverseCapsulePtr BuildPoWRefreshUniverse(
+        uint32_t group, const CBlockIndex& branch_tip,
         QuorumBuildError* error = nullptr) const;
 
     [[nodiscard]] const uint256& GenesisHash() const noexcept

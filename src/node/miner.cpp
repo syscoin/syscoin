@@ -5,6 +5,7 @@
 
 #include <node/miner.h>
 
+#include <auxpow.h>
 #include <chain.h>
 #include <chainparams.h>
 #include <coins.h>
@@ -16,6 +17,7 @@
 #include <consensus/validation.h>
 #include <deploymentstatus.h>
 #include <logging.h>
+#include <node/blockstorage.h>
 #include <policy/feerate.h>
 #include <policy/policy.h>
 #include <pow.h>
@@ -33,6 +35,7 @@
 #include <evo/deterministicmns.h>
 #include <llmq/quorums_chainlocks.h>
 #include <llmq/pq_btcc.h>
+#include <llmq/pq_recovery_refresh.h>
 #include <validationinterface.h>
 namespace node {
 int64_t UpdateTime(CBlockHeader* pblock, const Consensus::Params& consensusParams, const CBlockIndex* pindexPrev)
@@ -181,6 +184,50 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(
     pblock->nTime = TicksSinceEpoch<std::chrono::seconds>(GetAdjustedTime());
     m_lock_time_cutoff = pindexPrev->GetMedianTimePast();
 
+    const auto btcc_schedule{
+        llmq::pq::GetBTCCScheduleConfig(chainparams.GetConsensus())};
+    const auto chainlock_schedule{llmq::pq::MakeChainLockScheduleConfig(
+        chainparams.GetConsensus().nPQChainLockEpochOrigin)};
+    std::vector<uint8_t> recovery_work_extra;
+    if (chainlock_schedule) {
+        const auto config{llmq::pq::GetRecoveryRefreshConfig(chainparams.GetConsensus())};
+        const auto coordinates{llmq::pq::RecoveryRefreshCoordinatesForCarrierHeight(
+            *chainlock_schedule, btcc_schedule, config, nHeight)};
+        if (coordinates) {
+            const auto* entropy{pindexPrev->GetAncestor(coordinates->entropy_height)};
+            CBlock entropy_block;
+            if (entropy && (entropy->nStatus & BLOCK_HAVE_DATA) &&
+                m_chainstate.m_chainman.m_blockman.ReadBlockFromDisk(entropy_block, *entropy) &&
+                entropy_block.auxpow) {
+                CDataStream proof{SER_NETWORK, PROTOCOL_VERSION};
+                proof << *entropy_block.auxpow;
+                const auto proof_bytes{MakeUCharSpan(proof)};
+                llmq::pq::RecoveryRefreshWorkCommitment commitment;
+                commitment.group = coordinates->group;
+                commitment.entropy_block_hash = entropy->GetBlockHash();
+                commitment.parent_work_hash = entropy_block.auxpow->getParentBlockHash();
+                commitment.proof.assign(proof_bytes.begin(), proof_bytes.end());
+                // F's local wrapper is only a producer-selected candidate.
+                // Authority later comes from these immutable G coinbase bytes.
+                CBlockIndex carrier;
+                carrier.pprev = pindexPrev;
+                carrier.nHeight = nHeight;
+                carrier.phashBlock = pindexPrev->phashBlock;
+                if (llmq::pq::VerifyRecoveryRefreshWorkCommitment(
+                        *chainlock_schedule, btcc_schedule, config, *coordinates,
+                        carrier, commitment, chainparams.GetConsensus()) &&
+                    llmq::pq::AppendRecoveryRefreshWorkCommitment(recovery_work_extra, commitment)) {
+                    const size_t weight{WITNESS_SCALE_FACTOR * (recovery_work_extra.size() + 3)};
+                    if (weight <= m_options.nBlockMaxWeight - nBlockWeight) {
+                        nBlockWeight += weight;
+                    } else {
+                        recovery_work_extra.clear();
+                    }
+                }
+            }
+        }
+    }
+
     int nPackagesSelected = 0;
     int nDescendantsUpdated = 0;
     if (m_mempool) {
@@ -241,10 +288,9 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(
     // sentinel preserves deterministic cadence when no BTC cursor advanced.
     const auto bytesVecNEVM = MakeUCharSpan(dsNEVM);
     pblocktemplate->vchCoinbaseCommitmentExtra.insert( pblocktemplate->vchCoinbaseCommitmentExtra.end(), bytesVecNEVM.begin(), bytesVecNEVM.end() );
-    const auto btcc_schedule{
-        llmq::pq::GetBTCCScheduleConfig(chainparams.GetConsensus())};
-    const auto chainlock_schedule{llmq::pq::MakeChainLockScheduleConfig(
-        chainparams.GetConsensus().nPQChainLockEpochOrigin)};
+    pblocktemplate->vchCoinbaseCommitmentExtra.insert(
+        pblocktemplate->vchCoinbaseCommitmentExtra.end(),
+        recovery_work_extra.begin(), recovery_work_extra.end());
     if (chainlock_schedule) {
         const llmq::pq::PaymentAuditScheduleConfig audit_schedule{
             *chainlock_schedule, btcc_schedule};

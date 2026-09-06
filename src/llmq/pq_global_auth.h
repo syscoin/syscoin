@@ -38,6 +38,8 @@ inline constexpr std::string_view GOVERNANCE_VOTE_DOMAIN{
     "SYS_PQ_GOV_VOTE_V1"};
 inline constexpr std::string_view GOVERNANCE_PROPOSAL_VOTE_DOMAIN{
     "SYS_PQ_GOV_PROPOSAL_VOTE_V1"};
+inline constexpr std::string_view RECOVERY_READINESS_DOMAIN{
+    "SYS_PQ_RECOVERY_READINESS_V1"};
 
 enum class GlobalAuthPurpose : uint8_t {
     GLOBAL_REGISTRATION = 0,
@@ -48,7 +50,42 @@ enum class GlobalAuthPurpose : uint8_t {
     GOVERNANCE_TRIGGER = 5,
     GOVERNANCE_VOTE = 6,
     GOVERNANCE_PROPOSAL_VOTE = 8,
+    RECOVERY_READINESS = 9,
 };
+
+struct RecoveryReadinessAuthorization {
+    static constexpr uint16_t VERSION{1};
+    static constexpr std::size_t WIRE_SIZE{sizeof(uint16_t) + 3 * 32 + 3 * sizeof(uint32_t)};
+
+    uint16_t version{VERSION};
+    uint256 pro_tx_hash;
+    uint32_t global_key_version{0};
+    uint32_t group{0};
+    int32_t reference_height{-1};
+    uint256 reference_hash;
+    uint256 transaction_inputs_hash;
+
+    SERIALIZE_METHODS(RecoveryReadinessAuthorization, obj)
+    {
+        READWRITE(obj.version, obj.pro_tx_hash, obj.global_key_version,
+                  obj.group, obj.reference_height, obj.reference_hash,
+                  obj.transaction_inputs_hash);
+    }
+
+    [[nodiscard]] bool IsStructurallyValid() const noexcept;
+    friend bool operator==(const RecoveryReadinessAuthorization&,
+                           const RecoveryReadinessAuthorization&) = default;
+};
+
+[[nodiscard]] std::optional<uint256> GetRecoveryReadinessAuthorizationHash(
+    const uint256& genesis_hash,
+    const GlobalKeyRecord& current,
+    const RecoveryReadinessAuthorization& authorization);
+[[nodiscard]] bool VerifyRecoveryReadinessAuthorization(
+    const uint256& genesis_hash,
+    const GlobalKeyRecord& current,
+    const RecoveryReadinessAuthorization& authorization,
+    const GlobalSignature& signature);
 
 enum class GovernanceAuthPurpose : uint8_t {
     TRIGGER = 0,

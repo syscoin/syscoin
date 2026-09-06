@@ -181,6 +181,17 @@ public:
         int pqregistrationcutoffblocks{0};
         int pqrostersnapshotlag{288}; // SYSCOIN: Carry the regtest-only PQ roster lag into consensus parameters.
         int pqfuturehorizonepochs{0};
+        struct PQRecoveryRefreshOptions {
+            int32_t activation_height;
+            uint32_t snapshot_lag;
+            uint32_t entropy_delay;
+            uint32_t carrier_delay;
+            uint32_t carrier_min_depth;
+            uint32_t snapshot_min_work;
+            uint32_t carrier_min_work;
+            uint32_t readiness_window;
+        };
+        std::optional<PQRecoveryRefreshOptions> pqrecoveryrefresh;
         int pqbtcccandidateorigin{std::numeric_limits<int>::max()};
         int pqbtccnevminjectionlag{10};
         // SYSCOIN END: Regtest PQ activation and receipt-anchor overrides.

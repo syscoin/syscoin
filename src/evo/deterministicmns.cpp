@@ -247,9 +247,20 @@ const CBlockIndex* GetAuxiliaryHistoryCommonAncestor(
 llmq::pq::PQRegistryCallbacks MakePQRegistryCallbacks(
     const CDeterministicMNList& before,
     const CDeterministicMNList& after,
-    const uint256& genesis_hash)
+    const uint256& genesis_hash,
+    const CBlockIndex* parent)
 {
     llmq::pq::PQRegistryCallbacks callbacks;
+    callbacks.lookup_block_hash = [parent](int32_t height)
+        -> std::optional<uint256> {
+        if (parent == nullptr || height < 0 || height > parent->nHeight) {
+            return std::nullopt;
+        }
+        const CBlockIndex* ancestor{parent->GetAncestor(height)};
+        return ancestor != nullptr
+                   ? std::optional<uint256>{ancestor->GetBlockHash()}
+                   : std::nullopt;
+    };
     callbacks.dmn_exists_before = [&before](const uint256& pro_tx_hash) {
         return before.HasMN(pro_tx_hash);
     };
@@ -2685,7 +2696,8 @@ bool CDeterministicMNManager::ProcessBlock(const CBlock& block, const CBlockInde
                 return _state.Error("failed-pq-registry-open");
             }
             const auto callbacks = MakePQRegistryCallbacks(
-                oldList, newList, consensusParams.hashGenesisBlock);
+                oldList, newList, consensusParams.hashGenesisBlock,
+                pindex->pprev);
             const auto net_removed_pro_tx_hashes{
                 newList.BuildTrackedNetRemovedProTxHashes(oldList)};
             bool prepared{false};
@@ -2733,8 +2745,10 @@ bool CDeterministicMNManager::ProcessBlock(const CBlock& block, const CBlockInde
         } else {
             for (const auto& transaction : block.vtx) {
                 if (transaction &&
-                    transaction->nVersion ==
-                        llmq::pq::PQ_GLOBAL_KEY_TX_VERSION) {
+                    (transaction->nVersion ==
+                         llmq::pq::PQ_GLOBAL_KEY_TX_VERSION ||
+                     transaction->nVersion ==
+                         llmq::pq::PQ_RECOVERY_READINESS_TX_VERSION)) {
                     return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
                                           "bad-pq-registry-disabled");
                 }
@@ -2810,11 +2824,14 @@ bool CDeterministicMNManager::ProcessBlock(const CBlock& block, const CBlockInde
             finality_retention_floor != std::numeric_limits<int>::max() &&
             nHeight >= finality_retention_floor &&
             pq_deployment == llmq::pq::PQRegistryDeploymentResult::VALID &&
-            consensusParams.nPQRosterSnapshotLag > 0 &&
-            llmq::pq::IsRegistrationCutoffHeight(
-                pq_config.schedule,
-                static_cast<uint32_t>(consensusParams.nPQRosterSnapshotLag),
-                nHeight)};
+            ((consensusParams.nPQRosterSnapshotLag > 0 &&
+              llmq::pq::IsRegistrationCutoffHeight(
+                  pq_config.schedule,
+                  static_cast<uint32_t>(consensusParams.nPQRosterSnapshotLag),
+                  nHeight)) ||
+             llmq::pq::RecoveryRefreshCoordinatesForSnapshotHeight(
+                 pq_config.schedule, pq_config.btcc_schedule,
+                 pq_config.recovery_refresh, nHeight).has_value())};
         m_snapshot_persistence_generation.fetch_add(
             1, std::memory_order_relaxed);
         if (replay_write_through || finality_roster_write_through) {
@@ -3451,7 +3468,8 @@ bool CDeterministicMNManager::CheckPQTransaction(
     bool fJustCheck,
     bool check_sigs)
 {
-    if (tx.nVersion != llmq::pq::PQ_GLOBAL_KEY_TX_VERSION) {
+    if (tx.nVersion != llmq::pq::PQ_GLOBAL_KEY_TX_VERSION &&
+        tx.nVersion != llmq::pq::PQ_RECOVERY_READINESS_TX_VERSION) {
         return FormatSyscoinErrorMessage(state, "bad-pq-tx-version",
                                          fJustCheck);
     }
@@ -3486,7 +3504,8 @@ bool CDeterministicMNManager::CheckPQTransaction(
         return state.Error("failed-pq-missing-dmn-parent");
     }
     const auto callbacks = MakePQRegistryCallbacks(
-        parent_list, parent_list, Params().GetConsensus().hashGenesisBlock);
+        parent_list, parent_list, Params().GetConsensus().hashGenesisBlock,
+        pindexPrev);
     llmq::pq::PQRegistryError error;
     if (!registry->ValidateTransaction(tx, pindexPrev->GetBlockHash(),
                                        pindexPrev->nHeight + 1, callbacks,

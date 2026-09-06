@@ -609,6 +609,18 @@ public:
         consensus.nPQRosterSnapshotLag = opts.pqrostersnapshotlag;
         consensus.nPQFutureHorizonEpochs =
             static_cast<uint32_t>(std::max(opts.pqfuturehorizonepochs, 0));
+        if (opts.pqrecoveryrefresh) {
+            const auto& refresh{*opts.pqrecoveryrefresh};
+            consensus.nPQRecoveryRefreshActivationHeight = refresh.activation_height;
+            consensus.nPQRecoveryRefreshGraceGroups = 1;
+            consensus.nPQRecoveryRefreshSnapshotLagBlocks = refresh.snapshot_lag;
+            consensus.nPQRecoveryRefreshEntropyDelayBlocks = refresh.entropy_delay;
+            consensus.nPQRecoveryRefreshCarrierDelayBlocks = refresh.carrier_delay;
+            consensus.nPQRecoveryRefreshCarrierMinDepthBlocks = refresh.carrier_min_depth;
+            consensus.nPQRecoveryRefreshSnapshotMinWorkBlocks = refresh.snapshot_min_work;
+            consensus.nPQRecoveryRefreshCarrierMinWorkBlocks = refresh.carrier_min_work;
+            consensus.nPQRecoveryReadinessWindowBlocks = refresh.readiness_window;
+        }
         consensus.nPQBTCCCandidateOrigin = opts.pqbtcccandidateorigin;
         consensus.nPQBTCCNEVMInjectionLag = opts.pqbtccnevminjectionlag;
         // SYSCOIN: Keep the release-updatable receipt assumption independent

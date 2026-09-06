@@ -7,6 +7,7 @@
 #include <arith_uint256.h>
 #include <chain.h>
 #include <crypto/sha256.h>
+#include <pow.h>
 #include <streams.h>
 #include <test/pq_test_util.h>
 
@@ -550,6 +551,137 @@ struct IndexChain {
 } // namespace
 
 BOOST_AUTO_TEST_SUITE(pq_quorum_builder_tests)
+
+BOOST_AUTO_TEST_CASE(pow_refresh_selects_only_fresh_ready_members_and_binds_immutable_source)
+{
+    constexpr uint32_t GROUP{2};
+    constexpr uint32_t OLD_MEMBERS{QUORUM_SIZE};
+    constexpr uint32_t ALL_MEMBERS{2 * QUORUM_SIZE + 1};
+    const uint256 genesis{NonNullHash(18'900)};
+    auto config{BuildConfig()};
+    config.btcc_schedule = ResetPolicy().btcc_schedule;
+    config.recovery_refresh = RecoveryRefreshConfig{
+        .activation_height = 2305,
+        .grace_groups = 1,
+        .snapshot_lag_blocks = 144,
+        .entropy_delay_blocks = 60,
+        .carrier_delay_blocks = 60,
+        .carrier_min_depth_blocks = 5,
+        .snapshot_min_work_blocks = 60,
+        .carrier_min_work_blocks = 5,
+        .readiness_window_blocks = 128};
+    const auto coordinates{DeriveRecoveryRefreshCoordinates(
+        config.schedule, config.btcc_schedule, config.recovery_refresh, GROUP)};
+    BOOST_REQUIRE(coordinates);
+    IndexChain chain(coordinates->target_height, coordinates->target_height + 1, 0);
+    for (auto& index : chain.indices) {
+        index.nBits = 0x207fffff;
+        index.nChainWork = GetBlockProof(index) * (index.nHeight + 1);
+        LOCK(cs_main);
+        index.nStatus = BLOCK_VALID_SCRIPTS;
+    }
+    auto& carrier{chain.indices[coordinates->carrier_height]};
+    // Proof validation is tested separately; this fixture begins at the same
+    // fully validated immutable index boundary consumed by roster construction.
+    carrier.pqRecoveryRefreshWorkValidated = true;
+    carrier.pqRecoveryRefreshGroup = GROUP;
+    carrier.pqRecoveryRefreshEntropyBlockHash =
+        chain.At(coordinates->entropy_height).GetBlockHash();
+    carrier.pqRecoveryRefreshParentWorkHash = NonNullHash(18'901);
+    carrier.pqRecoveryRefreshCommitmentHash = NonNullHash(18'902);
+
+    enum class ReadinessCase { VALID, MISSING, STALE, LATE, WRONG_BRANCH };
+    ReadinessCase readiness{ReadinessCase::VALID};
+    const QuorumSnapshotLookup lookup = [&](const CBlockIndex& index) {
+        QuorumSnapshotState state;
+        state.deterministic_mns = Snapshot(index.nHeight, index.GetBlockHash(), ALL_MEMBERS);
+        auto keys{RecoveryTargetKeyStates(ALL_MEMBERS, index.nHeight)};
+        if (index.nHeight >= coordinates->snapshot_height) {
+            for (uint32_t tag{OLD_MEMBERS}; tag < ALL_MEMBERS; ++tag) {
+                auto record{RecoveryReadinessRecord{
+                    GROUP, keys[tag].global_key.key_version,
+                    coordinates->readiness_reference_height,
+                    chain.At(coordinates->readiness_reference_height).GetBlockHash(),
+                    coordinates->snapshot_height}};
+                if (readiness == ReadinessCase::STALE) --record.group;
+                if (readiness == ReadinessCase::WRONG_BRANCH) record.reference_hash = NonNullHash(18'903);
+                if (readiness == ReadinessCase::LATE || tag == ALL_MEMBERS - 1) ++record.included_height;
+                if (readiness != ReadinessCase::MISSING) keys[tag].recovery_readiness = record;
+            }
+        }
+        state.operator_key_states = SharedOperatorStates(std::move(keys));
+        return std::optional<QuorumSnapshotState>{std::move(state)};
+    };
+    const auto cache{FrozenQuorumRosterCache::Create(genesis, config, lookup)};
+    BOOST_REQUIRE(cache);
+    QuorumBuildError error{};
+    const auto capsule{cache->BuildPoWRefreshUniverse(GROUP, chain.Tip(), &error)};
+    BOOST_REQUIRE_MESSAGE(capsule, "quorum build error=" << static_cast<int>(error));
+    BOOST_CHECK_EQUAL(capsule->Members().size(), QUORUM_SIZE);
+    BOOST_CHECK(capsule->Source().kind == RecoveryRosterSourceKind::POW_REFRESH);
+    std::set<uint256> expected;
+    for (uint32_t fresh{OLD_MEMBERS}; fresh < ALL_MEMBERS - 1; ++fresh) {
+        expected.insert(NonNullHash(10'000 + fresh));
+    }
+    for (const auto& member : capsule->Members()) BOOST_CHECK_EQUAL(expected.erase(member.pro_tx_hash), 1U);
+    BOOST_CHECK(expected.empty());
+    const auto bundle{RecoveryBeaconBundleAtHeight(coordinates->target_height, capsule->Source())};
+    const auto rosters{cache->GetVerifiedActive(
+        coordinates->target_height, chain.Tip(), bundle, &error)};
+    BOOST_REQUIRE_MESSAGE(rosters, "quorum build error=" << static_cast<int>(error));
+    for (const auto& roster : rosters->Rosters()) {
+        BOOST_CHECK_EQUAL(roster.descriptor.valid_count, QUORUM_SIZE);
+        BOOST_CHECK(!ContainsMember(roster, NonNullHash(10'000)));
+        BOOST_CHECK(ContainsMember(roster, NonNullHash(10'000 + OLD_MEMBERS)));
+    }
+
+    const auto decoded{RecoveryUniverseCapsule::DecodeTrustedPersistence(capsule->Encode(), &error)};
+    BOOST_REQUIRE(decoded);
+    BOOST_CHECK(*decoded == *capsule);
+    const auto restored{std::make_shared<const RecoveryUniverseCapsule>(*decoded)};
+    const RecoveryUniverseLookup persisted = [restored](const uint256& id) {
+        return id == restored->SourceId() ? restored : RecoveryUniverseCapsulePtr{};
+    };
+    // Identity reconstruction can use the durable capsule after restart. The
+    // separately retained S key snapshot is still required for this attempt.
+    const auto restarted{FrozenQuorumRosterCache::Create(genesis, config, lookup, true, persisted)};
+    BOOST_REQUIRE(restarted);
+    const auto restarted_rosters{restarted->GetVerifiedActive(
+        coordinates->target_height, chain.Tip(), bundle, &error)};
+    BOOST_REQUIRE(restarted_rosters);
+    BOOST_CHECK(SameRosterSet(rosters->Rosters(), restarted_rosters->Rosters()));
+
+    for (const auto invalid : {ReadinessCase::MISSING, ReadinessCase::STALE,
+                              ReadinessCase::LATE, ReadinessCase::WRONG_BRANCH}) {
+        readiness = invalid;
+        BOOST_CHECK(!cache->BuildPoWRefreshUniverse(GROUP, chain.Tip(), &error));
+        BOOST_CHECK(error == QuorumBuildError::INSUFFICIENT_ELIGIBLE_MEMBERS);
+    }
+    readiness = ReadinessCase::VALID;
+    carrier.pqRecoveryRefreshWorkValidated = false;
+    BOOST_CHECK(!cache->BuildPoWRefreshUniverse(GROUP, chain.Tip(), &error));
+    BOOST_CHECK(error == QuorumBuildError::INVALID_ROSTER_BEACON);
+    BOOST_CHECK(!cache->GetVerifiedActive(
+        coordinates->target_height, chain.Tip(), bundle, &error));
+    BOOST_CHECK(error == QuorumBuildError::INVALID_ROSTER_BEACON);
+    carrier.pqRecoveryRefreshWorkValidated = true;
+
+    auto forged{capsule->Source()};
+    forged.refresh.seed = NonNullHash(18'904);
+    BOOST_CHECK(!BuildActiveFrozenQuorumRosters(genesis, config,
+        coordinates->target_height, chain.Tip(),
+        RecoveryBeaconBundleAtHeight(coordinates->target_height, forged), lookup, &error));
+    BOOST_CHECK(error == QuorumBuildError::INVALID_ROSTER_BEACON);
+    forged = capsule->Source();
+    forged.refresh.universe_root = NonNullHash(18'905);
+    forged.refresh.seed = *GetRecoveryRefreshEntropyHash(genesis,
+        forged.refresh.universe_root, GROUP, forged.refresh.snapshot_hash,
+        forged.refresh.entropy_block_hash, forged.refresh.parent_work_hash);
+    BOOST_CHECK(!BuildActiveFrozenQuorumRosters(genesis, config,
+        coordinates->target_height, chain.Tip(),
+        RecoveryBeaconBundleAtHeight(coordinates->target_height, forged), lookup, &error));
+    BOOST_CHECK(error == QuorumBuildError::INVALID_RECOVERY_UNIVERSE);
+}
 
 BOOST_AUTO_TEST_CASE(base_hash_cannot_grind_fixed_snapshot_and_beacon)
 {

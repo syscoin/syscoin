@@ -286,8 +286,9 @@ std::optional<uint8_t> ValidateRosterAuthorizationStateInternal(
         (context.admission == RosterAuthorizationAdmission::RECOVER &&
          (!context.previous || statement.btcc_advance != BTCCAdvance::KEEP ||
           statement.roster_beacons.active.recovery_authority_source.IsNull() ||
-          statement.roster_beacons.active.recovery_authority_source !=
-              context.previous->window.active.recovery_authority_source ||
+          (statement.roster_beacons.active.recovery_authority_source !=
+               context.previous->window.active.recovery_authority_source &&
+           !context.HasPoWRefreshAuthority(genesis_hash, statement)) ||
           MakeRecoveryRosterBeaconWindow(
               statement.roster_beacons.active.recovery_authority_source,
               statement.roster_beacons.active.seeds.back().epoch) !=
@@ -831,6 +832,25 @@ std::vector<uint8_t> DurableRosterContext::Encode() const
     }
     return {UCharCast(stream.data()),
             UCharCast(stream.data() + stream.size())};
+}
+
+bool VerifiedPoWRefreshAuthority::Authorizes(
+    const uint256& genesis_hash, const ChainLockStatement& statement) const noexcept
+{
+    return !genesis_hash.IsNull() && genesis_hash == m_genesis_hash &&
+           statement.height == m_target_height &&
+           !m_target_hash.IsNull() && statement.block_hash == m_target_hash &&
+           statement.roster_transition == RosterAuthorizationTransitionKind::RECOVER &&
+           m_source.kind == RecoveryRosterSourceKind::POW_REFRESH &&
+           m_source.IsStructurallyValid() &&
+           statement.roster_beacons.active.recovery_authority_source == m_source;
+}
+
+bool RosterAuthorizationVerificationContext::HasPoWRefreshAuthority(
+    const uint256& genesis_hash, const ChainLockStatement& statement) const noexcept
+{
+    return admission == RosterAuthorizationAdmission::RECOVER && m_pow_refresh &&
+           m_pow_refresh->Authorizes(genesis_hash, statement);
 }
 
 VerifiedPoWHistoricalBoundary::VerifiedPoWHistoricalBoundary(

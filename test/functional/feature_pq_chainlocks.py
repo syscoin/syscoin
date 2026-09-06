@@ -72,17 +72,17 @@ BITMAP_SIZE = QUORUM_SIZE // 8
 BTCC_RECEIPT_STATE_SIZE = 108
 BTCC_RECEIPT_WIRE_SIZE = 138
 PAYMENT_AUDIT_RECEIPT_STATE_SIZE = 136
-ROSTER_BEACON_SEED_WIRE_SIZE = 112
-RECOVERY_ROSTER_AUTHORITY_SOURCE_WIRE_SIZE = 112
-CHAINLOCK_STATEMENT_WIRE_SIZE = 1_296
+ROSTER_BEACON_SEED_WIRE_SIZE = 144
+RECOVERY_ROSTER_AUTHORITY_SOURCE_WIRE_SIZE = 353
+CHAINLOCK_STATEMENT_WIRE_SIZE = 1_697
 FINAL_CHAINLOCK_FIXED_WIRE_SIZE = (
     CHAINLOCK_STATEMENT_WIRE_SIZE + 1 + ACTIVE_QUORUMS * BITMAP_SIZE + 2
 )
 PQCLSHARE_WIRE_SIZE = 1_282
-SELF_CONTAINED_CHAINLOCK_SHARE_WIRE_SIZE = 2_614
-FINAL_CHAINLOCK_WIRE_SIZE = 1_001_147
-FINAL_PAYMENT_AUDIT_WIRE_SIZE = 1_041_546
-PAYMENT_AUDIT_RECEIPT_WIRE_SIZE = 369
+SELF_CONTAINED_CHAINLOCK_SHARE_WIRE_SIZE = 3_015
+FINAL_CHAINLOCK_WIRE_SIZE = 1_001_548
+FINAL_PAYMENT_AUDIT_WIRE_SIZE = 1_041_947
+PAYMENT_AUDIT_RECEIPT_WIRE_SIZE = 401
 PAYMENT_AUDIT_RECEIPT_VERSION = 1
 PAYMENT_PROBATION_STATE_VERSION = 1
 CHAINLOCK_PERIOD = 5
@@ -234,6 +234,7 @@ def serialize_roster_beacon_seed(epoch, state=2):
             + serialize_cursor()
             + struct.pack("<i", -1)
             + ser_uint256(0)
+            + ser_uint256(0)
         )
     return (
         struct.pack("<HBBI", 1, 1, state, epoch)
@@ -241,11 +242,17 @@ def serialize_roster_beacon_seed(epoch, state=2):
             10_000 + epoch, 100_000 + epoch, 200_000 + epoch)
         + struct.pack("<i", 800_000 + epoch)
         + ser_uint256(300_000 + epoch if state == 2 else 0)
+        + ser_uint256(0)
     )
 
 
 def serialize_recovery_roster_authority_source(epoch):
-    payload = serialize_roster_beacon_seed(epoch)
+    empty_refresh = (
+        struct.pack("<Ii", 0, -1) + bytes(64)
+        + struct.pack("<i", -1) + bytes(32)
+        + struct.pack("<i", -1) + bytes(96)
+    )
+    payload = b"\x01" + serialize_roster_beacon_seed(epoch) + empty_refresh
     assert_equal(len(payload), RECOVERY_ROSTER_AUTHORITY_SOURCE_WIRE_SIZE)
     return payload
 

@@ -66,7 +66,7 @@ struct DecodedProviderRevocation {
 };
 
 using DecodedPayload =
-    std::variant<GlobalKeyTxPayload, DecodedProviderRevocation>;
+    std::variant<GlobalKeyTxPayload, RecoveryReadinessTxPayload, DecodedProviderRevocation>;
 
 template <typename T>
 std::shared_ptr<const std::vector<T>> MakeTrackedVector(
@@ -248,6 +248,7 @@ bool IsStructurallyValidSnapshotState(
              state.global_key.activated_height >
                  static_cast<uint32_t>(height)) ||
             state.revoked_height > static_cast<uint32_t>(height) ||
+            (state.recovery_readiness && state.recovery_readiness->included_height > height) ||
             (index != 0 &&
              state.schedule != operator_states[0].schedule)) {
             return false;
@@ -743,9 +744,10 @@ bool DecodeRegistryUpdate(const CTransaction& transaction,
 {
     decoded.reset();
     const bool global{transaction.nVersion == PQ_GLOBAL_KEY_TX_VERSION};
+    const bool readiness{transaction.nVersion == PQ_RECOVERY_READINESS_TX_VERSION};
     const bool provider_revoke{
         transaction.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE};
-    if (!global && !provider_revoke) return true;
+    if (!global && !readiness && !provider_revoke) return true;
 
     if (provider_revoke) {
         CProUpRevTx provider_payload;
@@ -770,8 +772,9 @@ bool DecodeRegistryUpdate(const CTransaction& transaction,
     if (!ExtractCanonicalPQPayload(transaction, encoded)) {
         return SetError(
             error,
-            global ? PQRegistryResult::INVALID_GLOBAL_KEY_PAYLOAD
-                   : PQRegistryResult::INVALID_PROVIDER_REVOCATION_PAYLOAD,
+            global ? PQRegistryResult::INVALID_GLOBAL_KEY_PAYLOAD :
+                (readiness ? PQRegistryResult::INVALID_RECOVERY_READINESS_PAYLOAD
+                           : PQRegistryResult::INVALID_PROVIDER_REVOCATION_PAYLOAD),
             transaction_index);
     }
 
@@ -786,6 +789,14 @@ bool DecodeRegistryUpdate(const CTransaction& transaction,
                             transaction_index);
         }
         update.pro_tx_hash = payload.pro_tx_hash;
+        update.payload = std::move(payload);
+    } else if (readiness) {
+        RecoveryReadinessTxPayload payload;
+        if (!DecodeRecoveryReadinessTxPayload(encoded, payload)) {
+            return SetError(error, PQRegistryResult::INVALID_RECOVERY_READINESS_PAYLOAD,
+                            transaction_index);
+        }
+        update.pro_tx_hash = payload.readiness.pro_tx_hash;
         update.payload = std::move(payload);
     } else {
         DecodedProviderRevocation revocation;
@@ -824,6 +835,7 @@ bool ApplyDecodedUpdate(
     const DecodedUpdate& update,
     const OperatorKeyScheduleView& schedule_view,
     const uint256& genesis_hash,
+    const PQRegistryConfig& config,
     const PQRegistryCallbacks& callbacks,
     bool check_sigs,
     FindGlobalKeyOwner&& find_global_key_owner,
@@ -887,6 +899,38 @@ bool ApplyDecodedUpdate(
                 global->transaction_inputs_hash, global->authorization,
                 check_sigs);
         }
+    } else if (const auto* ready{std::get_if<RecoveryReadinessTxPayload>(&update.payload)}) {
+        const auto& authorization{ready->readiness};
+        if (authorization.transaction_inputs_hash != CalcTxInputsHash(*update.transaction)) {
+            return SetError(error, PQRegistryResult::TRANSACTION_INPUTS_HASH_MISMATCH,
+                            update.transaction_index, update.pro_tx_hash);
+        }
+        const auto coordinates{DeriveRecoveryRefreshCoordinates(
+            config.schedule, config.btcc_schedule, config.recovery_refresh, authorization.group)};
+        if (!coordinates || schedule_view.block_height < config.recovery_refresh.activation_height ||
+            authorization.reference_height != coordinates->readiness_reference_height ||
+            schedule_view.block_height <= coordinates->readiness_reference_height ||
+            schedule_view.block_height > coordinates->snapshot_height) {
+            return SetError(error, PQRegistryResult::INVALID_RECOVERY_READINESS,
+                            update.transaction_index, update.pro_tx_hash);
+        }
+        if (!callbacks.lookup_block_hash) {
+            return SetError(error, PQRegistryResult::CALLBACK_MISSING,
+                            update.transaction_index, update.pro_tx_hash);
+        }
+        std::optional<uint256> reference;
+        try {
+            reference = callbacks.lookup_block_hash(coordinates->readiness_reference_height);
+        } catch (...) {
+            return SetError(error, PQRegistryResult::CALLBACK_FAILED,
+                            update.transaction_index, update.pro_tx_hash);
+        }
+        if (!reference || *reference != authorization.reference_hash) {
+            return SetError(error, PQRegistryResult::INVALID_RECOVERY_READINESS,
+                            update.transaction_index, update.pro_tx_hash);
+        }
+        transition = state.ApplyRecoveryReadiness(schedule_view, genesis_hash, authorization,
+            ready->signature, coordinates->snapshot_height, check_sigs);
     } else {
         const auto& revocation{
             std::get<DecodedProviderRevocation>(update.payload)};
@@ -1055,7 +1099,8 @@ bool PQRegistryConfig::IsValid() const noexcept
         registration_cutoff_blocks == 0 ||
         future_horizon_epochs < ACTIVE_QUORUMS ||
         future_horizon_epochs > MAX_OPERATOR_SCHEDULE_EPOCHS ||
-        preparation_height >= schedule.epoch_origin) {
+        preparation_height >= schedule.epoch_origin ||
+        (!recovery_refresh.IsDisabled() && !recovery_refresh.IsValid(schedule, btcc_schedule))) {
         return false;
     }
     const auto epoch_zero_cutoff{RegistrationCutoffHeight(
@@ -1096,7 +1141,9 @@ PQRegistryDeploymentResult GetPQRegistryConfig(
         params.nPQChainLockEpochOrigin == std::numeric_limits<int>::max() &&
         params.nPQRegistrationCutoffBlocks == 0 &&
         params.nPQFutureHorizonEpochs == 0};
-    if (disabled) return PQRegistryDeploymentResult::DISABLED;
+    const auto refresh{GetRecoveryRefreshConfig(params)};
+    if (disabled) return refresh.IsDisabled() ? PQRegistryDeploymentResult::DISABLED
+                                             : PQRegistryDeploymentResult::INVALID_CONFIGURATION;
     const auto activation_configuration{
         Consensus::CheckPQActivationConfiguration(params)};
     if (params.nPQPreparationHeight < params.DIP0003Height ||
@@ -1106,6 +1153,9 @@ PQRegistryDeploymentResult GetPQRegistryConfig(
         params.nPQFutureHorizonEpochs == 0 ||
         activation_configuration ==
             Consensus::PQActivationResult::INVALID_CONFIGURATION ||
+        (!refresh.IsDisabled() &&
+         (activation_configuration != Consensus::PQActivationResult::VALID ||
+          refresh.activation_height < params.nPQActivationHeight)) ||
         (activation_configuration == Consensus::PQActivationResult::VALID &&
          params.nPQPreparationHeight >= params.nPQActivationHeight)) {
         return PQRegistryDeploymentResult::INVALID_CONFIGURATION;
@@ -1117,6 +1167,8 @@ PQRegistryDeploymentResult GetPQRegistryConfig(
     config.schedule = *schedule;
     config.registration_cutoff_blocks = params.nPQRegistrationCutoffBlocks;
     config.future_horizon_epochs = params.nPQFutureHorizonEpochs;
+    config.btcc_schedule = GetBTCCScheduleConfig(params);
+    config.recovery_refresh = refresh;
     return config.IsValid() ? PQRegistryDeploymentResult::VALID
                             : PQRegistryDeploymentResult::INVALID_CONFIGURATION;
 }
@@ -1179,7 +1231,8 @@ bool PQRegistryDiskSnapshot::IsStructurallyValid() const noexcept
                 static_cast<uint32_t>(height)) {
             return false;
         }
-        if (state.revoked_height > static_cast<uint32_t>(height)) {
+        if (state.revoked_height > static_cast<uint32_t>(height) ||
+            (state.recovery_readiness && state.recovery_readiness->included_height > height)) {
             return false;
         }
     }
@@ -1189,7 +1242,8 @@ bool PQRegistryDiskSnapshot::IsStructurallyValid() const noexcept
                 static_cast<uint32_t>(height)) {
             return false;
         }
-        if (state.revoked_height > static_cast<uint32_t>(height)) {
+        if (state.revoked_height > static_cast<uint32_t>(height) ||
+            (state.recovery_readiness && state.recovery_readiness->included_height > height)) {
             return false;
         }
     }
@@ -1243,6 +1297,8 @@ std::string_view PQRegistryResultString(PQRegistryResult result) noexcept
     case PQRegistryResult::DUPLICATE_OPERATOR_UPDATE: return "duplicate-operator-update";
     case PQRegistryResult::DUPLICATE_GLOBAL_KEY: return "duplicate-global-key";
     case PQRegistryResult::INVALID_GLOBAL_KEY_PAYLOAD: return "invalid-global-key-payload";
+    case PQRegistryResult::INVALID_RECOVERY_READINESS_PAYLOAD: return "invalid-recovery-readiness-payload";
+    case PQRegistryResult::INVALID_RECOVERY_READINESS: return "invalid-recovery-readiness";
     case PQRegistryResult::INVALID_PROVIDER_REVOCATION_PAYLOAD: return "invalid-provider-revocation-payload";
     case PQRegistryResult::TRANSACTION_INPUTS_HASH_MISMATCH: return "transaction-inputs-hash-mismatch";
     case PQRegistryResult::OWNER_AUTHORIZATION_FAILED: return "owner-authorization-failed";
@@ -1286,6 +1342,8 @@ bool IsPQRegistryLocalFailure(PQRegistryResult result) noexcept
     case PQRegistryResult::DUPLICATE_OPERATOR_UPDATE:
     case PQRegistryResult::DUPLICATE_GLOBAL_KEY:
     case PQRegistryResult::INVALID_GLOBAL_KEY_PAYLOAD:
+    case PQRegistryResult::INVALID_RECOVERY_READINESS_PAYLOAD:
+    case PQRegistryResult::INVALID_RECOVERY_READINESS:
     case PQRegistryResult::INVALID_PROVIDER_REVOCATION_PAYLOAD:
     case PQRegistryResult::TRANSACTION_INPUTS_HASH_MISMATCH:
     case PQRegistryResult::OWNER_AUTHORIZATION_FAILED:
@@ -1656,6 +1714,18 @@ bool PQRegistryManager::AuthenticateGCContext(
                     << m_config.schedule.active_epochs
                     << m_config.registration_cutoff_blocks
                     << m_config.future_horizon_epochs
+                    << m_config.btcc_schedule.candidate_origin
+                    << m_config.btcc_schedule.candidate_period
+                    << m_config.btcc_schedule.nevm_injection_lag
+                    << m_config.recovery_refresh.activation_height
+                    << m_config.recovery_refresh.grace_groups
+                    << m_config.recovery_refresh.snapshot_lag_blocks
+                    << m_config.recovery_refresh.entropy_delay_blocks
+                    << m_config.recovery_refresh.carrier_delay_blocks
+                    << m_config.recovery_refresh.carrier_min_depth_blocks
+                    << m_config.recovery_refresh.snapshot_min_work_blocks
+                    << m_config.recovery_refresh.carrier_min_work_blocks
+                    << m_config.recovery_refresh.readiness_window_blocks
                     << segment_replay.records.front().identity
                     << segment_replay.records.front().state_root
                     << segment_replay.records.front().record_hash;
@@ -3466,6 +3536,7 @@ bool PQRegistryManager::PrepareBlockInternal(
         for (std::size_t index{0}; index < block.vtx.size(); ++index) {
             if (block.vtx[index] &&
                 (block.vtx[index]->nVersion == PQ_GLOBAL_KEY_TX_VERSION ||
+                 block.vtx[index]->nVersion == PQ_RECOVERY_READINESS_TX_VERSION ||
                  IsPQProviderRevocation(*block.vtx[index]))) {
                 return SetError(error,
                                 PQRegistryResult::PQ_TX_BEFORE_PREPARATION,
@@ -3692,7 +3763,7 @@ bool PQRegistryManager::PrepareBlockInternal(
                     : std::optional<uint256>{owner->second};
             }};
         if (!ApplyDecodedUpdate(
-                candidate, update, *schedule_view, m_genesis_hash, callbacks,
+                candidate, update, *schedule_view, m_genesis_hash, m_config, callbacks,
                 /*check_sigs=*/true, find_global_key_owner, error)) {
             return false;
         }
@@ -3901,7 +3972,8 @@ bool PQRegistryManager::ValidateTransaction(
     PQRegistryError& error)
 {
     error.Clear();
-    if (transaction.nVersion != PQ_GLOBAL_KEY_TX_VERSION ||
+    if ((transaction.nVersion != PQ_GLOBAL_KEY_TX_VERSION &&
+         transaction.nVersion != PQ_RECOVERY_READINESS_TX_VERSION) ||
         parent_block_hash.IsNull() || height <= 0) {
         return SetError(error, PQRegistryResult::INVALID_BLOCK);
     }
@@ -4028,7 +4100,7 @@ bool PQRegistryManager::ValidateTransaction(
     auto& state{*candidate_state};
 
     if (!ApplyDecodedUpdate(
-            state, *decoded, *schedule_view, m_genesis_hash, callbacks,
+            state, *decoded, *schedule_view, m_genesis_hash, m_config, callbacks,
             check_sigs,
             [&](const GlobalPublicKey& public_key) {
                 return logical_empty_parent
@@ -4247,6 +4319,8 @@ bool PQRegistryManager::GetMempoolView(
          !IsStrictlySortedUnique(requested_operators))) {
         return SetError(error, PQRegistryResult::INVALID_BLOCK);
     }
+    view.tip_height = height;
+    view.config = m_config;
     view.operators.reserve(requested_operators.size());
     if (height < m_config.preparation_height) {
         for (const auto& pro_tx_hash : requested_operators) {

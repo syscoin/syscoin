@@ -144,8 +144,8 @@ BOOST_AUTO_TEST_CASE(canonical_registry_hash_matches_generic_hash)
     const auto generic{
         GetPQKeyConsensusStateHash(genesis, states)};
     BOOST_REQUIRE(canonical);
-    BOOST_CHECK(*canonical == uint256S(
-        "f672dbd6383697c1e49dcab37fef63c857797ab2dfecd8ea9e2f8096a6eabeb8"));
+    BOOST_CHECK_EQUAL(canonical->ToString(),
+        "f23b8fae7b896bc5c26408dc4d418df9435bce0b219979f3919febd607060ba7");
     BOOST_CHECK(canonical == generic);
 
     const std::vector<OperatorKeyState> empty;

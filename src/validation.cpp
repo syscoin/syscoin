@@ -16,6 +16,7 @@
 #include <clientversion.h>
 #include <common/args.h>
 #include <llmq/pq_btcc.h> // SYSCOIN: branch-bound BTCC receipt validation.
+#include <llmq/pq_recovery_refresh.h>
 #include <consensus/amount.h>
 #include <consensus/consensus.h>
 #include <consensus/merkle.h>
@@ -392,7 +393,8 @@ static bool IsBranchBoundProviderMempoolTransaction(
            tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE ||
            tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR ||
            tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE ||
-           tx.nVersion == SYSCOIN_TX_VERSION_PQ_GLOBAL_KEY;
+           tx.nVersion == SYSCOIN_TX_VERSION_PQ_GLOBAL_KEY ||
+           tx.nVersion == SYSCOIN_TX_VERSION_PQ_RECOVERY_READINESS;
 }
 
 // SYSCOIN BEGIN: Public activation-quarantine provider policy.
@@ -401,7 +403,8 @@ bool IsPQActivationQuarantinedProviderTxVersion(int32_t version) noexcept
     return version == SYSCOIN_TX_VERSION_MN_REGISTER ||
            version == SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE ||
            version == SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR ||
-           version == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE;
+           version == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE ||
+           version == SYSCOIN_TX_VERSION_PQ_RECOVERY_READINESS;
 }
 // SYSCOIN END: Public activation-quarantine provider policy.
 
@@ -2088,6 +2091,61 @@ static bool CheckBTCCReceiptCommitment(const CBlock& block,
     }
     if (decoded != nullptr) *decoded = receipt;
     return true;
+}
+
+static bool CheckRecoveryRefreshWorkCommitment(
+    const CBlock& block, BlockValidationState& state, const CBlockIndex& index,
+    const Consensus::Params& consensus,
+    std::optional<llmq::pq::ValidatedRecoveryRefreshWorkSample>* validated = nullptr)
+{
+    if (validated) validated->reset();
+    const auto config{llmq::pq::GetRecoveryRefreshConfig(consensus)};
+    if (config.IsDisabled() || index.nHeight < config.activation_height) return true;
+    const auto chainlock{llmq::pq::MakeChainLockScheduleConfig(consensus.nPQChainLockEpochOrigin)};
+    const auto btcc{llmq::pq::GetBTCCScheduleConfig(consensus)};
+    if (!chainlock || !config.IsValid(*chainlock, btcc)) {
+        return state.Error("pq-recovery-refresh-invalid-schedule");
+    }
+    std::optional<llmq::pq::RecoveryRefreshWorkCommitment> commitment;
+    if (!llmq::pq::ExtractRecoveryRefreshWorkCommitment(block, commitment)) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                             "bad-pq-recovery-work-encoding");
+    }
+    // Omitting the sample disables this attempt, not ordinary PoW progress.
+    if (!commitment) return true;
+    const auto coordinates{llmq::pq::RecoveryRefreshCoordinatesForCarrierHeight(
+        *chainlock, btcc, config, index.nHeight)};
+    if (!coordinates) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                             "bad-pq-recovery-work-height");
+    }
+    auto sample{llmq::pq::VerifyRecoveryRefreshWorkCommitment(
+        *chainlock, btcc, config, *coordinates, index, *commitment, consensus)};
+    if (!sample) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                             "bad-pq-recovery-work-proof");
+    }
+    if (validated) *validated = std::move(sample);
+    return true;
+}
+
+static bool SetIndexedRecoveryRefreshWork(
+    CBlockIndex& index,
+    const std::optional<llmq::pq::ValidatedRecoveryRefreshWorkSample>& sample)
+{
+    const uint32_t group{sample ? sample->Group() : 0};
+    const uint256 entropy_hash{sample ? sample->EntropyBlockHash() : uint256{}};
+    const uint256 parent_hash{sample ? sample->ParentWorkHash() : uint256{}};
+    const uint256 commitment_hash{sample ? sample->CommitmentHash() : uint256{}};
+    const bool changed{index.pqRecoveryRefreshGroup != group ||
+        index.pqRecoveryRefreshEntropyBlockHash != entropy_hash ||
+        index.pqRecoveryRefreshParentWorkHash != parent_hash ||
+        index.pqRecoveryRefreshCommitmentHash != commitment_hash};
+    index.pqRecoveryRefreshGroup = group;
+    index.pqRecoveryRefreshEntropyBlockHash = entropy_hash;
+    index.pqRecoveryRefreshParentWorkHash = parent_hash;
+    index.pqRecoveryRefreshCommitmentHash = commitment_hash;
+    return changed;
 }
 
 // SYSCOIN: Persisted BTCC cursor/state fields form the compact branch-local
@@ -4165,6 +4223,14 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     const auto time_start{SteadyClock::now()};
     const CChainParams& params{m_chainman.GetParams()};
 
+    // Revalidation may fail before scripts. Revoke the exact G attestation
+    // before any such exit and restore it only after full connection succeeds.
+    if (!fJustCheck && pindex->pqRecoveryRefreshWorkValidated) {
+        pindex->pqRecoveryRefreshWorkValidated = false;
+        m_chainman.NotePQProvenanceRevoked();
+        m_blockman.m_dirty_blockindex.insert(pindex);
+    }
+
     // Check it again in case a previous version let a bad block in
     // NOTE: We don't currently (re-)invoke ContextualCheckBlock() or
     // ContextualCheckBlockHeader() here. This means that if we add a new
@@ -4195,6 +4261,12 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     if (!CheckBTCPREVCommitment(block, state, pindex->nHeight,
                                 params.GetConsensus())) {
         return error("%s: CheckBTCPREVCommitment: %s", __func__,
+                     state.ToString());
+    }
+    std::optional<llmq::pq::ValidatedRecoveryRefreshWorkSample> recovery_work;
+    if (!CheckRecoveryRefreshWorkCommitment(
+            block, state, *pindex, params.GetConsensus(), &recovery_work)) {
+        return error("%s: CheckRecoveryRefreshWorkCommitment: %s", __func__,
                      state.ToString());
     }
 
@@ -4700,6 +4772,15 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
 
     if (!pindex->IsValid(BLOCK_VALID_SCRIPTS)) {
         pindex->RaiseValidity(BLOCK_VALID_SCRIPTS);
+        m_blockman.m_dirty_blockindex.insert(pindex);
+    }
+
+    if (SetIndexedRecoveryRefreshWork(*pindex, recovery_work)) {
+        m_blockman.m_dirty_blockindex.insert(pindex);
+    }
+    if (recovery_work && fScriptChecks && pindex->IsValid(BLOCK_VALID_SCRIPTS) &&
+        !pindex->IsAssumedValid()) {
+        pindex->pqRecoveryRefreshWorkValidated = true;
         m_blockman.m_dirty_blockindex.insert(pindex);
     }
 
@@ -7623,6 +7704,15 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
                                     chainman.GetConsensus())) {
         return false;
     }
+    const uint256 recovery_carrier_hash{block.GetHash()};
+    CBlockIndex recovery_carrier{block};
+    recovery_carrier.phashBlock = &recovery_carrier_hash;
+    recovery_carrier.pprev = const_cast<CBlockIndex*>(pindexPrev);
+    recovery_carrier.nHeight = nHeight;
+    if (!CheckRecoveryRefreshWorkCommitment(
+            block, state, recovery_carrier, chainman.GetConsensus())) {
+        return false;
+    }
     const auto audit_chainlock_schedule{
         llmq::pq::MakeChainLockScheduleConfig(
             chainman.GetConsensus().nPQChainLockEpochOrigin)};
@@ -8372,7 +8462,22 @@ bool Chainstate::RollforwardBlock(CBlockIndex* pindex, CCoinsViewCache& inputs, 
     if (!m_blockman.ReadBlockFromDisk(block, *pindex)) {
         return error("ReplayBlock(): ReadBlockFromDisk failed at %d, hash=%s", pindex->nHeight, pindex->GetBlockHash().ToString());
     }
+    const bool had_recovery_work_provenance{pindex->pqRecoveryRefreshWorkValidated};
+    if (had_recovery_work_provenance) {
+        pindex->pqRecoveryRefreshWorkValidated = false;
+        m_chainman.NotePQProvenanceRevoked();
+        m_blockman.m_dirty_blockindex.insert(pindex);
+    }
     BlockValidationState state;
+    std::optional<llmq::pq::ValidatedRecoveryRefreshWorkSample> recovery_work;
+    if (!CheckRecoveryRefreshWorkCommitment(
+            block, state, *pindex, chainParams, &recovery_work)) {
+        return error("ReplayBlock(): CheckRecoveryRefreshWorkCommitment failed at %d, "
+                     "hash=%s state=%s", pindex->nHeight,
+                     pindex->GetBlockHash().ToString(), state.ToString());
+    }
+    const bool recovery_work_changed{SetIndexedRecoveryRefreshWork(*pindex, recovery_work)};
+    if (recovery_work_changed) m_blockman.m_dirty_blockindex.insert(pindex);
     if (!CheckBTCPREVCommitment(block, state, pindex->nHeight, chainParams)) {
         return error("ReplayBlock(): CheckBTCPREVCommitment failed at %d, "
                      "hash=%s state=%s", pindex->nHeight,
@@ -8490,6 +8595,13 @@ bool Chainstate::RollforwardBlock(CBlockIndex* pindex, CCoinsViewCache& inputs, 
             "hash=%s state=%s",
             pindex->nHeight, pindex->GetBlockHash().ToString(),
             state.ToString());
+    }
+    // Rollforward can preserve an existing full-validation attestation after
+    // raw proof rechecking; it cannot manufacture one from script-valid flags.
+    if (had_recovery_work_provenance && !recovery_work_changed && recovery_work &&
+        pindex->IsValid(BLOCK_VALID_SCRIPTS) && !pindex->IsAssumedValid()) {
+        pindex->pqRecoveryRefreshWorkValidated = true;
+        m_blockman.m_dirty_blockindex.insert(pindex);
     }
     return true;
 }

@@ -115,6 +115,17 @@ struct Params {
     uint32_t nPQRegistrationCutoffBlocks{0};
     int nPQRosterSnapshotLag{288}; // SYSCOIN: Freeze PQ rosters on an earlier branch-bound snapshot.
     uint32_t nPQFutureHorizonEpochs{0};
+    // Rolling recovery is a separate, explicitly activated consensus profile.
+    // No public network inherits experimental readiness or work-depth choices.
+    int nPQRecoveryRefreshActivationHeight{-1};
+    uint32_t nPQRecoveryRefreshGraceGroups{0};
+    uint32_t nPQRecoveryRefreshSnapshotLagBlocks{0};
+    uint32_t nPQRecoveryRefreshEntropyDelayBlocks{0};
+    uint32_t nPQRecoveryRefreshCarrierDelayBlocks{0};
+    uint32_t nPQRecoveryRefreshCarrierMinDepthBlocks{0};
+    uint32_t nPQRecoveryRefreshSnapshotMinWorkBlocks{0};
+    uint32_t nPQRecoveryRefreshCarrierMinWorkBlocks{0};
+    uint32_t nPQRecoveryReadinessWindowBlocks{0};
     int nPQBTCCCandidateOrigin{std::numeric_limits<int>::max()};
     // Candidate H is signed by the H+5 ChainLock round and may first be
     // receipted after the fixed five-block propagation buffer at H+10.

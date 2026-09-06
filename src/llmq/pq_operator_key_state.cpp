@@ -237,12 +237,23 @@ OperatorKeyState OperatorKeyState::ForOperator(
     return state;
 }
 
+bool RecoveryReadinessRecord::IsStructurallyValid() const noexcept
+{
+    return group <= std::numeric_limits<uint32_t>::max() / ACTIVE_QUORUMS &&
+           global_key_version != 0 && reference_height >= 0 &&
+           !reference_hash.IsNull() && included_height > reference_height;
+}
+
 bool OperatorKeyState::IsStructurallyValid() const noexcept
 {
     if (version != OPERATOR_KEY_STATE_VERSION || pro_tx_hash.IsNull() ||
         has_global_key > 1 || global_key_active > 1 ||
         global_key_active > has_global_key || schedule_initialized > 1 ||
-        frozen_child_roots.size() > MAX_RETAINED_FROZEN_CHILD_ROOTS) {
+        frozen_child_roots.size() > MAX_RETAINED_FROZEN_CHILD_ROOTS ||
+        (recovery_readiness &&
+         (!recovery_readiness->IsStructurallyValid() || !HasActiveGlobalKey() ||
+          recovery_readiness->global_key_version != global_key.key_version ||
+          recovery_readiness->included_height < static_cast<int64_t>(global_key.activated_height)))) {
         return false;
     }
     if (schedule_initialized == 0) {
@@ -421,6 +432,7 @@ OperatorKeyStateResult OperatorKeyState::ApplyInitialGlobalKey(
     next.global_key.activated_height =
         static_cast<uint32_t>(view.block_height);
     next.frozen_child_roots.clear();
+    next.recovery_readiness.reset();
     if (!next.IsStructurallyValid()) {
         return OperatorKeyStateResult::INVALID_STATE;
     }
@@ -468,6 +480,7 @@ OperatorKeyStateResult OperatorKeyState::ApplyGlobalKeyRotation(
     next.global_key = candidate;
     next.global_key.activated_height =
         static_cast<uint32_t>(view.block_height);
+    next.recovery_readiness.reset();
     if (!next.IsStructurallyValid()) {
         return OperatorKeyStateResult::INVALID_STATE;
     }
@@ -504,11 +517,58 @@ OperatorKeyStateResult OperatorKeyState::ApplyProviderRevocation(
     next.global_key_active = 0;
     next.revoked_height = static_cast<uint32_t>(view.block_height);
     next.frozen_child_roots.clear();
+    next.recovery_readiness.reset();
     if (!next.IsStructurallyValid()) {
         return OperatorKeyStateResult::INVALID_STATE;
     }
     *this = std::move(next);
     return OperatorKeyStateResult::OK;
+}
+
+OperatorKeyStateResult OperatorKeyState::ApplyRecoveryReadiness(
+    const OperatorKeyScheduleView& view,
+    const uint256& genesis_hash,
+    const RecoveryReadinessAuthorization& authorization,
+    const GlobalSignature& signature,
+    int32_t snapshot_height,
+    bool check_sigs)
+{
+    const auto prepared{CheckPrepared(*this, view)};
+    if (prepared != OperatorKeyStateResult::OK) return prepared;
+    if (!HasActiveGlobalKey()) return OperatorKeyStateResult::GLOBAL_KEY_INACTIVE;
+    if (!authorization.IsStructurallyValid() || authorization.pro_tx_hash != pro_tx_hash ||
+        authorization.global_key_version != global_key.key_version ||
+        static_cast<uint32_t>(view.block_height) < global_key.activated_height ||
+        view.block_height <= authorization.reference_height || view.block_height > snapshot_height ||
+        (recovery_readiness &&
+         (authorization.group < recovery_readiness->group ||
+          view.block_height <= recovery_readiness->included_height))) {
+        return OperatorKeyStateResult::INVALID_RECOVERY_READINESS;
+    }
+    if (!GetRecoveryReadinessAuthorizationHash(genesis_hash, global_key, authorization) ||
+        (check_sigs && !VerifyRecoveryReadinessAuthorization(
+            genesis_hash, global_key, authorization, signature))) {
+        return OperatorKeyStateResult::RECOVERY_READINESS_AUTH_FAILED;
+    }
+    // Expiry is evaluated at the future frozen snapshot, never by mutating
+    // ordinary operator eligibility as the live tip advances.
+    recovery_readiness = RecoveryReadinessRecord{
+        authorization.group, authorization.global_key_version,
+        authorization.reference_height, authorization.reference_hash, view.block_height};
+    return OperatorKeyStateResult::OK;
+}
+
+bool OperatorKeyState::IsRecoveryReady(
+    uint32_t group, int32_t reference_height,
+    const uint256& reference_hash, int32_t snapshot_height) const noexcept
+{
+    return IsStructurallyValid() && HasActiveGlobalKey() && recovery_readiness &&
+           recovery_readiness->group == group &&
+           recovery_readiness->global_key_version == global_key.key_version &&
+           recovery_readiness->reference_height == reference_height &&
+           recovery_readiness->reference_hash == reference_hash &&
+           recovery_readiness->included_height > reference_height &&
+           recovery_readiness->included_height <= snapshot_height;
 }
 
 ChildRootResolution OperatorKeyState::ResolveChildRoot(

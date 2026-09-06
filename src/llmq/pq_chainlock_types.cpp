@@ -18,7 +18,8 @@ bool IsKnownAdvance(BTCCAdvance advance)
 bool IsKnownRosterBeaconAnchorKind(RosterBeaconAnchorKind kind)
 {
     return kind == RosterBeaconAnchorKind::NORMAL ||
-           kind == RosterBeaconAnchorKind::RECOVERY;
+           kind == RosterBeaconAnchorKind::RECOVERY ||
+           kind == RosterBeaconAnchorKind::POW_RECOVERY;
 }
 
 bool IsKnownRosterBeaconState(RosterBeaconState state)
@@ -163,6 +164,12 @@ bool RosterBeaconSeed::IsStructurallyValid() const noexcept
         !IsKnownRosterBeaconState(state)) {
         return false;
     }
+    if (anchor_kind == RosterBeaconAnchorKind::POW_RECOVERY) {
+        return state == RosterBeaconState::READY && anchor_cursor.IsNull() &&
+               anchor_btc_height == -1 && future_btc_hash.IsNull() &&
+               !recovery_entropy_hash.IsNull();
+    }
+    if (!recovery_entropy_hash.IsNull()) return false;
     if (anchor_kind == RosterBeaconAnchorKind::RECOVERY) {
         if (!anchor_cursor.IsStructurallyValid() ||
             anchor_cursor.IsNull() || !FutureBTCHeight()) {
@@ -193,16 +200,46 @@ bool RosterBeaconSeed::IsReady() const noexcept
     return state == RosterBeaconState::READY && IsStructurallyValid();
 }
 
+bool RosterBeaconSeed::IsRecovery() const noexcept
+{
+    return anchor_kind == RosterBeaconAnchorKind::RECOVERY ||
+           anchor_kind == RosterBeaconAnchorKind::POW_RECOVERY;
+}
+
+bool RecoveryRefreshSource::IsNull() const noexcept
+{
+    return *this == RecoveryRefreshSource{};
+}
+
+bool RecoveryRefreshSource::IsStructurallyValid() const noexcept
+{
+    return !IsNull() &&
+           group <= (std::numeric_limits<uint32_t>::max() -
+                     (ACTIVE_QUORUMS - 1)) / ACTIVE_QUORUMS &&
+           snapshot_height >= 0 && entropy_height > snapshot_height &&
+           carrier_height > entropy_height && !snapshot_hash.IsNull() &&
+           !universe_root.IsNull() && !entropy_block_hash.IsNull() &&
+           !carrier_block_hash.IsNull() && !parent_work_hash.IsNull() &&
+           !seed.IsNull();
+}
+
 bool RecoveryRosterAuthoritySource::IsNull() const noexcept
 {
-    return normal_beacon == RosterBeaconSeed{};
+    return kind == RecoveryRosterSourceKind::NORMAL_BEACON &&
+           normal_beacon == RosterBeaconSeed{} && refresh.IsNull();
 }
 
 bool RecoveryRosterAuthoritySource::IsStructurallyValid() const noexcept
 {
-    return IsNull() ||
-           (normal_beacon.anchor_kind == RosterBeaconAnchorKind::NORMAL &&
-            normal_beacon.IsReady());
+    if (kind == RecoveryRosterSourceKind::POW_REFRESH) {
+        return normal_beacon == RosterBeaconSeed{} &&
+               refresh.IsStructurallyValid();
+    }
+    return kind == RecoveryRosterSourceKind::NORMAL_BEACON &&
+           refresh.IsNull() &&
+           (IsNull() ||
+            (normal_beacon.anchor_kind == RosterBeaconAnchorKind::NORMAL &&
+             normal_beacon.IsReady()));
 }
 
 bool ActiveRosterBeaconBundle::IsStructurallyValid() const noexcept

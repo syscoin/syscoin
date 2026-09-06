@@ -252,6 +252,25 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
     // SYSCOIN: PQ roster snapshot policy is independent of per-key registration.
     options.pqrostersnapshotlag = args.GetIntArg("-pqrostersnapshotlag", 288);
     options.pqfuturehorizonepochs = args.GetIntArg("-pqfuturehorizonepochs", 0);
+    if (args.IsArgSet("-pqrecoveryrefresh")) {
+        const auto fields{SplitString(
+            GetSinglePQDeploymentArg(args, "-pqrecoveryrefresh"), ':')};
+        std::array<int32_t, 8> values{};
+        if (fields.size() != values.size()) {
+            throw std::runtime_error("-pqrecoveryrefresh requires exactly eight colon-separated values");
+        }
+        for (std::size_t i{0}; i < values.size(); ++i) {
+            if (!ParseInt32(fields[i], &values[i]) || values[i] <= 0 ||
+                values[i] == std::numeric_limits<int32_t>::max()) {
+                throw std::runtime_error("-pqrecoveryrefresh values must be positive heights/counts below INT_MAX");
+            }
+        }
+        options.pqrecoveryrefresh = CChainParams::RegTestOptions::PQRecoveryRefreshOptions{
+            values[0], static_cast<uint32_t>(values[1]), static_cast<uint32_t>(values[2]),
+            static_cast<uint32_t>(values[3]), static_cast<uint32_t>(values[4]),
+            static_cast<uint32_t>(values[5]), static_cast<uint32_t>(values[6]),
+            static_cast<uint32_t>(values[7])};
+    }
     options.pqbtcccandidateorigin = args.GetIntArg(
         "-pqbtcccandidateorigin", std::numeric_limits<int>::max());
     options.pqbtccnevminjectionlag = args.GetIntArg("-pqbtccnevminjectionlag", 10);
@@ -314,6 +333,7 @@ std::unique_ptr<const CChainParams> CreateChainParams(const ArgsManager& args, c
     if (chain != ChainType::REGTEST &&
         (args.IsArgSet(PQ_ACTIVATION_HEIGHT_ARG) ||
          HasPQBTCCReceiptAnchorArg(args) ||
+         args.IsArgSet("-pqrecoveryrefresh") ||
          args.IsArgSet("-pqfinalitypreparation"))) {
         throw std::runtime_error(
             "PQ deployment overrides are valid only on regtest");

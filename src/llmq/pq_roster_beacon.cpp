@@ -320,7 +320,7 @@ DeriveNormalRosterAuthorizationDecision(
         new_window.active.seeds.begin(),
         new_window.active.seeds.end(),
         [](const RosterBeaconSeed& seed) {
-            return seed.anchor_kind == RosterBeaconAnchorKind::RECOVERY;
+            return seed.IsRecovery();
         })};
     RecoveryRosterAuthoritySource expected_source{
         input.previous.window.active.recovery_authority_source};
@@ -405,22 +405,33 @@ bool IsRecoveryRosterBeaconWindow(const RosterBeaconWindow& window) noexcept
         window.active.recovery_authority_source.IsNull()) {
         return false;
     }
-    const auto& source{
-        window.active.recovery_authority_source.normal_beacon};
-    if (!source.IsReady() ||
-        source.anchor_kind != RosterBeaconAnchorKind::NORMAL) {
-        return false;
-    }
     for (const auto& seed : window.active.seeds) {
-        if (!seed.IsReady() ||
-            seed.anchor_kind != RosterBeaconAnchorKind::RECOVERY ||
-            seed.anchor_cursor != source.anchor_cursor ||
-            seed.anchor_btc_height != source.anchor_btc_height ||
-            seed.future_btc_hash != source.future_btc_hash) {
+        const auto expected{MakeRecoveryRosterBeaconSeed(
+            window.active.recovery_authority_source, seed.epoch)};
+        if (!expected || seed != *expected) {
             return false;
         }
     }
     return true;
+}
+
+std::optional<RosterBeaconSeed> MakeRecoveryRosterBeaconSeed(
+    const RecoveryRosterAuthoritySource& source, uint32_t epoch) noexcept
+{
+    if (!source.IsStructurallyValid() || source.IsNull()) return std::nullopt;
+    if (source.kind == RecoveryRosterSourceKind::POW_REFRESH) {
+        if (epoch / ACTIVE_QUORUMS < source.refresh.group) return std::nullopt;
+        RosterBeaconSeed seed;
+        seed.epoch = epoch;
+        seed.anchor_kind = RosterBeaconAnchorKind::POW_RECOVERY;
+        seed.state = RosterBeaconState::READY;
+        seed.recovery_entropy_hash = source.refresh.seed;
+        return seed;
+    }
+    auto seed{source.normal_beacon};
+    seed.anchor_kind = RosterBeaconAnchorKind::RECOVERY;
+    seed.epoch = epoch;
+    return seed;
 }
 
 std::optional<RosterBeaconWindow> MakeRecoveryRosterBeaconWindow(
@@ -438,10 +449,10 @@ std::optional<RosterBeaconWindow> MakeRecoveryRosterBeaconWindow(
     const uint32_t first_epoch{
         newest_epoch - static_cast<uint32_t>(ACTIVE_QUORUMS - 1)};
     for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
-        auto seed{source.normal_beacon};
-        seed.anchor_kind = RosterBeaconAnchorKind::RECOVERY;
-        seed.epoch = first_epoch + static_cast<uint32_t>(slot);
-        window.active.seeds[slot] = std::move(seed);
+        const auto seed{MakeRecoveryRosterBeaconSeed(
+            source, first_epoch + static_cast<uint32_t>(slot))};
+        if (!seed) return std::nullopt;
+        window.active.seeds[slot] = *seed;
     }
     window.next = EmptyNormalSeed(newest_epoch + 1);
     return IsRecoveryRosterBeaconWindow(window)
@@ -485,8 +496,7 @@ bool HasRecoveryRosterBeacon(const RosterBeaconWindow& window) noexcept
            std::any_of(
                window.active.seeds.begin(), window.active.seeds.end(),
                [](const RosterBeaconSeed& seed) {
-                   return seed.anchor_kind ==
-                          RosterBeaconAnchorKind::RECOVERY;
+                   return seed.IsRecovery();
                });
 }
 
