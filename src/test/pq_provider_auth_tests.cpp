@@ -8,7 +8,9 @@
 #include <evo/deterministicmns.h>
 #include <evo/providertx.h>
 #include <evo/specialtx.h>
+#include <llmq/quorums_commitment.h>
 #include <netbase.h>
+#include <primitives/block.h>
 #include <script/script.h>
 #include <test/util/setup_common.h>
 #include <validation.h>
@@ -47,6 +49,7 @@ class PostPQProviderAuthSetup : public BasicTestingSetup
 {
 private:
     Consensus::Params& m_consensus;
+    const int m_old_dip3_height;
     const int m_old_activation_height;
     const int m_old_preparation_height;
     const int m_old_epoch_origin;
@@ -58,7 +61,7 @@ public:
     static constexpr int ACTIVATION_HEIGHT{1000};
 
     const uint256 pro_tx_hash{NonNullHash(1)};
-    const uint256 parent_hash{NonNullHash(2)};
+    uint256 parent_hash{NonNullHash(2)};
     const uint256 previous_hash{NonNullHash(6)};
     CBlockIndex previous_index;
     CBlockIndex parent_index;
@@ -67,6 +70,7 @@ public:
     PostPQProviderAuthSetup()
         : BasicTestingSetup{ChainType::REGTEST},
           m_consensus{const_cast<Consensus::Params&>(Params().GetConsensus())},
+          m_old_dip3_height{m_consensus.DIP0003Height},
           m_old_activation_height{m_consensus.nPQActivationHeight},
           m_old_preparation_height{m_consensus.nPQPreparationHeight},
           m_old_epoch_origin{m_consensus.nPQChainLockEpochOrigin},
@@ -74,6 +78,8 @@ public:
           m_old_future_horizon{m_consensus.nPQFutureHorizonEpochs},
           m_previous_manager{std::move(deterministicMNManager)}
     {
+        // Keep the two-block fixture's inverse-history base available.
+        m_consensus.DIP0003Height = ACTIVATION_HEIGHT - 2;
         m_consensus.nPQActivationHeight = ACTIVATION_HEIGHT;
         m_consensus.nPQPreparationHeight = ACTIVATION_HEIGHT - 1;
         m_consensus.nPQChainLockEpochOrigin = 1440;
@@ -120,6 +126,7 @@ public:
     {
         deterministicMNManager.reset();
         deterministicMNManager = std::move(m_previous_manager);
+        m_consensus.DIP0003Height = m_old_dip3_height;
         m_consensus.nPQActivationHeight = m_old_activation_height;
         m_consensus.nPQPreparationHeight = m_old_preparation_height;
         m_consensus.nPQChainLockEpochOrigin = m_old_epoch_origin;
@@ -131,6 +138,39 @@ public:
     void UseDisabledPQActivation()
     {
         m_consensus.nPQActivationHeight = std::numeric_limits<int>::max();
+    }
+
+    void LoadEmptyParentRegistry()
+    {
+        LOCK(cs_main);
+        auto previous_list{deterministicMNManager->GetListForBlock(&parent_index)};
+        previous_list.SetBlockHash(previous_hash);
+        previous_list.SetHeight(previous_index.nHeight);
+        deterministicMNManager->m_evoDb->WriteCache(
+            previous_hash, std::move(previous_list));
+
+        CBlock preparation;
+        preparation.hashPrevBlock = previous_hash;
+        preparation.nTime = parent_index.nHeight;
+        preparation.nNonce = parent_index.nHeight;
+        preparation.vtx.emplace_back(MakeTransactionRef(CMutableTransaction{}));
+        parent_hash = preparation.GetHash();
+        CCoinsView base_view;
+        CCoinsViewCache view{&base_view};
+        const llmq::CFinalCommitmentTxPayload no_legacy_commitment;
+        BlockValidationState state;
+        CDeterministicMNListNEVMAddressDiff diff;
+        BOOST_REQUIRE_MESSAGE(deterministicMNManager->ProcessBlock(
+            preparation, &parent_index, state, view, no_legacy_commitment,
+            diff, /*fJustCheck=*/false, /*ibd=*/true), state.ToString());
+
+        llmq::pq::PQRegistryReadView registry;
+        std::string error;
+        BOOST_REQUIRE_MESSAGE(deterministicMNManager->GetPQRegistryReadView(
+            &parent_index, registry, error), error);
+        BOOST_CHECK_EQUAL(registry.OperatorCount(), 0U);
+        BOOST_REQUIRE(deterministicMNManager->GetListForBlock(
+            &parent_index).GetMN(pro_tx_hash));
     }
 
     CTransaction ServiceMutation() const
@@ -239,6 +279,7 @@ BOOST_AUTO_TEST_CASE(disabled_activation_replays_legacy_provider_versions)
 
 BOOST_AUTO_TEST_CASE(post_pq_auth_is_independent_of_script_checks)
 {
+    LoadEmptyParentRegistry();
     const CTransaction service{ServiceMutation()};
     const CTransaction revoke{RevokeMutation()};
 
@@ -263,12 +304,14 @@ BOOST_AUTO_TEST_CASE(post_pq_auth_is_independent_of_script_checks)
         service, &parent_index, service_normal, /*fJustCheck=*/false,
         /*check_sigs=*/false, SpecialTxValidationContext::NORMAL));
     BOOST_CHECK_EQUAL(service_normal.GetRejectReason(), "bad-protx-pq-key");
+    BOOST_CHECK(service_normal.IsInvalid());
 
     TxValidationState revoke_normal;
     BOOST_CHECK(!CheckProUpRevTx(
         revoke, &parent_index, revoke_normal, /*fJustCheck=*/false,
         /*check_sigs=*/false, SpecialTxValidationContext::NORMAL));
     BOOST_CHECK_EQUAL(revoke_normal.GetRejectReason(), "bad-protx-pq-key");
+    BOOST_CHECK(revoke_normal.IsInvalid());
 
     // Block connection delegates only PQ revocation authorization to the
     // registry state transition. Service updates are not registry-owned and
@@ -286,6 +329,7 @@ BOOST_AUTO_TEST_CASE(post_pq_auth_is_independent_of_script_checks)
         SpecialTxValidationContext::PQ_REGISTRY_PRECHECK));
     BOOST_CHECK_EQUAL(service_registry_precheck.GetRejectReason(),
                       "bad-protx-pq-key");
+    BOOST_CHECK(service_registry_precheck.IsInvalid());
 
     // Roll-forward is not a second validation path. It only reapplies effects
     // from a block which passed full validation before the interrupted flush.
@@ -300,6 +344,32 @@ BOOST_AUTO_TEST_CASE(post_pq_auth_is_independent_of_script_checks)
         revoke, &parent_index, revoke_rollforward, /*fJustCheck=*/false,
         /*check_sigs=*/false,
         SpecialTxValidationContext::ALREADY_VALIDATED_ROLLFORWARD));
+}
+
+BOOST_AUTO_TEST_CASE(unavailable_parent_registry_is_a_local_error)
+{
+    LOCK(cs_main);
+    // The fixture has a DMN list but has not processed its preparation block.
+    // Missing local registry state must not be classified as an invalid key.
+    for (const bool just_check : {false, true}) {
+        for (const bool check_sigs : {false, true}) {
+            for (const auto& [transaction, check_provider] : {
+                     std::pair{ServiceMutation(), &CheckProUpServTx},
+                     std::pair{RevokeMutation(), &CheckProUpRevTx}}) {
+                TxValidationState state;
+                BOOST_CHECK(!check_provider(transaction, &parent_index, state,
+                    just_check, check_sigs, SpecialTxValidationContext::NORMAL));
+                BOOST_CHECK(state.IsError());
+                BOOST_CHECK(!state.IsInvalid());
+                BOOST_CHECK_EQUAL(state.GetRejectReason(), "failed-protx-pq-registry");
+            }
+        }
+    }
+    TxValidationState service_precheck;
+    BOOST_CHECK(!CheckProUpServTx(ServiceMutation(), &parent_index,
+        service_precheck, /*fJustCheck=*/false, /*check_sigs=*/true,
+        SpecialTxValidationContext::PQ_REGISTRY_PRECHECK));
+    BOOST_CHECK(service_precheck.IsError());
 }
 
 BOOST_AUTO_TEST_SUITE_END()

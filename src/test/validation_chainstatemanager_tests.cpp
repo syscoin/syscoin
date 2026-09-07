@@ -11,10 +11,12 @@
 #include <evo/pq_payment_probation_db.h> // SYSCOIN: multi-chainstate probation GC.
 #include <evo/pq_registry.h> // SYSCOIN: deep rollback registry roots.
 #include <kernel/disconnected_transactions.h>
+#include <kernel/context.h>
 #include <llmq/pq_chainlock_persistence.h> // SYSCOIN: pre-import durable finality.
 #include <llmq/pq_chainlock_schedule.h> // SYSCOIN: payment-audit preseal coverage.
 #include <llmq/quorums_chainlocks.h> // SYSCOIN: retained probation roots.
 #include <llmq/quorums_init.h> // SYSCOIN: recreate pre-import finality handler.
+#include <masternode/activemasternode.h>
 #include <netbase.h> // SYSCOIN: deterministic valid-MN fixture service.
 #include <node/blockstorage.h>
 #include <node/chainstate.h>
@@ -35,6 +37,7 @@
 #include <uint256.h>
 #include <validation.h>
 #include <validationinterface.h>
+#include <walletinitinterface.h>
 
 #include <tinyformat.h>
 
@@ -738,9 +741,8 @@ BOOST_FIXTURE_TEST_CASE(nevm_startup_pair_requires_fresh_exact_completion,
     BlockValidationState state;
     const bool activated{
         chainman.ActiveChainstate().ActivateBestChain(state)};
-    BOOST_CHECK(!activated);
-    BOOST_CHECK(state.IsError());
-    BOOST_CHECK(!state.IsInvalid());
+    BOOST_CHECK(activated);
+    BOOST_CHECK(state.IsValid());
     BOOST_CHECK(WITH_LOCK(
         ::cs_main, return chainman.ActiveTip()->GetBlockHash()) ==
                 target->GetHash());
@@ -749,10 +751,19 @@ BOOST_FIXTURE_TEST_CASE(nevm_startup_pair_requires_fresh_exact_completion,
     BOOST_CHECK_EQUAL(nevm->connected_blocks.size(), 3U);
     BOOST_CHECK_GT(nevm->block_info_queries, 0U);
 
+    // The production import caller treats an ABC error as fatal. Pending
+    // status must leave it free to finish and release the acquisition guard.
+    m_node.notifications->m_shutdown_on_fatal_error = false;
+    node::ImportBlocks(chainman, {}, nullptr, deterministicMNManager,
+                       activeMasternodeManager, g_wallet_init_interface, m_node);
+    BOOST_CHECK_EQUAL(m_node.exit_status.load(), EXIT_SUCCESS);
+    BOOST_CHECK(!chainman.m_blockman.LoadingBlocks());
+    BOOST_CHECK(chainman.HasPendingNEVMStartupPair());
+
     {
         LOCK(::cs_main);
-        BOOST_CHECK(!chainman.MaybeCompleteNEVMStartupPair(error));
-        BOOST_CHECK(!error.empty());
+        BOOST_CHECK(chainman.MaybeCompleteNEVMStartupPair(error));
+        BOOST_CHECK(error.empty());
         BOOST_CHECK(chainman.HasPendingNEVMStartupPair());
 
         nevm->block_info_error.clear();
@@ -766,11 +777,21 @@ BOOST_FIXTURE_TEST_CASE(nevm_startup_pair_requires_fresh_exact_completion,
         BOOST_CHECK(chainman.HasPendingNEVMStartupPair());
     }
     BOOST_CHECK(chainman.IsInitialBlockDownload());
+    // A stopped startup worker must perform no external status request.
+    const auto queries_before_interrupt{nevm->block_info_queries};
+    m_node.kernel->interrupt();
+    BlockValidationState interrupted_state;
+    BOOST_CHECK(chainman.RetryNEVMStartupPair(interrupted_state));
+    BOOST_CHECK_EQUAL(nevm->block_info_queries, queries_before_interrupt);
+    BOOST_CHECK(chainman.HasPendingNEVMStartupPair());
+    m_node.kernel->interrupt.reset();
+
+    nevm->applied_count = 3;
+    BlockValidationState retry_state;
+    BOOST_REQUIRE(chainman.RetryNEVMStartupPair(retry_state));
+    BOOST_CHECK(retry_state.IsValid());
     {
         LOCK(::cs_main);
-        nevm->applied_count = 3;
-        BOOST_REQUIRE(chainman.MaybeCompleteNEVMStartupPair(error));
-        BOOST_CHECK(error.empty());
         BOOST_CHECK(!chainman.HasPendingNEVMStartupPair());
         BOOST_CHECK((chainman.ActiveTip()->nStatus & BLOCK_FAILED_MASK) == 0);
     }
@@ -798,10 +819,28 @@ BOOST_FIXTURE_TEST_CASE(nevm_startup_pair_inside_known_suffix_resumes_delivery,
         BOOST_REQUIRE(chainman.InitializeNEVMStartupPair(
             nevm->applied_count, nevm->applied_hash, error));
     }
+    nevm->block_info_error = "startup-test-status-unavailable";
     BlockValidationState state;
     BOOST_REQUIRE_MESSAGE(
         chainman.ActiveChainstate().ActivateBestChain(state),
         state.ToString());
+    BOOST_CHECK(state.IsValid());
+    BOOST_CHECK(WITH_LOCK(
+        ::cs_main, return chainman.ActiveTip()->GetBlockHash()) ==
+                applied->GetHash());
+    BOOST_CHECK(chainman.HasPendingNEVMStartupPair());
+    BOOST_CHECK(chainman.IsInitialBlockDownload());
+    BOOST_CHECK_EQUAL(nevm->connected_blocks.size(), 3U);
+
+    BlockValidationState pending_state;
+    BOOST_REQUIRE(chainman.RetryNEVMStartupPair(pending_state));
+    BOOST_CHECK(pending_state.IsValid());
+    BOOST_CHECK(chainman.HasPendingNEVMStartupPair());
+    BOOST_CHECK_EQUAL(nevm->connected_blocks.size(), 3U);
+
+    nevm->block_info_error.clear();
+    BlockValidationState retry_state;
+    BOOST_REQUIRE(chainman.RetryNEVMStartupPair(retry_state));
     BOOST_CHECK(WITH_LOCK(
         ::cs_main, return chainman.ActiveTip()->GetBlockHash()) ==
                 next->GetHash());

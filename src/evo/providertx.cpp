@@ -21,6 +21,8 @@
 #include <validation.h>
 #include <common/args.h>
 
+#include <exception>
+
 namespace {
 
 enum class ProviderAuthEra {
@@ -54,17 +56,33 @@ bool HasNonZeroByte(const Range& range)
 bool GetParentOperatorKey(const CBlockIndex* pindex_prev,
                           const uint256& pro_tx_hash,
                           const llmq::pq::OperatorKeyState*& operator_state,
-                          llmq::pq::PQRegistryReadView& snapshot)
+                          llmq::pq::PQRegistryReadView& snapshot,
+                          TxValidationState& state,
+                          bool fJustCheck)
 {
-    if (pindex_prev == nullptr || deterministicMNManager == nullptr) return false;
-    std::string error;
-    if (!deterministicMNManager->GetPQRegistryReadView(
-            pindex_prev, snapshot, error)) {
-        return false;
+    if (pindex_prev == nullptr || deterministicMNManager == nullptr) {
+        return state.Error("failed-protx-pq-registry");
     }
-    operator_state = snapshot.FindOperator(pro_tx_hash);
-    return operator_state != nullptr && operator_state->HasActiveGlobalKey() &&
-           operator_state->global_key.IsStructurallyValid();
+    try {
+        std::string error;
+        if (!deterministicMNManager->GetPQRegistryReadView(
+                pindex_prev, snapshot, error)) {
+            LogPrintf("%s -- %s\n", __func__, error);
+            return state.Error("failed-protx-pq-registry");
+        }
+        operator_state = snapshot.FindOperator(pro_tx_hash);
+    } catch (const std::exception& exception) {
+        // Local registry reconstruction failures must not become consensus
+        // invalidity in CheckSpecialTx's general exception handler.
+        LogPrintf("%s -- PQ registry lookup exception: %s\n",
+                  __func__, exception.what());
+        return state.Error("failed-protx-pq-registry");
+    }
+    if (operator_state == nullptr || !operator_state->HasActiveGlobalKey() ||
+        !operator_state->global_key.IsStructurallyValid()) {
+        return FormatSyscoinErrorMessage(state, "bad-protx-pq-key", fJustCheck);
+    }
+    return true;
 }
 
 bool CheckProviderVersion(uint16_t actual,
@@ -453,8 +471,11 @@ bool CheckProUpServTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxV
                 llmq::pq::PQRegistryReadView registry_snapshot;
                 const llmq::pq::OperatorKeyState* operator_state{nullptr};
                 if (!GetParentOperatorKey(pindexPrev, ptx.proTxHash,
-                                          operator_state, registry_snapshot) ||
-                    ptx.globalKeyVersion != operator_state->global_key.key_version) {
+                                          operator_state, registry_snapshot,
+                                          state, fJustCheck)) {
+                    return false;
+                }
+                if (ptx.globalKeyVersion != operator_state->global_key.key_version) {
                     return FormatSyscoinErrorMessage(
                         state, "bad-protx-pq-key", fJustCheck);
                 }
@@ -610,8 +631,11 @@ bool CheckProUpRevTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxVa
                 llmq::pq::PQRegistryReadView registry_snapshot;
                 const llmq::pq::OperatorKeyState* operator_state{nullptr};
                 if (!GetParentOperatorKey(pindexPrev, ptx.proTxHash,
-                                          operator_state, registry_snapshot) ||
-                    ptx.globalKeyVersion != operator_state->global_key.key_version) {
+                                          operator_state, registry_snapshot,
+                                          state, fJustCheck)) {
+                    return false;
+                }
+                if (ptx.globalKeyVersion != operator_state->global_key.key_version) {
                     return FormatSyscoinErrorMessage(
                         state, "bad-protx-pq-key", fJustCheck);
                 }

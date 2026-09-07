@@ -2570,6 +2570,19 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             StartShutdown();
             return;
         }
+        // ImportingNow has ended, so missing headers/blocks can be acquired.
+        // Use the import thread: ABC may wait for the scheduler's validation
+        // callbacks, and must not run on that scheduler itself.
+        while (chainman.HasPendingNEVMStartupPair() && !chainman.m_interrupt) {
+            UninterruptibleSleep(std::chrono::seconds{1});
+            BlockValidationState state;
+            if (!chainman.RetryNEVMStartupPair(state)) {
+                chainman.GetNotifications().fatalError(strprintf(
+                    "Failed to recover NEVM startup pair (%s)", state.ToString()));
+                return;
+            }
+        }
+        if (chainman.m_interrupt) return;
         // Start indexes initial sync
         if (!StartIndexBackgroundSync(node)) {
             bilingual_str err_str = _("Failed to start indexes, shutting down..");

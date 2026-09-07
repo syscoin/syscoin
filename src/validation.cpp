@@ -3287,18 +3287,33 @@ bool ChainstateManager::MaybeCompleteNEVMStartupPair(std::string& error)
     // cs_main excludes branch changes across this synchronous status snapshot.
     // Callers have already published the real connected tip, not fJustCheck.
     GetMainSignals().NotifyGetNEVMBlockInfo(count, syscoin_hash, status_error);
-    if (!status_error.empty() || !DoesNEVMBlockInfoMatchSyscoinBlock(
+    if (!status_error.empty()) {
+        LogPrintf("Geth's applied pair is unavailable after Core recovery; "
+                  "startup remains pending: %s\n", status_error);
+        return true;
+    }
+    if (!DoesNEVMBlockInfoMatchSyscoinBlock(
             GetConsensus().nNEVMStartBlock, count, pair.height,
             syscoin_hash, pair.block_hash)) {
-        error = status_error.empty()
-            ? "Geth's applied pair changed during Core startup recovery"
-            : "Geth's applied pair is unavailable after Core recovery: " + status_error;
+        error = "Geth's applied pair changed during Core startup recovery";
         return false;
     }
     LogPrintf("Core recovered Geth's exact startup pair %s at height %d\n",
               pair.block_hash.ToString(), pair.height);
     m_nevm_startup_pair.reset();
     m_nevm_startup_pair_pending.store(false, std::memory_order_release);
+    return true;
+}
+
+bool ChainstateManager::RetryNEVMStartupPair(BlockValidationState& state)
+{
+    AssertLockNotHeld(cs_main);
+    if (m_interrupt) return true;
+    if (!ActiveChainstate().ActivateBestChain(state)) return false;
+    if (!HasPendingNEVMStartupPair() && !m_interrupt) {
+        (void)IsInitialBlockDownload();
+        (void)MaybeStartNEVMNetwork();
+    }
     return true;
 }
 
@@ -6687,6 +6702,7 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
     CBlockIndex *pindexMostWork = nullptr;
     CBlockIndex *pindexNewTip = nullptr;
     bool base_sync_completed{false};
+    bool waiting_for_nevm_status{false};
     do {
         // Block until the validation queue drains. This should largely
         // never happen in normal operation, however may happen during
@@ -6714,6 +6730,13 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                 std::string startup_pair_error;
                 if (!m_chainman.MaybeCompleteNEVMStartupPair(startup_pair_error)) {
                     return state.Error(startup_pair_error);
+                }
+                if (m_chainman.HasPendingNEVMStartupPair() &&
+                    m_chain.Height() >= pair.height) {
+                    // Pause at the recovered prefix until a fresh status is
+                    // available. Still flush any blocks connected this call.
+                    waiting_for_nevm_status = true;
+                    break;
                 }
             }
             CBlockIndex* starting_tip = m_chain.Tip();
@@ -6843,13 +6866,12 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
         if (m_chainman.m_interrupt) break;
     } while (pindexNewTip != pindexMostWork);
 
-    if (this == &m_chainman.ActiveChainstate()) {
+    if (this == &m_chainman.ActiveChainstate() && !waiting_for_nevm_status) {
         LOCK(cs_main);
         std::string startup_pair_error;
         if (!m_chainman.MaybeCompleteNEVMStartupPair(startup_pair_error)) {
             // The connected blocks and notifications are already published.
-            // Preserve the pending pair for a later status retry; no block is
-            // invalidated because the external process changed or is unavailable.
+            // A confirmed pair mismatch is a local error, not block invalidity.
             return state.Error(startup_pair_error);
         }
     }

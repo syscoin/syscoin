@@ -1575,9 +1575,12 @@ public:
     [[nodiscard]] bool CheckNEVMStartupConnect(
         const CBlockIndex& index, std::string& error) const
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
-    /** Re-read Geth after the exact pair has actually become active locally. */
+    /** Re-read Geth after local recovery; unavailable status leaves the pair pending. */
     [[nodiscard]] bool MaybeCompleteNEVMStartupPair(std::string& error)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** Retry activation and publish readiness even if no new block arrives. */
+    [[nodiscard]] bool RetryNEVMStartupPair(BlockValidationState& state)
+        LOCKS_EXCLUDED(::cs_main);
     void ResetNEVMNetworkStart()
     {
         m_nevm_network_start_sent.store(false,
