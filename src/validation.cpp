@@ -715,7 +715,7 @@ private:
     // Looks up inputs, calculates feerate, considers replacement, evaluates
     // package limits, etc. As this function can be invoked for "free" by a peer,
     // only tests that are fast should be done here (to avoid CPU DoS).
-    bool PreChecks(ATMPArgs& args, Workspace& ws) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_pool.cs);
+    bool PreChecks(ATMPArgs& args, Workspace& ws, NEVMMintTxSet& mint_txs) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_pool.cs);
 
     // Run checks for mempool replace-by-fee.
     bool ReplacementChecks(Workspace& ws) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_pool.cs);
@@ -777,7 +777,7 @@ private:
     bool m_rbf{false};
 };
 
-bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
+bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws, NEVMMintTxSet& mint_txs)
 {
     AssertLockHeld(cs_main);
     AssertLockHeld(m_pool.cs);
@@ -880,6 +880,20 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
         }
     }
 
+    // Check sidecars after cheap policy checks, but before a missing-input
+    // result can place an unusable representation in the identity-keyed orphanage.
+    const auto poda_result = ProcessNEVMData(
+        m_active_chainstate.m_blockman, tx,
+        m_active_chainstate.m_chain.Tip()->GetMedianTimePast(),
+        TicksSinceEpoch<std::chrono::seconds>(m_active_chainstate.m_chainman.m_options.adjusted_time_callback()),
+        ws.mapPoDA);
+    if (poda_result == ProcessNEVMDataResult::AUX_DATA_INVALID) {
+        return state.Invalid(TxValidationResult::TX_AUX_DATA_INVALID, "bad-txns-poda-invalid");
+    }
+    if (poda_result == ProcessNEVMDataResult::CONSENSUS_INVALID) {
+        return state.Invalid(TxValidationResult::TX_NOT_STANDARD, "bad-txns-poda-invalid");
+    }
+
     m_view.SetBackend(m_viewmempool);
 
     const CCoinsViewCache& coins_cache = m_active_chainstate.CoinsTip();
@@ -934,15 +948,17 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
 
     // SYSCOIN
     const auto& params = args.m_chainparams.GetConsensus();
-    if (!CheckSyscoinInputs(params, tx, hash, state, (uint32_t)m_active_chainstate.m_chain.Tip()->nHeight + 1, args.m_test_accept, setMintTxsMempool, mapAssetIn, mapAssetOut)) {
+    if (!CheckSyscoinInputs(params, tx, hash, state, (uint32_t)m_active_chainstate.m_chain.Tip()->nHeight + 1, args.m_test_accept, mint_txs, mapAssetIn, mapAssetOut)) {
         return false; // state filled in by CheckSyscoinInputs
-    }      
-    
-    // SYSCOIN
-    if(ProcessNEVMData(m_active_chainstate.m_blockman, tx, m_active_chainstate.m_chain.Tip()->GetMedianTimePast(), TicksSinceEpoch<std::chrono::seconds>(m_active_chainstate.m_chainman.m_options.adjusted_time_callback()), ws.mapPoDA) != ProcessNEVMDataResult::VALID) {
-        return state.Invalid(TxValidationResult::TX_NOT_STANDARD, "bad-txns-poda-invalid");
     }
-     if (m_pool.m_require_standard && !AreInputsStandard(tx, m_view)) {
+    if (IsSyscoinMintTx(tx.nVersion)) {
+        const CMintSyscoin mint(tx);
+        if (!mint.IsNull() && setMintTxsMempool.count(mint.nTxHash)) {
+            return state.Invalid(TxValidationResult::TX_MINT_DUPLICATE, "mint-duplicate-transfer");
+        }
+    }
+
+    if (m_pool.m_require_standard && !AreInputsStandard(tx, m_view)) {
         return state.Invalid(TxValidationResult::TX_INPUTS_NOT_STANDARD, "bad-txns-nonstandard-inputs");
     }
 
@@ -1367,8 +1383,9 @@ MempoolAcceptResult MemPoolAccept::AcceptSingleTransaction(const CTransactionRef
     LOCK(m_pool.cs); // mempool "read lock" (held through GetMainSignals().TransactionAddedToMempool())
 
     Workspace ws(ptx);
+    NEVMMintTxSet mint_txs;
 
-    if (!PreChecks(args, ws)) return MempoolAcceptResult::Failure(ws.m_state);
+    if (!PreChecks(args, ws, mint_txs)) return MempoolAcceptResult::Failure(ws.m_state);
 
     if (m_rbf && !ReplacementChecks(ws)) return MempoolAcceptResult::Failure(ws.m_state);
 
@@ -1410,9 +1427,11 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptMultipleTransactions(const std::
 
     LOCK(m_pool.cs);
 
+    // Each attempt owns its reservations; failed subpackages may be retried with different fees.
+    NEVMMintTxSet mint_txs;
     // Do all PreChecks first and fail fast to avoid running expensive script checks when unnecessary.
     for (Workspace& ws : workspaces) {
-        if (!PreChecks(args, ws)) {
+        if (!PreChecks(args, ws, mint_txs)) {
             package_state.Invalid(PackageValidationResult::PCKG_TX, "transaction failed");
             // Exit early to avoid doing pointless work. Update the failed tx result; the rest are unfinished.
             results.emplace(ws.m_ptx->GetWitnessHash(), MempoolAcceptResult::Failure(ws.m_state));
@@ -1737,16 +1756,6 @@ MempoolAcceptResult AcceptToMemoryPool(Chainstate& active_chainstate, const CTra
             // SYSCOIN
             mapAssetAllocationConflicts.erase(hashTx);
         }
-        // if we had duplicate mint's we don't want to remove the mint tx hash, but only if we had some other error not related to TX_MINT_DUPLICATE
-        if(result.m_state.GetResult() != TxValidationResult::TX_MINT_DUPLICATE) {
-            // remove nevm tx from mempool structure
-            if(IsSyscoinMintTx(tx->nVersion)) {
-                CMintSyscoin mintSyscoin(*tx);
-                if(!mintSyscoin.IsNull()) {
-                    setMintTxsMempool.erase(mintSyscoin.nTxHash);
-                }
-            }
-        }
         TRACE2(mempool, rejected,
                 tx->GetHash().data(),
                 result.m_state.GetRejectReason().c_str()
@@ -2069,7 +2078,7 @@ void Chainstate::ConflictingChainFound(CBlockIndex* pindexNew)
 // which does its own setBlockIndexCandidates management.
 void Chainstate::InvalidBlockFound(CBlockIndex* pindex, const BlockValidationState& state)
 {
-    if (state.GetResult() != BlockValidationResult::BLOCK_MUTATED) {
+    if (IsBlockRejectionCacheable(state.GetResult())) {
         pindex->nStatus |= BLOCK_FAILED_VALID;
         m_chainman.m_failed_blocks.insert(pindex);
         m_blockman.m_dirty_blockindex.insert(pindex);
@@ -2455,6 +2464,10 @@ bool EraseMempoolNEVMData(const std::vector<uint8_t>& vchVersionHash, const uint
     }
     return true;
 }
+void ReleaseMempoolNEVMDataOwner(const std::vector<uint8_t>& vchVersionHash, const uint256& txid)
+{
+    if (pnevmdatadb && !vchVersionHash.empty()) pnevmdatadb->ReleaseMempoolOwner(vchVersionHash, txid);
+}
 class CBlobCheck
 {
 private:
@@ -2494,6 +2507,9 @@ ProcessNEVMDataResult ProcessNEVMDataHelper(const BlockManager& blockman, const 
     CCheckQueueControl<CBlobCheck> control(&blobcheckqueue);
     std::vector<CBlobCheck> vChecks;
     for (const auto &nevmDataPayload : vecNevmDataPayload) {
+        if (nevmDataPayload.vchNEVMData && nevmDataPayload.vchNEVMData->size() > MAX_NEVM_DATA_BLOB) {
+            return ProcessNEVMDataResult::AUX_DATA_INVALID;
+        }
         // if connecting block is over NEVM_DATA_ENFORCE_TIME_NOT_HAVE_DATA seconds old (median) and we have a chainlock less than NEVM_DATA_ENFORCE_TIME_HAVE_DATA seconds old (median)
         const bool enforceNotHaveData = nMedianTimeCL > 0 && nMedianTime < (nTimeNow - NEVM_DATA_ENFORCE_TIME_NOT_HAVE_DATA) && nMedianTimeCL >= (nTimeNow - NEVM_DATA_ENFORCE_TIME_HAVE_DATA);
         const bool enforceHaveData = nMedianTime >= (nTimeNow - NEVM_DATA_ENFORCE_TIME_HAVE_DATA);
@@ -2526,6 +2542,21 @@ ProcessNEVMDataResult ProcessNEVMDataHelper(const BlockManager& blockman, const 
     }
     return ProcessNEVMDataResult::VALID;
 }
+static ProcessNEVMDataResult ExtractNEVMData(const CTransaction& tx, CNEVMData& payload)
+{
+    payload = CNEVMData(tx);
+    if (payload.IsNull()) return ProcessNEVMDataResult::CONSENSUS_INVALID;
+
+    const int data_output = GetSyscoinDataOutput(tx);
+    for (size_t i = 0; i < tx.vout.size(); ++i) {
+        // Only the selected commitment has a corresponding retained sidecar.
+        if (i != static_cast<size_t>(data_output) && !tx.vout[i].vchNEVMData.empty()) {
+            return ProcessNEVMDataResult::AUX_DATA_INVALID;
+        }
+    }
+    return ProcessNEVMDataResult::VALID;
+}
+
 // when we receive blocks/txs from peers we need to strip the OPRETURN NEVM DA payload and store separately
 ProcessNEVMDataResult ProcessNEVMData(const BlockManager& blockman, const CBlock &block, const int64_t &nMedianTime, const int64_t& nTimeNow, PoDAMAPMemory &mapPoDA) {
     std::vector<CNEVMData> vecNevmDataPayload;
@@ -2537,10 +2568,9 @@ ProcessNEVMDataResult ProcessNEVMData(const BlockManager& blockman, const CBlock
                 LogPrintf("ProcessNEVMData nCountBlobs > MAX_DATA_BLOBS, nCountBlobs: %d\n", nCountBlobs);
                 return ProcessNEVMDataResult::CONSENSUS_INVALID;
             }
-            const CNEVMData nevmDataPayload(*tx);
-            if(nevmDataPayload.IsNull()) {
-                return ProcessNEVMDataResult::CONSENSUS_INVALID;
-            }
+            CNEVMData nevmDataPayload;
+            const auto result = ExtractNEVMData(*tx, nevmDataPayload);
+            if (result != ProcessNEVMDataResult::VALID) return result;
             vecNevmDataPayload.emplace_back(nevmDataPayload);
         }
     }
@@ -2553,10 +2583,9 @@ ProcessNEVMDataResult ProcessNEVMData(const BlockManager& blockman, const CTrans
     if(!tx.IsNEVMData()) {
         return ProcessNEVMDataResult::VALID;
     }
-    const CNEVMData nevmDataPayload(tx);
-    if(nevmDataPayload.IsNull()) {
-        return ProcessNEVMDataResult::CONSENSUS_INVALID;
-    }
+    CNEVMData nevmDataPayload;
+    const auto result = ExtractNEVMData(tx, nevmDataPayload);
+    if (result != ProcessNEVMDataResult::VALID) return result;
     std::vector<CNEVMData> vecPayload{nevmDataPayload};
     return ProcessNEVMDataHelper(blockman, vecPayload, nMedianTime, nTimeNow, mapPoDA);
 }
@@ -2818,6 +2847,19 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         return true;
     }
 
+    // Special-transaction processing mutates quorum and masternode caches.
+    // Reject replaceable data before those effects so retry starts cleanly.
+    if (pindex->nHeight >= params.GetConsensus().nPODAStartBlock) {
+        const auto poda_result = ProcessNEVMData(m_chainman.m_blockman, block, pindex->GetMedianTimePast(),
+            TicksSinceEpoch<std::chrono::seconds>(m_chainman.m_options.adjusted_time_callback()), mapPoDA);
+        if (poda_result == ProcessNEVMDataResult::CONSENSUS_INVALID) {
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "poda-validation-failed");
+        }
+        if (poda_result == ProcessNEVMDataResult::AUX_DATA_INVALID) {
+            return state.Invalid(BlockValidationResult::BLOCK_AUX_DATA_INVALID, "poda-aux-data-invalid");
+        }
+    }
+
     // SYSCOIN: Persist BTCPREV commitment in block index only for consensus-relevant
     // sign-offset BTCC heights. Reuse the contextual-validation cache in the common
     // accept->connect flow; otherwise fall back to reparsing.
@@ -3048,7 +3090,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             }
             // SYSCOIN
             TxValidationState tx_statesys;
-            // just temp var not used in !fJustCheck mode
+            // Keep block-local reservations even in TestBlockValidity's check-only mode.
             if (!CheckSyscoinInputs(params.GetConsensus(), tx, txHash, tx_statesys, (uint32_t)pindex->nHeight, fJustCheck, setMintTxs, mapAssetIn, mapAssetOut)){
                 // Any transaction validation failure in ConnectBlock is a block consensus failure
                 state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
@@ -3111,17 +3153,6 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         }
         UpdateCoins(tx, view, i == 0 ? undoDummy : blockundo.vtxundo.back(), pindex->nHeight);
     }
-    bool PODAContext = pindex->nHeight >= params.GetConsensus().nPODAStartBlock;
-    if(PODAContext && state.IsValid()) {
-        const auto poda_result = ProcessNEVMData(m_chainman.m_blockman, block, pindex->GetMedianTimePast(), TicksSinceEpoch<std::chrono::seconds>(m_chainman.m_options.adjusted_time_callback()), mapPoDA);
-        if(poda_result == ProcessNEVMDataResult::CONSENSUS_INVALID) {
-            state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "poda-validation-failed");
-        }
-        if(poda_result == ProcessNEVMDataResult::AUX_DATA_INVALID) {
-            state.Invalid(BlockValidationResult::BLOCK_MUTATED, "poda-aux-data-invalid");
-        }
-    }
-
     const auto time_3{SteadyClock::now()};
     time_connect += time_3 - time_2;
     LogPrint(BCLog::BENCHMARK, "      - Connect %u transactions: %.2fms (%.3fms/tx, %.3fms/txin) [%.2fs (%.2fms/blk)]\n", (unsigned)block.vtx.size(),
@@ -3743,7 +3774,6 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
         LogPrint(BCLog::BENCHMARK, "  - Using cached block\n");
         pthisBlock = pblock;
     }
-    const CBlock& blockConnecting = *pthisBlock;
     // Apply the block atomically to the chain state.
     const auto time_2{SteadyClock::now()};
     SteadyClock::time_point time_3;
@@ -3757,10 +3787,33 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
     PoDAMAPMemory mapPoDA;
     std::vector<std::pair<uint256, uint32_t> > vecTXIDPairs;
     {
-        CCoinsViewCache view(&CoinsTip());
-        bool rv = ConnectBlock(blockConnecting, state, pindexNew, view, false /*bJustCheck*/, setMintTxs, mapNEVMTxRoots, mapPoDA, vecTXIDPairs);
-        GetMainSignals().BlockChecked(blockConnecting, state);
+        auto view = std::make_unique<CCoinsViewCache>(&CoinsTip());
+        bool rv = ConnectBlock(*pthisBlock, state, pindexNew, *view, false /*bJustCheck*/, setMintTxs, mapNEVMTxRoots, mapPoDA, vecTXIDPairs);
+        if (!rv && !pblock && state.GetResult() == BlockValidationResult::BLOCK_AUX_DATA_INVALID && HasNEVMAuxiliaryData(*pthisBlock)) {
+            // Disk blocks omit sidecars; reattaching shared optional data can
+            // change their size. Retry the original disk representation once,
+            // with a fresh view and every consensus/data-availability check.
+            auto committed = std::make_shared<CBlock>();
+            if (!m_blockman.ReadBlockFromDisk(*committed, *pindexNew, /*load_auxiliary_data=*/false)) {
+                return FatalError(m_chainman.GetNotifications(), state, "Failed to reread committed block");
+            }
+            view = std::make_unique<CCoinsViewCache>(&CoinsTip());
+            state = BlockValidationState();
+            setMintTxs.clear();
+            mapNEVMTxRoots.clear();
+            mapPoDA.clear();
+            vecTXIDPairs.clear();
+            pthisBlock = std::move(committed);
+            rv = ConnectBlock(*pthisBlock, state, pindexNew, *view, false /*bJustCheck*/, setMintTxs, mapNEVMTxRoots, mapPoDA, vecTXIDPairs);
+        }
+        GetMainSignals().BlockChecked(*pthisBlock, state);
         if (!rv) {
+            if (state.GetResult() == BlockValidationResult::BLOCK_AUX_DATA_INVALID) {
+                // Stored blocks acquire sidecars again when read. Stop this
+                // activation attempt without retiring its candidate or looping
+                // over the same replaceable representation as an invalid chain.
+                state.Error("Auxiliary block data requires refresh");
+            }
             if (state.IsInvalid())
                 InvalidBlockFound(pindexNew, state);
             return error("%s: ConnectBlock %s failed, %s", __func__, pindexNew->GetBlockHash().ToString(), state.ToString());
@@ -3772,9 +3825,10 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
                  Ticks<MillisecondsDouble>(time_3 - time_2),
                  Ticks<SecondsDouble>(time_connect_total),
                  Ticks<MillisecondsDouble>(time_connect_total) / num_blocks_total);
-        bool flushed = view.Flush();
+        bool flushed = view->Flush();
         assert(flushed);
     }
+    const CBlock& blockConnecting = *pthisBlock;
     // SYSCOIN: Stage mint markers in cache; they become durable on the next full
     // UTXO flush (write-ahead of CoinsTip) or on mint-containing disconnect/replay.
     if(pnevmdatadb)
@@ -3970,7 +4024,7 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
             if (!ConnectTip(state, pindexConnect, pindexConnect == pindexMostWork ? pblock : std::shared_ptr<const CBlock>(), connectTrace, disconnectpool)) {
                 if (state.IsInvalid()) {
                     // The block violates a consensus rule.
-                    if (state.GetResult() != BlockValidationResult::BLOCK_MUTATED) {
+                    if (IsBlockRejectionCacheable(state.GetResult())) {
                         InvalidChainFound(vpindexToConnect.front());
                     }
                     state = BlockValidationState();
@@ -4730,7 +4784,8 @@ bool CheckBlock(const CBlock& block, BlockValidationState& state, const Consensu
     if (block.vtx.empty() || block.vtx.size() * WITNESS_SCALE_FACTOR > MAX_BLOCK_WEIGHT || ::GetSerializeSize(block, PROTOCOL_VERSION | SERIALIZE_TRANSACTION_NO_WITNESS) * WITNESS_SCALE_FACTOR > MAX_BLOCK_WEIGHT) {
         // SYSCOIN, pre NEVM we had larger blocks for SPTs mainly
         if(block.GetBlockTime() >= Params().GetConsensus().nNEVMStartTime) {
-            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-length", "size limits failed");
+            return state.Invalid(HasNEVMAuxiliaryData(block) ? BlockValidationResult::BLOCK_AUX_DATA_INVALID : BlockValidationResult::BLOCK_CONSENSUS,
+                                 "bad-blk-length", "size limits failed");
         }
     }
     // SYSCOIN
@@ -4753,10 +4808,11 @@ bool CheckBlock(const CBlock& block, BlockValidationState& state, const Consensu
     for (const auto& tx : block.vtx) {
         TxValidationState tx_state;
         if (!CheckTransaction(*tx, tx_state)) {
-            // CheckBlock() does context-free validation checks. The only
-            // possible failures are consensus failures.
-            assert(tx_state.GetResult() == TxValidationResult::TX_CONSENSUS);
-            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, tx_state.GetRejectReason(),
+            assert(tx_state.GetResult() == TxValidationResult::TX_CONSENSUS ||
+                   tx_state.GetResult() == TxValidationResult::TX_AUX_DATA_INVALID);
+            return state.Invalid(tx_state.GetResult() == TxValidationResult::TX_AUX_DATA_INVALID ?
+                                     BlockValidationResult::BLOCK_AUX_DATA_INVALID : BlockValidationResult::BLOCK_CONSENSUS,
+                                 tx_state.GetRejectReason(),
                                  strprintf("Transaction check failed (tx hash %s) %s", tx->GetHash().ToString(), tx_state.GetDebugMessage()));
         }
     }
@@ -5064,7 +5120,10 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
     const auto& consensusParams = chainman.GetParams().GetConsensus();
     bool nevmContext = nHeight >= consensusParams.nNEVMStartBlock;
     if ((fRegTest || nevmContext) && GetBlockWeight(block) > MAX_BLOCK_WEIGHT) {
-        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-weight", strprintf("%s : weight limit failed", __func__));
+        // Old data may legitimately be omitted, but its presence contributes
+        // to weight without changing the committed block identity.
+        return state.Invalid(HasNEVMAuxiliaryData(block) ? BlockValidationResult::BLOCK_AUX_DATA_INVALID : BlockValidationResult::BLOCK_CONSENSUS,
+                             "bad-blk-weight", strprintf("%s : weight limit failed", __func__));
     }
     bool fNexusActive = nHeight >= consensusParams.nNexusStartBlock;
     // Ensure the coinbase transaction is either standard or explicitly allowed
@@ -5329,23 +5388,12 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
     }
 
     const CChainParams& params{GetParams()};
-    if (!CheckBlock(block, state, params.GetConsensus(), true, true) ||
-        !ContextualCheckBlock(block, state, *this, pindex->pprev)) {
-        if (state.IsInvalid() && state.GetResult() != BlockValidationResult::BLOCK_MUTATED) {
+    if (!CheckBlock(block, state, params.GetConsensus(), true, true)) {
+        if (state.IsInvalid() && IsBlockRejectionCacheable(state.GetResult())) {
             pindex->nStatus |= BLOCK_FAILED_VALID;
             m_blockman.m_dirty_blockindex.insert(pindex);
         }
         return error("%s: %s", __func__, state.ToString());
-    }
-    // SYSCOIN: cache the contextually validated BTCPREV so ConnectBlock can reuse it
-    // without reparsing the coinbase payload in the common accept->connect flow.
-    {
-        const bool btcp_required = IsBTCCSignHeight(params.GetConsensus(), pindex->nHeight) &&
-                                   block.auxpow;
-        if (btcp_required) {
-            pindex->m_btcp_prev_contextually_validated = true;
-            pindex->m_btcp_prev_contextual_commitment = block.auxpow->getParentPrevBlockHash();
-        }
     }
     // SYSCOIN ProcessNEVMData/FlushDataToCache so we have the data from processing out-of-order blocks and it reads from disk (recreating PoDA data in block) prior to validation in ConnectTip()
     bool PODAContext = pindex->nHeight >= params.GetConsensus().nPODAStartBlock;
@@ -5359,8 +5407,25 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
             return error("%s: %s", __func__, state.ToString());
         }
         if(poda_result == ProcessNEVMDataResult::AUX_DATA_INVALID) {
-            state.Invalid(BlockValidationResult::BLOCK_MUTATED, "poda-aux-data-invalid");
+            state.Invalid(BlockValidationResult::BLOCK_AUX_DATA_INVALID, "poda-aux-data-invalid");
             return error("%s: %s", __func__, state.ToString());
+        }
+    }
+    if (!ContextualCheckBlock(block, state, *this, pindex->pprev)) {
+        if (state.IsInvalid() && IsBlockRejectionCacheable(state.GetResult())) {
+            pindex->nStatus |= BLOCK_FAILED_VALID;
+            m_blockman.m_dirty_blockindex.insert(pindex);
+        }
+        return error("%s: %s", __func__, state.ToString());
+    }
+    // SYSCOIN: cache the contextually validated BTCPREV so ConnectBlock can reuse it
+    // without reparsing the coinbase payload in the common accept->connect flow.
+    {
+        const bool btcp_required = IsBTCCSignHeight(params.GetConsensus(), pindex->nHeight) &&
+                                   block.auxpow;
+        if (btcp_required) {
+            pindex->m_btcp_prev_contextually_validated = true;
+            pindex->m_btcp_prev_contextual_commitment = block.auxpow->getParentPrevBlockHash();
         }
     }
     if(pnevmdatadb)

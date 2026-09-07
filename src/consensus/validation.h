@@ -6,6 +6,7 @@
 #ifndef SYSCOIN_CONSENSUS_VALIDATION_H
 #define SYSCOIN_CONSENSUS_VALIDATION_H
 
+#include <algorithm>
 #include <string>
 #include <version.h>
 #include <consensus/consensus.h>
@@ -55,6 +56,7 @@ enum class TxValidationResult {
     TX_MEMPOOL_POLICY,        //!< violated mempool's fee/size/descendant/RBF/etc limits
     // SYSCOIN
     TX_MINT_DUPLICATE, //!< mempool's nevm mint tx hashexisting in mempool
+    TX_AUX_DATA_INVALID,      //!< auxiliary data failed validation independently of txid and wtxid
     TX_NO_MEMPOOL,            //!< this node does not have a mempool so can't validate the transaction
 };
 
@@ -77,6 +79,7 @@ enum class BlockValidationResult {
     BLOCK_CACHED_INVALID,    //!< this block was cached as being invalid and we didn't store the reason why
     BLOCK_INVALID_HEADER,    //!< invalid proof of work or time too old
     BLOCK_MUTATED,           //!< the block's data didn't match the data committed to by the PoW
+    BLOCK_AUX_DATA_INVALID,  //!< replaceable auxiliary data failed validation independently of block identity
     BLOCK_MISSING_PREV,      //!< We don't have the previous block the checked one is built on
     BLOCK_INVALID_PREV,      //!< A block this one builds on is invalid
     BLOCK_TIME_FUTURE,       //!< block timestamp was > 2 hours in the future (or our clock is bad)
@@ -144,6 +147,37 @@ public:
 
 class TxValidationState : public ValidationState<TxValidationResult> {};
 class BlockValidationState : public ValidationState<BlockValidationResult> {};
+
+/** Whether a rejection can be retained under the transaction's witness identity. */
+inline bool IsTxRejectionCacheable(TxValidationResult result, const CTransaction& tx)
+{
+    // Even valid optional sidecars affect size and fee policy without changing
+    // either transaction identity. Do not retain their policy failures by hash.
+    return !tx.IsNEVMData() && result != TxValidationResult::TX_RESULT_UNSET &&
+           result != TxValidationResult::TX_WITNESS_STRIPPED &&
+           result != TxValidationResult::TX_AUX_DATA_INVALID;
+}
+
+inline bool IsBlockRejectionCacheable(BlockValidationResult result)
+{
+    return result != BlockValidationResult::BLOCK_RESULT_UNSET &&
+           result != BlockValidationResult::BLOCK_MUTATED &&
+           result != BlockValidationResult::BLOCK_AUX_DATA_INVALID;
+}
+
+inline bool HasNEVMAuxiliaryData(const CTransaction& tx)
+{
+    return tx.IsNEVMData() && std::any_of(tx.vout.begin(), tx.vout.end(), [](const auto& out) {
+        return !out.vchNEVMData.empty();
+    });
+}
+
+inline bool HasNEVMAuxiliaryData(const CBlock& block)
+{
+    return std::any_of(block.vtx.begin(), block.vtx.end(), [](const auto& tx) {
+        return HasNEVMAuxiliaryData(*tx);
+    });
+}
 
 // These implement the weight = (stripped_size * 4) + witness_size formula,
 // using only serialization with and without witness data. As witness_size

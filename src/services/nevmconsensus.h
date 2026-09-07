@@ -9,6 +9,9 @@
 #include <consensus/params.h>
 #include <util/hasher.h>
 #include <sync.h>
+
+#include <map>
+
 class TxValidationState;
 class CCoinsViewCache;
 class CTxUndo;
@@ -31,14 +34,18 @@ public:
     mutable Mutex cs_cache; // Mutex to protect cache operations
 private:
     PoDAMAPMemory mapCache GUARDED_BY(cs_cache);
+    // Deletion authority belongs only to this session's exclusively mempool-owned
+    // blobs. It survives metadata flushes, but reopened/legacy rows are retained.
+    std::map<std::vector<uint8_t>, uint256> m_mempool_owners GUARDED_BY(cs_cache);
+    bool PruneToBatch(CDBBatch& batch, CDBBatch& batchblob, int64_t nMedianTime, NEVMDataVec& pruned_keys) EXCLUSIVE_LOCKS_REQUIRED(cs_cache);
 public:
     using CDBWrapper::CDBWrapper;
     bool FlushErase(const NEVMDataVec &vecDataKeys) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
     bool FlushMempoolErase(const std::vector<uint8_t>& vchVersionHash, const uint256& txid) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
+    void ReleaseMempoolOwner(const std::vector<uint8_t>& version_hash, const uint256& txid) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
     bool FlushCacheToDisk(const int64_t nMedianTime, bool fSync = true) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
     void FlushDataToCache(const PoDAMAPMemory &mapPoDA, PoDAFlushSource source) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
     bool PruneStandalone(const int64_t nMedianTime, bool fSync = true) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
-    bool PruneToBatch(CDBBatch& batch,CDBBatch& batchblob,  const int64_t nMedianTime) EXCLUSIVE_LOCKS_REQUIRED(cs_cache);
     bool GetBlobMetaData(const std::vector<uint8_t>& vchVersionhash, MapPoDAPayloadMeta& meta) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
     bool BlobExists(const std::vector<uint8_t>& vchVersionhash) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
     const PoDAMAPMemory& GetCache() const EXCLUSIVE_LOCKS_REQUIRED(cs_cache);

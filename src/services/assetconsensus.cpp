@@ -338,19 +338,8 @@ bool CheckSyscoinMintInternal(
     if (nAssetFromLog == 0 || outputAmount == 0 || witnessAddress.empty()) {
         return FormatSyscoinErrorMessage(state, "mint-missing-freeze-log", fJustCheck);
     }
-    // sanity check is set in mempool during m_test_accept and when miner validates block
-    // we care to ensure unique bridge id's in the mempool, not to emplace on test_accept
-    if(fJustCheck) {
-        if(setMintTxs.find(mintSyscoin.nTxHash) != setMintTxs.end()) {
-            return state.Invalid(TxValidationResult::TX_MINT_DUPLICATE, "mint-duplicate-transfer");
-        }
-    }
-    else {
-        // ensure eth tx not already spent in current processing block or mempool(mapMintKeysMempool passed in)
-        auto itMap = setMintTxs.insert(mintSyscoin.nTxHash);
-        if(!itMap.second) {
-            return state.Invalid(TxValidationResult::TX_MINT_DUPLICATE, "mint-duplicate-transfer");
-        }
+    if (setMintTxs.count(mintSyscoin.nTxHash)) {
+        return state.Invalid(TxValidationResult::TX_MINT_DUPLICATE, "mint-duplicate-transfer");
     }
     
     if (!rlpTxValue.isList()) {
@@ -489,6 +478,9 @@ bool CheckSyscoinMint(
     if (outputAmount != nTotalMinted) {
         return FormatSyscoinErrorMessage(state, "mint-output-mismatch", fJustCheck);
     }
+    // The caller owns this block/package-local set, including for check-only validation.
+    // Do not reserve a mint before its proof and outputs have both passed validation.
+    setMintTxs.insert(mintSyscoin.nTxHash);
     if (!fJustCheck) {
         if (nHeight > 0) {
             LogPrint(BCLog::SYS,"CONNECTED ASSET MINT: asset=%llu tx=%s height=%d fJustCheck=%s\n",
@@ -648,27 +640,11 @@ bool CNEVMTxRootsDB::FlushCacheToDisk(std::size_t CHUNK_ITEMS, bool fSync)
     LOCK(cs_cache);
     if (mapCache.empty()) return true;
 
-    CDBBatch batch(*this);
-    std::size_t items = 0;
-    std::size_t count = 0;
-    auto flush = [&]() {
-        if (batch.SizeEstimate() == 0) return true;
-        if (!WriteBatch(batch, fSync)) return false;
-        batch.Clear();
-        items = 0;
-        return true;
-    };
-
-    for (auto it = mapCache.begin(); it != mapCache.end(); ) {
-        batch.Write(it->first, it->second);
-        count++;
-        if (++items == CHUNK_ITEMS) {
-            if (!flush()) return false;
-        }
-        // entry is now durable → erase from cache
-        it = mapCache.erase(it);
-    }
-    if (!flush()) return false;       // last partial chunk
+    const std::size_t count = mapCache.size();
+    if (!nevm_cache_detail::FlushCache(
+            *this, mapCache, CHUNK_ITEMS, fSync,
+            [](CDBBatch& batch, const auto& entry) { batch.Write(entry.first, entry.second); },
+            [this](CDBBatch& batch, bool sync) { return WriteBatch(batch, sync); })) return false;
 
     LogPrint(BCLog::SYS,
              "Flushed NEVM-tx-roots cache, %zu items written in %zu-entry chunks\n",
@@ -712,27 +688,11 @@ bool CNEVMMintedTxDB::FlushCacheToDisk(std::size_t CHUNK_ITEMS, bool fSync)
     LOCK(cs_cache);
     if (mapCache.empty()) return true;
 
-    CDBBatch batch(*this);
-    std::size_t items = 0;
-    std::size_t count = 0;
-
-    auto flush = [&]() {
-        if (batch.SizeEstimate() == 0) return true;
-        if (!WriteBatch(batch, fSync)) return false;
-        batch.Clear();
-        items = 0;
-        return true;
-    };
-
-    for (auto it = mapCache.begin(); it != mapCache.end(); ) {
-        batch.Write(*it, true);       // value is a dummy bool
-        count++;
-        if (++items == CHUNK_ITEMS) {
-            if (!flush()) return false;
-        }
-        it = mapCache.erase(it);      // safe to purge now
-    }
-    if (!flush()) return false;
+    const std::size_t count = mapCache.size();
+    if (!nevm_cache_detail::FlushCache(
+            *this, mapCache, CHUNK_ITEMS, fSync,
+            [](CDBBatch& batch, const uint256& key) { batch.Write(key, true); },
+            [this](CDBBatch& batch, bool sync) { return WriteBatch(batch, sync); })) return false;
 
     LogPrint(BCLog::SYS,
              "Flushed NEVM-minted-tx cache, %zu items written in %zu-entry chunks\n",

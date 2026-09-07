@@ -104,6 +104,9 @@ SYSCOIN_TESTS =\
   test/dbwrapper_tests.cpp \
   test/denialofservice_tests.cpp \
   test/descriptor_tests.cpp \
+  test/nevm_auxiliary_tests.cpp \
+  test/nevm_cache_writeback_tests.cpp \
+  test/nevm_ownership_tests.cpp \
   test/nevm_tests.cpp \
   test/evo_deterministicmns_tests.cpp \
   test/evodb_tests.cpp \

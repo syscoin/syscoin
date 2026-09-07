@@ -1680,6 +1680,7 @@ bool PeerManagerImpl::MaybePunishNodeForBlock(NodeId nodeid, const BlockValidati
         return true;
     case BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE:
     case BlockValidationResult::BLOCK_TIME_FUTURE:
+    case BlockValidationResult::BLOCK_AUX_DATA_INVALID:
         break;
     }
     if (message != "") {
@@ -1708,6 +1709,7 @@ bool PeerManagerImpl::MaybePunishNodeForTx(NodeId nodeid, const TxValidationStat
     case TxValidationResult::TX_PREMATURE_SPEND:
     case TxValidationResult::TX_WITNESS_MUTATED:
     case TxValidationResult::TX_WITNESS_STRIPPED:
+    case TxValidationResult::TX_AUX_DATA_INVALID:
     case TxValidationResult::TX_CONFLICT:
     case TxValidationResult::TX_MEMPOOL_POLICY:
     case TxValidationResult::TX_NO_MEMPOOL:
@@ -3171,7 +3173,7 @@ bool PeerManagerImpl::ProcessOrphanTx(Peer& peer)
             // Has inputs but not accepted to mempool
             // Probably non-standard or insufficient fee
             LogPrint(BCLog::TXPACKAGES, "   removed orphan tx %s (wtxid=%s)\n", orphanHash.ToString(), orphan_wtxid.ToString());
-            if (state.GetResult() != TxValidationResult::TX_WITNESS_STRIPPED) {
+            if (IsTxRejectionCacheable(state.GetResult(), *porphanTx)) {
                 // We can add the wtxid of this transaction to our reject filter.
                 // Do not add txids of witness transactions or witness-stripped
                 // transactions to the filter, as they can have been malleated;
@@ -4543,7 +4545,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 m_txrequest.ForgetTxHash(tx.GetWitnessHash());
             }
         } else {
-            if (state.GetResult() != TxValidationResult::TX_WITNESS_STRIPPED) {
+            if (IsTxRejectionCacheable(state.GetResult(), tx)) {
                 // We can add the wtxid of this transaction to our reject filter.
                 // Do not add txids of witness transactions or witness-stripped
                 // transactions to the filter, as they can have been malleated;
