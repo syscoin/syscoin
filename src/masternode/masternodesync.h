@@ -50,6 +50,7 @@ private:
          MAX_GOVERNANCE_PAGE_INVENTORY - 1) /
         MAX_GOVERNANCE_PAGE_INVENTORY};
     static constexpr std::size_t MAX_GOVERNANCE_VIEW_RESTARTS{4};
+    static constexpr std::size_t MAX_GOVERNANCE_RESOURCE_RETRIES{4};
     static constexpr std::size_t
         MAX_GOVERNANCE_PAGE_SESSION_ADMISSION_RETRIES{1};
 
@@ -85,6 +86,7 @@ private:
         uint32_t seen_count{0};
         std::size_t page_count{0};
         std::size_t restarts{0};
+        std::size_t resource_retries{0};
         std::chrono::microseconds retry_not_before{0};
         bool established{false};
         std::vector<CInv> transcript;
@@ -211,7 +213,8 @@ public:
                                const CGovernancePageResponse& response,
                                PeerManager& peerman)
         EXCLUSIVE_LOCKS_REQUIRED(!m_governance_page_mutex);
-    void ProcessTick(CConnman& connman, PeerManager& peerman)
+    void ProcessTick(CConnman& connman, PeerManager& peerman,
+                     ChainstateManager& chainman)
         EXCLUSIVE_LOCKS_REQUIRED(!m_governance_page_mutex);
     void NotifyHeaderTip(const CBlockIndex *pindexNew);
     void UpdatedBlockTip(const CBlockIndex *pindexNew,
@@ -219,7 +222,8 @@ public:
                          bool fInitialDownload)
         EXCLUSIVE_LOCKS_REQUIRED(!m_governance_page_mutex);
 
-    void DoMaintenance(CConnman &connman, PeerManager& peerman)
+    void DoMaintenance(CConnman& connman, PeerManager& peerman,
+                       ChainstateManager& chainman)
         EXCLUSIVE_LOCKS_REQUIRED(!m_governance_page_mutex);
 
 private:
@@ -242,6 +246,8 @@ private:
     void CancelGovernancePageSession(PeerManager& peerman)
         EXCLUSIVE_LOCKS_REQUIRED(!m_governance_page_mutex);
     void ResetGovernanceScope(const uint256& scope_hash)
+        EXCLUSIVE_LOCKS_REQUIRED(m_governance_page_mutex);
+    [[nodiscard]] bool RestartGovernanceScopeView()
         EXCLUSIVE_LOCKS_REQUIRED(m_governance_page_mutex);
     [[nodiscard]] bool ParkGovernancePageSessionUntil(
         std::chrono::microseconds retry_not_before)

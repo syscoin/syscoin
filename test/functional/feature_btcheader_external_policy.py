@@ -80,6 +80,7 @@ class BTCHeaderPolicyAuxpowTest(SyscoinTestFramework):
     NEXT_TIP = bytes(range(33, 65)).hex()
     OLD = "cc" * 32
     FORK = "dd" * 32
+    BACKEND_TIMEOUT = 10
     PQ_EPOCH_BLOCKS = 288
     ACTIVE_QUORUMS = 4
     CHAINLOCK_EPOCH_ORIGIN = 1440
@@ -102,7 +103,8 @@ class BTCHeaderPolicyAuxpowTest(SyscoinTestFramework):
             "-mncollateral=100",
             "-btcheaderpolicyondemand=1",
             "-btcheadermanaged=0",
-            "-btcheadercmdtimeout=1",
+            # Allow the Python backend to start on loaded CI workers.
+            f"-btcheadercmdtimeout={self.BACKEND_TIMEOUT}",
         ]]
 
     def add_options(self, parser):
@@ -424,7 +426,8 @@ class BTCHeaderPolicyAuxpowTest(SyscoinTestFramework):
             -1, "btcheadercmd-exit-1", node.createauxblock, address)
 
         self.state["online"] = True
-        self.state["sleep"] = 2
+        # Keep the deliberate stall longer than the healthy-command allowance.
+        self.state["sleep"] = 2 * self.BACKEND_TIMEOUT
         self._write_state()
         assert_raises_rpc_error(
             -1, "btcheadercmd-timeout", node.createauxblock, address)

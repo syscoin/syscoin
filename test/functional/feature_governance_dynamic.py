@@ -18,12 +18,17 @@ SUPERBLOCK_PAYMENT_LIMIT_SAME = Decimal('0')
 GOVERNANCE_FEE_CONFIRMATIONS = 6
 MASTERNODE_SYNC_TICK_SECONDS = 6
 GOVERNANCE_PROPAGATION_TIMEOUT = 60
+# A 300-second mocktime cooldown at two mock seconds/second, plus relay time.
+GOVERNANCE_POST_JUMP_PROPAGATION_TIMEOUT = 150 + GOVERNANCE_PROPAGATION_TIMEOUT
 MAX_GOVERNANCE_BUDGET = Decimal('5000000.00000000') 
 PROPOSAL_END_EPOCH = 600
 class SyscoinGovernanceTest(DashTestFramework):
     def set_test_params(self):
-        # Using adjusted v20 deployment params to test an edge case where superblock maturity window is equal to deployment window size
-        self.set_dash_test_params(6, 5, fast_dip3_enforcement=True)
+        # PQ preparation crosses regtest's default NEVM activation. Keep this
+        # fixture's 25-block governance cadence and original adaptive budget.
+        self.set_dash_test_params(
+            6, 5, extra_args=[["-nevmstartheight=10000"] for _ in range(6)],
+            fast_dip3_enforcement=True)
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()
@@ -120,6 +125,7 @@ class SyscoinGovernanceTest(DashTestFramework):
         }
         governance_info = self.nodes[0].getgovernanceinfo()
         sb_cycle = governance_info['superblockcycle']
+        assert_equal(sb_cycle, 25)
         self.sb_maturity_window = governance_info['superblockmaturitywindow']
         self.sb_immaturity_window = sb_cycle - self.sb_maturity_window
         self.p0_payout_address = self.nodes[0].getnewaddress()
@@ -128,6 +134,7 @@ class SyscoinGovernanceTest(DashTestFramework):
         self.p3_payout_address = self.nodes[0].getnewaddress()
         self.initial_budget = Decimal('2000000.00000000')
         self.expected_budget = self.initial_budget
+        self.check_superblockbudget()
 
         # Ensure nodes are connected at the beginning
         for idx, node_outer in enumerate(self.nodes):
@@ -347,7 +354,12 @@ class SyscoinGovernanceTest(DashTestFramework):
             self.log.info(f"Submitted proposal {i} with hash {proposal_hash}")
             # This fixture originates every proposal from one peer. Drain its
             # bounded governance lane before announcing the next object.
-            self.sync_gobject_list(i + 1)
+            # Expiry jumps can time out an in-flight trigger vote, putting all
+            # localhost peers in a 300-second mocktime cooldown. The first
+            # object needs time to cross it before its ordinary relay wait.
+            self.sync_gobject_list(
+                i + 1, timeout=GOVERNANCE_POST_JUMP_PROPAGATION_TIMEOUT
+                if i == 0 else GOVERNANCE_PROPAGATION_TIMEOUT)
 
         return proposals_data
 
@@ -364,17 +376,19 @@ class SyscoinGovernanceTest(DashTestFramework):
                 # live MN sources. Drain each vote before originating another.
                 self.sync_proposal_votes(proposal_hash, expected_yes_count)
 
-    def sync_gobject_list(self, expected_count):
+    def sync_gobject_list(self, expected_count, timeout=GOVERNANCE_PROPAGATION_TIMEOUT):
+        sb_block_height = self.nodes[0].getgovernanceinfo()["nextsuperblock"]
+
         def all_nodes_have_exact_count():
-            self._throttled_bump_mocktime(
-                "feature_governance_dynamic_object_sync", step=1)
+            self.bump_governance_sync_mocktime(
+                "feature_governance_dynamic_object_sync", sb_block_height)
             return all(
                 len(node.gobject_list("valid", "proposals")) == expected_count
                 for node in self.nodes)
 
         self.wait_until(
             all_nodes_have_exact_count,
-            timeout=GOVERNANCE_PROPAGATION_TIMEOUT)
+            timeout=timeout)
 
     def capture_proposal_vote_hashes(self, proposal_hashes):
         expected_vote_count = len(self.mninfo)
@@ -392,6 +406,21 @@ class SyscoinGovernanceTest(DashTestFramework):
             expected_vote_hashes[proposal_hash] = vote_hashes
         return expected_vote_hashes
 
+    def bump_governance_sync_mocktime(self, throttle_key, sb_block_height):
+        # Mining uses one second per block except the six-second transition
+        # into maturity. Reserve that time plus one second of validity even
+        # when a larger timeout factor permits a longer relay wait.
+        block_count = self.nodes[0].getblockcount()
+        remaining_blocks = max(0, sb_block_height - block_count)
+        maturity_margin = (
+            MASTERNODE_SYNC_TICK_SECONDS - 1
+            if block_count < sb_block_height - self.sb_maturity_window else 0)
+        last_safe_mocktime = (
+            self.active_proposal_expiry_time -
+            remaining_blocks - maturity_margin - 1)
+        if self.mocktime < last_safe_mocktime:
+            self._throttled_bump_mocktime(throttle_key, step=1)
+
     def wait_for_governance_recovery(
             self, proposal_hashes, expected_vote_hashes, sb_block_height):
         expected_proposal_hashes = set(proposal_hashes)
@@ -399,13 +428,8 @@ class SyscoinGovernanceTest(DashTestFramework):
         expected_vote_count = len(self.mninfo)
 
         def all_nodes_have_exact_governance():
-            remaining_blocks = max(
-                0, sb_block_height - self.nodes[0].getblockcount())
-            last_safe_mocktime = (
-                self.active_proposal_expiry_time - remaining_blocks - 1)
-            if self.mocktime < last_safe_mocktime:
-                self._throttled_bump_mocktime(
-                    "feature_governance_dynamic_recovery", step=1)
+            self.bump_governance_sync_mocktime(
+                "feature_governance_dynamic_recovery", sb_block_height)
 
             for node in self.nodes:
                 if (set(node.gobject_list("valid", "proposals")) !=
@@ -428,9 +452,11 @@ class SyscoinGovernanceTest(DashTestFramework):
             timeout=GOVERNANCE_PROPAGATION_TIMEOUT)
 
     def sync_proposal_votes(self, proposal_hash, expected_yes_count):
+        sb_block_height = self.nodes[0].getgovernanceinfo()["nextsuperblock"]
+
         def all_nodes_have_exact_count():
-            self._throttled_bump_mocktime(
-                "feature_governance_dynamic_vote_sync", step=1)
+            self.bump_governance_sync_mocktime(
+                "feature_governance_dynamic_vote_sync", sb_block_height)
             for node in self.nodes:
                 funding_result = node.gobject_get(
                     proposal_hash)["FundingResult"]
@@ -452,14 +478,9 @@ class SyscoinGovernanceTest(DashTestFramework):
             maturity_height = sb_block_height - self.sb_maturity_window
             if block_count >= maturity_height:
                 # PQ trigger signing needs a stable tip, while the bounded
-                # governance request lane needs mocktime to refill. Preserve
-                # one second for each final block plus a validity margin.
-                last_safe_mocktime = (
-                    self.active_proposal_expiry_time -
-                    (sb_block_height - block_count) - 1)
-                if self.mocktime < last_safe_mocktime:
-                    self._throttled_bump_mocktime(
-                        "feature_governance_dynamic_trigger_sync", step=1)
+                # governance request lane needs mocktime to refill.
+                self.bump_governance_sync_mocktime(
+                    "feature_governance_dynamic_trigger_sync", sb_block_height)
                 if self.have_trigger_for_height(sb_block_height):
                     return True
                 # A remote trigger can arrive after this tip's governance
@@ -470,7 +491,7 @@ class SyscoinGovernanceTest(DashTestFramework):
                             sb_block_height)):
                     self.generate_synced_blocks(1)
                 return False
-            self.bump_mocktime(6)
+            self.bump_mocktime(MASTERNODE_SYNC_TICK_SECONDS)
             self.sync_blocks()
             time.sleep(2)
             self.generate(self.nodes[0], 1, sync_fun=self.no_op)

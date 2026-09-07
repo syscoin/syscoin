@@ -25,6 +25,7 @@
 #include <sync.h>
 #include <test/util/chainstate.h>
 #include <test/util/coins.h>
+#include <test/util/net.h>
 #include <test/util/random.h>
 #include <test/util/setup_common.h>
 #include <uint256.h>
@@ -634,6 +635,7 @@ public:
         int64_t tracker_source{-1};
         std::size_t source_index{0};
         std::size_t restarts{0};
+        std::size_t resource_retries{0};
         std::size_t session_admission_retries{0};
         std::chrono::microseconds retry_not_before{0};
     };
@@ -676,6 +678,16 @@ public:
     static void DeferPeriodicPagePump(CMasternodeSync& sync)
     {
         sync.m_next_governance_page_resync = GetTime() + 60;
+    }
+
+    static int64_t NextInitialPageAttempt(const CMasternodeSync& sync)
+    {
+        return sync.m_next_governance_page_attempt.load();
+    }
+
+    static int64_t NextPeriodicPageAttempt(const CMasternodeSync& sync)
+    {
+        return sync.m_next_governance_page_resync.load();
     }
 
     static bool ResetDrainPending(const CMasternodeSync& sync)
@@ -822,6 +834,7 @@ public:
         result.tracker_source = state.tracker_source;
         result.source_index = state.source_index;
         result.restarts = state.scope.restarts;
+        result.resource_retries = state.scope.resource_retries;
         result.retry_not_before = state.scope.retry_not_before;
         return result;
     }
@@ -854,6 +867,7 @@ public:
         result.tracker_source = state.tracker_source;
         result.source_index = state.source_index;
         result.restarts = state.scope.restarts;
+        result.resource_retries = state.scope.resource_retries;
         result.session_admission_retries =
             state.tracker_session_admission_retries;
         result.retry_not_before = state.scope.retry_not_before;
@@ -885,6 +899,7 @@ public:
         result.tracker_source = state.tracker_source;
         result.source_index = state.source_index;
         result.restarts = state.scope.restarts;
+        result.resource_retries = state.scope.resource_retries;
         result.session_admission_retries =
             state.tracker_session_admission_retries;
         result.retry_not_before = state.scope.retry_not_before;
@@ -893,7 +908,40 @@ public:
 
     static std::size_t ImmediateTemporaryRetries()
     {
+        return CMasternodeSync::MAX_GOVERNANCE_RESOURCE_RETRIES;
+    }
+
+    static std::size_t MaximumViewRestarts()
+    {
         return CMasternodeSync::MAX_GOVERNANCE_VIEW_RESTARTS;
+    }
+
+    static bool RestartView(CMasternodeSync& sync)
+    {
+        LOCK(sync.m_governance_page_mutex);
+        return sync.RestartGovernanceScopeView();
+    }
+
+    static void SetPartialPageProgress(CMasternodeSync& sync)
+    {
+        LOCK(sync.m_governance_page_mutex);
+        auto& scope{sync.m_governance_page_sync.scope};
+        const std::vector<CInv> full_scope{
+            {MSG_GOVERNANCE_OBJECT, uint256S("01")},
+            {MSG_GOVERNANCE_OBJECT, uint256S("02")},
+            {MSG_GOVERNANCE_OBJECT, uint256S("03")}};
+        const auto view{ComputeGovernancePageViewHash(
+            scope.scope_hash, full_scope)};
+        BOOST_REQUIRE(view);
+        // Install admitted progress for the first page of this exact view.
+        // Retrying the same scope must retain both independent retry budgets.
+        scope.established = true;
+        scope.view_id = *view;
+        scope.total_count = full_scope.size();
+        scope.seen_count = 2;
+        scope.page_count = 1;
+        scope.transcript.assign(full_scope.begin(), full_scope.begin() + 2);
+        scope.cursor = scope.transcript.back().hash;
     }
 
     static bool IsIdleAndEmpty(const CMasternodeSync& sync)
@@ -2095,6 +2143,98 @@ BOOST_FIXTURE_TEST_CASE(
         cohort.begin(), cohort.end());
 }
 
+BOOST_FIXTURE_TEST_CASE(
+    governance_page_client_regtest_waits_for_current_chain,
+    TestChain100Setup)
+{
+    using SyncAccess =
+        masternode_sync_tests::CMasternodeSyncTestAccess;
+    auto& chainman{*Assert(m_node.chainman)};
+    auto& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+    auto& peerman{*Assert(m_node.peerman)};
+    BOOST_REQUIRE(fRegTest);
+    BOOST_REQUIRE(!chainman.IsInitialBlockDownload());
+
+    auto* peer = new CNode{
+        /*id=*/101, /*sock=*/nullptr, CAddress{},
+        /*nKeyedNetGroupIn=*/1, /*nLocalHostNonceIn=*/1, CAddress{},
+        /*addrNameIn=*/std::string{}, ConnectionType::OUTBOUND_FULL_RELAY,
+        /*inbound_onion=*/false};
+    peer->nVersion = GOVERNANCE_PAGE_PROTO_VERSION - 1;
+    peer->SetCommonVersion(GOVERNANCE_PAGE_PROTO_VERSION - 1);
+    peer->fSuccessfullyConnected = true;
+    connman.AddTestNode(*peer);
+    struct ClearPeers {
+        ConnmanTestMsg& connman;
+        ~ClearPeers() { connman.ClearTestNodes(); }
+    } clear_peers{connman};
+
+    CMasternodeSync sync;
+    const auto tick = [&] {
+        SetMockTime(GetTime() + MASTERNODE_SYNC_TICK_SECONDS);
+        sync.ProcessTick(connman, peerman, chainman);
+    };
+
+    // A reset after catching up must progress without another block callback.
+    sync.Reset(/*fForce=*/true, /*fNotifyReset=*/false);
+    BOOST_REQUIRE(!sync.ReachedBestHeader());
+    tick();
+    BOOST_REQUIRE_EQUAL(sync.GetAssetID(), MASTERNODE_SYNC_GOVERNANCE);
+
+    CBlockIndex* original_best_header;
+    {
+        LOCK(cs_main);
+        original_best_header = chainman.m_best_header;
+        BOOST_REQUIRE(original_best_header == chainman.ActiveTip());
+        CBlockHeader header;
+        header.nVersion = 4;
+        header.hashPrevBlock = original_best_header->GetBlockHash();
+        header.hashMerkleRoot = InsecureRand256();
+        header.nTime = original_best_header->nTime + 1;
+        header.nBits = original_best_header->nBits;
+        const auto* ahead{chainman.m_blockman.AddToBlockIndex(
+            header, chainman.m_best_header)};
+        BOOST_REQUIRE(chainman.m_best_header == ahead);
+        BOOST_REQUIRE(chainman.ActiveTip() != ahead);
+    }
+    struct RestoreBestHeader {
+        ChainstateManager& chainman;
+        CBlockIndex* original;
+        ~RestoreBestHeader()
+        {
+            LOCK(cs_main);
+            chainman.m_best_header = original;
+        }
+    } restore_header{chainman, original_best_header};
+
+    // Public IBD remains latched false after a newer header arrives. The
+    // active-chain comparison must independently hold the quick transition.
+    BOOST_REQUIRE(!chainman.IsInitialBlockDownload());
+    sync.Reset(/*fForce=*/true, /*fNotifyReset=*/false);
+    tick();
+    BOOST_REQUIRE_EQUAL(sync.GetAssetID(), MASTERNODE_SYNC_BLOCKCHAIN);
+    tick();
+    BOOST_CHECK_EQUAL(sync.GetAssetID(), MASTERNODE_SYNC_BLOCKCHAIN);
+
+    // Header lag also drains an existing page pass without starting a
+    // fallback or deferring the next initial or periodic attempt.
+    (void)SyncAccess::PrepareInitialPagePump(sync);
+    SyncAccess::StartObjectPass(sync, {peer->GetId()});
+    const auto initial_attempt{SyncAccess::NextInitialPageAttempt(sync)};
+    tick();
+    BOOST_CHECK_EQUAL(sync.GetAssetID(), MASTERNODE_SYNC_GOVERNANCE);
+    BOOST_CHECK(SyncAccess::IsIdleAndEmpty(sync));
+    BOOST_CHECK_EQUAL(SyncAccess::NextInitialPageAttempt(sync), initial_attempt);
+
+    (void)SyncAccess::PreparePeriodicPagePump(sync);
+    SyncAccess::StartObjectPass(sync, {peer->GetId()});
+    const auto periodic_attempt{SyncAccess::NextPeriodicPageAttempt(sync)};
+    tick();
+    BOOST_CHECK_EQUAL(sync.GetAssetID(), MASTERNODE_SYNC_FINISHED);
+    BOOST_CHECK(SyncAccess::IsIdleAndEmpty(sync));
+    BOOST_CHECK_EQUAL(SyncAccess::NextPeriodicPageAttempt(sync), periodic_attempt);
+}
+
 BOOST_AUTO_TEST_CASE(governance_page_client_reset_generation_is_terminal)
 {
     using SyncAccess =
@@ -2231,6 +2371,63 @@ BOOST_AUTO_TEST_CASE(
 }
 
 BOOST_AUTO_TEST_CASE(
+    governance_page_client_separates_resource_and_view_retries)
+{
+    using SyncAccess =
+        masternode_sync_tests::CMasternodeSyncTestAccess;
+    CMasternodeSync sync;
+    const std::vector<int64_t> cohort{11, 12};
+    SyncAccess::StartObjectPass(sync, cohort);
+    SyncAccess::SetTrackerSession(sync, cohort.front());
+
+    const auto start{std::chrono::seconds{100}};
+    for (std::size_t retry{1};
+         retry <= SyncAccess::ImmediateTemporaryRetries(); ++retry) {
+        const auto result{SyncAccess::ScheduleTemporaryUnavailable(
+            sync, start + std::chrono::seconds{static_cast<int64_t>(retry)})};
+        BOOST_REQUIRE(!result.advance_scope);
+        BOOST_REQUIRE(!result.release_tracker_session);
+    }
+    const auto parked{SyncAccess::ScheduleTemporaryUnavailable(
+        sync, start + std::chrono::seconds{
+            static_cast<int64_t>(SyncAccess::ImmediateTemporaryRetries() + 1)})};
+    BOOST_REQUIRE(parked.release_tracker_session);
+    SyncAccess::SetTrackerSession(sync, cohort.front());
+    SyncAccess::SetPartialPageProgress(sync);
+
+    // Honest resource depletion followed by a valid partial page must not
+    // turn the first expired view into repeated source-attributable churn.
+    BOOST_REQUIRE(SyncAccess::RestartView(sync));
+
+    // The view restart must also preserve the exhausted resource budget:
+    // another TEMP rotates sources instead of starting a fresh retry cycle.
+    const auto exhausted{SyncAccess::ScheduleTemporaryUnavailable(
+        sync, parked.retry_not_before)};
+    BOOST_REQUIRE(exhausted.advance_scope);
+    BOOST_CHECK_EQUAL(exhausted.source_index, 1U);
+    BOOST_CHECK_EQUAL(exhausted.restarts, 0U);
+    BOOST_CHECK_EQUAL(exhausted.resource_retries, 0U);
+
+    // Interleaving TEMP replies and partial progress cannot reset the view
+    // churn bound for the new source, or consume it ahead of actual restarts.
+    SyncAccess::SetTrackerSession(sync, cohort.back());
+    for (std::size_t restart{1};
+         restart <= SyncAccess::MaximumViewRestarts(); ++restart) {
+        SyncAccess::SetPartialPageProgress(sync);
+        BOOST_REQUIRE(SyncAccess::RestartView(sync));
+        const auto result{SyncAccess::ScheduleTemporaryUnavailable(
+            sync, parked.retry_not_before +
+                std::chrono::seconds{static_cast<int64_t>(restart)})};
+        BOOST_CHECK(!result.advance_scope);
+        BOOST_CHECK(!result.release_tracker_session);
+        BOOST_CHECK_EQUAL(result.restarts, restart);
+        BOOST_CHECK_EQUAL(result.resource_retries, restart);
+    }
+    SyncAccess::SetPartialPageProgress(sync);
+    BOOST_CHECK(!SyncAccess::RestartView(sync));
+}
+
+BOOST_AUTO_TEST_CASE(
     governance_page_client_bounds_temporary_unavailability)
 {
     using SyncAccess =
@@ -2252,7 +2449,8 @@ BOOST_AUTO_TEST_CASE(
         BOOST_CHECK(result.tracker_session_active);
         BOOST_CHECK_EQUAL(result.tracker_source, cohort.front());
         BOOST_CHECK_EQUAL(result.source_index, 0U);
-        BOOST_CHECK_EQUAL(result.restarts, retry);
+        BOOST_CHECK_EQUAL(result.restarts, 0U);
+        BOOST_CHECK_EQUAL(result.resource_retries, retry);
         BOOST_CHECK(result.retry_not_before ==
                     std::chrono::microseconds{0});
     }
@@ -2267,8 +2465,9 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(!parked.tracker_session_active);
     BOOST_CHECK_EQUAL(parked.tracker_source, -1);
     BOOST_CHECK_EQUAL(parked.source_index, 0U);
+    BOOST_CHECK_EQUAL(parked.restarts, 0U);
     BOOST_CHECK_EQUAL(
-        parked.restarts,
+        parked.resource_retries,
         SyncAccess::ImmediateTemporaryRetries() + 1);
     const auto refill_delay{std::chrono::seconds{
         static_cast<int64_t>(
@@ -2288,7 +2487,7 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(!exhausted.temporarily_unavailable);
     BOOST_CHECK(exhausted.tracker_session_active);
     BOOST_CHECK_EQUAL(exhausted.source_index, 1U);
-    BOOST_CHECK_EQUAL(exhausted.restarts, 0U);
+    BOOST_CHECK_EQUAL(exhausted.resource_retries, 0U);
     BOOST_CHECK(exhausted.retry_not_before ==
                 std::chrono::microseconds{0});
 

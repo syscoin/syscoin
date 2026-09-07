@@ -7,7 +7,7 @@
 from test_framework.auxpow_testing import mineAuxpowBlock
 from test_framework.messages import CTransaction, from_hex
 from test_framework.script import OP_RETURN
-from test_framework.test_framework import SyscoinTestFramework
+from test_framework.test_framework import AuxPoWMiningMixin, SyscoinTestFramework
 from test_framework.util import (
     Decimal,
     assert_equal,
@@ -17,7 +17,7 @@ from test_framework.util import (
 )
 
 
-class PQOperatorLifecycleTest(SyscoinTestFramework):
+class PQOperatorLifecycleTest(AuxPoWMiningMixin, SyscoinTestFramework):
     CHAINLOCK_SEED = "11" * 32
     ACTIVATION_PREDECESSOR_HEIGHT = 2304
     BTCC_CANDIDATE_ORIGIN = 2305

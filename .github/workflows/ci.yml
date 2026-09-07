@@ -136,7 +136,8 @@ jobs:
     # No need to run on the read-only mirror, unless it is a PR.
     if: github.repository != 'syscoin-core/gui' || github.event_name == 'pull_request'
 
-    timeout-minutes: 120
+    # The native build and full PQ/governance matrix exceeded two hours.
+    timeout-minutes: 180
 
     env:
       FILE_ENV: './ci/test/00_setup_env_mac_native.sh'

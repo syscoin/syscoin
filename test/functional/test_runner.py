@@ -98,6 +98,11 @@ EXTENDED_SCRIPTS = [
 BASE_SCRIPTS = [
     # Scripts that are run by default.
     # Longest test should go first, to favor running tests in parallel
+    # SYSCOIN: start long chain-building fixtures before the shorter tests.
+    'feature_pq_chainlocks.py --descriptors',
+    'feature_nevm_data.py --descriptors',
+    'feature_governance_dynamic.py --descriptors',
+    'feature_governance.py --descriptors',
     # vv Tests less than 5m vv
     'feature_fee_estimation.py',
     'feature_taproot.py',
@@ -160,7 +165,6 @@ BASE_SCRIPTS = [
     'feature_deterministicmns.py --descriptors',
     # SYSCOIN: PQ operator registration and rotation lifecycle.
     'feature_pq_operator_lifecycle.py --descriptors',
-    'feature_nevm_data.py --descriptors',
     'feature_nevm_connect_after_consensus.py --descriptors',
     'rpc_signer.py',
     'wallet_signer.py --descriptors',
@@ -319,8 +323,6 @@ BASE_SCRIPTS = [
     'feature_dersig.py',
     'feature_cltv.py',
     'feature_governance_objects.py --descriptors',
-    'feature_governance.py --descriptors',
-    'feature_governance_dynamic.py --descriptors',
     'rpc_uptime.py',
     'feature_discover.py',
     'wallet_resendwallettransactions.py --legacy-wallet',
@@ -393,8 +395,6 @@ BASE_SCRIPTS = [
     'feature_help.py',
     'feature_shutdown.py',
     'feature_sporks.py',
-    # SYSCOIN: post-quantum ChainLock P2P and RPC admission coverage.
-    'feature_pq_chainlocks.py --descriptors',
     'feature_multikeysporks.py',
     'wallet_migration.py',
     'p2p_ibd_txrelay.py',
@@ -599,7 +599,7 @@ def run_tests(*, test_list, src_dir, build_dir, tmpdir, jobs=1, enable_coverage=
     result = unittest.TextTestRunner(verbosity=1, failfast=True).run(test_framework_tests)
     if not result.wasSuccessful():
         logging.debug("Early exiting after failure in TestFramework unit tests")
-        sys.exit(False)
+        sys.exit(1)
 
     flags = ['--cachedir={}'.format(cache_dir)] + args
 

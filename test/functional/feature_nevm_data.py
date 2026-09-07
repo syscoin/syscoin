@@ -8,14 +8,16 @@ import time
 from threading import Event, Thread
 from io import BytesIO
 from test_framework.test_framework import DashTestFramework
-from test_framework.util import assert_equal, assert_raises_rpc_error, force_finish_mnsync
+from test_framework.util import assert_equal, assert_greater_than, assert_raises_rpc_error, force_finish_mnsync
 from test_framework.messages import (
     NEVM_DATA_EXPIRE_TIME,
     MAX_DATA_BLOBS,
     MAX_NEVM_DATA_BLOB,
+    NEVM_DATA_SCALE_FACTOR,
     CNEVMBlock,
     CNEVMBlockConnect,
     hash256,
+    ser_compact_size,
     uint256_from_str,
 )
 
@@ -61,6 +63,18 @@ class NEVMDataTest(DashTestFramework):
                 node.getnevmblobdata(versionhash).get('chainlock', False),
                 False)
 
+    def assert_blob_block_membership(self, block_hash, expected_count):
+        node = self.nodes[1]
+        blob_txids = {
+            node.getnevmblobdata(versionhash)['txid']
+            for versionhash in self.blobVHs
+        }
+        # Mempool blobs and successive blocks can share an MTP. Identify
+        # mined blobs by transaction membership, not by their timestamps.
+        mined = blob_txids.intersection(node.getblock(block_hash)['tx'])
+        assert_equal(len(mined), expected_count)
+        return mined, blob_txids.intersection(node.getrawmempool())
+
     def nevm_data_max_size_blob(self):
         print('Testing for max size of a blob (2MB)')
         blobDataMax = secrets.token_hex(MAX_NEVM_DATA_BLOB)
@@ -90,37 +104,30 @@ class NEVMDataTest(DashTestFramework):
         self.wait_until(lambda: self.sync_mempools_helper(self.nodes))
         print('Generating block...')
         tip = self.generate(self.nodes[0], 1)[-1]
-        rpc_details = self.nodes[0].getblock(tip, True)
+        rpc_details = self.nodes[0].getblock(tip, 2)
         print('Ensure fees will be properly calculated due to the block size being correctly calculated based on PoDA policy (100x factor of blob data)...')
-        assert rpc_details["size"] > 670000 and rpc_details["size"]  < 680000
-        foundCount = 0
+        # Transaction hex excludes blob bytes. Account for the actual header,
+        # inputs and witnesses instead of assuming a fixed wallet spend size.
+        ordinary_size = (
+            len(self.nodes[0].getblockheader(tip, False)) // 2
+            + len(ser_compact_size(len(rpc_details['tx'])))
+            + sum(len(tx['hex']) // 2 for tx in rpc_details['tx'])
+        )
+        assert_equal(
+            rpc_details['size'],
+            ordinary_size + MAX_DATA_BLOBS * int(MAX_NEVM_DATA_BLOB * NEVM_DATA_SCALE_FACTOR))
         self.wait_until(lambda: self.sync_blocks_helper(self.nodes))
-        # get the tip block's MTP
-        mtp = self.nodes[0].getblockheader(tip)["mediantime"]
-        foundCount = 0
         print('Testing nodes to see if MAX_DATA_BLOBS blobs exist at 2MB each in the tip...')
-        for i, blobVH in enumerate(self.blobVHs):
-            try:
-                blob = self.nodes[1].getnevmblobdata(blobVH)
-                if blob['mtp'] == mtp:
-                    foundCount += 1
-            except Exception:
-                pass
-
-        assert_equal(foundCount, MAX_DATA_BLOBS)
+        first_mined, remaining = self.assert_blob_block_membership(tip, MAX_DATA_BLOBS)
+        assert_equal(len(remaining), 1)
+        assert_equal(first_mined.intersection(remaining), set())
         print('Generating next block...')
         tip = self.generate(self.nodes[0], 1)[-1]
-        mtp = self.nodes[0].getblockheader(tip)["mediantime"]
         print('Testing nodes to see if MAX_DATA_BLOBS+1 blobs exist after the next block...')
-        for i, blobVH in enumerate(self.blobVHs):
-            try:
-                blob = self.nodes[1].getnevmblobdata(blobVH)
-                if blob['mtp'] == mtp:
-                    foundCount += 1
-            except Exception:
-                pass
-
-        assert_equal(foundCount, MAX_DATA_BLOBS+1)
+        second_mined, remaining_after = self.assert_blob_block_membership(tip, 1)
+        assert_equal(second_mined, remaining)
+        assert_equal(remaining_after, set())
+        assert_equal(len(first_mined.union(second_mined)), MAX_DATA_BLOBS + 1)
         self.generate(self.nodes[0], 3)
         self.wait_until(lambda: self.sync_blocks_helper(self.nodes))
 
@@ -133,61 +140,37 @@ class NEVMDataTest(DashTestFramework):
             self.blobVHs.append(vh)
         self.wait_until(lambda: self.sync_mempools_helper(self.nodes))
         print('Generating block...')
-        block_before_mining = self.nodes[0].getbestblockhash()
         self.generate_helper(self.nodes[0], 1)
-        mtp = self.nodes[0].getblockheader(block_before_mining)["mediantime"]
-        foundCount = 0
+        tip = self.nodes[0].getbestblockhash()
         print('Testing nodes to see if only MAX_DATA_BLOBS blobs exist...')
-        for i, blobVH in enumerate(self.blobVHs):
-            try:
-                blob = self.nodes[1].getnevmblobdata(blobVH)
-                if blob['mtp'] == mtp:
-                    foundCount += 1
-            except Exception:
-                pass
-
-        assert_equal(foundCount, MAX_DATA_BLOBS)
+        first_mined, remaining = self.assert_blob_block_membership(tip, MAX_DATA_BLOBS)
+        assert_equal(len(remaining), MAX_DATA_BLOBS)
+        assert_equal(first_mined.intersection(remaining), set())
         # mine the rest of the blobs
         print('Generating next block...')
         self.generate_helper(self.nodes[0], 1)
         tip = self.nodes[0].getbestblockhash()
         print('Testing nodes to see if MAX_DATA_BLOBS*2 blobs exist...')
-        mtp = self.nodes[0].getblockheader(tip)["mediantime"]
-        for i, blobVH in enumerate(self.blobVHs):
-            try:
-                blob = self.nodes[1].getnevmblobdata(blobVH)
-                if blob['mtp'] == mtp:
-                    foundCount += 1
-            except Exception:
-                pass
-
-        assert_equal(foundCount, MAX_DATA_BLOBS*2)
+        second_mined, remaining_after = self.assert_blob_block_membership(tip, MAX_DATA_BLOBS)
+        assert_equal(second_mined, remaining)
+        assert_equal(remaining_after, set())
+        assert_equal(len(first_mined.union(second_mined)), MAX_DATA_BLOBS * 2)
         self.generate_helper(self.nodes[0], 3)
         self.sync_without_finality()
 
-    def bump_until_mtp_exceeds(self, cl, expiry_timestamp):
-        max_bumps = 20  # avoid infinite loops in case something goes wrong
-        bumps = 0
-        mtp = self.nodes[0].getblockheader(cl)["mediantime"]
-        while True:
-            bump_time = (expiry_timestamp - mtp) * 10
-            if (bump_time > 150):
-                bump_time = 150
-            self.bump_mocktime(bump_time)
-            print(f"Current MTP: {mtp}, Target expiry: {expiry_timestamp}, Mocktime: {self.mocktime}")
-            for i in range(len(self.nodes)):
-                force_finish_mnsync(self.nodes[i])
-
-            cl = self.nodes[0].getbestblockhash()
-            self.generate(self.nodes[0], 5)
-            mtp = self.nodes[0].getblockheader(cl)['mediantime']
+    def bump_until_mtp_exceeds(self, expiry_timestamp):
+        node = self.nodes[0]
+        mtp = node.getblockheader(node.getbestblockhash())["mediantime"]
+        if mtp <= expiry_timestamp:
+            self.bump_mocktime(max(0, expiry_timestamp + 1 - self.mocktime))
+            for node_to_sync in self.nodes:
+                force_finish_mnsync(node_to_sync)
+            # Six newer timestamps move the median of the last eleven blocks
+            # past expiry. Read the resulting tip, not the pre-mining tip.
+            self.generate(node, 6)
             self.sync_without_finality()
-            if mtp > expiry_timestamp:
-                print(f"Current MTP: {mtp}, Target expiry: {expiry_timestamp}, Mocktime: {self.mocktime}, MTP expiry achieved")
-                break
-            bumps += 1
-            if bumps >= max_bumps:
-                raise RuntimeError("Exceeded max mocktime bumps without reaching expiry MTP.")
+            mtp = node.getblockheader(node.getbestblockhash())["mediantime"]
+        assert_greater_than(mtp, expiry_timestamp)
 
     def basic_nevm_data(self):
         print('Testing relay in mempool and compact blocks around blobs')
@@ -223,6 +206,16 @@ class NEVMDataTest(DashTestFramework):
         assert_equal(self.nodes[0].getnevmblobdata(txid, True)['data'], txidData)
         assert_equal(self.nodes[1].getnevmblobdata(vh, True)['data'], vhData)
         assert_equal(self.nodes[1].getnevmblobdata(txid, True)['data'], txidData)
+        # Give the renewed blob a distinct retention window. A few seconds
+        # between inclusions can be consumed by mining and synchronization
+        # during the original blobs' expiry and reorg checks below.
+        renewal_time_gap = NEVM_DATA_EXPIRE_TIME // 2
+        renewal_timestamp = self.nodes[0].getnevmblobdata(txid1)['mtp'] + renewal_time_gap
+        self.bump_mocktime(max(0, renewal_timestamp - self.mocktime), nodes=self.nodes[0:4])
+        for node in self.nodes[0:4]:
+            force_finish_mnsync(node)
+        self.generate(self.nodes[0], 6, sync_fun=self.no_op)
+        self.wait_until(lambda: self.sync_blocks_helper(self.nodes[0:4]))
         # test relay before block creation
         print('Create more blobs...')
         self.nodes[0].syscoincreatenevmblob(secrets.token_hex(55))
@@ -256,6 +249,9 @@ class NEVMDataTest(DashTestFramework):
         assert_equal(self.nodes[1].getnevmblobdata(vh, True)['data'], vhData)
         assert_equal(self.nodes[1].getnevmblobdata(txid1, True)['data'], txid1Data)
         mtp = self.nodes[1].getnevmblobdata(txid1)['mtp']
+        assert_greater_than(
+            self.nodes[1].getnevmblobdata(vh)['mtp'],
+            mtp + renewal_time_gap - 1)
         print('Start node 4...')
         self.start_node(4, extra_args=["-mocktime=" + str(self.mocktime), *self.extra_args[4]])
         force_finish_mnsync(self.nodes[4])
@@ -286,9 +282,9 @@ class NEVMDataTest(DashTestFramework):
         self.bump_mocktime(3) # push median time over expiry
         for i in range(len(self.nodes)):
             force_finish_mnsync(self.nodes[i])
-        cl = self.generate(self.nodes[0], 10)[-6]
+        self.generate(self.nodes[0], 10)
         self.sync_without_finality()
-        self.bump_until_mtp_exceeds(cl, expiry_timestamp)
+        self.bump_until_mtp_exceeds(expiry_timestamp)
         assert_raises_rpc_error(-32602, 'Could not find blob information for versionhash', self.nodes[0].getnevmblobdata, txid)
         assert_raises_rpc_error(-32602, 'Could not find blob information for versionhash', self.nodes[0].getnevmblobdata, txid1)
         assert_raises_rpc_error(-32602, 'Could not find blob information for versionhash', self.nodes[4].getnevmblobdata, txid)
@@ -318,8 +314,7 @@ class NEVMDataTest(DashTestFramework):
         print('Expire updated blob...')
         mtp = self.nodes[0].getnevmblobdata(vh)['mtp']
         expiry_timestamp = (mtp + NEVM_DATA_EXPIRE_TIME)
-        cl = self.nodes[0].getbestblockhash()
-        self.bump_until_mtp_exceeds(cl, expiry_timestamp)
+        self.bump_until_mtp_exceeds(expiry_timestamp)
         for i in range(len(self.nodes)):
             force_finish_mnsync(self.nodes[i])
         self.generate(self.nodes[0], 5)

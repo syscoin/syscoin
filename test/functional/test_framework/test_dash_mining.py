@@ -14,7 +14,7 @@ from .test_framework import DashTestFramework
 
 
 class RecordingMiningNode:
-    def __init__(self, *, args=(), candidates=(), height=0):
+    def __init__(self, *, args=(), candidates=(), height=0, max_ordinary_batch=None):
         self.process = SimpleNamespace(args=["syscoind", *args])
         self.extra_args = []
         self.candidates = set(candidates)
@@ -22,6 +22,7 @@ class RecordingMiningNode:
         self.calls = []
         self.payouts = {}
         self.template = None
+        self.max_ordinary_batch = max_ordinary_batch
 
     def getblockcount(self):
         return self.height
@@ -36,6 +37,8 @@ class RecordingMiningNode:
 
     def generatetoaddress(self, nblocks, address, *, invalid_call):
         assert invalid_call is False
+        if self.max_ordinary_batch is not None and nblocks > self.max_ordinary_batch:
+            raise JSONRPCException({"code": -344, "message": "mining RPC timed out"})
         heights = range(self.height + 1, self.height + nblocks + 1)
         assert self.candidates.isdisjoint(heights), "ordinary batch crossed a candidate"
         self.calls.append(("ordinary", self.height + 1, nblocks, address))
@@ -174,7 +177,7 @@ class TestDashMining(unittest.TestCase):
         ])
         self.framework.sync_all.assert_called_once_with()
 
-    def test_disabled_and_unconfigured_schedules_use_one_ordinary_batch(self):
+    def test_disabled_and_unconfigured_schedules_use_only_ordinary_batches(self):
         for args in ([], ["-pqbtcccandidateorigin=-1"],
                      ["-pqbtcccandidateorigin=2147483647"]):
             with self.subTest(args=args):
@@ -184,9 +187,41 @@ class TestDashMining(unittest.TestCase):
                 hashes = self.framework.generatetoaddress(
                     node, 27, "ordinary-address", sync_fun=sync)
                 self.assert_hashes_and_payouts(node, hashes, 1, 27, "ordinary-address")
-                self.assertEqual(node.calls, [("ordinary", 1, 27, "ordinary-address")])
+                self.assertTrue(all(kind == "ordinary" for kind, *_ in node.calls))
                 sync.assert_called_once_with()
         self.framework.sync_all.assert_not_called()
+
+    def test_large_preparation_mining_stays_within_each_rpc_budget(self):
+        from feature_deterministicmns import DIP3Test
+        from feature_pq_operator_lifecycle import PQOperatorLifecycleTest
+
+        # Both an unconfigured preparation chain and a distant first
+        # candidate used to dispatch the entire catch-up through one RPC.
+        for fixture in (DashTestFramework, DIP3Test, PQOperatorLifecycleTest):
+            for args in ([], ["-pqbtcccandidateorigin=2305"]):
+                with self.subTest(fixture=fixture.__name__, args=args):
+                    framework = object.__new__(fixture)
+                    framework.sync_all = Mock()
+                    node = RecordingMiningNode(
+                        args=args, height=111, max_ordinary_batch=10)
+                    hashes = framework.generate(node, 2304 - node.height)
+                    self.assert_hashes_and_payouts(
+                        node, hashes, 112, 2193,
+                        node.get_deterministic_priv_key().address)
+                    self.assertEqual(node.height, 2304)
+                    self.assertGreater(len(node.calls), 1)
+                    framework.sync_all.assert_called_once_with()
+
+    def test_short_rpc_result_returns_without_retrying(self):
+        node = RecordingMiningNode()
+        ordinary_rpc = node.generatetoaddress
+        with patch.object(node, "generatetoaddress", side_effect=lambda nblocks, address, **kwargs:
+                          ordinary_rpc(3, address, **kwargs)) as limited_rpc:
+            hashes = self.framework.generate(node, 30)
+        self.assert_hashes_and_payouts(
+            node, hashes, 1, 3, node.get_deterministic_priv_key().address)
+        limited_rpc.assert_called_once()
+        self.framework.sync_all.assert_called_once_with()
 
     def test_zero_blocks_preserves_empty_result_and_sync(self):
         node = RecordingMiningNode(args=["-pqbtcccandidateorigin=5"], candidates=[5])

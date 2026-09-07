@@ -282,7 +282,20 @@ void CMasternodeSync::ResetGovernanceScope(const uint256& scope_hash)
     auto& state{m_governance_page_sync};
     state.scope.Reset(scope_hash);
     state.scope.restarts = 0;
+    state.scope.resource_retries = 0;
     state.pending_response.reset();
+}
+
+bool CMasternodeSync::RestartGovernanceScopeView()
+{
+    AssertLockHeld(m_governance_page_mutex);
+    auto& state{m_governance_page_sync};
+    auto& scope{state.scope};
+    ++scope.restarts;
+    const uint256 scope_hash{scope.scope_hash};
+    scope.Reset(scope_hash);
+    state.pending_response.reset();
+    return scope.restarts <= MAX_GOVERNANCE_VIEW_RESTARTS;
 }
 
 bool CMasternodeSync::ParkGovernancePageSessionUntil(
@@ -304,17 +317,20 @@ CMasternodeSync::ScheduleGovernanceScopeRetry(
     AssertLockHeld(m_governance_page_mutex);
     auto& state{m_governance_page_sync};
     auto& scope{state.scope};
-    const std::size_t restarts{
-        scope.restarts == std::numeric_limits<std::size_t>::max()
-            ? scope.restarts
-            : scope.restarts + 1};
+    const std::size_t resource_retries{
+        scope.resource_retries == std::numeric_limits<std::size_t>::max()
+            ? scope.resource_retries
+            : scope.resource_retries + 1};
     const uint256 scope_hash{scope.scope_hash};
-    ResetGovernanceScope(scope_hash);
-    scope.restarts = restarts;
-    if (restarts <= MAX_GOVERNANCE_VIEW_RESTARTS) {
+    // Resource backpressure rewinds the view without consuming or resetting
+    // the independent budget for repeated view changes by this source.
+    scope.Reset(scope_hash);
+    state.pending_response.reset();
+    scope.resource_retries = resource_retries;
+    if (resource_retries <= MAX_GOVERNANCE_RESOURCE_RETRIES) {
         return GovernanceScopeRetryAction::RETRY;
     }
-    if (restarts > MAX_GOVERNANCE_VIEW_RESTARTS + 1) {
+    if (resource_retries > MAX_GOVERNANCE_RESOURCE_RETRIES + 1) {
         return GovernanceScopeRetryAction::ADVANCE;
     }
 
@@ -662,12 +678,7 @@ CMasternodeSync::PumpGovernancePages(
                     restart_state, complete, temporarily_unavailable,
                     unserviceable);
             } else {
-                auto& scope{state.scope};
-                const std::size_t restarts{scope.restarts + 1};
-                const uint256 scope_hash{scope.scope_hash};
-                ResetGovernanceScope(scope_hash);
-                scope.restarts = restarts;
-                if (restarts > MAX_GOVERNANCE_VIEW_RESTARTS) {
+                if (!RestartGovernanceScopeView()) {
                     failed_page_source = result->source.peer;
                     AdvanceGovernanceScope(
                         GovernancePageSourceOutcome::FAILED,
@@ -750,8 +761,7 @@ CMasternodeSync::PumpGovernancePages(
             state.phase = GovernancePagePhase::OBJECTS;
             state.source_index = 0;
             state.successful_sources_for_scope = 0;
-            state.scope.Reset(uint256{});
-            state.scope.restarts = 0;
+            ResetGovernanceScope(uint256{});
         }
 
         const auto now{GetTime<std::chrono::microseconds>()};
@@ -880,7 +890,8 @@ CMasternodeSync::PumpGovernancePages(
     return GovernancePagePumpResult::ACTIVE;
 }
 
-void CMasternodeSync::ProcessTick(CConnman& connman, PeerManager& peerman)
+void CMasternodeSync::ProcessTick(CConnman& connman, PeerManager& peerman,
+                                 ChainstateManager& chainman)
 {
     static int nTick = 0;
     nTick++;
@@ -899,6 +910,21 @@ void CMasternodeSync::ProcessTick(CConnman& connman, PeerManager& peerman)
         LogPrint(BCLog::MNSYNC, "CMasternodeSync::ProcessTick -- WARNING: no actions for too long, restarting sync...\n");
         Reset(true);
         return;
+    }
+
+    if (fRegTest) {
+        // Regtest skips the normal blockchain quiet period, but governance
+        // collateral still requires the complete active chain. Read current
+        // readiness because Reset clears the cached best-header flag even
+        // when no new block notification will arrive.
+        const bool chain_ready{WITH_LOCK(cs_main,
+            return chainman.ActiveTip() != nullptr &&
+                   chainman.ActiveTip() == chainman.m_best_header &&
+                   !chainman.IsInitialBlockDownload())};
+        if (!chain_ready) {
+            CancelGovernancePageSession(peerman);
+            return;
+        }
     }
 
     bool governance_pages_active{false};
@@ -1285,9 +1311,10 @@ void CMasternodeSync::UpdatedBlockTip(const CBlockIndex *pindexNew, ChainstateMa
                 pindexNew->nHeight, pindexTip->nHeight, fInitialDownload, ReachedBestHeader());
 }
 
-void CMasternodeSync::DoMaintenance(CConnman &connman, PeerManager& peerman)
+void CMasternodeSync::DoMaintenance(CConnman& connman, PeerManager& peerman,
+                                   ChainstateManager& chainman)
 {
     if (ShutdownRequested()) return;
 
-    ProcessTick(connman, peerman);
+    ProcessTick(connman, peerman, chainman);
 }

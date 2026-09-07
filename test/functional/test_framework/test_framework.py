@@ -1070,6 +1070,9 @@ class AuxPoWMiningMixin:
     """Opt fixture mining into scheduled AuxPoW without changing its lifecycle."""
 
     PQ_BTCC_CANDIDATE_PERIOD = 10
+    # Preparation can require thousands of blocks before AuxPoW is enabled.
+    # Bound each RPC so slower CI builds return before the per-call timeout.
+    MINING_RPC_BATCH_SIZE = 10
 
     def generate(self, generator, nblocks, *, sync_fun=None):
         return self.generatetoaddress(
@@ -1084,17 +1087,19 @@ class AuxPoWMiningMixin:
             int(arg.split("=", 1)[1]) for arg in reversed(generator.process.args)
             if arg.startswith("-pqbtcccandidateorigin=")), None)
         period = self.PQ_BTCC_CANDIDATE_PERIOD
-        if (origin is None or not 0 <= origin <= 2**31 - 1 - period or
-                nblocks <= 0):
+        scheduled = origin is not None and 0 <= origin <= 2**31 - 1 - period
+        if nblocks <= 0:
             return super().generatetoaddress(
                 generator, nblocks, address, sync_fun=sync_fun)
 
         blocks = []
         while len(blocks) < nblocks:
-            height = generator.getblockcount() + 1
-            candidate_height = origin + max(
-                0, (height - origin + period - 1) // period) * period
-            ordinary_count = min(nblocks - len(blocks), candidate_height - height)
+            ordinary_count = min(nblocks - len(blocks), self.MINING_RPC_BATCH_SIZE)
+            if scheduled:
+                height = generator.getblockcount() + 1
+                candidate_height = origin + max(
+                    0, (height - origin + period - 1) // period) * period
+                ordinary_count = min(ordinary_count, candidate_height - height)
             if ordinary_count:
                 # Never let a normal RPC batch cross a candidate: it can mine
                 # a prefix before failing and lose the caller's block hashes.
