@@ -46,122 +46,141 @@ bool DisconnectSyscoinTransaction(const CTransaction& tx, NEVMMintTxSet &setMint
     return true;       
 }
 
-void CNEVMDataDB::FlushDataToCache(const PoDAMAPMemory &mapPoDA, PoDAFlushSource source) {
+void CNEVMDataDB::FlushDataToCache(const PoDAMAPMemory& mapPoDA, PoDAFlushSource source)
+{
     LOCK(cs_cache);
-    if(mapPoDA.empty()) {
-        return;
-    }
-    CDBBatch batchblob(*pnevmdatablobdb);  
-    for (auto const& [key, val] : mapPoDA) {
-        if(!val.vchNEVMData) {
-            continue;
-        }
+    if (mapPoDA.empty()) return;
+
+    PoDAMAPMemory cache_updates;
+    std::map<std::vector<uint8_t>, uint256> owner_updates;
+    NEVMDataVec retained_keys;
+    CDBBatch batchblob(*pnevmdatablobdb);
+    for (const auto& [key, val] : mapPoDA) {
+        const bool have_payload = val.vchNEVMData && !val.vchNEVMData->empty();
         MapPoDAPayloadMeta meta;
-        if(Read(key, meta)) {
-            if(source == PoDAFlushSource::Block && meta.nSize == val.nSize) {
-                auto inserted = mapCache.try_emplace(key, meta);
-                if(inserted.first->second.nSize == val.nSize &&
-                   PreferBlockBlobMetadata(val, inserted.first->second)) {
-                    inserted.first->second.nMedianTime = val.nMedianTime;
-                    inserted.first->second.txid = val.txid;
-                }
-            }
-            continue;
+        const auto cached = mapCache.find(key);
+        bool have_metadata = cached != mapCache.end();
+        if (have_metadata) {
+            meta = cached->second;
+        } else {
+            have_metadata = Read(key, meta);
+            // An unreadable existing row is not evidence of a new mempool blob.
+            if (!have_metadata && Exists(key)) continue;
         }
-        auto inserted = mapCache.try_emplace(key, val.txid, val.nSize, val.nMedianTime);
-        if(!inserted.second) {
-            if(source == PoDAFlushSource::Block &&
-               inserted.first->second.nSize == val.nSize &&
-               PreferBlockBlobMetadata(val, inserted.first->second)) {
-                inserted.first->second.nMedianTime = val.nMedianTime;
-                inserted.first->second.txid = val.txid;
-            }
-            continue;
-        }
-        if(!pnevmdatablobdb->Exists(key)) {
+        // Optional sidecar omissions still identify retained references, but do
+        // not provide a size or enough information to create a new blob record.
+        if (!have_metadata && !have_payload) continue;
+        if (have_metadata && have_payload && meta.nSize != val.nSize) continue;
+
+        const bool have_blob = have_payload && pnevmdatablobdb->Exists(key);
+        if (have_payload && !have_blob) {
             batchblob.Write(key, val.vchNEVMData);
         }
-    }
-    if(batchblob.SizeEstimate() > 0) {
-        pnevmdatablobdb->WriteBatch(batchblob);
-    }
-}
-bool CNEVMDataDB::FlushCacheToDisk(const int64_t nMedianTime, bool fSync) {
-    bool cacheEmpty = false;
-    {
-        LOCK(cs_cache);
-        cacheEmpty = mapCache.empty();
-    }
-    if(cacheEmpty) {
-        if(fTestNet) {
-            return PruneStandalone(nMedianTime, fSync);
+        if (have_metadata && source == PoDAFlushSource::Mempool) {
+            if (meta.txid != val.txid) retained_keys.push_back(key);
+            continue;
         }
-        return true;
+
+        const auto& preferred_meta = source == PoDAFlushSource::Block && have_metadata &&
+            !PreferBlockBlobMetadata(val, meta) ? meta : val;
+        cache_updates.try_emplace(key, preferred_meta.txid, have_metadata ? meta.nSize : val.nSize,
+                                  preferred_meta.nMedianTime);
+        if (source == PoDAFlushSource::Block) {
+            retained_keys.push_back(key);
+        } else if (!have_blob) {
+            owner_updates.emplace(key, val.txid);
+        }
     }
+    if (batchblob.SizeEstimate() > 0 && !pnevmdatablobdb->WriteBatch(batchblob)) {
+        throw dbwrapper_error("Failed to write NEVM blob data");
+    }
+    for (const auto& [key, meta] : cache_updates) {
+        const auto cached = mapCache.find(key);
+        if (cached != mapCache.end()) cached->second = meta;
+    }
+    for (const auto& key : retained_keys) m_mempool_owners.erase(key);
+    mapCache.merge(cache_updates);
+    m_mempool_owners.merge(owner_updates);
+}
+bool CNEVMDataDB::FlushCacheToDisk(const int64_t nMedianTime, bool fSync)
+{
     LOCK(cs_cache);
+    if (mapCache.empty() && !fTestNet) return true;
+
     CDBBatch batch(*this);
+    CDBBatch batchblob(*pnevmdatablobdb);
+    NEVMDataVec pruned_keys;
     // only prune on testnet flush, mainnet relies only on CL
-    if(fTestNet) {
-        CDBBatch batchblob(*pnevmdatablobdb);
-        if (!PruneToBatch(batch, batchblob, nMedianTime)) {
+    if (fTestNet) {
+        if (!PruneToBatch(batch, batchblob, nMedianTime, pruned_keys)) {
             LogPrint(BCLog::SYS, "Error: Could not prune nevm blobs\n");
             return false;
         }
-        pnevmdatablobdb->WriteBatch(batchblob);
     }
-    for (auto const& [key, val] : mapCache) {
+    for (const auto& [key, val] : mapCache) {
+        if (fTestNet && IsNEVMDataExpired(nMedianTime, val.nMedianTime)) continue;
         batch.Write(key, val);
     }
-    if(mapCache.size() > 0)
+    if (!mapCache.empty()) {
         LogPrint(BCLog::SYS, "Flushing cache to disk, storing %d nevm blobs\n", mapCache.size());
-    bool res = WriteBatch(batch, fSync);
-    if(res) {
-        mapCache.clear();
     }
-    return res;
+    // Keep metadata indexed until payload deletion succeeds, so interrupted
+    // cleanup can be retried without an unindexed payload leak.
+    if (batchblob.SizeEstimate() > 0 && !pnevmdatablobdb->WriteBatch(batchblob, fSync)) return false;
+    if (!WriteBatch(batch, fSync)) return false;
+    mapCache.clear();
+    for (const auto& key : pruned_keys) m_mempool_owners.erase(key);
+    return true;
 }
-bool CNEVMDataDB::FlushErase(const NEVMDataVec &vecDataKeys) {
+bool CNEVMDataDB::FlushErase(const NEVMDataVec& vecDataKeys)
+{
     LOCK(cs_cache);
-    if(vecDataKeys.empty())
-        return true;
-    CDBBatch batch(*this);    
-    for (const auto &key : vecDataKeys) {
+    if (vecDataKeys.empty()) return true;
+
+    CDBBatch batch(*this);
+    for (const auto& key : vecDataKeys) {
         batch.Erase(key);
-        // remove from cache as well
-        auto it = mapCache.find(key);
-        if(it != mapCache.end())
-            mapCache.erase(it);
     }
-    if(vecDataKeys.size() > 0)
-        LogPrint(BCLog::SYS, "Flushing, erasing %d nevm blob keys\n", vecDataKeys.size());
-    return WriteBatch(batch, true) && pnevmdatablobdb->FlushErase(vecDataKeys);
+    if (!pnevmdatablobdb->FlushErase(vecDataKeys)) return false;
+    if (!WriteBatch(batch, true)) return false;
+    for (const auto& key : vecDataKeys) {
+        mapCache.erase(key);
+        m_mempool_owners.erase(key);
+    }
+    LogPrint(BCLog::SYS, "Flushing, erasing %d nevm blob keys\n", vecDataKeys.size());
+    return true;
 }
-bool CNEVMDataDB::FlushMempoolErase(const std::vector<uint8_t>& vchVersionHash, const uint256& txid) {
+bool CNEVMDataDB::FlushMempoolErase(const std::vector<uint8_t>& vchVersionHash, const uint256& txid)
+{
     LOCK(cs_cache);
+    const auto owner = m_mempool_owners.find(vchVersionHash);
+    if (owner == m_mempool_owners.end() || owner->second != txid) return true;
+
     MapPoDAPayloadMeta meta;
-    if(Read(vchVersionHash, meta)) {
-        if(meta.txid == txid) {
-            CDBBatch batch(*this);
-            auto it = mapCache.find(vchVersionHash);
-            if(it != mapCache.end()) {
-                if(it->second.txid != txid) {
-                    batch.Write(vchVersionHash, it->second);
-                    return WriteBatch(batch, true);
-                }
-                mapCache.erase(it);
-            }
-            batch.Erase(vchVersionHash);
-            return WriteBatch(batch, true) && pnevmdatablobdb->FlushErase({vchVersionHash});
-        }
+    const auto cached = mapCache.find(vchVersionHash);
+    if (cached != mapCache.end()) {
+        meta = cached->second;
+    } else if (!Read(vchVersionHash, meta)) {
         return true;
     }
-    auto it = mapCache.find(vchVersionHash);
-    if(it == mapCache.end() || it->second.txid != txid) {
-        return true;
-    }
-    mapCache.erase(it);
-    return pnevmdatablobdb->FlushErase({vchVersionHash});
+    if (meta.txid != txid) return true;
+
+    CDBBatch batch(*this);
+    batch.Erase(vchVersionHash);
+    if (!pnevmdatablobdb->FlushErase({vchVersionHash})) return false;
+    if (!WriteBatch(batch, true)) return false;
+    mapCache.erase(vchVersionHash);
+    m_mempool_owners.erase(vchVersionHash);
+    return true;
 }
+
+void CNEVMDataDB::ReleaseMempoolOwner(const std::vector<uint8_t>& version_hash, const uint256& txid)
+{
+    LOCK(cs_cache);
+    const auto owner = m_mempool_owners.find(version_hash);
+    if (owner != m_mempool_owners.end() && owner->second == txid) m_mempool_owners.erase(owner);
+}
+
 bool CNEVMDataBlobDB::FlushErase(const NEVMDataVec &vecDataKeys) {
     CDBBatch batch(*this);    
     for (const auto &key : vecDataKeys) {
@@ -189,7 +208,8 @@ const PoDAMAPMemory& CNEVMDataDB::GetCache() const {
 bool CNEVMDataDB::PruneToBatch(
     CDBBatch& batch,
     CDBBatch& batchblob,
-    const int64_t nMedianTime)
+    const int64_t nMedianTime,
+    NEVMDataVec& pruned_keys)
 {
     AssertLockHeld(cs_cache);
     int nCount = 0;
@@ -217,6 +237,7 @@ bool CNEVMDataDB::PruneToBatch(
                 if (isExpired) {
                     batch.Erase(vchVersionHash);
                     batchblob.Erase(vchVersionHash);
+                    pruned_keys.push_back(vchVersionHash);
                     ++nCount;
                 }
             }
@@ -226,17 +247,12 @@ bool CNEVMDataDB::PruneToBatch(
         }
     }
 
-    auto it = mapCache.begin();
-    while (it != mapCache.end()) {
-        const int64_t entryTime = it->second.nMedianTime;
-        const bool isExpired{IsNEVMDataExpired(nMedianTime, entryTime)};
-        if (isExpired) {
-            batch.Erase(it->first);
-            batchblob.Erase(it->first);
-            it = mapCache.erase(it);
+    for (const auto& [key, meta] : mapCache) {
+        if (IsNEVMDataExpired(nMedianTime, meta.nMedianTime)) {
+            batch.Erase(key);
+            batchblob.Erase(key);
+            pruned_keys.push_back(key);
             ++nCount;
-        } else {
-            ++it;
         }
     }
     if(nCount > 0)
@@ -250,8 +266,15 @@ bool CNEVMDataDB::PruneStandalone(const int64_t nMedianTime, bool fSync)
     LOCK(cs_cache);
     CDBBatch batch(*this);
     CDBBatch batchblob(*pnevmdatablobdb);
-    if (!PruneToBatch(batch, batchblob, nMedianTime)) {
+    NEVMDataVec pruned_keys;
+    if (!PruneToBatch(batch, batchblob, nMedianTime, pruned_keys)) {
         return false;
     }
-    return WriteBatch(batch, fSync) && pnevmdatablobdb->WriteBatch(batchblob, fSync);
+    if (!pnevmdatablobdb->WriteBatch(batchblob, fSync)) return false;
+    if (!WriteBatch(batch, fSync)) return false;
+    for (const auto& key : pruned_keys) {
+        mapCache.erase(key);
+        m_mempool_owners.erase(key);
+    }
+    return true;
 }

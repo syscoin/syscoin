@@ -1195,11 +1195,11 @@ bool BlockManager::ReadBlockFromDisk(CBlock& block, const FlatFilePos& pos) cons
     return res;
 }
 
-bool BlockManager::ReadBlockFromDisk(CBlock& block, const CBlockIndex& index) const
+bool BlockManager::ReadBlockFromDisk(CBlock& block, const CBlockIndex& index, bool load_auxiliary_data) const
 {
     auto res = ReadBlockOrHeader(block, index);
     // SYSCOIN
-    if(!FillNEVMData(block)) {
+    if(load_auxiliary_data && !FillNEVMData(block)) {
         return error("ReadBlockFromDisk(): FillNEVMData() failed for %s",
         index.GetBlockHash().GetHex());
     }

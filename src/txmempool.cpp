@@ -31,6 +31,7 @@
 #include <evo/providertx.h>
 #include <evo/deterministicmns.h>   
 extern bool EraseMempoolNEVMData(const std::vector<uint8_t>&, const uint256&);
+extern void ReleaseMempoolNEVMDataOwner(const std::vector<uint8_t>&, const uint256&);
 extern NEVMMintTxSet setMintTxsMempool;
 extern std::unordered_map<COutPoint, std::pair<CTransactionRef, CTransactionRef>, SaltedOutpointHasher> mapAssetAllocationConflicts;
 
@@ -702,6 +703,12 @@ bool CTxMemPool::addUnchecked(
         }
     }
 
+    // Only admitted transactions own global mint reservations. Validation attempts use local sets.
+    if (IsSyscoinMintTx(tx.nVersion)) {
+        const CMintSyscoin mint(tx);
+        if (!mint.IsNull()) setMintTxsMempool.insert(mint.nTxHash);
+    }
+
     TRACE3(mempool, added,
         entry.GetTx().GetHash().data(),
         entry.GetTxSize(),
@@ -855,11 +862,15 @@ void CTxMemPool::removeUnchecked(txiter it, MemPoolRemovalReason reason)
         if(!mintSyscoin.IsNull())
             setMintTxsMempool.erase(mintSyscoin.nTxHash);
     }
-    // Remove only mempool-owned PoDA data on expiry/trim; confirmed and duplicate blobs are chain-owned.
-    else if(it->GetTx().IsNEVMData() && (reason == MemPoolRemovalReason::EXPIRY || reason == MemPoolRemovalReason::SIZELIMIT)) {
+    // Only expiry/trim may delete sole-owned payloads. Every removal releases
+    // session ownership so replacement/conflict churn cannot retain owner RAM.
+    else if(it->GetTx().IsNEVMData()) {
         CNEVMData nevmData(it->GetTx());
         if(!nevmData.IsNull()){
-            EraseMempoolNEVMData(nevmData.vchVersionHash, tx_hash);
+            if (reason == MemPoolRemovalReason::EXPIRY || reason == MemPoolRemovalReason::SIZELIMIT) {
+                EraseMempoolNEVMData(nevmData.vchVersionHash, tx_hash);
+            }
+            ReleaseMempoolNEVMDataOwner(nevmData.vchVersionHash, tx_hash);
         }
     }
     cachedInnerUsage -= memusage::DynamicUsage(it->GetMemPoolParentsConst()) + memusage::DynamicUsage(it->GetMemPoolChildrenConst());

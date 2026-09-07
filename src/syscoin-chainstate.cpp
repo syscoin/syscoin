@@ -285,6 +285,9 @@ int main(int argc, char* argv[])
         case BlockValidationResult::BLOCK_MUTATED:
             std::cerr << "the block's data didn't match the data committed to by the PoW" << std::endl;
             break;
+        case BlockValidationResult::BLOCK_AUX_DATA_INVALID:
+            std::cerr << "replaceable auxiliary block data failed validation" << std::endl;
+            break;
         case BlockValidationResult::BLOCK_MISSING_PREV:
             std::cerr << "We don't have the previous block the checked one is built on" << std::endl;
             break;
