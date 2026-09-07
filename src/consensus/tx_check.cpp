@@ -17,7 +17,10 @@ bool CheckTransaction(const CTransaction& tx, TxValidationState& state)
         return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-vout-empty");
     // Size limits (this doesn't take the witness into account, as that hasn't been checked for malleability)
     if (::GetSerializeSize(tx, PROTOCOL_VERSION | SERIALIZE_TRANSACTION_NO_WITNESS) * WITNESS_SCALE_FACTOR > MAX_BLOCK_WEIGHT) {
-        return state.Invalid(HasNEVMAuxiliaryData(tx) ? TxValidationResult::TX_AUX_DATA_INVALID : TxValidationResult::TX_CONSENSUS,
+        // An unrelated or discounted sidecar cannot excuse an oversized committed form.
+        const bool committed_oversize = ::GetSerializeSize(tx, PROTOCOL_VERSION | SERIALIZE_TRANSACTION_NO_WITNESS,
+                                                          SER_SIZE | SER_NO_PODA) * WITNESS_SCALE_FACTOR > MAX_BLOCK_WEIGHT;
+        return state.Invalid(committed_oversize ? TxValidationResult::TX_CONSENSUS : TxValidationResult::TX_AUX_DATA_INVALID,
                              "bad-txns-oversize");
     }
 

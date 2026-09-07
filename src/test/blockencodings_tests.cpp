@@ -5,6 +5,7 @@
 #include <blockencodings.h>
 #include <chainparams.h>
 #include <consensus/merkle.h>
+#include <consensus/validation.h>
 #include <pow.h>
 #include <streams.h>
 #include <test/util/random.h>
@@ -13,6 +14,8 @@
 #include <test/util/setup_common.h>
 
 #include <boost/test/unit_test.hpp>
+
+#include <optional>
 
 std::vector<std::pair<uint256, CTransactionRef>> extra_txn;
 
@@ -111,6 +114,37 @@ BOOST_AUTO_TEST_CASE(SimpleRoundTripTest)
         BOOST_CHECK_EQUAL(block.hashMerkleRoot.ToString(), BlockMerkleRoot(block3, &mutated).ToString());
         BOOST_CHECK(!mutated);
     }
+}
+
+BOOST_AUTO_TEST_CASE(FillBlockValidationResultTest)
+{
+    CTxMemPool pool{MemPoolOptionsForTest(m_node)};
+    const CBlock block{BuildBlockTestCase()};
+
+    const auto check_status = [&](std::optional<BlockValidationResult> result, ReadStatus expected_status) {
+        CBlockHeaderAndShortTxIDs short_ids{block};
+        PartiallyDownloadedBlock partial_block{&pool};
+        BOOST_REQUIRE(partial_block.InitData(short_ids, {}) == READ_STATUS_OK);
+
+        bool check_block_called{false};
+        partial_block.m_check_block_mock = [result, &check_block_called](const CBlock&, BlockValidationState& state, const Consensus::Params&, bool check_pow, bool check_merkle_root) {
+            check_block_called = true;
+            BOOST_CHECK(check_pow);
+            BOOST_CHECK(check_merkle_root);
+            return result ? state.Invalid(*result) : true;
+        };
+
+        CBlock reconstructed_block;
+        BOOST_CHECK(partial_block.FillBlock(reconstructed_block, {block.vtx[1], block.vtx[2]}) == expected_status);
+        BOOST_CHECK(check_block_called);
+        BOOST_CHECK_EQUAL(reconstructed_block.GetHash().ToString(), block.GetHash().ToString());
+        BOOST_CHECK(reconstructed_block.vtx == block.vtx);
+    };
+
+    check_status(BlockValidationResult::BLOCK_MUTATED, READ_STATUS_FAILED);
+    check_status(BlockValidationResult::BLOCK_AUX_DATA_INVALID, READ_STATUS_FAILED);
+    check_status(BlockValidationResult::BLOCK_CONSENSUS, READ_STATUS_CHECKBLOCK_FAILED);
+    check_status(std::nullopt, READ_STATUS_OK);
 }
 
 class TestHeaderAndShortIDs {

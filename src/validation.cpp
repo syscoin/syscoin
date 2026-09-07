@@ -4784,7 +4784,10 @@ bool CheckBlock(const CBlock& block, BlockValidationState& state, const Consensu
     if (block.vtx.empty() || block.vtx.size() * WITNESS_SCALE_FACTOR > MAX_BLOCK_WEIGHT || ::GetSerializeSize(block, PROTOCOL_VERSION | SERIALIZE_TRANSACTION_NO_WITNESS) * WITNESS_SCALE_FACTOR > MAX_BLOCK_WEIGHT) {
         // SYSCOIN, pre NEVM we had larger blocks for SPTs mainly
         if(block.GetBlockTime() >= Params().GetConsensus().nNEVMStartTime) {
-            return state.Invalid(HasNEVMAuxiliaryData(block) ? BlockValidationResult::BLOCK_AUX_DATA_INVALID : BlockValidationResult::BLOCK_CONSENSUS,
+            const bool committed_invalid = block.vtx.empty() || block.vtx.size() * WITNESS_SCALE_FACTOR > MAX_BLOCK_WEIGHT ||
+                ::GetSerializeSize(block, PROTOCOL_VERSION | SERIALIZE_TRANSACTION_NO_WITNESS,
+                                   SER_SIZE | SER_NO_PODA) * WITNESS_SCALE_FACTOR > MAX_BLOCK_WEIGHT;
+            return state.Invalid(committed_invalid ? BlockValidationResult::BLOCK_CONSENSUS : BlockValidationResult::BLOCK_AUX_DATA_INVALID,
                                  "bad-blk-length", "size limits failed");
         }
     }
@@ -5121,8 +5124,12 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
     bool nevmContext = nHeight >= consensusParams.nNEVMStartBlock;
     if ((fRegTest || nevmContext) && GetBlockWeight(block) > MAX_BLOCK_WEIGHT) {
         // Old data may legitimately be omitted, but its presence contributes
-        // to weight without changing the committed block identity.
-        return state.Invalid(HasNEVMAuxiliaryData(block) ? BlockValidationResult::BLOCK_AUX_DATA_INVALID : BlockValidationResult::BLOCK_CONSENSUS,
+        // to weight without changing the committed block identity. Keep witness
+        // weight in the committed measure; only omit the auxiliary sidecars.
+        const int64_t committed_weight =
+            ::GetSerializeSize(block, PROTOCOL_VERSION | SERIALIZE_TRANSACTION_NO_WITNESS, SER_SIZE | SER_NO_PODA) * (WITNESS_SCALE_FACTOR - 1) +
+            ::GetSerializeSize(block, PROTOCOL_VERSION, SER_SIZE | SER_NO_PODA);
+        return state.Invalid(committed_weight > MAX_BLOCK_WEIGHT ? BlockValidationResult::BLOCK_CONSENSUS : BlockValidationResult::BLOCK_AUX_DATA_INVALID,
                              "bad-blk-weight", strprintf("%s : weight limit failed", __func__));
     }
     bool fNexusActive = nHeight >= consensusParams.nNexusStartBlock;

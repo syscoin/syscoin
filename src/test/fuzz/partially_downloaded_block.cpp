@@ -114,6 +114,7 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
              BlockValidationResult::BLOCK_CACHED_INVALID,
              BlockValidationResult::BLOCK_INVALID_HEADER,
              BlockValidationResult::BLOCK_MUTATED,
+             BlockValidationResult::BLOCK_AUX_DATA_INVALID,
              BlockValidationResult::BLOCK_MISSING_PREV,
              BlockValidationResult::BLOCK_INVALID_PREV,
              BlockValidationResult::BLOCK_TIME_FUTURE,

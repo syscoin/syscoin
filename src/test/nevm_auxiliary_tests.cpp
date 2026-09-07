@@ -164,8 +164,59 @@ BOOST_AUTO_TEST_CASE(size_failure_classification_accounts_for_auxiliary_data)
     tx.vout.front().vchNEVMData = {'x'};
     TxValidationState auxiliary;
     BOOST_CHECK(!CheckTransaction(CTransaction{tx}, auxiliary));
-    BOOST_CHECK_EQUAL(auxiliary.GetResult(), TxValidationResult::TX_AUX_DATA_INVALID);
+    BOOST_CHECK_EQUAL(auxiliary.GetResult(), TxValidationResult::TX_CONSENSUS);
     BOOST_CHECK_EQUAL(auxiliary.GetRejectReason(), "bad-txns-oversize");
+
+    tx.vout.front().scriptPubKey.front() = OP_RETURN;
+    TxValidationState unspendable;
+    BOOST_CHECK(!CheckTransaction(CTransaction{tx}, unspendable));
+    BOOST_CHECK_EQUAL(unspendable.GetResult(), TxValidationResult::TX_CONSENSUS);
+    BOOST_CHECK_EQUAL(unspendable.GetRejectReason(), "bad-txns-oversize");
+}
+
+BOOST_AUTO_TEST_CASE(committed_size_omits_only_auxiliary_contributions)
+{
+    for (const size_t data_size : {0U, 1U, 99U, 100U, 101U, 200U}) {
+        CMutableTransaction tx = MakeAuxiliaryTransaction(NEVM_DATA_LEGACY_VERSION_BYTE,
+                                                        std::vector<uint8_t>(data_size, 'x'));
+        tx.vin.emplace_back(COutPoint{uint256S("01"), 0});
+        tx.vout.emplace_back(0, CScript() << OP_TRUE);
+        tx.vout.back().vchNEVMData.assign(200, 'y');
+        for (const bool with_witness : {false, true}) {
+            if (with_witness) tx.vin.front().scriptWitness.stack = {{1, 2, 3}};
+            CMutableTransaction cleared{tx};
+            for (auto& output : cleared.vout) output.vchNEVMData.clear();
+            const CTransaction attached{tx};
+            const CTransaction committed{cleared};
+            CBlock attached_block;
+            attached_block.SetNEVMVersion();
+            attached_block.vtx = {MakeTransactionRef(attached)};
+            CBlock committed_block;
+            committed_block.SetNEVMVersion();
+            committed_block.vtx = {MakeTransactionRef(committed)};
+
+            for (const int version : {PROTOCOL_VERSION, PROTOCOL_VERSION | SERIALIZE_TRANSACTION_NO_WITNESS}) {
+                const auto committed_size = ::GetSerializeSize(attached, version, SER_SIZE | SER_NO_PODA);
+                BOOST_CHECK_EQUAL(committed_size, ::GetSerializeSize(committed, version));
+                BOOST_CHECK_EQUAL(::GetSerializeSize(attached, version) - committed_size,
+                                  static_cast<size_t>(data_size * NEVM_DATA_SCALE_FACTOR));
+                BOOST_CHECK_EQUAL(::GetSerializeSize(attached_block, version, SER_SIZE | SER_NO_PODA),
+                                  ::GetSerializeSize(committed_block, version));
+                attached_block.vchNEVMBlockData.assign(200, 'z');
+                BOOST_CHECK_EQUAL(::GetSerializeSize(attached_block, version, SER_SIZE | SER_NO_PODA),
+                                  ::GetSerializeSize(committed_block, version));
+
+                CMutableTransaction ordinary{tx};
+                ordinary.nVersion = CTransaction::CURRENT_VERSION;
+                BOOST_CHECK_EQUAL(::GetSerializeSize(ordinary, version, SER_SIZE | SER_NO_PODA),
+                                  ::GetSerializeSize(ordinary, version));
+            }
+            const auto committed_weight =
+                ::GetSerializeSize(attached_block, PROTOCOL_VERSION | SERIALIZE_TRANSACTION_NO_WITNESS, SER_SIZE | SER_NO_PODA) * (WITNESS_SCALE_FACTOR - 1) +
+                ::GetSerializeSize(attached_block, PROTOCOL_VERSION, SER_SIZE | SER_NO_PODA);
+            BOOST_CHECK_EQUAL(committed_weight, GetBlockWeight(committed_block));
+        }
+    }
 }
 
 BOOST_AUTO_TEST_CASE(committed_disk_reads_preserve_ordinary_blocks)
