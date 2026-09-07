@@ -33,6 +33,7 @@
 #include <kernel/notifications_interface.h>
 #include <logging.h>
 #include <logging/timer.h>
+#include <node/blockconnection.h>
 #include <node/blockstorage.h>
 #include <node/utxo_snapshot.h>
 #include <nevm/sha3.h>
@@ -3782,32 +3783,19 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
     LogPrint(BCLog::BENCHMARK, "  - Load block from disk: %.2fms\n",
              Ticks<MillisecondsDouble>(time_2 - time_1));
     // SYSCOIN
-    NEVMMintTxSet setMintTxs;
-    NEVMTxRootMap mapNEVMTxRoots;
-    PoDAMAPMemory mapPoDA;
-    std::vector<std::pair<uint256, uint32_t> > vecTXIDPairs;
+    node::BlockConnectionState connection{CoinsTip()};
     {
-        auto view = std::make_unique<CCoinsViewCache>(&CoinsTip());
-        bool rv = ConnectBlock(*pthisBlock, state, pindexNew, *view, false /*bJustCheck*/, setMintTxs, mapNEVMTxRoots, mapPoDA, vecTXIDPairs);
-        if (!rv && !pblock && state.GetResult() == BlockValidationResult::BLOCK_AUX_DATA_INVALID && HasNEVMAuxiliaryData(*pthisBlock)) {
-            // Disk blocks omit sidecars; reattaching shared optional data can
-            // change their size. Retry the original disk representation once,
-            // with a fresh view and every consensus/data-availability check.
-            auto committed = std::make_shared<CBlock>();
-            if (!m_blockman.ReadBlockFromDisk(*committed, *pindexNew, /*load_auxiliary_data=*/false)) {
-                return FatalError(m_chainman.GetNotifications(), state, "Failed to reread committed block");
-            }
-            view = std::make_unique<CCoinsViewCache>(&CoinsTip());
-            state = BlockValidationState();
-            setMintTxs.clear();
-            mapNEVMTxRoots.clear();
-            mapPoDA.clear();
-            vecTXIDPairs.clear();
-            pthisBlock = std::move(committed);
-            rv = ConnectBlock(*pthisBlock, state, pindexNew, *view, false /*bJustCheck*/, setMintTxs, mapNEVMTxRoots, mapPoDA, vecTXIDPairs);
+        const auto result = node::ConnectBlockWithAuxiliaryRetry(
+            m_blockman, *pindexNew, /*loaded_from_disk=*/!pblock, pthisBlock, state, CoinsTip(), connection,
+            [&]() EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+                return ConnectBlock(*pthisBlock, state, pindexNew, *connection.view, false /*bJustCheck*/,
+                                    connection.mint_txs, connection.nevm_tx_roots, connection.poda, connection.txid_pairs);
+            });
+        if (result == node::BlockConnectionResult::DISK_READ_FAILED) {
+            return FatalError(m_chainman.GetNotifications(), state, "Failed to reread committed block");
         }
         GetMainSignals().BlockChecked(*pthisBlock, state);
-        if (!rv) {
+        if (result == node::BlockConnectionResult::FAILED) {
             if (state.GetResult() == BlockValidationResult::BLOCK_AUX_DATA_INVALID) {
                 // Stored blocks acquire sidecars again when read. Stop this
                 // activation attempt without retiring its candidate or looping
@@ -3825,20 +3813,21 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
                  Ticks<MillisecondsDouble>(time_3 - time_2),
                  Ticks<SecondsDouble>(time_connect_total),
                  Ticks<MillisecondsDouble>(time_connect_total) / num_blocks_total);
-        bool flushed = view->Flush();
+        bool flushed = connection.view->Flush();
         assert(flushed);
+        connection.view.reset();
     }
     const CBlock& blockConnecting = *pthisBlock;
     // SYSCOIN: Stage mint markers in cache; they become durable on the next full
     // UTXO flush (write-ahead of CoinsTip) or on mint-containing disconnect/replay.
     if(pnevmdatadb)
-        pnevmdatadb->FlushDataToCache(mapPoDA, PoDAFlushSource::Block);
+        pnevmdatadb->FlushDataToCache(connection.poda, PoDAFlushSource::Block);
     if(pnevmtxmintdb)
-        pnevmtxmintdb->FlushDataToCache(setMintTxs);
+        pnevmtxmintdb->FlushDataToCache(connection.mint_txs);
     if(pblockindexdb)
-        pblockindexdb->FlushDataToCache(vecTXIDPairs);
+        pblockindexdb->FlushDataToCache(connection.txid_pairs);
     if(pnevmtxrootsdb)
-        pnevmtxrootsdb->FlushDataToCache(mapNEVMTxRoots);
+        pnevmtxrootsdb->FlushDataToCache(connection.nevm_tx_roots);
     const auto time_4{SteadyClock::now()};
     time_flush += time_4 - time_3;
     LogPrint(BCLog::BENCHMARK, "  - Flush: %.2fms [%.2fs (%.2fms/blk)]\n",

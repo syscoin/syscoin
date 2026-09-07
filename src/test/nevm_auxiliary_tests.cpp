@@ -6,15 +6,22 @@
 #include <consensus/tx_check.h>
 #include <consensus/validation.h>
 #include <nevm/sha3.h>
+#include <node/blockconnection.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
 #include <script/script.h>
+#include <script/sign.h>
+#include <script/signingprovider.h>
 #include <streams.h>
 #include <sync.h>
+#include <test/util/coins.h>
 #include <test/util/setup_common.h>
+#include <util/time.h>
 #include <validation.h>
 
+#include <algorithm>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 #include <boost/test/unit_test.hpp>
@@ -35,6 +42,147 @@ CMutableTransaction MakeAuxiliaryTransaction(uint8_t hash_type, const std::vecto
     tx.vout.back().vchNEVMData = data;
     return tx;
 }
+
+struct AuxiliaryRetrySetup : TestChain100Setup {
+    CBlockIndex* index{nullptr};
+    COutPoint input;
+    COutPoint output;
+
+    AuxiliaryRetrySetup()
+    {
+        const CTransaction& funding = *m_coinbase_txns.front();
+        CMutableTransaction tx = MakeAuxiliaryTransaction(NEVM_DATA_LEGACY_VERSION_BYTE, {'r', 'e', 't', 'r', 'y'});
+        input = COutPoint{funding.GetHash(), 0};
+        tx.vin.emplace_back(input);
+        tx.vout.emplace_back(funding.vout.front().nValue - 1000, CScript() << OP_TRUE);
+        FillableSigningProvider provider;
+        provider.AddKey(coinbaseKey);
+        SignatureData signature;
+        BOOST_REQUIRE(SignSignature(provider, funding, tx, 0, SIGHASH_ALL, signature));
+        output = COutPoint{tx.GetHash(), 1};
+
+        const auto block = std::make_shared<const CBlock>(
+            CreateBlock({tx}, CScript() << OP_TRUE, m_node.chainman->ActiveChainstate()));
+        LOCK(cs_main);
+        BlockValidationState state;
+        bool new_block{false};
+        BOOST_REQUIRE(m_node.chainman->AcceptBlock(block, state, &index, /*fRequested=*/true,
+                                                  /*dbp=*/nullptr, &new_block, /*min_pow_checked=*/true));
+        BOOST_REQUIRE(new_block);
+        BOOST_REQUIRE(index);
+        BOOST_REQUIRE(m_node.chainman->ActiveTip() == index->pprev);
+    }
+
+    std::shared_ptr<const CBlock> ReadCandidate(bool load_auxiliary_data = true)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+    {
+        auto block = std::make_shared<CBlock>();
+        BOOST_REQUIRE(m_node.chainman->m_blockman.ReadBlockFromDisk(*block, *index, load_auxiliary_data));
+        BOOST_REQUIRE_EQUAL(block->vtx.size(), 2U);
+        BOOST_REQUIRE_EQUAL(HasNEVMAuxiliaryData(*block), load_auxiliary_data);
+        return block;
+    }
+
+    void CheckRetry(bool require_data)
+    {
+        LOCK(cs_main);
+        auto& chainstate = m_node.chainman->ActiveChainstate();
+        auto& coins_tip = chainstate.CoinsTip();
+        const uint256 tip_hash = coins_tip.GetBestBlock();
+        SetMockTime(index->GetMedianTimePast() + (require_data ? 0 : NEVM_DATA_ENFORCE_TIME_HAVE_DATA + 1));
+        auto block = ReadCandidate();
+        const auto original = block;
+
+        // The first failure is injected, not caused by invalid transaction or
+        // blob bytes. Establish the ordinary attached representation as a control.
+        BlockValidationState control_state;
+        node::BlockConnectionState control{coins_tip};
+        BOOST_REQUIRE(chainstate.ConnectBlock(*block, control_state, index, *control.view, /*fJustCheck=*/true,
+                                              control.mint_txs, control.nevm_tx_roots, control.poda, control.txid_pairs));
+        BOOST_REQUIRE_EQUAL(control.poda.size(), 1U);
+
+        CCoinsViewCache parent{&coins_tip};
+        node::BlockConnectionState connection{parent};
+        BlockValidationState state;
+        const uint256 marker{uint256S("01")};
+        const std::vector<uint8_t> marker_key(32, 0x42);
+        COutPoint staged_coin;
+        unsigned int attempts{0};
+        const auto result = node::ConnectBlockWithAuxiliaryRetry(
+            m_node.chainman->m_blockman, *index, /*loaded_from_disk=*/true, block, state, parent, connection,
+            [&]() EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+                ++attempts;
+                BOOST_REQUIRE(state.IsValid());
+                BOOST_CHECK(state.GetRejectReason().empty());
+                BOOST_CHECK(state.GetDebugMessage().empty());
+                if (attempts == 1) {
+                    BOOST_REQUIRE(HasNEVMAuxiliaryData(*block));
+                    staged_coin = AddTestCoin(*connection.view);
+                    connection.view->SetBestBlock(marker);
+                    connection.mint_txs.insert(marker);
+                    connection.nevm_tx_roots.emplace(marker, NEVMTxRoot{});
+                    connection.poda.emplace(marker_key, MapPoDAPayloadMeta{marker, 0, 0});
+                    connection.txid_pairs.emplace_back(marker, 0);
+                    return state.Invalid(BlockValidationResult::BLOCK_AUX_DATA_INVALID,
+                                         "injected-auxiliary-result", "first-attempt state");
+                }
+                BOOST_REQUIRE_EQUAL(attempts, 2U);
+                BOOST_REQUIRE(!HasNEVMAuxiliaryData(*block));
+                BOOST_REQUIRE(block->GetHash() == original->GetHash());
+                BOOST_REQUIRE(block->vtx[1]->GetWitnessHash() == original->vtx[1]->GetWitnessHash());
+                BOOST_REQUIRE_EQUAL(connection.view->GetCacheSize(), 0U);
+                BOOST_REQUIRE(connection.view->GetBestBlock() == tip_hash);
+                BOOST_REQUIRE(!connection.view->HaveCoin(staged_coin));
+                BOOST_REQUIRE(connection.mint_txs.empty());
+                BOOST_REQUIRE(connection.nevm_tx_roots.empty());
+                BOOST_REQUIRE(connection.poda.empty());
+                BOOST_REQUIRE(connection.txid_pairs.empty());
+                return chainstate.ConnectBlock(*block, state, index, *connection.view, /*fJustCheck=*/false,
+                                               connection.mint_txs, connection.nevm_tx_roots,
+                                               connection.poda, connection.txid_pairs);
+            });
+
+        BOOST_CHECK_EQUAL(attempts, 2U);
+        BOOST_CHECK(block != original);
+        BOOST_CHECK(HasNEVMAuxiliaryData(*original));
+        BOOST_CHECK(!HasNEVMAuxiliaryData(*block));
+        BOOST_CHECK(!parent.HaveCoin(staged_coin));
+        BOOST_CHECK(parent.HaveCoin(input));
+        BOOST_CHECK(!parent.HaveCoin(output));
+        BOOST_CHECK(parent.GetBestBlock() == tip_hash);
+        BOOST_CHECK_EQUAL(connection.mint_txs.count(marker), 0U);
+        BOOST_CHECK_EQUAL(connection.nevm_tx_roots.count(marker), 0U);
+        BOOST_CHECK_EQUAL(connection.poda.count(marker_key), 0U);
+        BOOST_CHECK(std::none_of(connection.txid_pairs.begin(), connection.txid_pairs.end(),
+                                 [&](const auto& entry) { return entry.first == marker; }));
+
+        if (require_data) {
+            BOOST_CHECK(result == node::BlockConnectionResult::FAILED);
+            BOOST_CHECK(state.IsInvalid());
+            BOOST_CHECK_EQUAL(state.GetResult(), BlockValidationResult::BLOCK_AUX_DATA_INVALID);
+            BOOST_CHECK_EQUAL(state.GetRejectReason(), "poda-aux-data-invalid");
+            BOOST_CHECK(!IsBlockRejectionCacheable(state.GetResult()));
+            BOOST_CHECK(connection.poda.empty());
+            BOOST_CHECK(connection.view->HaveCoin(input));
+            BOOST_CHECK(!connection.view->HaveCoin(output));
+        } else {
+            BOOST_CHECK(result == node::BlockConnectionResult::SUCCESS);
+            BOOST_CHECK(state.IsValid());
+            BOOST_CHECK_EQUAL(connection.poda.size(), 1U);
+            BOOST_CHECK(!connection.view->HaveCoin(input));
+            BOOST_CHECK(connection.view->HaveCoin(output));
+            BOOST_REQUIRE(connection.view->Flush());
+            BOOST_CHECK(!parent.HaveCoin(staged_coin));
+            BOOST_CHECK(!parent.HaveCoin(input));
+            BOOST_CHECK(parent.HaveCoin(output));
+            BOOST_CHECK(parent.GetBestBlock() == index->GetBlockHash());
+        }
+        BOOST_CHECK(coins_tip.GetBestBlock() == tip_hash);
+        BOOST_CHECK(coins_tip.HaveCoin(input));
+        BOOST_CHECK(!coins_tip.HaveCoin(output));
+        BOOST_CHECK(m_node.chainman->ActiveTip() == index->pprev);
+    }
+};
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(nevm_auxiliary_tests, RegTestingSetup)
@@ -236,6 +384,88 @@ BOOST_AUTO_TEST_CASE(committed_disk_reads_preserve_ordinary_blocks)
     }
     BlockValidationState state;
     BOOST_CHECK(CheckBlock(committed, state, Params().GetConsensus()));
+}
+
+BOOST_FIXTURE_TEST_CASE(disk_auxiliary_retry_reconnects_with_fresh_state, AuxiliaryRetrySetup)
+{
+    CheckRetry(/*require_data=*/false);
+}
+
+BOOST_FIXTURE_TEST_CASE(disk_auxiliary_retry_preserves_required_data_checks, AuxiliaryRetrySetup)
+{
+    CheckRetry(/*require_data=*/true);
+}
+
+BOOST_FIXTURE_TEST_CASE(disk_auxiliary_retry_is_limited_to_eligible_failures, AuxiliaryRetrySetup)
+{
+    LOCK(cs_main);
+    struct Case {
+        bool loaded_from_disk;
+        bool with_auxiliary;
+        bool success;
+        BlockValidationResult failure;
+    };
+    for (const auto& test : {
+             Case{true, true, true, BlockValidationResult::BLOCK_RESULT_UNSET},
+             Case{false, true, false, BlockValidationResult::BLOCK_AUX_DATA_INVALID},
+             Case{true, false, false, BlockValidationResult::BLOCK_AUX_DATA_INVALID},
+             Case{true, true, false, BlockValidationResult::BLOCK_CONSENSUS},
+             Case{true, true, false, BlockValidationResult::BLOCK_MUTATED}}) {
+        auto block = ReadCandidate(test.with_auxiliary);
+        const auto original = block;
+        CCoinsViewCache parent{&m_node.chainman->ActiveChainstate().CoinsTip()};
+        node::BlockConnectionState connection{parent};
+        BlockValidationState state;
+        unsigned int attempts{0};
+        const uint256 marker{uint256S("01")};
+        const auto result = node::ConnectBlockWithAuxiliaryRetry(
+            m_node.chainman->m_blockman, *index, test.loaded_from_disk, block, state, parent, connection,
+            [&] {
+                ++attempts;
+                connection.mint_txs.insert(marker);
+                return test.success || state.Invalid(test.failure, "injected-result");
+            });
+        BOOST_CHECK_EQUAL(attempts, 1U);
+        BOOST_CHECK(block == original);
+        BOOST_CHECK_EQUAL(connection.mint_txs.count(marker), 1U);
+        BOOST_CHECK(result == (test.success ? node::BlockConnectionResult::SUCCESS : node::BlockConnectionResult::FAILED));
+        BOOST_CHECK_EQUAL(state.GetResult(), test.failure);
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(disk_auxiliary_retry_preserves_reread_errors, AuxiliaryRetrySetup)
+{
+    LOCK(cs_main);
+    auto block = ReadCandidate();
+    const auto original = block;
+    CCoinsViewCache parent{&m_node.chainman->ActiveChainstate().CoinsTip()};
+    node::BlockConnectionState connection{parent};
+    BlockValidationState state;
+    unsigned int attempts{0};
+    const uint256 marker{uint256S("01")};
+    CBlockIndex mismatched_index;
+    mismatched_index.nStatus = BLOCK_HAVE_DATA;
+    mismatched_index.nFile = index->nFile;
+    mismatched_index.nDataPos = index->nDataPos;
+    // Exercise the real indexed-read failure without changing stored block bytes.
+    mismatched_index.phashBlock = &marker;
+    const auto result = node::ConnectBlockWithAuxiliaryRetry(
+        m_node.chainman->m_blockman, mismatched_index, /*loaded_from_disk=*/true, block, state, parent, connection,
+        [&] {
+            ++attempts;
+            connection.mint_txs.insert(marker);
+            connection.view->SetBestBlock(marker);
+            return state.Invalid(BlockValidationResult::BLOCK_AUX_DATA_INVALID, "injected-result");
+        });
+    BOOST_CHECK(result == node::BlockConnectionResult::DISK_READ_FAILED);
+    BOOST_CHECK_EQUAL(attempts, 1U);
+    BOOST_CHECK(block == original);
+    BOOST_CHECK(state.IsInvalid());
+    BOOST_CHECK_EQUAL(state.GetResult(), BlockValidationResult::BLOCK_AUX_DATA_INVALID);
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "injected-result");
+    BOOST_CHECK_EQUAL(connection.mint_txs.count(marker), 1U);
+    BOOST_CHECK(connection.view->GetBestBlock() == marker);
+    BOOST_CHECK(parent.GetBestBlock() == index->pprev->GetBlockHash());
 }
 
 BOOST_AUTO_TEST_CASE(admission_checks_auxiliary_data_before_orphan_eligibility)
