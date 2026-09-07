@@ -479,12 +479,18 @@ bool QueryActiveHash(const BTCHeaderCommandRunner& runner,
     return true;
 }
 
+bool IsSameTip(const TipView& first, const TipView& second) noexcept
+{
+    return first.hash == second.hash && first.height == second.height;
+}
+
 std::optional<BTCHeaderPolicyResult> CheckCandidateWithTip(
     const BTCHeaderCommandRunner& runner,
     const BTCHeaderPolicyConfig& config,
     const TipView& tip,
     const uint256& candidate_hash,
     const std::optional<uint256>& previous_hash,
+    int64_t now,
     std::string& error)
 {
     if (candidate_hash.IsNull()) {
@@ -551,15 +557,20 @@ std::optional<BTCHeaderPolicyResult> CheckCandidateWithTip(
         }
     }
 
+    // Do not accept facts collected across an observed Bitcoin tip change.
+    TipView final_tip;
+    if (!QueryTip(runner, config, now, final_tip, error)) {
+        return std::nullopt;
+    }
+    if (!IsSameTip(tip, final_tip)) {
+        SetError(error, "btc-candidate-tip-view-changed");
+        return std::nullopt;
+    }
+
     error.clear();
     return BTCHeaderPolicyResult{
         candidate_hash, static_cast<int32_t>(candidate.height),
         candidate.confirmations, previous_was_reorged};
-}
-
-bool IsSameTip(const TipView& first, const TipView& second) noexcept
-{
-    return first.hash == second.hash && first.height == second.height;
 }
 
 struct StableInactiveAnchorFacts {
@@ -803,7 +814,7 @@ std::optional<BTCHeaderPolicyResult> BTCHeaderPolicy::SelectMiningHash(
         return std::nullopt;
     }
     return CheckCandidateWithTip(m_runner, config, tip, selected_hash,
-                                 std::nullopt, deny_reason);
+                                 std::nullopt, now, deny_reason);
 }
 
 std::optional<BTCHeaderPolicyResult> BTCHeaderPolicy::CheckCandidate(
@@ -823,7 +834,7 @@ std::optional<BTCHeaderPolicyResult> BTCHeaderPolicy::CheckCandidate(
         return std::nullopt;
     }
     return CheckCandidateWithTip(m_runner, config, tip, candidate_hash,
-                                 previous_hash, deny_reason);
+                                 previous_hash, now, deny_reason);
 }
 
 std::optional<BTCHeaderActiveRange>

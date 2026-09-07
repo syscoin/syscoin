@@ -182,6 +182,10 @@ BOOST_AUTO_TEST_CASE(miner_selects_configured_confirmation_depth)
     BOOST_CHECK(selected->btc_hash == setup.confirmed);
     BOOST_CHECK_EQUAL(selected->btc_height, 98);
     BOOST_CHECK_EQUAL(selected->confirmations, 3);
+    BOOST_CHECK_EQUAL(setup.backend.method_calls["getblockchaininfo"], 2U);
+    BOOST_CHECK_EQUAL(setup.backend.method_calls["getblockheader"], 3U);
+    BOOST_CHECK_EQUAL(setup.backend.method_calls["getblockhash"], 2U);
+    BOOST_CHECK_EQUAL(setup.backend.method_calls["getchaintips"], 2U);
 }
 
 BOOST_AUTO_TEST_CASE(candidate_requires_exact_active_header_response)
@@ -192,11 +196,175 @@ BOOST_AUTO_TEST_CASE(candidate_requires_exact_active_header_response)
         setup.config, setup.tip, setup.previous, setup.NOW, error)};
     BOOST_REQUIRE_MESSAGE(accepted, error);
     BOOST_CHECK_EQUAL(accepted->btc_height, 100);
+    BOOST_CHECK_EQUAL(setup.backend.method_calls["getblockchaininfo"], 2U);
+    BOOST_CHECK_EQUAL(setup.backend.method_calls["getblockheader"], 4U);
+    BOOST_CHECK_EQUAL(setup.backend.method_calls["getblockhash"], 2U);
+    BOOST_CHECK_EQUAL(setup.backend.method_calls["getchaintips"], 2U);
 
     setup.backend.wrong_header_hash = true;
     BOOST_CHECK(!setup.Policy().CheckCandidate(
         setup.config, setup.tip, setup.previous, setup.NOW, error));
     BOOST_CHECK_EQUAL(error, "btc-bestheader-invalid-response");
+}
+
+BOOST_AUTO_TEST_CASE(candidate_previous_checks_finish_before_final_tip_query)
+{
+    PolicySetup setup;
+    const std::vector<std::optional<uint256>> previous_hashes{
+        std::nullopt, uint256{}, setup.confirmed, setup.previous};
+    for (const auto& previous_hash : previous_hashes) {
+        const bool checks_previous{previous_hash && !previous_hash->IsNull() &&
+                                   *previous_hash != setup.confirmed};
+        BOOST_TEST_CONTEXT("checks_previous=" << checks_previous) {
+            setup.backend.method_calls.clear();
+            bool previous_header_queried{false};
+            bool previous_active_queried{false};
+            bool final_tip_queried{false};
+            setup.backend.before_call = [&](const std::vector<std::string>& args,
+                                            std::size_t method_call) {
+                if (args == std::vector<std::string>{
+                                "getblockheader", setup.previous.GetHex(), "true"}) {
+                    previous_header_queried = true;
+                }
+                if (args == std::vector<std::string>{"getblockhash", "90"}) {
+                    BOOST_CHECK(previous_header_queried);
+                    previous_active_queried = true;
+                }
+                if (args.front() == "getblockchaininfo" && method_call == 2) {
+                    final_tip_queried = true;
+                    BOOST_CHECK_EQUAL(previous_header_queried, checks_previous);
+                    BOOST_CHECK_EQUAL(previous_active_queried, checks_previous);
+                    BOOST_CHECK_EQUAL(setup.backend.method_calls["getblockhash"],
+                                      checks_previous ? 2U : 1U);
+                }
+            };
+
+            std::string error;
+            const auto accepted{setup.Policy().CheckCandidate(
+                setup.config, setup.confirmed, previous_hash, setup.NOW, error)};
+            BOOST_REQUIRE_MESSAGE(accepted, error);
+            BOOST_CHECK(final_tip_queried);
+            BOOST_CHECK(!accepted->previous_was_reorged);
+            BOOST_CHECK_EQUAL(accepted->confirmations, 3);
+            BOOST_CHECK_EQUAL(setup.backend.method_calls["getblockchaininfo"], 2U);
+            BOOST_CHECK_EQUAL(setup.backend.method_calls["getblockheader"],
+                              checks_previous ? 4U : 3U);
+            BOOST_CHECK_EQUAL(setup.backend.method_calls["getchaintips"], 2U);
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(mining_and_candidate_retry_after_tip_view_changes)
+{
+    for (const bool mining : {false, true}) {
+        for (const bool forward : {false, true}) {
+            BOOST_TEST_CONTEXT("mining=" << mining << " forward=" << forward) {
+                PolicySetup setup;
+                setup.config.min_confirmations = 3;
+                // Isolate tip equality from the independent recent-fork policy.
+                if (!forward) setup.config.recent_fork_depth = 0;
+                const uint256 next_candidate{NonNullHash(99)};
+                const uint256 next_tip{NonNullHash(10'100)};
+                const int64_t next_height{forward ? 101 : 100};
+                setup.backend.headers.emplace(
+                    next_candidate, Header{99, 2, setup.NOW - 60});
+                setup.backend.active_hashes.emplace(99, next_candidate);
+                bool tip_changed{false};
+                setup.backend.before_call = [&](const std::vector<std::string>& args,
+                                                std::size_t method_call) {
+                    if (args.front() != "getblockhash" || method_call != 2) return;
+                    if (forward) {
+                        for (auto& entry : setup.backend.headers) {
+                            ++entry.second.confirmations;
+                        }
+                    } else {
+                        setup.backend.headers[setup.tip].confirmations = -1;
+                    }
+                    setup.backend.best_hash = next_tip;
+                    setup.backend.headers.emplace(
+                        next_tip, Header{next_height, 1, setup.NOW});
+                    setup.backend.active_hashes[next_height] = next_tip;
+                    setup.backend.chain_tips = {
+                        ChainTip{next_tip, next_height, "active"}};
+                    if (!forward) {
+                        setup.backend.chain_tips.push_back(
+                            ChainTip{setup.tip, 100, "valid-fork"});
+                    }
+                    tip_changed = true;
+                };
+
+                const BTCHeaderPolicy policy{setup.Policy()};
+                std::string error;
+                const auto check = [&]() {
+                    return mining
+                        ? policy.SelectMiningHash(setup.config, setup.NOW, error)
+                        : policy.CheckCandidate(setup.config, setup.confirmed,
+                                                setup.previous, setup.NOW, error);
+                };
+                BOOST_CHECK(!check());
+                BOOST_CHECK(tip_changed);
+                BOOST_CHECK_EQUAL(error, "btc-candidate-tip-view-changed");
+                BOOST_CHECK_EQUAL(setup.backend.method_calls["getblockchaininfo"], 2U);
+
+                setup.backend.before_call = {};
+                setup.backend.method_calls.clear();
+                const auto retried{check()};
+                BOOST_REQUIRE_MESSAGE(retried, error);
+                BOOST_CHECK(error.empty());
+                BOOST_CHECK(retried->btc_hash ==
+                            (mining && forward ? next_candidate : setup.confirmed));
+                BOOST_CHECK_EQUAL(retried->confirmations,
+                                  !mining && forward ? 4 : 3);
+                BOOST_CHECK_EQUAL(setup.backend.method_calls["getblockchaininfo"], 2U);
+            }
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(mining_and_candidate_final_tip_outage_recovers)
+{
+    for (const bool mining : {false, true}) {
+        for (const std::string failed_method : {
+                 "getblockchaininfo", "getblockheader", "getchaintips"}) {
+            BOOST_TEST_CONTEXT("mining=" << mining << " failed_method=" << failed_method) {
+                PolicySetup setup;
+                setup.config.min_confirmations = 3;
+                bool final_tip_queried{false};
+                setup.backend.before_call = [&](const std::vector<std::string>& args,
+                                                std::size_t method_call) {
+                    if (args.front() == "getblockchaininfo" && method_call == 2) {
+                        final_tip_queried = true;
+                    }
+                    if (final_tip_queried && args.front() == failed_method) {
+                        setup.backend.online = false;
+                    }
+                };
+
+                const BTCHeaderPolicy policy{setup.Policy()};
+                std::string error;
+                const auto check = [&]() {
+                    return mining
+                        ? policy.SelectMiningHash(setup.config, setup.NOW, error)
+                        : policy.CheckCandidate(setup.config, setup.confirmed,
+                                                setup.previous, setup.NOW, error);
+                };
+                BOOST_CHECK(!check());
+                BOOST_CHECK(final_tip_queried);
+                BOOST_CHECK_EQUAL(error, "backend-down");
+
+                setup.backend.before_call = {};
+                setup.backend.online = true;
+                setup.backend.method_calls.clear();
+                const auto retried{check()};
+                BOOST_REQUIRE_MESSAGE(retried, error);
+                BOOST_CHECK(error.empty());
+                BOOST_CHECK(retried->btc_hash == setup.confirmed);
+                BOOST_CHECK_EQUAL(retried->confirmations, 3);
+                BOOST_CHECK_EQUAL(setup.backend.method_calls["getblockchaininfo"], 2U);
+                BOOST_CHECK_EQUAL(setup.backend.method_calls["getchaintips"], 2U);
+            }
+        }
+    }
 }
 
 BOOST_AUTO_TEST_CASE(stale_lagging_and_wrong_network_views_fail_closed)
