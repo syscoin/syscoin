@@ -4280,9 +4280,11 @@ void CGovernanceManager::EraseOrphanVote(
     cmmapOrphanVotes.GetAll(object_hash, existing);
     const bool present{std::find(existing.begin(), existing.end(),
                                  vote_pair) != existing.end()};
+    // Both arguments may refer to the cache entry being erased. Finish all
+    // reads needed for accounting before invalidating that entry.
+    const uint64_t bytes{present ? PersistedVoteBytes(vote_pair.first) : 0};
     cmmapOrphanVotes.Erase(object_hash, vote_pair);
     if (present) {
-        const uint64_t bytes{PersistedVoteBytes(vote_pair.first)};
         m_persisted_vote_bytes -=
             std::min(m_persisted_vote_bytes, bytes);
     }

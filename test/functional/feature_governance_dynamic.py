@@ -418,8 +418,34 @@ class SyscoinGovernanceTest(DashTestFramework):
         last_safe_mocktime = (
             self.active_proposal_expiry_time -
             remaining_blocks - maturity_margin - 1)
+        assert self.mocktime <= last_safe_mocktime, (
+            f"Governance synchronization exceeded proposal validity budget: "
+            f"mocktime={self.mocktime}, latest_safe={last_safe_mocktime}, "
+            f"expiry={self.active_proposal_expiry_time}, height={block_count}")
         if self.mocktime < last_safe_mocktime:
             self._throttled_bump_mocktime(throttle_key, step=1)
+
+    def wait_for_recovery_sync(self, sb_block_height):
+        # Block validation can take minutes under sanitizers. Governance
+        # paging waits for that chain, so preserve proposal time until then.
+        self.log.info("Recovery: waiting for block synchronization")
+        block_sync_mocktime = self.mocktime
+        self.sync_blocks(timeout=180)
+        assert_equal(self.mocktime, block_sync_mocktime)
+        self.log.info(
+            "Recovery: block synchronization complete; waiting for governance")
+
+        def all_nodes_synced():
+            # Once the chain is current, advance every serving peer's page
+            # budgets while reserving time for the trigger and superblock.
+            self.bump_governance_sync_mocktime(
+                "feature_governance_dynamic_recovery_mnsync", sb_block_height)
+            return all(node.mnsync("status")["IsSynced"] for node in self.nodes)
+
+        self.wait_until(all_nodes_synced, timeout=180)
+        self.log.info(
+            "Recovery: governance synchronized with %d seconds of proposal validity remaining",
+            self.active_proposal_expiry_time - self.mocktime)
 
     def wait_for_governance_recovery(
             self, proposal_hashes, expected_vote_hashes, sb_block_height):
@@ -597,10 +623,7 @@ class SyscoinGovernanceTest(DashTestFramework):
                 if node_inner.index != node_outer.index:
                     self.connect_nodes(node_inner.index, node_outer.index, wait_for_connect=False)
 
-        # Page serving has time-based work and byte budgets on both sides of
-        # the connection. Advance every participant's mock clock while only
-        # node1 is recovering so honest servers can refill those budgets.
-        assert self.sync_mnsync(self.nodes, timeout=180)
+        self.wait_for_recovery_sync(sb_height)
         self.wait_for_governance_recovery(
             proposal_hashes, expected_vote_hashes, sb_height)
         self.log.info(f"Waiting for trigger")
@@ -650,8 +673,7 @@ class SyscoinGovernanceTest(DashTestFramework):
                 if node_inner.index != node_outer.index:
                     self.connect_nodes(node_inner.index, node_outer.index, wait_for_connect=False)
 
-        # Keep serving peers' page-rate clocks moving during DB-free recovery.
-        assert self.sync_mnsync(self.nodes, timeout=180)
+        self.wait_for_recovery_sync(sb_height)
         self.wait_for_governance_recovery(
             proposal_hashes, expected_vote_hashes, sb_height)
         self.log.info(f"Waiting for trigger")

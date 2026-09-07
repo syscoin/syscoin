@@ -174,6 +174,11 @@ public:
         manager.CheckOrphanVotes(object_hash, peerman);
     }
 
+    static void CleanOrphanObjects(CGovernanceManager& manager)
+    {
+        manager.CleanOrphanObjects();
+    }
+
     static constexpr std::size_t MaxOrphanVotes()
     {
         return CGovernanceManager::MAX_ORPHAN_VOTES;
@@ -4115,6 +4120,61 @@ BOOST_FIXTURE_TEST_CASE(
     BOOST_CHECK_EQUAL(Access::PersistedVoteBytes(*governance), limit);
 
     Access::ClearOrphanVotes(*governance);
+    BOOST_CHECK_EQUAL(Access::PersistedVoteBytes(*governance), 0U);
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    governance_orphan_cleanup_preserves_live_vote_accounting,
+    TestChain100Setup)
+{
+    using Access = governance_tests::CGovernanceManagerTestAccess;
+    const int64_t now{GetTime<std::chrono::seconds>().count()};
+    const uint256 first_parent{uint256{113}};
+    const uint256 second_parent{uint256{114}};
+    CGovernanceVote expired{
+        COutPoint{uint256{115}, 0}, first_parent,
+        VOTE_SIGNAL_FUNDING, VOTE_OUTCOME_YES};
+    CGovernanceVote at_boundary{
+        COutPoint{uint256{116}, 0}, first_parent,
+        VOTE_SIGNAL_FUNDING, VOTE_OUTCOME_YES};
+    CGovernanceVote live{
+        COutPoint{uint256{117}, 0}, second_parent,
+        VOTE_SIGNAL_FUNDING, VOTE_OUTCOME_YES};
+    const uint64_t expired_bytes{Access::VoteBytes(expired)};
+    const uint64_t boundary_bytes{Access::VoteBytes(at_boundary)};
+    const uint64_t live_bytes{Access::VoteBytes(live)};
+
+    BOOST_REQUIRE(Access::StoreOrphanVote(
+        *governance, first_parent, expired, now - 1));
+    BOOST_REQUIRE(Access::StoreOrphanVote(
+        *governance, first_parent, at_boundary, now));
+    BOOST_REQUIRE(Access::StoreOrphanVote(
+        *governance, second_parent, live, now + 60));
+    BOOST_CHECK_EQUAL(Access::OrphanVoteCount(*governance), 3U);
+    BOOST_CHECK_EQUAL(Access::PersistedVoteBytes(*governance),
+                      expired_bytes + boundary_bytes + live_bytes);
+
+    // Expiry is strict: the vote at the current time survives this round.
+    Access::CleanOrphanObjects(*governance);
+    BOOST_CHECK_EQUAL(Access::OrphanVoteCount(*governance), 2U);
+    BOOST_CHECK_EQUAL(Access::PersistedVoteBytes(*governance),
+                      boundary_bytes + live_bytes);
+    Access::CleanOrphanObjects(*governance);
+    BOOST_CHECK_EQUAL(Access::OrphanVoteCount(*governance), 2U);
+    BOOST_CHECK_EQUAL(Access::PersistedVoteBytes(*governance),
+                      boundary_bytes + live_bytes);
+
+    SetMockTime(now + 1);
+    Access::CleanOrphanObjects(*governance);
+    BOOST_CHECK_EQUAL(Access::OrphanVoteCount(*governance), 1U);
+    BOOST_CHECK_EQUAL(Access::PersistedVoteBytes(*governance), live_bytes);
+
+    SetMockTime(now + 61);
+    Access::CleanOrphanObjects(*governance);
+    BOOST_CHECK_EQUAL(Access::OrphanVoteCount(*governance), 0U);
+    BOOST_CHECK_EQUAL(Access::PersistedVoteBytes(*governance), 0U);
+    Access::CleanOrphanObjects(*governance);
+    BOOST_CHECK_EQUAL(Access::OrphanVoteCount(*governance), 0U);
     BOOST_CHECK_EQUAL(Access::PersistedVoteBytes(*governance), 0U);
 }
 
