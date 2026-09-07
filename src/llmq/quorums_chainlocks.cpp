@@ -19532,6 +19532,9 @@ void CChainLocksHandler::RelayChainLockShare(
 
 void CChainLocksHandler::MaybeCreateAndSignChainLock()
 {
+    // SYSCOIN: Pause local production until Core reaches Geth's applied
+    // startup pair; certificate verification and acquisition remain open.
+    if (m_chainman.HasPendingNEVMStartupPair()) return;
     const uint64_t admission_generation{GetShareAdmissionGeneration()};
     if (admission_generation == 0 || !fMasternodeMode ||
         !m_signer_journal ||
@@ -19650,7 +19653,8 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
                !IsPaymentAuditPresealActive();
     };
     const auto exact_signing_capability_is_current = [&]() {
-        return IsShareAdmissionGenerationCurrent(admission_generation) &&
+        return !m_chainman.HasPendingNEVMStartupPair() &&
+               IsShareAdmissionGenerationCurrent(admission_generation) &&
                has_exact_collector() &&
                local_preseals_clear() &&
                IsCurrentSigningSource(contexts->source);
@@ -19830,6 +19834,9 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
 
 void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
 {
+    // SYSCOIN: Startup pairing gates only new local signatures, preserving
+    // the recovery certificate traffic needed to reconnect Core's suffix.
+    if (m_chainman.HasPendingNEVMStartupPair()) return;
     const uint64_t admission_generation{GetShareAdmissionGeneration()};
     if (admission_generation == 0 || !fMasternodeMode ||
         !m_signer_journal ||
@@ -20009,7 +20016,8 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
 
             pq::ChainLockSigningError signing_error{
                 pq::ChainLockSigningError::NONE};
-            if (!IsShareAdmissionGenerationCurrent(admission_generation) ||
+            if (m_chainman.HasPendingNEVMStartupPair() ||
+                !IsShareAdmissionGenerationCurrent(admission_generation) ||
                 !has_exact_open_runtime() ||
                 !IsActiveMasternodeChildSigningMaterialCurrent(
                     local_pro_tx_hash, *signing_material)) {
@@ -20035,7 +20043,8 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
                 }
                 continue;
             }
-            if (!IsCurrentPaymentAuditStatement(*statement) ||
+            if (m_chainman.HasPendingNEVMStartupPair() ||
+                !IsCurrentPaymentAuditStatement(*statement) ||
                 !IsActiveMasternodeChildSigningMaterialCurrent(
                     local_pro_tx_hash, *signing_material)) {
                 return;
@@ -20053,7 +20062,8 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
                     collection.accepted_duplicate)) {
                 continue;
             }
-            if (!HasExactPaymentAuditRuntime(
+            if (m_chainman.HasPendingNEVMStartupPair() ||
+                !HasExactPaymentAuditRuntime(
                     runtime_generation, *statement, signing_context,
                     relay_plan) ||
                 !IsCurrentPaymentAuditStatement(*statement)) {

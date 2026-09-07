@@ -1729,6 +1729,15 @@ that Geth never applied and does not emit Geth disconnects for that suffix. It
 must not cross a durable ChainLock finality floor; if Geth is behind finalized
 Core state, operators must rebuild or bootstrap Geth instead.
 
+If Geth retained an exact applied height/hash pair ahead of Core's last coins
+flush, Core keeps that pair pending while reconnecting its ancestors. Only
+that exact already-applied prefix suppresses external connect notifications;
+normal local validation and certificate acquisition continue. Missing headers
+pause activation until their ancestry is available. Public readiness, new local
+signatures, mining templates, and snapshot activation wait until Core reaches
+the pair and a fresh Geth status confirms it. A conflicting branch remains a
+local recovery error, rather than marking its blocks consensus-invalid.
+
 The separate `preseal_snapshot_window <= 1,728` deployment check remains
 intentional. Before the first durable missing-certificate marker exists, all
 four historical quorum rosters must be available by arbitrary block lookup.

@@ -4,6 +4,7 @@
 //
 #include <addresstype.h> // SYSCOIN: deterministic valid-MN payout.
 #include <chainparams.h>
+#include <consensus/merkle.h>
 #include <consensus/pq_migration_config.h> // SYSCOIN: PQ activation-boundary tests.
 #include <consensus/validation.h>
 #include <evo/deterministicmns.h> // SYSCOIN: deep rollback integration state.
@@ -18,6 +19,7 @@
 #include <node/blockstorage.h>
 #include <node/chainstate.h>
 #include <node/kernel_notifications.h>
+#include <node/miner.h> // SYSCOIN: preserve NEVM template commitments.
 #include <node/utxo_snapshot.h>
 #include <pow.h>
 #include <random.h>
@@ -39,6 +41,8 @@
 #include <algorithm> // SYSCOIN: synthetic recovery-universe fixture.
 #include <array> // SYSCOIN: synthetic PQ activation fixtures.
 #include <cstdint> // SYSCOIN: synthetic recovery-authority fixture.
+#include <limits>
+#include <stdexcept>
 #include <type_traits>
 #include <vector>
 
@@ -85,6 +89,126 @@ struct DeferredNEVMReplaySetup : TestChain100Setup {
     DeferredNEVMReplaySetup()
         : TestChain100Setup{ChainType::REGTEST,
                             {"-nevmstartheight=101"}} {}
+};
+
+// SYSCOIN: Exercise Core's real NEVM connection path without an external
+// process. Only committed notifications advance this local Geth stand-in;
+// template checks leave its applied pair unchanged.
+struct StartupNEVMSubscriber final : CValidationInterface {
+    uint64_t applied_count{0};
+    uint256 applied_hash;
+    std::string block_info_error;
+    std::size_t block_info_queries{0};
+    std::vector<uint256> connected_blocks;
+    std::vector<uint256> disconnected_blocks;
+    uint8_t template_serial{0};
+
+    void NotifyGetNEVMBlock(CNEVMBlock& block, std::string& state) override
+    {
+        state.clear();
+        block.nBlockHash.begin()[0] = ++template_serial;
+        block.nTxRoot = block.nBlockHash;
+        block.nReceiptRoot = block.nBlockHash;
+        // Core treats this payload as opaque; the subscriber substitutes for
+        // the external engine that produces and validates it.
+        block.vchNEVMBlockData = {template_serial};
+    }
+
+    void NotifyNEVMBlockConnect(
+        const CNEVMHeader&, const CBlock&, std::string& state,
+        const uint256& hash, NEVMDataVec&, const uint32_t& height,
+        bool, const uint256&,
+        const CDeterministicMNListNEVMAddressDiff&) override
+    {
+        state.clear();
+        if (hash.IsNull()) return;
+        connected_blocks.push_back(hash);
+        applied_count = height - 101 + 1;
+        applied_hash = hash;
+    }
+
+    void NotifyNEVMBlockDisconnect(
+        std::string& state, const uint256& hash,
+        const CDeterministicMNListNEVMAddressDiff&) override
+    {
+        state.clear();
+        disconnected_blocks.push_back(hash);
+    }
+
+    void NotifyGetNEVMBlockInfo(
+        uint64_t& count, uint256& hash, std::string& state) override
+    {
+        ++block_info_queries;
+        count = applied_count;
+        hash = applied_hash;
+        state = block_info_error;
+    }
+};
+
+struct StartupNEVMRecoverySetup : DeferredNEVMReplaySetup {
+    const bool previous_nevm_connection{fNEVMConnection};
+    std::shared_ptr<StartupNEVMSubscriber> nevm{
+        std::make_shared<StartupNEVMSubscriber>()};
+
+    StartupNEVMRecoverySetup()
+    {
+        RegisterSharedValidationInterface(nevm);
+        fNEVMConnection = true;
+    }
+
+    ~StartupNEVMRecoverySetup()
+    {
+        UnregisterValidationInterface(nevm.get());
+        SyncWithValidationInterfaceQueue();
+        fNEVMConnection = previous_nevm_connection;
+    }
+
+    std::shared_ptr<const CBlock> MakeNEVMBlock()
+    {
+        auto& chainman{*Assert(m_node.chainman)};
+        CBlock block{node::BlockAssembler{
+            chainman.ActiveChainstate(), nullptr}
+                         .CreateNewBlock(CScript{} << OP_TRUE)->block};
+        block.hashMerkleRoot = BlockMerkleRoot(block);
+        while (!CheckProofOfWork(
+            block.GetHash(), block.nBits, chainman.GetConsensus())) {
+            ++block.nNonce;
+        }
+        return std::make_shared<const CBlock>(std::move(block));
+    }
+
+    std::shared_ptr<const CBlock> MineNEVMBlock()
+    {
+        const auto block{MakeNEVMBlock()};
+        auto& chainman{*Assert(m_node.chainman)};
+        BOOST_REQUIRE(chainman.ProcessNewBlock(block, true, true, nullptr));
+        BOOST_REQUIRE(WITH_LOCK(
+            ::cs_main, return chainman.ActiveTip()->GetBlockHash()) ==
+                      block->GetHash());
+        SetMockTime(GetTime() + 1);
+        return block;
+    }
+
+    void RewindCore(int height)
+    {
+        struct RestoreNEVMConnection {
+            const bool previous{fNEVMConnection};
+            ~RestoreNEVMConnection() { fNEVMConnection = previous; }
+        } restore;
+        fNEVMConnection = false;
+        auto& chainman{*Assert(m_node.chainman)};
+        auto& chainstate{chainman.ActiveChainstate()};
+        LOCK2(::cs_main, chainstate.MempoolMutex());
+        while (chainman.ActiveHeight() > height) {
+            BlockValidationState state;
+            BOOST_REQUIRE_MESSAGE(chainstate.DisconnectTip(
+                                      state, nullptr, /*bReverify=*/false),
+                                  state.ToString());
+            // A restart rebuilds candidates above the recovered coins tip.
+            // Restore entries pruned while this fixture first mined ahead.
+            chainstate.setBlockIndexCandidates.insert(chainman.ActiveTip());
+        }
+    }
 };
 
 bool ReplayDeferredForTest(Chainstate& chainstate,
@@ -527,6 +651,288 @@ BOOST_FIXTURE_TEST_CASE(deferred_nevm_replay_clears_only_at_exact_tip,
     BOOST_CHECK(!complete);
     BOOST_CHECK(!finalized);
     BOOST_CHECK(error.empty());
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_startup_ahead_pair_recovers_without_duplicate_connects,
+                        StartupNEVMRecoverySetup)
+{
+    auto& chainman{*Assert(m_node.chainman)};
+    MineNEVMBlock();
+    MineNEVMBlock();
+    const auto target{MineNEVMBlock()};
+    BOOST_REQUIRE_EQUAL(nevm->applied_count, 3U);
+    BOOST_REQUIRE_EQUAL(nevm->connected_blocks.size(), 3U);
+
+    // Model a restart with Core's coins tip behind the pair Geth retained.
+    // The same stored blocks remain available to ActivateBestChain.
+    RewindCore(101);
+    BOOST_REQUIRE(!chainman.IsInitialBlockDownload());
+    std::string error;
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.InitializeNEVMStartupPair(
+            nevm->applied_count, nevm->applied_hash, error));
+        BOOST_CHECK(chainman.HasPendingNEVMStartupPair());
+        BOOST_CHECK(chainman.MaybeCompleteNEVMStartupPair(error));
+        BOOST_CHECK(chainman.HasPendingNEVMStartupPair());
+    }
+    BOOST_CHECK(chainman.IsInitialBlockDownload());
+    BOOST_CHECK_THROW(MakeNEVMBlock(), std::runtime_error);
+    BOOST_CHECK_EQUAL(nevm->block_info_queries, 0U);
+
+    BlockValidationState state;
+    BOOST_REQUIRE_MESSAGE(
+        chainman.ActiveChainstate().ActivateBestChain(state),
+        state.ToString());
+    BOOST_CHECK(WITH_LOCK(
+        ::cs_main, return chainman.ActiveTip()->GetBlockHash()) ==
+                target->GetHash());
+    BOOST_CHECK(WITH_LOCK(
+        ::cs_main,
+        return chainman.ActiveChainstate().CoinsTip().GetBestBlock()) ==
+                target->GetHash());
+    BOOST_CHECK_EQUAL(nevm->connected_blocks.size(), 3U);
+    BOOST_CHECK(nevm->disconnected_blocks.empty());
+    BOOST_CHECK_GT(nevm->block_info_queries, 0U);
+    BOOST_CHECK(!chainman.HasPendingNEVMStartupPair());
+    BOOST_CHECK(!chainman.IsInitialBlockDownload());
+
+    // Recovery suppresses only the already-applied prefix. A subsequent
+    // block follows the ordinary external validation and notification path.
+    const auto next{MineNEVMBlock()};
+    BOOST_REQUIRE_EQUAL(nevm->connected_blocks.size(), 4U);
+    BOOST_CHECK(nevm->connected_blocks.back() == next->GetHash());
+    BOOST_CHECK_EQUAL(nevm->applied_count, 4U);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_startup_pair_requires_fresh_exact_completion,
+                        StartupNEVMRecoverySetup)
+{
+    auto& chainman{*Assert(m_node.chainman)};
+    MineNEVMBlock();
+    const auto previous{MineNEVMBlock()};
+    const auto target{MineNEVMBlock()};
+    RewindCore(102);
+    std::string error;
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.InitializeNEVMStartupPair(
+            3, target->GetHash(), error));
+
+        // A successful historical validation check does not publish a tip
+        // or establish that Core has recovered the external engine's pair.
+        auto& chainstate{chainman.ActiveChainstate()};
+        CCoinsViewCache view{&chainstate.CoinsTip()};
+        BlockValidationState check_state;
+        BOOST_REQUIRE(chainstate.ConnectBlock(
+            *target, check_state,
+            chainman.m_blockman.LookupBlockIndex(target->GetHash()),
+            view, /*fJustCheck=*/true));
+        BOOST_CHECK(chainman.ActiveTip()->GetBlockHash() ==
+                    previous->GetHash());
+        BOOST_CHECK(chainman.HasPendingNEVMStartupPair());
+        BOOST_CHECK_EQUAL(nevm->block_info_queries, 0U);
+        BOOST_CHECK_EQUAL(nevm->connected_blocks.size(), 3U);
+    }
+    nevm->block_info_error = "startup-test-status-unavailable";
+    BlockValidationState state;
+    const bool activated{
+        chainman.ActiveChainstate().ActivateBestChain(state)};
+    BOOST_CHECK(!activated);
+    BOOST_CHECK(state.IsError());
+    BOOST_CHECK(!state.IsInvalid());
+    BOOST_CHECK(WITH_LOCK(
+        ::cs_main, return chainman.ActiveTip()->GetBlockHash()) ==
+                target->GetHash());
+    BOOST_CHECK(chainman.HasPendingNEVMStartupPair());
+    BOOST_CHECK(chainman.IsInitialBlockDownload());
+    BOOST_CHECK_EQUAL(nevm->connected_blocks.size(), 3U);
+    BOOST_CHECK_GT(nevm->block_info_queries, 0U);
+
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK(!chainman.MaybeCompleteNEVMStartupPair(error));
+        BOOST_CHECK(!error.empty());
+        BOOST_CHECK(chainman.HasPendingNEVMStartupPair());
+
+        nevm->block_info_error.clear();
+        nevm->applied_hash = previous->GetHash();
+        BOOST_CHECK(!chainman.MaybeCompleteNEVMStartupPair(error));
+        BOOST_CHECK(chainman.HasPendingNEVMStartupPair());
+
+        nevm->applied_hash = target->GetHash();
+        nevm->applied_count = 2;
+        BOOST_CHECK(!chainman.MaybeCompleteNEVMStartupPair(error));
+        BOOST_CHECK(chainman.HasPendingNEVMStartupPair());
+    }
+    BOOST_CHECK(chainman.IsInitialBlockDownload());
+    {
+        LOCK(::cs_main);
+        nevm->applied_count = 3;
+        BOOST_REQUIRE(chainman.MaybeCompleteNEVMStartupPair(error));
+        BOOST_CHECK(error.empty());
+        BOOST_CHECK(!chainman.HasPendingNEVMStartupPair());
+        BOOST_CHECK((chainman.ActiveTip()->nStatus & BLOCK_FAILED_MASK) == 0);
+    }
+    BOOST_CHECK(!chainman.IsInitialBlockDownload());
+    BOOST_CHECK_EQUAL(nevm->connected_blocks.size(), 3U);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_startup_pair_inside_known_suffix_resumes_delivery,
+                        StartupNEVMRecoverySetup)
+{
+    auto& chainman{*Assert(m_node.chainman)};
+    MineNEVMBlock();
+    MineNEVMBlock();
+    const auto applied{MineNEVMBlock()};
+    const auto next{MineNEVMBlock()};
+    // Core may already have the following block available on disk even
+    // though Geth's retained applied pair ends one block earlier.
+    nevm->applied_count = 3;
+    nevm->applied_hash = applied->GetHash();
+    nevm->connected_blocks.resize(3);
+    RewindCore(101);
+    std::string error;
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.InitializeNEVMStartupPair(
+            nevm->applied_count, nevm->applied_hash, error));
+    }
+    BlockValidationState state;
+    BOOST_REQUIRE_MESSAGE(
+        chainman.ActiveChainstate().ActivateBestChain(state),
+        state.ToString());
+    BOOST_CHECK(WITH_LOCK(
+        ::cs_main, return chainman.ActiveTip()->GetBlockHash()) ==
+                next->GetHash());
+    BOOST_REQUIRE_EQUAL(nevm->connected_blocks.size(), 4U);
+    BOOST_CHECK(nevm->connected_blocks.back() == next->GetHash());
+    BOOST_CHECK_EQUAL(nevm->applied_count, 4U);
+    BOOST_CHECK_GT(nevm->block_info_queries, 0U);
+    BOOST_CHECK(!chainman.HasPendingNEVMStartupPair());
+    BOOST_CHECK(!chainman.IsInitialBlockDownload());
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_startup_pair_rejects_other_branch_as_local_error,
+                        StartupNEVMRecoverySetup)
+{
+    auto& chainman{*Assert(m_node.chainman)};
+    const auto first{MineNEVMBlock()};
+    // Both children are ordinary valid templates built on the same parent.
+    const auto alternative{MakeNEVMBlock()};
+    const auto second{MineNEVMBlock()};
+    BOOST_REQUIRE(alternative->GetHash() != second->GetHash());
+    const auto target{MineNEVMBlock()};
+    RewindCore(101);
+
+    std::string error;
+    auto& chainstate{chainman.ActiveChainstate()};
+    LOCK2(::cs_main, chainstate.MempoolMutex());
+    BOOST_REQUIRE(chainman.InitializeNEVMStartupPair(
+        3, target->GetHash(), error));
+    CBlockIndex alternative_index{alternative->GetBlockHeader()};
+    const uint256 alternative_hash{alternative->GetHash()};
+    alternative_index.phashBlock = &alternative_hash;
+    alternative_index.nHeight = 102;
+    alternative_index.pprev = chainman.ActiveTip();
+    alternative_index.BuildSkip();
+    const auto original_status{alternative_index.nStatus};
+    CCoinsViewCache view{&chainstate.CoinsTip()};
+    BlockValidationState state;
+    BOOST_CHECK(!chainstate.ConnectBlock(
+        *alternative, state, &alternative_index, view));
+    BOOST_CHECK(state.IsError());
+    BOOST_CHECK(!state.IsInvalid());
+    BOOST_CHECK(view.GetBestBlock() == first->GetHash());
+    BOOST_CHECK_EQUAL(alternative_index.nStatus, original_status);
+    BOOST_CHECK_EQUAL(nevm->connected_blocks.size(), 3U);
+    BOOST_CHECK(chainman.HasPendingNEVMStartupPair());
+
+    BlockValidationState disconnect_state;
+    BOOST_CHECK(!chainstate.DisconnectTip(disconnect_state, nullptr));
+    BOOST_CHECK(disconnect_state.IsError());
+    BOOST_CHECK(!disconnect_state.IsInvalid());
+    BOOST_CHECK(chainman.ActiveTip()->GetBlockHash() == first->GetHash());
+    BOOST_CHECK(nevm->disconnected_blocks.empty());
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_startup_pair_preserves_matched_behind_and_zero_status,
+                        StartupNEVMRecoverySetup)
+{
+    auto& chainman{*Assert(m_node.chainman)};
+    const auto first{MineNEVMBlock()};
+    const auto second{MineNEVMBlock()};
+    const auto third{MineNEVMBlock()};
+    std::string error;
+    LOCK(::cs_main);
+    BOOST_CHECK(chainman.InitializeNEVMStartupPair(3, third->GetHash(), error));
+    BOOST_CHECK(!chainman.HasPendingNEVMStartupPair());
+    BOOST_CHECK(chainman.InitializeNEVMStartupPair(2, second->GetHash(), error));
+    BOOST_CHECK(!chainman.HasPendingNEVMStartupPair());
+    BOOST_CHECK(chainman.InitializeNEVMStartupPair(0, uint256{}, error));
+    BOOST_CHECK(!chainman.HasPendingNEVMStartupPair());
+
+    BOOST_CHECK(!chainman.InitializeNEVMStartupPair(0, first->GetHash(), error));
+    BOOST_CHECK(!chainman.InitializeNEVMStartupPair(1, uint256{}, error));
+    BOOST_CHECK(!chainman.InitializeNEVMStartupPair(2, first->GetHash(), error));
+    BOOST_CHECK(!chainman.InitializeNEVMStartupPair(
+        std::numeric_limits<uint64_t>::max(), third->GetHash(), error));
+    BOOST_CHECK(!chainman.HasPendingNEVMStartupPair());
+    BOOST_CHECK_EQUAL(nevm->connected_blocks.size(), 3U);
+    BOOST_CHECK_EQUAL(nevm->block_info_queries, 0U);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_startup_unknown_ahead_pair_waits_for_headers,
+                        StartupNEVMRecoverySetup)
+{
+    auto& chainman{*Assert(m_node.chainman)};
+    const auto first{MineNEVMBlock()};
+    const auto second{MineNEVMBlock()};
+    MineNEVMBlock();
+    const auto future{MakeNEVMBlock()};
+    const auto delivered_before{nevm->connected_blocks.size()};
+    nevm->applied_count = 4;
+    nevm->applied_hash = future->GetHash();
+    RewindCore(101);
+
+    // A crash can also leave the paired block's index entry unflushed.
+    // A local status pair whose header is unavailable must keep recovery
+    // open without treating another available branch as already applied.
+    const uint256 unavailable_hash{future->GetHash()};
+    std::string error;
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.m_blockman.LookupBlockIndex(unavailable_hash) ==
+                      nullptr);
+        BOOST_REQUIRE(chainman.InitializeNEVMStartupPair(
+            nevm->applied_count, unavailable_hash, error));
+        const CBlockIndex* available{
+            chainman.m_blockman.LookupBlockIndex(second->GetHash())};
+        BOOST_REQUIRE(available != nullptr);
+        BOOST_CHECK(!chainman.CheckNEVMStartupConnect(*available, error));
+        BOOST_CHECK(!error.empty());
+    }
+    BlockValidationState state;
+    BOOST_REQUIRE(chainman.ActiveChainstate().ActivateBestChain(state));
+    BOOST_CHECK(state.IsValid());
+    BOOST_CHECK(WITH_LOCK(
+        ::cs_main, return chainman.ActiveTip()->GetBlockHash()) ==
+                first->GetHash());
+    BOOST_CHECK(chainman.HasPendingNEVMStartupPair());
+    BOOST_CHECK(chainman.IsInitialBlockDownload());
+    BOOST_CHECK_EQUAL(nevm->connected_blocks.size(), delivered_before);
+    BOOST_CHECK_EQUAL(nevm->block_info_queries, 0U);
+
+    // Ordinary block receipt supplies the missing header and resumes the
+    // stored suffix. The retained pair is rechecked after Core reaches it.
+    BOOST_REQUIRE(chainman.ProcessNewBlock(future, true, true, nullptr));
+    BOOST_CHECK(WITH_LOCK(
+        ::cs_main, return chainman.ActiveTip()->GetBlockHash()) ==
+                future->GetHash());
+    BOOST_CHECK_EQUAL(nevm->connected_blocks.size(), delivered_before);
+    BOOST_CHECK_GT(nevm->block_info_queries, 0U);
+    BOOST_CHECK(!chainman.HasPendingNEVMStartupPair());
+    BOOST_CHECK(!chainman.IsInitialBlockDownload());
 }
 
 BOOST_AUTO_TEST_CASE(coins_recovery_marker_validation)

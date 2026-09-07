@@ -155,6 +155,12 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(
             "PQ activation handoff is in sync-only quarantine");
     }
     // SYSCOIN END: Public PQ activation block-production gate.
+    // SYSCOIN: Geth may still be ahead of the recovered Core tip. Do not
+    // request a template until its exact applied pair is active locally.
+    if (m_chainstate.m_chainman.HasPendingNEVMStartupPair()) {
+        throw std::runtime_error(
+            "NEVM startup pairing is waiting for Core block recovery");
+    }
     nHeight = pindexPrev->nHeight + 1;
     // SYSCOIN
     const bool btcp_required{llmq::pq::IsBTCPREVCommitmentHeight(

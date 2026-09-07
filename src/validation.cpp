@@ -3002,6 +3002,9 @@ bool ChainstateManager::IsPQBlockProductionAllowed() const noexcept
 // authentication, snapshot validation, and required Geth startup are ready.
 bool ChainstateManager::IsInitialBlockDownload() const
 {
+    // SYSCOIN: Pair reconciliation precedes even an already latched IBD
+    // result; a running child alone does not establish its Core branch.
+    if (HasPendingNEVMStartupPair()) return true;
     // Optimization: pre-test latch before taking the lock.
     if (m_cached_finished_ibd.load(std::memory_order_relaxed))
         return false;
@@ -3166,7 +3169,8 @@ void ChainstateManager::MaybeCompleteInitialBlockDownload()
 
 bool ChainstateManager::MaybeStartNEVMNetwork()
 {
-    if (!fNEVMConnection || fRegTest || m_interrupt ||
+    if (HasPendingNEVMStartupPair() ||
+        !fNEVMConnection || fRegTest || m_interrupt ||
         IsInitialBlockDownload()) {
         return true;
     }
@@ -3186,6 +3190,116 @@ bool ChainstateManager::MaybeStartNEVMNetwork()
                                         std::memory_order_relaxed);
     }
     return response;
+}
+
+bool ChainstateManager::InitializeNEVMStartupPair(
+    uint64_t geth_count, const uint256& syscoin_hash, std::string& error)
+{
+    AssertLockHeld(cs_main);
+    error.clear();
+    if (m_nevm_startup_pair) {
+        error = "NEVM startup pair is already awaiting Core recovery";
+        return false;
+    }
+    if (geth_count == 0) {
+        if (syscoin_hash.IsNull()) return true;
+        error = "Geth reports a Syscoin hash with a zero applied count";
+        return false;
+    }
+    const int64_t start{GetConsensus().nNEVMStartBlock};
+    if (start < 0 || syscoin_hash.IsNull() ||
+        geth_count > static_cast<uint64_t>(
+                         std::numeric_limits<int64_t>::max() - start)) {
+        error = "Geth reports an invalid applied Syscoin pair";
+        return false;
+    }
+    const int64_t height{start + static_cast<int64_t>(geth_count) - 1};
+    if (height > std::numeric_limits<int32_t>::max()) {
+        error = "Geth's applied Syscoin height is out of range";
+        return false;
+    }
+    const CBlockIndex* tip{ActiveTip()};
+    const CBlockIndex* applied{m_blockman.LookupBlockIndex(syscoin_hash)};
+    if (tip != nullptr && height <= tip->nHeight) {
+        const CBlockIndex* ancestor{tip->GetAncestor(static_cast<int32_t>(height))};
+        if (ancestor != nullptr && DoesNEVMBlockInfoMatchSyscoinBlock(
+                start, geth_count, ancestor->nHeight, syscoin_hash,
+                ancestor->GetBlockHash())) {
+            return true;
+        }
+        error = "Geth's applied Syscoin pair is on a different Core branch";
+        return false;
+    }
+    if (applied != nullptr &&
+        (applied->nHeight != height ||
+         (applied->nStatus & (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK)) ||
+         (tip != nullptr && applied->GetAncestor(tip->nHeight) != tip))) {
+        error = "Geth's ahead Syscoin pair conflicts with Core's recovered branch";
+        return false;
+    }
+    // The header may also have been lost before the last block-index flush.
+    // Keep ordinary header/block acquisition open until its ancestry is known.
+    m_nevm_startup_pair = NEVMStartupPair{
+        static_cast<int32_t>(height), syscoin_hash};
+    m_nevm_startup_pair_pending.store(true, std::memory_order_release);
+    return true;
+}
+
+bool ChainstateManager::CheckNEVMStartupConnect(
+    const CBlockIndex& index, std::string& error) const
+{
+    AssertLockHeld(cs_main);
+    error.clear();
+    if (!m_nevm_startup_pair) return true;
+    const auto& pair{*m_nevm_startup_pair};
+    const CBlockIndex* applied{m_blockman.LookupBlockIndex(pair.block_hash)};
+    if (applied == nullptr) {
+        error = "NEVM startup recovery is awaiting the applied pair's headers";
+        return false;
+    }
+    const CBlockIndex* ancestor{index.nHeight <= applied->nHeight
+        ? applied->GetAncestor(index.nHeight) : nullptr};
+    if (applied->nHeight != pair.height ||
+        (applied->nStatus & (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK)) ||
+        ancestor == nullptr || ancestor->GetBlockHash() != index.GetBlockHash()) {
+        error = "NEVM startup recovery would leave Geth's applied Syscoin branch";
+        return false;
+    }
+    return true;
+}
+
+bool ChainstateManager::MaybeCompleteNEVMStartupPair(std::string& error)
+{
+    AssertLockHeld(cs_main);
+    error.clear();
+    if (!m_nevm_startup_pair) return true;
+    const auto& pair{*m_nevm_startup_pair};
+    const CBlockIndex* tip{ActiveTip()};
+    if (tip == nullptr || tip->nHeight < pair.height) return true;
+    const CBlockIndex* applied{tip->GetAncestor(pair.height)};
+    if (applied == nullptr || applied->GetBlockHash() != pair.block_hash) {
+        error = "Recovered Core tip does not contain Geth's startup pair";
+        return false;
+    }
+    uint64_t count{0};
+    uint256 syscoin_hash;
+    std::string status_error;
+    // cs_main excludes branch changes across this synchronous status snapshot.
+    // Callers have already published the real connected tip, not fJustCheck.
+    GetMainSignals().NotifyGetNEVMBlockInfo(count, syscoin_hash, status_error);
+    if (!status_error.empty() || !DoesNEVMBlockInfoMatchSyscoinBlock(
+            GetConsensus().nNEVMStartBlock, count, pair.height,
+            syscoin_hash, pair.block_hash)) {
+        error = status_error.empty()
+            ? "Geth's applied pair changed during Core startup recovery"
+            : "Geth's applied pair is unavailable after Core recovery: " + status_error;
+        return false;
+    }
+    LogPrintf("Core recovered Geth's exact startup pair %s at height %d\n",
+              pair.block_hash.ToString(), pair.height);
+    m_nevm_startup_pair.reset();
+    m_nevm_startup_pair_pending.store(false, std::memory_order_release);
+    return true;
 }
 
 void Chainstate::CheckForkWarningConditions()
@@ -3542,7 +3656,23 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
     }
     std::string stateStr;
     const bool bypass_external_notify = ShouldBypassExternalNEVMNotifyCalls(m_chainman, nHeight);
-    if(fNEVMConnection && !bypass_external_notify && !defer_btcc_nevm) {
+    bool startup_already_applied{false};
+    {
+        LOCK(cs_main);
+        startup_already_applied = m_chainman.HasPendingNEVMStartupPair();
+        if (startup_already_applied &&
+            (pindex == nullptr ||
+             !m_chainman.CheckNEVMStartupConnect(*pindex, stateStr))) {
+            return state.Error(stateStr.empty()
+                ? "NEVM startup recovery requires a branch-bound block"
+                : stateStr);
+        }
+    }
+    // Geth accepts an exact current-tip retry, not older canonical blocks.
+    // Only this already-paired ancestry skips the external notification;
+    // receipt, transaction and local state validation above still execute.
+    if(fNEVMConnection && !bypass_external_notify && !defer_btcc_nevm &&
+       !startup_already_applied) {
         if (m_chainman.m_interrupt) {
             return state.Error("shutdown");
         }
@@ -4299,6 +4429,13 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
 {
     AssertLockHeld(cs_main);
     assert(pindex);
+
+    // SYSCOIN: Reject a local recovery alignment error before special-tx or
+    // coins state can change. It does not make a competing block invalid.
+    std::string startup_pair_error;
+    if (!m_chainman.CheckNEVMStartupConnect(*pindex, startup_pair_error)) {
+        return state.Error(startup_pair_error);
+    }
 
     uint256 block_hash{block.GetHash()};
     assert(*pindex->phashBlock == block_hash);
@@ -5334,6 +5471,12 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
 {
     AssertLockHeld(cs_main);
     if (m_mempool) AssertLockHeld(m_mempool->cs);
+
+    // SYSCOIN: Geth is still above this tip. Undoing a Core ancestor would
+    // neither disconnect Geth's actual tip nor preserve the pending branch.
+    if (m_chainman.HasPendingNEVMStartupPair()) {
+        return state.Error("Cannot disconnect Core while its Geth startup pair is pending");
+    }
 
     CBlockIndex *pindexDelete = m_chain.Tip();
     assert(pindexDelete);
@@ -6560,6 +6703,19 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
             // authentication keeps the public IBD latch active.
             const bool was_base_sync_complete{
                 m_chainman.IsBaseBlockSyncComplete()};
+            if (this == &m_chainman.ActiveChainstate() &&
+                m_chainman.HasPendingNEVMStartupPair()) {
+                const auto& pair{*m_chainman.m_nevm_startup_pair};
+                if (m_blockman.LookupBlockIndex(pair.block_hash) == nullptr) {
+                    // A crash may also precede the block-index flush. Header
+                    // and block acquisition remain open while activation waits.
+                    return true;
+                }
+                std::string startup_pair_error;
+                if (!m_chainman.MaybeCompleteNEVMStartupPair(startup_pair_error)) {
+                    return state.Error(startup_pair_error);
+                }
+            }
             CBlockIndex* starting_tip = m_chain.Tip();
             bool blocks_connected = false;
             // SYSCOIN: A deferred receipt branch yields immediately to another
@@ -6686,6 +6842,17 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
         // that the best block hash is non-null.
         if (m_chainman.m_interrupt) break;
     } while (pindexNewTip != pindexMostWork);
+
+    if (this == &m_chainman.ActiveChainstate()) {
+        LOCK(cs_main);
+        std::string startup_pair_error;
+        if (!m_chainman.MaybeCompleteNEVMStartupPair(startup_pair_error)) {
+            // The connected blocks and notifications are already published.
+            // Preserve the pending pair for a later status retry; no block is
+            // invalidated because the external process changed or is unavailable.
+            return state.Error(startup_pair_error);
+        }
+    }
 
     m_chainman.CheckBlockIndex();
 
@@ -9764,6 +9931,12 @@ bool ChainstateManager::ActivateSnapshot(
         const SnapshotMetadata& metadata,
         bool in_memory)
 {
+    // SYSCOIN: A snapshot must not jump over real block reconnection and
+    // thereby complete pairing without recovering the already-applied prefix.
+    if (HasPendingNEVMStartupPair()) {
+        LogPrintf("[snapshot] waiting for NEVM startup pair recovery\n");
+        return false;
+    }
     uint256 base_blockhash = metadata.m_base_blockhash;
 
     if (this->SnapshotBlockhash()) {

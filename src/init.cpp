@@ -2318,50 +2318,26 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         }
         if(geth_ready) {
             int64_t nHeightLocalGeth;
-            bool geth_syscoin_pair_matches{false};
+            bool geth_syscoin_pair_accepted{false};
+            std::string geth_pair_error;
             {
                 LOCK(cs_main);
                 nHeightLocalGeth = (chainman.ActiveChain().Height() - Params().GetConsensus().nNEVMStartBlock) + 1;
                 if(nHeightLocalGeth < 0) {
                     nHeightLocalGeth = 0;
                 }
-                // SYSCOIN: The count is not a branch identity. Refuse to make
-                // Geth operational unless its atomically reported last pair is
-                // the exact active Syscoin ancestor at that height.
-                const int64_t nevm_start{
-                    Params().GetConsensus().nNEVMStartBlock};
-                if (nHeightFromGeth == 0) {
-                    geth_syscoin_pair_matches =
-                        lastSYSBlockHashFromGeth.IsNull();
-                } else if (
-                    nevm_start >= 0 &&
-                    nHeightFromGeth <= static_cast<uint64_t>(
-                        std::numeric_limits<int64_t>::max() - nevm_start)) {
-                    const int64_t last_applied_height{
-                        nevm_start + static_cast<int64_t>(nHeightFromGeth) - 1};
-                    const CBlockIndex* applied_index{
-                        last_applied_height >= 0 &&
-                                last_applied_height <=
-                                    chainman.ActiveChain().Height()
-                            ? chainman.ActiveChain()[
-                                  static_cast<int32_t>(last_applied_height)]
-                            : nullptr};
-                    geth_syscoin_pair_matches =
-                        applied_index != nullptr &&
-                        DoesNEVMBlockInfoMatchSyscoinBlock(
-                            nevm_start, nHeightFromGeth,
-                            static_cast<uint32_t>(last_applied_height),
-                            lastSYSBlockHashFromGeth,
-                            applied_index->GetBlockHash());
-                }
+                // SYSCOIN: Geth can retain a newer pair than the last Core
+                // coins flush. Reconcile that exact prefix before readiness.
+                geth_syscoin_pair_accepted = chainman.InitializeNEVMStartupPair(
+                    nHeightFromGeth, lastSYSBlockHashFromGeth, geth_pair_error);
             }
-            if (!geth_syscoin_pair_matches) {
+            if (!geth_syscoin_pair_accepted) {
                 node.chainman->ActiveChainstate().StopGethNode(true);
                 fNEVMConnection = false;
-                return InitError(Untranslated(
-                    "Geth's last applied Syscoin block does not match the "
-                    "active Syscoin branch. Refusing NEVM startup; rebuild "
-                    "Geth state with -reindex-chainstate."));
+                return InitError(Untranslated(strprintf(
+                    "Cannot reconcile Geth's applied Syscoin pair: %s. "
+                    "Preserve both databases and repair their branch alignment.",
+                    geth_pair_error)));
             }
             LogPrintf("Geth nHeightFromGeth %d nHeightLocalGeth %d\n", nHeightFromGeth, nHeightLocalGeth);
             {

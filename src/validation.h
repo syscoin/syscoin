@@ -1227,6 +1227,15 @@ private:
 
     std::atomic<uint32_t> m_skip_external_nevm_notifies_until_height{0};
 
+    // SYSCOIN: A Geth pair ahead of the recovered coins tip is a temporary
+    // startup obligation, never a height-only notification bypass.
+    struct NEVMStartupPair {
+        int32_t height;
+        uint256 block_hash;
+    };
+    std::optional<NEVMStartupPair> m_nevm_startup_pair GUARDED_BY(::cs_main);
+    std::atomic<bool> m_nevm_startup_pair_pending{false};
+
 public:
     using Options = kernel::ChainstateManagerOpts;
 
@@ -1553,6 +1562,22 @@ public:
 
     /** Start NEVM peer networking after IBD and deferred replay are complete. */
     [[nodiscard]] bool MaybeStartNEVMNetwork();
+
+    /** Accept a paired startup snapshot, retaining an ahead pair for recovery. */
+    [[nodiscard]] bool InitializeNEVMStartupPair(
+        uint64_t geth_count, const uint256& syscoin_hash, std::string& error)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool HasPendingNEVMStartupPair() const noexcept
+    {
+        return m_nevm_startup_pair_pending.load(std::memory_order_acquire);
+    }
+    /** Only exact ancestors of the pending pair may reconnect without Geth. */
+    [[nodiscard]] bool CheckNEVMStartupConnect(
+        const CBlockIndex& index, std::string& error) const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** Re-read Geth after the exact pair has actually become active locally. */
+    [[nodiscard]] bool MaybeCompleteNEVMStartupPair(std::string& error)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     void ResetNEVMNetworkStart()
     {
         m_nevm_network_start_sent.store(false,
