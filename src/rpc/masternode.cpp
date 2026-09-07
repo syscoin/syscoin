@@ -505,7 +505,7 @@ RPCHelpMan masternode_payments()
                 voutMasternodePayments, voutDummy)) {
             throw JSONRPCError(
                 RPC_INTERNAL_ERROR,
-                "Governance state is unavailable for payment calculation");
+                "Payment or governance state is unavailable for payment calculation");
         }
 
         UniValue blockObj(UniValue::VOBJ);

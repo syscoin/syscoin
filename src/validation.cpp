@@ -4729,6 +4729,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         const CAmount blockReward = GetBlockSubsidy(pindex->nHeight, params.GetConsensus());
         CAmount nMNSeniorityRet = 0;
         CAmount nMNFloorDiffRet = 0;
+        MasternodePaymentStatus payment_status;
         std::vector<bool> matched_payment_outputs;
         // A ChainLock may provide the historical fallback only for strict
         // ancestors. The ChainLocked block itself must pass exact governance
@@ -4750,7 +4751,10 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             }
         }
         // detect MN was paid properly, accounting for seniority which is added to subsidy
-        if (!IsBlockPayeeValid(m_chain, *block.vtx[0], pindex->nHeight, blockReward, nFees, nMNSeniorityRet, nMNFloorDiffRet, &matched_payment_outputs)) {
+        if (!IsBlockPayeeValid(m_chain, *block.vtx[0], pindex->nHeight, blockReward, nFees, nMNSeniorityRet, nMNFloorDiffRet, &matched_payment_outputs, &payment_status)) {
+            if (payment_status == MasternodePaymentStatus::UNAVAILABLE) {
+                return state.Error("failed-pq-payment-eligibility-state");
+            }
             LogPrintf("ERROR: ConnectBlock(): couldn't find masternode or superblock payments\n");
             return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-cb-payee");
         }
@@ -4760,7 +4764,8 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         // add seniority to reward when checking for limit
         const bool block_value_valid{IsBlockValueValid(
             block, pindex,
-            blockReward + nFees + nMNSeniorityRet + nMNFloorDiffRet,
+            GetBlockPaymentValueLimit(payment_status, blockReward, nFees,
+                                      nMNSeniorityRet, nMNFloorDiffRet),
             strError, fJustCheck, check_superblock,
             &exact_superblock_validation, &matched_payment_outputs,
             &governance_state_available)};

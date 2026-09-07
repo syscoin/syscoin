@@ -267,7 +267,7 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(
                 nFees, pblocktemplate->voutMasternodePayments,
                 pblocktemplate->voutSuperblockPayments)) {
             throw std::runtime_error(
-                "Governance state is unavailable for block template");
+                "Payment or governance state is unavailable for block template");
         }
     }
     if(NEVMActive_context && fNEVMConnection) {

@@ -1792,8 +1792,18 @@ active global key and a `FROZEN_PRESENT` child root for the payment's target
 epoch. Preparation and legacy payments below `A` are unchanged. Payment
 probation then filters only that root-capable deterministic queue. If every
 root-capable payee is withheld, selection falls back to the same root-capable
-queue so an audit outage cannot remove its last payee. A post-activation state with no
-root-capable valid payee is rejected rather than paying a rootless operator.
+queue so an audit outage cannot remove its last payee. When the authenticated
+post-activation state has no root-capable valid payee, blocks can still advance
+the registry and restore eligibility. The ordinary coinbase allowance is then
+the miner's `(subsidy + 3) / 4 + fees`, using integer division: the normal miner
+subsidy share plus all transaction fees. The sentry subsidy remains unminted,
+and no sentry seniority or minimum-payment top-up is created. With that full
+allowance claimed, fees are transferred without being burned and ordinary net
+issuance is `(subsidy + 3) / 4`, before any other burns. Required governance
+payments remain separate and unchanged. Missing or unreadable eligibility state
+is not an empty set and still fails closed. Normal parent-state payee selection
+and the existing half-fee split resume as soon as an eligible operator exists;
+registration alone need not satisfy the root cutoff.
 
 One audit is attempted per 288-block epoch, about twelve hours at the nominal
 2.5-minute spacing. Its subject is the newest frozen 400-member roster, not
@@ -2324,7 +2334,8 @@ Expected failures are fail-closed:
 | Covering payment-audit CLSIG is absent, off-branch, below-terminal, or invalid | Keep requesting a valid descendant; the marker grants no authority and no covered certificate may be pruned |
 | Payment-audit state, pre-seal, checkpoint, certificate, or prune-batch fsync fails | Keep the obligation and gates active; never publish provisional state, clear a marker, advance a checkpoint, or infer an empty audit |
 | All root-capable valid payees are payment-withheld | Use the ordinary root-capable deterministic payee as the explicit liveness fallback |
-| No root-capable valid payee exists at or after `A` | Reject the block; never redirect the masternode reward to a rootless operator or the miner |
+| Authenticated state has no root-capable valid payee at or after `A` | Permit progression with the sentry subsidy unminted; pay the miner its normal subsidy share plus all fees, retain required governance payments, and create no sentry seniority or minimum-payment top-up |
+| Root-capable payee state is unavailable or corrupt | Fail closed; never substitute the verified-empty payment rule |
 | Regtest preparation profile supplies activation, candidate, or receipt fields | Fail startup; preparation has registry/quorum history only and no finality state |
 | Partial public or full regtest deployment profile | Fail startup; never infer missing activation, receipt state, or schedule values |
 | No durable winner yet | Continue ordinary valid-most-work fork choice and forbid destructive auxiliary-state GC |
@@ -2572,8 +2583,12 @@ Expected failures are fail-closed:
 - Failed payment-eligibility cache insertion preserves the list/index bijection,
   bounded size, and existing entries, publishes no partial result, and permits
   retry. A local lookup exception during block checking or connection is an
-  availability error, never consensus-invalid; actual empty eligibility after
-  activation remains consensus-invalid.
+  availability error, never consensus-invalid. Authenticated empty eligibility
+  after activation permits registry progression while leaving the sentry
+  subsidy allocation unminted and paying all fees to the miner. Verify the
+  reduced ordinary coinbase cap, fee conservation and subsidy rounding,
+  unchanged governance payments, and restoration of normal
+  payments after an authorized registration becomes root-capable.
 - Probation state remains exact and branch-pinned but is absent from roster
   selection inputs. Snapshots that differ only in misses/withholding build
   byte-identical rosters, and a reorg restores probation and roster state

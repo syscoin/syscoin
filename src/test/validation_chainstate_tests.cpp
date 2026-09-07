@@ -12,6 +12,7 @@
 #include <governance/governanceexceptions.h>
 #include <governance/pq_governance_auth.h> // SYSCOIN: PQ governance authorization fixtures.
 #include <governance/governancevote.h>
+#include <llmq/quorums_commitment.h>
 #include <masternode/masternodepayments.h>
 #include <masternode/masternodesync.h>
 #include <net.h> // SYSCOIN: bounded governance transport fixtures.
@@ -1104,6 +1105,278 @@ BOOST_FIXTURE_TEST_CASE(chainstate_update_tip, TestChain100Setup)
 }
 
 // SYSCOIN BEGIN: fork governance and PQ finality chainstate regressions.
+BOOST_FIXTURE_TEST_CASE(pq_empty_payment_templates_keep_miner_subsidy_and_all_fees,
+                        TestChain100Setup)
+{
+    LOCK(::cs_main);
+    auto& consensus{
+        const_cast<Consensus::Params&>(Params().GetConsensus())};
+    struct RestorePaymentProfile {
+        Consensus::Params& consensus;
+        const Consensus::Params original;
+        const int sync_mode;
+        ~RestorePaymentProfile()
+        {
+            consensus = original;
+            masternodeSync.SetSyncMode(sync_mode);
+        }
+    } restore{consensus, consensus, masternodeSync.GetAssetID()};
+    constexpr int preparation_height{1295};
+    constexpr int activation_height{1441};
+    consensus.DIP0003Height = preparation_height - 1;
+    consensus.DIP0003EnforcementHeight = preparation_height - 1;
+    consensus.nPQPreparationHeight = preparation_height;
+    consensus.nPQChainLockEpochOrigin = 1440;
+    consensus.nPQRegistrationCutoffBlocks = 144;
+    consensus.nPQFutureHorizonEpochs = 8;
+    consensus.nPQActivationHeight = activation_height;
+    llmq::pq::PQRegistryConfig registry_config;
+    BOOST_REQUIRE(llmq::pq::GetPQRegistryConfig(consensus, registry_config) ==
+                  llmq::pq::PQRegistryDeploymentResult::VALID);
+
+    int previous_superblock{0};
+    int superblock_height{0};
+    CSuperblock::GetNearestSuperblocksHeights(
+        activation_height, previous_superblock, superblock_height);
+    std::vector<uint256> hashes(static_cast<size_t>(superblock_height + 2));
+    std::vector<CBlockIndex> indices(hashes.size());
+    for (int height{0}; height <= superblock_height + 1; ++height) {
+        WriteLE32(hashes[height].begin(),
+                  static_cast<uint32_t>(height + 10'000));
+        auto& index{indices[height]};
+        index.nHeight = height;
+        index.phashBlock = &hashes[height];
+        index.pprev = height == 0 ? nullptr : &indices[height - 1];
+        index.BuildSkip();
+    }
+    CChain payment_chain;
+    payment_chain.SetTip(indices[preparation_height - 1]);
+    const CScript payout{GetScriptForDestination(
+        PKHash(coinbaseKey.GetPubKey()))};
+    auto mn_state{std::make_shared<CDeterministicMNState>()};
+    mn_state->keyIDOwner = coinbaseKey.GetPubKey().GetID();
+    mn_state->nRegisteredHeight = preparation_height - 10;
+    mn_state->nCollateralHeight = preparation_height - 10;
+    mn_state->scriptPayout = payout;
+    auto rootless_mn{std::make_shared<CDeterministicMN>(1)};
+    rootless_mn->proTxHash = uint256{200};
+    rootless_mn->collateralOutpoint = COutPoint{uint256{201}, 0};
+    rootless_mn->pdmnState = std::move(mn_state);
+    CDeterministicMNList base_list{
+        hashes[preparation_height - 1], preparation_height - 1, 0};
+    base_list.AddMN(rootless_mn);
+    BOOST_REQUIRE(base_list.GetValidMN(rootless_mn->proTxHash));
+    BOOST_REQUIRE(deterministicMNManager->m_evoDb->WriteThrough(
+        hashes[preparation_height - 1], base_list, /*fSync=*/true));
+
+    const auto make_coinbase = [&](CAmount value) {
+        CMutableTransaction tx;
+        tx.vin.resize(1);
+        tx.vin[0].prevout.SetNull();
+        tx.vout.emplace_back(value, payout);
+        return tx;
+    };
+    const auto check_payee = [&](const CMutableTransaction& tx, int height,
+                                 CAmount subsidy, CAmount fees,
+                                 MasternodePaymentStatus expected) {
+        CAmount seniority{77};
+        CAmount floor{88};
+        std::vector<bool> matched;
+        MasternodePaymentStatus status{MasternodePaymentStatus::UNAVAILABLE};
+        BOOST_REQUIRE(IsBlockPayeeValid(
+            payment_chain, CTransaction{tx}, height, subsidy, fees,
+            seniority, floor, &matched, &status));
+        BOOST_CHECK(status == expected);
+        BOOST_CHECK_EQUAL(matched.size(), tx.vout.size());
+        if (expected == MasternodePaymentStatus::PQ_NO_PAYEE) {
+            BOOST_CHECK_EQUAL(seniority, 0);
+            BOOST_CHECK_EQUAL(floor, 0);
+            BOOST_CHECK(std::none_of(matched.begin(), matched.end(),
+                                     [](bool used) { return used; }));
+        }
+        return GetBlockPaymentValueLimit(status, subsidy, fees,
+                                         seniority, floor);
+    };
+    std::vector<CTxOut> mn_outputs;
+    std::vector<CTxOut> governance_outputs;
+    constexpr CAmount legacy_subsidy{100 * COIN};
+    constexpr CAmount odd_fees{5};
+    auto legacy_empty_tx{make_coinbase(legacy_subsidy + odd_fees)};
+    BOOST_REQUIRE(FillBlockPayments(
+        payment_chain, legacy_empty_tx, preparation_height - 1,
+        legacy_subsidy, odd_fees, mn_outputs, governance_outputs));
+    BOOST_CHECK(mn_outputs.empty());
+    BOOST_CHECK_EQUAL(legacy_empty_tx.vout[0].nValue,
+                      legacy_subsidy + odd_fees);
+    BOOST_CHECK_EQUAL(check_payee(
+        legacy_empty_tx, preparation_height - 1, legacy_subsidy, odd_fees,
+        MasternodePaymentStatus::LEGACY_NO_PAYEE), legacy_subsidy + odd_fees);
+    auto legacy_tx{make_coinbase(legacy_subsidy + odd_fees)};
+    BOOST_REQUIRE(FillBlockPayments(
+        payment_chain, legacy_tx, preparation_height, legacy_subsidy,
+        odd_fees, mn_outputs, governance_outputs));
+    BOOST_REQUIRE_EQUAL(mn_outputs.size(), 1U);
+    BOOST_CHECK_EQUAL(legacy_tx.vout[0].nValue,
+                      legacy_subsidy / 4 + odd_fees / 2);
+    BOOST_CHECK_EQUAL(mn_outputs[0].nValue,
+                      legacy_subsidy * 3 / 4 + odd_fees / 2);
+    BOOST_CHECK_EQUAL(check_payee(
+        legacy_tx, preparation_height, legacy_subsidy, odd_fees,
+        MasternodePaymentStatus::PAYEE), legacy_subsidy + odd_fees);
+
+    CCoinsView base_view;
+    CCoinsViewCache coins{&base_view};
+    const llmq::CFinalCommitmentTxPayload no_legacy_commitment;
+    int processed_height{preparation_height - 1};
+    const auto process_through = [&](int target_height)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+        while (processed_height < target_height) {
+            const int height{++processed_height};
+            CBlock block;
+            block.hashPrevBlock = hashes[height - 1];
+            block.nTime = static_cast<uint32_t>(height);
+            block.vtx.emplace_back(MakeTransactionRef(make_coinbase(0)));
+            hashes[height] = block.GetHash();
+            BlockValidationState state;
+            CDeterministicMNListNEVMAddressDiff diff;
+            BOOST_REQUIRE_MESSAGE(deterministicMNManager->ProcessBlock(
+                block, &indices[height], state, coins, no_legacy_commitment,
+                diff, /*fJustCheck=*/false, /*ibd=*/true), state.ToString());
+        }
+        payment_chain.SetTip(indices[target_height]);
+    };
+    // Process the preparation history so the empty frozen-root view is
+    // authenticated independently of the still-valid legacy MN membership.
+    process_through(activation_height - 1);
+    CDeterministicMNCPtr payee;
+    BOOST_REQUIRE(deterministicMNManager->GetMNPayeeForBlock(
+        payment_chain.Tip(), payee));
+    BOOST_CHECK(!payee);
+    BOOST_REQUIRE(deterministicMNManager->GetListForBlock(
+        payment_chain.Tip()).GetValidMN(rootless_mn->proTxHash));
+    BOOST_REQUIRE(!CSuperblock::IsValidBlockHeight(activation_height));
+
+    for (const auto& [subsidy, fees] :
+         std::array<std::pair<CAmount, CAmount>, 8>{{
+             {100 * COIN, 0}, {100 * COIN + 1, 5}, {7, 3},
+             {4, 1}, {1, 0}, {0, 0}, {0, 5}, {0, 4}}}) {
+        const CAmount miner_subsidy{(subsidy + 3) / 4};
+        const CAmount expected{miner_subsidy + fees};
+        auto tx{make_coinbase(subsidy + fees)};
+        mn_outputs.clear();
+        governance_outputs.clear();
+        BOOST_REQUIRE(FillBlockPayments(
+            payment_chain, tx, activation_height, subsidy, fees,
+            mn_outputs, governance_outputs));
+        BOOST_CHECK(mn_outputs.empty());
+        BOOST_CHECK(governance_outputs.empty());
+        BOOST_REQUIRE_EQUAL(tx.vout.size(), 1U);
+        BOOST_CHECK_EQUAL(tx.vout[0].nValue, expected);
+        BOOST_CHECK_EQUAL(CTransaction{tx}.GetValueOut() - fees,
+                          miner_subsidy);
+        const CAmount limit{check_payee(
+            tx, activation_height, subsidy, fees,
+            MasternodePaymentStatus::PQ_NO_PAYEE)};
+        BOOST_CHECK_EQUAL(limit, expected);
+        BOOST_CHECK_EQUAL(GetBlockPaymentValueLimit(
+            MasternodePaymentStatus::PQ_NO_PAYEE, subsidy, fees,
+            /*mnSeniority=*/100 * COIN, /*mnFloorDiff=*/100 * COIN), expected);
+        CBlock block;
+        block.vtx.emplace_back(MakeTransactionRef(tx));
+        std::string error;
+        BOOST_CHECK(IsBlockValueValid(
+            block, &indices[activation_height], limit, error,
+            /*fJustCheck=*/true, /*check_superblock=*/true));
+        ++tx.vout[0].nValue;
+        block.vtx[0] = MakeTransactionRef(tx);
+        BOOST_CHECK(!IsBlockValueValid(
+            block, &indices[activation_height], limit, error,
+            /*fJustCheck=*/true, /*check_superblock=*/true));
+    }
+
+    // PQ accounting follows A even if a regtest profile delays the legacy
+    // enforcement height; a normal empty-set template retains the same cap.
+    consensus.DIP0003EnforcementHeight = superblock_height + 10;
+    BOOST_REQUIRE(!deterministicMNManager->IsDIP3Enforced(activation_height));
+    BOOST_REQUIRE(Consensus::CheckPQPaymentEligibility(
+        consensus, activation_height) ==
+        Consensus::PQPaymentEligibilityResult::ROOT_REQUIRED);
+    auto delayed_enforcement_tx{make_coinbase(legacy_subsidy + odd_fees)};
+    BOOST_REQUIRE(FillBlockPayments(
+        payment_chain, delayed_enforcement_tx, activation_height,
+        legacy_subsidy, odd_fees, mn_outputs, governance_outputs));
+    BOOST_CHECK_EQUAL(check_payee(
+        delayed_enforcement_tx, activation_height, legacy_subsidy, odd_fees,
+        MasternodePaymentStatus::PQ_NO_PAYEE),
+        legacy_subsidy / 4 + odd_fees);
+    BOOST_CHECK_EQUAL(CTransaction{delayed_enforcement_tx}.GetValueOut(),
+                      legacy_subsidy / 4 + odd_fees);
+
+    process_through(superblock_height - 1);
+    BOOST_REQUIRE(governance != nullptr);
+    BOOST_REQUIRE(governance_tests::PublishGovernanceReadyForTest(
+        *governance, *payment_chain.Tip()));
+    masternodeSync.SetSyncMode(MASTERNODE_SYNC_FINISHED);
+    auto superblock_tx{make_coinbase(legacy_subsidy + odd_fees)};
+    BOOST_REQUIRE(FillBlockPayments(
+        payment_chain, superblock_tx, superblock_height, legacy_subsidy,
+        odd_fees, mn_outputs, governance_outputs));
+    BOOST_CHECK(mn_outputs.empty());
+    BOOST_CHECK(governance_outputs.empty());
+    const CAmount limit{check_payee(
+        superblock_tx, superblock_height, legacy_subsidy, odd_fees,
+        MasternodePaymentStatus::PQ_NO_PAYEE)};
+    BOOST_CHECK_EQUAL(limit, legacy_subsidy / 4 + odd_fees);
+    BOOST_CHECK_EQUAL(CTransaction{superblock_tx}.GetValueOut() - odd_fees,
+                      legacy_subsidy / 4);
+    CBlock superblock;
+    superblock.vtx.emplace_back(MakeTransactionRef(superblock_tx));
+    std::string error;
+    bool exact{false};
+    BOOST_CHECK(IsBlockValueValid(
+        superblock, &indices[superblock_height], limit, error,
+        /*fJustCheck=*/true, /*check_superblock=*/true, &exact));
+    BOOST_CHECK(exact);
+    const CAmount payment_limit{CSuperblock::GetPaymentsLimit(
+        indices[superblock_height].GetAncestor(previous_superblock))};
+    const CAmount budget_up{std::min(
+        (payment_limit * CSuperblock::SHIFT_UP) / CSuperblock::SHIFT,
+        CSuperblock::SUPERBLOCK_BUDGET_MAX)};
+    BOOST_REQUIRE_GT(budget_up, 0);
+    superblock_tx.vout[0].nValue = limit + budget_up;
+    superblock.vtx[0] = MakeTransactionRef(superblock_tx);
+    for (const bool check_superblock : {true, false}) {
+        masternodeSync.SetSyncMode(check_superblock
+            ? MASTERNODE_SYNC_GOVERNANCE : MASTERNODE_SYNC_FINISHED);
+        exact = true;
+        BOOST_CHECK(IsBlockValueValid(
+            superblock, &indices[superblock_height], limit, error,
+            /*fJustCheck=*/true, check_superblock, &exact));
+        BOOST_CHECK(!exact);
+    }
+    ++superblock_tx.vout[0].nValue;
+    superblock.vtx[0] = MakeTransactionRef(superblock_tx);
+    BOOST_CHECK(!IsBlockValueValid(
+        superblock, &indices[superblock_height], limit, error,
+        /*fJustCheck=*/true, /*check_superblock=*/false));
+
+    // The next parent has not been processed: absence of its local view is
+    // an unavailable state, not an authenticated empty eligibility set.
+    payment_chain.SetTip(indices[superblock_height]);
+    auto unavailable_tx{make_coinbase(legacy_subsidy + odd_fees)};
+    BOOST_REQUIRE(!CSuperblock::IsValidBlockHeight(superblock_height + 1));
+    BOOST_CHECK(!FillBlockPayments(
+        payment_chain, unavailable_tx, superblock_height + 1,
+        legacy_subsidy, odd_fees, mn_outputs, governance_outputs));
+    CAmount seniority{0};
+    CAmount floor{0};
+    MasternodePaymentStatus status{MasternodePaymentStatus::PQ_NO_PAYEE};
+    BOOST_CHECK(!IsBlockPayeeValid(
+        payment_chain, CTransaction{unavailable_tx}, superblock_height + 1,
+        legacy_subsidy, odd_fees, seniority, floor, nullptr, &status));
+    BOOST_CHECK(status == MasternodePaymentStatus::UNAVAILABLE);
+}
+
 BOOST_FIXTURE_TEST_CASE(
     superblock_first_adaptive_cycle_uses_default_budget_only,
     TestChain100Setup)
@@ -1820,6 +2093,29 @@ BOOST_FIXTURE_TEST_CASE(
             /*blockReward=*/11 * COIN,
             /*nGovernanceBudget=*/2 * COIN,
             &previously_matched));
+
+    // Exact governance payments remain additional to the reduced ordinary
+    // allocation when the authenticated PQ payment set has no payee.
+    constexpr CAmount empty_subsidy{40 * COIN + 1};
+    constexpr CAmount empty_fees{5};
+    constexpr CAmount empty_miner_subsidy{10 * COIN + 1};
+    constexpr CAmount expected_empty_limit{empty_miner_subsidy + empty_fees};
+    const CAmount empty_limit{GetBlockPaymentValueLimit(
+        MasternodePaymentStatus::PQ_NO_PAYEE, empty_subsidy, empty_fees,
+        /*mnSeniority=*/100 * COIN, /*mnFloorDiff=*/100 * COIN)};
+    BOOST_CHECK_EQUAL(empty_limit, expected_empty_limit);
+    tx.vout = {CTxOut{expected_empty_limit, CScript{}}, required_output,
+               required_output};
+    BOOST_CHECK_EQUAL(CTransaction{tx}.GetValueOut() - empty_fees,
+                      empty_miner_subsidy + 2 * COIN);
+    std::vector<bool> empty_mn_matches(tx.vout.size(), false);
+    BOOST_CHECK(superblock->IsValid(
+        CTransaction{tx}, event_height, empty_limit,
+        /*nGovernanceBudget=*/2 * COIN, &empty_mn_matches));
+    ++tx.vout[0].nValue;
+    BOOST_CHECK(!superblock->IsValid(
+        CTransaction{tx}, event_height, empty_limit,
+        /*nGovernanceBudget=*/2 * COIN, &empty_mn_matches));
 }
 
 BOOST_FIXTURE_TEST_CASE(

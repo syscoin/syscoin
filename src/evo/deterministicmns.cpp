@@ -3047,12 +3047,9 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
                   pindexPrev->GetBlockHash().ToString(), e.what());
         return _state.Error("failed-pq-payment-eligibility-state");
     }
-    if (payment_eligibility ==
-            Consensus::PQPaymentEligibilityResult::ROOT_REQUIRED &&
-        !payee) {
-        return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
-                              "bad-pq-no-payment-eligible-mn");
-    }
+    // A verified empty PQ set must allow registrations to restore eligibility.
+    // Coinbase validation leaves its subsidy allocation unminted; unavailable
+    // parent state still fails above and cannot use this recovery policy.
     // at least 2 rounds of payments before registered MN's gets put in list
     const size_t mnCountThreshold = oldList.GetValidMNsCount()*2;
     // we iterate the oldList here and update the newList

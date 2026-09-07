@@ -6,14 +6,17 @@
 #include <coins.h>
 #include <consensus/pq_migration_config.h> // SYSCOIN: Exercise PQ activation boundaries.
 #include <consensus/validation.h>
+#include <crypto/slhdsa/slhdsa.h>
 #include <evo/providertx.h>
 #include <evo/specialtx.h>
 #include <evo/deterministicmns.h>
 #include <evo/pq_providertx.h>
 #include <chainparams.h>
 #include <dbwrapper.h>
+#include <key.h>
 #include <llmq/quorums_commitment.h>
 #include <masternode/masternodemeta.h>
+#include <messagesigner.h>
 #include <streams.h>
 #include <test/util/random.h>
 #include <test/util/setup_common.h>
@@ -31,6 +34,7 @@
 #include <initializer_list>
 #include <limits>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -1580,7 +1584,9 @@ BOOST_AUTO_TEST_CASE(payment_projection_stops_at_frozen_epoch_boundary)
     BOOST_CHECK_EQUAL(projection.size(), 1U);
 }
 
-BOOST_AUTO_TEST_CASE(pq_payment_root_gate_starts_at_activation)
+BOOST_FIXTURE_TEST_CASE(
+    pq_empty_payment_set_advances_until_registered_root_is_eligible,
+    BasicTestingSetup)
 {
     SelectParams(ChainType::REGTEST);
     LOCK(::cs_main);
@@ -1607,6 +1613,7 @@ BOOST_AUTO_TEST_CASE(pq_payment_root_gate_starts_at_activation)
     constexpr int preparation_height{1295};
     constexpr int epoch_origin{1440};
     constexpr int activation_height{1441};
+    constexpr int registration_height{activation_height + 2};
     consensus.DIP0003Height = preparation_height - 1;
     consensus.nPQPreparationHeight = preparation_height;
     consensus.nPQChainLockEpochOrigin = epoch_origin;
@@ -1618,6 +1625,21 @@ BOOST_AUTO_TEST_CASE(pq_payment_root_gate_starts_at_activation)
     BOOST_REQUIRE(llmq::pq::GetPQRegistryConfig(
                       consensus, registry_config) ==
                   llmq::pq::PQRegistryDeploymentResult::VALID);
+    const auto registration_view{llmq::pq::DeriveOperatorKeyScheduleView(
+        registry_config.schedule, registration_height,
+        registry_config.registration_cutoff_blocks,
+        registry_config.future_horizon_epochs)};
+    BOOST_REQUIRE(registration_view);
+    const uint32_t payment_epoch{registration_view->first_mutable_epoch};
+    const auto cutoff_height{llmq::pq::RegistrationCutoffHeight(
+        registry_config.schedule, payment_epoch,
+        registry_config.registration_cutoff_blocks)};
+    const auto first_payment_height{llmq::pq::EpochBaseHeight(
+        registry_config.schedule, payment_epoch)};
+    BOOST_REQUIRE(cutoff_height);
+    BOOST_REQUIRE(first_payment_height);
+    BOOST_REQUIRE_GT(*cutoff_height, registration_height);
+    BOOST_REQUIRE_GT(*first_payment_height, *cutoff_height);
 
     auto db_params = DBParams{
         .path = "testdb_dmn_pq_payment_root_gate",
@@ -1626,16 +1648,82 @@ BOOST_AUTO_TEST_CASE(pq_payment_root_gate_starts_at_activation)
         .wipe_data = true,
     };
     CDeterministicMNManager manager(db_params);
+    CKey owner_key;
+    owner_key.MakeNewKey(/*fCompressed=*/true);
+    auto member{std::make_shared<CDeterministicMN>(
+        *MakeLegacyReplayMN(0, 20))};
+    auto member_state{
+        std::make_shared<CDeterministicMNState>(*member->pdmnState)};
+    member_state->keyIDOwner = owner_key.GetPubKey().GetID();
+    member->pdmnState = std::move(member_state);
     const uint256 base_hash{MakeSnapshotKey(preparation_height - 1)};
     CDeterministicMNList base_list{
         base_hash, preparation_height - 1, 1};
-    base_list.AddMN(MakeLegacyReplayMN(0, 20),
-                    /*fBumpTotalCount=*/false);
+    base_list.AddMN(member, /*fBumpTotalCount=*/false);
     BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
         base_hash, base_list, /*fSync=*/true));
 
-    constexpr int block_count{
-        activation_height - preparation_height};
+    slhdsa::KeyGenerationSeed seed;
+    for (std::size_t i{0}; i < seed.size(); ++i) {
+        seed[i] = static_cast<uint8_t>(i + 91);
+    }
+    auto operator_key{slhdsa::GenerateSecretKey(seed)};
+    BOOST_REQUIRE(operator_key);
+    llmq::pq::ChildKeyTreeCommitment commitment;
+    commitment.generation = 1;
+    commitment.first_epoch = payment_epoch;
+    const auto tree_id{llmq::pq::GetChildKeyTreeId(
+        consensus.hashGenesisBlock, member->proTxHash,
+        commitment.generation, commitment.first_epoch)};
+    BOOST_REQUIRE(tree_id);
+    commitment.tree_id = *tree_id;
+    // This manager-level fixture authenticates registration and commits to a
+    // child root; it does not build or exercise a scheduled-WOTS signing tree.
+    commitment.root = MakeSnapshotKey(94'000);
+    BOOST_REQUIRE(commitment.IsStructurallyValid());
+
+    CMutableTransaction registration;
+    registration.nVersion = llmq::pq::PQ_GLOBAL_KEY_TX_VERSION;
+    registration.vin.emplace_back(COutPoint{MakeSnapshotKey(94'001), 0});
+    registration.vout.emplace_back(1, CScript{} << OP_TRUE);
+    llmq::pq::GlobalKeyTxPayload payload;
+    payload.operation = llmq::pq::GlobalKeyOperation::INITIAL;
+    payload.pro_tx_hash = member->proTxHash;
+    payload.candidate.key_version = 1;
+    payload.candidate.child_key_commitment = commitment;
+    BOOST_REQUIRE(operator_key->GetPublicKey(payload.candidate.public_key));
+    BOOST_REQUIRE(llmq::pq::IsGlobalKeyCandidateStructurallyValid(
+        payload.candidate));
+    payload.transaction_inputs_hash = CalcTxInputsHash(
+        CTransaction{registration});
+    const auto owner_digest{
+        llmq::pq::GetGlobalOwnerRegistrationAuthorizationHash(
+            consensus.hashGenesisBlock, payload)};
+    BOOST_REQUIRE(owner_digest);
+    std::vector<unsigned char> owner_signature;
+    BOOST_REQUIRE(CHashSigner::SignHash(
+        *owner_digest, owner_key, owner_signature));
+    BOOST_REQUIRE_EQUAL(owner_signature.size(),
+                        llmq::pq::COMPACT_ECDSA_SIGNATURE_SIZE);
+    std::copy(owner_signature.begin(), owner_signature.end(),
+              payload.owner_authorization.begin());
+    const auto registration_digest{
+        llmq::pq::GetGlobalRegistrationAuthorizationHash(
+            consensus.hashGenesisBlock, member->proTxHash,
+            payload.candidate, payload.transaction_inputs_hash)};
+    BOOST_REQUIRE(registration_digest);
+    BOOST_REQUIRE(slhdsa::SignDeterministic(
+        *operator_key,
+        std::span<const uint8_t>{registration_digest->begin(),
+                                 registration_digest->size()},
+        llmq::pq::GetGlobalAuthContext(
+            llmq::pq::GlobalAuthPurpose::GLOBAL_REGISTRATION),
+        payload.authorization));
+    SetTxPayload(registration, payload);
+    const auto registration_tx{MakeTransactionRef(std::move(registration))};
+
+    const int block_count{
+        *first_payment_height + 2 - preparation_height};
     std::vector<CBlock> blocks(static_cast<size_t>(block_count));
     std::vector<uint256> hashes(static_cast<size_t>(block_count));
     std::vector<CBlockIndex> indices(static_cast<size_t>(block_count));
@@ -1650,6 +1738,9 @@ BOOST_AUTO_TEST_CASE(pq_payment_root_gate_starts_at_activation)
         const int height{preparation_height + offset};
         auto& block{blocks[static_cast<size_t>(offset)]};
         block = MakeProviderMutationBlock({});
+        if (height == registration_height) {
+            block.vtx.emplace_back(registration_tx);
+        }
         block.hashPrevBlock = offset == 0
             ? base_hash
             : hashes[static_cast<size_t>(offset - 1)];
@@ -1664,38 +1755,84 @@ BOOST_AUTO_TEST_CASE(pq_payment_root_gate_starts_at_activation)
             : &indices[static_cast<size_t>(offset - 1)];
         index.phashBlock = &hashes[static_cast<size_t>(offset)];
 
+        const bool has_payee{
+            height < activation_height || height >= *first_payment_height};
+        CDeterministicMNCPtr payee;
+        BOOST_REQUIRE(manager.GetMNPayeeForBlock(index.pprev, payee));
+        std::vector<CDeterministicMNCPtr> projected_payees;
+        BOOST_REQUIRE(manager.GetProjectedMNPayeesForBlock(
+            index.pprev, 20, projected_payees));
+        if (has_payee) {
+            BOOST_REQUIRE(payee);
+            BOOST_CHECK(payee->proTxHash == member->proTxHash);
+            BOOST_REQUIRE_EQUAL(projected_payees.size(), 1U);
+            BOOST_CHECK(projected_payees.front()->proTxHash == member->proTxHash);
+        } else {
+            BOOST_CHECK(!payee);
+            BOOST_CHECK(projected_payees.empty());
+        }
+
+        if (height == activation_height) {
+            BlockValidationState check_state;
+            CDeterministicMNListNEVMAddressDiff check_diff;
+            BOOST_REQUIRE_MESSAGE(manager.ProcessBlock(
+                block, &index, check_state, view, no_legacy_commitment,
+                check_diff, /*fJustCheck=*/true, /*ibd=*/true),
+                check_state.ToString());
+            CDeterministicMNList unpublished;
+            BOOST_CHECK(!manager.m_evoDb->ReadCache(
+                index.GetBlockHash(), unpublished));
+        }
+
         BlockValidationState state;
         CDeterministicMNListNEVMAddressDiff diff;
         BOOST_REQUIRE_MESSAGE(manager.ProcessBlock(
             block, &index, state, view, no_legacy_commitment, diff,
             /*fJustCheck=*/false, /*ibd=*/true), state.ToString());
+        BOOST_CHECK(state.IsValid());
+        const auto current{manager.GetListForBlock(&index)};
+        const auto current_member{current.GetMN(member->proTxHash)};
+        BOOST_REQUIRE(current_member);
+        BOOST_CHECK_EQUAL(current.GetValidMNsCount(), 1U);
+        BOOST_CHECK_EQUAL(current_member->pdmnState->nLastPaidHeight,
+                          has_payee ? height : activation_height - 1);
+        BOOST_CHECK_EQUAL(current_member->pdmnState->nPoSeRevivedHeight,
+                          member->pdmnState->nPoSeRevivedHeight);
+
+        llmq::pq::PQPaymentProbationStateView payment_state;
+        BOOST_REQUIRE(manager.GetPaymentProbationStateView(
+            &index, payment_state));
+        BOOST_CHECK(payment_state.StateHash() ==
+                    manager.EmptyPaymentProbationStateHash());
+        BOOST_CHECK_EQUAL(payment_state.MissCount(member->proTxHash), 0U);
+        BOOST_CHECK(!payment_state.IsPaymentWithheld(member->proTxHash));
+        BOOST_CHECK_EQUAL(
+            payment_state.PaymentEligibleSinceHeight(member->proTxHash), -1);
+
+        llmq::pq::PQRegistryReadView registry_view;
+        std::string registry_error;
+        BOOST_REQUIRE_MESSAGE(manager.GetPQRegistryReadView(
+            &index, registry_view, registry_error), registry_error);
+        if (height < registration_height) {
+            BOOST_CHECK_EQUAL(registry_view.OperatorCount(), 0U);
+            BOOST_CHECK(registry_view.FindOperator(member->proTxHash) == nullptr);
+        } else {
+            BOOST_CHECK_EQUAL(registry_view.OperatorCount(), 1U);
+            const auto* registered{registry_view.FindOperator(member->proTxHash)};
+            BOOST_REQUIRE(registered);
+            BOOST_CHECK(registered->HasActiveGlobalKey());
+            BOOST_CHECK(registered->global_key.child_key_commitment == commitment);
+            BOOST_CHECK_EQUAL(registered->global_key.activated_height,
+                              registration_height);
+            const auto root{registered->ResolveChildRoot(payment_epoch)};
+            BOOST_CHECK(root.status ==
+                (height < *cutoff_height
+                    ? llmq::pq::ChildRootResolutionStatus::MUTABLE_PRESENT
+                    : llmq::pq::ChildRootResolutionStatus::FROZEN_PRESENT));
+            BOOST_REQUIRE(root.record);
+            BOOST_CHECK(root.record->commitment == commitment);
+        }
     }
-
-    // SYSCOIN: The projection path must apply the same empty root-capable set
-    // as exact consensus selection instead of falling back to rootless MNs.
-    std::vector<CDeterministicMNCPtr> projected_payees;
-    BOOST_REQUIRE(manager.GetProjectedMNPayeesForBlock(
-        &indices.back(), 20, projected_payees));
-    BOOST_CHECK(projected_payees.empty());
-
-    CDeterministicMNList current;
-    CDeterministicMNList previous;
-    BlockValidationState pre_activation_state;
-    BOOST_REQUIRE(manager.BuildNewListFromBlock(
-        blocks.back(), indices.back().pprev, pre_activation_state, view,
-        current, previous, no_legacy_commitment));
-
-    CBlock activation_block{MakeProviderMutationBlock({})};
-    activation_block.hashPrevBlock = hashes.back();
-    activation_block.nTime = activation_height;
-    activation_block.nNonce = activation_height;
-    BlockValidationState activation_state;
-    BOOST_CHECK(!manager.BuildNewListFromBlock(
-        activation_block, &indices.back(), activation_state, view,
-        current, previous, no_legacy_commitment));
-    BOOST_CHECK(activation_state.IsInvalid());
-    BOOST_CHECK_EQUAL(activation_state.GetRejectReason(),
-                      "bad-pq-no-payment-eligible-mn");
 }
 
 BOOST_AUTO_TEST_CASE(outbound_probe_failures_do_not_mutate_pose_or_payments)

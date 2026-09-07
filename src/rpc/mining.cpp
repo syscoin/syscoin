@@ -765,12 +765,18 @@ static RPCHelpMan getblocktemplate()
     }
 
     // SYSCOIN
-    // Get expected MN/superblock payees. The call to GetBlockTxOuts might fail on regtest/devnet or when
-    // testnet is reset. This is fine and we ignore failure (blocks will be accepted)
+    // A verified empty set can be mined, but unavailable PQ state must not
+    // inherit the legacy no-payee fallback or a cached template's allowance.
     std::vector<CTxOut> voutMasternodePayments;
     CAmount mnRet, mnRet1;
     int nCollateralHeight;
-    mnpayments.GetBlockTxOuts(node.chainman->ActiveChain(), node.chainman->ActiveHeight() + 1, 0, voutMasternodePayments, 0, mnRet, mnRet1, nCollateralHeight);
+    if (mnpayments.GetBlockTxOuts(
+            node.chainman->ActiveChain(), node.chainman->ActiveHeight() + 1,
+            0, voutMasternodePayments, 0, mnRet, mnRet1,
+            nCollateralHeight) == MasternodePaymentStatus::UNAVAILABLE) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR,
+                           "Payment eligibility state is unavailable");
+    }
 
     // next bock is a superblock and we need governance info to correctly construct it
     if (!fRegTest && !fSigNet && isSBSportActive

@@ -11,11 +11,37 @@
 #include <spork.h>
 #include <validation.h>
 
+#include <consensus/pq_migration_config.h>
 #include <evo/deterministicmns.h>
 #include <evo/specialtx.h>
 #include <string>
 
 CMasternodePayments mnpayments;
+
+CAmount GetMinerPayment(MasternodePaymentStatus status,
+                        const CAmount& blockReward, const CAmount& fees)
+{
+    assert(status == MasternodePaymentStatus::PAYEE ||
+           status == MasternodePaymentStatus::PQ_NO_PAYEE);
+    return (blockReward + 3) / 4 +
+           (status == MasternodePaymentStatus::PQ_NO_PAYEE ? fees : fees / 2);
+}
+
+CAmount GetBlockPaymentValueLimit(MasternodePaymentStatus status,
+                                 const CAmount& blockReward,
+                                 const CAmount& fees,
+                                 const CAmount& mnSeniority,
+                                 const CAmount& mnFloorDiff)
+{
+    assert(status != MasternodePaymentStatus::UNAVAILABLE);
+    // No operator exists to earn the missing share or its extra issuance.
+    // The same reduced base also applies beneath superblock budget limits.
+    if (status == MasternodePaymentStatus::PQ_NO_PAYEE) {
+        return GetMinerPayment(status, blockReward, fees);
+    }
+    return blockReward + fees + mnSeniority + mnFloorDiff;
+}
+
 void CheckAndWriteBudget(const CAmount& nSuperblockPayment, const CAmount& nPaymentLimit, const CAmount& nGovernanceBudgetUp, const CBlockIndex* pindex) {
     CAmount nGovernanceBudgetDown = (nPaymentLimit * CSuperblock::SHIFT_DOWN) / CSuperblock::SHIFT;
     if (nGovernanceBudgetDown < CSuperblock::SUPERBLOCK_BUDGET_MIN) {
@@ -166,8 +192,9 @@ bool IsBlockValueValid(const CBlock& block, const CBlockIndex* pindex, const CAm
     return true;
 }
 
-bool IsBlockPayeeValid(CChain& activeChain, const CTransaction& txNew, int nBlockHeight, const CAmount &blockReward, const CAmount &fees, CAmount& nMNSeniorityRet, CAmount& nMNFloorDiffRet, std::vector<bool>* matched_outputs)
+bool IsBlockPayeeValid(CChain& activeChain, const CTransaction& txNew, int nBlockHeight, const CAmount &blockReward, const CAmount &fees, CAmount& nMNSeniorityRet, CAmount& nMNFloorDiffRet, std::vector<bool>* matched_outputs, MasternodePaymentStatus* payment_status)
 {
+    if (payment_status) *payment_status = MasternodePaymentStatus::LEGACY_NO_PAYEE;
 
     // we are still using budgets, but we have no data about them anymore,
     // we can only check masternode payments
@@ -184,7 +211,12 @@ bool IsBlockPayeeValid(CChain& activeChain, const CTransaction& txNew, int nBloc
     const CAmount nHalfFee = fees / 2;
 
     // Check for correct masternode payment
-    if(CMasternodePayments::IsTransactionValid(activeChain, txNew, nBlockHeight, blockReward, nHalfFee, nMNSeniorityRet, nMNFloorDiffRet, matched_outputs)) {
+    MasternodePaymentStatus status;
+    const bool valid{CMasternodePayments::IsTransactionValid(
+        activeChain, txNew, nBlockHeight, blockReward, nHalfFee,
+        nMNSeniorityRet, nMNFloorDiffRet, status, matched_outputs)};
+    if (payment_status) *payment_status = status;
+    if (valid) {
         LogPrint(BCLog::MNPAYMENTS, "%s -- Valid masternode payment at height %d\n", __func__, nBlockHeight);
         return true;
     }
@@ -218,15 +250,23 @@ bool FillBlockPayments(CChain& activeChain, CMutableTransaction& txNew, int nBlo
     }
 
     const CAmount nHalfFee = fees / 2;
-    if (!CMasternodePayments::GetMasternodeTxOuts(activeChain, nBlockHeight, blockReward, voutMasternodePaymentsRet, nHalfFee)) {
+    const auto payment_status{CMasternodePayments::GetMasternodeTxOuts(
+        activeChain, nBlockHeight, blockReward, voutMasternodePaymentsRet,
+        nHalfFee)};
+    if (payment_status == MasternodePaymentStatus::UNAVAILABLE) {
+        return false;
+    }
+    if (payment_status == MasternodePaymentStatus::LEGACY_NO_PAYEE) {
         LogPrint(BCLog::MNPAYMENTS, "%s -- no masternode to pay (MN list probably empty)\n", __func__);
         return true;
     }
-	// miner takes 25% of the reward and half fees
-    CAmount minerRewardWithMN = (blockReward + 3) / 4; 
-    txNew.vout[0].nValue = voutMasternodePaymentsRet.empty()? blockReward: minerRewardWithMN;
-    if(nHalfFee > 0)
-	    txNew.vout[0].nValue += nHalfFee;
+    // A verified empty PQ set leaves its subsidy allocation unminted while
+    // giving the miner all fees. Governance payments must still be appended.
+    txNew.vout[0].nValue =
+        payment_status == MasternodePaymentStatus::PQ_NO_PAYEE ||
+                !voutMasternodePaymentsRet.empty()
+            ? GetMinerPayment(payment_status, blockReward, fees)
+            : blockReward + nHalfFee;
     // mn is paid 75% of block reward plus any seniority
     txNew.vout.insert(txNew.vout.end(), voutMasternodePaymentsRet.begin(), voutMasternodePaymentsRet.end());
     // superblock governance amount is added as extra
@@ -249,16 +289,23 @@ bool FillBlockPayments(CChain& activeChain, CMutableTransaction& txNew, int nBlo
 *   Get masternode payment tx outputs
 */
 
-bool CMasternodePayments::GetMasternodeTxOuts(CChain& activeChain, int nBlockHeight, const CAmount &blockReward, std::vector<CTxOut>& voutMasternodePaymentsRet, const CAmount &nHalfFee)
+MasternodePaymentStatus CMasternodePayments::GetMasternodeTxOuts(CChain& activeChain, int nBlockHeight, const CAmount &blockReward, std::vector<CTxOut>& voutMasternodePaymentsRet, const CAmount &nHalfFee)
 {
     // make sure it's not filled yet
     voutMasternodePaymentsRet.clear();
     CAmount nMNSeniorityRet;
     CAmount nMNFloorDiffRet;
     int nCollateralHeight;
-    if(!GetBlockTxOuts(activeChain, nBlockHeight, blockReward, voutMasternodePaymentsRet, nHalfFee, nMNSeniorityRet, nMNFloorDiffRet, nCollateralHeight)) {
-        LogPrintf("CMasternodePayments::%s -- no payee (deterministic masternode list empty)\n", __func__);
-        return false;
+    const auto status{GetBlockTxOuts(
+        activeChain, nBlockHeight, blockReward, voutMasternodePaymentsRet,
+        nHalfFee, nMNSeniorityRet, nMNFloorDiffRet, nCollateralHeight)};
+    if (status != MasternodePaymentStatus::PAYEE) {
+        if (status == MasternodePaymentStatus::UNAVAILABLE) {
+            LogPrintf("CMasternodePayments::%s -- payment state unavailable\n", __func__);
+        } else {
+            LogPrint(BCLog::MNPAYMENTS, "CMasternodePayments::%s -- no eligible payee\n", __func__);
+        }
+        return status;
     }
 
     for (const auto& txout : voutMasternodePaymentsRet) {
@@ -268,7 +315,7 @@ bool CMasternodePayments::GetMasternodeTxOuts(CChain& activeChain, int nBlockHei
         LogPrintf("CMasternodePayments::%s -- Masternode payment %lld to %s\n", __func__, txout.nValue, EncodeDestination(dest));
     }
 
-    return true;
+    return status;
 }
 CAmount GetBlockMNSubsidy(const CAmount &nBlockReward, unsigned int nHeight, const Consensus::Params& consensusParams, unsigned int nStartHeight, CAmount& nMNSeniorityRet, CAmount& nMNFloorDiffRet)
 {
@@ -290,19 +337,43 @@ CAmount GetBlockMNSubsidy(const CAmount &nBlockReward, unsigned int nHeight, con
     }
     return nSubsidy;
 }
-bool CMasternodePayments::GetBlockTxOuts(CChain& activeChain, int nBlockHeight, const CAmount &blockReward, std::vector<CTxOut>& voutMasternodePaymentsRet, const CAmount &nHalfFee, CAmount& nMNSeniorityRet, CAmount &nMNFloorDiffRet, int& nCollateralHeightRet)
+MasternodePaymentStatus CMasternodePayments::GetBlockTxOuts(CChain& activeChain, int nBlockHeight, const CAmount &blockReward, std::vector<CTxOut>& voutMasternodePaymentsRet, const CAmount &nHalfFee, CAmount& nMNSeniorityRet, CAmount &nMNFloorDiffRet, int& nCollateralHeightRet)
 {
     voutMasternodePaymentsRet.clear();
+    nMNSeniorityRet = 0;
+    nMNFloorDiffRet = 0;
+    nCollateralHeightRet = 0;
+    const auto eligibility{Consensus::CheckPQPaymentEligibility(
+        Params().GetConsensus(), nBlockHeight)};
+    if (eligibility ==
+        Consensus::PQPaymentEligibilityResult::INVALID_CONFIGURATION) {
+        return MasternodePaymentStatus::UNAVAILABLE;
+    }
+    const bool pq_payments{
+        eligibility == Consensus::PQPaymentEligibilityResult::ROOT_REQUIRED};
+    const auto unavailable{pq_payments
+        ? MasternodePaymentStatus::UNAVAILABLE
+        : MasternodePaymentStatus::LEGACY_NO_PAYEE};
     CDeterministicMNCPtr dmnPayee;
     {
         LOCK(cs_main);
         const CBlockIndex* pindex = activeChain[nBlockHeight - 1];
         if(!pindex)
-            return false;
-        if (!deterministicMNManager->GetMNPayeeForBlock(pindex, dmnPayee) ||
-            !dmnPayee) {
-            return false;
+            return unavailable;
+        try {
+            if (!deterministicMNManager->GetMNPayeeForBlock(pindex, dmnPayee)) {
+                return unavailable;
+            }
+        } catch (const std::exception& e) {
+            if (!pq_payments) throw;
+            LogPrintf("%s -- payment state unavailable at height %d: %s\n",
+                      __func__, nBlockHeight, e.what());
+            return MasternodePaymentStatus::UNAVAILABLE;
         }
+    }
+    if (!dmnPayee) {
+        return pq_payments ? MasternodePaymentStatus::PQ_NO_PAYEE
+                           : MasternodePaymentStatus::LEGACY_NO_PAYEE;
     }
     nCollateralHeightRet = dmnPayee->pdmnState->nCollateralHeight;
     CAmount masternodeReward = GetBlockMNSubsidy(blockReward, nBlockHeight, Params().GetConsensus(), nCollateralHeightRet, nMNSeniorityRet, nMNFloorDiffRet) + nHalfFee;
@@ -322,23 +393,37 @@ bool CMasternodePayments::GetBlockTxOuts(CChain& activeChain, int nBlockHeight, 
         voutMasternodePaymentsRet.emplace_back(operatorReward, dmnPayee->pdmnState->scriptOperatorPayout);
     }
 
-    return true;
+    return MasternodePaymentStatus::PAYEE;
 }
 
-bool CMasternodePayments::IsTransactionValid(CChain& activeChain, const CTransaction& txNew, int nBlockHeight, const CAmount &blockReward, const CAmount& nHalfFee, CAmount& nMNSeniorityRet, CAmount &nMNFloorDiffRet, std::vector<bool>* matched_outputs)
+bool CMasternodePayments::IsTransactionValid(CChain& activeChain, const CTransaction& txNew, int nBlockHeight, const CAmount &blockReward, const CAmount& nHalfFee, CAmount& nMNSeniorityRet, CAmount &nMNFloorDiffRet, MasternodePaymentStatus& payment_status, std::vector<bool>* matched_outputs)
 {
+    payment_status = MasternodePaymentStatus::LEGACY_NO_PAYEE;
     if (matched_outputs) {
         matched_outputs->assign(txNew.vout.size(), false);
     }
-    if (!deterministicMNManager || !deterministicMNManager->IsDIP3Enforced(nBlockHeight)) {
-        // can't verify historical blocks here
+    // PQ eligibility starts at its own activation even when a regtest profile
+    // delays the historical DIP3 payment-enforcement height.
+    if (Consensus::CheckPQPaymentEligibility(Params().GetConsensus(), nBlockHeight) ==
+            Consensus::PQPaymentEligibilityResult::LEGACY &&
+        (!deterministicMNManager || !deterministicMNManager->IsDIP3Enforced(nBlockHeight))) {
         return true;
+    }
+    if (!deterministicMNManager) {
+        payment_status = MasternodePaymentStatus::UNAVAILABLE;
+        return false;
     }
 
     std::vector<CTxOut> voutMasternodePayments;
     int nCollateralHeight;
-    if (!GetBlockTxOuts(activeChain, nBlockHeight, blockReward, voutMasternodePayments, nHalfFee, nMNSeniorityRet, nMNFloorDiffRet, nCollateralHeight)) {
-        LogPrintf("CMasternodePayments::%s -- ERROR failed to get payees for block at height %s\n", __func__, nBlockHeight);
+    payment_status = GetBlockTxOuts(
+        activeChain, nBlockHeight, blockReward, voutMasternodePayments,
+        nHalfFee, nMNSeniorityRet, nMNFloorDiffRet, nCollateralHeight);
+    if (payment_status == MasternodePaymentStatus::UNAVAILABLE) {
+        return false;
+    }
+    if (payment_status != MasternodePaymentStatus::PAYEE) {
+        LogPrint(BCLog::MNPAYMENTS, "CMasternodePayments::%s -- no eligible payee at height %d\n", __func__, nBlockHeight);
         return true;
     }
 
