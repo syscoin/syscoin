@@ -262,6 +262,7 @@ SYSCOIN_CORE_H = \
   netgroup.h \
   netmessagemaker.h \
   node/abort.h \
+  node/blockconnection.h \
   node/blockmanager_args.h \
   node/blockstorage.h \
   node/caches.h \

@@ -14,6 +14,7 @@
 #include <consensus/validation.h>
 #include <core_io.h>
 #include <key.h>
+#include <key_io.h>
 #include <nevm/nevm.h>
 #include <nevm/sha3.h>
 #include <policy/policy.h>
@@ -29,6 +30,7 @@
 #include <test/util/random.h>
 #include <test/util/script.h>
 #include <test/util/transaction_utils.h>
+#include <test/util/txmempool.h>
 #include <util/strencodings.h>
 #include <util/string.h>
 #include <validation.h>
@@ -45,6 +47,8 @@
 #include <univalue.h>
 
 typedef std::vector<unsigned char> valtype;
+
+extern NEVMMintTxSet setMintTxsMempool;
 
 static CFeeRate g_dust{DUST_RELAY_TX_FEE};
 static bool g_bare_multi{DEFAULT_PERMIT_BAREMULTISIG};
@@ -529,6 +533,48 @@ BOOST_AUTO_TEST_CASE(syscoin_mint_parent_node_offsets)
     check({}, 0, {}, std::numeric_limits<uint16_t>::max(), false);
 }
 
+BOOST_FIXTURE_TEST_CASE(syscoin_mint_mempool_reservation_ownership, TestingSetup)
+{
+    CMintSyscoin mint;
+    mint.nTxHash = uint256S("a1");
+    mint.voutAssets.emplace_back(1, std::vector<CAssetOutValue>{{0, 1}});
+    mint.vchTxParentNodes = {0x80};
+    mint.vchReceiptParentNodes = {0x80};
+    std::vector<unsigned char> mint_data;
+    mint.SerializeData(mint_data);
+    CMutableTransaction mtx;
+    mtx.nVersion = SYSCOIN_TX_VERSION_ALLOCATION_MINT;
+    mtx.vin.emplace_back(COutPoint{uint256S("a0"), 0});
+    mtx.vout.emplace_back(10000, GetScriptForDestination(WitnessV0KeyHash{uint160(ParseHex("0100000000000000000000000000000000000000"))}));
+    mtx.vout.emplace_back(0, CScript() << OP_RETURN << mint_data);
+    mtx.LoadAssets();
+    const auto tx = MakeTransactionRef(mtx);
+    BOOST_REQUIRE(!CMintSyscoin(*tx).IsNull());
+
+    CTxMemPool& pool = *Assert(m_node.mempool);
+    LOCK2(cs_main, pool.cs);
+    BOOST_REQUIRE_EQUAL(setMintTxsMempool.count(mint.nTxHash), 0U);
+    // This parsed placeholder exercises bookkeeping only; its proof is never submitted for validation.
+    pool.addUnchecked(TestMemPoolEntryHelper{}.FromTx(tx));
+    BOOST_CHECK_EQUAL(setMintTxsMempool.count(mint.nTxHash), 1U);
+
+    for (const bool test_accept : {false, true}) {
+        const auto result = AcceptToMemoryPool(m_node.chainman->ActiveChainstate(), tx,
+                                             GetTime(), false, test_accept);
+        BOOST_CHECK_EQUAL(result.m_result_type, MempoolAcceptResult::ResultType::INVALID);
+        BOOST_CHECK_EQUAL(result.m_state.GetRejectReason(), "txn-already-in-mempool");
+        BOOST_CHECK_EQUAL(setMintTxsMempool.count(mint.nTxHash), 1U);
+    }
+    const auto package_result = ProcessNewPackage(m_node.chainman->ActiveChainstate(), pool,
+                                                  {tx}, /*test_accept=*/true);
+    BOOST_CHECK(package_result.m_state.IsInvalid());
+    BOOST_CHECK_EQUAL(setMintTxsMempool.count(mint.nTxHash), 1U);
+
+    pool.removeRecursive(*tx, MemPoolRemovalReason::EXPIRY);
+    BOOST_CHECK_EQUAL(setMintTxsMempool.count(mint.nTxHash), 0U);
+    BOOST_CHECK(!pool.exists(GenTxid::Txid(tx->GetHash())));
+}
+
 BOOST_AUTO_TEST_CASE(syscoin_mint_compares_roots_before_proof_parsing)
 {
     auto previous_roots_db = std::move(pnevmtxrootsdb);
@@ -622,8 +668,9 @@ BOOST_AUTO_TEST_CASE(syscoin_mint_canonical_receipt_activation)
     topics.append(dev::bytes{1}); // Legacy does not inspect the freezer topic shape.
     topics.append(dev::bytes{});  // Legacy accepts additional topics.
 
-    const std::string witness{"abc"};
-    dev::bytes event_data(128, 0);
+    const WitnessV0KeyHash destination{uint160(ParseHex("0100000000000000000000000000000000000000"))};
+    const std::string witness{EncodeDestination(destination)};
+    dev::bytes event_data(96 + ((witness.size() + 31) & ~size_t{31}), 0);
     event_data[31] = 1; // amount
     event_data[32] = 1; // Legacy ignores the offset's high bits.
     event_data[63] = 64;
@@ -701,6 +748,42 @@ BOOST_AUTO_TEST_CASE(syscoin_mint_canonical_receipt_activation)
     BOOST_CHECK(!CheckSyscoinMintInternal(
         mint, canonical_state, true, true, /*nHeight=*/0, mint_txs, asset_guid, amount, address));
     BOOST_CHECK_EQUAL(canonical_state.GetRejectReason(), "mint-log-invalid-field-count");
+
+    mint.voutAssets.emplace_back(1, std::vector<CAssetOutValue>{{0, 1}});
+    std::vector<unsigned char> mint_data;
+    mint.SerializeData(mint_data);
+    CMutableTransaction mint_mtx;
+    mint_mtx.nVersion = SYSCOIN_TX_VERSION_ALLOCATION_MINT;
+    mint_mtx.vout.emplace_back(0, GetScriptForDestination(destination));
+    mint_mtx.vout.emplace_back(0, CScript() << OP_RETURN << mint_data);
+    mint_mtx.LoadAssets();
+    const CTransaction mint_tx(mint_mtx);
+
+    for (const bool just_check : {false, true}) {
+        NEVMMintTxSet reservations;
+        CAssetsMap assets_in;
+        CAssetsMap assets_out{{1, 2}};
+        TxValidationState output_state;
+        BOOST_CHECK(!CheckSyscoinMint(mint_tx, mint_tx.GetHash(), output_state, 0,
+                                     just_check, reservations, assets_in, assets_out));
+        BOOST_CHECK_EQUAL(output_state.GetRejectReason(), "mint-output-mismatch");
+        BOOST_CHECK(reservations.empty());
+
+        assets_out = {{1, 1}};
+        TxValidationState accepted_state;
+        BOOST_CHECK(CheckSyscoinMint(mint_tx, mint_tx.GetHash(), accepted_state, 0,
+                                    just_check, reservations, assets_in, assets_out));
+        BOOST_CHECK_EQUAL(reservations.size(), 1U);
+        BOOST_CHECK_EQUAL(reservations.count(mint.nTxHash), 1U);
+        BOOST_CHECK(!pnevmtxmintdb->ExistsTx(mint.nTxHash));
+
+        assets_out = {{1, 1}};
+        TxValidationState duplicate_state;
+        BOOST_CHECK(!CheckSyscoinMint(mint_tx, mint_tx.GetHash(), duplicate_state, 0,
+                                     just_check, reservations, assets_in, assets_out));
+        BOOST_CHECK_EQUAL(duplicate_state.GetResult(), TxValidationResult::TX_MINT_DUPLICATE);
+        BOOST_CHECK_EQUAL(reservations.size(), 1U);
+    }
 
     pnevmtxrootsdb = std::move(previous_roots_db);
     pnevmtxmintdb = std::move(previous_mint_db);

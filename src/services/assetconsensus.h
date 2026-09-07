@@ -9,6 +9,36 @@
 #include <consensus/params.h>
 #include <util/hasher.h>
 #include <sync.h>
+
+#include <cstddef>
+
+namespace nevm_cache_detail {
+/** The caller must hold the cache lock; callbacks must not modify the cache. */
+template <typename Cache, typename AddToBatch, typename WriteBatch>
+bool FlushCache(CDBWrapper& db, Cache& cache, std::size_t chunk_items, bool sync,
+                AddToBatch add_to_batch, WriteBatch write_batch)
+{
+    CDBBatch batch(db);
+    auto first = cache.begin();
+    while (first != cache.end()) {
+        auto last = first;
+        std::size_t items{0};
+        do {
+            add_to_batch(batch, *last);
+            ++last;
+            ++items;
+        } while (last != cache.end() && items != chunk_items);
+
+        // A zero chunk limit preserves the unbounded-batch behavior. Keep the
+        // entire pending range visible if writing returns false or throws.
+        if (!write_batch(batch, sync)) return false;
+        first = cache.erase(first, last);
+        batch.Clear();
+    }
+    return true;
+}
+} // namespace nevm_cache_detail
+
 class TxValidationState;
 class CTxUndo;
 class CBlock;

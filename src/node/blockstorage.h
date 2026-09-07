@@ -374,7 +374,8 @@ public:
 
     /** Functions for disk access for blocks */
     bool ReadBlockFromDisk(CBlock& block, const FlatFilePos& pos) const;
-    bool ReadBlockFromDisk(CBlock& block, const CBlockIndex& index) const;
+    /** Auxiliary loading may be disabled when revalidating the committed disk representation. */
+    bool ReadBlockFromDisk(CBlock& block, const CBlockIndex& index, bool load_auxiliary_data = true) const;
     bool ReadRawBlockFromDisk(std::vector<uint8_t>& block, const FlatFilePos& pos) const;
 
     bool UndoReadFromDisk(CBlockUndo& blockundo, const CBlockIndex& index) const;

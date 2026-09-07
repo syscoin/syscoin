@@ -1374,6 +1374,7 @@ bool DisconnectNEVMCommitment(ChainstateManager& chainman, BlockValidationState&
 bool GetNEVMData(BlockValidationState& state, const CBlock& block, CNEVMHeader &evmBlock, std::vector<unsigned char>* coinbase_payload = nullptr);
 bool FillNEVMData(CBlock &block);
 bool EraseMempoolNEVMData(const std::vector<uint8_t>& vchVersionHash, const uint256& txid);
+void ReleaseMempoolNEVMDataOwner(const std::vector<uint8_t>& vchVersionHash, const uint256& txid);
 enum class ProcessNEVMDataResult {
     VALID,
     CONSENSUS_INVALID,
