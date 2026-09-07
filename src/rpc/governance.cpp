@@ -230,12 +230,9 @@ static RPCHelpMan gobject_submit()
 
     // RELAY THIS OBJECT
     // Reject if rate check fails but don't update buffer
-    {
-        LOCK(governance->cs);
-        if (!governance->MasternodeRateCheck(govobj)) {
-            LogPrintf("gobject(submit) -- Object submission rejected because of rate check failure - hash = %s\n", strHash);
-            throw JSONRPCError(RPC_INVALID_PARAMETER, "Object creation rate limit exceeded");
-        }
+    if (!governance->MasternodeRateCheck(govobj)) {
+        LogPrintf("gobject(submit) -- Object submission rejected because of rate check failure - hash = %s\n", strHash);
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Object creation rate limit exceeded");
     }
 
     LogPrintf("gobject(submit) -- Adding locally created governance object - %s\n", strHash);

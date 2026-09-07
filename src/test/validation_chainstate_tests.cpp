@@ -2144,6 +2144,54 @@ BOOST_FIXTURE_TEST_CASE(
 }
 
 BOOST_FIXTURE_TEST_CASE(
+    governance_page_client_regtest_syncs_sporks_at_genesis,
+    RegTestingSetup)
+{
+    SetMockTime(1598887952);
+    auto& chainman{*Assert(m_node.chainman)};
+    auto& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+    auto& peerman{*Assert(m_node.peerman)};
+    BOOST_REQUIRE(fRegTest);
+    {
+        LOCK(cs_main);
+        BOOST_REQUIRE_EQUAL(chainman.ActiveHeight(), 0);
+        BOOST_REQUIRE(chainman.ActiveTip() == chainman.m_best_header);
+    }
+    BOOST_REQUIRE(chainman.IsInitialBlockDownload());
+
+    auto* peer = new CNode{
+        /*id=*/102, /*sock=*/nullptr, CAddress{},
+        /*nKeyedNetGroupIn=*/1, /*nLocalHostNonceIn=*/1, CAddress{},
+        /*addrNameIn=*/std::string{}, ConnectionType::OUTBOUND_FULL_RELAY,
+        /*inbound_onion=*/false};
+    peer->nVersion = GOVERNANCE_PAGE_PROTO_VERSION - 1;
+    peer->SetCommonVersion(GOVERNANCE_PAGE_PROTO_VERSION - 1);
+    peer->fSuccessfullyConnected = true;
+    connman.AddTestNode(*peer);
+    struct ClearPeers {
+        ConnmanTestMsg& connman;
+        ~ClearPeers() { connman.ClearTestNodes(); }
+    } clear_peers{connman};
+
+    // An idle genesis chain has no missing known blocks. It must still
+    // request cached spork shares after a reset, without mining a block.
+    CMasternodeSync sync;
+    sync.Reset(/*fForce=*/true, /*fNotifyReset=*/false);
+    BOOST_REQUIRE(!sync.ReachedBestHeader());
+    SetMockTime(GetTime() + MASTERNODE_SYNC_TICK_SECONDS);
+    sync.ProcessTick(connman, peerman, chainman);
+    BOOST_CHECK_EQUAL(sync.GetAssetID(), MASTERNODE_SYNC_GOVERNANCE);
+    BOOST_CHECK(chainman.IsInitialBlockDownload());
+    {
+        LOCK(peer->cs_vSend);
+        const auto& [data, more, message_type]{
+            peer->m_transport->GetBytesToSend(!peer->vSendMsg.empty())};
+        BOOST_CHECK(!data.empty());
+        BOOST_CHECK_EQUAL(message_type, NetMsgType::GETSPORKS);
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(
     governance_page_client_regtest_waits_for_current_chain,
     TestChain100Setup)
 {

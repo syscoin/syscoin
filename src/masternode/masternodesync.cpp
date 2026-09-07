@@ -916,11 +916,11 @@ void CMasternodeSync::ProcessTick(CConnman& connman, PeerManager& peerman,
         // Regtest skips the normal blockchain quiet period, but governance
         // collateral still requires the complete active chain. Read current
         // readiness because Reset clears the cached best-header flag even
-        // when no new block notification will arrive.
+        // when no new block notification will arrive. IBD's tip-age check
+        // must not suppress spork sync on an idle regtest chain.
         const bool chain_ready{WITH_LOCK(cs_main,
             return chainman.ActiveTip() != nullptr &&
-                   chainman.ActiveTip() == chainman.m_best_header &&
-                   !chainman.IsInitialBlockDownload())};
+                   chainman.ActiveTip() == chainman.m_best_header)};
         if (!chain_ready) {
             CancelGovernancePageSession(peerman);
             return;
