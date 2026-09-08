@@ -598,7 +598,7 @@ BOOST_FIXTURE_TEST_CASE(pq_voting_keys_salvage_refuses_loss, TestingSetup)
             BOOST_REQUIRE(wallet->GenerateVotingKey(public_key, key_error));
             if (encrypted) BOOST_REQUIRE(wallet->EncryptWallet(SecureString{"pq-salvage-test"}));
         });
-        const fs::path path{GetWalletDir() / name};
+        const fs::path path{GetWalletDir() / fs::PathFromString(name)};
         const auto directory_entries = [&] {
             std::set<fs::path> entries;
             for (const auto& entry : fs::directory_iterator(path)) entries.insert(entry.path());
