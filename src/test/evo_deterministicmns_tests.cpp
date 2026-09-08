@@ -433,6 +433,26 @@ static CBlock MakeProviderMutationBlock(
     return block;
 }
 
+static CDeterministicMNCPtr MakeNEVMAddressMN(uint64_t internal_id, uint32_t tag)
+{
+    auto member{std::make_shared<CDeterministicMN>(
+        *MakeLegacyReplayMN(internal_id, tag))};
+    auto state{
+        std::make_shared<CDeterministicMNState>(*member->pdmnState)};
+    state->vchNEVMAddress.assign(20, static_cast<unsigned char>(tag));
+    member->pdmnState = std::move(state);
+    return member;
+}
+
+static void CheckNEVMAddressDiff(
+    const CDeterministicMNListNEVMAddressDiff& actual,
+    const CDeterministicMNListNEVMAddressDiff& expected)
+{
+    BOOST_CHECK(actual.addedMNNEVM == expected.addedMNNEVM);
+    BOOST_CHECK(actual.updatedMNNEVM == expected.updatedMNNEVM);
+    BOOST_CHECK(actual.removedMNNEVM == expected.removedMNNEVM);
+}
+
 BOOST_AUTO_TEST_SUITE(evo_dmn_db_maintenance_tests)
 
 BOOST_AUTO_TEST_CASE(unavailable_and_corrupt_negative_heights_are_null)
@@ -5383,7 +5403,7 @@ BOOST_AUTO_TEST_CASE(legacy_operator_scheme_migration_preserves_operator_state)
                 member_state->scriptOperatorPayout);
     BOOST_CHECK(migrated->pdmnState->vchNEVMAddress ==
                 member_state->vchNEVMAddress);
-    BOOST_CHECK(!migrated_list.m_changed_nevm_address);
+    BOOST_CHECK(!parent_list.HasNEVMAddressChanges(migrated_list));
     BOOST_REQUIRE(migrated_list.GetUniquePropertyMN(legacy_key));
     BOOST_CHECK(!migrated_list.HasUniqueProperty(basic_key));
     auto removable_list{migrated_list};
@@ -5403,9 +5423,333 @@ BOOST_AUTO_TEST_CASE(legacy_operator_scheme_migration_preserves_operator_state)
     BOOST_CHECK(changed->pdmnState->IsBanned());
     BOOST_CHECK(changed->pdmnState->scriptOperatorPayout.empty());
     BOOST_CHECK(changed->pdmnState->vchNEVMAddress.empty());
-    BOOST_CHECK(changed_list.m_changed_nevm_address);
+    BOOST_CHECK(parent_list.HasNEVMAddressChanges(changed_list));
     BOOST_REQUIRE(changed_list.GetUniquePropertyMN(changed_key));
     BOOST_CHECK(!changed_list.HasUniqueProperty(legacy_key));
+}
+
+BOOST_AUTO_TEST_CASE(nevm_address_projection_tracks_exact_net_changes)
+{
+    const auto member{MakeNEVMAddressMN(1, 1)};
+    const auto& address{member->pdmnState->vchNEVMAddress};
+    const auto collateral_height{
+        static_cast<uint32_t>(member->pdmnState->nCollateralHeight)};
+    const std::vector<unsigned char> updated_address(20, 0x42);
+    const CDeterministicMNList empty{MakeSnapshotKey(61'001), 5000, 0};
+    auto original{empty};
+    original.AddMN(member);
+
+    CDeterministicMNListNEVMAddressDiff actual;
+    CDeterministicMNListNEVMAddressDiff expected;
+    expected.addedMNNEVM.emplace_back(address, collateral_height);
+    BOOST_CHECK(empty.HasNEVMAddressChanges(original));
+    empty.BuildNEVMAddressDiff(original, actual);
+    CheckNEVMAddressDiff(actual, expected);
+
+    auto updated{original};
+    auto updated_state{
+        std::make_shared<CDeterministicMNState>(*member->pdmnState)};
+    updated_state->vchNEVMAddress = updated_address;
+    updated.UpdateMN(member->proTxHash, updated_state);
+    expected = {};
+    expected.updatedMNNEVM.emplace_back(
+        address, std::make_pair(updated_address, collateral_height));
+    BOOST_CHECK(original.HasNEVMAddressChanges(updated));
+    original.BuildNEVMAddressDiff(updated, actual);
+    CheckNEVMAddressDiff(actual, expected);
+
+    CDeterministicMNListDiff inverse;
+    updated.BuildTrackedInverseDiff(original, inverse);
+    const uint256 parent_hash{original.GetBlockHash()};
+    CBlockIndex parent_index;
+    parent_index.nHeight = original.GetHeight();
+    parent_index.phashBlock = &parent_hash;
+    const auto restored{updated.ApplyDiff(
+        &parent_index, inverse, original.GetTotalRegisteredCount())};
+    BOOST_CHECK(!original.HasNEVMAddressChanges(restored));
+
+    auto cleared{updated};
+    auto cleared_state{
+        std::make_shared<CDeterministicMNState>(*updated_state)};
+    cleared_state->vchNEVMAddress.clear();
+    cleared.UpdateMN(member->proTxHash, cleared_state);
+    expected = {};
+    expected.removedMNNEVM.emplace_back(updated_address);
+    BOOST_CHECK(updated.HasNEVMAddressChanges(cleared));
+    updated.BuildNEVMAddressDiff(cleared, actual);
+    CheckNEVMAddressDiff(actual, expected);
+
+    auto removed{original};
+    removed.RemoveMN(member->proTxHash);
+    expected.removedMNNEVM = {address};
+    original.BuildNEVMAddressDiff(removed, actual);
+    CheckNEVMAddressDiff(actual, expected);
+    BOOST_CHECK(!empty.HasNEVMAddressChanges(removed));
+
+    auto banned{original};
+    banned.PoSePunish(member->proTxHash, banned.CalcMaxPoSePenalty());
+    BOOST_CHECK(banned.GetMN(member->proTxHash)->pdmnState->IsBanned());
+    BOOST_CHECK(original.HasNEVMAddressChanges(banned));
+    original.BuildNEVMAddressDiff(banned, actual);
+    CheckNEVMAddressDiff(actual, expected);
+
+    auto bookkeeping{original};
+    auto bookkeeping_state{
+        std::make_shared<CDeterministicMNState>(*member->pdmnState)};
+    ++bookkeeping_state->nLastPaidHeight;
+    ++bookkeeping_state->nPoSePenalty;
+    ++bookkeeping_state->nCollateralHeight;
+    bookkeeping.UpdateMN(member->proTxHash, bookkeeping_state);
+    bookkeeping.SetHeight(original.GetHeight() + 1);
+    bookkeeping.SetBlockHash(MakeSnapshotKey(61'002));
+    bookkeeping.ResetTrackedChanges();
+    BOOST_CHECK(!original.HasNEVMAddressChanges(bookkeeping));
+    original.BuildNEVMAddressDiff(bookkeeping, actual);
+    CheckNEVMAddressDiff(actual, {});
+
+    updated.UpdateMN(member->proTxHash, member->pdmnState);
+    BOOST_CHECK(!original.HasNEVMAddressChanges(updated));
+    original.BuildNEVMAddressDiff(updated, actual);
+    CheckNEVMAddressDiff(actual, {});
+
+    auto addressless{std::make_shared<CDeterministicMN>(
+        *MakeNEVMAddressMN(3, 3))};
+    auto addressless_state{
+        std::make_shared<CDeterministicMNState>(*addressless->pdmnState)};
+    addressless_state->vchNEVMAddress.clear();
+    addressless->pdmnState = std::move(addressless_state);
+    bookkeeping.AddMN(addressless);
+    BOOST_CHECK(!original.HasNEVMAddressChanges(bookkeeping));
+    original.BuildNEVMAddressDiff(bookkeeping, actual);
+    CheckNEVMAddressDiff(actual, {});
+    bookkeeping.RemoveMN(addressless->proTxHash);
+    BOOST_CHECK(!original.HasNEVMAddressChanges(bookkeeping));
+}
+
+BOOST_AUTO_TEST_CASE(nevm_address_projection_preserves_owner_identity)
+{
+    const auto first_owner{MakeNEVMAddressMN(1, 1)};
+    auto next_owner{std::make_shared<CDeterministicMN>(
+        *MakeNEVMAddressMN(3, 3))};
+    auto next_state{
+        std::make_shared<CDeterministicMNState>(*next_owner->pdmnState)};
+    next_state->vchNEVMAddress = first_owner->pdmnState->vchNEVMAddress;
+    next_owner->pdmnState = std::move(next_state);
+
+    CDeterministicMNList original{MakeSnapshotKey(62'001), 5000, 0};
+    original.AddMN(first_owner);
+    auto transferred{original};
+    transferred.RemoveMN(first_owner->proTxHash);
+    transferred.AddMN(next_owner);
+
+    // The address set is unchanged, but BuildDiff preserves provider identity.
+    BOOST_CHECK(original.HasNEVMAddressChanges(transferred));
+    CDeterministicMNListNEVMAddressDiff actual;
+    original.BuildNEVMAddressDiff(transferred, actual);
+    CDeterministicMNListNEVMAddressDiff expected;
+    expected.addedMNNEVM.emplace_back(
+        next_owner->pdmnState->vchNEVMAddress,
+        static_cast<uint32_t>(next_owner->pdmnState->nCollateralHeight));
+    expected.removedMNNEVM.emplace_back(
+        first_owner->pdmnState->vchNEVMAddress);
+    CheckNEVMAddressDiff(actual, expected);
+
+    transferred.BuildNEVMAddressDiff(original, actual);
+    expected.addedMNNEVM.front().second =
+        static_cast<uint32_t>(first_owner->pdmnState->nCollateralHeight);
+    CheckNEVMAddressDiff(actual, expected);
+}
+
+BOOST_AUTO_TEST_CASE(nevm_address_projection_survives_reload_and_rejected_updates)
+{
+    const auto first{MakeNEVMAddressMN(1, 1)};
+    const auto second{MakeNEVMAddressMN(3, 3)};
+    CDeterministicMNList original{MakeSnapshotKey(63'001), 5000, 0};
+    original.AddMN(first);
+    original.AddMN(second);
+    auto changed{original};
+    auto changed_state{
+        std::make_shared<CDeterministicMNState>(*first->pdmnState)};
+    changed_state->vchNEVMAddress.assign(20, 0x42);
+    changed.UpdateMN(first->proTxHash, changed_state);
+    BOOST_REQUIRE(original.HasNEVMAddressChanges(changed));
+
+    auto reloaded{changed};
+    BOOST_CHECK(!changed.HasNEVMAddressChanges(reloaded));
+    CDataStream original_encoded{SER_DISK, PROTOCOL_VERSION};
+    original_encoded << original;
+    original_encoded >> reloaded;
+    BOOST_CHECK(!original.HasNEVMAddressChanges(reloaded));
+    BOOST_CHECK(changed.HasNEVMAddressChanges(reloaded));
+    CDataStream changed_encoded{SER_DISK, PROTOCOL_VERSION};
+    changed_encoded << changed;
+    changed_encoded >> reloaded;
+    BOOST_CHECK(!changed.HasNEVMAddressChanges(reloaded));
+    BOOST_CHECK(original.HasNEVMAddressChanges(reloaded));
+
+    CDeterministicMNListNEVMAddressDiff expected;
+    CDeterministicMNListNEVMAddressDiff actual;
+    original.BuildNEVMAddressDiff(changed, expected);
+    original.BuildNEVMAddressDiff(reloaded, actual);
+    CheckNEVMAddressDiff(actual, expected);
+    reloaded.clear();
+    const CDeterministicMNList empty;
+    BOOST_CHECK(!empty.HasNEVMAddressChanges(reloaded));
+    empty.BuildNEVMAddressDiff(reloaded, actual);
+    CheckNEVMAddressDiff(actual, {});
+    reloaded = original;
+    reloaded.ResetTrackedChanges();
+    BOOST_CHECK(!original.HasNEVMAddressChanges(reloaded));
+
+    auto duplicate_state{
+        std::make_shared<CDeterministicMNState>(*second->pdmnState)};
+    duplicate_state->vchNEVMAddress = first->pdmnState->vchNEVMAddress;
+    BOOST_CHECK_THROW(reloaded.UpdateMN(second->proTxHash, duplicate_state),
+                      std::runtime_error);
+    BOOST_CHECK(!original.HasNEVMAddressChanges(reloaded));
+    BOOST_CHECK(reloaded == original);
+
+    auto duplicate{std::make_shared<CDeterministicMN>(
+        *MakeNEVMAddressMN(5, 5))};
+    auto duplicate_add_state{
+        std::make_shared<CDeterministicMNState>(*duplicate->pdmnState)};
+    duplicate_add_state->vchNEVMAddress = first->pdmnState->vchNEVMAddress;
+    duplicate->pdmnState = std::move(duplicate_add_state);
+    BOOST_CHECK_THROW(reloaded.AddMN(duplicate), std::runtime_error);
+    BOOST_CHECK(!original.HasNEVMAddressChanges(reloaded));
+    BOOST_CHECK(reloaded == original);
+}
+
+BOOST_FIXTURE_TEST_CASE(ibd_nevm_service_diffs_match_warm_and_reloaded_parents,
+                        ChainTestingSetup)
+{
+    SelectParams(ChainType::MAIN);
+    LOCK(::cs_main);
+    auto& consensus{const_cast<Consensus::Params&>(Params().GetConsensus())};
+    struct RestoreProfile {
+        Consensus::Params& consensus;
+        int preparation_height{consensus.nPQPreparationHeight};
+        int epoch_origin{consensus.nPQChainLockEpochOrigin};
+        uint32_t cutoff{consensus.nPQRegistrationCutoffBlocks};
+        uint32_t future{consensus.nPQFutureHorizonEpochs};
+        int activation_height{consensus.nPQActivationHeight};
+        int nexus_height{consensus.nNexusStartBlock};
+        bool nevm_connection{fNEVMConnection};
+        ~RestoreProfile()
+        {
+            consensus.nPQPreparationHeight = preparation_height;
+            consensus.nPQChainLockEpochOrigin = epoch_origin;
+            consensus.nPQRegistrationCutoffBlocks = cutoff;
+            consensus.nPQFutureHorizonEpochs = future;
+            consensus.nPQActivationHeight = activation_height;
+            consensus.nNexusStartBlock = nexus_height;
+            fNEVMConnection = nevm_connection;
+        }
+    } restore{consensus};
+    consensus.nPQPreparationHeight = std::numeric_limits<int>::max();
+    consensus.nPQChainLockEpochOrigin = std::numeric_limits<int>::max();
+    consensus.nPQRegistrationCutoffBlocks = 0;
+    consensus.nPQFutureHorizonEpochs = 0;
+    consensus.nPQActivationHeight = std::numeric_limits<int>::max();
+    consensus.nNexusStartBlock = consensus.DIP0003Height;
+    fNEVMConnection = true;
+
+    const int base_height{consensus.DIP0003Height};
+    auto member{std::make_shared<CDeterministicMN>(*MakeNEVMAddressMN(1, 1))};
+    auto member_state{
+        std::make_shared<CDeterministicMNState>(*member->pdmnState)};
+    member_state->vchNEVMAddress.clear();
+    member->pdmnState = member_state;
+    const auto collateral_height{
+        static_cast<uint32_t>(member_state->nCollateralHeight)};
+    const std::vector<unsigned char> first_address(20, 0x11);
+    const std::vector<unsigned char> second_address(20, 0x22);
+    const std::array<std::vector<unsigned char>, 4> addresses{
+        first_address, first_address, second_address, {}};
+    std::array<CDeterministicMNListNEVMAddressDiff, 4> expected;
+    expected[0].addedMNNEVM.emplace_back(first_address, collateral_height);
+    expected[2].updatedMNNEVM.emplace_back(
+        first_address, std::make_pair(second_address, collateral_height));
+    expected[3].removedMNNEVM.emplace_back(second_address);
+
+    for (const auto& [reload_parent, deferred] :
+         {std::pair{false, false}, std::pair{true, false},
+          std::pair{true, true}}) {
+        const ScopedDiskDBPath disk;
+        auto db_params = DBParams{
+            .path = disk.path,
+            .cache_bytes = static_cast<size_t>(1 << 20),
+            .memory_only = false,
+            .wipe_data = true,
+        };
+        auto manager{std::make_unique<CDeterministicMNManager>(db_params)};
+        std::array<uint256, 5> hashes;
+        std::array<CBlockIndex, 5> indices;
+        hashes[0] = MakeSnapshotKey(64'001);
+        indices[0].nHeight = base_height;
+        indices[0].phashBlock = &hashes[0];
+        CDeterministicMNList parent{hashes[0], base_height, 0};
+        parent.AddMN(member);
+        BOOST_REQUIRE(manager->m_evoDb->WriteThrough(
+            hashes[0], parent, /*fSync=*/true));
+        CCoinsView base_view;
+        CCoinsViewCache view(&base_view);
+
+        for (size_t step{0}; step < addresses.size(); ++step) {
+            if (reload_parent) {
+                manager.reset();
+                db_params.wipe_data = false;
+                manager = std::make_unique<CDeterministicMNManager>(db_params);
+            }
+            CMutableTransaction tx;
+            tx.nVersion = SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE;
+            tx.vin.emplace_back(COutPoint{
+                MakeSnapshotKey(65'000 + static_cast<int>(step)), 0});
+            tx.vout.emplace_back(1, CScript{} << OP_TRUE);
+            CProUpServTx payload;
+            payload.nVersion = CProUpServTx::UPDATE_NEVM_VERSION;
+            payload.proTxHash = member->proTxHash;
+            payload.inputsHash = MakeSnapshotKey(66'000 + static_cast<int>(step));
+            payload.vchNEVMAddress = addresses[step];
+            SetTxPayload(tx, payload);
+            CBlock block{MakeProviderMutationBlock(
+                {MakeTransactionRef(std::move(tx))})};
+            block.hashPrevBlock = hashes[step];
+            block.nTime = static_cast<uint32_t>(step + 1);
+            block.nNonce = static_cast<uint32_t>(step + 1);
+            hashes[step + 1] = block.GetHash();
+            auto& index{indices[step + 1]};
+            index.nHeight = base_height + static_cast<int>(step) + 1;
+            index.pprev = &indices[step];
+            index.phashBlock = &hashes[step + 1];
+
+            BlockValidationState state;
+            CDeterministicMNListNEVMAddressDiff delivered;
+            BOOST_REQUIRE_MESSAGE(manager->ProcessBlock(
+                block, &index, state, view, llmq::CFinalCommitmentTxPayload{},
+                delivered, /*fJustCheck=*/false, /*ibd=*/true, deferred),
+                state.ToString());
+            CheckNEVMAddressDiff(delivered,
+                                 deferred ? CDeterministicMNListNEVMAddressDiff{}
+                                          : expected[step]);
+            BOOST_REQUIRE(manager->FlushPendingSnapshotsToDisk(/*fSync=*/true));
+
+            // Deferred delivery must depend on persisted states, not live flags.
+            if (deferred) {
+                manager.reset();
+                db_params.wipe_data = false;
+                manager = std::make_unique<CDeterministicMNManager>(db_params);
+            }
+            const auto before{manager->GetListForBlock(index.pprev)};
+            const auto after{manager->GetListForBlock(&index)};
+            CDeterministicMNListNEVMAddressDiff replayed;
+            before.BuildNEVMAddressDiff(after, replayed);
+            CheckNEVMAddressDiff(replayed, expected[step]);
+            const auto current_member{after.GetMN(member->proTxHash)};
+            BOOST_REQUIRE(current_member);
+            BOOST_CHECK(current_member->pdmnState->vchNEVMAddress == addresses[step]);
+        }
+    }
 }
 // SYSCOIN END: PQ deterministic-MN, payment, registry, and maintenance regressions.
 

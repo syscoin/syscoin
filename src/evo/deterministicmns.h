@@ -100,7 +100,6 @@ public:
     using MnMap = immer::map<uint256, CDeterministicMNCPtr, ImmerHasher>;
     using MnInternalIdMap = immer::map<uint64_t, uint256>;
     using MnUniquePropertyMap = immer::map<uint256, std::pair<uint256, uint32_t>, ImmerHasher>;
-    bool m_changed_nevm_address{false};
 private:
     uint256 blockHash;
     int nHeight{-1};
@@ -115,6 +114,11 @@ private:
     // authorities. Ordinary payment/service updates must not force an O(N)
     // governance rebuild at every straight chain extension.
     MuHash3072 m_pq_governance_authority_content_hash;
+    // Memory-only address projection, rebuilt with snapshots. Unrelated DMN
+    // bookkeeping must not force a full-list comparison during NEVM replay.
+    MuHash3072 m_nevm_address_content_hash;
+    mutable std::optional<uint256> m_nevm_address_hash;
+    [[nodiscard]] uint256 GetNEVMAddressHash() const;
     // Memory-only cache for branch-local deterministic-state diagnostics.
     mutable std::optional<uint256> m_pq_legacy_state_hash;
     mutable uint256 m_pq_legacy_state_hash_genesis;
@@ -159,6 +163,8 @@ public:
         // SYSCOIN: Rebuild the memory-only commitment through AddMN below.
         m_pq_legacy_content_hash = MuHash3072{};
         m_pq_governance_authority_content_hash = MuHash3072{};
+        m_nevm_address_content_hash = MuHash3072{};
+        m_nevm_address_hash.reset();
         m_pq_legacy_state_hash.reset();
         m_pq_governance_authority_hash.reset();
         m_tracked_changes.clear();
@@ -180,13 +186,14 @@ public:
         // SYSCOIN: Clear the memory-only deterministic-state commitment.
         m_pq_legacy_content_hash = MuHash3072{};
         m_pq_governance_authority_content_hash = MuHash3072{};
+        m_nevm_address_content_hash = MuHash3072{};
+        m_nevm_address_hash.reset();
         m_pq_legacy_state_hash.reset();
         m_pq_governance_authority_hash.reset();
         m_tracked_changes.clear();
         blockHash.SetNull();
         nHeight = -1;
         nTotalRegisteredCount = 0;
-        m_changed_nevm_address = false;
     }
     [[nodiscard]] size_t GetAllMNsCount() const
     {
@@ -357,6 +364,9 @@ public:
     void PoSeDecrease(const uint256& proTxHash);
 
     void BuildDiff(const CDeterministicMNList& to, CDeterministicMNListDiff &diffRet, CDeterministicMNListNEVMAddressDiff &diffRetNEVMAddress) const;
+    [[nodiscard]] bool HasNEVMAddressChanges(const CDeterministicMNList& to) const;
+    void BuildNEVMAddressDiff(const CDeterministicMNList& to,
+                              CDeterministicMNListNEVMAddressDiff& diff) const;
     void BuildTrackedInverseDiff(const CDeterministicMNList& parent,
                                  CDeterministicMNListDiff& inverse) const;
     [[nodiscard]] std::vector<uint256> BuildTrackedNetRemovedProTxHashes(
@@ -1016,7 +1026,8 @@ public:
 
     bool ProcessBlock(const CBlock& block, const CBlockIndex* pindex, BlockValidationState& state,
                       const CCoinsViewCache& view, const llmq::CFinalCommitmentTxPayload& legacy_commitment,
-                      CDeterministicMNListNEVMAddressDiff &diff, bool fJustCheck, bool ibd) EXCLUSIVE_LOCKS_REQUIRED(!cs, cs_main);
+                      CDeterministicMNListNEVMAddressDiff &diff, bool fJustCheck, bool ibd,
+                      bool nevm_delivery_deferred = false) EXCLUSIVE_LOCKS_REQUIRED(!cs, cs_main);
     bool UndoBlock(const CBlockIndex* pindex, CDeterministicMNListNEVMAddressDiff &inversedDiffNEVMAddress) EXCLUSIVE_LOCKS_REQUIRED(!cs, cs_main);
 
     // the returned list will not contain the correct block hash (we can't know it yet as the coinbase TX is not updated yet)

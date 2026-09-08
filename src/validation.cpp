@@ -3905,12 +3905,11 @@ bool Chainstate::ReplayDeferredBTCCNEVM(
             }
 
             try {
-                CDeterministicMNListDiff ignored_diff;
                 const CDeterministicMNList previous{
                     deterministicMNManager->GetListForBlock(index->pprev)};
                 const CDeterministicMNList current{
                     deterministicMNManager->GetListForBlock(index)};
-                previous.BuildDiff(current, ignored_diff, nevm_diff);
+                previous.BuildNEVMAddressDiff(current, nevm_diff);
             } catch (const std::exception& exception) {
                 error = strprintf("deferred-nevm-dmn-diff:%s", exception.what());
                 return false;

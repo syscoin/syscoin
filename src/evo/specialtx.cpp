@@ -14,6 +14,7 @@
 #include <util/time.h>
 #include <llmq/quorums_commitment.h>
 #include <llmq/quorums_blockprocessor.h>
+#include <llmq/quorums_chainlocks.h>
 #include <logging.h>
 #include <governance/governance.h>
 
@@ -107,8 +108,14 @@ bool ProcessSpecialTxsInBlock(ChainstateManager &chainman, const CBlock& block, 
         auto nTime3 = SystemClock::now(); nTimeQuorum += nTime3 - nTime2;
         LogPrint(BCLog::BENCHMARK, "        - quorumBlockProcessor: %.2fms [%.2fs]\n",  Ticks<MillisecondsDouble>(nTime3 - nTime2), Ticks<SecondsDouble>(nTimeQuorum));
 
+        // Deferred delivery reconstructs its own address diff from snapshots.
+        // cs_main keeps this marker decision stable through ConnectNEVMCommitment.
+        const bool nevm_delivery_deferred{
+            ibd && pindex != nullptr && llmq::chainLocksHandler != nullptr &&
+            llmq::chainLocksHandler->ShouldDeferBTCCNEVM(*pindex)};
         if (!deterministicMNManager || !deterministicMNManager->ProcessBlock(
-                block, pindex, state, view, qcTx, diff, fJustCheck, ibd)) {
+                block, pindex, state, view, qcTx, diff, fJustCheck, ibd,
+                nevm_delivery_deferred)) {
             // pass the state returned by the function above
             return false;
         }

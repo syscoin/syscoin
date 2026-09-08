@@ -46,6 +46,21 @@ constexpr std::string_view DMN_INVERSE_BASE_DOMAIN{
     "SYS_DMN_INVERSE_BASE_V1"};
 constexpr std::string_view DMN_INVERSE_HISTORY_DOMAIN{
     "SYS_DMN_INVERSE_HISTORY_V1"};
+constexpr std::string_view NEVM_ADDRESS_ELEMENT_DOMAIN{
+    "SYS_DMN_NEVM_ADDRESS_ELEMENT_V1"};
+
+DataStream SerializeNEVMAddressElement(const CDeterministicMN& dmn)
+{
+    DataStream stream;
+    if (!dmn.pdmnState->vchNEVMAddress.empty()) {
+        stream.write(AsBytes(Span{NEVM_ADDRESS_ELEMENT_DOMAIN.data(),
+                                  NEVM_ADDRESS_ELEMENT_DOMAIN.size()}));
+        // BuildDiff keys address transitions by proTxHash. Collateral height
+        // alone does not produce an NEVM entry in that existing contract.
+        stream << dmn.proTxHash << dmn.pdmnState->vchNEVMAddress;
+    }
+    return stream;
+}
 
 uint256 GetDMNInverseBaseCommitment(
     const uint256& genesis_hash,
@@ -1909,6 +1924,31 @@ uint256 CDeterministicMNList::GetOrComputePQGovernanceAuthorityHash(
 }
 // SYSCOIN END: Incremental branch-local deterministic-state diagnostics.
 
+uint256 CDeterministicMNList::GetNEVMAddressHash() const
+{
+    if (!m_nevm_address_hash) {
+        MuHash3072 content{m_nevm_address_content_hash};
+        uint256 hash;
+        content.Finalize(hash);
+        m_nevm_address_hash = hash;
+    }
+    return *m_nevm_address_hash;
+}
+
+bool CDeterministicMNList::HasNEVMAddressChanges(const CDeterministicMNList& to) const
+{
+    return GetNEVMAddressHash() != to.GetNEVMAddressHash();
+}
+
+void CDeterministicMNList::BuildNEVMAddressDiff(
+    const CDeterministicMNList& to, CDeterministicMNListNEVMAddressDiff& diff) const
+{
+    diff = {};
+    if (!HasNEVMAddressChanges(to)) return;
+    CDeterministicMNListDiff ignored_diff;
+    BuildDiff(to, ignored_diff, diff);
+}
+
 CDeterministicMNCPtr CDeterministicMNList::GetValidMN(const uint256& proTxHash) const
 {
     auto dmn = GetMN(proTxHash);
@@ -2178,9 +2218,6 @@ void CDeterministicMNList::PoSePunish(const uint256& proTxHash, int penalty)
 
 
     if (newState->nPoSePenalty >= maxPenalty && !newState->IsBanned()) {
-        if(!newState->vchNEVMAddress.empty()) {
-            m_changed_nevm_address = true;
-        }
         newState->BanIfNotBanned(nHeight);
         LogPrint(BCLog::MNLIST, "CDeterministicMNList::%s -- banned MN %s at height %d\n",
                     __func__, proTxHash.ToString(), nHeight);
@@ -2454,6 +2491,7 @@ void CDeterministicMNList::AddMN(const CDeterministicMNCPtr& dmn, bool fBumpTota
     const DataStream content{SerializePQLegacyStateElement(*dmn)};
     const DataStream governance_content{
         SerializePQGovernanceAuthorityElement(*dmn)};
+    const DataStream nevm_content{SerializeNEVMAddressElement(*dmn)};
 
     // All mnUniquePropertyMap's updates must be atomic.
     // Using this temporary map as a checkpoint to rollback to in case of any issues.
@@ -2490,6 +2528,10 @@ void CDeterministicMNList::AddMN(const CDeterministicMNCPtr& dmn, bool fBumpTota
     m_pq_legacy_content_hash.Insert(MakeUCharSpan(content));
     m_pq_governance_authority_content_hash.Insert(
         MakeUCharSpan(governance_content));
+    if (!nevm_content.empty()) {
+        m_nevm_address_content_hash.Insert(MakeUCharSpan(nevm_content));
+        m_nevm_address_hash.reset();
+    }
     if (fBumpTotalCount) {
         // nTotalRegisteredCount acts more like a checkpoint, not as a limit,
         nTotalRegisteredCount = std::max(dmn->GetInternalId() + 1, (uint64_t)nTotalRegisteredCount);
@@ -2522,6 +2564,12 @@ void CDeterministicMNList::UpdateMN(const uint256& proTxHash, const std::shared_
     const bool governance_authority_changed{
         oldDmn->pdmnState->keyIDVoting != pdmnState->keyIDVoting ||
         IsMNValid(*oldDmn) != IsMNValid(*dmn)};
+    const bool nevm_address_changed{
+        oldState->vchNEVMAddress != pdmnState->vchNEVMAddress};
+    const DataStream old_nevm_content{
+        nevm_address_changed ? SerializeNEVMAddressElement(*oldDmn) : DataStream{}};
+    const DataStream new_nevm_content{
+        nevm_address_changed ? SerializeNEVMAddressElement(*dmn) : DataStream{}};
 
     // All mnUniquePropertyMap's updates must be atomic.
     // Using this temporary map as a checkpoint to rollback to in case of any issues.
@@ -2550,6 +2598,15 @@ void CDeterministicMNList::UpdateMN(const uint256& proTxHash, const std::shared_
     mnMap = mnMap.set(entryProTxHash, dmn);
     m_pq_legacy_content_hash.Remove(MakeUCharSpan(old_content));
     m_pq_legacy_content_hash.Insert(MakeUCharSpan(new_content));
+    if (nevm_address_changed) {
+        if (!old_nevm_content.empty()) {
+            m_nevm_address_content_hash.Remove(MakeUCharSpan(old_nevm_content));
+        }
+        if (!new_nevm_content.empty()) {
+            m_nevm_address_content_hash.Insert(MakeUCharSpan(new_nevm_content));
+        }
+        m_nevm_address_hash.reset();
+    }
     if (governance_authority_changed) {
         const DataStream old_governance_content{
             SerializePQGovernanceAuthorityElement(*oldDmn)};
@@ -2588,6 +2645,7 @@ void CDeterministicMNList::RemoveMN(const uint256& proTxHash)
     const DataStream content{SerializePQLegacyStateElement(*dmn)};
     const DataStream governance_content{
         SerializePQGovernanceAuthorityElement(*dmn)};
+    const DataStream nevm_content{SerializeNEVMAddressElement(*dmn)};
 
     // All mnUniquePropertyMap's updates must be atomic.
     // Using this temporary map as a checkpoint to rollback to in case of any issues.
@@ -2624,6 +2682,10 @@ void CDeterministicMNList::RemoveMN(const uint256& proTxHash)
     m_pq_legacy_content_hash.Remove(MakeUCharSpan(content));
     m_pq_governance_authority_content_hash.Remove(
         MakeUCharSpan(governance_content));
+    if (!nevm_content.empty()) {
+        m_nevm_address_content_hash.Remove(MakeUCharSpan(nevm_content));
+        m_nevm_address_hash.reset();
+    }
     m_tracked_changes.emplace(proTxHash);
     m_pq_legacy_state_hash.reset();
     m_pq_governance_authority_hash.reset();
@@ -2652,7 +2714,7 @@ std::string CDeterministicMNListNEVMAddressDiff::ToString() const {
     );
 }
 
-bool CDeterministicMNManager::ProcessBlock(const CBlock& block, const CBlockIndex* pindex, BlockValidationState& _state, const CCoinsViewCache& view, const llmq::CFinalCommitmentTxPayload& legacy_commitment, CDeterministicMNListNEVMAddressDiff &diffNEVM, bool fJustCheck, bool ibd)
+bool CDeterministicMNManager::ProcessBlock(const CBlock& block, const CBlockIndex* pindex, BlockValidationState& _state, const CCoinsViewCache& view, const llmq::CFinalCommitmentTxPayload& legacy_commitment, CDeterministicMNListNEVMAddressDiff &diffNEVM, bool fJustCheck, bool ibd, bool nevm_delivery_deferred)
 {
     const auto& consensusParams = Params().GetConsensus();
     bool fDIP0003Active = pindex->nHeight >= consensusParams.DIP0003Height;
@@ -2799,8 +2861,10 @@ bool CDeterministicMNManager::ProcessBlock(const CBlock& block, const CBlockInde
         }
         newList.ResetTrackedChanges();
 
-        if(!ibd || (fNEVMConnection && fNexusActive && newList.m_changed_nevm_address)) {
+        if (!ibd) {
             oldList.BuildDiff(newList, diff, diffNEVM);
+        } else if (fNEVMConnection && fNexusActive && !nevm_delivery_deferred) {
+            oldList.BuildNEVMAddressDiff(newList, diffNEVM);
         }
         if(!ibd) {
             if (diff.HasChanges()) {
@@ -3205,9 +3269,6 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
                     // This might only happen with a ProRegTx that refers an external collateral
                     // In that case the new ProRegTx will replace the old one. This means the old one is removed
                     // and the new one is added like a completely fresh one, which is also at the bottom of the payment list
-                    if(!replacedDmn->pdmnState->vchNEVMAddress.empty()) {
-                        newList.m_changed_nevm_address = true;
-                    }
                     newList.RemoveMN(replacedDmn->proTxHash);
                     LogPrint(BCLog::MNLIST, "CDeterministicMNManager::%s -- MN %s removed from list because collateral was used for a new ProRegTx. collateralOutpoint=%s, nHeight=%d, mapCurMNs.allMNsCount=%d\n",
                                 __func__, replacedDmn->proTxHash.ToString(), dmn->collateralOutpoint.ToStringShort(), nHeight, newList.GetAllMNsCount());
@@ -3234,9 +3295,6 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
                 if (proTx.addr == CService() || proTx.nVersion == CProRegTx::PQ_VERSION) {
                     // SYSCOIN: A PQ registration has no operator key until a later tx86
                     // is committed against this DMN's parent snapshot.
-                    if(!dmnState->vchNEVMAddress.empty()) {
-                        newList.m_changed_nevm_address = true;
-                    }
                     dmnState->BanIfNotBanned(nHeight);
                 }
                 dmn->pdmnState = dmnState;
@@ -3281,7 +3339,6 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
                     if(newState->IsBanned()) {
                         return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-protx-banned-nevm-address");
                     }
-                    newState->m_changed_nevm_address = true;
                     newState->vchNEVMAddress = proTx.vchNEVMAddress;
                 }
                 if (newState->IsBanned()) {
@@ -3339,9 +3396,6 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
                         proTx.nVersion == CProUpRegTx::LEGACY_BLS_VERSION)};
                 if (proTx.nVersion <= CProUpRegTx::BASIC_BLS_VERSION &&
                     !same_legacy_operator_key) {
-                    if(!newState->vchNEVMAddress.empty()) {
-                        newList.m_changed_nevm_address = true;
-                    }
                     newState->ResetOperatorFields();
                     newState->BanIfNotBanned(nHeight);
                     newState->nVersion = proTx.nVersion;
@@ -3370,9 +3424,6 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
                     return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-protx-hash");
                 }
                 auto newState = std::make_shared<CDeterministicMNState>(*dmn->pdmnState);
-                if(!newState->vchNEVMAddress.empty()) {
-                    newList.m_changed_nevm_address = true;
-                }
                 newState->ResetOperatorFields();
                 newState->BanIfNotBanned(nHeight);
                 newState->nRevocationReason = proTx.nReason;
@@ -3392,9 +3443,6 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
         for (const auto& in : tx.vin) {
             auto dmn = newList.GetMNByCollateral(in.prevout);
             if (dmn && dmn->collateralOutpoint == in.prevout) {
-                if(!dmn->pdmnState->vchNEVMAddress.empty()) {
-                    newList.m_changed_nevm_address = true;
-                }
                 newList.RemoveMN(dmn->proTxHash);
                 LogPrint(BCLog::MNLIST, "CDeterministicMNManager::%s -- MN %s removed from list because collateral was spent. collateralOutpoint=%s, nHeight=%d, mapCurMNs.allMNsCount=%d\n",
                               __func__, dmn->proTxHash.ToString(), dmn->collateralOutpoint.ToStringShort(), nHeight, newList.GetAllMNsCount());

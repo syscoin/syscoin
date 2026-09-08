@@ -53,7 +53,6 @@ public:
     CScript scriptPayout;
     CScript scriptOperatorPayout;
     std::vector<unsigned char> vchNEVMAddress;
-    bool m_changed_nevm_address{false};
 
 public:
     CDeterministicMNState() = default;
