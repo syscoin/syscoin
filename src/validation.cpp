@@ -3748,6 +3748,25 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
     return res;
 }
 
+// SYSCOIN: A connect acknowledgement may only queue a block in Geth's IBD
+// buffer. Deferred replay and disconnect must classify progress from an
+// applied pair after flushing that buffer, including an interrupted pass.
+static bool FlushAndGetNEVMBlockInfo(
+    uint64_t& count, uint256& syscoin_hash, std::string& error)
+{
+    error.clear();
+    bool flushed{false};
+    GetMainSignals().NotifyNEVMComms("flush", flushed);
+    if (!flushed) {
+        error = "nevm-flush-unavailable";
+        return false;
+    }
+    count = 0;
+    syscoin_hash.SetNull();
+    GetMainSignals().NotifyGetNEVMBlockInfo(count, syscoin_hash, error);
+    return error.empty();
+}
+
 bool Chainstate::ReplayDeferredBTCCNEVM(
     int32_t through_height,
     const uint256& through_hash,
@@ -3795,9 +3814,8 @@ bool Chainstate::ReplayDeferredBTCCNEVM(
     uint64_t geth_count{0};
     uint256 geth_last_syscoin_hash;
     std::string state_string;
-    GetMainSignals().NotifyGetNEVMBlockInfo(
-        geth_count, geth_last_syscoin_hash, state_string);
-    if (!state_string.empty()) {
+    if (!FlushAndGetNEVMBlockInfo(
+            geth_count, geth_last_syscoin_hash, state_string)) {
         error = "deferred-nevm-height-unavailable:" + state_string;
         return false;
     }
@@ -3852,8 +3870,9 @@ bool Chainstate::ReplayDeferredBTCCNEVM(
         return finalize_at_exact_tip();
     }
 
-    // SYSCOIN: Bound scheduler work. Geth's reported height makes every batch
-    // and crash retry idempotent without trusting a local replay counter.
+    // SYSCOIN: Bound scheduler work. Flush before reading the applied pair
+    // and after sending each batch so progress is independent of Geth's IBD
+    // buffer size, without trusting a local replay counter.
     static constexpr int32_t MAX_DEFERRED_NEVM_REPLAY_BATCH{64};
     const int32_t first_height{static_cast<int32_t>(std::max<int64_t>(
         next_height, nevm_start))};
@@ -3949,6 +3968,26 @@ bool Chainstate::ReplayDeferredBTCCNEVM(
         if (pnevmtxrootsdb) pnevmtxrootsdb->FlushDataToCache(roots);
     }
 
+    // A successful send is not proof that Geth applied this prefix. Keep the
+    // replay marker and its retained inputs until the exact pair is reported.
+    if (!FlushAndGetNEVMBlockInfo(
+            geth_count, geth_last_syscoin_hash, state_string)) {
+        error = "deferred-nevm-commit-unavailable:" + state_string;
+        return false;
+    }
+    {
+        LOCK(cs_main);
+        const CBlockIndex* applied_index{
+            m_chainman.ActiveChain()[last_height]};
+        if (applied_index == nullptr ||
+            !DoesNEVMBlockInfoMatchSyscoinBlock(
+                nevm_start, geth_count,
+                static_cast<uint32_t>(last_height),
+                geth_last_syscoin_hash, applied_index->GetBlockHash())) {
+            error = "deferred-nevm-commit-pair-mismatch";
+            return false;
+        }
+    }
     complete = last_height == through_height;
     return finalize_at_exact_tip();
 }
@@ -4011,25 +4050,25 @@ bool DisconnectNEVMCommitment(ChainstateManager& chainman, BlockValidationState&
         fNEVMConnection &&
         !ShouldBypassExternalNEVMNotifyCalls(chainman, nHeight)};
     // SYSCOIN: A durable BTCC pre-seal defers connect notifications from its
-    // carrier onward. During a reorg, disconnect only the prefix Geth reports
-    // as actually applied; asking it to remove a never-sent block can wedge
-    // both chains. Pre-marker blocks retain the normal unconditional path.
+    // carrier onward. Flush any prefix queued by an interrupted replay before
+    // deciding which blocks Geth actually applied. Asking it to remove a
+    // never-sent block can wedge both chains. Pre-marker blocks retain the
+    // normal unconditional path.
     if (notify_external && llmq::chainLocksHandler != nullptr &&
         llmq::chainLocksHandler->ShouldDeferBTCCNEVM(index)) {
         uint64_t geth_count{0};
         uint256 geth_last_syscoin_hash;
         std::string height_error;
-        GetMainSignals().NotifyGetNEVMBlockInfo(
-            geth_count, geth_last_syscoin_hash, height_error);
+        if (!FlushAndGetNEVMBlockInfo(
+                geth_count, geth_last_syscoin_hash, height_error)) {
+            return state.Error(
+                "pq-btcc-nevm-disconnect-height-unavailable:" + height_error);
+        }
         const int64_t nevm_start{chainman.GetConsensus().nNEVMStartBlock};
         const auto applied{IsNEVMBlockAppliedForDisconnect(
             nevm_start, geth_count, nHeight)};
-        if (!height_error.empty() || !applied) {
-            return state.Error(
-                height_error.empty()
-                    ? "pq-btcc-nevm-disconnect-height-overflow"
-                    : "pq-btcc-nevm-disconnect-height-unavailable:" +
-                          height_error);
+        if (!applied) {
+            return state.Error("pq-btcc-nevm-disconnect-height-overflow");
         }
         // SYSCOIN: Count alone cannot distinguish equal-height Syscoin forks.
         // Bind Geth's last applied pair to the exact ancestry being unwound

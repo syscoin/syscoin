@@ -1776,6 +1776,16 @@ active tip. Count alone is insufficient because an equal-height Geth state may
 be on another branch. Disconnect/reorg notifications observe the same applied
 boundary, and replay rechecks the exact branch around external notifications.
 
+Deferred replay explicitly flushes Geth's buffered connects before selecting
+its starting pair and after each bounded batch. A flush uses `nevmcomms flush`
+and requires the distinct `flushed` response, followed by an exact applied-pair
+query; an older Geth's generic `ack` is insufficient. The final batch cannot
+clear its marker until the reported pair matches. Marker-bound disconnects
+also flush before querying ownership, so a buffered prefix from an interrupted
+pass is accounted for before unwinding. Ordinary sync batching and read-only
+status queries keep their existing behavior. Deploy the companion Geth flush
+support before this Core change is used for deferred recovery.
+
 The marker supplies authorization bounds, not the missing certificate. An
 honest peer must still serve the receipt-selected B for historical coverage,
 or the exact terminal or a valid covering certificate for the marker path.

@@ -381,7 +381,11 @@ bool CZMQAbstractPublishNotifier::NotifyNEVMCommsCommon(const std::string &commM
                 LogPrint(BCLog::SYS, "NotifyNEVMComms: nevm-response-wrong-command\n");
                 return false;
             }
-            if(parts[1] != "ack") {
+            // Older Geth versions acknowledge unknown comms commands. Require
+            // explicit flush support; callers verify the applied pair next.
+            const std::string expected_response{
+                commMessage == "flush" ? "flushed" : "ack"};
+            if(parts[1] != expected_response) {
                 LogPrint(BCLog::SYS, "NotifyNEVMComms: nevm-comms-response-invalid-data\n");
                 return false;
             }

@@ -10,6 +10,7 @@
 #include <evo/deterministicmns.h> // SYSCOIN: deep rollback integration state.
 #include <evo/pq_payment_probation_db.h> // SYSCOIN: multi-chainstate probation GC.
 #include <evo/pq_registry.h> // SYSCOIN: deep rollback registry roots.
+#include <governance/governance.h> // SYSCOIN: tip-bound block fixture readiness.
 #include <kernel/disconnected_transactions.h>
 #include <kernel/context.h>
 #include <llmq/pq_chainlock_persistence.h> // SYSCOIN: pre-import durable finality.
@@ -47,6 +48,7 @@
 #include <array> // SYSCOIN: synthetic PQ activation fixtures.
 #include <cstdint> // SYSCOIN: synthetic recovery-authority fixture.
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <type_traits>
 #include <vector>
@@ -98,11 +100,23 @@ struct DeferredNEVMReplaySetup : TestChain100Setup {
 };
 
 // SYSCOIN: Exercise Core's real NEVM connection path without an external
-// process. Only committed notifications advance this local Geth stand-in;
-// template checks leave its applied pair unchanged.
+// process. Tests may defer application until an explicit flush while still
+// acknowledging connects; the default preserves immediate application.
+// Template checks leave its applied pair unchanged.
 struct StartupNEVMSubscriber final : CValidationInterface {
+    struct AppliedPair {
+        uint64_t count;
+        uint256 hash;
+    };
+
     uint64_t applied_count{0};
     uint256 applied_hash;
+    bool buffer_connects{false};
+    bool flush_available{true};
+    std::optional<AppliedPair> buffered_pair;
+    std::optional<AppliedPair> reported_pair_override;
+    std::optional<AppliedPair> last_reported_pair;
+    std::size_t flush_requests{0};
     std::string block_info_error;
     std::size_t block_info_queries{0};
     std::vector<uint256> connected_blocks;
@@ -129,8 +143,25 @@ struct StartupNEVMSubscriber final : CValidationInterface {
         state.clear();
         if (hash.IsNull()) return;
         connected_blocks.push_back(hash);
+        if (buffer_connects) {
+            buffered_pair = AppliedPair{height - 101 + 1, hash};
+            return;
+        }
         applied_count = height - 101 + 1;
         applied_hash = hash;
+    }
+
+    void NotifyNEVMComms(const std::string& command, bool& response) override
+    {
+        if (command != "flush") return;
+        ++flush_requests;
+        response = flush_available;
+        if (!response) return;
+        if (buffered_pair) {
+            applied_count = buffered_pair->count;
+            applied_hash = buffered_pair->hash;
+            buffered_pair.reset();
+        }
     }
 
     void NotifyNEVMBlockDisconnect(
@@ -145,9 +176,14 @@ struct StartupNEVMSubscriber final : CValidationInterface {
         uint64_t& count, uint256& hash, std::string& state) override
     {
         ++block_info_queries;
-        count = applied_count;
-        hash = applied_hash;
+        const auto reported{reported_pair_override.value_or(
+            AppliedPair{applied_count, applied_hash})};
+        count = reported.count;
+        hash = reported.hash;
         state = block_info_error;
+        if (state.empty()) {
+            last_reported_pair = AppliedPair{count, hash};
+        }
     }
 };
 
@@ -183,11 +219,20 @@ struct StartupNEVMRecoverySetup : DeferredNEVMReplaySetup {
         return std::make_shared<const CBlock>(std::move(block));
     }
 
-    std::shared_ptr<const CBlock> MineNEVMBlock()
+    std::shared_ptr<const CBlock> MineNEVMBlock(bool forward_to_nevm = true)
     {
         const auto block{MakeNEVMBlock()};
         auto& chainman{*Assert(m_node.chainman)};
-        BOOST_REQUIRE(chainman.ProcessNewBlock(block, true, true, nullptr));
+        {
+            struct RestoreNEVMConnection {
+                const bool previous{fNEVMConnection};
+                ~RestoreNEVMConnection() { fNEVMConnection = previous; }
+            } restore;
+            // Keep the valid template's NEVM payload in the stored block,
+            // while preparing a Core prefix awaiting external delivery.
+            if (!forward_to_nevm) fNEVMConnection = false;
+            BOOST_REQUIRE(chainman.ProcessNewBlock(block, true, true, nullptr));
+        }
         BOOST_REQUIRE(WITH_LOCK(
             ::cs_main, return chainman.ActiveTip()->GetBlockHash()) ==
                       block->GetHash());
@@ -629,7 +674,7 @@ BOOST_FIXTURE_TEST_CASE(
 }
 
 BOOST_FIXTURE_TEST_CASE(deferred_nevm_replay_clears_only_at_exact_tip,
-                        DeferredNEVMReplaySetup)
+                        StartupNEVMRecoverySetup)
 {
     ChainstateManager& chainman{*Assert(m_node.chainman)};
     Chainstate& chainstate{chainman.ActiveChainstate()};
@@ -638,13 +683,6 @@ BOOST_FIXTURE_TEST_CASE(deferred_nevm_replay_clears_only_at_exact_tip,
     BOOST_REQUIRE(replay_tip != nullptr);
     BOOST_REQUIRE_EQUAL(replay_tip->nHeight, 100);
 
-    const bool previous_nevm_connection{fNEVMConnection};
-    struct RestoreNEVMConnection {
-        const bool previous;
-        ~RestoreNEVMConnection() { fNEVMConnection = previous; }
-    } restore_nevm_connection{previous_nevm_connection};
-
-    fNEVMConnection = true;
     bool finalized{false};
     bool complete{false};
     std::string error;
@@ -681,6 +719,183 @@ BOOST_FIXTURE_TEST_CASE(deferred_nevm_replay_clears_only_at_exact_tip,
     BOOST_CHECK(!complete);
     BOOST_CHECK(!finalized);
     BOOST_CHECK(error.empty());
+}
+
+BOOST_FIXTURE_TEST_CASE(deferred_nevm_replay_commits_each_bounded_batch,
+                        StartupNEVMRecoverySetup)
+{
+    auto& chainman{*Assert(m_node.chainman)};
+    auto& chainstate{chainman.ActiveChainstate()};
+    std::vector<uint256> expected_blocks;
+    BOOST_REQUIRE(governance != nullptr);
+    struct ClearGovernanceReadiness {
+        ~ClearGovernanceReadiness() { governance->ObserveChainTip(nullptr); }
+    } clear_governance_readiness;
+    // More than one replay batch, including a partial final batch.
+    for (int i{0}; i < 70; ++i) {
+        // Like the inherited bootstrap miner, provide the empty governance
+        // fixture's exact parent state across regtest superblock heights.
+        const CBlockIndex* parent{
+            WITH_LOCK(::cs_main, return chainman.ActiveTip())};
+        BOOST_REQUIRE(parent != nullptr);
+        BOOST_REQUIRE(governance_tests::PublishGovernanceReadyForTest(
+            *governance, *parent));
+        expected_blocks.push_back(
+            MineNEVMBlock(/*forward_to_nevm=*/false)->GetHash());
+    }
+    governance->ObserveChainTip(nullptr);
+    const CBlockIndex* target{
+        WITH_LOCK(::cs_main, return chainman.ActiveTip())};
+    BOOST_REQUIRE(target != nullptr);
+    BOOST_REQUIRE_EQUAL(nevm->applied_count, 0U);
+    BOOST_REQUIRE(nevm->connected_blocks.empty());
+    nevm->buffer_connects = true;
+
+    std::size_t finalizations{0};
+    const auto finalize = [&] {
+        AssertMainLockHeldForTest();
+        ++finalizations;
+        BOOST_CHECK_EQUAL(nevm->applied_count, expected_blocks.size());
+        BOOST_CHECK(nevm->applied_hash == target->GetBlockHash());
+        BOOST_REQUIRE(nevm->last_reported_pair.has_value());
+        BOOST_CHECK_EQUAL(nevm->last_reported_pair->count, expected_blocks.size());
+        BOOST_CHECK(nevm->last_reported_pair->hash == target->GetBlockHash());
+        BOOST_CHECK(!nevm->buffered_pair.has_value());
+        return true;
+    };
+    bool complete{false};
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(ReplayDeferredForTest(
+        chainstate, target->nHeight, target->GetBlockHash(),
+        finalize, complete, error), error);
+    BOOST_CHECK(!complete);
+    BOOST_CHECK_EQUAL(finalizations, 0U);
+    BOOST_CHECK_EQUAL(nevm->applied_count, 64U);
+    BOOST_CHECK(nevm->applied_hash == expected_blocks[63]);
+    BOOST_CHECK(!nevm->buffered_pair.has_value());
+    BOOST_CHECK(error.empty());
+
+    BOOST_REQUIRE_MESSAGE(ReplayDeferredForTest(
+        chainstate, target->nHeight, target->GetBlockHash(),
+        finalize, complete, error), error);
+    BOOST_CHECK(complete);
+    BOOST_CHECK_EQUAL(finalizations, 1U);
+    BOOST_CHECK(error.empty());
+    BOOST_CHECK(nevm->connected_blocks == expected_blocks);
+}
+
+BOOST_FIXTURE_TEST_CASE(deferred_nevm_replay_flushes_accepted_prefix_before_cursor,
+                        StartupNEVMRecoverySetup)
+{
+    auto& chainman{*Assert(m_node.chainman)};
+    nevm->buffer_connects = true;
+    const auto first{MineNEVMBlock()};
+    const auto second{MineNEVMBlock()};
+    const auto target{MineNEVMBlock(/*forward_to_nevm=*/false)};
+    BOOST_REQUIRE_EQUAL(nevm->applied_count, 0U);
+    BOOST_REQUIRE(nevm->buffered_pair.has_value());
+    BOOST_REQUIRE_EQUAL(nevm->buffered_pair->count, 2U);
+
+    bool finalized{false};
+    bool complete{false};
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(ReplayDeferredForTest(
+        chainman.ActiveChainstate(),
+        WITH_LOCK(::cs_main, return chainman.ActiveHeight()), target->GetHash(),
+        [&] {
+            finalized = true;
+            BOOST_CHECK_EQUAL(nevm->applied_count, 3U);
+            BOOST_CHECK(nevm->applied_hash == target->GetHash());
+            BOOST_REQUIRE(nevm->last_reported_pair.has_value());
+            BOOST_CHECK_EQUAL(nevm->last_reported_pair->count, 3U);
+            BOOST_CHECK(nevm->last_reported_pair->hash == target->GetHash());
+            return true;
+        },
+        complete, error), error);
+    BOOST_CHECK(complete);
+    BOOST_CHECK(finalized);
+    BOOST_CHECK(error.empty());
+    BOOST_CHECK(!nevm->buffered_pair.has_value());
+    const std::vector<uint256> expected_blocks{
+        first->GetHash(), second->GetHash(), target->GetHash()};
+    BOOST_CHECK(nevm->connected_blocks == expected_blocks);
+}
+
+BOOST_FIXTURE_TEST_CASE(deferred_nevm_replay_waits_for_flush_availability,
+                        StartupNEVMRecoverySetup)
+{
+    auto& chainman{*Assert(m_node.chainman)};
+    const auto target{MineNEVMBlock(/*forward_to_nevm=*/false)};
+    const int target_height{
+        WITH_LOCK(::cs_main, return chainman.ActiveHeight())};
+    nevm->buffer_connects = true;
+    nevm->flush_available = false;
+    bool finalized{false};
+    const auto finalize = [&] {
+        finalized = true;
+        BOOST_CHECK(nevm->applied_hash == target->GetHash());
+        return true;
+    };
+    bool complete{false};
+    std::string error;
+    BOOST_CHECK(!ReplayDeferredForTest(
+        chainman.ActiveChainstate(), target_height, target->GetHash(),
+        finalize, complete, error));
+    BOOST_CHECK(!complete);
+    BOOST_CHECK(!finalized);
+    BOOST_CHECK(!error.empty());
+    BOOST_CHECK_EQUAL(nevm->flush_requests, 1U);
+    BOOST_CHECK_EQUAL(nevm->block_info_queries, 0U);
+    BOOST_CHECK(nevm->connected_blocks.empty());
+
+    nevm->flush_available = true;
+    BOOST_REQUIRE_MESSAGE(ReplayDeferredForTest(
+        chainman.ActiveChainstate(), target_height, target->GetHash(),
+        finalize, complete, error), error);
+    BOOST_CHECK(complete);
+    BOOST_CHECK(finalized);
+    BOOST_CHECK(error.empty());
+    BOOST_CHECK_EQUAL(nevm->applied_count, 1U);
+}
+
+BOOST_FIXTURE_TEST_CASE(deferred_nevm_replay_requires_reported_commit_pair,
+                        StartupNEVMRecoverySetup)
+{
+    auto& chainman{*Assert(m_node.chainman)};
+    const auto target{MineNEVMBlock(/*forward_to_nevm=*/false)};
+    const int target_height{
+        WITH_LOCK(::cs_main, return chainman.ActiveHeight())};
+    nevm->buffer_connects = true;
+    // A successful flush acknowledgement cannot substitute for the applied
+    // pair when the endpoint's status view has not caught up yet.
+    nevm->reported_pair_override = StartupNEVMSubscriber::AppliedPair{0, {}};
+    bool finalized{false};
+    const auto finalize = [&] {
+        finalized = true;
+        BOOST_REQUIRE(nevm->last_reported_pair.has_value());
+        BOOST_CHECK_EQUAL(nevm->last_reported_pair->count, 1U);
+        BOOST_CHECK(nevm->last_reported_pair->hash == target->GetHash());
+        return true;
+    };
+    bool complete{false};
+    std::string error;
+    BOOST_CHECK(!ReplayDeferredForTest(
+        chainman.ActiveChainstate(), target_height, target->GetHash(),
+        finalize, complete, error));
+    BOOST_CHECK(!complete);
+    BOOST_CHECK(!finalized);
+    BOOST_CHECK_EQUAL(error, "deferred-nevm-commit-pair-mismatch");
+    BOOST_CHECK_EQUAL(nevm->applied_count, 1U);
+    BOOST_CHECK_EQUAL(nevm->connected_blocks.size(), 1U);
+
+    nevm->reported_pair_override.reset();
+    BOOST_REQUIRE_MESSAGE(ReplayDeferredForTest(
+        chainman.ActiveChainstate(), target_height, target->GetHash(),
+        finalize, complete, error), error);
+    BOOST_CHECK(complete);
+    BOOST_CHECK(finalized);
+    BOOST_CHECK(error.empty());
+    BOOST_CHECK_EQUAL(nevm->connected_blocks.size(), 1U);
 }
 
 BOOST_FIXTURE_TEST_CASE(nevm_startup_ahead_pair_recovers_without_duplicate_connects,
