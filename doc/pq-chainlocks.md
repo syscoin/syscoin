@@ -1805,15 +1805,20 @@ must not cross a durable ChainLock finality floor; if Geth is behind finalized
 Core state, operators must rebuild or bootstrap Geth instead.
 
 If Geth retained an exact applied height/hash pair ahead of Core's last coins
-flush, Core keeps that pair pending while reconnecting its ancestors. Only
-that exact already-applied prefix suppresses external connect notifications;
-normal local validation and certificate acquisition continue. Missing headers
-pause activation until their ancestry is available, except that a fresh Core
-activates canonical genesis so startup can open peer header acquisition. Public
+flush, Core keeps that pair pending while reconnecting its available ancestors.
+Candidate selection is temporarily restricted to that exact prefix, even when
+a competing branch has more work. Competing candidates remain available and
+normal fork choice resumes as soon as a fresh, exact Geth status completes
+reconciliation. Only the already-applied prefix suppresses external connect
+notifications; normal local validation, durable finality checks, and certificate
+acquisition continue. Missing block data or certificates leave recovery waiting
+at its available prefix. Missing headers pause activation until their ancestry
+is available, except that a fresh Core activates canonical genesis so startup
+can open peer header acquisition. Public
 readiness, new local signatures, mining templates, and snapshot activation wait
 until Core reaches the pair and a fresh Geth status confirms it. A conflicting
-branch remains a local recovery error, rather than marking its blocks
-consensus-invalid.
+applied pair or an attempted connection outside that prefix remains a local
+recovery error, rather than marking its blocks consensus-invalid.
 
 The separate `preseal_snapshot_window <= 1,728` deployment check remains
 intentional. Before the first durable missing-certificate marker exists, all

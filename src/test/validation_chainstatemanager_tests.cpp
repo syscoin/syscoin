@@ -270,6 +270,126 @@ struct StartupNEVMRecoverySetup : DeferredNEVMReplaySetup {
             chainstate.setBlockIndexCandidates.insert(chainman.ActiveTip());
         }
     }
+
+    struct CompetingStartupBranches {
+        std::shared_ptr<const CBlock> fork;
+        std::shared_ptr<const CBlock> applied;
+        std::shared_ptr<const CBlock> sibling;
+        std::shared_ptr<const CBlock> sibling_tip;
+        CBlockIndex* applied_index{nullptr};
+        CBlockIndex* sibling_index{nullptr};
+        CBlockIndex* sibling_tip_index{nullptr};
+    };
+
+    CompetingStartupBranches PrepareCompetingStartupPair(bool have_applied_body = true)
+    {
+        auto& chainman{*Assert(m_node.chainman)};
+        auto& chainstate{chainman.ActiveChainstate()};
+        CompetingStartupBranches branches;
+        branches.fork = MineNEVMBlock();
+        branches.applied = MakeNEVMBlock();
+        branches.sibling = MineNEVMBlock(/*forward_to_nevm=*/false);
+        branches.sibling_tip = MineNEVMBlock(/*forward_to_nevm=*/false);
+        BOOST_REQUIRE(branches.applied->GetHash() != branches.sibling->GetHash());
+        RewindCore(101);
+        BlockValidationState header_state;
+        BOOST_REQUIRE_MESSAGE(chainman.ProcessNewBlockHeaders(
+            {branches.applied->GetBlockHeader()}, /*min_pow_checked=*/true,
+            header_state), header_state.ToString());
+        LOCK(::cs_main);
+        branches.applied_index = chainman.m_blockman.LookupBlockIndex(branches.applied->GetHash());
+        branches.sibling_index = chainman.m_blockman.LookupBlockIndex(branches.sibling->GetHash());
+        branches.sibling_tip_index = chainman.m_blockman.LookupBlockIndex(branches.sibling_tip->GetHash());
+        BOOST_REQUIRE(branches.applied_index != nullptr);
+        BOOST_REQUIRE(branches.sibling_index != nullptr);
+        BOOST_REQUIRE(branches.sibling_tip_index != nullptr);
+        BOOST_REQUIRE_EQUAL(branches.applied_index->nHeight, 102);
+        BOOST_REQUIRE_EQUAL(branches.sibling_tip_index->nHeight, 103);
+        BOOST_REQUIRE(branches.applied_index->pprev == chainman.ActiveTip());
+        BOOST_REQUIRE(branches.sibling_index->pprev == branches.applied_index->pprev);
+        BOOST_REQUIRE(branches.sibling_tip_index->pprev == branches.sibling_index);
+        BOOST_REQUIRE(branches.sibling_tip_index->nChainWork > branches.applied_index->nChainWork);
+        if (have_applied_body) {
+            BlockValidationState accept_state;
+            BOOST_REQUIRE_MESSAGE(chainman.AcceptBlock(
+                branches.applied, accept_state, nullptr, /*fRequested=*/true,
+                /*dbp=*/nullptr, /*fNewBlock=*/nullptr, /*min_pow_checked=*/true),
+                accept_state.ToString());
+        }
+        BOOST_REQUIRE_EQUAL(chainstate.setBlockIndexCandidates.count(branches.applied_index),
+                            have_applied_body ? 1U : 0U);
+        BOOST_REQUIRE_EQUAL(chainstate.setBlockIndexCandidates.count(branches.sibling_tip_index), 1U);
+        BOOST_REQUIRE_EQUAL(bool(branches.applied_index->nStatus & BLOCK_HAVE_DATA), have_applied_body);
+        BOOST_REQUIRE(branches.sibling_tip_index->nStatus & BLOCK_HAVE_DATA);
+        nevm->applied_count = 2;
+        nevm->applied_hash = branches.applied->GetHash();
+        nevm->connected_blocks.clear();
+        nevm->disconnected_blocks.clear();
+        std::string error;
+        BOOST_REQUIRE(chainman.InitializeNEVMStartupPair(
+            nevm->applied_count, nevm->applied_hash, error));
+        BOOST_REQUIRE(chainman.HasPendingNEVMStartupPair());
+        return branches;
+    }
+
+    void CheckCompetingStartupPairCompleted(const CompetingStartupBranches& branches)
+    {
+        auto& chainman{*Assert(m_node.chainman)};
+        auto& chainstate{chainman.ActiveChainstate()};
+        BOOST_CHECK(!chainman.HasPendingNEVMStartupPair());
+        BOOST_CHECK(nevm->disconnected_blocks == std::vector<uint256>{branches.applied->GetHash()});
+        BOOST_CHECK(nevm->connected_blocks ==
+                    (std::vector<uint256>{branches.sibling->GetHash(), branches.sibling_tip->GetHash()}));
+        BOOST_CHECK_EQUAL(nevm->applied_count, 3U);
+        BOOST_CHECK(nevm->applied_hash == branches.sibling_tip->GetHash());
+        BOOST_REQUIRE(nevm->last_reported_pair.has_value());
+        BOOST_CHECK_EQUAL(nevm->last_reported_pair->count, 2U);
+        BOOST_CHECK(nevm->last_reported_pair->hash == branches.applied->GetHash());
+        LOCK(::cs_main);
+        BOOST_CHECK(chainman.ActiveTip()->GetBlockHash() == branches.sibling_tip->GetHash());
+        BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == branches.sibling_tip->GetHash());
+        BOOST_CHECK_EQUAL(branches.applied_index->nStatus & BLOCK_FAILED_MASK, 0U);
+        BOOST_CHECK_EQUAL(branches.sibling_index->nStatus & BLOCK_FAILED_MASK, 0U);
+        BOOST_CHECK_EQUAL(branches.sibling_tip_index->nStatus & BLOCK_FAILED_MASK, 0U);
+    }
+
+    void CheckCompetingStartupPairQuarantine(bool payment_audit)
+    {
+        auto& chainman{*Assert(m_node.chainman)};
+        auto& chainstate{chainman.ActiveChainstate()};
+        const auto branches{PrepareCompetingStartupPair()};
+        const uint256 logical_id{GetRandHash()};
+        {
+            LOCK(::cs_main);
+            BOOST_REQUIRE(payment_audit
+                ? chainstate.DeferPaymentAuditReceiptCandidates(logical_id, *branches.applied_index)
+                : chainstate.DeferBTCCReceiptCandidates(logical_id, *branches.applied_index));
+            BOOST_CHECK(!chainstate.IsCurrentMostWorkBranch(*branches.applied_index));
+            BOOST_CHECK(!chainstate.IsCurrentMostWorkBranch(*branches.sibling_tip_index));
+        }
+        BlockValidationState waiting_state;
+        BOOST_REQUIRE_MESSAGE(chainstate.ActivateBestChain(waiting_state), waiting_state.ToString());
+        BOOST_CHECK(waiting_state.IsValid());
+        BOOST_CHECK(chainman.HasPendingNEVMStartupPair());
+        BOOST_CHECK(nevm->connected_blocks.empty());
+        BOOST_CHECK(nevm->disconnected_blocks.empty());
+        {
+            LOCK(::cs_main);
+            BOOST_CHECK(chainman.ActiveTip()->GetBlockHash() == branches.fork->GetHash());
+            BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == branches.fork->GetHash());
+            BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(branches.applied_index), 0U);
+            BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(branches.sibling_tip_index), 1U);
+            BOOST_REQUIRE(payment_audit
+                ? chainstate.ReconsiderPaymentAuditReceiptCandidates(logical_id)
+                : chainstate.ReconsiderBTCCReceiptCandidates(logical_id));
+            BOOST_CHECK(chainstate.IsCurrentMostWorkBranch(*branches.applied_index));
+            BOOST_CHECK(!chainstate.IsCurrentMostWorkBranch(*branches.sibling_tip_index));
+        }
+        BlockValidationState recovery_state;
+        BOOST_REQUIRE_MESSAGE(chainstate.ActivateBestChain(recovery_state), recovery_state.ToString());
+        BOOST_CHECK(recovery_state.IsValid());
+        CheckCompetingStartupPairCompleted(branches);
+    }
 };
 
 struct CoinsNEVMRecoverySetup : StartupNEVMRecoverySetup {
@@ -1368,6 +1488,231 @@ BOOST_FIXTURE_TEST_CASE(nevm_startup_pair_rejects_other_branch_as_local_error,
     BOOST_CHECK(!disconnect_state.IsInvalid());
     BOOST_CHECK(chainman.ActiveTip()->GetBlockHash() == first->GetHash());
     BOOST_CHECK(nevm->disconnected_blocks.empty());
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_startup_pair_waits_before_switching_to_higher_work_sibling,
+                        StartupNEVMRecoverySetup)
+{
+    auto& chainman{*Assert(m_node.chainman)};
+    auto& chainstate{chainman.ActiveChainstate()};
+    const auto branches{PrepareCompetingStartupPair()};
+    nevm->block_info_error = "startup-test-status-unavailable";
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK(chainstate.IsCurrentMostWorkBranch(*branches.applied_index));
+        BOOST_CHECK(!chainstate.IsCurrentMostWorkBranch(*branches.sibling_index));
+        BOOST_CHECK(!chainstate.IsCurrentMostWorkBranch(*branches.sibling_tip_index));
+    }
+    BlockValidationState state;
+    BOOST_REQUIRE_MESSAGE(chainstate.ActivateBestChain(state), state.ToString());
+    BOOST_CHECK(state.IsValid());
+    const auto check_waiting = [&] {
+        BOOST_CHECK(chainman.HasPendingNEVMStartupPair());
+        BOOST_CHECK(nevm->connected_blocks.empty());
+        BOOST_CHECK(nevm->disconnected_blocks.empty());
+        LOCK(::cs_main);
+        BOOST_CHECK(chainman.ActiveTip()->GetBlockHash() == branches.applied->GetHash());
+        BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == branches.applied->GetHash());
+        BOOST_CHECK(!chainstate.IsCurrentMostWorkBranch(*branches.sibling_tip_index));
+    };
+    check_waiting();
+    BlockValidationState waiting_state;
+    BOOST_REQUIRE_MESSAGE(chainman.RetryNEVMStartupPair(waiting_state), waiting_state.ToString());
+    BOOST_CHECK(waiting_state.IsValid());
+    check_waiting();
+
+    nevm->block_info_error.clear();
+    BlockValidationState retry_state;
+    BOOST_REQUIRE_MESSAGE(chainman.RetryNEVMStartupPair(retry_state), retry_state.ToString());
+    BOOST_CHECK(retry_state.IsValid());
+    CheckCompetingStartupPairCompleted(branches);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_startup_pair_exact_completion_resumes_fork_choice_in_same_call,
+                        StartupNEVMRecoverySetup)
+{
+    auto& chainman{*Assert(m_node.chainman)};
+    auto& chainstate{chainman.ActiveChainstate()};
+    const auto branches{PrepareCompetingStartupPair()};
+    BlockValidationState state;
+    BOOST_REQUIRE_MESSAGE(chainstate.ActivateBestChain(state), state.ToString());
+    BOOST_CHECK(state.IsValid());
+    CheckCompetingStartupPairCompleted(branches);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_startup_pair_missing_body_waits_despite_higher_work_sibling,
+                        StartupNEVMRecoverySetup)
+{
+    auto& chainman{*Assert(m_node.chainman)};
+    auto& chainstate{chainman.ActiveChainstate()};
+    const auto branches{PrepareCompetingStartupPair(/*have_applied_body=*/false)};
+    const auto check_waiting = [&] {
+        BOOST_CHECK(chainman.HasPendingNEVMStartupPair());
+        BOOST_CHECK(nevm->connected_blocks.empty());
+        BOOST_CHECK(nevm->disconnected_blocks.empty());
+        LOCK(::cs_main);
+        BOOST_CHECK(chainman.ActiveTip()->GetBlockHash() == branches.fork->GetHash());
+        BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == branches.fork->GetHash());
+        BOOST_CHECK(!chainstate.IsCurrentMostWorkBranch(*branches.applied_index));
+        BOOST_CHECK(!chainstate.IsCurrentMostWorkBranch(*branches.sibling_tip_index));
+        BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(branches.sibling_tip_index), 1U);
+    };
+    BlockValidationState waiting_state;
+    BOOST_REQUIRE_MESSAGE(chainstate.ActivateBestChain(waiting_state), waiting_state.ToString());
+    BOOST_CHECK(waiting_state.IsValid());
+    check_waiting();
+    BlockValidationState retry_state;
+    BOOST_REQUIRE_MESSAGE(chainman.RetryNEVMStartupPair(retry_state), retry_state.ToString());
+    BOOST_CHECK(retry_state.IsValid());
+    check_waiting();
+
+    {
+        LOCK(::cs_main);
+        BlockValidationState accept_state;
+        BOOST_REQUIRE_MESSAGE(chainman.AcceptBlock(
+            branches.applied, accept_state, nullptr, /*fRequested=*/true,
+            /*dbp=*/nullptr, /*fNewBlock=*/nullptr, /*min_pow_checked=*/true),
+            accept_state.ToString());
+        BOOST_CHECK(chainstate.IsCurrentMostWorkBranch(*branches.applied_index));
+        BOOST_CHECK(!chainstate.IsCurrentMostWorkBranch(*branches.sibling_tip_index));
+    }
+    BlockValidationState recovery_state;
+    BOOST_REQUIRE_MESSAGE(chainstate.ActivateBestChain(recovery_state), recovery_state.ToString());
+    BOOST_CHECK(recovery_state.IsValid());
+    CheckCompetingStartupPairCompleted(branches);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_startup_pair_advances_available_prefix_before_missing_body,
+                        StartupNEVMRecoverySetup)
+{
+    auto& chainman{*Assert(m_node.chainman)};
+    auto& chainstate{chainman.ActiveChainstate()};
+    const auto fork{MineNEVMBlock()};
+    const auto prefix{MakeNEVMBlock()};
+    const auto sibling{MineNEVMBlock(/*forward_to_nevm=*/false)};
+    CBlock applied_block{*MakeNEVMBlock()};
+    BOOST_REQUIRE_EQUAL(applied_block.vtx.size(), 1U);
+    BOOST_REQUIRE_LT(103, chainman.GetConsensus().DIP0003Height);
+    BOOST_REQUIRE_EQUAL(prefix->nTime, sibling->nTime);
+    BOOST_REQUIRE_EQUAL(prefix->nBits, sibling->nBits);
+    // This unused height-103 template has a unique mock NEVM payload and
+    // only a height-bound coinbase; reparenting avoids manipulating candidates.
+    applied_block.hashPrevBlock = prefix->GetHash();
+    applied_block.fChecked = false;
+    applied_block.nNonce = 0;
+    while (!CheckProofOfWork(
+        applied_block.GetHash(), applied_block.nBits, chainman.GetConsensus())) {
+        ++applied_block.nNonce;
+    }
+    const auto applied{std::make_shared<const CBlock>(std::move(applied_block))};
+    const auto sibling_second{MineNEVMBlock(/*forward_to_nevm=*/false)};
+    const auto sibling_tip{MineNEVMBlock(/*forward_to_nevm=*/false)};
+    BOOST_REQUIRE(applied->vchNEVMBlockData != sibling_second->vchNEVMBlockData);
+    RewindCore(101);
+
+    BlockValidationState header_state;
+    BOOST_REQUIRE_MESSAGE(chainman.ProcessNewBlockHeaders(
+        {prefix->GetBlockHeader(), applied->GetBlockHeader()},
+        /*min_pow_checked=*/true, header_state), header_state.ToString());
+    CBlockIndex* prefix_index{nullptr};
+    CBlockIndex* applied_index{nullptr};
+    CBlockIndex* sibling_tip_index{nullptr};
+    {
+        LOCK(::cs_main);
+        BlockValidationState accept_state;
+        BOOST_REQUIRE_MESSAGE(chainman.AcceptBlock(
+            prefix, accept_state, &prefix_index, /*fRequested=*/true,
+            /*dbp=*/nullptr, /*fNewBlock=*/nullptr, /*min_pow_checked=*/true),
+            accept_state.ToString());
+        applied_index = chainman.m_blockman.LookupBlockIndex(applied->GetHash());
+        sibling_tip_index = chainman.m_blockman.LookupBlockIndex(sibling_tip->GetHash());
+        BOOST_REQUIRE(prefix_index != nullptr);
+        BOOST_REQUIRE(applied_index != nullptr);
+        BOOST_REQUIRE(sibling_tip_index != nullptr);
+        BOOST_REQUIRE_EQUAL(prefix_index->nHeight, 102);
+        BOOST_REQUIRE_EQUAL(applied_index->nHeight, 103);
+        BOOST_REQUIRE_EQUAL(sibling_tip_index->nHeight, 104);
+        BOOST_REQUIRE(applied_index->pprev == prefix_index);
+        BOOST_REQUIRE(sibling_tip_index->nChainWork > applied_index->nChainWork);
+        BOOST_REQUIRE(!(applied_index->nStatus & BLOCK_HAVE_DATA));
+        BOOST_REQUIRE_EQUAL(chainstate.setBlockIndexCandidates.count(prefix_index), 1U);
+        BOOST_REQUIRE_EQUAL(chainstate.setBlockIndexCandidates.count(applied_index), 0U);
+        BOOST_REQUIRE_EQUAL(chainstate.setBlockIndexCandidates.count(sibling_tip_index), 1U);
+        nevm->applied_count = 3;
+        nevm->applied_hash = applied->GetHash();
+        nevm->connected_blocks.clear();
+        nevm->disconnected_blocks.clear();
+        std::string error;
+        BOOST_REQUIRE(chainman.InitializeNEVMStartupPair(
+            nevm->applied_count, nevm->applied_hash, error));
+        BOOST_CHECK(chainman.ActiveTip()->GetBlockHash() == fork->GetHash());
+        BOOST_CHECK(chainstate.IsCurrentMostWorkBranch(*prefix_index));
+        BOOST_CHECK(!chainstate.IsCurrentMostWorkBranch(*applied_index));
+        BOOST_CHECK(!chainstate.IsCurrentMostWorkBranch(*sibling_tip_index));
+    }
+    const auto queries_before{nevm->block_info_queries};
+    const auto check_waiting = [&] {
+        BOOST_CHECK(chainman.HasPendingNEVMStartupPair());
+        BOOST_CHECK(nevm->connected_blocks.empty());
+        BOOST_CHECK(nevm->disconnected_blocks.empty());
+        BOOST_CHECK_EQUAL(nevm->block_info_queries, queries_before);
+        LOCK(::cs_main);
+        BOOST_CHECK(chainman.ActiveTip()->GetBlockHash() == prefix->GetHash());
+        BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == prefix->GetHash());
+        BOOST_CHECK(!chainstate.IsCurrentMostWorkBranch(*applied_index));
+        BOOST_CHECK(!chainstate.IsCurrentMostWorkBranch(*sibling_tip_index));
+        BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(sibling_tip_index), 1U);
+    };
+    BlockValidationState progress_state;
+    BOOST_REQUIRE_MESSAGE(chainstate.ActivateBestChain(progress_state), progress_state.ToString());
+    BOOST_CHECK(progress_state.IsValid());
+    check_waiting();
+    BlockValidationState waiting_state;
+    BOOST_REQUIRE_MESSAGE(chainman.RetryNEVMStartupPair(waiting_state), waiting_state.ToString());
+    BOOST_CHECK(waiting_state.IsValid());
+    check_waiting();
+
+    {
+        LOCK(::cs_main);
+        BlockValidationState accept_state;
+        BOOST_REQUIRE_MESSAGE(chainman.AcceptBlock(
+            applied, accept_state, nullptr, /*fRequested=*/true,
+            /*dbp=*/nullptr, /*fNewBlock=*/nullptr, /*min_pow_checked=*/true),
+            accept_state.ToString());
+        BOOST_CHECK(chainstate.IsCurrentMostWorkBranch(*applied_index));
+        BOOST_CHECK(!chainstate.IsCurrentMostWorkBranch(*sibling_tip_index));
+    }
+    BlockValidationState recovery_state;
+    BOOST_REQUIRE_MESSAGE(chainstate.ActivateBestChain(recovery_state), recovery_state.ToString());
+    BOOST_CHECK(recovery_state.IsValid());
+    BOOST_CHECK(!chainman.HasPendingNEVMStartupPair());
+    BOOST_CHECK(nevm->disconnected_blocks ==
+                (std::vector<uint256>{applied->GetHash(), prefix->GetHash()}));
+    BOOST_CHECK(nevm->connected_blocks ==
+                (std::vector<uint256>{sibling->GetHash(), sibling_second->GetHash(), sibling_tip->GetHash()}));
+    BOOST_REQUIRE(nevm->last_reported_pair.has_value());
+    BOOST_CHECK_EQUAL(nevm->last_reported_pair->count, 3U);
+    BOOST_CHECK(nevm->last_reported_pair->hash == applied->GetHash());
+    BOOST_CHECK_EQUAL(nevm->applied_count, 4U);
+    BOOST_CHECK(nevm->applied_hash == sibling_tip->GetHash());
+    LOCK(::cs_main);
+    BOOST_CHECK(chainman.ActiveTip()->GetBlockHash() == sibling_tip->GetHash());
+    BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == sibling_tip->GetHash());
+    BOOST_CHECK_EQUAL(prefix_index->nStatus & BLOCK_FAILED_MASK, 0U);
+    BOOST_CHECK_EQUAL(applied_index->nStatus & BLOCK_FAILED_MASK, 0U);
+    BOOST_CHECK_EQUAL(sibling_tip_index->nStatus & BLOCK_FAILED_MASK, 0U);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_startup_pair_respects_btcc_receipt_quarantine,
+                        StartupNEVMRecoverySetup)
+{
+    CheckCompetingStartupPairQuarantine(/*payment_audit=*/false);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_startup_pair_respects_payment_receipt_quarantine,
+                        StartupNEVMRecoverySetup)
+{
+    CheckCompetingStartupPairQuarantine(/*payment_audit=*/true);
 }
 
 BOOST_FIXTURE_TEST_CASE(nevm_startup_pair_preserves_matched_behind_and_zero_status,

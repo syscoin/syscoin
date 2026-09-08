@@ -5917,12 +5917,30 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
 CBlockIndex* Chainstate::FindMostWorkChain()
 {
     AssertLockHeld(::cs_main);
+    const CBlockIndex* startup_applied{nullptr};
+    if (this == &m_chainman.ActiveChainstate() &&
+        m_chainman.HasPendingNEVMStartupPair()) {
+        const auto& pair{*m_chainman.m_nevm_startup_pair};
+        startup_applied = m_blockman.LookupBlockIndex(pair.block_hash);
+        if (startup_applied == nullptr || startup_applied->nHeight != pair.height ||
+            (startup_applied->nStatus & (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK))) {
+            return nullptr;
+        }
+    }
     do {
         CBlockIndex *pindexNew = nullptr;
 
         // Find the best candidate header.
         {
             std::set<CBlockIndex*, CBlockIndexWorkComparator>::reverse_iterator it = setBlockIndexCandidates.rbegin();
+            // Reconcile Geth's already-applied prefix before ordinary fork
+            // choice. Keep competing tips eligible for when the pair clears;
+            // preseal admission must observe the same temporary selection.
+            while (it != setBlockIndexCandidates.rend() && startup_applied != nullptr &&
+                   ((*it)->nHeight > startup_applied->nHeight ||
+                    startup_applied->GetAncestor((*it)->nHeight) != *it)) {
+                ++it;
+            }
             if (it == setBlockIndexCandidates.rend())
                 return nullptr;
             pindexNew = *it;
@@ -6768,6 +6786,7 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
     CBlockIndex *pindexNewTip = nullptr;
     bool base_sync_completed{false};
     bool waiting_for_nevm_status{false};
+    bool blocks_connected_this_call{false};
     do {
         // Block until the validation queue drains. This should largely
         // never happen in normal operation, however may happen during
@@ -6784,10 +6803,13 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
             // authentication keeps the public IBD latch active.
             const bool was_base_sync_complete{
                 m_chainman.IsBaseBlockSyncComplete()};
+            bool recovering_known_nevm_pair{false};
             if (this == &m_chainman.ActiveChainstate() &&
                 m_chainman.HasPendingNEVMStartupPair()) {
-                const auto& pair{*m_chainman.m_nevm_startup_pair};
-                if (m_blockman.LookupBlockIndex(pair.block_hash) == nullptr) {
+                const auto pair{*m_chainman.m_nevm_startup_pair};
+                const CBlockIndex* applied{m_blockman.LookupBlockIndex(pair.block_hash)};
+                std::string startup_pair_error;
+                if (applied == nullptr) {
                     if (m_chain.Tip() != nullptr || pair.height <= 0) return true;
                     // Startup waits for genesis before opening Core's peer
                     // network. Activate only genesis while the applied pair's
@@ -6800,8 +6822,16 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                          (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK))) {
                         return true;
                     }
+                } else {
+                    recovering_known_nevm_pair = true;
+                    // Missing data may wait, but a newly known or conflicted
+                    // applied pair must still fail closed before selection.
+                    if (!m_chainman.CheckNEVMStartupConnect(*applied, startup_pair_error) ||
+                        (m_chain.Tip() != nullptr && m_chain.Height() < pair.height &&
+                         !m_chainman.CheckNEVMStartupConnect(*m_chain.Tip(), startup_pair_error))) {
+                        return state.Error(startup_pair_error);
+                    }
                 }
-                std::string startup_pair_error;
                 if (!m_chainman.MaybeCompleteNEVMStartupPair(startup_pair_error)) {
                     return state.Error(startup_pair_error);
                 }
@@ -6849,9 +6879,16 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                 blocks_connected = blocks_connected ||
                                    starting_tip != m_chain.Tip() ||
                                    !connected_blocks.empty();
+                blocks_connected_this_call = blocks_connected_this_call || blocks_connected;
 
                 if (fInvalidFound) {
                     // Wipe cache, we may need another branch now.
+                    pindexMostWork = nullptr;
+                }
+                if (recovering_known_nevm_pair && blocks_connected) {
+                    // Revisit the fresh-status gate even when the selected
+                    // recovery prefix is now the tip, then resume fork choice
+                    // in this call once reconciliation completes.
                     pindexMostWork = nullptr;
                 }
                 pindexNewTip = m_chain.Tip();
@@ -6883,7 +6920,12 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                      !m_chain.Tip() ||
                      (starting_tip && CBlockIndexWorkComparator()(
                                           m_chain.Tip(), starting_tip)));
-            if (!blocks_connected) return true;
+            if (!blocks_connected) {
+                // A recovery iteration may have connected a prefix before
+                // this one ran out of eligible work. Preserve its final flush.
+                if (blocks_connected_this_call) break;
+                return true;
+            }
             const CBlockIndex* pindexFork = m_chain.FindFork(starting_tip);
             bool still_in_ibd = m_chainman.IsInitialBlockDownload();
             base_sync_completed = base_sync_completed ||
