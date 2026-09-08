@@ -332,6 +332,12 @@ public:
                 manager.m_pq_authority_snapshot_reuses};
     }
 
+    static uint64_t VoteContextChecks(CGovernanceManager& manager)
+    {
+        LOCK(manager.cs);
+        return manager.m_pq_vote_context_checks;
+    }
+
     static bool IsStraightExtension(
         CGovernanceManager& manager,
         const CBlockIndex& tip)
@@ -444,6 +450,19 @@ public:
             vote.GetHash(), &object->second);
     }
 
+    static void InsertRetainedVoteForSerializationTest(
+        CGovernanceManager& manager, const uint256& object_hash,
+        const CGovernanceVote& vote)
+    {
+        LOCK(manager.cs);
+        const auto object{manager.mapObjects.find(object_hash)};
+        BOOST_REQUIRE(object != manager.mapObjects.end());
+        auto& file{const_cast<CGovernanceObjectVoteFile&>(
+            object->second.GetVoteFile())};
+        file.AddVote(vote, /*retain_replaced=*/true);
+        BOOST_REQUIRE(manager.RebuildIndexes());
+    }
+
     static bool PublishReadyForTip(
         CGovernanceManager& manager, const CBlockIndex& tip,
         bool advance_validation_context = false)
@@ -497,6 +516,24 @@ public:
             /*full_revalidation=*/false,
             changed_pq_operators, changed_delegated_operators,
             reactivated_triggers, result.refreshed_objects,
+            result.checked_pq_votes,
+            result.checked_delegated_votes);
+    }
+
+    static bool ReconcileAllVotes(
+        CGovernanceManager& manager,
+        const CBlockIndex& tip,
+        const CDeterministicMNList& mn_list,
+        const llmq::pq::PQRegistrySnapshot& snapshot,
+        const std::set<uint256>& reactivated_triggers,
+        ReconcileResult& result)
+    {
+        LOCK(manager.cs);
+        result = {};
+        return manager.ReconcileGovernanceVotes(
+            tip, mn_list, snapshot,
+            /*full_revalidation=*/true,
+            {}, {}, reactivated_triggers, result.refreshed_objects,
             result.checked_pq_votes,
             result.checked_delegated_votes);
     }
@@ -1982,6 +2019,18 @@ BOOST_FIXTURE_TEST_CASE(
                 make_trigger(event_height, InsecureRand256()),
                 on_time_trigger_hash));
 
+    // Retaining an earlier vote for rollback must not reopen admission for
+    // a new vote once this trigger's event height has been reached.
+    CGovernanceVote retained_funding_vote{
+        COutPoint{InsecureRand256(), 0},
+        on_time_trigger_hash,
+        VOTE_SIGNAL_FUNDING,
+        VOTE_OUTCOME_YES};
+    BOOST_REQUIRE(
+        governance_tests::CGovernanceManagerTestAccess::
+            InsertVoteForSerializationTest(
+                *governance, on_time_trigger_hash, retained_funding_vote));
+
     CGovernanceVote late_funding_vote{
         COutPoint{InsecureRand256(), 0},
         on_time_trigger_hash,
@@ -2002,6 +2051,13 @@ BOOST_FIXTURE_TEST_CASE(
     BOOST_CHECK(
         std::string{exception.what()}.find("event height has passed") !=
         std::string::npos);
+    BOOST_CHECK(
+        !governance_tests::CGovernanceManagerTestAccess::ObjectHasVote(
+            *governance, on_time_trigger_hash, late_funding_vote.GetHash()));
+    BOOST_CHECK(
+        governance_tests::CGovernanceManagerTestAccess::ObjectHasVote(
+            *governance, on_time_trigger_hash,
+            retained_funding_vote.GetHash()));
 }
 
 BOOST_FIXTURE_TEST_CASE(
@@ -3427,6 +3483,330 @@ BOOST_FIXTURE_TEST_CASE(
 }
 
 BOOST_FIXTURE_TEST_CASE(
+    governance_future_vote_height_blocks_reuse_and_restores_exact_wire,
+    TestChain100Setup)
+{
+    using Access = governance_tests::CGovernanceManagerTestAccess;
+    using namespace llmq::pq;
+    BOOST_REQUIRE(governance != nullptr);
+    BOOST_REQUIRE(deterministicMNManager != nullptr);
+    auto& chainman{*m_node.chainman};
+    auto& consensus{const_cast<Consensus::Params&>(Params().GetConsensus())};
+    constexpr int preparation_height{1295};
+    constexpr int creator_height{1296};
+    constexpr int vote_height{1298};
+    constexpr int final_height{1299};
+    std::vector<uint256> hashes(final_height + 1);
+    std::vector<CBlockIndex> indices(final_height + 1);
+    for (int height{0}; height <= final_height; ++height) {
+        WriteLE32(hashes[height].begin(), 900'000 + height);
+        indices[height].nHeight = height;
+        indices[height].pprev = height == 0 ? nullptr : &indices[height - 1];
+        indices[height].phashBlock = &hashes[height];
+        indices[height].BuildSkip();
+    }
+    uint256 alternate_hash{uint256{160}};
+    CBlockIndex alternate;
+    alternate.nHeight = vote_height;
+    alternate.pprev = &indices[vote_height - 1];
+    alternate.phashBlock = &alternate_hash;
+    alternate.BuildSkip();
+
+    struct RestoreFixtureState {
+        ChainstateManager& chainman;
+        Consensus::Params& consensus;
+        const Consensus::Params original_consensus;
+        CBlockIndex* original_tip;
+        std::unique_ptr<CDeterministicMNManager> original_manager;
+        ~RestoreFixtureState()
+        {
+            LOCK(::cs_main);
+            governance->ObserveChainTip(nullptr);
+            chainman.ActiveChain().SetTip(*original_tip);
+            deterministicMNManager = std::move(original_manager);
+            consensus = original_consensus;
+        }
+    } restore{chainman, consensus, consensus,
+              WITH_LOCK(::cs_main, return chainman.ActiveTip()),
+              std::move(deterministicMNManager)};
+    BOOST_REQUIRE(restore.original_tip != nullptr);
+    consensus.DIP0003Height = preparation_height - 1;
+    consensus.DIP0003EnforcementHeight = preparation_height - 1;
+    consensus.nPQPreparationHeight = preparation_height;
+    consensus.nPQActivationHeight = creator_height;
+    consensus.nPQChainLockEpochOrigin = 1440;
+    consensus.nPQRegistrationCutoffBlocks = 144;
+    consensus.nPQFutureHorizonEpochs = 8;
+    consensus.nGovernanceMinQuorum = 1;
+    PQRegistryConfig registry_config;
+    BOOST_REQUIRE(GetPQRegistryConfig(consensus, registry_config) ==
+                  PQRegistryDeploymentResult::VALID);
+
+    const uint256 pro_tx_hash{uint256{161}};
+    const COutPoint collateral{uint256{162}, 0};
+    auto member{std::make_shared<CDeterministicMN>(1)};
+    member->proTxHash = pro_tx_hash;
+    member->collateralOutpoint = collateral;
+    auto member_state{std::make_shared<CDeterministicMNState>()};
+    member_state->keyIDOwner = coinbaseKey.GetPubKey().GetID();
+    member_state->keyIDVoting = coinbaseKey.GetPubKey().GetID();
+    member_state->nRegisteredHeight = preparation_height - 1;
+    member->pdmnState = std::move(member_state);
+
+    OperatorKeyState operator_state{OperatorKeyState::ForOperator(pro_tx_hash)};
+    const auto initial_schedule{DeriveOperatorKeyScheduleView(
+        registry_config.schedule, preparation_height,
+        registry_config.registration_cutoff_blocks,
+        registry_config.future_horizon_epochs)};
+    BOOST_REQUIRE(initial_schedule);
+    operator_state.schedule_initialized = 1;
+    operator_state.schedule = OperatorKeyScheduleState::FromView(*initial_schedule);
+    operator_state.has_global_key = 1;
+    operator_state.global_key_active = 1;
+    operator_state.global_key.key_version = 1;
+    operator_state.global_key.public_key[0] = 1;
+    operator_state.global_key.activated_height = preparation_height;
+    operator_state.global_key.child_key_commitment.generation = 1;
+    operator_state.global_key.child_key_commitment.first_epoch = 0;
+    const auto tree_id{GetChildKeyTreeId(
+        consensus.hashGenesisBlock, pro_tx_hash,
+        operator_state.global_key.child_key_commitment.generation,
+        operator_state.global_key.child_key_commitment.first_epoch)};
+    BOOST_REQUIRE(tree_id);
+    operator_state.global_key.child_key_commitment.tree_id = *tree_id;
+    operator_state.global_key.child_key_commitment.root = uint256{164};
+    BOOST_REQUIRE(operator_state.IsStructurallyValid());
+
+    const DBParams dmn_db_params{
+        .path = m_path_root / "governance_future_votes_evodb",
+        .cache_bytes = 1 << 20,
+        .memory_only = false,
+        .wipe_data = false,
+    };
+    DBParams registry_db_params{dmn_db_params};
+    registry_db_params.path =
+        m_path_root / "governance_future_votes_evodb_pq_registry";
+    registry_db_params.cache_bytes /= 2;
+    std::vector<uint256> registry_roots(final_height + 1);
+    const auto empty_root{
+        PQRegistrySnapshot{}.RecomputeConsensusStateRoot(
+            consensus.hashGenesisBlock)};
+    BOOST_REQUIRE(empty_root);
+    registry_roots[preparation_height - 1] = *empty_root;
+    {
+        // Seed ordinary authenticated registry records through the existing
+        // persistence seam, then let the production deterministic manager
+        // reopen and authenticate them during RevalidatePQGovernance.
+        PQRegistryManager writer{
+            registry_db_params, consensus.hashGenesisBlock, registry_config,
+            evo::MakeAuxiliaryHistoryGCDeployment(consensus).configuration_id};
+        std::optional<OperatorKeyState> previous_state;
+        for (int height{preparation_height}; height <= final_height; ++height) {
+            const auto schedule{DeriveOperatorKeyScheduleView(
+                registry_config.schedule, height,
+                registry_config.registration_cutoff_blocks,
+                registry_config.future_horizon_epochs)};
+            BOOST_REQUIRE(schedule);
+            BOOST_REQUIRE(operator_state.Advance(*schedule) ==
+                          OperatorKeyStateResult::OK);
+            PQRegistrySnapshot snapshot;
+            snapshot.operator_states.push_back(operator_state);
+            const auto root{snapshot.RecomputeConsensusStateRoot(
+                consensus.hashGenesisBlock)};
+            BOOST_REQUIRE(root);
+            registry_roots[height] = *root;
+            PQRegistryDiskSnapshot disk;
+            disk.is_checkpoint = height == preparation_height;
+            disk.height = height;
+            disk.block_hash = hashes[height];
+            disk.previous_block_hash = hashes[height - 1];
+            disk.previous_consensus_state_root = registry_roots[height - 1];
+            if (!previous_state || *previous_state != operator_state) {
+                disk.operator_states.push_back(operator_state);
+            }
+            if (disk.is_checkpoint != 0) {
+                disk.checkpoint_operator_states.push_back(operator_state);
+            }
+            disk.consensus_state_root = *root;
+            BOOST_REQUIRE(writer.WriteExactSnapshotForTesting(
+                disk.block_hash, disk));
+            previous_state = operator_state;
+        }
+        PQRegistryDiskSnapshot alternate_disk;
+        alternate_disk.height = alternate.nHeight;
+        alternate_disk.block_hash = alternate.GetBlockHash();
+        alternate_disk.previous_block_hash = alternate.pprev->GetBlockHash();
+        alternate_disk.previous_consensus_state_root =
+            registry_roots[vote_height - 1];
+        alternate_disk.consensus_state_root = registry_roots[vote_height];
+        BOOST_REQUIRE(writer.WriteExactSnapshotForTesting(
+            alternate_disk.block_hash, alternate_disk));
+    }
+    BOOST_REQUIRE(registry_roots[creator_height] == registry_roots[final_height]);
+    deterministicMNManager =
+        std::make_unique<CDeterministicMNManager>(dmn_db_params);
+    const auto seed_member = [&](const CBlockIndex& tip) {
+        CDeterministicMNList list{tip.GetBlockHash(), tip.nHeight, 1};
+        list.AddMN(member, /*fBumpTotalCount=*/false);
+        deterministicMNManager->m_evoDb->WriteCache(tip.GetBlockHash(), list);
+    };
+    for (int height{creator_height}; height <= final_height; ++height) {
+        seed_member(indices[height]);
+    }
+    seed_member(alternate);
+
+    int previous_superblock{0};
+    int event_height{0};
+    CSuperblock::GetNearestSuperblocksHeights(
+        final_height, previous_superblock, event_height);
+    BOOST_REQUIRE_GT(event_height, final_height);
+    const auto encoded_authorization = [&](const CBlockIndex& signing_block) {
+        GovernanceAuthorization authorization;
+        authorization.signed_height = signing_block.nHeight;
+        authorization.signed_block_hash = signing_block.GetBlockHash();
+        authorization.pro_tx_hash = pro_tx_hash;
+        authorization.global_key_version = 1;
+        authorization.signature[0] = 1;
+        std::vector<unsigned char> encoded;
+        BOOST_REQUIRE(EncodeGovernanceAuthorization(authorization, encoded));
+        return encoded;
+    };
+    const auto insert_admitted_trigger = [&](int signed_height,
+                                             uint256 proposal_hash) {
+        std::vector<CGovernancePayment> payments;
+        payments.emplace_back(
+            PKHash(coinbaseKey.GetPubKey()), COIN, proposal_hash);
+        CSuperblock schedule{event_height, std::move(payments)};
+        CGovernanceObject trigger{
+            uint256{}, /*revision=*/1,
+            GetTime<std::chrono::seconds>().count(), uint256{},
+            schedule.GetHexStrData()};
+        Governance::Object wire{trigger.Object()};
+        wire.masternodeOutpoint = collateral;
+        wire.vchSig = encoded_authorization(indices[signed_height]);
+        CDataStream stream{SER_NETWORK, PROTOCOL_VERSION};
+        stream << wire;
+        CGovernanceObject decoded;
+        stream >> decoded;
+        return Access::InsertObject(*governance, std::move(decoded));
+    };
+    const uint256 trigger_hash{
+        insert_admitted_trigger(creator_height, uint256{165})};
+    CGovernanceVote vote{
+        collateral, trigger_hash, VOTE_SIGNAL_FUNDING, VOTE_OUTCOME_YES};
+    vote.SetTime(100);
+    vote.SetSignature(encoded_authorization(indices[vote_height]));
+    Access::InsertRetainedVoteForSerializationTest(*governance, trigger_hash, vote);
+    Access::SetReady(*governance, true);
+    governance->ObserveChainTip(nullptr);
+    const uint64_t retained_bytes{Access::PersistedVoteBytes(*governance)};
+    BOOST_REQUIRE_GT(retained_bytes, 0U);
+    const auto revalidate_at = [&](CBlockIndex& tip) {
+        {
+            LOCK(::cs_main);
+            chainman.ActiveChain().SetTip(tip);
+        }
+        BOOST_REQUIRE(governance->RevalidatePQGovernance(tip));
+        BOOST_REQUIRE(governance->IsReady());
+    };
+    const auto check_vote = [&](const CGovernanceVote* expected) {
+        BOOST_CHECK_EQUAL(governance->HaveVoteForHash(vote.GetHash()),
+                          expected != nullptr);
+        CDataStream wire{SER_NETWORK, PROTOCOL_VERSION};
+        BOOST_CHECK_EQUAL(governance->SerializeVoteForHash(vote.GetHash(), wire),
+                          expected != nullptr);
+        if (expected != nullptr) {
+            CGovernanceVote decoded;
+            wire >> decoded;
+            BOOST_CHECK(decoded.HasSameWireEncoding(*expected));
+        }
+        BOOST_CHECK(wire.empty());
+        CGovernancePageRequest request;
+        request.nonce = 1;
+        request.scope_hash = trigger_hash;
+        const auto page{governance->BuildGovernancePage(request)};
+        BOOST_REQUIRE(page);
+        BOOST_REQUIRE_EQUAL(page->response.status, GOVERNANCE_PAGE_OK);
+        BOOST_CHECK_EQUAL(page->response.total_count,
+                          expected != nullptr ? 1U : 0U);
+        LOCK(governance->cs);
+        const auto* object{governance->FindConstGovernanceObject(trigger_hash)};
+        BOOST_REQUIRE(object != nullptr);
+        BOOST_CHECK_EQUAL(object->GetAbsoluteYesCount(VOTE_SIGNAL_FUNDING),
+                          expected != nullptr ? 1 : 0);
+    };
+
+    revalidate_at(indices[final_height]);
+    check_vote(&vote);
+    revalidate_at(indices[creator_height]);
+    check_vote(nullptr);
+    BOOST_CHECK((Access::TriggerStateCounts(*governance) ==
+                 std::pair<std::size_t, std::size_t>{1, 0}));
+    const auto before{Access::AuthoritySnapshotStats(*governance)};
+    const uint64_t checks_before{Access::VoteContextChecks(*governance)};
+    const auto context_before{Access::ValidationContextEpoch(*governance)};
+    BOOST_REQUIRE(context_before);
+
+    revalidate_at(indices[vote_height - 1]);
+    check_vote(nullptr);
+    const auto intermediate{Access::AuthoritySnapshotStats(*governance)};
+    BOOST_CHECK_EQUAL(intermediate.builds, before.builds);
+    BOOST_CHECK_EQUAL(intermediate.reuses, before.reuses + 1);
+    BOOST_CHECK_EQUAL(Access::VoteContextChecks(*governance), checks_before);
+    BOOST_CHECK(Access::ValidationContextEpoch(*governance) == context_before);
+
+    revalidate_at(indices[vote_height]);
+    check_vote(&vote);
+    const auto restored{Access::AuthoritySnapshotStats(*governance)};
+    BOOST_CHECK_EQUAL(restored.builds, intermediate.builds + 1);
+    BOOST_CHECK_EQUAL(restored.reuses, intermediate.reuses);
+    BOOST_CHECK_GT(Access::VoteContextChecks(*governance), checks_before);
+    BOOST_REQUIRE(Access::ValidationContextEpoch(*governance));
+    BOOST_CHECK_GT(*Access::ValidationContextEpoch(*governance), *context_before);
+    BOOST_CHECK_EQUAL(Access::PersistedVoteBytes(*governance), retained_bytes);
+    const uint64_t checks_restored{Access::VoteContextChecks(*governance)};
+    revalidate_at(indices[final_height]);
+    BOOST_CHECK_EQUAL(Access::VoteContextChecks(*governance), checks_restored);
+
+    // A different valid authorization for the same logical vote must change
+    // direct serving as well as the tally and page view, then restore A again.
+    revalidate_at(alternate);
+    check_vote(nullptr);
+    CGovernanceVote alternate_vote{vote};
+    alternate_vote.SetSignature(encoded_authorization(alternate));
+    Access::InsertRetainedVoteForSerializationTest(
+        *governance, trigger_hash, alternate_vote);
+    governance->ObserveChainTip(nullptr);
+    revalidate_at(alternate);
+    check_vote(&alternate_vote);
+    BOOST_CHECK_EQUAL(Access::PersistedVoteBytes(*governance), 2 * retained_bytes);
+    revalidate_at(indices[vote_height]);
+    check_vote(&vote);
+
+    // A creator authorization can also lie above the rollback point. Its
+    // earlier boundary must reactivate the object before the vote boundary.
+    governance->DeleteGovernanceObject(trigger_hash);
+    const uint256 later_trigger{
+        insert_admitted_trigger(vote_height - 1, uint256{166})};
+    CGovernanceVote later_vote{
+        collateral, later_trigger, VOTE_SIGNAL_FUNDING, VOTE_OUTCOME_YES};
+    later_vote.SetTime(100);
+    later_vote.SetSignature(encoded_authorization(indices[vote_height]));
+    Access::InsertRetainedVoteForSerializationTest(
+        *governance, later_trigger, later_vote);
+    governance->ObserveChainTip(nullptr);
+    revalidate_at(indices[final_height]);
+    BOOST_REQUIRE(governance->HaveObjectForHash(later_trigger));
+    revalidate_at(indices[creator_height]);
+    BOOST_CHECK(!governance->HaveObjectForHash(later_trigger));
+    revalidate_at(indices[vote_height - 1]);
+    BOOST_CHECK(governance->HaveObjectForHash(later_trigger));
+    BOOST_CHECK(!governance->HaveVoteForHash(later_vote.GetHash()));
+    revalidate_at(indices[vote_height]);
+    BOOST_CHECK(governance->HaveVoteForHash(later_vote.GetHash()));
+}
+
+BOOST_FIXTURE_TEST_CASE(
     governance_validation_context_is_hidden_during_pq_quarantine,
     TestingSetup)
 {
@@ -4132,7 +4512,9 @@ BOOST_FIXTURE_TEST_CASE(
     const int retention{consensus.SuperBlockCycle(event_height)};
     BOOST_REQUIRE_GT(retention, 2);
     BOOST_REQUIRE(CSuperblock::IsValidBlockHeight(event_height));
-    consensus.nPQActivationHeight = event_height - 2;
+    const int creator_height{event_height - 3};
+    const int vote_height{event_height - 2};
+    consensus.nPQActivationHeight = creator_height;
 
     // A complete branch lets the authorization and exact superblock value
     // checks resolve their normal ancestors at every intermediate tip.
@@ -4172,8 +4554,8 @@ BOOST_FIXTURE_TEST_CASE(
     // As in the quarantine test, model an already-admitted trigger and vote.
     // Rebuild checks their exact branch/key context, without re-signing them.
     GovernanceAuthorization authorization;
-    authorization.signed_height = event_height - 2;
-    authorization.signed_block_hash = hashes[event_height - 2];
+    authorization.signed_height = creator_height;
+    authorization.signed_block_hash = hashes[creator_height];
     authorization.pro_tx_hash = pro_tx_hash;
     authorization.global_key_version = 1;
     authorization.signature[0] = 1;
@@ -4198,6 +4580,10 @@ BOOST_FIXTURE_TEST_CASE(
         collateral, authorized_trigger.GetHash(),
         VOTE_SIGNAL_FUNDING, VOTE_OUTCOME_YES};
     vote.SetTime(GetTime<std::chrono::seconds>().count());
+    authorization.signed_height = vote_height;
+    authorization.signed_block_hash = hashes[vote_height];
+    BOOST_REQUIRE(EncodeGovernanceAuthorization(
+        authorization, encoded_authorization));
     vote.SetSignature(encoded_authorization);
     CGovernanceObjectVoteFile vote_file;
     vote_file.AddVote(vote);
@@ -4205,7 +4591,8 @@ BOOST_FIXTURE_TEST_CASE(
     vote_rec_t vote_record;
     vote_record.mapInstances.emplace(
         VOTE_SIGNAL_FUNDING,
-        vote_instance_t{VOTE_OUTCOME_YES, 0, vote.GetTimestamp()});
+        vote_instance_t{VOTE_OUTCOME_YES, vote.GetTimestamp(),
+                        vote.GetTimestamp()});
     current_votes.emplace(collateral, std::move(vote_record));
     CDataStream admitted_object{SER_DISK, PROTOCOL_VERSION};
     admitted_object << authorized_trigger.Object() << int64_t{0} << false
@@ -4227,12 +4614,37 @@ BOOST_FIXTURE_TEST_CASE(
         snapshot.operator_states.push_back(operator_state);
         governance->ObserveChainTip(&tip);
         Access::SetCachedHeight(*governance, tip.nHeight);
+        std::set<uint256> reactivated_triggers;
+        BOOST_REQUIRE(Access::RebuildTriggerState(
+            *governance, tip, list, snapshot,
+            /*recompute_cached_flags=*/false, &reactivated_triggers));
+        Access::ReconcileResult reconciled;
+        BOOST_REQUIRE(Access::ReconcileAllVotes(
+            *governance, tip, list, snapshot,
+            reactivated_triggers, reconciled));
         BOOST_REQUIRE(Access::RebuildTriggerState(
             *governance, tip, list, snapshot));
         BOOST_REQUIRE(Access::PublishReadyForTip(*governance, tip));
         BOOST_CHECK(!Access::IsCachedDelete(*governance, trigger_hash));
-        BOOST_CHECK(Access::ObjectHasVote(
-            *governance, trigger_hash, vote.GetHash()));
+        if (tip.nHeight >= vote_height) {
+            BOOST_CHECK_MESSAGE(Access::ObjectHasVote(
+                *governance, trigger_hash, vote.GetHash()),
+                "Funding vote missing at restored height " << tip.nHeight);
+        }
+        {
+            LOCK(governance->cs);
+            const auto* object{governance->FindConstGovernanceObject(trigger_hash)};
+            BOOST_REQUIRE(object != nullptr);
+            vote_rec_t current;
+            const bool has_active_vote{object->GetCurrentMNVotes(collateral, current)};
+            BOOST_CHECK_EQUAL(has_active_vote, tip.nHeight >= vote_height);
+            if (has_active_vote) {
+                // Reconciliation and inactive disk reloads preserve the
+                // original admission rate timestamp without a fresh rate slot.
+                BOOST_CHECK_EQUAL(current.mapInstances.at(VOTE_SIGNAL_FUNDING).nTime,
+                                  vote.GetTimestamp());
+            }
+        }
         BOOST_CHECK_EQUAL(Access::IsPageObjectEligible(
             *governance, trigger_hash, tip.nHeight),
             tip.nHeight < event_height);
@@ -4265,6 +4677,8 @@ BOOST_FIXTURE_TEST_CASE(
 
     rebuild_at(indices[event_height - 1]);
     check_exact_payment(indices[event_height]);
+    WITH_LOCK(cs_main,
+        indices[event_height].nStatus |= BLOCK_GOVERNANCE_VALIDATED);
     rebuild_at(indices[event_height]);
     CSuperblockManager::ExecuteBestSuperblock(
         event_height, &indices[event_height]);
@@ -4294,6 +4708,56 @@ BOOST_FIXTURE_TEST_CASE(
     replacement.phashBlock = &replacement_hash;
     replacement.BuildSkip();
     check_exact_payment(replacement);
+
+    // A deeper disconnect crosses the vote's signing height while leaving
+    // the earlier trigger authorization valid. Returning to the same branch
+    // must restore the vote and accept the same previously valid block S.
+    rebuild_at(indices[vote_height]);
+    rebuild_at(indices[creator_height]);
+    BOOST_CHECK((Access::TriggerStateCounts(*governance) ==
+                 std::pair<std::size_t, std::size_t>{1, 0}));
+    {
+        LOCK(governance->cs);
+        const auto* object{governance->FindConstGovernanceObject(trigger_hash)};
+        BOOST_REQUIRE(object != nullptr);
+        BOOST_CHECK_EQUAL(object->GetAbsoluteYesCount(VOTE_SIGNAL_FUNDING), 0);
+    }
+    rebuild_at(indices[vote_height]);
+    rebuild_at(indices[event_height - 1]);
+    BOOST_CHECK((Access::TriggerStateCounts(*governance) ==
+                 std::pair<std::size_t, std::size_t>{1, 0}));
+    check_exact_payment(indices[event_height]);
+
+    // Persist while the vote is branch-inactive. A cache reload must retain
+    // its authorization without counting it until the original branch is
+    // restored, just as the in-memory rollback above does.
+    rebuild_at(indices[vote_height]);
+    rebuild_at(indices[creator_height]);
+    CDataStream inactive_vote_cache{SER_DISK, PROTOCOL_VERSION};
+    {
+        LOCK(governance->cs);
+        const auto* object{governance->FindConstGovernanceObject(trigger_hash)};
+        BOOST_REQUIRE(object != nullptr);
+        BOOST_CHECK_EQUAL(object->GetAbsoluteYesCount(VOTE_SIGNAL_FUNDING), 0);
+        inactive_vote_cache << *object;
+    }
+    governance->DeleteGovernanceObject(trigger_hash);
+    CGovernanceObject reloaded_inactive;
+    inactive_vote_cache >> reloaded_inactive;
+    BOOST_CHECK(inactive_vote_cache.empty());
+    BOOST_REQUIRE(Access::InsertObject(
+        *governance, std::move(reloaded_inactive)) == trigger_hash);
+    BOOST_REQUIRE(Access::RebuildIndexes(*governance));
+    rebuild_at(indices[creator_height]);
+    {
+        LOCK(governance->cs);
+        const auto* object{governance->FindConstGovernanceObject(trigger_hash)};
+        BOOST_REQUIRE(object != nullptr);
+        BOOST_CHECK_EQUAL(object->GetAbsoluteYesCount(VOTE_SIGNAL_FUNDING), 0);
+    }
+    rebuild_at(indices[vote_height]);
+    rebuild_at(indices[event_height - 1]);
+    check_exact_payment(indices[event_height]);
 
     // A recent-past cache reload reconstructs Valid status, as on startup,
     // and must preserve its original funding vote for the same rollback.

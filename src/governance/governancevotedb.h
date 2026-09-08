@@ -40,9 +40,14 @@ private:
     int nMemoryVotes;
     uint64_t nSerializedVoteBytes;
 
+    // All admitted wire forms survive reversible authority/branch changes.
     vote_l_t listVotes;
 
+    // Only representatives valid in the current context are counted/served.
     vote_m_t mapVoteIndex;
+
+    // Unlike a logical vote hash, this key includes the authorization bytes.
+    vote_m_t mapStoredVoteIndex;
 
     // Existing sessions keep old immutable generations alive while mutation
     // publishes a fresh snapshot for new cursor-zero requests.
@@ -56,11 +61,12 @@ public:
     CGovernanceObjectVoteFile();
 
     CGovernanceObjectVoteFile(const CGovernanceObjectVoteFile& other);
+    CGovernanceObjectVoteFile& operator=(const CGovernanceObjectVoteFile& other);
 
     /**
      * Add a vote to the file
      */
-    void AddVote(const CGovernanceVote& vote);
+    void AddVote(const CGovernanceVote& vote, bool retain_replaced = false);
 
     /**
      * Return true if the vote with this hash is currently cached in memory
@@ -109,7 +115,12 @@ public:
     }
 
     [[nodiscard]] uint64_t ProjectedSerializedVoteBytes(
-        const CGovernanceVote& vote) const;
+        const CGovernanceVote& vote, bool retain_replaced = false) const;
+
+    /** Select already-stored representatives without changing retained bytes. */
+    [[nodiscard]] std::set<uint256> UpdateActiveVotes(
+        const std::optional<COutPoint>& masternode_filter,
+        const std::vector<const CGovernanceVote*>& selected_stored_votes);
 
     std::vector<CGovernanceVote> GetVotes() const;
 
@@ -118,8 +129,10 @@ public:
     template <typename Callback>
     void ForEachVote(Callback&& callback) const
     {
-        for (const auto& vote : listVotes) {
-            if (!callback(vote)) break;
+        for (const auto& [hash, vote] : mapVoteIndex) {
+            (void)hash;
+            const CGovernanceVote& active_vote{*vote};
+            if (!callback(active_vote)) break;
         }
     }
 
@@ -129,11 +142,46 @@ public:
     {
         const auto [begin, end]{mapMasternodeIndex.equal_range(outpoint)};
         for (auto it{begin}; it != end; ++it) {
-            if (!callback(*it->second)) break;
+            const auto active{mapVoteIndex.find(it->second->GetHash())};
+            if (active == mapVoteIndex.end() || active->second != it->second) {
+                continue;
+            }
+            const CGovernanceVote& active_vote{*it->second};
+            if (!callback(active_vote)) break;
         }
     }
 
     [[nodiscard]] bool HasVoteFromMasternode(
+        const COutPoint& outpoint) const
+    {
+        bool found{false};
+        ForEachVoteFromMasternode(outpoint, [&](const CGovernanceVote&) {
+            found = true;
+            return false;
+        });
+        return found;
+    }
+
+    template <typename Callback>
+    void ForEachStoredVote(Callback&& callback) const
+    {
+        for (const auto& vote : listVotes) {
+            if (!callback(vote)) break;
+        }
+    }
+
+    template <typename Callback>
+    void ForEachStoredVoteFromMasternode(const COutPoint& outpoint,
+                                         Callback&& callback) const
+    {
+        const auto [begin, end]{mapMasternodeIndex.equal_range(outpoint)};
+        for (auto it{begin}; it != end; ++it) {
+            const CGovernanceVote& stored_vote{*it->second};
+            if (!callback(stored_vote)) break;
+        }
+    }
+
+    [[nodiscard]] bool HasStoredVoteFromMasternode(
         const COutPoint& outpoint) const
     {
         return mapMasternodeIndex.contains(outpoint);
@@ -157,6 +205,8 @@ private:
 
     [[nodiscard]] static uint64_t SerializedVoteBytes(
         const CGovernanceVote& vote);
+
+    [[nodiscard]] static uint256 StoredVoteHash(const CGovernanceVote& vote);
 
     void RebuildIndex();
 

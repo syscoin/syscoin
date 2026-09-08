@@ -265,7 +265,8 @@ bool CGovernanceObject::ProcessVote(const CBlockIndex& validation_branch,
     }
 
     voteInstanceRef = vote_instance_t(vote.GetOutcome(), nVoteTimeUpdate, vote.GetTimestamp());
-    fileVotes.AddVote(vote);
+    fileVotes.AddVote(vote, /*retain_replaced=*/
+                               GetObjectType() == GOVERNANCE_OBJECT_TRIGGER);
     fDirtyCache = true;
     // SEND NOTIFICATION TO SCRIPT/ZMQ
     GetMainSignals().NotifyGovernanceVote(vote.GetHash());
@@ -361,6 +362,62 @@ std::set<uint256> CGovernanceObject::RemoveInvalidPQVotesImpl(
     std::set<COutPoint>* removed_operators)
 {
     LOCK(cs);
+    if (GetObjectType() == GOVERNANCE_OBJECT_TRIGGER) {
+        // Only previously admitted exact wire forms enter this history.
+        // Select the newest currently authorized vote per operator/signal;
+        // a temporary branch or key change must not destroy the alternatives.
+        using vote_key_t = std::pair<COutPoint, vote_signal_enum_t>;
+        std::map<vote_key_t, const CGovernanceVote*> winners;
+        const auto inspect_stored_vote = [&](const CGovernanceVote& vote) {
+            if (checked_votes != nullptr) ++*checked_votes;
+            std::string error;
+            if (!vote.CheckPQAuthorizationContext(
+                    validation_branch, validation_mn_list, current_snapshot,
+                    error)) {
+                return true;
+            }
+            const vote_key_t key{vote.GetMasternodeOutpoint(),
+                                 vote.GetSignal()};
+            const auto [it, inserted]{winners.emplace(key, &vote)};
+            if (!inserted &&
+                (vote.GetTimestamp() > it->second->GetTimestamp() ||
+                 (vote.GetTimestamp() == it->second->GetTimestamp() &&
+                  vote.GetOutcome() > it->second->GetOutcome()))) {
+                it->second = &vote;
+            }
+            return true;
+        };
+        if (masternode_filter) {
+            fileVotes.ForEachStoredVoteFromMasternode(
+                *masternode_filter, inspect_stored_vote);
+        } else {
+            fileVotes.ForEachStoredVote(inspect_stored_vote);
+        }
+        std::vector<const CGovernanceVote*> selected;
+        selected.reserve(winners.size());
+        for (const auto& [key, vote] : winners) selected.push_back(vote);
+        auto changed{fileVotes.UpdateActiveVotes(masternode_filter, selected)};
+
+        // Preserve admission rate timestamps even while a signal has no active
+        // vote. Recovery changes the tally without granting a fresh rate slot.
+        auto current = masternode_filter
+            ? mapCurrentMNVotes.lower_bound(*masternode_filter)
+            : mapCurrentMNVotes.begin();
+        for (; current != mapCurrentMNVotes.end() &&
+               (!masternode_filter || current->first == *masternode_filter);
+             ++current) {
+            for (auto& [signal, instance] : current->second.mapInstances) {
+                instance = vote_instance_t(VOTE_OUTCOME_NONE, instance.nTime);
+            }
+        }
+        for (const auto& [key, vote] : winners) {
+            auto& instance{mapCurrentMNVotes[key.first].mapInstances[key.second]};
+            instance = vote_instance_t(vote->GetOutcome(), instance.nTime,
+                                       vote->GetTimestamp());
+        }
+        if (!changed.empty()) fDirtyCache = true;
+        return changed;
+    }
     std::set<uint256> removed_votes;
     const auto inspect_vote = [&](const CGovernanceVote& vote) {
         if (!GetGovernanceVoteAuthPurpose(
@@ -450,7 +507,7 @@ bool CGovernanceObject::HasPQVoteFromMasternode(
 {
     LOCK(cs);
     bool found{false};
-    fileVotes.ForEachVoteFromMasternode(
+    fileVotes.ForEachStoredVoteFromMasternode(
         masternode, [&](const CGovernanceVote& vote) {
             found = GetGovernanceVoteAuthPurpose(
                         GetObjectType(), vote.GetSignal())
@@ -458,6 +515,28 @@ bool CGovernanceObject::HasPQVoteFromMasternode(
             return !found;
         });
     return found;
+}
+
+std::optional<int32_t> CGovernanceObject::NextPQAuthorizationHeight(
+    int32_t tip_height) const
+{
+    LOCK(cs);
+    if (GetObjectType() != GOVERNANCE_OBJECT_TRIGGER || IsSetExpired()) {
+        return std::nullopt;
+    }
+    std::optional<int32_t> next;
+    const auto consider = [&](int32_t height) {
+        if (height > tip_height && (!next || height < *next)) next = height;
+    };
+    llmq::pq::GovernanceAuthorization creator;
+    if (llmq::pq::DecodeGovernanceAuthorization(m_obj.vchSig, creator)) {
+        consider(creator.signed_height);
+    }
+    fileVotes.ForEachStoredVote([&](const CGovernanceVote& vote) {
+        if (const auto height{vote.GetPQSigningHeight()}) consider(*height);
+        return true;
+    });
+    return next;
 }
 
 bool CGovernanceObject::HasDelegatedFundingVoteFromMasternode(
@@ -944,7 +1023,10 @@ bool CGovernanceObject::GetCurrentMNVotes(const COutPoint& mnCollateralOutpoint,
         return false;
     }
     voteRecord = it->second;
-    return true;
+    std::erase_if(voteRecord.mapInstances, [](const auto& entry) {
+        return entry.second.eOutcome == VOTE_OUTCOME_NONE;
+    });
+    return !voteRecord.mapInstances.empty();
 }
 
 void CGovernanceObject::Relay(PeerManager& peerman) const

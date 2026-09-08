@@ -19,6 +19,15 @@
 
 #include <tuple>
 
+std::optional<int32_t> CGovernanceVote::GetPQSigningHeight() const
+{
+    llmq::pq::GovernanceAuthorization authorization;
+    if (!llmq::pq::DecodeGovernanceAuthorization(vchSig, authorization)) {
+        return std::nullopt;
+    }
+    return authorization.signed_height;
+}
+
 std::string CGovernanceVoting::ConvertOutcomeToString(vote_outcome_enum_t nOutcome)
 {
     static const std::map<vote_outcome_enum_t, std::string> mapOutcomeString = {

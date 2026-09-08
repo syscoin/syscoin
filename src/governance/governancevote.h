@@ -119,6 +119,9 @@ public:
 
     std::size_t GetSignatureSize() const noexcept { return vchSig.size(); }
 
+    /** Signing height of a canonical PQ envelope, for retained-vote recovery. */
+    [[nodiscard]] std::optional<int32_t> GetPQSigningHeight() const;
+
     void SetTime(int64_t nTimeIn)
     {
         nTime = nTimeIn;

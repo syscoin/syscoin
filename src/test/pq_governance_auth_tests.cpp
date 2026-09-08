@@ -4,6 +4,7 @@
 
 #include <governance/pq_governance_auth.h>
 #include <governance/governance.h>
+#include <governance/governanceobject.h>
 #include <governance/governancevote.h>
 #include <governance/governancevotedb.h>
 #include <flatdatabase.h>
@@ -674,6 +675,296 @@ BOOST_AUTO_TEST_CASE(governance_vote_bytes_and_flatdb_sizes_are_checked)
     BOOST_CHECK(!FlatDatabaseFileSizeAllowed(beyond_int, limit));
     BOOST_CHECK(FlatDatabaseFileSizeAllowed(
         beyond_int, std::numeric_limits<uint64_t>::max()));
+}
+
+BOOST_AUTO_TEST_CASE(retained_vote_wires_have_one_active_representative)
+{
+    const uint256 parent{uint256{83}};
+    const COutPoint voter{uint256{84}, 0};
+    const COutPoint unrelated_voter{uint256{85}, 0};
+    CGovernanceVote branch_a{
+        voter, parent, VOTE_SIGNAL_FUNDING, VOTE_OUTCOME_YES};
+    branch_a.SetTime(100);
+    branch_a.SetSignature(std::vector<unsigned char>{1, 2, 3});
+    CGovernanceVote branch_b{branch_a};
+    branch_b.SetSignature(std::vector<unsigned char>{4, 5, 6});
+    BOOST_REQUIRE(branch_a.GetHash() == branch_b.GetHash());
+    BOOST_REQUIRE(!branch_a.HasSameWireEncoding(branch_b));
+    CGovernanceVote unrelated{
+        unrelated_voter, parent, VOTE_SIGNAL_FUNDING, VOTE_OUTCOME_NO};
+    unrelated.SetTime(100);
+
+    CGovernanceObjectVoteFile votes;
+    votes.AddVote(branch_a, /*retain_replaced=*/true);
+    votes.AddVote(unrelated, /*retain_replaced=*/true);
+    const uint64_t original_bytes{votes.GetSerializedVoteBytes()};
+    const auto budget{std::make_shared<GovernancePageSnapshotBudget>()};
+    const auto original_page{votes.GetPageSnapshot(
+        parent, budget, /*instance_id=*/10,
+        /*validation_context_epoch=*/10)};
+    BOOST_REQUIRE(original_page);
+
+    // A branch change hides A without dropping its authenticated wire form.
+    const auto deactivated{votes.UpdateActiveVotes(voter, {})};
+    BOOST_CHECK(deactivated.contains(branch_a.GetHash()));
+    BOOST_CHECK(!votes.HasVote(branch_a.GetHash()));
+    BOOST_CHECK(!votes.GetVote(branch_a.GetHash()));
+    BOOST_CHECK(!votes.GetVoteSerializedSizeUpperBound(
+        branch_a.GetHash(), PROTOCOL_VERSION));
+    CDataStream hidden{SER_NETWORK, PROTOCOL_VERSION};
+    BOOST_CHECK(!votes.SerializeVoteToStream(branch_a.GetHash(), hidden));
+    BOOST_CHECK(hidden.empty());
+    BOOST_CHECK_EQUAL(votes.GetVoteCount(), 1);
+    BOOST_CHECK(votes.HasStoredVoteFromMasternode(voter));
+    BOOST_CHECK(!votes.HasVoteFromMasternode(voter));
+    BOOST_CHECK(votes.HasVote(unrelated.GetHash()));
+    BOOST_CHECK_EQUAL(votes.GetSerializedVoteBytes(), original_bytes);
+
+    const uint64_t projected{
+        votes.ProjectedSerializedVoteBytes(branch_b,
+                                           /*retain_replaced=*/true)};
+    BOOST_REQUIRE_GT(projected, original_bytes);
+    votes.AddVote(branch_b, /*retain_replaced=*/true);
+    BOOST_CHECK_EQUAL(votes.GetSerializedVoteBytes(), projected);
+    votes.AddVote(branch_b, /*retain_replaced=*/true);
+    BOOST_CHECK_EQUAL(votes.GetSerializedVoteBytes(), projected);
+
+    const auto select_wire = [](CGovernanceObjectVoteFile& file,
+                                const CGovernanceVote& selected) {
+        std::vector<const CGovernanceVote*> selection;
+        file.ForEachStoredVote([&](const CGovernanceVote& stored) {
+            if (stored.HasSameWireEncoding(selected)) {
+                selection.push_back(&stored);
+            }
+            return true;
+        });
+        BOOST_REQUIRE_EQUAL(selection.size(), 1U);
+        return file.UpdateActiveVotes(
+            selected.GetMasternodeOutpoint(), selection);
+    };
+    select_wire(votes, branch_b);
+    BOOST_REQUIRE(votes.GetVote(branch_b.GetHash()));
+    BOOST_CHECK(votes.GetVote(branch_b.GetHash())->HasSameWireEncoding(
+        branch_b));
+    BOOST_CHECK_EQUAL(votes.GetVoteCount(), 2);
+    const auto branch_b_page{votes.GetPageSnapshot(
+        parent, budget, /*instance_id=*/11,
+        /*validation_context_epoch=*/10)};
+    BOOST_REQUIRE(branch_b_page);
+    BOOST_CHECK(branch_b_page != original_page);
+    // The inventory view is unchanged, but its exact payload generation is new.
+    BOOST_CHECK(branch_b_page->ViewId() == original_page->ViewId());
+    const auto check_page_wire = [&](const auto& page,
+                                     const CGovernanceVote& expected) {
+        bool found{false};
+        for (const auto& entry : page->Entries()) {
+            if (entry.inv.hash != expected.GetHash()) continue;
+            CDataStream stream{
+                Span<const uint8_t>{entry.payload}, SER_NETWORK,
+                GOVERNANCE_PAGE_PROTO_VERSION};
+            CGovernanceVote decoded;
+            stream >> decoded;
+            BOOST_CHECK(decoded.HasSameWireEncoding(expected));
+            BOOST_CHECK(stream.empty());
+            found = true;
+        }
+        BOOST_CHECK(found);
+    };
+    check_page_wire(original_page, branch_a);
+    check_page_wire(branch_b_page, branch_b);
+
+    const auto reactivated{select_wire(votes, branch_a)};
+    BOOST_CHECK(reactivated.contains(branch_a.GetHash()));
+    BOOST_CHECK_EQUAL(votes.GetSerializedVoteBytes(), projected);
+    const CGovernanceObjectVoteFile copied{votes};
+    BOOST_REQUIRE(copied.GetVote(branch_a.GetHash()));
+    BOOST_CHECK(copied.GetVote(branch_a.GetHash())->HasSameWireEncoding(
+        branch_a));
+    BOOST_CHECK_EQUAL(copied.GetSerializedVoteBytes(), projected);
+
+    CGovernanceObjectVoteFile inactive{votes};
+    (void)inactive.UpdateActiveVotes(voter, {});
+    const CGovernanceObjectVoteFile inactive_copy{inactive};
+    CGovernanceObjectVoteFile assigned;
+    assigned.AddVote(branch_b);
+    assigned = inactive;
+    for (const auto* file : std::array<const CGovernanceObjectVoteFile*, 2>{
+             &inactive_copy, &assigned}) {
+        BOOST_CHECK(!file->HasVote(branch_a.GetHash()));
+        BOOST_CHECK(file->HasStoredVoteFromMasternode(voter));
+        BOOST_CHECK(file->HasVote(unrelated.GetHash()));
+        BOOST_CHECK_EQUAL(file->GetVoteCount(), 1);
+        BOOST_CHECK_EQUAL(file->GetSerializedVoteBytes(), projected);
+    }
+    select_wire(assigned, branch_b);
+    BOOST_REQUIRE(assigned.GetVote(branch_b.GetHash()));
+    BOOST_CHECK(assigned.GetVote(branch_b.GetHash())->HasSameWireEncoding(branch_b));
+
+    // Same logical hashes must survive the legacy list serialization together.
+    CDataStream disk{SER_DISK, PROTOCOL_VERSION};
+    disk << votes;
+    CGovernanceObjectVoteFile reloaded;
+    disk >> reloaded;
+    BOOST_CHECK(disk.empty());
+    std::size_t stored_count{0};
+    reloaded.ForEachStoredVote([&](const CGovernanceVote&) {
+        ++stored_count;
+        return true;
+    });
+    BOOST_CHECK_EQUAL(stored_count, 3U);
+    BOOST_CHECK_EQUAL(reloaded.GetSerializedVoteBytes(), projected);
+    select_wire(reloaded, branch_a);
+    BOOST_REQUIRE(reloaded.GetVote(branch_a.GetHash()));
+    BOOST_CHECK(reloaded.GetVote(branch_a.GetHash())->HasSameWireEncoding(
+        branch_a));
+    select_wire(reloaded, branch_b);
+    BOOST_REQUIRE(reloaded.GetVote(branch_b.GetHash()));
+    BOOST_CHECK(reloaded.GetVote(branch_b.GetHash())->HasSameWireEncoding(
+        branch_b));
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    retained_trigger_votes_reconcile_wire_variants_and_supersession,
+    BasicTestingSetup)
+{
+    const int activation_height{Params().GetConsensus().DIP0003Height};
+    BOOST_REQUIRE_GT(activation_height, 0);
+    ScopedPQActivation activation{activation_height};
+    std::array<CBlockIndex, 2> common;
+    std::array<uint256, 2> common_hashes;
+    BuildBranch(common, common_hashes, nullptr, activation_height - 1,
+                0x70, /*build_skip=*/false);
+    std::array<CBlockIndex, 2> branch_a;
+    std::array<uint256, 2> branch_a_hashes;
+    BuildBranch(branch_a, branch_a_hashes, &common.back(),
+                activation_height + 1, 0x71, /*build_skip=*/false);
+    std::array<CBlockIndex, 2> branch_b;
+    std::array<uint256, 2> branch_b_hashes;
+    BuildBranch(branch_b, branch_b_hashes, &common.back(),
+                activation_height + 1, 0x72, /*build_skip=*/false);
+
+    const uint256 pro_tx_hash{uint256{86}};
+    const COutPoint collateral{uint256{87}, 0};
+    auto signing_secret{DeterministicGlobalKey(0x73)};
+    const auto signing_key{GlobalKeyFor(
+        signing_secret, pro_tx_hash, /*key_version=*/1,
+        static_cast<uint32_t>(activation_height))};
+    const auto operator_state{
+        CurrentOperatorState(pro_tx_hash, signing_key, /*active=*/true)};
+    CGovernanceObject object{
+        uint256{}, /*revision=*/1, /*time=*/100, uint256{},
+        "7b2274797065223a327d"};
+    BOOST_REQUIRE_EQUAL(object.GetObjectType(), GOVERNANCE_OBJECT_TRIGGER);
+    auto& vote_file{const_cast<CGovernanceObjectVoteFile&>(
+        object.GetVoteFile())};
+    const auto make_vote = [&](const CBlockIndex& signing_block,
+                               int64_t timestamp,
+                               vote_outcome_enum_t outcome) {
+        CGovernanceVote vote{
+            collateral, object.GetHash(), VOTE_SIGNAL_FUNDING, outcome};
+        vote.SetTime(timestamp);
+        GovernanceAuthorization authorization;
+        authorization.signed_height = signing_block.nHeight;
+        authorization.signed_block_hash = signing_block.GetBlockHash();
+        authorization.pro_tx_hash = pro_tx_hash;
+        authorization.global_key_version = signing_key.key_version;
+        // Reconciliation handles previously admitted signatures and repeats
+        // only their exact branch/current-key checks, as on cache startup.
+        authorization.signature[0] = 1;
+        std::vector<unsigned char> encoded;
+        BOOST_REQUIRE(EncodeGovernanceAuthorization(authorization, encoded));
+        vote.SetSignature(encoded);
+        return vote;
+    };
+    const auto reconcile = [&](CGovernanceObject& target,
+                                const CBlockIndex& tip) {
+        const auto list{CurrentMNList(tip, pro_tx_hash, collateral)};
+        const auto snapshot{CurrentRegistrySnapshot(tip, operator_state)};
+        return target.RemoveInvalidPQVotes(tip, list, snapshot);
+    };
+    const auto check_selected = [&](const CGovernanceObject& target,
+                                     const CGovernanceVote& expected) {
+        const auto selected{target.GetVoteFile().GetVote(expected.GetHash())};
+        BOOST_REQUIRE(selected);
+        BOOST_CHECK(selected->HasSameWireEncoding(expected));
+        BOOST_CHECK_EQUAL(target.GetVoteFile().GetVoteCount(), 1);
+        vote_rec_t current;
+        BOOST_REQUIRE(target.GetCurrentMNVotes(collateral, current));
+        const auto instance{current.mapInstances.find(VOTE_SIGNAL_FUNDING)};
+        BOOST_REQUIRE(instance != current.mapInstances.end());
+        BOOST_CHECK_EQUAL(instance->second.eOutcome, expected.GetOutcome());
+        BOOST_CHECK_EQUAL(instance->second.nCreationTime,
+                          expected.GetTimestamp());
+    };
+
+    const auto a{make_vote(branch_a.front(), 100, VOTE_OUTCOME_YES)};
+    const auto b{make_vote(branch_b.front(), 100, VOTE_OUTCOME_YES)};
+    BOOST_REQUIRE(a.GetHash() == b.GetHash());
+    vote_file.AddVote(a, /*retain_replaced=*/true);
+    reconcile(object, branch_a.back());
+    check_selected(object, a);
+    const uint64_t one_wire_bytes{vote_file.GetSerializedVoteBytes()};
+
+    reconcile(object, branch_b.back());
+    BOOST_CHECK_EQUAL(object.GetAbsoluteYesCount(VOTE_SIGNAL_FUNDING), 0);
+    BOOST_CHECK_EQUAL(vote_file.GetVoteCount(), 0);
+    BOOST_CHECK_EQUAL(vote_file.GetSerializedVoteBytes(), one_wire_bytes);
+    vote_file.AddVote(b, /*retain_replaced=*/true);
+    reconcile(object, branch_b.back());
+    check_selected(object, b);
+    BOOST_CHECK_EQUAL(object.GetAbsoluteYesCount(VOTE_SIGNAL_FUNDING), 1);
+    const uint64_t both_wire_bytes{vote_file.GetSerializedVoteBytes()};
+    BOOST_CHECK_EQUAL(both_wire_bytes, 2 * one_wire_bytes);
+    const auto switched{reconcile(object, branch_a.back())};
+    BOOST_CHECK(switched.contains(a.GetHash()));
+    check_selected(object, a);
+
+    reconcile(object, common.back());
+    BOOST_CHECK_EQUAL(object.GetAbsoluteYesCount(VOTE_SIGNAL_FUNDING), 0);
+    BOOST_CHECK_EQUAL(vote_file.GetVoteCount(), 0);
+    CDataStream disk{SER_DISK, PROTOCOL_VERSION};
+    disk << object;
+    CGovernanceObject reloaded;
+    disk >> reloaded;
+    BOOST_CHECK(disk.empty());
+    reconcile(reloaded, common.back());
+    BOOST_CHECK_EQUAL(reloaded.GetAbsoluteYesCount(VOTE_SIGNAL_FUNDING), 0);
+    BOOST_CHECK_EQUAL(reloaded.GetVoteFile().GetSerializedVoteBytes(),
+                      both_wire_bytes);
+    reconcile(reloaded, branch_a.back());
+    check_selected(reloaded, a);
+    reconcile(reloaded, branch_b.back());
+    check_selected(reloaded, b);
+
+    // A newer B vote supersedes the A vote, but cannot erase the earlier
+    // accepted choice needed when returning to A. Equal timestamps use the
+    // same outcome tie break as ordinary vote admission.
+    for (const int64_t replacement_time : {int64_t{100}, int64_t{101}}) {
+        CGovernanceObject superseded{
+            uint256{}, /*revision=*/1, /*time=*/100, uint256{},
+            "7b2274797065223a327d"};
+        auto& retained{const_cast<CGovernanceObjectVoteFile&>(
+            superseded.GetVoteFile())};
+        const auto original{make_vote(common.back(), 100, VOTE_OUTCOME_YES)};
+        const auto replacement{
+            make_vote(branch_b.front(), replacement_time, VOTE_OUTCOME_NO)};
+        retained.AddVote(original, /*retain_replaced=*/true);
+        retained.AddVote(replacement, /*retain_replaced=*/true);
+        BOOST_CHECK_EQUAL(retained.GetVoteCount(), 1);
+        BOOST_CHECK(!retained.HasVote(original.GetHash()));
+        BOOST_REQUIRE(retained.GetVote(replacement.GetHash()));
+        BOOST_CHECK(retained.GetVote(replacement.GetHash())->HasSameWireEncoding(
+            replacement));
+        const uint64_t retained_bytes{retained.GetSerializedVoteBytes()};
+        reconcile(superseded, branch_b.back());
+        check_selected(superseded, replacement);
+        BOOST_CHECK_EQUAL(superseded.GetAbsoluteNoCount(VOTE_SIGNAL_FUNDING), 1);
+        reconcile(superseded, branch_a.back());
+        check_selected(superseded, original);
+        BOOST_CHECK_EQUAL(superseded.GetAbsoluteYesCount(VOTE_SIGNAL_FUNDING), 1);
+        BOOST_CHECK_EQUAL(superseded.GetNoCount(VOTE_SIGNAL_FUNDING), 0);
+        BOOST_CHECK_EQUAL(retained.GetSerializedVoteBytes(), retained_bytes);
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -394,6 +394,9 @@ public:
         std::set<COutPoint>* removed_operators = nullptr);
     [[nodiscard]] bool HasPQVoteFromMasternode(
         const COutPoint& masternode) const;
+    /** Next retained creator/vote authorization above the current tip. */
+    [[nodiscard]] std::optional<int32_t> NextPQAuthorizationHeight(
+        int32_t tip_height) const;
     [[nodiscard]] bool HasDelegatedFundingVoteFromMasternode(
         const COutPoint& masternode) const;
     /** Whether a stored vote legitimately supersedes this candidate. */

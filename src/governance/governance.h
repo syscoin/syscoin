@@ -559,6 +559,11 @@ private:
     delegated_authority_map_t m_delegated_funding_authorities
         GUARDED_BY(cs);
     pq_vote_object_index_t m_pq_vote_objects GUARDED_BY(cs);
+    // Retained authorizations can become active on an unchanged-authority
+    // extension. Index the next signing-height boundary per trigger so normal
+    // exact-snapshot reuse never needs to walk the retained vote history.
+    std::map<int32_t, std::set<uint256>> m_pq_future_authorizations GUARDED_BY(cs);
+    std::map<uint256, int32_t> m_pq_future_authorization_heights GUARDED_BY(cs);
     pq_vote_object_index_t m_delegated_funding_vote_objects
         GUARDED_BY(cs);
     uint256 m_pq_authority_tip_hash GUARDED_BY(cs);
@@ -857,6 +862,9 @@ private:
         EXCLUSIVE_LOCKS_REQUIRED(cs);
     void RemoveObjectFromGovernanceVoteIndexes(
         const uint256& object_hash, const CGovernanceObject& object)
+        EXCLUSIVE_LOCKS_REQUIRED(cs);
+    void UpdatePQAuthorizationHeight(
+        const uint256& object_hash, std::optional<int32_t> next_height)
         EXCLUSIVE_LOCKS_REQUIRED(cs);
 
     template <typename RegistrySnapshot>

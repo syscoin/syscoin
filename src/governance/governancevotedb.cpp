@@ -5,6 +5,7 @@
 #include <governance/governancevotedb.h>
 
 #include <clientversion.h>
+#include <hash.h>
 
 #include <limits>
 
@@ -13,6 +14,7 @@ CGovernanceObjectVoteFile::CGovernanceObjectVoteFile() :
     nSerializedVoteBytes(0),
     listVotes(),
     mapVoteIndex(),
+    mapStoredVoteIndex(),
     m_page_snapshot(),
     mapMasternodeIndex()
 {
@@ -23,26 +25,87 @@ CGovernanceObjectVoteFile::CGovernanceObjectVoteFile(const CGovernanceObjectVote
     nSerializedVoteBytes(other.nSerializedVoteBytes),
     listVotes(other.listVotes),
     mapVoteIndex(),
+    mapStoredVoteIndex(),
     m_page_snapshot(),
     mapMasternodeIndex()
 {
     RebuildIndex();
+    std::vector<const CGovernanceVote*> active_votes;
+    active_votes.reserve(other.mapVoteIndex.size());
+    for (const auto& [hash, vote] : other.mapVoteIndex) {
+        (void)hash;
+        const auto stored{mapStoredVoteIndex.find(StoredVoteHash(*vote))};
+        assert(stored != mapStoredVoteIndex.end());
+        active_votes.push_back(&*stored->second);
+    }
+    (void)UpdateActiveVotes(std::nullopt, active_votes);
 }
 
-void CGovernanceObjectVoteFile::AddVote(const CGovernanceVote& vote)
+CGovernanceObjectVoteFile& CGovernanceObjectVoteFile::operator=(
+    const CGovernanceObjectVoteFile& other)
 {
-    const uint256 nHash = vote.GetHash();
-    // make sure to never add/update already known votes
-    if (HasVote(nHash))
-        return;
-    listVotes.push_front(vote);
-    mapVoteIndex.emplace(nHash, listVotes.begin());
-    InvalidatePageView();
-    mapMasternodeIndex.emplace(vote.GetMasternodeOutpoint(),
-                               listVotes.begin());
-    nSerializedVoteBytes += SerializedVoteBytes(vote);
-    ++nMemoryVotes;
-    RemoveOldVotes(vote);
+    if (this == &other) return *this;
+    CGovernanceObjectVoteFile copy{other};
+    std::swap(nMemoryVotes, copy.nMemoryVotes);
+    std::swap(nSerializedVoteBytes, copy.nSerializedVoteBytes);
+    listVotes.swap(copy.listVotes);
+    mapVoteIndex.swap(copy.mapVoteIndex);
+    mapStoredVoteIndex.swap(copy.mapStoredVoteIndex);
+    mapMasternodeIndex.swap(copy.mapMasternodeIndex);
+    m_page_snapshot.swap(copy.m_page_snapshot);
+    return *this;
+}
+
+void CGovernanceObjectVoteFile::AddVote(
+    const CGovernanceVote& vote, bool retain_replaced)
+{
+    const uint256 logical_hash{vote.GetHash()};
+    if (!retain_replaced && HasVote(logical_hash)) return;
+
+    const uint256 wire_hash{StoredVoteHash(vote)};
+    auto stored{mapStoredVoteIndex.find(wire_hash)};
+    if (stored == mapStoredVoteIndex.end()) {
+        const uint64_t vote_bytes{SerializedVoteBytes(vote)};
+        if (vote_bytes > std::numeric_limits<uint64_t>::max() -
+                             nSerializedVoteBytes) {
+            throw std::ios_base::failure("governance vote byte count overflow");
+        }
+        listVotes.push_front(vote);
+        stored = mapStoredVoteIndex.emplace(wire_hash, listVotes.begin()).first;
+        mapMasternodeIndex.emplace(vote.GetMasternodeOutpoint(),
+                                   listVotes.begin());
+        nSerializedVoteBytes += vote_bytes;
+    }
+    assert(stored->second->HasSameWireEncoding(vote));
+
+    bool changed{false};
+    if (retain_replaced) {
+        const auto [begin, end]{mapMasternodeIndex.equal_range(
+            vote.GetMasternodeOutpoint())};
+        for (auto it{begin}; it != end; ++it) {
+            const CGovernanceVote& current{*it->second};
+            if (current.GetParentHash() != vote.GetParentHash() ||
+                current.GetSignal() != vote.GetSignal() ||
+                current.GetTimestamp() > vote.GetTimestamp() ||
+                (current.GetTimestamp() == vote.GetTimestamp() &&
+                 current.GetOutcome() >= vote.GetOutcome())) {
+                continue;
+            }
+            const auto active{mapVoteIndex.find(current.GetHash())};
+            if (active != mapVoteIndex.end() && active->second == it->second) {
+                mapVoteIndex.erase(active);
+                changed = true;
+            }
+        }
+    }
+    const auto active{mapVoteIndex.find(logical_hash)};
+    if (active == mapVoteIndex.end() || active->second != stored->second) {
+        mapVoteIndex.insert_or_assign(logical_hash, stored->second);
+        changed = true;
+    }
+    nMemoryVotes = static_cast<int>(mapVoteIndex.size());
+    if (changed) InvalidatePageView();
+    if (!retain_replaced) RemoveOldVotes(vote);
 }
 
 uint64_t CGovernanceObjectVoteFile::SerializedVoteBytes(
@@ -51,28 +114,102 @@ uint64_t CGovernanceObjectVoteFile::SerializedVoteBytes(
     return ::GetSerializeSize(vote, CLIENT_VERSION, SER_DISK);
 }
 
-uint64_t CGovernanceObjectVoteFile::ProjectedSerializedVoteBytes(
-    const CGovernanceVote& vote) const
+uint256 CGovernanceObjectVoteFile::StoredVoteHash(const CGovernanceVote& vote)
 {
-    if (HasVote(vote.GetHash())) return nSerializedVoteBytes;
+    // SER_GETHASH deliberately omits signatures for logical vote identities.
+    return SerializeHash(vote, SER_NETWORK, PROTOCOL_VERSION);
+}
 
-    const uint64_t vote_bytes{SerializedVoteBytes(vote)};
+uint64_t CGovernanceObjectVoteFile::ProjectedSerializedVoteBytes(
+    const CGovernanceVote& vote, bool retain_replaced) const
+{
+    if (!retain_replaced && HasVote(vote.GetHash())) return nSerializedVoteBytes;
+
+    const uint64_t vote_bytes{mapStoredVoteIndex.contains(StoredVoteHash(vote))
+        ? 0 : SerializedVoteBytes(vote)};
     uint64_t removed_bytes{0};
-    for (const auto& current : listVotes) {
-        if (current.GetMasternodeOutpoint() ==
-                vote.GetMasternodeOutpoint() &&
-            current.GetParentHash() == vote.GetParentHash() &&
-            current.GetSignal() == vote.GetSignal() &&
-            current.GetTimestamp() < vote.GetTimestamp()) {
-            removed_bytes += SerializedVoteBytes(current);
-        }
+    if (!retain_replaced) {
+        ForEachStoredVoteFromMasternode(
+            vote.GetMasternodeOutpoint(), [&](const CGovernanceVote& current) {
+                if (current.GetParentHash() == vote.GetParentHash() &&
+                    current.GetSignal() == vote.GetSignal() &&
+                    current.GetTimestamp() < vote.GetTimestamp()) {
+                    removed_bytes += SerializedVoteBytes(current);
+                }
+                return true;
+            });
     }
+    assert(nSerializedVoteBytes >= removed_bytes);
+    const uint64_t retained_bytes{nSerializedVoteBytes - removed_bytes};
     if (vote_bytes > std::numeric_limits<uint64_t>::max() -
-                         nSerializedVoteBytes) {
+                         retained_bytes) {
         return std::numeric_limits<uint64_t>::max();
     }
-    const uint64_t with_vote{nSerializedVoteBytes + vote_bytes};
-    return removed_bytes > with_vote ? 0 : with_vote - removed_bytes;
+    return retained_bytes + vote_bytes;
+}
+
+std::set<uint256> CGovernanceObjectVoteFile::UpdateActiveVotes(
+    const std::optional<COutPoint>& masternode_filter,
+    const std::vector<const CGovernanceVote*>& selected_stored_votes)
+{
+    std::set<const CGovernanceVote*> selected{
+        selected_stored_votes.begin(), selected_stored_votes.end()};
+    vote_m_t previous;
+    vote_m_t next;
+    if (!masternode_filter) previous = mapVoteIndex;
+    const auto inspect_stored = [&](vote_l_t::iterator vote) {
+        const uint256 logical_hash{vote->GetHash()};
+        if (selected.erase(&*vote) != 0) {
+            const bool inserted{next.emplace(logical_hash, vote).second};
+            // One wire representative per logical vote is the caller's
+            // responsibility; the selected pointers must belong to this file.
+            assert(inserted);
+            (void)inserted;
+        }
+        if (masternode_filter) {
+            const auto active{mapVoteIndex.find(logical_hash)};
+            if (active != mapVoteIndex.end() && active->second == vote) {
+                previous.emplace(logical_hash, vote);
+            }
+        }
+    };
+    if (masternode_filter) {
+        const auto [begin, end]{mapMasternodeIndex.equal_range(*masternode_filter)};
+        for (auto it{begin}; it != end; ++it) inspect_stored(it->second);
+    } else {
+        for (auto it{listVotes.begin()}; it != listVotes.end(); ++it) {
+            inspect_stored(it);
+        }
+    }
+    assert(selected.empty());
+
+    std::set<uint256> changed;
+    for (const auto& [hash, vote] : previous) {
+        const auto replacement{next.find(hash)};
+        if (replacement == next.end() || replacement->second != vote) {
+            changed.insert(hash);
+        }
+    }
+    for (const auto& [hash, vote] : next) {
+        const auto original{previous.find(hash)};
+        if (original == previous.end() || original->second != vote) {
+            changed.insert(hash);
+        }
+    }
+    if (changed.empty()) return changed;
+
+    if (masternode_filter) {
+        for (const auto& [hash, vote] : previous) {
+            (void)vote;
+            mapVoteIndex.erase(hash);
+        }
+        mapVoteIndex.insert(next.begin(), next.end());
+    } else {
+        mapVoteIndex = std::move(next);
+    }
+    nMemoryVotes = static_cast<int>(mapVoteIndex.size());
+    InvalidatePageView();
+    return changed;
 }
 
 bool CGovernanceObjectVoteFile::HasVote(const uint256& nHash) const
@@ -234,8 +371,11 @@ CGovernanceObjectVoteFile::GetVoteSerializedSizeUpperBound(
 std::vector<CGovernanceVote> CGovernanceObjectVoteFile::GetVotes() const
 {
     std::vector<CGovernanceVote> vecResult;
-    vecResult.reserve(listVotes.size());
-    std::copy(std::begin(listVotes), std::end(listVotes), std::back_inserter(vecResult));
+    vecResult.reserve(mapVoteIndex.size());
+    ForEachVote([&](const CGovernanceVote& vote) {
+        vecResult.push_back(vote);
+        return true;
+    });
     return vecResult;
 }
 
@@ -281,16 +421,15 @@ std::set<uint256> CGovernanceObjectVoteFile::RemoveInvalidVotes(const CDetermini
 
 void CGovernanceObjectVoteFile::RemoveOldVotes(const CGovernanceVote& vote)
 {
-    auto it = listVotes.begin();
-    while (it != listVotes.end()) {
-        if (it->GetMasternodeOutpoint() == vote.GetMasternodeOutpoint() // same masternode
-            && it->GetParentHash() == vote.GetParentHash() // same governance object (e.g. same proposal)
-            && it->GetSignal() == vote.GetSignal() // same signal (e.g. "funding", "delete", etc.)
-            && it->GetTimestamp() < vote.GetTimestamp()) // older than new vote
-        {
-            it = EraseVote(it);
-        } else {
-            ++it;
+    const auto [begin, end]{mapMasternodeIndex.equal_range(
+        vote.GetMasternodeOutpoint())};
+    for (auto it{begin}; it != end;) {
+        const auto current{it->second};
+        ++it;
+        if (current->GetParentHash() == vote.GetParentHash() &&
+            current->GetSignal() == vote.GetSignal() &&
+            current->GetTimestamp() < vote.GetTimestamp()) {
+            EraseVote(current);
         }
     }
 }
@@ -309,9 +448,13 @@ CGovernanceObjectVoteFile::EraseVote(vote_l_t::iterator vote)
     const uint64_t vote_bytes{SerializedVoteBytes(*vote)};
     assert(nSerializedVoteBytes >= vote_bytes);
     nSerializedVoteBytes -= vote_bytes;
-    --nMemoryVotes;
-    mapVoteIndex.erase(vote->GetHash());
-    InvalidatePageView();
+    mapStoredVoteIndex.erase(StoredVoteHash(*vote));
+    const auto active{mapVoteIndex.find(vote->GetHash())};
+    if (active != mapVoteIndex.end() && active->second == vote) {
+        mapVoteIndex.erase(active);
+        --nMemoryVotes;
+        InvalidatePageView();
+    }
     return listVotes.erase(vote);
 }
 
@@ -319,15 +462,19 @@ void CGovernanceObjectVoteFile::RebuildIndex()
 {
     InvalidatePageView();
     mapVoteIndex.clear();
+    mapStoredVoteIndex.clear();
     mapMasternodeIndex.clear();
     nMemoryVotes = 0;
     nSerializedVoteBytes = 0;
     auto it = listVotes.begin();
     while (it != listVotes.end()) {
         const CGovernanceVote& vote = *it;
-        const uint256 nHash = vote.GetHash();
-        if (mapVoteIndex.find(nHash) == mapVoteIndex.end()) {
-            mapVoteIndex[nHash] = it;
+        const uint256 wire_hash{StoredVoteHash(vote)};
+        if (!mapStoredVoteIndex.contains(wire_hash)) {
+            mapStoredVoteIndex.emplace(wire_hash, it);
+            if (mapVoteIndex.emplace(vote.GetHash(), it).second) {
+                ++nMemoryVotes;
+            }
             mapMasternodeIndex.emplace(vote.GetMasternodeOutpoint(), it);
             const uint64_t vote_bytes{SerializedVoteBytes(vote)};
             if (vote_bytes > std::numeric_limits<uint64_t>::max() -
@@ -336,9 +483,9 @@ void CGovernanceObjectVoteFile::RebuildIndex()
                     "governance vote byte count overflow");
             }
             nSerializedVoteBytes += vote_bytes;
-            ++nMemoryVotes;
             ++it;
         } else {
+            assert(mapStoredVoteIndex.at(wire_hash)->HasSameWireEncoding(vote));
             listVotes.erase(it++);
         }
     }

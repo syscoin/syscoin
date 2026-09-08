@@ -4221,7 +4221,9 @@ bool CGovernanceManager::ProcessVoteWithBudget(
     const uint64_t current_bytes{
         object.GetVoteFile().GetSerializedVoteBytes()};
     const uint64_t projected_bytes{
-        object.GetVoteFile().ProjectedSerializedVoteBytes(vote)};
+        object.GetVoteFile().ProjectedSerializedVoteBytes(
+            vote, /*retain_replaced=*/
+                      object.GetObjectType() == GOVERNANCE_OBJECT_TRIGGER)};
     if (!CanAdmitPersistedVoteBytes(current_bytes, projected_bytes)) {
         exception = CGovernanceException(
             "CGovernanceManager::ProcessVote -- persisted vote byte budget exhausted",
@@ -4309,6 +4311,8 @@ bool CGovernanceManager::RebuildIndexes()
 
     cmapVoteToObject.Clear();
     m_pq_vote_objects.clear();
+    m_pq_future_authorizations.clear();
+    m_pq_future_authorization_heights.clear();
     m_delegated_funding_vote_objects.clear();
     for (auto& object_entry : mapObjects) {
         const uint256& object_hash{object_entry.first};
@@ -4318,6 +4322,10 @@ bool CGovernanceManager::RebuildIndexes()
         govobj.GetVoteFile().ForEachVote(
             [&](const CGovernanceVote& vote) {
                 cmapVoteToObject.Insert(vote.GetHash(), &govobj);
+                return true;
+            });
+        govobj.GetVoteFile().ForEachStoredVote(
+            [&](const CGovernanceVote& vote) {
                 if (GetGovernanceVoteAuthPurpose(
                         govobj.GetObjectType(), vote.GetSignal())) {
                     pq_operators.push_back(
@@ -4360,9 +4368,10 @@ void CGovernanceManager::RemoveObjectFromGovernanceVoteIndexes(
     const uint256& object_hash, const CGovernanceObject& object)
 {
     AssertLockHeld(cs);
+    UpdatePQAuthorizationHeight(object_hash, std::nullopt);
     std::set<COutPoint> pq_operators;
     std::set<COutPoint> delegated_operators;
-    object.GetVoteFile().ForEachVote([&](const CGovernanceVote& vote) {
+    object.GetVoteFile().ForEachStoredVote([&](const CGovernanceVote& vote) {
         if (GetGovernanceVoteAuthPurpose(
                 object.GetObjectType(), vote.GetSignal())) {
             pq_operators.insert(vote.GetMasternodeOutpoint());
@@ -4385,6 +4394,25 @@ void CGovernanceManager::RemoveObjectFromGovernanceVoteIndexes(
     erase_from_index(m_pq_vote_objects, pq_operators);
     erase_from_index(
         m_delegated_funding_vote_objects, delegated_operators);
+}
+
+void CGovernanceManager::UpdatePQAuthorizationHeight(
+    const uint256& object_hash, std::optional<int32_t> next_height)
+{
+    AssertLockHeld(cs);
+    const auto previous{m_pq_future_authorization_heights.find(object_hash)};
+    if (previous != m_pq_future_authorization_heights.end()) {
+        const auto scheduled{m_pq_future_authorizations.find(previous->second)};
+        if (scheduled != m_pq_future_authorizations.end()) {
+            scheduled->second.erase(object_hash);
+            if (scheduled->second.empty()) m_pq_future_authorizations.erase(scheduled);
+        }
+        m_pq_future_authorization_heights.erase(previous);
+    }
+    if (next_height) {
+        m_pq_future_authorizations[*next_height].insert(object_hash);
+        m_pq_future_authorization_heights.emplace(object_hash, *next_height);
+    }
 }
 
 void CGovernanceManager::RememberFailedPQGovernanceTip(
@@ -4771,6 +4799,11 @@ bool CGovernanceManager::TryReusePQGovernanceSnapshot(
         return false;
     }
 
+    if (!m_pq_future_authorizations.empty() &&
+        m_pq_future_authorizations.begin()->first <= validation_tip.nHeight) {
+        return false;
+    }
+
     const PQGovernanceTipIdentity expected_tip{validation_tip};
     const auto readiness{
         m_pq_governance_readiness.load(std::memory_order_acquire)};
@@ -4881,10 +4914,14 @@ bool CGovernanceManager::ReconcileGovernanceVotesImpl(
     std::size_t& checked_delegated_votes)
 {
     AssertLockHeld(cs);
-    const auto erase_vote_refs = [&](const std::set<uint256>& removed) {
-        for (const uint256& vote_hash : removed) {
+    const auto refresh_vote_refs = [&](const std::set<uint256>& changed,
+                                       CGovernanceObject& object) {
+        for (const uint256& vote_hash : changed) {
             cmapVoteToObject.Erase(vote_hash);
             cmapInvalidVotes.Erase(vote_hash);
+            if (object.GetVoteFile().HasVote(vote_hash)) {
+                cmapVoteToObject.Insert(vote_hash, &object);
+            }
         }
     };
     const auto update_vote_bytes = [&](uint64_t before,
@@ -4928,8 +4965,8 @@ bool CGovernanceManager::ReconcileGovernanceVotesImpl(
         if (!removed_pq.empty() || !removed_delegated.empty()) {
             flags_to_refresh.insert(object_hash);
         }
-        erase_vote_refs(removed_pq);
-        erase_vote_refs(removed_delegated);
+        refresh_vote_refs(removed_pq, object);
+        refresh_vote_refs(removed_delegated, object);
         for (const COutPoint& outpoint : removed_pq_operators) {
             if (!object.HasPQVoteFromMasternode(outpoint)) {
                 erase_empty_operator(
@@ -5003,7 +5040,7 @@ bool CGovernanceManager::ReconcileGovernanceVotesImpl(
             update_vote_bytes(vote_bytes_before, vote_bytes_after);
             if (!removed.empty()) {
                 flags_to_refresh.insert(object_hash);
-                erase_vote_refs(removed);
+                refresh_vote_refs(removed, object);
             }
             if (!object.HasPQVoteFromMasternode(outpoint)) {
                 indexed->second.erase(object_hash);
@@ -5036,7 +5073,7 @@ bool CGovernanceManager::ReconcileGovernanceVotesImpl(
             update_vote_bytes(vote_bytes_before, vote_bytes_after);
             if (!removed.empty()) {
                 flags_to_refresh.insert(object_hash);
-                erase_vote_refs(removed);
+                refresh_vote_refs(removed, object);
             }
             if (!object.HasDelegatedFundingVoteFromMasternode(
                     outpoint)) {
@@ -5187,6 +5224,12 @@ bool CGovernanceManager::RevalidatePQGovernanceImpl(
         }
     }
     const bool full_revalidation{!straight_extension};
+    std::set<uint256> due_authorizations;
+    for (auto due{m_pq_future_authorizations.begin()};
+         due != m_pq_future_authorizations.end() &&
+         due->first <= validation_tip.nHeight; ++due) {
+        due_authorizations.insert(due->second.begin(), due->second.end());
+    }
     const std::set<COutPoint> changed_pq_operators{full_revalidation
         ? std::set<COutPoint>{}
         : FindChangedPQGovernanceAuthorities(m_pq_authorities,
@@ -5205,6 +5248,7 @@ bool CGovernanceManager::RevalidatePQGovernanceImpl(
         !m_pq_trigger_state_initialized};
     const bool advance_validation_context{
         full_revalidation || valid_roster_count_changed ||
+        !due_authorizations.empty() ||
         !changed_pq_operators.empty() ||
         !changed_delegated_operators.empty() ||
         !m_pq_trigger_state_initialized ||
@@ -5218,6 +5262,7 @@ bool CGovernanceManager::RevalidatePQGovernanceImpl(
     // been reconciled below.
     std::set<uint256> reactivated_triggers;
     if (full_revalidation || !changed_pq_operators.empty() ||
+        !due_authorizations.empty() ||
         valid_roster_count_changed ||
         !m_pq_trigger_state_initialized) {
         if (!RebuildPQTriggerState(validation_tip, mn_list,
@@ -5228,6 +5273,8 @@ bool CGovernanceManager::RevalidatePQGovernanceImpl(
             return false;
         }
     }
+    reactivated_triggers.insert(due_authorizations.begin(),
+                                due_authorizations.end());
 
     std::set<uint256> flags_to_refresh;
     std::size_t checked_pq_votes{0};
@@ -5283,6 +5330,23 @@ bool CGovernanceManager::RevalidatePQGovernanceImpl(
     if (chainman.ActiveTip() != &validation_tip) {
         RememberFailedPQGovernanceTip(validation_tip);
         return false;
+    }
+    // A rollback discovers future creator and vote envelopes. Fresh admission
+    // cannot add one above the tip, so extensions only revisit due objects.
+    if (full_revalidation) {
+        m_pq_future_authorizations.clear();
+        m_pq_future_authorization_heights.clear();
+        for (const auto& [hash, object] : mapObjects) {
+            UpdatePQAuthorizationHeight(hash,
+                object.NextPQAuthorizationHeight(validation_tip.nHeight));
+        }
+    } else {
+        for (const uint256& hash : due_authorizations) {
+            const auto object{mapObjects.find(hash)};
+            UpdatePQAuthorizationHeight(hash, object == mapObjects.end()
+                ? std::nullopt
+                : object->second.NextPQAuthorizationHeight(validation_tip.nHeight));
+        }
     }
     m_pq_vote_context_checks += checked_pq_votes;
     m_delegated_vote_context_checks += checked_delegated_votes;
