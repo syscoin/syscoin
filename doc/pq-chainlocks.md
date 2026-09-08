@@ -246,12 +246,21 @@ role; a trigger's `FUNDING` signal does not select the owner's key.
 `protx_generate_voting_key` creates an independent key in the selected wallet
 and returns only its 32-byte public key as hexadecimal. It does not derive the
 secret from an ECDSA key, operator key, or ChainLock seed. The wallet stores and
-encrypts this secret with its other private material. A new full wallet backup
-is required after key creation: an older backup or a descriptor-only export
-cannot recover it. A wallet containing these records requires a compatible
+encrypts this secret with its other private material. Back up the wallet after
+key creation; `backupwallet` preserves the full database for `restorewallet`.
+An older backup or a descriptor-only export cannot recover the new key.
+A wallet containing these records requires a compatible
 binary and must not be downgraded to one that ignores PQ key encryption.
 Legacy BDB salvage refuses a wallet with PQ voting records without replacing
 the original; use a full wallet backup to recover this independent authority.
+
+For legacy wallets, `dumpwallet` also exports these secrets as
+`pqvotingkey=<64-byte-secret-hex> <32-byte-public-key-hex>` records.
+The dump is unencrypted and must be kept private. Restore it with a PQ-capable
+`importwallet`; older importers do not recognize these records. Import checks
+the complete PQ key batch before adding any keys, preserves existing voting
+keys, and encrypts imported secrets when the destination wallet is encrypted.
+Both dump and import require an encrypted wallet to be unlocked.
 
 PQ3 registration and registrar payloads carry the voting public key in the
 owner-authorized transcript. In PQ mode the RPC's existing voting argument is

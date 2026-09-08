@@ -224,6 +224,96 @@ bool CWallet::GenerateVotingKey(slhdsa::PublicKey& public_key, std::string& erro
     return true;
 }
 
+// SYSCOIN BEGIN: Preserve independent PQ keys in legacy wallet dumps.
+bool CWallet::ExportVotingKeys(std::map<slhdsa::PublicKey, CKeyingMaterial>& keys, std::string& error) const
+{
+    LOCK(cs_wallet);
+    keys.clear();
+    if (IsLocked()) {
+        error = "Wallet is locked";
+        return false;
+    }
+    std::map<slhdsa::PublicKey, CKeyingMaterial> exported{m_voting_keys};
+    for (const auto& [public_key, encrypted] : m_crypted_voting_keys) {
+        CKeyingMaterial secret;
+        if (!DecryptSecret(vMasterKey, encrypted, VotingKeyEncryptionIV(public_key), secret) ||
+            !VotingKeyMatchesPublic(secret, public_key)) {
+            error = "Unable to decrypt voting key";
+            return false;
+        }
+        exported.emplace(public_key, std::move(secret));
+    }
+    keys.swap(exported);
+    error.clear();
+    return true;
+}
+
+bool CWallet::ImportVotingKeys(const std::map<slhdsa::PublicKey, CKeyingMaterial>& keys, std::string& error)
+{
+    LOCK(cs_wallet);
+    if (keys.empty()) {
+        error.clear();
+        return true;
+    }
+    if (IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS | WALLET_FLAG_EXTERNAL_SIGNER)) {
+        error = "This wallet cannot store private voting keys";
+        return false;
+    }
+    if (IsLocked()) {
+        error = "Wallet is locked";
+        return false;
+    }
+    std::map<slhdsa::PublicKey, CKeyingMaterial> plain_keys;
+    std::map<slhdsa::PublicKey, std::vector<unsigned char>> encrypted_keys;
+    for (const auto& [public_key, secret] : keys) {
+        // Validate even existing keys: a duplicate must not hide a corrupt record.
+        if (!VotingKeyMatchesPublic(secret, public_key)) {
+            error = "Invalid PQ voting key record";
+            return false;
+        }
+        if (HasVotingKey(public_key)) continue;
+        if (IsCrypted()) {
+            std::vector<unsigned char> encrypted;
+            if (!EncryptSecret(vMasterKey, secret, VotingKeyEncryptionIV(public_key), encrypted)) {
+                error = "Unable to encrypt voting key";
+                return false;
+            }
+            encrypted_keys.emplace(public_key, std::move(encrypted));
+        } else {
+            plain_keys.emplace(public_key, secret);
+        }
+    }
+    if (plain_keys.empty() && encrypted_keys.empty()) {
+        error.clear();
+        return true;
+    }
+    WalletBatch batch(GetDatabase());
+    if (!batch.TxnBegin()) {
+        error = "Unable to begin voting key persistence";
+        return false;
+    }
+    const auto abort = [&]() {
+        batch.TxnAbort();
+        error = "Unable to persist voting keys";
+        return false;
+    };
+    const uint64_t flags{m_wallet_flags.load() | WALLET_FLAG_PQ_VOTING_KEYS};
+    if (!batch.WriteWalletFlags(flags)) return abort();
+    for (const auto& [public_key, secret] : plain_keys) {
+        if (!batch.WriteVotingKey(public_key, secret)) return abort();
+    }
+    for (const auto& [public_key, encrypted] : encrypted_keys) {
+        if (!batch.WriteCryptedVotingKey(public_key, encrypted)) return abort();
+    }
+    if (!batch.TxnCommit()) return abort();
+    m_wallet_flags = flags;
+    m_voting_keys.merge(plain_keys);
+    m_crypted_voting_keys.merge(encrypted_keys);
+    error.clear();
+    return true;
+}
+// SYSCOIN END: Preserve independent PQ keys in legacy wallet dumps.
+
 bool CWallet::SignVotingAuthorization(const slhdsa::PublicKey& public_key,
                                       const uint256& authorization_hash,
                                       slhdsa::Signature& signature, std::string& error) const

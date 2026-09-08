@@ -901,6 +901,11 @@ public:
     /** Independent of spending/operator keys; back up the full wallet after generation. */
     bool GenerateVotingKey(slhdsa::PublicKey& public_key, std::string& error);
     bool HasVotingKey(const slhdsa::PublicKey& public_key) const;
+    // SYSCOIN BEGIN: Preserve independent PQ keys in legacy wallet dumps.
+    bool ExportVotingKeys(std::map<slhdsa::PublicKey, CKeyingMaterial>& keys, std::string& error) const;
+    /** Validate the complete batch, then persist new keys and their mandatory flag atomically. */
+    bool ImportVotingKeys(const std::map<slhdsa::PublicKey, CKeyingMaterial>& keys, std::string& error);
+    // SYSCOIN END: Preserve independent PQ keys in legacy wallet dumps.
     /** The only signing domain exposed for these reusable keys is proposal funding. */
     bool SignVotingAuthorization(const slhdsa::PublicKey& public_key, const uint256& authorization_hash,
                                  slhdsa::Signature& signature, std::string& error) const;
