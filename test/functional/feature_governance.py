@@ -10,6 +10,8 @@ from test_framework.util import assert_equal, assert_raises_rpc_error, satoshi_r
 from decimal import Decimal
 
 GOVERNANCE_PROPAGATION_TIMEOUT = 60
+GOVERNANCE_MAINTENANCE_INTERVAL = 5 * 60
+GOVERNANCE_DELETION_DELAY = 10 * 60
 
 class SyscoinGovernanceTest (DashTestFramework):
     def set_test_params(self):
@@ -129,6 +131,78 @@ class SyscoinGovernanceTest (DashTestFramework):
         for _ in range(count):
             self.bump_mocktime(1)
             self.generate(self.nodes[0], 1)
+
+    def check_expired_superblock_replay(self, block_hash, trigger_hashes):
+        node = self.nodes[0]
+        block = node.getblock(block_hash, 2)
+        height = block["height"]
+        cycle = node.getgovernanceinfo()["superblockcycle"]
+        self.log.info(f"Replaying funded superblock {height} after governance expiry")
+        assert_equal(node.getblockcount(), height + cycle)
+        assert_equal(block["chainlock"], False)
+        assert trigger_hashes
+        for trigger_hash in trigger_hashes:
+            assert_equal(node.gobject_get(trigger_hash)["fCachedDelete"], False)
+            assert node.gobject_getcurrentvotes(trigger_hash)
+
+        # Executed triggers survive exactly one cycle. Cross the normal
+        # expiry boundary, then let maintenance delete their objects and votes.
+        self.generate_synced_blocks(1)
+        self.isolate_node(node)
+        node.mockscheduler(GOVERNANCE_MAINTENANCE_INTERVAL + 1)
+        self.wait_until(lambda: all(
+            node.gobject_get(h)["fCachedDelete"] for h in trigger_hashes))
+        with node.assert_debug_log([
+                f"UpdateCachesAndClean -- erase obj {h}" for h in trigger_hashes],
+                timeout=GOVERNANCE_PROPAGATION_TIMEOUT):
+            self.bump_mocktime(GOVERNANCE_DELETION_DELAY + 1)
+            node.mockscheduler(GOVERNANCE_MAINTENANCE_INTERVAL + 1)
+
+        def check_governance_removed():
+            for trigger_hash in trigger_hashes:
+                assert_raises_rpc_error(
+                    -8, "Unknown governance object", node.gobject_get, trigger_hash)
+                assert_raises_rpc_error(
+                    -8, "Unknown governance-hash", node.gobject_getcurrentvotes, trigger_hash)
+
+        check_governance_removed()
+        assert_equal(node.gobject_count()["quarantined_triggers"], 0)
+        original_tip = node.getbestblockhash()
+        budgets = node.getgovernanceinfo()["last10governancebudgets"]
+        coinbase = block["tx"][0]
+        payout_addresses = {self.p0_payout_address, self.p1_payout_address,
+                            self.p2_payout_address}
+        paid_outputs = {
+            out["n"]: node.gettxout(coinbase["txid"], out["n"], False)
+            for out in coinbase["vout"]
+            if out["scriptPubKey"].get("address") in payout_addresses}
+        assert len(paid_outputs) >= 2
+        assert all(output is not None for output in paid_outputs.values())
+        assert_equal(node.mnsync("status")["IsSynced"], True)
+
+        # These RPCs use DisconnectBlock and ConnectBlock on retained block
+        # bodies. No peer can redeliver governance data to the isolated node.
+        with node.assert_debug_log([
+                f"UndoBlock -- Removing superblock at height from SB cache: {height}"],
+                timeout=GOVERNANCE_PROPAGATION_TIMEOUT):
+            node.invalidateblock(block_hash)
+        assert_equal(node.getbestblockhash(), block["previousblockhash"])
+        assert_equal(node.getblockcount(), height - 1)
+        for output_index in paid_outputs:
+            assert_equal(node.gettxout(coinbase["txid"], output_index, False), None)
+        assert_equal(node.mnsync("status")["IsSynced"], True)
+        check_governance_removed()
+
+        node.reconsiderblock(block_hash)
+        assert_equal(node.getbestblockhash(), original_tip)
+        assert_equal(node.getgovernanceinfo()["last10governancebudgets"], budgets)
+        for output_index, original_output in paid_outputs.items():
+            assert_equal(node.gettxout(coinbase["txid"], output_index, False), original_output)
+        assert_equal(node.mnsync("status")["IsSynced"], True)
+        assert_equal(node.getnetworkinfo()["networkactive"], False)
+        assert_equal(node.getconnectioncount(), 0)
+        check_governance_removed()
+        assert_equal(node.gobject_count()["quarantined_triggers"], 0)
         
     def run_test(self):
         self.budget = satoshi_round("2000000.00")
@@ -549,6 +623,13 @@ class SyscoinGovernanceTest (DashTestFramework):
             assert_equal(self.nodes[0].getblockcount(), sb_height)
             self.check_superblock()
             self.check_superblockbudget()
+            if i == 0:
+                replay_block_hash = self.nodes[0].getbestblockhash()
+                replay_trigger_hashes = [
+                    h for h, trigger in self.nodes[0].gobject_list("all", "triggers").items()
+                    if json.loads(trigger["DataString"])["event_block_height"] == sb_height]
+
+        self.check_expired_superblock_replay(replay_block_hash, replay_trigger_hashes)
 
 
 if __name__ == '__main__':
