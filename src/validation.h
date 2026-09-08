@@ -1771,18 +1771,25 @@ public:
 
 /** Global variable that points to the height based on a transaction id  */
 static const uint32_t MAX_BLOCK_INDEX = 43800*12; // 2.5 year of blocks
-// SYSCOIN
+// SYSCOIN BEGIN: Retryable transaction-height cache, serialized by cs_main.
 class CBlockIndexDB : public CDBWrapper {
     std::unordered_map<uint256, uint32_t, StaticSaltedHasher> mapCache;
+    std::unordered_set<uint256, StaticSaltedHasher> m_pending_erases;
+    bool m_pending_erase_sync{false};
+    void StageErase(const std::vector<std::pair<uint256, uint32_t>>& txids) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    bool Prune(const uint32_t& height) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+protected:
+    virtual bool WriteCacheBatch(CDBBatch& batch, bool sync) { return WriteBatch(batch, sync); }
 public:
     using CDBWrapper::CDBWrapper;
-    bool ReadBlockHeight(const uint256& txid, uint32_t& nHeight);
-    bool Prune(const uint32_t &nHeight, CDBBatch &batch);
-    bool FlushErase(const std::vector<std::pair<uint256,uint32_t> > &vecTXIDPairs);
-    bool FlushErase(const std::vector<std::pair<uint256,uint32_t> > &vecTXIDPairs, CDBBatch &batch);
-    void FlushDataToCache(const std::vector<std::pair<uint256,uint32_t> > &vecTXIDPairs);
-    bool FlushCacheToDisk(const uint32_t &nHeight, std::size_t CHUNK_ITEMS = 100000, bool fSync = true);
+    virtual ~CBlockIndexDB() = default;
+    bool ReadBlockHeight(const uint256& txid, uint32_t& nHeight) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    void EraseCache(const std::vector<std::pair<uint256, uint32_t>>& txids) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    bool FlushErase(const std::vector<std::pair<uint256,uint32_t> > &vecTXIDPairs) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    void FlushDataToCache(const std::vector<std::pair<uint256,uint32_t> > &vecTXIDPairs) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    bool FlushCacheToDisk(const uint32_t &nHeight, std::size_t CHUNK_ITEMS = 100000, bool fSync = true) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 };
+// SYSCOIN END: Retryable transaction-height cache, serialized by cs_main.
 extern std::unique_ptr<CBlockIndexDB> pblockindexdb;
 // SYSCOIN
 static const unsigned int DEFAULT_RPC_SERIALIZE_VERSION = 1;

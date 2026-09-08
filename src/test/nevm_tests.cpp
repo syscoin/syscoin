@@ -872,3 +872,221 @@ BOOST_FIXTURE_TEST_CASE(mint_replay_disconnect_only_excludes_reconnected, BasicT
 }
 
 BOOST_AUTO_TEST_SUITE_END()
+
+// SYSCOIN BEGIN: Exercise real NEVM cache classes with failed batch writes.
+namespace {
+template <typename Database>
+class FailingNEVMCacheDB final : public Database
+{
+public:
+    using Database::Database;
+    std::vector<bool> writes;
+
+    void FailNextWrite(bool throw_error)
+    {
+        m_fail_call = writes.size() + 1;
+        m_throw_error = throw_error;
+    }
+
+protected:
+    bool WriteCacheBatch(CDBBatch& batch, bool sync) override
+    {
+        writes.push_back(sync);
+        if (writes.size() == m_fail_call) {
+            if (m_throw_error) throw dbwrapper_error("NEVM cache test write failure");
+            return false;
+        }
+        return CDBWrapper::WriteBatch(batch, sync);
+    }
+
+private:
+    std::size_t m_fail_call{0};
+    bool m_throw_error{false};
+};
+
+uint256 NEVMCacheTestKey(unsigned char value)
+{
+    uint256 key;
+    key.begin()[0] = value;
+    return key;
+}
+
+void StageNEVMCacheValue(CNEVMMintedTxDB& db, const uint256& key, unsigned char)
+{
+    db.FlushDataToCache({key});
+}
+
+void StageNEVMCacheValue(CNEVMTxRootsDB& db, const uint256& key, unsigned char value)
+{
+    db.FlushDataToCache({{key, NEVMTxRoot{NEVMCacheTestKey(value), NEVMCacheTestKey(value + 1)}}});
+}
+
+bool NEVMCacheValueMatches(CNEVMMintedTxDB& db, const uint256& key, unsigned char)
+{
+    return db.ExistsTx(key);
+}
+
+bool NEVMCacheValueMatches(CNEVMTxRootsDB& db, const uint256& key, unsigned char value)
+{
+    NEVMTxRoot roots;
+    return db.ReadTxRoots(key, roots) && roots.nTxRoot == NEVMCacheTestKey(value) &&
+           roots.nReceiptRoot == NEVMCacheTestKey(value + 1);
+}
+
+template <typename Operation>
+void CheckNEVMCacheWriteFailure(bool throw_error, Operation operation)
+{
+    if (throw_error) {
+        BOOST_CHECK_THROW(operation(), dbwrapper_error);
+    } else {
+        BOOST_CHECK(!operation());
+    }
+}
+
+template <typename Database>
+void CheckNEVMCacheEraseRetries(const fs::path& path)
+{
+    const uint256 erased{NEVMCacheTestKey(1)};
+    const uint256 retained{NEVMCacheTestKey(2)};
+    for (const bool stored : {false, true}) {
+        for (const bool throw_error : {false, true}) {
+            FailingNEVMCacheDB<Database> db({.path = path, .cache_bytes = 1 << 20, .wipe_data = true});
+            StageNEVMCacheValue(db, erased, 11);
+            StageNEVMCacheValue(db, retained, 12);
+            if (stored) BOOST_REQUIRE(db.FlushCacheToDisk(2, true));
+            db.writes.clear();
+            BOOST_REQUIRE(NEVMCacheValueMatches(db, erased, 11));
+
+            db.FailNextWrite(throw_error);
+            CheckNEVMCacheWriteFailure(throw_error, [&] { return db.FlushErase({erased}); });
+            BOOST_CHECK(!NEVMCacheValueMatches(db, erased, 11));
+            BOOST_CHECK_EQUAL(db.Exists(erased), stored);
+            BOOST_CHECK(NEVMCacheValueMatches(db, retained, 12));
+
+            // A failed retry must preserve the deletion and stop before writing puts.
+            db.FailNextWrite(throw_error);
+            CheckNEVMCacheWriteFailure(throw_error, [&] { return db.FlushCacheToDisk(2, false); });
+            BOOST_CHECK(!NEVMCacheValueMatches(db, erased, 11));
+            BOOST_CHECK_EQUAL(db.Exists(erased), stored);
+            BOOST_CHECK(db.writes == std::vector<bool>({true, true}));
+
+            // Stored rows exercise an erase-only retry with an empty put cache.
+            BOOST_REQUIRE(db.FlushCacheToDisk(2, false));
+            BOOST_CHECK(!db.Exists(erased));
+            BOOST_CHECK(!NEVMCacheValueMatches(db, erased, 11));
+            BOOST_CHECK(db.Exists(retained));
+            BOOST_CHECK(NEVMCacheValueMatches(db, retained, 12));
+            const std::vector<bool> expected{stored ? std::vector<bool>{true, true, true} :
+                                                     std::vector<bool>{true, true, true, false}};
+            BOOST_CHECK(db.writes == expected);
+            const auto writes{db.writes.size()};
+            BOOST_REQUIRE(db.FlushCacheToDisk(2, false));
+            BOOST_CHECK_EQUAL(db.writes.size(), writes);
+        }
+    }
+}
+
+template <typename Database>
+void CheckNEVMCacheReinsertion(const fs::path& path)
+{
+    const uint256 key{NEVMCacheTestKey(3)};
+    for (const bool throw_error : {false, true}) {
+        FailingNEVMCacheDB<Database> db({.path = path, .cache_bytes = 1 << 20, .wipe_data = true});
+        StageNEVMCacheValue(db, key, 13);
+        BOOST_REQUIRE(db.FlushCacheToDisk(2, true));
+        db.writes.clear();
+        db.FailNextWrite(throw_error);
+        CheckNEVMCacheWriteFailure(throw_error, [&] { return db.FlushErase({key}); });
+        BOOST_CHECK(!NEVMCacheValueMatches(db, key, 13));
+        BOOST_REQUIRE(db.Exists(key));
+
+        StageNEVMCacheValue(db, key, 23);
+        BOOST_REQUIRE(NEVMCacheValueMatches(db, key, 23));
+        BOOST_REQUIRE(db.FlushCacheToDisk(2, false));
+        BOOST_CHECK(db.writes == std::vector<bool>({true, false}));
+        BOOST_CHECK(NEVMCacheValueMatches(db, key, 23));
+        BOOST_CHECK(db.Exists(key));
+        const auto writes{db.writes.size()};
+        BOOST_REQUIRE(db.FlushCacheToDisk(2, true));
+        BOOST_CHECK_EQUAL(db.writes.size(), writes);
+        BOOST_CHECK(NEVMCacheValueMatches(db, key, 23));
+    }
+}
+
+template <typename Database>
+void CheckNEVMCacheNormalWritePolicy(const fs::path& path)
+{
+    for (const std::size_t chunk_items : {0U, 1U, 2U, 256U}) {
+        for (const bool sync : {false, true}) {
+            FailingNEVMCacheDB<Database> db({.path = path, .cache_bytes = 1 << 20, .wipe_data = true});
+            for (unsigned char key{1}; key <= 5; ++key) StageNEVMCacheValue(db, NEVMCacheTestKey(key), key);
+            BOOST_CHECK(db.writes.empty());
+            BOOST_REQUIRE(db.FlushCacheToDisk(chunk_items, sync));
+            const std::size_t expected_batches{chunk_items == 0 ? 1 : (5 + chunk_items - 1) / chunk_items};
+            BOOST_CHECK(db.writes == std::vector<bool>(expected_batches, sync));
+            BOOST_REQUIRE(db.FlushCacheToDisk(chunk_items, sync));
+            BOOST_CHECK_EQUAL(db.writes.size(), expected_batches);
+            BOOST_REQUIRE(db.FlushErase({NEVMCacheTestKey(1), NEVMCacheTestKey(2)}));
+            BOOST_CHECK_EQUAL(db.writes.size(), expected_batches + 1);
+            BOOST_CHECK(db.writes.back());
+            BOOST_CHECK(!db.Exists(NEVMCacheTestKey(1)));
+            BOOST_CHECK(!db.Exists(NEVMCacheTestKey(2)));
+            BOOST_REQUIRE(db.FlushCacheToDisk(chunk_items, sync));
+            BOOST_CHECK_EQUAL(db.writes.size(), expected_batches + 1);
+        }
+    }
+}
+
+template <typename Database>
+void CheckNEVMCacheQueuedErase(const fs::path& path)
+{
+    FailingNEVMCacheDB<Database> db({.path = path, .cache_bytes = 1 << 20, .wipe_data = true});
+    const uint256 stored{NEVMCacheTestKey(1)};
+    const uint256 cached{NEVMCacheTestKey(2)};
+    StageNEVMCacheValue(db, stored, 11);
+    BOOST_REQUIRE(db.FlushCacheToDisk(2, true));
+    StageNEVMCacheValue(db, cached, 12);
+    db.writes.clear();
+
+    // Queue all stores' intents before a failure in the first store can prevent
+    // the others from reaching their immediate FlushErase calls.
+    db.EraseCache({stored, cached});
+    BOOST_CHECK(db.writes.empty());
+    BOOST_CHECK(!NEVMCacheValueMatches(db, stored, 11));
+    BOOST_CHECK(!NEVMCacheValueMatches(db, cached, 12));
+    BOOST_CHECK(db.Exists(stored));
+    BOOST_REQUIRE(db.FlushCacheToDisk(2, false));
+    BOOST_CHECK(db.writes == std::vector<bool>({true}));
+    BOOST_CHECK(!db.Exists(stored));
+    BOOST_CHECK(!db.Exists(cached));
+}
+} // namespace
+
+BOOST_FIXTURE_TEST_SUITE(nevm_cache_retry_tests, BasicTestingSetup)
+
+BOOST_AUTO_TEST_CASE(failed_erases_hide_stale_values_and_remain_retryable)
+{
+    CheckNEVMCacheEraseRetries<CNEVMMintedTxDB>(m_args.GetDataDirBase() / "mint_erase_retry");
+    CheckNEVMCacheEraseRetries<CNEVMTxRootsDB>(m_args.GetDataDirBase() / "root_erase_retry");
+}
+
+BOOST_AUTO_TEST_CASE(reinserted_values_cancel_failed_erases)
+{
+    CheckNEVMCacheReinsertion<CNEVMMintedTxDB>(m_args.GetDataDirBase() / "mint_erase_reinsert");
+    CheckNEVMCacheReinsertion<CNEVMTxRootsDB>(m_args.GetDataDirBase() / "root_erase_reinsert");
+}
+
+BOOST_AUTO_TEST_CASE(normal_flushes_keep_chunk_counts_and_sync_flags)
+{
+    CheckNEVMCacheNormalWritePolicy<CNEVMMintedTxDB>(m_args.GetDataDirBase() / "mint_batch_policy");
+    CheckNEVMCacheNormalWritePolicy<CNEVMTxRootsDB>(m_args.GetDataDirBase() / "root_batch_policy");
+}
+
+BOOST_AUTO_TEST_CASE(queued_erases_survive_unattempted_immediate_writes)
+{
+    CheckNEVMCacheQueuedErase<CNEVMMintedTxDB>(m_args.GetDataDirBase() / "mint_erase_queued");
+    CheckNEVMCacheQueuedErase<CNEVMTxRootsDB>(m_args.GetDataDirBase() / "root_erase_queued");
+}
+
+BOOST_AUTO_TEST_SUITE_END()
+// SYSCOIN END: Exercise real NEVM cache classes with failed batch writes.

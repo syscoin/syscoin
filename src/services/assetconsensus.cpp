@@ -624,11 +624,11 @@ bool CheckAssetAllocationInputs(const CTransaction &tx, const uint256& txHash, T
     }  
     return true;
 }
-// called on connect
-
+// SYSCOIN BEGIN: Retry failed erases without changing ordinary put batching.
 void CNEVMTxRootsDB::FlushDataToCache(const NEVMTxRootMap &mapNEVMTxRoots) {
     LOCK(cs_cache);
     for (const auto& entry : mapNEVMTxRoots) {
+        m_pending_erases.erase(entry.first);
         auto result = mapCache.emplace(entry.first, entry.second);
         if (!result.second) {
             result.first->second = entry.second;
@@ -638,13 +638,14 @@ void CNEVMTxRootsDB::FlushDataToCache(const NEVMTxRootMap &mapNEVMTxRoots) {
 bool CNEVMTxRootsDB::FlushCacheToDisk(std::size_t CHUNK_ITEMS, bool fSync)
 {
     LOCK(cs_cache);
+    if (!FlushPendingErases()) return false;
     if (mapCache.empty()) return true;
 
     const std::size_t count = mapCache.size();
     if (!nevm_cache_detail::FlushCache(
             *this, mapCache, CHUNK_ITEMS, fSync,
             [](CDBBatch& batch, const auto& entry) { batch.Write(entry.first, entry.second); },
-            [this](CDBBatch& batch, bool sync) { return WriteBatch(batch, sync); })) return false;
+            [this](CDBBatch& batch, bool sync) { return WriteCacheBatch(batch, sync); })) return false;
 
     LogPrint(BCLog::SYS,
              "Flushed NEVM-tx-roots cache, %zu items written in %zu-entry chunks\n",
@@ -654,45 +655,65 @@ bool CNEVMTxRootsDB::FlushCacheToDisk(std::size_t CHUNK_ITEMS, bool fSync)
 
 bool CNEVMTxRootsDB::ReadTxRoots(const uint256& nBlockHash, NEVMTxRoot& txRoot) {
     LOCK(cs_cache);
+    if (m_pending_erases.contains(nBlockHash)) return false;
     auto it = mapCache.find(nBlockHash);
     if (it != mapCache.end()) {
         txRoot = it->second;
         return true;
     }
     return Read(nBlockHash, txRoot);
-} 
+}
+void CNEVMTxRootsDB::StageErase(const std::vector<uint256>& block_hashes)
+{
+    AssertLockHeld(cs_cache);
+    for (const auto& hash : block_hashes) {
+        m_pending_erases.insert(hash);
+        mapCache.erase(hash);
+    }
+}
+void CNEVMTxRootsDB::EraseCache(const std::vector<uint256>& block_hashes)
+{
+    LOCK(cs_cache);
+    StageErase(block_hashes);
+}
 bool CNEVMTxRootsDB::FlushErase(const std::vector<uint256> &vecBlockHashes) {
     LOCK(cs_cache);
     if(vecBlockHashes.empty())
         return true;
-    CDBBatch batch(*this);
-    for (const auto& hash: vecBlockHashes) {
-        batch.Erase(hash);
-        auto it = mapCache.find(hash);
-        if (it != mapCache.end()) {
-            mapCache.erase(hash);
-        }
-    }
+    StageErase(vecBlockHashes);
     if(vecBlockHashes.size() > 0)
         LogPrint(BCLog::SYS, "Flushing, erasing %d nevm tx roots\n", vecBlockHashes.size());
-    return WriteBatch(batch, true);
+    return FlushPendingErases();
+}
+bool CNEVMTxRootsDB::FlushPendingErases()
+{
+    AssertLockHeld(cs_cache);
+    if (m_pending_erases.empty()) return true;
+    CDBBatch batch(*this);
+    for (const auto& hash : m_pending_erases) batch.Erase(hash);
+    // Preserve the synchronous durability requested by the original erase.
+    if (!WriteCacheBatch(batch, true)) return false;
+    m_pending_erases.clear();
+    return true;
 }
 void CNEVMMintedTxDB::FlushDataToCache(const NEVMMintTxSet &mapNEVMTxRoots) {
     LOCK(cs_cache);
     for (auto const& key : mapNEVMTxRoots) {
+        m_pending_erases.erase(key);
         mapCache.insert(key);
     }
 }
 bool CNEVMMintedTxDB::FlushCacheToDisk(std::size_t CHUNK_ITEMS, bool fSync)
 {
     LOCK(cs_cache);
+    if (!FlushPendingErases()) return false;
     if (mapCache.empty()) return true;
 
     const std::size_t count = mapCache.size();
     if (!nevm_cache_detail::FlushCache(
             *this, mapCache, CHUNK_ITEMS, fSync,
             [](CDBBatch& batch, const uint256& key) { batch.Write(key, true); },
-            [this](CDBBatch& batch, bool sync) { return WriteBatch(batch, sync); })) return false;
+            [this](CDBBatch& batch, bool sync) { return WriteCacheBatch(batch, sync); })) return false;
 
     LogPrint(BCLog::SYS,
              "Flushed NEVM-minted-tx cache, %zu items written in %zu-entry chunks\n",
@@ -700,26 +721,45 @@ bool CNEVMMintedTxDB::FlushCacheToDisk(std::size_t CHUNK_ITEMS, bool fSync)
     return true;
 }
 
+void CNEVMMintedTxDB::StageErase(const NEVMMintTxSet& tx_hashes)
+{
+    AssertLockHeld(cs_cache);
+    for (const auto& key : tx_hashes) {
+        m_pending_erases.insert(key);
+        mapCache.erase(key);
+    }
+}
+void CNEVMMintedTxDB::EraseCache(const NEVMMintTxSet& tx_hashes)
+{
+    LOCK(cs_cache);
+    StageErase(tx_hashes);
+}
 bool CNEVMMintedTxDB::FlushErase(const NEVMMintTxSet &mapNEVMTxRoots) {
     LOCK(cs_cache);
     if(mapNEVMTxRoots.empty())
         return true;
-    CDBBatch batch(*this);
-    for (const auto &key : mapNEVMTxRoots) {
-        batch.Erase(key);
-        auto it = mapCache.find(key);
-        if(it != mapCache.end()){
-            mapCache.erase(it);
-        }
-    }
+    StageErase(mapNEVMTxRoots);
     if(mapNEVMTxRoots.size() > 0)
         LogPrint(BCLog::SYS, "Flushing, erasing %d nevm tx mints\n", mapNEVMTxRoots.size());
-    return WriteBatch(batch, true);
+    return FlushPendingErases();
+}
+bool CNEVMMintedTxDB::FlushPendingErases()
+{
+    AssertLockHeld(cs_cache);
+    if (m_pending_erases.empty()) return true;
+    CDBBatch batch(*this);
+    for (const auto& key : m_pending_erases) batch.Erase(key);
+    // Preserve the synchronous durability requested by the original erase.
+    if (!WriteCacheBatch(batch, true)) return false;
+    m_pending_erases.clear();
+    return true;
 }
 bool CNEVMMintedTxDB::ExistsTx(const uint256& nTxHash) {
     LOCK(cs_cache);
+    if (m_pending_erases.contains(nTxHash)) return false;
     return (mapCache.find(nTxHash) != mapCache.end()) || Exists(nTxHash);
 }
+// SYSCOIN END: Retry failed erases without changing ordinary put batching.
 std::string stringFromSyscoinTx(const int &nVersion) {
     switch (nVersion) {
 	case SYSCOIN_TX_VERSION_ALLOCATION_SEND:

@@ -5632,6 +5632,10 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
                                   pindexDelete->GetBlockHash().ToString()));
                 }
             }
+            // SYSCOIN: Retain all deletion intents if an earlier DB write fails.
+            pnevmtxmintdb->EraseCache(setMintTxs);
+            pnevmtxrootsdb->EraseCache(vecNEVMBlocks);
+            pblockindexdb->EraseCache(vecTXIDPairs);
             if (!pnevmtxmintdb->FlushErase(setMintTxs) ||
                 !pnevmtxrootsdb->FlushErase(vecNEVMBlocks) ||
                 !pblockindexdb->FlushErase(vecTXIDPairs)) {
@@ -9079,6 +9083,9 @@ bool Chainstate::ReplayBlocks()
     // deferred: erasing them before the recovered UTXO tip is durable can leave
     // minted UTXOs without replay protection after a crash.
     if (pnevmtxrootsdb != nullptr) {
+        // SYSCOIN: Queue both rollback sets before either DB write can fail.
+        pnevmtxrootsdb->EraseCache(vecNEVMBlocks);
+        pblockindexdb->EraseCache(vecTXIDPairs);
         if (!pnevmtxrootsdb->FlushErase(vecNEVMBlocks) || !pblockindexdb->FlushErase(vecTXIDPairs)) {
             return error("RollbackBlock(): Error flushing to asset dbs on disconnect");
         }
@@ -10568,8 +10575,9 @@ bool ChainstateManager::IsSnapshotActive() const
 }
 
 
-// SYSCOIN
+// SYSCOIN BEGIN: Retain pending index writes and deletions until batch success.
 bool CBlockIndexDB::ReadBlockHeight(const uint256& txid, uint32_t& nHeight) {
+    if (m_pending_erases.contains(txid)) return false;
     auto it = mapCache.find(txid);
     if(it != mapCache.end()){
         nHeight = it->second;
@@ -10582,62 +10590,67 @@ bool CBlockIndexDB::ReadBlockHeight(const uint256& txid, uint32_t& nHeight) {
 bool CBlockIndexDB::FlushErase(const std::vector<std::pair<uint256,uint32_t> > &vecTXIDPairs) {
     if(vecTXIDPairs.empty())
         return true;
+    EraseCache(vecTXIDPairs);
     CDBBatch batch(*this);
-    FlushErase(vecTXIDPairs, batch);
-    return WriteBatch(batch, true);
+    for (const auto& txid : m_pending_erases) batch.Erase(txid);
+    if (!WriteCacheBatch(batch, /*sync=*/true)) return false;
+    m_pending_erases.clear();
+    m_pending_erase_sync = false;
+    return true;
 }
-bool CBlockIndexDB::FlushErase(const std::vector<std::pair<uint256,uint32_t> > &vecTXIDPairs, CDBBatch &batch) {
-    if(vecTXIDPairs.empty())
-        return true;
+void CBlockIndexDB::EraseCache(const std::vector<std::pair<uint256,uint32_t> > &vecTXIDPairs) {
+    StageErase(vecTXIDPairs);
+    if (!vecTXIDPairs.empty()) m_pending_erase_sync = true;
+}
+void CBlockIndexDB::StageErase(const std::vector<std::pair<uint256,uint32_t> > &vecTXIDPairs) {
     for (const auto &pair : vecTXIDPairs) {
-        batch.Erase(pair.first);
-        auto it = mapCache.find(pair.first);
-        if(it != mapCache.end()){
-            mapCache.erase(it);
-        }
+        m_pending_erases.insert(pair.first);
+        mapCache.erase(pair.first);
     }
     if(vecTXIDPairs.size() > 0)
-        LogPrint(BCLog::SYS, "Flushing %d block index removals\n", vecTXIDPairs.size());
-    return true;
+        LogPrint(BCLog::SYS, "Staged %d block index removals\n", vecTXIDPairs.size());
 }
 void CBlockIndexDB::FlushDataToCache(const std::vector<std::pair<uint256,uint32_t> > &vecTXIDPairs) {
     if(vecTXIDPairs.empty()) {
         return;
     }
     for (auto const& [key, val] : vecTXIDPairs) {
+        m_pending_erases.erase(key);
         mapCache.try_emplace(key, val);
     }
+    if (m_pending_erases.empty()) m_pending_erase_sync = false;
 }
 bool CBlockIndexDB::FlushCacheToDisk(const uint32_t &nHeight,
                                      std::size_t CHUNK_ITEMS,
                                      bool fSync)
 {
-    if (mapCache.empty()) return true;
+    if (mapCache.empty() && m_pending_erases.empty()) return true;
 
     CDBBatch batch(*this);
-    std::size_t items = 0;
     std::size_t count = 0;
-    /* prune first so we don’t write obsolete entries */
-    Prune(nHeight, batch);
+    // Keep pruning in the first existing batch, including a prune-only batch.
+    if (!Prune(nHeight)) return false;
+    for (const auto& txid : m_pending_erases) batch.Erase(txid);
 
-    auto flush = [&]() {
-        if (batch.SizeEstimate() == 0) return true;
-        if (!WriteBatch(batch, fSync)) return false;
-        batch.Clear();
-        items = 0;
-        return true;
-    };
-
-    for (auto it = mapCache.begin(); it != mapCache.end(); ) {
-        batch.Write(it->first, it->second);
-        count++;
-        if (++items == CHUNK_ITEMS) {
-            if (!flush()) return false;
+    auto first = mapCache.begin();
+    do {
+        auto last = first;
+        std::size_t items{0};
+        while (last != mapCache.end() && (CHUNK_ITEMS == 0 || items < CHUNK_ITEMS)) {
+            batch.Write(last->first, last->second);
+            ++last;
+            ++items;
         }
-        // safe to erase now – record is durable
-        it = mapCache.erase(it);
-    }
-    if (!flush()) return false;
+        if (batch.SizeEstimate() == 0) break;
+        // Explicit erase retries retain their original synchronous requirement.
+        // A failed batch leaves its complete range and all deletion intents pending.
+        if (!WriteCacheBatch(batch, fSync || m_pending_erase_sync)) return false;
+        first = mapCache.erase(first, last);
+        m_pending_erases.clear();
+        m_pending_erase_sync = false;
+        count += items;
+        batch.Clear();
+    } while (first != mapCache.end());
 
     LogPrint(BCLog::SYS,
              "Flushed %zu block-index entries (chunk=%zu)\n",
@@ -10645,7 +10658,7 @@ bool CBlockIndexDB::FlushCacheToDisk(const uint32_t &nHeight,
     return true;
 }
 
-bool CBlockIndexDB::Prune(const uint32_t &nHeight, CDBBatch &batch) {
+bool CBlockIndexDB::Prune(const uint32_t &nHeight) {
     if(MAX_BLOCK_INDEX > nHeight) {
         LogPrintf("PruneIndex not enough blocks, not pruning\n");
         return true;
@@ -10659,7 +10672,11 @@ bool CBlockIndexDB::Prune(const uint32_t &nHeight, CDBBatch &batch) {
     while (pcursor->Valid()) {
         try {
             if(pcursor->GetValue(nValue) && nValue < cutoffHeight && pcursor->GetKey(nKey)) {
-                vecTXIDPairs.emplace_back(std::make_pair(nKey, nValue));
+                // A newer cached height supersedes an obsolete disk row.
+                const auto cached = mapCache.find(nKey);
+                if (cached == mapCache.end() || cached->second < cutoffHeight) {
+                    vecTXIDPairs.emplace_back(std::make_pair(nKey, nValue));
+                }
             }
             pcursor->Next();
         }
@@ -10667,9 +10684,10 @@ bool CBlockIndexDB::Prune(const uint32_t &nHeight, CDBBatch &batch) {
             return error("%s() : deserialize error", __func__);
         }
     }
-    return FlushErase(vecTXIDPairs, batch);
+    StageErase(vecTXIDPairs);
+    return true;
 }
-
+// SYSCOIN END: Retain pending index writes and deletions until batch success.
 
 void recursive_copy(const fs::path &src, const fs::path &dst)
 {

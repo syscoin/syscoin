@@ -451,9 +451,10 @@ static RPCHelpMan getrawtransaction()
         }
     // SYSCOIN
     } else {
+        // SYSCOIN: Protect the cache lookup and corresponding active-chain height.
+        LOCK(cs_main);
         uint32_t nBlockHeight;
         if(pblockindexdb != nullptr && pblockindexdb->ReadBlockHeight(hash, nBlockHeight)){     
-            LOCK(cs_main);
             blockindex = chainman.ActiveChain()[nBlockHeight];
         } 
  

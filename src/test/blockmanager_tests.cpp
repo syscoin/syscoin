@@ -21,8 +21,214 @@ using node::BlockManager;
 using node::KernelNotifications;
 using node::MAX_BLOCKFILE_SIZE;
 
+// SYSCOIN BEGIN: Inject batch failures in the real transaction-height cache.
+namespace {
+class FailingBlockIndexDB : public CBlockIndexDB {
+public:
+    enum class Failure { FALSE_RESULT, THROW_BEFORE, THROW_AFTER };
+    using CBlockIndexDB::CBlockIndexDB;
+    std::vector<bool> sync_calls;
+    std::size_t fail_call{0};
+    Failure failure{Failure::THROW_BEFORE};
+
+protected:
+    bool WriteCacheBatch(CDBBatch& batch, bool sync) override
+    {
+        sync_calls.push_back(sync);
+        if (sync_calls.size() == fail_call) {
+            if (failure == Failure::FALSE_RESULT) return false;
+            if (failure == Failure::THROW_AFTER) CDBWrapper::WriteBatch(batch, sync);
+            throw dbwrapper_error{"injected transaction-height batch failure"};
+        }
+        return CDBWrapper::WriteBatch(batch, sync);
+    }
+};
+
+uint256 IndexKey(uint8_t value)
+{
+    uint256 key;
+    key.begin()[0] = value;
+    return key;
+}
+} // namespace
+// SYSCOIN END: Inject batch failures in the real transaction-height cache.
+
 // use BasicTestingSetup here for the data directory configuration, setup, and cleanup
 BOOST_FIXTURE_TEST_SUITE(blockmanager_tests, BasicTestingSetup)
+
+// SYSCOIN BEGIN: Retrying inserts and deletions preserves data and batching.
+BOOST_AUTO_TEST_CASE(block_index_failed_chunks_remain_retryable)
+{
+    LOCK(cs_main);
+    std::vector<std::pair<uint256, uint32_t>> rows;
+    for (uint8_t i = 1; i <= 5; ++i) rows.emplace_back(IndexKey(i), 100 + i);
+    for (const std::size_t chunk : {1U, 2U, 100000U, 0U}) {
+        const auto batches = chunk == 0 ? 1 : (rows.size() + chunk - 1) / chunk;
+        for (std::size_t fail_call = 1; fail_call <= batches; ++fail_call) {
+            for (const auto failure : {FailingBlockIndexDB::Failure::FALSE_RESULT,
+                                       FailingBlockIndexDB::Failure::THROW_BEFORE,
+                                       FailingBlockIndexDB::Failure::THROW_AFTER}) {
+                FailingBlockIndexDB db{{.path = m_path_root / "height-chunks", .cache_bytes = 1 << 20, .memory_only = true}};
+                db.FlushDataToCache(rows);
+                db.fail_call = fail_call;
+                db.failure = failure;
+                if (failure == FailingBlockIndexDB::Failure::FALSE_RESULT) {
+                    BOOST_CHECK(!db.FlushCacheToDisk(200, chunk, /*fSync=*/false));
+                } else {
+                    BOOST_CHECK_THROW(db.FlushCacheToDisk(200, chunk, /*fSync=*/false), dbwrapper_error);
+                }
+                for (const auto& [key, expected] : rows) {
+                    uint32_t height{0};
+                    BOOST_REQUIRE(db.ReadBlockHeight(key, height));
+                    BOOST_CHECK_EQUAL(height, expected);
+                }
+                BOOST_REQUIRE(db.FlushCacheToDisk(200, chunk, /*fSync=*/false));
+                // Exactly one failed/unacknowledged batch is repeated.
+                BOOST_CHECK_EQUAL(db.sync_calls.size(), batches + 1);
+                for (const bool sync : db.sync_calls) BOOST_CHECK(!sync);
+                for (const auto& [key, expected] : rows) {
+                    uint32_t height{0};
+                    BOOST_REQUIRE(db.Read(key, height));
+                    BOOST_CHECK_EQUAL(height, expected);
+                }
+                BOOST_REQUIRE(db.FlushCacheToDisk(200, chunk, /*fSync=*/true));
+                BOOST_CHECK_EQUAL(db.sync_calls.size(), batches + 1);
+            }
+        }
+        FailingBlockIndexDB success{{.path = m_path_root / "height-success", .cache_bytes = 1 << 20, .memory_only = true}};
+        success.FlushDataToCache(rows);
+        BOOST_REQUIRE(success.FlushCacheToDisk(200, chunk, /*fSync=*/false));
+        BOOST_CHECK_EQUAL(success.sync_calls.size(), batches);
+        for (const bool sync : success.sync_calls) BOOST_CHECK(!sync);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(block_index_erase_retry_and_latest_put)
+{
+    LOCK(cs_main);
+    const auto disk_key = IndexKey(1), cached_key = IndexKey(2), kept_key = IndexKey(3);
+    for (const auto failure : {FailingBlockIndexDB::Failure::FALSE_RESULT,
+                               FailingBlockIndexDB::Failure::THROW_BEFORE,
+                               FailingBlockIndexDB::Failure::THROW_AFTER}) {
+        FailingBlockIndexDB db{{.path = m_path_root / "height-erases", .cache_bytes = 1 << 20, .memory_only = true}};
+        BOOST_REQUIRE(db.Write(disk_key, uint32_t{100}));
+        db.FlushDataToCache({{cached_key, 101}, {kept_key, 102}});
+        db.fail_call = 1;
+        db.failure = failure;
+        if (failure == FailingBlockIndexDB::Failure::FALSE_RESULT) {
+            BOOST_CHECK(!db.FlushErase({{disk_key, 100}, {cached_key, 101}}));
+        } else {
+            BOOST_CHECK_THROW(db.FlushErase({{disk_key, 100}, {cached_key, 101}}), dbwrapper_error);
+        }
+        uint32_t height{0};
+        BOOST_CHECK(!db.ReadBlockHeight(disk_key, height));
+        BOOST_CHECK(!db.ReadBlockHeight(cached_key, height));
+        BOOST_REQUIRE(db.ReadBlockHeight(kept_key, height));
+        BOOST_CHECK_EQUAL(height, 102U);
+        BOOST_REQUIRE(db.FlushCacheToDisk(200, 2, /*fSync=*/false));
+        BOOST_CHECK_EQUAL(db.sync_calls.size(), 2U);
+        BOOST_CHECK(db.sync_calls[0]);
+        BOOST_CHECK(db.sync_calls[1]);
+        BOOST_CHECK(!db.Exists(disk_key));
+        BOOST_CHECK(!db.Exists(cached_key));
+        BOOST_REQUIRE(db.Read(kept_key, height));
+        BOOST_CHECK_EQUAL(height, 102U);
+
+        db.fail_call = 3;
+        db.failure = FailingBlockIndexDB::Failure::THROW_BEFORE;
+        BOOST_CHECK_THROW(db.FlushErase({{kept_key, 102}}), dbwrapper_error);
+        db.FlushDataToCache({{kept_key, 150}});
+        BOOST_REQUIRE(db.ReadBlockHeight(kept_key, height));
+        BOOST_CHECK_EQUAL(height, 150U);
+        BOOST_REQUIRE(db.FlushCacheToDisk(200, 2, /*fSync=*/false));
+        BOOST_CHECK_EQUAL(db.sync_calls.size(), 4U);
+        BOOST_CHECK(!db.sync_calls.back());
+        BOOST_REQUIRE(db.Read(kept_key, height));
+        BOOST_CHECK_EQUAL(height, 150U);
+        BOOST_REQUIRE(db.FlushErase({{kept_key, 150}}));
+        BOOST_CHECK_EQUAL(db.sync_calls.size(), 5U);
+        BOOST_REQUIRE(db.FlushCacheToDisk(200));
+        BOOST_CHECK_EQUAL(db.sync_calls.size(), 5U);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(block_index_pruning_shares_the_first_batch)
+{
+    LOCK(cs_main);
+    const auto newer_key = IndexKey(1), stale_key = IndexKey(2), added_key = IndexKey(3);
+    for (const std::size_t fail_call : {0U, 1U, 2U}) {
+        FailingBlockIndexDB db{{.path = m_path_root / "height-prune", .cache_bytes = 1 << 20, .memory_only = true}};
+        BOOST_REQUIRE(db.Write(newer_key, uint32_t{5}));
+        BOOST_REQUIRE(db.Write(stale_key, uint32_t{6}));
+        db.FlushDataToCache({{newer_key, 100}, {added_key, 101}});
+        db.fail_call = fail_call;
+        if (fail_call != 0) {
+            BOOST_CHECK_THROW(db.FlushCacheToDisk(MAX_BLOCK_INDEX + 10, 1, /*fSync=*/false), dbwrapper_error);
+            uint32_t height{0};
+            BOOST_CHECK(!db.ReadBlockHeight(stale_key, height));
+            BOOST_REQUIRE(db.ReadBlockHeight(newer_key, height));
+            BOOST_CHECK_EQUAL(height, 100U);
+        }
+        BOOST_REQUIRE(db.FlushCacheToDisk(MAX_BLOCK_INDEX + 10, 1, /*fSync=*/false));
+        BOOST_CHECK_EQUAL(db.sync_calls.size(), fail_call == 0 ? 2U : 3U);
+        for (const bool sync : db.sync_calls) BOOST_CHECK(!sync);
+        BOOST_CHECK(!db.Exists(stale_key));
+        uint32_t height{0};
+        BOOST_REQUIRE(db.Read(newer_key, height));
+        BOOST_CHECK_EQUAL(height, 100U);
+        BOOST_REQUIRE(db.Read(added_key, height));
+        BOOST_CHECK_EQUAL(height, 101U);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(block_index_staged_erases_survive_skipped_write)
+{
+    LOCK(cs_main);
+    const auto disk_key = IndexKey(1), cached_key = IndexKey(2);
+    FailingBlockIndexDB db{{.path = m_path_root / "height-staged", .cache_bytes = 1 << 20, .memory_only = true}};
+    BOOST_REQUIRE(db.Write(disk_key, uint32_t{100}));
+    db.FlushDataToCache({{cached_key, 101}});
+    // An earlier auxiliary DB may fail before this DB's FlushErase is reached.
+    db.EraseCache({{disk_key, 100}, {cached_key, 101}});
+    BOOST_CHECK(db.sync_calls.empty());
+    uint32_t height{0};
+    BOOST_CHECK(!db.ReadBlockHeight(disk_key, height));
+    BOOST_CHECK(!db.ReadBlockHeight(cached_key, height));
+    BOOST_REQUIRE(db.FlushCacheToDisk(200, 100000, /*fSync=*/false));
+    BOOST_REQUIRE_EQUAL(db.sync_calls.size(), 1U);
+    BOOST_CHECK(db.sync_calls.back());
+    BOOST_CHECK(!db.Exists(disk_key));
+    BOOST_CHECK(!db.Exists(cached_key));
+}
+
+BOOST_AUTO_TEST_CASE(block_index_erase_only_retry_survives_reopen)
+{
+    LOCK(cs_main);
+    const auto key = IndexKey(1);
+    const auto path = m_path_root / "height-reopen";
+    {
+        FailingBlockIndexDB db{{.path = path, .cache_bytes = 1 << 20}};
+        BOOST_REQUIRE(db.Write(key, uint32_t{5}, /*fSync=*/true));
+        db.FlushDataToCache({{key, 6}});
+        db.fail_call = 1;
+        // Pruning consumes the only pending put. Its erase still needs retry.
+        BOOST_CHECK_THROW(db.FlushCacheToDisk(MAX_BLOCK_INDEX + 10, 100000, /*fSync=*/false), dbwrapper_error);
+        BOOST_REQUIRE(db.FlushCacheToDisk(MAX_BLOCK_INDEX + 10, 100000, /*fSync=*/false));
+        BOOST_CHECK_EQUAL(db.sync_calls.size(), 2U);
+        for (const bool sync : db.sync_calls) BOOST_CHECK(!sync);
+        BOOST_REQUIRE(db.Write(key, uint32_t{20}, /*fSync=*/true));
+        db.fail_call = 3;
+        BOOST_CHECK_THROW(db.FlushErase({{key, 20}}), dbwrapper_error);
+        BOOST_REQUIRE(db.FlushCacheToDisk(MAX_BLOCK_INDEX + 10, 100000, /*fSync=*/false));
+        BOOST_CHECK_EQUAL(db.sync_calls.size(), 4U);
+        BOOST_CHECK(db.sync_calls.back());
+    }
+    CBlockIndexDB reopened{{.path = path, .cache_bytes = 1 << 20}};
+    uint32_t height{0};
+    BOOST_CHECK(!reopened.ReadBlockHeight(key, height));
+    BOOST_CHECK(!reopened.Exists(key));
+}
+// SYSCOIN END: Retrying inserts and deletions preserves data and batching.
 
 // SYSCOIN: A replay-retention floor may move backward but never forward implicitly.
 BOOST_AUTO_TEST_CASE(replay_prune_lock_never_raises_a_reorg_floor)

@@ -42,11 +42,19 @@ bool FlushCache(CDBWrapper& db, Cache& cache, std::size_t chunk_items, bool sync
 class TxValidationState;
 class CTxUndo;
 class CBlock;
+// SYSCOIN BEGIN: Retain uncommitted cache deletions until their write succeeds.
 class CNEVMTxRootsDB : public CDBWrapper {
     NEVMTxRootMap mapCache;
     mutable Mutex cs_cache; // Mutex to protect cache operations (non-recursive for better performance)
+    NEVMMintTxSet m_pending_erases GUARDED_BY(cs_cache);
+    void StageErase(const std::vector<uint256>& block_hashes) EXCLUSIVE_LOCKS_REQUIRED(cs_cache);
+    bool FlushPendingErases() EXCLUSIVE_LOCKS_REQUIRED(cs_cache);
+protected:
+    virtual bool WriteCacheBatch(CDBBatch& batch, bool sync) { return CDBWrapper::WriteBatch(batch, sync); }
 public:
     using CDBWrapper::CDBWrapper;
+    virtual ~CNEVMTxRootsDB() = default;
+    void EraseCache(const std::vector<uint256>& block_hashes) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
     bool FlushErase(const std::vector<uint256> &vecBlockHashes) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
     bool ReadTxRoots(const uint256& nBlockHash, NEVMTxRoot& txRoot) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
     bool FlushCacheToDisk(std::size_t CHUNK_ITEMS = 100000, bool fSync = true) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
@@ -56,13 +64,21 @@ public:
 class CNEVMMintedTxDB : public CDBWrapper {
     NEVMMintTxSet mapCache;
     mutable Mutex cs_cache; // Mutex to protect cache operations (non-recursive for better performance)
+    NEVMMintTxSet m_pending_erases GUARDED_BY(cs_cache);
+    void StageErase(const NEVMMintTxSet& tx_hashes) EXCLUSIVE_LOCKS_REQUIRED(cs_cache);
+    bool FlushPendingErases() EXCLUSIVE_LOCKS_REQUIRED(cs_cache);
+protected:
+    virtual bool WriteCacheBatch(CDBBatch& batch, bool sync) { return CDBWrapper::WriteBatch(batch, sync); }
 public:
     using CDBWrapper::CDBWrapper;
+    virtual ~CNEVMMintedTxDB() = default;
+    void EraseCache(const NEVMMintTxSet& tx_hashes) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
     bool FlushErase(const NEVMMintTxSet &setMintTxs) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
     bool FlushCacheToDisk(std::size_t CHUNK_ITEMS = 256, bool fSync = true) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
     void FlushDataToCache(const NEVMMintTxSet &mapNEVMTxRoots) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
     bool ExistsTx(const uint256& nTxHash) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
 };
+// SYSCOIN END: Retain uncommitted cache deletions until their write succeeds.
 
 extern std::unique_ptr<CNEVMTxRootsDB> pnevmtxrootsdb;
 extern std::unique_ptr<CNEVMMintedTxDB> pnevmtxmintdb;
