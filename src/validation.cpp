@@ -4974,7 +4974,8 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             if (governance == nullptr || pindex->pprev == nullptr) {
                 return state.Error("governance-state-unavailable");
             }
-            if (!governance->IsReadyForTip(pindex->pprev) &&
+            if (!HasValidatedSuperblockPayments(block, *pindex) &&
+                !governance->IsReadyForTip(pindex->pprev) &&
                 !governance->RevalidatePQGovernance(*pindex->pprev)) {
                 return state.Error("governance-state-unavailable");
             }
@@ -4998,6 +4999,9 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             strError, fJustCheck, check_superblock,
             &exact_superblock_validation, &matched_payment_outputs,
             &governance_state_available)};
+        // Legacy enforcement exceptions must not attest a failed payment
+        // check as an exact decision that a later reconnect may reuse.
+        exact_superblock_validation &= block_value_valid;
         if (!block_value_valid && !governance_state_available) {
             LogPrintf("ERROR: ConnectBlock(): %s\n", strError);
             return state.Error("governance-state-unavailable");

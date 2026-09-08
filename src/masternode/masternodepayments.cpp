@@ -12,11 +12,29 @@
 #include <validation.h>
 
 #include <consensus/pq_migration_config.h>
+#include <consensus/merkle.h>
 #include <evo/deterministicmns.h>
 #include <evo/specialtx.h>
 #include <string>
 
 CMasternodePayments mnpayments;
+
+bool HasValidatedSuperblockPayments(const CBlock& block, const CBlockIndex& index)
+{
+    if (!(index.nStatus & BLOCK_GOVERNANCE_VALIDATED) ||
+        (index.nStatus & BLOCK_FAILED_MASK) ||
+        !CSuperblock::IsValidBlockHeight(index.nHeight) ||
+        index.phashBlock == nullptr || index.pprev == nullptr ||
+        block.vtx.empty() || block.GetHash() != index.GetBlockHash() ||
+        block.hashPrevBlock != index.pprev->GetBlockHash()) {
+        return false;
+    }
+    // Block copies retain fChecked. Recompute the commitment instead of
+    // trusting that cache when reusing a prior payment decision.
+    bool mutated{false};
+    const uint256 merkle_root{BlockMerkleRoot(block, &mutated)};
+    return !mutated && merkle_root == block.hashMerkleRoot;
+}
 
 CAmount GetMinerPayment(MasternodePaymentStatus status,
                         const CAmount& blockReward, const CAmount& fees)
@@ -143,7 +161,10 @@ bool IsBlockValueValid(const CBlock& block, const CBlockIndex* pindex, const CAm
         }
         return isBlockRewardValueMet;
     }
-    if (!check_superblock) {
+    // Off-chain votes can change after this exact block was connected. Keep
+    // its verified payment decision, while still enforcing the limits above
+    // and rebuilding the branch's adaptive budget after a disconnect.
+    if (!check_superblock || HasValidatedSuperblockPayments(block, *pindex)) {
         if(!fJustCheck)
             CheckAndWriteBudget(nSuperblockPayment, nPaymentLimit, nGovernanceBudgetUp, pindex);
         return true;

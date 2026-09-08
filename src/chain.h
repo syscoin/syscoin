@@ -148,7 +148,9 @@ enum BlockStatus : uint32_t {
      * Exact governance validation was performed for this superblock while the
      * required governance data was available. This is persisted so ChainLock
      * signing never relies only on BLOCK_VALID_SCRIPTS, which can be reached
-     * through the bounded historical-sync fallback.
+     * through the bounded historical-sync fallback. Reconnecting the same
+     * committed block may reuse this payment decision after off-chain votes
+     * change, while still enforcing its branch-derived payment bounds.
      */
     BLOCK_GOVERNANCE_VALIDATED = 1024,
     // SYSCOIN: This block's persisted BTCPREV/BTCC accumulator was produced

@@ -5,6 +5,7 @@
 #include <chainparams.h>
 #include <addresstype.h>
 #include <consensus/validation.h>
+#include <consensus/merkle.h>
 #include <crypto/common.h> // SYSCOIN: PQ authority fixture serialization.
 #include <evo/deterministicmns.h> // SYSCOIN: governance authority fixtures.
 #include <evo/pq_registry.h> // SYSCOIN: PQ authority snapshot fixtures.
@@ -1678,6 +1679,122 @@ BOOST_FIXTURE_TEST_CASE(superblock_chainlock_requires_exact_governance_provenanc
                                   /*check_superblock=*/false,
                                   &exact_superblock_validation));
     BOOST_CHECK(!exact_superblock_validation);
+}
+
+BOOST_FIXTURE_TEST_CASE(superblock_payment_replay_requires_committed_provenance,
+                        TestChainDIP3V19Setup)
+{
+    struct SyncModeGuard {
+        const int old_mode{masternodeSync.GetAssetID()};
+        ~SyncModeGuard() { masternodeSync.SetSyncMode(old_mode); }
+    } sync_mode_guard;
+    LOCK(::cs_main);
+    const CBlockIndex* tip{m_node.chainman->ActiveChain().Tip()};
+    BOOST_REQUIRE(tip != nullptr && tip->pprev != nullptr);
+    BOOST_REQUIRE(CSuperblock::IsValidBlockHeight(tip->nHeight));
+    BOOST_REQUIRE(governance != nullptr);
+    BOOST_REQUIRE(!m_coinbase_txns.empty());
+    masternodeSync.SetSyncMode(MASTERNODE_SYNC_FINISHED);
+    BOOST_REQUIRE(governance_tests::PublishGovernanceReadyForTest(
+        *governance, *tip->pprev));
+
+    CBlock block{tip->GetBlockHeader()};
+    block.vtx.emplace_back(m_coinbase_txns.back());
+    block.hashMerkleRoot = BlockMerkleRoot(block);
+    const uint256 block_hash{block.GetHash()};
+    CBlockIndex index{block};
+    index.nHeight = tip->nHeight;
+    index.pprev = tip->pprev;
+    index.phashBlock = &block_hash;
+    index.BuildSkip();
+    const CAmount value_limit{block.vtx[0]->GetValueOut()};
+    std::string error;
+    bool exact{false};
+    BOOST_REQUIRE(IsBlockValueValid(
+        block, &index, value_limit, error, /*fJustCheck=*/true,
+        /*check_superblock=*/true, &exact));
+    BOOST_REQUIRE(exact);
+    BOOST_CHECK(!HasValidatedSuperblockPayments(block, index));
+    index.nStatus |= BLOCK_GOVERNANCE_VALIDATED;
+    BOOST_REQUIRE(HasValidatedSuperblockPayments(block, index));
+
+    // A prior exact decision remains usable when the live view is unavailable.
+    // Reuse neither creates a new attestation nor writes a budget in check mode.
+    governance->ObserveChainTip(nullptr);
+    BOOST_REQUIRE(!governance->IsReadyForTip(index.pprev));
+    bool available{false};
+    CAmount budget{0};
+    governance->m_sb->EraseCache(block_hash);
+    BOOST_CHECK(IsBlockValueValid(
+        block, &index, value_limit, error, /*fJustCheck=*/true,
+        /*check_superblock=*/true, &exact, nullptr, &available));
+    BOOST_CHECK(!exact);
+    BOOST_CHECK(available);
+    BOOST_CHECK(!governance->m_sb->ReadCache(block_hash, budget));
+    BOOST_CHECK(IsBlockValueValid(
+        block, &index, value_limit, error, /*fJustCheck=*/false,
+        /*check_superblock=*/true, &exact));
+    BOOST_CHECK(governance->m_sb->ReadCache(block_hash, budget));
+    BOOST_CHECK_EQUAL(budget, CSuperblock::GetPaymentsLimit(
+        index.GetAncestor(index.nHeight -
+            Params().GetConsensus().SuperBlockCycle(index.nHeight))));
+
+    index.nStatus &= ~BLOCK_GOVERNANCE_VALIDATED;
+    BOOST_CHECK(!HasValidatedSuperblockPayments(block, index));
+    BOOST_CHECK(!IsBlockValueValid(
+        block, &index, value_limit, error, /*fJustCheck=*/true,
+        /*check_superblock=*/true, &exact, nullptr, &available));
+    BOOST_CHECK(!available);
+    BOOST_CHECK(!exact);
+    index.nStatus |= BLOCK_GOVERNANCE_VALIDATED;
+
+    // A stale fChecked flag must not authorize different payment bytes.
+    CBlock changed{block};
+    changed.fChecked = true;
+    CMutableTransaction different_payment{*changed.vtx[0]};
+    different_payment.vout[0].scriptPubKey = CScript() << OP_FALSE;
+    changed.vtx[0] = MakeTransactionRef(different_payment);
+    BOOST_CHECK(!HasValidatedSuperblockPayments(changed, index));
+    BOOST_CHECK(!IsBlockValueValid(
+        changed, &index, value_limit, error, /*fJustCheck=*/true,
+        /*check_superblock=*/true, nullptr, nullptr, &available));
+    BOOST_CHECK(!available);
+    changed.hashMerkleRoot = BlockMerkleRoot(changed);
+    BOOST_CHECK(!HasValidatedSuperblockPayments(changed, index));
+    changed = block;
+    ++changed.nNonce;
+    BOOST_CHECK(!HasValidatedSuperblockPayments(changed, index));
+    index.nStatus |= BLOCK_FAILED_VALID;
+    BOOST_CHECK(!HasValidatedSuperblockPayments(block, index));
+    index.nStatus &= ~BLOCK_FAILED_VALID;
+    index.pprev = tip->pprev->pprev;
+    BOOST_CHECK(!HasValidatedSuperblockPayments(block, index));
+    index.pprev = tip->pprev;
+
+    // A duplicate Merkle leaf must not inherit the original block's decision.
+    CBlock duplicated{block};
+    CMutableTransaction transaction;
+    transaction.vin.resize(1);
+    transaction.vin[0].prevout = COutPoint{uint256{1}, 0};
+    transaction.vout.emplace_back(1, CScript() << OP_TRUE);
+    duplicated.vtx.emplace_back(MakeTransactionRef(transaction));
+    transaction.vin[0].prevout.n = 1;
+    duplicated.vtx.emplace_back(MakeTransactionRef(transaction));
+    duplicated.hashMerkleRoot = BlockMerkleRoot(duplicated);
+    const uint256 duplicated_hash{duplicated.GetHash()};
+    CBlockIndex duplicate_index{duplicated};
+    duplicate_index.nHeight = index.nHeight;
+    duplicate_index.pprev = index.pprev;
+    duplicate_index.nStatus = index.nStatus;
+    duplicate_index.phashBlock = &duplicated_hash;
+    BOOST_REQUIRE(HasValidatedSuperblockPayments(duplicated, duplicate_index));
+    duplicated.vtx.emplace_back(duplicated.vtx.back());
+    BOOST_REQUIRE(BlockMerkleRoot(duplicated) == duplicated.hashMerkleRoot);
+    BOOST_CHECK(!HasValidatedSuperblockPayments(duplicated, duplicate_index));
+
+    BOOST_REQUIRE(governance_tests::PublishGovernanceReadyForTest(
+        *governance, *tip->pprev));
+    governance->m_sb->EraseCache(block_hash);
 }
 
 BOOST_FIXTURE_TEST_CASE(chainlock_enforcement_provenance_mode_matrix,

@@ -20,6 +20,8 @@ enum class MasternodePaymentStatus {
 
 CAmount GetMinerPayment(MasternodePaymentStatus status, const CAmount& blockReward, const CAmount& fees);
 CAmount GetBlockPaymentValueLimit(MasternodePaymentStatus status, const CAmount& blockReward, const CAmount& fees, const CAmount& mnSeniority, const CAmount& mnFloorDiff);
+// Reuse exact governance provenance only for the same committed block payments.
+bool HasValidatedSuperblockPayments(const CBlock& block, const CBlockIndex& index);
 /// TODO: all 4 functions do not belong here really, they should be refactored/moved somewhere (main.cpp ?)
 bool IsBlockValueValid(const CBlock& block, const CBlockIndex* pindex, const CAmount &blockReward, std::string& strErrorRet, bool fJustCheck, bool check_superblock, bool* exact_superblock_validation = nullptr, const std::vector<bool>* matched_outputs = nullptr, bool* governance_state_available = nullptr);
 bool IsBlockPayeeValid(CChain& activeChain, const CTransaction& txNew, int nBlockHeight, const CAmount &blockReward, const CAmount &fees, CAmount& nMNSeniorityRet, CAmount &nMNFloorDiffRet, std::vector<bool>* matched_outputs = nullptr, MasternodePaymentStatus* payment_status = nullptr);
