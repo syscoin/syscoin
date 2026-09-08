@@ -4490,14 +4490,11 @@ bool CGovernanceManager::RebuildPQTriggerStateImpl(
 
         const bool was_inactive{
             m_pq_inactive_triggers.contains(object_hash)};
-        // An authorization-invalid trigger above deliberately bypasses this
-        // irreversible temporal cleanup so an A-B-A reorg can restore it.
-        // Once its authorization is active again, a past event can never be
-        // made visible merely by clearing a vote-derived deletion flag.
-        if (trigger->GetBlockHeight() < validation_tip.nHeight) {
-            object.PrepareDeletion(now);
-            continue;
-        }
+        // A disconnect can rebuild at S+1 before reaching the parent of
+        // superblock S. Keep its trigger and votes through the ordinary
+        // expiry window so exact payment validation can reconnect S.
+        // Existing admission, paging, and funding-vote height checks keep
+        // past events out of those live flows without permanent deletion.
         if (was_inactive && reactivated_triggers != nullptr) {
             // Report the transition before the visibility gate below. Votes
             // skipped while quarantined may themselves be the reason this

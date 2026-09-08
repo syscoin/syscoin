@@ -8,14 +8,19 @@
 #include <consensus/params.h>
 #include <evo/deterministicmns.h>
 #include <governance/governanceclasses.h>
+#include <net.h>
+#include <net_processing.h>
 #include <pow.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
+#include <protocol.h>
 #include <script/script.h>
 #include <streams.h>
 #include <test/pq_test_util.h>
+#include <test/util/net.h>
 #include <test/util/setup_common.h>
 #include <test/util/validation.h>
+#include <timedata.h>
 #include <util/time.h>
 
 #include <algorithm>
@@ -388,6 +393,14 @@ public:
     static pq::ChainLockFinalityStore* Store(CChainLocksHandler& handler)
     {
         return handler.m_store.get();
+    }
+
+    static void SetServableHistoricalCertificate(
+        CChainLocksHandler& handler,
+        std::shared_ptr<const pq::FinalChainLock> certificate)
+    {
+        LOCK(::cs_main);
+        handler.m_historical_sync_servable[0] = std::move(certificate);
     }
 
     static pq::BTCCReceipt BTCCReceiptForCarrier(
@@ -6144,6 +6157,152 @@ llmq::pq::RecoveryUniverseCapsulePtr SelectorRecoveryUniverse(
 }
 
 } // namespace
+
+BOOST_FIXTURE_TEST_CASE(
+    chainlock_targeted_polls_preserve_standby_peers_and_upload_limits,
+    PQAuthorizationBasePathSetup)
+{
+    using Access = llmq::test::CChainLocksHandlerTestAccess;
+    using namespace llmq::pq;
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    auto& chainman{*Assert(m_node.chainman)};
+    auto& peerman{*Assert(m_node.peerman)};
+    auto& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+    const uint256 genesis{chainman.GetConsensus().hashGenesisBlock};
+    FullReceiptCatchupContext store_context;
+    std::unique_ptr<llmq::CChainLocksHandler> handler;
+    {
+        LOCK(::cs_main);
+        handler = std::make_unique<llmq::CChainLocksHandler>(
+            connman, peerman, chainman);
+    }
+    Access::ExchangeFinalityStore(*handler,
+        std::make_unique<ChainLockFinalityStore>(
+            genesis, CatchupStoreConfig(), store_context));
+    // Install already-servable bytes at the handler's normal serving seam.
+    // Certificate admission and signature verification have separate tests.
+    auto certificate{std::make_shared<const FinalChainLock>(
+        MakeCatchupChainLock(2'000, 1'995, NonNullHash(921'100), 44))};
+    BOOST_REQUIRE(certificate->IsStructurallyValid());
+    Access::SetServableHistoricalCertificate(*handler, certificate);
+    const uint256 logical_id{certificate->GetLogicalId(genesis)};
+    BOOST_REQUIRE(handler->AlreadyHave(logical_id));
+    const std::vector<CInv> inventory{{MSG_CLSIG, logical_id}};
+
+    in_addr ipv4_addr;
+    ipv4_addr.s_addr = 0xa0b0c009;
+    const CAddress address{CService{ipv4_addr, 7785}, NODE_NETWORK};
+    CNode node{
+        /*id=*/902, /*sock=*/nullptr, address,
+        /*nKeyedNetGroupIn=*/9, /*nLocalHostNonceIn=*/902, CAddress{},
+        /*addrNameIn=*/std::string{}, ConnectionType::OUTBOUND_FULL_RELAY,
+        /*inbound_onion=*/false};
+    connman.Handshake(
+        node, /*successfully_connected=*/true,
+        ServiceFlags(NODE_NETWORK | NODE_WITNESS),
+        ServiceFlags(NODE_NETWORK | NODE_WITNESS),
+        PROTOCOL_VERSION, /*relay_txs=*/true);
+    TestOnlyResetTimeData();
+    struct RestoreNetworkState {
+        PeerManager& peerman;
+        CNode& node;
+        llmq::CChainLocksHandler* previous_handler;
+        std::chrono::seconds previous_mock_time;
+        ~RestoreNetworkState()
+        {
+            peerman.FinalizeNode(node);
+            llmq::chainLocksHandler = previous_handler;
+            SetMockTime(previous_mock_time);
+        }
+    } restore{peerman, node,
+              std::exchange(llmq::chainLocksHandler, handler.get()),
+              GetMockTime()};
+    BOOST_REQUIRE(!node.fDisconnect);
+    const PeerRef peer{peerman.GetPeerRef(node.GetId())};
+    BOOST_REQUIRE(peer);
+    connman.FlushSendBuffer(node);
+    node.fPauseSend = false;
+
+    std::atomic<bool> interrupt{false};
+    const auto start{GetTime<std::chrono::seconds>()};
+    const auto dispatch = [&](const char* command, const auto& argument)
+        EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex) {
+        CDataStream request{SER_NETWORK, node.GetCommonVersion()};
+        request << argument;
+        peerman.ProcessMessage(node, command, request,
+                               GetTime<std::chrono::microseconds>(), interrupt);
+    };
+    const auto drain_reply = [&](const char* expected_command) {
+        LOCK(node.cs_vSend);
+        // With a null socket the one response is left in the V1 transport.
+        BOOST_REQUIRE(node.vSendMsg.empty());
+        std::size_t total_bytes{0};
+        while (true) {
+            const auto& [bytes, more, command]{
+                node.m_transport->GetBytesToSend(false)};
+            (void)more;
+            if (bytes.empty()) break;
+            BOOST_CHECK_EQUAL(command, expected_command);
+            total_bytes += bytes.size();
+            node.m_transport->MarkBytesSent(bytes.size());
+        }
+        node.fPauseSend = false;
+        return total_bytes;
+    };
+    const auto check_score = [&](int expected) {
+        LOCK(peer->m_misbehavior_mutex);
+        BOOST_CHECK_EQUAL(peer->m_misbehavior_score, expected);
+        BOOST_CHECK(!peer->m_should_discourage);
+        BOOST_CHECK(!node.fDisconnect);
+    };
+    const std::size_t inventory_bytes{
+        CMessageHeader::HEADER_SIZE + GetSerializeSize(inventory)};
+    const std::size_t certificate_bytes{
+        CMessageHeader::HEADER_SIZE + FinalChainLockSerializedSize()};
+
+    // Two other providers may occupy the required download lanes for sixty
+    // seconds. This honest standby receives the scheduler's five-second
+    // GETCLSIG polls but no GETDATA throughout that interval.
+    for (int seconds{0}; seconds <= 65; seconds += 5) {
+        SetMockTime(start + std::chrono::seconds{seconds});
+        dispatch(NetMsgType::GETCLSIG, logical_id);
+        BOOST_CHECK_EQUAL(drain_reply(NetMsgType::INV), inventory_bytes);
+        check_score(0);
+        LOCK(peer->m_pq_certificate_mutex);
+        BOOST_CHECK(peer->m_clsig_uploads
+                        .HasActiveTargetedAuthorization(logical_id));
+    }
+
+    // Repeated polls left exactly one consumable payload grant.
+    dispatch(NetMsgType::GETDATA, inventory);
+    BOOST_CHECK_EQUAL(drain_reply(NetMsgType::CLSIG), certificate_bytes);
+    check_score(0);
+    dispatch(NetMsgType::GETDATA, inventory);
+    BOOST_CHECK_EQUAL(drain_reply(""), 0U);
+    check_score(20); // Ungranted GETDATA remains a protocol violation.
+
+    // An explicit retry can grant the second and final payload.
+    dispatch(NetMsgType::GETCLSIG, logical_id);
+    BOOST_CHECK_EQUAL(drain_reply(NetMsgType::INV), inventory_bytes);
+    dispatch(NetMsgType::GETDATA, inventory);
+    BOOST_CHECK_EQUAL(drain_reply(NetMsgType::CLSIG), certificate_bytes);
+    check_score(20);
+
+    // The requester may still be waiting for local verification or another
+    // provider. Exhausted polls neither punish it nor mint a third payload.
+    for (int seconds{70}; seconds <= 105; seconds += 5) {
+        SetMockTime(start + std::chrono::seconds{seconds});
+        dispatch(NetMsgType::GETCLSIG, logical_id);
+        BOOST_CHECK_EQUAL(drain_reply(""), 0U);
+        check_score(20);
+        LOCK(peer->m_pq_certificate_mutex);
+        BOOST_CHECK(!peer->m_clsig_uploads
+                         .HasActiveTargetedAuthorization(logical_id));
+    }
+    dispatch(NetMsgType::GETDATA, inventory);
+    BOOST_CHECK_EQUAL(drain_reply(""), 0U);
+    check_score(40);
+}
 
 BOOST_FIXTURE_TEST_CASE(
     chainlock_finalization_retry_reuses_complete_proof_after_contention,

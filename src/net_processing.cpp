@@ -8337,15 +8337,19 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             bool upload_authorized{false};
             {
                 LOCK(peer->m_pq_certificate_mutex);
-                // An explicit by-ID retry reissues exactly one upload
-                // authorization, capped at two full payloads per logical ID
-                // and connection. Repeating the targeted request before its
-                // GETDATA is consumed does not reopen the authorization.
+                // The required-receipt scheduler polls every five seconds,
+                // including peers waiting behind the two download lanes.
+                // Repeat their INV without reopening an unconsumed grant.
                 upload_authorized =
+                    peer->m_clsig_uploads.HasActiveTargetedAuthorization(inv.hash) ||
                     peer->m_clsig_uploads.Reauthorize(inv.hash);
             }
             if (!upload_authorized) {
-                Misbehaving(*peer, 20, "repeated-pq-clsig-retry");
+                // Exhausted polls are harmless. GETDATA still consumes each
+                // grant once and enforces the two-payload upload cap.
+                LogPrint(BCLog::NET,
+                         "PQ ChainLock upload cap reached for %s peer=%d\n",
+                         inv.hash.ToString(), pfrom.GetId());
                 return;
             }
             {

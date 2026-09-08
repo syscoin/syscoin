@@ -532,6 +532,22 @@ public:
             it->second.IsSetCachedDeleteByVotes();
     }
 
+    static bool IsPageObjectEligible(
+        CGovernanceManager& manager, const uint256& object_hash,
+        int active_height)
+    {
+        LOCK(manager.cs);
+        const auto it{manager.mapObjects.find(object_hash)};
+        return it != manager.mapObjects.end() &&
+            manager.IsGovernancePageObjectEligible(
+                object_hash, it->second, active_height);
+    }
+
+    static void SetCachedHeight(CGovernanceManager& manager, int height)
+    {
+        manager.nCachedBlockHeight.store(height, std::memory_order_relaxed);
+    }
+
     static void RefreshObjectFlags(
         CGovernanceManager& manager, const uint256& object_hash,
         const CDeterministicMNList& mn_list)
@@ -4079,6 +4095,230 @@ BOOST_FIXTURE_TEST_CASE(
                 incremental_state);
     BOOST_CHECK(!Access::IsCachedDelete(
         *governance, threshold_trigger_hash));
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    governance_executed_trigger_survives_superblock_reorg,
+    TestChain100Setup)
+{
+    using Access = governance_tests::CGovernanceManagerTestAccess;
+    using namespace llmq::pq;
+    BOOST_REQUIRE(governance != nullptr);
+    BOOST_REQUIRE(deterministicMNManager != nullptr);
+    BOOST_REQUIRE(AreSuperblocksEnabled());
+
+    auto& consensus{const_cast<Consensus::Params&>(Params().GetConsensus())};
+    struct StateRestore {
+        Consensus::Params& consensus;
+        int activation{consensus.nPQActivationHeight};
+        int quorum{consensus.nGovernanceMinQuorum};
+        int sync_mode{masternodeSync.GetAssetID()};
+        ~StateRestore()
+        {
+            consensus.nPQActivationHeight = activation;
+            consensus.nGovernanceMinQuorum = quorum;
+            masternodeSync.SetSyncMode(sync_mode);
+        }
+    } restore{consensus};
+    consensus.nGovernanceMinQuorum = 1;
+    masternodeSync.SetSyncMode(MASTERNODE_SYNC_FINISHED);
+
+    int previous_superblock{0};
+    int event_height{0};
+    CSuperblock::GetNearestSuperblocksHeights(
+        std::max(consensus.DIP0003Height,
+                 consensus.nSuperblockStartBlock) + 2,
+        previous_superblock, event_height);
+    const int retention{consensus.SuperBlockCycle(event_height)};
+    BOOST_REQUIRE_GT(retention, 2);
+    BOOST_REQUIRE(CSuperblock::IsValidBlockHeight(event_height));
+    consensus.nPQActivationHeight = event_height - 2;
+
+    // A complete branch lets the authorization and exact superblock value
+    // checks resolve their normal ancestors at every intermediate tip.
+    std::vector<uint256> hashes(event_height + retention + 2);
+    std::vector<CBlockIndex> indices(hashes.size());
+    for (std::size_t height{0}; height < indices.size(); ++height) {
+        WriteLE32(hashes[height].begin(), 700'000 + height);
+        indices[height].nHeight = static_cast<int>(height);
+        indices[height].pprev = height == 0 ? nullptr : &indices[height - 1];
+        indices[height].phashBlock = &hashes[height];
+        indices[height].BuildSkip();
+    }
+
+    const uint256 pro_tx_hash{uint256{120}};
+    const COutPoint collateral{uint256{121}, 0};
+    auto dmn_state{std::make_shared<CDeterministicMNState>()};
+    dmn_state->keyIDOwner.begin()[0] = 1;
+    dmn_state->nRegisteredHeight = 1;
+    auto dmn{std::make_shared<CDeterministicMN>(1)};
+    dmn->proTxHash = pro_tx_hash;
+    dmn->collateralOutpoint = collateral;
+    dmn->pdmnState = std::move(dmn_state);
+
+    OperatorKeyState operator_state{OperatorKeyState::ForOperator(pro_tx_hash)};
+    operator_state.has_global_key = 1;
+    operator_state.global_key_active = 1;
+    operator_state.global_key.key_version = 1;
+    operator_state.global_key.public_key[0] = 1;
+    operator_state.global_key.activated_height = 1;
+    operator_state.global_key.child_key_commitment.generation = 1;
+    operator_state.global_key.child_key_commitment.first_epoch = 0;
+    operator_state.global_key.child_key_commitment.tree_id = uint256{122};
+    operator_state.global_key.child_key_commitment.root = uint256{123};
+    BOOST_REQUIRE(IsStoredGlobalKeyRecordStructurallyValid(
+        operator_state.global_key));
+
+    // As in the quarantine test, model an already-admitted trigger and vote.
+    // Rebuild checks their exact branch/key context, without re-signing them.
+    GovernanceAuthorization authorization;
+    authorization.signed_height = event_height - 2;
+    authorization.signed_block_hash = hashes[event_height - 2];
+    authorization.pro_tx_hash = pro_tx_hash;
+    authorization.global_key_version = 1;
+    authorization.signature[0] = 1;
+    std::vector<unsigned char> encoded_authorization;
+    BOOST_REQUIRE(EncodeGovernanceAuthorization(
+        authorization, encoded_authorization));
+    const CTxDestination destination{PKHash(coinbaseKey.GetPubKey())};
+    std::vector<CGovernancePayment> payments;
+    payments.emplace_back(destination, COIN, uint256{124});
+    CSuperblock schedule{event_height, std::move(payments)};
+    CGovernanceObject trigger{
+        uint256{}, 1, GetTime<std::chrono::seconds>().count(),
+        uint256{}, schedule.GetHexStrData()};
+    Governance::Object wire{trigger.Object()};
+    wire.masternodeOutpoint = collateral;
+    wire.vchSig = encoded_authorization;
+    CDataStream network_object{SER_NETWORK, PROTOCOL_VERSION};
+    network_object << wire;
+    CGovernanceObject authorized_trigger;
+    network_object >> authorized_trigger;
+    CGovernanceVote vote{
+        collateral, authorized_trigger.GetHash(),
+        VOTE_SIGNAL_FUNDING, VOTE_OUTCOME_YES};
+    vote.SetTime(GetTime<std::chrono::seconds>().count());
+    vote.SetSignature(encoded_authorization);
+    CGovernanceObjectVoteFile vote_file;
+    vote_file.AddVote(vote);
+    CGovernanceObject::vote_m_t current_votes;
+    vote_rec_t vote_record;
+    vote_record.mapInstances.emplace(
+        VOTE_SIGNAL_FUNDING,
+        vote_instance_t{VOTE_OUTCOME_YES, 0, vote.GetTimestamp()});
+    current_votes.emplace(collateral, std::move(vote_record));
+    CDataStream admitted_object{SER_DISK, PROTOCOL_VERSION};
+    admitted_object << authorized_trigger.Object() << int64_t{0} << false
+                    << current_votes << vote_file;
+    CGovernanceObject admitted;
+    admitted_object >> admitted;
+    const uint256 trigger_hash{Access::InsertObject(
+        *governance, std::move(admitted))};
+    BOOST_REQUIRE(Access::RebuildIndexes(*governance));
+
+    const auto rebuild_at = [&](const CBlockIndex& tip) {
+        LOCK(::cs_main);
+        CDeterministicMNList list{tip.GetBlockHash(), tip.nHeight, 1};
+        list.AddMN(dmn, /*fBumpTotalCount=*/false);
+        deterministicMNManager->m_evoDb->WriteCache(tip.GetBlockHash(), list);
+        PQRegistrySnapshot snapshot;
+        snapshot.height = tip.nHeight;
+        snapshot.block_hash = tip.GetBlockHash();
+        snapshot.operator_states.push_back(operator_state);
+        governance->ObserveChainTip(&tip);
+        Access::SetCachedHeight(*governance, tip.nHeight);
+        BOOST_REQUIRE(Access::RebuildTriggerState(
+            *governance, tip, list, snapshot));
+        BOOST_REQUIRE(Access::PublishReadyForTip(*governance, tip));
+        BOOST_CHECK(!Access::IsCachedDelete(*governance, trigger_hash));
+        BOOST_CHECK(Access::ObjectHasVote(
+            *governance, trigger_hash, vote.GetHash()));
+        BOOST_CHECK_EQUAL(Access::IsPageObjectEligible(
+            *governance, trigger_hash, tip.nHeight),
+            tip.nHeight < event_height);
+    };
+
+    const CAmount regular_reward{100 * COIN};
+    CMutableTransaction coinbase;
+    coinbase.vin.resize(1);
+    coinbase.vin[0].prevout.SetNull();
+    coinbase.vout.emplace_back(regular_reward, CScript() << OP_TRUE);
+    coinbase.vout.emplace_back(COIN, GetScriptForDestination(destination));
+    CBlock block;
+    block.vtx.emplace_back(MakeTransactionRef(coinbase));
+    const auto check_exact_payment = [&](const CBlockIndex& index) {
+        LOCK(::cs_main);
+        std::string error;
+        bool exact{false};
+        BOOST_CHECK_MESSAGE(IsBlockValueValid(
+            block, &index, regular_reward, error, /*fJustCheck=*/true,
+            /*check_superblock=*/true, &exact), error);
+        BOOST_CHECK(exact);
+        CBlock missing_payment{block};
+        CMutableTransaction missing{coinbase};
+        missing.vout.pop_back();
+        missing_payment.vtx[0] = MakeTransactionRef(missing);
+        BOOST_CHECK(!IsBlockValueValid(
+            missing_payment, &index, regular_reward, error,
+            /*fJustCheck=*/true, /*check_superblock=*/true));
+    };
+
+    rebuild_at(indices[event_height - 1]);
+    check_exact_payment(indices[event_height]);
+    rebuild_at(indices[event_height]);
+    CSuperblockManager::ExecuteBestSuperblock(
+        event_height, &indices[event_height]);
+    rebuild_at(indices[event_height + 1]);
+    rebuild_at(indices[event_height + 2]);
+    BOOST_CHECK(Access::TriggerStatus(*governance, trigger_hash) ==
+                SeenObjectStatus::Executed);
+    CDataStream recent_past_cache{SER_DISK, PROTOCOL_VERSION};
+    {
+        LOCK(governance->cs);
+        const auto* object{governance->FindConstGovernanceObject(trigger_hash)};
+        BOOST_REQUIRE(object != nullptr);
+        recent_past_cache << *object;
+    }
+
+    // Disconnect S+2 -> S+1 -> S -> S-1. The first intermediate rebuild used
+    // to permanently delete the still-needed trigger and suppress peer retry.
+    for (int height{event_height + 1}; height >= event_height - 1; --height) {
+        rebuild_at(indices[height]);
+    }
+    BOOST_CHECK(Access::TriggerStatus(*governance, trigger_hash) ==
+                SeenObjectStatus::Valid);
+    uint256 replacement_hash{uint256{125}};
+    CBlockIndex replacement;
+    replacement.nHeight = event_height;
+    replacement.pprev = &indices[event_height - 1];
+    replacement.phashBlock = &replacement_hash;
+    replacement.BuildSkip();
+    check_exact_payment(replacement);
+
+    // A recent-past cache reload reconstructs Valid status, as on startup,
+    // and must preserve its original funding vote for the same rollback.
+    governance->DeleteGovernanceObject(trigger_hash);
+    CGovernanceObject reloaded;
+    recent_past_cache >> reloaded;
+    BOOST_CHECK(Access::InsertObject(*governance, std::move(reloaded)) ==
+                trigger_hash);
+    BOOST_REQUIRE(Access::RebuildIndexes(*governance));
+    rebuild_at(indices[event_height + 1]);
+    BOOST_CHECK(Access::TriggerStatus(*governance, trigger_hash) ==
+                SeenObjectStatus::Valid);
+    rebuild_at(indices[event_height]);
+    rebuild_at(indices[event_height - 1]);
+    check_exact_payment(replacement);
+
+    // Retention still ends at the existing Valid-trigger expiry boundary.
+    const int expiry_height{event_height + std::min(576, retention)};
+    rebuild_at(indices[expiry_height]);
+    WITH_LOCK(governance->cs, governance->CleanAndRemoveTriggers());
+    BOOST_REQUIRE(Access::GetTrigger(*governance, trigger_hash));
+    rebuild_at(indices[expiry_height + 1]);
+    WITH_LOCK(governance->cs, governance->CleanAndRemoveTriggers());
+    BOOST_CHECK(!Access::GetTrigger(*governance, trigger_hash));
+    BOOST_CHECK(Access::IsCachedDelete(*governance, trigger_hash));
 }
 
 BOOST_FIXTURE_TEST_CASE(
