@@ -43,11 +43,18 @@ class PQVotingKeyTest(DashTestFramework):
         assert_equal(result["detail"][self.mn.proTxHash]["result"], "success")
 
     def rotate(self, public_key):
-        self.nodes[0].protx_update_registrar(
-            self.mn.proTxHash, "", public_key, "", self.mn.collateral_address)
+        owner = self.nodes[0]
+        # Proposal funding can consume the setup address's spare coins.
+        # Keep registrar fees independent of that selection and MN collateral.
+        fee_address = owner.getnewaddress()
+        owner.sendtoaddress(fee_address, 1)
         self.bump_mocktime(1)
-        self.generate(self.nodes[0], 1)
-        return self.nodes[0].getbestblockhash()
+        self.generate(owner, 1)
+        owner.protx_update_registrar(
+            self.mn.proTxHash, "", public_key, "", fee_address)
+        self.bump_mocktime(1)
+        self.generate(owner, 1)
+        return owner.getbestblockhash()
 
     def advance_vote_time(self):
         # The one-hour vote interval also trips the controller's scheduler-

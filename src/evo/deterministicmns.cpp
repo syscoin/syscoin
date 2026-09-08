@@ -92,17 +92,6 @@ uint256 GetDMNInverseHistoryCommitment(
     return writer.GetHash();
 }
 
-bool InverseCarriesPQVotingState(const CDeterministicMNListDiff& diff)
-{
-    return std::any_of(diff.updatedMNs.begin(), diff.updatedMNs.end(),
-        [](const auto& entry) {
-            return (entry.second.fields & CDeterministicMNStateDiff::Field_pqVotingKey) != 0;
-        }) || std::any_of(diff.addedMNs.begin(), diff.addedMNs.end(),
-        [](const auto& dmn) {
-            return dmn && dmn->pdmnState && dmn->pdmnState->pqVotingKey.key_version != 0;
-        });
-}
-
 // SYSCOIN BEGIN: Incremental branch-local deterministic-state commitment.
 DataStream SerializePQLegacyStateElement(const CDeterministicMN& dmn)
 {
@@ -574,9 +563,7 @@ bool ReconstructParentFromInverse(
 
 bool CDeterministicMNListInverse::IsStructurallyValid() const
 {
-    if ((version != VERSION && version != PQ_VOTING_VERSION) ||
-        ((version == PQ_VOTING_VERSION) != InverseCarriesPQVotingState(inverse_diff)) ||
-        genesis_hash.IsNull() ||
+    if (version != VERSION || genesis_hash.IsNull() ||
         coverage_base_height < 0 ||
         coverage_base_height > parent_height ||
         parent_history_commitment.IsNull() || history_commitment.IsNull() ||
@@ -611,22 +598,17 @@ bool CDeterministicMNListInverse::IsStructurallyValid() const
             return false;
         }
     }
-    // V1 stays frozen for authenticated historical replay. V2 adds only the
-    // independent voting record, including an empty record when undoing its
-    // initial registration; unrelated history retains its exact V1 bytes.
-    static constexpr uint32_t LEGACY_INVERSE_STATE_DIFF_FIELDS{
+    // The first-release V1 schema includes independent voting-key state.
+    // Later fields must not silently acquire disk meaning under this version.
+    static constexpr uint32_t INVERSE_STATE_DIFF_FIELDS{
         (static_cast<uint32_t>(
-             CDeterministicMNStateDiff::Field_vchNEVMAddress)
+             CDeterministicMNStateDiff::Field_pqVotingKey)
          << 1) -
         1};
-    const uint32_t inverse_state_diff_fields{LEGACY_INVERSE_STATE_DIFF_FIELDS |
-        (version == PQ_VOTING_VERSION
-             ? static_cast<uint32_t>(CDeterministicMNStateDiff::Field_pqVotingKey)
-             : 0U)};
     for (const auto& [internal_id, state_diff] : inverse_diff.updatedMNs) {
         if (internal_id >= parent_total_registered_count ||
             state_diff.fields == 0 ||
-            (state_diff.fields & ~inverse_state_diff_fields) != 0 ||
+            (state_diff.fields & ~INVERSE_STATE_DIFF_FIELDS) != 0 ||
             !changed_ids.emplace(internal_id).second) {
             return false;
         }
@@ -915,9 +897,6 @@ bool CDeterministicMNManager::CommitInverseJournal(
         inverse.parent_total_registered_count =
             parent_list.GetTotalRegisteredCount();
         child_list.BuildTrackedInverseDiff(parent_list, inverse.inverse_diff);
-        if (InverseCarriesPQVotingState(inverse.inverse_diff)) {
-            inverse.version = CDeterministicMNListInverse::PQ_VOTING_VERSION;
-        }
         const uint256 parent_state_hash{
             parent_list.GetOrComputePQLegacyStateHash(
                 consensus.hashGenesisBlock)};

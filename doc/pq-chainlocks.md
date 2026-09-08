@@ -272,12 +272,14 @@ and includes the voting-key record in diffs and state commitments. Historical
 records with no PQ voting-key history retain their old encoding. The mutable
 operator/provider `nVersion` is not the storage discriminator: operator reset
 can return it to the legacy value without revoking the voting key.
-Undo records carrying voting-key state use inverse-journal version `2`;
-unrelated records retain the frozen version `1` format.
+One first-release inverse-journal format, version `1`, handles all transitions,
+including changes to the PQ voting key.
 
 These changes belong to the same scheduled PQ activation. Deploy the upgraded
 software before height `A`; it replays legacy blocks below `A` and enforces the
-new rules at `A`. Existing masternode owners must register their separate voting
+new rules at `A`. Existing pre-journal datadirs require a one-time reindex to
+build the inverse history; this journal is not an existing mainnet format.
+Existing masternode owners must register their separate voting
 key using a PQ registrar update. Pre-activation ECDSA funding votes stop counting
 at the boundary and must be recast with that key. The wallet signer waits six
 blocks after key registration so its signing-block anchor includes the key.

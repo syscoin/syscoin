@@ -2186,6 +2186,84 @@ BOOST_AUTO_TEST_CASE(pq_voting_authority_commits_rotation_revocation_and_undo)
     BOOST_CHECK(list.GetOrComputePQLegacyStateHash(genesis_hash) == legacy_state);
 }
 
+BOOST_AUTO_TEST_CASE(inverse_journal_v1_rejects_unknown_versions_and_fields)
+{
+    BOOST_CHECK_EQUAL(CDeterministicMNListInverse::VERSION, 1U);
+    CDeterministicMNListInverse inverse;
+    inverse.genesis_hash = MakeSnapshotKey(61'000);
+    inverse.coverage_base_height = 10;
+    inverse.parent_history_commitment = MakeSnapshotKey(61'001);
+    inverse.child_height = 11;
+    inverse.child_hash = MakeSnapshotKey(61'002);
+    inverse.child_state_hash = MakeSnapshotKey(61'003);
+    inverse.parent_height = 10;
+    inverse.parent_hash = MakeSnapshotKey(61'004);
+    inverse.parent_state_hash = MakeSnapshotKey(61'005);
+    inverse.parent_total_registered_count = 1;
+    CDeterministicMNStateDiff voting_diff;
+    voting_diff.fields = CDeterministicMNStateDiff::Field_pqVotingKey;
+    voting_diff.state.pqVotingKey.public_key.fill(0x91);
+    voting_diff.state.pqVotingKey.key_version = 1;
+    voting_diff.state.pqVotingKey.activated_height = 10;
+    inverse.inverse_diff.updatedMNs.emplace(0, voting_diff);
+
+    const auto seal = [](CDeterministicMNListInverse& record) {
+        constexpr std::string_view domain{"SYS_DMN_INVERSE_HISTORY_V1"};
+        CHashWriter writer{SER_GETHASH, 0};
+        writer.write(AsBytes(Span{domain.data(), domain.size()}));
+        writer << record.version << record.genesis_hash
+               << record.coverage_base_height
+               << record.parent_history_commitment << record.child_height
+               << record.child_hash << record.child_state_hash
+               << record.parent_height << record.parent_hash
+               << record.parent_state_hash
+               << record.parent_total_registered_count
+               << ::SerializeHash(record.inverse_diff);
+        record.history_commitment = writer.GetHash();
+    };
+    const auto encode_unchecked = [](const CDeterministicMNListInverse& record) {
+        CDataStream stream{SER_DISK, PROTOCOL_VERSION};
+        stream << record.version << record.genesis_hash << record.coverage_base_height
+               << record.parent_history_commitment << record.history_commitment
+               << record.child_height << record.child_hash << record.child_state_hash
+               << record.parent_height << record.parent_hash << record.parent_state_hash
+               << record.parent_total_registered_count << record.inverse_diff;
+        return stream;
+    };
+    seal(inverse);
+    BOOST_REQUIRE(inverse.IsStructurallyValid());
+    CDataStream encoded{SER_DISK, PROTOCOL_VERSION};
+    encoded << inverse;
+    CDeterministicMNListInverse decoded;
+    encoded >> decoded;
+    BOOST_CHECK(encoded.empty());
+    BOOST_CHECK_EQUAL(decoded.version, 1U);
+    BOOST_CHECK(decoded.inverse_diff.updatedMNs.at(0).state.pqVotingKey ==
+                voting_diff.state.pqVotingKey);
+    BOOST_CHECK(::SerializeHash(decoded) == ::SerializeHash(inverse));
+
+    // Recompute each commitment so rejection proves the schema gate, rather
+    // than merely detecting a stale hash after an in-memory mutation.
+    for (uint16_t version : std::array<uint16_t, 4>{0, 2, 3, 0xffff}) {
+        auto unsupported{inverse};
+        unsupported.version = version;
+        seal(unsupported);
+        BOOST_CHECK(!unsupported.IsStructurallyValid());
+        BOOST_CHECK_THROW(::SerializeHash(unsupported), std::ios_base::failure);
+        auto malformed{encode_unchecked(unsupported)};
+        BOOST_CHECK_THROW(malformed >> decoded, std::ios_base::failure);
+    }
+    for (uint32_t field : std::array<uint32_t, 2>{0x40000, 0x80000000}) {
+        auto unsupported{inverse};
+        unsupported.inverse_diff.updatedMNs.at(0).fields |= field;
+        seal(unsupported);
+        BOOST_CHECK(!unsupported.IsStructurallyValid());
+        BOOST_CHECK_THROW(::SerializeHash(unsupported), std::ios_base::failure);
+        auto malformed{encode_unchecked(unsupported)};
+        BOOST_CHECK_THROW(malformed >> decoded, std::ios_base::failure);
+    }
+}
+
 BOOST_FIXTURE_TEST_CASE(
     pq_voting_inverse_journal_persists_and_restores_across_restart,
     ChainTestingSetup)
@@ -2238,7 +2316,6 @@ BOOST_FIXTURE_TEST_CASE(
     llmq::pq::GlobalPublicKey first_key{};
     first_key.fill(0x91);
     const std::array<uint32_t, 6> versions{1, 1, 2, 3, 4, 0};
-    const std::array<uint16_t, 6> journal_versions{2, 1, 2, 2, 2, 2};
     {
         CDeterministicMNManager manager{db_params};
         BOOST_REQUIRE(manager.m_evoDb->WriteThrough(chain.hashes[0], base, true));
@@ -2290,8 +2367,7 @@ BOOST_FIXTURE_TEST_CASE(
             }
             CDeterministicMNManager::InverseJournalEntryStatsForTesting stats;
             BOOST_REQUIRE(manager.GetInverseJournalEntryStatsForTesting(chain.hashes[offset], stats));
-            BOOST_CHECK_EQUAL(stats.version,
-                offset < registration_offset ? 1 : journal_versions[offset - registration_offset]);
+            BOOST_CHECK_EQUAL(stats.version, 1U);
             expected_hashes[offset] = current.GetOrComputePQLegacyStateHash(consensus.hashGenesisBlock);
             expected_authorities[offset] = current.GetOrComputePQGovernanceAuthorityHash(consensus.hashGenesisBlock);
         }

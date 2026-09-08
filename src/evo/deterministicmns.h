@@ -614,7 +614,6 @@ class CDeterministicMNListInverse
 {
 public:
     static constexpr uint16_t VERSION{1};
-    static constexpr uint16_t PQ_VOTING_VERSION{2};
     static constexpr size_t MAX_CHANGES{
         CDeterministicMNListDiff::MAX_CHANGES};
 
