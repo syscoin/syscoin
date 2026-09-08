@@ -305,6 +305,13 @@ bool CDBWrapper::WriteBatch(CDBBatch& batch, bool fSync)
     return true;
 }
 
+// SYSCOIN: A cross-database commit requires a barrier over every prior write.
+bool CDBWrapper::Sync()
+{
+    HandleError(DBContext().pdb->Sync());
+    return true;
+}
+
 size_t CDBWrapper::DynamicMemoryUsage() const
 {
     std::string memory;

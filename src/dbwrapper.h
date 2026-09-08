@@ -308,6 +308,9 @@ public:
 
     bool WriteBatch(CDBBatch& batch, bool fSync = false);
 
+    // SYSCOIN: Make all prior writes durable, including earlier rotated WALs.
+    bool Sync();
+
     // Get an estimate of LevelDB memory usage (in bytes).
     size_t DynamicMemoryUsage() const;
 

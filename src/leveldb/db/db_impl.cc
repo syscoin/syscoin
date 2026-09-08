@@ -41,16 +41,19 @@ namespace leveldb {
 const int kNumNonTableCacheFiles = 10;
 
 // Information kept for every waiting writer
+// SYSCOIN BEGIN: Standalone durability barriers must not join write groups.
 struct DBImpl::Writer {
   explicit Writer(port::Mutex* mu)
-      : batch(nullptr), sync(false), done(false), cv(mu) {}
+      : batch(nullptr), sync(false), sync_barrier(false), done(false), cv(mu) {}
 
   Status status;
   WriteBatch* batch;
   bool sync;
+  bool sync_barrier;
   bool done;
   port::CondVar cv;
 };
+// SYSCOIN END: Standalone durability barriers must not join write groups.
 
 struct DBImpl::CompactionState {
   // Files produced by compaction
@@ -1193,6 +1196,46 @@ Status DBImpl::Delete(const WriteOptions& options, const Slice& key) {
   return DB::Delete(options, key);
 }
 
+// SYSCOIN BEGIN: Sync prior writes without rotating away an unsynced log.
+Status DBImpl::Sync() {
+  Writer w(&mutex_);
+  w.sync = true;
+  w.sync_barrier = true;
+
+  MutexLock l(&mutex_);
+  writers_.push_back(&w);
+  while (&w != writers_.front()) {
+    w.cv.Wait();
+  }
+  assert(!w.done);
+
+  // A rotated log is durable only after its immutable memtable's table and
+  // manifest have both synced. Queue-head ownership prevents further rotation.
+  while (imm_ != nullptr && bg_error_.ok()) {
+    background_work_finished_signal_.Wait();
+  }
+  Status status = bg_error_;
+  if (status.ok()) {
+    // Do not call MakeRoomForWrite: it can replace the log before syncing it.
+    mutex_.Unlock();
+    status = logfile_->Sync();
+    mutex_.Lock();
+    if (!status.ok()) {
+      RecordBackgroundError(status);
+    } else if (!bg_error_.ok()) {
+      status = bg_error_;
+    }
+  }
+
+  assert(writers_.front() == &w);
+  writers_.pop_front();
+  if (!writers_.empty()) {
+    writers_.front()->cv.Signal();
+  }
+  return status;
+}
+// SYSCOIN END: Sync prior writes without rotating away an unsynced log.
+
 Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
   Writer w(&mutex_);
   w.batch = updates;
@@ -1290,6 +1333,8 @@ WriteBatch* DBImpl::BuildBatchGroup(Writer** last_writer) {
   ++iter;  // Advance past "first"
   for (; iter != writers_.end(); ++iter) {
     Writer* w = *iter;
+    // SYSCOIN: A barrier must wait for immutable-table durability itself.
+    if (w->sync_barrier) break;
     if (w->sync && !first->sync) {
       // Do not include a sync write into a batch handled by a non-sync write.
       break;
@@ -1475,6 +1520,11 @@ Status DB::Delete(const WriteOptions& opt, const Slice& key) {
 }
 
 DB::~DB() = default;
+
+// SYSCOIN: Never substitute an ordinary empty sync write for this stronger API.
+Status DB::Sync() {
+  return Status::NotSupported("durability barrier");
+}
 
 Status DB::Open(const Options& options, const std::string& dbname, DB** dbptr) {
   *dbptr = nullptr;

@@ -39,6 +39,7 @@
 #include <test/util/validation.h>
 #include <timedata.h>
 #include <uint256.h>
+#include <undo.h> // SYSCOIN: mint rollback durability fixture.
 #include <validation.h>
 #include <validationinterface.h>
 #include <walletinitinterface.h>
@@ -48,6 +49,7 @@
 #include <algorithm> // SYSCOIN: synthetic recovery-universe fixture.
 #include <array> // SYSCOIN: synthetic PQ activation fixtures.
 #include <cstdint> // SYSCOIN: synthetic recovery-authority fixture.
+#include <functional> // SYSCOIN: observe coins/mint persistence ordering.
 #include <limits>
 #include <optional>
 #include <stdexcept>
@@ -461,6 +463,209 @@ struct CoinsNEVMRecoverySetup : StartupNEVMRecoverySetup {
     }
 };
 
+// SYSCOIN BEGIN: Exercise the production rollback callers with actual coins
+// and mint databases. The stored mint is a parsed, previously-validated-state
+// bookkeeping fixture; Ethereum proof validation is tested separately.
+struct ObservedRollbackMintDB final : CNEVMMintedTxDB {
+    using CNEVMMintedTxDB::CNEVMMintedTxDB;
+    std::function<void(bool)> before_write;
+
+protected:
+    bool WriteCacheBatch(CDBBatch& batch, bool sync) override
+    {
+        if (before_write) before_write(sync);
+        return CDBWrapper::WriteBatch(batch, sync);
+    }
+};
+
+struct MintRollbackDurabilitySetup : TestChain100Setup {
+    std::unique_ptr<CNEVMMintedTxDB> previous_mint_db;
+    const uint256 mint_hash{uint256S("b001")};
+    COutPoint mint_coin;
+    uint256 parent_hash;
+    uint256 stored_tip_hash;
+
+    MintRollbackDurabilitySetup()
+        : TestChain100Setup{ChainType::REGTEST, {}, COINBASE_MATURITY,
+                            /*coins_db_in_memory=*/false},
+          previous_mint_db{std::move(pnevmtxmintdb)}
+    {
+        pnevmtxmintdb = std::make_unique<ObservedRollbackMintDB>(DBParams{
+            .path = m_node.chainman->m_options.datadir / "mint-rollback-test",
+            .cache_bytes = 1U << 20,
+            .wipe_data = true,
+        });
+    }
+
+    ~MintRollbackDurabilitySetup()
+    {
+        pnevmtxmintdb = std::move(previous_mint_db);
+    }
+
+    ObservedRollbackMintDB& MintDB()
+    {
+        return static_cast<ObservedRollbackMintDB&>(*pnevmtxmintdb);
+    }
+
+    void StoreTip(bool with_mint)
+    {
+        auto& chainman{*m_node.chainman};
+        auto& chainstate{chainman.ActiveChainstate()};
+        std::vector<CMutableTransaction> transactions;
+        if (with_mint) {
+            CMintSyscoin mint;
+            mint.nTxHash = mint_hash;
+            mint.voutAssets.emplace_back(1, std::vector<CAssetOutValue>{{0, 1}});
+            mint.vchTxParentNodes = {0x80};
+            mint.vchReceiptParentNodes = {0x80};
+            std::vector<unsigned char> payload;
+            mint.SerializeData(payload);
+            CMutableTransaction tx;
+            tx.nVersion = SYSCOIN_TX_VERSION_ALLOCATION_MINT;
+            tx.vin.emplace_back(COutPoint{m_coinbase_txns.front()->GetHash(), 0});
+            tx.vout.emplace_back(1, CScript{} << OP_TRUE);
+            tx.vout.emplace_back(0, CScript{} << OP_RETURN << payload);
+            tx.LoadAssets();
+            BOOST_REQUIRE(!CMintSyscoin(CTransaction{tx}).IsNull());
+            transactions.push_back(std::move(tx));
+        }
+        const CBlock block{CreateBlock(transactions, CScript{} << OP_TRUE,
+                                      chainstate)};
+        LOCK(::cs_main);
+        parent_hash = chainman.ActiveTip()->GetBlockHash();
+        stored_tip_hash = block.GetHash();
+        const FlatFilePos pos{chainman.m_blockman.SaveBlockToDisk(
+            block, chainman.ActiveHeight() + 1, nullptr)};
+        BOOST_REQUIRE(!pos.IsNull());
+        auto* index{chainman.m_blockman.AddToBlockIndex(
+            block, chainman.m_best_header)};
+        BOOST_REQUIRE(index != nullptr);
+        chainman.ReceivedBlockTransactions(block, index, pos);
+        CBlockUndo undo;
+        auto& coins{chainstate.CoinsTip()};
+        if (with_mint) {
+            Coin input;
+            BOOST_REQUIRE(coins.SpendCoin(block.vtx[1]->vin[0].prevout, &input));
+            undo.vtxundo.emplace_back();
+            undo.vtxundo.back().vprevout.push_back(std::move(input));
+            mint_coin = COutPoint{block.vtx[1]->GetHash(), 0};
+        }
+        for (const auto& tx : block.vtx) AddCoins(coins, *tx, index->nHeight);
+        BlockValidationState state;
+        BOOST_REQUIRE(chainman.m_blockman.WriteUndoDataForBlock(undo, state, *index));
+        index->RaiseValidity(BLOCK_VALID_SCRIPTS);
+        coins.SetBestBlock(stored_tip_hash);
+        chainstate.m_chain.SetTip(*index);
+        if (with_mint) {
+            MintDB().FlushDataToCache({mint_hash});
+            BOOST_REQUIRE(MintDB().FlushCacheToDisk());
+        }
+        BOOST_REQUIRE(chainstate.CoinsDB().FlushWithSync(coins));
+    }
+
+    void ReopenCoins(bool prepare_replay)
+    {
+        auto& chainstate{m_node.chainman->ActiveChainstate()};
+        LOCK(::cs_main);
+        const auto path{chainstate.CoinsDB().StoragePath()};
+        BOOST_REQUIRE(path.has_value());
+        chainstate.ResetCoinsViews();
+        if (prepare_replay) {
+            CDBWrapper db{DBParams{
+                .path = *path,
+                .cache_bytes = 1U << 20,
+                .obfuscate = true,
+            }};
+            CDBBatch batch{db};
+            batch.Erase(uint8_t{'B'});
+            batch.Write(uint8_t{'H'},
+                        std::vector<uint256>{parent_hash, stored_tip_hash});
+            BOOST_REQUIRE(db.WriteBatch(batch, /*fSync=*/true));
+        }
+        chainstate.InitCoinsDB(1U << 20, /*in_memory=*/false,
+                               /*should_wipe=*/false);
+        chainstate.InitCoinsCache(1U << 23);
+    }
+
+    void CheckRollback(bool replay, bool fail_coins_sync, bool with_mint = true,
+                       bool fail_coins_write = false)
+    {
+        StoreTip(with_mint);
+        auto& chainstate{m_node.chainman->ActiveChainstate()};
+        if (replay) ReopenCoins(/*prepare_replay=*/true);
+        LOCK(::cs_main);
+        std::size_t coins_writes{0};
+        std::size_t coins_syncs{0};
+        std::size_t mint_writes{0};
+        const bool fail{fail_coins_sync || fail_coins_write};
+        chainstate.CoinsDB().SetWriteBatchCallbackForTesting([&](bool sync) {
+            ++coins_writes;
+            BOOST_CHECK(!sync);
+            if (with_mint) {
+                // The marker must remain visible until every coins batch
+                // succeeds, including while a failing batch is attempted.
+                BOOST_CHECK(MintDB().ExistsTx(mint_hash));
+                BOOST_CHECK(MintDB().Exists(mint_hash));
+            }
+            return !fail_coins_write;
+        });
+        chainstate.CoinsDB().SetSyncCallbackForTesting(
+            [&]() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+                ++coins_syncs;
+                BOOST_CHECK(with_mint);
+                BOOST_CHECK_GT(coins_writes, 0U);
+                BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == parent_hash);
+                BOOST_CHECK(!chainstate.CoinsDB().HaveCoin(mint_coin));
+                BOOST_CHECK(MintDB().ExistsTx(mint_hash));
+                BOOST_CHECK(MintDB().Exists(mint_hash));
+                return !fail_coins_sync;
+            });
+        MintDB().before_write = [&](bool sync) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+            ++mint_writes;
+            BOOST_CHECK(sync);
+            BOOST_CHECK_EQUAL(coins_syncs, 1U);
+            BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == parent_hash);
+            BOOST_CHECK(!chainstate.CoinsDB().HaveCoin(mint_coin));
+        };
+        bool result;
+        BlockValidationState state;
+        if (replay) {
+            result = chainstate.ReplayBlocks();
+        } else {
+            LOCK(chainstate.MempoolMutex());
+            m_node.notifications->m_shutdown_on_fatal_error = false;
+            result = chainstate.DisconnectTip(state, nullptr, /*bReverify=*/false);
+            m_node.notifications->m_shutdown_on_fatal_error = true;
+            m_node.exit_status.store(EXIT_SUCCESS);
+            BOOST_CHECK_EQUAL(state.IsError(), fail);
+        }
+        chainstate.CoinsDB().SetWriteBatchCallbackForTesting({});
+        chainstate.CoinsDB().SetSyncCallbackForTesting({});
+        MintDB().before_write = {};
+        BOOST_CHECK_EQUAL(result, !fail);
+        if (with_mint || replay) BOOST_CHECK_GT(coins_writes, 0U);
+        BOOST_CHECK_EQUAL(coins_syncs, with_mint && !fail_coins_write ? 1U : 0U);
+        BOOST_CHECK_EQUAL(mint_writes, with_mint && !fail ? 1U : 0U);
+        if (with_mint) {
+            BOOST_CHECK_EQUAL(MintDB().ExistsTx(mint_hash), fail);
+            // A failed coins write or sync must not queue an erase that a later
+            // shutdown/cache flush could commit ahead of durable coin removal.
+            BOOST_REQUIRE(MintDB().FlushCacheToDisk());
+            BOOST_CHECK_EQUAL(MintDB().Exists(mint_hash), fail);
+        }
+        // A normal close/reopen preserves successful asynchronous writes even
+        // when the sync was rejected. Power-loss recovery is covered in DB tests.
+        ReopenCoins(/*prepare_replay=*/false);
+        BOOST_CHECK_EQUAL(chainstate.CoinsDB().HaveCoin(mint_coin),
+                          with_mint && fail_coins_write);
+        if (!fail_coins_write && (with_mint || replay)) {
+            BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == parent_hash);
+            BOOST_CHECK(chainstate.CoinsDB().GetHeadBlocks().empty());
+        }
+    }
+};
+// SYSCOIN END: Mint rollback persistence ordering fixture.
+
 struct FreshNEVMStartupSetup : ChainTestingSetup {
     const bool previous_nevm_connection{fNEVMConnection};
     const bool previous_regtest{fRegTest};
@@ -871,6 +1076,60 @@ BOOST_FIXTURE_TEST_CASE(
     BOOST_CHECK(chainman.IsInitialBlockDownload());
     BOOST_CHECK(llmq::chainLocksHandler->GetCLSIGFromPeers());
 }
+
+// SYSCOIN BEGIN: Coins removal must be synchronous before mint-marker erasure.
+BOOST_FIXTURE_TEST_CASE(mint_disconnect_syncs_coins_before_marker_erase,
+                        MintRollbackDurabilitySetup)
+{
+    CheckRollback(/*replay=*/false, /*fail_coins_sync=*/false);
+}
+
+BOOST_FIXTURE_TEST_CASE(mint_disconnect_failed_coins_sync_preserves_marker,
+                        MintRollbackDurabilitySetup)
+{
+    CheckRollback(/*replay=*/false, /*fail_coins_sync=*/true);
+}
+
+BOOST_FIXTURE_TEST_CASE(mint_disconnect_failed_coins_write_preserves_marker,
+                        MintRollbackDurabilitySetup)
+{
+    CheckRollback(/*replay=*/false, /*fail_coins_sync=*/false,
+                  /*with_mint=*/true, /*fail_coins_write=*/true);
+}
+
+BOOST_FIXTURE_TEST_CASE(mint_replay_syncs_coins_before_marker_erase,
+                        MintRollbackDurabilitySetup)
+{
+    CheckRollback(/*replay=*/true, /*fail_coins_sync=*/false);
+}
+
+BOOST_FIXTURE_TEST_CASE(mint_replay_failed_coins_sync_preserves_marker,
+                        MintRollbackDurabilitySetup)
+{
+    CheckRollback(/*replay=*/true, /*fail_coins_sync=*/true);
+}
+
+BOOST_FIXTURE_TEST_CASE(mint_replay_failed_coins_write_preserves_marker,
+                        MintRollbackDurabilitySetup)
+{
+    CheckRollback(/*replay=*/true, /*fail_coins_sync=*/false,
+                  /*with_mint=*/true, /*fail_coins_write=*/true);
+}
+
+BOOST_FIXTURE_TEST_CASE(nonmint_disconnect_preserves_async_coins_flush,
+                        MintRollbackDurabilitySetup)
+{
+    CheckRollback(/*replay=*/false, /*fail_coins_sync=*/false,
+                  /*with_mint=*/false);
+}
+
+BOOST_FIXTURE_TEST_CASE(nonmint_replay_preserves_async_coins_flush,
+                        MintRollbackDurabilitySetup)
+{
+    CheckRollback(/*replay=*/true, /*fail_coins_sync=*/false,
+                  /*with_mint=*/false);
+}
+// SYSCOIN END: Coins removal must be synchronous before mint-marker erasure.
 
 BOOST_FIXTURE_TEST_CASE(nevm_coins_replay_recovers_partial_forward_flush_locally,
                         CoinsNEVMRecoverySetup)

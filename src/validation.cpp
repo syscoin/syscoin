@@ -5625,7 +5625,9 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
                         strprintf("DisconnectTip(): Failed to persist deterministic state for parent of %s",
                                   pindexDelete->GetBlockHash().ToString()));
                 }
-                if (!CoinsTip().Flush()) {
+                // SYSCOIN: All prior coins writes must be durable before mint
+                // replay markers can be hidden or erased in a separate DB.
+                if (!CoinsDB().FlushWithSync(CoinsTip())) {
                     return FatalError(
                         m_chainman.GetNotifications(), state,
                         strprintf("DisconnectTip(): Failed to flush disconnected UTXO state %s",
@@ -9172,7 +9174,12 @@ bool Chainstate::ReplayBlocks()
         return error(
             "ReplayBlocks(): Failed to persist deterministic masternode state");
     }
-    if (!cache.Flush()) {
+    // SYSCOIN: Only replay that removes mint markers needs a coins durability
+    // barrier; ordinary rollforward keeps the existing asynchronous policy.
+    const bool coins_flushed = pnevmtxmintdb && !setMintDisconnectOnly.empty()
+        ? CoinsDB().FlushWithSync(cache)
+        : cache.Flush();
+    if (!coins_flushed) {
         return error("ReplayBlocks(): Failed to commit replayed UTXO state");
     }
     if (pnevmtxmintdb && !setMintDisconnectOnly.empty() &&
