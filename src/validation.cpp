@@ -3254,6 +3254,13 @@ bool ChainstateManager::CheckNEVMStartupConnect(
     const auto& pair{*m_nevm_startup_pair};
     const CBlockIndex* applied{m_blockman.LookupBlockIndex(pair.block_hash)};
     if (applied == nullptr) {
+        // Every valid branch shares the configured genesis. A fresh Core
+        // must activate it before startup can open header acquisition.
+        if (pair.height > 0 && index.nHeight == 0 &&
+            index.pprev == nullptr &&
+            index.GetBlockHash() == GetConsensus().hashGenesisBlock) {
+            return true;
+        }
         error = "NEVM startup recovery is awaiting the applied pair's headers";
         return false;
     }
@@ -6723,9 +6730,18 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                 m_chainman.HasPendingNEVMStartupPair()) {
                 const auto& pair{*m_chainman.m_nevm_startup_pair};
                 if (m_blockman.LookupBlockIndex(pair.block_hash) == nullptr) {
-                    // A crash may also precede the block-index flush. Header
-                    // and block acquisition remain open while activation waits.
-                    return true;
+                    if (m_chain.Tip() != nullptr || pair.height <= 0) return true;
+                    // Startup waits for genesis before opening Core's peer
+                    // network. Activate only genesis while the applied pair's
+                    // ancestry is unknown, even if other candidates are indexed.
+                    pindexMostWork = m_blockman.LookupBlockIndex(
+                        m_chainman.GetConsensus().hashGenesisBlock);
+                    if (pindexMostWork == nullptr ||
+                        !(pindexMostWork->nStatus & BLOCK_HAVE_DATA) ||
+                        (pindexMostWork->nStatus &
+                         (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK))) {
+                        return true;
+                    }
                 }
                 std::string startup_pair_error;
                 if (!m_chainman.MaybeCompleteNEVMStartupPair(startup_pair_error)) {

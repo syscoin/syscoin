@@ -20,6 +20,7 @@
 #include <netbase.h> // SYSCOIN: deterministic valid-MN fixture service.
 #include <node/blockstorage.h>
 #include <node/chainstate.h>
+#include <node/interface_ui.h> // SYSCOIN: startup's genesis notification.
 #include <node/kernel_notifications.h>
 #include <node/miner.h> // SYSCOIN: preserve NEVM template commitments.
 #include <node/utxo_snapshot.h>
@@ -30,6 +31,7 @@
 #include <test/pq_test_util.h> // SYSCOIN: durable roster-context fixture.
 #include <test/util/chainstate.h>
 #include <test/util/logging.h>
+#include <test/util/mining.h>
 #include <test/util/random.h>
 #include <test/util/setup_common.h>
 #include <test/util/validation.h>
@@ -49,6 +51,7 @@
 #include <type_traits>
 #include <vector>
 
+#include <boost/signals2/connection.hpp>
 #include <boost/test/unit_test.hpp>
 
 using node::BlockManager;
@@ -211,6 +214,30 @@ struct StartupNEVMRecoverySetup : DeferredNEVMReplaySetup {
             // Restore entries pruned while this fixture first mined ahead.
             chainstate.setBlockIndexCandidates.insert(chainman.ActiveTip());
         }
+    }
+};
+
+struct FreshNEVMStartupSetup : ChainTestingSetup {
+    const bool previous_nevm_connection{fNEVMConnection};
+    const bool previous_regtest{fRegTest};
+    std::shared_ptr<StartupNEVMSubscriber> nevm{
+        std::make_shared<StartupNEVMSubscriber>()};
+
+    FreshNEVMStartupSetup()
+        : ChainTestingSetup{ChainType::REGTEST,
+                            {"-nevmstartheight=101"}}
+    {
+        RegisterSharedValidationInterface(nevm);
+        fNEVMConnection = true;
+        fRegTest = true;
+    }
+
+    ~FreshNEVMStartupSetup()
+    {
+        UnregisterValidationInterface(nevm.get());
+        SyncWithValidationInterfaceQueue();
+        fNEVMConnection = previous_nevm_connection;
+        fRegTest = previous_regtest;
     }
 };
 
@@ -972,6 +999,83 @@ BOOST_FIXTURE_TEST_CASE(nevm_startup_unknown_ahead_pair_waits_for_headers,
     BOOST_CHECK_GT(nevm->block_info_queries, 0U);
     BOOST_CHECK(!chainman.HasPendingNEVMStartupPair());
     BOOST_CHECK(!chainman.IsInitialBlockDownload());
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_startup_bootstrap_pair_activates_only_genesis,
+                        FreshNEVMStartupSetup)
+{
+    auto& chainman{*Assert(m_node.chainman)};
+    node::ChainstateLoadOptions options;
+    options.mempool = m_node.mempool.get();
+    options.block_tree_db_in_memory = true;
+    options.coins_db_in_memory = true;
+    options.connman = m_node.connman.get();
+    options.banman = m_node.banman.get();
+    options.peerman = m_node.peerman.get();
+    const auto [status, load_error]{
+        node::LoadChainstate(chainman, m_cache_sizes, options)};
+    BOOST_REQUIRE_MESSAGE(status == node::ChainstateLoadStatus::SUCCESS,
+                          load_error.original);
+
+    const auto blocks{CreateBlockChain(1, Params())};
+    const uint256 genesis_hash{chainman.GetConsensus().hashGenesisBlock};
+    CBlockIndex* indexed_child{nullptr};
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.ActiveTip() == nullptr);
+        BOOST_REQUIRE(chainman.ActiveChainstate().CoinsTip().GetBestBlock().IsNull());
+        // Restore an already-stored candidate without activating it, as
+        // block-index loading can do before an empty coins state is rebuilt.
+        // The live AcceptBlock path requires genesis to be active already.
+        BlockValidationState block_state;
+        BOOST_REQUIRE(CheckBlock(*blocks.front(), block_state,
+                                 chainman.GetConsensus()));
+        const FlatFilePos pos{chainman.m_blockman.SaveBlockToDisk(
+            *blocks.front(), 1, nullptr)};
+        BOOST_REQUIRE(!pos.IsNull());
+        indexed_child = chainman.m_blockman.AddToBlockIndex(
+            *blocks.front(), chainman.m_best_header);
+        BOOST_REQUIRE(indexed_child != nullptr);
+        chainman.ReceivedBlockTransactions(*blocks.front(), indexed_child, pos);
+        std::string error;
+        nevm->applied_count = 1;
+        nevm->applied_hash = InsecureRand256();
+        BOOST_REQUIRE(chainman.InitializeNEVMStartupPair(
+            nevm->applied_count, nevm->applied_hash, error));
+        BOOST_CHECK(!chainman.CheckNEVMStartupConnect(*indexed_child, error));
+    }
+
+    bool genesis_notified{false};
+    const boost::signals2::scoped_connection genesis_notification{
+        uiInterface.NotifyBlockTip_connect(
+            [&](SynchronizationState, const CBlockIndex* tip) {
+                genesis_notified = tip != nullptr &&
+                                   tip->GetBlockHash() == genesis_hash;
+            })};
+    // This is the caller that must release AppInitMain's genesis wait
+    // before networking can obtain the still-missing pair header.
+    m_node.notifications->m_shutdown_on_fatal_error = false;
+    node::ImportBlocks(chainman, {}, nullptr, deterministicMNManager,
+                       activeMasternodeManager, g_wallet_init_interface, m_node);
+    BOOST_CHECK_EQUAL(m_node.exit_status.load(), EXIT_SUCCESS);
+    BOOST_CHECK(genesis_notified);
+    BOOST_CHECK(!chainman.m_blockman.LoadingBlocks());
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.ActiveTip() != nullptr);
+        BOOST_CHECK(chainman.ActiveTip()->GetBlockHash() == genesis_hash);
+        BOOST_CHECK(chainman.ActiveChainstate().CoinsTip().GetBestBlock() == genesis_hash);
+    }
+    BOOST_CHECK(chainman.HasPendingNEVMStartupPair());
+    BOOST_CHECK(chainman.IsInitialBlockDownload());
+    BOOST_CHECK(nevm->connected_blocks.empty());
+    BOOST_CHECK_EQUAL(nevm->block_info_queries, 0U);
+
+    BlockValidationState retry_state;
+    BOOST_REQUIRE(chainman.RetryNEVMStartupPair(retry_state));
+    BOOST_CHECK(retry_state.IsValid());
+    BOOST_CHECK(WITH_LOCK(::cs_main, return chainman.ActiveHeight()) == 0);
+    BOOST_CHECK(chainman.HasPendingNEVMStartupPair());
 }
 
 BOOST_AUTO_TEST_CASE(coins_recovery_marker_validation)
