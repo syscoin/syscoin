@@ -1704,6 +1704,15 @@ private:
         const CBlockIndex& active_tip,
         pq::BTCCPresealState& state)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    [[nodiscard]] static std::optional<pq::BTCCPresealMarker>
+    RecoverBTCCPresealMarker(
+        const CChain& active_chain, const CBlockIndex& old_terminal,
+        const pq::BTCCPresealMarker& marker, const uint256& genesis_hash,
+        const pq::ChainLockFinalityStoreConfig& config)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    [[nodiscard]] bool RepairReorgedBTCCPresealTerminals()
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main, !m_btcc_preseal_mutex,
+                                 !m_needed_btcc_certificate_mutex);
     [[nodiscard]] std::optional<int32_t>
     AdvanceBTCCReplayValidationBounded(
         const CBlockIndex& active_tip,
@@ -1905,6 +1914,29 @@ private:
         uint64_t collector_generation{0};
         bool stale{false};
     };
+    [[nodiscard]] static std::optional<LocalChainLockFinalization>
+    GetChainLockFinalizationForRetry(
+        const CurrentSigningContextsPtr& expected_contexts,
+        uint64_t expected_collector_generation,
+        const CurrentSigningContextsPtr& current_contexts,
+        uint64_t current_collector_generation,
+        uint64_t admission_generation,
+        std::size_t variant_index,
+        pq::ChainLockCollector* collector);
+    void MaybeRetryChainLockFinalization()
+        EXCLUSIVE_LOCKS_REQUIRED(!m_share_lifecycle_mutex,
+                                 !cs_main,
+                                 !m_context_build_mutex,
+                                 !m_chainlock_admission_mutex,
+                                 !m_verification_mutex,
+                                 !m_collector_mutex,
+                                 !m_lookup_mutex,
+                                 !m_persisted_mutex,
+                                 !m_btcc_preseal_mutex,
+                                 !m_needed_btcc_certificate_mutex,
+                                 !m_pending_btcc_receipt_mutex,
+                                 !m_pending_payment_audit_receipt_mutex,
+                                 !m_signer_reconcile_mutex);
     [[nodiscard]] bool ProcessCollectedChainLock(
         const LocalChainLockFinalization& finalized,
         BlockValidationState& state)
@@ -2611,6 +2643,16 @@ private:
                                  !m_needed_btcc_certificate_mutex);
     void MaybeReplayPaymentAuditPreseal()
         EXCLUSIVE_LOCKS_REQUIRED(!m_btcc_preseal_mutex);
+    /** Rebind a reorged marker to the last receipt on its surviving prefix. */
+    [[nodiscard]] static std::optional<pq::PaymentAuditPresealMarker>
+    RecoverPaymentAuditPresealMarker(
+        const CChain& active_chain,
+        const CBlockIndex& old_terminal,
+        const pq::PaymentAuditPresealMarker& marker,
+        const uint256& genesis_hash,
+        const pq::PaymentAuditScheduleConfig& schedule,
+        const std::function<bool(CBlock&, const CBlockIndex&)>& read_block)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     [[nodiscard]] bool ClearBTCCPreseal(
         const pq::BTCCPresealMarker& expected)
         EXCLUSIVE_LOCKS_REQUIRED(!m_btcc_preseal_mutex,
@@ -2729,6 +2771,7 @@ private:
     void RefreshPQHistoryAuthState()
         EXCLUSIVE_LOCKS_REQUIRED(!m_persisted_mutex,
                                  !m_lookup_mutex,
+                                 !m_needed_btcc_certificate_mutex,
                                  !m_btcc_preseal_mutex);
     void QuarantineInvalidPersistedChainLock(const std::string& reason)
         EXCLUSIVE_LOCKS_REQUIRED(!m_persisted_mutex);
@@ -2883,6 +2926,7 @@ private:
     // no false->true interval can revive work from an older handler state.
     ShareAdmissionGate m_share_admission_gate;
     std::atomic_bool m_historical_sync_reauthentication_pending{false};
+    std::atomic_bool m_btcc_preseal_repair_pending{false};
     AuxiliaryHistoryGCAuthorizationGate m_auxiliary_history_gc_auth_gate;
     std::atomic_bool m_persistence_failed{false};
     std::atomic_bool m_enforced{false};

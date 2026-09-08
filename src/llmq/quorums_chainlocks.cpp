@@ -3356,6 +3356,7 @@ void CChainLocksHandler::Start()
             RequestCatchupChainLock();
             RefreshPQHistoryAuthState();
             MaybeRelayPaymentAuditHave();
+            MaybeRetryChainLockFinalization();
             const uint64_t admission_generation{
                 GetShareAdmissionGeneration()};
             if (admission_generation != 0) {
@@ -3971,6 +3972,19 @@ void CChainLocksHandler::RefreshPQHistoryAuthState()
         LOCK(cs_main);
         // Scheduler and validation callbacks may observe revocation in either order.
         RevokeReorgedHistoricalSyncAuthorizationLocked();
+        if (!RepairReorgedBTCCPresealTerminals()) {
+            // Preserve the durable boundary while its local reconstruction
+            // inputs are unavailable. A retry must not reopen the IBD latch
+            // or turn a recoverable marker repair into a terminal failure.
+            m_btcc_preseal_repair_pending.store(true);
+            while (!m_share_admission_gate.TryPublishEnabled(
+                m_share_admission_gate.Observe(), false)) {}
+            (void)m_auxiliary_history_gc_auth_gate.SetHealthy(false, [this] {
+                return RevokeAuxiliaryHistoryGCAuthorization();
+            });
+            return;
+        }
+        resume_participation = m_btcc_preseal_repair_pending.exchange(false);
         pending = HasPendingPQHistoryAuthentication();
         if (!m_chainman.PublishPQHistoryAuthState(
                 pending ? PQHistoryAuthState::PENDING
@@ -3983,7 +3997,9 @@ void CChainLocksHandler::RefreshPQHistoryAuthState()
             return;
         }
         if (!pending) {
-            resume_participation = m_historical_sync_reauthentication_pending.exchange(false);
+            resume_participation =
+                m_historical_sync_reauthentication_pending.exchange(false) ||
+                resume_participation;
         }
     }
     if (resume_participation) CheckActiveState();
@@ -9591,6 +9607,91 @@ CChainLocksHandler::TryPromoteRetainedChainLock(
         : RetainedChainLockPromotion::DEFERRED;
 }
 
+std::optional<pq::PaymentAuditPresealMarker>
+CChainLocksHandler::RecoverPaymentAuditPresealMarker(
+    const CChain& active_chain,
+    const CBlockIndex& old_terminal,
+    const pq::PaymentAuditPresealMarker& marker,
+    const uint256& genesis_hash,
+    const pq::PaymentAuditScheduleConfig& schedule,
+    const std::function<bool(CBlock&, const CBlockIndex&)>& read_block)
+{
+    AssertLockHeld(cs_main);
+    if (!marker.IsStructurallyValid() || !schedule.IsValid() ||
+        genesis_hash.IsNull() || !read_block ||
+        old_terminal.nHeight != marker.terminal_carrier_height ||
+        old_terminal.GetBlockHash() != marker.terminal_carrier_hash) {
+        return std::nullopt;
+    }
+    const CBlockIndex* earliest{
+        active_chain[marker.earliest_carrier_height]};
+    const CBlockIndex* shared{active_chain.FindFork(&old_terminal)};
+    const auto usable = [](const CBlockIndex* index)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+        return index != nullptr && !(index->nStatus & BLOCK_FAILED_MASK) &&
+               !index->IsAssumedValid() &&
+               index->IsValid(BLOCK_VALID_SCRIPTS) &&
+               HasFullReceiptIndexProvenance(*index);
+    };
+    if (!usable(earliest) || !usable(shared) ||
+        earliest->GetBlockHash() != marker.earliest_carrier_hash ||
+        shared->nHeight < earliest->nHeight ||
+        old_terminal.GetAncestor(earliest->nHeight) != earliest) {
+        return std::nullopt;
+    }
+    const auto shared_state{IndexedPaymentAuditReceiptState(*shared)};
+    if (!shared_state || shared_state->cursor.IsNull() ||
+        shared_state->cursor.carrier_height < earliest->nHeight ||
+        shared_state->cursor.carrier_height > shared->nHeight) {
+        return std::nullopt;
+    }
+    // The common ancestor's cursor skips any null-receipt tail without
+    // scanning block bodies, and cannot select a receipt on the losing fork.
+    const CBlockIndex* terminal{
+        active_chain[shared_state->cursor.carrier_height]};
+    if (!usable(terminal)) return std::nullopt;
+    const auto terminal_state{IndexedPaymentAuditReceiptState(*terminal)};
+    if (!terminal_state || *terminal_state != *shared_state ||
+        terminal->pqPaymentProbationStateHash !=
+            shared->pqPaymentProbationStateHash) {
+        return std::nullopt;
+    }
+    const auto read_receipt = [&](const CBlockIndex& carrier,
+                                  pq::PaymentAuditReceipt& receipt)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+        if (!usable(carrier.pprev)) return false;
+        const auto previous{IndexedPaymentAuditReceiptState(*carrier.pprev)};
+        const auto indexed{IndexedPaymentAuditReceiptState(carrier)};
+        CBlock block;
+        if (!previous || !indexed || !read_block(block, carrier) ||
+            block.GetHash() != carrier.GetBlockHash() ||
+            !ExtractPaymentAuditReceipt(block, receipt) || receipt.IsNull() ||
+            ClassifyPaymentAuditReceiptCarrierContext(
+                receipt, carrier, schedule) != PaymentAuditContextStatus::READY) {
+            return false;
+        }
+        const auto applied{pq::ApplyPaymentAuditReceipt(
+            genesis_hash, *previous, receipt)};
+        return applied && *applied == *indexed &&
+               receipt.next_probation_state_hash ==
+                   carrier.pqPaymentProbationStateHash;
+    };
+    pq::PaymentAuditReceipt receipt;
+    if (!read_receipt(*earliest, receipt) ||
+        IndexedPaymentAuditReceiptState(*earliest->pprev) !=
+            marker.predecessor_receipt_state ||
+        earliest->pprev->pqPaymentProbationStateHash !=
+            marker.predecessor_probation_state_hash ||
+        (terminal != earliest && !read_receipt(*terminal, receipt))) {
+        return std::nullopt;
+    }
+    pq::PaymentAuditPresealMarker recovered{marker};
+    recovered.terminal_carrier_height = terminal->nHeight;
+    recovered.terminal_carrier_hash = terminal->GetBlockHash();
+    recovered.terminal_receipt = std::move(receipt);
+    return recovered;
+}
+
 void CChainLocksHandler::MaybeReplayPaymentAuditPreseal()
 {
     if (!m_chainman.IsPQParticipationAllowed()) return;
@@ -9698,43 +9799,19 @@ void CChainLocksHandler::MaybeReplayPaymentAuditPreseal()
                  active_tip->GetAncestor(earliest->nHeight) != earliest)) {
                 next.active.reset();
             } else if (earliest != nullptr) {
-                CBlock block;
-                pq::PaymentAuditReceipt receipt;
-                const auto predecessor_state{
-                    earliest->pprev == nullptr
-                        ? std::optional<pq::PaymentAuditReceiptState>{}
-                        : IndexedPaymentAuditReceiptState(*earliest->pprev)};
-                const auto indexed_state{
-                    IndexedPaymentAuditReceiptState(*earliest)};
-                if (!m_chainman.m_blockman.ReadBlockFromDisk(
-                        block, *earliest) ||
-                    !ExtractPaymentAuditReceipt(block, receipt) ||
-                    receipt.IsNull() || !predecessor_state ||
-                    !indexed_state ||
-                    *predecessor_state !=
-                        next.active->predecessor_receipt_state ||
-                    earliest->pprev == nullptr ||
-                    earliest->pprev->pqPaymentProbationStateHash !=
-                        next.active->predecessor_probation_state_hash ||
-                    ClassifyPaymentAuditReceiptCarrierContext(
-                        receipt, *earliest,
-                        pq::PaymentAuditScheduleConfig{
-                            m_config->chainlock_schedule,
-                            m_config->btcc_schedule}) !=
-                        PaymentAuditContextStatus::READY) {
-                    return;
-                }
-                const auto applied{pq::ApplyPaymentAuditReceipt(
-                    m_genesis_hash, *predecessor_state, receipt)};
-                if (!applied || *applied != *indexed_state ||
-                    receipt.next_probation_state_hash !=
-                        earliest->pqPaymentProbationStateHash) {
-                    return;
-                }
-                next.active->terminal_carrier_height = earliest->nHeight;
-                next.active->terminal_carrier_hash =
-                    earliest->GetBlockHash();
-                next.active->terminal_receipt = std::move(receipt);
+                const CBlockIndex* old_terminal{marker_index(next.active, true)};
+                if (old_terminal == nullptr) return;
+                const auto recovered{RecoverPaymentAuditPresealMarker(
+                    m_chainman.ActiveChain(), *old_terminal, *next.active,
+                    m_genesis_hash,
+                    pq::PaymentAuditScheduleConfig{
+                        m_config->chainlock_schedule, m_config->btcc_schedule},
+                    [this](CBlock& block, const CBlockIndex& index)
+                        EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+                        return m_chainman.m_blockman.ReadBlockFromDisk(block, index);
+                    })};
+                if (!recovered) return;
+                next.active = *recovered;
             }
         }
 
@@ -9808,6 +9885,144 @@ void CChainLocksHandler::MaybeReplayPaymentAuditPreseal()
                   __func__, error);
         return;
     }
+}
+
+std::optional<pq::BTCCPresealMarker>
+CChainLocksHandler::RecoverBTCCPresealMarker(
+    const CChain& active_chain, const CBlockIndex& old_terminal,
+    const pq::BTCCPresealMarker& marker, const uint256& genesis_hash,
+    const pq::ChainLockFinalityStoreConfig& config)
+{
+    AssertLockHeld(cs_main);
+    if (!marker.IsStructurallyValid() ||
+        old_terminal.nHeight != marker.terminal_carrier_height ||
+        old_terminal.GetBlockHash() != marker.terminal_carrier_hash) {
+        return std::nullopt;
+    }
+    const CBlockIndex* earliest{active_chain[marker.earliest_carrier_height]};
+    const CBlockIndex* common{active_chain.FindFork(&old_terminal)};
+    if (earliest == nullptr || earliest->pprev == nullptr ||
+        earliest->GetBlockHash() != marker.earliest_carrier_hash ||
+        common == nullptr || common->nHeight < earliest->nHeight) {
+        return std::nullopt;
+    }
+    const auto fully_indexed = [](const CBlockIndex& index)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+        return !index.IsAssumedValid() && index.IsValid(BLOCK_VALID_SCRIPTS) &&
+               !(index.nStatus & BLOCK_CONFLICT_CHAINLOCK) &&
+               HasFullReceiptIndexProvenance(index);
+    };
+    const auto common_state{IndexedBTCCReceiptState(*common)};
+    const auto earliest_parent{IndexedBTCCReceiptState(*earliest->pprev)};
+    if (!fully_indexed(*common) || !fully_indexed(*earliest) ||
+        !fully_indexed(*earliest->pprev) || !common_state || !earliest_parent ||
+        *earliest_parent != marker.predecessor_receipt_state ||
+        common_state->latest_receipt_carrier_height < earliest->nHeight ||
+        common_state->latest_receipt_carrier_height > common->nHeight) {
+        return std::nullopt;
+    }
+    const CBlockIndex* terminal{common->GetAncestor(
+        common_state->latest_receipt_carrier_height)};
+    if (terminal == nullptr || terminal->pprev == nullptr ||
+        !fully_indexed(*terminal) || !fully_indexed(*terminal->pprev)) {
+        return std::nullopt;
+    }
+    const auto before{IndexedBTCCReceiptState(*terminal->pprev)};
+    const auto after{IndexedBTCCReceiptState(*terminal)};
+    if (!before || !after || *after != *common_state) return std::nullopt;
+    const auto receipt{pq::ReconstructBTCCReceipt(
+        genesis_hash, config.chainlock_schedule, config.btcc_schedule,
+        config.activation_predecessor_height, *terminal, *before, *after,
+        terminal->pqBTCCReceiptLogicalId)};
+    if (!receipt || receipt->IsNull()) return std::nullopt;
+
+    // Even an authenticated common prefix remains owed to Geth. Move only
+    // the receipt dependency; keep its earliest replay and retention boundary.
+    auto repaired{marker};
+    repaired.terminal_carrier_height = terminal->nHeight;
+    repaired.terminal_carrier_hash = terminal->GetBlockHash();
+    repaired.terminal_parent_receipt_state = *before;
+    repaired.terminal_receipt = *receipt;
+    return repaired.IsStructurallyValid()
+        ? std::optional<pq::BTCCPresealMarker>{std::move(repaired)}
+        : std::nullopt;
+}
+
+bool CChainLocksHandler::RepairReorgedBTCCPresealTerminals()
+{
+    AssertLockHeld(cs_main);
+    pq::BTCCPresealState durable;
+    {
+        LOCK(m_btcc_preseal_mutex);
+        durable = m_btcc_preseal_state;
+    }
+    if (durable.IsEmpty()) return true;
+    if (!m_config) return false;
+    const CChain& active_chain{m_chainman.ActiveChain()};
+    auto next{durable};
+    const auto repair = [&](auto& marker, bool prospective)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+        if (!marker) return true;
+        const CBlockIndex* earliest{active_chain[marker->earliest_carrier_height]};
+        // Entirely displaced boundaries use the existing bounded branch
+        // recovery, which also accounts for the prospective slot.
+        if (earliest == nullptr ||
+            earliest->GetBlockHash() != marker->earliest_carrier_hash) return true;
+        const CBlockIndex* terminal{m_chainman.m_blockman.LookupBlockIndex(
+            marker->terminal_carrier_hash)};
+        if (terminal == nullptr ||
+            terminal->nHeight != marker->terminal_carrier_height) return false;
+        if (active_chain.Contains(terminal) ||
+            (prospective && m_chainman.ActiveChainstate()
+                .IsCurrentMostWorkBranch(*terminal))) return true;
+        auto repaired{RecoverBTCCPresealMarker(
+            active_chain, *terminal, *marker, m_genesis_hash, *m_config)};
+        if (!repaired) return false;
+        marker = std::move(*repaired);
+        return true;
+    };
+    if (!repair(next.active, false) || !repair(next.prospective, true)) return false;
+    const auto on_active = [&](const auto& marker)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+        if (!marker) return false;
+        const CBlockIndex* earliest{active_chain[marker->earliest_carrier_height]};
+        const CBlockIndex* terminal{active_chain[marker->terminal_carrier_height]};
+        return earliest != nullptr && terminal != nullptr &&
+               earliest->GetBlockHash() == marker->earliest_carrier_hash &&
+               terminal->GetBlockHash() == marker->terminal_carrier_hash;
+    };
+    if (on_active(next.active) && on_active(next.prospective)) {
+        // Repaired slots can converge on the active prefix. Keep the earliest
+        // replay floor and the farthest receipt dependency as one obligation.
+        if ((next.active->terminal_carrier_height ==
+                 next.prospective->terminal_carrier_height &&
+             (next.active->terminal_parent_receipt_state !=
+                  next.prospective->terminal_parent_receipt_state ||
+              next.active->terminal_receipt != next.prospective->terminal_receipt)) ||
+            (next.active->earliest_carrier_height ==
+                 next.prospective->earliest_carrier_height &&
+             (next.active->earliest_carrier_hash !=
+                  next.prospective->earliest_carrier_hash ||
+              next.active->predecessor_receipt_state !=
+                  next.prospective->predecessor_receipt_state))) {
+            return false;
+        }
+        auto merged{next.prospective->earliest_carrier_height <
+                            next.active->earliest_carrier_height
+                        ? *next.prospective : *next.active};
+        const auto& terminal{next.prospective->terminal_carrier_height >
+                                     next.active->terminal_carrier_height
+                                 ? *next.prospective : *next.active};
+        merged.terminal_carrier_height = terminal.terminal_carrier_height;
+        merged.terminal_carrier_hash = terminal.terminal_carrier_hash;
+        merged.terminal_parent_receipt_state = terminal.terminal_parent_receipt_state;
+        merged.terminal_receipt = terminal.terminal_receipt;
+        next.active = std::move(merged);
+        next.prospective.reset();
+    }
+    if (next == durable) return true;
+    LOCK(m_btcc_preseal_mutex);
+    return m_btcc_preseal_state == durable && PersistBTCCPresealStateLocked(next);
 }
 
 bool CChainLocksHandler::RecoverActiveBTCCPresealBounded(
@@ -10087,6 +10302,10 @@ CChainLocksHandler::AdvanceBTCCReplayValidationFrontier(
 void CChainLocksHandler::MaybeReplayBTCCPreseal()
 {
     if (!m_chainman.IsPQParticipationAllowed()) return;
+    {
+        LOCK(cs_main);
+        if (!RepairReorgedBTCCPresealTerminals()) return;
+    }
     pq::BTCCPresealState durable;
     pq::PaymentAuditPresealState payment_audit_durable;
     {
@@ -10141,7 +10360,15 @@ void CChainLocksHandler::MaybeReplayBTCCPreseal()
         // Promotion happens only after ActiveChain proves that the prospective
         // branch won. Until this fsynced transition, the prior active boundary
         // remains alongside it and survives every crash cut.
-        if (marker_on_active(next.prospective)) {
+        const auto terminal_on_active = [&](const auto& candidate)
+            EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+            if (!candidate) return false;
+            const CBlockIndex* terminal{m_chainman.ActiveChain()[
+                candidate->terminal_carrier_height]};
+            return terminal != nullptr && terminal->GetBlockHash() ==
+                candidate->terminal_carrier_hash && marker_on_active(candidate);
+        };
+        if (terminal_on_active(next.prospective)) {
             if (!marker_on_active(next.active) ||
                 next.prospective->earliest_carrier_height <
                     next.active->earliest_carrier_height) {
@@ -17952,6 +18179,86 @@ bool CChainLocksHandler::ProcessCollectedChainLock(
         /*peer_fault=*/nullptr, &finalized);
 }
 
+std::optional<CChainLocksHandler::LocalChainLockFinalization>
+CChainLocksHandler::GetChainLockFinalizationForRetry(
+    const CurrentSigningContextsPtr& expected_contexts,
+    uint64_t expected_collector_generation,
+    const CurrentSigningContextsPtr& current_contexts,
+    uint64_t current_collector_generation,
+    uint64_t admission_generation,
+    std::size_t variant_index,
+    pq::ChainLockCollector* collector)
+{
+    if (!expected_contexts || expected_contexts != current_contexts ||
+        expected_collector_generation != current_collector_generation ||
+        admission_generation == 0 ||
+        expected_contexts->source.admission_generation != admission_generation ||
+        variant_index >= expected_contexts->count ||
+        variant_index >= CurrentSigningContexts::MAX_VARIANTS ||
+        collector == nullptr) {
+        return std::nullopt;
+    }
+    const auto& context{expected_contexts->prepared_contexts[variant_index]};
+    if (!context || collector->GetPreparedContext() != context ||
+        collector->GetStatement() != expected_contexts->statements[variant_index]) {
+        return std::nullopt;
+    }
+    auto proof{collector->FinalizeCollection()};
+    if (!proof || proof->ContextPtr() != context) return std::nullopt;
+    return LocalChainLockFinalization{
+        std::move(proof), expected_contexts, variant_index,
+        admission_generation, expected_collector_generation};
+}
+
+void CChainLocksHandler::MaybeRetryChainLockFinalization()
+{
+    // A first submission can lose ordinary admission contention after the
+    // last unique share arrived. Retry the immutable collector proof once per
+    // scheduler pass; duplicate network shares never trigger this work.
+    const uint64_t admission_generation{GetShareAdmissionGeneration()};
+    if (admission_generation == 0) return;
+    TRY_LOCK(m_share_lifecycle_mutex, lifecycle_lock);
+    if (!lifecycle_lock) return;
+    const auto contexts{GetPublishedCurrentSigningContexts(admission_generation)};
+    if (!contexts || !IsCurrentSigningSource(contexts->source)) return;
+    uint64_t collector_generation{0};
+    {
+        LOCK(m_collector_mutex);
+        if (m_current_signing_contexts != contexts) return;
+        collector_generation = m_collector_generation;
+    }
+    for (std::size_t variant{0}; variant < contexts->count; ++variant) {
+        if (!IsShareAdmissionGenerationCurrent(admission_generation) ||
+            !IsCurrentSigningSource(contexts->source)) {
+            return;
+        }
+        std::optional<LocalChainLockFinalization> finalized;
+        {
+            LOCK(m_collector_mutex);
+            finalized = GetChainLockFinalizationForRetry(
+                contexts, collector_generation, m_current_signing_contexts,
+                m_collector_generation, GetShareAdmissionGeneration(), variant,
+                m_collectors[variant].get());
+        }
+        if (!finalized) continue;
+        // The source check runs outside the collector mutex. A retired view
+        // cannot regain authority merely because its certificate is complete.
+        if (!IsShareAdmissionGenerationCurrent(admission_generation) ||
+            !IsCurrentSigningSource(contexts->source)) {
+            return;
+        }
+        {
+            LOCK(m_collector_mutex);
+            if (m_current_signing_contexts != contexts ||
+                m_collector_generation != collector_generation) {
+                return;
+            }
+        }
+        BlockValidationState state;
+        (void)ProcessCollectedChainLock(*finalized, state);
+    }
+}
+
 std::optional<bool>
 CChainLocksHandler::ProcessPaymentAuditSealCertificate(
     NodeId from,
@@ -20245,7 +20552,8 @@ void CChainLocksHandler::CheckActiveState()
         verification_available = IsChainLockVerificationAvailable();
         if (m_share_admission_gate.TryPublishEnabled(
                 observation, verification_available && operational &&
-                    !m_historical_sync_reauthentication_pending.load())) {
+                    !m_historical_sync_reauthentication_pending.load() &&
+                    !m_btcc_preseal_repair_pending.load())) {
             break;
         }
     }
@@ -20268,7 +20576,8 @@ void CChainLocksHandler::CheckActiveState()
         LOCK(cs_main);
         (void)m_auxiliary_history_gc_auth_gate.SetHealthy(
             deterministicMNManager && configured && verification_available &&
-                enforce && !m_historical_sync_reauthentication_pending.load(),
+                enforce && !m_historical_sync_reauthentication_pending.load() &&
+                !m_btcc_preseal_repair_pending.load(),
             [this] { return RevokeAuxiliaryHistoryGCAuthorization(); });
     }
 }

@@ -34,39 +34,6 @@ static_assert(std::is_same_v<
                            .Certificate()),
               const FinalChainLock&>);
 
-namespace llmq_tests {
-
-class ChainLockCollectorTestAccess {
-public:
-    static void InsertFrom(ChainLockCollector& collector,
-                           std::size_t quorum_slot,
-                           std::size_t first_member,
-                           std::size_t count,
-                           uint8_t tag)
-    {
-        for (std::size_t member{first_member};
-             member < first_member + count; ++member) {
-            AuthenticatedChildSignature signature;
-            signature.key_proof.public_key[0] = 1;
-            signature.signature[0] = tag;
-            signature.signature[1] = static_cast<uint8_t>(member);
-            signature.signature[2] = static_cast<uint8_t>(member >> 8);
-            collector.m_shares[quorum_slot].emplace(
-                static_cast<uint16_t>(member), std::move(signature));
-        }
-    }
-
-    static void Insert(ChainLockCollector& collector,
-                       std::size_t quorum_slot,
-                       std::size_t count,
-                       uint8_t tag)
-    {
-        InsertFrom(collector, quorum_slot, 0, count, tag);
-    }
-};
-
-} // namespace llmq_tests
-
 namespace {
 
 uint256 NonNullHash(uint64_t value)
