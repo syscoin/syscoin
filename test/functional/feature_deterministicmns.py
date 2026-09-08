@@ -278,22 +278,24 @@ class DIP3Test(AuxPoWMiningMixin, SyscoinTestFramework):
         # with an unrelated standard-transaction weight failure.
         payment_mn.rewards_address = self.nodes[0].getnewaddress()
         self.update_mn_payee(payment_mn, payment_mn.rewards_address)
-        # change voting address and see if changes are reflected in `masternode status` rpc output
+        # SYSCOIN: After activation, status updates expose the SLH voting key.
         mn = payment_mn
         node = self.nodes[0]
         old_dmnState = mn.node.masternode_status()["dmnState"]
-        old_voting_address = old_dmnState["votingAddress"]
-        new_voting_address = node.getnewaddress()
-        assert old_voting_address != new_voting_address
+        # The payment MN was registered during legacy preparation, so it has
+        # no PQ voting key until the first registrar update below.
+        old_voting_key = old_dmnState.get("pqVotingPublicKey", "0" * 64)
+        new_voting_key = node.protx_generate_voting_key()
+        assert old_voting_key != new_voting_key
         # also check if funds from payout address are used when no fee source address is specified
         node.sendtoaddress(mn.rewards_address, 0.001)
         self.generate(node, 1)
-        node.protx_update_registrar(mn.protx_hash, "", new_voting_address, "")
+        node.protx_update_registrar(mn.protx_hash, "", new_voting_key, "")
         self.generate(node, 1)
-        # SYSCOIN END: Bound payout-input selection after PQ test acceleration.
         new_dmnState = mn.node.masternode_status()["dmnState"]
-        new_voting_address_from_rpc = new_dmnState["votingAddress"]
-        assert new_voting_address_from_rpc == new_voting_address
+        assert_equal(new_dmnState["pqVotingPublicKey"], new_voting_key)
+        assert_equal(new_dmnState["pqVotingKeyVersion"], old_dmnState.get("pqVotingKeyVersion", 0) + 1)
+        # SYSCOIN END: Bound payout-input selection after PQ test acceleration.
         # make sure payoutAddress is the same as before
         assert old_dmnState["payoutAddress"] == new_dmnState["payoutAddress"]
 
@@ -307,7 +309,12 @@ class DIP3Test(AuxPoWMiningMixin, SyscoinTestFramework):
         operator_keys = node.protx_generate_operator_keypair()
         mn.fundsAddr = node.getnewaddress()
         mn.ownerAddr = node.getnewaddress()
-        mn.votingAddr = mn.ownerAddr
+        # SYSCOIN BEGIN: Match voting credentials to the next block's profile.
+        mn.votingCredential = (
+            node.protx_generate_voting_key()
+            if node.getblockcount() + 1 >= self.PQ_BTCC_CANDIDATE_ORIGIN
+            else mn.ownerAddr)
+        # SYSCOIN END: Match voting credentials to the next block's profile.
         mn.operatorKey = operator_keys['operatorKey']
         mn.chainlockSeed = operator_keys['chainlockSeed']
 
@@ -334,7 +341,7 @@ class DIP3Test(AuxPoWMiningMixin, SyscoinTestFramework):
         mn.collateral_address = node.getnewaddress()
         mn.rewards_address = node.getnewaddress()
 
-        mn.protx_hash = node.protx_register_fund( mn.collateral_address, '127.0.0.1:%d' % mn.p2p_port, mn.ownerAddr, "", mn.votingAddr, 0, mn.rewards_address, mn.fundsAddr)
+        mn.protx_hash = node.protx_register_fund( mn.collateral_address, '127.0.0.1:%d' % mn.p2p_port, mn.ownerAddr, "", mn.votingCredential, 0, mn.rewards_address, mn.fundsAddr)  # SYSCOIN: legacy address or PQ voting key.
         mn.collateral_txid = mn.protx_hash
         mn.collateral_vout = -1
 
@@ -350,7 +357,7 @@ class DIP3Test(AuxPoWMiningMixin, SyscoinTestFramework):
         node.sendtoaddress(mn.fundsAddr, 0.001)
         mn.rewards_address = node.getnewaddress()
 
-        mn.protx_hash = node.protx_register(mn.collateral_txid, mn.collateral_vout, '127.0.0.1:%d' % mn.p2p_port, mn.ownerAddr, "", mn.votingAddr, 0, mn.rewards_address, mn.fundsAddr)
+        mn.protx_hash = node.protx_register(mn.collateral_txid, mn.collateral_vout, '127.0.0.1:%d' % mn.p2p_port, mn.ownerAddr, "", mn.votingCredential, 0, mn.rewards_address, mn.fundsAddr)  # SYSCOIN: legacy address or PQ voting key.
 
     # SYSCOIN BEGIN: Register one real root and activate the PQ test profile.
     def activate_payment_mn(self, node, mn):

@@ -688,7 +688,8 @@ BOOST_AUTO_TEST_CASE(operator_vote_sync_verification_is_globally_and_source_boun
         bounded.Size(), GovernanceVoteSyncRateLimiter::MAX_SOURCES);
 }
 
-BOOST_AUTO_TEST_CASE(authority_delta_vote_lookup_is_operator_bounded)
+// SYSCOIN: Vote invalidation checks activation against initialized chain parameters.
+BOOST_FIXTURE_TEST_CASE(authority_delta_vote_lookup_is_operator_bounded, BasicTestingSetup)
 {
     constexpr std::size_t operator_count{256};
     CGovernanceObjectVoteFile votes;
