@@ -21,6 +21,7 @@ CMasternodePayments mnpayments;
 
 bool HasValidatedSuperblockPayments(const CBlock& block, const CBlockIndex& index)
 {
+    LOCK(cs_main);
     if (!(index.nStatus & BLOCK_GOVERNANCE_VALIDATED) ||
         (index.nStatus & BLOCK_FAILED_MASK) ||
         !CSuperblock::IsValidBlockHeight(index.nHeight) ||
