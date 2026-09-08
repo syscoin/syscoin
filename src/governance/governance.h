@@ -13,11 +13,13 @@
 #include <cachemultimap.h>
 #include <chrono>
 #include <evo/evodb.h>
+#include <evo/pq_voting_key.h>
 #include <limits>
 #include <map>
 #include <memory>
 #include <net_types.h>
 #include <optional>
+#include <pubkey.h>
 #include <set>
 #include <string_view>
 #include <tuple>
@@ -500,7 +502,15 @@ private:
     };
     using pq_authority_map_t =
         std::map<COutPoint, PQGovernanceAuthority>;
-    using delegated_authority_map_t = std::map<COutPoint, CKeyID>;
+    struct DelegatedGovernanceAuthority {
+        uint256 pro_tx_hash;
+        CKeyID legacy_voting_key;
+        llmq::pq::VotingKeyRecord voting_key;
+
+        friend bool operator==(const DelegatedGovernanceAuthority&,
+                               const DelegatedGovernanceAuthority&) = default;
+    };
+    using delegated_authority_map_t = std::map<COutPoint, DelegatedGovernanceAuthority>;
     using pq_vote_object_index_t =
         std::map<COutPoint, std::set<uint256>>;
 
@@ -560,7 +570,7 @@ private:
         GUARDED_BY(cs);
     pq_vote_object_index_t m_pq_vote_objects GUARDED_BY(cs);
     // Retained authorizations can become active on an unchanged-authority
-    // extension. Index the next signing-height boundary per trigger so normal
+    // extension. Index the next signing-height boundary per object so normal
     // exact-snapshot reuse never needs to walk the retained vote history.
     std::map<int32_t, std::set<uint256>> m_pq_future_authorizations GUARDED_BY(cs);
     std::map<uint256, int32_t> m_pq_future_authorization_heights GUARDED_BY(cs);

@@ -6,6 +6,7 @@
 
 #include <chain.h>
 #include <chainparams.h>
+#include <consensus/pq_migration_config.h>
 #include <governance/pq_governance_auth_interface.h> // SYSCOIN: declaration-only auth boundary.
 #include <key.h>
 #include <masternode/activemasternode.h>
@@ -94,9 +95,18 @@ vote_signal_enum_t CGovernanceVoting::ConvertVoteSignal(const std::string& strVo
     return it->second;
 }
 
+bool IsPQGovernanceEnabledAtHeight(int32_t height) noexcept
+{
+    const auto& consensus{Params().GetConsensus()};
+    // An invalid transition must not reopen the retired ECDSA admission path.
+    return Consensus::CheckPQLegacyReplay(consensus, height) !=
+           Consensus::PQLegacyReplayResult::ALLOWED;
+}
+
 std::optional<llmq::pq::GovernanceAuthPurpose>
 GetGovernanceVoteAuthPurpose(
-    int governance_object_type, vote_signal_enum_t signal) noexcept
+    int governance_object_type, vote_signal_enum_t signal,
+    int32_t validation_height) noexcept
 {
     if (signal <= VOTE_SIGNAL_NONE || signal > MAX_SUPPORTED_VOTE_SIGNAL) {
         return std::nullopt;
@@ -104,15 +114,20 @@ GetGovernanceVoteAuthPurpose(
     if (governance_object_type == GOVERNANCE_OBJECT_TRIGGER) {
         return llmq::pq::GovernanceAuthPurpose::TRIGGER_VOTE;
     }
-    if (governance_object_type == GOVERNANCE_OBJECT_PROPOSAL &&
-        signal != VOTE_SIGNAL_FUNDING) {
+    if (governance_object_type == GOVERNANCE_OBJECT_PROPOSAL) {
+        if (signal == VOTE_SIGNAL_FUNDING) {
+            if (validation_height != std::numeric_limits<int32_t>::max() &&
+                !IsPQGovernanceEnabledAtHeight(validation_height)) return std::nullopt;
+            return llmq::pq::GovernanceAuthPurpose::PROPOSAL_FUNDING_VOTE;
+        }
         return llmq::pq::GovernanceAuthPurpose::PROPOSAL_VOTE;
     }
     return std::nullopt;
 }
 
 bool IsPotentialOrphanGovernanceVoteAuthorization(
-    vote_signal_enum_t signal, std::size_t signature_size) noexcept
+    vote_signal_enum_t signal, std::size_t signature_size,
+    int32_t validation_height) noexcept
 {
     if (signal <= VOTE_SIGNAL_NONE || signal > MAX_SUPPORTED_VOTE_SIGNAL) {
         return false;
@@ -121,9 +136,9 @@ bool IsPotentialOrphanGovernanceVoteAuthorization(
         llmq::pq::GovernanceAuthorization::WIRE_SIZE) {
         return true;
     }
-    // Without the parent, compact ECDSA can only become a proposal funding
-    // vote; every other supported object/signal pairing requires SLH.
-    return signal == VOTE_SIGNAL_FUNDING &&
+    return validation_height != std::numeric_limits<int32_t>::max() &&
+           !IsPQGovernanceEnabledAtHeight(validation_height) &&
+           signal == VOTE_SIGNAL_FUNDING &&
            signature_size == CPubKey::COMPACT_SIGNATURE_SIZE;
 }
 
@@ -298,36 +313,39 @@ bool CGovernanceVote::CheckPQSignature(
 bool CGovernanceVote::CheckPQAuthorizationContext(
     const CBlockIndex& validation_branch,
     const CDeterministicMNList& validation_mn_list,
-    std::string& error) const
+    std::string& error,
+    llmq::pq::GovernanceAuthPurpose purpose) const
 {
     llmq::pq::GovernanceAuthorization authorization;
     return llmq::pq::CheckGovernanceAuthorizationContextForBranch(
         validation_branch, validation_mn_list, masternodeOutpoint, vchSig,
-        authorization, error);
+        authorization, error, purpose);
 }
 
 bool CGovernanceVote::CheckPQAuthorizationContext(
     const CBlockIndex& validation_branch,
     const CDeterministicMNList& validation_mn_list,
     const llmq::pq::PQRegistrySnapshot& current_snapshot,
-    std::string& error) const
+    std::string& error,
+    llmq::pq::GovernanceAuthPurpose purpose) const
 {
     llmq::pq::GovernanceAuthorization authorization;
     return llmq::pq::CheckGovernanceAuthorizationContext(
         validation_branch, validation_mn_list, current_snapshot,
-        masternodeOutpoint, vchSig, authorization, error);
+        masternodeOutpoint, vchSig, authorization, error, purpose);
 }
 
 bool CGovernanceVote::CheckPQAuthorizationContext(
     const CBlockIndex& validation_branch,
     const CDeterministicMNList& validation_mn_list,
     const llmq::pq::PQRegistryReadView& current_snapshot,
-    std::string& error) const
+    std::string& error,
+    llmq::pq::GovernanceAuthPurpose purpose) const
 {
     llmq::pq::GovernanceAuthorization authorization;
     return llmq::pq::CheckGovernanceAuthorizationContext(
         validation_branch, validation_mn_list, current_snapshot,
-        masternodeOutpoint, vchSig, authorization, error);
+        masternodeOutpoint, vchSig, authorization, error, purpose);
 }
 
 bool CGovernanceVote::IsValidBasic(
@@ -364,7 +382,9 @@ bool CGovernanceVote::IsValidBasic(
 bool CGovernanceVote::IsValid(
     const CDeterministicMNList& validation_mn_list) const
 {
-    if (!IsValidBasic(validation_mn_list)) return false;
+    if (validation_mn_list.IsNull() ||
+        IsPQGovernanceEnabledAtHeight(validation_mn_list.GetHeight()) ||
+        !IsValidBasic(validation_mn_list)) return false;
     const auto dmn{
         validation_mn_list.GetValidMNByCollateral(masternodeOutpoint)};
     return dmn && CheckSignature(dmn->pdmnState->keyIDVoting);
@@ -387,14 +407,15 @@ bool CGovernanceVote::IsValidPQ(
 bool CGovernanceVote::IsValidPQContext(
     const CBlockIndex& validation_branch,
     const CDeterministicMNList& validation_mn_list,
-    std::string& error) const
+    std::string& error,
+    llmq::pq::GovernanceAuthPurpose purpose) const
 {
     if (!IsValidBasic(validation_mn_list)) {
         error = "invalid governance vote fields or masternode identity";
         return false;
     }
     return CheckPQAuthorizationContext(validation_branch, validation_mn_list,
-                                       error);
+                                       error, purpose);
 }
 
 bool operator==(const CGovernanceVote& vote1, const CGovernanceVote& vote2)

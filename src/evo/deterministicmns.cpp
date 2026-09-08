@@ -92,6 +92,17 @@ uint256 GetDMNInverseHistoryCommitment(
     return writer.GetHash();
 }
 
+bool InverseCarriesPQVotingState(const CDeterministicMNListDiff& diff)
+{
+    return std::any_of(diff.updatedMNs.begin(), diff.updatedMNs.end(),
+        [](const auto& entry) {
+            return (entry.second.fields & CDeterministicMNStateDiff::Field_pqVotingKey) != 0;
+        }) || std::any_of(diff.addedMNs.begin(), diff.addedMNs.end(),
+        [](const auto& dmn) {
+            return dmn && dmn->pdmnState && dmn->pdmnState->pqVotingKey.key_version != 0;
+        });
+}
+
 // SYSCOIN BEGIN: Incremental branch-local deterministic-state commitment.
 DataStream SerializePQLegacyStateElement(const CDeterministicMN& dmn)
 {
@@ -115,6 +126,7 @@ DataStream SerializePQGovernanceAuthorityElement(
     stream << dmn.proTxHash << dmn.collateralOutpoint
            << dmn.pdmnState->keyIDVoting
            << CDeterministicMNList::IsMNValid(dmn);
+    llmq::pq::SerializeVotingKeyCommitment(stream, dmn.pdmnState->pqVotingKey);
     return stream;
 }
 // SYSCOIN END: Incremental branch-local deterministic-state commitment.
@@ -562,7 +574,9 @@ bool ReconstructParentFromInverse(
 
 bool CDeterministicMNListInverse::IsStructurallyValid() const
 {
-    if (version != VERSION || genesis_hash.IsNull() ||
+    if ((version != VERSION && version != PQ_VOTING_VERSION) ||
+        ((version == PQ_VOTING_VERSION) != InverseCarriesPQVotingState(inverse_diff)) ||
+        genesis_hash.IsNull() ||
         coverage_base_height < 0 ||
         coverage_base_height > parent_height ||
         parent_history_commitment.IsNull() || history_commitment.IsNull() ||
@@ -597,18 +611,22 @@ bool CDeterministicMNListInverse::IsStructurallyValid() const
             return false;
         }
     }
-    // The inverse journal intentionally freezes the state-diff field language
-    // through vchNEVMAddress. A later field is rejected until a new journal
-    // schema defines how it participates in parent-state reconstruction.
-    static constexpr uint32_t INVERSE_STATE_DIFF_FIELDS{
+    // V1 stays frozen for authenticated historical replay. V2 adds only the
+    // independent voting record, including an empty record when undoing its
+    // initial registration; unrelated history retains its exact V1 bytes.
+    static constexpr uint32_t LEGACY_INVERSE_STATE_DIFF_FIELDS{
         (static_cast<uint32_t>(
              CDeterministicMNStateDiff::Field_vchNEVMAddress)
          << 1) -
         1};
+    const uint32_t inverse_state_diff_fields{LEGACY_INVERSE_STATE_DIFF_FIELDS |
+        (version == PQ_VOTING_VERSION
+             ? static_cast<uint32_t>(CDeterministicMNStateDiff::Field_pqVotingKey)
+             : 0U)};
     for (const auto& [internal_id, state_diff] : inverse_diff.updatedMNs) {
         if (internal_id >= parent_total_registered_count ||
             state_diff.fields == 0 ||
-            (state_diff.fields & ~INVERSE_STATE_DIFF_FIELDS) != 0 ||
+            (state_diff.fields & ~inverse_state_diff_fields) != 0 ||
             !changed_ids.emplace(internal_id).second) {
             return false;
         }
@@ -897,6 +915,9 @@ bool CDeterministicMNManager::CommitInverseJournal(
         inverse.parent_total_registered_count =
             parent_list.GetTotalRegisteredCount();
         child_list.BuildTrackedInverseDiff(parent_list, inverse.inverse_diff);
+        if (InverseCarriesPQVotingState(inverse.inverse_diff)) {
+            inverse.version = CDeterministicMNListInverse::PQ_VOTING_VERSION;
+        }
         const uint256 parent_state_hash{
             parent_list.GetOrComputePQLegacyStateHash(
                 consensus.hashGenesisBlock)};
@@ -2563,6 +2584,7 @@ void CDeterministicMNList::UpdateMN(const uint256& proTxHash, const std::shared_
     const DataStream new_content{SerializePQLegacyStateElement(*dmn)};
     const bool governance_authority_changed{
         oldDmn->pdmnState->keyIDVoting != pdmnState->keyIDVoting ||
+        oldDmn->pdmnState->pqVotingKey != pdmnState->pqVotingKey ||
         IsMNValid(*oldDmn) != IsMNValid(*dmn)};
     const bool nevm_address_changed{
         oldState->vchNEVMAddress != pdmnState->vchNEVMAddress};
@@ -3286,6 +3308,11 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
                 dmn->pdmnState = std::make_shared<CDeterministicMNState>(proTx);
                 auto dmnState = std::make_shared<CDeterministicMNState>(*dmn->pdmnState);
                 dmnState->nRegisteredHeight = nHeight;
+                if (proTx.nVersion == CProRegTx::PQ_VERSION &&
+                    (llmq::pq::IsNullVotingPublicKey(proTx.pqVotingPublicKey) ||
+                     !dmnState->pqVotingKey.UpdatePublicKey(proTx.pqVotingPublicKey, nHeight))) {
+                    return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-protx-pq-voting-key");
+                }
                 // if using external collateral,  height from when collateral was created
                 if(!proTx.collateralOutpoint.hash.IsNull())
                     dmnState->nCollateralHeight = coin.nHeight;
@@ -3403,6 +3430,9 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
                 }
                 if (proTx.nVersion == CProUpRegTx::PQ_VERSION) {
                     newState->nVersion = proTx.nVersion;
+                    if (!newState->pqVotingKey.UpdatePublicKey(proTx.pqVotingPublicKey, nHeight)) {
+                        return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-protx-pq-voting-key");
+                    }
                 }
 
                 newState->keyIDVoting = proTx.keyIDVoting;
@@ -3816,6 +3846,7 @@ bool CDeterministicMNManager::GetInverseJournalEntryStatsForTesting(
     try {
         CDeterministicMNListInverse inverse;
         if (!m_inverse_journal->ReadCache(child_hash, inverse)) return false;
+        stats.version = inverse.version;
         stats.serialized_size = GetSerializeSize(inverse);
         stats.added_mns = inverse.inverse_diff.addedMNs.size();
         stats.updated_mns = inverse.inverse_diff.updatedMNs.size();

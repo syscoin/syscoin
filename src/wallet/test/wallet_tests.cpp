@@ -12,6 +12,7 @@
 #include <addresstype.h>
 #include <interfaces/chain.h>
 #include <key_io.h>
+#include <llmq/pq_global_auth.h>
 #include <node/blockstorage.h>
 #include <policy/policy.h>
 #include <rpc/server.h>
@@ -25,6 +26,9 @@
 #include <wallet/coincontrol.h>
 #include <wallet/context.h>
 #include <wallet/receive.h>
+#ifdef USE_BDB
+#include <wallet/salvage.h>
+#endif
 #include <wallet/spend.h>
 #include <wallet/test/util.h>
 #include <wallet/test/wallet_test_fixture.h>
@@ -45,6 +49,126 @@ static_assert(DEFAULT_TRANSACTION_MINFEE >= DEFAULT_MIN_RELAY_TX_FEE, "wallet mi
 static_assert(WALLET_INCREMENTAL_RELAY_FEE >= DEFAULT_INCREMENTAL_RELAY_FEE, "wallet incremental fee is smaller than default incremental relay fee");
 
 BOOST_FIXTURE_TEST_SUITE(wallet_tests, WalletTestingSetup)
+
+BOOST_AUTO_TEST_CASE(pq_voting_keys_generation_and_domain)
+{
+    slhdsa::PublicKey first, second;
+    std::string error;
+    BOOST_REQUIRE(m_wallet.GenerateVotingKey(first, error));
+    BOOST_REQUIRE(m_wallet.GenerateVotingKey(second, error));
+    BOOST_CHECK(first != second);
+    BOOST_CHECK(m_wallet.HasVotingKey(first));
+    BOOST_CHECK(m_wallet.HasVotingKey(second));
+    BOOST_CHECK(m_wallet.IsWalletFlagSet(WALLET_FLAG_PQ_VOTING_KEYS));
+    BOOST_CHECK((WALLET_FLAG_PQ_VOTING_KEYS >> 32) != 0);
+    const uint256 digest{GetRandHash()};
+    const auto context{llmq::pq::GetGlobalAuthContext(llmq::pq::GlobalAuthPurpose::GOVERNANCE_PROPOSAL_FUNDING_VOTE)};
+    slhdsa::Signature signature, repeated;
+    BOOST_REQUIRE(m_wallet.SignVotingAuthorization(first, digest, signature, error));
+    BOOST_REQUIRE(m_wallet.SignVotingAuthorization(first, digest, repeated, error));
+    BOOST_CHECK(signature == repeated);
+    BOOST_CHECK(slhdsa::Verify(first, std::span{digest.begin(), digest.size()}, context, signature));
+    BOOST_CHECK(!slhdsa::Verify(second, std::span{digest.begin(), digest.size()}, context, signature));
+    const uint256 changed{GetRandHash()};
+    BOOST_CHECK(!slhdsa::Verify(first, std::span{changed.begin(), changed.size()}, context, signature));
+    BOOST_CHECK(!slhdsa::Verify(first, std::span{digest.begin(), digest.size()},
+        llmq::pq::GetGlobalAuthContext(llmq::pq::GlobalAuthPurpose::GOVERNANCE_PROPOSAL_VOTE), signature));
+    BOOST_CHECK(!m_wallet.SignVotingAuthorization({}, digest, signature, error));
+    BOOST_CHECK(!m_wallet.SignVotingAuthorization(first, {}, signature, error));
+
+    CWallet disabled(m_node.chain.get(), "", CreateMockableWalletDatabase());
+    WITH_LOCK(disabled.cs_wallet, disabled.SetWalletFlag(WALLET_FLAG_DISABLE_PRIVATE_KEYS));
+    BOOST_CHECK(!disabled.GenerateVotingKey(second, error));
+    BOOST_CHECK(!disabled.IsWalletFlagSet(WALLET_FLAG_PQ_VOTING_KEYS));
+    CWallet failed(m_node.chain.get(), "", CreateMockableWalletDatabase());
+    GetMockableDatabase(failed).m_pass = false;
+    BOOST_CHECK(!failed.GenerateVotingKey(second, error));
+    BOOST_CHECK(!failed.IsWalletFlagSet(WALLET_FLAG_PQ_VOTING_KEYS));
+    BOOST_CHECK(second == slhdsa::PublicKey{});
+}
+
+BOOST_AUTO_TEST_CASE(pq_voting_keys_encryption_reload)
+{
+    slhdsa::PublicKey first, second;
+    std::string error;
+    BOOST_REQUIRE(m_wallet.GenerateVotingKey(first, error));
+    const auto plain_record{std::make_pair(DBKeys::PQ_VOTING_KEY, first)};
+    const auto encrypted_record{std::make_pair(DBKeys::PQ_VOTING_CRYPTED_KEY, first)};
+    BOOST_CHECK(m_wallet.GetDatabase().MakeBatch()->Exists(plain_record));
+    BOOST_CHECK(!m_wallet.GetDatabase().MakeBatch()->Exists(encrypted_record));
+    const uint256 digest{GetRandHash()};
+    slhdsa::Signature original, restored;
+    BOOST_REQUIRE(m_wallet.SignVotingAuthorization(first, digest, original, error));
+    BOOST_REQUIRE(m_wallet.EncryptWallet(SecureString{"pq-wallet-test"}));
+    BOOST_CHECK(m_wallet.IsLocked());
+    BOOST_CHECK(m_wallet.HasVotingKey(first));
+    BOOST_CHECK(!m_wallet.GetDatabase().MakeBatch()->Exists(plain_record));
+    BOOST_CHECK(m_wallet.GetDatabase().MakeBatch()->Exists(encrypted_record));
+    BOOST_CHECK(!m_wallet.SignVotingAuthorization(first, digest, restored, error));
+    BOOST_CHECK(!m_wallet.GenerateVotingKey(second, error));
+    BOOST_CHECK(!m_wallet.Unlock(SecureString{"wrong-passphrase"}));
+    BOOST_REQUIRE(m_wallet.Unlock(SecureString{"pq-wallet-test"}));
+    BOOST_REQUIRE(m_wallet.GenerateVotingKey(second, error));
+    BOOST_CHECK(!m_wallet.GetDatabase().MakeBatch()->Exists(std::make_pair(DBKeys::PQ_VOTING_KEY, second)));
+    BOOST_CHECK(m_wallet.GetDatabase().MakeBatch()->Exists(std::make_pair(DBKeys::PQ_VOTING_CRYPTED_KEY, second)));
+    BOOST_REQUIRE(m_wallet.SignVotingAuthorization(first, digest, restored, error));
+    BOOST_CHECK(original == restored);
+    BOOST_REQUIRE(m_wallet.ChangeWalletPassphrase(SecureString{"pq-wallet-test"}, SecureString{"pq-wallet-new"}));
+
+    CWallet reloaded(m_node.chain.get(), "", DuplicateMockDatabase(m_wallet.GetDatabase()));
+    BOOST_REQUIRE_EQUAL(reloaded.LoadWallet(), DBErrors::LOAD_OK);
+    BOOST_CHECK(reloaded.IsLocked());
+    BOOST_CHECK(reloaded.HasVotingKey(first));
+    BOOST_CHECK(reloaded.HasVotingKey(second));
+    BOOST_CHECK(!reloaded.Unlock(SecureString{"pq-wallet-test"}));
+    BOOST_REQUIRE(reloaded.Unlock(SecureString{"pq-wallet-new"}));
+    BOOST_REQUIRE(reloaded.SignVotingAuthorization(first, digest, restored, error));
+    BOOST_CHECK(original == restored);
+}
+
+BOOST_AUTO_TEST_CASE(pq_voting_keys_reject_corruption)
+{
+    slhdsa::PublicKey public_key;
+    std::string error;
+    BOOST_REQUIRE(m_wallet.GenerateVotingKey(public_key, error));
+    {
+        auto database{DuplicateMockDatabase(m_wallet.GetDatabase())};
+        BOOST_REQUIRE(database->MakeBatch()->Write(DBKeys::FLAGS, uint64_t{0}));
+        CWallet corrupted(m_node.chain.get(), "", std::move(database));
+        BOOST_CHECK_EQUAL(corrupted.LoadWallet(), DBErrors::CORRUPT);
+    }
+    {
+        auto database{DuplicateMockDatabase(m_wallet.GetDatabase())};
+        BOOST_REQUIRE(database->MakeBatch()->Write(std::make_pair(DBKeys::PQ_VOTING_KEY, public_key),
+                                                 CKeyingMaterial(slhdsa::SECRET_KEY_SIZE, 0)));
+        CWallet corrupted(m_node.chain.get(), "", std::move(database));
+        BOOST_CHECK_EQUAL(corrupted.LoadWallet(), DBErrors::CORRUPT);
+    }
+    BOOST_REQUIRE(m_wallet.EncryptWallet(SecureString{"pq-wallet-test"}));
+    {
+        auto database{DuplicateMockDatabase(m_wallet.GetDatabase())};
+        std::pair<std::vector<unsigned char>, uint256> encrypted;
+        const auto record{std::make_pair(DBKeys::PQ_VOTING_CRYPTED_KEY, public_key)};
+        BOOST_REQUIRE(database->MakeBatch()->Read(record, encrypted));
+        encrypted.first.front() ^= 1;
+        BOOST_REQUIRE(database->MakeBatch()->Write(record, encrypted));
+        CWallet corrupted(m_node.chain.get(), "", std::move(database));
+        BOOST_CHECK_EQUAL(corrupted.LoadWallet(), DBErrors::CORRUPT);
+    }
+    {
+        auto database{DuplicateMockDatabase(m_wallet.GetDatabase())};
+        std::pair<std::vector<unsigned char>, uint256> encrypted;
+        const auto record{std::make_pair(DBKeys::PQ_VOTING_CRYPTED_KEY, public_key)};
+        BOOST_REQUIRE(database->MakeBatch()->Read(record, encrypted));
+        encrypted.first.front() ^= 1;
+        encrypted.second = Hash(encrypted.first);
+        BOOST_REQUIRE(database->MakeBatch()->Write(record, encrypted));
+        CWallet corrupted(m_node.chain.get(), "", std::move(database));
+        BOOST_REQUIRE_EQUAL(corrupted.LoadWallet(), DBErrors::LOAD_OK);
+        BOOST_CHECK(!corrupted.Unlock(SecureString{"pq-wallet-test"}));
+        BOOST_CHECK(corrupted.IsLocked());
+    }
+}
 
 static CMutableTransaction TestSimpleSpend(const CTransaction& from, uint32_t index, const CKey& key, const CScript& pubkey)
 {
@@ -424,6 +548,79 @@ void TestLoadWallet(const std::string& name, DatabaseFormat format, std::functio
     BOOST_CHECK_EQUAL(wallet->LoadWallet(), DBErrors::LOAD_OK);
     WITH_LOCK(wallet->cs_wallet, f(wallet));
 }
+
+BOOST_FIXTURE_TEST_CASE(pq_voting_keys_database_reopen, TestingSetup)
+{
+    for (DatabaseFormat format : DATABASE_FORMATS) {
+        const std::string name{strprintf("pq-voting-keys-%i", format)};
+        slhdsa::PublicKey first, second;
+        slhdsa::Signature original, restored;
+        const uint256 digest{GetRandHash()};
+        std::string error;
+        TestLoadWallet(name, format, [&](std::shared_ptr<CWallet> wallet) EXCLUSIVE_LOCKS_REQUIRED(wallet->cs_wallet) {
+            wallet->SetWalletFlag(WALLET_FLAG_DESCRIPTORS | WALLET_FLAG_BLANK_WALLET);
+            BOOST_REQUIRE(wallet->GenerateVotingKey(first, error));
+            BOOST_REQUIRE(wallet->SignVotingAuthorization(first, digest, original, error));
+        });
+        TestLoadWallet(name, format, [&](std::shared_ptr<CWallet> wallet) EXCLUSIVE_LOCKS_REQUIRED(wallet->cs_wallet) {
+            BOOST_CHECK(wallet->HasVotingKey(first));
+            BOOST_REQUIRE(wallet->SignVotingAuthorization(first, digest, restored, error));
+            BOOST_CHECK(restored == original);
+            BOOST_REQUIRE(wallet->EncryptWallet(SecureString{"pq-persistent-wallet"}));
+            BOOST_REQUIRE(wallet->Unlock(SecureString{"pq-persistent-wallet"}));
+            BOOST_REQUIRE(wallet->GenerateVotingKey(second, error));
+        });
+        TestLoadWallet(name, format, [&](std::shared_ptr<CWallet> wallet) EXCLUSIVE_LOCKS_REQUIRED(wallet->cs_wallet) {
+            BOOST_CHECK(wallet->IsLocked());
+            BOOST_CHECK(wallet->HasVotingKey(first));
+            BOOST_CHECK(wallet->HasVotingKey(second));
+            BOOST_CHECK(!wallet->SignVotingAuthorization(first, digest, restored, error));
+            auto batch{wallet->GetDatabase().MakeBatch()};
+            for (const auto& public_key : {first, second}) {
+                BOOST_CHECK(!batch->Exists(std::make_pair(DBKeys::PQ_VOTING_KEY, public_key)));
+                BOOST_CHECK(batch->Exists(std::make_pair(DBKeys::PQ_VOTING_CRYPTED_KEY, public_key)));
+            }
+            BOOST_REQUIRE(wallet->Unlock(SecureString{"pq-persistent-wallet"}));
+            BOOST_REQUIRE(wallet->SignVotingAuthorization(first, digest, restored, error));
+            BOOST_CHECK(restored == original);
+        });
+    }
+}
+
+#ifdef USE_BDB
+BOOST_FIXTURE_TEST_CASE(pq_voting_keys_salvage_refuses_loss, TestingSetup)
+{
+    for (bool encrypted : {false, true}) {
+        const std::string name{encrypted ? "pq-salvage-encrypted" : "pq-salvage-plain"};
+        slhdsa::PublicKey public_key;
+        TestLoadWallet(name, DatabaseFormat::BERKELEY, [&](std::shared_ptr<CWallet> wallet) EXCLUSIVE_LOCKS_REQUIRED(wallet->cs_wallet) {
+            std::string key_error;
+            BOOST_REQUIRE(wallet->GenerateVotingKey(public_key, key_error));
+            if (encrypted) BOOST_REQUIRE(wallet->EncryptWallet(SecureString{"pq-salvage-test"}));
+        });
+        const fs::path path{GetWalletDir() / name};
+        const auto directory_entries = [&] {
+            std::set<fs::path> entries;
+            for (const auto& entry : fs::directory_iterator(path)) entries.insert(entry.path());
+            return entries;
+        };
+        const auto before{directory_entries()};
+        bilingual_str error;
+        std::vector<bilingual_str> warnings;
+        BOOST_CHECK(!RecoverDatabaseFile(m_args, path, error, warnings));
+        BOOST_CHECK(error.original.find("does not support wallets containing PQ voting keys") != std::string::npos);
+        BOOST_CHECK(before == directory_entries());
+        TestLoadWallet(name, DatabaseFormat::BERKELEY, [&](std::shared_ptr<CWallet> wallet) EXCLUSIVE_LOCKS_REQUIRED(wallet->cs_wallet) {
+            BOOST_CHECK(wallet->HasVotingKey(public_key));
+            BOOST_CHECK(wallet->IsWalletFlagSet(WALLET_FLAG_PQ_VOTING_KEYS));
+            if (encrypted) BOOST_REQUIRE(wallet->Unlock(SecureString{"pq-salvage-test"}));
+            slhdsa::Signature signature;
+            std::string key_error;
+            BOOST_CHECK(wallet->SignVotingAuthorization(public_key, GetRandHash(), signature, key_error));
+        });
+    }
+}
+#endif
 
 BOOST_FIXTURE_TEST_CASE(LoadReceiveRequests, TestingSetup)
 {

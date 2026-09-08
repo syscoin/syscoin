@@ -1852,7 +1852,7 @@ void CGovernanceManager::ProcessMessage(CNode* pfrom, const std::string& strComm
                             deterministicMNManager->GetListForBlock(
                                 known_tip);
                         known_purpose = GetGovernanceVoteAuthPurpose(
-                            known_object_type, vote.GetSignal());
+                            known_object_type, vote.GetSignal(), known_tip->nHeight);
                     }
                 }
             }
@@ -1904,7 +1904,7 @@ void CGovernanceManager::ProcessMessage(CNode* pfrom, const std::string& strComm
                     object_it->second.GetObjectType() ==
                         known_object_type &&
                     GetGovernanceVoteAuthPurpose(
-                        known_object_type, vote.GetSignal()) ==
+                        known_object_type, vote.GetSignal(), known_tip->nHeight) ==
                         known_purpose) {
                     const auto rebound{
                         object_it->second.GetVoteFile().GetVote(nHash)};
@@ -2008,7 +2008,7 @@ void CGovernanceManager::ProcessMessage(CNode* pfrom, const std::string& strComm
                         rejected_purpose =
                             GetGovernanceVoteAuthPurpose(
                                 rejected_object_type,
-                                vote.GetSignal());
+                                vote.GetSignal(), rejected_tip->nHeight);
                     } else {
                         rejected_tip = nullptr;
                     }
@@ -2052,7 +2052,7 @@ void CGovernanceManager::ProcessMessage(CNode* pfrom, const std::string& strComm
                             object_it->second.HasStoredSupersedingVote(vote) &&
                             GetGovernanceVoteAuthPurpose(
                                 rejected_object_type,
-                                vote.GetSignal()) ==
+                                vote.GetSignal(), rejected_tip->nHeight) ==
                                 rejected_purpose;
                     }
                     if (stable_rejected_context) {
@@ -2108,16 +2108,12 @@ bool CGovernanceManager::VerifyOrphanPQVoteUnlocked(
     AssertLockNotHeld(cs_main);
     AssertLockNotHeld(cs);
 
-    if (vote.GetSignal() == VOTE_SIGNAL_FUNDING) {
-        return VerifyPQVoteUnlocked(
-            vote, validation_tip, validation_mn_list,
-            llmq::pq::GovernanceAuthPurpose::TRIGGER_VOTE, error);
-    }
-
     std::string proposal_error;
     if (VerifyPQVoteUnlocked(
             vote, validation_tip, validation_mn_list,
-            llmq::pq::GovernanceAuthPurpose::PROPOSAL_VOTE,
+            vote.GetSignal() == VOTE_SIGNAL_FUNDING
+                ? llmq::pq::GovernanceAuthPurpose::PROPOSAL_FUNDING_VOTE
+                : llmq::pq::GovernanceAuthPurpose::PROPOSAL_VOTE,
             proposal_error)) {
         error.clear();
         return true;
@@ -2206,7 +2202,7 @@ void CGovernanceManager::CheckOrphanVotes(
     for (const auto& pair : candidates) {
         bool signature_valid{false};
         const auto pq_purpose{GetGovernanceVoteAuthPurpose(
-            object_type, pair.first.GetSignal())};
+            object_type, pair.first.GetSignal(), validation_tip->nHeight)};
         if (pq_purpose) {
             // SYSCOIN: the full SLH operation must never run under chain,
             // governance, or governance-object locks.
@@ -2269,7 +2265,7 @@ void CGovernanceManager::CheckOrphanVotes(
                     CGovernanceException exception;
                     const bool pq_signature_preverified{
                         GetGovernanceVoteAuthPurpose(
-                            object_type, result.pair.first.GetSignal())
+                            object_type, result.pair.first.GetSignal(), validation_tip->nHeight)
                             .has_value()};
                     if (ProcessVoteWithBudget(
                             object, *validation_tip, validation_mn_list,
@@ -3239,8 +3235,8 @@ void CGovernanceManager::SyncSingleObjVotes(CNode* pnode, const uint256& nProp, 
         object_type = govobj.GetObjectType();
     }
 
-    // Snapshot at most one delegated funding vote per valid masternode and a
-    // fixed number of operator votes. SLH work runs only after locks release.
+    // Snapshot at most one legacy funding vote per valid masternode and a
+    // fixed number of PQ votes. SLH work runs only after locks release.
     {
         LOCK2(chainman.GetMutex(), cs);
         validation_tip = chainman.ActiveTip();
@@ -3259,41 +3255,41 @@ void CGovernanceManager::SyncSingleObjVotes(CNode* pnode, const uint256& nProp, 
         const std::size_t max_delegated_votes{
             validation_mn_list.GetValidMNsCount()};
         std::size_t delegated_votes{0};
-        std::size_t operator_votes{0};
+        std::size_t pq_votes{0};
         object_it->second.GetVoteFile().ForEachVote(
             [&](const CGovernanceVote& vote) {
-                const bool requires_operator{
+                const bool requires_pq{
                     GetGovernanceVoteAuthPurpose(
-                        object_type, vote.GetSignal())
+                        object_type, vote.GetSignal(), validation_tip->nHeight)
                         .has_value()};
                 if (!filter.contains(vote.GetHash())) {
-                    if (requires_operator &&
-                        operator_votes <
+                    if (requires_pq &&
+                        pq_votes <
                             GovernanceVoteSyncRateLimiter::
                                 MAX_VERIFICATIONS_PER_REQUEST) {
                         candidates.push_back(vote);
-                        ++operator_votes;
-                    } else if (!requires_operator &&
+                        ++pq_votes;
+                    } else if (!requires_pq &&
                                delegated_votes < max_delegated_votes) {
                         candidates.push_back(vote);
                         ++delegated_votes;
                     }
                 }
-                return operator_votes <
+                return pq_votes <
                            GovernanceVoteSyncRateLimiter::
                                MAX_VERIFICATIONS_PER_REQUEST ||
                        delegated_votes < max_delegated_votes;
             });
     }
 
-    const bool has_operator_votes{std::any_of(
+    const bool has_pq_votes{std::any_of(
         candidates.begin(), candidates.end(), [&](const auto& vote) {
             return GetGovernanceVoteAuthPurpose(
-                       object_type, vote.GetSignal())
+                       object_type, vote.GetSignal(), validation_tip->nHeight)
                 .has_value();
         })};
-    bool operator_votes_admitted{!has_operator_votes};
-    if (has_operator_votes) {
+    bool pq_votes_admitted{!has_pq_votes};
+    if (has_pq_votes) {
         const uint256 authenticated_pro_tx{
             pnode->GetVerifiedProRegTxHash()};
         const uint64_t keyed_net_group{pnode->nKeyedNetGroup};
@@ -3301,13 +3297,13 @@ void CGovernanceManager::SyncSingleObjVotes(CNode* pnode, const uint256& nProp, 
         // small in-memory token table; SLH work never inherits it.
         UniqueLock rate_lock{m_vote_sync_rate_mutex,
                              "m_vote_sync_rate_mutex", __FILE__, __LINE__};
-        operator_votes_admitted = m_vote_sync_rate.Consume(
+        pq_votes_admitted = m_vote_sync_rate.Consume(
             pnode->GetId(), authenticated_pro_tx, keyed_net_group,
             GetTime<std::chrono::microseconds>());
     }
-    if (!operator_votes_admitted) {
+    if (!pq_votes_admitted) {
         LogPrint(BCLog::GOBJECT,
-                 "CGovernanceManager::%s -- rate limited operator-vote sync from peer=%d, object=%s\n",
+                 "CGovernanceManager::%s -- rate limited PQ-vote sync from peer=%d, object=%s\n",
                  __func__, pnode->GetId(), nProp.ToString());
         // CGovernanceVote caches its hash in a const member and is therefore
         // deliberately non-assignable; vector erase/compaction is invalid.
@@ -3315,7 +3311,7 @@ void CGovernanceManager::SyncSingleObjVotes(CNode* pnode, const uint256& nProp, 
         delegated_candidates.reserve(candidates.size());
         for (const auto& vote : candidates) {
             if (!GetGovernanceVoteAuthPurpose(
-                     object_type, vote.GetSignal())) {
+                     object_type, vote.GetSignal(), validation_tip->nHeight)) {
                 delegated_candidates.push_back(vote);
             }
         }
@@ -3327,7 +3323,7 @@ void CGovernanceManager::SyncSingleObjVotes(CNode* pnode, const uint256& nProp, 
     for (const auto& vote : candidates) {
         bool valid{false};
         const auto pq_purpose{GetGovernanceVoteAuthPurpose(
-            object_type, vote.GetSignal())};
+            object_type, vote.GetSignal(), validation_tip->nHeight)};
         if (pq_purpose) {
             // SYSCOIN: never hold chain/governance/object locks across SLH.
             AssertLockNotHeld(cs_main);
@@ -3693,7 +3689,7 @@ bool CGovernanceManager::ProcessVote(
                 deterministicMNManager->GetListForBlock(validation_tip);
             if (!vote.IsValidBasic(validation_mn_list) ||
                 !IsPotentialOrphanGovernanceVoteAuthorization(
-                    vote.GetSignal(), vote.GetSignatureSize())) {
+                    vote.GetSignal(), vote.GetSignatureSize(), validation_tip->nHeight)) {
                 const std::string error{strprintf(
                     "CGovernanceManager::ProcessVote -- Invalid orphan vote fields, identity, or signature encoding for object %s",
                     nHashGovobj.ToString())};
@@ -3738,7 +3734,7 @@ bool CGovernanceManager::ProcessVote(
             validation_mn_list =
                 deterministicMNManager->GetListForBlock(validation_tip);
             pq_purpose = GetGovernanceVoteAuthPurpose(
-                object_type, vote.GetSignal());
+                object_type, vote.GetSignal(), validation_tip->nHeight);
             if (!pq_purpose) {
                 const bool accepted{
                     ProcessVoteWithBudget(
@@ -3876,7 +3872,7 @@ bool CGovernanceManager::ProcessVote(
             vote, *validation_tip, validation_mn_list,
             *pq_purpose, signature_error)) {
         const std::string error{strprintf(
-            "CGovernanceManager::ProcessVote -- Invalid operator vote: %s",
+            "CGovernanceManager::ProcessVote -- Invalid PQ vote: %s",
             signature_error)};
         bool stable_context{false};
         {
@@ -3889,7 +3885,7 @@ bool CGovernanceManager::ProcessVote(
                 !object->second.IsSetCachedDelete() &&
                 !object->second.IsSetExpired() &&
                 GetGovernanceVoteAuthPurpose(
-                    object_type, vote.GetSignal()) == pq_purpose;
+                    object_type, vote.GetSignal(), validation_tip->nHeight) == pq_purpose;
             if (stable_context &&
                 object_type == GOVERNANCE_OBJECT_TRIGGER) {
                 const auto trigger{mapTrigger.find(nHashGovobj)};
@@ -3928,7 +3924,7 @@ bool CGovernanceManager::ProcessVote(
     if (govobj.GetObjectType() != object_type ||
         govobj.IsSetCachedDelete() || govobj.IsSetExpired() ||
         GetGovernanceVoteAuthPurpose(
-            object_type, vote.GetSignal()) != pq_purpose) {
+            object_type, vote.GetSignal(), validation_tip->nHeight) != pq_purpose) {
         return false;
     }
     if (object_type == GOVERNANCE_OBJECT_TRIGGER) {
@@ -4223,7 +4219,8 @@ bool CGovernanceManager::ProcessVoteWithBudget(
     const uint64_t projected_bytes{
         object.GetVoteFile().ProjectedSerializedVoteBytes(
             vote, /*retain_replaced=*/
-                      object.GetObjectType() == GOVERNANCE_OBJECT_TRIGGER)};
+                      object.GetObjectType() == GOVERNANCE_OBJECT_TRIGGER ||
+                      object.GetObjectType() == GOVERNANCE_OBJECT_PROPOSAL)};
     if (!CanAdmitPersistedVoteBytes(current_bytes, projected_bytes)) {
         exception = CGovernanceException(
             "CGovernanceManager::ProcessVote -- persisted vote byte budget exhausted",
@@ -4326,14 +4323,12 @@ bool CGovernanceManager::RebuildIndexes()
             });
         govobj.GetVoteFile().ForEachStoredVote(
             [&](const CGovernanceVote& vote) {
-                if (GetGovernanceVoteAuthPurpose(
+                if (IsDelegatedProposalFundingVote(
+                        govobj.GetObjectType(), vote.GetSignal())) {
+                    delegated_operators.push_back(vote.GetMasternodeOutpoint());
+                } else if (GetGovernanceVoteAuthPurpose(
                         govobj.GetObjectType(), vote.GetSignal())) {
                     pq_operators.push_back(
-                        vote.GetMasternodeOutpoint());
-                } else if (IsDelegatedProposalFundingVote(
-                               govobj.GetObjectType(),
-                               vote.GetSignal())) {
-                    delegated_operators.push_back(
                         vote.GetMasternodeOutpoint());
                 }
                 return true;
@@ -4354,13 +4349,12 @@ void CGovernanceManager::IndexGovernanceVote(
     const CGovernanceVote& vote)
 {
     AssertLockHeld(cs);
-    if (GetGovernanceVoteAuthPurpose(object_type, vote.GetSignal())) {
-        m_pq_vote_objects[vote.GetMasternodeOutpoint()].insert(
-            object_hash);
-    } else if (IsDelegatedProposalFundingVote(
-                   object_type, vote.GetSignal())) {
+    if (IsDelegatedProposalFundingVote(object_type, vote.GetSignal())) {
         m_delegated_funding_vote_objects[
             vote.GetMasternodeOutpoint()].insert(object_hash);
+    } else if (GetGovernanceVoteAuthPurpose(object_type, vote.GetSignal())) {
+        m_pq_vote_objects[vote.GetMasternodeOutpoint()].insert(
+            object_hash);
     }
 }
 
@@ -4372,13 +4366,12 @@ void CGovernanceManager::RemoveObjectFromGovernanceVoteIndexes(
     std::set<COutPoint> pq_operators;
     std::set<COutPoint> delegated_operators;
     object.GetVoteFile().ForEachStoredVote([&](const CGovernanceVote& vote) {
-        if (GetGovernanceVoteAuthPurpose(
+        if (IsDelegatedProposalFundingVote(
+                object.GetObjectType(), vote.GetSignal())) {
+            delegated_operators.insert(vote.GetMasternodeOutpoint());
+        } else if (GetGovernanceVoteAuthPurpose(
                 object.GetObjectType(), vote.GetSignal())) {
             pq_operators.insert(vote.GetMasternodeOutpoint());
-        } else if (IsDelegatedProposalFundingVote(
-                       object.GetObjectType(), vote.GetSignal())) {
-            delegated_operators.insert(
-                vote.GetMasternodeOutpoint());
         }
         return true;
     });
@@ -4717,7 +4710,9 @@ bool CGovernanceManager::BuildPQGovernanceAuthoritySnapshotImpl(
             ++valid_mn_count;
             unique &= delegated_authorities.emplace(
                 dmn.collateralOutpoint,
-                dmn.pdmnState->keyIDVoting).second;
+                DelegatedGovernanceAuthority{
+                    dmn.proTxHash, dmn.pdmnState->keyIDVoting,
+                    dmn.pdmnState->pqVotingKey}).second;
             const llmq::pq::OperatorKeyState* state{
                 registry_snapshot.FindOperator(dmn.proTxHash)};
             if (state == nullptr || !state->HasActiveGlobalKey()) return;
@@ -4795,7 +4790,9 @@ bool CGovernanceManager::TryReusePQGovernanceSnapshot(
     if (dmn_content_hash.IsNull() || registry_state_root.IsNull() ||
         !m_pq_authority_snapshot_valid ||
         m_pq_authority_dmn_content_hash != dmn_content_hash ||
-        m_pq_authority_registry_state_root != registry_state_root) {
+        m_pq_authority_registry_state_root != registry_state_root ||
+        IsPQGovernanceEnabledAtHeight(m_pq_authority_tip_height) !=
+            IsPQGovernanceEnabledAtHeight(validation_tip.nHeight)) {
         return false;
     }
 
@@ -4951,33 +4948,18 @@ bool CGovernanceManager::ReconcileGovernanceVotesImpl(
             validation_tip, validation_mn_list, registry_snapshot,
             /*masternode_filter=*/std::nullopt,
             &checked_pq_votes, &removed_pq_operators)};
-        std::set<COutPoint> removed_delegated_operators;
-        const auto removed_delegated{
-            object.RemoveInvalidDelegatedFundingVotes(
-                validation_mn_list,
-                /*masternode_filter=*/std::nullopt,
-                &checked_delegated_votes,
-                &removed_delegated_operators)};
         const uint64_t vote_bytes_after{
             object.GetVoteFile().GetSerializedVoteBytes()};
         update_vote_bytes(vote_bytes_before, vote_bytes_after);
 
-        if (!removed_pq.empty() || !removed_delegated.empty()) {
+        if (!removed_pq.empty()) {
             flags_to_refresh.insert(object_hash);
         }
         refresh_vote_refs(removed_pq, object);
-        refresh_vote_refs(removed_delegated, object);
         for (const COutPoint& outpoint : removed_pq_operators) {
             if (!object.HasPQVoteFromMasternode(outpoint)) {
                 erase_empty_operator(
                     m_pq_vote_objects, outpoint, object_hash);
-            }
-        }
-        for (const COutPoint& outpoint : removed_delegated_operators) {
-            if (!object.HasDelegatedFundingVoteFromMasternode(outpoint)) {
-                erase_empty_operator(
-                    m_delegated_funding_vote_objects, outpoint,
-                    object_hash);
             }
         }
     };
@@ -5065,8 +5047,8 @@ bool CGovernanceManager::ReconcileGovernanceVotesImpl(
             const uint64_t vote_bytes_before{
                 object.GetVoteFile().GetSerializedVoteBytes()};
             const auto removed{
-                object.RemoveInvalidDelegatedFundingVotes(
-                    validation_mn_list, outpoint,
+                object.RemoveInvalidPQVotes(
+                    validation_tip, validation_mn_list, registry_snapshot, outpoint,
                     &checked_delegated_votes)};
             const uint64_t vote_bytes_after{
                 object.GetVoteFile().GetSerializedVoteBytes()};
@@ -5223,7 +5205,11 @@ bool CGovernanceManager::RevalidatePQGovernanceImpl(
             }
         }
     }
-    const bool full_revalidation{!straight_extension};
+    // Funding changes authority at activation even if neither key map changed.
+    const bool full_revalidation{
+        !straight_extension ||
+        IsPQGovernanceEnabledAtHeight(m_pq_authority_tip_height) !=
+            IsPQGovernanceEnabledAtHeight(validation_tip.nHeight)};
     std::set<uint256> due_authorizations;
     for (auto due{m_pq_future_authorizations.begin()};
          due != m_pq_future_authorizations.end() &&

@@ -204,6 +204,7 @@ CMutableTransaction PQRegisterTransaction(
     payload.addr = service;
     payload.keyIDOwner = owner;
     payload.keyIDVoting.begin()[0] = 1;
+    payload.pqVotingPublicKey[0] = 1;
     payload.scriptPayout = CScript{} << OP_TRUE;
     payload.inputsHash = PQMempoolHash(40'000 + tag);
     payload.vchSig.assign(1, 1);

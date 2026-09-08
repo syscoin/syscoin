@@ -1053,7 +1053,8 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
 class MasternodeInfo:
     def __init__(self, proTxHash, ownerAddr, votingAddr, operatorKey,
                  chainlockSeed, collateral_address, collateral_txid,
-                 collateral_vout, service, operatorPayoutAddress):
+                 collateral_vout, service, operatorPayoutAddress,
+                 pqVotingPublicKey):
         self.proTxHash = proTxHash
         self.ownerAddr = ownerAddr
         self.votingAddr = votingAddr
@@ -1064,6 +1065,7 @@ class MasternodeInfo:
         self.collateral_vout = collateral_vout
         self.service = service
         self.operatorPayoutAddress = operatorPayoutAddress
+        self.pqVotingPublicKey = pqVotingPublicKey
 
 
 class AuxPoWMiningMixin:
@@ -1283,6 +1285,15 @@ class DashTestFramework(AuxPoWMiningMixin, SyscoinTestFramework):
         self.generate(self.nodes[0], 1)
         self.sync_blocks(self.nodes)
 
+        # Registrar authority belongs to the controller, not the operators.
+        # A separate block keeps each MN's service and registrar mutations disjoint.
+        for mn in self.mninfo:
+            self.nodes[0].protx_update_registrar(
+                mn.proTxHash, "", mn.pqVotingPublicKey, "",
+                mn.collateral_address)
+        self.generate(self.nodes[0], 1)
+        self.sync_blocks(self.nodes)
+
     def prepare_masternode(self, idx):
         register_fund = (idx % 2) == 0
 
@@ -1305,17 +1316,22 @@ class DashTestFramework(AuxPoWMiningMixin, SyscoinTestFramework):
 
         ownerAddr = self.nodes[0].getnewaddress()
         votingAddr = self.nodes[0].getnewaddress()
+        pqVotingPublicKey = self.nodes[0].protx_generate_voting_key()
         rewardsAddr = self.nodes[0].getnewaddress()
         port = p2p_port(len(self.nodes) + idx)
         ipAndPort = '127.0.0.1:%d' % port
         operatorReward = idx
         submit = (idx % 4) < 2
+        activation_height = self.pq_activation_height()
+        voting_credential = (
+            pqVotingPublicKey if activation_height is not None and
+            self.nodes[0].getblockcount() + 1 >= activation_height else votingAddr)
         if register_fund:
             # self.nodes[0].lockunspent(True, [{'txid': txid, 'vout': collateral_vout}])
-            protx_result = self.nodes[0].protx_register_fund(address, ipAndPort, ownerAddr, "", votingAddr, operatorReward, rewardsAddr, address, submit)
+            protx_result = self.nodes[0].protx_register_fund(address, ipAndPort, ownerAddr, "", voting_credential, operatorReward, rewardsAddr, address, submit)
         else:
             self.generate(self.nodes[0], 1, sync_fun=self.no_op)
-            protx_result = self.nodes[0].protx_register(txid, collateral_vout, ipAndPort, ownerAddr, "", votingAddr, operatorReward, rewardsAddr, address, submit)
+            protx_result = self.nodes[0].protx_register(txid, collateral_vout, ipAndPort, ownerAddr, "", voting_credential, operatorReward, rewardsAddr, address, submit)
 
         if submit:
             proTxHash = protx_result
@@ -1357,7 +1373,7 @@ class DashTestFramework(AuxPoWMiningMixin, SyscoinTestFramework):
             proTxHash, ownerAddr, votingAddr,
             operator_keys["operatorKey"], operator_keys["chainlockSeed"],
             address, collateral_txid, collateral_vout,
-            ipAndPort, operatorPayoutAddress))
+            ipAndPort, operatorPayoutAddress, pqVotingPublicKey))
 
         self.log.info("Prepared masternode %d: collateral_txid=%s, collateral_vout=%d, protxHash=%s" % (idx, collateral_txid, collateral_vout, proTxHash))
 

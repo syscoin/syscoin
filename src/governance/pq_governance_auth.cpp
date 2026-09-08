@@ -45,7 +45,8 @@ bool CheckGovernanceAuthorizationContextImpl(
     std::span<const unsigned char> encoded,
     GovernanceAuthorization& authorization,
     GlobalKeyRecord* resolved_current_key,
-    std::string& error)
+    std::string& error,
+    GovernanceAuthPurpose purpose)
 {
     if (encoded.size() != GovernanceAuthorization::WIRE_SIZE ||
         !DecodeGovernanceAuthorization(encoded, authorization)) {
@@ -85,6 +86,15 @@ bool CheckGovernanceAuthorizationContextImpl(
         registry_block_hash != validation_branch.GetBlockHash()) {
         error = "current governance registry does not match the branch";
         return false;
+    }
+    if (purpose == GovernanceAuthPurpose::PROPOSAL_FUNDING_VOTE) {
+        if (!GovernanceAuthorizationMatchesCurrentVotingKey(
+                authorization, dmn->pdmnState->pqVotingKey)) {
+            error = "governance voting key is unset, revoked, rotated, or replaced";
+            return false;
+        }
+        error.clear();
+        return true;
     }
     const OperatorKeyState* current_state{
         find_operator(authorization.pro_tx_hash)};
@@ -128,12 +138,18 @@ bool VerifyGovernanceAuthorizationWithCurrentRegistry(
             validation_branch, validation_mn_list, registry_height,
             registry_block_hash, std::forward<FindOperator>(find_operator),
             masternode_outpoint, encoded, authorization, &current_key,
-            error)) {
+            error, purpose)) {
         return false;
     }
-    if (!VerifyGovernanceAuthorization(
-            Params().GetConsensus().hashGenesisBlock, current_key,
-            authorization, purpose, unsigned_payload_hash)) {
+    const bool signature_valid = purpose == GovernanceAuthPurpose::PROPOSAL_FUNDING_VOTE
+        ? VerifyGovernanceFundingAuthorization(
+              Params().GetConsensus().hashGenesisBlock,
+              validation_mn_list.GetValidMNByCollateral(masternode_outpoint)->pdmnState->pqVotingKey,
+              authorization, unsigned_payload_hash)
+        : VerifyGovernanceAuthorization(
+              Params().GetConsensus().hashGenesisBlock, current_key,
+              authorization, purpose, unsigned_payload_hash);
+    if (!signature_valid) {
         error = "invalid governance SLH signature";
         return false;
     }
@@ -199,7 +215,8 @@ bool CheckGovernanceAuthorizationContextForBranch(
     const COutPoint& masternode_outpoint,
     std::span<const unsigned char> encoded,
     GovernanceAuthorization& authorization,
-    std::string& error)
+    std::string& error,
+    GovernanceAuthPurpose purpose)
 {
     PQRegistryReadView current_snapshot;
     if (deterministicMNManager == nullptr ||
@@ -210,7 +227,7 @@ bool CheckGovernanceAuthorizationContextForBranch(
     }
     return CheckGovernanceAuthorizationContext(
         validation_branch, validation_mn_list, current_snapshot,
-        masternode_outpoint, encoded, authorization, error);
+        masternode_outpoint, encoded, authorization, error, purpose);
 }
 
 bool CheckGovernanceAuthorizationContext(
@@ -220,7 +237,8 @@ bool CheckGovernanceAuthorizationContext(
     const COutPoint& masternode_outpoint,
     std::span<const unsigned char> encoded,
     GovernanceAuthorization& authorization,
-    std::string& error)
+    std::string& error,
+    GovernanceAuthPurpose purpose)
 {
     return CheckGovernanceAuthorizationContextImpl(
         validation_branch, validation_mn_list, current_snapshot.height,
@@ -229,7 +247,7 @@ bool CheckGovernanceAuthorizationContext(
             return current_snapshot.FindOperator(pro_tx_hash);
         },
         masternode_outpoint, encoded, authorization,
-        /*resolved_current_key=*/nullptr, error);
+        /*resolved_current_key=*/nullptr, error, purpose);
 }
 
 bool CheckGovernanceAuthorizationContext(
@@ -239,7 +257,8 @@ bool CheckGovernanceAuthorizationContext(
     const COutPoint& masternode_outpoint,
     std::span<const unsigned char> encoded,
     GovernanceAuthorization& authorization,
-    std::string& error)
+    std::string& error,
+    GovernanceAuthPurpose purpose)
 {
     return CheckGovernanceAuthorizationContextImpl(
         validation_branch, validation_mn_list, current_snapshot.Height(),
@@ -248,7 +267,7 @@ bool CheckGovernanceAuthorizationContext(
             return current_snapshot.FindOperator(pro_tx_hash);
         },
         masternode_outpoint, encoded, authorization,
-        /*resolved_current_key=*/nullptr, error);
+        /*resolved_current_key=*/nullptr, error, purpose);
 }
 
 bool VerifyGovernanceAuthorizationForBranch(

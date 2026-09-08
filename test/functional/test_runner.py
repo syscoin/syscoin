@@ -165,6 +165,7 @@ BASE_SCRIPTS = [
     'feature_deterministicmns.py --descriptors',
     # SYSCOIN: PQ operator registration and rotation lifecycle.
     'feature_pq_operator_lifecycle.py --descriptors',
+    'feature_pq_voting_key.py --descriptors',
     'feature_nevm_connect_after_consensus.py --descriptors',
     'rpc_signer.py',
     'wallet_signer.py --descriptors',

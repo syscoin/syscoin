@@ -7,6 +7,7 @@
 #include <consensus/validation.h>
 #include <consensus/merkle.h>
 #include <crypto/common.h> // SYSCOIN: PQ authority fixture serialization.
+#include <crypto/slhdsa/slhdsa.h>
 #include <evo/deterministicmns.h> // SYSCOIN: governance authority fixtures.
 #include <evo/pq_registry.h> // SYSCOIN: PQ authority snapshot fixtures.
 #include <governance/governanceclasses.h>
@@ -43,6 +44,7 @@
 #include <map>
 #include <memory>
 #include <set>
+#include <span>
 #include <thread>
 #include <utility>
 // SYSCOIN END: fork governance/PQ chainstate test dependencies.
@@ -273,6 +275,25 @@ public:
         return CGovernanceManager::FindChangedPQGovernanceAuthorities(
                    convert(previous), convert(next))
             .size();
+    }
+
+    static std::size_t ChangedDelegatedAuthorityCount(
+        const CBlockIndex& tip,
+        const CDeterministicMNList& previous,
+        const CDeterministicMNList& next,
+        const llmq::pq::PQRegistrySnapshot& snapshot)
+    {
+        CGovernanceManager::pq_authority_map_t pq_authorities;
+        CGovernanceManager::delegated_authority_map_t previous_authorities;
+        CGovernanceManager::delegated_authority_map_t next_authorities;
+        std::size_t count{0};
+        std::string error;
+        BOOST_REQUIRE(CGovernanceManager::BuildPQGovernanceAuthoritySnapshot(
+            tip, previous, snapshot, pq_authorities, previous_authorities, count, error));
+        BOOST_REQUIRE(CGovernanceManager::BuildPQGovernanceAuthoritySnapshot(
+            tip, next, snapshot, pq_authorities, next_authorities, count, error));
+        return CGovernanceManager::FindChangedDelegatedGovernanceAuthorities(
+            previous_authorities, next_authorities).size();
     }
 
     static void RememberAuthorityTip(
@@ -3406,6 +3427,52 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(error.find("exact tip") != std::string::npos);
 }
 
+BOOST_AUTO_TEST_CASE(governance_delegated_authority_delta_tracks_voting_record)
+{
+    using Access = governance_tests::CGovernanceManagerTestAccess;
+    const uint256 tip_hash{uint256{201}};
+    CBlockIndex tip;
+    tip.nHeight = 101;
+    tip.phashBlock = &tip_hash;
+    const uint256 pro_tx_hash{uint256{202}};
+    const COutPoint collateral{uint256{203}, 0};
+    llmq::pq::PQRegistrySnapshot snapshot;
+    snapshot.height = tip.nHeight;
+    snapshot.block_hash = tip_hash;
+    llmq::pq::VotingKeyRecord voting_key;
+    voting_key.public_key[0] = 1;
+    voting_key.key_version = 1;
+    voting_key.activated_height = 100;
+    const auto make_list = [&](const llmq::pq::VotingKeyRecord& key,
+                               const uint256& identity) {
+        CDeterministicMNList list{tip_hash, tip.nHeight, 1};
+        auto state{std::make_shared<CDeterministicMNState>()};
+        state->keyIDOwner.begin()[0] = 1;
+        state->pqVotingKey = key;
+        auto member{std::make_shared<CDeterministicMN>(1)};
+        member->proTxHash = identity;
+        member->collateralOutpoint = collateral;
+        member->pdmnState = std::move(state);
+        list.AddMN(member, false);
+        return list;
+    };
+    const auto original{make_list(voting_key, pro_tx_hash)};
+    BOOST_CHECK_EQUAL(Access::ChangedDelegatedAuthorityCount(
+        tip, original, make_list(voting_key, pro_tx_hash), snapshot), 0U);
+    auto rotated{voting_key};
+    rotated.public_key[0] = 2;
+    ++rotated.key_version;
+    rotated.activated_height = 101;
+    auto revoked{rotated};
+    revoked.public_key = {};
+    for (const auto& changed : {rotated, revoked, llmq::pq::VotingKeyRecord{}}) {
+        BOOST_CHECK_EQUAL(Access::ChangedDelegatedAuthorityCount(
+            tip, original, make_list(changed, pro_tx_hash), snapshot), 1U);
+    }
+    BOOST_CHECK_EQUAL(Access::ChangedDelegatedAuthorityCount(
+        tip, original, make_list(voting_key, uint256{204}), snapshot), 1U);
+}
+
 BOOST_AUTO_TEST_CASE(
     governance_authority_maps_fail_closed_for_reindex_sentinel)
 {
@@ -3597,6 +3664,38 @@ BOOST_FIXTURE_TEST_CASE(
     const auto invalidated{Access::AuthoritySnapshotStats(*governance)};
     BOOST_CHECK_EQUAL(invalidated.builds, before.builds);
     BOOST_CHECK_EQUAL(invalidated.reuses, repeated.reuses + 2);
+}
+
+BOOST_FIXTURE_TEST_CASE(governance_activation_blocks_unchanged_authority_reuse,
+                        TestChain100Setup)
+{
+    using Access = governance_tests::CGovernanceManagerTestAccess;
+    BOOST_REQUIRE(governance != nullptr);
+    const auto* tip{WITH_LOCK(::cs_main, return m_node.chainman->ActiveTip())};
+    BOOST_REQUIRE(tip != nullptr);
+    auto& consensus{const_cast<Consensus::Params&>(Params().GetConsensus())};
+    struct RestoreConsensus {
+        Consensus::Params& consensus;
+        const Consensus::Params saved;
+        ~RestoreConsensus() { consensus = saved; }
+    } restore{consensus, consensus};
+    consensus.DIP0003Height = 1;
+    consensus.nPQActivationHeight = tip->nHeight + 1;
+    const uint256 dmn_hash{uint256{205}};
+    const uint256 registry_root{uint256{206}};
+    Access::RememberAuthorityContent(*governance, *tip, dmn_hash, registry_root);
+    governance->ObserveChainTip(tip);
+    BOOST_REQUIRE(Access::PublishReadyForTip(*governance, *tip));
+    BOOST_REQUIRE(Access::TryReuseAuthorityContent(*governance, *tip, dmn_hash, registry_root));
+    const uint256 child_hash{uint256{207}};
+    CBlockIndex child;
+    child.nHeight = tip->nHeight + 1;
+    child.pprev = const_cast<CBlockIndex*>(tip);
+    child.phashBlock = &child_hash;
+    governance->ObserveChainTip(&child);
+    BOOST_CHECK(!Access::TryReuseAuthorityContent(*governance, child, dmn_hash, registry_root));
+    BOOST_CHECK(!Access::IsRememberedTip(*governance, child));
+    governance->ObserveChainTip(tip);
 }
 
 BOOST_FIXTURE_TEST_CASE(
@@ -5079,6 +5178,261 @@ BOOST_FIXTURE_TEST_CASE(
         GOVERNANCE_EXCEPTION_PERMANENT_ERROR);
     BOOST_CHECK_EQUAL(corrupt_exception.GetNodePenalty(), 20);
     BOOST_CHECK_EQUAL(Access::OrphanVoteCount(*governance), 1U);
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    governance_pq_orphan_funding_promotion_requires_matching_parent_authority,
+    TestChain100Setup)
+{
+    using Access = governance_tests::CGovernanceManagerTestAccess;
+    using namespace llmq::pq;
+    BOOST_REQUIRE(governance != nullptr);
+    BOOST_REQUIRE(deterministicMNManager != nullptr);
+    auto& chainman{*m_node.chainman};
+    auto& consensus{const_cast<Consensus::Params&>(Params().GetConsensus())};
+    constexpr int preparation_height{1295};
+    constexpr int activation_height{1296};
+    constexpr int tip_height{1297};
+    std::vector<uint256> hashes(tip_height + 1);
+    std::vector<CBlockIndex> indices(tip_height + 1);
+    for (int height{0}; height <= tip_height; ++height) {
+        WriteLE32(hashes[height].begin(), 910'000 + height);
+        indices[height].nHeight = height;
+        indices[height].pprev = height == 0 ? nullptr : &indices[height - 1];
+        indices[height].phashBlock = &hashes[height];
+        indices[height].BuildSkip();
+    }
+    struct RestoreFixtureState {
+        ChainstateManager& chainman;
+        Consensus::Params& consensus;
+        const Consensus::Params original_consensus;
+        CBlockIndex* original_tip;
+        std::unique_ptr<CDeterministicMNManager> original_manager;
+        ~RestoreFixtureState()
+        {
+            LOCK(::cs_main);
+            governance->ObserveChainTip(nullptr);
+            chainman.ActiveChain().SetTip(*original_tip);
+            deterministicMNManager = std::move(original_manager);
+            consensus = original_consensus;
+        }
+    } restore{chainman, consensus, consensus,
+              WITH_LOCK(::cs_main, return chainman.ActiveTip()),
+              std::move(deterministicMNManager)};
+    BOOST_REQUIRE(restore.original_tip != nullptr);
+    consensus.DIP0003Height = preparation_height - 1;
+    consensus.DIP0003EnforcementHeight = preparation_height - 1;
+    consensus.nPQPreparationHeight = preparation_height;
+    consensus.nPQActivationHeight = activation_height;
+    consensus.nPQChainLockEpochOrigin = 1440;
+    consensus.nPQRegistrationCutoffBlocks = 144;
+    consensus.nPQFutureHorizonEpochs = 8;
+    consensus.nGovernanceMinQuorum = 1;
+    PQRegistryConfig registry_config;
+    BOOST_REQUIRE(GetPQRegistryConfig(consensus, registry_config) ==
+                  PQRegistryDeploymentResult::VALID);
+
+    slhdsa::KeyGenerationSeed operator_seed{};
+    slhdsa::KeyGenerationSeed voting_seed{};
+    operator_seed[0] = 1;
+    voting_seed[0] = 2;
+    auto operator_key{slhdsa::GenerateSecretKey(operator_seed)};
+    auto voting_key{slhdsa::GenerateSecretKey(voting_seed)};
+    BOOST_REQUIRE(operator_key);
+    BOOST_REQUIRE(voting_key);
+    const uint256 pro_tx_hash{uint256{208}};
+    const COutPoint collateral{uint256{209}, 0};
+    VotingKeyRecord voting_record;
+    BOOST_REQUIRE(voting_key->GetPublicKey(voting_record.public_key));
+    voting_record.key_version = 1;
+    voting_record.activated_height = activation_height;
+    BOOST_REQUIRE(voting_record.HasActiveKey());
+    auto member{std::make_shared<CDeterministicMN>(1)};
+    member->proTxHash = pro_tx_hash;
+    member->collateralOutpoint = collateral;
+    auto member_state{std::make_shared<CDeterministicMNState>()};
+    member_state->keyIDOwner = coinbaseKey.GetPubKey().GetID();
+    member_state->keyIDVoting = coinbaseKey.GetPubKey().GetID();
+    member_state->nRegisteredHeight = preparation_height - 1;
+    member_state->pqVotingKey = voting_record;
+    member->pdmnState = std::move(member_state);
+
+    OperatorKeyState operator_state{OperatorKeyState::ForOperator(pro_tx_hash)};
+    const auto initial_schedule{DeriveOperatorKeyScheduleView(
+        registry_config.schedule, preparation_height,
+        registry_config.registration_cutoff_blocks,
+        registry_config.future_horizon_epochs)};
+    BOOST_REQUIRE(initial_schedule);
+    operator_state.schedule_initialized = 1;
+    operator_state.schedule = OperatorKeyScheduleState::FromView(*initial_schedule);
+    operator_state.has_global_key = 1;
+    operator_state.global_key_active = 1;
+    operator_state.global_key.key_version = 1;
+    BOOST_REQUIRE(operator_key->GetPublicKey(operator_state.global_key.public_key));
+    operator_state.global_key.activated_height = preparation_height;
+    operator_state.global_key.child_key_commitment.generation = 1;
+    operator_state.global_key.child_key_commitment.first_epoch = 0;
+    const auto tree_id{GetChildKeyTreeId(
+        consensus.hashGenesisBlock, pro_tx_hash,
+        operator_state.global_key.child_key_commitment.generation,
+        operator_state.global_key.child_key_commitment.first_epoch)};
+    BOOST_REQUIRE(tree_id);
+    operator_state.global_key.child_key_commitment.tree_id = *tree_id;
+    operator_state.global_key.child_key_commitment.root = uint256{210};
+    BOOST_REQUIRE(operator_state.IsStructurallyValid());
+
+    const DBParams dmn_db_params{
+        .path = m_path_root / "governance_pq_orphans_evodb",
+        .cache_bytes = 1 << 20,
+        .memory_only = false,
+        .wipe_data = false,
+    };
+    DBParams registry_db_params{dmn_db_params};
+    registry_db_params.path =
+        m_path_root / "governance_pq_orphans_evodb_pq_registry";
+    registry_db_params.cache_bytes /= 2;
+    auto previous_root{PQRegistrySnapshot{}.RecomputeConsensusStateRoot(
+        consensus.hashGenesisBlock)};
+    BOOST_REQUIRE(previous_root);
+    {
+        PQRegistryManager writer{
+            registry_db_params, consensus.hashGenesisBlock, registry_config,
+            evo::MakeAuxiliaryHistoryGCDeployment(consensus).configuration_id};
+        std::optional<OperatorKeyState> previous_state;
+        for (int height{preparation_height}; height <= tip_height; ++height) {
+            const auto schedule{DeriveOperatorKeyScheduleView(
+                registry_config.schedule, height,
+                registry_config.registration_cutoff_blocks,
+                registry_config.future_horizon_epochs)};
+            BOOST_REQUIRE(schedule);
+            BOOST_REQUIRE(operator_state.Advance(*schedule) ==
+                          OperatorKeyStateResult::OK);
+            PQRegistrySnapshot snapshot;
+            snapshot.operator_states.push_back(operator_state);
+            const auto root{snapshot.RecomputeConsensusStateRoot(
+                consensus.hashGenesisBlock)};
+            BOOST_REQUIRE(root);
+            PQRegistryDiskSnapshot disk;
+            disk.is_checkpoint = height == preparation_height;
+            disk.height = height;
+            disk.block_hash = hashes[height];
+            disk.previous_block_hash = hashes[height - 1];
+            disk.previous_consensus_state_root = *previous_root;
+            if (!previous_state || *previous_state != operator_state) {
+                disk.operator_states.push_back(operator_state);
+            }
+            if (disk.is_checkpoint != 0) {
+                disk.checkpoint_operator_states.push_back(operator_state);
+            }
+            disk.consensus_state_root = *root;
+            BOOST_REQUIRE(writer.WriteExactSnapshotForTesting(disk.block_hash, disk));
+            previous_state = operator_state;
+            previous_root = root;
+        }
+    }
+    deterministicMNManager =
+        std::make_unique<CDeterministicMNManager>(dmn_db_params);
+    CDeterministicMNList validation_mn_list{hashes[tip_height], tip_height, 1};
+    validation_mn_list.AddMN(member, /*fBumpTotalCount=*/false);
+    deterministicMNManager->m_evoDb->WriteCache(
+        hashes[tip_height], validation_mn_list);
+    {
+        LOCK(::cs_main);
+        chainman.ActiveChain().SetTip(indices[tip_height]);
+    }
+    Access::SetReady(*governance, true);
+    BOOST_REQUIRE(IsPQGovernanceEnabledAtHeight(tip_height));
+    BOOST_REQUIRE_EQUAL(Access::OrphanVoteCount(*governance), 0U);
+    BOOST_REQUIRE_EQUAL(Access::PersistedVoteBytes(*governance), 0U);
+    int previous_superblock{0};
+    int event_height{0};
+    CSuperblock::GetNearestSuperblocksHeights(
+        tip_height, previous_superblock, event_height);
+    BOOST_REQUIRE_GT(event_height, tip_height);
+    uint64_t accepted_bytes{0};
+    int revision{0};
+
+    for (const bool proposal_parent : {true, false}) {
+        for (const bool voting_authority : {true, false}) {
+            BOOST_TEST_CONTEXT("proposal_parent=" << proposal_parent
+                               << ", voting_authority=" << voting_authority) {
+                ++revision;
+                std::vector<CGovernancePayment> payments;
+                payments.emplace_back(
+                    PKHash(coinbaseKey.GetPubKey()), COIN, pro_tx_hash);
+                CSuperblock schedule{event_height, std::move(payments)};
+                // Parent admission is separate from the orphan's signature
+                // verification; the minimal proposal keeps this role test focused.
+                CGovernanceObject parent{
+                    uint256{}, revision,
+                    GetTime<std::chrono::seconds>().count(), uint256{},
+                    proposal_parent ? "7b2274797065223a317d" : schedule.GetHexStrData()};
+                BOOST_REQUIRE_EQUAL(parent.GetObjectType(),
+                    proposal_parent ? GOVERNANCE_OBJECT_PROPOSAL : GOVERNANCE_OBJECT_TRIGGER);
+                const uint256 parent_hash{parent.GetHash()};
+                CGovernanceVote vote{
+                    collateral, parent_hash, VOTE_SIGNAL_FUNDING, VOTE_OUTCOME_YES};
+                vote.SetTime(100 + revision);
+                GovernanceAuthorization authorization;
+                authorization.signed_height = tip_height;
+                authorization.signed_block_hash = hashes[tip_height];
+                authorization.pro_tx_hash = pro_tx_hash;
+                authorization.global_key_version = 1;
+                const auto digest{voting_authority
+                    ? GetGovernanceFundingAuthorizationHash(
+                          consensus.hashGenesisBlock, voting_record,
+                          authorization, vote.GetSignatureHash())
+                    : GetGovernanceAuthorizationHash(
+                          consensus.hashGenesisBlock, operator_state.global_key,
+                          authorization, GovernanceAuthPurpose::TRIGGER_VOTE,
+                          vote.GetSignatureHash())};
+                BOOST_REQUIRE(digest);
+                BOOST_REQUIRE(slhdsa::SignDeterministic(
+                    voting_authority ? *voting_key : *operator_key,
+                    std::span<const uint8_t>{digest->begin(), digest->size()},
+                    GetGlobalAuthContext(voting_authority
+                        ? GlobalAuthPurpose::GOVERNANCE_PROPOSAL_FUNDING_VOTE
+                        : GlobalAuthPurpose::GOVERNANCE_VOTE),
+                    authorization.signature));
+                std::vector<unsigned char> encoded;
+                BOOST_REQUIRE(EncodeGovernanceAuthorization(authorization, encoded));
+                vote.SetSignature(std::move(encoded));
+                const uint64_t vote_bytes{Access::VoteBytes(vote)};
+                bool retained{false};
+                CGovernanceException exception;
+                BOOST_CHECK(!Access::ProcessVoteAtHeight(
+                    *governance, tip_height, vote, exception,
+                    *m_node.connman, &retained));
+                BOOST_REQUIRE_MESSAGE(retained, exception.what());
+                BOOST_CHECK_EQUAL(exception.GetType(), GOVERNANCE_EXCEPTION_WARNING);
+                BOOST_CHECK_EQUAL(Access::OrphanVoteCount(*governance), 1U);
+                BOOST_CHECK_EQUAL(Access::PersistedVoteBytes(*governance),
+                                  accepted_bytes + vote_bytes);
+
+                if (proposal_parent) {
+                    BOOST_REQUIRE(Access::InsertObject(*governance, std::move(parent)) ==
+                                  parent_hash);
+                } else {
+                    uint256 inserted_hash;
+                    BOOST_REQUIRE(Access::InsertPreviouslyAdmittedTrigger(
+                        *governance, std::move(parent), inserted_hash));
+                    BOOST_REQUIRE(inserted_hash == parent_hash);
+                }
+                Access::CheckOrphanVotes(*governance, parent_hash, *m_node.peerman);
+                const bool accepted{proposal_parent == voting_authority};
+                if (accepted) accepted_bytes += vote_bytes;
+                BOOST_CHECK_EQUAL(Access::OrphanVoteCount(*governance), 0U);
+                BOOST_CHECK_EQUAL(Access::PersistedVoteBytes(*governance), accepted_bytes);
+                BOOST_CHECK_EQUAL(governance->HaveVoteForHash(vote.GetHash()), accepted);
+                LOCK(governance->cs);
+                const auto* object{governance->FindConstGovernanceObject(parent_hash)};
+                BOOST_REQUIRE(object != nullptr);
+                BOOST_CHECK_EQUAL(object->GetVoteFile().GetVoteCount(), accepted ? 1 : 0);
+                BOOST_CHECK_EQUAL(object->GetAbsoluteYesCount(VOTE_SIGNAL_FUNDING),
+                                  accepted ? 1 : 0);
+            }
+        }
+    }
 }
 
 // SYSCOIN: invalid orphan votes never consume retained admission capacity.

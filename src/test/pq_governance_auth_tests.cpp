@@ -15,6 +15,8 @@
 #include <crypto/slhdsa/slhdsa.h>
 #include <evo/deterministicmns.h>
 #include <evo/pq_registry.h>
+#include <evo/pq_voting_key.h>
+#include <key.h>
 #include <pubkey.h>
 #include <streams.h>
 #include <test/util/setup_common.h>
@@ -135,7 +137,9 @@ PQRegistrySnapshot CurrentRegistrySnapshot(
 
 CDeterministicMNList CurrentMNList(const CBlockIndex& tip,
                                    const uint256& pro_tx_hash,
-                                   const COutPoint& collateral)
+                                   const COutPoint& collateral,
+                                   const VotingKeyRecord& voting_key = {},
+                                   const CKeyID& legacy_voting_key = {})
 {
     CDeterministicMNList list{
         tip.GetBlockHash(), tip.nHeight, /*total_registered_count=*/1};
@@ -144,6 +148,8 @@ CDeterministicMNList CurrentMNList(const CBlockIndex& tip,
     member->collateralOutpoint = collateral;
     auto state{std::make_shared<CDeterministicMNState>()};
     state->keyIDOwner.begin()[0] = 1;
+    state->pqVotingKey = voting_key;
+    state->keyIDVoting = legacy_voting_key;
     member->pdmnState = std::move(state);
     list.AddMN(member, /*fBumpTotalCount=*/false);
     BOOST_REQUIRE(list.GetValidMNByCollateral(collateral));
@@ -234,7 +240,7 @@ BOOST_AUTO_TEST_CASE(unavailable_dmn_context_fails_closed_without_height_access)
     std::string error;
     BOOST_CHECK(!CheckGovernanceAuthorizationContext(
         branch, CDeterministicMNList{}, PQRegistrySnapshot{}, COutPoint{},
-        encoded, decoded, error));
+        encoded, decoded, error, GovernanceAuthPurpose::TRIGGER));
     BOOST_CHECK_EQUAL(error, "governance validation contexts do not match");
 }
 
@@ -338,6 +344,167 @@ BOOST_FIXTURE_TEST_CASE(
         error, "governance signer key is revoked, rotated, or replaced");
 }
 
+BOOST_FIXTURE_TEST_CASE(
+    funding_voting_key_is_independent_of_operator_and_bound_to_branch_and_payload,
+    BasicTestingSetup)
+{
+    const int height{Params().GetConsensus().DIP0003Height};
+    ScopedPQActivation activation{height};
+    std::array<CBlockIndex, 4> branch;
+    std::array<uint256, 4> hashes;
+    BuildBranch(branch, hashes, nullptr, height - 1, 0x91, false);
+    std::array<CBlockIndex, 2> fork;
+    std::array<uint256, 2> fork_hashes;
+    BuildBranch(fork, fork_hashes, &branch[0], height, 0x92, false);
+
+    const uint256 pro_tx_hash{uint256{91}};
+    const COutPoint collateral{uint256{92}, 0};
+    auto operator_secret{DeterministicGlobalKey(0x93)};
+    const auto operator_key{GlobalKeyFor(operator_secret, pro_tx_hash, 1, height)};
+    const auto snapshot{CurrentRegistrySnapshot(
+        branch.back(), CurrentOperatorState(pro_tx_hash, operator_key, true))};
+    auto voting_secret{DeterministicGlobalKey(0x94)};
+    VotingKeyRecord voting_key;
+    BOOST_REQUIRE(voting_secret.GetPublicKey(voting_key.public_key));
+    voting_key.key_version = 1;
+    voting_key.activated_height = height;
+    const auto list{CurrentMNList(branch.back(), pro_tx_hash, collateral, voting_key)};
+    CGovernanceVote vote{collateral, uint256{93}, VOTE_SIGNAL_FUNDING, VOTE_OUTCOME_YES};
+    vote.SetTime(100);
+    GovernanceAuthorization authorization;
+    authorization.signed_height = height;
+    authorization.signed_block_hash = branch[1].GetBlockHash();
+    authorization.pro_tx_hash = pro_tx_hash;
+    authorization.global_key_version = voting_key.key_version;
+    const auto& genesis{Params().GetConsensus().hashGenesisBlock};
+    const auto digest{GetGovernanceFundingAuthorizationHash(
+        genesis, voting_key, authorization, vote.GetSignatureHash())};
+    BOOST_REQUIRE(digest);
+    authorization.signature = SignGovernance(
+        voting_secret, GlobalAuthPurpose::GOVERNANCE_PROPOSAL_FUNDING_VOTE, *digest);
+    std::vector<unsigned char> encoded;
+    BOOST_REQUIRE(EncodeGovernanceAuthorization(authorization, encoded));
+    vote.SetSignature(encoded);
+    const auto verify = [&](const CBlockIndex& tip,
+                            const CDeterministicMNList& current_list,
+                            const PQRegistrySnapshot& current_snapshot,
+                            GovernanceAuthPurpose purpose = GovernanceAuthPurpose::PROPOSAL_FUNDING_VOTE) {
+        std::string error;
+        return VerifyGovernanceAuthorizationForBranch(
+            tip, current_list, current_snapshot, collateral, purpose,
+            vote.GetSignatureHash(), encoded, error);
+    };
+    BOOST_REQUIRE(verify(branch.back(), list, snapshot));
+    BOOST_CHECK(!verify(branch.back(), list, snapshot, GovernanceAuthPurpose::TRIGGER_VOTE));
+    BOOST_CHECK(!verify(branch.back(), list, snapshot, GovernanceAuthPurpose::PROPOSAL_VOTE));
+    BOOST_CHECK(!GetGovernanceAuthorizationHash(
+        genesis, operator_key, authorization, GovernanceAuthPurpose::PROPOSAL_FUNDING_VOTE,
+        vote.GetSignatureHash()));
+
+    // A live funding delegation survives both operator rotation and revocation.
+    auto rotated_operator_key{operator_key};
+    ++rotated_operator_key.key_version;
+    BOOST_CHECK(verify(branch.back(), list, CurrentRegistrySnapshot(
+        branch.back(), CurrentOperatorState(pro_tx_hash, rotated_operator_key, true))));
+    BOOST_CHECK(verify(branch.back(), list, CurrentRegistrySnapshot(
+        branch.back(), CurrentOperatorState(pro_tx_hash, operator_key, false, height + 1))));
+    const auto fork_list{CurrentMNList(fork.back(), pro_tx_hash, collateral, voting_key)};
+    const auto fork_snapshot{CurrentRegistrySnapshot(
+        fork.back(), CurrentOperatorState(pro_tx_hash, operator_key, true))};
+    BOOST_CHECK(!verify(fork.back(), fork_list, fork_snapshot));
+
+    BOOST_CHECK(!VerifyGovernanceFundingAuthorization(
+        uint256{94}, voting_key, authorization, vote.GetSignatureHash()));
+    BOOST_CHECK(!VerifyGovernanceFundingAuthorization(
+        genesis, voting_key, authorization, uint256{95}));
+    CGovernanceVote changed_signal{collateral, vote.GetParentHash(), VOTE_SIGNAL_VALID, VOTE_OUTCOME_YES};
+    changed_signal.SetTime(vote.GetTimestamp());
+    BOOST_CHECK(!VerifyGovernanceFundingAuthorization(
+        genesis, voting_key, authorization, changed_signal.GetSignatureHash()));
+
+    auto rotated_voting_key{voting_key};
+    ++rotated_voting_key.key_version;
+    rotated_voting_key.activated_height = height + 1;
+    BOOST_CHECK(!verify(branch.back(), CurrentMNList(
+        branch.back(), pro_tx_hash, collateral, rotated_voting_key), snapshot));
+    auto revoked_voting_key{rotated_voting_key};
+    revoked_voting_key.public_key = {};
+    BOOST_CHECK(!verify(branch.back(), CurrentMNList(
+        branch.back(), pro_tx_hash, collateral, revoked_voting_key), snapshot));
+    BOOST_CHECK(!verify(branch.back(), CurrentMNList(
+        branch.back(), pro_tx_hash, collateral), snapshot));
+    BOOST_CHECK(!verify(branch.back(), CurrentMNList(
+        branch.back(), uint256{96}, collateral, voting_key), snapshot));
+    auto premature_key{voting_key};
+    premature_key.activated_height = height + 1;
+    BOOST_CHECK(!GovernanceAuthorizationMatchesCurrentVotingKey(authorization, premature_key));
+
+    // Even a genuine operator signature in the funding domain is not a delegation.
+    auto wrong_signer{authorization};
+    wrong_signer.signature = SignGovernance(
+        operator_secret, GlobalAuthPurpose::GOVERNANCE_PROPOSAL_FUNDING_VOTE, *digest);
+    BOOST_REQUIRE(EncodeGovernanceAuthorization(wrong_signer, encoded));
+    BOOST_CHECK(!verify(branch.back(), list, snapshot));
+    auto wrong_domain{authorization};
+    wrong_domain.signature = SignGovernance(
+        voting_secret, GlobalAuthPurpose::GOVERNANCE_PROPOSAL_VOTE, *digest);
+    BOOST_REQUIRE(EncodeGovernanceAuthorization(wrong_domain, encoded));
+    BOOST_CHECK(!verify(branch.back(), list, snapshot));
+}
+
+BOOST_FIXTURE_TEST_CASE(legacy_funding_deactivates_at_activation_and_recovers_on_rollback,
+                        BasicTestingSetup)
+{
+    const int height{Params().GetConsensus().DIP0003Height};
+    ScopedPQActivation activation{height};
+    std::array<CBlockIndex, 3> branch;
+    std::array<uint256, 3> hashes;
+    BuildBranch(branch, hashes, nullptr, height - 2, 0xa1, false);
+    const uint256 pro_tx_hash{uint256{101}};
+    const COutPoint collateral{uint256{102}, 0};
+    CKey legacy_key;
+    legacy_key.MakeNewKey(true);
+    const auto legacy_id{legacy_key.GetPubKey().GetID()};
+    auto operator_secret{DeterministicGlobalKey(0xa2)};
+    const auto operator_key{GlobalKeyFor(operator_secret, pro_tx_hash, 1, height - 1)};
+    const auto operator_state{CurrentOperatorState(pro_tx_hash, operator_key, true)};
+    CGovernanceObject proposal{uint256{}, 1, 100, uint256{}, "7b2274797065223a317d"};
+    CGovernanceVote vote{collateral, proposal.GetHash(), VOTE_SIGNAL_FUNDING, VOTE_OUTCOME_YES};
+    vote.SetTime(100);
+    BOOST_REQUIRE(vote.Sign(legacy_key, legacy_id));
+    auto& stored{const_cast<CGovernanceObjectVoteFile&>(proposal.GetVoteFile())};
+    stored.AddVote(vote, true);
+    const auto reconcile = [&](CGovernanceObject& object, const CBlockIndex& tip) {
+        const auto list{CurrentMNList(tip, pro_tx_hash, collateral, {}, legacy_id)};
+        const auto snapshot{CurrentRegistrySnapshot(tip, operator_state)};
+        object.RemoveInvalidPQVotes(tip, list, snapshot);
+    };
+    const auto before{CurrentMNList(branch[1], pro_tx_hash, collateral, {}, legacy_id)};
+    const auto after{CurrentMNList(branch[2], pro_tx_hash, collateral, {}, legacy_id)};
+    BOOST_REQUIRE(vote.IsValid(before));
+    BOOST_CHECK(!vote.IsValid(after));
+    BOOST_CHECK(!GetGovernanceVoteAuthPurpose(GOVERNANCE_OBJECT_PROPOSAL, VOTE_SIGNAL_FUNDING, height - 1));
+    BOOST_CHECK(GetGovernanceVoteAuthPurpose(GOVERNANCE_OBJECT_PROPOSAL, VOTE_SIGNAL_FUNDING, height));
+    BOOST_CHECK(IsPotentialOrphanGovernanceVoteAuthorization(VOTE_SIGNAL_FUNDING, vote.GetSignatureSize(), height - 1));
+    BOOST_CHECK(!IsPotentialOrphanGovernanceVoteAuthorization(VOTE_SIGNAL_FUNDING, vote.GetSignatureSize(), height));
+    reconcile(proposal, branch[1]);
+    BOOST_CHECK_EQUAL(proposal.GetAbsoluteYesCount(VOTE_SIGNAL_FUNDING), 1);
+    const auto bytes{stored.GetSerializedVoteBytes()};
+    reconcile(proposal, branch[2]);
+    BOOST_CHECK_EQUAL(proposal.GetAbsoluteYesCount(VOTE_SIGNAL_FUNDING), 0);
+    BOOST_CHECK_EQUAL(stored.GetSerializedVoteBytes(), bytes);
+    CDataStream disk{SER_DISK, PROTOCOL_VERSION};
+    disk << proposal;
+    CGovernanceObject reloaded;
+    disk >> reloaded;
+    reconcile(reloaded, branch[1]);
+    BOOST_CHECK_EQUAL(reloaded.GetAbsoluteYesCount(VOTE_SIGNAL_FUNDING), 1);
+    BOOST_REQUIRE(reloaded.GetVoteFile().GetVote(vote.GetHash()));
+    BOOST_CHECK(reloaded.GetVoteFile().GetVote(vote.GetHash())->HasSameWireEncoding(vote));
+    reconcile(reloaded, branch[2]);
+    BOOST_CHECK_EQUAL(reloaded.GetAbsoluteYesCount(VOTE_SIGNAL_FUNDING), 0);
+}
+
 BOOST_AUTO_TEST_CASE(governance_signature_vector_is_bounded_before_relay)
 {
     uint256 parent_hash;
@@ -405,8 +572,10 @@ BOOST_AUTO_TEST_CASE(governance_vote_ordering_is_strict_and_cache_safe)
 
 BOOST_AUTO_TEST_CASE(governance_vote_authority_is_object_and_signal_specific)
 {
-    BOOST_CHECK(!GetGovernanceVoteAuthPurpose(
-        GOVERNANCE_OBJECT_PROPOSAL, VOTE_SIGNAL_FUNDING));
+    const auto funding{GetGovernanceVoteAuthPurpose(
+        GOVERNANCE_OBJECT_PROPOSAL, VOTE_SIGNAL_FUNDING)};
+    BOOST_REQUIRE(funding);
+    BOOST_CHECK(*funding == GovernanceAuthPurpose::PROPOSAL_FUNDING_VOTE);
     for (const auto signal : {VOTE_SIGNAL_VALID, VOTE_SIGNAL_DELETE,
                               VOTE_SIGNAL_ENDORSED}) {
         const auto purpose{GetGovernanceVoteAuthPurpose(
@@ -433,7 +602,7 @@ BOOST_AUTO_TEST_CASE(orphan_vote_encoding_is_signal_specific)
     constexpr std::size_t compact{CPubKey::COMPACT_SIGNATURE_SIZE};
     constexpr std::size_t slh{GovernanceAuthorization::WIRE_SIZE};
 
-    BOOST_CHECK(IsPotentialOrphanGovernanceVoteAuthorization(
+    BOOST_CHECK(!IsPotentialOrphanGovernanceVoteAuthorization(
         VOTE_SIGNAL_FUNDING, compact));
     BOOST_CHECK(IsPotentialOrphanGovernanceVoteAuthorization(
         VOTE_SIGNAL_FUNDING, slh));
@@ -824,7 +993,7 @@ BOOST_AUTO_TEST_CASE(retained_vote_wires_have_one_active_representative)
 }
 
 BOOST_FIXTURE_TEST_CASE(
-    retained_trigger_votes_reconcile_wire_variants_and_supersession,
+    retained_trigger_and_proposal_votes_reconcile_wire_variants_and_supersession,
     BasicTestingSetup)
 {
     const int activation_height{Params().GetConsensus().DIP0003Height};
@@ -851,10 +1020,15 @@ BOOST_FIXTURE_TEST_CASE(
         static_cast<uint32_t>(activation_height))};
     const auto operator_state{
         CurrentOperatorState(pro_tx_hash, signing_key, /*active=*/true)};
+    const VotingKeyRecord voting_key{
+        signing_key.public_key, signing_key.key_version, activation_height};
+    for (const int object_type : {GOVERNANCE_OBJECT_TRIGGER, GOVERNANCE_OBJECT_PROPOSAL}) {
+    const std::string object_data = object_type == GOVERNANCE_OBJECT_TRIGGER
+        ? "7b2274797065223a327d" : "7b2274797065223a317d";
     CGovernanceObject object{
         uint256{}, /*revision=*/1, /*time=*/100, uint256{},
-        "7b2274797065223a327d"};
-    BOOST_REQUIRE_EQUAL(object.GetObjectType(), GOVERNANCE_OBJECT_TRIGGER);
+        object_data};
+    BOOST_REQUIRE_EQUAL(object.GetObjectType(), object_type);
     auto& vote_file{const_cast<CGovernanceObjectVoteFile&>(
         object.GetVoteFile())};
     const auto make_vote = [&](const CBlockIndex& signing_block,
@@ -878,7 +1052,7 @@ BOOST_FIXTURE_TEST_CASE(
     };
     const auto reconcile = [&](CGovernanceObject& target,
                                 const CBlockIndex& tip) {
-        const auto list{CurrentMNList(tip, pro_tx_hash, collateral)};
+        const auto list{CurrentMNList(tip, pro_tx_hash, collateral, voting_key)};
         const auto snapshot{CurrentRegistrySnapshot(tip, operator_state)};
         return target.RemoveInvalidPQVotes(tip, list, snapshot);
     };
@@ -922,6 +1096,9 @@ BOOST_FIXTURE_TEST_CASE(
     reconcile(object, common.back());
     BOOST_CHECK_EQUAL(object.GetAbsoluteYesCount(VOTE_SIGNAL_FUNDING), 0);
     BOOST_CHECK_EQUAL(vote_file.GetVoteCount(), 0);
+    BOOST_REQUIRE(object.NextPQAuthorizationHeight(common.back().nHeight));
+    BOOST_CHECK_EQUAL(*object.NextPQAuthorizationHeight(common.back().nHeight),
+                      branch_a.front().nHeight);
     CDataStream disk{SER_DISK, PROTOCOL_VERSION};
     disk << object;
     CGovernanceObject reloaded;
@@ -942,7 +1119,7 @@ BOOST_FIXTURE_TEST_CASE(
     for (const int64_t replacement_time : {int64_t{100}, int64_t{101}}) {
         CGovernanceObject superseded{
             uint256{}, /*revision=*/1, /*time=*/100, uint256{},
-            "7b2274797065223a327d"};
+            object_data};
         auto& retained{const_cast<CGovernanceObjectVoteFile&>(
             superseded.GetVoteFile())};
         const auto original{make_vote(common.back(), 100, VOTE_OUTCOME_YES)};
@@ -964,6 +1141,7 @@ BOOST_FIXTURE_TEST_CASE(
         BOOST_CHECK_EQUAL(superseded.GetAbsoluteYesCount(VOTE_SIGNAL_FUNDING), 1);
         BOOST_CHECK_EQUAL(superseded.GetNoCount(VOTE_SIGNAL_FUNDING), 0);
         BOOST_CHECK_EQUAL(retained.GetSerializedVoteBytes(), retained_bytes);
+    }
     }
 }
 

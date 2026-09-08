@@ -145,6 +145,7 @@ SYSCOIN_CORE_H = \
   evo/dmnstate.h \
   evo/providertx.h \
   evo/pq_registry.h \
+  evo/pq_voting_key.h \
   evo/specialtx_payload.h \
   evo/specialtx.h \
   masternode/activemasternode.h \

@@ -9,6 +9,8 @@
 #include <evo/providertx.h>
 #include <evo/specialtx.h>
 #include <llmq/quorums_commitment.h>
+#include <key.h>
+#include <messagesigner.h>
 #include <netbase.h>
 #include <primitives/block.h>
 #include <script/script.h>
@@ -370,6 +372,65 @@ BOOST_AUTO_TEST_CASE(unavailable_parent_registry_is_a_local_error)
         service_precheck, /*fJustCheck=*/false, /*check_sigs=*/true,
         SpecialTxValidationContext::PQ_REGISTRY_PRECHECK));
     BOOST_CHECK(service_precheck.IsError());
+}
+
+BOOST_AUTO_TEST_CASE(pq_voting_registrar_remains_owner_authorized)
+{
+    LOCK(cs_main);
+    CKey owner;
+    owner.MakeNewKey(true);
+    CKey non_owner;
+    non_owner.MakeNewKey(true);
+    auto parent_list{deterministicMNManager->GetListForBlock(&parent_index)};
+    const auto member{parent_list.GetMN(pro_tx_hash)};
+    BOOST_REQUIRE(member);
+    auto original{std::make_shared<CDeterministicMNState>(*member->pdmnState)};
+    original->keyIDOwner = owner.GetPubKey().GetID();
+    original->keyIDVoting = non_owner.GetPubKey().GetID();
+    llmq::pq::GlobalPublicKey original_key{};
+    original_key.fill(0x31);
+    BOOST_REQUIRE(original->pqVotingKey.UpdatePublicKey(original_key, parent_index.nHeight - 1));
+    parent_list.UpdateMN(pro_tx_hash, original);
+    deterministicMNManager->m_evoDb->WriteCache(parent_hash, parent_list);
+    LoadEmptyParentRegistry();
+
+    CCoinsView base_view;
+    CCoinsViewCache view{&base_view};
+    view.AddCoin(member->collateralOutpoint,
+        Coin{CTxOut{nMNCollateralRequired, GetScriptForDestination(
+            WitnessV0KeyHash{NonNullKeyID(70)})}, parent_index.nHeight - 100, false}, false);
+
+    for (bool revoke : {false, true}) {
+        CMutableTransaction transaction;
+        transaction.nVersion = SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR;
+        transaction.vin.emplace_back(COutPoint{NonNullHash(71), 0});
+        transaction.vout.emplace_back(1, CScript{} << OP_TRUE);
+        CProUpRegTx payload;
+        payload.nVersion = CProUpRegTx::PQ_VERSION;
+        payload.proTxHash = pro_tx_hash;
+        payload.keyIDVoting = original->keyIDVoting;
+        if (!revoke) payload.pqVotingPublicKey.fill(0x41);
+        payload.scriptPayout = GetScriptForDestination(WitnessV0KeyHash{NonNullKeyID(72)});
+        payload.inputsHash = CalcTxInputsHash(CTransaction{transaction});
+        BOOST_REQUIRE(CHashSigner::SignHash(::SerializeHash(payload), owner, payload.vchSig));
+        SetTxPayload(transaction, payload);
+        TxValidationState valid;
+        BOOST_REQUIRE_MESSAGE(CheckProUpRegTx(CTransaction{transaction}, &parent_index,
+            valid, view, false, true), valid.ToString());
+
+        payload.pqVotingPublicKey.back() ^= 1;
+        SetTxPayload(transaction, payload);
+        TxValidationState changed_key;
+        BOOST_CHECK(!CheckProUpRegTx(CTransaction{transaction}, &parent_index,
+            changed_key, view, false, true));
+        BOOST_CHECK_EQUAL(changed_key.GetRejectReason(), "bad-protx-hash-sig");
+        BOOST_REQUIRE(CHashSigner::SignHash(::SerializeHash(payload), non_owner, payload.vchSig));
+        SetTxPayload(transaction, payload);
+        TxValidationState wrong_owner;
+        BOOST_CHECK(!CheckProUpRegTx(CTransaction{transaction}, &parent_index,
+            wrong_owner, view, false, true));
+        BOOST_CHECK_EQUAL(wrong_owner.GetRejectReason(), "bad-protx-hash-sig");
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

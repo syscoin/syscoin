@@ -571,7 +571,7 @@ static RPCHelpMan voteraw()
             {"voteSignal", RPCArg::Type::STR, RPCArg::Optional::NO, "One of following (funding|valid|delete|endorsed)."}, 
             {"voteOutcome", RPCArg::Type::STR, RPCArg::Optional::NO, "One of following (yes|no|abstain)."},
             {"time", RPCArg::Type::NUM, RPCArg::Optional::NO, "Time of vote."},
-            {"voteSig", RPCArg::Type::STR, RPCArg::Optional::NO, "Base64 voting-key ECDSA signature for proposal funding, or fixed SLH operator authorization envelope for all trigger votes and other proposal signals."},
+            {"voteSig", RPCArg::Type::STR, RPCArg::Optional::NO, "Base64 fixed SLH authorization envelope: delegated voting key for proposal funding, operator key for trigger votes and other proposal signals. Legacy proposal-funding ECDSA is accepted only before PQ activation."},
         },
         RPCResult{RPCResult::Type::ANY, "", ""},
         RPCExamples{
@@ -643,7 +643,7 @@ static RPCHelpMan voteraw()
     bool signature_valid{false};
     std::string signature_error;
     const auto pq_purpose{GetGovernanceVoteAuthPurpose(
-        govObjType, eVoteSignal)};
+        govObjType, eVoteSignal, validation_tip->nHeight)};
     if (pq_purpose) {
         signature_valid = vote.IsValidPQ(
             *validation_tip, mnList, *pq_purpose, signature_error);
@@ -652,7 +652,7 @@ static RPCHelpMan voteraw()
     }
     if (!signature_valid) {
         if (signature_error.empty()) {
-            signature_error = "invalid voting-key ECDSA signature";
+            signature_error = "invalid governance voting-key signature";
         }
         throw JSONRPCError(RPC_INTERNAL_ERROR,
                            "Failure to verify governance authorization: " +

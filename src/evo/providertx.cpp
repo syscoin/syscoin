@@ -208,6 +208,9 @@ bool CProRegTx::IsTriviallyValid(TxValidationState& state, bool) const
         (nVersion == PQ_VERSION && !pubKeyOperator.IsNull())) {
         return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-protx-key-null");
     }
+    if (nVersion == PQ_VERSION && llmq::pq::IsNullVotingPublicKey(pqVotingPublicKey)) {
+        return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-protx-pq-voting-key");
+    }
     CTxDestination payoutDest;
     if (!ExtractDestination(scriptPayout, payoutDest)) {
         // should not happen as we checked script types before
@@ -546,6 +549,13 @@ bool CheckProUpRegTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxVa
         auto dmn = mnList.GetMN(ptx.proTxHash);
         if (!dmn) {
             return FormatSyscoinErrorMessage(state, "bad-protx-hash", fJustCheck);
+        }
+
+        if (ptx.nVersion == CProUpRegTx::PQ_VERSION) {
+            auto voting_key = dmn->pdmnState->pqVotingKey;
+            if (!voting_key.UpdatePublicKey(ptx.pqVotingPublicKey, pindexPrev->nHeight + 1)) {
+                return FormatSyscoinErrorMessage(state, "bad-protx-pq-voting-key", fJustCheck);
+            }
         }
 
         // don't allow reuse of payee key for other keys (don't allow people to put the payee key onto an online server)

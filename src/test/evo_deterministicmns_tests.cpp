@@ -1700,6 +1700,7 @@ static void CheckEmptyPQPaymentRegistration(bool start_empty)
         provider.collateralOutpoint = COutPoint{uint256{}, 0};
         provider.keyIDOwner = owner_key.GetPubKey().GetID();
         provider.keyIDVoting = MakeAnchorKeyID(0x76);
+        provider.pqVotingPublicKey.fill(0x77);
         provider.scriptPayout = payout;
         provider.inputsHash = CalcTxInputsHash(
             CTransaction{provider_registration});
@@ -2128,6 +2129,190 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         decoded.GetOrComputePQGovernanceAuthorityHash(genesis_hash) ==
         expected);
+}
+
+BOOST_AUTO_TEST_CASE(pq_voting_authority_commits_rotation_revocation_and_undo)
+{
+    const uint256 genesis_hash{MakeSnapshotKey(60'120)};
+    CDeterministicMNList list{MakeNontrivialAnchorSnapshot(
+        MakeSnapshotKey(60'121), 4323, false)};
+    const uint256 legacy_authority{list.GetOrComputePQGovernanceAuthorityHash(genesis_hash)};
+    const uint256 legacy_state{list.GetOrComputePQLegacyStateHash(genesis_hash)};
+    const auto member{list.GetMNByInternalId(9)};
+    BOOST_REQUIRE(member);
+    auto first{std::make_shared<CDeterministicMNState>(*member->pdmnState)};
+    llmq::pq::GlobalPublicKey key{};
+    key.fill(0x81);
+    BOOST_REQUIRE(first->pqVotingKey.UpdatePublicKey(key, list.GetHeight()));
+    list.UpdateMN(member->proTxHash, first);
+    const uint256 first_authority{list.GetOrComputePQGovernanceAuthorityHash(genesis_hash)};
+    BOOST_CHECK(first_authority != legacy_authority);
+    BOOST_CHECK(list.GetOrComputePQLegacyStateHash(genesis_hash) != legacy_state);
+
+    auto payout_only{std::make_shared<CDeterministicMNState>(*first)};
+    payout_only->scriptPayout = CScript{} << OP_TRUE;
+    BOOST_REQUIRE(payout_only->pqVotingKey.UpdatePublicKey(key, list.GetHeight() + 1));
+    list.UpdateMN(member->proTxHash, payout_only);
+    BOOST_CHECK(list.GetOrComputePQGovernanceAuthorityHash(genesis_hash) == first_authority);
+    auto rotated{std::make_shared<CDeterministicMNState>(*first)};
+    key[0] ^= 1;
+    BOOST_REQUIRE(rotated->pqVotingKey.UpdatePublicKey(key, list.GetHeight() + 1));
+    key[0] ^= 1;
+    BOOST_REQUIRE(rotated->pqVotingKey.UpdatePublicKey(key, list.GetHeight() + 2));
+    list.UpdateMN(member->proTxHash, rotated);
+    BOOST_CHECK(rotated->pqVotingKey.public_key == first->pqVotingKey.public_key);
+    const uint256 rotated_authority{list.GetOrComputePQGovernanceAuthorityHash(genesis_hash)};
+    BOOST_CHECK(rotated_authority != first_authority);
+
+    CDataStream encoded{SER_DISK, PROTOCOL_VERSION};
+    encoded << list;
+    CDeterministicMNList decoded;
+    encoded >> decoded;
+    BOOST_CHECK(decoded.GetOrComputePQGovernanceAuthorityHash(genesis_hash) == rotated_authority);
+    BOOST_CHECK(decoded.GetOrComputePQLegacyStateHash(genesis_hash) ==
+                list.GetOrComputePQLegacyStateHash(genesis_hash));
+
+    auto revoked{std::make_shared<CDeterministicMNState>(*rotated)};
+    BOOST_REQUIRE(revoked->pqVotingKey.UpdatePublicKey({}, list.GetHeight() + 3));
+    list.UpdateMN(member->proTxHash, revoked);
+    const uint256 revoked_authority{list.GetOrComputePQGovernanceAuthorityHash(genesis_hash)};
+    BOOST_CHECK(revoked_authority != rotated_authority);
+    BOOST_CHECK(revoked_authority != legacy_authority);
+    CDeterministicMNStateDiff inverse{*revoked, *member->pdmnState};
+    auto restored{std::make_shared<CDeterministicMNState>(*revoked)};
+    inverse.ApplyToState(*restored);
+    list.UpdateMN(member->proTxHash, restored);
+    BOOST_CHECK(list.GetOrComputePQGovernanceAuthorityHash(genesis_hash) == legacy_authority);
+    BOOST_CHECK(list.GetOrComputePQLegacyStateHash(genesis_hash) == legacy_state);
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    pq_voting_inverse_journal_persists_and_restores_across_restart,
+    ChainTestingSetup)
+{
+    SelectParams(ChainType::REGTEST);
+    LOCK(cs_main);
+    auto& consensus{const_cast<Consensus::Params&>(Params().GetConsensus())};
+    struct RestoreProfile {
+        Consensus::Params& consensus;
+        int dip3{consensus.DIP0003Height};
+        int preparation{consensus.nPQPreparationHeight};
+        int activation{consensus.nPQActivationHeight};
+        int origin{consensus.nPQChainLockEpochOrigin};
+        uint32_t cutoff{consensus.nPQRegistrationCutoffBlocks};
+        uint32_t horizon{consensus.nPQFutureHorizonEpochs};
+        ~RestoreProfile()
+        {
+            consensus.DIP0003Height = dip3;
+            consensus.nPQPreparationHeight = preparation;
+            consensus.nPQActivationHeight = activation;
+            consensus.nPQChainLockEpochOrigin = origin;
+            consensus.nPQRegistrationCutoffBlocks = cutoff;
+            consensus.nPQFutureHorizonEpochs = horizon;
+        }
+    } restore{consensus};
+    constexpr int base_height{1294};
+    constexpr int registration_offset{1441 - base_height};
+    constexpr int depth{registration_offset + 5};
+    consensus.DIP0003Height = base_height;
+    consensus.nPQPreparationHeight = base_height + 1;
+    consensus.nPQActivationHeight = base_height + registration_offset;
+    consensus.nPQChainLockEpochOrigin = 1440;
+    consensus.nPQRegistrationCutoffBlocks = 144;
+    consensus.nPQFutureHorizonEpochs = 8;
+    auto chain{BuildSnapshotIndexChain(base_height, depth + 1)};
+    const auto member{MakeLegacyReplayMN(0, 1)};
+    CDeterministicMNList base{chain.hashes[0], base_height, 1};
+    base.AddMN(member, /*fBumpTotalCount=*/false);
+    std::array<uint256, depth + 1> expected_hashes;
+    std::array<uint256, depth + 1> expected_authorities;
+    expected_hashes[0] = base.GetOrComputePQLegacyStateHash(consensus.hashGenesisBlock);
+    expected_authorities[0] = base.GetOrComputePQGovernanceAuthorityHash(consensus.hashGenesisBlock);
+    const ScopedDiskDBPath disk;
+    auto db_params = DBParams{
+        .path = disk.path,
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = false,
+        .wipe_data = true,
+    };
+    llmq::pq::GlobalPublicKey first_key{};
+    first_key.fill(0x91);
+    const std::array<uint32_t, 6> versions{1, 1, 2, 3, 4, 0};
+    const std::array<uint16_t, 6> journal_versions{2, 1, 2, 2, 2, 2};
+    {
+        CDeterministicMNManager manager{db_params};
+        BOOST_REQUIRE(manager.m_evoDb->WriteThrough(chain.hashes[0], base, true));
+        CCoinsView base_view;
+        CCoinsViewCache view{&base_view};
+        for (int offset{1}; offset <= depth; ++offset) {
+            CBlock block{MakeProviderMutationBlock({})};
+            block.hashPrevBlock = chain.hashes[offset - 1];
+            block.nTime = 100 + offset;
+            block.nNonce = 200 + offset;
+            if (offset >= registration_offset) {
+                const int update_index{offset - registration_offset};
+                CMutableTransaction tx;
+                tx.vin.emplace_back(offset == depth ? member->collateralOutpoint
+                    : COutPoint{MakeSnapshotKey(80'000 + offset), 0});
+                tx.vout.emplace_back(1, CScript{} << OP_TRUE);
+                if (offset != depth) {
+                    tx.nVersion = SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR;
+                    CProUpRegTx payload;
+                    payload.nVersion = CProUpRegTx::PQ_VERSION;
+                    payload.proTxHash = member->proTxHash;
+                    payload.keyIDVoting = member->pdmnState->keyIDVoting;
+                    payload.pqVotingPublicKey = first_key;
+                    if (update_index == 2) payload.pqVotingPublicKey.front() ^= 1;
+                    if (update_index == 3) payload.pqVotingPublicKey = {};
+                    payload.scriptPayout = CScript{} << (update_index == 1 ? OP_2 : OP_TRUE);
+                    payload.inputsHash = CalcTxInputsHash(CTransaction{tx});
+                    SetTxPayload(tx, payload);
+                }
+                block.vtx.emplace_back(MakeTransactionRef(std::move(tx)));
+            }
+            chain.hashes[offset] = block.GetHash();
+            BlockValidationState state;
+            CDeterministicMNListNEVMAddressDiff nevm;
+            BOOST_REQUIRE_MESSAGE(manager.ProcessBlock(block, &chain.indices[offset], state,
+                view, llmq::CFinalCommitmentTxPayload{}, nevm, false, true), state.ToString());
+            const auto current{manager.GetListForBlock(&chain.indices[offset])};
+            const auto current_member{current.GetMN(member->proTxHash)};
+            if (offset == depth) {
+                BOOST_CHECK(!current_member);
+            } else {
+                BOOST_REQUIRE(current_member);
+                BOOST_CHECK_EQUAL(current_member->pdmnState->pqVotingKey.key_version,
+                    offset < registration_offset ? 0 : versions[offset - registration_offset]);
+                if (offset == registration_offset + 1) {
+                    BOOST_CHECK_EQUAL(current_member->pdmnState->pqVotingKey.activated_height,
+                        base_height + registration_offset);
+                }
+            }
+            CDeterministicMNManager::InverseJournalEntryStatsForTesting stats;
+            BOOST_REQUIRE(manager.GetInverseJournalEntryStatsForTesting(chain.hashes[offset], stats));
+            BOOST_CHECK_EQUAL(stats.version,
+                offset < registration_offset ? 1 : journal_versions[offset - registration_offset]);
+            expected_hashes[offset] = current.GetOrComputePQLegacyStateHash(consensus.hashGenesisBlock);
+            expected_authorities[offset] = current.GetOrComputePQGovernanceAuthorityHash(consensus.hashGenesisBlock);
+        }
+        BOOST_REQUIRE(manager.FlushPendingSnapshotsToDisk(true));
+    }
+    db_params.wipe_data = false;
+    {
+        CDeterministicMNManager restarted{db_params};
+        BOOST_REQUIRE(restarted.VerifyInverseJournalTipSeal(&chain.indices.back()));
+        for (int offset{1}; offset < depth; ++offset) {
+            restarted.m_evoDb->EraseCache(chain.hashes[offset]);
+        }
+        BOOST_REQUIRE(restarted.m_evoDb->FlushCacheToDisk(256, true));
+        for (int offset{depth}; offset > 0; --offset) {
+            CDeterministicMNListNEVMAddressDiff nevm;
+            BOOST_REQUIRE(restarted.UndoBlock(&chain.indices[offset], nevm));
+            const auto restored{restarted.GetListForBlock(&chain.indices[offset - 1])};
+            BOOST_CHECK(restored.GetOrComputePQLegacyStateHash(consensus.hashGenesisBlock) == expected_hashes[offset - 1]);
+            BOOST_CHECK(restored.GetOrComputePQGovernanceAuthorityHash(consensus.hashGenesisBlock) == expected_authorities[offset - 1]);
+        }
+    }
 }
 
 BOOST_AUTO_TEST_CASE(pq_legacy_state_commitment_uses_current_update_entry)

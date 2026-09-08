@@ -8,6 +8,7 @@
 #include <crypto/legacy_bls.h>
 #include <consensus/validation.h>
 #include <evo/provider_revoke_payload.h>
+#include <evo/pq_voting_key.h>
 #include <llmq/pq_chainlock_types.h>
 #include <primitives/transaction.h>
 
@@ -55,6 +56,7 @@ public:
     CKeyID keyIDOwner;
     CLegacyBLSPublicKey pubKeyOperator;
     CKeyID keyIDVoting;
+    llmq::pq::GlobalPublicKey pqVotingPublicKey{};
     uint16_t nOperatorReward{0};
     CScript scriptPayout;
     uint256 inputsHash; // replay protection
@@ -84,6 +86,11 @@ public:
                 obj.scriptPayout,
                 obj.inputsHash
         );
+        if (obj.nVersion == PQ_VERSION) {
+            READWRITE(obj.pqVotingPublicKey);
+        } else {
+            SER_READ(obj, obj.pqVotingPublicKey = {});
+        }
         if (!(s.GetType() & SER_GETHASH)) {
             READWRITE(obj.vchSig);
         }
@@ -105,6 +112,9 @@ public:
         obj.pushKV("service", addr.ToStringAddr());
         obj.pushKV("ownerAddress", EncodeDestination(WitnessV0KeyHash(keyIDOwner)));
         obj.pushKV("votingAddress", EncodeDestination(WitnessV0KeyHash(keyIDVoting)));
+        if (nVersion == PQ_VERSION) {
+            obj.pushKV("pqVotingPublicKey", HexStr(pqVotingPublicKey));
+        }
 
         CTxDestination dest;
         if (ExtractDestination(scriptPayout, dest)) {
@@ -206,6 +216,7 @@ public:
     uint16_t nMode{0}; // only 0 supported for now
     CLegacyBLSPublicKey pubKeyOperator;
     CKeyID keyIDVoting;
+    llmq::pq::GlobalPublicKey pqVotingPublicKey{};
     CScript scriptPayout;
     uint256 inputsHash; // replay protection
     std::vector<unsigned char> vchSig;
@@ -230,6 +241,11 @@ public:
                 obj.scriptPayout,
                 obj.inputsHash
         );
+        if (obj.nVersion == PQ_VERSION) {
+            READWRITE(obj.pqVotingPublicKey);
+        } else {
+            SER_READ(obj, obj.pqVotingPublicKey = {});
+        }
         if (!(s.GetType() & SER_GETHASH)) {
             READWRITE(
                     obj.vchSig
@@ -247,6 +263,9 @@ public:
         obj.pushKV("version", nVersion);
         obj.pushKV("proTxHash", proTxHash.ToString());
         obj.pushKV("votingAddress", EncodeDestination(WitnessV0KeyHash(keyIDVoting)));
+        if (nVersion == PQ_VERSION) {
+            obj.pushKV("pqVotingPublicKey", HexStr(pqVotingPublicKey));
+        }
         CTxDestination dest;
         if (ExtractDestination(scriptPayout, dest)) {
             obj.pushKV("payoutAddress", EncodeDestination(dest));

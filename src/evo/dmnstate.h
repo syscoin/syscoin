@@ -49,6 +49,7 @@ public:
     // diagnostics. It is never a live post-activation authentication key.
     CLegacyBLSPublicKey pubKeyOperator;
     CKeyID keyIDVoting;
+    llmq::pq::VotingKeyRecord pqVotingKey;
     CService addr;
     CScript scriptPayout;
     CScript scriptOperatorPayout;
@@ -74,8 +75,34 @@ public:
 
     SERIALIZE_METHODS(CDeterministicMNState, obj)
     {
+        // The provider version changes on operator reset, so it cannot also
+        // select the persistent owner-delegated voting-key schema.
+        static constexpr int32_t PQ_STATE_SENTINEL{-1};
+        static constexpr uint16_t PQ_STATE_SCHEMA{1};
+        SER_WRITE(obj, if (obj.nVersion < 0 || !obj.pqVotingKey.IsStructurallyValid()) {
+            throw std::ios_base::failure("non-canonical DMN voting-key state");
+        });
+        int32_t encoded_version{obj.pqVotingKey.key_version == 0
+            ? obj.nVersion : PQ_STATE_SENTINEL};
+        READWRITE(encoded_version);
+        if (encoded_version < PQ_STATE_SENTINEL) {
+            throw std::ios_base::failure("invalid DMN state encoding");
+        }
+        const bool has_voting_record{encoded_version == PQ_STATE_SENTINEL};
+        if (has_voting_record) {
+            uint16_t schema{PQ_STATE_SCHEMA};
+            READWRITE(schema);
+            if (schema != PQ_STATE_SCHEMA) {
+                throw std::ios_base::failure("unknown DMN voting-key schema");
+            }
+            READWRITE(obj.nVersion);
+            if (obj.nVersion < 0) {
+                throw std::ios_base::failure("invalid DMN provider version");
+            }
+        } else {
+            SER_READ(obj, obj.nVersion = encoded_version; obj.pqVotingKey = {});
+        }
         READWRITE(
-            obj.nVersion,
             obj.nRegisteredHeight,
             obj.nLastPaidHeight,
             obj.nPoSePenalty,
@@ -93,6 +120,12 @@ public:
             obj.scriptOperatorPayout,
             obj.nCollateralHeight,
             obj.vchNEVMAddress);
+        if (has_voting_record) {
+            READWRITE(obj.pqVotingKey);
+            if (obj.pqVotingKey.key_version == 0) {
+                throw std::ios_base::failure("empty extended DMN voting-key state");
+            }
+        }
     }
 
     void ResetOperatorFields()
@@ -150,6 +183,7 @@ public:
         pubKeyOperator.Serialize(stream);
         stream << keyIDVoting << addr << scriptPayout << scriptOperatorPayout
                << static_cast<int32_t>(nCollateralHeight) << vchNEVMAddress;
+        llmq::pq::SerializeVotingKeyCommitment(stream, pqVotingKey);
     }
 
 public:
@@ -178,6 +212,7 @@ public:
         Field_nCollateralHeight = 0x4000,
         Field_nVersion = 0x8000,
         Field_vchNEVMAddress = 0x10000,
+        Field_pqVotingKey = 0x20000,
     };
 
 #define DMN_STATE_DIFF_ALL_FIELDS                      \
@@ -197,7 +232,8 @@ public:
     DMN_STATE_DIFF_LINE(scriptOperatorPayout)          \
     DMN_STATE_DIFF_LINE(nCollateralHeight)             \
     DMN_STATE_DIFF_LINE(nVersion)                      \
-    DMN_STATE_DIFF_LINE(vchNEVMAddress)
+    DMN_STATE_DIFF_LINE(vchNEVMAddress)                \
+    DMN_STATE_DIFF_LINE(pqVotingKey)
 
 public:
     uint32_t fields{0};

@@ -11,6 +11,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <string>
 
@@ -49,14 +50,18 @@ enum vote_signal_enum_t {
 
 static constexpr int MAX_SUPPORTED_VOTE_SIGNAL = VOTE_SIGNAL_ENDORSED;
 
-/** Return the operator authorization required by one object/signal pair. */
+[[nodiscard]] bool IsPQGovernanceEnabledAtHeight(int32_t height) noexcept;
+
+/** Resolve from the parent and height; omitted height selects the PQ-era role. */
 [[nodiscard]] std::optional<llmq::pq::GovernanceAuthPurpose>
 GetGovernanceVoteAuthPurpose(
-    int governance_object_type, vote_signal_enum_t signal) noexcept;
+    int governance_object_type, vote_signal_enum_t signal,
+    int32_t validation_height = std::numeric_limits<int32_t>::max()) noexcept;
 
 /** Whether an authorization encoding can match any supported parent type. */
 [[nodiscard]] bool IsPotentialOrphanGovernanceVoteAuthorization(
-    vote_signal_enum_t signal, std::size_t signature_size) noexcept;
+    vote_signal_enum_t signal, std::size_t signature_size,
+    int32_t validation_height = std::numeric_limits<int32_t>::max()) noexcept;
 
 /**
 * Governance Voting
@@ -143,17 +148,20 @@ public:
     bool CheckPQAuthorizationContext(
         const CBlockIndex& validation_branch,
         const CDeterministicMNList& validation_mn_list,
-        std::string& error) const;
+        std::string& error,
+        llmq::pq::GovernanceAuthPurpose purpose) const;
     bool CheckPQAuthorizationContext(
         const CBlockIndex& validation_branch,
         const CDeterministicMNList& validation_mn_list,
         const llmq::pq::PQRegistrySnapshot& current_snapshot,
-        std::string& error) const;
+        std::string& error,
+        llmq::pq::GovernanceAuthPurpose purpose) const;
     bool CheckPQAuthorizationContext(
         const CBlockIndex& validation_branch,
         const CDeterministicMNList& validation_mn_list,
         const llmq::pq::PQRegistryReadView& current_snapshot,
-        std::string& error) const;
+        std::string& error,
+        llmq::pq::GovernanceAuthPurpose purpose) const;
     bool IsValid(const CDeterministicMNList& tip_mn_list) const;
     bool IsValidPQ(const CBlockIndex& validation_branch,
                    const CDeterministicMNList& validation_mn_list,
@@ -161,7 +169,8 @@ public:
                    std::string& error) const;
     bool IsValidPQContext(const CBlockIndex& validation_branch,
                           const CDeterministicMNList& validation_mn_list,
-                          std::string& error) const;
+                          std::string& error,
+                          llmq::pq::GovernanceAuthPurpose purpose) const;
     void Relay(PeerManager& peerman, const CDeterministicMNList& tip_mn_list) const;
 
     const COutPoint& GetMasternodeOutpoint() const { return masternodeOutpoint; }

@@ -85,24 +85,6 @@ bool RecoverDatabaseFile(const ArgsManager& args, const fs::path& file_path, bil
         return false;
     }
 
-    // Recovery procedure:
-    // move wallet file to walletfilename.timestamp.bak
-    // Call Salvage with fAggressive=true to
-    // get as much data as possible.
-    // Rewrite salvaged data to fresh wallet file
-    // Rescan so any missing transactions will be
-    // found.
-    int64_t now = GetTime();
-    std::string newFilename = strprintf("%s.%d.bak", filename, now);
-
-    int result = env->dbenv->dbrename(nullptr, filename.c_str(), nullptr,
-                                       newFilename.c_str(), DB_AUTO_COMMIT);
-    if (result != 0)
-    {
-        error = strprintf(Untranslated("Failed to rename %s to %s"), filename, newFilename);
-        return false;
-    }
-
     /**
      * Salvage data from a file. The DB_AGGRESSIVE flag is being used (see berkeley DB->verify() method documentation).
      * key/value pairs are appended to salvagedData which are then written out to a new wallet file.
@@ -114,7 +96,7 @@ bool RecoverDatabaseFile(const ArgsManager& args, const fs::path& file_path, bil
     std::stringstream strDump;
 
     Db db(env->dbenv.get(), 0);
-    result = db.verify(newFilename.c_str(), nullptr, &strDump, DB_SALVAGE | DB_AGGRESSIVE);
+    int result = db.verify(filename.c_str(), nullptr, &strDump, DB_SALVAGE | DB_AGGRESSIVE);
     if (result == DB_VERIFY_BAD) {
         warnings.push_back(Untranslated("Salvage: Database salvage found errors, all data may not be recoverable."));
     }
@@ -160,7 +142,39 @@ bool RecoverDatabaseFile(const ArgsManager& args, const fs::path& file_path, bil
 
     if (salvagedData.empty())
     {
-        error = strprintf(Untranslated("Salvage(aggressive) found no records in %s."), newFilename);
+        error = strprintf(Untranslated("Salvage(aggressive) found no records in %s."), filename);
+        return false;
+    }
+
+    // Legacy salvage cannot validate these independent secrets and their
+    // mandatory flag. Refuse before replacing the source with a lossy wallet.
+    for (const auto& row : salvagedData) {
+        try {
+            DataStream key{row.first};
+            std::string type;
+            key >> type;
+            bool contains_pq{type == DBKeys::PQ_VOTING_KEY || type == DBKeys::PQ_VOTING_CRYPTED_KEY};
+            if (type == DBKeys::FLAGS) {
+                DataStream value{row.second};
+                uint64_t flags;
+                value >> flags;
+                contains_pq = (flags & WALLET_FLAG_PQ_VOTING_KEYS) != 0;
+            }
+            if (contains_pq) {
+                error = Untranslated("Salvage does not support wallets containing PQ voting keys. The original wallet was left unchanged; restore a full wallet backup instead.");
+                return false;
+            }
+        } catch (const std::exception&) {
+            error = Untranslated("Salvage cannot determine whether malformed wallet records contain PQ voting keys. The original wallet was left unchanged.");
+            return false;
+        }
+    }
+
+    const std::string newFilename{strprintf("%s.%d.bak", filename, GetTime())};
+    result = env->dbenv->dbrename(nullptr, filename.c_str(), nullptr,
+                                newFilename.c_str(), DB_AUTO_COMMIT);
+    if (result != 0) {
+        error = strprintf(Untranslated("Failed to rename %s to %s"), filename, newFilename);
         return false;
     }
 

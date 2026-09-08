@@ -5,6 +5,7 @@
 #include <llmq/pq_global_auth.h>
 
 #include <crypto/slhdsa/slhdsa.h>
+#include <evo/pq_voting_key.h>
 #include <hash.h>
 #include <netaddress.h>
 #include <span.h>
@@ -121,6 +122,9 @@ std::span<const uint8_t> GetGlobalAuthContext(GlobalAuthPurpose purpose) noexcep
     case GlobalAuthPurpose::RECOVERY_READINESS:
         context = RECOVERY_READINESS_DOMAIN;
         break;
+    case GlobalAuthPurpose::GOVERNANCE_PROPOSAL_FUNDING_VOTE:
+        context = GOVERNANCE_PROPOSAL_FUNDING_VOTE_DOMAIN;
+        break;
     }
     return {reinterpret_cast<const uint8_t*>(context.data()), context.size()};
 }
@@ -135,6 +139,7 @@ static_assert(GOVERNANCE_VOTE_DOMAIN.size() <= slhdsa::MAX_CONTEXT_SIZE);
 static_assert(GOVERNANCE_PROPOSAL_VOTE_DOMAIN.size() <=
               slhdsa::MAX_CONTEXT_SIZE);
 static_assert(RECOVERY_READINESS_DOMAIN.size() <= slhdsa::MAX_CONTEXT_SIZE);
+static_assert(GOVERNANCE_PROPOSAL_FUNDING_VOTE_DOMAIN.size() <= slhdsa::MAX_CONTEXT_SIZE);
 
 bool RecoveryReadinessAuthorization::IsStructurallyValid() const noexcept
 {
@@ -296,6 +301,49 @@ bool GovernanceAuthorizationMatchesCurrentKey(
            authorization.global_key_version == current_key.key_version &&
            current_key.activated_height <=
                static_cast<uint32_t>(authorization.signed_height);
+}
+
+bool GovernanceAuthorizationMatchesCurrentVotingKey(
+    const GovernanceAuthorization& authorization,
+    const VotingKeyRecord& current_key) noexcept
+{
+    return authorization.IsHeaderStructurallyValid() &&
+           current_key.HasActiveKey() &&
+           authorization.global_key_version == current_key.key_version &&
+           current_key.activated_height <= authorization.signed_height;
+}
+
+std::optional<uint256> GetGovernanceFundingAuthorizationHash(
+    const uint256& genesis_hash,
+    const VotingKeyRecord& signing_key,
+    const GovernanceAuthorization& authorization,
+    const uint256& unsigned_payload_hash)
+{
+    if (genesis_hash.IsNull() || unsigned_payload_hash.IsNull() ||
+        !GovernanceAuthorizationMatchesCurrentVotingKey(authorization, signing_key)) {
+        return std::nullopt;
+    }
+    return TaggedHash(GOVERNANCE_PROPOSAL_FUNDING_VOTE_DOMAIN,
+                      genesis_hash, authorization.version,
+                      authorization.signed_height, authorization.signed_block_hash,
+                      authorization.pro_tx_hash, authorization.global_key_version,
+                      signing_key.public_key, signing_key.activated_height,
+                      unsigned_payload_hash);
+}
+
+bool VerifyGovernanceFundingAuthorization(
+    const uint256& genesis_hash,
+    const VotingKeyRecord& signing_key,
+    const GovernanceAuthorization& authorization,
+    const uint256& unsigned_payload_hash)
+{
+    const auto digest{GetGovernanceFundingAuthorizationHash(
+        genesis_hash, signing_key, authorization, unsigned_payload_hash)};
+    return digest && authorization.IsStructurallyValid() &&
+           slhdsa::Verify(signing_key.public_key,
+                         std::span<const uint8_t>{digest->begin(), digest->size()},
+                         GetGlobalAuthContext(GlobalAuthPurpose::GOVERNANCE_PROPOSAL_FUNDING_VOTE),
+                         authorization.signature);
 }
 
 bool IsGlobalKeyCandidateStructurallyValid(const GlobalKeyRecord& candidate) noexcept

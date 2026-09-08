@@ -373,11 +373,6 @@ public:
     /// Called when MN's which have voted on this object have been removed
     void ClearMasternodeVotes(const CDeterministicMNList& tip_mn_list);
 
-    std::set<uint256> RemoveInvalidDelegatedFundingVotes(
-        const CDeterministicMNList& validation_mn_list,
-        const std::optional<COutPoint>& masternode_filter = std::nullopt,
-        std::size_t* checked_votes = nullptr,
-        std::set<COutPoint>* removed_operators = nullptr);
     std::set<uint256> RemoveInvalidPQVotes(
         const CBlockIndex& validation_branch,
         const CDeterministicMNList& validation_mn_list,

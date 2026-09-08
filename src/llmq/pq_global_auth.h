@@ -21,6 +21,8 @@ class CService;
 
 namespace llmq::pq {
 
+struct VotingKeyRecord;
+
 inline constexpr uint16_t PROVIDER_SERVICE_AUTH_VERSION{1};
 inline constexpr uint16_t PROVIDER_REVOKE_AUTH_VERSION{1};
 inline constexpr uint16_t MNAUTH_TRANSCRIPT_VERSION{1};
@@ -38,6 +40,8 @@ inline constexpr std::string_view GOVERNANCE_VOTE_DOMAIN{
     "SYS_PQ_GOV_VOTE_V1"};
 inline constexpr std::string_view GOVERNANCE_PROPOSAL_VOTE_DOMAIN{
     "SYS_PQ_GOV_PROPOSAL_VOTE_V1"};
+inline constexpr std::string_view GOVERNANCE_PROPOSAL_FUNDING_VOTE_DOMAIN{
+    "SYS_PQ_GOV_PROPOSAL_FUNDING_VOTE_V1"};
 inline constexpr std::string_view RECOVERY_READINESS_DOMAIN{
     "SYS_PQ_RECOVERY_READINESS_V1"};
 
@@ -51,6 +55,7 @@ enum class GlobalAuthPurpose : uint8_t {
     GOVERNANCE_VOTE = 6,
     GOVERNANCE_PROPOSAL_VOTE = 8,
     RECOVERY_READINESS = 9,
+    GOVERNANCE_PROPOSAL_FUNDING_VOTE = 10,
 };
 
 struct RecoveryReadinessAuthorization {
@@ -91,6 +96,7 @@ enum class GovernanceAuthPurpose : uint8_t {
     TRIGGER = 0,
     TRIGGER_VOTE = 1,
     PROPOSAL_VOTE = 2,
+    PROPOSAL_FUNDING_VOTE = 3,
 };
 
 /**
@@ -147,6 +153,21 @@ static_assert(GovernanceAuthorization::WIRE_SIZE == 7'930);
     const GovernanceAuthorization& authorization,
     GovernanceAuthPurpose purpose,
     const uint256& unsigned_payload_hash);
+
+/** Funding uses only the owner's delegated voting record, never operator state. */
+[[nodiscard]] std::optional<uint256> GetGovernanceFundingAuthorizationHash(
+    const uint256& genesis_hash,
+    const VotingKeyRecord& signing_key,
+    const GovernanceAuthorization& authorization,
+    const uint256& unsigned_payload_hash);
+[[nodiscard]] bool VerifyGovernanceFundingAuthorization(
+    const uint256& genesis_hash,
+    const VotingKeyRecord& signing_key,
+    const GovernanceAuthorization& authorization,
+    const uint256& unsigned_payload_hash);
+[[nodiscard]] bool GovernanceAuthorizationMatchesCurrentVotingKey(
+    const GovernanceAuthorization& authorization,
+    const VotingKeyRecord& current_key) noexcept;
 
 /** Current-key match, including proof that it was active by signed_height. */
 [[nodiscard]] bool GovernanceAuthorizationMatchesCurrentKey(

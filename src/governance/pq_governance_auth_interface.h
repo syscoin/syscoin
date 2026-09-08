@@ -38,7 +38,8 @@ class PQRegistryReadView;
     const COutPoint& masternode_outpoint,
     std::span<const unsigned char> encoded,
     GovernanceAuthorization& authorization,
-    std::string& error);
+    std::string& error,
+    GovernanceAuthPurpose purpose);
 
 [[nodiscard]] bool CheckGovernanceAuthorizationContext(
     const CBlockIndex& validation_branch,
@@ -47,7 +48,8 @@ class PQRegistryReadView;
     const COutPoint& masternode_outpoint,
     std::span<const unsigned char> encoded,
     GovernanceAuthorization& authorization,
-    std::string& error);
+    std::string& error,
+    GovernanceAuthPurpose purpose);
 
 [[nodiscard]] bool CheckGovernanceAuthorizationContext(
     const CBlockIndex& validation_branch,
@@ -56,7 +58,8 @@ class PQRegistryReadView;
     const COutPoint& masternode_outpoint,
     std::span<const unsigned char> encoded,
     GovernanceAuthorization& authorization,
-    std::string& error);
+    std::string& error,
+    GovernanceAuthPurpose purpose);
 
 /**
  * Verify with the exact active key at validation_branch. The signed block

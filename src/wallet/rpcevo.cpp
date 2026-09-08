@@ -27,6 +27,7 @@
 #include <evo/deterministicmns.h>
 #include <evo/pq_providertx.h>
 #include <evo/pq_registry.h>
+#include <governance/governancevote.h>
 
 #include <llmq/pq_global_auth.h>
 
@@ -403,6 +404,32 @@ static void ConfigureProviderRegistrationForNextBlock(
     }
 }
 
+static llmq::pq::GlobalPublicKey ParseVotingPublicKey(const std::string& encoded,
+                                                     bool allow_revocation = false)
+{
+    llmq::pq::GlobalPublicKey public_key{};
+    if (encoded.size() != public_key.size() * 2 || !IsHex(encoded)) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER,
+                           "Voting key must be an exactly 32-byte SLH-DSA public key in hex");
+    }
+    const auto bytes{ParseHex(encoded)};
+    std::copy(bytes.begin(), bytes.end(), public_key.begin());
+    if (!allow_revocation && llmq::pq::IsNullVotingPublicKey(public_key)) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Voting public key must not be zero");
+    }
+    return public_key;
+}
+
+static void ConfigureProviderVotingKey(CProRegTx& payload, const std::string& voting_key)
+{
+    payload.keyIDVoting = payload.keyIDOwner;
+    if (payload.nVersion == CProRegTx::PQ_VERSION) {
+        payload.pqVotingPublicKey = ParseVotingPublicKey(voting_key);
+    } else if (!voting_key.empty()) {
+        payload.keyIDVoting = ParsePubKeyIDFromAddress(voting_key, "voting address");
+    }
+}
+
 static void EnsurePQPreparationRPCActive(int current_height)
 {
     llmq::pq::PQRegistryConfig config;
@@ -689,9 +716,8 @@ static RPCHelpMan protx_register()
                                         "The corresponding private key does not have to be known by your wallet.\n"
                                         "The address must be unused and must differ from the collateralAddress."},
                     {"legacyOperatorPubKey", RPCArg::Type::STR, RPCArg::Optional::NO, "Legacy 48-byte operator public key before PQ activation; must be empty after activation. The global SLH-DSA key is registered separately."},
-                    {"votingAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "The voting key address. The private key does not have to be known by your wallet.\n"
-                                        "It has to match the private key which is later used when voting on proposals.\n"
-                                        "If set to an empty string, ownerAddress will be used.\n"},
+                    {"votingAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "After PQ activation, the nonzero 32-byte SLH voting public key (64 hex characters) from protx_generate_voting_key.\n"
+                                        "Before activation, a legacy voting address; an empty string uses ownerAddress.\n"},
                     {"operatorReward", RPCArg::Type::NUM, RPCArg::Optional::NO, "The fraction in %% to share with the operator. The value must be\n"
                                         "between 0.00 and 100.00."},
                     {"payoutAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "The Syscoin address to use for masternode reward payments."},
@@ -754,10 +780,7 @@ static RPCHelpMan protx_register()
         ConfigureProviderRegistrationForNextBlock(
             ptx, current_height,
             request.params[paramIdx + 2].get_str());
-        CKeyID keyIDVoting = ptx.keyIDOwner;
-        if (request.params[paramIdx + 3].get_str() != "") {
-            keyIDVoting = ParsePubKeyIDFromAddress(request.params[paramIdx + 3].get_str(), "voting address");
-        }
+        ConfigureProviderVotingKey(ptx, request.params[paramIdx + 3].get_str());
 
         int64_t operatorReward;
         if (!ParseFixedPoint(request.params[paramIdx + 4].getValStr(), 2, &operatorReward)) {
@@ -773,7 +796,6 @@ static RPCHelpMan protx_register()
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf("invalid payout address: %s", request.params[paramIdx + 5].get_str()));
         }
 
-        ptx.keyIDVoting = keyIDVoting;
         ptx.scriptPayout = GetScriptForDestination(payoutDest);
 
         // make sure fee calculation works
@@ -853,9 +875,8 @@ static RPCHelpMan protx_register_fund()
                                         "The corresponding private key does not have to be known by your wallet.\n"
                                         "The address must be unused and must differ from the collateralAddress."},
                     {"legacyOperatorPubKey", RPCArg::Type::STR, RPCArg::Optional::NO, "Legacy 48-byte operator public key before PQ activation; must be empty after activation. Register the global SLH-DSA key separately."},
-                    {"votingAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "The voting key address. The private key does not have to be known by your wallet.\n"
-                                        "It has to match the private key which is later used when voting on proposals.\n"
-                                        "If set to an empty string, ownerAddress will be used.\n"},
+                    {"votingAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "After PQ activation, the nonzero 32-byte SLH voting public key (64 hex characters) from protx_generate_voting_key.\n"
+                                        "Before activation, a legacy voting address; an empty string uses ownerAddress.\n"},
                     {"operatorReward", RPCArg::Type::NUM, RPCArg::Optional::NO, "The fraction in %% to share with the operator. The value must be\n"
                                         "between 0.00 and 100.00."},
                     {"payoutAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "The Syscoin address to use for masternode reward payments."},
@@ -916,10 +937,7 @@ static RPCHelpMan protx_register_fund()
     ConfigureProviderRegistrationForNextBlock(
         ptx, current_height,
         request.params[paramIdx + 2].get_str());
-    CKeyID keyIDVoting = ptx.keyIDOwner;
-    if (request.params[paramIdx + 3].get_str() != "") {
-        keyIDVoting = ParsePubKeyIDFromAddress(request.params[paramIdx + 3].get_str(), "voting address");
-    }
+    ConfigureProviderVotingKey(ptx, request.params[paramIdx + 3].get_str());
 
     int64_t operatorReward;
     if (!ParseFixedPoint(request.params[paramIdx + 4].getValStr(), 2, &operatorReward)) {
@@ -935,7 +953,6 @@ static RPCHelpMan protx_register_fund()
         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf("invalid payout address: %s", request.params[paramIdx + 5].get_str()));
     }
 
-    ptx.keyIDVoting = keyIDVoting;
     ptx.scriptPayout = GetScriptForDestination(payoutDest);
 
 
@@ -991,9 +1008,8 @@ static RPCHelpMan protx_register_prepare()
                                     "The corresponding private key does not have to be known by your wallet.\n"
                                     "The address must be unused and must differ from the collateralAddress."},
                 {"legacyOperatorPubKey", RPCArg::Type::STR, RPCArg::Optional::NO, "Legacy 48-byte operator public key before PQ activation; must be empty after activation. Register the global SLH-DSA key separately."},
-                {"votingAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "The voting key address. The private key does not have to be known by your wallet.\n"
-                                    "It has to match the private key which is later used when voting on proposals.\n"
-                                    "If set to an empty string, ownerAddress will be used.\n"},
+                {"votingAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "After PQ activation, the nonzero 32-byte SLH voting public key (64 hex characters) from protx_generate_voting_key.\n"
+                                    "Before activation, a legacy voting address; an empty string uses ownerAddress.\n"},
                 {"operatorReward", RPCArg::Type::NUM, RPCArg::Optional::NO, "The fraction in %% to share with the operator. The value must be\n"
                                     "between 0.00 and 100.00."},
                 {"payoutAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "The Syscoin address to use for masternode reward payments."},
@@ -1052,10 +1068,7 @@ static RPCHelpMan protx_register_prepare()
         ConfigureProviderRegistrationForNextBlock(
             ptx, current_height,
             request.params[paramIdx + 2].get_str());
-        CKeyID keyIDVoting = ptx.keyIDOwner;
-        if (request.params[paramIdx + 3].get_str() != "") {
-            keyIDVoting = ParsePubKeyIDFromAddress(request.params[paramIdx + 3].get_str(), "voting address");
-        }
+        ConfigureProviderVotingKey(ptx, request.params[paramIdx + 3].get_str());
 
         int64_t operatorReward;
         if (!ParseFixedPoint(request.params[paramIdx + 4].getValStr(), 2, &operatorReward)) {
@@ -1071,7 +1084,6 @@ static RPCHelpMan protx_register_prepare()
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf("invalid payout address: %s", request.params[paramIdx + 5].get_str()));
         }
 
-        ptx.keyIDVoting = keyIDVoting;
         ptx.scriptPayout = GetScriptForDestination(payoutDest);
 
 
@@ -1315,6 +1327,29 @@ static RPCHelpMan protx_register_operator_key()
             });
         },
     };
+}
+
+static RPCHelpMan protx_generate_voting_key()
+{
+    return RPCHelpMan{
+        "protx_generate_voting_key",
+        "\nGenerates an independent reusable SLH-DSA proposal-funding voting key in this wallet.\n"
+        "Only its public key is returned. Give it to the masternode owner for registration; the private key stays in the owner's or delegate's wallet.\n"
+        "Back up the full wallet with backupwallet after generation. Descriptor exports and earlier backups cannot recover this independent key.\n",
+        {},
+        RPCResult{RPCResult::Type::STR_HEX, "publicKey", "32-byte SLH-DSA-SHAKE-128s voting public key"},
+        RPCExamples{HelpExampleCli("protx_generate_voting_key", "")},
+        [&](const RPCHelpMan&, const node::JSONRPCRequest& request) -> UniValue {
+            auto wallet{GetWalletForJSONRPCRequest(request)};
+            if (!wallet) return NullUniValue;
+            EnsureWalletIsUnlocked(*wallet);
+            slhdsa::PublicKey public_key;
+            std::string error;
+            if (!wallet->GenerateVotingKey(public_key, error)) {
+                throw JSONRPCError(RPC_WALLET_ERROR, error);
+            }
+            return HexStr(public_key);
+        }};
 }
 
 static RPCHelpMan protx_generate_operator_keypair()
@@ -1765,9 +1800,7 @@ static RPCHelpMan protx_update_service()
                 {
                     {"proTxHash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The hash of the initial ProRegTx."},
                     {"deprecatedOperatorPubKey", RPCArg::Type::STR, RPCArg::Optional::NO, "Must be empty. Global SLH-DSA key rotation uses the separate PQ global-key transaction."},
-                    {"votingAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "The voting key address. The private key does not have to be known by your wallet.\n"
-                                    "It has to match the private key which is later used when voting on proposals.\n"
-                                    "If set to an empty string, the currently active voting key address is reused."}, 
+                    {"votingAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "A 32-byte SLH voting public key (64 hex characters). An empty string preserves the current key; 64 zeroes revoke it. This RPC requires PQ activation at the next block height."},
                     {"payoutAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "The Syscoin address to use for masternode reward payments.\n"
                                     "If set to an empty string, the currently active payout address is reused."}, 
                     {"feeSourceAddress", RPCArg::Type::STR, RPCArg::Default{""}, "If specified wallet will only use coins from this address to fund ProTx.\n"
@@ -1803,6 +1836,7 @@ static RPCHelpMan protx_update_service()
             throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("masternode %s not found", ptx.proTxHash.ToString()));
         }
         ptx.keyIDVoting = dmn->pdmnState->keyIDVoting;
+        ptx.pqVotingPublicKey = dmn->pdmnState->pqVotingKey.public_key;
         ptx.scriptPayout = dmn->pdmnState->scriptPayout;
 
         if (!request.params[1].get_str().empty()) {
@@ -1811,7 +1845,7 @@ static RPCHelpMan protx_update_service()
                 "deprecatedOperatorPubKey must be empty; use a PQ global-key transaction for key rotation");
         }
         if (request.params[2].get_str() != "") {
-            ptx.keyIDVoting = ParsePubKeyIDFromAddress(request.params[2].get_str(), "voting address");
+            ptx.pqVotingPublicKey = ParseVotingPublicKey(request.params[2].get_str(), /*allow_revocation=*/true);
         }
 
         CTxDestination payoutDest;
@@ -1989,7 +2023,15 @@ static bool CheckWalletOwnsScript(CWallet* pwallet, const CScript& script) {
     LOCK(pwallet->cs_wallet);
     return pwallet->IsMine(script) != ISMINE_NO;
 }
-UniValue BuildDMNListEntry(CWallet* pwallet, const CDeterministicMN& dmn, int detailed)
+static bool WalletHasMasternodeVotingKey(CWallet* wallet, const CDeterministicMN& dmn, int height)
+{
+    if (!wallet) return false;
+    return IsPQGovernanceEnabledAtHeight(height)
+        ? dmn.pdmnState->pqVotingKey.HasActiveKey() && wallet->HasVotingKey(dmn.pdmnState->pqVotingKey.public_key)
+        : CheckWalletOwnsKey(wallet, dmn.pdmnState->keyIDVoting);
+}
+
+UniValue BuildDMNListEntry(CWallet* pwallet, const CDeterministicMN& dmn, int detailed, int height)
 {
     if (!detailed) {
         return dmn.proTxHash.ToString();
@@ -2001,12 +2043,11 @@ UniValue BuildDMNListEntry(CWallet* pwallet, const CDeterministicMN& dmn, int de
         o.pushKV("collateralIndex", (int)dmn.collateralOutpoint.n);
         o.pushKV("collateralHeight", dmn.pdmnState->nCollateralHeight);
         o.pushKV("votingAddress", EncodeDestination(voteDest));
+        o.pushKV("pqVotingPublicKey", HexStr(dmn.pdmnState->pqVotingKey.public_key));
+        o.pushKV("pqVotingKeyVersion", dmn.pdmnState->pqVotingKey.key_version);
+        o.pushKV("hasVotingKey", WalletHasMasternodeVotingKey(pwallet, dmn, height));
         if(pwallet) {
             LOCK(pwallet->cs_wallet);
-            CKey keyVoting;
-            if (pwallet->GetKey(dmn.pdmnState->keyIDVoting, keyVoting)) {
-                o.pushKV("votingKey", EncodeSecret(keyVoting));
-            }
             const auto* address_book_entry = pwallet->FindAddressBookEntry(voteDest);
             if (address_book_entry) {
                 o.pushKV("label", address_book_entry->GetLabel());
@@ -2027,7 +2068,7 @@ UniValue BuildDMNListEntry(CWallet* pwallet, const CDeterministicMN& dmn, int de
         if (pwallet) {
             LOCK2(pwallet->cs_wallet, cs_main);
             bool hasOwnerKey = CheckWalletOwnsKey(pwallet, dmn.pdmnState->keyIDOwner);
-            bool hasVotingKey = CheckWalletOwnsKey(pwallet, dmn.pdmnState->keyIDVoting);
+            bool hasVotingKey = WalletHasMasternodeVotingKey(pwallet, dmn, height);
 
             UniValue walletObj(UniValue::VOBJ);
             walletObj.pushKV("hasOwnerKey", hasOwnerKey);
@@ -2051,7 +2092,7 @@ static RPCHelpMan protx_list_wallet()
         "\nList only ProTx which are found in your wallet at the given chain height.\n"
         "This will also include ProTx which failed PoSe verification.\n",
         {
-            {"detailed", RPCArg::Type::NUM, RPCArg::Default{0}, "If 0, only the hashes of the ProTx will be returned. If 1 returns voting details for each DMN and keys and if 2 returns full details of each DMN"},
+            {"detailed", RPCArg::Type::NUM, RPCArg::Default{0}, "If 0, only the hashes of the ProTx are returned. If 1, returns public voting details and wallet key availability; if 2, returns full DMN details. No voting secrets are returned."},
             {"height", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Height to look for ProTx transactions, if not specified defaults to current chain-tip"},                   
         },
         RPCResult{RPCResult::Type::ANY, "", ""},
@@ -2093,10 +2134,10 @@ static RPCHelpMan protx_list_wallet()
     mnList.ForEachMN(false, [&](const auto& dmn) {
         if (setOutpts.count(dmn.collateralOutpoint) ||
             CheckWalletOwnsKey(pwallet, dmn.pdmnState->keyIDOwner) ||
-            CheckWalletOwnsKey(pwallet, dmn.pdmnState->keyIDVoting) ||
+            WalletHasMasternodeVotingKey(pwallet, dmn, mnList.GetHeight()) ||
             CheckWalletOwnsScript(pwallet, dmn.pdmnState->scriptPayout) ||
             CheckWalletOwnsScript(pwallet, dmn.pdmnState->scriptOperatorPayout)) {
-            ret.push_back(BuildDMNListEntry(pwallet, dmn, detailed));
+            ret.push_back(BuildDMNListEntry(pwallet, dmn, detailed, mnList.GetHeight()));
         }
     });
     return ret;
@@ -2128,7 +2169,7 @@ static RPCHelpMan protx_info_wallet()
     if (!dmn) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("%s not found", proTxHash.ToString()));
     }
-    return BuildDMNListEntry(pwallet, *dmn, 2);
+    return BuildDMNListEntry(pwallet, *dmn, 2, mnList.GetHeight());
 },
     };
 } 
@@ -2142,6 +2183,7 @@ Span<const CRPCCommand> wallet::GetEvoWalletRPCCommands()
         {"evowallet", &protx_register_fund},
         {"evowallet", &protx_register_prepare},
         {"evowallet", &protx_register_submit},
+        {"evowallet", &protx_generate_voting_key},
         {"evowallet", &protx_generate_operator_keypair},
         {"evowallet", &protx_register_operator_key},
         {"evowallet", &protx_rotate_operator_key},

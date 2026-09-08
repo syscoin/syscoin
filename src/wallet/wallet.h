@@ -8,6 +8,7 @@
 
 #include <addresstype.h>
 #include <consensus/amount.h>
+#include <crypto/slhdsa/slhdsa.h>
 #include <interfaces/chain.h>
 #include <interfaces/handler.h>
 #include <kernel/cs_main.h>
@@ -158,7 +159,8 @@ static constexpr uint64_t KNOWN_WALLET_FLAGS =
     |   WALLET_FLAG_LAST_HARDENED_XPUB_CACHED
     |   WALLET_FLAG_DISABLE_PRIVATE_KEYS
     |   WALLET_FLAG_DESCRIPTORS
-    |   WALLET_FLAG_EXTERNAL_SIGNER;
+    |   WALLET_FLAG_EXTERNAL_SIGNER
+    |   WALLET_FLAG_PQ_VOTING_KEYS;
 
 static constexpr uint64_t MUTABLE_WALLET_FLAGS =
         WALLET_FLAG_AVOID_REUSE;
@@ -170,7 +172,8 @@ static const std::map<std::string,WalletFlags> WALLET_FLAG_MAP{
     {"last_hardened_xpub_cached", WALLET_FLAG_LAST_HARDENED_XPUB_CACHED},
     {"disable_private_keys", WALLET_FLAG_DISABLE_PRIVATE_KEYS},
     {"descriptor_wallet", WALLET_FLAG_DESCRIPTORS},
-    {"external_signer", WALLET_FLAG_EXTERNAL_SIGNER}
+    {"external_signer", WALLET_FLAG_EXTERNAL_SIGNER},
+    {"pq_voting_keys", WALLET_FLAG_PQ_VOTING_KEYS}
 };
 
 /** A wrapper to reserve an address from a wallet
@@ -304,6 +307,10 @@ class CWallet final : public WalletStorage, public interfaces::Chain::Notificati
 {
 private:
     CKeyingMaterial vMasterKey GUARDED_BY(cs_wallet);
+    std::map<slhdsa::PublicKey, CKeyingMaterial> m_voting_keys GUARDED_BY(cs_wallet);
+    std::map<slhdsa::PublicKey, std::vector<unsigned char>> m_crypted_voting_keys GUARDED_BY(cs_wallet);
+
+    bool CheckVotingDecryptionKey(const CKeyingMaterial& master_key) const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
 
     bool Unlock(const CKeyingMaterial& vMasterKeyIn, bool accept_no_keys = false);
 
@@ -891,6 +898,14 @@ public:
     bool WriteGovernanceObject(const Governance::Object& obj) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
     /** Returns a vector containing pointers to the governance objects in m_gobjects */
     std::vector<const Governance::Object*> GetGovernanceObjects() EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+    /** Independent of spending/operator keys; back up the full wallet after generation. */
+    bool GenerateVotingKey(slhdsa::PublicKey& public_key, std::string& error);
+    bool HasVotingKey(const slhdsa::PublicKey& public_key) const;
+    /** The only signing domain exposed for these reusable keys is proposal funding. */
+    bool SignVotingAuthorization(const slhdsa::PublicKey& public_key, const uint256& authorization_hash,
+                                 slhdsa::Signature& signature, std::string& error) const;
+    bool LoadVotingKey(const slhdsa::PublicKey& public_key, const CKeyingMaterial& secret) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+    bool LoadCryptedVotingKey(const slhdsa::PublicKey& public_key, const std::vector<unsigned char>& secret) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
     /**
      * Blocks until the wallet state is up-to-date to /at least/ the current
      * chain at the time this function is entered
