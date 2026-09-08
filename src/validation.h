@@ -58,6 +58,12 @@
 class Chainstate;
 class CTxMemPool;
 class ChainstateManager;
+// Coins-database recovery reapplies local effects of fully validated blocks.
+// External NEVM reconciliation happens separately after that recovery completes.
+enum class NEVMNotificationContext {
+    LIVE,
+    ALREADY_VALIDATED_COINS_RECOVERY,
+};
 struct ChainTxData;
 class DisconnectedBlockTransactions;
 class CDeterministicMNListNEVMAddressDiff;
@@ -501,6 +507,7 @@ enum class VerifyDBResult {
     INTERRUPTED,
     SKIPPED_L3_CHECKS,
     SKIPPED_MISSING_BLOCKS,
+    UNSUPPORTED_CHECK_LEVEL,
 };
 
 /** RAII wrapper for VerifyDB: Verify consistency of the block and coin databases */
@@ -1061,7 +1068,7 @@ private:
     // SYSCOIN: Normal block connection requires cs_main. Authenticated
     // catch-up replay instead holds m_chainstate_mutex while releasing
     // cs_main across the synchronous Geth call.
-    bool ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMap &mapNEVMTxRoots, const CBlock& block, const CBlockIndex* pindex, const uint256& nBlockHash, const uint32_t& nHeight, const bool fJustCheck, PoDAMAPMemory &mapPoDA, const CDeterministicMNListNEVMAddressDiff &diff, bool btcc_prefix_authenticated = false);
+    bool ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMap &mapNEVMTxRoots, const CBlock& block, const CBlockIndex* pindex, const uint256& nBlockHash, const uint32_t& nHeight, const bool fJustCheck, PoDAMAPMemory &mapPoDA, const CDeterministicMNListNEVMAddressDiff &diff, bool btcc_prefix_authenticated = false, NEVMNotificationContext notification_context = NEVMNotificationContext::LIVE);
     SteadyClock::time_point m_last_write{};
     SteadyClock::time_point m_last_flush{};
     // SYSCOIN: Retry auxiliary GC once per tip or external retention change;
@@ -1790,7 +1797,7 @@ int RPCSerializationFlags();
     uint32_t expected_syscoin_height,
     const uint256& reported_syscoin_hash,
     const uint256& expected_syscoin_hash) noexcept;
-bool DisconnectNEVMCommitment(ChainstateManager& chainman, BlockValidationState& state, std::vector<uint256> &vecNEVMBlocks, const CBlock& block, const CBlockIndex& index, const uint32_t& nHeight, const uint256& nBlockHash, const CDeterministicMNListNEVMAddressDiff &diff) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+bool DisconnectNEVMCommitment(ChainstateManager& chainman, BlockValidationState& state, std::vector<uint256> &vecNEVMBlocks, const CBlock& block, const CBlockIndex& index, const uint32_t& nHeight, const uint256& nBlockHash, const CDeterministicMNListNEVMAddressDiff &diff, NEVMNotificationContext notification_context = NEVMNotificationContext::LIVE) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 bool GetNEVMData(BlockValidationState& state, const CBlock& block, CNEVMHeader &evmBlock, std::vector<unsigned char>* coinbase_payload = nullptr);
 bool FillNEVMData(CBlock &block);
 bool EraseMempoolNEVMData(const std::vector<uint8_t>& vchVersionHash, const uint256& txid);

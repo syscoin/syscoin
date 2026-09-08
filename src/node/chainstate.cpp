@@ -601,6 +601,9 @@ ChainstateLoadResult VerifyLoadedChainstate(ChainstateManager& chainman, const C
                 return {ChainstateLoadStatus::INTERRUPTED, _("Block verification was interrupted")};
             case VerifyDBResult::CORRUPTED_BLOCK_DB:
                 return {ChainstateLoadStatus::FAILURE, _("Corrupted block database detected")};
+            case VerifyDBResult::UNSUPPORTED_CHECK_LEVEL:
+                return {ChainstateLoadStatus::FAILURE,
+                        _("Check level 4 is unavailable after PQ activation; use check levels 0 through 3")};
             case VerifyDBResult::SKIPPED_L3_CHECKS:
                 if (options.require_full_verification) {
                     return {ChainstateLoadStatus::FAILURE_INSUFFICIENT_DBCACHE, _("Insufficient dbcache for block verification")};

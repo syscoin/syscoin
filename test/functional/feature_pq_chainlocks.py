@@ -2282,6 +2282,17 @@ class PQChainLocksTest(SyscoinTestFramework):
         self.assert_payment_audit_retired(
             bundle, "pq-audit-live-retired", 0xc401)
 
+        # Level-4 reconnect cannot isolate PQ auxiliary state after archive
+        # retirement. Reject it before touching the durable winner's index
+        # provenance, and confirm that normal verification still works.
+        best_chainlock = node.getbestchainlock()
+        assert_raises_rpc_error(
+            -8, "Check level 4 is unavailable after PQ activation",
+            node.verifychain, 4, 0)
+        assert_equal(node.getbestchainlock(), best_chainlock)
+        assert_equal(node.getbestblockhash(), expected_tip)
+        assert node.verifychain(3, 10)
+
         self.restart_node(0, extra_args=context["fixture_args"])
         force_finish_mnsync(node)
         self.assert_payment_audit_state(context, post, expected_tip)

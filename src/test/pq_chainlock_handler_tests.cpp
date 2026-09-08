@@ -599,6 +599,26 @@ public:
         return handler.HasPendingPQHistoryAuthentication(allow_prefix);
     }
 
+    static void SetRestoredEnforcementWitness(
+        CChainLocksHandler& handler, const uint256& witness_id)
+    {
+        LOCK(handler.m_persisted_mutex);
+        handler.m_threshold_attested_enforcement_witness = witness_id;
+        handler.m_persisted_best_auth_pending = true;
+        handler.m_enforced.store(true);
+    }
+
+    static bool BestAuthenticationPending(const CChainLocksHandler& handler)
+    {
+        LOCK(handler.m_persisted_mutex);
+        return handler.m_persisted_best_auth_pending;
+    }
+
+    static void EnforceBestChainLock(CChainLocksHandler& handler)
+    {
+        handler.EnforceBestChainLock();
+    }
+
     static void RefreshHistory(CChainLocksHandler& handler)
     {
         handler.RefreshPQHistoryAuthState();
@@ -6302,6 +6322,161 @@ BOOST_FIXTURE_TEST_CASE(
     dispatch(NetMsgType::GETDATA, inventory);
     BOOST_CHECK_EQUAL(drain_reply(""), 0U);
     check_score(40);
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    restored_chainlock_enforcement_accepts_only_pruned_active_winners,
+    PQAuthorizationBasePathSetup)
+{
+    using Access = llmq::test::CChainLocksHandlerTestAccess;
+    using namespace llmq::pq;
+    constexpr int32_t TARGET_HEIGHT{2'330};
+    constexpr int32_t PREDECESSOR_HEIGHT{TARGET_HEIGHT - PQ_CL_PERIOD};
+    constexpr int32_t TIP_HEIGHT{TARGET_HEIGHT + PQ_CL_SIGN_LAG};
+    const uint256 probation_root{NonNullHash(986'000)};
+    auto& chainman{*Assert(m_node.chainman)};
+    const uint256 genesis{chainman.GetConsensus().hashGenesisBlock};
+    std::vector<CBlockIndex*> chain(static_cast<std::size_t>(TIP_HEIGHT + 1));
+    CBlockIndex* sibling{nullptr};
+    {
+        LOCK(::cs_main);
+        chain[0] = chainman.ActiveTip();
+        BOOST_REQUIRE(chain[0]);
+        const int64_t first_time{GetTime<std::chrono::seconds>().count() - TIP_HEIGHT};
+        for (int32_t height{1}; height <= TIP_HEIGHT; ++height) {
+            CBlockHeader header;
+            header.nVersion = 4;
+            header.hashPrevBlock = chain[height - 1]->GetBlockHash();
+            header.hashMerkleRoot = NonNullHash(987'000 + height);
+            header.nTime = static_cast<uint32_t>(first_time + height);
+            header.nBits = chain[height - 1]->nBits;
+            header.nNonce = static_cast<uint32_t>(height);
+            chain[height] = chainman.m_blockman.AddToBlockIndex(header, chainman.m_best_header);
+            BOOST_REQUIRE(chain[height]);
+            chain[height]->nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA |
+                BLOCK_PQ_BTCC_INDEX_VALIDATED | BLOCK_PQ_RECEIPT_INDEX_VALIDATED |
+                BLOCK_GOVERNANCE_VALIDATED;
+            chain[height]->nTx = 1;
+            chain[height]->nChainTx = static_cast<unsigned int>(height + 1);
+            chain[height]->pqPaymentProbationStateHash = probation_root;
+        }
+        CBlockHeader header{chain[TARGET_HEIGHT]->GetBlockHeader()};
+        header.hashMerkleRoot = NonNullHash(990'000);
+        sibling = chainman.m_blockman.AddToBlockIndex(header, chainman.m_best_header);
+        BOOST_REQUIRE(sibling);
+        sibling->nStatus = chain[TARGET_HEIGHT]->nStatus;
+        sibling->nTx = 1;
+        sibling->nChainTx = static_cast<unsigned int>(TARGET_HEIGHT + 1);
+        chainman.ActiveChainstate().m_chain.SetTip(*chain[TIP_HEIGHT]);
+        BOOST_REQUIRE(chainman.IsBaseBlockSyncComplete());
+        BOOST_REQUIRE(CSuperblock::IsValidBlockHeight(TARGET_HEIGHT));
+        // Historical governance replay preserves full receipt validation but
+        // lacks exact local governance provenance. Pruning later removes data.
+        chain[TARGET_HEIGHT]->nStatus &=
+            ~(BLOCK_GOVERNANCE_VALIDATED | BLOCK_HAVE_DATA);
+    }
+
+    auto& consensus{const_cast<Consensus::Params&>(chainman.GetConsensus())};
+    const auto original_consensus{consensus};
+    consensus.nPQActivationHeight = 2'305;
+    consensus.nPQPreparationHeight = 1'000;
+    consensus.nPQChainLockEpochOrigin = 1'440;
+    consensus.nPQRegistrationCutoffBlocks = 288;
+    consensus.nPQFutureHorizonEpochs = 8;
+    consensus.nPQRosterSnapshotLag = 288;
+    consensus.nPQBTCCCandidateOrigin = 2'305;
+    consensus.nPQBTCCNEVMInjectionLag = PQ_BTCC_NEVM_LAG;
+    consensus.nPQBTCCReceiptAnchorHeight = 1'000;
+    consensus.hashPQBTCCReceiptAnchorBlock = chain[1'000]->GetBlockHash();
+    consensus.nPQBTCCReceiptAnchorCursorHeight = -1;
+    consensus.hashPQBTCCReceiptAnchorCursorSysBlock.SetNull();
+    consensus.hashPQBTCCReceiptAnchorCursorBTCBlock.SetNull();
+    consensus.hashPQBTCCReceiptAnchorState.SetNull();
+    consensus.nDefaultAssumeValidHeight = -1;
+    std::unique_ptr<llmq::CChainLocksHandler> handler;
+    {
+        LOCK(::cs_main);
+        handler = std::make_unique<llmq::CChainLocksHandler>(
+            *Assert(m_node.connman), *Assert(m_node.peerman), chainman);
+    }
+    consensus = original_consensus;
+    const auto* config{Access::Config(*handler)};
+    BOOST_REQUIRE(config);
+    FullReceiptCatchupContext store_context;
+    store_context.full_receipt_history = true;
+    Access::ResetFinalityStoreWithContext(*handler, store_context);
+    auto* store{Access::Store(*handler)};
+    BOOST_REQUIRE(store);
+    auto certificate{MakeCatchupChainLock(
+        TARGET_HEIGHT, PREDECESSOR_HEIGHT,
+        chain[PREDECESSOR_HEIGHT]->GetBlockHash(), 986'001)};
+    certificate.statement.block_hash = chain[TARGET_HEIGHT]->GetBlockHash();
+    certificate.statement.payment_probation_state_hash = probation_root;
+    BOOST_REQUIRE(certificate.IsStructurallyValid());
+    // Enter at the post-verification startup seam, then exercise the complete
+    // production handler and lower-chainstate enforcement path.
+    const auto prepared{store->PreparePersistedCandidate(certificate)};
+    BOOST_REQUIRE(prepared);
+    const auto verified{ChainLockStoreTestContextFactory::CreateTrustedPersistence(
+        genesis, config->chainlock_schedule, certificate.statement)};
+    BOOST_REQUIRE(store->AcceptPersistedVerified(
+        *prepared, certificate, /*signatures_valid=*/true, nullptr, verified));
+    const uint256 witness_id{certificate.GetWitnessId(genesis)};
+    const auto check_rejected = [&] {
+        Access::ClearHistoricalIndexTestCache(*handler);
+        Access::EnforceBestChainLock(*handler);
+        BOOST_CHECK(Access::BestAuthenticationPending(*handler));
+        BOOST_CHECK(Access::PendingHistory(*handler));
+        LOCK(::cs_main);
+        BOOST_CHECK(!(sibling->nStatus & BLOCK_CONFLICT_CHAINLOCK));
+        BOOST_CHECK(!(chain[TARGET_HEIGHT]->nStatus & BLOCK_CONFLICT_CHAINLOCK));
+    };
+
+    Access::SetRestoredEnforcementWitness(*handler, {});
+    check_rejected();
+    Access::SetRestoredEnforcementWitness(*handler, NonNullHash(986'002));
+    check_rejected();
+    Access::SetRestoredEnforcementWitness(*handler, witness_id);
+    for (const int32_t height : {PREDECESSOR_HEIGHT, TARGET_HEIGHT}) {
+        {
+            LOCK(::cs_main);
+            chain[height]->nStatus &= ~BLOCK_PQ_RECEIPT_INDEX_VALIDATED;
+        }
+        check_rejected();
+        {
+            LOCK(::cs_main);
+            chain[height]->nStatus |= BLOCK_PQ_RECEIPT_INDEX_VALIDATED;
+        }
+    }
+    {
+        LOCK(::cs_main);
+        chain[TARGET_HEIGHT]->pqPaymentProbationStateHash = NonNullHash(986'003);
+    }
+    check_rejected();
+    {
+        LOCK(::cs_main);
+        chain[TARGET_HEIGHT]->pqPaymentProbationStateHash = probation_root;
+        chainman.ActiveChainstate().m_chain.SetTip(*sibling);
+        BOOST_REQUIRE(chainman.IsBaseBlockSyncComplete());
+    }
+    check_rejected();
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK(chainman.ActiveTip() == sibling);
+        chainman.ActiveChainstate().m_chain.SetTip(*chain[TIP_HEIGHT]);
+    }
+
+    Access::ClearHistoricalIndexTestCache(*handler);
+    Access::EnforceBestChainLock(*handler);
+    BOOST_CHECK(!Access::BestAuthenticationPending(*handler));
+    BOOST_CHECK(!Access::PendingHistory(*handler));
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK(chainman.ActiveTip() == chain[TIP_HEIGHT]);
+        BOOST_CHECK(!(chain[TARGET_HEIGHT]->nStatus & BLOCK_HAVE_DATA));
+        BOOST_CHECK(!(chain[TARGET_HEIGHT]->nStatus & BLOCK_GOVERNANCE_VALIDATED));
+        BOOST_CHECK(sibling->nStatus & BLOCK_CONFLICT_CHAINLOCK);
+    }
 }
 
 BOOST_FIXTURE_TEST_CASE(

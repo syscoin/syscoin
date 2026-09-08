@@ -1319,7 +1319,7 @@ static RPCHelpMan gettxout()
 static RPCHelpMan verifychain()
 {
     return RPCHelpMan{"verifychain",
-                "\nVerifies blockchain database.\n",
+                "\nVerifies blockchain database. Check level 4 is unavailable after PQ activation; use check levels 0 through 3.\n",
                 {
                     {"checklevel", RPCArg::Type::NUM, RPCArg::DefaultHint{strprintf("%d, range=0-4", DEFAULT_CHECKLEVEL)},
                         strprintf("How thorough the block verification is:\n%s", MakeUnorderedList(CHECKLEVEL_DOC))},
@@ -1340,8 +1340,13 @@ static RPCHelpMan verifychain()
     LOCK(cs_main);
 
     Chainstate& active_chainstate = chainman.ActiveChainstate();
-    return CVerifyDB(chainman.GetNotifications()).VerifyDB(
-               active_chainstate, chainman.GetParams().GetConsensus(), active_chainstate.CoinsTip(), check_level, check_depth) == VerifyDBResult::SUCCESS;
+    const auto result = CVerifyDB(chainman.GetNotifications()).VerifyDB(
+        active_chainstate, chainman.GetParams().GetConsensus(), active_chainstate.CoinsTip(), check_level, check_depth);
+    if (result == VerifyDBResult::UNSUPPORTED_CHECK_LEVEL) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER,
+            "Check level 4 is unavailable after PQ activation; use check levels 0 through 3");
+    }
+    return result == VerifyDBResult::SUCCESS;
 },
     };
 }

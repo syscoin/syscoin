@@ -28,6 +28,7 @@
 #include <pow.h>
 #include <random.h>
 #include <rpc/blockchain.h>
+#include <services/assetconsensus.h> // SYSCOIN: coins-recovery NEVM roots and mint markers.
 #include <sync.h>
 #include <test/pq_test_util.h> // SYSCOIN: durable roster-context fixture.
 #include <test/util/chainstate.h>
@@ -94,9 +95,10 @@ public:
 
 namespace {
 struct DeferredNEVMReplaySetup : TestChain100Setup {
-    DeferredNEVMReplaySetup()
+    explicit DeferredNEVMReplaySetup(bool coins_db_in_memory = true)
         : TestChain100Setup{ChainType::REGTEST,
-                            {"-nevmstartheight=101"}} {}
+                            {"-nevmstartheight=101"}, COINBASE_MATURITY,
+                            coins_db_in_memory} {}
 };
 
 // SYSCOIN: Exercise Core's real NEVM connection path without an external
@@ -118,6 +120,8 @@ struct StartupNEVMSubscriber final : CValidationInterface {
     std::optional<AppliedPair> last_reported_pair;
     std::size_t flush_requests{0};
     std::string block_info_error;
+    std::string connect_error;
+    std::string disconnect_error;
     std::size_t block_info_queries{0};
     std::vector<uint256> connected_blocks;
     std::vector<uint256> disconnected_blocks;
@@ -143,6 +147,10 @@ struct StartupNEVMSubscriber final : CValidationInterface {
         state.clear();
         if (hash.IsNull()) return;
         connected_blocks.push_back(hash);
+        if (!connect_error.empty()) {
+            state = connect_error;
+            return;
+        }
         if (buffer_connects) {
             buffered_pair = AppliedPair{height - 101 + 1, hash};
             return;
@@ -170,6 +178,7 @@ struct StartupNEVMSubscriber final : CValidationInterface {
     {
         state.clear();
         disconnected_blocks.push_back(hash);
+        state = disconnect_error;
     }
 
     void NotifyGetNEVMBlockInfo(
@@ -192,7 +201,8 @@ struct StartupNEVMRecoverySetup : DeferredNEVMReplaySetup {
     std::shared_ptr<StartupNEVMSubscriber> nevm{
         std::make_shared<StartupNEVMSubscriber>()};
 
-    StartupNEVMRecoverySetup()
+    explicit StartupNEVMRecoverySetup(bool coins_db_in_memory = true)
+        : DeferredNEVMReplaySetup{coins_db_in_memory}
     {
         RegisterSharedValidationInterface(nevm);
         fNEVMConnection = true;
@@ -259,6 +269,75 @@ struct StartupNEVMRecoverySetup : DeferredNEVMReplaySetup {
             // Restore entries pruned while this fixture first mined ahead.
             chainstate.setBlockIndexCandidates.insert(chainman.ActiveTip());
         }
+    }
+};
+
+struct CoinsNEVMRecoverySetup : StartupNEVMRecoverySetup {
+    Consensus::Params& consensus{
+        const_cast<Consensus::Params&>(Params().GetConsensus())};
+    const int previous_dip3_height{consensus.DIP0003Height};
+    const int previous_dip3_enforcement{consensus.DIP0003EnforcementHeight};
+
+    CoinsNEVMRecoverySetup()
+        : StartupNEVMRecoverySetup{/*coins_db_in_memory=*/false}
+    {
+        // BasicTestingSetup force-sets the DIP3 argument. Activate the actual
+        // fixture consensus only after its unchanged 100-block base exists.
+        consensus.DIP0003Height = 101;
+        consensus.DIP0003EnforcementHeight = 101;
+    }
+
+    ~CoinsNEVMRecoverySetup()
+    {
+        consensus.DIP0003Height = previous_dip3_height;
+        consensus.DIP0003EnforcementHeight = previous_dip3_enforcement;
+    }
+
+    void PrepareInterruptedFlush(const uint256& new_head,
+                                 const uint256& old_head)
+    {
+        auto& chainman{*Assert(m_node.chainman)};
+        auto& chainstate{chainman.ActiveChainstate()};
+        LOCK(::cs_main);
+        const auto path{chainstate.CoinsDB().StoragePath()};
+        BOOST_REQUIRE(path.has_value());
+        // Drop unflushed cache changes and reopen the real coins store with
+        // the exact recovery marker written by an interrupted BatchWrite.
+        chainstate.ResetCoinsViews();
+        {
+            CDBWrapper db{DBParams{
+                .path = *path,
+                .cache_bytes = 1U << 20,
+                .obfuscate = true,
+            }};
+            CDBBatch batch{db};
+            batch.Erase(uint8_t{'B'});
+            batch.Write(uint8_t{'H'},
+                        std::vector<uint256>{new_head, old_head});
+            BOOST_REQUIRE(db.WriteBatch(batch, /*fSync=*/true));
+        }
+        chainstate.InitCoinsDB(/*cache_size_bytes=*/1U << 20,
+                               /*in_memory=*/false,
+                               /*should_wipe=*/false);
+        BOOST_CHECK(chainstate.CoinsDB().GetBestBlock().IsNull());
+        BOOST_CHECK(chainstate.CoinsDB().GetHeadBlocks() ==
+                    (std::vector<uint256>{new_head, old_head}));
+    }
+
+    void CheckRecoveredTip(const uint256& expected_hash)
+    {
+        auto& chainman{*Assert(m_node.chainman)};
+        auto& chainstate{chainman.ActiveChainstate()};
+        LOCK(::cs_main);
+        BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == expected_hash);
+        BOOST_CHECK(chainstate.CoinsDB().GetHeadBlocks().empty());
+        chainstate.InitCoinsCache(1U << 23);
+        BOOST_REQUIRE(chainstate.LoadChainTip());
+        BOOST_CHECK(chainman.ActiveTip()->GetBlockHash() == expected_hash);
+        const auto recovered_list{
+            deterministicMNManager->GetListForBlock(chainman.ActiveTip())};
+        BOOST_CHECK(recovered_list.GetBlockHash() == expected_hash);
+        BOOST_CHECK_EQUAL(recovered_list.GetHeight(), chainman.ActiveHeight());
     }
 };
 
@@ -671,6 +750,160 @@ BOOST_FIXTURE_TEST_CASE(
     }
     BOOST_CHECK(chainman.IsInitialBlockDownload());
     BOOST_CHECK(llmq::chainLocksHandler->GetCLSIGFromPeers());
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_coins_replay_recovers_partial_forward_flush_locally,
+                        CoinsNEVMRecoverySetup)
+{
+    auto& chainman{*Assert(m_node.chainman)};
+    auto& chainstate{chainman.ActiveChainstate()};
+    const uint256 old_head{
+        WITH_LOCK(::cs_main, return chainman.ActiveTip()->GetBlockHash())};
+    const auto first{MineNEVMBlock()};
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainstate.CoinsTip().Flush());
+    }
+    const auto second{MineNEVMBlock()};
+    const COutPoint first_coin{first->vtx[0]->GetHash(), 0};
+    const COutPoint second_coin{second->vtx[0]->GetHash(), 0};
+    {
+        LOCK(::cs_main);
+        // The interrupted batch has written the first block's coins but not
+        // the second block, so recovery must support both idempotent replay
+        // and previously unapplied UTXO additions in the same pass.
+        BOOST_REQUIRE(chainstate.CoinsDB().GetBestBlock() == first->GetHash());
+        BOOST_REQUIRE(chainstate.CoinsDB().HaveCoin(first_coin));
+        BOOST_REQUIRE(!chainstate.CoinsDB().HaveCoin(second_coin));
+    }
+    BOOST_REQUIRE(pnevmtxrootsdb != nullptr);
+    BOOST_REQUIRE(pnevmtxmintdb != nullptr);
+    CNEVMHeader first_header, second_header;
+    BlockValidationState first_state, second_state;
+    BOOST_REQUIRE(GetNEVMData(first_state, *first, first_header));
+    BOOST_REQUIRE(GetNEVMData(second_state, *second, second_header));
+    BOOST_REQUIRE(pnevmtxrootsdb->FlushErase(
+        {first_header.nBlockHash, second_header.nBlockHash}));
+    const uint256 retained_mint{RecoveryFixtureHash(90'001)};
+    pnevmtxmintdb->FlushDataToCache({retained_mint});
+    BOOST_REQUIRE(pnevmtxmintdb->FlushCacheToDisk());
+
+    PrepareInterruptedFlush(second->GetHash(), old_head);
+    nevm->connected_blocks.clear();
+    nevm->disconnected_blocks.clear();
+    nevm->connect_error = "nevm-not-connected";
+    nevm->disconnect_error = "nevm-not-connected";
+    const auto info_queries{nevm->block_info_queries};
+    const auto flush_queries{nevm->flush_requests};
+    BOOST_REQUIRE(chainstate.ReplayBlocks());
+    CheckRecoveredTip(second->GetHash());
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK(chainstate.CoinsDB().HaveCoin(first_coin));
+        BOOST_CHECK(chainstate.CoinsDB().HaveCoin(second_coin));
+    }
+    NEVMTxRoot first_roots, second_roots;
+    BOOST_REQUIRE(pnevmtxrootsdb->ReadTxRoots(first_header.nBlockHash, first_roots));
+    BOOST_REQUIRE(pnevmtxrootsdb->ReadTxRoots(second_header.nBlockHash, second_roots));
+    BOOST_CHECK(first_roots.nTxRoot == first_header.nTxRoot);
+    BOOST_CHECK(first_roots.nReceiptRoot == first_header.nReceiptRoot);
+    BOOST_CHECK(second_roots.nTxRoot == second_header.nTxRoot);
+    BOOST_CHECK(second_roots.nReceiptRoot == second_header.nReceiptRoot);
+    BOOST_CHECK(pnevmtxmintdb->ExistsTx(retained_mint));
+    BOOST_CHECK(nevm->connected_blocks.empty());
+    BOOST_CHECK(nevm->disconnected_blocks.empty());
+    BOOST_CHECK_EQUAL(nevm->block_info_queries, info_queries);
+    BOOST_CHECK_EQUAL(nevm->flush_requests, flush_queries);
+    BOOST_CHECK(fNEVMConnection);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_coins_replay_recovers_fork_locally,
+                        CoinsNEVMRecoverySetup)
+{
+    auto& chainman{*Assert(m_node.chainman)};
+    auto& chainstate{chainman.ActiveChainstate()};
+    const auto old_first{MineNEVMBlock()};
+    const auto old_second{MineNEVMBlock()};
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainstate.CoinsTip().Flush());
+    }
+    CBlockIndex* old_branch{
+        WITH_LOCK(::cs_main, return chainman.m_blockman.LookupBlockIndex(
+            old_first->GetHash()))};
+    BOOST_REQUIRE(old_branch != nullptr);
+    BlockValidationState invalidate_state;
+    // The ordinary invalidation path preserves candidate-set invariants.
+    // Skip only external/local NEVM disconnect work during fixture setup so
+    // ReplayBlocks still has the old branch's roots to remove below.
+    BOOST_REQUIRE_MESSAGE(chainstate.InvalidateBlock(
+        invalidate_state, old_branch, /*bReverify=*/false),
+        invalidate_state.ToString());
+    BOOST_REQUIRE_EQUAL(WITH_LOCK(::cs_main, return chainman.ActiveHeight()), 100);
+    const auto new_first{MineNEVMBlock()};
+    const auto new_second{MineNEVMBlock()};
+    {
+        LOCK(::cs_main);
+        // Both heads of the interrupted flush represent validated branches.
+        // Reconsider the old branch after selecting the new one; recovery
+        // applies the recorded target without running best-chain activation.
+        chainstate.ResetBlockFailureFlags(old_branch);
+        BOOST_REQUIRE(old_branch->IsValid(BLOCK_VALID_SCRIPTS));
+    }
+    const COutPoint old_coin{old_second->vtx[0]->GetHash(), 0};
+    const COutPoint new_coin{new_second->vtx[0]->GetHash(), 0};
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainstate.CoinsDB().GetBestBlock() == old_second->GetHash());
+        BOOST_REQUIRE(chainstate.CoinsDB().HaveCoin(old_coin));
+        BOOST_REQUIRE(!chainstate.CoinsDB().HaveCoin(new_coin));
+    }
+    BOOST_REQUIRE(pnevmtxrootsdb != nullptr);
+    std::array<CNEVMHeader, 4> headers;
+    const std::array blocks{old_first, old_second, new_first, new_second};
+    for (std::size_t i{0}; i < blocks.size(); ++i) {
+        BlockValidationState state;
+        BOOST_REQUIRE(GetNEVMData(state, *blocks[i], headers[i]));
+    }
+    BOOST_REQUIRE(pnevmtxrootsdb->FlushErase(
+        {headers[2].nBlockHash, headers[3].nBlockHash}));
+    NEVMTxRoot old_roots;
+    BOOST_REQUIRE(pnevmtxrootsdb->ReadTxRoots(headers[1].nBlockHash, old_roots));
+
+    PrepareInterruptedFlush(new_second->GetHash(), old_second->GetHash());
+    nevm->connected_blocks.clear();
+    nevm->disconnected_blocks.clear();
+    // Model an already-aligned external engine that rejects replay of older
+    // canonical blocks and would reject disconnects from the abandoned fork.
+    nevm->connect_error = "nevm-historical-duplicate";
+    nevm->disconnect_error = "nevm-disconnect-wrong-branch";
+    const auto applied_count{nevm->applied_count};
+    const auto applied_hash{nevm->applied_hash};
+    const auto info_queries{nevm->block_info_queries};
+    const auto flush_queries{nevm->flush_requests};
+    BOOST_REQUIRE(chainstate.ReplayBlocks());
+    CheckRecoveredTip(new_second->GetHash());
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK(!chainstate.CoinsDB().HaveCoin(old_coin));
+        BOOST_CHECK(chainstate.CoinsDB().HaveCoin(new_coin));
+    }
+    for (std::size_t i{0}; i < headers.size(); ++i) {
+        NEVMTxRoot roots;
+        const bool found{pnevmtxrootsdb->ReadTxRoots(headers[i].nBlockHash, roots)};
+        BOOST_CHECK_EQUAL(found, i >= 2);
+        if (found) {
+            BOOST_CHECK(roots.nTxRoot == headers[i].nTxRoot);
+            BOOST_CHECK(roots.nReceiptRoot == headers[i].nReceiptRoot);
+        }
+    }
+    BOOST_CHECK(nevm->connected_blocks.empty());
+    BOOST_CHECK(nevm->disconnected_blocks.empty());
+    BOOST_CHECK_EQUAL(nevm->block_info_queries, info_queries);
+    BOOST_CHECK_EQUAL(nevm->flush_requests, flush_queries);
+    BOOST_CHECK_EQUAL(nevm->applied_count, applied_count);
+    BOOST_CHECK(nevm->applied_hash == applied_hash);
+    BOOST_CHECK(fNEVMConnection);
 }
 
 BOOST_FIXTURE_TEST_CASE(deferred_nevm_replay_clears_only_at_exact_tip,

@@ -3616,7 +3616,10 @@ static bool ShouldBypassExternalNEVMNotifyCalls(const ChainstateManager& chainma
 
 // SYSCOIN: Authenticated BTCC catch-up may replay NEVM without treating an
 // equal-height but different Syscoin branch as already applied.
-bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMap &mapNEVMTxRoots, const CBlock& block, const CBlockIndex* pindex, const uint256& nBlockHash, const uint32_t& nHeight, const bool fJustCheck, PoDAMAPMemory &mapPoDA, const CDeterministicMNListNEVMAddressDiff &diff, bool btcc_prefix_authenticated) {
+bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMap &mapNEVMTxRoots, const CBlock& block, const CBlockIndex* pindex, const uint256& nBlockHash, const uint32_t& nHeight, const bool fJustCheck, PoDAMAPMemory &mapPoDA, const CDeterministicMNListNEVMAddressDiff &diff, bool btcc_prefix_authenticated, NEVMNotificationContext notification_context) {
+    const bool local_coins_recovery{
+        notification_context ==
+            NEVMNotificationContext::ALREADY_VALIDATED_COINS_RECOVERY};
     CNEVMHeader nevmBlockHeader;
     std::vector<unsigned char> coinbase_payload;
     if(!GetNEVMData(state, block, nevmBlockHeader, &coinbase_payload)) {
@@ -3666,7 +3669,9 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
             llmq::chainLocksHandler != nullptr &&
             llmq::chainLocksHandler->ShouldDeferBTCCNEVM(*pindex);
     }
-    if (nonnull_receipt) {
+    // Rollforward has already reconstructed the local receipt accumulator.
+    // Its live forwarding authorization is required only for external delivery.
+    if (nonnull_receipt && !local_coins_recovery) {
         if (btcc_prefix_authenticated ||
             receipt_live_verified) {
             if (receipt_advances_cursor) {
@@ -3679,7 +3684,7 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
     std::string stateStr;
     const bool bypass_external_notify = ShouldBypassExternalNEVMNotifyCalls(m_chainman, nHeight);
     bool startup_already_applied{false};
-    {
+    if (!local_coins_recovery) {
         LOCK(cs_main);
         startup_already_applied = m_chainman.HasPendingNEVMStartupPair();
         if (startup_already_applied &&
@@ -3691,9 +3696,11 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
         }
     }
     // Geth accepts an exact current-tip retry, not older canonical blocks.
-    // Only this already-paired ancestry skips the external notification;
-    // receipt, transaction and local state validation above still execute.
-    if(fNEVMConnection && !bypass_external_notify && !defer_btcc_nevm &&
+    // Live startup replay skips delivery only for already-paired ancestry.
+    // Coins recovery defers delivery until subsequent NEVM reconciliation;
+    // receipt, transaction and local state validation still execute.
+    if(fNEVMConnection && !local_coins_recovery &&
+       !bypass_external_notify && !defer_btcc_nevm &&
        !startup_already_applied) {
         if (m_chainman.m_interrupt) {
             return state.Error("shutdown");
@@ -4040,13 +4047,15 @@ bool DoesNEVMBlockInfoMatchSyscoinBlock(
            reported_syscoin_hash == expected_syscoin_hash;
 }
 
-bool DisconnectNEVMCommitment(ChainstateManager& chainman, BlockValidationState& state, std::vector<uint256> &vecNEVMBlocks, const CBlock& block, const CBlockIndex& index, const uint32_t& nHeight, const uint256& nBlockHash, const CDeterministicMNListNEVMAddressDiff &diff) {
+bool DisconnectNEVMCommitment(ChainstateManager& chainman, BlockValidationState& state, std::vector<uint256> &vecNEVMBlocks, const CBlock& block, const CBlockIndex& index, const uint32_t& nHeight, const uint256& nBlockHash, const CDeterministicMNListNEVMAddressDiff &diff, NEVMNotificationContext notification_context) {
     CNEVMHeader evmBlock;
     if(!GetNEVMData(state, block, evmBlock)) {
         return false; // state filled by GetNEVMData
     }
     bool notify_external{
         fNEVMConnection &&
+        notification_context !=
+            NEVMNotificationContext::ALREADY_VALIDATED_COINS_RECOVERY &&
         !ShouldBypassExternalNEVMNotifyCalls(chainman, nHeight)};
     // SYSCOIN: A durable BTCC pre-seal defers connect notifications from its
     // carrier onward. Flush any prefix queued by an interrupted replay before
@@ -4360,7 +4369,10 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
     bool bRegTestContext = !fRegTest || (fRegTest && fNEVMConnection);
     // SYSCOIN: pass the exact branch index so pre-seal disconnect symmetry can
     // distinguish deferred blocks from the Geth-applied prefix.
-    if(bRegTestContext && bReverify && pindex->nHeight >= params.nNEVMStartBlock && !DisconnectNEVMCommitment(m_chainman, state, vecNEVMBlocks, block, *pindex, pindex->nHeight, block.GetHash(), diffNEVM)) {
+    const auto nevm_notification_context{bReplay
+        ? NEVMNotificationContext::ALREADY_VALIDATED_COINS_RECOVERY
+        : NEVMNotificationContext::LIVE};
+    if(bRegTestContext && bReverify && pindex->nHeight >= params.nNEVMStartBlock && !DisconnectNEVMCommitment(m_chainman, state, vecNEVMBlocks, block, *pindex, pindex->nHeight, block.GetHash(), diffNEVM, nevm_notification_context)) {
         const std::string errStr = strprintf("DisconnectBlock(): NEVM block failed to disconnect: %s\n", state.ToString().c_str());
         error(errStr.c_str());
         return DISCONNECT_FAILED;
@@ -8691,6 +8703,18 @@ VerifyDBResult CVerifyDB::VerifyDB(
         nCheckDepth = chainstate.m_chain.Height();
     }
     nCheckLevel = std::max(0, std::min(4, nCheckLevel));
+    // SYSCOIN: Level-4 reconnect only isolates the coins view. PQ receipt and
+    // probation state, index provenance, and archive pins remain live, and GC
+    // may already have retired the historical state needed to reconnect.
+    // Every checked suffix includes the tip; reject before any verification
+    // can mutate that auxiliary state or revoke a durable index attestation.
+    if (nCheckLevel >= 4 &&
+        Consensus::CheckPQPaymentEligibility(
+            consensus_params, chainstate.m_chain.Height()) ==
+            Consensus::PQPaymentEligibilityResult::ROOT_REQUIRED) {
+        LogPrintf("VerifyDB(): check level 4 is unavailable after PQ activation; use check levels 0 through 3\n");
+        return VerifyDBResult::UNSUPPORTED_CHECK_LEVEL;
+    }
     LogPrintf("Verifying last %i blocks at level %i\n", nCheckDepth, nCheckLevel);
     CCoinsViewCache coins(&coinsview);
     CBlockIndex* pindex;
@@ -8948,7 +8972,9 @@ bool Chainstate::RollforwardBlock(CBlockIndex* pindex, CCoinsViewCache& inputs, 
     }
     bool bRegTestContext = !fRegTest || (fRegTest && fNEVMConnection);
     if (bRegTestContext && pindex->nHeight >= chainParams.nNEVMStartBlock) {
-        if (!ConnectNEVMCommitment(state, mapNEVMTxRoots, block, pindex, pindex->GetBlockHash(), pindex->nHeight, false, mapPoDA, diff)) {
+        if (!ConnectNEVMCommitment(state, mapNEVMTxRoots, block, pindex, pindex->GetBlockHash(), pindex->nHeight, false, mapPoDA, diff,
+                /*btcc_prefix_authenticated=*/false,
+                NEVMNotificationContext::ALREADY_VALIDATED_COINS_RECOVERY)) {
             return error("RollforwardBlock(): ConnectNEVMCommitment() failed at %d, hash=%s state=%s", pindex->nHeight, pindex->GetBlockHash().ToString(), state.ToString());
         }
         if (!state.IsValid()) {

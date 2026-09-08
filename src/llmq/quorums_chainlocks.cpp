@@ -20447,6 +20447,9 @@ void CChainLocksHandler::EnforceBestChainLock()
                 *best, statement.previous_chainlock_height,
                 HistoricalIndexValidationMode::FULL_FINALITY)) {
             const uint256 witness_id{record->metadata.witness_id};
+            // An active ancestor needs no reconnect. Match EnforceBlock's
+            // pruning exception without admitting a bodyless branch switch.
+            const bool already_active{m_chainman.ActiveChain().Contains(best)};
             if (witness_id.IsNull() ||
                 threshold_attested_witness != witness_id ||
                 !m_chainman.IsBaseBlockSyncComplete() ||
@@ -20456,7 +20459,7 @@ void CChainLocksHandler::EnforceBestChainLock()
                     m_config->activation_predecessor_height ||
                 statement.previous_chainlock_height >= statement.height ||
                 (best->nStatus & BLOCK_FAILED_MASK) ||
-                (best->nStatus & BLOCK_HAVE_DATA) == 0 ||
+                (!already_active && (best->nStatus & BLOCK_HAVE_DATA) == 0) ||
                 best->IsAssumedValid() ||
                 !best->IsValid(BLOCK_VALID_SCRIPTS) ||
                 !HasFullReceiptIndexProvenance(*best)) {

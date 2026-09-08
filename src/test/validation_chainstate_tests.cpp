@@ -24,6 +24,7 @@
 #include <pubkey.h> // SYSCOIN: delegated governance signature fixtures.
 #include <random.h>
 #include <rpc/blockchain.h>
+#include <rpc/server.h>
 #include <script/script.h>
 #include <sync.h>
 #include <test/util/chainstate.h>
@@ -1103,6 +1104,88 @@ BOOST_AUTO_TEST_CASE(validation_chainstate_resize_caches)
         // The view cache should be empty since we had to destruct to downsize.
         BOOST_CHECK(!c1.CoinsTip().HaveCoinInCache(outpoint));
     }
+}
+
+BOOST_FIXTURE_TEST_CASE(verifydb_pq_level4_preserves_live_provenance,
+                        TestChain100Setup)
+{
+    auto& chainman{*Assert(m_node.chainman)};
+    LOCK(::cs_main);
+    auto& chainstate{chainman.ActiveChainstate()};
+    auto* tip{chainman.ActiveTip()};
+    BOOST_REQUIRE(tip != nullptr);
+    auto& consensus{const_cast<Consensus::Params&>(chainman.GetConsensus())};
+    struct RestoreConsensus {
+        Consensus::Params& consensus;
+        const Consensus::Params saved;
+        ~RestoreConsensus() { consensus = saved; }
+    } restore{consensus, consensus};
+
+    // An ordinary preactivation suffix still supports a real reconnect.
+    // This coins-only fixture has no historical governance state to replay.
+    consensus.nSuperblockStartBlock = tip->nHeight + 1;
+    consensus.DIP0003Height = tip->nHeight + 1;
+    consensus.nPQActivationHeight = tip->nHeight + 1;
+    CVerifyDB verifier{chainman.GetNotifications()};
+    for (const int depth : {1, 0}) {
+        BOOST_REQUIRE(verifier.VerifyDB(chainstate, consensus,
+            chainstate.CoinsTip(), 4, depth) == VerifyDBResult::SUCCESS);
+    }
+
+    consensus.DIP0003Height = tip->nHeight;
+    consensus.nPQActivationHeight = tip->nHeight;
+    const auto original_status{tip->nStatus};
+    const bool original_recovery_work{tip->pqRecoveryRefreshWorkValidated};
+    tip->nStatus |= BLOCK_PQ_BTCC_INDEX_VALIDATED |
+        BLOCK_PQ_RECEIPT_INDEX_VALIDATED;
+    tip->pqRecoveryRefreshWorkValidated = true;
+    std::vector<std::pair<uint32_t, bool>> index_state;
+    for (int height{0}; height <= tip->nHeight; ++height) {
+        const auto* index{chainman.ActiveChain()[height]};
+        index_state.emplace_back(index->nStatus,
+                                 index->pqRecoveryRefreshWorkValidated);
+    }
+    const auto revision{chainman.GetPQProvenanceRevocationRevision()};
+    const auto coins_tip{chainstate.CoinsTip().GetBestBlock()};
+    const auto check_unchanged = [&]() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+        for (int height{0}; height <= tip->nHeight; ++height) {
+            const auto* index{chainman.ActiveChain()[height]};
+            BOOST_CHECK_EQUAL(index->nStatus, index_state[height].first);
+            BOOST_CHECK_EQUAL(index->pqRecoveryRefreshWorkValidated,
+                              index_state[height].second);
+        }
+        BOOST_CHECK_EQUAL(chainman.GetPQProvenanceRevocationRevision(), revision);
+        BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == coins_tip);
+        BOOST_CHECK(chainman.ActiveTip() == tip);
+    };
+    for (const int depth : {1, 0}) {
+        BOOST_CHECK(verifier.VerifyDB(chainstate, consensus,
+            chainstate.CoinsTip(), 4, depth) ==
+            VerifyDBResult::UNSUPPORTED_CHECK_LEVEL);
+        check_unchanged();
+        for (int level{0}; level <= 3; ++level) {
+            BOOST_CHECK(verifier.VerifyDB(chainstate, consensus,
+                chainstate.CoinsTip(), level, depth) == VerifyDBResult::SUCCESS);
+            check_unchanged();
+        }
+    }
+
+    node::JSONRPCRequest request;
+    request.context = &m_node;
+    request.strMethod = "verifychain";
+    request.params = UniValue{UniValue::VARR};
+    request.params.push_back(4);
+    request.params.push_back(0);
+    if (RPCIsInWarmup(nullptr)) SetRPCWarmupFinished();
+    BOOST_CHECK_EXCEPTION(tableRPC.execute(request), UniValue,
+        [](const UniValue& error) {
+            return error.find_value("code").getInt<int>() == RPC_INVALID_PARAMETER &&
+                error.find_value("message").get_str() ==
+                    "Check level 4 is unavailable after PQ activation; use check levels 0 through 3";
+        });
+    check_unchanged();
+    tip->nStatus = original_status;
+    tip->pqRecoveryRefreshWorkValidated = original_recovery_work;
 }
 
 //! Test UpdateTip behavior for both active and background chainstates.
