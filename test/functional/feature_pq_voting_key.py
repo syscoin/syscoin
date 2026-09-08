@@ -42,7 +42,7 @@ class PQVotingKeyTest(DashTestFramework):
             self.proposal, "funding", outcome, self.mn.proTxHash)
         assert_equal(result["detail"][self.mn.proTxHash]["result"], "success")
 
-    def rotate(self, public_key):
+    def rotate(self, public_key, *, check_fee_bump=False):
         owner = self.nodes[0]
         # Proposal funding can consume the setup address's spare coins.
         # Keep registrar fees independent of that selection and MN collateral.
@@ -50,10 +50,28 @@ class PQVotingKeyTest(DashTestFramework):
         owner.sendtoaddress(fee_address, 1)
         self.bump_mocktime(1)
         self.generate(owner, 1)
-        owner.protx_update_registrar(
+        txid = owner.protx_update_registrar(
             self.mn.proTxHash, "", public_key, "", fee_address)
+        if check_fee_bump:
+            self.log.info("Provider fee bumps fail before changing wallet replacement state")
+            original = owner.gettransaction(txid)
+            assert_equal(original["bip125-replaceable"], "yes")
+            decoded = owner.decoderawtransaction(original["hex"])
+            assert_equal(decoded["version"], 82)
+            assert_equal(decoded["proUpRegTx"]["pqVotingPublicKey"], self.mn.pqVotingPublicKey)
+            assert_equal(owner.getrawtransaction(txid, True)["proUpRegTx"], decoded["proUpRegTx"])
+            mempool = set(owner.getrawmempool())
+            for rpc in (owner.bumpfee, owner.psbtbumpfee):
+                for _ in range(2):
+                    assert_raises_rpc_error(
+                        -4, "Fee bumping is not supported for masternode transactions",
+                        rpc, txid, {"fee_rate": 100})
+                    assert_equal(set(owner.getrawmempool()), mempool)
+                    assert "replaced_by_txid" not in owner.gettransaction(txid)
         self.bump_mocktime(1)
         self.generate(owner, 1)
+        if check_fee_bump:
+            assert_equal(owner.gettransaction(txid)["confirmations"], 1)
         return owner.getbestblockhash()
 
     def advance_vote_time(self):
@@ -84,7 +102,7 @@ class PQVotingKeyTest(DashTestFramework):
         assert_equal(details[0]["hasVotingKey"], True)
         assert "votingKey" not in details[0]
         initial_key_height = self.state()["pqVotingKeyActivationHeight"]
-        self.rotate("")
+        self.rotate("", check_fee_bump=True)
         assert_equal(self.state()["pqVotingKeyVersion"], 1)
         assert_equal(self.state()["pqVotingKeyActivationHeight"], initial_key_height)
 

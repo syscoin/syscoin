@@ -3,6 +3,10 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <core_io.h>
+// SYSCOIN BEGIN: Check provider payload RPC schemas against their actual encodings.
+#include <evo/providertx.h>
+#include <evo/specialtx_payload.h>
+// SYSCOIN END: Check provider payload RPC schemas against their actual encodings.
 #include <interfaces/chain.h>
 #include <llmq/pq_chainlock_types.h> // SYSCOIN: PQ operator RPC policy.
 #include <node/context.h>
@@ -82,6 +86,40 @@ UniValue RPCTestingSetup::CallRPC(std::string args)
 
 
 BOOST_FIXTURE_TEST_SUITE(rpc_tests, RPCTestingSetup)
+
+// SYSCOIN BEGIN: Decoding legacy and PQ provider payloads must satisfy RPC docs.
+BOOST_AUTO_TEST_CASE(rpc_provider_payload_documentation)
+{
+    gArgs.ForceSetArg("-rpcdoccheck", "1");
+    const auto check = [&](const auto& payload, const char* field) {
+        CMutableTransaction tx;
+        tx.nVersion = std::decay_t<decltype(payload)>::SPECIALTX_TYPE;
+        tx.vin.emplace_back(COutPoint{uint256::ONEV, 0});
+        SetTxPayload(tx, payload);
+        const auto decoded{CallRPC("decoderawtransaction " + EncodeHexTx(CTransaction(tx)))};
+        BOOST_REQUIRE(decoded.exists(field));
+        BOOST_CHECK_EQUAL(decoded[field]["version"].getInt<int>(), payload.nVersion);
+    };
+    for (uint16_t version : {1, 2, 3}) {
+        CProRegTx registration;
+        registration.nVersion = version;
+        registration.pqVotingPublicKey.fill(0x51);
+        check(registration, "proRegTx");
+        CProUpRegTx registrar;
+        registrar.nVersion = version;
+        registrar.pqVotingPublicKey.fill(0x61);
+        check(registrar, "proUpRegTx");
+    }
+    for (uint16_t version : {1, 2, 3, 4}) {
+        CProUpServTx service;
+        service.nVersion = version;
+        check(service, "proUpServTx");
+        service.scriptOperatorPayout = CScript() << OP_0 << std::vector<unsigned char>(20, 1);
+        if (version >= CProUpServTx::UPDATE_NEVM_VERSION) service.vchNEVMAddress.assign(20, 2);
+        check(service, "proUpServTx");
+    }
+}
+// SYSCOIN END: Decoding legacy and PQ provider payloads must satisfy RPC docs.
 
 BOOST_AUTO_TEST_CASE(rpc_namedparams)
 {
