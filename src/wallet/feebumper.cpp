@@ -28,6 +28,12 @@ static feebumper::Result PreconditionChecks(const CWallet& wallet, const CWallet
         return feebumper::Result::WALLET_ERROR;
     }
     // SYSCOIN END: Generic fee bumping cannot rebuild provider authorization.
+    // SYSCOIN BEGIN: Generic fee bumping cannot preserve asset allocations.
+    if (wtx.tx->HasAssets()) {
+        errors.push_back(Untranslated("Fee bumping is not supported for asset transactions"));
+        return feebumper::Result::WALLET_ERROR;
+    }
+    // SYSCOIN END: Generic fee bumping cannot preserve asset allocations.
     if (wallet.HasWalletSpend(wtx.tx)) {
         errors.push_back(Untranslated("Transaction has descendants in the wallet"));
         return feebumper::Result::INVALID_PARAMETER;

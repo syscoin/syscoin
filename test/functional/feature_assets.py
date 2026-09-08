@@ -54,7 +54,8 @@ class AssetTransactionTest(SyscoinTestFramework):
             '-sporkkey=cVpF924EspNh8KjYsfhgY96mmxvT6DgdWiTYMtMjuM74hJaU5psW',
         ] for _ in range(self.num_nodes)]
 
-    def syscoin_tx(self, tx_type, asset_amounts, sys_amount=Decimal('0'), sys_destination=None, nevm_address=None, spv_proof=None):
+    # SYSCOIN: Check fee-bump refusal before mining an asset transaction.
+    def syscoin_tx(self, tx_type, asset_amounts, sys_amount=Decimal('0'), sys_destination=None, nevm_address=None, spv_proof=None, *, check_fee_bump=False):
         tx_hex = create_transaction_with_selector(
             node=self.nodes[0],
             tx_type=tx_type,
@@ -65,7 +66,32 @@ class AssetTransactionTest(SyscoinTestFramework):
             spv_proof=spv_proof
         )
         txid = self.nodes[0].sendrawtransaction(tx_hex)
+        # SYSCOIN BEGIN: Reject both bump RPCs before changing asset or wallet state.
+        if check_fee_bump:
+            node = self.nodes[0]
+            original = node.gettransaction(txid)
+            assert_equal(original['bip125-replaceable'], 'yes')
+            assert_equal(node.decoderawtransaction(original['hex'])['version'], tx_type)
+            mempool = set(node.getrawmempool())
+            for rpc in (node.bumpfee, node.psbtbumpfee):
+                for _ in range(2):
+                    assert_raises_rpc_error(
+                        -4, 'Fee bumping is not supported for asset transactions',
+                        rpc, txid, {'fee_rate': 100})
+                    assert_equal(set(node.getrawmempool()), mempool)
+                    current = node.gettransaction(txid)
+                    assert_equal(current['hex'], original['hex'])
+                    assert 'replaced_by_txid' not in current
+        # SYSCOIN END: Reject both bump RPCs before changing asset or wallet state.
         self.generate(self.nodes[0],1)
+        # SYSCOIN BEGIN: The original asset transfer and its change still confirm.
+        if check_fee_bump:
+            assert_equal(node.gettransaction(txid)['confirmations'], 1)
+            for member in self.nodes:
+                outputs = member.getrawtransaction(txid, True)['vout']
+                amounts = sorted(out['asset_value'] for out in outputs if out.get('asset_guid') == SYSX_GUID)
+                assert_equal(amounts, [Decimal('5'), Decimal('15')])
+        # SYSCOIN END: The original asset transfer and its change still confirm.
         # Verify the transaction outputs
         verify_tx_outputs(
             node=self.nodes[0],
@@ -81,8 +107,10 @@ class AssetTransactionTest(SyscoinTestFramework):
         expected_balance = sys_balance_before - sys_amount - Decimal('0.0001') + BLOCK_REWARD + DUST_THRESHOLD
         assert_equal(expected_balance, sys_balance_after)
 
-    def asset_allocation_send(self, asset_amounts, sys_amount=Decimal('0'), sys_destination=None):
-        self.syscoin_tx(SYSCOIN_TX_VERSION_ALLOCATION_SEND, asset_amounts, sys_amount, sys_destination)
+    # SYSCOIN BEGIN: Exercise refusal to bump an otherwise valid asset send.
+    def asset_allocation_send(self, asset_amounts, sys_amount=Decimal('0'), sys_destination=None, *, check_fee_bump=False):
+        self.syscoin_tx(SYSCOIN_TX_VERSION_ALLOCATION_SEND, asset_amounts, sys_amount, sys_destination, check_fee_bump=check_fee_bump)
+    # SYSCOIN END: Exercise refusal to bump an otherwise valid asset send.
 
     def allocation_burn_to_nevm(self, asset_amounts, sys_amount=Decimal('0'), nevm_address=''):
         sys_balance_before = self.nodes[0].getbalance()
@@ -160,7 +188,7 @@ class AssetTransactionTest(SyscoinTestFramework):
         self.sysx_addr = self.nodes[0].getnewaddress()
         self.sysx_addr1 = self.nodes[0].getnewaddress()
         self.sysx_addr2 = self.nodes[0].getnewaddress()
-        self.asset_allocation_send(asset_amounts)
+        self.asset_allocation_send(asset_amounts, check_fee_bump=True)  # SYSCOIN: Keep all 20 SYSX after refused bumps.
         asset_amounts = [
             (SYSX_GUID, Decimal('5'), self.sysx_addr),
             (SYSX_GUID, Decimal('15'), self.sysx_addr1)
