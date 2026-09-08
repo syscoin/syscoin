@@ -78,6 +78,8 @@ struct CoinFilterParams {
     bool include_immature_coinbase{false};
     // By default, skip locked UTXOs
     bool skip_locked{true};
+    // SYSCOIN: Asset-bearing outputs are inventory, not automatic SYS funding.
+    bool include_assets{false};
 };
 
 /**

@@ -280,6 +280,11 @@ util::Result<PreSelectedInputs> FetchSelectedInputs(const CWallet& wallet, const
             txout = *out;
         }
 
+        // SYSCOIN: Plain SYS transactions must not consume asset allocations.
+        if (!txout.assetInfo.IsNull() && !IsSyscoinTx(coin_control.m_version)) {
+            return util::Error{_("Asset inputs require an asset transaction")};
+        }
+
         if (input_bytes == -1) {
             input_bytes = CalculateMaximumSignedInputSize(txout, outpoint, &coin_control.m_external_provider, can_grind_r, &coin_control);
         }
@@ -386,6 +391,10 @@ CoinsResult AvailableCoins(const CWallet& wallet,
             const CTxOut& output = wtx.tx->vout[i];
             const COutPoint outpoint(wtxid, i);
 
+            // SYSCOIN: Asset inputs need explicit selection and matching outputs.
+            if (!params.include_assets && !output.assetInfo.IsNull())
+                continue;
+
             if (output.nValue < params.min_amount || output.nValue > params.max_amount)
                 continue;
 
@@ -474,6 +483,7 @@ CoinsResult AvailableCoins(const CWallet& wallet,
 CoinsResult AvailableCoinsListUnspent(const CWallet& wallet, const CCoinControl* coinControl, CoinFilterParams params)
 {
     params.only_spendable = false;
+    params.include_assets = true; // SYSCOIN: Keep allocations visible to asset selectors.
     return AvailableCoins(wallet, coinControl, /*feerate=*/ std::nullopt, params);
 }
 
@@ -509,6 +519,7 @@ std::map<CTxDestination, std::vector<COutput>> ListCoins(const CWallet& wallet)
     CoinFilterParams coins_params;
     coins_params.only_spendable = false;
     coins_params.skip_locked = false;
+    coins_params.include_assets = true; // SYSCOIN: Coin inventory includes asset outputs.
     for (const COutput& coin : AvailableCoins(wallet, &coin_control, /*feerate=*/std::nullopt, coins_params).All()) {
         CTxDestination address;
         if ((coin.spendable || (wallet.IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS) && coin.solvable))) {
@@ -1335,6 +1346,8 @@ util::Result<CreatedTransactionResult> CreateTransaction(
 
 bool FundTransaction(CWallet& wallet, CMutableTransaction& tx, CAmount& nFeeRet, int& nChangePosInOut, bilingual_str& error, bool lockUnspents, const std::set<int>& setSubtractFeeFromOutputs, CCoinControl coinControl)
 {
+    // SYSCOIN: Validate selected inputs against the actual transaction being funded.
+    coinControl.m_version = tx.nVersion;
     std::vector<CRecipient> vecSend;
 
     // Turn the txout set into a CRecipient vector.
@@ -1371,8 +1384,8 @@ bool FundTransaction(CWallet& wallet, CMutableTransaction& tx, CAmount& nFeeRet,
             error = _("Unable to find UTXO for external input");
             return false;
         } else {
-            // SYSCOIN The input was not in the wallet, but is in the UTXO set, so select as external
-            coinControl.SelectExternal(outPoint, CTxOut(coins[outPoint].out.nValue,coins[outPoint].out.scriptPubKey));
+            // SYSCOIN: Preserve asset metadata when validating external inputs.
+            coinControl.SelectExternal(outPoint, coins[outPoint].out);
         }
     }
 

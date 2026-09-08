@@ -32,6 +32,9 @@ from test_framework.asset_helpers import (
     SYSCOIN_TX_VERSION_SYSCOIN_BURN_TO_ALLOCATION,
     SYSCOIN_TX_VERSION_ALLOCATION_BURN_TO_SYSCOIN,
 )
+# SYSCOIN BEGIN: Build an asset transfer with explicit inputs for wallet funding.
+from test_framework.asset_helpers import AssetOut, AssetOutValue, create_allocation_data
+# SYSCOIN END: Build an asset transfer with explicit inputs for wallet funding.
 
 # Constants for testing
 SYSX_GUID = 123456
@@ -178,6 +181,8 @@ class AssetTransactionTest(SyscoinTestFramework):
         self.test_utxo_consolidation()
         self.test_dust_handling()
         self.test_error_cases()
+        # SYSCOIN: Ordinary wallet payments must not consume asset allocations.
+        self.test_wallet_asset_input_protection()
 
     def test_allocation_send(self):
         """Test SYSCOIN_TX_VERSION_ALLOCATION_SEND transactions"""
@@ -550,6 +555,120 @@ class AssetTransactionTest(SyscoinTestFramework):
             pass  # Expected exception
         
         print("Error case tests passed")
+
+    # SYSCOIN BEGIN: Protect asset carriers while preserving explicit asset funding.
+    def test_wallet_asset_input_protection(self):
+        self.log.info("Test ordinary wallet funding preserves asset-bearing UTXOs")
+        node, peer = self.nodes
+        source = node.get_wallet_rpc(self.default_wallet_name)
+        self.bump_mocktime(1)
+        node.createwallet("asset-input-guard", descriptors=self.options.descriptors)
+        asset_wallet = node.get_wallet_rpc("asset-input-guard")
+        asset_address = asset_wallet.getnewaddress(address_type="bech32")
+        allocation = create_transaction_with_selector(
+            node=source, tx_type=SYSCOIN_TX_VERSION_ALLOCATION_SEND,
+            asset_amounts=[(SYSX_GUID, Decimal("10"), asset_address)])
+        node.sendrawtransaction(allocation)
+        self.generate(node, 1)
+
+        # This wallet has no connection to the asset transaction, ensuring its
+        # selected input is obtained through the external UTXO funding path.
+        node.createwallet("asset-input-funder", descriptors=self.options.descriptors)
+        funder = node.get_wallet_rpc("asset-input-funder")
+        asset_utxos = asset_wallet.listunspent()
+        assert_equal(len(asset_utxos), 1)
+        asset = asset_utxos[0]
+        assert_equal(asset["asset_guid"], SYSX_GUID)
+        assert_equal(asset["asset_amount"], Decimal("10"))
+        assert_equal(asset["amount"], DUST_THRESHOLD)
+        prevout = {"txid": asset["txid"], "vout": asset["vout"]}
+        asset_outpoint = (asset["txid"], asset["vout"])
+
+        def assert_asset_intact():
+            remaining = [u for u in asset_wallet.listunspent() if "asset_guid" in u]
+            assert_equal(len(remaining), 1)
+            assert_equal((remaining[0]["txid"], remaining[0]["vout"]), asset_outpoint)
+            assert_equal(remaining[0]["asset_amount"], Decimal("10"))
+            assert all(member.gettxout(asset["txid"], asset["vout"]) is not None
+                       for member in self.nodes)
+
+        destination = peer.getnewaddress()
+        mempool_before = set(node.getrawmempool())
+        assert_raises_rpc_error(
+            -6, "Insufficient funds", asset_wallet.sendtoaddress,
+            destination, Decimal("0.00000330"), fee_rate=1)
+        ordinary_raw = node.createrawtransaction(
+            [prevout], {destination: Decimal("0.00000330")})
+        error = "Asset inputs require an asset transaction"
+        assert_raises_rpc_error(
+            -4, error, asset_wallet.fundrawtransaction,
+            ordinary_raw, {"fee_rate": 1})
+        external_weights = [{**prevout, "weight": 300}]
+        assert_raises_rpc_error(
+            -4, error, funder.fundrawtransaction, ordinary_raw,
+            {"fee_rate": 1, "input_weights": external_weights})
+        assert_raises_rpc_error(
+            -4, error, asset_wallet.sendall,
+            [destination], fee_rate=1, inputs=[prevout])
+        assert_equal(set(node.getrawmempool()), mempool_before)
+        assert_asset_intact()
+
+        source.sendtoaddress(asset_wallet.getnewaddress(), Decimal("1"))
+        source.sendtoaddress(funder.getnewaddress(), Decimal("1"))
+        self.generate(node, 1)
+        automatic_raw = node.createrawtransaction([], {destination: Decimal("0.1")})
+        automatic = asset_wallet.fundrawtransaction(automatic_raw, {"fee_rate": 1})
+        automatic_tx = node.decoderawtransaction(automatic["hex"])
+        assert asset_outpoint not in {(txin["txid"], txin["vout"])
+                                     for txin in automatic_tx["vin"]}
+        payment = asset_wallet.sendtoaddress(destination, Decimal("0.1"), fee_rate=1)
+        payment_tx = node.getrawtransaction(payment, True)
+        assert_equal(payment_tx["version"], 2)
+        assert asset_outpoint not in {(txin["txid"], txin["vout"])
+                                     for txin in payment_tx["vin"]}
+        self.generate(node, 1)
+        assert_asset_intact()
+
+        sweep = asset_wallet.sendall([destination], fee_rate=1)
+        assert sweep["complete"]
+        sweep_tx = node.getrawtransaction(sweep["txid"], True)
+        assert_equal(sweep_tx["version"], 2)
+        assert asset_outpoint not in {(txin["txid"], txin["vout"])
+                                     for txin in sweep_tx["vin"]}
+        self.generate(node, 1)
+        assert_equal(len(asset_wallet.listunspent()), 1)
+        assert_asset_intact()
+
+        # Explicit asset funding remains usable, including external asset inputs.
+        # Append SYS change so the allocation's output index remains unchanged.
+        asset_destination = peer.getnewaddress()
+        data = create_allocation_data(
+            SYSCOIN_TX_VERSION_ALLOCATION_SEND,
+            [AssetOut(SYSX_GUID, [AssetOutValue(0, Decimal("10"))])])
+        asset_raw = node.createrawtransaction(
+            [prevout], [{asset_destination: DUST_THRESHOLD}, {"data": data},
+                        {"data_version": SYSCOIN_TX_VERSION_ALLOCATION_SEND}])
+        funded = funder.fundrawtransaction(
+            asset_raw, {"fee_rate": 1, "changePosition": 2,
+                        "input_weights": external_weights})
+        funded_tx = node.decoderawtransaction(funded["hex"])
+        assert_equal(funded_tx["version"], SYSCOIN_TX_VERSION_ALLOCATION_SEND)
+        assert_equal(funded_tx["vout"][0]["asset_guid"], SYSX_GUID)
+        assert_equal(funded_tx["vout"][0]["asset_value"], Decimal("10"))
+        signed = asset_wallet.signrawtransactionwithwallet(funded["hex"])
+        assert not signed["complete"]
+        signed = funder.signrawtransactionwithwallet(signed["hex"])
+        assert signed["complete"]
+        assert node.testmempoolaccept([signed["hex"]])[0]["allowed"]
+        asset_txid = node.sendrawtransaction(signed["hex"])
+        self.generate(node, 1)
+        received = peer.listunspent(addresses=[asset_destination])
+        assert_equal(len(received), 1)
+        assert_equal(received[0]["txid"], asset_txid)
+        assert_equal(received[0]["asset_guid"], SYSX_GUID)
+        assert_equal(received[0]["asset_amount"], Decimal("10"))
+        assert_equal(asset_wallet.listunspent(), [])
+    # SYSCOIN END: Protect asset carriers while preserving explicit asset funding.
 
 
 if __name__ == '__main__':
