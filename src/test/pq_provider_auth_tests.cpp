@@ -248,6 +248,102 @@ public:
         SetTxPayload(transaction, payload);
         return CTransaction{transaction};
     }
+
+    CTransaction Registration(bool legacy) const
+    {
+        CMutableTransaction transaction;
+        transaction.nVersion = SYSCOIN_TX_VERSION_MN_REGISTER;
+        transaction.vin.emplace_back(COutPoint{NonNullHash(14), 0});
+        transaction.vout.emplace_back(nMNCollateralRequired,
+            GetScriptForDestination(WitnessV0KeyHash{NonNullKeyID(70)}));
+
+        CProRegTx payload;
+        payload.nVersion = legacy ? CProRegTx::LEGACY_BLS_VERSION
+                                 : CProRegTx::PQ_VERSION;
+        payload.collateralOutpoint = COutPoint{uint256{}, 0};
+        payload.keyIDOwner = NonNullKeyID(20);
+        payload.keyIDVoting = NonNullKeyID(21);
+        payload.scriptPayout =
+            GetScriptForDestination(WitnessV0KeyHash{NonNullKeyID(72)});
+        if (legacy) {
+            std::array<uint8_t, CLegacyBLSPublicKey::SERIALIZED_SIZE> key{};
+            key.fill(1);
+            assert(payload.pubKeyOperator.SetBytes(key));
+        } else {
+            payload.pqVotingPublicKey.fill(0x31);
+        }
+        payload.inputsHash = CalcTxInputsHash(CTransaction{transaction});
+        SetTxPayload(transaction, payload);
+        return CTransaction{transaction};
+    }
+
+    CTransaction RegistrarMutation(bool legacy) const
+    {
+        CMutableTransaction transaction;
+        transaction.nVersion = SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR;
+        transaction.vin.emplace_back(COutPoint{NonNullHash(15), 0});
+        transaction.vout.emplace_back(1, CScript{} << OP_TRUE);
+
+        CProUpRegTx payload;
+        payload.nVersion = legacy ? CProUpRegTx::LEGACY_BLS_VERSION
+                                 : CProUpRegTx::PQ_VERSION;
+        payload.proTxHash = pro_tx_hash;
+        payload.keyIDVoting = NonNullKeyID(21);
+        payload.scriptPayout =
+            GetScriptForDestination(WitnessV0KeyHash{NonNullKeyID(72)});
+        if (legacy) {
+            std::array<uint8_t, CLegacyBLSPublicKey::SERIALIZED_SIZE> key{};
+            key.fill(2);
+            assert(payload.pubKeyOperator.SetBytes(key));
+        } else {
+            payload.pqVotingPublicKey.fill(0x41);
+        }
+        payload.inputsHash = CalcTxInputsHash(CTransaction{transaction});
+        SetTxPayload(transaction, payload);
+        return CTransaction{transaction};
+    }
+
+    std::array<CTransaction, 4> ProviderTransactions(bool legacy) const
+    {
+        return {Registration(legacy),
+                legacy ? LegacyServiceMutation() : ServiceMutation(),
+                RegistrarMutation(legacy),
+                legacy ? LegacyRevokeMutation() : RevokeMutation()};
+    }
+
+    bool CheckProvider(const CTransaction& transaction,
+                       const CBlockIndex* parent,
+                       TxValidationState& state,
+                       bool just_check,
+                       bool check_sigs,
+                       SpecialTxValidationContext context =
+                           SpecialTxValidationContext::MEMPOOL_PRECHECK) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+    {
+        CCoinsView base_view;
+        CCoinsViewCache view{&base_view};
+        view.AddCoin(COutPoint{NonNullHash(5), 0},
+            Coin{CTxOut{nMNCollateralRequired, GetScriptForDestination(
+                WitnessV0KeyHash{NonNullKeyID(70)})},
+                ACTIVATION_HEIGHT - 200, false}, false);
+        switch (transaction.nVersion) {
+        case SYSCOIN_TX_VERSION_MN_REGISTER:
+            return CheckProRegTx(transaction, parent, state, view,
+                                 just_check, check_sigs);
+        case SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE:
+            return CheckProUpServTx(transaction, parent, state,
+                                    just_check, check_sigs, context);
+        case SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR:
+            return CheckProUpRegTx(transaction, parent, state, view,
+                                   just_check, check_sigs);
+        case SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE:
+            return CheckProUpRevTx(transaction, parent, state,
+                                   just_check, check_sigs, context);
+        default:
+            assert(false);
+            return false;
+        }
+    }
 };
 
 } // namespace
@@ -374,6 +470,155 @@ BOOST_AUTO_TEST_CASE(unavailable_parent_registry_is_a_local_error)
     BOOST_CHECK(service_precheck.IsError());
 }
 
+BOOST_AUTO_TEST_CASE(provider_parent_snapshot_failures_are_local_errors)
+{
+    LOCK(cs_main);
+    auto& db{*deterministicMNManager->m_evoDb};
+    const auto parent_list{deterministicMNManager->GetListForBlock(&parent_index)};
+    enum class Failure { MISSING, HEIGHT, HASH, DATABASE };
+    for (const bool legacy : {false, true}) {
+        if (legacy) UseDisabledPQActivation();
+        for (const auto& transaction : ProviderTransactions(legacy)) {
+            for (const bool just_check : {false, true}) {
+                for (const bool check_sigs : {false, true}) {
+                    for (const auto failure : {Failure::MISSING, Failure::HEIGHT,
+                                               Failure::HASH, Failure::DATABASE}) {
+                        BOOST_TEST_CONTEXT("version=" << transaction.nVersion
+                            << " legacy=" << legacy << " just_check=" << just_check
+                            << " check_sigs=" << check_sigs
+                            << " failure=" << static_cast<int>(failure)) {
+                            auto snapshot{parent_list};
+                            if (failure == Failure::HEIGHT) {
+                                snapshot.SetHeight(parent_index.nHeight + 1);
+                            } else if (failure == Failure::HASH) {
+                                snapshot.SetBlockHash(NonNullHash(90));
+                            }
+                            db.WriteCache(parent_hash, snapshot);
+                            if (failure == Failure::MISSING) {
+                                db.EraseCache(parent_hash);
+                            } else if (failure == Failure::DATABASE) {
+                                // ReadCache must flush this unrelated tombstone
+                                // before returning even a cached parent snapshot.
+                                db.EraseCache(NonNullHash(91));
+                                db.FailNextFlushBatchForTesting();
+                            }
+                            TxValidationState failed;
+                            BOOST_CHECK(!CheckProvider(transaction, &parent_index,
+                                failed, just_check, check_sigs,
+                                SpecialTxValidationContext::NORMAL));
+                            BOOST_CHECK(failed.IsError());
+                            BOOST_CHECK(!failed.IsInvalid());
+                            BOOST_CHECK_EQUAL(failed.GetRejectReason(),
+                                              "failed-protx-parent-state");
+
+                            db.WriteCache(parent_hash, parent_list);
+                            // These fixtures check the structural admission
+                            // pass; their placeholder PQ signatures do not
+                            // claim successful normal operator authorization.
+                            TxValidationState restored;
+                            BOOST_REQUIRE_MESSAGE(CheckProvider(transaction,
+                                &parent_index, restored, just_check,
+                                /*check_sigs=*/false), restored.ToString());
+                            BOOST_CHECK(restored.IsValid());
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(provider_parent_lookup_preserves_consensus_checks)
+{
+    LOCK(cs_main);
+    auto& db{*deterministicMNManager->m_evoDb};
+    const auto parent_list{deterministicMNManager->GetListForBlock(&parent_index)};
+    for (const bool legacy : {false, true}) {
+        if (legacy) UseDisabledPQActivation();
+        for (const auto& transaction : ProviderTransactions(legacy)) {
+            BOOST_TEST_CONTEXT("version=" << transaction.nVersion
+                               << " legacy=" << legacy) {
+                TxValidationState valid;
+                BOOST_REQUIRE_MESSAGE(CheckProvider(transaction, &parent_index,
+                    valid, false, false), valid.ToString());
+
+                CMutableTransaction changed_inputs{transaction};
+                ++changed_inputs.vin.front().prevout.n;
+                TxValidationState inputs_state;
+                BOOST_CHECK(!CheckProvider(CTransaction{changed_inputs},
+                    &parent_index, inputs_state, false, false));
+                BOOST_CHECK(inputs_state.IsInvalid());
+                BOOST_CHECK_EQUAL(inputs_state.GetRejectReason(),
+                                  "bad-protx-inputs-hash");
+
+                CMutableTransaction no_payload{transaction};
+                no_payload.vout.clear();
+                no_payload.vout.emplace_back(1, CScript{} << OP_TRUE);
+                TxValidationState payload_state;
+                BOOST_CHECK(!CheckProvider(CTransaction{no_payload},
+                    &parent_index, payload_state, false, false));
+                BOOST_CHECK(payload_state.IsInvalid());
+                BOOST_CHECK_EQUAL(payload_state.GetRejectReason(),
+                                  "bad-protx-payload");
+
+                TxValidationState null_parent;
+                BOOST_CHECK(!CheckProvider(transaction, nullptr,
+                    null_parent, false, false));
+                BOOST_CHECK(null_parent.IsInvalid());
+                BOOST_CHECK_EQUAL(null_parent.GetRejectReason(),
+                                  "bad-protx-version");
+
+                auto altered_list{parent_list};
+                const bool registration{
+                    transaction.nVersion == SYSCOIN_TX_VERSION_MN_REGISTER};
+                if (registration) {
+                    auto member_state{std::make_shared<CDeterministicMNState>(
+                        *altered_list.GetMN(pro_tx_hash)->pdmnState)};
+                    member_state->keyIDOwner = NonNullKeyID(20);
+                    altered_list.UpdateMN(pro_tx_hash, member_state);
+                } else {
+                    altered_list.RemoveMN(pro_tx_hash);
+                }
+                db.WriteCache(parent_hash, altered_list);
+                TxValidationState membership_state;
+                BOOST_CHECK(!CheckProvider(transaction, &parent_index,
+                    membership_state, false, false));
+                BOOST_CHECK(membership_state.IsInvalid());
+                BOOST_CHECK_EQUAL(membership_state.GetRejectReason(),
+                    registration ? "bad-protx-dup-key" : "bad-protx-hash");
+                db.WriteCache(parent_hash, parent_list);
+            }
+        }
+    }
+
+    // Before DIP3, the manager legitimately returns an empty list without
+    // consulting persistent snapshots. Keep that registration contract.
+    CBlockIndex pre_dip3;
+    pre_dip3.nHeight = ACTIVATION_HEIGHT - 3;
+    pre_dip3.phashBlock = &previous_hash;
+    TxValidationState pre_dip3_state;
+    BOOST_REQUIRE_MESSAGE(CheckProvider(Registration(/*legacy=*/true),
+        &pre_dip3, pre_dip3_state, false, true), pre_dip3_state.ToString());
+}
+
+BOOST_AUTO_TEST_CASE(unavailable_provider_parent_manager_is_a_local_error)
+{
+    LOCK(cs_main);
+    struct RestoreManager {
+        std::unique_ptr<CDeterministicMNManager> manager{
+            std::move(deterministicMNManager)};
+        ~RestoreManager() { deterministicMNManager = std::move(manager); }
+    } restore;
+    for (const auto& transaction : ProviderTransactions(/*legacy=*/false)) {
+        TxValidationState state;
+        BOOST_CHECK(!CheckProvider(transaction, &parent_index, state,
+                                   false, false));
+        BOOST_CHECK(state.IsError());
+        BOOST_CHECK(!state.IsInvalid());
+        BOOST_CHECK_EQUAL(state.GetRejectReason(), "failed-protx-parent-state");
+    }
+}
+
 BOOST_AUTO_TEST_CASE(pq_voting_registrar_remains_owner_authorized)
 {
     LOCK(cs_main);
@@ -423,12 +668,14 @@ BOOST_AUTO_TEST_CASE(pq_voting_registrar_remains_owner_authorized)
         TxValidationState changed_key;
         BOOST_CHECK(!CheckProUpRegTx(CTransaction{transaction}, &parent_index,
             changed_key, view, false, true));
+        BOOST_CHECK(changed_key.IsInvalid());
         BOOST_CHECK_EQUAL(changed_key.GetRejectReason(), "bad-protx-hash-sig");
         BOOST_REQUIRE(CHashSigner::SignHash(::SerializeHash(payload), non_owner, payload.vchSig));
         SetTxPayload(transaction, payload);
         TxValidationState wrong_owner;
         BOOST_CHECK(!CheckProUpRegTx(CTransaction{transaction}, &parent_index,
             wrong_owner, view, false, true));
+        BOOST_CHECK(wrong_owner.IsInvalid());
         BOOST_CHECK_EQUAL(wrong_owner.GetRejectReason(), "bad-protx-hash-sig");
     }
 }

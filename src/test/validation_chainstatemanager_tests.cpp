@@ -8,6 +8,8 @@
 #include <consensus/pq_migration_config.h> // SYSCOIN: PQ activation-boundary tests.
 #include <consensus/validation.h>
 #include <evo/deterministicmns.h> // SYSCOIN: deep rollback integration state.
+#include <evo/providertx.h> // SYSCOIN: provider parent-state recovery.
+#include <evo/specialtx_payload.h>
 #include <evo/pq_payment_probation_db.h> // SYSCOIN: multi-chainstate probation GC.
 #include <evo/pq_registry.h> // SYSCOIN: deep rollback registry roots.
 #include <governance/governance.h> // SYSCOIN: tip-bound block fixture readiness.
@@ -28,6 +30,7 @@
 #include <pow.h>
 #include <random.h>
 #include <rpc/blockchain.h>
+#include <script/sign.h> // SYSCOIN: funded provider registration fixture.
 #include <services/assetconsensus.h> // SYSCOIN: coins-recovery NEVM roots and mint markers.
 #include <shutdown.h> // SYSCOIN: managed NEVM shutdown regression.
 #include <sync.h>
@@ -1208,6 +1211,162 @@ struct NEVMMintReadErrorSetup : StartupNEVMRecoverySetup {
     }
 };
 // SYSCOIN END: Mint database read errors must leave block candidates usable.
+
+struct ProviderParentErrorSetup : StartupNEVMRecoverySetup {
+    Consensus::Params& consensus{
+        const_cast<Consensus::Params&>(Params().GetConsensus())};
+    const int previous_dip3_height{consensus.DIP0003Height};
+    const CAmount previous_collateral{nMNCollateralRequired};
+    const bool previous_shutdown_on_fatal_error{
+        m_node.notifications->m_shutdown_on_fatal_error};
+
+    ProviderParentErrorSetup()
+    {
+        consensus.DIP0003Height = 101;
+        nMNCollateralRequired = 40 * COIN;
+        m_node.notifications->m_shutdown_on_fatal_error = false;
+    }
+
+    ~ProviderParentErrorSetup()
+    {
+        consensus.DIP0003Height = previous_dip3_height;
+        nMNCollateralRequired = previous_collateral;
+        m_node.notifications->m_shutdown_on_fatal_error =
+            previous_shutdown_on_fatal_error;
+        m_node.exit_status.store(EXIT_SUCCESS);
+    }
+
+    void CheckParentErrors()
+    {
+        auto& chainman{*Assert(m_node.chainman)};
+        auto& chainstate{chainman.ActiveChainstate()};
+        const auto parent{MineNEVMBlock()};
+        const auto& funding{m_coinbase_txns.front()};
+        CKey owner, voting, collateral, payout;
+        for (auto* key : {&owner, &voting, &collateral, &payout}) {
+            key->MakeNewKey(true);
+        }
+        CMutableTransaction registration;
+        registration.nVersion = SYSCOIN_TX_VERSION_MN_REGISTER;
+        registration.vin.emplace_back(COutPoint{funding->GetHash(), 0});
+        registration.vout.emplace_back(nMNCollateralRequired,
+            GetScriptForDestination(PKHash(collateral.GetPubKey())));
+        registration.vout.emplace_back(
+            funding->vout.at(0).nValue - nMNCollateralRequired - 10000,
+            GetScriptForDestination(PKHash(payout.GetPubKey())));
+        CProRegTx payload;
+        payload.nVersion = CProRegTx::LEGACY_BLS_VERSION;
+        payload.collateralOutpoint = COutPoint{uint256{}, 0};
+        payload.keyIDOwner = owner.GetPubKey().GetID();
+        payload.keyIDVoting = voting.GetPubKey().GetID();
+        payload.scriptPayout = GetScriptForDestination(PKHash(payout.GetPubKey()));
+        // Historical pre-PQ operator keys are opaque, non-null byte strings.
+        std::array<uint8_t, CLegacyBLSPublicKey::SERIALIZED_SIZE> operator_key{};
+        operator_key.fill(1);
+        BOOST_REQUIRE(payload.pubKeyOperator.SetBytes(operator_key));
+        payload.inputsHash = CalcTxInputsHash(CTransaction{registration});
+        SetTxPayload(registration, payload);
+        FillableSigningProvider signer;
+        signer.AddKey(coinbaseKey);
+        SignatureData signature;
+        BOOST_REQUIRE(SignSignature(signer, *funding, registration, 0,
+                                    SIGHASH_ALL, signature));
+
+        auto block_template{node::BlockAssembler{
+            chainstate, nullptr}.CreateNewBlock(CScript{} << OP_TRUE)};
+        CBlock block{block_template->block};
+        block.vtx.push_back(MakeTransactionRef(registration));
+        node::RegenerateCommitments(block, chainman,
+                                    block_template->vchCoinbaseCommitmentExtra);
+        block.fChecked = false;
+        while (!CheckProofOfWork(block.GetHash(), block.nBits, consensus)) {
+            ++block.nNonce;
+        }
+        const auto candidate{std::make_shared<const CBlock>(std::move(block))};
+        CNEVMHeader header;
+        BlockValidationState header_state;
+        BOOST_REQUIRE(GetNEVMData(header_state, *candidate, header));
+        CBlockIndex* candidate_index{nullptr};
+        CDeterministicMNList parent_list;
+        {
+            LOCK(::cs_main);
+            BlockValidationState valid_state;
+            BOOST_REQUIRE_MESSAGE(TestBlockValidity(valid_state,
+                chainman.GetParams(), chainstate, *candidate, chainman.ActiveTip(),
+                chainman.m_options.adjusted_time_callback), valid_state.ToString());
+            parent_list = deterministicMNManager->GetListForBlock(chainman.ActiveTip());
+            BOOST_REQUIRE_EQUAL(parent_list.GetHeight(), 101);
+            BlockValidationState accept_state;
+            BOOST_REQUIRE_MESSAGE(chainman.AcceptBlock(candidate, accept_state,
+                &candidate_index, true, nullptr, nullptr, true), accept_state.ToString());
+            BOOST_REQUIRE(candidate_index != nullptr);
+        }
+        const auto durable_tip{WITH_LOCK(::cs_main,
+            return chainstate.CoinsDB().GetBestBlock())};
+        const auto published_tip{pnevmtxrootsdb->GetPublishedTip()};
+        const auto nevm_connects{nevm->connected_blocks.size()};
+        const COutPoint collateral_output{registration.GetHash(), 0};
+
+        enum class Fault { MISSING, HEIGHT, DATABASE };
+        for (const auto fault : {Fault::MISSING, Fault::HEIGHT, Fault::DATABASE}) {
+            {
+                LOCK(::cs_main);
+                auto& db{*deterministicMNManager->m_evoDb};
+                if (fault == Fault::MISSING) {
+                    db.EraseCache(parent->GetHash());
+                } else if (fault == Fault::HEIGHT) {
+                    auto mismatch{parent_list};
+                    mismatch.SetHeight(parent_list.GetHeight() - 1);
+                    db.WriteCache(parent->GetHash(), std::move(mismatch));
+                } else {
+                    db.EraseCache(uint256S("f001"));
+                    db.FailNextFlushBatchForTesting();
+                }
+            }
+            BlockValidationState failed_state;
+            BOOST_CHECK(!chainstate.ActivateBestChain(failed_state, candidate));
+            BOOST_CHECK(failed_state.IsError());
+            BOOST_CHECK(!failed_state.IsInvalid());
+            BOOST_CHECK(failed_state.ToString().find("failed-protx-parent-state") !=
+                        std::string::npos);
+            {
+                LOCK(::cs_main);
+                BOOST_CHECK_EQUAL(candidate_index->nStatus & BLOCK_FAILED_MASK, 0U);
+                BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(candidate_index), 1U);
+                BOOST_CHECK(chainman.ActiveTip()->GetBlockHash() == parent->GetHash());
+                BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == parent->GetHash());
+                BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == durable_tip);
+                BOOST_CHECK(chainstate.CoinsTip().HaveCoin(registration.vin.front().prevout));
+                BOOST_CHECK(!chainstate.CoinsTip().HaveCoin(collateral_output));
+                deterministicMNManager->m_evoDb->WriteCache(parent->GetHash(), parent_list);
+            }
+            BOOST_CHECK_EQUAL(nevm->connected_blocks.size(), nevm_connects);
+            BOOST_CHECK(pnevmtxrootsdb->GetPublishedTip() == published_tip);
+            NEVMTxRoot roots;
+            BOOST_CHECK(!pnevmtxrootsdb->ReadTxRoots(header.nBlockHash, roots));
+            m_node.exit_status.store(EXIT_SUCCESS);
+        }
+
+        // The same fully validated, indexed candidate succeeds after local
+        // state is restored, without reconsidering or replacing the block.
+        BlockValidationState retry_state;
+        BOOST_REQUIRE_MESSAGE(chainstate.ActivateBestChain(retry_state, candidate),
+                              retry_state.ToString());
+        BOOST_CHECK(retry_state.IsValid());
+        {
+            LOCK(::cs_main);
+            BOOST_CHECK(chainman.ActiveTip() == candidate_index);
+            BOOST_CHECK_EQUAL(candidate_index->nStatus & BLOCK_FAILED_MASK, 0U);
+            BOOST_CHECK(chainstate.CoinsTip().HaveCoin(collateral_output));
+            BOOST_CHECK(!chainstate.CoinsTip().HaveCoin(registration.vin.front().prevout));
+            BOOST_CHECK(deterministicMNManager->GetListForBlock(candidate_index)
+                            .GetMN(registration.GetHash()) != nullptr);
+        }
+        NEVMTxRoot roots;
+        BOOST_CHECK(pnevmtxrootsdb->ReadTxRoots(header.nBlockHash, roots));
+        BOOST_CHECK_EQUAL(nevm->connected_blocks.size(), nevm_connects + 1);
+    }
+};
 
 struct CoinsNEVMRecoverySetup : StartupNEVMRecoverySetup {
     Consensus::Params& consensus{
@@ -2783,6 +2942,12 @@ BOOST_FIXTURE_TEST_CASE(nevm_mint_marker_read_error_preserves_block_candidate,
     CheckReadError(/*roots_error=*/false);
 }
 // SYSCOIN END: Valid mint candidates survive local NEVM database read errors.
+
+BOOST_FIXTURE_TEST_CASE(provider_parent_errors_preserve_block_candidate,
+                        ProviderParentErrorSetup)
+{
+    CheckParentErrors();
+}
 
 // SYSCOIN BEGIN: Public IBD and durable recovery-marker lifecycle tests.
 // and deferred NEVM recovery reach the exact active tip.

@@ -53,6 +53,25 @@ bool HasNonZeroByte(const Range& range)
     });
 }
 
+bool GetParentMNList(const CBlockIndex& parent,
+                     CDeterministicMNList& mn_list,
+                     TxValidationState& state)
+{
+    if (deterministicMNManager == nullptr) {
+        return state.Error("failed-protx-parent-state");
+    }
+    try {
+        mn_list = deterministicMNManager->GetListForBlock(&parent);
+    } catch (const std::exception& exception) {
+        // Missing, inconsistent, or unreadable local snapshots must not
+        // become consensus invalidity in CheckSpecialTx's general handler.
+        LogPrintf("%s -- DMN parent lookup exception: %s\n",
+                  __func__, exception.what());
+        return state.Error("failed-protx-parent-state");
+    }
+    return true;
+}
+
 bool GetParentOperatorKey(const CBlockIndex* pindex_prev,
                           const uint256& pro_tx_hash,
                           const llmq::pq::OperatorKeyState*& operator_state,
@@ -358,7 +377,8 @@ bool CheckProRegTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxVali
     }
 
     if (pindexPrev) {
-        auto mnList = deterministicMNManager->GetListForBlock(pindexPrev);
+        CDeterministicMNList mnList;
+        if (!GetParentMNList(*pindexPrev, mnList, state)) return false;
 
         // only allow reusing of addresses when it's for the same collateral (which replaces the old MN)
         if (mnList.HasUniqueProperty(ptx.addr) && mnList.GetUniquePropertyMN(ptx.addr)->collateralOutpoint != collateralOutpoint) {
@@ -420,7 +440,8 @@ bool CheckProUpServTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxV
     }
 
     if (pindexPrev) {
-        auto mnList = deterministicMNManager->GetListForBlock(pindexPrev);
+        CDeterministicMNList mnList;
+        if (!GetParentMNList(*pindexPrev, mnList, state)) return false;
         auto mn = mnList.GetMN(ptx.proTxHash);
         if (!mn) {
             return FormatSyscoinErrorMessage(state, "bad-protx-hash", fJustCheck);
@@ -545,7 +566,8 @@ bool CheckProUpRegTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxVa
     }
 
     if (pindexPrev) {
-        auto mnList = deterministicMNManager->GetListForBlock(pindexPrev);
+        CDeterministicMNList mnList;
+        if (!GetParentMNList(*pindexPrev, mnList, state)) return false;
         auto dmn = mnList.GetMN(ptx.proTxHash);
         if (!dmn) {
             return FormatSyscoinErrorMessage(state, "bad-protx-hash", fJustCheck);
@@ -621,7 +643,8 @@ bool CheckProUpRevTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxVa
     }
 
     if (pindexPrev) {
-        auto mnList = deterministicMNManager->GetListForBlock(pindexPrev);
+        CDeterministicMNList mnList;
+        if (!GetParentMNList(*pindexPrev, mnList, state)) return false;
         auto dmn = mnList.GetMN(ptx.proTxHash);
         if (!dmn)
             return FormatSyscoinErrorMessage(state, "bad-protx-hash", fJustCheck);
