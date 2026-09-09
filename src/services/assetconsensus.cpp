@@ -530,6 +530,9 @@ bool CheckSyscoinInputs(const Consensus::Params& params, const CTransaction& tx,
         if (good && tx.HasAssets() && mapAssetIn != mapAssetOut) {
             return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-asset-io-mismatch");
         }
+    } catch (const dbwrapper_error& e) {
+        // SYSCOIN: A local database failure says nothing about mint validity.
+        return state.Error(e.what());
     } catch (const std::exception& e) {
         return FormatSyscoinErrorMessage(state, e.what(), fJustCheck);
     } catch (...) {
@@ -770,7 +773,7 @@ bool CNEVMTxRootsDB::ReadTxRoots(const uint256& nBlockHash, NEVMTxRoot& txRoot) 
         txRoot = it->second;
         return true;
     }
-    return Read(nBlockHash, txRoot);
+    return ReadTxRootsFromDisk(nBlockHash, txRoot);
 }
 void CNEVMTxRootsDB::StageErase(const std::vector<uint256>& block_hashes)
 {
@@ -866,7 +869,7 @@ bool CNEVMMintedTxDB::FlushPendingErases()
 bool CNEVMMintedTxDB::ExistsTx(const uint256& nTxHash) {
     LOCK(cs_cache);
     if (m_pending_erases.contains(nTxHash)) return false;
-    return (mapCache.find(nTxHash) != mapCache.end()) || Exists(nTxHash);
+    return (mapCache.find(nTxHash) != mapCache.end()) || ExistsTxOnDisk(nTxHash);
 }
 // SYSCOIN END: Retry failed erases without changing ordinary put batching.
 std::string stringFromSyscoinTx(const int &nVersion) {

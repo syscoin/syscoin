@@ -1514,6 +1514,16 @@ MempoolAcceptResult MemPoolAccept::AcceptSingleTransaction(const CTransactionRef
                                         effective_feerate, single_wtxid);
 }
 
+// SYSCOIN: Preserve local failures through package wrapping and result merging.
+static void SetPackageTransactionError(PackageValidationState& package_state, const TxValidationState& tx_state)
+{
+    if (tx_state.IsError()) {
+        package_state.Invalid(PackageValidationResult::PCKG_MEMPOOL_ERROR, tx_state.GetRejectReason());
+    } else if (package_state.GetResult() != PackageValidationResult::PCKG_MEMPOOL_ERROR) {
+        package_state.Invalid(PackageValidationResult::PCKG_TX, "transaction failed");
+    }
+}
+
 PackageMempoolAcceptResult MemPoolAccept::AcceptMultipleTransactions(const std::vector<CTransactionRef>& txns, ATMPArgs& args)
 {
     AssertLockHeld(cs_main);
@@ -1535,7 +1545,7 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptMultipleTransactions(const std::
     // Do all PreChecks first and fail fast to avoid running expensive script checks when unnecessary.
     for (Workspace& ws : workspaces) {
         if (!PreChecks(args, ws, mint_txs)) {
-            package_state.Invalid(PackageValidationResult::PCKG_TX, "transaction failed");
+            SetPackageTransactionError(package_state, ws.m_state);
             // Exit early to avoid doing pointless work. Update the failed tx result; the rest are unfinished.
             results.emplace(ws.m_ptx->GetWitnessHash(), MempoolAcceptResult::Failure(ws.m_state));
             return PackageMempoolAcceptResult(package_state, std::move(results));
@@ -1605,12 +1615,12 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptMultipleTransactions(const std::
         // expensive-authentication gate.
         if (!PolicyScriptChecks(args, ws)) {
             // Exit early to avoid doing pointless work. Update the failed tx result; the rest are unfinished.
-            package_state.Invalid(PackageValidationResult::PCKG_TX, "transaction failed");
+            SetPackageTransactionError(package_state, ws.m_state);
             results.emplace(ws.m_ptx->GetWitnessHash(), MempoolAcceptResult::Failure(ws.m_state));
             return PackageMempoolAcceptResult(package_state, std::move(results));
         }
         if (!SpecialTxAuthChecks(ws)) {
-            package_state.Invalid(PackageValidationResult::PCKG_TX, "transaction failed");
+            SetPackageTransactionError(package_state, ws.m_state);
             results.emplace(ws.m_ptx->GetWitnessHash(), MempoolAcceptResult::Failure(ws.m_state));
             return PackageMempoolAcceptResult(package_state, std::move(results));
         }
@@ -1650,7 +1660,7 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptSubPackage(const std::vector<CTr
         const auto single_res = AcceptSingleTransaction(tx, single_args);
         PackageValidationState package_state_wrapped;
         if (single_res.m_result_type != MempoolAcceptResult::ResultType::VALID) {
-            package_state_wrapped.Invalid(PackageValidationResult::PCKG_TX, "transaction failed");
+            SetPackageTransactionError(package_state_wrapped, single_res.m_state);
         }
         return PackageMempoolAcceptResult(package_state_wrapped, {{tx->GetWitnessHash(), single_res}});
     }();
@@ -1803,7 +1813,7 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptPackage(const Package& package, 
                 // future.  Continue individually validating the rest of the transactions, because
                 // some of them may still be valid.
                 quit_early = true;
-                package_state_quit_early.Invalid(PackageValidationResult::PCKG_TX, "transaction failed");
+                SetPackageTransactionError(package_state_quit_early, single_res.m_state);
                 individual_results_nonfinal.emplace(wtxid, single_res);
             } else {
                 individual_results_nonfinal.emplace(wtxid, single_res);
@@ -1829,9 +1839,9 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptPackage(const Package& package, 
             // been evicted due to LimitMempoolSize() above.
             const auto& txresult = multi_submission_result.m_tx_results.at(wtxid);
             if (txresult.m_result_type == MempoolAcceptResult::ResultType::VALID && !m_pool.exists(GenTxid::Wtxid(wtxid))) {
-                package_state_final.Invalid(PackageValidationResult::PCKG_TX, "transaction failed");
                 TxValidationState mempool_full_state;
                 mempool_full_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "mempool full");
+                SetPackageTransactionError(package_state_final, mempool_full_state);
                 results_final.emplace(wtxid, MempoolAcceptResult::Failure(mempool_full_state));
             } else {
                 results_final.emplace(wtxid, txresult);
@@ -1843,9 +1853,9 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptPackage(const Package& package, 
             Assume(individual_results_nonfinal.count(wtxid) == 0);
             // Query by txid to include the same-txid-different-witness ones.
             if (!m_pool.exists(GenTxid::Txid(tx->GetHash()))) {
-                package_state_final.Invalid(PackageValidationResult::PCKG_TX, "transaction failed");
                 TxValidationState mempool_full_state;
                 mempool_full_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "mempool full");
+                SetPackageTransactionError(package_state_final, mempool_full_state);
                 // Replace the previous result.
                 results_final.erase(wtxid);
                 results_final.emplace(wtxid, MempoolAcceptResult::Failure(mempool_full_state));
@@ -4888,9 +4898,14 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             TxValidationState tx_statesys;
             // Keep block-local reservations even in TestBlockValidity's check-only mode.
             if (!CheckSyscoinInputs(params.GetConsensus(), tx, txHash, tx_statesys, (uint32_t)pindex->nHeight, fJustCheck, setMintTxs, mapAssetIn, mapAssetOut)){
-                // Any transaction validation failure in ConnectBlock is a block consensus failure
-                state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
-                            tx_statesys.GetRejectReason(), tx_statesys.GetDebugMessage());
+                // SYSCOIN: Storage errors must not retire a valid block candidate.
+                if (tx_statesys.IsError()) {
+                    FatalError(m_chainman.GetNotifications(), state,
+                               strprintf("System error while checking Syscoin inputs: %s", tx_statesys.ToString()));
+                } else {
+                    state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                  tx_statesys.GetRejectReason(), tx_statesys.GetDebugMessage());
+                }
                 connect_error = strprintf("%s: Consensus::CheckSyscoinInputs: %s, %s", __func__, tx.GetHash().ToString(), state.ToString());
                 break;
             }

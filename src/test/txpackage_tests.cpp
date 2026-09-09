@@ -14,11 +14,15 @@
 #include <primitives/transaction.h>
 #include <script/script.h>
 #include <script/sign.h> // SYSCOIN: provider package signing fixtures.
+#include <services/assetconsensus.h> // SYSCOIN: local mint database failures.
+#include <test/util/nevm_mint.h> // SYSCOIN: mint package read-error regression.
 #include <test/util/random.h>
 #include <test/util/setup_common.h>
 #include <validation.h>
 
 #include <boost/test/unit_test.hpp>
+
+extern NEVMMintTxSet setMintTxsMempool;
 
 BOOST_AUTO_TEST_SUITE(txpackage_tests)
 // A fee amount that is above 1sat/vB but below 5sat/vB for most transactions created within these
@@ -236,6 +240,84 @@ BOOST_FIXTURE_TEST_CASE(package_validation_tests, TestChain100Setup)
 
     // Check that mempool size hasn't changed.
     BOOST_CHECK_EQUAL(m_node.mempool->size(), initialPoolSize);
+}
+
+// SYSCOIN: Local mint database errors survive package wrapping and merging.
+BOOST_FIXTURE_TEST_CASE(package_mint_database_read_error, TestChain100Setup)
+{
+    struct UnavailableRootsDB final : CNEVMTxRootsDB {
+        using CNEVMTxRootsDB::CNEVMTxRootsDB;
+        bool fail{true};
+        unsigned reads{0};
+        bool ReadTxRootsFromDisk(const uint256& hash, NEVMTxRoot& roots) override
+        {
+            ++reads;
+            if (fail) throw dbwrapper_error("mint roots unavailable");
+            return CNEVMTxRootsDB::ReadTxRootsFromDisk(hash, roots);
+        }
+    };
+    auto& consensus{const_cast<Consensus::Params&>(Params().GetConsensus())};
+    struct RestoreMintState {
+        Consensus::Params& consensus;
+        int nexus_height;
+        std::unique_ptr<CNEVMTxRootsDB> roots{std::move(pnevmtxrootsdb)};
+        ~RestoreMintState()
+        {
+            consensus.nNexusStartBlock = nexus_height;
+            pnevmtxrootsdb = std::move(roots);
+        }
+    } restore{consensus, consensus.nNexusStartBlock};
+    consensus.nNexusStartBlock = 0;
+    auto roots{std::make_unique<UnavailableRootsDB>(DBParams{
+        .path = "package_mint_read_error", .cache_bytes = 1U << 20,
+        .memory_only = true, .wipe_data = true})};
+    auto& db{*roots};
+    pnevmtxrootsdb = std::move(roots);
+
+    const WitnessV0KeyHash destination{coinbaseKey.GetPubKey().GetID()};
+    auto fixture{MakeValidNEVMMintFixture(consensus, 101, destination, uint256S("c001"))};
+    fixture.tx.vin.emplace_back(COutPoint{m_coinbase_txns.front()->GetHash(), 0});
+    fixture.tx.vout[0].nValue = m_coinbase_txns.front()->vout[0].nValue - COIN;
+    FillableSigningProvider provider;
+    provider.AddKey(coinbaseKey);
+    SignatureData signature;
+    BOOST_REQUIRE(SignSignature(provider, *m_coinbase_txns.front(), fixture.tx,
+                                0, SIGHASH_ALL, signature));
+    const auto mint{MakeTransactionRef(fixture.tx)};
+    CMutableTransaction child;
+    child.vin.emplace_back(COutPoint{mint->GetHash(), 0});
+    child.vout.emplace_back(-1, GetScriptForDestination(destination));
+    const auto invalid_child{MakeTransactionRef(child)};
+
+    LOCK(cs_main);
+    auto& chainstate{m_node.chainman->ActiveChainstate()};
+    auto& pool{*m_node.mempool};
+    const auto initial_size{pool.size()};
+    const auto initial_reservations{setMintTxsMempool};
+    for (const bool test_accept : {true, false}) {
+        for (const bool include_invalid_child : {false, true}) {
+            if (!test_accept && !include_invalid_child) continue;
+            const Package package{include_invalid_child ? Package{mint, invalid_child} : Package{mint}};
+            const auto previous_reads{db.reads};
+            const auto result{ProcessNewPackage(chainstate, pool, package, test_accept)};
+            BOOST_CHECK_EQUAL(result.m_state.GetResult(), PackageValidationResult::PCKG_MEMPOOL_ERROR);
+            BOOST_CHECK_EQUAL(result.m_state.GetRejectReason(), "mint roots unavailable");
+            BOOST_REQUIRE(result.m_tx_results.contains(mint->GetWitnessHash()));
+            BOOST_CHECK(result.m_tx_results.at(mint->GetWitnessHash()).m_state.IsError());
+            BOOST_CHECK_GT(db.reads, previous_reads);
+            BOOST_CHECK_EQUAL(pool.size(), initial_size);
+            BOOST_CHECK(setMintTxsMempool == initial_reservations);
+        }
+    }
+
+    // An absent source record remains an ordinary rejection after reads resume.
+    db.fail = false;
+    const auto missing{ProcessNewPackage(chainstate, pool, {mint}, /*test_accept=*/true)};
+    BOOST_CHECK_EQUAL(missing.m_state.GetResult(), PackageValidationResult::PCKG_TX);
+    BOOST_REQUIRE(missing.m_tx_results.contains(mint->GetWitnessHash()));
+    const auto& missing_state{missing.m_tx_results.at(mint->GetWitnessHash()).m_state};
+    BOOST_CHECK(missing_state.IsInvalid());
+    BOOST_CHECK_EQUAL(missing_state.GetRejectReason(), "mint-txroot-missing");
 }
 
 // SYSCOIN BEGIN: package admission cannot bypass provider/PQ uniqueness.

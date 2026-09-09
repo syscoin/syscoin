@@ -75,6 +75,11 @@ class CNEVMTxRootsDB : public CDBWrapper {
     void StageErase(const std::vector<uint256>& block_hashes) EXCLUSIVE_LOCKS_REQUIRED(cs_cache);
     bool FlushPendingErases() EXCLUSIVE_LOCKS_REQUIRED(cs_cache);
 protected:
+    // SYSCOIN: Keep disk reads injectable without bypassing cache visibility.
+    virtual bool ReadTxRootsFromDisk(const uint256& block_hash, NEVMTxRoot& roots)
+    {
+        return CDBWrapper::Read(block_hash, roots);
+    }
     virtual bool WriteCacheBatch(CDBBatch& batch, bool sync) { return CDBWrapper::WriteBatch(batch, sync); }
 public:
     // SYSCOIN BEGIN: Load and resolve the single durable disconnect obligation.
@@ -105,6 +110,8 @@ class CNEVMMintedTxDB : public CDBWrapper {
     void StageErase(const NEVMMintTxSet& tx_hashes) EXCLUSIVE_LOCKS_REQUIRED(cs_cache);
     bool FlushPendingErases() EXCLUSIVE_LOCKS_REQUIRED(cs_cache);
 protected:
+    // SYSCOIN: Exercise disk failures after pending erases and cache hits.
+    virtual bool ExistsTxOnDisk(const uint256& tx_hash) { return CDBWrapper::Exists(tx_hash); }
     virtual bool WriteCacheBatch(CDBBatch& batch, bool sync) { return CDBWrapper::WriteBatch(batch, sync); }
 public:
     using CDBWrapper::CDBWrapper;

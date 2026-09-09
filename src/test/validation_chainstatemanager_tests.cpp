@@ -34,6 +34,7 @@
 #include <test/util/chainstate.h>
 #include <test/util/logging.h>
 #include <test/util/mining.h>
+#include <test/util/nevm_mint.h> // SYSCOIN: fully valid mint block read-error regressions.
 #include <test/util/random.h>
 #include <test/util/setup_common.h>
 #include <test/util/validation.h>
@@ -144,6 +145,7 @@ struct StartupNEVMSubscriber final : CValidationInterface {
     std::vector<uint256> disconnected_blocks;
     uint8_t template_serial{0};
     std::optional<uint256> template_block_hash;
+    std::optional<NEVMTxRoot> template_roots;
 
     void NotifyGetNEVMBlock(CNEVMBlock& block, std::string& state) override
     {
@@ -152,6 +154,10 @@ struct StartupNEVMSubscriber final : CValidationInterface {
         block.nTxRoot = block.nBlockHash;
         block.nReceiptRoot = block.nBlockHash;
         if (template_block_hash) block.nBlockHash = *template_block_hash;
+        if (template_roots) {
+            block.nTxRoot = template_roots->nTxRoot;
+            block.nReceiptRoot = template_roots->nReceiptRoot;
+        }
         // Core treats this payload as opaque; the subscriber substitutes for
         // the external engine that produces and validates it.
         block.vchNEVMBlockData = {template_serial};
@@ -410,6 +416,238 @@ struct StartupNEVMRecoverySetup : DeferredNEVMReplaySetup {
         CheckCompetingStartupPairCompleted(branches);
     }
 };
+
+// SYSCOIN BEGIN: Mint database read errors must leave block candidates usable.
+class NEVMMintReadErrorRootsDB final : public CNEVMTxRootsDB {
+public:
+    using CNEVMTxRootsDB::CNEVMTxRootsDB;
+    std::optional<uint256> failed_hash;
+    size_t failures{0};
+
+protected:
+    bool ReadTxRootsFromDisk(const uint256& hash, NEVMTxRoot& roots) override
+    {
+        if (failed_hash == hash) {
+            ++failures;
+            throw dbwrapper_error("injected NEVM source-root read error");
+        }
+        return CNEVMTxRootsDB::ReadTxRootsFromDisk(hash, roots);
+    }
+};
+
+class NEVMMintReadErrorMintDB final : public CNEVMMintedTxDB {
+public:
+    using CNEVMMintedTxDB::CNEVMMintedTxDB;
+    std::optional<uint256> failed_hash;
+    size_t failures{0};
+
+protected:
+    bool ExistsTxOnDisk(const uint256& hash) override
+    {
+        if (failed_hash == hash) {
+            ++failures;
+            throw dbwrapper_error("injected NEVM consumed-proof read error");
+        }
+        return CNEVMMintedTxDB::ExistsTxOnDisk(hash);
+    }
+};
+
+struct NEVMMintReadErrorSetup : StartupNEVMRecoverySetup {
+    Consensus::Params& consensus{
+        const_cast<Consensus::Params&>(Params().GetConsensus())};
+    const int previous_nexus_height{consensus.nNexusStartBlock};
+    const bool previous_shutdown_on_fatal_error{
+        m_node.notifications->m_shutdown_on_fatal_error};
+    std::unique_ptr<CNEVMTxRootsDB> previous_roots_db{std::move(pnevmtxrootsdb)};
+    std::unique_ptr<CNEVMMintedTxDB> previous_mint_db{std::move(pnevmtxmintdb)};
+
+    NEVMMintReadErrorSetup()
+    {
+        // The shared 100-block base predates asset validation. Enable it for
+        // the real source/funding block and its mint-containing successor.
+        consensus.nNexusStartBlock = 101;
+        m_node.notifications->m_shutdown_on_fatal_error = false;
+        pnevmtxrootsdb = std::make_unique<NEVMMintReadErrorRootsDB>(DBParams{
+            .path = "mint_block_read_error_roots", .cache_bytes = 1U << 20,
+            .memory_only = true, .wipe_data = true});
+        pnevmtxmintdb = std::make_unique<NEVMMintReadErrorMintDB>(DBParams{
+            .path = "mint_block_read_error_markers", .cache_bytes = 1U << 20,
+            .memory_only = true, .wipe_data = true});
+    }
+
+    ~NEVMMintReadErrorSetup()
+    {
+        consensus.nNexusStartBlock = previous_nexus_height;
+        m_node.notifications->m_shutdown_on_fatal_error =
+            previous_shutdown_on_fatal_error;
+        m_node.exit_status.store(EXIT_SUCCESS);
+        pnevmtxrootsdb = std::move(previous_roots_db);
+        pnevmtxmintdb = std::move(previous_mint_db);
+    }
+
+    std::shared_ptr<const CBlock> MakeMintBlock(const CMutableTransaction& tx)
+    {
+        auto& chainman{*Assert(m_node.chainman)};
+        auto block_template{node::BlockAssembler{
+            chainman.ActiveChainstate(), nullptr}.CreateNewBlock(CScript{} << OP_TRUE)};
+        CBlock block{block_template->block};
+        block.vtx.push_back(MakeTransactionRef(tx));
+        // The generic chain fixture discards extra coinbase data. Keep the
+        // source roots and NEVM tag while rebuilding the witness commitment.
+        node::RegenerateCommitments(block, chainman,
+                                    block_template->vchCoinbaseCommitmentExtra);
+        block.fChecked = false;
+        while (!CheckProofOfWork(block.GetHash(), block.nBits, consensus)) {
+            ++block.nNonce;
+        }
+        return std::make_shared<const CBlock>(std::move(block));
+    }
+
+    void CheckReadError(bool roots_error)
+    {
+        auto& chainman{*Assert(m_node.chainman)};
+        auto& chainstate{chainman.ActiveChainstate()};
+        auto& roots_db{static_cast<NEVMMintReadErrorRootsDB&>(*pnevmtxrootsdb)};
+        auto& mint_db{static_cast<NEVMMintReadErrorMintDB&>(*pnevmtxmintdb)};
+        auto valid_mint{MakeValidNEVMMintFixture(
+            consensus, 102, WitnessV0KeyHash{coinbaseKey.GetPubKey()},
+            uint256S("fa01"))};
+
+        // Commit the actual proof roots in a source block, and give the mint
+        // a confirmed non-coinbase OP_TRUE input. Core's mint and input checks
+        // remain enabled; the existing subscriber represents the NEVM engine.
+        nevm->template_block_hash = valid_mint.mint.nBlockHash;
+        nevm->template_roots = NEVMTxRoot{
+            valid_mint.mint.nTxRoot, valid_mint.mint.nReceiptRoot};
+        const auto funding{CreateValidMempoolTransaction(
+            m_coinbase_txns.front(), 0, 1, coinbaseKey,
+            CScript{} << OP_TRUE, 10 * COIN, /*submit=*/false)};
+        const auto source{MakeMintBlock(funding)};
+        {
+            LOCK(::cs_main);
+            BlockValidationState source_state;
+            BOOST_REQUIRE_MESSAGE(TestBlockValidity(
+                source_state, chainman.GetParams(), chainstate, *source,
+                chainman.ActiveTip(), chainman.m_options.adjusted_time_callback),
+                source_state.ToString());
+        }
+        BOOST_REQUIRE(chainman.ProcessNewBlock(source, true, true, nullptr));
+        BOOST_REQUIRE(WITH_LOCK(::cs_main,
+            return chainman.ActiveTip()->GetBlockHash()) == source->GetHash());
+        nevm->template_block_hash.reset();
+        nevm->template_roots.reset();
+        SetMockTime(GetTime() + 1);
+        BOOST_REQUIRE(roots_db.FlushCacheToDisk());
+
+        const COutPoint funding_output{funding.GetHash(), 0};
+        valid_mint.tx.vin.emplace_back(funding_output);
+        const auto candidate{MakeMintBlock(valid_mint.tx)};
+        const COutPoint minted_output{valid_mint.tx.GetHash(), 0};
+        const COutPoint candidate_coinbase{candidate->vtx.front()->GetHash(), 0};
+        CNEVMHeader candidate_header;
+        BlockValidationState header_state;
+        BOOST_REQUIRE(GetNEVMData(header_state, *candidate, candidate_header));
+
+        CBlockIndex* candidate_index{nullptr};
+        CBlockIndex* descendant_index{nullptr};
+        {
+            LOCK(::cs_main);
+            // Prove the complete candidate passes before injecting storage
+            // failure, including its mint proofs, outputs, and input script.
+            BlockValidationState valid_state;
+            BOOST_REQUIRE_MESSAGE(TestBlockValidity(
+                valid_state, chainman.GetParams(), chainstate, *candidate,
+                chainman.ActiveTip(), chainman.m_options.adjusted_time_callback),
+                valid_state.ToString());
+            BOOST_REQUIRE(valid_state.IsValid());
+            BlockValidationState accept_state;
+            BOOST_REQUIRE_MESSAGE(chainman.AcceptBlock(
+                candidate, accept_state, &candidate_index, /*fRequested=*/true,
+                /*dbp=*/nullptr, /*fNewBlock=*/nullptr, /*min_pow_checked=*/true),
+                accept_state.ToString());
+            BOOST_REQUIRE(candidate_index != nullptr);
+            BOOST_REQUIRE_EQUAL(chainstate.setBlockIndexCandidates.count(candidate_index), 1U);
+        }
+        // Retain a known descendant header so a local read fault cannot
+        // poison either this candidate or the branch extending it.
+        CBlockHeader descendant{candidate->GetBlockHeader()};
+        descendant.hashPrevBlock = candidate->GetHash();
+        ++descendant.nTime;
+        descendant.nNonce = 0;
+        while (!CheckProofOfWork(descendant.GetHash(), descendant.nBits, consensus)) {
+            ++descendant.nNonce;
+        }
+        BlockValidationState descendant_state;
+        BOOST_REQUIRE_MESSAGE(chainman.ProcessNewBlockHeaders(
+            {descendant}, /*min_pow_checked=*/true, descendant_state),
+            descendant_state.ToString());
+        {
+            LOCK(::cs_main);
+            descendant_index = chainman.m_blockman.LookupBlockIndex(descendant.GetHash());
+            BOOST_REQUIRE(descendant_index != nullptr);
+        }
+
+        const auto durable_tip{WITH_LOCK(::cs_main,
+            return chainstate.CoinsDB().GetBestBlock())};
+        const auto nevm_connects{nevm->connected_blocks.size()};
+        if (roots_error) roots_db.failed_hash = valid_mint.mint.nBlockHash;
+        else mint_db.failed_hash = valid_mint.mint.nTxHash;
+        BlockValidationState failed_state;
+        BOOST_CHECK(!chainstate.ActivateBestChain(failed_state, candidate));
+        BOOST_CHECK(failed_state.IsError());
+        BOOST_CHECK(!failed_state.IsInvalid());
+        BOOST_CHECK(failed_state.ToString().find(
+            roots_error ? "injected NEVM source-root read error"
+                        : "injected NEVM consumed-proof read error") != std::string::npos);
+        BOOST_CHECK_EQUAL(roots_error ? roots_db.failures : mint_db.failures, 1U);
+        // FatalError must notify the node without poisoning block validity.
+        BOOST_CHECK_EQUAL(m_node.exit_status.load(), EXIT_FAILURE);
+        roots_db.failed_hash.reset();
+        mint_db.failed_hash.reset();
+        {
+            LOCK(::cs_main);
+            BOOST_CHECK_EQUAL(candidate_index->nStatus & BLOCK_FAILED_MASK, 0U);
+            BOOST_CHECK_EQUAL(descendant_index->nStatus & BLOCK_FAILED_MASK, 0U);
+            BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(candidate_index), 1U);
+            BOOST_CHECK(chainman.ActiveTip()->GetBlockHash() == source->GetHash());
+            BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == source->GetHash());
+            BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == durable_tip);
+            BOOST_CHECK(chainstate.CoinsTip().HaveCoin(funding_output));
+            BOOST_CHECK(!chainstate.CoinsTip().HaveCoin(minted_output));
+            BOOST_CHECK(!chainstate.CoinsTip().HaveCoin(candidate_coinbase));
+        }
+        BOOST_CHECK_EQUAL(nevm->connected_blocks.size(), nevm_connects);
+        BOOST_CHECK(!mint_db.ExistsTx(valid_mint.mint.nTxHash));
+        BOOST_CHECK(!mint_db.Exists(valid_mint.mint.nTxHash));
+        NEVMTxRoot roots;
+        BOOST_CHECK(!roots_db.ReadTxRoots(candidate_header.nBlockHash, roots));
+        BOOST_REQUIRE(roots_db.ReadTxRoots(valid_mint.mint.nBlockHash, roots));
+        BOOST_CHECK(roots.nTxRoot == valid_mint.mint.nTxRoot);
+        BOOST_CHECK(roots.nReceiptRoot == valid_mint.mint.nReceiptRoot);
+
+        // Retry the exact indexed candidate without reconsidering or replacing
+        // any block. Restoring storage must be enough for normal activation.
+        m_node.exit_status.store(EXIT_SUCCESS);
+        BlockValidationState retry_state;
+        BOOST_REQUIRE_MESSAGE(chainstate.ActivateBestChain(retry_state, candidate),
+                              retry_state.ToString());
+        BOOST_CHECK(retry_state.IsValid());
+        {
+            LOCK(::cs_main);
+            BOOST_CHECK(chainman.ActiveTip() == candidate_index);
+            BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == candidate->GetHash());
+            BOOST_CHECK(!chainstate.CoinsTip().HaveCoin(funding_output));
+            BOOST_CHECK(chainstate.CoinsTip().HaveCoin(minted_output));
+            BOOST_CHECK(chainstate.CoinsTip().HaveCoin(candidate_coinbase));
+            BOOST_CHECK_EQUAL(candidate_index->nStatus & BLOCK_FAILED_MASK, 0U);
+            BOOST_CHECK_EQUAL(descendant_index->nStatus & BLOCK_FAILED_MASK, 0U);
+        }
+        BOOST_CHECK(mint_db.ExistsTx(valid_mint.mint.nTxHash));
+        BOOST_CHECK(roots_db.ReadTxRoots(candidate_header.nBlockHash, roots));
+        BOOST_CHECK_EQUAL(m_node.exit_status.load(), EXIT_SUCCESS);
+    }
+};
+// SYSCOIN END: Mint database read errors must leave block candidates usable.
 
 struct CoinsNEVMRecoverySetup : StartupNEVMRecoverySetup {
     Consensus::Params& consensus{
@@ -1144,6 +1382,20 @@ BOOST_FIXTURE_TEST_CASE(persisted_reindex_marker_forces_clean_block_index, Chain
     }
 }
 BOOST_FIXTURE_TEST_SUITE(validation_chainstatemanager_tests, TestingSetup)
+
+// SYSCOIN BEGIN: Valid mint candidates survive local NEVM database read errors.
+BOOST_FIXTURE_TEST_CASE(nevm_mint_root_read_error_preserves_block_candidate,
+                        NEVMMintReadErrorSetup)
+{
+    CheckReadError(/*roots_error=*/true);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_mint_marker_read_error_preserves_block_candidate,
+                        NEVMMintReadErrorSetup)
+{
+    CheckReadError(/*roots_error=*/false);
+}
+// SYSCOIN END: Valid mint candidates survive local NEVM database read errors.
 
 // SYSCOIN BEGIN: Public IBD and durable recovery-marker lifecycle tests.
 // and deferred NEVM recovery reach the exact active tip.

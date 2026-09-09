@@ -28,6 +28,7 @@
 #include <services/assetconsensus.h>
 #include <streams.h>
 #include <test/util/json.h>
+#include <test/util/nevm_mint.h>
 #include <test/util/random.h>
 #include <test/util/script.h>
 #include <test/util/transaction_utils.h>
@@ -939,6 +940,162 @@ BOOST_AUTO_TEST_CASE(syscoin_mint_typed_transaction_schemas)
 
     pnevmtxrootsdb = std::move(previous_roots_db);
     pnevmtxmintdb = std::move(previous_mint_db);
+}
+
+BOOST_AUTO_TEST_CASE(syscoin_mint_database_read_errors_are_retryable)
+{
+    struct FaultRootsDB : CNEVMTxRootsDB {
+        using CNEVMTxRootsDB::CNEVMTxRootsDB;
+        bool fail_reads{false};
+        size_t disk_reads{0};
+        bool ReadTxRootsFromDisk(const uint256& hash, NEVMTxRoot& roots) override
+        {
+            ++disk_reads;
+            if (fail_reads) throw dbwrapper_error("injected NEVM roots read failure");
+            return CNEVMTxRootsDB::ReadTxRootsFromDisk(hash, roots);
+        }
+    };
+    struct FaultMintDB : CNEVMMintedTxDB {
+        using CNEVMMintedTxDB::CNEVMMintedTxDB;
+        bool fail_reads{false};
+        size_t disk_reads{0};
+        bool ExistsTxOnDisk(const uint256& hash) override
+        {
+            ++disk_reads;
+            if (fail_reads) throw dbwrapper_error("injected NEVM mint read failure");
+            return CNEVMMintedTxDB::ExistsTxOnDisk(hash);
+        }
+    };
+    struct RestoreDatabases {
+        std::unique_ptr<CNEVMTxRootsDB> roots{std::move(pnevmtxrootsdb)};
+        std::unique_ptr<CNEVMMintedTxDB> mints{std::move(pnevmtxmintdb)};
+        ~RestoreDatabases()
+        {
+            pnevmtxrootsdb = std::move(roots);
+            pnevmtxmintdb = std::move(mints);
+        }
+    } restore_databases;
+    auto roots = std::make_unique<FaultRootsDB>(DBParams{
+        .path = "mint_read_error_roots", .cache_bytes = 1 << 20,
+        .memory_only = true, .wipe_data = true});
+    auto mints = std::make_unique<FaultMintDB>(DBParams{
+        .path = "mint_read_error_txs", .cache_bytes = 1 << 20,
+        .memory_only = true, .wipe_data = true});
+    auto* const roots_db{roots.get()};
+    auto* const mint_db{mints.get()};
+    pnevmtxrootsdb = std::move(roots);
+    pnevmtxmintdb = std::move(mints);
+
+    const auto& params{Params().GetConsensus()};
+    const uint32_t height = std::max(params.nNexusStartBlock, params.nCLReceiptStartBlock);
+    const WitnessV0KeyHash destination{uint160{}};
+    auto fixture{MakeValidNEVMMintFixture(params, height, destination, uint256S("db01"))};
+    fixture.tx.vin.emplace_back(COutPoint{uint256S("db02"), 0});
+    const CTransaction tx{fixture.tx};
+    const auto& mint{fixture.mint};
+    const NEVMTxRootMap valid_roots{{mint.nBlockHash, {mint.nTxRoot, mint.nReceiptRoot}}};
+    roots_db->FlushDataToCache(valid_roots);
+    BOOST_REQUIRE(roots_db->FlushCacheToDisk()); // Force the injected disk-read seam.
+    const NEVMMintTxSet initial_reservations{uint256S("db03")};
+    const auto initial_global_mints{WITH_LOCK(cs_main, return setMintTxsMempool)};
+    const CAssetsMap initial_outputs{{1, 1}};
+
+    for (const bool just_check : {false, true}) {
+        for (const bool roots_failure : {true, false}) {
+            BOOST_TEST_CONTEXT("just_check=" << just_check << " roots_failure=" << roots_failure) {
+                NEVMMintTxSet reservations{initial_reservations};
+                CAssetsMap assets_in;
+                CAssetsMap assets_out{initial_outputs};
+                roots_db->fail_reads = roots_failure;
+                mint_db->fail_reads = !roots_failure;
+                const size_t root_reads{roots_db->disk_reads};
+                const size_t mint_reads{mint_db->disk_reads};
+                TxValidationState failed_state;
+                BOOST_CHECK(!CheckSyscoinInputs(params, tx, tx.GetHash(), failed_state,
+                    height, just_check, reservations, assets_in, assets_out));
+                BOOST_CHECK(failed_state.IsError());
+                BOOST_CHECK(!failed_state.IsInvalid());
+                BOOST_CHECK_EQUAL(failed_state.GetResult(), TxValidationResult::TX_RESULT_UNSET);
+                BOOST_CHECK_EQUAL(failed_state.GetRejectReason(), roots_failure
+                    ? "injected NEVM roots read failure" : "injected NEVM mint read failure");
+                BOOST_CHECK_EQUAL(roots_db->disk_reads, root_reads + 1);
+                BOOST_CHECK_EQUAL(mint_db->disk_reads, mint_reads + (roots_failure ? 0 : 1));
+                BOOST_CHECK(reservations == initial_reservations);
+                BOOST_CHECK(assets_in.empty());
+                BOOST_CHECK(assets_out == initial_outputs);
+                BOOST_CHECK(WITH_LOCK(cs_main, return setMintTxsMempool == initial_global_mints));
+
+                roots_db->fail_reads = false;
+                mint_db->fail_reads = false;
+                BOOST_CHECK(!mint_db->ExistsTx(mint.nTxHash));
+                BOOST_REQUIRE(mint_db->FlushCacheToDisk());
+                BOOST_CHECK(!mint_db->Exists(mint.nTxHash));
+
+                // The identical proof and caller-owned state succeed as soon as
+                // the local read fault is removed, including check-only calls.
+                TxValidationState retry_state;
+                BOOST_CHECK_MESSAGE(CheckSyscoinInputs(params, tx, tx.GetHash(), retry_state,
+                    height, just_check, reservations, assets_in, assets_out), retry_state.ToString());
+                BOOST_CHECK(retry_state.IsValid());
+                BOOST_CHECK_EQUAL(reservations.size(), initial_reservations.size() + 1);
+                BOOST_CHECK_EQUAL(reservations.count(mint.nTxHash), 1U);
+                BOOST_CHECK(assets_in.empty());
+                BOOST_CHECK(assets_out.empty());
+                BOOST_CHECK(!mint_db->ExistsTx(mint.nTxHash));
+                BOOST_CHECK(WITH_LOCK(cs_main, return setMintTxsMempool == initial_global_mints));
+            }
+        }
+    }
+
+    const auto check_invalid = [&](const CTransaction& invalid_tx, const std::string& reason) {
+        for (const bool just_check : {false, true}) {
+            NEVMMintTxSet reservations{initial_reservations};
+            CAssetsMap assets_in;
+            CAssetsMap assets_out{initial_outputs};
+            TxValidationState state;
+            BOOST_CHECK(!CheckSyscoinInputs(params, invalid_tx, invalid_tx.GetHash(), state,
+                height, just_check, reservations, assets_in, assets_out));
+            BOOST_CHECK(state.IsInvalid());
+            BOOST_CHECK(!state.IsError());
+            BOOST_CHECK_EQUAL(state.GetResult(), just_check
+                ? TxValidationResult::TX_CONSENSUS : TxValidationResult::TX_CONFLICT);
+            BOOST_CHECK_EQUAL(state.GetRejectReason(), reason);
+            BOOST_CHECK(reservations == initial_reservations);
+            BOOST_CHECK(assets_in.empty());
+            BOOST_CHECK(assets_out == initial_outputs);
+            BOOST_CHECK(WITH_LOCK(cs_main, return setMintTxsMempool == initial_global_mints));
+        }
+    };
+
+    // A normal missing read and a positive consumed-transfer lookup retain
+    // their consensus-invalid classification.
+    BOOST_REQUIRE(roots_db->FlushErase({mint.nBlockHash}));
+    check_invalid(tx, "mint-txroot-missing");
+    roots_db->FlushDataToCache(valid_roots);
+    BOOST_REQUIRE(roots_db->FlushCacheToDisk());
+    mint_db->FlushDataToCache({mint.nTxHash});
+    BOOST_REQUIRE(mint_db->FlushCacheToDisk());
+    check_invalid(tx, "mint-exists");
+    BOOST_REQUIRE(mint_db->FlushErase({mint.nTxHash}));
+
+    CMintSyscoin invalid_proof{tx};
+    invalid_proof.vchTxPath = {0x01}; // The committed leaf has an empty nibble path.
+    std::vector<unsigned char> payload;
+    invalid_proof.SerializeData(payload);
+    auto invalid_mtx{fixture.tx};
+    invalid_mtx.vout.back().scriptPubKey = CScript{} << OP_RETURN << payload;
+    invalid_mtx.LoadAssets();
+    check_invalid(CTransaction{invalid_mtx}, "mint-verify-receipt-proof");
+
+    // A malformed RLP exception still describes invalid supplied proof data.
+    CMintSyscoin malformed_proof{tx};
+    malformed_proof.posReceipt = 0;
+    malformed_proof.vchReceiptParentNodes = {0x81}; // Truncated one-byte RLP string.
+    malformed_proof.SerializeData(payload);
+    invalid_mtx.vout.back().scriptPubKey = CScript{} << OP_RETURN << payload;
+    invalid_mtx.LoadAssets();
+    check_invalid(CTransaction{invalid_mtx}, "BadRLP");
+    BOOST_CHECK(!mint_db->ExistsTx(mint.nTxHash));
 }
 
 BOOST_AUTO_TEST_CASE(syscoin_bridge_raw_allocation_canonicality)
