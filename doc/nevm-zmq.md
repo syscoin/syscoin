@@ -34,6 +34,30 @@ Geth classifies errors at their validation origin. Storage and local execution
 read failures take precedence over computed validation mismatches. Mutable
 payload failures do not establish invalidity of a committed block hash.
 
+## Live recovery
+
+After an operational connect failure, Core flushes Geth's remaining buffer
+and queries `nevmblockinfo` for its applied count and paired Syscoin hash.
+The reported pair must match an ancestor of the pending block, or that exact
+pending block if its successful reply was lost. A different branch or an
+unexpected ahead pair stops recovery with an operational error.
+
+Core resends only the missing, already-connected predecessors. It reconstructs
+their historical NEVM payload, PoDA version hashes and masternode address
+diffs without reconnecting Core's coins or republishing its local caches.
+Existing BTC receipt authorization still applies. Each batch of at most 64
+blocks is flushed and checked against its exact expected applied pair before
+proceeding. Core then retries the pending block once. A failed predecessor
+replay cannot mark that pending block consensus-invalid.
+
+This recovery also runs after replacing an unavailable managed Geth process.
+Template checks, startup coins recovery and authenticated deferred BTCC replay
+retain their own behavior. An unsupported connect protocol requires a compatible
+engine, and a matching consensus-invalid result is not retried. Missing replay
+inputs or another engine failure leave the candidate retryable. This path
+handles connect failures; engine loss first encountered during a normal reorg
+disconnect still follows the separate disconnect error path.
+
 ## Upgrade order
 
 Upgrade Core before Geth, or stop both and upgrade them together. Updated Core

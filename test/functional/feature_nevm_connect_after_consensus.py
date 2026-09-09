@@ -2,7 +2,7 @@
 # Copyright (c) 2026 The Syscoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
-"""NEVM connects follow Core checks and distinguish engine errors from invalidity."""
+"""NEVM connects preserve invalidity and recover lost acknowledged predecessors."""
 
 from io import BytesIO
 from threading import Thread
@@ -68,6 +68,10 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
         self._connect_protocol_response = b"connect-v1"
         self._connect_negotiations = 0
         self._applied_syshashes = []
+        self._buffer_connects = False
+        self._buffered_syshashes = []
+        self._expected_connect_syshashes = None
+        self._nevm_events = []
 
         def _loop():
             while self._zmq_running:
@@ -91,6 +95,8 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
                         self._connect_negotiations += 1
                         response = self._connect_protocol_response
                     elif payload == ser_string(b"flush"):
+                        self._flush_mock_buffer()
+                        self._nevm_events.append(("flush", len(self._applied_syshashes)))
                         response = b"flushed"
                     self._zmq_sock.send_multipart([b"nevmcomms", response])
                 elif topic == b"nevmblock":
@@ -105,6 +111,10 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
                 elif topic == b"nevmblockinfo":
                     # Report the applied pair without calling Core while it
                     # may be waiting for this reply with cs_main held.
+                    self._nevm_events.append((
+                        "blockinfo", len(self._applied_syshashes),
+                        self._applied_syshashes[-1] if self._applied_syshashes else 0,
+                    ))
                     self._zmq_sock.send_multipart(
                         [
                             b"nevmblockinfo",
@@ -122,10 +132,19 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
                             response = self._connect_response
                             if callable(response):
                                 response = response(nevm_connect)
-                            if response == b"connected" and (
-                                not self._applied_syshashes or self._applied_syshashes[-1] != nevm_connect.sysblockhash
-                            ):
-                                self._applied_syshashes.append(nevm_connect.sysblockhash)
+                            acknowledged = self._applied_syshashes + self._buffered_syshashes
+                            exact_retry = acknowledged and acknowledged[-1] == nevm_connect.sysblockhash
+                            if response == b"connected" and not exact_retry:
+                                if self._expected_connect_syshashes is not None and (
+                                    len(acknowledged) >= len(self._expected_connect_syshashes)
+                                    or nevm_connect.sysblockhash != self._expected_connect_syshashes[len(acknowledged)]
+                                ):
+                                    response = b"error:non contiguous insert"
+                                elif self._buffer_connects:
+                                    self._buffered_syshashes.append(nevm_connect.sysblockhash)
+                                else:
+                                    self._applied_syshashes.append(nevm_connect.sysblockhash)
+                        self._nevm_events.append(("connect", nevm_connect.sysblockhash, response))
                     except Exception as e:
                         self.log.warning("failed to decode nevmconnect: %s", e)
                         self._connect_syshashes.append(-1)
@@ -145,6 +164,10 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
 
         self._zmq_thread = Thread(target=_loop, daemon=True)
         self._zmq_thread.start()
+
+    def _flush_mock_buffer(self):
+        self._applied_syshashes.extend(self._buffered_syshashes)
+        self._buffered_syshashes.clear()
 
     def _stop_zmq_responder(self):
         if not self._zmq_running:
@@ -207,6 +230,62 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
             f"{request.sysblockhash ^ sys_delta:064x}"
         ).encode()
 
+    def _check_lost_acknowledged_predecessors(self):
+        node = self.nodes[0]
+        core_pid = node.process.pid
+        applied = self._applied_syshashes[:]
+        self._buffer_connects = True
+        missing = [int(block_hash, 16) for block_hash in self.generate(node, 2)]
+        assert_equal(self._applied_syshashes, applied)
+        assert_equal(self._buffered_syshashes, missing)
+
+        # Prepare the successor while the mock engine is still available.
+        # Then lose only acknowledged entries, keeping Core and its chain live.
+        block = self._build_block(node)
+        raw = self._serialize_nevm_block(block, self._last_nevm_block_data).hex()
+        parent = applied + missing
+        self._expected_connect_syshashes = parent + [block.sha256]
+        self._buffered_syshashes.clear()
+        connect_len = len(self._connect_syshashes)
+        disconnect_len = len(self._disconnect_syshashes)
+        event_len = len(self._nevm_events)
+        parent_tip = node.getbestblockhash()
+        parent_coinbase = node.getblock(parent_tip)["tx"][0]
+        parent_coin = node.gettxout(parent_coinbase, 0)
+
+        assert_equal(node.submitblock(raw), None)
+        assert_equal(node.process.pid, core_pid)
+        assert_equal(node.process.poll(), None)
+        assert_equal(node.getbestblockhash(), block.hash)
+        assert_equal(node.gettxout(parent_coinbase, 0), {
+            **parent_coin,
+            "bestblock": block.hash,
+            "confirmations": parent_coin["confirmations"] + 1,
+        })
+        assert node.gettxout(block.vtx[0].hash, 0) is not None
+        assert_equal(self._disconnect_syshashes[disconnect_len:], [])
+        assert_equal(self._nonzero_connects_since(connect_len), [block.sha256, *missing, block.sha256])
+
+        events = self._nevm_events[event_len:]
+        connects = [event for event in events if event[0] == "connect"]
+        assert_equal(connects[0], ("connect", block.sha256, b"error:non contiguous insert"))
+        assert_equal(connects[-1], ("connect", block.sha256, b"connected"))
+        statuses = [(index, event) for index, event in enumerate(events) if event[0] == "blockinfo"]
+        assert statuses
+        assert_equal(statuses[0][1], ("blockinfo", len(applied), applied[-1]))
+        assert_equal(statuses[-1][1], ("blockinfo", len(parent), parent[-1]))
+        for index, _ in statuses:
+            assert index > 0 and events[index - 1][0] == "flush"
+        # The missing prefix must be applied before the current pair is retried.
+        assert statuses[-1][0] < len(events) - 1
+        assert_equal(self._applied_syshashes[:len(parent)], parent)
+        assert_equal(self._applied_syshashes + self._buffered_syshashes, parent + [block.sha256])
+
+        # Complete the mock's final acknowledged batch before the other cases.
+        self._flush_mock_buffer()
+        self._buffer_connects = False
+        self._expected_connect_syshashes = None
+
     def _check_connect_responses(self, responses, *, protocol_response=b"connect-v1", consensus_invalid=False):
         node = self.nodes[0]
         block = self._build_block(node)
@@ -229,6 +308,7 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
         applied = self._applied_syshashes[:]
         self._connect_protocol_response = protocol_response
         expected_connects = []
+        connects_per_attempt = 1 if consensus_invalid or protocol_response != b"connect-v1" else 2
         for attempt, response in enumerate(responses, start=1):
             self._connect_response = response
             if consensus_invalid:
@@ -242,9 +322,9 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
             assert_equal(node.gettxout(previous_coinbase, 0), previous_coin)
             assert_equal(node.gettxout(block.vtx[0].hash, 0), None)
             assert_equal(self._applied_syshashes, applied)
-            assert_equal(self._connect_negotiations, negotiations + attempt)
+            assert_equal(self._connect_negotiations, negotiations + attempt * connects_per_attempt)
             if protocol_response == b"connect-v1":
-                expected_connects.append(block.sha256)
+                expected_connects.extend([block.sha256] * connects_per_attempt)
             assert_equal(self._nonzero_connects_since(connect_len), expected_connects)
 
         self._connect_response = b"connected"
@@ -258,7 +338,7 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
         assert_equal(node.getbestblockhash(), block.hash)
         assert node.gettxout(block.vtx[0].hash, 0) is not None
         assert_equal(self._applied_syshashes, applied + [block.sha256])
-        assert_equal(self._connect_negotiations, negotiations + len(responses) + 1)
+        assert_equal(self._connect_negotiations, negotiations + len(responses) * connects_per_attempt + 1)
         assert_equal(self._nonzero_connects_since(connect_len), expected_connects + [block.sha256])
 
     def run_test(self):
@@ -270,7 +350,7 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
             self.restart_node(0, self.extra_args[0])
             force_finish_mnsync(self.nodes[0])
 
-            self.generate(self.nodes[0], 5)
+            self.generate(self.nodes[0], 2)
             tip_before = self.nodes[0].getbestblockhash()
             height_before = self.nodes[0].getblockcount()
 
@@ -289,6 +369,9 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
             assert_equal(result, "bad-cb-amount")
             assert_equal(self._nonzero_connects_since(connect_len), [])
             assert_equal(self._disconnect_syshashes[disconnect_len:], [])
+
+            self.log.info("Live Core replays only predecessors lost from the engine's acknowledged buffer")
+            self._check_lost_acknowledged_predecessors()
 
             self.log.info("Operational and unmatched responses preserve the exact block for retry")
             # Keep the focused pre-DIP3 fixture below its first superblock;

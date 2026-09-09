@@ -63,6 +63,9 @@ class ChainstateManager;
 enum class NEVMNotificationContext {
     LIVE,
     ALREADY_VALIDATED_COINS_RECOVERY,
+    // Rebuild the engine's accepted prefix without recursively recovering it
+    // or changing Core's already-applied coins and metadata.
+    EXTERNAL_REPLAY,
 };
 struct ChainTxData;
 class DisconnectedBlockTransactions;
@@ -1069,6 +1072,9 @@ private:
     // catch-up replay instead holds m_chainstate_mutex while releasing
     // cs_main across the synchronous Geth call.
     bool ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMap &mapNEVMTxRoots, const CBlock& block, const CBlockIndex* pindex, const uint256& nBlockHash, const uint32_t& nHeight, const bool fJustCheck, PoDAMAPMemory &mapPoDA, const CDeterministicMNListNEVMAddressDiff &diff, bool btcc_prefix_authenticated = false, NEVMNotificationContext notification_context = NEVMNotificationContext::LIVE);
+    bool RecoverNEVMPrefixForConnect(const CBlockIndex& pending,
+                                     std::string& error)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     SteadyClock::time_point m_last_write{};
     SteadyClock::time_point m_last_flush{};
     // SYSCOIN: Retry auxiliary GC once per tip or external retention change;

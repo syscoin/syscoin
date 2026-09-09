@@ -3726,35 +3726,60 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
         const bool exit_when_synced{
             std::find(geth_command_line.begin(), geth_command_line.end(),
                       "--exitwhensynced") != geth_command_line.end()};
-        // A completed managed engine is expected to disappear. Honor its
-        // shutdown mode before recovery can spawn a replacement process.
-        if (exit_when_synced && stateStr == "nevm-connect-not-sent") {
+        // A completed managed engine is expected to disappear. Honor every
+        // existing shutdown result before restarting or replaying anything.
+        const auto should_exit = [&] {
+            return exit_when_synced &&
+                (stateStr == "nevm-connect-response-invalid-data" ||
+                 stateStr == "nevm-connect-consensus-invalid" ||
+                 stateStr == "nevm-connect-protocol-unsupported" ||
+                 stateStr == "nevm-connect-not-sent" ||
+                 stateStr == "nevm-response-not-found");
+        };
+        if (should_exit()) {
             m_chainman.GetNotifications().exitWhenSynced();
             return state.Error(stateStr);
         }
         // Resolve the retry before classifying the result. An earlier transport
         // failure must not leave a successful retry in an invalid/error state.
-        if(stateStr == "nevm-connect-not-sent") {
+        bool restarted{false};
+        if (stateStr == "nevm-connect-not-sent" &&
+            notification_context != NEVMNotificationContext::EXTERNAL_REPLAY) {
             bool bResponse = false;
             GetMainSignals().NotifyNEVMComms("status", bResponse);
             if(!bResponse) {
-                if(RestartGethNode()) {
-                    // try again after resetting connection
-                    stateStr.clear();
-                    GetMainSignals().NotifyNEVMBlockConnect(nevmBlockHeader, block, stateStr, fJustCheck? uint256(): nBlockHash, NEVMDataVecOut, nHeight, bSkipValidation, btcPrevHashForNEVM, diff);
-                }
+                restarted = RestartGethNode();
             }
         }
-        if(!stateStr.empty()) {
-            if(stateStr == "nevm-connect-response-invalid-data" ||
-               stateStr == "nevm-connect-consensus-invalid" ||
-               stateStr == "nevm-connect-protocol-unsupported" ||
-               stateStr == "nevm-connect-not-sent" ||
-               stateStr == "nevm-response-not-found") {
-                if(exit_when_synced) {
-                    m_chainman.GetNotifications().exitWhenSynced();
-                    return state.Error(stateStr);
+        bool retry_current{restarted};
+        if (!stateStr.empty() &&
+            stateStr != "nevm-connect-consensus-invalid" &&
+            stateStr != "nevm-connect-protocol-unsupported" &&
+            !fJustCheck && !btcc_prefix_authenticated && pindex != nullptr &&
+            notification_context == NEVMNotificationContext::LIVE) {
+            LOCK(cs_main);
+            // Only the pending active-chain extension can recover a live
+            // engine. Historical replay and template checks cannot authorize
+            // a second replay or select another Core branch.
+            if (this == &m_chainman.ActiveChainstate() &&
+                pindex->pprev == m_chainman.ActiveTip()) {
+                std::string recovery_error;
+                if (!RecoverNEVMPrefixForConnect(*pindex, recovery_error)) {
+                    return state.Error(recovery_error);
                 }
+                retry_current = true;
+            }
+        }
+        if (retry_current) {
+            // Recovery verifies the applied predecessor (or this exact pair
+            // after a lost reply). Retry the current request only once.
+            stateStr.clear();
+            GetMainSignals().NotifyNEVMBlockConnect(nevmBlockHeader, block, stateStr, fJustCheck? uint256(): nBlockHash, NEVMDataVecOut, nHeight, bSkipValidation, btcPrevHashForNEVM, diff);
+        }
+        if(!stateStr.empty()) {
+            if (should_exit()) {
+                m_chainman.GetNotifications().exitWhenSynced();
+                return state.Error(stateStr);
             }
             // The notifier matches this verdict to the requested
             // pair. Unclassified engine errors must remain retryable.
@@ -3762,6 +3787,9 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
                 return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, stateStr);
             }
             return state.Error(stateStr);
+        }
+        if (restarted && !m_chainman.MaybeStartNEVMNetwork()) {
+            return state.Error("nevm-restart-network-unavailable");
         }
     }
     const bool res = state.IsValid();
@@ -3793,6 +3821,154 @@ static bool FlushAndGetNEVMBlockInfo(
     syscoin_hash.SetNull();
     GetMainSignals().NotifyGetNEVMBlockInfo(count, syscoin_hash, error);
     return error.empty();
+}
+
+// Reconstruct external inputs from an already-connected Core block. This
+// does not reapply transactions or publish local coins, roots or PoDA caches.
+static bool ReadNEVMReplayInputs(
+    node::BlockManager& blockman, const CBlockIndex& index, CBlock& block,
+    PoDAMAPMemory& poda, CDeterministicMNListNEVMAddressDiff& nevm_diff,
+    const char* error_prefix, std::string& error)
+{
+    int64_t median_time_past;
+    {
+        LOCK(cs_main);
+        if (index.pprev == nullptr ||
+            !blockman.ReadBlockFromDisk(block, index)) {
+            error = strprintf("%s-block-unavailable:%d", error_prefix, index.nHeight);
+            return false;
+        }
+        try {
+            if (deterministicMNManager == nullptr) {
+                error = strprintf("%s-dmn-unavailable", error_prefix);
+                return false;
+            }
+            const CDeterministicMNList previous{
+                deterministicMNManager->GetListForBlock(index.pprev)};
+            const CDeterministicMNList current{
+                deterministicMNManager->GetListForBlock(&index)};
+            previous.BuildNEVMAddressDiff(current, nevm_diff);
+        } catch (const std::exception& exception) {
+            error = strprintf("%s-dmn-diff:%s", error_prefix, exception.what());
+            return false;
+        }
+        median_time_past = index.GetMedianTimePast();
+    }
+    // The base block already passed PoDA validation. Rebuild its version-hash
+    // vector without applying today's expiry policy to historical data.
+    for (const CTransactionRef& tx : block.vtx) {
+        if (!tx->IsNEVMData()) continue;
+        const CNEVMData payload{*tx};
+        if (payload.IsNull()) {
+            error = strprintf("%s-poda-unavailable:%d", error_prefix, index.nHeight);
+            return false;
+        }
+        poda.try_emplace(payload.vchVersionHash,
+                        MapPoDAPayloadMeta{payload, median_time_past});
+    }
+    return true;
+}
+
+bool Chainstate::RecoverNEVMPrefixForConnect(
+    const CBlockIndex& pending, std::string& error)
+{
+    AssertLockHeld(cs_main);
+    error.clear();
+    if (this != &m_chainman.ActiveChainstate() || pending.pprev == nullptr ||
+        pending.pprev != m_chainman.ActiveTip()) {
+        error = "nevm-live-recovery-not-active-extension";
+        return false;
+    }
+    if (m_chainman.m_interrupt) {
+        error = "shutdown";
+        return false;
+    }
+    uint64_t count{0};
+    uint256 syscoin_hash;
+    if (!FlushAndGetNEVMBlockInfo(count, syscoin_hash, error)) return false;
+
+    const int64_t start{m_chainman.GetConsensus().nNEVMStartBlock};
+    if (start < 0 || start > pending.nHeight ||
+        count > static_cast<uint64_t>(std::numeric_limits<int64_t>::max() - start)) {
+        error = "nevm-live-recovery-height-overflow";
+        return false;
+    }
+    // A lost reply may have left the pending pair already committed. Let the
+    // normal exact-pair retry verify it; no predecessor should be resent.
+    if (DoesNEVMBlockInfoMatchSyscoinBlock(
+            start, count, pending.nHeight, syscoin_hash, pending.GetBlockHash())) {
+        return true;
+    }
+    int64_t next_height{start + static_cast<int64_t>(count)};
+    if (next_height > pending.nHeight ||
+        (count == 0 && !syscoin_hash.IsNull())) {
+        error = "nevm-live-recovery-applied-pair-mismatch";
+        return false;
+    }
+    if (count > 0) {
+        const CBlockIndex* applied{
+            pending.pprev->GetAncestor(static_cast<int32_t>(next_height - 1))};
+        if (applied == nullptr || !DoesNEVMBlockInfoMatchSyscoinBlock(
+                start, count, applied->nHeight, syscoin_hash, applied->GetBlockHash())) {
+            error = "nevm-live-recovery-applied-pair-mismatch";
+            return false;
+        }
+    }
+
+    // cs_main holds this accepted ancestry stable, including callers without
+    // the activation mutex. Bound each buffered batch and check interruption
+    // per block. Every batch resumes from a verified applied pair, not ACKs.
+    static constexpr int64_t REPLAY_BATCH_SIZE{64};
+    while (next_height < pending.nHeight) {
+        const int32_t last_height{static_cast<int32_t>(std::min<int64_t>(
+            pending.nHeight - 1, next_height + REPLAY_BATCH_SIZE - 1))};
+        for (; next_height <= last_height; ++next_height) {
+            if (m_chainman.m_interrupt) {
+                error = "shutdown";
+                return false;
+            }
+            const CBlockIndex* index{
+                pending.pprev->GetAncestor(static_cast<int32_t>(next_height))};
+            if (index == nullptr || m_chain[index->nHeight] != index) {
+                error = "nevm-live-recovery-prefix-mismatch";
+                return false;
+            }
+            CBlock block;
+            PoDAMAPMemory poda;
+            CDeterministicMNListNEVMAddressDiff nevm_diff;
+            try {
+                if (!ReadNEVMReplayInputs(m_blockman, *index, block, poda,
+                                         nevm_diff, "nevm-live-recovery", error)) {
+                    return false;
+                }
+                BlockValidationState replay_state;
+                NEVMTxRootMap roots;
+                if (!ConnectNEVMCommitment(
+                        replay_state, roots, block, index, index->GetBlockHash(),
+                        index->nHeight, /*fJustCheck=*/false, poda, nevm_diff,
+                        /*btcc_prefix_authenticated=*/false,
+                        NEVMNotificationContext::EXTERNAL_REPLAY) ||
+                    !replay_state.IsValid()) {
+                    // A predecessor failure cannot invalidate the pending
+                    // current block. Retain Core's chain and retryable inputs.
+                    error = strprintf("nevm-live-recovery-connect:%d:%s",
+                                      index->nHeight, replay_state.ToString());
+                    return false;
+                }
+            } catch (const std::exception& exception) {
+                error = strprintf("nevm-live-recovery-input:%s", exception.what());
+                return false;
+            }
+        }
+        if (!FlushAndGetNEVMBlockInfo(count, syscoin_hash, error)) return false;
+        const CBlockIndex* applied{pending.pprev->GetAncestor(last_height)};
+        if (applied == nullptr || !DoesNEVMBlockInfoMatchSyscoinBlock(
+                start, count, last_height, syscoin_hash, applied->GetBlockHash())) {
+            error = "nevm-live-recovery-commit-pair-mismatch";
+            return false;
+        }
+    }
+    return true;
 }
 
 bool Chainstate::ReplayDeferredBTCCNEVM(
@@ -3912,7 +4088,6 @@ bool Chainstate::ReplayDeferredBTCCNEVM(
     for (int32_t height{first_height}; height <= last_height; ++height) {
         CBlockIndex* index{nullptr};
         uint256 block_hash;
-        int64_t median_time_past{0};
         CBlock block;
         CDeterministicMNListNEVMAddressDiff nevm_diff;
         {
@@ -3927,39 +4102,13 @@ bool Chainstate::ReplayDeferredBTCCNEVM(
                 return false;
             }
 
-            if (!m_blockman.ReadBlockFromDisk(block, *index)) {
-                error = strprintf("deferred-nevm-block-unavailable:%d", height);
-                return false;
-            }
-
-            try {
-                const CDeterministicMNList previous{
-                    deterministicMNManager->GetListForBlock(index->pprev)};
-                const CDeterministicMNList current{
-                    deterministicMNManager->GetListForBlock(index)};
-                previous.BuildNEVMAddressDiff(current, nevm_diff);
-            } catch (const std::exception& exception) {
-                error = strprintf("deferred-nevm-dmn-diff:%s", exception.what());
-                return false;
-            }
             block_hash = index->GetBlockHash();
-            median_time_past = index->GetMedianTimePast();
         }
 
-        // SYSCOIN: The base block already passed PoDA validation. Rebuild only
-        // the version-hash vector for Geth; applying today's age policy again
-        // would make historical replay depend on wall-clock time.
         PoDAMAPMemory poda;
-        for (const CTransactionRef& tx : block.vtx) {
-            if (!tx->IsNEVMData()) continue;
-            const CNEVMData payload{*tx};
-            if (payload.IsNull()) {
-                error = strprintf("deferred-nevm-poda-unavailable:%d", height);
-                return false;
-            }
-            poda.try_emplace(
-                payload.vchVersionHash,
-                MapPoDAPayloadMeta{payload, median_time_past});
+        if (!ReadNEVMReplayInputs(m_blockman, *index, block, poda, nevm_diff,
+                                 "deferred-nevm", error)) {
+            return false;
         }
 
         // SYSCOIN: Revalidate the exact replay slot after disk/PoDA work. The
@@ -11060,10 +11209,8 @@ bool Chainstate::RestartGethNode() {
             return false;
         }
     }
-    if (!m_chainman.MaybeStartNEVMNetwork()) {
-        LogPrintf("RestartGethNode: Could not start network\n");
-        return false;
-    }
+    // The connect caller reconciles the applied prefix before requesting
+    // networking. Starting the process alone does not restore its buffer.
     return true;
 }
 fs::path FindExecPath(std::string &binArchitectureTag) {
