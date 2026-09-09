@@ -18,8 +18,10 @@
 #include <llmq/pq_btcc.h> // SYSCOIN: PQ BTCC activation schedule coverage.
 #include <nevm/nevm.h>
 #include <nevm/sha3.h>
+#include <node/miner.h>
 #include <policy/policy.h>
 #include <policy/settings.h>
+#include <pow.h>
 #include <script/script.h>
 #include <script/script_error.h>
 #include <script/sign.h>
@@ -535,10 +537,14 @@ BOOST_AUTO_TEST_CASE(syscoin_mint_parent_node_offsets)
     check({}, 0, {}, std::numeric_limits<uint16_t>::max(), false);
 }
 
-BOOST_FIXTURE_TEST_CASE(syscoin_mint_mempool_reservation_ownership, TestingSetup)
+namespace {
+
+// Parsed placeholders exercise mempool bookkeeping only. Their proofs are
+// never submitted to validation or included in a block template.
+CTransactionRef MempoolMintPlaceholder(const uint256& proof, const COutPoint& input)
 {
     CMintSyscoin mint;
-    mint.nTxHash = uint256S("a1");
+    mint.nTxHash = proof;
     mint.voutAssets.emplace_back(1, std::vector<CAssetOutValue>{{0, 1}});
     mint.vchTxParentNodes = {0x80};
     mint.vchReceiptParentNodes = {0x80};
@@ -546,18 +552,34 @@ BOOST_FIXTURE_TEST_CASE(syscoin_mint_mempool_reservation_ownership, TestingSetup
     mint.SerializeData(mint_data);
     CMutableTransaction mtx;
     mtx.nVersion = SYSCOIN_TX_VERSION_ALLOCATION_MINT;
-    mtx.vin.emplace_back(COutPoint{uint256S("a0"), 0});
+    mtx.vin.emplace_back(input);
     mtx.vout.emplace_back(10000, GetScriptForDestination(WitnessV0KeyHash{uint160(ParseHex("0100000000000000000000000000000000000000"))}));
     mtx.vout.emplace_back(0, CScript() << OP_RETURN << mint_data);
     mtx.LoadAssets();
-    const auto tx = MakeTransactionRef(mtx);
+    return MakeTransactionRef(mtx);
+}
+
+CTransactionRef MempoolMintChild(const CTransactionRef& parent)
+{
+    CMutableTransaction child;
+    child.vin.emplace_back(COutPoint{parent->GetHash(), 0});
+    child.vout.emplace_back(parent->vout[0].nValue - 1000, CScript{} << OP_TRUE);
+    return MakeTransactionRef(child);
+}
+
+} // namespace
+
+BOOST_FIXTURE_TEST_CASE(syscoin_mint_mempool_reservation_ownership, TestingSetup)
+{
+    const auto tx{MempoolMintPlaceholder(uint256S("a1"), COutPoint{uint256S("a0"), 0})};
+    const CMintSyscoin mint(*tx);
     BOOST_REQUIRE(!CMintSyscoin(*tx).IsNull());
 
     CTxMemPool& pool = *Assert(m_node.mempool);
     LOCK2(cs_main, pool.cs);
     BOOST_REQUIRE_EQUAL(setMintTxsMempool.count(mint.nTxHash), 0U);
     // This parsed placeholder exercises bookkeeping only; its proof is never submitted for validation.
-    pool.addUnchecked(TestMemPoolEntryHelper{}.FromTx(tx));
+    pool.addUnchecked(TestMemPoolEntryHelper{}.Time(Now<NodeSeconds>()).FromTx(tx));
     BOOST_CHECK_EQUAL(setMintTxsMempool.count(mint.nTxHash), 1U);
 
     for (const bool test_accept : {false, true}) {
@@ -575,6 +597,138 @@ BOOST_FIXTURE_TEST_CASE(syscoin_mint_mempool_reservation_ownership, TestingSetup
     pool.removeRecursive(*tx, MemPoolRemovalReason::EXPIRY);
     BOOST_CHECK_EQUAL(setMintTxsMempool.count(mint.nTxHash), 0U);
     BOOST_CHECK(!pool.exists(GenTxid::Txid(tx->GetHash())));
+}
+
+BOOST_FIXTURE_TEST_CASE(syscoin_mint_mempool_confirmation_conflicts, TestChain100Setup)
+{
+    CTxMemPool& pool{*Assert(m_node.mempool)};
+    LOCK2(cs_main, pool.cs);
+    const auto proof{uint256S("b1")};
+    const auto pending{MempoolMintPlaceholder(proof, COutPoint{uint256S("b0"), 0})};
+    const auto child{MempoolMintChild(pending)};
+    const auto grandchild{MempoolMintChild(child)};
+    const auto unrelated{MempoolMintPlaceholder(uint256S("b2"), COutPoint{uint256S("b3"), 0})};
+    for (const auto& tx : {pending, child, grandchild, unrelated}) {
+        BOOST_REQUIRE(pool.addUnchecked(TestMemPoolEntryHelper{}.Time(Now<NodeSeconds>()).FromTx(tx)));
+    }
+
+    // Block cleanup receives a different owner with disjoint ordinary inputs.
+    const auto confirmed{MempoolMintPlaceholder(proof, COutPoint{uint256S("b4"), 0})};
+    BOOST_REQUIRE(confirmed->GetHash() != pending->GetHash());
+    BOOST_REQUIRE(confirmed->vin[0].prevout != pending->vin[0].prevout);
+    pool.removeForBlock({confirmed}, 1);
+    BOOST_REQUIRE_EQUAL(pool.size(), 1U);
+    BOOST_CHECK(pool.exists(GenTxid::Txid(unrelated->GetHash())));
+    BOOST_CHECK_EQUAL(setMintTxsMempool.count(proof), 0U);
+    BOOST_CHECK_EQUAL(setMintTxsMempool.count(uint256S("b2")), 1U);
+
+    // Repeated cleanup is harmless, and unrelated proof ownership survives.
+    pool.removeForBlock({confirmed}, 1);
+    BOOST_CHECK_EQUAL(pool.size(), 1U);
+    pool.removeRecursive(*unrelated, MemPoolRemovalReason::EXPIRY);
+    BOOST_CHECK_EQUAL(setMintTxsMempool.count(uint256S("b2")), 0U);
+    BOOST_REQUIRE_EQUAL(pool.size(), 0U);
+    const auto block_template{node::BlockAssembler{
+        m_node.chainman->ActiveChainstate(), &pool}.CreateNewBlock(CScript{} << OP_TRUE)};
+    BOOST_CHECK_EQUAL(block_template->block.vtx.size(), 1U);
+}
+
+BOOST_FIXTURE_TEST_CASE(syscoin_mint_mempool_exact_confirmation, TestingSetup)
+{
+    CTxMemPool& pool{*Assert(m_node.mempool)};
+    LOCK2(cs_main, pool.cs);
+    const auto proof{uint256S("c1")};
+    const auto confirmed{MempoolMintPlaceholder(proof, COutPoint{uint256S("c0"), 0})};
+    const auto child{MempoolMintChild(confirmed)};
+    BOOST_REQUIRE(pool.addUnchecked(TestMemPoolEntryHelper{}.Time(Now<NodeSeconds>()).FromTx(confirmed)));
+    BOOST_REQUIRE(pool.addUnchecked(TestMemPoolEntryHelper{}.Time(Now<NodeSeconds>()).FromTx(child)));
+    pool.removeForBlock({confirmed}, 1);
+    BOOST_REQUIRE_EQUAL(pool.size(), 1U);
+    BOOST_CHECK(pool.exists(GenTxid::Txid(child->GetHash())));
+    BOOST_CHECK_EQUAL(setMintTxsMempool.count(proof), 0U);
+    pool.removeRecursive(*child, MemPoolRemovalReason::EXPIRY);
+
+    // Reuse after removal must point to the new owner, including after expiry.
+    const auto replacement{MempoolMintPlaceholder(proof, COutPoint{uint256S("c2"), 0})};
+    BOOST_REQUIRE(pool.addUnchecked(TestMemPoolEntryHelper{}.Time(Now<NodeSeconds>()).FromTx(replacement)));
+    pool.removeRecursive(*replacement, MemPoolRemovalReason::EXPIRY);
+    BOOST_CHECK_EQUAL(setMintTxsMempool.count(proof), 0U);
+    BOOST_REQUIRE(pool.addUnchecked(TestMemPoolEntryHelper{}.Time(Now<NodeSeconds>()).FromTx(replacement)));
+    pool.removeForBlock({confirmed}, 1);
+    BOOST_CHECK_EQUAL(pool.size(), 0U);
+    BOOST_CHECK_EQUAL(setMintTxsMempool.count(proof), 0U);
+}
+
+BOOST_FIXTURE_TEST_CASE(syscoin_mint_mempool_reorg_cleanup, TestChain100Setup)
+{
+    // Keep an ordinary, mature coinbase spend valid across the disconnection.
+    mineBlocks(1);
+    auto& chainstate{m_node.chainman->ActiveChainstate()};
+    CTxMemPool& pool{*Assert(m_node.mempool)};
+    const auto ordinary{CreateValidMempoolTransaction(
+        m_coinbase_txns.front(), 0, 1, coinbaseKey,
+        GetScriptForDestination(WitnessV0KeyHash{coinbaseKey.GetPubKey()}),
+        m_coinbase_txns.front()->vout[0].nValue - 10000, /*submit=*/false)};
+    const auto proof{uint256S("d1")};
+    const auto pending{MempoolMintPlaceholder(proof, COutPoint{uint256S("d0"), 0})};
+    const auto child{MempoolMintChild(pending)};
+    CBlockIndex* disconnected_tip;
+    {
+        LOCK2(cs_main, pool.cs);
+        disconnected_tip = m_node.chainman->ActiveTip();
+        BOOST_REQUIRE_EQUAL(disconnected_tip->nHeight, 101);
+        const auto accepted{m_node.chainman->ProcessTransaction(MakeTransactionRef(ordinary))};
+        BOOST_REQUIRE_MESSAGE(accepted.m_result_type == MempoolAcceptResult::ResultType::VALID,
+                              accepted.m_state.ToString());
+        BOOST_REQUIRE(pool.addUnchecked(TestMemPoolEntryHelper{}.Time(Now<NodeSeconds>()).FromTx(pending)));
+        BOOST_REQUIRE(pool.addUnchecked(TestMemPoolEntryHelper{}.Time(Now<NodeSeconds>()).FromTx(child)));
+        BOOST_CHECK_EQUAL(setMintTxsMempool.count(proof), 1U);
+    }
+
+    // Marking an inactive sibling performs empty reconciliation but does not
+    // roll back branch state, so it must preserve pending mint ownership.
+    CBlockHeader inactive_header{disconnected_tip->GetBlockHeader()};
+    ++inactive_header.nTime;
+    inactive_header.nNonce = 0;
+    while (!CheckProofOfWork(inactive_header.GetHash(), inactive_header.nBits,
+                            m_node.chainman->GetConsensus())) {
+        ++inactive_header.nNonce;
+    }
+    BlockValidationState header_state;
+    BOOST_REQUIRE_MESSAGE(m_node.chainman->ProcessNewBlockHeaders(
+        {inactive_header}, /*min_pow_checked=*/true, header_state), header_state.ToString());
+    {
+        LOCK2(cs_main, pool.cs);
+        auto* inactive{m_node.chainman->m_blockman.LookupBlockIndex(inactive_header.GetHash())};
+        BOOST_REQUIRE(inactive != nullptr);
+        BlockValidationState conflict_state;
+        BOOST_REQUIRE_MESSAGE(chainstate.MarkConflictingBlock(conflict_state, inactive),
+                              conflict_state.ToString());
+        BOOST_CHECK(m_node.chainman->ActiveTip() == disconnected_tip);
+        BOOST_REQUIRE_EQUAL(pool.size(), 3U);
+        BOOST_CHECK_EQUAL(setMintTxsMempool.count(proof), 1U);
+    }
+    BlockValidationState state;
+    BOOST_REQUIRE_MESSAGE(chainstate.InvalidateBlock(state, disconnected_tip), state.ToString());
+    {
+        LOCK2(cs_main, pool.cs);
+        BOOST_REQUIRE_EQUAL(m_node.chainman->ActiveHeight(), 100);
+        BOOST_REQUIRE_EQUAL(pool.size(), 1U);
+        BOOST_REQUIRE(pool.exists(GenTxid::Txid(ordinary.GetHash())));
+        BOOST_REQUIRE_EQUAL(setMintTxsMempool.count(proof), 0U);
+
+        // Only the legitimate ordinary transaction reaches the real assembler.
+        const auto block_template{node::BlockAssembler{chainstate, &pool}.CreateNewBlock(CScript{} << OP_TRUE)};
+        BOOST_REQUIRE_EQUAL(block_template->block.vtx.size(), 2U);
+        BOOST_CHECK(block_template->block.vtx[1]->GetHash() == ordinary.GetHash());
+
+        // Repeated reconciliation and reservation reuse remain consistent.
+        BOOST_REQUIRE(pool.addUnchecked(TestMemPoolEntryHelper{}.Time(Now<NodeSeconds>()).FromTx(pending)));
+        pool.RemoveMintTransactionsForReorg();
+        pool.RemoveMintTransactionsForReorg();
+        BOOST_CHECK_EQUAL(setMintTxsMempool.count(proof), 0U);
+        BOOST_CHECK_EQUAL(pool.size(), 1U);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(syscoin_mint_compares_roots_before_proof_parsing)

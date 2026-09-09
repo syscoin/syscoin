@@ -5891,6 +5891,10 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
         bool flushed = view.Flush();
         assert(flushed);
     }
+    // Branch state has rolled back. Release pending mints and their proof
+    // reservations before any disconnected transactions can be re-admitted,
+    // including when a later step exits with a local error.
+    if (m_mempool) m_mempool->RemoveMintTransactionsForReorg();
     // A backward tip shift introduces one older block into the bounded
     // random-access DMN window. Restore it before an alternate branch can
     // immediately request a historical PQ roster; the inverse journal owns

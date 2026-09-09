@@ -706,7 +706,10 @@ bool CTxMemPool::addUnchecked(
     // Only admitted transactions own global mint reservations. Validation attempts use local sets.
     if (IsSyscoinMintTx(tx.nVersion)) {
         const CMintSyscoin mint(tx);
-        if (!mint.IsNull()) setMintTxsMempool.insert(mint.nTxHash);
+        if (!mint.IsNull()) {
+            mapMintTxs.emplace(mint.nTxHash, tx_hash);
+            setMintTxsMempool.insert(mint.nTxHash);
+        }
     }
 
     TRACE3(mempool, added,
@@ -859,8 +862,13 @@ void CTxMemPool::removeUnchecked(txiter it, MemPoolRemovalReason reason)
     // remove nevm tx from mempool structure
     if(IsSyscoinMintTx(it->GetTx().nVersion)) {
         CMintSyscoin mintSyscoin(it->GetTx());
-        if(!mintSyscoin.IsNull())
-            setMintTxsMempool.erase(mintSyscoin.nTxHash);
+        if (!mintSyscoin.IsNull()) {
+            const auto owner{mapMintTxs.find(mintSyscoin.nTxHash)};
+            if (owner != mapMintTxs.end() && owner->second == tx_hash) {
+                mapMintTxs.erase(owner);
+                setMintTxsMempool.erase(mintSyscoin.nTxHash);
+            }
+        }
     }
     // Only expiry/trim may delete sole-owned payloads. Every removal releases
     // session ownership so replacement/conflict churn cannot retain owner RAM.
@@ -1862,6 +1870,28 @@ bool CTxMemPool::RebuildPQRegistryReservations(
     return true;
 }
 
+void CTxMemPool::RemoveMintTransactionsForReorg()
+{
+    AssertLockHeld(cs_main);
+    AssertLockHeld(cs);
+
+    // Source-root authority and consumed-proof state are branch-dependent.
+    // Drop pending mints without database reads or proof verification under
+    // the global locks. Still-valid transactions can pass admission again.
+    std::vector<uint256> txids;
+    for (const auto& entry : mapTx) {
+        if (IsSyscoinMintTx(entry.GetTx().nVersion)) {
+            txids.push_back(entry.GetTx().GetHash());
+        }
+    }
+    for (const auto& txid : txids) {
+        const auto entry{mapTx.find(txid)};
+        if (entry != mapTx.end()) {
+            removeRecursive(entry->GetTx(), MemPoolRemovalReason::REORG);
+        }
+    }
+}
+
 void CTxMemPool::RemoveProviderTransactionsForReorg()
 {
     AssertLockHeld(cs_main);
@@ -1937,6 +1967,21 @@ void CTxMemPool::removeForBlock(const std::vector<CTransactionRef>& vtx, unsigne
             setEntries stage;
             stage.insert(it);
             RemoveStaged(stage, true, MemPoolRemovalReason::BLOCK);
+        }
+        // Proof consumption conflicts independently of ordinary inputs.
+        // Exact confirmation above preserves that transaction's children;
+        // an alternate pending representation and its children are invalid.
+        if (IsSyscoinMintTx(tx->nVersion)) {
+            const CMintSyscoin mint(*tx);
+            if (!mint.IsNull()) {
+                const auto owner{mapMintTxs.find(mint.nTxHash)};
+                if (owner != mapMintTxs.end()) {
+                    const auto entry{mapTx.find(owner->second)};
+                    if (entry != mapTx.end()) {
+                        removeRecursive(entry->GetTx(), MemPoolRemovalReason::CONFLICT);
+                    }
+                }
+            }
         }
         removeConflicts(*tx);
         // SYSCOIN
@@ -2523,6 +2568,7 @@ size_t CTxMemPool::DynamicMemoryUsage() const {
            memusage::DynamicUsage(mapNextTx) +
            memusage::DynamicUsage(mapDeltas) +
            memusage::DynamicUsage(vTxHashes) +
+           memusage::DynamicUsage(mapMintTxs) +
            // SYSCOIN: Include every bounded PQ/provider reservation index.
            memusage::DynamicUsage(mapPQOperatorUpdates) +
            memusage::DynamicUsage(mapPQUpdateCollaterals) +

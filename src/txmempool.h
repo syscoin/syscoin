@@ -464,6 +464,8 @@ private:
      */
     std::set<uint256> m_unbroadcast_txids GUARDED_BY(cs);
     // SYSCOIN
+    // NEVM proof identity -> pending Syscoin transaction owner.
+    std::map<uint256, uint256> mapMintTxs GUARDED_BY(cs);
     std::multimap<uint256, uint256> mapProTxRefs; // proTxHash -> transaction (all TXs that refer to an existing proTx)
     // Consensus allows only one PQ registry mutation per operator in a block.
     std::map<uint256, uint256> mapPQOperatorUpdates; // proTxHash -> transaction
@@ -588,6 +590,8 @@ public:
     bool RebuildPQRegistryReservations(const CBlockIndex* active_tip)
         EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
     void RemoveProviderTransactionsForReorg()
+        EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
+    void RemoveMintTransactionsForReorg()
         EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
     // SYSCOIN: Purge legacy provider payloads before the first PQ-only block.
     void RemoveLegacyProviderTransactionsForPQActivation()
