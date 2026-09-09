@@ -190,22 +190,31 @@ BOOST_AUTO_TEST_CASE(auxiliary_snapshot_barrier_precedes_ibd_coins_marker)
         /*fSync=*/false));
     BOOST_CHECK_EQUAL(
         deterministicMNManager->m_evoDb->GetReadWriteCacheSize(), 0U);
-    deterministicMNManager->m_evoDb->FailNextFlushBatchForTesting();
+    // SYSCOIN: Both a batch failure and a later WAL-barrier failure must keep
+    // the coins marker behind the auxiliary state being committed.
+    for (const bool fail_barrier : {false, true}) {
+        if (fail_barrier) {
+            deterministicMNManager->m_evoDb->FailNextFlushBarrierForTesting();
+        } else {
+            deterministicMNManager->m_evoDb->FailNextFlushBatchForTesting();
+        }
+        m_node.notifications->m_shutdown_on_fatal_error = false;
+        BlockValidationState state;
+        const bool flushed{chainstate.FlushStateToDisk(
+            state, FlushStateMode::IF_NEEDED)};
+        m_node.notifications->m_shutdown_on_fatal_error = true;
+        m_node.exit_status.store(EXIT_SUCCESS);
 
-    m_node.notifications->m_shutdown_on_fatal_error = false;
-    BlockValidationState state;
-    const bool flushed{chainstate.FlushStateToDisk(
-        state, FlushStateMode::IF_NEEDED)};
-    m_node.notifications->m_shutdown_on_fatal_error = true;
-    m_node.exit_status.store(EXIT_SUCCESS);
-
-    BOOST_CHECK(!flushed);
-    BOOST_CHECK(state.IsError());
-    BOOST_CHECK_EQUAL(
-        state.GetRejectReason(),
-        "System error while flushing: injected EvoDB flush-batch failure");
-    BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == durable_best);
-    BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == pending_best);
+        BOOST_CHECK(!flushed);
+        BOOST_CHECK(state.IsError());
+        BOOST_CHECK_EQUAL(
+            state.GetRejectReason(),
+            fail_barrier
+                ? "System error while flushing: injected EvoDB flush-barrier failure"
+                : "System error while flushing: injected EvoDB flush-batch failure");
+        BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == durable_best);
+        BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == pending_best);
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

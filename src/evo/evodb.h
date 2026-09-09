@@ -40,6 +40,7 @@ class CEvoDB : public CDBWrapper {
     // without changing CDBWrapper's production exception contract.
     bool m_fail_next_flush_batch_for_testing{false};
     bool m_fail_next_sync_flush_batch_for_testing{false};
+    bool m_fail_next_flush_barrier_for_testing{false};
     bool m_fail_next_write_through_for_testing{false};
     bool m_fail_next_sync_write_through_for_testing{false};
 public:
@@ -73,7 +74,16 @@ private:
             throw dbwrapper_error{
                 "injected synchronous EvoDB flush-batch failure"};
         }
-        return WriteBatch(batch, fSync);
+        // SYSCOIN: Empty barriers must not rotate a full, unsynced WAL via
+        // DB::Write. Non-empty batches still need Sync afterward to cover any
+        // earlier asynchronous writes in a rotated immutable memtable.
+        if (batch.SizeEstimate() != 0 && !WriteBatch(batch, fSync)) return false;
+        if (!fSync) return true;
+        if (m_fail_next_flush_barrier_for_testing) {
+            m_fail_next_flush_barrier_for_testing = false;
+            throw dbwrapper_error{"injected EvoDB flush-barrier failure"};
+        }
+        return CDBWrapper::Sync();
     }
 
     void TrimReadCache()
@@ -349,9 +359,9 @@ public:
 
             // SYSCOIN: WriteThrough(..., false) records are already outside the
             // dirty FIFO, but a later consensus marker can still require an
-            // ordering barrier for their LevelDB WAL. An empty synchronous
-            // batch supplies that barrier through the same retryable seam as a
-            // non-empty flush.
+            // ordering barrier for all prior LevelDB WALs. The shared helper
+            // syncs directly for an empty batch and retains the same retryable
+            // failure seam as a non-empty flush.
             CDBBatch barrier(*this);
             return WriteFlushBatch(barrier, /*fSync=*/true);
         }
@@ -439,6 +449,14 @@ public:
     {
         LOCK(cs);
         m_fail_next_sync_flush_batch_for_testing = true;
+    }
+
+    // SYSCOIN: Exercise retained retry bookkeeping when a non-empty batch has
+    // succeeded but the following durability barrier has not completed.
+    void FailNextFlushBarrierForTesting()
+    {
+        LOCK(cs);
+        m_fail_next_flush_barrier_for_testing = true;
     }
 
     // SYSCOIN: This one-shot seam verifies that consensus callers classify a
