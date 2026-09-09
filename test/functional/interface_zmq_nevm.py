@@ -6,7 +6,7 @@
 
 from test_framework.address import ADDRESS_BCRT1_UNSPENDABLE
 from test_framework.test_framework import AuxPoWMiningMixin, SyscoinTestFramework
-from test_framework.messages import hash256, CNEVMBlock, CNEVMBlockConnect, CNEVMBlockDisconnect, uint256_from_str
+from test_framework.messages import hash256, CNEVMBlock, CNEVMBlockConnect, CNEVMBlockDisconnect, ser_string, uint256_from_str
 from test_framework.util import (
     assert_equal,
     get_rpc_proxy,
@@ -27,7 +27,8 @@ def receive_thread_nevm(test_framework, idx, subscriber):
         try:
             data = subscriber.receive()
             if data[0] == b"nevmcomms":
-                subscriber.send([b"nevmcomms", b"ack"])
+                response = b"connect-v1" if data[1] == ser_string(b"connect-v1") else b"ack"
+                subscriber.send([b"nevmcomms", response])
             elif data[0] == b"nevmblock":
                 hashStr = hash256(str(random.randint(-0x80000000, 0x7fffffff)).encode())
                 hashTopic = uint256_from_str(hashStr)

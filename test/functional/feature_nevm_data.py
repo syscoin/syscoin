@@ -18,6 +18,7 @@ from test_framework.messages import (
     CNEVMBlockConnect,
     hash256,
     ser_compact_size,
+    ser_string,
     uint256_from_str,
 )
 
@@ -352,7 +353,8 @@ class NEVMDataTest(DashTestFramework):
                         continue
                     topic = parts[0]
                     if topic == b"nevmcomms":
-                        sock.send_multipart([b"nevmcomms", b"ack"])
+                        response = b"connect-v1" if parts[1] == ser_string(b"connect-v1") else b"ack"
+                        sock.send_multipart([b"nevmcomms", response])
                     elif topic == b"nevmblock":
                         h = hash256(str(random.randint(-0x80000000, 0x7FFFFFFF)).encode())
                         u = uint256_from_str(h)

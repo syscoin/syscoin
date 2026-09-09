@@ -2,7 +2,7 @@
 # Copyright (c) 2026 The Syscoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
-"""NEVM connect should only follow successful Core consensus checks."""
+"""NEVM connects follow Core checks and distinguish engine errors from invalidity."""
 
 from io import BytesIO
 from threading import Thread
@@ -45,7 +45,6 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
             "-nevmstartheight=1",
             "-mncollateral=100",
             "-dip3params=1000:1000",
-            "-gethcommandline=--exitwhensynced",
             "-par=2",
         ]]
 
@@ -66,6 +65,9 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
         self._disconnect_syshashes = []
         self._last_nevm_block_data = b"nevmblock"
         self._connect_response = b"connected"
+        self._connect_protocol_response = b"connect-v1"
+        self._connect_negotiations = 0
+        self._applied_syshashes = []
 
         def _loop():
             while self._zmq_running:
@@ -84,7 +86,13 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
                 topic = parts[0]
                 payload = parts[1] if len(parts) > 1 else b""
                 if topic == b"nevmcomms":
-                    self._zmq_sock.send_multipart([b"nevmcomms", b"ack"])
+                    response = b"ack"
+                    if payload == ser_string(b"connect-v1"):
+                        self._connect_negotiations += 1
+                        response = self._connect_protocol_response
+                    elif payload == ser_string(b"flush"):
+                        response = b"flushed"
+                    self._zmq_sock.send_multipart([b"nevmcomms", response])
                 elif topic == b"nevmblock":
                     h = hash256(str(random.randint(-0x80000000, 0x7FFFFFFF)).encode())
                     u = uint256_from_str(h)
@@ -95,13 +103,13 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
                     nevm_block.vchNEVMBlockData = self._last_nevm_block_data
                     self._zmq_sock.send_multipart([b"nevmblock", nevm_block.serialize()])
                 elif topic == b"nevmblockinfo":
-                    # SYSCOIN: Status binds the count to the exact paired
-                    # Syscoin branch tip so equal-height forks cannot replay.
+                    # Report the applied pair without calling Core while it
+                    # may be waiting for this reply with cs_main held.
                     self._zmq_sock.send_multipart(
                         [
                             b"nevmblockinfo",
-                            str(self.nodes[0].getblockcount()).encode(),
-                            self.nodes[0].getbestblockhash().encode(),
+                            str(len(self._applied_syshashes)).encode(),
+                            f"{self._applied_syshashes[-1] if self._applied_syshashes else 0:064x}".encode(),
                         ]
                     )
                 elif topic == b"nevmconnect":
@@ -112,6 +120,12 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
                         self._connect_syshashes.append(nevm_connect.sysblockhash)
                         if nevm_connect.sysblockhash != 0:
                             response = self._connect_response
+                            if callable(response):
+                                response = response(nevm_connect)
+                            if response == b"connected" and (
+                                not self._applied_syshashes or self._applied_syshashes[-1] != nevm_connect.sysblockhash
+                            ):
+                                self._applied_syshashes.append(nevm_connect.sysblockhash)
                     except Exception as e:
                         self.log.warning("failed to decode nevmconnect: %s", e)
                         self._connect_syshashes.append(-1)
@@ -121,6 +135,8 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
                         nevm_disconnect = CNEVMBlockDisconnect()
                         nevm_disconnect.deserialize(BytesIO(payload))
                         self._disconnect_syshashes.append(nevm_disconnect.sysblockhash)
+                        if self._applied_syshashes and self._applied_syshashes[-1] == nevm_disconnect.sysblockhash:
+                            self._applied_syshashes.pop()
                     except Exception:
                         self._disconnect_syshashes.append(-1)
                     self._zmq_sock.send_multipart([b"nevmdisconnect", b"disconnected"])
@@ -131,6 +147,8 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
         self._zmq_thread.start()
 
     def _stop_zmq_responder(self):
+        if not self._zmq_running:
+            return
         self._zmq_running = False
         if hasattr(self, "_zmq_thread"):
             self._zmq_thread.join(timeout=5)
@@ -156,7 +174,7 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
         r += ser_string(nevm_data)
         return r
 
-    def _build_bad_cb_amount_block(self, node):
+    def _build_block(self, node, *, coinbase_excess=0):
         tmpl = node.getblocktemplate({"rules": ["segwit"]})
         base_extra = bytes.fromhex(tmpl.get("default_witness_commitment_extra", ""))
         if base_extra == b"":
@@ -168,7 +186,7 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
 
         coinbase = create_coinbase(height=tmpl["height"])
         coinbase.nVersion = tmpl.get("version_coinbase", coinbase.nVersion)
-        coinbase.vout[0].nValue = tmpl["coinbasevalue"] + COIN
+        coinbase.vout[0].nValue = tmpl["coinbasevalue"] + coinbase_excess
         for mn_out in tmpl.get("masternode", []):
             coinbase.vout.append(CTxOut(mn_out["amount"], bytes.fromhex(mn_out["script"])))
         for sb_out in tmpl.get("superblock", []):
@@ -181,6 +199,67 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
         add_witness_commitment(block, nonce=0)
         block.solve()
         return block
+
+    @staticmethod
+    def _invalid_response(request, *, nevm_delta=0, sys_delta=0):
+        return (
+            f"invalid:{request.evmBlock.nBlockHash ^ nevm_delta:064x}:"
+            f"{request.sysblockhash ^ sys_delta:064x}"
+        ).encode()
+
+    def _check_connect_responses(self, responses, *, protocol_response=b"connect-v1", consensus_invalid=False):
+        node = self.nodes[0]
+        block = self._build_block(node)
+        raw = self._serialize_nevm_block(block, self._last_nevm_block_data).hex()
+        previous_tip = node.getbestblockhash()
+        previous_coinbase = node.getblock(previous_tip)["tx"][0]
+        previous_coin = node.gettxout(previous_coinbase, 0)
+
+        # Index a descendant before the failed connection to verify that an
+        # operational response does not invalidate the candidate's branch.
+        descendant = create_block(
+            hashprev=block.sha256, coinbase=create_coinbase(node.getblockcount() + 2),
+            ntime=block.nTime + 1, version=block.nVersion,
+        )
+        descendant.solve()
+        assert_equal(node.submitheader(bytes.fromhex(raw)[:80].hex()), None)
+        assert_equal(node.submitheader(self._serialize_nevm_block(descendant, b"")[:80].hex()), None)
+        connect_len = len(self._connect_syshashes)
+        negotiations = self._connect_negotiations
+        applied = self._applied_syshashes[:]
+        self._connect_protocol_response = protocol_response
+        expected_connects = []
+        for attempt, response in enumerate(responses, start=1):
+            self._connect_response = response
+            if consensus_invalid:
+                assert_equal(node.submitblock(raw), "nevm-connect-consensus-invalid")
+            else:
+                error = "nevm-connect-response-invalid-data" if protocol_response == b"connect-v1" else "nevm-connect-protocol-unsupported"
+                assert_raises_rpc_error(-25, error, node.submitblock, raw)
+                branch_tip = next(tip for tip in node.getchaintips() if tip["hash"] == descendant.hash)
+                assert_equal(branch_tip["status"], "headers-only")
+            assert_equal(node.getbestblockhash(), previous_tip)
+            assert_equal(node.gettxout(previous_coinbase, 0), previous_coin)
+            assert_equal(node.gettxout(block.vtx[0].hash, 0), None)
+            assert_equal(self._applied_syshashes, applied)
+            assert_equal(self._connect_negotiations, negotiations + attempt)
+            if protocol_response == b"connect-v1":
+                expected_connects.append(block.sha256)
+            assert_equal(self._nonzero_connects_since(connect_len), expected_connects)
+
+        self._connect_response = b"connected"
+        self._connect_protocol_response = b"connect-v1"
+        if consensus_invalid:
+            assert_equal(node.submitblock(raw), "duplicate-invalid")
+            assert_equal(self._nonzero_connects_since(connect_len), expected_connects)
+            return
+        # Resubmit the exact indexed block, with no reconsiderblock call.
+        assert_equal(node.submitblock(raw), "duplicate")
+        assert_equal(node.getbestblockhash(), block.hash)
+        assert node.gettxout(block.vtx[0].hash, 0) is not None
+        assert_equal(self._applied_syshashes, applied + [block.sha256])
+        assert_equal(self._connect_negotiations, negotiations + len(responses) + 1)
+        assert_equal(self._nonzero_connects_since(connect_len), expected_connects + [block.sha256])
 
     def run_test(self):
         address = "tcp://127.0.0.1:29601"
@@ -196,7 +275,7 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
             height_before = self.nodes[0].getblockcount()
 
             # Rejected late (coinbase value) must not emit a nonzero nevmconnect.
-            bad_block = self._build_bad_cb_amount_block(self.nodes[0])
+            bad_block = self._build_block(self.nodes[0], coinbase_excess=COIN)
             time.sleep(0.2)
             connect_len = len(self._connect_syshashes)
             disconnect_len = len(self._disconnect_syshashes)
@@ -211,8 +290,26 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
             assert_equal(self._nonzero_connects_since(connect_len), [])
             assert_equal(self._disconnect_syshashes[disconnect_len:], [])
 
+            self.log.info("Operational and unmatched responses preserve the exact block for retry")
+            # Keep the focused pre-DIP3 fixture below its first superblock;
+            # every failed attempt must preserve this same indexed branch.
+            self._check_connect_responses((
+                b"error:queue-full", b"not connected", b"unknown", b"invalid", b"invalid:malformed",
+                lambda request: self._invalid_response(request, nevm_delta=1),
+                lambda request: self._invalid_response(request, sys_delta=1),
+                lambda request: self._invalid_response(request) + b":extra",
+            ))
+
+            self.log.info("A generic ack cannot negotiate typed connect results")
+            self._check_connect_responses((b"connected",), protocol_response=b"ack")
+            self.log.info("Only an invalid result bound to both requested hashes rejects the block")
+            self._check_connect_responses((self._invalid_response,), consensus_invalid=True)
+
             # Managed Geth shutdown remains a clean daemon exit even though
             # Core now reports the unfinished connection as an operational error.
+            self.extra_args[0].append("-gethcommandline=--exitwhensynced")
+            self.restart_node(0, self.extra_args[0])
+            force_finish_mnsync(self.nodes[0])
             address = self.nodes[0].getnewaddress()
             self._connect_response = b"not connected"
             assert_raises_rpc_error(
@@ -220,6 +317,23 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
                 self.nodes[0].generatetoaddress, 1, address, invalid_call=False,
             )
             self.nodes[0].wait_until_stopped()
+
+            self.log.info("Managed shutdown also exits when the connected engine disappears")
+            self._connect_response = b"connected"
+            self.restart_node(0, self.extra_args[0])
+            node = self.nodes[0]
+            force_finish_mnsync(node)
+            # Prepare while the engine is available, then remove the actual
+            # transport endpoint before submitting the valid candidate.
+            block = self._build_block(node)
+            raw = self._serialize_nevm_block(block, self._last_nevm_block_data).hex()
+            self._stop_zmq_responder()
+            with node.assert_debug_log(
+                ["nevm-connect-not-sent", "Shutdown: done"],
+                unexpected_msgs=["RestartGethNode:", "StartGethNode:", "Geth Started with pid"],
+            ):
+                assert_raises_rpc_error(-25, "nevm-connect-not-sent", node.submitblock, raw)
+                node.wait_until_stopped()
         finally:
             self._stop_zmq_responder()
 

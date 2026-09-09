@@ -359,7 +359,8 @@ bool CZMQAbstractPublishNotifier::NotifyNEVMCommsCommon(const std::string &commM
 {
     LOCK(cs_nevm);
     bResponse = false;
-    const int timeout = commMessage == "status" ? NEVM_STATUS_TIMEOUT_MS : NEVM_COMMS_TIMEOUT_MS;
+    const int timeout = (commMessage == "status" || commMessage == "connect-v1")
+        ? NEVM_STATUS_TIMEOUT_MS : NEVM_COMMS_TIMEOUT_MS;
     if(!SetNEVMReceiveTimeout(psocketsub, timeout)) {
         return false;
     }
@@ -381,10 +382,11 @@ bool CZMQAbstractPublishNotifier::NotifyNEVMCommsCommon(const std::string &commM
                 LogPrint(BCLog::SYS, "NotifyNEVMComms: nevm-response-wrong-command\n");
                 return false;
             }
-            // Older Geth versions acknowledge unknown comms commands. Require
-            // explicit flush support; callers verify the applied pair next.
+            // Older Geth versions acknowledge unknown commands. Require an
+            // explicit response for each capability before relying on it.
             const std::string expected_response{
-                commMessage == "flush" ? "flushed" : "ack"};
+                commMessage == "flush" ? "flushed" :
+                commMessage == "connect-v1" ? "connect-v1" : "ack"};
             if(parts[1] != expected_response) {
                 LogPrint(BCLog::SYS, "NotifyNEVMComms: nevm-comms-response-invalid-data\n");
                 return false;
@@ -403,14 +405,27 @@ bool CZMQPublishNEVMBlockConnectNotifier::NotifyNEVMBlockConnect(const CNEVMHead
 {
     LOCK(cs_nevm);
     state = "";
+    // Negotiate on every connect: the engine may have restarted or been
+    // replaced since any previous request. A generic ack is insufficient.
+    bool classified_responses{false};
+    if (!NotifyNEVMCommsCommon("connect-v1", classified_responses) ||
+        !classified_responses) {
+        // Preserve managed restart when the engine is unavailable. A live
+        // legacy engine instead needs an upgrade, not a restart loop.
+        bool connected{false};
+        NotifyNEVMCommsCommon("status", connected);
+        state = connected ? "nevm-connect-protocol-unsupported"
+                          : "nevm-connect-not-sent";
+        return false;
+    }
     if(bFirstTime) {
-        bFirstTime = false;
         bool bResponse = false;
         NotifyNEVMCommsCommon("status", bResponse);
         if(!bResponse) {
             state = "nevm-not-connected";
             return false;
         }
+        bFirstTime = false;
     }
     if(!SetNEVMReceiveTimeout(psocketsub, NEVM_COMMS_TIMEOUT_MS)) {
         state = "ZMQ_RCVTIMEO";
@@ -435,9 +450,17 @@ bool CZMQPublishNEVMBlockConnectNotifier::NotifyNEVMBlockConnect(const CNEVMHead
             state = "nevm-response-wrong-command";
             return false;
         }
-        if(!bSkipValidation && parts[1] != "connected") {
+        if(parts[1] != "connected") {
             LogPrint(BCLog::SYS, "NotifyNEVMBlockConnect: %s\n", parts[1]);
-            state = "nevm-connect-response-invalid-data";
+            // Only an explicit verdict for this exact pair can retire the
+            // candidate. A buffered predecessor's failure, legacy reply or
+            // malformed token is an operational error. Exact comparison also
+            // enforces both 64-character hashes and excludes trailing data.
+            const std::string invalid_response{
+                "invalid:" + evmBlock.nBlockHash.GetHex() + ":" + nSYSBlockHash.GetHex()};
+            state = parts[1] == invalid_response
+                ? "nevm-connect-consensus-invalid"
+                : "nevm-connect-response-invalid-data";
             return false;
         }
     } else if (!bSkipValidation) {

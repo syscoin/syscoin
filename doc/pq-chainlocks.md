@@ -1863,8 +1863,10 @@ query; an older Geth's generic `ack` is insufficient. The final batch cannot
 clear its marker until the reported pair matches. Marker-bound disconnects
 also flush before querying ownership, so a buffered prefix from an interrupted
 pass is accounted for before unwinding. Ordinary sync batching and read-only
-status queries keep their existing behavior. Deploy the companion Geth flush
-support before this Core change is used for deferred recovery.
+status queries keep their existing behavior. Deferred recovery requires the
+companion Geth flush support and classified connect results. Follow the paired
+[NEVM upgrade order](nevm-zmq.md#upgrade-order): upgrade Core first, or stop
+both processes and upgrade them together before resuming recovery.
 
 The marker supplies authorization bounds, not the missing certificate. An
 honest peer must still serve the receipt-selected B for historical coverage,

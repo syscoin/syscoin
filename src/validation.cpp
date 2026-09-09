@@ -3722,6 +3722,16 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
             return state.Error("shutdown");
         }
         GetMainSignals().NotifyNEVMBlockConnect(nevmBlockHeader, block, stateStr, fJustCheck? uint256(): nBlockHash, NEVMDataVecOut, nHeight, bSkipValidation, btcPrevHashForNEVM, diff);
+        const auto& geth_command_line{m_chainman.GethCommandLine()};
+        const bool exit_when_synced{
+            std::find(geth_command_line.begin(), geth_command_line.end(),
+                      "--exitwhensynced") != geth_command_line.end()};
+        // A completed managed engine is expected to disappear. Honor its
+        // shutdown mode before recovery can spawn a replacement process.
+        if (exit_when_synced && stateStr == "nevm-connect-not-sent") {
+            m_chainman.GetNotifications().exitWhenSynced();
+            return state.Error(stateStr);
+        }
         // Resolve the retry before classifying the result. An earlier transport
         // failure must not leave a successful retry in an invalid/error state.
         if(stateStr == "nevm-connect-not-sent") {
@@ -3736,16 +3746,19 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
             }
         }
         if(!stateStr.empty()) {
-            if(stateStr == "nevm-connect-response-invalid-data" || stateStr == "nevm-response-not-found") {
-                const std::vector<std::string> &cmdLine = m_chainman.GethCommandLine();
-                if(std::find(cmdLine.begin(), cmdLine.end(), "--exitwhensynced") != cmdLine.end()) {
+            if(stateStr == "nevm-connect-response-invalid-data" ||
+               stateStr == "nevm-connect-consensus-invalid" ||
+               stateStr == "nevm-connect-protocol-unsupported" ||
+               stateStr == "nevm-connect-not-sent" ||
+               stateStr == "nevm-response-not-found") {
+                if(exit_when_synced) {
                     m_chainman.GetNotifications().exitWhenSynced();
                     return state.Error(stateStr);
                 }
             }
-            // Preserve explicit engine rejection, but never cache a local
-            // communication/protocol failure as a consensus-invalid block.
-            if(stateStr == "nevm-connect-response-invalid-data") {
+            // The notifier matches this verdict to the requested
+            // pair. Unclassified engine errors must remain retryable.
+            if(stateStr == "nevm-connect-consensus-invalid") {
                 return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, stateStr);
             }
             return state.Error(stateStr);

@@ -340,8 +340,9 @@ struct StartupNEVMRecoverySetup : DeferredNEVMReplaySetup {
         const auto status_queries{nevm->status_requests};
         const auto applied_hash{nevm->applied_hash};
         const auto applied_count{nevm->applied_count};
-        // A healthy mock status prevents the send-error path launching Geth.
-        nevm->status_available = true;
+        // Ordinary send errors probe the engine. Managed shutdown must skip
+        // that probe and exit even when the engine has already disappeared.
+        nevm->status_available = !managed_exit;
         nevm->connect_error = error;
         BlockValidationState failed_state;
         const bool activated{chainstate.ActivateBestChain(failed_state, candidate)};
@@ -356,7 +357,7 @@ struct StartupNEVMRecoverySetup : DeferredNEVMReplaySetup {
         }
         BOOST_CHECK_EQUAL(nevm->connected_blocks.size(), connects + 1);
         BOOST_CHECK_EQUAL(nevm->status_requests,
-                          status_queries + (error == "nevm-connect-not-sent" ? 1U : 0U));
+                          status_queries + (error == "nevm-connect-not-sent" && !managed_exit ? 1U : 0U));
         BOOST_CHECK(nevm->applied_hash == applied_hash);
         BOOST_CHECK_EQUAL(nevm->applied_count, applied_count);
         {
@@ -1526,7 +1527,9 @@ BOOST_FIXTURE_TEST_CASE(nevm_connect_operational_errors_preserve_block_candidate
 {
     for (const auto* error : {"nevm-not-connected", "ZMQ_RCVTIMEO",
                              "nevm-connect-not-sent", "nevm-response-invalid-parts",
-                             "nevm-response-wrong-command", "nevm-response-not-found"}) {
+                             "nevm-response-wrong-command", "nevm-response-not-found",
+                             "nevm-connect-protocol-unsupported",
+                             "nevm-connect-response-invalid-data"}) {
         BOOST_TEST_CONTEXT(error) { CheckConnectError(error); }
     }
 }
@@ -1534,7 +1537,7 @@ BOOST_FIXTURE_TEST_CASE(nevm_connect_operational_errors_preserve_block_candidate
 BOOST_FIXTURE_TEST_CASE(nevm_connect_engine_rejection_invalidates_block_candidate,
                         StartupNEVMRecoverySetup)
 {
-    CheckConnectError("nevm-connect-response-invalid-data", /*engine_rejection=*/true);
+    CheckConnectError("nevm-connect-consensus-invalid", /*engine_rejection=*/true);
 }
 
 BOOST_FIXTURE_TEST_CASE(nevm_connect_managed_shutdown_preserves_block_candidate,
@@ -1542,7 +1545,9 @@ BOOST_FIXTURE_TEST_CASE(nevm_connect_managed_shutdown_preserves_block_candidate,
 {
     BOOST_REQUIRE(m_node.chainman->GethCommandLine() ==
                   std::vector<std::string>{"--exitwhensynced"});
-    for (const auto* error : {"nevm-connect-response-invalid-data", "nevm-response-not-found"}) {
+    for (const auto* error : {"nevm-connect-response-invalid-data",
+                             "nevm-connect-consensus-invalid", "nevm-response-not-found",
+                             "nevm-connect-protocol-unsupported", "nevm-connect-not-sent"}) {
         BOOST_TEST_CONTEXT(error) {
             CheckConnectError(error, /*engine_rejection=*/false, /*managed_exit=*/true);
         }
