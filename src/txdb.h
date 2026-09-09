@@ -53,6 +53,10 @@ struct CoinsViewOptions {
 /** CCoinsView backed by the coin database (chainstate/) */
 class CCoinsViewDB final : public CCoinsView
 {
+    // SYSCOIN: BatchWrite consumes caller cache entries before their writes
+    // complete. After failure, only reopening can recover a usable view;
+    // shutdown must not retry the depleted cache and publish a false tip.
+    bool m_write_failed{false};
     // SYSCOIN BEGIN: Observe and inject failures at mint rollback barriers.
     std::function<bool(bool)> m_write_batch_callback_for_testing;
     std::function<bool()> m_sync_callback_for_testing;

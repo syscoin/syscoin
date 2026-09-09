@@ -91,9 +91,14 @@ std::vector<uint256> CCoinsViewDB::GetHeadBlocks() const {
 // SYSCOIN BEGIN: Sync all prior coins writes before deleting mint markers.
 bool CCoinsViewDB::WriteCoinsBatch(CDBBatch& batch)
 {
+    // SYSCOIN: Latch before either a false result or an exception can escape.
+    // Preserve the on-disk BEST/HEADS recovery state until this DB is reopened.
+    m_write_failed = true;
     if (m_write_batch_callback_for_testing &&
         !m_write_batch_callback_for_testing(false)) return false;
-    return m_db->WriteBatch(batch);
+    const bool written{m_db->WriteBatch(batch)};
+    if (written) m_write_failed = false;
+    return written;
 }
 
 void CCoinsViewDB::SetWriteBatchCallbackForTesting(std::function<bool(bool)> callback)
@@ -118,6 +123,9 @@ bool CCoinsViewDB::FlushWithSync(CCoinsViewCache& cache)
 // SYSCOIN END: Sync all prior coins writes before deleting mint markers.
 
 bool CCoinsViewDB::BatchWrite(CCoinsMap &mapCoins, const uint256 &hashBlock, bool erase) {
+    // SYSCOIN: A previous attempt may have discarded unwritten dirty entries.
+    // Do not mutate this cache or retire its recovery markers on a retry.
+    if (m_write_failed) return false;
     CDBBatch batch(*m_db);
     size_t count = 0;
     size_t changed = 0;

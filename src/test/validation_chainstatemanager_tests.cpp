@@ -2135,6 +2135,68 @@ BOOST_FIXTURE_TEST_CASE(nevm_root_prepare_failure_preserves_coin_cache,
     BOOST_CHECK(MintDB().ExistsTx(mint_hash));
 }
 
+BOOST_FIXTURE_TEST_CASE(nevm_failed_coins_write_shutdown_preserves_recoverable_state,
+                        NEVMRootRollbackSetup)
+{
+    PrepareRootDisconnect(/*with_mint=*/true);
+    auto& chainstate{m_node.chainman->ActiveChainstate()};
+    const COutPoint restored_input{carrier.vtx[1]->vin[0].prevout};
+    LOCK(::cs_main);
+    const auto coins_path{chainstate.CoinsDB().StoragePath()};
+    BOOST_REQUIRE(coins_path);
+    BOOST_REQUIRE(chainstate.CoinsDB().HaveCoin(minted_coin));
+    BOOST_REQUIRE(!chainstate.CoinsDB().HaveCoin(restored_input));
+
+    std::size_t coins_writes{0};
+    chainstate.CoinsDB().SetWriteBatchCallbackForTesting([&](bool) {
+        if (++coins_writes == 1) {
+            throw dbwrapper_error("injected transient coins write failure");
+        }
+        return true;
+    });
+    BlockValidationState failed_state;
+    BOOST_REQUIRE(!DisconnectRootTip(failed_state, /*reverify=*/false));
+    BOOST_REQUIRE(failed_state.IsError());
+    BOOST_REQUIRE(RootsDB().GetPendingDisconnect());
+    BOOST_REQUIRE(chainstate.CoinsDB().GetBestBlock() == carrier.GetHash());
+    BOOST_REQUIRE(chainstate.CoinsDB().GetHeadBlocks().empty());
+    BOOST_REQUIRE(chainstate.CoinsDB().HaveCoin(minted_coin));
+    BOOST_REQUIRE(!chainstate.CoinsDB().HaveCoin(restored_input));
+
+    // Shutdown retries this very CoinsTip after a runtime failure. A transient
+    // WAL append failure does not poison LevelDB, so that retry can succeed.
+    // It must preserve the old recovery head or commit every parent coin;
+    // publishing a clean parent marker after dropping failed dirty entries
+    // prevents startup from detecting and replaying the missing undo writes.
+    m_node.notifications->m_shutdown_on_fatal_error = false;
+    chainstate.ForceFlushStateToDisk();
+    m_node.notifications->m_shutdown_on_fatal_error = true;
+    m_node.exit_status.store(EXIT_SUCCESS);
+    chainstate.CoinsDB().SetWriteBatchCallbackForTesting({});
+    const uint256 recovered_tip{chainstate.CoinsDB().GetBestBlock()};
+    BOOST_TEST_MESSAGE("shutdown coins writes=" << coins_writes <<
+                       " parent marker=" << (recovered_tip == parent->GetHash()));
+    BOOST_REQUIRE(recovered_tip == carrier.GetHash() || recovered_tip == parent->GetHash());
+    const bool parent_published{recovered_tip == parent->GetHash()};
+    BOOST_CHECK_EQUAL(chainstate.CoinsDB().HaveCoin(minted_coin), !parent_published);
+    BOOST_CHECK_EQUAL(chainstate.CoinsDB().HaveCoin(restored_input), parent_published);
+
+    // Reopen with no caller cache, as normal startup does. Empty HEADS means
+    // ReplayBlocks must trust BEST, so it cannot repair a false-clean marker.
+    chainstate.ResetCoinsViews();
+    chainstate.InitCoinsDB(1U << 20, /*in_memory=*/false,
+                           /*should_wipe=*/false, *coins_path);
+    BOOST_REQUIRE(chainstate.CoinsDB().GetHeadBlocks().empty());
+    BOOST_REQUIRE(chainstate.ReplayBlocks());
+    BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == recovered_tip);
+    BOOST_CHECK_EQUAL(chainstate.CoinsDB().HaveCoin(minted_coin), !parent_published);
+    BOOST_CHECK_EQUAL(chainstate.CoinsDB().HaveCoin(restored_input), parent_published);
+    BOOST_CHECK(!RootsDB().GetPendingDisconnect());
+    BOOST_CHECK(MintDB().ExistsTx(mint_hash));
+    chainstate.InitCoinsCache(1U << 23);
+    BOOST_REQUIRE(chainstate.LoadChainTip());
+}
+
 BOOST_FIXTURE_TEST_CASE(nevm_verification_disconnect_keeps_root_authority,
                         NEVMRootRollbackSetup)
 {
