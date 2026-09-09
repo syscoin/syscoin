@@ -454,6 +454,7 @@ libsyscoin_util_a-clientversion.$(OBJEXT): obj/build.h
   nevm/exceptions.h \
   nevm/fixedhash.cpp \
   nevm/fixedhash.h \
+  nevm/response.h \
   nevm/rlp.cpp \
   nevm/rlp.h \
   nevm/sha3.cpp \

@@ -286,7 +286,7 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
         self._buffer_connects = False
         self._expected_connect_syshashes = None
 
-    def _check_connect_responses(self, responses, *, protocol_response=b"connect-v1", consensus_invalid=False):
+    def _check_connect_responses(self, responses, *, protocol_response=b"connect-v1", consensus_invalid=False, connects_per_attempt=None):
         node = self.nodes[0]
         block = self._build_block(node)
         raw = self._serialize_nevm_block(block, self._last_nevm_block_data).hex()
@@ -308,7 +308,8 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
         applied = self._applied_syshashes[:]
         self._connect_protocol_response = protocol_response
         expected_connects = []
-        connects_per_attempt = 1 if consensus_invalid or protocol_response != b"connect-v1" else 2
+        if connects_per_attempt is None:
+            connects_per_attempt = 1 if consensus_invalid or protocol_response != b"connect-v1" else 2
         for attempt, response in enumerate(responses, start=1):
             self._connect_response = response
             if consensus_invalid:
@@ -350,7 +351,8 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
             self.restart_node(0, self.extra_args[0])
             force_finish_mnsync(self.nodes[0])
 
-            self.generate(self.nodes[0], 2)
+            # Leave room for each response group below the first superblock.
+            self.generate(self.nodes[0], 1)
             tip_before = self.nodes[0].getbestblockhash()
             height_before = self.nodes[0].getblockcount()
 
@@ -378,10 +380,14 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
             # every failed attempt must preserve this same indexed branch.
             self._check_connect_responses((
                 b"error:queue-full", b"not connected", b"unknown", b"invalid", b"invalid:malformed",
-                lambda request: self._invalid_response(request, nevm_delta=1),
-                lambda request: self._invalid_response(request, sys_delta=1),
                 lambda request: self._invalid_response(request) + b":extra",
             ))
+
+            # Typed but unbound identities are refused before transport recovery.
+            self._check_connect_responses((
+                lambda request: self._invalid_response(request, nevm_delta=1),
+                lambda request: self._invalid_response(request, sys_delta=1),
+            ), connects_per_attempt=1)
 
             self.log.info("A generic ack cannot negotiate typed connect results")
             self._check_connect_responses((b"connected",), protocol_response=b"ack")

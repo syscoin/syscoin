@@ -22,11 +22,11 @@ bool CZMQAbstractNotifier::NotifyGovernanceVote(const uint256& /*vote*/)
 {
     return true;
 }
-bool CZMQAbstractNotifier::NotifyNEVMComms(const std::string& commMessage, bool &bResponse) 
+bool CZMQAbstractNotifier::NotifyNEVMComms(const std::string& commMessage, bool &bResponse, std::optional<NEVMBlockReject>* rejection)
 {
     return true;
 }
-bool CZMQAbstractNotifier::NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation, const uint256& btcPrevHashForNEVM, const CDeterministicMNListNEVMAddressDiff &diff)
+bool CZMQAbstractNotifier::NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation, const uint256& btcPrevHashForNEVM, const CDeterministicMNListNEVMAddressDiff &diff, std::optional<NEVMBlockReject>* rejection)
 {
     return true;
 }

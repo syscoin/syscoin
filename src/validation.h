@@ -19,6 +19,7 @@
 #include <kernel/chainparams.h>
 #include <kernel/chainstatemanager_opts.h>
 #include <kernel/cs_main.h> // IWYU pragma: export
+#include <nevm/response.h>
 #include <node/blockstorage.h>
 #include <node/btcheader_state.h> // SYSCOIN: shared managed-backend state boundary.
 #include <policy/feerate.h>
@@ -66,6 +67,24 @@ enum class NEVMNotificationContext {
     // Rebuild the engine's accepted prefix without recursively recovering it
     // or changing Core's already-applied coins and metadata.
     EXTERNAL_REPLAY,
+};
+// A fresh, branch-bound engine endpoint authorizes local unwind only above
+// this Core ancestor. Height -1 denotes the prefix before Core genesis.
+class NEVMDisconnectPrefix {
+    friend class Chainstate;
+    const int32_t height;
+    const uint256 block_hash;
+    NEVMDisconnectPrefix(int32_t height_in, const uint256& hash_in)
+        : height(height_in), block_hash(hash_in) {}
+
+public:
+    bool ContainsUnapplied(const CBlockIndex& index) const
+    {
+        if (height < -1 || index.nHeight <= height) return false;
+        if (height == -1) return block_hash.IsNull();
+        const auto* ancestor{index.GetAncestor(height)};
+        return ancestor != nullptr && ancestor->GetBlockHash() == block_hash;
+    }
 };
 struct ChainTxData;
 class DisconnectedBlockTransactions;
@@ -822,15 +841,15 @@ public:
 
     // Block (dis)connection on a given view:
     // SYSCOIN
-    DisconnectResult DisconnectBlock(const CBlock& block, const CBlockIndex* pindex, CCoinsViewCache& view, NEVMMintTxSet &setMintTxs, std::vector<uint256> &vecNEVMBlocks, std::vector<std::pair<uint256,uint32_t> >& vecTXIDPairs, bool bReverify = true, bool bReplay = false, bool bUpdateSpecialTxState = true) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    DisconnectResult DisconnectBlock(const CBlock& block, const CBlockIndex* pindex, CCoinsViewCache& view, NEVMMintTxSet &setMintTxs, std::vector<uint256> &vecNEVMBlocks, std::vector<std::pair<uint256,uint32_t> >& vecTXIDPairs, bool bReverify = true, bool bReplay = false, bool bUpdateSpecialTxState = true, const NEVMDisconnectPrefix* nevm_prefix = nullptr) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool ConnectBlock(const CBlock& block, BlockValidationState& state, CBlockIndex* pindex,
                     CCoinsViewCache& view, bool fJustCheck = false, bool bReverify = true) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     bool ConnectBlock(const CBlock& block, BlockValidationState& state, CBlockIndex* pindex,
-                    CCoinsViewCache& view, bool fJustCheck, NEVMMintTxSet &setMintTxs, NEVMTxRootMap &mapNEVMTxRoots, PoDAMAPMemory &mapPoDA, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs, bool bReverify = true) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+                    CCoinsViewCache& view, bool fJustCheck, NEVMMintTxSet &setMintTxs, NEVMTxRootMap &mapNEVMTxRoots, PoDAMAPMemory &mapPoDA, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs, bool bReverify = true, std::optional<NEVMBlockReject>* rejection = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     // SYSCOIN Apply the effects of a block disconnection on the UTXO set.
-    bool DisconnectTip(BlockValidationState& state, DisconnectedBlockTransactions* disconnectpool, bool bReverify = true, bool bUpdateSpecialTxState = true) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs);
+    bool DisconnectTip(BlockValidationState& state, DisconnectedBlockTransactions* disconnectpool, bool bReverify = true, bool bUpdateSpecialTxState = true, const NEVMDisconnectPrefix* nevm_prefix = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs);
 
     // Manual block validity manipulation:
     /** Mark a block as precious and reorganize.
@@ -1031,8 +1050,21 @@ private:
                                          std::string& reason)
         EXCLUSIVE_LOCKS_REQUIRED(cs_btcheader);
     // SYSCOIN: Report certificate-deferred work separately from invalid blocks.
-    bool ActivateBestChainStep(BlockValidationState& state, CBlockIndex* pindexMostWork, const std::shared_ptr<const CBlock>& pblock, bool& fInvalidFound, bool& fReceiptCandidateDeferred, ConnectTrace& connectTrace) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs);
-    bool ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew, const std::shared_ptr<const CBlock>& pblock, ConnectTrace& connectTrace, DisconnectedBlockTransactions& disconnectpool) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs);
+    bool ActivateBestChainStep(BlockValidationState& state, CBlockIndex* pindexMostWork, const std::shared_ptr<const CBlock>& pblock, bool& fInvalidFound, bool& fReceiptCandidateDeferred, ConnectTrace& connectTrace, std::optional<NEVMBlockReject>& rejection) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs);
+    bool ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew, const std::shared_ptr<const CBlock>& pblock, ConnectTrace& connectTrace, DisconnectedBlockTransactions& disconnectpool, std::optional<NEVMBlockReject>& rejection) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs);
+    bool ReconcileRejectedNEVMBlock(BlockValidationState& state,
+                                    const NEVMBlockReject& rejection)
+        EXCLUSIVE_LOCKS_REQUIRED(m_chainstate_mutex) LOCKS_EXCLUDED(cs_main);
+    bool InvalidateBlockLocked(BlockValidationState& state, CBlockIndex* pindex,
+                               bool bReverify, bool bUpdateSpecialTxState,
+                               const NEVMBlockReject* rejection = nullptr)
+        EXCLUSIVE_LOCKS_REQUIRED(m_chainstate_mutex) LOCKS_EXCLUDED(cs_main);
+    bool ReplayDeferredBTCCNEVMLocked(int32_t through_height,
+                                     const uint256& through_hash,
+                                     const std::function<bool()>& finalize,
+                                     bool& complete, std::string& error,
+                                     std::optional<NEVMBlockReject>& rejection)
+        EXCLUSIVE_LOCKS_REQUIRED(m_chainstate_mutex) LOCKS_EXCLUDED(cs_main);
 
     void InvalidBlockFound(CBlockIndex* pindex, const BlockValidationState& state) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     CBlockIndex* FindMostWorkChain() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
@@ -1071,9 +1103,10 @@ private:
     // SYSCOIN: Normal block connection requires cs_main. Authenticated
     // catch-up replay instead holds m_chainstate_mutex while releasing
     // cs_main across the synchronous Geth call.
-    bool ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMap &mapNEVMTxRoots, const CBlock& block, const CBlockIndex* pindex, const uint256& nBlockHash, const uint32_t& nHeight, const bool fJustCheck, PoDAMAPMemory &mapPoDA, const CDeterministicMNListNEVMAddressDiff &diff, bool btcc_prefix_authenticated = false, NEVMNotificationContext notification_context = NEVMNotificationContext::LIVE);
+    bool ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMap &mapNEVMTxRoots, const CBlock& block, const CBlockIndex* pindex, const uint256& nBlockHash, const uint32_t& nHeight, const bool fJustCheck, PoDAMAPMemory &mapPoDA, const CDeterministicMNListNEVMAddressDiff &diff, bool btcc_prefix_authenticated = false, NEVMNotificationContext notification_context = NEVMNotificationContext::LIVE, std::optional<NEVMBlockReject>* rejection = nullptr);
     bool RecoverNEVMPrefixForConnect(const CBlockIndex& pending,
-                                     std::string& error)
+                                     std::string& error,
+                                     std::optional<NEVMBlockReject>& rejection)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     SteadyClock::time_point m_last_write{};
     SteadyClock::time_point m_last_flush{};
@@ -1810,7 +1843,7 @@ int RPCSerializationFlags();
     uint32_t expected_syscoin_height,
     const uint256& reported_syscoin_hash,
     const uint256& expected_syscoin_hash) noexcept;
-bool DisconnectNEVMCommitment(ChainstateManager& chainman, BlockValidationState& state, std::vector<uint256> &vecNEVMBlocks, const CBlock& block, const CBlockIndex& index, const uint32_t& nHeight, const uint256& nBlockHash, const CDeterministicMNListNEVMAddressDiff &diff, NEVMNotificationContext notification_context = NEVMNotificationContext::LIVE) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+bool DisconnectNEVMCommitment(ChainstateManager& chainman, BlockValidationState& state, std::vector<uint256> &vecNEVMBlocks, const CBlock& block, const CBlockIndex& index, const uint32_t& nHeight, const uint256& nBlockHash, const CDeterministicMNListNEVMAddressDiff &diff, NEVMNotificationContext notification_context = NEVMNotificationContext::LIVE, const NEVMDisconnectPrefix* nevm_prefix = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 bool GetNEVMData(BlockValidationState& state, const CBlock& block, CNEVMHeader &evmBlock, std::vector<unsigned char>* coinbase_payload = nullptr);
 bool FillNEVMData(CBlock &block);
 bool EraseMempoolNEVMData(const std::vector<uint8_t>& vchVersionHash, const uint256& txid);

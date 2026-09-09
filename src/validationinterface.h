@@ -8,6 +8,7 @@
 
 #include <kernel/cs_main.h>
 #include <kernel/chain.h>
+#include <nevm/response.h>
 #include <primitives/transaction.h> // CTransaction(Ref)
 #include <sync.h>
 
@@ -193,14 +194,14 @@ protected:
     virtual void NotifyGovernanceVote(const uint256& vote) {}
     virtual void NotifyGovernanceObject(const uint256 &object) {}
     virtual void NotifyMasternodeListChanged(bool undo, const CDeterministicMNList& oldMNList, const CDeterministicMNListDiff& diff) {}
-    virtual void NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation, const uint256& btcPrevHashForNEVM, const CDeterministicMNListNEVMAddressDiff &diff) {}
+    virtual void NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation, const uint256& btcPrevHashForNEVM, const CDeterministicMNListNEVMAddressDiff &diff, std::optional<NEVMBlockReject>* rejection = nullptr) {}
     virtual void NotifyNEVMBlockDisconnect(std::string &state, const uint256& nBlockHash, const CDeterministicMNListNEVMAddressDiff &diff) {}
     // SYSCOIN: Bind the applied NEVM height to its paired Syscoin branch tip.
     virtual void NotifyGetNEVMBlockInfo(uint64_t &nHeight,
                                         uint256& nSYSBlockHash,
                                         std::string &state) {}
     virtual void NotifyGetNEVMBlock(CNEVMBlock &evmBlock, std::string &state) {}
-    virtual void NotifyNEVMComms(const std::string& commMessage, bool &bResponse) {}
+    virtual void NotifyNEVMComms(const std::string& commMessage, bool &bResponse, std::optional<NEVMBlockReject>* rejection = nullptr) {}
     friend class ValidationInterfaceTest;
 };
 
@@ -240,14 +241,14 @@ public:
     void NotifyGovernanceVote(const uint256& vote);
     void NotifyGovernanceObject(const uint256& object);
     void NotifyMasternodeListChanged(bool undo, const CDeterministicMNList& oldMNList, const CDeterministicMNListDiff& diff);
-    void NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation, const uint256& btcPrevHashForNEVM, const CDeterministicMNListNEVMAddressDiff &diff);
+    void NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation, const uint256& btcPrevHashForNEVM, const CDeterministicMNListNEVMAddressDiff &diff, std::optional<NEVMBlockReject>* rejection = nullptr);
     void NotifyNEVMBlockDisconnect(std::string &state, const uint256& nBlockHash, const CDeterministicMNListNEVMAddressDiff &diff);
     // SYSCOIN: Returns the last applied Syscoin hash with the NEVM block count.
     void NotifyGetNEVMBlockInfo(uint64_t &nHeight,
                                 uint256& nSYSBlockHash,
                                 std::string &state);
     void NotifyGetNEVMBlock(CNEVMBlock &evmBlock, std::string &state);
-    void NotifyNEVMComms(const std::string& commMessage, bool &bResponse);
+    void NotifyNEVMComms(const std::string& commMessage, bool &bResponse, std::optional<NEVMBlockReject>* rejection = nullptr);
 };
 
 CMainSignals& GetMainSignals();

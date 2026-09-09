@@ -3626,7 +3626,8 @@ static bool ShouldBypassExternalNEVMNotifyCalls(const ChainstateManager& chainma
 
 // SYSCOIN: Authenticated BTCC catch-up may replay NEVM without treating an
 // equal-height but different Syscoin branch as already applied.
-bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMap &mapNEVMTxRoots, const CBlock& block, const CBlockIndex* pindex, const uint256& nBlockHash, const uint32_t& nHeight, const bool fJustCheck, PoDAMAPMemory &mapPoDA, const CDeterministicMNListNEVMAddressDiff &diff, bool btcc_prefix_authenticated, NEVMNotificationContext notification_context) {
+bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMap &mapNEVMTxRoots, const CBlock& block, const CBlockIndex* pindex, const uint256& nBlockHash, const uint32_t& nHeight, const bool fJustCheck, PoDAMAPMemory &mapPoDA, const CDeterministicMNListNEVMAddressDiff &diff, bool btcc_prefix_authenticated, NEVMNotificationContext notification_context, std::optional<NEVMBlockReject>* rejection) {
+    if (rejection) rejection->reset();
     const bool local_coins_recovery{
         notification_context ==
             NEVMNotificationContext::ALREADY_VALIDATED_COINS_RECOVERY};
@@ -3721,7 +3722,8 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
         if (m_chainman.m_interrupt) {
             return state.Error("shutdown");
         }
-        GetMainSignals().NotifyNEVMBlockConnect(nevmBlockHeader, block, stateStr, fJustCheck? uint256(): nBlockHash, NEVMDataVecOut, nHeight, bSkipValidation, btcPrevHashForNEVM, diff);
+        std::optional<NEVMBlockReject> rejected_pair;
+        GetMainSignals().NotifyNEVMBlockConnect(nevmBlockHeader, block, stateStr, fJustCheck? uint256(): nBlockHash, NEVMDataVecOut, nHeight, bSkipValidation, btcPrevHashForNEVM, diff, &rejected_pair);
         const auto& geth_command_line{m_chainman.GethCommandLine()};
         const bool exit_when_synced{
             std::find(geth_command_line.begin(), geth_command_line.end(),
@@ -3752,7 +3754,7 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
             }
         }
         bool retry_current{restarted};
-        if (!stateStr.empty() &&
+        if (!rejected_pair && !stateStr.empty() &&
             stateStr != "nevm-connect-consensus-invalid" &&
             stateStr != "nevm-connect-protocol-unsupported" &&
             !fJustCheck && !btcc_prefix_authenticated && pindex != nullptr &&
@@ -3764,7 +3766,9 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
             if (this == &m_chainman.ActiveChainstate() &&
                 pindex->pprev == m_chainman.ActiveTip()) {
                 std::string recovery_error;
-                if (!RecoverNEVMPrefixForConnect(*pindex, recovery_error)) {
+                if (!RecoverNEVMPrefixForConnect(*pindex, recovery_error,
+                                                 rejected_pair)) {
+                    if (rejection) *rejection = rejected_pair;
                     return state.Error(recovery_error);
                 }
                 retry_current = true;
@@ -3774,7 +3778,7 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
             // Recovery verifies the applied predecessor (or this exact pair
             // after a lost reply). Retry the current request only once.
             stateStr.clear();
-            GetMainSignals().NotifyNEVMBlockConnect(nevmBlockHeader, block, stateStr, fJustCheck? uint256(): nBlockHash, NEVMDataVecOut, nHeight, bSkipValidation, btcPrevHashForNEVM, diff);
+            GetMainSignals().NotifyNEVMBlockConnect(nevmBlockHeader, block, stateStr, fJustCheck? uint256(): nBlockHash, NEVMDataVecOut, nHeight, bSkipValidation, btcPrevHashForNEVM, diff, &rejected_pair);
         }
         if(!stateStr.empty()) {
             if (should_exit()) {
@@ -3784,8 +3788,14 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
             // The notifier matches this verdict to the requested
             // pair. Unclassified engine errors must remain retryable.
             if(stateStr == "nevm-connect-consensus-invalid") {
+                if (rejection) {
+                    *rejection = NEVMBlockReject{
+                        nevmBlockHeader.nBlockHash,
+                        fJustCheck ? uint256{} : nBlockHash};
+                }
                 return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, stateStr);
             }
+            if (rejection) *rejection = rejected_pair;
             return state.Error(stateStr);
         }
         if (restarted && !m_chainman.MaybeStartNEVMNetwork()) {
@@ -3808,11 +3818,13 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
 // buffer. Deferred replay and disconnect must classify progress from an
 // applied pair after flushing that buffer, including an interrupted pass.
 static bool FlushAndGetNEVMBlockInfo(
-    uint64_t& count, uint256& syscoin_hash, std::string& error)
+    uint64_t& count, uint256& syscoin_hash, std::string& error,
+    std::optional<NEVMBlockReject>* rejection = nullptr)
 {
     error.clear();
+    if (rejection) rejection->reset();
     bool flushed{false};
-    GetMainSignals().NotifyNEVMComms("flush", flushed);
+    GetMainSignals().NotifyNEVMComms("flush", flushed, rejection);
     if (!flushed) {
         error = "nevm-flush-unavailable";
         return false;
@@ -3870,10 +3882,12 @@ static bool ReadNEVMReplayInputs(
 }
 
 bool Chainstate::RecoverNEVMPrefixForConnect(
-    const CBlockIndex& pending, std::string& error)
+    const CBlockIndex& pending, std::string& error,
+    std::optional<NEVMBlockReject>& rejection)
 {
     AssertLockHeld(cs_main);
     error.clear();
+    rejection.reset();
     if (this != &m_chainman.ActiveChainstate() || pending.pprev == nullptr ||
         pending.pprev != m_chainman.ActiveTip()) {
         error = "nevm-live-recovery-not-active-extension";
@@ -3885,7 +3899,7 @@ bool Chainstate::RecoverNEVMPrefixForConnect(
     }
     uint64_t count{0};
     uint256 syscoin_hash;
-    if (!FlushAndGetNEVMBlockInfo(count, syscoin_hash, error)) return false;
+    if (!FlushAndGetNEVMBlockInfo(count, syscoin_hash, error, &rejection)) return false;
 
     const int64_t start{m_chainman.GetConsensus().nNEVMStartBlock};
     if (start < 0 || start > pending.nHeight ||
@@ -3947,10 +3961,10 @@ bool Chainstate::RecoverNEVMPrefixForConnect(
                         replay_state, roots, block, index, index->GetBlockHash(),
                         index->nHeight, /*fJustCheck=*/false, poda, nevm_diff,
                         /*btcc_prefix_authenticated=*/false,
-                        NEVMNotificationContext::EXTERNAL_REPLAY) ||
+                        NEVMNotificationContext::EXTERNAL_REPLAY, &rejection) ||
                     !replay_state.IsValid()) {
-                    // A predecessor failure cannot invalidate the pending
-                    // current block. Retain Core's chain and retryable inputs.
+                    // Preserve the predecessor's identity for activation to
+                    // reconcile after the pending child view is discarded.
                     error = strprintf("nevm-live-recovery-connect:%d:%s",
                                       index->nHeight, replay_state.ToString());
                     return false;
@@ -3960,7 +3974,7 @@ bool Chainstate::RecoverNEVMPrefixForConnect(
                 return false;
             }
         }
-        if (!FlushAndGetNEVMBlockInfo(count, syscoin_hash, error)) return false;
+        if (!FlushAndGetNEVMBlockInfo(count, syscoin_hash, error, &rejection)) return false;
         const CBlockIndex* applied{pending.pprev->GetAncestor(last_height)};
         if (applied == nullptr || !DoesNEVMBlockInfoMatchSyscoinBlock(
                 start, count, last_height, syscoin_hash, applied->GetBlockHash())) {
@@ -3980,11 +3994,42 @@ bool Chainstate::ReplayDeferredBTCCNEVM(
 {
     AssertLockNotHeld(cs_main);
     AssertLockNotHeld(m_chainstate_mutex);
-    // SYSCOIN: Keep the authenticated replay branch stable while releasing
-    // cs_main around the synchronous Geth notification below. This is the
-    // same serialization used by ActivateBestChain, without holding the
-    // global validation lock across an external process boundary.
-    LOCK(m_chainstate_mutex);
+    {
+        LOCK(m_chainstate_mutex);
+        std::optional<NEVMBlockReject> rejection;
+        if (ReplayDeferredBTCCNEVMLocked(through_height, through_hash, finalize,
+                                        complete, error, rejection)) {
+            return true;
+        }
+        if (!rejection) return false;
+        BlockValidationState state;
+        if (!ReconcileRejectedNEVMBlock(state, *rejection)) {
+            complete = false;
+            error = "deferred-nevm-reconciliation:" + state.ToString();
+            return false;
+        }
+    }
+    // Invalidation has finished and released activation exclusion. Select a
+    // known replacement, but retain the original replay marker: its exact
+    // through_hash was not applied, and its finalizer must never run here.
+    BlockValidationState state;
+    complete = false;
+    if (!ActivateBestChain(state)) {
+        error = "deferred-nevm-replacement:" + state.ToString();
+        return false;
+    }
+    error = "deferred-nevm-rejected-prefix-reconciled";
+    return false;
+}
+
+bool Chainstate::ReplayDeferredBTCCNEVMLocked(
+    int32_t through_height, const uint256& through_hash,
+    const std::function<bool()>& finalize, bool& complete, std::string& error,
+    std::optional<NEVMBlockReject>& rejection)
+{
+    AssertLockNotHeld(cs_main);
+    AssertLockHeld(m_chainstate_mutex);
+    rejection.reset();
     complete = false;
     error.clear();
     if (!fNEVMConnection || through_height < 0 || through_hash.IsNull() ||
@@ -4019,7 +4064,7 @@ bool Chainstate::ReplayDeferredBTCCNEVM(
     uint256 geth_last_syscoin_hash;
     std::string state_string;
     if (!FlushAndGetNEVMBlockInfo(
-            geth_count, geth_last_syscoin_hash, state_string)) {
+            geth_count, geth_last_syscoin_hash, state_string, &rejection)) {
         error = "deferred-nevm-height-unavailable:" + state_string;
         return false;
     }
@@ -4132,7 +4177,8 @@ bool Chainstate::ReplayDeferredBTCCNEVM(
         if (!ConnectNEVMCommitment(
                 state, roots, block, index, block_hash,
                 static_cast<uint32_t>(height), /*fJustCheck=*/false, poda,
-                nevm_diff, /*btcc_prefix_authenticated=*/true) ||
+                nevm_diff, /*btcc_prefix_authenticated=*/true,
+                NEVMNotificationContext::LIVE, &rejection) ||
             !state.IsValid()) {
             error = strprintf("deferred-nevm-connect:%d:%s", height,
                               state.ToString());
@@ -4147,7 +4193,7 @@ bool Chainstate::ReplayDeferredBTCCNEVM(
     // A successful send is not proof that Geth applied this prefix. Keep the
     // replay marker and its retained inputs until the exact pair is reported.
     if (!FlushAndGetNEVMBlockInfo(
-            geth_count, geth_last_syscoin_hash, state_string)) {
+            geth_count, geth_last_syscoin_hash, state_string, &rejection)) {
         error = "deferred-nevm-commit-unavailable:" + state_string;
         return false;
     }
@@ -4217,7 +4263,7 @@ bool DoesNEVMBlockInfoMatchSyscoinBlock(
            reported_syscoin_hash == expected_syscoin_hash;
 }
 
-bool DisconnectNEVMCommitment(ChainstateManager& chainman, BlockValidationState& state, std::vector<uint256> &vecNEVMBlocks, const CBlock& block, const CBlockIndex& index, const uint32_t& nHeight, const uint256& nBlockHash, const CDeterministicMNListNEVMAddressDiff &diff, NEVMNotificationContext notification_context) {
+bool DisconnectNEVMCommitment(ChainstateManager& chainman, BlockValidationState& state, std::vector<uint256> &vecNEVMBlocks, const CBlock& block, const CBlockIndex& index, const uint32_t& nHeight, const uint256& nBlockHash, const CDeterministicMNListNEVMAddressDiff &diff, NEVMNotificationContext notification_context, const NEVMDisconnectPrefix* nevm_prefix) {
     CNEVMHeader evmBlock;
     if(!GetNEVMData(state, block, evmBlock)) {
         return false; // state filled by GetNEVMData
@@ -4227,6 +4273,12 @@ bool DisconnectNEVMCommitment(ChainstateManager& chainman, BlockValidationState&
         notification_context !=
             NEVMNotificationContext::ALREADY_VALIDATED_COINS_RECOVERY &&
         !ShouldBypassExternalNEVMNotifyCalls(chainman, nHeight)};
+    if (nevm_prefix != nullptr) {
+        if (!nevm_prefix->ContainsUnapplied(index)) {
+            return state.Error("nevm-disconnect-unapplied-prefix-mismatch");
+        }
+        notify_external = false;
+    }
     // SYSCOIN: A durable BTCC pre-seal defers connect notifications from its
     // carrier onward. Flush any prefix queued by an interrupted replay before
     // deciding which blocks Geth actually applied. Asking it to remove a
@@ -4459,7 +4511,7 @@ ProcessNEVMDataResult ProcessNEVMData(const BlockManager& blockman, const CTrans
 /** Undo the effects of this block (with given index) on the UTXO set represented by coins.
  *  When FAILED is returned, view is left in an indeterminate state. */
 // SYSCOIN
-DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIndex* pindex, CCoinsViewCache& view, NEVMMintTxSet &setMintTxs, std::vector<uint256> &vecNEVMBlocks, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs, bool bReverify, bool bReplay, bool bUpdateSpecialTxState)
+DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIndex* pindex, CCoinsViewCache& view, NEVMMintTxSet &setMintTxs, std::vector<uint256> &vecNEVMBlocks, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs, bool bReverify, bool bReplay, bool bUpdateSpecialTxState, const NEVMDisconnectPrefix* nevm_prefix)
 {
     AssertLockHeld(::cs_main);
     // SYSCOIN
@@ -4474,6 +4526,9 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
 
     if (blockUndo.vtxundo.size() + 1 != block.vtx.size()) {
         error("DisconnectBlock(): block and undo data inconsistent");
+        return DISCONNECT_FAILED;
+    }
+    if (nevm_prefix != nullptr && !nevm_prefix->ContainsUnapplied(*pindex)) {
         return DISCONNECT_FAILED;
     }
     // SYSCOIN
@@ -4542,7 +4597,7 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
     const auto nevm_notification_context{bReplay
         ? NEVMNotificationContext::ALREADY_VALIDATED_COINS_RECOVERY
         : NEVMNotificationContext::LIVE};
-    if(bRegTestContext && bReverify && pindex->nHeight >= params.nNEVMStartBlock && !DisconnectNEVMCommitment(m_chainman, state, vecNEVMBlocks, block, *pindex, pindex->nHeight, block.GetHash(), diffNEVM, nevm_notification_context)) {
+    if(bRegTestContext && bReverify && pindex->nHeight >= params.nNEVMStartBlock && !DisconnectNEVMCommitment(m_chainman, state, vecNEVMBlocks, block, *pindex, pindex->nHeight, block.GetHash(), diffNEVM, nevm_notification_context, nevm_prefix)) {
         const std::string errStr = strprintf("DisconnectBlock(): NEVM block failed to disconnect: %s\n", state.ToString().c_str());
         error(errStr.c_str());
         return DISCONNECT_FAILED;
@@ -4667,8 +4722,9 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
  *  can fail if those validity checks fail (among other reasons). */
 bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, CBlockIndex* pindex,
                   CCoinsViewCache& view, bool fJustCheck, 
-                  NEVMMintTxSet &setMintTxs, NEVMTxRootMap &mapNEVMTxRoots, PoDAMAPMemory &mapPoDA, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs, bool bReverify)
+                  NEVMMintTxSet &setMintTxs, NEVMTxRootMap &mapNEVMTxRoots, PoDAMAPMemory &mapPoDA, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs, bool bReverify, std::optional<NEVMBlockReject>* rejection)
 {
+    if (rejection) rejection->reset();
     AssertLockHeld(cs_main);
     assert(pindex);
 
@@ -5207,7 +5263,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
 
     const bool bRegTestContext = !fRegTest || (fRegTest && fNEVMConnection);
     if (bRegTestContext && bReverify && pindex->nHeight >= params.GetConsensus().nNEVMStartBlock) {
-        if (!ConnectNEVMCommitment(state, mapNEVMTxRoots, block, pindex, blockHash, (uint32_t)pindex->nHeight, fJustCheck, mapPoDA, diff)) {
+        if (!ConnectNEVMCommitment(state, mapNEVMTxRoots, block, pindex, blockHash, (uint32_t)pindex->nHeight, fJustCheck, mapPoDA, diff, false, NEVMNotificationContext::LIVE, rejection)) {
             return error("%s: ConnectNEVMCommitment failed with %s", __func__, state.ToString());
         }
         // Helper may return true while leaving state invalid (managed geth shutdown path).
@@ -5740,7 +5796,7 @@ void Chainstate::UpdateTip(const CBlockIndex* pindexNew)
   * in any case).
   */
  // SYSCOIN
-bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTransactions* disconnectpool, bool bReverify, bool bUpdateSpecialTxState)
+bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTransactions* disconnectpool, bool bReverify, bool bUpdateSpecialTxState, const NEVMDisconnectPrefix* nevm_prefix)
 {
     AssertLockHeld(cs_main);
     if (m_mempool) AssertLockHeld(m_mempool->cs);
@@ -5759,6 +5815,10 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
     CBlockIndex *pindexDelete = m_chain.Tip();
     assert(pindexDelete);
     assert(pindexDelete->pprev);
+    if (nevm_prefix != nullptr &&
+        !nevm_prefix->ContainsUnapplied(*pindexDelete)) {
+        return state.Error("nevm-disconnect-unapplied-prefix-mismatch");
+    }
     // SYSCOIN BEGIN: Never cross the imported A-1 handoff in this BLS-free
     // process. A transition release must validate any replacement first.
     std::string pq_handoff_disconnect_error;
@@ -5797,7 +5857,7 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
     {
         CCoinsViewCache view(&CoinsTip());
         assert(view.GetBestBlock() == pindexDelete->GetBlockHash());
-        if (DisconnectBlock(block, pindexDelete, view, setMintTxs, vecNEVMBlocks, vecTXIDPairs, bReverify, false /*bReplay*/, bUpdateSpecialTxState) != DISCONNECT_OK)
+        if (DisconnectBlock(block, pindexDelete, view, setMintTxs, vecNEVMBlocks, vecTXIDPairs, bReverify, false /*bReplay*/, bUpdateSpecialTxState, nevm_prefix) != DISCONNECT_OK)
             return error("DisconnectTip(): DisconnectBlock %s failed", pindexDelete->GetBlockHash().ToString());
         // SYSCOIN: Revoke mint authority and retain its exact carrier in one
         // durable batch before even publishing parent coins to the cache.
@@ -5988,8 +6048,9 @@ public:
  * The block is added to connectTrace if connection succeeds.
  */
 // SYSCOIN
-bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew, const std::shared_ptr<const CBlock>& pblock, ConnectTrace& connectTrace, DisconnectedBlockTransactions &disconnectpool)
+bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew, const std::shared_ptr<const CBlock>& pblock, ConnectTrace& connectTrace, DisconnectedBlockTransactions &disconnectpool, std::optional<NEVMBlockReject>& rejection)
 {
+    rejection.reset();
     AssertLockHeld(cs_main);
     if (m_mempool) AssertLockHeld(m_mempool->cs);
 
@@ -6042,9 +6103,10 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
             m_blockman, *pindexNew, /*loaded_from_disk=*/!pblock, pthisBlock, state, CoinsTip(), connection,
             [&]() EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
                 return ConnectBlock(*pthisBlock, state, pindexNew, *connection.view, false /*bJustCheck*/,
-                                    connection.mint_txs, connection.nevm_tx_roots, connection.poda, connection.txid_pairs);
+                                    connection.mint_txs, connection.nevm_tx_roots, connection.poda, connection.txid_pairs, true, &rejection);
             });
         if (result == node::BlockConnectionResult::DISK_READ_FAILED) {
+            rejection.reset();
             return FatalError(m_chainman.GetNotifications(), state, "Failed to reread committed block");
         }
         GetMainSignals().BlockChecked(*pthisBlock, state);
@@ -6747,7 +6809,7 @@ void Chainstate::PruneBlockIndexCandidates() {
  * @returns true unless a system error occurred
  */
 // SYSCOIN: A missing authenticated receipt defers a candidate without making it invalid.
-bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex* pindexMostWork, const std::shared_ptr<const CBlock>& pblock, bool& fInvalidFound, bool& fReceiptCandidateDeferred, ConnectTrace& connectTrace)
+bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex* pindexMostWork, const std::shared_ptr<const CBlock>& pblock, bool& fInvalidFound, bool& fReceiptCandidateDeferred, ConnectTrace& connectTrace, std::optional<NEVMBlockReject>& rejection)
 {
     AssertLockHeld(cs_main);
     if (m_mempool) AssertLockHeld(m_mempool->cs);
@@ -6874,14 +6936,21 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
 
         // Connect new blocks.
         for (CBlockIndex* pindexConnect : reverse_iterate(vpindexToConnect)) {
-            if (!ConnectTip(state, pindexConnect, pindexConnect == pindexMostWork ? pblock : std::shared_ptr<const CBlock>(), connectTrace, disconnectpool)) {
+            if (!ConnectTip(state, pindexConnect, pindexConnect == pindexMostWork ? pblock : std::shared_ptr<const CBlock>(), connectTrace, disconnectpool, rejection)) {
                 if (state.IsInvalid()) {
+                    rejection.reset();
                     // The block violates a consensus rule.
                     if (IsBlockRejectionCacheable(state.GetResult())) {
                         InvalidChainFound(vpindexToConnect.front());
                     }
                     state = BlockValidationState();
                     fInvalidFound = true;
+                    fContinue = false;
+                    break;
+                } else if (rejection) {
+                    // Keep BlockChecked's operational result for this child.
+                    // The rejected ancestor is handled after trace publication.
+                    state = BlockValidationState{};
                     fContinue = false;
                     break;
                 } else if (state.GetRejectReason() ==
@@ -7036,6 +7105,7 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
     bool waiting_for_nevm_status{false};
     bool blocks_connected_this_call{false};
     do {
+        std::optional<NEVMBlockReject> rejection;
         // Block until the validation queue drains. This should largely
         // never happen in normal operation, however may happen during
         // reindex, causing memory blowup if we run too far ahead.
@@ -7115,7 +7185,7 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                 bool fReceiptCandidateDeferred = false;
                 std::shared_ptr<const CBlock> nullBlockPtr;
                 // SYSCOIN
-                if (!ActivateBestChainStep(state, pindexMostWork, pblock && pblock->GetHash() == pindexMostWork->GetBlockHash() ? pblock : nullBlockPtr, fInvalidFound, fReceiptCandidateDeferred, connectTrace)) {
+                if (!ActivateBestChainStep(state, pindexMostWork, pblock && pblock->GetHash() == pindexMostWork->GetBlockHash() ? pblock : nullBlockPtr, fInvalidFound, fReceiptCandidateDeferred, connectTrace, rejection)) {
                     // A system error occurred
                     return false;
                 }
@@ -7146,6 +7216,8 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                     GetMainSignals().BlockConnected(this->GetRole(), trace.pblock, trace.pindex);
                 }
 
+                if (rejection) break;
+
                 if (fReceiptCandidateDeferred) {
                     // The quarantined branch is deliberately absent from the
                     // work set. Select again immediately so an already-known
@@ -7168,7 +7240,7 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                      !m_chain.Tip() ||
                      (starting_tip && CBlockIndexWorkComparator()(
                                           m_chain.Tip(), starting_tip)));
-            if (!blocks_connected) {
+            if (!blocks_connected && !rejection) {
                 // A recovery iteration may have connected a prefix before
                 // this one ran out of eligible work. Preserve its final flush.
                 if (blocks_connected_this_call) break;
@@ -7189,6 +7261,9 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                 GetMainSignals().UpdatedBlockTip(pindexNewTip, pindexFork, m_chainman, still_in_ibd);
                 // Always notify the UI if a new block tip was connected
                 if (kernel::IsInterrupted(m_chainman.GetNotifications().blockTip(GetSynchronizationState(still_in_ibd), *pindexNewTip))) {
+                    if (rejection) {
+                        return state.Error("nevm-rejected-block-invalidation-interrupted");
+                    }
                     // Just breaking and returning success for now. This could
                     // be changed to bubble up the kernel::Interrupted value to
                     // the caller so the caller could distinguish between
@@ -7196,6 +7271,16 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                     break;
                 }
             }
+        }
+        if (rejection) {
+            // No connection view, mempool lock or unpublished trace survives
+            // here. Reuse ordinary invalidation while retaining activation
+            // exclusion across the verified engine endpoint and local undo.
+            if (!ReconcileRejectedNEVMBlock(state, *rejection)) return false;
+            pindexNewTip = WITH_LOCK(cs_main, return m_chain.Tip());
+            pindexMostWork = nullptr;
+            pblock.reset();
+            blocks_connected_this_call = true;
         }
         // When we reach this point, we switched to a new tip (stored in pindexNewTip).
 
@@ -7420,6 +7505,45 @@ bool Chainstate::EnforceBlock(
 bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex *pindex, bool bReverify, bool bUpdateSpecialTxState)
 {
     AssertLockNotHeld(m_chainstate_mutex);
+    // Serialize administrative invalidation with activation, as before.
+    LOCK(m_chainstate_mutex);
+    return InvalidateBlockLocked(state, pindex, bReverify, bUpdateSpecialTxState);
+}
+
+bool Chainstate::ReconcileRejectedNEVMBlock(
+    BlockValidationState& state, const NEVMBlockReject& rejection)
+{
+    AssertLockHeld(m_chainstate_mutex);
+    AssertLockNotHeld(cs_main);
+    CBlockIndex* rejected{nullptr};
+    {
+        LOCK(cs_main);
+        rejected = m_blockman.LookupBlockIndex(rejection.syscoin_hash);
+        if (rejected == nullptr) {
+            return state.Error("nevm-rejected-block-unknown");
+        }
+    }
+    if (!InvalidateBlockLocked(state, rejected, true, true, &rejection)) {
+        return false;
+    }
+    LOCK(cs_main);
+    // Administrative invalidation can return after a partial shutdown unwind.
+    // Never treat that as completion or resume another branch in that state.
+    if (m_chainman.m_interrupt || m_chain.Contains(rejected) ||
+        !(rejected->nStatus & BLOCK_FAILED_VALID)) {
+        return state.Error("nevm-rejected-block-invalidation-interrupted");
+    }
+    return FlushStateToDisk(state, FlushStateMode::ALWAYS);
+}
+
+bool Chainstate::InvalidateBlockLocked(BlockValidationState& state,
+                                      CBlockIndex* pindex, bool bReverify,
+                                      bool bUpdateSpecialTxState,
+                                      const NEVMBlockReject* rejection)
+{
+    AssertLockHeld(m_chainstate_mutex);
+    AssertLockNotHeld(cs_main);
+    if (m_mempool) AssertLockNotHeld(m_mempool->cs);
 
     // Genesis block can't be invalidated
     assert(pindex);
@@ -7429,10 +7553,52 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex *pinde
     bool pindex_was_in_chain = false;
     int disconnected = 0;
 
-    // We do not allow ActivateBestChain() to run while InvalidateBlock() is
-    // running, as that could cause the tip to change while we disconnect
-    // blocks.
-    LOCK(m_chainstate_mutex);
+    std::optional<NEVMDisconnectPrefix> nevm_prefix;
+    if (rejection != nullptr) {
+        LOCK(cs_main);
+        if (this != &m_chainman.ActiveChainstate() || !fNEVMConnection ||
+            rejection->nevm_hash.IsNull() || rejection->syscoin_hash.IsNull() ||
+            pindex->GetBlockHash() != rejection->syscoin_hash ||
+            !m_chain.Contains(pindex)) {
+            return state.Error("nevm-rejected-block-not-active");
+        }
+        const int64_t start{m_chainman.GetConsensus().nNEVMStartBlock};
+        if (start < 0 || start > pindex->nHeight) {
+            return state.Error("nevm-rejected-block-before-activation");
+        }
+        CBlock block;
+        CNEVMHeader header;
+        if (!m_blockman.ReadBlockFromDisk(block, *pindex)) {
+            return state.Error("nevm-rejected-block-read-failed");
+        }
+        BlockValidationState header_state;
+        if (!GetNEVMData(header_state, block, header) ||
+            header.nBlockHash != rejection->nevm_hash) {
+            return state.Error("nevm-rejected-block-pair-mismatch");
+        }
+        uint64_t count{0};
+        uint256 applied_hash;
+        std::string error;
+        if (!FlushAndGetNEVMBlockInfo(count, applied_hash, error)) {
+            return state.Error("nevm-rejected-block-status:" + error);
+        }
+        // Buffered insertion commits preceding blocks before rejecting the
+        // next one. Require that exact predecessor so replacement selection
+        // cannot later disconnect a retained but externally unapplied parent.
+        if (count != static_cast<uint64_t>(pindex->nHeight - start) ||
+            (count == 0 && !applied_hash.IsNull())) {
+            return state.Error("nevm-rejected-block-applied-prefix-mismatch");
+        }
+        const int32_t height{static_cast<int32_t>(start + static_cast<int64_t>(count) - 1)};
+        const CBlockIndex* applied{height < 0 ? nullptr : m_chain[height]};
+        if ((height >= 0 && applied == nullptr) ||
+            (count != 0 && (applied == nullptr ||
+                           applied->GetBlockHash() != applied_hash))) {
+            return state.Error("nevm-rejected-block-applied-branch-mismatch");
+        }
+        nevm_prefix.emplace(NEVMDisconnectPrefix{
+            height, applied == nullptr ? uint256{} : applied->GetBlockHash()});
+    }
 
     // SYSCOIN BEGIN: Protect durable finality during administrative invalidation.
     bool invalidates_active_chain{false};
@@ -7519,7 +7685,8 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex *pinde
         // ActivateBestChain considers blocks already in m_chain
         // unconditionally valid already, so force disconnect away from it.
         DisconnectedBlockTransactions disconnectpool{MAX_DISCONNECTED_TX_POOL_SIZE * 1000};
-        bool ret = DisconnectTip(state, &disconnectpool, bReverify, bUpdateSpecialTxState);
+        bool ret = DisconnectTip(state, &disconnectpool, bReverify, bUpdateSpecialTxState,
+                                 nevm_prefix ? &*nevm_prefix : nullptr);
         // DisconnectTip will add transactions to disconnectpool.
         // Adjust the mempool to be consistent with the new tip, adding
         // transactions back to the mempool if disconnecting was successful,

@@ -351,13 +351,14 @@ bool CZMQAbstractPublishNotifier::ReceiveZmqMessage(std::vector<std::string>& pa
         return false;
     return true;
 }
-bool CZMQPublishNEVMCommsNotifier::NotifyNEVMComms(const std::string &commMessage, bool &bResponse) {
-    return NotifyNEVMCommsCommon(commMessage, bResponse);
+bool CZMQPublishNEVMCommsNotifier::NotifyNEVMComms(const std::string &commMessage, bool &bResponse, std::optional<NEVMBlockReject>* rejection) {
+    return NotifyNEVMCommsCommon(commMessage, bResponse, rejection);
 
 }
-bool CZMQAbstractPublishNotifier::NotifyNEVMCommsCommon(const std::string &commMessage, bool &bResponse)
+bool CZMQAbstractPublishNotifier::NotifyNEVMCommsCommon(const std::string &commMessage, bool &bResponse, std::optional<NEVMBlockReject>* rejection)
 {
     LOCK(cs_nevm);
+    if (rejection) rejection->reset();
     bResponse = false;
     const int timeout = (commMessage == "status" || commMessage == "connect-v1")
         ? NEVM_STATUS_TIMEOUT_MS : NEVM_COMMS_TIMEOUT_MS;
@@ -388,6 +389,10 @@ bool CZMQAbstractPublishNotifier::NotifyNEVMCommsCommon(const std::string &commM
                 commMessage == "flush" ? "flushed" :
                 commMessage == "connect-v1" ? "connect-v1" : "ack"};
             if(parts[1] != expected_response) {
+                // Only an explicit flush can report buffered block rejection.
+                if (commMessage == "flush" && rejection) {
+                    *rejection = ParseNEVMBlockReject(parts[1]);
+                }
                 LogPrint(BCLog::SYS, "NotifyNEVMComms: nevm-comms-response-invalid-data\n");
                 return false;
             }
@@ -401,9 +406,10 @@ bool CZMQAbstractPublishNotifier::NotifyNEVMCommsCommon(const std::string &commM
     }
     return true;
 }
-bool CZMQPublishNEVMBlockConnectNotifier::NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nSYSBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation, const uint256& btcPrevHashForNEVM, const CDeterministicMNListNEVMAddressDiff &diff)
+bool CZMQPublishNEVMBlockConnectNotifier::NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nSYSBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation, const uint256& btcPrevHashForNEVM, const CDeterministicMNListNEVMAddressDiff &diff, std::optional<NEVMBlockReject>* rejection)
 {
     LOCK(cs_nevm);
+    if (rejection) rejection->reset();
     state = "";
     // Negotiate on every connect: the engine may have restarted or been
     // replaced since any previous request. A generic ack is insufficient.
@@ -452,13 +458,12 @@ bool CZMQPublishNEVMBlockConnectNotifier::NotifyNEVMBlockConnect(const CNEVMHead
         }
         if(parts[1] != "connected") {
             LogPrint(BCLog::SYS, "NotifyNEVMBlockConnect: %s\n", parts[1]);
-            // Only an explicit verdict for this exact pair can retire the
-            // candidate. A buffered predecessor's failure, legacy reply or
-            // malformed token is an operational error. Exact comparison also
-            // enforces both 64-character hashes and excludes trailing data.
-            const std::string invalid_response{
-                "invalid:" + evmBlock.nBlockHash.GetHex() + ":" + nSYSBlockHash.GetHex()};
-            state = parts[1] == invalid_response
+            // Preserve an earlier pair's rejection for chain validation while
+            // retaining the current candidate's operational-error state.
+            const auto parsed = ParseNEVMBlockReject(parts[1]);
+            if (rejection) *rejection = parsed;
+            state = parsed && parsed->nevm_hash == evmBlock.nBlockHash &&
+                    parsed->syscoin_hash == nSYSBlockHash
                 ? "nevm-connect-consensus-invalid"
                 : "nevm-connect-response-invalid-data";
             return false;

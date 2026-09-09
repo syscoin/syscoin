@@ -301,11 +301,13 @@ void CMainSignals::NotifyGovernanceObject(const uint256& object) {
 void CMainSignals::NotifyMasternodeListChanged(bool undo, const CDeterministicMNList& oldMNList, const CDeterministicMNListDiff& diff) {
     m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.NotifyMasternodeListChanged(undo, oldMNList, diff); });
 }
-void CMainSignals::NotifyNEVMComms(const std::string& commMessage, bool &bResponse) {
-    m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.NotifyNEVMComms(commMessage, bResponse); });
+void CMainSignals::NotifyNEVMComms(const std::string& commMessage, bool &bResponse, std::optional<NEVMBlockReject>* rejection) {
+    if (rejection) rejection->reset();
+    m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.NotifyNEVMComms(commMessage, bResponse, rejection); });
 }
-void CMainSignals::NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation, const uint256& btcPrevHashForNEVM, const CDeterministicMNListNEVMAddressDiff &diff) {
-    m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.NotifyNEVMBlockConnect(evmBlock, block, state, nBlockHash, NEVMDataVecOut, nHeight, bSkipValidation, btcPrevHashForNEVM, diff); });
+void CMainSignals::NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation, const uint256& btcPrevHashForNEVM, const CDeterministicMNListNEVMAddressDiff &diff, std::optional<NEVMBlockReject>* rejection) {
+    if (rejection) rejection->reset();
+    m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.NotifyNEVMBlockConnect(evmBlock, block, state, nBlockHash, NEVMDataVecOut, nHeight, bSkipValidation, btcPrevHashForNEVM, diff, rejection); });
 }
 void CMainSignals::NotifyNEVMBlockDisconnect(std::string &state, const uint256& nBlockHash, const CDeterministicMNListNEVMAddressDiff &diff) {
     m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.NotifyNEVMBlockDisconnect(state, nBlockHash, diff); });

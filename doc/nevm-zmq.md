@@ -24,11 +24,17 @@ order, which reverses their 32 serialized bytes. This applies to the NEVM
 hash too; it is not Geth's usual `common.Hash.Hex()` order. No prefixes,
 suffixes, or extra fields are allowed in an `invalid` response.
 
-Core permanently rejects a candidate only when the entire `invalid` response
-matches both hashes in that request. Buffered insertion may fail on an earlier
-pair, so Geth reports the pair at the failing insertion index. A different
-pair, malformed result, legacy error text, or unknown result remains an
-operational error, leaving the candidate available for retry.
+An entire `invalid` response matching both requested hashes establishes
+invalidity of that candidate. Buffered insertion may fail on an earlier pair,
+so Geth reports the pair at the failing insertion index. Core handles that
+ancestor separately as described below; the current request is not marked
+independently invalid. Malformed results, unbound identities, legacy error
+text and unknown results remain operational errors.
+
+For `nevmcomms` with the serialized string `flush`, the second response frame
+is `flushed`, the same `invalid:<nevm-hash>:<sys-hash>` token, or
+`flush-failed: <diagnostic>`. Only the complete canonical token carries a
+rejected pair; diagnostic text is never parsed as a validation verdict.
 
 Geth classifies errors at their validation origin. Storage and local execution
 read failures take precedence over computed validation mismatches. Mutable
@@ -57,6 +63,27 @@ engine, and a matching consensus-invalid result is not retried. Missing replay
 inputs or another engine failure leave the candidate retryable. This path
 handles connect failures; engine loss first encountered during a normal reorg
 disconnect still follows the separate disconnect error path.
+
+## Delayed buffered rejection
+
+A rejection received during live connect, predecessor replay or deferred BTCC
+replay may identify a block Core previously accepted. Core binds both hashes
+to that active block's stored commitment, then flushes and requires Geth's
+fresh applied pair to match its exact predecessor. Zero applied blocks require
+a zero paired hash and rejection of the first NEVM block. An unknown identity,
+different branch, farther-behind endpoint or unavailable status stops the
+operation without authorizing invalidation.
+
+Once bound, Core uses its normal invalidation routine to remove the rejected
+block and accepted descendants. External disconnect notifications are omitted
+only for this verified unapplied suffix; coins, roots, mint authority, local
+indexes and mempool cleanup still run. Durable finality and the PQ activation
+handoff remain enforced. Core checks completion and persists the result before
+selecting another known branch. An interrupted unwind cannot report success.
+
+Deferred replay retains its original marker and does not call its finalizer
+after reconciliation, because the original target was not applied. Replacement
+selection runs after releasing the replay activation lock.
 
 ## Upgrade order
 

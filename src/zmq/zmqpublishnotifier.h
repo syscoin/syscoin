@@ -37,7 +37,7 @@ public:
     bool SendZmqMessage(const char *command, const void* data, size_t size);
     // SYSCOIN
     bool SendZmqMessageNEVM(const char *command, const void* data, size_t size);
-    bool NotifyNEVMCommsCommon(const std::string& commMessage, bool &bResponse);
+    bool NotifyNEVMCommsCommon(const std::string& commMessage, bool &bResponse, std::optional<NEVMBlockReject>* rejection = nullptr);
     /* receive zmq message
        parts:
           * command
@@ -51,7 +51,7 @@ public:
 class CZMQPublishNEVMCommsNotifier : public CZMQAbstractPublishNotifier
 {
 public:
-    bool NotifyNEVMComms(const std::string& commMessage, bool &bResponse) override;
+    bool NotifyNEVMComms(const std::string& commMessage, bool &bResponse, std::optional<NEVMBlockReject>* rejection = nullptr) override;
 };
 class CZMQPublishNEVMBlockInfoNotifier : public CZMQAbstractPublishNotifier
 {
@@ -71,7 +71,7 @@ class CZMQPublishNEVMBlockConnectNotifier : public CZMQAbstractPublishNotifier
 {
 public:
     CZMQPublishNEVMBlockConnectNotifier() = default;
-    bool NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation, const uint256& btcPrevHashForNEVM, const CDeterministicMNListNEVMAddressDiff &diff) override;
+    bool NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation, const uint256& btcPrevHashForNEVM, const CDeterministicMNListNEVMAddressDiff &diff, std::optional<NEVMBlockReject>* rejection = nullptr) override;
 };
 class CZMQPublishNEVMBlockDisconnectNotifier : public CZMQAbstractPublishNotifier
 {

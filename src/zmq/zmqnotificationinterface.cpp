@@ -222,16 +222,16 @@ void TryForEach(std::list<std::unique_ptr<CZMQAbstractNotifier>>& notifiers, con
 }
 } // anonymous namespace
 // SYSCOIN
-void CZMQNotificationInterface::NotifyNEVMComms(const std::string& commMessage, bool &bResponse)
+void CZMQNotificationInterface::NotifyNEVMComms(const std::string& commMessage, bool &bResponse, std::optional<NEVMBlockReject>* rejection)
 {
-    TryForEach(notifiers, [&commMessage, &bResponse](CZMQAbstractNotifier* notifier) {
-        return notifier->NotifyNEVMComms(commMessage, bResponse);
+    TryForEach(notifiers, [&commMessage, &bResponse, rejection](CZMQAbstractNotifier* notifier) {
+        return notifier->NotifyNEVMComms(commMessage, bResponse, rejection);
     });
 }
-void CZMQNotificationInterface::NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation, const uint256& btcPrevHashForNEVM, const CDeterministicMNListNEVMAddressDiff &diff)
+void CZMQNotificationInterface::NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation, const uint256& btcPrevHashForNEVM, const CDeterministicMNListNEVMAddressDiff &diff, std::optional<NEVMBlockReject>* rejection)
 {
-    TryForEach(notifiers, [&evmBlock, &block, &nBlockHash, &state, &NEVMDataVecOut, &nHeight, &bSkipValidation, &btcPrevHashForNEVM, &diff](CZMQAbstractNotifier* notifier) {
-        return notifier->NotifyNEVMBlockConnect(evmBlock, block, state, nBlockHash, NEVMDataVecOut, nHeight, bSkipValidation, btcPrevHashForNEVM, diff);
+    TryForEach(notifiers, [&evmBlock, &block, &nBlockHash, &state, &NEVMDataVecOut, &nHeight, &bSkipValidation, &btcPrevHashForNEVM, &diff, rejection](CZMQAbstractNotifier* notifier) {
+        return notifier->NotifyNEVMBlockConnect(evmBlock, block, state, nBlockHash, NEVMDataVecOut, nHeight, bSkipValidation, btcPrevHashForNEVM, diff, rejection);
     });
 }
 void CZMQNotificationInterface::NotifyNEVMBlockDisconnect(std::string &state, const uint256& nBlockHash, const CDeterministicMNListNEVMAddressDiff &diff)

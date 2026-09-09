@@ -46,14 +46,14 @@ protected:
     // SYSCOIN
     void NotifyGovernanceVote(const uint256& vote) override;
     void NotifyGovernanceObject(const uint256& object) override;
-    void NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation, const uint256& btcPrevHashForNEVM, const CDeterministicMNListNEVMAddressDiff &diff) override;
+    void NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation, const uint256& btcPrevHashForNEVM, const CDeterministicMNListNEVMAddressDiff &diff, std::optional<NEVMBlockReject>* rejection = nullptr) override;
     void NotifyNEVMBlockDisconnect(std::string &state, const uint256& nBlockHash, const CDeterministicMNListNEVMAddressDiff &diff) override;
     // SYSCOIN: Count and paired hash are one branch-authentication response.
     void NotifyGetNEVMBlockInfo(uint64_t &nHeight,
                                 uint256& nSYSBlockHash,
                                 std::string& state) override;
     void NotifyGetNEVMBlock(CNEVMBlock &evmBlock, std::string& state) override;
-    void NotifyNEVMComms(const std::string& commMessage, bool &bResponse) override;
+    void NotifyNEVMComms(const std::string& commMessage, bool &bResponse, std::optional<NEVMBlockReject>* rejection = nullptr) override;
 private:
     CZMQNotificationInterface();
 

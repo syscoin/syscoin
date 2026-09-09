@@ -7,6 +7,7 @@
 #include <nevm/nevm.h>
 #include <nevm/common.h>
 #include <nevm/rlp.h>
+#include <nevm/response.h>
 #include <nevm/address.h>
 #include <nevm/sha3.h>
 #include <script/interpreter.h>
@@ -55,6 +56,39 @@ MapPoDAPayloadMeta MakePoDAMeta(const uint256& txid, uint32_t size, int64_t medi
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(nevm_tests, BasicTestingSetup)
+BOOST_AUTO_TEST_CASE(nevm_rejection_response_requires_exact_canonical_pair)
+{
+    const auto nevm_hash{uint256S(std::string(64, 'a'))};
+    const auto syscoin_hash{uint256S(std::string(64, 'b'))};
+    const std::string canonical{"invalid:" + nevm_hash.GetHex() + ":" + syscoin_hash.GetHex()};
+    const auto parsed{ParseNEVMBlockReject(canonical)};
+    BOOST_REQUIRE(parsed.has_value());
+    BOOST_CHECK(parsed->nevm_hash == nevm_hash);
+    BOOST_CHECK(parsed->syscoin_hash == syscoin_hash);
+
+    std::string uppercase{canonical};
+    uppercase[8] = 'A';
+    std::string nonhex{canonical};
+    nonhex.back() = 'g';
+    const std::array<std::string, 9> noncanonical{{
+        "", "invalid", canonical.substr(0, canonical.size() - 1),
+        "error:" + canonical, canonical + ":detail", canonical + "\n",
+        "invalid:0x" + nevm_hash.GetHex() + ":" + syscoin_hash.GetHex(),
+        uppercase, nonhex}};
+    for (const auto& response : noncanonical) {
+        BOOST_TEST_CONTEXT(response) {
+            BOOST_CHECK(!ParseNEVMBlockReject(response).has_value());
+        }
+    }
+    // The protocol preserves the pair; ancestry and zero-hash semantics are
+    // checked against Core state by the receiving validation path.
+    const auto zero_pair{ParseNEVMBlockReject(
+        "invalid:" + uint256{}.GetHex() + ":" + uint256{}.GetHex())};
+    BOOST_REQUIRE(zero_pair.has_value());
+    BOOST_CHECK(zero_pair->nevm_hash.IsNull());
+    BOOST_CHECK(zero_pair->syscoin_hash.IsNull());
+}
+
 BOOST_AUTO_TEST_CASE(preseal_disconnect_tracks_only_geth_applied_prefix)
 {
     // SYSCOIN: Geth count N means heights [start, start + N) were applied.
