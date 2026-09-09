@@ -222,6 +222,7 @@ ChainTestingSetup::ChainTestingSetup(const ChainType chainType, const std::vecto
         .adjusted_time_callback = GetAdjustedTime,
         .check_block_index = true,
         .notifications = *m_node.notifications,
+        .geth_commandline = m_node.args->GetArgs("-gethcommandline"),
     };
     const BlockManager::Options blockman_opts{
         .chainparams = chainman_opts.chainparams,

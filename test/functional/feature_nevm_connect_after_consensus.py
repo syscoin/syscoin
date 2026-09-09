@@ -11,7 +11,7 @@ import struct
 import time
 
 from test_framework.test_framework import SyscoinTestFramework
-from test_framework.util import assert_equal, force_finish_mnsync
+from test_framework.util import assert_equal, assert_raises_rpc_error, force_finish_mnsync
 from test_framework.blocktools import create_block, create_coinbase, add_witness_commitment
 from test_framework.messages import (
     COIN,
@@ -45,6 +45,7 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
             "-nevmstartheight=1",
             "-mncollateral=100",
             "-dip3params=1000:1000",
+            "-gethcommandline=--exitwhensynced",
             "-par=2",
         ]]
 
@@ -64,6 +65,7 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
         self._connect_syshashes = []
         self._disconnect_syshashes = []
         self._last_nevm_block_data = b"nevmblock"
+        self._connect_response = b"connected"
 
         def _loop():
             while self._zmq_running:
@@ -103,14 +105,17 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
                         ]
                     )
                 elif topic == b"nevmconnect":
+                    response = b"connected"
                     try:
                         nevm_connect = CNEVMBlockConnect()
                         nevm_connect.deserialize(BytesIO(payload))
                         self._connect_syshashes.append(nevm_connect.sysblockhash)
+                        if nevm_connect.sysblockhash != 0:
+                            response = self._connect_response
                     except Exception as e:
                         self.log.warning("failed to decode nevmconnect: %s", e)
                         self._connect_syshashes.append(-1)
-                    self._zmq_sock.send_multipart([b"nevmconnect", b"connected"])
+                    self._zmq_sock.send_multipart([b"nevmconnect", response])
                 elif topic == b"nevmdisconnect":
                     try:
                         nevm_disconnect = CNEVMBlockDisconnect()
@@ -205,6 +210,16 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
             assert_equal(result, "bad-cb-amount")
             assert_equal(self._nonzero_connects_since(connect_len), [])
             assert_equal(self._disconnect_syshashes[disconnect_len:], [])
+
+            # Managed Geth shutdown remains a clean daemon exit even though
+            # Core now reports the unfinished connection as an operational error.
+            address = self.nodes[0].getnewaddress()
+            self._connect_response = b"not connected"
+            assert_raises_rpc_error(
+                -32603, "ProcessNewBlock, block not accepted",
+                self.nodes[0].generatetoaddress, 1, address, invalid_call=False,
+            )
+            self.nodes[0].wait_until_stopped()
         finally:
             self._stop_zmq_responder()
 

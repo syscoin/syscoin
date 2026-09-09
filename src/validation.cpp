@@ -3722,44 +3722,36 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
             return state.Error("shutdown");
         }
         GetMainSignals().NotifyNEVMBlockConnect(nevmBlockHeader, block, stateStr, fJustCheck? uint256(): nBlockHash, NEVMDataVecOut, nHeight, bSkipValidation, btcPrevHashForNEVM, diff);
-        if(!stateStr.empty()) {
-            state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, stateStr);
-            if(stateStr == "nevm-connect-response-invalid-data" || stateStr == "nevm-response-not-found") {
-                // if exitwhensynced is set on geth we likely have shutdown the geth node so we should also shut syscoin down here
-                const std::vector<std::string> &cmdLine = m_chainman.GethCommandLine();
-                if(std::find(cmdLine.begin(), cmdLine.end(), "--exitwhensynced") != cmdLine.end()) {
-                    m_chainman.GetNotifications().exitWhenSynced();
-                    return true;
-                }
-            }
-        }
-    }
-    bool res = state.IsValid();
-    // try to bring connection back alive if its not connected for some reason
-    if(!res) {
-        if(state.GetRejectReason() == "nevm-connect-not-sent") {
+        // Resolve the retry before classifying the result. An earlier transport
+        // failure must not leave a successful retry in an invalid/error state.
+        if(stateStr == "nevm-connect-not-sent") {
             bool bResponse = false;
             GetMainSignals().NotifyNEVMComms("status", bResponse);
             if(!bResponse) {
                 if(RestartGethNode()) {
                     // try again after resetting connection
+                    stateStr.clear();
                     GetMainSignals().NotifyNEVMBlockConnect(nevmBlockHeader, block, stateStr, fJustCheck? uint256(): nBlockHash, NEVMDataVecOut, nHeight, bSkipValidation, btcPrevHashForNEVM, diff);
-                    if(!stateStr.empty()) {
-                        state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, stateStr);
-                        if(stateStr == "nevm-connect-response-invalid-data" || stateStr == "nevm-response-not-found") {
-                            // if exitwhensynced is set on geth we likely have shutdown the geth node so we should also shut syscoin down here
-                            const std::vector<std::string> &cmdLine = m_chainman.GethCommandLine();
-                            if(std::find(cmdLine.begin(), cmdLine.end(), "--exitwhensynced") != cmdLine.end()) {
-                                m_chainman.GetNotifications().exitWhenSynced();
-                                return true;
-                            }
-                        }
-                    }
-                    res = state.IsValid();
                 }
             }
         }
+        if(!stateStr.empty()) {
+            if(stateStr == "nevm-connect-response-invalid-data" || stateStr == "nevm-response-not-found") {
+                const std::vector<std::string> &cmdLine = m_chainman.GethCommandLine();
+                if(std::find(cmdLine.begin(), cmdLine.end(), "--exitwhensynced") != cmdLine.end()) {
+                    m_chainman.GetNotifications().exitWhenSynced();
+                    return state.Error(stateStr);
+                }
+            }
+            // Preserve explicit engine rejection, but never cache a local
+            // communication/protocol failure as a consensus-invalid block.
+            if(stateStr == "nevm-connect-response-invalid-data") {
+                return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, stateStr);
+            }
+            return state.Error(stateStr);
+        }
     }
+    const bool res = state.IsValid();
     if(res && !fJustCheck) {
         NEVMTxRoot txRootDB;
         txRootDB.nTxRoot = nevmBlockHeader.nTxRoot;

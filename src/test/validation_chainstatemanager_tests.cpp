@@ -29,6 +29,7 @@
 #include <random.h>
 #include <rpc/blockchain.h>
 #include <services/assetconsensus.h> // SYSCOIN: coins-recovery NEVM roots and mint markers.
+#include <shutdown.h> // SYSCOIN: managed NEVM shutdown regression.
 #include <sync.h>
 #include <test/pq_test_util.h> // SYSCOIN: durable roster-context fixture.
 #include <test/util/chainstate.h>
@@ -113,9 +114,14 @@ public:
 
 namespace {
 struct DeferredNEVMReplaySetup : TestChain100Setup {
-    explicit DeferredNEVMReplaySetup(bool coins_db_in_memory = true)
+    explicit DeferredNEVMReplaySetup(bool coins_db_in_memory = true,
+                                     bool managed_exit = false)
         : TestChain100Setup{ChainType::REGTEST,
-                            {"-nevmstartheight=101"}, COINBASE_MATURITY,
+                            managed_exit
+                                ? std::vector<const char*>{"-nevmstartheight=101",
+                                                          "-gethcommandline=--exitwhensynced"}
+                                : std::vector<const char*>{"-nevmstartheight=101"},
+                            COINBASE_MATURITY,
                             coins_db_in_memory} {}
 };
 
@@ -137,6 +143,8 @@ struct StartupNEVMSubscriber final : CValidationInterface {
     std::optional<AppliedPair> reported_pair_override;
     std::optional<AppliedPair> last_reported_pair;
     std::size_t flush_requests{0};
+    bool status_available{true};
+    std::size_t status_requests{0};
     std::string block_info_error;
     std::string connect_error;
     std::string disconnect_error;
@@ -186,6 +194,11 @@ struct StartupNEVMSubscriber final : CValidationInterface {
 
     void NotifyNEVMComms(const std::string& command, bool& response) override
     {
+        if (command == "status") {
+            ++status_requests;
+            response = status_available;
+            return;
+        }
         if (command != "flush") return;
         ++flush_requests;
         response = flush_available;
@@ -226,8 +239,9 @@ struct StartupNEVMRecoverySetup : DeferredNEVMReplaySetup {
     std::shared_ptr<StartupNEVMSubscriber> nevm{
         std::make_shared<StartupNEVMSubscriber>()};
 
-    explicit StartupNEVMRecoverySetup(bool coins_db_in_memory = true)
-        : DeferredNEVMReplaySetup{coins_db_in_memory}
+    explicit StartupNEVMRecoverySetup(bool coins_db_in_memory = true,
+                                      bool managed_exit = false)
+        : DeferredNEVMReplaySetup{coins_db_in_memory, managed_exit}
     {
         RegisterSharedValidationInterface(nevm);
         fNEVMConnection = true;
@@ -273,6 +287,121 @@ struct StartupNEVMRecoverySetup : DeferredNEVMReplaySetup {
                       block->GetHash());
         SetMockTime(GetTime() + 1);
         return block;
+    }
+
+    void CheckConnectError(const std::string& error, bool engine_rejection = false,
+                           bool managed_exit = false)
+    {
+        auto& chainman{*Assert(m_node.chainman)};
+        auto& chainstate{chainman.ActiveChainstate()};
+        BOOST_REQUIRE(pnevmtxrootsdb != nullptr);
+        const auto candidate{MakeNEVMBlock()};
+        const COutPoint candidate_coinbase{candidate->vtx.front()->GetHash(), 0};
+        const COutPoint existing_coin{m_coinbase_txns.front()->GetHash(), 0};
+        CNEVMHeader header;
+        BlockValidationState header_state;
+        BOOST_REQUIRE(GetNEVMData(header_state, *candidate, header));
+        CBlockIndex* candidate_index{nullptr};
+        CBlockIndex* original_tip{nullptr};
+        uint256 durable_tip;
+        {
+            LOCK(::cs_main);
+            original_tip = chainman.ActiveTip();
+            durable_tip = chainstate.CoinsDB().GetBestBlock();
+            // Validate the complete candidate before injecting a notifier error.
+            BlockValidationState valid_state;
+            BOOST_REQUIRE_MESSAGE(TestBlockValidity(
+                valid_state, chainman.GetParams(), chainstate, *candidate,
+                original_tip, chainman.m_options.adjusted_time_callback),
+                valid_state.ToString());
+            BlockValidationState accept_state;
+            BOOST_REQUIRE_MESSAGE(chainman.AcceptBlock(
+                candidate, accept_state, &candidate_index, /*fRequested=*/true,
+                /*dbp=*/nullptr, /*fNewBlock=*/nullptr, /*min_pow_checked=*/true),
+                accept_state.ToString());
+            BOOST_REQUIRE(candidate_index != nullptr);
+            BOOST_REQUIRE_EQUAL(chainstate.setBlockIndexCandidates.count(candidate_index), 1U);
+            BOOST_REQUIRE(chainstate.CoinsTip().HaveCoin(existing_coin));
+        }
+        CBlockHeader descendant{candidate->GetBlockHeader()};
+        descendant.hashPrevBlock = candidate->GetHash();
+        ++descendant.nTime;
+        descendant.nNonce = 0;
+        while (!CheckProofOfWork(descendant.GetHash(), descendant.nBits,
+                                 chainman.GetConsensus())) ++descendant.nNonce;
+        BlockValidationState descendant_state;
+        BOOST_REQUIRE_MESSAGE(chainman.ProcessNewBlockHeaders(
+            {descendant}, /*min_pow_checked=*/true, descendant_state),
+            descendant_state.ToString());
+        CBlockIndex* descendant_index{WITH_LOCK(::cs_main,
+            return chainman.m_blockman.LookupBlockIndex(descendant.GetHash()))};
+        BOOST_REQUIRE(descendant_index != nullptr);
+        const auto connects{nevm->connected_blocks.size()};
+        const auto status_queries{nevm->status_requests};
+        const auto applied_hash{nevm->applied_hash};
+        const auto applied_count{nevm->applied_count};
+        // A healthy mock status prevents the send-error path launching Geth.
+        nevm->status_available = true;
+        nevm->connect_error = error;
+        BlockValidationState failed_state;
+        const bool activated{chainstate.ActivateBestChain(failed_state, candidate)};
+        if (engine_rejection) {
+            // ActivateBestChain retires invalid candidates and resets its state.
+            BOOST_CHECK(activated);
+        } else {
+            BOOST_CHECK(!activated);
+            BOOST_CHECK(failed_state.IsError());
+            BOOST_CHECK(!failed_state.IsInvalid());
+            BOOST_CHECK_EQUAL(failed_state.GetRejectReason(), error);
+        }
+        BOOST_CHECK_EQUAL(nevm->connected_blocks.size(), connects + 1);
+        BOOST_CHECK_EQUAL(nevm->status_requests,
+                          status_queries + (error == "nevm-connect-not-sent" ? 1U : 0U));
+        BOOST_CHECK(nevm->applied_hash == applied_hash);
+        BOOST_CHECK_EQUAL(nevm->applied_count, applied_count);
+        {
+            LOCK(::cs_main);
+            BOOST_CHECK(chainman.ActiveTip() == original_tip);
+            BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == original_tip->GetBlockHash());
+            BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == durable_tip);
+            BOOST_CHECK(chainstate.CoinsTip().HaveCoin(existing_coin));
+            BOOST_CHECK(!chainstate.CoinsTip().HaveCoin(candidate_coinbase));
+            BOOST_CHECK_EQUAL(candidate_index->nStatus & BLOCK_FAILED_MASK,
+                              engine_rejection ? BLOCK_FAILED_VALID : 0U);
+            BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(candidate_index),
+                              engine_rejection ? 0U : 1U);
+            if (!engine_rejection) {
+                BOOST_CHECK_EQUAL(descendant_index->nStatus & BLOCK_FAILED_MASK, 0U);
+            }
+        }
+        NEVMTxRoot roots;
+        BOOST_CHECK(!pnevmtxrootsdb->ReadTxRoots(header.nBlockHash, roots));
+        BOOST_CHECK(!pnevmtxrootsdb->Read(header.nBlockHash, roots));
+        nevm->connect_error.clear();
+        if (managed_exit) {
+            BOOST_CHECK(ShutdownRequested());
+            AbortShutdown();
+        }
+        if (engine_rejection) return;
+        // Retry this exact indexed block without reconsidering its branch.
+        BlockValidationState retry_state;
+        BOOST_REQUIRE_MESSAGE(chainstate.ActivateBestChain(retry_state, candidate),
+                              retry_state.ToString());
+        BOOST_CHECK(retry_state.IsValid());
+        {
+            LOCK(::cs_main);
+            BOOST_CHECK(chainman.ActiveTip() == candidate_index);
+            BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == candidate->GetHash());
+            BOOST_CHECK(chainstate.CoinsTip().HaveCoin(candidate_coinbase));
+            BOOST_CHECK_EQUAL(candidate_index->nStatus & BLOCK_FAILED_MASK, 0U);
+            BOOST_CHECK_EQUAL(descendant_index->nStatus & BLOCK_FAILED_MASK, 0U);
+        }
+        BOOST_CHECK(pnevmtxrootsdb->ReadTxRoots(header.nBlockHash, roots));
+        BOOST_CHECK(roots.nTxRoot == header.nTxRoot);
+        BOOST_CHECK(roots.nReceiptRoot == header.nReceiptRoot);
+        BOOST_CHECK(nevm->applied_hash == candidate->GetHash());
+        BOOST_CHECK_EQUAL(nevm->connected_blocks.size(), connects + 2);
+        SetMockTime(GetTime() + 1);
     }
 
     void RewindCore(int height)
@@ -415,6 +544,15 @@ struct StartupNEVMRecoverySetup : DeferredNEVMReplaySetup {
         BOOST_CHECK(recovery_state.IsValid());
         CheckCompetingStartupPairCompleted(branches);
     }
+};
+
+struct ManagedNEVMShutdownSetup : StartupNEVMRecoverySetup {
+    ManagedNEVMShutdownSetup()
+        : StartupNEVMRecoverySetup{/*coins_db_in_memory=*/true, /*managed_exit=*/true}
+    {
+        BOOST_REQUIRE(!ShutdownRequested());
+    }
+    ~ManagedNEVMShutdownSetup() { AbortShutdown(); }
 };
 
 // SYSCOIN BEGIN: Mint database read errors must leave block candidates usable.
@@ -1382,6 +1520,34 @@ BOOST_FIXTURE_TEST_CASE(persisted_reindex_marker_forces_clean_block_index, Chain
     }
 }
 BOOST_FIXTURE_TEST_SUITE(validation_chainstatemanager_tests, TestingSetup)
+
+BOOST_FIXTURE_TEST_CASE(nevm_connect_operational_errors_preserve_block_candidate,
+                        StartupNEVMRecoverySetup)
+{
+    for (const auto* error : {"nevm-not-connected", "ZMQ_RCVTIMEO",
+                             "nevm-connect-not-sent", "nevm-response-invalid-parts",
+                             "nevm-response-wrong-command", "nevm-response-not-found"}) {
+        BOOST_TEST_CONTEXT(error) { CheckConnectError(error); }
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_connect_engine_rejection_invalidates_block_candidate,
+                        StartupNEVMRecoverySetup)
+{
+    CheckConnectError("nevm-connect-response-invalid-data", /*engine_rejection=*/true);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_connect_managed_shutdown_preserves_block_candidate,
+                        ManagedNEVMShutdownSetup)
+{
+    BOOST_REQUIRE(m_node.chainman->GethCommandLine() ==
+                  std::vector<std::string>{"--exitwhensynced"});
+    for (const auto* error : {"nevm-connect-response-invalid-data", "nevm-response-not-found"}) {
+        BOOST_TEST_CONTEXT(error) {
+            CheckConnectError(error, /*engine_rejection=*/false, /*managed_exit=*/true);
+        }
+    }
+}
 
 // SYSCOIN BEGIN: Valid mint candidates survive local NEVM database read errors.
 BOOST_FIXTURE_TEST_CASE(nevm_mint_root_read_error_preserves_block_candidate,
