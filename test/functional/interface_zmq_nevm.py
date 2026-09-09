@@ -5,7 +5,7 @@
 """Test the ZMQ notification interface."""
 
 from test_framework.address import ADDRESS_BCRT1_UNSPENDABLE
-from test_framework.test_framework import SyscoinTestFramework
+from test_framework.test_framework import AuxPoWMiningMixin, SyscoinTestFramework
 from test_framework.messages import hash256, CNEVMBlock, CNEVMBlockConnect, CNEVMBlockDisconnect, uint256_from_str
 from test_framework.util import (
     assert_equal,
@@ -190,7 +190,7 @@ class ZMQPublisher:
         print(f"Expected: {expected_mn_mapping}")
         assert self.mnNEVMAddressMapping == expected_mn_mapping, "MN mapping did not match expected state"
 
-class ZMQTest(SyscoinTestFramework):
+class ZMQTest(AuxPoWMiningMixin, SyscoinTestFramework):
 
     def add_options(self, parser):
         # This test is descriptor-only; do not expose legacy wallet mode.
@@ -248,7 +248,7 @@ class ZMQTest(SyscoinTestFramework):
             self.test_basic(nevmsub, nevmsub1)
             # SYSCOIN BEGIN: Register roots and cross the PQ activation boundary.
             self.prepare_pq_masternodes()
-            self.activate_pq_profile()
+            self.activate_pq_profile((nevmsub, nevmsub1))
             # SYSCOIN END: Register roots and cross the PQ activation boundary.
             self.test_nevm_mapping(nevmsub)
             self.test_nevm_edge_cases(nevmsub)
@@ -634,9 +634,14 @@ class ZMQTest(SyscoinTestFramework):
         """Create a masternode with the specified NEVM address"""
         mn = self.prepared_mns.pop(index)
         assert_equal(mn.alias, alias)
+        # Registration and later wallet funding may consume the original
+        # setup balance. Give this post-activation update its own fee input.
+        service_fee_address = self.nodes[0].getnewaddress()
+        self.nodes[0].sendtoaddress(service_fee_address, 1)
+        self.generate(self.nodes[0], 1)
         self.nodes[0].protx_update_service(
             mn.protx_hash, '127.0.0.1:%d' % mn.p2p_port,
-            mn.operatorKey, "", "", mn.fundsAddr)
+            mn.operatorKey, "", "", service_fee_address)
         self.generate(self.nodes[0], 1)
         if nevm_address is not None:
             self.generate(self.nodes[0], (self.mn_count+1)*2 + 1)
@@ -691,7 +696,7 @@ class ZMQTest(SyscoinTestFramework):
                 (4, "edge-non-nevm-mn")):
             self.prepared_mns[index] = self.prepare_registered_mn(index, alias)
 
-    def activate_pq_profile(self):
+    def activate_pq_profile(self, subscribers):
         predecessor_height = 2304
         assert self.nodes[0].getblockcount() <= predecessor_height
         self.generatetoaddress(
@@ -721,6 +726,10 @@ class ZMQTest(SyscoinTestFramework):
                 self.extra_args[index].append('-reindex-chainstate')
 
         self.stop_nodes()
+        # Reindex replays every NEVM connect. Reset each stopped node's mock
+        # engine state so its original blocks are not rejected as duplicates.
+        for subscriber in subscribers:
+            subscriber.clearMappings()
         for index, node in enumerate(self.nodes):
             node.extra_args = list(self.extra_args[index])
             self.start_node(index, extra_args=self.extra_args[index])
@@ -731,6 +740,8 @@ class ZMQTest(SyscoinTestFramework):
         assert_equal(self.nodes[1].getblockcount(), predecessor_height)
         assert_equal(self.nodes[0].getbestblockhash(), predecessor_hash)
         assert_equal(self.nodes[1].getbestblockhash(), predecessor_hash)
+        for subscriber in subscribers:
+            assert_equal(subscriber.getLastSYSBlock(), int(predecessor_hash, 16))
     # SYSCOIN END: PQ-rooted NEVM masternode preparation and activation.
 
     def update_mn_set_nevm(self, mn, nevm_address):
