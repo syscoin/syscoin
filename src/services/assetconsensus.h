@@ -70,6 +70,8 @@ class CNEVMTxRootsDB : public CDBWrapper {
     NEVMMintTxSet m_pending_erases GUARDED_BY(cs_cache);
     // SYSCOIN: A durable disconnect remains masked until coins recovery finishes.
     std::optional<NEVMRootDisconnect> m_pending_disconnect GUARDED_BY(cs_cache);
+    // SYSCOIN: Write-ahead branch tip for roots that may have reached disk.
+    std::optional<uint256> m_published_tip GUARDED_BY(cs_cache);
     void StageErase(const std::vector<uint256>& block_hashes) EXCLUSIVE_LOCKS_REQUIRED(cs_cache);
     bool FlushPendingErases() EXCLUSIVE_LOCKS_REQUIRED(cs_cache);
 protected:
@@ -78,10 +80,15 @@ public:
     // SYSCOIN BEGIN: Load and resolve the single durable disconnect obligation.
     explicit CNEVMTxRootsDB(const DBParams& params);
     std::optional<NEVMRootDisconnect> GetPendingDisconnect() const EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
+    std::optional<uint256> GetPublishedTip() const EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
+    // Record the complete source branch before publishing cached root additions.
+    bool RecordPublishedTip(const uint256& target) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
     // Revoke while the coins rollback is still private to the caller.
     bool BeginDisconnect(const NEVMRootDisconnect& disconnect) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
-    // Requires synchronized coins; restoration also requires canonical ancestry.
-    bool CompleteDisconnect(bool restore_root) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
+    // Requires synchronized recovered coins and root cleanup. The optional
+    // pending-root value must come from an authenticated canonical carrier.
+    bool CompleteRootRecovery(const uint256& recovered_tip,
+                              const std::optional<NEVMTxRoot>& pending_root) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
     // SYSCOIN END: Load and resolve the single durable disconnect obligation.
     virtual ~CNEVMTxRootsDB() = default;
     void EraseCache(const std::vector<uint256>& block_hashes) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);

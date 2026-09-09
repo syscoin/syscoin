@@ -628,28 +628,64 @@ bool CheckAssetAllocationInputs(const CTransaction &tx, const uint256& txHash, T
 namespace {
 // Legacy root keys serialize to 32 bytes, so this one-byte key cannot collide.
 constexpr uint8_t DB_NEVM_ROOT_DISCONNECT{'D'};
+constexpr uint8_t DB_NEVM_ROOT_PUBLISHED_TIP{'T'};
 }
 
 CNEVMTxRootsDB::CNEVMTxRootsDB(const DBParams& params) : CDBWrapper(params)
 {
-    std::unique_ptr<CDBIterator> it{NewIterator()};
-    it->Seek(DB_NEVM_ROOT_DISCONNECT);
-    it->CheckStatus();
-    uint8_t key;
-    if (!it->Valid() || !it->GetKeyExact(key) || key != DB_NEVM_ROOT_DISCONNECT) return;
-    NEVMRootDisconnect disconnect;
-    if (it->GetValueSize() != 4 * uint256::size() ||
-        !it->GetValueExact(disconnect) || !disconnect.IsValid()) {
-        throw dbwrapper_error("Invalid pending NEVM root disconnect record");
-    }
+    const auto read_record = [this](uint8_t record_key, auto& value,
+                                    std::size_t expected_size, const char* message) {
+        std::unique_ptr<CDBIterator> it{NewIterator()};
+        it->Seek(record_key);
+        it->CheckStatus();
+        uint8_t key;
+        if (!it->Valid() || !it->GetKeyExact(key) || key != record_key) return false;
+        if (it->GetValueSize() != expected_size || !it->GetValueExact(value)) {
+            throw dbwrapper_error(message);
+        }
+        return true;
+    };
     LOCK(cs_cache);
-    m_pending_disconnect = disconnect;
+    NEVMRootDisconnect disconnect;
+    if (read_record(DB_NEVM_ROOT_DISCONNECT, disconnect, 4 * uint256::size(),
+                    "Invalid pending NEVM root disconnect record")) {
+        if (!disconnect.IsValid()) {
+            throw dbwrapper_error("Invalid pending NEVM root disconnect record");
+        }
+        m_pending_disconnect = disconnect;
+    }
+    uint256 published_tip;
+    if (read_record(DB_NEVM_ROOT_PUBLISHED_TIP, published_tip, uint256::size(),
+                    "Invalid published NEVM root tip record")) {
+        if (published_tip.IsNull()) {
+            throw dbwrapper_error("Invalid published NEVM root tip record");
+        }
+        m_published_tip = published_tip;
+    }
 }
 
 std::optional<NEVMRootDisconnect> CNEVMTxRootsDB::GetPendingDisconnect() const
 {
     LOCK(cs_cache);
     return m_pending_disconnect;
+}
+
+std::optional<uint256> CNEVMTxRootsDB::GetPublishedTip() const
+{
+    LOCK(cs_cache);
+    return m_published_tip;
+}
+
+bool CNEVMTxRootsDB::RecordPublishedTip(const uint256& target)
+{
+    LOCK(cs_cache);
+    if (target.IsNull()) return false;
+    if (m_published_tip == target) return true;
+    CDBBatch batch(*this);
+    batch.Write(DB_NEVM_ROOT_PUBLISHED_TIP, target);
+    if (!WriteCacheBatch(batch, /*sync=*/true)) return false;
+    m_published_tip = target;
+    return true;
 }
 
 bool CNEVMTxRootsDB::BeginDisconnect(const NEVMRootDisconnect& disconnect)
@@ -666,23 +702,29 @@ bool CNEVMTxRootsDB::BeginDisconnect(const NEVMRootDisconnect& disconnect)
     return true;
 }
 
-bool CNEVMTxRootsDB::CompleteDisconnect(bool restore_root)
+bool CNEVMTxRootsDB::CompleteRootRecovery(
+    const uint256& recovered_tip, const std::optional<NEVMTxRoot>& pending_root)
 {
     LOCK(cs_cache);
-    if (!m_pending_disconnect) return true;
-    const auto& disconnect = *m_pending_disconnect;
+    if (recovered_tip.IsNull()) return false;
     CDBBatch batch(*this);
-    if (restore_root) {
-        batch.Write(disconnect.block_hash,
-                    NEVMTxRoot{disconnect.tx_root, disconnect.receipt_root});
-    } else {
-        batch.Erase(disconnect.block_hash);
+    if (m_pending_disconnect) {
+        const auto& block_hash = m_pending_disconnect->block_hash;
+        if (pending_root) {
+            batch.Write(block_hash, *pending_root);
+        } else {
+            batch.Erase(block_hash);
+        }
     }
     batch.Erase(DB_NEVM_ROOT_DISCONNECT);
+    batch.Write(DB_NEVM_ROOT_PUBLISHED_TIP, recovered_tip);
     if (!WriteCacheBatch(batch, /*sync=*/true)) return false;
-    mapCache.erase(disconnect.block_hash);
-    m_pending_erases.erase(disconnect.block_hash);
+    if (m_pending_disconnect) {
+        mapCache.erase(m_pending_disconnect->block_hash);
+        m_pending_erases.erase(m_pending_disconnect->block_hash);
+    }
     m_pending_disconnect.reset();
+    m_published_tip = recovered_tip;
     return true;
 }
 // SYSCOIN END: Revoke roots and retain recovery intent in one durable batch.

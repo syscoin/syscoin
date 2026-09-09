@@ -5321,9 +5321,31 @@ bool Chainstate::FlushStateToDisk(
                 !pblockindexdb->FlushCacheToDisk((uint32_t)m_chain.Height(), /*CHUNK_ITEMS=*/100000, sys_sync_flush)) {
                 return FatalError(m_chainman.GetNotifications(), state, "Failed to commit to block index db");
             }
-            if (pnevmtxrootsdb &&
-                !pnevmtxrootsdb->FlushCacheToDisk(/*CHUNK_ITEMS=*/100000, sys_sync_flush)) {
-                return FatalError(m_chainman.GetNotifications(), state, "Failed to commit to nevm tx roots db");
+            // SYSCOIN: The root cache can reach disk on a metadata-only
+            // flush while coins still name an older block. Persist its source
+            // branch first so startup can reconcile the whole surplus suffix.
+            // This store is shared with background AssumeUTXO validation;
+            // its roots belong to the active branch, not the background tip.
+            if (pnevmtxrootsdb) {
+                auto& active{m_chainman.ActiveChainstate()};
+                const auto root_tip{active.CoinsTip().GetBestBlock()};
+                if ((!fRegTest || fNEVMConnection) && !root_tip.IsNull()) {
+                    const auto* root_index{m_blockman.LookupBlockIndex(root_tip)};
+                    if (!root_index ||
+                        !m_blockman.FlushChainstateBlockFile(root_index->nHeight) ||
+                        !pnevmtxrootsdb->RecordPublishedTip(root_tip)) {
+                        return FatalError(m_chainman.GetNotifications(), state,
+                                          "Failed to persist NEVM root publication branch");
+                    }
+                }
+                // A full coins flush may survive independently of older
+                // asynchronous root writes. Its canonical roots must already
+                // be durable even when T and the recovered coins tip match.
+                if (!pnevmtxrootsdb->FlushCacheToDisk(/*CHUNK_ITEMS=*/100000,
+                                                    /*fSync=*/fDoFullFlush || sys_sync_flush) ||
+                    (fDoFullFlush && !pnevmtxrootsdb->Sync())) {
+                    return FatalError(m_chainman.GetNotifications(), state, "Failed to commit to nevm tx roots db");
+                }
             }
             // SYSCOIN: nevmminttx is flushed with the full UTXO flush below (write-ahead
             // of CoinsTip), not on ordinary periodic metadata writes.
@@ -5682,7 +5704,8 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
                 }
             }
             if (root_disconnect &&
-                !pnevmtxrootsdb->CompleteDisconnect(/*restore_root=*/false)) {
+                !pnevmtxrootsdb->CompleteRootRecovery(
+                    pindexDelete->pprev->GetBlockHash(), std::nullopt)) {
                 return FatalError(m_chainman.GetNotifications(), state,
                                   "DisconnectTip(): Failed to complete NEVM root revocation");
             }
@@ -9120,53 +9143,133 @@ bool Chainstate::ReplayBlocks()
         this == &m_chainman.ActiveChainstate() && pnevmtxrootsdb
             ? pnevmtxrootsdb->GetPendingDisconnect()
             : std::nullopt};
-    const auto recover_root_disconnect = [&](bool coins_synced)
+    const auto published_root_tip{
+        this == &m_chainman.ActiveChainstate() && pnevmtxrootsdb
+            ? pnevmtxrootsdb->GetPublishedTip()
+            : std::nullopt};
+    const bool root_recovery{root_disconnect || published_root_tip};
+    const auto recover_roots = [&](bool coins_synced)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
-        if (!root_disconnect) return true;
+        if (!root_recovery) return true;
         const uint256 recovered_hash{db.GetBestBlock()};
         // An empty/reindexed coins view causes startup to recreate the roots
-        // store. Preserve its mask until that existing rebuild takes place.
+        // store. Preserve its recovery metadata until that rebuild takes place.
         if (recovered_hash.IsNull() && db.GetHeadBlocks().empty()) return true;
         const CBlockIndex* recovered{m_blockman.LookupBlockIndex(recovered_hash)};
         if (recovered == nullptr || !db.GetHeadBlocks().empty()) {
             return error("ReplayBlocks(): Cannot establish coins ancestry for NEVM root recovery");
         }
-        const CBlockIndex* carrier{m_blockman.LookupBlockIndex(root_disconnect->carrier)};
-        const bool restore_root{
-            carrier != nullptr && carrier->nHeight <= recovered->nHeight &&
-            recovered->GetAncestor(carrier->nHeight) == carrier};
-        if (restore_root) {
+        if (hashHeads.empty() && !root_disconnect && published_root_tip == recovered_hash) return true;
+
+        const auto read_header = [&](const CBlockIndex& index, CNEVMHeader& header) {
             CBlock block;
-            CNEVMHeader header;
+            bool mutated{false};
             BlockValidationState header_state;
-            if (!m_blockman.ReadBlockFromDisk(block, *carrier) ||
-                !GetNEVMData(header_state, block, header) ||
+            // The coinbase commitment is authenticated by the stored header's
+            // merkle root; auxiliary PoDA sidecars are unnecessary for this.
+            return m_blockman.ReadBlockFromDisk(block, index, /*load_auxiliary_data=*/false) &&
+                BlockMerkleRoot(block, &mutated) == block.hashMerkleRoot && !mutated &&
+                GetNEVMData(header_state, block, header);
+        };
+        std::vector<const CBlockIndex*> sources;
+        if (published_root_tip) {
+            const auto* source{m_blockman.LookupBlockIndex(*published_root_tip)};
+            if (!source) return error("ReplayBlocks(): Unknown published NEVM root branch");
+            sources.push_back(source);
+        }
+        if (hashHeads.size() == 2 && !hashHeads[1].IsNull()) {
+            const auto* source{m_blockman.LookupBlockIndex(hashHeads[1])};
+            if (!source) return error("ReplayBlocks(): Unknown prior coins branch for NEVM root recovery");
+            sources.push_back(source);
+        }
+        std::set<uint256> affected;
+        if (root_disconnect) {
+            const auto* carrier{m_blockman.LookupBlockIndex(root_disconnect->carrier)};
+            CNEVMHeader header;
+            // Authenticate the record even on the discarded branch. Corrupt
+            // metadata must not select an unrelated canonical key for erasure.
+            if (!carrier || !read_header(*carrier, header) ||
                 header.nBlockHash != root_disconnect->block_hash ||
                 header.nTxRoot != root_disconnect->tx_root ||
                 header.nReceiptRoot != root_disconnect->receipt_root) {
-                return error("ReplayBlocks(): NEVM root recovery does not match its canonical carrier");
+                return error("ReplayBlocks(): NEVM root recovery does not match its carrier");
+            }
+            sources.push_back(carrier);
+            affected.insert(header.nBlockHash);
+        }
+        int canonical_fork_height{recovered->nHeight};
+        std::set<const CBlockIndex*> visited;
+        for (const auto* source : sources) {
+            const auto* fork{LastCommonAncestor(source, recovered)};
+            if (!fork) return error("ReplayBlocks(): NEVM root branches have no common ancestor");
+            canonical_fork_height = std::min(canonical_fork_height, fork->nHeight);
+            for (auto* index = source; index != fork; index = index->pprev) {
+                if (index->nHeight < m_chainman.GetConsensus().nNEVMStartBlock) break;
+                if (!visited.insert(index).second) break;
+                CNEVMHeader header;
+                if (!read_header(*index, header)) {
+                    return error("ReplayBlocks(): Cannot authenticate discarded NEVM root carrier %s",
+                                 index->GetBlockHash().ToString());
+                }
+                affected.insert(header.nBlockHash);
             }
         }
-        // A second crash must not lose the coins state used to authorize
-        // restoration after the recovery record has been removed.
-        if (!coins_synced) {
-            // Include retained roots written by earlier asynchronous flushes.
-            if (!pnevmtxrootsdb->FlushCacheToDisk(
-                    /*CHUNK_ITEMS=*/100000, /*fSync=*/true) ||
-                !pnevmtxrootsdb->Sync()) {
-                return error("ReplayBlocks(): Failed to synchronize retained NEVM roots");
+        NEVMTxRootMap canonical_roots;
+        auto unresolved{affected};
+        // A NEVM hash can also occur in the common prefix, with a different
+        // accepted commitment. Search canonical ancestry for every affected
+        // key, choosing its latest carrier, and rebuild the replacement suffix.
+        for (auto* index = recovered;
+             index && index->nHeight >= m_chainman.GetConsensus().nNEVMStartBlock;
+             index = index->pprev) {
+            const bool replacement{index->nHeight > canonical_fork_height};
+            if (!replacement && unresolved.empty()) break;
+            CNEVMHeader header;
+            if (!read_header(*index, header)) {
+                return error("ReplayBlocks(): Cannot authenticate canonical NEVM root carrier %s",
+                             index->GetBlockHash().ToString());
             }
+            if (replacement || affected.contains(header.nBlockHash)) {
+                canonical_roots.try_emplace(header.nBlockHash,
+                    NEVMTxRoot{header.nTxRoot, header.nReceiptRoot});
+                unresolved.erase(header.nBlockHash);
+            }
+        }
+        // Pin the recovered coins endpoint before any destructive cleanup or
+        // restoration. A second crash must recover to this same branch while
+        // the old source endpoints still describe the unfinished root work.
+        if (!coins_synced) {
             cache.SetBestBlock(recovered_hash);
             if (!CoinsDB().FlushWithSync(cache)) {
                 return error("ReplayBlocks(): Failed to synchronize coins for NEVM root recovery");
             }
         }
-        if (!pnevmtxrootsdb->CompleteDisconnect(restore_root)) {
-            return error("ReplayBlocks(): Failed to resolve NEVM root disconnect");
+        std::vector<uint256> erased_roots;
+        for (const auto& hash : affected) {
+            // Do not create a missing-canonical-root window by erasing an
+            // alias before replacing its value. This also preserves roots if
+            // the already-published endpoint equals the recovered coins tip.
+            if (!canonical_roots.contains(hash)) erased_roots.push_back(hash);
+        }
+        if (!pnevmtxrootsdb->FlushErase(erased_roots)) {
+            return error("ReplayBlocks(): Failed to erase discarded NEVM roots");
+        }
+        pnevmtxrootsdb->FlushDataToCache(canonical_roots);
+        if (!pnevmtxrootsdb->FlushCacheToDisk(/*CHUNK_ITEMS=*/100000, /*fSync=*/true) ||
+            !pnevmtxrootsdb->Sync()) {
+            return error("ReplayBlocks(): Failed to synchronize recovered NEVM roots");
+        }
+        std::optional<NEVMTxRoot> pending_root;
+        if (root_disconnect) {
+            const auto it{canonical_roots.find(root_disconnect->block_hash)};
+            if (it != canonical_roots.end()) pending_root = it->second;
+        }
+        if (!pnevmtxrootsdb->CompleteRootRecovery(recovered_hash, pending_root)) {
+            return error("ReplayBlocks(): Failed to complete NEVM root recovery");
         }
         return true;
     };
-    if (hashHeads.empty()) return recover_root_disconnect(/*coins_synced=*/false);
+    if (hashHeads.empty()) return recover_roots(/*coins_synced=*/false);
     if (hashHeads.size() != 2) return error("ReplayBlocks(): unknown inconsistent state");
 
     m_chainman.GetNotifications().progress(_("Replaying blocks…"), 0, false);
@@ -9234,10 +9337,13 @@ bool Chainstate::ReplayBlocks()
     // deferred: erasing them before the recovered UTXO tip is durable can leave
     // minted UTXOs without replay protection after a crash.
     if (pnevmtxrootsdb != nullptr) {
-        // SYSCOIN: Queue both rollback sets before either DB write can fail.
-        pnevmtxrootsdb->EraseCache(vecNEVMBlocks);
+        // SYSCOIN: Root recovery reconciles both branches after coins are
+        // pinned, preserving keys also carried by the canonical branch.
+        // Legacy stores retain their existing rollback path.
+        if (!root_recovery) pnevmtxrootsdb->EraseCache(vecNEVMBlocks);
         pblockindexdb->EraseCache(vecTXIDPairs);
-        if (!pnevmtxrootsdb->FlushErase(vecNEVMBlocks) || !pblockindexdb->FlushErase(vecTXIDPairs)) {
+        if ((!root_recovery && !pnevmtxrootsdb->FlushErase(vecNEVMBlocks)) ||
+            !pblockindexdb->FlushErase(vecTXIDPairs)) {
             return error("RollbackBlock(): Error flushing to asset dbs on disconnect");
         }
     }
@@ -9281,18 +9387,10 @@ bool Chainstate::ReplayBlocks()
         return error(
             "ReplayBlocks(): Failed to persist deterministic masternode state");
     }
-    // SYSCOIN: Resolve the root recovery record only after every reconstructed
-    // canonical root can survive the same restart as the recovered coins tip.
-    if (root_disconnect) {
-        pnevmtxrootsdb->FlushDataToCache(mapNEVMTxRoots);
-        if (!pnevmtxrootsdb->FlushCacheToDisk(/*CHUNK_ITEMS=*/100000, /*fSync=*/true) ||
-            !pnevmtxrootsdb->Sync()) {
-            return error("ReplayBlocks(): Failed to persist recovered NEVM roots");
-        }
-    }
-    // SYSCOIN: A pending root recovery, like mint-marker removal, must retain
-    // its protection until all prior coins writes are durable.
-    const bool coins_flushed = root_disconnect ||
+    // SYSCOIN: Keep both source endpoints until the recovered coins branch is
+    // durable, then reconcile roots against it. Publishing replacement roots
+    // before this barrier could leave them outside the recorded source branch.
+    const bool coins_flushed = root_recovery ||
             (pnevmtxmintdb && !setMintDisconnectOnly.empty())
         ? CoinsDB().FlushWithSync(cache)
         : cache.Flush();
@@ -9309,10 +9407,10 @@ bool Chainstate::ReplayBlocks()
     if(pblockindexdb) {
         pblockindexdb->FlushDataToCache(vecTXIDPairs);
     }
-    if(pnevmtxrootsdb && !root_disconnect) {
+    if(pnevmtxrootsdb && !root_recovery) {
         pnevmtxrootsdb->FlushDataToCache(mapNEVMTxRoots);
     }
-    if (!recover_root_disconnect(/*coins_synced=*/true)) return false;
+    if (!recover_roots(/*coins_synced=*/true)) return false;
     m_chainman.GetNotifications().progress(bilingual_str{}, 100, false);
     return true;
 }

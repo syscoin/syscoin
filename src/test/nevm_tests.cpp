@@ -27,6 +27,7 @@
 #include <cstddef>
 // SYSCOIN: overflow boundary coverage for deferred NEVM disconnects.
 #include <limits>
+#include <optional> // SYSCOIN: explicit canonical-root recovery results.
 #include <utility>
 #include <vector>
 
@@ -933,6 +934,13 @@ bool NEVMCacheValueMatches(CNEVMTxRootsDB& db, const uint256& key, unsigned char
            roots.nReceiptRoot == NEVMCacheTestKey(value + 1);
 }
 
+// SYSCOIN: The caller has separately authenticated and synchronized this tip.
+bool CompleteRootDisconnect(CNEVMTxRootsDB& db, const NEVMRootDisconnect& record, bool restore_root)
+{
+    return db.CompleteRootRecovery(NEVMCacheTestKey(99),
+        restore_root ? std::make_optional(NEVMTxRoot{record.tx_root, record.receipt_root}) : std::nullopt);
+}
+
 template <typename Operation>
 void CheckNEVMCacheWriteFailure(bool throw_error, Operation operation)
 {
@@ -1129,7 +1137,7 @@ BOOST_AUTO_TEST_CASE(root_disconnect_journal_masks_reinsertions_across_reopen)
 
             // The caller separately establishes and synchronizes the recovered
             // coins tip before choosing whether this carrier remains canonical.
-            BOOST_REQUIRE(db.CompleteDisconnect(restore_root));
+            BOOST_REQUIRE(CompleteRootDisconnect(db, record, restore_root));
             BOOST_CHECK(db.writes == std::vector<bool>{true});
             BOOST_CHECK(!db.GetPendingDisconnect());
             BOOST_CHECK_EQUAL(NEVMCacheValueMatches(db, record.block_hash, 13), restore_root);
@@ -1169,7 +1177,7 @@ BOOST_AUTO_TEST_CASE(root_disconnect_journal_write_failures_preserve_recovery_st
                 BOOST_REQUIRE(NEVMCacheValueMatches(db, record.block_hash, 13));
                 BOOST_REQUIRE(db.BeginDisconnect(record));
                 db.FailNextWrite(throw_error);
-                CheckNEVMCacheWriteFailure(throw_error, [&] { return db.CompleteDisconnect(restore_root); });
+                CheckNEVMCacheWriteFailure(throw_error, [&] { return CompleteRootDisconnect(db, record, restore_root); });
                 BOOST_REQUIRE(db.GetPendingDisconnect());
                 BOOST_CHECK(!NEVMCacheValueMatches(db, record.block_hash, 13));
                 StageNEVMCacheValue(db, record.block_hash, 23);
@@ -1181,7 +1189,7 @@ BOOST_AUTO_TEST_CASE(root_disconnect_journal_write_failures_preserve_recovery_st
                 BOOST_REQUIRE(db.GetPendingDisconnect());
                 BOOST_CHECK(!NEVMCacheValueMatches(db, record.block_hash, 13));
                 BOOST_CHECK(!NEVMCacheValueMatches(db, record.block_hash, 23));
-                BOOST_REQUIRE(db.CompleteDisconnect(restore_root));
+                BOOST_REQUIRE(CompleteRootDisconnect(db, record, restore_root));
             }
             {
                 CNEVMTxRootsDB db({.path = path, .cache_bytes = 1 << 20});
@@ -1217,7 +1225,7 @@ BOOST_AUTO_TEST_CASE(root_disconnect_journal_preserves_opaque_roots_and_rejects_
             BOOST_REQUIRE(db.GetPendingDisconnect());
             NEVMTxRoot roots;
             BOOST_CHECK(!db.ReadTxRoots(opaque.block_hash, roots));
-            BOOST_REQUIRE(db.CompleteDisconnect(/*restore_root=*/true));
+            BOOST_REQUIRE(CompleteRootDisconnect(db, opaque, /*restore_root=*/true));
         }
         {
             CNEVMTxRootsDB db(params);
@@ -1263,6 +1271,138 @@ BOOST_AUTO_TEST_CASE(root_disconnect_journal_preserves_opaque_roots_and_rejects_
     BOOST_CHECK(NEVMCacheValueMatches(db, NEVMCacheTestKey('D'), 13));
 }
 // SYSCOIN END: Cold reopening must preserve unfinished root revocation.
+
+// SYSCOIN BEGIN: Root publication coverage survives asynchronous puts and crashes.
+BOOST_AUTO_TEST_CASE(published_root_tip_is_durable_before_asynchronous_cache_puts)
+{
+    const fs::path path{m_args.GetDataDirBase() / "root_published_tip"};
+    const uint256 old_tip{NEVMCacheTestKey(10)};
+    const uint256 new_tip{NEVMCacheTestKey(11)};
+    const uint256 recovered_tip{NEVMCacheTestKey(15)};
+    const uint256 root_hash{NEVMCacheTestKey(12)};
+    for (const bool throw_error : {false, true}) {
+        {
+            FailingNEVMCacheDB<CNEVMTxRootsDB> db(
+                {.path = path, .cache_bytes = 1 << 20, .wipe_data = true});
+            BOOST_CHECK(!db.RecordPublishedTip(uint256{}));
+            BOOST_CHECK(db.writes.empty());
+            BOOST_REQUIRE(db.RecordPublishedTip(old_tip));
+            StageNEVMCacheValue(db, root_hash, 13);
+            db.FailNextWrite(throw_error);
+            CheckNEVMCacheWriteFailure(throw_error, [&] { return db.RecordPublishedTip(new_tip); });
+            BOOST_REQUIRE(db.GetPublishedTip());
+            BOOST_CHECK(*db.GetPublishedTip() == old_tip);
+            BOOST_CHECK(db.writes == std::vector<bool>({true, true}));
+            BOOST_CHECK(!db.Exists(root_hash));
+        }
+        {
+            FailingNEVMCacheDB<CNEVMTxRootsDB> db({.path = path, .cache_bytes = 1 << 20});
+            BOOST_REQUIRE(db.GetPublishedTip());
+            BOOST_CHECK(*db.GetPublishedTip() == old_tip);
+            BOOST_CHECK(!db.Exists(root_hash));
+            BOOST_REQUIRE(db.RecordPublishedTip(new_tip));
+            BOOST_REQUIRE(db.RecordPublishedTip(new_tip));
+            BOOST_CHECK(db.writes == std::vector<bool>{true});
+            StageNEVMCacheValue(db, root_hash, 13);
+            BOOST_REQUIRE(db.FlushCacheToDisk(2, /*fSync=*/false));
+            BOOST_CHECK(db.writes == std::vector<bool>({true, false}));
+        }
+        {
+            CNEVMTxRootsDB db({.path = path, .cache_bytes = 1 << 20});
+            BOOST_REQUIRE(db.GetPublishedTip());
+            BOOST_CHECK(*db.GetPublishedTip() == new_tip);
+            BOOST_CHECK(!db.GetPendingDisconnect());
+            BOOST_CHECK(NEVMCacheValueMatches(db, root_hash, 13));
+            BOOST_REQUIRE(db.CompleteRootRecovery(recovered_tip, std::nullopt));
+        }
+        {
+            CNEVMTxRootsDB db({.path = path, .cache_bytes = 1 << 20});
+            BOOST_REQUIRE(db.GetPublishedTip());
+            BOOST_CHECK(*db.GetPublishedTip() == recovered_tip);
+            BOOST_CHECK(!db.GetPendingDisconnect());
+            BOOST_CHECK(NEVMCacheValueMatches(db, root_hash, 13));
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(root_recovery_atomically_updates_publication_tip_and_canonical_alias)
+{
+    const fs::path path{m_args.GetDataDirBase() / "root_recovery_alias"};
+    const NEVMRootDisconnect record{NEVMCacheTestKey(1), NEVMCacheTestKey(2),
+                                    NEVMCacheTestKey(13), NEVMCacheTestKey(14)};
+    const uint256 recovered_tip{NEVMCacheTestKey(20)};
+    for (const bool throw_error : {false, true}) {
+        for (const bool restore_alias : {false, true}) {
+            const auto canonical_roots{restore_alias
+                ? std::make_optional(NEVMTxRoot{NEVMCacheTestKey(23), NEVMCacheTestKey(24)})
+                : std::nullopt};
+            {
+                FailingNEVMCacheDB<CNEVMTxRootsDB> db(
+                    {.path = path, .cache_bytes = 1 << 20, .wipe_data = true});
+                BOOST_REQUIRE(db.RecordPublishedTip(record.carrier));
+                StageNEVMCacheValue(db, record.block_hash, 13);
+                BOOST_REQUIRE(db.FlushCacheToDisk());
+                BOOST_REQUIRE(db.BeginDisconnect(record));
+                BOOST_CHECK(!db.CompleteRootRecovery(uint256{}, canonical_roots));
+                db.FailNextWrite(throw_error);
+                CheckNEVMCacheWriteFailure(throw_error, [&] {
+                    return db.CompleteRootRecovery(recovered_tip, canonical_roots);
+                });
+                BOOST_REQUIRE(db.GetPublishedTip());
+                BOOST_CHECK(*db.GetPublishedTip() == record.carrier);
+                BOOST_REQUIRE(db.GetPendingDisconnect());
+                BOOST_CHECK(!NEVMCacheValueMatches(db, record.block_hash, 13));
+                BOOST_CHECK(!NEVMCacheValueMatches(db, record.block_hash, 23));
+            }
+            {
+                FailingNEVMCacheDB<CNEVMTxRootsDB> db({.path = path, .cache_bytes = 1 << 20});
+                BOOST_REQUIRE(db.GetPendingDisconnect());
+                BOOST_REQUIRE(db.GetPublishedTip());
+                BOOST_CHECK(*db.GetPublishedTip() == record.carrier);
+                BOOST_CHECK(!NEVMCacheValueMatches(db, record.block_hash, 23));
+                BOOST_REQUIRE(db.CompleteRootRecovery(recovered_tip, canonical_roots));
+                BOOST_CHECK(db.writes == std::vector<bool>{true});
+            }
+            {
+                CNEVMTxRootsDB db({.path = path, .cache_bytes = 1 << 20});
+                BOOST_REQUIRE(db.GetPublishedTip());
+                BOOST_CHECK(*db.GetPublishedTip() == recovered_tip);
+                BOOST_CHECK(!db.GetPendingDisconnect());
+                BOOST_CHECK(!NEVMCacheValueMatches(db, record.block_hash, 13));
+                BOOST_CHECK_EQUAL(NEVMCacheValueMatches(db, record.block_hash, 23), restore_alias);
+                BOOST_CHECK_EQUAL(db.Exists(record.block_hash), restore_alias);
+            }
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(published_root_tip_rejects_malformed_records_and_preserves_legacy_keys)
+{
+    const fs::path path{m_args.GetDataDirBase() / "root_published_tip_malformed"};
+    const DBParams params{.path = path, .cache_bytes = 1 << 20};
+    const uint256 tip{NEVMCacheTestKey(10)};
+    const auto check_malformed = [&](const auto& value) {
+        {
+            CDBWrapper db({.path = path, .cache_bytes = 1 << 20, .wipe_data = true});
+            BOOST_REQUIRE(db.Write(uint8_t{'T'}, value, true));
+        }
+        BOOST_CHECK_THROW(CNEVMTxRootsDB{params}, dbwrapper_error);
+    };
+    check_malformed(uint256{});
+    check_malformed(uint8_t{1});
+    check_malformed(std::pair{tip, uint8_t{1}});
+    {
+        CNEVMTxRootsDB db({.path = path, .cache_bytes = 1 << 20, .wipe_data = true});
+        BOOST_REQUIRE(db.RecordPublishedTip(tip));
+        StageNEVMCacheValue(db, NEVMCacheTestKey('T'), 13);
+        BOOST_REQUIRE(db.FlushCacheToDisk());
+    }
+    CNEVMTxRootsDB db(params);
+    BOOST_REQUIRE(db.GetPublishedTip());
+    BOOST_CHECK(*db.GetPublishedTip() == tip);
+    BOOST_CHECK(NEVMCacheValueMatches(db, NEVMCacheTestKey('T'), 13));
+}
+// SYSCOIN END: Root publication coverage survives asynchronous puts and crashes.
 
 BOOST_AUTO_TEST_SUITE_END()
 // SYSCOIN END: Exercise real NEVM cache classes with failed batch writes.

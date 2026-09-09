@@ -143,6 +143,7 @@ struct StartupNEVMSubscriber final : CValidationInterface {
     std::vector<uint256> connected_blocks;
     std::vector<uint256> disconnected_blocks;
     uint8_t template_serial{0};
+    std::optional<uint256> template_block_hash;
 
     void NotifyGetNEVMBlock(CNEVMBlock& block, std::string& state) override
     {
@@ -150,6 +151,7 @@ struct StartupNEVMSubscriber final : CValidationInterface {
         block.nBlockHash.begin()[0] = ++template_serial;
         block.nTxRoot = block.nBlockHash;
         block.nReceiptRoot = block.nBlockHash;
+        if (template_block_hash) block.nBlockHash = *template_block_hash;
         // Core treats this payload as opaque; the subscriber substitutes for
         // the external engine that produces and validates it.
         block.vchNEVMBlockData = {template_serial};
@@ -706,6 +708,7 @@ struct NEVMRootRollbackSetup : StartupNEVMRecoverySetup {
     const fs::path mints_path{m_path_root / "root-disconnect-mints"};
     const uint256 mint_hash{uint256S("b001")};
     const uint256 unclaimed_hash{uint256S("b002")};
+    std::shared_ptr<const CBlock> checkpoint;
     std::shared_ptr<const CBlock> parent;
     CBlock carrier;
     CNEVMHeader canonical_header;
@@ -756,9 +759,27 @@ struct NEVMRootRollbackSetup : StartupNEVMRecoverySetup {
         return index;
     }
 
-    void PrepareRootDisconnect(bool with_mint = true)
+    void PrepareRootDisconnect(bool with_mint = true, bool lagging_coins = false,
+                               bool alias_checkpoint = false)
     {
+        if (lagging_coins) {
+            // Q has both durable coins and usable NEVM roots. Its successors
+            // P and A below remain ahead of the independently durable coins.
+            checkpoint = MineNEVMBlock();
+            SyncWithValidationInterfaceQueue();
+            LOCK(::cs_main);
+            auto& chainstate{m_node.chainman->ActiveChainstate()};
+            BOOST_REQUIRE(RootsDB().FlushCacheToDisk());
+            BOOST_REQUIRE(chainstate.CoinsDB().FlushWithSync(chainstate.CoinsTip()));
+            if (alias_checkpoint) {
+                CNEVMHeader header;
+                BlockValidationState state;
+                BOOST_REQUIRE(GetNEVMData(state, *checkpoint, header));
+                nevm->template_block_hash = header.nBlockHash;
+            }
+        }
         parent = MineNEVMBlock();
+        nevm->template_block_hash.reset();
         SyncWithValidationInterfaceQueue();
         auto& chainman{*m_node.chainman};
         auto& chainstate{chainman.ActiveChainstate()};
@@ -816,11 +837,149 @@ struct NEVMRootRollbackSetup : StartupNEVMRecoverySetup {
             {orphan_header.nBlockHash, {orphan_header.nTxRoot, orphan_header.nReceiptRoot}},
             {canonical_header.nBlockHash, {canonical_header.nTxRoot, canonical_header.nReceiptRoot}},
         });
-        BOOST_REQUIRE(RootsDB().FlushCacheToDisk());
-        BOOST_REQUIRE(chainstate.CoinsDB().FlushWithSync(coins));
-        nevm->applied_count = 2;
+        if (lagging_coins) {
+            NEVMTxRoot root;
+            if (alias_checkpoint) {
+                BOOST_REQUIRE(RootsDB().Read(canonical_header.nBlockHash, root));
+                BOOST_REQUIRE(root.nTxRoot != canonical_header.nTxRoot);
+            } else {
+                BOOST_REQUIRE(!RootsDB().Read(canonical_header.nBlockHash, root));
+            }
+            BOOST_REQUIRE(!RootsDB().Read(orphan_header.nBlockHash, root));
+            BOOST_REQUIRE(chainstate.CoinsDB().GetBestBlock() == checkpoint->GetHash());
+        } else {
+            BOOST_REQUIRE(RootsDB().FlushCacheToDisk());
+            BOOST_REQUIRE(chainstate.CoinsDB().FlushWithSync(coins));
+        }
+        nevm->applied_count = lagging_coins ? 3 : 2;
         nevm->applied_hash = carrier.GetHash();
         nevm->disconnected_blocks.clear();
+    }
+
+    void SaveRootCrashManifest(const fs::path& crash_path,
+                               const CBlock* replacement = nullptr)
+    {
+        LOCK(::cs_main);
+        auto& chainstate{m_node.chainman->ActiveChainstate()};
+        CDBWrapper manifest{DBParams{
+            .path = crash_path / "manifest", .cache_bytes = 1U << 20}};
+        CDBBatch batch{manifest};
+        batch.Write(std::string{"fixture_root"}, fs::PathToString(m_path_root));
+        batch.Write(std::string{"coins_path"},
+                    fs::PathToString(*chainstate.CoinsDB().StoragePath()));
+        const auto write_block = [&](const std::string& key, const CBlock& block) {
+            CDataStream bytes{SER_DISK, CLIENT_VERSION};
+            bytes << block;
+            batch.Write(key, std::vector<uint8_t>{
+                UCharCast(bytes.data()), UCharCast(bytes.data() + bytes.size())});
+        };
+        if (checkpoint) write_block("checkpoint", *checkpoint);
+        write_block("parent", *parent);
+        write_block("carrier", carrier);
+        if (replacement) write_block("replacement", *replacement);
+        BOOST_REQUIRE(manifest.WriteBatch(batch, /*fSync=*/true));
+    }
+
+    struct RootCrashState {
+        fs::path fixture_root;
+        fs::path coins_path;
+        CBlock checkpoint;
+        CBlock parent;
+        CBlock carrier;
+        std::optional<CBlock> replacement;
+    };
+
+    RootCrashState ReadRootCrashManifest(const fs::path& crash_path)
+    {
+        CDBWrapper manifest{DBParams{
+            .path = crash_path / "manifest", .cache_bytes = 1U << 20}};
+        RootCrashState saved;
+        std::string fixture_root_string, coins_path_string;
+        BOOST_REQUIRE(manifest.Read(std::string{"fixture_root"}, fixture_root_string));
+        BOOST_REQUIRE(manifest.Read(std::string{"coins_path"}, coins_path_string));
+        saved.fixture_root = fs::u8path(fixture_root_string);
+        saved.coins_path = fs::u8path(coins_path_string);
+        BOOST_REQUIRE(saved.fixture_root != m_path_root);
+        BOOST_REQUIRE(saved.fixture_root.parent_path() == m_path_root.parent_path());
+        const auto read_block = [&](const std::string& key, CBlock& block) {
+            std::vector<uint8_t> bytes;
+            BOOST_REQUIRE(manifest.Read(key, bytes));
+            CDataStream stream{bytes, SER_DISK, CLIENT_VERSION};
+            stream >> block;
+            BOOST_REQUIRE(stream.empty());
+        };
+        read_block("checkpoint", saved.checkpoint);
+        read_block("parent", saved.parent);
+        read_block("carrier", saved.carrier);
+        if (manifest.Exists(std::string{"replacement"})) {
+            saved.replacement.emplace();
+            read_block("replacement", *saved.replacement);
+        }
+        return saved;
+    }
+
+    void TrackRootRecoveryDirectory(const fs::path& crash_path)
+    {
+        CDBWrapper manifest{DBParams{
+            .path = crash_path / "manifest", .cache_bytes = 1U << 20}};
+        std::vector<std::string> recovery_roots;
+        manifest.Read(std::string{"recovery_roots"}, recovery_roots);
+        recovery_roots.push_back(fs::PathToString(m_path_root));
+        BOOST_REQUIRE(manifest.Write(std::string{"recovery_roots"},
+                                      recovery_roots, /*fSync=*/true));
+    }
+
+    void OpenRootCrashState(const RootCrashState& saved)
+    {
+        pnevmtxrootsdb = std::make_unique<ObservedDisconnectRootsDB>(DBParams{
+            .path = saved.fixture_root / "root-disconnect-roots", .cache_bytes = 1U << 20});
+        pnevmtxmintdb = std::make_unique<ObservedRollbackMintDB>(DBParams{
+            .path = saved.fixture_root / "root-disconnect-mints", .cache_bytes = 1U << 20});
+        LOCK(::cs_main);
+        auto& chainstate{m_node.chainman->ActiveChainstate()};
+        chainstate.ResetCoinsViews();
+        chainstate.InitCoinsDB(1U << 20, /*in_memory=*/false,
+                               /*should_wipe=*/false, saved.coins_path);
+        StoreBlockIndex(saved.checkpoint);
+        auto* parent_index{StoreBlockIndex(saved.parent)};
+        auto* carrier_index{StoreBlockIndex(saved.carrier)};
+        if (saved.replacement) {
+            StoreBlockIndex(*saved.replacement);
+            // The aligned-publication replay fixture uses coinbase-only
+            // discarded blocks, so their authentic undo records are empty.
+            BOOST_REQUIRE_EQUAL(saved.parent.vtx.size(), 1U);
+            BOOST_REQUIRE_EQUAL(saved.carrier.vtx.size(), 1U);
+            BlockValidationState state;
+            for (auto* index : {parent_index, carrier_index}) {
+                BOOST_REQUIRE(m_node.chainman->m_blockman.WriteUndoDataForBlock(
+                    CBlockUndo{}, state, *index));
+            }
+        }
+    }
+
+    void RunRootCrashChild(const fs::path& crash_path, const std::string& cut)
+    {
+#if defined(HAVE_BOOST_PROCESS) || defined(ENABLE_EXTERNAL_SIGNER)
+#if BOOST_VERSION >= 108800
+        namespace bp = boost::process::v1;
+#else
+        namespace bp = boost::process;
+#endif
+        const std::vector<std::string> args{
+            "--run_test=validation_chainstatemanager_tests/nevm_disconnect_root_crash_child",
+            "--", "NEVM_ROOT_CRASH_CHILD", fs::PathToString(crash_path), cut};
+        bp::child child{bp::exe = boost::unit_test::framework::master_test_suite().argv[0],
+                         bp::args = args};
+        const auto deadline{std::chrono::steady_clock::now() + std::chrono::minutes{2}};
+        while (child.running() && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{10});
+        }
+        const bool timed_out{child.running()};
+        if (timed_out) child.terminate();
+        child.wait();
+        BOOST_REQUIRE_MESSAGE(!timed_out, "Owned crash-test child timed out");
+        BOOST_REQUIRE_EQUAL(child.exit_code(), 73);
+#endif
     }
 
     bool DisconnectRootTip(BlockValidationState& state, bool reverify)
@@ -1354,34 +1513,134 @@ BOOST_FIXTURE_TEST_CASE(nevm_disconnect_root_crash_child, NEVMRootRollbackSetup,
     const std::string cut{args[2]};
     BOOST_REQUIRE(crash_path.is_absolute());
     BOOST_REQUIRE(fs::is_directory(crash_path));
-    BOOST_REQUIRE(!fs::exists(crash_path / "manifest"));
-    PrepareRootDisconnect();
-    auto& chainstate{m_node.chainman->ActiveChainstate()};
-    {
+    if (cut == "during-aligned-publication-alias-replay") {
+        const auto saved{ReadRootCrashManifest(crash_path)};
+        BOOST_REQUIRE(saved.replacement);
+        TrackRootRecoveryDirectory(crash_path);
+        OpenRootCrashState(saved);
         LOCK(::cs_main);
-        CDBWrapper manifest{DBParams{
-            .path = crash_path / "manifest", .cache_bytes = 1U << 20}};
-        CDBBatch batch{manifest};
-        batch.Write(std::string{"fixture_root"}, fs::PathToString(m_path_root));
-        batch.Write(std::string{"coins_path"},
-                    fs::PathToString(*chainstate.CoinsDB().StoragePath()));
-        CDataStream parent_bytes{SER_DISK, CLIENT_VERSION};
-        CDataStream carrier_bytes{SER_DISK, CLIENT_VERSION};
-        parent_bytes << *parent;
-        carrier_bytes << carrier;
-        batch.Write(std::string{"parent"}, std::vector<uint8_t>{
-            UCharCast(parent_bytes.data()), UCharCast(parent_bytes.data() + parent_bytes.size())});
-        batch.Write(std::string{"carrier"}, std::vector<uint8_t>{
-            UCharCast(carrier_bytes.data()), UCharCast(carrier_bytes.data() + carrier_bytes.size())});
-        BOOST_REQUIRE(manifest.WriteBatch(batch, /*fSync=*/true));
+        auto& coins_db{m_node.chainman->ActiveChainstate().CoinsDB()};
+        BOOST_REQUIRE(RootsDB().GetPublishedTip() == saved.replacement->GetHash());
+        BOOST_REQUIRE(!RootsDB().GetPendingDisconnect());
+        BOOST_REQUIRE(coins_db.GetHeadBlocks() == (std::vector<uint256>{
+            saved.replacement->GetHash(), saved.carrier.GetHash()}));
+        CNEVMHeader canonical;
+        BlockValidationState state;
+        BOOST_REQUIRE(GetNEVMData(state, *saved.replacement, canonical));
+        const auto check_alias = [&] {
+            NEVMTxRoot root;
+            BOOST_REQUIRE(RootsDB().Read(canonical.nBlockHash, root));
+            BOOST_CHECK(root.nTxRoot == canonical.nTxRoot);
+            BOOST_CHECK(root.nReceiptRoot == canonical.nReceiptRoot);
+        };
+        std::size_t coins_syncs{0};
+        coins_db.SetSyncCallbackForTesting([&] {
+            ++coins_syncs;
+            check_alias();
+            return true;
+        });
+        RootsDB().before_write = [&] {
+            BOOST_REQUIRE_EQUAL(coins_syncs, 1U);
+            check_alias();
+            return true;
+        };
+        RootsDB().after_write = [&] {
+            // T already equals the now-durable coins endpoint. If this
+            // cleanup erased a canonical alias, the cold fast path below
+            // would have no remaining metadata with which to repair it.
+            check_alias();
+            uint256 published;
+            BOOST_REQUIRE(RootsDB().Read(uint8_t{'T'}, published));
+            BOOST_REQUIRE(published == saved.replacement->GetHash());
+            BOOST_REQUIRE(!RootsDB().Exists(uint8_t{'D'}));
+            BOOST_REQUIRE(coins_db.GetBestBlock() == saved.replacement->GetHash());
+            BOOST_REQUIRE(coins_db.GetHeadBlocks().empty());
+            std::_Exit(73);
+        };
+        m_node.chainman->ActiveChainstate().ReplayBlocks();
+        BOOST_FAIL("ReplayBlocks did not reach the aligned-publication cleanup crash");
+        return;
+    }
+    if (cut == "during-lagging-cleanup") {
+        const auto saved{ReadRootCrashManifest(crash_path)};
+        TrackRootRecoveryDirectory(crash_path);
+        OpenRootCrashState(saved);
+        LOCK(::cs_main);
+        auto& chainstate{m_node.chainman->ActiveChainstate()};
+        BOOST_REQUIRE(chainstate.CoinsDB().GetBestBlock() == saved.checkpoint.GetHash());
+        BOOST_REQUIRE(RootsDB().GetPendingDisconnect());
+        std::size_t coins_syncs{0};
+        chainstate.CoinsDB().SetSyncCallbackForTesting([&] {
+            ++coins_syncs;
+            return true;
+        });
+        RootsDB().after_write = [&] {
+            // The first cleanup batch may already remove surplus rows. Its
+            // durable obligation must outlive both that write and this crash.
+            BOOST_REQUIRE_EQUAL(coins_syncs, 1U);
+            BOOST_REQUIRE(RootsDB().Exists(uint8_t{'D'}));
+            std::_Exit(73);
+        };
+        chainstate.ReplayBlocks();
+        BOOST_FAIL("ReplayBlocks did not reach the requested cleanup crash");
+        return;
+    }
+    BOOST_REQUIRE(!fs::exists(crash_path / "manifest"));
+    const bool alias_checkpoint{cut == "after-aliased-retained-roots-before-coins"};
+    const bool forward_only{cut == "after-forward-roots-before-coins"};
+    const bool aligned_replay{cut == "before-aligned-publication-alias-replay"};
+    const bool lagging_coins{
+        cut == "after-retained-roots-before-coins" || alias_checkpoint || forward_only || aligned_replay};
+    PrepareRootDisconnect(/*with_mint=*/!aligned_replay, lagging_coins, alias_checkpoint);
+    auto& chainstate{m_node.chainman->ActiveChainstate()};
+    if (aligned_replay) {
+        LOCK(::cs_main);
+        CBlock replacement{*parent};
+        ++replacement.nTime;
+        replacement.nNonce = 0;
+        replacement.fChecked = false;
+        while (!CheckProofOfWork(replacement.GetHash(), replacement.nBits,
+                                  m_node.chainman->GetConsensus())) ++replacement.nNonce;
+        BOOST_REQUIRE(replacement.GetHash() != parent->GetHash());
+        StoreBlockIndex(replacement);
+        BOOST_REQUIRE(RootsDB().FlushCacheToDisk());
+        // T=R describes an already-published canonical root set. Retain the
+        // shared P/R key and Q; remove the key unique to abandoned carrier A.
+        BOOST_REQUIRE(RootsDB().FlushErase({orphan_header.nBlockHash}));
+        BOOST_REQUIRE(RootsDB().RecordPublishedTip(replacement.GetHash()));
+        BOOST_REQUIRE(chainstate.CoinsDB().FlushWithSync(chainstate.CoinsTip()));
+        BOOST_REQUIRE(chainstate.CoinsDB().GetBestBlock() == carrier.GetHash());
+        const fs::path coins_path{*chainstate.CoinsDB().StoragePath()};
+        SaveRootCrashManifest(crash_path, &replacement);
+        chainstate.ResetCoinsViews();
+        {
+            CDBWrapper coins{DBParams{
+                .path = coins_path, .cache_bytes = 1U << 20, .obfuscate = true}};
+            CDBBatch batch{coins};
+            batch.Erase(uint8_t{'B'});
+            batch.Write(uint8_t{'H'}, std::vector<uint256>{
+                replacement.GetHash(), carrier.GetHash()});
+            BOOST_REQUIRE(coins.WriteBatch(batch, /*fSync=*/true));
+        }
+        std::_Exit(73);
+    }
+    SaveRootCrashManifest(crash_path);
+    if (forward_only) {
+        // Ordinary forward batching has no disconnect journal, but the root
+        // publisher must still describe the suffix ahead of durable coins Q.
+        BOOST_REQUIRE(RootsDB().RecordPublishedTip(carrier.GetHash()));
+        BOOST_REQUIRE(RootsDB().FlushCacheToDisk());
+        BOOST_REQUIRE(!RootsDB().GetPendingDisconnect());
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainstate.CoinsDB().GetBestBlock() == checkpoint->GetHash());
+        std::_Exit(73);
     }
     std::size_t root_writes{0};
     std::size_t coins_syncs{0};
     RootsDB().before_write = [&] {
         ++root_writes;
         if (cut == "before-root-prepare" && root_writes == 1) std::_Exit(73);
-        if (cut == "after-coins-sync" && root_writes == 2) {
-            BOOST_REQUIRE_EQUAL(coins_syncs, 1U);
+        if (cut == "after-coins-sync" && coins_syncs == 1) {
             std::_Exit(73);
         }
         return true;
@@ -1395,6 +1654,20 @@ BOOST_FIXTURE_TEST_CASE(nevm_disconnect_root_crash_child, NEVMRootRollbackSetup,
             ++coins_syncs;
             return true;
         });
+        if (lagging_coins) {
+            auto& coins_db{chainstate.CoinsDB()};
+            coins_db.SetWriteBatchCallbackForTesting([&](bool) {
+                NEVMTxRoot durable_parent;
+                BOOST_REQUIRE(RootsDB().Read(canonical_header.nBlockHash, durable_parent));
+                BOOST_REQUIRE(durable_parent.nTxRoot == canonical_header.nTxRoot);
+                BOOST_REQUIRE(durable_parent.nReceiptRoot == canonical_header.nReceiptRoot);
+                BOOST_REQUIRE(coins_db.GetBestBlock() == checkpoint->GetHash());
+                BOOST_REQUIRE_EQUAL(coins_syncs, 0U);
+                BOOST_REQUIRE(RootsDB().GetPendingDisconnect());
+                std::_Exit(73);
+                return false;
+            });
+        }
     }
     MintDB().before_write = [&](bool sync) {
         if (cut == "after-journal-clear") {
@@ -1412,32 +1685,13 @@ BOOST_FIXTURE_TEST_CASE(nevm_disconnect_roots_cold_recovery,
                         NEVMRootRollbackSetup)
 {
 #if defined(HAVE_BOOST_PROCESS) || defined(ENABLE_EXTERNAL_SIGNER)
-#if BOOST_VERSION >= 108800
-    namespace bp = boost::process::v1;
-#else
-    namespace bp = boost::process;
-#endif
-    const std::string executable{
-        boost::unit_test::framework::master_test_suite().argv[0]};
     auto& chainstate{m_node.chainman->ActiveChainstate()};
     for (const std::string cut : {"before-root-prepare", "after-root-prepare",
                                   "after-coins-sync", "after-journal-clear"}) {
         BOOST_TEST_CONTEXT("cold reopen at " << cut) {
             const fs::path crash_path{m_path_root / fs::u8path(cut)};
             BOOST_REQUIRE(fs::create_directories(crash_path));
-            const std::vector<std::string> args{
-                "--run_test=validation_chainstatemanager_tests/nevm_disconnect_root_crash_child",
-                "--", "NEVM_ROOT_CRASH_CHILD", fs::PathToString(crash_path), cut};
-            bp::child child{bp::exe = executable, bp::args = args};
-            const auto deadline{std::chrono::steady_clock::now() + std::chrono::minutes{2}};
-            while (child.running() && std::chrono::steady_clock::now() < deadline) {
-                std::this_thread::sleep_for(std::chrono::milliseconds{10});
-            }
-            const bool timed_out{child.running()};
-            if (timed_out) child.terminate();
-            child.wait();
-            BOOST_REQUIRE_MESSAGE(!timed_out, "Owned crash-test child timed out");
-            BOOST_REQUIRE_EQUAL(child.exit_code(), 73);
+            RunRootCrashChild(crash_path, cut);
 
             CDBWrapper manifest{DBParams{
                 .path = crash_path / "manifest", .cache_bytes = 1U << 20}};
@@ -1528,6 +1782,296 @@ BOOST_FIXTURE_TEST_CASE(nevm_disconnect_roots_cold_recovery,
 #else
     BOOST_TEST_MESSAGE("Skipping subprocess root-crash regression: Boost.Process unavailable");
 #endif
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_disconnect_roots_recover_lagging_coins,
+                        NEVMRootRollbackSetup)
+{
+#if defined(HAVE_BOOST_PROCESS) || defined(ENABLE_EXTERNAL_SIGNER)
+    auto& chainman{*m_node.chainman};
+    auto& chainstate{chainman.ActiveChainstate()};
+    for (const std::string mode : {"lagging-q", "forward-root-flush", "repeated-cleanup",
+                                  "replacement-root-alias", "common-ancestor-root-alias"}) {
+        BOOST_TEST_CONTEXT(mode) {
+            const bool ancestor_alias{mode == "common-ancestor-root-alias"};
+            const bool forward_only{mode == "forward-root-flush"};
+            const fs::path crash_path{m_path_root / fs::u8path(mode)};
+            BOOST_REQUIRE(fs::create_directories(crash_path));
+            RunRootCrashChild(crash_path, forward_only
+                ? "after-forward-roots-before-coins"
+                : ancestor_alias ? "after-aliased-retained-roots-before-coins"
+                                 : "after-retained-roots-before-coins");
+            if (mode == "repeated-cleanup") {
+                // Both recovery processes lose power after a cleanup write,
+                // leaving a cold third recovery to finish the same obligation.
+                RunRootCrashChild(crash_path, "during-lagging-cleanup");
+                RunRootCrashChild(crash_path, "during-lagging-cleanup");
+            }
+            const auto saved{ReadRootCrashManifest(crash_path)};
+            OpenRootCrashState(saved);
+            CNEVMHeader checkpoint_header, parent_header, carrier_header;
+            BlockValidationState state;
+            BOOST_REQUIRE(GetNEVMData(state, saved.checkpoint, checkpoint_header));
+            BOOST_REQUIRE(GetNEVMData(state, saved.parent, parent_header));
+            BOOST_REQUIRE(GetNEVMData(state, saved.carrier, carrier_header));
+            BOOST_REQUIRE_EQUAL(saved.carrier.vtx.size(), 2U);
+            const COutPoint minted{saved.carrier.vtx[1]->GetHash(), 0};
+            LOCK(::cs_main);
+            BOOST_REQUIRE(chainstate.CoinsDB().GetBestBlock() == saved.checkpoint.GetHash());
+            BOOST_REQUIRE(chainstate.CoinsDB().GetHeadBlocks().empty());
+            BOOST_CHECK(!chainstate.CoinsDB().HaveCoin(minted));
+            BOOST_REQUIRE_EQUAL(RootsDB().GetPendingDisconnect().has_value(), !forward_only);
+            BOOST_CHECK(MintDB().ExistsTx(mint_hash));
+            BOOST_CHECK(!MintDB().ExistsTx(unclaimed_hash));
+            NEVMTxRoot root;
+            BOOST_CHECK_EQUAL(RootsDB().Read(parent_header.nBlockHash, root),
+                              mode != "repeated-cleanup");
+            BOOST_CHECK_EQUAL(RootsDB().ReadTxRoots(carrier_header.nBlockHash, root), forward_only);
+            BOOST_REQUIRE(RootsDB().ReadTxRoots(checkpoint_header.nBlockHash, root));
+            BOOST_CHECK(root.nTxRoot == (ancestor_alias
+                ? parent_header.nTxRoot : checkpoint_header.nTxRoot));
+            BOOST_CHECK(root.nReceiptRoot == (ancestor_alias
+                ? parent_header.nReceiptRoot : checkpoint_header.nReceiptRoot));
+
+            CBlockIndex* recovered{chainman.m_blockman.LookupBlockIndex(saved.checkpoint.GetHash())};
+            if (mode == "replacement-root-alias") {
+                // A different Syscoin carrier on the recovered branch can
+                // legitimately commit the same NEVM root key as orphan P.
+                CBlock replacement{saved.parent};
+                ++replacement.nTime;
+                replacement.nNonce = 0;
+                replacement.fChecked = false;
+                while (!CheckProofOfWork(replacement.GetHash(), replacement.nBits,
+                                          chainman.GetConsensus())) ++replacement.nNonce;
+                BOOST_REQUIRE(replacement.GetHash() != saved.parent.GetHash());
+                CNEVMHeader replacement_header;
+                BOOST_REQUIRE(GetNEVMData(state, replacement, replacement_header));
+                BOOST_REQUIRE(replacement_header.nBlockHash == parent_header.nBlockHash);
+                recovered = StoreBlockIndex(replacement);
+                chainstate.ResetCoinsViews();
+                {
+                    CDBWrapper coins{DBParams{
+                        .path = saved.coins_path, .cache_bytes = 1U << 20,
+                        .obfuscate = true}};
+                    CDBBatch batch{coins};
+                    batch.Erase(uint8_t{'B'});
+                    batch.Write(uint8_t{'H'}, std::vector<uint256>{
+                        replacement.GetHash(), saved.checkpoint.GetHash()});
+                    BOOST_REQUIRE(coins.WriteBatch(batch, /*fSync=*/true));
+                }
+                chainstate.InitCoinsDB(1U << 20, /*in_memory=*/false,
+                                       /*should_wipe=*/false, saved.coins_path);
+            }
+            BOOST_REQUIRE(recovered != nullptr);
+            BOOST_REQUIRE(chainstate.ReplayBlocks());
+            BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == recovered->GetBlockHash());
+            BOOST_CHECK(chainstate.CoinsDB().GetHeadBlocks().empty());
+            BOOST_CHECK(!RootsDB().GetPendingDisconnect());
+            BOOST_REQUIRE(RootsDB().GetPublishedTip());
+            BOOST_CHECK(*RootsDB().GetPublishedTip() == recovered->GetBlockHash());
+            BOOST_CHECK(!RootsDB().ReadTxRoots(carrier_header.nBlockHash, root));
+            BOOST_CHECK(!RootsDB().Read(carrier_header.nBlockHash, root));
+            const bool keep_parent{mode == "replacement-root-alias" || ancestor_alias};
+            BOOST_CHECK_EQUAL(RootsDB().ReadTxRoots(parent_header.nBlockHash, root), keep_parent);
+            if (keep_parent) {
+                BOOST_CHECK(root.nTxRoot == (ancestor_alias
+                    ? checkpoint_header.nTxRoot : parent_header.nTxRoot));
+                BOOST_CHECK(root.nReceiptRoot == (ancestor_alias
+                    ? checkpoint_header.nReceiptRoot : parent_header.nReceiptRoot));
+            }
+            BOOST_CHECK_EQUAL(RootsDB().Read(parent_header.nBlockHash, root), keep_parent);
+            BOOST_REQUIRE(RootsDB().ReadTxRoots(checkpoint_header.nBlockHash, root));
+            BOOST_CHECK(root.nTxRoot == checkpoint_header.nTxRoot);
+            BOOST_CHECK(root.nReceiptRoot == checkpoint_header.nReceiptRoot);
+            BOOST_CHECK(MintDB().ExistsTx(mint_hash));
+            BOOST_CHECK(!MintDB().ExistsTx(unclaimed_hash));
+            if (mode != "replacement-root-alias") {
+                // Geth can also recover Q; a matching pair must not force P
+                // back onto Core just to hide surplus local proof authority.
+                chainstate.m_chain.SetTip(*recovered);
+                nevm->applied_count = 1;
+                nevm->applied_hash = recovered->GetBlockHash();
+                std::string error;
+                BOOST_REQUIRE(chainman.InitializeNEVMStartupPair(
+                    nevm->applied_count, nevm->applied_hash, error));
+                BOOST_CHECK(!chainman.HasPendingNEVMStartupPair());
+            }
+            BOOST_CHECK(nevm->connected_blocks.empty());
+            BOOST_CHECK(nevm->disconnected_blocks.empty());
+            chainstate.ResetCoinsViews();
+            pnevmtxrootsdb.reset();
+            pnevmtxmintdb.reset();
+            fs::remove_all(saved.fixture_root);
+            if (mode == "repeated-cleanup") {
+                CDBWrapper manifest{DBParams{
+                    .path = crash_path / "manifest", .cache_bytes = 1U << 20}};
+                std::vector<std::string> recovery_roots;
+                BOOST_REQUIRE(manifest.Read(std::string{"recovery_roots"}, recovery_roots));
+                BOOST_REQUIRE_EQUAL(recovery_roots.size(), 2U);
+                for (const auto& path_string : recovery_roots) {
+                    const fs::path path{fs::u8path(path_string)};
+                    BOOST_REQUIRE(path != m_path_root);
+                    BOOST_REQUIRE(path.parent_path() == m_path_root.parent_path());
+                    fs::remove_all(path);
+                }
+            }
+        }
+    }
+#else
+    BOOST_TEST_MESSAGE("Skipping subprocess root-crash regression: Boost.Process unavailable");
+#endif
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_replay_preserves_alias_with_aligned_published_tip,
+                        NEVMRootRollbackSetup)
+{
+#if defined(HAVE_BOOST_PROCESS) || defined(ENABLE_EXTERNAL_SIGNER)
+    const fs::path crash_path{m_path_root / "aligned-publication-alias"};
+    BOOST_REQUIRE(fs::create_directories(crash_path));
+    RunRootCrashChild(crash_path, "before-aligned-publication-alias-replay");
+    RunRootCrashChild(crash_path, "during-aligned-publication-alias-replay");
+    const auto saved{ReadRootCrashManifest(crash_path)};
+    BOOST_REQUIRE(saved.replacement);
+    OpenRootCrashState(saved);
+    CNEVMHeader canonical, checkpoint_header, discarded;
+    BlockValidationState state;
+    BOOST_REQUIRE(GetNEVMData(state, *saved.replacement, canonical));
+    BOOST_REQUIRE(GetNEVMData(state, saved.checkpoint, checkpoint_header));
+    BOOST_REQUIRE(GetNEVMData(state, saved.carrier, discarded));
+    LOCK(::cs_main);
+    auto& chainstate{m_node.chainman->ActiveChainstate()};
+    BOOST_REQUIRE(chainstate.CoinsDB().GetBestBlock() == saved.replacement->GetHash());
+    BOOST_REQUIRE(chainstate.CoinsDB().GetHeadBlocks().empty());
+    BOOST_REQUIRE(RootsDB().GetPublishedTip() == saved.replacement->GetHash());
+    BOOST_REQUIRE(!RootsDB().GetPendingDisconnect());
+    NEVMTxRoot root;
+    BOOST_REQUIRE(RootsDB().Read(canonical.nBlockHash, root));
+    BOOST_CHECK(root.nTxRoot == canonical.nTxRoot);
+    BOOST_CHECK(root.nReceiptRoot == canonical.nReceiptRoot);
+    BOOST_CHECK(!RootsDB().Read(discarded.nBlockHash, root));
+    BOOST_REQUIRE(RootsDB().Read(checkpoint_header.nBlockHash, root));
+    BOOST_CHECK(root.nTxRoot == checkpoint_header.nTxRoot);
+    BOOST_CHECK(root.nReceiptRoot == checkpoint_header.nReceiptRoot);
+
+    // This cold startup legitimately takes T==coins/no-D's fast path. It
+    // must not depend on a vanished in-memory alias-restoration obligation.
+    std::size_t root_writes{0};
+    std::size_t coins_syncs{0};
+    RootsDB().before_write = [&] { ++root_writes; return true; };
+    chainstate.CoinsDB().SetSyncCallbackForTesting([&] { ++coins_syncs; return true; });
+    BOOST_REQUIRE(chainstate.ReplayBlocks());
+    RootsDB().before_write = {};
+    chainstate.CoinsDB().SetSyncCallbackForTesting({});
+    BOOST_CHECK_EQUAL(root_writes, 0U);
+    BOOST_CHECK_EQUAL(coins_syncs, 0U);
+    BOOST_REQUIRE(RootsDB().ReadTxRoots(canonical.nBlockHash, root));
+    BOOST_CHECK(root.nTxRoot == canonical.nTxRoot);
+    BOOST_CHECK(root.nReceiptRoot == canonical.nReceiptRoot);
+    BOOST_CHECK(nevm->connected_blocks.empty());
+    BOOST_CHECK(nevm->disconnected_blocks.empty());
+    chainstate.ResetCoinsViews();
+    pnevmtxrootsdb.reset();
+    pnevmtxmintdb.reset();
+    fs::remove_all(saved.fixture_root);
+    CDBWrapper manifest{DBParams{
+        .path = crash_path / "manifest", .cache_bytes = 1U << 20}};
+    std::vector<std::string> recovery_roots;
+    BOOST_REQUIRE(manifest.Read(std::string{"recovery_roots"}, recovery_roots));
+    BOOST_REQUIRE_EQUAL(recovery_roots.size(), 1U);
+    const fs::path recovery_root{fs::u8path(recovery_roots.front())};
+    BOOST_REQUIRE(recovery_root != m_path_root);
+    BOOST_REQUIRE(recovery_root.parent_path() == m_path_root.parent_path());
+    fs::remove_all(recovery_root);
+#else
+    BOOST_TEST_MESSAGE("Skipping subprocess root-crash regression: Boost.Process unavailable");
+#endif
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_full_flush_publishes_root_branch_before_coins,
+                        NEVMRootRollbackSetup)
+{
+    PrepareRootDisconnect(/*with_mint=*/true, /*lagging_coins=*/true);
+    LOCK(::cs_main);
+    auto& chainstate{m_node.chainman->ActiveChainstate()};
+    const auto previous_published_tip{RootsDB().GetPublishedTip()};
+    std::size_t root_writes{0};
+    std::size_t coins_writes{0};
+    RootsDB().before_write = [&] {
+        ++root_writes;
+        NEVMTxRoot root;
+        BOOST_CHECK(!RootsDB().Read(canonical_header.nBlockHash, root));
+        BOOST_CHECK(!RootsDB().Read(orphan_header.nBlockHash, root));
+        return false;
+    };
+    chainstate.CoinsDB().SetWriteBatchCallbackForTesting([&](bool) {
+        ++coins_writes;
+        return true;
+    });
+    BlockValidationState failed_state;
+    m_node.notifications->m_shutdown_on_fatal_error = false;
+    const bool failed_flush{chainstate.FlushStateToDisk(failed_state, FlushStateMode::ALWAYS)};
+    m_node.notifications->m_shutdown_on_fatal_error = true;
+    m_node.exit_status.store(EXIT_SUCCESS);
+    BOOST_CHECK(!failed_flush);
+    BOOST_CHECK(failed_state.IsError());
+    BOOST_CHECK_EQUAL(root_writes, 1U);
+    BOOST_CHECK_EQUAL(coins_writes, 0U);
+    BOOST_CHECK(RootsDB().GetPublishedTip() == previous_published_tip);
+    BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == checkpoint->GetHash());
+    BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == carrier.GetHash());
+    NEVMTxRoot root;
+    BOOST_CHECK(!RootsDB().Read(canonical_header.nBlockHash, root));
+    BOOST_CHECK(!RootsDB().Read(orphan_header.nBlockHash, root));
+
+    // Retry the same real flush. The first successful root write publishes T;
+    // every root cache batch and the later coins write must observe that T.
+    root_writes = 0;
+    bool publication_written{false};
+    RootsDB().observe_sync = [](bool sync) { BOOST_CHECK(sync); };
+    RootsDB().before_write = [&] {
+        ++root_writes;
+        if (root_writes > 1) {
+            uint256 published;
+            BOOST_REQUIRE(publication_written);
+            BOOST_REQUIRE(RootsDB().Read(uint8_t{'T'}, published));
+            BOOST_CHECK(published == carrier.GetHash());
+        }
+        return true;
+    };
+    RootsDB().after_write = [&] {
+        if (root_writes == 1) {
+            uint256 published;
+            BOOST_REQUIRE(RootsDB().Read(uint8_t{'T'}, published));
+            BOOST_CHECK(published == carrier.GetHash());
+            publication_written = true;
+        }
+    };
+    chainstate.CoinsDB().SetWriteBatchCallbackForTesting([&](bool) {
+        ++coins_writes;
+        BOOST_REQUIRE(publication_written);
+        BOOST_REQUIRE_GE(root_writes, 2U);
+        BOOST_REQUIRE(RootsDB().GetPublishedTip());
+        BOOST_CHECK(*RootsDB().GetPublishedTip() == carrier.GetHash());
+        for (const auto* header : {&canonical_header, &orphan_header}) {
+            NEVMTxRoot durable;
+            BOOST_REQUIRE(RootsDB().Read(header->nBlockHash, durable));
+            BOOST_CHECK(durable.nTxRoot == header->nTxRoot);
+            BOOST_CHECK(durable.nReceiptRoot == header->nReceiptRoot);
+        }
+        return true;
+    });
+    BlockValidationState state;
+    const bool flushed{chainstate.FlushStateToDisk(state, FlushStateMode::ALWAYS)};
+    RootsDB().before_write = {};
+    RootsDB().after_write = {};
+    RootsDB().observe_sync = {};
+    chainstate.CoinsDB().SetWriteBatchCallbackForTesting({});
+    BOOST_REQUIRE_MESSAGE(flushed, state.ToString());
+    BOOST_CHECK_EQUAL(root_writes, 2U);
+    BOOST_CHECK_GT(coins_writes, 0U);
+    BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == carrier.GetHash());
+    BOOST_CHECK(chainstate.CoinsDB().HaveCoin(minted_coin));
+    BOOST_CHECK(!RootsDB().GetPendingDisconnect());
 }
 
 BOOST_FIXTURE_TEST_CASE(nevm_nonmint_local_disconnect_revokes_roots,
@@ -1740,8 +2284,8 @@ BOOST_FIXTURE_TEST_CASE(nevm_coins_replay_recovers_fork_locally,
     NEVMTxRoot old_roots;
     BOOST_REQUIRE(pnevmtxrootsdb->ReadTxRoots(headers[1].nBlockHash, old_roots));
     // SYSCOIN: The same restart can have both a pending root revocation and
-    // interrupted coins batches. Rebuilt replacement roots must be durable
-    // before coins commit and the recovery record is retired.
+    // interrupted coins batches. The recovered coins branch must be durable
+    // before root cleanup/restoration and retirement of its recovery record.
     BOOST_REQUIRE(pnevmtxrootsdb->BeginDisconnect(NEVMRootDisconnect{
         old_second->GetHash(), headers[1].nBlockHash,
         headers[1].nTxRoot, headers[1].nReceiptRoot}));
@@ -1762,12 +2306,7 @@ BOOST_FIXTURE_TEST_CASE(nevm_coins_replay_recovers_fork_locally,
         LOCK(::cs_main);
         chainstate.CoinsDB().SetSyncCallbackForTesting([&] {
             ++recovery_syncs;
-            for (std::size_t i{2}; i < headers.size(); ++i) {
-                NEVMTxRoot durable_roots;
-                BOOST_REQUIRE(pnevmtxrootsdb->Read(headers[i].nBlockHash, durable_roots));
-                BOOST_CHECK(durable_roots.nTxRoot == headers[i].nTxRoot);
-                BOOST_CHECK(durable_roots.nReceiptRoot == headers[i].nReceiptRoot);
-            }
+            BOOST_REQUIRE(pnevmtxrootsdb->GetPendingDisconnect());
             return true;
         });
     }
@@ -1791,6 +2330,10 @@ BOOST_FIXTURE_TEST_CASE(nevm_coins_replay_recovers_fork_locally,
         if (found) {
             BOOST_CHECK(roots.nTxRoot == headers[i].nTxRoot);
             BOOST_CHECK(roots.nReceiptRoot == headers[i].nReceiptRoot);
+            NEVMTxRoot durable_roots;
+            BOOST_REQUIRE(pnevmtxrootsdb->Read(headers[i].nBlockHash, durable_roots));
+            BOOST_CHECK(durable_roots.nTxRoot == headers[i].nTxRoot);
+            BOOST_CHECK(durable_roots.nReceiptRoot == headers[i].nReceiptRoot);
         }
     }
     BOOST_CHECK(nevm->connected_blocks.empty());
