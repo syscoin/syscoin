@@ -11,6 +11,7 @@
 #include <sync.h>
 
 #include <cstddef>
+#include <optional> // SYSCOIN: Persist unfinished NEVM root revocation.
 
 namespace nevm_cache_detail {
 /** The caller must hold the cache lock; callbacks must not modify the cache. */
@@ -42,17 +43,46 @@ bool FlushCache(CDBWrapper& db, Cache& cache, std::size_t chunk_items, bool sync
 class TxValidationState;
 class CTxUndo;
 class CBlock;
+// SYSCOIN BEGIN: Recover root authority against the durable coins branch.
+struct NEVMRootDisconnect {
+    uint256 carrier;
+    uint256 block_hash;
+    uint256 tx_root;
+    uint256 receipt_root;
+
+    SERIALIZE_METHODS(NEVMRootDisconnect, obj)
+    {
+        READWRITE(obj.carrier, obj.block_hash, obj.tx_root, obj.receipt_root);
+    }
+
+    bool IsValid() const
+    {
+        // Recover exactly the committed header; do not introduce new NEVM
+        // header restrictions while disconnecting previously accepted blocks.
+        return !carrier.IsNull();
+    }
+};
+// SYSCOIN END: Recover root authority against the durable coins branch.
 // SYSCOIN BEGIN: Retain uncommitted cache deletions until their write succeeds.
 class CNEVMTxRootsDB : public CDBWrapper {
     NEVMTxRootMap mapCache;
     mutable Mutex cs_cache; // Mutex to protect cache operations (non-recursive for better performance)
     NEVMMintTxSet m_pending_erases GUARDED_BY(cs_cache);
+    // SYSCOIN: A durable disconnect remains masked until coins recovery finishes.
+    std::optional<NEVMRootDisconnect> m_pending_disconnect GUARDED_BY(cs_cache);
     void StageErase(const std::vector<uint256>& block_hashes) EXCLUSIVE_LOCKS_REQUIRED(cs_cache);
     bool FlushPendingErases() EXCLUSIVE_LOCKS_REQUIRED(cs_cache);
 protected:
     virtual bool WriteCacheBatch(CDBBatch& batch, bool sync) { return CDBWrapper::WriteBatch(batch, sync); }
 public:
-    using CDBWrapper::CDBWrapper;
+    // SYSCOIN BEGIN: Load and resolve the single durable disconnect obligation.
+    explicit CNEVMTxRootsDB(const DBParams& params);
+    std::optional<NEVMRootDisconnect> GetPendingDisconnect() const EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
+    // Revoke while the coins rollback is still private to the caller.
+    bool BeginDisconnect(const NEVMRootDisconnect& disconnect) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
+    // Requires synchronized coins; restoration also requires canonical ancestry.
+    bool CompleteDisconnect(bool restore_root) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
+    // SYSCOIN END: Load and resolve the single durable disconnect obligation.
     virtual ~CNEVMTxRootsDB() = default;
     void EraseCache(const std::vector<uint256>& block_hashes) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
     bool FlushErase(const std::vector<uint256> &vecBlockHashes) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);

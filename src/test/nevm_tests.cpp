@@ -1088,5 +1088,181 @@ BOOST_AUTO_TEST_CASE(queued_erases_survive_unattempted_immediate_writes)
     CheckNEVMCacheQueuedErase<CNEVMTxRootsDB>(m_args.GetDataDirBase() / "root_erase_queued");
 }
 
+// SYSCOIN BEGIN: Cold reopening must preserve unfinished root revocation.
+BOOST_AUTO_TEST_CASE(root_disconnect_journal_masks_reinsertions_across_reopen)
+{
+    const fs::path path{m_args.GetDataDirBase() / "root_disconnect_reopen"};
+    const NEVMRootDisconnect record{NEVMCacheTestKey(1), NEVMCacheTestKey(2),
+                                    NEVMCacheTestKey(13), NEVMCacheTestKey(14)};
+    const uint256 unrelated{NEVMCacheTestKey(3)};
+    for (const bool restore_root : {false, true}) {
+        {
+            FailingNEVMCacheDB<CNEVMTxRootsDB> db(
+                {.path = path, .cache_bytes = 1 << 20, .wipe_data = true});
+            StageNEVMCacheValue(db, record.block_hash, 13);
+            BOOST_REQUIRE(db.FlushCacheToDisk());
+            db.writes.clear();
+            BOOST_REQUIRE(db.BeginDisconnect(record));
+            BOOST_CHECK(db.writes == std::vector<bool>{true});
+            BOOST_CHECK(!db.Exists(record.block_hash));
+            BOOST_CHECK(!NEVMCacheValueMatches(db, record.block_hash, 13));
+            BOOST_CHECK(!db.BeginDisconnect(record));
+
+            // A delayed cache insertion must not cancel a durable revocation.
+            StageNEVMCacheValue(db, record.block_hash, 23);
+            StageNEVMCacheValue(db, unrelated, 33);
+            BOOST_CHECK(!NEVMCacheValueMatches(db, record.block_hash, 23));
+            BOOST_REQUIRE(db.FlushCacheToDisk(2, false));
+            BOOST_CHECK(!db.Exists(record.block_hash));
+            BOOST_CHECK(NEVMCacheValueMatches(db, unrelated, 33));
+        }
+        {
+            FailingNEVMCacheDB<CNEVMTxRootsDB> db({.path = path, .cache_bytes = 1 << 20});
+            const auto pending{db.GetPendingDisconnect()};
+            BOOST_REQUIRE(pending);
+            BOOST_CHECK(pending->carrier == record.carrier);
+            BOOST_CHECK(pending->block_hash == record.block_hash);
+            BOOST_CHECK(pending->tx_root == record.tx_root);
+            BOOST_CHECK(pending->receipt_root == record.receipt_root);
+            BOOST_CHECK(!NEVMCacheValueMatches(db, record.block_hash, 13));
+            BOOST_CHECK(NEVMCacheValueMatches(db, unrelated, 33));
+
+            // The caller separately establishes and synchronizes the recovered
+            // coins tip before choosing whether this carrier remains canonical.
+            BOOST_REQUIRE(db.CompleteDisconnect(restore_root));
+            BOOST_CHECK(db.writes == std::vector<bool>{true});
+            BOOST_CHECK(!db.GetPendingDisconnect());
+            BOOST_CHECK_EQUAL(NEVMCacheValueMatches(db, record.block_hash, 13), restore_root);
+            BOOST_CHECK(!NEVMCacheValueMatches(db, record.block_hash, 23));
+        }
+        {
+            CNEVMTxRootsDB db({.path = path, .cache_bytes = 1 << 20});
+            BOOST_CHECK(!db.GetPendingDisconnect());
+            BOOST_CHECK_EQUAL(NEVMCacheValueMatches(db, record.block_hash, 13), restore_root);
+            BOOST_CHECK_EQUAL(db.Exists(record.block_hash), restore_root);
+            BOOST_CHECK(NEVMCacheValueMatches(db, unrelated, 33));
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(root_disconnect_journal_write_failures_preserve_recovery_state)
+{
+    const fs::path path{m_args.GetDataDirBase() / "root_disconnect_failed_write"};
+    const NEVMRootDisconnect record{NEVMCacheTestKey(1), NEVMCacheTestKey(2),
+                                    NEVMCacheTestKey(13), NEVMCacheTestKey(14)};
+    for (const bool throw_error : {false, true}) {
+        for (const bool restore_root : {false, true}) {
+            {
+                FailingNEVMCacheDB<CNEVMTxRootsDB> db(
+                    {.path = path, .cache_bytes = 1 << 20, .wipe_data = true});
+                StageNEVMCacheValue(db, record.block_hash, 13);
+                BOOST_REQUIRE(db.FlushCacheToDisk());
+                db.FailNextWrite(throw_error);
+                CheckNEVMCacheWriteFailure(throw_error, [&] { return db.BeginDisconnect(record); });
+                BOOST_CHECK(!db.GetPendingDisconnect());
+                BOOST_CHECK(NEVMCacheValueMatches(db, record.block_hash, 13));
+                BOOST_CHECK(db.Exists(record.block_hash));
+            }
+            {
+                FailingNEVMCacheDB<CNEVMTxRootsDB> db({.path = path, .cache_bytes = 1 << 20});
+                BOOST_CHECK(!db.GetPendingDisconnect());
+                BOOST_REQUIRE(NEVMCacheValueMatches(db, record.block_hash, 13));
+                BOOST_REQUIRE(db.BeginDisconnect(record));
+                db.FailNextWrite(throw_error);
+                CheckNEVMCacheWriteFailure(throw_error, [&] { return db.CompleteDisconnect(restore_root); });
+                BOOST_REQUIRE(db.GetPendingDisconnect());
+                BOOST_CHECK(!NEVMCacheValueMatches(db, record.block_hash, 13));
+                StageNEVMCacheValue(db, record.block_hash, 23);
+                BOOST_REQUIRE(db.FlushCacheToDisk(2, false));
+                BOOST_CHECK(!db.Exists(record.block_hash));
+            }
+            {
+                CNEVMTxRootsDB db({.path = path, .cache_bytes = 1 << 20});
+                BOOST_REQUIRE(db.GetPendingDisconnect());
+                BOOST_CHECK(!NEVMCacheValueMatches(db, record.block_hash, 13));
+                BOOST_CHECK(!NEVMCacheValueMatches(db, record.block_hash, 23));
+                BOOST_REQUIRE(db.CompleteDisconnect(restore_root));
+            }
+            {
+                CNEVMTxRootsDB db({.path = path, .cache_bytes = 1 << 20});
+                BOOST_CHECK(!db.GetPendingDisconnect());
+                BOOST_CHECK_EQUAL(NEVMCacheValueMatches(db, record.block_hash, 13), restore_root);
+                BOOST_CHECK_EQUAL(db.Exists(record.block_hash), restore_root);
+            }
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(root_disconnect_journal_preserves_opaque_roots_and_rejects_malformed_records)
+{
+    const fs::path path{m_args.GetDataDirBase() / "root_disconnect_malformed"};
+    const DBParams params{.path = path, .cache_bytes = 1 << 20};
+    const NEVMRootDisconnect record{NEVMCacheTestKey(1), NEVMCacheTestKey(2),
+                                    NEVMCacheTestKey(13), NEVMCacheTestKey(14)};
+    // Null NEVM fields remain opaque committed data; rollback must not add
+    // restrictions absent from historical commitment validation.
+    for (const unsigned int null_fields : {1U, 2U, 4U, 7U}) {
+        auto opaque{record};
+        if (null_fields & 1U) opaque.block_hash.SetNull();
+        if (null_fields & 2U) opaque.tx_root.SetNull();
+        if (null_fields & 4U) opaque.receipt_root.SetNull();
+        {
+            CNEVMTxRootsDB db({.path = path, .cache_bytes = 1 << 20, .wipe_data = true});
+            db.FlushDataToCache({{opaque.block_hash, NEVMTxRoot{opaque.tx_root, opaque.receipt_root}}});
+            BOOST_REQUIRE(db.FlushCacheToDisk());
+            BOOST_REQUIRE(db.BeginDisconnect(opaque));
+        }
+        {
+            CNEVMTxRootsDB db(params);
+            BOOST_REQUIRE(db.GetPendingDisconnect());
+            NEVMTxRoot roots;
+            BOOST_CHECK(!db.ReadTxRoots(opaque.block_hash, roots));
+            BOOST_REQUIRE(db.CompleteDisconnect(/*restore_root=*/true));
+        }
+        {
+            CNEVMTxRootsDB db(params);
+            BOOST_CHECK(!db.GetPendingDisconnect());
+            NEVMTxRoot roots;
+            BOOST_REQUIRE(db.ReadTxRoots(opaque.block_hash, roots));
+            BOOST_CHECK(roots.nTxRoot == opaque.tx_root);
+            BOOST_CHECK(roots.nReceiptRoot == opaque.receipt_root);
+        }
+    }
+    {
+        auto invalid{record};
+        invalid.carrier.SetNull();
+        {
+            FailingNEVMCacheDB<CNEVMTxRootsDB> db(
+                {.path = path, .cache_bytes = 1 << 20, .wipe_data = true});
+            BOOST_CHECK(!db.BeginDisconnect(invalid));
+            BOOST_CHECK(db.writes.empty());
+            BOOST_CHECK(!db.GetPendingDisconnect());
+            BOOST_REQUIRE(db.Write(uint8_t{'D'}, invalid, true));
+        }
+        BOOST_CHECK_THROW(CNEVMTxRootsDB{params}, dbwrapper_error);
+    }
+    {
+        CDBWrapper db({.path = path, .cache_bytes = 1 << 20, .wipe_data = true});
+        BOOST_REQUIRE(db.Write(uint8_t{'D'}, uint8_t{1}, true));
+    }
+    BOOST_CHECK_THROW(CNEVMTxRootsDB{params}, dbwrapper_error);
+    {
+        CDBWrapper db({.path = path, .cache_bytes = 1 << 20, .wipe_data = true});
+        BOOST_REQUIRE(db.Write(uint8_t{'D'}, std::pair{record, uint8_t{1}}, true));
+    }
+    BOOST_CHECK_THROW(CNEVMTxRootsDB{params}, dbwrapper_error);
+    {
+        // The reserved one-byte key must not collide with a legacy root hash
+        // whose first byte is the same journal tag.
+        CNEVMTxRootsDB db({.path = path, .cache_bytes = 1 << 20, .wipe_data = true});
+        StageNEVMCacheValue(db, NEVMCacheTestKey('D'), 13);
+        BOOST_REQUIRE(db.FlushCacheToDisk());
+    }
+    CNEVMTxRootsDB db(params);
+    BOOST_CHECK(!db.GetPendingDisconnect());
+    BOOST_CHECK(NEVMCacheValueMatches(db, NEVMCacheTestKey('D'), 13));
+}
+// SYSCOIN END: Cold reopening must preserve unfinished root revocation.
+
 BOOST_AUTO_TEST_SUITE_END()
 // SYSCOIN END: Exercise real NEVM cache classes with failed batch writes.

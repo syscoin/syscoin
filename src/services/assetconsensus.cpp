@@ -624,10 +624,75 @@ bool CheckAssetAllocationInputs(const CTransaction &tx, const uint256& txHash, T
     }  
     return true;
 }
+// SYSCOIN BEGIN: Revoke roots and retain recovery intent in one durable batch.
+namespace {
+// Legacy root keys serialize to 32 bytes, so this one-byte key cannot collide.
+constexpr uint8_t DB_NEVM_ROOT_DISCONNECT{'D'};
+}
+
+CNEVMTxRootsDB::CNEVMTxRootsDB(const DBParams& params) : CDBWrapper(params)
+{
+    std::unique_ptr<CDBIterator> it{NewIterator()};
+    it->Seek(DB_NEVM_ROOT_DISCONNECT);
+    it->CheckStatus();
+    uint8_t key;
+    if (!it->Valid() || !it->GetKeyExact(key) || key != DB_NEVM_ROOT_DISCONNECT) return;
+    NEVMRootDisconnect disconnect;
+    if (it->GetValueSize() != 4 * uint256::size() ||
+        !it->GetValueExact(disconnect) || !disconnect.IsValid()) {
+        throw dbwrapper_error("Invalid pending NEVM root disconnect record");
+    }
+    LOCK(cs_cache);
+    m_pending_disconnect = disconnect;
+}
+
+std::optional<NEVMRootDisconnect> CNEVMTxRootsDB::GetPendingDisconnect() const
+{
+    LOCK(cs_cache);
+    return m_pending_disconnect;
+}
+
+bool CNEVMTxRootsDB::BeginDisconnect(const NEVMRootDisconnect& disconnect)
+{
+    LOCK(cs_cache);
+    if (m_pending_disconnect || !disconnect.IsValid()) return false;
+    CDBBatch batch(*this);
+    batch.Write(DB_NEVM_ROOT_DISCONNECT, disconnect);
+    batch.Erase(disconnect.block_hash);
+    if (!WriteCacheBatch(batch, /*sync=*/true)) return false;
+    m_pending_disconnect = disconnect;
+    mapCache.erase(disconnect.block_hash);
+    m_pending_erases.erase(disconnect.block_hash);
+    return true;
+}
+
+bool CNEVMTxRootsDB::CompleteDisconnect(bool restore_root)
+{
+    LOCK(cs_cache);
+    if (!m_pending_disconnect) return true;
+    const auto& disconnect = *m_pending_disconnect;
+    CDBBatch batch(*this);
+    if (restore_root) {
+        batch.Write(disconnect.block_hash,
+                    NEVMTxRoot{disconnect.tx_root, disconnect.receipt_root});
+    } else {
+        batch.Erase(disconnect.block_hash);
+    }
+    batch.Erase(DB_NEVM_ROOT_DISCONNECT);
+    if (!WriteCacheBatch(batch, /*sync=*/true)) return false;
+    mapCache.erase(disconnect.block_hash);
+    m_pending_erases.erase(disconnect.block_hash);
+    m_pending_disconnect.reset();
+    return true;
+}
+// SYSCOIN END: Revoke roots and retain recovery intent in one durable batch.
+
 // SYSCOIN BEGIN: Retry failed erases without changing ordinary put batching.
 void CNEVMTxRootsDB::FlushDataToCache(const NEVMTxRootMap &mapNEVMTxRoots) {
     LOCK(cs_cache);
     for (const auto& entry : mapNEVMTxRoots) {
+        // SYSCOIN: Only explicit coins recovery can restore a revoked root.
+        if (m_pending_disconnect && m_pending_disconnect->block_hash == entry.first) continue;
         m_pending_erases.erase(entry.first);
         auto result = mapCache.emplace(entry.first, entry.second);
         if (!result.second) {
@@ -655,6 +720,8 @@ bool CNEVMTxRootsDB::FlushCacheToDisk(std::size_t CHUNK_ITEMS, bool fSync)
 
 bool CNEVMTxRootsDB::ReadTxRoots(const uint256& nBlockHash, NEVMTxRoot& txRoot) {
     LOCK(cs_cache);
+    // SYSCOIN: Reopening the database must preserve the durable revocation.
+    if (m_pending_disconnect && m_pending_disconnect->block_hash == nBlockHash) return false;
     if (m_pending_erases.contains(nBlockHash)) return false;
     auto it = mapCache.find(nBlockHash);
     if (it != mapCache.end()) {

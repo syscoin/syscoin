@@ -48,13 +48,28 @@
 
 #include <algorithm> // SYSCOIN: synthetic recovery-universe fixture.
 #include <array> // SYSCOIN: synthetic PQ activation fixtures.
+#include <chrono> // SYSCOIN: bounded crash-test subprocess lifetime.
 #include <cstdint> // SYSCOIN: synthetic recovery-authority fixture.
+#include <cstdlib> // SYSCOIN: unclean exit of an owned crash-test subprocess.
 #include <functional> // SYSCOIN: observe coins/mint persistence ordering.
 #include <limits>
 #include <optional>
 #include <stdexcept>
 #include <type_traits>
+#include <thread> // SYSCOIN: bounded wait for an owned crash-test subprocess.
 #include <vector>
+
+#if defined(HAVE_BOOST_PROCESS) || defined(ENABLE_EXTERNAL_SIGNER)
+// SYSCOIN: Use a fresh process rather than forking an active chain fixture.
+#include <boost/version.hpp>
+#if BOOST_VERSION >= 108800
+#include <boost/process/v1/args.hpp>
+#include <boost/process/v1/child.hpp>
+#include <boost/process/v1/exe.hpp>
+#else
+#include <boost/process.hpp>
+#endif
+#endif
 
 #include <boost/signals2/connection.hpp>
 #include <boost/test/unit_test.hpp>
@@ -563,7 +578,7 @@ struct MintRollbackDurabilitySetup : TestChain100Setup {
         BOOST_REQUIRE(chainstate.CoinsDB().FlushWithSync(coins));
     }
 
-    void ReopenCoins(bool prepare_replay)
+    void ReopenCoins(bool prepare_replay, std::optional<uint256> new_head = std::nullopt)
     {
         auto& chainstate{m_node.chainman->ActiveChainstate()};
         LOCK(::cs_main);
@@ -579,7 +594,7 @@ struct MintRollbackDurabilitySetup : TestChain100Setup {
             CDBBatch batch{db};
             batch.Erase(uint8_t{'B'});
             batch.Write(uint8_t{'H'},
-                        std::vector<uint256>{parent_hash, stored_tip_hash});
+                        std::vector<uint256>{new_head.value_or(parent_hash), stored_tip_hash});
             BOOST_REQUIRE(db.WriteBatch(batch, /*fSync=*/true));
         }
         chainstate.InitCoinsDB(1U << 20, /*in_memory=*/false,
@@ -665,6 +680,161 @@ struct MintRollbackDurabilitySetup : TestChain100Setup {
     }
 };
 // SYSCOIN END: Mint rollback persistence ordering fixture.
+
+// SYSCOIN BEGIN: Crash-safe NEVM root revocation across the coins transition.
+struct ObservedDisconnectRootsDB final : CNEVMTxRootsDB {
+    using CNEVMTxRootsDB::CNEVMTxRootsDB;
+    std::function<void(bool)> observe_sync;
+    std::function<bool()> before_write;
+    std::function<void()> after_write;
+
+protected:
+    bool WriteCacheBatch(CDBBatch& batch, bool sync) override
+    {
+        if (observe_sync) observe_sync(sync);
+        if (before_write && !before_write()) return false;
+        const bool written{CDBWrapper::WriteBatch(batch, sync)};
+        if (written && after_write) after_write();
+        return written;
+    }
+};
+
+struct NEVMRootRollbackSetup : StartupNEVMRecoverySetup {
+    std::unique_ptr<CNEVMTxRootsDB> previous_roots_db{std::move(pnevmtxrootsdb)};
+    std::unique_ptr<CNEVMMintedTxDB> previous_mint_db{std::move(pnevmtxmintdb)};
+    const fs::path roots_path{m_path_root / "root-disconnect-roots"};
+    const fs::path mints_path{m_path_root / "root-disconnect-mints"};
+    const uint256 mint_hash{uint256S("b001")};
+    const uint256 unclaimed_hash{uint256S("b002")};
+    std::shared_ptr<const CBlock> parent;
+    CBlock carrier;
+    CNEVMHeader canonical_header;
+    CNEVMHeader orphan_header;
+    COutPoint minted_coin;
+
+    NEVMRootRollbackSetup()
+        : StartupNEVMRecoverySetup{/*coins_db_in_memory=*/false}
+    {
+        pnevmtxrootsdb = std::make_unique<ObservedDisconnectRootsDB>(DBParams{
+            .path = roots_path, .cache_bytes = 1U << 20, .wipe_data = true});
+        pnevmtxmintdb = std::make_unique<ObservedRollbackMintDB>(DBParams{
+            .path = mints_path, .cache_bytes = 1U << 20, .wipe_data = true});
+    }
+
+    ~NEVMRootRollbackSetup()
+    {
+        pnevmtxrootsdb = std::move(previous_roots_db);
+        pnevmtxmintdb = std::move(previous_mint_db);
+    }
+
+    ObservedDisconnectRootsDB& RootsDB()
+    {
+        return static_cast<ObservedDisconnectRootsDB&>(*pnevmtxrootsdb);
+    }
+
+    ObservedRollbackMintDB& MintDB()
+    {
+        return static_cast<ObservedRollbackMintDB&>(*pnevmtxmintdb);
+    }
+
+    CBlockIndex* StoreBlockIndex(const CBlock& block)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        auto& chainman{*m_node.chainman};
+        if (auto* index{chainman.m_blockman.LookupBlockIndex(block.GetHash())}) {
+            return index;
+        }
+        auto* previous{chainman.m_blockman.LookupBlockIndex(block.hashPrevBlock)};
+        BOOST_REQUIRE(previous != nullptr);
+        const FlatFilePos pos{chainman.m_blockman.SaveBlockToDisk(
+            block, previous->nHeight + 1, nullptr)};
+        BOOST_REQUIRE(!pos.IsNull());
+        auto* index{chainman.m_blockman.AddToBlockIndex(block, chainman.m_best_header)};
+        BOOST_REQUIRE(index != nullptr);
+        chainman.ReceivedBlockTransactions(block, index, pos);
+        index->RaiseValidity(BLOCK_VALID_SCRIPTS);
+        return index;
+    }
+
+    void PrepareRootDisconnect(bool with_mint = true)
+    {
+        parent = MineNEVMBlock();
+        SyncWithValidationInterfaceQueue();
+        auto& chainman{*m_node.chainman};
+        auto& chainstate{chainman.ActiveChainstate()};
+        auto block_template{node::BlockAssembler{chainstate, nullptr}
+                                .CreateNewBlock(CScript{} << OP_TRUE)};
+        carrier = block_template->block;
+        if (with_mint) {
+            // A parsed, previously validated mint bookkeeping fixture. Its
+            // independent unclaimed hash below has no consumed-proof marker.
+            CMintSyscoin mint;
+            mint.nTxHash = mint_hash;
+            mint.voutAssets.emplace_back(1, std::vector<CAssetOutValue>{{0, 1}});
+            mint.vchTxParentNodes = {0x80};
+            mint.vchReceiptParentNodes = {0x80};
+            std::vector<unsigned char> payload;
+            mint.SerializeData(payload);
+            CMutableTransaction tx;
+            tx.nVersion = SYSCOIN_TX_VERSION_ALLOCATION_MINT;
+            tx.vin.emplace_back(COutPoint{m_coinbase_txns.front()->GetHash(), 0});
+            tx.vout.emplace_back(1, CScript{} << OP_TRUE);
+            tx.vout.emplace_back(0, CScript{} << OP_RETURN << payload);
+            tx.LoadAssets();
+            BOOST_REQUIRE(!CMintSyscoin(CTransaction{tx}).IsNull());
+            carrier.vtx.push_back(MakeTransactionRef(std::move(tx)));
+        }
+        node::RegenerateCommitments(carrier, chainman,
+                                    block_template->vchCoinbaseCommitmentExtra);
+        carrier.fChecked = false;
+        carrier.nNonce = 0;
+        while (!CheckProofOfWork(carrier.GetHash(), carrier.nBits,
+                                  chainman.GetConsensus())) ++carrier.nNonce;
+        BlockValidationState header_state;
+        BOOST_REQUIRE(GetNEVMData(header_state, carrier, orphan_header));
+        BOOST_REQUIRE(GetNEVMData(header_state, *parent, canonical_header));
+        BOOST_REQUIRE(orphan_header.nBlockHash != canonical_header.nBlockHash);
+        LOCK(::cs_main);
+        auto* index{StoreBlockIndex(carrier)};
+        CBlockUndo undo;
+        auto& coins{chainstate.CoinsTip()};
+        if (with_mint) {
+            Coin input;
+            BOOST_REQUIRE(coins.SpendCoin(carrier.vtx[1]->vin[0].prevout, &input));
+            undo.vtxundo.emplace_back();
+            undo.vtxundo.back().vprevout.push_back(std::move(input));
+            minted_coin = COutPoint{carrier.vtx[1]->GetHash(), 0};
+            MintDB().FlushDataToCache({mint_hash});
+            BOOST_REQUIRE(MintDB().FlushCacheToDisk());
+        }
+        for (const auto& tx : carrier.vtx) AddCoins(coins, *tx, index->nHeight);
+        BlockValidationState undo_state;
+        BOOST_REQUIRE(chainman.m_blockman.WriteUndoDataForBlock(undo, undo_state, *index));
+        coins.SetBestBlock(carrier.GetHash());
+        chainstate.m_chain.SetTip(*index);
+        RootsDB().FlushDataToCache({
+            {orphan_header.nBlockHash, {orphan_header.nTxRoot, orphan_header.nReceiptRoot}},
+            {canonical_header.nBlockHash, {canonical_header.nTxRoot, canonical_header.nReceiptRoot}},
+        });
+        BOOST_REQUIRE(RootsDB().FlushCacheToDisk());
+        BOOST_REQUIRE(chainstate.CoinsDB().FlushWithSync(coins));
+        nevm->applied_count = 2;
+        nevm->applied_hash = carrier.GetHash();
+        nevm->disconnected_blocks.clear();
+    }
+
+    bool DisconnectRootTip(BlockValidationState& state, bool reverify)
+    {
+        auto& chainstate{m_node.chainman->ActiveChainstate()};
+        LOCK2(::cs_main, chainstate.MempoolMutex());
+        m_node.notifications->m_shutdown_on_fatal_error = false;
+        const bool disconnected{chainstate.DisconnectTip(state, nullptr, reverify)};
+        m_node.notifications->m_shutdown_on_fatal_error = true;
+        m_node.exit_status.store(EXIT_SUCCESS);
+        return disconnected;
+    }
+};
+// SYSCOIN END: Crash-safe NEVM root revocation across the coins transition.
 
 struct FreshNEVMStartupSetup : ChainTestingSetup {
     const bool previous_nevm_connection{fNEVMConnection};
@@ -1129,7 +1299,321 @@ BOOST_FIXTURE_TEST_CASE(nonmint_replay_preserves_async_coins_flush,
     CheckRollback(/*replay=*/true, /*fail_coins_sync=*/false,
                   /*with_mint=*/false);
 }
+
+BOOST_FIXTURE_TEST_CASE(mint_replay_retains_proof_reconnected_on_new_branch,
+                        MintRollbackDurabilitySetup)
+{
+    StoreTip(/*with_mint=*/true);
+    auto& chainman{*m_node.chainman};
+    auto& chainstate{chainman.ActiveChainstate()};
+    LOCK(::cs_main);
+    auto* old_index{chainman.m_blockman.LookupBlockIndex(stored_tip_hash)};
+    BOOST_REQUIRE(old_index != nullptr);
+    CBlock replacement;
+    BOOST_REQUIRE(chainman.m_blockman.ReadBlockFromDisk(replacement, *old_index));
+    CMutableTransaction replacement_mint{*replacement.vtx[1]};
+    replacement_mint.nLockTime = 1;
+    replacement.vtx[1] = MakeTransactionRef(std::move(replacement_mint));
+    ++replacement.nTime;
+    node::RegenerateCommitments(replacement, chainman, {});
+    replacement.nNonce = 0;
+    while (!CheckProofOfWork(replacement.GetHash(), replacement.nBits,
+                              chainman.GetConsensus())) ++replacement.nNonce;
+    const COutPoint replacement_coin{replacement.vtx[1]->GetHash(), 0};
+    BOOST_REQUIRE(replacement_coin != mint_coin);
+    BOOST_REQUIRE(CMintSyscoin(*replacement.vtx[1]).nTxHash == mint_hash);
+    const auto pos{chainman.m_blockman.SaveBlockToDisk(replacement, old_index->nHeight, nullptr)};
+    BOOST_REQUIRE(!pos.IsNull());
+    auto* replacement_index{chainman.m_blockman.AddToBlockIndex(replacement, chainman.m_best_header)};
+    BOOST_REQUIRE(replacement_index != nullptr);
+    chainman.ReceivedBlockTransactions(replacement, replacement_index, pos);
+    replacement_index->RaiseValidity(BLOCK_VALID_SCRIPTS);
+    ReopenCoins(/*prepare_replay=*/true, replacement.GetHash());
+    BOOST_REQUIRE(chainstate.ReplayBlocks());
+    BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == replacement.GetHash());
+    BOOST_CHECK(!chainstate.CoinsDB().HaveCoin(mint_coin));
+    BOOST_CHECK(chainstate.CoinsDB().HaveCoin(replacement_coin));
+    BOOST_CHECK(MintDB().ExistsTx(mint_hash));
+    BOOST_REQUIRE(MintDB().FlushCacheToDisk());
+    BOOST_CHECK(MintDB().Exists(mint_hash));
+}
 // SYSCOIN END: Coins removal must be synchronous before mint-marker erasure.
+
+// SYSCOIN BEGIN: Exercise real process loss and empty-HEADS startup recovery.
+BOOST_FIXTURE_TEST_CASE(nevm_disconnect_root_crash_child, NEVMRootRollbackSetup,
+                        *boost::unit_test::disabled())
+{
+    const auto args{G_TEST_COMMAND_LINE_ARGUMENTS()};
+    if (args.empty() || std::string{args[0]} != "NEVM_ROOT_CRASH_CHILD") {
+        BOOST_TEST_MESSAGE("Crash helper requires an owned parent-test invocation");
+        return;
+    }
+    BOOST_REQUIRE_EQUAL(args.size(), 3U);
+    BOOST_REQUIRE_EQUAL(std::string{args[0]}, "NEVM_ROOT_CRASH_CHILD");
+    const fs::path crash_path{fs::u8path(args[1])};
+    const std::string cut{args[2]};
+    BOOST_REQUIRE(crash_path.is_absolute());
+    BOOST_REQUIRE(fs::is_directory(crash_path));
+    BOOST_REQUIRE(!fs::exists(crash_path / "manifest"));
+    PrepareRootDisconnect();
+    auto& chainstate{m_node.chainman->ActiveChainstate()};
+    {
+        LOCK(::cs_main);
+        CDBWrapper manifest{DBParams{
+            .path = crash_path / "manifest", .cache_bytes = 1U << 20}};
+        CDBBatch batch{manifest};
+        batch.Write(std::string{"fixture_root"}, fs::PathToString(m_path_root));
+        batch.Write(std::string{"coins_path"},
+                    fs::PathToString(*chainstate.CoinsDB().StoragePath()));
+        CDataStream parent_bytes{SER_DISK, CLIENT_VERSION};
+        CDataStream carrier_bytes{SER_DISK, CLIENT_VERSION};
+        parent_bytes << *parent;
+        carrier_bytes << carrier;
+        batch.Write(std::string{"parent"}, std::vector<uint8_t>{
+            UCharCast(parent_bytes.data()), UCharCast(parent_bytes.data() + parent_bytes.size())});
+        batch.Write(std::string{"carrier"}, std::vector<uint8_t>{
+            UCharCast(carrier_bytes.data()), UCharCast(carrier_bytes.data() + carrier_bytes.size())});
+        BOOST_REQUIRE(manifest.WriteBatch(batch, /*fSync=*/true));
+    }
+    std::size_t root_writes{0};
+    std::size_t coins_syncs{0};
+    RootsDB().before_write = [&] {
+        ++root_writes;
+        if (cut == "before-root-prepare" && root_writes == 1) std::_Exit(73);
+        if (cut == "after-coins-sync" && root_writes == 2) {
+            BOOST_REQUIRE_EQUAL(coins_syncs, 1U);
+            std::_Exit(73);
+        }
+        return true;
+    };
+    RootsDB().after_write = [&] {
+        if (cut == "after-root-prepare" && root_writes == 1) std::_Exit(73);
+    };
+    {
+        LOCK(::cs_main);
+        chainstate.CoinsDB().SetSyncCallbackForTesting([&] {
+            ++coins_syncs;
+            return true;
+        });
+    }
+    MintDB().before_write = [&](bool sync) {
+        if (cut == "after-journal-clear") {
+            BOOST_REQUIRE(sync);
+            BOOST_REQUIRE_EQUAL(coins_syncs, 1U);
+            std::_Exit(73);
+        }
+    };
+    BlockValidationState state;
+    DisconnectRootTip(state, /*reverify=*/true);
+    BOOST_FAIL("DisconnectTip did not reach the requested crash cut: " + cut);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_disconnect_roots_cold_recovery,
+                        NEVMRootRollbackSetup)
+{
+#if defined(HAVE_BOOST_PROCESS) || defined(ENABLE_EXTERNAL_SIGNER)
+#if BOOST_VERSION >= 108800
+    namespace bp = boost::process::v1;
+#else
+    namespace bp = boost::process;
+#endif
+    const std::string executable{
+        boost::unit_test::framework::master_test_suite().argv[0]};
+    auto& chainstate{m_node.chainman->ActiveChainstate()};
+    for (const std::string cut : {"before-root-prepare", "after-root-prepare",
+                                  "after-coins-sync", "after-journal-clear"}) {
+        BOOST_TEST_CONTEXT("cold reopen at " << cut) {
+            const fs::path crash_path{m_path_root / fs::u8path(cut)};
+            BOOST_REQUIRE(fs::create_directories(crash_path));
+            const std::vector<std::string> args{
+                "--run_test=validation_chainstatemanager_tests/nevm_disconnect_root_crash_child",
+                "--", "NEVM_ROOT_CRASH_CHILD", fs::PathToString(crash_path), cut};
+            bp::child child{bp::exe = executable, bp::args = args};
+            const auto deadline{std::chrono::steady_clock::now() + std::chrono::minutes{2}};
+            while (child.running() && std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds{10});
+            }
+            const bool timed_out{child.running()};
+            if (timed_out) child.terminate();
+            child.wait();
+            BOOST_REQUIRE_MESSAGE(!timed_out, "Owned crash-test child timed out");
+            BOOST_REQUIRE_EQUAL(child.exit_code(), 73);
+
+            CDBWrapper manifest{DBParams{
+                .path = crash_path / "manifest", .cache_bytes = 1U << 20}};
+            std::string fixture_root_string, coins_path_string;
+            std::vector<uint8_t> parent_bytes, carrier_bytes;
+            CBlock saved_parent, saved_carrier;
+            BOOST_REQUIRE(manifest.Read(std::string{"fixture_root"}, fixture_root_string));
+            BOOST_REQUIRE(manifest.Read(std::string{"coins_path"}, coins_path_string));
+            BOOST_REQUIRE(manifest.Read(std::string{"parent"}, parent_bytes));
+            BOOST_REQUIRE(manifest.Read(std::string{"carrier"}, carrier_bytes));
+            CDataStream parent_stream{parent_bytes, SER_DISK, CLIENT_VERSION};
+            CDataStream carrier_stream{carrier_bytes, SER_DISK, CLIENT_VERSION};
+            parent_stream >> saved_parent;
+            carrier_stream >> saved_carrier;
+            BOOST_REQUIRE(parent_stream.empty());
+            BOOST_REQUIRE(carrier_stream.empty());
+            const fs::path child_root{fs::u8path(fixture_root_string)};
+            BOOST_REQUIRE(child_root != m_path_root);
+            BOOST_REQUIRE(child_root.parent_path() == m_path_root.parent_path());
+            CNEVMHeader orphan, canonical;
+            BlockValidationState state;
+            BOOST_REQUIRE(GetNEVMData(state, saved_carrier, orphan));
+            BOOST_REQUIRE(GetNEVMData(state, saved_parent, canonical));
+            BOOST_REQUIRE_EQUAL(saved_carrier.vtx.size(), 2U);
+            const COutPoint minted{saved_carrier.vtx[1]->GetHash(), 0};
+
+            // These are new DB objects in a process that never held the
+            // writer's caches; _Exit skipped every writer-side destructor.
+            pnevmtxrootsdb = std::make_unique<CNEVMTxRootsDB>(DBParams{
+                .path = child_root / "root-disconnect-roots", .cache_bytes = 1U << 20});
+            pnevmtxmintdb = std::make_unique<CNEVMMintedTxDB>(DBParams{
+                .path = child_root / "root-disconnect-mints", .cache_bytes = 1U << 20});
+            LOCK(::cs_main);
+            chainstate.ResetCoinsViews();
+            chainstate.InitCoinsDB(1U << 20, /*in_memory=*/false,
+                                   /*should_wipe=*/false, fs::u8path(coins_path_string));
+            const bool old_coins{cut == "before-root-prepare" || cut == "after-root-prepare"};
+            const bool pending{cut == "after-root-prepare" || cut == "after-coins-sync"};
+            BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() ==
+                        (old_coins ? saved_carrier.GetHash() : saved_parent.GetHash()));
+            BOOST_CHECK(chainstate.CoinsDB().GetHeadBlocks().empty());
+            BOOST_CHECK_EQUAL(chainstate.CoinsDB().HaveCoin(minted), old_coins);
+            BOOST_CHECK(pnevmtxmintdb->ExistsTx(mint_hash));
+            BOOST_CHECK(!pnevmtxmintdb->ExistsTx(unclaimed_hash));
+            BOOST_CHECK_EQUAL(pnevmtxrootsdb->GetPendingDisconnect().has_value(), pending);
+            NEVMTxRoot roots;
+            BOOST_CHECK_EQUAL(pnevmtxrootsdb->ReadTxRoots(orphan.nBlockHash, roots),
+                              cut == "before-root-prepare");
+            BOOST_REQUIRE(pnevmtxrootsdb->ReadTxRoots(canonical.nBlockHash, roots));
+            BOOST_CHECK(roots.nTxRoot == canonical.nTxRoot);
+            BOOST_CHECK(roots.nReceiptRoot == canonical.nReceiptRoot);
+
+            // Recreate only the two stored indexes above the fixture's exact
+            // shared 100-block base, then run the normal startup entry point.
+            StoreBlockIndex(saved_parent);
+            StoreBlockIndex(saved_carrier);
+            if (pending) {
+                chainstate.CoinsDB().SetSyncCallbackForTesting([] { return false; });
+                BOOST_CHECK(!chainstate.ReplayBlocks());
+                BOOST_CHECK(pnevmtxrootsdb->GetPendingDisconnect());
+                BOOST_CHECK(!pnevmtxrootsdb->ReadTxRoots(orphan.nBlockHash, roots));
+            }
+            std::size_t recovery_syncs{0};
+            chainstate.CoinsDB().SetSyncCallbackForTesting([&] {
+                ++recovery_syncs;
+                return true;
+            });
+            BOOST_REQUIRE(chainstate.ReplayBlocks());
+            chainstate.CoinsDB().SetSyncCallbackForTesting({});
+            BOOST_CHECK_EQUAL(recovery_syncs, pending ? 1U : 0U);
+            BOOST_CHECK(!pnevmtxrootsdb->GetPendingDisconnect());
+            BOOST_CHECK_EQUAL(pnevmtxrootsdb->ReadTxRoots(orphan.nBlockHash, roots), old_coins);
+            if (old_coins) {
+                BOOST_CHECK(roots.nTxRoot == orphan.nTxRoot);
+                BOOST_CHECK(roots.nReceiptRoot == orphan.nReceiptRoot);
+            }
+            BOOST_CHECK(pnevmtxrootsdb->ReadTxRoots(canonical.nBlockHash, roots));
+            BOOST_CHECK(pnevmtxmintdb->ExistsTx(mint_hash));
+            BOOST_CHECK(!pnevmtxmintdb->ExistsTx(unclaimed_hash));
+            BOOST_CHECK(nevm->connected_blocks.empty());
+            BOOST_CHECK(nevm->disconnected_blocks.empty());
+            chainstate.ResetCoinsViews();
+            pnevmtxrootsdb.reset();
+            pnevmtxmintdb.reset();
+            fs::remove_all(child_root);
+        }
+    }
+#else
+    BOOST_TEST_MESSAGE("Skipping subprocess root-crash regression: Boost.Process unavailable");
+#endif
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_nonmint_local_disconnect_revokes_roots,
+                        NEVMRootRollbackSetup)
+{
+    PrepareRootDisconnect(/*with_mint=*/false);
+    // A recently connected parent can still have its root only in RAM.
+    // Committing parent coins must also make that surviving authority durable.
+    BOOST_REQUIRE(RootsDB().Erase(canonical_header.nBlockHash, /*fSync=*/true));
+    RootsDB().FlushDataToCache({{canonical_header.nBlockHash,
+        {canonical_header.nTxRoot, canonical_header.nReceiptRoot}}});
+    NEVMTxRoot cached_parent;
+    BOOST_REQUIRE(!RootsDB().Read(canonical_header.nBlockHash, cached_parent));
+    BOOST_REQUIRE(RootsDB().ReadTxRoots(canonical_header.nBlockHash, cached_parent));
+    RootsDB().observe_sync = [](bool sync) { BOOST_CHECK(sync); };
+    auto& chainstate{m_node.chainman->ActiveChainstate()};
+    std::size_t coins_syncs{0};
+    {
+        LOCK(::cs_main);
+        chainstate.CoinsDB().SetSyncCallbackForTesting([&] {
+            ++coins_syncs;
+            NEVMTxRoot durable_parent;
+            BOOST_REQUIRE(RootsDB().Read(canonical_header.nBlockHash, durable_parent));
+            BOOST_CHECK(durable_parent.nTxRoot == canonical_header.nTxRoot);
+            BOOST_CHECK(durable_parent.nReceiptRoot == canonical_header.nReceiptRoot);
+            return true;
+        });
+    }
+    BlockValidationState state;
+    BOOST_REQUIRE(DisconnectRootTip(state, /*reverify=*/false));
+    LOCK(::cs_main);
+    chainstate.CoinsDB().SetSyncCallbackForTesting({});
+    BOOST_CHECK_EQUAL(coins_syncs, 1U);
+    BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == parent->GetHash());
+    BOOST_CHECK(!RootsDB().GetPendingDisconnect());
+    NEVMTxRoot roots;
+    BOOST_CHECK(!RootsDB().ReadTxRoots(orphan_header.nBlockHash, roots));
+    BOOST_REQUIRE(RootsDB().Read(canonical_header.nBlockHash, roots));
+    BOOST_CHECK(RootsDB().ReadTxRoots(canonical_header.nBlockHash, roots));
+    BOOST_CHECK(nevm->disconnected_blocks.empty());
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_root_prepare_failure_preserves_coin_cache,
+                        NEVMRootRollbackSetup)
+{
+    PrepareRootDisconnect();
+    RootsDB().before_write = [] { return false; };
+    BlockValidationState state;
+    BOOST_CHECK(!DisconnectRootTip(state, /*reverify=*/true));
+    RootsDB().before_write = {};
+    BOOST_CHECK(state.IsError());
+    LOCK(::cs_main);
+    auto& chainstate{m_node.chainman->ActiveChainstate()};
+    BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == carrier.GetHash());
+    BOOST_CHECK(chainstate.CoinsTip().HaveCoin(minted_coin));
+    BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == carrier.GetHash());
+    BOOST_CHECK(chainstate.CoinsDB().HaveCoin(minted_coin));
+    BOOST_CHECK(!RootsDB().GetPendingDisconnect());
+    NEVMTxRoot roots;
+    BOOST_CHECK(RootsDB().ReadTxRoots(orphan_header.nBlockHash, roots));
+    BOOST_CHECK(MintDB().ExistsTx(mint_hash));
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_verification_disconnect_keeps_root_authority,
+                        NEVMRootRollbackSetup)
+{
+    PrepareRootDisconnect(/*with_mint=*/false);
+    auto& chainman{*m_node.chainman};
+    auto& chainstate{chainman.ActiveChainstate()};
+    LOCK(::cs_main);
+    CCoinsViewCache private_view{&chainstate.CoinsTip()};
+    NEVMMintTxSet mints;
+    std::vector<uint256> roots_to_remove;
+    std::vector<std::pair<uint256, uint32_t>> txids;
+    BOOST_REQUIRE(chainstate.DisconnectBlock(
+        carrier, chainman.ActiveTip(), private_view, mints, roots_to_remove,
+        txids, /*bReverify=*/false, /*bReplay=*/false,
+        /*bUpdateSpecialTxState=*/false) == DISCONNECT_OK);
+    BOOST_CHECK(private_view.GetBestBlock() == parent->GetHash());
+    BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == carrier.GetHash());
+    BOOST_CHECK(!RootsDB().GetPendingDisconnect());
+    NEVMTxRoot roots;
+    BOOST_CHECK(RootsDB().ReadTxRoots(orphan_header.nBlockHash, roots));
+    BOOST_CHECK(nevm->disconnected_blocks.empty());
+}
+// SYSCOIN END: Exercise real process loss and empty-HEADS startup recovery.
 
 BOOST_FIXTURE_TEST_CASE(nevm_coins_replay_recovers_partial_forward_flush_locally,
                         CoinsNEVMRecoverySetup)
@@ -1212,12 +1696,19 @@ BOOST_FIXTURE_TEST_CASE(nevm_coins_replay_recovers_fork_locally,
             old_first->GetHash()))};
     BOOST_REQUIRE(old_branch != nullptr);
     BlockValidationState invalidate_state;
-    // The ordinary invalidation path preserves candidate-set invariants.
-    // Skip only external/local NEVM disconnect work during fixture setup so
-    // ReplayBlocks still has the old branch's roots to remove below.
-    BOOST_REQUIRE_MESSAGE(chainstate.InvalidateBlock(
-        invalidate_state, old_branch, /*bReverify=*/false),
-        invalidate_state.ToString());
+    // SYSCOIN: Manufacture a partial old-branch DB flush for ReplayBlocks.
+    // Disable the fixture's external-engine context during setup, as RewindCore
+    // does; a real local-only disconnect now also revokes roots and syncs coins.
+    {
+        struct RestoreNEVMConnection {
+            const bool previous{fNEVMConnection};
+            ~RestoreNEVMConnection() { fNEVMConnection = previous; }
+        } restore;
+        fNEVMConnection = false;
+        BOOST_REQUIRE_MESSAGE(chainstate.InvalidateBlock(
+            invalidate_state, old_branch, /*bReverify=*/false),
+            invalidate_state.ToString());
+    }
     BOOST_REQUIRE_EQUAL(WITH_LOCK(::cs_main, return chainman.ActiveHeight()), 100);
     const auto new_first{MineNEVMBlock()};
     const auto new_second{MineNEVMBlock()};
@@ -1248,6 +1739,12 @@ BOOST_FIXTURE_TEST_CASE(nevm_coins_replay_recovers_fork_locally,
         {headers[2].nBlockHash, headers[3].nBlockHash}));
     NEVMTxRoot old_roots;
     BOOST_REQUIRE(pnevmtxrootsdb->ReadTxRoots(headers[1].nBlockHash, old_roots));
+    // SYSCOIN: The same restart can have both a pending root revocation and
+    // interrupted coins batches. Rebuilt replacement roots must be durable
+    // before coins commit and the recovery record is retired.
+    BOOST_REQUIRE(pnevmtxrootsdb->BeginDisconnect(NEVMRootDisconnect{
+        old_second->GetHash(), headers[1].nBlockHash,
+        headers[1].nTxRoot, headers[1].nReceiptRoot}));
 
     PrepareInterruptedFlush(new_second->GetHash(), old_second->GetHash());
     nevm->connected_blocks.clear();
@@ -1260,7 +1757,27 @@ BOOST_FIXTURE_TEST_CASE(nevm_coins_replay_recovers_fork_locally,
     const auto applied_hash{nevm->applied_hash};
     const auto info_queries{nevm->block_info_queries};
     const auto flush_queries{nevm->flush_requests};
+    std::size_t recovery_syncs{0};
+    {
+        LOCK(::cs_main);
+        chainstate.CoinsDB().SetSyncCallbackForTesting([&] {
+            ++recovery_syncs;
+            for (std::size_t i{2}; i < headers.size(); ++i) {
+                NEVMTxRoot durable_roots;
+                BOOST_REQUIRE(pnevmtxrootsdb->Read(headers[i].nBlockHash, durable_roots));
+                BOOST_CHECK(durable_roots.nTxRoot == headers[i].nTxRoot);
+                BOOST_CHECK(durable_roots.nReceiptRoot == headers[i].nReceiptRoot);
+            }
+            return true;
+        });
+    }
     BOOST_REQUIRE(chainstate.ReplayBlocks());
+    {
+        LOCK(::cs_main);
+        chainstate.CoinsDB().SetSyncCallbackForTesting({});
+    }
+    BOOST_CHECK_EQUAL(recovery_syncs, 1U);
+    BOOST_CHECK(!pnevmtxrootsdb->GetPendingDisconnect());
     CheckRecoveredTip(new_second->GetHash());
     {
         LOCK(::cs_main);
