@@ -6881,16 +6881,27 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
             if (!llmq::IsDurableChainLockCandidateCompatible(
                     pindexMostWork->nHeight, durable_target->nHeight,
                     candidate_descends_target, target_descends_candidate)) {
-                if (pindexFork == nullptr ||
-                    pindexFork->nHeight ==
+                const CBlockIndex* durable_fork{
+                    LastCommonAncestor(pindexMostWork, durable_target)};
+                if (pindexFork == nullptr || durable_fork == nullptr) {
+                    return state.Error(
+                        "cannot isolate incompatible durable-finality "
+                        "candidate branch");
+                }
+                // The winner may share an inactive prefix with this candidate.
+                // Mark only beyond both forks: preserve that winner prefix and
+                // leave active conflicts for ordinary ChainLock enforcement.
+                const int32_t conflict_fork_height{
+                    std::max(pindexFork->nHeight, durable_fork->nHeight)};
+                if (conflict_fork_height ==
                         std::numeric_limits<int32_t>::max() ||
-                    pindexMostWork->nHeight <= pindexFork->nHeight) {
+                    pindexMostWork->nHeight <= conflict_fork_height) {
                     return state.Error(
                         "cannot isolate incompatible durable-finality "
                         "candidate branch");
                 }
                 CBlockIndex* conflict_root{pindexMostWork->GetAncestor(
-                    pindexFork->nHeight + 1)};
+                    conflict_fork_height + 1)};
                 if (conflict_root == nullptr ||
                     m_chain.Contains(conflict_root)) {
                     return state.Error(

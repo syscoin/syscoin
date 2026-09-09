@@ -6461,7 +6461,8 @@ BOOST_FIXTURE_TEST_CASE(
 }
 
 // A fsynced side-branch winner protects both its own ancestry and the active
-// recovery fork before Start() has imported it into the in-memory store.
+// recovery fork before Start() has imported it into the in-memory store,
+// including when activation quarantines an incompatible inactive candidate.
 BOOST_FIXTURE_TEST_CASE(
     invalidate_rejects_preimport_durable_side_branch_boundary,
     TestChain100Setup)
@@ -6562,6 +6563,26 @@ BOOST_FIXTURE_TEST_CASE(
     BOOST_REQUIRE(llmq::pq::IsEligibleChainLockTarget(
         config->chainlock_schedule, target_height));
 
+    // Register the normal parent-to-child edges so conflict marking exercises
+    // its real subtree traversal. These are structural index fixtures only;
+    // each activation below must stop at preflight before reading a body.
+    const auto add_index = [&](const CBlockIndex& parent)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+        CBlockHeader header;
+        header.nVersion = 4;
+        header.hashPrevBlock = parent.GetBlockHash();
+        header.hashMerkleRoot = GetRandHash();
+        header.nTime = parent.nTime + 1;
+        header.nBits = parent.nBits;
+        CBlockIndex* index{chainman.m_blockman.AddToBlockIndex(
+            header, chainman.m_best_header)};
+        BOOST_REQUIRE(index != nullptr);
+        index->nTx = 1;
+        index->nChainTx = parent.nChainTx + 1;
+        index->nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA;
+        return index;
+    };
+
     CBlockIndex* durable_target{active_lca};
     CBlockIndex* durable_ancestor{nullptr};
     CBlockIndex* activation_predecessor{nullptr};
@@ -6569,23 +6590,7 @@ BOOST_FIXTURE_TEST_CASE(
         LOCK(::cs_main);
         for (int32_t height{active_lca->nHeight + 1};
              height <= target_height; ++height) {
-            uint256 hash{GetRandHash()};
-            while (chainman.m_blockman.LookupBlockIndex(hash) != nullptr) {
-                hash = GetRandHash();
-            }
-            auto [entry, inserted]{
-                chainman.m_blockman.m_block_index.try_emplace(hash)};
-            BOOST_REQUIRE(inserted);
-            CBlockIndex& index{entry->second};
-            index.phashBlock = &entry->first;
-            index.pprev = durable_target;
-            index.nHeight = height;
-            index.nChainWork = durable_target->nChainWork + 1;
-            index.nTx = 1;
-            index.nChainTx = durable_target->nChainTx + 1;
-            index.nStatus = BLOCK_VALID_SCRIPTS;
-            index.BuildSkip();
-            durable_target = &index;
+            durable_target = add_index(*durable_target);
             if (height == config->activation_predecessor_height) {
                 activation_predecessor = durable_target;
             }
@@ -6749,6 +6754,110 @@ BOOST_FIXTURE_TEST_CASE(
     assert_rejected(durable_target);
     assert_rejected(durable_ancestor);
     assert_rejected(active_lca);
+
+    auto& chainstate{chainman.ActiveChainstate()};
+    const uint256 original_coins_tip{
+        WITH_LOCK(::cs_main, return chainstate.CoinsTip().GetBestBlock())};
+    const auto original_candidates{
+        WITH_LOCK(::cs_main, return chainstate.setBlockIndexCandidates)};
+    struct RestoreCandidates {
+        Chainstate& chainstate;
+        const std::set<CBlockIndex*, node::CBlockIndexWorkComparator> candidates;
+        ~RestoreCandidates()
+        {
+            LOCK(::cs_main);
+            chainstate.setBlockIndexCandidates = candidates;
+        }
+    } restore_candidates{chainstate, original_candidates};
+
+    CBlockIndex* durable_child{nullptr};
+    {
+        LOCK(::cs_main);
+        durable_child = add_index(*durable_target);
+    }
+    const auto check_preflight =
+        [&](const std::vector<CBlockIndex*>& conflicting) {
+        BOOST_REQUIRE(!conflicting.empty());
+        {
+            LOCK(::cs_main);
+            // Only the incompatible tip is initially eligible. Its preflight
+            // rejection returns without chain progress; candidates restored by
+            // conflict marking are inspected below, never connected here.
+            chainstate.setBlockIndexCandidates.clear();
+            chainstate.setBlockIndexCandidates.insert(active_tip);
+            chainstate.setBlockIndexCandidates.insert(conflicting.back());
+            chainstate.ResetChainLockConflictMarkingStatsForTesting();
+        }
+        BlockValidationState state;
+        BOOST_REQUIRE_MESSAGE(chainstate.ActivateBestChain(state),
+                              state.ToString());
+        BOOST_CHECK(state.IsValid());
+        LOCK(::cs_main);
+        BOOST_CHECK_EQUAL(chainman.ActiveTip(), active_tip);
+        BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == original_coins_tip);
+        for (CBlockIndex* index : conflicting) {
+            BOOST_CHECK(index->nStatus & BLOCK_CONFLICT_CHAINLOCK);
+            BOOST_CHECK(!(index->nStatus & BLOCK_FAILED_MASK));
+            BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(index), 0U);
+        }
+        // Preserve the winner, its descendant, and every shared ancestor, not
+        // merely the currently active fork point.
+        bool durable_ancestry_preserved{true};
+        for (const CBlockIndex* index{durable_child};
+             index != active_lca->pprev; index = index->pprev) {
+            durable_ancestry_preserved = durable_ancestry_preserved &&
+                !(index->nStatus &
+                  (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK));
+        }
+        BOOST_CHECK(durable_ancestry_preserved);
+        for (const CBlockIndex* index{active_tip};
+             index != active_lca; index = index->pprev) {
+            BOOST_CHECK(!(index->nStatus &
+                          (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK)));
+        }
+        BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(durable_target), 1U);
+        BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(durable_child), 1U);
+        const auto stats{chainstate.GetChainLockConflictMarkingStatsForTesting()};
+        BOOST_CHECK_EQUAL(stats.batch_calls, 1U);
+        BOOST_CHECK_EQUAL(stats.input_roots, 1U);
+        BOOST_CHECK_EQUAL(stats.visited_blocks, conflicting.size());
+        BOOST_CHECK_EQUAL(stats.disconnect_tip_calls, 0U);
+        BOOST_CHECK_EQUAL(stats.tip_publications, 0U);
+    };
+
+    // The candidate and durable winner share a long inactive prefix. The
+    // first conflicting child is after their own common ancestor, not after
+    // the much earlier fork with the active chain.
+    std::vector<CBlockIndex*> shared_prefix_competitor;
+    {
+        LOCK(::cs_main);
+        CBlockIndex* parent{durable_ancestor};
+        for (int count{0}; count < 3; ++count) {
+            parent = add_index(*parent);
+            shared_prefix_competitor.push_back(parent);
+        }
+        BOOST_REQUIRE_EQUAL(
+            LastCommonAncestor(shared_prefix_competitor.back(), durable_target),
+            durable_ancestor);
+        BOOST_REQUIRE_EQUAL(
+            chainstate.m_chain.FindFork(shared_prefix_competitor.back()), active_lca);
+    }
+    check_preflight(shared_prefix_competitor);
+
+    // Conversely, the candidate/winner fork precedes an active competing
+    // suffix. Preflight must retire only the new inactive extension and leave
+    // disconnection of the active suffix to normal finality enforcement.
+    std::vector<CBlockIndex*> active_extension;
+    {
+        LOCK(::cs_main);
+        active_extension.push_back(add_index(*active_tip));
+        active_extension.push_back(add_index(*active_extension.back()));
+        BOOST_REQUIRE_EQUAL(
+            LastCommonAncestor(active_extension.back(), durable_target), active_lca);
+        BOOST_REQUIRE_EQUAL(
+            chainstate.m_chain.FindFork(active_extension.back()), active_tip);
+    }
+    check_preflight(active_extension);
 }
 // SYSCOIN END: Durable ChainLock restart and deep-invalidation tests.
 
