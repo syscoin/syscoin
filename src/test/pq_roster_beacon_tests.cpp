@@ -268,6 +268,44 @@ static_assert(std::is_same_v<decltype(static_cast<ModifierFunction>(
 
 BOOST_AUTO_TEST_SUITE(pq_roster_beacon_tests)
 
+// SYSCOIN BEGIN: Check the height API's bounds independently of seed validity.
+BOOST_AUTO_TEST_CASE(future_btc_height_rejects_negative_and_overflow_anchors)
+{
+    constexpr int32_t delta{
+        static_cast<int32_t>(ROSTER_BEACON_FUTURE_BTC_HEIGHT_DELTA)};
+    constexpr int32_t max_height{std::numeric_limits<int32_t>::max()};
+    constexpr int32_t max_anchor{max_height - delta};
+    RosterBeaconSeed seed;
+
+    for (int32_t anchor{-delta}; anchor < 0; ++anchor) {
+        BOOST_TEST_CONTEXT("negative anchor " << anchor) {
+            seed.anchor_btc_height = anchor;
+            BOOST_CHECK(!seed.FutureBTCHeight());
+        }
+    }
+    for (const int32_t anchor : {std::numeric_limits<int32_t>::min(),
+                                 std::numeric_limits<int32_t>::min() + 1,
+                                 -delta - 1}) {
+        seed.anchor_btc_height = anchor;
+        BOOST_CHECK(!seed.FutureBTCHeight());
+    }
+
+    seed.anchor_btc_height = 0;
+    BOOST_REQUIRE(seed.FutureBTCHeight());
+    BOOST_CHECK_EQUAL(*seed.FutureBTCHeight(), delta);
+    seed.anchor_btc_height = max_anchor;
+    BOOST_REQUIRE(seed.FutureBTCHeight());
+    BOOST_CHECK_EQUAL(*seed.FutureBTCHeight(), max_height);
+
+    for (int32_t excess{1}; excess <= delta; ++excess) {
+        seed.anchor_btc_height = max_anchor + excess;
+        BOOST_TEST_CONTEXT("overflow anchor " << seed.anchor_btc_height) {
+            BOOST_CHECK(!seed.FutureBTCHeight());
+        }
+    }
+}
+// SYSCOIN END: Check the height API's bounds independently of seed validity.
+
 BOOST_AUTO_TEST_CASE(record_states_are_canonical_and_fixed_width)
 {
     const auto empty{EmptySeed(9)};

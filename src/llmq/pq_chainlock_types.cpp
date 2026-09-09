@@ -147,14 +147,16 @@ bool BTCCursor::IsStructurallyValid() const
 
 std::optional<int32_t> RosterBeaconSeed::FutureBTCHeight() const noexcept
 {
-    if (anchor_btc_height < 0 ||
-        static_cast<int64_t>(anchor_btc_height) +
-                ROSTER_BEACON_FUTURE_BTC_HEIGHT_DELTA >
-            std::numeric_limits<int32_t>::max()) {
+    // SYSCOIN: Check the widened result before narrowing. Optimized Clang
+    // with libstdc++ can otherwise carry a negative anchor into the optional's
+    // engagement flag while packing the addition and flag into one register.
+    const int64_t future_height{static_cast<int64_t>(anchor_btc_height) +
+                                ROSTER_BEACON_FUTURE_BTC_HEIGHT_DELTA};
+    if (future_height < ROSTER_BEACON_FUTURE_BTC_HEIGHT_DELTA ||
+        future_height > std::numeric_limits<int32_t>::max()) {
         return std::nullopt;
     }
-    return anchor_btc_height +
-           static_cast<int32_t>(ROSTER_BEACON_FUTURE_BTC_HEIGHT_DELTA);
+    return static_cast<int32_t>(future_height);
 }
 
 bool RosterBeaconSeed::IsStructurallyValid() const noexcept
