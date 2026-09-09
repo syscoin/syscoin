@@ -185,6 +185,7 @@ std::string g_managed_btcheader_owner_token GUARDED_BY(cs_btcheader);
 fs::path g_managed_btcheader_owner_path GUARDED_BY(cs_btcheader);
 int64_t g_btcheader_last_probe_time GUARDED_BY(cs_btcheader){0};
 int64_t g_btcheader_last_restart_time GUARDED_BY(cs_btcheader){0};
+std::optional<int64_t> g_btcheader_startup_time GUARDED_BY(cs_btcheader);
 int64_t g_btcheader_last_progress_time GUARDED_BY(cs_btcheader){0};
 int64_t g_btcheader_last_tip_height GUARDED_BY(cs_btcheader){-1};
 uint256 g_btcheader_last_tip_hash GUARDED_BY(cs_btcheader);
@@ -12007,6 +12008,7 @@ void ClearManagedBTCHeaderRuntime(bool remove_owner_record)
     g_managed_btcheader_owner_path.clear();
     g_managed_btcheader_owner_record.reset();
     g_managed_btcheader_rpc_args.clear();
+    g_btcheader_startup_time.reset();
 }
 
 #ifndef WIN32
@@ -12835,6 +12837,7 @@ bool Chainstate::RestartBTCHeaderNodeForWatchdog(
             force_reindex, g_btcheader_restart_failures, cause);
         return false;
     }
+    g_btcheader_startup_time = GetTime();
     LogPrintf("Bitcoin header watchdog restarted managed child "
               "(reindex=%d reason=%s)\n", force_reindex, cause);
     return true;
@@ -12858,28 +12861,50 @@ bool Chainstate::CheckBTCHeaderNodeHealth(bool recover, std::string& reason)
                chain_info.isObject();
     };
 
+    bool restarted{false};
     if (managed) {
         std::string process_reason;
-        if (!IsManagedBTCHeaderNodeRunningLocked(process_reason) &&
-            !RestartBTCHeaderNodeForWatchdog(
-                recover, now, "process-not-running:" + process_reason,
-                reason)) {
-            return RecordBTCHeaderHealthFailure(
-                now, reason.empty() ? process_reason : reason, reason);
+        if (!IsManagedBTCHeaderNodeRunningLocked(process_reason)) {
+            if (!RestartBTCHeaderNodeForWatchdog(
+                    recover, now, "process-not-running:" + process_reason,
+                    reason)) {
+                return RecordBTCHeaderHealthFailure(
+                    now, reason.empty() ? process_reason : reason, reason);
+            }
+            restarted = true;
         }
     }
 
     UniValue chain_info;
     std::string probe_error;
     if (!probe(chain_info, probe_error)) {
-        if (!RestartBTCHeaderNodeForWatchdog(
+        if (!restarted && g_btcheader_startup_time) {
+            const int64_t startup_age{GetTime() - *g_btcheader_startup_time};
+            if (startup_age < 0) {
+                return RecordBTCHeaderHealthFailure(
+                    now, "btcheader-startup-clock-regressed", reason);
+            }
+            const int64_t startup_grace{std::max<int64_t>(
+                0, gArgs.GetIntArg("-btcheaderwatchdogstartupgrace",
+                                   DEFAULT_BTC_HEADER_WATCHDOG_STARTUP_GRACE))};
+            if (startup_age < startup_grace) {
+                // SYSCOIN: A live replacement may still be initializing RPC.
+                // Keep policy fail-closed without resetting its startup budget
+                // or the durable header-progress clock on each failed probe.
+                return RecordBTCHeaderHealthFailure(
+                    now, "btcheader-watchdog-startup-pending:" + probe_error,
+                    reason);
+            }
+        }
+        if (!restarted && !RestartBTCHeaderNodeForWatchdog(
                 recover, now, "rpc-unreachable:" + probe_error, reason)) {
             return RecordBTCHeaderHealthFailure(
                 now, reason.empty() ? probe_error : reason, reason);
         }
-        // SYSCOIN: A new process can need a short interval to publish its RPC cookie
-        // and bind the endpoint. Keep the scheduler bounded while permitting
-        // immediate recovery from a transient crash.
+        // SYSCOIN: Both restart paths must probe the new child before another
+        // restart can be considered. A new process can need a short interval
+        // to publish its RPC cookie and bind the endpoint. Keep the scheduler
+        // bounded while permitting recovery from a transient crash.
         for (int attempt{0}; attempt < 10; ++attempt) {
             UninterruptibleSleep(std::chrono::milliseconds{200});
             probe_error.clear();
@@ -12926,6 +12951,7 @@ bool Chainstate::CheckBTCHeaderNodeHealth(bool recover, std::string& reason)
         return RecordBTCHeaderHealthFailure(
             now, "btcheader-watchdog-null-tip", reason);
     }
+    g_btcheader_startup_time.reset();
 
     const bool tip_changed{
         g_btcheader_last_progress_time == 0 ||

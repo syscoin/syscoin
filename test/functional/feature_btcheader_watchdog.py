@@ -7,6 +7,7 @@
 import json
 import os
 from pathlib import Path
+import signal
 import time
 
 from test_framework.test_framework import SkipTest, SyscoinTestFramework
@@ -71,6 +72,21 @@ if Path(sys.argv[0]).name == "bitcoin-cli":
     method = positional[0]
     if method == "getblockchaininfo":
         state = json.loads((data_dir / "state.json").read_text(encoding="utf8"))
+        now = time.monotonic()
+        delay = endpoint["first_probe_delay"]
+        if delay and "first_probe_time" not in endpoint:
+            # Managed startup already waits for the process to survive. Arm
+            # warmup on its first RPC probe so this exercises the later retry.
+            endpoint["first_probe_time"] = now
+            write_json(endpoint_path, endpoint)
+        ready = (not state.get("rpc_unavailable", False) and
+                 now >= endpoint.get("first_probe_time", now) + delay)
+        if state.get("record_probes", False):
+            record({"event": "probe", "pid": endpoint["pid"],
+                    "comment": endpoint["comment"], "ready": ready,
+                    "time": now})
+        if not ready:
+            sys.exit("managed endpoint is not ready")
         result = {
             "chain": "regtest",
             "headersonly": True,
@@ -108,9 +124,11 @@ fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
 cookie = "__cookie__:" + secrets.token_hex(32)
 cookie_path.write_text(cookie, encoding="utf8")
 cookie_path.chmod(0o600)
+state = json.loads((data_dir / "state.json").read_text(encoding="utf8"))
 endpoint = {
     "pid": os.getpid(), "rpc_port": options["-rpcport"],
     "comment": options["-uacomment"], "cookie": cookie,
+    "first_probe_delay": state.get("first_probe_delay", 0),
 }
 write_json(endpoint_path, endpoint)
 record({"event": "start", "pid": os.getpid(), "argv": sys.argv[1:],
@@ -148,6 +166,7 @@ class BTCHeaderWatchdogTest(SyscoinTestFramework):
     PROBE_INTERVAL = 3600
     STALL_TIMEOUT = 20
     RESTART_COOLDOWN = 10
+    STARTUP_GRACE = 30
     REINDEX_AFTER = 2
 
     def set_test_params(self):
@@ -235,6 +254,204 @@ class BTCHeaderWatchdogTest(SyscoinTestFramework):
         assert all(entry["reason"] == "authenticated-stop"
                    for entry in self.events("exit"))
 
+    def check_restarted_child_warmup(self):
+        node = self.nodes[0]
+        self.log.info("One stopped-child restart retries through brief RPC warmup")
+        self.advance_time(self.RESTART_COOLDOWN)
+        self.state.update(ibd=False, height=102, hash="33" * 32,
+                          first_probe_delay=0.7, rpc_unavailable=False,
+                          record_probes=True)
+        self.write_state()
+        starts = len(self.events("start"))
+        stops = len(self.events("stop-request"))
+        exits = len(self.events("exit"))
+        probes_before = len(self.events("probe"))
+        with node.assert_debug_log([
+                "Bitcoin header watchdog restarted managed child",
+        ], unexpected_msgs=[
+                "btcheader-watchdog-restart-cooldown",
+                "btcheader-watchdog-rpc-unreachable-after-restart",
+                "btcheader-watchdog-restart-failed",
+                "forcing owned Bitcoin header pid",
+        ], timeout=30):
+            node.mockscheduler(self.PROBE_INTERVAL)
+            node.syncwithvalidationinterfacequeue()
+
+        # Inspect this scheduler invocation before status can supply a later
+        # successful probe and conceal a skipped retry in the watchdog.
+        launch = self.events("start")[-1]
+        probes = self.events("probe")[probes_before:]
+        assert_equal(len(self.events("start")), starts + 1)
+        assert_equal(len(self.events("stop-request")), stops)
+        assert_equal(len(self.events("exit")), exits)
+        assert not launch["reindex"]
+        assert 2 <= len(probes) <= 11, probes
+        assert all(probe["pid"] == launch["pid"] and
+                   probe["comment"] == launch["comment"] for probe in probes)
+        assert all(not probe["ready"] for probe in probes[:-1]), probes
+        assert probes[-1]["ready"], probes
+        assert probes[-1]["time"] - probes[0]["time"] >= 0.7, probes
+        status = node.syscoinbtcheaderstatus()
+        assert status["process_running"]
+        assert status["policy_healthy"]
+        assert status["ready"]
+        self.assert_owner_progress((self.state["height"], self.state["hash"], self.now))
+        node.syscoinstopbtcheadernode()
+        assert_equal(self.events("exit")[-1]["pid"], launch["pid"])
+        assert_equal(self.events("exit")[-1]["reason"], "authenticated-stop")
+
+    def assert_unready_status(self):
+        status = self.nodes[0].syscoinbtcheaderstatus()
+        assert status["process_running"]
+        assert not status["policy_healthy"]
+        assert not status["ready"]
+        assert "chaininfo" not in status
+        assert "btcheader-watchdog-startup-pending" in status["reason"]
+
+    def restart_unready_backend(self, previous_launch=None):
+        node = self.nodes[0]
+        self.state.update(first_probe_delay=0, rpc_unavailable=True,
+                          record_probes=True)
+        self.write_state()
+        starts = len(self.events("start"))
+        stops = len(self.events("stop-request"))
+        exits = len(self.events("exit"))
+        probes_before = len(self.events("probe"))
+        started = time.monotonic()
+        with node.assert_debug_log([
+                "Bitcoin header watchdog restarted managed child",
+                "btcheader-watchdog-rpc-unreachable-after-restart",
+        ], unexpected_msgs=[
+                "btcheader-watchdog-restart-cooldown",
+                "btcheader-watchdog-startup-pending",
+                "btcheader-watchdog-restart-failed",
+                "forcing owned Bitcoin header pid",
+        ], timeout=30):
+            node.mockscheduler(self.PROBE_INTERVAL)
+            node.syncwithvalidationinterfacequeue()
+        elapsed = time.monotonic() - started
+        assert elapsed < 30, f"Unavailable replacement blocked watchdog for {elapsed:.2f}s"
+        launch = self.events("start")[-1]
+        probes = self.events("probe")[probes_before:]
+        assert_equal(len(self.events("start")), starts + 1)
+        assert_equal(len(self.events("stop-request")), stops)
+        assert not launch["reindex"]
+        if previous_launch is None:
+            assert_equal(len(self.events("exit")), exits)
+            # A stopped-child restart probes the new child once, then retries
+            # exactly ten times before recording the failed recovery cycle.
+            assert_equal(len(probes), 11)
+        else:
+            assert launch["pid"] != previous_launch["pid"]
+            assert_equal(len(self.events("exit")), exits + 1)
+            assert_equal(self.events("exit")[-1]["pid"], previous_launch["pid"])
+            assert_equal(self.events("exit")[-1]["reason"],
+                         f"signal:{signal.SIGTERM}")
+            # The old owned child gets a health probe and one authentication
+            # probe before its controlled stop. Only the ten retries target
+            # the new child on this live-process restart path.
+            assert_equal(len(probes), 12)
+            assert all(probe["pid"] == previous_launch["pid"] and
+                       probe["comment"] == previous_launch["comment"] and
+                       not probe["ready"] for probe in probes[:2])
+            probes = probes[2:]
+            lifecycle = [entry for entry in self.events()
+                         if entry["event"] in ("start", "exit")]
+            assert_equal([(entry["event"], entry["pid"])
+                          for entry in lifecycle[-2:]],
+                         [("exit", previous_launch["pid"]),
+                          ("start", launch["pid"])])
+        assert all(not probe["ready"] and probe["pid"] == launch["pid"] and
+                   probe["comment"] == launch["comment"] for probe in probes)
+        self.assert_unready_status()
+        return launch
+
+    def assert_startup_pending(self, launch, progress):
+        starts = len(self.events("start"))
+        stops = len(self.events("stop-request"))
+        exits = len(self.events("exit"))
+        probes_before = len(self.events("probe"))
+        self.scheduler_probe("btcheader-watchdog-startup-pending")
+        assert_equal(len(self.events("start")), starts)
+        assert_equal(len(self.events("stop-request")), stops)
+        assert_equal(len(self.events("exit")), exits)
+        probes = self.events("probe")[probes_before:]
+        assert_equal(len(probes), 1)
+        assert_equal(probes[0]["pid"], launch["pid"])
+        assert_equal(probes[0]["comment"], launch["comment"])
+        assert not probes[0]["ready"]
+        self.assert_unready_status()
+        self.assert_owner_progress(progress)
+
+    def check_restarted_child_startup_grace(self):
+        node = self.nodes[0]
+        self.log.info("Startup grace retains an unready child beyond restart cooldown")
+        progress = (self.state["height"], self.state["hash"], self.now)
+        self.advance_time(self.RESTART_COOLDOWN)
+        launch = self.restart_unready_backend()
+        self.assert_owner_progress(progress)
+        for _ in range(2):
+            self.advance_time(self.RESTART_COOLDOWN + 1)
+            self.assert_startup_pending(launch, progress)
+
+        self.log.info("Readiness during startup grace recovers without another launch")
+        self.state.update(height=103, hash="44" * 32, rpc_unavailable=False)
+        self.write_state()
+        starts = len(self.events("start"))
+        stops = len(self.events("stop-request"))
+        exits = len(self.events("exit"))
+        probes_before = len(self.events("probe"))
+        with node.assert_debug_log([], unexpected_msgs=[
+                "Bitcoin header watchdog restarted managed child",
+                "Bitcoin header policy backend is not ready;",
+        ], timeout=30):
+            node.mockscheduler(self.PROBE_INTERVAL)
+            node.syncwithvalidationinterfacequeue()
+        assert_equal(len(self.events("start")), starts)
+        assert_equal(len(self.events("stop-request")), stops)
+        assert_equal(len(self.events("exit")), exits)
+        probes = self.events("probe")[probes_before:]
+        assert_equal(len(probes), 1)
+        assert_equal(probes[0]["pid"], launch["pid"])
+        assert probes[0]["ready"]
+        status = node.syscoinbtcheaderstatus()
+        assert status["process_running"]
+        assert status["policy_healthy"]
+        assert status["ready"]
+        progress = (self.state["height"], self.state["hash"], self.now)
+        self.assert_owner_progress(progress)
+        return launch, progress
+
+    def check_restarted_child_unavailable(self, healthy_launch, progress):
+        node = self.nodes[0]
+        self.log.info("Readiness clears startup grace before a later live RPC outage")
+        # No time advances after readiness: normal cooldown has expired, but
+        # the old launch would still be inside its startup grace if not cleared.
+        launch = self.restart_unready_backend(healthy_launch)
+        self.assert_owner_progress(progress)
+        elapsed = 0
+        for seconds in (1, self.RESTART_COOLDOWN, self.RESTART_COOLDOWN + 1):
+            self.advance_time(seconds)
+            elapsed += seconds
+            self.assert_startup_pending(launch, progress)
+
+        self.log.info("Grace expiry permits one bounded replacement of an unready child")
+        self.advance_time(self.STARTUP_GRACE - elapsed)
+        # With REINDEX_AFTER=2, this second failed recovery cycle must still
+        # launch without reindex. The first cycle and repeated pending probes
+        # must not have consumed multiple escalation attempts.
+        launch = self.restart_unready_backend(launch)
+        self.assert_owner_progress(progress)
+        self.advance_time(1)
+        self.assert_startup_pending(launch, progress)
+
+        # Restore only the owned fake's RPC response for authenticated cleanup.
+        self.state["rpc_unavailable"] = False
+        self.write_state()
+        node.syscoinstopbtcheadernode()
+        assert_equal(self.events("exit")[-1]["pid"], launch["pid"])
+        assert_equal(self.events("exit")[-1]["reason"], "authenticated-stop")
+
     def run_test(self):
         node = self.nodes[0]
         operator = node.protx_generate_operator_keypair()
@@ -270,6 +487,7 @@ class BTCHeaderWatchdogTest(SyscoinTestFramework):
             "-btcheaderwatchdog=1",
             f"-btcheaderwatchdogprobeinterval={self.PROBE_INTERVAL}",
             f"-btcheaderwatchdogrestartcooldown={self.RESTART_COOLDOWN}",
+            f"-btcheaderwatchdogstartupgrace={self.STARTUP_GRACE}",
             f"-btcheaderwatchdogstalltimeout={self.STALL_TIMEOUT}",
             f"-btcheaderwatchdogreindexafter={self.REINDEX_AFTER}",
             "-btcheadercmdtimeout=5",
@@ -342,6 +560,10 @@ class BTCHeaderWatchdogTest(SyscoinTestFramework):
             elif entry["event"] == "stop-request":
                 assert identity in authenticated
         assert_equal(sum(entry["reindex"] for entry in launches), 2)
+
+        self.check_restarted_child_warmup()
+        launch, progress = self.check_restarted_child_startup_grace()
+        self.check_restarted_child_unavailable(launch, progress)
 
 
 if __name__ == "__main__":

@@ -92,8 +92,12 @@ cookie, and a random instance token. Symlinked or unsafe datadirs are rejected.
 
 The watchdog checks process ownership, RPC readiness, IBD progress, and
 post-IBD tip progress. A stopped or stalled owned child is restarted with a
-cooldown; repeated failures may trigger one headers reindex. If an
-authenticated stop cannot be completed, replacement/adoption is refused. A
+cooldown; repeated failures may trigger one headers reindex. A live replacement
+gets up to three minutes by default to become RPC-ready, with bounded probes
+and policy remaining fail-closed during that interval. RPC readiness ends
+this startup grace; header synchronization uses the separate IBD progress
+timeout. If an authenticated stop cannot be completed, replacement/adoption
+is refused. A
 later outage refuses `ADVANCE`, while exactly 267 positions in each of any
 three of the four 400-member rosters converging on `KEEP` can still finalize
 the base ChainLock. An arbitrary split between the two statements can delay a
@@ -165,6 +169,7 @@ Available policy settings are:
 | `-btcheaderwatchdog` | 1 | Supervise and recover the managed child |
 | `-btcheaderwatchdogprobeinterval` | 15 | Health-probe interval |
 | `-btcheaderwatchdogrestartcooldown` | 60 | Minimum interval between managed restarts |
+| `-btcheaderwatchdogstartupgrace` | 180 | RPC startup grace after watchdog restart; 0 disables |
 | `-btcheaderwatchdogstalltimeout` | 1800 | IBD no-progress restart timeout |
 | `-btcheaderwatchdogreindexafter` | 3 | Failed managed restarts before one reindex; 0 disables |
 | `-btcheadertipmaxnoprogress` | 1800 | Post-IBD no-progress policy timeout; 0 disables |
