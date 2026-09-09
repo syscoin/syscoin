@@ -68,6 +68,9 @@ jobs:
           # https://git-scm.com/docs/git-rev-list
           echo "TEST_BASE=$(git rev-list -n$((${{ env.MAX_COUNT }} + 1)) --reverse HEAD ^$(git rev-list -n1 --merges HEAD)^@ | head -1)" >> "$GITHUB_ENV"
       - run: |
+          # SYSCOIN: Chrome is unused here; its runner-provided APT source can
+          # have mismatched indexes. Remove both legacy and deb822 sources.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome*.list /etc/apt/sources.list.d/google-chrome*.sources
           sudo apt-get update
           # SYSCOIN: Install the compiler used for both history and PR head.
           sudo apt-get install gcc-13 g++-13 ccache build-essential libtool autotools-dev automake pkg-config bsdmainutils python3-zmq libevent-dev libboost-dev libsqlite3-dev libdb++-dev systemtap-sdt-dev libminiupnpc-dev libnatpmp-dev libqt5gui5 libqt5core5a libqt5dbus5 qttools5-dev qttools5-dev-tools qtwayland5 libqrencode-dev -y
@@ -101,6 +104,9 @@ jobs:
 
       - name: Install build dependencies
         run: |
+          # SYSCOIN: Chrome is unused here; its runner-provided APT source can
+          # have mismatched indexes. Remove both legacy and deb822 sources.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome*.list /etc/apt/sources.list.d/google-chrome*.sources
           sudo apt-get update
           sudo apt-get install --yes build-essential cmake curl git libboost-dev libevent-dev pkg-config python3
 

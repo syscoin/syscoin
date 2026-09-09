@@ -698,13 +698,14 @@ BOOST_FIXTURE_TEST_CASE(syscoin_mint_mempool_reorg_cleanup, TestChain100Setup)
     BOOST_REQUIRE_MESSAGE(m_node.chainman->ProcessNewBlockHeaders(
         {inactive_header}, /*min_pow_checked=*/true, header_state), header_state.ToString());
     {
-        LOCK2(cs_main, pool.cs);
+        LOCK(cs_main);
         auto* inactive{m_node.chainman->m_blockman.LookupBlockIndex(inactive_header.GetHash())};
         BOOST_REQUIRE(inactive != nullptr);
         BlockValidationState conflict_state;
         BOOST_REQUIRE_MESSAGE(chainstate.MarkConflictingBlock(conflict_state, inactive),
                               conflict_state.ToString());
         BOOST_CHECK(m_node.chainman->ActiveTip() == disconnected_tip);
+        LOCK(pool.cs);
         BOOST_REQUIRE_EQUAL(pool.size(), 3U);
         BOOST_CHECK_EQUAL(setMintTxsMempool.count(proof), 1U);
     }
