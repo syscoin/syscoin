@@ -3769,10 +3769,21 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
                 std::string recovery_error;
                 if (!RecoverNEVMPrefixForConnect(*pindex, recovery_error,
                                                  rejected_pair)) {
-                    if (rejection) *rejection = rejected_pair;
-                    return state.Error(recovery_error);
+                    if (rejected_pair &&
+                        rejected_pair->nevm_hash == nevmBlockHeader.nBlockHash &&
+                        rejected_pair->syscoin_hash == nBlockHash) {
+                        // A recovery flush can reject the current request after
+                        // its reply was lost. Use the ordinary current verdict
+                        // classifier below, including managed-exit handling.
+                        stateStr = "nevm-connect-consensus-invalid";
+                        retry_current = false;
+                    } else {
+                        if (rejection) *rejection = rejected_pair;
+                        return state.Error(recovery_error);
+                    }
+                } else {
+                    retry_current = true;
                 }
-                retry_current = true;
             }
         }
         if (retry_current) {

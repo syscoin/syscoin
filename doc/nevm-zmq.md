@@ -48,13 +48,17 @@ The reported pair must match an ancestor of the pending block, or that exact
 pending block if its successful reply was lost. A different branch or an
 unexpected ahead pair stops recovery with an operational error.
 
+A recovery flush can also reject the pending request whose reply was lost.
+If both rejected hashes match that request, Core uses its normal current-block
+verdict handling without retrying it or unwinding its valid parent.
+
 Core resends only the missing, already-connected predecessors. It reconstructs
 their historical NEVM payload, PoDA version hashes and masternode address
 diffs without reconnecting Core's coins or republishing its local caches.
 Existing BTC receipt authorization still applies. Each batch of at most 64
 blocks is flushed and checked against its exact expected applied pair before
-proceeding. Core then retries the pending block once. A failed predecessor
-replay cannot mark that pending block consensus-invalid.
+proceeding. Core then retries the pending block once. A rejection of a
+predecessor does not independently mark the pending block consensus-invalid.
 
 This recovery also runs after replacing an unavailable managed Geth process.
 Template checks, startup coins recovery and authenticated deferred BTCC replay

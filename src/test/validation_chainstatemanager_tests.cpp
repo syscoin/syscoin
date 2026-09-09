@@ -2198,6 +2198,262 @@ BOOST_FIXTURE_TEST_CASE(nevm_connect_live_accepts_exact_current_pair_after_lost_
     BOOST_CHECK(nevm->command_trace == expected);
 }
 
+// SYSCOIN: These nonmint blocks are valid before the synthetic engine verdict.
+// Exercise only classification and atomic local-state publication at the
+// recovery flush boundary; no invalid transaction or engine payload is needed.
+BOOST_FIXTURE_TEST_CASE(nevm_connect_live_current_flush_verdict_invalidates_candidate,
+                        RejectedNEVMPrefixSetup)
+{
+    PrepareLostPrefix(3);
+    auto& chainman{*Assert(m_node.chainman)};
+    auto& chainstate{chainman.ActiveChainstate()};
+    {
+        LOCK(::cs_main);
+        BlockValidationState valid_state;
+        BOOST_REQUIRE_MESSAGE(TestBlockValidity(
+            valid_state, chainman.GetParams(), chainstate, *candidate,
+            original_tip, chainman.m_options.adjusted_time_callback),
+            valid_state.ToString());
+        BlockValidationState flush_state;
+        BOOST_REQUIRE_MESSAGE(chainstate.FlushStateToDisk(flush_state, FlushStateMode::ALWAYS),
+                              flush_state.ToString());
+        durable_tip = chainstate.CoinsDB().GetBestBlock();
+        BOOST_REQUIRE(durable_tip == original_tip->GetBlockHash());
+    }
+    const auto verdict{VerdictFor(*candidate)};
+    nevm->connect_response = [this](const uint256& hash, uint32_t height) {
+        BOOST_REQUIRE(hash == candidate->GetHash());
+        BOOST_REQUIRE_EQUAL(++candidate_attempts, 1U);
+        BOOST_REQUIRE(nevm->buffered_pairs.empty());
+        BOOST_REQUIRE(!nevm->buffered_pair.has_value());
+        // Queue the valid current pair, then lose its acknowledgement. The
+        // recovery flush supplies the synthetic final verdict for that pair.
+        const StartupNEVMSubscriber::AppliedPair queued{height - 101 + 1, hash};
+        nevm->buffered_pair = queued;
+        nevm->buffered_pairs.push_back(queued);
+        return std::string{"nevm-response-not-found"};
+    };
+    nevm->flush_verdict = [this, verdict]() -> std::optional<NEVMBlockReject> {
+        BOOST_REQUIRE_EQUAL(++verdict_deliveries, 1U);
+        BOOST_REQUIRE(nevm->buffered_pair.has_value());
+        BOOST_CHECK_EQUAL(nevm->buffered_pair->count, prefix.size() + 1);
+        BOOST_CHECK(nevm->buffered_pair->hash == candidate->GetHash());
+        BOOST_REQUIRE_EQUAL(nevm->buffered_pairs.size(), 1U);
+        BOOST_CHECK_EQUAL(nevm->buffered_pairs.front().count, prefix.size() + 1);
+        BOOST_CHECK(nevm->buffered_pairs.front().hash == candidate->GetHash());
+        return verdict;
+    };
+    const auto flushes{nevm->flush_requests};
+    const auto queries{nevm->block_info_queries};
+    BlockValidationState state;
+    // Ordinary invalid-candidate retirement resets ActivateBestChain's state.
+    BOOST_REQUIRE_MESSAGE(chainstate.ActivateBestChain(state, candidate), state.ToString());
+    BOOST_CHECK(state.IsValid());
+    CheckLocalState(/*connected=*/false, /*invalid=*/true);
+    BOOST_CHECK_EQUAL(candidate_attempts, 1U);
+    BOOST_CHECK_EQUAL(verdict_deliveries, 1U);
+    BOOST_CHECK_EQUAL(nevm->flush_requests, flushes + 1);
+    BOOST_CHECK_EQUAL(nevm->block_info_queries, queries);
+    const std::vector<std::string> expected{
+        "connect:" + candidate->GetHash().ToString(), "flush"};
+    BOOST_CHECK(nevm->command_trace == expected);
+    BOOST_CHECK_EQUAL(nevm->applied_count, prefix.size());
+    BOOST_CHECK(nevm->applied_hash == original_tip->GetBlockHash());
+    BOOST_CHECK(nevm->buffered_pairs.empty());
+    BOOST_CHECK(!nevm->buffered_pair.has_value());
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK_EQUAL(chainman.m_failed_blocks.count(candidate_index), 1U);
+        BOOST_CHECK(!(descendant_index->nStatus & BLOCK_FAILED_VALID));
+        BOOST_CHECK(!chainstate.CoinsDB().HaveCoin(
+            COutPoint{candidate->vtx.front()->GetHash(), 0}));
+    }
+
+    // A later engine acknowledgement would buffer this valid fixture block.
+    // The cached verdict must prevent another delivery or local admission.
+    nevm->connect_response = {};
+    nevm->flush_verdict = {};
+    BOOST_REQUIRE(nevm->buffer_connects);
+    BlockValidationState retry_state;
+    BOOST_REQUIRE_MESSAGE(chainstate.ActivateBestChain(retry_state, candidate),
+                          retry_state.ToString());
+    BOOST_CHECK(retry_state.IsValid());
+    BOOST_CHECK(nevm->command_trace == expected);
+    BOOST_CHECK(nevm->buffered_pairs.empty());
+    BOOST_CHECK(!nevm->buffered_pair.has_value());
+    CheckLocalState(/*connected=*/false, /*invalid=*/true);
+
+    LOCK(::cs_main);
+    BlockValidationState flush_state;
+    BOOST_REQUIRE_MESSAGE(chainstate.FlushStateToDisk(flush_state, FlushStateMode::ALWAYS),
+                          flush_state.ToString());
+    CDiskBlockIndex disk_candidate;
+    BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->Read(
+        std::make_pair(uint8_t{'b'}, candidate->GetHash()), disk_candidate));
+    BOOST_CHECK_EQUAL(disk_candidate.nStatus & BLOCK_FAILED_MASK, BLOCK_FAILED_VALID);
+    BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == durable_tip);
+    BOOST_CHECK(!chainstate.CoinsDB().HaveCoin(
+        COutPoint{candidate->vtx.front()->GetHash(), 0}));
+    for (const auto& block : prefix) {
+        auto* const index{chainman.m_blockman.LookupBlockIndex(block->GetHash())};
+        BOOST_REQUIRE(index != nullptr);
+        BOOST_CHECK_EQUAL(chainman.m_failed_blocks.count(index), 0U);
+        CDiskBlockIndex disk_parent;
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->Read(
+            std::make_pair(uint8_t{'b'}, block->GetHash()), disk_parent));
+        BOOST_CHECK_EQUAL(disk_parent.nStatus & BLOCK_FAILED_MASK, 0U);
+        BOOST_CHECK(chainstate.CoinsDB().HaveCoin(
+            COutPoint{block->vtx.front()->GetHash(), 0}));
+        NEVMTxRoot roots;
+        const auto parent_verdict{VerdictFor(*block)};
+        BOOST_CHECK(pnevmtxrootsdb->Read(parent_verdict.nevm_hash, roots));
+        CNEVMHeader header;
+        BlockValidationState header_state;
+        BOOST_REQUIRE(GetNEVMData(header_state, *block, header));
+        BOOST_CHECK(roots.nTxRoot == header.nTxRoot);
+        BOOST_CHECK(roots.nReceiptRoot == header.nReceiptRoot);
+    }
+    NEVMTxRoot candidate_roots;
+    BOOST_CHECK(!pnevmtxrootsdb->ReadTxRoots(verdict.nevm_hash, candidate_roots));
+    BOOST_CHECK(!pnevmtxrootsdb->Read(verdict.nevm_hash, candidate_roots));
+    BOOST_CHECK(pnevmtxrootsdb->GetPublishedTip() == durable_tip);
+    BOOST_CHECK(!pnevmtxrootsdb->GetPendingDisconnect());
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_connect_live_current_flush_requires_matching_verdict,
+                        RejectedNEVMPrefixSetup)
+{
+    PrepareLostPrefix(3);
+    auto& chainman{*Assert(m_node.chainman)};
+    auto& chainstate{chainman.ActiveChainstate()};
+    {
+        LOCK(::cs_main);
+        BlockValidationState valid_state;
+        BOOST_REQUIRE_MESSAGE(TestBlockValidity(
+            valid_state, chainman.GetParams(), chainstate, *candidate,
+            original_tip, chainman.m_options.adjusted_time_callback),
+            valid_state.ToString());
+    }
+    const auto current{VerdictFor(*candidate)};
+    const auto parent{VerdictFor(*prefix.back())};
+    struct FlushResult {
+        const char* name;
+        std::optional<NEVMBlockReject> verdict;
+    };
+    const std::array<FlushResult, 4> results{{
+        {"no structured verdict", std::nullopt},
+        {"current Syscoin hash with another NEVM hash",
+            NEVMBlockReject{parent.nevm_hash, current.syscoin_hash}},
+        {"current NEVM hash with another Syscoin hash",
+            NEVMBlockReject{current.nevm_hash, parent.syscoin_hash}},
+        {"zero identity", NEVMBlockReject{}}}};
+    for (const auto& result : results) {
+        BOOST_TEST_CONTEXT(result.name) {
+            candidate_attempts = 0;
+            verdict_deliveries = 0;
+            nevm->command_trace.clear();
+            FailFirstCandidate("nevm-response-not-found");
+            nevm->flush_available = false;
+            nevm->flush_verdict = [this, verdict = result.verdict]()
+                -> std::optional<NEVMBlockReject> {
+                BOOST_REQUIRE_EQUAL(++verdict_deliveries, 1U);
+                return verdict;
+            };
+            const auto flushes{nevm->flush_requests};
+            const auto queries{nevm->block_info_queries};
+            BlockValidationState state;
+            BOOST_CHECK(!chainstate.ActivateBestChain(state, candidate));
+            BOOST_CHECK(state.IsError());
+            BOOST_CHECK(!state.IsInvalid());
+            CheckLocalState(/*connected=*/false);
+            BOOST_CHECK_EQUAL(candidate_attempts, 1U);
+            BOOST_CHECK_EQUAL(verdict_deliveries, 1U);
+            BOOST_CHECK_EQUAL(nevm->flush_requests, flushes + 1);
+            BOOST_CHECK_EQUAL(nevm->block_info_queries, queries);
+            const std::vector<std::string> expected{
+                "connect:" + candidate->GetHash().ToString(), "flush"};
+            BOOST_CHECK(nevm->command_trace == expected);
+            BOOST_CHECK_EQUAL(nevm->applied_count, prefix.size());
+            BOOST_CHECK(nevm->applied_hash == original_tip->GetBlockHash());
+            BOOST_CHECK(nevm->buffered_pairs.empty());
+            BOOST_CHECK(!nevm->buffered_pair.has_value());
+            LOCK(::cs_main);
+            BOOST_CHECK_EQUAL(chainman.m_failed_blocks.count(candidate_index), 0U);
+            BOOST_CHECK(!pnevmtxrootsdb->GetPendingDisconnect());
+        }
+    }
+    // All four failed flushes preserve ordinary retry eligibility.
+    nevm->connect_response = {};
+    nevm->flush_verdict = {};
+    nevm->flush_available = true;
+    nevm->buffer_connects = false;
+    nevm->command_trace.clear();
+    BlockValidationState retry_state;
+    BOOST_REQUIRE_MESSAGE(chainstate.ActivateBestChain(retry_state, candidate),
+                          retry_state.ToString());
+    BOOST_CHECK(retry_state.IsValid());
+    CheckLocalState(/*connected=*/true);
+    BOOST_CHECK(nevm->command_trace == std::vector<std::string>{
+        "connect:" + candidate->GetHash().ToString()});
+    BOOST_CHECK_EQUAL(nevm->applied_count, prefix.size() + 1);
+    BOOST_CHECK(nevm->applied_hash == candidate->GetHash());
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_connect_live_current_flush_verdict_honors_managed_exit,
+                        ManagedLiveNEVMRecoverySetup)
+{
+    PrepareLostPrefix(3);
+    auto& chainman{*Assert(m_node.chainman)};
+    auto& chainstate{chainman.ActiveChainstate()};
+    BOOST_REQUIRE(chainman.GethCommandLine() ==
+                  std::vector<std::string>{"--exitwhensynced"});
+    {
+        LOCK(::cs_main);
+        BlockValidationState valid_state;
+        BOOST_REQUIRE_MESSAGE(TestBlockValidity(
+            valid_state, chainman.GetParams(), chainstate, *candidate,
+            original_tip, chainman.m_options.adjusted_time_callback),
+            valid_state.ToString());
+    }
+    CNEVMHeader header;
+    BlockValidationState header_state;
+    BOOST_REQUIRE(GetNEVMData(header_state, *candidate, header));
+    const NEVMBlockReject verdict{header.nBlockHash, candidate->GetHash()};
+    std::size_t verdict_deliveries{0};
+    // This transport error enters recovery without requesting managed exit.
+    FailFirstCandidate("nevm-response-invalid-parts");
+    nevm->flush_verdict = [&verdict_deliveries, verdict]()
+        -> std::optional<NEVMBlockReject> {
+        BOOST_REQUIRE_EQUAL(++verdict_deliveries, 1U);
+        return verdict;
+    };
+    const auto flushes{nevm->flush_requests};
+    const auto queries{nevm->block_info_queries};
+    BlockValidationState state;
+    BOOST_CHECK(!chainstate.ActivateBestChain(state, candidate));
+    BOOST_CHECK(state.IsError());
+    BOOST_CHECK(!state.IsInvalid());
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "nevm-connect-consensus-invalid");
+    BOOST_CHECK(ShutdownRequested());
+    CheckLocalState(/*connected=*/false);
+    BOOST_CHECK_EQUAL(candidate_attempts, 1U);
+    BOOST_CHECK_EQUAL(verdict_deliveries, 1U);
+    BOOST_CHECK_EQUAL(nevm->flush_requests, flushes + 1);
+    BOOST_CHECK_EQUAL(nevm->block_info_queries, queries);
+    const std::vector<std::string> expected{
+        "connect:" + candidate->GetHash().ToString(), "flush"};
+    BOOST_CHECK(nevm->command_trace == expected);
+    BOOST_CHECK_EQUAL(nevm->applied_count, prefix.size());
+    BOOST_CHECK(nevm->applied_hash == original_tip->GetBlockHash());
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK_EQUAL(chainman.m_failed_blocks.count(candidate_index), 0U);
+    }
+    nevm->connect_response = {};
+    nevm->flush_verdict = {};
+    AbortShutdown();
+}
+
 BOOST_FIXTURE_TEST_CASE(nevm_connect_live_refuses_mismatched_applied_pair,
                         LiveNEVMRecoverySetup)
 {
