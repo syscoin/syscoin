@@ -836,6 +836,20 @@ bool PaymentAuditPresealAuxiliaryRetentionFloor(
     std::optional<int32_t>& floor)
 {
     floor.reset();
+    if (!state.IsEmpty()) {
+        // The first missing audit can depend on older ordinary certificate
+        // ancestry. Preserve its roster inputs from marker creation/restart,
+        // before the transient dependency walker discovers that ancestry.
+        const auto first_target{pq::NextEligibleChainLockTargetHeight(
+            finality_config.chainlock_schedule,
+            finality_config.activation_predecessor_height)};
+        const auto first_roster_floor{first_target
+            ? OldestRosterSnapshotHeight(quorum_config, *first_target)
+            : std::nullopt};
+        if (!first_roster_floor) return false;
+        floor = std::min(finality_config.activation_predecessor_height,
+                         *first_roster_floor);
+    }
     const pq::PaymentAuditScheduleConfig audit_schedule{
         finality_config.chainlock_schedule,
         finality_config.btcc_schedule};
@@ -3355,7 +3369,14 @@ void CChainLocksHandler::Start()
             MaintainPaymentAuditCheckpointGC();
             const bool historical_dependency{RefreshPoWHistoricalSyncBoundary()};
             MaybeReplayBTCCPreseal();
-            if (!historical_dependency) RequestNeededBTCCCertificate();
+            const bool payment_dependency{WITH_LOCK(
+                m_needed_btcc_certificate_mutex,
+                return m_needed_btcc_certificate &&
+                    m_needed_btcc_certificate->source ==
+                        NeededBTCCCertificateSource::PAYMENT_AUDIT_SEAL)};
+            if (!historical_dependency || payment_dependency) {
+                RequestNeededBTCCCertificate();
+            }
             RequestNeededPaymentAuditCertificate();
             RetryPendingBTCCBlock();
             RequestCatchupChainLock();
@@ -5811,6 +5832,11 @@ CChainLocksHandler::SelectRequiredBTCCCertificate(
     const std::optional<uint256>& pending,
     const std::optional<NeededBTCCCertificate>& needed)
 {
+    if (needed && needed->source ==
+                      NeededBTCCCertificateSource::PAYMENT_AUDIT_SEAL &&
+        !needed->logical_id.IsNull()) {
+        return needed->logical_id;
+    }
     if (pending && !pending->IsNull()) return pending;
     return needed && !needed->logical_id.IsNull()
         ? std::optional<uint256>{needed->logical_id}
@@ -5855,13 +5881,15 @@ void CChainLocksHandler::NotePendingPaymentAuditReceiptCertificate(
         carrier.pprev == nullptr) {
         return;
     }
+    // Resolve the active replay dependency first: a later deferred branch
+    // must not displace the proof needed to release this node's preseal.
+    const PendingPaymentAuditReceiptDependency dependency{
+        GetPaymentAuditReplayDependency().value_or(
+            PendingPaymentAuditReceiptDependency{
+                receipt, carrier.GetBlockHash(),
+                carrier.pprev->GetBlockHash()})};
     LOCK(m_pending_payment_audit_receipt_mutex);
-    if (m_pending_payment_audit_receipt &&
-        m_pending_payment_audit_receipt->receipt == receipt &&
-        m_pending_payment_audit_receipt->carrier_hash ==
-            carrier.GetBlockHash() &&
-        m_pending_payment_audit_receipt->carrier_parent_hash ==
-            carrier.pprev->GetBlockHash()) {
+    if (m_pending_payment_audit_receipt == dependency) {
         return;
     }
     if (m_pending_payment_audit_seal) {
@@ -5872,16 +5900,13 @@ void CChainLocksHandler::NotePendingPaymentAuditReceiptCertificate(
             m_pending_payment_audit_seal->source_token);
         m_pending_payment_audit_seal.reset();
     }
-    m_pending_payment_audit_receipt =
-        PendingPaymentAuditReceiptDependency{
-            receipt, carrier.GetBlockHash(),
-            carrier.pprev->GetBlockHash()};
+    m_pending_payment_audit_receipt = dependency;
     m_pending_payment_audit_last_request = std::chrono::microseconds{0};
     LogPrint(BCLog::CHAINLOCKS,
              "CChainLocksHandler::%s -- carrier %s waits for payment "
              "audit %s\n",
-             __func__, carrier.GetBlockHash().ToString(),
-             receipt.audit_witness_id.ToString());
+             __func__, dependency.carrier_hash.ToString(),
+             dependency.receipt.audit_witness_id.ToString());
 }
 
 bool CChainLocksHandler::IsPendingPaymentAuditReceiptCertificate(
@@ -5908,6 +5933,45 @@ CChainLocksHandler::ResolvePendingPaymentAuditContext(
     }
     if (!dependency ||
         dependency->receipt.audit_witness_id != witness_id) {
+        return std::nullopt;
+    }
+
+    if (dependency->source ==
+        PaymentAuditReceiptDependencySource::PRESEAL_REPLAY) {
+        if (dependency->source_token.IsNull() ||
+            GetPaymentAuditReplayDependency() != dependency) {
+            return std::nullopt;
+        }
+        const CBlockIndex* carrier{
+            m_chainman.m_blockman.LookupBlockIndex(
+                dependency->carrier_hash)};
+        if (carrier == nullptr || carrier->pprev == nullptr ||
+            carrier->nHeight != dependency->receipt.carrier_height ||
+            carrier->pprev->GetBlockHash() !=
+                dependency->carrier_parent_hash ||
+            m_chainman.ActiveChain()[carrier->nHeight] != carrier ||
+            !carrier->IsValid(BLOCK_VALID_SCRIPTS) ||
+            !HasFullReceiptIndexProvenance(*carrier)) {
+            return std::nullopt;
+        }
+        CBlock carrier_block;
+        if (!m_chainman.m_blockman.ReadBlockFromDisk(
+                carrier_block, *carrier)) {
+            return std::nullopt;
+        }
+        const auto decoded{ExtractDeferredPaymentAuditReceipt(
+            carrier_block, witness_id, *carrier, *carrier)};
+        if (!decoded || *decoded != dependency->receipt) {
+            return std::nullopt;
+        }
+        // The carrier and source token bind this capability across a null
+        // tail advancing the tip; any marker revision invalidates it.
+        return PaymentAuditHistoricalContext{
+            *dependency, carrier->GetBlockHash(), carrier->nHeight};
+    }
+    if (dependency->source !=
+            PaymentAuditReceiptDependencySource::DEFERRED_CANDIDATE ||
+        !dependency->source_token.IsNull()) {
         return std::nullopt;
     }
 
@@ -5961,6 +6025,14 @@ CChainLocksHandler::ResolvePendingPaymentAuditContext(
 bool CChainLocksHandler::RetireInvalidPendingPaymentAuditReceipt(
     const PaymentAuditHistoricalContext& expected)
 {
+    if (expected.dependency.source !=
+        PaymentAuditReceiptDependencySource::DEFERRED_CANDIDATE) {
+        // An active compact carrier owns a durable replay obligation, not a
+        // deferred candidate to retire. Reject the response and retain that
+        // obligation; peer-supplied evidence cannot poison local persistence
+        // or remove an already connected block through this request path.
+        return false;
+    }
     const bool retired{m_chainman.ActiveChainstate()
                            .RunWithStableActiveChain([&] {
         LOCK(cs_main);
@@ -7384,20 +7456,26 @@ bool CChainLocksHandler::RevalidatePendingPaymentAuditReceiptDependency()
 bool CChainLocksHandler::RevalidatePendingPaymentAuditReceiptDependencyLocked()
 {
     AssertLockHeld(cs_main);
+    // A connected replay boundary must make progress before a later branch
+    // can use the same bounded request lane. The getter authenticates the
+    // exact active marker, frontier carrier, and current provenance token.
+    std::optional<PendingPaymentAuditReceiptDependency> replacement{
+        GetPaymentAuditReplayDependency()};
     std::optional<DeferredBTCCReceiptCandidate> best_deferred;
     node::CBlockIndexWorkComparator compare;
-    for (Chainstate* chainstate : m_chainman.GetAll()) {
-        const auto candidate{
-            chainstate->GetBestDeferredPaymentAuditReceiptCandidate()};
-        if (candidate &&
-            (!best_deferred ||
-             compare(best_deferred->best_candidate,
-                     candidate->best_candidate))) {
-            best_deferred = candidate;
+    if (!replacement) {
+        for (Chainstate* chainstate : m_chainman.GetAll()) {
+            const auto candidate{
+                chainstate->GetBestDeferredPaymentAuditReceiptCandidate()};
+            if (candidate &&
+                (!best_deferred ||
+                 compare(best_deferred->best_candidate,
+                         candidate->best_candidate))) {
+                best_deferred = candidate;
+            }
         }
     }
 
-    std::optional<PendingPaymentAuditReceiptDependency> replacement;
     if (best_deferred && best_deferred->carrier != nullptr &&
         best_deferred->best_candidate != nullptr) {
         CBlock carrier_block;
@@ -7421,7 +7499,7 @@ bool CChainLocksHandler::RevalidatePendingPaymentAuditReceiptDependencyLocked()
             return true;
         }
         LogPrint(BCLog::CHAINLOCKS,
-                 "CChainLocksHandler::%s -- reconstructing highest-work "
+                 "CChainLocksHandler::%s -- reconstructing required "
                  "payment-audit carrier %s witness %s\n",
                  __func__, replacement->carrier_hash.ToString(),
                  replacement->receipt.audit_witness_id.ToString());
@@ -7442,7 +7520,9 @@ bool CChainLocksHandler::RevalidatePendingPaymentAuditReceiptDependencyLocked()
         // Disk or index readiness is a local retry condition. Preserve the
         // previously authorized exact dependency until its replacement has
         // been reconstructed completely.
-        if (m_pending_payment_audit_receipt) {
+        if (m_pending_payment_audit_receipt &&
+            m_pending_payment_audit_receipt->source ==
+                PaymentAuditReceiptDependencySource::DEFERRED_CANDIDATE) {
             for (Chainstate* chainstate : m_chainman.GetAll()) {
                 const auto dependency{
                     chainstate->m_deferred_btcc_receipt_candidates.find(
@@ -7500,8 +7580,8 @@ bool CChainLocksHandler::RevalidatePendingPaymentAuditReceiptDependencyLocked()
             std::chrono::microseconds{0};
         return false;
     }
-    // Never synthesize receipt authorization from a deferred map key. If the
-    // deferred set is empty, the old singleton no longer has a carrier.
+    // Neither an active replay source nor a deferred carrier still owns the
+    // old singleton. Never synthesize authority from an orphaned map key.
     if (m_pending_payment_audit_seal) {
         LOCK(m_needed_btcc_certificate_mutex);
         (void)EraseNeededBTCCCertificate(
@@ -7520,11 +7600,19 @@ CChainLocksHandler::MakePendingPaymentAuditSealDependency(
     const uint256& genesis_hash,
     const PendingPaymentAuditReceiptDependency& owner,
     const pq::ChainLockStatement& statement,
-    const std::optional<pq::RosterAuthorizationBaseIdentity>& objective_base)
+    const std::optional<pq::RosterAuthorizationBaseIdentity>& objective_base,
+    const std::optional<pq::RosterAuthorizationBaseIdentity>& requested_base,
+    uint64_t request_revision)
 {
+    const bool valid_source{
+        owner.source == PaymentAuditReceiptDependencySource::PRESEAL_REPLAY
+            ? !owner.source_token.IsNull()
+            : owner.source ==
+                      PaymentAuditReceiptDependencySource::DEFERRED_CANDIDATE &&
+                  owner.source_token.IsNull()};
     if (genesis_hash.IsNull() || !owner.receipt.IsStructurallyValid() ||
         owner.receipt.IsNull() || owner.carrier_hash.IsNull() ||
-        owner.carrier_parent_hash.IsNull() ||
+        owner.carrier_parent_hash.IsNull() || !valid_source ||
         !statement.IsStructurallyValid() ||
         owner.receipt.seal_height != statement.height ||
         owner.receipt.seal_block_hash != statement.block_hash) {
@@ -7537,7 +7625,14 @@ CChainLocksHandler::MakePendingPaymentAuditSealDependency(
          (objective_base || !statement.roster_authorization_base.IsNull())) ||
         (!initializes &&
          (!objective_base || objective_base->IsNull() ||
-          *objective_base != statement.roster_authorization_base))) {
+          *objective_base != statement.roster_authorization_base)) ||
+        (requested_base &&
+         (!objective_base || requested_base->IsNull() ||
+          !requested_base->IsStructurallyValid() ||
+          requested_base->height > objective_base->height ||
+          requested_base->height >= statement.height ||
+          (requested_base->height == objective_base->height &&
+           *requested_base != *objective_base)))) {
         return std::nullopt;
     }
     const uint256 logical_id{
@@ -7545,19 +7640,23 @@ CChainLocksHandler::MakePendingPaymentAuditSealDependency(
     if (logical_id.IsNull()) return std::nullopt;
 
     CHashWriter writer{SER_GETHASH, 0};
-    writer << std::string{"SYS_PQ_PAYMENT_AUDIT_SEAL_FETCH_V1"}
+    writer << std::string{"SYS_PQ_PAYMENT_AUDIT_SEAL_FETCH_V2"}
            << owner.receipt << owner.carrier_hash
-           << owner.carrier_parent_hash << statement
+           << owner.carrier_parent_hash
+           << static_cast<uint8_t>(owner.source) << owner.source_token
+           << statement
            << (objective_base ? *objective_base
                               : pq::RosterAuthorizationBaseIdentity{})
-           << logical_id;
+           << logical_id << requested_base.has_value()
+           << requested_base.value_or(pq::RosterAuthorizationBaseIdentity{})
+           << request_revision;
     const uint256 source_token{writer.GetHash()};
     if (source_token.IsNull()) return std::nullopt;
     return PendingPaymentAuditSealDependency{
         owner, statement,
         objective_base.value_or(
             pq::RosterAuthorizationBaseIdentity{}),
-        logical_id, source_token};
+        logical_id, source_token, requested_base, request_revision};
 }
 
 bool CChainLocksHandler::PublishPendingPaymentAuditSealDependency(
@@ -7579,10 +7678,12 @@ bool CChainLocksHandler::DoesPaymentAuditSealSourceMatch(
     const std::optional<NeededBTCCCertificate>& needed) noexcept
 {
     const auto& dependency{capability.dependency};
+    // This is download ownership, not ordinary verification authority. A
+    // parent lost to retention must leave the request consumable so the
+    // full verifier below can descend and recover that parent again.
     const bool exact_base{
-        dependency.objective_base.IsNull()
-            ? !capability.objective_base
-            : capability.objective_base &&
+        !capability.objective_base ||
+            (!dependency.objective_base.IsNull() &&
                 capability.objective_base->certificate &&
                 capability.objective_base->verification_context &&
                 capability.objective_base->metadata.AuthorizationBase() ==
@@ -7594,12 +7695,12 @@ bool CChainLocksHandler::DoesPaymentAuditSealSourceMatch(
                     capability.objective_base->metadata.statement &&
                 capability.objective_base->verification_context
                         ->Statement() ==
-                    capability.objective_base->metadata.statement};
+                    capability.objective_base->metadata.statement)};
     return exact_base && pending && *pending == dependency.owner && seal &&
         *seal == dependency && needed &&
         needed->source ==
             NeededBTCCCertificateSource::PAYMENT_AUDIT_SEAL &&
-        needed->logical_id == dependency.logical_id &&
+        needed->logical_id == dependency.RequestedIdentity().logical_id &&
         needed->source_token == dependency.source_token;
 }
 
@@ -7617,7 +7718,16 @@ bool CChainLocksHandler::StagePendingPaymentAuditSealDependency(
     if (!already_servable && !dependency.objective_base.IsNull()) {
         objective_base = m_store->GetVerifiedRosterAuthorizationBase(
             dependency.objective_base);
-        if (!objective_base) return false;
+    }
+    auto staged{dependency};
+    if (!already_servable && !objective_base &&
+        !dependency.objective_base.IsNull() && !dependency.requested_base) {
+        const auto requested{MakePendingPaymentAuditSealDependency(
+            m_genesis_hash, dependency.owner, dependency.statement,
+            dependency.objective_base, dependency.objective_base,
+            dependency.request_revision)};
+        if (!requested) return false;
+        staged = *requested;
     }
     LOCK(m_pending_payment_audit_receipt_mutex);
     if (!m_pending_payment_audit_receipt ||
@@ -7638,25 +7748,84 @@ bool CChainLocksHandler::StagePendingPaymentAuditSealDependency(
         return true;
     }
     if (m_pending_payment_audit_seal &&
+        m_pending_payment_audit_seal->owner == dependency.owner &&
+        m_pending_payment_audit_seal->statement == dependency.statement &&
+        m_pending_payment_audit_seal->objective_base ==
+            dependency.objective_base) {
+        // A duplicate audit cannot restart an in-flight descent or revive
+        // the source token from an earlier request of the same identity.
+        return true;
+    }
+    if (m_pending_payment_audit_seal &&
         m_pending_payment_audit_seal->source_token !=
-            dependency.source_token) {
+            staged.source_token) {
         (void)EraseNeededBTCCCertificate(
             m_needed_btcc_certificate,
             NeededBTCCCertificateSource::PAYMENT_AUDIT_SEAL,
             m_pending_payment_audit_seal->source_token);
     }
     (void)PublishPendingPaymentAuditSealDependency(
-        m_pending_payment_audit_seal, dependency);
+        m_pending_payment_audit_seal, staged);
     (void)PublishNeededBTCCCertificate(
         m_needed_btcc_certificate,
         NeededBTCCCertificateSource::PAYMENT_AUDIT_SEAL,
-        dependency.logical_id, dependency.source_token);
+        staged.RequestedIdentity().logical_id, staged.source_token);
     return DoesPaymentAuditSealSourceMatch(
         PaymentAuditSealFetchCapability{
-            dependency, std::move(objective_base)},
+            staged, std::move(objective_base)},
         m_pending_payment_audit_receipt,
         m_pending_payment_audit_seal,
         m_needed_btcc_certificate);
+}
+
+bool CChainLocksHandler::AdvancePaymentAuditSealDependency(
+    const PaymentAuditSealFetchCapability& capability,
+    const pq::RosterAuthorizationBaseIdentity& missing_base)
+{
+    const auto& previous{capability.dependency};
+    if (missing_base.IsNull() || !missing_base.IsStructurallyValid() ||
+        missing_base.height >= previous.RequestedIdentity().height ||
+        previous.request_revision == std::numeric_limits<uint64_t>::max()) {
+        return false;
+    }
+    const auto next{MakePendingPaymentAuditSealDependency(
+        m_genesis_hash, previous.owner, previous.statement,
+        previous.objective_base, missing_base,
+        previous.request_revision + 1)};
+    if (!next) return false;
+
+    LOCK(cs_main);
+    const auto owner{ResolvePendingPaymentAuditContext(
+        previous.owner.receipt.audit_witness_id)};
+    if (!owner || owner->dependency != previous.owner) return false;
+    const CBlockIndex* carrier{m_chainman.m_blockman.LookupBlockIndex(
+        previous.owner.carrier_hash)};
+    const auto requested{previous.RequestedIdentity()};
+    const CBlockIndex* current{carrier
+        ? carrier->GetAncestor(requested.height) : nullptr};
+    const CBlockIndex* target{carrier
+        ? carrier->GetAncestor(missing_base.height) : nullptr};
+    if (!current || current->GetBlockHash() != requested.block_hash ||
+        !target || target->GetBlockHash() != missing_base.block_hash) {
+        return false;
+    }
+    std::optional<pq::RosterAuthorizationBaseIdentity> selected;
+    (void)ResolveObjectiveRosterAuthorizationContext(
+        *current, nullptr, &selected);
+    if (!selected || *selected != missing_base) return false;
+    LOCK(m_pending_payment_audit_receipt_mutex);
+    LOCK(m_needed_btcc_certificate_mutex);
+    if (!DoesPaymentAuditSealSourceMatch(
+            capability, m_pending_payment_audit_receipt,
+            m_pending_payment_audit_seal, m_needed_btcc_certificate)) {
+        return false;
+    }
+    m_pending_payment_audit_seal = *next;
+    (void)PublishNeededBTCCCertificate(
+        m_needed_btcc_certificate,
+        NeededBTCCCertificateSource::PAYMENT_AUDIT_SEAL,
+        next->RequestedIdentity().logical_id, next->source_token);
+    return true;
 }
 
 void CChainLocksHandler::ClearPendingPaymentAuditDependenciesForStop()
@@ -7688,7 +7857,8 @@ CChainLocksHandler::GetPaymentAuditSealFetchCapability(
         LOCK(m_pending_payment_audit_receipt_mutex);
         LOCK(m_needed_btcc_certificate_mutex);
         if (!m_pending_payment_audit_seal ||
-            m_pending_payment_audit_seal->logical_id != logical_id) {
+            m_pending_payment_audit_seal->RequestedIdentity().logical_id !=
+                logical_id) {
             return std::nullopt;
         }
         dependency = m_pending_payment_audit_seal;
@@ -7697,7 +7867,6 @@ CChainLocksHandler::GetPaymentAuditSealFetchCapability(
     if (!dependency->objective_base.IsNull()) {
         objective_base = m_store->GetVerifiedRosterAuthorizationBase(
             dependency->objective_base);
-        if (!objective_base) return std::nullopt;
     }
     PaymentAuditSealFetchCapability capability{
         *dependency, std::move(objective_base)};
@@ -7716,7 +7885,7 @@ bool CChainLocksHandler::IsPaymentAuditSealFetchCapabilityCurrent(
     const PaymentAuditSealFetchCapability& capability) const
 {
     const auto current{GetPaymentAuditSealFetchCapability(
-        capability.dependency.logical_id)};
+        capability.dependency.RequestedIdentity().logical_id)};
     if (!current || current->dependency != capability.dependency ||
         current->objective_base.has_value() !=
             capability.objective_base.has_value()) {
@@ -7733,6 +7902,18 @@ bool CChainLocksHandler::AuthorizePaymentAuditSealPersistence(
     pq::ChainLockFinalityError* error) const
 {
     if (!persist_record || !m_store) {
+        if (error != nullptr) {
+            *error = pq::ChainLockFinalityError::CONTEXT_CHANGED;
+        }
+        return false;
+    }
+    // Marker recovery can precede its engine replay's chainstate lock. Keep
+    // the actual owner revision stable through the certificate fsync, rather
+    // than relying only on the still-published request tuple.
+    LOCK(cs_main);
+    const auto owner{ResolvePendingPaymentAuditContext(
+        capability.dependency.owner.receipt.audit_witness_id)};
+    if (!owner || owner->dependency != capability.dependency.owner) {
         if (error != nullptr) {
             *error = pq::ChainLockFinalityError::CONTEXT_CHANGED;
         }
@@ -7756,6 +7937,24 @@ bool CChainLocksHandler::AuthorizePaymentAuditSealPersistence(
 void CChainLocksHandler::CompletePaymentAuditSealFetch(
     const PaymentAuditSealFetchCapability& capability)
 {
+    std::optional<PendingPaymentAuditSealDependency> next;
+    if (capability.dependency.requested_base) {
+        const auto& previous{capability.dependency};
+        if (!m_store || previous.request_revision ==
+                            std::numeric_limits<uint64_t>::max()) {
+            return;
+        }
+        const auto base{m_store->GetVerifiedRosterAuthorizationBase(
+            previous.objective_base)};
+        next = MakePendingPaymentAuditSealDependency(
+            m_genesis_hash, previous.owner, previous.statement,
+            previous.objective_base,
+            base ? std::optional<pq::RosterAuthorizationBaseIdentity>{}
+                 : std::optional<pq::RosterAuthorizationBaseIdentity>{
+                       previous.objective_base},
+            previous.request_revision + 1);
+        if (!next) return;
+    }
     LOCK(m_pending_payment_audit_receipt_mutex);
     LOCK(m_needed_btcc_certificate_mutex);
     if (!DoesPaymentAuditSealSourceMatch(
@@ -7768,7 +7967,13 @@ void CChainLocksHandler::CompletePaymentAuditSealFetch(
         m_needed_btcc_certificate,
         NeededBTCCCertificateSource::PAYMENT_AUDIT_SEAL,
         capability.dependency.source_token);
-    m_pending_payment_audit_seal.reset();
+    m_pending_payment_audit_seal = next;
+    if (next) {
+        (void)PublishNeededBTCCCertificate(
+            m_needed_btcc_certificate,
+            NeededBTCCCertificateSource::PAYMENT_AUDIT_SEAL,
+            next->RequestedIdentity().logical_id, next->source_token);
+    }
     m_pending_payment_audit_last_request =
         std::chrono::microseconds{0};
 }
@@ -7776,8 +7981,11 @@ void CChainLocksHandler::CompletePaymentAuditSealFetch(
 std::optional<CChainLocksHandler::RuntimeVerificationContext>
 CChainLocksHandler::BuildPaymentAuditSealVerificationContext(
     const PaymentAuditSealFetchCapability& capability,
-    bool publish_roster) const
+    const pq::ChainLockStatement& statement,
+    bool publish_roster,
+    std::optional<pq::RosterAuthorizationBaseIdentity>* missing_base) const
 {
+    if (missing_base != nullptr) missing_base->reset();
     if (!m_config || !m_quorum_build_config || !m_store) {
         return std::nullopt;
     }
@@ -7787,8 +7995,20 @@ CChainLocksHandler::BuildPaymentAuditSealVerificationContext(
         dependency.objective_base.IsNull()
             ? std::optional<pq::RosterAuthorizationBaseIdentity>{}
             : std::optional<pq::RosterAuthorizationBaseIdentity>{
-                  dependency.objective_base})};
+                  dependency.objective_base},
+        dependency.requested_base, dependency.request_revision)};
     if (!rebuilt || *rebuilt != dependency) return std::nullopt;
+    const pq::RosterAuthorizationBaseIdentity received{
+        statement.height, statement.block_hash,
+        pq::GetLogicalChainLockId(m_genesis_hash, statement)};
+    if (!statement.IsStructurallyValid() ||
+        received != dependency.RequestedIdentity() ||
+        (!dependency.requested_base && statement != dependency.statement) ||
+        (dependency.requested_base &&
+         !pq::IsBTCCCandidateHeight(m_config->btcc_schedule,
+                                   statement.height))) {
+        return std::nullopt;
+    }
 
     uint64_t roster_source_generation{0};
     const auto roster_cache{
@@ -7796,6 +8016,7 @@ CChainLocksHandler::BuildPaymentAuditSealVerificationContext(
     if (!roster_cache) return std::nullopt;
 
     const CBlockIndex* seal{nullptr};
+    std::optional<ObjectiveRosterAuthorizationContext> objective;
     std::optional<pq::RosterAuthorizationVerificationContext>
         authorization;
     {
@@ -7810,7 +8031,7 @@ CChainLocksHandler::BuildPaymentAuditSealVerificationContext(
         const auto audit_schedule{pq::BuildPaymentAuditEpochSchedule(
             audit_config, dependency.owner.receipt.epoch)};
         seal = m_chainman.m_blockman.LookupBlockIndex(
-            dependency.statement.block_hash);
+            statement.block_hash);
         const CBlockIndex* carrier{
             m_chainman.m_blockman.LookupBlockIndex(
                 dependency.owner.carrier_hash)};
@@ -7825,11 +8046,13 @@ CChainLocksHandler::BuildPaymentAuditSealVerificationContext(
             carrier->nHeight != dependency.owner.receipt.carrier_height ||
             carrier->pprev->GetBlockHash() !=
                 dependency.owner.carrier_parent_hash ||
-            carrier->GetAncestor(dependency.statement.height) != seal ||
+            statement.previous_chainlock_height <
+                m_config->activation_predecessor_height ||
+            carrier->GetAncestor(statement.height) != seal ||
             ClassifyPaymentAuditSealContextCached(
-                seal, dependency.statement.height,
-                dependency.statement.previous_chainlock_height,
-                dependency.statement.previous_chainlock_hash,
+                seal, statement.height,
+                statement.previous_chainlock_height,
+                statement.previous_chainlock_hash,
                 PaymentAuditSealValidation::THRESHOLD_ATTESTED_HISTORY) !=
                 PaymentAuditContextStatus::READY) {
             return std::nullopt;
@@ -7838,55 +8061,65 @@ CChainLocksHandler::BuildPaymentAuditSealVerificationContext(
         const auto indexed_audit{IndexedPaymentAuditReceiptState(*seal)};
         pq::BTCCValidationError btcc_error{pq::BTCCValidationError::NONE};
         if (!indexed_btcc || !indexed_audit ||
-            *indexed_btcc != dependency.statement.btcc_receipt_state ||
+            *indexed_btcc != statement.btcc_receipt_state ||
             *indexed_audit !=
-                dependency.statement.payment_audit_receipt_state ||
+                statement.payment_audit_receipt_state ||
             seal->pqPaymentProbationStateHash !=
-                dependency.statement.payment_probation_state_hash ||
+                statement.payment_probation_state_hash ||
             !pq::ValidateBTCCursorTransition(
                 m_config->btcc_schedule, *seal,
-                dependency.statement.previous_btcc_cursor,
-                dependency.statement.accepted_btcc_cursor,
-                dependency.statement.btcc_advance, &btcc_error)) {
+                statement.previous_btcc_cursor,
+                statement.accepted_btcc_cursor,
+                statement.btcc_advance, &btcc_error)) {
             return std::nullopt;
         }
 
-        std::optional<ObjectiveRosterAuthorizationContext> objective;
-        if (dependency.statement.roster_transition !=
+        if (statement.roster_transition !=
             pq::RosterAuthorizationTransitionKind::INITIALIZE) {
-            if (!capability.objective_base) return std::nullopt;
+            const auto ordinary_base{
+                m_store->GetVerifiedRosterAuthorizationBase(
+                    statement.roster_authorization_base)};
+            std::optional<pq::RosterAuthorizationBaseIdentity> selected;
             objective = ResolveObjectiveRosterAuthorizationContext(
-                *seal, &*capability.objective_base);
-            if (!objective || !objective->base ||
-                objective->base->metadata.AuthorizationBase() !=
-                    dependency.objective_base) {
+                *seal, ordinary_base ? &*ordinary_base : nullptr, &selected);
+            if (!selected || *selected != statement.roster_authorization_base ||
+                selected->height >= statement.height) {
                 return std::nullopt;
             }
-        } else if (capability.objective_base ||
-                   !dependency.objective_base.IsNull()) {
+            if (!ordinary_base) {
+                if (missing_base != nullptr) *missing_base = *selected;
+                return std::nullopt;
+            }
+            if (!objective || !objective->base ||
+                objective->base->metadata.AuthorizationBase() !=
+                    statement.roster_authorization_base) {
+                return std::nullopt;
+            }
+        } else if (!statement.roster_authorization_base.IsNull()) {
             return std::nullopt;
         }
-        authorization = BuildNetworkRosterAuthorizationContext(
-            dependency.statement, *seal,
-            objective ? &*objective : nullptr);
     }
+    // The ordinary authorization builder samples chain state internally and
+    // may perform roster work; it must run without cs_main held.
+    authorization = BuildNetworkRosterAuthorizationContext(
+        statement, *seal, objective ? &*objective : nullptr);
     if (!authorization || seal == nullptr) return std::nullopt;
 
     pq::QuorumBuildError build_error{pq::QuorumBuildError::NONE};
     const auto roster_set{publish_roster
         ? roster_cache->GetVerifiedActive(
-              dependency.statement.height, *seal,
-              dependency.statement.roster_beacons.active,
+              statement.height, *seal,
+              statement.roster_beacons.active,
               &build_error)
         : roster_cache->GetVerifiedActiveNoPublish(
-              dependency.statement.height, *seal,
-              dependency.statement.roster_beacons.active,
+              statement.height, *seal,
+              statement.roster_beacons.active,
               &build_error)};
     if (!roster_set) return std::nullopt;
     pq::ChainLockVerificationError verification_error{
         pq::ChainLockVerificationError::NONE};
     auto prepared{pq::PreparedChainLockContext::Create(
-        m_config->chainlock_schedule, dependency.statement,
+        m_config->chainlock_schedule, statement,
         roster_set, *authorization, &verification_error)};
     if (!prepared) return std::nullopt;
     return RuntimeVerificationContext{
@@ -9707,6 +9940,350 @@ CChainLocksHandler::RecoverPaymentAuditPresealMarker(
     return recovered;
 }
 
+uint256 CChainLocksHandler::GetPaymentAuditReplaySourceToken() const
+{
+    AssertLockHeld(cs_main);
+    AssertLockNotHeld(m_lookup_mutex);
+    AssertLockNotHeld(m_btcc_preseal_mutex);
+    if (!m_chainman.IsPQParticipationAllowed() || !m_config || !m_store ||
+        !m_persistence || m_persistence_failed.load() ||
+        !m_payment_audit_store || !m_payment_audit_store->IsHealthy() ||
+        deterministicMNManager == nullptr) return {};
+    uint64_t roster_generation{0};
+    if (!GetQuorumRosterCache(&roster_generation)) return {};
+    pq::PaymentAuditPresealState state;
+    {
+        LOCK(m_btcc_preseal_mutex);
+        state = m_payment_audit_preseal_state;
+    }
+    if (state.IsEmpty()) return {};
+    CHashWriter writer{SER_GETHASH, 0};
+    writer << std::string{"SYS_PQ_PAYMENT_AUDIT_BOUNDED_REPLAY_V1"}
+           << PaymentAuditPresealStateToken(state)
+           << m_chainman.GetPQProvenanceRevocationRevision()
+           << roster_generation
+           << deterministicMNManager->PaymentProbationStateViewGeneration()
+           << PaymentAuditCheckpointToken(m_payment_audit_store->GetPruneCheckpoint());
+    return writer.GetHash();
+}
+
+bool CChainLocksHandler::IsPaymentAuditReplayFloorStatementValid(
+    const pq::ChainLockStatement& statement, const CBlockIndex& index) const
+{
+    AssertLockHeld(cs_main);
+    const auto btcc{IndexedBTCCReceiptState(index)};
+    const auto payment{IndexedPaymentAuditReceiptState(index)};
+    return statement.height == index.nHeight && statement.block_hash == index.GetBlockHash() &&
+           m_chainman.ActiveChain()[index.nHeight] == &index &&
+           !index.IsAssumedValid() && index.IsValid(BLOCK_VALID_SCRIPTS) &&
+           !(index.nStatus & (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK)) &&
+           HasFullReceiptIndexProvenance(index) && btcc && payment &&
+           *btcc == statement.btcc_receipt_state &&
+           *payment == statement.payment_audit_receipt_state &&
+           index.pqPaymentProbationStateHash == statement.payment_probation_state_hash;
+}
+
+bool CChainLocksHandler::IsPaymentAuditReplaySealFloorValid(
+    const pq::VerifiedRosterAuthorizationBaseView& seal,
+    const CBlockIndex& index) const
+{
+    AssertLockHeld(cs_main);
+    if (!m_config || !seal.certificate || !seal.verification_context ||
+        !seal.metadata.IsInternallyConsistent(m_genesis_hash)) return false;
+    const auto& statement{seal.metadata.statement};
+    const auto& context{*seal.verification_context};
+    // The typed store view already crossed full signature verification.
+    // Borrow that immutable fact for replay without promoting finality or GC.
+    return seal.certificate->statement == statement &&
+           context.GenesisHash() == m_genesis_hash &&
+           context.Schedule() == m_config->chainlock_schedule &&
+           context.Statement() == statement &&
+           context.StatementLogicalId() == seal.metadata.logical_id &&
+           context.Authorization().admission != pq::RosterAuthorizationAdmission::POW_HISTORY &&
+           pq::IsSigningRosterAuthorizationMask(context.AuthorizationMask()) &&
+           (seal.certificate->selected_quorum_mask & context.AuthorizationMask()) ==
+               seal.certificate->selected_quorum_mask &&
+           IsPaymentAuditReplayFloorStatementValid(statement, index);
+}
+
+bool CChainLocksHandler::IsPaymentAuditReplayValidationCurrent() const
+{
+    AssertLockHeld(cs_main);
+    const auto& runtime{m_payment_audit_replay_validation};
+    if (runtime.source_token.IsNull() ||
+        runtime.source_token != GetPaymentAuditReplaySourceToken()) return false;
+    const CChain& chain{m_chainman.ActiveChain()};
+    const CBlockIndex* floor{chain[runtime.floor_height]};
+    const CBlockIndex* through{chain[runtime.frontier.ValidatedThroughHeight()]};
+    return floor != nullptr && through != nullptr &&
+           floor->GetBlockHash() == runtime.floor_hash &&
+           runtime.frontier.IsComplete(*through) &&
+           (!runtime.checkpoint_floor || IsPaymentAuditPrefixAuthenticated(*floor)) &&
+           (!runtime.seal_floor || IsPaymentAuditReplaySealFloorValid(*runtime.seal_floor, *floor)) &&
+           (!runtime.audit_floor || IsPaymentAuditReplayFloorStatementValid(
+               runtime.audit_floor->m_statement.seal_statement, *floor));
+}
+
+bool CChainLocksHandler::IsPaymentAuditReplayAuthenticated(
+    const CBlockIndex& index) const
+{
+    AssertLockHeld(cs_main);
+    if (IsPaymentAuditPrefixAuthenticated(index)) return true;
+    const auto& runtime{m_payment_audit_replay_validation};
+    return IsPaymentAuditReplayValidationCurrent() &&
+           m_chainman.ActiveChain()[index.nHeight] == &index &&
+           (index.nHeight >= runtime.floor_height || runtime.seal_floor || runtime.audit_floor) &&
+           index.nHeight <= runtime.frontier.ValidatedThroughHeight();
+}
+
+std::optional<CChainLocksHandler::PendingPaymentAuditReceiptDependency>
+CChainLocksHandler::GetPaymentAuditReplayDependency() const
+{
+    AssertLockHeld(cs_main);
+    AssertLockNotHeld(m_btcc_preseal_mutex);
+    const auto& runtime{m_payment_audit_replay_validation};
+    if (!runtime.dependency || !IsPaymentAuditReplayValidationCurrent()) return std::nullopt;
+    const auto& dependency{*runtime.dependency};
+    const CBlockIndex* carrier{m_chainman.ActiveChain()[dependency.receipt.carrier_height]};
+    bool exact_terminal{false};
+    if (runtime.terminal_probe) {
+        LOCK(m_btcc_preseal_mutex);
+        const auto matches = [&](const auto& marker) {
+            return marker && marker->terminal_carrier_hash == dependency.carrier_hash &&
+                   marker->terminal_carrier_height == dependency.receipt.carrier_height &&
+                   marker->terminal_receipt == dependency.receipt;
+        };
+        exact_terminal = matches(m_payment_audit_preseal_state.active) ||
+                         matches(m_payment_audit_preseal_state.prospective);
+    }
+    if (dependency.source != PaymentAuditReceiptDependencySource::PRESEAL_REPLAY ||
+        dependency.source_token != runtime.source_token || dependency.receipt.IsNull() ||
+        carrier == nullptr || carrier->pprev == nullptr ||
+        (runtime.terminal_probe ? !exact_terminal :
+            carrier->nHeight != runtime.frontier.ValidatedThroughHeight() + 1) ||
+        carrier->GetBlockHash() != dependency.carrier_hash ||
+        carrier->pprev->GetBlockHash() != dependency.carrier_parent_hash ||
+        carrier->IsAssumedValid() || !carrier->IsValid(BLOCK_VALID_SCRIPTS) ||
+        (carrier->nStatus & (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK)) ||
+        !HasFullReceiptIndexProvenance(*carrier)) return std::nullopt;
+    return dependency;
+}
+
+void CChainLocksHandler::AdvancePaymentAuditPresealReplayValidation(
+    const CBlockIndex& active_tip, const pq::PaymentAuditPresealState& state)
+{
+    AssertLockHeld(cs_main);
+    AssertLockNotHeld(m_btcc_preseal_mutex);
+    AssertLockNotHeld(m_lookup_mutex);
+    AssertLockNotHeld(m_verification_mutex);
+    auto& runtime{m_payment_audit_replay_validation};
+    runtime.dependency.reset();
+    runtime.terminal_probe = false;
+    {
+        LOCK(m_btcc_preseal_mutex);
+        if (state != m_payment_audit_preseal_state) {
+            runtime = {};
+            return;
+        }
+    }
+    const uint256 source{GetPaymentAuditReplaySourceToken()};
+    if (source.IsNull()) {
+        runtime = {};
+        return;
+    }
+    const CChain& chain{m_chainman.ActiveChain()};
+    const auto usable = [](const CBlockIndex* index)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+        return index != nullptr && !index->IsAssumedValid() &&
+               index->IsValid(BLOCK_VALID_SCRIPTS) &&
+               !(index->nStatus & (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK)) &&
+               HasFullReceiptIndexProvenance(*index);
+    };
+    const CBlockIndex* floor{nullptr};
+    const pq::PaymentAuditPresealMarker* latest_marker{nullptr};
+    const auto anchor = [&](const auto& candidate)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+        if (!candidate) return true;
+        const CBlockIndex* terminal{chain[candidate->terminal_carrier_height]};
+        if (terminal == nullptr || terminal->GetBlockHash() != candidate->terminal_carrier_hash) {
+            return true;
+        }
+        const CBlockIndex* earliest{chain[candidate->earliest_carrier_height]};
+        if (!candidate->IsStructurallyValid() || !usable(earliest) ||
+            !usable(earliest->pprev) || !usable(terminal) || !usable(terminal->pprev) ||
+            earliest->GetBlockHash() != candidate->earliest_carrier_hash ||
+            IndexedPaymentAuditReceiptState(*earliest->pprev) != candidate->predecessor_receipt_state ||
+            earliest->pprev->pqPaymentProbationStateHash != candidate->predecessor_probation_state_hash) {
+            return false;
+        }
+        const auto previous{IndexedPaymentAuditReceiptState(*terminal->pprev)};
+        const auto applied{previous ? pq::ApplyPaymentAuditReceipt(
+            m_genesis_hash, *previous, candidate->terminal_receipt) : std::nullopt};
+        if (!applied || applied != IndexedPaymentAuditReceiptState(*terminal) ||
+            candidate->terminal_receipt.next_probation_state_hash != terminal->pqPaymentProbationStateHash) {
+            return false;
+        }
+        if (floor == nullptr || earliest->pprev->nHeight < floor->nHeight) floor = earliest->pprev;
+        if (latest_marker == nullptr || terminal->nHeight > latest_marker->terminal_carrier_height) {
+            latest_marker = &*candidate;
+        }
+        return true;
+    };
+    if (!anchor(state.active) || !anchor(state.prospective) || floor == nullptr) {
+        runtime = {};
+        return;
+    }
+    // Existing finality covers a pruned prefix. A fully verified ordinary
+    // audit seal also authenticates its cumulative state for replay only.
+    bool checkpoint_floor{false};
+    const auto checkpoint{m_payment_audit_store->GetPruneCheckpoint()};
+    if (checkpoint) {
+        const CBlockIndex* covered{chain[std::min(active_tip.nHeight, checkpoint->covered_through_height)]};
+        if (usable(covered) && covered->nHeight > floor->nHeight &&
+            IsPaymentAuditPrefixAuthenticated(*covered)) {
+            floor = covered;
+            checkpoint_floor = true;
+        }
+    }
+    std::optional<pq::VerifiedRosterAuthorizationBaseView> seal_floor;
+    VerifiedPaymentAuditReceiptTransitionPtr audit_floor;
+    const auto& terminal_receipt{latest_marker->terminal_receipt};
+    const CBlockIndex* terminal{chain[latest_marker->terminal_carrier_height]};
+    const CBlockIndex* seal_index{chain[terminal_receipt.seal_height]};
+    const bool exact_seal{usable(seal_index) &&
+        seal_index->GetBlockHash() == terminal_receipt.seal_block_hash &&
+        terminal->nHeight >= seal_index->nHeight &&
+        terminal->GetAncestor(seal_index->nHeight) == seal_index};
+    if (exact_seal && seal_index->nHeight > floor->nHeight) {
+        const auto select = [&](const pq::VerifiedRosterAuthorizationBaseView& view)
+            EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+            if (!IsPaymentAuditReplaySealFloorValid(view, *seal_index)) return false;
+            seal_floor = view;
+            return true;
+        };
+        if (!runtime.seal_floor || !select(*runtime.seal_floor)) {
+            for (const auto& view : m_store->GetVerifiedRosterAuthorizationBasesForTarget(
+                     seal_index->nHeight, seal_index->GetBlockHash())) {
+                if (select(view)) break;
+            }
+        }
+        if (seal_floor) {
+            floor = seal_index;
+            checkpoint_floor = false;
+        }
+    }
+    if (exact_seal && seal_index->nHeight > floor->nHeight) {
+        VerifiedPaymentAuditReceiptTransitionPtr verified;
+        if (runtime.source_token == source && runtime.audit_floor &&
+            runtime.audit_floor->m_receipt == terminal_receipt &&
+            runtime.audit_floor->m_carrier_parent_hash == terminal->pprev->GetBlockHash() &&
+            runtime.audit_floor->m_parent_probation_state_hash == terminal->pprev->pqPaymentProbationStateHash) {
+            verified = runtime.audit_floor;
+        } else if (CheckPaymentAuditReceiptCertificate(terminal_receipt, *terminal, verified) !=
+                       PaymentAuditReceiptCertificateStatus::VERIFIED) {
+            verified.reset();
+        }
+        if (verified &&
+            IsPaymentAuditReplayFloorStatementValid(verified->m_statement.seal_statement, *seal_index)) {
+            // The opaque archive admission authenticated the embedded seal
+            // and all audit signatures. Earlier audit witnesses may be gone.
+            audit_floor = std::move(verified);
+            floor = seal_index;
+            checkpoint_floor = false;
+        }
+    }
+    runtime.source_token = source;
+    runtime.floor_height = floor->nHeight;
+    runtime.floor_hash = floor->GetBlockHash();
+    runtime.checkpoint_floor = checkpoint_floor;
+    runtime.seal_floor = std::move(seal_floor);
+    runtime.audit_floor = std::move(audit_floor);
+    static constexpr std::size_t MAX_PAYMENT_AUDIT_REPLAY_VALIDATION_BLOCKS{256};
+    const auto plan{runtime.frontier.Plan(chain, active_tip, floor->nHeight,
+        floor->GetBlockHash(), source, MAX_PAYMENT_AUDIT_REPLAY_VALIDATION_BLOCKS)};
+    if (plan.status == BoundedActiveRangeStatus::INVALID) {
+        runtime = {};
+        return;
+    }
+    if (plan.status != BoundedActiveRangeStatus::WORK) return;
+    const auto publish_missing = [&](const pq::PaymentAuditReceipt* missing,
+                                     const CBlockIndex* missing_carrier)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+        // Ask for the last package first: its ordinary seal can cover audit
+        // proofs that peers legitimately pruned. Local proofs may still make
+        // bounded progress while that exact seal dependency is fetched.
+        const bool probe{exact_seal && seal_index->nHeight > floor->nHeight};
+        const pq::PaymentAuditReceipt* receipt{probe ? &terminal_receipt : missing};
+        const CBlockIndex* carrier{probe ? terminal : missing_carrier};
+        if (receipt == nullptr || carrier == nullptr || carrier->pprev == nullptr) return;
+        runtime.terminal_probe = probe;
+        runtime.dependency = PendingPaymentAuditReceiptDependency{
+            *receipt, carrier->GetBlockHash(), carrier->pprev->GetBlockHash(),
+            PaymentAuditReceiptDependencySource::PRESEAL_REPLAY, source};
+    };
+    const pq::PaymentAuditScheduleConfig schedule{m_config->chainlock_schedule, m_config->btcc_schedule};
+    for (int32_t height{plan.first_height}; height <= plan.last_height; ++height) {
+        const CBlockIndex* index{chain[height]};
+        pq::PaymentAuditReceipt receipt;
+        const auto verify = [&]() EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+            if (!usable(index) || !usable(index->pprev)) return PaymentAuditReceiptCertificateStatus::LOCAL_ERROR;
+            const auto previous{IndexedPaymentAuditReceiptState(*index->pprev)};
+            const auto indexed{IndexedPaymentAuditReceiptState(*index)};
+            if (!previous || !indexed) return PaymentAuditReceiptCertificateStatus::LOCAL_ERROR;
+            if (pq::PaymentAuditReceiptSlotEpoch(schedule, height)) {
+                CBlock block;
+                if (!m_chainman.m_blockman.ReadBlockFromDisk(block, *index) ||
+                    block.GetHash() != index->GetBlockHash() || !ExtractPaymentAuditReceipt(block, receipt)) {
+                    return PaymentAuditReceiptCertificateStatus::LOCAL_ERROR;
+                }
+            }
+            if (!receipt.IsNull() && ClassifyPaymentAuditReceiptCarrierContext(receipt, *index, schedule) !=
+                    PaymentAuditContextStatus::READY) return PaymentAuditReceiptCertificateStatus::INVALID;
+            const auto applied{pq::ApplyPaymentAuditReceipt(m_genesis_hash, *previous, receipt)};
+            const uint256& probation_hash{receipt.IsNull() ? index->pprev->pqPaymentProbationStateHash
+                                                        : receipt.next_probation_state_hash};
+            if (!applied || *applied != *indexed || probation_hash != index->pqPaymentProbationStateHash) {
+                return PaymentAuditReceiptCertificateStatus::LOCAL_ERROR;
+            }
+            if (receipt.IsNull()) return PaymentAuditReceiptCertificateStatus::VERIFIED;
+            VerifiedPaymentAuditReceiptTransitionPtr verified;
+            const bool held_terminal{runtime.audit_floor && runtime.audit_floor->m_receipt == receipt &&
+                runtime.audit_floor->m_carrier_parent_hash == index->pprev->GetBlockHash() &&
+                runtime.audit_floor->m_parent_probation_state_hash == index->pprev->pqPaymentProbationStateHash};
+            if (held_terminal) verified = runtime.audit_floor;
+            const auto status{held_terminal ? PaymentAuditReceiptCertificateStatus::VERIFIED :
+                CheckPaymentAuditReceiptCertificate(receipt, *index, verified)};
+            if (status != PaymentAuditReceiptCertificateStatus::VERIFIED) return status;
+            const auto* transition{GetVerifiedPaymentAuditReceiptTransition(verified)};
+            const pq::PQPaymentAuditReceiptIdentity expected{receipt.epoch, receipt.carrier_height, receipt.result_hash};
+            return transition != nullptr && transition->PreviousStateHash() == index->pprev->pqPaymentProbationStateHash &&
+                   transition->AppliedReceipt() == expected && transition->Result().StateHash() == probation_hash
+                ? PaymentAuditReceiptCertificateStatus::VERIFIED : PaymentAuditReceiptCertificateStatus::LOCAL_ERROR;
+        };
+        const auto status{verify()};
+        if (status != PaymentAuditReceiptCertificateStatus::VERIFIED) {
+            if (!runtime.frontier.CommitThrough(chain, height - 1)) {
+                runtime = {};
+                return;
+            }
+            if (status == PaymentAuditReceiptCertificateStatus::MISSING && !receipt.IsNull() && index->pprev) {
+                publish_missing(&receipt, index);
+            } else {
+                // A later authenticated seal may cover an old roster or
+                // probation dependency that is no longer retained locally.
+                publish_missing(nullptr, nullptr);
+            }
+            return;
+        }
+    }
+    if (!runtime.frontier.CommitThrough(chain, plan.last_height) ||
+        source != GetPaymentAuditReplaySourceToken()) {
+        runtime = {};
+    } else if (!runtime.frontier.IsComplete(active_tip)) {
+        publish_missing(nullptr, nullptr);
+    }
+}
+
 void CChainLocksHandler::MaybeReplayPaymentAuditPreseal()
 {
     if (!m_chainman.IsPQParticipationAllowed()) return;
@@ -9723,8 +10300,13 @@ void CChainLocksHandler::MaybeReplayPaymentAuditPreseal()
     std::optional<pq::PaymentAuditPresealMarker> marker;
     int32_t replay_through{-1};
     uint256 replay_through_hash;
+    uint256 replay_source;
     {
         LOCK(cs_main);
+        {
+            LOCK(m_btcc_preseal_mutex);
+            if (durable != m_payment_audit_preseal_state) return;
+        }
         const CBlockIndex* active_tip{m_chainman.ActiveTip()};
         if (active_tip == nullptr) return;
         const auto marker_index = [&](const auto& candidate, bool terminal)
@@ -9839,11 +10421,15 @@ void CChainLocksHandler::MaybeReplayPaymentAuditPreseal()
             durable = next;
         }
         if (durable.IsEmpty()) return;
+        // Make bounded proof progress even when a BTCC obligation also holds
+        // the engine. Its replay path consumes the same verified frontier.
+        AdvancePaymentAuditPresealReplayValidation(*active_tip, durable);
         {
             LOCK(m_btcc_preseal_mutex);
             if (!m_btcc_preseal_state.IsEmpty()) return;
         }
 
+        bool needs_full_proof{false};
         const auto inspect = [&](const auto& candidate)
             EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
             if (!candidate || !candidate->IsStructurallyValid()) return true;
@@ -9862,10 +10448,10 @@ void CChainLocksHandler::MaybeReplayPaymentAuditPreseal()
                 active_tip->GetAncestor(terminal->nHeight) != terminal) {
                 return true;
             }
-            if (terminal->GetAncestor(earliest->nHeight) != earliest ||
-                !IsPaymentAuditPrefixAuthenticated(*terminal)) {
+            if (terminal->GetAncestor(earliest->nHeight) != earliest) {
                 return false;
             }
+            needs_full_proof |= !IsPaymentAuditPrefixAuthenticated(*terminal);
             if (!marker || candidate->earliest_carrier_height <
                                marker->earliest_carrier_height) {
                 marker = *candidate;
@@ -9879,6 +10465,13 @@ void CChainLocksHandler::MaybeReplayPaymentAuditPreseal()
             !marker) {
             return;
         }
+        if (needs_full_proof) {
+            // Checking only the marker terminal could skip a later receipt
+            // in the active tail. Authenticate the exact selected endpoint.
+            if (!IsPaymentAuditReplayAuthenticated(*active_tip)) return;
+            replay_source = GetPaymentAuditReplaySourceToken();
+            if (replay_source.IsNull()) return;
+        }
         replay_through = active_tip->nHeight;
         replay_through_hash = active_tip->GetBlockHash();
     }
@@ -9889,12 +10482,22 @@ void CChainLocksHandler::MaybeReplayPaymentAuditPreseal()
 
     bool complete{false};
     std::string error;
+    std::function<bool()> revalidate;
+    if (!replay_source.IsNull()) {
+        revalidate = [this, replay_source, replay_through, replay_through_hash]()
+            EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+            const CBlockIndex* target{m_chainman.ActiveChain()[replay_through]};
+            return target != nullptr && target->GetBlockHash() == replay_through_hash &&
+                   replay_source == GetPaymentAuditReplaySourceToken() &&
+                   IsPaymentAuditReplayAuthenticated(*target);
+        };
+    }
     if (!m_chainman.ActiveChainstate().ReplayDeferredBTCCNEVM(
             replay_through, replay_through_hash,
             [this, expected = *marker] {
                 return ClearPaymentAuditPreseal(expected);
             },
-            complete, error)) {
+            complete, error, revalidate)) {
         LogPrintf("CChainLocksHandler::%s -- deferred payment-audit NEVM "
                   "replay paused: %s\n",
                   __func__, error);
@@ -10347,8 +10950,13 @@ void CChainLocksHandler::MaybeReplayBTCCPreseal()
     std::optional<pq::BTCCPresealMarker> marker;
     int32_t replay_through{-1};
     uint256 replay_through_hash;
+    uint256 payment_replay_source;
     {
         LOCK(cs_main);
+        {
+            LOCK(m_btcc_preseal_mutex);
+            payment_audit_durable = m_payment_audit_preseal_state;
+        }
         const CBlockIndex* active_tip{m_chainman.ActiveTip()};
         if (active_tip == nullptr) return;
 
@@ -10505,7 +11113,16 @@ void CChainLocksHandler::MaybeReplayBTCCPreseal()
                     terminal->GetAncestor(earliest->nHeight) == earliest &&
                     IsPaymentAuditPrefixAuthenticated(*terminal)};
                 if (terminal_authenticated) return;
-                replay_through = earliest->nHeight - 1;
+                int32_t payment_limit{earliest->nHeight - 1};
+                if (IsPaymentAuditReplayValidationCurrent()) {
+                    const int32_t verified_through{
+                        m_payment_audit_replay_validation.frontier.ValidatedThroughHeight()};
+                    if (verified_through >= earliest->nHeight) {
+                        payment_limit = verified_through;
+                        payment_replay_source = GetPaymentAuditReplaySourceToken();
+                    }
+                }
+                replay_through = std::min(replay_through, payment_limit);
                 const CBlockIndex* capped{
                     active_tip->GetAncestor(replay_through)};
                 replay_through_hash = capped == nullptr
@@ -10529,12 +11146,22 @@ void CChainLocksHandler::MaybeReplayBTCCPreseal()
 
     bool complete{false};
     std::string error;
+    std::function<bool()> revalidate;
+    if (!payment_replay_source.IsNull()) {
+        revalidate = [this, payment_replay_source, replay_through, replay_through_hash]()
+            EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+            const CBlockIndex* target{m_chainman.ActiveChain()[replay_through]};
+            return target != nullptr && target->GetBlockHash() == replay_through_hash &&
+                   payment_replay_source == GetPaymentAuditReplaySourceToken() &&
+                   IsPaymentAuditReplayAuthenticated(*target);
+        };
+    }
     if (!m_chainman.ActiveChainstate().ReplayDeferredBTCCNEVM(
             replay_through, replay_through_hash,
             [this, expected = *marker] {
                 return ClearBTCCPreseal(expected);
             },
-            complete, error)) {
+            complete, error, revalidate)) {
         LogPrintf("CChainLocksHandler::%s -- deferred NEVM replay paused: %s\n",
                   __func__, error);
         return;
@@ -10545,14 +11172,31 @@ void CChainLocksHandler::RequestNeededBTCCCertificate()
 {
     if (!m_chainman.IsPQParticipationAllowed()) return;
     (void)RevalidatePendingBTCCReceiptDependency();
+    (void)RevalidatePendingPaymentAuditReceiptDependency();
     const auto pending_verified{
         GetPendingVerifiedHistoricalChainLock()};
     std::optional<uint256> logical_id;
+    bool payment_dependency{false};
     bool pending_blocks_lower_priority{false};
     const auto now{GetTime<std::chrono::microseconds>()};
     {
+        LOCK(m_needed_btcc_certificate_mutex);
+        if (m_needed_btcc_certificate &&
+            m_needed_btcc_certificate->source ==
+                NeededBTCCCertificateSource::PAYMENT_AUDIT_SEAL) {
+            if (m_needed_btcc_certificate->last_request.count() != 0 &&
+                now - m_needed_btcc_certificate->last_request <
+                    std::chrono::seconds{30}) {
+                return;
+            }
+            logical_id = m_needed_btcc_certificate->logical_id;
+            m_needed_btcc_certificate->last_request = now;
+            payment_dependency = true;
+        }
+    }
+    {
         LOCK(m_pending_btcc_receipt_mutex);
-        if (m_pending_btcc_receipt &&
+        if (!payment_dependency && m_pending_btcc_receipt &&
             (!pending_verified ||
              pending_verified->logical_id !=
                  m_pending_btcc_receipt->logical_id)) {
@@ -10583,10 +11227,33 @@ void CChainLocksHandler::RequestNeededBTCCCertificate()
         logical_id = m_needed_btcc_certificate->logical_id;
         m_needed_btcc_certificate->last_request = now;
     }
+    if (payment_dependency) {
+        const auto capability{GetPaymentAuditSealFetchCapability(*logical_id)};
+        if (!capability) return;
+        if (m_store && m_store->GetVerifiedRosterAuthorizationBase(
+                capability->dependency.RequestedIdentity())) {
+            CompletePaymentAuditSealFetch(*capability);
+            return;
+        }
+        CChainLockSig retained;
+        if (GetChainLockByHash(*logical_id, retained)) {
+            // Historical B is a byte source only. Never pass this request to
+            // retained-finality promotion, even if ownership changes here.
+            TRY_LOCK(m_chainlock_admission_mutex, admission_lock);
+            if (!admission_lock ||
+                !IsPaymentAuditSealFetchCapabilityCurrent(*capability)) {
+                return;
+            }
+            BlockValidationState state;
+            (void)ProcessPaymentAuditSealCertificate(
+                /*from=*/-1, retained, state, /*peer_fault=*/nullptr);
+            return;
+        }
+    }
     // The requested ID is exact. If its fully verified bytes are already
     // retained locally, a second download cannot repair a transient current
     // context; retry local admission at this lane's bounded cadence instead.
-    if (TryPromoteRetainedChainLock(*logical_id) !=
+    if (!payment_dependency && TryPromoteRetainedChainLock(*logical_id) !=
         RetainedChainLockPromotion::ABSENT) {
         return;
     }
@@ -10606,22 +11273,30 @@ void CChainLocksHandler::RequestNeededPaymentAuditCertificate()
     if (!m_chainman.IsPQParticipationAllowed()) return;
     {
         LOCK(cs_main);
-        if (IsPaymentAuditPresealActive()) return;
+        (void)RevalidatePendingPaymentAuditReceiptDependencyLocked();
+        if (IsPaymentAuditPresealActive()) {
+            LOCK(m_pending_payment_audit_receipt_mutex);
+            if (!m_pending_payment_audit_receipt ||
+                m_pending_payment_audit_receipt->source !=
+                    PaymentAuditReceiptDependencySource::PRESEAL_REPLAY) {
+                return;
+            }
+        }
     }
-    (void)RevalidatePendingPaymentAuditReceiptDependency();
     std::optional<uint256> seal_logical_id;
     {
         LOCK(m_pending_payment_audit_receipt_mutex);
         if (m_pending_payment_audit_seal) {
             seal_logical_id =
-                m_pending_payment_audit_seal->logical_id;
+                m_pending_payment_audit_seal->RequestedIdentity().logical_id;
         }
     }
     if (seal_logical_id) {
         const auto capability{
             GetPaymentAuditSealFetchCapability(*seal_logical_id)};
         if (capability && m_store &&
-            m_store->GetServableByLogicalId(*seal_logical_id)) {
+            m_store->GetVerifiedRosterAuthorizationBase(
+                capability->dependency.RequestedIdentity())) {
             CompletePaymentAuditSealFetch(*capability);
         }
         // GETCLSIG is owned by the single needed-certificate scheduler lane.
@@ -11715,9 +12390,11 @@ pq::AcceptedBranchRelation CChainLocksHandler::QueryAcceptedBranch(
 std::optional<CChainLocksHandler::ObjectiveRosterAuthorizationContext>
 CChainLocksHandler::ResolveObjectiveRosterAuthorizationContext(
     const CBlockIndex& candidate,
-    const pq::VerifiedRosterAuthorizationBaseView* exact_base) const
+    const pq::VerifiedRosterAuthorizationBaseView* exact_base,
+    std::optional<pq::RosterAuthorizationBaseIdentity>* selected_identity) const
 {
     AssertLockHeld(cs_main);
+    if (selected_identity != nullptr) selected_identity->reset();
     if (!m_config || !m_store || candidate.nHeight < 0 ||
         (candidate.nStatus & BLOCK_FAILED_MASK)) {
         return std::nullopt;
@@ -11788,6 +12465,13 @@ CChainLocksHandler::ResolveObjectiveRosterAuthorizationContext(
         carrier->pqBTCCReceiptLogicalId)};
     if (!receipt || receipt->IsNull()) return std::nullopt;
 
+    // This identity only authorizes fetching the exact receipt-selected
+    // certificate. It never supplies the missing ordinary authorization edge.
+    if (selected_identity != nullptr) {
+        *selected_identity = pq::RosterAuthorizationBaseIdentity{
+            receipted_target_height, receipted_target->GetBlockHash(),
+            receipt->chainlock_logical_id};
+    }
     auto base{exact_base != nullptr
         ? std::optional<pq::VerifiedRosterAuthorizationBaseView>{*exact_base}
         : m_store->GetVerifiedRosterAuthorizationBaseByLogicalId(
@@ -16987,15 +17671,14 @@ CChainLocksHandler::BuildPaymentAuditVerificationRosters(
         std::optional<pq::RosterAuthorizationBaseIdentity> objective_base;
         if (statement.seal_statement.roster_transition !=
             pq::RosterAuthorizationTransitionKind::INITIALIZE) {
-            const auto objective{
-                ResolveObjectiveRosterAuthorizationContext(*seal)};
-            if (!objective || !objective->base) {
+            (void)ResolveObjectiveRosterAuthorizationContext(
+                *seal, nullptr, &objective_base);
+            if (!objective_base) {
                 if (status != nullptr) {
                     *status = PaymentAuditRosterBuildStatus::LOCAL_ERROR;
                 }
                 return nullptr;
             }
-            objective_base = objective->base->metadata.AuthorizationBase();
             if (*objective_base !=
                 statement.seal_statement.roster_authorization_base) {
                 return nullptr;
@@ -17662,8 +18345,7 @@ void CChainLocksHandler::ProcessPaymentAuditCertificateInternal(
             m_pending_payment_audit_receipt
                     ->receipt.audit_witness_id == witness_id &&
             (!historical ||
-             m_pending_payment_audit_receipt->carrier_hash ==
-                 historical->dependency.carrier_hash)) {
+             *m_pending_payment_audit_receipt == historical->dependency)) {
             m_pending_payment_audit_receipt.reset();
             m_pending_payment_audit_last_request =
                 std::chrono::microseconds{0};
@@ -18286,32 +18968,38 @@ CChainLocksHandler::ProcessPaymentAuditSealCertificate(
     const auto capability{
         GetPaymentAuditSealFetchCapability(logical_id)};
     if (!capability) return std::nullopt;
-    if (chainlock.statement != capability->dependency.statement ||
-        logical_id != capability->dependency.logical_id ||
+    const pq::RosterAuthorizationBaseIdentity received{
+        chainlock.statement.height, chainlock.statement.block_hash, logical_id};
+    if (received != capability->dependency.RequestedIdentity() ||
+        (!capability->dependency.requested_base &&
+         chainlock.statement != capability->dependency.statement) ||
         witness_id.IsNull()) {
         if (peer_fault != nullptr) *peer_fault = true;
         FailPeerResponse(from, logical_id);
         return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK,
                              "pq-clsig-invalid-payment-audit-seal");
     }
-    if (m_store->GetServableByLogicalId(logical_id)) {
+    if (m_store->GetVerifiedRosterAuthorizationBase(received)) {
         CompletePaymentAuditSealFetch(*capability);
         CompletePeerResponse(from, logical_id);
         return true;
     }
-    if (m_store->AlreadyHaveWitness(witness_id)) {
-        CompletePeerResponse(from, logical_id);
-        return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK,
-                             "pq-clsig-duplicate-witness");
-    }
-
     ScopedFinalitySnapshotVerificationRetention snapshot_retention{
         deterministicMNManager.get()};
+    std::optional<pq::RosterAuthorizationBaseIdentity> missing_base;
     const auto verification{
         BuildPaymentAuditSealVerificationContext(
-            *capability, /*publish_roster=*/false)};
+            *capability, chainlock.statement, /*publish_roster=*/false,
+            &missing_base)};
     if (!verification) {
+        const bool advanced{missing_base &&
+            AdvancePaymentAuditSealDependency(*capability, *missing_base)};
         CompletePeerResponse(from, logical_id);
+        if (advanced) {
+            // Retain only the exact older identity. The current multi-megabyte
+            // witness must be requested again after its ordinary base verifies.
+            return true;
+        }
         return state.Error("pq-clsig-payment-audit-seal-context-unavailable");
     }
     pq::ChainLockVerificationError verification_error{
@@ -18345,7 +19033,7 @@ CChainLocksHandler::ProcessPaymentAuditSealCertificate(
         pq::ChainLockFinalityError::NONE};
     bool index_persistence_failed{false};
     const bool accepted{
-        m_chainman.ActiveChainstate().RunWithStableActiveChain([&] {
+        m_chainman.ActiveChainstate().RunWithStableActiveChain([&]() EXCLUSIVE_LOCKS_REQUIRED(!cs_main) {
             if (!IsPaymentAuditSealFetchCapabilityCurrent(*capability)) {
                 finality_error =
                     pq::ChainLockFinalityError::CONTEXT_CHANGED;
@@ -18353,8 +19041,12 @@ CChainLocksHandler::ProcessPaymentAuditSealCertificate(
             }
             const auto current{
                 BuildPaymentAuditSealVerificationContext(
-                    *capability, /*publish_roster=*/true)};
+                    *capability, chainlock.statement, /*publish_roster=*/true)};
             if (!current ||
+                current->roster_source_generation !=
+                    verification->roster_source_generation ||
+                !IsQuorumRosterSourceGenerationCurrent(
+                    current->roster_source_generation) ||
                 current->prepared_context->AuthorizationMask() !=
                     verification->prepared_context->AuthorizationMask() ||
                 Descriptors(current->prepared_context->Rosters()) !=
@@ -18406,7 +19098,7 @@ CChainLocksHandler::ProcessPaymentAuditSealCertificate(
     CompletePeerResponse(from, logical_id);
     ForgetAllRequests(logical_id);
     LogPrint(BCLog::CHAINLOCKS,
-             "CChainLocksHandler::%s accepted payment-audit seal CLSIG "
+             "CChainLocksHandler::%s accepted payment-audit dependency CLSIG "
              "%s at height %d as authorization only\n",
              __func__, witness_id.ToString(), chainlock.statement.height);
     return true;
@@ -18468,6 +19160,16 @@ bool CChainLocksHandler::ProcessNewChainLockInternal(
                              "pq-clsig-verifier-busy");
     }
 
+    // The exact payment dependency owns this response even if these bytes
+    // also name historical B. Only fresh ordinary verification may persist
+    // its authorization edge; the PoW-history import below cannot supply it.
+    if (!retained_local_promotion) {
+        if (const auto payment_seal{ProcessPaymentAuditSealCertificate(
+                from, chainlock, state, peer_fault)}) {
+            return *payment_seal;
+        }
+    }
+
     if (!retained_local_promotion && !local_finalization && !continuation) {
         {
             LOCK(cs_main);
@@ -18492,13 +19194,6 @@ bool CChainLocksHandler::ProcessNewChainLockInternal(
         if (const auto imported{ProcessPoWHistoricalSyncCertificate(
                 from, chainlock, state, peer_fault)}) {
             return *imported;
-        }
-    }
-
-    if (!retained_local_promotion) {
-        if (const auto payment_seal{ProcessPaymentAuditSealCertificate(
-                from, chainlock, state, peer_fault)}) {
-            return *payment_seal;
         }
     }
 

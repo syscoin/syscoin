@@ -4557,7 +4557,8 @@ bool Chainstate::ReplayDeferredBTCCNEVM(
     const uint256& through_hash,
     const std::function<bool()>& finalize,
     bool& complete,
-    std::string& error)
+    std::string& error,
+    const std::function<bool()>& revalidate)
 {
     AssertLockNotHeld(cs_main);
     AssertLockNotHeld(m_chainstate_mutex);
@@ -4565,7 +4566,7 @@ bool Chainstate::ReplayDeferredBTCCNEVM(
         LOCK(m_chainstate_mutex);
         std::optional<NEVMBlockReject> rejection;
         if (ReplayDeferredBTCCNEVMLocked(through_height, through_hash, finalize,
-                                        complete, error, rejection)) {
+                                        complete, error, rejection, revalidate)) {
             return true;
         }
         if (!rejection) return false;
@@ -4592,7 +4593,8 @@ bool Chainstate::ReplayDeferredBTCCNEVM(
 bool Chainstate::ReplayDeferredBTCCNEVMLocked(
     int32_t through_height, const uint256& through_hash,
     const std::function<bool()>& finalize, bool& complete, std::string& error,
-    std::optional<NEVMBlockReject>& rejection)
+    std::optional<NEVMBlockReject>& rejection,
+    const std::function<bool()>& revalidate)
 {
     AssertLockNotHeld(cs_main);
     AssertLockHeld(m_chainstate_mutex);
@@ -4603,6 +4605,22 @@ bool Chainstate::ReplayDeferredBTCCNEVMLocked(
         !finalize) {
         error = "deferred-nevm-replay-invalid-request";
         return false;
+    }
+
+    // SYSCOIN: Process-local receipt verification may be revoked without
+    // changing the endpoint hash. Recheck it after activation exclusion is
+    // held and again at every external-send and durable-finalization boundary.
+    const auto authorization_current =
+        [&]() EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_chainstate_mutex) {
+        if (!revalidate || revalidate()) return true;
+        complete = false;
+        rejection.reset();
+        error = "deferred-nevm-replay-authorization-changed";
+        return false;
+    };
+    {
+        LOCK(cs_main);
+        if (!authorization_current()) return false;
     }
 
     // SYSCOIN: Marker deletion is the commit point for deferred replay. Keep
@@ -4620,6 +4638,7 @@ bool Chainstate::ReplayDeferredBTCCNEVMLocked(
             complete = false;
             return true;
         }
+        if (!authorization_current()) return false;
         if (!finalize()) {
             error = "deferred-nevm-replay-finalization-failed";
             return false;
@@ -4737,6 +4756,7 @@ bool Chainstate::ReplayDeferredBTCCNEVMLocked(
                 error = "deferred-nevm-prefix-reorged";
                 return false;
             }
+            if (!authorization_current()) return false;
         }
 
         BlockValidationState state;

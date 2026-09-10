@@ -3832,11 +3832,13 @@ bool ReplayDeferredForTest(Chainstate& chainstate,
                            const uint256& through_hash,
                            const std::function<bool()>& finalize,
                            bool& complete,
-                           std::string& error) NO_THREAD_SAFETY_ANALYSIS
+                           std::string& error,
+                           const std::function<bool()>& revalidate = {})
+    NO_THREAD_SAFETY_ANALYSIS
 {
     AssertLockNotHeld(::cs_main);
     return chainstate.ReplayDeferredBTCCNEVM(
-        through_height, through_hash, finalize, complete, error);
+        through_height, through_hash, finalize, complete, error, revalidate);
 }
 
 void AssertMainLockHeldForTest() NO_THREAD_SAFETY_ANALYSIS
@@ -7512,6 +7514,126 @@ BOOST_FIXTURE_TEST_CASE(deferred_nevm_replay_clears_only_at_exact_tip,
     BOOST_CHECK(!complete);
     BOOST_CHECK(!finalized);
     BOOST_CHECK(error.empty());
+}
+
+BOOST_FIXTURE_TEST_CASE(deferred_nevm_replay_revalidation_rejects_before_engine_activity,
+                        StartupNEVMRecoverySetup)
+{
+    auto& chainman{*Assert(m_node.chainman)};
+    const auto target{MineNEVMBlock(/*forward_to_nevm=*/false)};
+    const int target_height{
+        WITH_LOCK(::cs_main, return chainman.ActiveHeight())};
+    const auto commands_before{nevm->command_trace};
+    const auto flushes_before{nevm->flush_requests};
+    const auto queries_before{nevm->block_info_queries};
+    BOOST_REQUIRE(nevm->connected_blocks.empty());
+    BOOST_REQUIRE_EQUAL(nevm->applied_count, 0U);
+
+    std::size_t revalidations{0};
+    std::size_t finalizations{0};
+    bool complete{true};
+    std::string error;
+    BOOST_CHECK(!ReplayDeferredForTest(
+        chainman.ActiveChainstate(), target_height, target->GetHash(),
+        [&] {
+            ++finalizations;
+            return true;
+        },
+        complete, error,
+        [&] {
+            AssertMainLockHeldForTest();
+            ++revalidations;
+            return false;
+        }));
+    BOOST_CHECK_EQUAL(revalidations, 1U);
+    BOOST_CHECK(!complete);
+    BOOST_CHECK_EQUAL(finalizations, 0U);
+    BOOST_CHECK_EQUAL(error, "deferred-nevm-replay-authorization-changed");
+    BOOST_CHECK(nevm->command_trace == commands_before);
+    BOOST_CHECK_EQUAL(nevm->flush_requests, flushes_before);
+    BOOST_CHECK_EQUAL(nevm->block_info_queries, queries_before);
+    BOOST_CHECK(nevm->connected_blocks.empty());
+    BOOST_CHECK(nevm->disconnected_blocks.empty());
+    BOOST_CHECK_EQUAL(nevm->applied_count, 0U);
+    BOOST_CHECK(WITH_LOCK(::cs_main, return chainman.ActiveTip()->GetBlockHash()) ==
+                target->GetHash());
+}
+
+BOOST_FIXTURE_TEST_CASE(deferred_nevm_replay_revalidation_preserves_partial_and_applied_prefixes,
+                        StartupNEVMRecoverySetup)
+{
+    auto& chainman{*Assert(m_node.chainman)};
+    const auto first{MineNEVMBlock(/*forward_to_nevm=*/false)};
+    const auto target{MineNEVMBlock(/*forward_to_nevm=*/false)};
+    const int target_height{
+        WITH_LOCK(::cs_main, return chainman.ActiveHeight())};
+    BOOST_REQUIRE(nevm->connected_blocks.empty());
+    BOOST_REQUIRE_EQUAL(nevm->applied_count, 0U);
+
+    bool authorized{true};
+    nevm->connect_response = [&](const uint256&, uint32_t) {
+        // Revoke local proof authority after each accepted send. The next
+        // slot or exact-tip finalizer must observe the changed source.
+        authorized = false;
+        return std::string{};
+    };
+    const auto revalidate = [&] {
+        AssertMainLockHeldForTest();
+        return authorized;
+    };
+    std::size_t finalizations{0};
+    const auto finalize = [&] {
+        AssertMainLockHeldForTest();
+        ++finalizations;
+        return true;
+    };
+    bool complete{true};
+    std::string error;
+
+    // The first block may be applied, but revoked authority cannot send the
+    // second block or clear the caller's durable replay obligation.
+    BOOST_CHECK(!ReplayDeferredForTest(
+        chainman.ActiveChainstate(), target_height, target->GetHash(),
+        finalize, complete, error, revalidate));
+    BOOST_CHECK(!complete);
+    BOOST_CHECK_EQUAL(finalizations, 0U);
+    BOOST_CHECK_EQUAL(error, "deferred-nevm-replay-authorization-changed");
+    BOOST_CHECK(nevm->connected_blocks == std::vector<uint256>{first->GetHash()});
+    BOOST_CHECK_EQUAL(nevm->applied_count, 1U);
+    BOOST_CHECK(nevm->applied_hash == first->GetHash());
+    BOOST_CHECK(nevm->disconnected_blocks.empty());
+
+    // A later pass resumes from the engine's applied pair. Revocation on the
+    // final send must still prevent finalization even after that pair reaches
+    // the requested exact tip.
+    authorized = true;
+    BOOST_CHECK(!ReplayDeferredForTest(
+        chainman.ActiveChainstate(), target_height, target->GetHash(),
+        finalize, complete, error, revalidate));
+    BOOST_CHECK(!complete);
+    BOOST_CHECK_EQUAL(finalizations, 0U);
+    BOOST_CHECK_EQUAL(error, "deferred-nevm-replay-authorization-changed");
+    const std::vector<uint256> expected_blocks{first->GetHash(), target->GetHash()};
+    BOOST_CHECK(nevm->connected_blocks == expected_blocks);
+    BOOST_CHECK_EQUAL(nevm->applied_count, 2U);
+    BOOST_CHECK(nevm->applied_hash == target->GetHash());
+    BOOST_CHECK(nevm->disconnected_blocks.empty());
+    BOOST_REQUIRE(nevm->last_reported_pair.has_value());
+    BOOST_CHECK_EQUAL(nevm->last_reported_pair->count, 2U);
+    BOOST_CHECK(nevm->last_reported_pair->hash == target->GetHash());
+
+    // Renewed authority can finalize the already applied endpoint without
+    // replaying either block a second time.
+    authorized = true;
+    BOOST_REQUIRE_MESSAGE(ReplayDeferredForTest(
+        chainman.ActiveChainstate(), target_height, target->GetHash(),
+        finalize, complete, error, revalidate), error);
+    BOOST_CHECK(complete);
+    BOOST_CHECK_EQUAL(finalizations, 1U);
+    BOOST_CHECK(error.empty());
+    BOOST_CHECK(nevm->connected_blocks == expected_blocks);
+    BOOST_CHECK(WITH_LOCK(::cs_main, return chainman.ActiveTip()->GetBlockHash()) ==
+                target->GetHash());
 }
 
 BOOST_FIXTURE_TEST_CASE(deferred_nevm_replay_commits_each_bounded_batch,

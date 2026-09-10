@@ -43,7 +43,7 @@ from test_framework.messages import (
     uint256_from_compact,
     uint256_from_str,
 )
-from test_framework.p2p import P2PInterface, P2P_VERSION
+from test_framework.p2p import P2PInterface, P2P_VERSION, p2p_lock
 from test_framework.script import CScript, OP_RETURN
 from test_framework.test_node import ErrorMatch
 from test_framework.test_framework import SkipTest, SyscoinTestFramework
@@ -382,6 +382,18 @@ def serialize_final_chainlock(statement, signature_byte=0):
     return payload
 
 
+class PaymentAuditDependencyPeer(P2PInterface):
+    def __init__(self):
+        super().__init__()
+        self.requested_chainlock_ids = set()
+
+    def on_getclsig(self, message):
+        # Keep exact requests even if a later best-certificate probe replaces
+        # last_message before the test thread observes this scheduler pass.
+        if message.logical_id is not None:
+            self.requested_chainlock_ids.add(message.logical_id)
+
+
 class PQChainLocksTest(SyscoinTestFramework):
     def add_options(self, parser):
         self.add_wallet_options(parser, descriptors=True, legacy=False)
@@ -496,9 +508,9 @@ class PQChainLocksTest(SyscoinTestFramework):
         assert_raises_rpc_error(
             -32603, "Unable to find any chainlock", node.getchainlocks)
 
-    def connect_peer(self, marker):
+    def connect_peer(self, marker, *, peer=None):
         peer = self.nodes[0].add_p2p_connection(
-            P2PInterface(), uacomment=marker
+            peer if peer is not None else P2PInterface(), uacomment=marker
         )
         peer.wait_for_verack()
         peer_info = next(
@@ -1952,21 +1964,12 @@ class PQChainLocksTest(SyscoinTestFramework):
         assert_equal(best["logicalid"], expected_logical)
         assert_equal(best["witnessid"], expected_witness)
 
-    def admit_payment_audit_chainlocks(self, context):
-        bundle = context["bundle"]
-        best = self.nodes[0].getbestchainlock()
-        assert_equal(best["height"], PAYMENT_AUDIT_ANCHOR_HEIGHT)
-        assert_equal(
-            best["logicalid"], "%064x" % bundle["anchor"]["logical_hash"])
-        for artifact, height, block_hash, marker in [
-            (bundle["seal"], PAYMENT_AUDIT_SEAL_HEIGHT,
-             context["seal_hash"], "pq-audit-seal"),
-        ]:
-            self.admit_chainlock_artifact(
-                artifact, height, block_hash, marker)
-
     def build_pending_payment_audit_carrier(self, bundle):
         node = self.nodes[0]
+        anchor = node.getbestchainlock()
+        assert_equal(anchor["height"], PAYMENT_AUDIT_ANCHOR_HEIGHT)
+        assert_equal(anchor["logicalid"],
+                     "%064x" % bundle["anchor"]["logical_hash"])
         self.mine_pq_to_height(PAYMENT_AUDIT_CARRIER_HEIGHT - 1)
         provider_marker = "pq-audit-required-provider"
 
@@ -2031,7 +2034,8 @@ class PQChainLocksTest(SyscoinTestFramework):
         # after returning to the stable parent; the pending carrier cannot
         # advance that tip until this exact witness arrives.
         provider = self.authenticate_peer(
-            self.connect_peer(provider_marker), provider_marker, 0xc200)
+            self.connect_peer(provider_marker, peer=PaymentAuditDependencyPeer()),
+            provider_marker, 0xc200)
         with node.assert_debug_log([
                 "pq-payment-audit-certificate-pending"]):
             assert_raises_rpc_error(
@@ -2060,6 +2064,56 @@ class PQChainLocksTest(SyscoinTestFramework):
             provider.last_message["getdata"].inv[0].type,
             MSG_PQPOSECERT,
         )
+        seal = bundle["seal"]
+        with p2p_lock:
+            assert seal["logical_hash"] not in provider.requested_chainlock_ids
+        provider.send_and_ping(
+            msg_pqposecert(bundle["audit_certificate"]), timeout=1200)
+        # The first exact audit response is only a dependency discovery: its
+        # seal has never been sent to this node. Keep the carrier pending.
+        assert_equal(node.getbestblockhash(), parent_hash)
+        assert_equal(node.getbestchainlock(), anchor)
+        provider.wait_until(
+            lambda: seal["logical_hash"] in provider.requested_chainlock_ids,
+            timeout=60,
+        )
+        with p2p_lock:
+            audit_requests_before_seal = provider.message_count["getpqpose"]
+
+        # Answer the observed exact GETCLSIG through INV/GETDATA. The specific
+        # acceptance marker and unchanged winner rule out generic finality
+        # admission or a fixture helper silently supplying the seal first.
+        self.request_chainlock(provider, seal["logical_hash"])
+        seal_acceptance = (
+            "accepted payment-audit dependency CLSIG %064x at height %d "
+            "as authorization only" %
+            (seal["witness_hash"], PAYMENT_AUDIT_SEAL_HEIGHT)
+        )
+        with node.assert_debug_log(
+                [seal_acceptance],
+                unexpected_msgs=["accepted PQ ChainLock"], timeout=1200):
+            provider.send_and_ping(msg_clsig(seal["certificate"]), timeout=1200)
+        assert_equal(node.getbestblockhash(), parent_hash)
+        assert_equal(node.getbestchainlock(), anchor)
+
+        # Admission releases the exact audit for a fresh network retry. A
+        # previous GETPQPOSE cannot satisfy this wait, and the first payload
+        # must not have been admitted while its seal was unavailable.
+        provider.wait_until(
+            lambda: (
+                provider.message_count["getpqpose"] > audit_requests_before_seal
+                and provider.last_message["getpqpose"].witness_id ==
+                    bundle["audit_witness_hash"]
+            ),
+            timeout=60,
+        )
+        with p2p_lock:
+            provider.last_message.pop("getdata", None)
+        provider.send_message(msg_inv([
+            CInv(MSG_PQPOSECERT, bundle["audit_witness_hash"]),
+        ]))
+        provider.wait_for_getdata([bundle["audit_witness_hash"]], timeout=60)
+        assert_equal(provider.last_message["getdata"].inv[0].type, MSG_PQPOSECERT)
         provider.send_and_ping(
             msg_pqposecert(bundle["audit_certificate"]), timeout=1200)
         self.wait_until(
@@ -2256,7 +2310,8 @@ class PQChainLocksTest(SyscoinTestFramework):
         node = self.nodes[0]
         context = self.generate_payment_audit_fixture(authorizer)
         bundle = context["bundle"]
-        self.admit_payment_audit_chainlocks(context)
+        # Fetch the seal only after the pending carrier's first audit response
+        # discovers it; the older ordinary anchor remains the durable winner.
         carrier_hash, canonical_hash = \
             self.build_pending_payment_audit_carrier(bundle)
         # Initial activation pins the witness and advances the archive

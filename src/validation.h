@@ -928,12 +928,15 @@ public:
      * SYSCOIN: Replay one bounded batch of a catch-up-authenticated prefix.
      * When replay reaches the requested exact active tip, finalize is invoked
      * synchronously while activation is excluded and cs_main is held.
+     * The optional revalidator runs under those same locks before engine
+     * activity, each block notification, and finalization.
      */
     bool ReplayDeferredBTCCNEVM(int32_t through_height,
                                 const uint256& through_hash,
                                 const std::function<bool()>& finalize,
                                 bool& complete,
-                                std::string& error)
+                                std::string& error,
+                                const std::function<bool()>& revalidate = {})
         EXCLUSIVE_LOCKS_REQUIRED(!cs_main, !m_chainstate_mutex);
     /**
      * SYSCOIN: Serialize a PQ catch-up rebase with active-chain activation.
@@ -1089,7 +1092,8 @@ private:
                                      const uint256& through_hash,
                                      const std::function<bool()>& finalize,
                                      bool& complete, std::string& error,
-                                     std::optional<NEVMBlockReject>& rejection)
+                                     std::optional<NEVMBlockReject>& rejection,
+                                     const std::function<bool()>& revalidate)
         EXCLUSIVE_LOCKS_REQUIRED(m_chainstate_mutex) LOCKS_EXCLUDED(cs_main);
 
     void InvalidBlockFound(CBlockIndex* pindex, const BlockValidationState& state) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
