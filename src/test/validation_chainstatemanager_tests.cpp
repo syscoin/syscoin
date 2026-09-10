@@ -3891,6 +3891,121 @@ BOOST_FIXTURE_TEST_CASE(nevm_payload_repair_healthy_import_skips_checks,
     BOOST_CHECK(!WITH_LOCK(::cs_main, return m_node.chainman->GetNEVMPayloadRepairRequest()));
 }
 
+BOOST_FIXTURE_TEST_CASE(nevm_payload_repair_blocks_mining_until_replay_completes,
+                        PersistentNEVMPayloadRepairSetup)
+{
+    const auto first{MineNEVMBlock()};
+    const auto second{MineNEVMBlock(/*forward_to_nevm=*/false)};
+    auto& chainman{*m_node.chainman};
+    const auto verdict{PayloadVerdictFor(*second)};
+    const std::vector<uint8_t> replacement{0x51, 0x52};
+    nevm->payload_check_response = [&](
+        const CNEVMHeader&, const CBlock& block, const uint256& hash,
+        bool& valid, std::string& error, std::optional<NEVMBlockReject>* rejection) {
+        BOOST_CHECK(hash == second->GetHash());
+        valid = block.vchNEVMBlockData == replacement;
+        error = valid ? std::string{} : "fixture-payload-rejected";
+        if (!valid && rejection) *rejection = verdict;
+    };
+    const auto create_template = [&] {
+        return node::BlockAssembler{chainman.ActiveChainstate(), nullptr}
+            .CreateNewBlock(CScript{} << OP_TRUE);
+    };
+    const auto check_blocked = [&](const char* stage) {
+        BOOST_TEST_CONTEXT(stage) {
+            BOOST_REQUIRE(chainman.HasPendingNEVMPayloadRepair());
+            BOOST_CHECK(!chainman.HasPendingNEVMStartupPair());
+            BOOST_REQUIRE(llmq::chainLocksHandler != nullptr);
+            BOOST_CHECK(!llmq::chainLocksHandler->HasNEVMReplayObligation());
+            const auto templates{nevm->template_serial};
+            BOOST_CHECK_EXCEPTION(create_template(), std::runtime_error,
+                [](const std::runtime_error& error) {
+                    return std::string{error.what()} ==
+                        "NEVM block production is waiting for execution recovery";
+                });
+            BOOST_CHECK_EQUAL(nevm->template_serial, templates);
+            BOOST_CHECK_EQUAL(nevm->applied_count, 1U);
+            BOOST_CHECK(nevm->applied_hash == first->GetHash());
+            BOOST_CHECK(WITH_LOCK(::cs_main, return chainman.ActiveTip()->GetBlockHash()) ==
+                        second->GetHash());
+        }
+    };
+
+    // A reopened durable marker starts in VERIFY_STORED, before it exposes a
+    // download request. This stage must already prevent template generation.
+    std::string error;
+    {
+        LOCK(::cs_main);
+        BlockValidationState flush_state;
+        BOOST_REQUIRE_MESSAGE(chainman.ActiveChainstate().FlushStateToDisk(
+            flush_state, FlushStateMode::ALWAYS), flush_state.ToString());
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->Write(
+            NEVM_PAYLOAD_TEST_MARKER, verdict, /*fSync=*/true));
+        BOOST_REQUIRE_MESSAGE(chainman.InitializeNEVMPayloadRepair(error), error);
+        BOOST_CHECK(!chainman.GetNEVMPayloadRepairRequest());
+    }
+    check_blocked("VERIFY_STORED");
+    BOOST_REQUIRE_MESSAGE(chainman.MaybeRecoverNEVMPayload(error), error);
+    const auto request{WITH_LOCK(::cs_main, return chainman.GetNEVMPayloadRepairRequest())};
+    BOOST_REQUIRE(request.has_value());
+    check_blocked("DOWNLOAD");
+
+    BlockValidationState state;
+    BOOST_REQUIRE_MESSAGE(chainman.ProcessNEVMPayloadRepair(*request, replacement, state),
+                          state.ToString());
+    BOOST_CHECK(!WITH_LOCK(::cs_main, return chainman.GetNEVMPayloadRepairRequest()));
+    check_blocked("REPLAY");
+
+    BOOST_REQUIRE_MESSAGE(chainman.MaybeRecoverNEVMPayload(error), error);
+    BOOST_CHECK(!chainman.HasPendingNEVMPayloadRepair());
+    BOOST_CHECK(!WITH_LOCK(::cs_main,
+        return chainman.m_blockman.m_block_tree_db->Exists(NEVM_PAYLOAD_TEST_MARKER)));
+    BOOST_CHECK_EQUAL(nevm->applied_count, 2U);
+    BOOST_CHECK(nevm->applied_hash == second->GetHash());
+    const auto templates{nevm->template_serial};
+    const auto resumed{create_template()};
+    BOOST_REQUIRE(resumed != nullptr);
+    BOOST_CHECK(resumed->block.hashPrevBlock == second->GetHash());
+    BOOST_CHECK_EQUAL(nevm->template_serial, templates + 1U);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_payload_repair_unconnected_candidate_allows_sibling_mining,
+                        StartupNEVMRecoverySetup)
+{
+    const auto parent{MineNEVMBlock()};
+    const auto candidate{MakeNEVMBlock()};
+    auto& chainman{*m_node.chainman};
+    const auto verdict{PayloadVerdictFor(*candidate)};
+    CBlockIndex* candidate_index{nullptr};
+    std::string error;
+    {
+        LOCK(::cs_main);
+        BlockValidationState state;
+        BOOST_REQUIRE_MESSAGE(chainman.AcceptBlock(
+            candidate, state, &candidate_index, /*fRequested=*/true,
+            /*dbp=*/nullptr, /*fNewBlock=*/nullptr, /*min_pow_checked=*/true),
+            state.ToString());
+        BOOST_REQUIRE(candidate_index != nullptr);
+        BOOST_REQUIRE(!chainman.ActiveChain().Contains(candidate_index));
+        BOOST_REQUIRE(candidate_index->pprev == chainman.ActiveTip());
+        BlockValidationState flush_state;
+        BOOST_REQUIRE_MESSAGE(chainman.ActiveChainstate().FlushStateToDisk(
+            flush_state, FlushStateMode::ALWAYS), flush_state.ToString());
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->Write(
+            NEVM_PAYLOAD_TEST_MARKER, verdict, /*fSync=*/true));
+        BOOST_REQUIRE_MESSAGE(chainman.InitializeNEVMPayloadRepair(error), error);
+    }
+    BOOST_REQUIRE(chainman.HasPendingNEVMPayloadRepair());
+    const auto templates{nevm->template_serial};
+    const auto sibling{MakeNEVMBlock()};
+    BOOST_CHECK(sibling->hashPrevBlock == parent->GetHash());
+    BOOST_CHECK(sibling->GetHash() != candidate->GetHash());
+    BOOST_CHECK_EQUAL(nevm->template_serial, templates + 1U);
+    BOOST_CHECK_EQUAL(nevm->applied_count, 1U);
+    BOOST_CHECK(nevm->applied_hash == parent->GetHash());
+    BOOST_CHECK(chainman.HasPendingNEVMPayloadRepair());
+}
+
 BOOST_FIXTURE_TEST_CASE(nevm_payload_repair_rejects_wrong_fingerprint,
                         NEVMPayloadRepairSetup)
 {

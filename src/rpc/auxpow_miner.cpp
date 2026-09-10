@@ -79,6 +79,13 @@ AuxpowMiner::getCurrentBlock (ChainstateManager &chainman, const CTxMemPool& mem
 
   {
     LOCK (cs_main);
+    // SYSCOIN: A replay obligation can appear without changing the tip or
+    // invalidating this miner's cached templates.
+    if (!chainman.IsNEVMBlockProductionAllowed()) {
+      throw JSONRPCError(
+          RPC_CLIENT_IN_INITIAL_DOWNLOAD,
+          "NEVM block production is waiting for execution recovery");
+    }
     const int nextHeight = chainman.ActiveChain().Height() + 1;
     if (btcPrev.next_height != nextHeight) {
       throw JSONRPCError(RPC_MISC_ERROR, BTCPREV_TIP_CHANGED_ERROR);

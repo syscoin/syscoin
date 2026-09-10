@@ -1668,6 +1668,9 @@ public:
     {
         return m_nevm_startup_pair_pending.load(std::memory_order_acquire);
     }
+    /** Block template issuance until the active branch's NEVM replay completes. */
+    [[nodiscard]] bool IsNEVMBlockProductionAllowed() const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** Only exact ancestors of the pending pair may reconnect without Geth. */
     [[nodiscard]] bool CheckNEVMStartupConnect(
         const CBlockIndex& index, std::string& error) const

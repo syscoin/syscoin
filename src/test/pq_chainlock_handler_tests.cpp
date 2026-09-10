@@ -8,12 +8,17 @@
 #include <consensus/params.h>
 #include <evo/deterministicmns.h>
 #include <governance/governanceclasses.h>
+#include <key_io.h>
 #include <net.h>
 #include <net_processing.h>
+#include <node/miner.h>
 #include <pow.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
 #include <protocol.h>
+#include <rpc/protocol.h>
+#include <rpc/request.h>
+#include <rpc/server.h>
 #include <script/script.h>
 #include <streams.h>
 #include <test/pq_test_util.h>
@@ -22,6 +27,7 @@
 #include <test/util/validation.h>
 #include <timedata.h>
 #include <util/time.h>
+#include <validationinterface.h>
 
 #include <algorithm>
 #include <array>
@@ -579,6 +585,18 @@ public:
         BOOST_REQUIRE(handler.m_persistence->PersistPaymentAuditPresealState(payment));
         handler.m_btcc_preseal_state = btcc;
         handler.m_payment_audit_preseal_state = payment;
+    }
+
+    static bool ClearReplayMarker(CChainLocksHandler& handler,
+                                  const pq::BTCCPresealMarker& marker)
+    {
+        return handler.ClearBTCCPreseal(marker);
+    }
+
+    static bool ClearReplayMarker(CChainLocksHandler& handler,
+                                  const pq::PaymentAuditPresealMarker& marker)
+    {
+        return handler.ClearPaymentAuditPreseal(marker);
     }
 
     static std::optional<pq::PaymentAuditPresealMarker> RecoverPaymentPreseal(
@@ -1925,9 +1943,310 @@ struct BTCCPresealRecoveryChain {
     }
 };
 
+// SYSCOIN: Observe actual mining entry points after public IBD has latched.
+struct ReplayMiningNEVMSubscriber final : CValidationInterface {
+    std::size_t template_requests{0};
+    std::string template_error;
+
+    void NotifyGetNEVMBlock(CNEVMBlock& block, std::string& error) override
+    {
+        ++template_requests;
+        error = template_error;
+        block.nBlockHash = NonNullHash(1'100'000 + template_requests);
+        block.nTxRoot = block.nBlockHash;
+        block.nReceiptRoot = block.nBlockHash;
+        block.vchNEVMBlockData = {1};
+    }
+
+    void NotifyNEVMBlockConnect(
+        const CNEVMHeader&, const CBlock&, std::string& error,
+        const uint256&, NEVMDataVec&, const uint32_t&, bool, const uint256&,
+        const CDeterministicMNListNEVMAddressDiff&,
+        std::optional<NEVMBlockReject>* rejection = nullptr) override
+    {
+        error.clear();
+        if (rejection) rejection->reset();
+    }
+};
+
+struct PresealMiningSetup : TestChain100Setup {
+    using Access = llmq::test::CChainLocksHandlerTestAccess;
+    static constexpr int32_t TIP_HEIGHT{1'385};
+    static constexpr int32_t BTCC_CARRIER_HEIGHT{875};
+    const bool previous_nevm_connection{fNEVMConnection};
+    std::shared_ptr<ReplayMiningNEVMSubscriber> nevm{
+        std::make_shared<ReplayMiningNEVMSubscriber>()};
+    const llmq::pq::ChainLockFinalityStoreConfig marker_config{[] {
+        auto config{CatchupStoreConfig()};
+        config.btcc_schedule.candidate_origin = 865;
+        return config;
+    }()};
+    std::unique_ptr<llmq::pq::PQChainLockPersistence> original_persistence;
+    llmq::pq::PQChainLockPersistence* durable{nullptr};
+    uint64_t marker_revision{0};
+
+    PresealMiningSetup()
+        : TestChain100Setup{ChainType::REGTEST, {"-nevmstartheight=101"}}
+    {
+        fNEVMConnection = false;
+        mineBlocks(TIP_HEIGHT - 100);
+        SyncWithValidationInterfaceQueue();
+        auto& chainman{static_cast<TestChainstateManager&>(*Assert(m_node.chainman))};
+        BOOST_REQUIRE_EQUAL(WITH_LOCK(::cs_main, return chainman.ActiveHeight()), TIP_HEIGHT);
+        BOOST_REQUIRE(llmq::chainLocksHandler);
+        BOOST_REQUIRE(marker_config.IsValid());
+        auto persistence{std::make_unique<llmq::pq::PQChainLockPersistence>(
+            DBParams{.path = m_path_root / "mining-replay-markers", .cache_bytes = 4U << 20},
+            chainman.GetConsensus().hashGenesisBlock, marker_config)};
+        durable = persistence.get();
+        original_persistence = Access::ExchangePersistence(
+            *llmq::chainLocksHandler, std::move(persistence));
+        BOOST_REQUIRE(!durable->HasBest());
+        chainman.ResetIbd(PQHistoryAuthState::READY);
+        BOOST_REQUIRE(!chainman.IsInitialBlockDownload());
+        BOOST_REQUIRE(!chainman.HasPendingNEVMStartupPair());
+        RegisterSharedValidationInterface(nevm);
+        fNEVMConnection = true;
+    }
+
+    ~PresealMiningSetup()
+    {
+        UnregisterValidationInterface(nevm.get());
+        SyncWithValidationInterfaceQueue();
+        fNEVMConnection = previous_nevm_connection;
+        if (durable) Access::SetReplayMarkers(*llmq::chainLocksHandler, {}, {});
+        Access::ExchangePersistence(
+            *llmq::chainLocksHandler, std::move(original_persistence)).reset();
+    }
+
+    llmq::pq::BTCCPresealMarker BTCCMarker(bool unrelated = false)
+    {
+        LOCK(::cs_main);
+        auto& chainman{*Assert(m_node.chainman)};
+        const CBlockIndex* carrier{chainman.ActiveChain()[BTCC_CARRIER_HEIGHT]};
+        BOOST_REQUIRE(carrier);
+        if (unrelated) {
+            auto header{carrier->GetBlockHeader()};
+            header.hashMerkleRoot = NonNullHash(1'101'000 + marker_revision);
+            carrier = chainman.m_blockman.AddToBlockIndex(header, chainman.m_best_header);
+            BOOST_REQUIRE(carrier);
+            BOOST_REQUIRE(!chainman.ActiveChain().Contains(carrier));
+        }
+        const CBlockIndex* target{carrier->GetAncestor(865)};
+        BOOST_REQUIRE(target);
+        llmq::pq::BTCCReceipt receipt;
+        receipt.chainlock_target_height = target->nHeight;
+        receipt.chainlock_target_hash = target->GetBlockHash();
+        receipt.chainlock_logical_id = NonNullHash(1'102'000);
+        receipt.accepted_cursor = {target->nHeight, target->GetBlockHash(), NonNullHash(1'102'001)};
+        llmq::pq::BTCCPresealMarker marker{
+            carrier->nHeight, carrier->GetBlockHash(), {},
+            carrier->nHeight, carrier->GetBlockHash(), {}, receipt, ++marker_revision};
+        BOOST_REQUIRE(marker.IsStructurallyValid());
+        return marker;
+    }
+
+    llmq::pq::PaymentAuditPresealMarker PaymentMarker(bool unrelated = false)
+    {
+        LOCK(::cs_main);
+        auto& chainman{*Assert(m_node.chainman)};
+        const llmq::pq::PaymentAuditScheduleConfig schedule{
+            marker_config.chainlock_schedule, marker_config.btcc_schedule};
+        const auto epoch{llmq::pq::BuildPaymentAuditEpochSchedule(schedule, 3)};
+        BOOST_REQUIRE(epoch);
+        BOOST_REQUIRE_EQUAL(epoch->carrier_start_height, TIP_HEIGHT);
+        const CBlockIndex* carrier{chainman.ActiveChain()[epoch->carrier_start_height]};
+        BOOST_REQUIRE(carrier);
+        if (unrelated) {
+            auto header{carrier->GetBlockHeader()};
+            header.hashMerkleRoot = NonNullHash(1'103'000 + marker_revision);
+            carrier = chainman.m_blockman.AddToBlockIndex(header, chainman.m_best_header);
+            BOOST_REQUIRE(carrier);
+            BOOST_REQUIRE(!chainman.ActiveChain().Contains(carrier));
+        }
+        auto receipt{NonNullPaymentAuditReceipt(3)};
+        receipt.epoch = 3;
+        receipt.seal_height = epoch->seal_height;
+        receipt.seal_block_hash = carrier->GetAncestor(receipt.seal_height)->GetBlockHash();
+        receipt.carrier_height = carrier->nHeight;
+        receipt.subject_roster_beacon = SubjectBeacon(receipt.epoch);
+        llmq::pq::PaymentAuditPresealMarker marker{
+            carrier->nHeight, carrier->GetBlockHash(), {}, NonNullHash(1'104'000),
+            carrier->nHeight, carrier->GetBlockHash(), receipt, ++marker_revision};
+        BOOST_REQUIRE(marker.IsStructurallyValid());
+        return marker;
+    }
+
+    void CheckDurableMarkers(const llmq::pq::BTCCPresealState& btcc,
+                             const llmq::pq::PaymentAuditPresealState& payment)
+    {
+        // Reopen the database so this observes the synchronous disk write,
+        // including erasure, independently of persistence's in-memory cache.
+        SyncWithValidationInterfaceQueue();
+        durable = nullptr;
+        Access::ExchangePersistence(*llmq::chainLocksHandler, nullptr).reset();
+        auto persistence{std::make_unique<llmq::pq::PQChainLockPersistence>(
+            DBParams{.path = m_path_root / "mining-replay-markers", .cache_bytes = 4U << 20},
+            m_node.chainman->GetConsensus().hashGenesisBlock, marker_config)};
+        durable = persistence.get();
+        Access::ExchangePersistence(*llmq::chainLocksHandler, std::move(persistence));
+        BOOST_REQUIRE(durable->LoadBTCCPresealState() == btcc);
+        BOOST_REQUIRE(durable->LoadPaymentAuditPresealState() == payment);
+        BOOST_REQUIRE(!durable->HasBest());
+    }
+
+    UniValue MiningRPC(const std::string& method)
+    {
+        node::JSONRPCRequest request;
+        request.context = &m_node;
+        request.strMethod = method;
+        request.params = UniValue{UniValue::VARR};
+        if (method == "getblocktemplate") {
+            UniValue options{UniValue::VOBJ};
+            UniValue rules{UniValue::VARR};
+            rules.push_back("segwit");
+            options.pushKV("rules", rules);
+            request.params.push_back(options);
+        } else {
+            request.params.push_back(EncodeDestination(PKHash(coinbaseKey.GetPubKey())));
+        }
+        if (RPCIsInWarmup(nullptr)) SetRPCWarmupFinished();
+        return tableRPC.execute(request);
+    }
+
+    void CheckMiningCachesAllowed()
+    {
+        BOOST_REQUIRE(!m_node.chainman->IsInitialBlockDownload());
+        for (const auto* method : {"getblocktemplate", "createauxblock"}) {
+            BOOST_TEST_CONTEXT(method) {
+                const auto first{MiningRPC(method)};
+                BOOST_REQUIRE(first.isObject());
+                BOOST_CHECK_EQUAL(first["height"].getInt<int>(), TIP_HEIGHT + 1);
+                BOOST_CHECK_EQUAL(first["previousblockhash"].get_str(),
+                    WITH_LOCK(::cs_main, return m_node.chainman->ActiveTip()->GetBlockHash().ToString()));
+                const auto requests{nevm->template_requests};
+                const auto cached{MiningRPC(method)};
+                BOOST_CHECK_EQUAL(cached.write(), first.write());
+                BOOST_CHECK_EQUAL(nevm->template_requests, requests);
+            }
+        }
+    }
+
+    void CheckMiningCachesBlocked()
+    {
+        BOOST_REQUIRE(!m_node.chainman->IsInitialBlockDownload());
+        const auto requests{nevm->template_requests};
+        for (const auto* method : {"getblocktemplate", "createauxblock"}) {
+            BOOST_TEST_CONTEXT(method) {
+                BOOST_CHECK_EXCEPTION(MiningRPC(method), UniValue,
+                    [](const UniValue& error) {
+                        return error["code"].getInt<int>() == RPC_CLIENT_IN_INITIAL_DOWNLOAD &&
+                               error["message"].get_str() ==
+                                   "NEVM block production is waiting for execution recovery";
+                    });
+                BOOST_CHECK_EQUAL(nevm->template_requests, requests);
+            }
+        }
+    }
+
+    void CheckAssemblerAllowed()
+    {
+        BOOST_REQUIRE(!m_node.chainman->IsInitialBlockDownload());
+        const auto requests{nevm->template_requests};
+        const auto block{node::BlockAssembler{m_node.chainman->ActiveChainstate(), nullptr}
+                             .CreateNewBlock(CScript{} << OP_TRUE)};
+        BOOST_REQUIRE(block);
+        BOOST_CHECK_EQUAL(nevm->template_requests, requests + 1);
+    }
+
+    void CheckAssemblerBlocked()
+    {
+        BOOST_REQUIRE(!m_node.chainman->IsInitialBlockDownload());
+        BOOST_REQUIRE(!m_node.chainman->HasPendingNEVMStartupPair());
+        const auto requests{nevm->template_requests};
+        BOOST_CHECK_EXCEPTION(
+            (node::BlockAssembler{m_node.chainman->ActiveChainstate(), nullptr}
+                 .CreateNewBlock(CScript{} << OP_TRUE)),
+            std::runtime_error, [](const std::runtime_error& error) {
+                return std::string{error.what()} ==
+                    "NEVM block production is waiting for execution recovery";
+            });
+        BOOST_CHECK_EQUAL(nevm->template_requests, requests);
+    }
+};
+
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(pq_chainlock_handler_tests, BasicTestingSetup)
+
+BOOST_FIXTURE_TEST_CASE(nevm_mining_active_btcc_preseal_blocks_before_template_request,
+                        PresealMiningSetup)
+{
+    CheckAssemblerAllowed();
+    CheckMiningCachesAllowed();
+    const auto marker{BTCCMarker()};
+    Access::SetReplayMarkers(*llmq::chainLocksHandler, {marker, std::nullopt}, {});
+    CheckDurableMarkers({marker, std::nullopt}, {});
+    CheckAssemblerBlocked();
+    CheckMiningCachesBlocked();
+    BOOST_REQUIRE(Access::ClearReplayMarker(*llmq::chainLocksHandler, marker));
+    CheckDurableMarkers({}, {});
+    CheckAssemblerAllowed();
+    CheckMiningCachesAllowed();
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_mining_active_payment_preseal_blocks_fresh_and_cached_templates,
+                        PresealMiningSetup)
+{
+    CheckAssemblerAllowed();
+    CheckMiningCachesAllowed();
+    const auto marker{PaymentMarker()};
+    Access::SetReplayMarkers(*llmq::chainLocksHandler, {}, {marker, std::nullopt});
+    CheckDurableMarkers({}, {marker, std::nullopt});
+    CheckAssemblerBlocked();
+    CheckMiningCachesBlocked();
+    BOOST_REQUIRE(Access::ClearReplayMarker(*llmq::chainLocksHandler, marker));
+    CheckDurableMarkers({}, {});
+    CheckAssemblerAllowed();
+    CheckMiningCachesAllowed();
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_mining_prospective_markers_follow_the_active_branch,
+                        PresealMiningSetup)
+{
+    for (const bool unrelated : {false, true}) {
+        for (const bool payment : {false, true}) {
+            BOOST_TEST_CONTEXT("unrelated=" << unrelated << ", payment=" << payment) {
+                CheckAssemblerAllowed();
+                CheckMiningCachesAllowed();
+                llmq::pq::BTCCPresealState btcc_state;
+                llmq::pq::PaymentAuditPresealState payment_state;
+                if (payment) payment_state.prospective = PaymentMarker(unrelated);
+                else btcc_state.prospective = BTCCMarker(unrelated);
+                Access::SetReplayMarkers(*llmq::chainLocksHandler, btcc_state, payment_state);
+                CheckDurableMarkers(btcc_state, payment_state);
+                BOOST_REQUIRE(llmq::chainLocksHandler->HasNEVMReplayObligation());
+                if (unrelated) {
+                    CheckAssemblerAllowed();
+                    CheckMiningCachesAllowed();
+                } else {
+                    CheckAssemblerBlocked();
+                    CheckMiningCachesBlocked();
+                }
+                if (payment) {
+                    BOOST_REQUIRE(Access::ClearReplayMarker(
+                        *llmq::chainLocksHandler, *payment_state.prospective));
+                } else {
+                    BOOST_REQUIRE(Access::ClearReplayMarker(
+                        *llmq::chainLocksHandler, *btcc_state.prospective));
+                }
+                CheckDurableMarkers({}, {});
+                CheckAssemblerAllowed();
+                CheckMiningCachesAllowed();
+            }
+        }
+    }
+}
 
 BOOST_AUTO_TEST_CASE(btcc_preseal_terminal_reorg_preserves_single_carrier)
 {
@@ -6143,7 +6462,8 @@ struct PQAuthorizationBasePathSetup : TestingSetup {
     PQAuthorizationBasePathSetup() : TestingSetup{ChainType::REGTEST} {}
     void CheckHistoricalPrefix(bool reauthorize_after_ready, bool mixed_markers = false,
                                bool btcc_terminal_reorg = false,
-                               bool btcc_coalesce_markers = false);
+                               bool btcc_coalesce_markers = false,
+                               bool mining_guard = false);
 };
 
 llmq::pq::RecoveryUniverseCapsulePtr SelectorRecoveryUniverse(
@@ -7057,7 +7377,8 @@ BOOST_FIXTURE_TEST_CASE(
 
 void PQAuthorizationBasePathSetup::CheckHistoricalPrefix(bool reauthorize_after_ready, bool mixed_markers,
                                                         bool btcc_terminal_reorg,
-                                                        bool btcc_coalesce_markers)
+                                                        bool btcc_coalesce_markers,
+                                                        bool mining_guard)
 {
     using Access = llmq::test::CChainLocksHandlerTestAccess;
     using namespace llmq::pq;
@@ -7127,7 +7448,7 @@ void PQAuthorizationBasePathSetup::CheckHistoricalPrefix(bool reauthorize_after_
     BOOST_REQUIRE(store);
     auto persistence{std::make_unique<PQChainLockPersistence>(
         DBParams{.path = m_path_root / "historical-prefix-selector", .cache_bytes = 4U << 20,
-                 .memory_only = !reauthorize_after_ready}, genesis, *config)};
+                 .memory_only = !reauthorize_after_ready && !mining_guard}, genesis, *config)};
     auto* durable{persistence.get()};
     const auto original_persistence{Access::ExchangePersistence(*handler, std::move(persistence))};
 
@@ -8065,6 +8386,84 @@ void PQAuthorizationBasePathSetup::CheckHistoricalPrefix(bool reauthorize_after_
     BOOST_CHECK(durable->LoadPaymentAuditPresealState() == payment_markers);
     Access::RefreshHistory(*handler);
     BOOST_CHECK(WITH_LOCK(::cs_main, return chainman.GetPQHistoryAuthState()) == PQHistoryAuthState::READY);
+    if (mining_guard) {
+        // Both exact prefixes are already authenticated. The remaining
+        // durable obligations still require execution replay before mining.
+        BOOST_REQUIRE(!chainman.IsInitialBlockDownload());
+        BOOST_REQUIRE(chainman.IsPQBlockProductionAllowed());
+        BOOST_REQUIRE(!chainman.HasPendingNEVMStartupPair());
+        BOOST_REQUIRE(!WITH_LOCK(::cs_main, return handler->IsBTCCPresealActive()));
+        BOOST_REQUIRE(!WITH_LOCK(::cs_main, return handler->IsPaymentAuditPresealActive()));
+        BOOST_REQUIRE(handler->HasNEVMReplayObligation());
+
+        struct RestoreMiningContext {
+            Consensus::Params& consensus;
+            const int dip_height;
+            const int nevm_height;
+            const bool nevm_connection;
+            llmq::CChainLocksHandler* original_handler;
+            const std::shared_ptr<ReplayMiningNEVMSubscriber> subscriber{
+                std::make_shared<ReplayMiningNEVMSubscriber>()};
+
+            ~RestoreMiningContext()
+            {
+                UnregisterValidationInterface(subscriber.get());
+                SyncWithValidationInterfaceQueue();
+                LOCK(::cs_main);
+                consensus.DIP0003Height = dip_height;
+                consensus.nNEVMStartBlock = nevm_height;
+                fNEVMConnection = nevm_connection;
+                llmq::chainLocksHandler = original_handler;
+            }
+        } restore{consensus, consensus.DIP0003Height, consensus.nNEVMStartBlock,
+                  fNEVMConnection, llmq::chainLocksHandler};
+        restore.subscriber->template_error = "mining-replay-template-probe";
+        RegisterSharedValidationInterface(restore.subscriber);
+        {
+            LOCK(::cs_main);
+            consensus.DIP0003Height = std::numeric_limits<int>::max();
+            consensus.nNEVMStartBlock = 1;
+            fNEVMConnection = true;
+            llmq::chainLocksHandler = handler.get();
+        }
+        const auto check_blocked = [&] {
+            BOOST_REQUIRE(!chainman.IsInitialBlockDownload());
+            BOOST_CHECK_EXCEPTION(
+                (node::BlockAssembler{chainman.ActiveChainstate(), nullptr}
+                     .CreateNewBlock(CScript{} << OP_TRUE)),
+                std::runtime_error, [](const std::runtime_error& error) {
+                    return std::string{error.what()} ==
+                        "NEVM block production is waiting for execution recovery";
+                });
+            BOOST_CHECK_EQUAL(restore.subscriber->template_requests, 0U);
+        };
+        check_blocked();
+        BOOST_REQUIRE(Access::ClearReplayMarker(*handler, *btcc_markers.active));
+        BOOST_REQUIRE(durable->LoadBTCCPresealState().IsEmpty());
+        BOOST_REQUIRE(durable->LoadPaymentAuditPresealState() == payment_markers);
+        check_blocked();
+        BOOST_REQUIRE(Access::ClearReplayMarker(*handler, *payment_markers.active));
+        BOOST_REQUIRE(durable->LoadPaymentAuditPresealState().IsEmpty());
+        BOOST_REQUIRE(!handler->HasNEVMReplayObligation());
+        // The callback sentinel stops before synthetic block bodies or coins
+        // could affect the result, and proves clearing releases the same gate.
+        BOOST_CHECK_EXCEPTION(
+            (node::BlockAssembler{chainman.ActiveChainstate(), nullptr}
+                 .CreateNewBlock(CScript{} << OP_TRUE)),
+            std::runtime_error, [](const std::runtime_error& error) {
+                return std::string{error.what()} ==
+                    "Could not fetch NEVM block mining-replay-template-probe";
+            });
+        BOOST_CHECK_EQUAL(restore.subscriber->template_requests, 1U);
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_mining_authenticated_markers_wait_for_execution_replay,
+                        PQAuthorizationBasePathSetup)
+{
+    CheckHistoricalPrefix(/*reauthorize_after_ready=*/false, /*mixed_markers=*/false,
+                          /*btcc_terminal_reorg=*/false, /*btcc_coalesce_markers=*/false,
+                          /*mining_guard=*/true);
 }
 
 BOOST_FIXTURE_TEST_CASE(historical_prefix_selector_uses_durably_known_receipt_base,

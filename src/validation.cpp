@@ -3206,6 +3206,32 @@ bool ChainstateManager::MaybeStartNEVMNetwork()
     return response;
 }
 
+bool ChainstateManager::IsNEVMBlockProductionAllowed() const
+{
+    AssertLockHeld(cs_main);
+    if (HasPendingNEVMStartupPair()) return false;
+    const CBlockIndex* tip{ActiveTip()};
+    if (!fNEVMConnection || tip == nullptr ||
+        int64_t{tip->nHeight} + 1 < GetConsensus().nNEVMStartBlock) {
+        return true;
+    }
+    // Replacing damaged payload bytes is not enough: the repaired active
+    // prefix must also finish replay before the engine can supply a template.
+    if (m_nevm_payload_repair) {
+        const CBlockIndex* repaired{
+            m_blockman.LookupBlockIndex(m_nevm_payload_repair->syscoin_hash)};
+        if (repaired && tip->GetAncestor(repaired->nHeight) == repaired) {
+            return false;
+        }
+    }
+    // IBD is a one-way latch. A later historical-proof gap can defer Geth
+    // again, and authenticating that gap does not itself complete replay.
+    // Follow the active branch so an unrelated prospective marker cannot
+    // stop its miner, and do not require a new finality certificate.
+    return llmq::chainLocksHandler == nullptr ||
+           !llmq::chainLocksHandler->ShouldDeferBTCCNEVM(*tip);
+}
+
 bool ChainstateManager::InitializeNEVMStartupPair(
     uint64_t geth_count, const uint256& syscoin_hash, std::string& error)
 {

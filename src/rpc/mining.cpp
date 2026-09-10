@@ -847,6 +847,14 @@ static RPCHelpMan getblocktemplate()
         throw JSONRPCError(RPC_INVALID_PARAMETER, "getblocktemplate must be called with the segwit rule set (call with {\"rules\": [\"segwit\"]})");
     }
 
+    // SYSCOIN: Recheck after long-poll released cs_main, including when the
+    // current tip still matches a cached template from before replay began.
+    if (!chainman.IsNEVMBlockProductionAllowed()) {
+        throw JSONRPCError(
+            RPC_CLIENT_IN_INITIAL_DOWNLOAD,
+            "NEVM block production is waiting for execution recovery");
+    }
+
     // Update block
     static CBlockIndex* pindexPrev;
     static int64_t time_start;

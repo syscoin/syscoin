@@ -1856,6 +1856,13 @@ active tip. Count alone is insufficient because an equal-height Geth state may
 be on another branch. Disconnect/reorg notifications observe the same applied
 boundary, and replay rechecks the exact branch around external notifications.
 
+NEVM-connected miners with an active-branch receipt replay or payload-repair
+obligation cannot create or receive cached block templates until execution
+replay completes, even if public IBD has already finished, the missing
+certificate has been authenticated, or repaired payload bytes are stored. The
+check follows the active branch; an unrelated prospective marker or absence of
+new finality certificates alone does not block templates.
+
 Deferred replay explicitly flushes Geth's buffered connects before selecting
 its starting pair and after each bounded batch. A flush uses `nevmcomms flush`
 and requires the distinct `flushed` response, followed by an exact applied-pair
