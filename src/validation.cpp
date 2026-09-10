@@ -10071,6 +10071,7 @@ bool Chainstate::ReplayBlocks()
             const bool replacement{index->nHeight > canonical_fork_height};
             if (!replacement && unresolved.empty()) break;
             CNEVMHeader header;
+            // SYSCOIN BEGIN: Authenticate canonical aliases after body pruning.
             // Only old canonical alias lookup can use pruning proofs. The
             // replacement suffix and every discarded/journal carrier above
             // still require their retained block bodies.
@@ -10080,6 +10081,7 @@ bool Chainstate::ReplayBlocks()
                 return error("ReplayBlocks(): Cannot authenticate canonical NEVM root carrier %s",
                              index->GetBlockHash().ToString());
             }
+            // SYSCOIN END: Authenticate canonical aliases after body pruning.
             if (replacement || affected.contains(header.nBlockHash)) {
                 canonical_roots.try_emplace(header.nBlockHash,
                     NEVMTxRoot{header.nTxRoot, header.nReceiptRoot});
@@ -10301,6 +10303,10 @@ bool ChainstateManager::LoadBlockIndex()
         bool ret{m_blockman.LoadBlockIndexDB(SnapshotBlockhash())};
         if (!ret) return false;
 
+        // SYSCOIN BEGIN: Move Bitcoin's startup cleanup after the NEVM evidence
+        // audit in CompleteChainstateInitialization(); retain the original call here.
+        // m_blockman.ScanAndUnlinkAlreadyPrunedFiles();
+        // SYSCOIN END: Move startup cleanup after the NEVM evidence audit.
         std::vector<CBlockIndex*> vSortedByHeight{m_blockman.GetAllBlockIndices()};
         std::sort(vSortedByHeight.begin(), vSortedByHeight.end(),
                   CBlockIndexHeightOnlyComparator());
