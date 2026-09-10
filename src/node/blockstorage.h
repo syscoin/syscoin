@@ -13,8 +13,10 @@
 #include <kernel/chainparams.h>
 #include <kernel/cs_main.h>
 #include <kernel/messagestartchars.h>
+#include <merkleblock.h>
 #include <node/pq_activation_handoff.h> // SYSCOIN: durable local PQ activation provenance.
 #include <span.h>
+#include <streams.h>
 #include <sync.h>
 #include <util/fs.h>
 #include <util/hasher.h>
@@ -43,6 +45,7 @@ class CDSNotificationInterface;
 class CDeterministicMNManager;
 class CActiveMasternodeManager;
 class CBlockHeader;
+class CNEVMHeader;
 class WalletInitInterface;
 struct CCheckpointData;
 struct FlatFilePos;
@@ -52,6 +55,24 @@ struct Params;
 namespace util {
 class SignalInterrupt;
 } // namespace util
+
+namespace node {
+/** Coinbase commitment evidence retained before deleting a NEVM block body. */
+struct NEVMPrunedRootProof {
+    static constexpr uint8_t VERSION{1};
+    uint8_t version{VERSION};
+    CTransactionRef coinbase;
+    CPartialMerkleTree merkle_tree;
+
+    SERIALIZE_METHODS(NEVMPrunedRootProof, obj)
+    {
+        READWRITE(obj.version);
+        // Only the transaction ID is committed by the indexed Merkle root.
+        OverrideStream<Stream> stripped{&s, SERIALIZE_TRANSACTION_NO_WITNESS};
+        ser_action.SerReadWriteMany(stripped, obj.coinbase, obj.merkle_tree);
+    }
+};
+} // namespace node
 
 namespace kernel {
 /** Access to the block database (blocks/index/) */
@@ -72,6 +93,10 @@ public:
         const node::PQActivationHandoffRecord& record);
     bool ReadPQActivationHandoff(node::PQActivationHandoffRecord& record);
     // SYSCOIN END: Persist the local BLS-to-PQ activation handoff atomically.
+    bool ReadNEVMPrunedRootProof(
+        const uint256& carrier, node::NEVMPrunedRootProof& proof);
+    bool WriteNEVMPrunedRootProofs(
+        const std::vector<std::pair<uint256, node::NEVMPrunedRootProof>>& proofs);
     bool LoadBlockIndexGuts(const Consensus::Params& consensusParams, std::function<CBlockIndex*(const uint256&)> insertBlockIndex, const util::SignalInterrupt& interrupt)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 };
@@ -316,7 +341,9 @@ public:
      * This could happen on some systems if the file was still being read while unlinked,
      * or if we crash before unlinking.
      */
-    void ScanAndUnlinkAlreadyPrunedFiles() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool ScanAndUnlinkAlreadyPrunedFiles() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** Fail closed when an earlier prune left no authenticated coinbase evidence. */
+    bool CheckNEVMPrunedBlockProofs() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     // SYSCOIN
     CBlockIndex* AddToBlockIndex(const CBlockHeader& block, CBlockIndex*& best_header, enum BlockStatus nStatus = BLOCK_VALID_TREE) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
@@ -420,6 +447,9 @@ public:
     bool ReadBlockFromDisk(CBlock& block, const FlatFilePos& pos) const;
     /** Auxiliary loading may be disabled when revalidating the committed disk representation. */
     bool ReadBlockFromDisk(CBlock& block, const CBlockIndex& index, bool load_auxiliary_data = true) const;
+    /** Authenticate a pruned carrier's NEVM commitment without its block body. */
+    bool ReadNEVMPrunedHeader(CNEVMHeader& header, const CBlockIndex& index) const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool ReadRawBlockFromDisk(std::vector<uint8_t>& block, const FlatFilePos& pos) const;
 
     bool UndoReadFromDisk(CBlockUndo& blockundo, const CBlockIndex& index) const;

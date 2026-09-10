@@ -10071,7 +10071,12 @@ bool Chainstate::ReplayBlocks()
             const bool replacement{index->nHeight > canonical_fork_height};
             if (!replacement && unresolved.empty()) break;
             CNEVMHeader header;
-            if (!read_header(*index, header)) {
+            // Only old canonical alias lookup can use pruning proofs. The
+            // replacement suffix and every discarded/journal carrier above
+            // still require their retained block bodies.
+            const bool pruned_alias{!replacement && m_blockman.IsBlockPruned(index)};
+            if (!(pruned_alias ? m_blockman.ReadNEVMPrunedHeader(header, *index)
+                               : read_header(*index, header))) {
                 return error("ReplayBlocks(): Cannot authenticate canonical NEVM root carrier %s",
                              index->GetBlockHash().ToString());
             }
@@ -10295,8 +10300,6 @@ bool ChainstateManager::LoadBlockIndex()
     if (!fReindex) {
         bool ret{m_blockman.LoadBlockIndexDB(SnapshotBlockhash())};
         if (!ret) return false;
-
-        m_blockman.ScanAndUnlinkAlreadyPrunedFiles();
 
         std::vector<CBlockIndex*> vSortedByHeight{m_blockman.GetAllBlockIndices()};
         std::sort(vSortedByHeight.begin(), vSortedByHeight.end(),

@@ -139,6 +139,31 @@ Deferred replay retains its original marker and does not call its finalizer
 after reconciliation, because the original target was not applied. Replacement
 selection runs after releasing the replay activation lock.
 
+## Root recovery with pruning
+
+Before deleting a block file, Core synchronously retains each indexed NEVM
+carrier's coinbase and its Merkle inclusion proof in the block index database.
+The proof binds the coinbase to the carrier's indexed Merkle root and transaction
+count. Recovery uses these proofs to find the latest surviving canonical owner
+of an affected NEVM root key, including aliases whose block bodies were pruned.
+It still requires block bodies for the recent discarded and replacement suffixes
+and for an unfinished disconnect journal's carrier. Missing or corrupt evidence
+stops recovery without completing its metadata.
+
+Pruning adds no proof generation to healthy block imports. It does add retained
+metadata outside the block-file prune target. Startup authenticates the retained
+proofs before completing deletion of previously pruned files. An orphan-only key
+can still require scanning canonical commitment metadata back to NEVM activation;
+this recovery work is proportional to history length, even for a shallow rollback.
+On an archive node, historical carriers without retained proofs are read from
+their block bodies.
+
+An older database that already pruned NEVM bodies without retaining these proofs
+cannot backfill them locally. Startup rejects missing or corrupt pruning evidence
+with instructions to use full `-reindex` and redownload the missing history.
+`-reindex-chainstate` cannot recover this data and is incompatible with prune mode.
+Unpruned databases need no backfill: proofs are created when their files are pruned.
+
 ## Upgrade order
 
 Upgrade Core before Geth, or stop both and upgrade them together. Updated Core

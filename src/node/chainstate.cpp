@@ -188,6 +188,14 @@ static ChainstateLoadResult CompleteChainstateInitialization(
         return {ChainstateLoadStatus::FAILURE, _("Error loading block database")};
     }
 
+    // SYSCOIN: Authenticate retained NEVM commitments before removing files
+    // whose pruning metadata survived a crash. Older pruned databases cannot
+    // backfill this evidence after their historical block bodies are gone.
+    if (!fReindex && !chainman.m_blockman.ScanAndUnlinkAlreadyPrunedFiles()) {
+        return {ChainstateLoadStatus::FAILURE_INCOMPATIBLE_DB,
+                _("Pruned NEVM commitment evidence is missing or corrupt. Restart with -reindex to rebuild the block database and redownload pruned history.")};
+    }
+
     if (!chainman.BlockIndex().empty() &&
             !chainman.m_blockman.LookupBlockIndex(chainman.GetConsensus().hashGenesisBlock)) {
         // If the loaded chain has a wrong genesis, bail out immediately
@@ -293,7 +301,10 @@ static ChainstateLoadResult CompleteChainstateInitialization(
 
         // ReplayBlocks is a no-op if we cleared the coinsviewdb with -reindex or -reindex-chainstate
         if (!chainstate->ReplayBlocks()) {
-            return {ChainstateLoadStatus::FAILURE, _("Unable to replay blocks. You will need to rebuild the database using -reindex-chainstate.")};
+            return {ChainstateLoadStatus::FAILURE,
+                    chainman.m_blockman.m_have_pruned
+                        ? _("Unable to replay blocks. Restart with -reindex to rebuild the block database and redownload pruned history.")
+                        : _("Unable to replay blocks. You will need to rebuild the database using -reindex-chainstate.")};
         }
 
         // The on-disk coinsdb is now in a good state, create the cache

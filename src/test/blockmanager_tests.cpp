@@ -20,6 +20,8 @@
 #include <test/util/logging.h>
 #include <test/util/setup_common.h>
 
+#include <stdexcept>
+
 using node::BLOCK_SERIALIZATION_HEADER_SIZE;
 using node::BlockManager;
 using node::KernelNotifications;
@@ -159,6 +161,15 @@ struct NEVMBlockStorageSetup : BasicTestingSetup {
             expected_undo_bytes << undo;
             BOOST_CHECK(actual_undo_bytes.str() == expected_undo_bytes.str());
         }
+    }
+
+    void RollBlockFile() EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+    {
+        blockman.GetBlockFileInfo(index->nFile)->nSize = 0x10000;
+        const auto pos{blockman.SaveBlockToDisk(Params().GenesisBlock(), index->nHeight + 1, nullptr)};
+        BOOST_REQUIRE(!pos.IsNull());
+        BOOST_REQUIRE_NE(pos.nFile, index->nFile);
+        BOOST_REQUIRE(blockman.FlushChainstateBlockFile(index->nHeight + 1));
     }
 };
 
@@ -369,6 +380,168 @@ BOOST_FIXTURE_TEST_CASE(nevm_payload_reindex_rejects_core_changes_and_wrong_cont
     BOOST_CHECK(!blockman.AdoptNEVMBlockDataForReindex(state, *index, candidate, candidate_pos));
     BOOST_CHECK_EQUAL(state.GetRejectReason(), "nevm-payload-reindex-adoption-unavailable");
     BOOST_CHECK(index->GetBlockPos() == original_pos);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_pruned_coinbase_proof_survives_unlink_and_reopen, NEVMBlockStorageSetup)
+{
+    LOCK(cs_main);
+    Store(/*with_undo=*/true);
+    RollBlockFile();
+    const auto carrier{index->GetBlockHash()};
+    const auto old_pos{index->GetBlockPos()};
+    const auto block_path{blockman.GetBlockPosFilename(old_pos)};
+    const auto undo_path{m_args.GetBlocksDirPath() / "rev00000.dat"};
+    const auto coinbase_hash{block.vtx.front()->GetHash()};
+    blockman.PruneOneBlockFile(old_pos.nFile);
+    blockman.m_have_pruned = true;
+    BOOST_REQUIRE(blockman.m_block_tree_db->WriteFlag("prunedblockfiles", true));
+    BOOST_REQUIRE(blockman.WriteBlockIndexDB());
+    BOOST_REQUIRE(blockman.CheckNEVMPrunedBlockProofs());
+    BOOST_REQUIRE(blockman.ScanAndUnlinkAlreadyPrunedFiles());
+    BOOST_CHECK(!fs::exists(block_path));
+    BOOST_CHECK(!fs::exists(undo_path));
+    // Discard the full body, including AuxPoW and opaque engine payload.
+    block.SetNull();
+    blockman.m_block_tree_db.reset();
+    blockman.m_block_index.clear();
+    blockman.m_prev_block_index.clear();
+    blockman.m_block_tree_db = std::make_unique<node::BlockTreeDB>(
+        DBParams{.path = db_path, .cache_bytes = 1 << 20});
+    BOOST_REQUIRE(blockman.LoadBlockIndexDB(std::nullopt));
+    index = blockman.LookupBlockIndex(carrier);
+    BOOST_REQUIRE(index != nullptr);
+    BOOST_CHECK(!(index->nStatus & (BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO)));
+    BOOST_REQUIRE(blockman.CheckNEVMPrunedBlockProofs());
+    node::NEVMPrunedRootProof proof;
+    BOOST_REQUIRE(blockman.m_block_tree_db->ReadNEVMPrunedRootProof(carrier, proof));
+    BOOST_CHECK_EQUAL(proof.version, node::NEVMPrunedRootProof::VERSION);
+    BOOST_REQUIRE(proof.coinbase != nullptr);
+    BOOST_CHECK(proof.coinbase->GetHash() == coinbase_hash);
+    BOOST_CHECK_EQUAL(proof.merkle_tree.GetNumTransactions(), index->nTx);
+    std::vector<uint256> matches;
+    std::vector<unsigned int> positions;
+    BOOST_CHECK(proof.merkle_tree.ExtractMatches(matches, positions) == index->hashMerkleRoot);
+    BOOST_REQUIRE_EQUAL(matches.size(), 1U);
+    BOOST_REQUIRE_EQUAL(positions.size(), 1U);
+    BOOST_CHECK(matches.front() == coinbase_hash);
+    BOOST_CHECK_EQUAL(positions.front(), 0U);
+    CBlock unavailable;
+    BOOST_CHECK(!blockman.ReadBlockFromDisk(unavailable, *index, /*load_auxiliary_data=*/false));
+    // An inactive NEVM-version side branch need not contain valid NEVM fields.
+    // Its inclusion proof is still required; it cannot supply recovery roots.
+    CNEVMHeader header;
+    BOOST_CHECK(!blockman.ReadNEVMPrunedHeader(header, *index));
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_pruned_proof_corruption_blocks_startup_cleanup, NEVMBlockStorageSetup)
+{
+    LOCK(cs_main);
+    Store(/*with_undo=*/true);
+    RollBlockFile();
+    const auto old_pos{index->GetBlockPos()};
+    const auto block_path{blockman.GetBlockPosFilename(old_pos)};
+    const auto undo_path{m_args.GetBlocksDirPath() / "rev00000.dat"};
+    const auto carrier{index->GetBlockHash()};
+    const auto proof_key{std::make_pair(uint8_t{'N'}, carrier)};
+    blockman.PruneOneBlockFile(old_pos.nFile);
+    blockman.m_have_pruned = true;
+    node::NEVMPrunedRootProof original;
+    BOOST_REQUIRE(blockman.m_block_tree_db->ReadNEVMPrunedRootProof(carrier, original));
+    const auto reject_cleanup = [&]() EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+        BOOST_CHECK(!blockman.CheckNEVMPrunedBlockProofs());
+        BOOST_CHECK(!blockman.ScanAndUnlinkAlreadyPrunedFiles());
+        BOOST_CHECK(fs::exists(block_path));
+        BOOST_CHECK(fs::exists(undo_path));
+    };
+    const auto restore = [&]() EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+        BOOST_REQUIRE(blockman.m_block_tree_db->WriteNEVMPrunedRootProofs({{carrier, original}}));
+    };
+
+    BOOST_REQUIRE(blockman.m_block_tree_db->Erase(proof_key, /*fSync=*/true));
+    reject_cleanup();
+    // A snapshot can give an undownloaded header a synthetic nTx. It has no
+    // pruned body to authenticate. An actually received, subsequently failed
+    // branch must still retain its proof for a possible reconsideration.
+    const auto stored_status{index->nStatus};
+    index->nStatus = BLOCK_VALID_TREE | BLOCK_ASSUMED_VALID;
+    BOOST_CHECK(blockman.CheckNEVMPrunedBlockProofs());
+    index->nStatus = stored_status | BLOCK_FAILED_VALID;
+    reject_cleanup();
+    index->nStatus = stored_status;
+    // A truncated record must fail through the real database deserializer.
+    BOOST_REQUIRE(blockman.m_block_tree_db->Write(proof_key, uint8_t{1}, /*fSync=*/true));
+    reject_cleanup();
+    BOOST_REQUIRE(blockman.m_block_tree_db->Write(
+        proof_key, std::make_pair(original, uint8_t{0}), /*fSync=*/true));
+    reject_cleanup();
+    for (const bool unsupported_version : {false, true}) {
+        auto invalid{original};
+        if (unsupported_version) {
+            ++invalid.version;
+        } else {
+            invalid.merkle_tree = CPartialMerkleTree{};
+        }
+        BOOST_REQUIRE(blockman.m_block_tree_db->Write(proof_key, invalid, /*fSync=*/true));
+        reject_cleanup();
+    }
+    auto wrong_coinbase{original};
+    CMutableTransaction altered{*original.coinbase};
+    ++altered.nLockTime;
+    wrong_coinbase.coinbase = MakeTransactionRef(altered);
+    BOOST_REQUIRE(blockman.m_block_tree_db->WriteNEVMPrunedRootProofs({{carrier, wrong_coinbase}}));
+    reject_cleanup();
+    restore();
+    ++index->nTx;
+    reject_cleanup();
+    --index->nTx;
+    const auto merkle_root{index->hashMerkleRoot};
+    index->hashMerkleRoot = IndexKey(55);
+    reject_cleanup();
+    index->hashMerkleRoot = merkle_root;
+    BOOST_REQUIRE(blockman.CheckNEVMPrunedBlockProofs());
+    BOOST_REQUIRE(blockman.ScanAndUnlinkAlreadyPrunedFiles());
+    BOOST_CHECK(!fs::exists(block_path));
+    BOOST_CHECK(!fs::exists(undo_path));
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_pruning_unreadable_or_corrupt_body_preserves_metadata, NEVMBlockStorageSetup)
+{
+    LOCK(cs_main);
+    Store(/*with_undo=*/true);
+    const auto old_pos{index->GetBlockPos()};
+    const auto block_path{blockman.GetBlockPosFilename(old_pos)};
+    const auto undo_path{m_args.GetBlocksDirPath() / "rev00000.dat"};
+    const auto metadata = [&]() EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+        CDataStream bytes{SER_DISK, CLIENT_VERSION};
+        bytes << *blockman.GetBlockFileInfo(old_pos.nFile);
+        for (const auto& [hash, entry] : blockman.m_block_index) bytes << CDiskBlockIndex{&entry};
+        return bytes.str();
+    };
+    const auto before{metadata()};
+    for (const bool unreadable : {false, true}) {
+        if (unreadable) {
+            fs::resize_file(block_path, old_pos.nPos + 1);
+        } else {
+            CBlock corrupt{block};
+            CMutableTransaction altered{*corrupt.vtx.front()};
+            ++altered.nLockTime;
+            corrupt.vtx.front() = MakeTransactionRef(altered);
+            auto file{blockman.OpenBlockFile(old_pos)};
+            BOOST_REQUIRE(!file.IsNull());
+            file << corrupt;
+        }
+        const auto size_before{fs::file_size(block_path)};
+        BOOST_CHECK_THROW(blockman.PruneOneBlockFile(old_pos.nFile), std::runtime_error);
+        BOOST_CHECK(metadata() == before);
+        BOOST_CHECK_EQUAL(fs::file_size(block_path), size_before);
+        BOOST_CHECK(fs::exists(undo_path));
+        node::NEVMPrunedRootProof proof;
+        BOOST_CHECK(!blockman.m_block_tree_db->ReadNEVMPrunedRootProof(index->GetBlockHash(), proof));
+        auto file{blockman.OpenBlockFile(old_pos)};
+        BOOST_REQUIRE(!file.IsNull());
+        file << block;
+    }
+    CheckStored(*index, block.vchNEVMBlockData);
 }
 
 // SYSCOIN BEGIN: Retrying inserts and deletions preserves data and batching.
