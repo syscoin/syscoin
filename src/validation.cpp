@@ -6187,6 +6187,46 @@ void Chainstate::UpdateTip(const CBlockIndex* pindexNew)
     UpdateTipLog(m_chainman, coins_tip, pindexNew, params, __func__, "", warning_messages.original);
 }
 
+bool Chainstate::PrepareNEVMPayloadDisconnectPrefix(
+    BlockValidationState& state,
+    std::optional<NEVMDisconnectPrefix>& prefix)
+{
+    AssertLockHeld(cs_main);
+    prefix.reset();
+    const CBlockIndex* tip{m_chain.Tip()};
+    const int64_t start{m_chainman.GetConsensus().nNEVMStartBlock};
+    if (this != &m_chainman.ActiveChainstate() || !fNEVMConnection ||
+        !m_chainman.HasPendingNEVMPayloadRepair() || tip == nullptr ||
+        tip->nHeight < start) return true;
+
+    // A payload rejection can leave an acknowledged Core suffix above Geth's
+    // applied head. The marker only triggers this fresh endpoint check; it
+    // does not authorize skipping any external disconnect on its own.
+    uint64_t count{0};
+    uint256 applied_hash;
+    std::string error;
+    if (!FlushAndGetNEVMBlockInfo(count, applied_hash, error)) {
+        return state.Error("nevm-payload-reorg-status:" + error);
+    }
+    // Bound the count before conversion/addition, rejecting both overflow
+    // and an engine endpoint above Core's active tip.
+    if (start < 0 ||
+        count > static_cast<uint64_t>(tip->nHeight - start + 1) ||
+        (count == 0 && !applied_hash.IsNull())) {
+        return state.Error("nevm-payload-reorg-applied-prefix-mismatch");
+    }
+    const int32_t height{static_cast<int32_t>(start + static_cast<int64_t>(count) - 1)};
+    const CBlockIndex* applied{height < 0 ? nullptr : m_chain[height]};
+    if ((height >= 0 && applied == nullptr) ||
+        (count != 0 && (applied == nullptr || applied_hash.IsNull() ||
+                       applied->GetBlockHash() != applied_hash))) {
+        return state.Error("nevm-payload-reorg-applied-branch-mismatch");
+    }
+    prefix.emplace(NEVMDisconnectPrefix{
+        height, applied == nullptr ? uint256{} : applied->GetBlockHash()});
+    return true;
+}
+
 /** Disconnect m_chain's tip.
   * After calling, the mempool will be in an inconsistent state, with
   * transactions from disconnected blocks being added to disconnectpool.  You
@@ -7323,11 +7363,21 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
         return state.Error("nevm-payload-repair-pending");
     }
 
+    std::optional<NEVMDisconnectPrefix> nevm_prefix;
+    if (pindexOldTip != pindexFork &&
+        !PrepareNEVMPayloadDisconnectPrefix(state, nevm_prefix)) {
+        return false;
+    }
+
     // Disconnect active blocks which are no longer in the best chain.
     bool fBlocksDisconnected = false;
     DisconnectedBlockTransactions disconnectpool{MAX_DISCONNECTED_TX_POOL_SIZE * 1000};
     while (m_chain.Tip() && m_chain.Tip() != pindexFork) {
-        if (!DisconnectTip(state, &disconnectpool)) {
+        // At or below the checked endpoint, Geth did apply the block and must
+        // receive its ordinary exact-pair disconnect.
+        const auto* prefix{nevm_prefix && nevm_prefix->ContainsUnapplied(*m_chain.Tip())
+            ? &*nevm_prefix : nullptr};
+        if (!DisconnectTip(state, &disconnectpool, true, true, prefix)) {
             // This is likely a fatal error, but keep the mempool consistent,
             // just in case. Only remove from the mempool in this case.
             MaybeUpdateMempoolForReorg(disconnectpool, false);
@@ -7907,10 +7957,19 @@ bool Chainstate::EnforceBlock(
         }
         pindex_walk = pindex_walk->pprev;
     }
+    // Establish any unapplied suffix before conflict publication or undo.
+    // Failure here is retryable; no partial finality unwind has begun.
+    std::optional<NEVMDisconnectPrefix> nevm_prefix;
+    if (std::any_of(conflict_roots.begin(), conflict_roots.end(),
+                    [this](const CBlockIndex* root) { return m_chain.Contains(root); }) &&
+        !PrepareNEVMPayloadDisconnectPrefix(state, nevm_prefix)) {
+        return false;
+    }
     if (!conflict_roots.empty() &&
         !MarkConflictingBlocks(
             state, conflict_roots,
-            ChainLockConflictMarkingMode::DISCONNECT_ACTIVE)) {
+            ChainLockConflictMarkingMode::DISCONNECT_ACTIVE,
+            nevm_prefix ? &*nevm_prefix : nullptr)) {
         LogPrintf("Chainstate::%s -- batched conflict marking failed: %s\n",
                   __func__, state.ToString());
         // A partially disconnected finality interval is unsafe to continue.
@@ -8077,6 +8136,11 @@ bool Chainstate::InvalidateBlockLocked(BlockValidationState& state,
     }
     // SYSCOIN END: Protect durable finality during administrative invalidation.
 
+    if (invalidates_active_chain && rejection == nullptr && bReverify) {
+        LOCK(cs_main);
+        if (!PrepareNEVMPayloadDisconnectPrefix(state, nevm_prefix)) return false;
+    }
+
     // We'll be acquiring and releasing cs_main below, to allow the validation
     // callbacks to run. However, we should keep the block index in a
     // consistent state as we disconnect blocks -- in particular we need to
@@ -8123,7 +8187,8 @@ bool Chainstate::InvalidateBlockLocked(BlockValidationState& state,
         // unconditionally valid already, so force disconnect away from it.
         DisconnectedBlockTransactions disconnectpool{MAX_DISCONNECTED_TX_POOL_SIZE * 1000};
         bool ret = DisconnectTip(state, &disconnectpool, bReverify, bUpdateSpecialTxState,
-                                 nevm_prefix ? &*nevm_prefix : nullptr);
+                                 nevm_prefix && nevm_prefix->ContainsUnapplied(*invalid_walk_tip)
+                                     ? &*nevm_prefix : nullptr);
         // DisconnectTip will add transactions to disconnectpool.
         // Adjust the mempool to be consistent with the new tip, adding
         // transactions back to the mempool if disconnecting was successful,
@@ -8222,9 +8287,13 @@ bool Chainstate::InvalidateBlockLocked(BlockValidationState& state,
 bool Chainstate::MarkConflictingBlock(BlockValidationState& state,
                                       CBlockIndex* pindex)
 {
+    std::optional<NEVMDisconnectPrefix> nevm_prefix;
+    if (pindex != nullptr && m_chain.Contains(pindex) &&
+        !PrepareNEVMPayloadDisconnectPrefix(state, nevm_prefix)) return false;
     std::array<CBlockIndex*, 1> roots{pindex};
     return MarkConflictingBlocks(
-        state, roots, ChainLockConflictMarkingMode::DISCONNECT_ACTIVE);
+        state, roots, ChainLockConflictMarkingMode::DISCONNECT_ACTIVE,
+        nevm_prefix ? &*nevm_prefix : nullptr);
 }
 
 bool Chainstate::MarkConflictingBlocksInactive(
@@ -8232,7 +8301,7 @@ bool Chainstate::MarkConflictingBlocksInactive(
     std::span<CBlockIndex* const> roots)
 {
     return MarkConflictingBlocks(
-        state, roots, ChainLockConflictMarkingMode::REQUIRE_INACTIVE);
+        state, roots, ChainLockConflictMarkingMode::REQUIRE_INACTIVE, nullptr);
 }
 
 ChainLockConflictMarkingStatsForTesting
@@ -8251,7 +8320,8 @@ void Chainstate::ResetChainLockConflictMarkingStatsForTesting()
 bool Chainstate::MarkConflictingBlocks(
     BlockValidationState& state,
     std::span<CBlockIndex* const> roots,
-    ChainLockConflictMarkingMode mode)
+    ChainLockConflictMarkingMode mode,
+    const NEVMDisconnectPrefix* nevm_prefix)
 {
     AssertLockHeld(cs_main);
     const bool disconnect_active{
@@ -8308,7 +8378,10 @@ bool Chainstate::MarkConflictingBlocks(
             const CBlockIndex* old_tip{m_chain.Tip()};
             active_chain_changed = true;
             ++m_chainlock_conflict_marking_stats.disconnect_tip_calls;
-            const bool disconnected_tip{DisconnectTip(state, &disconnectpool)};
+            const bool disconnected_tip{DisconnectTip(
+                state, &disconnectpool, true, true,
+                nevm_prefix && nevm_prefix->ContainsUnapplied(*old_tip)
+                    ? nevm_prefix : nullptr)};
             MaybeUpdateMempoolForReorg(
                 disconnectpool,
                 /*fAddToMempool=*/(++disconnected <= 10) && disconnected_tip);

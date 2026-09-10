@@ -691,6 +691,7 @@ struct LiveNEVMRecoverySetup : StartupNEVMRecoverySetup {
     CBlockIndex* original_tip{nullptr};
     uint256 durable_tip;
     std::size_t candidate_attempts{0};
+    std::function<void()> before_prefix_mine;
 
     explicit LiveNEVMRecoverySetup(bool managed_exit = false)
         : StartupNEVMRecoverySetup{/*coins_db_in_memory=*/true, managed_exit} {}
@@ -717,6 +718,7 @@ struct LiveNEVMRecoverySetup : StartupNEVMRecoverySetup {
         nevm->buffer_connects = true;
         for (std::size_t i{0}; i < acknowledged; ++i) {
             prepare_governance();
+            if (before_prefix_mine) before_prefix_mine();
             prefix.push_back(MineNEVMBlock());
         }
         BOOST_REQUIRE_EQUAL(nevm->applied_count, 0U);
@@ -1152,6 +1154,243 @@ struct NEVMPayloadRepairSetup : RejectedNEVMPrefixSetup {
         CheckLocalState(/*connected=*/true);
         BOOST_CHECK_EQUAL(nevm->applied_count, prefix.size() + 1);
         BOOST_CHECK(nevm->applied_hash == candidate->GetHash());
+    }
+};
+
+struct NEVMPayloadForkSetup : NEVMPayloadRepairSetup {
+    const bool previous_shutdown_on_fatal_error{
+        m_node.notifications->m_shutdown_on_fatal_error};
+    std::vector<std::shared_ptr<const CBlock>> fork;
+    CBlockIndex* fork_tip{nullptr};
+
+    NEVMPayloadForkSetup()
+    {
+        // A regression must report a failed check without stopping the runner.
+        m_node.notifications->m_shutdown_on_fatal_error = false;
+    }
+
+    ~NEVMPayloadForkSetup()
+    {
+        m_node.notifications->m_shutdown_on_fatal_error = previous_shutdown_on_fatal_error;
+        m_node.exit_status.store(EXIT_SUCCESS);
+    }
+
+    void AppendForkTemplate()
+    {
+        auto& chainman{*m_node.chainman};
+        CBlock block{*MakeNEVMBlock()};
+        BOOST_REQUIRE_EQUAL(block.vtx.size(), 1U);
+        BOOST_REQUIRE_LT(WITH_LOCK(::cs_main, return chainman.ActiveHeight()) + 1,
+                         chainman.GetConsensus().DIP0003Height);
+        // These unused, height-matched templates contain only a coinbase and
+        // unique opaque mock NEVM data. Reparenting preserves their local
+        // validity, as in the competing startup-pair fixtures.
+        if (!fork.empty()) block.hashPrevBlock = fork.back()->GetHash();
+        block.fChecked = false;
+        block.nNonce = 0;
+        while (!CheckProofOfWork(block.GetHash(), block.nBits, chainman.GetConsensus())) {
+            ++block.nNonce;
+        }
+        fork.push_back(std::make_shared<const CBlock>(std::move(block)));
+    }
+
+    void PrepareFork(bool below_applied)
+    {
+        before_prefix_mine = [this, below_applied] {
+            if (below_applied || !prefix.empty()) AppendForkTemplate();
+        };
+        PreparePayloadFixture();
+        before_prefix_mine = {};
+        AppendForkTemplate();
+        DeliverPayloadVerdict();
+        nevm->buffer_connects = false;
+        auto& chainman{*m_node.chainman};
+        LOCK(::cs_main);
+        for (const auto& block : fork) {
+            BlockValidationState state;
+            BOOST_REQUIRE_MESSAGE(chainman.AcceptBlock(
+                block, state, &fork_tip, true, nullptr, nullptr, true), state.ToString());
+            BOOST_REQUIRE(fork_tip != nullptr);
+        }
+        BOOST_REQUIRE(fork_tip->nChainWork > chainman.ActiveTip()->nChainWork);
+        BOOST_REQUIRE_EQUAL(chainman.ActiveChain().FindFork(fork_tip)->nHeight,
+                            below_applied ? 100 : 101);
+        BOOST_REQUIRE_EQUAL(nevm->applied_count, 1U);
+        BOOST_REQUIRE(nevm->applied_hash == prefix.front()->GetHash());
+        BOOST_REQUIRE(nevm->strict_disconnect_order);
+    }
+
+    void CheckForkSelected(bool below_applied)
+    {
+        auto& chainman{*m_node.chainman};
+        auto& chainstate{chainman.ActiveChainstate()};
+        const auto connects{nevm->connected_blocks.size()};
+        const auto queries{nevm->block_info_queries};
+        const auto flushes{nevm->flush_requests};
+        BlockValidationState state;
+        BOOST_REQUIRE_MESSAGE(chainstate.PreciousBlock(state, fork_tip), state.ToString());
+        BOOST_CHECK(state.IsValid());
+        BOOST_CHECK_EQUAL(m_node.exit_status.load(), EXIT_SUCCESS);
+        BOOST_CHECK_EQUAL(nevm->block_info_queries, queries + 1);
+        BOOST_CHECK_EQUAL(nevm->flush_requests, flushes + 1);
+        BOOST_CHECK(nevm->disconnected_blocks == (below_applied
+            ? std::vector<uint256>{prefix.front()->GetHash()} : std::vector<uint256>{}));
+        std::vector<uint256> expected_connects;
+        for (const auto& block : fork) expected_connects.push_back(block->GetHash());
+        BOOST_CHECK(std::vector<uint256>(nevm->connected_blocks.begin() + connects,
+                                        nevm->connected_blocks.end()) == expected_connects);
+        BOOST_CHECK_EQUAL(nevm->applied_count, 4U);
+        BOOST_CHECK_EQUAL(nevm->applied_pairs.size(), 4U);
+        BOOST_CHECK(nevm->applied_hash == fork.back()->GetHash());
+        std::string error;
+        BOOST_REQUIRE_MESSAGE(chainman.MaybeRecoverNEVMPayload(error), error);
+        BOOST_CHECK(!chainman.HasPendingNEVMPayloadRepair());
+        BOOST_CHECK_EQUAL(nevm->payload_check_requests, 0U);
+        CheckStoredPayload(prefix[1]->vchNEVMBlockData, /*positions_unchanged=*/true);
+        LOCK(::cs_main);
+        BlockValidationState flush_state;
+        BOOST_REQUIRE_MESSAGE(chainstate.FlushStateToDisk(flush_state, FlushStateMode::ALWAYS),
+                              flush_state.ToString());
+        BOOST_CHECK(chainman.ActiveTip() == fork_tip);
+        BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == fork.back()->GetHash());
+        BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == fork.back()->GetHash());
+        BOOST_CHECK(chainstate.CoinsDB().GetHeadBlocks().empty());
+        BOOST_CHECK(pnevmtxrootsdb->GetPublishedTip() == fork.back()->GetHash());
+        BOOST_CHECK(!pnevmtxrootsdb->GetPendingDisconnect());
+        BOOST_CHECK(!chainman.m_blockman.m_block_tree_db->Exists(NEVM_PAYLOAD_TEST_MARKER));
+        const auto check_block = [&](const CBlock& block, bool active)
+            EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+            const auto* index{chainman.m_blockman.LookupBlockIndex(block.GetHash())};
+            BOOST_REQUIRE(index != nullptr);
+            BOOST_CHECK_EQUAL(index->nStatus & BLOCK_FAILED_MASK, 0U);
+            const COutPoint coin{block.vtx.front()->GetHash(), 0};
+            BOOST_CHECK_EQUAL(chainstate.CoinsTip().HaveCoin(coin), active);
+            BOOST_CHECK_EQUAL(chainstate.CoinsDB().HaveCoin(coin), active);
+            CNEVMHeader header;
+            BlockValidationState header_state;
+            BOOST_REQUIRE(GetNEVMData(header_state, block, header));
+            NEVMTxRoot roots;
+            BOOST_CHECK_EQUAL(pnevmtxrootsdb->ReadTxRoots(header.nBlockHash, roots), active);
+            BOOST_CHECK_EQUAL(pnevmtxrootsdb->Read(header.nBlockHash, roots), active);
+            if (active) {
+                BOOST_CHECK(roots.nTxRoot == header.nTxRoot);
+                BOOST_CHECK(roots.nReceiptRoot == header.nReceiptRoot);
+            }
+        };
+        for (std::size_t i{0}; i < prefix.size(); ++i) {
+            check_block(*prefix[i], !below_applied && i == 0);
+        }
+        for (const auto& block : fork) check_block(*block, true);
+        check_block(*candidate, false);
+        BOOST_CHECK_EQUAL(descendant_index->nStatus & BLOCK_FAILED_MASK, 0U);
+        BOOST_CHECK(fNEVMConnection);
+    }
+
+    void CheckExplicitUnwind(bool conflict)
+    {
+        auto& chainman{*m_node.chainman};
+        auto& chainstate{chainman.ActiveChainstate()};
+        const auto connects{nevm->connected_blocks};
+        const auto queries{nevm->block_info_queries};
+        const auto flushes{nevm->flush_requests};
+        CBlockIndex* applied{WITH_LOCK(::cs_main,
+            return chainman.m_blockman.LookupBlockIndex(prefix.front()->GetHash()))};
+        BOOST_REQUIRE(applied != nullptr);
+        BlockValidationState state;
+        if (conflict) {
+            LOCK(::cs_main);
+            BOOST_REQUIRE_MESSAGE(chainstate.MarkConflictingBlock(state, applied), state.ToString());
+        } else {
+            BOOST_REQUIRE_MESSAGE(chainstate.InvalidateBlock(state, applied, /*bReverify=*/true),
+                                  state.ToString());
+        }
+        BOOST_CHECK(state.IsValid());
+        BOOST_CHECK_EQUAL(m_node.exit_status.load(), EXIT_SUCCESS);
+        BOOST_CHECK_EQUAL(nevm->block_info_queries, queries + 1);
+        BOOST_CHECK_EQUAL(nevm->flush_requests, flushes + 1);
+        // Both public operations cross P after locally removing unapplied B/A.
+        // The actual applied P must still receive its ordinary engine undo.
+        BOOST_CHECK(nevm->disconnected_blocks == std::vector<uint256>{prefix.front()->GetHash()});
+        BOOST_CHECK(nevm->connected_blocks == connects);
+        BOOST_CHECK_EQUAL(nevm->applied_count, 0U);
+        BOOST_CHECK(nevm->applied_hash.IsNull());
+        BOOST_CHECK(nevm->applied_pairs.empty());
+        BOOST_CHECK(nevm->buffered_pairs.empty());
+        BOOST_CHECK_EQUAL(nevm->payload_check_requests, 0U);
+        LOCK(::cs_main);
+        BlockValidationState flush_state;
+        BOOST_REQUIRE_MESSAGE(chainstate.FlushStateToDisk(flush_state, FlushStateMode::ALWAYS),
+                              flush_state.ToString());
+        const auto parent{prefix.front()->hashPrevBlock};
+        BOOST_CHECK(chainman.ActiveTip()->GetBlockHash() == parent);
+        BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == parent);
+        BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == parent);
+        BOOST_CHECK(chainstate.CoinsDB().GetHeadBlocks().empty());
+        BOOST_CHECK(pnevmtxrootsdb->GetPublishedTip() == parent);
+        BOOST_CHECK(!pnevmtxrootsdb->GetPendingDisconnect());
+        for (const auto& block : prefix) {
+            const auto* index{chainman.m_blockman.LookupBlockIndex(block->GetHash())};
+            BOOST_REQUIRE(index != nullptr);
+            if (conflict) {
+                BOOST_CHECK(index->nStatus & BLOCK_CONFLICT_CHAINLOCK);
+                BOOST_CHECK_EQUAL(index->nStatus & BLOCK_FAILED_MASK, 0U);
+            } else {
+                BOOST_CHECK(index->nStatus & BLOCK_FAILED_MASK);
+            }
+            CDiskBlockIndex disk_index;
+            BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->Read(
+                std::make_pair(uint8_t{'b'}, block->GetHash()), disk_index));
+            BOOST_CHECK_EQUAL(disk_index.nStatus, index->nStatus);
+            const COutPoint coin{block->vtx.front()->GetHash(), 0};
+            BOOST_CHECK(!chainstate.CoinsTip().HaveCoin(coin));
+            BOOST_CHECK(!chainstate.CoinsDB().HaveCoin(coin));
+            NEVMTxRoot roots;
+            const auto nevm_hash{VerdictFor(*block).nevm_hash};
+            BOOST_CHECK(!pnevmtxrootsdb->ReadTxRoots(nevm_hash, roots));
+            BOOST_CHECK(!pnevmtxrootsdb->Read(nevm_hash, roots));
+        }
+        BOOST_CHECK_EQUAL(fork_tip->nStatus & (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK), 0U);
+        BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(fork_tip), 1U);
+        BOOST_CHECK(!(candidate_index->nStatus & BLOCK_FAILED_VALID));
+        BOOST_CHECK(!(descendant_index->nStatus & BLOCK_FAILED_VALID));
+        BOOST_CHECK(fNEVMConnection);
+    }
+
+    void CheckRefusedFork(const std::string& reason, bool queried = true)
+    {
+        const auto request{Request()};
+        const auto connects{nevm->connected_blocks};
+        const auto queries{nevm->block_info_queries};
+        const auto flushes{nevm->flush_requests};
+        BlockValidationState state;
+        BOOST_CHECK(!m_node.chainman->ActiveChainstate().PreciousBlock(state, fork_tip));
+        BOOST_CHECK(state.IsError());
+        BOOST_CHECK_EQUAL(state.GetRejectReason(), reason);
+        BOOST_CHECK_EQUAL(m_node.exit_status.load(), EXIT_SUCCESS);
+        BOOST_CHECK_EQUAL(nevm->flush_requests, flushes + 1);
+        BOOST_CHECK_EQUAL(nevm->block_info_queries, queries + (queried ? 1U : 0U));
+        BOOST_CHECK(nevm->connected_blocks == connects);
+        BOOST_CHECK_EQUAL(nevm->applied_count, 1U);
+        BOOST_REQUIRE_EQUAL(nevm->applied_pairs.size(), 1U);
+        BOOST_CHECK(nevm->applied_hash == prefix.front()->GetHash());
+        BOOST_CHECK(Request() == request);
+        CheckLocalState(/*connected=*/false);
+        CheckStoredPayload(prefix[1]->vchNEVMBlockData, /*positions_unchanged=*/true);
+        LOCK(::cs_main);
+        for (const auto& block : prefix) {
+            NEVMTxRoot roots;
+            BOOST_CHECK(pnevmtxrootsdb->Read(VerdictFor(*block).nevm_hash, roots));
+        }
+        for (const auto& block : fork) {
+            const auto* index{m_node.chainman->m_blockman.LookupBlockIndex(block->GetHash())};
+            BOOST_REQUIRE(index != nullptr);
+            BOOST_CHECK_EQUAL(index->nStatus & BLOCK_FAILED_MASK, 0U);
+            BOOST_CHECK(!m_node.chainman->ActiveChainstate().CoinsTip().HaveCoin(
+                COutPoint{block->vtx.front()->GetHash(), 0}));
+        }
+        BOOST_CHECK(pnevmtxrootsdb->GetPublishedTip() == original_tip->GetBlockHash());
+        BOOST_CHECK(!pnevmtxrootsdb->GetPendingDisconnect());
+        BOOST_CHECK_EQUAL(nevm->payload_check_requests, 0U);
     }
 };
 
@@ -2809,6 +3048,77 @@ BOOST_FIXTURE_TEST_CASE(nevm_payload_repair_startup_discards_failed_marker,
     BOOST_CHECK(!chainman.HasPendingNEVMPayloadRepair());
     BOOST_CHECK(nevm->command_trace == commands);
     BOOST_CHECK_EQUAL(nevm->payload_check_requests, 0U);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_payload_repair_reorg_skips_unapplied_active_suffix,
+                        NEVMPayloadForkSetup)
+{
+    PrepareFork(/*below_applied=*/false);
+    CheckForkSelected(/*below_applied=*/false);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_payload_repair_reorg_disconnects_applied_prefix,
+                        NEVMPayloadForkSetup)
+{
+    PrepareFork(/*below_applied=*/true);
+    CheckForkSelected(/*below_applied=*/true);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_payload_repair_reorg_preserves_state_when_status_unavailable,
+                        NEVMPayloadForkSetup)
+{
+    PrepareFork(/*below_applied=*/false);
+    nevm->flush_available = false;
+    CheckRefusedFork("nevm-payload-reorg-status:nevm-flush-unavailable", /*queried=*/false);
+    nevm->flush_available = true;
+    nevm->block_info_error = "fixture-status-unavailable";
+    CheckRefusedFork("nevm-payload-reorg-status:fixture-status-unavailable");
+    nevm->block_info_error.clear();
+    CheckForkSelected(/*below_applied=*/false);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_payload_repair_invalidation_unwinds_exact_applied_prefix,
+                        NEVMPayloadForkSetup)
+{
+    PrepareFork(/*below_applied=*/true);
+    CheckExplicitUnwind(/*conflict=*/false);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_payload_repair_conflict_unwinds_exact_applied_prefix,
+                        NEVMPayloadForkSetup)
+{
+    PrepareFork(/*below_applied=*/true);
+    CheckExplicitUnwind(/*conflict=*/true);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_payload_repair_reorg_requires_exact_applied_endpoint,
+                        NEVMPayloadForkSetup)
+{
+    PrepareFork(/*below_applied=*/false);
+    struct RefusedEndpoint {
+        const char* name;
+        StartupNEVMSubscriber::AppliedPair applied;
+        const char* error;
+    };
+    const std::array<RefusedEndpoint, 5> endpoints{{
+        {"zero count with nonzero hash", {0, prefix.front()->GetHash()},
+            "nevm-payload-reorg-applied-prefix-mismatch"},
+        {"endpoint on competing branch", {2, fork.front()->GetHash()},
+            "nevm-payload-reorg-applied-branch-mismatch"},
+        {"endpoint hash at wrong height", {2, prefix.front()->GetHash()},
+            "nevm-payload-reorg-applied-branch-mismatch"},
+        {"endpoint ahead of active tip", {4, candidate->GetHash()},
+            "nevm-payload-reorg-applied-prefix-mismatch"},
+        {"overflowing applied count", {std::numeric_limits<uint64_t>::max(), prefix.front()->GetHash()},
+            "nevm-payload-reorg-applied-prefix-mismatch"}}};
+    for (const auto& endpoint : endpoints) {
+        BOOST_TEST_CONTEXT(endpoint.name) {
+            nevm->reported_pair_override = endpoint.applied;
+            CheckRefusedFork(endpoint.error);
+        }
+    }
+    nevm->reported_pair_override.reset();
+    CheckForkSelected(/*below_applied=*/false);
 }
 
 BOOST_FIXTURE_TEST_CASE(nevm_payload_repair_startup_replays_published_replacement,

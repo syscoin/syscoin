@@ -1036,7 +1036,8 @@ private:
     bool MarkConflictingBlocks(
         BlockValidationState& state,
         std::span<CBlockIndex* const> roots,
-        ChainLockConflictMarkingMode mode)
+        ChainLockConflictMarkingMode mode,
+        const NEVMDisconnectPrefix* nevm_prefix)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     ChainLockConflictMarkingStatsForTesting
         m_chainlock_conflict_marking_stats GUARDED_BY(cs_main);
@@ -1052,6 +1053,11 @@ private:
         EXCLUSIVE_LOCKS_REQUIRED(cs_btcheader);
     // SYSCOIN: Report certificate-deferred work separately from invalid blocks.
     bool ActivateBestChainStep(BlockValidationState& state, CBlockIndex* pindexMostWork, const std::shared_ptr<const CBlock>& pblock, bool& fInvalidFound, bool& fReceiptCandidateDeferred, ConnectTrace& connectTrace, std::optional<NEVMBlockReject>& rejection) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs);
+    // Call after transition authorization, before undoing an active block.
+    bool PrepareNEVMPayloadDisconnectPrefix(
+        BlockValidationState& state,
+        std::optional<NEVMDisconnectPrefix>& prefix)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     bool ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew, const std::shared_ptr<const CBlock>& pblock, ConnectTrace& connectTrace, DisconnectedBlockTransactions& disconnectpool, std::optional<NEVMBlockReject>& rejection) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs);
     bool ReconcileRejectedNEVMBlock(BlockValidationState& state,
                                     const NEVMBlockReject& rejection)

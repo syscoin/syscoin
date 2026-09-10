@@ -77,8 +77,18 @@ activation of the same branch before block reads or engine calls. Persistence
 retries and peer requests are rate limited; an authenticated rejection can
 still incur a recovery flush and replacement validation. Undrained retired
 requests close their connection so a fresh connection can retry without
-confusing late responses. A valid branch that
-supersedes the rejected branch clears its obsolete repair obligation.
+confusing late responses. A valid branch that supersedes the rejected branch
+clears its obsolete repair obligation.
+
+When best-chain selection, administrative invalidation or ChainLock enforcement
+removes an active suffix during pending payload repair, Core first flushes
+Geth and binds its fresh applied endpoint to the active Core ancestry.
+Only blocks above that endpoint omit external
+disconnects; blocks Geth applied still receive ordinary exact-pair disconnects.
+An unavailable, inconsistent or different-branch endpoint stops the switch
+before undo. This reuses normal local rollback, including durable root and
+coins updates, and preserves finality and activation-handoff checks. The
+repair marker itself never authorizes skipping a disconnect.
 
 ## Live recovery
 
