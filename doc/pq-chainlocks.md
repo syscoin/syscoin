@@ -2032,17 +2032,20 @@ and is never converted into peer misbehavior or permanent block invalidity.
 If an exact requested historical audit is present but the ordinary seal needed
 to derive its reporter rosters is no longer in the recent winner set, that
 pending carrier owns one `PAYMENT_AUDIT_SEAL` request lane. The immutable audit
-statement supplies the exact seal statement and logical ID; any objective
-authorization base it requires must already be locally verified.
-`GETCLSIG(id)` may return
-only that exact certificate. The receiver rebuilds the current branch-bound
-context, verifies all 801 signatures, rechecks the carrier/source token at the
-fsync boundary, and stores the seal as authorization only. If recovery rosters
-were used, the same atomic record retains their exact authenticated source
-universe. A replaced carrier, authorization base, branch, or token cannot clear
-or reuse the lane. If another path installed the byte-identical seal while the
-audit response was being checked, staging succeeds without a peer-failure
-cooldown and the audit is retried immediately from the local row.
+statement supplies the exact seal statement and logical ID. If its ordinary
+authorization base is missing, the receiver follows the branch-selected base
+identities through strictly decreasing heights in that same lane. Each
+`GETCLSIG(id)` requests one exact certificate; received bytes must rebuild the
+ordinary branch-bound authorization and pass all 801 signatures before they
+become a verified authorization-only record. As dependencies become available,
+the receiver retries the seal and then the exact audit witness. No peer may
+substitute an unrelated old certificate or use the request as finality.
+Publication rechecks the carrier, branch, source token, and exact request owner
+at the fsync boundary. If recovery rosters were used, the atomic record also
+retains their exact authenticated source universe. A replaced owner or stale
+response cannot clear the current lane. If another path installed the
+byte-identical seal during verification, the audit can retry from the local
+record without a peer-failure cooldown.
 
 Every audit-window owner and the authorization base named by its seal remain
 servable until that window's exclusive carrier end. Expiry is clocked only by
@@ -2064,13 +2067,63 @@ terminal carrier and receipt, and a monotonic revision. Active and prospective
 branches have separate markers, and the block/DMN/PQ inputs needed to replay
 either prefix remain protected from pruning.
 
-The prefix becomes authenticated only when a descendant CLSIG is verified with
-all 801 signatures under its ordinary deterministic rosters, lies on the
-accepted active branch at or above the terminal carrier, descends through that
-carrier and the durable predecessor, and signs the exactly recomputed cumulative
-receipt state and probation root. The marker supplies replay bounds, never
-quorum authority. After that covering CLSIG and the reconstructed state are
-durable, the node first forces the active chainstate to disk, ordering the DMN,
+Payment-audit NEVM replay can finish without a newer covering CLSIG when the
+required ordinary proofs are available. The node first requests the exact
+terminal audit. A fully verified ordinary seal, or an ordinary archive audit
+whose admission verified that seal, authenticates the cumulative states at
+the seal block. That block can serve as a local replay floor even if earlier
+audit witnesses were pruned. The node still verifies the terminal audit's
+exact receipt and probation transition and every later non-null receipt; a
+seal alone does not verify its later audit. Without such a floor, retained
+individual proofs can verify the missing prefix in order.
+
+If the seal's ordinary authorization ancestry has also been pruned, a separate
+historical path can verify the terminal audit for replay only. After base-block
+sync and any snapshot background validation, the active branch independently
+selects the existing PoW-history endpoint
+`E = LatestEligibleChainLockTargetHeight(tip) - sign_lag`. The exact terminal
+carrier must be at or below E, and E must remain above the actual durable
+winner D, or the activation predecessor if D is absent. Accepted and durable
+best identities must agree when selecting and publishing the proof. The
+canonical carrier receipt, marker, branch provenance, indexed states, and
+historical snapshots must all match. An audit that is still newer than E uses
+the ordinary dependency path; once it becomes eligible, the scheduler releases
+only that owner's stalled seal request and retries its exact audit witness.
+
+This path uses the existing PoW-history trust assumption for the missing
+ordinary authorization edges. It does not prove that those omitted edges were
+signed. The full audit statement commits to its embedded seal statement, and
+the receiver reconstructs canonical reporter and subject rosters, checks the
+schedule, seed, ancestry and state roots, and verifies all 801 audit signatures.
+After verification it rederives the same inputs with the active chain stable
+and computes the exact probation transition. The result is a separate,
+immutable RAM-only replay proof. It never enters the ordinary audit archive or
+ChainLock store, serves as an ordinary authorization base, supplies signing
+authority, or authorizes GC. Historical ingress runs before ordinary archive
+duplicate handling; a failed eligible historical verification cannot fall
+through to ordinary admission.
+
+The historical proof binds frozen E and its block hash, actual durable D,
+the exact marker/carrier and receipt, both indexed receipt states, the
+probation root, and the roster/probation/provenance source generations.
+Descendant tip growth preserves frozen E; a changed supporting branch, durable
+identity, marker revision, or source revokes the proof. Restart discards it and
+any partial validation frontier, so an outstanding marker requires fresh
+verification. A bounded scanner reads actual scheduled receipts, checks every
+indexed accumulator and probation-root transition above the selected replay
+floor through the active tip, and rejects unavailable or inconsistent suffix
+data. Replay rechecks its proof
+before external engine operations and finalization. It clears the durable
+marker only after the engine flush and exact applied height/hash match the
+active endpoint. Count alone or a null tail does not authorize completion.
+
+Irreversible audit-prefix pruning still requires a descendant CLSIG verified
+with all 801 signatures under ordinary deterministic rosters, on the accepted
+active branch at or above the terminal carrier, descending through that carrier
+and the durable predecessor, and signing the exactly recomputed cumulative
+receipt state and probation root. A replay proof or marker cannot replace that
+finality. After the covering CLSIG and reconstructed state are durable, the
+node first forces the active chainstate to disk, ordering the DMN,
 PQ-registry, payment-state, and UTXO best-block markers before any irreversible
 GC. It then atomically persists a monotonic audit checkpoint and deletes every
 full audit certificate at or below the checkpoint epoch; hash-addressed
@@ -2090,24 +2143,34 @@ winner. One synchronous chainstate-and-GC sequence runs only when the boundary
 advances or when a crash or `-reindex-chainstate` leaves that completion record
 behind the durable archive checkpoint.
 
-While either marker is unresolved, base block sync and enforcement of an
-already durable ChainLock continue, as do inbound CLSIG verification and
-`GETCLSIG` recovery. New local finality signing/publication, payment-audit
-production, fully authenticated readiness, covered-prefix pruning, and paired
-NEVM notifications from the provisional boundary are gated fail-closed. A
-crash, marker revision, branch change, or failed state/checkpoint/certificate
-fsync cannot clear the obligation or expose provisional state as authenticated.
+While a marker lacks the applicable verified coverage or replay proof, base
+block sync and enforcement of an already durable ChainLock continue, as do
+permitted inbound certificate verification and exact proof requests. New local
+finality signing/publication, payment-audit production, fully authenticated
+readiness, and paired NEVM execution from the provisional boundary remain
+gated. A verified replay proof permits only the checked replay described above;
+ordinary participation and signing checks still apply, and destructive GC
+retains its separate durable-finality requirement. A crash, marker revision,
+branch change, or failed state/checkpoint/certificate fsync cannot erase the
+outstanding obligation or turn provisional state into ordinary authority.
 
 Consequently, an already authorized participating node that restarts or falls
-behind replays the on-chain receipt chain, obtains one later covering CLSIG
-through the ordinary P2P path, and discards covered audit certificates; it does
-not download or retain a permanent 1,041,971-byte-per-epoch audit archive. A
-fresh, full-reindex, or snapshot-reconstruction node may perform the same replay
-only provisionally inside historical-replay quarantine. It cannot request or
-restore the covering CLSIG or become authoritative until a separately
-authenticated checkpoint or snapshot release ends that quarantine. Full
-certificates are stored and served only while live or not yet covered. Null or
-inconclusive audits remain fail-open no-ops for new misses.
+behind can recover through a covering CLSIG, retained ordinary proofs, or the
+eligible terminal audit's historical replay proof. It need not retain a
+permanent 1,041,971-byte-per-epoch audit archive. Recovery still requires the
+chosen full certificate bytes and the historical inputs needed to verify them:
+hash commitments cannot recreate pruned witnesses or unavailable snapshots.
+If neither local storage nor reachable peers can supply an applicable proof,
+or required historical inputs cannot be reconstructed, the node keeps its
+obligation and waits.
+Covered certificates remain prunable only under the durable checkpoint rules.
+
+These paths do not release public activation or historical-replay quarantine.
+A fresh, full-reindex, or snapshot-reconstruction node that is not yet
+authorized to participate still needs the separately authenticated checkpoint
+or snapshot release required by that quarantine before restoring/requesting
+finality authority or becoming live. Null or inconclusive audits remain
+fail-open no-ops for new misses.
 
 The protocol proves possession and use of the registered child key during one
 of 24 deadlines selected only later. It does not mathematically prove that an
@@ -2406,9 +2469,13 @@ The implementation must preserve these invariants:
     never consults probation state; at and after `A`, payment selection first requires
     the target epoch's frozen PQ child root, and an all-withheld fallback remains
     confined to that root-capable queue.
-18. Compact payment-audit replay is provisional until one fully verified,
-    durable descendant CLSIG authenticates its cumulative receipt state and
-    probation root. A marker or checkpoint is never quorum authority, and no
+18. Compact payment-audit replay requires either verified covering finality or
+    exact retained-proof verification, including the independently selected
+    historical terminal-audit path when eligible. Historical replay authority
+    is RAM-only, source-bound, and revoked before further replay on a changed
+    boundary; it is never ordinary finality, signing, serving, or GC authority.
+    Irreversible prefix pruning still requires a fully verified durable
+    covering CLSIG. A marker or checkpoint is never quorum authority, and no
     covered full-audit prefix remains a permanent archive.
 
 Expected failures are fail-closed:
@@ -2440,8 +2507,11 @@ Expected failures are fail-closed:
 | Subject has one conclusive audit miss | Persist miss count one; leave payments unchanged |
 | Subject has two unrecovered conclusive audit misses | Cap at two and withhold payments until a later authenticated positive; never alter finality membership/order, quorum validity, or MNAUTH |
 | Live payment-audit certificate is missing at a non-null carrier | Quarantine only the dependent branch, request the exact audit witness ID, and activate an available valid sibling |
-| Covered payment-audit certificate is absent during historical IBD/replay | Recompute the bitmap transition, fsync an active/prospective marker before provisional use, continue base sync, and gate signing/readiness until a covering CLSIG is durable |
-| Covering payment-audit CLSIG is absent, off-branch, below-terminal, or invalid | Keep requesting a valid descendant; the marker grants no authority and no covered certificate may be pruned |
+| Full payment-audit certificate is absent during historical IBD/replay | Recompute the compact transition provisionally, fsync the active/prospective marker, continue base sync, and retain the obligation until covering finality or exact ordinary/historical proof verification permits replay |
+| Covering payment-audit CLSIG is absent, off-branch, below-terminal, or invalid | Reject unusable coverage; use available exact ordinary proofs or an eligible terminal-audit historical replay proof, otherwise keep waiting. No replay-only proof permits prefix pruning |
+| Terminal audit's ordinary seal/base ancestry is missing | Request exact branch-selected dependencies in decreasing height order; after base/snapshot validation and terminal carrier <= frozen E, the full audit may instead receive separate PoW-history replay verification |
+| Historical audit fails signatures, receipt/branch/root checks, or loses its frozen E/D/source binding | Reject the invalid response without ordinary admission; a changed binding also revokes the replay proof and validation frontier. Retain the marker until current exact evidence permits replay |
+| Required audit bytes, canonical carrier, or historical snapshots are unavailable | Keep the affected replay obligation; a cumulative hash cannot reconstruct missing proof bytes or local verification inputs |
 | Payment-audit state, pre-seal, checkpoint, certificate, or prune-batch fsync fails | Keep the obligation and gates active; never publish provisional state, clear a marker, advance a checkpoint, or infer an empty audit |
 | All root-capable valid payees are payment-withheld | Use the ordinary root-capable deterministic payee as the explicit liveness fallback |
 | Authenticated state has no root-capable valid payee at or after `A` | Permit progression with the sentry subsidy unminted; pay the miner its normal subsidy share plus all fees, retain required governance payments, and create no sentry seniority or minimum-payment top-up |
@@ -2739,20 +2809,42 @@ Expected failures are fail-closed:
   accepted active-branch descendant at/above the terminal carrier, and sign the
   recomputed cumulative receipt state and probation root. Wrong predecessor,
   off-branch/below-terminal targets, a marker alone, or either root mismatch
-  cannot authenticate the prefix, clear a gate, or prune a witness.
+  cannot establish that finality coverage or authorize witness pruning.
+- Retained ordinary terminal audits release an existing payment replay marker
+  without newer finality. A verified ordinary seal or a previously admitted
+  terminal audit supplies the seal-block floor when earlier audits are absent;
+  the terminal receipt and actual suffix still require verification. Test
+  wrong-branch seals, missing ancestry, intermediate accumulator/probation
+  mismatches, partial scans, and restart with changed roster availability.
+- Historical terminal-audit recovery retains the existing E cutoff, base-sync
+  and snapshot guards, accepted/durable D agreement, canonical roster checks,
+  and all 801 signatures. Use a matching on-chain witness ID with an invalid
+  signature to prove that structural/ID checks are insufficient. Successful
+  recovery leaves ordinary audit archives, authorization bases, durable
+  finality, and GC checkpoints absent or unchanged.
+- Through actual `INV`/`GETDATA`/`PQPOSECERT` handling, a terminal newer than E
+  stages the ordinary seal dependency. Advancing the null tail until it is
+  eligible clears only that owner's matching lane and emits one exact audit
+  retry, without repeatedly resetting an in-flight request. An ordinary
+  archive duplicate arriving during the download cannot bypass historical
+  replay verification.
+- Historical proofs and partial scan progress disappear on restart. Marker,
+  roster, provenance, branch, and durable-boundary changes revoke the relevant
+  replay authority; recheck after engine queries and before notifications or
+  finalization. Failed flushes, wrong applied hashes, and wrong final endpoints
+  preserve the marker and mining restriction even after all block notifications
+  have been sent.
 - Checkpoint tests bind the terminal receipt epoch/hash to the exact durable
   covering target and logical/witness IDs. Persist-and-prune is one synchronous
   batch; exact replay is idempotent, regressions and equal-epoch conflicts are
   rejected, every certificate/index at or below the boundary disappears, and
   the live suffix remains readable after crash/restart.
-- An already participating roll-forward recovery replays a long on-chain
-  receipt prefix without its covered full witnesses, remains
-  signing/readiness-gated until one later P2P CLSIG covers the prefix, and
-  reproduces the same accumulator, probation root, and checkpoint as a node
-  that originally verified every certificate. Fresh sync, full reindex,
-  `-reindex-chainstate`, and snapshot reconstruction reproduce those values
-  provisionally but remain P2P/restoration-gated until a separately
-  authenticated checkpoint or snapshot release ends quarantine.
+- An already participating roll-forward recovery reproduces the receipt and
+  probation states with either later covering finality or the exact verified
+  replay proofs above. Only the durable covering-finality path creates a GC
+  checkpoint. Fresh sync, full reindex, `-reindex-chainstate`, and snapshot
+  reconstruction remain subject to their separate public participation and
+  quarantine-release requirements; none of these replay tests waives them.
 - The six-epoch storage-bound regression seals and checkpoints five audit
   prefixes, rejects retrieval/admission/pinning of their retired epochs, and
   leaves only the sixth live/uncovered suffix after restart. This exercises the
@@ -2760,6 +2852,18 @@ Expected failures are fail-closed:
   physical-compaction run remains required. Independently, restart accounting
   retains one durable best CLSIG plus at most one unsealed BTCC `ADVANCE`, with
   eight recent CLSIGs in the bounded RAM store.
+
+The native payment-preseal cases in `pq_chainlock_handler_tests.cpp` begin at
+an already-connected compact-receipt boundary with modeled validated indexes
+and canonical historical snapshots. Ordinary archive cases model prior
+signature admission. The historical cases generate 400 real operator WOTS
+keys and child proofs and verify all 801 terminal-audit signatures through the
+real verifier, including PeerManager ingress, request accounting, probation
+derivation, restart, and
+the NEVM replay/mining gates. Their engine is a deterministic test double.
+They do not establish cold public-peer synchronization, deployed snapshot
+availability, or production Geth behavior. Those remain separate end-to-end
+and availability requirements.
 
 ### BTCC/NEVM tests
 

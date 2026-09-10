@@ -1392,6 +1392,25 @@ private:
                                const PaymentAuditHistoricalContext&) = default;
     };
 
+    /** Local PoW coverage for one replay-only terminal audit, never finality. */
+    struct PaymentAuditHistoricalReplayBoundary {
+        PendingPaymentAuditReceiptDependency owner;
+        int32_t coverage_height{-1};
+        uint256 coverage_hash;
+        std::optional<pq::FinalChainLockRecordMetadata> durable_prior;
+        pq::BTCCReceiptState receipt_state;
+        pq::PaymentAuditReceiptState payment_audit_state;
+        uint256 probation_state_hash;
+
+        friend bool operator==(const PaymentAuditHistoricalReplayBoundary&,
+                               const PaymentAuditHistoricalReplayBoundary&) = default;
+    };
+
+    struct PaymentAuditHistoricalReplayProof {
+        PaymentAuditHistoricalReplayBoundary boundary;
+        VerifiedPaymentAuditReceiptTransitionPtr transition;
+    };
+
     /** One exact audit seal and one decreasing ordinary-base request cursor. */
     struct PendingPaymentAuditSealDependency {
         PendingPaymentAuditReceiptDependency owner;
@@ -1561,6 +1580,8 @@ private:
         bool checkpoint_floor{false};
         std::optional<pq::VerifiedRosterAuthorizationBaseView> seal_floor;
         VerifiedPaymentAuditReceiptTransitionPtr audit_floor;
+        bool audit_floor_historical{false};
+        VerifiedPaymentAuditReceiptTransitionPtr historical_receipt;
         bool terminal_probe{false};
         std::optional<PendingPaymentAuditReceiptDependency> dependency;
     };
@@ -2141,8 +2162,38 @@ private:
         int32_t* reconstruction_floor = nullptr,
         bool defer_historical_provenance = false,
         std::optional<PendingPaymentAuditSealDependency>*
-            missing_seal = nullptr) const
+            missing_seal = nullptr,
+        pq::PreparedChainLockContextPtr historical_seal_context = nullptr) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_lookup_mutex);
+    // This view deliberately never reads the ordinary finality store: the
+    // getter also runs from ordinary-store persistence callbacks.
+    [[nodiscard]] std::optional<PaymentAuditHistoricalReplayBoundary>
+    GetPaymentAuditHistoricalReplayBoundaryView(
+        const PendingPaymentAuditReceiptDependency& owner,
+        std::optional<int32_t> coverage_height = std::nullopt) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main, !m_lookup_mutex, !m_btcc_preseal_mutex);
+    [[nodiscard]] std::optional<PaymentAuditHistoricalReplayBoundary>
+    SelectPaymentAuditHistoricalReplayBoundary(
+        const PendingPaymentAuditReceiptDependency& owner,
+        std::optional<int32_t> coverage_height = std::nullopt) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main, !m_lookup_mutex, !m_btcc_preseal_mutex);
+    [[nodiscard]] pq::PreparedChainLockContextPtr
+    BuildPaymentAuditHistoricalReplaySealContext(
+        const PaymentAuditHistoricalReplayBoundary& boundary,
+        const pq::PaymentAuditStatement& statement) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main, !m_lookup_mutex, !m_btcc_preseal_mutex);
+    [[nodiscard]] VerifiedPaymentAuditReceiptTransitionPtr
+    GetPaymentAuditHistoricalReplayTransition(
+        const pq::PaymentAuditReceipt& receipt,
+        const CBlockIndex& carrier) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main, !m_lookup_mutex, !m_btcc_preseal_mutex);
+    [[nodiscard]] std::optional<bool> TryProcessPaymentAuditHistoricalReplay(
+        const pq::FinalPaymentAudit& audit,
+        const PaymentAuditHistoricalContext& historical)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs_main, !m_lookup_mutex, !m_verification_mutex,
+                                 !m_pending_payment_audit_receipt_mutex,
+                                 !m_needed_btcc_certificate_mutex,
+                                 !m_btcc_preseal_mutex);
     [[nodiscard]] PaymentAuditReceiptCertificateStatus
     BuildStoredVerifiedPaymentAuditSubject(
         const pq::StoredVerifiedPaymentAudit& stored,
@@ -2889,6 +2940,8 @@ private:
     mutable PaymentAuditReceiptCache m_payment_audit_receipt_cache;
     mutable std::unique_ptr<VerifiedPaymentAuditReceiptTransitionCache>
         m_verified_payment_audit_transition_cache;
+    std::shared_ptr<const PaymentAuditHistoricalReplayProof>
+        m_payment_audit_historical_replay_proof GUARDED_BY(cs_main);
     mutable pq::ChainLockVerifier m_verifier;
     mutable pq::CatchupHistoricalProofCache m_catchup_proof_cache;
 

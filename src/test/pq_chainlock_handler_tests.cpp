@@ -7,6 +7,7 @@
 #include <chain.h>
 #include <consensus/merkle.h>
 #include <consensus/params.h>
+#include <crypto/scheduled_wots/scheduled_wots.h>
 #include <evo/deterministicmns.h>
 #include <governance/governanceclasses.h>
 #include <key_io.h>
@@ -635,6 +636,44 @@ public:
     {
         LOCK(::cs_main);
         return handler.IsPaymentAuditReplayAuthenticated(index);
+    }
+
+    static std::optional<CChainLocksHandler::PaymentAuditHistoricalContext>
+    PaymentAuditHistoricalContext(const CChainLocksHandler& handler,
+                                 const uint256& witness_id)
+    {
+        LOCK(::cs_main);
+        return handler.ResolvePendingPaymentAuditContext(witness_id);
+    }
+
+    static std::optional<bool> TryHistoricalPaymentAudit(
+        CChainLocksHandler& handler, const pq::FinalPaymentAudit& audit,
+        const CChainLocksHandler::PaymentAuditHistoricalContext& context)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs_main)
+    {
+        AssertLockNotHeld(::cs_main);
+        return handler.TryProcessPaymentAuditHistoricalReplay(audit, context);
+    }
+
+    static void RequestPaymentAuditDependency(CChainLocksHandler& handler)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs_main)
+    {
+        handler.RequestNeededPaymentAuditCertificate();
+    }
+
+    static std::chrono::microseconds PaymentAuditLastRequest(
+        const CChainLocksHandler& handler)
+    {
+        LOCK(handler.m_pending_payment_audit_receipt_mutex);
+        return handler.m_pending_payment_audit_last_request;
+    }
+
+    static VerifiedPaymentAuditReceiptTransitionPtr HistoricalPaymentAuditTransition(
+        const CChainLocksHandler& handler, const pq::PaymentAuditReceipt& receipt,
+        const CBlockIndex& carrier)
+    {
+        LOCK(::cs_main);
+        return handler.GetPaymentAuditHistoricalReplayTransition(receipt, carrier);
     }
 
     static pq::PQChainLockPersistence& Persistence(CChainLocksHandler& handler)
@@ -2293,9 +2332,11 @@ struct PresealMiningSetup : TestChain100Setup {
     }
 };
 
-// SYSCOIN: Start at the already-connected compact-receipt boundary. Archive
-// admission below represents prior signature verification; the handler still
-// checks the real archived audit, branch, roster and probation transition.
+// SYSCOIN: Start at the already-connected compact-receipt boundary. Ordinary
+// archive cases model prior signature verification. The opt-in historical
+// cases sign their terminal audit and invoke the complete verifier. The chain
+// indexes and canonical roster snapshots model an already-connected history;
+// these tests do not claim cold synchronization from public peers.
 struct LatePaymentAuditPresealSetup : TestingSetup {
     using Access = llmq::test::CChainLocksHandlerTestAccess;
     using Status = llmq::CChainLocksHandler::PaymentAuditReceiptCertificateStatus;
@@ -2312,6 +2353,7 @@ struct LatePaymentAuditPresealSetup : TestingSetup {
         std::size_t flushes{0};
         bool flush_available{true};
         bool wrong_final_tip{false};
+        uint64_t expected_final_count{TIP_HEIGHT - FIRST_CARRIER + 1};
         std::optional<uint256> reported_hash;
         std::function<void()> on_query;
 
@@ -2349,8 +2391,79 @@ struct LatePaymentAuditPresealSetup : TestingSetup {
             if (auto callback{std::exchange(on_query, {})}) callback();
             error.clear();
             reported_count = count;
-            reported = wrong_final_tip && count == static_cast<uint64_t>(TIP_HEIGHT - FIRST_CARRIER + 1)
+            reported = wrong_final_tip && count == expected_final_count
                 ? NonNullHash(1'250'000) : reported_hash.value_or(hash);
+        }
+    };
+
+    struct AuditPeer {
+        ConnmanTestMsg& connman;
+        PeerManager& peerman;
+        CNode* node;
+        const std::chrono::seconds previous_mock_time{GetMockTime()};
+        std::atomic<bool> interrupt{false};
+
+        explicit AuditPeer(node::NodeContext& context)
+            : connman{static_cast<ConnmanTestMsg&>(*context.connman)},
+              peerman{*context.peerman},
+              node{new CNode{/*id=*/925, /*sock=*/nullptr,
+                  CAddress{CService{in_addr{0xa0b0c00d}, 7785}, NODE_NETWORK},
+                  /*nKeyedNetGroupIn=*/13, /*nLocalHostNonceIn=*/925, CAddress{},
+                  /*addrNameIn=*/std::string{}, ConnectionType::OUTBOUND_FULL_RELAY,
+                  /*inbound_onion=*/false}}
+        {
+            connman.AddTestNode(*node);
+        }
+        ~AuditPeer()
+        {
+            peerman.FinalizeNode(*node);
+            connman.ClearTestNodes();
+            SetMockTime(previous_mock_time);
+        }
+        void Handshake() EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex, !::cs_main)
+        {
+            connman.Handshake(*node, /*successfully_connected=*/true,
+                ServiceFlags(NODE_NETWORK | NODE_WITNESS),
+                ServiceFlags(NODE_NETWORK | NODE_WITNESS), PROTOCOL_VERSION, /*relay_txs=*/true);
+            TestOnlyResetTimeData();
+            BOOST_REQUIRE(!node->fDisconnect);
+            connman.FlushSendBuffer(*node);
+            node->fPauseSend = false;
+        }
+        template <typename T>
+        void Dispatch(const char* command, const T& value)
+            EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex, !::cs_main)
+        {
+            CDataStream payload{SER_NETWORK, node->GetCommonVersion()};
+            payload << value;
+            peerman.ProcessMessage(*node, command, payload,
+                GetTime<std::chrono::microseconds>(), interrupt);
+        }
+        void Request(const uint256& witness_id)
+            EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex, !::cs_main)
+        {
+            Dispatch(NetMsgType::INV, std::vector<CInv>{{MSG_PQPOSECERT, witness_id}});
+            peerman.SendMessages(node);
+            BOOST_REQUIRE(WITH_LOCK(::cs_main,
+                return peerman.GetRequestedPaymentAudit(node->GetId())) == witness_id);
+            connman.FlushSendBuffer(*node);
+            node->fPauseSend = false;
+        }
+        void Deliver(const llmq::pq::FinalPaymentAudit& audit)
+            EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex, !::cs_main)
+        {
+            Dispatch(NetMsgType::PQPOSECERT, audit);
+            BOOST_CHECK(!WITH_LOCK(::cs_main,
+                return peerman.GetRequestedPaymentAudit(node->GetId())));
+        }
+        std::size_t Queued(const std::string& command) const
+        {
+            LOCK(node->cs_vSend);
+            const auto& [bytes, more, current]{node->m_transport->GetBytesToSend(false)};
+            (void)more;
+            return (!bytes.empty() && current == command ? 1U : 0U) +
+                std::count_if(node->vSendMsg.begin(), node->vSendMsg.end(),
+                    [&](const CSerializedNetMsg& message) { return message.m_type == command; });
         }
     };
 
@@ -2368,6 +2481,12 @@ struct LatePaymentAuditPresealSetup : TestingSetup {
     uint256 probation_hash;
     llmq::pq::ChainLockFinalityStoreConfig config;
     llmq::pq::QuorumBuildConfig quorum_config;
+    llmq::pq::FrozenQuorumRosterCachePtr signing_roster_cache;
+    std::vector<std::optional<scheduled_wots::SecretKey>> signing_keys;
+    std::vector<scheduled_wots::PublicKey> signing_public_keys;
+    const bool signed_terminal;
+    const bool invalid_terminal_signature;
+    const int32_t tip_height;
     std::size_t roster_lookups{0};
     const uint256 genesis{m_node.chainman->GetConsensus().hashGenesisBlock};
 
@@ -2382,14 +2501,17 @@ struct LatePaymentAuditPresealSetup : TestingSetup {
         ~ActiveDIP() { consensus.DIP0003Height = previous; }
     };
 
-    LatePaymentAuditPresealSetup()
+    explicit LatePaymentAuditPresealSetup(bool sign_terminal = false, bool invalid_signature = false)
         : TestingSetup{ChainType::REGTEST, {"-nevmstartheight=2825"}},
-          chain(static_cast<std::size_t>(TIP_HEIGHT + 1))
+          chain(static_cast<std::size_t>((sign_terminal ? 3'420 : TIP_HEIGHT) + 1)),
+          signed_terminal{sign_terminal}, invalid_terminal_signature{invalid_signature},
+          tip_height{sign_terminal ? 3'420 : TIP_HEIGHT}
     {
         fNEVMConnection = false;
         CreateHandler();
         config = *Assert(Access::Config(*handler));
         quorum_config = *Assert(Access::QuorumConfig(*handler));
+        if (signed_terminal) PrepareSigningKeys();
         InstallRosterCache();
         BOOST_REQUIRE(deterministicMNManager);
         probation_hash = deterministicMNManager->EmptyPaymentProbationStateHash();
@@ -2406,8 +2528,8 @@ struct LatePaymentAuditPresealSetup : TestingSetup {
         chain[0] = m_node.chainman->ActiveTip();
         BOOST_REQUIRE(chain[0]);
         chain[0]->pqPaymentProbationStateHash = probation_hash;
-        const int64_t first_time{GetTime() - TIP_HEIGHT};
-        for (int32_t height{1}; height <= TIP_HEIGHT; ++height) {
+        const int64_t first_time{GetTime() - tip_height};
+        for (int32_t height{1}; height <= tip_height; ++height) {
             llmq::pq::BTCCReceipt btcc;
             if (height == 2'315) btcc = MakeBTCCReceipt(2'305);
             for (const auto& epoch : epochs) {
@@ -2487,7 +2609,8 @@ struct LatePaymentAuditPresealSetup : TestingSetup {
                 index->GetBlockHash(), CDeterministicMNList{index->GetBlockHash(), height, 0}, false));
             if (height >= FIRST_CARRIER) replay_hashes.push_back(block.GetHash());
         }
-        BOOST_REQUIRE(m_node.chainman->m_blockman.FlushChainstateBlockFile(TIP_HEIGHT));
+        BOOST_REQUIRE(m_node.chainman->m_blockman.FlushChainstateBlockFile(tip_height));
+        engine->expected_final_count = replay_hashes.size();
         markers.active = llmq::pq::PaymentAuditPresealMarker{
             FIRST_CARRIER, chain[FIRST_CARRIER]->GetBlockHash(), {},
             deterministicMNManager->EmptyPaymentProbationStateHash(),
@@ -2539,6 +2662,85 @@ struct LatePaymentAuditPresealSetup : TestingSetup {
         BOOST_REQUIRE(Access::QuorumConfig(*handler));
     }
 
+    void PrepareSigningKeys()
+    {
+        signing_keys.resize(llmq::pq::QUORUM_SIZE);
+        signing_public_keys.resize(signing_keys.size());
+        std::vector<std::future<bool>> workers;
+        constexpr std::size_t WORKERS{8};
+        for (std::size_t worker{0}; worker < WORKERS; ++worker) {
+            workers.push_back(std::async(std::launch::async, [&, worker] {
+                for (std::size_t tag{worker}; tag < signing_keys.size(); tag += WORKERS) {
+                    scheduled_wots::KeyGenerationSeed seed{};
+                    for (std::size_t byte{0}; byte < seed.size(); ++byte) {
+                        seed[byte] = static_cast<uint8_t>(
+                            ((uint64_t{tag + 1} >> ((byte % 8) * 8)) ^ (0x63U + 29U * byte)));
+                    }
+                    auto key{scheduled_wots::GenerateSecretKey(seed)};
+                    if (!key || !key->GetPublicKey(signing_public_keys[tag])) return false;
+                    signing_keys[tag] = std::move(*key);
+                }
+                return true;
+            }));
+        }
+        for (auto& worker : workers) BOOST_REQUIRE(worker.get());
+    }
+
+    llmq::pq::test::SyntheticChildAuthorization SignedChildAuthorization(
+        std::size_t tag, uint32_t epoch) const
+    {
+        return llmq::pq::test::MakeSyntheticChildAuthorization(
+            genesis, NonNullHash(1'220'000 + tag), epoch,
+            signing_public_keys.at(tag), (uint64_t{epoch} << 32) | (tag + 1));
+    }
+
+    void SignTerminalAudit(llmq::pq::FinalPaymentAudit& audit)
+    {
+        using namespace llmq::pq;
+        auto& seal{audit.statement.seal_statement};
+        QuorumBuildError error{QuorumBuildError::NONE};
+        const auto verified_rosters{signing_roster_cache->GetVerifiedActiveNoPublish(
+            seal.height, *chain[seal.height], seal.roster_beacons.active, &error)};
+        BOOST_REQUIRE_MESSAGE(verified_rosters, static_cast<int>(error));
+        const auto& rosters{verified_rosters->Rosters()};
+        std::array<QuorumDescriptor, ACTIVE_QUORUMS> descriptors;
+        for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+            descriptors[slot] = rosters[slot].descriptor;
+        }
+        seal.quorum_context_hash = GetQuorumContextHash(
+            genesis, seal.height, seal.block_hash, descriptors);
+        BOOST_REQUIRE(audit.statement.commitment.subject_descriptor_hash ==
+            GetPaymentAuditDescriptorHash(genesis, descriptors[REQUIRED_QUORUMS - 1]));
+        std::size_t offset{0};
+        const PaymentAuditScheduleConfig schedule{config.chainlock_schedule, config.btcc_schedule};
+        for (std::size_t slot{0}; slot < REQUIRED_QUORUMS; ++slot) {
+            const auto& roster{rosters[slot]};
+            const auto leaf{PaymentAuditLeafIndex(schedule, audit.statement.commitment.subject_epoch,
+                seal.height, roster.descriptor.epoch)};
+            BOOST_REQUIRE(leaf);
+            for (uint16_t member{0}; member < QUORUM_THRESHOLD; ++member) {
+                const auto& frozen{roster.members[member]};
+                std::size_t tag{0};
+                while (tag < signing_keys.size() && NonNullHash(1'220'000 + tag) != frozen.pro_tx_hash) ++tag;
+                BOOST_REQUIRE_LT(tag, signing_keys.size());
+                const auto child{SignedChildAuthorization(tag, roster.descriptor.epoch)};
+                BOOST_REQUIRE(frozen.child_root && *frozen.child_root == child.record);
+                auto& witness{audit.report_witnesses.at(offset++)};
+                witness.authenticated_signature.key_proof = child.proof;
+                const auto transcript{BuildPaymentAuditShareTranscript(audit.statement,
+                    witness.observed_members, roster.descriptor, member, frozen.pro_tx_hash)};
+                const auto hash{GetPaymentAuditShareHash(genesis, transcript)};
+                scheduled_wots::Message message;
+                std::copy(hash.begin(), hash.end(), message.begin());
+                // Each operator signs a distinct scheduled audit leaf in
+                // each selected slot; every one of the 801 signatures is real.
+                BOOST_REQUIRE(scheduled_wots::SignDeterministic(
+                    *signing_keys[tag], *leaf, message, witness.authenticated_signature.signature));
+            }
+        }
+        BOOST_REQUIRE_EQUAL(offset, PAYMENT_AUDIT_SIGNATURE_COUNT);
+    }
+
     llmq::pq::QuorumSnapshotState Snapshot(const CBlockIndex& index) const
     {
         using namespace llmq::pq;
@@ -2570,10 +2772,15 @@ struct LatePaymentAuditPresealSetup : TestingSetup {
             key.global_key.child_key_commitment.root = NonNullHash(1'225'000 + tag);
             key.schedule_initialized = 1;
             key.schedule = OperatorKeyScheduleState::FromView(*view);
+            if (signed_terminal) {
+                key.global_key.child_key_commitment =
+                    SignedChildAuthorization(tag, key.schedule.first_mutable_epoch).record.commitment;
+            }
             for (uint32_t epoch{key.schedule.first_retained_frozen_epoch};
                  epoch < key.schedule.first_mutable_epoch; ++epoch) {
-                key.frozen_child_roots.push_back(FrozenChildRootRecord{
-                    key.pro_tx_hash, 1, epoch, key.global_key.child_key_commitment});
+                key.frozen_child_roots.push_back(signed_terminal
+                    ? SignedChildAuthorization(tag, epoch).record
+                    : FrozenChildRootRecord{key.pro_tx_hash, 1, epoch, key.global_key.child_key_commitment});
             }
             BOOST_REQUIRE(key.IsStructurallyValid());
             keys.push_back(std::move(key));
@@ -2592,6 +2799,7 @@ struct LatePaymentAuditPresealSetup : TestingSetup {
                 return std::optional<llmq::pq::QuorumSnapshotState>{Snapshot(index)};
             })};
         BOOST_REQUIRE(cache);
+        signing_roster_cache = cache;
         handler->SetQuorumRosterCache(cache);
     }
 
@@ -2675,6 +2883,19 @@ struct LatePaymentAuditPresealSetup : TestingSetup {
         seal.payment_probation_state_hash = probation_hash;
         seal.roster_authorization_base = {seal.previous_chainlock_height,
             seal.previous_chainlock_hash, NonNullHash(1'241'000 + ordinal)};
+        if (signed_terminal && ordinal + 1 == audits.size()) {
+            // The near-tip ingress case must reach the real missing-seal
+            // graph using the branch's selected ordinary base identity.
+            const auto selected{Access::SelectedObjectiveRosterBase(*handler, *chain[seal.height])};
+            BOOST_REQUIRE(selected);
+            seal.roster_authorization_base = *selected;
+            SignTerminalAudit(audit);
+            if (invalid_terminal_signature) {
+                // Commit the corrupted witness ID into the carrier below,
+                // so rejection cannot be explained by a mismatching ID.
+                audit.report_witnesses.front().authenticated_signature.signature[0] ^= 1;
+            }
+        }
         BOOST_REQUIRE(audit.IsStructurallyValid());
         const auto classification{ClassifyPaymentAuditReports(audit)};
         BOOST_REQUIRE(classification);
@@ -2931,6 +3152,207 @@ struct LatePaymentAuditPresealSetup : TestingSetup {
         }
     }
 
+    void CheckNoHistoricalOrdinaryAuthority()
+    {
+        BOOST_CHECK(Access::Persistence(*handler).LoadAuthorizationBases().empty());
+        BOOST_CHECK(!Access::Persistence(*handler).HasBest());
+        BOOST_CHECK(!Access::Persistence(*handler).LoadPaymentAuditSealContext());
+        BOOST_CHECK_EQUAL(Access::Store(*handler)->AuthorizationBaseSizeForTesting(), 0U);
+        BOOST_CHECK(!Access::Store(*handler)->GetVerifiedRosterAuthorizationBase(
+            audits.back().statement.seal_statement.roster_authorization_base));
+        BOOST_CHECK(Access::Store(*handler)->GetVerifiedRosterAuthorizationBasesForTarget(
+            receipts.back().seal_height, receipts.back().seal_block_hash).empty());
+        BOOST_CHECK(!Access::Store(*handler)->GetBest());
+        BOOST_CHECK(!Access::AuditStore(*handler).GetPruneCheckpoint());
+    }
+
+    void CheckNoHistoricalArchives()
+    {
+        for (const auto& receipt : receipts) {
+            BOOST_CHECK(!Access::AuditStore(*handler).Get(receipt.audit_witness_id));
+        }
+        CheckNoHistoricalOrdinaryAuthority();
+    }
+
+    auto RequestHistoricalReplay()
+    {
+        ReplayUntilMissing(0);
+        {
+            LOCK(::cs_main);
+            BOOST_REQUIRE(m_node.chainman->IsBaseBlockSyncComplete());
+            handler->NotePendingPaymentAuditReceiptCertificate(
+                receipts.back(), *chain[CARRIERS.back()]);
+        }
+        const auto context{Access::PaymentAuditHistoricalContext(
+            *handler, receipts.back().audit_witness_id)};
+        BOOST_REQUIRE(context);
+        return *context;
+    }
+
+    auto HistoricalTransition() const
+    {
+        return Access::HistoricalPaymentAuditTransition(
+            *handler, receipts.back(), *chain[CARRIERS.back()]);
+    }
+
+    void CheckHistoricalSignedReplay() EXCLUSIVE_LOCKS_REQUIRED(!::cs_main)
+    {
+        BOOST_REQUIRE(signed_terminal);
+        LOCK(NetEventsInterface::g_msgproc_mutex);
+        ActiveDIP active_dip{const_cast<Consensus::Params&>(m_node.chainman->GetConsensus())};
+        AuditPeer peer{m_node};
+        peer.Handshake();
+        engine->flush_available = false;
+        auto context{RequestHistoricalReplay()};
+        CheckNoHistoricalArchives();
+        std::optional<Access::PaymentAuditSealRequest> stalled;
+        {
+            auto& active{m_node.chainman->ActiveChainstate()};
+            struct RestoreTip {
+                Chainstate& active;
+                CBlockIndex& tip;
+                ~RestoreTip() { LOCK(::cs_main); active.m_chain.SetTip(tip); active.CoinsTip().SetBestBlock(tip.GetBlockHash()); }
+            } restore{active, *chain.back()};
+            WITH_LOCK(::cs_main, active.m_chain.SetTip(*chain[TIP_HEIGHT]);
+                active.CoinsTip().SetBestBlock(chain[TIP_HEIGHT]->GetBlockHash()));
+            // At tip 3407 the independently selected E is 3395, below the
+            // exact terminal receipt at 3405. Its seal alone cannot open E.
+            BOOST_CHECK(!Access::TryHistoricalPaymentAudit(*handler, audits.back(), context).has_value());
+            BOOST_CHECK(!HistoricalTransition());
+            Access::RequestPaymentAuditDependency(*handler);
+            BOOST_REQUIRE_GT(Access::PaymentAuditLastRequest(*handler).count(), 0);
+            peer.Request(receipts.back().audit_witness_id);
+            peer.Deliver(audits.back());
+            stalled = Access::PaymentAuditSealRequestState(*handler);
+            BOOST_REQUIRE(stalled);
+            BOOST_CHECK(Access::HasNeededPaymentAuditSeal(*handler));
+            BOOST_CHECK(!HistoricalTransition());
+            peer.connman.FlushSendBuffer(*peer.node);
+            Access::RequestPaymentAuditDependency(*handler);
+            BOOST_CHECK(Access::PaymentAuditSealRequestState(*handler) == stalled);
+            BOOST_CHECK_EQUAL(peer.Queued(NetMsgType::GETPQPOSE), 0U);
+        }
+        // Only the null tail advanced. The actual scheduler must relinquish
+        // this exact ordinary-seal graph and request the audit once it is deep.
+        Access::RequestPaymentAuditDependency(*handler);
+        BOOST_CHECK(!Access::HasPendingPaymentAuditSeal(*handler));
+        BOOST_CHECK(!Access::HasNeededPaymentAuditSeal(*handler));
+        BOOST_CHECK_EQUAL(peer.Queued(NetMsgType::GETPQPOSE), 1U);
+        const auto retry_time{Access::PaymentAuditLastRequest(*handler)};
+        Access::RequestPaymentAuditDependency(*handler);
+        BOOST_CHECK(Access::PaymentAuditLastRequest(*handler) == retry_time);
+        BOOST_CHECK_EQUAL(peer.Queued(NetMsgType::GETPQPOSE), 1U);
+        SetMockTime(GetTime<std::chrono::seconds>() +
+            ChainLockRequestTracker::SOURCE_FAILURE_COOLDOWN + std::chrono::seconds{1});
+        auto wrong_branch{audits.back()};
+        wrong_branch.statement.seal_statement.block_hash = NonNullHash(1'250'101);
+        BOOST_CHECK(!Access::TryHistoricalPaymentAudit(*handler, wrong_branch, context).value_or(false));
+        BOOST_CHECK(!HistoricalTransition());
+        ++markers.active->revision;
+        Access::SetReplayMarkers(*handler, {}, markers);
+        BOOST_CHECK(!Access::TryHistoricalPaymentAudit(*handler, audits.back(), context).value_or(false));
+        context = RequestHistoricalReplay();
+        peer.Request(receipts.back().audit_witness_id);
+        peer.Deliver(audits.back());
+        const auto proof{HistoricalTransition()};
+        BOOST_REQUIRE(proof);
+        const auto* transition{llmq::GetVerifiedPaymentAuditReceiptTransition(proof)};
+        BOOST_REQUIRE(transition);
+        BOOST_CHECK(transition->Result().StateHash() == receipts.back().next_probation_state_hash);
+        BOOST_CHECK(Access::HasPendingPaymentAuditReceipt(*handler));
+        CheckNoHistoricalArchives();
+        Replay();
+        BOOST_CHECK_EQUAL(Access::PaymentReplayValidatedHeight(*handler), tip_height);
+        BOOST_CHECK(Access::PaymentReplayAuthenticated(*handler, *chain[FIRST_CARRIER]));
+        CheckBlocked();
+
+        // The signed capability is deliberately absent from every durable
+        // archive. Restart must discover and verify the terminal proof again.
+        ReopenHandler();
+        BOOST_CHECK(!HistoricalTransition());
+        BOOST_CHECK_EQUAL(Access::PaymentReplayValidatedHeight(*handler), -1);
+        CheckNoHistoricalArchives();
+        context = RequestHistoricalReplay();
+        peer.Request(receipts.back().audit_witness_id);
+        peer.Deliver(audits.back());
+        const auto held_proof{HistoricalTransition()};
+        BOOST_REQUIRE(held_proof);
+        Replay();
+        BOOST_REQUIRE_EQUAL(Access::PaymentReplayValidatedHeight(*handler), tip_height);
+        bool source_changed{false};
+        engine->on_query = [&] {
+            source_changed = true;
+            ++markers.active->revision;
+            Access::SetReplayMarkers(*handler, {}, markers);
+        };
+        engine->flush_available = true;
+        Replay();
+        BOOST_REQUIRE(source_changed);
+        BOOST_CHECK(!HistoricalTransition());
+        BOOST_CHECK(!Access::PaymentReplayAuthenticated(*handler, *chain[FIRST_CARRIER]));
+        Replay();
+        BOOST_CHECK_EQUAL(Access::PaymentReplayValidatedHeight(*handler), FIRST_CARRIER - 1);
+        CheckBlocked();
+        context = RequestHistoricalReplay();
+        peer.Request(receipts.back().audit_witness_id);
+        peer.Deliver(audits.back());
+        BOOST_REQUIRE(HistoricalTransition());
+        engine->reported_hash = NonNullHash(1'250'102);
+        Replay();
+        CheckBlocked();
+        engine->reported_hash.reset();
+        engine->wrong_final_tip = true;
+        for (std::size_t attempt{0}; attempt < 32 && engine->count < replay_hashes.size(); ++attempt) Replay();
+        BOOST_REQUIRE_EQUAL(engine->count, replay_hashes.size());
+        CheckBlocked(replay_hashes.size());
+        engine->wrong_final_tip = false;
+        CompleteReplay();
+        CheckNoHistoricalArchives();
+    }
+
+    void CheckHistoricalInvalidSignature() EXCLUSIVE_LOCKS_REQUIRED(!::cs_main)
+    {
+        BOOST_REQUIRE(signed_terminal && invalid_terminal_signature);
+        LOCK(NetEventsInterface::g_msgproc_mutex);
+        ActiveDIP active_dip{const_cast<Consensus::Params&>(m_node.chainman->GetConsensus())};
+        AuditPeer peer{m_node};
+        peer.Handshake();
+        const auto context{RequestHistoricalReplay()};
+        BOOST_REQUIRE(audits.back().IsStructurallyValid());
+        BOOST_REQUIRE(audits.back().GetWitnessId(genesis) == receipts.back().audit_witness_id);
+        const auto attempted{Access::TryHistoricalPaymentAudit(*handler, audits.back(), context)};
+        BOOST_REQUIRE(attempted.has_value());
+        BOOST_CHECK(!*attempted);
+        peer.Request(receipts.back().audit_witness_id);
+        peer.Deliver(audits.back());
+        BOOST_CHECK(!HistoricalTransition());
+        BOOST_CHECK(!Access::HasPendingPaymentAuditSeal(*handler));
+        CheckNoHistoricalArchives();
+        CheckBlocked();
+    }
+
+    void CheckHistoricalIngressBeforeArchiveDuplicate() EXCLUSIVE_LOCKS_REQUIRED(!::cs_main)
+    {
+        BOOST_REQUIRE(signed_terminal && !invalid_terminal_signature);
+        LOCK(NetEventsInterface::g_msgproc_mutex);
+        ActiveDIP active_dip{const_cast<Consensus::Params&>(m_node.chainman->GetConsensus())};
+        AuditPeer peer{m_node};
+        peer.Handshake();
+        (void)RequestHistoricalReplay();
+        peer.Request(receipts.back().audit_witness_id);
+        // Model an already-verified ordinary archive appearing while the
+        // exact response is in flight. Duplicate accounting must not bypass
+        // creation of the separately needed replay capability.
+        BOOST_REQUIRE(Access::AuditStore(*handler).AcceptVerified(
+            Access::VerifiedPaymentAudit(audits.back()), /*required_witness=*/true) ==
+            llmq::pq::PaymentAuditStoreResult::ACCEPTED);
+        BOOST_CHECK(!HistoricalTransition());
+        peer.Deliver(audits.back());
+        BOOST_REQUIRE(HistoricalTransition());
+        BOOST_REQUIRE(Access::AuditStore(*handler).Get(receipts.back().audit_witness_id));
+        CheckNoHistoricalOrdinaryAuthority();
+    }
+
     void CheckIntermediateRoots()
     {
         AdmitAll();
@@ -3149,6 +3571,14 @@ struct LatePaymentAuditPresealSetup : TestingSetup {
     }
 };
 
+struct SignedLatePaymentAuditPresealSetup : LatePaymentAuditPresealSetup {
+    SignedLatePaymentAuditPresealSetup() : LatePaymentAuditPresealSetup{true} {}
+};
+
+struct InvalidSignedLatePaymentAuditPresealSetup : LatePaymentAuditPresealSetup {
+    InvalidSignedLatePaymentAuditPresealSetup() : LatePaymentAuditPresealSetup{true, true} {}
+};
+
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(pq_chainlock_handler_tests, BasicTestingSetup)
@@ -3175,6 +3605,36 @@ BOOST_FIXTURE_TEST_CASE(payment_preseal_ordinary_terminal_seal_skips_pruned_audi
                         LatePaymentAuditPresealSetup)
 {
     CheckCoveredPrefix(/*ordinary_seal=*/true);
+}
+
+BOOST_FIXTURE_TEST_CASE(payment_preseal_signed_historical_terminal_replays_without_ordinary_archives,
+                        SignedLatePaymentAuditPresealSetup)
+{
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(m_node.chainman->IsBaseBlockSyncComplete());
+    }
+    CheckHistoricalSignedReplay();
+}
+
+BOOST_FIXTURE_TEST_CASE(payment_preseal_historical_terminal_rejects_matching_invalid_signature,
+                        InvalidSignedLatePaymentAuditPresealSetup)
+{
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(m_node.chainman->IsBaseBlockSyncComplete());
+    }
+    CheckHistoricalInvalidSignature();
+}
+
+BOOST_FIXTURE_TEST_CASE(payment_preseal_historical_ingress_precedes_ordinary_archive_duplicate,
+                        SignedLatePaymentAuditPresealSetup)
+{
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(m_node.chainman->IsBaseBlockSyncComplete());
+    }
+    CheckHistoricalIngressBeforeArchiveDuplicate();
 }
 
 BOOST_FIXTURE_TEST_CASE(payment_preseal_tail_indexed_roots_must_match_authenticated_seal,
