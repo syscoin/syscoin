@@ -98,6 +98,7 @@
 #include <services/assetconsensus.h>
 #include <fstream>
 #include <cachemultimap.h>
+#include <nevm/rlp.h> // SYSCOIN: authenticate committed ancestry after a failed retry.
 #include <nevm/sha3.h>
 #include <core_io.h>
 #ifndef WIN32
@@ -3627,6 +3628,81 @@ static bool ShouldBypassExternalNEVMNotifyCalls(const ChainstateManager& chainma
     return bypass_height > 0 && nHeight <= bypass_height;
 }
 
+// SYSCOIN BEGIN: Classify immutable ancestry only after a failed live retry.
+static bool HasCommittedNEVMContinuityMismatch(
+    const BlockManager& blockman, const CBlock& block,
+    const CBlockIndex& index, const CNEVMHeader& commitment,
+    int64_t start) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    AssertLockHeld(cs_main);
+    if (start < 0 || index.nHeight < start) return false;
+    try {
+        const dev::RLP encoded{block.vchNEVMBlockData};
+        const auto block_fields{encoded.itemCount()};
+        if ((block_fields != 3 && block_fields != 4) ||
+            !encoded[1].isList() || !encoded[2].isList() ||
+            (block_fields == 4 && !encoded[3].isList())) return false;
+        const auto header{encoded[0]};
+        const auto fields{header.itemCount()};
+        // Match Geth's canonical Header encoding, including optional suffixes.
+        // Unknown formats and malformed representations provide no proof.
+        if (fields < 15 || fields > 21) return false;
+        for (size_t i{0}; i < fields; ++i) {
+            const auto field{header[i]};
+            if (!field.isData()) return false;
+            const auto size{field.size()};
+            switch (i) {
+            case 0: case 1: case 3: case 4: case 5: case 13:
+            case 16: case 19: case 20:
+                if (size != 32) return false;
+                break;
+            case 2:
+                if (size != 20) return false;
+                break;
+            case 6:
+                if (size != 256) return false;
+                break;
+            case 14:
+                if (size != 8) return false;
+                break;
+            case 7: case 8: case 15:
+                if (!field.isInt()) return false;
+                break;
+            case 9: case 10: case 11: case 17: case 18:
+                if (!field.isInt() || size > sizeof(uint64_t)) return false;
+                break;
+            default: // Extra data is an arbitrary byte string.
+                break;
+            }
+        }
+        const auto hash{dev::sha3(header.data())};
+        if (!std::equal(hash.begin(), hash.end(), commitment.nBlockHash.begin())) return false;
+        const uint64_t expected_number{static_cast<uint64_t>(int64_t{index.nHeight} - start + 1)};
+        const auto number{header[8]};
+        // Geth stores Number as big.Int. Do not truncate a committed overflow.
+        if (number.size() > sizeof(uint64_t) || number.toInt<uint64_t>() != expected_number) return true;
+        // The first NEVM parent is engine genesis, not a Core commitment.
+        if (index.nHeight == start || index.pprev == nullptr) return false;
+        CNEVMHeader parent_commitment;
+        if (index.pprev->nStatus & BLOCK_HAVE_DATA) {
+            CBlock parent;
+            bool mutated{false};
+            BlockValidationState state;
+            if (!blockman.ReadBlockFromDisk(parent, *index.pprev, /*load_auxiliary_data=*/false) ||
+                parent.vtx.empty() ||
+                BlockMerkleRoot(parent, &mutated) != index.pprev->hashMerkleRoot || mutated ||
+                !GetNEVMData(state, parent, parent_commitment)) return false;
+        } else if (!blockman.ReadNEVMPrunedHeader(parent_commitment, *index.pprev)) {
+            return false;
+        }
+        const auto parent_hash{header[0].payload()};
+        return !std::equal(parent_hash.begin(), parent_hash.end(), parent_commitment.nBlockHash.begin());
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+// SYSCOIN END: Classify immutable ancestry only after a failed live retry.
+
 // SYSCOIN: Authenticated BTCC catch-up may replay NEVM without treating an
 // equal-height but different Syscoin branch as already applied.
 bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMap &mapNEVMTxRoots, const CBlock& block, const CBlockIndex* pindex, const uint256& nBlockHash, const uint32_t& nHeight, const bool fJustCheck, PoDAMAPMemory &mapPoDA, const CDeterministicMNListNEVMAddressDiff &diff, bool btcc_prefix_authenticated, NEVMNotificationContext notification_context, std::optional<NEVMBlockReject>* rejection) {
@@ -3759,6 +3835,7 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
             }
         }
         bool retry_current{restarted};
+        bool recovered_prefix{false};
         if (!rejected_pair && !stateStr.empty() &&
             stateStr != "nevm-connect-consensus-invalid" &&
             stateStr != "nevm-connect-protocol-unsupported" &&
@@ -3788,6 +3865,7 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
                         return state.Error(recovery_error);
                     }
                 } else {
+                    recovered_prefix = true;
                     retry_current = true;
                 }
             }
@@ -3803,8 +3881,20 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
                 m_chainman.GetNotifications().exitWhenSynced();
                 return state.Error(stateStr);
             }
-            // The notifier matches this verdict to the requested
-            // pair. Unclassified engine errors must remain retryable.
+            // A generic continuity error is ambiguous until the selected
+            // prefix has been recovered. After its failed retry, authenticate
+            // the candidate header itself before retiring an immutable fault.
+            if (recovered_prefix && !rejected_pair &&
+                stateStr == "nevm-connect-response-invalid-data") {
+                LOCK(cs_main);
+                if (HasCommittedNEVMContinuityMismatch(
+                        m_blockman, block, *pindex, nevmBlockHeader,
+                        m_chainman.GetConsensus().nNEVMStartBlock)) {
+                    stateStr = "nevm-connect-consensus-invalid";
+                }
+            }
+            // Both the notifier and local continuity proof bind the verdict
+            // to this pair. Unclassified engine errors must remain retryable.
             if(stateStr == "nevm-connect-consensus-invalid") {
                 if (rejection) {
                     *rejection = NEVMBlockReject{
