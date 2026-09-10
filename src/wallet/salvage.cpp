@@ -146,6 +146,7 @@ bool RecoverDatabaseFile(const ArgsManager& args, const fs::path& file_path, bil
         return false;
     }
 
+    // SYSCOIN BEGIN: Refuse lossy salvage of independent PQ voting secrets.
     // Legacy salvage cannot validate these independent secrets and their
     // mandatory flag. Refuse before replacing the source with a lossy wallet.
     for (const auto& row : salvagedData) {
@@ -169,6 +170,7 @@ bool RecoverDatabaseFile(const ArgsManager& args, const fs::path& file_path, bil
             return false;
         }
     }
+    // SYSCOIN END: Refuse lossy salvage of independent PQ voting secrets.
 
     const std::string newFilename{strprintf("%s.%d.bak", filename, GetTime())};
     result = env->dbenv->dbrename(nullptr, filename.c_str(), nullptr,

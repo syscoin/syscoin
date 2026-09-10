@@ -62,11 +62,13 @@ static const char *MSG_RAWMEMPOOLTX  = "rawmempooltx";
 static const char *MSG_HASHGVOTE     = "hashgovernancevote";
 static const char *MSG_HASHGOBJ      = "hashgovernanceobject";
 static const char *MSG_SEQUENCE  = "sequence";
+// SYSCOIN BEGIN: NEVM request timeouts and socket serialization.
 static constexpr int NEVM_STATUS_TIMEOUT_MS{2000};
 static constexpr int NEVM_COMMS_TIMEOUT_MS{150000};
 static constexpr int NEVM_DISCONNECT_TIMEOUT_MS{30000};
 static constexpr int NEVM_PAYLOAD_CHECK_TIMEOUT_MS{5000};
 RecursiveMutex cs_nevm;
+// SYSCOIN END: NEVM request timeouts and socket serialization.
 
 // Internal function to send multipart message
 static int zmq_send_multipart(void *sock, const void* data, size_t size, ...)
@@ -111,6 +113,7 @@ static int zmq_send_multipart(void *sock, const void* data, size_t size, ...)
     return 0;
 }
 
+// SYSCOIN BEGIN: Configure NEVM receive timeouts.
 static bool SetNEVMReceiveTimeout(void* socket, int timeout_ms)
 {
     if (!socket) {
@@ -123,6 +126,7 @@ static bool SetNEVMReceiveTimeout(void* socket, int timeout_ms)
     }
     return true;
 }
+// SYSCOIN END: Configure NEVM receive timeouts.
 static bool IsZMQAddressIPV6(const std::string &zmq_address)
 {
     const std::string tcp_prefix = "tcp://";
@@ -135,6 +139,7 @@ static bool IsZMQAddressIPV6(const std::string &zmq_address)
     }
     return false;
 }
+// SYSCOIN BEGIN: Receive multipart NEVM request responses.
 // Internal function to receive multipart message
 static int zmq_receive_multipart(void *socket, std::vector<std::string>& parts)
 {
@@ -161,15 +166,19 @@ static int zmq_receive_multipart(void *socket, std::vector<std::string>& parts)
     zmq_msg_close (&part); } while (more);
     return 0;
 }
+// SYSCOIN END: Receive multipart NEVM request responses.
 
+// SYSCOIN: Extend Bitcoin notifier initialization with an NEVM request context.
 bool CZMQAbstractPublishNotifier::Initialize(void *pcontext, void *pcontextsub)
 {
+    // SYSCOIN: Neither the publisher nor NEVM request socket may be initialized.
     assert(!psocket && !psocketsub);
 
     // check if address is being used by other publish notifier
     std::multimap<std::string, CZMQAbstractPublishNotifier*>::iterator i = mapPublishNotifiers.find(address);
     if (i==mapPublishNotifiers.end())
     {
+        // SYSCOIN BEGIN: Select NEVM request setup or the retained Bitcoin publisher setup.
         if(!addresssub.empty()) {
             psocketsub = zmq_socket(pcontextsub, ZMQ_REQ);
             if (!psocketsub)
@@ -216,6 +225,7 @@ bool CZMQAbstractPublishNotifier::Initialize(void *pcontext, void *pcontextsub)
             }
             LogPrint(BCLog::ZMQ, "REQ subscribed on address %s\n", addresssub);
         } else {
+        // SYSCOIN END: Select NEVM request setup or the retained Bitcoin publisher setup.
             psocket = zmq_socket(pcontext, ZMQ_PUB);
             if (!psocket)
             {
@@ -251,10 +261,12 @@ bool CZMQAbstractPublishNotifier::Initialize(void *pcontext, void *pcontextsub)
             rc = zmq_bind(psocket, address.c_str());
             if (rc != 0)
             {
+                // SYSCOIN: Distinguish publisher failures from NEVM request-socket failures.
                 zmqError("Failed to bind address for publisher");
                 zmq_close(psocket);
                 return false;
             }
+        // SYSCOIN: Close the socket-selection wrapper around Bitcoin publisher setup.
         }
         // register this notifier for the address, so it can be reused for other publish notifier
         mapPublishNotifiers.insert(std::make_pair(address, this));
@@ -262,10 +274,12 @@ bool CZMQAbstractPublishNotifier::Initialize(void *pcontext, void *pcontextsub)
     }
     else
     {
+        // SYSCOIN: Include the NEVM request endpoint when reusing a notifier socket.
         LogPrint(BCLog::ZMQ, "Reusing socket for address %s, subscriber %s\n", address, addresssub);
         LogPrint(BCLog::ZMQ, "Outbound message high water mark for %s at %s is %d\n", type, address, outbound_message_high_water_mark);
 
         psocket = i->second->psocket;
+        // SYSCOIN: Share the NEVM request socket with other notifiers at this address.
         psocketsub = i->second->psocketsub;
         mapPublishNotifiers.insert(std::make_pair(address, this));
 
@@ -276,6 +290,7 @@ bool CZMQAbstractPublishNotifier::Initialize(void *pcontext, void *pcontextsub)
 void CZMQAbstractPublishNotifier::Shutdown()
 {
     // Early return if Initialize was not called
+    // SYSCOIN: Keep shutdown active when only the NEVM request socket exists.
     if (!psocket && !psocketsub) return;
 
     int count = mapPublishNotifiers.count(address);
@@ -296,20 +311,23 @@ void CZMQAbstractPublishNotifier::Shutdown()
     if (count == 1)
     {
         LogPrint(BCLog::ZMQ, "Close socket at address %s\n", address);
+        // SYSCOIN BEGIN: Guard retained Bitcoin publisher cleanup when using NEVM-only sockets.
         if(psocket) {
             int linger = 0;
             zmq_setsockopt(psocket, ZMQ_LINGER, &linger, sizeof(linger));
             zmq_close(psocket);
         }
-        // SYSCOIN
+        // SYSCOIN END: Guard retained Bitcoin publisher cleanup when using NEVM-only sockets.
+        // SYSCOIN BEGIN: Close the NEVM request socket on its final reference.
         if(psocketsub) {
             int linger = 0;
             zmq_setsockopt(psocketsub, ZMQ_LINGER, &linger, sizeof(linger));
             zmq_close(psocketsub);
         }
+        // SYSCOIN END: Close the NEVM request socket on its final reference.
     }
     psocket = nullptr;
-    // SYSCOIN
+    // SYSCOIN: Clear the released NEVM request-socket handle.
     psocketsub = nullptr;
 }
 
@@ -329,6 +347,7 @@ bool CZMQAbstractPublishNotifier::SendZmqMessage(const char *command, const void
 
     return true;
 }
+// SYSCOIN BEGIN: Send NEVM requests without Bitcoin publication sequence numbers.
 bool CZMQAbstractPublishNotifier::SendZmqMessageNEVM(const char *command, const void* data, size_t size)
 {
     assert(psocketsub);
@@ -341,6 +360,7 @@ bool CZMQAbstractPublishNotifier::SendZmqMessageNEVM(const char *command, const 
 
     return true;
 }
+// SYSCOIN END: Send NEVM requests without Bitcoin publication sequence numbers.
 
 // SYSCOIN
 bool CZMQAbstractPublishNotifier::ReceiveZmqMessage(std::vector<std::string>& parts)

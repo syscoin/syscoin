@@ -157,6 +157,7 @@ bool WalletBatch::WriteMasterKey(unsigned int nID, const CMasterKey& kMasterKey)
     return WriteIC(std::make_pair(DBKeys::MASTER_KEY, nID), kMasterKey, true);
 }
 
+// SYSCOIN BEGIN: Persist independent plaintext and encrypted PQ voting keys.
 bool WalletBatch::WriteVotingKey(const slhdsa::PublicKey& public_key,
                                 const CKeyingMaterial& secret)
 {
@@ -173,6 +174,7 @@ bool WalletBatch::WriteCryptedVotingKey(const slhdsa::PublicKey& public_key,
     }
     return !erase_plaintext || EraseIC(std::make_pair(DBKeys::PQ_VOTING_KEY, public_key));
 }
+// SYSCOIN END: Persist independent plaintext and encrypted PQ voting keys.
 
 bool WalletBatch::WriteCScript(const uint160& hash, const CScript& redeemScript)
 {
@@ -1186,6 +1188,7 @@ static DBErrors LoadDecryptionKeys(CWallet* pwallet, DatabaseBatch& batch) EXCLU
     return mkey_res.m_result;
 }
 
+// SYSCOIN BEGIN: Validate and load independent PQ voting-key records.
 static DBErrors LoadVotingKeys(CWallet* pwallet, DatabaseBatch& batch) EXCLUSIVE_LOCKS_REQUIRED(pwallet->cs_wallet)
 {
     const auto plain = LoadRecords(pwallet, batch, DBKeys::PQ_VOTING_KEY,
@@ -1216,6 +1219,7 @@ static DBErrors LoadVotingKeys(CWallet* pwallet, DatabaseBatch& batch) EXCLUSIVE
         });
     return std::max(plain.m_result, encrypted.m_result);
 }
+// SYSCOIN END: Validate and load independent PQ voting-key records.
 
 DBErrors WalletBatch::LoadWallet(CWallet* pwallet)
 {

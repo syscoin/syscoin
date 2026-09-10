@@ -710,14 +710,22 @@ bool BlockManager::WriteBlockIndexDB()
     AssertLockHeld(::cs_main);
     std::vector<std::pair<int, const CBlockFileInfo*>> vFiles;
     vFiles.reserve(m_dirty_fileinfo.size());
+    // SYSCOIN BEGIN: Retain dirty file entries while collecting the Bitcoin database batch.
     for (const int file : m_dirty_fileinfo) {
         vFiles.emplace_back(file, &m_blockfile_info[file]);
+        // SYSCOIN: Bitcoin erased here; defer clearing until WriteBatchSync succeeds.
+        // m_dirty_fileinfo.erase(it++);
     }
+    // SYSCOIN END: Retain dirty file entries while collecting the Bitcoin database batch.
     std::vector<const CBlockIndex*> vBlocks;
     vBlocks.reserve(m_dirty_blockindex.size());
+    // SYSCOIN BEGIN: Retain dirty block entries while collecting the Bitcoin database batch.
     for (const CBlockIndex* block : m_dirty_blockindex) {
         vBlocks.push_back(block);
+        // SYSCOIN: Bitcoin erased here; defer clearing until WriteBatchSync succeeds.
+        // m_dirty_blockindex.erase(it++);
     }
+    // SYSCOIN END: Retain dirty block entries while collecting the Bitcoin database batch.
     int max_blockfile = WITH_LOCK(cs_LastBlockFile, return this->MaxBlockfileNum());
     if (!m_block_tree_db->WriteBatchSync(vFiles, max_blockfile, vBlocks)) {
         return false;
@@ -1294,6 +1302,7 @@ bool BlockManager::WriteUndoDataForBlock(const CBlockUndo& blockundo, BlockValid
     return true;
 }
 
+// SYSCOIN: Factor Bitcoin disk reading into a shared block/AuxPoW-header template.
 /* Generic implementation of block reading that can handle
    both a block and its header.  */
 
@@ -1317,6 +1326,7 @@ bool BlockManager::ReadBlockOrHeader(T& block, const FlatFilePos& pos) const
     }
     const auto& consensus = GetConsensus();
     // Check the header
+    // SYSCOIN: Replace Bitcoin CheckProofOfWork with AuxPoW-aware header validation.
     if (!HasValidProofOfWork({block}, consensus))
         return error("ReadBlockFromDisk: Errors in block header at %s", pos.ToString());
 
@@ -1327,6 +1337,7 @@ bool BlockManager::ReadBlockOrHeader(T& block, const FlatFilePos& pos) const
 
     return true;
 }
+// SYSCOIN: Adapt the Bitcoin index-based reader to the block/header template.
 template<typename T>
 bool BlockManager::ReadBlockOrHeader(T& block, const CBlockIndex& pindex) const
 {
@@ -1340,6 +1351,7 @@ bool BlockManager::ReadBlockOrHeader(T& block, const CBlockIndex& pindex) const
     return true;
 }
 
+// SYSCOIN BEGIN: Wrap shared disk readers with optional NEVM auxiliary-data loading.
 bool BlockManager::ReadBlockFromDisk(CBlock& block, const FlatFilePos& pos) const
 {
     auto res = ReadBlockOrHeader(block, pos);
@@ -1361,6 +1373,7 @@ bool BlockManager::ReadBlockFromDisk(CBlock& block, const CBlockIndex& index, bo
     }
     return res;
 }
+// SYSCOIN END: Wrap shared disk readers with optional NEVM auxiliary-data loading.
 
 // SYSCOIN BEGIN: Recover canonical NEVM roots from retained coinbase evidence.
 bool BlockManager::ReadNEVMPrunedHeader(CNEVMHeader& header, const CBlockIndex& index) const
@@ -1450,6 +1463,7 @@ FlatFilePos BlockManager::SaveBlockToDisk(const CBlock& block, int nHeight, cons
     return blockPos;
 }
 
+// SYSCOIN BEGIN: Durable NEVM payload replacement and reindex adoption.
 bool BlockManager::ReplaceNEVMBlockData(BlockValidationState& state,
                                        CBlockIndex& index,
                                        Span<const uint8_t> payload)
@@ -1561,6 +1575,7 @@ bool BlockManager::AdoptNEVMBlockDataForReindex(BlockValidationState& state,
         return state.Error(strprintf("nevm-payload-reindex-storage-error:%s", e.what()));
     }
 }
+// SYSCOIN END: Durable NEVM payload replacement and reindex adoption.
 
 class ImportingNow
 {
@@ -1585,9 +1600,11 @@ void ImportBlocks(ChainstateManager& chainman, std::vector<fs::path> vImportFile
 
     {
         ImportingNow imp{chainman.m_blockman.m_importing};
+        // SYSCOIN: Retain the starting reindex state through activation handling.
         const bool reindexing{fReindex.load()};
 
         // -reindex
+        // SYSCOIN: Use the retained reindex state while the durable marker remains set.
         if (reindexing) {
             int nFile = 0;
             // Map of disk positions for blocks with unknown parent (only used for reindex);
@@ -1610,6 +1627,11 @@ void ImportBlocks(ChainstateManager& chainman, std::vector<fs::path> vImportFile
                 }
                 nFile++;
             }
+            // SYSCOIN BEGIN: Move Bitcoin reindex completion after best-chain activation handling.
+            // WITH_LOCK(::cs_main, chainman.m_blockman.m_block_tree_db->WriteReindexing(false));
+            // fReindex = false;
+            // LogPrintf("Reindexing finished\n");
+            // SYSCOIN END: Move Bitcoin reindex completion after best-chain activation handling.
             // To avoid ending up in a situation without genesis block, re-try initializing (no-op if reindexing worked):
             chainman.ActiveChainstate().LoadGenesisBlock();
         }
@@ -1637,6 +1659,7 @@ void ImportBlocks(ChainstateManager& chainman, std::vector<fs::path> vImportFile
         for (Chainstate* chainstate : WITH_LOCK(::cs_main, return chainman.GetAll())) {
             BlockValidationState state;
             if (!chainstate->ActivateBestChain(state, nullptr)) {
+                // SYSCOIN BEGIN: Allow durable NEVM repair to defer best-chain activation after import.
                 if (state.IsError() &&
                     state.GetRejectReason() == "nevm-payload-repair-pending" &&
                     WITH_LOCK(::cs_main, return chainman.HasDurableNEVMPayloadRepair())) {
@@ -1647,10 +1670,12 @@ void ImportBlocks(ChainstateManager& chainman, std::vector<fs::path> vImportFile
                     LogPrintf("Best-chain activation deferred while durable NEVM payload repair is pending\n");
                     continue;
                 }
+                // SYSCOIN END: Allow durable NEVM repair to defer best-chain activation after import.
                 chainman.GetNotifications().fatalError(strprintf("Failed to connect best block (%s)", state.ToString()));
                 return;
             }
         }
+        // SYSCOIN BEGIN: Complete reindex after activation handling and check durable marker clearing.
         if (reindexing) {
             const bool marker_cleared{WITH_LOCK(
                 ::cs_main,
@@ -1665,6 +1690,7 @@ void ImportBlocks(ChainstateManager& chainman, std::vector<fs::path> vImportFile
             fReindex = false;
             LogPrintf("Reindexing finished\n");
         }
+        // SYSCOIN END: Complete reindex after activation handling and check durable marker clearing.
         // SYSCOIN
         if(pdsNotificationInterface)
             pdsNotificationInterface->InitializeCurrentBlockTip(chainman);

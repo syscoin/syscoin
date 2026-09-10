@@ -981,7 +981,9 @@ bool CTxMemPool::existsConflicts(const CTransaction &tx) const
 void CTxMemPool::removeConflicts(const CTransaction &tx)
 {
     // Remove transactions which depend on inputs of tx, recursively
+    // SYSCOIN BEGIN: Protect masternode-dependent eviction with the chain lock.
     AssertLockHeld(cs_main);
+    // SYSCOIN END: Require the chain lock for masternode-dependent eviction.
     AssertLockHeld(cs);
     for (const CTxIn &txin : tx.vin) {
         auto it = mapNextTx.find(txin.prevout);
@@ -989,6 +991,8 @@ void CTxMemPool::removeConflicts(const CTransaction &tx)
             const CTransaction &txConflict = *it->second;
             if (txConflict != tx)
             {
+                // SYSCOIN BEGIN: Extend Bitcoin conflict eviction to remove
+                // masternode updates referring to a displaced registration.
                 if (txConflict.nVersion == SYSCOIN_TX_VERSION_MN_REGISTER) {
                     // Remove all other protxes which refer to this protx
                     // NOTE: Can't use equal_range here as every call to removeRecursive might invalidate iterators
@@ -1006,6 +1010,7 @@ void CTxMemPool::removeConflicts(const CTransaction &tx)
                         }
                     }
                 }
+                // SYSCOIN END: Evict dependants of the displaced registration.
                 ClearPrioritisation(txConflict.GetHash());
                 removeRecursive(txConflict, MemPoolRemovalReason::CONFLICT);
             }

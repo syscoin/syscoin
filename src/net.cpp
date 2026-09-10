@@ -2099,11 +2099,13 @@ void CConnman::NotifyNumConnectionsChanged()
         nodes_size = m_nodes.size();
     }
 
+    // SYSCOIN BEGIN: Reset masternode sync when connectivity crosses zero.
     // If we had zero connections before and new connections now or if we just dropped
     // to zero connections reset the sync process if its outdated.
     if ((nodes_size > 0 && nPrevNodeCount == 0) || (nodes_size == 0 && nPrevNodeCount > 0)) {
         masternodeSync.Reset();
     }
+    // SYSCOIN END: Reset masternode sync when connectivity crosses zero.
 
     if(nodes_size != nPrevNodeCount) {
         nPrevNodeCount = nodes_size;
@@ -2716,6 +2718,7 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect)
                 } // no default case, so the compiler can warn about missing cases
             }
         }
+        // SYSCOIN BEGIN: Collect authenticated masternodes during outbound selection.
         std::set<uint256> setConnectedMasternodes;
         {
             LOCK(m_nodes_mutex);
@@ -2726,6 +2729,7 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect)
                 }
             }
         }
+        // SYSCOIN END: Collect authenticated masternodes during outbound selection.
         ConnectionType conn_type = ConnectionType::OUTBOUND_FULL_RELAY;
         auto now = GetTime<std::chrono::microseconds>();
         bool anchor = false;
@@ -3846,8 +3850,10 @@ void CConnman::StopThreads()
     }
     if (threadMessageHandler.joinable())
         threadMessageHandler.join();
+    // SYSCOIN BEGIN: Join the dedicated masternode connection thread.
     if (threadOpenMasternodeConnections.joinable())
         threadOpenMasternodeConnections.join();
+    // SYSCOIN END: Join the dedicated masternode connection thread.
     if (threadOpenConnections.joinable())
         threadOpenConnections.join();
     if (threadOpenAddedConnections.joinable())
@@ -4423,6 +4429,7 @@ void CConnman::PushMessage(CNode* pnode, CSerializedNetMsg&& msg)
     }
     if (nBytesSent) RecordBytesSent(nBytesSent);
 }
+// SYSCOIN BEGIN: Extend Bitcoin ForNode callbacks with address and condition filters.
 bool CConnman::ForNode(const CService& addr, std::function<bool(const CNode* pnode)> cond, std::function<bool(CNode* pnode)> func)
 {
     CNode* found = nullptr;
@@ -4448,6 +4455,7 @@ bool CConnman::ForNode(NodeId id, std::function<bool(const CNode* pnode)> cond, 
     }
     return found != nullptr && cond(found) && func(found);
 }
+// SYSCOIN END: Extend Bitcoin ForNode callbacks with address and condition filters.
 // SYSCOIN
 bool CConnman::IsMasternodeOrDisconnectRequested(const CService& addr) {
     const auto status{GetMasternodeConnectionStatus(addr)};

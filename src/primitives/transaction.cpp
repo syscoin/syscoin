@@ -28,6 +28,7 @@
 #pragma GCC diagnostic pop
 #endif
 
+// SYSCOIN BEGIN: Encode and validate legacy and BLAKE2s NEVM version hashes.
 bool IsValidNEVMVersionHash(const std::vector<uint8_t>& vchVersionHash)
 {
     if (vchVersionHash.size() == NEVM_DATA_LEGACY_VERSIONHASH_SIZE) {
@@ -71,6 +72,7 @@ std::vector<uint8_t> EncodeNEVMVersionHash(const std::vector<uint8_t>& hash_dige
     encoded_hash.insert(encoded_hash.end(), hash_digest.begin(), hash_digest.end());
     return encoded_hash;
 }
+// SYSCOIN END: Encode and validate NEVM version hashes.
 
 bool fTestNet = false;
 std::string COutPoint::ToString() const

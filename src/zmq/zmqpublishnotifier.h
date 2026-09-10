@@ -47,7 +47,7 @@ public:
     bool Initialize(void *pcontext, void *pcontextsub) override;
     void Shutdown() override;
 };
-// SYSCOIN
+// SYSCOIN BEGIN: NEVM request and response notifier interfaces.
 class CZMQPublishNEVMCommsNotifier : public CZMQAbstractPublishNotifier
 {
 public:
@@ -79,6 +79,7 @@ class CZMQPublishNEVMBlockDisconnectNotifier : public CZMQAbstractPublishNotifie
 public:
     bool NotifyNEVMBlockDisconnect(std::string &state, const uint256& nBlockHash, const CDeterministicMNListNEVMAddressDiff &diff) override;
 };
+// SYSCOIN END: NEVM request and response notifier interfaces.
 class CZMQPublishHashBlockNotifier : public CZMQAbstractPublishNotifier
 {
 public:

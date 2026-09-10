@@ -22,7 +22,7 @@
 #include <merkleblock.h>
 #include <netbase.h>
 #include <netmessagemaker.h>
-#include <nevm/response.h>
+#include <nevm/response.h> // SYSCOIN: NEVM response and payload-repair types.
 #include <node/blockstorage.h>
 #include <node/txreconciliation.h>
 #include <policy/fees.h>
@@ -2395,9 +2395,11 @@ struct CNodeState {
     //! Since when we're stalling block download progress (in microseconds), or 0.
     std::chrono::microseconds m_stalling_since{0us};
     std::list<QueuedBlock> vBlocksInFlight;
+    // SYSCOIN BEGIN: Track retired NEVM payload responses per connection.
     // BLOCK has no request nonce. Drain a retired repair response before
     // assigning another repair generation to this connection.
     std::optional<uint256> m_stale_nevm_payload_request;
+    // SYSCOIN END: Track retired NEVM payload responses per connection.
     //! When the first entry in vBlocksInFlight started downloading. Don't care when vBlocksInFlight is empty.
     std::chrono::microseconds m_downloading_since{0us};
     //! Whether we consider this a preferred download peer.
@@ -3022,6 +3024,7 @@ private:
     typedef std::multimap<uint256, std::pair<NodeId, std::list<QueuedBlock>::iterator>> BlockDownloadMap;
     BlockDownloadMap mapBlocksInFlight GUARDED_BY(cs_main);
 
+    // SYSCOIN BEGIN: NEVM payload-repair request ownership and retry state.
     std::optional<NEVMPayloadRepairRequest> m_nevm_payload_request GUARDED_BY(cs_main);
     std::optional<NodeId> m_nevm_payload_peer GUARDED_BY(cs_main);
     std::optional<NodeId> m_nevm_payload_last_peer GUARDED_BY(cs_main);
@@ -3032,6 +3035,7 @@ private:
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     void RefreshNEVMPayloadRequest(std::chrono::microseconds now)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    // SYSCOIN END: NEVM payload-repair request ownership and retry state.
 
     /** When our tip was last updated. */
     std::atomic<std::chrono::seconds> m_last_tip_update{0s};
@@ -3329,6 +3333,7 @@ bool PeerManagerImpl::BlockRequested(NodeId nodeid, const CBlockIndex& block, st
     return true;
 }
 
+// SYSCOIN BEGIN: Maintain NEVM payload-repair request generations.
 void PeerManagerImpl::ReleaseNEVMPayloadRequest(std::chrono::microseconds now, bool retire_response)
 {
     AssertLockHeld(cs_main);
@@ -3362,6 +3367,7 @@ void PeerManagerImpl::RefreshNEVMPayloadRequest(std::chrono::microseconds now)
         ReleaseNEVMPayloadRequest(now, /*retire_response=*/true);
     }
 }
+// SYSCOIN END: Maintain NEVM payload-repair request generations.
 
 void PeerManagerImpl::MaybeSetPeerAsAnnouncingHeaderAndIDs(NodeId nodeid)
 {
@@ -3777,6 +3783,7 @@ void ExpireGovernanceUploads(
 
 } // namespace
 
+// SYSCOIN BEGIN: Governance-page request preparation and lifecycle.
 std::optional<std::shared_ptr<
     const GovernancePageImmutableSnapshot>>
 PeerManagerImpl::PrepareGovernancePageRequest(
@@ -4212,6 +4219,7 @@ PeerManagerImpl::TakeGovernancePageResult()
     return m_governance_requests.TakePageResult(
         GetTime<std::chrono::microseconds>());
 }
+// SYSCOIN END: Governance-page request preparation and lifecycle.
 
 void PeerManagerImpl::PushNodeVersion(CNode& pnode, const Peer& peer)
 {
@@ -4383,9 +4391,11 @@ void PeerManagerImpl::FinalizeNode(const CNode& node)
     CNodeState *state = State(nodeid);
     assert(state != nullptr);
 
+    // SYSCOIN BEGIN: Release NEVM payload ownership when its peer is finalized.
     if (m_nevm_payload_peer == nodeid) {
         ReleaseNEVMPayloadRequest(GetTime<std::chrono::microseconds>(), /*retire_response=*/false);
     }
+    // SYSCOIN END: Release NEVM payload ownership when its peer is finalized.
 
     if (state->fSyncStarted)
         nSyncStarted--;
@@ -6167,6 +6177,7 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
         // always be punished.)
         return;
     }
+    // SYSCOIN BEGIN: Enforce negotiated byte limits for extended headers.
     size_t nSize = 0;
     for (const auto& header : headers) {
         nSize += GetSerializeSize(header, PROTOCOL_VERSION);
@@ -6176,6 +6187,7 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
             return;
         }
     }
+    // SYSCOIN END: Enforce negotiated byte limits for extended headers.
     const CBlockIndex *pindexLast = nullptr;
 
     // We'll set already_validated_work to true if these headers are
@@ -7730,21 +7742,26 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         // We must use CBlocks, as CBlockHeaders won't include the 0x00 nTx count at the end.
         std::vector<CBlock> vHeaders;
         unsigned nCount = 0;
+        // SYSCOIN: Account for variable-size AuxPoW headers.
         unsigned nSize = 0;
         LogPrint(BCLog::NET, "getheaders %d to %s from peer=%d\n", (pindex ? pindex->nHeight : -1), hashStop.IsNull() ? "end" : hashStop.ToString(), pfrom.GetId());
         for (; pindex; pindex = m_chainman.ActiveChain().Next(pindex))
         {
             const CBlockHeader &header = pindex->GetBlockHeader(m_chainman.m_blockman);
             ++nCount;
+            // SYSCOIN: Accumulate serialized header bytes for the negotiated limit.
             nSize += GetSerializeSize(header, PROTOCOL_VERSION);
             vHeaders.emplace_back(header);
             if (nCount >= MAX_HEADERS_RESULTS
                   || pindex->GetBlockHash() == hashStop)
                 break;
+            // SYSCOIN BEGIN: Stop extended-header batches at the byte threshold.
             if (pfrom.nVersion >= SIZE_HEADERS_LIMIT_VERSION
                   && nSize >= THRESHOLD_HEADERS_SIZE)
                 break;
+            // SYSCOIN END: Stop extended-header batches at the byte threshold.
         }
+        // SYSCOIN BEGIN: Condition Bitcoin header publication on the byte limit.
        /* Check maximum headers size before pushing the message
            if the peer enforces it.  This should not fail since we
            break above in the loop at the threshold and the threshold
@@ -7755,6 +7772,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             LogPrintf("ERROR: not pushing 'headers', too large\n");
         else
         {
+        // SYSCOIN END: Condition Bitcoin header publication on the byte limit.
+            // SYSCOIN: Include serialized bytes in extended-header publication diagnostics.
             LogPrint(BCLog::NET, "pushing %u headers, %u bytes\n", nCount, nSize);
             // pindex can be nullptr either if we sent m_chainman.ActiveChain().Tip() OR
             // if our peer has m_chainman.ActiveChain().Tip() (and thus we are sending an empty
@@ -7770,6 +7789,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             // in the SendMessages logic.
             nodestate->pindexBestHeaderSent = pindex ? pindex : m_chainman.ActiveChain().Tip();
             m_connman.PushMessage(&pfrom, msgMaker.Make(NetMsgType::HEADERS, vHeaders));
+        // SYSCOIN: Close the byte-limit wrapper around Bitcoin header publication.
         }
 
         return;
@@ -8297,9 +8317,11 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         bool forceProcessing = false;
         const uint256 hash(pblock->GetHash());
         bool min_pow_checked = false;
+        // SYSCOIN: Keep NEVM payload repair separate from ordinary block acceptance.
         std::optional<NEVMPayloadRepairRequest> payload_repair;
         {
             LOCK(cs_main);
+            // SYSCOIN BEGIN: Select repair responses and condition Bitcoin block accounting.
             RefreshNEVMPayloadRequest(GetTime<std::chrono::microseconds>());
             auto* node_state{State(pfrom.GetId())};
             if (node_state && node_state->m_stale_nevm_payload_request == hash) {
@@ -8314,6 +8336,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 payload_repair = m_nevm_payload_request;
             }
             if (!payload_repair) {
+            // SYSCOIN END: Select repair responses and condition Bitcoin block accounting.
                 // Always process the block if we requested it, since we may
                 // need it even when it's not a candidate for a new best tip.
                 forceProcessing = IsBlockRequested(hash);
@@ -8328,8 +8351,10 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 if (prev_block && prev_block->nChainWork + CalculateHeadersWork({pblock->GetBlockHeader()}) >= GetAntiDoSWorkThreshold()) {
                     min_pow_checked = true;
                 }
+            // SYSCOIN: Close the repair exclusion around Bitcoin block accounting.
             }
         }
+        // SYSCOIN BEGIN: Consume authenticated NEVM payload repair before ProcessBlock.
         if (payload_repair) {
             BlockValidationState repair_state;
             const bool repaired{m_chainman.ProcessNEVMPayloadRepair(
@@ -8356,6 +8381,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             }
             return;
         }
+        // SYSCOIN END: Consume authenticated NEVM payload repair before ProcessBlock.
         ProcessBlock(pfrom, pblock, forceProcessing, min_pow_checked);
         return;
     }
@@ -9426,12 +9452,14 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
 {
     AssertLockHeld(g_msgproc_mutex);
 
+    // SYSCOIN BEGIN: Retry local NEVM payload recovery before sending messages.
     if (m_chainman.HasPendingNEVMPayloadRepair() && !m_chainman.m_blockman.LoadingBlocks()) {
         std::string error;
         if (!m_chainman.MaybeRecoverNEVMPayload(error)) {
             LogPrint(BCLog::NET, "NEVM payload recovery deferred: %s\n", error);
         }
     }
+    // SYSCOIN END: Retry local NEVM payload recovery before sending messages.
 
     PeerRef peer = GetPeerRef(pto->GetId());
     if (!peer) return false;
@@ -9489,6 +9517,7 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
     {
         LOCK(cs_main);
         CNodeState &state = *State(pto->GetId());
+        // SYSCOIN BEGIN: Retire connections with stale NEVM payload requests.
         RefreshNEVMPayloadRequest(current_time);
         if (state.m_stale_nevm_payload_request) {
             // BLOCK has no request nonce. Retire the connection so a later
@@ -9499,6 +9528,7 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
             pto->fDisconnect = true;
             return true;
         }
+        // SYSCOIN END: Retire connections with stale NEVM payload requests.
 
         // Start block sync
         if (m_chainman.m_best_header == nullptr) {

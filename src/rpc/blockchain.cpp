@@ -108,6 +108,7 @@ static int ComputeNextBlockAndDepth(const CBlockIndex* tip, const CBlockIndex* b
     next = nullptr;
     return blockindex == tip ? 1 : -1;
 }
+// SYSCOIN BEGIN: Describe the AuxPoW coinbase and merged-mining proof in JSON.
 UniValue AuxpowToJSON(const CAuxPow& auxpow, Chainstate& chainstate)
 {
     UniValue result(UniValue::VOBJ);
@@ -142,6 +143,7 @@ UniValue AuxpowToJSON(const CAuxPow& auxpow, Chainstate& chainstate)
 
     return result;
 }
+// SYSCOIN END: Describe the AuxPoW coinbase and merged-mining proof in JSON.
 static const CBlockIndex* ParseHashOrHeight(const UniValue& param, ChainstateManager& chainman) {
     LOCK(::cs_main);
     CChain& active_chain = chainman.ActiveChain();
@@ -1340,6 +1342,7 @@ static RPCHelpMan verifychain()
     LOCK(cs_main);
 
     Chainstate& active_chainstate = chainman.ActiveChainstate();
+    // SYSCOIN BEGIN: Report unsupported verification levels after PQ activation.
     const auto result = CVerifyDB(chainman.GetNotifications()).VerifyDB(
         active_chainstate, chainman.GetParams().GetConsensus(), active_chainstate.CoinsTip(), check_level, check_depth);
     if (result == VerifyDBResult::UNSUPPORTED_CHECK_LEVEL) {
@@ -1347,6 +1350,7 @@ static RPCHelpMan verifychain()
             "Check level 4 is unavailable after PQ activation; use check levels 0 through 3");
     }
     return result == VerifyDBResult::SUCCESS;
+    // SYSCOIN END: Report unsupported verification levels after PQ activation.
 },
     };
 }

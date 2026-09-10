@@ -372,6 +372,7 @@ public:
     /** Store block on disk. If dbp is not nullptr, then it provides the known position of the block within a block file on disk. */
     FlatFilePos SaveBlockToDisk(const CBlock& block, int nHeight, const FlatFilePos* dbp);
 
+    // SYSCOIN BEGIN: NEVM payload replacement and reindex adoption interfaces.
     /**
      * Replace only the stored NEVM payload, preserving the block and its undo.
      * The caller must have authenticated the replacement with the engine.
@@ -394,6 +395,7 @@ public:
                                                   const CBlock& candidate,
                                                   const FlatFilePos& known_pos)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    // SYSCOIN END: NEVM payload replacement and reindex adoption interfaces.
 
     /** Whether running in -prune mode. */
     [[nodiscard]] bool IsPruneMode() const { return m_prune_mode; }

@@ -1726,6 +1726,7 @@ public:
      */
     bool ProcessNewBlock(const std::shared_ptr<const CBlock>& block, bool force_processing, bool min_pow_checked, bool* new_block) LOCKS_EXCLUDED(cs_main);
 
+    // SYSCOIN BEGIN: Expose durable NEVM payload repair and Geth reconciliation.
     bool HasPendingNEVMPayloadRepair() const;
     bool HasDurableNEVMPayloadRepair() const EXCLUSIVE_LOCKS_REQUIRED(cs_main)
     {
@@ -1743,6 +1744,7 @@ public:
     bool DiscoverNEVMPayloadRepair(uint64_t geth_count,
                                    const uint256& syscoin_hash,
                                    std::string& error) LOCKS_EXCLUDED(cs_main);
+    // SYSCOIN END: Expose NEVM payload repair and reconciliation.
 
     /**
      * Process incoming block headers.

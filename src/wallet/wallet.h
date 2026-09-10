@@ -307,10 +307,12 @@ class CWallet final : public WalletStorage, public interfaces::Chain::Notificati
 {
 private:
     CKeyingMaterial vMasterKey GUARDED_BY(cs_wallet);
+    // SYSCOIN BEGIN: Store and decrypt independent SLH-DSA voting keys.
     std::map<slhdsa::PublicKey, CKeyingMaterial> m_voting_keys GUARDED_BY(cs_wallet);
     std::map<slhdsa::PublicKey, std::vector<unsigned char>> m_crypted_voting_keys GUARDED_BY(cs_wallet);
 
     bool CheckVotingDecryptionKey(const CKeyingMaterial& master_key) const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+    // SYSCOIN END: Store and decrypt independent SLH-DSA voting keys.
 
     bool Unlock(const CKeyingMaterial& vMasterKeyIn, bool accept_no_keys = false);
 

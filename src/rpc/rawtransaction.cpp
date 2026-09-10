@@ -51,9 +51,11 @@ using node::FindCoins;
 using node::GetTransaction;
 using node::PSBTAnalysis;
 
+// SYSCOIN BEGIN: Expose the upstream helper for AuxPoW; defaults are in its header.
 void TxToJSON(const CTransaction& tx, const uint256 hashBlock, UniValue& entry,
                      Chainstate& active_chainstate, const CTxUndo* txundo,
                      TxVerbosity verbosity)
+// SYSCOIN END: Expose the upstream helper for AuxPoW; defaults are in its header.
 {
     CHECK_NONFATAL(verbosity >= TxVerbosity::SHOW_DETAILS);
     // Call into TxToUniv() in bitcoin-common to decode the transaction hex.
@@ -132,6 +134,7 @@ static std::vector<RPCResult> DecodeTxDoc(const std::string& txid_field_doc)
                 {RPCResult::Type::STR_AMOUNT, "asset_value", /*optional=*/true, "The asset value in " + CURRENCY_UNIT},
             }},
         }},
+        // SYSCOIN BEGIN: Document asset, provider, coinbase, and quorum transaction JSON.
         {RPCResult::Type::OBJ, "systx", /*optional=*/true, "",
         {
             {RPCResult::Type::STR, "txtype", "Transaction type"},
@@ -221,6 +224,7 @@ static std::vector<RPCResult> DecodeTxDoc(const std::string& txid_field_doc)
                 }}
             }}
         }}
+        // SYSCOIN END: Document asset, provider, coinbase, and quorum transaction JSON.
     };
 }
 

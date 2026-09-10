@@ -1113,6 +1113,7 @@ bool CWallet::EncryptWallet(const SecureString& strWalletPassphrase)
             return false;
         }
 
+        // SYSCOIN BEGIN: Encrypt independent voting secrets in the wallet transaction.
         std::map<slhdsa::PublicKey, std::vector<unsigned char>> encrypted_voting_keys;
         for (const auto& [public_key, secret] : m_voting_keys) {
             std::vector<unsigned char> encrypted;
@@ -1125,6 +1126,7 @@ bool CWallet::EncryptWallet(const SecureString& strWalletPassphrase)
             }
             encrypted_voting_keys.emplace(public_key, std::move(encrypted));
         }
+        // SYSCOIN END: Encrypt independent voting secrets in the wallet transaction.
 
         for (const auto& spk_man_pair : m_spk_managers) {
             auto spk_man = spk_man_pair.second.get();
@@ -1152,8 +1154,10 @@ bool CWallet::EncryptWallet(const SecureString& strWalletPassphrase)
         delete encrypted_batch;
         encrypted_batch = nullptr;
 
+        // SYSCOIN BEGIN: Publish encrypted voting-key state after the wallet commit.
         m_crypted_voting_keys = std::move(encrypted_voting_keys);
         m_voting_keys.clear();
+        // SYSCOIN END: Publish encrypted voting-key state after the wallet commit.
 
         Lock();
         Unlock(strWalletPassphrase);

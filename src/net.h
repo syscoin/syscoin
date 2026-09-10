@@ -1331,7 +1331,7 @@ public:
     RecursiveMutex& GetNodesMutex() const LOCK_RETURNED(m_nodes_mutex);
 
     void PushMessage(CNode* pnode, CSerializedNetMsg&& msg) EXCLUSIVE_LOCKS_REQUIRED(!m_total_bytes_sent_mutex);
-    // SYSCOIN
+    // SYSCOIN BEGIN: Extend Bitcoin node callbacks with fork connection filters.
     template<typename Callable>
     bool ForNode(NodeId id, Callable&& func)
     {
@@ -1434,6 +1434,7 @@ public:
     {
         ForEachNodeThen(FullyConnectedOnly, pre, post);
     }
+    // SYSCOIN END: Extend Bitcoin node callbacks with fork connection filters.
 
     // Addrman functions
     /**

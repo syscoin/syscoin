@@ -955,6 +955,7 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws, NEVMMintTxSet& mint
         }
     }
 
+    // SYSCOIN BEGIN: Validate PoDA sidecars before Bitcoin's missing-input checks.
     // Check sidecars after cheap policy checks, but before a missing-input
     // result can place an unusable representation in the identity-keyed orphanage.
     const auto poda_result = ProcessNEVMData(
@@ -968,6 +969,7 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws, NEVMMintTxSet& mint
     if (poda_result == ProcessNEVMDataResult::CONSENSUS_INVALID) {
         return state.Invalid(TxValidationResult::TX_NOT_STANDARD, "bad-txns-poda-invalid");
     }
+    // SYSCOIN END: Validate PoDA sidecars before missing-input classification.
 
     m_view.SetBackend(m_viewmempool);
 
@@ -4945,8 +4947,11 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
     // Note: the blocks specified here are different than the ones used in ConnectBlock because DisconnectBlock
     // unwinds the blocks in reverse. As a result, the inconsistency is not discovered until the earlier
     // blocks with the duplicate coinbase transactions are disconnected.
+    // SYSCOIN BEGIN: Do not apply Bitcoin's historical duplicate-coinbase
+    // disconnect exceptions to the Syscoin chain; retain the original below.
     /*bool fEnforceBIP30 = !((pindex->nHeight==91722 && pindex->GetBlockHash() == uint256S("0x00000000000271a2dc26e7667f8419f2e15416dc6955e5a6c6cdf3f2574dd08e")) ||
                            (pindex->nHeight==91812 && pindex->GetBlockHash() == uint256S("0x00000000000af0aed4792b1acee3d966af36cf5def14935db8de83d6f9306f2f")));*/
+    // SYSCOIN END: Omit Bitcoin's historical disconnect exceptions.
 
     // undo transactions in reverse order
     for (int i = block.vtx.size() - 1; i >= 0; i--) {
@@ -4954,6 +4959,9 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
         // SYSCOIN
         const uint256 &hash = tx.GetHash();
         const bool is_coinbase = tx.IsCoinBase();
+        // SYSCOIN BEGIN: Remove the Bitcoin-only exception predicate.
+        // bool is_bip30_exception = (is_coinbase && !fEnforceBIP30);
+        // SYSCOIN END: Remove the Bitcoin-only exception predicate.
 
         // Check that all outputs are available and match the outputs in the block itself
         // exactly.
@@ -4963,7 +4971,12 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
                 Coin coin;
                 bool is_spent = view.SpendCoin(out, &coin);
                 if (!is_spent || tx.vout[o] != coin.out || pindex->nHeight != coin.nHeight || is_coinbase != coin.fCoinBase) {
+                    // SYSCOIN BEGIN: Record every mismatch without Bitcoin's
+                    // historical exception guard, retained here as comments.
+                    // if (!is_bip30_exception) {
                     fClean = false; // transaction output mismatch
+                    // }
+                    // SYSCOIN END: Record mismatches without the Bitcoin exception.
                 }
             }
         }
@@ -5354,8 +5367,12 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     // Now that the whole chain is irreversibly beyond that time it is applied to all blocks except the
     // two in the chain that violate it. This prevents exploiting the issue against nodes during their
     // initial block download.
+    // SYSCOIN BEGIN: Omit Bitcoin's historical BIP30 repeat exceptions.
+    // Bitcoin 26.0rc3 original: bool fEnforceBIP30 = !IsBIP30Repeat(*pindex);
+    // The older inlined Bitcoin form is retained below for merge context.
     // bool fEnforceBIP30 = !((pindex->nHeight==91842 && pindex->GetBlockHash() == uint256S("0x00000000000a4d0a398161ffc163c503763b1f4360639393e0e4c8e300e0caec")) ||
                            // (pindex->nHeight==91880 && pindex->GetBlockHash() == uint256S("0x00000000000743f190a18c5577a3c2d2a1f610ae9601ac046a38084ccb7cd721")));
+    // SYSCOIN END: Omit Bitcoin's historical BIP30 repeat exceptions.
 
     // Once BIP34 activated it was not possible to create new duplicate coinbases and thus other than starting
     // with the 2 existing duplicate coinbase pairs, not possible to create overwriting txs.  But by the
@@ -5383,7 +5400,9 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     // future consensus change to do a new and improved version of BIP34 that
     // will actually prevent ever creating any duplicate coinbases in the
     // future.
+    // SYSCOIN BEGIN: Omit Bitcoin's chain-specific BIP30 optimization limit.
     // static constexpr int BIP34_IMPLIES_BIP30_LIMIT = 1983702;
+    // SYSCOIN END: Omit the Bitcoin BIP30 optimization limit.
 
     // There is no potential to create a duplicate coinbase at block 209,921
     // because this is still before the BIP34 height and so explicit BIP30
@@ -5413,13 +5432,18 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     // post BIP34 before approximately height 486,000,000. After block
     // 1,983,702 testnet3 starts doing unnecessary BIP30 checking again.
     assert(pindex->pprev);
-    // CBlockIndex* pindexBIP34height = pindex->pprev->GetAncestor(m_params.GetConsensus().BIP34Height);
+    // SYSCOIN BEGIN: Omit Bitcoin's BIP34-based shortcut; retain its original
+    // code here because Syscoin runs the collision loop below unconditionally.
+    // CBlockIndex* pindexBIP34height = pindex->pprev->GetAncestor(params.GetConsensus().BIP34Height);
     //Only continue to enforce if we're below BIP34 activation height or the block hash at that height doesn't correspond.
-    // fEnforceBIP30 = fEnforceBIP30 && (!pindexBIP34height || !(pindexBIP34height->GetBlockHash() == m_params.GetConsensus().BIP34Hash));
+    // fEnforceBIP30 = fEnforceBIP30 && (!pindexBIP34height || !(pindexBIP34height->GetBlockHash() == params.GetConsensus().BIP34Hash));
+    // SYSCOIN END: Omit Bitcoin's BIP34-based shortcut.
 
     // TODO: Remove BIP30 checking from block height 1,983,702 on, once we have a
     // consensus change that ensures coinbases at those heights cannot
     // duplicate earlier coinbases.
+    // SYSCOIN BEGIN: Modify Bitcoin's guarded BIP30 collision loop to run
+    // unconditionally; preserve the removed guard and closing brace as comments.
     // if (fEnforceBIP30 || pindex->nHeight >= BIP34_IMPLIES_BIP30_LIMIT) {
         for (const auto& tx : block.vtx) {
             for (size_t o = 0; o < tx->vout.size(); o++) {
@@ -5430,6 +5454,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             }
         }
     //}
+    // SYSCOIN END: Run the inherited BIP30 collision loop unconditionally.
 
     // Enforce BIP68 (sequence locks)
     int nLockTimeFlags = 0;
@@ -5597,7 +5622,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         }
         return false;
     }
-    // SYSCOIN : MODIFIED TO CHECK MASTERNODE PAYMENTS AND SUPERBLOCKS
+    // SYSCOIN BEGIN: Validate masternode/superblock payments and connect the NEVM commitment.
     bool exact_superblock_validation{false};
     if(fNexusContext) {
         const CAmount blockReward = GetBlockSubsidy(pindex->nHeight, params.GetConsensus());
@@ -5673,7 +5698,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             return false;
         }
     }
-    // END SYSCOIN
+    // SYSCOIN END: Validate fork payments and connect the NEVM commitment.
     const auto time_4{SteadyClock::now()};
     time_verify += time_4 - time_2;
     LogPrint(BCLog::BENCHMARK, "    - Verify %u txins: %.2fms (%.3fms/txin) [%.2fs (%.2fms/blk)]\n", nInputs - 1,
@@ -6673,6 +6698,7 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
 CBlockIndex* Chainstate::FindMostWorkChain()
 {
     AssertLockHeld(::cs_main);
+    // SYSCOIN BEGIN: Resolve the Geth-applied startup endpoint before fork selection.
     const CBlockIndex* startup_applied{nullptr};
     if (this == &m_chainman.ActiveChainstate() &&
         m_chainman.HasPendingNEVMStartupPair()) {
@@ -6683,12 +6709,15 @@ CBlockIndex* Chainstate::FindMostWorkChain()
             return nullptr;
         }
     }
+    // SYSCOIN END: Resolve the Geth-applied startup endpoint.
     do {
         CBlockIndex *pindexNew = nullptr;
 
         // Find the best candidate header.
         {
             std::set<CBlockIndex*, CBlockIndexWorkComparator>::reverse_iterator it = setBlockIndexCandidates.rbegin();
+            // SYSCOIN BEGIN: Restrict Bitcoin's candidate iteration temporarily
+            // to the branch already applied by Geth during startup recovery.
             // Reconcile Geth's already-applied prefix before ordinary fork
             // choice. Keep competing tips eligible for when the pair clears;
             // preseal admission must observe the same temporary selection.
@@ -6697,6 +6726,7 @@ CBlockIndex* Chainstate::FindMostWorkChain()
                     startup_applied->GetAncestor((*it)->nHeight) != *it)) {
                 ++it;
             }
+            // SYSCOIN END: Restrict startup candidates to the Geth-applied branch.
             if (it == setBlockIndexCandidates.rend())
                 return nullptr;
             pindexNew = *it;
@@ -9075,6 +9105,12 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
     // large by filling up the coinbase witness, which doesn't change
     // the block hash, so we couldn't mark the block as permanently
     // failed).
+    // SYSCOIN BEGIN: Modify Bitcoin's weight check for NEVM activation and
+    // distinguish replaceable PoDA sidecars from committed block weight.
+    // Bitcoin original:
+    // if (GetBlockWeight(block) > MAX_BLOCK_WEIGHT) {
+    //     return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-weight", strprintf("%s : weight limit failed", __func__));
+    // }
     const auto& consensusParams = chainman.GetParams().GetConsensus();
     bool nevmContext = nHeight >= consensusParams.nNEVMStartBlock;
     if ((fRegTest || nevmContext) && GetBlockWeight(block) > MAX_BLOCK_WEIGHT) {
@@ -9087,6 +9123,8 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
         return state.Invalid(committed_weight > MAX_BLOCK_WEIGHT ? BlockValidationResult::BLOCK_CONSENSUS : BlockValidationResult::BLOCK_AUX_DATA_INVALID,
                              "bad-blk-weight", strprintf("%s : weight limit failed", __func__));
     }
+    // SYSCOIN END: Apply NEVM weight rules and classify PoDA sidecar failures.
+    // SYSCOIN BEGIN: Enforce Nexus coinbase and masternode transaction versions.
     bool fNexusActive = nHeight >= consensusParams.nNexusStartBlock;
     // Ensure the coinbase transaction is either standard or explicitly allowed
     if (fNexusActive && (!(block.vtx[0]->nVersion <= CTransaction::CURRENT_VERSION || 
@@ -9101,6 +9139,7 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
             return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-mn-version", "Bad version for non-coinbase masternode transaction");
         }
     }
+    // SYSCOIN END: Enforce Nexus coinbase and masternode transaction versions.
     return true;
 }
 bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValidationState& state, CBlockIndex** ppindex, bool min_pow_checked, bool bForBlock)
@@ -10382,6 +10421,7 @@ bool Chainstate::LoadGenesisBlock()
     return true;
 }
 
+// SYSCOIN BEGIN: Authenticate repaired NEVM payloads encountered during full reindex.
 // Full reindex discards the block-index DB and encounters the original record
 // before an appended repair. Only differing duplicate payloads need this check.
 static bool RecoverReindexedNEVMPayload(BlockManager& blockman,
@@ -10441,6 +10481,8 @@ static bool RecoverReindexedNEVMPayload(BlockManager& blockman,
     }
     return true;
 }
+
+// SYSCOIN END: Authenticate repaired NEVM payloads during full reindex.
 
 void ChainstateManager::LoadExternalBlockFile(
     CAutoFile& file_in,
@@ -10551,6 +10593,8 @@ void ChainstateManager::LoadExternalBlockFile(
                         if (state.IsError()) {
                             break;
                         }
+                    // SYSCOIN BEGIN: Extend Bitcoin reindex imports to recover
+                    // a repaired representation of an already indexed NEVM block.
                     } else if (fReindex && dbp && header.IsNEVM()) {
                         CBlock duplicate;
                         std::string error;
@@ -10559,6 +10603,7 @@ void ChainstateManager::LoadExternalBlockFile(
                             GetNotifications().fatalError("Cannot recover duplicate NEVM payload during reindex: " + error);
                             return;
                         }
+                    // SYSCOIN END: Recover an already indexed NEVM payload representation.
                     } else if (hash != params.GetConsensus().hashGenesisBlock && pindex->nHeight % 1000 == 0) {
                         LogPrint(BCLog::REINDEX, "Block Import: already had block %s at height %d\n", hash.ToString(), pindex->nHeight);
                     }
@@ -10620,6 +10665,8 @@ void ChainstateManager::LoadExternalBlockFile(
                                     head.ToString());
                             LOCK(cs_main);
                             BlockValidationState dummy;
+                            // SYSCOIN BEGIN: Recover repaired NEVM payloads when
+                            // Bitcoin's out-of-order import queue revisits a stored block.
                             if (auto* existing{m_blockman.LookupBlockIndex(pblockrecursive->GetHash())};
                                 existing && (existing->nStatus & BLOCK_HAVE_DATA)) {
                                 std::string error;
@@ -10629,6 +10676,7 @@ void ChainstateManager::LoadExternalBlockFile(
                                     return;
                                 }
                             }
+                            // SYSCOIN END: Recover payload repairs from the import queue.
                             if (AcceptBlock(pblockrecursive, dummy, nullptr, true, &it->second, nullptr, true)) {
                                 nLoaded++;
                                 queue.push_back(pblockrecursive->GetHash());

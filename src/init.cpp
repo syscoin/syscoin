@@ -49,7 +49,7 @@
 #include <node/chainstate.h>
 #include <node/chainstatemanager_args.h>
 #include <node/context.h>
-#include <node/geth_startup.h>
+#include <node/geth_startup.h> // SYSCOIN: Managed Geth startup and recovery support.
 #include <node/interface_ui.h>
 #include <node/kernel_notifications.h>
 #include <node/mempool_args.h>
@@ -1985,11 +1985,13 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             return chainman->m_blockman.ReadBlockFromDisk(block, index);
         });
 
+    // SYSCOIN BEGIN: Require the configured NEVM notification interface.
     if(fNEVMConnection) {
         if(!g_zmq_notification_interface) {
             return InitError(Untranslated("Could not establish ZMQ interface connections, check your ZMQ settings and try again..."));
         }
     }
+    // SYSCOIN END: Require the configured NEVM notification interface.
     if (g_zmq_notification_interface) {
         RegisterValidationInterface(g_zmq_notification_interface.get());
     }
@@ -2154,6 +2156,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                     "", CClientUIInterface::MSG_ERROR | CClientUIInterface::BTN_ABORT);
                 if (fRet) {
                     fReindex = true;
+                    // SYSCOIN: Rebuild Geth together with the requested Syscoin reindex.
                     fReindexGeth = true;
                     AbortShutdown();
                 } else {
@@ -2584,6 +2587,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             StartShutdown();
             return;
         }
+        // SYSCOIN BEGIN: Resolve the NEVM startup pair before starting indexes and mempool.
         // ImportingNow has ended, so missing headers/blocks can be acquired.
         // Use the import thread: ABC may wait for the scheduler's validation
         // callbacks, and must not run on that scheduler itself.
@@ -2597,6 +2601,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             }
         }
         if (chainman.m_interrupt) return;
+        // SYSCOIN END: Resolve the NEVM startup pair before starting indexes and mempool.
         // Start indexes initial sync
         if (!StartIndexBackgroundSync(node)) {
             bilingual_str err_str = _("Failed to start indexes, shutting down..");

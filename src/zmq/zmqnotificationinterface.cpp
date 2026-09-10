@@ -51,12 +51,14 @@ std::unique_ptr<CZMQNotificationInterface> CZMQNotificationInterface::Create(
         return std::make_unique<CZMQPublishRawBlockNotifier>(get_block_by_index);
     };
     factories["pubrawtx"] = CZMQAbstractNotifier::Create<CZMQPublishRawTransactionNotifier>;
-    // SYSCOIN
+    // SYSCOIN BEGIN: Add fork mempool and governance publication factories.
     factories["pubrawmempooltx"] = CZMQAbstractNotifier::Create<CZMQPublishRawMempoolTransactionNotifier>;
     factories["pubhashgovernancevote"] = CZMQAbstractNotifier::Create<CZMQPublishHashGovernanceVoteNotifier>;
     factories["pubhashgovernanceobject"] = CZMQAbstractNotifier::Create<CZMQPublishHashGovernanceObjectNotifier>;
+    // SYSCOIN END: Add fork mempool and governance publication factories.
     factories["pubsequence"] = CZMQAbstractNotifier::Create<CZMQPublishSequenceNotifier>;
     std::list<std::unique_ptr<CZMQAbstractNotifier>> notifiers;
+    // SYSCOIN BEGIN: Create NEVM request notifiers for the configured subscriber endpoint.
     if(!fNEVMSub.empty()) {
         std::string pubCmd = "pubnevmblockinfo";
         CZMQNotifierFactory factory0 = CZMQAbstractNotifier::Create<CZMQPublishNEVMBlockInfoNotifier>;
@@ -109,6 +111,7 @@ std::unique_ptr<CZMQNotificationInterface> CZMQNotificationInterface::Create(
         notifiers.push_back(std::move(notifier3));
 
     }
+    // SYSCOIN END: Create NEVM request notifiers for the configured subscriber endpoint.
     
     
     for (const auto& entry : factories)
@@ -145,12 +148,14 @@ bool CZMQNotificationInterface::Initialize()
     LogPrint(BCLog::ZMQ, "version %d.%d.%d\n", major, minor, patch);
 
     LogPrint(BCLog::ZMQ, "Initialize notification interface\n");
-    // SYSCOIN
+    // SYSCOIN: Validate both Bitcoin publication and NEVM request contexts.
     assert(!pcontext && !pcontextsub);
 
     pcontext = zmq_ctx_new();
+    // SYSCOIN: Allocate a separate context for NEVM request sockets.
     pcontextsub = zmq_ctx_new();
 
+    // SYSCOIN: Treat failure of either required ZMQ context as initialization failure.
     if (!pcontext || !pcontextsub)
     {
         zmqError("Unable to initialize context");
@@ -158,12 +163,14 @@ bool CZMQNotificationInterface::Initialize()
     }
 
     for (auto& notifier : notifiers) {
+        // SYSCOIN BEGIN: Pass the NEVM context through Bitcoin notifier initialization.
         if (notifier->Initialize(pcontext, pcontextsub)) {
             LogPrint(BCLog::ZMQ, "Notifier %s ready (address = %s, subscriber address = %s)\n", notifier->GetType(), notifier->GetAddress(), notifier->GetAddressSub());
         } else {
             LogPrint(BCLog::ZMQ, "Notifier %s failed (address = %s, subscriber address = %s)\n", notifier->GetType(), notifier->GetAddress(), notifier->GetAddressSub());
             return false;
         }
+        // SYSCOIN END: Pass the NEVM context through Bitcoin notifier initialization.
     }
 
     return true;
@@ -176,6 +183,7 @@ void CZMQNotificationInterface::Shutdown()
     if (pcontext)
     {
         for (auto& notifier : notifiers) {
+            // SYSCOIN: Include the NEVM subscriber endpoint in shutdown diagnostics.
             LogPrint(BCLog::ZMQ, "Shutdown notifier %s at %s, subscriber: %s\n", notifier->GetType(), notifier->GetAddress(), notifier->GetAddressSub());
             notifier->Shutdown();
         }
@@ -183,13 +191,14 @@ void CZMQNotificationInterface::Shutdown()
 
         pcontext = nullptr;
     }
-    // SYSCOIN
+    // SYSCOIN BEGIN: Release the separate NEVM request context.
     LogPrint(BCLog::ZMQ, "zmq: Shutdown subscription interface\n");
     if (pcontextsub)
     {
         zmq_ctx_term(pcontextsub);
         pcontextsub = nullptr;
     }
+    // SYSCOIN END: Release the separate NEVM request context.
 }
 
 namespace {

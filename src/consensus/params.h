@@ -195,6 +195,14 @@ struct Params {
     bool fPowNoRetargeting;
     int64_t nPowTargetSpacing;
     int64_t nPowTargetTimespan;
+    // SYSCOIN BEGIN: Add reward/seniority schedules and replace Bitcoin's
+    // height-independent PoW accessors across the NEVM timing transition.
+    // Bitcoin originals:
+    // std::chrono::seconds PowTargetSpacing() const
+    // {
+    //     return std::chrono::seconds{nPowTargetSpacing};
+    // }
+    // int64_t DifficultyAdjustmentInterval() const { return nPowTargetTimespan / nPowTargetSpacing; }
     int SuperBlockCycle(int nHeight) const { 
         if (nHeight >= nNEVMStartBlock) {
             return nSuperblockCycle;
@@ -242,6 +250,7 @@ struct Params {
     int64_t DifficultyAdjustmentInterval(int nHeight) const {
         return nPowTargetTimespan / PowTargetSpacing(nHeight);
     }
+    // SYSCOIN END: Apply reward and PoW schedules across the NEVM transition.
     /** The best chain should have at least this much work */
     uint256 nMinimumChainWork;
     /** By default assume that the signatures in ancestors of this block are valid */

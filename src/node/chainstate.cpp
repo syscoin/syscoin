@@ -483,6 +483,7 @@ ChainstateLoadResult LoadChainstate(ChainstateManager& chainman, const CacheSize
 
     LOCK(cs_main);
 
+    // SYSCOIN BEGIN: Resume durable reindex state before loading chainstate and Geth.
     ChainstateLoadOptions effective_options{options};
     if (!effective_options.reindex && !effective_options.block_tree_db_in_memory) {
         auto& pblocktree{chainman.m_blockman.m_block_tree_db};
@@ -504,16 +505,19 @@ ChainstateLoadResult LoadChainstate(ChainstateManager& chainman, const CacheSize
             fReindexGeth = true;
         }
     }
+    // SYSCOIN END: Resume durable reindex state before loading chainstate and Geth.
 
     chainman.m_total_coinstip_cache = cache_sizes.coins;
     chainman.m_total_coinsdb_cache = cache_sizes.coins_db;
 
     // Load the fully validated chainstate.
+    // SYSCOIN: Use the recovered reindex options in Bitcoin chainstate initialization.
     chainman.InitializeChainstate(effective_options.mempool);
 
     // Load a chain created from a UTXO snapshot, if any exist.
     bool has_snapshot = chainman.DetectSnapshotChainstate();
 
+    // SYSCOIN: Use the recovered reindex options in Bitcoin chainstate initialization.
     if (has_snapshot && (effective_options.reindex || effective_options.reindex_chainstate)) {
         LogPrintf("[snapshot] deleting snapshot chainstate due to reindexing\n");
         if (!chainman.DeleteSnapshotChainstate()) {
@@ -521,6 +525,7 @@ ChainstateLoadResult LoadChainstate(ChainstateManager& chainman, const CacheSize
         }
     }
 
+    // SYSCOIN: Use the recovered reindex options in Bitcoin chainstate initialization.
     auto [init_status, init_error] = CompleteChainstateInitialization(chainman, cache_sizes, effective_options);
     if (init_status != ChainstateLoadStatus::SUCCESS) {
         return {init_status, init_error};
@@ -551,12 +556,14 @@ ChainstateLoadResult LoadChainstate(ChainstateManager& chainman, const CacheSize
         assert(!chainman.IsSnapshotActive());
         assert(!chainman.IsSnapshotValidated());
 
+        // SYSCOIN: Preserve recovered reindex options during Bitcoin snapshot cleanup.
         chainman.InitializeChainstate(effective_options.mempool);
 
         // A reload of the block index is required to recompute setBlockIndexCandidates
         // for the fully validated chainstate.
         chainman.ActiveChainstate().ClearBlockIndexCandidates();
 
+        // SYSCOIN: Preserve recovered reindex options during Bitcoin snapshot cleanup.
         auto [init_status, init_error] = CompleteChainstateInitialization(chainman, cache_sizes, effective_options);
         if (init_status != ChainstateLoadStatus::SUCCESS) {
             return {init_status, init_error};

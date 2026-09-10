@@ -42,9 +42,9 @@ public:
     std::string GetType() const { return type; }
     void SetType(const std::string &t) { type = t; }
     std::string GetAddress() const { return address; }
-    std::string GetAddressSub() const { return addresssub; }
+    std::string GetAddressSub() const { return addresssub; } // SYSCOIN: NEVM request endpoint.
     void SetAddress(const std::string &a) { address = a; }
-    void SetAddressSub(const std::string &a) { addresssub = a; }
+    void SetAddressSub(const std::string &a) { addresssub = a; } // SYSCOIN: NEVM request endpoint.
     int GetOutboundMessageHighWaterMark() const { return outbound_message_high_water_mark; }
     void SetOutboundMessageHighWaterMark(const int sndhwm) {
         if (sndhwm >= 0) {
