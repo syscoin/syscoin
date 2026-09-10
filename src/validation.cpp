@@ -7372,12 +7372,13 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
                 durable_error));
         }
         if (replay_target_pending) {
-            if (pindexOldTip != nullptr || pindexMostWork->nHeight != 0 ||
+            if (pindexOldTip != nullptr || !CoinsTip().GetBestBlock().IsNull() ||
+                pindexMostWork->nHeight != 0 ||
                 pindexMostWork->GetBlockHash() !=
                     m_chainman.GetConsensus().hashGenesisBlock) {
                 return state.Error(
-                    "durable finality target is pending during block-index "
-                    "replay outside genesis activation");
+                    "durable finality bootstrap requires empty-chainstate "
+                    "genesis activation");
             }
         }
         if ((durable_active_floor == nullptr) !=
@@ -7755,8 +7756,12 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                 bool fInvalidFound = false;
                 bool fReceiptCandidateDeferred = false;
                 std::shared_ptr<const CBlock> nullBlockPtr;
+                // SYSCOIN: Bootstrap genesis before applying durable finality
+                // to retained candidates, then resume the cached highest work.
+                CBlockIndex* step_target{m_chain.Tip() == nullptr
+                    ? pindexMostWork->GetAncestor(0) : pindexMostWork};
                 // SYSCOIN
-                if (!ActivateBestChainStep(state, pindexMostWork, pblock && pblock->GetHash() == pindexMostWork->GetBlockHash() ? pblock : nullBlockPtr, fInvalidFound, fReceiptCandidateDeferred, connectTrace, rejection, repair_selection)) {
+                if (!ActivateBestChainStep(state, step_target, pblock && pblock->GetHash() == step_target->GetBlockHash() ? pblock : nullBlockPtr, fInvalidFound, fReceiptCandidateDeferred, connectTrace, rejection, repair_selection)) {
                     // A system error occurred
                     return false;
                 }

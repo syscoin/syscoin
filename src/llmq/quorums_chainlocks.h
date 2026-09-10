@@ -1095,6 +1095,8 @@ public:
      * enforcement can activate it. Block-index replay may use the exact
      * transaction-valid target as a provisional ancestry constraint while
      * ConnectBlock performs the remaining script validation.
+     * A pending result authorizes only empty-chainstate genesis activation,
+     * including a retained validated target during chainstate-only rebuild.
     */
     [[nodiscard]] bool GetDurableFinalityRecoveryFloor(
         const CBlockIndex*& active_floor,

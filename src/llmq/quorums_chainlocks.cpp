@@ -4359,10 +4359,19 @@ bool CChainLocksHandler::GetDurableFinalityRecoveryFloor(
         if (target->nHeight != durable->statement.height ||
             (target->nStatus & BLOCK_FAILED_MASK) ||
             target->IsAssumedValid() ||
-            (!fully_validated && !provisional_replay_target) ||
-            active_tip == nullptr) {
+            (!fully_validated && !provisional_replay_target)) {
             error = "durable ChainLock recovery target is unavailable or "
                     "not fully validated";
+            return false;
+        }
+        if (active_tip == nullptr) {
+            // Chainstate-only rebuild retains this validated target. Establish
+            // only genesis before resolving its active-chain ancestry floor.
+            if (!checkpoint && replay_target_pending != nullptr) {
+                *replay_target_pending = true;
+                return true;
+            }
+            error = "durable ChainLock recovery target has no active chain";
             return false;
         }
         const CBlockIndex* resolved_active_floor{

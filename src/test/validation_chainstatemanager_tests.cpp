@@ -20,7 +20,9 @@
 #include <llmq/quorums_chainlocks.h> // SYSCOIN: retained probation roots.
 #include <llmq/quorums_init.h> // SYSCOIN: recreate pre-import finality handler.
 #include <masternode/activemasternode.h>
+#include <masternode/masternodemeta.h> // SYSCOIN: rebuild auxiliary fixture state.
 #include <netbase.h> // SYSCOIN: deterministic valid-MN fixture service.
+#include <netfulfilledman.h> // SYSCOIN: rebuild auxiliary fixture state.
 #include <node/blockstorage.h>
 #include <node/chainstate.h>
 #include <node/interface_ui.h> // SYSCOIN: startup's genesis notification.
@@ -32,7 +34,9 @@
 #include <rpc/blockchain.h>
 #include <script/sign.h> // SYSCOIN: funded provider registration fixture.
 #include <services/assetconsensus.h> // SYSCOIN: coins-recovery NEVM roots and mint markers.
+#include <services/nevmconsensus.h> // SYSCOIN: rebuild auxiliary fixture databases.
 #include <shutdown.h> // SYSCOIN: managed NEVM shutdown regression.
+#include <spork.h> // SYSCOIN: rebuild auxiliary fixture state.
 #include <sync.h>
 #include <test/pq_test_util.h> // SYSCOIN: durable roster-context fixture.
 #include <test/util/chainstate.h>
@@ -8821,12 +8825,11 @@ BOOST_FIXTURE_TEST_CASE(
 // A fsynced side-branch winner protects both its own ancestry and the active
 // recovery fork before Start() has imported it into the in-memory store,
 // including when activation quarantines an incompatible inactive candidate.
-BOOST_FIXTURE_TEST_CASE(
-    invalidate_rejects_preimport_durable_side_branch_boundary,
-    TestChain100Setup)
+static void CheckPreimportDurableSideBranchBoundary(
+    node::NodeContext& node_context, bool bootstrap_empty_chain)
 {
     auto& chainman{static_cast<TestChainstateManager&>(
-        *Assert(m_node.chainman))};
+        *Assert(node_context.chainman))};
     auto& consensus{
         const_cast<Consensus::Params&>(Params().GetConsensus())};
     struct RestoreConsensus {
@@ -8922,8 +8925,8 @@ BOOST_FIXTURE_TEST_CASE(
         config->chainlock_schedule, target_height));
 
     // Register the normal parent-to-child edges so conflict marking exercises
-    // its real subtree traversal. These are structural index fixtures only;
-    // each activation below must stop at preflight before reading a body.
+    // its real subtree traversal. These structural entries must never be read
+    // as blocks: activation stops at preflight or after the real genesis.
     const auto add_index = [&](const CBlockIndex& parent)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
         CBlockHeader header;
@@ -9032,6 +9035,7 @@ BOOST_FIXTURE_TEST_CASE(
 
     // Close the fixture's disabled handler before writing its normal durable
     // database, then reconstruct it without calling Start().
+    SyncWithValidationInterfaceQueue();
     llmq::StopLLMQSystem();
     llmq::DestroyLLMQSystem();
     chainman.ResetIbd(PQHistoryAuthState::UNINITIALIZED);
@@ -9069,15 +9073,157 @@ BOOST_FIXTURE_TEST_CASE(
             /*payment_audit_seal_context=*/std::nullopt,
             recovery_universe));
     }
+    CBlockIndex* genesis{nullptr};
+    std::array<CBlockIndex*, 2> bootstrap_competitor{};
+    if (bootstrap_empty_chain) {
+        // Chainstate-only reindex preserves the fully validated block index
+        // and durable finality, but reconstructs coins from an empty chain.
+        // The real genesis record must remain activatable in that state.
+        {
+            LOCK(::cs_main);
+            BOOST_REQUIRE(!node::fReindex.load());
+            genesis = chainman.m_blockman.LookupBlockIndex(consensus.hashGenesisBlock);
+            BOOST_REQUIRE(genesis != nullptr);
+            BOOST_REQUIRE(durable_target->IsValid(BLOCK_VALID_SCRIPTS));
+            BOOST_REQUIRE(durable_target->GetAncestor(0) == genesis);
+            bootstrap_competitor[0] = add_index(*durable_ancestor);
+            bootstrap_competitor[1] = add_index(*bootstrap_competitor[0]);
+            BOOST_REQUIRE(bootstrap_competitor.back()->nChainWork > durable_target->nChainWork);
+            chainman.ResetChainstates();
+            auto& rebuilt{chainman.InitializeChainstate(node_context.mempool.get())};
+            rebuilt.InitCoinsDB(1U << 20, /*in_memory=*/true, /*should_wipe=*/true);
+            rebuilt.InitCoinsCache(1U << 20);
+            BOOST_REQUIRE(chainman.ActiveTip() == nullptr);
+            BOOST_REQUIRE(rebuilt.CoinsTip().GetBestBlock().IsNull());
+            BOOST_REQUIRE(rebuilt.CoinsDB().GetBestBlock().IsNull());
+            BOOST_REQUIRE(rebuilt.CoinsDB().GetHeadBlocks().empty());
+            BOOST_REQUIRE(!rebuilt.CoinsDB().Cursor()->Valid());
+            // The retained index selects higher work normally. Bootstrap must
+            // select genesis without trusting or reading this conflicting body.
+            for (CBlockIndex* index : chainman.m_blockman.GetAllBlockIndices()) {
+                if (index->IsValid(BLOCK_VALID_TRANSACTIONS) && index->HaveNumChainTxs() &&
+                    !(index->nStatus & BLOCK_CONFLICT_CHAINLOCK)) {
+                    rebuilt.setBlockIndexCandidates.insert(index);
+                }
+            }
+
+            // Mirror startup's effective_reindex_geth auxiliary reset before
+            // recreating LLMQ. In particular, the old DMN manager must not
+            // retain its height-100 tip while coins restart from genesis.
+            const auto auxiliary_params = [&](const char* name) {
+                return DBParams{
+                    .path = chainman.m_options.datadir / name,
+                    .cache_bytes = 1U << 20,
+                    .memory_only = true,
+                    .wipe_data = true};
+            };
+            deterministicMNManager.reset();
+            deterministicMNManager = std::make_unique<CDeterministicMNManager>(
+                auxiliary_params("evodb_dmn"));
+            governance.reset();
+            governance = std::make_unique<CGovernanceManager>(chainman);
+            sporkManager.reset();
+            sporkManager = std::make_unique<CSporkManager>();
+            netfulfilledman.reset();
+            netfulfilledman = std::make_unique<CNetFulfilledRequestManager>();
+            mmetaman.reset();
+            mmetaman = std::make_unique<CMasternodeMetaMan>();
+            pnevmtxrootsdb.reset();
+            pnevmtxrootsdb = std::make_unique<CNEVMTxRootsDB>(
+                auxiliary_params("nevmtxroots"));
+            pnevmtxmintdb.reset();
+            pnevmtxmintdb = std::make_unique<CNEVMMintedTxDB>(
+                auxiliary_params("nevmminttx"));
+            pblockindexdb.reset();
+            pblockindexdb = std::make_unique<CBlockIndexDB>(
+                auxiliary_params("dbblockindex"));
+            pnevmdatadb.reset();
+            pnevmdatadb = std::make_unique<CNEVMDataDB>(
+                auxiliary_params("nevmdata"));
+            // Durable finality and PoDA blob data survive this rebuild.
+        }
+    }
     {
         LOCK(::cs_main);
-        llmq::InitLLMQSystem(*Assert(m_node.connman),
-                             *Assert(m_node.peerman), chainman);
+        llmq::InitLLMQSystem(*Assert(node_context.connman),
+                             *Assert(node_context.peerman), chainman);
         BOOST_CHECK(chainman.GetPQHistoryAuthState() ==
                     PQHistoryAuthState::PENDING);
     }
     BOOST_REQUIRE(llmq::chainLocksHandler != nullptr);
     BOOST_CHECK(!llmq::chainLocksHandler->GetBestChainLock());
+
+    if (bootstrap_empty_chain) {
+        const auto check_winner_preserved = [&] {
+            const auto identity{llmq::chainLocksHandler->GetDurableFinalityTargetForStartup()};
+            BOOST_REQUIRE(identity.has_value());
+            BOOST_CHECK_EQUAL(identity->height, winner.statement.height);
+            BOOST_CHECK(identity->block_hash == winner.statement.block_hash);
+            BOOST_CHECK(!llmq::chainLocksHandler->GetBestChainLock());
+            LOCK(::cs_main);
+            BOOST_CHECK(chainman.GetPQHistoryAuthState() == PQHistoryAuthState::PENDING);
+            for (const CBlockIndex* index{durable_target}; index != nullptr; index = index->pprev) {
+                BOOST_CHECK_EQUAL(index->nStatus & (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK), 0U);
+            }
+        };
+        check_winner_preserved();
+        auto& rebuilt{chainman.ActiveChainstate()};
+        {
+            bool genesis_notified{false};
+            struct ResetInterrupt {
+                util::SignalInterrupt& interrupt;
+                ~ResetInterrupt() { interrupt.reset(); }
+            } reset_interrupt{node_context.kernel->interrupt};
+            const boost::signals2::scoped_connection genesis_notification{
+                uiInterface.NotifyBlockTip_connect(
+                    [&](SynchronizationState, const CBlockIndex* tip) {
+                        genesis_notified = tip == genesis;
+                        node_context.kernel->interrupt();
+                    })};
+            BlockValidationState bootstrap_state;
+            BOOST_REQUIRE_MESSAGE(rebuilt.ActivateBestChain(bootstrap_state), bootstrap_state.ToString());
+            BOOST_CHECK(bootstrap_state.IsValid());
+            BOOST_CHECK(genesis_notified);
+            BOOST_CHECK(chainman.m_interrupt);
+        }
+        BOOST_CHECK(!chainman.m_interrupt);
+        {
+            LOCK(::cs_main);
+            BOOST_REQUIRE(chainman.ActiveTip() == genesis);
+            BOOST_CHECK(rebuilt.CoinsTip().GetBestBlock() == genesis->GetBlockHash());
+            BOOST_REQUIRE_EQUAL(rebuilt.setBlockIndexCandidates.count(bootstrap_competitor.back()), 1U);
+            BOOST_CHECK_EQUAL(bootstrap_competitor.back()->nStatus & (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK), 0U);
+            // With genesis established, ordinary preflight must reject the
+            // same incompatible candidate before reading its synthetic body.
+            rebuilt.ResetChainLockConflictMarkingStatsForTesting();
+        }
+        BlockValidationState competing_state;
+        BOOST_REQUIRE_MESSAGE(rebuilt.ActivateBestChain(competing_state), competing_state.ToString());
+        BOOST_CHECK(competing_state.IsValid());
+        check_winner_preserved();
+        LOCK(::cs_main);
+        BOOST_CHECK(chainman.ActiveTip() == genesis);
+        BOOST_CHECK(rebuilt.CoinsTip().GetBestBlock() == genesis->GetBlockHash());
+        const CBlockIndex* floor{nullptr};
+        const CBlockIndex* target{nullptr};
+        std::string error;
+        BOOST_REQUIRE_MESSAGE(llmq::chainLocksHandler->GetDurableFinalityRecoveryFloor(
+            floor, target, error), error);
+        BOOST_CHECK(floor == genesis);
+        BOOST_CHECK(target == durable_target);
+        for (const CBlockIndex* index : bootstrap_competitor) {
+            BOOST_CHECK(index->nStatus & BLOCK_CONFLICT_CHAINLOCK);
+            BOOST_CHECK_EQUAL(index->nStatus & BLOCK_FAILED_MASK, 0U);
+        }
+        BOOST_CHECK_EQUAL(rebuilt.setBlockIndexCandidates.count(bootstrap_competitor.back()), 0U);
+        BOOST_CHECK_EQUAL(rebuilt.setBlockIndexCandidates.count(durable_target), 1U);
+        const auto stats{rebuilt.GetChainLockConflictMarkingStatsForTesting()};
+        BOOST_CHECK_EQUAL(stats.batch_calls, 1U);
+        BOOST_CHECK_EQUAL(stats.disconnect_tip_calls, 0U);
+        BOOST_CHECK_EQUAL(stats.tip_publications, 0U);
+        BOOST_CHECK(!node::fReindex.load());
+        return;
+    }
 
     const CBlockIndex* resolved_floor{nullptr};
     const CBlockIndex* resolved_target{nullptr};
@@ -9216,6 +9362,19 @@ BOOST_FIXTURE_TEST_CASE(
             chainstate.m_chain.FindFork(active_extension.back()), active_tip);
     }
     check_preflight(active_extension);
+}
+BOOST_FIXTURE_TEST_CASE(
+    invalidate_rejects_preimport_durable_side_branch_boundary,
+    TestChain100Setup)
+{
+    CheckPreimportDurableSideBranchBoundary(m_node, /*bootstrap_empty_chain=*/false);
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    chainstate_rebuild_bootstraps_genesis_with_retained_durable_winner,
+    TestChain100Setup)
+{
+    CheckPreimportDurableSideBranchBoundary(m_node, /*bootstrap_empty_chain=*/true);
 }
 // SYSCOIN END: Durable ChainLock restart and deep-invalidation tests.
 
