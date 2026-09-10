@@ -6353,7 +6353,7 @@ void Chainstate::UpdateTip(const CBlockIndex* pindexNew)
     UpdateTipLog(m_chainman, coins_tip, pindexNew, params, __func__, "", warning_messages.original);
 }
 
-bool Chainstate::PrepareNEVMPayloadDisconnectPrefix(
+bool Chainstate::PrepareNEVMDisconnectPrefix(
     BlockValidationState& state,
     std::optional<NEVMDisconnectPrefix>& prefix)
 {
@@ -6362,31 +6362,31 @@ bool Chainstate::PrepareNEVMPayloadDisconnectPrefix(
     const CBlockIndex* tip{m_chain.Tip()};
     const int64_t start{m_chainman.GetConsensus().nNEVMStartBlock};
     if (this != &m_chainman.ActiveChainstate() || !fNEVMConnection ||
-        !m_chainman.HasPendingNEVMPayloadRepair() || tip == nullptr ||
-        tip->nHeight < start) return true;
+        tip == nullptr || tip->nHeight < start ||
+        ShouldBypassExternalNEVMNotifyCalls(m_chainman, tip->nHeight)) return true;
 
-    // A payload rejection can leave an acknowledged Core suffix above Geth's
-    // applied head. The marker only triggers this fresh endpoint check; it
-    // does not authorize skipping any external disconnect on its own.
+    // A buffered acknowledgement can be lost after an operational failure.
+    // Before paired rollback, authenticate Geth's applied endpoint; only this
+    // fresh proof authorizes locally undoing an unapplied Core suffix.
     uint64_t count{0};
     uint256 applied_hash;
     std::string error;
     if (!FlushAndGetNEVMBlockInfo(count, applied_hash, error)) {
-        return state.Error("nevm-payload-reorg-status:" + error);
+        return state.Error("nevm-reorg-status:" + error);
     }
     // Bound the count before conversion/addition, rejecting both overflow
     // and an engine endpoint above Core's active tip.
     if (start < 0 ||
         count > static_cast<uint64_t>(tip->nHeight - start + 1) ||
         (count == 0 && !applied_hash.IsNull())) {
-        return state.Error("nevm-payload-reorg-applied-prefix-mismatch");
+        return state.Error("nevm-reorg-applied-prefix-mismatch");
     }
     const int32_t height{static_cast<int32_t>(start + static_cast<int64_t>(count) - 1)};
     const CBlockIndex* applied{height < 0 ? nullptr : m_chain[height]};
     if ((height >= 0 && applied == nullptr) ||
         (count != 0 && (applied == nullptr || applied_hash.IsNull() ||
                        applied->GetBlockHash() != applied_hash))) {
-        return state.Error("nevm-payload-reorg-applied-branch-mismatch");
+        return state.Error("nevm-reorg-applied-branch-mismatch");
     }
     prefix.emplace(NEVMDisconnectPrefix{
         height, applied == nullptr ? uint256{} : applied->GetBlockHash()});
@@ -7542,7 +7542,7 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
 
     std::optional<NEVMDisconnectPrefix> nevm_prefix;
     if (pindexOldTip != pindexFork &&
-        !PrepareNEVMPayloadDisconnectPrefix(state, nevm_prefix)) {
+        !PrepareNEVMDisconnectPrefix(state, nevm_prefix)) {
         return false;
     }
 
@@ -8164,7 +8164,7 @@ bool Chainstate::EnforceBlock(
     std::optional<NEVMDisconnectPrefix> nevm_prefix;
     if (std::any_of(conflict_roots.begin(), conflict_roots.end(),
                     [this](const CBlockIndex* root) { return m_chain.Contains(root); }) &&
-        !PrepareNEVMPayloadDisconnectPrefix(state, nevm_prefix)) {
+        !PrepareNEVMDisconnectPrefix(state, nevm_prefix)) {
         return false;
     }
     if (!conflict_roots.empty() &&
@@ -8342,7 +8342,7 @@ bool Chainstate::InvalidateBlockLocked(BlockValidationState& state,
 
     if (invalidates_active_chain && rejection == nullptr && bReverify) {
         LOCK(cs_main);
-        if (!PrepareNEVMPayloadDisconnectPrefix(state, nevm_prefix)) return false;
+        if (!PrepareNEVMDisconnectPrefix(state, nevm_prefix)) return false;
     }
 
     // We'll be acquiring and releasing cs_main below, to allow the validation
@@ -8493,7 +8493,7 @@ bool Chainstate::MarkConflictingBlock(BlockValidationState& state,
 {
     std::optional<NEVMDisconnectPrefix> nevm_prefix;
     if (pindex != nullptr && m_chain.Contains(pindex) &&
-        !PrepareNEVMPayloadDisconnectPrefix(state, nevm_prefix)) return false;
+        !PrepareNEVMDisconnectPrefix(state, nevm_prefix)) return false;
     std::array<CBlockIndex*, 1> roots{pindex};
     return MarkConflictingBlocks(
         state, roots, ChainLockConflictMarkingMode::DISCONNECT_ACTIVE,

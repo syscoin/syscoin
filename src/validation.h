@@ -1071,7 +1071,7 @@ private:
     // SYSCOIN: Carry deferred work and the selected candidate's repair authority.
     bool ActivateBestChainStep(BlockValidationState& state, CBlockIndex* pindexMostWork, const std::shared_ptr<const CBlock>& pblock, bool& fInvalidFound, bool& fReceiptCandidateDeferred, ConnectTrace& connectTrace, std::optional<NEVMBlockReject>& rejection, std::optional<NEVMPayloadRepairSelection>& repair_selection) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs, m_chainstate_mutex);
     // Call after transition authorization, before undoing an active block.
-    bool PrepareNEVMPayloadDisconnectPrefix(
+    bool PrepareNEVMDisconnectPrefix(
         BlockValidationState& state,
         std::optional<NEVMDisconnectPrefix>& prefix)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
