@@ -158,6 +158,12 @@ state_path = sys.argv[1]
 with open(state_path, "r", encoding="utf8") as handle:
     state = json.load(handle)
 
+def save_state():
+    replacement = state_path + ".tmp"
+    with open(replacement, "w", encoding="utf8") as handle:
+        json.dump(state, handle)
+    os.replace(replacement, state_path)
+
 view = state["ready" if state["ready_phase"] else "anchor"]
 method = sys.argv[2]
 args = sys.argv[3:]
@@ -181,11 +187,8 @@ elif method == "getblockhash" and len(args) == 1:
     print(view["active"][args[0]])
     if (not state["ready_phase"] and
             args[0] == str(state["anchor_height"])):
-        state["ready_phase"] = True
-        replacement = state_path + ".tmp"
-        with open(replacement, "w", encoding="utf8") as handle:
-            json.dump(state, handle)
-        os.replace(replacement, state_path)
+        state["anchor_check_seen"] = True
+        save_state()
     sys.exit(0)
 elif method == "getchaintips" and not args:
     result = [{
@@ -198,6 +201,12 @@ else:
     sys.exit(2)
 
 json.dump(result, sys.stdout)
+if (method == "getchaintips" and not state["ready_phase"] and
+        state["anchor_check_seen"]):
+    # Preserve the anchor view through CheckCandidate's closing tip sample.
+    # Its pending seed is persisted before the next pass needs mature headers.
+    state["ready_phase"] = True
+    save_state()
 '''
 
 
@@ -414,6 +423,7 @@ class PQChainLocksTest(SyscoinTestFramework):
         )
         state = {
             "ready_phase": False,
+            "anchor_check_seen": False,
             "anchor_height": RECOVERY_ANCHOR_BTC_HEIGHT,
             "anchor": {
                 "best_hash": anchor_hash,
@@ -453,6 +463,8 @@ class PQChainLocksTest(SyscoinTestFramework):
             "-btcheadermanaged=0",
             "-btcheadercmdtimeout=2",
             "-btcheadertipmaxage=0",
+            # The final getchaintips response closes the fake anchor phase.
+            "-btcheaderrecentforkdepth=2",
             "-btcheadercmd=%s" % sys.executable,
             "-btcheaderarg=%s" % self.btc_backend_script,
             "-btcheaderarg=%s" % self.btc_backend_state,
@@ -1224,23 +1236,24 @@ class PQChainLocksTest(SyscoinTestFramework):
         ]
         self.extra_args[0] = fixture_args
         node.extra_args = list(fixture_args)
-        with node.assert_debug_log(
-                ["Loaded branch-bound PQ ChainLock regtest fixture"]):
-            self.start_node(0, extra_args=fixture_args)
-        # preciousblock preference is not durable. Restore the exact branch
-        # used by the fixture before publishing any collection capability.
-        node.preciousblock(canonical_tip)
-        self.wait_until(
-            lambda: node.getbestblockhash() == canonical_tip,
-            timeout=30,
-        )
-        assert_equal(node.getblockhash(FIRST_ELIGIBLE_TARGET_HEIGHT),
-                     target_hash)
-        assert_equal(node.getbestblockhash(), canonical_tip)
+        # The enabled spork survives restart, so the scheduler can publish
+        # this context before start_node returns or mnsync is finished.
         with node.assert_debug_log([
+                "Loaded branch-bound PQ ChainLock regtest fixture",
                 "published PQ ChainLock signing context height=%d" %
                 FIRST_ELIGIBLE_TARGET_HEIGHT,
         ], timeout=180):
+            self.start_node(0, extra_args=fixture_args)
+            # preciousblock preference is not durable. Restore and verify
+            # the exact branch used by the fixture before sending shares.
+            node.preciousblock(canonical_tip)
+            self.wait_until(
+                lambda: node.getbestblockhash() == canonical_tip,
+                timeout=30,
+            )
+            assert_equal(node.getblockhash(FIRST_ELIGIBLE_TARGET_HEIGHT),
+                         target_hash)
+            assert_equal(node.getbestblockhash(), canonical_tip)
             node.spork("SPORK_19_CHAINLOCKS_ENABLED", 0)
             force_finish_mnsync(node)
         self.assert_no_chainlock_rpcs(node)
