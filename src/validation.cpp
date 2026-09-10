@@ -3945,6 +3945,15 @@ bool MatchesNEVMPayloadRejection(const NEVMBlockReject& rejection,
         header.nBlockHash, header.nTxRoot, header.nReceiptRoot,
         rejection.syscoin_hash, payload);
 }
+
+// SYSCOIN: A pure check can prove an immutable contradiction in this tuple.
+bool MatchesNEVMCommitmentRejection(const std::optional<NEVMBlockReject>& rejection,
+                                    const CNEVMHeader& header, const uint256& syscoin_hash)
+{
+    return rejection && !rejection->IsPayload() &&
+           rejection->nevm_hash == header.nBlockHash &&
+           rejection->syscoin_hash == syscoin_hash;
+}
 } // namespace
 
 bool ChainstateManager::HasPendingNEVMPayloadRepair() const
@@ -4154,16 +4163,26 @@ bool ChainstateManager::DiscoverNEVMPayloadRepair(
     bool valid{false};
     std::optional<NEVMBlockReject> rejection;
     GetMainSignals().NotifyNEVMPayloadCheck(header, block, index->GetBlockHash(), valid, error, &rejection);
-    if (rejection && rejection->IsPayload()) {
+    if (!valid) {
+        const bool commitment_rejected{
+            MatchesNEVMCommitmentRejection(rejection, header, index->GetBlockHash())};
+        if (!rejection || (!rejection->IsPayload() && !commitment_rejected)) {
+            error = "nevm-payload-startup-check-unavailable:" + error;
+            return false;
+        }
+        // SYSCOIN: Preserve startup recovery until ordinary replay resolves
+        // the contradiction with its applied-prefix and finality checks.
+        if (commitment_rejected) {
+            rejection->payload_hash = NEVMPayloadFingerprint(
+                header.nBlockHash, header.nTxRoot, header.nReceiptRoot,
+                index->GetBlockHash(), block.vchNEVMBlockData);
+        }
         state = BlockValidationState{};
         if (!QueueNEVMPayloadRepair(*rejection, state)) {
             error = state.ToString();
             return false;
         }
-    }
-    if (!valid && !rejection) {
-        error = "nevm-payload-startup-check-unavailable:" + error;
-        return false;
+        if (commitment_rejected) m_nevm_payload_stage = NEVMPayloadRepairStage::REPLAY;
     }
     error.clear();
     return true;
@@ -4197,10 +4216,14 @@ bool ChainstateManager::ProcessNEVMPayloadRepair(
     // committed NEVM header remain those already accepted and stored locally.
     block.vchNEVMBlockData.assign(payload.begin(), payload.end());
     bool valid{false};
-    if (!GetMainSignals().NotifyNEVMPayloadCheck(header, block,
-            request.rejection.syscoin_hash, valid, error) || !valid) {
+    std::optional<NEVMBlockReject> rejection;
+    GetMainSignals().NotifyNEVMPayloadCheck(header, block,
+        request.rejection.syscoin_hash, valid, error, &rejection);
+    if (!valid && !MatchesNEVMCommitmentRejection(rejection, header, request.rejection.syscoin_hash)) {
         return state.Error(error.empty() ? "nevm-payload-repair-not-validated" : error);
     }
+    // SYSCOIN: Retain a source-proven contradiction too. Normal replay must
+    // inspect these exact bytes before it can reject the immutable block.
     if (!m_blockman.ReplaceNEVMBlockData(state, *index, payload)) return false;
     m_nevm_payload_stage = NEVMPayloadRepairStage::REPLAY;
     ++m_nevm_payload_generation;
@@ -4245,9 +4268,11 @@ bool ChainstateManager::MaybeRecoverNEVMPayload(std::string& error)
                     bool valid{false};
                     GetMainSignals().NotifyNEVMPayloadCheck(header, block,
                         index->GetBlockHash(), valid, error, &rejection);
-                    if (valid) {
+                    if (valid || MatchesNEVMCommitmentRejection(rejection, header, index->GetBlockHash())) {
                         // Covers a crash after the new disk positions committed
-                        // but before the in-memory transition to replay.
+                        // but before the in-memory transition to replay. An
+                        // immutable contradiction also needs ordinary replay's
+                        // applied-prefix and finality checks before rejection.
                         m_nevm_payload_stage = NEVMPayloadRepairStage::REPLAY;
                     } else if (rejection && rejection->IsPayload()) {
                         if (!QueueNEVMPayloadRepair(*rejection, state)) {
@@ -10499,7 +10524,8 @@ static bool RecoverReindexedNEVMPayload(BlockManager& blockman,
     std::optional<NEVMBlockReject> rejection;
     GetMainSignals().NotifyNEVMPayloadCheck(header, original,
         index.GetBlockHash(), valid, error, &rejection);
-    if (valid) return true;
+    // SYSCOIN: Keep proof of an immutable contradiction for normal activation.
+    if (valid || MatchesNEVMCommitmentRejection(rejection, header, index.GetBlockHash())) return true;
     if (!rejection || !rejection->IsPayload() ||
         rejection->nevm_hash != header.nBlockHash ||
         rejection->syscoin_hash != index.GetBlockHash() ||
@@ -10511,7 +10537,7 @@ static bool RecoverReindexedNEVMPayload(BlockManager& blockman,
     rejection.reset();
     GetMainSignals().NotifyNEVMPayloadCheck(header, original,
         index.GetBlockHash(), valid, error, &rejection);
-    if (!valid) {
+    if (!valid && !MatchesNEVMCommitmentRejection(rejection, header, index.GetBlockHash())) {
         // Another rejected representation may precede the repaired record.
         if (rejection && rejection->IsPayload() &&
             rejection->nevm_hash == header.nBlockHash &&

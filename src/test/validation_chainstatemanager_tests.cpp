@@ -1465,6 +1465,190 @@ struct PersistentNEVMPayloadRepairSetup : StartupNEVMRecoverySetup {
     }
 };
 
+// SYSCOIN BEGIN: Pure validation may prove an immutable committed-root error.
+struct ImmutableNEVMPayloadRepairSetup : StartupNEVMRecoverySetup {
+    std::shared_ptr<const CBlock> parent;
+    std::shared_ptr<const CBlock> candidate;
+    CBlockIndex* parent_index{nullptr};
+    CBlockIndex* candidate_index{nullptr};
+    CBlockIndex* descendant_index{nullptr};
+    const std::vector<uint8_t> proof_payload{0x49, 0x4d, 0x4d};
+    NEVMBlockReject payload_verdict;
+    NEVMBlockReject permanent_verdict;
+    FlatFilePos original_pos;
+    FlatFilePos original_undo;
+    std::optional<NEVMBlockReject> pure_override;
+    bool pure_unavailable{false};
+
+    ImmutableNEVMPayloadRepairSetup()
+        : StartupNEVMRecoverySetup{/*coins_db_in_memory=*/false,
+                                    /*managed_exit=*/false,
+                                    /*block_tree_db_in_memory=*/false} {}
+
+    void Prepare(bool stored_proof, bool active_candidate = false)
+    {
+        auto& chainman{*m_node.chainman};
+        auto& chainstate{chainman.ActiveChainstate()};
+        if (active_candidate) {
+            CBlock block;
+            LOCK(::cs_main);
+            BOOST_REQUIRE(chainman.m_blockman.ReadBlockFromDisk(block, *chainman.ActiveTip(), false));
+            parent = std::make_shared<const CBlock>(std::move(block));
+        } else {
+            parent = MineNEVMBlock();
+        }
+        CBlock block{*MakeNEVMBlock()};
+        if (stored_proof) block.vchNEVMBlockData = proof_payload;
+        candidate = std::make_shared<const CBlock>(std::move(block));
+        payload_verdict = PayloadVerdictFor(*candidate);
+        permanent_verdict = NEVMBlockReject{payload_verdict.nevm_hash, candidate->GetHash()};
+        {
+            LOCK(::cs_main);
+            parent_index = chainman.ActiveTip();
+            BlockValidationState state;
+            BOOST_REQUIRE_MESSAGE(chainman.AcceptBlock(
+                candidate, state, &candidate_index, true, nullptr, nullptr, true), state.ToString());
+            BOOST_REQUIRE(candidate_index != nullptr);
+            original_pos = candidate_index->GetBlockPos();
+            original_undo = candidate_index->GetUndoPos();
+        }
+        if (active_candidate) {
+            BlockValidationState state;
+            BOOST_REQUIRE_MESSAGE(chainstate.ActivateBestChain(state, candidate), state.ToString());
+            BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainman.ActiveTip()) == candidate_index);
+            // Model a fresh engine with a Core suffix already committed locally.
+            nevm->applied_count = 0;
+            nevm->applied_hash.SetNull();
+        }
+        CBlockHeader descendant{candidate->GetBlockHeader()};
+        descendant.hashPrevBlock = candidate->GetHash();
+        ++descendant.nTime;
+        descendant.nNonce = 0;
+        while (!CheckProofOfWork(descendant.GetHash(), descendant.nBits,
+                                 chainman.GetConsensus())) ++descendant.nNonce;
+        BlockValidationState descendant_state;
+        BOOST_REQUIRE_MESSAGE(chainman.ProcessNewBlockHeaders(
+            {descendant}, true, descendant_state), descendant_state.ToString());
+        {
+            LOCK(::cs_main);
+            descendant_index = chainman.m_blockman.LookupBlockIndex(descendant.GetHash());
+            BOOST_REQUIRE(descendant_index != nullptr);
+            original_undo = candidate_index->GetUndoPos();
+            BlockValidationState state;
+            BOOST_REQUIRE_MESSAGE(chainstate.FlushStateToDisk(state, FlushStateMode::ALWAYS), state.ToString());
+        }
+        // The engine alone decodes opaque payload bytes. Crucially, normal
+        // connection inspects the stored representation, so merely entering
+        // REPLAY without durably replacing a wrong header cannot pass.
+        nevm->connect_verdict = [this](const uint256& hash) -> std::optional<NEVMBlockReject> {
+            if (hash != candidate->GetHash()) return std::nullopt;
+            CBlock stored;
+            LOCK(::cs_main);
+            BOOST_REQUIRE(m_node.chainman->m_blockman.ReadBlockFromDisk(stored, *candidate_index, false));
+            return stored.vchNEVMBlockData == proof_payload
+                ? permanent_verdict : PayloadVerdictFor(stored);
+        };
+        nevm->payload_check_response = [this](
+            const CNEVMHeader& header, const CBlock& checked, const uint256& hash,
+            bool& valid, std::string& error, std::optional<NEVMBlockReject>* rejection) {
+            BOOST_CHECK(hash == candidate->GetHash());
+            BOOST_CHECK(header.nBlockHash == permanent_verdict.nevm_hash);
+            valid = false;
+            error = pure_unavailable ? "fixture-check-unavailable" : "fixture-committed-roots-invalid";
+            if (!pure_unavailable && rejection) {
+                *rejection = pure_override.value_or(checked.vchNEVMBlockData == proof_payload
+                    ? permanent_verdict : PayloadVerdictFor(checked));
+            }
+        };
+        nevm->connected_blocks.clear();
+        nevm->disconnected_blocks.clear();
+    }
+
+    void CheckStored(bool replaced)
+    {
+        LOCK(::cs_main);
+        CBlock stored;
+        BOOST_REQUIRE(m_node.chainman->m_blockman.ReadBlockFromDisk(stored, *candidate_index, false));
+        BOOST_CHECK(stored.GetHash() == candidate->GetHash());
+        BOOST_REQUIRE_EQUAL(stored.vtx.size(), candidate->vtx.size());
+        for (std::size_t i{0}; i < stored.vtx.size(); ++i) {
+            BOOST_CHECK(stored.vtx[i]->GetHash() == candidate->vtx[i]->GetHash());
+        }
+        BOOST_CHECK(stored.vchNEVMBlockData == (replaced ? proof_payload : candidate->vchNEVMBlockData));
+        BOOST_CHECK_EQUAL(candidate_index->GetBlockPos() == original_pos, !replaced);
+        BOOST_CHECK(candidate_index->GetUndoPos() == original_undo);
+    }
+
+    void CheckParent(bool invalid)
+    {
+        auto& chainman{*m_node.chainman};
+        auto& chainstate{chainman.ActiveChainstate()};
+        LOCK(::cs_main);
+        BOOST_CHECK(chainman.ActiveTip() == parent_index);
+        BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == parent->GetHash());
+        BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == parent->GetHash());
+        BOOST_CHECK(chainstate.CoinsDB().GetHeadBlocks().empty());
+        const COutPoint parent_coin{parent->vtx.front()->GetHash(), 0};
+        const COutPoint candidate_coin{candidate->vtx.front()->GetHash(), 0};
+        BOOST_CHECK(chainstate.CoinsTip().HaveCoin(parent_coin));
+        BOOST_CHECK(chainstate.CoinsDB().HaveCoin(parent_coin));
+        BOOST_CHECK(!chainstate.CoinsTip().HaveCoin(candidate_coin));
+        BOOST_CHECK(!chainstate.CoinsDB().HaveCoin(candidate_coin));
+        BOOST_CHECK_EQUAL(parent_index->nStatus & (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK), 0U);
+        BOOST_CHECK_EQUAL(candidate_index->nStatus & BLOCK_FAILED_MASK, invalid ? BLOCK_FAILED_VALID : 0U);
+        BOOST_CHECK_EQUAL(candidate_index->nStatus & BLOCK_CONFLICT_CHAINLOCK, 0U);
+        BOOST_CHECK(!(descendant_index->nStatus & BLOCK_FAILED_VALID));
+        BOOST_CHECK_EQUAL(chainman.m_failed_blocks.count(candidate_index), invalid ? 1U : 0U);
+        BOOST_CHECK_EQUAL(chainman.m_failed_blocks.count(parent_index), 0U);
+        BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(candidate_index), invalid ? 0U : 1U);
+        NEVMTxRoot roots;
+        BOOST_CHECK(!pnevmtxrootsdb->ReadTxRoots(permanent_verdict.nevm_hash, roots));
+        BOOST_CHECK(!pnevmtxrootsdb->Read(permanent_verdict.nevm_hash, roots));
+        if (parent->IsNEVM()) {
+            CNEVMHeader header;
+            BlockValidationState state;
+            BOOST_REQUIRE(GetNEVMData(state, *parent, header));
+            BOOST_REQUIRE(pnevmtxrootsdb->Read(header.nBlockHash, roots));
+            BOOST_CHECK(roots.nTxRoot == header.nTxRoot);
+            BOOST_CHECK(roots.nReceiptRoot == header.nReceiptRoot);
+        }
+        BOOST_CHECK(pnevmtxrootsdb->GetPublishedTip() == parent->GetHash());
+        BOOST_CHECK(!pnevmtxrootsdb->GetPendingDisconnect());
+        BOOST_CHECK_EQUAL(nevm->applied_count, parent->IsNEVM() ? 1U : 0U);
+        BOOST_CHECK(nevm->applied_hash == (parent->IsNEVM() ? parent->GetHash() : uint256{}));
+        BOOST_CHECK(nevm->disconnected_blocks.empty());
+        BOOST_CHECK(fNEVMConnection);
+    }
+
+    void RecoverAndCheckInvalid(bool replaced)
+    {
+        auto& chainman{*m_node.chainman};
+        std::string error;
+        BOOST_REQUIRE_MESSAGE(chainman.MaybeRecoverNEVMPayload(error), error);
+        // An active rejected suffix leaves an obsolete marker for the next
+        // normal recovery pass; clearing it must not wait for a retry timer.
+        BOOST_REQUIRE_MESSAGE(chainman.MaybeRecoverNEVMPayload(error), error);
+        BOOST_CHECK(!chainman.HasPendingNEVMPayloadRepair());
+        BOOST_CHECK(!WITH_LOCK(::cs_main, return chainman.GetNEVMPayloadRepairRequest()));
+        CheckParent(/*invalid=*/true);
+        CheckStored(replaced);
+        BOOST_CHECK(nevm->connected_blocks == std::vector<uint256>{candidate->GetHash()});
+        BlockValidationState retry_state;
+        BOOST_REQUIRE_MESSAGE(chainman.ActiveChainstate().ActivateBestChain(retry_state, candidate), retry_state.ToString());
+        BOOST_CHECK(nevm->connected_blocks == std::vector<uint256>{candidate->GetHash()});
+        LOCK(::cs_main);
+        BlockValidationState flush_state;
+        BOOST_REQUIRE_MESSAGE(chainman.ActiveChainstate().FlushStateToDisk(
+            flush_state, FlushStateMode::ALWAYS), flush_state.ToString());
+        BOOST_CHECK(!chainman.m_blockman.m_block_tree_db->Exists(NEVM_PAYLOAD_TEST_MARKER));
+        CDiskBlockIndex disk_candidate;
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->Read(
+            std::make_pair(uint8_t{'b'}, candidate->GetHash()), disk_candidate));
+        BOOST_CHECK_EQUAL(disk_candidate.nStatus & BLOCK_FAILED_MASK, BLOCK_FAILED_VALID);
+    }
+};
+// SYSCOIN END: Pure validation may prove an immutable committed-root error.
+
 // SYSCOIN BEGIN: Use disk coins and index state for failed repair retargeting.
 struct FailedNEVMPayloadRetargetSetup : StartupNEVMRecoverySetup {
     const bool previous_shutdown_on_fatal_error{m_node.notifications->m_shutdown_on_fatal_error};
@@ -1488,14 +1672,29 @@ struct FailedNEVMPayloadRetargetSetup : StartupNEVMRecoverySetup {
 // SYSCOIN END: Use disk coins and index state for failed repair retargeting.
 
 struct NEVMPayloadReindexSetup : StartupNEVMRecoverySetup {
-    void CheckReindexDuplicate(bool queued, bool changed = true)
+    enum class ImmutableProof { NONE, REPLACEMENT, ORIGINAL };
+
+    void CheckReindexDuplicate(bool queued, bool changed = true,
+                               ImmutableProof proof = ImmutableProof::NONE)
     {
         const auto parent{MineNEVMBlock()};
         const auto original{MakeNEVMBlock()};
         CBlock replacement{*original};
         if (changed) replacement.vchNEVMBlockData = {0x4f, 0x4b};
         const auto verdict{PayloadVerdictFor(*original)};
+        const NEVMBlockReject permanent{verdict.nevm_hash, verdict.syscoin_hash};
         auto& chainman{*m_node.chainman};
+        struct RestoreFatalError {
+            node::KernelNotifications& notifications;
+            std::atomic<int>& exit_status;
+            const bool previous{notifications.m_shutdown_on_fatal_error};
+            ~RestoreFatalError()
+            {
+                notifications.m_shutdown_on_fatal_error = previous;
+                exit_status.store(EXIT_SUCCESS);
+            }
+        } restore_fatal{*m_node.notifications, m_node.exit_status};
+        m_node.notifications->m_shutdown_on_fatal_error = false;
         FlatFilePos original_pos, replacement_pos;
         const auto write_record = [](CAutoFile& file, int number, const CBlock& block) {
             const auto size{static_cast<unsigned int>(GetSerializeSize(block, CLIENT_VERSION, SER_DISK))};
@@ -1529,9 +1728,12 @@ struct NEVMPayloadReindexSetup : StartupNEVMRecoverySetup {
             bool& valid, std::string& error, std::optional<NEVMBlockReject>* rejection) {
             BOOST_CHECK(hash == original->GetHash());
             BOOST_CHECK(header.nBlockHash == verdict.nevm_hash);
-            valid = block.vchNEVMBlockData == replacement.vchNEVMBlockData;
+            const bool is_proof{proof == ImmutableProof::ORIGINAL ||
+                (proof == ImmutableProof::REPLACEMENT &&
+                 block.vchNEVMBlockData == replacement.vchNEVMBlockData)};
+            valid = !is_proof && block.vchNEVMBlockData == replacement.vchNEVMBlockData;
             error = valid ? std::string{} : "fixture-payload-rejected";
-            if (!valid && rejection) *rejection = verdict;
+            if (!valid && rejection) *rejection = is_proof ? permanent : verdict;
         };
         std::multimap<uint256, FlatFilePos> unknown_parent;
         if (queued) {
@@ -1549,19 +1751,59 @@ struct NEVMPayloadReindexSetup : StartupNEVMRecoverySetup {
         CAutoFile file{chainman.m_blockman.OpenBlockFile(scan_pos, true)};
         BOOST_REQUIRE(!file.IsNull());
         chainman.LoadExternalBlockFile(file, &scan_pos, &unknown_parent);
+        BOOST_REQUIRE_EQUAL(m_node.exit_status.load(), EXIT_SUCCESS);
         BOOST_CHECK(unknown_parent.empty());
-        BOOST_CHECK_EQUAL(nevm->payload_check_requests, changed ? 2U : 0U);
+        BOOST_CHECK_EQUAL(nevm->payload_check_requests,
+                          !changed ? 0U : proof == ImmutableProof::ORIGINAL ? 1U : 2U);
+        const bool adopted{changed && proof != ImmutableProof::ORIGINAL};
+        CBlockIndex* index{nullptr};
+        {
+            LOCK(::cs_main);
+            index = chainman.m_blockman.LookupBlockIndex(original->GetHash());
+            BOOST_REQUIRE(index != nullptr);
+            BOOST_CHECK(index->GetBlockPos() == (adopted ? replacement_pos : original_pos));
+            BOOST_CHECK_EQUAL(index->nStatus & BLOCK_FAILED_MASK, 0U);
+            BOOST_CHECK(!(index->nStatus & BLOCK_HAVE_UNDO));
+            CBlock stored;
+            BOOST_REQUIRE(chainman.m_blockman.ReadBlockFromDisk(stored, *index, false));
+            BOOST_CHECK(stored.GetHash() == original->GetHash());
+            BOOST_CHECK(stored.vchNEVMBlockData ==
+                        (adopted ? replacement.vchNEVMBlockData : original->vchNEVMBlockData));
+            BOOST_CHECK(chainman.ActiveTip()->GetBlockHash() == parent->GetHash());
+        }
+        if (proof == ImmutableProof::NONE) return;
+        // Reindex only preserves the representation. Once import ends, the
+        // ordinary connector must independently reject the committed pair.
+        node::fReindex = reindex_guard.previous;
+        nevm->connect_verdict = [&, index](const uint256& hash) -> std::optional<NEVMBlockReject> {
+            if (hash != original->GetHash()) return std::nullopt;
+            LOCK(::cs_main);
+            CBlock stored;
+            BOOST_REQUIRE(chainman.m_blockman.ReadBlockFromDisk(stored, *index, false));
+            return stored.vchNEVMBlockData == (adopted ? replacement.vchNEVMBlockData : original->vchNEVMBlockData)
+                ? permanent : PayloadVerdictFor(stored);
+        };
+        auto& chainstate{chainman.ActiveChainstate()};
+        BlockValidationState state;
+        BOOST_REQUIRE_MESSAGE(chainstate.ActivateBestChain(state), state.ToString());
         LOCK(::cs_main);
-        const auto* index{chainman.m_blockman.LookupBlockIndex(original->GetHash())};
-        BOOST_REQUIRE(index != nullptr);
-        BOOST_CHECK(index->GetBlockPos() == (changed ? replacement_pos : original_pos));
-        BOOST_CHECK_EQUAL(index->nStatus & BLOCK_FAILED_MASK, 0U);
-        BOOST_CHECK(!(index->nStatus & BLOCK_HAVE_UNDO));
-        CBlock stored;
-        BOOST_REQUIRE(chainman.m_blockman.ReadBlockFromDisk(stored, *index, false));
-        BOOST_CHECK(stored.GetHash() == original->GetHash());
-        BOOST_CHECK(stored.vchNEVMBlockData == replacement.vchNEVMBlockData);
+        BOOST_CHECK_EQUAL(index->nStatus & BLOCK_FAILED_MASK, BLOCK_FAILED_VALID);
+        BOOST_CHECK_EQUAL(chainman.m_failed_blocks.count(index), 1U);
+        BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(index), 0U);
         BOOST_CHECK(chainman.ActiveTip()->GetBlockHash() == parent->GetHash());
+        BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == parent->GetHash());
+        BOOST_CHECK(chainstate.CoinsTip().HaveCoin(COutPoint{parent->vtx.front()->GetHash(), 0}));
+        BOOST_CHECK(!chainstate.CoinsTip().HaveCoin(COutPoint{original->vtx.front()->GetHash(), 0}));
+        BOOST_CHECK(!chainman.HasPendingNEVMPayloadRepair());
+        BOOST_CHECK_EQUAL(chainman.ActiveTip()->nStatus & (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK), 0U);
+        NEVMTxRoot roots;
+        BOOST_CHECK(pnevmtxrootsdb->ReadTxRoots(PayloadVerdictFor(*parent).nevm_hash, roots));
+        BOOST_CHECK(!pnevmtxrootsdb->ReadTxRoots(permanent.nevm_hash, roots));
+        BOOST_CHECK(!pnevmtxrootsdb->GetPendingDisconnect());
+        BOOST_CHECK_EQUAL(nevm->applied_count, 1U);
+        BOOST_CHECK(nevm->applied_hash == parent->GetHash());
+        BOOST_CHECK(nevm->disconnected_blocks.empty());
+        nevm->connect_verdict = {};
     }
 };
 
@@ -3332,6 +3574,107 @@ BOOST_FIXTURE_TEST_CASE(nevm_payload_repair_startup_verifies_before_download,
     BOOST_CHECK_EQUAL(nevm->payload_check_requests, 2U);
 }
 
+// SYSCOIN BEGIN: Recover old mutable-payload markers through normal invalidity.
+BOOST_FIXTURE_TEST_CASE(nevm_payload_repair_reopened_marker_with_immutable_proof,
+                        ImmutableNEVMPayloadRepairSetup)
+{
+    Prepare(/*stored_proof=*/true);
+    auto& chainman{*m_node.chainman};
+    std::string error;
+    {
+        LOCK(::cs_main);
+        // The previous engine misclassified this representation as repairable.
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->Write(
+            NEVM_PAYLOAD_TEST_MARKER, payload_verdict, /*fSync=*/true));
+        const auto db_path{chainman.m_blockman.m_block_tree_db->StoragePath()};
+        BOOST_REQUIRE(db_path.has_value());
+        chainman.m_blockman.m_block_tree_db.reset();
+        chainman.m_blockman.m_block_tree_db = std::make_unique<node::BlockTreeDB>(DBParams{
+            .path = *db_path, .cache_bytes = 1U << 20});
+        BOOST_CHECK(!chainman.HasPendingNEVMPayloadRepair());
+        BOOST_REQUIRE_MESSAGE(chainman.InitializeNEVMPayloadRepair(error), error);
+        BOOST_CHECK(chainman.HasPendingNEVMPayloadRepair());
+        BOOST_CHECK(!chainman.GetNEVMPayloadRepairRequest());
+        NEVMBlockReject persisted;
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->Read(NEVM_PAYLOAD_TEST_MARKER, persisted));
+        BOOST_CHECK(persisted == payload_verdict);
+    }
+    BOOST_CHECK_EQUAL(nevm->payload_check_requests, 0U);
+    CheckParent(/*invalid=*/false);
+    RecoverAndCheckInvalid(/*replaced=*/false);
+    BOOST_CHECK_EQUAL(nevm->payload_check_requests, 1U);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_payload_repair_download_persists_immutable_proof_before_replay,
+                        ImmutableNEVMPayloadRepairSetup)
+{
+    Prepare(/*stored_proof=*/false);
+    auto& chainman{*m_node.chainman};
+    BlockValidationState pending_state;
+    BOOST_REQUIRE(!chainman.ActiveChainstate().ActivateBestChain(pending_state, candidate));
+    BOOST_CHECK(pending_state.IsError());
+    const auto request{WITH_LOCK(::cs_main, return chainman.GetNEVMPayloadRepairRequest())};
+    BOOST_REQUIRE(request.has_value());
+    nevm->connected_blocks.clear();
+    CheckParent(/*invalid=*/false);
+    for (unsigned int failure{0}; failure < 3; ++failure) {
+        pure_override = permanent_verdict;
+        if (failure == 0) pure_override->nevm_hash = GetRandHash();
+        if (failure == 1) pure_override->syscoin_hash = GetRandHash();
+        pure_unavailable = failure == 2;
+        BlockValidationState state;
+        BOOST_CHECK(!chainman.ProcessNEVMPayloadRepair(*request, proof_payload, state));
+        BOOST_CHECK(state.IsError());
+        BOOST_CHECK(WITH_LOCK(::cs_main, return chainman.GetNEVMPayloadRepairRequest()) == request);
+        CheckStored(/*replaced=*/false);
+        CheckParent(/*invalid=*/false);
+    }
+    pure_override.reset();
+    pure_unavailable = false;
+    BlockValidationState state;
+    BOOST_REQUIRE_MESSAGE(chainman.ProcessNEVMPayloadRepair(*request, proof_payload, state), state.ToString());
+    BOOST_CHECK(state.IsValid());
+    BOOST_CHECK(chainman.HasPendingNEVMPayloadRepair());
+    BOOST_CHECK(!WITH_LOCK(::cs_main, return chainman.GetNEVMPayloadRepairRequest()));
+    // Pure validation authorizes storing this exact proof, never block invalidity.
+    CheckParent(/*invalid=*/false);
+    CheckStored(/*replaced=*/true);
+    BOOST_CHECK(nevm->connected_blocks.empty());
+    RecoverAndCheckInvalid(/*replaced=*/true);
+    BOOST_CHECK_EQUAL(nevm->payload_check_requests, 4U);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_payload_repair_count_zero_discovers_immutable_proof,
+                        ImmutableNEVMPayloadRepairSetup)
+{
+    Prepare(/*stored_proof=*/true, /*active_candidate=*/true);
+    auto& chainman{*m_node.chainman};
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(chainman.DiscoverNEVMPayloadRepair(0, uint256{}, error), error);
+    BOOST_CHECK(error.empty());
+    BOOST_REQUIRE(chainman.HasPendingNEVMPayloadRepair());
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK(!chainman.GetNEVMPayloadRepairRequest());
+        BOOST_CHECK(chainman.ActiveTip() == candidate_index);
+        BOOST_CHECK(chainman.ActiveChainstate().CoinsTip().GetBestBlock() == candidate->GetHash());
+        BOOST_CHECK(chainman.ActiveChainstate().CoinsDB().GetBestBlock() == candidate->GetHash());
+        BOOST_CHECK_EQUAL(candidate_index->nStatus & (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK), 0U);
+        BOOST_CHECK_EQUAL(chainman.m_failed_blocks.count(candidate_index), 0U);
+        BOOST_CHECK(pnevmtxrootsdb->GetPublishedTip() == candidate->GetHash());
+        BOOST_CHECK(!pnevmtxrootsdb->GetPendingDisconnect());
+        NEVMBlockReject persisted;
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->Read(NEVM_PAYLOAD_TEST_MARKER, persisted));
+        BOOST_CHECK(persisted == payload_verdict);
+    }
+    BOOST_CHECK(fNEVMConnection);
+    BOOST_CHECK(nevm->connected_blocks.empty());
+    BOOST_CHECK_EQUAL(nevm->payload_check_requests, 1U);
+    RecoverAndCheckInvalid(/*replaced=*/false);
+    BOOST_CHECK_EQUAL(nevm->payload_check_requests, 1U);
+}
+// SYSCOIN END: Recover old mutable-payload markers through normal invalidity.
+
 BOOST_FIXTURE_TEST_CASE(nevm_payload_repair_clears_after_valid_branch_selection,
                         StartupNEVMRecoverySetup)
 {
@@ -3973,6 +4316,24 @@ BOOST_FIXTURE_TEST_CASE(nevm_payload_repair_reindex_identical_skips_check,
                         NEVMPayloadReindexSetup)
 {
     CheckReindexDuplicate(/*queued=*/false, /*changed=*/false);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_payload_repair_reindex_direct_immutable_proof,
+                        NEVMPayloadReindexSetup)
+{
+    CheckReindexDuplicate(/*queued=*/false, /*changed=*/true, ImmutableProof::REPLACEMENT);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_payload_repair_reindex_queued_immutable_proof,
+                        NEVMPayloadReindexSetup)
+{
+    CheckReindexDuplicate(/*queued=*/true, /*changed=*/true, ImmutableProof::REPLACEMENT);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_payload_repair_reindex_retains_original_immutable_proof,
+                        NEVMPayloadReindexSetup)
+{
+    CheckReindexDuplicate(/*queued=*/false, /*changed=*/true, ImmutableProof::ORIGINAL);
 }
 
 BOOST_FIXTURE_TEST_CASE(nevm_connect_operational_errors_preserve_block_candidate,

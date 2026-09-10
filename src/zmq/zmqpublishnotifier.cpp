@@ -559,7 +559,8 @@ bool CZMQPublishNEVMBlockConnectNotifier::NotifyNEVMPayloadCheck(const CNEVMHead
         if (parts[1] != "payload-valid") {
             error = parts[1].empty() ? "nevm-payload-check-response-empty" : parts[1];
             const auto parsed{ParseNEVMBlockReject(parts[1])};
-            if (rejection && parsed && parsed->IsPayload() &&
+            // SYSCOIN: Preserve exact immutable verdicts for recovery replay.
+            if (rejection && parsed &&
                 parsed->nevm_hash == evmBlock.nBlockHash &&
                 parsed->syscoin_hash == syscoin_hash) {
                 *rejection = parsed;

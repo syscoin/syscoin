@@ -276,12 +276,12 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
             f"{request.sysblockhash:064x}:{uint256_from_str(digest):064x}"
         ).encode()
 
-    def _check_payload_repair_from_requested_peer(self):
+    def _check_payload_repair_from_requested_peer(self, *, commitment_invalid=False):
         node = self.nodes[0]
         block = self._build_block(node)
         # Keep this repaired-and-cleaned-up fixture distinct if later cases
         # reuse the cached template for the same parent.
-        block.nNonce += 1
+        block.nNonce += 1 + (1 << 16 if commitment_invalid else 0)
         block.solve()
         original_payload = self._last_nevm_block_data
         replacement_payload = b"approved-nevm-fixture"
@@ -299,11 +299,14 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
             if request.sysblockhash == block.sha256 and request.evmBlock.vchNEVMBlockData == original_payload:
                 rejected.append(request)
                 return self._payload_invalid_response(request)
+            if commitment_invalid and request.sysblockhash == block.sha256:
+                return self._invalid_response(request)
             return b"connected"
 
         self._connect_response = connect_response
         self._payload_check_response = lambda request: (
-            b"payload-valid" if request.sysblockhash == block.sha256
+            (self._invalid_response(request) if commitment_invalid else b"payload-valid")
+            if request.sysblockhash == block.sha256
             and request.evmBlock.vchNEVMBlockData == replacement_payload
             else self._payload_invalid_response(request)
         )
@@ -345,11 +348,16 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
             # Reuse the legitimately mined wrapper. Only the opaque mock
             # engine payload differs in the requested full-block response.
             peer.send_message(msg_generic(b"block", replacement_raw))
-            self.wait_until(lambda: node.getbestblockhash() == block.hash)
+            if commitment_invalid:
+                self.wait_until(lambda: any(tip["hash"] == block.hash and tip["status"] == "invalid"
+                                           for tip in node.getchaintips()))
+                assert_equal(node.getbestblockhash(), previous_tip)
+            else:
+                self.wait_until(lambda: node.getbestblockhash() == block.hash)
             peer.sync_with_ping()
             assert_equal(node.getblockheader(block.hash, False), stored_header)
             assert_equal(node.getblock(block.hash, 0), replacement_raw.hex())
-            assert_equal(self._applied_syshashes, applied + [block.sha256])
+            assert_equal(self._applied_syshashes, applied if commitment_invalid else applied + [block.sha256])
             assert_equal(self._nonzero_connects_since(connect_len), [block.sha256, block.sha256])
             assert_equal(len(self._payload_checks), checks + 1)
             assert_equal(self._payload_negotiations, negotiations + 1)
@@ -359,10 +367,11 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
             assert_equal(validated.evmBlock.nTxRoot, rejected[0].evmBlock.nTxRoot)
             assert_equal(validated.evmBlock.nReceiptRoot, rejected[0].evmBlock.nReceiptRoot)
             assert_equal(validated.evmBlock.vchNEVMBlockData, replacement_payload)
-            assert_equal(node.submitblock(replacement_raw.hex()), "duplicate")
+            assert_equal(node.submitblock(replacement_raw.hex()), "duplicate-invalid" if commitment_invalid else "duplicate")
             # Administrative test cleanup after successful repair exercises
             # ordinary undo and keeps later cases below the first superblock.
-            node.invalidateblock(block.hash)
+            if not commitment_invalid:
+                node.invalidateblock(block.hash)
             assert_equal(node.getbestblockhash(), previous_tip)
             assert_equal(self._applied_syshashes, applied)
         finally:
@@ -654,6 +663,9 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
 
             self.log.info("A requested full block repairs only the engine-approved NEVM payload")
             self._check_payload_repair_from_requested_peer()
+
+            self.log.info("A requested payload can prove an immutable commitment contradiction")
+            self._check_payload_repair_from_requested_peer(commitment_invalid=True)
 
             self.log.info("A better branch retargets repair and retires the old designated peer")
             self._check_payload_repair_retargets_requested_peer()
