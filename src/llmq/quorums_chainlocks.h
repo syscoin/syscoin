@@ -1023,7 +1023,8 @@ class CChainLocksHandler final : private pq::ChainLockFinalityContext {
 public:
     CChainLocksHandler(CConnman& connman,
                        PeerManager& peerman,
-                       ChainstateManager& chainman)
+                       ChainstateManager& chainman,
+                       bool rebuild_core_chainstate = false)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     ~CChainLocksHandler();
 

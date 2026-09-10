@@ -17,6 +17,7 @@
 #include <kernel/context.h>
 #include <llmq/pq_chainlock_persistence.h> // SYSCOIN: pre-import durable finality.
 #include <llmq/pq_chainlock_schedule.h> // SYSCOIN: payment-audit preseal coverage.
+#include <llmq/pq_payment_audit_staging_store.h> // SYSCOIN: durable audit reconstruction controls.
 #include <llmq/quorums_chainlocks.h> // SYSCOIN: retained probation roots.
 #include <llmq/quorums_init.h> // SYSCOIN: recreate pre-import finality handler.
 #include <masternode/activemasternode.h>
@@ -8967,23 +8968,43 @@ enum class DurableSideBranchCase {
     BOOTSTRAP_VALIDATED,
     FINISHED_REINDEX_PROVISIONAL,
     DIVERGENT_PROVISIONAL,
+    AUDIT_CHECKPOINT_REBUILD,
+    AUDIT_CHECKPOINT_GETH_ONLY,
+    AUDIT_CHECKPOINT_EMPTY_GETH,
+    AUDIT_CHECKPOINT_FULL_REINDEX,
 };
 
 // A fsynced side-branch winner protects both its own ancestry and the active
 // recovery fork before Start() has imported it into the in-memory store,
 // including when activation quarantines an incompatible inactive candidate.
 static void CheckPreimportDurableSideBranchBoundary(
-    node::NodeContext& node_context, DurableSideBranchCase scenario)
+    node::NodeContext& node_context, DurableSideBranchCase scenario,
+    const node::CacheSizes* load_cache_sizes = nullptr)
 {
+    const bool audit_checkpoint{
+        scenario == DurableSideBranchCase::AUDIT_CHECKPOINT_REBUILD ||
+        scenario == DurableSideBranchCase::AUDIT_CHECKPOINT_GETH_ONLY ||
+        scenario == DurableSideBranchCase::AUDIT_CHECKPOINT_EMPTY_GETH ||
+        scenario == DurableSideBranchCase::AUDIT_CHECKPOINT_FULL_REINDEX};
+    const bool preserve_audit_checkpoint{
+        scenario == DurableSideBranchCase::AUDIT_CHECKPOINT_GETH_ONLY};
+    const bool persisted_full_reindex{
+        scenario == DurableSideBranchCase::AUDIT_CHECKPOINT_FULL_REINDEX};
     const bool bootstrap_empty_chain{
         scenario == DurableSideBranchCase::BOOTSTRAP_VALIDATED ||
-        scenario == DurableSideBranchCase::FINISHED_REINDEX_PROVISIONAL};
+        scenario == DurableSideBranchCase::FINISHED_REINDEX_PROVISIONAL ||
+        (audit_checkpoint && !preserve_audit_checkpoint)};
     const bool provisional_winner{
         scenario == DurableSideBranchCase::FINISHED_REINDEX_PROVISIONAL ||
         scenario == DurableSideBranchCase::DIVERGENT_PROVISIONAL};
     struct RestoreReindex {
         const bool previous{node::fReindex.load()};
-        ~RestoreReindex() { node::fReindex = previous; }
+        const bool previous_geth{fReindexGeth.load()};
+        ~RestoreReindex()
+        {
+            node::fReindex = previous;
+            fReindexGeth = previous_geth;
+        }
     } restore_reindex;
     auto& chainman{static_cast<TestChainstateManager&>(
         *Assert(node_context.chainman))};
@@ -9055,7 +9076,7 @@ static void CheckPreimportDurableSideBranchBoundary(
     // Retained real blocks must replay under the same pre-DIP rules used to
     // mine them. Preparation can start there and still precede the synthetic
     // winner's first roster cutoff.
-    consensus.DIP0003Height = bootstrap_empty_chain ? restore.dip3_height : 1;
+    consensus.DIP0003Height = bootstrap_empty_chain || audit_checkpoint ? restore.dip3_height : 1;
     consensus.nPQPreparationHeight = consensus.DIP0003Height;
     consensus.nPQChainLockEpochOrigin = 1'440;
     consensus.nPQRegistrationCutoffBlocks = 288;
@@ -9078,9 +9099,24 @@ static void CheckPreimportDurableSideBranchBoundary(
         llmq::MakePQChainLockFinalityStoreConfig(consensus)};
     BOOST_REQUIRE(config);
     BOOST_REQUIRE(llmq::MakePQQuorumBuildConfig(consensus));
-    const int32_t target_height{
+    const int32_t initializer_height{
         config->chainlock_schedule.epoch_origin +
         static_cast<int32_t>(llmq::pq::PQ_FIRST_ELIGIBLE_TARGET_OFFSET)};
+    int32_t target_height{initializer_height};
+    constexpr uint32_t checkpoint_epoch{llmq::pq::ACTIVE_QUORUMS - 1};
+    std::optional<llmq::pq::PaymentAuditEpochSchedule> audit_schedule;
+    if (audit_checkpoint) {
+        BOOST_REQUIRE(load_cache_sizes != nullptr);
+        audit_schedule = llmq::pq::BuildPaymentAuditEpochSchedule(
+            {config->chainlock_schedule, config->btcc_schedule}, checkpoint_epoch);
+        BOOST_REQUIRE(audit_schedule);
+        const auto covered_target{llmq::pq::NextEligibleChainLockTargetHeight(
+            config->chainlock_schedule, audit_schedule->carrier_end_height_exclusive - 2)};
+        BOOST_REQUIRE(covered_target);
+        target_height = *covered_target;
+        BOOST_REQUIRE(target_height > initializer_height);
+        BOOST_REQUIRE(target_height + 1 >= audit_schedule->carrier_end_height_exclusive);
+    }
     BOOST_REQUIRE(llmq::pq::IsEligibleChainLockTarget(
         config->chainlock_schedule, target_height));
 
@@ -9102,6 +9138,11 @@ static void CheckPreimportDurableSideBranchBoundary(
         index->nChainTx = parent.nChainTx + 1;
         index->nStatus = (provisional_winner ? BLOCK_VALID_TRANSACTIONS :
                                                BLOCK_VALID_SCRIPTS) | BLOCK_HAVE_DATA;
+        if (audit_checkpoint) {
+            index->nStatus |= BLOCK_PQ_RECEIPT_INDEX_VALIDATED;
+            index->pqPaymentProbationStateHash =
+                deterministicMNManager->EmptyPaymentProbationStateHash();
+        }
         return index;
     };
 
@@ -9132,8 +9173,10 @@ static void CheckPreimportDurableSideBranchBoundary(
     }
 
     llmq::pq::FinalChainLock winner;
-    winner.statement.height = durable_target->nHeight;
-    winner.statement.block_hash = durable_target->GetBlockHash();
+    const CBlockIndex* initializer_target{durable_target->GetAncestor(initializer_height)};
+    BOOST_REQUIRE(initializer_target != nullptr);
+    winner.statement.height = initializer_target->nHeight;
+    winner.statement.block_hash = initializer_target->GetBlockHash();
     winner.statement.previous_chainlock_height =
         activation_predecessor->nHeight;
     winner.statement.previous_chainlock_hash =
@@ -9180,7 +9223,8 @@ static void CheckPreimportDurableSideBranchBoundary(
     BOOST_REQUIRE(authorization_state_hash);
     winner.statement.roster_authorization_state_hash =
         *authorization_state_hash;
-    winner.statement.payment_probation_state_hash = GetRandHash();
+    winner.statement.payment_probation_state_hash = audit_checkpoint
+        ? deterministicMNManager->EmptyPaymentProbationStateHash() : GetRandHash();
     winner.selected_quorum_mask = 0b0111;
     winner.signatures.resize(llmq::pq::FINAL_SIGNATURE_COUNT);
     for (auto& signature : winner.signatures) {
@@ -9202,6 +9246,8 @@ static void CheckPreimportDurableSideBranchBoundary(
     llmq::StopLLMQSystem();
     llmq::DestroyLLMQSystem();
     chainman.ResetIbd(PQHistoryAuthState::UNINITIALIZED);
+    llmq::pq::RecoveryUniverseCapsulePtr recovery_universe;
+    uint256 initializer_logical_id;
     {
         llmq::pq::PQChainLockPersistence persistence{
             DBParams{
@@ -9226,19 +9272,192 @@ static void CheckPreimportDurableSideBranchBoundary(
         const CBlockIndex* source_snapshot{
             durable_target->GetAncestor(*source_snapshot_height)};
         BOOST_REQUIRE(source_snapshot != nullptr);
-        const auto recovery_universe{MakeRecoveryUniverseFixture(
+        recovery_universe = MakeRecoveryUniverseFixture(
             consensus.hashGenesisBlock,
             winner.statement.roster_beacons.active.recovery_authority_source,
-            *source_snapshot)};
+            *source_snapshot);
         BOOST_REQUIRE(recovery_universe);
         BOOST_REQUIRE(persistence.PersistInitializedBest(
             winner, context, /*error=*/nullptr, /*verified_reset=*/nullptr,
             /*payment_audit_seal_context=*/std::nullopt,
             recovery_universe));
+        if (audit_checkpoint) {
+            // Retain the exact initializer as roster authority, then persist
+            // a later KEEP winner whose completed audit window can be pruned.
+            const auto initializer{winner};
+            initializer_logical_id = initializer.GetLogicalId(consensus.hashGenesisBlock);
+            auto& statement{winner.statement};
+            statement.height = durable_target->nHeight;
+            statement.block_hash = durable_target->GetBlockHash();
+            statement.previous_chainlock_height = statement.height - llmq::pq::PQ_CL_PERIOD;
+            statement.previous_chainlock_hash = durable_target
+                ->GetAncestor(statement.previous_chainlock_height)->GetBlockHash();
+            statement.roster_transition = llmq::pq::RosterAuthorizationTransitionKind::KEEP;
+            statement.roster_authorization_base = {
+                initializer.statement.height, initializer.statement.block_hash,
+                initializer_logical_id};
+            statement.previous_btcc_cursor = initializer.statement.accepted_btcc_cursor;
+            statement.btcc_advance = llmq::pq::BTCCAdvance::KEEP;
+            llmq::pq::RosterAuthorizationTransition transition;
+            transition.kind = statement.roster_transition;
+            transition.target_height = statement.height;
+            transition.target_block_hash = statement.block_hash;
+            transition.predecessor_height = statement.previous_chainlock_height;
+            transition.predecessor_block_hash = statement.previous_chainlock_hash;
+            transition.authorization_base = statement.roster_authorization_base;
+            transition.previous = llmq::pq::RosterAuthorizationPriorState{
+                initializer.statement.roster_authorization_state_hash,
+                initializer.statement.roster_beacons};
+            transition.new_window = statement.roster_beacons;
+            const auto state_hash{llmq::pq::GetRosterAuthorizationStateHash(
+                consensus.hashGenesisBlock, transition)};
+            BOOST_REQUIRE(state_hash);
+            statement.roster_authorization_state_hash = *state_hash;
+            BOOST_REQUIRE(winner.IsStructurallyValid());
+            const auto later_context{llmq::pq::ChainLockStoreTestContextFactory::CreateDurable(
+                consensus.hashGenesisBlock, config->chainlock_schedule, statement)};
+            BOOST_REQUIRE(later_context);
+            BOOST_REQUIRE(persistence.PersistBest(winner, later_context));
+        }
     }
     CBlockIndex* genesis{nullptr};
     std::array<CBlockIndex*, 2> bootstrap_competitor{};
-    if (bootstrap_empty_chain) {
+    std::optional<llmq::pq::PaymentAuditStoreCheckpoint> checkpoint;
+    std::optional<llmq::pq::PaymentAuditFrozenRowSummary> frozen_row;
+    if (audit_checkpoint) {
+        checkpoint = llmq::pq::PaymentAuditStoreCheckpoint{
+            checkpoint_epoch, winner.statement.height, winner.statement.block_hash,
+            winner.statement.payment_audit_receipt_state,
+            winner.statement.payment_probation_state_hash,
+            winner.statement.height, winner.statement.block_hash,
+            winner.GetLogicalId(consensus.hashGenesisBlock),
+            winner.GetWitnessId(consensus.hashGenesisBlock)};
+        BOOST_REQUIRE(checkpoint->IsStructurallyValid());
+        {
+            llmq::pq::PaymentAuditStore archive{
+                chainman.m_options.datadir / "llmq/pq-payment-audits",
+                consensus.hashGenesisBlock, 8U << 20, /*wipe=*/true};
+            BOOST_REQUIRE(archive.PruneThroughCheckpoint(*checkpoint));
+            BOOST_REQUIRE(archive.GetPruneCheckpoint() == checkpoint);
+            BOOST_REQUIRE(!archive.GetPendingPruneCheckpoint());
+        }
+        {
+            llmq::pq::PaymentAuditStagingStore staging{
+                chainman.m_options.datadir / "llmq/pq-payment-audit-staging",
+                consensus.hashGenesisBlock, 8U << 20, /*wipe=*/true};
+            llmq::pq::PaymentAuditStagingRow row;
+            row.expected.epoch = checkpoint_epoch;
+            row.expected.response_height = audit_schedule->rows.front().response_height;
+            row.expected.response_chainlock_logical_id = initializer_logical_id;
+            row.expected.subject_descriptor_hash = GetRandHash();
+            row.deadline_height = audit_schedule->rows.front().deadline_height;
+            row.response_block_hash = initializer_target->GetBlockHash();
+            BOOST_REQUIRE_EQUAL(row.expected.response_height, initializer_target->nHeight);
+            for (std::size_t member{0}; member < llmq::pq::QUORUM_MIN_VALID; ++member) {
+                row.subject_valid_members[member / 8] |=
+                    static_cast<uint8_t>(uint8_t{1} << (member % 8));
+            }
+            BOOST_REQUIRE(row.IsStructurallyValid(consensus.hashGenesisBlock));
+            using StagingResult = llmq::pq::PaymentAuditStagingResult;
+            BOOST_REQUIRE(staging.ActivateEpoch(checkpoint_epoch) == StagingResult::ACCEPTED);
+            BOOST_REQUIRE(staging.EnsureRow(row) == StagingResult::ACCEPTED);
+            const CBlockIndex* deadline{durable_target->GetAncestor(row.deadline_height)};
+            BOOST_REQUIRE(deadline != nullptr);
+            BOOST_REQUIRE(staging.FreezeRow(checkpoint_epoch, 0,
+                row.response_block_hash, deadline->GetBlockHash()) == StagingResult::ACCEPTED);
+            frozen_row = staging.GetSummary(checkpoint_epoch, 0);
+            BOOST_REQUIRE(frozen_row);
+        }
+
+        {
+            LOCK(::cs_main);
+            BOOST_REQUIRE(!node::fReindex.load());
+            BOOST_REQUIRE(active_tip->nHeight < consensus.DIP0003Height);
+            genesis = chainman.m_blockman.LookupBlockIndex(consensus.hashGenesisBlock);
+            BOOST_REQUIRE(genesis != nullptr);
+            if (bootstrap_empty_chain) {
+                bootstrap_competitor[0] = add_index(*durable_ancestor);
+                bootstrap_competitor[1] = add_index(*bootstrap_competitor[0]);
+                BOOST_REQUIRE(bootstrap_competitor.back()->nChainWork > durable_target->nChainWork);
+            }
+            BlockValidationState flush_state;
+            BOOST_REQUIRE_MESSAGE(chainman.ActiveChainstate().FlushStateToDisk(
+                flush_state, FlushStateMode::ALWAYS), flush_state.ToString());
+            BOOST_REQUIRE(chainman.ActiveChainstate().CoinsDB().GetBestBlock() == active_tip->GetBlockHash());
+            BOOST_REQUIRE(chainman.m_blockman.WriteBlockIndexDB());
+            bool full_reindex{false};
+            chainman.m_blockman.m_block_tree_db->ReadReindexing(full_reindex);
+            BOOST_REQUIRE(!full_reindex);
+            if (persisted_full_reindex) {
+                BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->WriteReindexing(true));
+            }
+            chainman.ResetChainstates();
+            // The loader rebuilds this multimap; keep the existing index
+            // objects but avoid duplicating their parent-to-child edges.
+            chainman.m_blockman.m_prev_block_index.clear();
+            if (scenario == DurableSideBranchCase::AUDIT_CHECKPOINT_EMPTY_GETH) {
+                auto& empty{chainman.InitializeChainstate(node_context.mempool.get())};
+                empty.InitCoinsDB(1U << 20, /*in_memory=*/false, /*should_wipe=*/true);
+                BOOST_REQUIRE(empty.CoinsDB().GetBestBlock().IsNull());
+                chainman.ResetChainstates();
+            }
+        }
+        node::ChainstateLoadOptions options;
+        options.mempool = node_context.mempool.get();
+        options.block_tree_db_in_memory = false;
+        options.coins_db_in_memory = false;
+        options.reindex_chainstate = scenario == DurableSideBranchCase::AUDIT_CHECKPOINT_REBUILD;
+        options.fReindexGeth = !persisted_full_reindex;
+        options.connman = node_context.connman.get();
+        options.banman = node_context.banman.get();
+        options.peerman = node_context.peerman.get();
+        fReindexGeth = options.fReindexGeth;
+        const auto [status, load_error]{node::LoadChainstate(chainman, *load_cache_sizes, options)};
+        BOOST_REQUIRE_MESSAGE(status == node::ChainstateLoadStatus::SUCCESS, load_error.original);
+        LOCK(::cs_main);
+        BOOST_CHECK_EQUAL(node::fReindex.load(), persisted_full_reindex);
+        BOOST_REQUIRE(chainman.m_blockman.LookupBlockIndex(winner.statement.block_hash) == durable_target);
+        if (bootstrap_empty_chain) {
+            BOOST_REQUIRE(chainman.ActiveTip() == nullptr);
+            BOOST_REQUIRE(chainman.ActiveChainstate().CoinsTip().GetBestBlock().IsNull());
+            BOOST_REQUIRE(chainman.ActiveChainstate().CoinsDB().GetHeadBlocks().empty());
+            BOOST_REQUIRE(!chainman.ActiveChainstate().CoinsDB().Cursor()->Valid());
+        } else {
+            BOOST_REQUIRE(chainman.ActiveTip() == active_tip);
+            BOOST_REQUIRE(chainman.ActiveChainstate().CoinsDB().GetBestBlock() == active_tip->GetBlockHash());
+            BOOST_REQUIRE(chainman.ActiveChainstate().CoinsDB().Cursor()->Valid());
+        }
+    }
+    const auto check_audit_stores = [&] {
+        BOOST_REQUIRE(audit_checkpoint);
+        SyncWithValidationInterfaceQueue();
+        llmq::StopLLMQSystem();
+        llmq::DestroyLLMQSystem();
+        llmq::pq::PaymentAuditStore archive{
+            chainman.m_options.datadir / "llmq/pq-payment-audits", consensus.hashGenesisBlock};
+        BOOST_REQUIRE(archive.IsHealthy());
+        BOOST_CHECK(!archive.GetPendingPruneCheckpoint());
+        BOOST_CHECK(archive.GetPruneCheckpoint() == (preserve_audit_checkpoint
+            ? checkpoint : std::optional<llmq::pq::PaymentAuditStoreCheckpoint>{}));
+        llmq::pq::PaymentAuditStagingStore staging{
+            chainman.m_options.datadir / "llmq/pq-payment-audit-staging", consensus.hashGenesisBlock};
+        BOOST_REQUIRE(staging.IsHealthy());
+        BOOST_CHECK(staging.ActiveEpoch() == (preserve_audit_checkpoint
+            ? std::optional<uint32_t>{checkpoint_epoch} : std::optional<uint32_t>{}));
+        BOOST_CHECK(staging.GetSummary(checkpoint_epoch, 0) == (preserve_audit_checkpoint
+            ? frozen_row : std::optional<llmq::pq::PaymentAuditFrozenRowSummary>{}));
+        llmq::pq::PQChainLockPersistence persistence{
+            DBParams{.path = chainman.m_options.datadir / "llmq/pq-chainlocks",
+                     .cache_bytes = 4U << 20, .wipe_data = false},
+            consensus.hashGenesisBlock, *config};
+        const auto persisted_winner{persistence.LoadBest()};
+        BOOST_REQUIRE(persisted_winner);
+        BOOST_CHECK(persisted_winner->ChainLock() == winner);
+        const auto persisted_universe{persistence.LoadRecoveryUniverse(recovery_universe->SourceId())};
+        BOOST_REQUIRE(persisted_universe);
+        BOOST_CHECK(persisted_universe->CapsuleId() == recovery_universe->CapsuleId());
+    };
+    if (bootstrap_empty_chain && !audit_checkpoint) {
         // Chainstate-only reindex preserves the fully validated block index
         // and durable finality, but reconstructs coins from an empty chain.
         // The real genesis record must remain activatable in that state.
@@ -9314,7 +9533,7 @@ static void CheckPreimportDurableSideBranchBoundary(
             // Durable finality and PoDA blob data survive this rebuild.
         }
     }
-    {
+    if (!audit_checkpoint) {
         LOCK(::cs_main);
         llmq::InitLLMQSystem(*Assert(node_context.connman),
                              *Assert(node_context.peerman), chainman);
@@ -9323,6 +9542,21 @@ static void CheckPreimportDurableSideBranchBoundary(
     }
     BOOST_REQUIRE(llmq::chainLocksHandler != nullptr);
     BOOST_CHECK(!llmq::chainLocksHandler->GetBestChainLock());
+    if (audit_checkpoint) {
+        const auto identity{llmq::chainLocksHandler->GetDurableFinalityTargetForStartup()};
+        BOOST_REQUIRE(identity);
+        BOOST_CHECK_EQUAL(identity->height, winner.statement.height);
+        BOOST_CHECK(identity->block_hash == winner.statement.block_hash);
+        const auto lookup{llmq::chainLocksHandler->GetRecoveryUniversePersistenceLookup()};
+        BOOST_REQUIRE(lookup);
+        const auto retained_universe{lookup(recovery_universe->SourceId())};
+        BOOST_REQUIRE(retained_universe);
+        BOOST_CHECK(retained_universe->CapsuleId() == recovery_universe->CapsuleId());
+        if (preserve_audit_checkpoint || persisted_full_reindex) {
+            check_audit_stores();
+            return;
+        }
+    }
 
     struct ResetInterrupt {
         util::SignalInterrupt& interrupt;
@@ -9512,45 +9746,48 @@ static void CheckPreimportDurableSideBranchBoundary(
         }
         BOOST_CHECK(!chainman.m_interrupt);
         check_winner_preserved();
-        LOCK(::cs_main);
-        BOOST_REQUIRE(chainman.ActiveTip() == progressed_tip);
-        BOOST_REQUIRE(progressed_tip->nHeight > 0);
-        BOOST_REQUIRE(progressed_tip->nHeight <= active_lca->nHeight);
-        BOOST_CHECK(durable_target->GetAncestor(progressed_tip->nHeight) == progressed_tip);
-        BOOST_CHECK(rebuilt.CoinsTip().GetBestBlock() == progressed_tip->GetBlockHash());
-        Coin recovered_coin;
-        BOOST_REQUIRE(rebuilt.CoinsTip().GetCoin(replayed_coinbase, recovered_coin));
-        BOOST_CHECK(recovered_coin.out == expected_coinbase);
-        BOOST_CHECK_EQUAL(recovered_coin.nHeight, first_replayed_index->nHeight);
-        BOOST_CHECK(recovered_coin.IsCoinBase());
-        const CBlockIndex* floor{nullptr};
-        const CBlockIndex* target{nullptr};
-        std::string error;
-        if (provisional_winner) {
-            // Forward replay does not grant the ordinary disconnect/invalidate
-            // callers a provisional finality floor.
-            BOOST_REQUIRE(!llmq::chainLocksHandler->GetDurableFinalityRecoveryFloor(
-                floor, target, error));
-            BOOST_CHECK(floor == nullptr);
-            BOOST_CHECK(target == nullptr);
-            BOOST_CHECK(!durable_target->IsValid(BLOCK_VALID_SCRIPTS));
-        } else {
-            BOOST_REQUIRE_MESSAGE(llmq::chainLocksHandler->GetDurableFinalityRecoveryFloor(
-                floor, target, error), error);
-            BOOST_CHECK(floor == progressed_tip);
-            BOOST_CHECK(target == durable_target);
+        {
+            LOCK(::cs_main);
+            BOOST_REQUIRE(chainman.ActiveTip() == progressed_tip);
+            BOOST_REQUIRE(progressed_tip->nHeight > 0);
+            BOOST_REQUIRE(progressed_tip->nHeight <= active_lca->nHeight);
+            BOOST_CHECK(durable_target->GetAncestor(progressed_tip->nHeight) == progressed_tip);
+            BOOST_CHECK(rebuilt.CoinsTip().GetBestBlock() == progressed_tip->GetBlockHash());
+            Coin recovered_coin;
+            BOOST_REQUIRE(rebuilt.CoinsTip().GetCoin(replayed_coinbase, recovered_coin));
+            BOOST_CHECK(recovered_coin.out == expected_coinbase);
+            BOOST_CHECK_EQUAL(recovered_coin.nHeight, first_replayed_index->nHeight);
+            BOOST_CHECK(recovered_coin.IsCoinBase());
+            const CBlockIndex* floor{nullptr};
+            const CBlockIndex* target{nullptr};
+            std::string error;
+            if (provisional_winner) {
+                // Forward replay does not grant the ordinary disconnect/invalidate
+                // callers a provisional finality floor.
+                BOOST_REQUIRE(!llmq::chainLocksHandler->GetDurableFinalityRecoveryFloor(
+                    floor, target, error));
+                BOOST_CHECK(floor == nullptr);
+                BOOST_CHECK(target == nullptr);
+                BOOST_CHECK(!durable_target->IsValid(BLOCK_VALID_SCRIPTS));
+            } else {
+                BOOST_REQUIRE_MESSAGE(llmq::chainLocksHandler->GetDurableFinalityRecoveryFloor(
+                    floor, target, error), error);
+                BOOST_CHECK(floor == progressed_tip);
+                BOOST_CHECK(target == durable_target);
+            }
+            for (const CBlockIndex* index : bootstrap_competitor) {
+                BOOST_CHECK(index->nStatus & BLOCK_CONFLICT_CHAINLOCK);
+                BOOST_CHECK_EQUAL(index->nStatus & BLOCK_FAILED_MASK, 0U);
+            }
+            BOOST_CHECK_EQUAL(rebuilt.setBlockIndexCandidates.count(bootstrap_competitor.back()), 0U);
+            BOOST_CHECK_EQUAL(rebuilt.setBlockIndexCandidates.count(durable_target), 1U);
+            const auto stats{rebuilt.GetChainLockConflictMarkingStatsForTesting()};
+            BOOST_CHECK_EQUAL(stats.batch_calls, 1U);
+            BOOST_CHECK_EQUAL(stats.disconnect_tip_calls, 0U);
+            BOOST_CHECK_EQUAL(stats.tip_publications, 0U);
+            BOOST_CHECK(!node::fReindex.load());
         }
-        for (const CBlockIndex* index : bootstrap_competitor) {
-            BOOST_CHECK(index->nStatus & BLOCK_CONFLICT_CHAINLOCK);
-            BOOST_CHECK_EQUAL(index->nStatus & BLOCK_FAILED_MASK, 0U);
-        }
-        BOOST_CHECK_EQUAL(rebuilt.setBlockIndexCandidates.count(bootstrap_competitor.back()), 0U);
-        BOOST_CHECK_EQUAL(rebuilt.setBlockIndexCandidates.count(durable_target), 1U);
-        const auto stats{rebuilt.GetChainLockConflictMarkingStatsForTesting()};
-        BOOST_CHECK_EQUAL(stats.batch_calls, 1U);
-        BOOST_CHECK_EQUAL(stats.disconnect_tip_calls, 0U);
-        BOOST_CHECK_EQUAL(stats.tip_publications, 0U);
-        BOOST_CHECK(!node::fReindex.load());
+        if (audit_checkpoint) check_audit_stores();
         return;
     }
 
@@ -9724,6 +9961,47 @@ BOOST_FIXTURE_TEST_CASE(
     TestChain100Setup)
 {
     CheckPreimportDurableSideBranchBoundary(m_node, DurableSideBranchCase::DIVERGENT_PROVISIONAL);
+}
+
+struct AuditCheckpointStartupSetup : TestChain100Setup {
+    AuditCheckpointStartupSetup()
+        : TestChain100Setup{ChainType::REGTEST, {}, COINBASE_MATURITY,
+                            /*coins_db_in_memory=*/false,
+                            /*block_tree_db_in_memory=*/false}
+    {
+    }
+};
+
+BOOST_FIXTURE_TEST_CASE(
+    chainstate_rebuild_resets_audit_checkpoint_and_replays,
+    AuditCheckpointStartupSetup)
+{
+    CheckPreimportDurableSideBranchBoundary(m_node,
+        DurableSideBranchCase::AUDIT_CHECKPOINT_REBUILD, &m_cache_sizes);
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    geth_only_rebuild_preserves_audit_checkpoint_and_staging,
+    AuditCheckpointStartupSetup)
+{
+    CheckPreimportDurableSideBranchBoundary(m_node,
+        DurableSideBranchCase::AUDIT_CHECKPOINT_GETH_ONLY, &m_cache_sizes);
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    geth_rebuild_with_empty_coins_resets_audit_checkpoint_and_replays,
+    AuditCheckpointStartupSetup)
+{
+    CheckPreimportDurableSideBranchBoundary(m_node,
+        DurableSideBranchCase::AUDIT_CHECKPOINT_EMPTY_GETH, &m_cache_sizes);
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    persisted_full_reindex_resets_audit_checkpoint_and_staging,
+    AuditCheckpointStartupSetup)
+{
+    CheckPreimportDurableSideBranchBoundary(m_node,
+        DurableSideBranchCase::AUDIT_CHECKPOINT_FULL_REINDEX, &m_cache_sizes);
 }
 // SYSCOIN END: Durable ChainLock restart and deep-invalidation tests.
 

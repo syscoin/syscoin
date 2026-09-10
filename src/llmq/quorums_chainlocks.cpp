@@ -2794,7 +2794,8 @@ bool ShouldConsumePaymentAuditStartupSlot(
 
 CChainLocksHandler::CChainLocksHandler(CConnman& connman,
                                        PeerManager& peerman,
-                                       ChainstateManager& chainman)
+                                       ChainstateManager& chainman,
+                                       bool rebuild_core_chainstate)
     : m_connman{connman},
       m_peerman{peerman},
       m_chainman{chainman},
@@ -2810,13 +2811,14 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
     if (m_config) {
         bool full_reindex{false};
         if (m_chainman.m_blockman.m_block_tree_db) {
-            // Full reindex may rebuild bounded block-derived audit data, but
-            // it cannot rediscover the roster-authorization predecessor chain
-            // from block inventory. Preserve the fsynced finality state and
-            // reauthenticate it against the rebuilt branch instead.
             m_chainman.m_blockman.m_block_tree_db->ReadReindexing(
                 full_reindex);
         }
+        const bool reset_payment_audits{
+            rebuild_core_chainstate || full_reindex};
+        // Core replay cannot rediscover roster-authorization predecessors
+        // from block inventory. Preserve fsynced finality and reauthenticate
+        // it against the rebuilt branch.
         m_persistence = std::make_unique<pq::PQChainLockPersistence>(
             DBParams{
                 .path = chainman.m_options.datadir / "llmq/pq-chainlocks",
@@ -3194,16 +3196,19 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
                 return persisted && completed;
             });
         try {
+            // Reset the archive checkpoint with Core state. Replay may fetch
+            // exact witnesses or reauthenticate compact receipt history;
+            // missing local staging evidence requires abstention.
             m_payment_audit_store =
                 std::make_unique<pq::PaymentAuditStore>(
                     chainman.m_options.datadir /
                         "llmq/pq-payment-audits",
-                    m_genesis_hash, 8U << 20, full_reindex);
+                    m_genesis_hash, 8U << 20, reset_payment_audits);
             m_payment_audit_staging_store =
                 std::make_unique<pq::PaymentAuditStagingStore>(
                     chainman.m_options.datadir /
                         "llmq/pq-payment-audit-staging",
-                    m_genesis_hash, 8U << 20, full_reindex);
+                    m_genesis_hash, 8U << 20, reset_payment_audits);
             if (!m_payment_audit_store->IsHealthy() ||
                 !m_payment_audit_staging_store->IsHealthy()) {
                 throw std::runtime_error{

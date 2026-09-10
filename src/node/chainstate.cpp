@@ -139,8 +139,10 @@ static ChainstateLoadResult CompleteChainstateInitialization(
     netfulfilledman.reset(new CNetFulfilledRequestManager());
     mmetaman.reset();
     mmetaman.reset(new CMasternodeMetaMan());
-    // SYSCOIN: Initialize the fork-owned finality stack against this rebuilt chainstate.
-    llmq::InitLLMQSystem(*options.connman, *options.peerman, chainman);
+    // SYSCOIN: Audit state follows Core reconstruction, including its prune
+    // checkpoint. A Geth-only reset retains the exact audit archive.
+    llmq::InitLLMQSystem(*options.connman, *options.peerman, chainman,
+                        options.reindex || options.reindex_chainstate);
     pnevmtxrootsdb.reset();
     pnevmtxrootsdb = std::make_unique<CNEVMTxRootsDB>(DBParams{
         .path = chainman.m_options.datadir / "nevmtxroots",
@@ -404,7 +406,8 @@ static ChainstateLoadResult CompleteChainstateInitialization(
         mmetaman.reset();
         mmetaman.reset(new CMasternodeMetaMan());
         // SYSCOIN: Rebind fork-owned finality after empty-coins recovery.
-        llmq::InitLLMQSystem(*options.connman, *options.peerman, chainman);
+        llmq::InitLLMQSystem(*options.connman, *options.peerman, chainman,
+                            /*rebuild_core_chainstate=*/true);
         pnevmtxrootsdb.reset();
         pnevmtxrootsdb = std::make_unique<CNEVMTxRootsDB>(DBParams{
             .path = chainman.m_options.datadir / "nevmtxroots",
@@ -442,6 +445,13 @@ static ChainstateLoadResult CompleteChainstateInitialization(
             .wipe_data = false,
             .options = chainman.m_options.coins_db});  
     } else if (coinsViewEmpty) {
+        if (!options.reindex && !options.reindex_chainstate && !disk_reindexing) {
+            // Geth reconstruction already rebuilt auxiliary state, but an
+            // empty coins view also requires the Core audit checkpoint reset.
+            llmq::DestroyLLMQSystem();
+            llmq::InitLLMQSystem(*options.connman, *options.peerman, chainman,
+                                /*rebuild_core_chainstate=*/true);
+        }
         // SYSCOIN Continued reindex already reinitialized reconstructible NEVM DBs above
         // via effective_reindex_geth, which skips the block above. nevmminttx still
         // must clear whenever the UTXO set is empty so replay state matches chainstate.

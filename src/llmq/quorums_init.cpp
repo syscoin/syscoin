@@ -28,7 +28,8 @@ namespace llmq
 
 void InitLLMQSystem(CConnman& connman,
                     PeerManager& peerman,
-                    ChainstateManager& chainman)
+                    ChainstateManager& chainman,
+                    bool rebuild_core_chainstate)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
     const PQHistoryAuthState initialization_state{
@@ -109,7 +110,8 @@ void InitLLMQSystem(CConnman& connman,
     // It has no live P2P or mining path.
     auto block_processor{std::make_unique<CQuorumBlockProcessor>()};
     auto chainlocks_handler{
-        std::make_unique<CChainLocksHandler>(connman, peerman, chainman)};
+        std::make_unique<CChainLocksHandler>(
+            connman, peerman, chainman, rebuild_core_chainstate)};
 
     pq::FrozenQuorumRosterCachePtr roster_cache;
     if (quorum_build_config) {

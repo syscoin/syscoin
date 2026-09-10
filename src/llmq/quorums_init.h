@@ -16,7 +16,8 @@ namespace llmq
 // SYSCOIN: Initialize the pre-activation commitment replay shim and PQ finality service.
 void InitLLMQSystem(CConnman& connman,
                     PeerManager& peerman,
-                    ChainstateManager& chainman)
+                    ChainstateManager& chainman,
+                    bool rebuild_core_chainstate = false)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 void DestroyLLMQSystem();
 
