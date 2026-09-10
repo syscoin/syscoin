@@ -3648,8 +3648,7 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
         return state.Error("NEVM root disconnect recovery is pending");
     }
     CNEVMHeader nevmBlockHeader;
-    std::vector<unsigned char> coinbase_payload;
-    if(!GetNEVMData(state, block, nevmBlockHeader, &coinbase_payload)) {
+    if(!GetNEVMData(state, block, nevmBlockHeader)) {
         return false; //state filled by GetNEVMData
     }
     if(block.vchNEVMBlockData.empty()) {
@@ -3659,10 +3658,6 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
     NEVMDataVec NEVMDataVecOut;
     for (auto const& [key, val] : mapPoDA) {
         NEVMDataVecOut.emplace_back(key);
-    }
-    bool bSkipValidation = false;
-    if(bSkipValidation) {
-        LogPrintf("ConnectNEVMCommitment: skipping validation result...\n");
     }
     // SYSCOIN: Geth exposes BTCPrevHash immediately and has no provisional
     // distinction. Only an authenticated cursor ADVANCE is forwarded; a
@@ -3733,7 +3728,7 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
             return state.Error("shutdown");
         }
         std::optional<NEVMBlockReject> rejected_pair;
-        GetMainSignals().NotifyNEVMBlockConnect(nevmBlockHeader, block, stateStr, fJustCheck? uint256(): nBlockHash, NEVMDataVecOut, nHeight, bSkipValidation, btcPrevHashForNEVM, diff, &rejected_pair);
+        GetMainSignals().NotifyNEVMBlockConnect(nevmBlockHeader, block, stateStr, fJustCheck? uint256(): nBlockHash, NEVMDataVecOut, nHeight, /*bSkipValidation=*/false, btcPrevHashForNEVM, diff, &rejected_pair);
         const auto& geth_command_line{m_chainman.GethCommandLine()};
         const bool exit_when_synced{
             std::find(geth_command_line.begin(), geth_command_line.end(),
@@ -3801,7 +3796,7 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
             // Recovery verifies the applied predecessor (or this exact pair
             // after a lost reply). Retry the current request only once.
             stateStr.clear();
-            GetMainSignals().NotifyNEVMBlockConnect(nevmBlockHeader, block, stateStr, fJustCheck? uint256(): nBlockHash, NEVMDataVecOut, nHeight, bSkipValidation, btcPrevHashForNEVM, diff, &rejected_pair);
+            GetMainSignals().NotifyNEVMBlockConnect(nevmBlockHeader, block, stateStr, fJustCheck? uint256(): nBlockHash, NEVMDataVecOut, nHeight, /*bSkipValidation=*/false, btcPrevHashForNEVM, diff, &rejected_pair);
         }
         if(!stateStr.empty()) {
             if (should_exit()) {
@@ -4219,7 +4214,6 @@ bool ChainstateManager::MaybeRecoverNEVMPayload(std::string& error)
     error.clear();
     if (!HasPendingNEVMPayloadRepair()) return true;
     Chainstate& chainstate{ActiveChainstate()};
-    bool activate{false};
     {
         LOCK(chainstate.m_chainstate_mutex);
         std::optional<NEVMBlockReject> rejection;
@@ -4229,7 +4223,6 @@ bool ChainstateManager::MaybeRecoverNEVMPayload(std::string& error)
             if (ObsoleteNEVMPayloadRepair(
                     m_blockman.LookupBlockIndex(m_nevm_payload_repair->syscoin_hash), ActiveTip())) {
                 if (!ClearNEVMPayloadRepair(error)) return false;
-                activate = true;
             } else {
                 const auto now{std::chrono::steady_clock::now()};
                 if (now < m_nevm_payload_retry_after) return true;
@@ -4275,7 +4268,6 @@ bool ChainstateManager::MaybeRecoverNEVMPayload(std::string& error)
                     if (!rejection) return false;
                 } else {
                     if (!ClearNEVMPayloadRepair(error)) return false;
-                    activate = true;
                 }
             }
         }
@@ -4285,19 +4277,17 @@ bool ChainstateManager::MaybeRecoverNEVMPayload(std::string& error)
                 error = state.ToString();
                 return false;
             }
-            activate = true;
         }
     }
-    if (activate) {
-        BlockValidationState state;
-        if (!chainstate.ActivateBestChain(state)) {
-            error = state.ToString();
-            return false;
-        }
-        if (!MaybeStartNEVMNetwork()) {
-            error = "nevm-payload-repair-network-unavailable";
-            return false;
-        }
+    // SYSCOIN: Resume activation after clearing or reconciling the repair.
+    BlockValidationState state;
+    if (!chainstate.ActivateBestChain(state)) {
+        error = state.ToString();
+        return false;
+    }
+    if (!MaybeStartNEVMNetwork()) {
+        error = "nevm-payload-repair-network-unavailable";
+        return false;
     }
     return true;
 }
@@ -6015,8 +6005,12 @@ bool Chainstate::FlushStateToDisk(
                 const auto root_tip{active.CoinsTip().GetBestBlock()};
                 if ((!fRegTest || fNEVMConnection) && !root_tip.IsNull()) {
                     const auto* root_index{m_blockman.LookupBlockIndex(root_tip)};
+                    // SYSCOIN: The initial barrier covers this cursor unless
+                    // the active coins endpoint selects another blockfile type.
                     if (!root_index ||
-                        !m_blockman.FlushChainstateBlockFile(root_index->nHeight) ||
+                        (m_blockman.BlockfileTypeForHeight(root_index->nHeight) !=
+                             m_blockman.BlockfileTypeForHeight(m_chain.Height()) &&
+                         !m_blockman.FlushChainstateBlockFile(root_index->nHeight)) ||
                         !pnevmtxrootsdb->RecordPublishedTip(root_tip)) {
                         return FatalError(m_chainman.GetNotifications(), state,
                                           "Failed to persist NEVM root publication branch");

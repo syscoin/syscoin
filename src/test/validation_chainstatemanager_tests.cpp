@@ -5625,6 +5625,91 @@ BOOST_FIXTURE_TEST_CASE(nevm_full_flush_publishes_root_branch_before_coins,
     BOOST_CHECK(!RootsDB().GetPendingDisconnect());
 }
 
+// SYSCOIN BEGIN: Root publication must flush a distinct assumed block stream.
+BOOST_FIXTURE_TEST_CASE(nevm_root_publication_requires_distinct_blockfile_flush,
+                        NEVMRootRollbackSetup)
+{
+    auto& chainman{*m_node.chainman};
+    auto& chainstate{chainman.ActiveChainstate()};
+    auto& blockman{chainman.m_blockman};
+    BOOST_REQUIRE(!ShutdownRequested());
+    const auto previous_snapshot_height{
+        WITH_LOCK(::cs_main, return blockman.m_snapshot_height)};
+    struct Restore {
+        std::function<void()> action;
+        ~Restore() { action(); }
+    } restore_snapshot{[&] {
+        LOCK(::cs_main);
+        blockman.m_snapshot_height = previous_snapshot_height;
+    }};
+    // PrepareRootDisconnect builds Q, P and A. Put only A in the assumed
+    // stream, using the same cursor setup as the blockmanager by-type test.
+    WITH_LOCK(::cs_main, blockman.m_snapshot_height = chainman.ActiveHeight() + 3);
+    PrepareRootDisconnect(/*with_mint=*/false, /*lagging_coins=*/true);
+
+    LOCK(::cs_main);
+    CBlockIndex* const carrier_index{blockman.LookupBlockIndex(carrier.GetHash())};
+    CBlockIndex* const parent_index{blockman.LookupBlockIndex(parent->GetHash())};
+    BOOST_REQUIRE(carrier_index != nullptr);
+    BOOST_REQUIRE(parent_index != nullptr);
+    BOOST_REQUIRE_EQUAL(carrier_index->nHeight, *blockman.m_snapshot_height);
+    BOOST_REQUIRE_NE(parent_index->nFile, carrier_index->nFile);
+    const auto previous_published_tip{RootsDB().GetPublishedTip()};
+    const uint256 durable_coins{chainstate.CoinsDB().GetBestBlock()};
+    std::size_t root_writes{0};
+    std::size_t coins_writes{0};
+    {
+        const fs::path block_path{blockman.GetBlockPosFilename(carrier_index->GetBlockPos())};
+        const fs::path saved_path{fs::u8path(fs::PathToString(block_path) + ".flush-test")};
+        fs::rename(block_path, saved_path);
+        Restore restore_file{[&] {
+            fs::remove(block_path);
+            fs::rename(saved_path, block_path);
+        }};
+        BOOST_REQUIRE(fs::create_directory(block_path));
+        const bool previous_shutdown_on_fatal_error{
+            m_node.notifications->m_shutdown_on_fatal_error};
+        Restore restore_flush_state{[&] {
+            LOCK(::cs_main);
+            RootsDB().before_write = {};
+            chainstate.CoinsDB().SetWriteBatchCallbackForTesting({});
+            chainstate.m_chain.SetTip(*carrier_index);
+            m_node.notifications->m_shutdown_on_fatal_error = previous_shutdown_on_fatal_error;
+            AbortShutdown();
+            m_node.exit_status.store(EXIT_SUCCESS);
+        }};
+        // ConnectTip updates CoinsTip before m_chain. The same Chainstate
+        // can therefore require both cursors at the snapshot-height boundary.
+        chainstate.m_chain.SetTip(*parent_index);
+        BOOST_REQUIRE(chainstate.CoinsTip().GetBestBlock() == carrier.GetHash());
+        RootsDB().before_write = [&] { ++root_writes; return true; };
+        chainstate.CoinsDB().SetWriteBatchCallbackForTesting([&](bool) {
+            ++coins_writes;
+            return true;
+        });
+        m_node.notifications->m_shutdown_on_fatal_error = false;
+        BlockValidationState state;
+        const bool flushed{chainstate.FlushStateToDisk(state, FlushStateMode::ALWAYS)};
+        BOOST_CHECK(!flushed);
+        BOOST_CHECK(state.IsError());
+        BOOST_CHECK_EQUAL(state.GetRejectReason(),
+                          "Failed to persist NEVM root publication branch");
+        BOOST_CHECK_EQUAL(root_writes, 0U);
+        BOOST_CHECK_EQUAL(coins_writes, 0U);
+        BOOST_CHECK(RootsDB().GetPublishedTip() == previous_published_tip);
+        BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == durable_coins);
+        BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == carrier.GetHash());
+    }
+    // With the actual file restored, the pending roots and coins can commit.
+    BlockValidationState state;
+    BOOST_REQUIRE_MESSAGE(chainstate.FlushStateToDisk(state, FlushStateMode::ALWAYS),
+                          state.ToString());
+    BOOST_REQUIRE(RootsDB().GetPublishedTip());
+    BOOST_CHECK(*RootsDB().GetPublishedTip() == carrier.GetHash());
+    BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == carrier.GetHash());
+}
+// SYSCOIN END: Root publication preserves the distinct-stream durability barrier.
+
 BOOST_FIXTURE_TEST_CASE(nevm_nonmint_local_disconnect_revokes_roots,
                         NEVMRootRollbackSetup)
 {
