@@ -4337,11 +4337,12 @@ bool CChainLocksHandler::GetDurableFinalityRecoveryFloor(
         const CBlockIndex* target{m_chainman.m_blockman.LookupBlockIndex(
             durable->statement.block_hash)};
         const CBlockIndex* active_tip{m_chainman.ActiveTip()};
-        const bool block_index_replay{
-            mode == DurableFinalityRecoveryMode::BLOCK_INDEX_REPLAY &&
-            node::fReindex.load() && !checkpoint};
+        const bool activation_replay{
+            mode == DurableFinalityRecoveryMode::ACTIVATION_REPLAY &&
+            !checkpoint};
         if (target == nullptr) {
-            if (block_index_replay && replay_target_pending != nullptr) {
+            if (activation_replay && node::fReindex.load() &&
+                replay_target_pending != nullptr) {
                 *replay_target_pending = true;
                 return true;
             }
@@ -4352,7 +4353,7 @@ bool CChainLocksHandler::GetDurableFinalityRecoveryFloor(
         const bool fully_validated{
             target->IsValid(BLOCK_VALID_SCRIPTS)};
         const bool provisional_replay_target{
-            block_index_replay &&
+            activation_replay &&
             (target->nStatus & BLOCK_HAVE_DATA) &&
             target->IsValid(BLOCK_VALID_TRANSACTIONS) &&
             target->HaveNumChainTxs()};

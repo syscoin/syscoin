@@ -1658,7 +1658,10 @@ void ImportBlocks(ChainstateManager& chainman, std::vector<fs::path> vImportFile
         // the relevant pointers before the ABC call.
         for (Chainstate* chainstate : WITH_LOCK(::cs_main, return chainman.GetAll())) {
             BlockValidationState state;
-            if (!chainstate->ActivateBestChain(state, nullptr)) {
+            const bool activated{chainstate->ActivateBestChain(state, nullptr)};
+            // Interrupted activation can return success after only a prefix.
+            if (chainman.m_interrupt) return;
+            if (!activated) {
                 // SYSCOIN BEGIN: Allow durable NEVM repair to defer best-chain activation after import.
                 if (state.IsError() &&
                     state.GetRejectReason() == "nevm-payload-repair-pending" &&

@@ -1086,15 +1086,16 @@ public:
     GetDurableFinalityTargetForStartup() const;
     enum class DurableFinalityRecoveryMode : uint8_t {
         REQUIRE_VALIDATED,
-        BLOCK_INDEX_REPLAY,
+        ACTIVATION_REPLAY,
     };
     /**
      * Resolve the active-chain floor protected by the fsynced winner before
      * Start() imports it into the live store. If the winner is on a validated
      * side branch, its active-chain fork is protected until normal finality
-     * enforcement can activate it. Block-index replay may use the exact
+     * enforcement can activate it. Forward activation may use the exact
      * transaction-valid target as a provisional ancestry constraint while
-     * ConnectBlock performs the remaining script validation.
+     * ConnectBlock performs the remaining script validation, including after
+     * block-index import releases the peer network for payload repair.
      * A pending result authorizes only empty-chainstate genesis activation,
      * including a retained validated target during chainstate-only rebuild.
     */

@@ -7354,6 +7354,144 @@ BOOST_FIXTURE_TEST_CASE(nevm_startup_bootstrap_pair_activates_only_genesis,
     BOOST_CHECK(chainman.HasPendingNEVMStartupPair());
 }
 
+BOOST_FIXTURE_TEST_CASE(reindex_interrupt_during_final_activation_retains_marker,
+                        FreshNEVMStartupSetup)
+{
+    auto& chainman{*Assert(m_node.chainman)};
+    BOOST_REQUIRE(!chainman.m_interrupt);
+    struct RestoreImportState {
+        node::NodeContext& node_context;
+        const bool reindex{node::fReindex.load()};
+        const bool reindex_geth{fReindexGeth.load()};
+        const int sync_mode{masternodeSync.GetAssetID()};
+        const bool shutdown_on_fatal_error{
+            node_context.notifications->m_shutdown_on_fatal_error};
+        const int exit_status{node_context.exit_status.load()};
+        ~RestoreImportState()
+        {
+            node_context.kernel->interrupt.reset();
+            node::fReindex = reindex;
+            fReindexGeth = reindex_geth;
+            masternodeSync.SetSyncMode(sync_mode);
+            node_context.notifications->m_shutdown_on_fatal_error =
+                shutdown_on_fatal_error;
+            node_context.exit_status.store(exit_status);
+        }
+    } restore{m_node};
+    node::fReindex = false;
+    fReindexGeth = false;
+    masternodeSync.SetSyncMode(MASTERNODE_SYNC_GOVERNANCE);
+    m_node.notifications->m_shutdown_on_fatal_error = false;
+
+    // Start through the real full-reindex loader with an empty block index
+    // and its on-disk marker. It also resets the auxiliary replay databases.
+    node::ChainstateLoadOptions options;
+    options.mempool = m_node.mempool.get();
+    options.block_tree_db_in_memory = false;
+    options.coins_db_in_memory = true;
+    options.reindex = true;
+    options.connman = m_node.connman.get();
+    options.banman = m_node.banman.get();
+    options.peerman = m_node.peerman.get();
+    const auto [status, load_error]{
+        node::LoadChainstate(chainman, m_cache_sizes, options)};
+    BOOST_REQUIRE_MESSAGE(status == node::ChainstateLoadStatus::SUCCESS,
+                          load_error.original);
+    BOOST_REQUIRE(node::fReindex.load());
+
+    const auto blocks{CreateBlockChain(2, Params())};
+    const uint256 genesis_hash{chainman.GetConsensus().hashGenesisBlock};
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.BlockIndex().empty());
+        BOOST_REQUIRE(chainman.ActiveTip() == nullptr);
+        BOOST_REQUIRE(chainman.ActiveChainstate().CoinsTip().GetBestBlock().IsNull());
+        bool reindexing{false};
+        chainman.m_blockman.m_block_tree_db->ReadReindexing(reindexing);
+        BOOST_REQUIRE(reindexing);
+        // Store only raw records. ImportBlocks must discover every index and
+        // candidate itself, activating genesis while it scans this file.
+        BOOST_REQUIRE(!chainman.m_blockman.SaveBlockToDisk(
+            Params().GenesisBlock(), 0, nullptr).IsNull());
+        for (std::size_t i{0}; i < blocks.size(); ++i) {
+            const FlatFilePos pos{chainman.m_blockman.SaveBlockToDisk(
+                *blocks[i], static_cast<int>(i + 1), nullptr)};
+            BOOST_REQUIRE(!pos.IsNull());
+            BOOST_REQUIRE_EQUAL(pos.nFile, 0);
+        }
+        BOOST_REQUIRE(chainman.BlockIndex().empty());
+    }
+
+    std::vector<uint256> notified_tips;
+    bool suffix_scanned_before_interrupt{false};
+    const boost::signals2::scoped_connection tip_notification{
+        uiInterface.NotifyBlockTip_connect(
+            [&](SynchronizationState, const CBlockIndex* tip) {
+                BOOST_REQUIRE(tip != nullptr);
+                notified_tips.push_back(tip->GetBlockHash());
+                LOCK(::cs_main);
+                if (tip->nHeight == 0) {
+                    BOOST_CHECK(tip->GetBlockHash() == genesis_hash);
+                    BOOST_CHECK(chainman.m_blockman.LookupBlockIndex(
+                        blocks.front()->GetHash()) == nullptr);
+                    BOOST_CHECK(chainman.m_blockman.LookupBlockIndex(
+                        blocks.back()->GetHash()) == nullptr);
+                    BOOST_CHECK(!chainman.m_interrupt);
+                    return;
+                }
+                BOOST_CHECK_EQUAL(tip->nHeight, 1);
+                BOOST_CHECK(tip->GetBlockHash() == blocks.front()->GetHash());
+                const CBlockIndex* suffix{chainman.m_blockman.LookupBlockIndex(
+                    blocks.back()->GetHash())};
+                suffix_scanned_before_interrupt = suffix != nullptr &&
+                    (suffix->nStatus & BLOCK_HAVE_DATA) &&
+                    suffix->IsValid(BLOCK_VALID_TRANSACTIONS) &&
+                    !suffix->IsValid(BLOCK_VALID_SCRIPTS);
+                // Reindex activates only genesis while scanning. Both child
+                // records are now indexed, so this is the final ABC call.
+                BOOST_CHECK(suffix_scanned_before_interrupt);
+                m_node.kernel->interrupt();
+            })};
+
+    node::ImportBlocks(chainman, {}, nullptr, deterministicMNManager,
+                       activeMasternodeManager, g_wallet_init_interface, m_node);
+    BOOST_CHECK_EQUAL(m_node.exit_status.load(), EXIT_SUCCESS);
+    BOOST_CHECK(notified_tips ==
+        (std::vector<uint256>{genesis_hash, blocks.front()->GetHash()}));
+    BOOST_CHECK(suffix_scanned_before_interrupt);
+    BOOST_CHECK(chainman.m_interrupt);
+    BOOST_CHECK(!chainman.m_blockman.m_importing.load());
+    BOOST_CHECK(node::fReindex.load());
+    SyncWithValidationInterfaceQueue();
+    {
+        LOCK(::cs_main);
+        auto& chainstate{chainman.ActiveChainstate()};
+        BOOST_REQUIRE(chainman.ActiveTip() != nullptr);
+        BOOST_CHECK(chainman.ActiveTip()->GetBlockHash() == blocks.front()->GetHash());
+        BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == blocks.front()->GetHash());
+        BOOST_CHECK(chainstate.CoinsTip().HaveCoin(
+            COutPoint{blocks.front()->vtx.front()->GetHash(), 0}));
+        BOOST_CHECK(!chainstate.CoinsTip().HaveCoin(
+            COutPoint{blocks.back()->vtx.front()->GetHash(), 0}));
+        CBlockIndex* suffix{chainman.m_blockman.LookupBlockIndex(blocks.back()->GetHash())};
+        BOOST_REQUIRE(suffix != nullptr);
+        BOOST_CHECK(suffix->IsValid(BLOCK_VALID_TRANSACTIONS));
+        BOOST_CHECK(!suffix->IsValid(BLOCK_VALID_SCRIPTS));
+        BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(suffix), 1U);
+
+        // Reopen the actual block-tree DB to verify the restart marker, not
+        // merely the process flag after ABC returned with a partial prefix.
+        chainman.m_blockman.m_block_tree_db.reset();
+        chainman.m_blockman.m_block_tree_db = std::make_unique<node::BlockTreeDB>(DBParams{
+            .path = chainman.m_options.datadir / "blocks" / "index",
+            .cache_bytes = static_cast<size_t>(m_cache_sizes.block_tree_db),
+            .memory_only = false});
+        bool reindexing{false};
+        chainman.m_blockman.m_block_tree_db->ReadReindexing(reindexing);
+        BOOST_CHECK(reindexing);
+    }
+}
+
 BOOST_AUTO_TEST_CASE(coins_recovery_marker_validation)
 {
     const auto hash = [](uint8_t tag) {
@@ -8823,12 +8961,29 @@ BOOST_FIXTURE_TEST_CASE(
         recovered_base));
 }
 
+enum class DurableSideBranchCase {
+    ACTIVE_VALIDATED,
+    BOOTSTRAP_VALIDATED,
+    FINISHED_REINDEX_PROVISIONAL,
+    DIVERGENT_PROVISIONAL,
+};
+
 // A fsynced side-branch winner protects both its own ancestry and the active
 // recovery fork before Start() has imported it into the in-memory store,
 // including when activation quarantines an incompatible inactive candidate.
 static void CheckPreimportDurableSideBranchBoundary(
-    node::NodeContext& node_context, bool bootstrap_empty_chain)
+    node::NodeContext& node_context, DurableSideBranchCase scenario)
 {
+    const bool bootstrap_empty_chain{
+        scenario == DurableSideBranchCase::BOOTSTRAP_VALIDATED ||
+        scenario == DurableSideBranchCase::FINISHED_REINDEX_PROVISIONAL};
+    const bool provisional_winner{
+        scenario == DurableSideBranchCase::FINISHED_REINDEX_PROVISIONAL ||
+        scenario == DurableSideBranchCase::DIVERGENT_PROVISIONAL};
+    struct RestoreReindex {
+        const bool previous{node::fReindex.load()};
+        ~RestoreReindex() { node::fReindex = previous; }
+    } restore_reindex;
     auto& chainman{static_cast<TestChainstateManager&>(
         *Assert(node_context.chainman))};
     auto& consensus{
@@ -8944,7 +9099,8 @@ static void CheckPreimportDurableSideBranchBoundary(
         BOOST_REQUIRE(index != nullptr);
         index->nTx = 1;
         index->nChainTx = parent.nChainTx + 1;
-        index->nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA;
+        index->nStatus = (provisional_winner ? BLOCK_VALID_TRANSACTIONS :
+                                               BLOCK_VALID_SCRIPTS) | BLOCK_HAVE_DATA;
         return index;
     };
 
@@ -8969,7 +9125,9 @@ static void CheckPreimportDurableSideBranchBoundary(
     BOOST_REQUIRE_EQUAL(durable_target->nHeight, target_height);
     {
         LOCK(::cs_main);
-        BOOST_REQUIRE(durable_target->IsValid(BLOCK_VALID_SCRIPTS));
+        BOOST_REQUIRE(durable_target->IsValid(provisional_winner ?
+            BLOCK_VALID_TRANSACTIONS : BLOCK_VALID_SCRIPTS));
+        BOOST_CHECK_EQUAL(durable_target->IsValid(BLOCK_VALID_SCRIPTS), !provisional_winner);
     }
 
     llmq::pq::FinalChainLock winner;
@@ -9088,7 +9246,8 @@ static void CheckPreimportDurableSideBranchBoundary(
             BOOST_REQUIRE(!node::fReindex.load());
             genesis = chainman.m_blockman.LookupBlockIndex(consensus.hashGenesisBlock);
             BOOST_REQUIRE(genesis != nullptr);
-            BOOST_REQUIRE(durable_target->IsValid(BLOCK_VALID_SCRIPTS));
+            BOOST_REQUIRE(durable_target->IsValid(provisional_winner ?
+                BLOCK_VALID_TRANSACTIONS : BLOCK_VALID_SCRIPTS));
             BOOST_REQUIRE(durable_target->GetAncestor(0) == genesis);
             bootstrap_competitor[0] = add_index(*durable_ancestor);
             bootstrap_competitor[1] = add_index(*bootstrap_competitor[0]);
@@ -9105,6 +9264,13 @@ static void CheckPreimportDurableSideBranchBoundary(
             // The retained index selects higher work normally. Bootstrap must
             // select genesis without trusting or reading this conflicting body.
             for (CBlockIndex* index : chainman.m_blockman.GetAllBlockIndices()) {
+                if (provisional_winner && index->nHeight != 0) {
+                    // A completed full scan knows transaction-valid bodies,
+                    // but has not reconstructed their chainstate or undo yet.
+                    index->nStatus = (index->nStatus & ~(BLOCK_VALID_MASK | BLOCK_HAVE_UNDO)) |
+                                     BLOCK_VALID_TRANSACTIONS;
+                    index->nUndoPos = 0;
+                }
                 if (index->IsValid(BLOCK_VALID_TRANSACTIONS) && index->HaveNumChainTxs() &&
                     !(index->nStatus & BLOCK_CONFLICT_CHAINLOCK)) {
                     rebuilt.setBlockIndexCandidates.insert(index);
@@ -9161,6 +9327,94 @@ static void CheckPreimportDurableSideBranchBoundary(
         util::SignalInterrupt& interrupt;
         ~ResetInterrupt() { interrupt.reset(); }
     };
+    const auto check_default_callers_fail_closed = [&] {
+        auto& chainstate{chainman.ActiveChainstate()};
+        const CBlockIndex* original_tip;
+        uint256 original_coins;
+        uint32_t original_status;
+        std::size_t original_candidate_count;
+        {
+            LOCK(::cs_main);
+            BOOST_REQUIRE(!node::fReindex.load());
+            BOOST_REQUIRE(!durable_target->IsValid(BLOCK_VALID_SCRIPTS));
+            original_tip = chainman.ActiveTip();
+            BOOST_REQUIRE(original_tip != nullptr);
+            original_coins = chainstate.CoinsTip().GetBestBlock();
+            original_status = durable_target->nStatus;
+            original_candidate_count = chainstate.setBlockIndexCandidates.size();
+            const CBlockIndex* floor{nullptr};
+            const CBlockIndex* target{nullptr};
+            std::string error;
+            BOOST_REQUIRE(!llmq::chainLocksHandler->GetDurableFinalityRecoveryFloor(
+                floor, target, error));
+            BOOST_CHECK(floor == nullptr);
+            BOOST_CHECK(target == nullptr);
+            BOOST_CHECK(error.find("not fully validated") != std::string::npos);
+            BOOST_REQUIRE(!chainman.CheckPQActivationHandoffDisconnect(*original_tip, error));
+            BOOST_CHECK(error.find("not fully validated") != std::string::npos);
+        }
+        BlockValidationState invalidation_state;
+        BOOST_REQUIRE(!chainstate.InvalidateBlock(invalidation_state, durable_target,
+            /*bReverify=*/false, /*bUpdateSpecialTxState=*/true));
+        BOOST_CHECK(invalidation_state.IsError());
+        BOOST_CHECK(invalidation_state.GetRejectReason().find("not fully validated") != std::string::npos);
+        LOCK(::cs_main);
+        BOOST_CHECK(chainman.ActiveTip() == original_tip);
+        BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == original_coins);
+        BOOST_CHECK(durable_target->nStatus == original_status);
+        BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.size(), original_candidate_count);
+    };
+
+    if (scenario == DurableSideBranchCase::DIVERGENT_PROVISIONAL) {
+        check_default_callers_fail_closed();
+        auto& chainstate{chainman.ActiveChainstate()};
+        const uint256 original_coins{WITH_LOCK(
+            ::cs_main, return chainstate.CoinsTip().GetBestBlock())};
+        const uint32_t original_status{WITH_LOCK(
+            ::cs_main, return durable_target->nStatus)};
+        {
+            LOCK(::cs_main);
+            BOOST_REQUIRE(chainstate.m_chain.FindFork(durable_target) == active_lca);
+            BOOST_REQUIRE(active_lca != active_tip);
+            chainstate.setBlockIndexCandidates.clear();
+            for (CBlockIndex* index : chainman.m_blockman.GetAllBlockIndices()) {
+                if (index->IsValid(BLOCK_VALID_TRANSACTIONS) && index->HaveNumChainTxs() &&
+                    !(index->nStatus & BLOCK_CONFLICT_CHAINLOCK) &&
+                    !node::CBlockIndexWorkComparator()(index, active_tip)) {
+                    chainstate.setBlockIndexCandidates.insert(index);
+                }
+            }
+            BOOST_REQUIRE(!chainstate.setBlockIndexCandidates.empty());
+            BOOST_REQUIRE(*chainstate.setBlockIndexCandidates.rbegin() == durable_target);
+            chainstate.ResetChainLockConflictMarkingStatsForTesting();
+        }
+        BOOST_REQUIRE(!chainman.m_interrupt);
+        BOOST_REQUIRE_EQUAL(node_context.exit_status.load(), EXIT_SUCCESS);
+        BlockValidationState state;
+        BOOST_REQUIRE(!chainstate.ActivateBestChain(state));
+        BOOST_CHECK(state.IsError());
+        BOOST_CHECK_EQUAL(state.GetRejectReason(),
+            "provisional durable finality permits only forward activation");
+        BOOST_CHECK(!chainman.m_interrupt);
+        BOOST_CHECK_EQUAL(node_context.exit_status.load(), EXIT_SUCCESS);
+        LOCK(::cs_main);
+        BOOST_CHECK(chainman.ActiveTip() == active_tip);
+        BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == original_coins);
+        BOOST_CHECK(durable_target->nStatus == original_status);
+        BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(durable_target), 1U);
+        for (const CBlockIndex* index{active_tip}; index != nullptr; index = index->pprev) {
+            BOOST_CHECK_EQUAL(index->nStatus & (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK), 0U);
+        }
+        for (const CBlockIndex* index{durable_target}; index != nullptr; index = index->pprev) {
+            BOOST_CHECK_EQUAL(index->nStatus & (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK), 0U);
+        }
+        const auto stats{chainstate.GetChainLockConflictMarkingStatsForTesting()};
+        BOOST_CHECK_EQUAL(stats.batch_calls, 0U);
+        BOOST_CHECK_EQUAL(stats.disconnect_tip_calls, 0U);
+        BOOST_CHECK_EQUAL(stats.tip_publications, 0U);
+        return;
+    }
+
     if (bootstrap_empty_chain) {
         struct RestoreMasternodeSync {
             int mode{masternodeSync.GetAssetID()};
@@ -9181,6 +9435,12 @@ static void CheckPreimportDurableSideBranchBoundary(
         };
         check_winner_preserved();
         auto& rebuilt{chainman.ActiveChainstate()};
+        if (provisional_winner) {
+            // The initial import may activate genesis while its full-reindex
+            // authority is still live. Later peer repair runs after scan completion.
+            BOOST_REQUIRE(!node::fReindex.load());
+            node::fReindex = true;
+        }
         {
             bool genesis_notified{false};
             ResetInterrupt reset_interrupt{node_context.kernel->interrupt};
@@ -9197,6 +9457,11 @@ static void CheckPreimportDurableSideBranchBoundary(
             BOOST_CHECK(chainman.m_interrupt);
         }
         BOOST_CHECK(!chainman.m_interrupt);
+        if (provisional_winner) {
+            BOOST_REQUIRE(node::fReindex.load());
+            node::fReindex = false;
+            check_default_callers_fail_closed();
+        }
         {
             LOCK(::cs_main);
             BOOST_REQUIRE(chainman.ActiveTip() == genesis);
@@ -9260,10 +9525,20 @@ static void CheckPreimportDurableSideBranchBoundary(
         const CBlockIndex* floor{nullptr};
         const CBlockIndex* target{nullptr};
         std::string error;
-        BOOST_REQUIRE_MESSAGE(llmq::chainLocksHandler->GetDurableFinalityRecoveryFloor(
-            floor, target, error), error);
-        BOOST_CHECK(floor == progressed_tip);
-        BOOST_CHECK(target == durable_target);
+        if (provisional_winner) {
+            // Forward replay does not grant the ordinary disconnect/invalidate
+            // callers a provisional finality floor.
+            BOOST_REQUIRE(!llmq::chainLocksHandler->GetDurableFinalityRecoveryFloor(
+                floor, target, error));
+            BOOST_CHECK(floor == nullptr);
+            BOOST_CHECK(target == nullptr);
+            BOOST_CHECK(!durable_target->IsValid(BLOCK_VALID_SCRIPTS));
+        } else {
+            BOOST_REQUIRE_MESSAGE(llmq::chainLocksHandler->GetDurableFinalityRecoveryFloor(
+                floor, target, error), error);
+            BOOST_CHECK(floor == progressed_tip);
+            BOOST_CHECK(target == durable_target);
+        }
         for (const CBlockIndex* index : bootstrap_competitor) {
             BOOST_CHECK(index->nStatus & BLOCK_CONFLICT_CHAINLOCK);
             BOOST_CHECK_EQUAL(index->nStatus & BLOCK_FAILED_MASK, 0U);
@@ -9426,14 +9701,28 @@ BOOST_FIXTURE_TEST_CASE(
     invalidate_rejects_preimport_durable_side_branch_boundary,
     TestChain100Setup)
 {
-    CheckPreimportDurableSideBranchBoundary(m_node, /*bootstrap_empty_chain=*/false);
+    CheckPreimportDurableSideBranchBoundary(m_node, DurableSideBranchCase::ACTIVE_VALIDATED);
 }
 
 BOOST_FIXTURE_TEST_CASE(
     chainstate_rebuild_bootstraps_genesis_with_retained_durable_winner,
     TestChain100Setup)
 {
-    CheckPreimportDurableSideBranchBoundary(m_node, /*bootstrap_empty_chain=*/true);
+    CheckPreimportDurableSideBranchBoundary(m_node, DurableSideBranchCase::BOOTSTRAP_VALIDATED);
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    activation_replays_provisional_durable_winner_after_reindex_scan,
+    TestChain100Setup)
+{
+    CheckPreimportDurableSideBranchBoundary(m_node, DurableSideBranchCase::FINISHED_REINDEX_PROVISIONAL);
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    activation_refuses_provisional_winner_reorganization,
+    TestChain100Setup)
+{
+    CheckPreimportDurableSideBranchBoundary(m_node, DurableSideBranchCase::DIVERGENT_PROVISIONAL);
 }
 // SYSCOIN END: Durable ChainLock restart and deep-invalidation tests.
 

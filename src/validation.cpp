@@ -7356,15 +7356,10 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
         const CBlockIndex* durable_target{nullptr};
         bool replay_target_pending{false};
         std::string durable_error;
-        const auto recovery_mode{
-            fReindex.load()
-                ? llmq::CChainLocksHandler::DurableFinalityRecoveryMode::
-                      BLOCK_INDEX_REPLAY
-                : llmq::CChainLocksHandler::DurableFinalityRecoveryMode::
-                      REQUIRE_VALIDATED};
         if (!llmq::chainLocksHandler->GetDurableFinalityRecoveryFloor(
                 durable_active_floor, durable_target, durable_error,
-                recovery_mode,
+                llmq::CChainLocksHandler::DurableFinalityRecoveryMode::
+                    ACTIVATION_REPLAY,
                 &replay_target_pending)) {
             return state.Error(strprintf(
                 "cannot establish durable finality before best-chain "
@@ -7436,6 +7431,13 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
                     durable_target->GetBlockHash().ToString());
                 fInvalidFound = true;
                 return true;
+            }
+            // Provisional ancestry permits validation, never a disconnect of
+            // this chainstate's existing prefix, including background replay.
+            if (!durable_target->IsValid(BLOCK_VALID_SCRIPTS) &&
+                pindexOldTip != pindexFork) {
+                return state.Error(
+                    "provisional durable finality permits only forward activation");
             }
         }
     }
