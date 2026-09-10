@@ -182,7 +182,8 @@ struct StartupNEVMSubscriber final : CValidationInterface {
     void NotifyGetNEVMBlock(CNEVMBlock& block, std::string& state) override
     {
         state.clear();
-        block.nBlockHash.begin()[0] = ++template_serial;
+        template_serial = static_cast<uint8_t>(template_serial + 1U);
+        block.nBlockHash.begin()[0] = template_serial;
         block.nTxRoot = block.nBlockHash;
         block.nReceiptRoot = block.nBlockHash;
         if (template_block_hash) block.nBlockHash = *template_block_hash;
