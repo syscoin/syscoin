@@ -12,6 +12,7 @@ from test_framework.util import assert_equal, assert_raises_rpc_error
 
 class PQVotingKeyTest(DashTestFramework):
     def set_test_params(self):
+        self.rpc_timeout = 600  # PQ activation reindexes the prepared chain before readiness.
         self.set_dash_test_params(
             2, 1, extra_args=[["-nevmstartheight=10000"] for _ in range(2)],
             fast_dip3_enforcement=True)

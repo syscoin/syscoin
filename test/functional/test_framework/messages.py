@@ -340,10 +340,10 @@ class NEVMDataVec:
         self.data = []
 
     def deserialize(self, f):
-        self.data = deser_vector(f, deser_string)
+        self.data = deser_string_vector(f)
 
     def serialize(self):
-        return ser_vector(self.data, ser_string)
+        return ser_string_vector(self.data)
 
     def __repr__(self):
         return "NEVMDataVec(data=%s)" % repr(self.data)

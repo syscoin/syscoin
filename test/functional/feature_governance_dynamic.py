@@ -24,6 +24,7 @@ MAX_GOVERNANCE_BUDGET = Decimal('5000000.00000000')
 PROPOSAL_END_EPOCH = 600
 class SyscoinGovernanceTest(DashTestFramework):
     def set_test_params(self):
+        self.rpc_timeout = 600  # PQ activation reindexes the prepared chain before readiness.
         # PQ preparation crosses regtest's default NEVM activation. Keep this
         # fixture's 25-block governance cadence and original adaptive budget.
         self.set_dash_test_params(

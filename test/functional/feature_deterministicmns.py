@@ -22,6 +22,7 @@ class DIP3Test(AuxPoWMiningMixin, SyscoinTestFramework):
 
     # SYSCOIN BEGIN: PQ-sized deterministic-MN test topology.
     def set_test_params(self):
+        self.rpc_timeout = 600  # PQ activation reindexes the prepared chain before readiness.
         # No prebuilt PQ registry fixture exists for this dynamically mined
         # chain. Five prepared records are enough to retain the collateral
         # removal, reorg, and replacement matrix. Only the payment-eligible

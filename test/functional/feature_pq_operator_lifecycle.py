@@ -31,6 +31,7 @@ class PQOperatorLifecycleTest(AuxPoWMiningMixin, SyscoinTestFramework):
         )
 
     def set_test_params(self):
+        self.rpc_timeout = 600  # PQ activation reindexes the prepared chain before readiness.
         self.num_nodes = 2
         self.setup_clean_chain = True
         self.extra_args = [

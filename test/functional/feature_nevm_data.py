@@ -16,6 +16,7 @@ from test_framework.messages import (
     NEVM_DATA_SCALE_FACTOR,
     CNEVMBlock,
     CNEVMBlockConnect,
+    CNEVMBlockDisconnect,
     hash256,
     ser_compact_size,
     ser_string,
@@ -330,6 +331,13 @@ class NEVMDataTest(DashTestFramework):
         self._zmq_running = True
         self._zmq_connect_count = 0
         self._zmq_connect_events = []
+        # The engine attaches after setup mined with -nevmstartheight=1.
+        # Seed its applied prefix before enabling ZMQ, then update it from
+        # notifications so rollback can verify the exact count/hash pair.
+        self._zmq_applied_syshashes = [
+            int(self.nodes[0].getblockhash(height), 16)
+            for height in range(1, self.nodes[0].getblockcount() + 1)
+        ]
         self._zmq_ctx = zmq.Context()
         self._zmq_ready = Event()
         self._zmq_error = None
@@ -353,7 +361,12 @@ class NEVMDataTest(DashTestFramework):
                         continue
                     topic = parts[0]
                     if topic == b"nevmcomms":
-                        response = b"connect-v1" if parts[1] == ser_string(b"connect-v1") else b"ack"
+                        response = b"ack"
+                        if parts[1] == ser_string(b"connect-v1"):
+                            response = b"connect-v1"
+                        elif parts[1] == ser_string(b"flush"):
+                            # This mock applies every accepted connect inline.
+                            response = b"flushed"
                         sock.send_multipart([b"nevmcomms", response])
                     elif topic == b"nevmblock":
                         h = hash256(str(random.randint(-0x80000000, 0x7FFFFFFF)).encode())
@@ -365,24 +378,32 @@ class NEVMDataTest(DashTestFramework):
                         nevm_block.vchNEVMBlockData = b"nevmblock"
                         sock.send_multipart([b"nevmblock", nevm_block.serialize()])
                     elif topic == b"nevmblockinfo":
-                        # Regtest does not attach an external NEVM chain. Avoid
-                        # a re-entrant RPC while node 0 is waiting for this REP
-                        # response, which can deadlock the fixture at shutdown.
-                        # SYSCOIN: Zero applied blocks have no paired Syscoin
-                        # tip; the third frame is the protocol's null hash.
+                        # Never call Core while it may be waiting for this
+                        # response with cs_main held.
+                        applied_tip = self._zmq_applied_syshashes[-1] if self._zmq_applied_syshashes else 0
                         sock.send_multipart(
-                            [b"nevmblockinfo", b"0", b"0" * 64]
+                            [
+                                b"nevmblockinfo",
+                                str(len(self._zmq_applied_syshashes)).encode(),
+                                f"{applied_tip:064x}".encode(),
+                            ]
                         )
                     elif topic == b"nevmconnect":
                         self._zmq_connect_count += 1
-                        try:
-                            nevm_connect = CNEVMBlockConnect()
-                            nevm_connect.deserialize(BytesIO(parts[1]))
-                            self._zmq_connect_events.append((nevm_connect.sysblockhash, nevm_connect.btcprevhash))
-                        except Exception:
-                            pass
+                        nevm_connect = CNEVMBlockConnect()
+                        nevm_connect.deserialize(BytesIO(parts[1]))
+                        self._zmq_connect_events.append((nevm_connect.sysblockhash, nevm_connect.btcprevhash))
+                        if nevm_connect.sysblockhash != 0:
+                            exact_retry = self._zmq_applied_syshashes and self._zmq_applied_syshashes[-1] == nevm_connect.sysblockhash
+                            if not exact_retry:
+                                self._zmq_applied_syshashes.append(nevm_connect.sysblockhash)
                         sock.send_multipart([b"nevmconnect", b"connected"])
                     elif topic == b"nevmdisconnect":
+                        nevm_disconnect = CNEVMBlockDisconnect()
+                        nevm_disconnect.deserialize(BytesIO(parts[1]))
+                        assert self._zmq_applied_syshashes
+                        assert_equal(self._zmq_applied_syshashes[-1], nevm_disconnect.sysblockhash)
+                        self._zmq_applied_syshashes.pop()
                         sock.send_multipart([b"nevmdisconnect", b"disconnected"])
                     else:
                         sock.send_multipart([topic, b"ack"])
