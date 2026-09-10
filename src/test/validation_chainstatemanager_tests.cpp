@@ -32,6 +32,7 @@
 #include <node/interface_ui.h> // SYSCOIN: startup's genesis notification.
 #include <node/kernel_notifications.h>
 #include <node/miner.h> // SYSCOIN: preserve NEVM template commitments.
+#include <node/pq_activation_handoff.h> // SYSCOIN: durable A-1 publication regression.
 #include <node/utxo_snapshot.h>
 #include <pow.h>
 #include <random.h>
@@ -124,6 +125,41 @@ public:
         EXCLUSIVE_LOCKS_REQUIRED(cs_main)
     {
         chainman.NotePQProvenanceRevoked();
+    }
+
+    // The mining fixture is regtest. Initialize its public-network policy
+    // from the real block-tree record without changing global chain params.
+    static void PreparePublicHandoff(ChainstateManager& chainman)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+    {
+        std::optional<node::PQActivationHandoffRecord> persisted;
+        auto& db{*chainman.m_blockman.m_block_tree_db};
+        if (db.HasPQActivationHandoff()) {
+            node::PQActivationHandoffRecord record;
+            BOOST_REQUIRE(db.ReadPQActivationHandoff(record));
+            persisted = record;
+        }
+        const auto resolution{node::PreparePQActivationHandoff(
+            chainman.GetConsensus(), /*public_network=*/true,
+            /*force_historical_replay=*/false, /*empty_chainstate=*/false,
+            persisted)};
+        BOOST_REQUIRE(resolution.state ==
+            node::PQActivationRuntimeState::DEFERRED_HANDOFF);
+        BOOST_REQUIRE(!resolution.record_to_write);
+        chainman.m_pq_activation_runtime_state = resolution.state;
+        chainman.m_pq_activation_handoff_record = persisted;
+        chainman.m_pq_activation_participation_allowed.store(false);
+    }
+
+    static node::PQActivationRuntimeState HandoffState(
+        const ChainstateManager& chainman) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+    {
+        return chainman.m_pq_activation_runtime_state;
+    }
+
+    static bool HandoffParticipationAllowed(const ChainstateManager& chainman)
+    {
+        return chainman.m_pq_activation_participation_allowed.load();
     }
 };
 } // namespace llmq::test
@@ -2278,18 +2314,21 @@ struct NEVMMintReadErrorSetup : StartupNEVMRecoverySetup {
     std::unique_ptr<CNEVMTxRootsDB> previous_roots_db{std::move(pnevmtxrootsdb)};
     std::unique_ptr<CNEVMMintedTxDB> previous_mint_db{std::move(pnevmtxmintdb)};
 
-    NEVMMintReadErrorSetup()
+    explicit NEVMMintReadErrorSetup(bool in_memory = true)
+        : StartupNEVMRecoverySetup{in_memory, false, in_memory}
     {
         // The shared 100-block base predates asset validation. Enable it for
         // the real source/funding block and its mint-containing successor.
         consensus.nNexusStartBlock = 101;
         m_node.notifications->m_shutdown_on_fatal_error = false;
         pnevmtxrootsdb = std::make_unique<NEVMMintReadErrorRootsDB>(DBParams{
-            .path = "mint_block_read_error_roots", .cache_bytes = 1U << 20,
-            .memory_only = true, .wipe_data = true});
+            .path = m_args.GetDataDirNet() / "mint_block_read_error_roots",
+            .cache_bytes = 1U << 20,
+            .memory_only = in_memory, .wipe_data = true});
         pnevmtxmintdb = std::make_unique<NEVMMintReadErrorMintDB>(DBParams{
-            .path = "mint_block_read_error_markers", .cache_bytes = 1U << 20,
-            .memory_only = true, .wipe_data = true});
+            .path = m_args.GetDataDirNet() / "mint_block_read_error_markers",
+            .cache_bytes = 1U << 20,
+            .memory_only = in_memory, .wipe_data = true});
     }
 
     ~NEVMMintReadErrorSetup()
@@ -2465,6 +2504,214 @@ struct NEVMMintReadErrorSetup : StartupNEVMRecoverySetup {
     }
 };
 // SYSCOIN END: Mint database read errors must leave block candidates usable.
+
+// SYSCOIN BEGIN: Rejecting an imported A-1 pin must discard all staged coins.
+struct NEVMMintHandoffSetup : NEVMMintReadErrorSetup {
+    enum class ImportedPin { MISMATCH, MATCH, ABSENT };
+    const int previous_activation_height{consensus.nPQActivationHeight};
+    const int previous_dip3_height{consensus.DIP0003Height};
+
+    NEVMMintHandoffSetup() : NEVMMintReadErrorSetup{/*in_memory=*/false}
+    {
+        consensus.nPQActivationHeight = 103;
+        consensus.DIP0003Height = 103;
+        BOOST_REQUIRE(Consensus::CheckPQActivationConfiguration(consensus) ==
+            Consensus::PQActivationResult::VALID);
+    }
+
+    ~NEVMMintHandoffSetup()
+    {
+        consensus.nPQActivationHeight = previous_activation_height;
+        consensus.DIP0003Height = previous_dip3_height;
+    }
+
+    void CheckHandoffPublication(ImportedPin pin)
+    {
+        auto& chainman{*Assert(m_node.chainman)};
+        auto& chainstate{chainman.ActiveChainstate()};
+        auto valid_mint{MakeValidNEVMMintFixture(
+            consensus, 102, WitnessV0KeyHash{coinbaseKey.GetPubKey()},
+            uint256S("fa02"))};
+        nevm->template_block_hash = valid_mint.mint.nBlockHash;
+        nevm->template_roots = NEVMTxRoot{
+            valid_mint.mint.nTxRoot, valid_mint.mint.nReceiptRoot};
+        const auto funding{CreateValidMempoolTransaction(
+            m_coinbase_txns.front(), 0, 1, coinbaseKey,
+            CScript{} << OP_TRUE, 10 * COIN, /*submit=*/false)};
+        const auto source{MakeMintBlock(funding)};
+        BOOST_REQUIRE(chainman.ProcessNewBlock(source, true, true, nullptr));
+        BOOST_REQUIRE(WITH_LOCK(::cs_main,
+            return chainman.ActiveTip()->GetBlockHash()) == source->GetHash());
+        nevm->template_block_hash.reset();
+        nevm->template_roots.reset();
+        SetMockTime(GetTime() + 1);
+        {
+            LOCK(::cs_main);
+            BOOST_REQUIRE_EQUAL(chainman.ActiveHeight(), 101);
+            BlockValidationState flush_state;
+            BOOST_REQUIRE_MESSAGE(chainstate.FlushStateToDisk(
+                flush_state, FlushStateMode::ALWAYS), flush_state.ToString());
+            BOOST_REQUIRE(chainstate.CoinsDB().GetBestBlock() == source->GetHash());
+            BOOST_REQUIRE(pnevmtxrootsdb->GetPublishedTip() == source->GetHash());
+        }
+
+        const COutPoint funding_output{funding.GetHash(), 0};
+        valid_mint.tx.vin.emplace_back(funding_output);
+        const auto candidate{MakeMintBlock(valid_mint.tx)};
+        const COutPoint minted_output{valid_mint.tx.GetHash(), 0};
+        const COutPoint candidate_coinbase{candidate->vtx.front()->GetHash(), 0};
+        CNEVMHeader candidate_header;
+        BlockValidationState header_state;
+        BOOST_REQUIRE(GetNEVMData(header_state, *candidate, candidate_header));
+        CBlockIndex* candidate_index{nullptr};
+        const uint256 imported_hash{pin == ImportedPin::MATCH
+            ? candidate->GetHash() : uint256S("a1bad")};
+        {
+            LOCK(::cs_main);
+            // Validate the funding, scripts and both canonical mint proofs
+            // before installing the deferred public-network handoff state.
+            BlockValidationState valid_state;
+            BOOST_REQUIRE_MESSAGE(TestBlockValidity(
+                valid_state, chainman.GetParams(), chainstate, *candidate,
+                chainman.ActiveTip(), chainman.m_options.adjusted_time_callback),
+                valid_state.ToString());
+            BOOST_REQUIRE(valid_state.IsValid());
+            BlockValidationState accept_state;
+            BOOST_REQUIRE_MESSAGE(chainman.AcceptBlock(
+                candidate, accept_state, &candidate_index, /*fRequested=*/true,
+                /*dbp=*/nullptr, /*fNewBlock=*/nullptr, /*min_pow_checked=*/true),
+                accept_state.ToString());
+            BOOST_REQUIRE(candidate_index != nullptr);
+            BOOST_REQUIRE_EQUAL(candidate_index->nHeight, 102);
+            BOOST_REQUIRE_EQUAL(chainstate.setBlockIndexCandidates.count(candidate_index), 1U);
+            if (pin != ImportedPin::ABSENT) {
+                BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->WritePQActivationHandoff({
+                    node::PQActivationHandoffRecord::VERSION,
+                    node::PQActivationHandoffState::PINNED, 103, imported_hash}));
+            }
+            llmq::test::PQHistoryReauthenticationTestAccess::PreparePublicHandoff(chainman);
+            BOOST_REQUIRE(!llmq::test::PQHistoryReauthenticationTestAccess::
+                HandoffParticipationAllowed(chainman));
+        }
+
+        const bool connected{pin != ImportedPin::MISMATCH};
+        const uint256 expected_tip{connected ? candidate->GetHash() : source->GetHash()};
+        const auto nevm_connects{nevm->connected_blocks.size()};
+        BlockValidationState state;
+        BOOST_CHECK_EQUAL(chainstate.ActivateBestChain(state, candidate), connected);
+        BOOST_CHECK_EQUAL(state.IsError(), !connected);
+        BOOST_CHECK(!state.IsInvalid());
+        BOOST_CHECK_EQUAL(m_node.exit_status.load(), connected ? EXIT_SUCCESS : EXIT_FAILURE);
+        if (!connected) {
+            BOOST_CHECK(state.ToString().find(
+                "no longer matches the active A-1 predecessor") != std::string::npos);
+        }
+        // Even the rejected handoff reaches successful ConnectBlock and its
+        // NEVM acknowledgement. Local coins and bridge publication follow it.
+        BOOST_CHECK_EQUAL(nevm->connected_blocks.size(), nevm_connects + 1);
+        BOOST_REQUIRE(!nevm->connected_blocks.empty());
+        BOOST_CHECK(nevm->connected_blocks.back() == candidate->GetHash());
+
+        const auto check_handoff = [&]() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+            const auto runtime{llmq::test::PQHistoryReauthenticationTestAccess::HandoffState(chainman)};
+            BOOST_CHECK(runtime == (pin == ImportedPin::MISMATCH
+                ? node::PQActivationRuntimeState::FAILED
+                : pin == ImportedPin::MATCH ? node::PQActivationRuntimeState::PINNED
+                                            : node::PQActivationRuntimeState::DEFERRED_HANDOFF));
+            BOOST_CHECK_EQUAL(llmq::test::PQHistoryReauthenticationTestAccess::
+                HandoffParticipationAllowed(chainman), pin == ImportedPin::MATCH);
+            auto& db{*chainman.m_blockman.m_block_tree_db};
+            BOOST_CHECK_EQUAL(db.HasPQActivationHandoff(), pin != ImportedPin::ABSENT);
+            if (pin != ImportedPin::ABSENT) {
+                node::PQActivationHandoffRecord record;
+                BOOST_REQUIRE(db.ReadPQActivationHandoff(record));
+                BOOST_CHECK(record.IsValid(103));
+                BOOST_CHECK(record.state == (connected ? node::PQActivationHandoffState::PINNED
+                                                       : node::PQActivationHandoffState::FAILED));
+                BOOST_CHECK(record.predecessor_hash == imported_hash);
+            }
+        };
+        const auto check_coins = [&](const CCoinsView& coins) {
+            BOOST_CHECK(coins.GetBestBlock() == expected_tip);
+            BOOST_CHECK_EQUAL(coins.HaveCoin(funding_output), !connected);
+            BOOST_CHECK_EQUAL(coins.HaveCoin(minted_output), connected);
+            BOOST_CHECK_EQUAL(coins.HaveCoin(candidate_coinbase), connected);
+            BOOST_CHECK(coins.HaveCoin(COutPoint{source->vtx.front()->GetHash(), 0}));
+        };
+        const auto check_bridge = [&](bool durable) {
+            NEVMTxRoot roots;
+            BOOST_REQUIRE(pnevmtxrootsdb->ReadTxRoots(valid_mint.mint.nBlockHash, roots));
+            BOOST_CHECK(roots.nTxRoot == valid_mint.mint.nTxRoot);
+            BOOST_CHECK(roots.nReceiptRoot == valid_mint.mint.nReceiptRoot);
+            BOOST_CHECK_EQUAL(pnevmtxrootsdb->ReadTxRoots(candidate_header.nBlockHash, roots), connected);
+            if (connected) {
+                BOOST_CHECK(roots.nTxRoot == candidate_header.nTxRoot);
+                BOOST_CHECK(roots.nReceiptRoot == candidate_header.nReceiptRoot);
+            }
+            BOOST_CHECK_EQUAL(pnevmtxmintdb->ExistsTx(valid_mint.mint.nTxHash), connected);
+            BOOST_CHECK(!pnevmtxrootsdb->GetPendingDisconnect());
+            if (durable) {
+                BOOST_CHECK_EQUAL(pnevmtxmintdb->Exists(valid_mint.mint.nTxHash), connected);
+                BOOST_CHECK_EQUAL(pnevmtxrootsdb->Read(candidate_header.nBlockHash, roots), connected);
+                BOOST_CHECK(pnevmtxrootsdb->GetPublishedTip() == expected_tip);
+            }
+        };
+        {
+            LOCK(::cs_main);
+            BOOST_CHECK(chainman.ActiveTip()->GetBlockHash() == expected_tip);
+            BOOST_CHECK_EQUAL(candidate_index->nStatus & BLOCK_FAILED_MASK, 0U);
+            BOOST_CHECK_EQUAL(chainman.m_failed_blocks.count(candidate_index), 0U);
+            BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(candidate_index), 1U);
+            BOOST_CHECK(candidate_index->IsValid(BLOCK_VALID_SCRIPTS));
+            check_coins(chainstate.CoinsTip());
+            check_bridge(/*durable=*/false);
+            check_handoff();
+
+            // Exercise the ordinary shutdown flush after FatalError. The
+            // rejected candidate must never become a clean durable BEST.
+            BlockValidationState flush_state;
+            BOOST_REQUIRE_MESSAGE(chainstate.FlushStateToDisk(
+                flush_state, FlushStateMode::ALWAYS), flush_state.ToString());
+            check_coins(chainstate.CoinsDB());
+            check_bridge(/*durable=*/true);
+            BOOST_CHECK(chainstate.CoinsDB().GetHeadBlocks().empty());
+        }
+        SyncWithValidationInterfaceQueue();
+        {
+            LOCK(::cs_main);
+            const auto coins_path{chainstate.CoinsDB().StoragePath()};
+            const auto index_path{chainman.m_blockman.m_block_tree_db->StoragePath()};
+            BOOST_REQUIRE(coins_path && index_path);
+            chainstate.ResetCoinsViews();
+            chainstate.InitCoinsDB(1U << 20, /*in_memory=*/false,
+                                  /*should_wipe=*/false, *coins_path);
+            pnevmtxrootsdb.reset();
+            pnevmtxrootsdb = std::make_unique<NEVMMintReadErrorRootsDB>(DBParams{
+                .path = m_args.GetDataDirNet() / "mint_block_read_error_roots",
+                .cache_bytes = 1U << 20});
+            pnevmtxmintdb.reset();
+            pnevmtxmintdb = std::make_unique<NEVMMintReadErrorMintDB>(DBParams{
+                .path = m_args.GetDataDirNet() / "mint_block_read_error_markers",
+                .cache_bytes = 1U << 20});
+            chainman.m_blockman.m_block_tree_db.reset();
+            chainman.m_blockman.m_block_tree_db = std::make_unique<node::BlockTreeDB>(DBParams{
+                .path = *index_path, .cache_bytes = 1U << 20});
+            check_coins(chainstate.CoinsDB());
+            check_bridge(/*durable=*/true);
+            check_handoff();
+            BOOST_CHECK(chainstate.CoinsDB().GetHeadBlocks().empty());
+            BOOST_CHECK(chainman.ActiveTip()->GetBlockHash() == expected_tip);
+            CDiskBlockIndex disk_candidate;
+            BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->Read(
+                std::make_pair(uint8_t{'b'}, candidate->GetHash()), disk_candidate));
+            BOOST_CHECK_EQUAL(disk_candidate.nStatus & BLOCK_FAILED_MASK, 0U);
+            // Restore the cache only after inspecting the raw persisted view;
+            // replay or LoadChainTip would obscure a false-clean BEST marker.
+            chainstate.InitCoinsCache(1U << 23);
+        }
+    }
+};
+// SYSCOIN END: Rejecting an imported A-1 pin must discard all staged coins.
 
 struct ProviderParentErrorSetup : StartupNEVMRecoverySetup {
     Consensus::Params& consensus{
@@ -5802,6 +6049,24 @@ BOOST_FIXTURE_TEST_CASE(nevm_mint_marker_read_error_preserves_block_candidate,
     CheckReadError(/*roots_error=*/false);
 }
 // SYSCOIN END: Valid mint candidates survive local NEVM database read errors.
+
+BOOST_FIXTURE_TEST_CASE(nevm_mint_a1_handoff_mismatch_preserves_parent_publication,
+                        NEVMMintHandoffSetup)
+{
+    CheckHandoffPublication(ImportedPin::MISMATCH);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_mint_a1_handoff_matching_pin_publishes_complete_state,
+                        NEVMMintHandoffSetup)
+{
+    CheckHandoffPublication(ImportedPin::MATCH);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_mint_a1_handoff_without_pin_remains_deferred,
+                        NEVMMintHandoffSetup)
+{
+    CheckHandoffPublication(ImportedPin::ABSENT);
+}
 
 BOOST_FIXTURE_TEST_CASE(provider_parent_errors_preserve_block_candidate,
                         ProviderParentErrorSetup)

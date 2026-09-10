@@ -6766,25 +6766,26 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
                  Ticks<MillisecondsDouble>(time_3 - time_2),
                  Ticks<SecondsDouble>(time_connect_total),
                  Ticks<MillisecondsDouble>(time_connect_total) / num_blocks_total);
+        // SYSCOIN BEGIN: A node replaying from below A-1 may consume an existing
+        // transition-release pin only after validating that exact predecessor.
+        // Keep coins and bridge outputs local until this fallible check passes.
+        if (pindexNew->nHeight ==
+                m_chainman.GetConsensus().nPQActivationHeight - 1) {
+            std::string pq_handoff_error;
+            if (!m_chainman.MaybeFinalizePQActivationHandoff(
+                    *pindexNew, pq_handoff_error)) {
+                return FatalError(
+                    m_chainman.GetNotifications(), state,
+                    pq_handoff_error.empty()
+                        ? "Invalid imported PQ activation handoff"
+                        : pq_handoff_error);
+            }
+        }
+        // SYSCOIN END: Consume only an already-imported A-1 handoff.
         bool flushed = connection.view->Flush();
         assert(flushed);
         connection.view.reset();
     }
-    // SYSCOIN BEGIN: A node replaying from below A-1 may consume an existing
-    // transition-release pin only after validating that exact predecessor.
-    if (pindexNew->nHeight ==
-            m_chainman.GetConsensus().nPQActivationHeight - 1) {
-        std::string pq_handoff_error;
-        if (!m_chainman.MaybeFinalizePQActivationHandoff(
-                *pindexNew, pq_handoff_error)) {
-            return FatalError(
-                m_chainman.GetNotifications(), state,
-                pq_handoff_error.empty()
-                    ? "Invalid imported PQ activation handoff"
-                    : pq_handoff_error);
-        }
-    }
-    // SYSCOIN END: Consume only an already-imported A-1 handoff.
     const CBlock& blockConnecting = *pthisBlock;
     // SYSCOIN: Stage mint markers in cache; they become durable on the next full
     // UTXO flush (write-ahead of CoinsTip) or on mint-containing disconnect/replay.
