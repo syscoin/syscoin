@@ -17,7 +17,8 @@ The engine responds to `nevmconnect` with two frames. The first is
 | --- | --- |
 | `connected` | The engine accepted this request. During buffered sync this may only queue it; use `flush` and `nevmblockinfo` to verify the applied pair. |
 | `invalid:<nevm-hash>:<sys-hash>` | A positively classified consensus failure for the indicated pair. |
-| `error:<diagnostic>` | An operational, payload, or unclassified failure. The diagnostic is for logging, not classification. |
+| `payload-invalid:<nevm-hash>:<sys-hash>:<fingerprint>` | A rejected payload representation bound to the pair and exact supplied bytes; authorizes payload recovery, not block invalidation. |
+| `error:<diagnostic>` | An operational or unclassified failure. The diagnostic is for logging, not classification. |
 
 Both hashes use Core's 64-character lowercase `uint256::GetHex()` display
 order, which reverses their 32 serialized bytes. This applies to the NEVM
@@ -32,13 +33,52 @@ independently invalid. Malformed results, unbound identities, legacy error
 text and unknown results remain operational errors.
 
 For `nevmcomms` with the serialized string `flush`, the second response frame
-is `flushed`, the same `invalid:<nevm-hash>:<sys-hash>` token, or
+is `flushed`, the same `invalid` or `payload-invalid` token, or
 `flush-failed: <diagnostic>`. Only the complete canonical token carries a
 rejected pair; diagnostic text is never parsed as a validation verdict.
 
 Geth classifies errors at their validation origin. Storage and local execution
 read failures take precedence over computed validation mismatches. Mutable
 payload failures do not establish invalidity of a committed block hash.
+
+## Rejected payload recovery
+
+The fingerprint is a single SHA256 over the ASCII string
+`syscoin-nevm-payload-v1` followed by one NUL byte, then the raw 32-byte NEVM
+hash, transaction root, receipt root, Syscoin hash, and the exact NEVM payload
+without its CompactSize length. The fingerprint in the response uses the same
+reversed display order as the two hashes. Core accepts only the complete
+canonical token and matches it to the stored commitment and payload.
+
+Before checking a replacement, Core negotiates the serialized string
+`payload-v1` on `nevmcomms`. Exactly two response frames, `nevmcomms` and
+`payload-v1`, establish support. It then sends `nevmvalidate` with the existing
+connect envelope: committed header, payload, Syscoin hash, empty version-hash
+vector, default masternode diff, and zero BTC cursor. Exactly two reply frames
+are required: `nevmvalidate` and `payload-valid`, a canonical `payload-invalid`
+token, or an error diagnostic. Send and receive timeouts are five seconds.
+This check decodes the payload and verifies its header and body commitments;
+it does not import, execute, buffer, or pair the block.
+
+Core persists a repair obligation before requesting replacement bytes from one
+designated peer. Only that payload is substituted into the existing stored
+Syscoin block. The configured engine must approve it before Core appends the
+replacement, durably publishes its disk positions, and replays the missing
+NEVM prefix. Transactions, AuxPoW, validity, chain work and undo are preserved.
+The obligation remains until replay completes. Restart verifies the stored
+representation, including a crash after disk replacement; reindex checks
+differing payload duplicates before choosing the surviving record. Recovery
+requires a compatible engine with `payload-v1` support, including these restart
+and reindex cases.
+
+Healthy new imports add no payload fingerprint, parser or body-validation
+pass. Pending rejection handling uses index metadata to stop repeated
+activation of the same branch before block reads or engine calls. Persistence
+retries and peer requests are rate limited; an authenticated rejection can
+still incur a recovery flush and replacement validation. Undrained retired
+requests close their connection so a fresh connection can retry without
+confusing late responses. A valid branch that
+supersedes the rejected branch clears its obsolete repair obligation.
 
 ## Live recovery
 
@@ -70,7 +110,7 @@ disconnect still follows the separate disconnect error path.
 
 ## Delayed buffered rejection
 
-A rejection received during live connect, predecessor replay or deferred BTCC
+A consensus `invalid` rejection received during live connect, predecessor replay or deferred BTCC
 replay may identify a block Core previously accepted. Core binds both hashes
 to that active block's stored commitment, then flushes and requires Geth's
 fresh applied pair to match its exact predecessor. Zero applied blocks require

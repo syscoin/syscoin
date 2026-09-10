@@ -53,6 +53,7 @@ static const char *MSG_RAWBLOCK  = "rawblock";
 static const char *MSG_RAWTX     = "rawtx";
 // SYSCOIN
 static const char *MSG_NEVMBLOCKCONNECT  = "nevmconnect";
+static const char *MSG_NEVMPAYLOADCHECK  = "nevmvalidate";
 static const char *MSG_NEVMCOMMS  = "nevmcomms";
 static const char *MSG_NEVMBLOCKDISCONNECT  = "nevmdisconnect";
 static const char *MSG_NEVMBLOCK  = "nevmblock";
@@ -64,6 +65,7 @@ static const char *MSG_SEQUENCE  = "sequence";
 static constexpr int NEVM_STATUS_TIMEOUT_MS{2000};
 static constexpr int NEVM_COMMS_TIMEOUT_MS{150000};
 static constexpr int NEVM_DISCONNECT_TIMEOUT_MS{30000};
+static constexpr int NEVM_PAYLOAD_CHECK_TIMEOUT_MS{5000};
 RecursiveMutex cs_nevm;
 
 // Internal function to send multipart message
@@ -360,7 +362,7 @@ bool CZMQAbstractPublishNotifier::NotifyNEVMCommsCommon(const std::string &commM
     LOCK(cs_nevm);
     if (rejection) rejection->reset();
     bResponse = false;
-    const int timeout = (commMessage == "status" || commMessage == "connect-v1")
+    const int timeout = (commMessage == "status" || commMessage == "connect-v1" || commMessage == "payload-v1")
         ? NEVM_STATUS_TIMEOUT_MS : NEVM_COMMS_TIMEOUT_MS;
     if(!SetNEVMReceiveTimeout(psocketsub, timeout)) {
         return false;
@@ -387,7 +389,8 @@ bool CZMQAbstractPublishNotifier::NotifyNEVMCommsCommon(const std::string &commM
             // explicit response for each capability before relying on it.
             const std::string expected_response{
                 commMessage == "flush" ? "flushed" :
-                commMessage == "connect-v1" ? "connect-v1" : "ack"};
+                commMessage == "connect-v1" ? "connect-v1" :
+                commMessage == "payload-v1" ? "payload-v1" : "ack"};
             if(parts[1] != expected_response) {
                 // Only an explicit flush can report buffered block rejection.
                 if (commMessage == "flush" && rejection) {
@@ -464,7 +467,7 @@ bool CZMQPublishNEVMBlockConnectNotifier::NotifyNEVMBlockConnect(const CNEVMHead
             if (rejection) *rejection = parsed;
             state = parsed && parsed->nevm_hash == evmBlock.nBlockHash &&
                     parsed->syscoin_hash == nSYSBlockHash
-                ? "nevm-connect-consensus-invalid"
+                ? (parsed->IsPayload() ? "nevm-connect-payload-invalid" : "nevm-connect-consensus-invalid")
                 : "nevm-connect-response-invalid-data";
             return false;
         }
@@ -473,6 +476,82 @@ bool CZMQPublishNEVMBlockConnectNotifier::NotifyNEVMBlockConnect(const CNEVMHead
         return false;
     }
 
+    return true;
+}
+bool CZMQPublishNEVMBlockConnectNotifier::NotifyNEVMPayloadCheck(const CNEVMHeader& evmBlock, const CBlock& block, const uint256& syscoin_hash, bool& valid, std::string& error, std::optional<NEVMBlockReject>* rejection)
+{
+    LOCK(cs_nevm);
+    valid = false;
+    error = "nevm-payload-check-unavailable";
+    if (rejection) rejection->reset();
+    if (!psocketsub) return false;
+
+    int send_timeout{0}, receive_timeout{0};
+    size_t option_size{sizeof(int)};
+    if (zmq_getsockopt(psocketsub, ZMQ_SNDTIMEO, &send_timeout, &option_size) != 0 ||
+        zmq_getsockopt(psocketsub, ZMQ_RCVTIMEO, &receive_timeout, &option_size) != 0) {
+        error = "nevm-payload-check-timeout-unavailable";
+        return false;
+    }
+    struct RestoreTimeouts {
+        void* socket;
+        int send_timeout;
+        int receive_timeout;
+        ~RestoreTimeouts()
+        {
+            zmq_setsockopt(socket, ZMQ_SNDTIMEO, &send_timeout, sizeof(send_timeout));
+            zmq_setsockopt(socket, ZMQ_RCVTIMEO, &receive_timeout, sizeof(receive_timeout));
+        }
+    } restore{psocketsub, send_timeout, receive_timeout};
+    if (zmq_setsockopt(psocketsub, ZMQ_SNDTIMEO, &NEVM_PAYLOAD_CHECK_TIMEOUT_MS,
+                       sizeof(NEVM_PAYLOAD_CHECK_TIMEOUT_MS)) != 0) {
+        error = "nevm-payload-check-send-timeout-failed";
+        return false;
+    }
+    bool supported{false};
+    if (!NotifyNEVMCommsCommon("payload-v1", supported) || !supported) {
+        error = "nevm-payload-check-protocol-unavailable";
+        return false;
+    }
+    if (!SetNEVMReceiveTimeout(psocketsub, NEVM_PAYLOAD_CHECK_TIMEOUT_MS)) {
+        error = "nevm-payload-check-receive-timeout-failed";
+        return false;
+    }
+    try {
+        CDataStream ss{SER_NETWORK, PROTOCOL_VERSION};
+        // Preserve the complete connect envelope. The pure validator does not
+        // consume version hashes, the MN diff or the authenticated BTC cursor.
+        ss << evmBlock << block.vchNEVMBlockData << syscoin_hash
+           << NEVMDataVec{} << CDeterministicMNListNEVMAddressDiff{} << uint256{};
+        if (!SendZmqMessageNEVM(MSG_NEVMPAYLOADCHECK, ss.data(), ss.size())) {
+            error = "nevm-payload-check-not-sent";
+            return false;
+        }
+        std::vector<std::string> parts;
+        if (!ReceiveZmqMessage(parts)) {
+            error = "nevm-payload-check-response-not-found";
+            return false;
+        }
+        if (parts.size() != 2 || parts[0] != MSG_NEVMPAYLOADCHECK) {
+            error = "nevm-payload-check-response-invalid";
+            return false;
+        }
+        if (parts[1] != "payload-valid") {
+            error = parts[1].empty() ? "nevm-payload-check-response-empty" : parts[1];
+            const auto parsed{ParseNEVMBlockReject(parts[1])};
+            if (rejection && parsed && parsed->IsPayload() &&
+                parsed->nevm_hash == evmBlock.nBlockHash &&
+                parsed->syscoin_hash == syscoin_hash) {
+                *rejection = parsed;
+            }
+            return false;
+        }
+    } catch (const std::exception& e) {
+        error = strprintf("nevm-payload-check-error:%s", e.what());
+        return false;
+    }
+    valid = true;
+    error.clear();
     return true;
 }
 bool CZMQPublishNEVMBlockDisconnectNotifier::NotifyNEVMBlockDisconnect(std::string &state, const uint256& nSYSBlockHash, const CDeterministicMNListNEVMAddressDiff &diff)

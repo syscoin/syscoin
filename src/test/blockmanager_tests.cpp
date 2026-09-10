@@ -4,11 +4,15 @@
 
 #include <chainparams.h>
 #include <clientversion.h>
+#include <consensus/validation.h>
 #include <node/blockstorage.h>
 #include <node/context.h>
 #include <node/kernel_notifications.h>
 #include <script/solver.h>
 #include <primitives/block.h>
+#include <pow.h>
+#include <streams.h>
+#include <undo.h>
 #include <util/chaintype.h>
 #include <validation.h>
 
@@ -50,11 +54,322 @@ uint256 IndexKey(uint8_t value)
     key.begin()[0] = value;
     return key;
 }
+
+// Storage-only fixture: the engine payload is opaque and never executed.
+struct NEVMBlockStorageSetup : BasicTestingSetup {
+    kernel::Notifications notifications;
+    BlockManager blockman{
+        m_node.kernel->interrupt,
+        {.chainparams = Params(), .fast_prune = true,
+         .blocks_dir = m_args.GetBlocksDirPath(), .notifications = notifications}};
+    CBlock block;
+    CBlockUndo undo;
+    CBlockIndex* index{nullptr};
+    const fs::path db_path{m_path_root / "replacement-index"};
+
+    NEVMBlockStorageSetup() : BasicTestingSetup{ChainType::REGTEST} {}
+
+    void Store(bool with_undo) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+    {
+        blockman.m_block_tree_db = std::make_unique<node::BlockTreeDB>(
+            DBParams{.path = db_path, .cache_bytes = 1 << 20});
+        CBlockIndex* best_header{nullptr};
+        const auto store = [&](const CBlock& value) EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+            CBlockIndex* entry{blockman.AddToBlockIndex(value, best_header)};
+            const auto pos{blockman.SaveBlockToDisk(value, entry->nHeight, nullptr)};
+            BOOST_REQUIRE(!pos.IsNull());
+            entry->nFile = pos.nFile;
+            entry->nDataPos = pos.nPos;
+            entry->nStatus |= BLOCK_HAVE_DATA;
+            entry->RaiseValidity(BLOCK_VALID_SCRIPTS);
+            entry->nTx = value.vtx.size();
+            entry->nChainTx = entry->nTx + (entry->pprev ? entry->pprev->nChainTx : 0);
+            return entry;
+        };
+        store(Params().GenesisBlock());
+        block = Params().GenesisBlock();
+        block.hashPrevBlock = block.GetHash();
+        ++block.nTime;
+        block.SetBaseVersion(1, Params().GetConsensus().nAuxpowChainId);
+        block.SetNEVMVersion();
+        block.vchNEVMBlockData = {0x31, 0x32, 0x33};
+        // Match the complete merged-mining proof used by the regtest AuxPoW
+        // fixtures, including the required parent coinbase header.
+        block.SetAuxpowVersion(true);
+        const uint256 child_hash{block.GetHash()};
+        std::vector<uint8_t> merged{std::begin(pchMergedMiningHeader), std::end(pchMergedMiningHeader)};
+        merged.insert(merged.end(), std::make_reverse_iterator(child_hash.end()),
+                      std::make_reverse_iterator(child_hash.begin()));
+        CDataStream suffix{SER_NETWORK, PROTOCOL_VERSION};
+        suffix << uint32_t{1} << uint32_t{0};
+        const auto suffix_bytes{MakeUCharSpan(suffix)};
+        merged.insert(merged.end(), suffix_bytes.begin(), suffix_bytes.end());
+        CMutableTransaction parent_coinbase;
+        parent_coinbase.vin.resize(1);
+        parent_coinbase.vin[0].prevout.SetNull();
+        parent_coinbase.vin[0].scriptSig = CScript{} << merged;
+        const auto coinbase{MakeTransactionRef(parent_coinbase)};
+        CPureBlockHeader parent;
+        parent.nVersion = 1;
+        parent.hashMerkleRoot = coinbase->GetHash();
+        while (!CheckProofOfWork(parent.GetHash(), block.nBits, Params().GetConsensus())) ++parent.nNonce;
+        CDataStream proof{SER_NETWORK, PROTOCOL_VERSION};
+        proof << coinbase << uint256{} << std::vector<uint256>{} << int32_t{0}
+              << std::vector<uint256>{} << int32_t{0} << parent;
+        auto auxpow{std::make_unique<CAuxPow>()};
+        proof >> *auxpow;
+        block.SetAuxpow(std::move(auxpow));
+        BOOST_REQUIRE(HasValidProofOfWork({block}, Params().GetConsensus()));
+        index = store(block);
+        index->nSequenceId = 37;
+        index->btcpPrevCommitment = IndexKey(21);
+        index->pqBTCCReceiptCursorHeight = 8;
+        index->pqBTCCReceiptStateHash = IndexKey(22);
+        index->pqPaymentAuditReceiptStateHash = IndexKey(23);
+        index->m_btcp_prev_contextually_validated = true;
+        index->m_btcp_prev_contextual_commitment = IndexKey(24);
+        if (with_undo) {
+            undo.vtxundo.resize(1);
+            undo.vtxundo[0].vprevout.emplace_back(
+                CTxOut{123, CScript{} << OP_TRUE}, 7, false);
+            BlockValidationState state;
+            BOOST_REQUIRE(blockman.WriteUndoDataForBlock(undo, state, *index));
+        }
+        BOOST_REQUIRE(blockman.FlushChainstateBlockFile(index->nHeight));
+        BOOST_REQUIRE(blockman.WriteBlockIndexDB());
+    }
+
+    void CheckStored(const CBlockIndex& entry, Span<const uint8_t> payload)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+    {
+        CBlock actual;
+        BOOST_REQUIRE(blockman.ReadBlockFromDisk(actual, entry, /*load_auxiliary_data=*/false));
+        CBlock expected{block};
+        expected.vchNEVMBlockData.assign(payload.begin(), payload.end());
+        CDataStream actual_bytes{SER_DISK, CLIENT_VERSION}, expected_bytes{SER_DISK, CLIENT_VERSION};
+        actual_bytes << actual;
+        expected_bytes << expected;
+        BOOST_CHECK(actual_bytes.str() == expected_bytes.str());
+        BOOST_CHECK(actual.GetHash() == block.GetHash());
+        if (entry.nStatus & BLOCK_HAVE_UNDO) {
+            CBlockUndo actual_undo;
+            BOOST_REQUIRE(blockman.UndoReadFromDisk(actual_undo, entry));
+            CDataStream actual_undo_bytes{SER_DISK, CLIENT_VERSION}, expected_undo_bytes{SER_DISK, CLIENT_VERSION};
+            actual_undo_bytes << actual_undo;
+            expected_undo_bytes << undo;
+            BOOST_CHECK(actual_undo_bytes.str() == expected_undo_bytes.str());
+        }
+    }
+};
+
+void CheckReplacementMetadata(const CBlockIndex& before, const CBlockIndex& after)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    CDiskBlockIndex expected{&before};
+    expected.nFile = after.nFile;
+    expected.nDataPos = after.nDataPos;
+    expected.nUndoPos = after.nUndoPos;
+    CDataStream expected_bytes{SER_DISK, CLIENT_VERSION}, actual_bytes{SER_DISK, CLIENT_VERSION};
+    expected_bytes << CDiskBlockIndex{&expected};
+    actual_bytes << CDiskBlockIndex{&after};
+    BOOST_CHECK(expected_bytes.str() == actual_bytes.str());
+    BOOST_CHECK_EQUAL(after.nChainTx, before.nChainTx);
+    BOOST_CHECK_EQUAL(after.nSequenceId, before.nSequenceId);
+    BOOST_CHECK(after.pprev == before.pprev);
+    BOOST_CHECK(after.nChainWork == before.nChainWork);
+    BOOST_CHECK_EQUAL(after.m_btcp_prev_contextually_validated,
+                      before.m_btcp_prev_contextually_validated);
+    BOOST_CHECK(after.m_btcp_prev_contextual_commitment == before.m_btcp_prev_contextual_commitment);
+}
+
+struct ReindexForStorageTest {
+    const bool previous{node::fReindex.exchange(true)};
+    ~ReindexForStorageTest() { node::fReindex = previous; }
+};
 } // namespace
 // SYSCOIN END: Inject batch failures in the real transaction-height cache.
 
 // use BasicTestingSetup here for the data directory configuration, setup, and cleanup
 BOOST_FIXTURE_TEST_SUITE(blockmanager_tests, BasicTestingSetup)
+
+BOOST_FIXTURE_TEST_CASE(nevm_payload_replacement_preserves_metadata_and_reopens, NEVMBlockStorageSetup)
+{
+    LOCK(cs_main);
+    Store(/*with_undo=*/true);
+    const CDiskBlockIndex before{index};
+    const auto original_pos{index->GetBlockPos()};
+    const auto original_undo_pos{index->GetUndoPos()};
+    // Force the replacement into another small test block file.
+    blockman.GetBlockFileInfo(index->nFile)->nSize = 0x10000;
+    const std::vector<uint8_t> replacement{0x41, 0x42, 0x43, 0x44};
+    BlockValidationState state;
+    BOOST_REQUIRE(blockman.ReplaceNEVMBlockData(state, *index, replacement));
+    BOOST_CHECK(state.IsValid());
+    BOOST_CHECK_NE(index->nFile, original_pos.nFile);
+    BOOST_CHECK(index->GetUndoPos() != original_undo_pos);
+    CheckReplacementMetadata(before, *index);
+    CheckStored(*index, replacement);
+    CheckStored(before, block.vchNEVMBlockData);
+
+    const auto repaired_hash{index->GetBlockHash()};
+    CDataStream expected_bytes{SER_DISK, CLIENT_VERSION}, reopened_bytes{SER_DISK, CLIENT_VERSION};
+    expected_bytes << CDiskBlockIndex{index};
+    blockman.m_block_tree_db.reset();
+    blockman.m_block_index.clear();
+    blockman.m_prev_block_index.clear();
+    blockman.m_block_tree_db = std::make_unique<node::BlockTreeDB>(
+        DBParams{.path = db_path, .cache_bytes = 1 << 20});
+    BOOST_REQUIRE(blockman.LoadBlockIndexDB(std::nullopt));
+    index = blockman.LookupBlockIndex(repaired_hash);
+    BOOST_REQUIRE(index != nullptr);
+    reopened_bytes << CDiskBlockIndex{index};
+    BOOST_CHECK(expected_bytes.str() == reopened_bytes.str());
+    CheckStored(*index, replacement);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_payload_replacement_keeps_unrelated_dirty_indexes, NEVMBlockStorageSetup)
+{
+    LOCK(cs_main);
+    Store(/*with_undo=*/false);
+    const CDiskBlockIndex before{index};
+    CBlockHeader unrelated_header{block.GetBlockHeader()};
+    unrelated_header.hashPrevBlock = block.GetHash();
+    ++unrelated_header.nNonce;
+    CBlockIndex* best_header{index};
+    CBlockIndex* unrelated{blockman.AddToBlockIndex(unrelated_header, best_header)};
+    unrelated->btcpPrevCommitment = IndexKey(99);
+    const std::vector<uint8_t> replacement{0x51, 0x52};
+    BlockValidationState state;
+    BOOST_REQUIRE(blockman.ReplaceNEVMBlockData(state, *index, replacement));
+    BOOST_CHECK_EQUAL(index->nFile, before.nFile);
+    BOOST_CHECK_NE(index->nDataPos, before.nDataPos);
+    BOOST_CHECK(index->GetUndoPos().IsNull());
+    CDiskBlockIndex stored_unrelated;
+    BOOST_CHECK(!blockman.m_block_tree_db->Read(
+        std::make_pair(uint8_t{'b'}, unrelated->GetBlockHash()), stored_unrelated));
+    CheckReplacementMetadata(before, *index);
+    CheckStored(*index, replacement);
+    BOOST_REQUIRE(blockman.WriteBlockIndexDB());
+    BOOST_REQUIRE(blockman.m_block_tree_db->Read(
+        std::make_pair(uint8_t{'b'}, unrelated->GetBlockHash()), stored_unrelated));
+    BOOST_CHECK(stored_unrelated.btcpPrevCommitment == IndexKey(99));
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_payload_replacement_failed_flush_keeps_old_positions, NEVMBlockStorageSetup)
+{
+    LOCK(cs_main);
+    Store(/*with_undo=*/false);
+    const CDiskBlockIndex before{index};
+    blockman.GetBlockFileInfo(index->nFile)->nSize = 0x10000;
+    // The replacement block can be appended, but its destination undo-file
+    // durability barrier cannot open a directory as a regular file.
+    const fs::path blocked_undo{m_args.GetBlocksDirPath() / "rev00001.dat"};
+    BOOST_REQUIRE(fs::create_directory(blocked_undo));
+    const std::vector<uint8_t> replacement{0x61, 0x62};
+    BlockValidationState state;
+    BOOST_CHECK(!blockman.ReplaceNEVMBlockData(state, *index, replacement));
+    BOOST_CHECK(state.IsError());
+    BOOST_CHECK(index->GetBlockPos() == before.GetBlockPos());
+    BOOST_CHECK(index->GetUndoPos() == before.GetUndoPos());
+    CheckReplacementMetadata(before, *index);
+    CheckStored(*index, block.vchNEVMBlockData);
+    CDiskBlockIndex persisted;
+    BOOST_REQUIRE(blockman.m_block_tree_db->Read(
+        std::make_pair(uint8_t{'b'}, index->GetBlockHash()), persisted));
+    BOOST_CHECK_EQUAL(persisted.nFile, before.nFile);
+    BOOST_CHECK_EQUAL(persisted.nDataPos, before.nDataPos);
+    BOOST_REQUIRE(fs::remove(blocked_undo));
+    state = BlockValidationState{};
+    BOOST_REQUIRE(blockman.ReplaceNEVMBlockData(state, *index, replacement));
+    CheckStored(*index, replacement);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_payload_replacement_requires_persisted_index, NEVMBlockStorageSetup)
+{
+    LOCK(cs_main);
+    Store(/*with_undo=*/false);
+    const auto old_pos{index->GetBlockPos()};
+    BOOST_REQUIRE(blockman.m_block_tree_db->Erase(
+        std::make_pair(uint8_t{'b'}, index->GetBlockHash()), /*fSync=*/true));
+    const std::vector<uint8_t> replacement{0x71, 0x72};
+    BlockValidationState state;
+    BOOST_CHECK(!blockman.ReplaceNEVMBlockData(state, *index, replacement));
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "nevm-payload-replacement-index-not-persisted");
+    BOOST_CHECK(index->GetBlockPos() == old_pos);
+    CheckStored(*index, block.vchNEVMBlockData);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_payload_reindex_adopts_existing_record, NEVMBlockStorageSetup)
+{
+    LOCK(cs_main);
+    Store(/*with_undo=*/false);
+    const CDiskBlockIndex before{index};
+    CBlock candidate{block};
+    candidate.vchNEVMBlockData = {0x81, 0x82};
+    const auto candidate_pos{blockman.SaveBlockToDisk(candidate, index->nHeight, nullptr)};
+    BOOST_REQUIRE(!candidate_pos.IsNull());
+    BOOST_REQUIRE(blockman.FlushChainstateBlockFile(index->nHeight));
+    const auto usage_before{blockman.CalculateCurrentUsage()};
+    ReindexForStorageTest reindex;
+    BlockValidationState state;
+    BOOST_REQUIRE(blockman.AdoptNEVMBlockDataForReindex(state, *index, candidate, candidate_pos));
+    BOOST_CHECK(index->GetBlockPos() == candidate_pos);
+    BOOST_CHECK_EQUAL(blockman.CalculateCurrentUsage(), usage_before);
+    CheckReplacementMetadata(before, *index);
+    CheckStored(*index, candidate.vchNEVMBlockData);
+    CDiskBlockIndex persisted;
+    BOOST_REQUIRE(blockman.m_block_tree_db->Read(
+        std::make_pair(uint8_t{'b'}, index->GetBlockHash()), persisted));
+    BOOST_CHECK_EQUAL(persisted.nDataPos, before.nDataPos);
+    BOOST_REQUIRE(blockman.WriteBlockIndexDB());
+    BOOST_REQUIRE(blockman.m_block_tree_db->Read(
+        std::make_pair(uint8_t{'b'}, index->GetBlockHash()), persisted));
+    BOOST_CHECK_EQUAL(persisted.nDataPos, candidate_pos.nPos);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_payload_reindex_rejects_core_changes_and_wrong_context, NEVMBlockStorageSetup)
+{
+    LOCK(cs_main);
+    Store(/*with_undo=*/false);
+    const auto original_pos{index->GetBlockPos()};
+    CBlock candidate{block};
+    candidate.vchNEVMBlockData = {0x91, 0x92};
+    const auto candidate_pos{blockman.SaveBlockToDisk(candidate, index->nHeight, nullptr)};
+    BOOST_REQUIRE(!candidate_pos.IsNull());
+    BlockValidationState state;
+    BOOST_CHECK(!blockman.AdoptNEVMBlockDataForReindex(state, *index, candidate, candidate_pos));
+    ReindexForStorageTest reindex;
+    CBlock changed_body{candidate};
+    changed_body.vtx.clear();
+    state = BlockValidationState{};
+    BOOST_CHECK(!blockman.AdoptNEVMBlockDataForReindex(state, *index, changed_body, candidate_pos));
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "nevm-payload-reindex-core-block-mismatch");
+    CBlock changed_wrapper{candidate};
+    CPureBlockHeader alternate_parent;
+    alternate_parent.nVersion = 1;
+    alternate_parent.nTime = 1;
+    const auto parent_coinbase{candidate.auxpow->getCoinbaseTx()};
+    alternate_parent.hashMerkleRoot = parent_coinbase->GetHash();
+    while (!CheckProofOfWork(alternate_parent.GetHash(), block.nBits, Params().GetConsensus())) ++alternate_parent.nNonce;
+    CDataStream alternate_proof{SER_NETWORK, PROTOCOL_VERSION};
+    alternate_proof << parent_coinbase << uint256{} << std::vector<uint256>{} << int32_t{0}
+                    << std::vector<uint256>{} << int32_t{0} << alternate_parent;
+    auto alternate_auxpow{std::make_unique<CAuxPow>()};
+    alternate_proof >> *alternate_auxpow;
+    changed_wrapper.SetAuxpow(std::move(alternate_auxpow));
+    BOOST_CHECK(changed_wrapper.GetHash() == candidate.GetHash());
+    BOOST_REQUIRE(HasValidProofOfWork({changed_wrapper}, Params().GetConsensus()));
+    state = BlockValidationState{};
+    BOOST_CHECK(!blockman.AdoptNEVMBlockDataForReindex(state, *index, changed_wrapper, candidate_pos));
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "nevm-payload-reindex-core-block-mismatch");
+    CBlockUndo empty_undo;
+    state = BlockValidationState{};
+    BOOST_REQUIRE(blockman.WriteUndoDataForBlock(empty_undo, state, *index));
+    state = BlockValidationState{};
+    BOOST_CHECK(!blockman.AdoptNEVMBlockDataForReindex(state, *index, candidate, candidate_pos));
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "nevm-payload-reindex-adoption-unavailable");
+    BOOST_CHECK(index->GetBlockPos() == original_pos);
+}
 
 // SYSCOIN BEGIN: Retrying inserts and deletions preserves data and batching.
 BOOST_AUTO_TEST_CASE(block_index_failed_chunks_remain_retryable)

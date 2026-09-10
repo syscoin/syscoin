@@ -14,6 +14,7 @@
 #include <kernel/cs_main.h>
 #include <kernel/messagestartchars.h>
 #include <node/pq_activation_handoff.h> // SYSCOIN: durable local PQ activation provenance.
+#include <span.h>
 #include <sync.h>
 #include <util/fs.h>
 #include <util/hasher.h>
@@ -337,6 +338,29 @@ public:
 
     /** Store block on disk. If dbp is not nullptr, then it provides the known position of the block within a block file on disk. */
     FlatFilePos SaveBlockToDisk(const CBlock& block, int nHeight, const FlatFilePos* dbp);
+
+    /**
+     * Replace only the stored NEVM payload, preserving the block and its undo.
+     * The caller must have authenticated the replacement with the engine.
+     * The target's block-index entry must already be persisted by normal flushing.
+     * Publish new disk positions only after the records and index are durable.
+     */
+    [[nodiscard]] bool ReplaceNEVMBlockData(BlockValidationState& state,
+                                          CBlockIndex& index,
+                                          Span<const uint8_t> payload)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
+    /**
+     * Adopt an existing corrected record during reindex, before undo exists.
+     * The caller must have read candidate from known_pos and authenticated the
+     * old payload rejection and replacement with the engine. Ordinary reindex
+     * flushing persists the new position; the Core block must remain identical.
+     */
+    [[nodiscard]] bool AdoptNEVMBlockDataForReindex(BlockValidationState& state,
+                                                  CBlockIndex& index,
+                                                  const CBlock& candidate,
+                                                  const FlatFilePos& known_pos)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     /** Whether running in -prune mode. */
     [[nodiscard]] bool IsPruneMode() const { return m_prune_mode; }

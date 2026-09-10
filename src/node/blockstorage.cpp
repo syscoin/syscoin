@@ -33,6 +33,7 @@
 #include <primitives/block.h>
 #include <node/context.h>
 #include <masternode/activemasternode.h>
+#include <algorithm>
 #include <map>
 #include <unordered_map>
 
@@ -1272,6 +1273,118 @@ FlatFilePos BlockManager::SaveBlockToDisk(const CBlock& block, int nHeight, cons
     return blockPos;
 }
 
+bool BlockManager::ReplaceNEVMBlockData(BlockValidationState& state,
+                                       CBlockIndex& index,
+                                       Span<const uint8_t> payload)
+{
+    AssertLockHeld(cs_main);
+    if (!(index.nStatus & BLOCK_HAVE_DATA) || !m_block_tree_db) {
+        return state.Error("nevm-payload-replacement-storage-unavailable");
+    }
+    if (payload.empty() || payload.size() > MAX_NEVM_BLOCK_SIZE) {
+        return state.Error("nevm-payload-replacement-size");
+    }
+    try {
+        // A selective replacement batch must not publish a newly accepted
+        // child before normal flushing has persisted its indexed ancestry.
+        if (!m_block_tree_db->Exists(
+                std::make_pair(kernel::DB_BLOCK_INDEX, index.GetBlockHash()))) {
+            return state.Error("nevm-payload-replacement-index-not-persisted");
+        }
+        CBlock block;
+        if (!ReadBlockFromDisk(block, index, /*load_auxiliary_data=*/false) ||
+            !block.IsNEVM()) {
+            return state.Error("nevm-payload-replacement-block-unavailable");
+        }
+        CBlockUndo undo;
+        const bool have_undo{(index.nStatus & BLOCK_HAVE_UNDO) != 0};
+        if (have_undo && (index.pprev == nullptr || !UndoReadFromDisk(undo, index))) {
+            return state.Error("nevm-payload-replacement-undo-unavailable");
+        }
+        block.vchNEVMBlockData.assign(payload.begin(), payload.end());
+
+        LOCK(cs_LastBlockFile);
+        const FlatFilePos pos{SaveBlockToDisk(block, index.nHeight, nullptr)};
+        if (pos.IsNull()) return state.Error("nevm-payload-replacement-write-failed");
+
+        CDiskBlockIndex replacement{&index};
+        replacement.nFile = pos.nFile;
+        replacement.nDataPos = pos.nPos;
+        // Block and undo positions share nFile. Moving the block therefore
+        // requires copying its undo before either new position is published.
+        if (have_undo && pos.nFile != index.nFile) {
+            FlatFilePos undo_pos;
+            if (!FindUndoPos(state, pos.nFile, undo_pos,
+                             GetSerializeSize(undo, CLIENT_VERSION) + 40) ||
+                !UndoWriteToDisk(undo, undo_pos, index.pprev->GetBlockHash())) {
+                return state.Error("nevm-payload-replacement-undo-write-failed");
+            }
+            replacement.nUndoPos = undo_pos.nPos;
+        }
+        if (!FlushBlockFile(pos.nFile, /*fFinalize=*/false, /*finalize_undo=*/false)) {
+            return state.Error("nevm-payload-replacement-flush-failed");
+        }
+        // Do not publish other dirty indexes, whose backing files may not
+        // have been flushed. Retain their dirty entries for the usual flush.
+        if (!m_block_tree_db->WriteBatchSync(
+                {{pos.nFile, &m_blockfile_info[pos.nFile]}}, MaxBlockfileNum(),
+                {&replacement})) {
+            return state.Error("nevm-payload-replacement-index-write-failed");
+        }
+        index.nFile = replacement.nFile;
+        index.nDataPos = replacement.nDataPos;
+        index.nUndoPos = replacement.nUndoPos;
+        m_dirty_blockindex.erase(&index);
+        m_dirty_fileinfo.erase(pos.nFile);
+        return true;
+    } catch (const std::exception& e) {
+        return state.Error(strprintf("nevm-payload-replacement-storage-error:%s", e.what()));
+    }
+}
+
+bool BlockManager::AdoptNEVMBlockDataForReindex(BlockValidationState& state,
+                                              CBlockIndex& index,
+                                              const CBlock& candidate,
+                                              const FlatFilePos& known_pos)
+{
+    AssertLockHeld(cs_main);
+    if (!fReindex || !(index.nStatus & BLOCK_HAVE_DATA) ||
+        (index.nStatus & BLOCK_HAVE_UNDO) || known_pos.nFile < 0 ||
+        known_pos.nPos < BLOCK_SERIALIZATION_HEADER_SIZE) {
+        return state.Error("nevm-payload-reindex-adoption-unavailable");
+    }
+    if (candidate.vchNEVMBlockData.empty() ||
+        candidate.vchNEVMBlockData.size() > MAX_NEVM_BLOCK_SIZE) {
+        return state.Error("nevm-payload-reindex-adoption-size");
+    }
+    try {
+        CBlock original;
+        if (!ReadBlockFromDisk(original, index, /*load_auxiliary_data=*/false) ||
+            !original.IsNEVM()) {
+            return state.Error("nevm-payload-reindex-original-unavailable");
+        }
+        // A shared pure-header hash does not authenticate the mutable AuxPoW
+        // wrapper. Compare the entire disk record after changing only payload.
+        original.vchNEVMBlockData = candidate.vchNEVMBlockData;
+        CDataStream original_bytes{SER_DISK, CLIENT_VERSION};
+        CDataStream candidate_bytes{SER_DISK, CLIENT_VERSION};
+        original_bytes << original;
+        candidate_bytes << candidate;
+        if (!std::equal(original_bytes.begin(), original_bytes.end(),
+                        candidate_bytes.begin(), candidate_bytes.end())) {
+            return state.Error("nevm-payload-reindex-core-block-mismatch");
+        }
+        const FlatFilePos pos{SaveBlockToDisk(candidate, index.nHeight, &known_pos)};
+        if (pos.IsNull()) return state.Error("nevm-payload-reindex-position-failed");
+        m_dirty_blockindex.insert(&index);
+        index.nFile = pos.nFile;
+        index.nDataPos = pos.nPos;
+        return true;
+    } catch (const std::exception& e) {
+        return state.Error(strprintf("nevm-payload-reindex-storage-error:%s", e.what()));
+    }
+}
+
 class ImportingNow
 {
     std::atomic<bool>& m_importing;
@@ -1347,6 +1460,16 @@ void ImportBlocks(ChainstateManager& chainman, std::vector<fs::path> vImportFile
         for (Chainstate* chainstate : WITH_LOCK(::cs_main, return chainman.GetAll())) {
             BlockValidationState state;
             if (!chainstate->ActivateBestChain(state, nullptr)) {
+                if (state.IsError() &&
+                    state.GetRejectReason() == "nevm-payload-repair-pending" &&
+                    WITH_LOCK(::cs_main, return chainman.HasDurableNEVMPayloadRepair())) {
+                    // The durable repair marker protects the indexed ancestry
+                    // and active coins. Finish the completed import/reindex
+                    // scan so LoadingBlocks() releases the peer network needed
+                    // to fetch replacement payload bytes.
+                    LogPrintf("Best-chain activation deferred while durable NEVM payload repair is pending\n");
+                    continue;
+                }
                 chainman.GetNotifications().fatalError(strprintf("Failed to connect best block (%s)", state.ToString()));
                 return;
             }

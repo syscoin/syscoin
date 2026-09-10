@@ -240,6 +240,16 @@ void CZMQNotificationInterface::NotifyNEVMBlockDisconnect(std::string &state, co
         return notifier->NotifyNEVMBlockDisconnect(state, nBlockHash, diff);
     });
 }
+void CZMQNotificationInterface::NotifyNEVMPayloadCheck(const CNEVMHeader& evmBlock, const CBlock& block, const uint256& syscoin_hash, bool& valid, std::string& error, std::optional<NEVMBlockReject>* rejection)
+{
+    valid = false;
+    error = "nevm-payload-check-unavailable";
+    if (rejection) rejection->reset();
+    // A repair failure must not remove the ordinary block-connect notifier.
+    TryForEach(notifiers, [&](CZMQAbstractNotifier* notifier) {
+        return notifier->NotifyNEVMPayloadCheck(evmBlock, block, syscoin_hash, valid, error, rejection);
+    });
+}
 void CZMQNotificationInterface::NotifyGetNEVMBlockInfo(uint64_t &nHeight, uint256& nSYSBlockHash, std::string &state)
 {
     // SYSCOIN: Preserve the atomic count/hash pair from one notifier response.

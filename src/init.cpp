@@ -2235,6 +2235,13 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             "-btcheadermanaged=0 with a valid -btcheadercmd executable and "
             "literal -btcheaderarg values."));
     }
+    {
+        LOCK(cs_main);
+        std::string error;
+        if (!chainman.InitializeNEVMPayloadRepair(error)) {
+            return InitError(Untranslated("Cannot restore NEVM payload repair: " + error));
+        }
+    }
     if(fNEVMConnection && !fRegTest) {
         if(!node.chainman->ActiveChainstate().DoGethStartupProcedure()) {
             fNEVMConnection = false;
@@ -2340,6 +2347,10 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                     "Preserve both databases and repair their branch alignment.",
                     geth_pair_error)));
             }
+            if (!chainman.DiscoverNEVMPayloadRepair(
+                    nHeightFromGeth, lastSYSBlockHashFromGeth, geth_pair_error)) {
+                return InitError(Untranslated("Cannot recover NEVM payload: " + geth_pair_error));
+            }
             LogPrintf("Geth nHeightFromGeth %d nHeightLocalGeth %d\n", nHeightFromGeth, nHeightLocalGeth);
             {
                 const auto& consensus = Params().GetConsensus();
@@ -2366,7 +2377,9 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             const bool preseal_replay_active{
                 llmq::chainLocksHandler != nullptr &&
                 llmq::chainLocksHandler->HasNEVMReplayObligation()};
-            if (preseal_replay_active) {
+            if (chainman.HasPendingNEVMPayloadRepair()) {
+                LogPrintf("Preserving Core's chain while a rejected NEVM payload awaits repair\n");
+            } else if (preseal_replay_active) {
                 LogPrintf("Geth is intentionally behind while the durable "
                           "BTCC pre-seal awaits authenticated replay\n");
             // local height is higher so we need to rollback to geth height

@@ -22,6 +22,7 @@
 #include <merkleblock.h>
 #include <netbase.h>
 #include <netmessagemaker.h>
+#include <nevm/response.h>
 #include <node/blockstorage.h>
 #include <node/txreconciliation.h>
 #include <policy/fees.h>
@@ -2362,6 +2363,9 @@ namespace {
 // an honest peer near 0.5 Mbps to finish one response while the two-lane
 // tracker still rotates withholding sources promptly.
 static constexpr auto CLSIG_REQUEST_TIMEOUT{60s};
+static constexpr auto NEVM_PAYLOAD_REQUEST_TIMEOUT{60s};
+static constexpr auto NEVM_PAYLOAD_RETRY_DELAY{5s};
+static constexpr auto NEVM_PAYLOAD_SAME_PEER_RETRY_DELAY{30s};
 /** Blocks that are in flight, and that are in the queue to be downloaded. */
 struct QueuedBlock {
     /** BlockIndex. We must have this since we only request blocks when we've already validated the header. */
@@ -2391,6 +2395,9 @@ struct CNodeState {
     //! Since when we're stalling block download progress (in microseconds), or 0.
     std::chrono::microseconds m_stalling_since{0us};
     std::list<QueuedBlock> vBlocksInFlight;
+    // BLOCK has no request nonce. Drain a retired repair response before
+    // assigning another repair generation to this connection.
+    std::optional<uint256> m_stale_nevm_payload_request;
     //! When the first entry in vBlocksInFlight started downloading. Don't care when vBlocksInFlight is empty.
     std::chrono::microseconds m_downloading_since{0us};
     //! Whether we consider this a preferred download peer.
@@ -3015,6 +3022,17 @@ private:
     typedef std::multimap<uint256, std::pair<NodeId, std::list<QueuedBlock>::iterator>> BlockDownloadMap;
     BlockDownloadMap mapBlocksInFlight GUARDED_BY(cs_main);
 
+    std::optional<NEVMPayloadRepairRequest> m_nevm_payload_request GUARDED_BY(cs_main);
+    std::optional<NodeId> m_nevm_payload_peer GUARDED_BY(cs_main);
+    std::optional<NodeId> m_nevm_payload_last_peer GUARDED_BY(cs_main);
+    std::chrono::microseconds m_nevm_payload_deadline GUARDED_BY(cs_main){0us};
+    std::chrono::microseconds m_nevm_payload_next_retry GUARDED_BY(cs_main){0us};
+    std::chrono::microseconds m_nevm_payload_same_peer_retry GUARDED_BY(cs_main){0us};
+    void ReleaseNEVMPayloadRequest(std::chrono::microseconds now, bool retire_response)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    void RefreshNEVMPayloadRequest(std::chrono::microseconds now)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
     /** When our tip was last updated. */
     std::atomic<std::chrono::seconds> m_last_tip_update{0s};
 
@@ -3309,6 +3327,40 @@ bool PeerManagerImpl::BlockRequested(NodeId nodeid, const CBlockIndex& block, st
         *pit = &itInFlight->second.second;
     }
     return true;
+}
+
+void PeerManagerImpl::ReleaseNEVMPayloadRequest(std::chrono::microseconds now, bool retire_response)
+{
+    AssertLockHeld(cs_main);
+    if (!m_nevm_payload_peer) return;
+    const auto& hash{Assert(m_nevm_payload_request)->rejection.syscoin_hash};
+    RemoveBlockRequest(hash, *m_nevm_payload_peer);
+    if (retire_response) {
+        if (auto* state{State(*m_nevm_payload_peer)}) {
+            state->m_stale_nevm_payload_request = hash;
+        }
+    }
+    m_nevm_payload_last_peer = m_nevm_payload_peer;
+    m_nevm_payload_peer.reset();
+    m_nevm_payload_deadline = 0us;
+    m_nevm_payload_next_retry = now + NEVM_PAYLOAD_RETRY_DELAY;
+    m_nevm_payload_same_peer_retry = now + NEVM_PAYLOAD_SAME_PEER_RETRY_DELAY;
+}
+
+void PeerManagerImpl::RefreshNEVMPayloadRequest(std::chrono::microseconds now)
+{
+    AssertLockHeld(cs_main);
+    if (!m_nevm_payload_request && !m_chainman.HasPendingNEVMPayloadRepair()) return;
+    const auto current{m_chainman.GetNEVMPayloadRepairRequest()};
+    if (current != m_nevm_payload_request) {
+        ReleaseNEVMPayloadRequest(now, /*retire_response=*/true);
+        m_nevm_payload_request = current;
+        m_nevm_payload_last_peer.reset();
+        m_nevm_payload_next_retry = 0us;
+        m_nevm_payload_same_peer_retry = 0us;
+    } else if (m_nevm_payload_peer && now >= m_nevm_payload_deadline) {
+        ReleaseNEVMPayloadRequest(now, /*retire_response=*/true);
+    }
 }
 
 void PeerManagerImpl::MaybeSetPeerAsAnnouncingHeaderAndIDs(NodeId nodeid)
@@ -4330,6 +4382,10 @@ void PeerManagerImpl::FinalizeNode(const CNode& node)
     }
     CNodeState *state = State(nodeid);
     assert(state != nullptr);
+
+    if (m_nevm_payload_peer == nodeid) {
+        ReleaseNEVMPayloadRequest(GetTime<std::chrono::microseconds>(), /*retire_response=*/false);
+    }
 
     if (state->fSyncStarted)
         nSyncStarted--;
@@ -8241,22 +8297,64 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         bool forceProcessing = false;
         const uint256 hash(pblock->GetHash());
         bool min_pow_checked = false;
+        std::optional<NEVMPayloadRepairRequest> payload_repair;
         {
             LOCK(cs_main);
-            // Always process the block if we requested it, since we may
-            // need it even when it's not a candidate for a new best tip.
-            forceProcessing = IsBlockRequested(hash);
-            RemoveBlockRequest(hash, pfrom.GetId());
-            // mapBlockSource is only used for punishing peers and setting
-            // which peers send us compact blocks, so the race between here and
-            // cs_main in ProcessNewBlock is fine.
-            mapBlockSource.emplace(hash, std::make_pair(pfrom.GetId(), true));
-
-            // Check work on this block against our anti-dos thresholds.
-            const CBlockIndex* prev_block = m_chainman.m_blockman.LookupBlockIndex(pblock->hashPrevBlock);
-            if (prev_block && prev_block->nChainWork + CalculateHeadersWork({pblock->GetBlockHeader()}) >= GetAntiDoSWorkThreshold()) {
-                min_pow_checked = true;
+            RefreshNEVMPayloadRequest(GetTime<std::chrono::microseconds>());
+            auto* node_state{State(pfrom.GetId())};
+            if (node_state && node_state->m_stale_nevm_payload_request == hash) {
+                node_state->m_stale_nevm_payload_request.reset();
+                return;
             }
+            if (m_nevm_payload_request &&
+                m_nevm_payload_request->rejection.syscoin_hash == hash) {
+                // Only the designated full-block response can provide repair
+                // bytes. Keep it out of ordinary acceptance and peer punishment.
+                if (m_nevm_payload_peer != pfrom.GetId()) return;
+                payload_repair = m_nevm_payload_request;
+            }
+            if (!payload_repair) {
+                // Always process the block if we requested it, since we may
+                // need it even when it's not a candidate for a new best tip.
+                forceProcessing = IsBlockRequested(hash);
+                RemoveBlockRequest(hash, pfrom.GetId());
+                // mapBlockSource is only used for punishing peers and setting
+                // which peers send us compact blocks, so the race between here and
+                // cs_main in ProcessNewBlock is fine.
+                mapBlockSource.emplace(hash, std::make_pair(pfrom.GetId(), true));
+
+                // Check work on this block against our anti-dos thresholds.
+                const CBlockIndex* prev_block = m_chainman.m_blockman.LookupBlockIndex(pblock->hashPrevBlock);
+                if (prev_block && prev_block->nChainWork + CalculateHeadersWork({pblock->GetBlockHeader()}) >= GetAntiDoSWorkThreshold()) {
+                    min_pow_checked = true;
+                }
+            }
+        }
+        if (payload_repair) {
+            BlockValidationState repair_state;
+            const bool repaired{m_chainman.ProcessNEVMPayloadRepair(
+                *payload_repair, pblock->vchNEVMBlockData, repair_state)};
+            {
+                LOCK(cs_main);
+                if (m_nevm_payload_request == payload_repair &&
+                    m_nevm_payload_peer == pfrom.GetId()) {
+                    ReleaseNEVMPayloadRequest(GetTime<std::chrono::microseconds>(), /*retire_response=*/false);
+                }
+                if (repaired) RemoveBlockRequest(hash, std::nullopt);
+            }
+            if (repaired) {
+                LOCK(m_most_recent_block_mutex);
+                if (m_most_recent_block_hash == hash) {
+                    m_most_recent_block.reset();
+                    m_most_recent_compact_block.reset();
+                    m_most_recent_block_txs.reset();
+                    m_most_recent_block_hash.SetNull();
+                }
+            } else {
+                LogPrint(BCLog::NET, "NEVM payload repair response deferred for block %s peer=%d: %s\n",
+                         hash.ToString(), pfrom.GetId(), repair_state.ToString());
+            }
+            return;
         }
         ProcessBlock(pfrom, pblock, forceProcessing, min_pow_checked);
         return;
@@ -8673,6 +8771,15 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         if (vInv.size() <= MAX_PEER_TX_ANNOUNCEMENTS + MAX_BLOCKS_IN_TRANSIT_PER_PEER) {
             LOCK(::cs_main);
             for (CInv &inv : vInv) {
+                if (inv.type == MSG_BLOCK || inv.type == (MSG_BLOCK | MSG_WITNESS_FLAG)) {
+                    if (auto* state{State(pfrom.GetId())};
+                        state && state->m_stale_nevm_payload_request == inv.hash) {
+                        state->m_stale_nevm_payload_request.reset();
+                    } else if (m_nevm_payload_peer == pfrom.GetId() && m_nevm_payload_request &&
+                               m_nevm_payload_request->rejection.syscoin_hash == inv.hash) {
+                        ReleaseNEVMPayloadRequest(GetTime<std::chrono::microseconds>(), /*retire_response=*/false);
+                    }
+                }
                 if (inv.IsGenTxMsg()) {
                     // If we receive a NOTFOUND message for a tx we requested, mark the announcement for it as
                     // completed in TxRequestTracker.
@@ -9319,6 +9426,13 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
 {
     AssertLockHeld(g_msgproc_mutex);
 
+    if (m_chainman.HasPendingNEVMPayloadRepair() && !m_chainman.m_blockman.LoadingBlocks()) {
+        std::string error;
+        if (!m_chainman.MaybeRecoverNEVMPayload(error)) {
+            LogPrint(BCLog::NET, "NEVM payload recovery deferred: %s\n", error);
+        }
+    }
+
     PeerRef peer = GetPeerRef(pto->GetId());
     if (!peer) return false;
     const Consensus::Params& consensusParams = m_chainparams.GetConsensus();
@@ -9375,6 +9489,16 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
     {
         LOCK(cs_main);
         CNodeState &state = *State(pto->GetId());
+        RefreshNEVMPayloadRequest(current_time);
+        if (state.m_stale_nevm_payload_request) {
+            // BLOCK has no request nonce. Retire the connection so a later
+            // retry cannot consume its old response. Honest peers may stay
+            // silent when they do not yet have a requested block; reconnecting
+            // gives them a fresh request scope instead of excluding them forever.
+            LogPrint(BCLog::NET, "Closing peer=%d after retired NEVM payload request\n", pto->GetId());
+            pto->fDisconnect = true;
+            return true;
+        }
 
         // Start block sync
         if (m_chainman.m_best_header == nullptr) {
@@ -9875,6 +9999,28 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
         // Message: getdata (blocks)
         //
         std::vector<CInv> vGetData;
+        if (m_nevm_payload_request && !m_nevm_payload_peer &&
+            current_time >= m_nevm_payload_next_retry &&
+            (m_nevm_payload_last_peer != pto->GetId() || current_time >= m_nevm_payload_same_peer_retry) &&
+            !state.m_stale_nevm_payload_request &&
+            !m_chainman.m_blockman.LoadingBlocks() &&
+            CanServeBlocks(*peer) && CanServeWitnesses(*peer) && !IsLimitedPeer(*peer) &&
+            pto->CanRelay() && !pto->IsAddrFetchConn() &&
+            state.vBlocksInFlight.size() < MAX_BLOCKS_IN_TRANSIT_PER_PEER) {
+            const auto& hash{m_nevm_payload_request->rejection.syscoin_hash};
+            if (const auto* pindex{m_chainman.m_blockman.LookupBlockIndex(hash)}) {
+                // A stored payload needs an explicit full-block request: the
+                // ordinary scheduler intentionally skips BLOCK_HAVE_DATA.
+                RemoveBlockRequest(hash, std::nullopt);
+                if (BlockRequested(pto->GetId(), *pindex)) {
+                    m_nevm_payload_peer = pto->GetId();
+                    m_nevm_payload_deadline = current_time + NEVM_PAYLOAD_REQUEST_TIMEOUT;
+                    vGetData.emplace_back(MSG_BLOCK | MSG_WITNESS_FLAG, hash);
+                    LogPrint(BCLog::NET, "Requesting NEVM payload repair for block %s peer=%d\n",
+                             hash.ToString(), pto->GetId());
+                }
+            }
+        }
         // SYSCOIN
         if (CanServeBlocks(*peer) && pto->CanRelay() && ((sync_blocks_and_headers_from_peer && !IsLimitedPeer(*peer)) || !m_chainman.IsInitialBlockDownload()) && state.vBlocksInFlight.size() < MAX_BLOCKS_IN_TRANSIT_PER_PEER) {
             std::vector<const CBlockIndex*> vToDownload;

@@ -89,6 +89,46 @@ BOOST_AUTO_TEST_CASE(nevm_rejection_response_requires_exact_canonical_pair)
     BOOST_CHECK(zero_pair->syscoin_hash.IsNull());
 }
 
+BOOST_AUTO_TEST_CASE(nevm_payload_rejection_is_distinct_and_binds_exact_bytes)
+{
+    uint256 nevm_hash, tx_root, receipt_root, syscoin_hash;
+    std::array<uint256*, 4> context{&nevm_hash, &tx_root, &receipt_root, &syscoin_hash};
+    uint8_t next{0};
+    for (auto* hash : context) {
+        for (auto& byte : *hash) byte = next++;
+    }
+    const std::string fixture{"benign local fingerprint fixture"};
+    const std::vector<uint8_t> bytes{fixture.begin(), fixture.end()};
+    const auto fingerprint{NEVMPayloadFingerprint(
+        nevm_hash, tx_root, receipt_root, syscoin_hash, bytes)};
+    // Shared known-answer vector with Geth; no payload parsing or network I/O.
+    BOOST_CHECK_EQUAL(HexStr(fingerprint),
+        "40eedc11769e15ed1de925895606a70fee885b59b12bb7e9d72f5e089ec1c0e8");
+    const std::string token{"payload-invalid:" + nevm_hash.GetHex() + ":" +
+        syscoin_hash.GetHex() + ":" + fingerprint.GetHex()};
+    const auto parsed{ParseNEVMBlockReject(token)};
+    BOOST_REQUIRE(parsed);
+    BOOST_CHECK(parsed->IsPayload());
+    BOOST_CHECK(parsed->nevm_hash == nevm_hash);
+    BOOST_CHECK(parsed->syscoin_hash == syscoin_hash);
+    BOOST_CHECK(parsed->payload_hash == fingerprint);
+    const auto consensus{ParseNEVMBlockReject(
+        "invalid:" + nevm_hash.GetHex() + ":" + syscoin_hash.GetHex())};
+    BOOST_REQUIRE(consensus);
+    BOOST_CHECK(!consensus->IsPayload());
+    for (const auto& response : {token + "\n", "error:" + token,
+            token.substr(0, token.size() - 1), token + ":extra",
+            token.substr(0, token.size() - 1) + "A"}) {
+        BOOST_CHECK(!ParseNEVMBlockReject(response));
+    }
+    auto different{bytes};
+    different.back() ^= 1;
+    BOOST_CHECK(fingerprint != NEVMPayloadFingerprint(
+        nevm_hash, tx_root, receipt_root, syscoin_hash, different));
+    BOOST_CHECK(fingerprint != NEVMPayloadFingerprint(
+        nevm_hash, receipt_root, tx_root, syscoin_hash, bytes));
+}
+
 BOOST_AUTO_TEST_CASE(preseal_disconnect_tracks_only_geth_applied_prefix)
 {
     // SYSCOIN: Geth count N means heights [start, start + N) were applied.

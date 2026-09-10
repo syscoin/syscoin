@@ -312,6 +312,17 @@ void CMainSignals::NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBl
 void CMainSignals::NotifyNEVMBlockDisconnect(std::string &state, const uint256& nBlockHash, const CDeterministicMNListNEVMAddressDiff &diff) {
     m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.NotifyNEVMBlockDisconnect(state, nBlockHash, diff); });
 }
+bool CMainSignals::NotifyNEVMPayloadCheck(const CNEVMHeader& evmBlock, const CBlock& block, const uint256& syscoin_hash, bool& valid, std::string& error, std::optional<NEVMBlockReject>* rejection)
+{
+    valid = false;
+    error = "nevm-payload-check-unavailable";
+    if (rejection) rejection->reset();
+    m_internals->Iterate([&](CValidationInterface& callbacks) {
+        callbacks.NotifyNEVMPayloadCheck(evmBlock, block, syscoin_hash, valid, error, rejection);
+    });
+    valid = valid && error.empty();
+    return valid;
+}
 void CMainSignals::NotifyGetNEVMBlockInfo(uint64_t &nHeight, uint256& nSYSBlockHash, std::string &state) {
     // SYSCOIN: Count-only status cannot distinguish equal-height Syscoin forks.
     m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.NotifyGetNEVMBlockInfo(nHeight, nSYSBlockHash, state);});

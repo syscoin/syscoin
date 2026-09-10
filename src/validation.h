@@ -1109,6 +1109,11 @@ private:
                                      std::string& error,
                                      std::optional<NEVMBlockReject>& rejection)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    bool RecoverNEVMPrefixThrough(const CBlockIndex& through,
+                                  const CBlockIndex* pending,
+                                  std::string& error,
+                                  std::optional<NEVMBlockReject>& rejection)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     SteadyClock::time_point m_last_write{};
     SteadyClock::time_point m_last_flush{};
     // SYSCOIN: Retry auxiliary GC once per tip or external retention change;
@@ -1282,6 +1287,24 @@ private:
     };
     std::optional<NEVMStartupPair> m_nevm_startup_pair GUARDED_BY(::cs_main);
     std::atomic<bool> m_nevm_startup_pair_pending{false};
+
+    enum class NEVMPayloadRepairStage { VERIFY_STORED, DOWNLOAD, REPLAY };
+    std::optional<NEVMBlockReject> m_nevm_payload_repair GUARDED_BY(::cs_main);
+    NEVMPayloadRepairStage m_nevm_payload_stage GUARDED_BY(::cs_main){NEVMPayloadRepairStage::VERIFY_STORED};
+    uint64_t m_nevm_payload_generation GUARDED_BY(::cs_main){0};
+    bool m_nevm_payload_durable GUARDED_BY(::cs_main){false};
+    std::chrono::steady_clock::time_point m_nevm_payload_retry_after GUARDED_BY(::cs_main){};
+    std::chrono::steady_clock::time_point m_nevm_payload_persist_retry_after GUARDED_BY(::cs_main){};
+    std::atomic<bool> m_nevm_payload_pending{false};
+    bool IsWaitingForNEVMPayload(const CBlockIndex& candidate) const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool PersistNEVMPayloadRepair(BlockValidationState& state)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool ClearNEVMPayloadRepair(std::string& error)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool QueueNEVMPayloadRepair(const NEVMBlockReject& rejection,
+                                BlockValidationState& state)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
 public:
     using Options = kernel::ChainstateManagerOpts;
@@ -1696,6 +1719,24 @@ public:
      * @returns     If the block was processed, independently of block validity
      */
     bool ProcessNewBlock(const std::shared_ptr<const CBlock>& block, bool force_processing, bool min_pow_checked, bool* new_block) LOCKS_EXCLUDED(cs_main);
+
+    bool HasPendingNEVMPayloadRepair() const;
+    bool HasDurableNEVMPayloadRepair() const EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+    {
+        return m_nevm_payload_repair.has_value() && m_nevm_payload_durable;
+    }
+    std::optional<NEVMPayloadRepairRequest> GetNEVMPayloadRepairRequest() const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    bool ProcessNEVMPayloadRepair(const NEVMPayloadRepairRequest& request,
+                                  Span<const uint8_t> payload,
+                                  BlockValidationState& state)
+        LOCKS_EXCLUDED(cs_main);
+    bool MaybeRecoverNEVMPayload(std::string& error) LOCKS_EXCLUDED(cs_main);
+    bool InitializeNEVMPayloadRepair(std::string& error)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    bool DiscoverNEVMPayloadRepair(uint64_t geth_count,
+                                   const uint256& syscoin_hash,
+                                   std::string& error) LOCKS_EXCLUDED(cs_main);
 
     /**
      * Process incoming block headers.
