@@ -18928,7 +18928,14 @@ bool CChainLocksHandler::ProcessNewChainLockInternal(
             if (peer_fault != nullptr) *peer_fault = false;
         }
     }
-    admission_lock.unlock();
+    {
+        // The inherited unlock does not remove UniqueLock's tracking entry.
+        std::string lockname;
+        CheckLastCritical(admission_lock.mutex(), lockname, "admission_lock",
+                          __FILE__, __LINE__);
+        admission_lock.unlock();
+        LeaveCritical();
+    }
 
     const auto accept_verified = [&] {
         const auto publication_context{
