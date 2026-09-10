@@ -21,6 +21,7 @@
 #include <llmq/quorums_init.h> // SYSCOIN: recreate pre-import finality handler.
 #include <masternode/activemasternode.h>
 #include <masternode/masternodemeta.h> // SYSCOIN: rebuild auxiliary fixture state.
+#include <masternode/masternodesync.h> // SYSCOIN: replay before governance sync.
 #include <netbase.h> // SYSCOIN: deterministic valid-MN fixture service.
 #include <netfulfilledman.h> // SYSCOIN: rebuild auxiliary fixture state.
 #include <node/blockstorage.h>
@@ -8895,8 +8896,11 @@ static void CheckPreimportDurableSideBranchBoundary(
     }
     BOOST_REQUIRE(active_lca != nullptr);
 
-    consensus.DIP0003Height = 1;
-    consensus.nPQPreparationHeight = 1;
+    // Retained real blocks must replay under the same pre-DIP rules used to
+    // mine them. Preparation can start there and still precede the synthetic
+    // winner's first roster cutoff.
+    consensus.DIP0003Height = bootstrap_empty_chain ? restore.dip3_height : 1;
+    consensus.nPQPreparationHeight = consensus.DIP0003Height;
     consensus.nPQChainLockEpochOrigin = 1'440;
     consensus.nPQRegistrationCutoffBlocks = 288;
     consensus.nPQRosterSnapshotLag = 288;
@@ -9153,7 +9157,16 @@ static void CheckPreimportDurableSideBranchBoundary(
     BOOST_REQUIRE(llmq::chainLocksHandler != nullptr);
     BOOST_CHECK(!llmq::chainLocksHandler->GetBestChainLock());
 
+    struct ResetInterrupt {
+        util::SignalInterrupt& interrupt;
+        ~ResetInterrupt() { interrupt.reset(); }
+    };
     if (bootstrap_empty_chain) {
+        struct RestoreMasternodeSync {
+            int mode{masternodeSync.GetAssetID()};
+            ~RestoreMasternodeSync() { masternodeSync.SetSyncMode(mode); }
+        } restore_sync;
+        masternodeSync.SetSyncMode(MASTERNODE_SYNC_GOVERNANCE);
         const auto check_winner_preserved = [&] {
             const auto identity{llmq::chainLocksHandler->GetDurableFinalityTargetForStartup()};
             BOOST_REQUIRE(identity.has_value());
@@ -9170,10 +9183,7 @@ static void CheckPreimportDurableSideBranchBoundary(
         auto& rebuilt{chainman.ActiveChainstate()};
         {
             bool genesis_notified{false};
-            struct ResetInterrupt {
-                util::SignalInterrupt& interrupt;
-                ~ResetInterrupt() { interrupt.reset(); }
-            } reset_interrupt{node_context.kernel->interrupt};
+            ResetInterrupt reset_interrupt{node_context.kernel->interrupt};
             const boost::signals2::scoped_connection genesis_notification{
                 uiInterface.NotifyBlockTip_connect(
                     [&](SynchronizationState, const CBlockIndex* tip) {
@@ -9197,19 +9207,62 @@ static void CheckPreimportDurableSideBranchBoundary(
             // same incompatible candidate before reading its synthetic body.
             rebuilt.ResetChainLockConflictMarkingStatsForTesting();
         }
-        BlockValidationState competing_state;
-        BOOST_REQUIRE_MESSAGE(rebuilt.ActivateBestChain(competing_state), competing_state.ToString());
-        BOOST_CHECK(competing_state.IsValid());
+        const CBlockIndex* first_replayed_index{WITH_LOCK(
+            ::cs_main, return durable_target->GetAncestor(1))};
+        BOOST_REQUIRE(first_replayed_index != nullptr);
+        BOOST_REQUIRE(active_lca->nHeight < consensus.DIP0003Height);
+        CBlock first_replayed_block;
+        BOOST_REQUIRE(chainman.m_blockman.ReadBlockFromDisk(
+            first_replayed_block, *first_replayed_index));
+        BOOST_REQUIRE(first_replayed_block.GetHash() == first_replayed_index->GetBlockHash());
+        BOOST_REQUIRE(!first_replayed_block.vtx.empty());
+        BOOST_REQUIRE(first_replayed_block.vtx.front()->IsCoinBase());
+        BOOST_REQUIRE(!first_replayed_block.vtx.front()->vout.empty());
+        const COutPoint replayed_coinbase{
+            first_replayed_block.vtx.front()->GetHash(), 0};
+        const CTxOut expected_coinbase{first_replayed_block.vtx.front()->vout.front()};
+        BOOST_REQUIRE(!expected_coinbase.scriptPubKey.IsUnspendable());
+        BOOST_REQUIRE(!WITH_LOCK(::cs_main, return rebuilt.CoinsTip().HaveCoin(replayed_coinbase)));
+        const CBlockIndex* progressed_tip{nullptr};
+        {
+            // The same invocation must retire the incompatible candidate and
+            // begin replaying the winner's real indexed ancestry. Stop at the
+            // first connected tip, before its synthetic suffix above height 90.
+            ResetInterrupt reset_interrupt{node_context.kernel->interrupt};
+            const boost::signals2::scoped_connection progress_notification{
+                uiInterface.NotifyBlockTip_connect(
+                    [&](SynchronizationState, const CBlockIndex* tip) {
+                        if (tip != nullptr && tip->nHeight > 0) {
+                            progressed_tip = tip;
+                            node_context.kernel->interrupt();
+                        }
+                    })};
+            BlockValidationState competing_state;
+            BOOST_REQUIRE_MESSAGE(rebuilt.ActivateBestChain(competing_state), competing_state.ToString());
+            BOOST_CHECK(competing_state.IsValid());
+            BOOST_REQUIRE_MESSAGE(progressed_tip != nullptr,
+                "conflict rejection did not resume compatible indexed replay in the same activation call");
+            BOOST_CHECK(chainman.m_interrupt);
+        }
+        BOOST_CHECK(!chainman.m_interrupt);
         check_winner_preserved();
         LOCK(::cs_main);
-        BOOST_CHECK(chainman.ActiveTip() == genesis);
-        BOOST_CHECK(rebuilt.CoinsTip().GetBestBlock() == genesis->GetBlockHash());
+        BOOST_REQUIRE(chainman.ActiveTip() == progressed_tip);
+        BOOST_REQUIRE(progressed_tip->nHeight > 0);
+        BOOST_REQUIRE(progressed_tip->nHeight <= active_lca->nHeight);
+        BOOST_CHECK(durable_target->GetAncestor(progressed_tip->nHeight) == progressed_tip);
+        BOOST_CHECK(rebuilt.CoinsTip().GetBestBlock() == progressed_tip->GetBlockHash());
+        Coin recovered_coin;
+        BOOST_REQUIRE(rebuilt.CoinsTip().GetCoin(replayed_coinbase, recovered_coin));
+        BOOST_CHECK(recovered_coin.out == expected_coinbase);
+        BOOST_CHECK_EQUAL(recovered_coin.nHeight, first_replayed_index->nHeight);
+        BOOST_CHECK(recovered_coin.IsCoinBase());
         const CBlockIndex* floor{nullptr};
         const CBlockIndex* target{nullptr};
         std::string error;
         BOOST_REQUIRE_MESSAGE(llmq::chainLocksHandler->GetDurableFinalityRecoveryFloor(
             floor, target, error), error);
-        BOOST_CHECK(floor == genesis);
+        BOOST_CHECK(floor == progressed_tip);
         BOOST_CHECK(target == durable_target);
         for (const CBlockIndex* index : bootstrap_competitor) {
             BOOST_CHECK(index->nStatus & BLOCK_CONFLICT_CHAINLOCK);
@@ -9284,17 +9337,23 @@ static void CheckPreimportDurableSideBranchBoundary(
         BOOST_REQUIRE(!conflicting.empty());
         {
             LOCK(::cs_main);
-            // Only the incompatible tip is initially eligible. Its preflight
-            // rejection returns without chain progress; candidates restored by
-            // conflict marking are inspected below, never connected here.
+            // Only the incompatible tip is initially eligible. Preset the
+            // interrupt so ABC stops after its guaranteed first step; restored
+            // synthetic candidates are inspected without being connected.
             chainstate.setBlockIndexCandidates.clear();
             chainstate.setBlockIndexCandidates.insert(active_tip);
             chainstate.setBlockIndexCandidates.insert(conflicting.back());
             chainstate.ResetChainLockConflictMarkingStatsForTesting();
         }
         BlockValidationState state;
-        BOOST_REQUIRE_MESSAGE(chainstate.ActivateBestChain(state),
-                              state.ToString());
+        {
+            BOOST_REQUIRE(!chainman.m_interrupt);
+            ResetInterrupt reset_interrupt{node_context.kernel->interrupt};
+            node_context.kernel->interrupt();
+            BOOST_REQUIRE_MESSAGE(chainstate.ActivateBestChain(state),
+                                  state.ToString());
+        }
+        BOOST_CHECK(!chainman.m_interrupt);
         BOOST_CHECK(state.IsValid());
         LOCK(::cs_main);
         BOOST_CHECK_EQUAL(chainman.ActiveTip(), active_tip);

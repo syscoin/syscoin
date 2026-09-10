@@ -7735,11 +7735,11 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
             }
             CBlockIndex* starting_tip = m_chain.Tip();
             bool blocks_connected = false;
-            // SYSCOIN: A deferred receipt branch yields immediately to another
-            // already-known candidate rather than waiting for a scheduler tick.
-            bool select_alternative_after_btcc_defer{false};
+            // SYSCOIN: Retired conflicts and deferred receipt branches yield
+            // immediately to another already-known candidate.
+            bool select_alternative{false};
             do {
-                select_alternative_after_btcc_defer = false;
+                select_alternative = false;
                 // We absolutely may not unlock cs_main until we've made forward progress
                 // (with the exception of shutdown due to hardware issues, low disk space, etc).
                 ConnectTrace connectTrace; // Destructed before cs_main is unlocked
@@ -7776,6 +7776,11 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                 blocks_connected_this_call = blocks_connected_this_call || blocks_connected;
 
                 if (fInvalidFound) {
+                    // Only a retired conflict guarantees a different candidate;
+                    // a noncacheable invalid representation may remain eligible.
+                    select_alternative =
+                        (pindexMostWork->nStatus & BLOCK_CONFLICT_CHAINLOCK) != 0 &&
+                        !m_chainman.m_interrupt;
                     // Wipe cache, we may need another branch now.
                     pindexMostWork = nullptr;
                 }
@@ -7800,7 +7805,7 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                     // verifiable sibling can make progress without waiting for
                     // another block or scheduler tick.
                     pindexMostWork = nullptr;
-                    select_alternative_after_btcc_defer = true;
+                    select_alternative = true;
                     continue;
                 }
 
@@ -7812,7 +7817,7 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                 if (m_disabled) {
                     break;
                 }
-            } while (select_alternative_after_btcc_defer ||
+            } while (select_alternative ||
                      !m_chain.Tip() ||
                      (starting_tip && CBlockIndexWorkComparator()(
                                           m_chain.Tip(), starting_tip)));
