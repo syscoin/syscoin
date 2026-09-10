@@ -21,6 +21,7 @@ from test_framework.messages import (
     CNEVMBlock,
     CNEVMBlockConnect,
     CNEVMBlockDisconnect,
+    CNEVMHeader,
     CTxOut,
     hash256,
     msg_generic,
@@ -370,6 +371,140 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
             self._connect_response = b"connected"
             self._payload_check_response = b"payload-valid"
 
+    def _check_payload_repair_retargets_requested_peer(self):
+        node = self.nodes[0]
+        previous_tip = node.getbestblockhash()
+        previous_height = node.getblockcount()
+        previous_coinbase = node.getblock(previous_tip)["tx"][0]
+        previous_coin = node.gettxout(previous_coinbase, 0)
+        previous_mocktime = node.mocktime
+        applied = self._applied_syshashes[:]
+        connect_len = len(self._connect_syshashes)
+        checks = len(self._payload_checks)
+
+        def build_branch_block(label, parent_hash, height):
+            # These coinbase-only branches precede DIP3 and the first
+            # superblock. Reuse template payments, but commit a distinct mock
+            # NEVM identity even if getblocktemplate returns its cached block.
+            assert height < 1000
+            block = self._build_block(node)
+            assert_equal(len(block.vtx), 1)
+            coinbase = block.vtx[0]
+            coinbase.vin[0].scriptSig = create_coinbase(height).vin[0].scriptSig
+            nevm_header = CNEVMHeader()
+            for field in ("nBlockHash", "nTxRoot", "nReceiptRoot"):
+                setattr(nevm_header, field, uint256_from_str(hash256(
+                    label + field.encode() + ser_uint256(parent_hash)
+                )))
+            offset = coinbase.extraData.index(b"nevm") + len(b"nevm")
+            coinbase.extraData = (
+                coinbase.extraData[:offset] + nevm_header.serialize()
+                + coinbase.extraData[offset + len(nevm_header.serialize()):]
+            )
+            coinbase.vout.pop()  # Replace the template's witness commitment.
+            block.hashPrevBlock = parent_hash
+            block.nTime += height - previous_height - 1
+            block.nNonce = 0
+            add_witness_commitment(block, nonce=0)
+            block.solve()
+            return block
+
+        block_a = build_branch_block(b"payload-retarget-A", int(previous_tip, 16), previous_height + 1)
+        block_b = build_branch_block(b"payload-retarget-B", int(previous_tip, 16), previous_height + 1)
+        block_b2 = build_branch_block(b"payload-retarget-B2", block_b.sha256, previous_height + 2)
+        blocks = (block_a, block_b, block_b2)
+        original_payload = self._last_nevm_block_data
+        original_raws = [self._serialize_nevm_block(block, original_payload) for block in blocks]
+        stale_a_raw = self._serialize_nevm_block(block_a, b"stale-nevm-A")
+        replacement_payload = b"approved-nevm-B"
+        replacement_b_raw = self._serialize_nevm_block(block_b, replacement_payload)
+        rejected = []
+
+        def connect_response(request):
+            if request.sysblockhash in (block_a.sha256, block_b.sha256) and request.evmBlock.vchNEVMBlockData == original_payload:
+                rejected.append(request)
+                return self._payload_invalid_response(request)
+            return b"connected"
+
+        def assert_pending_b():
+            assert_equal(node.getbestblockhash(), previous_tip)
+            assert_equal(node.gettxout(previous_coinbase, 0), previous_coin)
+            for block, raw in zip(blocks, original_raws):
+                assert_equal(node.getblock(block.hash, 0), raw.hex())
+                assert_equal(node.gettxout(block.vtx[0].hash, 0), None)
+            tips = {tip["hash"]: tip["status"] for tip in node.getchaintips()}
+            assert tips[block_a.hash] != "invalid"
+            assert tips[block_b2.hash] != "invalid"
+            assert_equal(self._nonzero_connects_since(connect_len), [block_a.sha256, block_b.sha256])
+            assert_equal(len(self._payload_checks), checks)
+            assert_equal(self._applied_syshashes, applied)
+
+        self._connect_response = connect_response
+        self._payload_check_response = lambda request: (
+            b"payload-valid" if request.sysblockhash == block_b.sha256
+            and request.evmBlock.vchNEVMBlockData == replacement_payload
+            else self._payload_invalid_response(request)
+        )
+        try:
+            # Freeze time throughout retargeting so A's peer cannot retire
+            # because its request timed out.
+            node.setmocktime(previous_mocktime or int(time.time()))
+            assert_raises_rpc_error(-25, "nevm-connect-payload-invalid", node.submitblock, original_raws[0].hex())
+            peer_a = node.add_p2p_connection(NEVMPayloadRepairPeer())
+            peer_a.wait_for_getdata([block_a.sha256])
+
+            assert_equal(node.submitblock(original_raws[1].hex()), "inconclusive")
+            # B2 makes B's branch strictly better while A's response is held.
+            assert_equal(node.submitblock(original_raws[2].hex()), "inconclusive")
+            peer_a.wait_for_disconnect()
+            assert_pending_b()
+            assert_equal([request.sysblockhash for request in rejected], [block_a.sha256, block_b.sha256])
+            stored_header_b = node.getblockheader(block_b.hash, False)
+
+            peer_b = node.add_p2p_connection(NEVMPayloadRepairPeer())
+            peer_b.wait_for_getdata([block_b.sha256])
+            with p2p_lock:
+                assert_equal(peer_b.last_message["getdata"].inv[0].type, MSG_BLOCK | MSG_WITNESS_FLAG)
+            # The old connection is retired. Deliver its stale A bytes on
+            # B's designated connection and prove they cannot satisfy or
+            # disturb B's repair before the actual B response arrives.
+            peer_b.send_and_ping(msg_generic(b"block", stale_a_raw))
+            assert peer_b.is_connected
+            assert_pending_b()
+
+            peer_b.send_message(msg_generic(b"block", replacement_b_raw))
+            self.wait_until(lambda: node.getbestblockhash() == block_b2.hash)
+            peer_b.sync_with_ping()
+            assert_equal(node.getblockheader(block_b.hash, False), stored_header_b)
+            assert_equal(node.getblock(block_b.hash, 0), replacement_b_raw.hex())
+            assert_equal(node.getblock(block_a.hash, 0), original_raws[0].hex())
+            assert_equal(node.getblock(block_b2.hash, 0), original_raws[2].hex())
+            assert_equal(self._applied_syshashes, applied + [block_b.sha256, block_b2.sha256])
+            assert_equal(self._nonzero_connects_since(connect_len), [
+                block_a.sha256, block_b.sha256, block_b.sha256, block_b2.sha256,
+            ])
+            assert_equal(len(self._payload_checks), checks + 1)
+            validated = self._payload_checks[-1]
+            assert_equal(validated.sysblockhash, block_b.sha256)
+            for field in ("nBlockHash", "nTxRoot", "nReceiptRoot"):
+                assert_equal(getattr(validated.evmBlock, field), getattr(rejected[-1].evmBlock, field))
+            assert_equal(validated.evmBlock.vchNEVMBlockData, replacement_payload)
+            assert node.gettxout(block_b.vtx[0].hash, 0) is not None
+            assert node.gettxout(block_b2.vtx[0].hash, 0) is not None
+
+            # Remove A before undoing B so fixture cleanup cannot select the
+            # deliberately unrepaired old branch. Keep later cases' height.
+            node.invalidateblock(block_a.hash)
+            node.invalidateblock(block_b.hash)
+            assert_equal(node.getbestblockhash(), previous_tip)
+            assert_equal(node.getblockcount(), previous_height)
+            assert_equal(self._applied_syshashes, applied)
+        finally:
+            node.disconnect_p2ps()
+            node.setmocktime(previous_mocktime or 0)
+            self._connect_response = b"connected"
+            self._payload_check_response = b"payload-valid"
+
     def _check_lost_acknowledged_predecessors(self):
         node = self.nodes[0]
         core_pid = node.process.pid
@@ -519,6 +654,9 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
 
             self.log.info("A requested full block repairs only the engine-approved NEVM payload")
             self._check_payload_repair_from_requested_peer()
+
+            self.log.info("A better branch retargets repair and retires the old designated peer")
+            self._check_payload_repair_retargets_requested_peer()
 
             self.log.info("Operational and unmatched responses preserve the exact block for retry")
             # Keep the focused pre-DIP3 fixture below its first superblock;

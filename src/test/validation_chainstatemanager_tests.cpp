@@ -1465,6 +1465,28 @@ struct PersistentNEVMPayloadRepairSetup : StartupNEVMRecoverySetup {
     }
 };
 
+// SYSCOIN BEGIN: Use disk coins and index state for failed repair retargeting.
+struct FailedNEVMPayloadRetargetSetup : StartupNEVMRecoverySetup {
+    const bool previous_shutdown_on_fatal_error{m_node.notifications->m_shutdown_on_fatal_error};
+
+    FailedNEVMPayloadRetargetSetup()
+        : StartupNEVMRecoverySetup{/*coins_db_in_memory=*/false,
+                                    /*managed_exit=*/false,
+                                    /*block_tree_db_in_memory=*/false}
+    {
+        m_node.notifications->m_shutdown_on_fatal_error = false;
+    }
+
+    ~FailedNEVMPayloadRetargetSetup()
+    {
+        WITH_LOCK(::cs_main,
+            m_node.chainman->ActiveChainstate().CoinsDB().SetWriteBatchCallbackForTesting({}));
+        m_node.notifications->m_shutdown_on_fatal_error = previous_shutdown_on_fatal_error;
+        m_node.exit_status.store(EXIT_SUCCESS);
+    }
+};
+// SYSCOIN END: Use disk coins and index state for failed repair retargeting.
+
 struct NEVMPayloadReindexSetup : StartupNEVMRecoverySetup {
     void CheckReindexDuplicate(bool queued, bool changed = true)
     {
@@ -3368,6 +3390,427 @@ BOOST_FIXTURE_TEST_CASE(nevm_payload_repair_clears_after_valid_branch_selection,
     BOOST_CHECK(nevm->command_trace == commands);
     BOOST_CHECK_EQUAL(nevm->payload_check_requests, 0U);
 }
+
+// SYSCOIN BEGIN: A selected competing branch can replace a pending payload repair.
+BOOST_FIXTURE_TEST_CASE(nevm_payload_repair_switches_to_selected_competing_branch,
+                        PersistentNEVMPayloadRepairSetup)
+{
+    auto& chainman{*m_node.chainman};
+    auto& chainstate{chainman.ActiveChainstate()};
+    CBlockIndex* const parent{WITH_LOCK(::cs_main, return chainman.ActiveTip())};
+    const auto candidate{MakeNEVMBlock()};
+    const auto alternative{MakeNEVMBlock()};
+    // Give B a valid stored child without first connecting either sibling.
+    // Before DIP3, these templates contain only a coinbase; update its BIP34
+    // height while retaining the independently generated NEVM commitment.
+    CBlock child{*MakeNEVMBlock()};
+    BOOST_REQUIRE_EQUAL(child.vtx.size(), 1U);
+    BOOST_REQUIRE_LT(parent->nHeight + 2, chainman.GetConsensus().DIP0003Height);
+    CMutableTransaction coinbase{*child.vtx.front()};
+    coinbase.vin.front().scriptSig = CScript{} << (parent->nHeight + 2) << OP_0;
+    child.vtx.front() = MakeTransactionRef(std::move(coinbase));
+    child.hashPrevBlock = alternative->GetHash();
+    child.hashMerkleRoot = BlockMerkleRoot(child);
+    child.fChecked = false;
+    child.nNonce = 0;
+    while (!CheckProofOfWork(child.GetHash(), child.nBits, chainman.GetConsensus())) ++child.nNonce;
+    const auto alternative_tip{std::make_shared<const CBlock>(std::move(child))};
+    const auto candidate_verdict{PayloadVerdictFor(*candidate)};
+    const auto alternative_verdict{PayloadVerdictFor(*alternative)};
+    CBlockIndex* candidate_index{nullptr};
+    CBlockIndex* alternative_index{nullptr};
+    CBlockIndex* alternative_tip_index{nullptr};
+    const auto accept = [&](const auto& block, CBlockIndex*& index) {
+        LOCK(::cs_main);
+        BlockValidationState state;
+        BOOST_REQUIRE_MESSAGE(chainman.AcceptBlock(
+            block, state, &index, true, nullptr, nullptr, true), state.ToString());
+        BOOST_REQUIRE(index != nullptr);
+    };
+    accept(candidate, candidate_index);
+    nevm->connect_verdict = [candidate_verdict, alternative_verdict](const uint256& hash)
+        -> std::optional<NEVMBlockReject> {
+        if (hash == candidate_verdict.syscoin_hash) return candidate_verdict;
+        if (hash == alternative_verdict.syscoin_hash) return alternative_verdict;
+        return std::nullopt;
+    };
+    BlockValidationState first_state;
+    BOOST_CHECK(!chainstate.ActivateBestChain(first_state, candidate));
+    BOOST_CHECK_EQUAL(first_state.GetRejectReason(), "nevm-payload-repair-pending");
+    const auto old_request{WITH_LOCK(::cs_main, return chainman.GetNEVMPayloadRepairRequest())};
+    BOOST_REQUIRE(old_request.has_value());
+    BOOST_REQUIRE(old_request->rejection == candidate_verdict);
+    const auto published_parent{pnevmtxrootsdb->GetPublishedTip()};
+    accept(alternative, alternative_index);
+    accept(alternative_tip, alternative_tip_index);
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.ActiveTip() == parent);
+        BOOST_REQUIRE(candidate_index->pprev == parent);
+        BOOST_REQUIRE(alternative_index->pprev == parent);
+        BOOST_REQUIRE(alternative_tip_index->pprev == alternative_index);
+        BOOST_REQUIRE(alternative_tip_index->nChainWork > candidate_index->nChainWork);
+        BOOST_REQUIRE(chainstate.IsCurrentMostWorkBranch(*alternative_index));
+        BOOST_REQUIRE(!(alternative_tip_index->nStatus & BLOCK_CONFLICT_CHAINLOCK));
+    }
+    BlockValidationState selected_state;
+    BOOST_CHECK(!chainstate.ActivateBestChain(selected_state));
+    BOOST_CHECK(selected_state.IsError());
+    BOOST_CHECK(!selected_state.IsInvalid());
+    BOOST_CHECK_EQUAL(selected_state.GetRejectReason(), "nevm-payload-repair-pending");
+    BOOST_CHECK(nevm->connected_blocks ==
+                (std::vector<uint256>{candidate->GetHash(), alternative->GetHash()}));
+    const auto request{WITH_LOCK(::cs_main, return chainman.GetNEVMPayloadRepairRequest())};
+    BOOST_REQUIRE(request.has_value());
+    BOOST_REQUIRE(request->rejection == alternative_verdict);
+    BOOST_CHECK_GT(request->generation, old_request->generation);
+    // Reopen the real block index after retargeting. The new obligation must
+    // survive independently of the old manager's in-memory repair state.
+    SyncWithValidationInterfaceQueue();
+    {
+        ChainstateManager restarted{m_node.kernel->interrupt, chainman.m_options,
+            {.chainparams = chainman.GetParams(),
+             .blocks_dir = m_args.GetBlocksDirPath(),
+             .notifications = *m_node.notifications}};
+        LOCK(::cs_main);
+        const auto db_path{chainman.m_blockman.m_block_tree_db->StoragePath()};
+        BOOST_REQUIRE(db_path.has_value());
+        chainman.m_blockman.m_block_tree_db.reset();
+        restarted.m_blockman.m_block_tree_db = std::make_unique<node::BlockTreeDB>(DBParams{
+            .path = *db_path, .cache_bytes = 1U << 20});
+        struct RestoreIndexDB {
+            BlockManager& original;
+            BlockManager& reopened;
+            ~RestoreIndexDB() { original.m_block_tree_db = std::move(reopened.m_block_tree_db); }
+        } restore{chainman.m_blockman, restarted.m_blockman};
+        BOOST_REQUIRE(restarted.m_blockman.LoadBlockIndexDB(std::nullopt));
+        for (const auto& block : {candidate, alternative, alternative_tip}) {
+            const auto* index{restarted.m_blockman.LookupBlockIndex(block->GetHash())};
+            BOOST_REQUIRE(index != nullptr);
+            BOOST_CHECK_EQUAL(index->nStatus & BLOCK_FAILED_MASK, 0U);
+        }
+        std::string error;
+        BOOST_REQUIRE_MESSAGE(restarted.InitializeNEVMPayloadRepair(error), error);
+        BOOST_CHECK(restarted.HasPendingNEVMPayloadRepair());
+        BOOST_CHECK(!restarted.GetNEVMPayloadRepairRequest());
+        BOOST_CHECK_EQUAL(nevm->payload_check_requests, 0U);
+        NEVMBlockReject persisted;
+        BOOST_REQUIRE(restarted.m_blockman.m_block_tree_db->Read(NEVM_PAYLOAD_TEST_MARKER, persisted));
+        BOOST_CHECK(persisted == alternative_verdict);
+    }
+    const auto original_pos{WITH_LOCK(::cs_main, return alternative_index->GetBlockPos())};
+    const auto check_unpublished = [&]() {
+        LOCK(::cs_main);
+        BOOST_CHECK(chainman.ActiveTip() == parent);
+        BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == parent->GetBlockHash());
+        BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == parent->GetBlockHash());
+        BOOST_CHECK(pnevmtxrootsdb->GetPublishedTip() == published_parent);
+        BOOST_CHECK(!pnevmtxrootsdb->GetPendingDisconnect());
+        for (const auto* index : {candidate_index, alternative_index, alternative_tip_index}) {
+            BOOST_CHECK_EQUAL(index->nStatus & BLOCK_FAILED_MASK, 0U);
+        }
+        for (const auto& block : {candidate, alternative, alternative_tip}) {
+            BOOST_CHECK(!chainstate.CoinsTip().HaveCoin(COutPoint{block->vtx.front()->GetHash(), 0}));
+            NEVMTxRoot roots;
+            const auto hash{PayloadVerdictFor(*block).nevm_hash};
+            BOOST_CHECK(!pnevmtxrootsdb->ReadTxRoots(hash, roots));
+            BOOST_CHECK(!pnevmtxrootsdb->Read(hash, roots));
+        }
+        NEVMBlockReject persisted;
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->Read(NEVM_PAYLOAD_TEST_MARKER, persisted));
+        BOOST_CHECK(persisted == alternative_verdict);
+        CBlock stored;
+        BOOST_REQUIRE(chainman.m_blockman.ReadBlockFromDisk(stored, *alternative_index, false));
+        BOOST_CHECK(stored.vchNEVMBlockData == alternative->vchNEVMBlockData);
+        BOOST_CHECK(alternative_index->GetBlockPos() == original_pos);
+        BOOST_CHECK_EQUAL(nevm->applied_count, 0U);
+        BOOST_CHECK(nevm->applied_hash.IsNull());
+        BOOST_CHECK(nevm->disconnected_blocks.empty());
+    };
+    check_unpublished();
+    const std::vector<uint8_t> replacement{0x51, 0x52};
+    BlockValidationState stale_state;
+    BOOST_CHECK(!chainman.ProcessNEVMPayloadRepair(*old_request, replacement, stale_state));
+    BOOST_CHECK_EQUAL(stale_state.GetRejectReason(), "nevm-payload-repair-request-stale");
+    BOOST_CHECK_EQUAL(nevm->payload_check_requests, 0U);
+    nevm->payload_check_response = [&](const CNEVMHeader& header, const CBlock& block,
+        const uint256& hash, bool& valid, std::string& error, std::optional<NEVMBlockReject>*) {
+        BOOST_CHECK(hash == alternative_verdict.syscoin_hash);
+        BOOST_CHECK(header.nBlockHash == alternative_verdict.nevm_hash);
+        valid = block.vchNEVMBlockData == replacement;
+        error = valid ? std::string{} : "fixture-payload-rejected";
+    };
+    const std::vector<uint8_t> unaccepted{0x00};
+    BlockValidationState unaccepted_state;
+    BOOST_CHECK(!chainman.ProcessNEVMPayloadRepair(*request, unaccepted, unaccepted_state));
+    BOOST_CHECK_EQUAL(unaccepted_state.GetRejectReason(), "fixture-payload-rejected");
+    BOOST_CHECK(WITH_LOCK(::cs_main, return chainman.GetNEVMPayloadRepairRequest()) == request);
+    check_unpublished();
+    BlockValidationState repaired_state;
+    BOOST_REQUIRE_MESSAGE(chainman.ProcessNEVMPayloadRepair(*request, replacement, repaired_state),
+                          repaired_state.ToString());
+    nevm->connect_verdict = {};
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(chainman.MaybeRecoverNEVMPayload(error), error);
+    BOOST_CHECK(error.empty());
+    BOOST_CHECK(!chainman.HasPendingNEVMPayloadRepair());
+    BOOST_CHECK_EQUAL(nevm->payload_check_requests, 2U);
+    BOOST_CHECK(nevm->applied_hash == alternative_tip->GetHash());
+    LOCK(::cs_main);
+    BOOST_CHECK(chainman.ActiveTip() == alternative_tip_index);
+    BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == alternative_tip->GetHash());
+    BOOST_CHECK_EQUAL(candidate_index->nStatus & BLOCK_FAILED_MASK, 0U);
+    BOOST_CHECK_EQUAL(alternative_index->nStatus & BLOCK_FAILED_MASK, 0U);
+    BOOST_CHECK_EQUAL(alternative_tip_index->nStatus & BLOCK_FAILED_MASK, 0U);
+    BOOST_CHECK(!chainman.m_blockman.m_block_tree_db->Exists(NEVM_PAYLOAD_TEST_MARKER));
+}
+// SYSCOIN END: A selected competing branch can replace a pending payload repair.
+
+// SYSCOIN BEGIN: Retargeting requires the attempted pair and its stored fingerprint.
+BOOST_FIXTURE_TEST_CASE(nevm_payload_repair_retarget_rejects_unrelated_or_changed_payload,
+                        StartupNEVMRecoverySetup)
+{
+    auto& chainman{*m_node.chainman};
+    auto& chainstate{chainman.ActiveChainstate()};
+    CBlockIndex* const parent{WITH_LOCK(::cs_main, return chainman.ActiveTip())};
+    const auto candidate{MakeNEVMBlock()};
+    const auto alternative{MakeNEVMBlock()};
+    const auto unrelated{MakeNEVMBlock()};
+    CBlock child{*MakeNEVMBlock()};
+    BOOST_REQUIRE_EQUAL(child.vtx.size(), 1U);
+    BOOST_REQUIRE_LT(parent->nHeight + 2, chainman.GetConsensus().DIP0003Height);
+    CMutableTransaction coinbase{*child.vtx.front()};
+    coinbase.vin.front().scriptSig = CScript{} << (parent->nHeight + 2) << OP_0;
+    child.vtx.front() = MakeTransactionRef(std::move(coinbase));
+    child.hashPrevBlock = alternative->GetHash();
+    child.hashMerkleRoot = BlockMerkleRoot(child);
+    child.fChecked = false;
+    child.nNonce = 0;
+    while (!CheckProofOfWork(child.GetHash(), child.nBits, chainman.GetConsensus())) ++child.nNonce;
+    const auto alternative_tip{std::make_shared<const CBlock>(std::move(child))};
+    const auto candidate_verdict{PayloadVerdictFor(*candidate)};
+    const auto alternative_verdict{PayloadVerdictFor(*alternative)};
+    CBlockIndex* candidate_index{nullptr};
+    CBlockIndex* alternative_index{nullptr};
+    CBlockIndex* unrelated_index{nullptr};
+    CBlockIndex* alternative_tip_index{nullptr};
+    const auto accept = [&](const auto& block, CBlockIndex*& index) {
+        LOCK(::cs_main);
+        BlockValidationState state;
+        BOOST_REQUIRE_MESSAGE(chainman.AcceptBlock(
+            block, state, &index, true, nullptr, nullptr, true), state.ToString());
+        BOOST_REQUIRE(index != nullptr);
+    };
+    accept(candidate, candidate_index);
+    nevm->connect_verdict = [candidate_verdict](const uint256& hash)
+        -> std::optional<NEVMBlockReject> {
+        return hash == candidate_verdict.syscoin_hash ? std::optional{candidate_verdict} : std::nullopt;
+    };
+    BlockValidationState first_state;
+    BOOST_CHECK(!chainstate.ActivateBestChain(first_state, candidate));
+    BOOST_CHECK_EQUAL(first_state.GetRejectReason(), "nevm-payload-repair-pending");
+    const auto request{WITH_LOCK(::cs_main, return chainman.GetNEVMPayloadRepairRequest())};
+    BOOST_REQUIRE(request.has_value());
+    BOOST_REQUIRE(request->rejection == candidate_verdict);
+    accept(alternative, alternative_index);
+    accept(unrelated, unrelated_index);
+    accept(alternative_tip, alternative_tip_index);
+    const auto published_parent{pnevmtxrootsdb->GetPublishedTip()};
+    const auto original_pos{WITH_LOCK(::cs_main, return alternative_index->GetBlockPos())};
+    for (const bool wrong_pair : {true, false}) {
+        BOOST_TEST_CONTEXT((wrong_pair ? "unrelated stored sibling" : "changed stored fingerprint")) {
+            auto verdict{wrong_pair ? PayloadVerdictFor(*unrelated) : alternative_verdict};
+            if (!wrong_pair) verdict.payload_hash->begin()[0] ^= 1;
+            nevm->connect_verdict = [&, verdict](const uint256& hash)
+                -> std::optional<NEVMBlockReject> {
+                BOOST_CHECK(hash == alternative->GetHash());
+                return verdict;
+            };
+            {
+                LOCK(::cs_main);
+                BOOST_REQUIRE(alternative_tip_index->nChainWork > candidate_index->nChainWork);
+                BOOST_REQUIRE(chainstate.IsCurrentMostWorkBranch(*alternative_index));
+                BOOST_CHECK(!chainstate.IsCurrentMostWorkBranch(*unrelated_index));
+            }
+            const auto connects{nevm->connected_blocks.size()};
+            BlockValidationState state;
+            BOOST_CHECK(!chainstate.ActivateBestChain(state));
+            BOOST_CHECK(state.IsError());
+            BOOST_CHECK(!state.IsInvalid());
+            if (!wrong_pair) BOOST_CHECK_EQUAL(state.GetRejectReason(), "nevm-payload-repair-fingerprint-mismatch");
+            BOOST_CHECK_EQUAL(nevm->connected_blocks.size(), connects + 1);
+            LOCK(::cs_main);
+            BOOST_CHECK(chainman.GetNEVMPayloadRepairRequest() == request);
+            BOOST_CHECK(chainman.ActiveTip() == parent);
+            BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == parent->GetBlockHash());
+            BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == parent->GetBlockHash());
+            BOOST_CHECK(pnevmtxrootsdb->GetPublishedTip() == published_parent);
+            BOOST_CHECK(!pnevmtxrootsdb->GetPendingDisconnect());
+            for (const auto* index : {candidate_index, alternative_index, unrelated_index, alternative_tip_index}) {
+                BOOST_CHECK_EQUAL(index->nStatus & BLOCK_FAILED_MASK, 0U);
+            }
+            for (const auto& block : {candidate, alternative, unrelated, alternative_tip}) {
+                BOOST_CHECK(!chainstate.CoinsTip().HaveCoin(COutPoint{block->vtx.front()->GetHash(), 0}));
+                NEVMTxRoot roots;
+                BOOST_CHECK(!pnevmtxrootsdb->ReadTxRoots(PayloadVerdictFor(*block).nevm_hash, roots));
+            }
+            NEVMBlockReject persisted;
+            BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->Read(NEVM_PAYLOAD_TEST_MARKER, persisted));
+            BOOST_CHECK(persisted == candidate_verdict);
+            CBlock stored;
+            BOOST_REQUIRE(chainman.m_blockman.ReadBlockFromDisk(stored, *alternative_index, false));
+            BOOST_CHECK(stored.vchNEVMBlockData == alternative->vchNEVMBlockData);
+            BOOST_CHECK(alternative_index->GetBlockPos() == original_pos);
+            BOOST_CHECK_EQUAL(nevm->applied_count, 0U);
+            BOOST_CHECK(nevm->disconnected_blocks.empty());
+            BOOST_CHECK_EQUAL(nevm->payload_check_requests, 0U);
+        }
+    }
+}
+// SYSCOIN END: Retargeting requires the attempted pair and its stored fingerprint.
+
+// SYSCOIN BEGIN: Failed retarget persistence preserves the previous durable repair.
+BOOST_FIXTURE_TEST_CASE(nevm_payload_repair_retarget_flush_failure_keeps_durable_obligation,
+                        FailedNEVMPayloadRetargetSetup)
+{
+    auto& chainman{*m_node.chainman};
+    auto& chainstate{chainman.ActiveChainstate()};
+    CBlockIndex* const parent{WITH_LOCK(::cs_main, return chainman.ActiveTip())};
+    const auto candidate{MakeNEVMBlock()};
+    const auto alternative{MakeNEVMBlock()};
+    CBlock child{*MakeNEVMBlock()};
+    BOOST_REQUIRE_EQUAL(child.vtx.size(), 1U);
+    BOOST_REQUIRE_LT(parent->nHeight + 2, chainman.GetConsensus().DIP0003Height);
+    CMutableTransaction coinbase{*child.vtx.front()};
+    coinbase.vin.front().scriptSig = CScript{} << (parent->nHeight + 2) << OP_0;
+    child.vtx.front() = MakeTransactionRef(std::move(coinbase));
+    child.hashPrevBlock = alternative->GetHash();
+    child.hashMerkleRoot = BlockMerkleRoot(child);
+    child.fChecked = false;
+    child.nNonce = 0;
+    while (!CheckProofOfWork(child.GetHash(), child.nBits, chainman.GetConsensus())) ++child.nNonce;
+    const auto alternative_tip{std::make_shared<const CBlock>(std::move(child))};
+    const auto candidate_verdict{PayloadVerdictFor(*candidate)};
+    const auto alternative_verdict{PayloadVerdictFor(*alternative)};
+    CBlockIndex* candidate_index{nullptr};
+    CBlockIndex* alternative_index{nullptr};
+    CBlockIndex* alternative_tip_index{nullptr};
+    const auto accept = [&](const auto& block, CBlockIndex*& index) {
+        LOCK(::cs_main);
+        BlockValidationState state;
+        BOOST_REQUIRE_MESSAGE(chainman.AcceptBlock(
+            block, state, &index, true, nullptr, nullptr, true), state.ToString());
+        BOOST_REQUIRE(index != nullptr);
+    };
+    accept(candidate, candidate_index);
+    nevm->connect_verdict = [candidate_verdict, alternative_verdict](const uint256& hash)
+        -> std::optional<NEVMBlockReject> {
+        if (hash == candidate_verdict.syscoin_hash) return candidate_verdict;
+        if (hash == alternative_verdict.syscoin_hash) return alternative_verdict;
+        return std::nullopt;
+    };
+    BlockValidationState first_state;
+    BOOST_CHECK(!chainstate.ActivateBestChain(first_state, candidate));
+    BOOST_CHECK_EQUAL(first_state.GetRejectReason(), "nevm-payload-repair-pending");
+    const auto old_request{WITH_LOCK(::cs_main, return chainman.GetNEVMPayloadRepairRequest())};
+    BOOST_REQUIRE(old_request.has_value());
+    BOOST_REQUIRE(old_request->rejection == candidate_verdict);
+    const auto coins_path{WITH_LOCK(::cs_main, return chainstate.CoinsDB().StoragePath())};
+    BOOST_REQUIRE(coins_path.has_value());
+    const auto index_path{WITH_LOCK(::cs_main,
+        return chainman.m_blockman.m_block_tree_db->StoragePath())};
+    BOOST_REQUIRE(index_path.has_value());
+    const auto published_parent{pnevmtxrootsdb->GetPublishedTip()};
+    accept(alternative, alternative_index);
+    accept(alternative_tip, alternative_tip_index);
+    std::size_t coins_writes{0};
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(alternative_tip_index->nChainWork > candidate_index->nChainWork);
+        BOOST_REQUIRE(chainstate.IsCurrentMostWorkBranch(*alternative_index));
+        chainstate.CoinsDB().SetWriteBatchCallbackForTesting([&](bool) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+            ++coins_writes;
+            BOOST_CHECK(chainman.HasPendingNEVMPayloadRepair());
+            BOOST_CHECK(!chainman.GetNEVMPayloadRepairRequest());
+            NEVMBlockReject persisted;
+            BOOST_CHECK(chainman.m_blockman.m_block_tree_db->Read(NEVM_PAYLOAD_TEST_MARKER, persisted));
+            BOOST_CHECK(persisted == candidate_verdict);
+            return false;
+        });
+    }
+    BlockValidationState failed_state;
+    const bool activated{chainstate.ActivateBestChain(failed_state)};
+    {
+        LOCK(::cs_main);
+        chainstate.CoinsDB().SetWriteBatchCallbackForTesting({});
+        // A failed coins batch intentionally poisons its view. Reopen the
+        // existing disk state before any assertions can abort this test.
+        chainstate.ResetCoinsViews();
+        chainstate.InitCoinsDB(1U << 20, /*in_memory=*/false,
+                               /*should_wipe=*/false, *coins_path);
+        chainstate.InitCoinsCache(1U << 23);
+        BOOST_CHECK(!activated);
+        BOOST_CHECK(failed_state.IsError());
+        BOOST_CHECK(!failed_state.IsInvalid());
+        BOOST_CHECK_EQUAL(coins_writes, 1U);
+        BOOST_CHECK(chainman.ActiveTip() == parent);
+        BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == parent->GetBlockHash());
+        BOOST_CHECK(chainstate.CoinsDB().GetHeadBlocks().empty());
+        BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == parent->GetBlockHash());
+        BOOST_CHECK(pnevmtxrootsdb->GetPublishedTip() == published_parent);
+        BOOST_CHECK(!pnevmtxrootsdb->GetPendingDisconnect());
+        BOOST_CHECK(chainman.HasPendingNEVMPayloadRepair());
+        BOOST_CHECK(!chainman.GetNEVMPayloadRepairRequest());
+        NEVMBlockReject persisted;
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->Read(NEVM_PAYLOAD_TEST_MARKER, persisted));
+        BOOST_CHECK(persisted == candidate_verdict);
+        for (const auto* index : {candidate_index, alternative_index, alternative_tip_index}) {
+            BOOST_CHECK_EQUAL(index->nStatus & BLOCK_FAILED_MASK, 0U);
+        }
+        for (const auto& block : {candidate, alternative, alternative_tip}) {
+            BOOST_CHECK(!chainstate.CoinsTip().HaveCoin(COutPoint{block->vtx.front()->GetHash(), 0}));
+            NEVMTxRoot roots;
+            BOOST_CHECK(!pnevmtxrootsdb->ReadTxRoots(PayloadVerdictFor(*block).nevm_hash, roots));
+        }
+    }
+    BlockValidationState stale_state;
+    const std::vector<uint8_t> replacement{0x51, 0x52};
+    BOOST_CHECK(!chainman.ProcessNEVMPayloadRepair(*old_request, replacement, stale_state));
+    BOOST_CHECK_EQUAL(stale_state.GetRejectReason(), "nevm-payload-repair-request-stale");
+    BOOST_CHECK_EQUAL(nevm->payload_check_requests, 0U);
+    BOOST_CHECK_EQUAL(nevm->applied_count, 0U);
+    BOOST_CHECK(nevm->disconnected_blocks.empty());
+
+    // A fresh manager recovers A from the old durable row, even though the
+    // live manager has already switched its nondurable obligation to B.
+    SyncWithValidationInterfaceQueue();
+    ChainstateManager restarted{m_node.kernel->interrupt, chainman.m_options,
+        {.chainparams = chainman.GetParams(),
+         .blocks_dir = m_args.GetBlocksDirPath(),
+         .notifications = *m_node.notifications}};
+    LOCK(::cs_main);
+    chainman.m_blockman.m_block_tree_db.reset();
+    restarted.m_blockman.m_block_tree_db = std::make_unique<node::BlockTreeDB>(DBParams{
+        .path = *index_path, .cache_bytes = 1U << 20});
+    struct RestoreIndexDB {
+        BlockManager& original;
+        BlockManager& reopened;
+        ~RestoreIndexDB() { original.m_block_tree_db = std::move(reopened.m_block_tree_db); }
+    } restore{chainman.m_blockman, restarted.m_blockman};
+    BOOST_REQUIRE(restarted.m_blockman.LoadBlockIndexDB(std::nullopt));
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(restarted.InitializeNEVMPayloadRepair(error), error);
+    BOOST_CHECK(restarted.HasPendingNEVMPayloadRepair());
+    BOOST_CHECK(!restarted.GetNEVMPayloadRepairRequest());
+    const auto* restored_candidate{restarted.m_blockman.LookupBlockIndex(candidate->GetHash())};
+    const auto* restored_alternative{restarted.m_blockman.LookupBlockIndex(alternative->GetHash())};
+    BOOST_REQUIRE(restored_candidate != nullptr);
+    BOOST_REQUIRE(restored_alternative != nullptr);
+    NEVMBlockReject persisted;
+    BOOST_REQUIRE(restarted.m_blockman.m_block_tree_db->Read(NEVM_PAYLOAD_TEST_MARKER, persisted));
+    BOOST_CHECK(persisted == candidate_verdict);
+}
+// SYSCOIN END: Failed retarget persistence preserves the previous durable repair.
 
 BOOST_FIXTURE_TEST_CASE(nevm_payload_repair_startup_discards_failed_marker,
                         StartupNEVMRecoverySetup)

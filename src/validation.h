@@ -86,6 +86,23 @@ public:
         return ancestor != nullptr && ancestor->GetBlockHash() == block_hash;
     }
 };
+// SYSCOIN BEGIN: Carry branch-selection authority only from a failed activation.
+// This context is created after finality preflight and consumed before the
+// same activation exclusion is released. Replay/startup checks cannot mint it.
+class NEVMPayloadRepairSelection {
+    friend class Chainstate;
+    friend class ChainstateManager;
+    const CBlockIndex* const selected_tip;
+    const CBlockIndex* const candidate;
+    const CBlockIndex* const parent;
+
+    NEVMPayloadRepairSelection(const CBlockIndex& selected_tip_in,
+                              const CBlockIndex& candidate_in,
+                              const CBlockIndex& parent_in)
+        : selected_tip(&selected_tip_in), candidate(&candidate_in),
+          parent(&parent_in) {}
+};
+// SYSCOIN END: Bind payload repair retargeting to the actual activation attempt.
 struct ChainTxData;
 class DisconnectedBlockTransactions;
 class CDeterministicMNListNEVMAddressDiff;
@@ -1051,16 +1068,18 @@ private:
                                          const std::string& cause,
                                          std::string& reason)
         EXCLUSIVE_LOCKS_REQUIRED(cs_btcheader);
-    // SYSCOIN: Report certificate-deferred work separately from invalid blocks.
-    bool ActivateBestChainStep(BlockValidationState& state, CBlockIndex* pindexMostWork, const std::shared_ptr<const CBlock>& pblock, bool& fInvalidFound, bool& fReceiptCandidateDeferred, ConnectTrace& connectTrace, std::optional<NEVMBlockReject>& rejection) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs);
+    // SYSCOIN: Carry deferred work and the selected candidate's repair authority.
+    bool ActivateBestChainStep(BlockValidationState& state, CBlockIndex* pindexMostWork, const std::shared_ptr<const CBlock>& pblock, bool& fInvalidFound, bool& fReceiptCandidateDeferred, ConnectTrace& connectTrace, std::optional<NEVMBlockReject>& rejection, std::optional<NEVMPayloadRepairSelection>& repair_selection) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs, m_chainstate_mutex);
     // Call after transition authorization, before undoing an active block.
     bool PrepareNEVMPayloadDisconnectPrefix(
         BlockValidationState& state,
         std::optional<NEVMDisconnectPrefix>& prefix)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     bool ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew, const std::shared_ptr<const CBlock>& pblock, ConnectTrace& connectTrace, DisconnectedBlockTransactions& disconnectpool, std::optional<NEVMBlockReject>& rejection) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs);
+    // SYSCOIN: Only ordinary activation supplies authority to change repair branches.
     bool ReconcileRejectedNEVMBlock(BlockValidationState& state,
-                                    const NEVMBlockReject& rejection)
+                                    const NEVMBlockReject& rejection,
+                                    const NEVMPayloadRepairSelection* selection = nullptr)
         EXCLUSIVE_LOCKS_REQUIRED(m_chainstate_mutex) LOCKS_EXCLUDED(cs_main);
     bool InvalidateBlockLocked(BlockValidationState& state, CBlockIndex* pindex,
                                bool bReverify, bool bUpdateSpecialTxState,
@@ -1308,8 +1327,10 @@ private:
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool ClearNEVMPayloadRepair(std::string& error)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    // SYSCOIN: Preserve predecessor priority unless activation selected a competing repair.
     bool QueueNEVMPayloadRepair(const NEVMBlockReject& rejection,
-                                BlockValidationState& state)
+                                BlockValidationState& state,
+                                const NEVMPayloadRepairSelection* selection = nullptr)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
 public:

@@ -4001,8 +4001,10 @@ bool ChainstateManager::PersistNEVMPayloadRepair(BlockValidationState& state)
     return true;
 }
 
+// SYSCOIN: A selected competing candidate may need repair before becoming active.
 bool ChainstateManager::QueueNEVMPayloadRepair(const NEVMBlockReject& rejection,
-                                               BlockValidationState& state)
+                                               BlockValidationState& state,
+                                               const NEVMPayloadRepairSelection* selection)
 {
     AssertLockHeld(cs_main);
     // Repeated reports of this already authenticated identity cannot make
@@ -4011,10 +4013,37 @@ bool ChainstateManager::QueueNEVMPayloadRepair(const NEVMBlockReject& rejection,
     CBlockIndex* requested{m_blockman.LookupBlockIndex(rejection.syscoin_hash)};
     if (m_nevm_payload_repair && m_nevm_payload_stage != NEVMPayloadRepairStage::REPLAY) {
         const CBlockIndex* previous{m_blockman.LookupBlockIndex(m_nevm_payload_repair->syscoin_hash)};
-        if (!requested || !ActiveChain().Contains(requested) ||
-            (previous && ActiveChain().Contains(previous) && previous->nHeight <= requested->nHeight)) {
+        // SYSCOIN BEGIN: Distinguish an active predecessor from a selected fork.
+        // Keep the existing earlier-active-predecessor rule. An unconnected
+        // candidate can replace it only with authority from its own failed
+        // ConnectTip attempt, while that activation still excludes transitions.
+        const bool earlier_active_predecessor{
+            requested && ActiveChain().Contains(requested) &&
+            (!previous || !ActiveChain().Contains(previous) ||
+             previous->nHeight > requested->nHeight)};
+        bool selected_competing_candidate{false};
+        if (selection) {
+            if (requested && previous && selection->candidate == requested &&
+                selection->parent == ActiveTip() &&
+                requested->pprev == selection->parent &&
+                !(requested->nStatus & (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK)) &&
+                !(selection->selected_tip->nStatus & (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK)) &&
+                selection->selected_tip->nHeight >= requested->nHeight &&
+                selection->selected_tip->GetAncestor(requested->nHeight) == requested &&
+                !ActiveChain().Contains(previous)) {
+                const int common_height{
+                    std::min(previous->nHeight, selection->selected_tip->nHeight)};
+                // Do not displace a dependency on the selected ancestry,
+                // including one beyond the selected candidate's current tip.
+                selected_competing_candidate =
+                    previous->GetAncestor(common_height) !=
+                    selection->selected_tip->GetAncestor(common_height);
+            }
+        }
+        if (!earlier_active_predecessor && !selected_competing_candidate) {
             return state.Error("nevm-payload-repair-predecessor-pending");
         }
+        // SYSCOIN END: Authorize only the activation-selected competing repair.
     }
     CBlockIndex* index{nullptr};
     CBlock block;
@@ -4026,6 +4055,9 @@ bool ChainstateManager::QueueNEVMPayloadRepair(const NEVMBlockReject& rejection,
     if (!MatchesNEVMPayloadRejection(rejection, header, block.vchNEVMBlockData)) {
         return state.Error("nevm-payload-repair-fingerprint-mismatch");
     }
+    // SYSCOIN: Preserve the old durable row until the new authenticated marker
+    // overwrites it atomically. Nondurable state exposes no download request;
+    // a failed flush/write leaves the old row available for restart recovery.
     m_nevm_payload_repair = rejection;
     m_nevm_payload_stage = NEVMPayloadRepairStage::DOWNLOAD;
     m_nevm_payload_durable = false;
@@ -7284,11 +7316,14 @@ void Chainstate::PruneBlockIndexCandidates() {
  *
  * @returns true unless a system error occurred
  */
-// SYSCOIN: A missing authenticated receipt defers a candidate without making it invalid.
-bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex* pindexMostWork, const std::shared_ptr<const CBlock>& pblock, bool& fInvalidFound, bool& fReceiptCandidateDeferred, ConnectTrace& connectTrace, std::optional<NEVMBlockReject>& rejection)
+// SYSCOIN: Bind payload repair to the selected candidate, separately from invalidity.
+bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex* pindexMostWork, const std::shared_ptr<const CBlock>& pblock, bool& fInvalidFound, bool& fReceiptCandidateDeferred, ConnectTrace& connectTrace, std::optional<NEVMBlockReject>& rejection, std::optional<NEVMPayloadRepairSelection>& repair_selection)
 {
     AssertLockHeld(cs_main);
     if (m_mempool) AssertLockHeld(m_mempool->cs);
+    // SYSCOIN: Repair-selection authority must not outlive or cross activation steps.
+    AssertLockHeld(m_chainstate_mutex);
+    repair_selection.reset();
     const CBlockIndex* pindexOldTip = m_chain.Tip();
     const CBlockIndex* pindexFork = m_chain.FindFork(pindexMostWork);
 
@@ -7451,6 +7486,18 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
                     fContinue = false;
                     break;
                 } else if (rejection) {
+                    // SYSCOIN BEGIN: Authorize only this rejected selected candidate.
+                    // A flush may instead reject an earlier replayed block;
+                    // such a verdict retains the ordinary predecessor rules.
+                    if (rejection->IsPayload() &&
+                        rejection->syscoin_hash == pindexConnect->GetBlockHash() &&
+                        this == &m_chainman.ActiveChainstate() &&
+                        m_chain.Tip() != nullptr &&
+                        pindexConnect->pprev == m_chain.Tip()) {
+                        repair_selection.emplace(NEVMPayloadRepairSelection{
+                            *pindexMostWork, *pindexConnect, *m_chain.Tip()});
+                    }
+                    // SYSCOIN END: Preserve the selected ancestry across trace publication.
                     // Keep BlockChecked's operational result for this child.
                     // The rejected ancestor is handled after trace publication.
                     state = BlockValidationState{};
@@ -7609,6 +7656,8 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
     bool blocks_connected_this_call{false};
     do {
         std::optional<NEVMBlockReject> rejection;
+        // SYSCOIN: Keep the failed step's selection even if the work cache resets.
+        std::optional<NEVMPayloadRepairSelection> repair_selection;
         // Block until the validation queue drains. This should largely
         // never happen in normal operation, however may happen during
         // reindex, causing memory blowup if we run too far ahead.
@@ -7688,7 +7737,7 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                 bool fReceiptCandidateDeferred = false;
                 std::shared_ptr<const CBlock> nullBlockPtr;
                 // SYSCOIN
-                if (!ActivateBestChainStep(state, pindexMostWork, pblock && pblock->GetHash() == pindexMostWork->GetBlockHash() ? pblock : nullBlockPtr, fInvalidFound, fReceiptCandidateDeferred, connectTrace, rejection)) {
+                if (!ActivateBestChainStep(state, pindexMostWork, pblock && pblock->GetHash() == pindexMostWork->GetBlockHash() ? pblock : nullBlockPtr, fInvalidFound, fReceiptCandidateDeferred, connectTrace, rejection, repair_selection)) {
                     // A system error occurred
                     return false;
                 }
@@ -7779,7 +7828,9 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
             // No connection view, mempool lock or unpublished trace survives
             // here. Reuse ordinary invalidation while retaining activation
             // exclusion across the verified engine endpoint and local undo.
-            if (!ReconcileRejectedNEVMBlock(state, *rejection)) return false;
+            // SYSCOIN: Replay callers have no authority to select an inactive fork.
+            if (!ReconcileRejectedNEVMBlock(state, *rejection,
+                    repair_selection ? &*repair_selection : nullptr)) return false;
             pindexNewTip = WITH_LOCK(cs_main, return m_chain.Tip());
             pindexMostWork = nullptr;
             pblock.reset();
@@ -8023,7 +8074,8 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex *pinde
 }
 
 bool Chainstate::ReconcileRejectedNEVMBlock(
-    BlockValidationState& state, const NEVMBlockReject& rejection)
+    BlockValidationState& state, const NEVMBlockReject& rejection,
+    const NEVMPayloadRepairSelection* selection)
 {
     AssertLockHeld(m_chainstate_mutex);
     AssertLockNotHeld(cs_main);
@@ -8032,7 +8084,8 @@ bool Chainstate::ReconcileRejectedNEVMBlock(
         if (this != &m_chainman.ActiveChainstate()) {
             return state.Error("nevm-payload-repair-not-active-chainstate");
         }
-        if (!m_chainman.QueueNEVMPayloadRepair(rejection, state)) return false;
+        // SYSCOIN: Forward only the activation attempt's branch-bound authority.
+        if (!m_chainman.QueueNEVMPayloadRepair(rejection, state, selection)) return false;
         return state.Error("nevm-payload-repair-pending");
     }
     CBlockIndex* rejected{nullptr};
