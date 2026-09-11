@@ -3921,6 +3921,14 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
             bool bResponse = false;
             GetMainSignals().NotifyNEVMComms("status", bResponse);
             if(!bResponse) {
+                // SYSCOIN BEGIN: Restarting may discard acknowledged execution.
+                // Check-only retries cannot verify the applied Core prefix;
+                // keep mining gated even if the restart itself fails.
+                {
+                    LOCK(cs_main);
+                    m_chainman.m_nevm_prefix_recovery_needed = true;
+                }
+                // SYSCOIN END: Leave prefix reconciliation to its existing caller.
                 restarted = m_restart_geth_for_testing
                     ? m_restart_geth_for_testing() : RestartGethNode();
             }

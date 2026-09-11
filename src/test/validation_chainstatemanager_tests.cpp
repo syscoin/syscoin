@@ -1223,8 +1223,9 @@ struct CommittedNEVMContinuitySetup : LiveNEVMRecoverySetup {
     };
     HeaderCase header_case{HeaderCase::VALID};
 
-    explicit CommittedNEVMContinuitySetup(bool in_memory = true)
-        : LiveNEVMRecoverySetup{/*managed_exit=*/false, in_memory}
+    // SYSCOIN: Proposal checks also exercise the managed engine's exit policy.
+    explicit CommittedNEVMContinuitySetup(bool in_memory = true, bool managed_exit = false)
+        : LiveNEVMRecoverySetup{managed_exit, in_memory}
     {
         nevm->template_response = [this](CNEVMBlock& block) {
             auto& chainman{*m_node.chainman};
@@ -1419,8 +1420,9 @@ struct MiningNEVMPrefixSetup : CommittedNEVMContinuitySetup {
     uint256 published_tip;
     std::size_t template_checks{0};
 
-    explicit MiningNEVMPrefixSetup(bool in_memory = true)
-        : CommittedNEVMContinuitySetup{in_memory}
+    // SYSCOIN: Share canonical prefix evidence with managed proposal tests.
+    explicit MiningNEVMPrefixSetup(bool in_memory = true, bool managed_exit = false)
+        : CommittedNEVMContinuitySetup{in_memory, managed_exit}
     {
         PrepareCommitted(HeaderCase::VALID);
         SyncWithValidationInterfaceQueue();
@@ -1745,6 +1747,274 @@ struct MiningNEVMPrefixSetup : CommittedNEVMContinuitySetup {
         }
     }
 };
+
+// SYSCOIN BEGIN: A real proposal check can restart an engine that lost Core's
+// acknowledged suffix. Publish the mining obligation before that restart,
+// then let only the scheduled worker verify and replay the selected prefix.
+struct ProposalMiningNEVMPrefixSetup : MiningNEVMPrefixSetup {
+    enum class RestartResult { READY, DELAYED, FAILED };
+
+    explicit ProposalMiningNEVMPrefixSetup(bool managed_exit = false)
+        : MiningNEVMPrefixSetup{/*in_memory=*/true, managed_exit} {}
+
+    struct RestoreProposalHooks {
+        Chainstate& chainstate;
+        StartupNEVMSubscriber& subscriber;
+        decltype(StartupNEVMSubscriber::wire_connect) wire;
+        ~RestoreProposalHooks()
+        {
+            subscriber.wire_connect = std::move(wire);
+            node::test::NEVMRestartTestAccess::SetRestart(chainstate, {});
+        }
+    };
+
+    UniValue ProposalRPC(const CBlock& block)
+    {
+        CDataStream encoded{SER_NETWORK, PROTOCOL_VERSION};
+        encoded << block;
+        UniValue options{UniValue::VOBJ};
+        options.pushKV("mode", "proposal");
+        options.pushKV("data", HexStr(MakeUCharSpan(encoded)));
+        node::JSONRPCRequest request;
+        request.context = &m_node;
+        request.strMethod = "getblocktemplate";
+        request.params = UniValue{UniValue::VARR};
+        request.params.push_back(options);
+        if (RPCIsInWarmup(nullptr)) SetRPCWarmupFinished();
+        return tableRPC.execute(request);
+    }
+
+    std::shared_ptr<const CBlock> UnindexedProposal()
+    {
+        // Reuse the externally supplied current-tip payload. A local template
+        // request would flush the very buffered suffix that this test loses.
+        CBlock proposal{*candidate};
+        ++proposal.nNonce;
+        proposal.fChecked = false;
+        return std::make_shared<const CBlock>(std::move(proposal));
+    }
+
+    void CheckProposalUnchanged(const CBlock& proposal)
+    {
+        CheckUnchanged();
+        auto& chainman{*m_node.chainman};
+        LOCK(::cs_main);
+        BOOST_CHECK(chainman.m_blockman.LookupBlockIndex(proposal.GetHash()) == nullptr);
+        BOOST_CHECK(!chainman.ActiveChainstate().CoinsTip().HaveCoin(
+            COutPoint{proposal.vtx.front()->GetHash(), 0}));
+        CNEVMHeader header;
+        BlockValidationState state;
+        BOOST_REQUIRE(GetNEVMData(state, proposal, header));
+        NEVMTxRoot roots;
+        BOOST_CHECK(!pnevmtxrootsdb->ReadTxRoots(header.nBlockHash, roots));
+        BOOST_CHECK(!pnevmtxrootsdb->Read(header.nBlockHash, roots));
+        BOOST_CHECK_EQUAL(chainman.m_failed_blocks.count(candidate_index), 0U);
+    }
+
+    void CheckProposalMiningGate()
+    {
+        auto& chainman{*m_node.chainman};
+        BOOST_CHECK(!WITH_LOCK(::cs_main, return chainman.PrepareNEVMBlockProduction()));
+        const auto commands{nevm->command_trace};
+        const auto templates{nevm->template_serial};
+        CheckRefused(chainman.ActiveChainstate());
+        for (const auto* method : {"getblocktemplate", "createauxblock"}) {
+            BOOST_CHECK_EXCEPTION(MiningRPC(method), UniValue, [](const UniValue& error) {
+                return error["code"].getInt<int>() == RPC_CLIENT_IN_INITIAL_DOWNLOAD &&
+                    error["message"].get_str().find("execution recovery") != std::string::npos;
+            });
+        }
+        BOOST_CHECK(nevm->command_trace == commands);
+        BOOST_CHECK_EQUAL(nevm->template_serial, templates);
+    }
+
+    void CheckProposalRestart(RestartResult result, const std::string& cached_method = {})
+    {
+        auto& chainman{*m_node.chainman};
+        auto& chainstate{chainman.ActiveChainstate()};
+        UniValue cached;
+        if (!cached_method.empty()) {
+            cached = MiningRPC(cached_method);
+            BOOST_REQUIRE(cached.isObject());
+            const auto templates{nevm->template_serial};
+            BOOST_REQUIRE_EQUAL(MiningRPC(cached_method).write(), cached.write());
+            BOOST_REQUIRE_EQUAL(nevm->template_serial, templates);
+        }
+        const auto proposal{UnindexedProposal()};
+        CheckTemplate(*proposal);
+        BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainman.PrepareNEVMBlockProduction()));
+        BOOST_REQUIRE(WITH_LOCK(::cs_main,
+            return chainman.m_blockman.LookupBlockIndex(proposal->GetHash())) == nullptr);
+
+        // Without prior local work, Core stays at 103 while the engine loses
+        // buffered 102–103. Priming a cache flushes those blocks, so cached
+        // controls retain 103 and require exact-pair verification after restart.
+        // No activation failure or test-only marker arms this recovery.
+        const std::size_t retained{cached_method.empty() ? 1U : prefix.size()};
+        nevm->applied_count = retained;
+        nevm->applied_hash = prefix[retained - 1]->GetHash();
+        nevm->buffered_pairs.clear();
+        nevm->buffered_pair.reset();
+        nevm->connected_blocks.clear();
+        nevm->command_trace.clear();
+        nevm->status_available = false;
+        bool engine_ready{false};
+        std::size_t restarts{0};
+        std::size_t proposal_checks{0};
+        RestoreProposalHooks restore{chainstate, *nevm, nevm->wire_connect};
+        nevm->wire_connect = [&, wire = restore.wire](const CNEVMHeader& header,
+            const CBlock& block, const uint256& identity, std::string& error) {
+            if (identity.IsNull()) {
+                ++proposal_checks;
+                if (!engine_ready) {
+                    error = "nevm-connect-not-sent";
+                    return uint64_t{0};
+                }
+            }
+            return wire(header, block, identity, error);
+        };
+        node::test::NEVMRestartTestAccess::SetRestart(chainstate, [&] {
+            ++restarts;
+            BOOST_CHECK(!WITH_LOCK(::cs_main, return chainman.PrepareNEVMBlockProduction()));
+            BOOST_CHECK(nevm->connected_blocks.empty());
+            engine_ready = result == RestartResult::READY;
+            nevm->status_available = engine_ready;
+            return result != RestartResult::FAILED;
+        });
+        const auto status_queries{nevm->status_requests};
+        const auto flushes{nevm->flush_requests};
+        const auto queries{nevm->block_info_queries};
+        const std::string expected_error{result == RestartResult::READY
+            ? "nevm-connect-response-invalid-data" : "nevm-connect-not-sent"};
+        if (result == RestartResult::READY && retained == prefix.size()) {
+            // A successful zero-identity retry proves this proposal's payload,
+            // but cannot clear the selected-chain recovery obligation.
+            BOOST_CHECK(ProposalRPC(*proposal).isNull());
+        } else {
+            BOOST_CHECK_EXCEPTION(ProposalRPC(*proposal), UniValue, [&](const UniValue& error) {
+                return error["code"].getInt<int>() == RPC_VERIFY_ERROR &&
+                    error["message"].get_str() == expected_error;
+            });
+        }
+        BOOST_CHECK_EQUAL(restarts, 1U);
+        BOOST_CHECK_EQUAL(proposal_checks, result == RestartResult::FAILED ? 1U : 2U);
+        BOOST_CHECK_EQUAL(nevm->status_requests, status_queries + 1);
+        BOOST_CHECK_EQUAL(nevm->flush_requests, flushes);
+        BOOST_CHECK_EQUAL(nevm->block_info_queries, queries);
+        BOOST_CHECK(nevm->command_trace == std::vector<std::string>{"status"});
+        BOOST_CHECK(nevm->connected_blocks.empty());
+        BOOST_CHECK_EQUAL(nevm->applied_count, retained);
+        BOOST_CHECK(nevm->buffered_pairs.empty());
+        BOOST_CHECK(!ShutdownRequested());
+        CheckProposalMiningGate();
+        CheckProposalUnchanged(*proposal);
+
+        // A worker whose applied-pair query is still unavailable retains the
+        // obligation, including when the managed restart itself failed.
+        nevm->block_info_error = "nevm-blockinfo-unavailable";
+        RecoverPrefix(/*expected=*/false);
+        CheckProposalMiningGate();
+        CheckProposalUnchanged(*proposal);
+        engine_ready = true;
+        nevm->status_available = true;
+        nevm->block_info_error.clear();
+        nevm->command_trace.clear();
+        RecoverPrefix();
+        std::vector<std::string> expected{"flush", "blockinfo"};
+        std::vector<uint256> replayed;
+        for (std::size_t i{retained}; i < prefix.size(); ++i) {
+            replayed.push_back(prefix[i]->GetHash());
+            expected.push_back("connect:" + prefix[i]->GetHash().ToString());
+        }
+        if (retained < prefix.size()) expected.insert(expected.end(), {"flush", "blockinfo"});
+        BOOST_CHECK(nevm->command_trace == expected);
+        BOOST_CHECK(nevm->connected_blocks == replayed);
+        BOOST_CHECK_EQUAL(nevm->applied_count, prefix.size());
+        BOOST_CHECK(nevm->applied_hash == original_tip->GetBlockHash());
+        BOOST_CHECK(nevm->buffered_pairs.empty());
+        BOOST_CHECK(WITH_LOCK(::cs_main, return chainman.PrepareNEVMBlockProduction()));
+        BOOST_CHECK_EQUAL(restarts, 1U);
+        if (!cached_method.empty()) {
+            const auto templates{nevm->template_serial};
+            BOOST_CHECK_EQUAL(MiningRPC(cached_method).write(), cached.write());
+            BOOST_CHECK_EQUAL(nevm->template_serial, templates);
+        }
+        CheckTemplate(*MakeNEVMBlock());
+        for (const auto* method : {"getblocktemplate", "createauxblock"}) {
+            BOOST_CHECK_EQUAL(MiningRPC(method)["previousblockhash"].get_str(),
+                              original_tip->GetBlockHash().ToString());
+        }
+        BOOST_CHECK(ProposalRPC(*proposal).isNull());
+        CheckProposalUnchanged(*proposal);
+    }
+
+    void CheckHealthyProposal()
+    {
+        const auto proposal{UnindexedProposal()};
+        nevm->applied_count = 1;
+        nevm->applied_hash = prefix.front()->GetHash();
+        for (std::size_t i{1}; i < prefix.size(); ++i) {
+            nevm->buffered_pairs.push_back({i + 1, prefix[i]->GetHash()});
+        }
+        nevm->command_trace.clear();
+        const auto flushes{nevm->flush_requests};
+        const auto queries{nevm->block_info_queries};
+        const auto status_queries{nevm->status_requests};
+        BOOST_CHECK(ProposalRPC(*proposal).isNull());
+        RecoverPrefix();
+        BOOST_CHECK(WITH_LOCK(::cs_main, return m_node.chainman->PrepareNEVMBlockProduction()));
+        BOOST_CHECK(nevm->command_trace.empty());
+        BOOST_CHECK_EQUAL(nevm->applied_count, 1U);
+        BOOST_CHECK_EQUAL(nevm->buffered_pairs.size(), 2U);
+        CheckTemplate(*MakeNEVMBlock());
+        BOOST_CHECK_EQUAL(nevm->flush_requests, flushes + 1); // Normal template flush only.
+        BOOST_CHECK_EQUAL(nevm->block_info_queries, queries);
+        BOOST_CHECK_EQUAL(nevm->status_requests, status_queries);
+        CheckProposalUnchanged(*proposal);
+    }
+};
+
+struct ManagedProposalMiningNEVMPrefixSetup : ProposalMiningNEVMPrefixSetup {
+    ManagedProposalMiningNEVMPrefixSetup() : ProposalMiningNEVMPrefixSetup{/*managed_exit=*/true}
+    {
+        BOOST_REQUIRE(!ShutdownRequested());
+    }
+    ~ManagedProposalMiningNEVMPrefixSetup() { AbortShutdown(); }
+
+    void CheckManagedProposal()
+    {
+        auto& chainman{*m_node.chainman};
+        auto& chainstate{chainman.ActiveChainstate()};
+        BOOST_REQUIRE(chainman.GethCommandLine() == std::vector<std::string>{"--exitwhensynced"});
+        const auto proposal{UnindexedProposal()};
+        nevm->applied_count = 1;
+        nevm->applied_hash = prefix.front()->GetHash();
+        nevm->buffered_pairs.clear();
+        nevm->buffered_pair.reset();
+        nevm->command_trace.clear();
+        nevm->status_available = false;
+        RestoreProposalHooks restore{chainstate, *nevm, nevm->wire_connect};
+        std::size_t restarts{0};
+        node::test::NEVMRestartTestAccess::SetRestart(chainstate, [&] { ++restarts; return true; });
+        nevm->wire_connect = [](const CNEVMHeader&, const CBlock&, const uint256& identity,
+                                std::string& error) {
+            BOOST_CHECK(identity.IsNull());
+            error = "nevm-connect-not-sent";
+            return uint64_t{0};
+        };
+        BOOST_CHECK_EXCEPTION(ProposalRPC(*proposal), UniValue, [](const UniValue& error) {
+            return error["code"].getInt<int>() == RPC_VERIFY_ERROR &&
+                error["message"].get_str() == "nevm-connect-not-sent";
+        });
+        BOOST_CHECK(ShutdownRequested());
+        BOOST_CHECK_EQUAL(restarts, 0U);
+        BOOST_CHECK(nevm->command_trace.empty());
+        BOOST_CHECK(nevm->connected_blocks.empty());
+        BOOST_CHECK(WITH_LOCK(::cs_main, return chainman.PrepareNEVMBlockProduction()));
+        CheckProposalUnchanged(*proposal);
+    }
+};
+// SYSCOIN END: Proposal-triggered managed restart mining recovery.
 
 // SYSCOIN: Enter recovery through rollback preflight, with no failed forward
 // connection or pre-existing marker to arm the mining gate.
@@ -7037,6 +7307,64 @@ BOOST_FIXTURE_TEST_CASE(nevm_connect_managed_shutdown_preserves_block_candidate,
         }
     }
 }
+
+// SYSCOIN BEGIN: Proposal-triggered restart must gate fresh and cached work
+// until the scheduled worker verifies the current selected NEVM prefix.
+BOOST_FIXTURE_TEST_CASE(nevm_mining_proposal_restart_recovers_lost_buffer, ProposalMiningNEVMPrefixSetup)
+{
+    CheckProposalRestart(RestartResult::READY);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_mining_proposal_delayed_restart_recovers_lost_buffer, ProposalMiningNEVMPrefixSetup)
+{
+    CheckProposalRestart(RestartResult::DELAYED);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_mining_proposal_failed_restart_recovers_lost_buffer, ProposalMiningNEVMPrefixSetup)
+{
+    CheckProposalRestart(RestartResult::FAILED);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_mining_proposal_restart_gates_cached_gbt, ProposalMiningNEVMPrefixSetup)
+{
+    CheckProposalRestart(RestartResult::READY, "getblocktemplate");
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_mining_proposal_restart_gates_cached_auxblock, ProposalMiningNEVMPrefixSetup)
+{
+    CheckProposalRestart(RestartResult::READY, "createauxblock");
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_mining_proposal_delayed_restart_gates_cached_gbt, ProposalMiningNEVMPrefixSetup)
+{
+    CheckProposalRestart(RestartResult::DELAYED, "getblocktemplate");
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_mining_proposal_delayed_restart_gates_cached_auxblock, ProposalMiningNEVMPrefixSetup)
+{
+    CheckProposalRestart(RestartResult::DELAYED, "createauxblock");
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_mining_proposal_failed_restart_gates_cached_gbt, ProposalMiningNEVMPrefixSetup)
+{
+    CheckProposalRestart(RestartResult::FAILED, "getblocktemplate");
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_mining_proposal_failed_restart_gates_cached_auxblock, ProposalMiningNEVMPrefixSetup)
+{
+    CheckProposalRestart(RestartResult::FAILED, "createauxblock");
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_mining_proposal_healthy_buffer_has_no_recovery_probe, ProposalMiningNEVMPrefixSetup)
+{
+    CheckHealthyProposal();
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_mining_proposal_managed_exit_does_not_restart, ManagedProposalMiningNEVMPrefixSetup)
+{
+    CheckManagedProposal();
+}
+// SYSCOIN END: Proposal-triggered restart mining recovery regressions.
 
 BOOST_FIXTURE_TEST_CASE(nevm_mining_lost_prefix_blocks_fresh_work, MiningNEVMPrefixSetup)
 {
