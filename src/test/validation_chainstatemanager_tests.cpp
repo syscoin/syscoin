@@ -1411,14 +1411,15 @@ struct MiningNEVMPrefixSetup : CommittedNEVMContinuitySetup {
         return tableRPC.execute(request);
     }
 
-    void CheckCached(const std::string& method)
+    void CheckCached(const std::string& method, const std::function<void()>& lose_prefix = {})
     {
         const auto cached{MiningRPC(method)};
         BOOST_REQUIRE(cached.isObject());
         const auto requests{nevm->template_serial};
         BOOST_REQUIRE_EQUAL(MiningRPC(method).write(), cached.write());
         BOOST_REQUIRE_EQUAL(nevm->template_serial, requests);
-        LosePrefix();
+        if (lose_prefix) lose_prefix();
+        else LosePrefix();
         nevm->block_info_error = "nevm-blockinfo-unavailable";
         BOOST_CHECK_EXCEPTION(MiningRPC(method), UniValue, [](const UniValue& error) {
             return error["code"].getInt<int>() == RPC_CLIENT_IN_INITIAL_DOWNLOAD &&
@@ -1433,6 +1434,131 @@ struct MiningNEVMPrefixSetup : CommittedNEVMContinuitySetup {
         BOOST_CHECK_EQUAL(nevm->template_serial, requests);
         BOOST_CHECK_EQUAL(nevm->applied_count, prefix.size());
         BOOST_CHECK(nevm->applied_hash == original_tip->GetBlockHash());
+        CheckTemplate(*MakeNEVMBlock());
+        CheckUnchanged();
+    }
+};
+
+// SYSCOIN: Enter recovery through rollback preflight, with no failed forward
+// connection or pre-existing marker to arm the mining gate.
+struct RollbackMiningNEVMPrefixSetup : MiningNEVMPrefixSetup {
+    enum class Fault { FLUSH, STATUS, WRONG_BRANCH, BEHIND_INTERRUPTED };
+    std::vector<std::shared_ptr<const CBlock>> fork;
+    CBlockIndex* fork_tip{nullptr};
+
+    ~RollbackMiningNEVMPrefixSetup()
+    {
+        m_node.kernel->interrupt.reset();
+        nevm->flush_verdict = {};
+    }
+
+    void PrepareCompetingBranch()
+    {
+        auto& chainman{*m_node.chainman};
+        LOCK(::cs_main);
+        const CBlockIndex* parent{original_tip->pprev};
+        uint256 nevm_parent{EngineHash(2)};
+        // Two ordinary, coinbase-only blocks fork at the second NEVM block.
+        // PreciousBlock selects this higher-work branch over the active tip.
+        for (uint64_t number{3}; number <= 4; ++number) {
+            CBlock block{*candidate};
+            BOOST_REQUIRE_EQUAL(block.vtx.size(), 1U);
+            CMutableTransaction coinbase{*block.vtx.front()};
+            coinbase.vin.front().scriptSig = CScript{} << (parent->nHeight + 1) << OP_0;
+            block.vtx.front() = MakeTransactionRef(coinbase);
+            CNEVMBlock execution;
+            EncodeTemplate(execution, number, nevm_parent);
+            block.vchNEVMBlockData = execution.vchNEVMBlockData;
+            nevm_parent = execution.nBlockHash;
+            CDataStream extra{SER_NETWORK, PROTOCOL_VERSION};
+            extra << NEVM_MAGIC_BYTES << CNEVMHeader(std::move(execution));
+            const auto bytes{MakeUCharSpan(extra)};
+            block.hashPrevBlock = parent->GetBlockHash();
+            block.nTime = parent->nTime + 1;
+            node::RegenerateCommitments(block, chainman, {bytes.begin(), bytes.end()});
+            block.fChecked = false;
+            block.nNonce = 0;
+            while (!CheckProofOfWork(block.GetHash(), block.nBits, chainman.GetConsensus())) ++block.nNonce;
+            fork.push_back(std::make_shared<const CBlock>(std::move(block)));
+            BlockValidationState state;
+            BOOST_REQUIRE_MESSAGE(chainman.AcceptBlock(
+                fork.back(), state, &fork_tip, true, nullptr, nullptr, true), state.ToString());
+            BOOST_REQUIRE(fork_tip != nullptr);
+            parent = fork_tip;
+        }
+        BOOST_REQUIRE(fork_tip->nChainWork > original_tip->nChainWork);
+        BOOST_REQUIRE(chainman.ActiveChain().FindFork(fork_tip) == original_tip->pprev);
+    }
+
+    void FailPreflight(Fault fault)
+    {
+        PrepareCompetingBranch();
+        CheckUnchanged();
+        BOOST_REQUIRE(nevm->connected_blocks.empty());
+        nevm->applied_count = 1;
+        nevm->applied_hash = prefix.front()->GetHash();
+        nevm->buffered_pairs = {{2, prefix[1]->GetHash()}, {3, prefix[2]->GetHash()}};
+        nevm->buffered_pair = nevm->buffered_pairs.back();
+        nevm->flush_verdict = [this, fault]() -> std::optional<NEVMBlockReject> {
+            BOOST_REQUIRE_EQUAL(nevm->buffered_pairs.size(), 2U);
+            // An unclassified import error discards the acknowledged suffix.
+            // The remaining applied count/hash still names the first block.
+            nevm->buffered_pairs.clear();
+            nevm->buffered_pair.reset();
+            if (fault == Fault::BEHIND_INTERRUPTED) m_node.kernel->interrupt();
+            return std::nullopt;
+        };
+        nevm->flush_available = fault != Fault::FLUSH;
+        if (fault == Fault::STATUS) nevm->block_info_error = "nevm-blockinfo-unavailable";
+        if (fault == Fault::WRONG_BRANCH) {
+            nevm->reported_pair_override = StartupNEVMSubscriber::AppliedPair{1, uint256S("deadbeef")};
+        }
+        const auto flushes{nevm->flush_requests};
+        const auto queries{nevm->block_info_queries};
+        auto& chainstate{m_node.chainman->ActiveChainstate()};
+        BlockValidationState state;
+        if (fault == Fault::BEHIND_INTERRUPTED) {
+            // A valid behind pair does not reconcile the retained Core tip
+            // if interruption prevents the intended undo from starting.
+            BOOST_REQUIRE(!chainstate.InvalidateBlock(state, original_tip));
+            m_node.kernel->interrupt.reset();
+            BOOST_CHECK(state.IsValid());
+        } else {
+            BOOST_REQUIRE(!chainstate.PreciousBlock(state, fork_tip));
+            BOOST_CHECK(state.IsError());
+            const std::string reason{fault == Fault::FLUSH ? "nevm-reorg-status:nevm-flush-unavailable"
+                : fault == Fault::STATUS ? "nevm-reorg-status:nevm-blockinfo-unavailable"
+                                         : "nevm-reorg-applied-branch-mismatch"};
+            BOOST_CHECK_EQUAL(state.GetRejectReason(), reason);
+        }
+        nevm->flush_verdict = {};
+        nevm->flush_available = true;
+        nevm->block_info_error.clear();
+        nevm->reported_pair_override.reset();
+        BOOST_CHECK_EQUAL(nevm->flush_requests, flushes + 1);
+        BOOST_CHECK_EQUAL(nevm->block_info_queries, queries + (fault == Fault::FLUSH ? 0U : 1U));
+        BOOST_CHECK(nevm->connected_blocks.empty());
+        BOOST_CHECK(nevm->buffered_pairs.empty());
+        BOOST_CHECK(!nevm->buffered_pair);
+        BOOST_CHECK_EQUAL(nevm->applied_count, 1U);
+        BOOST_CHECK_EQUAL(m_node.exit_status.load(), EXIT_SUCCESS);
+        CheckUnchanged();
+        LOCK(::cs_main);
+        for (const auto& block : fork) {
+            const auto* index{m_node.chainman->m_blockman.LookupBlockIndex(block->GetHash())};
+            BOOST_REQUIRE(index != nullptr);
+            BOOST_CHECK_EQUAL(index->nStatus & BLOCK_FAILED_MASK, 0U);
+            BOOST_CHECK(!chainstate.CoinsTip().HaveCoin(COutPoint{block->vtx.front()->GetHash(), 0}));
+        }
+    }
+
+    void CheckFreshPreflight(Fault fault)
+    {
+        FailPreflight(fault);
+        nevm->block_info_error = "nevm-blockinfo-unavailable";
+        CheckRefused(m_node.chainman->ActiveChainstate());
+        CheckUnchanged();
+        nevm->block_info_error.clear();
         CheckTemplate(*MakeNEVMBlock());
         CheckUnchanged();
     }
@@ -6362,6 +6488,36 @@ BOOST_FIXTURE_TEST_CASE(nevm_mining_lost_prefix_blocks_cached_gbt, MiningNEVMPre
 BOOST_FIXTURE_TEST_CASE(nevm_mining_lost_prefix_blocks_cached_auxblock, MiningNEVMPrefixSetup)
 {
     CheckCached("createauxblock");
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_mining_rollback_preflight_flush_failure, RollbackMiningNEVMPrefixSetup)
+{
+    CheckFreshPreflight(Fault::FLUSH);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_mining_rollback_preflight_unavailable_status, RollbackMiningNEVMPrefixSetup)
+{
+    CheckFreshPreflight(Fault::STATUS);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_mining_rollback_preflight_wrong_branch, RollbackMiningNEVMPrefixSetup)
+{
+    CheckFreshPreflight(Fault::WRONG_BRANCH);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_mining_rollback_preflight_behind_endpoint_survives_interruption, RollbackMiningNEVMPrefixSetup)
+{
+    CheckFreshPreflight(Fault::BEHIND_INTERRUPTED);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_mining_rollback_preflight_cached_gbt, RollbackMiningNEVMPrefixSetup)
+{
+    CheckCached("getblocktemplate", [&] { FailPreflight(Fault::FLUSH); });
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_mining_rollback_preflight_cached_auxblock, RollbackMiningNEVMPrefixSetup)
+{
+    CheckCached("createauxblock", [&] { FailPreflight(Fault::FLUSH); });
 }
 
 BOOST_FIXTURE_TEST_CASE(nevm_mining_failed_retry_rechecks_applied_prefix, MiningNEVMPrefixSetup)

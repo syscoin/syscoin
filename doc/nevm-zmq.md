@@ -126,6 +126,11 @@ classifies a behind engine, including an empty one, so reopening Core does not
 bypass the gate. Healthy block connections and template requests add no recovery
 probe. A failed replay leaves mining unavailable and local coins, roots and mint
 markers unchanged; existing activation paths retain rejection reconciliation.
+Rollback preflight arms the same guard before flushing, since even a failed
+flush can discard the acknowledged buffer. An unavailable or inconsistent
+endpoint, or an interrupted transition from a verified behind endpoint, leaves
+the guard armed. The next mining request verifies the resulting active prefix;
+successful block extensions do not add a preflight or recovery probe.
 
 ## Delayed buffered rejection
 

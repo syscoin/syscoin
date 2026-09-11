@@ -6489,6 +6489,10 @@ bool Chainstate::PrepareNEVMDisconnectPrefix(
     // A buffered acknowledgement can be lost after an operational failure.
     // Before paired rollback, authenticate Geth's applied endpoint; only this
     // fresh proof authorizes locally undoing an unapplied Core suffix.
+    // The flush itself can discard that suffix even when preflight fails.
+    // Retain uncertainty across the transition until recovery verifies the
+    // resulting active tip, including a behind pair followed by interruption.
+    m_chainman.m_nevm_prefix_recovery_needed = true;
     uint64_t count{0};
     uint256 applied_hash;
     std::string error;
