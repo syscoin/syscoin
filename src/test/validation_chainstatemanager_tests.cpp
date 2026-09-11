@@ -2649,6 +2649,233 @@ struct NEVMMintReadErrorSetup : StartupNEVMRecoverySetup {
 };
 // SYSCOIN END: Mint database read errors must leave block candidates usable.
 
+// SYSCOIN BEGIN: PoDA storage failures must precede shared coins publication.
+class PoDAPublicationReadErrorDB final : public CNEVMDataDB {
+public:
+    using CNEVMDataDB::CNEVMDataDB;
+    std::optional<std::vector<uint8_t>> failed_key;
+    mutable std::size_t failures{0};
+    std::function<void()> before_failure;
+
+protected:
+    bool BlobExistsOnDisk(const std::vector<uint8_t>& key) const override
+    {
+        if (failed_key == key) {
+            ++failures;
+            if (before_failure) before_failure();
+            throw dbwrapper_error("injected PoDA blob read error");
+        }
+        return CNEVMDataDB::BlobExistsOnDisk(key);
+    }
+};
+
+struct NEVMMintPoDAPublicationSetup : NEVMMintReadErrorSetup {
+    enum class Mode { READ_ERROR, VALID, INVALID_MINT };
+    std::unique_ptr<CNEVMDataDB> previous_poda_db{std::move(pnevmdatadb)};
+
+    NEVMMintPoDAPublicationSetup() : NEVMMintReadErrorSetup{false}
+    {
+        pnevmdatadb = std::make_unique<PoDAPublicationReadErrorDB>(DBParams{
+            .path = m_args.GetDataDirNet() / "mint_poda_publication",
+            .cache_bytes = 1U << 20, .wipe_data = true});
+        nevm->strict_connect_order = true;
+    }
+
+    ~NEVMMintPoDAPublicationSetup()
+    {
+        pnevmdatadb = std::move(previous_poda_db);
+    }
+
+    void CheckPublication(Mode mode, bool reopen_before_retry = false)
+    {
+        auto& chainman{*m_node.chainman};
+        auto& chainstate{chainman.ActiveChainstate()};
+        auto& poda_db{static_cast<PoDAPublicationReadErrorDB&>(*pnevmdatadb)};
+        auto mint{MakeValidNEVMMintFixture(consensus, 102,
+            WitnessV0KeyHash{coinbaseKey.GetPubKey()}, uint256S("fd01"))};
+        nevm->template_block_hash = mint.mint.nBlockHash;
+        nevm->template_roots = NEVMTxRoot{mint.mint.nTxRoot, mint.mint.nReceiptRoot};
+        auto funding{CreateValidMempoolTransaction(m_coinbase_txns.front(), 0, 1,
+            coinbaseKey, CScript{} << OP_TRUE, 10 * COIN, /*submit=*/false)};
+        funding.vout.emplace_back(10 * COIN, CScript{} << OP_TRUE);
+        funding.vin.front().scriptSig.clear();
+        FillableSigningProvider provider;
+        provider.AddKey(coinbaseKey);
+        SignatureData signature;
+        BOOST_REQUIRE(SignSignature(provider, *m_coinbase_txns.front(), funding,
+                                    0, SIGHASH_ALL, signature));
+        const auto source{MakeMintBlock(funding)};
+        BOOST_REQUIRE(chainman.ProcessNewBlock(source, true, true, nullptr));
+        BOOST_REQUIRE(WITH_LOCK(::cs_main,
+            return chainman.ActiveTip()->GetBlockHash()) == source->GetHash());
+        nevm->template_block_hash.reset();
+        nevm->template_roots.reset();
+        SetMockTime(GetTime() + 1);
+        const COutPoint mint_funding{funding.GetHash(), 0};
+        const COutPoint poda_funding{funding.GetHash(), 1};
+        mint.tx.vin.emplace_back(mint_funding);
+
+        const std::vector<uint8_t> bytes{'p', 'o', 'd', 'a'};
+        CNEVMData payload;
+        payload.vchVersionHash = dev::sha3(bytes).asBytes();
+        std::vector<unsigned char> commitment;
+        payload.SerializeData(commitment);
+        CMutableTransaction poda;
+        poda.nVersion = SYSCOIN_TX_VERSION_NEVM_DATA_SHA3;
+        poda.vin.emplace_back(poda_funding);
+        poda.vout.emplace_back(0, CScript{} << OP_RETURN << commitment);
+        poda.vout.back().vchNEVMData = bytes;
+        poda.vout.emplace_back(9 * COIN, CScript{} << OP_TRUE);
+        const auto valid_candidate{MakeMintBlock(mint.tx, MakeTransactionRef(poda))};
+        {
+            LOCK(::cs_main);
+            BlockValidationState valid;
+            BOOST_REQUIRE_MESSAGE(TestBlockValidity(valid, chainman.GetParams(),
+                chainstate, *valid_candidate, chainman.ActiveTip(),
+                chainman.m_options.adjusted_time_callback), valid.ToString());
+        }
+        if (mode == Mode::INVALID_MINT) {
+            BOOST_REQUIRE(!mint.mint.vchReceiptParentNodes.empty());
+            mint.mint.vchReceiptParentNodes.back() ^= 1;
+            std::vector<unsigned char> invalid_payload;
+            mint.mint.SerializeData(invalid_payload);
+            mint.tx.vout.back().scriptPubKey = CScript{} << OP_RETURN << invalid_payload;
+            mint.tx.LoadAssets();
+        }
+        const auto candidate{mode == Mode::INVALID_MINT
+            ? MakeMintBlock(mint.tx, MakeTransactionRef(poda)) : valid_candidate};
+        const COutPoint minted{mint.tx.GetHash(), 0};
+        const COutPoint coinbase{candidate->vtx.front()->GetHash(), 0};
+        CNEVMHeader candidate_header;
+        BlockValidationState header_state;
+        BOOST_REQUIRE(GetNEVMData(header_state, *candidate, candidate_header));
+        BOOST_REQUIRE(candidate_header.nBlockHash != mint.mint.nBlockHash);
+        CBlockIndex* index{nullptr};
+        {
+            LOCK(::cs_main);
+            BlockValidationState accepted;
+            BOOST_REQUIRE_MESSAGE(chainman.AcceptBlock(candidate, accepted, &index,
+                true, nullptr, nullptr, true), accepted.ToString());
+            BOOST_REQUIRE(index);
+            // Earlier admission has already stored this valid nonempty blob.
+            BOOST_REQUIRE(pnevmdatablobdb->Exists(payload.vchVersionHash));
+            BOOST_REQUIRE(pnevmdatadb->BlobExists(payload.vchVersionHash));
+            BlockValidationState flushed;
+            BOOST_REQUIRE_MESSAGE(chainstate.FlushStateToDisk(
+                flushed, FlushStateMode::ALWAYS), flushed.ToString());
+            BOOST_REQUIRE(chainstate.CoinsDB().GetBestBlock() == source->GetHash());
+            BOOST_REQUIRE(!pnevmtxmintdb->ExistsTx(mint.mint.nTxHash));
+        }
+
+        if (mode == Mode::READ_ERROR) {
+            poda_db.failed_key = payload.vchVersionHash;
+            poda_db.before_failure = [&]() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+                BOOST_CHECK(chainman.ActiveTip()->GetBlockHash() == source->GetHash());
+                BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == source->GetHash());
+                BOOST_CHECK(!pnevmtxmintdb->ExistsTx(mint.mint.nTxHash));
+            };
+        }
+        const auto connects_before{nevm->connected_blocks.size()};
+        BlockValidationState connected;
+        BOOST_CHECK_EQUAL(chainstate.ActivateBestChain(connected, candidate),
+                          mode != Mode::READ_ERROR);
+        BOOST_CHECK_EQUAL(connected.IsError(), mode == Mode::READ_ERROR);
+        BOOST_CHECK_EQUAL(m_node.exit_status.load(),
+                          mode == Mode::READ_ERROR ? EXIT_FAILURE : EXIT_SUCCESS);
+        BOOST_CHECK_EQUAL(poda_db.failures, mode == Mode::READ_ERROR ? 1U : 0U);
+        if (mode == Mode::READ_ERROR) {
+            BOOST_CHECK(!connected.IsInvalid());
+            BOOST_CHECK(connected.ToString().find("injected PoDA blob read error") != std::string::npos);
+        }
+        poda_db.failed_key.reset();
+        poda_db.before_failure = {};
+
+        BOOST_CHECK_EQUAL(nevm->connected_blocks.size(), connects_before +
+                          (mode == Mode::INVALID_MINT ? 0U : 1U));
+        const auto check_coins = [&](const CCoinsView& coins, bool applied) {
+            BOOST_CHECK(coins.GetBestBlock() == (applied ? candidate->GetHash() : source->GetHash()));
+            BOOST_CHECK_EQUAL(coins.HaveCoin(minted), applied);
+            BOOST_CHECK_EQUAL(coins.HaveCoin(coinbase), applied);
+            BOOST_CHECK_EQUAL(coins.HaveCoin(mint_funding), !applied);
+            BOOST_CHECK_EQUAL(coins.HaveCoin(poda_funding), !applied);
+        };
+        const auto check_bridge = [&](bool applied) {
+            NEVMTxRoot roots;
+            BOOST_REQUIRE(pnevmtxrootsdb->ReadTxRoots(mint.mint.nBlockHash, roots));
+            BOOST_CHECK(roots.nTxRoot == mint.mint.nTxRoot);
+            BOOST_CHECK(roots.nReceiptRoot == mint.mint.nReceiptRoot);
+            BOOST_CHECK_EQUAL(pnevmtxmintdb->ExistsTx(mint.mint.nTxHash), applied);
+            BOOST_CHECK_EQUAL(pnevmtxrootsdb->ReadTxRoots(candidate_header.nBlockHash, roots), applied);
+            BOOST_CHECK(!pnevmtxrootsdb->GetPendingDisconnect());
+        };
+        const auto flush = [&](bool applied) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+            BlockValidationState flushed;
+            BOOST_REQUIRE_MESSAGE(chainstate.FlushStateToDisk(flushed, FlushStateMode::ALWAYS),
+                                  flushed.ToString());
+            check_coins(chainstate.CoinsDB(), applied);
+            BOOST_CHECK_EQUAL(pnevmtxmintdb->Exists(mint.mint.nTxHash), applied);
+            NEVMTxRoot roots;
+            BOOST_CHECK_EQUAL(pnevmtxrootsdb->Read(candidate_header.nBlockHash, roots), applied);
+            BOOST_CHECK(pnevmtxrootsdb->GetPublishedTip() ==
+                        (applied ? candidate->GetHash() : source->GetHash()));
+        };
+        const auto reopen = [&](bool applied) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+            const auto roots_path{*pnevmtxrootsdb->StoragePath()};
+            const auto mints_path{*pnevmtxmintdb->StoragePath()};
+            chainstate.ResetCoinsViews();
+            chainstate.InitCoinsDB(1U << 20, false, false);
+            pnevmtxrootsdb.reset();
+            pnevmtxmintdb.reset();
+            pnevmtxrootsdb = std::make_unique<CNEVMTxRootsDB>(DBParams{
+                .path = roots_path, .cache_bytes = 1U << 20});
+            pnevmtxmintdb = std::make_unique<CNEVMMintedTxDB>(DBParams{
+                .path = mints_path, .cache_bytes = 1U << 20});
+            // Inspect raw databases before replay can conceal an incorrect BEST.
+            check_coins(chainstate.CoinsDB(), applied);
+            BOOST_CHECK(chainstate.CoinsDB().GetHeadBlocks().empty());
+            BOOST_CHECK_EQUAL(pnevmtxmintdb->Exists(mint.mint.nTxHash), applied);
+            NEVMTxRoot roots;
+            BOOST_CHECK_EQUAL(pnevmtxrootsdb->Read(candidate_header.nBlockHash, roots), applied);
+            BOOST_CHECK(pnevmtxrootsdb->GetPublishedTip() ==
+                        (applied ? candidate->GetHash() : source->GetHash()));
+            BOOST_REQUIRE(chainstate.ReplayBlocks());
+            check_bridge(applied);
+            chainstate.InitCoinsCache(1U << 23);
+            BOOST_REQUIRE(chainstate.LoadChainTip());
+        };
+        {
+            LOCK(::cs_main);
+            BOOST_CHECK_EQUAL(index->nStatus & BLOCK_FAILED_MASK,
+                              mode == Mode::INVALID_MINT ? BLOCK_FAILED_VALID : 0U);
+            const bool applied{mode == Mode::VALID};
+            BOOST_CHECK(chainman.ActiveTip()->GetBlockHash() ==
+                        (applied ? candidate->GetHash() : source->GetHash()));
+            check_coins(chainstate.CoinsTip(), applied);
+            check_bridge(applied);
+            flush(applied);
+            if (mode != Mode::READ_ERROR || reopen_before_retry) reopen(applied);
+            if (mode == Mode::READ_ERROR) {
+                BOOST_REQUIRE_EQUAL(chainstate.setBlockIndexCandidates.count(index), 1U);
+            }
+        }
+        if (mode == Mode::READ_ERROR) {
+            // Retry the same indexed block. The engine has already accepted
+            // its exact pair; strict ordering permits that idempotent retry.
+            m_node.exit_status.store(EXIT_SUCCESS);
+            BlockValidationState retried;
+            BOOST_REQUIRE_MESSAGE(chainstate.ActivateBestChain(retried, candidate), retried.ToString());
+            LOCK(::cs_main);
+            BOOST_CHECK(chainman.ActiveTip() == index);
+            BOOST_CHECK_EQUAL(index->nStatus & BLOCK_FAILED_MASK, 0U);
+            check_coins(chainstate.CoinsTip(), true);
+            check_bridge(true);
+            flush(true);
+            reopen(true);
+        }
+    }
+};
+// SYSCOIN END: PoDA storage failures must precede shared coins publication.
+
 // SYSCOIN BEGIN: Rejecting an imported A-1 pin must discard all staged coins.
 struct NEVMMintHandoffSetup : NEVMMintReadErrorSetup {
     enum class ImportedPin { MISMATCH, MATCH, ABSENT };
@@ -6444,6 +6671,26 @@ BOOST_FIXTURE_TEST_CASE(nevm_mint_cleanup_preserves_reincluded_spent_mint, NEVMM
 BOOST_FIXTURE_TEST_CASE(nevm_mint_cleanup_requires_replacement_body, NEVMMintCleanupSetup)
 {
     CheckCleanup(Cut::BEFORE_ERASE, Damage::MISSING_REPLACEMENT, /*reincluded=*/true);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_mint_poda_read_error_retries, NEVMMintPoDAPublicationSetup)
+{
+    CheckPublication(Mode::READ_ERROR);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_mint_poda_read_error_reopens_before_retry, NEVMMintPoDAPublicationSetup)
+{
+    CheckPublication(Mode::READ_ERROR, /*reopen_before_retry=*/true);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_mint_poda_healthy_publication, NEVMMintPoDAPublicationSetup)
+{
+    CheckPublication(Mode::VALID);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_mint_poda_rejects_invalid_mint, NEVMMintPoDAPublicationSetup)
+{
+    CheckPublication(Mode::INVALID_MINT);
 }
 
 BOOST_FIXTURE_TEST_CASE(nevm_mint_a1_handoff_mismatch_preserves_parent_publication,

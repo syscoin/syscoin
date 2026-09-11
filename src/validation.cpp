@@ -6808,6 +6808,17 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
             }
         }
         // SYSCOIN END: Consume only an already-imported A-1 handoff.
+        // SYSCOIN: PoDA staging performs fallible database I/O. Keep coins
+        // and mint/root reservations local until it succeeds, so shutdown
+        // cannot flush candidate coins without their consumed-proof markers.
+        try {
+            if (pnevmdatadb) {
+                pnevmdatadb->FlushDataToCache(connection.poda, PoDAFlushSource::Block);
+            }
+        } catch (const dbwrapper_error& e) {
+            return FatalError(m_chainman.GetNotifications(), state,
+                              std::string{"ConnectTip(): Failed to stage PoDA: "} + e.what());
+        }
         bool flushed = connection.view->Flush();
         assert(flushed);
         connection.view.reset();
@@ -6815,8 +6826,6 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
     const CBlock& blockConnecting = *pthisBlock;
     // SYSCOIN: Stage mint markers in cache; they become durable on the next full
     // UTXO flush (write-ahead of CoinsTip) or on mint-containing disconnect/replay.
-    if(pnevmdatadb)
-        pnevmdatadb->FlushDataToCache(connection.poda, PoDAFlushSource::Block);
     if(pnevmtxmintdb)
         pnevmtxmintdb->FlushDataToCache(connection.mint_txs);
     if(pblockindexdb)

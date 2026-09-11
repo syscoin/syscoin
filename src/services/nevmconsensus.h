@@ -49,8 +49,12 @@ private:
     // blobs. It survives metadata flushes, but reopened/legacy rows are retained.
     std::map<std::vector<uint8_t>, uint256> m_mempool_owners GUARDED_BY(cs_cache);
     bool PruneToBatch(CDBBatch& batch, CDBBatch& batchblob, int64_t nMedianTime, NEVMDataVec& pruned_keys) EXCLUSIVE_LOCKS_REQUIRED(cs_cache);
+protected:
+    // SYSCOIN: Blob reads can fail even when metadata is already cached.
+    virtual bool BlobExistsOnDisk(const std::vector<uint8_t>& key) const;
 public:
     using CDBWrapper::CDBWrapper;
+    virtual ~CNEVMDataDB() = default;
     bool FlushErase(const NEVMDataVec &vecDataKeys) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
     bool FlushMempoolErase(const std::vector<uint8_t>& vchVersionHash, const uint256& txid) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
     void ReleaseMempoolOwner(const std::vector<uint8_t>& version_hash, const uint256& txid) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);

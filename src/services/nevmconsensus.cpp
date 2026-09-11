@@ -46,6 +46,11 @@ bool DisconnectSyscoinTransaction(const CTransaction& tx, NEVMMintTxSet &setMint
     return true;       
 }
 
+bool CNEVMDataDB::BlobExistsOnDisk(const std::vector<uint8_t>& key) const
+{
+    return pnevmdatablobdb->Exists(key);
+}
+
 void CNEVMDataDB::FlushDataToCache(const PoDAMAPMemory& mapPoDA, PoDAFlushSource source)
 {
     LOCK(cs_cache);
@@ -72,7 +77,7 @@ void CNEVMDataDB::FlushDataToCache(const PoDAMAPMemory& mapPoDA, PoDAFlushSource
         if (!have_metadata && !have_payload) continue;
         if (have_metadata && have_payload && meta.nSize != val.nSize) continue;
 
-        const bool have_blob = have_payload && pnevmdatablobdb->Exists(key);
+        const bool have_blob = have_payload && BlobExistsOnDisk(key);
         if (have_payload && !have_blob) {
             batchblob.Write(key, val.vchNEVMData);
         }
