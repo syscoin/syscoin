@@ -145,6 +145,10 @@ namespace test {
 class PQHistoryReauthenticationTestAccess;
 }
 }
+// SYSCOIN: Inject only process restart in NEVM recovery regression tests.
+namespace node::test {
+class NEVMRestartTestAccess;
+}
 
 /** Recognition of a previously authenticated dependency being revoked. */
 class PQHistoryReauthentication final {
@@ -643,6 +647,10 @@ enum class CoinsCacheSizeState
  */
 class Chainstate
 {
+    friend class node::test::NEVMRestartTestAccess;
+    // SYSCOIN: Leave connection, recovery and networking control under test.
+    std::function<bool()> m_restart_geth_for_testing;
+
 protected:
     /**
      * The ChainState Mutex

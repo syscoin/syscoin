@@ -164,6 +164,17 @@ public:
 };
 } // namespace llmq::test
 
+// SYSCOIN: Substitute process management without bypassing NEVM recovery.
+namespace node::test {
+class NEVMRestartTestAccess {
+public:
+    static void SetRestart(Chainstate& chainstate, std::function<bool()> restart)
+    {
+        chainstate.m_restart_geth_for_testing = std::move(restart);
+    }
+};
+} // namespace node::test
+
 namespace {
 struct DeferredNEVMReplaySetup : TestChain100Setup {
     explicit DeferredNEVMReplaySetup(bool coins_db_in_memory = true,
@@ -201,6 +212,8 @@ struct StartupNEVMSubscriber final : CValidationInterface {
     std::size_t flush_requests{0};
     bool status_available{true};
     std::size_t status_requests{0};
+    std::size_t network_start_requests{0};
+    std::function<bool()> network_start_response;
     std::string block_info_error;
     std::string connect_error;
     std::function<std::string(const uint256&, uint32_t)> connect_response;
@@ -324,6 +337,12 @@ struct StartupNEVMSubscriber final : CValidationInterface {
         std::optional<NEVMBlockReject>* rejection = nullptr) override
     {
         if (rejection) rejection->reset();
+        if (command == "startnetwork") {
+            command_trace.push_back(command);
+            ++network_start_requests;
+            if (network_start_response) response = network_start_response();
+            return;
+        }
         if (command == "status") {
             command_trace.push_back(command);
             ++status_requests;
@@ -893,6 +912,129 @@ struct LiveNEVMRecoverySetup : StartupNEVMRecoverySetup {
         }
         expected.push_back("connect:" + candidate->GetHash().ToString());
         BOOST_CHECK(nevm->command_trace == expected);
+    }
+};
+
+// SYSCOIN: A failed networking-control acknowledgement must not discard a
+// recovered connection or strand its external pair ahead of Core.
+struct RestartNEVMNetworkSetup : LiveNEVMRecoverySetup {
+    void CheckNetworkFailure(bool buffered)
+    {
+        auto& chainman{*m_node.chainman};
+        auto& chainstate{chainman.ActiveChainstate()};
+        struct RestoreRestart {
+            Chainstate& chainstate;
+            const bool regtest{fRegTest};
+            ~RestoreRestart()
+            {
+                fRegTest = regtest;
+                node::test::NEVMRestartTestAccess::SetRestart(chainstate, {});
+            }
+        } restore{chainstate};
+        nevm->strict_disconnect_order = true;
+        PrepareLostPrefix(0);
+        const auto sibling{MakeNEVMBlock()};
+        // Build a higher-work competing branch before connecting C. These
+        // pre-DIP3 templates contain only the height-bound coinbase.
+        CBlock child{*MakeNEVMBlock()};
+        BOOST_REQUIRE_EQUAL(child.vtx.size(), 1U);
+        BOOST_REQUIRE_LT(original_tip->nHeight + 2, chainman.GetConsensus().DIP0003Height);
+        CMutableTransaction coinbase{*child.vtx.front()};
+        coinbase.vin.front().scriptSig = CScript{} << (original_tip->nHeight + 2) << OP_0;
+        child.vtx.front() = MakeTransactionRef(std::move(coinbase));
+        child.hashPrevBlock = sibling->GetHash();
+        child.hashMerkleRoot = BlockMerkleRoot(child);
+        child.fChecked = false;
+        child.nNonce = 0;
+        while (!CheckProofOfWork(child.GetHash(), child.nBits, chainman.GetConsensus())) ++child.nNonce;
+        const auto sibling_tip{std::make_shared<const CBlock>(std::move(child))};
+        SyncWithValidationInterfaceQueue();
+        chainman.m_cached_finished_ibd.store(true);
+        chainman.m_nevm_network_start_sent.store(true);
+        BOOST_REQUIRE(!chainman.HasPendingNEVMStartupPair());
+        BOOST_REQUIRE(!chainman.HasPendingNEVMPayloadRepair());
+        BOOST_REQUIRE(!llmq::chainLocksHandler->HasNEVMReplayObligation());
+        std::size_t restarts{0};
+        node::test::NEVMRestartTestAccess::SetRestart(chainstate, [&] {
+            ++restarts;
+            chainman.ResetNEVMNetworkStart();
+            return true;
+        });
+        nevm->status_available = false;
+        nevm->connect_response = [&](const uint256& hash, uint32_t) {
+            if (hash != candidate->GetHash()) return std::string{};
+            BOOST_REQUIRE_LE(++candidate_attempts, 2U);
+            if (candidate_attempts == 1) return std::string{"nevm-connect-not-sent"};
+            BOOST_CHECK(nevm->applied_hash == original_tip->GetBlockHash());
+            BOOST_CHECK(nevm->buffered_pairs.empty());
+            nevm->buffer_connects = buffered;
+            // Native validation uses regtest consensus. Exercise the real
+            // non-regtest networking guards only after it has succeeded.
+            fRegTest = false;
+            return std::string{};
+        };
+        nevm->network_start_response = [&] {
+            BOOST_CHECK(!fRegTest);
+            fRegTest = true;
+            return false;
+        };
+        BlockValidationState state;
+        BOOST_REQUIRE_MESSAGE(chainstate.ActivateBestChain(state, candidate), state.ToString());
+        BOOST_CHECK(state.IsValid());
+        CheckLocalState(/*connected=*/true);
+        BOOST_CHECK_EQUAL(restarts, 1U);
+        BOOST_CHECK_EQUAL(candidate_attempts, 2U);
+        BOOST_CHECK_EQUAL(nevm->network_start_requests, 1U);
+        BOOST_CHECK(!chainman.m_nevm_network_start_sent.load());
+        BOOST_CHECK_EQUAL(nevm->applied_count, prefix.size() + (buffered ? 0U : 1U));
+        BOOST_CHECK_EQUAL(nevm->buffered_pairs.size(), buffered ? 1U : 0U);
+
+        // The existing readiness scheduler calls this same helper. A failed
+        // request retries, and a successful acknowledgement latches once.
+        const auto connects{nevm->connected_blocks.size()};
+        const auto flushes{nevm->flush_requests};
+        nevm->network_start_response = [&] { fRegTest = true; return true; };
+        fRegTest = false;
+        BOOST_REQUIRE(chainman.MaybeStartNEVMNetwork());
+        BOOST_CHECK(chainman.m_nevm_network_start_sent.load());
+        fRegTest = false;
+        BOOST_REQUIRE(chainman.MaybeStartNEVMNetwork());
+        fRegTest = true;
+        BOOST_CHECK_EQUAL(nevm->network_start_requests, 2U);
+        BOOST_CHECK_EQUAL(nevm->connected_blocks.size(), connects);
+        BOOST_CHECK_EQUAL(nevm->flush_requests, flushes);
+
+        nevm->connect_response = {};
+        nevm->buffer_connects = false;
+        for (const auto& block : {sibling, sibling_tip}) {
+            LOCK(::cs_main);
+            BlockValidationState accept_state;
+            BOOST_REQUIRE_MESSAGE(chainman.AcceptBlock(
+                block, accept_state, nullptr, true, nullptr, nullptr, true), accept_state.ToString());
+        }
+        BlockValidationState reorg_state;
+        BOOST_REQUIRE_MESSAGE(chainstate.ActivateBestChain(reorg_state), reorg_state.ToString());
+        BOOST_CHECK(reorg_state.IsValid());
+        BOOST_CHECK(nevm->disconnected_blocks == std::vector<uint256>{candidate->GetHash()});
+        BOOST_CHECK(nevm->applied_hash == sibling_tip->GetHash());
+        BOOST_CHECK(nevm->buffered_pairs.empty());
+        LOCK(::cs_main);
+        BOOST_CHECK(chainman.ActiveTip()->GetBlockHash() == sibling_tip->GetHash());
+        BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == sibling_tip->GetHash());
+        for (const auto& block : {candidate, sibling, sibling_tip}) {
+            const bool connected{block != candidate};
+            const auto* index{chainman.m_blockman.LookupBlockIndex(block->GetHash())};
+            BOOST_REQUIRE(index != nullptr);
+            BOOST_CHECK_EQUAL(index->nStatus & BLOCK_FAILED_MASK, 0U);
+            BOOST_CHECK_EQUAL(chainstate.CoinsTip().HaveCoin(
+                COutPoint{block->vtx.front()->GetHash(), 0}), connected);
+            CNEVMHeader header;
+            BlockValidationState header_state;
+            BOOST_REQUIRE(GetNEVMData(header_state, *block, header));
+            NEVMTxRoot roots;
+            BOOST_CHECK_EQUAL(pnevmtxrootsdb->ReadTxRoots(header.nBlockHash, roots), connected);
+        }
+        BOOST_CHECK(!pnevmtxrootsdb->GetPendingDisconnect());
     }
 };
 
@@ -5426,6 +5568,18 @@ BOOST_FIXTURE_TEST_CASE(nevm_connect_live_recovers_zero_applied_prefix,
     // A live status response avoids launching a child process while exercising
     // the same recovery path used after a successful managed restart.
     CheckLostPrefix(0, "nevm-connect-not-sent");
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_connect_restart_network_failure_preserves_applied_pair,
+                        RestartNEVMNetworkSetup)
+{
+    CheckNetworkFailure(/*buffered=*/false);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_connect_restart_network_failure_preserves_buffered_pair,
+                        RestartNEVMNetworkSetup)
+{
+    CheckNetworkFailure(/*buffered=*/true);
 }
 
 BOOST_FIXTURE_TEST_CASE(nevm_connect_live_commits_each_recovery_batch,

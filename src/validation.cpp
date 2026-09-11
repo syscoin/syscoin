@@ -3857,7 +3857,8 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
             bool bResponse = false;
             GetMainSignals().NotifyNEVMComms("status", bResponse);
             if(!bResponse) {
-                restarted = RestartGethNode();
+                restarted = m_restart_geth_for_testing
+                    ? m_restart_geth_for_testing() : RestartGethNode();
             }
         }
         bool retry_current{restarted};
@@ -3933,7 +3934,10 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
             return state.Error(stateStr);
         }
         if (restarted && !m_chainman.MaybeStartNEVMNetwork()) {
-            return state.Error("nevm-restart-network-unavailable");
+            // SYSCOIN: Geth already accepted this pair. Publish the successful
+            // connection even if networking startup needs a later retry; the
+            // helper leaves its latch unset for the readiness scheduler.
+            LogPrintf("%s: NEVM networking start unavailable after restart; will retry\n", __func__);
         }
     }
     const bool res = state.IsValid();
