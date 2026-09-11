@@ -622,6 +622,100 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
             self._block_info_available = True
             self._expected_connect_syshashes = None
 
+    def _check_applied_pending_child_scheduler(self):
+        node = self.nodes[0]
+        assert_equal(node.getconnectioncount(), 0)
+        core_pid = node.process.pid
+        block = self._build_block(node)
+        # Give this later-invalidated fixture its own identity even when the
+        # next case reuses the cached template for the same parent.
+        block.nNonce += 1 << 17
+        block.solve()
+        raw = self._serialize_nevm_block(block, self._last_nevm_block_data).hex()
+        previous_tip = node.getbestblockhash()
+        previous_coinbase = node.getblock(previous_tip)["tx"][0]
+        previous_coin = node.gettxout(previous_coinbase, 0)
+        applied = self._applied_syshashes[:]
+        connect_len = len(self._connect_syshashes)
+        disconnect_len = len(self._disconnect_syshashes)
+        event_len = len(self._nevm_events)
+
+        def apply_without_acknowledgement(request):
+            if request.sysblockhash != block.sha256:
+                return b"error:mock-unexpected-connect"
+            if self._applied_syshashes == applied:
+                self._applied_syshashes.append(block.sha256)
+            # Apply the request, but make its acknowledgement unusable. The
+            # subsequent unavailable status prevents the bounded live recovery
+            # from proving that the child has already reached the engine.
+            return b"error:mock-lost-ack"
+
+        self._connect_response = apply_without_acknowledgement
+        self._expected_connect_syshashes = applied + [block.sha256]
+        self._block_info_available = False
+        try:
+            assert_raises_rpc_error(-25, "nevm-response-unserialize", node.submitblock, raw)
+            assert_equal(node.getbestblockhash(), previous_tip)
+            assert_equal(node.gettxout(previous_coinbase, 0), previous_coin)
+            assert_equal(node.gettxout(block.vtx[0].hash, 0), None)
+            assert_equal(node.getblock(block.hash, 0), raw)
+            branch = next(tip for tip in node.getchaintips() if tip["hash"] == block.hash)
+            assert branch["status"] != "invalid"
+            assert_equal(self._applied_syshashes, applied + [block.sha256])
+            assert_equal(self._nonzero_connects_since(connect_len), [block.sha256])
+            assert_raises_rpc_error(
+                -10, "execution recovery", node.getblocktemplate, {"rules": ["segwit"]},
+            )
+
+            # Restore replies without submitting any block or requesting a
+            # template. Only the private scheduler can finish Core's retained
+            # pending child and reopen mining against the engine's exact pair.
+            self._connect_response = b"connected"
+            self._block_info_available = True
+            self.wait_until(lambda: node.getbestblockhash() == block.hash)
+            assert_equal(node.process.pid, core_pid)
+            assert_equal(node.process.poll(), None)
+            assert_equal(node.getblock(block.hash, 0), raw)
+            assert_equal(node.gettxout(previous_coinbase, 0), {
+                **previous_coin,
+                "bestblock": block.hash,
+                "confirmations": previous_coin["confirmations"] + 1,
+            })
+            assert node.gettxout(block.vtx[0].hash, 0) is not None
+            assert_equal(self._applied_syshashes, applied + [block.sha256])
+
+            # A later scheduler pass verifies the newly active prefix before
+            # mining reopens. These template retries only observe readiness.
+            templates = []
+
+            def ready():
+                try:
+                    templates.append(node.getblocktemplate({"rules": ["segwit"]}))
+                    return True
+                except JSONRPCException as error:
+                    if error.error["code"] == -10 and "execution recovery" in error.error["message"]:
+                        return False
+                    raise
+
+            self.wait_until(ready)
+            assert_equal(templates[0]["previousblockhash"], block.hash)
+            assert_equal(self._nonzero_connects_since(connect_len), [block.sha256, block.sha256])
+            assert_equal(self._disconnect_syshashes[disconnect_len:], [])
+            events = self._nevm_events[event_len:]
+            statuses = [event for event in events if event[0] == "blockinfo"]
+            assert len(statuses) >= 2
+            assert_equal(statuses[-1], ("blockinfo", len(applied) + 1, block.sha256))
+
+            # Administrative cleanup keeps subsequent response cases below
+            # the first superblock after scheduler completion is established.
+            node.invalidateblock(block.hash)
+            assert_equal(node.getbestblockhash(), previous_tip)
+            assert_equal(self._applied_syshashes, applied)
+        finally:
+            self._connect_response = b"connected"
+            self._block_info_available = True
+            self._expected_connect_syshashes = None
+
     def _check_connect_responses(self, responses, *, protocol_response=b"connect-v1", consensus_invalid=False, connects_per_attempt=None):
         node = self.nodes[0]
         block = self._build_block(node)
@@ -715,6 +809,9 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
 
             self.log.info("Mining recovery runs without peers, new blocks, or a mining request")
             self._check_mining_prefix_scheduler()
+
+            self.log.info("Scheduled recovery finishes an already-applied child after its acknowledgement fails")
+            self._check_applied_pending_child_scheduler()
 
             self.log.info("A requested full block repairs only the engine-approved NEVM payload")
             self._check_payload_repair_from_requested_peer()

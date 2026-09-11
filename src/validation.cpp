@@ -3258,6 +3258,9 @@ bool ChainstateManager::MaybeRecoverNEVMBlockProduction(std::string& error)
         if (!recovery_pending()) return true;
         chainstate = &ActiveChainstate();
     }
+    // SYSCOIN: A lost acknowledgement may leave this exact child applied in
+    // Geth but unpublished in Core. Never infer that authority from height.
+    const CBlockIndex* pending_connect{nullptr};
     {
         // Invalidation retains its applied-prefix snapshot across cs_main
         // releases. Exclude the entire operation before replay can move Geth.
@@ -3268,19 +3271,36 @@ bool ChainstateManager::MaybeRecoverNEVMBlockProduction(std::string& error)
             if (chainstate != &ActiveChainstate() || !recovery_pending()) return true;
             const CBlockIndex* tip{ActiveTip()};
             if (tip == nullptr) return true;
-            if (chainstate->RecoverNEVMPrefixThrough(*tip, nullptr, error, rejection)) return true;
-            if (!rejection) return false;
+            // SYSCOIN BEGIN: Preserve the known attempted child across ticks.
+            CBlockIndex* pending{chainstate->NEVMPendingConnectCandidate()};
+            if (chainstate->RecoverNEVMPrefixThrough(*tip, pending, error, rejection)) {
+                if (!m_nevm_prefix_recovery_needed) {
+                    chainstate->m_nevm_pending_connect.reset();
+                    return true;
+                }
+                // Only the exact already-applied child leaves the flag armed
+                // after successful recovery. Revalidate it again in activation.
+                assert(pending != nullptr);
+                pending_connect = pending;
+            } else if (!rejection) {
+                return false;
+            }
+            // SYSCOIN END: Preserve the known attempted child across ticks.
         }
         // Use the same endpoint, payload and finality checks as activation.
         // Reconciliation may release cs_main, so retain activation exclusion.
-        BlockValidationState state;
-        if (!chainstate->ReconcileRejectedNEVMBlock(state, *rejection)) {
-            error = state.ToString();
-            return false;
+        if (rejection) {
+            BlockValidationState state;
+            if (!chainstate->ReconcileRejectedNEVMBlock(state, *rejection)) {
+                error = state.ToString();
+                return false;
+            }
         }
     }
     BlockValidationState state;
-    if (!chainstate->ActivateBestChain(state)) {
+    // SYSCOIN: Activation takes its own locks and rechecks the pending ticket.
+    // Its publication leaves mining gated until the next tick's fresh pair check.
+    if (!chainstate->ActivateBestChainInternal(state, nullptr, pending_connect)) {
         error = state.ToString();
         return false;
     }
@@ -4527,8 +4547,26 @@ bool Chainstate::RecoverNEVMPrefixForConnect(
         error = "nevm-live-recovery-not-active-extension";
         return false;
     }
+    // SYSCOIN: Retain the real attempted identity before any fallible query.
+    // Even a verified predecessor can be followed by a lost current-pair reply.
+    m_nevm_pending_connect = pending.GetBlockHash();
     return RecoverNEVMPrefixThrough(*pending.pprev, &pending, error, rejection);
 }
+
+// SYSCOIN BEGIN: Recovery may retry only the stored, currently selected child.
+CBlockIndex* Chainstate::NEVMPendingConnectCandidate()
+{
+    AssertLockHeld(cs_main);
+    if (!m_nevm_pending_connect || this != &m_chainman.ActiveChainstate()) return nullptr;
+    CBlockIndex* pending{m_blockman.LookupBlockIndex(*m_nevm_pending_connect)};
+    if (pending == nullptr || pending->pprev != m_chain.Tip() ||
+        !(pending->nStatus & BLOCK_HAVE_DATA) ||
+        !pending->IsValid(BLOCK_VALID_TRANSACTIONS) ||
+        (pending->nStatus & BLOCK_CONFLICT_CHAINLOCK) ||
+        !pending->HaveNumChainTxs() || !IsCurrentMostWorkBranch(*pending)) return nullptr;
+    return pending;
+}
+// SYSCOIN END: The engine's reported identity alone cannot select a candidate.
 
 bool Chainstate::RecoverNEVMPrefixThrough(
     const CBlockIndex& through, const CBlockIndex* pending, std::string& error,
@@ -7990,6 +8028,14 @@ static void LimitValidationInterfaceQueue() LOCKS_EXCLUDED(cs_main) {
 }
 
 bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<const CBlock> pblock)
+// SYSCOIN BEGIN: Preserve ordinary activation and privately bound recovery retries.
+{
+    return ActivateBestChainInternal(state, std::move(pblock), nullptr);
+}
+
+bool Chainstate::ActivateBestChainInternal(BlockValidationState& state,
+    std::shared_ptr<const CBlock> pblock, const CBlockIndex* nevm_pending)
+// SYSCOIN END: The internal entry acquires the ordinary activation locks.
 {
     AssertLockNotHeld(m_chainstate_mutex);
 
@@ -8096,6 +8142,21 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                     break;
                 }
 
+                // SYSCOIN BEGIN: Revalidate after the scheduler releases its locks.
+                if (nevm_pending) {
+                    if (m_chainman.m_interrupt || m_blockman.LoadingBlocks() ||
+                        !m_chainman.m_nevm_prefix_recovery_needed || !fNEVMConnection ||
+                        !m_chainman.IsPQBlockProductionAllowed() ||
+                        !m_chainman.NEVMBlockProductionPrerequisitesMet() ||
+                        NEVMPendingConnectCandidate() != nevm_pending) {
+                        return state.Error("nevm-live-recovery-pending-changed");
+                    }
+                    // Keep ordinary finality and validation checks, but finish
+                    // only this child even when selection has more descendants.
+                    pindexMostWork = m_blockman.LookupBlockIndex(nevm_pending->GetBlockHash());
+                }
+                // SYSCOIN END: Bound this activation to the exact pending child.
+
                 bool fInvalidFound = false;
                 bool fReceiptCandidateDeferred = false;
                 std::shared_ptr<const CBlock> nullBlockPtr;
@@ -8103,11 +8164,14 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                 // to retained candidates, then resume the cached highest work.
                 CBlockIndex* step_target{m_chain.Tip() == nullptr
                     ? pindexMostWork->GetAncestor(0) : pindexMostWork};
-                // SYSCOIN
-                if (!ActivateBestChainStep(state, step_target, pblock && pblock->GetHash() == step_target->GetBlockHash() ? pblock : nullBlockPtr, fInvalidFound, fReceiptCandidateDeferred, connectTrace, rejection, repair_selection)) {
+                // SYSCOIN BEGIN: Keep a scheduled publication gated until a fresh pair check.
+                const bool step_completed{ActivateBestChainStep(state, step_target, pblock && pblock->GetHash() == step_target->GetBlockHash() ? pblock : nullBlockPtr, fInvalidFound, fReceiptCandidateDeferred, connectTrace, rejection, repair_selection)};
+                if (nevm_pending) m_chainman.m_nevm_prefix_recovery_needed = true;
+                if (!step_completed) {
                     // A system error occurred
                     return false;
                 }
+                // SYSCOIN END: A synchronous predecessor retry cannot clear this obligation.
                 // SYSCOIN: A pending auxiliary certificate can end this step
                 // without connecting a block. Consume ConnectTrace's
                 // single-use result exactly once while distinguishing that
@@ -8148,6 +8212,10 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                 }
 
                 if (rejection) break;
+
+                // SYSCOIN: One pending-child attempt must not select a sibling
+                // after a finality refusal or deferred auxiliary dependency.
+                if (nevm_pending) break;
 
                 if (fReceiptCandidateDeferred) {
                     // The quarantined branch is deliberately absent from the
@@ -8245,7 +8313,8 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
         // never interrupt before connecting the genesis block during LoadChainTip(). Previously this
         // caused an assert() failure during interrupt in such cases as the UTXO DB flushing checks
         // that the best block hash is non-null.
-        if (m_chainman.m_interrupt) break;
+        // SYSCOIN: A scheduled pending-child retry performs only one step.
+        if (nevm_pending || m_chainman.m_interrupt) break;
     } while (pindexNewTip != pindexMostWork);
 
     if (this == &m_chainman.ActiveChainstate() && !waiting_for_nevm_status) {
