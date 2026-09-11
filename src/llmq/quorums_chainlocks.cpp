@@ -3390,6 +3390,12 @@ void CChainLocksHandler::Start()
             RetryPendingBTCCBlock();
             RequestCatchupChainLock();
             RefreshPQHistoryAuthState();
+            // This private scheduler can wait for activation and validation
+            // callbacks. The main validation-callback scheduler cannot.
+            std::string recovery_error;
+            if (!m_chainman.MaybeRecoverNEVMBlockProduction(recovery_error)) {
+                LogPrint(BCLog::CHAINLOCKS, "NEVM block production recovery deferred: %s\n", recovery_error);
+            }
             MaybeRelayPaymentAuditHave();
             MaybeRetryChainLockFinalization();
             const uint64_t admission_generation{

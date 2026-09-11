@@ -148,6 +148,7 @@ class PQHistoryReauthenticationTestAccess;
 // SYSCOIN: Inject only process restart in NEVM recovery regression tests.
 namespace node::test {
 class NEVMRestartTestAccess;
+class NEVMMiningTestAccess;
 }
 
 /** Recognition of a previously authenticated dependency being revoked. */
@@ -648,8 +649,11 @@ enum class CoinsCacheSizeState
 class Chainstate
 {
     friend class node::test::NEVMRestartTestAccess;
+    friend class node::test::NEVMMiningTestAccess;
     // SYSCOIN: Leave connection, recovery and networking control under test.
     std::function<bool()> m_restart_geth_for_testing;
+    // Pauses invalidation with its applied-prefix authority retained and cs_main released.
+    std::function<void(int)> m_invalidate_block_step_for_testing;
 
 protected:
     /**
@@ -1327,6 +1331,8 @@ private:
     // SYSCOIN: Ordinary buffer loss can leave no payload/receipt marker.
     // Clear only after flushing and binding the applied pair to ActiveTip().
     bool m_nevm_prefix_recovery_needed GUARDED_BY(::cs_main){false};
+    bool NEVMBlockProductionPrerequisitesMet()
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     enum class NEVMPayloadRepairStage { VERIFY_STORED, DOWNLOAD, REPLAY };
     std::optional<NEVMBlockReject> m_nevm_payload_repair GUARDED_BY(::cs_main);
@@ -1683,9 +1689,12 @@ public:
     {
         return m_nevm_startup_pair_pending.load(std::memory_order_acquire);
     }
-    /** Reconcile a lost prefix before issuing work; healthy paths need no probe. */
+    /** Read-only gate for fresh/cached work; never replays under a mining lock. */
     [[nodiscard]] bool PrepareNEVMBlockProduction()
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** Retry mining recovery with activation excluded, before acquiring cs_main. */
+    [[nodiscard]] bool MaybeRecoverNEVMBlockProduction(std::string& error)
+        LOCKS_EXCLUDED(::cs_main);
     /** Only exact ancestors of the pending pair may reconnect without Geth. */
     [[nodiscard]] bool CheckNEVMStartupConnect(
         const CBlockIndex& index, std::string& error) const

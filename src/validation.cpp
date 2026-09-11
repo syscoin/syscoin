@@ -3206,7 +3206,7 @@ bool ChainstateManager::MaybeStartNEVMNetwork()
     return response;
 }
 
-bool ChainstateManager::PrepareNEVMBlockProduction()
+bool ChainstateManager::NEVMBlockProductionPrerequisitesMet()
 {
     AssertLockHeld(cs_main);
     if (HasPendingNEVMStartupPair()) return false;
@@ -3230,17 +3230,62 @@ bool ChainstateManager::PrepareNEVMBlockProduction()
     // stop its miner, and do not require a new finality certificate.
     if (llmq::chainLocksHandler != nullptr &&
         llmq::chainLocksHandler->ShouldDeferBTCCNEVM(*tip)) return false;
-    if (m_nevm_prefix_recovery_needed) {
-        std::string error;
+    return true;
+}
+
+bool ChainstateManager::PrepareNEVMBlockProduction()
+{
+    AssertLockHeld(cs_main);
+    if (!NEVMBlockProductionPrerequisitesMet()) return false;
+    const CBlockIndex* tip{ActiveTip()};
+    return !fNEVMConnection || tip == nullptr ||
+        int64_t{tip->nHeight} + 1 < GetConsensus().nNEVMStartBlock ||
+        !m_nevm_prefix_recovery_needed;
+}
+
+bool ChainstateManager::MaybeRecoverNEVMBlockProduction(std::string& error)
+{
+    AssertLockNotHeld(cs_main);
+    error.clear();
+    const auto recovery_pending = [&]() EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+        return m_nevm_prefix_recovery_needed && fNEVMConnection &&
+            !m_interrupt && !m_blockman.LoadingBlocks() &&
+            IsPQBlockProductionAllowed() && NEVMBlockProductionPrerequisitesMet();
+    };
+    Chainstate* chainstate;
+    {
+        LOCK(cs_main);
+        if (!recovery_pending()) return true;
+        chainstate = &ActiveChainstate();
+    }
+    {
+        // Invalidation retains its applied-prefix snapshot across cs_main
+        // releases. Exclude the entire operation before replay can move Geth.
+        LOCK(chainstate->m_chainstate_mutex);
         std::optional<NEVMBlockReject> rejection;
-        if (!ActiveChainstate().RecoverNEVMPrefixThrough(*tip, nullptr, error, rejection)) {
-            // This entry point holds cs_main, not activation exclusion. Leave
-            // rejection reconciliation to the ordinary recovery paths.
-            LogPrintf("%s: NEVM block production awaiting prefix recovery: %s\n", __func__, error);
+        {
+            LOCK(cs_main);
+            if (chainstate != &ActiveChainstate() || !recovery_pending()) return true;
+            const CBlockIndex* tip{ActiveTip()};
+            if (tip == nullptr) return true;
+            if (chainstate->RecoverNEVMPrefixThrough(*tip, nullptr, error, rejection)) return true;
+            if (!rejection) return false;
+        }
+        // Use the same endpoint, payload and finality checks as activation.
+        // Reconciliation may release cs_main, so retain activation exclusion.
+        BlockValidationState state;
+        if (!chainstate->ReconcileRejectedNEVMBlock(state, *rejection)) {
+            error = state.ToString();
             return false;
         }
     }
-    return !m_nevm_prefix_recovery_needed;
+    BlockValidationState state;
+    if (!chainstate->ActivateBestChain(state)) {
+        error = state.ToString();
+        return false;
+    }
+    error.clear();
+    return true;
 }
 
 bool ChainstateManager::InitializeNEVMStartupPair(
@@ -4540,9 +4585,9 @@ bool Chainstate::RecoverNEVMPrefixThrough(
         }
     }
 
-    // cs_main holds this accepted ancestry stable, including callers without
-    // the activation mutex. Bound each buffered batch and check interruption
-    // per block. Every batch resumes from a verified applied pair, not ACKs.
+    // cs_main holds this accepted ancestry stable. Callers that mutate the
+    // engine also retain activation exclusion. Bound each buffered batch and
+    // check interruption per block. Resume from a verified applied pair, not ACKs.
     static constexpr int64_t REPLAY_BATCH_SIZE{64};
     while (next_height <= through.nHeight) {
         const int32_t last_height{static_cast<int32_t>(std::min<int64_t>(
@@ -8530,6 +8575,10 @@ bool Chainstate::InvalidateBlockLocked(BlockValidationState& state,
     // Disconnect (descendants of) pindex, and mark them invalid.
     while (true) {
         if (m_chainman.m_interrupt) break;
+
+        if (m_invalidate_block_step_for_testing) {
+            m_invalidate_block_step_for_testing(disconnected);
+        }
 
         // Make sure the queue of validation callbacks doesn't grow unboundedly.
         LimitValidationInterfaceQueue();

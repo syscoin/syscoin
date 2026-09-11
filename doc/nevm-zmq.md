@@ -119,18 +119,25 @@ handles connect failures; engine loss first encountered during a normal reorg
 disconnect still follows the separate disconnect error path.
 
 Before issuing fresh or cached mining work after unresolved ordinary prefix
-recovery, Core retries that replay and requires a flushed applied count/hash
-matching the active Core tip. A buffered connect acknowledgement, networking
+recovery, Core requires a flushed applied count/hash matching the active Core
+tip. A buffered connect acknowledgement, networking
 acknowledgement or template response cannot clear this obligation. Startup also
 classifies a behind engine, including an empty one, so reopening Core does not
 bypass the gate. Healthy block connections and template requests add no recovery
-probe. A failed replay leaves mining unavailable and local coins, roots and mint
-markers unchanged; existing activation paths retain rejection reconciliation.
+probe. The mining gates only check readiness. The private recovery scheduler
+retries every five seconds with the chainstate mutex acquired before `cs_main`,
+excluding activation and invalidation for the whole replay. Invalidation retains its
+applied-endpoint authority across its deliberate `cs_main` releases, so mining
+cannot replay blocks that rollback still classifies as unapplied. A failed
+operational replay leaves mining unavailable and local coins, roots and mint
+markers unchanged. Structured rejections use normal payload repair or
+endpoint- and finality-checked invalidation under that same exclusion.
 Rollback preflight arms the same guard before flushing, since even a failed
 flush can discard the acknowledged buffer. An unavailable or inconsistent
 endpoint, or an interrupted transition from a verified behind endpoint, leaves
-the guard armed. The next mining request verifies the resulting active prefix;
-successful block extensions do not add a preflight or recovery probe.
+the guard armed. The recovery scheduler verifies the resulting active prefix
+before a later mining request can proceed. Successful block extensions do not
+add a preflight or recovery probe.
 
 ## Delayed buffered rejection
 

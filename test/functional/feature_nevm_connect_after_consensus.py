@@ -12,6 +12,7 @@ import struct
 import time
 
 from test_framework.test_framework import SyscoinTestFramework
+from test_framework.authproxy import JSONRPCException
 from test_framework.util import assert_equal, assert_raises_rpc_error, force_finish_mnsync
 from test_framework.blocktools import create_block, create_coinbase, add_witness_commitment
 from test_framework.messages import (
@@ -87,6 +88,7 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
         self._buffered_syshashes = []
         self._expected_connect_syshashes = None
         self._nevm_events = []
+        self._block_info_available = True
 
         def _loop():
             while self._zmq_running:
@@ -136,7 +138,7 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
                     self._zmq_sock.send_multipart(
                         [
                             b"nevmblockinfo",
-                            str(len(self._applied_syshashes)).encode(),
+                            str(len(self._applied_syshashes)).encode() if self._block_info_available else b"unavailable",
                             f"{self._applied_syshashes[-1] if self._applied_syshashes else 0:064x}".encode(),
                         ]
                     )
@@ -229,7 +231,21 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
         return r
 
     def _build_block(self, node, *, coinbase_excess=0):
-        tmpl = node.getblocktemplate({"rules": ["segwit"]})
+        # Rollback arms the mining gate. Its scheduler owns the recovery,
+        # so a miner retries until the resulting active prefix is verified.
+        templates = []
+
+        def ready():
+            try:
+                templates.append(node.getblocktemplate({"rules": ["segwit"]}))
+                return True
+            except JSONRPCException as error:
+                if error.error["code"] == -10 and "execution recovery" in error.error["message"]:
+                    return False
+                raise
+
+        self.wait_until(ready)
+        tmpl = templates[0]
         base_extra = bytes.fromhex(tmpl.get("default_witness_commitment_extra", ""))
         if base_extra == b"":
             raise AssertionError("getblocktemplate missing default_witness_commitment_extra")
@@ -570,6 +586,42 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
         self._buffer_connects = False
         self._expected_connect_syshashes = None
 
+    def _check_mining_prefix_scheduler(self):
+        node = self.nodes[0]
+        assert_equal(node.getconnectioncount(), 0)
+        cached = node.getblocktemplate({"rules": ["segwit"]})
+        tip = node.getbestblockhash()
+        applied = self._applied_syshashes[:]
+        assert len(applied) > 1
+        connect_len = len(self._connect_syshashes)
+        disconnect_len = len(self._disconnect_syshashes)
+
+        # Simulate a lost execution suffix. Failed invalidation preflight
+        # arms recovery without changing Core or introducing a new block.
+        self._applied_syshashes = applied[:-1]
+        self._expected_connect_syshashes = applied
+        self._block_info_available = False
+        try:
+            assert_raises_rpc_error(-20, "nevm-reorg-status:", node.invalidateblock, tip)
+            assert_raises_rpc_error(
+                -10, "execution recovery", node.getblocktemplate, {"rules": ["segwit"]},
+            )
+            assert_equal(node.getbestblockhash(), tip)
+            assert_equal(self._nonzero_connects_since(connect_len), [])
+
+            # No mining call or peer drives this retry: the private scheduler
+            # must replay the retained block and verify its final applied pair.
+            self._block_info_available = True
+            self.wait_until(lambda: self._applied_syshashes == applied)
+            recovered = node.getblocktemplate({"rules": ["segwit"]})
+            assert_equal(recovered["previousblockhash"], cached["previousblockhash"])
+            assert_equal(node.getbestblockhash(), tip)
+            assert_equal(self._nonzero_connects_since(connect_len), [applied[-1]])
+            assert_equal(self._disconnect_syshashes[disconnect_len:], [])
+        finally:
+            self._block_info_available = True
+            self._expected_connect_syshashes = None
+
     def _check_connect_responses(self, responses, *, protocol_response=b"connect-v1", consensus_invalid=False, connects_per_attempt=None):
         node = self.nodes[0]
         block = self._build_block(node)
@@ -660,6 +712,9 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
             self._check_lost_acknowledged_predecessors()
             assert_equal(self._payload_checks, [])
             assert_equal(self._payload_negotiations, 0)
+
+            self.log.info("Mining recovery runs without peers, new blocks, or a mining request")
+            self._check_mining_prefix_scheduler()
 
             self.log.info("A requested full block repairs only the engine-approved NEVM payload")
             self._check_payload_repair_from_requested_peer()
