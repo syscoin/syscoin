@@ -2096,12 +2096,32 @@ signed. The full audit statement commits to its embedded seal statement, and
 the receiver reconstructs canonical reporter and subject rosters, checks the
 schedule, seed, ancestry and state roots, and verifies all 801 audit signatures.
 After verification it rederives the same inputs with the active chain stable
-and computes the exact probation transition. The result is a separate,
-immutable RAM-only replay proof. It never enters the ordinary audit archive or
+and computes the exact probation transition. Before publishing replay authority,
+it synchronously persists the complete audit in the separate
+`llmq/pq-payment-audit-recovery` database. A failed write leaves replay blocked.
+The resulting authority is a separate, immutable RAM-only replay proof. It never enters the ordinary audit archive or
 ChainLock store, serves as an ordinary authorization base, supplies signing
 authority, or authorizes GC. Historical ingress runs before ordinary archive
 duplicate handling; a failed eligible historical verification cannot fall
 through to ordinary admission.
+
+The recovery database retains at most two full audit packages, with a fixed
+manifest and checksums bound to genesis, exact witness, and carrier metadata.
+These raw bytes carry no saved verification authority. They remain available
+through the existing exact `GETPQPOSE`/`INV`/`GETDATA` flow after marker completion,
+restart, and reindex. An outstanding marker retries its locally retained package
+at the normal bounded request cadence, reconstructing current context and
+verifying all 801 signatures again. A pending raw-only witness does not suppress
+the ordinary network download when historical verification is not yet eligible.
+
+Admitting a third fully verified package atomically replaces an unowned old
+package: either its carrier is off the active branch, or a strictly later epoch's
+verified embedded seal covers its exact active carrier. Both marker-owned
+witnesses are protected. Obsolete branch packages are preferred, then the oldest
+covered package, so the most recent preceding package remains available. This bounds retained raw data to
+about 2.09 MB without advancing ordinary audit or probation GC. Separate raw
+retirement requires an authenticated existing ordinary checkpoint covering the
+exact active carrier; marker deletion alone never deletes the saved package.
 
 The historical proof binds frozen E and its block hash, actual durable D,
 the exact marker/carrier and receipt, both indexed receipt states, the
@@ -2473,7 +2493,8 @@ The implementation must preserve these invariants:
     exact retained-proof verification, including the independently selected
     historical terminal-audit path when eligible. Historical replay authority
     is RAM-only, source-bound, and revoked before further replay on a changed
-    boundary; it is never ordinary finality, signing, serving, or GC authority.
+    boundary; it is never ordinary finality, signing, or GC authority. Its
+    separately retained raw audit remains available for exact peer retrieval.
     Irreversible prefix pruning still requires a fully verified durable
     covering CLSIG. A marker or checkpoint is never quorum authority, and no
     covered full-audit prefix remains a permanent archive.
@@ -2834,6 +2855,17 @@ Expected failures are fail-closed:
   finalization. Failed flushes, wrong applied hashes, and wrong final endpoints
   preserve the marker and mining restriction even after all block notifications
   have been sent.
+- Persist a fully verified historical audit before releasing replay, reopen
+  without peers, and fully reverify the saved bytes. After marker completion
+  and another reopen, serve byte-identical V1 payloads through actual
+  `GETPQPOSE`/`INV`/`GETDATA` handling. A second receiver with fresh certificate
+  stores must complete recovery using only that served payload. Already-validated
+  chain history and a mock NEVM endpoint are explicit native fixture boundaries.
+- Fill both recovery slots, then admit a third epoch through signed historical
+  ingress without a durable finality winner. Retain the newer fallback, replace
+  the oldest covered package, and preserve exact serving after restart. Check
+  schema/genesis/corruption failures, exact revision checks, and synchronous
+  batch failures that reopen with a coherent old or new manifest and payloads.
 - Checkpoint tests bind the terminal receipt epoch/hash to the exact durable
   covering target and logical/witness IDs. Persist-and-prune is one synchronous
   batch; exact replay is idempotent, regressions and equal-epoch conflicts are

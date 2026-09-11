@@ -656,8 +656,10 @@ public:
     }
 
     static void RequestPaymentAuditDependency(CChainLocksHandler& handler)
-        EXCLUSIVE_LOCKS_REQUIRED(!cs_main)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs_main, !handler.m_verification_mutex)
     {
+        AssertLockNotHeld(::cs_main);
+        AssertLockNotHeld(handler.m_verification_mutex);
         handler.RequestNeededPaymentAuditCertificate();
     }
 
@@ -873,6 +875,29 @@ public:
     static pq::PaymentAuditStore& AuditStore(CChainLocksHandler& handler)
     {
         return *Assert(handler.m_payment_audit_store);
+    }
+
+    static std::unique_ptr<pq::PaymentAuditStore> ExchangeAuditStore(
+        CChainLocksHandler& handler, std::unique_ptr<pq::PaymentAuditStore> store)
+    {
+        return std::exchange(handler.m_payment_audit_store, std::move(store));
+    }
+
+    static pq::PaymentAuditRecoveryStore& RecoveryAuditStore(CChainLocksHandler& handler)
+    {
+        return *Assert(handler.m_payment_audit_recovery_store);
+    }
+
+    static std::unique_ptr<pq::PaymentAuditRecoveryStore> ExchangeRecoveryAuditStore(
+        CChainLocksHandler& handler, std::unique_ptr<pq::PaymentAuditRecoveryStore> store)
+    {
+        return std::exchange(handler.m_payment_audit_recovery_store, std::move(store));
+    }
+
+    static pq::VerifiedPaymentAuditRecoveryAdmission RecoveryAuditForTest(
+        pq::PaymentAuditRecoveryIdentity identity, pq::FinalPaymentAudit audit)
+    {
+        return pq::VerifiedPaymentAuditRecoveryAdmission{std::move(identity), std::move(audit)};
     }
 
     static bool HasHistoricalSyncAuthorization(const CChainLocksHandler& handler)
@@ -2456,6 +2481,60 @@ struct LatePaymentAuditPresealSetup : TestingSetup {
             BOOST_CHECK(!WITH_LOCK(::cs_main,
                 return peerman.GetRequestedPaymentAudit(node->GetId())));
         }
+        void DeliverPayload(const std::vector<uint8_t>& bytes)
+            EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex, !::cs_main)
+        {
+            CDataStream payload{Span<const uint8_t>{bytes}, SER_NETWORK, node->GetCommonVersion()};
+            peerman.ProcessMessage(*node, NetMsgType::PQPOSECERT, payload,
+                GetTime<std::chrono::microseconds>(), interrupt);
+            BOOST_CHECK(!WITH_LOCK(::cs_main,
+                return peerman.GetRequestedPaymentAudit(node->GetId())));
+        }
+        std::vector<uint8_t> DrainPayload(const char* expected_command)
+        {
+            std::vector<uint8_t> wire;
+            {
+                LOCK(node->cs_vSend);
+                BOOST_REQUIRE(node->vSendMsg.empty());
+                while (true) {
+                    const auto& [bytes, more, command]{node->m_transport->GetBytesToSend(false)};
+                    (void)more;
+                    if (bytes.empty()) break;
+                    BOOST_CHECK_EQUAL(command, expected_command);
+                    wire.insert(wire.end(), bytes.begin(), bytes.end());
+                    node->m_transport->MarkBytesSent(bytes.size());
+                }
+            }
+            node->fPauseSend = false;
+            BOOST_REQUIRE_GE(wire.size(), CMessageHeader::HEADER_SIZE);
+            CDataStream message{Span<const uint8_t>{wire}, SER_NETWORK, node->GetCommonVersion()};
+            CMessageHeader header;
+            message >> header;
+            BOOST_CHECK_EQUAL(header.GetCommand(), expected_command);
+            BOOST_REQUIRE_EQUAL(message.size(), header.nMessageSize);
+            const auto payload{MakeUCharSpan(message)};
+            return {payload.begin(), payload.end()};
+        }
+        std::vector<uint8_t> Fetch(const uint256& witness_id)
+            EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex, !::cs_main)
+        {
+            connman.FlushSendBuffer(*node);
+            node->fPauseSend = false;
+            Dispatch(NetMsgType::GETPQPOSE, witness_id);
+            const auto inventory_payload{DrainPayload(NetMsgType::INV)};
+            CDataStream inventory_stream{
+                Span<const uint8_t>{inventory_payload}, SER_NETWORK, node->GetCommonVersion()};
+            std::vector<CInv> inventory;
+            inventory_stream >> inventory;
+            BOOST_REQUIRE(inventory_stream.empty());
+            BOOST_REQUIRE_EQUAL(inventory.size(), 1U);
+            BOOST_REQUIRE(inventory.front().type == MSG_PQPOSECERT);
+            BOOST_REQUIRE(inventory.front().hash == witness_id);
+            Dispatch(NetMsgType::GETDATA, inventory);
+            auto payload{DrainPayload(NetMsgType::PQPOSECERT)};
+            BOOST_REQUIRE_EQUAL(payload.size(), llmq::pq::FinalPaymentAudit::WIRE_SIZE);
+            return payload;
+        }
         std::size_t Queued(const std::string& command) const
         {
             LOCK(node->cs_vSend);
@@ -2933,7 +3012,7 @@ struct LatePaymentAuditPresealSetup : TestingSetup {
         return receipt;
     }
 
-    void ReopenHandler()
+    void ReopenHandler(bool pending_marker = true)
     {
         SyncWithValidationInterfaceQueue();
         llmq::chainLocksHandler = previous_handler;
@@ -2941,7 +3020,8 @@ struct LatePaymentAuditPresealSetup : TestingSetup {
         CreateHandler();
         InstallRosterCache();
         llmq::chainLocksHandler = handler.get();
-        BOOST_REQUIRE(Access::Persistence(*handler).LoadPaymentAuditPresealState() == markers);
+        BOOST_REQUIRE(Access::Persistence(*handler).LoadPaymentAuditPresealState() ==
+            (pending_marker ? markers : llmq::pq::PaymentAuditPresealState{}));
         BOOST_REQUIRE(!Access::Persistence(*handler).HasBest());
         LatchMiningReady();
     }
@@ -3166,10 +3246,15 @@ struct LatePaymentAuditPresealSetup : TestingSetup {
         BOOST_CHECK(!Access::AuditStore(*handler).GetPruneCheckpoint());
     }
 
-    void CheckNoHistoricalArchives()
+    void CheckNoOrdinaryAuditArchives()
     {
         for (const auto& receipt : receipts) {
             BOOST_CHECK(!Access::AuditStore(*handler).Get(receipt.audit_witness_id));
+            BOOST_CHECK(!Access::AuditStore(*handler).GetVerifiedWithCandidateRevision(
+                receipt.audit_witness_id));
+            const auto candidates{Access::AuditStore(*handler).GetEpochCandidateSnapshot(receipt.epoch)};
+            BOOST_REQUIRE(candidates);
+            BOOST_CHECK(candidates->ordered_candidates.empty());
         }
         CheckNoHistoricalOrdinaryAuthority();
     }
@@ -3200,11 +3285,11 @@ struct LatePaymentAuditPresealSetup : TestingSetup {
         BOOST_REQUIRE(signed_terminal);
         LOCK(NetEventsInterface::g_msgproc_mutex);
         ActiveDIP active_dip{const_cast<Consensus::Params&>(m_node.chainman->GetConsensus())};
-        AuditPeer peer{m_node};
-        peer.Handshake();
+        auto peer{std::make_unique<AuditPeer>(m_node)};
+        peer->Handshake();
         engine->flush_available = false;
         auto context{RequestHistoricalReplay()};
-        CheckNoHistoricalArchives();
+        CheckNoOrdinaryAuditArchives();
         std::optional<Access::PaymentAuditSealRequest> stalled;
         {
             auto& active{m_node.chainman->ActiveChainstate()};
@@ -3221,27 +3306,27 @@ struct LatePaymentAuditPresealSetup : TestingSetup {
             BOOST_CHECK(!HistoricalTransition());
             Access::RequestPaymentAuditDependency(*handler);
             BOOST_REQUIRE_GT(Access::PaymentAuditLastRequest(*handler).count(), 0);
-            peer.Request(receipts.back().audit_witness_id);
-            peer.Deliver(audits.back());
+            peer->Request(receipts.back().audit_witness_id);
+            peer->Deliver(audits.back());
             stalled = Access::PaymentAuditSealRequestState(*handler);
             BOOST_REQUIRE(stalled);
             BOOST_CHECK(Access::HasNeededPaymentAuditSeal(*handler));
             BOOST_CHECK(!HistoricalTransition());
-            peer.connman.FlushSendBuffer(*peer.node);
+            peer->connman.FlushSendBuffer(*peer->node);
             Access::RequestPaymentAuditDependency(*handler);
             BOOST_CHECK(Access::PaymentAuditSealRequestState(*handler) == stalled);
-            BOOST_CHECK_EQUAL(peer.Queued(NetMsgType::GETPQPOSE), 0U);
+            BOOST_CHECK_EQUAL(peer->Queued(NetMsgType::GETPQPOSE), 0U);
         }
         // Only the null tail advanced. The actual scheduler must relinquish
         // this exact ordinary-seal graph and request the audit once it is deep.
         Access::RequestPaymentAuditDependency(*handler);
         BOOST_CHECK(!Access::HasPendingPaymentAuditSeal(*handler));
         BOOST_CHECK(!Access::HasNeededPaymentAuditSeal(*handler));
-        BOOST_CHECK_EQUAL(peer.Queued(NetMsgType::GETPQPOSE), 1U);
+        BOOST_CHECK_EQUAL(peer->Queued(NetMsgType::GETPQPOSE), 1U);
         const auto retry_time{Access::PaymentAuditLastRequest(*handler)};
         Access::RequestPaymentAuditDependency(*handler);
         BOOST_CHECK(Access::PaymentAuditLastRequest(*handler) == retry_time);
-        BOOST_CHECK_EQUAL(peer.Queued(NetMsgType::GETPQPOSE), 1U);
+        BOOST_CHECK_EQUAL(peer->Queued(NetMsgType::GETPQPOSE), 1U);
         SetMockTime(GetTime<std::chrono::seconds>() +
             ChainLockRequestTracker::SOURCE_FAILURE_COOLDOWN + std::chrono::seconds{1});
         auto wrong_branch{audits.back()};
@@ -3252,29 +3337,79 @@ struct LatePaymentAuditPresealSetup : TestingSetup {
         Access::SetReplayMarkers(*handler, {}, markers);
         BOOST_CHECK(!Access::TryHistoricalPaymentAudit(*handler, audits.back(), context).value_or(false));
         context = RequestHistoricalReplay();
-        peer.Request(receipts.back().audit_witness_id);
-        peer.Deliver(audits.back());
+        peer->Request(receipts.back().audit_witness_id);
+        // Model two prior verified raw admissions at the fixture boundary.
+        // The terminal audit below still passes all 801 signatures through
+        // production ingress, which must select the covered oldest package.
+        for (std::size_t ordinal{0}; ordinal < 2; ++ordinal) {
+            const auto& receipt{receipts[ordinal]};
+            BOOST_REQUIRE(Access::RecoveryAuditStore(*handler).Persist(Access::RecoveryAuditForTest(
+                {receipt.epoch, receipt.carrier_height, chain[receipt.carrier_height]->GetBlockHash(),
+                 receipt.audit_logical_id, receipt.audit_witness_id}, audits[ordinal])) ==
+                llmq::pq::PaymentAuditRecoveryStoreResult::ACCEPTED);
+        }
+        peer->Deliver(audits.back());
         const auto proof{HistoricalTransition()};
         BOOST_REQUIRE(proof);
+        const auto retained{Access::RecoveryAuditStore(*handler).GetRetentionSnapshot()};
+        BOOST_REQUIRE(retained);
+        BOOST_REQUIRE_EQUAL(retained->retained.size(), 2U);
+        BOOST_CHECK(!Access::RecoveryAuditStore(*handler).Has(receipts.front().audit_witness_id));
+        BOOST_CHECK(Access::RecoveryAuditStore(*handler).Has(receipts[1].audit_witness_id));
+        BOOST_CHECK(Access::RecoveryAuditStore(*handler).Has(receipts.back().audit_witness_id));
         const auto* transition{llmq::GetVerifiedPaymentAuditReceiptTransition(proof)};
         BOOST_REQUIRE(transition);
         BOOST_CHECK(transition->Result().StateHash() == receipts.back().next_probation_state_hash);
         BOOST_CHECK(Access::HasPendingPaymentAuditReceipt(*handler));
-        CheckNoHistoricalArchives();
+        CheckNoOrdinaryAuditArchives();
         Replay();
         BOOST_CHECK_EQUAL(Access::PaymentReplayValidatedHeight(*handler), tip_height);
         BOOST_CHECK(Access::PaymentReplayAuthenticated(*handler, *chain[FIRST_CARRIER]));
         CheckBlocked();
 
-        // The signed capability is deliberately absent from every durable
-        // archive. Restart must discover and verify the terminal proof again.
+        {
+            auto& active{m_node.chainman->ActiveChainstate()};
+            struct RestoreTip {
+                Chainstate& active;
+                CBlockIndex& tip;
+                ~RestoreTip() { LOCK(::cs_main); active.m_chain.SetTip(tip); active.CoinsTip().SetBestBlock(tip.GetBlockHash()); }
+            } restore{active, *chain.back()};
+            WITH_LOCK(::cs_main, active.m_chain.SetTip(*chain[TIP_HEIGHT]);
+                active.CoinsTip().SetBestBlock(chain[TIP_HEIGHT]->GetBlockHash()));
+            (void)RequestHistoricalReplay();
+            BOOST_REQUIRE(Access::RecoveryAuditStore(*handler).Has(receipts.back().audit_witness_id));
+            BOOST_CHECK(!HistoricalTransition());
+            // Raw availability cannot suppress the exact network request
+            // when a shallower tip makes historical verification ineligible.
+            BOOST_CHECK(!handler->AlreadyHavePaymentAudit(receipts.back().audit_witness_id));
+            peer->Request(receipts.back().audit_witness_id);
+            peer->Deliver(audits.back());
+            BOOST_CHECK(Access::HasPendingPaymentAuditSeal(*handler));
+            BOOST_CHECK(!HistoricalTransition());
+        }
+        Access::RequestPaymentAuditDependency(*handler);
+        BOOST_REQUIRE(HistoricalTransition());
+        BOOST_CHECK(!Access::HasPendingPaymentAuditSeal(*handler));
+        CheckNoOrdinaryAuditArchives();
+
+        // The original provider is gone. Restart retains only raw bytes;
+        // unavailable current rosters must prevent them becoming authority.
+        peer.reset();
+        BOOST_REQUIRE_EQUAL(m_node.connman->GetNodeCount(ConnectionDirection::Both), 0U);
         ReopenHandler();
         BOOST_CHECK(!HistoricalTransition());
         BOOST_CHECK_EQUAL(Access::PaymentReplayValidatedHeight(*handler), -1);
-        CheckNoHistoricalArchives();
-        context = RequestHistoricalReplay();
-        peer.Request(receipts.back().audit_witness_id);
-        peer.Deliver(audits.back());
+        BOOST_REQUIRE(Access::RecoveryAuditStore(*handler).Has(receipts.back().audit_witness_id));
+        CheckNoOrdinaryAuditArchives();
+        (void)RequestHistoricalReplay();
+        InstallRosterCache(false);
+        Access::RequestPaymentAuditDependency(*handler);
+        BOOST_CHECK(!HistoricalTransition());
+        CheckBlocked();
+        InstallRosterCache();
+        (void)RequestHistoricalReplay();
+        SetMockTime(GetTime<std::chrono::seconds>() + std::chrono::seconds{6});
+        Access::RequestPaymentAuditDependency(*handler);
         const auto held_proof{HistoricalTransition()};
         BOOST_REQUIRE(held_proof);
         Replay();
@@ -3293,10 +3428,10 @@ struct LatePaymentAuditPresealSetup : TestingSetup {
         Replay();
         BOOST_CHECK_EQUAL(Access::PaymentReplayValidatedHeight(*handler), FIRST_CARRIER - 1);
         CheckBlocked();
-        context = RequestHistoricalReplay();
-        peer.Request(receipts.back().audit_witness_id);
-        peer.Deliver(audits.back());
+        (void)RequestHistoricalReplay();
+        Access::RequestPaymentAuditDependency(*handler);
         BOOST_REQUIRE(HistoricalTransition());
+        BOOST_CHECK_EQUAL(m_node.connman->GetNodeCount(ConnectionDirection::Both), 0U);
         engine->reported_hash = NonNullHash(1'250'102);
         Replay();
         CheckBlocked();
@@ -3307,7 +3442,7 @@ struct LatePaymentAuditPresealSetup : TestingSetup {
         CheckBlocked(replay_hashes.size());
         engine->wrong_final_tip = false;
         CompleteReplay();
-        CheckNoHistoricalArchives();
+        CheckNoOrdinaryAuditArchives();
     }
 
     void CheckHistoricalInvalidSignature() EXCLUSIVE_LOCKS_REQUIRED(!::cs_main)
@@ -3315,20 +3450,129 @@ struct LatePaymentAuditPresealSetup : TestingSetup {
         BOOST_REQUIRE(signed_terminal && invalid_terminal_signature);
         LOCK(NetEventsInterface::g_msgproc_mutex);
         ActiveDIP active_dip{const_cast<Consensus::Params&>(m_node.chainman->GetConsensus())};
-        AuditPeer peer{m_node};
-        peer.Handshake();
+        auto peer{std::make_unique<AuditPeer>(m_node)};
+        peer->Handshake();
         const auto context{RequestHistoricalReplay()};
         BOOST_REQUIRE(audits.back().IsStructurallyValid());
         BOOST_REQUIRE(audits.back().GetWitnessId(genesis) == receipts.back().audit_witness_id);
         const auto attempted{Access::TryHistoricalPaymentAudit(*handler, audits.back(), context)};
         BOOST_REQUIRE(attempted.has_value());
         BOOST_CHECK(!*attempted);
-        peer.Request(receipts.back().audit_witness_id);
-        peer.Deliver(audits.back());
+        peer->Request(receipts.back().audit_witness_id);
+        peer->Deliver(audits.back());
         BOOST_CHECK(!HistoricalTransition());
         BOOST_CHECK(!Access::HasPendingPaymentAuditSeal(*handler));
-        CheckNoHistoricalArchives();
+        BOOST_CHECK(!Access::RecoveryAuditStore(*handler).Has(receipts.back().audit_witness_id));
+        CheckNoOrdinaryAuditArchives();
         CheckBlocked();
+
+        // Seed only the raw test seam. Its exact witness ID is in the real
+        // fixture carrier, but the 801-signature verification must still fail
+        // after reopening; durable raw bytes are not saved authorization.
+        const auto& receipt{receipts.back()};
+        BOOST_REQUIRE(Access::RecoveryAuditStore(*handler).Persist(Access::RecoveryAuditForTest(
+            {receipt.epoch, receipt.carrier_height, chain[receipt.carrier_height]->GetBlockHash(),
+             receipt.audit_logical_id, receipt.audit_witness_id}, audits.back())) ==
+            llmq::pq::PaymentAuditRecoveryStoreResult::ACCEPTED);
+        peer.reset();
+        BOOST_REQUIRE_EQUAL(m_node.connman->GetNodeCount(ConnectionDirection::Both), 0U);
+        ReopenHandler();
+        BOOST_REQUIRE(Access::RecoveryAuditStore(*handler).Has(receipt.audit_witness_id));
+        (void)RequestHistoricalReplay();
+        Access::RequestPaymentAuditDependency(*handler);
+        BOOST_CHECK(!HistoricalTransition());
+        BOOST_CHECK_EQUAL(Access::PaymentReplayValidatedHeight(*handler), FIRST_CARRIER - 1);
+        CheckNoOrdinaryAuditArchives();
+        CheckBlocked();
+    }
+
+    void CheckRecoveredAuditProviderHandoff() EXCLUSIVE_LOCKS_REQUIRED(!::cs_main)
+    {
+        using namespace llmq::pq;
+        LOCK(NetEventsInterface::g_msgproc_mutex);
+        ActiveDIP active_dip{const_cast<Consensus::Params&>(m_node.chainman->GetConsensus())};
+        BOOST_REQUIRE(signed_terminal && !invalid_terminal_signature);
+        BOOST_REQUIRE(Access::Persistence(*handler).LoadPaymentAuditPresealState().IsEmpty());
+        BOOST_REQUIRE_EQUAL(m_node.connman->GetNodeCount(ConnectionDirection::Both), 0U);
+        BOOST_REQUIRE(Access::RecoveryAuditStore(*handler).Has(receipts.back().audit_witness_id));
+        FinalPaymentAudit retained_audit;
+        BOOST_REQUIRE(handler->GetPaymentAuditByHash(receipts.back().audit_witness_id, retained_audit));
+        BOOST_CHECK(retained_audit.GetWitnessId(genesis) == receipts.back().audit_witness_id);
+        // CompleteReplay drives replay directly. Run its following production
+        // scheduler pass to retire the completed receipt's pending request.
+        Access::RequestPaymentAuditDependency(*handler);
+        BOOST_CHECK(!Access::HasPendingPaymentAuditReceipt(*handler));
+        BOOST_CHECK(handler->AlreadyHavePaymentAudit(receipts.back().audit_witness_id));
+        CheckCompleted();
+        CheckNoOrdinaryAuditArchives();
+        CDataStream original{SER_NETWORK, PROTOCOL_VERSION};
+        original << audits.back();
+        const auto original_span{MakeUCharSpan(original)};
+        const std::vector<uint8_t> original_payload{original_span.begin(), original_span.end()};
+        std::vector<uint8_t> served_payload;
+        {
+            AuditPeer downstream{m_node};
+            downstream.Handshake();
+            served_payload = downstream.Fetch(receipts.back().audit_witness_id);
+            BOOST_CHECK(served_payload == original_payload);
+            // The marker and RAM authorization are gone. Reopening must
+            // preserve the independently retained package for exact serving.
+            ReopenHandler(/*pending_marker=*/false);
+            BOOST_CHECK(!HistoricalTransition());
+            BOOST_CHECK(handler->AlreadyHavePaymentAudit(receipts.back().audit_witness_id));
+            CheckCompleted();
+            CheckNoOrdinaryAuditArchives();
+            const auto reopened_payload{downstream.Fetch(receipts.back().audit_witness_id)};
+            BOOST_REQUIRE(reopened_payload == served_payload);
+            served_payload = reopened_payload;
+        }
+
+        // Model a second receiver at the same validated-chain boundary with
+        // fresh certificate databases and an empty mock execution engine.
+        // The original provider is absent; only receiver 1's captured network
+        // payload is supplied below. No raw package or verification capability
+        // is copied between receivers.
+        ReopenHandler(/*pending_marker=*/false);
+        Access::ExchangePersistence(*handler, std::make_unique<PQChainLockPersistence>(
+            DBParams{.path = m_path_root / "receiver-2-chainlocks", .cache_bytes = 4U << 20},
+            genesis, config));
+        Access::ExchangeAuditStore(*handler, std::make_unique<PaymentAuditStore>(
+            m_path_root / "receiver-2-ordinary-audits", genesis));
+        Access::ExchangeRecoveryAuditStore(*handler, std::make_unique<PaymentAuditRecoveryStore>(
+            m_path_root / "receiver-2-recovery-audits", genesis));
+        const auto empty_recovery{Access::RecoveryAuditStore(*handler).GetRetentionSnapshot()};
+        BOOST_REQUIRE(empty_recovery);
+        BOOST_REQUIRE(empty_recovery->retained.empty());
+        BOOST_REQUIRE(!handler->AlreadyHavePaymentAudit(receipts.back().audit_witness_id));
+        engine->count = 0;
+        engine->hash.SetNull();
+        engine->connected.clear();
+        Access::SetReplayMarkers(*handler, {}, markers);
+        (void)RequestHistoricalReplay();
+        BOOST_CHECK(!HistoricalTransition());
+        CheckNoOrdinaryAuditArchives();
+
+        CDataStream served_stream{
+            Span<const uint8_t>{served_payload}, SER_NETWORK, PROTOCOL_VERSION};
+        FinalPaymentAudit served_audit;
+        served_stream >> served_audit;
+        BOOST_REQUIRE(served_stream.empty());
+        const uint256 served_witness{served_audit.GetWitnessId(genesis)};
+        BOOST_REQUIRE(served_witness == receipts.back().audit_witness_id);
+        AuditPeer recovered_provider{m_node};
+        recovered_provider.Handshake();
+        recovered_provider.Request(served_witness);
+        recovered_provider.DeliverPayload(served_payload);
+        BOOST_REQUIRE(HistoricalTransition());
+        CompleteReplay();
+        CheckNoOrdinaryAuditArchives();
+        const auto recovered_raw{Access::RecoveryAuditStore(*handler).GetRaw(served_witness)};
+        BOOST_REQUIRE(recovered_raw);
+        BOOST_CHECK(recovered_raw->identity.witness_id == served_witness);
+        CDataStream retained{SER_NETWORK, PROTOCOL_VERSION};
+        retained << recovered_raw->audit;
+        const auto retained_span{MakeUCharSpan(retained)};
+        BOOST_CHECK(std::vector<uint8_t>(retained_span.begin(), retained_span.end()) == served_payload);
     }
 
     void CheckHistoricalIngressBeforeArchiveDuplicate() EXCLUSIVE_LOCKS_REQUIRED(!::cs_main)
@@ -3615,6 +3859,7 @@ BOOST_FIXTURE_TEST_CASE(payment_preseal_signed_historical_terminal_replays_witho
         BOOST_REQUIRE(m_node.chainman->IsBaseBlockSyncComplete());
     }
     CheckHistoricalSignedReplay();
+    CheckRecoveredAuditProviderHandoff();
 }
 
 BOOST_FIXTURE_TEST_CASE(payment_preseal_historical_terminal_rejects_matching_invalid_signature,

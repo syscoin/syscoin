@@ -1113,7 +1113,8 @@ public:
 
     /** Exact payment-audit certificates remain independently retrievable. */
     [[nodiscard]] bool AlreadyHavePaymentAudit(
-        const uint256& witness_id) const;
+        const uint256& witness_id) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_pending_payment_audit_receipt_mutex);
     [[nodiscard]] bool GetPaymentAuditByHash(
         const uint256& witness_id,
         pq::FinalPaymentAudit& result) const;
@@ -2194,6 +2195,12 @@ private:
                                  !m_pending_payment_audit_receipt_mutex,
                                  !m_needed_btcc_certificate_mutex,
                                  !m_btcc_preseal_mutex);
+    [[nodiscard]] bool PersistPaymentAuditHistoricalReplayWitness(
+        const pq::FinalPaymentAudit& audit,
+        const PaymentAuditHistoricalReplayBoundary& boundary)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main, !m_lookup_mutex, !m_btcc_preseal_mutex);
+    void RetirePaymentAuditRecoveryThroughCheckpoint()
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main, !m_lookup_mutex, !m_btcc_preseal_mutex);
     [[nodiscard]] PaymentAuditReceiptCertificateStatus
     BuildStoredVerifiedPaymentAuditSubject(
         const pq::StoredVerifiedPaymentAudit& stored,
@@ -2522,6 +2529,7 @@ private:
     void RetryPendingBTCCBlock();
     void RequestNeededPaymentAuditCertificate()
         EXCLUSIVE_LOCKS_REQUIRED(
+            !cs_main, !m_verification_mutex,
             !m_pending_payment_audit_receipt_mutex,
             !m_needed_btcc_certificate_mutex,
             !m_btcc_preseal_mutex,
@@ -2933,6 +2941,7 @@ private:
     std::unique_ptr<pq::PQChainLockPersistence> m_persistence;
     std::unique_ptr<pq::ChainLockFinalityStore> m_store;
     std::unique_ptr<pq::PaymentAuditStore> m_payment_audit_store;
+    std::unique_ptr<pq::PaymentAuditRecoveryStore> m_payment_audit_recovery_store;
     std::unique_ptr<pq::PaymentAuditStagingStore>
         m_payment_audit_staging_store;
     mutable PaymentAuditCandidateMetadataCache

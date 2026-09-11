@@ -10,8 +10,10 @@
 #include <sync.h>
 #include <util/fs.h>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -336,6 +338,185 @@ private:
         GUARDED_BY(m_mutex);
     std::optional<PruneIntentState> m_prune_intent
         GUARDED_BY(m_mutex);
+};
+
+/** Retention metadata only; none of these fields grants replay authority. */
+struct PaymentAuditRecoveryIdentity {
+    uint32_t epoch{0};
+    int32_t carrier_height{-1};
+    uint256 carrier_hash;
+    uint256 logical_id;
+    uint256 witness_id;
+
+    [[nodiscard]] bool IsStructurallyValid() const noexcept
+    {
+        return carrier_height >= 0 && !carrier_hash.IsNull() &&
+               !logical_id.IsNull() && !witness_id.IsNull();
+    }
+
+    SERIALIZE_METHODS(PaymentAuditRecoveryIdentity, obj)
+    {
+        READWRITE(obj.epoch, obj.carrier_height, obj.carrier_hash,
+                  obj.logical_id, obj.witness_id);
+    }
+
+    friend bool operator==(const PaymentAuditRecoveryIdentity&,
+                           const PaymentAuditRecoveryIdentity&) = default;
+};
+
+/** Durable raw bytes. Every replay use must verify all signatures anew. */
+struct RawRecoveryPaymentAudit {
+    PaymentAuditRecoveryIdentity identity;
+    FinalPaymentAudit audit;
+};
+
+/** Bounded metadata view, independent of current replay-marker ownership. */
+struct PaymentAuditRecoverySnapshot {
+    uint64_t revision{0};
+    std::vector<PaymentAuditRecoveryIdentity> retained;
+};
+
+enum class PaymentAuditRecoveryStoreResult : uint8_t {
+    ACCEPTED = 0,
+    DUPLICATE_WITNESS,
+    FULL,
+    STALE,
+    INVALID,
+    CORRUPT,
+    DATABASE_ERROR,
+};
+
+/** Admission after full historical verification under a stable owner. */
+class VerifiedPaymentAuditRecoveryAdmission final {
+public:
+    VerifiedPaymentAuditRecoveryAdmission(
+        const VerifiedPaymentAuditRecoveryAdmission&) = delete;
+    VerifiedPaymentAuditRecoveryAdmission& operator=(
+        const VerifiedPaymentAuditRecoveryAdmission&) = delete;
+    VerifiedPaymentAuditRecoveryAdmission(
+        VerifiedPaymentAuditRecoveryAdmission&&) noexcept = default;
+    VerifiedPaymentAuditRecoveryAdmission& operator=(
+        VerifiedPaymentAuditRecoveryAdmission&&) noexcept = default;
+
+private:
+    VerifiedPaymentAuditRecoveryAdmission(PaymentAuditRecoveryIdentity identity,
+                                          FinalPaymentAudit audit)
+        : m_identity{std::move(identity)}, m_audit{std::move(audit)}
+    {
+    }
+
+    PaymentAuditRecoveryIdentity m_identity;
+    FinalPaymentAudit m_audit;
+
+    friend class ::llmq::CChainLocksHandler;
+    friend class ::llmq::test::CChainLocksHandlerTestAccess;
+    friend class ::llmq_tests::PaymentAuditStoreTestAccess;
+    friend class PaymentAuditRecoveryStore;
+};
+
+/**
+ * Exact raw-slot supersession checked by the handler under a stable active
+ * chain and owner. The new fully verified seal must cover the old active
+ * carrier, or the old carrier must be off-branch and unowned by either marker.
+ * This capability grants no ordinary archive or checkpoint authority.
+ */
+class PaymentAuditRecoveryReplacement final {
+private:
+    PaymentAuditRecoveryReplacement(PaymentAuditRecoveryIdentity old_identity,
+                                    PaymentAuditRecoveryIdentity new_identity,
+                                    uint64_t expected_revision)
+        : m_old_identity{std::move(old_identity)},
+          m_new_identity{std::move(new_identity)},
+          m_expected_revision{expected_revision}
+    {
+    }
+
+    PaymentAuditRecoveryIdentity m_old_identity;
+    PaymentAuditRecoveryIdentity m_new_identity;
+    uint64_t m_expected_revision{0};
+
+    friend class ::llmq::CChainLocksHandler;
+    friend class ::llmq::test::CChainLocksHandlerTestAccess;
+    friend class ::llmq_tests::PaymentAuditStoreTestAccess;
+    friend class PaymentAuditRecoveryStore;
+};
+
+/** Exact retirement after the handler validates durable ordinary coverage. */
+class PaymentAuditRecoveryRetirement final {
+private:
+    PaymentAuditRecoveryRetirement(PaymentAuditRecoveryIdentity identity,
+                                   PaymentAuditStoreCheckpoint checkpoint,
+                                   uint64_t expected_revision)
+        : m_identity{std::move(identity)},
+          m_checkpoint{std::move(checkpoint)},
+          m_expected_revision{expected_revision}
+    {
+    }
+
+    PaymentAuditRecoveryIdentity m_identity;
+    PaymentAuditStoreCheckpoint m_checkpoint;
+    uint64_t m_expected_revision{0};
+
+    friend class ::llmq::CChainLocksHandler;
+    friend class ::llmq::test::CChainLocksHandlerTestAccess;
+    friend class ::llmq_tests::PaymentAuditStoreTestAccess;
+    friend class PaymentAuditRecoveryStore;
+};
+
+/**
+ * Two independently retained recovery packages. The manifest and payloads
+ * change in one fsynced batch. Full stores refuse admission without explicit
+ * checked supersession; marker retirement, reorg and restart never erase bytes.
+ * This database has no ordinary candidate, verified-audit or checkpoint API.
+ */
+class PaymentAuditRecoveryStore final {
+public:
+    static constexpr uint32_t DB_FORMAT_VERSION{1};
+    static constexpr std::size_t MAX_RETAINED_AUDITS{2};
+
+    PaymentAuditRecoveryStore(fs::path path, uint256 genesis_hash,
+                             std::size_t cache_bytes = 2 << 20,
+                             bool wipe = false);
+
+    [[nodiscard]] bool IsHealthy() const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    [[nodiscard]] std::optional<PaymentAuditRecoverySnapshot>
+    GetRetentionSnapshot() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    [[nodiscard]] std::optional<RawRecoveryPaymentAudit> GetRaw(
+        const uint256& witness_id) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    [[nodiscard]] bool Has(const uint256& witness_id) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    [[nodiscard]] PaymentAuditRecoveryStoreResult Persist(
+        VerifiedPaymentAuditRecoveryAdmission admission,
+        std::optional<PaymentAuditRecoveryReplacement> replacement = std::nullopt)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    [[nodiscard]] PaymentAuditRecoveryStoreResult RetireCovered(
+        PaymentAuditRecoveryRetirement retirement)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+private:
+    void Initialize() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    [[nodiscard]] std::optional<RawRecoveryPaymentAudit> GetRawLocked(
+        std::size_t slot) const EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    [[nodiscard]] bool CanAdvanceRevision() const
+        EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    [[nodiscard]] bool WriteBatchLocked(CDBBatch& batch)
+        EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+
+    uint256 m_genesis_hash;
+    mutable CDBWrapper m_db;
+    mutable Mutex m_mutex;
+    mutable std::optional<PaymentAuditRecoveryStoreResult> m_failure
+        GUARDED_BY(m_mutex);
+    uint64_t m_revision GUARDED_BY(m_mutex){1};
+    std::array<std::optional<PaymentAuditRecoveryIdentity>, MAX_RETAINED_AUDITS>
+        m_retained GUARDED_BY(m_mutex);
+    /** Private test seam for uncertain synchronous-write outcomes. */
+    std::function<bool(CDBBatch&, bool)> m_batch_writer_for_testing
+        GUARDED_BY(m_mutex);
+
+    friend class ::llmq_tests::PaymentAuditStoreTestAccess;
 };
 
 } // namespace llmq::pq

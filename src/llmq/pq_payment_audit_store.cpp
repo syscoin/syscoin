@@ -4,10 +4,13 @@
 
 #include <llmq/pq_payment_audit_store.h>
 
+#include <hash.h>
+
 #include <algorithm>
 #include <array>
 #include <exception>
 #include <limits>
+#include <string>
 #include <vector>
 
 namespace llmq::pq {
@@ -1794,6 +1797,435 @@ PaymentAuditStore::GetPendingPruneCheckpoint() const
                ? std::nullopt
                : std::optional<PaymentAuditStoreCheckpoint>{
                      m_prune_intent->checkpoint};
+}
+
+namespace {
+
+constexpr uint8_t RECOVERY_SCHEMA_KEY{0xb0};
+constexpr uint8_t RECOVERY_MANIFEST_KEY{0xb1};
+constexpr uint8_t RECOVERY_SLOT_FIRST_KEY{0xb2};
+constexpr uint32_t RECOVERY_SCHEMA_GUARD{0x50525331}; // "PRS1"
+constexpr uint32_t RECOVERY_MANIFEST_GUARD{0x50524d31}; // "PRM1"
+constexpr uint32_t RECOVERY_RECORD_GUARD{0x50525231}; // "PRR1"
+constexpr std::size_t RECOVERY_IDENTITY_SIZE{2 * sizeof(uint32_t) + 3 * 32};
+
+struct RecoverySchema {
+    SchemaValue audit_schema;
+    uint32_t slots{PaymentAuditRecoveryStore::MAX_RETAINED_AUDITS};
+    uint256 checksum;
+
+    SERIALIZE_METHODS(RecoverySchema, obj)
+    {
+        READWRITE(obj.audit_schema, obj.slots, obj.checksum);
+    }
+
+    friend bool operator==(const RecoverySchema&, const RecoverySchema&) = default;
+};
+
+struct RecoveryManifest {
+    uint32_t version{PaymentAuditRecoveryStore::DB_FORMAT_VERSION};
+    uint32_t guard{RECOVERY_MANIFEST_GUARD};
+    std::array<uint8_t, PaymentAuditRecoveryStore::MAX_RETAINED_AUDITS> present{};
+    std::array<PaymentAuditRecoveryIdentity,
+               PaymentAuditRecoveryStore::MAX_RETAINED_AUDITS> identities{};
+    uint256 checksum;
+
+    SERIALIZE_METHODS(RecoveryManifest, obj)
+    {
+        READWRITE(obj.version, obj.guard, obj.present);
+        for (auto& identity : obj.identities) READWRITE(identity);
+        READWRITE(obj.checksum);
+    }
+};
+
+struct RecoveryRecord {
+    uint32_t version{PaymentAuditRecoveryStore::DB_FORMAT_VERSION};
+    uint32_t guard{RECOVERY_RECORD_GUARD};
+    PaymentAuditRecoveryIdentity identity;
+    FinalPaymentAudit audit;
+    uint256 checksum;
+
+    SERIALIZE_METHODS(RecoveryRecord, obj)
+    {
+        READWRITE(obj.version, obj.guard, obj.identity, obj.audit, obj.checksum);
+    }
+};
+
+constexpr std::size_t RECOVERY_SCHEMA_SIZE{SCHEMA_VALUE_SIZE + sizeof(uint32_t) + 32};
+constexpr std::size_t RECOVERY_MANIFEST_SIZE{
+    2 * sizeof(uint32_t) + PaymentAuditRecoveryStore::MAX_RETAINED_AUDITS *
+        (sizeof(uint8_t) + RECOVERY_IDENTITY_SIZE) + 32};
+constexpr std::size_t RECOVERY_RECORD_SIZE{
+    2 * sizeof(uint32_t) + RECOVERY_IDENTITY_SIZE + FinalPaymentAudit::WIRE_SIZE + 32};
+static_assert(RECOVERY_SCHEMA_SIZE == 92);
+static_assert(RECOVERY_MANIFEST_SIZE == 250);
+static_assert(RECOVERY_RECORD_SIZE == 1'042'115);
+
+RecoverySchema MakeRecoverySchema(const uint256& genesis_hash)
+{
+    RecoverySchema schema;
+    schema.audit_schema = MakeSchemaValue(genesis_hash);
+    schema.audit_schema.version = PaymentAuditRecoveryStore::DB_FORMAT_VERSION;
+    schema.audit_schema.guard = RECOVERY_SCHEMA_GUARD;
+    HashWriter writer{SER_GETHASH, 0};
+    writer << std::string{"SYS_PQ_PAYMENT_AUDIT_RECOVERY_SCHEMA_V1"}
+           << schema.audit_schema << schema.slots;
+    schema.checksum = writer.GetHash();
+    return schema;
+}
+
+uint256 RecoveryManifestChecksum(const uint256& genesis_hash,
+                                const RecoveryManifest& manifest)
+{
+    HashWriter writer{SER_GETHASH, 0};
+    writer << std::string{"SYS_PQ_PAYMENT_AUDIT_RECOVERY_MANIFEST_V1"}
+           << genesis_hash << manifest.version << manifest.guard
+           << manifest.present;
+    for (const auto& identity : manifest.identities) writer << identity;
+    return writer.GetHash();
+}
+
+RecoveryManifest MakeRecoveryManifest(
+    const uint256& genesis_hash,
+    const std::array<std::optional<PaymentAuditRecoveryIdentity>,
+                     PaymentAuditRecoveryStore::MAX_RETAINED_AUDITS>& retained)
+{
+    RecoveryManifest manifest;
+    for (std::size_t slot{0}; slot < retained.size(); ++slot) {
+        if (!retained[slot]) continue;
+        manifest.present[slot] = 1;
+        manifest.identities[slot] = *retained[slot];
+    }
+    manifest.checksum = RecoveryManifestChecksum(genesis_hash, manifest);
+    return manifest;
+}
+
+bool IsRecoveryManifestValid(const uint256& genesis_hash,
+                             const RecoveryManifest& manifest)
+{
+    if (manifest.version != PaymentAuditRecoveryStore::DB_FORMAT_VERSION ||
+        manifest.guard != RECOVERY_MANIFEST_GUARD ||
+        manifest.checksum != RecoveryManifestChecksum(genesis_hash, manifest)) {
+        return false;
+    }
+    for (std::size_t slot{0}; slot < manifest.present.size(); ++slot) {
+        if (manifest.present[slot] > 1 ||
+            (manifest.present[slot] && !manifest.identities[slot].IsStructurallyValid()) ||
+            (!manifest.present[slot] && manifest.identities[slot] !=
+                PaymentAuditRecoveryIdentity{})) return false;
+        for (std::size_t other{slot + 1}; other < manifest.present.size(); ++other) {
+            if (manifest.present[slot] && manifest.present[other] &&
+                manifest.identities[slot].witness_id ==
+                    manifest.identities[other].witness_id) return false;
+        }
+    }
+    return true;
+}
+
+uint256 RecoveryRecordChecksum(const uint256& genesis_hash, std::size_t slot,
+                              const RecoveryRecord& record)
+{
+    HashWriter writer{SER_GETHASH, 0};
+    writer << std::string{"SYS_PQ_PAYMENT_AUDIT_RECOVERY_RECORD_V1"}
+           << genesis_hash << static_cast<uint32_t>(slot)
+           << record.version << record.guard << record.identity << record.audit;
+    return writer.GetHash();
+}
+
+bool IsRecoveryAuditValid(const uint256& genesis_hash,
+                          const PaymentAuditRecoveryIdentity& identity,
+                          const FinalPaymentAudit& audit)
+{
+    return identity.IsStructurallyValid() && audit.IsStructurallyValid() &&
+           identity.epoch == audit.statement.commitment.seed.epoch &&
+           identity.carrier_height >= audit.statement.commitment.seal_height &&
+           identity.logical_id == audit.GetLogicalId(genesis_hash) &&
+           identity.witness_id == audit.GetWitnessId(genesis_hash);
+}
+
+bool IsRecoveryRecordValid(const uint256& genesis_hash, std::size_t slot,
+                           const RecoveryRecord& record,
+                           const PaymentAuditRecoveryIdentity& identity)
+{
+    return record.version == PaymentAuditRecoveryStore::DB_FORMAT_VERSION &&
+           record.guard == RECOVERY_RECORD_GUARD && record.identity == identity &&
+           IsRecoveryAuditValid(genesis_hash, record.identity, record.audit) &&
+           record.checksum == RecoveryRecordChecksum(genesis_hash, slot, record);
+}
+
+uint8_t RecoverySlotKey(std::size_t slot)
+{
+    return static_cast<uint8_t>(RECOVERY_SLOT_FIRST_KEY + slot);
+}
+
+} // namespace
+
+PaymentAuditRecoveryStore::PaymentAuditRecoveryStore(
+    fs::path path, uint256 genesis_hash, std::size_t cache_bytes, bool wipe)
+    : m_genesis_hash{std::move(genesis_hash)},
+      m_db{DBParams{.path = std::move(path),
+                    .cache_bytes = cache_bytes,
+                    .memory_only = false,
+                    .wipe_data = wipe,
+                    .obfuscate = false}}
+{
+    Initialize();
+}
+
+void PaymentAuditRecoveryStore::Initialize()
+{
+    LOCK(m_mutex);
+    if (m_genesis_hash.IsNull()) {
+        m_failure = PaymentAuditRecoveryStoreResult::INVALID;
+        return;
+    }
+    try {
+        const auto expected_schema{MakeRecoverySchema(m_genesis_hash)};
+        if (m_db.IsEmpty()) {
+            CDBBatch batch{m_db};
+            batch.Write(RECOVERY_SCHEMA_KEY, expected_schema);
+            batch.Write(RECOVERY_MANIFEST_KEY,
+                        MakeRecoveryManifest(m_genesis_hash, m_retained));
+            if (!WriteBatchLocked(batch)) {
+                m_failure = PaymentAuditRecoveryStoreResult::DATABASE_ERROR;
+            }
+            return;
+        }
+        RecoverySchema schema;
+        RecoveryManifest manifest;
+        if (ReadExactBounded(m_db, RECOVERY_SCHEMA_KEY, RECOVERY_SCHEMA_SIZE,
+                             schema) != BoundedReadResult::FOUND ||
+            schema != expected_schema ||
+            ReadExactBounded(m_db, RECOVERY_MANIFEST_KEY, RECOVERY_MANIFEST_SIZE,
+                             manifest) != BoundedReadResult::FOUND ||
+            !IsRecoveryManifestValid(m_genesis_hash, manifest)) {
+            m_failure = PaymentAuditRecoveryStoreResult::CORRUPT;
+            return;
+        }
+        std::array<bool, 2 + MAX_RETAINED_AUDITS> seen{};
+        std::unique_ptr<CDBIterator> iterator{m_db.NewIterator()};
+        for (iterator->SeekToFirst(); iterator->Valid(); iterator->Next()) {
+            uint8_t key{0};
+            if (!iterator->GetKeyExact(key) || key < RECOVERY_SCHEMA_KEY ||
+                key >= RECOVERY_SLOT_FIRST_KEY + MAX_RETAINED_AUDITS ||
+                seen[key - RECOVERY_SCHEMA_KEY]) {
+                m_failure = PaymentAuditRecoveryStoreResult::CORRUPT;
+                return;
+            }
+            seen[key - RECOVERY_SCHEMA_KEY] = true;
+        }
+        iterator->CheckStatus();
+        for (std::size_t slot{0}; slot < MAX_RETAINED_AUDITS; ++slot) {
+            if (seen[2 + slot] != (manifest.present[slot] != 0)) {
+                m_failure = PaymentAuditRecoveryStoreResult::CORRUPT;
+                return;
+            }
+            if (manifest.present[slot]) {
+                m_retained[slot] = manifest.identities[slot];
+                if (!GetRawLocked(slot)) return;
+            }
+        }
+    } catch (const std::exception&) {
+        m_failure = PaymentAuditRecoveryStoreResult::DATABASE_ERROR;
+    }
+}
+
+bool PaymentAuditRecoveryStore::IsHealthy() const
+{
+    LOCK(m_mutex);
+    return !m_failure;
+}
+
+std::optional<PaymentAuditRecoverySnapshot>
+PaymentAuditRecoveryStore::GetRetentionSnapshot() const
+{
+    LOCK(m_mutex);
+    if (m_failure) return std::nullopt;
+    PaymentAuditRecoverySnapshot snapshot{m_revision, {}};
+    snapshot.retained.reserve(MAX_RETAINED_AUDITS);
+    for (const auto& identity : m_retained) {
+        if (identity) snapshot.retained.push_back(*identity);
+    }
+    return snapshot;
+}
+
+std::optional<RawRecoveryPaymentAudit> PaymentAuditRecoveryStore::GetRawLocked(
+    std::size_t slot) const
+{
+    if (m_failure || slot >= MAX_RETAINED_AUDITS || !m_retained[slot]) {
+        return std::nullopt;
+    }
+    try {
+        RecoveryRecord record;
+        if (ReadExactBounded(m_db, RecoverySlotKey(slot), RECOVERY_RECORD_SIZE,
+                             record) != BoundedReadResult::FOUND ||
+            !IsRecoveryRecordValid(m_genesis_hash, slot, record,
+                                   *m_retained[slot])) {
+            m_failure = PaymentAuditRecoveryStoreResult::CORRUPT;
+            return std::nullopt;
+        }
+        return RawRecoveryPaymentAudit{record.identity, std::move(record.audit)};
+    } catch (const std::exception&) {
+        m_failure = PaymentAuditRecoveryStoreResult::DATABASE_ERROR;
+        return std::nullopt;
+    }
+}
+
+std::optional<RawRecoveryPaymentAudit> PaymentAuditRecoveryStore::GetRaw(
+    const uint256& witness_id) const
+{
+    LOCK(m_mutex);
+    if (m_failure || witness_id.IsNull()) return std::nullopt;
+    for (std::size_t slot{0}; slot < MAX_RETAINED_AUDITS; ++slot) {
+        if (m_retained[slot] && m_retained[slot]->witness_id == witness_id) {
+            return GetRawLocked(slot);
+        }
+    }
+    return std::nullopt;
+}
+
+bool PaymentAuditRecoveryStore::Has(const uint256& witness_id) const
+{
+    LOCK(m_mutex);
+    if (m_failure || witness_id.IsNull()) return false;
+    for (const auto& identity : m_retained) {
+        if (identity && identity->witness_id == witness_id) return true;
+    }
+    return false;
+}
+
+bool PaymentAuditRecoveryStore::CanAdvanceRevision() const
+{
+    if (m_revision != std::numeric_limits<uint64_t>::max()) return true;
+    m_failure = PaymentAuditRecoveryStoreResult::DATABASE_ERROR;
+    return false;
+}
+
+bool PaymentAuditRecoveryStore::WriteBatchLocked(CDBBatch& batch)
+{
+    return m_batch_writer_for_testing
+               ? m_batch_writer_for_testing(batch, /*sync=*/true)
+               : m_db.WriteBatch(batch, /*fSync=*/true);
+}
+
+PaymentAuditRecoveryStoreResult PaymentAuditRecoveryStore::Persist(
+    VerifiedPaymentAuditRecoveryAdmission admission,
+    std::optional<PaymentAuditRecoveryReplacement> replacement)
+{
+    LOCK(m_mutex);
+    if (m_failure) return *m_failure;
+    if (!IsRecoveryAuditValid(m_genesis_hash, admission.m_identity,
+                              admission.m_audit)) {
+        return PaymentAuditRecoveryStoreResult::INVALID;
+    }
+    std::optional<std::size_t> replacement_slot;
+    if (replacement) {
+        if (replacement->m_expected_revision != m_revision) {
+            return PaymentAuditRecoveryStoreResult::STALE;
+        }
+        if (replacement->m_new_identity != admission.m_identity ||
+            !replacement->m_old_identity.IsStructurallyValid()) {
+            return PaymentAuditRecoveryStoreResult::INVALID;
+        }
+        for (std::size_t slot{0}; slot < MAX_RETAINED_AUDITS; ++slot) {
+            if (m_retained[slot] == replacement->m_old_identity) replacement_slot = slot;
+        }
+        if (!replacement_slot) return PaymentAuditRecoveryStoreResult::STALE;
+    }
+    std::optional<std::size_t> selected_slot;
+    bool selected_payload_validated{false};
+    for (std::size_t slot{0}; slot < MAX_RETAINED_AUDITS; ++slot) {
+        if (m_retained[slot] &&
+            m_retained[slot]->witness_id == admission.m_identity.witness_id) {
+            if (replacement_slot && *replacement_slot != slot) {
+                return PaymentAuditRecoveryStoreResult::INVALID;
+            }
+            const auto existing{GetRawLocked(slot)};
+            if (!existing) return *m_failure;
+            if (existing->audit != admission.m_audit) {
+                return PaymentAuditRecoveryStoreResult::INVALID;
+            }
+            if (existing->identity == admission.m_identity) {
+                return PaymentAuditRecoveryStoreResult::DUPLICATE_WITNESS;
+            }
+            selected_slot = slot;
+            selected_payload_validated = true;
+            break;
+        }
+    }
+    if (!selected_slot) selected_slot = replacement_slot;
+    if (!selected_slot) {
+        for (std::size_t slot{0}; slot < MAX_RETAINED_AUDITS; ++slot) {
+            if (!m_retained[slot]) {
+                selected_slot = slot;
+                break;
+            }
+        }
+    }
+    if (!selected_slot) return PaymentAuditRecoveryStoreResult::FULL;
+    if (!selected_payload_validated && m_retained[*selected_slot] &&
+        !GetRawLocked(*selected_slot)) return *m_failure;
+    if (!CanAdvanceRevision()) return *m_failure;
+    try {
+        RecoveryRecord record;
+        record.identity = admission.m_identity;
+        record.audit = std::move(admission.m_audit);
+        record.checksum = RecoveryRecordChecksum(m_genesis_hash, *selected_slot, record);
+        auto retained{m_retained};
+        retained[*selected_slot] = record.identity;
+        CDBBatch batch{m_db};
+        batch.Write(RecoverySlotKey(*selected_slot), record);
+        batch.Write(RECOVERY_MANIFEST_KEY, MakeRecoveryManifest(m_genesis_hash, retained));
+        if (!WriteBatchLocked(batch)) {
+            m_failure = PaymentAuditRecoveryStoreResult::DATABASE_ERROR;
+            return *m_failure;
+        }
+        m_retained = std::move(retained);
+        ++m_revision;
+        return PaymentAuditRecoveryStoreResult::ACCEPTED;
+    } catch (const std::exception&) {
+        m_failure = PaymentAuditRecoveryStoreResult::DATABASE_ERROR;
+        return *m_failure;
+    }
+}
+
+PaymentAuditRecoveryStoreResult PaymentAuditRecoveryStore::RetireCovered(
+    PaymentAuditRecoveryRetirement retirement)
+{
+    LOCK(m_mutex);
+    if (m_failure) return *m_failure;
+    if (retirement.m_expected_revision != m_revision) {
+        return PaymentAuditRecoveryStoreResult::STALE;
+    }
+    const auto& identity{retirement.m_identity};
+    const auto& checkpoint{retirement.m_checkpoint};
+    if (!identity.IsStructurallyValid() || !checkpoint.IsStructurallyValid() ||
+        checkpoint.prune_through_epoch < identity.epoch ||
+        checkpoint.covered_through_height < identity.carrier_height) {
+        return PaymentAuditRecoveryStoreResult::INVALID;
+    }
+    for (std::size_t slot{0}; slot < MAX_RETAINED_AUDITS; ++slot) {
+        if (m_retained[slot] != identity) continue;
+        if (!GetRawLocked(slot) || !CanAdvanceRevision()) return *m_failure;
+        try {
+            auto retained{m_retained};
+            retained[slot].reset();
+            CDBBatch batch{m_db};
+            batch.Erase(RecoverySlotKey(slot));
+            batch.Write(RECOVERY_MANIFEST_KEY, MakeRecoveryManifest(m_genesis_hash, retained));
+            if (!WriteBatchLocked(batch)) {
+                m_failure = PaymentAuditRecoveryStoreResult::DATABASE_ERROR;
+                return *m_failure;
+            }
+            m_retained = std::move(retained);
+            ++m_revision;
+            return PaymentAuditRecoveryStoreResult::ACCEPTED;
+        } catch (const std::exception&) {
+            m_failure = PaymentAuditRecoveryStoreResult::DATABASE_ERROR;
+            return *m_failure;
+        }
+    }
+    return PaymentAuditRecoveryStoreResult::STALE;
 }
 
 } // namespace llmq::pq

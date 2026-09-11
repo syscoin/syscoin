@@ -3218,12 +3218,20 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
                     chainman.m_options.datadir /
                         "llmq/pq-payment-audits",
                     m_genesis_hash, 8U << 20, reset_payment_audits);
+            // Raw recovery bytes carry no persisted replay authority. Keep
+            // them across reindex so the only local proof is not discarded.
+            m_payment_audit_recovery_store =
+                std::make_unique<pq::PaymentAuditRecoveryStore>(
+                    chainman.m_options.datadir /
+                        "llmq/pq-payment-audit-recovery",
+                    m_genesis_hash);
             m_payment_audit_staging_store =
                 std::make_unique<pq::PaymentAuditStagingStore>(
                     chainman.m_options.datadir /
                         "llmq/pq-payment-audit-staging",
                     m_genesis_hash, 8U << 20, reset_payment_audits);
             if (!m_payment_audit_store->IsHealthy() ||
+                !m_payment_audit_recovery_store->IsHealthy() ||
                 !m_payment_audit_staging_store->IsHealthy()) {
                 throw std::runtime_error{
                     "payment-audit database failed schema/health check"};
@@ -3233,6 +3241,7 @@ CChainLocksHandler::CChainLocksHandler(CConnman& connman,
                       "payment-audit archive: %s\n",
                       __func__, exception.what());
             m_payment_audit_store.reset();
+            m_payment_audit_recovery_store.reset();
             m_payment_audit_staging_store.reset();
             m_persistence_failed.store(true);
             DisableShareAdmission();
@@ -4479,18 +4488,36 @@ bool CChainLocksHandler::GetRecentChainLockByHeight(
 bool CChainLocksHandler::AlreadyHavePaymentAudit(
     const uint256& witness_id) const
 {
-    return m_payment_audit_store && !witness_id.IsNull() &&
-           m_payment_audit_store->Has(witness_id);
+    if (witness_id.IsNull()) return false;
+    if (m_payment_audit_store && m_payment_audit_store->Has(witness_id)) return true;
+    if (!m_payment_audit_recovery_store || !m_payment_audit_recovery_store->Has(witness_id)) {
+        return false;
+    }
+    // Raw bytes are served independently, but cannot suppress an unresolved
+    // receipt's ordinary download after a reorg or before base sync completes.
+    // The scheduler separately attempts full historical revalidation locally.
+    LOCK(m_pending_payment_audit_receipt_mutex);
+    return !m_pending_payment_audit_receipt ||
+        m_pending_payment_audit_receipt->receipt.audit_witness_id != witness_id;
 }
 
 bool CChainLocksHandler::GetPaymentAuditByHash(
     const uint256& witness_id, pq::FinalPaymentAudit& result) const
 {
-    if (!m_payment_audit_store || witness_id.IsNull()) return false;
-    const auto found{m_payment_audit_store->Get(witness_id)};
-    if (!found) return false;
-    result = *found;
-    return true;
+    if (witness_id.IsNull()) return false;
+    if (m_payment_audit_store) {
+        if (const auto found{m_payment_audit_store->Get(witness_id)}) {
+            result = *found;
+            return true;
+        }
+    }
+    if (m_payment_audit_recovery_store) {
+        if (const auto found{m_payment_audit_recovery_store->GetRaw(witness_id)}) {
+            result = found->audit;
+            return true;
+        }
+    }
+    return false;
 }
 
 CChainLocksHandler::PaymentAuditReceiptCertificateStatus
@@ -9948,6 +9975,7 @@ uint256 CChainLocksHandler::GetPaymentAuditReplaySourceToken() const
     if (!m_chainman.IsPQParticipationAllowed() || !m_config || !m_store ||
         !m_persistence || m_persistence_failed.load() ||
         !m_payment_audit_store || !m_payment_audit_store->IsHealthy() ||
+        !m_payment_audit_recovery_store || !m_payment_audit_recovery_store->IsHealthy() ||
         deterministicMNManager == nullptr) return {};
     uint64_t roster_generation{0};
     if (!GetQuorumRosterCache(&roster_generation)) return {};
@@ -11302,10 +11330,13 @@ void CChainLocksHandler::RequestNeededBTCCCertificate()
 
 void CChainLocksHandler::RequestNeededPaymentAuditCertificate()
 {
+    AssertLockNotHeld(cs_main);
+    AssertLockNotHeld(m_verification_mutex);
     if (!m_chainman.IsPQParticipationAllowed()) return;
     {
         LOCK(cs_main);
         (void)RevalidatePendingPaymentAuditReceiptDependencyLocked();
+        RetirePaymentAuditRecoveryThroughCheckpoint();
         if (IsPaymentAuditPresealActive()) {
             LOCK(m_pending_payment_audit_receipt_mutex);
             if (!m_pending_payment_audit_receipt ||
@@ -11372,6 +11403,20 @@ void CChainLocksHandler::RequestNeededPaymentAuditCertificate()
         }
     }
     if (!witness_id) return;
+    if (m_payment_audit_recovery_store) {
+        const auto retained{m_payment_audit_recovery_store->GetRaw(*witness_id)};
+        if (retained) {
+            std::optional<PaymentAuditHistoricalContext> historical;
+            {
+                LOCK(cs_main);
+                historical = ResolvePendingPaymentAuditContext(*witness_id);
+            }
+            // A reopened raw package must traverse all signature, branch,
+            // owner and generation checks before regaining RAM authority.
+            if (historical && TryProcessPaymentAuditHistoricalReplay(
+                    retained->audit, *historical).has_value()) return;
+        }
+    }
     m_connman.ForEachNode([&](CNode* node) {
         if (!SupportsPQChainLocks(node->GetCommonVersion())) return;
         CNetMsgMaker maker{node->GetCommonVersion()};
@@ -17738,6 +17783,118 @@ CChainLocksHandler::GetPaymentAuditHistoricalReplayTransition(
     return proof->transition;
 }
 
+bool CChainLocksHandler::PersistPaymentAuditHistoricalReplayWitness(
+    const pq::FinalPaymentAudit& audit,
+    const PaymentAuditHistoricalReplayBoundary& boundary)
+{
+    AssertLockHeld(cs_main);
+    if (!m_payment_audit_recovery_store || m_persistence_failed.load()) return false;
+    const auto snapshot{m_payment_audit_recovery_store->GetRetentionSnapshot()};
+    if (!snapshot) {
+        m_persistence_failed.store(true);
+        return false;
+    }
+    const auto& receipt{boundary.owner.receipt};
+    const pq::PaymentAuditRecoveryIdentity identity{receipt.epoch,
+        receipt.carrier_height, boundary.owner.carrier_hash,
+        receipt.audit_logical_id, receipt.audit_witness_id};
+    std::optional<pq::PaymentAuditRecoveryReplacement> replacement;
+    const bool already_retained{std::any_of(snapshot->retained.begin(),
+        snapshot->retained.end(), [&](const auto& retained) {
+            return retained.witness_id == identity.witness_id;
+        })};
+    if (!already_retained && snapshot->retained.size() >=
+            pq::PaymentAuditRecoveryStore::MAX_RETAINED_AUDITS) {
+        pq::PaymentAuditPresealState markers;
+        {
+            LOCK(m_btcc_preseal_mutex);
+            markers = m_payment_audit_preseal_state;
+        }
+        if (!markers.IsStructurallyValid()) return false;
+        const CChain& chain{m_chainman.ActiveChain()};
+        const CBlockIndex* seal{chain[receipt.seal_height]};
+        if (!seal || seal->GetBlockHash() != receipt.seal_block_hash) return false;
+        const pq::PaymentAuditRecoveryIdentity* victim{nullptr};
+        bool victim_off_branch{false};
+        for (const auto& retained : snapshot->retained) {
+            // A marker may still need this exact witness even when its
+            // original carrier was replaced on another branch.
+            const std::array marker_slots{&markers.active, &markers.prospective};
+            const bool owned{std::any_of(marker_slots.begin(), marker_slots.end(),
+                [&](const auto* marker) {
+                    return *marker && (*marker)->terminal_receipt.audit_witness_id ==
+                        retained.witness_id;
+                })};
+            if (owned) continue;
+            const CBlockIndex* old{chain[retained.carrier_height]};
+            const bool off_branch{!old || old->GetBlockHash() != retained.carrier_hash};
+            if (!off_branch) {
+                const auto indexed{IndexedPaymentAuditReceiptState(*old)};
+                if (retained.epoch >= identity.epoch || !indexed ||
+                    indexed->cursor.epoch != retained.epoch ||
+                    indexed->cursor.carrier_height != retained.carrier_height ||
+                    indexed->cursor.audit_logical_id != retained.logical_id ||
+                    indexed->cursor.audit_witness_id != retained.witness_id ||
+                    seal->nHeight < old->nHeight ||
+                    seal->GetAncestor(old->nHeight) != old) continue;
+            }
+            // Prefer obsolete branches, then the oldest covered package;
+            // keep the most recent preceding recovery available to peers.
+            if (!victim || (off_branch && !victim_off_branch) ||
+                (off_branch == victim_off_branch &&
+                 retained.carrier_height < victim->carrier_height)) {
+                victim = &retained;
+                victim_off_branch = off_branch;
+            }
+        }
+        if (!victim) return false;
+        replacement = pq::PaymentAuditRecoveryReplacement{
+            *victim, identity, snapshot->revision};
+    }
+    const auto result{m_payment_audit_recovery_store->Persist(
+        pq::VerifiedPaymentAuditRecoveryAdmission{identity, audit},
+        std::move(replacement))};
+    if (result == pq::PaymentAuditRecoveryStoreResult::ACCEPTED ||
+        result == pq::PaymentAuditRecoveryStoreResult::DUPLICATE_WITNESS) return true;
+    if (result == pq::PaymentAuditRecoveryStoreResult::CORRUPT ||
+        result == pq::PaymentAuditRecoveryStoreResult::DATABASE_ERROR) {
+        m_persistence_failed.store(true);
+    }
+    LogPrintf("CChainLocksHandler::%s -- failed to retain recovered payment audit %s (%d)\n",
+              __func__, identity.witness_id.ToString(), static_cast<int>(result));
+    return false;
+}
+
+void CChainLocksHandler::RetirePaymentAuditRecoveryThroughCheckpoint()
+{
+    AssertLockHeld(cs_main);
+    if (!m_payment_audit_recovery_store || !m_payment_audit_store ||
+        m_persistence_failed.load()) return;
+    const auto checkpoint{m_payment_audit_store->GetPruneCheckpoint()};
+    if (!checkpoint) return;
+    const auto snapshot{m_payment_audit_recovery_store->GetRetentionSnapshot()};
+    if (!snapshot) {
+        m_persistence_failed.store(true);
+        return;
+    }
+    for (const auto& retained : snapshot->retained) {
+        const CBlockIndex* carrier{m_chainman.ActiveChain()[retained.carrier_height]};
+        if (retained.epoch > checkpoint->prune_through_epoch ||
+            retained.carrier_height > checkpoint->covered_through_height ||
+            !carrier || carrier->GetBlockHash() != retained.carrier_hash ||
+            !IsPaymentAuditCheckpointAuthenticated(*checkpoint, *carrier)) continue;
+        const auto result{m_payment_audit_recovery_store->RetireCovered(
+            pq::PaymentAuditRecoveryRetirement{retained, *checkpoint, snapshot->revision})};
+        if (result == pq::PaymentAuditRecoveryStoreResult::CORRUPT ||
+            result == pq::PaymentAuditRecoveryStoreResult::DATABASE_ERROR) {
+            m_persistence_failed.store(true);
+        }
+        // One bounded fsync per scheduler pass; refresh the revision before
+        // retiring another entry on the following pass.
+        return;
+    }
+}
+
 std::optional<bool> CChainLocksHandler::TryProcessPaymentAuditHistoricalReplay(
     const pq::FinalPaymentAudit& audit, const PaymentAuditHistoricalContext& historical)
 {
@@ -17827,6 +17984,9 @@ std::optional<bool> CChainLocksHandler::TryProcessPaymentAuditHistoricalReplay(
         auto transition{DerivePaymentAuditProbationTransition(audit.statement.commitment,
             subject, *carrier->pprev, receipt.carrier_height, receipt.result_hash, receipt.online_members)};
         if (!transition || transition->Result().StateHash() != receipt.next_probation_state_hash) return false;
+        // Publish replay authority only after the complete verified package
+        // is durable. Raw bytes alone can never recreate this authority.
+        if (!PersistPaymentAuditHistoricalReplayWitness(audit, *boundary)) return false;
         const uint64_t probation_generation{transition->ProvenanceGeneration()};
         VerifiedPaymentAuditReceiptTransitionPtr verified{new VerifiedPaymentAuditReceiptTransition{
             receipt, audit.statement, carrier->pprev->GetBlockHash(), carrier->pprev->nHeight,
@@ -18369,7 +18529,7 @@ void CChainLocksHandler::ProcessPaymentAuditCertificateInternal(
         if (replay.has_value()) {
             // A historical trust substitute may only mint replay authority.
             // Neither an ordinary archive duplicate nor a failed attempt
-            // may route it into ordinary admission, serving or finality.
+            // may route it into ordinary admission or finality.
             if (*replay) {
                 complete_request(witness_id);
                 LogPrint(BCLog::CHAINLOCKS,
