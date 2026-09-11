@@ -3718,7 +3718,7 @@ static bool ShouldBypassExternalNEVMNotifyCalls(const ChainstateManager& chainma
     return bypass_height > 0 && nHeight <= bypass_height;
 }
 
-// SYSCOIN BEGIN: Classify immutable ancestry only after a failed live retry.
+// SYSCOIN BEGIN: Classify failed execution against a verified predecessor.
 static bool HasCommittedNEVMContinuityMismatch(
     const BlockManager& blockman, const CBlock& block,
     const CBlockIndex& index, const CNEVMHeader& commitment,
@@ -3791,7 +3791,7 @@ static bool HasCommittedNEVMContinuityMismatch(
         return false;
     }
 }
-// SYSCOIN END: Classify immutable ancestry only after a failed live retry.
+// SYSCOIN END: Classify failed execution against a verified predecessor.
 
 // SYSCOIN: Authenticated BTCC catch-up may replay NEVM without treating an
 // equal-height but different Syscoin branch as already applied.
@@ -4861,6 +4861,49 @@ bool Chainstate::ReplayDeferredBTCCNEVMLocked(
             !state.IsValid()) {
             error = strprintf("deferred-nevm-connect:%d:%s", height,
                               state.ToString());
+            if (!rejection && !m_chainman.m_interrupt && state.IsError() &&
+                state.GetRejectReason() == "nevm-connect-response-invalid-data") {
+                // Earlier acknowledgements can still be buffered. Drain them
+                // before proving this slot's continuity, preserving any earlier
+                // typed rejection for the outer reconciliation wrapper.
+                if (!FlushAndGetNEVMBlockInfo(
+                        geth_count, geth_last_syscoin_hash, state_string,
+                        &rejection)) {
+                    error = "deferred-nevm-failed-prefix-unavailable:" + state_string;
+                    return false;
+                }
+                LOCK(cs_main);
+                if (!authorization_current()) return false;
+                const CBlockIndex* through_index{
+                    m_chainman.ActiveChain()[through_height]};
+                if (this != &m_chainman.ActiveChainstate() ||
+                    through_index == nullptr ||
+                    through_index->GetBlockHash() != through_hash ||
+                    m_chainman.ActiveChain()[height] != index) {
+                    error = "deferred-nevm-prefix-reorged";
+                    return false;
+                }
+                if (m_chainman.m_interrupt) return false;
+                if (geth_count != static_cast<uint64_t>(int64_t{height} - nevm_start) ||
+                    (geth_count == 0 ? !geth_last_syscoin_hash.IsNull()
+                        : geth_last_syscoin_hash != index->pprev->GetBlockHash())) {
+                    error = "deferred-nevm-failed-prefix-pair-mismatch";
+                    return false;
+                }
+                // Disk reads bind the block header, but the coinbase commitment
+                // also needs its transaction Merkle proof before it can establish
+                // an immutable fault in this already-connected Core ancestor.
+                bool mutated{false};
+                BlockValidationState commitment_state;
+                CNEVMHeader commitment;
+                if (!block.vtx.empty() &&
+                    BlockMerkleRoot(block, &mutated) == index->hashMerkleRoot &&
+                    !mutated && GetNEVMData(commitment_state, block, commitment) &&
+                    HasCommittedNEVMContinuityMismatch(
+                        m_blockman, block, *index, commitment, nevm_start)) {
+                    rejection = NEVMBlockReject{commitment.nBlockHash, block_hash};
+                }
+            }
             return false;
         }
         if (pnevmdatadb) {

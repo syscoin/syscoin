@@ -8370,6 +8370,109 @@ llmq::pq::RecoveryUniverseCapsulePtr SelectorRecoveryUniverse(
 
 } // namespace
 
+namespace llmq::test {
+
+// SYSCOIN: A real durable winner on a synthetic validated descendant protects
+// the native NEVM fixture's active ancestor before in-memory finality import.
+void WithNEVMDurableFinalityForTest(ChainstateManager& chainman,
+                                  const CBlockIndex& protected_index,
+                                  const std::function<void()>& run)
+{
+    using namespace pq;
+    using Access = CChainLocksHandlerTestAccess;
+    constexpr int32_t TARGET_HEIGHT{865};
+    auto& handler{*Assert(chainLocksHandler)};
+    auto config{CatchupStoreConfig()};
+    config.btcc_schedule.candidate_origin = TARGET_HEIGHT;
+    BOOST_REQUIRE(config.IsValid());
+    const uint256 genesis{chainman.GetConsensus().hashGenesisBlock};
+    const CBlockIndex* target{&protected_index};
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.ActiveChain().Contains(&protected_index));
+        BOOST_REQUIRE_LT(protected_index.nHeight, TARGET_HEIGHT);
+        auto* original_best_header{chainman.m_best_header};
+        while (target->nHeight < TARGET_HEIGHT) {
+            CBlockHeader header;
+            header.nVersion = 4;
+            header.hashPrevBlock = target->GetBlockHash();
+            header.hashMerkleRoot = NonNullHash(1'106'000 + target->nHeight);
+            header.nTime = target->nTime + 1;
+            header.nBits = target->nBits;
+            auto* next{chainman.m_blockman.AddToBlockIndex(header, chainman.m_best_header)};
+            BOOST_REQUIRE(next);
+            next->nStatus = BLOCK_VALID_SCRIPTS;
+            next->nTx = 1;
+            next->nChainTx = target->nChainTx + 1;
+            target = next;
+        }
+        chainman.m_best_header = original_best_header;
+    }
+    const auto* predecessor{target->pprev};
+    BOOST_REQUIRE(predecessor);
+    auto winner{MakeCatchupChainLock(TARGET_HEIGHT, predecessor->nHeight,
+                                    predecessor->GetBlockHash(), 1'107'000)};
+    winner.statement.block_hash = target->GetBlockHash();
+    winner.statement.accepted_btcc_cursor = {
+        TARGET_HEIGHT, target->GetBlockHash(), NonNullHash(1'107'001)};
+    winner.statement.btcc_advance = BTCCAdvance::ADVANCE;
+    winner.statement.roster_transition = RosterAuthorizationTransitionKind::INITIALIZE;
+    winner.statement.roster_authorization_base = {};
+    const auto epoch{EpochForHeight(config.chainlock_schedule, TARGET_HEIGHT)};
+    BOOST_REQUIRE(epoch);
+    auto ready{SubjectBeacon(*epoch)};
+    ready.anchor_cursor = winner.statement.accepted_btcc_cursor;
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        auto& seed{winner.statement.roster_beacons.active.seeds[slot]};
+        seed = ready;
+        seed.epoch = *epoch - (ACTIVE_QUORUMS - 1) + slot;
+    }
+    winner.statement.roster_beacons.active.recovery_authority_source.normal_beacon = ready;
+    winner.statement.roster_beacons.next = {};
+    winner.statement.roster_beacons.next.epoch = *epoch + 1;
+    RosterAuthorizationTransition transition;
+    transition.kind = winner.statement.roster_transition;
+    transition.target_height = TARGET_HEIGHT;
+    transition.target_block_hash = target->GetBlockHash();
+    transition.predecessor_height = predecessor->nHeight;
+    transition.predecessor_block_hash = predecessor->GetBlockHash();
+    transition.new_window = winner.statement.roster_beacons;
+    const auto state_hash{GetRosterAuthorizationStateHash(genesis, transition)};
+    BOOST_REQUIRE(state_hash);
+    winner.statement.roster_authorization_state_hash = *state_hash;
+    BOOST_REQUIRE(winner.IsStructurallyValid());
+    const auto context{ChainLockStoreTestContextFactory::CreateDurable(
+        genesis, config.chainlock_schedule, winner.statement)};
+    BOOST_REQUIRE(context);
+    const auto universe{SelectorRecoveryUniverse(genesis,
+        winner.statement.roster_beacons.active.recovery_authority_source,
+        predecessor->GetBlockHash())};
+    auto persistence{std::make_unique<PQChainLockPersistence>(
+        DBParams{.path = chainman.m_options.datadir / "nevm-protected-finality",
+                 .cache_bytes = 1U << 20, .wipe_data = true}, genesis, config)};
+    BOOST_REQUIRE(persistence->PersistInitializedBest(
+        winner, context, nullptr, nullptr, std::nullopt, universe));
+    BOOST_REQUIRE(persistence->HasBest());
+    struct Restore {
+        CChainLocksHandler& handler;
+        std::unique_ptr<PQChainLockPersistence> original;
+        ~Restore() { Access::ExchangePersistence(handler, std::move(original)).reset(); }
+    } restore{handler, Access::ExchangePersistence(handler, std::move(persistence))};
+    {
+        LOCK(::cs_main);
+        const CBlockIndex* active_floor{nullptr};
+        const CBlockIndex* durable_target{nullptr};
+        std::string error;
+        BOOST_REQUIRE_MESSAGE(handler.GetDurableFinalityRecoveryFloor(
+            active_floor, durable_target, error), error);
+        BOOST_REQUIRE(active_floor == &protected_index);
+        BOOST_REQUIRE(durable_target == target);
+    }
+    run();
+}
+
+} // namespace llmq::test
+
 BOOST_FIXTURE_TEST_CASE(
     chainlock_targeted_polls_preserve_standby_peers_and_upload_limits,
     PQAuthorizationBasePathSetup)

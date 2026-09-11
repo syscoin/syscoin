@@ -105,6 +105,9 @@ namespace llmq::test {
 void WithNEVMRootDeferralForTest(ChainstateManager& chainman,
                                 const CBlockIndex& carrier,
                                 const std::function<void()>& run);
+void WithNEVMDurableFinalityForTest(ChainstateManager& chainman,
+                                   const CBlockIndex& protected_index,
+                                   const std::function<void()>& run);
 
 class PQHistoryReauthenticationTestAccess {
 public:
@@ -5395,6 +5398,179 @@ struct DeferredNEVMRejectionSetup : StartupNEVMRecoverySetup {
     }
 };
 
+// SYSCOIN: Deferred replay reaches a real committed-header contradiction only
+// after buffering valid predecessors in an already-connected Core suffix.
+struct DeferredNEVMContinuitySetup : CommittedNEVMContinuitySetup {
+    enum class EndpointFailure { FLUSH, STATUS, WRONG_HASH, BEHIND, AHEAD };
+    std::shared_ptr<const CBlock> deferred_tip;
+    std::size_t finalizations{0};
+    bool complete{true};
+    std::string replay_error;
+
+    void PrepareDeferred(HeaderCase selected_case)
+    {
+        PrepareCommitted(selected_case, /*retained=*/1);
+        auto& chainman{*m_node.chainman};
+        {
+            struct RestoreConnection {
+                bool previous{fNEVMConnection};
+                ~RestoreConnection() { fNEVMConnection = previous; }
+            } restore;
+            // Keep normal local validation and undo creation while the
+            // externally unapplied candidate joins the deferred suffix.
+            fNEVMConnection = false;
+            BlockValidationState state;
+            BOOST_REQUIRE_MESSAGE(chainman.ActiveChainstate().ActivateBestChain(state, candidate), state.ToString());
+        }
+        BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainman.ActiveTip()) == candidate_index);
+        prefix.push_back(candidate);
+        deferred_tip = MineNEVMBlock(/*forward_to_nevm=*/false);
+        prefix.pop_back();
+        {
+            LOCK(::cs_main);
+            // Regtest's connection-off shortcut also skips local root
+            // recording. Real receipt deferral records these commitments
+            // before external execution, so retain the same durable roots.
+            NEVMTxRootMap roots;
+            for (const auto& block : {candidate, deferred_tip}) {
+                CNEVMHeader header;
+                BlockValidationState state;
+                BOOST_REQUIRE(GetNEVMData(state, *block, header));
+                roots.emplace(header.nBlockHash, NEVMTxRoot{header.nTxRoot, header.nReceiptRoot});
+            }
+            pnevmtxrootsdb->FlushDataToCache(roots);
+            BlockValidationState state;
+            BOOST_REQUIRE_MESSAGE(chainman.ActiveChainstate().FlushStateToDisk(state, FlushStateMode::ALWAYS), state.ToString());
+        }
+        BOOST_REQUIRE_EQUAL(nevm->applied_count, 1U);
+        BOOST_REQUIRE(nevm->applied_hash == prefix.front()->GetHash());
+        BOOST_REQUIRE(nevm->buffered_pairs.empty());
+        nevm->connected_blocks.clear();
+        nevm->command_trace.clear();
+        nevm->flush_requests = 0;
+        nevm->block_info_queries = 0;
+        nevm->disconnect_error = "unexpected-disconnect-of-unapplied-prefix";
+        nevm->connect_response = [this](const uint256& hash, uint32_t) {
+            return hash == candidate->GetHash()
+                ? std::string{"nevm-connect-response-invalid-data"} : std::string{};
+        };
+    }
+
+    bool ReplayDeferred(const std::function<bool()>& revalidate = {})
+    {
+        return ReplayDeferredForTest(m_node.chainman->ActiveChainstate(),
+            candidate_index->nHeight + 1, deferred_tip->GetHash(),
+            [this] {
+                AssertMainLockHeldForTest();
+                ++finalizations;
+                return true;
+            }, complete, replay_error, revalidate);
+    }
+
+    void CheckDeferredState(std::size_t retained_count = 5)
+    {
+        auto& chainman{*m_node.chainman};
+        auto& chainstate{chainman.ActiveChainstate()};
+        std::vector<std::shared_ptr<const CBlock>> blocks{prefix};
+        blocks.push_back(candidate);
+        blocks.push_back(deferred_tip);
+        BOOST_REQUIRE_LE(retained_count, blocks.size());
+        BOOST_REQUIRE_GT(retained_count, 0U);
+        LOCK(::cs_main);
+        const uint256 tip{blocks[retained_count - 1]->GetHash()};
+        BOOST_CHECK(chainman.ActiveTip()->GetBlockHash() == tip);
+        BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == tip);
+        BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == tip);
+        BOOST_CHECK(pnevmtxrootsdb->GetPublishedTip() == tip);
+        BOOST_CHECK(!pnevmtxrootsdb->GetPendingDisconnect());
+        BOOST_CHECK(nevm->disconnected_blocks.empty());
+        for (std::size_t i{0}; i < blocks.size(); ++i) {
+            const auto& block{blocks[i]};
+            auto* index{chainman.m_blockman.LookupBlockIndex(block->GetHash())};
+            BOOST_REQUIRE(index != nullptr);
+            const bool retained{i < retained_count};
+            if (retained) BOOST_CHECK_EQUAL(index->nStatus & BLOCK_FAILED_MASK, 0U);
+            else BOOST_CHECK(index->nStatus & BLOCK_FAILED_MASK);
+            CDiskBlockIndex persisted;
+            BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->Read(
+                std::make_pair(uint8_t{'b'}, block->GetHash()), persisted));
+            BOOST_CHECK_EQUAL(persisted.nStatus & BLOCK_FAILED_MASK, index->nStatus & BLOCK_FAILED_MASK);
+            BOOST_CHECK_EQUAL(chainstate.CoinsTip().HaveCoin(COutPoint{block->vtx.front()->GetHash(), 0}), retained);
+            BOOST_CHECK_EQUAL(chainstate.CoinsDB().HaveCoin(COutPoint{block->vtx.front()->GetHash(), 0}), retained);
+            CNEVMHeader header;
+            BlockValidationState state;
+            BOOST_REQUIRE(GetNEVMData(state, *block, header));
+            NEVMTxRoot roots;
+            BOOST_CHECK_EQUAL(pnevmtxrootsdb->ReadTxRoots(header.nBlockHash, roots), retained);
+            BOOST_CHECK_EQUAL(pnevmtxrootsdb->Read(header.nBlockHash, roots), retained);
+            if (!retained) BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(index), 0U);
+        }
+    }
+
+    void CheckRejected(std::size_t retained_count = 3)
+    {
+        BOOST_CHECK(!complete);
+        BOOST_CHECK_EQUAL(finalizations, 0U);
+        BOOST_CHECK_EQUAL(replay_error, "deferred-nevm-rejected-prefix-reconciled");
+        BOOST_CHECK_EQUAL(nevm->applied_count, retained_count);
+        BOOST_CHECK(nevm->applied_hash == prefix[retained_count - 1]->GetHash());
+        BOOST_CHECK(nevm->buffered_pairs.empty());
+        BOOST_CHECK(!m_node.chainman->HasPendingNEVMPayloadRepair());
+        CheckDeferredState(retained_count);
+    }
+
+    void CheckUnclassified()
+    {
+        BOOST_CHECK(!complete);
+        BOOST_CHECK_EQUAL(finalizations, 0U);
+        BOOST_CHECK(!replay_error.empty());
+        BOOST_CHECK(!m_node.chainman->HasPendingNEVMPayloadRepair());
+        CheckDeferredState();
+    }
+
+    void CheckCommittedMismatch(HeaderCase selected_case)
+    {
+        PrepareDeferred(selected_case);
+        BOOST_CHECK(!ReplayDeferred());
+        CheckRejected();
+        BOOST_CHECK(nevm->connected_blocks == (std::vector<uint256>{
+            prefix[1]->GetHash(), prefix[2]->GetHash(), candidate->GetHash()}));
+        const std::vector<std::string> expected{
+            "flush", "blockinfo", "connect:" + prefix[1]->GetHash().ToString(),
+            "connect:" + prefix[2]->GetHash().ToString(), "connect:" + candidate->GetHash().ToString(),
+            "flush", "blockinfo", "flush", "blockinfo"};
+        BOOST_CHECK(nevm->command_trace == expected);
+    }
+
+    void CheckUntrustedEndpoint(EndpointFailure failure)
+    {
+        PrepareDeferred(HeaderCase::WRONG_PARENT);
+        nevm->flush_verdict = [this, failure]() -> std::optional<NEVMBlockReject> {
+            if (nevm->flush_requests != 2) return std::nullopt;
+            if (failure == EndpointFailure::FLUSH) nevm->flush_available = false;
+            if (failure == EndpointFailure::STATUS) nevm->block_info_error = "nevm-blockinfo-unavailable";
+            if (failure == EndpointFailure::WRONG_HASH) {
+                nevm->reported_pair_override = StartupNEVMSubscriber::AppliedPair{3, uint256S("deadbeef")};
+            }
+            if (failure == EndpointFailure::BEHIND) {
+                nevm->reported_pair_override = StartupNEVMSubscriber::AppliedPair{1, prefix.front()->GetHash()};
+            }
+            if (failure == EndpointFailure::AHEAD) {
+                nevm->reported_pair_override = StartupNEVMSubscriber::AppliedPair{4, candidate->GetHash()};
+            }
+            return std::nullopt;
+        };
+        BOOST_CHECK(!ReplayDeferred());
+        CheckUnclassified();
+        nevm->flush_verdict = {};
+        nevm->flush_available = true;
+        nevm->block_info_error.clear();
+        nevm->reported_pair_override.reset();
+        BOOST_CHECK(!ReplayDeferred());
+        CheckRejected();
+    }
+};
+
 
 // SYSCOIN BEGIN: Durable recovery-universe fixture.
 uint256 RecoveryFixtureHash(uint64_t value)
@@ -9499,6 +9675,251 @@ BOOST_FIXTURE_TEST_CASE(deferred_nevm_replay_requires_reported_commit_pair,
     BOOST_CHECK(finalized);
     BOOST_CHECK(error.empty());
     BOOST_CHECK_EQUAL(nevm->connected_blocks.size(), 1U);
+}
+
+BOOST_FIXTURE_TEST_CASE(deferred_nevm_committed_parent_mismatch_reconciles_buffered_prefix,
+                        DeferredNEVMContinuitySetup)
+{
+    CheckCommittedMismatch(HeaderCase::WRONG_PARENT);
+}
+
+BOOST_FIXTURE_TEST_CASE(deferred_nevm_committed_number_mismatch_reconciles_buffered_prefix,
+                        DeferredNEVMContinuitySetup)
+{
+    CheckCommittedMismatch(HeaderCase::WRONG_NUMBER);
+}
+
+BOOST_FIXTURE_TEST_CASE(deferred_nevm_committed_wide_number_is_not_truncated,
+                        DeferredNEVMContinuitySetup)
+{
+    CheckCommittedMismatch(HeaderCase::WIDE_NUMBER);
+}
+
+BOOST_FIXTURE_TEST_CASE(deferred_nevm_valid_continuity_error_remains_retryable,
+                        DeferredNEVMContinuitySetup)
+{
+    PrepareDeferred(HeaderCase::VALID);
+    BOOST_CHECK(!ReplayDeferred());
+    CheckUnclassified();
+    BOOST_CHECK_EQUAL(nevm->applied_count, prefix.size());
+    nevm->connect_response = {};
+    BOOST_REQUIRE_MESSAGE(ReplayDeferred(), replay_error);
+    BOOST_CHECK(complete);
+    BOOST_CHECK_EQUAL(finalizations, 1U);
+    BOOST_CHECK_EQUAL(nevm->applied_count, 5U);
+    BOOST_CHECK(nevm->applied_hash == deferred_tip->GetHash());
+    CheckDeferredState();
+}
+
+BOOST_FIXTURE_TEST_CASE(deferred_nevm_committed_mismatch_transport_error_remains_retryable,
+                        DeferredNEVMContinuitySetup)
+{
+    PrepareDeferred(HeaderCase::WRONG_PARENT);
+    nevm->connect_response = [this](const uint256& hash, uint32_t) {
+        return hash == candidate->GetHash() ? std::string{"nevm-response-not-found"} : std::string{};
+    };
+    BOOST_CHECK(!ReplayDeferred());
+    CheckUnclassified();
+    BOOST_CHECK_EQUAL(nevm->flush_requests, 1U);
+    BOOST_CHECK_EQUAL(nevm->applied_count, 1U);
+    BOOST_CHECK_EQUAL(nevm->buffered_pairs.size(), 2U);
+}
+
+BOOST_FIXTURE_TEST_CASE(deferred_nevm_different_supplied_header_cannot_prove_invalidity,
+                        DeferredNEVMContinuitySetup)
+{
+    PrepareDeferred(HeaderCase::DIFFERENT_HEADER);
+    BOOST_CHECK(!ReplayDeferred());
+    CheckUnclassified();
+}
+
+BOOST_FIXTURE_TEST_CASE(deferred_nevm_malformed_header_cannot_prove_invalidity,
+                        DeferredNEVMContinuitySetup)
+{
+    PrepareDeferred(HeaderCase::MALFORMED_HEADER);
+    BOOST_CHECK(!ReplayDeferred());
+    CheckUnclassified();
+}
+
+BOOST_FIXTURE_TEST_CASE(deferred_nevm_malformed_payload_cannot_prove_invalidity,
+                        DeferredNEVMContinuitySetup)
+{
+    PrepareDeferred(HeaderCase::MALFORMED_PAYLOAD);
+    BOOST_CHECK(!ReplayDeferred());
+    CheckUnclassified();
+}
+
+BOOST_FIXTURE_TEST_CASE(deferred_nevm_continuity_requires_authenticated_child_coinbase,
+                        DeferredNEVMContinuitySetup)
+{
+    PrepareDeferred(HeaderCase::WRONG_PARENT);
+    {
+        struct RestorePosition {
+            CBlockIndex& index;
+            FlatFilePos pos;
+            ~RestorePosition()
+            {
+                LOCK(::cs_main);
+                index.nFile = pos.nFile;
+                index.nDataPos = pos.nPos;
+            }
+        } restore{*candidate_index, WITH_LOCK(::cs_main, return candidate_index->GetBlockPos())};
+        {
+            LOCK(::cs_main);
+            CBlock corrupt{*candidate};
+            CMutableTransaction coinbase{*corrupt.vtx.front()};
+            ++coinbase.nLockTime;
+            corrupt.vtx.front() = MakeTransactionRef(coinbase);
+            BOOST_REQUIRE(corrupt.GetHash() == candidate->GetHash());
+            BOOST_REQUIRE(BlockMerkleRoot(corrupt) != candidate_index->hashMerkleRoot);
+            const auto pos{m_node.chainman->m_blockman.SaveBlockToDisk(corrupt, candidate_index->nHeight, nullptr)};
+            BOOST_REQUIRE(!pos.IsNull());
+            candidate_index->nFile = pos.nFile;
+            candidate_index->nDataPos = pos.nPos;
+        }
+        // The block header still identifies the same child, and the supplied
+        // NEVM header still has a real parent contradiction. Its coinbase
+        // cannot establish an immutable commitment without the Merkle proof.
+        BOOST_CHECK(!ReplayDeferred());
+    }
+    BOOST_CHECK_EQUAL(replay_error, "deferred-nevm-connect:104:nevm-connect-response-invalid-data");
+    BOOST_CHECK_EQUAL(nevm->flush_requests, 2U);
+    BOOST_CHECK_EQUAL(nevm->block_info_queries, 2U);
+    CheckUnclassified();
+    BOOST_REQUIRE(!nevm->connected_blocks.empty());
+    BOOST_CHECK(nevm->connected_blocks.back() == candidate->GetHash());
+    BOOST_CHECK(!ReplayDeferred());
+    CheckRejected();
+}
+
+BOOST_FIXTURE_TEST_CASE(deferred_nevm_continuity_requires_available_parent_commitment,
+                        DeferredNEVMContinuitySetup)
+{
+    PrepareDeferred(HeaderCase::WRONG_PARENT);
+    {
+        struct RestorePosition {
+            CBlockIndex& index;
+            FlatFilePos pos;
+            ~RestorePosition()
+            {
+                LOCK(::cs_main);
+                index.nFile = pos.nFile;
+                index.nDataPos = pos.nPos;
+            }
+        } restore{*original_tip, WITH_LOCK(::cs_main, return original_tip->GetBlockPos())};
+        nevm->connect_response = [this](const uint256& hash, uint32_t) {
+            if (hash != candidate->GetHash()) return std::string{};
+            // Earlier replay has already read and buffered this parent. Lose
+            // its independent stored commitment only at the failing child.
+            LOCK(::cs_main);
+            original_tip->nFile = std::numeric_limits<int>::max();
+            return std::string{"nevm-connect-response-invalid-data"};
+        };
+        BOOST_CHECK(!ReplayDeferred());
+    }
+    BOOST_CHECK_EQUAL(replay_error, "deferred-nevm-connect:104:nevm-connect-response-invalid-data");
+    BOOST_CHECK_EQUAL(nevm->flush_requests, 2U);
+    BOOST_CHECK_EQUAL(nevm->block_info_queries, 2U);
+    CheckUnclassified();
+    nevm->connect_response = [this](const uint256& hash, uint32_t) {
+        return hash == candidate->GetHash()
+            ? std::string{"nevm-connect-response-invalid-data"} : std::string{};
+    };
+    BOOST_CHECK(!ReplayDeferred());
+    CheckRejected();
+}
+
+BOOST_FIXTURE_TEST_CASE(deferred_nevm_continuity_requires_successful_predecessor_flush,
+                        DeferredNEVMContinuitySetup)
+{
+    CheckUntrustedEndpoint(EndpointFailure::FLUSH);
+}
+
+BOOST_FIXTURE_TEST_CASE(deferred_nevm_continuity_requires_available_predecessor_status,
+                        DeferredNEVMContinuitySetup)
+{
+    CheckUntrustedEndpoint(EndpointFailure::STATUS);
+}
+
+BOOST_FIXTURE_TEST_CASE(deferred_nevm_continuity_requires_exact_predecessor_hash,
+                        DeferredNEVMContinuitySetup)
+{
+    CheckUntrustedEndpoint(EndpointFailure::WRONG_HASH);
+}
+
+BOOST_FIXTURE_TEST_CASE(deferred_nevm_continuity_rejects_behind_predecessor_pair,
+                        DeferredNEVMContinuitySetup)
+{
+    CheckUntrustedEndpoint(EndpointFailure::BEHIND);
+}
+
+BOOST_FIXTURE_TEST_CASE(deferred_nevm_continuity_rejects_ahead_predecessor_pair,
+                        DeferredNEVMContinuitySetup)
+{
+    CheckUntrustedEndpoint(EndpointFailure::AHEAD);
+}
+
+BOOST_FIXTURE_TEST_CASE(deferred_nevm_continuity_rechecks_authorization_after_flush,
+                        DeferredNEVMContinuitySetup)
+{
+    PrepareDeferred(HeaderCase::WRONG_PARENT);
+    bool authorized{true};
+    nevm->flush_verdict = [&](void) -> std::optional<NEVMBlockReject> {
+        if (nevm->flush_requests == 2) authorized = false;
+        return std::nullopt;
+    };
+    BOOST_CHECK(!ReplayDeferred([&] { return authorized; }));
+    BOOST_CHECK_EQUAL(replay_error, "deferred-nevm-replay-authorization-changed");
+    CheckUnclassified();
+    authorized = true;
+    nevm->flush_verdict = {};
+    BOOST_CHECK(!ReplayDeferred([&] { return authorized; }));
+    CheckRejected();
+}
+
+BOOST_FIXTURE_TEST_CASE(deferred_nevm_continuity_preserves_earlier_flush_verdict,
+                        DeferredNEVMContinuitySetup)
+{
+    PrepareDeferred(HeaderCase::WRONG_PARENT);
+    CNEVMHeader header;
+    BlockValidationState state;
+    BOOST_REQUIRE(GetNEVMData(state, *prefix[1], header));
+    nevm->flush_verdict = [&](void) -> std::optional<NEVMBlockReject> {
+        if (nevm->flush_requests != 2) return std::nullopt;
+        return NEVMBlockReject{header.nBlockHash, prefix[1]->GetHash()};
+    };
+    BOOST_CHECK(!ReplayDeferred());
+    CheckRejected(/*retained_count=*/1);
+    LOCK(::cs_main);
+    const auto* rejected{m_node.chainman->m_blockman.LookupBlockIndex(prefix[1]->GetHash())};
+    BOOST_REQUIRE(rejected != nullptr);
+    BOOST_CHECK(rejected->nStatus & BLOCK_FAILED_VALID);
+}
+
+BOOST_FIXTURE_TEST_CASE(deferred_nevm_payload_verdict_preserves_committed_wrapper,
+                        DeferredNEVMContinuitySetup)
+{
+    PrepareDeferred(HeaderCase::WRONG_PARENT);
+    const auto payload_verdict{PayloadVerdictFor(*candidate)};
+    nevm->connect_verdict = [&](const uint256& hash) -> std::optional<NEVMBlockReject> {
+        return hash == candidate->GetHash() ? std::make_optional(payload_verdict) : std::nullopt;
+    };
+    BOOST_CHECK(!ReplayDeferred());
+    BOOST_CHECK(!complete);
+    BOOST_CHECK_EQUAL(finalizations, 0U);
+    BOOST_CHECK(m_node.chainman->HasPendingNEVMPayloadRepair());
+    CheckDeferredState();
+}
+
+BOOST_FIXTURE_TEST_CASE(deferred_nevm_committed_mismatch_respects_durable_finality,
+                        DeferredNEVMContinuitySetup)
+{
+    PrepareDeferred(HeaderCase::WRONG_PARENT);
+    llmq::test::WithNEVMDurableFinalityForTest(*m_node.chainman, *candidate_index, [&] {
+        BOOST_CHECK(!ReplayDeferred());
+        BOOST_CHECK(replay_error.find("refusing to invalidate height 104 through durable ChainLock target") != std::string::npos);
+        CheckUnclassified();
+    });
 }
 
 BOOST_FIXTURE_TEST_CASE(deferred_nevm_rejection_connect_preserves_original_marker,
