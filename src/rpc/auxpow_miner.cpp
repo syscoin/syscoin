@@ -81,7 +81,7 @@ AuxpowMiner::getCurrentBlock (ChainstateManager &chainman, const CTxMemPool& mem
     LOCK (cs_main);
     // SYSCOIN: A replay obligation can appear without changing the tip or
     // invalidating this miner's cached templates.
-    if (!chainman.IsNEVMBlockProductionAllowed()) {
+    if (!chainman.PrepareNEVMBlockProduction()) {
       throw JSONRPCError(
           RPC_CLIENT_IN_INITIAL_DOWNLOAD,
           "NEVM block production is waiting for execution recovery");

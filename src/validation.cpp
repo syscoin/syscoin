@@ -3206,7 +3206,7 @@ bool ChainstateManager::MaybeStartNEVMNetwork()
     return response;
 }
 
-bool ChainstateManager::IsNEVMBlockProductionAllowed() const
+bool ChainstateManager::PrepareNEVMBlockProduction()
 {
     AssertLockHeld(cs_main);
     if (HasPendingNEVMStartupPair()) return false;
@@ -3228,8 +3228,19 @@ bool ChainstateManager::IsNEVMBlockProductionAllowed() const
     // again, and authenticating that gap does not itself complete replay.
     // Follow the active branch so an unrelated prospective marker cannot
     // stop its miner, and do not require a new finality certificate.
-    return llmq::chainLocksHandler == nullptr ||
-           !llmq::chainLocksHandler->ShouldDeferBTCCNEVM(*tip);
+    if (llmq::chainLocksHandler != nullptr &&
+        llmq::chainLocksHandler->ShouldDeferBTCCNEVM(*tip)) return false;
+    if (m_nevm_prefix_recovery_needed) {
+        std::string error;
+        std::optional<NEVMBlockReject> rejection;
+        if (!ActiveChainstate().RecoverNEVMPrefixThrough(*tip, nullptr, error, rejection)) {
+            // This entry point holds cs_main, not activation exclusion. Leave
+            // rejection reconciliation to the ordinary recovery paths.
+            LogPrintf("%s: NEVM block production awaiting prefix recovery: %s\n", __func__, error);
+            return false;
+        }
+    }
+    return !m_nevm_prefix_recovery_needed;
 }
 
 bool ChainstateManager::InitializeNEVMStartupPair(
@@ -3242,7 +3253,12 @@ bool ChainstateManager::InitializeNEVMStartupPair(
         return false;
     }
     if (geth_count == 0) {
-        if (syscoin_hash.IsNull()) return true;
+        if (syscoin_hash.IsNull()) {
+            if (ActiveTip() && ActiveTip()->nHeight >= GetConsensus().nNEVMStartBlock) {
+                m_nevm_prefix_recovery_needed = true;
+            }
+            return true;
+        }
         error = "Geth reports a Syscoin hash with a zero applied count";
         return false;
     }
@@ -3265,6 +3281,9 @@ bool ChainstateManager::InitializeNEVMStartupPair(
         if (ancestor != nullptr && DoesNEVMBlockInfoMatchSyscoinBlock(
                 start, geth_count, ancestor->nHeight, syscoin_hash,
                 ancestor->GetBlockHash())) {
+            // Reclassify after reopen; raw status cannot clear an existing
+            // obligation because buffered work has not yet been flushed.
+            if (height < tip->nHeight) m_nevm_prefix_recovery_needed = true;
             return true;
         }
         error = "Geth's applied Syscoin pair is on a different Core branch";
@@ -3931,6 +3950,12 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
                 return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, stateStr);
             }
             if (rejection) *rejection = rejected_pair;
+            if (recovered_prefix && !rejected_pair) {
+                LOCK(cs_main);
+                // Another operational failure during the one retry may have
+                // discarded the prefix that recovery just verified.
+                m_chainman.m_nevm_prefix_recovery_needed = true;
+            }
             return state.Error(stateStr);
         }
         if (restarted && !m_chainman.MaybeStartNEVMNetwork()) {
@@ -4464,7 +4489,9 @@ bool Chainstate::RecoverNEVMPrefixThrough(
         return false;
     }
     const int64_t start{m_chainman.GetConsensus().nNEVMStartBlock};
-    if (!pending && through.nHeight < start) return true;
+    if (!pending && through.nHeight < start &&
+        !m_chainman.m_nevm_prefix_recovery_needed) return true;
+    m_chainman.m_nevm_prefix_recovery_needed = true;
     if (m_chainman.m_interrupt) {
         error = "shutdown";
         return false;
@@ -4472,6 +4499,19 @@ bool Chainstate::RecoverNEVMPrefixThrough(
     uint64_t count{0};
     uint256 syscoin_hash;
     if (!FlushAndGetNEVMBlockInfo(count, syscoin_hash, error, &rejection)) return false;
+
+    // A rollback can remove the whole NEVM suffix while recovery is pending.
+    // Require a fresh empty applied pair before allowing the first template.
+    if (!pending && through.nHeight < start) {
+        if (count != 0 || !syscoin_hash.IsNull()) {
+            error = "nevm-live-recovery-applied-pair-mismatch";
+            return false;
+        }
+        if (&through == m_chainman.ActiveTip()) {
+            m_chainman.m_nevm_prefix_recovery_needed = false;
+        }
+        return true;
+    }
 
     if (start < 0 || start > (pending ? pending->nHeight : through.nHeight) ||
         count > static_cast<uint64_t>(std::numeric_limits<int64_t>::max() - start)) {
@@ -4552,6 +4592,9 @@ bool Chainstate::RecoverNEVMPrefixThrough(
             error = "nevm-live-recovery-commit-pair-mismatch";
             return false;
         }
+    }
+    if (&through == m_chainman.ActiveTip()) {
+        m_chainman.m_nevm_prefix_recovery_needed = false;
     }
     return true;
 }

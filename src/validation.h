@@ -1324,6 +1324,9 @@ private:
     };
     std::optional<NEVMStartupPair> m_nevm_startup_pair GUARDED_BY(::cs_main);
     std::atomic<bool> m_nevm_startup_pair_pending{false};
+    // SYSCOIN: Ordinary buffer loss can leave no payload/receipt marker.
+    // Clear only after flushing and binding the applied pair to ActiveTip().
+    bool m_nevm_prefix_recovery_needed GUARDED_BY(::cs_main){false};
 
     enum class NEVMPayloadRepairStage { VERIFY_STORED, DOWNLOAD, REPLAY };
     std::optional<NEVMBlockReject> m_nevm_payload_repair GUARDED_BY(::cs_main);
@@ -1680,8 +1683,8 @@ public:
     {
         return m_nevm_startup_pair_pending.load(std::memory_order_acquire);
     }
-    /** Block template issuance until the active branch's NEVM replay completes. */
-    [[nodiscard]] bool IsNEVMBlockProductionAllowed() const
+    /** Reconcile a lost prefix before issuing work; healthy paths need no probe. */
+    [[nodiscard]] bool PrepareNEVMBlockProduction()
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** Only exact ancestors of the pending pair may reconnect without Geth. */
     [[nodiscard]] bool CheckNEVMStartupConnect(

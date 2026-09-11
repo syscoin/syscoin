@@ -118,6 +118,15 @@ inputs or another engine failure leave the candidate retryable. This path
 handles connect failures; engine loss first encountered during a normal reorg
 disconnect still follows the separate disconnect error path.
 
+Before issuing fresh or cached mining work after unresolved ordinary prefix
+recovery, Core retries that replay and requires a flushed applied count/hash
+matching the active Core tip. A buffered connect acknowledgement, networking
+acknowledgement or template response cannot clear this obligation. Startup also
+classifies a behind engine, including an empty one, so reopening Core does not
+bypass the gate. Healthy block connections and template requests add no recovery
+probe. A failed replay leaves mining unavailable and local coins, roots and mint
+markers unchanged; existing activation paths retain rejection reconciliation.
+
 ## Delayed buffered rejection
 
 A consensus `invalid` rejection received during live connect, predecessor replay or deferred BTCC

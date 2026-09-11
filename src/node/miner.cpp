@@ -157,7 +157,7 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(
     // SYSCOIN END: Public PQ activation block-production gate.
     // SYSCOIN: Startup pairing and deferred replay must finish before the
     // engine can supply the next block for this active Core branch.
-    if (!m_chainstate.m_chainman.IsNEVMBlockProductionAllowed()) {
+    if (!m_chainstate.m_chainman.PrepareNEVMBlockProduction()) {
         throw std::runtime_error(
             "NEVM block production is waiting for execution recovery");
     }

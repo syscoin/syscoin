@@ -3123,7 +3123,7 @@ struct LatePaymentAuditPresealSetup : TestingSetup {
             LOCK(::cs_main);
             BOOST_CHECK(handler->HasNEVMReplayObligation());
             BOOST_CHECK(handler->IsPaymentAuditPresealActive());
-            BOOST_CHECK(!m_node.chainman->IsNEVMBlockProductionAllowed());
+            BOOST_CHECK(!m_node.chainman->PrepareNEVMBlockProduction());
             BOOST_CHECK(Access::Persistence(*handler).LoadPaymentAuditPresealState() == markers);
             BOOST_CHECK_EQUAL(engine->count, applied);
             BOOST_REQUIRE_LE(applied, replay_hashes.size());
@@ -3158,7 +3158,7 @@ struct LatePaymentAuditPresealSetup : TestingSetup {
             LOCK(::cs_main);
             BOOST_CHECK(!handler->HasNEVMReplayObligation());
             BOOST_CHECK(!handler->IsPaymentAuditPresealActive());
-            BOOST_CHECK(m_node.chainman->IsNEVMBlockProductionAllowed());
+            BOOST_CHECK(m_node.chainman->PrepareNEVMBlockProduction());
             BOOST_CHECK(Access::Persistence(*handler).LoadPaymentAuditPresealState().IsEmpty());
             BOOST_CHECK(!Access::Store(*handler)->GetBest());
             BOOST_CHECK(!Access::AuditStore(*handler).GetPruneCheckpoint());

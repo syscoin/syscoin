@@ -849,7 +849,7 @@ static RPCHelpMan getblocktemplate()
 
     // SYSCOIN: Recheck after long-poll released cs_main, including when the
     // current tip still matches a cached template from before replay began.
-    if (!chainman.IsNEVMBlockProductionAllowed()) {
+    if (!chainman.PrepareNEVMBlockProduction()) {
         throw JSONRPCError(
             RPC_CLIENT_IN_INITIAL_DOWNLOAD,
             "NEVM block production is waiting for execution recovery");
