@@ -12,6 +12,7 @@
 #include <governance/governanceclasses.h>
 #include <key_io.h>
 #include <net.h>
+#include <netbase.h>
 #include <net_processing.h>
 #include <node/miner.h>
 #include <node/blockstorage.h>
@@ -2432,7 +2433,7 @@ struct LatePaymentAuditPresealSetup : TestingSetup {
             : connman{static_cast<ConnmanTestMsg&>(*context.connman)},
               peerman{*context.peerman},
               node{new CNode{/*id=*/925, /*sock=*/nullptr,
-                  CAddress{CService{in_addr{0xa0b0c00d}, 7785}, NODE_NETWORK},
+                  CAddress{LookupNumeric("13.192.176.160", 7785), NODE_NETWORK},
                   /*nKeyedNetGroupIn=*/13, /*nLocalHostNonceIn=*/925, CAddress{},
                   /*addrNameIn=*/std::string{}, ConnectionType::OUTBOUND_FULL_RELAY,
                   /*inbound_onion=*/false}}
