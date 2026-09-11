@@ -6557,7 +6557,7 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
     }
     // SYSCOIN: Root authority is already revoked. Persist replay protection
     // and branch-bound DMN/PQ state before synchronizing parent coins; only
-    // then retire the recovery record and remove consumed-proof markers.
+    // then remove consumed-proof markers before retiring the recovery record.
     if (pnevmtxmintdb != nullptr || root_disconnect) {
         try {
             if (!setMintTxs.empty() || root_disconnect) {
@@ -6594,12 +6594,6 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
                                   pindexDelete->GetBlockHash().ToString()));
                 }
             }
-            if (root_disconnect &&
-                !pnevmtxrootsdb->CompleteRootRecovery(
-                    pindexDelete->pprev->GetBlockHash(), std::nullopt)) {
-                return FatalError(m_chainman.GetNotifications(), state,
-                                  "DisconnectTip(): Failed to complete NEVM root revocation");
-            }
             // SYSCOIN: Retain all deletion intents if an earlier DB write fails.
             if (pnevmtxmintdb) pnevmtxmintdb->EraseCache(setMintTxs);
             pblockindexdb->EraseCache(vecTXIDPairs);
@@ -6608,6 +6602,14 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
                 return FatalError(m_chainman.GetNotifications(), state,
                                   strprintf("DisconnectTip(): Error flushing to asset dbs on disconnect %s",
                                             pindexDelete->GetBlockHash().ToString()));
+            }
+            // SYSCOIN: Startup also needs this carrier if mint cleanup is
+            // interrupted after the parent coins have become durable.
+            if (root_disconnect &&
+                !pnevmtxrootsdb->CompleteRootRecovery(
+                    pindexDelete->pprev->GetBlockHash(), std::nullopt)) {
+                return FatalError(m_chainman.GetNotifications(), state,
+                                  "DisconnectTip(): Failed to complete NEVM root revocation");
             }
         } catch (const std::runtime_error& e) {
             return FatalError(m_chainman.GetNotifications(), state,
@@ -10271,15 +10273,25 @@ bool Chainstate::ReplayBlocks()
         }
         if (hashHeads.empty() && !root_disconnect && published_root_tip == recovered_hash) return true;
 
-        const auto read_header = [&](const CBlockIndex& index, CNEVMHeader& header) {
+        // SYSCOIN: Reconstruct mint cleanup from the same authenticated bodies
+        // used for root recovery. Header-only pruning proofs cannot supply it.
+        const auto read_header = [&](const CBlockIndex& index, CNEVMHeader& header,
+                                     NEVMMintTxSet* mints = nullptr) {
             CBlock block;
             bool mutated{false};
             BlockValidationState header_state;
             // The coinbase commitment is authenticated by the stored header's
             // merkle root; auxiliary PoDA sidecars are unnecessary for this.
-            return m_blockman.ReadBlockFromDisk(block, index, /*load_auxiliary_data=*/false) &&
-                BlockMerkleRoot(block, &mutated) == block.hashMerkleRoot && !mutated &&
-                GetNEVMData(header_state, block, header);
+            if (!m_blockman.ReadBlockFromDisk(block, index, /*load_auxiliary_data=*/false) ||
+                BlockMerkleRoot(block, &mutated) != index.hashMerkleRoot || mutated ||
+                !GetNEVMData(header_state, block, header)) return false;
+            if (mints) {
+                for (const auto& tx : block.vtx) {
+                    if (IsSyscoinMintTx(tx->nVersion) &&
+                        !DisconnectMintAsset(*tx, *mints)) return false;
+                }
+            }
+            return true;
         };
         std::vector<const CBlockIndex*> sources;
         if (published_root_tip) {
@@ -10309,6 +10321,7 @@ bool Chainstate::ReplayBlocks()
         }
         int canonical_fork_height{recovered->nHeight};
         std::set<const CBlockIndex*> visited;
+        NEVMMintTxSet discarded_mints, canonical_mints;
         for (const auto* source : sources) {
             const auto* fork{LastCommonAncestor(source, recovered)};
             if (!fork) return error("ReplayBlocks(): NEVM root branches have no common ancestor");
@@ -10317,7 +10330,7 @@ bool Chainstate::ReplayBlocks()
                 if (index->nHeight < m_chainman.GetConsensus().nNEVMStartBlock) break;
                 if (!visited.insert(index).second) break;
                 CNEVMHeader header;
-                if (!read_header(*index, header)) {
+                if (!read_header(*index, header, &discarded_mints)) {
                     return error("ReplayBlocks(): Cannot authenticate discarded NEVM root carrier %s",
                                  index->GetBlockHash().ToString());
                 }
@@ -10341,7 +10354,8 @@ bool Chainstate::ReplayBlocks()
             // still require their retained block bodies.
             const bool pruned_alias{!replacement && m_blockman.IsBlockPruned(index)};
             if (!(pruned_alias ? m_blockman.ReadNEVMPrunedHeader(header, *index)
-                               : read_header(*index, header))) {
+                               : read_header(*index, header,
+                                     replacement ? &canonical_mints : nullptr))) {
                 return error("ReplayBlocks(): Cannot authenticate canonical NEVM root carrier %s",
                              index->GetBlockHash().ToString());
             }
@@ -10351,6 +10365,13 @@ bool Chainstate::ReplayBlocks()
                     NEVMTxRoot{header.nTxRoot, header.nReceiptRoot});
                 unresolved.erase(header.nBlockHash);
             }
+        }
+        // SYSCOIN: A previously validated discarded mint cannot also occur in
+        // its common prefix. Only the recovered replacement suffix can own
+        // the same proof again; preserve it even if its outputs were spent.
+        for (const auto& hash : canonical_mints) discarded_mints.erase(hash);
+        if (!discarded_mints.empty() && !pnevmtxmintdb) {
+            return error("ReplayBlocks(): Mint database unavailable for NEVM recovery");
         }
         // Pin the recovered coins endpoint before any destructive cleanup or
         // restoration. A second crash must recover to this same branch while
@@ -10375,6 +10396,12 @@ bool Chainstate::ReplayBlocks()
         if (!pnevmtxrootsdb->FlushCacheToDisk(/*CHUNK_ITEMS=*/100000, /*fSync=*/true) ||
             !pnevmtxrootsdb->Sync()) {
             return error("ReplayBlocks(): Failed to synchronize recovered NEVM roots");
+        }
+        // SYSCOIN: Keep the journal/source cursor until these erasures are
+        // durable too. A second restart can reconstruct the same cleanup even
+        // though the coins database no longer has interrupted-batch heads.
+        if (!discarded_mints.empty() && !pnevmtxmintdb->FlushErase(discarded_mints)) {
+            return error("ReplayBlocks(): Failed to erase recovered orphan mint markers");
         }
         std::optional<NEVMTxRoot> pending_root;
         if (root_disconnect) {
@@ -10481,8 +10508,8 @@ bool Chainstate::ReplayBlocks()
     }
 
     cache.SetBestBlock(pindexNew->GetBlockHash());
-    // SYSCOIN: additions before UTXO commit; erasures after. Extra markers after a
-    // crash are fail-closed (may require -reindex-chainstate).
+    // SYSCOIN: additions before UTXO commit; erasures after. Retain the
+    // discarded NEVM source below until cleanup has also become durable.
     NEVMMintTxSet setMintDisconnectOnly;
     if (pnevmtxmintdb) {
         for (const auto& hash : setMintTxsDisconnect) {
@@ -10503,6 +10530,31 @@ bool Chainstate::ReplayBlocks()
             /*fSync=*/true)) {
         return error(
             "ReplayBlocks(): Failed to persist deterministic masternode state");
+    }
+    // SYSCOIN: Two-head coins recovery can name a discarded branch which
+    // neither durable root endpoint covers. Once coins commit, HEADS loses
+    // that identity. A canonical publication cursor can safely retain it:
+    // canonical roots are reconstructed from the recovered coins endpoint.
+    if (root_recovery && !setMintDisconnectOnly.empty()) {
+        // The rollback loop has already advanced pindexOld to the fork.
+        const auto* old_source{m_blockman.LookupBlockIndex(hashHeads[1])};
+        if (!old_source) return error("ReplayBlocks(): Unknown discarded mint source");
+        const auto* published{published_root_tip
+            ? m_blockman.LookupBlockIndex(*published_root_tip) : nullptr};
+        const auto* journal{root_disconnect
+            ? m_blockman.LookupBlockIndex(root_disconnect->carrier) : nullptr};
+        const auto ancestor_of = [](const CBlockIndex* ancestor, const CBlockIndex* tip) {
+            return ancestor && tip && tip->nHeight >= ancestor->nHeight &&
+                tip->GetAncestor(ancestor->nHeight) == ancestor;
+        };
+        if (!ancestor_of(old_source, published) && !ancestor_of(old_source, journal)) {
+            // Never discard another off-canonical root source to make room.
+            if ((published_root_tip && !ancestor_of(published, pindexNew) &&
+                 !ancestor_of(published, old_source)) ||
+                !pnevmtxrootsdb->RecordPublishedTip(old_source->GetBlockHash())) {
+                return error("ReplayBlocks(): Cannot retain discarded mint cleanup source");
+            }
+        }
     }
     // SYSCOIN: Keep both source endpoints until the recovered coins branch is
     // durable, then reconcile roots against it. Publishing replacement roots

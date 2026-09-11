@@ -139,6 +139,24 @@ Deferred replay retains its original marker and does not call its finalizer
 after reconciliation, because the original target was not applied. Replacement
 selection runs after releasing the replay activation lock.
 
+## Interrupted mint rollback
+
+Core keeps the root-disconnect journal until both parent coins and consumed-proof
+marker deletions are durable. Startup reconstructs pending mint cleanup from
+authenticated discarded block bodies, even when the coins database has already
+finished its rollback. It preserves any proof consumed in the recovered
+replacement suffix, including mints whose outputs have since been spent. Missing
+or inconsistent carrier data stops recovery with a local error. Healthy block
+connections require no additional reads or writes for this cleanup.
+
+Older versions could discard the journal before deleting mint markers. Once that
+cleanup identity is lost, upgrading alone cannot distinguish an orphan marker
+from a legitimate consumption. Rebuild affected Core state with
+`-reindex-chainstate` when complete block history is available and no stale
+failed-block flags were recorded. Use full `-reindex` if valid replacements were
+already marked failed, or if pruned history must be redownloaded. Do not delete
+`nevmminttx` alone: spent mint outputs still require replay protection.
+
 ## Root recovery with pruning
 
 Before deleting a block file, Core synchronously retains each indexed NEVM

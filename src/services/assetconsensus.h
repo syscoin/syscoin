@@ -90,7 +90,7 @@ public:
     bool RecordPublishedTip(const uint256& target) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
     // Revoke while the coins rollback is still private to the caller.
     bool BeginDisconnect(const NEVMRootDisconnect& disconnect) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
-    // Requires synchronized recovered coins and root cleanup. The optional
+    // Requires synchronized recovered coins, roots and mint cleanup. The optional
     // pending-root value must come from an authenticated canonical carrier.
     bool CompleteRootRecovery(const uint256& recovered_tip,
                               const std::optional<NEVMTxRoot>& pending_root) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
