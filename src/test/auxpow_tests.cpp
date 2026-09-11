@@ -764,6 +764,104 @@ BOOST_FIXTURE_TEST_CASE(
 }
 
 BOOST_FIXTURE_TEST_CASE(
+    auxpow_noncacheable_activation_rejection_does_not_repeat_candidate,
+    NexusAuxpowWrapperSetup)
+{
+  auto& chainman{*Assert(m_node.chainman)};
+  auto& chainstate{chainman.ActiveChainstate()};
+  const uint256 committed{ArithToUint256(arith_uint256{101})};
+  const uint256 mismatched{ArithToUint256(arith_uint256{202})};
+  CBlock child{BuildAuxpowChildTemplate(m_node)};
+  CDataStream btcp_data{SER_NETWORK, PROTOCOL_VERSION};
+  btcp_data << BTCPREV_MAGIC_BYTES << committed;
+  const auto btcp_bytes{MakeUCharSpan(btcp_data)};
+  node::RegenerateCommitments(child, chainman,
+      std::vector<unsigned char>{btcp_bytes.begin(), btcp_bytes.end()});
+  auto& consensus{const_cast<Consensus::Params&>(Params().GetConsensus())};
+  struct Restore {
+    Consensus::Params& consensus;
+    util::SignalInterrupt& interrupt;
+    const int origin{consensus.nPQBTCCCandidateOrigin};
+    ~Restore() { consensus.nPQBTCCCandidateOrigin = origin; interrupt.reset(); }
+  } restore{consensus, m_node.kernel->interrupt};
+  consensus.nPQBTCCCandidateOrigin = 101;
+  const CScript tag{CurrentAuxpowTag(chainman)};
+  const auto good{BuildAuxpowWrapper(child, committed, tag)};
+  const auto bad{BuildAuxpowWrapper(child, mismatched, tag)};
+  ++child.nTime;
+  const auto sibling{BuildAuxpowWrapper(child, committed, tag)};
+  BOOST_REQUIRE(good->GetHash() == bad->GetHash());
+  BOOST_REQUIRE(good->GetHash() != sibling->GetHash());
+  BOOST_REQUIRE(!m_node.kernel->interrupt);
+  // The alternate wrapper passes CheckBlock, then fails the contextual
+  // BTCPREV check in ConnectBlock without turning into a fatal disk error.
+  BlockValidationState checked_state;
+  BOOST_REQUIRE_MESSAGE(CheckBlock(*bad, checked_state, consensus), checked_state.ToString());
+  CBlockIndex* candidate_index{nullptr};
+  CBlockIndex* sibling_index{nullptr};
+  CBlockIndex* parent{nullptr};
+  {
+    LOCK(cs_main);
+    parent = chainman.ActiveTip();
+    BOOST_REQUIRE(parent);
+    BOOST_REQUIRE_LT(parent->nHeight + 1, consensus.nNEVMStartBlock);
+    BlockValidationState stored_state;
+    BOOST_REQUIRE_MESSAGE(chainman.AcceptBlock(good, stored_state, &candidate_index,
+        true, nullptr, nullptr, true), stored_state.ToString());
+    BOOST_REQUIRE_MESSAGE(chainman.AcceptBlock(sibling, stored_state, &sibling_index,
+        true, nullptr, nullptr, true), stored_state.ToString());
+    BOOST_REQUIRE(candidate_index && sibling_index);
+    BOOST_REQUIRE(chainstate.IsCurrentMostWorkBranch(*candidate_index));
+    BOOST_REQUIRE(!chainstate.IsCurrentMostWorkBranch(*sibling_index));
+  }
+  class Observer final : public CValidationInterface {
+  public:
+    std::vector<uint256> checked;
+    util::SignalInterrupt& interrupt;
+    explicit Observer(util::SignalInterrupt& value) : interrupt{value}
+    { RegisterValidationInterface(this); }
+    ~Observer()
+    {
+      UnregisterValidationInterface(this);
+      SyncWithValidationInterfaceQueue();
+    }
+    void BlockChecked(const CBlock& block, const BlockValidationState& state) override
+    {
+      checked.push_back(block.GetHash());
+      BOOST_CHECK(state.GetResult() == BlockValidationResult::BLOCK_MUTATED);
+      BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-btcp-mismatch");
+      BOOST_CHECK(!IsBlockRejectionCacheable(state.GetResult()));
+      // Stop an erroneous retry loop so the negative regression stays bounded.
+      if (checked.size() > 1) interrupt();
+    }
+  };
+  {
+    Observer observer{m_node.kernel->interrupt};
+    BlockValidationState state;
+    BOOST_REQUIRE_MESSAGE(chainstate.ActivateBestChain(state, bad), state.ToString());
+    BOOST_CHECK(state.IsValid());
+    BOOST_CHECK(observer.checked == std::vector<uint256>{good->GetHash()});
+    BOOST_CHECK(!m_node.kernel->interrupt);
+  }
+  {
+    LOCK(cs_main);
+    BOOST_CHECK(chainman.ActiveTip() == parent);
+    BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == parent->GetBlockHash());
+    for (auto* index : {candidate_index, sibling_index}) {
+      BOOST_CHECK_EQUAL(index->nStatus & BLOCK_FAILED_MASK, 0U);
+      BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(index), 1U);
+    }
+    BOOST_CHECK(chainstate.IsCurrentMostWorkBranch(*candidate_index));
+    // The rejected in-memory wrapper must not replace the usable wrapper
+    // already stored for this child-header identity.
+    CBlock stored;
+    BOOST_REQUIRE(chainman.m_blockman.ReadBlockFromDisk(stored, *candidate_index));
+    BOOST_REQUIRE(stored.auxpow);
+    BOOST_CHECK(stored.auxpow->getParentPrevBlockHash() == committed);
+  }
+}
+
+BOOST_FIXTURE_TEST_CASE(
     auxpow_known_header_rechecks_first_storable_wrapper,
     NexusAuxpowWrapperSetup)
 {

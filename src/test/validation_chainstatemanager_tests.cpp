@@ -785,6 +785,146 @@ struct ManagedNEVMShutdownSetup : StartupNEVMRecoverySetup {
     ~ManagedNEVMShutdownSetup() { AbortShutdown(); }
 };
 
+struct ActivationAttemptObserver final : CValidationInterface {
+    std::function<void(const CBlock&, const BlockValidationState&)> on_checked;
+
+    explicit ActivationAttemptObserver(decltype(on_checked) callback)
+        : on_checked{std::move(callback)}
+    {
+        RegisterValidationInterface(this);
+    }
+    ~ActivationAttemptObserver()
+    {
+        UnregisterValidationInterface(this);
+        SyncWithValidationInterfaceQueue();
+    }
+    void BlockChecked(const CBlock& block, const BlockValidationState& state) override
+    {
+        on_checked(block, state);
+    }
+};
+
+// SYSCOIN: A cacheable Core rejection must yield to an indexed valid branch
+// in the same activation call, even if the failed step moved no chain tip.
+struct CandidateSelectionSetup : TestChain100Setup {
+    std::shared_ptr<const CBlock> candidate;
+    std::shared_ptr<const CBlock> candidate_child;
+    std::shared_ptr<const CBlock> sibling;
+    CBlockIndex* parent_index{nullptr};
+    CBlockIndex* candidate_index{nullptr};
+    CBlockIndex* selected_index{nullptr};
+    CBlockIndex* sibling_index{nullptr};
+
+    ~CandidateSelectionSetup() { m_node.kernel->interrupt.reset(); }
+
+    void Store(const std::shared_ptr<const CBlock>& block, CBlockIndex*& index)
+    {
+        LOCK(::cs_main);
+        BlockValidationState state;
+        BOOST_REQUIRE_MESSAGE(m_node.chainman->AcceptBlock(
+            block, state, &index, true, nullptr, nullptr, true), state.ToString());
+        BOOST_REQUIRE(index != nullptr);
+    }
+
+    void Solve(CBlock& block)
+    {
+        block.fChecked = false;
+        block.nNonce = 0;
+        while (!CheckProofOfWork(block.GetHash(), block.nBits, m_node.chainman->GetConsensus())) ++block.nNonce;
+    }
+
+    void PrepareCandidates(bool overpaid, bool select_descendant = false)
+    {
+        auto& chainman{*m_node.chainman};
+        auto& chainstate{chainman.ActiveChainstate()};
+        parent_index = WITH_LOCK(::cs_main, return chainman.ActiveTip());
+        BOOST_REQUIRE(parent_index != nullptr);
+        BOOST_REQUIRE_LT(parent_index->nHeight + 2, chainman.GetConsensus().nNEVMStartBlock);
+        CBlock first{CreateBlock({}, CScript{} << OP_TRUE, chainstate)};
+        if (overpaid) {
+            CMutableTransaction coinbase{*first.vtx.front()};
+            ++coinbase.vout.front().nValue;
+            first.vtx.front() = MakeTransactionRef(coinbase);
+            node::RegenerateCommitments(first, chainman, {});
+            Solve(first);
+        }
+        candidate = std::make_shared<const CBlock>(std::move(first));
+        // Arrival order makes the bad tip win the equal-work tie. The
+        // descendant variant instead chooses that branch by strictly more work.
+        Store(candidate, candidate_index);
+        selected_index = candidate_index;
+        if (select_descendant) {
+            CBlock child{CreateBlock({}, CScript{} << OP_TRUE, chainstate)};
+            CMutableTransaction coinbase{*child.vtx.front()};
+            coinbase.vin.front().scriptSig = CScript{} << (candidate_index->nHeight + 1) << OP_0;
+            child.vtx.front() = MakeTransactionRef(coinbase);
+            child.hashPrevBlock = candidate->GetHash();
+            child.nTime = candidate->nTime + 1;
+            node::RegenerateCommitments(child, chainman, {});
+            Solve(child);
+            candidate_child = std::make_shared<const CBlock>(std::move(child));
+            Store(candidate_child, selected_index);
+        }
+        sibling = std::make_shared<const CBlock>(CreateBlock({}, CScript{} << OP_2, chainstate));
+        BOOST_REQUIRE(candidate->GetHash() != sibling->GetHash());
+        Store(sibling, sibling_index);
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainstate.IsCurrentMostWorkBranch(*selected_index));
+        BOOST_REQUIRE(!chainstate.IsCurrentMostWorkBranch(*sibling_index));
+        BOOST_REQUIRE_EQUAL(chainstate.setBlockIndexCandidates.count(selected_index), 1U);
+        BOOST_REQUIRE_EQUAL(chainstate.setBlockIndexCandidates.count(sibling_index), 1U);
+        BOOST_REQUIRE_EQUAL(candidate_index->nStatus & BLOCK_FAILED_MASK, 0U);
+        BOOST_REQUIRE_EQUAL(selected_index->nStatus & BLOCK_FAILED_MASK, 0U);
+    }
+
+    void CheckCacheableRejection(bool select_descendant)
+    {
+        PrepareCandidates(/*overpaid=*/true, select_descendant);
+        auto& chainman{*m_node.chainman};
+        auto& chainstate{chainman.ActiveChainstate()};
+        std::vector<uint256> checked;
+        ActivationAttemptObserver observer{[&](const CBlock& block, const BlockValidationState& state) {
+            checked.push_back(block.GetHash());
+            if (block.GetHash() == candidate->GetHash()) {
+                BOOST_CHECK(WITH_LOCK(::cs_main, return chainman.ActiveTip()) == parent_index);
+                BOOST_CHECK(state.IsInvalid());
+                BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-cb-amount");
+                BOOST_CHECK(IsBlockRejectionCacheable(state.GetResult()));
+            }
+            // Bound a bad reselection implementation instead of hanging a
+            // regression test if it retries a still-eligible representation.
+            if (checked.size() > 2) m_node.kernel->interrupt();
+        }};
+        BlockValidationState state;
+        BOOST_REQUIRE_MESSAGE(chainstate.ActivateBestChain(state), state.ToString());
+        BOOST_CHECK(state.IsValid());
+        BOOST_CHECK(checked == (std::vector<uint256>{candidate->GetHash(), sibling->GetHash()}));
+        BOOST_CHECK(!m_node.kernel->interrupt);
+        LOCK(::cs_main);
+        BOOST_CHECK(chainman.ActiveTip() == sibling_index);
+        BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == sibling->GetHash());
+        BOOST_CHECK_EQUAL(candidate_index->nStatus & BLOCK_FAILED_MASK, BLOCK_FAILED_VALID);
+        BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(candidate_index), 0U);
+        if (select_descendant) {
+            BOOST_CHECK_EQUAL(selected_index->nStatus & BLOCK_FAILED_MASK, BLOCK_FAILED_CHILD);
+            BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(selected_index), 0U);
+            BOOST_CHECK(!chainstate.CoinsTip().HaveCoin(COutPoint{candidate_child->vtx.front()->GetHash(), 0}));
+        }
+        BOOST_CHECK_EQUAL(sibling_index->nStatus & BLOCK_FAILED_MASK, 0U);
+        BOOST_CHECK(!chainstate.CoinsTip().HaveCoin(COutPoint{candidate->vtx.front()->GetHash(), 0}));
+        BOOST_CHECK(chainstate.CoinsTip().HaveCoin(COutPoint{sibling->vtx.front()->GetHash(), 0}));
+        BlockValidationState flushed;
+        BOOST_REQUIRE_MESSAGE(chainstate.FlushStateToDisk(flushed, FlushStateMode::ALWAYS), flushed.ToString());
+        BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == sibling->GetHash());
+        for (const auto* index : {candidate_index, selected_index, sibling_index}) {
+            CDiskBlockIndex persisted;
+            BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->Read(
+                std::make_pair(uint8_t{'b'}, index->GetBlockHash()), persisted));
+            BOOST_CHECK_EQUAL(persisted.nStatus & BLOCK_FAILED_MASK, index->nStatus & BLOCK_FAILED_MASK);
+        }
+    }
+};
+
 struct LiveNEVMRecoverySetup : StartupNEVMRecoverySetup {
     std::vector<std::shared_ptr<const CBlock>> prefix;
     std::shared_ptr<const CBlock> candidate;
@@ -5680,6 +5820,74 @@ BOOST_FIXTURE_TEST_CASE(persisted_reindex_marker_forces_clean_block_index, Chain
     }
 }
 BOOST_FIXTURE_TEST_SUITE(validation_chainstatemanager_tests, TestingSetup)
+
+BOOST_FIXTURE_TEST_CASE(activation_cacheable_tip_rejection_selects_known_sibling,
+                        CandidateSelectionSetup)
+{
+    CheckCacheableRejection(/*select_descendant=*/false);
+}
+
+BOOST_FIXTURE_TEST_CASE(activation_cacheable_ancestor_rejection_selects_known_sibling,
+                        CandidateSelectionSetup)
+{
+    CheckCacheableRejection(/*select_descendant=*/true);
+}
+
+BOOST_FIXTURE_TEST_CASE(activation_operational_error_does_not_select_known_sibling,
+                        StartupNEVMRecoverySetup)
+{
+    struct ResetInterrupt {
+        util::SignalInterrupt& interrupt;
+        ~ResetInterrupt() { interrupt.reset(); }
+    } reset_interrupt{m_node.kernel->interrupt};
+    auto& chainman{*m_node.chainman};
+    auto& chainstate{chainman.ActiveChainstate()};
+    const auto* parent{WITH_LOCK(::cs_main, return chainman.ActiveTip())};
+    const auto candidate{MakeNEVMBlock()};
+    const auto sibling{MakeNEVMBlock()};
+    CBlockIndex* candidate_index{nullptr};
+    CBlockIndex* sibling_index{nullptr};
+    {
+        LOCK(::cs_main);
+        BlockValidationState accepted;
+        BOOST_REQUIRE(chainman.AcceptBlock(candidate, accepted, &candidate_index, true, nullptr, nullptr, true));
+        BOOST_REQUIRE(chainman.AcceptBlock(sibling, accepted, &sibling_index, true, nullptr, nullptr, true));
+        BOOST_REQUIRE(candidate_index && sibling_index);
+        BOOST_REQUIRE(chainstate.IsCurrentMostWorkBranch(*candidate_index));
+    }
+    nevm->connect_response = [&](const uint256& hash, uint32_t) {
+        return hash == candidate->GetHash() ? std::string{"nevm-response-not-found"} : std::string{};
+    };
+    std::vector<uint256> checked;
+    ActivationAttemptObserver observer{[&](const CBlock& block, const BlockValidationState&) {
+        checked.push_back(block.GetHash());
+        if (checked.size() > 1) m_node.kernel->interrupt();
+    }};
+    BlockValidationState state;
+    BOOST_CHECK(!chainstate.ActivateBestChain(state));
+    BOOST_CHECK(state.IsError());
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "nevm-response-not-found");
+    BOOST_CHECK(checked == std::vector<uint256>{candidate->GetHash()});
+    BOOST_CHECK(nevm->connected_blocks == (std::vector<uint256>{candidate->GetHash(), candidate->GetHash()}));
+    BOOST_CHECK(!m_node.kernel->interrupt);
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK(chainman.ActiveTip() == parent);
+        BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == parent->GetBlockHash());
+        for (auto* index : {candidate_index, sibling_index}) {
+            BOOST_CHECK_EQUAL(index->nStatus & BLOCK_FAILED_MASK, 0U);
+            BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(index), 1U);
+        }
+    }
+    nevm->connect_response = {};
+    checked.clear();
+    BlockValidationState retry;
+    BOOST_REQUIRE_MESSAGE(chainstate.ActivateBestChain(retry, candidate), retry.ToString());
+    BOOST_CHECK(checked == std::vector<uint256>{candidate->GetHash()});
+    BOOST_CHECK_EQUAL(nevm->connected_blocks.size(), 3U);
+    BOOST_CHECK(nevm->applied_hash == candidate->GetHash());
+    BOOST_CHECK(WITH_LOCK(::cs_main, return chainman.ActiveTip()) == candidate_index);
+}
 
 BOOST_FIXTURE_TEST_CASE(nevm_payload_repair_healthy_import_skips_checks,
                         StartupNEVMRecoverySetup)

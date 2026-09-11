@@ -8070,7 +8070,7 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
             }
             CBlockIndex* starting_tip = m_chain.Tip();
             bool blocks_connected = false;
-            // SYSCOIN: Retired conflicts and deferred receipt branches yield
+            // SYSCOIN: Retired candidates and deferred receipt branches yield
             // immediately to another already-known candidate.
             bool select_alternative{false};
             do {
@@ -8111,13 +8111,18 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                 blocks_connected_this_call = blocks_connected_this_call || blocks_connected;
 
                 if (fInvalidFound) {
-                    // Only a retired conflict guarantees a different candidate;
-                    // a noncacheable invalid representation may remain eligible.
-                    select_alternative =
-                        (pindexMostWork->nStatus & BLOCK_CONFLICT_CHAINLOCK) != 0 &&
-                        !m_chainman.m_interrupt;
-                    // Wipe cache, we may need another branch now.
+                    // Reselect through the ancestry filter: a rejected ancestor
+                    // may not have marked the selected descendant failed yet.
+                    // A noncacheable representation can remain best, so only
+                    // continue immediately when selection finds another branch.
+                    const CBlockIndex* attempted{pindexMostWork};
                     pindexMostWork = nullptr;
+                    if (!m_chainman.m_interrupt) {
+                        CBlockIndex* next{FindMostWorkChain()};
+                        select_alternative = next != nullptr &&
+                            next != attempted && next != m_chain.Tip();
+                        if (select_alternative) pindexMostWork = next;
+                    }
                 }
                 if (recovering_known_nevm_pair && blocks_connected) {
                     // Revisit the fresh-status gate even when the selected
