@@ -11,7 +11,7 @@ In this test we connect to one node over p2p, and test block requests:
 re-requested.
 4) Invalid block due to future timestamp is later accepted when that timestamp
 becomes valid.
-5) A cacheable invalid candidate yields to an already-known valid sibling in
+5) SYSCOIN: A cacheable invalid candidate yields to an already-known valid sibling in
 the same activation call, including when the selected tip is its descendant.
 """
 import copy
@@ -23,7 +23,7 @@ from test_framework.blocktools import (
     create_coinbase,
     create_tx_with_script,
 )
-from test_framework.messages import CBlockHeader, COIN
+from test_framework.messages import CBlockHeader, COIN  # SYSCOIN: Serialize queued candidate headers.
 from test_framework.p2p import P2PDataStore
 from test_framework.script import OP_TRUE
 from test_framework.test_framework import SyscoinTestFramework
@@ -137,6 +137,7 @@ class InvalidBlockRequestTest(SyscoinTestFramework):
         node.setmocktime(t + 1)
         peer.send_blocks_and_test([block], node, success=True)
 
+        # SYSCOIN BEGIN: Continue candidate selection after a cacheable rejection.
         self.log.info("Select a known valid sibling after a cacheable rejection makes no progress")
         for invalid_descendant in (False, True):
             best = node.getblock(node.getbestblockhash())
@@ -172,6 +173,7 @@ class InvalidBlockRequestTest(SyscoinTestFramework):
             assert_equal(node.submitblock(parent.serialize().hex()), None)
             assert_equal(node.getbestblockhash(), sibling.hash)
             assert_equal(node.submitblock(invalid.serialize().hex()), "duplicate-invalid")
+        # SYSCOIN END: Continue candidate selection after a cacheable rejection.
 
 
 if __name__ == '__main__':

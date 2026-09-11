@@ -785,6 +785,7 @@ struct ManagedNEVMShutdownSetup : StartupNEVMRecoverySetup {
     ~ManagedNEVMShutdownSetup() { AbortShutdown(); }
 };
 
+// SYSCOIN BEGIN: Observe candidate selection after failed activation.
 struct ActivationAttemptObserver final : CValidationInterface {
     std::function<void(const CBlock&, const BlockValidationState&)> on_checked;
 
@@ -924,6 +925,8 @@ struct CandidateSelectionSetup : TestChain100Setup {
         }
     }
 };
+
+// SYSCOIN END: Observe candidate selection after failed activation.
 
 struct LiveNEVMRecoverySetup : StartupNEVMRecoverySetup {
     std::vector<std::shared_ptr<const CBlock>> prefix;
@@ -5821,6 +5824,7 @@ BOOST_FIXTURE_TEST_CASE(persisted_reindex_marker_forces_clean_block_index, Chain
 }
 BOOST_FIXTURE_TEST_SUITE(validation_chainstatemanager_tests, TestingSetup)
 
+// SYSCOIN BEGIN: Continue selection after cacheable candidate rejection.
 BOOST_FIXTURE_TEST_CASE(activation_cacheable_tip_rejection_selects_known_sibling,
                         CandidateSelectionSetup)
 {
@@ -5888,6 +5892,8 @@ BOOST_FIXTURE_TEST_CASE(activation_operational_error_does_not_select_known_sibli
     BOOST_CHECK(nevm->applied_hash == candidate->GetHash());
     BOOST_CHECK(WITH_LOCK(::cs_main, return chainman.ActiveTip()) == candidate_index);
 }
+
+// SYSCOIN END: Continue selection after cacheable candidate rejection.
 
 BOOST_FIXTURE_TEST_CASE(nevm_payload_repair_healthy_import_skips_checks,
                         StartupNEVMRecoverySetup)

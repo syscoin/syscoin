@@ -8110,6 +8110,7 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                                    !connected_blocks.empty();
                 blocks_connected_this_call = blocks_connected_this_call || blocks_connected;
 
+                // SYSCOIN BEGIN: Reselect only a different eligible candidate.
                 if (fInvalidFound) {
                     // Reselect through the ancestry filter: a rejected ancestor
                     // may not have marked the selected descendant failed yet.
@@ -8124,6 +8125,7 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                         if (select_alternative) pindexMostWork = next;
                     }
                 }
+                // SYSCOIN END: Reselect only a different eligible candidate.
                 if (recovering_known_nevm_pair && blocks_connected) {
                     // Revisit the fresh-status gate even when the selected
                     // recovery prefix is now the tip, then resume fork choice
