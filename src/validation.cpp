@@ -3261,6 +3261,8 @@ bool ChainstateManager::MaybeRecoverNEVMBlockProduction(std::string& error)
     // SYSCOIN: A lost acknowledgement may leave this exact child applied in
     // Geth but unpublished in Core. Never infer that authority from height.
     const CBlockIndex* pending_connect{nullptr};
+    // SYSCOIN: Resuming fork selection grants no authority to a pending branch.
+    bool continue_activation{false};
     {
         // Invalidation retains its applied-prefix snapshot across cs_main
         // releases. Exclude the entire operation before replay can move Geth.
@@ -3275,13 +3277,27 @@ bool ChainstateManager::MaybeRecoverNEVMBlockProduction(std::string& error)
             CBlockIndex* pending{chainstate->NEVMPendingConnectCandidate()};
             if (chainstate->RecoverNEVMPrefixThrough(*tip, pending, error, rejection)) {
                 if (!m_nevm_prefix_recovery_needed) {
-                    chainstate->m_nevm_pending_connect.reset();
-                    return true;
+                    // SYSCOIN BEGIN: Finish selection after publishing the lost-ACK child.
+                    const CBlockIndex* attempted{chainstate->m_nevm_pending_connect
+                        ? m_blockman.LookupBlockIndex(*chainstate->m_nevm_pending_connect) : nullptr};
+                    const bool owns_continuation{chainstate->m_nevm_activation_continuation ||
+                        (attempted && chainstate->m_chain.Contains(attempted))};
+                    const CBlockIndex* next{owns_continuation ? chainstate->FindMostWorkChain() : nullptr};
+                    if (next == nullptr || next == tip) {
+                        chainstate->m_nevm_pending_connect.reset();
+                        chainstate->m_nevm_activation_continuation = false;
+                        return true;
+                    }
+                    chainstate->m_nevm_activation_continuation = true;
+                    m_nevm_prefix_recovery_needed = true;
+                    continue_activation = true;
+                    // SYSCOIN END: Consume this reason only under activation's own locks.
+                } else {
+                    // Only the exact already-applied child leaves the flag armed
+                    // after successful recovery. Revalidate it again in activation.
+                    assert(pending != nullptr);
+                    pending_connect = pending;
                 }
-                // Only the exact already-applied child leaves the flag armed
-                // after successful recovery. Revalidate it again in activation.
-                assert(pending != nullptr);
-                pending_connect = pending;
             } else if (!rejection) {
                 return false;
             }
@@ -3300,7 +3316,7 @@ bool ChainstateManager::MaybeRecoverNEVMBlockProduction(std::string& error)
     BlockValidationState state;
     // SYSCOIN: Activation takes its own locks and rechecks the pending ticket.
     // Its publication leaves mining gated until the next tick's fresh pair check.
-    if (!chainstate->ActivateBestChainInternal(state, nullptr, pending_connect)) {
+    if (!chainstate->ActivateBestChainInternal(state, nullptr, pending_connect, continue_activation)) {
         error = state.ToString();
         return false;
     }
@@ -8034,7 +8050,8 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
 }
 
 bool Chainstate::ActivateBestChainInternal(BlockValidationState& state,
-    std::shared_ptr<const CBlock> pblock, const CBlockIndex* nevm_pending)
+    std::shared_ptr<const CBlock> pblock, const CBlockIndex* nevm_pending,
+    bool nevm_continuation)
 // SYSCOIN END: The internal entry acquires the ordinary activation locks.
 {
     AssertLockNotHeld(m_chainstate_mutex);
@@ -8057,6 +8074,21 @@ bool Chainstate::ActivateBestChainInternal(BlockValidationState& state,
             "Please report this as a bug. %s\n", PACKAGE_BUGREPORT);
         return false;
     }
+
+    // SYSCOIN BEGIN: Consume aligned recovery's ordinary continuation once.
+    if (nevm_continuation) {
+        LOCK(cs_main);
+        if (this != &m_chainman.ActiveChainstate() || !m_nevm_activation_continuation ||
+            !m_chainman.m_nevm_prefix_recovery_needed || !fNEVMConnection ||
+            m_chainman.m_interrupt || m_blockman.LoadingBlocks() ||
+            !m_chainman.IsPQBlockProductionAllowed() ||
+            !m_chainman.NEVMBlockProductionPrerequisitesMet()) {
+            return state.Error("nevm-live-recovery-continuation-changed");
+        }
+        m_nevm_activation_continuation = false;
+        m_nevm_pending_connect.reset();
+    }
+    // SYSCOIN END: The normal selector and finality checks choose all further work.
 
     CBlockIndex *pindexMostWork = nullptr;
     CBlockIndex *pindexNewTip = nullptr;
@@ -8166,8 +8198,13 @@ bool Chainstate::ActivateBestChainInternal(BlockValidationState& state,
                     ? pindexMostWork->GetAncestor(0) : pindexMostWork};
                 // SYSCOIN BEGIN: Keep a scheduled publication gated until a fresh pair check.
                 const bool step_completed{ActivateBestChainStep(state, step_target, pblock && pblock->GetHash() == step_target->GetBlockHash() ? pblock : nullBlockPtr, fInvalidFound, fReceiptCandidateDeferred, connectTrace, rejection, repair_selection)};
-                if (nevm_pending) m_chainman.m_nevm_prefix_recovery_needed = true;
+                if (nevm_pending || nevm_continuation) m_chainman.m_nevm_prefix_recovery_needed = true;
                 if (!step_completed) {
+                    // SYSCOIN: Only a new unresolved connect carries this pass
+                    // into another tick; noncacheable refusal cannot busy-loop.
+                    if (nevm_continuation && m_nevm_pending_connect) {
+                        m_nevm_activation_continuation = true;
+                    }
                     // A system error occurred
                     return false;
                 }

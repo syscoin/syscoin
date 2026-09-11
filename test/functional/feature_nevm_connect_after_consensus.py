@@ -4,6 +4,7 @@
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """NEVM connects preserve invalidity and recover lost acknowledged predecessors."""
 
+from copy import deepcopy
 from io import BytesIO
 from threading import Thread
 import hashlib
@@ -635,6 +636,31 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
         previous_tip = node.getbestblockhash()
         previous_coinbase = node.getblock(previous_tip)["tx"][0]
         previous_coin = node.gettxout(previous_coinbase, 0)
+
+        # Build the descendant offline while C is still pending. These early
+        # coinbase-only blocks use the same payments below DIP3/superblocks.
+        assert_equal(len(block.vtx), 1)
+        descendant = deepcopy(block)
+        coinbase = descendant.vtx[0]
+        coinbase.vin[0].scriptSig = create_coinbase(node.getblockcount() + 2).vin[0].scriptSig
+        nevm_header = CNEVMHeader()
+        for field in ("nBlockHash", "nTxRoot", "nReceiptRoot"):
+            setattr(nevm_header, field, uint256_from_str(hash256(
+                b"pending-child-descendant" + field.encode() + ser_uint256(block.sha256)
+            )))
+        offset = coinbase.extraData.index(b"nevm") + len(b"nevm")
+        coinbase.extraData = (
+            coinbase.extraData[:offset] + nevm_header.serialize()
+            + coinbase.extraData[offset + len(nevm_header.serialize()):]
+        )
+        coinbase.vout.pop()
+        descendant.hashPrevBlock = block.sha256
+        descendant.nTime += 1
+        descendant.nNonce = 0
+        add_witness_commitment(descendant, nonce=0)
+        descendant.solve()
+        descendant_raw = self._serialize_nevm_block(descendant, self._last_nevm_block_data).hex()
+
         applied = self._applied_syshashes[:]
         connect_len = len(self._connect_syshashes)
         disconnect_len = len(self._disconnect_syshashes)
@@ -651,7 +677,7 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
             return b"error:mock-lost-ack"
 
         self._connect_response = apply_without_acknowledgement
-        self._expected_connect_syshashes = applied + [block.sha256]
+        self._expected_connect_syshashes = applied + [block.sha256, descendant.sha256]
         self._block_info_available = False
         try:
             assert_raises_rpc_error(-25, "nevm-response-unserialize", node.submitblock, raw)
@@ -663,6 +689,18 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
             assert branch["status"] != "invalid"
             assert_equal(self._applied_syshashes, applied + [block.sha256])
             assert_equal(self._nonzero_connects_since(connect_len), [block.sha256])
+
+            # Download D before communication recovers. Its public submission
+            # retries C, whose unavailable acknowledgement still keeps Core at
+            # P; D remains an eligible stored descendant of that same branch.
+            assert_equal(node.submitblock(descendant_raw), "inconclusive")
+            assert_equal(node.getbestblockhash(), previous_tip)
+            assert_equal(node.getblock(descendant.hash, 0), descendant_raw)
+            assert_equal(node.gettxout(descendant.vtx[0].hash, 0), None)
+            branch = next(tip for tip in node.getchaintips() if tip["hash"] == descendant.hash)
+            assert branch["status"] != "invalid"
+            assert_equal(self._applied_syshashes, applied + [block.sha256])
+            assert_equal(self._nonzero_connects_since(connect_len), [block.sha256, block.sha256])
             assert_raises_rpc_error(
                 -10, "execution recovery", node.getblocktemplate, {"rules": ["segwit"]},
             )
@@ -683,9 +721,25 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
             })
             assert node.gettxout(block.vtx[0].hash, 0) is not None
             assert_equal(self._applied_syshashes, applied + [block.sha256])
+            assert_raises_rpc_error(
+                -10, "execution recovery", node.getblocktemplate, {"rules": ["segwit"]},
+            )
 
-            # A later scheduler pass verifies the newly active prefix before
-            # mining reopens. These template retries only observe readiness.
+            # The next scheduler pass must resume ordinary candidate selection
+            # after verifying C. No new block submission or peer may drive D.
+            self.wait_until(lambda: node.getbestblockhash() == descendant.hash)
+            assert_equal(node.getblock(descendant.hash, 0), descendant_raw)
+            assert_equal(node.gettxout(previous_coinbase, 0), {
+                **previous_coin,
+                "bestblock": descendant.hash,
+                "confirmations": previous_coin["confirmations"] + 2,
+            })
+            assert_equal(node.gettxout(block.vtx[0].hash, 0)["confirmations"], 2)
+            assert node.gettxout(descendant.vtx[0].hash, 0) is not None
+            assert_equal(self._applied_syshashes, applied + [block.sha256, descendant.sha256])
+
+            # A final scheduler pass verifies D before mining reopens. These
+            # template retries only observe readiness, never select candidates.
             templates = []
 
             def ready():
@@ -698,13 +752,25 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
                     raise
 
             self.wait_until(ready)
-            assert_equal(templates[0]["previousblockhash"], block.hash)
-            assert_equal(self._nonzero_connects_since(connect_len), [block.sha256, block.sha256])
+            assert_equal(templates[0]["previousblockhash"], descendant.hash)
+            assert_equal(self._nonzero_connects_since(connect_len), [
+                block.sha256, block.sha256, block.sha256, descendant.sha256,
+            ])
             assert_equal(self._disconnect_syshashes[disconnect_len:], [])
             events = self._nevm_events[event_len:]
             statuses = [event for event in events if event[0] == "blockinfo"]
-            assert len(statuses) >= 2
-            assert_equal(statuses[-1], ("blockinfo", len(applied) + 1, block.sha256))
+            assert len(statuses) >= 3
+            assert_equal(statuses[-1], ("blockinfo", len(applied) + 2, descendant.sha256))
+            descendant_connect_index = events.index(("connect", descendant.sha256, b"connected"))
+            parent_status_index = max(
+                index for index, event in enumerate(events)
+                if event == ("blockinfo", len(applied) + 1, block.sha256)
+            )
+            assert parent_status_index < descendant_connect_index
+            assert_equal(events[parent_status_index - 1], ("flush", len(applied) + 1))
+            last_status_index = max(index for index, event in enumerate(events) if event[0] == "blockinfo")
+            assert last_status_index > descendant_connect_index
+            assert_equal(events[last_status_index - 1], ("flush", len(applied) + 2))
 
             # Administrative cleanup keeps subsequent response cases below
             # the first superblock after scheduler completion is established.

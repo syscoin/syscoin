@@ -1087,10 +1087,13 @@ private:
     bool ActivateBestChainStep(BlockValidationState& state, CBlockIndex* pindexMostWork, const std::shared_ptr<const CBlock>& pblock, bool& fInvalidFound, bool& fReceiptCandidateDeferred, ConnectTrace& connectTrace, std::optional<NEVMBlockReject>& rejection, std::optional<NEVMPayloadRepairSelection>& repair_selection) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs, m_chainstate_mutex);
     // SYSCOIN BEGIN: Bound scheduled completion to one previously attempted child.
     bool ActivateBestChainInternal(BlockValidationState& state,
-        std::shared_ptr<const CBlock> pblock, const CBlockIndex* nevm_pending)
+        std::shared_ptr<const CBlock> pblock, const CBlockIndex* nevm_pending,
+        bool nevm_continuation = false)
         EXCLUSIVE_LOCKS_REQUIRED(!m_chainstate_mutex) LOCKS_EXCLUDED(cs_main);
     CBlockIndex* NEVMPendingConnectCandidate() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     std::optional<uint256> m_nevm_pending_connect GUARDED_BY(cs_main);
+    // SYSCOIN: An aligned published child still owns ordinary fork selection.
+    bool m_nevm_activation_continuation GUARDED_BY(cs_main){false};
     // SYSCOIN END: Transient lost-acknowledgement recovery context.
     // Call after transition authorization, before undoing an active block.
     bool PrepareNEVMDisconnectPrefix(
