@@ -98,6 +98,10 @@ using node::SnapshotMetadata;
 extern NEVMMintTxSet setMintTxsMempool;
 
 namespace llmq::test {
+void WithNEVMRootDeferralForTest(ChainstateManager& chainman,
+                                const CBlockIndex& carrier,
+                                const std::function<void()>& run);
+
 class PQHistoryReauthenticationTestAccess {
 public:
     static PQHistoryReauthentication Make(
@@ -201,6 +205,7 @@ struct StartupNEVMSubscriber final : CValidationInterface {
     };
 
     uint64_t applied_count{0};
+    uint32_t first_nevm_height{101};
     uint256 applied_hash;
     bool buffer_connects{false};
     bool flush_available{true};
@@ -286,7 +291,7 @@ struct StartupNEVMSubscriber final : CValidationInterface {
             state = connect_response(hash, height);
             if (!state.empty()) return;
         }
-        const AppliedPair incoming{height - 101 + 1, hash};
+        const AppliedPair incoming{height - first_nevm_height + 1, hash};
         if (strict_connect_order) {
             const auto last{buffered_pairs.empty()
                 ? AppliedPair{applied_count, applied_hash}
@@ -3727,6 +3732,228 @@ struct NEVMMintCleanupSetup : NEVMMintReadErrorSetup {
     }
 };
 
+// SYSCOIN: Exercise clean undo of Core-accepted receipt-deferred carriers.
+// The existing handler fixture seeds a durable receipt obligation; every
+// source, duplicate and mint below still uses the normal block validator.
+struct NEVMCleanRootAliasSetup : NEVMMintCleanupSetup {
+    enum class Variant { SAME, DIFFERENT, ORPHAN, LATEST, MISSING, CORRUPT, MISSING_ORPHAN };
+    const int previous_nevm_start{consensus.nNEVMStartBlock};
+
+    NEVMCleanRootAliasSetup()
+    {
+        consensus.nNEVMStartBlock = 874;
+        consensus.nNexusStartBlock = 874;
+        nevm->first_nevm_height = 874;
+        fNEVMConnection = false;
+        mineBlocks(773);
+        fNEVMConnection = true;
+    }
+
+    ~NEVMCleanRootAliasSetup()
+    {
+        consensus.nNEVMStartBlock = previous_nevm_start;
+    }
+
+    std::shared_ptr<const CBlock> ReceivedChild(
+        const CBlock& prototype, const CNEVMHeader& commitment,
+        const CMutableTransaction* mint = nullptr)
+    {
+        auto& chainman{*m_node.chainman};
+        LOCK(::cs_main);
+        const auto* parent{chainman.ActiveTip()};
+        CBlock block{prototype};
+        CMutableTransaction coinbase{*block.vtx.front()};
+        coinbase.vin.front().scriptSig = CScript{} << (parent->nHeight + 1) << OP_0;
+        block.vtx = {MakeTransactionRef(coinbase)};
+        if (mint) block.vtx.push_back(MakeTransactionRef(*mint));
+        CNEVMHeader old_header;
+        std::vector<unsigned char> payload;
+        BlockValidationState state;
+        BOOST_REQUIRE(GetNEVMData(state, prototype, old_header, &payload));
+        auto pos{std::search(payload.begin(), payload.end(),
+                             std::begin(NEVM_MAGIC_BYTES), std::end(NEVM_MAGIC_BYTES))};
+        BOOST_REQUIRE(pos != payload.end());
+        pos += sizeof(NEVM_MAGIC_BYTES);
+        CDataStream encoded(SER_NETWORK, PROTOCOL_VERSION);
+        encoded << commitment;
+        BOOST_REQUIRE_GE(std::distance(pos, payload.end()), encoded.size());
+        std::transform(encoded.begin(), encoded.end(), pos,
+                       [](std::byte value) { return std::to_integer<unsigned char>(value); });
+        block.hashPrevBlock = parent->GetBlockHash();
+        block.nTime = parent->nTime + 1;
+        block.nNonce = 0;
+        node::RegenerateCommitments(block, chainman, payload);
+        block.fChecked = false;
+        while (!CheckProofOfWork(block.GetHash(), block.nBits, consensus)) ++block.nNonce;
+        return std::make_shared<const CBlock>(std::move(block));
+    }
+
+    void CheckCleanAlias(Variant variant)
+    {
+        auto& chainman{*m_node.chainman};
+        auto& chainstate{chainman.ActiveChainstate()};
+        auto mint{MakeValidNEVMMintFixture(consensus, 875,
+            WitnessV0KeyHash{coinbaseKey.GetPubKey()}, uint256S("fa74"))};
+        nevm->template_block_hash = mint.mint.nBlockHash;
+        nevm->template_roots = NEVMTxRoot{mint.mint.nTxRoot, mint.mint.nReceiptRoot};
+        const auto funding{CreateValidMempoolTransaction(
+            m_coinbase_txns.front(), 0, 1, coinbaseKey,
+            CScript{} << OP_TRUE, 10 * COIN, /*submit=*/false)};
+        const auto source{MakeMintBlock(funding)};
+        BOOST_REQUIRE(chainman.ProcessNewBlock(source, true, true, nullptr));
+        BOOST_REQUIRE(WITH_LOCK(::cs_main,
+            return chainman.ActiveTip()->GetBlockHash()) == source->GetHash());
+        BOOST_REQUIRE_EQUAL(nevm->applied_count, 1U);
+        BOOST_REQUIRE(nevm->applied_hash == source->GetHash());
+        nevm->template_block_hash.reset();
+        nevm->template_roots.reset();
+        SetMockTime(GetTime() + 1);
+        mint.tx.vin.emplace_back(COutPoint{funding.GetHash(), 0});
+        const auto valid_mint_block{MakeMintBlock(mint.tx)};
+        {
+            LOCK(::cs_main);
+            BlockValidationState valid;
+            BOOST_REQUIRE_MESSAGE(TestBlockValidity(valid, chainman.GetParams(), chainstate,
+                *valid_mint_block, chainman.ActiveTip(), chainman.m_options.adjusted_time_callback),
+                valid.ToString());
+        }
+        // Build the received carrier before its replay obligation gates local
+        // mining. ReceivedChild constructs subsequent peer blocks without
+        // bypassing that gate or invoking the block assembler again.
+        const auto boundary{MakeNEVMBlock()};
+        CBlockIndex* boundary_index{nullptr};
+        {
+            LOCK(::cs_main);
+            BlockValidationState accepted;
+            BOOST_REQUIRE(chainman.AcceptBlock(boundary, accepted, &boundary_index,
+                true, nullptr, nullptr, true));
+        }
+        BOOST_REQUIRE(boundary_index);
+        const auto check_roots = [&](const CNEVMHeader& expected) {
+            NEVMTxRoot roots;
+            BOOST_REQUIRE(pnevmtxrootsdb->ReadTxRoots(expected.nBlockHash, roots));
+            BOOST_CHECK(roots.nTxRoot == expected.nTxRoot);
+            BOOST_CHECK(roots.nReceiptRoot == expected.nReceiptRoot);
+            BOOST_REQUIRE(pnevmtxrootsdb->Read(expected.nBlockHash, roots));
+            BOOST_CHECK(roots.nTxRoot == expected.nTxRoot);
+            BOOST_CHECK(roots.nReceiptRoot == expected.nReceiptRoot);
+        };
+        const auto flush = [&]() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+            BlockValidationState state;
+            BOOST_REQUIRE_MESSAGE(chainstate.FlushStateToDisk(state, FlushStateMode::ALWAYS),
+                                  state.ToString());
+        };
+        CNEVMHeader source_header;
+        BlockValidationState header_state;
+        BOOST_REQUIRE(GetNEVMData(header_state, *source, source_header));
+        llmq::test::WithNEVMRootDeferralForTest(chainman, *boundary_index, [&] {
+            {
+                LOCK(::cs_main);
+                BOOST_REQUIRE(llmq::chainLocksHandler->ShouldDeferBTCCNEVM(*boundary_index));
+            }
+            BlockValidationState activated;
+            BOOST_REQUIRE_MESSAGE(chainstate.ActivateBestChain(activated, boundary), activated.ToString());
+            BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainman.ActiveTip()) == boundary_index);
+            CNEVMHeader retained;
+            BOOST_REQUIRE(GetNEVMData(header_state, *source, retained));
+            if (variant == Variant::LATEST) {
+                retained.nTxRoot = uint256S("aa01");
+                retained.nReceiptRoot = uint256S("aa02");
+                const auto newer_owner{ReceivedChild(*boundary, retained)};
+                BOOST_REQUIRE(chainman.ProcessNewBlock(newer_owner, true, true, nullptr));
+                BOOST_REQUIRE(WITH_LOCK(::cs_main,
+                    return chainman.ActiveTip()->GetBlockHash()) == newer_owner->GetHash());
+            }
+            CNEVMHeader removed;
+            BOOST_REQUIRE(GetNEVMData(header_state, *source, removed));
+            const bool orphan{variant == Variant::ORPHAN || variant == Variant::MISSING_ORPHAN};
+            if (orphan) removed.nBlockHash = uint256S("fa99");
+            if (variant != Variant::SAME) {
+                removed.nTxRoot = uint256S("bb01");
+                removed.nReceiptRoot = uint256S("bb02");
+            }
+            const auto duplicate{ReceivedChild(*boundary, removed)};
+            BOOST_REQUIRE(chainman.ProcessNewBlock(duplicate, true, true, nullptr));
+            SyncWithValidationInterfaceQueue();
+            LOCK(::cs_main);
+            auto* const duplicate_index{chainman.ActiveTip()};
+            BOOST_REQUIRE(duplicate_index->GetBlockHash() == duplicate->GetHash());
+            BOOST_REQUIRE(duplicate_index->IsValid(BLOCK_VALID_SCRIPTS));
+            BOOST_REQUIRE(llmq::chainLocksHandler->ShouldDeferBTCCNEVM(*duplicate_index));
+            BOOST_REQUIRE_EQUAL(nevm->connected_blocks.size(), 1U);
+            BOOST_REQUIRE(nevm->applied_hash == source->GetHash());
+            flush();
+            check_roots(removed);
+            LOCK(chainstate.MempoolMutex());
+            if (variant == Variant::MISSING || variant == Variant::CORRUPT ||
+                variant == Variant::MISSING_ORPHAN) {
+                auto* source_index{chainman.m_blockman.LookupBlockIndex(source->GetHash())};
+                BOOST_REQUIRE(source_index);
+                struct RestorePosition {
+                    CBlockIndex& index;
+                    FlatFilePos pos;
+                    ~RestorePosition() { index.nFile = pos.nFile; index.nDataPos = pos.nPos; }
+                } restore{*source_index, source_index->GetBlockPos()};
+                if (variant == Variant::CORRUPT) {
+                    CBlock corrupt{*source};
+                    CMutableTransaction altered{*corrupt.vtx.front()};
+                    ++altered.nLockTime;
+                    corrupt.vtx.front() = MakeTransactionRef(altered);
+                    const auto pos{chainman.m_blockman.SaveBlockToDisk(corrupt, source_index->nHeight, nullptr)};
+                    BOOST_REQUIRE(!pos.IsNull());
+                    source_index->nFile = pos.nFile;
+                    source_index->nDataPos = pos.nPos;
+                } else {
+                    source_index->nFile = std::numeric_limits<int>::max();
+                }
+                BlockValidationState failed;
+                BOOST_REQUIRE(!chainstate.DisconnectTip(failed, nullptr, true));
+                BOOST_CHECK(failed.IsError());
+                BOOST_CHECK(!failed.IsInvalid());
+                BOOST_CHECK(chainman.ActiveTip() == duplicate_index);
+                BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == duplicate->GetHash());
+                BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == duplicate->GetHash());
+                BOOST_CHECK(!pnevmtxrootsdb->GetPendingDisconnect());
+                BOOST_CHECK(pnevmtxrootsdb->GetPublishedTip() == duplicate->GetHash());
+                check_roots(removed);
+            }
+            BlockValidationState disconnected;
+            BOOST_REQUIRE_MESSAGE(chainstate.DisconnectTip(disconnected, nullptr, true),
+                                  disconnected.ToString());
+            check_roots(retained);
+            if (orphan) {
+                NEVMTxRoot roots;
+                BOOST_CHECK(!pnevmtxrootsdb->ReadTxRoots(removed.nBlockHash, roots));
+                BOOST_CHECK(!pnevmtxrootsdb->Read(removed.nBlockHash, roots));
+            }
+            BOOST_CHECK(!pnevmtxrootsdb->GetPendingDisconnect());
+            BOOST_CHECK(pnevmtxrootsdb->GetPublishedTip() == chainman.ActiveTip()->GetBlockHash());
+            flush();
+            check_roots(retained);
+            ReopenCoins();
+            BOOST_REQUIRE(chainstate.ReplayBlocks());
+            check_roots(retained);
+            if (variant == Variant::LATEST) {
+                BlockValidationState earlier;
+                BOOST_REQUIRE_MESSAGE(chainstate.DisconnectTip(earlier, nullptr, true),
+                                      earlier.ToString());
+                check_roots(source_header);
+            }
+            BOOST_REQUIRE(chainman.ActiveTip() == boundary_index);
+            BOOST_CHECK_EQUAL(nevm->applied_count, 1U);
+            BOOST_CHECK(nevm->applied_hash == source->GetHash());
+            BOOST_CHECK(nevm->disconnected_blocks.empty());
+            BOOST_CHECK_EQUAL(nevm->connected_blocks.size(), 1U);
+            BOOST_CHECK_EQUAL(duplicate_index->nStatus & BLOCK_FAILED_MASK, 0U);
+            BOOST_CHECK(!pnevmtxmintdb->ExistsTx(mint.mint.nTxHash));
+            const auto mint_after{ReceivedChild(*boundary, source_header, &mint.tx)};
+            BlockValidationState valid;
+            BOOST_REQUIRE_MESSAGE(TestBlockValidity(valid, chainman.GetParams(), chainstate,
+                *mint_after, boundary_index, chainman.m_options.adjusted_time_callback), valid.ToString());
+        });
+    }
+};
+
 struct NEVMRootRollbackSetup : StartupNEVMRecoverySetup {
     std::unique_ptr<CNEVMTxRootsDB> previous_roots_db{std::move(pnevmtxrootsdb)};
     std::unique_ptr<CNEVMMintedTxDB> previous_mint_db{std::move(pnevmtxmintdb)};
@@ -6632,6 +6859,41 @@ BOOST_FIXTURE_TEST_CASE(nevm_mint_marker_read_error_preserves_block_candidate,
     CheckReadError(/*roots_error=*/false);
 }
 // SYSCOIN END: Valid mint candidates survive local NEVM database read errors.
+
+BOOST_FIXTURE_TEST_CASE(nevm_clean_rollback_preserves_identical_alias, NEVMCleanRootAliasSetup)
+{
+    CheckCleanAlias(Variant::SAME);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_clean_rollback_restores_canonical_tuple, NEVMCleanRootAliasSetup)
+{
+    CheckCleanAlias(Variant::DIFFERENT);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_clean_rollback_erases_orphan_only_root, NEVMCleanRootAliasSetup)
+{
+    CheckCleanAlias(Variant::ORPHAN);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_clean_rollback_selects_latest_owner, NEVMCleanRootAliasSetup)
+{
+    CheckCleanAlias(Variant::LATEST);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_clean_rollback_requires_canonical_body, NEVMCleanRootAliasSetup)
+{
+    CheckCleanAlias(Variant::MISSING);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_clean_rollback_authenticates_canonical_body, NEVMCleanRootAliasSetup)
+{
+    CheckCleanAlias(Variant::CORRUPT);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_clean_rollback_requires_evidence_of_absence, NEVMCleanRootAliasSetup)
+{
+    CheckCleanAlias(Variant::MISSING_ORPHAN);
+}
 
 BOOST_FIXTURE_TEST_CASE(nevm_mint_cleanup_reopens_before_erase, NEVMMintCleanupSetup)
 {

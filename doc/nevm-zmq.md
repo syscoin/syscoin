@@ -139,6 +139,21 @@ Deferred replay retains its original marker and does not call its finalizer
 after reconciliation, because the original target was not applied. Replacement
 selection runs after releasing the replay activation lock.
 
+## Root ownership during rollback
+
+A receipt-deferred suffix can repeat a NEVM hash already carried by the retained
+branch. Before undoing a carrier, Core authenticates the retained ancestry and
+finds that key's latest surviving tuple. Clean completion restores that tuple
+through the existing root-disconnect journal; it erases the key only after
+establishing that no canonical carrier remains. Missing or corrupt evidence
+stops rollback before undo or root revocation. The coins durability barrier,
+pending-root masking, and consumed-proof cleanup ordering still apply.
+
+This lookup runs on rollback, including local undo of unapplied blocks, and
+shares startup recovery's block/proof reader. It adds no work to healthy block
+extensions and retains no additional records. A lookup may scan back to NEVM
+activation; a multi-block rollback can repeat that scan for each removed key.
+
 ## Interrupted mint rollback
 
 Core keeps the root-disconnect journal until both parent coins and consumed-proof

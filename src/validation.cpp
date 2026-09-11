@@ -6403,6 +6403,34 @@ void Chainstate::UpdateTip(const CBlockIndex* pindexNew)
     UpdateTipLog(m_chainman, coins_tip, pindexNew, params, __func__, "", warning_messages.original);
 }
 
+// SYSCOIN BEGIN: Share authenticated carrier reads between rollback and recovery.
+static bool ReadNEVMRootCarrier(
+    node::BlockManager& blockman, const CBlockIndex& index,
+    CNEVMHeader& header, bool allow_pruned = false,
+    NEVMMintTxSet* mints = nullptr)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    // Pruning evidence supplies root ownership only. Discarded/replacement
+    // carriers needed for mint cleanup must retain their complete bodies.
+    if (allow_pruned && !mints && blockman.IsBlockPruned(&index)) {
+        return blockman.ReadNEVMPrunedHeader(header, index);
+    }
+    CBlock block;
+    bool mutated{false};
+    BlockValidationState state;
+    if (!blockman.ReadBlockFromDisk(block, index, /*load_auxiliary_data=*/false) ||
+        BlockMerkleRoot(block, &mutated) != index.hashMerkleRoot || mutated ||
+        !GetNEVMData(state, block, header)) return false;
+    if (mints) {
+        for (const auto& tx : block.vtx) {
+            if (IsSyscoinMintTx(tx->nVersion) &&
+                !DisconnectMintAsset(*tx, *mints)) return false;
+        }
+    }
+    return true;
+}
+// SYSCOIN END: Shared NEVM root and mint-cleanup evidence.
+
 bool Chainstate::PrepareNEVMDisconnectPrefix(
     BlockValidationState& state,
     std::optional<NEVMDisconnectPrefix>& prefix)
@@ -6498,6 +6526,7 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
     // SYSCOIN: Local source-root authority follows every real rollback,
     // including startup alignment that deliberately skips Geth notifications.
     std::optional<NEVMRootDisconnect> root_disconnect;
+    std::optional<NEVMTxRoot> retained_root;
     if (pnevmtxrootsdb && (!fRegTest || fNEVMConnection) &&
         pindexDelete->nHeight >= m_chainman.GetConsensus().nNEVMStartBlock) {
         CNEVMHeader header;
@@ -6505,6 +6534,23 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
         root_disconnect = NEVMRootDisconnect{
             pindexDelete->GetBlockHash(), header.nBlockHash,
             header.nTxRoot, header.nReceiptRoot};
+        // SYSCOIN: Deferred execution does not establish unique NEVM hashes.
+        // Resolve the latest surviving owner before any undo or revocation;
+        // missing evidence cannot authorize erasing or restoring this key.
+        for (const CBlockIndex* index{pindexDelete->pprev};
+             index && index->nHeight >= m_chainman.GetConsensus().nNEVMStartBlock;
+             index = index->pprev) {
+            CNEVMHeader canonical;
+            if (!ReadNEVMRootCarrier(m_blockman, *index, canonical, /*allow_pruned=*/true)) {
+                return state.Error(strprintf(
+                    "DisconnectTip(): Cannot authenticate canonical NEVM root carrier %s",
+                    index->GetBlockHash().ToString()));
+            }
+            if (canonical.nBlockHash == header.nBlockHash) {
+                retained_root = NEVMTxRoot{canonical.nTxRoot, canonical.nReceiptRoot};
+                break;
+            }
+        }
     }
     // Apply the block atomically to the chain state.
     // SYSCOIN
@@ -6607,7 +6653,7 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
             // interrupted after the parent coins have become durable.
             if (root_disconnect &&
                 !pnevmtxrootsdb->CompleteRootRecovery(
-                    pindexDelete->pprev->GetBlockHash(), std::nullopt)) {
+                    pindexDelete->pprev->GetBlockHash(), retained_root)) {
                 return FatalError(m_chainman.GetNotifications(), state,
                                   "DisconnectTip(): Failed to complete NEVM root revocation");
             }
@@ -10282,26 +10328,6 @@ bool Chainstate::ReplayBlocks()
         }
         if (hashHeads.empty() && !root_disconnect && published_root_tip == recovered_hash) return true;
 
-        // SYSCOIN: Reconstruct mint cleanup from the same authenticated bodies
-        // used for root recovery. Header-only pruning proofs cannot supply it.
-        const auto read_header = [&](const CBlockIndex& index, CNEVMHeader& header,
-                                     NEVMMintTxSet* mints = nullptr) {
-            CBlock block;
-            bool mutated{false};
-            BlockValidationState header_state;
-            // The coinbase commitment is authenticated by the stored header's
-            // merkle root; auxiliary PoDA sidecars are unnecessary for this.
-            if (!m_blockman.ReadBlockFromDisk(block, index, /*load_auxiliary_data=*/false) ||
-                BlockMerkleRoot(block, &mutated) != index.hashMerkleRoot || mutated ||
-                !GetNEVMData(header_state, block, header)) return false;
-            if (mints) {
-                for (const auto& tx : block.vtx) {
-                    if (IsSyscoinMintTx(tx->nVersion) &&
-                        !DisconnectMintAsset(*tx, *mints)) return false;
-                }
-            }
-            return true;
-        };
         std::vector<const CBlockIndex*> sources;
         if (published_root_tip) {
             const auto* source{m_blockman.LookupBlockIndex(*published_root_tip)};
@@ -10319,7 +10345,7 @@ bool Chainstate::ReplayBlocks()
             CNEVMHeader header;
             // Authenticate the record even on the discarded branch. Corrupt
             // metadata must not select an unrelated canonical key for erasure.
-            if (!carrier || !read_header(*carrier, header) ||
+            if (!carrier || !ReadNEVMRootCarrier(m_blockman, *carrier, header) ||
                 header.nBlockHash != root_disconnect->block_hash ||
                 header.nTxRoot != root_disconnect->tx_root ||
                 header.nReceiptRoot != root_disconnect->receipt_root) {
@@ -10339,7 +10365,8 @@ bool Chainstate::ReplayBlocks()
                 if (index->nHeight < m_chainman.GetConsensus().nNEVMStartBlock) break;
                 if (!visited.insert(index).second) break;
                 CNEVMHeader header;
-                if (!read_header(*index, header, &discarded_mints)) {
+                if (!ReadNEVMRootCarrier(m_blockman, *index, header,
+                                        /*allow_pruned=*/false, &discarded_mints)) {
                     return error("ReplayBlocks(): Cannot authenticate discarded NEVM root carrier %s",
                                  index->GetBlockHash().ToString());
                 }
@@ -10361,10 +10388,9 @@ bool Chainstate::ReplayBlocks()
             // Only old canonical alias lookup can use pruning proofs. The
             // replacement suffix and every discarded/journal carrier above
             // still require their retained block bodies.
-            const bool pruned_alias{!replacement && m_blockman.IsBlockPruned(index)};
-            if (!(pruned_alias ? m_blockman.ReadNEVMPrunedHeader(header, *index)
-                               : read_header(*index, header,
-                                     replacement ? &canonical_mints : nullptr))) {
+            if (!ReadNEVMRootCarrier(m_blockman, *index, header,
+                                     /*allow_pruned=*/!replacement,
+                                     replacement ? &canonical_mints : nullptr)) {
                 return error("ReplayBlocks(): Cannot authenticate canonical NEVM root carrier %s",
                              index->GetBlockHash().ToString());
             }

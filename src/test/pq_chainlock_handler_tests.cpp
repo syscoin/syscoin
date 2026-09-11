@@ -1838,6 +1838,49 @@ public:
     }
 };
 
+// SYSCOIN: Share the existing durable receipt-marker fixture with the native
+// clean-root rollback tests. Only receipt availability is seeded; those tests
+// connect and disconnect the subsequent blocks through production validation.
+void WithNEVMRootDeferralForTest(ChainstateManager& chainman,
+                                const CBlockIndex& carrier,
+                                const std::function<void()>& run)
+{
+    using Access = CChainLocksHandlerTestAccess;
+    auto& handler{*Assert(chainLocksHandler)};
+    auto config{CatchupStoreConfig()};
+    config.btcc_schedule.candidate_origin = 865;
+    BOOST_REQUIRE(config.IsValid());
+    BOOST_REQUIRE(chainman.IsPQParticipationAllowed());
+    pq::BTCCPresealMarker marker;
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE_EQUAL(carrier.nHeight, 875);
+        const auto* target{carrier.GetAncestor(865)};
+        BOOST_REQUIRE(target);
+        pq::BTCCReceipt receipt;
+        receipt.chainlock_target_height = target->nHeight;
+        receipt.chainlock_target_hash = target->GetBlockHash();
+        receipt.chainlock_logical_id = NonNullHash(1'105'000);
+        receipt.accepted_cursor = {target->nHeight, target->GetBlockHash(), NonNullHash(1'105'001)};
+        marker = {carrier.nHeight, carrier.GetBlockHash(), {},
+                  carrier.nHeight, carrier.GetBlockHash(), {}, receipt, 1};
+    }
+    auto persistence{std::make_unique<pq::PQChainLockPersistence>(
+        DBParams{.path = chainman.m_options.datadir / "root-alias-preseal",
+                 .cache_bytes = 1U << 20, .wipe_data = true},
+        chainman.GetConsensus().hashGenesisBlock, config)};
+    struct Restore {
+        CChainLocksHandler& handler;
+        std::unique_ptr<pq::PQChainLockPersistence> original;
+        ~Restore()
+        {
+            Access::SetReplayMarkers(handler, {}, {});
+            Access::ExchangePersistence(handler, std::move(original)).reset();
+        }
+    } restore{handler, Access::ExchangePersistence(handler, std::move(persistence))};
+    Access::SetReplayMarkers(handler, {marker, std::nullopt}, {});
+    run();
+}
 } // namespace llmq::test
 
 namespace {
