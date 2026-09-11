@@ -782,6 +782,135 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
             self._block_info_available = True
             self._expected_connect_syshashes = None
 
+    def _check_applied_pending_child_reselected(self):
+        node = self.nodes[0]
+        assert_equal(node.getconnectioncount(), 0)
+        core_pid = node.process.pid
+        previous_tip = node.getbestblockhash()
+        previous_height = node.getblockcount()
+        previous_coinbase = node.getblock(previous_tip)["tx"][0]
+        previous_coin = node.gettxout(previous_coinbase, 0)
+        applied = self._applied_syshashes[:]
+
+        def build_branch_block(label, parent_hash, height):
+            # Reuse pre-DIP3 payments while committing distinct mock NEVM
+            # identities for these coinbase-only branches below superblocks.
+            block = self._build_block(node)
+            assert_equal(len(block.vtx), 1)
+            coinbase = block.vtx[0]
+            coinbase.vin[0].scriptSig = create_coinbase(height).vin[0].scriptSig
+            nevm_header = CNEVMHeader()
+            for field in ("nBlockHash", "nTxRoot", "nReceiptRoot"):
+                setattr(nevm_header, field, uint256_from_str(hash256(
+                    label + field.encode() + ser_uint256(parent_hash)
+                )))
+            offset = coinbase.extraData.index(b"nevm") + len(b"nevm")
+            coinbase.extraData = (
+                coinbase.extraData[:offset] + nevm_header.serialize()
+                + coinbase.extraData[offset + len(nevm_header.serialize()):]
+            )
+            coinbase.vout.pop()
+            block.hashPrevBlock = parent_hash
+            block.nTime += height - previous_height - 1
+            block.nNonce = 1 << 18
+            add_witness_commitment(block, nonce=0)
+            block.solve()
+            return block
+
+        block_c = build_branch_block(b"applied-reselection-C", int(previous_tip, 16), previous_height + 1)
+        block_b = build_branch_block(b"applied-reselection-B", int(previous_tip, 16), previous_height + 1)
+        block_b2 = build_branch_block(b"applied-reselection-B2", block_b.sha256, previous_height + 2)
+        blocks = (block_c, block_b, block_b2)
+        raws = [self._serialize_nevm_block(block, self._last_nevm_block_data).hex() for block in blocks]
+        connect_len = len(self._connect_syshashes)
+        disconnect_len = len(self._disconnect_syshashes)
+
+        def apply_without_acknowledgement(request):
+            if request.sysblockhash == block_c.sha256:
+                if self._applied_syshashes == applied:
+                    self._applied_syshashes.append(block_c.sha256)
+                return b"error:mock-lost-ack"
+            return b"error:non contiguous insert"
+
+        self._connect_response = apply_without_acknowledgement
+        self._block_info_available = False
+        try:
+            assert_raises_rpc_error(-25, "nevm-response-unserialize", node.submitblock, raws[0])
+            assert_equal(node.submitblock(raws[1]), "inconclusive")
+            assert_equal(node.submitblock(raws[2]), "inconclusive")
+            assert_equal(node.getbestblockhash(), previous_tip)
+            assert_equal(node.gettxout(previous_coinbase, 0), previous_coin)
+            for block, raw in zip(blocks, raws):
+                assert_equal(node.getblock(block.hash, 0), raw)
+                assert_equal(node.gettxout(block.vtx[0].hash, 0), None)
+            tips = {tip["hash"]: tip["status"] for tip in node.getchaintips()}
+            assert tips[block_c.hash] != "invalid"
+            assert tips[block_b2.hash] != "invalid"
+            assert_equal(self._applied_syshashes, applied + [block_c.sha256])
+            # B's ordinary activation attempt must wait before external
+            # delivery while C's earlier applied identity remains unresolved.
+            assert_equal(self._nonzero_connects_since(connect_len), [block_c.sha256, block_c.sha256])
+            assert_equal(self._disconnect_syshashes[disconnect_len:], [])
+            assert_raises_rpc_error(
+                -10, "execution recovery", node.getblocktemplate, {"rules": ["segwit"]},
+            )
+            recovery_connect_len = len(self._connect_syshashes)
+
+            # Only the scheduler may reconcile engine-only C and select the
+            # already-downloaded better branch; Core must never publish C.
+            with node.assert_debug_log(
+                [f"UpdateTip: new best={block_b2.hash}"],
+                unexpected_msgs=[f"UpdateTip: new best={block_c.hash}"],
+            ):
+                self._expected_connect_syshashes = applied + [block_b.sha256, block_b2.sha256]
+                self._connect_response = b"connected"
+                self._block_info_available = True
+                self.wait_until(lambda: node.getbestblockhash() == block_b2.hash)
+
+                templates = []
+
+                def ready():
+                    try:
+                        templates.append(node.getblocktemplate({"rules": ["segwit"]}))
+                        return True
+                    except JSONRPCException as error:
+                        if error.error["code"] == -10 and "execution recovery" in error.error["message"]:
+                            return False
+                        raise
+
+                self.wait_until(ready)
+                assert_equal(templates[0]["previousblockhash"], block_b2.hash)
+
+            assert_equal(node.process.pid, core_pid)
+            assert_equal(node.process.poll(), None)
+            assert_equal(node.gettxout(block_c.vtx[0].hash, 0), None)
+            assert_equal(node.gettxout(previous_coinbase, 0), {
+                **previous_coin,
+                "bestblock": block_b2.hash,
+                "confirmations": previous_coin["confirmations"] + 2,
+            })
+            assert_equal(node.gettxout(block_b.vtx[0].hash, 0)["confirmations"], 2)
+            assert node.gettxout(block_b2.vtx[0].hash, 0) is not None
+            for block, raw in zip(blocks, raws):
+                assert_equal(node.getblock(block.hash, 0), raw)
+            tips = {tip["hash"]: tip["status"] for tip in node.getchaintips()}
+            assert tips[block_c.hash] != "invalid"
+            assert_equal(tips[block_b2.hash], "active")
+            assert_equal(self._applied_syshashes, applied + [block_b.sha256, block_b2.sha256])
+            assert_equal(self._nonzero_connects_since(recovery_connect_len), [block_b.sha256, block_b2.sha256])
+            assert_equal(self._disconnect_syshashes[disconnect_len:], [block_c.sha256])
+
+            # Remove C before undoing B so fixture cleanup cannot select it.
+            node.invalidateblock(block_c.hash)
+            node.invalidateblock(block_b.hash)
+            assert_equal(node.getbestblockhash(), previous_tip)
+            assert_equal(node.getblockcount(), previous_height)
+            assert_equal(self._applied_syshashes, applied)
+        finally:
+            self._connect_response = b"connected"
+            self._block_info_available = True
+            self._expected_connect_syshashes = None
+
     def _check_connect_responses(self, responses, *, protocol_response=b"connect-v1", consensus_invalid=False, connects_per_attempt=None):
         node = self.nodes[0]
         block = self._build_block(node)
@@ -878,6 +1007,9 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
 
             self.log.info("Scheduled recovery finishes an already-applied child after its acknowledgement fails")
             self._check_applied_pending_child_scheduler()
+
+            self.log.info("Scheduled recovery rolls back an engine-only child after a better branch arrives")
+            self._check_applied_pending_child_reselected()
 
             self.log.info("A requested full block repairs only the engine-approved NEVM payload")
             self._check_payload_repair_from_requested_peer()

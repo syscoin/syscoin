@@ -1090,9 +1090,12 @@ private:
         std::shared_ptr<const CBlock> pblock, const CBlockIndex* nevm_pending,
         bool nevm_continuation = false)
         EXCLUSIVE_LOCKS_REQUIRED(!m_chainstate_mutex) LOCKS_EXCLUDED(cs_main);
-    CBlockIndex* NEVMPendingConnectCandidate() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    CBlockIndex* NEVMPendingConnectCandidate(bool require_selected = true) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    // SYSCOIN: Cancel only the authenticated external effect of an unpublished child.
+    bool CancelUnselectedNEVMPendingConnect(const CBlockIndex& pending, std::string& error)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_chainstate_mutex);
     std::optional<uint256> m_nevm_pending_connect GUARDED_BY(cs_main);
-    // SYSCOIN: An aligned published child still owns ordinary fork selection.
+    // SYSCOIN: A published or externally cancelled attempt still owns fork selection.
     bool m_nevm_activation_continuation GUARDED_BY(cs_main){false};
     // SYSCOIN END: Transient lost-acknowledgement recovery context.
     // Call after transition authorization, before undoing an active block.
