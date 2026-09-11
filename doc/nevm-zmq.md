@@ -149,14 +149,6 @@ replacement suffix, including mints whose outputs have since been spent. Missing
 or inconsistent carrier data stops recovery with a local error. Healthy block
 connections require no additional reads or writes for this cleanup.
 
-Older versions could discard the journal before deleting mint markers. Once that
-cleanup identity is lost, upgrading alone cannot distinguish an orphan marker
-from a legitimate consumption. Rebuild affected Core state with
-`-reindex-chainstate` when complete block history is available and no stale
-failed-block flags were recorded. Use full `-reindex` if valid replacements were
-already marked failed, or if pruned history must be redownloaded. Do not delete
-`nevmminttx` alone: spent mint outputs still require replay protection.
-
 ## Root recovery with pruning
 
 Before deleting a block file, Core synchronously retains each indexed NEVM

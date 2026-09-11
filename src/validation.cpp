@@ -10508,8 +10508,7 @@ bool Chainstate::ReplayBlocks()
     }
 
     cache.SetBestBlock(pindexNew->GetBlockHash());
-    // SYSCOIN: additions before UTXO commit; erasures after. Retain the
-    // discarded NEVM source below until cleanup has also become durable.
+    // SYSCOIN: additions before UTXO commit; erasures after.
     NEVMMintTxSet setMintDisconnectOnly;
     if (pnevmtxmintdb) {
         for (const auto& hash : setMintTxsDisconnect) {
@@ -10530,31 +10529,6 @@ bool Chainstate::ReplayBlocks()
             /*fSync=*/true)) {
         return error(
             "ReplayBlocks(): Failed to persist deterministic masternode state");
-    }
-    // SYSCOIN: Two-head coins recovery can name a discarded branch which
-    // neither durable root endpoint covers. Once coins commit, HEADS loses
-    // that identity. A canonical publication cursor can safely retain it:
-    // canonical roots are reconstructed from the recovered coins endpoint.
-    if (root_recovery && !setMintDisconnectOnly.empty()) {
-        // The rollback loop has already advanced pindexOld to the fork.
-        const auto* old_source{m_blockman.LookupBlockIndex(hashHeads[1])};
-        if (!old_source) return error("ReplayBlocks(): Unknown discarded mint source");
-        const auto* published{published_root_tip
-            ? m_blockman.LookupBlockIndex(*published_root_tip) : nullptr};
-        const auto* journal{root_disconnect
-            ? m_blockman.LookupBlockIndex(root_disconnect->carrier) : nullptr};
-        const auto ancestor_of = [](const CBlockIndex* ancestor, const CBlockIndex* tip) {
-            return ancestor && tip && tip->nHeight >= ancestor->nHeight &&
-                tip->GetAncestor(ancestor->nHeight) == ancestor;
-        };
-        if (!ancestor_of(old_source, published) && !ancestor_of(old_source, journal)) {
-            // Never discard another off-canonical root source to make room.
-            if ((published_root_tip && !ancestor_of(published, pindexNew) &&
-                 !ancestor_of(published, old_source)) ||
-                !pnevmtxrootsdb->RecordPublishedTip(old_source->GetBlockHash())) {
-                return error("ReplayBlocks(): Cannot retain discarded mint cleanup source");
-            }
-        }
     }
     // SYSCOIN: Keep both source endpoints until the recovered coins branch is
     // durable, then reconcile roots against it. Publishing replacement roots

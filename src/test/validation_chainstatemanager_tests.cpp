@@ -6823,65 +6823,6 @@ BOOST_FIXTURE_TEST_CASE(mint_replay_retains_proof_reconnected_on_new_branch,
 }
 // SYSCOIN END: Coins removal must be synchronous before mint-marker erasure.
 
-BOOST_FIXTURE_TEST_CASE(nevm_mint_cleanup_preserves_two_head_source_across_second_restart,
-                        NEVMRootRollbackSetup)
-{
-    PrepareRootDisconnect();
-    auto& chainstate{m_node.chainman->ActiveChainstate()};
-    LOCK(::cs_main);
-    const auto coins_path{*chainstate.CoinsDB().StoragePath()};
-    BOOST_REQUIRE(RootsDB().RecordPublishedTip(parent->GetHash()));
-    BOOST_REQUIRE(!RootsDB().GetPendingDisconnect());
-    chainstate.ResetCoinsViews();
-    {
-        CDBWrapper coins{DBParams{
-            .path = coins_path, .cache_bytes = 1U << 20, .obfuscate = true}};
-        CDBBatch batch{coins};
-        batch.Erase(uint8_t{'B'});
-        batch.Write(uint8_t{'H'}, std::vector<uint256>{parent->GetHash(), carrier.GetHash()});
-        BOOST_REQUIRE(coins.WriteBatch(batch, /*fSync=*/true));
-    }
-    chainstate.InitCoinsDB(1U << 20, false, false);
-    chainstate.InitCoinsCache(1U << 23);
-    std::size_t erase_attempts{0};
-    MintDB().before_write = [&](bool sync) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
-        ++erase_attempts;
-        BOOST_CHECK(sync);
-        BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == parent->GetHash());
-        BOOST_CHECK(chainstate.CoinsDB().GetHeadBlocks().empty());
-        BOOST_CHECK(!chainstate.CoinsDB().HaveCoin(minted_coin));
-        BOOST_CHECK(RootsDB().GetPublishedTip() == carrier.GetHash());
-    };
-    MintDB().allow_write = [] { return false; };
-    BOOST_CHECK(!chainstate.ReplayBlocks());
-    MintDB().before_write = {};
-    MintDB().allow_write = {};
-    BOOST_REQUIRE_EQUAL(erase_attempts, 1U);
-    BOOST_REQUIRE(MintDB().Exists(mint_hash));
-    BOOST_REQUIRE(!RootsDB().GetPendingDisconnect());
-    // The second restart has clean coins heads. Its surviving source cursor
-    // must still identify the discarded carrier that owns the orphan marker.
-    for (int reopen{0}; reopen != 2; ++reopen) {
-        chainstate.ResetCoinsViews();
-        chainstate.InitCoinsDB(1U << 20, false, false);
-        chainstate.InitCoinsCache(1U << 23);
-        pnevmtxrootsdb.reset();
-        pnevmtxmintdb.reset();
-        pnevmtxrootsdb = std::make_unique<ObservedDisconnectRootsDB>(DBParams{
-            .path = roots_path, .cache_bytes = 1U << 20});
-        pnevmtxmintdb = std::make_unique<ObservedRollbackMintDB>(DBParams{
-            .path = mints_path, .cache_bytes = 1U << 20});
-        BOOST_REQUIRE(chainstate.ReplayBlocks());
-        BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == parent->GetHash());
-        BOOST_CHECK(chainstate.CoinsDB().GetHeadBlocks().empty());
-        BOOST_CHECK(RootsDB().GetPublishedTip() == parent->GetHash());
-        BOOST_CHECK(!RootsDB().GetPendingDisconnect());
-        BOOST_CHECK(!MintDB().Exists(mint_hash));
-        BOOST_CHECK(!MintDB().ExistsTx(mint_hash));
-        BOOST_CHECK(!chainstate.CoinsDB().HaveCoin(minted_coin));
-    }
-}
-
 // SYSCOIN BEGIN: Exercise real process loss and empty-HEADS startup recovery.
 BOOST_FIXTURE_TEST_CASE(nevm_disconnect_root_crash_child, NEVMRootRollbackSetup,
                         *boost::unit_test::disabled())
