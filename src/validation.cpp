@@ -4614,9 +4614,11 @@ bool Chainstate::CancelUnselectedNEVMPendingConnect(
     AssertLockHeld(m_chainstate_mutex);
     const CBlockIndex* parent{m_chain.Tip()};
     const CBlockIndex* selected{FindMostWorkChain()};
+    // SYSCOIN: Cancellation resolves only the known external child of this tip.
+    // The preferred fork can diverge below it or win with fewer blocks; ordinary
+    // activation independently authorizes and performs every active-chain undo.
     if (parent == nullptr || NEVMPendingConnectCandidate(/*require_selected=*/false) != &pending ||
-        selected == nullptr || selected->nHeight <= parent->nHeight ||
-        selected->GetAncestor(parent->nHeight) != parent ||
+        selected == nullptr || m_chain.Contains(selected) ||
         selected->GetAncestor(pending.nHeight) == &pending) {
         error = "nevm-live-recovery-cancel-selection-changed";
         return false;
