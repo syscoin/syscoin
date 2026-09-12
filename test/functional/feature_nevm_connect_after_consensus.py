@@ -155,6 +155,9 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
                 elif topic == b"nevmblockinfo":
                     # Report the applied pair without calling Core while it
                     # may be waiting for this reply with cs_main held.
+                    available = self._block_info_available
+                    if callable(available):
+                        available = available()
                     self._nevm_events.append((
                         "blockinfo", len(self._applied_syshashes),
                         self._applied_syshashes[-1] if self._applied_syshashes else 0,
@@ -162,7 +165,7 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
                     self._zmq_sock.send_multipart(
                         [
                             b"nevmblockinfo",
-                            str(len(self._applied_syshashes)).encode() if self._block_info_available else b"unavailable",
+                            str(len(self._applied_syshashes)).encode() if available else b"unavailable",
                             f"{self._applied_syshashes[-1] if self._applied_syshashes else 0:064x}".encode(),
                         ]
                     )
@@ -290,6 +293,31 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
 
         txlist = [tx_from_hex(e["data"]) for e in tmpl.get("transactions", [])]
         block = create_block(tmpl=tmpl, coinbase=coinbase, txlist=txlist)
+        add_witness_commitment(block, nonce=0)
+        block.solve()
+        return block
+
+    def _build_branch_block(self, node, label, parent_hash, height):
+        # Reuse pre-DIP3 payments while committing distinct mock NEVM
+        # identities for these coinbase-only branches below superblocks.
+        block = self._build_block(node)
+        assert_equal(len(block.vtx), 1)
+        coinbase = block.vtx[0]
+        coinbase.vin[0].scriptSig = create_coinbase(height).vin[0].scriptSig
+        nevm_header = CNEVMHeader()
+        for field in ("nBlockHash", "nTxRoot", "nReceiptRoot"):
+            setattr(nevm_header, field, uint256_from_str(hash256(
+                label + field.encode() + ser_uint256(parent_hash)
+            )))
+        offset = coinbase.extraData.index(b"nevm") + len(b"nevm")
+        coinbase.extraData = (
+            coinbase.extraData[:offset] + nevm_header.serialize()
+            + coinbase.extraData[offset + len(nevm_header.serialize()):]
+        )
+        coinbase.vout.pop()
+        block.hashPrevBlock = parent_hash
+        block.nTime += height - node.getblockcount() - 1
+        block.nNonce = 1 << 18
         add_witness_commitment(block, nonce=0)
         block.solve()
         return block
@@ -819,6 +847,128 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
             self._block_info_available = True
             self._expected_connect_syshashes = None
 
+    def _check_reorg_preflight_scheduler(self, *, repeat_preflight=False):
+        node = self.nodes[0]
+        assert_equal(node.getconnectioncount(), 0)
+        core_pid = node.process.pid
+        previous_tip = node.getbestblockhash()
+        previous_height = node.getblockcount()
+        previous_coinbase = node.getblock(previous_tip)["tx"][0]
+        previous_coin = node.gettxout(previous_coinbase, 0)
+        fork_hash = node.getblock(previous_tip)["previousblockhash"]
+        fork_coinbase = node.getblock(fork_hash)["tx"][0]
+        fork_coin = node.gettxout(fork_coinbase, 0)
+        applied = self._applied_syshashes[:]
+        assert_equal(applied[-1], int(previous_tip, 16))
+        scenario = b"reorg-preflight-repeat" if repeat_preflight else b"reorg-preflight"
+        first = self._build_branch_block(node, scenario + b"-B1", int(fork_hash, 16), previous_height)
+        selected = self._build_branch_block(node, scenario + b"-B2", first.sha256, previous_height + 1)
+        blocks = (first, selected)
+        raws = [self._serialize_nevm_block(block, self._last_nevm_block_data).hex() for block in blocks]
+        connect_len = len(self._connect_syshashes)
+        disconnect_len = len(self._disconnect_syshashes)
+        fence_len = len(self._durable_pair_replies)
+        event_len = len(self._nevm_events)
+        self._block_info_available = False
+        try:
+            # Both valid bodies are stored before reorganization preflight.
+            # No child has been sent or lost an acknowledgement in this case.
+            assert_equal(node.submitblock(raws[0]), "inconclusive")
+            with node.assert_debug_log(["nevm-reorg-status:nevm-response-unserialize"]):
+                assert_equal(node.submitblock(raws[1]), "inconclusive")
+            assert_equal(node.getbestblockhash(), previous_tip)
+            assert_equal(node.gettxout(previous_coinbase, 0), previous_coin)
+            assert_equal(self._applied_syshashes, applied)
+            assert_equal(self._nonzero_connects_since(connect_len), [])
+            assert_equal(self._disconnect_syshashes[disconnect_len:], [])
+            assert_equal(self._durable_pair_replies[fence_len:], [])
+            for block, raw in zip(blocks, raws):
+                assert_equal(node.getblock(block.hash, 0), raw)
+                assert_equal(node.gettxout(block.vtx[0].hash, 0), None)
+            tips = {tip["hash"]: tip["status"] for tip in node.getchaintips()}
+            assert_equal(tips[previous_tip], "active")
+            assert tips[selected.hash] != "invalid"
+            assert_raises_rpc_error(
+                -10, "execution recovery", node.getblocktemplate, {"rules": ["segwit"]},
+            )
+
+            self._expected_connect_syshashes = applied[:-1] + [first.sha256, selected.sha256]
+            if repeat_preflight:
+                status_calls = []
+
+                def fail_each_preflight():
+                    # The worker authenticates T, activation authenticates T
+                    # after its lock handoff, then reorg preflight queries T.
+                    # Refuse that third query on two separate scheduler ticks.
+                    status_calls.append(time.monotonic())
+                    return len(status_calls) % 3 != 0
+
+                self._block_info_available = fail_each_preflight
+                self.wait_until(lambda: len(status_calls) >= 6)
+                assert status_calls[3] - status_calls[0] >= 0.1
+                assert_equal(node.getbestblockhash(), previous_tip)
+                assert_equal(node.gettxout(previous_coinbase, 0), previous_coin)
+                assert_equal(self._applied_syshashes, applied)
+                assert_equal(self._nonzero_connects_since(connect_len), [])
+                assert_equal(self._disconnect_syshashes[disconnect_len:], [])
+                assert_equal(self._durable_pair_replies[fence_len:], [])
+                assert_raises_rpc_error(
+                    -10, "execution recovery", node.getblocktemplate, {"rules": ["segwit"]},
+                )
+
+            # No submission, reconsideration, activation RPC, or restart may
+            # resume selection: only the periodic recovery worker is active.
+            self._block_info_available = True
+            self.wait_until(lambda: node.getbestblockhash() == selected.hash)
+            assert_equal(node.process.pid, core_pid)
+            assert_equal(node.process.poll(), None)
+            assert_equal(node.gettxout(previous_coinbase, 0), None)
+            assert_equal(node.gettxout(fork_coinbase, 0), {
+                **fork_coin, "bestblock": selected.hash,
+                "confirmations": fork_coin["confirmations"] + 1,
+            })
+            assert_equal(node.gettxout(first.vtx[0].hash, 0)["confirmations"], 2)
+            assert_equal(node.gettxout(selected.vtx[0].hash, 0)["confirmations"], 1)
+            assert_equal(self._applied_syshashes, self._expected_connect_syshashes)
+            assert_equal(self._nonzero_connects_since(connect_len), [first.sha256, selected.sha256])
+            assert_equal(self._disconnect_syshashes[disconnect_len:], [int(previous_tip, 16)])
+            command = f"durable-pair-v1:{len(applied) - 1}:{applied[-2]:064x}".encode()
+            assert_equal(self._durable_pair_replies[fence_len:], [(command, command)])
+
+            templates = []
+
+            def ready():
+                try:
+                    templates.append(node.getblocktemplate({"rules": ["segwit"]}))
+                    return True
+                except JSONRPCException as error:
+                    if error.error["code"] == -10 and "execution recovery" in error.error["message"]:
+                        return False
+                    raise
+
+            self.wait_until(ready)
+            assert_equal(templates[0]["previousblockhash"], selected.hash)
+            events = self._nevm_events[event_len:]
+            last_status = max(index for index, event in enumerate(events) if event[0] == "blockinfo")
+            assert_equal(events[last_status], ("blockinfo", len(applied) + 1, selected.sha256))
+            assert_equal(events[last_status - 1], ("flush", len(applied) + 1))
+            assert last_status > events.index(("connect", selected.sha256, b"connected"))
+            tips = {tip["hash"]: tip["status"] for tip in node.getchaintips()}
+            assert_equal(tips[selected.hash], "active")
+            assert_equal(tips[previous_tip], "valid-fork")
+
+            # Cleanup follows all recovery assertions and keeps later cases
+            # below superblock/DIP3 boundaries, restoring the original coins.
+            self._expected_connect_syshashes = applied
+            node.invalidateblock(first.hash)
+            assert_equal(node.getbestblockhash(), previous_tip)
+            assert_equal(node.getblockcount(), previous_height)
+            assert_equal(self._applied_syshashes, applied)
+            assert_equal(node.gettxout(previous_coinbase, 0), previous_coin)
+        finally:
+            self._block_info_available = True
+            self._expected_connect_syshashes = None
+
     def _check_applied_pending_child_reselected(self, *, deeper_fork=False, retire_pending=False,
                                                restart_before_recovery=False, check_durable_fence=False):
         node = self.nodes[0]
@@ -843,29 +993,7 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
             scenario += b"-durable-fence"
 
         def build_branch_block(label, parent_hash, height):
-            # Reuse pre-DIP3 payments while committing distinct mock NEVM
-            # identities for these coinbase-only branches below superblocks.
-            block = self._build_block(node)
-            assert_equal(len(block.vtx), 1)
-            coinbase = block.vtx[0]
-            coinbase.vin[0].scriptSig = create_coinbase(height).vin[0].scriptSig
-            nevm_header = CNEVMHeader()
-            for field in ("nBlockHash", "nTxRoot", "nReceiptRoot"):
-                setattr(nevm_header, field, uint256_from_str(hash256(
-                    label + field.encode() + ser_uint256(parent_hash)
-                )))
-            offset = coinbase.extraData.index(b"nevm") + len(b"nevm")
-            coinbase.extraData = (
-                coinbase.extraData[:offset] + nevm_header.serialize()
-                + coinbase.extraData[offset + len(nevm_header.serialize()):]
-            )
-            coinbase.vout.pop()
-            block.hashPrevBlock = parent_hash
-            block.nTime += height - previous_height - 1
-            block.nNonce = 1 << 18
-            add_witness_commitment(block, nonce=0)
-            block.solve()
-            return block
+            return self._build_branch_block(node, label, parent_hash, height)
 
         block_c = build_branch_block(scenario + b"-C", int(previous_tip, 16), previous_height + 1)
         preferred = []
@@ -1135,6 +1263,12 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
 
             self.log.info("Mining recovery runs without peers, new blocks, or a mining request")
             self._check_mining_prefix_scheduler()
+
+            self.log.info("Scheduled recovery resumes a stored better fork after reorg preflight status failure")
+            self._check_reorg_preflight_scheduler()
+
+            self.log.info("Repeated reorg preflight refusals retain scheduler-owned fork selection")
+            self._check_reorg_preflight_scheduler(repeat_preflight=True)
 
             self.log.info("Scheduled recovery finishes an already-applied child after its acknowledgement fails")
             self._check_pending_child_scheduler()

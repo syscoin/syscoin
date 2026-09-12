@@ -20,3 +20,13 @@ controlled full `-reindex` or clean resync from validated history, with agreemen
 on the resulting budget. Reindexing also rebuilds paired auxiliary state. Do not
 assume that upgrading the binary alone reconciles existing budget histories, or
 that mixed old and new live nodes necessarily enforce the same later amount limit.
+
+NEVM reorganization recovery
+---------------------------
+
+A temporary engine-status failure before a reorganization now retains the work
+needed to resume normal best-chain selection. The recovery worker retries the
+currently preferred usable branch without requiring another block submission,
+including after repeated preflight failures. Mining remains gated until the new
+endpoint is freshly verified. This adds failure-path bookkeeping without new
+healthy-forward engine probes or durability barriers.

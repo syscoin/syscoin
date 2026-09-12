@@ -1099,7 +1099,8 @@ private:
     bool CancelUnselectedNEVMPendingConnect(const CBlockIndex& pending, std::string& error)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_chainstate_mutex);
     std::optional<uint256> m_nevm_pending_connect GUARDED_BY(cs_main);
-    // SYSCOIN: A published or externally cancelled attempt still owns fork selection.
+    // SYSCOIN: Resume selection after a suspended NEVM reorg preflight or a
+    // published/externally cancelled connect attempt, using current fork choice.
     bool m_nevm_activation_continuation GUARDED_BY(cs_main){false};
     // SYSCOIN END: Transient lost-acknowledgement recovery context.
     // Call after transition authorization, before undoing an active block.

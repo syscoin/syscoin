@@ -3294,7 +3294,7 @@ bool ChainstateManager::MaybeRecoverNEVMBlockProduction(std::string& error)
                         m_nevm_prefix_recovery_needed = true;
                         return false;
                     }
-                    // SYSCOIN BEGIN: Finish selection after resolving the lost-ACK child.
+                    // SYSCOIN BEGIN: Finish selection after resolving engine recovery.
                     const CBlockIndex* attempted{chainstate->m_nevm_pending_connect
                         ? m_blockman.LookupBlockIndex(*chainstate->m_nevm_pending_connect) : nullptr};
                     // SYSCOIN: Parent alignment resolves the recorded attempt
@@ -8326,6 +8326,10 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
     std::optional<NEVMDisconnectPrefix> nevm_prefix;
     if (pindexOldTip != pindexFork &&
         !PrepareNEVMDisconnectPrefix(state, nevm_prefix)) {
+        // SYSCOIN: Retry ordinary selection after recoverable preflight,
+        // including repeated failures during a scheduled continuation.
+        // No replacement child has been sent or gains activation authority.
+        m_nevm_activation_continuation = true;
         return false;
     }
 
@@ -8699,8 +8703,9 @@ bool Chainstate::ActivateBestChainInternal(BlockValidationState& state,
                 const bool step_completed{ActivateBestChainStep(state, step_target, pblock && pblock->GetHash() == step_target->GetBlockHash() ? pblock : nullBlockPtr, fInvalidFound, fReceiptCandidateDeferred, connectTrace, rejection, repair_selection)};
                 if (nevm_pending || nevm_continuation) m_chainman.m_nevm_prefix_recovery_needed = true;
                 if (!step_completed) {
-                    // SYSCOIN: Only a new unresolved connect carries this pass
-                    // into another tick; noncacheable refusal cannot busy-loop.
+                    // SYSCOIN: Preflight failures rearm selection in the step.
+                    // Retain new unresolved connects too, but do not create a
+                    // retry loop for unrelated noncacheable validation refusal.
                     if (nevm_continuation && m_nevm_pending_connect) {
                         m_nevm_activation_continuation = true;
                     }
