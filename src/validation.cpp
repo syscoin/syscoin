@@ -3400,6 +3400,20 @@ bool ChainstateManager::InitializeNEVMPendingConnect(std::string& error)
     return true;
 }
 
+// SYSCOIN: A live endpoint acknowledgment does not make its state durable.
+// Share the exact engine barrier between rollback and failed-connect cleanup.
+static bool MakeNEVMPairDurable(const ChainstateManager& chainman,
+                                uint64_t count, const uint256& hash)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    bool durable{false};
+    if (fNEVMConnection && !chainman.m_interrupt) {
+        GetMainSignals().NotifyNEVMComms(
+            "durable-pair-v1:" + std::to_string(count) + ":" + hash.GetHex(), durable);
+    }
+    return durable;
+}
+
 bool ChainstateManager::ClearNEVMPendingConnect(
     uint64_t count, const uint256& hash, std::string& error)
 {
@@ -3408,12 +3422,7 @@ bool ChainstateManager::ClearNEVMPendingConnect(
     // An applied endpoint is not a durability barrier. Every cleanup route,
     // including already-aligned and lost-reply recovery, must fence that exact
     // engine pair before Core can durably forget the original obligation.
-    bool durable{false};
-    if (fNEVMConnection && !m_interrupt) {
-        GetMainSignals().NotifyNEVMComms(
-            "durable-pair-v1:" + std::to_string(count) + ":" + hash.GetHex(), durable);
-    }
-    if (!durable) {
+    if (!MakeNEVMPairDurable(*this, count, hash)) {
         m_nevm_prefix_recovery_needed = true;
         error = "nevm-pending-connect-durability-unavailable";
         return false;
@@ -7144,6 +7153,29 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
         assert(view.GetBestBlock() == pindexDelete->GetBlockHash());
         if (DisconnectBlock(block, pindexDelete, view, setMintTxs, vecNEVMBlocks, vecTXIDPairs, bReverify, false /*bReplay*/, bUpdateSpecialTxState, nevm_prefix) != DISCONNECT_OK)
             return error("DisconnectTip(): DisconnectBlock %s failed", pindexDelete->GetBlockHash().ToString());
+        // SYSCOIN: Ordinary rollback has no failed-connect record to retain
+        // its external effect. Fence the authenticated engine prefix before
+        // local root/coins completion can let retirement flags survive alone.
+        // An earlier failed acknowledgment or deferred/startup alignment can
+        // already leave Geth behind this parent, without another undo send.
+        const int64_t nevm_start{m_chainman.GetConsensus().nNEVMStartBlock};
+        if (this == &m_chainman.ActiveChainstate() && fNEVMConnection &&
+            pindexDelete->nHeight >= nevm_start &&
+            !ShouldBypassExternalNEVMNotifyCalls(m_chainman, pindexDelete->nHeight)) {
+            m_chainman.m_nevm_prefix_recovery_needed = true;
+            uint64_t count{0};
+            uint256 hash;
+            std::string error;
+            if (!FlushAndGetNEVMBlockInfo(count, hash, error)) {
+                return state.Error("nevm-disconnect-status:" + error);
+            }
+            if (!MatchesNEVMActivePrefix(nevm_start, count, hash, pindexDelete->pprev)) {
+                return state.Error("nevm-disconnect-applied-prefix-mismatch");
+            }
+            if (!MakeNEVMPairDurable(m_chainman, count, hash)) {
+                return state.Error("nevm-disconnect-durability-unavailable");
+            }
+        }
         // SYSCOIN: Revoke mint authority and retain its exact carrier in one
         // durable batch before even publishing parent coins to the cache.
         // If older coins survive a crash, startup can restore this root only

@@ -129,7 +129,9 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
                             f"durable-pair-v1:{len(self._applied_syshashes)}:"
                             f"{self._applied_syshashes[-1] if self._applied_syshashes else 0:064x}"
                         ).encode()
-                        if command != expected:
+                        if self._buffered_syshashes:
+                            response = b"error:mock-durable-pair-buffered"
+                        elif command != expected:
                             response = b"error:mock-durable-pair-mismatch"
                         elif self._durable_pair_response is not None:
                             response = self._durable_pair_response
@@ -798,11 +800,20 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
             assert last_status_index > descendant_connect_index
             assert_equal(events[last_status_index - 1], ("flush", len(applied) + 2))
 
-            # Administrative cleanup keeps subsequent response cases below
-            # the first superblock after scheduler completion is established.
+            # Recovery is complete, so this ordinary D -> C -> P rollback
+            # has no pending connect record. Fence each parent before Core
+            # can publish its coins; also keep later cases below superblocks.
+            fence_len = len(self._durable_pair_replies)
             node.invalidateblock(block.hash)
             assert_equal(node.getbestblockhash(), previous_tip)
             assert_equal(self._applied_syshashes, applied)
+            assert_equal(self._durable_syshashes, applied)
+            assert_equal(self._disconnect_syshashes[disconnect_len:], [descendant.sha256, block.sha256])
+            commands = [
+                f"durable-pair-v1:{len(applied) + 1}:{block.sha256:064x}".encode(),
+                f"durable-pair-v1:{len(applied)}:{applied[-1]:064x}".encode(),
+            ]
+            assert_equal(self._durable_pair_replies[fence_len:], [(command, command) for command in commands])
         finally:
             self._connect_response = b"connected"
             self._block_info_available = True
@@ -1094,7 +1105,10 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
             force_finish_mnsync(self.nodes[0])
 
             # Leave room for each response group below the first superblock.
+            fence_len = len(self._durable_pair_replies)
             self.generate(self.nodes[0], 1)
+            # Healthy forward publication requires no recovery fence.
+            assert_equal(self._durable_pair_replies[fence_len:], [])
             tip_before = self.nodes[0].getbestblockhash()
             height_before = self.nodes[0].getblockcount()
 

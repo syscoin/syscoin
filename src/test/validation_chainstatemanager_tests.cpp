@@ -788,6 +788,8 @@ struct StartupNEVMRecoverySetup : DeferredNEVMReplaySetup {
         BOOST_REQUIRE(branches.sibling_tip_index->nStatus & BLOCK_HAVE_DATA);
         nevm->applied_count = 2;
         nevm->applied_hash = branches.applied->GetHash();
+        nevm->strict_disconnect_order = true;
+        nevm->applied_pairs = {{1, branches.fork->GetHash()}, {2, branches.applied->GetHash()}};
         nevm->connected_blocks.clear();
         nevm->disconnected_blocks.clear();
         std::string error;
@@ -808,8 +810,8 @@ struct StartupNEVMRecoverySetup : DeferredNEVMReplaySetup {
         BOOST_CHECK_EQUAL(nevm->applied_count, 3U);
         BOOST_CHECK(nevm->applied_hash == branches.sibling_tip->GetHash());
         BOOST_REQUIRE(nevm->last_reported_pair.has_value());
-        BOOST_CHECK_EQUAL(nevm->last_reported_pair->count, 2U);
-        BOOST_CHECK(nevm->last_reported_pair->hash == branches.applied->GetHash());
+        BOOST_CHECK_EQUAL(nevm->last_reported_pair->count, 1U);
+        BOOST_CHECK(nevm->last_reported_pair->hash == branches.fork->GetHash());
         LOCK(::cs_main);
         BOOST_CHECK(chainman.ActiveTip()->GetBlockHash() == branches.sibling_tip->GetHash());
         BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == branches.sibling_tip->GetHash());
@@ -5020,6 +5022,8 @@ struct NEVMPayloadForkSetup : NEVMPayloadRepairSetup {
         const auto connects{nevm->connected_blocks.size()};
         const auto queries{nevm->block_info_queries};
         const auto flushes{nevm->flush_requests};
+        const auto undone_blocks{WITH_LOCK(::cs_main, return static_cast<std::size_t>(
+            chainstate.m_chain.Height() - chainstate.m_chain.FindFork(fork_tip)->nHeight))};
         BlockValidationState state;
         BOOST_REQUIRE_MESSAGE(chainstate.PreciousBlock(state, fork_tip), state.ToString());
         BOOST_CHECK(state.IsValid());
@@ -5027,8 +5031,10 @@ struct NEVMPayloadForkSetup : NEVMPayloadRepairSetup {
         // Replacing the durable attempt requires another fresh prefix proof
         // after the suffix undo. An above-P fork also recovers its unapplied
         // shared ancestor before retrying the first replacement connection.
-        BOOST_CHECK_EQUAL(nevm->block_info_queries, queries + (above_applied ? 4U : 2U));
-        BOOST_CHECK_EQUAL(nevm->flush_requests, flushes + (above_applied ? 4U : 2U));
+        // Every removed Core block also proves the observed engine prefix
+        // before its independently durable local rollback boundary.
+        BOOST_CHECK_EQUAL(nevm->block_info_queries, queries + (above_applied ? 4U : 2U) + undone_blocks);
+        BOOST_CHECK_EQUAL(nevm->flush_requests, flushes + (above_applied ? 4U : 2U) + undone_blocks);
         std::vector<uint256> expected_disconnects;
         if (applied_suffix) expected_disconnects = {prefix[2]->GetHash(), prefix[1]->GetHash()};
         if (below_applied) expected_disconnects.push_back(prefix.front()->GetHash());
@@ -5107,8 +5113,8 @@ struct NEVMPayloadForkSetup : NEVMPayloadRepairSetup {
         }
         BOOST_CHECK(state.IsValid());
         BOOST_CHECK_EQUAL(m_node.exit_status.load(), EXIT_SUCCESS);
-        BOOST_CHECK_EQUAL(nevm->block_info_queries, queries + 1);
-        BOOST_CHECK_EQUAL(nevm->flush_requests, flushes + 1);
+        BOOST_CHECK_EQUAL(nevm->block_info_queries, queries + 1 + prefix.size());
+        BOOST_CHECK_EQUAL(nevm->flush_requests, flushes + 1 + prefix.size());
         // Both public operations cross P after locally removing unapplied B/A.
         // The actual applied P must still receive its ordinary engine undo.
         BOOST_CHECK(nevm->disconnected_blocks == std::vector<uint256>{prefix.front()->GetHash()});
@@ -6939,6 +6945,223 @@ protected:
     }
 };
 
+// SYSCOIN: Ordinary acknowledged publication has no exceptional connect
+// journal. Every completed rollback must still precede a durable engine parent.
+struct OrdinaryNEVMDisconnectDurabilitySetup : StartupNEVMRecoverySetup {
+    std::unique_ptr<CNEVMTxRootsDB> previous_roots{std::move(pnevmtxrootsdb)};
+    const fs::path roots_path{m_path_root / "ordinary-disconnect-roots"};
+
+    OrdinaryNEVMDisconnectDurabilitySetup()
+        : StartupNEVMRecoverySetup{/*coins_db_in_memory=*/false,
+            /*managed_exit=*/false, /*block_tree_db_in_memory=*/false}
+    {
+        pnevmtxrootsdb = std::make_unique<ObservedDisconnectRootsDB>(DBParams{
+            .path = roots_path, .cache_bytes = 1U << 20, .wipe_data = true});
+        nevm->strict_connect_order = true;
+        nevm->strict_disconnect_order = true;
+    }
+
+    ~OrdinaryNEVMDisconnectDurabilitySetup()
+    {
+        pnevmtxrootsdb = std::move(previous_roots);
+    }
+
+    void CheckOrdinaryInvalidation(int failed_parent_count = 0, bool startup_rollback = false)
+    {
+        auto& chainman{*m_node.chainman};
+        auto& state{chainman.ActiveChainstate()};
+        const auto marker{std::make_pair(uint8_t{'F'}, std::string{"nevm_pending_connect_v1"})};
+        std::size_t healthy_syncs{0};
+        WITH_LOCK(::cs_main, state.CoinsDB().SetSyncCallbackForTesting([&] {
+            ++healthy_syncs;
+            return true;
+        }));
+        struct ClearObservers {
+            Chainstate& state;
+            StartupNEVMSubscriber& nevm;
+            ~ClearObservers()
+            {
+                WITH_LOCK(::cs_main, state.CoinsDB().SetSyncCallbackForTesting({}));
+                nevm.durable_pair_response = {};
+                auto& roots{static_cast<ObservedDisconnectRootsDB&>(*pnevmtxrootsdb)};
+                roots.before_write = {};
+                roots.after_write = {};
+            }
+        } clear{state, *nevm};
+        const std::array<std::shared_ptr<const CBlock>, 3> blocks{
+            MineNEVMBlock(), MineNEVMBlock(), MineNEVMBlock()};
+        SyncWithValidationInterfaceQueue();
+        BOOST_REQUIRE_EQUAL(healthy_syncs, 0U);
+        BOOST_REQUIRE_EQUAL(nevm->durable_pair_requests, 0U);
+        CheckNoPendingNEVMRecovery();
+        WITH_LOCK(::cs_main, state.CoinsDB().SetSyncCallbackForTesting({}));
+        std::array<CBlockIndex*, 3> indexes;
+        std::array<CNEVMHeader, 3> headers;
+        {
+            LOCK(::cs_main);
+            for (std::size_t i{0}; i < blocks.size(); ++i) {
+                indexes[i] = chainman.m_blockman.LookupBlockIndex(blocks[i]->GetHash());
+                BOOST_REQUIRE(indexes[i]);
+                BOOST_REQUIRE(indexes[i]->IsValid(BLOCK_VALID_SCRIPTS));
+                BlockValidationState decoded;
+                BOOST_REQUIRE(GetNEVMData(decoded, *blocks[i], headers[i]));
+            }
+            BlockValidationState flushed;
+            BOOST_REQUIRE_MESSAGE(state.FlushStateToDisk(flushed, FlushStateMode::ALWAYS), flushed.ToString());
+            BOOST_REQUIRE(state.CoinsDB().FlushWithSync(state.CoinsTip()));
+            BOOST_REQUIRE(pnevmtxrootsdb->FlushCacheToDisk(/*CHUNK_ITEMS=*/100000, /*fSync=*/true));
+            BOOST_REQUIRE(state.CoinsDB().GetBestBlock() == blocks[2]->GetHash());
+        }
+        // Ordinary flush/ACK only advances applied state. Seed a separately
+        // durable C2 so losing later asynchronous undo batches is observable.
+        nevm->PersistAppliedPair();
+        BOOST_REQUIRE_EQUAL(nevm->durable_pair->count, 3U);
+        if (startup_rollback) {
+            // A surviving engine process may already have applied the two
+            // asynchronous undos when Core restarts from its durable C2.
+            std::string error;
+            nevm->NotifyNEVMBlockDisconnect(error, blocks[2]->GetHash(), {});
+            BOOST_REQUIRE(error.empty());
+            nevm->NotifyNEVMBlockDisconnect(error, blocks[1]->GetHash(), {});
+            BOOST_REQUIRE(error.empty());
+            BOOST_REQUIRE_EQUAL(nevm->applied_count, 1U);
+            nevm->disconnected_blocks.clear();
+        }
+        nevm->command_trace.clear();
+        std::size_t root_writes{0}, parent_syncs{0};
+        bool fence_blocked{failed_parent_count != 0};
+        nevm->durable_pair_response = [&] {
+            return !fence_blocked || nevm->applied_count != static_cast<uint64_t>(failed_parent_count);
+        };
+        auto& roots{static_cast<ObservedDisconnectRootsDB&>(*pnevmtxrootsdb)};
+        roots.before_write = [&] {
+            ++root_writes;
+            BOOST_REQUIRE(nevm->durable_pair);
+            BOOST_CHECK_EQUAL(nevm->durable_pair->count, nevm->applied_count);
+            BOOST_CHECK(nevm->durable_pair->hash == nevm->applied_hash);
+            // C2's failed status is synchronously written by the second
+            // root revocation, without an extra fixture flush after undo.
+            if (WITH_LOCK(::cs_main, return chainman.ActiveTip()) == indexes[1]) {
+                LOCK(::cs_main);
+                CDiskBlockIndex persisted;
+                BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->Read(
+                    std::make_pair(uint8_t{'b'}, blocks[2]->GetHash()), persisted));
+                BOOST_CHECK(persisted.nStatus & BLOCK_FAILED_VALID);
+            }
+            return true;
+        };
+        WITH_LOCK(::cs_main, state.CoinsDB().SetSyncCallbackForTesting([&] {
+            LOCK(::cs_main);
+            ++parent_syncs;
+            BOOST_REQUIRE(nevm->durable_pair);
+            BOOST_REQUIRE_LE(parent_syncs, 2U);
+            const auto* local_parent{indexes[2 - parent_syncs]};
+            BOOST_CHECK(state.CoinsTip().GetBestBlock() == local_parent->GetBlockHash());
+            const auto* durable_parent{chainman.m_blockman.LookupBlockIndex(nevm->durable_pair->hash)};
+            BOOST_REQUIRE(durable_parent);
+            BOOST_CHECK(local_parent->GetAncestor(durable_parent->nHeight) == durable_parent);
+            BOOST_CHECK_EQUAL(nevm->durable_pair->count, nevm->applied_count);
+            return true;
+        }));
+        const auto check_failed = [&] {
+            LOCK(::cs_main);
+            const std::size_t retained{static_cast<std::size_t>(failed_parent_count)};
+            BOOST_CHECK(chainman.ActiveTip() == indexes[retained]);
+            BOOST_CHECK(state.CoinsTip().GetBestBlock() == blocks[retained]->GetHash());
+            BOOST_CHECK(state.CoinsDB().GetBestBlock() == blocks[retained]->GetHash());
+            BOOST_CHECK(state.CoinsDB().HaveCoin(COutPoint{blocks[retained]->vtx.front()->GetHash(), 0}));
+            BOOST_CHECK_EQUAL(indexes[retained]->nStatus & BLOCK_FAILED_MASK, 0U);
+            NEVMTxRoot retained_roots;
+            BOOST_CHECK(roots.ReadTxRoots(headers[retained].nBlockHash, retained_roots));
+            BOOST_CHECK(!roots.GetPendingDisconnect());
+            BOOST_CHECK(!chainman.m_blockman.m_block_tree_db->Exists(marker));
+            BOOST_CHECK(!chainman.PrepareNEVMBlockProduction());
+            BOOST_CHECK_EQUAL(parent_syncs, failed_parent_count == 2 ? 0U : 1U);
+        };
+        BlockValidationState invalidated;
+        const bool completed{state.InvalidateBlock(invalidated, indexes[1],
+            /*bReverify=*/!startup_rollback, /*bUpdateSpecialTxState=*/true)};
+        if (startup_rollback) BOOST_CHECK(nevm->disconnected_blocks.empty());
+        if (failed_parent_count) {
+            BOOST_REQUIRE(!completed);
+            BOOST_CHECK(invalidated.IsError());
+            BOOST_CHECK(!invalidated.IsInvalid());
+            BOOST_CHECK_EQUAL(invalidated.GetRejectReason(), "nevm-disconnect-durability-unavailable");
+            check_failed();
+            const auto writes{root_writes};
+            const auto disconnects{nevm->disconnected_blocks};
+            // The next preflight observes an already-behind applied pair.
+            // It must not skip the failed durability barrier and finish locally.
+            BlockValidationState retried;
+            BOOST_CHECK(!state.InvalidateBlock(retried, indexes[1]));
+            BOOST_CHECK(retried.IsError());
+            BOOST_CHECK_EQUAL(retried.GetRejectReason(), "nevm-disconnect-durability-unavailable");
+            check_failed();
+            BOOST_CHECK_EQUAL(root_writes, writes);
+            BOOST_CHECK(nevm->disconnected_blocks == disconnects);
+            if (failed_parent_count == 2) {
+                nevm->RestartFromDurablePair();
+                BOOST_CHECK(nevm->applied_hash == blocks[2]->GetHash());
+            }
+            fence_blocked = false;
+            BlockValidationState recovered;
+            BOOST_REQUIRE_MESSAGE(state.InvalidateBlock(recovered, indexes[1]), recovered.ToString());
+        } else {
+            BOOST_REQUIRE_MESSAGE(completed, invalidated.ToString());
+        }
+        roots.before_write = {};
+        WITH_LOCK(::cs_main, state.CoinsDB().SetSyncCallbackForTesting({}));
+        BOOST_CHECK_EQUAL(parent_syncs, 2U);
+        BOOST_CHECK_GE(root_writes, 4U);
+        {
+            LOCK(::cs_main);
+            BOOST_CHECK(chainman.ActiveTip() == indexes[0]);
+            BOOST_CHECK(state.CoinsDB().GetBestBlock() == blocks[0]->GetHash());
+            BOOST_CHECK(roots.GetPublishedTip() == blocks[0]->GetHash());
+            BOOST_CHECK(!roots.GetPendingDisconnect());
+            BOOST_CHECK(!chainman.m_blockman.m_block_tree_db->Exists(marker));
+            BOOST_CHECK(!node::test::NEVMMiningTestAccess::HasPendingRecoveryContext(state));
+            BOOST_CHECK(indexes[1]->nStatus & BLOCK_FAILED_VALID);
+            BOOST_CHECK(indexes[2]->nStatus & BLOCK_FAILED_MASK);
+            CDiskBlockIndex persisted;
+            BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->Read(
+                std::make_pair(uint8_t{'b'}, blocks[2]->GetHash()), persisted));
+            BOOST_CHECK(persisted.nStatus & BLOCK_FAILED_VALID);
+        }
+        // Readiness recovery also runs with no exceptional connect record.
+        // It cannot turn a merely applied rollback into a crash-safe endpoint.
+        const auto queries{nevm->block_info_queries};
+        std::string error;
+        BOOST_REQUIRE_MESSAGE(chainman.MaybeRecoverNEVMBlockProduction(error), error);
+        BOOST_CHECK_GT(nevm->block_info_queries, queries);
+        CheckNoPendingNEVMRecovery();
+        nevm->RestartFromDurablePair();
+        BOOST_CHECK_EQUAL(nevm->applied_count, 1U);
+        BOOST_CHECK(nevm->applied_hash == blocks[0]->GetHash());
+        {
+            LOCK(::cs_main);
+            state.ResetCoinsViews();
+            state.InitCoinsDB(1U << 20, /*in_memory=*/false, /*should_wipe=*/false);
+            state.InitCoinsCache(1U << 23);
+            roots.before_write = {};
+            pnevmtxrootsdb.reset();
+            pnevmtxrootsdb = std::make_unique<ObservedDisconnectRootsDB>(DBParams{
+                .path = roots_path, .cache_bytes = 1U << 20});
+            BOOST_CHECK(state.CoinsDB().GetBestBlock() == blocks[0]->GetHash());
+            BOOST_CHECK(pnevmtxrootsdb->GetPublishedTip() == blocks[0]->GetHash());
+            BOOST_CHECK(!pnevmtxrootsdb->GetPendingDisconnect());
+            for (std::size_t i{1}; i < blocks.size(); ++i) {
+                BOOST_CHECK(!state.CoinsDB().HaveCoin(COutPoint{blocks[i]->vtx.front()->GetHash(), 0}));
+                NEVMTxRoot removed;
+                BOOST_CHECK(!pnevmtxrootsdb->ReadTxRoots(headers[i].nBlockHash, removed));
+            }
+            BOOST_REQUIRE_MESSAGE(chainman.InitializeNEVMStartupPair(
+                nevm->applied_count, nevm->applied_hash, error), error);
+            BOOST_CHECK(indexes[2]->nStatus & BLOCK_FAILED_MASK);
+        }
+    }
+};
+
 // SYSCOIN: A fully validated mint remains usable after interrupted removal.
 struct NEVMMintCleanupSetup : NEVMMintReadErrorSetup {
     enum class Cut { BEFORE_ERASE, ERASE_FAILURE, BEFORE_COMPLETE, AFTER_COMPLETE };
@@ -7045,6 +7268,10 @@ struct NEVMMintCleanupSetup : NEVMMintReadErrorSetup {
             }
         };
         mints.allow_write = [&] { return cut != Cut::ERASE_FAILURE; };
+        // These startup-style local cleanup cuts begin after the engine has
+        // already applied its undo; bReverify=false deliberately sends none.
+        nevm->applied_count = source_index->nHeight - nevm->first_nevm_height + 1;
+        nevm->applied_hash = source->GetHash();
         {
             LOCK(chainstate.MempoolMutex());
             BlockValidationState disconnected;
@@ -7380,6 +7607,22 @@ struct NEVMRootRollbackSetup : StartupNEVMRecoverySetup {
             .path = roots_path, .cache_bytes = 1U << 20, .wipe_data = true});
         pnevmtxmintdb = std::make_unique<ObservedRollbackMintDB>(DBParams{
             .path = mints_path, .cache_bytes = 1U << 20, .wipe_data = true});
+        nevm->disconnect_response = [this](const uint256& hash,
+            const CDeterministicMNListNEVMAddressDiff&, std::string& error) {
+            if (!error.empty()) return;
+            BOOST_REQUIRE(hash == carrier.GetHash());
+            BOOST_REQUIRE(nevm->applied_hash == hash);
+            SetEngineAtRootParent();
+        };
+    }
+
+    void SetEngineAtRootParent()
+    {
+        LOCK(::cs_main);
+        const auto* index{m_node.chainman->m_blockman.LookupBlockIndex(parent->GetHash())};
+        BOOST_REQUIRE(index);
+        nevm->applied_count = index->nHeight - nevm->first_nevm_height + 1;
+        nevm->applied_hash = parent->GetHash();
     }
 
     ~NEVMRootRollbackSetup()
@@ -7512,7 +7755,7 @@ struct NEVMRootRollbackSetup : StartupNEVMRecoverySetup {
             BOOST_REQUIRE(RootsDB().FlushCacheToDisk());
             BOOST_REQUIRE(chainstate.CoinsDB().FlushWithSync(coins));
         }
-        nevm->applied_count = lagging_coins ? 3 : 2;
+        nevm->applied_count = index->nHeight - nevm->first_nevm_height + 1;
         nevm->applied_hash = carrier.GetHash();
         nevm->disconnected_blocks.clear();
     }
@@ -7646,6 +7889,10 @@ struct NEVMRootRollbackSetup : StartupNEVMRecoverySetup {
     bool DisconnectRootTip(BlockValidationState& state, bool reverify)
     {
         auto& chainstate{m_node.chainman->ActiveChainstate()};
+        // Local-only startup rollback assumes the surviving engine has
+        // already undone the carrier. Ordinary calls apply that undo in the
+        // notifier callback above. Neither path makes the mock pair durable.
+        if (!reverify) SetEngineAtRootParent();
         LOCK2(::cs_main, chainstate.MempoolMutex());
         m_node.notifications->m_shutdown_on_fatal_error = false;
         const bool disconnected{chainstate.DisconnectTip(state, nullptr, reverify)};
@@ -8354,7 +8601,9 @@ struct DeferredNEVMContinuitySetup : CommittedNEVMContinuitySetup {
         const std::vector<std::string> expected{
             "flush", "blockinfo", "connect:" + prefix[1]->GetHash().ToString(),
             "connect:" + prefix[2]->GetHash().ToString(), "connect:" + candidate->GetHash().ToString(),
-            "flush", "blockinfo", "flush", "blockinfo"};
+            "flush", "blockinfo", "flush", "blockinfo",
+            "flush", "blockinfo", "durable-pair-v1:3:" + prefix.back()->GetHash().ToString(),
+            "flush", "blockinfo", "durable-pair-v1:3:" + prefix.back()->GetHash().ToString()};
         BOOST_CHECK(nevm->command_trace == expected);
     }
 
@@ -9391,6 +9640,9 @@ BOOST_FIXTURE_TEST_CASE(nevm_payload_repair_retarget_flush_failure_keeps_durable
 BOOST_FIXTURE_TEST_CASE(nevm_payload_repair_startup_discards_failed_marker,
                         StartupNEVMRecoverySetup)
 {
+    // Retire normally acknowledged history with its actual external undo
+    // before checking startup's rejection of the stale payload marker.
+    nevm->strict_disconnect_order = true;
     auto& chainman{*m_node.chainman};
     const auto block{MineNEVMBlock()};
     const auto verdict{PayloadVerdictFor(*block)};
@@ -9399,7 +9651,7 @@ BOOST_FIXTURE_TEST_CASE(nevm_payload_repair_startup_discards_failed_marker,
     BOOST_REQUIRE(index != nullptr);
     BlockValidationState state;
     BOOST_REQUIRE_MESSAGE(chainman.ActiveChainstate().InvalidateBlock(
-        state, index, /*bReverify=*/false), state.ToString());
+        state, index, /*bReverify=*/true), state.ToString());
     const auto commands{nevm->command_trace};
     std::string error;
     {
@@ -9927,6 +10179,30 @@ BOOST_FIXTURE_TEST_CASE(nevm_mining_durable_pending_lost_fence_ack_retains_recor
 BOOST_FIXTURE_TEST_CASE(nevm_mining_durable_pending_already_applied_parent_requires_fence, ReopenedPendingNEVMConnectSetup)
 {
     CheckDurableFence(FenceScenario::ALREADY_PARENT);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_ordinary_invalidation_durable_engine_before_local_rollback,
+                        OrdinaryNEVMDisconnectDurabilitySetup)
+{
+    CheckOrdinaryInvalidation();
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_ordinary_startup_rollback_fences_already_applied_prefix,
+                        OrdinaryNEVMDisconnectDurabilitySetup)
+{
+    CheckOrdinaryInvalidation(/*failed_parent_count=*/0, /*startup_rollback=*/true);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_ordinary_invalidation_first_fence_failure_survives_engine_restart,
+                        OrdinaryNEVMDisconnectDurabilitySetup)
+{
+    CheckOrdinaryInvalidation(/*failed_parent_count=*/2);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_ordinary_invalidation_second_fence_failure_cannot_skip_on_retry,
+                        OrdinaryNEVMDisconnectDurabilitySetup)
+{
+    CheckOrdinaryInvalidation(/*failed_parent_count=*/1);
 }
 
 BOOST_FIXTURE_TEST_CASE(nevm_mining_durable_pending_lost_disconnect_ack_requires_fence, ReopenedPendingNEVMConnectSetup)
@@ -13749,6 +14025,8 @@ BOOST_FIXTURE_TEST_CASE(nevm_startup_pair_advances_available_prefix_before_missi
         BOOST_REQUIRE_EQUAL(chainstate.setBlockIndexCandidates.count(sibling_tip_index), 1U);
         nevm->applied_count = 3;
         nevm->applied_hash = applied->GetHash();
+        nevm->strict_disconnect_order = true;
+        nevm->applied_pairs = {{1, fork->GetHash()}, {2, prefix->GetHash()}, {3, applied->GetHash()}};
         nevm->connected_blocks.clear();
         nevm->disconnected_blocks.clear();
         std::string error;
@@ -13800,8 +14078,8 @@ BOOST_FIXTURE_TEST_CASE(nevm_startup_pair_advances_available_prefix_before_missi
     BOOST_CHECK(nevm->connected_blocks ==
                 (std::vector<uint256>{sibling->GetHash(), sibling_second->GetHash(), sibling_tip->GetHash()}));
     BOOST_REQUIRE(nevm->last_reported_pair.has_value());
-    BOOST_CHECK_EQUAL(nevm->last_reported_pair->count, 3U);
-    BOOST_CHECK(nevm->last_reported_pair->hash == applied->GetHash());
+    BOOST_CHECK_EQUAL(nevm->last_reported_pair->count, 1U);
+    BOOST_CHECK(nevm->last_reported_pair->hash == fork->GetHash());
     BOOST_CHECK_EQUAL(nevm->applied_count, 4U);
     BOOST_CHECK(nevm->applied_hash == sibling_tip->GetHash());
     LOCK(::cs_main);
