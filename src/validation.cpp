@@ -6815,7 +6815,9 @@ bool Chainstate::FlushStateToDisk(
                 }
             }
             // SYSCOIN END: Recovery-aware deterministic-MN maintenance.
-            if (governance && !governance->FlushCacheToDisk(sys_sync_flush)) {
+            // SYSCOIN: Cached budgets and earlier asynchronous budget writes
+            // must precede every full coins flush, including cache pressure.
+            if (governance && !governance->FlushCacheToDisk(fDoFullFlush || sys_sync_flush)) {
                 return FatalError(m_chainman.GetNotifications(), state, "Failed to commit governance DB");
             }
             m_last_write = nNow;
@@ -7248,10 +7250,10 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
                     return FatalError(m_chainman.GetNotifications(), state,
                                       "DisconnectTip(): Failed to persist retained NEVM roots");
                 }
-                // SYSCOIN: A surviving parent may still need cached budgets.
-                // Persist them before its coins, retaining the child's row
-                // through every remaining rollback failure.
-                if (undo_superblock_budget && !governance->FlushCacheToDisk(/*fSync=*/true)) {
+                // SYSCOIN: The surviving branch can need cached budgets
+                // even when the removed child is ordinary. Persist additions
+                // and earlier asynchronous writes before its durable coins.
+                if (governance && !governance->FlushCacheToDisk(/*fSync=*/true)) {
                     return FatalError(m_chainman.GetNotifications(), state,
                                       "DisconnectTip(): Failed to persist superblock budgets");
                 }

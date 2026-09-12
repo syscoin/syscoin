@@ -197,6 +197,13 @@ public:
                chainstate.m_nevm_activation_continuation;
     }
 
+    static void AgeMetadataWrite(Chainstate& chainstate)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        chainstate.m_last_write = SteadyClock::now() - std::chrono::hours{2};
+        chainstate.m_last_flush = SteadyClock::now();
+    }
+
     static void SetInvalidateStep(Chainstate& chainstate, std::function<void(int)> step)
     {
         chainstate.m_invalidate_block_step_for_testing = std::move(step);
@@ -226,6 +233,12 @@ public:
         return chainstate.ActivateBestChainInternal(state, nullptr, nullptr, true);
     }
 };
+
+void AgeMetadataWriteForTesting(Chainstate& chainstate)
+    EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    NEVMMiningTestAccess::AgeMetadataWrite(chainstate);
+}
 } // namespace node::test
 
 namespace {
@@ -7395,6 +7408,279 @@ struct NEVMSuperblockBudgetRollbackSetup : OrdinaryNEVMDisconnectDurabilitySetup
     }
 };
 
+// SYSCOIN: Removing an ordinary child must persist a surviving superblock's
+// newly computed budget before independently synchronizing parent coins.
+struct NEVMSurvivingBudgetSetup : NEVMSuperblockBudgetRollbackSetup {
+    static constexpr CAmount BUDGET{CSuperblock::SUPERBLOCK_BUDGET * CSuperblock::SHIFT_DOWN / CSuperblock::SHIFT};
+
+    void PrepareSurvivingBudget(bool fail_flush, bool async_prior_write,
+                               const fs::path& crash_path = {})
+    {
+        auto& chainman{*m_node.chainman};
+        auto& state{chainman.ActiveChainstate()};
+        std::size_t parent_syncs{0};
+        struct Restore {
+            Chainstate& state;
+            node::KernelNotifications& notifications;
+            std::atomic<int>& exit_status;
+            const bool shutdown_on_error{notifications.m_shutdown_on_fatal_error};
+            const int previous_exit{exit_status.load()};
+            ~Restore()
+            {
+                WITH_LOCK(::cs_main, state.CoinsDB().SetSyncCallbackForTesting({}));
+                notifications.m_shutdown_on_fatal_error = shutdown_on_error;
+                exit_status.store(previous_exit);
+                governance->ObserveChainTip(nullptr);
+            }
+        } restore{state, *m_node.notifications, m_node.exit_status};
+        WITH_LOCK(::cs_main, state.CoinsDB().SetSyncCallbackForTesting([&] {
+            ++parent_syncs;
+            return true;
+        }));
+        int previous_superblock{0}, next_superblock{0};
+        CSuperblock::GetNearestSuperblocksHeights(
+            WITH_LOCK(::cs_main, return chainman.ActiveHeight() + 1), previous_superblock, next_superblock);
+        std::shared_ptr<const CBlock> superblock;
+        while (WITH_LOCK(::cs_main, return chainman.ActiveHeight()) < next_superblock) {
+            const auto* tip{WITH_LOCK(::cs_main, return chainman.ActiveTip())};
+            BOOST_REQUIRE(governance_tests::PublishGovernanceReadyForTest(*governance, *tip));
+            superblock = MineNEVMBlock();
+        }
+        BOOST_REQUIRE(superblock);
+        auto* parent{WITH_LOCK(::cs_main, return chainman.ActiveTip())};
+        {
+            LOCK(::cs_main);
+            BudgetValidationRules rules;
+            // As in the refusal fixture, the real historical amount-only
+            // producer computes B(S); trigger/vote authorization is not modeled.
+            std::string error;
+            BOOST_REQUIRE_MESSAGE(IsBlockValueValid(*superblock, parent,
+                superblock->vtx.front()->GetValueOut() - COIN, error,
+                /*fJustCheck=*/false, /*check_superblock=*/false), error);
+            BOOST_REQUIRE_EQUAL(CSuperblock::GetPaymentsLimit(parent), BUDGET);
+        }
+        CAmount physical{0};
+        BOOST_REQUIRE(!governance->m_sb->Read(parent->GetBlockHash(), physical));
+        BOOST_REQUIRE_EQUAL(governance->m_sb->GetEraseCacheSize(), 0U);
+        BOOST_REQUIRE_GT(governance->m_sb->GetReadWriteCacheSize(), 0U);
+        // A successful ordinary forward connection must not consume the
+        // synchronous budget-flush seam. Consume it explicitly afterward,
+        // before any batch write, leaving the distinguishing B(S) cache intact.
+        governance->m_sb->FailNextSynchronousFlushBatchForTesting();
+        BOOST_REQUIRE(governance_tests::PublishGovernanceReadyForTest(*governance, *parent));
+        const auto child{MineNEVMBlock()};
+        BOOST_CHECK_THROW(governance->FlushCacheToDisk(/*fSync=*/true), dbwrapper_error);
+        BOOST_REQUIRE(!governance->m_sb->Read(parent->GetBlockHash(), physical));
+        BOOST_CHECK_EQUAL(parent_syncs, 0U);
+        BOOST_CHECK_EQUAL(nevm->durable_pair_requests, 0U);
+        CheckNoPendingNEVMRecovery();
+        auto* removed{WITH_LOCK(::cs_main, return chainman.ActiveTip())};
+        BOOST_REQUIRE(!CSuperblock::IsValidBlockHeight(removed->nHeight));
+        BOOST_REQUIRE(removed->pprev == parent);
+        if (async_prior_write) {
+            BOOST_REQUIRE(governance->m_sb->FlushCacheToDisk(/*CHUNK_ITEMS=*/256, /*fSync=*/false));
+            BOOST_REQUIRE_EQUAL(governance->m_sb->GetReadWriteCacheSize(), 0U);
+            BOOST_REQUIRE(governance->m_sb->Read(parent->GetBlockHash(), physical));
+            BOOST_REQUIRE_EQUAL(physical, BUDGET);
+        }
+        bool budget_before_parent_sync{false};
+        WITH_LOCK(::cs_main, state.CoinsDB().SetSyncCallbackForTesting([&] {
+            LOCK(::cs_main);
+            ++parent_syncs;
+            CAmount persisted{0};
+            budget_before_parent_sync = governance->m_sb->Read(parent->GetBlockHash(), persisted) && persisted == BUDGET;
+            BOOST_REQUIRE(chainman.ActiveTip() == removed);
+            BOOST_REQUIRE(state.CoinsTip().GetBestBlock() == parent->GetBlockHash());
+            BOOST_REQUIRE(nevm->durable_pair);
+            BOOST_REQUIRE(nevm->durable_pair->hash == parent->GetBlockHash());
+            BOOST_REQUIRE(nevm->durable_pair->count == nevm->applied_count);
+            BOOST_REQUIRE(pnevmtxrootsdb->GetPendingDisconnect());
+            return true;
+        }));
+        if (fail_flush) {
+            m_node.notifications->m_shutdown_on_fatal_error = false;
+            governance->m_sb->FailNextSynchronousFlushBatchForTesting();
+        }
+        BlockValidationState result;
+        const bool invalidated{state.InvalidateBlock(result, removed)};
+        if (fail_flush) {
+            BOOST_CHECK(!invalidated);
+            BOOST_CHECK(result.IsError());
+            BOOST_CHECK(!result.IsInvalid());
+            BOOST_CHECK(result.ToString().find("injected synchronous EvoDB flush-batch failure") != std::string::npos);
+            BOOST_CHECK_EQUAL(parent_syncs, 0U);
+            {
+                LOCK(::cs_main);
+                BOOST_CHECK(chainman.ActiveTip() == removed);
+                BOOST_CHECK_EQUAL(removed->nStatus & BLOCK_FAILED_MASK, 0U);
+                BOOST_CHECK(pnevmtxrootsdb->GetPendingDisconnect().has_value());
+                BOOST_CHECK(state.CoinsDB().GetBestBlock() != parent->GetBlockHash());
+            }
+            BOOST_CHECK_EQUAL(CSuperblock::GetPaymentsLimit(parent), BUDGET);
+            BOOST_CHECK_EQUAL(governance->m_sb->Read(parent->GetBlockHash(), physical), async_prior_write);
+            // Baseline may skip the barrier, leaving the injected failure
+            // armed. Consume that one-shot safely before fixture destruction.
+            try { governance->FlushCacheToDisk(/*fSync=*/true); } catch (const dbwrapper_error&) {}
+            return;
+        }
+        BOOST_REQUIRE_MESSAGE(invalidated, result.ToString());
+        BOOST_REQUIRE_EQUAL(parent_syncs, 1U);
+        {
+            LOCK(::cs_main);
+            BOOST_REQUIRE(chainman.ActiveTip() == parent);
+            BOOST_REQUIRE_EQUAL(parent->nStatus & BLOCK_FAILED_MASK, 0U);
+            BOOST_REQUIRE(removed->nStatus & BLOCK_FAILED_VALID);
+            BOOST_REQUIRE(state.CoinsDB().GetBestBlock() == parent->GetBlockHash());
+            BOOST_REQUIRE(state.CoinsDB().GetHeadBlocks().empty());
+            BOOST_REQUIRE(state.CoinsDB().HaveCoin(COutPoint{superblock->vtx.front()->GetHash(), 0}));
+            BOOST_REQUIRE(!state.CoinsDB().HaveCoin(COutPoint{child->vtx.front()->GetHash(), 0}));
+            BOOST_REQUIRE(pnevmtxrootsdb->GetPublishedTip() == parent->GetBlockHash());
+            BOOST_REQUIRE(!pnevmtxrootsdb->GetPendingDisconnect());
+        }
+        BOOST_REQUIRE(nevm->disconnected_blocks == std::vector<uint256>{child->GetHash()});
+        BOOST_REQUIRE(nevm->durable_pair);
+        BOOST_REQUIRE(nevm->durable_pair->hash == parent->GetBlockHash());
+        BOOST_REQUIRE(!crash_path.empty());
+        // Only this separate manifest is synchronized here. In particular,
+        // neither budget lookup nor any orderly shutdown can flush B(S).
+        CDBWrapper manifest{DBParams{.path = crash_path / "manifest", .cache_bytes = 1U << 20}};
+        CDBBatch batch{manifest};
+        batch.Write(std::string{"fixture_root"}, fs::PathToString(m_path_root));
+        batch.Write(std::string{"datadir"}, fs::PathToString(chainman.m_options.datadir));
+        batch.Write(std::string{"coins_path"}, WITH_LOCK(::cs_main,
+            return fs::PathToString(*state.CoinsDB().StoragePath())));
+        const auto write_block = [&](const std::string& key, const CBlock& block) {
+            CDataStream bytes{SER_DISK, CLIENT_VERSION};
+            bytes << block;
+            batch.Write(key, std::vector<uint8_t>{
+                UCharCast(bytes.data()), UCharCast(bytes.data() + bytes.size())});
+        };
+        write_block("superblock", *superblock);
+        write_block("child", *child);
+        batch.Write(std::string{"height"}, parent->nHeight);
+        batch.Write(std::string{"budget_before_parent_sync"}, budget_before_parent_sync);
+        batch.Write(std::string{"engine_count"}, nevm->durable_pair->count);
+        batch.Write(std::string{"engine_hash"}, nevm->durable_pair->hash);
+        BOOST_REQUIRE(manifest.WriteBatch(batch, /*fSync=*/true));
+        std::_Exit(73);
+    }
+
+    void CheckSurvivingBudgetCrash()
+    {
+#if defined(HAVE_BOOST_PROCESS) || defined(ENABLE_EXTERNAL_SIGNER)
+#if BOOST_VERSION >= 108800
+        namespace bp = boost::process::v1;
+#else
+        namespace bp = boost::process;
+#endif
+        const fs::path crash_path{m_path_root / "surviving-budget-crash"};
+        BOOST_REQUIRE(fs::create_directories(crash_path));
+        const std::vector<std::string> args{
+            "--run_test=validation_chainstatemanager_tests/nevm_surviving_budget_crash_child",
+            "--", "NEVM_SURVIVING_BUDGET_CHILD", fs::PathToString(crash_path)};
+        bp::child child{bp::exe = boost::unit_test::framework::master_test_suite().argv[0], bp::args = args};
+        const auto deadline{std::chrono::steady_clock::now() + std::chrono::minutes{2}};
+        while (child.running() && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{10});
+        }
+        const bool timed_out{child.running()};
+        if (timed_out) child.terminate();
+        child.wait();
+        BOOST_REQUIRE_MESSAGE(!timed_out, "Owned surviving-budget crash child timed out");
+        BOOST_REQUIRE_EQUAL(child.exit_code(), 73);
+        CDBWrapper manifest{DBParams{.path = crash_path / "manifest", .cache_bytes = 1U << 20}};
+        std::string fixture_root, datadir, coins_path;
+        CBlock superblock, removed;
+        int height{0};
+        uint64_t engine_count{0};
+        uint256 engine_hash;
+        bool budget_before_parent_sync{false};
+        BOOST_REQUIRE(manifest.Read(std::string{"fixture_root"}, fixture_root));
+        BOOST_REQUIRE(manifest.Read(std::string{"datadir"}, datadir));
+        BOOST_REQUIRE(manifest.Read(std::string{"coins_path"}, coins_path));
+        const auto read_block = [&](const std::string& key, CBlock& block) {
+            std::vector<uint8_t> bytes;
+            BOOST_REQUIRE(manifest.Read(key, bytes));
+            CDataStream stream{bytes, SER_DISK, CLIENT_VERSION};
+            stream >> block;
+            BOOST_REQUIRE(stream.empty());
+        };
+        read_block("superblock", superblock);
+        read_block("child", removed);
+        BOOST_REQUIRE(manifest.Read(std::string{"height"}, height));
+        BOOST_REQUIRE(manifest.Read(std::string{"budget_before_parent_sync"}, budget_before_parent_sync));
+        BOOST_REQUIRE(manifest.Read(std::string{"engine_count"}, engine_count));
+        BOOST_REQUIRE(manifest.Read(std::string{"engine_hash"}, engine_hash));
+        const fs::path child_root{fs::u8path(fixture_root)};
+        BOOST_REQUIRE(child_root != m_path_root);
+        BOOST_REQUIRE(child_root.parent_path() == m_path_root.parent_path());
+        BOOST_CHECK(budget_before_parent_sync);
+        const uint256 parent_hash{superblock.GetHash()};
+        BOOST_CHECK(engine_hash == parent_hash);
+        BOOST_CHECK_EQUAL(engine_count, height - m_node.chainman->GetConsensus().nNEVMStartBlock + 1);
+        {
+            CCoinsViewDB coins{DBParams{.path = fs::u8path(coins_path), .cache_bytes = 1U << 20}, {}};
+            CNEVMTxRootsDB roots{DBParams{.path = child_root / "ordinary-disconnect-roots", .cache_bytes = 1U << 20}};
+            BOOST_CHECK(coins.GetBestBlock() == parent_hash);
+            BOOST_CHECK(coins.GetHeadBlocks().empty());
+            BOOST_CHECK(coins.HaveCoin(COutPoint{superblock.vtx.front()->GetHash(), 0}));
+            BOOST_CHECK(!coins.HaveCoin(COutPoint{removed.vtx.front()->GetHash(), 0}));
+            BOOST_CHECK(roots.GetPublishedTip() == parent_hash);
+            BOOST_CHECK(!roots.GetPendingDisconnect());
+            CNEVMHeader canonical, orphan;
+            BlockValidationState decoded;
+            BOOST_REQUIRE(GetNEVMData(decoded, superblock, canonical));
+            BOOST_REQUIRE(GetNEVMData(decoded, removed, orphan));
+            NEVMTxRoot root;
+            BOOST_REQUIRE(roots.ReadTxRoots(canonical.nBlockHash, root));
+            BOOST_CHECK(root.nTxRoot == canonical.nTxRoot);
+            BOOST_CHECK(root.nReceiptRoot == canonical.nReceiptRoot);
+            BOOST_CHECK(!roots.ReadTxRoots(orphan.nBlockHash, root));
+            auto& original{*m_node.chainman};
+            auto options{original.m_options};
+            options.datadir = fs::u8path(datadir);
+            ChainstateManager reopened{m_node.kernel->interrupt, options,
+                {.chainparams = original.GetParams(), .blocks_dir = child_root / "blocks",
+                 .notifications = *m_node.notifications}};
+            struct RestoreGovernance {
+                std::unique_ptr<CGovernanceManager> saved{std::move(governance)};
+                ~RestoreGovernance() { governance = std::move(saved); }
+            } restore;
+            governance = std::make_unique<CGovernanceManager>(reopened);
+            BOOST_CHECK_EQUAL(governance->m_sb->GetReadWriteCacheSize(), 0U);
+            CAmount persisted{0};
+            BOOST_CHECK(governance->m_sb->Read(parent_hash, persisted));
+            BOOST_CHECK_EQUAL(persisted, BUDGET);
+            CBlockIndex parent{superblock};
+            parent.phashBlock = &parent_hash;
+            parent.nHeight = height;
+            BOOST_CHECK_EQUAL(CSuperblock::GetPaymentsLimit(&parent), BUDGET);
+            // The ordinary adaptive consumer must use the reopened row.
+            LOCK(::cs_main);
+            BudgetValidationRules rules;
+            const int cycle{original.GetConsensus().SuperBlockCycle(height)};
+            std::vector<CBlockIndex> next(static_cast<std::size_t>(cycle));
+            for (int i{0}; i < cycle; ++i) {
+                next[i].nHeight = height + i + 1;
+                next[i].pprev = i == 0 ? &parent : &next[i - 1];
+            }
+            CMutableTransaction coinbase;
+            coinbase.vin.resize(1);
+            coinbase.vin.front().prevout.SetNull();
+            const CAmount reward{50 * COIN};
+            coinbase.vout.emplace_back(reward + CSuperblock::SUPERBLOCK_BUDGET, CScript{} << OP_TRUE);
+            CBlock later;
+            later.vtx.push_back(MakeTransactionRef(std::move(coinbase)));
+            std::string error;
+            BOOST_CHECK(!IsBlockValueValid(later, &next.back(), reward, error,
+                /*fJustCheck=*/true, /*check_superblock=*/false));
+            BOOST_CHECK(error.find("exceeded superblock max value") != std::string::npos);
+        }
+        fs::remove_all(child_root);
+#endif
+    }
+};
+
 // SYSCOIN: A fully validated mint remains usable after interrupted removal.
 struct NEVMMintCleanupSetup : NEVMMintReadErrorSetup {
     enum class Cut { BEFORE_ERASE, ERASE_FAILURE, BEFORE_COMPLETE, AFTER_COMPLETE };
@@ -10442,6 +10728,36 @@ BOOST_FIXTURE_TEST_CASE(nevm_superblock_budget_erased_after_successful_rollback,
                         NEVMSuperblockBudgetRollbackSetup)
 {
     CheckBudgetRollback(Fault::NONE);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_surviving_budget_crash_child, NEVMSurvivingBudgetSetup,
+                        *boost::unit_test::disabled())
+{
+    const auto args{G_TEST_COMMAND_LINE_ARGUMENTS()};
+    if (args.empty() || std::string{args[0]} != "NEVM_SURVIVING_BUDGET_CHILD") {
+        BOOST_TEST_MESSAGE("Crash helper requires an owned parent-test invocation");
+        return;
+    }
+    BOOST_REQUIRE_EQUAL(args.size(), 2U);
+    const fs::path crash_path{fs::u8path(args[1])};
+    BOOST_REQUIRE(crash_path.is_absolute());
+    BOOST_REQUIRE(fs::is_directory(crash_path));
+    PrepareSurvivingBudget(/*fail_flush=*/false, /*async_prior_write=*/false, crash_path);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_surviving_budget_cold_reopen_after_ordinary_rollback, NEVMSurvivingBudgetSetup)
+{
+    CheckSurvivingBudgetCrash();
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_surviving_budget_flush_refusal_precedes_parent_coins, NEVMSurvivingBudgetSetup)
+{
+    PrepareSurvivingBudget(/*fail_flush=*/true, /*async_prior_write=*/false);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_surviving_budget_async_empty_cache_requires_barrier, NEVMSurvivingBudgetSetup)
+{
+    PrepareSurvivingBudget(/*fail_flush=*/true, /*async_prior_write=*/true);
 }
 
 BOOST_FIXTURE_TEST_CASE(nevm_ordinary_invalidation_durable_engine_before_local_rollback,

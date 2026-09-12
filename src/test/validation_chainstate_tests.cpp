@@ -56,6 +56,12 @@
 
 #include <boost/test/unit_test.hpp>
 
+// SYSCOIN: Existing chainstate test access forces a metadata-only timer event.
+namespace node::test {
+void AgeMetadataWriteForTesting(Chainstate& chainstate)
+    EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+}
+
 // SYSCOIN BEGIN: fork governance/PQ test accessors.
 namespace governance_tests {
 
@@ -1822,6 +1828,126 @@ struct SuperblockBudgetRollbackSetup : TestChain100Setup {
         BOOST_CHECK(chainstate.CoinsDB().GetHeadBlocks().empty());
         chainstate.InitCoinsCache(1U << 20);
     }
+
+    void CheckFullFlushBudget(bool metadata_first)
+    {
+        auto& chainman{*Assert(m_node.chainman)};
+        // A separate cache without mempool headroom makes pressure-triggered
+        // full flushing deterministic, as in validation_flush_tests.
+        Chainstate chainstate{/*mempool=*/nullptr, chainman.m_blockman, chainman};
+        chainstate.InitCoinsDB(1U << 20, /*in_memory=*/true,
+                              /*should_wipe=*/true, "budget-full-flush");
+        LOCK(::cs_main);
+        chainstate.InitCoinsCache(1U << 20);
+        CBlockIndex* tip{chainman.ActiveTip()};
+        BOOST_REQUIRE(tip);
+        BOOST_REQUIRE(CSuperblock::IsValidBlockHeight(tip->nHeight));
+        chainstate.m_chain.SetTip(*tip);
+        const uint256 durable_best{chainman.GetConsensus().hashGenesisBlock};
+        chainstate.CoinsTip().SetBestBlock(durable_best);
+        BOOST_REQUIRE(chainstate.CoinsDB().FlushWithSync(chainstate.CoinsTip()));
+        const COutPoint pending_coin{AddTestCoin(chainstate.CoinsTip())};
+        chainstate.CoinsTip().SetBestBlock(tip->GetBlockHash());
+        BOOST_REQUIRE(chainstate.GetCoinsCacheSizeState() == CoinsCacheSizeState::OK);
+
+        CAmount persisted{0};
+        BOOST_REQUIRE(!governance->m_sb->Read(tip->GetBlockHash(), persisted));
+        const CAmount budget{CSuperblock::SUPERBLOCK_BUDGET *
+            CSuperblock::SHIFT_DOWN / CSuperblock::SHIFT};
+        {
+            auto& consensus{const_cast<Consensus::Params&>(chainman.GetConsensus())};
+            struct RestoreRules {
+                Consensus::Params& consensus;
+                int dip3_height{consensus.DIP0003Height};
+                int sync_mode{masternodeSync.GetAssetID()};
+                ~RestoreRules()
+                {
+                    consensus.DIP0003Height = dip3_height;
+                    masternodeSync.SetSyncMode(sync_mode);
+                }
+            } restore{consensus};
+            consensus.DIP0003Height = 1;
+            masternodeSync.SetSyncMode(MASTERNODE_SYNC_GOVERNANCE);
+            CBlock block;
+            BOOST_REQUIRE(chainman.m_blockman.ReadBlockFromDisk(block, *tip));
+            std::string error;
+            BOOST_REQUIRE_MESSAGE(IsBlockValueValid(
+                block, tip, block.vtx.front()->GetValueOut() - COIN, error,
+                /*fJustCheck=*/false, /*check_superblock=*/false), error);
+            BOOST_REQUIRE_EQUAL(CSuperblock::GetPaymentsLimit(tip), budget);
+        }
+
+        struct RestoreFlushState {
+            Chainstate& chainstate;
+            node::KernelNotifications& notifications;
+            std::atomic<int>& exit_status;
+            bool shutdown_on_error;
+            int previous_exit_status;
+            ~RestoreFlushState()
+            {
+                LOCK(::cs_main);
+                chainstate.CoinsDB().SetWriteBatchCallbackForTesting({});
+                // Also consume an unobserved injection when testing old code
+                // that omitted the barrier, so fixture destruction stays safe.
+                try { governance->FlushCacheToDisk(/*fSync=*/true); }
+                catch (const dbwrapper_error&) {}
+                notifications.m_shutdown_on_fatal_error = shutdown_on_error;
+                exit_status.store(previous_exit_status);
+            }
+        } restore{chainstate, *m_node.notifications, m_node.exit_status,
+            m_node.notifications->m_shutdown_on_fatal_error, m_node.exit_status.load()};
+        m_node.notifications->m_shutdown_on_fatal_error = false;
+        std::size_t coin_batches{0};
+        chainstate.CoinsDB().SetWriteBatchCallbackForTesting([&](bool) {
+            ++coin_batches;
+            CAmount observed{0};
+            BOOST_CHECK(governance->m_sb->Read(tip->GetBlockHash(), observed));
+            BOOST_CHECK_EQUAL(observed, budget);
+            return true;
+        });
+        governance->m_sb->FailNextSynchronousFlushBatchForTesting();
+
+        // A healthy IF_NEEDED call must neither flush the budget nor consume
+        // its synchronous failure while the coins cache has enough room.
+        BlockValidationState healthy;
+        BOOST_REQUIRE(chainstate.FlushStateToDisk(healthy, FlushStateMode::IF_NEEDED));
+        BOOST_CHECK_EQUAL(coin_batches, 0U);
+        BOOST_CHECK(!governance->m_sb->Read(tip->GetBlockHash(), persisted));
+        BOOST_CHECK_GT(governance->m_sb->GetReadWriteCacheSize(), 0U);
+        if (metadata_first) {
+            // Age only the metadata timer: PERIODIC must write B asynchronously
+            // and retain the pending sync failure with an empty dirty cache.
+            node::test::AgeMetadataWriteForTesting(chainstate);
+            BlockValidationState metadata;
+            BOOST_REQUIRE(chainstate.FlushStateToDisk(metadata, FlushStateMode::PERIODIC));
+            BOOST_CHECK_EQUAL(coin_batches, 0U);
+            BOOST_REQUIRE(governance->m_sb->Read(tip->GetBlockHash(), persisted));
+            BOOST_CHECK_EQUAL(persisted, budget);
+            BOOST_CHECK_EQUAL(governance->m_sb->GetReadWriteCacheSize(), 0U);
+            BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == durable_best);
+        }
+
+        chainstate.m_coinstip_cache_size_bytes = 1;
+        BOOST_REQUIRE(chainstate.GetCoinsCacheSizeState() == CoinsCacheSizeState::CRITICAL);
+        BlockValidationState refused;
+        BOOST_CHECK(!chainstate.FlushStateToDisk(refused, FlushStateMode::IF_NEEDED));
+        BOOST_CHECK(refused.IsError());
+        BOOST_CHECK_EQUAL(m_node.exit_status.load(), EXIT_FAILURE);
+        BOOST_CHECK_EQUAL(coin_batches, 0U);
+        BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == durable_best);
+        BOOST_CHECK(!chainstate.CoinsDB().HaveCoin(pending_coin));
+        BOOST_CHECK(chainstate.CoinsTip().HaveCoin(pending_coin));
+        BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == tip->GetBlockHash());
+
+        // The consumed one-shot failure leaves the same full flush retryable.
+        BlockValidationState retried;
+        BOOST_REQUIRE(chainstate.FlushStateToDisk(retried, FlushStateMode::IF_NEEDED));
+        BOOST_CHECK_EQUAL(coin_batches, 1U);
+        BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == tip->GetBlockHash());
+        BOOST_CHECK(chainstate.CoinsDB().HaveCoin(pending_coin));
+        BOOST_REQUIRE(governance->m_sb->Read(tip->GetBlockHash(), persisted));
+        BOOST_CHECK_EQUAL(persisted, budget);
+    }
 };
 
 BOOST_FIXTURE_TEST_CASE(superblock_budget_retirement_waits_for_parent_coins,
@@ -1834,6 +1960,18 @@ BOOST_FIXTURE_TEST_CASE(superblock_budget_survives_failed_parent_coins_sync,
                         SuperblockBudgetRollbackSetup)
 {
     CheckBudgetRetirement(/*fail_sync=*/true);
+}
+
+BOOST_FIXTURE_TEST_CASE(full_coins_flush_syncs_cached_superblock_budget,
+                        SuperblockBudgetRollbackSetup)
+{
+    CheckFullFlushBudget(/*metadata_first=*/false);
+}
+
+BOOST_FIXTURE_TEST_CASE(full_coins_flush_syncs_previously_async_superblock_budget,
+                        SuperblockBudgetRollbackSetup)
+{
+    CheckFullFlushBudget(/*metadata_first=*/true);
 }
 // SYSCOIN END: Budget retirement on rollback without a NEVM coins barrier.
 
