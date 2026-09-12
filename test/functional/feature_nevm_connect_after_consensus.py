@@ -623,14 +623,14 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
             self._block_info_available = True
             self._expected_connect_syshashes = None
 
-    def _check_applied_pending_child_scheduler(self):
+    def _check_pending_child_scheduler(self, *, apply_before_reply=True):
         node = self.nodes[0]
         assert_equal(node.getconnectioncount(), 0)
         core_pid = node.process.pid
         block = self._build_block(node)
         # Give this later-invalidated fixture its own identity even when the
         # next case reuses the cached template for the same parent.
-        block.nNonce += 1 << 17
+        block.nNonce += 1 << (17 if apply_before_reply else 19)
         block.solve()
         raw = self._serialize_nevm_block(block, self._last_nevm_block_data).hex()
         previous_tip = node.getbestblockhash()
@@ -662,21 +662,21 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
         descendant_raw = self._serialize_nevm_block(descendant, self._last_nevm_block_data).hex()
 
         applied = self._applied_syshashes[:]
+        initial_engine = applied + [block.sha256] if apply_before_reply else applied
         connect_len = len(self._connect_syshashes)
         disconnect_len = len(self._disconnect_syshashes)
         event_len = len(self._nevm_events)
 
-        def apply_without_acknowledgement(request):
+        def fail_connection(request):
             if request.sysblockhash != block.sha256:
                 return b"error:mock-unexpected-connect"
-            if self._applied_syshashes == applied:
+            if apply_before_reply and self._applied_syshashes == applied:
                 self._applied_syshashes.append(block.sha256)
-            # Apply the request, but make its acknowledgement unusable. The
-            # subsequent unavailable status prevents the bounded live recovery
-            # from proving that the child has already reached the engine.
-            return b"error:mock-lost-ack"
+            # An unusable reply and unavailable status leave Core unable to
+            # distinguish an applied child from one never imported at all.
+            return b"error:mock-lost-ack" if apply_before_reply else b"error:mock-connect-unavailable"
 
-        self._connect_response = apply_without_acknowledgement
+        self._connect_response = fail_connection
         self._expected_connect_syshashes = applied + [block.sha256, descendant.sha256]
         self._block_info_available = False
         try:
@@ -687,7 +687,7 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
             assert_equal(node.getblock(block.hash, 0), raw)
             branch = next(tip for tip in node.getchaintips() if tip["hash"] == block.hash)
             assert branch["status"] != "invalid"
-            assert_equal(self._applied_syshashes, applied + [block.sha256])
+            assert_equal(self._applied_syshashes, initial_engine)
             assert_equal(self._nonzero_connects_since(connect_len), [block.sha256])
 
             # Download D before communication recovers. Its public submission
@@ -699,7 +699,7 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
             assert_equal(node.gettxout(descendant.vtx[0].hash, 0), None)
             branch = next(tip for tip in node.getchaintips() if tip["hash"] == descendant.hash)
             assert branch["status"] != "invalid"
-            assert_equal(self._applied_syshashes, applied + [block.sha256])
+            assert_equal(self._applied_syshashes, initial_engine)
             assert_equal(self._nonzero_connects_since(connect_len), [block.sha256, block.sha256])
             assert_raises_rpc_error(
                 -10, "execution recovery", node.getblocktemplate, {"rules": ["segwit"]},
@@ -710,24 +710,25 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
             # pending child and reopen mining against the engine's exact pair.
             self._connect_response = b"connected"
             self._block_info_available = True
-            self.wait_until(lambda: node.getbestblockhash() == block.hash)
+            if apply_before_reply:
+                self.wait_until(lambda: node.getbestblockhash() == block.hash)
+                assert_equal(node.gettxout(previous_coinbase, 0), {
+                    **previous_coin,
+                    "bestblock": block.hash,
+                    "confirmations": previous_coin["confirmations"] + 1,
+                })
+                assert node.gettxout(block.vtx[0].hash, 0) is not None
+                assert_equal(self._applied_syshashes, applied + [block.sha256])
+                assert_raises_rpc_error(
+                    -10, "execution recovery", node.getblocktemplate, {"rules": ["segwit"]},
+                )
+
+            # A fresh proof of P when C was never applied must also resume
+            # ordinary selection. No new block submission or peer may drive D.
+            self.wait_until(lambda: node.getbestblockhash() == descendant.hash)
             assert_equal(node.process.pid, core_pid)
             assert_equal(node.process.poll(), None)
             assert_equal(node.getblock(block.hash, 0), raw)
-            assert_equal(node.gettxout(previous_coinbase, 0), {
-                **previous_coin,
-                "bestblock": block.hash,
-                "confirmations": previous_coin["confirmations"] + 1,
-            })
-            assert node.gettxout(block.vtx[0].hash, 0) is not None
-            assert_equal(self._applied_syshashes, applied + [block.sha256])
-            assert_raises_rpc_error(
-                -10, "execution recovery", node.getblocktemplate, {"rules": ["segwit"]},
-            )
-
-            # The next scheduler pass must resume ordinary candidate selection
-            # after verifying C. No new block submission or peer may drive D.
-            self.wait_until(lambda: node.getbestblockhash() == descendant.hash)
             assert_equal(node.getblock(descendant.hash, 0), descendant_raw)
             assert_equal(node.gettxout(previous_coinbase, 0), {
                 **previous_coin,
@@ -762,12 +763,16 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
             assert len(statuses) >= 3
             assert_equal(statuses[-1], ("blockinfo", len(applied) + 2, descendant.sha256))
             descendant_connect_index = events.index(("connect", descendant.sha256, b"connected"))
+            verified_prefix = initial_engine
             parent_status_index = max(
                 index for index, event in enumerate(events)
-                if event == ("blockinfo", len(applied) + 1, block.sha256)
+                if event == ("blockinfo", len(verified_prefix), verified_prefix[-1])
             )
-            assert parent_status_index < descendant_connect_index
-            assert_equal(events[parent_status_index - 1], ("flush", len(applied) + 1))
+            first_import_index = descendant_connect_index if apply_before_reply else events.index(
+                ("connect", block.sha256, b"connected")
+            )
+            assert parent_status_index < first_import_index
+            assert_equal(events[parent_status_index - 1], ("flush", len(verified_prefix)))
             last_status_index = max(index for index, event in enumerate(events) if event[0] == "blockinfo")
             assert last_status_index > descendant_connect_index
             assert_equal(events[last_status_index - 1], ("flush", len(applied) + 2))
@@ -1028,7 +1033,10 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
             self._check_mining_prefix_scheduler()
 
             self.log.info("Scheduled recovery finishes an already-applied child after its acknowledgement fails")
-            self._check_applied_pending_child_scheduler()
+            self._check_pending_child_scheduler()
+
+            self.log.info("Scheduled recovery retries a stored child that never reached the engine")
+            self._check_pending_child_scheduler(apply_before_reply=False)
 
             self.log.info("Scheduled recovery rolls back an engine-only child after a better branch arrives")
             self._check_applied_pending_child_reselected()

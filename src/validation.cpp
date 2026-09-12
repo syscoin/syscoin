@@ -3287,8 +3287,11 @@ bool ChainstateManager::MaybeRecoverNEVMBlockProduction(std::string& error)
                     // SYSCOIN BEGIN: Finish selection after resolving the lost-ACK child.
                     const CBlockIndex* attempted{chainstate->m_nevm_pending_connect
                         ? m_blockman.LookupBlockIndex(*chainstate->m_nevm_pending_connect) : nullptr};
+                    // SYSCOIN: Parent alignment resolves the recorded attempt
+                    // even if it never applied or its child lost eligibility.
+                    // Ordinary selection still owns the next candidate.
                     const bool owns_continuation{chainstate->m_nevm_activation_continuation ||
-                        (attempted && chainstate->m_chain.Contains(attempted))};
+                        (attempted && (attempted->pprev == tip || chainstate->m_chain.Contains(attempted)))};
                     const CBlockIndex* next{owns_continuation ? chainstate->FindMostWorkChain() : nullptr};
                     if (next == nullptr || next == tip) {
                         chainstate->m_nevm_pending_connect.reset();
