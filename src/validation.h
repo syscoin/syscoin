@@ -876,7 +876,7 @@ public:
                     CCoinsViewCache& view, bool fJustCheck = false, bool bReverify = true) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     bool ConnectBlock(const CBlock& block, BlockValidationState& state, CBlockIndex* pindex,
-                    CCoinsViewCache& view, bool fJustCheck, NEVMMintTxSet &setMintTxs, NEVMTxRootMap &mapNEVMTxRoots, PoDAMAPMemory &mapPoDA, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs, bool bReverify = true, std::optional<NEVMBlockReject>* rejection = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+                    CCoinsViewCache& view, bool fJustCheck, NEVMMintTxSet &setMintTxs, NEVMTxRootMap &mapNEVMTxRoots, PoDAMAPMemory &mapPoDA, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs, bool bReverify = true, std::optional<NEVMBlockReject>* rejection = nullptr, bool* live_nevm_acknowledged = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     // SYSCOIN Apply the effects of a block disconnection on the UTXO set.
     bool DisconnectTip(BlockValidationState& state, DisconnectedBlockTransactions* disconnectpool, bool bReverify = true, bool bUpdateSpecialTxState = true, const NEVMDisconnectPrefix* nevm_prefix = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs);
@@ -1162,7 +1162,9 @@ private:
     // SYSCOIN: Normal block connection requires cs_main. Authenticated
     // catch-up replay instead holds m_chainstate_mutex while releasing
     // cs_main across the synchronous Geth call.
-    bool ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMap &mapNEVMTxRoots, const CBlock& block, const CBlockIndex* pindex, const uint256& nBlockHash, const uint32_t& nHeight, const bool fJustCheck, PoDAMAPMemory &mapPoDA, const CDeterministicMNListNEVMAddressDiff &diff, bool btcc_prefix_authenticated = false, NEVMNotificationContext notification_context = NEVMNotificationContext::LIVE, std::optional<NEVMBlockReject>* rejection = nullptr);
+    // SYSCOIN: The optional acknowledgment latches only actual live delivery;
+    // callers retain it across retries until their private outputs publish.
+    bool ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMap &mapNEVMTxRoots, const CBlock& block, const CBlockIndex* pindex, const uint256& nBlockHash, const uint32_t& nHeight, const bool fJustCheck, PoDAMAPMemory &mapPoDA, const CDeterministicMNListNEVMAddressDiff &diff, bool btcc_prefix_authenticated = false, NEVMNotificationContext notification_context = NEVMNotificationContext::LIVE, std::optional<NEVMBlockReject>* rejection = nullptr, bool* live_nevm_acknowledged = nullptr);
     bool RecoverNEVMPrefixForConnect(const CBlockIndex& pending,
                                      std::string& error,
                                      std::optional<NEVMBlockReject>& rejection)

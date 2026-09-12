@@ -3,8 +3,10 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <llmq/quorums_chainlocks.h>
+#include <llmq/quorums_commitment.h>
 
 #include <chain.h>
+#include <auxpow.h>
 #include <consensus/merkle.h>
 #include <consensus/params.h>
 #include <crypto/scheduled_wots/scheduled_wots.h>
@@ -15,6 +17,7 @@
 #include <netbase.h>
 #include <net_processing.h>
 #include <node/miner.h>
+#include <node/kernel_notifications.h>
 #include <node/blockstorage.h>
 #include <pow.h>
 #include <primitives/block.h>
@@ -24,9 +27,11 @@
 #include <rpc/request.h>
 #include <rpc/server.h>
 #include <script/script.h>
+#include <services/assetconsensus.h>
 #include <streams.h>
 #include <test/pq_test_util.h>
 #include <test/util/net.h>
+#include <test/util/logging.h>
 #include <test/util/setup_common.h>
 #include <test/util/validation.h>
 #include <timedata.h>
@@ -876,6 +881,14 @@ public:
     static pq::PaymentAuditStore& AuditStore(CChainLocksHandler& handler)
     {
         return *Assert(handler.m_payment_audit_store);
+    }
+
+    static void SetAuditPinWriter(CChainLocksHandler& handler,
+                                  std::function<bool(CDBBatch&, bool)> writer)
+    {
+        auto& store{AuditStore(handler)};
+        LOCK(store.m_mutex);
+        store.m_pin_batch_writer_for_testing = std::move(writer);
     }
 
     static std::unique_ptr<pq::PaymentAuditStore> ExchangeAuditStore(
@@ -2421,10 +2434,20 @@ struct LatePaymentAuditPresealSetup : TestingSetup {
         std::size_t queries{0};
         std::size_t flushes{0};
         bool flush_available{true};
+        bool allow_exact_retry{false};
+        bool durable_pair_available{true};
+        std::vector<std::string> durable_pair_requests;
         bool wrong_final_tip{false};
         uint64_t expected_final_count{TIP_HEIGHT - FIRST_CARRIER + 1};
         std::optional<uint256> reported_hash;
         std::function<void()> on_query;
+        std::function<void()> on_connect_ack;
+        std::function<void(const CBlock&, const BlockValidationState&)> on_checked;
+
+        void BlockChecked(const CBlock& block, const BlockValidationState& state) override
+        {
+            if (on_checked) on_checked(block, state);
+        }
 
         void NotifyGetNEVMBlock(CNEVMBlock&, std::string& error) override
         {
@@ -2440,16 +2463,29 @@ struct LatePaymentAuditPresealSetup : TestingSetup {
             error.clear();
             if (rejection) rejection->reset();
             if (incoming.IsNull()) return;
+            if (allow_exact_retry && count && incoming == hash && height == FIRST_CARRIER + count - 1) {
+                connected.push_back(incoming);
+                if (on_connect_ack) on_connect_ack();
+                return;
+            }
             BOOST_REQUIRE_EQUAL(height, FIRST_CARRIER + count);
             if (count != 0) BOOST_REQUIRE(block.hashPrevBlock == hash);
             ++count;
             hash = incoming;
             connected.push_back(hash);
+            if (on_connect_ack) on_connect_ack();
         }
         void NotifyNEVMComms(const std::string& command, bool& response,
                              std::optional<NEVMBlockReject>* rejection = nullptr) override
         {
             if (rejection) rejection->reset();
+            if (command.rfind("durable-pair-v1:", 0) == 0) {
+                durable_pair_requests.push_back(command);
+                const auto expected{"durable-pair-v1:" + std::to_string(count) + ":" + hash.GetHex()};
+                BOOST_CHECK_EQUAL(command, expected);
+                response = durable_pair_available && command == expected;
+                return;
+            }
             if (command == "flush") ++flushes;
             response = command == "flush" ? flush_available : true;
         }
@@ -3150,6 +3186,348 @@ struct LatePaymentAuditPresealSetup : TestingSetup {
     void AdmitAll()
     {
         for (std::size_t ordinal{0}; ordinal < audits.size(); ++ordinal) Admit(ordinal);
+    }
+
+    void CheckLiveAcknowledgementThenPinFailure(bool fail_parent_sync = false)
+    {
+        auto& chainman{*m_node.chainman};
+        auto& chainstate{chainman.ActiveChainstate()};
+        auto& consensus{const_cast<Consensus::Params&>(chainman.GetConsensus())};
+        struct RestoreConsensus {
+            Consensus::Params& target;
+            Consensus::Params previous;
+            ~RestoreConsensus() { target = previous; }
+        } restore_consensus{consensus, consensus};
+        consensus.DIP0003Height = 1;
+        consensus.nPQActivationHeight = 2'305;
+        consensus.nPQPreparationHeight = 1'000;
+        consensus.nPQChainLockEpochOrigin = 1'440;
+        consensus.nPQRegistrationCutoffBlocks = 288;
+        consensus.nPQRosterSnapshotLag = 288;
+        consensus.nPQFutureHorizonEpochs = 8;
+        consensus.nPQBTCCCandidateOrigin = 2'305;
+        consensus.nPQBTCCNEVMInjectionLag = llmq::pq::PQ_BTCC_NEVM_LAG;
+        consensus.nPQBTCCReceiptAnchorHeight = 0;
+        consensus.hashPQBTCCReceiptAnchorBlock = genesis;
+        Access::SetReplayMarkers(*handler, {}, {});
+        auto* child{chain[FIRST_CARRIER]};
+        auto* unused_carrier{child};
+        auto* parent{child->pprev};
+        auto block{std::make_shared<CBlock>()};
+        CBlock parent_block;
+        const auto marker{std::make_pair(uint8_t{'F'}, std::string{"nevm_pending_connect_v1"})};
+        {
+            LOCK(::cs_main);
+            BOOST_REQUIRE(chainman.m_blockman.ReadBlockFromDisk(*block, *child));
+            BOOST_REQUIRE(chainman.m_blockman.ReadBlockFromDisk(parent_block, *parent));
+            llmq::pq::PaymentAuditReceipt decoded;
+            BOOST_REQUIRE(ExtractPaymentAuditReceipt(*block, decoded));
+            BOOST_REQUIRE(!decoded.IsNull());
+            BOOST_REQUIRE(decoded == receipts.front());
+            // Construct a real submitted AuxPoW carrier. Both its version
+            // and BTCPREV commitment are finalized before building the proof.
+            const uint256 btc_prev{NonNullHash(1'300'002)};
+            CNEVMHeader nevm;
+            BlockValidationState header_state;
+            BOOST_REQUIRE(GetNEVMData(header_state, *block, nevm));
+            DataStream payload{SER_NETWORK};
+            payload << NEVM_MAGIC_BYTES << nevm
+                    << PAYMENT_AUDIT_RECEIPT_MAGIC_BYTES << decoded;
+            if (llmq::pq::IsBTCCReceiptCarrierHeight(config.btcc_schedule, child->nHeight)) {
+                payload << BTCC_RECEIPT_MAGIC_BYTES << llmq::pq::BTCCReceipt{};
+            }
+            payload << BTCPREV_MAGIC_BYTES << btc_prev;
+            const auto bytes{MakeUCharSpan(payload)};
+            CMutableTransaction coinbase{*block->vtx.front()};
+            coinbase.vout.back().scriptPubKey = CScript{} << OP_RETURN <<
+                std::vector<unsigned char>{bytes.begin(), bytes.end()};
+            block->vtx.front() = MakeTransactionRef(std::move(coinbase));
+            block->hashMerkleRoot = BlockMerkleRoot(*block);
+            block->SetAuxpowVersion(true);
+            int ref_height{parent->nHeight - 5};
+            ref_height -= ref_height % 10;
+            const auto* reference{parent->GetAncestor(ref_height)};
+            BOOST_REQUIRE(reference);
+            CDataStream tag{SER_NETWORK, PROTOCOL_VERSION};
+            tag << pchSyscoinHeader << reference->GetBlockHash() << static_cast<uint32_t>(ref_height);
+            const auto tag_bytes{MakeUCharSpan(tag)};
+            const CScript tag_script{CScript{} << OP_RETURN <<
+                std::vector<unsigned char>{tag_bytes.begin(), tag_bytes.end()}};
+            const auto child_hash{block->GetHash()};
+            std::vector<uint8_t> merged{std::begin(pchMergedMiningHeader), std::end(pchMergedMiningHeader)};
+            merged.insert(merged.end(), std::make_reverse_iterator(child_hash.end()),
+                          std::make_reverse_iterator(child_hash.begin()));
+            CDataStream suffix{SER_NETWORK, PROTOCOL_VERSION};
+            suffix << uint32_t{1} << uint32_t{0};
+            const auto suffix_bytes{MakeUCharSpan(suffix)};
+            merged.insert(merged.end(), suffix_bytes.begin(), suffix_bytes.end());
+            CMutableTransaction parent_coinbase;
+            parent_coinbase.vin.resize(1);
+            parent_coinbase.vin.front().prevout.SetNull();
+            parent_coinbase.vin.front().scriptSig = CScript{} << merged;
+            parent_coinbase.vout.emplace_back(0, tag_script);
+            const auto parent_tx{MakeTransactionRef(parent_coinbase)};
+            CPureBlockHeader parent_header;
+            parent_header.nVersion = 1;
+            parent_header.hashPrevBlock = btc_prev;
+            parent_header.hashMerkleRoot = parent_tx->GetHash();
+            while (!CheckProofOfWork(parent_header.GetHash(), block->nBits, consensus)) ++parent_header.nNonce;
+            CDataStream proof{SER_NETWORK, PROTOCOL_VERSION};
+            proof << parent_tx << uint256{} << std::vector<uint256>{} << int32_t{0}
+                  << std::vector<uint256>{} << int32_t{0} << parent_header;
+            auto auxpow{std::make_unique<CAuxPow>()};
+            proof >> *auxpow;
+            block->SetAuxpow(std::move(auxpow));
+            BOOST_REQUIRE(block->auxpow->check(block->GetHash(), block->GetChainId(), consensus));
+            block->fChecked = false;
+            const auto position{chainman.m_blockman.SaveBlockToDisk(*block, child->nHeight, nullptr)};
+            BOOST_REQUIRE(!position.IsNull());
+            child = chainman.m_blockman.AddToBlockIndex(*block, chainman.m_best_header);
+            BOOST_REQUIRE(child);
+            chainman.ReceivedBlockTransactions(*block, child, position);
+            chain[FIRST_CARRIER] = child;
+            chainstate.m_chain.SetTip(*parent);
+            chainstate.CoinsTip().SetBestBlock(parent->GetBlockHash());
+            AddCoins(chainstate.CoinsTip(), *parent_block.vtx.front(), parent->nHeight);
+            chainstate.setBlockIndexCandidates.clear();
+            child->nStatus = static_cast<BlockStatus>((child->nStatus & ~BLOCK_VALID_MASK) | BLOCK_VALID_TRANSACTIONS);
+            for (auto& [hash, index] : chainman.m_blockman.m_block_index) {
+                if (index.IsValid(BLOCK_VALID_TRANSACTIONS) && index.HaveNumChainTxs() &&
+                    !node::CBlockIndexWorkComparator()(&index, parent)) {
+                    chainstate.setBlockIndexCandidates.insert(&index);
+                }
+            }
+            chainman.m_best_header = child;
+            // Build the manager's rooted DMN inverse and registry histories
+            // from their canonical activation boundaries. This stages only
+            // already-known parents and sends nothing to the engine.
+            // The accepted DMN base contains this fixture's roster. Preserve
+            // it throughout the reconstructed inverse prefix rather than
+            // replacing the carrier's member-bearing parent with an empty list.
+            const auto base{Snapshot(*chain[consensus.DIP0003Height])};
+            CDeterministicMNList accepted_base{base.deterministic_mns.GetBlockHash(),
+                consensus.DIP0003Height, llmq::pq::QUORUM_SIZE + 1};
+            base.deterministic_mns.ForEachMN(false, [&](const CDeterministicMN& member) {
+                accepted_base.AddMN(base.deterministic_mns.GetMN(member.proTxHash), false);
+            });
+            BOOST_REQUIRE(deterministicMNManager->m_evoDb->WriteThrough(
+                chain[consensus.DIP0003Height]->GetBlockHash(), accepted_base, false));
+            for (int height{consensus.DIP0003Height + 1}; height <= parent->nHeight; ++height) {
+                CBlock historical;
+                BOOST_REQUIRE(chainman.m_blockman.ReadBlockFromDisk(historical, *chain[height]));
+                CDeterministicMNListNEVMAddressDiff diff;
+                BlockValidationState prepared;
+                BOOST_REQUIRE_MESSAGE(deterministicMNManager->ProcessBlock(
+                    historical, chain[height], prepared, chainstate.CoinsTip(),
+                    llmq::CFinalCommitmentTxPayload{}, diff, false,
+                    /*ibd=*/true, /*nevm_delivery_deferred=*/true),
+                    "history height " << height << ": " << prepared.ToString());
+            }
+            Admit(0);
+            BlockValidationState flushed;
+            BOOST_REQUIRE_MESSAGE(chainstate.FlushStateToDisk(flushed, FlushStateMode::ALWAYS), flushed.ToString());
+            BOOST_REQUIRE(chainstate.CoinsDB().GetBestBlock() == parent->GetBlockHash());
+            BOOST_REQUIRE(!chainman.m_blockman.m_block_tree_db->Exists(marker));
+            BOOST_REQUIRE(chainman.PrepareNEVMBlockProduction());
+            BOOST_REQUIRE(!handler->IsPaymentAuditPresealActive());
+        }
+        // Retire the fixture's unused synthetic carrier and suffix through
+        // ordinary invalidation. The replacement above is a distinct sibling;
+        // candidate selection and CheckBlockIndex retain their normal rules.
+        BlockValidationState retired;
+        BOOST_REQUIRE_MESSAGE(chainstate.InvalidateBlock(retired, unused_carrier), retired.ToString());
+        {
+            LOCK(::cs_main);
+            BOOST_REQUIRE(chainman.ActiveTip() == parent);
+            BOOST_REQUIRE(!chainman.m_blockman.m_block_tree_db->Exists(marker));
+            BOOST_REQUIRE(chainman.PrepareNEVMBlockProduction());
+            BOOST_REQUIRE(engine->connected.empty());
+        }
+        engine->count = 0;
+        engine->hash.SetNull();
+        engine->connected.clear();
+        CNEVMHeader nevm_header;
+        BlockValidationState decoded;
+        BOOST_REQUIRE(GetNEVMData(decoded, *block, nevm_header));
+        const uint256 mint_marker{NonNullHash(1'300'001)};
+        BOOST_REQUIRE(pnevmtxrootsdb && pnevmtxmintdb);
+        pnevmtxmintdb->FlushDataToCache({mint_marker});
+        BOOST_REQUIRE(pnevmtxmintdb->FlushCacheToDisk());
+        const auto unpublished = [&] {
+            LOCK(::cs_main);
+            BOOST_CHECK(chainman.ActiveTip() == parent);
+            BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == parent->GetBlockHash());
+            BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == parent->GetBlockHash());
+            BOOST_CHECK(chainstate.CoinsTip().HaveCoin(COutPoint{parent_block.vtx.front()->GetHash(), 0}));
+            BOOST_CHECK(!chainstate.CoinsTip().HaveCoin(COutPoint{block->vtx.front()->GetHash(), 0}));
+            BOOST_CHECK(!chainstate.CoinsDB().HaveCoin(COutPoint{block->vtx.front()->GetHash(), 0}));
+            BOOST_CHECK_EQUAL(child->nStatus & (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK | BLOCK_HAVE_UNDO), 0U);
+            NEVMTxRoot roots;
+            BOOST_CHECK(!pnevmtxrootsdb->ReadTxRoots(nevm_header.nBlockHash, roots));
+            BOOST_CHECK(!pnevmtxrootsdb->Read(nevm_header.nBlockHash, roots));
+            BOOST_CHECK(pnevmtxmintdb->Exists(mint_marker));
+            BOOST_CHECK(pnevmtxmintdb->ExistsTx(mint_marker));
+        };
+        std::size_t checked{0};
+        engine->on_checked = [&](const CBlock& checked_block, const BlockValidationState& result) {
+            ++checked;
+            BOOST_CHECK(checked_block.GetHash() == child->GetBlockHash());
+            BOOST_CHECK(result.IsError());
+            BOOST_CHECK_EQUAL(result.GetRejectReason(), "pq-payment-audit-archive-pin-failed");
+            unpublished();
+            LOCK(::cs_main);
+            std::pair<uint256, uint256> record;
+            BOOST_CHECK(chainman.m_blockman.m_block_tree_db->Read(marker, record));
+            BOOST_CHECK(record == std::make_pair(parent->GetBlockHash(), child->GetBlockHash()));
+            BOOST_CHECK(!chainman.PrepareNEVMBlockProduction());
+        };
+        std::size_t pins{0};
+        engine->on_connect_ack = [&] {
+            BOOST_REQUIRE_EQUAL(engine->connected.size(), 1U);
+            BOOST_REQUIRE(engine->hash == child->GetBlockHash());
+            BOOST_REQUIRE(Access::AuditStore(*handler).IsHealthy());
+            Access::SetAuditPinWriter(*handler, [&](CDBBatch&, bool sync) {
+                ++pins;
+                BOOST_CHECK(sync);
+                BOOST_CHECK_EQUAL(engine->connected.size(), 1U);
+                return false;
+            });
+        };
+        std::size_t parent_syncs{0};
+        struct RestoreFailureState {
+            Chainstate& state;
+            node::KernelNotifications& notifications;
+            std::atomic<int>& exit_status;
+            Engine& engine;
+            bool shutdown_on_error;
+            int previous_exit_status;
+            ~RestoreFailureState()
+            {
+                WITH_LOCK(::cs_main, state.CoinsDB().SetSyncCallbackForTesting({}));
+                notifications.m_shutdown_on_fatal_error = shutdown_on_error;
+                exit_status.store(previous_exit_status);
+                engine.on_connect_ack = {};
+                engine.on_checked = {};
+            }
+        } restore_failure{chainstate, *m_node.notifications, m_node.exit_status, *engine,
+            m_node.notifications->m_shutdown_on_fatal_error, m_node.exit_status.load()};
+        if (fail_parent_sync) {
+            m_node.notifications->m_shutdown_on_fatal_error = false;
+            WITH_LOCK(::cs_main, chainstate.CoinsDB().SetSyncCallbackForTesting([&] {
+                ++parent_syncs;
+                return false;
+            }));
+        }
+        std::unique_ptr<DebugLogHelper> fatal_log;
+        if (fail_parent_sync) fatal_log = std::make_unique<DebugLogHelper>(
+            "Failed to sync NEVM pending-connection parent coins");
+        BlockValidationState failed;
+        BOOST_CHECK(!chainstate.ActivateBestChain(failed, block));
+        engine->on_connect_ack = {};
+        engine->on_checked = {};
+        BOOST_REQUIRE_MESSAGE(failed.IsError(), failed.ToString());
+        BOOST_CHECK_EQUAL(failed.GetRejectReason(), "pq-payment-audit-archive-pin-failed");
+        BOOST_REQUIRE_EQUAL(pins, 1U);
+        BOOST_CHECK_EQUAL(checked, fail_parent_sync ? 0U : 1U);
+        BOOST_CHECK_EQUAL(parent_syncs, fail_parent_sync ? 1U : 0U);
+        BOOST_CHECK(!Access::AuditStore(*handler).IsHealthy());
+        BOOST_CHECK(engine->connected == std::vector<uint256>{child->GetBlockHash()});
+        unpublished();
+        if (fail_parent_sync) {
+            BOOST_CHECK_EQUAL(m_node.exit_status.load(), EXIT_FAILURE);
+            BlockValidationState invalidated;
+            BOOST_CHECK(!chainstate.InvalidateBlock(invalidated, child));
+            BOOST_CHECK_EQUAL(invalidated.GetRejectReason(), "nevm-pending-connect-not-durable");
+            LOCK(::cs_main);
+            BlockValidationState conflicted;
+            std::array<CBlockIndex*, 1> conflicts{child};
+            BOOST_CHECK(!chainstate.MarkConflictingBlocksInactive(conflicted, conflicts));
+            BOOST_CHECK_EQUAL(conflicted.GetRejectReason(), "nevm-pending-connect-not-durable");
+            BOOST_CHECK_EQUAL(child->nStatus & (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK), 0U);
+            BOOST_CHECK(!chainman.m_blockman.m_block_tree_db->Exists(marker));
+            BOOST_CHECK(!chainman.PrepareNEVMBlockProduction());
+            std::string error;
+            const auto retained{chainman.GetAllRecoveryBlockIndexes(error)};
+            BOOST_REQUIRE_MESSAGE(retained, error);
+            BOOST_CHECK(std::find(retained->begin(), retained->end(), child) != retained->end());
+            BOOST_CHECK(engine->durable_pair_requests.empty());
+            return;
+        }
+        const auto pending = [&] {
+            LOCK(::cs_main);
+            std::pair<uint256, uint256> record;
+            BOOST_CHECK(chainman.m_blockman.m_block_tree_db->Read(marker, record));
+            BOOST_CHECK(record == std::make_pair(parent->GetBlockHash(), child->GetBlockHash()));
+            BOOST_CHECK(!chainman.PrepareNEVMBlockProduction());
+        };
+        pending();
+        CheckAssemblerGate(false);
+        // The actual scheduler must own this first-ACK failure and attempt
+        // recovery. The unhealthy archive still refuses local publication.
+        const auto queries{engine->queries};
+        const auto flushes{engine->flushes};
+        std::string error;
+        BOOST_CHECK(!chainman.MaybeRecoverNEVMBlockProduction(error));
+        BOOST_CHECK(error.find("cannot establish durable finality before best-chain activation: "
+            "payment-audit archive is unhealthy") != std::string::npos);
+        BOOST_CHECK_GT(engine->queries, queries);
+        BOOST_CHECK_GT(engine->flushes, flushes);
+        BOOST_CHECK(engine->connected == std::vector<uint256>{child->GetBlockHash()});
+        BOOST_CHECK(engine->durable_pair_requests.empty());
+        unpublished();
+        pending();
+
+        // Reopen the real archive after the failed pin batch. Persisted
+        // verified witness rows survive; a new store clears the I/O latch.
+        auto unhealthy{Access::ExchangeAuditStore(*handler, {})};
+        unhealthy.reset();
+        Access::ExchangeAuditStore(*handler, std::make_unique<llmq::pq::PaymentAuditStore>(
+            chainman.m_options.datadir / "llmq/pq-payment-audits", genesis));
+        BOOST_REQUIRE(Access::AuditStore(*handler).IsHealthy());
+        engine->allow_exact_retry = true;
+        BOOST_REQUIRE_MESSAGE(chainman.MaybeRecoverNEVMBlockProduction(error), error);
+        BOOST_CHECK_EQUAL(engine->count, 1U);
+        BOOST_CHECK(engine->hash == child->GetBlockHash());
+        BOOST_CHECK(engine->connected == std::vector<uint256>({child->GetBlockHash(), child->GetBlockHash()}));
+        BOOST_CHECK(engine->durable_pair_requests.empty());
+        {
+            LOCK(::cs_main);
+            BOOST_CHECK(chainman.ActiveTip() == child);
+            BOOST_CHECK(chainstate.CoinsTip().HaveCoin(COutPoint{block->vtx.front()->GetHash(), 0}));
+            BOOST_CHECK_EQUAL(child->nStatus & (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK), 0U);
+            BOOST_CHECK(child->nStatus & BLOCK_HAVE_UNDO);
+            NEVMTxRoot roots;
+            BOOST_REQUIRE(pnevmtxrootsdb->ReadTxRoots(nevm_header.nBlockHash, roots));
+            BOOST_CHECK(!chainman.PrepareNEVMBlockProduction());
+        }
+        // Even after successful local publication, only an acknowledged exact
+        // durable pair may release the record and the mining gate.
+        engine->durable_pair_available = false;
+        BOOST_CHECK(!chainman.MaybeRecoverNEVMBlockProduction(error));
+        BOOST_CHECK_EQUAL(error, "nevm-pending-connect-durability-unavailable");
+        pending();
+        CheckAssemblerGate(false);
+        engine->durable_pair_available = true;
+        const auto final_queries{engine->queries};
+        BOOST_REQUIRE_MESSAGE(chainman.MaybeRecoverNEVMBlockProduction(error), error);
+        BOOST_CHECK_GT(engine->queries, final_queries);
+        BOOST_CHECK(engine->durable_pair_requests == std::vector<std::string>(2,
+            "durable-pair-v1:1:" + child->GetBlockHash().GetHex()));
+        BOOST_CHECK(engine->connected == std::vector<uint256>({child->GetBlockHash(), child->GetBlockHash()}));
+        {
+            LOCK(::cs_main);
+            BOOST_CHECK(chainman.PrepareNEVMBlockProduction());
+            BOOST_CHECK(!chainman.m_blockman.m_block_tree_db->Exists(marker));
+            BlockValidationState flushed;
+            BOOST_REQUIRE_MESSAGE(chainstate.FlushStateToDisk(flushed, FlushStateMode::ALWAYS), flushed.ToString());
+            BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == child->GetBlockHash());
+            BOOST_CHECK(chainstate.CoinsDB().HaveCoin(COutPoint{block->vtx.front()->GetHash(), 0}));
+            NEVMTxRoot roots;
+            BOOST_CHECK(pnevmtxrootsdb->Read(nevm_header.nBlockHash, roots));
+            BOOST_CHECK(pnevmtxmintdb->Exists(mint_marker));
+            BOOST_CHECK(pnevmtxmintdb->ExistsTx(mint_marker));
+        }
+        CheckAssemblerGate(true);
     }
 
     void CheckCompleted()
@@ -3870,6 +4248,18 @@ struct InvalidSignedLatePaymentAuditPresealSetup : LatePaymentAuditPresealSetup 
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(pq_chainlock_handler_tests, BasicTestingSetup)
+
+BOOST_FIXTURE_TEST_CASE(payment_audit_pin_failure_after_first_nevm_ack_retains_recovery,
+                        LatePaymentAuditPresealSetup)
+{
+    CheckLiveAcknowledgementThenPinFailure();
+}
+
+BOOST_FIXTURE_TEST_CASE(payment_audit_pin_failure_parent_sync_failure_blocks_retirement,
+                        LatePaymentAuditPresealSetup)
+{
+    CheckLiveAcknowledgementThenPinFailure(/*fail_parent_sync=*/true);
+}
 
 BOOST_FIXTURE_TEST_CASE(payment_preseal_late_terminal_archive_replays_without_new_finality,
                         LatePaymentAuditPresealSetup)

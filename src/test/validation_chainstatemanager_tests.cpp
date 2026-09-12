@@ -186,6 +186,15 @@ public:
 };
 class NEVMMiningTestAccess {
 public:
+    // SYSCOIN: A pre-send failure and a fully published healthy connection
+    // must leave no latent request for the scheduler to activate or cancel.
+    static bool HasPendingRecoveryContext(const Chainstate& chainstate)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        return chainstate.m_nevm_pending_connect.has_value() ||
+               chainstate.m_nevm_activation_continuation;
+    }
+
     static void SetInvalidateStep(Chainstate& chainstate, std::function<void(int)> step)
     {
         chainstate.m_invalidate_block_step_for_testing = std::move(step);
@@ -517,6 +526,19 @@ struct StartupNEVMRecoverySetup : DeferredNEVMReplaySetup {
         UnregisterValidationInterface(nevm.get());
         SyncWithValidationInterfaceQueue();
         fNEVMConnection = previous_nevm_connection;
+    }
+
+    // SYSCOIN: Check both transient and durable intent without running the
+    // scheduler; readiness is a read-only query and cannot erase a mistake.
+    void CheckNoPendingNEVMRecovery()
+    {
+        LOCK(::cs_main);
+        auto& chainman{*m_node.chainman};
+        BOOST_CHECK(!node::test::NEVMMiningTestAccess::HasPendingRecoveryContext(
+            chainman.ActiveChainstate()));
+        BOOST_CHECK(!chainman.m_blockman.m_block_tree_db->Exists(
+            std::make_pair(uint8_t{'F'}, std::string{"nevm_pending_connect_v1"})));
+        BOOST_CHECK(chainman.PrepareNEVMBlockProduction());
     }
 
     std::shared_ptr<const CBlock> MakeNEVMBlock()
@@ -4118,7 +4140,7 @@ struct ReopenedPendingNEVMConnectSetup : LostAckDescendantMiningSetup {
             // parent-coins barrier to an ordinary successful connection.
             BOOST_CHECK(state.IsValid());
             CheckLocalState(/*connected=*/true);
-            BOOST_CHECK(WITH_LOCK(::cs_main, return chainman.PrepareNEVMBlockProduction()));
+            CheckNoPendingNEVMRecovery();
             return;
         }
         BOOST_CHECK(state.IsError());
@@ -5978,6 +6000,9 @@ struct NEVMMintReadErrorSetup : StartupNEVMRecoverySetup {
             roots_error ? "injected NEVM source-root read error"
                         : "injected NEVM consumed-proof read error") != std::string::npos);
         BOOST_CHECK_EQUAL(roots_error ? roots_db.failures : mint_db.failures, 1U);
+        // SYSCOIN: These local reads fail before a real engine notification.
+        // They must not fabricate an external request or block mining at P.
+        CheckNoPendingNEVMRecovery();
         // FatalError must notify the node without poisoning block validity.
         BOOST_CHECK_EQUAL(m_node.exit_status.load(), EXIT_FAILURE);
         roots_db.failed_hash.reset();
@@ -6023,6 +6048,7 @@ struct NEVMMintReadErrorSetup : StartupNEVMRecoverySetup {
         BOOST_CHECK(mint_db.ExistsTx(valid_mint.mint.nTxHash));
         BOOST_CHECK(roots_db.ReadTxRoots(candidate_header.nBlockHash, roots));
         BOOST_CHECK_EQUAL(m_node.exit_status.load(), EXIT_SUCCESS);
+        CheckNoPendingNEVMRecovery();
     }
 };
 // SYSCOIN END: Mint database read errors must leave block candidates usable.
@@ -6579,6 +6605,8 @@ struct ProviderParentErrorSetup : StartupNEVMRecoverySetup {
             BOOST_CHECK(!failed_state.IsInvalid());
             BOOST_CHECK(failed_state.ToString().find("failed-protx-parent-state") !=
                         std::string::npos);
+            // SYSCOIN: Parent-provider preparation precedes the live send.
+            CheckNoPendingNEVMRecovery();
             {
                 LOCK(::cs_main);
                 BOOST_CHECK_EQUAL(candidate_index->nStatus & BLOCK_FAILED_MASK, 0U);
@@ -6615,6 +6643,7 @@ struct ProviderParentErrorSetup : StartupNEVMRecoverySetup {
         NEVMTxRoot roots;
         BOOST_CHECK(pnevmtxrootsdb->ReadTxRoots(header.nBlockHash, roots));
         BOOST_CHECK_EQUAL(nevm->connected_blocks.size(), nevm_connects + 1);
+        CheckNoPendingNEVMRecovery();
     }
 };
 

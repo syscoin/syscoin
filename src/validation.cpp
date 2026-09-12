@@ -4014,7 +4014,7 @@ static bool HasCommittedNEVMContinuityMismatch(
 
 // SYSCOIN: Authenticated BTCC catch-up may replay NEVM without treating an
 // equal-height but different Syscoin branch as already applied.
-bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMap &mapNEVMTxRoots, const CBlock& block, const CBlockIndex* pindex, const uint256& nBlockHash, const uint32_t& nHeight, const bool fJustCheck, PoDAMAPMemory &mapPoDA, const CDeterministicMNListNEVMAddressDiff &diff, bool btcc_prefix_authenticated, NEVMNotificationContext notification_context, std::optional<NEVMBlockReject>* rejection) {
+bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMap &mapNEVMTxRoots, const CBlock& block, const CBlockIndex* pindex, const uint256& nBlockHash, const uint32_t& nHeight, const bool fJustCheck, PoDAMAPMemory &mapPoDA, const CDeterministicMNListNEVMAddressDiff &diff, bool btcc_prefix_authenticated, NEVMNotificationContext notification_context, std::optional<NEVMBlockReject>* rejection, bool* live_nevm_acknowledged) {
     if (rejection) rejection->reset();
     const bool local_coins_recovery{
         notification_context ==
@@ -4268,6 +4268,18 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
                 m_chainman.m_nevm_prefix_recovery_needed = true;
             }
             return state.Error(stateStr);
+        }
+        // SYSCOIN: An accepted request can already be applied or buffered in
+        // Geth even when a later local step fails. Report that external effect
+        // to the enclosing connection without journaling healthy publication.
+        if (live_nevm_acknowledged && !fJustCheck &&
+            !btcc_prefix_authenticated && pindex != nullptr &&
+            notification_context == NEVMNotificationContext::LIVE) {
+            LOCK(cs_main);
+            if (this == &m_chainman.ActiveChainstate() &&
+                pindex->pprev == m_chainman.ActiveTip()) {
+                *live_nevm_acknowledged = true;
+            }
         }
         if (restarted && !m_chainman.MaybeStartNEVMNetwork()) {
             // SYSCOIN: Geth already accepted this pair. Publish the successful
@@ -5889,7 +5901,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
  *  can fail if those validity checks fail (among other reasons). */
 bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, CBlockIndex* pindex,
                   CCoinsViewCache& view, bool fJustCheck, 
-                  NEVMMintTxSet &setMintTxs, NEVMTxRootMap &mapNEVMTxRoots, PoDAMAPMemory &mapPoDA, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs, bool bReverify, std::optional<NEVMBlockReject>* rejection)
+                  NEVMMintTxSet &setMintTxs, NEVMTxRootMap &mapNEVMTxRoots, PoDAMAPMemory &mapPoDA, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs, bool bReverify, std::optional<NEVMBlockReject>* rejection, bool* live_nevm_acknowledged)
 {
     if (rejection) rejection->reset();
     AssertLockHeld(cs_main);
@@ -6442,7 +6454,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
 
     const bool bRegTestContext = !fRegTest || (fRegTest && fNEVMConnection);
     if (bRegTestContext && bReverify && pindex->nHeight >= params.GetConsensus().nNEVMStartBlock) {
-        if (!ConnectNEVMCommitment(state, mapNEVMTxRoots, block, pindex, blockHash, (uint32_t)pindex->nHeight, fJustCheck, mapPoDA, diff, false, NEVMNotificationContext::LIVE, rejection)) {
+        if (!ConnectNEVMCommitment(state, mapNEVMTxRoots, block, pindex, blockHash, (uint32_t)pindex->nHeight, fJustCheck, mapPoDA, diff, false, NEVMNotificationContext::LIVE, rejection, live_nevm_acknowledged)) {
             return error("%s: ConnectNEVMCommitment failed with %s", __func__, state.ToString());
         }
         // Helper may return true while leaving state invalid (managed geth shutdown path).
@@ -7383,18 +7395,31 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
     }
     // SYSCOIN END: Enforce the imported activation handoff before ConnectBlock.
     node::BlockConnectionState connection{CoinsTip()};
+    // SYSCOIN: Keep the actual external acknowledgment across auxiliary
+    // retries; discarding private outputs cannot undo an engine acceptance.
+    bool live_nevm_acknowledged{false};
+    const auto persist_failed_connection = [&]() EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+        assert(connection.view);
+        if (live_nevm_acknowledged) {
+            assert(this == &m_chainman.ActiveChainstate());
+            assert(pindexNew->pprev == m_chainman.ActiveTip());
+            m_nevm_pending_connect = pindexNew->GetBlockHash();
+            m_chainman.m_nevm_prefix_recovery_needed = true;
+        }
+        return PersistNEVMPendingConnect(state);
+    };
     {
         const auto result = node::ConnectBlockWithAuxiliaryRetry(
             m_blockman, *pindexNew, /*loaded_from_disk=*/!pblock, pthisBlock, state, CoinsTip(), connection,
             [&]() EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
                 return ConnectBlock(*pthisBlock, state, pindexNew, *connection.view, false /*bJustCheck*/,
-                                    connection.mint_txs, connection.nevm_tx_roots, connection.poda, connection.txid_pairs, true, &rejection);
+                                    connection.mint_txs, connection.nevm_tx_roots, connection.poda, connection.txid_pairs, true, &rejection, &live_nevm_acknowledged);
             });
         // SYSCOIN: Candidate outputs are still private. Make the accepted
         // parent and the failed attempt durable before notifications or
         // invalidation can persist its retirement independently.
         if (result != node::BlockConnectionResult::SUCCESS &&
-            !PersistNEVMPendingConnect(state)) return false;
+            !persist_failed_connection()) return false;
         if (result == node::BlockConnectionResult::DISK_READ_FAILED) {
             rejection.reset();
             return FatalError(m_chainman.GetNotifications(), state, "Failed to reread committed block");
@@ -7426,6 +7451,7 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
             std::string pq_handoff_error;
             if (!m_chainman.MaybeFinalizePQActivationHandoff(
                     *pindexNew, pq_handoff_error)) {
+                if (!persist_failed_connection()) return false;
                 return FatalError(
                     m_chainman.GetNotifications(), state,
                     pq_handoff_error.empty()
@@ -7442,6 +7468,7 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
                 pnevmdatadb->FlushDataToCache(connection.poda, PoDAFlushSource::Block);
             }
         } catch (const dbwrapper_error& e) {
+            if (!persist_failed_connection()) return false;
             return FatalError(m_chainman.GetNotifications(), state,
                               std::string{"ConnectTip(): Failed to stage PoDA: "} + e.what());
         }

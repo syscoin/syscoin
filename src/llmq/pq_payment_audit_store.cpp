@@ -1316,7 +1316,9 @@ PaymentAuditStoreResult PaymentAuditStore::PinReferencedWitness(
         epoch_record.pinned_witness_id = witness_id;
         batch.Write(epoch_key, epoch_record);
         if (!CanAdvanceCandidateRevision()) return *m_failure;
-        if (!m_db.WriteBatch(batch, true)) {
+        if (!(m_pin_batch_writer_for_testing
+                  ? m_pin_batch_writer_for_testing(batch, true)
+                  : m_db.WriteBatch(batch, true))) {
             m_failure = PaymentAuditStoreResult::DATABASE_ERROR;
             return *m_failure;
         }

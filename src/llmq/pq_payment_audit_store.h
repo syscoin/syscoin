@@ -338,6 +338,11 @@ private:
         GUARDED_BY(m_mutex);
     std::optional<PruneIntentState> m_prune_intent
         GUARDED_BY(m_mutex);
+    /** Private test seam at the ordinary witness-pin durability boundary. */
+    std::function<bool(CDBBatch&, bool)> m_pin_batch_writer_for_testing
+        GUARDED_BY(m_mutex);
+
+    friend class ::llmq::test::CChainLocksHandlerTestAccess;
 };
 
 /** Retention metadata only; none of these fields grants replay authority. */
