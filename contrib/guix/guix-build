@@ -299,37 +299,81 @@ for host in $HOSTS; do
     make -C "${PWD}/depends" -j"$JOBS" download-"$(host_to_commonname "$host")" ${V:+V=1} ${SOURCES_PATH:+SOURCES_PATH="$SOURCES_PATH"}
 done
 
-# Prepare pinned Bitcoin source archive for btcheadernode helper builds.
-# This avoids VCS/network source fetching inside the isolated build container.
+# SYSCOIN: Prepare and authenticate the pinned Bitcoin source before entering
+# the network-isolated build. Every official Linux and macOS package carries
+# the managed headers-only backend; Windows remains explicitly unsupported.
 BTCHEADERNODE_SOURCE_ARCHIVE=""
-if contains "$HOSTS" "x86_64-linux-gnu"; then
+build_btcheadernode=false
+for host in $HOSTS; do
+    case "$host" in
+        *-linux-*|*-apple-darwin*) build_btcheadernode=true ;;
+    esac
+done
+if $build_btcheadernode; then
     lock_file="${PWD}/contrib/btcheadernode/bitcoin.lock"
     if [ -f "$lock_file" ]; then
         # shellcheck source=/dev/null
         source "$lock_file"
         : "${BITCOIN_REPO:?BITCOIN_REPO must be set in contrib/btcheadernode/bitcoin.lock}"
         : "${BITCOIN_COMMIT:?BITCOIN_COMMIT must be set in contrib/btcheadernode/bitcoin.lock}"
+        : "${BITCOIN_SOURCE_ARCHIVE_URL:?BITCOIN_SOURCE_ARCHIVE_URL must be set in contrib/btcheadernode/bitcoin.lock}"
+        : "${BITCOIN_SOURCE_ARCHIVE_SHA256:?BITCOIN_SOURCE_ARCHIVE_SHA256 must be set in contrib/btcheadernode/bitcoin.lock}"
+
+        case "$BITCOIN_SOURCE_ARCHIVE_URL" in
+            https://*) ;;
+            *)
+                echo "ERR: pinned Bitcoin source archive URL must use HTTPS" >&2
+                exit 1
+                ;;
+        esac
+        case "$BITCOIN_SOURCE_ARCHIVE_SHA256" in
+            *[!0-9a-fA-F]*|'')
+                echo "ERR: invalid pinned Bitcoin source archive SHA-256" >&2
+                exit 1
+                ;;
+        esac
+        if [ "${#BITCOIN_SOURCE_ARCHIVE_SHA256}" -ne 64 ]; then
+            echo "ERR: invalid pinned Bitcoin source archive SHA-256 length" >&2
+            exit 1
+        fi
 
         btcheader_src_cache_dir="${PWD}/depends/sources/btcheadernode"
         btcheader_archive_host="${btcheader_src_cache_dir}/bitcoin-${BITCOIN_COMMIT}.tar.gz"
         btcheader_archive_container="/syscoin/depends/sources/btcheadernode/bitcoin-${BITCOIN_COMMIT}.tar.gz"
         if [ ! -f "$btcheader_archive_host" ]; then
-            tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/btcheadernode-guix.XXXXXXXX")"
-            git clone --filter=blob:none "$BITCOIN_REPO" "$tmpdir/bitcoin-src"
-            git -C "$tmpdir/bitcoin-src" fetch --tags --prune origin
-            if [ -n "${BITCOIN_REF:-}" ]; then
-                resolved_ref="$(git -C "$tmpdir/bitcoin-src" rev-parse --verify "${BITCOIN_REF}^{commit}")"
-                if [ "$resolved_ref" != "$BITCOIN_COMMIT" ]; then
-                    echo "ERR: bitcoin.lock mismatch: BITCOIN_REF (${BITCOIN_REF} -> ${resolved_ref}) != BITCOIN_COMMIT (${BITCOIN_COMMIT})" >&2
-                    rm -rf "$tmpdir"
-                    exit 1
-                fi
-            fi
-            git -C "$tmpdir/bitcoin-src" checkout --detach "$BITCOIN_COMMIT"
             mkdir -p "$btcheader_src_cache_dir"
-            git -C "$tmpdir/bitcoin-src" archive --format=tar.gz --prefix=bitcoin-src/ "$BITCOIN_COMMIT" > "${btcheader_archive_host}.tmp"
-            mv "${btcheader_archive_host}.tmp" "$btcheader_archive_host"
-            rm -rf "$tmpdir"
+            btcheader_archive_tmp="${btcheader_archive_host}.tmp.$$"
+            if command -v curl >/dev/null 2>&1; then
+                curl --fail --location --proto '=https' --tlsv1.2 \
+                    --output "$btcheader_archive_tmp" \
+                    "$BITCOIN_SOURCE_ARCHIVE_URL"
+            elif command -v wget >/dev/null 2>&1; then
+                wget --https-only --output-document="$btcheader_archive_tmp" \
+                    "$BITCOIN_SOURCE_ARCHIVE_URL"
+            else
+                echo "ERR: curl or wget is required to fetch the pinned Bitcoin source archive" >&2
+                exit 1
+            fi
+        else
+            btcheader_archive_tmp="$btcheader_archive_host"
+        fi
+
+        if command -v sha256sum >/dev/null 2>&1; then
+            btcheader_archive_sha256="$(sha256sum "$btcheader_archive_tmp" | awk '{print $1}')"
+        elif command -v shasum >/dev/null 2>&1; then
+            btcheader_archive_sha256="$(shasum -a 256 "$btcheader_archive_tmp" | awk '{print $1}')"
+        else
+            echo "ERR: sha256sum or shasum is required to authenticate the Bitcoin source archive" >&2
+            exit 1
+        fi
+        if [ "$btcheader_archive_sha256" != "$BITCOIN_SOURCE_ARCHIVE_SHA256" ]; then
+            echo "ERR: cached/downloaded Bitcoin source archive SHA-256 mismatch" >&2
+            echo "  expected: $BITCOIN_SOURCE_ARCHIVE_SHA256" >&2
+            echo "  actual:   $btcheader_archive_sha256" >&2
+            exit 1
+        fi
+        if [ "$btcheader_archive_tmp" != "$btcheader_archive_host" ]; then
+            mv "$btcheader_archive_tmp" "$btcheader_archive_host"
         fi
         BTCHEADERNODE_SOURCE_ARCHIVE="$btcheader_archive_container"
     fi

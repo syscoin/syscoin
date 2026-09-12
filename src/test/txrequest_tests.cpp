@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 
+#include <protocol.h> // SYSCOIN: exercise fork inventory request identities.
 #include <txrequest.h>
 #include <uint256.h>
 
@@ -735,6 +736,41 @@ BOOST_AUTO_TEST_CASE(TxRequestTest)
     for (int i = 0; i < 5; ++i) {
         TestInterleavedScenarios();
     }
+}
+
+// SYSCOIN: A fork payload response retires only the exact requested peer lane.
+BOOST_AUTO_TEST_CASE(exact_requested_response_preserves_alternate_peer)
+{
+    TxRequestTracker tracker{/*deterministic=*/true};
+    const NodeId first_peer{101};
+    const NodeId second_peer{102};
+    const uint256 logical_id{77};
+    const GenTxid object{GenTxid::Txid(logical_id, MSG_SPORK)};
+    tracker.ReceivedInv(first_peer, object, /*preferred=*/true, MIN_TIME);
+    tracker.ReceivedInv(second_peer, object, /*preferred=*/true, MIN_TIME);
+
+    const auto first_requestable{tracker.GetRequestable(first_peer, NO_TIME)};
+    const NodeId selected_peer{first_requestable.empty() ? second_peer
+                                                         : first_peer};
+    const NodeId alternate_peer{selected_peer == first_peer ? second_peer
+                                                            : first_peer};
+    const auto selected_requestable{
+        selected_peer == first_peer
+            ? first_requestable
+            : tracker.GetRequestable(second_peer, NO_TIME)};
+    BOOST_REQUIRE_EQUAL(selected_requestable.size(), 1U);
+    BOOST_CHECK(!tracker.IsRequested(selected_peer, logical_id));
+    tracker.RequestedTx(selected_peer, logical_id, MAX_TIME);
+    BOOST_CHECK(tracker.IsRequested(selected_peer, logical_id));
+    BOOST_CHECK(!tracker.IsRequested(alternate_peer, logical_id));
+    BOOST_CHECK(!tracker.IsRequested(selected_peer, uint256{78}));
+
+    tracker.ReceivedResponse(selected_peer, logical_id);
+    BOOST_CHECK(!tracker.IsRequested(selected_peer, logical_id));
+    const auto alternate_requestable{
+        tracker.GetRequestable(alternate_peer, NO_TIME)};
+    BOOST_REQUIRE_EQUAL(alternate_requestable.size(), 1U);
+    BOOST_CHECK(alternate_requestable.front() == object);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

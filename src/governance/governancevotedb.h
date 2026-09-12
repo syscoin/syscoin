@@ -5,13 +5,18 @@
 #ifndef SYSCOIN_GOVERNANCE_GOVERNANCEVOTEDB_H
 #define SYSCOIN_GOVERNANCE_GOVERNANCEVOTEDB_H
 
+#include <governance/governancepages.h>
 #include <governance/governancevote.h>
+#include <protocol.h>
 #include <serialize.h>
 #include <streams.h>
 #include <uint256.h>
 
 #include <list>
+#include <cstdint>
 #include <map>
+#include <optional>
+#include <set>
 #include <vector>
 
 class CDeterministicMNList;
@@ -33,39 +38,157 @@ public: // Types
 
 private:
     int nMemoryVotes;
+    uint64_t nSerializedVoteBytes;
 
+    // All admitted wire forms survive reversible authority/branch changes.
     vote_l_t listVotes;
 
+    // Only representatives valid in the current context are counted/served.
     vote_m_t mapVoteIndex;
+
+    // Unlike a logical vote hash, this key includes the authorization bytes.
+    vote_m_t mapStoredVoteIndex;
+
+    // Existing sessions keep old immutable generations alive while mutation
+    // publishes a fresh snapshot for new cursor-zero requests.
+    mutable std::weak_ptr<const GovernancePageImmutableSnapshot>
+        m_page_snapshot;
+
+    /** Memory-only index used by authority-delta revalidation. */
+    std::multimap<COutPoint, vote_l_t::iterator> mapMasternodeIndex;
 
 public:
     CGovernanceObjectVoteFile();
 
     CGovernanceObjectVoteFile(const CGovernanceObjectVoteFile& other);
+    CGovernanceObjectVoteFile& operator=(const CGovernanceObjectVoteFile& other);
 
     /**
      * Add a vote to the file
      */
-    void AddVote(const CGovernanceVote& vote);
+    void AddVote(const CGovernanceVote& vote, bool retain_replaced = false);
 
     /**
      * Return true if the vote with this hash is currently cached in memory
      */
     bool HasVote(const uint256& nHash) const;
 
+    /** Retrieve one exact stored vote without relying on the lossy global LRU. */
+    [[nodiscard]] std::optional<CGovernanceVote> GetVote(
+        const uint256& nHash) const;
+
+    /** Exact fixed-wire bytes retained by a fresh page snapshot. */
+    [[nodiscard]] std::optional<std::size_t>
+    GetPageSnapshotRetainedBytes() const;
+
+    [[nodiscard]] std::shared_ptr<
+        const GovernancePageImmutableSnapshot>
+    GetCachedPageSnapshot(uint64_t validation_context_epoch) const;
+
+    /** Capture or reuse one exact immutable vote generation. */
+    [[nodiscard]] std::shared_ptr<const GovernancePageImmutableSnapshot>
+    GetPageSnapshot(
+        const uint256& scope_hash,
+        const std::shared_ptr<GovernancePageSnapshotBudget>& budget,
+        uint64_t instance_id,
+        uint64_t validation_context_epoch,
+        std::optional<std::size_t> retained_bytes = std::nullopt) const;
+
     /**
      * Retrieve a vote cached in memory
      */
     bool SerializeVoteToStream(const uint256& nHash, CDataStream& ss) const;
+
+    /** Conservative network-wire size used before charging an upload. */
+    [[nodiscard]] std::optional<std::size_t>
+    GetVoteSerializedSizeUpperBound(const uint256& nHash,
+                                    int version) const;
 
     int GetVoteCount() const
     {
         return nMemoryVotes;
     }
 
+    [[nodiscard]] uint64_t GetSerializedVoteBytes() const
+    {
+        return nSerializedVoteBytes;
+    }
+
+    [[nodiscard]] uint64_t ProjectedSerializedVoteBytes(
+        const CGovernanceVote& vote, bool retain_replaced = false) const;
+
+    /** Select already-stored representatives without changing retained bytes. */
+    [[nodiscard]] std::set<uint256> UpdateActiveVotes(
+        const std::optional<COutPoint>& masternode_filter,
+        const std::vector<const CGovernanceVote*>& selected_stored_votes);
+
     std::vector<CGovernanceVote> GetVotes() const;
 
+    // SYSCOIN: allow bounded/filtering snapshots without first copying an
+    // attacker-selected object's entire vote file.
+    template <typename Callback>
+    void ForEachVote(Callback&& callback) const
+    {
+        for (const auto& [hash, vote] : mapVoteIndex) {
+            (void)hash;
+            const CGovernanceVote& active_vote{*vote};
+            if (!callback(active_vote)) break;
+        }
+    }
+
+    template <typename Callback>
+    void ForEachVoteFromMasternode(const COutPoint& outpoint,
+                                   Callback&& callback) const
+    {
+        const auto [begin, end]{mapMasternodeIndex.equal_range(outpoint)};
+        for (auto it{begin}; it != end; ++it) {
+            const auto active{mapVoteIndex.find(it->second->GetHash())};
+            if (active == mapVoteIndex.end() || active->second != it->second) {
+                continue;
+            }
+            const CGovernanceVote& active_vote{*it->second};
+            if (!callback(active_vote)) break;
+        }
+    }
+
+    [[nodiscard]] bool HasVoteFromMasternode(
+        const COutPoint& outpoint) const
+    {
+        bool found{false};
+        ForEachVoteFromMasternode(outpoint, [&](const CGovernanceVote&) {
+            found = true;
+            return false;
+        });
+        return found;
+    }
+
+    template <typename Callback>
+    void ForEachStoredVote(Callback&& callback) const
+    {
+        for (const auto& vote : listVotes) {
+            if (!callback(vote)) break;
+        }
+    }
+
+    template <typename Callback>
+    void ForEachStoredVoteFromMasternode(const COutPoint& outpoint,
+                                         Callback&& callback) const
+    {
+        const auto [begin, end]{mapMasternodeIndex.equal_range(outpoint)};
+        for (auto it{begin}; it != end; ++it) {
+            const CGovernanceVote& stored_vote{*it->second};
+            if (!callback(stored_vote)) break;
+        }
+    }
+
+    [[nodiscard]] bool HasStoredVoteFromMasternode(
+        const COutPoint& outpoint) const
+    {
+        return mapMasternodeIndex.contains(outpoint);
+    }
+
     void RemoveVotesFromMasternode(const COutPoint& outpointMasternode);
+    void RemoveVotes(const std::set<uint256>& vote_hashes);
     std::set<uint256> RemoveInvalidVotes(const CDeterministicMNList& tip_mn_list, const COutPoint& outpointMasternode, bool fProposal);
 
     SERIALIZE_METHODS(CGovernanceObjectVoteFile, obj)
@@ -78,7 +201,19 @@ private:
     // Drop older votes for the same gobject from the same masternode
     void RemoveOldVotes(const CGovernanceVote& vote);
 
+    vote_l_t::iterator EraseVote(vote_l_t::iterator vote);
+
+    [[nodiscard]] static uint64_t SerializedVoteBytes(
+        const CGovernanceVote& vote);
+
+    [[nodiscard]] static uint256 StoredVoteHash(const CGovernanceVote& vote);
+
     void RebuildIndex();
+
+    void InvalidatePageView() noexcept
+    {
+        m_page_snapshot.reset();
+    }
 };
 
 #endif // SYSCOIN_GOVERNANCE_GOVERNANCEVOTEDB_H

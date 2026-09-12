@@ -207,3 +207,16 @@ Example usage:
 
     cd .../src
     ../contrib/devtools/circular-dependencies.py {*,*/*,*/*/*}.{h,cpp}
+
+<!-- SYSCOIN BEGIN: Document the fork provenance audit tool. -->
+syscoin-upstream-audit
+======================
+
+Compare committed Syscoin source with a pinned Bitcoin revision and inventory
+SYSCOIN marker candidates, including removed upstream code. The read-only Python
+scanner distinguishes explicit regions, local markers, ambiguous boundaries, and
+unmarked candidates; its output still requires provenance review.
+
+See [the upstream porting guide](../../doc/upstream-porting/README.md) for the
+historical baseline, saved audit, annotation status, and reproduction commands.
+<!-- SYSCOIN END: Document the fork provenance audit tool. -->

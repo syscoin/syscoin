@@ -121,9 +121,12 @@ static RPCHelpMan getpeerinfo()
                     {RPCResult::Type::STR_HEX, "verified_proregtx_hash",  /*optional=*/true, "Only present when the peer is a masternode and successfully\n"
                                                                                 "authenticated via MNAUTH. In this case, this field contains the\n"
                                                                                 "protx hash of the masternode"},
-                    {RPCResult::Type::STR_HEX, "verified_pubkey_hash",  /*optional=*/true, "Only present when the peer is a masternode and successfully\n"
+                    {RPCResult::Type::STR_HEX, "verified_global_pubkey_hash",  /*optional=*/true, "Only present when the peer is a masternode and successfully\n"
                                                                                 "authenticated via MNAUTH. In this case, this field contains the\n"
-                                                                                "hash of the masternode's operator public key"},
+                                                                                "hash of the masternode's global SLH-DSA public key"},
+                    {RPCResult::Type::NUM, "verified_global_key_version",  /*optional=*/true, "Only present when the peer is a masternode and successfully\n"
+                                                                                "authenticated via MNAUTH. In this case, this field identifies the\n"
+                                                                                "exact global SLH-DSA key version"},
                     {RPCResult::Type::ARR, "servicesnames", "the services offered, in human-readable form",
                     {
                         {RPCResult::Type::STR, "SERVICE_NAME", "the service name if it is recognised"}
@@ -230,8 +233,9 @@ static RPCHelpMan getpeerinfo()
         if (!stats.verifiedProRegTxHash.IsNull()) {
             obj.pushKV("verified_proregtx_hash", stats.verifiedProRegTxHash.ToString());
         }
-        if (!stats.verifiedPubKeyHash.IsNull()) {
-            obj.pushKV("verified_pubkey_hash", stats.verifiedPubKeyHash.ToString());
+        if (!stats.verifiedGlobalKeyHash.IsNull()) {
+            obj.pushKV("verified_global_pubkey_hash", stats.verifiedGlobalKeyHash.ToString());
+            obj.pushKV("verified_global_key_version", stats.verifiedGlobalKeyVersion);
         }
         obj.pushKV("relaytxes", statestats.m_relay_txs);
         obj.pushKV("lastsend", count_seconds(stats.m_last_send));
@@ -636,6 +640,35 @@ static RPCHelpMan getnetworkinfo()
                         {RPCResult::Type::NUM, "connections_mn", "the number of verified mn connections"},
                         {RPCResult::Type::NUM, "connections_mn_in", "the number of inbound verified mn connections"},
                         {RPCResult::Type::NUM, "connections_mn_out", "the number of outbound verified mn connections"},
+                        {RPCResult::Type::OBJ, "mnauth", "bounded PQ MNAUTH executor statistics",
+                        {
+                            {RPCResult::Type::NUM, "verify_queue", "queued verification jobs"},
+                            {RPCResult::Type::NUM, "sign_queue", "queued signing jobs"},
+                            {RPCResult::Type::NUM, "initiator_sign_queue", "queued locally initiated signing jobs"},
+                            {RPCResult::Type::NUM, "responder_sign_queue", "queued authenticated-responder signing jobs"},
+                            {RPCResult::Type::NUM, "completion_queue", "completed jobs awaiting main-thread processing"},
+                            {RPCResult::Type::NUM, "verify_inflight", "verification workers currently active"},
+                            {RPCResult::Type::NUM, "sign_inflight", "signing workers currently active"},
+                            {RPCResult::Type::NUM, "verify_completed", "verification jobs completed"},
+                            {RPCResult::Type::NUM, "sign_completed", "signing jobs completed"},
+                            {RPCResult::Type::NUM, "verify_failed", "verification jobs which did not succeed"},
+                            {RPCResult::Type::NUM, "sign_failed", "signing jobs which did not succeed"},
+                            {RPCResult::Type::NUM, "verify_saturation_drops", "verification jobs rejected at queue capacity"},
+                            {RPCResult::Type::NUM, "sign_saturation_drops", "signing jobs rejected at queue capacity"},
+                            {RPCResult::Type::NUM, "initiator_sign_saturation_drops", "locally initiated signing jobs rejected at reserved queue capacity"},
+                            {RPCResult::Type::NUM, "responder_sign_saturation_drops", "authenticated-responder signing jobs rejected at queue capacity"},
+                            {RPCResult::Type::NUM, "verify_expired_before_execution", "verification jobs expired before crypto began"},
+                            {RPCResult::Type::NUM, "sign_expired_before_execution", "signing jobs expired before crypto began"},
+                            {RPCResult::Type::NUM, "preverify_rate_drops", "verification jobs rejected by source admission"},
+                            {RPCResult::Type::NUM, "sign_rate_drops", "signing jobs rejected by source or identity admission"},
+                            {RPCResult::Type::NUM, "cancelled_jobs", "jobs or completions removed on cancellation"},
+                            {RPCResult::Type::NUM, "stale_completions", "results rejected by exact context revalidation"},
+                            {RPCResult::Type::NUM, "completion_backpressure", "worker waits on bounded completion capacity"},
+                            {RPCResult::Type::NUM, "verify_latency_avg_us", "average verification queue-plus-work latency"},
+                            {RPCResult::Type::NUM, "verify_latency_max_us", "maximum verification queue-plus-work latency"},
+                            {RPCResult::Type::NUM, "sign_latency_avg_us", "average signing queue-plus-work latency"},
+                            {RPCResult::Type::NUM, "sign_latency_max_us", "maximum signing queue-plus-work latency"},
+                        }},
                         {RPCResult::Type::BOOL, "networkactive", "whether p2p networking is enabled"},
                         {RPCResult::Type::ARR, "networks", "information per network",
                         {
@@ -681,6 +714,60 @@ static RPCHelpMan getnetworkinfo()
     }
     if (node.peerman) {
         obj.pushKV("localrelay", !node.peerman->IgnoresIncomingTxs());
+        // SYSCOIN: Report bounded PQ MNAUTH executor state.
+        const CMNAuthAsyncStats stats{
+            node.peerman->GetMNAuthAsyncStats()};
+        UniValue mnauth(UniValue::VOBJ);
+        mnauth.pushKV("verify_queue", stats.verify_queue_depth);
+        mnauth.pushKV("sign_queue", stats.sign_queue_depth);
+        mnauth.pushKV("initiator_sign_queue",
+                      stats.initiator_sign_queue_depth);
+        mnauth.pushKV("responder_sign_queue",
+                      stats.responder_sign_queue_depth);
+        mnauth.pushKV("completion_queue", stats.completion_queue_depth);
+        mnauth.pushKV("verify_inflight", stats.verify_inflight);
+        mnauth.pushKV("sign_inflight", stats.sign_inflight);
+        mnauth.pushKV("verify_completed", stats.verify_completed);
+        mnauth.pushKV("sign_completed", stats.sign_completed);
+        mnauth.pushKV("verify_failed", stats.verify_failed);
+        mnauth.pushKV("sign_failed", stats.sign_failed);
+        mnauth.pushKV("verify_saturation_drops",
+                      stats.verify_saturation_drops);
+        mnauth.pushKV("sign_saturation_drops",
+                      stats.sign_saturation_drops);
+        mnauth.pushKV("initiator_sign_saturation_drops",
+                      stats.initiator_sign_saturation_drops);
+        mnauth.pushKV("responder_sign_saturation_drops",
+                      stats.responder_sign_saturation_drops);
+        mnauth.pushKV("verify_expired_before_execution",
+                      stats.verify_expired_before_execution);
+        mnauth.pushKV("sign_expired_before_execution",
+                      stats.sign_expired_before_execution);
+        mnauth.pushKV("preverify_rate_drops",
+                      stats.preverify_rate_limit_drops);
+        mnauth.pushKV("sign_rate_drops", stats.sign_rate_limit_drops);
+        mnauth.pushKV("cancelled_jobs", stats.cancelled_jobs);
+        mnauth.pushKV("stale_completions",
+                      stats.stale_completion_drops);
+        mnauth.pushKV("completion_backpressure",
+                      stats.completion_backpressure_events);
+        mnauth.pushKV(
+            "verify_latency_avg_us",
+            stats.verify_completed == 0
+                ? 0
+                : stats.verify_latency_total_micros /
+                      stats.verify_completed);
+        mnauth.pushKV("verify_latency_max_us",
+                      stats.verify_latency_max_micros);
+        mnauth.pushKV(
+            "sign_latency_avg_us",
+            stats.sign_completed == 0
+                ? 0
+                : stats.sign_latency_total_micros /
+                      stats.sign_completed);
+        mnauth.pushKV("sign_latency_max_us",
+                      stats.sign_latency_max_micros);
+        obj.pushKV("mnauth", std::move(mnauth));
     }
     obj.pushKV("timeoffset",    GetTimeOffset());
     if (node.connman) {

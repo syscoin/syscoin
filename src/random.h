@@ -121,6 +121,14 @@ bool GetRandBool(double rate);
 void GetStrongRandBytes(Span<unsigned char> bytes) noexcept;
 
 /**
+ * Fill an arbitrarily sized span using bounded strong-randomness requests.
+ *
+ * SYSCOIN: ProcRand accepts at most 32 bytes per extraction, while SLH-DSA
+ * key generation requires a 48-byte seed.
+ */
+void GetStrongRandBytesChunked(Span<unsigned char> bytes) noexcept;
+
+/**
  * Gather entropy from various expensive sources, and feed them to the PRNG state.
  *
  * Thread-safe.

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Generate a headers-only patch against the pinned Bitcoin lock commit.
+export LC_ALL=C
 set -euo pipefail
 
 usage() {

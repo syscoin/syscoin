@@ -13,6 +13,11 @@ on:
     tags-ignore:
       - '**'
 
+# SYSCOIN: CI only reads repository content; keep pull-request code from
+# inheriting broader repository or organization token defaults.
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.event_name != 'pull_request' && github.run_id || github.ref }}
   cancel-in-progress: true
@@ -25,7 +30,9 @@ env:
 jobs:
   test-each-commit:
     name: 'test each commit'
-    runs-on: ubuntu-22.04
+    # SYSCOIN: Historical commits require C++20 and predate the workaround for
+    # Clang/libstdc++ miscompiling empty optional Bitcoin heights. Use GCC 13.
+    runs-on: ubuntu-24.04
     if: github.event_name == 'pull_request' && github.event.pull_request.commits != 1
     timeout-minutes: 360  # Use maximum time, see https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#jobsjob_idtimeout-minutes. Assuming a worst case time of 1 hour per commit, this leads to a --max-count=6 below.
     env:
@@ -61,13 +68,72 @@ jobs:
           # https://git-scm.com/docs/git-rev-list
           echo "TEST_BASE=$(git rev-list -n$((${{ env.MAX_COUNT }} + 1)) --reverse HEAD ^$(git rev-list -n1 --merges HEAD)^@ | head -1)" >> "$GITHUB_ENV"
       - run: |
+          # SYSCOIN: Chrome is unused here; its runner-provided APT source can
+          # have mismatched indexes. Remove both legacy and deb822 sources.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome*.list /etc/apt/sources.list.d/google-chrome*.sources
           sudo apt-get update
-          sudo apt-get install clang ccache build-essential libtool autotools-dev automake pkg-config bsdmainutils python3-zmq libevent-dev libboost-dev libsqlite3-dev libdb++-dev systemtap-sdt-dev libminiupnpc-dev libnatpmp-dev libqt5gui5 libqt5core5a libqt5dbus5 qttools5-dev qttools5-dev-tools qtwayland5 libqrencode-dev -y
+          # SYSCOIN: Install the compiler used for both history and PR head.
+          sudo apt-get install gcc-13 g++-13 ccache build-essential libtool autotools-dev automake pkg-config bsdmainutils python3-zmq libevent-dev libboost-dev libsqlite3-dev libdb++-dev systemtap-sdt-dev libminiupnpc-dev libnatpmp-dev libqt5gui5 libqt5core5a libqt5dbus5 qttools5-dev qttools5-dev-tools qtwayland5 libqrencode-dev -y
       - name: Compile and run tests
         run: |
-          # Run tests on commits after the last merge commit and before the PR head commit
-          # Use clang++, because it is a bit faster and uses less memory than g++
-          git rebase --exec "echo Running test-one-commit on \$( git log -1 ) && ./autogen.sh && CC=clang CXX=clang++ ./configure && make clean && make -j $(nproc) check && ./test/functional/test_runner.py -j $(( $(nproc) * 2 ))" ${{ env.TEST_BASE }}
+          # SYSCOIN: Historical source cannot inherit the optional-height fix;
+          # validate every selected commit with the unaffected GCC compiler.
+          git rebase --exec "echo Running test-one-commit on \$( git log -1 ) && ./autogen.sh && CC=gcc-13 CXX=g++-13 ./configure && make clean && make -j $(nproc) check" ${{ env.TEST_BASE }}
+          # SYSCOIN: Full-depth PQ setup makes six concurrent historical
+          # functional matrices oversubscribe the runner, while old snapshots
+          # cannot inherit later test-harness fixes. Preserve per-commit
+          # compile/unit validation, then rebuild the exact PR head and run its
+          # complete functional matrix once.
+          git checkout ${{ github.event.pull_request.head.sha }}
+          ./autogen.sh
+          CC=gcc-13 CXX=g++-13 ./configure
+          make clean
+          make -j $(nproc) check
+          ./test/functional/test_runner.py -j $(nproc)
+
+  # SYSCOIN: The managed Bitcoin view is security-critical for BTCC signers.
+  # Build the exact pinned source, then exercise the patched header-chain RPC
+  # contract beyond genesis instead of relying on fake command responders.
+  btcheadernode-contract:
+    name: 'Managed Bitcoin header-node contract'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install build dependencies
+        run: |
+          # SYSCOIN: Chrome is unused here; its runner-provided APT source can
+          # have mismatched indexes. Remove both legacy and deb822 sources.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome*.list /etc/apt/sources.list.d/google-chrome*.sources
+          sudo apt-get update
+          sudo apt-get install --yes build-essential cmake curl git libboost-dev libevent-dev pkg-config python3
+
+      - name: Smoke-test Linux and Darwin cross toolchains
+        run: contrib/btcheadernode/test-toolchain-generation.sh
+
+      - name: Authenticate and build the pinned helper
+        run: |
+          source contrib/btcheadernode/bitcoin.lock
+          archive="$RUNNER_TEMP/bitcoin-${BITCOIN_COMMIT}.tar.gz"
+          curl --fail --location --proto '=https' --tlsv1.2 --output "$archive" "$BITCOIN_SOURCE_ARCHIVE_URL"
+          echo "${BITCOIN_SOURCE_ARCHIVE_SHA256}  ${archive}" | sha256sum --check
+          contrib/btcheadernode/test-source-provenance.sh "$archive"
+          BTCHEADERNODE_SOURCE_ARCHIVE="$archive" \
+          BTCHEADERNODE_STATIC_LINK_FLAGS='' \
+            contrib/btcheadernode/build-bitcoin-header-node.sh \
+              --src-root "$GITHUB_WORKSPACE" \
+              --build-root "$RUNNER_TEMP/btcheader-build" \
+              --jobs "$(nproc)"
+          cmp contrib/btcheadernode/COPYING.bitcoin-core \
+            "$RUNNER_TEMP/btcheader-build/src/bin/btcheadernode/COPYING.bitcoin-core"
+
+      - name: Exercise headers-only RPC and restart contract
+        run: |
+          python3 contrib/btcheadernode/test-headers-only.py \
+            --bitcoind "$RUNNER_TEMP/btcheader-build/src/bin/btcheadernode/bin/bitcoind" \
+            --bitcoin-cli "$RUNNER_TEMP/btcheader-build/src/bin/btcheadernode/bin/bitcoin-cli"
 
   macos-native-x86_64:
     name: 'macOS 15 native, x86_64, no depends, sqlite only, gui'
@@ -78,7 +144,8 @@ jobs:
     # No need to run on the read-only mirror, unless it is a PR.
     if: github.repository != 'syscoin-core/gui' || github.event_name == 'pull_request'
 
-    timeout-minutes: 120
+    # The native build and full PQ/governance matrix exceeded two hours.
+    timeout-minutes: 180
 
     env:
       FILE_ENV: './ci/test/00_setup_env_mac_native.sh'
@@ -117,7 +184,8 @@ jobs:
           key: ${{ github.job }}-ccache-${{ github.run_id }}
 
   win64-native:
-    name: 'Win64 native core, VS 2022, BLS easy backend'
+    # SYSCOIN: The post-BLS Windows build no longer provisions Dash BLS.
+    name: 'Win64 native core, VS 2022'
     # Use latest image, but hardcode version to avoid silent upgrades (and breaks).
     # See: https://github.com/actions/runner-images#available-images.
     runs-on: windows-2022
@@ -195,17 +263,18 @@ jobs:
           path: ~/AppData/Local/vcpkg/archives
           key: ${{ github.job }}-vcpkg-binary-${{ hashFiles('vcpkg_commit', 'msbuild_version', 'build_msvc/vcpkg.json') }}
 
-      - name: Build and test Dash BLS
-        run: .\build_msvc\build-dashbls.ps1 -Configuration Release -RunTests
+      - name: Test generated MSVC configuration
+        run: py -3 -B build_msvc\test_msvc_config.py
 
       - name: Generate project files
         run: py -3 build_msvc\msvc-autogen.py
 
+      # SYSCOIN: Build the full-dimension PQ ChainLock fixture on Windows.
       - name: Build
         shell: cmd
         run: |
           ccache --zero-stats
-          msbuild build_msvc\syscoin.sln "-target:syscoind;syscoin-cli;syscoin-tx;syscoin-util;syscoin-wallet;test_syscoin;bench_syscoin" -property:CLToolPath=C:\ccache;CLToolExe=cl.exe;UseMultiToolTask=true;Configuration=Release -maxCpuCount -verbosity:minimal -noLogo
+          msbuild build_msvc\syscoin.sln "-target:syscoind;syscoin-cli;syscoin-tx;syscoin-util;syscoin-wallet;test_syscoin;bench_syscoin;pq_chainlock_fixture" -property:CLToolPath=C:\ccache;CLToolExe=cl.exe;UseMultiToolTask=true;Configuration=Release -maxCpuCount -verbosity:minimal -noLogo
 
       - name: Ccache stats
         run: ccache --show-stats
@@ -221,8 +290,15 @@ jobs:
       - name: Run unit tests
         run: src\test_syscoin.exe -l test_suite
 
+      - name: Smoke-test external Bitcoin header command
+        timeout-minutes: 10
+        run: py -3 test\functional\test_runner.py feature_btcheader_external_command.py --jobs=1 --ci --tmpdirprefix=$env:RUNNER_TEMP --combinedlogslen=99999999 --require-backend
+
       - name: Run benchmarks
-        run: src\bench_syscoin.exe -sanity-check
+        # SYSCOIN: Full-depth PQ trees are explicit performance workloads. Keep
+        # the per-push smoke aligned with Makefile.test.include's bounded tier.
+        timeout-minutes: 15
+        run: src\bench_syscoin.exe -sanity-check -priority-level=high
 
       - name: Run util tests
         run: py -3 test\util\test_runner.py

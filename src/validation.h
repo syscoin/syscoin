@@ -19,7 +19,9 @@
 #include <kernel/chainparams.h>
 #include <kernel/chainstatemanager_opts.h>
 #include <kernel/cs_main.h> // IWYU pragma: export
+#include <nevm/response.h>
 #include <node/blockstorage.h>
+#include <node/btcheader_state.h> // SYSCOIN: shared managed-backend state boundary.
 #include <policy/feerate.h>
 #include <policy/packages.h>
 #include <policy/policy.h>
@@ -36,15 +38,20 @@
 #include <versionbits.h>
 
 #include <atomic>
+// SYSCOIN: callback used to serialize PQ catch-up persistence with activation.
+#include <functional>
 #include <limits>
 #include <map>
 #include <memory>
 #include <optional>
+// SYSCOIN: Validate persisted chainstate recovery markers without copying.
+#include <span>
 #include <set>
 #include <stdint.h>
 #include <string>
 #include <thread>
 #include <type_traits>
+#include <unordered_set> // SYSCOIN: Batched ChainLock-conflict descendant membership.
 #include <utility>
 #include <vector>
 // SYSCOIN
@@ -52,11 +59,141 @@
 class Chainstate;
 class CTxMemPool;
 class ChainstateManager;
+// Coins-database recovery reapplies local effects of fully validated blocks.
+// External NEVM reconciliation happens separately after that recovery completes.
+enum class NEVMNotificationContext {
+    LIVE,
+    ALREADY_VALIDATED_COINS_RECOVERY,
+    // Rebuild the engine's accepted prefix without recursively recovering it
+    // or changing Core's already-applied coins and metadata.
+    EXTERNAL_REPLAY,
+};
+// A fresh, branch-bound engine endpoint authorizes local unwind only above
+// this Core ancestor. Height -1 denotes the prefix before Core genesis.
+class NEVMDisconnectPrefix {
+    friend class Chainstate;
+    const int32_t height;
+    const uint256 block_hash;
+    NEVMDisconnectPrefix(int32_t height_in, const uint256& hash_in)
+        : height(height_in), block_hash(hash_in) {}
+
+public:
+    bool ContainsUnapplied(const CBlockIndex& index) const
+    {
+        if (height < -1 || index.nHeight <= height) return false;
+        if (height == -1) return block_hash.IsNull();
+        const auto* ancestor{index.GetAncestor(height)};
+        return ancestor != nullptr && ancestor->GetBlockHash() == block_hash;
+    }
+};
+// SYSCOIN BEGIN: Carry branch-selection authority only from a failed activation.
+// This context is created after finality preflight and consumed before the
+// same activation exclusion is released. Replay/startup checks cannot mint it.
+class NEVMPayloadRepairSelection {
+    friend class Chainstate;
+    friend class ChainstateManager;
+    const CBlockIndex* const selected_tip;
+    const CBlockIndex* const candidate;
+    const CBlockIndex* const parent;
+
+    NEVMPayloadRepairSelection(const CBlockIndex& selected_tip_in,
+                              const CBlockIndex& candidate_in,
+                              const CBlockIndex& parent_in)
+        : selected_tip(&selected_tip_in), candidate(&candidate_in),
+          parent(&parent_in) {}
+};
+// SYSCOIN END: Bind payload repair retargeting to the actual activation attempt.
 struct ChainTxData;
 class DisconnectedBlockTransactions;
 class CDeterministicMNListNEVMAddressDiff;
 struct PrecomputedTransactionData;
 struct LockPoints;
+
+// SYSCOIN: Expose only the highest-work missing-receipt dependency so the
+// ChainLock scheduler can multiplex one bounded GETCLSIG request lane.
+struct DeferredBTCCReceiptCandidate {
+    uint256 logical_id;
+    const CBlockIndex* carrier{nullptr};
+    CBlockIndex* best_candidate{nullptr};
+};
+enum class DeferredReceiptCertificateKind : uint8_t {
+    BTCC_CHAINLOCK = 0,
+    PAYMENT_AUDIT,
+};
+enum class ChainLockEnforcementProvenance : uint8_t {
+    EXACT_LOCAL = 0,
+    VERIFIED_DURABLE_CERTIFICATE,
+};
+// SYSCOIN BEGIN: Observable work bounds for batched ChainLock conflicts.
+struct ChainLockConflictMarkingStatsForTesting {
+    uint64_t batch_calls{0};
+    uint64_t input_roots{0};
+    uint64_t visited_blocks{0};
+    uint64_t block_index_scans{0};
+    uint64_t disconnect_tip_calls{0};
+    uint64_t tip_publications{0};
+};
+// SYSCOIN END: Observable work bounds for batched ChainLock conflicts.
+enum class PQHistoryAuthState : uint8_t {
+    UNINITIALIZED = 0,
+    PENDING,
+    READY,
+};
+namespace llmq {
+class CChainLocksHandler;
+namespace test {
+class PQHistoryReauthenticationTestAccess;
+}
+}
+// SYSCOIN: Inject only process restart in NEVM recovery regression tests.
+namespace node::test {
+class NEVMRestartTestAccess;
+class NEVMMiningTestAccess;
+}
+
+/** Recognition of a previously authenticated dependency being revoked. */
+class PQHistoryReauthentication final {
+private:
+    struct BlockIdentity {
+        int32_t height{-1};
+        uint256 hash;
+    };
+    static BlockIdentity Capture(const CBlockIndex& index)
+    {
+        return {index.nHeight, index.phashBlock ? *index.phashBlock : uint256{}};
+    }
+    static std::optional<BlockIdentity> Capture(const CBlockIndex* index)
+    {
+        return index ? std::optional<BlockIdentity>{Capture(*index)} : std::nullopt;
+    }
+    PQHistoryReauthentication(
+        const ChainstateManager& owner, const CBlockIndex& old_coverage,
+        const CBlockIndex& selected_tip, const CBlockIndex* previous_durable_floor,
+        const CBlockIndex* current_durable_floor, const uint256& dependency_token,
+        uint64_t old_provenance_revision)
+        : m_owner{&owner}, m_old_coverage{Capture(old_coverage)},
+          m_selected_tip{Capture(selected_tip)},
+          m_previous_durable_floor{Capture(previous_durable_floor)},
+          m_current_durable_floor{Capture(current_durable_floor)},
+          m_dependency_token{dependency_token},
+          m_old_provenance_revision{old_provenance_revision} {}
+
+    // Only identity is compared; the owner pointer is never dereferenced.
+    const ChainstateManager* m_owner;
+    BlockIdentity m_old_coverage;
+    BlockIdentity m_selected_tip;
+    std::optional<BlockIdentity> m_previous_durable_floor;
+    std::optional<BlockIdentity> m_current_durable_floor;
+    uint256 m_dependency_token;
+    uint64_t m_old_provenance_revision;
+    friend class ChainstateManager;
+    friend class llmq::CChainLocksHandler;
+    friend class llmq::test::PQHistoryReauthenticationTestAccess;
+};
+// SYSCOIN: Quarantine legacy provider mutations while still permitting the
+// independently PQ-authenticated global-key preparation transaction.
+[[nodiscard]] bool IsPQActivationQuarantinedProviderTxVersion(
+    int32_t version) noexcept;
 // SYSCOIN
 namespace llmq {
     class CChainLockSig;
@@ -108,20 +245,14 @@ extern bool fNEVMConnection;
 extern std::atomic_bool fReindexGeth;
 extern RecursiveMutex cs_btcheader;
 static constexpr uint8_t NEVM_MAGIC_BYTES[4] = {'n', 'e', 'v', 'm'};
-static constexpr uint8_t BTCCHECK_MAGIC_BYTES[4] = {'b', 't', 'c', 'c'};
-static constexpr uint8_t BTCPREV_MAGIC_BYTES[4] = {'b', 't', 'c', 'p'};
-static constexpr bool DEFAULT_BTC_HEADER_MANAGED{true};
 static constexpr bool DEFAULT_BTC_HEADER_POLICY_ON_DEMAND{false};
 static constexpr bool DEFAULT_BTC_HEADER_WATCHDOG{true};
 static constexpr int DEFAULT_BTC_HEADER_WATCHDOG_PROBE_INTERVAL{15};
 static constexpr int DEFAULT_BTC_HEADER_WATCHDOG_RESTART_COOLDOWN{60};
+static constexpr int DEFAULT_BTC_HEADER_WATCHDOG_STARTUP_GRACE{180};
 static constexpr int DEFAULT_BTC_HEADER_WATCHDOG_STALL_TIMEOUT{1800};
 static constexpr int DEFAULT_BTC_HEADER_WATCHDOG_REINDEX_AFTER{3};
-static constexpr int DEFAULT_BTC_HEADER_TIP_MAX_AGE{2 * 60 * 60};      // seconds
-static constexpr int DEFAULT_BTC_HEADER_RECENT_FORK_DEPTH{2};           // blocks from active tip
-static constexpr int DEFAULT_BTC_HEADER_MAX_LAG_BLOCKS{36};             // candidate lag behind active tip
-static constexpr int DEFAULT_BTC_HEADER_TIP_MAX_NO_PROGRESS{1800};      // seconds
-// Keep mainnet managed btcheader defaults off Bitcoin Core regtest ports (18444/18443).
+static constexpr int DEFAULT_BTC_HEADER_TIP_MAX_NO_PROGRESS{1800};
 static constexpr int DEFAULT_BTC_HEADER_MAINNET_P2P_PORT{18544};
 static constexpr int DEFAULT_BTC_HEADER_MAINNET_RPC_PORT{18543};
 static constexpr int DEFAULT_BTC_HEADER_TESTNET_P2P_PORT{19444};
@@ -131,36 +262,8 @@ static constexpr int DEFAULT_BTC_HEADER_SIGNET_RPC_PORT{20443};
 static constexpr int DEFAULT_BTC_HEADER_REGTEST_P2P_PORT{21444};
 static constexpr int DEFAULT_BTC_HEADER_REGTEST_RPC_PORT{21443};
 
-// SYSCOIN: BTC checkpoint cadence (must remain in sync across miner/specialtx/llmq handler)
-static constexpr int BTCCHECK_PERIOD{10};
-static constexpr int BTCCHECK_SIGN_OFFSET{2};   // within [0, BTCCHECK_PERIOD)
-static constexpr int BTCCHECK_PROP_BUFFER{5};   // blocks between signing and carrier mining
-static constexpr int BTCCHECK_CARRIER_OFFSET{BTCCHECK_SIGN_OFFSET + BTCCHECK_PROP_BUFFER}; // 7
-
-inline bool IsBTCCDeploymentConfigured(const Consensus::Params& consensus)
-{
-    return consensus.nBTCCStartBlock != std::numeric_limits<int>::max();
-}
-
-inline bool IsBTCCSignHeight(const Consensus::Params& consensus, const int height)
-{
-    return IsBTCCDeploymentConfigured(consensus) &&
-           height >= consensus.nBTCCStartBlock &&
-           (height % BTCCHECK_PERIOD) == BTCCHECK_SIGN_OFFSET;
-}
-
-inline bool IsBTCCCarrierHeight(const Consensus::Params& consensus, const int height)
-{
-    return height >= BTCCHECK_PROP_BUFFER &&
-           IsBTCCSignHeight(consensus, height - BTCCHECK_PROP_BUFFER);
-}
-
 /** Documentation for argument 'checklevel'. */
 extern const std::vector<std::string> CHECKLEVEL_DOC;
-
-// Returns the managed bitcoin-cli base argv used for BTC header policy RPC checks.
-// When managed mode is disabled or uninitialized, this returns false.
-bool GetManagedBTCHeaderRPCCommandArgs(std::vector<std::string>& args_out);
 
 /** Run instances of script checking worker threads */
 void StartScriptCheckWorkerThreads(int threads_num);
@@ -419,6 +522,22 @@ bool TestBlockValidity(BlockValidationState& state,
                        const std::function<NodeClock::time_point()>& adjusted_time_callback,
                        bool fCheckPOW = true,
                        bool fCheckMerkleRoot = true) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
+/**
+ * SYSCOIN: Validate an AuxPoW work template before the parent proof exists.
+ * The temporary proof binds the already-embedded BTCPREV commitment to the
+ * independently selected Bitcoin parent prevhash; normal block admission
+ * continues to require and validate the miner-supplied AuxPoW.
+ */
+bool TestAuxpowBlockTemplateValidity(
+    BlockValidationState& state,
+    const CChainParams& chainparams,
+    Chainstate& chainstate,
+    const CBlock& block,
+    CBlockIndex* pindexPrev,
+    const uint256& expected_btc_prev,
+    const std::function<NodeClock::time_point()>& adjusted_time_callback)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 // SYSCOIN
 static std::vector<unsigned char> emptyVec;
 /** Check with the proof of work on each blockheader matches the value in nBits */
@@ -433,6 +552,7 @@ enum class VerifyDBResult {
     INTERRUPTED,
     SKIPPED_L3_CHECKS,
     SKIPPED_MISSING_BLOCKS,
+    UNSUPPORTED_CHECK_LEVEL,
 };
 
 /** RAII wrapper for VerifyDB: Verify consistency of the block and coin databases */
@@ -528,6 +648,13 @@ enum class CoinsCacheSizeState
  */
 class Chainstate
 {
+    friend class node::test::NEVMRestartTestAccess;
+    friend class node::test::NEVMMiningTestAccess;
+    // SYSCOIN: Leave connection, recovery and networking control under test.
+    std::function<bool()> m_restart_geth_for_testing;
+    // Pauses invalidation with its applied-prefix authority retained and cs_main released.
+    std::function<void(int)> m_invalidate_block_step_for_testing;
+
 protected:
     /**
      * The ChainState Mutex
@@ -629,6 +756,23 @@ public:
      */
     std::set<CBlockIndex*, node::CBlockIndexWorkComparator> setBlockIndexCandidates;
 
+    // SYSCOIN: A branch whose BTCC carrier references an unavailable exact
+    // certificate is not invalid, but it must not monopolize best-chain
+    // selection while another fully verifiable branch is available. These
+    // maximal fork tips remain memory-only and are reconsidered when that
+    // exact logical certificate is accepted.
+    // SYSCOIN BEGIN: Branches quarantined while an authenticated receipt is unavailable.
+    struct DeferredBTCCReceiptDependency {
+        DeferredReceiptCertificateKind kind{
+            DeferredReceiptCertificateKind::BTCC_CHAINLOCK};
+        std::map<const CBlockIndex*,
+                 std::set<CBlockIndex*, node::CBlockIndexWorkComparator>>
+            branches;
+    };
+    std::map<uint256, DeferredBTCCReceiptDependency>
+        m_deferred_btcc_receipt_candidates;
+    // SYSCOIN END: Branches quarantined while an authenticated receipt is unavailable.
+
     //! @returns A reference to the in-memory cache of the UTXO set.
     CCoinsViewCache& CoinsTip() EXCLUSIVE_LOCKS_REQUIRED(cs_main)
     {
@@ -727,15 +871,15 @@ public:
 
     // Block (dis)connection on a given view:
     // SYSCOIN
-    DisconnectResult DisconnectBlock(const CBlock& block, const CBlockIndex* pindex, CCoinsViewCache& view, NEVMMintTxSet &setMintTxs, std::vector<uint256> &vecNEVMBlocks, std::vector<std::pair<uint256,uint32_t> >& vecTXIDPairs, bool bReverify = true, bool bReplay = false, bool bUpdateSpecialTxState = true) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    DisconnectResult DisconnectBlock(const CBlock& block, const CBlockIndex* pindex, CCoinsViewCache& view, NEVMMintTxSet &setMintTxs, std::vector<uint256> &vecNEVMBlocks, std::vector<std::pair<uint256,uint32_t> >& vecTXIDPairs, bool bReverify = true, bool bReplay = false, bool bUpdateSpecialTxState = true, const NEVMDisconnectPrefix* nevm_prefix = nullptr) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool ConnectBlock(const CBlock& block, BlockValidationState& state, CBlockIndex* pindex,
                     CCoinsViewCache& view, bool fJustCheck = false, bool bReverify = true) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     bool ConnectBlock(const CBlock& block, BlockValidationState& state, CBlockIndex* pindex,
-                    CCoinsViewCache& view, bool fJustCheck, NEVMMintTxSet &setMintTxs, NEVMTxRootMap &mapNEVMTxRoots, PoDAMAPMemory &mapPoDA, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs, bool bReverify = true) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+                    CCoinsViewCache& view, bool fJustCheck, NEVMMintTxSet &setMintTxs, NEVMTxRootMap &mapNEVMTxRoots, PoDAMAPMemory &mapPoDA, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs, bool bReverify = true, std::optional<NEVMBlockReject>* rejection = nullptr, bool* live_nevm_acknowledged = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     // SYSCOIN Apply the effects of a block disconnection on the UTXO set.
-    bool DisconnectTip(BlockValidationState& state, DisconnectedBlockTransactions* disconnectpool, bool bReverify = true, bool bUpdateSpecialTxState = true) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs);
+    bool DisconnectTip(BlockValidationState& state, DisconnectedBlockTransactions* disconnectpool, bool bReverify = true, bool bUpdateSpecialTxState = true, const NEVMDisconnectPrefix* nevm_prefix = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs);
 
     // Manual block validity manipulation:
     /** Mark a block as precious and reorganize.
@@ -761,13 +905,58 @@ public:
     bool StartBTCHeaderNode(bool force_reindex = false);
     bool StopBTCHeaderNode(bool bOnStart = false);
     bool IsManagedBTCHeaderNodeRunning(std::string& reason);
-    bool EnforceBlock(BlockValidationState& state, const CBlockIndex* pindex)
+    // SYSCOIN: Probe policy readiness and recover only an authenticated owned child.
+    bool CheckBTCHeaderNodeHealth(bool recover, std::string& reason);
+    // SYSCOIN: Enforce a PQ ChainLock against its authenticated predecessor.
+    bool EnforceBlock(BlockValidationState& state, const CBlockIndex* pindex,
+                      const CBlockIndex* finalized_predecessor,
+                      ChainLockEnforcementProvenance provenance)
         EXCLUSIVE_LOCKS_REQUIRED(!m_chainstate_mutex)
         LOCKS_EXCLUDED(cs_main);
+    // SYSCOIN BEGIN: Batched ChainLock-conflict marking interfaces.
     bool MarkConflictingBlock(BlockValidationState& state, CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
-    bool EnforceBestChainLock(const CBlockIndex* bestChainLockBlockIndex)
+    /**
+     * Quarantine known-inactive branches without touching the active chain or
+     * mempool. This is safe while ActivateBestChainStep holds both locks.
+     */
+    bool MarkConflictingBlocksInactive(
+        BlockValidationState& state,
+        std::span<CBlockIndex* const> roots)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    [[nodiscard]] ChainLockConflictMarkingStatsForTesting
+    GetChainLockConflictMarkingStatsForTesting() const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    void ResetChainLockConflictMarkingStatsForTesting()
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    // SYSCOIN END: Batched ChainLock-conflict marking interfaces.
+    // SYSCOIN: Reconcile the active chain with an authenticated PQ ChainLock.
+    bool EnforceBestChainLock(
+        const CBlockIndex* bestChainLockBlockIndex,
+        const CBlockIndex* finalized_predecessor,
+        ChainLockEnforcementProvenance provenance)
         EXCLUSIVE_LOCKS_REQUIRED(!m_chainstate_mutex)
         LOCKS_EXCLUDED(cs_main);
+    /**
+     * SYSCOIN: Replay one bounded batch of a catch-up-authenticated prefix.
+     * When replay reaches the requested exact active tip, finalize is invoked
+     * synchronously while activation is excluded and cs_main is held.
+     * The optional revalidator runs under those same locks before engine
+     * activity, each block notification, and finalization.
+     */
+    bool ReplayDeferredBTCCNEVM(int32_t through_height,
+                                const uint256& through_hash,
+                                const std::function<bool()>& finalize,
+                                bool& complete,
+                                std::string& error,
+                                const std::function<bool()>& revalidate = {})
+        EXCLUSIVE_LOCKS_REQUIRED(!cs_main, !m_chainstate_mutex);
+    /**
+     * SYSCOIN: Serialize a PQ catch-up rebase with active-chain activation.
+     * The callback may take cs_main and synchronously persist its branch-bound
+     * result; no external notification may run inside this boundary.
+     */
+    bool RunWithStableActiveChain(const std::function<bool()>& callback)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs_main, !m_chainstate_mutex);
     /** Remove invalidity status from a block and its descendants. */
     void ResetBlockFailureFlags(CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     bool ResetLastBlock() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
@@ -782,7 +971,39 @@ public:
 
     void TryAddBlockIndexCandidate(CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
-    void PruneBlockIndexCandidates();
+    /** Temporarily remove one missing-certificate branch from work selection. */
+    // SYSCOIN BEGIN: Deferred PQ receipt candidate lifecycle.
+    [[nodiscard]] bool DeferBTCCReceiptCandidates(
+        const uint256& logical_id,
+        const CBlockIndex& carrier) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    [[nodiscard]] bool DeferPaymentAuditReceiptCandidates(
+        const uint256& logical_id,
+        const CBlockIndex& carrier) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    /** Restore candidates waiting on an exact certificate after it is accepted. */
+    [[nodiscard]] bool ReconsiderBTCCReceiptCandidates(
+        const uint256& logical_id) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    [[nodiscard]] bool ReconsiderPaymentAuditReceiptCandidates(
+        const uint256& logical_id) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    [[nodiscard]] bool HasDeferredBTCCReceiptCandidates(
+        const uint256& logical_id) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    [[nodiscard]] bool HasDeferredPaymentAuditReceiptCandidates(
+        const uint256& logical_id) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    [[nodiscard]] std::optional<DeferredBTCCReceiptCandidate>
+    GetBestDeferredBTCCReceiptCandidate() const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    [[nodiscard]] std::optional<DeferredBTCCReceiptCandidate>
+    GetBestDeferredPaymentAuditReceiptCandidate() const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    [[nodiscard]] bool IsBTCCReceiptCandidateDeferred(
+        const CBlockIndex& candidate) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    // SYSCOIN END: Deferred PQ receipt candidate lifecycle.
+
+    // SYSCOIN: Preseal replacement may follow only the current best-work candidate.
+    [[nodiscard]] bool IsCurrentMostWorkBranch(const CBlockIndex& ancestor)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
+    // SYSCOIN: Pruning also maintains the deferred receipt-candidate index.
+    void PruneBlockIndexCandidates() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     void ClearBlockIndexCandidates() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
@@ -810,15 +1031,106 @@ public:
     }
 
 private:
+    // SYSCOIN BEGIN: Internal deferred-receipt index maintenance.
+    [[nodiscard]] bool DeferReceiptCandidates(
+        DeferredReceiptCertificateKind kind,
+        const uint256& logical_id,
+        const CBlockIndex& carrier) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    [[nodiscard]] bool ReconsiderReceiptCandidates(
+        DeferredReceiptCertificateKind kind,
+        const uint256& logical_id) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    [[nodiscard]] bool HasDeferredReceiptCandidates(
+        DeferredReceiptCertificateKind kind,
+        const uint256& logical_id) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    [[nodiscard]] std::optional<DeferredBTCCReceiptCandidate>
+    GetBestDeferredReceiptCandidate(DeferredReceiptCertificateKind kind) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    [[nodiscard]] std::optional<std::pair<uint256, const CBlockIndex*>>
+    FindDeferredBTCCReceiptDependency(const CBlockIndex& candidate) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    void AddDeferredBTCCReceiptCandidate(
+        const uint256& logical_id,
+        const CBlockIndex& carrier,
+        CBlockIndex& candidate) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    void RemoveDeferredBTCCReceiptCandidatesThrough(
+        const CBlockIndex& unusable) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    // SYSCOIN BEGIN: Remove one complete batch without repeated ancestry scans.
+    void RemoveDeferredBTCCReceiptCandidatesIn(
+        const std::unordered_set<const CBlockIndex*>& unusable)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    // SYSCOIN END: Remove one complete batch without repeated ancestry scans.
+    // SYSCOIN END: Internal deferred-receipt index maintenance.
+    // SYSCOIN BEGIN: Internal batched ChainLock-conflict engine.
+    enum class ChainLockConflictMarkingMode : uint8_t {
+        DISCONNECT_ACTIVE,
+        REQUIRE_INACTIVE,
+    };
+    bool MarkConflictingBlocks(
+        BlockValidationState& state,
+        std::span<CBlockIndex* const> roots,
+        ChainLockConflictMarkingMode mode,
+        const NEVMDisconnectPrefix* nevm_prefix)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    ChainLockConflictMarkingStatsForTesting
+        m_chainlock_conflict_marking_stats GUARDED_BY(cs_main);
+    // SYSCOIN END: Internal batched ChainLock-conflict engine.
     bool StartBTCHeaderNodeInternal(bool force_reindex) EXCLUSIVE_LOCKS_REQUIRED(cs_btcheader);
     bool StopBTCHeaderNodeInternal(bool bOnStart) EXCLUSIVE_LOCKS_REQUIRED(cs_btcheader);
-    bool ActivateBestChainStep(BlockValidationState& state, CBlockIndex* pindexMostWork, const std::shared_ptr<const CBlock>& pblock, bool& fInvalidFound, ConnectTrace& connectTrace) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs);
-    bool ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew, const std::shared_ptr<const CBlock>& pblock, ConnectTrace& connectTrace, DisconnectedBlockTransactions& disconnectpool) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs);
+    // SYSCOIN: Keep watchdog mutation in a lock-annotated member instead of a
+    // lambda whose captured lock state Clang cannot prove.
+    bool RestartBTCHeaderNodeForWatchdog(bool recover,
+                                         int64_t now,
+                                         const std::string& cause,
+                                         std::string& reason)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_btcheader);
+    // SYSCOIN: Carry deferred work and the selected candidate's repair authority.
+    bool ActivateBestChainStep(BlockValidationState& state, CBlockIndex* pindexMostWork, const std::shared_ptr<const CBlock>& pblock, bool& fInvalidFound, bool& fReceiptCandidateDeferred, ConnectTrace& connectTrace, std::optional<NEVMBlockReject>& rejection, std::optional<NEVMPayloadRepairSelection>& repair_selection) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs, m_chainstate_mutex);
+    // SYSCOIN BEGIN: Bound scheduled completion to one previously attempted child.
+    bool ActivateBestChainInternal(BlockValidationState& state,
+        std::shared_ptr<const CBlock> pblock, const CBlockIndex* nevm_pending,
+        bool nevm_continuation = false)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_chainstate_mutex) LOCKS_EXCLUDED(cs_main);
+    // SYSCOIN: Retirement revokes publication, not knowledge of an external effect.
+    CBlockIndex* NEVMPendingConnectAttempt() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    CBlockIndex* NEVMPendingConnectCandidate() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    // SYSCOIN: Persist only failed live attempts, before callbacks can retire them.
+    bool PersistNEVMPendingConnect(BlockValidationState& state) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    // SYSCOIN: Cancel only the authenticated external effect of an unpublished child.
+    bool CancelUnselectedNEVMPendingConnect(const CBlockIndex& pending, std::string& error)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_chainstate_mutex);
+    std::optional<uint256> m_nevm_pending_connect GUARDED_BY(cs_main);
+    // SYSCOIN: A published or externally cancelled attempt still owns fork selection.
+    bool m_nevm_activation_continuation GUARDED_BY(cs_main){false};
+    // SYSCOIN END: Transient lost-acknowledgement recovery context.
+    // Call after transition authorization, before undoing an active block.
+    bool PrepareNEVMDisconnectPrefix(
+        BlockValidationState& state,
+        std::optional<NEVMDisconnectPrefix>& prefix)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    bool ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew, const std::shared_ptr<const CBlock>& pblock, ConnectTrace& connectTrace, DisconnectedBlockTransactions& disconnectpool, std::optional<NEVMBlockReject>& rejection) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs);
+    // SYSCOIN: Only ordinary activation supplies authority to change repair branches.
+    bool ReconcileRejectedNEVMBlock(BlockValidationState& state,
+                                    const NEVMBlockReject& rejection,
+                                    const NEVMPayloadRepairSelection* selection = nullptr)
+        EXCLUSIVE_LOCKS_REQUIRED(m_chainstate_mutex) LOCKS_EXCLUDED(cs_main);
+    bool InvalidateBlockLocked(BlockValidationState& state, CBlockIndex* pindex,
+                               bool bReverify, bool bUpdateSpecialTxState,
+                               const NEVMBlockReject* rejection = nullptr)
+        EXCLUSIVE_LOCKS_REQUIRED(m_chainstate_mutex) LOCKS_EXCLUDED(cs_main);
+    bool ReplayDeferredBTCCNEVMLocked(int32_t through_height,
+                                     const uint256& through_hash,
+                                     const std::function<bool()>& finalize,
+                                     bool& complete, std::string& error,
+                                     std::optional<NEVMBlockReject>& rejection,
+                                     const std::function<bool()>& revalidate)
+        EXCLUSIVE_LOCKS_REQUIRED(m_chainstate_mutex) LOCKS_EXCLUDED(cs_main);
 
     void InvalidBlockFound(CBlockIndex* pindex, const BlockValidationState& state) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     CBlockIndex* FindMostWorkChain() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
-    bool RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& inputs, NEVMTxRootMap &mapNEVMTxRoots, NEVMMintTxSet &setMintTxs, PoDAMAPMemory &mapPoDA, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    // SYSCOIN: Rollforward reauthorizes branch-local BTCC receipt state before
+    // replaying any non-null Bitcoin checkpoint to NEVM.
+    bool RollforwardBlock(CBlockIndex* pindex, CCoinsViewCache& inputs, NEVMTxRootMap &mapNEVMTxRoots, NEVMMintTxSet &setMintTxs, PoDAMAPMemory &mapPoDA, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     void CheckForkWarningConditions() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     void InvalidChainFound(CBlockIndex* pindexNew) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     void ConflictingChainFound(CBlockIndex* pindexNew) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
@@ -845,10 +1157,30 @@ private:
     void UpdateTip(const CBlockIndex* pindexNew)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     // SYSCOIN
-    bool ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMap &mapNEVMTxRoots, const CBlock& block, const CBlockIndex* pindex, const uint256& nBlockHash, const uint32_t& nHeight, const bool fJustCheck, PoDAMAPMemory &mapPoDA, const CDeterministicMNListNEVMAddressDiff &diff) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
-
+    // SYSCOIN: btcc_prefix_authenticated is reserved for deterministic replay
+    // after a fully verified catch-up seal; live callers leave it false.
+    // SYSCOIN: Normal block connection requires cs_main. Authenticated
+    // catch-up replay instead holds m_chainstate_mutex while releasing
+    // cs_main across the synchronous Geth call.
+    // SYSCOIN: The optional acknowledgment latches only actual live delivery;
+    // callers retain it across retries until their private outputs publish.
+    bool ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMap &mapNEVMTxRoots, const CBlock& block, const CBlockIndex* pindex, const uint256& nBlockHash, const uint32_t& nHeight, const bool fJustCheck, PoDAMAPMemory &mapPoDA, const CDeterministicMNListNEVMAddressDiff &diff, bool btcc_prefix_authenticated = false, NEVMNotificationContext notification_context = NEVMNotificationContext::LIVE, std::optional<NEVMBlockReject>* rejection = nullptr, bool* live_nevm_acknowledged = nullptr);
+    bool RecoverNEVMPrefixForConnect(const CBlockIndex& pending,
+                                     std::string& error,
+                                     std::optional<NEVMBlockReject>& rejection)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    bool RecoverNEVMPrefixThrough(const CBlockIndex& through,
+                                  const CBlockIndex* pending,
+                                  std::string& error,
+                                  std::optional<NEVMBlockReject>& rejection)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     SteadyClock::time_point m_last_write{};
     SteadyClock::time_point m_last_flush{};
+    // SYSCOIN: Retry auxiliary GC once per tip or external retention change;
+    // mempool-triggered periodic calls must not amplify one bounded batch.
+    uint256 m_last_dmn_maintenance_retry_tip GUARDED_BY(::cs_main);
+    uint64_t m_last_dmn_maintenance_retry_generation
+        GUARDED_BY(::cs_main){0};
 
     /**
      * In case of an invalid snapshot, rename the coins leveldb directory so
@@ -947,6 +1279,27 @@ private:
 
     CBlockIndex* m_best_invalid GUARDED_BY(::cs_main){nullptr};
 
+    // SYSCOIN: Invalidates process-local proofs over mutable PQ block-index
+    // provenance. This is deliberately global: recovery-time revocation on a
+    // side branch may conservatively discard an active proof, while ordinary
+    // first validation and tip extension never advance the counter.
+    uint64_t m_pq_provenance_revocation_revision GUARDED_BY(::cs_main){0};
+    void NotePQProvenanceRevoked() EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        AssertLockHeld(::cs_main);
+        assert(m_pq_provenance_revocation_revision !=
+               std::numeric_limits<uint64_t>::max());
+        ++m_pq_provenance_revocation_revision;
+    }
+
+    // SYSCOIN BEGIN: Fail-closed local provenance for the BLS-free activation.
+    node::PQActivationRuntimeState m_pq_activation_runtime_state
+        GUARDED_BY(::cs_main){node::PQActivationRuntimeState::FAILED};
+    std::optional<node::PQActivationHandoffRecord>
+        m_pq_activation_handoff_record GUARDED_BY(::cs_main);
+    std::atomic<bool> m_pq_activation_participation_allowed{false};
+    // SYSCOIN END: Fail-closed local provenance for the BLS-free activation.
+
     //! Internal helper for ActivateSnapshot().
     [[nodiscard]] bool PopulateAndValidateSnapshot(
         Chainstate& snapshot_chainstate,
@@ -968,6 +1321,7 @@ private:
         bool min_pow_checked,
         bool bForBlock = true) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     friend Chainstate;
+    friend class llmq::test::PQHistoryReauthenticationTestAccess;
 
     /** Most recent headers presync progress update, for rate-limiting. */
     std::chrono::time_point<std::chrono::steady_clock> m_last_presync_update GUARDED_BY(::cs_main) {};
@@ -984,6 +1338,47 @@ private:
     }
 
     std::atomic<uint32_t> m_skip_external_nevm_notifies_until_height{0};
+
+    // SYSCOIN: A Geth pair ahead of the recovered coins tip is a temporary
+    // startup obligation, never a height-only notification bypass.
+    struct NEVMStartupPair {
+        int32_t height;
+        uint256 block_hash;
+    };
+    std::optional<NEVMStartupPair> m_nevm_startup_pair GUARDED_BY(::cs_main);
+    std::atomic<bool> m_nevm_startup_pair_pending{false};
+    // SYSCOIN: Ordinary buffer loss can leave no payload/receipt marker.
+    // Clear only after flushing and binding the applied pair to ActiveTip().
+    bool m_nevm_prefix_recovery_needed GUARDED_BY(::cs_main){false};
+    // SYSCOIN: One durable external attempt, never publication or fork-choice authority.
+    std::optional<std::pair<uint256, uint256>> m_nevm_pending_connect_record GUARDED_BY(::cs_main);
+    bool m_nevm_pending_connect_durable GUARDED_BY(::cs_main){false};
+    bool m_nevm_pending_connect_rebuild GUARDED_BY(::cs_main){false};
+    // Fence a freshly authenticated engine endpoint before erasing its obligation.
+    bool ClearNEVMPendingConnect(uint64_t count, const uint256& hash, std::string& error)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool NEVMBlockProductionPrerequisitesMet()
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    enum class NEVMPayloadRepairStage { VERIFY_STORED, DOWNLOAD, REPLAY };
+    std::optional<NEVMBlockReject> m_nevm_payload_repair GUARDED_BY(::cs_main);
+    NEVMPayloadRepairStage m_nevm_payload_stage GUARDED_BY(::cs_main){NEVMPayloadRepairStage::VERIFY_STORED};
+    uint64_t m_nevm_payload_generation GUARDED_BY(::cs_main){0};
+    bool m_nevm_payload_durable GUARDED_BY(::cs_main){false};
+    std::chrono::steady_clock::time_point m_nevm_payload_retry_after GUARDED_BY(::cs_main){};
+    std::chrono::steady_clock::time_point m_nevm_payload_persist_retry_after GUARDED_BY(::cs_main){};
+    std::atomic<bool> m_nevm_payload_pending{false};
+    bool IsWaitingForNEVMPayload(const CBlockIndex& candidate) const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool PersistNEVMPayloadRepair(BlockValidationState& state)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool ClearNEVMPayloadRepair(std::string& error)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    // SYSCOIN: Preserve predecessor priority unless activation selected a competing repair.
+    bool QueueNEVMPayloadRepair(const NEVMBlockReject& rejection,
+                                BlockValidationState& state,
+                                const NEVMPayloadRepairSelection* selection = nullptr)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
 public:
     using Options = kernel::ChainstateManagerOpts;
@@ -1011,8 +1406,8 @@ public:
      */
     void CheckBlockIndex();
 
-    // SYSCOIN: Startup hardening for BTCC carrier validation.
-    // Backfill btcpPrevCommitment for recent sign-offset blocks if missing in the block index.
+    // SYSCOIN: Startup hardening for deterministic PQ BTCC candidate lookup.
+    // Backfill btcpPrevCommitment for recent candidate blocks if missing in the block index.
     // This is intended to run after loading/verifying chainstate, before processing new blocks,
     // avoiding consensus-path disk reads while remaining tolerant to crashes/upgrades.
     void BackfillRecentBTCPREVCommitments();
@@ -1044,7 +1439,16 @@ public:
      * Mutable because we need to be able to mark IsInitialBlockDownload()
      * const, which latches this for caching purposes.
      */
+    // SYSCOIN: Gate one-shot NEVM publication and public readiness on
+    // authenticated PQ history rather than block sync alone.
     mutable std::atomic<bool> m_cached_finished_ibd{false};
+    std::atomic<bool> m_nevm_network_start_sent{false};
+
+    // Public readiness is held behind cs_main until every durable provisional
+    // PQ-history obligation has been authenticated. The ordinary block-sync
+    // predicate remains independently available to the catch-up verifier.
+    PQHistoryAuthState m_pq_history_auth_state GUARDED_BY(::cs_main){
+        PQHistoryAuthState::UNINITIALIZED};
 
     /**
      * Every received block is assigned a unique and increasing identifier, so we
@@ -1108,6 +1512,31 @@ public:
     //! Get all chainstates currently being used.
     std::vector<Chainstate*> GetAll();
 
+    // SYSCOIN: Preserve every crash-visible chainstate marker when retaining
+    // shared deterministic-MN and PQ history.
+    /**
+     * Get every initialized chainstate whose on-disk state may still be
+     * recovered or published. Disabled AssumeUTXO chainstates remain on disk
+     * until cleanup and therefore must participate in shared-state retention.
+     */
+    std::vector<Chainstate*> GetAllForPersistence();
+
+    /** Validate the normal, never-flushed, or interrupted CoinsDB markers. */
+    [[nodiscard]] static std::optional<std::vector<uint256>>
+    GetCoinsRecoveryMarkers(
+        const uint256& best_block,
+        std::span<const uint256> head_blocks,
+        const uint256& coins_tip,
+        std::string& error);
+
+    /**
+     * Resolve every crash-visible and prospective UTXO marker across all
+     * persistence chainstates. A partial CoinsDB batch exposes its new and old
+     * heads instead of a best block; malformed marker combinations fail.
+     */
+    [[nodiscard]] std::optional<std::vector<const CBlockIndex*>>
+    GetAllRecoveryBlockIndexes(std::string& error);
+
     //! Construct and activate a Chainstate on the basis of UTXO snapshot data.
     //!
     //! Steps:
@@ -1141,6 +1570,18 @@ public:
     CChain& ActiveChain() const EXCLUSIVE_LOCKS_REQUIRED(GetMutex()) { return ActiveChainstate().m_chain; }
     int ActiveHeight() const EXCLUSIVE_LOCKS_REQUIRED(GetMutex()) { return ActiveChain().Height(); }
     CBlockIndex* ActiveTip() const EXCLUSIVE_LOCKS_REQUIRED(GetMutex()) { return ActiveChain().Tip(); }
+    // SYSCOIN: Reject process-local PQ proofs built before index provenance
+    // was revoked without changing the active block hash.
+    uint64_t GetPQProvenanceRevocationRevision() const
+        EXCLUSIVE_LOCKS_REQUIRED(GetMutex())
+    {
+        return m_pq_provenance_revocation_revision;
+    }
+
+    /** SYSCOIN: Persistently retire only one definitively invalid deferred audit branch. */
+    [[nodiscard]] bool RetireDeferredPaymentAuditReceiptCarrier(
+        const uint256& witness_id,
+        CBlockIndex& carrier) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     //! The state of a background sync (for net processing)
     bool BackgroundSyncInProgress() const EXCLUSIVE_LOCKS_REQUIRED(GetMutex()) {
@@ -1181,6 +1622,132 @@ public:
 
     /** Check whether we are doing an initial block download (synchronizing from disk or network) */
     bool IsInitialBlockDownload() const;
+
+    // SYSCOIN BEGIN: Public-network BLS-to-PQ activation handoff.
+    /**
+     * Initialize local provenance before replay. Explicit replay and an empty
+     * coins DB are durably quarantined before any opaque legacy block is read.
+     */
+    bool PreparePQActivationHandoff(bool force_historical_replay,
+                                    bool empty_chainstate,
+                                    bilingual_str& error)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Verify the transition release's exact imported A-1 pin. */
+    bool FinalizePQActivationHandoff(const CBlockIndex* tip,
+                                     bilingual_str& error)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Verify an imported transition-release pin against the active tip. */
+    bool MaybeFinalizePQActivationHandoff(const CBlockIndex& tip,
+                                          std::string& error)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /**
+     * Protect any durable ChainLock floor and the imported A-1 handoff.
+     */
+    bool CheckPQActivationHandoffDisconnect(const CBlockIndex& disconnecting,
+                                             std::string& error)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    bool IsPQParticipationAllowed() const noexcept
+    {
+        return GetParams().GetChainType() == ChainType::REGTEST ||
+               m_pq_activation_participation_allowed.load(
+                   std::memory_order_acquire);
+    }
+
+    /** Permit block production only after authenticated handoff. */
+    bool IsPQBlockProductionAllowed() const noexcept;
+    // SYSCOIN END: Public-network BLS-to-PQ activation handoff.
+
+    // SYSCOIN: Separate base sync from the one-way public-readiness latch used
+    // by PQ-history authentication and NEVM startup.
+    /** Base-chain synchronization only; excludes PQ authentication and Geth. */
+    bool IsBaseBlockSyncComplete() const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** A preseal can begin before readiness or continue while already pending. */
+    bool CanBeginPQHistoryAuthentication() const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /**
+     * Permit bounded historical replay after the exact branch has advanced
+     * beyond the protocol owner's guaranteed certificate-serving window.
+     */
+    bool CanBeginPQHistoryAuthentication(
+        const CBlockIndex& branch_point,
+        int32_t certificate_serve_until_height) const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Enter PENDING using the same exact expired-history proof. */
+    [[nodiscard]] bool TryEnterPendingPQHistoryAuthentication(
+        const CBlockIndex& branch_point,
+        int32_t certificate_serve_until_height)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    bool HasCompletedInitialBlockDownload() const noexcept
+    {
+        return m_cached_finished_ibd.load(std::memory_order_relaxed);
+    }
+
+    /** Publish the aggregate PQ-history state without performing I/O/callbacks. */
+    [[nodiscard]] bool PublishPQHistoryAuthState(PQHistoryAuthState state)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Recover recognized coverage revocation without reopening public IBD. */
+    [[nodiscard]] bool TryReenterPendingPQHistoryAuthentication(
+        const PQHistoryReauthentication& proof)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Re-evaluate the one-way public IBD latch after publishing READY. */
+    void MaybeCompleteInitialBlockDownload()
+        EXCLUSIVE_LOCKS_REQUIRED(!::cs_main);
+
+    /** Start NEVM peer networking after IBD and deferred replay are complete. */
+    [[nodiscard]] bool MaybeStartNEVMNetwork();
+
+    // SYSCOIN: Restore and resolve a failed live attempt before startup activation.
+    [[nodiscard]] bool InitializeNEVMPendingConnect(std::string& error)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    [[nodiscard]] bool RecoverNEVMPendingConnect(uint64_t& count, uint256& hash, std::string& error)
+        LOCKS_EXCLUDED(::cs_main);
+
+    /** Accept a paired startup snapshot, retaining an ahead pair for recovery. */
+    [[nodiscard]] bool InitializeNEVMStartupPair(
+        uint64_t geth_count, const uint256& syscoin_hash, std::string& error)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool HasPendingNEVMStartupPair() const noexcept
+    {
+        return m_nevm_startup_pair_pending.load(std::memory_order_acquire);
+    }
+    /** Read-only gate for fresh/cached work; never replays under a mining lock. */
+    [[nodiscard]] bool PrepareNEVMBlockProduction()
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** Retry mining recovery with activation excluded, before acquiring cs_main. */
+    [[nodiscard]] bool MaybeRecoverNEVMBlockProduction(std::string& error)
+        LOCKS_EXCLUDED(::cs_main);
+    /** Only exact ancestors of the pending pair may reconnect without Geth. */
+    [[nodiscard]] bool CheckNEVMStartupConnect(
+        const CBlockIndex& index, std::string& error) const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** Re-read Geth after local recovery; unavailable status leaves the pair pending. */
+    [[nodiscard]] bool MaybeCompleteNEVMStartupPair(std::string& error)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** Retry activation and publish readiness even if no new block arrives. */
+    [[nodiscard]] bool RetryNEVMStartupPair(BlockValidationState& state)
+        LOCKS_EXCLUDED(::cs_main);
+    void ResetNEVMNetworkStart()
+    {
+        m_nevm_network_start_sent.store(false,
+                                        std::memory_order_relaxed);
+    }
+
+    PQHistoryAuthState GetPQHistoryAuthState() const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        return m_pq_history_auth_state;
+    }
 
     /**
      * Import blocks from an external file
@@ -1239,6 +1806,26 @@ public:
      */
     bool ProcessNewBlock(const std::shared_ptr<const CBlock>& block, bool force_processing, bool min_pow_checked, bool* new_block) LOCKS_EXCLUDED(cs_main);
 
+    // SYSCOIN BEGIN: Expose durable NEVM payload repair and Geth reconciliation.
+    bool HasPendingNEVMPayloadRepair() const;
+    bool HasDurableNEVMPayloadRepair() const EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+    {
+        return m_nevm_payload_repair.has_value() && m_nevm_payload_durable;
+    }
+    std::optional<NEVMPayloadRepairRequest> GetNEVMPayloadRepairRequest() const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    bool ProcessNEVMPayloadRepair(const NEVMPayloadRepairRequest& request,
+                                  Span<const uint8_t> payload,
+                                  BlockValidationState& state)
+        LOCKS_EXCLUDED(cs_main);
+    bool MaybeRecoverNEVMPayload(std::string& error) LOCKS_EXCLUDED(cs_main);
+    bool InitializeNEVMPayloadRepair(std::string& error)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    bool DiscoverNEVMPayloadRepair(uint64_t geth_count,
+                                   const uint256& syscoin_hash,
+                                   std::string& error) LOCKS_EXCLUDED(cs_main);
+    // SYSCOIN END: Expose NEVM payload repair and reconciliation.
+
     /**
      * Process incoming block headers.
      *
@@ -1286,7 +1873,6 @@ public:
 
     //! Load the block tree and coins database from disk, initializing state if we're running with -reindex
     bool LoadBlockIndex() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
-
     //! Check to see if caches are out of balance and if so, call
     //! ResizeCoinsCaches() as needed.
     void MaybeRebalanceCaches() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
@@ -1354,23 +1940,40 @@ public:
 
 /** Global variable that points to the height based on a transaction id  */
 static const uint32_t MAX_BLOCK_INDEX = 43800*12; // 2.5 year of blocks
-// SYSCOIN
+// SYSCOIN BEGIN: Retryable transaction-height cache, serialized by cs_main.
 class CBlockIndexDB : public CDBWrapper {
     std::unordered_map<uint256, uint32_t, StaticSaltedHasher> mapCache;
+    std::unordered_set<uint256, StaticSaltedHasher> m_pending_erases;
+    bool m_pending_erase_sync{false};
+    void StageErase(const std::vector<std::pair<uint256, uint32_t>>& txids) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    bool Prune(const uint32_t& height) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+protected:
+    virtual bool WriteCacheBatch(CDBBatch& batch, bool sync) { return WriteBatch(batch, sync); }
 public:
     using CDBWrapper::CDBWrapper;
-    bool ReadBlockHeight(const uint256& txid, uint32_t& nHeight);
-    bool Prune(const uint32_t &nHeight, CDBBatch &batch);
-    bool FlushErase(const std::vector<std::pair<uint256,uint32_t> > &vecTXIDPairs);
-    bool FlushErase(const std::vector<std::pair<uint256,uint32_t> > &vecTXIDPairs, CDBBatch &batch);
-    void FlushDataToCache(const std::vector<std::pair<uint256,uint32_t> > &vecTXIDPairs);
-    bool FlushCacheToDisk(const uint32_t &nHeight, std::size_t CHUNK_ITEMS = 100000, bool fSync = true);
+    virtual ~CBlockIndexDB() = default;
+    bool ReadBlockHeight(const uint256& txid, uint32_t& nHeight) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    void EraseCache(const std::vector<std::pair<uint256, uint32_t>>& txids) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    bool FlushErase(const std::vector<std::pair<uint256,uint32_t> > &vecTXIDPairs) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    void FlushDataToCache(const std::vector<std::pair<uint256,uint32_t> > &vecTXIDPairs) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    bool FlushCacheToDisk(const uint32_t &nHeight, std::size_t CHUNK_ITEMS = 100000, bool fSync = true) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 };
+// SYSCOIN END: Retryable transaction-height cache, serialized by cs_main.
 extern std::unique_ptr<CBlockIndexDB> pblockindexdb;
 // SYSCOIN
 static const unsigned int DEFAULT_RPC_SERIALIZE_VERSION = 1;
 int RPCSerializationFlags();
-bool DisconnectNEVMCommitment(ChainstateManager& chainman, BlockValidationState& state, std::vector<uint256> &vecNEVMBlocks, const CBlock& block, const uint32_t& nHeight, const uint256& nBlockHash, const CDeterministicMNListNEVMAddressDiff &diff) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+// SYSCOIN: Return whether Geth has applied this height under its count contract.
+[[nodiscard]] std::optional<bool> IsNEVMBlockAppliedForDisconnect(
+    int64_t nevm_start_height, uint64_t geth_count,
+    uint32_t disconnect_height) noexcept;
+// SYSCOIN: Count equality alone cannot authenticate an equal-height branch.
+[[nodiscard]] bool DoesNEVMBlockInfoMatchSyscoinBlock(
+    int64_t nevm_start_height, uint64_t geth_count,
+    uint32_t expected_syscoin_height,
+    const uint256& reported_syscoin_hash,
+    const uint256& expected_syscoin_hash) noexcept;
+bool DisconnectNEVMCommitment(ChainstateManager& chainman, BlockValidationState& state, std::vector<uint256> &vecNEVMBlocks, const CBlock& block, const CBlockIndex& index, const uint32_t& nHeight, const uint256& nBlockHash, const CDeterministicMNListNEVMAddressDiff &diff, NEVMNotificationContext notification_context = NEVMNotificationContext::LIVE, const NEVMDisconnectPrefix* nevm_prefix = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 bool GetNEVMData(BlockValidationState& state, const CBlock& block, CNEVMHeader &evmBlock, std::vector<unsigned char>* coinbase_payload = nullptr);
 bool FillNEVMData(CBlock &block);
 bool EraseMempoolNEVMData(const std::vector<uint8_t>& vchVersionHash, const uint256& txid);

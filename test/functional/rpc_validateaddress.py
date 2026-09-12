@@ -168,7 +168,6 @@ VALID_DATA = [
     ),
 ]
 
-
 class ValidateAddressMainTest(SyscoinTestFramework):
     def set_test_params(self):
         self.setup_clean_chain = True

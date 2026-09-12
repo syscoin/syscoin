@@ -305,6 +305,13 @@ bool CDBWrapper::WriteBatch(CDBBatch& batch, bool fSync)
     return true;
 }
 
+// SYSCOIN: A cross-database commit requires a barrier over every prior write.
+bool CDBWrapper::Sync()
+{
+    HandleError(DBContext().pdb->Sync());
+    return true;
+}
+
 size_t CDBWrapper::DynamicMemoryUsage() const
 {
     std::string memory;
@@ -378,7 +385,11 @@ bool CDBWrapper::IsEmpty()
 {
     std::unique_ptr<CDBIterator> it(NewIterator());
     it->SeekToFirst();
-    return !(it->Valid());
+    const bool empty{!it->Valid()};
+    // SYSCOIN: A failed iterator is not evidence that a security-sensitive
+    // database is empty and safe to initialize with a fresh schema.
+    it->CheckStatus();
+    return empty;
 }
 
 void CDBWrapper::CloseDB()
@@ -452,6 +463,16 @@ Span<const std::byte> CDBIterator::GetValueImpl() const
 
 CDBIterator::~CDBIterator() = default;
 bool CDBIterator::Valid() const { return m_impl_iter->iter->Valid(); }
+// SYSCOIN: Exact GC reads must distinguish clean iterator exhaustion from
+// storage failure before treating a key as absent.
+void CDBIterator::CheckStatus() const
+{
+    const leveldb::Status status{m_impl_iter->iter->status()};
+    if (!status.ok()) {
+        LogPrintf("LevelDB iterator failure: %s\n", status.ToString());
+        HandleError(status);
+    }
+}
 void CDBIterator::SeekToFirst() { m_impl_iter->iter->SeekToFirst(); }
 void CDBIterator::Next() { m_impl_iter->iter->Next(); }
 

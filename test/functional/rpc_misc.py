@@ -32,7 +32,8 @@ class RpcMiscTest(SyscoinTestFramework):
         )
 
         self.log.info("test getmemoryinfo")
-        memory = node.getmemoryinfo()['locked']
+        memory_info = node.getmemoryinfo()
+        memory = memory_info['locked']
         assert_greater_than(memory['used'], 0)
         assert_greater_than(memory['free'], 0)
         assert_greater_than(memory['total'], 0)
@@ -41,6 +42,18 @@ class RpcMiscTest(SyscoinTestFramework):
         assert_greater_than(memory['chunks_used'], 0)
         assert_greater_than(memory['chunks_free'], 0)
         assert_equal(memory['used'] + memory['free'], memory['total'])
+        # SYSCOIN BEGIN: PQ shared-state memory accounting.
+        pq_memory = memory_info['pq']
+        for field in (
+            'cache_owned_bytes',
+            'externally_pinned_state_bytes',
+            'live_registry_views',
+            'live_roster_contexts',
+            'verification_worker_pinned_bytes',
+            'audit_runtime_pinned_bytes',
+        ):
+            assert_greater_than_or_equal(pq_memory[field], 0)
+        # SYSCOIN END: PQ shared-state memory accounting.
 
         self.log.info("test mallocinfo")
         try:

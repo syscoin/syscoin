@@ -13,6 +13,10 @@
 #include <kernel/chainparams.h>
 #include <kernel/cs_main.h>
 #include <kernel/messagestartchars.h>
+#include <merkleblock.h> // SYSCOIN: retained NEVM coinbase inclusion proofs.
+#include <node/pq_activation_handoff.h> // SYSCOIN: durable local PQ activation provenance.
+#include <span.h>
+#include <streams.h> // SYSCOIN: witness-stripped coinbase proof serialization.
 #include <sync.h>
 #include <util/fs.h>
 #include <util/hasher.h>
@@ -41,6 +45,7 @@ class CDSNotificationInterface;
 class CDeterministicMNManager;
 class CActiveMasternodeManager;
 class CBlockHeader;
+class CNEVMHeader;
 class WalletInitInterface;
 struct CCheckpointData;
 struct FlatFilePos;
@@ -50,6 +55,26 @@ struct Params;
 namespace util {
 class SignalInterrupt;
 } // namespace util
+
+// SYSCOIN BEGIN: Coinbase commitment evidence retained across pruning.
+namespace node {
+/** Coinbase commitment evidence retained before deleting a NEVM block body. */
+struct NEVMPrunedRootProof {
+    static constexpr uint8_t VERSION{1};
+    uint8_t version{VERSION};
+    CTransactionRef coinbase;
+    CPartialMerkleTree merkle_tree;
+
+    SERIALIZE_METHODS(NEVMPrunedRootProof, obj)
+    {
+        READWRITE(obj.version);
+        // Only the transaction ID is committed by the indexed Merkle root.
+        OverrideStream<Stream> stripped{&s, SERIALIZE_TRANSACTION_NO_WITNESS};
+        ser_action.SerReadWriteMany(stripped, obj.coinbase, obj.merkle_tree);
+    }
+};
+} // namespace node
+// SYSCOIN END: Coinbase commitment evidence retained across pruning.
 
 namespace kernel {
 /** Access to the block database (blocks/index/) */
@@ -64,6 +89,18 @@ public:
     void ReadReindexing(bool& fReindexing);
     bool WriteFlag(const std::string& name, bool fValue);
     bool ReadFlag(const std::string& name, bool& fValue);
+    // SYSCOIN BEGIN: Persist the local BLS-to-PQ activation handoff atomically.
+    bool HasPQActivationHandoff() const;
+    bool WritePQActivationHandoff(
+        const node::PQActivationHandoffRecord& record);
+    bool ReadPQActivationHandoff(node::PQActivationHandoffRecord& record);
+    // SYSCOIN END: Persist the local BLS-to-PQ activation handoff atomically.
+    // SYSCOIN BEGIN: Persist authenticated NEVM commitments across pruning.
+    bool ReadNEVMPrunedRootProof(
+        const uint256& carrier, node::NEVMPrunedRootProof& proof);
+    bool WriteNEVMPrunedRootProofs(
+        const std::vector<std::pair<uint256, node::NEVMPrunedRootProof>>& proofs);
+    // SYSCOIN END: Persist authenticated NEVM commitments across pruning.
     bool LoadBlockIndexGuts(const Consensus::Params& consensusParams, std::function<CBlockIndex*(const uint256&)> insertBlockIndex, const util::SignalInterrupt& interrupt)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 };
@@ -164,7 +201,6 @@ private:
     [[nodiscard]] bool FlushUndoFile(int block_file, bool finalize = false);
 
     [[nodiscard]] bool FindBlockPos(FlatFilePos& pos, unsigned int nAddSize, unsigned int nHeight, uint64_t nTime, bool fKnown);
-    [[nodiscard]] bool FlushChainstateBlockFile(int tip_height);
     bool FindUndoPos(BlockValidationState& state, int nFile, FlatFilePos& pos, unsigned int nAddSize);
 
     FlatFileSeq BlockFileSeq() const;
@@ -295,6 +331,11 @@ public:
 
     std::unique_ptr<BlockTreeDB> m_block_tree_db GUARDED_BY(::cs_main);
 
+    // SYSCOIN: PQ catch-up durably flushes block and undo files before
+    // publishing replay progress.
+    /** Flush the current block and undo file for the chainstate type at the given height. */
+    [[nodiscard]] bool FlushChainstateBlockFile(int tip_height);
+
     bool WriteBlockIndexDB() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool LoadBlockIndexDB(const std::optional<uint256>& snapshot_blockhash)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
@@ -304,7 +345,11 @@ public:
      * This could happen on some systems if the file was still being read while unlinked,
      * or if we crash before unlinking.
      */
-    void ScanAndUnlinkAlreadyPrunedFiles() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    // SYSCOIN BEGIN: Audit retained NEVM evidence and report cleanup failures.
+    bool ScanAndUnlinkAlreadyPrunedFiles() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** Fail closed when an earlier prune left no authenticated coinbase evidence. */
+    bool CheckNEVMPrunedBlockProofs() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    // SYSCOIN END: Audit retained NEVM evidence and report cleanup failures.
 
     // SYSCOIN
     CBlockIndex* AddToBlockIndex(const CBlockHeader& block, CBlockIndex*& best_header, enum BlockStatus nStatus = BLOCK_VALID_TREE) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
@@ -326,6 +371,31 @@ public:
 
     /** Store block on disk. If dbp is not nullptr, then it provides the known position of the block within a block file on disk. */
     FlatFilePos SaveBlockToDisk(const CBlock& block, int nHeight, const FlatFilePos* dbp);
+
+    // SYSCOIN BEGIN: NEVM payload replacement and reindex adoption interfaces.
+    /**
+     * Replace only the stored NEVM payload, preserving the block and its undo.
+     * The caller must have authenticated the replacement with the engine.
+     * The target's block-index entry must already be persisted by normal flushing.
+     * Publish new disk positions only after the records and index are durable.
+     */
+    [[nodiscard]] bool ReplaceNEVMBlockData(BlockValidationState& state,
+                                          CBlockIndex& index,
+                                          Span<const uint8_t> payload)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
+    /**
+     * Adopt an existing corrected record during reindex, before undo exists.
+     * The caller must have read candidate from known_pos and authenticated the
+     * old payload rejection and replacement with the engine. Ordinary reindex
+     * flushing persists the new position; the Core block must remain identical.
+     */
+    [[nodiscard]] bool AdoptNEVMBlockDataForReindex(BlockValidationState& state,
+                                                  CBlockIndex& index,
+                                                  const CBlock& candidate,
+                                                  const FlatFilePos& known_pos)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    // SYSCOIN END: NEVM payload replacement and reindex adoption interfaces.
 
     /** Whether running in -prune mode. */
     [[nodiscard]] bool IsPruneMode() const { return m_prune_mode; }
@@ -360,6 +430,15 @@ public:
 
     //! Create or update a prune lock identified by its name
     void UpdatePruneLock(const std::string& name, const PruneLockInfo& lock_info) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    // SYSCOIN: Durable replay markers may move forward, but they must never
+    // undo a lower floor installed by DisconnectTip for reorg rollback data.
+    int UpdatePruneLockLowerOnly(const std::string& name,
+                                 const PruneLockInfo& lock_info)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    // SYSCOIN: Replay obligations must erase released locks; an INT_MAX
+    // sentinel would be moved backward by DisconnectTip and become active.
+    void RemovePruneLock(const std::string& name)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** Open a block file (blk?????.dat) */
     CAutoFile OpenBlockFile(const FlatFilePos& pos, bool fReadOnly = false) const;
@@ -376,6 +455,11 @@ public:
     bool ReadBlockFromDisk(CBlock& block, const FlatFilePos& pos) const;
     /** Auxiliary loading may be disabled when revalidating the committed disk representation. */
     bool ReadBlockFromDisk(CBlock& block, const CBlockIndex& index, bool load_auxiliary_data = true) const;
+    // SYSCOIN BEGIN: Read authenticated commitments after block-body pruning.
+    /** Authenticate a pruned carrier's NEVM commitment without its block body. */
+    bool ReadNEVMPrunedHeader(CNEVMHeader& header, const CBlockIndex& index) const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    // SYSCOIN END: Read authenticated commitments after block-body pruning.
     bool ReadRawBlockFromDisk(std::vector<uint8_t>& block, const FlatFilePos& pos) const;
 
     bool UndoReadFromDisk(CBlockUndo& blockundo, const CBlockIndex& index) const;

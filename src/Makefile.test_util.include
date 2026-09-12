@@ -16,6 +16,7 @@ TEST_UTIL_H = \
   test/util/logging.h \
   test/util/mining.h \
   test/util/net.h \
+  test/util/nevm_mint.h \
   test/util/poolresourcetester.h \
   test/util/random.h \
   test/util/script.h \

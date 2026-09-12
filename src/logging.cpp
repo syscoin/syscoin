@@ -177,9 +177,6 @@ const CLogCategoryDesc LogCategories[] =
     // SYSCOIN
     {BCLog::CHAINLOCKS, "chainlocks"},
     {BCLog::GOBJECT, "gobject"},
-    {BCLog::LLMQ, "llmq"},
-    {BCLog::LLMQ_DKG, "llmq-dkg"},
-    {BCLog::LLMQ_SIGS, "llmq-sigs"},
     {BCLog::MNPAYMENTS, "mnpayments"},
     {BCLog::MNLIST, "mnlist"},
     {BCLog::MNSYNC, "mnsync"},
@@ -289,12 +286,6 @@ std::string LogCategoryToStr(BCLog::LogFlags category)
         return "chainlocks";
     case BCLog::LogFlags::GOBJECT:
         return "gobject";
-    case BCLog::LogFlags::LLMQ:
-        return "llmq";
-    case BCLog::LogFlags::LLMQ_DKG:
-        return "llmq-dkg";
-    case BCLog::LogFlags::LLMQ_SIGS:
-        return "llmq-sigs";
     case BCLog::LogFlags::MNPAYMENTS:
         return "mnpayments";
     case BCLog::LogFlags::MNSYNC:

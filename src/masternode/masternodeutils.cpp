@@ -62,9 +62,6 @@ void CMasternodeUtils::DoMaintenance(CConnman& connman)
             } else if (GetTime<std::chrono::seconds>() - pnode->m_connected < PROBE_WAIT_INTERVAL) {
                 // non-verified, give it some time to verify itself
                 return;
-            } else if (pnode->qwatch) {
-                // keep watching nodes
-                return;
             }
         }
         if (fLogIPs) {

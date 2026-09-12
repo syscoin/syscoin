@@ -22,6 +22,9 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "libsyscoin_zmq", "libsyscoi
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "test_syscoin", "test_syscoin\test_syscoin.vcxproj", "{A56B73DB-D46D-4882-8374-1FE3FFA08F07}"
 EndProject
+# SYSCOIN: Register the fork-only PQ ChainLock fixture project.
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "pq_chainlock_fixture", "pq_chainlock_fixture\pq_chainlock_fixture.vcxproj", "{E9360B04-6EF4-4E5C-B319-E7356E4D7A91}"
+EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "libsyscoin_cli", "libsyscoin_cli\libsyscoin_cli.vcxproj", "{0667528C-D734-4009-ADF9-C0D6C4A5A5A6}"
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "syscoin-cli", "syscoin-cli\syscoin-cli.vcxproj", "{0B2D7431-F876-4A58-87BF-F748338CD3BF}"
@@ -96,6 +99,11 @@ Global
         {A56B73DB-D46D-4882-8374-1FE3FFA08F07}.Debug|x64.Build.0 = Debug|x64
         {A56B73DB-D46D-4882-8374-1FE3FFA08F07}.Release|x64.ActiveCfg = Release|x64
         {A56B73DB-D46D-4882-8374-1FE3FFA08F07}.Release|x64.Build.0 = Release|x64
+        # SYSCOIN: Build the PQ ChainLock fixture in both solution configurations.
+        {E9360B04-6EF4-4E5C-B319-E7356E4D7A91}.Debug|x64.ActiveCfg = Debug|x64
+        {E9360B04-6EF4-4E5C-B319-E7356E4D7A91}.Debug|x64.Build.0 = Debug|x64
+        {E9360B04-6EF4-4E5C-B319-E7356E4D7A91}.Release|x64.ActiveCfg = Release|x64
+        {E9360B04-6EF4-4E5C-B319-E7356E4D7A91}.Release|x64.Build.0 = Release|x64
         {0667528C-D734-4009-ADF9-C0D6C4A5A5A6}.Debug|x64.ActiveCfg = Debug|x64
         {0667528C-D734-4009-ADF9-C0D6C4A5A5A6}.Debug|x64.Build.0 = Debug|x64
         {0667528C-D734-4009-ADF9-C0D6C4A5A5A6}.Release|x64.ActiveCfg = Release|x64

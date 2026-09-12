@@ -37,7 +37,7 @@ public:
     bool SendZmqMessage(const char *command, const void* data, size_t size);
     // SYSCOIN
     bool SendZmqMessageNEVM(const char *command, const void* data, size_t size);
-    bool NotifyNEVMCommsCommon(const std::string& commMessage, bool &bResponse);
+    bool NotifyNEVMCommsCommon(const std::string& commMessage, bool &bResponse, std::optional<NEVMBlockReject>* rejection = nullptr);
     /* receive zmq message
        parts:
           * command
@@ -47,16 +47,19 @@ public:
     bool Initialize(void *pcontext, void *pcontextsub) override;
     void Shutdown() override;
 };
-// SYSCOIN
+// SYSCOIN BEGIN: NEVM request and response notifier interfaces.
 class CZMQPublishNEVMCommsNotifier : public CZMQAbstractPublishNotifier
 {
 public:
-    bool NotifyNEVMComms(const std::string& commMessage, bool &bResponse) override;
+    bool NotifyNEVMComms(const std::string& commMessage, bool &bResponse, std::optional<NEVMBlockReject>* rejection = nullptr) override;
 };
 class CZMQPublishNEVMBlockInfoNotifier : public CZMQAbstractPublishNotifier
 {
 public:
-    bool NotifyGetNEVMBlockInfo(uint64_t &nHeight, std::string &state) override;
+    // SYSCOIN: Require the applied Syscoin tip hash with the NEVM count.
+    bool NotifyGetNEVMBlockInfo(uint64_t &nHeight,
+                                uint256& nSYSBlockHash,
+                                std::string &state) override;
 };
 class CZMQPublishNEVMBlockNotifier : public CZMQAbstractPublishNotifier
 {
@@ -68,13 +71,15 @@ class CZMQPublishNEVMBlockConnectNotifier : public CZMQAbstractPublishNotifier
 {
 public:
     CZMQPublishNEVMBlockConnectNotifier() = default;
-    bool NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation, const uint256& btcPrevHashForNEVM, const CDeterministicMNListNEVMAddressDiff &diff) override;
+    bool NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation, const uint256& btcPrevHashForNEVM, const CDeterministicMNListNEVMAddressDiff &diff, std::optional<NEVMBlockReject>* rejection = nullptr) override;
+    bool NotifyNEVMPayloadCheck(const CNEVMHeader& evmBlock, const CBlock& block, const uint256& syscoin_hash, bool& valid, std::string& error, std::optional<NEVMBlockReject>* rejection = nullptr) override;
 };
 class CZMQPublishNEVMBlockDisconnectNotifier : public CZMQAbstractPublishNotifier
 {
 public:
     bool NotifyNEVMBlockDisconnect(std::string &state, const uint256& nBlockHash, const CDeterministicMNListNEVMAddressDiff &diff) override;
 };
+// SYSCOIN END: NEVM request and response notifier interfaces.
 class CZMQPublishHashBlockNotifier : public CZMQAbstractPublishNotifier
 {
 public:

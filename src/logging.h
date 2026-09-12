@@ -61,9 +61,7 @@ namespace BCLog {
         VALIDATION  = (1 << 21),
         // SYSCOIN
         GOBJECT     = (1 << 22),
-        LLMQ        = (1 << 23),
-        LLMQ_DKG    = (1 << 24),
-        LLMQ_SIGS   = (1 << 25),
+        // Bits 23 through 25 are reserved by the retired LLMQ/DKG logger.
         MNPAYMENTS  = (1 << 26),
         MNSYNC      = (1 << 27),
         SPORK       = (1 << 28),
@@ -81,8 +79,7 @@ namespace BCLog {
         SCAN        = (uint64_t)(1ULL << 38),
         TXPACKAGES  = (uint64_t)(1ULL << 39),
         NETCONN     = ((uint64_t)1ULL << 40),
-        DASH        = CHAINLOCKS | GOBJECT | LLMQ | LLMQ_DKG
-        | LLMQ_SIGS | MNPAYMENTS | MNSYNC | SPORK | NETCONN,
+        DASH        = CHAINLOCKS | GOBJECT | MNPAYMENTS | MNSYNC | SPORK | NETCONN,
         NET_NETCONN = NET | NETCONN,
         ALL         = ~(uint64_t)0,
     };

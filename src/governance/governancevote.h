@@ -5,16 +5,30 @@
 #ifndef SYSCOIN_GOVERNANCE_GOVERNANCEVOTE_H
 #define SYSCOIN_GOVERNANCE_GOVERNANCEVOTE_H
 
+#include <governance/governancecommon.h>
 #include <primitives/transaction.h>
 #include <uint256.h>
 
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <optional>
+#include <string>
+
 class CActiveMasternodeManager;
-class CBLSPublicKey;
+class CBlockIndex;
 class CDeterministicMNList;
+class CGovernanceManager;
 class CGovernanceVote;
 class CKey;
 class CKeyID;
 class PeerManager;
+
+namespace llmq::pq {
+enum class GovernanceAuthPurpose : uint8_t;
+struct PQRegistrySnapshot;
+class PQRegistryReadView;
+}
 
 // INTENTION OF MASTERNODES REGARDING ITEM
 enum vote_outcome_enum_t {
@@ -35,6 +49,19 @@ enum vote_signal_enum_t {
 };
 
 static constexpr int MAX_SUPPORTED_VOTE_SIGNAL = VOTE_SIGNAL_ENDORSED;
+
+[[nodiscard]] bool IsPQGovernanceEnabledAtHeight(int32_t height) noexcept;
+
+/** Resolve from the parent and height; omitted height selects the PQ-era role. */
+[[nodiscard]] std::optional<llmq::pq::GovernanceAuthPurpose>
+GetGovernanceVoteAuthPurpose(
+    int governance_object_type, vote_signal_enum_t signal,
+    int32_t validation_height = std::numeric_limits<int32_t>::max()) noexcept;
+
+/** Whether an authorization encoding can match any supported parent type. */
+[[nodiscard]] bool IsPotentialOrphanGovernanceVoteAuthorization(
+    vote_signal_enum_t signal, std::size_t signature_size,
+    int32_t validation_height = std::numeric_limits<int32_t>::max()) noexcept;
 
 /**
 * Governance Voting
@@ -57,6 +84,9 @@ public:
 
 class CGovernanceVote
 {
+    // SYSCOIN: orphan admission performs the same cheap field/MN checks before
+    // retaining a vote whose parent type is not known yet.
+    friend class CGovernanceManager;
     friend bool operator==(const CGovernanceVote& vote1, const CGovernanceVote& vote2);
 
     friend bool operator<(const CGovernanceVote& vote1, const CGovernanceVote& vote2);
@@ -74,6 +104,7 @@ private:
     /** Memory only. */
     const uint256 hash;
     void UpdateHash() const;
+    bool IsValidBasic(const CDeterministicMNList& validation_mn_list) const;
 
 public:
     CGovernanceVote();
@@ -91,6 +122,11 @@ public:
 
     const uint256& GetParentHash() const { return nParentHash; }
 
+    std::size_t GetSignatureSize() const noexcept { return vchSig.size(); }
+
+    /** Signing height of a canonical PQ envelope, for retained-vote recovery. */
+    [[nodiscard]] std::optional<int32_t> GetPQSigningHeight() const;
+
     void SetTime(int64_t nTimeIn)
     {
         nTime = nTimeIn;
@@ -101,9 +137,40 @@ public:
 
     bool Sign(const CKey& key, const CKeyID& keyID);
     bool CheckSignature(const CKeyID& keyID) const;
-    bool Sign();
-    bool CheckSignature(const CBLSPublicKey& pubKey) const;
-    bool IsValid(const CDeterministicMNList& tip_mn_list, bool useVotingKey) const;
+    bool SignPQ(const CBlockIndex& signing_block,
+                const uint256& pro_tx_hash,
+                uint32_t global_key_version,
+                llmq::pq::GovernanceAuthPurpose purpose);
+    bool CheckPQSignature(const CBlockIndex& validation_branch,
+                          const CDeterministicMNList& validation_mn_list,
+                          llmq::pq::GovernanceAuthPurpose purpose,
+                          std::string& error) const;
+    bool CheckPQAuthorizationContext(
+        const CBlockIndex& validation_branch,
+        const CDeterministicMNList& validation_mn_list,
+        std::string& error,
+        llmq::pq::GovernanceAuthPurpose purpose) const;
+    bool CheckPQAuthorizationContext(
+        const CBlockIndex& validation_branch,
+        const CDeterministicMNList& validation_mn_list,
+        const llmq::pq::PQRegistrySnapshot& current_snapshot,
+        std::string& error,
+        llmq::pq::GovernanceAuthPurpose purpose) const;
+    bool CheckPQAuthorizationContext(
+        const CBlockIndex& validation_branch,
+        const CDeterministicMNList& validation_mn_list,
+        const llmq::pq::PQRegistryReadView& current_snapshot,
+        std::string& error,
+        llmq::pq::GovernanceAuthPurpose purpose) const;
+    bool IsValid(const CDeterministicMNList& tip_mn_list) const;
+    bool IsValidPQ(const CBlockIndex& validation_branch,
+                   const CDeterministicMNList& validation_mn_list,
+                   llmq::pq::GovernanceAuthPurpose purpose,
+                   std::string& error) const;
+    bool IsValidPQContext(const CBlockIndex& validation_branch,
+                          const CDeterministicMNList& validation_mn_list,
+                          std::string& error,
+                          llmq::pq::GovernanceAuthPurpose purpose) const;
     void Relay(PeerManager& peerman, const CDeterministicMNList& tip_mn_list) const;
 
     const COutPoint& GetMasternodeOutpoint() const { return masternodeOutpoint; }
@@ -116,6 +183,9 @@ public:
 
     uint256 GetHash() const;
     uint256 GetSignatureHash() const;
+    /** Logical vote hashes omit the signature; compare the full wire form. */
+    [[nodiscard]] bool HasSameWireEncoding(
+        const CGovernanceVote& other) const;
 
     std::string ToString() const;
 
@@ -123,7 +193,8 @@ public:
     {
         READWRITE(obj.masternodeOutpoint, obj.nParentHash, obj.nVoteOutcome, obj.nVoteSignal, obj.nTime);
         if (!(s.GetType() & SER_GETHASH)) {
-            READWRITE(obj.vchSig);
+            READWRITE(Using<LimitedByteVectorFormatter<
+                          MAX_GOVERNANCE_SIGNATURE_SIZE>>(obj.vchSig));
         }
         SER_READ(obj, obj.UpdateHash());
     }

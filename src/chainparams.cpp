@@ -16,10 +16,68 @@
 #include <util/string.h>
 
 #include <assert.h>
+#include <algorithm> // SYSCOIN: complete PQ receipt-anchor argument groups.
+#include <array> // SYSCOIN: fixed PQ receipt-anchor argument groups.
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
 #include <vector>
+
+// SYSCOIN BEGIN: PQ activation and receipt-anchor argument parsing.
+namespace {
+
+constexpr const char* PQ_ACTIVATION_HEIGHT_ARG{"-pqactivationheight"};
+
+// SYSCOIN: This release-updatable receipt-crypto assumption must never be
+// inferred from or overwrite the PQ consensus activation height.
+constexpr std::array<const char*, 8> PQ_BTCC_RECEIPT_ANCHOR_ARGS{
+    "-pqbtccreceiptanchorheight",
+    "-pqbtccreceiptanchorblockhash",
+    "-pqbtccreceiptanchorcursorheight",
+    "-pqbtccreceiptanchorcursorsyshash",
+    "-pqbtccreceiptanchorcursorbtchash",
+    "-pqbtccreceiptanchorstatehash",
+    "-pqbtccreceiptanchorlatesttargetheight",
+    "-pqbtccreceiptanchorlatestcarrierheight",
+};
+
+bool HasPQBTCCReceiptAnchorArg(const ArgsManager& args)
+{
+    return std::any_of(PQ_BTCC_RECEIPT_ANCHOR_ARGS.begin(),
+                       PQ_BTCC_RECEIPT_ANCHOR_ARGS.end(),
+                       [&](const char* name) { return args.IsArgSet(name); });
+}
+
+std::string GetSinglePQDeploymentArg(const ArgsManager& args,
+                                     const char* name)
+{
+    const auto values = args.GetArgs(name);
+    if (values.size() != 1) {
+        throw std::runtime_error(strprintf(
+            "%s must be specified exactly once", name));
+    }
+    return values.front();
+}
+
+uint256 ParsePQBTCCReceiptAnchorHash(const ArgsManager& args,
+                                     const char* name,
+                                     bool require_nonzero)
+{
+    const std::string value = GetSinglePQDeploymentArg(args, name);
+    if (value.size() != 64 || !IsHex(value)) {
+        throw std::runtime_error(strprintf(
+            "%s must be exactly 64 hexadecimal characters", name));
+    }
+    uint256 hash;
+    hash.SetHex(value);
+    if (require_nonzero && hash.IsNull()) {
+        throw std::runtime_error(strprintf("%s must be non-zero", name));
+    }
+    return hash;
+}
+
+} // namespace
+// SYSCOIN END: PQ activation and receipt-anchor argument parsing.
 
 void ReadSigNetArgs(const ArgsManager& args, CChainParams::SigNetOptions& options)
 {
@@ -91,9 +149,132 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
     if (args.IsArgSet("-clreceiptstartheight")) {
         options.clreceiptstartblock = args.GetIntArg("-clreceiptstartheight", std::numeric_limits<int>::max());
     }
-    if (args.IsArgSet("-btccstartheight")) {
-        options.btccstartblock = args.GetIntArg("-btccstartheight", std::numeric_limits<int>::max());
+    // SYSCOIN BEGIN: Regtest PQ activation and receipt policy.
+    if (args.IsArgSet(PQ_ACTIVATION_HEIGHT_ARG)) {
+        const std::string height_value = GetSinglePQDeploymentArg(
+            args, PQ_ACTIVATION_HEIGHT_ARG);
+        int32_t height;
+        if (!ParseInt32(height_value, &height) || height <= 0 ||
+            height == std::numeric_limits<int32_t>::max()) {
+            throw std::runtime_error(strprintf(
+                "%s must be a positive 32-bit height below INT_MAX",
+                PQ_ACTIVATION_HEIGHT_ARG));
+        }
+        options.pqactivationheight = height;
     }
+    // SYSCOIN: Regtest can exercise a release-pinned historical receipt
+    // boundary, but partial records are rejected rather than default-filled.
+    if (HasPQBTCCReceiptAnchorArg(args)) {
+        if (!std::all_of(PQ_BTCC_RECEIPT_ANCHOR_ARGS.begin(),
+                         PQ_BTCC_RECEIPT_ANCHOR_ARGS.end(),
+                         [&](const char* name) { return args.IsArgSet(name); })) {
+            throw std::runtime_error(
+                "The eight PQ BTCC receipt anchor arguments must be specified together");
+        }
+        int32_t height;
+        const std::string height_value = GetSinglePQDeploymentArg(
+            args, PQ_BTCC_RECEIPT_ANCHOR_ARGS[0]);
+        if (!ParseInt32(height_value, &height) || height < 0 ||
+            height == std::numeric_limits<int32_t>::max()) {
+            throw std::runtime_error(strprintf(
+                "%s must be a non-negative 32-bit height below INT_MAX",
+                PQ_BTCC_RECEIPT_ANCHOR_ARGS[0]));
+        }
+        int32_t cursor_height;
+        const std::string cursor_height_value = GetSinglePQDeploymentArg(
+            args, PQ_BTCC_RECEIPT_ANCHOR_ARGS[2]);
+        if (!ParseInt32(cursor_height_value, &cursor_height) ||
+            cursor_height < -1 || cursor_height > height) {
+            throw std::runtime_error(strprintf(
+                "%s must be -1 or a height not above the receipt anchor",
+                PQ_BTCC_RECEIPT_ANCHOR_ARGS[2]));
+        }
+        const bool has_cursor{cursor_height >= 0};
+        const uint256 cursor_sys_hash{ParsePQBTCCReceiptAnchorHash(
+            args, PQ_BTCC_RECEIPT_ANCHOR_ARGS[3], has_cursor)};
+        const uint256 cursor_btc_hash{ParsePQBTCCReceiptAnchorHash(
+            args, PQ_BTCC_RECEIPT_ANCHOR_ARGS[4], has_cursor)};
+        const uint256 receipt_state_hash{ParsePQBTCCReceiptAnchorHash(
+            args, PQ_BTCC_RECEIPT_ANCHOR_ARGS[5], has_cursor)};
+        int32_t latest_target_height;
+        const std::string latest_target_value = GetSinglePQDeploymentArg(
+            args, PQ_BTCC_RECEIPT_ANCHOR_ARGS[6]);
+        if (!ParseInt32(latest_target_value, &latest_target_height) ||
+            latest_target_height < -1 || latest_target_height > height) {
+            throw std::runtime_error(strprintf(
+                "%s must be -1 or a height not above the receipt anchor",
+                PQ_BTCC_RECEIPT_ANCHOR_ARGS[6]));
+        }
+        int32_t latest_carrier_height;
+        const std::string latest_carrier_value = GetSinglePQDeploymentArg(
+            args, PQ_BTCC_RECEIPT_ANCHOR_ARGS[7]);
+        if (!ParseInt32(latest_carrier_value, &latest_carrier_height) ||
+            latest_carrier_height < -1 || latest_carrier_height > height) {
+            throw std::runtime_error(strprintf(
+                "%s must be -1 or a height not above the receipt anchor",
+                PQ_BTCC_RECEIPT_ANCHOR_ARGS[7]));
+        }
+        if (!has_cursor && (!cursor_sys_hash.IsNull() ||
+                            !cursor_btc_hash.IsNull() ||
+                            !receipt_state_hash.IsNull() ||
+                            latest_target_height != -1 ||
+                            latest_carrier_height != -1)) {
+            throw std::runtime_error(
+                "A null PQ BTCC receipt-anchor cursor requires three zero "
+                "hashes and two -1 receipt heights");
+        }
+        if (has_cursor &&
+            (latest_target_height < cursor_height ||
+             latest_carrier_height <= latest_target_height)) {
+            throw std::runtime_error(
+                "A non-null PQ BTCC receipt anchor requires a latest target "
+                "at or above its cursor and a later carrier height");
+        }
+        options.pqbtccreceiptanchor =
+            CChainParams::RegTestOptions::PQBTCCReceiptAnchorOptions{
+                height,
+                ParsePQBTCCReceiptAnchorHash(
+                    args, PQ_BTCC_RECEIPT_ANCHOR_ARGS[1], true),
+                cursor_height,
+                cursor_sys_hash,
+                cursor_btc_hash,
+                receipt_state_hash,
+                latest_target_height,
+                latest_carrier_height,
+            };
+    }
+    options.pqpreparationheight = args.GetIntArg(
+        "-pqpreparationheight", std::numeric_limits<int>::max());
+    options.pqchainlockepochorigin = args.GetIntArg(
+        "-pqchainlockepochorigin", std::numeric_limits<int>::max());
+    options.pqregistrationcutoffblocks = args.GetIntArg(
+        "-pqregistrationcutoffblocks", 0);
+    // SYSCOIN: PQ roster snapshot policy is independent of per-key registration.
+    options.pqrostersnapshotlag = args.GetIntArg("-pqrostersnapshotlag", 288);
+    options.pqfuturehorizonepochs = args.GetIntArg("-pqfuturehorizonepochs", 0);
+    if (args.IsArgSet("-pqrecoveryrefresh")) {
+        const auto fields{SplitString(
+            GetSinglePQDeploymentArg(args, "-pqrecoveryrefresh"), ':')};
+        std::array<int32_t, 8> values{};
+        if (fields.size() != values.size()) {
+            throw std::runtime_error("-pqrecoveryrefresh requires exactly eight colon-separated values");
+        }
+        for (std::size_t i{0}; i < values.size(); ++i) {
+            if (!ParseInt32(fields[i], &values[i]) || values[i] <= 0 ||
+                values[i] == std::numeric_limits<int32_t>::max()) {
+                throw std::runtime_error("-pqrecoveryrefresh values must be positive heights/counts below INT_MAX");
+            }
+        }
+        options.pqrecoveryrefresh = CChainParams::RegTestOptions::PQRecoveryRefreshOptions{
+            values[0], static_cast<uint32_t>(values[1]), static_cast<uint32_t>(values[2]),
+            static_cast<uint32_t>(values[3]), static_cast<uint32_t>(values[4]),
+            static_cast<uint32_t>(values[5]), static_cast<uint32_t>(values[6]),
+            static_cast<uint32_t>(values[7])};
+    }
+    options.pqbtcccandidateorigin = args.GetIntArg(
+        "-pqbtcccandidateorigin", std::numeric_limits<int>::max());
+    options.pqbtccnevminjectionlag = args.GetIntArg("-pqbtccnevminjectionlag", 10);
+    // SYSCOIN END: Regtest PQ activation and receipt policy.
     if (args.IsArgSet("-bridgev2startheight")) {
         options.bridgev2startblock = args.GetIntArg("-bridgev2startheight", std::numeric_limits<int>::max());
     }
@@ -148,6 +329,15 @@ const CChainParams &Params() {
 
 std::unique_ptr<const CChainParams> CreateChainParams(const ArgsManager& args, const ChainType chain)
 {
+    // SYSCOIN: Production networks may not override release-pinned PQ policy.
+    if (chain != ChainType::REGTEST &&
+        (args.IsArgSet(PQ_ACTIVATION_HEIGHT_ARG) ||
+         HasPQBTCCReceiptAnchorArg(args) ||
+         args.IsArgSet("-pqrecoveryrefresh") ||
+         args.IsArgSet("-pqfinalitypreparation"))) {
+        throw std::runtime_error(
+            "PQ deployment overrides are valid only on regtest");
+    }
     switch (chain) {
     // SYSCOIN
     case ChainType::MAIN: {
@@ -175,9 +365,4 @@ void SelectParams(const ChainType chain)
 {
     SelectBaseParams(chain);
     globalChainParams = CreateChainParams(gArgs, chain);
-}
-void UpdateLLMQTestParams(int size, int threshold)
-{
-    auto* params = const_cast<CChainParams*> (globalChainParams.get ());
-    params->UpdateLLMQTestParams(size, threshold);
 }

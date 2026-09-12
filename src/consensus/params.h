@@ -69,88 +69,16 @@ struct BIP9Deployment {
     static constexpr int64_t NEVER_ACTIVE = -2;
 };
 
-enum
-{
-    LLMQ_NONE = 0xff,
-
-    LLMQ_400_60 = 2, // 400 members, 240 (60%) threshold, one every 12 hours
-
-    // for testing only
-    LLMQ_TEST = 100, // 3 members, 2 (66%) threshold, one per hour. Params might differ when -llmqtestparams is used
-
-};
-
-static constexpr int MAX_LLMQ_SIZE{400};
-
-// Configures a LLMQ and its DKG
-// See https://github.com/dashpay/dips/blob/master/dip-0006.md for more details
-struct LLMQParams {
-    uint8_t type;
-
-    // not consensus critical, only used in logging, RPC and UI
-    std::string name;
-
-    // the size of the quorum, e.g. 50 or 400
+// SYSCOIN: Structural parameters for replaying historical tx85 commitments.
+// An unassigned migration profile uses them for compatibility replay; a
+// configured profile retires that replay at activation height A. They are not
+// a live BLS quorum configuration.
+struct LegacyQuorumReplayParams {
     int size;
-
-    // The minimum number of valid members after the DKK. If less members are determined valid, no commitment can be
-    // created. Should be higher then the threshold to allow some room for failing nodes, otherwise quorum might end up
-    // not being able to ever created a recovered signature if more nodes fail after the DKG
-    int minSize;
-
-    // The threshold required to recover a final signature. Should be at least 50%+1 of the quorum size. This value
-    // also controls the size of the public key verification vector and has a large influence on the performance of
-    // recovery. It also influences the amount of minimum messages that need to be exchanged for a single signing session.
-    // This value has the most influence on the security of the quorum. The number of total malicious masternodes
-    // required to negatively influence signing sessions highly correlates to the threshold percentage.
-    int threshold;
-
-    // The interval in number blocks for DKGs and the creation of LLMQs. If set to 24 for example, a DKG will start
-    // every 24 blocks, which is approximately once every hour.
-    int dkgInterval;
-
-    // The number of blocks per phase in a DKG session. There are 6 phases plus the mining phase that need to be processed
-    // per DKG. Set this value to a number of blocks so that each phase has enough time to propagate all required
-    // messages to all members before the next phase starts. If blocks are produced too fast, whole DKG sessions will
-    // fail.
-    int dkgPhaseBlocks;
-
-    // The starting block inside the DKG interval for when mining of commitments starts. The value is inclusive.
-    // Starting from this block, the inclusion of (possibly null) commitments is enforced until the first non-null
-    // commitment is mined. The chosen value should be at least 5 * dkgPhaseBlocks so that it starts right after the
-    // finalization phase.
-    int dkgMiningWindowStart;
-
-    // The ending block inside the DKG interval for when mining of commitments ends. The value is inclusive.
-    // Choose a value so that miners have enough time to receive the commitment and mine it. Also take into consideration
-    // that miners might omit real commitments and revert to always including null commitments. The mining window should
-    // be large enough so that other miners have a chance to produce a block containing a non-null commitment. The window
-    // should at the same time not be too large so that not too much space is wasted with null commitments in case a DKG
-    // session failed.
-    int dkgMiningWindowEnd;
-
-    // In the complaint phase, members will vote on other members being bad (missing valid contribution). If at least
-    // dkgBadVotesThreshold have voted for another member to be bad, it will considered to be bad by all other members
-    // as well. This serves as a protection against late-comers who send their contribution on the bring of
-    // phase-transition, which would otherwise result in inconsistent views of the valid members set
-    int dkgBadVotesThreshold;
-
-    // Number of quorums to consider "active" for signing sessions
-    int signingActiveQuorumCount;
-
-    // Used for intra-quorum communication. This is the number of quorums for which we should keep old connections. This
-    // should be at least one more then the active quorums set.
-    int keepOldConnections;
-
-    // How many members should we try to send all sigShares to before we give up.
-    int recoveryMembers;
-    public:
-
-    // For how many blocks recent DKG info should be kept
-    [[ nodiscard ]] constexpr int max_store_depth() const
-    {
-        return (signingActiveQuorumCount * 2) * dkgInterval;
-    }
+    // Structural replay preserves final-commitment minSize, not the smaller
+    // recovered-signature threshold used by the removed BLS machinery.
+    int minimum_size;
+    int session_interval;
 };
 /**
  * Parameters that influence chain consensus.
@@ -173,10 +101,47 @@ struct Params {
     int nBridgeStartBlock;
     int nNEVMStartBlock;
     int nCLReceiptStartBlock;
-    // BTCC signing, in-block carrier receipts, and BTCPREV validation.
-    // Kept independent from bridge receipt activation so a future
-    // post-quantum checkpoint format can activate on its own boundary.
-    int nBTCCStartBlock{std::numeric_limits<int>::max()};
+    // SYSCOIN: begin post-quantum migration and receipt policy.
+    // First block that accepts only post-quantum provider authorization and
+    // requires PQ-root-capable masternode payees. Legacy history below this
+    // height is replayed structurally and follows ordinary proof-of-work fork
+    // choice; this boundary is not a block or derived-state checkpoint.
+    int nPQActivationHeight{std::numeric_limits<int>::max()};
+    // Preparation is the first height accepting key-registry transactions and
+    // must precede epoch zero's registration cutoff.
+    // The epoch and BTCC origins are schedule anchors.
+    int nPQPreparationHeight{std::numeric_limits<int>::max()};
+    int nPQChainLockEpochOrigin{std::numeric_limits<int>::max()};
+    uint32_t nPQRegistrationCutoffBlocks{0};
+    int nPQRosterSnapshotLag{288}; // SYSCOIN: Freeze PQ rosters on an earlier branch-bound snapshot.
+    uint32_t nPQFutureHorizonEpochs{0};
+    // Rolling recovery is a separate, explicitly activated consensus profile.
+    // No public network inherits experimental readiness or work-depth choices.
+    int nPQRecoveryRefreshActivationHeight{-1};
+    uint32_t nPQRecoveryRefreshGraceGroups{0};
+    uint32_t nPQRecoveryRefreshSnapshotLagBlocks{0};
+    uint32_t nPQRecoveryRefreshEntropyDelayBlocks{0};
+    uint32_t nPQRecoveryRefreshCarrierDelayBlocks{0};
+    uint32_t nPQRecoveryRefreshCarrierMinDepthBlocks{0};
+    uint32_t nPQRecoveryRefreshSnapshotMinWorkBlocks{0};
+    uint32_t nPQRecoveryRefreshCarrierMinWorkBlocks{0};
+    uint32_t nPQRecoveryReadinessWindowBlocks{0};
+    int nPQBTCCCandidateOrigin{std::numeric_limits<int>::max()};
+    // Candidate H is signed by the H+5 ChainLock round and may first be
+    // receipted after the fixed five-block propagation buffer at H+10.
+    int nPQBTCCNEVMInjectionLag{10};
+    // SYSCOIN: Release-updatable historical BTCC receipt assumption boundary.
+    // This is intentionally independent from the height-only activation
+    // boundary: only the pre-boundary receipt-certificate crypto is assumed.
+    int nPQBTCCReceiptAnchorHeight{std::numeric_limits<int>::max()};
+    uint256 hashPQBTCCReceiptAnchorBlock;
+    int nPQBTCCReceiptAnchorCursorHeight{-1};
+    uint256 hashPQBTCCReceiptAnchorCursorSysBlock;
+    uint256 hashPQBTCCReceiptAnchorCursorBTCBlock;
+    uint256 hashPQBTCCReceiptAnchorState;
+    int nPQBTCCReceiptAnchorLatestTargetHeight{-1};
+    int nPQBTCCReceiptAnchorLatestCarrierHeight{-1};
+    // SYSCOIN: end post-quantum migration and receipt policy.
     // Bridge V2 vault-manager cutover (independent of nCLReceiptStartBlock).
     int nBridgeV2StartBlock{std::numeric_limits<int>::max()};
     int64_t nNEVMStartTime;
@@ -230,6 +195,14 @@ struct Params {
     bool fPowNoRetargeting;
     int64_t nPowTargetSpacing;
     int64_t nPowTargetTimespan;
+    // SYSCOIN BEGIN: Add reward/seniority schedules and replace Bitcoin's
+    // height-independent PoW accessors across the NEVM timing transition.
+    // Bitcoin originals:
+    // std::chrono::seconds PowTargetSpacing() const
+    // {
+    //     return std::chrono::seconds{nPowTargetSpacing};
+    // }
+    // int64_t DifficultyAdjustmentInterval() const { return nPowTargetTimespan / nPowTargetSpacing; }
     int SuperBlockCycle(int nHeight) const { 
         if (nHeight >= nNEVMStartBlock) {
             return nSuperblockCycle;
@@ -277,10 +250,14 @@ struct Params {
     int64_t DifficultyAdjustmentInterval(int nHeight) const {
         return nPowTargetTimespan / PowTargetSpacing(nHeight);
     }
+    // SYSCOIN END: Apply reward and PoW schedules across the NEVM transition.
     /** The best chain should have at least this much work */
     uint256 nMinimumChainWork;
     /** By default assume that the signatures in ancestors of this block are valid */
     uint256 defaultAssumeValid;
+    // SYSCOIN: The release-pinned BTCC receipt anchor must cover every block
+    // whose scripts can be skipped by the compiled assume-valid default.
+    int nDefaultAssumeValidHeight{-1};
     /** Auxpow parameters */
     int32_t nAuxpowChainId;
     int32_t nAuxpowOldChainId;
@@ -304,7 +281,7 @@ struct Params {
     int DIP0003Height;
     /** Block height at which DIP0003 becomes enforced */
     int DIP0003EnforcementHeight;
-    LLMQParams llmqTypeChainLocks;
+    LegacyQuorumReplayParams legacyQuorumReplay;
         /**
      * If true, witness commitments contain a payload equal to a Bitcoin Script solution
      * to the signet challenge. See BIP325.

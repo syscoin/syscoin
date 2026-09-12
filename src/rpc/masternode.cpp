@@ -17,6 +17,10 @@
 #include <llmq/quorums_chainlocks.h>
 #include <index/txindex.h>
 #include <llmq/quorums_utils.h>
+
+#include <limits>
+#include <vector>
+
 using node::GetTransaction;
 RPCHelpMan masternodelist();
 
@@ -84,9 +88,25 @@ static RPCHelpMan masternode_connect()
   node::NodeContext& node = EnsureAnyNodeContext(request.context);
   if(!node.connman)
       throw JSONRPCError(RPC_CLIENT_P2P_DISABLED, "Error: Peer-to-peer functionality missing or disabled");
-    // TODO: Pass CConnman instance somehow and don't use global variable.
-    node.connman->OpenMasternodeConnection(CAddress(addr.value(), NODE_NETWORK));
-    if (!node.connman->IsConnected(CAddress(addr.value(), NODE_NETWORK), AllNodes)) {
+    const auto connection_status{
+        node.connman->GetMasternodeConnectionStatus(*addr)};
+    if (connection_status ==
+        CConnman::MasternodeConnectionStatus::ORDINARY) {
+        throw JSONRPCError(
+            RPC_INTERNAL_ERROR,
+            strprintf("Existing ordinary connection to masternode %s; disconnect it and retry",
+                      strAddress));
+    }
+    if (connection_status ==
+        CConnman::MasternodeConnectionStatus::DISCONNECTING) {
+        throw JSONRPCError(
+            RPC_INTERNAL_ERROR,
+            strprintf("Connection to masternode %s is disconnecting; retry",
+                      strAddress));
+    }
+    if (!node.connman->OpenMasternodeConnection(
+            CAddress(addr.value(), NODE_NETWORK),
+            CConnman::MasternodeProbeConn::Is_Not_Connection)) {
         throw JSONRPCError(RPC_INTERNAL_ERROR, strprintf("Couldn't connect to masternode %s", strAddress));
     }
     return "successfully connected";
@@ -119,13 +139,42 @@ static RPCHelpMan masternode_count()
     };
 } 
 
-UniValue GetNextMasternodeForPayment(size_t heightShift)
+UniValue GetNextMasternodeForPayment(const node::NodeContext& node,
+                                     size_t heightShift)
 {
-    auto mnList = deterministicMNManager->GetListAtChainTip();
-    auto payees = mnList.GetProjectedMNPayees(heightShift);
-    if (payees.empty())
-        return "unknown";
-    auto payee = payees.back();
+    // SYSCOIN: Current selection must use the exact consensus path, while a
+    // future result is exposed only while its frozen eligibility set is known.
+    CDeterministicMNCPtr payee;
+    int target_height{-1};
+    {
+        LOCK(cs_main);
+        const CBlockIndex* tip{node.chainman->ActiveTip()};
+        if (tip == nullptr || heightShift == 0 ||
+            heightShift > static_cast<size_t>(std::numeric_limits<int>::max()) ||
+            tip->nHeight > std::numeric_limits<int>::max() -
+                               static_cast<int>(heightShift)) {
+            return "unknown";
+        }
+        target_height = tip->nHeight + static_cast<int>(heightShift);
+        if (heightShift == 1) {
+            if (!deterministicMNManager->GetMNPayeeForBlock(tip, payee)) {
+                throw JSONRPCError(
+                    RPC_INTERNAL_ERROR,
+                    "payment eligibility state is unavailable at the active tip");
+            }
+        } else {
+            std::vector<CDeterministicMNCPtr> projection;
+            if (!deterministicMNManager->GetProjectedMNPayeesForBlock(
+                    tip, static_cast<int>(heightShift), projection)) {
+                throw JSONRPCError(
+                    RPC_INTERNAL_ERROR,
+                    "payment projection state is unavailable at the active tip");
+            }
+            if (projection.size() < heightShift) return "unknown";
+            payee = projection.back();
+        }
+        if (!payee) return "unknown";
+    }
     CScript payeeScript = payee->pdmnState->scriptPayout;
 
     CTxDestination payeeDest;
@@ -133,7 +182,7 @@ UniValue GetNextMasternodeForPayment(size_t heightShift)
 
     UniValue obj(UniValue::VOBJ);
 
-    obj.pushKV("height",        (int)(mnList.GetHeight() + heightShift));
+    obj.pushKV("height",        target_height);
     obj.pushKV("IP:port",       payee->pdmnState->addr.ToStringAddrPort());
     obj.pushKV("proTxHash",     payee->proTxHash.ToString());
     obj.pushKV("outpoint",      payee->collateralOutpoint.ToStringShort());
@@ -154,7 +203,8 @@ static RPCHelpMan masternode_winner()
         },
     [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
-    return GetNextMasternodeForPayment(10);
+    return GetNextMasternodeForPayment(
+        EnsureAnyNodeContext(request.context), 10);
 },
     };
 } 
@@ -172,7 +222,8 @@ static RPCHelpMan masternode_current()
         },
     [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
-    return GetNextMasternodeForPayment(1);
+    return GetNextMasternodeForPayment(
+        EnsureAnyNodeContext(request.context), 1);
 },
     };
 } 
@@ -236,7 +287,12 @@ std::string GetRequiredPaymentsString(int nBlockHeight, const CDeterministicMNCP
             strPayments += ", " + EncodeDestination(dest);
         }
     }
-    if (CSuperblockManager::IsSuperblockTriggered(nBlockHeight)) {
+    const auto trigger_state{
+        CSuperblockManager::GetSuperblockTriggerState(nBlockHeight)};
+    if (trigger_state == SuperblockTriggerState::UNAVAILABLE) {
+        return strPayments + ", governance unavailable";
+    }
+    if (trigger_state == SuperblockTriggerState::TRIGGERED) {
         std::vector<CTxOut> voutSuperblock;
         if (!CSuperblockManager::GetSuperblockPayments(nBlockHeight, voutSuperblock)) {
             return strPayments + ", error";
@@ -338,12 +394,28 @@ static RPCHelpMan masternode_winners()
     int nStartHeight = std::max(nChainTipHeight - nCount, 1);
 
     for (int h = nStartHeight; h <= nChainTipHeight; h++) {
-        auto payee = deterministicMNManager->GetListForBlock(pindexTip->GetAncestor(h - 1)).GetMNPayee();
+        CDeterministicMNCPtr payee;
+        if (!deterministicMNManager->GetMNPayeeForBlock(
+                pindexTip->GetAncestor(h - 1), payee)) {
+            throw JSONRPCError(
+                RPC_INTERNAL_ERROR,
+                "payment audit state is unavailable at requested height");
+        }
         std::string strPayments = GetRequiredPaymentsString(h, payee);
         if (strFilter != "" && strPayments.find(strFilter) == std::string::npos) continue;
         obj.pushKV(strprintf("%d", h), strPayments);
     }
-    auto projection = deterministicMNManager->GetListForBlock(pindexTip).GetProjectedMNPayees(20);
+    // SYSCOIN: Do not manufacture future winners across a frozen-set boundary.
+    std::vector<CDeterministicMNCPtr> projection;
+    {
+        LOCK(cs_main);
+        if (!deterministicMNManager->GetProjectedMNPayeesForBlock(
+                pindexTip, 20, projection)) {
+            throw JSONRPCError(
+                RPC_INTERNAL_ERROR,
+                "payment projection state is unavailable at the active tip");
+        }
+    }
     for (size_t i = 0; i < projection.size(); i++) {
         int h = nChainTipHeight + 1 + i;
         std::string strPayments = GetRequiredPaymentsString(h, projection[i]);
@@ -426,7 +498,15 @@ RPCHelpMan masternode_payments()
         CMutableTransaction coinbaseTx;
         coinbaseTx.vout.resize(1);
         coinbaseTx.vout[0].nValue = blockReward + nBlockFees;
-        FillBlockPayments(WITH_LOCK(node.chainman->GetMutex(), return node.chainman->ActiveChain()), coinbaseTx, pindex->nHeight, blockReward, nBlockFees, voutMasternodePayments, voutDummy);
+        if (!FillBlockPayments(
+                WITH_LOCK(node.chainman->GetMutex(),
+                          return node.chainman->ActiveChain()),
+                coinbaseTx, pindex->nHeight, blockReward, nBlockFees,
+                voutMasternodePayments, voutDummy)) {
+            throw JSONRPCError(
+                RPC_INTERNAL_ERROR,
+                "Payment or governance state is unavailable for payment calculation");
+        }
 
         UniValue blockObj(UniValue::VOBJ);
         CAmount payedPerBlock{0};
@@ -448,7 +528,13 @@ RPCHelpMan masternode_payments()
         }
 
         // NOTE: we use _previous_ block to find a payee for the current one
-        const auto dmnPayee = deterministicMNManager->GetListForBlock(pindex->pprev).GetMNPayee();
+        CDeterministicMNCPtr dmnPayee;
+        if (!deterministicMNManager->GetMNPayeeForBlock(
+                pindex->pprev, dmnPayee)) {
+            throw JSONRPCError(
+                RPC_INTERNAL_ERROR,
+                "payment audit state is unavailable at requested height");
+        }
         protxObj.pushKV("proTxHash", dmnPayee == nullptr ? "" : dmnPayee->proTxHash.ToString());
         protxObj.pushKV("amount", payedPerMasternode);
         protxObj.pushKV("payees", payeesArr);

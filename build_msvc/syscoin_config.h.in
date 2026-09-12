@@ -44,6 +44,10 @@
 /* define if external signer support is enabled (requires Boost::Process) */
 #define ENABLE_EXTERNAL_SIGNER /**/
 
+/* Native MSVC uses the manifest's Boost.Process without configure probes. */
+#define HAVE_BOOST_PROCESS 1
+#define BOOST_PROCESS_USE_STD_FS 1
+
 /* Define to 1 if you have the declaration of `be16toh', and to 0 if you
    don't. */
 #define HAVE_DECL_BE16TOH 0

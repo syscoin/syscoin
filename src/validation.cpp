@@ -15,11 +15,12 @@
 #include <checkqueue.h>
 #include <clientversion.h>
 #include <common/args.h>
-#include <common/run_command.h>
-#include <llmq/quorums_btccheckpoints.h>
+#include <llmq/pq_btcc.h> // SYSCOIN: branch-bound BTCC receipt validation.
+#include <llmq/pq_recovery_refresh.h>
 #include <consensus/amount.h>
 #include <consensus/consensus.h>
 #include <consensus/merkle.h>
+#include <consensus/pq_migration_config.h> // SYSCOIN: provider mempool era transition.
 #include <consensus/tx_check.h>
 #include <consensus/tx_verify.h>
 #include <consensus/validation.h>
@@ -35,8 +36,8 @@
 #include <logging/timer.h>
 #include <node/blockconnection.h>
 #include <node/blockstorage.h>
+#include <node/btcheader_state.h> // SYSCOIN: narrow managed-helper state API.
 #include <node/utxo_snapshot.h>
-#include <nevm/sha3.h>
 #include <policy/policy.h>
 #include <policy/rbf.h>
 #include <policy/settings.h>
@@ -52,12 +53,14 @@
 #include <txdb.h>
 #include <txmempool.h>
 #include <uint256.h>
+#include <univalue.h> // SYSCOIN: managed Bitcoin-header RPC responses.
 #include <undo.h>
 #include <util/check.h> // For NDEBUG compile time check
 #include <util/fs.h>
 #include <util/fs_helpers.h>
 #include <util/hasher.h>
 #include <util/moneystr.h>
+#include <util/readwritefile.h> // SYSCOIN: durable managed-helper ownership records.
 #include <util/rbf.h>
 #include <util/signalinterrupt.h>
 #include <util/chaintype.h>
@@ -69,29 +72,34 @@
 #include <warnings.h>
 
 #include <algorithm>
+#include <array> // SYSCOIN: fixed managed-helper policy fields.
 #include <cassert>
 #include <chrono>
 #include <deque>
+#include <limits> // SYSCOIN: bounded PQ receipt and helper state.
 #include <numeric>
 #include <optional>
 #include <string>
+#include <string_view> // SYSCOIN: managed-helper argument validation.
 #include <tuple>
+#include <unordered_set> // SYSCOIN: Batched ChainLock-conflict traversal.
 #include <utility>
 // SYSCOIN
 #include <masternode/masternodepayments.h>
+#include <masternode/masternodesync.h>
 #include <evo/specialtx.h>
 #include <evo/deterministicmns.h>
 #include <llmq/quorums_chainlocks.h>
+#include <llmq/btc_header_policy.h>
 #include <services/nevmconsensus.h>
-#include <llmq/quorums.h>
 #include <llmq/quorums_blockprocessor.h>
 #include <governance/governance.h>
 #include <governance/governanceclasses.h>
 #include <services/assetconsensus.h>
 #include <fstream>
 #include <cachemultimap.h>
+#include <nevm/rlp.h> // SYSCOIN: authenticate committed ancestry after a failed retry.
 #include <nevm/sha3.h>
-#include <common/system.h> // runCommand
 #include <core_io.h>
 #ifndef WIN32
 #include <sys/wait.h>
@@ -121,7 +129,6 @@ ManagedProcessId gethpid = -1;
 ManagedProcessId btcheaderpid = -1;
 RecursiveMutex cs_geth;
 RecursiveMutex cs_btcheader;
-std::string g_managed_btcheader_rpc_cmd;
 static const char* GETH_STATE_BOOTSTRAP_STATUS_FILENAME = "state-bootstrap.status";
 NEVMMintTxSet setMintTxsMempool;
 std::unordered_map<COutPoint, std::pair<CTransactionRef, CTransactionRef>, SaltedOutpointHasher> mapAssetAllocationConflicts;
@@ -174,6 +181,19 @@ uint256 g_best_block;
 std::atomic_bool fReindexGeth(false);
 unsigned int fRPCSerialVersion;
 std::vector<std::string> g_managed_btcheader_rpc_args;
+bool g_managed_btcheader_adopted GUARDED_BY(cs_btcheader){false};
+std::string g_managed_btcheader_owner_token GUARDED_BY(cs_btcheader);
+fs::path g_managed_btcheader_owner_path GUARDED_BY(cs_btcheader);
+int64_t g_btcheader_last_probe_time GUARDED_BY(cs_btcheader){0};
+int64_t g_btcheader_last_restart_time GUARDED_BY(cs_btcheader){0};
+std::optional<int64_t> g_btcheader_startup_time GUARDED_BY(cs_btcheader);
+int64_t g_btcheader_last_progress_time GUARDED_BY(cs_btcheader){0};
+int64_t g_btcheader_last_tip_height GUARDED_BY(cs_btcheader){-1};
+uint256 g_btcheader_last_tip_hash GUARDED_BY(cs_btcheader);
+int32_t g_btcheader_restart_failures GUARDED_BY(cs_btcheader){0};
+bool g_btcheader_reindex_attempted GUARDED_BY(cs_btcheader){false};
+bool g_btcheader_last_probe_healthy GUARDED_BY(cs_btcheader){false};
+std::string g_btcheader_last_probe_reason GUARDED_BY(cs_btcheader);
 
 bool GetManagedBTCHeaderRPCCommandArgs(std::vector<std::string>& args_out)
 {
@@ -182,14 +202,11 @@ bool GetManagedBTCHeaderRPCCommandArgs(std::vector<std::string>& args_out)
     return false;
 #else
     LOCK(cs_btcheader);
-    if (g_managed_btcheader_rpc_args.empty()) {
-        return false;
-    }
+    if (g_managed_btcheader_rpc_args.empty()) return false;
     args_out = g_managed_btcheader_rpc_args;
     return true;
 #endif
 }
-
 const CBlockIndex* Chainstate::FindForkInGlobalIndex(const CBlockLocator& locator) const
 {
     AssertLockHeld(cs_main);
@@ -370,6 +387,30 @@ static bool IsCurrentForFeeEstimation(Chainstate& active_chainstate) EXCLUSIVE_L
     return true;
 }
 
+// SYSCOIN: Provider authorization is derived from the active deterministic
+// masternode branch, so these transactions cannot be resurrected across reorgs.
+static bool IsBranchBoundProviderMempoolTransaction(
+    const CTransaction& tx) noexcept
+{
+    return tx.nVersion == SYSCOIN_TX_VERSION_MN_REGISTER ||
+           tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE ||
+           tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR ||
+           tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE ||
+           tx.nVersion == SYSCOIN_TX_VERSION_PQ_GLOBAL_KEY ||
+           tx.nVersion == SYSCOIN_TX_VERSION_PQ_RECOVERY_READINESS;
+}
+
+// SYSCOIN BEGIN: Public activation-quarantine provider policy.
+bool IsPQActivationQuarantinedProviderTxVersion(int32_t version) noexcept
+{
+    return version == SYSCOIN_TX_VERSION_MN_REGISTER ||
+           version == SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE ||
+           version == SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR ||
+           version == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE ||
+           version == SYSCOIN_TX_VERSION_PQ_RECOVERY_READINESS;
+}
+// SYSCOIN END: Public activation-quarantine provider policy.
+
 void Chainstate::MaybeUpdateMempoolForReorg(
     DisconnectedBlockTransactions& disconnectpool,
     bool fAddToMempool)
@@ -390,6 +431,10 @@ void Chainstate::MaybeUpdateMempoolForReorg(
         while (it != queuedTx.rend()) {
             // ignore validation errors in resurrected transactions
             if (!fAddToMempool || (*it)->IsCoinBase() ||
+                // SYSCOIN: Reorg policy drops branch-bound entries below. Avoid
+                // needlessly re-running SLH/provider authorization under the
+                // global locks only to evict the transaction immediately.
+                IsBranchBoundProviderMempoolTransaction(**it) ||
                 AcceptToMemoryPool(*this, *it, GetTime(),
                     /*bypass_limits=*/true, /*test_accept=*/false).m_result_type !=
                         MempoolAcceptResult::ResultType::VALID) {
@@ -456,12 +501,21 @@ void Chainstate::MaybeUpdateMempoolForReorg(
                 }
             }
         }
+
         // Transaction is still valid and cached LockPoints are updated.
         return false;
     };
 
     // We also need to remove any now-immature transactions
     m_mempool->removeForReorg(m_chain, filter_final_and_mature);
+    // SYSCOIN: Provider authentication and membership are branch-bound. Evict before
+    // capacity reclassification so an invalid old reservation cannot displace
+    // a valid later entry. Peers may relay still-valid transactions again.
+    m_mempool->RemoveProviderTransactionsForReorg();
+    // The active branch can change whether a pending tx86 consumes a new
+    // operator slot. Reclassify before admitting another transaction so
+    // permanent registry capacity is reserved against the exact new tip.
+    m_mempool->RebuildPQRegistryReservations(m_chain.Tip());
     // Re-limit mempool size, in case we added any transactions
     LimitMempoolSize(*m_mempool, this->CoinsTip());
 }
@@ -705,6 +759,13 @@ private:
         /** Txid. */
         const uint256& m_hash;
         TxValidationState m_state;
+        // SYSCOIN: Prevent package admission from bypassing the post-script
+        // special-transaction authorization pass.
+        bool m_special_tx_auth_checked{false};
+        // SYSCOIN: Resolved against the same explicit tip used by provider conflict
+        // checks, so Finalize cannot publish a PQ mutation with a partial
+        // collateral index after an EvoDB read failure.
+        std::optional<COutPoint> m_pq_operator_collateral;
         /** A temporary cache containing serialized transaction data for signature verification.
          * Reused across PolicyScriptChecks and ConsensusScriptChecks. */
         PrecomputedTransactionData m_precomputed_txdata;
@@ -730,6 +791,11 @@ private:
     // Run the script checks using our policy flags. As this can be slow, we should
     // only invoke this on transactions that have otherwise passed policy checks.
     bool PolicyScriptChecks(const ATMPArgs& args, Workspace& ws) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_pool.cs);
+
+    // SYSCOIN: Verify special-transaction authorizations only after input
+    // scripts have passed. SLH-DSA verification is substantially more
+    // expensive than the structural special-transaction prepass in PreChecks().
+    bool SpecialTxAuthChecks(Workspace& ws) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_pool.cs);
 
     // Re-run the script checks, using consensus flags, and try to cache the
     // result in the scriptcache. This should be done after
@@ -802,6 +868,15 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws, NEVMMintTxSet& mint
     // Coinbase is only valid in a block, not as a loose transaction
     if (tx.IsCoinBase())
         return state.Invalid(TxValidationResult::TX_CONSENSUS, "coinbase");
+
+    // SYSCOIN BEGIN: A sync-only public node may replay provider mutations in
+    // blocks, but must not originate, relay, or reserve them in its mempool.
+    if (!m_active_chainstate.m_chainman.IsPQParticipationAllowed() &&
+        IsPQActivationQuarantinedProviderTxVersion(tx.nVersion)) {
+        return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY,
+                             "pq-activation-quarantine");
+    }
+    // SYSCOIN END: Public PQ activation provider-mempool gate.
 
     // Rather not work on nonstandard transactions (unless -testnet/-regtest)
     std::string reason;
@@ -881,6 +956,7 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws, NEVMMintTxSet& mint
         }
     }
 
+    // SYSCOIN BEGIN: Validate PoDA sidecars before Bitcoin's missing-input checks.
     // Check sidecars after cheap policy checks, but before a missing-input
     // result can place an unusable representation in the identity-keyed orphanage.
     const auto poda_result = ProcessNEVMData(
@@ -894,6 +970,7 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws, NEVMMintTxSet& mint
     if (poda_result == ProcessNEVMDataResult::CONSENSUS_INVALID) {
         return state.Invalid(TxValidationResult::TX_NOT_STANDARD, "bad-txns-poda-invalid");
     }
+    // SYSCOIN END: Validate PoDA sidecars before missing-input classification.
 
     m_view.SetBackend(m_viewmempool);
 
@@ -1099,13 +1176,19 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws, NEVMMintTxSet& mint
         if (!ancestors) return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "too-long-mempool-chain", error_message);
     }
 
-    // check special TXs after all the other checks. If we'd do this before the other checks, we might end up
-    // DoS scoring a node for non-critical errors, e.g. duplicate keys because a TX is received that was already
-    // mined
-    if (!CheckSpecialTx(m_active_chainstate.m_blockman, tx, m_active_chainstate.m_chain.Tip(), state, m_active_chainstate.CoinsTip(), true, true))
+    // SYSCOIN: Validate special-TX encoding and branch state here, but defer
+    // all signatures until the input scripts have screened unsolicited traffic.
+    if (!CheckSpecialTx(m_active_chainstate.m_blockman, tx,
+                        m_active_chainstate.m_chain.Tip(), state,
+                        m_active_chainstate.CoinsTip(), /*fJustCheck=*/true,
+                        /*check_sigs=*/false,
+                        SpecialTxValidationContext::MEMPOOL_PRECHECK))
         return false;
 
-    if (m_pool.existsProviderTxConflict(tx)) {
+    // SYSCOIN: Resolve provider and PQ registry conflicts against this exact tip.
+    if (m_pool.existsProviderTxConflict(
+            tx, m_active_chainstate.m_chain.Tip(),
+            &ws.m_pq_operator_collateral)) {
         return state.Invalid(TxValidationResult::TX_CONFLICT, "protx-dup");
     }
     ws.m_ancestors = *ancestors;
@@ -1197,8 +1280,8 @@ bool MemPoolAccept::PolicyScriptChecks(const ATMPArgs& args, Workspace& ws)
 
     constexpr unsigned int scriptVerifyFlags = STANDARD_SCRIPT_VERIFY_FLAGS;
 
-    // Check input scripts and signatures.
-    // This is done last to help prevent CPU exhaustion denial-of-service attacks.
+    // SYSCOIN: Screen input scripts before any expensive special-transaction
+    // authorization to limit CPU exhaustion denial-of-service attacks.
     if (!CheckInputScripts(tx, state, m_view, scriptVerifyFlags, true, false, ws.m_precomputed_txdata)) {
         // SCRIPT_VERIFY_CLEANSTACK requires SCRIPT_VERIFY_WITNESS, so we
         // need to turn both off, and compare against just turning off CLEANSTACK
@@ -1214,6 +1297,17 @@ bool MemPoolAccept::PolicyScriptChecks(const ATMPArgs& args, Workspace& ws)
     }
 
     return true;
+}
+
+// SYSCOIN: Expensive fork-specific authorization follows ordinary script checks.
+bool MemPoolAccept::SpecialTxAuthChecks(Workspace& ws)
+{
+    ws.m_special_tx_auth_checked = CheckSpecialTx(
+        m_active_chainstate.m_blockman, *ws.m_ptx,
+        m_active_chainstate.m_chain.Tip(), ws.m_state,
+        m_active_chainstate.CoinsTip(), /*fJustCheck=*/true,
+        /*check_sigs=*/true, SpecialTxValidationContext::NORMAL);
+    return ws.m_special_tx_auth_checked;
 }
 
 bool MemPoolAccept::ConsensusScriptChecks(const ATMPArgs& args, Workspace& ws)
@@ -1247,6 +1341,8 @@ bool MemPoolAccept::ConsensusScriptChecks(const ATMPArgs& args, Workspace& ws)
 
 bool MemPoolAccept::Finalize(const ATMPArgs& args, Workspace& ws)
 {
+    // SYSCOIN: Every fork-specific authorization must precede indexed admission.
+    assert(ws.m_special_tx_auth_checked);
     const CTransaction& tx = *ws.m_ptx;
     const uint256& hash = ws.m_hash;
     TxValidationState& state = ws.m_state;
@@ -1285,7 +1381,14 @@ bool MemPoolAccept::Finalize(const ATMPArgs& args, Workspace& ws)
     bool validForFeeEstimation = !bypass_limits && !args.m_package_submission && IsCurrentForFeeEstimation(m_active_chainstate) && m_pool.HasNoInputsOf(tx);
 
     // Store transaction in memory
-    m_pool.addUnchecked(*entry, ws.m_ancestors, validForFeeEstimation);
+    // SYSCOIN: Publish the resolved branch-bound PQ reservation atomically
+    // with the ordinary mempool entry.
+    if (!m_pool.addUnchecked(*entry, ws.m_ancestors, validForFeeEstimation,
+                             m_active_chainstate.m_chain.Tip(),
+                             ws.m_pq_operator_collateral)) {
+        return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY,
+                             "protx-index-unavailable");
+    }
 
     // SYSCOIN
     if(pnevmdatadb)
@@ -1390,9 +1493,11 @@ MempoolAcceptResult MemPoolAccept::AcceptSingleTransaction(const CTransactionRef
 
     if (m_rbf && !ReplacementChecks(ws)) return MempoolAcceptResult::Failure(ws.m_state);
 
-    // Perform the inexpensive checks first and avoid hashing and signature verification unless
-    // those checks pass, to mitigate CPU exhaustion denial-of-service attacks.
+    // SYSCOIN: Perform the inexpensive checks first and avoid PQ
+    // authorization work until ordinary transaction policy and scripts pass.
     if (!PolicyScriptChecks(args, ws)) return MempoolAcceptResult::Failure(ws.m_state);
+
+    if (!SpecialTxAuthChecks(ws)) return MempoolAcceptResult::Failure(ws.m_state);
 
     if (!ConsensusScriptChecks(args, ws)) return MempoolAcceptResult::Failure(ws.m_state);
 
@@ -1400,6 +1505,7 @@ MempoolAcceptResult MemPoolAccept::AcceptSingleTransaction(const CTransactionRef
     const std::vector<uint256> single_wtxid{ws.m_ptx->GetWitnessHash()};
     // Tx was accepted, but not added
     if (args.m_test_accept) {
+        assert(ws.m_special_tx_auth_checked);
         return MempoolAcceptResult::Success(std::move(ws.m_replaced_transactions), ws.m_vsize,
                                             ws.m_base_fees, effective_feerate, single_wtxid);
     }
@@ -1410,6 +1516,16 @@ MempoolAcceptResult MemPoolAccept::AcceptSingleTransaction(const CTransactionRef
 
     return MempoolAcceptResult::Success(std::move(ws.m_replaced_transactions), ws.m_vsize, ws.m_base_fees,
                                         effective_feerate, single_wtxid);
+}
+
+// SYSCOIN: Preserve local failures through package wrapping and result merging.
+static void SetPackageTransactionError(PackageValidationState& package_state, const TxValidationState& tx_state)
+{
+    if (tx_state.IsError()) {
+        package_state.Invalid(PackageValidationResult::PCKG_MEMPOOL_ERROR, tx_state.GetRejectReason());
+    } else if (package_state.GetResult() != PackageValidationResult::PCKG_MEMPOOL_ERROR) {
+        package_state.Invalid(PackageValidationResult::PCKG_TX, "transaction failed");
+    }
 }
 
 PackageMempoolAcceptResult MemPoolAccept::AcceptMultipleTransactions(const std::vector<CTransactionRef>& txns, ATMPArgs& args)
@@ -1433,7 +1549,7 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptMultipleTransactions(const std::
     // Do all PreChecks first and fail fast to avoid running expensive script checks when unnecessary.
     for (Workspace& ws : workspaces) {
         if (!PreChecks(args, ws, mint_txs)) {
-            package_state.Invalid(PackageValidationResult::PCKG_TX, "transaction failed");
+            SetPackageTransactionError(package_state, ws.m_state);
             // Exit early to avoid doing pointless work. Update the failed tx result; the rest are unfinished.
             results.emplace(ws.m_ptx->GetWitnessHash(), MempoolAcceptResult::Failure(ws.m_state));
             return PackageMempoolAcceptResult(package_state, std::move(results));
@@ -1444,6 +1560,23 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptMultipleTransactions(const std::
         // updated if package replace-by-fee is allowed in the future.
         assert(!args.m_allow_replacement);
         m_viewmempool.PackageAddTransaction(ws.m_ptx);
+    }
+
+    // SYSCOIN: A package must not bypass provider/PQ registry uniqueness by
+    // splitting mutually conflicting mutations across its members.
+    if (const auto conflict_index{
+            m_pool.FindPackageProviderTxConflict(
+                txns, m_active_chainstate.m_chain.Tip())}) {
+        Assume(*conflict_index < workspaces.size());
+        Workspace& offender{workspaces.at(*conflict_index)};
+        offender.m_state.Invalid(TxValidationResult::TX_CONFLICT,
+                                 "protx-dup");
+        package_state.Invalid(PackageValidationResult::PCKG_TX,
+                              "transaction failed");
+        results.emplace(offender.m_ptx->GetWitnessHash(),
+                        MempoolAcceptResult::Failure(offender.m_state));
+        return PackageMempoolAcceptResult(package_state,
+                                          std::move(results));
     }
 
     // Transactions must meet two minimum feerates: the mempool minimum fee and min relay fee.
@@ -1481,13 +1614,22 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptMultipleTransactions(const std::
                    [](const auto& ws) { return ws.m_ptx->GetWitnessHash(); });
     for (Workspace& ws : workspaces) {
         ws.m_package_feerate = package_feerate;
+        // SYSCOIN: Package members follow the same scripts-before-SLH ordering
+        // as single-transaction admission so package relay cannot bypass the
+        // expensive-authentication gate.
         if (!PolicyScriptChecks(args, ws)) {
             // Exit early to avoid doing pointless work. Update the failed tx result; the rest are unfinished.
-            package_state.Invalid(PackageValidationResult::PCKG_TX, "transaction failed");
+            SetPackageTransactionError(package_state, ws.m_state);
+            results.emplace(ws.m_ptx->GetWitnessHash(), MempoolAcceptResult::Failure(ws.m_state));
+            return PackageMempoolAcceptResult(package_state, std::move(results));
+        }
+        if (!SpecialTxAuthChecks(ws)) {
+            SetPackageTransactionError(package_state, ws.m_state);
             results.emplace(ws.m_ptx->GetWitnessHash(), MempoolAcceptResult::Failure(ws.m_state));
             return PackageMempoolAcceptResult(package_state, std::move(results));
         }
         if (args.m_test_accept) {
+            assert(ws.m_special_tx_auth_checked);
             const auto effective_feerate = args.m_package_feerates ? ws.m_package_feerate :
                 CFeeRate{ws.m_modified_fees, static_cast<uint32_t>(ws.m_vsize)};
             const auto effective_feerate_wtxids = args.m_package_feerates ? all_package_wtxids :
@@ -1522,7 +1664,7 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptSubPackage(const std::vector<CTr
         const auto single_res = AcceptSingleTransaction(tx, single_args);
         PackageValidationState package_state_wrapped;
         if (single_res.m_result_type != MempoolAcceptResult::ResultType::VALID) {
-            package_state_wrapped.Invalid(PackageValidationResult::PCKG_TX, "transaction failed");
+            SetPackageTransactionError(package_state_wrapped, single_res.m_state);
         }
         return PackageMempoolAcceptResult(package_state_wrapped, {{tx->GetWitnessHash(), single_res}});
     }();
@@ -1675,7 +1817,7 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptPackage(const Package& package, 
                 // future.  Continue individually validating the rest of the transactions, because
                 // some of them may still be valid.
                 quit_early = true;
-                package_state_quit_early.Invalid(PackageValidationResult::PCKG_TX, "transaction failed");
+                SetPackageTransactionError(package_state_quit_early, single_res.m_state);
                 individual_results_nonfinal.emplace(wtxid, single_res);
             } else {
                 individual_results_nonfinal.emplace(wtxid, single_res);
@@ -1701,9 +1843,9 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptPackage(const Package& package, 
             // been evicted due to LimitMempoolSize() above.
             const auto& txresult = multi_submission_result.m_tx_results.at(wtxid);
             if (txresult.m_result_type == MempoolAcceptResult::ResultType::VALID && !m_pool.exists(GenTxid::Wtxid(wtxid))) {
-                package_state_final.Invalid(PackageValidationResult::PCKG_TX, "transaction failed");
                 TxValidationState mempool_full_state;
                 mempool_full_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "mempool full");
+                SetPackageTransactionError(package_state_final, mempool_full_state);
                 results_final.emplace(wtxid, MempoolAcceptResult::Failure(mempool_full_state));
             } else {
                 results_final.emplace(wtxid, txresult);
@@ -1715,9 +1857,9 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptPackage(const Package& package, 
             Assume(individual_results_nonfinal.count(wtxid) == 0);
             // Query by txid to include the same-txid-different-witness ones.
             if (!m_pool.exists(GenTxid::Txid(tx->GetHash()))) {
-                package_state_final.Invalid(PackageValidationResult::PCKG_TX, "transaction failed");
                 TxValidationState mempool_full_state;
                 mempool_full_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "mempool full");
+                SetPackageTransactionError(package_state_final, mempool_full_state);
                 // Replace the previous result.
                 results_final.erase(wtxid);
                 results_final.emplace(wtxid, MempoolAcceptResult::Failure(mempool_full_state));
@@ -1804,7 +1946,16 @@ PackageMempoolAcceptResult ProcessNewPackage(Chainstate& active_chainstate, CTxM
 //
 // CBlock and CBlockIndex
 //
-bool CheckProofOfWork(const CBlockHeader& block, const Consensus::Params& params)
+// SYSCOIN BEGIN: AuxPoW is mutable outside the pure child-header identity.
+enum class BlockProofOfWorkResult {
+    VALID,
+    INVALID_CHILD_HEADER,
+    INVALID_AUXPOW_WRAPPER,
+};
+
+BlockProofOfWorkResult CheckBlockProofOfWork(
+    const CBlockHeader& block,
+    const Consensus::Params& params)
 {
     /* Except for legacy blocks with full version 1, ensure that
        the chain ID is correct.  Legacy blocks are not allowed since
@@ -1813,48 +1964,70 @@ bool CheckProofOfWork(const CBlockHeader& block, const Consensus::Params& params
     const int32_t nChainID = block.GetChainId();
     if (!block.IsLegacy() && params.fStrictChainId) {
         if(nChainID > 0) {
-            if(nChainID != params.nAuxpowChainId)
-                return error("%s : block does not have our chain ID"
-                        " (got %d, expected %d, full nVersion %d)",
-                        __func__, nChainID,
-                        params.nAuxpowChainId, block.nVersion);
-        } else if(block.auxpow) {
+            if(nChainID != params.nAuxpowChainId) {
+                error("%s : block does not have our chain ID"
+                      " (got %d, expected %d, full nVersion %d)",
+                      __func__, nChainID,
+                      params.nAuxpowChainId, block.nVersion);
+                return BlockProofOfWorkResult::INVALID_CHILD_HEADER;
+            }
+        } else if(block.IsAuxpow()) {
             const int32_t nOldChainID = block.GetOldChainId();
-            if(nOldChainID != params.nAuxpowOldChainId)
-                return error("%s : block does not have our old chain ID"
-                        " (got %d, expected %d, full nVersion %d)",
-                        __func__, nOldChainID,
-                        params.nAuxpowOldChainId, block.nVersion);
+            if(nOldChainID != params.nAuxpowOldChainId) {
+                error("%s : block does not have our old chain ID"
+                      " (got %d, expected %d, full nVersion %d)",
+                      __func__, nOldChainID,
+                      params.nAuxpowOldChainId, block.nVersion);
+                return BlockProofOfWorkResult::INVALID_CHILD_HEADER;
+            }
         }
     }
 
-
-    /* If there is no auxpow, just check the block hash.  */
-    if (!block.auxpow)
-    {
-        if (block.IsAuxpow())
-            return error("%s : no auxpow on block with auxpow version",
-                         __func__);
-
-        if (!CheckProofOfWork(block.GetHash(), block.nBits, params))
-            return error("%s : non-AUX proof of work failed", __func__);
-
-        return true;
+    /* A direct-PoW child commits both its target and proof hash. Validate
+       those immutable fields before classifying an unexpected wrapper. */
+    if (!block.IsAuxpow()) {
+        if (!CheckProofOfWork(block.GetHash(), block.nBits, params)) {
+            error("%s : non-AUX proof of work failed", __func__);
+            return BlockProofOfWorkResult::INVALID_CHILD_HEADER;
+        }
+        if (block.auxpow) {
+            error("%s : auxpow on block with non-auxpow version", __func__);
+            return BlockProofOfWorkResult::INVALID_AUXPOW_WRAPPER;
+        }
+        return BlockProofOfWorkResult::VALID;
     }
 
-    /* We have auxpow.  Check it.  */
-    if (!block.IsAuxpow())
-        return error("%s : auxpow on block with non-auxpow version", __func__);
+    if (!block.auxpow) {
+        error("%s : no auxpow on block with auxpow version", __func__);
+        return BlockProofOfWorkResult::INVALID_AUXPOW_WRAPPER;
+    }
 
-    if (!CheckProofOfWork(block.auxpow->getParentBlockHash(), block.nBits, params))
-        return error("%s : AUX proof of work failed", __func__);
-    if (!block.auxpow->check(block.GetHash(), block.GetChainId(), params))
-        return error("%s : AUX POW is not valid", __func__);
+    if (!CheckProofOfWork(
+            block.auxpow->getParentBlockHash(), block.nBits, params)) {
+        error("%s : AUX proof of work failed", __func__);
+        // Zero satisfies every valid nonzero target. If it fails too, nBits
+        // itself is malformed and therefore the immutable child is invalid.
+        return CheckProofOfWork(uint256{}, block.nBits, params)
+            ? BlockProofOfWorkResult::INVALID_AUXPOW_WRAPPER
+            : BlockProofOfWorkResult::INVALID_CHILD_HEADER;
+    }
+    if (!block.auxpow->check(
+            block.GetHash(), block.GetChainId(), params)) {
+        error("%s : AUX POW is not valid", __func__);
+        return BlockProofOfWorkResult::INVALID_AUXPOW_WRAPPER;
+    }
 
-
-    return true;
+    return BlockProofOfWorkResult::VALID;
 }
 
+bool CheckProofOfWork(const CBlockHeader& block, const Consensus::Params& params)
+{
+    return CheckBlockProofOfWork(block, params) ==
+           BlockProofOfWorkResult::VALID;
+}
+// SYSCOIN END: Keep mutable wrapper failures out of child-index invalidity.
+
+// SYSCOIN BEGIN: PQ receipt validation and branch-state transitions.
 static bool CheckDirectBlockNotAuxpowParent(const CBlock& block, BlockValidationState& state,
                                             int nHeight, const Consensus::Params& consensus)
 {
@@ -1879,6 +2052,636 @@ static bool CheckDirectBlockNotAuxpowParent(const CBlock& block, BlockValidation
 
     return true;
 }
+
+static bool CheckBTCPREVCommitment(const CBlock& block,
+                                   BlockValidationState& state,
+                                   int32_t height,
+                                   const Consensus::Params& consensus)
+{
+    if (!llmq::pq::IsBTCPREVCommitmentHeight(consensus, height)) {
+        return true;
+    }
+
+    // SYSCOIN: The committed Bitcoin parent prevhash is authenticated by the
+    // AuxPoW parent header. A direct Syscoin PoW block has no equivalent
+    // carrier, so accepting one at a scheduled height would let its miner
+    // choose an unauthenticated BTCC candidate.
+    if (!block.auxpow) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                             "bad-btcp-missing-auxpow");
+    }
+
+    uint256 committed;
+    if (!ExtractBTCPREVCommitment(block, committed)) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                             "bad-btcp-missing");
+    }
+    if (committed.IsNull()) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                             "bad-btcp-null");
+    }
+    if (committed != block.auxpow->getParentPrevBlockHash()) {
+        // SYSCOIN: AuxPoW is not committed by the child block hash. Reject this
+        // representation without poisoning another valid wrapper for it.
+        return state.Invalid(BlockValidationResult::BLOCK_MUTATED,
+                             "bad-btcp-mismatch");
+    }
+    return true;
+}
+
+static bool CheckBTCCReceiptCommitment(const CBlock& block,
+                                       BlockValidationState& state,
+                                       int32_t height,
+                                       const Consensus::Params& consensus,
+                                       llmq::pq::BTCCReceipt* decoded = nullptr)
+{
+    const auto config{llmq::pq::GetBTCCScheduleConfig(consensus)};
+    if (!config.IsValid()) return true;
+
+    const bool carrier{llmq::pq::IsBTCCReceiptCarrierHeight(config, height)};
+    const bool tagged{HasBTCCReceiptCommitment(block)};
+    llmq::pq::BTCCReceipt receipt;
+    const bool extracted{tagged && ExtractBTCCReceipt(block, receipt)};
+    if (!carrier) {
+        if (tagged) {
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                 "bad-btcc-receipt-unexpected");
+        }
+        return true;
+    }
+    if (!extracted) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                             "bad-btcc-receipt-missing");
+    }
+    if (decoded != nullptr) *decoded = receipt;
+    return true;
+}
+
+static bool CheckRecoveryRefreshWorkCommitment(
+    const CBlock& block, BlockValidationState& state, const CBlockIndex& index,
+    const Consensus::Params& consensus,
+    std::optional<llmq::pq::ValidatedRecoveryRefreshWorkSample>* validated = nullptr)
+{
+    if (validated) validated->reset();
+    const auto config{llmq::pq::GetRecoveryRefreshConfig(consensus)};
+    if (config.IsDisabled() || index.nHeight < config.activation_height) return true;
+    const auto chainlock{llmq::pq::MakeChainLockScheduleConfig(consensus.nPQChainLockEpochOrigin)};
+    const auto btcc{llmq::pq::GetBTCCScheduleConfig(consensus)};
+    if (!chainlock || !config.IsValid(*chainlock, btcc)) {
+        return state.Error("pq-recovery-refresh-invalid-schedule");
+    }
+    std::optional<llmq::pq::RecoveryRefreshWorkCommitment> commitment;
+    if (!llmq::pq::ExtractRecoveryRefreshWorkCommitment(block, commitment)) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                             "bad-pq-recovery-work-encoding");
+    }
+    // Omitting the sample disables this attempt, not ordinary PoW progress.
+    if (!commitment) return true;
+    const auto coordinates{llmq::pq::RecoveryRefreshCoordinatesForCarrierHeight(
+        *chainlock, btcc, config, index.nHeight)};
+    if (!coordinates) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                             "bad-pq-recovery-work-height");
+    }
+    auto sample{llmq::pq::VerifyRecoveryRefreshWorkCommitment(
+        *chainlock, btcc, config, *coordinates, index, *commitment, consensus)};
+    if (!sample) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                             "bad-pq-recovery-work-proof");
+    }
+    if (validated) *validated = std::move(sample);
+    return true;
+}
+
+static bool SetIndexedRecoveryRefreshWork(
+    CBlockIndex& index,
+    const std::optional<llmq::pq::ValidatedRecoveryRefreshWorkSample>& sample)
+{
+    const uint32_t group{sample ? sample->Group() : 0};
+    const uint256 entropy_hash{sample ? sample->EntropyBlockHash() : uint256{}};
+    const uint256 parent_hash{sample ? sample->ParentWorkHash() : uint256{}};
+    const uint256 commitment_hash{sample ? sample->CommitmentHash() : uint256{}};
+    const bool changed{index.pqRecoveryRefreshGroup != group ||
+        index.pqRecoveryRefreshEntropyBlockHash != entropy_hash ||
+        index.pqRecoveryRefreshParentWorkHash != parent_hash ||
+        index.pqRecoveryRefreshCommitmentHash != commitment_hash};
+    index.pqRecoveryRefreshGroup = group;
+    index.pqRecoveryRefreshEntropyBlockHash = entropy_hash;
+    index.pqRecoveryRefreshParentWorkHash = parent_hash;
+    index.pqRecoveryRefreshCommitmentHash = commitment_hash;
+    return changed;
+}
+
+// SYSCOIN: Persisted BTCC cursor/state fields form the compact branch-local
+// transition witness used only after full-validation provenance is checked.
+static llmq::pq::BTCCReceiptState IndexedBTCCReceiptState(
+    const CBlockIndex* index)
+{
+    if (index == nullptr) return {};
+    return {
+        llmq::pq::BTCCursor{index->pqBTCCReceiptCursorHeight,
+                            index->pqBTCCReceiptCursorSysHash,
+                            index->pqBTCCReceiptCursorBTCHash},
+        index->pqBTCCReceiptStateHash,
+        index->pqBTCCReceiptLatestTargetHeight,
+        index->pqBTCCReceiptLatestCarrierHeight};
+}
+
+// SYSCOIN: A missing exact receipt certificate is a retryable dependency, not
+// block invalidity, while its prospective replay obligation is durable.
+static constexpr std::string_view BTCC_RECEIPT_CERTIFICATE_PENDING{
+    "pq-btcc-receipt-certificate-pending"};
+static constexpr std::string_view PAYMENT_AUDIT_RECEIPT_CERTIFICATE_PENDING{
+    "pq-payment-audit-certificate-pending"};
+
+// SYSCOIN: A release anchor may assume only the historical receipt-certificate
+// checks. The exact block ancestry still comes from the fully validated base
+// chain, and the cumulative state is checked at the pinned boundary.
+static bool IsBTCCReceiptCoveredByAssumption(
+    const ChainstateManager& chainman,
+    const CBlockIndex& carrier,
+    const llmq::pq::ChainLockFinalityStoreConfig& config)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    const auto& anchor{config.btcc_receipt_assumption_anchor};
+    if (anchor.IsDisabled() || carrier.nHeight > anchor.height) return false;
+    const CBlockIndex* anchor_index{
+        chainman.m_blockman.LookupBlockIndex(anchor.block_hash)};
+    return anchor_index != nullptr && anchor_index->nHeight == anchor.height &&
+           anchor_index->GetAncestor(carrier.nHeight) == &carrier;
+}
+
+// SYSCOIN: Connect every carrier through one deterministic accumulator path;
+// historical preseal changes availability, never the committed transition.
+static bool ConnectBTCCReceiptState(ChainstateManager& chainman,
+                                    const CBlock& block,
+                                    CBlockIndex& index,
+                                    BlockValidationState& state,
+                                    bool* receipt_state_changed,
+                                    bool require_live_certificate,
+                                    bool allow_historical_preseal)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    AssertLockHeld(cs_main);
+    Assume(receipt_state_changed != nullptr);
+    *receipt_state_changed = false;
+    const auto& consensus{chainman.GetConsensus()};
+    const auto btcc_schedule{llmq::pq::GetBTCCScheduleConfig(consensus)};
+    if (!btcc_schedule.IsValid()) return true;
+    const auto chainlock_schedule{
+        llmq::pq::MakeChainLockScheduleConfig(consensus.nPQChainLockEpochOrigin)};
+    const auto finality_config{
+        llmq::MakePQChainLockFinalityStoreConfig(consensus)};
+    if (!chainlock_schedule || !finality_config) {
+        return state.Error("pq-btcc-receipt-invalid-schedule");
+    }
+
+    llmq::pq::BTCCReceipt receipt;
+    if (!CheckBTCCReceiptCommitment(block, state, index.nHeight, consensus,
+                                    &receipt)) {
+        return false;
+    }
+    const auto previous{IndexedBTCCReceiptState(index.pprev)};
+    if (!previous.IsStructurallyValid()) {
+        return state.Error("pq-btcc-receipt-state-unavailable");
+    }
+
+    llmq::pq::BTCCReceiptState next{previous};
+    index.m_pq_btcc_receipt_live_verified = false;
+    if (llmq::pq::IsBTCCReceiptCarrierHeight(btcc_schedule,
+                                              index.nHeight)) {
+        if (!llmq::pq::ValidateBTCCReceiptOnBranch(
+                *chainlock_schedule, btcc_schedule,
+                finality_config->activation_predecessor_height,
+                index, previous, receipt)) {
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                 "bad-btcc-receipt-branch");
+        }
+        const auto applied{llmq::pq::ApplyBTCCReceiptState(
+            consensus.hashGenesisBlock, *chainlock_schedule, btcc_schedule,
+            finality_config->activation_predecessor_height,
+            index.nHeight, index.GetBlockHash(), previous, receipt)};
+        if (!applied) {
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                 "bad-btcc-receipt-transition");
+        }
+        next = *applied;
+
+        if (!receipt.IsNull()) {
+            const auto certificate_status{
+                llmq::chainLocksHandler == nullptr
+                    ? llmq::CChainLocksHandler::BTCCReceiptCertificateStatus::MISSING
+                    : llmq::chainLocksHandler->CheckBTCCReceiptCertificate(
+                          receipt, index)};
+            if (certificate_status ==
+                llmq::CChainLocksHandler::BTCCReceiptCertificateStatus::INVALID) {
+                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                     "bad-btcc-receipt-certificate");
+            }
+            if (certificate_status ==
+                llmq::CChainLocksHandler::BTCCReceiptCertificateStatus::MISSING) {
+                if (IsBTCCReceiptCoveredByAssumption(
+                        chainman, index, *finality_config)) {
+                    index.m_pq_btcc_receipt_live_verified = true;
+                } else if (llmq::chainLocksHandler != nullptr &&
+                           llmq::chainLocksHandler
+                               ->IsBTCCPrefixAuthenticated(index)) {
+                    index.m_pq_btcc_receipt_live_verified = true;
+                } else if (require_live_certificate) {
+                    if (llmq::chainLocksHandler == nullptr) {
+                        return state.Error(
+                            "pq-btcc-chainlock-handler-unavailable");
+                    }
+                    // SYSCOIN: IBD can validate base/registry history without
+                    // every historical 1,000,364-byte CLSIG. Persist the branch-local
+                    // defer boundary before continuing; NEVM and signing stay
+                    // disabled until a current catch-up seal authenticates the
+                    // recomputed receipt accumulator.
+                    const bool preseal_allowed{
+                        allow_historical_preseal &&
+                        llmq::chainLocksHandler
+                            ->CanBeginBTCCPreseal(index, receipt)};
+                    if (!preseal_allowed ||
+                        !llmq::chainLocksHandler->BeginBTCCPreseal(
+                            index, receipt)) {
+                        llmq::chainLocksHandler
+                            ->NotePendingBTCCReceiptCertificate(
+                                receipt.chainlock_logical_id, index);
+                        return state.Error(
+                            std::string{BTCC_RECEIPT_CERTIFICATE_PENDING});
+                    }
+                }
+            } else {
+                index.m_pq_btcc_receipt_live_verified = true;
+            }
+        }
+
+    }
+
+    // SYSCOIN: The release-pinned boundary is all-or-none. Its exact block and
+    // accumulated receipt state must match before descendants can rely on the
+    // historical crypto assumption.
+    const auto& assumption{
+        finality_config->btcc_receipt_assumption_anchor};
+    if (!assumption.IsDisabled() && index.nHeight >= assumption.height) {
+        const CBlockIndex* anchor_index{index.GetAncestor(assumption.height)};
+        if (anchor_index == nullptr ||
+            anchor_index->GetBlockHash() != assumption.block_hash ||
+            (index.nHeight == assumption.height && next != assumption.receipt_state)) {
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                 "bad-pq-btcc-receipt-anchor");
+        }
+    }
+    const uint256 receipt_logical_id{
+        receipt.IsNull() ? uint256{} : receipt.chainlock_logical_id};
+    const bool changed{
+        index.pqBTCCReceiptCursorHeight != next.cursor.sys_height ||
+        index.pqBTCCReceiptCursorSysHash != next.cursor.sys_hash ||
+        index.pqBTCCReceiptCursorBTCHash != next.cursor.btc_hash ||
+        index.pqBTCCReceiptStateHash != next.cumulative_hash ||
+        index.pqBTCCReceiptLatestTargetHeight !=
+            next.latest_chainlock_target_height ||
+        index.pqBTCCReceiptLatestCarrierHeight !=
+            next.latest_receipt_carrier_height ||
+        index.pqBTCCReceiptLogicalId != receipt_logical_id};
+    index.pqBTCCReceiptCursorHeight = next.cursor.sys_height;
+    index.pqBTCCReceiptCursorSysHash = next.cursor.sys_hash;
+    index.pqBTCCReceiptCursorBTCHash = next.cursor.btc_hash;
+    index.pqBTCCReceiptStateHash = next.cumulative_hash;
+    index.pqBTCCReceiptLatestTargetHeight =
+        next.latest_chainlock_target_height;
+    index.pqBTCCReceiptLatestCarrierHeight =
+        next.latest_receipt_carrier_height;
+    index.pqBTCCReceiptLogicalId = receipt_logical_id;
+    *receipt_state_changed = changed;
+    return true;
+}
+
+static llmq::pq::PaymentAuditReceiptState
+IndexedPaymentAuditReceiptState(const CBlockIndex* index)
+{
+    if (index == nullptr) return {};
+    return {
+        llmq::pq::PaymentAuditReceiptCursor{
+            index->pqPaymentAuditReceiptCursorHeight,
+            index->pqPaymentAuditReceiptCursorEpoch,
+            index->pqPaymentAuditReceiptCursorSealHash,
+            index->pqPaymentAuditReceiptCursorLogicalId,
+            index->pqPaymentAuditReceiptCursorWitnessId},
+        index->pqPaymentAuditReceiptStateHash};
+}
+
+static bool CheckPaymentAuditReceiptCommitment(
+    const CBlock& block,
+    BlockValidationState& state,
+    int32_t height,
+    const llmq::pq::PaymentAuditScheduleConfig& schedule,
+    llmq::pq::PaymentAuditReceipt* decoded = nullptr)
+{
+    const auto slot_epoch{
+        llmq::pq::PaymentAuditReceiptSlotEpoch(schedule, height)};
+    const bool tagged{HasPaymentAuditReceiptCommitment(block)};
+    llmq::pq::PaymentAuditReceipt receipt;
+    const bool extracted{tagged && ExtractPaymentAuditReceipt(block, receipt)};
+    if (!slot_epoch) {
+        if (tagged) {
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                 "bad-pq-payment-audit-receipt-unexpected");
+        }
+        return true;
+    }
+    if (!extracted) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                             "bad-pq-payment-audit-receipt-missing");
+    }
+    if (!receipt.IsNull() && receipt.epoch != *slot_epoch) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                             "bad-pq-payment-audit-receipt-epoch");
+    }
+    if (decoded != nullptr) *decoded = receipt;
+    return true;
+}
+
+struct AppliedPaymentAuditArchiveReference {
+    uint32_t epoch{0};
+    uint256 witness_id;
+};
+
+static bool ConnectPaymentAuditReceiptState(
+    ChainstateManager& chainman,
+    const CBlock& block,
+    CBlockIndex& index,
+    BlockValidationState& state,
+    bool fJustCheck,
+    bool allow_historical_preseal,
+    bool* state_changed,
+    std::optional<AppliedPaymentAuditArchiveReference>* archive_reference)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    AssertLockHeld(cs_main);
+    Assume(state_changed != nullptr);
+    Assume(archive_reference != nullptr);
+    *state_changed = false;
+    archive_reference->reset();
+    const auto& consensus{chainman.GetConsensus()};
+    const auto chainlock_schedule{
+        llmq::pq::MakeChainLockScheduleConfig(
+            consensus.nPQChainLockEpochOrigin)};
+    const auto btcc_schedule{llmq::pq::GetBTCCScheduleConfig(consensus)};
+    if (!chainlock_schedule || !btcc_schedule.IsValid()) {
+        if (HasPaymentAuditReceiptCommitment(block)) {
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                 "bad-pq-payment-audit-disabled");
+        }
+        return true;
+    }
+    if (deterministicMNManager == nullptr) {
+        return state.Error("pq-payment-audit-dmn-manager-unavailable");
+    }
+    const llmq::pq::PaymentAuditScheduleConfig schedule{
+        *chainlock_schedule, btcc_schedule};
+    if (!schedule.IsValid()) {
+        return state.Error("pq-payment-audit-invalid-schedule");
+    }
+
+    llmq::pq::PaymentAuditReceipt receipt;
+    if (!CheckPaymentAuditReceiptCommitment(
+            block, state, index.nHeight, schedule, &receipt)) {
+        return false;
+    }
+    const auto previous_receipt{
+        IndexedPaymentAuditReceiptState(index.pprev)};
+    if (!previous_receipt.IsStructurallyValid()) {
+        return state.Error("pq-payment-audit-receipt-state-unavailable");
+    }
+    const uint256 previous_probation_hash{
+        index.pprev == nullptr ||
+                index.pprev->pqPaymentProbationStateHash.IsNull()
+            ? deterministicMNManager->EmptyPaymentProbationStateHash()
+            : index.pprev->pqPaymentProbationStateHash};
+    if (previous_probation_hash.IsNull()) {
+        return state.Error("pq-payment-audit-probation-root-unavailable");
+    }
+
+    auto next_receipt{previous_receipt};
+    uint256 next_probation_hash{previous_probation_hash};
+    const auto slot_epoch{llmq::pq::PaymentAuditReceiptSlotEpoch(
+        schedule, index.nHeight)};
+    if (slot_epoch) {
+        const auto applied_receipt{llmq::pq::ApplyPaymentAuditReceipt(
+            consensus.hashGenesisBlock, previous_receipt, receipt)};
+        if (!applied_receipt) {
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                 "bad-pq-payment-audit-receipt-transition");
+        }
+        next_receipt = *applied_receipt;
+
+        if (!receipt.IsNull()) {
+            if (llmq::chainLocksHandler == nullptr) {
+                return state.Error(
+                    "pq-payment-audit-handler-unavailable");
+            }
+            llmq::VerifiedPaymentAuditReceiptTransitionPtr
+                verified_transition;
+            std::optional<llmq::pq::PQPaymentProbationTransitionView>
+                compact_transition;
+            const llmq::pq::PQPaymentProbationTransitionView*
+                transition{nullptr};
+            bool compact_replay{false};
+            bool start_preseal{false};
+            const auto certificate_status{
+                llmq::chainLocksHandler
+                    ->CheckPaymentAuditReceiptCertificate(
+                        receipt, index, verified_transition)};
+            using CertificateStatus =
+                llmq::CChainLocksHandler::
+                    PaymentAuditReceiptCertificateStatus;
+            if (certificate_status == CertificateStatus::MISSING) {
+                const bool prefix_authenticated{
+                    llmq::chainLocksHandler
+                        ->IsPaymentAuditPrefixAuthenticated(index)};
+                const bool preseal_allowed{
+                    allow_historical_preseal &&
+                    llmq::chainLocksHandler
+                        ->CanBeginPaymentAuditPreseal(index, receipt)};
+                if (!prefix_authenticated && !preseal_allowed) {
+                    llmq::chainLocksHandler
+                        ->NotePendingPaymentAuditReceiptCertificate(
+                            receipt, index);
+                    return state.Error(
+                        std::string{
+                            PAYMENT_AUDIT_RECEIPT_CERTIFICATE_PENDING});
+                }
+                llmq::pq::PQPaymentProbationTransitionContext context;
+                const auto compact_status{
+                    llmq::chainLocksHandler
+                        ->BuildCompactPaymentAuditTransitionContext(
+                            receipt, index, context)};
+                if (compact_status ==
+                    llmq::PaymentAuditContextStatus::INVALID) {
+                    return state.Invalid(
+                        BlockValidationResult::BLOCK_CONSENSUS,
+                        "bad-pq-payment-audit-compact-context");
+                }
+                if (compact_status !=
+                    llmq::PaymentAuditContextStatus::READY) {
+                    return state.Error(
+                        "pq-payment-audit-compact-context-unavailable");
+                }
+                compact_replay = true;
+                start_preseal = !prefix_authenticated;
+                if (index.pprev == nullptr) {
+                    return state.Error(
+                        "pq-payment-audit-probation-state-unavailable");
+                }
+                auto outcome{deterministicMNManager
+                    ->ApplyPaymentProbationTransition(*index.pprev,
+                                                       context)};
+                using TransitionStatus =
+                    llmq::pq::PQPaymentProbationTransitionStatus;
+                if (outcome.status == TransitionStatus::INVALID) {
+                    return state.Invalid(
+                        BlockValidationResult::BLOCK_CONSENSUS,
+                        "bad-pq-payment-audit-result");
+                }
+                if (outcome.status != TransitionStatus::READY ||
+                    !outcome.transition) {
+                    return state.Error(
+                        "pq-payment-audit-compact-transition-unavailable");
+                }
+                const llmq::pq::PQPaymentAuditReceiptIdentity
+                    expected_transition_receipt{
+                        receipt.epoch, receipt.carrier_height,
+                        receipt.result_hash};
+                if (outcome.transition->PreviousStateHash() !=
+                        previous_probation_hash ||
+                    outcome.transition->AppliedReceipt() !=
+                        expected_transition_receipt) {
+                    return state.Error(
+                        "pq-payment-audit-compact-transition-unavailable");
+                }
+                if (outcome.transition->Result().StateHash() !=
+                        receipt.next_probation_state_hash) {
+                    return state.Invalid(
+                        BlockValidationResult::BLOCK_CONSENSUS,
+                        "bad-pq-payment-audit-result");
+                }
+                compact_transition = std::move(outcome.transition);
+                transition = &*compact_transition;
+            }
+            if (certificate_status == CertificateStatus::UNAVAILABLE) {
+                return state.Error(
+                    "pq-payment-audit-archive-unavailable");
+            }
+            if (certificate_status == CertificateStatus::LOCAL_ERROR) {
+                return state.Error(
+                    "pq-payment-audit-archive-local-error");
+            }
+            if (certificate_status != CertificateStatus::VERIFIED) {
+                if (!compact_replay) {
+                    return state.Invalid(
+                        BlockValidationResult::BLOCK_CONSENSUS,
+                        "bad-pq-payment-audit-certificate");
+                }
+            } else {
+                const llmq::pq::PQPaymentAuditReceiptIdentity
+                    expected_transition_receipt{
+                        receipt.epoch, receipt.carrier_height,
+                        receipt.result_hash};
+                transition =
+                    llmq::GetVerifiedPaymentAuditReceiptTransition(
+                        verified_transition);
+                if (transition == nullptr) {
+                    return state.Error(
+                        "pq-payment-audit-prepared-transition-missing");
+                }
+                if (transition->PreviousStateHash() !=
+                        previous_probation_hash ||
+                    transition->AppliedReceipt() !=
+                        expected_transition_receipt ||
+                    transition->Result().StateHash() !=
+                        receipt.next_probation_state_hash) {
+                    return state.Error(
+                        "pq-payment-audit-prepared-transition-mismatch");
+                }
+            }
+
+            if (transition == nullptr) {
+                return state.Error(
+                    "pq-payment-audit-transition-missing");
+            }
+            next_probation_hash = transition->Result().StateHash();
+            if (start_preseal && !fJustCheck &&
+                !llmq::chainLocksHandler->BeginPaymentAuditPreseal(
+                    index, receipt, previous_receipt,
+                    previous_probation_hash)) {
+                return state.Error(
+                    "failed-pq-payment-audit-preseal-persist");
+            }
+            if (!deterministicMNManager->CommitPaymentProbationTransition(
+                    *transition, fJustCheck)) {
+                return state.Error(
+                    "failed-pq-payment-audit-state-persist");
+            }
+            if (!compact_replay) {
+                *archive_reference = AppliedPaymentAuditArchiveReference{
+                    receipt.epoch, receipt.audit_witness_id};
+            }
+        }
+    }
+
+    const bool changed{
+        index.pqPaymentAuditReceiptCursorHeight !=
+                next_receipt.cursor.carrier_height ||
+        index.pqPaymentAuditReceiptCursorEpoch !=
+                next_receipt.cursor.epoch ||
+        index.pqPaymentAuditReceiptCursorSealHash !=
+                next_receipt.cursor.seal_block_hash ||
+        index.pqPaymentAuditReceiptCursorLogicalId !=
+                next_receipt.cursor.audit_logical_id ||
+        index.pqPaymentAuditReceiptCursorWitnessId !=
+                next_receipt.cursor.audit_witness_id ||
+        index.pqPaymentAuditReceiptStateHash !=
+                next_receipt.cumulative_hash ||
+        index.pqPaymentProbationStateHash != next_probation_hash};
+    index.pqPaymentAuditReceiptCursorHeight =
+        next_receipt.cursor.carrier_height;
+    index.pqPaymentAuditReceiptCursorEpoch = next_receipt.cursor.epoch;
+    index.pqPaymentAuditReceiptCursorSealHash =
+        next_receipt.cursor.seal_block_hash;
+    index.pqPaymentAuditReceiptCursorLogicalId =
+        next_receipt.cursor.audit_logical_id;
+    index.pqPaymentAuditReceiptCursorWitnessId =
+        next_receipt.cursor.audit_witness_id;
+    index.pqPaymentAuditReceiptStateHash = next_receipt.cumulative_hash;
+    index.pqPaymentProbationStateHash = next_probation_hash;
+    *state_changed = changed;
+    return true;
+}
+
+static bool PinAppliedPaymentAuditArchiveReference(
+    const std::optional<AppliedPaymentAuditArchiveReference>& reference,
+    BlockValidationState& state)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    AssertLockHeld(cs_main);
+    if (!reference) return true;
+    if (llmq::chainLocksHandler == nullptr) {
+        return state.Error("pq-payment-audit-handler-unavailable");
+    }
+    const auto status{
+        llmq::chainLocksHandler->PinPaymentAuditReceiptCertificate(
+            reference->epoch, reference->witness_id)};
+    if (status == llmq::CChainLocksHandler::
+                      PaymentAuditReceiptCertificateStatus::VERIFIED) {
+        return true;
+    }
+    // The exact certificate was already read and verified above. Any failure
+    // to retain it now is local archive state, never peer-controlled invalidity
+    // and never a reason to quarantine it as a missing network object.
+    return state.Error("pq-payment-audit-archive-pin-failed");
+}
+// SYSCOIN END: PQ receipt validation and branch-state transitions.
 
 CAmount GetBlockSubsidyRegtest(int nHeight, const Consensus::Params& consensusParams)
 {
@@ -1980,33 +2783,265 @@ void Chainstate::InitCoinsCache(size_t cache_size_bytes)
     m_coins_views->InitCache();
 }
 
+// SYSCOIN BEGIN: Local BLS-to-PQ activation handoff persistence.
+namespace {
+
+node::PQActivationHandoffTip BuildPQActivationHandoffTip(
+    const ChainstateManager& chainman,
+    const CBlockIndex* tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    const auto& consensus{chainman.GetConsensus()};
+    node::PQActivationHandoffTip result;
+    if (tip == nullptr ||
+        Consensus::CheckPQActivationConfiguration(consensus) !=
+            Consensus::PQActivationResult::VALID) {
+        return result;
+    }
+    result.height = tip->nHeight;
+    const CBlockIndex* predecessor{
+        tip->nHeight >= consensus.nPQActivationHeight - 1
+            ? tip->GetAncestor(consensus.nPQActivationHeight - 1)
+            : nullptr};
+    if (predecessor != nullptr) {
+        result.predecessor_hash = predecessor->GetBlockHash();
+        result.predecessor_fully_validated =
+            predecessor->IsValid(BLOCK_VALID_SCRIPTS) &&
+            !predecessor->IsAssumedValid();
+    }
+    const CBlockIndex* active_tip{chainman.ActiveTip()};
+    // ConnectTip finalizes the handoff after the candidate has passed full
+    // validation but before m_chain.SetTip(). Treat only that direct successor
+    // as the active view; an unrelated branch must never authorize the pin.
+    const CBlockIndex* active_view_tip{
+        node::IsPQActivationHandoffActiveView(
+            tip == active_tip,
+            tip != nullptr && tip->pprev == active_tip)
+            ? tip
+            : active_tip};
+    const CBlockIndex* active_predecessor{
+        active_view_tip != nullptr &&
+                active_view_tip->nHeight >= consensus.nPQActivationHeight - 1
+            ? active_view_tip->GetAncestor(
+                  consensus.nPQActivationHeight - 1)
+            : nullptr};
+    if (active_predecessor != nullptr) {
+        result.active_predecessor_hash =
+            active_predecessor->GetBlockHash();
+    }
+    const CBlockIndex* activation{
+        tip->nHeight >= consensus.nPQActivationHeight
+            ? tip->GetAncestor(consensus.nPQActivationHeight)
+            : nullptr};
+    result.activation_fully_validated =
+        activation != nullptr && activation->IsValid(BLOCK_VALID_SCRIPTS) &&
+        !activation->IsAssumedValid() &&
+        (activation->nStatus & BLOCK_PQ_BTCC_INDEX_VALIDATED);
+    return result;
+}
+
+} // namespace
+
+bool ChainstateManager::PreparePQActivationHandoff(
+    bool force_historical_replay,
+    bool empty_chainstate,
+    bilingual_str& error)
+{
+    AssertLockHeld(cs_main);
+    error = {};
+    const bool public_network{
+        GetParams().GetChainType() != ChainType::REGTEST};
+    std::optional<node::PQActivationHandoffRecord> persisted;
+    auto* const block_tree{m_blockman.m_block_tree_db.get()};
+    if (block_tree == nullptr) {
+        error = Untranslated("PQ activation handoff database is unavailable");
+        return false;
+    }
+
+    // Reconstruction cannot authenticate legacy BLS history, so it
+    // deliberately replaces any live pin with permanent replay quarantine.
+    if (!force_historical_replay && !empty_chainstate && public_network &&
+        block_tree->HasPQActivationHandoff()) {
+        node::PQActivationHandoffRecord record;
+        if (!block_tree->ReadPQActivationHandoff(record)) {
+            error = Untranslated("PQ activation handoff record is unreadable");
+            return false;
+        }
+        persisted = std::move(record);
+    }
+
+    const auto resolution{node::PreparePQActivationHandoff(
+        GetConsensus(), public_network, force_historical_replay,
+        empty_chainstate, persisted)};
+    if (resolution.record_to_write &&
+        !block_tree->WritePQActivationHandoff(
+            *resolution.record_to_write)) {
+        error = Untranslated("Failed to persist PQ activation replay quarantine");
+        return false;
+    }
+
+    m_pq_activation_runtime_state = resolution.state;
+    m_pq_activation_handoff_record = resolution.record_to_write
+        ? resolution.record_to_write
+        : persisted;
+    m_pq_activation_participation_allowed.store(
+        resolution.state == node::PQActivationRuntimeState::PINNED ||
+            resolution.state == node::PQActivationRuntimeState::BYPASS,
+        std::memory_order_release);
+    if (resolution.state == node::PQActivationRuntimeState::FAILED) {
+        error = Untranslated(
+            "PQ activation handoff state is invalid; restore the transition "
+            "release handoff or run that release on the selected branch");
+        return false;
+    }
+    return true;
+}
+
+bool ChainstateManager::FinalizePQActivationHandoff(
+    const CBlockIndex* tip,
+    bilingual_str& error)
+{
+    AssertLockHeld(cs_main);
+    error = {};
+    const auto resolution{node::FinalizePQActivationHandoff(
+        GetConsensus(), m_pq_activation_runtime_state,
+        m_pq_activation_handoff_record,
+        BuildPQActivationHandoffTip(*this, tip))};
+    if (resolution.record_to_write &&
+        !m_blockman.m_block_tree_db->WritePQActivationHandoff(
+            *resolution.record_to_write)) {
+        m_pq_activation_runtime_state =
+            node::PQActivationRuntimeState::FAILED;
+        m_pq_activation_participation_allowed.store(
+            false, std::memory_order_release);
+        error = Untranslated("Failed to persist PQ activation handoff state");
+        return false;
+    }
+    if (resolution.record_to_write) {
+        m_pq_activation_handoff_record = resolution.record_to_write;
+    }
+    m_pq_activation_runtime_state = resolution.state;
+    m_pq_activation_participation_allowed.store(
+        resolution.state == node::PQActivationRuntimeState::PINNED ||
+            resolution.state == node::PQActivationRuntimeState::BYPASS,
+        std::memory_order_release);
+    if (resolution.state == node::PQActivationRuntimeState::FAILED) {
+        error = Untranslated(
+            "The local PQ activation handoff is missing, unvalidated, or no "
+            "longer matches the active A-1 predecessor; return to the "
+            "legacy-validating transition release");
+        return false;
+    }
+    return true;
+}
+
+bool ChainstateManager::MaybeFinalizePQActivationHandoff(
+    const CBlockIndex& tip,
+    std::string& error)
+{
+    AssertLockHeld(cs_main);
+    error.clear();
+    if (m_pq_activation_runtime_state !=
+            node::PQActivationRuntimeState::HISTORICAL_REPLAY &&
+        m_pq_activation_runtime_state !=
+            node::PQActivationRuntimeState::DEFERRED_HANDOFF) {
+        return true;
+    }
+    bilingual_str translated_error;
+    if (!FinalizePQActivationHandoff(&tip, translated_error)) {
+        error = translated_error.original;
+        return false;
+    }
+    return true;
+}
+
+bool ChainstateManager::CheckPQActivationHandoffDisconnect(
+    const CBlockIndex& disconnecting,
+    std::string& error)
+{
+    AssertLockHeld(cs_main);
+    error.clear();
+    // A durable ChainLock is a generic finality floor, including regtest and
+    // activation-bypass configurations. Resolve it before the A-1-specific
+    // handoff transition so no accepted block can be disconnected in the
+    // fsync-to-conflict-publication interval.
+    if (llmq::chainLocksHandler != nullptr) {
+        const CBlockIndex* active_floor{nullptr};
+        const CBlockIndex* durable_target{nullptr};
+        if (!llmq::chainLocksHandler->GetDurableFinalityRecoveryFloor(
+                active_floor, durable_target, error)) {
+            return false;
+        }
+        if ((active_floor == nullptr) != (durable_target == nullptr)) {
+            error = "incomplete durable PQ ChainLock recovery boundary";
+            return false;
+        }
+        if (active_floor != nullptr) {
+            const bool floor_descends_from_disconnect{
+                active_floor->nHeight >= disconnecting.nHeight &&
+                active_floor->GetAncestor(disconnecting.nHeight) ==
+                    &disconnecting};
+            if (llmq::DisconnectCrossesDurableChainLockFloor(
+                    disconnecting.nHeight, active_floor->nHeight,
+                    floor_descends_from_disconnect)) {
+                error = "the durable PQ ChainLock winner finalizes the "
+                        "active recovery floor";
+                return false;
+            }
+        }
+    }
+    if (node::DisconnectCrossesPQActivationHandoff(
+            GetConsensus(), m_pq_activation_runtime_state,
+            m_pq_activation_handoff_record, disconnecting.nHeight,
+            disconnecting.GetBlockHash())) {
+        error = "the imported PQ activation handoff fixes the A-1 "
+                "predecessor";
+        return false;
+    }
+    return true;
+}
+
+bool ChainstateManager::IsPQBlockProductionAllowed() const noexcept
+{
+    return node::IsPQActivationBlockProductionAllowed(
+        IsPQParticipationAllowed());
+}
+// SYSCOIN END: Local BLS-to-PQ activation handoff persistence.
+
 // Note that though this is marked const, we may end up modifying `m_cached_finished_ibd`, which
 // is a performance-related implementation detail. This function must be marked
 // `const` so that `CValidationInterface` clients (which are given a `const Chainstate*`)
 // can call it.
 //
+// SYSCOIN: Keep public IBD latched until base sync, PQ-history
+// authentication, snapshot validation, and required Geth startup are ready.
 bool ChainstateManager::IsInitialBlockDownload() const
 {
+    // SYSCOIN: Pair reconciliation precedes even an already latched IBD
+    // result; a running child alone does not establish its Core branch.
+    if (HasPendingNEVMStartupPair()) return true;
     // Optimization: pre-test latch before taking the lock.
     if (m_cached_finished_ibd.load(std::memory_order_relaxed))
         return false;
 
-    bool notify_nevm_startnetwork{false};
+    bool notify_ibd_completed{false};
     {
         LOCK(cs_main);
         if (m_cached_finished_ibd.load(std::memory_order_relaxed))
             return false;
-        if (m_blockman.LoadingBlocks()) {
+        if (!IsBaseBlockSyncComplete()) {
             return true;
         }
-        CChain& chain{ActiveChain()};
-        if (chain.Tip() == nullptr) {
+        // SYSCOIN BEGIN: A public BLS-free node is not ready to participate
+        // until its exact local A-1 handoff has been established.
+        if (!IsPQParticipationAllowed()) {
             return true;
         }
-        if (chain.Tip()->nChainWork < MinimumChainWork()) {
+        // SYSCOIN END: Public PQ activation participation gate.
+        if (m_pq_history_auth_state != PQHistoryAuthState::READY) {
             return true;
         }
-        if (chain.Tip()->Time() < Now<NodeSeconds>() - m_options.max_tip_age) {
+        if (llmq::MakePQChainLockFinalityStoreConfig(GetConsensus()) &&
+            IsSnapshotActive() && !IsSnapshotValidated()) {
             return true;
         }
         if (fNEVMConnection && !fRegTest && !IsManagedGethStarted()) {
@@ -2014,14 +3049,607 @@ bool ChainstateManager::IsInitialBlockDownload() const
         }
         LogPrintf("Leaving InitialBlockDownload (latching to false)\n");
         m_cached_finished_ibd.store(true, std::memory_order_relaxed);
-        notify_nevm_startnetwork = fNEVMConnection && !fRegTest;
+        notify_ibd_completed = true;
     }
 
-    if (notify_nevm_startnetwork && !m_interrupt) {
-        bool bResponse = false;
-        GetMainSignals().NotifyNEVMComms("startnetwork", bResponse);
+    if (notify_ibd_completed) {
+        GetMainSignals().InitialBlockDownloadCompleted(
+            const_cast<ChainstateManager&>(*this));
     }
     return false;
+}
+
+bool ChainstateManager::IsBaseBlockSyncComplete() const
+{
+    AssertLockHeld(cs_main);
+    if (m_blockman.LoadingBlocks()) return false;
+    const CBlockIndex* tip{ActiveTip()};
+    return tip != nullptr && tip->nChainWork >= MinimumChainWork() &&
+           tip->Time() >= Now<NodeSeconds>() - m_options.max_tip_age;
+}
+
+bool ChainstateManager::CanBeginPQHistoryAuthentication() const
+{
+    AssertLockHeld(cs_main);
+    // SYSCOIN BEGIN: Never begin live finality authentication from a
+    // structurally replayed but locally unpinned legacy prefix. Once a
+    // preseal is active it may extend while the node catches up.
+    return IsPQParticipationAllowed() &&
+           (m_pq_history_auth_state == PQHistoryAuthState::PENDING ||
+            !m_cached_finished_ibd.load(std::memory_order_relaxed));
+    // SYSCOIN END: Public PQ activation participation gate.
+}
+
+bool ChainstateManager::CanBeginPQHistoryAuthentication(
+    const CBlockIndex& branch_point,
+    int32_t certificate_serve_until_height) const
+{
+    AssertLockHeld(cs_main);
+    if (CanBeginPQHistoryAuthentication()) return true;
+    const CBlockIndex* best_header{m_best_header};
+    return IsPQParticipationAllowed() &&
+           certificate_serve_until_height >= 0 &&
+           best_header != nullptr &&
+           best_header->nHeight >= certificate_serve_until_height &&
+           best_header->nHeight >= branch_point.nHeight &&
+           best_header->GetAncestor(branch_point.nHeight) == &branch_point;
+}
+
+bool ChainstateManager::TryEnterPendingPQHistoryAuthentication(
+    const CBlockIndex& branch_point,
+    int32_t certificate_serve_until_height)
+{
+    AssertLockHeld(cs_main);
+    if (!CanBeginPQHistoryAuthentication(
+            branch_point, certificate_serve_until_height)) {
+        return false;
+    }
+    m_pq_history_auth_state = PQHistoryAuthState::PENDING;
+    return true;
+}
+
+bool ChainstateManager::TryReenterPendingPQHistoryAuthentication(
+    const PQHistoryReauthentication& proof)
+{
+    AssertLockHeld(cs_main);
+    if (proof.m_owner != this || !IsPQParticipationAllowed() ||
+        (m_pq_history_auth_state != PQHistoryAuthState::READY &&
+         m_pq_history_auth_state != PQHistoryAuthState::PENDING) ||
+        proof.m_dependency_token.IsNull() ||
+        proof.m_old_provenance_revision > GetPQProvenanceRevocationRevision()) {
+        return false;
+    }
+    const auto resolve = [this](const PQHistoryReauthentication::BlockIdentity& identity)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main) -> const CBlockIndex* {
+        if (identity.height < 0 || identity.hash.IsNull()) return nullptr;
+        const CBlockIndex* index{m_blockman.LookupBlockIndex(identity.hash)};
+        return index && index->nHeight == identity.height ? index : nullptr;
+    };
+    const CBlockIndex* old_coverage{resolve(proof.m_old_coverage)};
+    const CBlockIndex* selected_tip{resolve(proof.m_selected_tip)};
+    const CBlockIndex* previous_floor{proof.m_previous_durable_floor
+        ? resolve(*proof.m_previous_durable_floor) : nullptr};
+    const CBlockIndex* current_floor{proof.m_current_durable_floor
+        ? resolve(*proof.m_current_durable_floor) : nullptr};
+    if (!old_coverage || !selected_tip || selected_tip != ActiveTip() ||
+        (proof.m_previous_durable_floor && !previous_floor) ||
+        (proof.m_current_durable_floor && !current_floor)) {
+        return false;
+    }
+    // Rebinding coverage cannot erase or replace the previous durable floor.
+    if (previous_floor &&
+        (!current_floor ||
+         current_floor->GetAncestor(previous_floor->nHeight) != previous_floor ||
+         old_coverage->GetAncestor(previous_floor->nHeight) != previous_floor)) {
+        return false;
+    }
+    if (current_floor &&
+        (old_coverage->nHeight <= current_floor->nHeight ||
+         old_coverage->GetAncestor(current_floor->nHeight) != current_floor ||
+         selected_tip->GetAncestor(current_floor->nHeight) != current_floor)) {
+        return false;
+    }
+    const bool floor_advanced{current_floor &&
+        (!previous_floor || current_floor->nHeight > previous_floor->nHeight)};
+    // The best header may lead the branch actually selected for replay.
+    // A frozen endpoint, provenance revision, or its bound D must have changed.
+    if (selected_tip->GetAncestor(old_coverage->nHeight) == old_coverage &&
+        proof.m_old_provenance_revision == GetPQProvenanceRevocationRevision() &&
+        !floor_advanced) {
+        return false;
+    }
+    m_pq_history_auth_state = PQHistoryAuthState::PENDING;
+    return true;
+}
+
+bool ChainstateManager::PublishPQHistoryAuthState(PQHistoryAuthState state)
+{
+    AssertLockHeld(cs_main);
+    if (state != PQHistoryAuthState::READY &&
+        m_cached_finished_ibd.load(std::memory_order_relaxed) &&
+        !(state == PQHistoryAuthState::PENDING &&
+          m_pq_history_auth_state == PQHistoryAuthState::PENDING)) {
+        return false;
+    }
+    m_pq_history_auth_state = state;
+    return true;
+}
+
+void ChainstateManager::MaybeCompleteInitialBlockDownload()
+{
+    AssertLockNotHeld(cs_main);
+    (void)IsInitialBlockDownload();
+}
+
+bool ChainstateManager::MaybeStartNEVMNetwork()
+{
+    if (HasPendingNEVMStartupPair() || HasPendingNEVMPayloadRepair() ||
+        !fNEVMConnection || fRegTest || m_interrupt ||
+        IsInitialBlockDownload()) {
+        return true;
+    }
+    if (llmq::chainLocksHandler != nullptr &&
+        llmq::chainLocksHandler->HasNEVMReplayObligation()) {
+        return true;
+    }
+    bool expected{false};
+    if (!m_nevm_network_start_sent.compare_exchange_strong(
+            expected, true, std::memory_order_relaxed)) {
+        return true;
+    }
+    bool response{false};
+    GetMainSignals().NotifyNEVMComms("startnetwork", response);
+    if (!response) {
+        m_nevm_network_start_sent.store(false,
+                                        std::memory_order_relaxed);
+    }
+    return response;
+}
+
+bool ChainstateManager::NEVMBlockProductionPrerequisitesMet()
+{
+    AssertLockHeld(cs_main);
+    if (HasPendingNEVMStartupPair()) return false;
+    const CBlockIndex* tip{ActiveTip()};
+    if (!fNEVMConnection || tip == nullptr ||
+        int64_t{tip->nHeight} + 1 < GetConsensus().nNEVMStartBlock) {
+        return true;
+    }
+    // Replacing damaged payload bytes is not enough: the repaired active
+    // prefix must also finish replay before the engine can supply a template.
+    if (m_nevm_payload_repair) {
+        const CBlockIndex* repaired{
+            m_blockman.LookupBlockIndex(m_nevm_payload_repair->syscoin_hash)};
+        if (repaired && tip->GetAncestor(repaired->nHeight) == repaired) {
+            return false;
+        }
+    }
+    // IBD is a one-way latch. A later historical-proof gap can defer Geth
+    // again, and authenticating that gap does not itself complete replay.
+    // Follow the active branch so an unrelated prospective marker cannot
+    // stop its miner, and do not require a new finality certificate.
+    if (llmq::chainLocksHandler != nullptr &&
+        llmq::chainLocksHandler->ShouldDeferBTCCNEVM(*tip)) return false;
+    return true;
+}
+
+bool ChainstateManager::PrepareNEVMBlockProduction()
+{
+    AssertLockHeld(cs_main);
+    if (!NEVMBlockProductionPrerequisitesMet()) return false;
+    const CBlockIndex* tip{ActiveTip()};
+    return !fNEVMConnection || tip == nullptr ||
+        int64_t{tip->nHeight} + 1 < GetConsensus().nNEVMStartBlock ||
+        !m_nevm_prefix_recovery_needed;
+}
+
+bool ChainstateManager::MaybeRecoverNEVMBlockProduction(std::string& error)
+{
+    AssertLockNotHeld(cs_main);
+    error.clear();
+    const auto recovery_pending = [&]() EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+        return m_nevm_prefix_recovery_needed && fNEVMConnection &&
+            !m_interrupt && !m_blockman.LoadingBlocks() &&
+            IsPQBlockProductionAllowed() && NEVMBlockProductionPrerequisitesMet();
+    };
+    Chainstate* chainstate;
+    {
+        LOCK(cs_main);
+        if (!recovery_pending()) return true;
+        chainstate = &ActiveChainstate();
+    }
+    // SYSCOIN: A lost acknowledgement may leave this exact child applied in
+    // Geth but unpublished in Core. Never infer that authority from height.
+    const CBlockIndex* pending_connect{nullptr};
+    // SYSCOIN: Resuming fork selection grants no authority to a pending branch.
+    bool continue_activation{false};
+    {
+        // Invalidation retains its applied-prefix snapshot across cs_main
+        // releases. Exclude the entire operation before replay can move Geth.
+        LOCK(chainstate->m_chainstate_mutex);
+        std::optional<NEVMBlockReject> rejection;
+        {
+            LOCK(cs_main);
+            if (chainstate != &ActiveChainstate() || !recovery_pending()) return true;
+            const CBlockIndex* tip{ActiveTip()};
+            if (tip == nullptr) return true;
+            // SYSCOIN BEGIN: Preserve the known attempted child across ticks.
+            CBlockIndex* pending{chainstate->NEVMPendingConnectAttempt()};
+            // SYSCOIN: A retired or unselected child may only be compensated,
+            // never published on the strength of its recorded external effect.
+            const bool cancel_pending{pending && chainstate->NEVMPendingConnectCandidate() != pending};
+            if (cancel_pending) chainstate->m_nevm_activation_continuation = true;
+            if (chainstate->RecoverNEVMPrefixThrough(*tip, pending, error, rejection)) {
+                if (cancel_pending && m_nevm_prefix_recovery_needed &&
+                    !chainstate->CancelUnselectedNEVMPendingConnect(*pending, error)) {
+                    return false;
+                }
+                if (!m_nevm_prefix_recovery_needed) {
+                    // SYSCOIN: This worker owns the completed endpoint proof;
+                    // unlike a live-prefix retry, it has no send in flight.
+                    const int64_t start{GetConsensus().nNEVMStartBlock};
+                    const uint64_t count{tip->nHeight < start ? 0 :
+                        static_cast<uint64_t>(int64_t{tip->nHeight} - start + 1)};
+                    if (!ClearNEVMPendingConnect(count, count ? tip->GetBlockHash() : uint256{}, error)) {
+                        m_nevm_prefix_recovery_needed = true;
+                        return false;
+                    }
+                    // SYSCOIN BEGIN: Finish selection after resolving the lost-ACK child.
+                    const CBlockIndex* attempted{chainstate->m_nevm_pending_connect
+                        ? m_blockman.LookupBlockIndex(*chainstate->m_nevm_pending_connect) : nullptr};
+                    // SYSCOIN: Parent alignment resolves the recorded attempt
+                    // even if it never applied or its child lost eligibility.
+                    // Ordinary selection still owns the next candidate.
+                    const bool owns_continuation{chainstate->m_nevm_activation_continuation ||
+                        (attempted && (attempted->pprev == tip || chainstate->m_chain.Contains(attempted)))};
+                    const CBlockIndex* next{owns_continuation ? chainstate->FindMostWorkChain() : nullptr};
+                    if (next == nullptr || next == tip) {
+                        chainstate->m_nevm_pending_connect.reset();
+                        chainstate->m_nevm_activation_continuation = false;
+                        return true;
+                    }
+                    chainstate->m_nevm_activation_continuation = true;
+                    m_nevm_prefix_recovery_needed = true;
+                    continue_activation = true;
+                    // SYSCOIN END: Consume this reason only under activation's own locks.
+                } else {
+                    // Only the exact already-applied child leaves the flag armed
+                    // after successful recovery. Revalidate it again in activation.
+                    assert(pending != nullptr);
+                    pending_connect = pending;
+                }
+            } else if (!rejection) {
+                return false;
+            }
+            // SYSCOIN END: Preserve the known attempted child across ticks.
+        }
+        // Use the same endpoint, payload and finality checks as activation.
+        // Reconciliation may release cs_main, so retain activation exclusion.
+        if (rejection) {
+            BlockValidationState state;
+            if (!chainstate->ReconcileRejectedNEVMBlock(state, *rejection)) {
+                error = state.ToString();
+                return false;
+            }
+        }
+    }
+    BlockValidationState state;
+    // SYSCOIN: Activation takes its own locks and rechecks the pending ticket.
+    // Its publication leaves mining gated until the next tick's fresh pair check.
+    if (!chainstate->ActivateBestChainInternal(state, nullptr, pending_connect, continue_activation)) {
+        error = state.ToString();
+        return false;
+    }
+    error.clear();
+    return true;
+}
+
+// SYSCOIN BEGIN: Durable provenance for an unresolved external connection.
+static bool FlushAndGetNEVMBlockInfo(
+    uint64_t& count, uint256& syscoin_hash, std::string& error,
+    std::optional<NEVMBlockReject>* rejection = nullptr);
+
+namespace {
+const auto NEVM_PENDING_CONNECT_KEY{std::make_pair(uint8_t{'F'}, std::string{"nevm_pending_connect_v1"})};
+const std::string NEVM_PENDING_CONNECT_PRUNE_LOCK{"nevm-pending-connect"};
+
+bool MatchesNEVMActivePrefix(int64_t start, uint64_t count,
+                            const uint256& hash, const CBlockIndex* tip)
+{
+    if (tip == nullptr || start < 0) return false;
+    if (count == 0) return hash.IsNull();
+    if (tip->nHeight < start ||
+        count > static_cast<uint64_t>(int64_t{tip->nHeight} - start + 1)) return false;
+    const auto* ancestor{tip->GetAncestor(
+        static_cast<int32_t>(start + static_cast<int64_t>(count) - 1))};
+    return ancestor && ancestor->GetBlockHash() == hash;
+}
+}
+
+bool ChainstateManager::InitializeNEVMPendingConnect(std::string& error)
+{
+    AssertLockHeld(cs_main);
+    error.clear();
+    if (m_nevm_pending_connect_record) return true;
+    std::pair<uint256, uint256> record;
+    try {
+        auto& db{*m_blockman.m_block_tree_db};
+        if (!db.Exists(NEVM_PENDING_CONNECT_KEY)) return true;
+        std::unique_ptr<CDBIterator> it{db.NewIterator()};
+        it->Seek(NEVM_PENDING_CONNECT_KEY);
+        it->CheckStatus();
+        std::pair<uint8_t, std::string> key;
+        if (!it->Valid() || !it->GetKeyExact(key) || key != NEVM_PENDING_CONNECT_KEY ||
+            it->GetValueSize() != 64 || !it->GetValueExact(record) ||
+            record.first.IsNull() || record.second.IsNull() || record.first == record.second) {
+            error = "nevm-pending-connect-record-invalid";
+            return false;
+        }
+    } catch (const std::exception& e) {
+        error = strprintf("nevm-pending-connect-record-read:%s", e.what());
+        return false;
+    }
+    m_nevm_pending_connect_record = record;
+    m_nevm_pending_connect_durable = true;
+    // DoGethStartupProcedure consumes this rebuild flag before engine attach.
+    m_nevm_pending_connect_rebuild = fReindexGeth.load();
+    ActiveChainstate().m_nevm_pending_connect = record.second;
+    m_nevm_prefix_recovery_needed = true;
+    m_blockman.UpdatePruneLock(NEVM_PENDING_CONNECT_PRUNE_LOCK,
+        {std::max(0, GetConsensus().nNEVMStartBlock)});
+    return true;
+}
+
+// SYSCOIN: A live endpoint acknowledgment does not make its state durable.
+// Share the exact engine barrier between rollback and failed-connect cleanup.
+static bool MakeNEVMPairDurable(const ChainstateManager& chainman,
+                                uint64_t count, const uint256& hash)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    bool durable{false};
+    if (fNEVMConnection && !chainman.m_interrupt) {
+        GetMainSignals().NotifyNEVMComms(
+            "durable-pair-v1:" + std::to_string(count) + ":" + hash.GetHex(), durable);
+    }
+    return durable;
+}
+
+bool ChainstateManager::ClearNEVMPendingConnect(
+    uint64_t count, const uint256& hash, std::string& error)
+{
+    AssertLockHeld(cs_main);
+    if (!m_nevm_pending_connect_record) return true;
+    // An applied endpoint is not a durability barrier. Every cleanup route,
+    // including already-aligned and lost-reply recovery, must fence that exact
+    // engine pair before Core can durably forget the original obligation.
+    if (!MakeNEVMPairDurable(*this, count, hash)) {
+        m_nevm_prefix_recovery_needed = true;
+        error = "nevm-pending-connect-durability-unavailable";
+        return false;
+    }
+    try {
+        if (!m_blockman.m_block_tree_db->Erase(NEVM_PENDING_CONNECT_KEY, /*fSync=*/true)) {
+            m_nevm_prefix_recovery_needed = true;
+            error = "nevm-pending-connect-record-erase-failed";
+            return false;
+        }
+    } catch (const std::exception& e) {
+        m_nevm_prefix_recovery_needed = true;
+        error = strprintf("nevm-pending-connect-record-erase:%s", e.what());
+        return false;
+    }
+    m_nevm_pending_connect_record.reset();
+    m_nevm_pending_connect_durable = false;
+    m_nevm_pending_connect_rebuild = false;
+    m_blockman.RemovePruneLock(NEVM_PENDING_CONNECT_PRUNE_LOCK);
+    return true;
+}
+
+bool ChainstateManager::RecoverNEVMPendingConnect(
+    uint64_t& count, uint256& hash, std::string& error)
+{
+    AssertLockNotHeld(cs_main);
+    Chainstate& chainstate{ActiveChainstate()};
+    LOCK(chainstate.m_chainstate_mutex);
+    LOCK(cs_main);
+    error.clear();
+    if (!m_nevm_pending_connect_record) return true;
+    if (!fNEVMConnection || m_interrupt) {
+        error = "nevm-pending-connect-engine-unavailable";
+        return false;
+    }
+    const auto& record{*m_nevm_pending_connect_record};
+    chainstate.m_nevm_pending_connect = record.second;
+    const CBlockIndex* tip{ActiveTip()};
+    CBlockIndex* pending{m_blockman.LookupBlockIndex(record.second)};
+    const int64_t start{GetConsensus().nNEVMStartBlock};
+    if (!FlushAndGetNEVMBlockInfo(count, hash, error)) return false;
+    // An explicit paired rebuild may have removed both the saved parent and
+    // all external effects. An ordinary unexplained pair gets no such escape.
+    const bool rebuilt_empty{m_nevm_pending_connect_rebuild && count == 0 && hash.IsNull()};
+    if (!rebuilt_empty && (pending == nullptr || pending->pprev == nullptr ||
+        pending->pprev->GetBlockHash() != record.first ||
+        (pending->nStatus & BLOCK_VALID_MASK) < BLOCK_VALID_TRANSACTIONS ||
+        !pending->HaveNumChainTxs())) {
+        error = "nevm-pending-connect-record-branch-mismatch";
+        return false;
+    }
+    const bool aligned{tip && (tip->nHeight < start ? (count == 0 && hash.IsNull()) :
+        DoesNEVMBlockInfoMatchSyscoinBlock(start, count, tip->nHeight, hash, tip->GetBlockHash()))};
+    // A freshly proved earlier active endpoint also proves C is absent.
+    // Preserve ordinary startup's existing prefix rollback/replay policy.
+    if (rebuilt_empty || MatchesNEVMActivePrefix(start, count, hash, tip)) {
+        if (!ClearNEVMPendingConnect(count, hash, error)) return false;
+        chainstate.m_nevm_pending_connect.reset();
+        chainstate.m_nevm_activation_continuation = false;
+        m_nevm_prefix_recovery_needed = !aligned && tip && tip->nHeight >= start;
+        return true;
+    }
+    if (tip == nullptr || pending->pprev != tip ||
+        chainstate.NEVMPendingConnectAttempt() != pending ||
+        !DoesNEVMBlockInfoMatchSyscoinBlock(start, count, pending->nHeight, hash, pending->GetBlockHash())) {
+        error = "nevm-pending-connect-applied-pair-mismatch";
+        return false;
+    }
+    // A record alone never retires C. Ordinary startup may still publish an
+    // eligible selected child; retirement/unselection permits only its inverse.
+    if (chainstate.NEVMPendingConnectCandidate() == pending) return true;
+    if (!chainstate.CancelUnselectedNEVMPendingConnect(*pending, error)) return false;
+    m_nevm_prefix_recovery_needed = true;
+    // Refresh the caller's startup tuple after compensation. Later startup
+    // payload, bootstrap and rollback decisions must see P, not the old C.
+    if (!FlushAndGetNEVMBlockInfo(count, hash, error)) return false;
+    if (tip->nHeight < start ? (count != 0 || !hash.IsNull()) :
+        !DoesNEVMBlockInfoMatchSyscoinBlock(start, count, tip->nHeight, hash, tip->GetBlockHash())) {
+        error = "nevm-pending-connect-compensation-pair-mismatch";
+        return false;
+    }
+    if (!ClearNEVMPendingConnect(count, hash, error)) return false;
+    chainstate.m_nevm_pending_connect.reset();
+    chainstate.m_nevm_activation_continuation = false;
+    m_nevm_prefix_recovery_needed = false;
+    return true;
+}
+// SYSCOIN END: Startup never infers an attempted operation from an ahead hash.
+
+bool ChainstateManager::InitializeNEVMStartupPair(
+    uint64_t geth_count, const uint256& syscoin_hash, std::string& error)
+{
+    AssertLockHeld(cs_main);
+    error.clear();
+    if (m_nevm_startup_pair) {
+        error = "NEVM startup pair is already awaiting Core recovery";
+        return false;
+    }
+    if (geth_count == 0) {
+        if (syscoin_hash.IsNull()) {
+            if (ActiveTip() && ActiveTip()->nHeight >= GetConsensus().nNEVMStartBlock) {
+                m_nevm_prefix_recovery_needed = true;
+            }
+            return true;
+        }
+        error = "Geth reports a Syscoin hash with a zero applied count";
+        return false;
+    }
+    const int64_t start{GetConsensus().nNEVMStartBlock};
+    if (start < 0 || syscoin_hash.IsNull() ||
+        geth_count > static_cast<uint64_t>(
+                         std::numeric_limits<int64_t>::max() - start)) {
+        error = "Geth reports an invalid applied Syscoin pair";
+        return false;
+    }
+    const int64_t height{start + static_cast<int64_t>(geth_count) - 1};
+    if (height > std::numeric_limits<int32_t>::max()) {
+        error = "Geth's applied Syscoin height is out of range";
+        return false;
+    }
+    const CBlockIndex* tip{ActiveTip()};
+    const CBlockIndex* applied{m_blockman.LookupBlockIndex(syscoin_hash)};
+    if (tip != nullptr && height <= tip->nHeight) {
+        const CBlockIndex* ancestor{tip->GetAncestor(static_cast<int32_t>(height))};
+        if (ancestor != nullptr && DoesNEVMBlockInfoMatchSyscoinBlock(
+                start, geth_count, ancestor->nHeight, syscoin_hash,
+                ancestor->GetBlockHash())) {
+            // Reclassify after reopen; raw status cannot clear an existing
+            // obligation because buffered work has not yet been flushed.
+            if (height < tip->nHeight) m_nevm_prefix_recovery_needed = true;
+            return true;
+        }
+        error = "Geth's applied Syscoin pair is on a different Core branch";
+        return false;
+    }
+    if (applied != nullptr &&
+        (applied->nHeight != height ||
+         (applied->nStatus & (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK)) ||
+         (tip != nullptr && applied->GetAncestor(tip->nHeight) != tip))) {
+        error = "Geth's ahead Syscoin pair conflicts with Core's recovered branch";
+        return false;
+    }
+    // The header may also have been lost before the last block-index flush.
+    // Keep ordinary header/block acquisition open until its ancestry is known.
+    m_nevm_startup_pair = NEVMStartupPair{
+        static_cast<int32_t>(height), syscoin_hash};
+    m_nevm_startup_pair_pending.store(true, std::memory_order_release);
+    return true;
+}
+
+bool ChainstateManager::CheckNEVMStartupConnect(
+    const CBlockIndex& index, std::string& error) const
+{
+    AssertLockHeld(cs_main);
+    error.clear();
+    if (!m_nevm_startup_pair) return true;
+    const auto& pair{*m_nevm_startup_pair};
+    const CBlockIndex* applied{m_blockman.LookupBlockIndex(pair.block_hash)};
+    if (applied == nullptr) {
+        // Every valid branch shares the configured genesis. A fresh Core
+        // must activate it before startup can open header acquisition.
+        if (pair.height > 0 && index.nHeight == 0 &&
+            index.pprev == nullptr &&
+            index.GetBlockHash() == GetConsensus().hashGenesisBlock) {
+            return true;
+        }
+        error = "NEVM startup recovery is awaiting the applied pair's headers";
+        return false;
+    }
+    const CBlockIndex* ancestor{index.nHeight <= applied->nHeight
+        ? applied->GetAncestor(index.nHeight) : nullptr};
+    if (applied->nHeight != pair.height ||
+        (applied->nStatus & (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK)) ||
+        ancestor == nullptr || ancestor->GetBlockHash() != index.GetBlockHash()) {
+        error = "NEVM startup recovery would leave Geth's applied Syscoin branch";
+        return false;
+    }
+    return true;
+}
+
+bool ChainstateManager::MaybeCompleteNEVMStartupPair(std::string& error)
+{
+    AssertLockHeld(cs_main);
+    error.clear();
+    if (!m_nevm_startup_pair) return true;
+    const auto& pair{*m_nevm_startup_pair};
+    const CBlockIndex* tip{ActiveTip()};
+    if (tip == nullptr || tip->nHeight < pair.height) return true;
+    const CBlockIndex* applied{tip->GetAncestor(pair.height)};
+    if (applied == nullptr || applied->GetBlockHash() != pair.block_hash) {
+        error = "Recovered Core tip does not contain Geth's startup pair";
+        return false;
+    }
+    uint64_t count{0};
+    uint256 syscoin_hash;
+    std::string status_error;
+    // cs_main excludes branch changes across this synchronous status snapshot.
+    // Callers have already published the real connected tip, not fJustCheck.
+    GetMainSignals().NotifyGetNEVMBlockInfo(count, syscoin_hash, status_error);
+    if (!status_error.empty()) {
+        LogPrintf("Geth's applied pair is unavailable after Core recovery; "
+                  "startup remains pending: %s\n", status_error);
+        return true;
+    }
+    if (!DoesNEVMBlockInfoMatchSyscoinBlock(
+            GetConsensus().nNEVMStartBlock, count, pair.height,
+            syscoin_hash, pair.block_hash)) {
+        error = "Geth's applied pair changed during Core startup recovery";
+        return false;
+    }
+    LogPrintf("Core recovered Geth's exact startup pair %s at height %d\n",
+              pair.block_hash.ToString(), pair.height);
+    m_nevm_startup_pair.reset();
+    m_nevm_startup_pair_pending.store(false, std::memory_order_release);
+    return true;
+}
+
+bool ChainstateManager::RetryNEVMStartupPair(BlockValidationState& state)
+{
+    AssertLockNotHeld(cs_main);
+    if (m_interrupt) return true;
+    if (!ActiveChainstate().ActivateBestChain(state)) return false;
+    if (!HasPendingNEVMStartupPair() && !m_interrupt) {
+        (void)IsInitialBlockDownload();
+        (void)MaybeStartNEVMNetwork();
+    }
+    return true;
 }
 
 void Chainstate::CheckForkWarningConditions()
@@ -2079,6 +3707,10 @@ void Chainstate::ConflictingChainFound(CBlockIndex* pindexNew)
 // which does its own setBlockIndexCandidates management.
 void Chainstate::InvalidBlockFound(CBlockIndex* pindex, const BlockValidationState& state)
 {
+    // SYSCOIN: A failed journal write has already requested fatal shutdown.
+    // Do not make an unrecorded retirement durable while shutdown unwinds.
+    if (m_chainman.m_nevm_pending_connect_record &&
+        !m_chainman.m_nevm_pending_connect_durable) return;
     if (IsBlockRejectionCacheable(state.GetResult())) {
         pindex->nStatus |= BLOCK_FAILED_VALID;
         m_chainman.m_failed_blocks.insert(pindex);
@@ -2314,10 +3946,103 @@ static bool ShouldBypassExternalNEVMNotifyCalls(const ChainstateManager& chainma
     return bypass_height > 0 && nHeight <= bypass_height;
 }
 
-bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMap &mapNEVMTxRoots, const CBlock& block, const CBlockIndex* pindex, const uint256& nBlockHash, const uint32_t& nHeight, const bool fJustCheck, PoDAMAPMemory &mapPoDA, const CDeterministicMNListNEVMAddressDiff &diff) {
+// SYSCOIN BEGIN: Classify failed execution against a verified predecessor.
+static bool HasCommittedNEVMContinuityMismatch(
+    const BlockManager& blockman, const CBlock& block,
+    const CBlockIndex& index, const CNEVMHeader& commitment,
+    int64_t start) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    AssertLockHeld(cs_main);
+    if (start < 0 || index.nHeight < start) return false;
+    try {
+        const dev::RLP encoded{block.vchNEVMBlockData};
+        const auto block_fields{encoded.itemCount()};
+        if ((block_fields != 3 && block_fields != 4) ||
+            !encoded[1].isList() || !encoded[2].isList() ||
+            (block_fields == 4 && !encoded[3].isList())) return false;
+        const auto header{encoded[0]};
+        const auto fields{header.itemCount()};
+        // Match Geth's canonical Header encoding, including optional suffixes.
+        // Unknown formats and malformed representations provide no proof.
+        if (fields < 15 || fields > 21) return false;
+        for (size_t i{0}; i < fields; ++i) {
+            const auto field{header[i]};
+            if (!field.isData()) return false;
+            const auto size{field.size()};
+            switch (i) {
+            case 0: case 1: case 3: case 4: case 5: case 13:
+            case 16: case 19: case 20:
+                if (size != 32) return false;
+                break;
+            case 2:
+                if (size != 20) return false;
+                break;
+            case 6:
+                if (size != 256) return false;
+                break;
+            case 14:
+                if (size != 8) return false;
+                break;
+            case 7: case 8: case 15:
+                if (!field.isInt()) return false;
+                break;
+            case 9: case 10: case 11: case 17: case 18:
+                if (!field.isInt() || size > sizeof(uint64_t)) return false;
+                break;
+            default: // Extra data is an arbitrary byte string.
+                break;
+            }
+        }
+        const auto hash{dev::sha3(header.data())};
+        if (!std::equal(hash.begin(), hash.end(), commitment.nBlockHash.begin())) return false;
+        const uint64_t expected_number{static_cast<uint64_t>(int64_t{index.nHeight} - start + 1)};
+        const auto number{header[8]};
+        // Geth stores Number as big.Int. Do not truncate a committed overflow.
+        if (number.size() > sizeof(uint64_t) || number.toInt<uint64_t>() != expected_number) return true;
+        // The first NEVM parent is engine genesis, not a Core commitment.
+        if (index.nHeight == start || index.pprev == nullptr) return false;
+        CNEVMHeader parent_commitment;
+        if (index.pprev->nStatus & BLOCK_HAVE_DATA) {
+            CBlock parent;
+            bool mutated{false};
+            BlockValidationState state;
+            if (!blockman.ReadBlockFromDisk(parent, *index.pprev, /*load_auxiliary_data=*/false) ||
+                parent.vtx.empty() ||
+                BlockMerkleRoot(parent, &mutated) != index.pprev->hashMerkleRoot || mutated ||
+                !GetNEVMData(state, parent, parent_commitment)) return false;
+        } else if (!blockman.ReadNEVMPrunedHeader(parent_commitment, *index.pprev)) {
+            return false;
+        }
+        const auto parent_hash{header[0].payload()};
+        return !std::equal(parent_hash.begin(), parent_hash.end(), parent_commitment.nBlockHash.begin());
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+// SYSCOIN END: Classify failed execution against a verified predecessor.
+
+// SYSCOIN: Authenticated BTCC catch-up may replay NEVM without treating an
+// equal-height but different Syscoin branch as already applied.
+bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMap &mapNEVMTxRoots, const CBlock& block, const CBlockIndex* pindex, const uint256& nBlockHash, const uint32_t& nHeight, const bool fJustCheck, PoDAMAPMemory &mapPoDA, const CDeterministicMNListNEVMAddressDiff &diff, bool btcc_prefix_authenticated, NEVMNotificationContext notification_context, std::optional<NEVMBlockReject>* rejection, bool* live_nevm_acknowledged) {
+    if (rejection) rejection->reset();
+    const bool local_coins_recovery{
+        notification_context ==
+            NEVMNotificationContext::ALREADY_VALIDATED_COINS_RECOVERY};
+    if (!local_coins_recovery && pindex != nullptr &&
+        m_chainman.HasPendingNEVMPayloadRepair()) {
+        LOCK(cs_main);
+        if (m_chainman.IsWaitingForNEVMPayload(*pindex)) {
+            return state.Error("nevm-payload-repair-pending");
+        }
+    }
+    // SYSCOIN: Deferred external replay must not bypass a failed local root
+    // disconnect. Only startup coins recovery may resolve that obligation.
+    if (!local_coins_recovery && pnevmtxrootsdb &&
+        pnevmtxrootsdb->GetPendingDisconnect()) {
+        return state.Error("NEVM root disconnect recovery is pending");
+    }
     CNEVMHeader nevmBlockHeader;
-    std::vector<unsigned char> coinbase_payload;
-    if(!GetNEVMData(state, block, nevmBlockHeader, &coinbase_payload)) {
+    if(!GetNEVMData(state, block, nevmBlockHeader)) {
         return false; //state filled by GetNEVMData
     }
     if(block.vchNEVMBlockData.empty()) {
@@ -2328,77 +4053,251 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
     for (auto const& [key, val] : mapPoDA) {
         NEVMDataVecOut.emplace_back(key);
     }
-    bool bSkipValidation = false;
-    if(bSkipValidation) {
-        LogPrintf("ConnectNEVMCommitment: skipping validation result...\n");
-    }
-    // Derive the BTC anchor once from consensus-indexed chain state and pass it through
-    // to ZMQ, avoiding BTCC payload parsing in notifier code.
+    // SYSCOIN: Geth exposes BTCPrevHash immediately and has no provisional
+    // distinction. Only an authenticated cursor ADVANCE is forwarded; a
+    // non-null KEEP receipt authenticates finality state without replaying an
+    // already-applied external checkpoint.
     uint256 btcPrevHashForNEVM{};
+    llmq::pq::BTCCReceipt receipt;
+    const auto btcc_schedule{
+        llmq::pq::GetBTCCScheduleConfig(m_chainman.GetConsensus())};
+    const bool has_receipt{
+        pindex != nullptr && btcc_schedule.IsValid() &&
+        llmq::pq::IsBTCCReceiptCarrierHeight(
+            btcc_schedule, static_cast<int32_t>(nHeight)) &&
+        ExtractBTCCReceipt(block, receipt)};
+    const bool nonnull_receipt{has_receipt && !receipt.IsNull()};
+    const bool receipt_advances_cursor{
+        nonnull_receipt && pindex->pprev != nullptr &&
+        llmq::pq::BTCCReceiptAdvancesCursor(
+            IndexedBTCCReceiptState(pindex->pprev), receipt)};
+    bool receipt_live_verified{false};
+    bool defer_btcc_nevm{false};
     {
-        const auto& consensus = m_chainman.GetConsensus();
-        const bool carrier_height = IsBTCCCarrierHeight(consensus, nHeight);
-        if (carrier_height) {
-            // Only forward a BTC anchor if this carrier block has a non-null BTCC receipt.
-            // (Null receipts are allowed for censorship resistance and must result in no NEVM checkpoint.)
-            llmq::CBTCCheckpointSig btcc;
-            const bool extracted = ExtractBTCCReceipt(coinbase_payload, btcc);
-            if (extracted && !btcc.IsNull()) {
-                if (pindex != nullptr) {
-                    const int expected_height = static_cast<int>(nHeight) - BTCCHECK_PROP_BUFFER;
-                    const CBlockIndex* pindexReceipt = pindex->GetAncestor(expected_height);
-                    if (pindexReceipt != nullptr) {
-                        btcPrevHashForNEVM = pindexReceipt->btcpPrevCommitment;
-                    }
-                }
+        // SYSCOIN: Snapshot receipt authorization under cs_main, then release
+        // this local acquisition before a catch-up replay waits on Geth.
+        // Ordinary ConnectBlock callers already hold the recursive lock.
+        LOCK(cs_main);
+        receipt_live_verified =
+            pindex != nullptr && pindex->m_pq_btcc_receipt_live_verified;
+        defer_btcc_nevm =
+            !btcc_prefix_authenticated && pindex != nullptr &&
+            llmq::chainLocksHandler != nullptr &&
+            llmq::chainLocksHandler->ShouldDeferBTCCNEVM(*pindex);
+    }
+    // Rollforward has already reconstructed the local receipt accumulator.
+    // Its live forwarding authorization is required only for external delivery.
+    if (nonnull_receipt && !local_coins_recovery) {
+        if (btcc_prefix_authenticated ||
+            receipt_live_verified) {
+            if (receipt_advances_cursor) {
+                btcPrevHashForNEVM = receipt.accepted_cursor.btc_hash;
             }
+        } else if (!defer_btcc_nevm) {
+            return state.Error("pq-btcc-nevm-receipt-unauthenticated");
         }
     }
     std::string stateStr;
     const bool bypass_external_notify = ShouldBypassExternalNEVMNotifyCalls(m_chainman, nHeight);
-    if(fNEVMConnection && !bypass_external_notify) {
+    bool startup_already_applied{false};
+    if (!local_coins_recovery) {
+        LOCK(cs_main);
+        startup_already_applied = m_chainman.HasPendingNEVMStartupPair();
+        if (startup_already_applied &&
+            (pindex == nullptr ||
+             !m_chainman.CheckNEVMStartupConnect(*pindex, stateStr))) {
+            return state.Error(stateStr.empty()
+                ? "NEVM startup recovery requires a branch-bound block"
+                : stateStr);
+        }
+    }
+    // Geth accepts an exact current-tip retry, not older canonical blocks.
+    // Live startup replay skips delivery only for already-paired ancestry.
+    // Coins recovery defers delivery until subsequent NEVM reconciliation;
+    // receipt, transaction and local state validation still execute.
+    if(fNEVMConnection && !local_coins_recovery &&
+       !bypass_external_notify && !defer_btcc_nevm &&
+       !startup_already_applied) {
         if (m_chainman.m_interrupt) {
             return state.Error("shutdown");
         }
-        GetMainSignals().NotifyNEVMBlockConnect(nevmBlockHeader, block, stateStr, fJustCheck? uint256(): nBlockHash, NEVMDataVecOut, nHeight, bSkipValidation, btcPrevHashForNEVM, diff);
-        if(!stateStr.empty()) {
-            state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, stateStr);
-            if(stateStr == "nevm-connect-response-invalid-data" || stateStr == "nevm-response-not-found") {
-                // if exitwhensynced is set on geth we likely have shutdown the geth node so we should also shut syscoin down here
-                const std::vector<std::string> &cmdLine = m_chainman.GethCommandLine();
-                if(std::find(cmdLine.begin(), cmdLine.end(), "--exitwhensynced") != cmdLine.end()) {
-                    m_chainman.GetNotifications().exitWhenSynced();
-                    return true;
+        // SYSCOIN BEGIN: Resolve the previous live attempt before sending a sibling.
+        // Otherwise its continuity failure would replace the only known identity
+        // of an applied-but-unpublished child. Healthy delivery does no extra I/O.
+        if (!fJustCheck && !btcc_prefix_authenticated && pindex != nullptr &&
+            notification_context == NEVMNotificationContext::LIVE) {
+            LOCK(cs_main);
+            if (m_chainman.m_nevm_prefix_recovery_needed && m_nevm_pending_connect &&
+                this == &m_chainman.ActiveChainstate()) {
+                const CBlockIndex* attempted{m_blockman.LookupBlockIndex(*m_nevm_pending_connect)};
+                if (attempted && attempted != pindex &&
+                    attempted->pprev == m_chainman.ActiveTip()) {
+                    return state.Error("nevm-live-recovery-pending-other-block");
                 }
             }
+            // SYSCOIN: A published child or a completed ordinary rollback may
+            // leave its durable attempt behind. Prove an active prefix before
+            // a different send can replace that record. An earlier endpoint
+            // remains subject to the existing live-prefix recovery path.
+            if (m_chainman.m_nevm_pending_connect_record &&
+                this == &m_chainman.ActiveChainstate() &&
+                m_chainman.m_nevm_pending_connect_record->second != pindex->GetBlockHash()) {
+                uint64_t count{0};
+                uint256 hash;
+                std::string error;
+                const CBlockIndex* tip{m_chainman.ActiveTip()};
+                const int64_t start{m_chainman.GetConsensus().nNEVMStartBlock};
+                if (!FlushAndGetNEVMBlockInfo(count, hash, error)) return state.Error(error);
+                if (!MatchesNEVMActivePrefix(start, count, hash, tip)) {
+                    return state.Error("nevm-pending-connect-unresolved");
+                }
+                if (tip->nHeight >= start &&
+                    !DoesNEVMBlockInfoMatchSyscoinBlock(start, count, tip->nHeight,
+                                                       hash, tip->GetBlockHash())) {
+                    m_chainman.m_nevm_prefix_recovery_needed = true;
+                }
+                if (!m_chainman.ClearNEVMPendingConnect(count, hash, error)) return state.Error(error);
+            }
         }
-    }
-    bool res = state.IsValid();
-    // try to bring connection back alive if its not connected for some reason
-    if(!res) {
-        if(state.GetRejectReason() == "nevm-connect-not-sent") {
+        // SYSCOIN END: Only a reconciled attempt may yield its identity.
+        std::optional<NEVMBlockReject> rejected_pair;
+        GetMainSignals().NotifyNEVMBlockConnect(nevmBlockHeader, block, stateStr, fJustCheck? uint256(): nBlockHash, NEVMDataVecOut, nHeight, /*bSkipValidation=*/false, btcPrevHashForNEVM, diff, &rejected_pair);
+        const auto& geth_command_line{m_chainman.GethCommandLine()};
+        const bool exit_when_synced{
+            std::find(geth_command_line.begin(), geth_command_line.end(),
+                      "--exitwhensynced") != geth_command_line.end()};
+        // A completed managed engine is expected to disappear. Honor every
+        // existing shutdown result before restarting or replaying anything.
+        const auto should_exit = [&] {
+            return exit_when_synced &&
+                (stateStr == "nevm-connect-response-invalid-data" ||
+                 stateStr == "nevm-connect-consensus-invalid" ||
+                 stateStr == "nevm-connect-protocol-unsupported" ||
+                 stateStr == "nevm-connect-not-sent" ||
+                 stateStr == "nevm-response-not-found");
+        };
+        if (should_exit()) {
+            m_chainman.GetNotifications().exitWhenSynced();
+            return state.Error(stateStr);
+        }
+        // Resolve the retry before classifying the result. An earlier transport
+        // failure must not leave a successful retry in an invalid/error state.
+        bool restarted{false};
+        if (stateStr == "nevm-connect-not-sent" &&
+            notification_context != NEVMNotificationContext::EXTERNAL_REPLAY) {
             bool bResponse = false;
             GetMainSignals().NotifyNEVMComms("status", bResponse);
             if(!bResponse) {
-                if(RestartGethNode()) {
-                    // try again after resetting connection
-                    GetMainSignals().NotifyNEVMBlockConnect(nevmBlockHeader, block, stateStr, fJustCheck? uint256(): nBlockHash, NEVMDataVecOut, nHeight, bSkipValidation, btcPrevHashForNEVM, diff);
-                    if(!stateStr.empty()) {
-                        state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, stateStr);
-                        if(stateStr == "nevm-connect-response-invalid-data" || stateStr == "nevm-response-not-found") {
-                            // if exitwhensynced is set on geth we likely have shutdown the geth node so we should also shut syscoin down here
-                            const std::vector<std::string> &cmdLine = m_chainman.GethCommandLine();
-                            if(std::find(cmdLine.begin(), cmdLine.end(), "--exitwhensynced") != cmdLine.end()) {
-                                m_chainman.GetNotifications().exitWhenSynced();
-                                return true;
-                            }
-                        }
+                // SYSCOIN BEGIN: Restarting may discard acknowledged execution.
+                // Check-only retries cannot verify the applied Core prefix;
+                // keep mining gated even if the restart itself fails.
+                {
+                    LOCK(cs_main);
+                    m_chainman.m_nevm_prefix_recovery_needed = true;
+                }
+                // SYSCOIN END: Leave prefix reconciliation to its existing caller.
+                restarted = m_restart_geth_for_testing
+                    ? m_restart_geth_for_testing() : RestartGethNode();
+            }
+        }
+        bool retry_current{restarted};
+        bool recovered_prefix{false};
+        if (!rejected_pair && !stateStr.empty() &&
+            stateStr != "nevm-connect-consensus-invalid" &&
+            stateStr != "nevm-connect-protocol-unsupported" &&
+            !fJustCheck && !btcc_prefix_authenticated && pindex != nullptr &&
+            notification_context == NEVMNotificationContext::LIVE) {
+            LOCK(cs_main);
+            // Only the pending active-chain extension can recover a live
+            // engine. Historical replay and template checks cannot authorize
+            // a second replay or select another Core branch.
+            if (this == &m_chainman.ActiveChainstate() &&
+                pindex->pprev == m_chainman.ActiveTip()) {
+                std::string recovery_error;
+                if (!RecoverNEVMPrefixForConnect(*pindex, recovery_error,
+                                                 rejected_pair)) {
+                    if (rejected_pair &&
+                        rejected_pair->nevm_hash == nevmBlockHeader.nBlockHash &&
+                        rejected_pair->syscoin_hash == nBlockHash) {
+                        // A recovery flush can reject the current request after
+                        // its reply was lost. Use the ordinary current verdict
+                        // classifier below, including managed-exit handling.
+                        stateStr = rejected_pair->IsPayload()
+                            ? "nevm-connect-payload-invalid"
+                            : "nevm-connect-consensus-invalid";
+                        retry_current = false;
+                    } else {
+                        if (rejection) *rejection = rejected_pair;
+                        return state.Error(recovery_error);
                     }
-                    res = state.IsValid();
+                } else {
+                    recovered_prefix = true;
+                    retry_current = true;
                 }
             }
         }
+        if (retry_current) {
+            // Recovery verifies the applied predecessor (or this exact pair
+            // after a lost reply). Retry the current request only once.
+            stateStr.clear();
+            GetMainSignals().NotifyNEVMBlockConnect(nevmBlockHeader, block, stateStr, fJustCheck? uint256(): nBlockHash, NEVMDataVecOut, nHeight, /*bSkipValidation=*/false, btcPrevHashForNEVM, diff, &rejected_pair);
+        }
+        if(!stateStr.empty()) {
+            if (should_exit()) {
+                m_chainman.GetNotifications().exitWhenSynced();
+                return state.Error(stateStr);
+            }
+            // A generic continuity error is ambiguous until the selected
+            // prefix has been recovered. After its failed retry, authenticate
+            // the candidate header itself before retiring an immutable fault.
+            if (recovered_prefix && !rejected_pair &&
+                stateStr == "nevm-connect-response-invalid-data") {
+                LOCK(cs_main);
+                if (HasCommittedNEVMContinuityMismatch(
+                        m_blockman, block, *pindex, nevmBlockHeader,
+                        m_chainman.GetConsensus().nNEVMStartBlock)) {
+                    stateStr = "nevm-connect-consensus-invalid";
+                }
+            }
+            // Both the notifier and local continuity proof bind the verdict
+            // to this pair. Unclassified engine errors must remain retryable.
+            if(stateStr == "nevm-connect-consensus-invalid") {
+                if (rejection) {
+                    *rejection = NEVMBlockReject{
+                        nevmBlockHeader.nBlockHash,
+                        fJustCheck ? uint256{} : nBlockHash};
+                }
+                return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, stateStr);
+            }
+            if (rejection) *rejection = rejected_pair;
+            if (recovered_prefix && !rejected_pair) {
+                LOCK(cs_main);
+                // Another operational failure during the one retry may have
+                // discarded the prefix that recovery just verified.
+                m_chainman.m_nevm_prefix_recovery_needed = true;
+            }
+            return state.Error(stateStr);
+        }
+        // SYSCOIN: An accepted request can already be applied or buffered in
+        // Geth even when a later local step fails. Report that external effect
+        // to the enclosing connection without journaling healthy publication.
+        if (live_nevm_acknowledged && !fJustCheck &&
+            !btcc_prefix_authenticated && pindex != nullptr &&
+            notification_context == NEVMNotificationContext::LIVE) {
+            LOCK(cs_main);
+            if (this == &m_chainman.ActiveChainstate() &&
+                pindex->pprev == m_chainman.ActiveTip()) {
+                *live_nevm_acknowledged = true;
+            }
+        }
+        if (restarted && !m_chainman.MaybeStartNEVMNetwork()) {
+            // SYSCOIN: Geth already accepted this pair. Publish the successful
+            // connection even if networking startup needs a later retry; the
+            // helper leaves its latch unset for the readiness scheduler.
+            LogPrintf("%s: NEVM networking start unavailable after restart; will retry\n", __func__);
+        }
     }
+    const bool res = state.IsValid();
     if(res && !fJustCheck) {
         NEVMTxRoot txRootDB;
         txRootDB.nTxRoot = nevmBlockHeader.nTxRoot;
@@ -2409,12 +4308,1208 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
 
     return res;
 }
-bool DisconnectNEVMCommitment(ChainstateManager& chainman, BlockValidationState& state, std::vector<uint256> &vecNEVMBlocks, const CBlock& block, const uint32_t& nHeight, const uint256& nBlockHash, const CDeterministicMNListNEVMAddressDiff &diff) {
+
+// SYSCOIN: A connect acknowledgement may only queue a block in Geth's IBD
+// buffer. Deferred replay and disconnect must classify progress from an
+// applied pair after flushing that buffer, including an interrupted pass.
+static bool FlushAndGetNEVMBlockInfo(
+    uint64_t& count, uint256& syscoin_hash, std::string& error,
+    std::optional<NEVMBlockReject>* rejection)
+{
+    error.clear();
+    if (rejection) rejection->reset();
+    bool flushed{false};
+    GetMainSignals().NotifyNEVMComms("flush", flushed, rejection);
+    if (!flushed) {
+        error = "nevm-flush-unavailable";
+        return false;
+    }
+    count = 0;
+    syscoin_hash.SetNull();
+    GetMainSignals().NotifyGetNEVMBlockInfo(count, syscoin_hash, error);
+    return error.empty();
+}
+
+// Reconstruct external inputs from an already-connected Core block. This
+// does not reapply transactions or publish local coins, roots or PoDA caches.
+static bool ReadNEVMReplayInputs(
+    node::BlockManager& blockman, const CBlockIndex& index, CBlock& block,
+    PoDAMAPMemory& poda, CDeterministicMNListNEVMAddressDiff& nevm_diff,
+    const char* error_prefix, std::string& error)
+{
+    int64_t median_time_past;
+    {
+        LOCK(cs_main);
+        if (index.pprev == nullptr ||
+            !blockman.ReadBlockFromDisk(block, index)) {
+            error = strprintf("%s-block-unavailable:%d", error_prefix, index.nHeight);
+            return false;
+        }
+        try {
+            if (deterministicMNManager == nullptr) {
+                error = strprintf("%s-dmn-unavailable", error_prefix);
+                return false;
+            }
+            const CDeterministicMNList previous{
+                deterministicMNManager->GetListForBlock(index.pprev)};
+            const CDeterministicMNList current{
+                deterministicMNManager->GetListForBlock(&index)};
+            previous.BuildNEVMAddressDiff(current, nevm_diff);
+        } catch (const std::exception& exception) {
+            error = strprintf("%s-dmn-diff:%s", error_prefix, exception.what());
+            return false;
+        }
+        median_time_past = index.GetMedianTimePast();
+    }
+    // The base block already passed PoDA validation. Rebuild its version-hash
+    // vector without applying today's expiry policy to historical data.
+    for (const CTransactionRef& tx : block.vtx) {
+        if (!tx->IsNEVMData()) continue;
+        const CNEVMData payload{*tx};
+        if (payload.IsNull()) {
+            error = strprintf("%s-poda-unavailable:%d", error_prefix, index.nHeight);
+            return false;
+        }
+        poda.try_emplace(payload.vchVersionHash,
+                        MapPoDAPayloadMeta{payload, median_time_past});
+    }
+    return true;
+}
+
+namespace {
+const auto NEVM_PAYLOAD_REPAIR_KEY{std::make_pair(uint8_t{'F'}, std::string{"nevm_payload_repair_v1"})};
+constexpr const char* NEVM_PAYLOAD_PRUNE_LOCK{"nevm-payload-repair"};
+
+bool ObsoleteNEVMPayloadRepair(const CBlockIndex* index, const CBlockIndex* tip)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    if (!index) return false;
+    if (index->nStatus & BLOCK_FAILED_MASK) return true;
+    if (!tip) return false;
+    const int height{std::min(index->nHeight, tip->nHeight)};
+    return index->GetAncestor(height) != tip->GetAncestor(height);
+}
+
+bool ReadNEVMPayloadRepairBlock(BlockManager& blockman,
+                                const NEVMBlockReject& rejection,
+                                CBlockIndex*& index, CBlock& block,
+                                CNEVMHeader& header, std::string& error)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    index = blockman.LookupBlockIndex(rejection.syscoin_hash);
+    if (!rejection.IsPayload() || rejection.nevm_hash.IsNull() ||
+        rejection.syscoin_hash.IsNull() || index == nullptr ||
+        !(index->nStatus & BLOCK_HAVE_DATA) ||
+        (index->nStatus & BLOCK_FAILED_MASK)) {
+        error = "nevm-payload-repair-index-unavailable";
+        return false;
+    }
+    BlockValidationState state;
+    if (!blockman.ReadBlockFromDisk(block, *index, /*load_auxiliary_data=*/false) ||
+        !block.IsNEVM() || !GetNEVMData(state, block, header) ||
+        header.nBlockHash != rejection.nevm_hash) {
+        error = "nevm-payload-repair-commitment-mismatch";
+        return false;
+    }
+    return true;
+}
+
+bool MatchesNEVMPayloadRejection(const NEVMBlockReject& rejection,
+                                  const CNEVMHeader& header,
+                                  Span<const uint8_t> payload)
+{
+    return rejection.payload_hash == NEVMPayloadFingerprint(
+        header.nBlockHash, header.nTxRoot, header.nReceiptRoot,
+        rejection.syscoin_hash, payload);
+}
+
+// SYSCOIN: A pure check can prove an immutable contradiction in this tuple.
+bool MatchesNEVMCommitmentRejection(const std::optional<NEVMBlockReject>& rejection,
+                                    const CNEVMHeader& header, const uint256& syscoin_hash)
+{
+    return rejection && !rejection->IsPayload() &&
+           rejection->nevm_hash == header.nBlockHash &&
+           rejection->syscoin_hash == syscoin_hash;
+}
+} // namespace
+
+bool ChainstateManager::HasPendingNEVMPayloadRepair() const
+{
+    return m_nevm_payload_pending.load(std::memory_order_acquire);
+}
+
+bool ChainstateManager::IsWaitingForNEVMPayload(const CBlockIndex& candidate) const
+{
+    AssertLockHeld(cs_main);
+    if (!m_nevm_payload_repair || m_nevm_payload_stage == NEVMPayloadRepairStage::REPLAY) return false;
+    const CBlockIndex* rejected{m_blockman.LookupBlockIndex(m_nevm_payload_repair->syscoin_hash)};
+    return rejected && candidate.nHeight >= rejected->nHeight &&
+           candidate.GetAncestor(rejected->nHeight) == rejected;
+}
+
+std::optional<NEVMPayloadRepairRequest> ChainstateManager::GetNEVMPayloadRepairRequest() const
+{
+    AssertLockHeld(cs_main);
+    if (!m_nevm_payload_repair || !m_nevm_payload_durable ||
+        m_nevm_payload_stage != NEVMPayloadRepairStage::DOWNLOAD) return std::nullopt;
+    return NEVMPayloadRepairRequest{m_nevm_payload_generation, *m_nevm_payload_repair};
+}
+
+bool ChainstateManager::PersistNEVMPayloadRepair(BlockValidationState& state)
+{
+    AssertLockHeld(cs_main);
+    assert(m_nevm_payload_repair);
+    if (m_nevm_payload_durable) return true;
+    const auto now{std::chrono::steady_clock::now()};
+    if (now < m_nevm_payload_persist_retry_after) {
+        return state.Error("nevm-payload-repair-persistence-retry-pending");
+    }
+    m_nevm_payload_persist_retry_after = now + std::chrono::seconds{5};
+    // Retain every potentially unapplied predecessor until the engine's
+    // exact applied pair has caught up. This is installed only on recovery.
+    m_blockman.UpdatePruneLock(NEVM_PAYLOAD_PRUNE_LOCK,
+        {std::max(0, GetConsensus().nNEVMStartBlock)});
+    if (!ActiveChainstate().FlushStateToDisk(state, FlushStateMode::ALWAYS)) return false;
+    try {
+        if (!m_blockman.m_block_tree_db->Write(NEVM_PAYLOAD_REPAIR_KEY,
+                                              *m_nevm_payload_repair, /*fSync=*/true)) {
+            return state.Error("nevm-payload-repair-marker-write-failed");
+        }
+    } catch (const std::exception& e) {
+        return state.Error(strprintf("nevm-payload-repair-marker-write:%s", e.what()));
+    }
+    m_nevm_payload_durable = true;
+    return true;
+}
+
+// SYSCOIN: A selected competing candidate may need repair before becoming active.
+bool ChainstateManager::QueueNEVMPayloadRepair(const NEVMBlockReject& rejection,
+                                               BlockValidationState& state,
+                                               const NEVMPayloadRepairSelection* selection)
+{
+    AssertLockHeld(cs_main);
+    // Repeated reports of this already authenticated identity cannot make
+    // ordinary block delivery re-read/hash its bytes or repeatedly fsync.
+    if (m_nevm_payload_repair == rejection) return PersistNEVMPayloadRepair(state);
+    CBlockIndex* requested{m_blockman.LookupBlockIndex(rejection.syscoin_hash)};
+    if (m_nevm_payload_repair && m_nevm_payload_stage != NEVMPayloadRepairStage::REPLAY) {
+        const CBlockIndex* previous{m_blockman.LookupBlockIndex(m_nevm_payload_repair->syscoin_hash)};
+        // SYSCOIN BEGIN: Distinguish an active predecessor from a selected fork.
+        // Keep the existing earlier-active-predecessor rule. An unconnected
+        // candidate can replace it only with authority from its own failed
+        // ConnectTip attempt, while that activation still excludes transitions.
+        const bool earlier_active_predecessor{
+            requested && ActiveChain().Contains(requested) &&
+            (!previous || !ActiveChain().Contains(previous) ||
+             previous->nHeight > requested->nHeight)};
+        bool selected_competing_candidate{false};
+        if (selection) {
+            if (requested && previous && selection->candidate == requested &&
+                selection->parent == ActiveTip() &&
+                requested->pprev == selection->parent &&
+                !(requested->nStatus & (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK)) &&
+                !(selection->selected_tip->nStatus & (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK)) &&
+                selection->selected_tip->nHeight >= requested->nHeight &&
+                selection->selected_tip->GetAncestor(requested->nHeight) == requested &&
+                !ActiveChain().Contains(previous)) {
+                const int common_height{
+                    std::min(previous->nHeight, selection->selected_tip->nHeight)};
+                // Do not displace a dependency on the selected ancestry,
+                // including one beyond the selected candidate's current tip.
+                selected_competing_candidate =
+                    previous->GetAncestor(common_height) !=
+                    selection->selected_tip->GetAncestor(common_height);
+            }
+        }
+        if (!earlier_active_predecessor && !selected_competing_candidate) {
+            return state.Error("nevm-payload-repair-predecessor-pending");
+        }
+        // SYSCOIN END: Authorize only the activation-selected competing repair.
+    }
+    CBlockIndex* index{nullptr};
+    CBlock block;
+    CNEVMHeader header;
+    std::string error;
+    if (!ReadNEVMPayloadRepairBlock(m_blockman, rejection, index, block, header, error)) {
+        return state.Error(error);
+    }
+    if (!MatchesNEVMPayloadRejection(rejection, header, block.vchNEVMBlockData)) {
+        return state.Error("nevm-payload-repair-fingerprint-mismatch");
+    }
+    // SYSCOIN: Preserve the old durable row until the new authenticated marker
+    // overwrites it atomically. Nondurable state exposes no download request;
+    // a failed flush/write leaves the old row available for restart recovery.
+    m_nevm_payload_repair = rejection;
+    m_nevm_payload_stage = NEVMPayloadRepairStage::DOWNLOAD;
+    m_nevm_payload_durable = false;
+    ++m_nevm_payload_generation;
+    m_nevm_payload_retry_after = {};
+    m_nevm_payload_persist_retry_after = {};
+    m_nevm_payload_pending.store(true, std::memory_order_release);
+    return PersistNEVMPayloadRepair(state);
+}
+
+bool ChainstateManager::InitializeNEVMPayloadRepair(std::string& error)
+{
+    AssertLockHeld(cs_main);
+    error.clear();
+    if (m_nevm_payload_repair) return true;
+    NEVMBlockReject rejection;
+    try {
+        if (!m_blockman.m_block_tree_db->Exists(NEVM_PAYLOAD_REPAIR_KEY)) return true;
+        if (!m_blockman.m_block_tree_db->Read(NEVM_PAYLOAD_REPAIR_KEY, rejection)) {
+            error = "nevm-payload-repair-marker-unreadable";
+            return false;
+        }
+    } catch (const std::exception& e) {
+        error = strprintf("nevm-payload-repair-marker-read:%s", e.what());
+        return false;
+    }
+    if (ObsoleteNEVMPayloadRepair(m_blockman.LookupBlockIndex(rejection.syscoin_hash),
+                                   m_active_chainstate ? ActiveTip() : nullptr)) {
+        return ClearNEVMPayloadRepair(error);
+    }
+    CBlockIndex* index{nullptr};
+    CBlock block;
+    CNEVMHeader header;
+    if (!ReadNEVMPayloadRepairBlock(m_blockman, rejection, index, block, header, error)) {
+        if (error.empty()) error = "nevm-payload-repair-marker-unreadable";
+        return false;
+    }
+    m_nevm_payload_repair = rejection;
+    m_nevm_payload_stage = NEVMPayloadRepairStage::VERIFY_STORED;
+    m_nevm_payload_durable = true;
+    ++m_nevm_payload_generation;
+    m_nevm_payload_retry_after = {};
+    m_blockman.UpdatePruneLock(NEVM_PAYLOAD_PRUNE_LOCK,
+        {std::max(0, GetConsensus().nNEVMStartBlock)});
+    m_nevm_payload_pending.store(true, std::memory_order_release);
+    return true;
+}
+
+bool ChainstateManager::ClearNEVMPayloadRepair(std::string& error)
+{
+    AssertLockHeld(cs_main);
+    try {
+        if (!m_blockman.m_block_tree_db->Erase(NEVM_PAYLOAD_REPAIR_KEY, /*fSync=*/true)) {
+            error = "nevm-payload-repair-marker-erase-failed";
+            return false;
+        }
+    } catch (const std::exception& e) {
+        error = strprintf("nevm-payload-repair-marker-erase:%s", e.what());
+        return false;
+    }
+    m_nevm_payload_repair.reset();
+    m_nevm_payload_durable = false;
+    ++m_nevm_payload_generation;
+    m_blockman.RemovePruneLock(NEVM_PAYLOAD_PRUNE_LOCK);
+    m_nevm_payload_pending.store(false, std::memory_order_release);
+    error.clear();
+    return true;
+}
+
+bool ChainstateManager::DiscoverNEVMPayloadRepair(
+    uint64_t geth_count, const uint256& syscoin_hash, std::string& error)
+{
+    AssertLockNotHeld(cs_main);
+    Chainstate& chainstate{ActiveChainstate()};
+    LOCK(chainstate.m_chainstate_mutex);
+    LOCK(cs_main);
+    error.clear();
+    if (m_nevm_payload_repair || !fNEVMConnection) return true;
+    const int64_t start{GetConsensus().nNEVMStartBlock};
+    if (start < 0 || geth_count > static_cast<uint64_t>(std::numeric_limits<int32_t>::max() - start)) return true;
+    const int32_t next_height{static_cast<int32_t>(start + geth_count)};
+    const CBlockIndex* tip{ActiveTip()};
+    if (!tip || next_height > tip->nHeight) return true;
+    if ((geth_count == 0 && !syscoin_hash.IsNull()) ||
+        (geth_count > 0 && (next_height == 0 ||
+         ActiveChain()[next_height - 1]->GetBlockHash() != syscoin_hash))) {
+        error = "nevm-payload-startup-applied-pair-mismatch";
+        return false;
+    }
+    // A crash may precede Core's marker write. Probe only the first unapplied
+    // stored block on a lagging startup; healthy startup does no payload I/O.
+    const CBlockIndex* index{ActiveChain()[next_height]};
+    if (!(index->nStatus & BLOCK_HAVE_DATA)) return true;
+    CBlock block;
+    CNEVMHeader header;
+    BlockValidationState state;
+    if (!m_blockman.ReadBlockFromDisk(block, *index, /*load_auxiliary_data=*/false) ||
+        !block.IsNEVM() || !GetNEVMData(state, block, header)) return true;
+    bool valid{false};
+    std::optional<NEVMBlockReject> rejection;
+    GetMainSignals().NotifyNEVMPayloadCheck(header, block, index->GetBlockHash(), valid, error, &rejection);
+    if (!valid) {
+        const bool commitment_rejected{
+            MatchesNEVMCommitmentRejection(rejection, header, index->GetBlockHash())};
+        if (!rejection || (!rejection->IsPayload() && !commitment_rejected)) {
+            error = "nevm-payload-startup-check-unavailable:" + error;
+            return false;
+        }
+        // SYSCOIN: Preserve startup recovery until ordinary replay resolves
+        // the contradiction with its applied-prefix and finality checks.
+        if (commitment_rejected) {
+            rejection->payload_hash = NEVMPayloadFingerprint(
+                header.nBlockHash, header.nTxRoot, header.nReceiptRoot,
+                index->GetBlockHash(), block.vchNEVMBlockData);
+        }
+        state = BlockValidationState{};
+        if (!QueueNEVMPayloadRepair(*rejection, state)) {
+            error = state.ToString();
+            return false;
+        }
+        if (commitment_rejected) m_nevm_payload_stage = NEVMPayloadRepairStage::REPLAY;
+    }
+    error.clear();
+    return true;
+}
+
+bool ChainstateManager::ProcessNEVMPayloadRepair(
+    const NEVMPayloadRepairRequest& request, Span<const uint8_t> payload,
+    BlockValidationState& state)
+{
+    AssertLockNotHeld(cs_main);
+    if (payload.empty() || payload.size() > MAX_NEVM_BLOCK_SIZE) {
+        return state.Error("nevm-payload-repair-size");
+    }
+    Chainstate& chainstate{ActiveChainstate()};
+    LOCK(chainstate.m_chainstate_mutex);
+    LOCK(cs_main);
+    if (m_interrupt || !fNEVMConnection || GetNEVMPayloadRepairRequest() != request) {
+        return state.Error("nevm-payload-repair-request-stale");
+    }
+    CBlockIndex* index{nullptr};
+    CBlock block;
+    CNEVMHeader header;
+    std::string error;
+    if (!ReadNEVMPayloadRepairBlock(m_blockman, request.rejection, index, block, header, error)) {
+        return state.Error(error);
+    }
+    if (!MatchesNEVMPayloadRejection(request.rejection, header, block.vchNEVMBlockData)) {
+        return state.Error("nevm-payload-repair-stored-bytes-changed");
+    }
+    // Only the payload comes from the peer. The entire Syscoin wrapper and
+    // committed NEVM header remain those already accepted and stored locally.
+    block.vchNEVMBlockData.assign(payload.begin(), payload.end());
+    bool valid{false};
+    std::optional<NEVMBlockReject> rejection;
+    GetMainSignals().NotifyNEVMPayloadCheck(header, block,
+        request.rejection.syscoin_hash, valid, error, &rejection);
+    if (!valid && !MatchesNEVMCommitmentRejection(rejection, header, request.rejection.syscoin_hash)) {
+        return state.Error(error.empty() ? "nevm-payload-repair-not-validated" : error);
+    }
+    // SYSCOIN: Retain a source-proven contradiction too. Normal replay must
+    // inspect these exact bytes before it can reject the immutable block.
+    if (!m_blockman.ReplaceNEVMBlockData(state, *index, payload)) return false;
+    m_nevm_payload_stage = NEVMPayloadRepairStage::REPLAY;
+    ++m_nevm_payload_generation;
+    m_nevm_payload_retry_after = {};
+    return true;
+}
+
+bool ChainstateManager::MaybeRecoverNEVMPayload(std::string& error)
+{
+    AssertLockNotHeld(cs_main);
+    error.clear();
+    if (!HasPendingNEVMPayloadRepair()) return true;
+    Chainstate& chainstate{ActiveChainstate()};
+    {
+        LOCK(chainstate.m_chainstate_mutex);
+        std::optional<NEVMBlockReject> rejection;
+        {
+            LOCK(cs_main);
+            if (!m_nevm_payload_repair) return true;
+            if (ObsoleteNEVMPayloadRepair(
+                    m_blockman.LookupBlockIndex(m_nevm_payload_repair->syscoin_hash), ActiveTip())) {
+                if (!ClearNEVMPayloadRepair(error)) return false;
+            } else {
+                const auto now{std::chrono::steady_clock::now()};
+                if (now < m_nevm_payload_retry_after) return true;
+                m_nevm_payload_retry_after = now + std::chrono::seconds{5};
+                if (m_interrupt || !fNEVMConnection) {
+                    error = "nevm-payload-repair-engine-unavailable";
+                    return false;
+                }
+                BlockValidationState state;
+                if (!PersistNEVMPayloadRepair(state)) {
+                    error = state.ToString();
+                    return false;
+                }
+                if (m_nevm_payload_stage == NEVMPayloadRepairStage::VERIFY_STORED) {
+                    CBlockIndex* index{nullptr};
+                    CBlock block;
+                    CNEVMHeader header;
+                    if (!ReadNEVMPayloadRepairBlock(m_blockman, *m_nevm_payload_repair,
+                                                    index, block, header, error)) return false;
+                    bool valid{false};
+                    GetMainSignals().NotifyNEVMPayloadCheck(header, block,
+                        index->GetBlockHash(), valid, error, &rejection);
+                    if (valid || MatchesNEVMCommitmentRejection(rejection, header, index->GetBlockHash())) {
+                        // Covers a crash after the new disk positions committed
+                        // but before the in-memory transition to replay. An
+                        // immutable contradiction also needs ordinary replay's
+                        // applied-prefix and finality checks before rejection.
+                        m_nevm_payload_stage = NEVMPayloadRepairStage::REPLAY;
+                    } else if (rejection && rejection->IsPayload()) {
+                        if (!QueueNEVMPayloadRepair(*rejection, state)) {
+                            error = state.ToString();
+                            return false;
+                        }
+                        m_nevm_payload_stage = NEVMPayloadRepairStage::DOWNLOAD;
+                        error.clear();
+                        return true;
+                    } else {
+                        return false;
+                    }
+                    rejection.reset();
+                }
+                if (m_nevm_payload_stage == NEVMPayloadRepairStage::DOWNLOAD) return true;
+                const CBlockIndex* tip{ActiveTip()};
+                if (tip && !chainstate.RecoverNEVMPrefixThrough(*tip, nullptr, error, rejection)) {
+                    if (!rejection) return false;
+                } else {
+                    if (!ClearNEVMPayloadRepair(error)) return false;
+                }
+            }
+        }
+        if (rejection) {
+            BlockValidationState state;
+            if (!chainstate.ReconcileRejectedNEVMBlock(state, *rejection)) {
+                error = state.ToString();
+                return false;
+            }
+        }
+    }
+    // SYSCOIN: Resume activation after clearing or reconciling the repair.
+    BlockValidationState state;
+    if (!chainstate.ActivateBestChain(state)) {
+        error = state.ToString();
+        return false;
+    }
+    if (!MaybeStartNEVMNetwork()) {
+        error = "nevm-payload-repair-network-unavailable";
+        return false;
+    }
+    return true;
+}
+
+bool Chainstate::PersistNEVMPendingConnect(BlockValidationState& state)
+{
+    AssertLockHeld(cs_main);
+    if (this != &m_chainman.ActiveChainstate() || !m_nevm_pending_connect) return true;
+    CBlockIndex* pending{NEVMPendingConnectAttempt()};
+    if (pending == nullptr) return true;
+    const auto record{std::make_pair(pending->pprev->GetBlockHash(), pending->GetBlockHash())};
+    if (m_chainman.m_nevm_pending_connect_record) {
+        if (*m_chainman.m_nevm_pending_connect_record != record) {
+            return FatalError(m_chainman.GetNotifications(), state,
+                              "Cannot replace an unresolved durable NEVM connection");
+        }
+        if (m_chainman.m_nevm_pending_connect_durable) return true;
+    }
+    // Stage the retention head before maintenance can discard C's inverse.
+    m_chainman.m_nevm_pending_connect_record = record;
+    m_blockman.UpdatePruneLock(NEVM_PENDING_CONNECT_PRUNE_LOCK,
+        {std::max(0, m_chainman.GetConsensus().nNEVMStartBlock)});
+    BlockValidationState persistence_state;
+    try {
+        // C may occupy a different block-file cursor than its active parent.
+        if (!m_blockman.FlushBlockFile(pending->nFile, /*fFinalize=*/false, /*finalize_undo=*/false) ||
+            !FlushStateToDisk(persistence_state, FlushStateMode::ALWAYS)) {
+            return FatalError(m_chainman.GetNotifications(), state,
+                              "Failed to persist NEVM pending-connection evidence: " + persistence_state.ToString());
+        }
+        // The full flush can leave P's coins in an asynchronous WAL. The
+        // separate block-tree record must not become durable before P does.
+        if (!CoinsDB().FlushWithSync(CoinsTip())) {
+            return FatalError(m_chainman.GetNotifications(), state,
+                              "Failed to sync NEVM pending-connection parent coins");
+        }
+        if (!m_blockman.m_block_tree_db->Write(NEVM_PENDING_CONNECT_KEY, record, /*fSync=*/true)) {
+            return FatalError(m_chainman.GetNotifications(), state,
+                              "Failed to persist NEVM pending-connection record");
+        }
+    } catch (const std::exception& e) {
+        return FatalError(m_chainman.GetNotifications(), state,
+                          strprintf("Failed to persist NEVM pending connection: %s", e.what()));
+    }
+    m_chainman.m_nevm_pending_connect_durable = true;
+    return true;
+}
+
+bool Chainstate::RecoverNEVMPrefixForConnect(
+    const CBlockIndex& pending, std::string& error,
+    std::optional<NEVMBlockReject>& rejection)
+{
+    AssertLockHeld(cs_main);
+    error.clear();
+    rejection.reset();
+    if (this != &m_chainman.ActiveChainstate() || pending.pprev == nullptr ||
+        pending.pprev != m_chainman.ActiveTip()) {
+        error = "nevm-live-recovery-not-active-extension";
+        return false;
+    }
+    // SYSCOIN: Retain the real attempted identity before any fallible query.
+    // Even a verified predecessor can be followed by a lost current-pair reply.
+    m_nevm_pending_connect = pending.GetBlockHash();
+    return RecoverNEVMPrefixThrough(*pending.pprev, &pending, error, rejection);
+}
+
+// SYSCOIN BEGIN: Known external effects and publication selection are distinct.
+CBlockIndex* Chainstate::NEVMPendingConnectAttempt()
+{
+    AssertLockHeld(cs_main);
+    if (!m_nevm_pending_connect || this != &m_chainman.ActiveChainstate()) return nullptr;
+    CBlockIndex* pending{m_blockman.LookupBlockIndex(*m_nevm_pending_connect)};
+    if (pending == nullptr || pending->pprev != m_chain.Tip() ||
+        !(pending->nStatus & BLOCK_HAVE_DATA) ||
+        (pending->nStatus & BLOCK_VALID_MASK) < BLOCK_VALID_TRANSACTIONS ||
+        !pending->HaveNumChainTxs()) return nullptr;
+    return pending;
+}
+
+CBlockIndex* Chainstate::NEVMPendingConnectCandidate()
+{
+    AssertLockHeld(cs_main);
+    CBlockIndex* pending{NEVMPendingConnectAttempt()};
+    if (pending == nullptr || !pending->IsValid(BLOCK_VALID_TRANSACTIONS) ||
+        (pending->nStatus & BLOCK_CONFLICT_CHAINLOCK) ||
+        !IsCurrentMostWorkBranch(*pending)) return nullptr;
+    return pending;
+}
+
+bool Chainstate::CancelUnselectedNEVMPendingConnect(
+    const CBlockIndex& pending, std::string& error)
+{
+    AssertLockHeld(cs_main);
+    AssertLockHeld(m_chainstate_mutex);
+    const CBlockIndex* parent{m_chain.Tip()};
+    const CBlockIndex* selected{FindMostWorkChain()};
+    // SYSCOIN: Cancellation resolves only the known external child of this tip.
+    // The preferred fork can diverge below it or win with fewer blocks; ordinary
+    // activation independently authorizes and performs every active-chain undo.
+    // A retired child can also be cancelled when the active parent remains
+    // selected and there is no replacement branch to activate.
+    const bool retired{(pending.nStatus & (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK)) != 0};
+    if (parent == nullptr || NEVMPendingConnectAttempt() != &pending ||
+        selected == nullptr || (m_chain.Contains(selected) && !(retired && selected == parent)) ||
+        selected->GetAncestor(pending.nHeight) == &pending) {
+        error = "nevm-live-recovery-cancel-selection-changed";
+        return false;
+    }
+    // The active recovery floor alone cannot protect an unpublished durable target.
+    if (llmq::chainLocksHandler != nullptr) {
+        const CBlockIndex* floor{nullptr};
+        const CBlockIndex* target{nullptr};
+        if (!llmq::chainLocksHandler->GetDurableFinalityRecoveryFloor(floor, target, error)) return false;
+        if ((floor == nullptr) != (target == nullptr) ||
+            (target && ((target->nHeight >= pending.nHeight &&
+                         target->GetAncestor(pending.nHeight) == &pending) ||
+                !llmq::IsDurableChainLockCandidateCompatible(
+                    selected->nHeight, target->nHeight,
+                    selected->nHeight >= target->nHeight && selected->GetAncestor(target->nHeight) == target,
+                    target->nHeight >= selected->nHeight && target->GetAncestor(selected->nHeight) == selected)))) {
+            error = "nevm-live-recovery-cancel-finality-conflict";
+            return false;
+        }
+    }
+    if (!m_chainman.CheckPQActivationHandoffDisconnect(pending, error)) return false;
+
+    // ConnectBlock has not written Bitcoin undo or published local state yet.
+    // Authenticate the stored commitment and reverse only its external MN diff.
+    CBlock block;
+    CNEVMHeader header;
+    BlockValidationState state;
+    bool mutated{false};
+    if (!m_blockman.ReadBlockFromDisk(block, pending, /*load_auxiliary_data=*/false) ||
+        block.GetHash() != pending.GetBlockHash() ||
+        block.hashPrevBlock != parent->GetBlockHash() ||
+        BlockMerkleRoot(block, &mutated) != pending.hashMerkleRoot || mutated ||
+        !block.IsNEVM() || !GetNEVMData(state, block, header)) {
+        error = "nevm-live-recovery-cancel-block-unavailable";
+        return false;
+    }
+    CDeterministicMNListNEVMAddressDiff inverse_diff;
+    if (pending.nHeight >= m_chainman.GetConsensus().DIP0003Height) {
+        try {
+            if (deterministicMNManager == nullptr) {
+                error = "nevm-live-recovery-cancel-dmn-unavailable";
+                return false;
+            }
+            const auto current{deterministicMNManager->GetListForBlock(&pending)};
+            const auto previous{deterministicMNManager->GetListForBlock(parent)};
+            if (current.IsNull() || current.GetHeight() != pending.nHeight ||
+                current.GetBlockHash() != pending.GetBlockHash() ||
+                (parent->nHeight >= m_chainman.GetConsensus().DIP0003Height &&
+                 (previous.IsNull() || previous.GetHeight() != parent->nHeight ||
+                  previous.GetBlockHash() != parent->GetBlockHash()))) {
+                error = "nevm-live-recovery-cancel-dmn-mismatch";
+                return false;
+            }
+            current.BuildNEVMAddressDiff(previous, inverse_diff);
+        } catch (const std::exception& exception) {
+            error = strprintf("nevm-live-recovery-cancel-dmn:%s", exception.what());
+            return false;
+        }
+    }
+    // The caller just flushed and proved this exact C endpoint under both locks.
+    // Retain continuation on an unusable reply: the next tick may already see P.
+    m_nevm_activation_continuation = true;
+    if (m_chainman.m_interrupt) {
+        error = "shutdown";
+        return false;
+    }
+    GetMainSignals().NotifyNEVMBlockDisconnect(error, pending.GetBlockHash(), inverse_diff);
+    if (!error.empty()) return false;
+    uint64_t count{0};
+    uint256 syscoin_hash;
+    if (!FlushAndGetNEVMBlockInfo(count, syscoin_hash, error)) return false;
+    const int64_t start{m_chainman.GetConsensus().nNEVMStartBlock};
+    if (parent->nHeight < start ? (count != 0 || !syscoin_hash.IsNull()) :
+        !DoesNEVMBlockInfoMatchSyscoinBlock(start, count, parent->nHeight,
+                                           syscoin_hash, parent->GetBlockHash())) {
+        error = "nevm-live-recovery-cancel-parent-mismatch";
+        return false;
+    }
+    m_chainman.m_nevm_prefix_recovery_needed = false;
+    return true;
+}
+// SYSCOIN END: The engine's reported identity alone cannot select a candidate.
+
+bool Chainstate::RecoverNEVMPrefixThrough(
+    const CBlockIndex& through, const CBlockIndex* pending, std::string& error,
+    std::optional<NEVMBlockReject>& rejection)
+{
+    AssertLockHeld(cs_main);
+    error.clear();
+    rejection.reset();
+    if (this != &m_chainman.ActiveChainstate() || !m_chain.Contains(&through)) {
+        error = "nevm-live-recovery-prefix-mismatch";
+        return false;
+    }
+    const int64_t start{m_chainman.GetConsensus().nNEVMStartBlock};
+    if (!pending && through.nHeight < start &&
+        !m_chainman.m_nevm_prefix_recovery_needed) return true;
+    m_chainman.m_nevm_prefix_recovery_needed = true;
+    if (m_chainman.m_interrupt) {
+        error = "shutdown";
+        return false;
+    }
+    uint64_t count{0};
+    uint256 syscoin_hash;
+    if (!FlushAndGetNEVMBlockInfo(count, syscoin_hash, error, &rejection)) return false;
+
+    // A rollback can remove the whole NEVM suffix while recovery is pending.
+    // Require a fresh empty applied pair before allowing the first template.
+    if (!pending && through.nHeight < start) {
+        if (count != 0 || !syscoin_hash.IsNull()) {
+            error = "nevm-live-recovery-applied-pair-mismatch";
+            return false;
+        }
+        if (&through == m_chainman.ActiveTip()) {
+            m_chainman.m_nevm_prefix_recovery_needed = false;
+        }
+        return true;
+    }
+
+    if (start < 0 || start > (pending ? pending->nHeight : through.nHeight) ||
+        count > static_cast<uint64_t>(std::numeric_limits<int64_t>::max() - start)) {
+        error = "nevm-live-recovery-height-overflow";
+        return false;
+    }
+    // A lost reply may have left the pending pair already committed. Let the
+    // normal exact-pair retry verify it; no predecessor should be resent.
+    if (pending && DoesNEVMBlockInfoMatchSyscoinBlock(
+            start, count, pending->nHeight, syscoin_hash, pending->GetBlockHash())) {
+        return true;
+    }
+    int64_t next_height{start + static_cast<int64_t>(count)};
+    if (next_height > int64_t{through.nHeight} + 1 ||
+        (count == 0 && !syscoin_hash.IsNull())) {
+        error = "nevm-live-recovery-applied-pair-mismatch";
+        return false;
+    }
+    if (count > 0) {
+        const CBlockIndex* applied{
+            through.GetAncestor(static_cast<int32_t>(next_height - 1))};
+        if (applied == nullptr || !DoesNEVMBlockInfoMatchSyscoinBlock(
+                start, count, applied->nHeight, syscoin_hash, applied->GetBlockHash())) {
+            error = "nevm-live-recovery-applied-pair-mismatch";
+            return false;
+        }
+    }
+
+    // cs_main holds this accepted ancestry stable. Callers that mutate the
+    // engine also retain activation exclusion. Bound each buffered batch and
+    // check interruption per block. Resume from a verified applied pair, not ACKs.
+    static constexpr int64_t REPLAY_BATCH_SIZE{64};
+    while (next_height <= through.nHeight) {
+        const int32_t last_height{static_cast<int32_t>(std::min<int64_t>(
+            through.nHeight, next_height + REPLAY_BATCH_SIZE - 1))};
+        for (; next_height <= last_height; ++next_height) {
+            if (m_chainman.m_interrupt) {
+                error = "shutdown";
+                return false;
+            }
+            const CBlockIndex* index{
+                through.GetAncestor(static_cast<int32_t>(next_height))};
+            if (index == nullptr || m_chain[index->nHeight] != index) {
+                error = "nevm-live-recovery-prefix-mismatch";
+                return false;
+            }
+            CBlock block;
+            PoDAMAPMemory poda;
+            CDeterministicMNListNEVMAddressDiff nevm_diff;
+            try {
+                if (!ReadNEVMReplayInputs(m_blockman, *index, block, poda,
+                                         nevm_diff, "nevm-live-recovery", error)) {
+                    return false;
+                }
+                BlockValidationState replay_state;
+                NEVMTxRootMap roots;
+                if (!ConnectNEVMCommitment(
+                        replay_state, roots, block, index, index->GetBlockHash(),
+                        index->nHeight, /*fJustCheck=*/false, poda, nevm_diff,
+                        /*btcc_prefix_authenticated=*/false,
+                        NEVMNotificationContext::EXTERNAL_REPLAY, &rejection) ||
+                    !replay_state.IsValid()) {
+                    // Preserve the predecessor's identity for activation to
+                    // reconcile after the pending child view is discarded.
+                    error = strprintf("nevm-live-recovery-connect:%d:%s",
+                                      index->nHeight, replay_state.ToString());
+                    return false;
+                }
+            } catch (const std::exception& exception) {
+                error = strprintf("nevm-live-recovery-input:%s", exception.what());
+                return false;
+            }
+        }
+        if (!FlushAndGetNEVMBlockInfo(count, syscoin_hash, error, &rejection)) return false;
+        const CBlockIndex* applied{through.GetAncestor(last_height)};
+        if (applied == nullptr || !DoesNEVMBlockInfoMatchSyscoinBlock(
+                start, count, last_height, syscoin_hash, applied->GetBlockHash())) {
+            error = "nevm-live-recovery-commit-pair-mismatch";
+            return false;
+        }
+    }
+    if (&through == m_chainman.ActiveTip()) {
+        m_chainman.m_nevm_prefix_recovery_needed = false;
+    }
+    return true;
+}
+
+bool Chainstate::ReplayDeferredBTCCNEVM(
+    int32_t through_height,
+    const uint256& through_hash,
+    const std::function<bool()>& finalize,
+    bool& complete,
+    std::string& error,
+    const std::function<bool()>& revalidate)
+{
+    AssertLockNotHeld(cs_main);
+    AssertLockNotHeld(m_chainstate_mutex);
+    {
+        LOCK(m_chainstate_mutex);
+        std::optional<NEVMBlockReject> rejection;
+        if (ReplayDeferredBTCCNEVMLocked(through_height, through_hash, finalize,
+                                        complete, error, rejection, revalidate)) {
+            return true;
+        }
+        if (!rejection) return false;
+        BlockValidationState state;
+        if (!ReconcileRejectedNEVMBlock(state, *rejection)) {
+            complete = false;
+            error = "deferred-nevm-reconciliation:" + state.ToString();
+            return false;
+        }
+    }
+    // Invalidation has finished and released activation exclusion. Select a
+    // known replacement, but retain the original replay marker: its exact
+    // through_hash was not applied, and its finalizer must never run here.
+    BlockValidationState state;
+    complete = false;
+    if (!ActivateBestChain(state)) {
+        error = "deferred-nevm-replacement:" + state.ToString();
+        return false;
+    }
+    error = "deferred-nevm-rejected-prefix-reconciled";
+    return false;
+}
+
+bool Chainstate::ReplayDeferredBTCCNEVMLocked(
+    int32_t through_height, const uint256& through_hash,
+    const std::function<bool()>& finalize, bool& complete, std::string& error,
+    std::optional<NEVMBlockReject>& rejection,
+    const std::function<bool()>& revalidate)
+{
+    AssertLockNotHeld(cs_main);
+    AssertLockHeld(m_chainstate_mutex);
+    rejection.reset();
+    complete = false;
+    error.clear();
+    if (!fNEVMConnection || through_height < 0 || through_hash.IsNull() ||
+        !finalize) {
+        error = "deferred-nevm-replay-invalid-request";
+        return false;
+    }
+
+    // SYSCOIN: Process-local receipt verification may be revoked without
+    // changing the endpoint hash. Recheck it after activation exclusion is
+    // held and again at every external-send and durable-finalization boundary.
+    const auto authorization_current =
+        [&]() EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_chainstate_mutex) {
+        if (!revalidate || revalidate()) return true;
+        complete = false;
+        rejection.reset();
+        error = "deferred-nevm-replay-authorization-changed";
+        return false;
+    };
+    {
+        LOCK(cs_main);
+        if (!authorization_current()) return false;
+    }
+
+    // SYSCOIN: Marker deletion is the commit point for deferred replay. Keep
+    // the ActivateBestChain exclusion held through the exact-tip recheck and
+    // durable deletion so no newly connected block can be skipped between
+    // those operations. The finalizer may take the marker mutex, preserving
+    // the canonical m_chainstate_mutex -> cs_main -> marker lock order.
+    const auto finalize_at_exact_tip =
+        [&]() EXCLUSIVE_LOCKS_REQUIRED(m_chainstate_mutex) {
+        if (!complete) return true;
+        LOCK(cs_main);
+        const CBlockIndex* active_tip{m_chainman.ActiveTip()};
+        if (active_tip == nullptr || active_tip->nHeight != through_height ||
+            active_tip->GetBlockHash() != through_hash) {
+            complete = false;
+            return true;
+        }
+        if (!authorization_current()) return false;
+        if (!finalize()) {
+            error = "deferred-nevm-replay-finalization-failed";
+            return false;
+        }
+        return true;
+    };
+
+    uint64_t geth_count{0};
+    uint256 geth_last_syscoin_hash;
+    std::string state_string;
+    if (!FlushAndGetNEVMBlockInfo(
+            geth_count, geth_last_syscoin_hash, state_string, &rejection)) {
+        error = "deferred-nevm-height-unavailable:" + state_string;
+        return false;
+    }
+
+    const int64_t nevm_start{m_chainman.GetConsensus().nNEVMStartBlock};
+    if (nevm_start < 0 ||
+        geth_count > static_cast<uint64_t>(
+            std::numeric_limits<int64_t>::max() - nevm_start)) {
+        error = "deferred-nevm-height-overflow";
+        return false;
+    }
+    const int64_t next_height{
+        nevm_start + static_cast<int64_t>(geth_count)};
+    if (next_height > static_cast<int64_t>(through_height) + 1) {
+        error = "deferred-nevm-ahead-of-authenticated-prefix";
+        return false;
+    }
+    if (geth_count == 0) {
+        if (!geth_last_syscoin_hash.IsNull()) {
+            error = "deferred-nevm-unexpected-genesis-syscoin-hash";
+            return false;
+        }
+    } else {
+        const int64_t last_applied_height{next_height - 1};
+        if (last_applied_height < 0 ||
+            last_applied_height > std::numeric_limits<uint32_t>::max()) {
+            error = "deferred-nevm-last-syscoin-height-overflow";
+            return false;
+        }
+        LOCK(cs_main);
+        const CBlockIndex* applied_index{
+            m_chainman.ActiveChain()[static_cast<int32_t>(last_applied_height)]};
+        if (applied_index == nullptr ||
+            !DoesNEVMBlockInfoMatchSyscoinBlock(
+                nevm_start, geth_count,
+                static_cast<uint32_t>(last_applied_height),
+                geth_last_syscoin_hash, applied_index->GetBlockHash())) {
+            error = "deferred-nevm-applied-syscoin-branch-mismatch";
+            return false;
+        }
+    }
+    if (next_height == static_cast<int64_t>(through_height) + 1) {
+        {
+            LOCK(cs_main);
+            const CBlockIndex* index{m_chainman.ActiveChain()[through_height]};
+            complete = index != nullptr && index->GetBlockHash() == through_hash;
+        }
+        if (!complete) {
+            error = "deferred-nevm-prefix-reorged";
+            return false;
+        }
+        return finalize_at_exact_tip();
+    }
+
+    // SYSCOIN: Bound scheduler work. Flush before reading the applied pair
+    // and after sending each batch so progress is independent of Geth's IBD
+    // buffer size, without trusting a local replay counter.
+    static constexpr int32_t MAX_DEFERRED_NEVM_REPLAY_BATCH{64};
+    const int32_t first_height{static_cast<int32_t>(std::max<int64_t>(
+        next_height, nevm_start))};
+    const int32_t last_height{static_cast<int32_t>(std::min<int64_t>(
+        through_height,
+        static_cast<int64_t>(first_height) +
+            MAX_DEFERRED_NEVM_REPLAY_BATCH - 1))};
+
+    for (int32_t height{first_height}; height <= last_height; ++height) {
+        CBlockIndex* index{nullptr};
+        uint256 block_hash;
+        CBlock block;
+        CDeterministicMNListNEVMAddressDiff nevm_diff;
+        {
+            LOCK(cs_main);
+            const CBlockIndex* through_index{
+                m_chainman.ActiveChain()[through_height]};
+            index = m_chainman.ActiveChain()[height];
+            if (through_index == nullptr ||
+                through_index->GetBlockHash() != through_hash ||
+                index == nullptr || index->pprev == nullptr) {
+                error = "deferred-nevm-prefix-reorged";
+                return false;
+            }
+
+            block_hash = index->GetBlockHash();
+        }
+
+        PoDAMAPMemory poda;
+        if (!ReadNEVMReplayInputs(m_blockman, *index, block, poda, nevm_diff,
+                                 "deferred-nevm", error)) {
+            return false;
+        }
+
+        // SYSCOIN: Revalidate the exact replay slot after disk/PoDA work. The
+        // chainstate mutex prevents activation from changing it between this
+        // check and the external notification.
+        {
+            LOCK(cs_main);
+            const CBlockIndex* through_index{
+                m_chainman.ActiveChain()[through_height]};
+            const CBlockIndex* active_index{m_chainman.ActiveChain()[height]};
+            if (through_index == nullptr ||
+                through_index->GetBlockHash() != through_hash ||
+                active_index != index || active_index->GetBlockHash() != block_hash) {
+                error = "deferred-nevm-prefix-reorged";
+                return false;
+            }
+            if (!authorization_current()) return false;
+        }
+
+        BlockValidationState state;
+        NEVMTxRootMap roots;
+        if (!ConnectNEVMCommitment(
+                state, roots, block, index, block_hash,
+                static_cast<uint32_t>(height), /*fJustCheck=*/false, poda,
+                nevm_diff, /*btcc_prefix_authenticated=*/true,
+                NEVMNotificationContext::LIVE, &rejection) ||
+            !state.IsValid()) {
+            error = strprintf("deferred-nevm-connect:%d:%s", height,
+                              state.ToString());
+            if (!rejection && !m_chainman.m_interrupt && state.IsError() &&
+                state.GetRejectReason() == "nevm-connect-response-invalid-data") {
+                // Earlier acknowledgements can still be buffered. Drain them
+                // before proving this slot's continuity, preserving any earlier
+                // typed rejection for the outer reconciliation wrapper.
+                if (!FlushAndGetNEVMBlockInfo(
+                        geth_count, geth_last_syscoin_hash, state_string,
+                        &rejection)) {
+                    error = "deferred-nevm-failed-prefix-unavailable:" + state_string;
+                    return false;
+                }
+                LOCK(cs_main);
+                if (!authorization_current()) return false;
+                const CBlockIndex* through_index{
+                    m_chainman.ActiveChain()[through_height]};
+                if (this != &m_chainman.ActiveChainstate() ||
+                    through_index == nullptr ||
+                    through_index->GetBlockHash() != through_hash ||
+                    m_chainman.ActiveChain()[height] != index) {
+                    error = "deferred-nevm-prefix-reorged";
+                    return false;
+                }
+                if (m_chainman.m_interrupt) return false;
+                if (geth_count != static_cast<uint64_t>(int64_t{height} - nevm_start) ||
+                    (geth_count == 0 ? !geth_last_syscoin_hash.IsNull()
+                        : geth_last_syscoin_hash != index->pprev->GetBlockHash())) {
+                    error = "deferred-nevm-failed-prefix-pair-mismatch";
+                    return false;
+                }
+                // Disk reads bind the block header, but the coinbase commitment
+                // also needs its transaction Merkle proof before it can establish
+                // an immutable fault in this already-connected Core ancestor.
+                bool mutated{false};
+                BlockValidationState commitment_state;
+                CNEVMHeader commitment;
+                if (!block.vtx.empty() &&
+                    BlockMerkleRoot(block, &mutated) == index->hashMerkleRoot &&
+                    !mutated && GetNEVMData(commitment_state, block, commitment) &&
+                    HasCommittedNEVMContinuityMismatch(
+                        m_blockman, block, *index, commitment, nevm_start)) {
+                    rejection = NEVMBlockReject{commitment.nBlockHash, block_hash};
+                }
+            }
+            return false;
+        }
+        if (pnevmdatadb) {
+            pnevmdatadb->FlushDataToCache(poda, PoDAFlushSource::Block);
+        }
+        if (pnevmtxrootsdb) pnevmtxrootsdb->FlushDataToCache(roots);
+    }
+
+    // A successful send is not proof that Geth applied this prefix. Keep the
+    // replay marker and its retained inputs until the exact pair is reported.
+    if (!FlushAndGetNEVMBlockInfo(
+            geth_count, geth_last_syscoin_hash, state_string, &rejection)) {
+        error = "deferred-nevm-commit-unavailable:" + state_string;
+        return false;
+    }
+    {
+        LOCK(cs_main);
+        const CBlockIndex* applied_index{
+            m_chainman.ActiveChain()[last_height]};
+        if (applied_index == nullptr ||
+            !DoesNEVMBlockInfoMatchSyscoinBlock(
+                nevm_start, geth_count,
+                static_cast<uint32_t>(last_height),
+                geth_last_syscoin_hash, applied_index->GetBlockHash())) {
+            error = "deferred-nevm-commit-pair-mismatch";
+            return false;
+        }
+    }
+    complete = last_height == through_height;
+    return finalize_at_exact_tip();
+}
+
+bool Chainstate::RunWithStableActiveChain(
+    const std::function<bool()>& callback)
+{
+    AssertLockNotHeld(cs_main);
+    AssertLockNotHeld(m_chainstate_mutex);
+    // SYSCOIN: ActivateBestChain uses this same outer lock. Holding it through
+    // the final context recheck, block-index fsync, certificate fsync, and store
+    // publication closes the best-work catch-up reorg race.
+    LOCK(m_chainstate_mutex);
+    return callback && callback();
+}
+
+std::optional<bool> IsNEVMBlockAppliedForDisconnect(
+    int64_t nevm_start_height, uint64_t geth_count,
+    uint32_t disconnect_height) noexcept
+{
+    if (nevm_start_height < 0 ||
+        geth_count > static_cast<uint64_t>(
+                         std::numeric_limits<int64_t>::max() -
+                         nevm_start_height)) {
+        return std::nullopt;
+    }
+    if (static_cast<int64_t>(disconnect_height) < nevm_start_height) {
+        return false;
+    }
+    return static_cast<int64_t>(disconnect_height) <
+           nevm_start_height + static_cast<int64_t>(geth_count);
+}
+
+bool DoesNEVMBlockInfoMatchSyscoinBlock(
+    int64_t nevm_start_height, uint64_t geth_count,
+    uint32_t expected_syscoin_height,
+    const uint256& reported_syscoin_hash,
+    const uint256& expected_syscoin_hash) noexcept
+{
+    if (nevm_start_height < 0 || geth_count == 0 ||
+        reported_syscoin_hash.IsNull() || expected_syscoin_hash.IsNull() ||
+        geth_count > static_cast<uint64_t>(
+                         std::numeric_limits<int64_t>::max() -
+                         nevm_start_height)) {
+        return false;
+    }
+    const int64_t last_applied_height{
+        nevm_start_height + static_cast<int64_t>(geth_count) - 1};
+    return last_applied_height ==
+               static_cast<int64_t>(expected_syscoin_height) &&
+           reported_syscoin_hash == expected_syscoin_hash;
+}
+
+bool DisconnectNEVMCommitment(ChainstateManager& chainman, BlockValidationState& state, std::vector<uint256> &vecNEVMBlocks, const CBlock& block, const CBlockIndex& index, const uint32_t& nHeight, const uint256& nBlockHash, const CDeterministicMNListNEVMAddressDiff &diff, NEVMNotificationContext notification_context, const NEVMDisconnectPrefix* nevm_prefix) {
     CNEVMHeader evmBlock;
     if(!GetNEVMData(state, block, evmBlock)) {
         return false; // state filled by GetNEVMData
     }
-    if(fNEVMConnection && !ShouldBypassExternalNEVMNotifyCalls(chainman, nHeight)) {
+    bool notify_external{
+        fNEVMConnection &&
+        notification_context !=
+            NEVMNotificationContext::ALREADY_VALIDATED_COINS_RECOVERY &&
+        !ShouldBypassExternalNEVMNotifyCalls(chainman, nHeight)};
+    if (nevm_prefix != nullptr) {
+        if (!nevm_prefix->ContainsUnapplied(index)) {
+            return state.Error("nevm-disconnect-unapplied-prefix-mismatch");
+        }
+        notify_external = false;
+    }
+    // SYSCOIN: A durable BTCC pre-seal defers connect notifications from its
+    // carrier onward. Flush any prefix queued by an interrupted replay before
+    // deciding which blocks Geth actually applied. Asking it to remove a
+    // never-sent block can wedge both chains. Pre-marker blocks retain the
+    // normal unconditional path.
+    if (notify_external && llmq::chainLocksHandler != nullptr &&
+        llmq::chainLocksHandler->ShouldDeferBTCCNEVM(index)) {
+        uint64_t geth_count{0};
+        uint256 geth_last_syscoin_hash;
+        std::string height_error;
+        if (!FlushAndGetNEVMBlockInfo(
+                geth_count, geth_last_syscoin_hash, height_error)) {
+            return state.Error(
+                "pq-btcc-nevm-disconnect-height-unavailable:" + height_error);
+        }
+        const int64_t nevm_start{chainman.GetConsensus().nNEVMStartBlock};
+        const auto applied{IsNEVMBlockAppliedForDisconnect(
+            nevm_start, geth_count, nHeight)};
+        if (!applied) {
+            return state.Error("pq-btcc-nevm-disconnect-height-overflow");
+        }
+        // SYSCOIN: Count alone cannot distinguish equal-height Syscoin forks.
+        // Bind Geth's last applied pair to the exact ancestry being unwound
+        // before deciding whether any external disconnect is safe.
+        if (geth_count == 0) {
+            if (!geth_last_syscoin_hash.IsNull()) {
+                return state.Error(
+                    "pq-btcc-nevm-disconnect-unexpected-zero-count-hash");
+            }
+        } else {
+            const int64_t last_applied_height{
+                nevm_start + static_cast<int64_t>(geth_count) - 1};
+            if (last_applied_height < 0 ||
+                last_applied_height > index.nHeight ||
+                last_applied_height >
+                    std::numeric_limits<uint32_t>::max()) {
+                return state.Error(
+                    "pq-btcc-nevm-disconnect-branch-height-mismatch");
+            }
+            const CBlockIndex* applied_index{
+                index.GetAncestor(static_cast<int32_t>(last_applied_height))};
+            if (applied_index == nullptr ||
+                !DoesNEVMBlockInfoMatchSyscoinBlock(
+                    nevm_start, geth_count,
+                    static_cast<uint32_t>(last_applied_height),
+                    geth_last_syscoin_hash,
+                    applied_index->GetBlockHash())) {
+                return state.Error(
+                    "pq-btcc-nevm-disconnect-syscoin-branch-mismatch");
+            }
+        }
+        notify_external = *applied;
+    }
+    if(notify_external) {
         if (chainman.m_interrupt) {
             return state.Error("shutdown");
         }
@@ -2593,7 +5688,7 @@ ProcessNEVMDataResult ProcessNEVMData(const BlockManager& blockman, const CTrans
 /** Undo the effects of this block (with given index) on the UTXO set represented by coins.
  *  When FAILED is returned, view is left in an indeterminate state. */
 // SYSCOIN
-DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIndex* pindex, CCoinsViewCache& view, NEVMMintTxSet &setMintTxs, std::vector<uint256> &vecNEVMBlocks, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs, bool bReverify, bool bReplay, bool bUpdateSpecialTxState)
+DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIndex* pindex, CCoinsViewCache& view, NEVMMintTxSet &setMintTxs, std::vector<uint256> &vecNEVMBlocks, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs, bool bReverify, bool bReplay, bool bUpdateSpecialTxState, const NEVMDisconnectPrefix* nevm_prefix)
 {
     AssertLockHeld(::cs_main);
     // SYSCOIN
@@ -2610,8 +5705,11 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
         error("DisconnectBlock(): block and undo data inconsistent");
         return DISCONNECT_FAILED;
     }
+    if (nevm_prefix != nullptr && !nevm_prefix->ContainsUnapplied(*pindex)) {
+        return DISCONNECT_FAILED;
+    }
     // SYSCOIN
-    if (!UndoSpecialTxsInBlock(block, pindex, diffNEVM, bUpdateSpecialTxState, bReplay)) {
+    if (!UndoSpecialTxsInBlock(block, pindex, diffNEVM, bUpdateSpecialTxState)) {
         error("DisconnectBlock(): UndoSpecialTxsInBlock failed!\n");
         return DISCONNECT_FAILED;
     }
@@ -2622,8 +5720,11 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
     // Note: the blocks specified here are different than the ones used in ConnectBlock because DisconnectBlock
     // unwinds the blocks in reverse. As a result, the inconsistency is not discovered until the earlier
     // blocks with the duplicate coinbase transactions are disconnected.
+    // SYSCOIN BEGIN: Do not apply Bitcoin's historical duplicate-coinbase
+    // disconnect exceptions to the Syscoin chain; retain the original below.
     /*bool fEnforceBIP30 = !((pindex->nHeight==91722 && pindex->GetBlockHash() == uint256S("0x00000000000271a2dc26e7667f8419f2e15416dc6955e5a6c6cdf3f2574dd08e")) ||
                            (pindex->nHeight==91812 && pindex->GetBlockHash() == uint256S("0x00000000000af0aed4792b1acee3d966af36cf5def14935db8de83d6f9306f2f")));*/
+    // SYSCOIN END: Omit Bitcoin's historical disconnect exceptions.
 
     // undo transactions in reverse order
     for (int i = block.vtx.size() - 1; i >= 0; i--) {
@@ -2631,6 +5732,9 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
         // SYSCOIN
         const uint256 &hash = tx.GetHash();
         const bool is_coinbase = tx.IsCoinBase();
+        // SYSCOIN BEGIN: Remove the Bitcoin-only exception predicate.
+        // bool is_bip30_exception = (is_coinbase && !fEnforceBIP30);
+        // SYSCOIN END: Remove the Bitcoin-only exception predicate.
 
         // Check that all outputs are available and match the outputs in the block itself
         // exactly.
@@ -2640,7 +5744,12 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
                 Coin coin;
                 bool is_spent = view.SpendCoin(out, &coin);
                 if (!is_spent || tx.vout[o] != coin.out || pindex->nHeight != coin.nHeight || is_coinbase != coin.fCoinBase) {
+                    // SYSCOIN BEGIN: Record every mismatch without Bitcoin's
+                    // historical exception guard, retained here as comments.
+                    // if (!is_bip30_exception) {
                     fClean = false; // transaction output mismatch
+                    // }
+                    // SYSCOIN END: Record mismatches without the Bitcoin exception.
                 }
             }
         }
@@ -2671,7 +5780,12 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
     }
     BlockValidationState state;
     bool bRegTestContext = !fRegTest || (fRegTest && fNEVMConnection);
-    if(bRegTestContext && bReverify && pindex->nHeight >= params.nNEVMStartBlock && !DisconnectNEVMCommitment(m_chainman, state, vecNEVMBlocks, block, pindex->nHeight, block.GetHash(), diffNEVM)) {
+    // SYSCOIN: pass the exact branch index so pre-seal disconnect symmetry can
+    // distinguish deferred blocks from the Geth-applied prefix.
+    const auto nevm_notification_context{bReplay
+        ? NEVMNotificationContext::ALREADY_VALIDATED_COINS_RECOVERY
+        : NEVMNotificationContext::LIVE};
+    if(bRegTestContext && bReverify && pindex->nHeight >= params.nNEVMStartBlock && !DisconnectNEVMCommitment(m_chainman, state, vecNEVMBlocks, block, *pindex, pindex->nHeight, block.GetHash(), diffNEVM, nevm_notification_context, nevm_prefix)) {
         const std::string errStr = strprintf("DisconnectBlock(): NEVM block failed to disconnect: %s\n", state.ToString().c_str());
         error(errStr.c_str());
         return DISCONNECT_FAILED;
@@ -2796,10 +5910,18 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
  *  can fail if those validity checks fail (among other reasons). */
 bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, CBlockIndex* pindex,
                   CCoinsViewCache& view, bool fJustCheck, 
-                  NEVMMintTxSet &setMintTxs, NEVMTxRootMap &mapNEVMTxRoots, PoDAMAPMemory &mapPoDA, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs, bool bReverify)
+                  NEVMMintTxSet &setMintTxs, NEVMTxRootMap &mapNEVMTxRoots, PoDAMAPMemory &mapPoDA, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs, bool bReverify, std::optional<NEVMBlockReject>* rejection, bool* live_nevm_acknowledged)
 {
+    if (rejection) rejection->reset();
     AssertLockHeld(cs_main);
     assert(pindex);
+
+    // SYSCOIN: Reject a local recovery alignment error before special-tx or
+    // coins state can change. It does not make a competing block invalid.
+    std::string startup_pair_error;
+    if (!m_chainman.CheckNEVMStartupConnect(*pindex, startup_pair_error)) {
+        return state.Error(startup_pair_error);
+    }
 
     uint256 block_hash{block.GetHash()};
     assert(*pindex->phashBlock == block_hash);
@@ -2807,6 +5929,14 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
 
     const auto time_start{SteadyClock::now()};
     const CChainParams& params{m_chainman.GetParams()};
+
+    // Revalidation may fail before scripts. Revoke the exact G attestation
+    // before any such exit and restore it only after full connection succeeds.
+    if (!fJustCheck && pindex->pqRecoveryRefreshWorkValidated) {
+        pindex->pqRecoveryRefreshWorkValidated = false;
+        m_chainman.NotePQProvenanceRevoked();
+        m_blockman.m_dirty_blockindex.insert(pindex);
+    }
 
     // Check it again in case a previous version let a bad block in
     // NOTE: We don't currently (re-)invoke ContextualCheckBlock() or
@@ -2830,8 +5960,21 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         }
         return error("%s: Consensus::CheckBlock: %s", __func__, state.ToString());
     }
+    // SYSCOIN: Apply fork-specific AuxPoW and BTCPREV context at the Bitcoin
+    // ConnectBlock boundary, including replay of previously indexed blocks.
     if (!CheckDirectBlockNotAuxpowParent(block, state, pindex->nHeight, params.GetConsensus())) {
         return error("%s: CheckDirectBlockNotAuxpowParent: %s", __func__, state.ToString());
+    }
+    if (!CheckBTCPREVCommitment(block, state, pindex->nHeight,
+                                params.GetConsensus())) {
+        return error("%s: CheckBTCPREVCommitment: %s", __func__,
+                     state.ToString());
+    }
+    std::optional<llmq::pq::ValidatedRecoveryRefreshWorkSample> recovery_work;
+    if (!CheckRecoveryRefreshWorkCommitment(
+            block, state, *pindex, params.GetConsensus(), &recovery_work)) {
+        return error("%s: CheckRecoveryRefreshWorkCommitment: %s", __func__,
+                     state.ToString());
     }
 
     // verify that the view's current state corresponds to the previous block
@@ -2861,31 +6004,88 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         }
     }
 
-    // SYSCOIN: Persist BTCPREV commitment in block index only for consensus-relevant
-    // sign-offset BTCC heights. Reuse the contextual-validation cache in the common
-    // accept->connect flow; otherwise fall back to reparsing.
+    // SYSCOIN: Both provenance bits attest the exact persisted accumulators.
+    // Revalidation revokes them before touching branch-derived metadata and
+    // restores them only at the fully successful tail of ConnectBlock.
+    const auto revoke_btcc_index_provenance = [&]()
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+        constexpr uint32_t provenance_mask{
+            BLOCK_PQ_BTCC_INDEX_VALIDATED |
+            BLOCK_PQ_RECEIPT_INDEX_VALIDATED};
+        if (pindex->nStatus & provenance_mask) {
+            m_chainman.NotePQProvenanceRevoked();
+            pindex->nStatus = static_cast<BlockStatus>(
+                pindex->nStatus & ~provenance_mask);
+            m_blockman.m_dirty_blockindex.insert(pindex);
+        }
+    };
+    if (!fJustCheck) revoke_btcc_index_provenance();
+
+    // SYSCOIN: Persist K only for consensus-relevant candidates. A non-null
+    // mismatch means the block-index record and retained block body disagree,
+    // so never repair it by overwrite.
     if (!fJustCheck) {
         const auto& consensus = params.GetConsensus();
-        const bool btcp_required = IsBTCCSignHeight(consensus, pindex->nHeight) &&
+        const bool btcp_required = llmq::pq::IsBTCPREVCommitmentHeight(consensus, pindex->nHeight) &&
                                    block.auxpow;
         if (btcp_required) {
             const uint256& btcp_expected = block.auxpow->getParentPrevBlockHash();
-            if (pindex->m_btcp_prev_contextually_validated &&
-                pindex->m_btcp_prev_contextual_commitment == btcp_expected) {
-                if (pindex->btcpPrevCommitment != btcp_expected) {
-                    pindex->btcpPrevCommitment = btcp_expected;
-                    m_blockman.m_dirty_blockindex.insert(pindex);
-                }
-            } else {
-                uint256 btcp;
-                if (ExtractBTCPREVCommitment(block, btcp) &&
-                    btcp == btcp_expected &&
-                    pindex->btcpPrevCommitment != btcp) {
-                    pindex->btcpPrevCommitment = btcp;
-                    m_blockman.m_dirty_blockindex.insert(pindex);
+            uint256 btcp{btcp_expected};
+            if (!(pindex->m_btcp_prev_contextually_validated &&
+                  pindex->m_btcp_prev_contextual_commitment ==
+                      btcp_expected)) {
+                if (!ExtractBTCPREVCommitment(block, btcp) ||
+                    btcp != btcp_expected) {
+                    return state.Error(
+                        "btcp-prev-contextual-cache-inconsistent");
                 }
             }
+            if (!pindex->btcpPrevCommitment.IsNull() &&
+                pindex->btcpPrevCommitment != btcp) {
+                return state.Error(
+                    "btcp-block-index-metadata-mismatch");
+            }
+            if (pindex->btcpPrevCommitment.IsNull()) {
+                revoke_btcc_index_provenance();
+                pindex->btcpPrevCommitment = btcp;
+                m_blockman.m_dirty_blockindex.insert(pindex);
+            }
         }
+    }
+
+    // SYSCOIN: A live non-null carrier needs its exact receipt certificate.
+    // Historical sync may instead fsync a branch-local authentication marker
+    // before compact replay: Core keeps validating the committed accumulator,
+    // while NEVM delivery and public readiness wait for a covering certificate.
+    // Canonical null carriers never introduce an off-chain dependency.
+    bool btcc_receipt_state_changed{false};
+    if (!ConnectBTCCReceiptState(
+            m_chainman, block, *pindex, state,
+            &btcc_receipt_state_changed,
+            /*require_live_certificate=*/true,
+            /*allow_historical_preseal=*/!fJustCheck)) {
+        return error("%s: ConnectBTCCReceiptState: %s", __func__,
+                     state.ToString());
+    }
+    if (!fJustCheck && btcc_receipt_state_changed) {
+        revoke_btcc_index_provenance();
+        m_blockman.m_dirty_blockindex.insert(pindex);
+    }
+
+    bool payment_audit_state_changed{false};
+    std::optional<AppliedPaymentAuditArchiveReference>
+        payment_audit_archive_reference;
+    if (!ConnectPaymentAuditReceiptState(
+            m_chainman, block, *pindex, state, fJustCheck,
+            /*allow_historical_preseal=*/!fJustCheck,
+            &payment_audit_state_changed,
+            &payment_audit_archive_reference)) {
+        return error("%s: ConnectPaymentAuditReceiptState: %s", __func__,
+                     state.ToString());
+    }
+    if (!fJustCheck && payment_audit_state_changed) {
+        revoke_btcc_index_provenance();
+        m_blockman.m_dirty_blockindex.insert(pindex);
     }
 
     bool fScriptChecks = true;
@@ -2940,8 +6140,12 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     // Now that the whole chain is irreversibly beyond that time it is applied to all blocks except the
     // two in the chain that violate it. This prevents exploiting the issue against nodes during their
     // initial block download.
+    // SYSCOIN BEGIN: Omit Bitcoin's historical BIP30 repeat exceptions.
+    // Bitcoin 26.0rc3 original: bool fEnforceBIP30 = !IsBIP30Repeat(*pindex);
+    // The older inlined Bitcoin form is retained below for merge context.
     // bool fEnforceBIP30 = !((pindex->nHeight==91842 && pindex->GetBlockHash() == uint256S("0x00000000000a4d0a398161ffc163c503763b1f4360639393e0e4c8e300e0caec")) ||
                            // (pindex->nHeight==91880 && pindex->GetBlockHash() == uint256S("0x00000000000743f190a18c5577a3c2d2a1f610ae9601ac046a38084ccb7cd721")));
+    // SYSCOIN END: Omit Bitcoin's historical BIP30 repeat exceptions.
 
     // Once BIP34 activated it was not possible to create new duplicate coinbases and thus other than starting
     // with the 2 existing duplicate coinbase pairs, not possible to create overwriting txs.  But by the
@@ -2969,7 +6173,9 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     // future consensus change to do a new and improved version of BIP34 that
     // will actually prevent ever creating any duplicate coinbases in the
     // future.
+    // SYSCOIN BEGIN: Omit Bitcoin's chain-specific BIP30 optimization limit.
     // static constexpr int BIP34_IMPLIES_BIP30_LIMIT = 1983702;
+    // SYSCOIN END: Omit the Bitcoin BIP30 optimization limit.
 
     // There is no potential to create a duplicate coinbase at block 209,921
     // because this is still before the BIP34 height and so explicit BIP30
@@ -2999,13 +6205,18 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     // post BIP34 before approximately height 486,000,000. After block
     // 1,983,702 testnet3 starts doing unnecessary BIP30 checking again.
     assert(pindex->pprev);
-    // CBlockIndex* pindexBIP34height = pindex->pprev->GetAncestor(m_params.GetConsensus().BIP34Height);
+    // SYSCOIN BEGIN: Omit Bitcoin's BIP34-based shortcut; retain its original
+    // code here because Syscoin runs the collision loop below unconditionally.
+    // CBlockIndex* pindexBIP34height = pindex->pprev->GetAncestor(params.GetConsensus().BIP34Height);
     //Only continue to enforce if we're below BIP34 activation height or the block hash at that height doesn't correspond.
-    // fEnforceBIP30 = fEnforceBIP30 && (!pindexBIP34height || !(pindexBIP34height->GetBlockHash() == m_params.GetConsensus().BIP34Hash));
+    // fEnforceBIP30 = fEnforceBIP30 && (!pindexBIP34height || !(pindexBIP34height->GetBlockHash() == params.GetConsensus().BIP34Hash));
+    // SYSCOIN END: Omit Bitcoin's BIP34-based shortcut.
 
     // TODO: Remove BIP30 checking from block height 1,983,702 on, once we have a
     // consensus change that ensures coinbases at those heights cannot
     // duplicate earlier coinbases.
+    // SYSCOIN BEGIN: Modify Bitcoin's guarded BIP30 collision loop to run
+    // unconditionally; preserve the removed guard and closing brace as comments.
     // if (fEnforceBIP30 || pindex->nHeight >= BIP34_IMPLIES_BIP30_LIMIT) {
         for (const auto& tx : block.vtx) {
             for (size_t o = 0; o < tx->vout.size(); o++) {
@@ -3016,6 +6227,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             }
         }
     //}
+    // SYSCOIN END: Run the inherited BIP30 collision loop unconditionally.
 
     // Enforce BIP68 (sequence locks)
     int nLockTimeFlags = 0;
@@ -3055,7 +6267,10 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     fScriptChecks = fScriptChecks && fNexusContext;
     CDeterministicMNListNEVMAddressDiff diff;
     // MUST process special txes before updating UTXO to ensure consistency between mempool and block processing
-    if (!ProcessSpecialTxsInBlock(m_chainman, block, pindex, state, diff, view, fJustCheck, fScriptChecks, m_chainman.IsInitialBlockDownload())) {
+    if (!ProcessSpecialTxsInBlock(m_chainman, block, pindex, state, diff, view,
+                                  fJustCheck, fScriptChecks,
+                                  m_chainman.IsInitialBlockDownload(),
+                                  SpecialTxValidationContext::NORMAL)) {
         LogPrintf("ERROR: %s: ProcessSpecialTxsInBlock for block %s failed with %s\n", __func__,
                      pindex->GetBlockHash().ToString().c_str(), state.ToString().c_str());
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, state.ToString());
@@ -3093,9 +6308,14 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             TxValidationState tx_statesys;
             // Keep block-local reservations even in TestBlockValidity's check-only mode.
             if (!CheckSyscoinInputs(params.GetConsensus(), tx, txHash, tx_statesys, (uint32_t)pindex->nHeight, fJustCheck, setMintTxs, mapAssetIn, mapAssetOut)){
-                // Any transaction validation failure in ConnectBlock is a block consensus failure
-                state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
-                            tx_statesys.GetRejectReason(), tx_statesys.GetDebugMessage());
+                // SYSCOIN: Storage errors must not retire a valid block candidate.
+                if (tx_statesys.IsError()) {
+                    FatalError(m_chainman.GetNotifications(), state,
+                               strprintf("System error while checking Syscoin inputs: %s", tx_statesys.ToString()));
+                } else {
+                    state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                  tx_statesys.GetRejectReason(), tx_statesys.GetDebugMessage());
+                }
                 connect_error = strprintf("%s: Consensus::CheckSyscoinInputs: %s, %s", __func__, tx.GetHash().ToString(), state.ToString());
                 break;
             }
@@ -3175,26 +6395,61 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         }
         return false;
     }
-    // SYSCOIN : MODIFIED TO CHECK MASTERNODE PAYMENTS AND SUPERBLOCKS
+    // SYSCOIN BEGIN: Validate masternode/superblock payments and connect the NEVM commitment.
     bool exact_superblock_validation{false};
     if(fNexusContext) {
         const CAmount blockReward = GetBlockSubsidy(pindex->nHeight, params.GetConsensus());
         CAmount nMNSeniorityRet = 0;
         CAmount nMNFloorDiffRet = 0;
+        MasternodePaymentStatus payment_status;
         std::vector<bool> matched_payment_outputs;
         // A ChainLock may provide the historical fallback only for strict
         // ancestors. The ChainLocked block itself must pass exact governance
         // validation.
-        const bool check_superblock = llmq::chainLocksHandler->GetBestChainLock().nHeight <= pindex->nHeight;
+        const auto best_chainlock = llmq::chainLocksHandler
+            ? llmq::chainLocksHandler->GetBestChainLock()
+            : nullptr;
+        const bool check_superblock = !best_chainlock ||
+                                      best_chainlock->statement.height <= pindex->nHeight;
+        if (check_superblock && masternodeSync.IsSynced() &&
+            AreSuperblocksEnabled() &&
+            CSuperblock::IsValidBlockHeight(pindex->nHeight)) {
+            if (governance == nullptr || pindex->pprev == nullptr) {
+                return state.Error("governance-state-unavailable");
+            }
+            if (!HasValidatedSuperblockPayments(block, *pindex) &&
+                !governance->IsReadyForTip(pindex->pprev) &&
+                !governance->RevalidatePQGovernance(*pindex->pprev)) {
+                return state.Error("governance-state-unavailable");
+            }
+        }
         // detect MN was paid properly, accounting for seniority which is added to subsidy
-        if (!IsBlockPayeeValid(m_chain, *block.vtx[0], pindex->nHeight, blockReward, nFees, nMNSeniorityRet, nMNFloorDiffRet, &matched_payment_outputs)) {
+        if (!IsBlockPayeeValid(m_chain, *block.vtx[0], pindex->nHeight, blockReward, nFees, nMNSeniorityRet, nMNFloorDiffRet, &matched_payment_outputs, &payment_status)) {
+            if (payment_status == MasternodePaymentStatus::UNAVAILABLE) {
+                return state.Error("failed-pq-payment-eligibility-state");
+            }
             LogPrintf("ERROR: ConnectBlock(): couldn't find masternode or superblock payments\n");
             return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-cb-payee");
         }
 
         std::string strError;
+        bool governance_state_available{true};
         // add seniority to reward when checking for limit
-        if (!IsBlockValueValid(block, pindex, blockReward+nFees+nMNSeniorityRet+nMNFloorDiffRet, strError, fJustCheck, check_superblock, &exact_superblock_validation, &matched_payment_outputs) && (fRegTest || pindex->nHeight >= params.GetConsensus().DIP0003EnforcementHeight)) {
+        const bool block_value_valid{IsBlockValueValid(
+            block, pindex,
+            GetBlockPaymentValueLimit(payment_status, blockReward, nFees,
+                                      nMNSeniorityRet, nMNFloorDiffRet),
+            strError, fJustCheck, check_superblock,
+            &exact_superblock_validation, &matched_payment_outputs,
+            &governance_state_available)};
+        // Legacy enforcement exceptions must not attest a failed payment
+        // check as an exact decision that a later reconnect may reuse.
+        exact_superblock_validation &= block_value_valid;
+        if (!block_value_valid && !governance_state_available) {
+            LogPrintf("ERROR: ConnectBlock(): %s\n", strError);
+            return state.Error("governance-state-unavailable");
+        }
+        if (!block_value_valid && (fRegTest || pindex->nHeight >= params.GetConsensus().DIP0003EnforcementHeight)) {
             LogPrintf("ERROR: ConnectBlock(): %s\n", strError);
             // hack for feature_signet.py to pass which uses bitcoin blocks signed by the signet witness
             if(!fSigNet || pindex->nHeight > 100) {
@@ -3208,7 +6463,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
 
     const bool bRegTestContext = !fRegTest || (fRegTest && fNEVMConnection);
     if (bRegTestContext && bReverify && pindex->nHeight >= params.GetConsensus().nNEVMStartBlock) {
-        if (!ConnectNEVMCommitment(state, mapNEVMTxRoots, block, pindex, blockHash, (uint32_t)pindex->nHeight, fJustCheck, mapPoDA, diff)) {
+        if (!ConnectNEVMCommitment(state, mapNEVMTxRoots, block, pindex, blockHash, (uint32_t)pindex->nHeight, fJustCheck, mapPoDA, diff, false, NEVMNotificationContext::LIVE, rejection, live_nevm_acknowledged)) {
             return error("%s: ConnectNEVMCommitment failed with %s", __func__, state.ToString());
         }
         // Helper may return true while leaving state invalid (managed geth shutdown path).
@@ -3216,7 +6471,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             return false;
         }
     }
-    // END SYSCOIN
+    // SYSCOIN END: Validate fork payments and connect the NEVM commitment.
     const auto time_4{SteadyClock::now()};
     time_verify += time_4 - time_2;
     LogPrint(BCLog::BENCHMARK, "    - Verify %u txins: %.2fms (%.3fms/txin) [%.2fs (%.2fms/blk)]\n", nInputs - 1,
@@ -3226,6 +6481,13 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
              Ticks<MillisecondsDouble>(time_verify) / num_blocks_total);
     if (fJustCheck)
         return true;
+
+    // SYSCOIN: Pin the exact verified payment witness before block durability
+    // can make its receipt state authoritative.
+    if (!PinAppliedPaymentAuditArchiveReference(
+            payment_audit_archive_reference, state)) {
+        return false;
+    }
 
     if (!m_blockman.WriteUndoDataForBlock(blockundo, state, *pindex)) {
         return false;
@@ -3245,6 +6507,40 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
 
     if (!pindex->IsValid(BLOCK_VALID_SCRIPTS)) {
         pindex->RaiseValidity(BLOCK_VALID_SCRIPTS);
+        m_blockman.m_dirty_blockindex.insert(pindex);
+    }
+
+    if (SetIndexedRecoveryRefreshWork(*pindex, recovery_work)) {
+        m_blockman.m_dirty_blockindex.insert(pindex);
+    }
+    if (recovery_work && fScriptChecks && pindex->IsValid(BLOCK_VALID_SCRIPTS) &&
+        !pindex->IsAssumedValid()) {
+        pindex->pqRecoveryRefreshWorkValidated = true;
+        m_blockman.m_dirty_blockindex.insert(pindex);
+    }
+
+    // SYSCOIN: BLOCK_VALID_SCRIPTS alone can come from assumevalid or an
+    // assumeutxo snapshot. Record the independently reconstructible receipt
+    // provenance only after this invocation actually checked scripts and
+    // completed the special-transaction and receipt-state paths above.
+    const bool receipt_index_validated{
+        fScriptChecks && !pindex->IsAssumedValid() &&
+        IndexedBTCCReceiptState(pindex).IsStructurallyValid() &&
+        IndexedPaymentAuditReceiptState(pindex).IsStructurallyValid() &&
+        !pindex->pqPaymentProbationStateHash.IsNull()};
+    if (receipt_index_validated &&
+        !(pindex->nStatus & BLOCK_PQ_RECEIPT_INDEX_VALIDATED)) {
+        pindex->nStatus |= BLOCK_PQ_RECEIPT_INDEX_VALIDATED;
+        m_blockman.m_dirty_blockindex.insert(pindex);
+    }
+
+    // The stronger bit remains exact-governance provenance for live finality.
+    const bool exact_governance_validated{
+        !CSuperblock::IsValidBlockHeight(pindex->nHeight) ||
+        (pindex->nStatus & BLOCK_GOVERNANCE_VALIDATED)};
+    if (receipt_index_validated && exact_governance_validated &&
+        !(pindex->nStatus & BLOCK_PQ_BTCC_INDEX_VALIDATED)) {
+        pindex->nStatus |= BLOCK_PQ_BTCC_INDEX_VALIDATED;
         m_blockman.m_dirty_blockindex.insert(pindex);
     }
 
@@ -3382,10 +6678,34 @@ bool Chainstate::FlushStateToDisk(
             dip3_active &&
             deterministicMNManager &&
             !deterministicMNManager->HasPersistentWindow();
+        // SYSCOIN BEGIN: Retryable bounded DMN maintenance scheduling.
+        const bool dmn_maintenance_retry_requested =
+            deterministicMNManager &&
+            deterministicMNManager->
+                AuxiliaryHistoryMaintenanceRetryRequested();
+        const uint64_t dmn_maintenance_request_generation{
+            deterministicMNManager
+                ? deterministicMNManager->
+                      AuxiliaryHistoryMaintenanceRequestGeneration()
+                : 0};
+        const uint256 dmn_maintenance_retry_tip{
+            m_chain.Tip() ? m_chain.Tip()->GetBlockHash() : uint256{}};
+        const bool dmn_maintenance_retry_needed =
+            mode == FlushStateMode::PERIODIC &&
+            !in_ibd &&
+            dip3_active &&
+            dmn_maintenance_retry_requested &&
+            (m_last_dmn_maintenance_retry_tip !=
+                 dmn_maintenance_retry_tip ||
+             m_last_dmn_maintenance_retry_generation !=
+                 dmn_maintenance_request_generation);
+        // SYSCOIN END: Retryable bounded DMN maintenance scheduling.
         // Combine all conditions that result in a full cache flush.
         fDoFullFlush = (mode == FlushStateMode::ALWAYS) || fCacheLarge || fCacheCritical || fPeriodicFlush || fFlushForPrune;
         // Write blocks and block index to disk.
-        if (fDoFullFlush || fPeriodicWrite || dmn_window_init_needed) {
+        // SYSCOIN: A pending bounded DMN pass also requires this metadata write path.
+        if (fDoFullFlush || fPeriodicWrite || dmn_window_init_needed ||
+            dmn_maintenance_retry_needed) {
             // Ensure we can write block index
             if (!CheckDiskSpace(m_blockman.m_opts.blocks_dir)) {
                 return FatalError(m_chainman.GetNotifications(), state, "Disk space is too low!", _("Disk space is too low!"));
@@ -3393,11 +6713,12 @@ bool Chainstate::FlushStateToDisk(
             {
                 LOG_TIME_MILLIS_WITH_CATEGORY("write block and undo data to disk", BCLog::BENCHMARK);
 
-                // First make sure all block and undo data is flushed to disk.
-                // TODO: Handle return error, or add detailed comment why it is
-                // safe to not return an error upon failure.
+                // SYSCOIN: Never publish block-index metadata after its
+                // backing block or undo flat-file flush failed.
                 if (!m_blockman.FlushChainstateBlockFile(m_chain.Height())) {
-                    LogPrintLevel(BCLog::VALIDATION, BCLog::Level::Warning, "%s: Failed to flush block file.\n", __func__);
+                    return FatalError(
+                        m_chainman.GetNotifications(), state,
+                        "Failed to flush block and undo files");
                 }
             }
 
@@ -3425,12 +6746,39 @@ bool Chainstate::FlushStateToDisk(
                 !pblockindexdb->FlushCacheToDisk((uint32_t)m_chain.Height(), /*CHUNK_ITEMS=*/100000, sys_sync_flush)) {
                 return FatalError(m_chainman.GetNotifications(), state, "Failed to commit to block index db");
             }
-            if (pnevmtxrootsdb &&
-                !pnevmtxrootsdb->FlushCacheToDisk(/*CHUNK_ITEMS=*/100000, sys_sync_flush)) {
-                return FatalError(m_chainman.GetNotifications(), state, "Failed to commit to nevm tx roots db");
+            // SYSCOIN: The root cache can reach disk on a metadata-only
+            // flush while coins still name an older block. Persist its source
+            // branch first so startup can reconcile the whole surplus suffix.
+            // This store is shared with background AssumeUTXO validation;
+            // its roots belong to the active branch, not the background tip.
+            if (pnevmtxrootsdb) {
+                auto& active{m_chainman.ActiveChainstate()};
+                const auto root_tip{active.CoinsTip().GetBestBlock()};
+                if ((!fRegTest || fNEVMConnection) && !root_tip.IsNull()) {
+                    const auto* root_index{m_blockman.LookupBlockIndex(root_tip)};
+                    // SYSCOIN: The initial barrier covers this cursor unless
+                    // the active coins endpoint selects another blockfile type.
+                    if (!root_index ||
+                        (m_blockman.BlockfileTypeForHeight(root_index->nHeight) !=
+                             m_blockman.BlockfileTypeForHeight(m_chain.Height()) &&
+                         !m_blockman.FlushChainstateBlockFile(root_index->nHeight)) ||
+                        !pnevmtxrootsdb->RecordPublishedTip(root_tip)) {
+                        return FatalError(m_chainman.GetNotifications(), state,
+                                          "Failed to persist NEVM root publication branch");
+                    }
+                }
+                // A full coins flush may survive independently of older
+                // asynchronous root writes. Its canonical roots must already
+                // be durable even when T and the recovered coins tip match.
+                if (!pnevmtxrootsdb->FlushCacheToDisk(/*CHUNK_ITEMS=*/100000,
+                                                    /*fSync=*/fDoFullFlush || sys_sync_flush) ||
+                    (fDoFullFlush && !pnevmtxrootsdb->Sync())) {
+                    return FatalError(m_chainman.GetNotifications(), state, "Failed to commit to nevm tx roots db");
+                }
             }
             // SYSCOIN: nevmminttx is flushed with the full UTXO flush below (write-ahead
             // of CoinsTip), not on ordinary periodic metadata writes.
+            // SYSCOIN BEGIN: Recovery-aware deterministic-MN maintenance.
             const bool force_dmn_maintenance =
                 deterministicMNManager &&
                 (mode == FlushStateMode::ALWAYS ||
@@ -3439,27 +6787,39 @@ bool Chainstate::FlushStateToDisk(
                 if (mode == FlushStateMode::PERIODIC) {
                     LogPrint(BCLog::SYS, "%s: requesting periodic DMN EvoDB maintenance at height %d\n", __func__, m_chain.Height());
                 }
-                if (!deterministicMNManager->FlushCacheToDisk(force_dmn_maintenance, sys_sync_flush)) {
+                std::string recovery_error;
+                const auto all_recovery_indexes{
+                    m_chainman.GetAllRecoveryBlockIndexes(recovery_error)};
+                if (!all_recovery_indexes) {
+                    return FatalError(
+                        m_chainman.GetNotifications(), state,
+                        strprintf("Invalid chainstate recovery markers during "
+                                  "DMN maintenance: %s",
+                                  recovery_error));
+                }
+                // Maintenance precedes this chainstate's CoinsTip flush, but
+                // the shared DB must remain recoverable across both markers
+                // of every active or cleanup-pending AssumeUTXO chainstate.
+                // A pre-DIP3 marker has no DMN snapshot to retain, but still
+                // vetoes destructive auxiliary GC until replay reaches DIP3.
+                if (!deterministicMNManager->FlushCacheToDisk(
+                        force_dmn_maintenance, sys_sync_flush,
+                        *all_recovery_indexes)) {
                     return FatalError(m_chainman.GetNotifications(), state, "Failed to commit DMN DB");
                 }
+                if (dmn_maintenance_retry_requested) {
+                    m_last_dmn_maintenance_retry_tip =
+                        dmn_maintenance_retry_tip;
+                    m_last_dmn_maintenance_retry_generation =
+                        dmn_maintenance_request_generation;
+                }
             }
-            if (governance && !governance->FlushCacheToDisk(sys_sync_flush)) {
+            // SYSCOIN END: Recovery-aware deterministic-MN maintenance.
+            // SYSCOIN: Cached budgets and earlier asynchronous budget writes
+            // must precede every full coins flush, including cache pressure.
+            if (governance && !governance->FlushCacheToDisk(fDoFullFlush || sys_sync_flush)) {
                 return FatalError(m_chainman.GetNotifications(), state, "Failed to commit governance DB");
             }
-            if (llmq::quorumBlockProcessor && !llmq::quorumBlockProcessor->FlushCacheToDisk(sys_sync_flush)) {
-                return FatalError(m_chainman.GetNotifications(), state, "Failed to commit QC DB");
-            }
-            const bool force_quorum_manager_maintenance = mode == FlushStateMode::ALWAYS;
-            // QuorumManager persists derived vvec/sk-share caches, so avoid reset/rewrite
-            // maintenance churn during IBD and only force it on clean shutdown.
-            const bool run_quorum_manager_maintenance =
-                llmq::quorumManager &&
-                (force_quorum_manager_maintenance || !in_ibd);
-            if (run_quorum_manager_maintenance &&
-                !llmq::quorumManager->FlushCacheToDisk(force_quorum_manager_maintenance, sys_sync_flush)) {
-                return FatalError(m_chainman.GetNotifications(), state, "Failed to commit QM DB");
-            }
-            
             m_last_write = nNow;
         }
         // Flush best chain related state. This can only be done if the blocks / block index write was also done.
@@ -3480,6 +6840,16 @@ bool Chainstate::FlushStateToDisk(
             if (pnevmtxmintdb &&
                 !pnevmtxmintdb->FlushCacheToDisk(/*CHUNK_ITEMS=*/256, /*fSync=*/true)) {
                 return FatalError(m_chainman.GetNotifications(), state, "Failed to commit NEVM mint replay database");
+            }
+            // SYSCOIN: The DMN list and PQ registry are consensus state keyed
+            // by the UTXO best-block marker. Flush dirty DMN records and place
+            // a durability barrier after asynchronous per-block PQ writes
+            // immediately before publishing that marker, including during IBD.
+            if (deterministicMNManager &&
+                !deterministicMNManager->FlushPendingSnapshotsToDisk(
+                    /*fSync=*/true)) {
+                return FatalError(m_chainman.GetNotifications(), state,
+                                  "Failed to commit deterministic masternode state");
             }
             // Flush the chainstate (which may refer to block index entries).
             if (!CoinsTip().Flush())
@@ -3580,6 +6950,17 @@ void Chainstate::UpdateTip(const CBlockIndex* pindexNew)
         return;
     }
 
+    // SYSCOIN: PQ finality depends on governance provenance at this exact tip.
+    if (governance) {
+        governance->ObserveChainTip(pindexNew);
+        if (governance->IsValid() &&
+            !governance->RevalidatePQGovernance(*pindexNew)) {
+            LogPrint(BCLog::GOBJECT,
+                     "%s: governance unavailable for active tip %s\n",
+                     __func__, pindexNew->GetBlockHash().ToString());
+        }
+    }
+
     // New best block
     if (m_mempool) {
         m_mempool->AddTransactionsUpdated(1);
@@ -3610,6 +6991,78 @@ void Chainstate::UpdateTip(const CBlockIndex* pindexNew)
     UpdateTipLog(m_chainman, coins_tip, pindexNew, params, __func__, "", warning_messages.original);
 }
 
+// SYSCOIN BEGIN: Share authenticated carrier reads between rollback and recovery.
+static bool ReadNEVMRootCarrier(
+    node::BlockManager& blockman, const CBlockIndex& index,
+    CNEVMHeader& header, bool allow_pruned = false,
+    NEVMMintTxSet* mints = nullptr)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    // Pruning evidence supplies root ownership only. Discarded/replacement
+    // carriers needed for mint cleanup must retain their complete bodies.
+    if (allow_pruned && !mints && blockman.IsBlockPruned(&index)) {
+        return blockman.ReadNEVMPrunedHeader(header, index);
+    }
+    CBlock block;
+    bool mutated{false};
+    BlockValidationState state;
+    if (!blockman.ReadBlockFromDisk(block, index, /*load_auxiliary_data=*/false) ||
+        BlockMerkleRoot(block, &mutated) != index.hashMerkleRoot || mutated ||
+        !GetNEVMData(state, block, header)) return false;
+    if (mints) {
+        for (const auto& tx : block.vtx) {
+            if (IsSyscoinMintTx(tx->nVersion) &&
+                !DisconnectMintAsset(*tx, *mints)) return false;
+        }
+    }
+    return true;
+}
+// SYSCOIN END: Shared NEVM root and mint-cleanup evidence.
+
+bool Chainstate::PrepareNEVMDisconnectPrefix(
+    BlockValidationState& state,
+    std::optional<NEVMDisconnectPrefix>& prefix)
+{
+    AssertLockHeld(cs_main);
+    prefix.reset();
+    const CBlockIndex* tip{m_chain.Tip()};
+    const int64_t start{m_chainman.GetConsensus().nNEVMStartBlock};
+    if (this != &m_chainman.ActiveChainstate() || !fNEVMConnection ||
+        tip == nullptr || tip->nHeight < start ||
+        ShouldBypassExternalNEVMNotifyCalls(m_chainman, tip->nHeight)) return true;
+
+    // A buffered acknowledgement can be lost after an operational failure.
+    // Before paired rollback, authenticate Geth's applied endpoint; only this
+    // fresh proof authorizes locally undoing an unapplied Core suffix.
+    // The flush itself can discard that suffix even when preflight fails.
+    // Retain uncertainty across the transition until recovery verifies the
+    // resulting active tip, including a behind pair followed by interruption.
+    m_chainman.m_nevm_prefix_recovery_needed = true;
+    uint64_t count{0};
+    uint256 applied_hash;
+    std::string error;
+    if (!FlushAndGetNEVMBlockInfo(count, applied_hash, error)) {
+        return state.Error("nevm-reorg-status:" + error);
+    }
+    // Bound the count before conversion/addition, rejecting both overflow
+    // and an engine endpoint above Core's active tip.
+    if (start < 0 ||
+        count > static_cast<uint64_t>(tip->nHeight - start + 1) ||
+        (count == 0 && !applied_hash.IsNull())) {
+        return state.Error("nevm-reorg-applied-prefix-mismatch");
+    }
+    const int32_t height{static_cast<int32_t>(start + static_cast<int64_t>(count) - 1)};
+    const CBlockIndex* applied{height < 0 ? nullptr : m_chain[height]};
+    if ((height >= 0 && applied == nullptr) ||
+        (count != 0 && (applied == nullptr || applied_hash.IsNull() ||
+                       applied->GetBlockHash() != applied_hash))) {
+        return state.Error("nevm-reorg-applied-branch-mismatch");
+    }
+    prefix.emplace(NEVMDisconnectPrefix{
+        height, applied == nullptr ? uint256{} : applied->GetBlockHash()});
+    return true;
+}
+
 /** Disconnect m_chain's tip.
   * After calling, the mempool will be in an inconsistent state, with
   * transactions from disconnected blocks being added to disconnectpool.  You
@@ -3621,19 +7074,78 @@ void Chainstate::UpdateTip(const CBlockIndex* pindexNew)
   * in any case).
   */
  // SYSCOIN
-bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTransactions* disconnectpool, bool bReverify, bool bUpdateSpecialTxState)
+bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTransactions* disconnectpool, bool bReverify, bool bUpdateSpecialTxState, const NEVMDisconnectPrefix* nevm_prefix)
 {
     AssertLockHeld(cs_main);
     if (m_mempool) AssertLockHeld(m_mempool->cs);
 
+    // SYSCOIN: Geth is still above this tip. Undoing a Core ancestor would
+    // neither disconnect Geth's actual tip nor preserve the pending branch.
+    if (m_chainman.HasPendingNEVMStartupPair()) {
+        return state.Error("Cannot disconnect Core while its Geth startup pair is pending");
+    }
+    // SYSCOIN: A failed root revocation must be recovered before another
+    // transition can reuse the same NEVM hash or overwrite its recovery record.
+    if (pnevmtxrootsdb && pnevmtxrootsdb->GetPendingDisconnect()) {
+        return state.Error("Cannot disconnect Core while NEVM root recovery is pending");
+    }
+
     CBlockIndex *pindexDelete = m_chain.Tip();
     assert(pindexDelete);
     assert(pindexDelete->pprev);
+    // SYSCOIN: Keep the child's adaptive budget until this rollback commits.
+    const bool undo_superblock_budget{bUpdateSpecialTxState && governance &&
+        CSuperblock::IsValidBlockHeight(pindexDelete->nHeight)};
+    if (nevm_prefix != nullptr &&
+        !nevm_prefix->ContainsUnapplied(*pindexDelete)) {
+        return state.Error("nevm-disconnect-unapplied-prefix-mismatch");
+    }
+    // SYSCOIN BEGIN: Never cross the imported A-1 handoff in this BLS-free
+    // process. A transition release must validate any replacement first.
+    std::string pq_handoff_disconnect_error;
+    if (!m_chainman.CheckPQActivationHandoffDisconnect(
+            *pindexDelete, pq_handoff_disconnect_error)) {
+        return FatalError(
+            m_chainman.GetNotifications(), state,
+            pq_handoff_disconnect_error.empty()
+                ? "PQ activation handoff disconnect rejected"
+                : pq_handoff_disconnect_error);
+    }
+    // SYSCOIN END: Protect the exact local PQ activation handoff.
     // Read block from disk.
     std::shared_ptr<CBlock> pblock = std::make_shared<CBlock>();
     CBlock& block = *pblock;
     if (!m_blockman.ReadBlockFromDisk(block, *pindexDelete)) {
         return error("DisconnectTip(): Failed to read block");
+    }
+    // SYSCOIN: Local source-root authority follows every real rollback,
+    // including startup alignment that deliberately skips Geth notifications.
+    std::optional<NEVMRootDisconnect> root_disconnect;
+    std::optional<NEVMTxRoot> retained_root;
+    if (pnevmtxrootsdb && (!fRegTest || fNEVMConnection) &&
+        pindexDelete->nHeight >= m_chainman.GetConsensus().nNEVMStartBlock) {
+        CNEVMHeader header;
+        if (!GetNEVMData(state, block, header)) return false;
+        root_disconnect = NEVMRootDisconnect{
+            pindexDelete->GetBlockHash(), header.nBlockHash,
+            header.nTxRoot, header.nReceiptRoot};
+        // SYSCOIN: Deferred execution does not establish unique NEVM hashes.
+        // Resolve the latest surviving owner before any undo or revocation;
+        // missing evidence cannot authorize erasing or restoring this key.
+        for (const CBlockIndex* index{pindexDelete->pprev};
+             index && index->nHeight >= m_chainman.GetConsensus().nNEVMStartBlock;
+             index = index->pprev) {
+            CNEVMHeader canonical;
+            if (!ReadNEVMRootCarrier(m_blockman, *index, canonical, /*allow_pruned=*/true)) {
+                return state.Error(strprintf(
+                    "DisconnectTip(): Cannot authenticate canonical NEVM root carrier %s",
+                    index->GetBlockHash().ToString()));
+            }
+            if (canonical.nBlockHash == header.nBlockHash) {
+                retained_root = NEVMTxRoot{canonical.nTxRoot, canonical.nReceiptRoot};
+                break;
+            }
+        }
     }
     // Apply the block atomically to the chain state.
     // SYSCOIN
@@ -3644,27 +7156,137 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
     {
         CCoinsViewCache view(&CoinsTip());
         assert(view.GetBestBlock() == pindexDelete->GetBlockHash());
-        if (DisconnectBlock(block, pindexDelete, view, setMintTxs, vecNEVMBlocks, vecTXIDPairs, bReverify, false /*bReplay*/, bUpdateSpecialTxState) != DISCONNECT_OK)
+        if (DisconnectBlock(block, pindexDelete, view, setMintTxs, vecNEVMBlocks, vecTXIDPairs, bReverify, false /*bReplay*/, bUpdateSpecialTxState, nevm_prefix) != DISCONNECT_OK)
             return error("DisconnectTip(): DisconnectBlock %s failed", pindexDelete->GetBlockHash().ToString());
+        // SYSCOIN: Ordinary rollback has no failed-connect record to retain
+        // its external effect. Fence the authenticated engine prefix before
+        // local root/coins completion can let retirement flags survive alone.
+        // An earlier failed acknowledgment or deferred/startup alignment can
+        // already leave Geth behind this parent, without another undo send.
+        const int64_t nevm_start{m_chainman.GetConsensus().nNEVMStartBlock};
+        if (this == &m_chainman.ActiveChainstate() && fNEVMConnection &&
+            pindexDelete->nHeight >= nevm_start &&
+            !ShouldBypassExternalNEVMNotifyCalls(m_chainman, pindexDelete->nHeight)) {
+            m_chainman.m_nevm_prefix_recovery_needed = true;
+            uint64_t count{0};
+            uint256 hash;
+            std::string error;
+            if (!FlushAndGetNEVMBlockInfo(count, hash, error)) {
+                return state.Error("nevm-disconnect-status:" + error);
+            }
+            if (!MatchesNEVMActivePrefix(nevm_start, count, hash, pindexDelete->pprev)) {
+                return state.Error("nevm-disconnect-applied-prefix-mismatch");
+            }
+            if (!MakeNEVMPairDurable(m_chainman, count, hash)) {
+                return state.Error("nevm-disconnect-durability-unavailable");
+            }
+        }
+        // SYSCOIN: Revoke mint authority and retain its exact carrier in one
+        // durable batch before even publishing parent coins to the cache.
+        // If older coins survive a crash, startup can restore this root only
+        // after authenticating that carrier on the recovered branch.
+        if (root_disconnect) {
+            try {
+                if (!m_blockman.FlushChainstateBlockFile(pindexDelete->nHeight) ||
+                    !m_blockman.WriteBlockIndexDB() ||
+                    !pnevmtxrootsdb->BeginDisconnect(*root_disconnect)) {
+                    return FatalError(m_chainman.GetNotifications(), state,
+                                      "DisconnectTip(): Failed to persist NEVM root revocation");
+                }
+            } catch (const std::runtime_error& e) {
+                return FatalError(m_chainman.GetNotifications(), state,
+                                  std::string{"System error while revoking NEVM root: "} + e.what());
+            }
+        }
         bool flushed = view.Flush();
         assert(flushed);
     }
-    // SYSCOIN: durable UTXO mint(T) => durable replay marker(T). Persist any
-    // pending marker additions, commit the disconnected UTXO tip, then erase.
-    // Extra markers after a crash are fail-closed (may require -reindex-chainstate).
-    if (pnevmtxmintdb != nullptr) {
-        if (!setMintTxs.empty()) {
-            if (!pnevmtxmintdb->FlushCacheToDisk(/*CHUNK_ITEMS=*/256, /*fSync=*/true)) {
-                return error("DisconnectTip(): Failed to persist mint replay additions %s",
-                             pindexDelete->GetBlockHash().ToString());
+    // Branch state has rolled back. Release pending mints and their proof
+    // reservations before any disconnected transactions can be re-admitted,
+    // including when a later step exits with a local error.
+    if (m_mempool) m_mempool->RemoveMintTransactionsForReorg();
+    // A backward tip shift introduces one older block into the bounded
+    // random-access DMN window. Restore it before an alternate branch can
+    // immediately request a historical PQ roster; the inverse journal owns
+    // sequential rollback, while these full snapshots own random access.
+    if (this == &m_chainman.ActiveChainstate() &&
+        deterministicMNManager != nullptr &&
+        !deterministicMNManager->EnsureRetainedSnapshotWindow(
+            pindexDelete->pprev)) {
+        return FatalError(
+            m_chainman.GetNotifications(), state,
+            strprintf("DisconnectTip(): Failed to restore deterministic "
+                      "masternode snapshot window for parent of %s",
+                      pindexDelete->GetBlockHash().ToString()));
+    }
+    bool parent_coins_synced{false};
+    // SYSCOIN: Root authority is already revoked. Persist replay protection
+    // and branch-bound DMN/PQ state before synchronizing parent coins; only
+    // then remove consumed-proof markers before retiring the recovery record.
+    if (pnevmtxmintdb != nullptr || root_disconnect) {
+        try {
+            if (!setMintTxs.empty() || root_disconnect) {
+                if (pnevmtxmintdb && !pnevmtxmintdb->FlushCacheToDisk(
+                        /*CHUNK_ITEMS=*/256, /*fSync=*/true)) {
+                    return FatalError(
+                        m_chainman.GetNotifications(), state,
+                        strprintf("DisconnectTip(): Failed to persist mint replay additions %s",
+                                  pindexDelete->GetBlockHash().ToString()));
+                }
+                if (deterministicMNManager &&
+                    !deterministicMNManager->FlushPendingSnapshotsToDisk(
+                        /*fSync=*/true)) {
+                    return FatalError(
+                        m_chainman.GetNotifications(), state,
+                        strprintf("DisconnectTip(): Failed to persist deterministic state for parent of %s",
+                                  pindexDelete->GetBlockHash().ToString()));
+                }
+                // SYSCOIN: Publishing parent coins must also preserve its
+                // usable source roots, which may still exist only in cache.
+                if (root_disconnect &&
+                    (!pnevmtxrootsdb->FlushCacheToDisk(
+                        /*CHUNK_ITEMS=*/100000, /*fSync=*/true) ||
+                     !pnevmtxrootsdb->Sync())) {
+                    return FatalError(m_chainman.GetNotifications(), state,
+                                      "DisconnectTip(): Failed to persist retained NEVM roots");
+                }
+                // SYSCOIN: The surviving branch can need cached budgets
+                // even when the removed child is ordinary. Persist additions
+                // and earlier asynchronous writes before its durable coins.
+                if (governance && !governance->FlushCacheToDisk(/*fSync=*/true)) {
+                    return FatalError(m_chainman.GetNotifications(), state,
+                                      "DisconnectTip(): Failed to persist superblock budgets");
+                }
+                // SYSCOIN: All prior coins writes must be durable before
+                // retiring root recovery or hiding any mint replay marker.
+                if (!CoinsDB().FlushWithSync(CoinsTip())) {
+                    return FatalError(
+                        m_chainman.GetNotifications(), state,
+                        strprintf("DisconnectTip(): Failed to flush disconnected UTXO state %s",
+                                  pindexDelete->GetBlockHash().ToString()));
+                }
+                parent_coins_synced = true;
             }
-            if (!CoinsTip().Flush()) {
-                return error("DisconnectTip(): Failed to flush disconnected UTXO state %s",
-                             pindexDelete->GetBlockHash().ToString());
+            // SYSCOIN: Retain all deletion intents if an earlier DB write fails.
+            if (pnevmtxmintdb) pnevmtxmintdb->EraseCache(setMintTxs);
+            pblockindexdb->EraseCache(vecTXIDPairs);
+            if ((pnevmtxmintdb && !pnevmtxmintdb->FlushErase(setMintTxs)) ||
+                !pblockindexdb->FlushErase(vecTXIDPairs)) {
+                return FatalError(m_chainman.GetNotifications(), state,
+                                  strprintf("DisconnectTip(): Error flushing to asset dbs on disconnect %s",
+                                            pindexDelete->GetBlockHash().ToString()));
             }
-        }
-        if (!pnevmtxmintdb->FlushErase(setMintTxs) || !pnevmtxrootsdb->FlushErase(vecNEVMBlocks) || !pblockindexdb->FlushErase(vecTXIDPairs)) {
-            return error("DisconnectTip(): Error flushing to asset dbs on disconnect %s", pindexDelete->GetBlockHash().ToString());
+            // SYSCOIN: Startup also needs this carrier if mint cleanup is
+            // interrupted after the parent coins have become durable.
+            if (root_disconnect &&
+                !pnevmtxrootsdb->CompleteRootRecovery(
+                    pindexDelete->pprev->GetBlockHash(), retained_root)) {
+                return FatalError(m_chainman.GetNotifications(), state,
+                                  "DisconnectTip(): Failed to complete NEVM root revocation");
+            }
+        } catch (const std::runtime_error& e) {
+            return FatalError(m_chainman.GetNotifications(), state,
+                              std::string{"System error while disconnecting: "} + e.what());
         }
     }
     LogPrint(BCLog::BENCHMARK, "- Disconnect block: %.2fms\n",
@@ -3681,9 +7303,24 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
         }
     }
 
-    // Write the chain state to disk, if necessary.
-    if (!FlushStateToDisk(state, FlushStateMode::IF_NEEDED)) {
+    // SYSCOIN: Offline and pre-NEVM superblock rollback may not cross the
+    // root/mint coins barrier above. Persist its parent and auxiliary state
+    // before a budget tombstone can outlive the child's on-disk coins.
+    const bool sync_budget_parent{undo_superblock_budget && !parent_coins_synced};
+    if (!FlushStateToDisk(state, sync_budget_parent
+            ? FlushStateMode::ALWAYS : FlushStateMode::IF_NEEDED)) {
         return false;
+    }
+    if (sync_budget_parent) {
+        try {
+            if (!CoinsDB().FlushWithSync(CoinsTip())) {
+                return FatalError(m_chainman.GetNotifications(), state,
+                                  "DisconnectTip(): Failed to persist superblock parent coins");
+            }
+        } catch (const std::runtime_error& e) {
+            return FatalError(m_chainman.GetNotifications(), state,
+                              std::string{"System error while persisting superblock parent: "} + e.what());
+        }
     }
 
     if (disconnectpool && m_mempool) {
@@ -3695,6 +7332,27 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
     }
 
     m_chain.SetTip(*pindexDelete->pprev);
+
+    // SYSCOIN: Every fallible persistence step has succeeded and this
+    // chainstate names its durable parent. Reads may now flush budget deletion.
+    if (undo_superblock_budget && !governance->UndoBlock(pindexDelete)) {
+        return FatalError(m_chainman.GetNotifications(), state,
+                          "DisconnectTip(): Failed to retire superblock budget");
+    }
+
+    // SYSCOIN: Ordinary undo has fully resolved this once-published attempt.
+    // Its retained identity must not block delivery of the replacement branch.
+    if (m_nevm_pending_connect == pindexDelete->GetBlockHash()) {
+        m_nevm_pending_connect.reset();
+    }
+
+    // InvalidateBlock releases cs_main between successive disconnects. Keep
+    // maintenance on the just-published chain tip before that can happen, so
+    // a periodic flush cannot prune a newly reconstructed deep-reorg parent
+    // against the stale pre-disconnect window.
+    if (this == &m_chainman.ActiveChainstate() && deterministicMNManager) {
+        deterministicMNManager->UpdatedBlockTip(pindexDelete->pprev);
+    }
 
     UpdateTip(pindexDelete->pprev);
     // Let wallets know transactions went from 1-confirmed to
@@ -3755,11 +7413,16 @@ public:
  * The block is added to connectTrace if connection succeeds.
  */
 // SYSCOIN
-bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew, const std::shared_ptr<const CBlock>& pblock, ConnectTrace& connectTrace, DisconnectedBlockTransactions &disconnectpool)
+bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew, const std::shared_ptr<const CBlock>& pblock, ConnectTrace& connectTrace, DisconnectedBlockTransactions &disconnectpool, std::optional<NEVMBlockReject>& rejection)
 {
+    rejection.reset();
     AssertLockHeld(cs_main);
     if (m_mempool) AssertLockHeld(m_mempool->cs);
 
+    // SYSCOIN: Do not replace an interrupted root revocation with new state.
+    if (pnevmtxrootsdb && pnevmtxrootsdb->GetPendingDisconnect()) {
+        return state.Error("Cannot connect Core while NEVM root recovery is pending");
+    }
     assert(pindexNew->pprev == m_chain.Tip());
     // Read block from disk.
     const auto time_1{SteadyClock::now()};
@@ -3783,15 +7446,50 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
     LogPrint(BCLog::BENCHMARK, "  - Load block from disk: %.2fms\n",
              Ticks<MillisecondsDouble>(time_2 - time_1));
     // SYSCOIN
+    // SYSCOIN BEGIN: A deferred BLS-free process must possess the imported
+    // A-1 pin before mutating chainstate with block A. Historical replay is
+    // allowed to continue only because it remains permanently sync-only.
+    if (pindexNew->nHeight >=
+            m_chainman.GetConsensus().nPQActivationHeight) {
+        std::string pq_handoff_error;
+        if (!m_chainman.MaybeFinalizePQActivationHandoff(
+                *pindexNew, pq_handoff_error)) {
+            return FatalError(
+                m_chainman.GetNotifications(), state,
+                pq_handoff_error.empty()
+                    ? "Missing imported PQ activation handoff"
+                    : pq_handoff_error);
+        }
+    }
+    // SYSCOIN END: Enforce the imported activation handoff before ConnectBlock.
     node::BlockConnectionState connection{CoinsTip()};
+    // SYSCOIN: Keep the actual external acknowledgment across auxiliary
+    // retries; discarding private outputs cannot undo an engine acceptance.
+    bool live_nevm_acknowledged{false};
+    const auto persist_failed_connection = [&]() EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+        assert(connection.view);
+        if (live_nevm_acknowledged) {
+            assert(this == &m_chainman.ActiveChainstate());
+            assert(pindexNew->pprev == m_chainman.ActiveTip());
+            m_nevm_pending_connect = pindexNew->GetBlockHash();
+            m_chainman.m_nevm_prefix_recovery_needed = true;
+        }
+        return PersistNEVMPendingConnect(state);
+    };
     {
         const auto result = node::ConnectBlockWithAuxiliaryRetry(
             m_blockman, *pindexNew, /*loaded_from_disk=*/!pblock, pthisBlock, state, CoinsTip(), connection,
             [&]() EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
                 return ConnectBlock(*pthisBlock, state, pindexNew, *connection.view, false /*bJustCheck*/,
-                                    connection.mint_txs, connection.nevm_tx_roots, connection.poda, connection.txid_pairs);
+                                    connection.mint_txs, connection.nevm_tx_roots, connection.poda, connection.txid_pairs, true, &rejection, &live_nevm_acknowledged);
             });
+        // SYSCOIN: Candidate outputs are still private. Make the accepted
+        // parent and the failed attempt durable before notifications or
+        // invalidation can persist its retirement independently.
+        if (result != node::BlockConnectionResult::SUCCESS &&
+            !persist_failed_connection()) return false;
         if (result == node::BlockConnectionResult::DISK_READ_FAILED) {
+            rejection.reset();
             return FatalError(m_chainman.GetNotifications(), state, "Failed to reread committed block");
         }
         GetMainSignals().BlockChecked(*pthisBlock, state);
@@ -3813,6 +7511,35 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
                  Ticks<MillisecondsDouble>(time_3 - time_2),
                  Ticks<SecondsDouble>(time_connect_total),
                  Ticks<MillisecondsDouble>(time_connect_total) / num_blocks_total);
+        // SYSCOIN BEGIN: A node replaying from below A-1 may consume an existing
+        // transition-release pin only after validating that exact predecessor.
+        // Keep coins and bridge outputs local until this fallible check passes.
+        if (pindexNew->nHeight ==
+                m_chainman.GetConsensus().nPQActivationHeight - 1) {
+            std::string pq_handoff_error;
+            if (!m_chainman.MaybeFinalizePQActivationHandoff(
+                    *pindexNew, pq_handoff_error)) {
+                if (!persist_failed_connection()) return false;
+                return FatalError(
+                    m_chainman.GetNotifications(), state,
+                    pq_handoff_error.empty()
+                        ? "Invalid imported PQ activation handoff"
+                        : pq_handoff_error);
+            }
+        }
+        // SYSCOIN END: Consume only an already-imported A-1 handoff.
+        // SYSCOIN: PoDA staging performs fallible database I/O. Keep coins
+        // and mint/root reservations local until it succeeds, so shutdown
+        // cannot flush candidate coins without their consumed-proof markers.
+        try {
+            if (pnevmdatadb) {
+                pnevmdatadb->FlushDataToCache(connection.poda, PoDAFlushSource::Block);
+            }
+        } catch (const dbwrapper_error& e) {
+            if (!persist_failed_connection()) return false;
+            return FatalError(m_chainman.GetNotifications(), state,
+                              std::string{"ConnectTip(): Failed to stage PoDA: "} + e.what());
+        }
         bool flushed = connection.view->Flush();
         assert(flushed);
         connection.view.reset();
@@ -3820,8 +7547,6 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
     const CBlock& blockConnecting = *pthisBlock;
     // SYSCOIN: Stage mint markers in cache; they become durable on the next full
     // UTXO flush (write-ahead of CoinsTip) or on mint-containing disconnect/replay.
-    if(pnevmdatadb)
-        pnevmdatadb->FlushDataToCache(connection.poda, PoDAFlushSource::Block);
     if(pnevmtxmintdb)
         pnevmtxmintdb->FlushDataToCache(connection.mint_txs);
     if(pblockindexdb)
@@ -3852,6 +7577,19 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
     // Update m_chain & related variables.
     m_chain.SetTip(*pindexNew);
     UpdateTip(pindexNew);
+    // SYSCOIN: The active branch determines outstanding PQ registry capacity.
+    if (m_mempool) {
+        // SYSCOIN BEGIN: Purge legacy provider payloads at PQ activation.
+        // Entries admitted while A - 1 was the next block use legacy provider
+        // payloads. They cannot be mined at A and must not poison every block
+        // template after the forward transition.
+        if (Consensus::IsPQProviderMempoolTransitionTip(
+                m_chainman.GetParams().GetConsensus(), pindexNew->nHeight)) {
+            m_mempool->RemoveLegacyProviderTransactionsForPQActivation();
+        }
+        // SYSCOIN END: Purge legacy provider payloads at PQ activation.
+        m_mempool->RebuildPQRegistryReservations(pindexNew);
+    }
 
     const auto time_6{SteadyClock::now()};
     time_post_connect += time_6 - time_5;
@@ -3884,15 +7622,50 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
 CBlockIndex* Chainstate::FindMostWorkChain()
 {
     AssertLockHeld(::cs_main);
+    // SYSCOIN BEGIN: Resolve the Geth-applied startup endpoint before fork selection.
+    const CBlockIndex* startup_applied{nullptr};
+    if (this == &m_chainman.ActiveChainstate() &&
+        m_chainman.HasPendingNEVMStartupPair()) {
+        const auto& pair{*m_chainman.m_nevm_startup_pair};
+        startup_applied = m_blockman.LookupBlockIndex(pair.block_hash);
+        if (startup_applied == nullptr || startup_applied->nHeight != pair.height ||
+            (startup_applied->nStatus & (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK))) {
+            return nullptr;
+        }
+    }
+    // SYSCOIN END: Resolve the Geth-applied startup endpoint.
     do {
         CBlockIndex *pindexNew = nullptr;
 
         // Find the best candidate header.
         {
             std::set<CBlockIndex*, CBlockIndexWorkComparator>::reverse_iterator it = setBlockIndexCandidates.rbegin();
+            // SYSCOIN BEGIN: Restrict Bitcoin's candidate iteration temporarily
+            // to the branch already applied by Geth during startup recovery.
+            // Reconcile Geth's already-applied prefix before ordinary fork
+            // choice. Keep competing tips eligible for when the pair clears;
+            // preseal admission must observe the same temporary selection.
+            while (it != setBlockIndexCandidates.rend() && startup_applied != nullptr &&
+                   ((*it)->nHeight > startup_applied->nHeight ||
+                    startup_applied->GetAncestor((*it)->nHeight) != *it)) {
+                ++it;
+            }
+            // SYSCOIN END: Restrict startup candidates to the Geth-applied branch.
             if (it == setBlockIndexCandidates.rend())
                 return nullptr;
             pindexNew = *it;
+        }
+
+        // SYSCOIN: Generic candidate-repopulation paths need not understand
+        // the transient BTCC dependency index. Enforce the exclusion again at
+        // the only work-selection boundary so a missing certificate cannot
+        // regain priority until its exact logical object is accepted.
+        if (const auto dependency{
+                FindDeferredBTCCReceiptDependency(*pindexNew)}) {
+            AddDeferredBTCCReceiptCandidate(
+                dependency->first, *dependency->second, *pindexNew);
+            setBlockIndexCandidates.erase(pindexNew);
+            continue;
         }
 
         // Check whether all blocks on the path between the currently active chain and the candidate are valid.
@@ -3948,8 +7721,477 @@ CBlockIndex* Chainstate::FindMostWorkChain()
     } while(true);
 }
 
+// SYSCOIN: A bounded prospective preseal slot follows only the branch that
+// ActivateBestChain is actually prepared to connect.
+bool Chainstate::IsCurrentMostWorkBranch(const CBlockIndex& ancestor)
+{
+    AssertLockHeld(cs_main);
+    if (m_chain.Contains(&ancestor)) return false;
+    const CBlockIndex* candidate{FindMostWorkChain()};
+    return candidate != nullptr && candidate->nHeight >= ancestor.nHeight &&
+           candidate->GetAncestor(ancestor.nHeight) == &ancestor;
+}
+
+// SYSCOIN: Quarantine and reconsider exact-certificate-dependent branches
+// without declaring their blocks invalid.
+bool Chainstate::DeferBTCCReceiptCandidates(
+    const uint256& logical_id,
+    const CBlockIndex& carrier)
+{
+    return DeferReceiptCandidates(
+        DeferredReceiptCertificateKind::BTCC_CHAINLOCK,
+        logical_id, carrier);
+}
+
+bool Chainstate::DeferPaymentAuditReceiptCandidates(
+    const uint256& logical_id,
+    const CBlockIndex& carrier)
+{
+    return DeferReceiptCandidates(
+        DeferredReceiptCertificateKind::PAYMENT_AUDIT,
+        logical_id, carrier);
+}
+
+bool Chainstate::DeferReceiptCandidates(
+    DeferredReceiptCertificateKind kind,
+    const uint256& logical_id,
+    const CBlockIndex& carrier)
+{
+    AssertLockHeld(cs_main);
+    if (logical_id.IsNull()) return false;
+
+    auto [dependency_it, dependency_inserted]{
+        m_deferred_btcc_receipt_candidates.try_emplace(logical_id)};
+    auto& dependency{dependency_it->second};
+    if (dependency_inserted) {
+        dependency.kind = kind;
+    } else if (dependency.kind != kind) {
+        return false;
+    }
+    const CBlockIndex* branch_carrier{&carrier};
+    for (const auto& [existing, _] : dependency.branches) {
+        if (carrier.nHeight >= existing->nHeight &&
+            carrier.GetAncestor(existing->nHeight) == existing) {
+            branch_carrier = existing;
+            break;
+        }
+    }
+    auto [branch, inserted]{dependency.branches.try_emplace(branch_carrier)};
+    if (branch_carrier == &carrier) {
+        for (auto existing{dependency.branches.begin()};
+             existing != dependency.branches.end();) {
+            const CBlockIndex* const existing_carrier{existing->first};
+            if (existing_carrier == &carrier ||
+                existing_carrier->nHeight < carrier.nHeight ||
+                existing_carrier->GetAncestor(carrier.nHeight) != &carrier) {
+                ++existing;
+                continue;
+            }
+            auto candidates{std::move(existing->second)};
+            existing = dependency.branches.erase(existing);
+            for (CBlockIndex* candidate : candidates) {
+                AddDeferredBTCCReceiptCandidate(
+                    logical_id, carrier, *candidate);
+            }
+        }
+        branch = dependency.branches.find(&carrier);
+    }
+
+    size_t moved{0};
+    for (auto it{setBlockIndexCandidates.begin()};
+         it != setBlockIndexCandidates.end();) {
+        CBlockIndex* const candidate{*it};
+        if (candidate->nHeight >= carrier.nHeight &&
+            candidate->GetAncestor(carrier.nHeight) == &carrier) {
+            AddDeferredBTCCReceiptCandidate(
+                logical_id, *branch_carrier, *candidate);
+            it = setBlockIndexCandidates.erase(it);
+            ++moved;
+        } else {
+            ++it;
+        }
+    }
+    const bool carrier_has_candidate{std::any_of(
+        branch->second.begin(), branch->second.end(),
+        [&](const CBlockIndex* candidate) {
+            return candidate->nHeight >= carrier.nHeight &&
+                   candidate->GetAncestor(carrier.nHeight) == &carrier;
+        })};
+    if (!carrier_has_candidate && inserted) {
+        dependency.branches.erase(branch_carrier);
+    }
+    if (dependency.branches.empty()) {
+        m_deferred_btcc_receipt_candidates.erase(logical_id);
+        return false;
+    }
+    LogPrint(BCLog::CHAINLOCKS,
+             "Chainstate::%s -- deferred %u candidate(s) through carrier %s "
+             "for ADVANCE %s\n",
+             __func__, moved, carrier.GetBlockHash().ToString(),
+             logical_id.ToString());
+    return carrier_has_candidate;
+}
+
+bool Chainstate::ReconsiderBTCCReceiptCandidates(const uint256& logical_id)
+{
+    return ReconsiderReceiptCandidates(
+        DeferredReceiptCertificateKind::BTCC_CHAINLOCK, logical_id);
+}
+
+bool Chainstate::ReconsiderPaymentAuditReceiptCandidates(
+    const uint256& logical_id)
+{
+    return ReconsiderReceiptCandidates(
+        DeferredReceiptCertificateKind::PAYMENT_AUDIT, logical_id);
+}
+
+bool Chainstate::ReconsiderReceiptCandidates(
+    DeferredReceiptCertificateKind kind,
+    const uint256& logical_id)
+{
+    AssertLockHeld(cs_main);
+    const auto found{m_deferred_btcc_receipt_candidates.find(logical_id)};
+    if (found == m_deferred_btcc_receipt_candidates.end() ||
+        found->second.kind != kind) {
+        return false;
+    }
+
+    std::set<CBlockIndex*, CBlockIndexWorkComparator> candidates;
+    for (auto& [_, branch_candidates] : found->second.branches) {
+        candidates.insert(branch_candidates.begin(), branch_candidates.end());
+    }
+    m_deferred_btcc_receipt_candidates.erase(found);
+    CBlockIndexWorkComparator compare;
+    for (CBlockIndex* candidate : candidates) {
+        for (CBlockIndex* restore{candidate};
+             restore != nullptr && !m_chain.Contains(restore);
+             restore = restore->pprev) {
+            if (m_chain.Tip() != nullptr && compare(restore, m_chain.Tip())) {
+                break;
+            }
+            if ((restore->nStatus &
+                 (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK)) != 0 ||
+                !restore->IsValid(BLOCK_VALID_TRANSACTIONS) ||
+                !restore->HaveNumChainTxs()) {
+                continue;
+            }
+            TryAddBlockIndexCandidate(restore);
+        }
+    }
+    LogPrint(BCLog::CHAINLOCKS,
+             "Chainstate::%s -- reconsidering %u candidate(s) for accepted "
+             "ADVANCE %s\n",
+             __func__, candidates.size(), logical_id.ToString());
+    return !candidates.empty();
+}
+
+bool Chainstate::HasDeferredBTCCReceiptCandidates(
+    const uint256& logical_id) const
+{
+    return HasDeferredReceiptCandidates(
+        DeferredReceiptCertificateKind::BTCC_CHAINLOCK, logical_id);
+}
+
+bool Chainstate::HasDeferredPaymentAuditReceiptCandidates(
+    const uint256& logical_id) const
+{
+    return HasDeferredReceiptCandidates(
+        DeferredReceiptCertificateKind::PAYMENT_AUDIT, logical_id);
+}
+
+bool Chainstate::HasDeferredReceiptCandidates(
+    DeferredReceiptCertificateKind kind,
+    const uint256& logical_id) const
+{
+    AssertLockHeld(cs_main);
+    const auto found{m_deferred_btcc_receipt_candidates.find(logical_id)};
+    return found != m_deferred_btcc_receipt_candidates.end() &&
+           found->second.kind == kind &&
+           std::any_of(found->second.branches.begin(),
+                       found->second.branches.end(),
+                       [](const auto& branch) {
+                           return !branch.second.empty();
+                       });
+}
+
+std::optional<DeferredBTCCReceiptCandidate>
+Chainstate::GetBestDeferredBTCCReceiptCandidate() const
+{
+    return GetBestDeferredReceiptCandidate(
+        DeferredReceiptCertificateKind::BTCC_CHAINLOCK);
+}
+
+std::optional<DeferredBTCCReceiptCandidate>
+Chainstate::GetBestDeferredPaymentAuditReceiptCandidate() const
+{
+    return GetBestDeferredReceiptCandidate(
+        DeferredReceiptCertificateKind::PAYMENT_AUDIT);
+}
+
+std::optional<DeferredBTCCReceiptCandidate>
+Chainstate::GetBestDeferredReceiptCandidate(
+    DeferredReceiptCertificateKind kind) const
+{
+    AssertLockHeld(cs_main);
+    std::optional<DeferredBTCCReceiptCandidate> best;
+    CBlockIndexWorkComparator compare;
+    for (const auto& [logical_id, dependency] :
+         m_deferred_btcc_receipt_candidates) {
+        if (dependency.kind != kind) continue;
+        for (const auto& [carrier, candidates] : dependency.branches) {
+            if ((carrier->nStatus &
+                 (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK)) != 0 ||
+                (carrier->nStatus & BLOCK_HAVE_DATA) == 0 ||
+                carrier->IsAssumedValid() ||
+                !carrier->IsValid(BLOCK_VALID_TRANSACTIONS) ||
+                !carrier->HaveNumChainTxs()) {
+                continue;
+            }
+            for (auto it{candidates.rbegin()}; it != candidates.rend(); ++it) {
+                CBlockIndex* const candidate{*it};
+                if ((candidate->nStatus &
+                     (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK)) != 0 ||
+                    (candidate->nStatus & BLOCK_HAVE_DATA) == 0 ||
+                    candidate->IsAssumedValid() ||
+                    !candidate->IsValid(BLOCK_VALID_TRANSACTIONS) ||
+                    !candidate->HaveNumChainTxs() ||
+                    (m_chain.Tip() != nullptr &&
+                     candidate->nChainWork <= m_chain.Tip()->nChainWork)) {
+                    continue;
+                }
+                if (!best || compare(best->best_candidate, candidate)) {
+                    best = DeferredBTCCReceiptCandidate{
+                        logical_id, carrier, candidate};
+                }
+                break;
+            }
+        }
+    }
+    return best;
+}
+
+bool Chainstate::IsBTCCReceiptCandidateDeferred(
+    const CBlockIndex& candidate) const
+{
+    AssertLockHeld(cs_main);
+    return FindDeferredBTCCReceiptDependency(candidate).has_value();
+}
+
+std::optional<std::pair<uint256, const CBlockIndex*>>
+Chainstate::FindDeferredBTCCReceiptDependency(
+    const CBlockIndex& candidate) const
+{
+    AssertLockHeld(cs_main);
+    std::optional<std::pair<uint256, const CBlockIndex*>> earliest;
+    for (const auto& [logical_id, dependency] :
+        m_deferred_btcc_receipt_candidates) {
+        for (const auto& [carrier, _] : dependency.branches) {
+            if ((carrier->nStatus &
+                 (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK)) != 0 ||
+                (carrier->nStatus & BLOCK_HAVE_DATA) == 0 ||
+                !carrier->HaveNumChainTxs() ||
+                candidate.nHeight < carrier->nHeight ||
+                candidate.GetAncestor(carrier->nHeight) != carrier) {
+                continue;
+            }
+            if (!earliest ||
+                carrier->nHeight < earliest->second->nHeight ||
+                (carrier->nHeight == earliest->second->nHeight &&
+                 logical_id < earliest->first)) {
+                earliest = std::pair{logical_id, carrier};
+            }
+        }
+    }
+    return earliest;
+}
+
+void Chainstate::AddDeferredBTCCReceiptCandidate(
+    const uint256& logical_id,
+    const CBlockIndex& carrier,
+    CBlockIndex& candidate)
+{
+    AssertLockHeld(cs_main);
+    const auto dependency{m_deferred_btcc_receipt_candidates.find(logical_id)};
+    Assume(dependency != m_deferred_btcc_receipt_candidates.end());
+    const auto branch{dependency->second.branches.find(&carrier)};
+    Assume(branch != dependency->second.branches.end());
+    auto& candidates{branch->second};
+    for (auto it{candidates.begin()}; it != candidates.end();) {
+        CBlockIndex* const existing{*it};
+        if (existing->nHeight >= candidate.nHeight &&
+            existing->GetAncestor(candidate.nHeight) == &candidate) {
+            return;
+        }
+        if (candidate.nHeight >= existing->nHeight &&
+            candidate.GetAncestor(existing->nHeight) == existing) {
+            it = candidates.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    candidates.insert(&candidate);
+}
+
+void Chainstate::RemoveDeferredBTCCReceiptCandidatesThrough(
+    const CBlockIndex& unusable)
+{
+    AssertLockHeld(cs_main);
+    const auto descends_from = [&](const CBlockIndex& candidate) {
+        return candidate.nHeight >= unusable.nHeight &&
+               candidate.GetAncestor(unusable.nHeight) == &unusable;
+    };
+
+    for (auto dependency{m_deferred_btcc_receipt_candidates.begin()};
+         dependency != m_deferred_btcc_receipt_candidates.end();) {
+        auto& branches{dependency->second.branches};
+        for (auto branch{branches.begin()}; branch != branches.end();) {
+            if (descends_from(*branch->first)) {
+                branch = branches.erase(branch);
+                continue;
+            }
+            auto& candidates{branch->second};
+            for (auto candidate{candidates.begin()};
+                 candidate != candidates.end();) {
+                candidate = descends_from(**candidate)
+                                ? candidates.erase(candidate)
+                                : std::next(candidate);
+            }
+            branch = candidates.empty() ? branches.erase(branch)
+                                        : std::next(branch);
+        }
+        if (branches.empty()) {
+            dependency = m_deferred_btcc_receipt_candidates.erase(dependency);
+        } else {
+            ++dependency;
+        }
+    }
+}
+
+// SYSCOIN BEGIN: Batched deferred-receipt conflict cleanup.
+void Chainstate::RemoveDeferredBTCCReceiptCandidatesIn(
+    const std::unordered_set<const CBlockIndex*>& unusable)
+{
+    AssertLockHeld(cs_main);
+    if (unusable.empty()) return;
+
+    const auto is_unusable = [&](const CBlockIndex* candidate)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+        if (unusable.contains(candidate)) return true;
+        // Production deferred entries live in BlockManager and were covered
+        // by the child-bucket walk. Preserve the public single-root helper's
+        // behavior for synthetic/unindexed callers without adding ancestry
+        // work to that indexed hot path.
+        if (m_blockman.LookupBlockIndex(candidate->GetBlockHash()) ==
+            candidate) {
+            return false;
+        }
+        for (const CBlockIndex* ancestor{candidate->pprev};
+             ancestor != nullptr; ancestor = ancestor->pprev) {
+            if (unusable.contains(ancestor)) return true;
+        }
+        return false;
+    };
+
+    for (auto dependency{m_deferred_btcc_receipt_candidates.begin()};
+         dependency != m_deferred_btcc_receipt_candidates.end();) {
+        auto& branches{dependency->second.branches};
+        for (auto branch{branches.begin()}; branch != branches.end();) {
+            if (is_unusable(branch->first)) {
+                branch = branches.erase(branch);
+                continue;
+            }
+            auto& candidates{branch->second};
+            for (auto candidate{candidates.begin()};
+                 candidate != candidates.end();) {
+                candidate = is_unusable(*candidate)
+                                ? candidates.erase(candidate)
+                                : std::next(candidate);
+            }
+            branch = candidates.empty() ? branches.erase(branch)
+                                        : std::next(branch);
+        }
+        dependency = branches.empty()
+                         ? m_deferred_btcc_receipt_candidates.erase(dependency)
+                         : std::next(dependency);
+    }
+}
+// SYSCOIN END: Batched deferred-receipt conflict cleanup.
+
+// SYSCOIN: Retire only the exact deferred branch whose witness proved invalid.
+bool ChainstateManager::RetireDeferredPaymentAuditReceiptCarrier(
+    const uint256& witness_id,
+    CBlockIndex& carrier)
+{
+    AssertLockHeld(cs_main);
+    if (witness_id.IsNull()) return false;
+
+    bool exact_branch_found{false};
+    for (Chainstate* chainstate : GetAll()) {
+        if (chainstate->m_chain.Contains(&carrier)) return false;
+        const auto dependency{
+            chainstate->m_deferred_btcc_receipt_candidates.find(witness_id)};
+        if (dependency !=
+                chainstate->m_deferred_btcc_receipt_candidates.end() &&
+            dependency->second.kind ==
+                DeferredReceiptCertificateKind::PAYMENT_AUDIT &&
+            dependency->second.branches.contains(&carrier)) {
+            exact_branch_found = true;
+        }
+    }
+    if (!exact_branch_found) return false;
+
+    BlockValidationState state;
+    state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                  "bad-pq-payment-audit-certificate");
+    ActiveChainstate().InvalidBlockFound(&carrier, state);
+    for (Chainstate* chainstate : GetAll()) {
+        chainstate->RemoveDeferredBTCCReceiptCandidatesThrough(carrier);
+    }
+    return true;
+}
+
 /** Delete all entries in setBlockIndexCandidates that are worse than the current tip. */
 void Chainstate::PruneBlockIndexCandidates() {
+    // SYSCOIN: A deferred branch stops mattering once it cannot improve the active
+    // chain. Dropping equal-work entries also preserves the ordinary rule that
+    // an already-active sibling is not reorganized merely because delayed
+    // auxiliary validation became available.
+    for (auto dependency{m_deferred_btcc_receipt_candidates.begin()};
+         dependency != m_deferred_btcc_receipt_candidates.end();) {
+        auto& branches{dependency->second.branches};
+        for (auto branch{branches.begin()}; branch != branches.end();) {
+            const CBlockIndex* const carrier{branch->first};
+            if ((carrier->nStatus &
+                 (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK)) != 0 ||
+                (carrier->nStatus & BLOCK_HAVE_DATA) == 0 ||
+                !carrier->HaveNumChainTxs()) {
+                branch = branches.erase(branch);
+                continue;
+            }
+            auto& candidates{branch->second};
+            for (auto candidate{candidates.begin()};
+                 candidate != candidates.end();) {
+                CBlockIndex* const index{*candidate};
+                const bool unusable{
+                    (index->nStatus &
+                     (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK)) != 0 ||
+                    !(index->nStatus & BLOCK_HAVE_DATA) ||
+                    !index->HaveNumChainTxs() ||
+                    (m_chain.Tip() != nullptr &&
+                     index->nChainWork <= m_chain.Tip()->nChainWork)};
+                candidate = unusable ? candidates.erase(candidate)
+                                     : std::next(candidate);
+            }
+            branch = candidates.empty() ? branches.erase(branch)
+                                        : std::next(branch);
+        }
+        if (branches.empty()) {
+            dependency = m_deferred_btcc_receipt_candidates.erase(dependency);
+        } else {
+            ++dependency;
+        }
+    }
+
     // Note that we can't delete the current block itself, as we may need to return to it later in case a
     // reorganization to a better block fails.
     std::set<CBlockIndex*, CBlockIndexWorkComparator>::iterator it = setBlockIndexCandidates.begin();
@@ -3966,19 +8208,136 @@ void Chainstate::PruneBlockIndexCandidates() {
  *
  * @returns true unless a system error occurred
  */
-bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex* pindexMostWork, const std::shared_ptr<const CBlock>& pblock, bool& fInvalidFound, ConnectTrace& connectTrace)
+// SYSCOIN: Bind payload repair to the selected candidate, separately from invalidity.
+bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex* pindexMostWork, const std::shared_ptr<const CBlock>& pblock, bool& fInvalidFound, bool& fReceiptCandidateDeferred, ConnectTrace& connectTrace, std::optional<NEVMBlockReject>& rejection, std::optional<NEVMPayloadRepairSelection>& repair_selection)
 {
     AssertLockHeld(cs_main);
     if (m_mempool) AssertLockHeld(m_mempool->cs);
-
+    // SYSCOIN: Repair-selection authority must not outlive or cross activation steps.
+    AssertLockHeld(m_chainstate_mutex);
+    repair_selection.reset();
     const CBlockIndex* pindexOldTip = m_chain.Tip();
     const CBlockIndex* pindexFork = m_chain.FindFork(pindexMostWork);
+
+    // SYSCOIN BEGIN: Close the durable-accept/enforcement scheduling gap.
+    // Certificate acceptance fsyncs while holding m_chainstate_mutex, but
+    // conflict publication follows in a separate acquisition. If ordinary
+    // best-work activation wins that acquisition, reject its incompatible
+    // inactive branch before disconnecting any block from the finalized view.
+    if (llmq::chainLocksHandler != nullptr) {
+        const CBlockIndex* durable_active_floor{nullptr};
+        const CBlockIndex* durable_target{nullptr};
+        bool replay_target_pending{false};
+        std::string durable_error;
+        if (!llmq::chainLocksHandler->GetDurableFinalityRecoveryFloor(
+                durable_active_floor, durable_target, durable_error,
+                llmq::CChainLocksHandler::DurableFinalityRecoveryMode::
+                    ACTIVATION_REPLAY,
+                &replay_target_pending)) {
+            return state.Error(strprintf(
+                "cannot establish durable finality before best-chain "
+                "activation: %s",
+                durable_error));
+        }
+        if (replay_target_pending) {
+            if (pindexOldTip != nullptr || !CoinsTip().GetBestBlock().IsNull() ||
+                pindexMostWork->nHeight != 0 ||
+                pindexMostWork->GetBlockHash() !=
+                    m_chainman.GetConsensus().hashGenesisBlock) {
+                return state.Error(
+                    "durable finality bootstrap requires empty-chainstate "
+                    "genesis activation");
+            }
+        }
+        if ((durable_active_floor == nullptr) !=
+            (durable_target == nullptr)) {
+            return state.Error(
+                "incomplete durable finality boundary before best-chain "
+                "activation");
+        }
+        if (durable_target != nullptr) {
+            const bool candidate_descends_target{
+                pindexMostWork->nHeight >= durable_target->nHeight &&
+                pindexMostWork->GetAncestor(durable_target->nHeight) ==
+                    durable_target};
+            const bool target_descends_candidate{
+                durable_target->nHeight >= pindexMostWork->nHeight &&
+                durable_target->GetAncestor(pindexMostWork->nHeight) ==
+                    pindexMostWork};
+            if (!llmq::IsDurableChainLockCandidateCompatible(
+                    pindexMostWork->nHeight, durable_target->nHeight,
+                    candidate_descends_target, target_descends_candidate)) {
+                const CBlockIndex* durable_fork{
+                    LastCommonAncestor(pindexMostWork, durable_target)};
+                if (pindexFork == nullptr || durable_fork == nullptr) {
+                    return state.Error(
+                        "cannot isolate incompatible durable-finality "
+                        "candidate branch");
+                }
+                // The winner may share an inactive prefix with this candidate.
+                // Mark only beyond both forks: preserve that winner prefix and
+                // leave active conflicts for ordinary ChainLock enforcement.
+                const int32_t conflict_fork_height{
+                    std::max(pindexFork->nHeight, durable_fork->nHeight)};
+                if (conflict_fork_height ==
+                        std::numeric_limits<int32_t>::max() ||
+                    pindexMostWork->nHeight <= conflict_fork_height) {
+                    return state.Error(
+                        "cannot isolate incompatible durable-finality "
+                        "candidate branch");
+                }
+                CBlockIndex* conflict_root{pindexMostWork->GetAncestor(
+                    conflict_fork_height + 1)};
+                if (conflict_root == nullptr ||
+                    m_chain.Contains(conflict_root)) {
+                    return state.Error(
+                        "invalid inactive durable-finality conflict root");
+                }
+                std::array<CBlockIndex*, 1> roots{conflict_root};
+                if (!MarkConflictingBlocksInactive(state, roots)) {
+                    return false;
+                }
+                LogPrintf(
+                    "Chainstate::%s -- rejected best-work candidate %s "
+                    "incompatible with durable PQ ChainLock %s\n",
+                    __func__, pindexMostWork->GetBlockHash().ToString(),
+                    durable_target->GetBlockHash().ToString());
+                fInvalidFound = true;
+                return true;
+            }
+            // Provisional ancestry permits validation, never a disconnect of
+            // this chainstate's existing prefix, including background replay.
+            if (!durable_target->IsValid(BLOCK_VALID_SCRIPTS) &&
+                pindexOldTip != pindexFork) {
+                return state.Error(
+                    "provisional durable finality permits only forward activation");
+            }
+        }
+    }
+    // SYSCOIN END: Preflight durable finality before best-chain disconnect.
+
+    // Honor finality's branch selection before waiting for payload data.
+    // Repeated delivery must not redo block reads or transaction/engine checks.
+    if (this == &m_chainman.ActiveChainstate() &&
+        m_chainman.IsWaitingForNEVMPayload(*pindexMostWork)) {
+        return state.Error("nevm-payload-repair-pending");
+    }
+
+    std::optional<NEVMDisconnectPrefix> nevm_prefix;
+    if (pindexOldTip != pindexFork &&
+        !PrepareNEVMDisconnectPrefix(state, nevm_prefix)) {
+        return false;
+    }
 
     // Disconnect active blocks which are no longer in the best chain.
     bool fBlocksDisconnected = false;
     DisconnectedBlockTransactions disconnectpool{MAX_DISCONNECTED_TX_POOL_SIZE * 1000};
     while (m_chain.Tip() && m_chain.Tip() != pindexFork) {
-        if (!DisconnectTip(state, &disconnectpool)) {
+        // At or below the checked endpoint, Geth did apply the block and must
+        // receive its ordinary exact-pair disconnect.
+        const auto* prefix{nevm_prefix && nevm_prefix->ContainsUnapplied(*m_chain.Tip())
+            ? &*nevm_prefix : nullptr};
+        if (!DisconnectTip(state, &disconnectpool, true, true, prefix)) {
             // This is likely a fatal error, but keep the mempool consistent,
             // just in case. Only remove from the mempool in this case.
             MaybeUpdateMempoolForReorg(disconnectpool, false);
@@ -4010,14 +8369,87 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
 
         // Connect new blocks.
         for (CBlockIndex* pindexConnect : reverse_iterate(vpindexToConnect)) {
-            if (!ConnectTip(state, pindexConnect, pindexConnect == pindexMostWork ? pblock : std::shared_ptr<const CBlock>(), connectTrace, disconnectpool)) {
+            if (!ConnectTip(state, pindexConnect, pindexConnect == pindexMostWork ? pblock : std::shared_ptr<const CBlock>(), connectTrace, disconnectpool, rejection)) {
                 if (state.IsInvalid()) {
+                    rejection.reset();
                     // The block violates a consensus rule.
                     if (IsBlockRejectionCacheable(state.GetResult())) {
                         InvalidChainFound(vpindexToConnect.front());
                     }
                     state = BlockValidationState();
                     fInvalidFound = true;
+                    fContinue = false;
+                    break;
+                } else if (rejection) {
+                    // SYSCOIN BEGIN: Authorize only this rejected selected candidate.
+                    // A flush may instead reject an earlier replayed block;
+                    // such a verdict retains the ordinary predecessor rules.
+                    if (rejection->IsPayload() &&
+                        rejection->syscoin_hash == pindexConnect->GetBlockHash() &&
+                        this == &m_chainman.ActiveChainstate() &&
+                        m_chain.Tip() != nullptr &&
+                        pindexConnect->pprev == m_chain.Tip()) {
+                        repair_selection.emplace(NEVMPayloadRepairSelection{
+                            *pindexMostWork, *pindexConnect, *m_chain.Tip()});
+                    }
+                    // SYSCOIN END: Preserve the selected ancestry across trace publication.
+                    // Keep BlockChecked's operational result for this child.
+                    // The rejected ancestor is handled after trace publication.
+                    state = BlockValidationState{};
+                    fContinue = false;
+                    break;
+                } else if (state.GetRejectReason() ==
+                               BTCC_RECEIPT_CERTIFICATE_PENDING ||
+                           state.GetRejectReason() ==
+                               PAYMENT_AUDIT_RECEIPT_CERTIFICATE_PENDING) {
+                    // SYSCOIN: The block is neither valid nor invalid until its
+                    // exact receipt certificate arrives. Quarantine every
+                    // currently eligible tip through this carrier so an
+                    // attacker-selected nonexistent ID cannot monopolize the
+                    // work selector. Acceptance of that exact logical object
+                    // restores the branch below.
+                    const CBlock* carrier_block{
+                        pindexConnect == pindexMostWork && pblock
+                            ? pblock.get()
+                            : nullptr};
+                    CBlock disk_block;
+                    if (carrier_block == nullptr) {
+                        if (!m_blockman.ReadBlockFromDisk(disk_block,
+                                                          *pindexConnect)) {
+                            state = BlockValidationState{};
+                            return state.Error(
+                                "pq-btcc-pending-carrier-read-failed");
+                        }
+                        carrier_block = &disk_block;
+                    }
+                    const bool payment_audit_dependency{
+                        state.GetRejectReason() ==
+                        PAYMENT_AUDIT_RECEIPT_CERTIFICATE_PENDING};
+                    bool deferred{false};
+                    if (payment_audit_dependency) {
+                        llmq::pq::PaymentAuditReceipt receipt;
+                        deferred =
+                            ExtractPaymentAuditReceipt(*carrier_block,
+                                                       receipt) &&
+                            !receipt.IsNull() &&
+                            DeferPaymentAuditReceiptCandidates(
+                                receipt.audit_witness_id, *pindexConnect);
+                    } else {
+                        llmq::pq::BTCCReceipt receipt;
+                        deferred = ExtractBTCCReceipt(*carrier_block,
+                                                      receipt) &&
+                                   !receipt.IsNull() &&
+                                   DeferBTCCReceiptCandidates(
+                                       receipt.chainlock_logical_id,
+                                       *pindexConnect);
+                    }
+                    if (!deferred) {
+                        state = BlockValidationState{};
+                        return state.Error(
+                            "pq-receipt-pending-candidate-defer-failed");
+                    }
+                    state = BlockValidationState{};
+                    fReceiptCandidateDeferred = true;
                     fContinue = false;
                     break;
                 } else {
@@ -4090,6 +8522,15 @@ static void LimitValidationInterfaceQueue() LOCKS_EXCLUDED(cs_main) {
 }
 
 bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<const CBlock> pblock)
+// SYSCOIN BEGIN: Preserve ordinary activation and privately bound recovery retries.
+{
+    return ActivateBestChainInternal(state, std::move(pblock), nullptr);
+}
+
+bool Chainstate::ActivateBestChainInternal(BlockValidationState& state,
+    std::shared_ptr<const CBlock> pblock, const CBlockIndex* nevm_pending,
+    bool nevm_continuation)
+// SYSCOIN END: The internal entry acquires the ordinary activation locks.
 {
     AssertLockNotHeld(m_chainstate_mutex);
 
@@ -4111,11 +8552,52 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
             "Please report this as a bug. %s\n", PACKAGE_BUGREPORT);
         return false;
     }
+    // SYSCOIN: Persistence failure must not permit another activation to
+    // mutate or replace the unrecorded external attempt before shutdown.
+    if (WITH_LOCK(cs_main, return m_chainman.m_nevm_pending_connect_record &&
+        !m_chainman.m_nevm_pending_connect_durable)) {
+        return state.Error("nevm-pending-connect-not-durable");
+    }
+
+    // SYSCOIN BEGIN: Consume aligned recovery's ordinary continuation once.
+    if (nevm_continuation) {
+        LOCK(cs_main);
+        if (this != &m_chainman.ActiveChainstate() || !m_nevm_activation_continuation ||
+            !m_chainman.m_nevm_prefix_recovery_needed || !fNEVMConnection ||
+            m_chainman.m_interrupt || m_blockman.LoadingBlocks() ||
+            !m_chainman.IsPQBlockProductionAllowed() ||
+            !m_chainman.NEVMBlockProductionPrerequisitesMet()) {
+            return state.Error("nevm-live-recovery-continuation-changed");
+        }
+        // SYSCOIN: Another activation may have applied a new lost-ACK child
+        // during the worker's lock handoff, even reapplying the same identity.
+        // Prove the current Core pair before consuming any retained attempt.
+        const CBlockIndex* tip{m_chain.Tip()};
+        uint64_t count{0};
+        uint256 syscoin_hash;
+        std::string error;
+        if (!FlushAndGetNEVMBlockInfo(count, syscoin_hash, error)) return state.Error(error);
+        const int64_t start{m_chainman.GetConsensus().nNEVMStartBlock};
+        if (tip == nullptr || (tip->nHeight < start ? (count != 0 || !syscoin_hash.IsNull()) :
+            !DoesNEVMBlockInfoMatchSyscoinBlock(start, count, tip->nHeight,
+                                               syscoin_hash, tip->GetBlockHash()))) {
+            return state.Error("nevm-live-recovery-continuation-pair-changed");
+        }
+        if (!m_chainman.ClearNEVMPendingConnect(count, syscoin_hash, error)) return state.Error(error);
+        m_nevm_activation_continuation = false;
+        m_nevm_pending_connect.reset();
+    }
+    // SYSCOIN END: The normal selector and finality checks choose all further work.
 
     CBlockIndex *pindexMostWork = nullptr;
     CBlockIndex *pindexNewTip = nullptr;
-    bool exited_ibd{false};
+    bool base_sync_completed{false};
+    bool waiting_for_nevm_status{false};
+    bool blocks_connected_this_call{false};
     do {
+        std::optional<NEVMBlockReject> rejection;
+        // SYSCOIN: Keep the failed step's selection even if the work cache resets.
+        std::optional<NEVMPayloadRepairSelection> repair_selection;
         // Block until the validation queue drains. This should largely
         // never happen in normal operation, however may happen during
         // reindex, causing memory blowup if we run too far ahead.
@@ -4127,10 +8609,57 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
             LOCK(cs_main);
             // Lock transaction pool for at least as long as it takes for connectTrace to be consumed
             LOCK(MempoolMutex());
-            const bool was_in_ibd = m_chainman.IsInitialBlockDownload();
+            // SYSCOIN: Cache priority follows base-chain sync even when PQ
+            // authentication keeps the public IBD latch active.
+            const bool was_base_sync_complete{
+                m_chainman.IsBaseBlockSyncComplete()};
+            bool recovering_known_nevm_pair{false};
+            if (this == &m_chainman.ActiveChainstate() &&
+                m_chainman.HasPendingNEVMStartupPair()) {
+                const auto pair{*m_chainman.m_nevm_startup_pair};
+                const CBlockIndex* applied{m_blockman.LookupBlockIndex(pair.block_hash)};
+                std::string startup_pair_error;
+                if (applied == nullptr) {
+                    if (m_chain.Tip() != nullptr || pair.height <= 0) return true;
+                    // Startup waits for genesis before opening Core's peer
+                    // network. Activate only genesis while the applied pair's
+                    // ancestry is unknown, even if other candidates are indexed.
+                    pindexMostWork = m_blockman.LookupBlockIndex(
+                        m_chainman.GetConsensus().hashGenesisBlock);
+                    if (pindexMostWork == nullptr ||
+                        !(pindexMostWork->nStatus & BLOCK_HAVE_DATA) ||
+                        (pindexMostWork->nStatus &
+                         (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK))) {
+                        return true;
+                    }
+                } else {
+                    recovering_known_nevm_pair = true;
+                    // Missing data may wait, but a newly known or conflicted
+                    // applied pair must still fail closed before selection.
+                    if (!m_chainman.CheckNEVMStartupConnect(*applied, startup_pair_error) ||
+                        (m_chain.Tip() != nullptr && m_chain.Height() < pair.height &&
+                         !m_chainman.CheckNEVMStartupConnect(*m_chain.Tip(), startup_pair_error))) {
+                        return state.Error(startup_pair_error);
+                    }
+                }
+                if (!m_chainman.MaybeCompleteNEVMStartupPair(startup_pair_error)) {
+                    return state.Error(startup_pair_error);
+                }
+                if (m_chainman.HasPendingNEVMStartupPair() &&
+                    m_chain.Height() >= pair.height) {
+                    // Pause at the recovered prefix until a fresh status is
+                    // available. Still flush any blocks connected this call.
+                    waiting_for_nevm_status = true;
+                    break;
+                }
+            }
             CBlockIndex* starting_tip = m_chain.Tip();
             bool blocks_connected = false;
+            // SYSCOIN: Retired candidates and deferred receipt branches yield
+            // immediately to another already-known candidate.
+            bool select_alternative{false};
             do {
+                select_alternative = false;
                 // We absolutely may not unlock cs_main until we've made forward progress
                 // (with the exception of shutdown due to hardware issues, low disk space, etc).
                 ConnectTrace connectTrace; // Destructed before cs_main is unlocked
@@ -4144,24 +8673,94 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                     break;
                 }
 
+                // SYSCOIN BEGIN: Revalidate after the scheduler releases its locks.
+                if (nevm_pending) {
+                    if (m_chainman.m_interrupt || m_blockman.LoadingBlocks() ||
+                        !m_chainman.m_nevm_prefix_recovery_needed || !fNEVMConnection ||
+                        !m_chainman.IsPQBlockProductionAllowed() ||
+                        !m_chainman.NEVMBlockProductionPrerequisitesMet() ||
+                        NEVMPendingConnectCandidate() != nevm_pending) {
+                        return state.Error("nevm-live-recovery-pending-changed");
+                    }
+                    // Keep ordinary finality and validation checks, but finish
+                    // only this child even when selection has more descendants.
+                    pindexMostWork = m_blockman.LookupBlockIndex(nevm_pending->GetBlockHash());
+                }
+                // SYSCOIN END: Bound this activation to the exact pending child.
+
                 bool fInvalidFound = false;
+                bool fReceiptCandidateDeferred = false;
                 std::shared_ptr<const CBlock> nullBlockPtr;
-                // SYSCOIN
-                if (!ActivateBestChainStep(state, pindexMostWork, pblock && pblock->GetHash() == pindexMostWork->GetBlockHash() ? pblock : nullBlockPtr, fInvalidFound, connectTrace)) {
+                // SYSCOIN: Bootstrap genesis before applying durable finality
+                // to retained candidates, then resume the cached highest work.
+                CBlockIndex* step_target{m_chain.Tip() == nullptr
+                    ? pindexMostWork->GetAncestor(0) : pindexMostWork};
+                // SYSCOIN BEGIN: Keep a scheduled publication gated until a fresh pair check.
+                const bool step_completed{ActivateBestChainStep(state, step_target, pblock && pblock->GetHash() == step_target->GetBlockHash() ? pblock : nullBlockPtr, fInvalidFound, fReceiptCandidateDeferred, connectTrace, rejection, repair_selection)};
+                if (nevm_pending || nevm_continuation) m_chainman.m_nevm_prefix_recovery_needed = true;
+                if (!step_completed) {
+                    // SYSCOIN: Only a new unresolved connect carries this pass
+                    // into another tick; noncacheable refusal cannot busy-loop.
+                    if (nevm_continuation && m_nevm_pending_connect) {
+                        m_nevm_activation_continuation = true;
+                    }
                     // A system error occurred
                     return false;
                 }
-                blocks_connected = true;
+                // SYSCOIN END: A synchronous predecessor retry cannot clear this obligation.
+                // SYSCOIN: A pending auxiliary certificate can end this step
+                // without connecting a block. Consume ConnectTrace's
+                // single-use result exactly once while distinguishing that
+                // case from real chain progress.
+                auto& connected_blocks = connectTrace.GetBlocksConnected();
+                blocks_connected = blocks_connected ||
+                                   starting_tip != m_chain.Tip() ||
+                                   !connected_blocks.empty();
+                blocks_connected_this_call = blocks_connected_this_call || blocks_connected;
 
+                // SYSCOIN BEGIN: Reselect only a different eligible candidate.
                 if (fInvalidFound) {
-                    // Wipe cache, we may need another branch now.
+                    // Reselect through the ancestry filter: a rejected ancestor
+                    // may not have marked the selected descendant failed yet.
+                    // A noncacheable representation can remain best, so only
+                    // continue immediately when selection finds another branch.
+                    const CBlockIndex* attempted{pindexMostWork};
+                    pindexMostWork = nullptr;
+                    if (!m_chainman.m_interrupt) {
+                        CBlockIndex* next{FindMostWorkChain()};
+                        select_alternative = next != nullptr &&
+                            next != attempted && next != m_chain.Tip();
+                        if (select_alternative) pindexMostWork = next;
+                    }
+                }
+                // SYSCOIN END: Reselect only a different eligible candidate.
+                if (recovering_known_nevm_pair && blocks_connected) {
+                    // Revisit the fresh-status gate even when the selected
+                    // recovery prefix is now the tip, then resume fork choice
+                    // in this call once reconciliation completes.
                     pindexMostWork = nullptr;
                 }
                 pindexNewTip = m_chain.Tip();
 
-                for (const PerBlockConnectTrace& trace : connectTrace.GetBlocksConnected()) {
+                for (const PerBlockConnectTrace& trace : connected_blocks) {
                     assert(trace.pblock && trace.pindex);
                     GetMainSignals().BlockConnected(this->GetRole(), trace.pblock, trace.pindex);
+                }
+
+                if (rejection) break;
+
+                // SYSCOIN: One pending-child attempt must not select a sibling
+                // after a finality refusal or deferred auxiliary dependency.
+                if (nevm_pending) break;
+
+                if (fReceiptCandidateDeferred) {
+                    // The quarantined branch is deliberately absent from the
+                    // work set. Select again immediately so an already-known
+                    // verifiable sibling can make progress without waiting for
+                    // another block or scheduler tick.
+                    pindexMostWork = nullptr;
+                    select_alternative = true;
+                    continue;
                 }
 
                 // This will have been toggled in
@@ -4172,15 +8771,21 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                 if (m_disabled) {
                     break;
                 }
-            } while (!m_chain.Tip() || (starting_tip && CBlockIndexWorkComparator()(m_chain.Tip(), starting_tip)));
-            if (!blocks_connected) return true;
+            } while (select_alternative ||
+                     !m_chain.Tip() ||
+                     (starting_tip && CBlockIndexWorkComparator()(
+                                          m_chain.Tip(), starting_tip)));
+            if (!blocks_connected && !rejection) {
+                // A recovery iteration may have connected a prefix before
+                // this one ran out of eligible work. Preserve its final flush.
+                if (blocks_connected_this_call) break;
+                return true;
+            }
             const CBlockIndex* pindexFork = m_chain.FindFork(starting_tip);
             bool still_in_ibd = m_chainman.IsInitialBlockDownload();
-
-            if (was_in_ibd && !still_in_ibd) {
-                // Active chainstate has exited IBD.
-                exited_ibd = true;
-            }
+            base_sync_completed = base_sync_completed ||
+                                  (!was_base_sync_complete &&
+                                   m_chainman.IsBaseBlockSyncComplete());
 
             // Notify external listeners about the new tip.
             // Enqueue while holding cs_main to ensure that UpdatedBlockTip is called in the order in which blocks are connected
@@ -4191,6 +8796,9 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                 GetMainSignals().UpdatedBlockTip(pindexNewTip, pindexFork, m_chainman, still_in_ibd);
                 // Always notify the UI if a new block tip was connected
                 if (kernel::IsInterrupted(m_chainman.GetNotifications().blockTip(GetSynchronizationState(still_in_ibd), *pindexNewTip))) {
+                    if (rejection) {
+                        return state.Error("nevm-rejected-block-invalidation-interrupted");
+                    }
                     // Just breaking and returning success for now. This could
                     // be changed to bubble up the kernel::Interrupted value to
                     // the caller so the caller could distinguish between
@@ -4199,13 +8807,27 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                 }
             }
         }
+        if (rejection) {
+            // No connection view, mempool lock or unpublished trace survives
+            // here. Reuse ordinary invalidation while retaining activation
+            // exclusion across the verified engine endpoint and local undo.
+            // SYSCOIN: Replay callers have no authority to select an inactive fork.
+            if (!ReconcileRejectedNEVMBlock(state, *rejection,
+                    repair_selection ? &*repair_selection : nullptr)) return false;
+            pindexNewTip = WITH_LOCK(cs_main, return m_chain.Tip());
+            pindexMostWork = nullptr;
+            pblock.reset();
+            blocks_connected_this_call = true;
+        }
         // When we reach this point, we switched to a new tip (stored in pindexNewTip).
 
-        if (exited_ibd) {
-            // If a background chainstate is in use, we may need to rebalance our
-            // allocation of caches once a chainstate exits initial block download.
+        if (base_sync_completed) {
+            // PQ authentication can extend public IBD beyond block sync. Move
+            // cache priority to background snapshot validation as soon as the
+            // active base chain itself is current.
             LOCK(::cs_main);
             m_chainman.MaybeRebalanceCaches();
+            base_sync_completed = false;
         }
 
         if (WITH_LOCK(::cs_main, return m_disabled)) {
@@ -4227,8 +8849,19 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
         // never interrupt before connecting the genesis block during LoadChainTip(). Previously this
         // caused an assert() failure during interrupt in such cases as the UTXO DB flushing checks
         // that the best block hash is non-null.
-        if (m_chainman.m_interrupt) break;
+        // SYSCOIN: A scheduled pending-child retry performs only one step.
+        if (nevm_pending || m_chainman.m_interrupt) break;
     } while (pindexNewTip != pindexMostWork);
+
+    if (this == &m_chainman.ActiveChainstate() && !waiting_for_nevm_status) {
+        LOCK(cs_main);
+        std::string startup_pair_error;
+        if (!m_chainman.MaybeCompleteNEVMStartupPair(startup_pair_error)) {
+            // The connected blocks and notifications are already published.
+            // A confirmed pair mismatch is a local error, not block invalidity.
+            return state.Error(startup_pair_error);
+        }
+    }
 
     m_chainman.CheckBlockIndex();
 
@@ -4268,7 +8901,11 @@ bool Chainstate::PreciousBlock(BlockValidationState& state, CBlockIndex* pindex)
 
     return ActivateBestChain(state, std::shared_ptr<const CBlock>());
 }
-bool Chainstate::EnforceBestChainLock(const CBlockIndex* bestChainLockBlockIndex)
+// SYSCOIN BEGIN: PQ ChainLock enforcement with explicit provenance.
+bool Chainstate::EnforceBestChainLock(
+    const CBlockIndex* bestChainLockBlockIndex,
+    const CBlockIndex* finalized_predecessor,
+    ChainLockEnforcementProvenance provenance)
 {
     AssertLockNotHeld(m_chainstate_mutex);
     AssertLockNotHeld(cs_main);
@@ -4279,7 +8916,8 @@ bool Chainstate::EnforceBestChainLock(const CBlockIndex* bestChainLockBlockIndex
     BlockValidationState state;
     // Go backwards through the chain referenced by clsig until we find a block that is part of the main chain and invalidate the fork block (next block in main chain).
     LogPrint(BCLog::CHAINLOCKS, "Chainstate::%s -- enforcing block %s via CLSIG\n", __func__, bestChainLockBlockIndex->GetBlockHash().ToString());
-    if (!EnforceBlock(state, bestChainLockBlockIndex)) {
+    if (!EnforceBlock(state, bestChainLockBlockIndex,
+                      finalized_predecessor, provenance)) {
         return false;
     }
     // no cs_main allowed
@@ -4304,7 +8942,10 @@ bool Chainstate::EnforceBestChainLock(const CBlockIndex* bestChainLockBlockIndex
     }
     return true;
 }
-bool Chainstate::EnforceBlock(BlockValidationState& state, const CBlockIndex *pindex)
+bool Chainstate::EnforceBlock(
+    BlockValidationState& state, const CBlockIndex* pindex,
+    const CBlockIndex* finalized_predecessor,
+    ChainLockEnforcementProvenance provenance)
 {
     AssertLockNotHeld(m_chainstate_mutex);
     AssertLockNotHeld(cs_main);
@@ -4313,40 +8954,164 @@ bool Chainstate::EnforceBlock(BlockValidationState& state, const CBlockIndex *pi
     // blocks.
     LOCK(m_chainstate_mutex);
     LOCK(cs_main);
-    if (!(pindex->nStatus & BLOCK_HAVE_DATA) ||
+    if (pindex == nullptr || finalized_predecessor == nullptr) {
+        LogPrintf("Chainstate::%s -- refusing ChainLock with an unavailable "
+                  "finality interval\n", __func__);
+        return false;
+    }
+    const bool exact_local{
+        provenance == ChainLockEnforcementProvenance::EXACT_LOCAL};
+    const bool verified_durable{
+        provenance == ChainLockEnforcementProvenance::
+                          VERIFIED_DURABLE_CERTIFICATE};
+    // An active ancestor needs no reconnect, so pruning its already-validated
+    // body cannot strand durable finality on restart. Changing branches still
+    // requires the candidate bytes before any conflict is published.
+    const bool already_active{m_chain.Contains(pindex)};
+    constexpr uint32_t exact_local_provenance{
+        BLOCK_PQ_BTCC_INDEX_VALIDATED |
+        BLOCK_PQ_RECEIPT_INDEX_VALIDATED};
+    const bool receipt_provenance{
+        exact_local
+            ? (pindex->nStatus & exact_local_provenance) ==
+                  exact_local_provenance
+            : (pindex->nStatus &
+               BLOCK_PQ_RECEIPT_INDEX_VALIDATED) != 0};
+    const CBlockIndex* resolved_predecessor{pindex};
+    while (resolved_predecessor != nullptr &&
+           resolved_predecessor->nHeight >
+               finalized_predecessor->nHeight) {
+        resolved_predecessor = resolved_predecessor->pprev;
+    }
+    const bool valid_finality_range{
+        finalized_predecessor->nHeight < pindex->nHeight &&
+        resolved_predecessor == finalized_predecessor};
+    if (!valid_finality_range || (!exact_local && !verified_durable) ||
+        (!already_active && !(pindex->nStatus & BLOCK_HAVE_DATA)) ||
         (pindex->nStatus & BLOCK_FAILED_MASK) ||
+        pindex->IsAssumedValid() || !receipt_provenance ||
         !pindex->IsValid(BLOCK_VALID_SCRIPTS) ||
         (CSuperblock::IsValidBlockHeight(pindex->nHeight) &&
+         !verified_durable &&
          !(pindex->nStatus & BLOCK_GOVERNANCE_VALIDATED))) {
         LogPrintf("Chainstate::%s -- refusing invalid or unverified ChainLock target %s\n",
                   __func__, pindex->GetBlockHash().ToString());
         return false;
     }
+    // Every certificate authenticates an exact, bounded successor interval.
+    // Mark siblings throughout that interval even when the target is already
+    // active; otherwise a branch indexed before acceptance can later extend
+    // above the best ChainLock height and evade the height-local admission
+    // check.
+    // SYSCOIN BEGIN: Publish all interval conflicts in one indexed batch.
+    std::vector<CBlockIndex*> conflict_roots;
     const CBlockIndex* pindex_walk = pindex;
-
-    while (pindex_walk && !m_chain.Contains(pindex_walk)) {
+    while (pindex_walk &&
+           pindex_walk->nHeight >= finalized_predecessor->nHeight) {
         // Mark all blocks that have the same prevBlockHash but are not equal to blockHash as conflicting
-        auto itp = m_blockman.LookupBlockIndexPrev(pindex_walk->pprev->GetBlockHash());
-        for (auto jt = itp.first; jt != itp.second; ++jt) {
-            if (jt->second == pindex_walk) {
-                continue;
+        if (pindex_walk->pprev != nullptr) {
+            auto itp = m_blockman.LookupBlockIndexPrev(
+                pindex_walk->pprev->GetBlockHash());
+            for (auto jt = itp.first; jt != itp.second; ++jt) {
+                if (jt->second == pindex_walk ||
+                    (jt->second->nStatus & BLOCK_CONFLICT_CHAINLOCK)) {
+                    continue;
+                }
+                conflict_roots.push_back(jt->second);
             }
-            if (!MarkConflictingBlock(state, jt->second)) {
-                LogPrintf("Chainstate::%s -- MarkConflictingBlock failed: %s\n", __func__, state.ToString());
-                // This should not have happened and we are in a state were it's not safe to continue anymore
-                assert(false);
-            }
-            LogPrintf("Chainstate::%s -- marked block %s as conflicting\n",
-                      __func__, jt->second->GetBlockHash().ToString());
         }
         pindex_walk = pindex_walk->pprev;
     }
+    // Establish any unapplied suffix before conflict publication or undo.
+    // Failure here is retryable; no partial finality unwind has begun.
+    std::optional<NEVMDisconnectPrefix> nevm_prefix;
+    if (std::any_of(conflict_roots.begin(), conflict_roots.end(),
+                    [this](const CBlockIndex* root) { return m_chain.Contains(root); }) &&
+        !PrepareNEVMDisconnectPrefix(state, nevm_prefix)) {
+        return false;
+    }
+    if (!conflict_roots.empty() &&
+        !MarkConflictingBlocks(
+            state, conflict_roots,
+            ChainLockConflictMarkingMode::DISCONNECT_ACTIVE,
+            nevm_prefix ? &*nevm_prefix : nullptr)) {
+        LogPrintf("Chainstate::%s -- batched conflict marking failed: %s\n",
+                  __func__, state.ToString());
+        // A partially disconnected finality interval is unsafe to continue.
+        assert(false);
+    }
+    for (const CBlockIndex* conflict_root : conflict_roots) {
+        LogPrintf("Chainstate::%s -- marked block %s as conflicting\n",
+                  __func__, conflict_root->GetBlockHash().ToString());
+    }
+    // SYSCOIN END: Publish all interval conflicts in one indexed batch.
     return true;
 }
+// SYSCOIN END: PQ ChainLock enforcement with explicit provenance.
 // SYSCOIN
 bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex *pindex, bool bReverify, bool bUpdateSpecialTxState)
 {
     AssertLockNotHeld(m_chainstate_mutex);
+    // Serialize administrative invalidation with activation, as before.
+    LOCK(m_chainstate_mutex);
+    return InvalidateBlockLocked(state, pindex, bReverify, bUpdateSpecialTxState);
+}
+
+bool Chainstate::ReconcileRejectedNEVMBlock(
+    BlockValidationState& state, const NEVMBlockReject& rejection,
+    const NEVMPayloadRepairSelection* selection)
+{
+    AssertLockHeld(m_chainstate_mutex);
+    AssertLockNotHeld(cs_main);
+    if (rejection.IsPayload()) {
+        LOCK(cs_main);
+        if (this != &m_chainman.ActiveChainstate()) {
+            return state.Error("nevm-payload-repair-not-active-chainstate");
+        }
+        // SYSCOIN: Forward only the activation attempt's branch-bound authority.
+        if (!m_chainman.QueueNEVMPayloadRepair(rejection, state, selection)) return false;
+        return state.Error("nevm-payload-repair-pending");
+    }
+    CBlockIndex* rejected{nullptr};
+    {
+        LOCK(cs_main);
+        rejected = m_blockman.LookupBlockIndex(rejection.syscoin_hash);
+        if (rejected == nullptr) {
+            return state.Error("nevm-rejected-block-unknown");
+        }
+    }
+    if (!InvalidateBlockLocked(state, rejected, true, true, &rejection)) {
+        return false;
+    }
+    LOCK(cs_main);
+    // Administrative invalidation can return after a partial shutdown unwind.
+    // Never treat that as completion or resume another branch in that state.
+    if (m_chainman.m_interrupt || m_chain.Contains(rejected) ||
+        !(rejected->nStatus & BLOCK_FAILED_VALID)) {
+        return state.Error("nevm-rejected-block-invalidation-interrupted");
+    }
+    return FlushStateToDisk(state, FlushStateMode::ALWAYS);
+}
+
+bool Chainstate::InvalidateBlockLocked(BlockValidationState& state,
+                                      CBlockIndex* pindex, bool bReverify,
+                                      bool bUpdateSpecialTxState,
+                                      const NEVMBlockReject* rejection)
+{
+    AssertLockHeld(m_chainstate_mutex);
+    AssertLockNotHeld(cs_main);
+    if (m_mempool) AssertLockNotHeld(m_mempool->cs);
+    // SYSCOIN: Preserve retirement ordering even during fatal-error shutdown.
+    if (WITH_LOCK(cs_main, return m_chainman.m_nevm_pending_connect_record &&
+        !m_chainman.m_nevm_pending_connect_durable)) {
+        return state.Error("nevm-pending-connect-not-durable");
+    }
+
+    // The NEVM body is outside the Syscoin block identity. Its rejection
+    // cannot invalidate the committed Syscoin header or its descendants.
+    if (rejection != nullptr && rejection->IsPayload()) {
+        return state.Error("nevm-payload-repair-required");
+    }
 
     // Genesis block can't be invalidated
     assert(pindex);
@@ -4356,10 +9121,97 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex *pinde
     bool pindex_was_in_chain = false;
     int disconnected = 0;
 
-    // We do not allow ActivateBestChain() to run while InvalidateBlock() is
-    // running, as that could cause the tip to change while we disconnect
-    // blocks.
-    LOCK(m_chainstate_mutex);
+    std::optional<NEVMDisconnectPrefix> nevm_prefix;
+    if (rejection != nullptr) {
+        LOCK(cs_main);
+        if (this != &m_chainman.ActiveChainstate() || !fNEVMConnection ||
+            rejection->nevm_hash.IsNull() || rejection->syscoin_hash.IsNull() ||
+            pindex->GetBlockHash() != rejection->syscoin_hash ||
+            !m_chain.Contains(pindex)) {
+            return state.Error("nevm-rejected-block-not-active");
+        }
+        const int64_t start{m_chainman.GetConsensus().nNEVMStartBlock};
+        if (start < 0 || start > pindex->nHeight) {
+            return state.Error("nevm-rejected-block-before-activation");
+        }
+        CBlock block;
+        CNEVMHeader header;
+        if (!m_blockman.ReadBlockFromDisk(block, *pindex)) {
+            return state.Error("nevm-rejected-block-read-failed");
+        }
+        BlockValidationState header_state;
+        if (!GetNEVMData(header_state, block, header) ||
+            header.nBlockHash != rejection->nevm_hash) {
+            return state.Error("nevm-rejected-block-pair-mismatch");
+        }
+        uint64_t count{0};
+        uint256 applied_hash;
+        std::string error;
+        if (!FlushAndGetNEVMBlockInfo(count, applied_hash, error)) {
+            return state.Error("nevm-rejected-block-status:" + error);
+        }
+        // Buffered insertion commits preceding blocks before rejecting the
+        // next one. Require that exact predecessor so replacement selection
+        // cannot later disconnect a retained but externally unapplied parent.
+        if (count != static_cast<uint64_t>(pindex->nHeight - start) ||
+            (count == 0 && !applied_hash.IsNull())) {
+            return state.Error("nevm-rejected-block-applied-prefix-mismatch");
+        }
+        const int32_t height{static_cast<int32_t>(start + static_cast<int64_t>(count) - 1)};
+        const CBlockIndex* applied{height < 0 ? nullptr : m_chain[height]};
+        if ((height >= 0 && applied == nullptr) ||
+            (count != 0 && (applied == nullptr ||
+                           applied->GetBlockHash() != applied_hash))) {
+            return state.Error("nevm-rejected-block-applied-branch-mismatch");
+        }
+        nevm_prefix.emplace(NEVMDisconnectPrefix{
+            height, applied == nullptr ? uint256{} : applied->GetBlockHash()});
+    }
+
+    // SYSCOIN BEGIN: Protect durable finality during administrative invalidation.
+    bool invalidates_active_chain{false};
+    {
+        LOCK(cs_main);
+        invalidates_active_chain = m_chain.Contains(pindex);
+    }
+    if (llmq::chainLocksHandler != nullptr) {
+        LOCK(cs_main);
+        const CBlockIndex* durable_finality_floor{nullptr};
+        const CBlockIndex* durable_finality_target{nullptr};
+        std::string finality_floor_error;
+        if (!llmq::chainLocksHandler->GetDurableFinalityRecoveryFloor(
+                durable_finality_floor, durable_finality_target,
+                finality_floor_error)) {
+            return state.Error(strprintf(
+                "cannot establish durable finality recovery floor: %s",
+                finality_floor_error));
+        }
+        if ((durable_finality_floor == nullptr) !=
+            (durable_finality_target == nullptr)) {
+            return state.Error(
+                "incomplete durable finality recovery boundary");
+        }
+        const bool crosses_active_floor{
+            invalidates_active_chain && durable_finality_floor != nullptr &&
+            pindex->nHeight <= durable_finality_floor->nHeight};
+        const bool crosses_durable_target{
+            durable_finality_target != nullptr &&
+            pindex->nHeight <= durable_finality_target->nHeight &&
+            durable_finality_target->GetAncestor(pindex->nHeight) == pindex};
+        if (crosses_active_floor || crosses_durable_target) {
+            return state.Error(strprintf(
+                "refusing to invalidate height %d through durable ChainLock "
+                "target %d (active recovery floor %d)",
+                pindex->nHeight, durable_finality_target->nHeight,
+                durable_finality_floor->nHeight));
+        }
+    }
+    // SYSCOIN END: Protect durable finality during administrative invalidation.
+
+    if (invalidates_active_chain && rejection == nullptr && bReverify) {
+        LOCK(cs_main);
+        if (!PrepareNEVMDisconnectPrefix(state, nevm_prefix)) return false;
+    }
 
     // We'll be acquiring and releasing cs_main below, to allow the validation
     // callbacks to run. However, we should keep the block index in a
@@ -4392,6 +9244,10 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex *pinde
     while (true) {
         if (m_chainman.m_interrupt) break;
 
+        if (m_invalidate_block_step_for_testing) {
+            m_invalidate_block_step_for_testing(disconnected);
+        }
+
         // Make sure the queue of validation callbacks doesn't grow unboundedly.
         LimitValidationInterfaceQueue();
 
@@ -4406,7 +9262,9 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex *pinde
         // ActivateBestChain considers blocks already in m_chain
         // unconditionally valid already, so force disconnect away from it.
         DisconnectedBlockTransactions disconnectpool{MAX_DISCONNECTED_TX_POOL_SIZE * 1000};
-        bool ret = DisconnectTip(state, &disconnectpool, bReverify, bUpdateSpecialTxState);
+        bool ret = DisconnectTip(state, &disconnectpool, bReverify, bUpdateSpecialTxState,
+                                 nevm_prefix && nevm_prefix->ContainsUnapplied(*invalid_walk_tip)
+                                     ? &*nevm_prefix : nullptr);
         // DisconnectTip will add transactions to disconnectpool.
         // Adjust the mempool to be consistent with the new tip, adding
         // transactions back to the mempool if disconnecting was successful,
@@ -4462,6 +9320,10 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex *pinde
         m_blockman.m_dirty_blockindex.insert(to_mark_failed);
         setBlockIndexCandidates.erase(to_mark_failed);
         m_chainman.m_failed_blocks.insert(to_mark_failed);
+        // SYSCOIN: Quarantined BTCC descendants bypass the ordinary
+        // FindMostWorkChain failed-child walk, so invalidate their carrier
+        // dependency at the root instead of leaving a stale GETCLSIG target.
+        RemoveDeferredBTCCReceiptCandidatesThrough(*pindex);
 
         // If any new blocks somehow arrived while we were disconnecting
         // (above), then the pre-calculation of what should go into
@@ -4479,8 +9341,10 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex *pinde
 
         InvalidChainFound(to_mark_failed);
         // SYSCOIN
-        if(deterministicMNManager)
+        if (this == &m_chainman.ActiveChainstate() &&
+            deterministicMNManager) {
             deterministicMNManager->UpdatedBlockTip(m_chain.Tip());
+        }
     }
     // Only notify about a new block tip if the active chain was modified.
     if (pindex_was_in_chain) {
@@ -4495,89 +9359,208 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex *pinde
     }
     return true;
 }
-// SYSCOIN
-bool Chainstate::MarkConflictingBlock(BlockValidationState& state, CBlockIndex *pindex)
+// SYSCOIN BEGIN: Batched ChainLock-conflict marking.
+bool Chainstate::MarkConflictingBlock(BlockValidationState& state,
+                                      CBlockIndex* pindex)
+{
+    std::optional<NEVMDisconnectPrefix> nevm_prefix;
+    if (pindex != nullptr && m_chain.Contains(pindex) &&
+        !PrepareNEVMDisconnectPrefix(state, nevm_prefix)) return false;
+    std::array<CBlockIndex*, 1> roots{pindex};
+    return MarkConflictingBlocks(
+        state, roots, ChainLockConflictMarkingMode::DISCONNECT_ACTIVE,
+        nevm_prefix ? &*nevm_prefix : nullptr);
+}
+
+bool Chainstate::MarkConflictingBlocksInactive(
+    BlockValidationState& state,
+    std::span<CBlockIndex* const> roots)
+{
+    return MarkConflictingBlocks(
+        state, roots, ChainLockConflictMarkingMode::REQUIRE_INACTIVE, nullptr);
+}
+
+ChainLockConflictMarkingStatsForTesting
+Chainstate::GetChainLockConflictMarkingStatsForTesting() const
 {
     AssertLockHeld(cs_main);
-    AssertLockNotHeld(m_mempool->cs);
-    bool pindex_was_in_chain = false;
-    int disconnected = 0;
-    CBlockIndex *conflicting_walk_tip = m_chain.Tip();
+    return m_chainlock_conflict_marking_stats;
+}
 
+void Chainstate::ResetChainLockConflictMarkingStatsForTesting()
+{
+    AssertLockHeld(cs_main);
+    m_chainlock_conflict_marking_stats = {};
+}
 
-    if (pindex == m_chainman.m_best_header) {
-        m_chainman.m_best_header = m_chainman.m_best_header->pprev;
+bool Chainstate::MarkConflictingBlocks(
+    BlockValidationState& state,
+    std::span<CBlockIndex* const> roots,
+    ChainLockConflictMarkingMode mode,
+    const NEVMDisconnectPrefix* nevm_prefix)
+{
+    AssertLockHeld(cs_main);
+    // SYSCOIN: A failed intent write cannot be followed by durable retirement.
+    if (m_chainman.m_nevm_pending_connect_record &&
+        !m_chainman.m_nevm_pending_connect_durable) {
+        return state.Error("nevm-pending-connect-not-durable");
     }
-    DisconnectedBlockTransactions disconnectpool{MAX_DISCONNECTED_TX_POOL_SIZE * 1000};
-    while (true) {
-        if (m_chainman.m_interrupt) break;
+    const bool disconnect_active{
+        mode == ChainLockConflictMarkingMode::DISCONNECT_ACTIVE};
+    if (disconnect_active && m_mempool != nullptr) {
+        AssertLockNotHeld(m_mempool->cs);
+    }
 
-        // Lock for as long as disconnectpool is in scope to make sure MaybeUpdateMempoolForReorg is
-        // called after DisconnectTip without unlocking in between
-        LOCK(MempoolMutex());
-        if(!m_chain.Contains(pindex)) break;
-        const CBlockIndex* pindexOldTip = m_chain.Tip();
-        pindex_was_in_chain = true;
-        // ActivateBestChain considers blocks already in m_chain
-        // unconditionally valid already, so force disconnect away from it.
-        bool ret = DisconnectTip(state, &disconnectpool);
-        // DisconnectTip will add transactions to disconnectpool.
-        // Adjust the mempool to be consistent with the new tip, adding
-        // transactions back to the mempool if disconnecting was successful,
-        // and we're not doing a very deep invalidation (in which case
-        // keeping the mempool up to date is probably futile anyway).
-        MaybeUpdateMempoolForReorg(disconnectpool, /* fAddToMempool = */ (++disconnected <= 10) && ret);
-        if (!ret) return false;
-        if (pindexOldTip == m_chainman.m_best_header) {
-            m_chainman.m_best_header = m_chainman.m_best_header->pprev;
+    std::vector<CBlockIndex*> unique_roots;
+    unique_roots.reserve(roots.size());
+    std::unordered_set<const CBlockIndex*> root_set;
+    root_set.reserve(roots.size());
+    for (CBlockIndex* root : roots) {
+        if (root == nullptr) {
+            return state.Error("null ChainLock conflict root");
+        }
+        if (root_set.insert(root).second) {
+            unique_roots.push_back(root);
+        }
+    }
+    if (unique_roots.empty()) return true;
+
+    CBlockIndex* active_root{nullptr};
+    for (CBlockIndex* root : unique_roots) {
+        if (!m_chain.Contains(root)) continue;
+        if (!disconnect_active) {
+            return state.Error("active ChainLock conflict in inactive batch");
+        }
+        if (active_root == nullptr || root->nHeight < active_root->nHeight) {
+            active_root = root;
         }
     }
 
-    // Now mark the blocks we just disconnected as descendants conflicting
-    // (note this may not be all descendants).
-    while (pindex_was_in_chain && conflicting_walk_tip != pindex) {
-        conflicting_walk_tip->nStatus |= BLOCK_CONFLICT_CHAINLOCK;
-        setBlockIndexCandidates.erase(conflicting_walk_tip);
-        conflicting_walk_tip = conflicting_walk_tip->pprev;
+    ++m_chainlock_conflict_marking_stats.batch_calls;
+    m_chainlock_conflict_marking_stats.input_roots += unique_roots.size();
+
+    bool active_chain_changed{false};
+    int disconnected{0};
+    DisconnectedBlockTransactions disconnectpool{
+        MAX_DISCONNECTED_TX_POOL_SIZE * 1000};
+    if (disconnect_active) {
+        for (const CBlockIndex* root : unique_roots) {
+            if (root == m_chainman.m_best_header) {
+                m_chainman.m_best_header = root->pprev;
+                break;
+            }
+        }
+        while (active_root != nullptr && m_chain.Contains(active_root)) {
+            if (m_chainman.m_interrupt) break;
+
+            // Preserve the existing disconnect/mempool transaction boundary;
+            // batching removes repeated subtree scans, not reorg semantics.
+            LOCK(MempoolMutex());
+            const CBlockIndex* old_tip{m_chain.Tip()};
+            active_chain_changed = true;
+            ++m_chainlock_conflict_marking_stats.disconnect_tip_calls;
+            const bool disconnected_tip{DisconnectTip(
+                state, &disconnectpool, true, true,
+                nevm_prefix && nevm_prefix->ContainsUnapplied(*old_tip)
+                    ? nevm_prefix : nullptr)};
+            MaybeUpdateMempoolForReorg(
+                disconnectpool,
+                /*fAddToMempool=*/(++disconnected <= 10) && disconnected_tip);
+            if (!disconnected_tip) return false;
+            if (old_tip == m_chainman.m_best_header) {
+                m_chainman.m_best_header = m_chainman.m_best_header->pprev;
+            }
+        }
+        if (active_root != nullptr && m_chain.Contains(active_root)) {
+            return state.Error("failed to disconnect active ChainLock conflict");
+        }
     }
 
+    const auto chainstates{m_chainman.GetAll()};
+    std::deque<CBlockIndex*> pending(unique_roots.begin(), unique_roots.end());
+    std::unordered_set<const CBlockIndex*> conflicting_blocks;
+    while (!pending.empty()) {
+        CBlockIndex* const conflict{pending.front()};
+        pending.pop_front();
+        if (!conflicting_blocks.insert(conflict).second) continue;
 
-    if (m_chain.Contains(pindex)) {
-        // If the to-be-marked invalid block is in the active chain, something is interfering and we can't proceed.
-        return false;
+        conflict->nStatus |= BLOCK_CONFLICT_CHAINLOCK;
+        m_blockman.m_dirty_blockindex.insert(conflict);
+        for (Chainstate* chainstate : chainstates) {
+            chainstate->setBlockIndexCandidates.erase(conflict);
+        }
+        const auto children{
+            m_blockman.LookupBlockIndexPrev(conflict->GetBlockHash())};
+        for (auto child{children.first}; child != children.second; ++child) {
+            pending.push_back(child->second);
+        }
     }
-    // Mark the block itself as conflicting.
-    pindex->nStatus |= BLOCK_CONFLICT_CHAINLOCK;
-    setBlockIndexCandidates.erase(pindex);
+    m_chainlock_conflict_marking_stats.visited_blocks +=
+        conflicting_blocks.size();
+    for (Chainstate* chainstate : chainstates) {
+        chainstate->RemoveDeferredBTCCReceiptCandidatesIn(conflicting_blocks);
+    }
 
-    // DisconnectTip will add transactions to disconnectpool; try to add these
-    // back to the mempool.
-    {
+    if (disconnect_active) {
+        // Preserve single-root behavior: even an inactive root completes the
+        // empty disconnect-pool reconciliation before tip publication.
         LOCK(MempoolMutex());
         MaybeUpdateMempoolForReorg(disconnectpool, true);
     }
 
-    // The resulting new best tip may not be in setBlockIndexCandidates anymore, so
-    // add it again.
+    // Descendants were found through the maintained parent->children index.
+    // Scan the block index exactly once to restore the best surviving header
+    // and any eligible candidates displaced by an active-chain disconnect.
+    ++m_chainlock_conflict_marking_stats.block_index_scans;
+    m_chainman.m_best_header = nullptr;
     for (auto& [_, block_index] : m_blockman.m_block_index) {
-        // SYSCOIN
-        if (!(block_index.nStatus & BLOCK_CONFLICT_CHAINLOCK) && block_index.IsValid(BLOCK_VALID_TRANSACTIONS) && block_index.HaveNumChainTxs() && !setBlockIndexCandidates.value_comp()(&block_index, m_chain.Tip())) {
+        if (!(block_index.nStatus &
+              (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK)) &&
+            block_index.IsValid(BLOCK_VALID_TREE) &&
+            (m_chainman.m_best_header == nullptr ||
+             CBlockIndexWorkComparator()(m_chainman.m_best_header,
+                                         &block_index))) {
+            m_chainman.m_best_header = &block_index;
+        }
+        if (!(block_index.nStatus & BLOCK_CONFLICT_CHAINLOCK) &&
+            block_index.IsValid(BLOCK_VALID_TRANSACTIONS) &&
+            block_index.HaveNumChainTxs() &&
+            !setBlockIndexCandidates.value_comp()(&block_index,
+                                                   m_chain.Tip())) {
             setBlockIndexCandidates.insert(&block_index);
         }
     }
 
-    ConflictingChainFound(pindex);
-    if(deterministicMNManager)
-        deterministicMNManager->UpdatedBlockTip(m_chain.Tip());
-    GetMainSignals().UpdatedBlockTip(m_chain.Tip(), nullptr, m_chainman, false);
+    CBlockIndex* representative{unique_roots.front()};
+    for (CBlockIndex* root : unique_roots) {
+        if (root->nChainWork > representative->nChainWork) {
+            representative = root;
+        }
+    }
+    ConflictingChainFound(representative);
 
-    // Only notify about a new block tip if the active chain was modified.
-    if (pindex_was_in_chain) {
-        // SYSCOIN for MN list to update
-        (void)m_chainman.GetNotifications().blockTip(GetSynchronizationState(m_chainman.IsInitialBlockDownload()), *pindex->pprev);
+    // ActivateBestChainStep publishes its own final tip after preflight. The
+    // inactive-only entry point therefore performs no callbacks while its
+    // caller holds the mempool lock.
+    if (disconnect_active) {
+        if (deterministicMNManager) {
+            deterministicMNManager->UpdatedBlockTip(m_chain.Tip());
+        }
+        GetMainSignals().UpdatedBlockTip(
+            m_chain.Tip(), nullptr, m_chainman,
+            m_chainman.IsInitialBlockDownload());
+        ++m_chainlock_conflict_marking_stats.tip_publications;
+
+        if (active_chain_changed) {
+            (void)m_chainman.GetNotifications().blockTip(
+                GetSynchronizationState(
+                    m_chainman.IsInitialBlockDownload()),
+                *Assert(m_chain.Tip()));
+        }
     }
     return true;
 }
+// SYSCOIN END: Batched ChainLock-conflict marking.
 bool Chainstate::ResetLastBlock() {
     AssertLockHeld(cs_main);
     if(m_chainman.m_best_invalid && m_chainman.m_best_invalid->GetAncestor(m_chain.Height()) == m_chain.Tip()) {
@@ -4655,9 +9638,17 @@ void Chainstate::ResetBlockFailureFlags(CBlockIndex *pindex) {
 void Chainstate::TryAddBlockIndexCandidate(CBlockIndex* pindex)
 {
     AssertLockHeld(cs_main);
+    // SYSCOIN: Preserve certificate-deferred quarantine across generic
+    // candidate-repopulation paths.
+    if (const auto dependency{FindDeferredBTCCReceiptDependency(*pindex)}) {
+        AddDeferredBTCCReceiptCandidate(
+            dependency->first, *dependency->second, *pindex);
+        return;
+    }
     // The block only is a candidate for the most-work-chain if it has the same
     // or more work than our current tip.
-    if (m_chain.Tip() != nullptr && setBlockIndexCandidates.value_comp()(pindex, m_chain.Tip())) {
+    if (m_chain.Tip() != nullptr &&
+        setBlockIndexCandidates.value_comp()(pindex, m_chain.Tip())) {
         return;
     }
     bool is_active_chainstate = this == &m_chainman.ActiveChainstate();
@@ -4726,8 +9717,21 @@ void ChainstateManager::ReceivedBlockTransactions(const CBlock& block, CBlockInd
 static bool CheckBlockHeader(const CBlockHeader& block, BlockValidationState& state, const Consensus::Params& consensusParams, bool fCheckPOW = true)
 {
     // Check proof of work matches claimed amount
-    if (fCheckPOW && !CheckProofOfWork(block, consensusParams))
-        return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "high-hash", "proof of work failed");
+    if (fCheckPOW) {
+        // SYSCOIN BEGIN: A bad parent wrapper must not poison the pure child ID.
+        const auto pow_result{CheckBlockProofOfWork(block, consensusParams)};
+        if (pow_result == BlockProofOfWorkResult::INVALID_CHILD_HEADER) {
+            return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
+                                 "high-hash", "proof of work failed");
+        }
+        if (pow_result ==
+            BlockProofOfWorkResult::INVALID_AUXPOW_WRAPPER) {
+            return state.Invalid(BlockValidationResult::BLOCK_MUTATED,
+                                 "high-hash",
+                                 "auxiliary proof of work failed");
+        }
+        // SYSCOIN END: Preserve child validity across mutable wrappers.
+    }
 
     return true;
 }
@@ -4880,6 +9884,81 @@ arith_uint256 CalculateHeadersWork(const std::vector<CBlockHeader>& headers)
     return total_work;
 }
 
+// SYSCOIN BEGIN: Validate the mutable parent-chain wrapper independently from
+// the pure child-header identity used by the block index.
+static bool CheckContextualAuxPowTag(const CBlockHeader& block,
+                                     BlockValidationState& state,
+                                     const Consensus::Params& consensus,
+                                     const CBlockIndex* pindexPrev)
+    EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    assert(pindexPrev != nullptr);
+    const int nHeight{pindexPrev->nHeight + 1};
+    if (nHeight < consensus.nNexusStartBlock || !block.IsAuxpow()) {
+        return true;
+    }
+    if (!block.auxpow) {
+        return state.Invalid(BlockValidationResult::BLOCK_MUTATED,
+                             "missing-auxpow", "Missing AuxPoW data");
+    }
+    const CTransactionRef coinbaseTx{block.auxpow->getCoinbaseTx()};
+    if (!coinbaseTx) {
+        return state.Invalid(BlockValidationResult::BLOCK_MUTATED,
+                             "missing-auxpow-cb",
+                             "Missing AuxPoW coinbase data");
+    }
+
+    int nActiveHeight{pindexPrev->nHeight - 5};
+    nActiveHeight -= nActiveHeight % 10;
+    const CBlockIndex* refIndex{pindexPrev->GetAncestor(nActiveHeight)};
+    if (!refIndex) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                             "bad-auxpow-ref",
+                             "Referenced mod-10 block missing");
+    }
+
+    CDataStream expectedData{SER_NETWORK, PROTOCOL_VERSION};
+    expectedData << refIndex->GetBlockHash()
+                 << static_cast<uint32_t>(refIndex->nHeight);
+    const auto expectedBytes{MakeUCharSpan(expectedData)};
+    const unsigned char* const sysHeaderBegin{pchSyscoinHeader};
+    const unsigned char* const sysHeaderEnd{
+        sysHeaderBegin + sizeof(pchSyscoinHeader)};
+    const size_t tagLen{static_cast<size_t>(sysHeaderEnd - sysHeaderBegin)};
+    bool foundSysTag{false};
+
+    for (const auto& txout : coinbaseTx->vout) {
+        if (!txout.scriptPubKey.IsUnspendable()) continue;
+        const auto pcHead{std::search(txout.scriptPubKey.begin(),
+                                      txout.scriptPubKey.end(),
+                                      sysHeaderBegin, sysHeaderEnd)};
+        if (pcHead == txout.scriptPubKey.end()) continue;
+        const auto pc{std::search(pcHead + tagLen,
+                                  txout.scriptPubKey.end(),
+                                  expectedBytes.begin(),
+                                  expectedBytes.end())};
+        if (pc == txout.scriptPubKey.end()) {
+            return state.Invalid(BlockValidationResult::BLOCK_MUTATED,
+                                 "bad-auxpow-tag",
+                                 "SYSCOIN AuxPoW tag mismatch (hash or height)");
+        }
+        if (foundSysTag) {
+            return state.Invalid(BlockValidationResult::BLOCK_MUTATED,
+                                 "multiple-syscoin-tags",
+                                 "Multiple SYSCOIN AuxPoW tags detected");
+        }
+        foundSysTag = true;
+    }
+
+    if (!foundSysTag) {
+        return state.Invalid(BlockValidationResult::BLOCK_MUTATED,
+                             "missing-syscoin-tag",
+                             "No SYSCOIN AuxPoW tag detected");
+    }
+    return true;
+}
+// SYSCOIN END: Contextual AuxPoW wrapper validation.
+
 /** Context-dependent validity checks.
  *  By "context", we mean only the previous block headers, but not the UTXO
  *  set; UTXO-related validity checks are done in ConnectBlock().
@@ -4952,58 +10031,7 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
                 return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, strprintf("bad-version(0x%08x)", baseVer),
                                     strprintf("rejected nVersion=0x%08x block", block.nVersion));
     }
-    bool fNexusActive = nHeight >= consensusParams.nNexusStartBlock;
-    if (fNexusActive && block.IsAuxpow())
-    {
-        if (!block.auxpow)
-            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "missing-auxpow", "Missing AuxPoW data");
-        const CTransactionRef coinbaseTx = block.auxpow->getCoinbaseTx();
-        if (!coinbaseTx)
-            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "missing-auxpow-cb", "Missing AuxPoW coinbase data");
-        int nActiveHeight = pindexPrev->nHeight - 5;
-        nActiveHeight -= nActiveHeight % 10;
-        const CBlockIndex* refIndex = pindexPrev->GetAncestor(nActiveHeight);
-        if (!refIndex)
-            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-auxpow-ref", "Referenced mod-10 block missing");
-
-        uint256 expectedTagHash = refIndex->GetBlockHash();
-        uint32_t expectedTagHeight = refIndex->nHeight;
-        
-        bool foundSysTag = false;
-        
-        const unsigned char* const sysHeaderBegin = pchSyscoinHeader;
-        const unsigned char* const sysHeaderEnd = sysHeaderBegin + sizeof(pchSyscoinHeader);
-        size_t tagLen = sysHeaderEnd - sysHeaderBegin;
-        
-        for (const auto &txout : coinbaseTx->vout)
-        {
-            if (txout.scriptPubKey.IsUnspendable())
-            {
-                auto pcHead = std::search(txout.scriptPubKey.begin(), txout.scriptPubKey.end(), sysHeaderBegin, sysHeaderEnd);
-                if (pcHead != txout.scriptPubKey.end())
-                {
-                    // Combine hash + height into one data chunk for validation
-                    CDataStream ssData(SER_NETWORK, PROTOCOL_VERSION);
-                    ssData << expectedTagHash;
-                    ssData << expectedTagHeight;
-                    const auto &bytesVec = MakeUCharSpan(ssData);
-                    auto pc = std::search(pcHead + tagLen, txout.scriptPubKey.end(), bytesVec.begin(), bytesVec.end());
-        
-                    if (pc == txout.scriptPubKey.end())
-                        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-auxpow-tag", "SYSCOIN AuxPoW tag mismatch (hash or height)");
-        
-                    if (foundSysTag)
-                        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "multiple-syscoin-tags", "Multiple SYSCOIN AuxPoW tags detected");
-        
-                    foundSysTag = true;
-                }
-            }
-        }
-        
-        if (!foundSysTag)
-            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "missing-syscoin-tag", "No SYSCOIN AuxPoW tag detected");           
-    }
-    return true;
+    return CheckContextualAuxPowTag(block, state, consensusParams, pindexPrev);
 }
 
 /** NOTE: This function is not currently invoked by ConnectBlock(), so we
@@ -5083,25 +10111,44 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
             }
         }
     }
-    // SYSCOIN: BTC prev-hash commitment binding for BTCC sign-offset blocks.
-    // Miners commit BTCPREV into the block's coinbase payload (merkle-root committed).
-    // Consensus verifies that it matches this block's AuxPoW parent prev-block hash.
-    {
-        const Consensus::Params& consensusParams = chainman.GetConsensus();
-        const bool btcpRequired = IsBTCCSignHeight(consensusParams, nHeight);
-        if (btcpRequired && block.auxpow) {
-            uint256 btcPrevHashCommit;
-            if (!ExtractBTCPREVCommitment(block, btcPrevHashCommit)) {
-                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-btcp-missing");
-            }
-            if (btcPrevHashCommit.IsNull()) {
-                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-btcp-null");
-            }
-            const uint256 btcPrevHashExpected = block.auxpow->getParentPrevBlockHash();
-            if (btcPrevHashCommit != btcPrevHashExpected) {
-                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-btcp-mismatch");
-            }
+    // SYSCOIN: Contextual checks reject malformed candidates before storing them. The
+    // same helper also runs in ConnectBlock and rollforward because those paths
+    // can be reached without ContextualCheckBlock during state reconstruction.
+    if (!CheckBTCPREVCommitment(block, state, nHeight,
+                                chainman.GetConsensus())) {
+        return false;
+    }
+    if (!CheckBTCCReceiptCommitment(block, state, nHeight,
+                                    chainman.GetConsensus())) {
+        return false;
+    }
+    const uint256 recovery_carrier_hash{block.GetHash()};
+    CBlockIndex recovery_carrier{block};
+    recovery_carrier.phashBlock = &recovery_carrier_hash;
+    recovery_carrier.pprev = const_cast<CBlockIndex*>(pindexPrev);
+    recovery_carrier.nHeight = nHeight;
+    if (!CheckRecoveryRefreshWorkCommitment(
+            block, state, recovery_carrier, chainman.GetConsensus())) {
+        return false;
+    }
+    const auto audit_chainlock_schedule{
+        llmq::pq::MakeChainLockScheduleConfig(
+            chainman.GetConsensus().nPQChainLockEpochOrigin)};
+    const auto audit_btcc_schedule{
+        llmq::pq::GetBTCCScheduleConfig(chainman.GetConsensus())};
+    if (audit_chainlock_schedule && audit_btcc_schedule.IsValid()) {
+        const llmq::pq::PaymentAuditScheduleConfig audit_schedule{
+            *audit_chainlock_schedule, audit_btcc_schedule};
+        if (!audit_schedule.IsValid()) {
+            return state.Error("pq-payment-audit-invalid-schedule");
         }
+        if (!CheckPaymentAuditReceiptCommitment(
+                block, state, nHeight, audit_schedule)) {
+            return false;
+        }
+    } else if (HasPaymentAuditReceiptCommitment(block)) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                             "bad-pq-payment-audit-disabled");
     }
     // After the coinbase witness reserved value and commitment are verified,
     // we can check if the block weight passes (before we've checked the
@@ -5109,6 +10156,12 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
     // large by filling up the coinbase witness, which doesn't change
     // the block hash, so we couldn't mark the block as permanently
     // failed).
+    // SYSCOIN BEGIN: Modify Bitcoin's weight check for NEVM activation and
+    // distinguish replaceable PoDA sidecars from committed block weight.
+    // Bitcoin original:
+    // if (GetBlockWeight(block) > MAX_BLOCK_WEIGHT) {
+    //     return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-weight", strprintf("%s : weight limit failed", __func__));
+    // }
     const auto& consensusParams = chainman.GetParams().GetConsensus();
     bool nevmContext = nHeight >= consensusParams.nNEVMStartBlock;
     if ((fRegTest || nevmContext) && GetBlockWeight(block) > MAX_BLOCK_WEIGHT) {
@@ -5121,6 +10174,8 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
         return state.Invalid(committed_weight > MAX_BLOCK_WEIGHT ? BlockValidationResult::BLOCK_CONSENSUS : BlockValidationResult::BLOCK_AUX_DATA_INVALID,
                              "bad-blk-weight", strprintf("%s : weight limit failed", __func__));
     }
+    // SYSCOIN END: Apply NEVM weight rules and classify PoDA sidecar failures.
+    // SYSCOIN BEGIN: Enforce Nexus coinbase and masternode transaction versions.
     bool fNexusActive = nHeight >= consensusParams.nNexusStartBlock;
     // Ensure the coinbase transaction is either standard or explicitly allowed
     if (fNexusActive && (!(block.vtx[0]->nVersion <= CTransaction::CURRENT_VERSION || 
@@ -5135,6 +10190,7 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
             return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-mn-version", "Bad version for non-coinbase masternode transaction");
         }
     }
+    // SYSCOIN END: Enforce Nexus coinbase and masternode transaction versions.
     return true;
 }
 bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValidationState& state, CBlockIndex** ppindex, bool min_pow_checked, bool bForBlock)
@@ -5161,6 +10217,18 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
                 LogPrintf("ERROR: %s: block %s is marked conflicting\n", __func__, hash.ToString());
                 return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK, "duplicate");
             }
+            // SYSCOIN BEGIN: A full block for a known child-header ID must
+            // validate the mutable AuxPoW wrapper that can become its stored
+            // representation.
+            if (bForBlock && !(pindex->nStatus & BLOCK_HAVE_DATA) &&
+                !CheckContextualAuxPowTag(block, state, GetConsensus(),
+                                          pindex->pprev)) {
+                LogPrint(BCLog::VALIDATION,
+                         "%s: contextual AuxPoW wrapper check failed for %s: %s\n",
+                         __func__, hash.ToString(), state.ToString());
+                return false;
+            }
+            // SYSCOIN END: Validate a known header's first storable wrapper.
             return true;
         }
 
@@ -5417,7 +10485,7 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
     // SYSCOIN: cache the contextually validated BTCPREV so ConnectBlock can reuse it
     // without reparsing the coinbase payload in the common accept->connect flow.
     {
-        const bool btcp_required = IsBTCCSignHeight(params.GetConsensus(), pindex->nHeight) &&
+        const bool btcp_required = llmq::pq::IsBTCPREVCommitmentHeight(params.GetConsensus(), pindex->nHeight) &&
                                    block.auxpow;
         if (btcp_required) {
             pindex->m_btcp_prev_contextually_validated = true;
@@ -5461,6 +10529,8 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
 bool ChainstateManager::ProcessNewBlock(const std::shared_ptr<const CBlock>& block, bool force_processing, bool min_pow_checked, bool* new_block)
 {
     AssertLockNotHeld(cs_main);
+    // SYSCOIN: Track whether this exact AuxPoW wrapper became canonical data.
+    bool accepted_new_block{false};
 
     {
         CBlockIndex *pindex = nullptr;
@@ -5479,7 +10549,9 @@ bool ChainstateManager::ProcessNewBlock(const std::shared_ptr<const CBlock>& blo
         bool ret = CheckBlock(*block, state, GetConsensus(), true, true);
         if (ret) {
             // Store to disk
-            ret = AcceptBlock(block, state, &pindex, force_processing, nullptr, new_block, min_pow_checked);
+            ret = AcceptBlock(block, state, &pindex, force_processing, nullptr,
+                              &accepted_new_block, min_pow_checked);
+            if (new_block) *new_block = accepted_new_block;
         }
         if (!ret) {
             GetMainSignals().BlockChecked(*block, state);
@@ -5489,16 +10561,23 @@ bool ChainstateManager::ProcessNewBlock(const std::shared_ptr<const CBlock>& blo
 
     NotifyHeaderTip(*this);
 
+    // SYSCOIN BEGIN: AcceptBlock may ignore an alternate representation for
+    // an already stored child hash. Only the representation just persisted is
+    // safe to substitute for the canonical disk block during connection.
+    const std::shared_ptr<const CBlock> activation_block{
+        accepted_new_block ? block : std::shared_ptr<const CBlock>{}};
     BlockValidationState state; // Only used to report errors, not invalidity - ignore it
-    if (!ActiveChainstate().ActivateBestChain(state, block)) {
+    if (!ActiveChainstate().ActivateBestChain(state, activation_block)) {
         return error("%s: ActivateBestChain failed (%s)", __func__, state.ToString());
     }
 
     Chainstate* bg_chain{WITH_LOCK(cs_main, return BackgroundSyncInProgress() ? m_ibd_chainstate.get() : nullptr)};
     BlockValidationState bg_state;
-    if (bg_chain && !bg_chain->ActivateBestChain(bg_state, block)) {
+    if (bg_chain && !bg_chain->ActivateBestChain(bg_state,
+                                                  activation_block)) {
         return error("%s: [background] ActivateBestChain failed (%s)", __func__, bg_state.ToString());
      }
+    // SYSCOIN END: Never activate an unpersisted alternate AuxPoW wrapper.
 
     return true;
 }
@@ -5553,6 +10632,71 @@ bool TestBlockValidity(BlockValidationState& state,
     assert(state.IsValid());
 
     return true;
+}
+
+// SYSCOIN: Validate an AuxPoW template against its policy-selected Bitcoin parent.
+bool TestAuxpowBlockTemplateValidity(
+    BlockValidationState& state,
+    const CChainParams& chainparams,
+    Chainstate& chainstate,
+    const CBlock& block,
+    CBlockIndex* pindexPrev,
+    const uint256& expected_btc_prev,
+    const std::function<NodeClock::time_point()>& adjusted_time_callback)
+{
+    AssertLockHeld(cs_main);
+    const int32_t height{pindexPrev == nullptr ? 0 : pindexPrev->nHeight + 1};
+    uint256 committed;
+    if (pindexPrev == nullptr || block.IsAuxpow() || block.auxpow ||
+        expected_btc_prev.IsNull() ||
+        !llmq::pq::IsBTCPREVCommitmentHeight(
+            chainparams.GetConsensus(), height) ||
+        !ExtractBTCPREVCommitment(block, committed) ||
+        committed != expected_btc_prev) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                             "bad-btcp-template-context");
+    }
+
+    // SYSCOIN: Nexus validates a chain-reference output in the parent
+    // coinbase. Build that exact output on a copied template so all ordinary
+    // block checks run unchanged before the real parent proof is available.
+    int32_t active_height{pindexPrev->nHeight - 5};
+    active_height -= active_height % 10;
+    const CBlockIndex* const reference{
+        pindexPrev->GetAncestor(active_height)};
+    if (reference == nullptr || reference->nHeight < 0) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                             "bad-btcp-template-reference");
+    }
+    CDataStream tag_data{SER_NETWORK, PROTOCOL_VERSION};
+    tag_data << pchSyscoinHeader << reference->GetBlockHash() <<
+        static_cast<uint32_t>(reference->nHeight);
+    const auto tag_bytes{MakeUCharSpan(tag_data)};
+    const CScript tag_script{
+        CScript{} << OP_RETURN <<
+            std::vector<unsigned char>{tag_bytes.begin(), tag_bytes.end()}};
+
+    CBlock validation_block{block};
+    validation_block.fChecked = false;
+    // SYSCOIN: generic template assembly and weight accounting must retain
+    // Bitcoin's invariant that an AuxPoW version always has a proof.  Mark
+    // only this private validation copy before constructing its synthetic
+    // parent; AuxpowMiner marks the returned proof-less work afterward.
+    validation_block.SetAuxpowVersion(true);
+    const uint256 expected_work_hash{validation_block.GetHash()};
+    validation_block.SetAuxpow(CAuxPow::createAuxPowForTemplate(
+        validation_block, expected_btc_prev, tag_script));
+    if (!validation_block.auxpow ||
+        validation_block.auxpow->getParentPrevBlockHash() !=
+            expected_btc_prev ||
+        validation_block.GetHash() != expected_work_hash) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                             "bad-btcp-template-proof");
+    }
+    return TestBlockValidity(
+        state, chainparams, chainstate, validation_block, pindexPrev,
+        adjusted_time_callback, /*fCheckPOW=*/false,
+        /*fCheckMerkleRoot=*/false);
 }
 
 /* This function is called from the RPC code for pruneblockchain */
@@ -5620,6 +10764,18 @@ VerifyDBResult CVerifyDB::VerifyDB(
         nCheckDepth = chainstate.m_chain.Height();
     }
     nCheckLevel = std::max(0, std::min(4, nCheckLevel));
+    // SYSCOIN: Level-4 reconnect only isolates the coins view. PQ receipt and
+    // probation state, index provenance, and archive pins remain live, and GC
+    // may already have retired the historical state needed to reconnect.
+    // Every checked suffix includes the tip; reject before any verification
+    // can mutate that auxiliary state or revoke a durable index attestation.
+    if (nCheckLevel >= 4 &&
+        Consensus::CheckPQPaymentEligibility(
+            consensus_params, chainstate.m_chain.Height()) ==
+            Consensus::PQPaymentEligibilityResult::ROOT_REQUIRED) {
+        LogPrintf("VerifyDB(): check level 4 is unavailable after PQ activation; use check levels 0 through 3\n");
+        return VerifyDBResult::UNSUPPORTED_CHECK_LEVEL;
+    }
     LogPrintf("Verifying last %i blocks at level %i\n", nCheckDepth, nCheckLevel);
     CCoinsViewCache coins(&coinsview);
     CBlockIndex* pindex;
@@ -5748,7 +10904,8 @@ VerifyDBResult CVerifyDB::VerifyDB(
 }
 
 /** Apply the effects of a block on the utxo cache, ignoring that it may already have been applied. */
-bool Chainstate::RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& inputs, NEVMTxRootMap &mapNEVMTxRoots, NEVMMintTxSet &setMintTxs, PoDAMAPMemory &mapPoDA, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs)
+// SYSCOIN: Rollforward reconstructs branch-bound receipt state before NEVM replay.
+bool Chainstate::RollforwardBlock(CBlockIndex* pindex, CCoinsViewCache& inputs, NEVMTxRootMap &mapNEVMTxRoots, NEVMMintTxSet &setMintTxs, PoDAMAPMemory &mapPoDA, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs)
 {
     // TODO: merge with ConnectBlock
     CBlock block;
@@ -5757,12 +10914,97 @@ bool Chainstate::RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& in
     if (!m_blockman.ReadBlockFromDisk(block, *pindex)) {
         return error("ReplayBlock(): ReadBlockFromDisk failed at %d, hash=%s", pindex->nHeight, pindex->GetBlockHash().ToString());
     }
+    const bool had_recovery_work_provenance{pindex->pqRecoveryRefreshWorkValidated};
+    if (had_recovery_work_provenance) {
+        pindex->pqRecoveryRefreshWorkValidated = false;
+        m_chainman.NotePQProvenanceRevoked();
+        m_blockman.m_dirty_blockindex.insert(pindex);
+    }
+    BlockValidationState state;
+    std::optional<llmq::pq::ValidatedRecoveryRefreshWorkSample> recovery_work;
+    if (!CheckRecoveryRefreshWorkCommitment(
+            block, state, *pindex, chainParams, &recovery_work)) {
+        return error("ReplayBlock(): CheckRecoveryRefreshWorkCommitment failed at %d, "
+                     "hash=%s state=%s", pindex->nHeight,
+                     pindex->GetBlockHash().ToString(), state.ToString());
+    }
+    const bool recovery_work_changed{SetIndexedRecoveryRefreshWork(*pindex, recovery_work)};
+    if (recovery_work_changed) m_blockman.m_dirty_blockindex.insert(pindex);
+    if (!CheckBTCPREVCommitment(block, state, pindex->nHeight, chainParams)) {
+        return error("ReplayBlock(): CheckBTCPREVCommitment failed at %d, "
+                     "hash=%s state=%s", pindex->nHeight,
+                     pindex->GetBlockHash().ToString(), state.ToString());
+    }
+    if (!CheckBTCCReceiptCommitment(block, state, pindex->nHeight,
+                                    chainParams)) {
+        return error("ReplayBlock(): CheckBTCCReceiptCommitment failed at %d, "
+                     "hash=%s state=%s", pindex->nHeight,
+                     pindex->GetBlockHash().ToString(), state.ToString());
+    }
+    // SYSCOIN: A coins-database rollforward must recompute and reauthorize the
+    // receipt accumulator before it can notify NEVM. A crash-persisted pre-seal
+    // keeps the block replayable without ever substituting zero for a real hash.
+    bool btcc_receipt_state_changed{false};
+    if (!ConnectBTCCReceiptState(
+            m_chainman, block, *pindex, state,
+            &btcc_receipt_state_changed,
+            /*require_live_certificate=*/true,
+            /*allow_historical_preseal=*/true)) {
+        return error("ReplayBlock(): ConnectBTCCReceiptState failed at %d, "
+                     "hash=%s state=%s", pindex->nHeight,
+                     pindex->GetBlockHash().ToString(), state.ToString());
+    }
+    if (btcc_receipt_state_changed) {
+        // SYSCOIN: A valid provenance bit and its accumulator share one block
+        // index record, so rollforward should never observe one without the
+        // other. If recovery does rewrite the accumulator, fail closed rather
+        // than carrying an attestation across an unexpected state change.
+        constexpr uint32_t provenance_mask{
+            BLOCK_PQ_BTCC_INDEX_VALIDATED |
+            BLOCK_PQ_RECEIPT_INDEX_VALIDATED};
+        if (pindex->nStatus & provenance_mask) {
+            m_chainman.NotePQProvenanceRevoked();
+            pindex->nStatus = static_cast<BlockStatus>(
+                pindex->nStatus & ~provenance_mask);
+        }
+        m_blockman.m_dirty_blockindex.insert(pindex);
+    }
+    bool payment_audit_state_changed{false};
+    std::optional<AppliedPaymentAuditArchiveReference>
+        payment_audit_archive_reference;
+    if (!ConnectPaymentAuditReceiptState(
+            m_chainman, block, *pindex, state,
+            /*fJustCheck=*/false,
+            /*allow_historical_preseal=*/true,
+            &payment_audit_state_changed,
+            &payment_audit_archive_reference)) {
+        return error(
+            "ReplayBlock(): ConnectPaymentAuditReceiptState failed at %d, "
+            "hash=%s state=%s",
+            pindex->nHeight, pindex->GetBlockHash().ToString(),
+            state.ToString());
+    }
+    if (payment_audit_state_changed) {
+        constexpr uint32_t provenance_mask{
+            BLOCK_PQ_BTCC_INDEX_VALIDATED |
+            BLOCK_PQ_RECEIPT_INDEX_VALIDATED};
+        if (pindex->nStatus & provenance_mask) {
+            m_chainman.NotePQProvenanceRevoked();
+            pindex->nStatus = static_cast<BlockStatus>(
+                pindex->nStatus & ~provenance_mask);
+        }
+        m_blockman.m_dirty_blockindex.insert(pindex);
+    }
     // SYSCOIN
     // MUST process special txes before updating UTXO to ensure consistency between mempool and block processing
     const bool ibd = m_chainman.IsInitialBlockDownload();
     CDeterministicMNListNEVMAddressDiff diff;
-    BlockValidationState state;
-    if (!ProcessSpecialTxsInBlock(m_chainman, block, pindex, state, diff, inputs, false /*fJustCheck*/, false /*fScriptChecks*/, ibd)) {
+    // SYSCOIN: Rollforward only reapplies database effects for blocks which completed
+    // full validation before an interrupted coins-database flush.
+    if (!ProcessSpecialTxsInBlock(
+            m_chainman, block, pindex, state, diff, inputs,
+            false /*fJustCheck*/, false /*fScriptChecks*/, ibd,
+            SpecialTxValidationContext::ALREADY_VALIDATED_ROLLFORWARD)) {
         return error("%s: ProcessSpecialTxsInBlock for block %s failed with %s", __func__,
             pindex->GetBlockHash().ToString(), state.ToString());
     }
@@ -5791,12 +11033,29 @@ bool Chainstate::RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& in
     }
     bool bRegTestContext = !fRegTest || (fRegTest && fNEVMConnection);
     if (bRegTestContext && pindex->nHeight >= chainParams.nNEVMStartBlock) {
-        if (!ConnectNEVMCommitment(state, mapNEVMTxRoots, block, pindex, pindex->GetBlockHash(), pindex->nHeight, false, mapPoDA, diff)) {
+        if (!ConnectNEVMCommitment(state, mapNEVMTxRoots, block, pindex, pindex->GetBlockHash(), pindex->nHeight, false, mapPoDA, diff,
+                /*btcc_prefix_authenticated=*/false,
+                NEVMNotificationContext::ALREADY_VALIDATED_COINS_RECOVERY)) {
             return error("RollforwardBlock(): ConnectNEVMCommitment() failed at %d, hash=%s state=%s", pindex->nHeight, pindex->GetBlockHash().ToString(), state.ToString());
         }
         if (!state.IsValid()) {
             return false;
         }
+    }
+    if (!PinAppliedPaymentAuditArchiveReference(
+            payment_audit_archive_reference, state)) {
+        return error(
+            "ReplayBlock(): payment-audit archive pin failed at %d, "
+            "hash=%s state=%s",
+            pindex->nHeight, pindex->GetBlockHash().ToString(),
+            state.ToString());
+    }
+    // Rollforward can preserve an existing full-validation attestation after
+    // raw proof rechecking; it cannot manufacture one from script-valid flags.
+    if (had_recovery_work_provenance && !recovery_work_changed && recovery_work &&
+        pindex->IsValid(BLOCK_VALID_SCRIPTS) && !pindex->IsAssumedValid()) {
+        pindex->pqRecoveryRefreshWorkValidated = true;
+        m_blockman.m_dirty_blockindex.insert(pindex);
     }
     return true;
 }
@@ -5813,7 +11072,152 @@ bool Chainstate::ReplayBlocks()
     std::vector<uint256> vecNEVMBlocks;
     std::vector<std::pair<uint256,uint32_t> > vecTXIDPairs;
     BlockValidationState state;
-    if (hashHeads.empty()) return true; // We're already in a consistent state.
+    // SYSCOIN: Coins can be consistent while an independent root revocation
+    // is incomplete. Recover the shared root store against the active coins
+    // branch, even when there is no interrupted coins batch to replay.
+    const auto root_disconnect{
+        this == &m_chainman.ActiveChainstate() && pnevmtxrootsdb
+            ? pnevmtxrootsdb->GetPendingDisconnect()
+            : std::nullopt};
+    const auto published_root_tip{
+        this == &m_chainman.ActiveChainstate() && pnevmtxrootsdb
+            ? pnevmtxrootsdb->GetPublishedTip()
+            : std::nullopt};
+    const bool root_recovery{root_disconnect || published_root_tip};
+    const auto recover_roots = [&](bool coins_synced)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+        if (!root_recovery) return true;
+        const uint256 recovered_hash{db.GetBestBlock()};
+        // An empty/reindexed coins view causes startup to recreate the roots
+        // store. Preserve its recovery metadata until that rebuild takes place.
+        if (recovered_hash.IsNull() && db.GetHeadBlocks().empty()) return true;
+        const CBlockIndex* recovered{m_blockman.LookupBlockIndex(recovered_hash)};
+        if (recovered == nullptr || !db.GetHeadBlocks().empty()) {
+            return error("ReplayBlocks(): Cannot establish coins ancestry for NEVM root recovery");
+        }
+        if (hashHeads.empty() && !root_disconnect && published_root_tip == recovered_hash) return true;
+
+        std::vector<const CBlockIndex*> sources;
+        if (published_root_tip) {
+            const auto* source{m_blockman.LookupBlockIndex(*published_root_tip)};
+            if (!source) return error("ReplayBlocks(): Unknown published NEVM root branch");
+            sources.push_back(source);
+        }
+        if (hashHeads.size() == 2 && !hashHeads[1].IsNull()) {
+            const auto* source{m_blockman.LookupBlockIndex(hashHeads[1])};
+            if (!source) return error("ReplayBlocks(): Unknown prior coins branch for NEVM root recovery");
+            sources.push_back(source);
+        }
+        std::set<uint256> affected;
+        if (root_disconnect) {
+            const auto* carrier{m_blockman.LookupBlockIndex(root_disconnect->carrier)};
+            CNEVMHeader header;
+            // Authenticate the record even on the discarded branch. Corrupt
+            // metadata must not select an unrelated canonical key for erasure.
+            if (!carrier || !ReadNEVMRootCarrier(m_blockman, *carrier, header) ||
+                header.nBlockHash != root_disconnect->block_hash ||
+                header.nTxRoot != root_disconnect->tx_root ||
+                header.nReceiptRoot != root_disconnect->receipt_root) {
+                return error("ReplayBlocks(): NEVM root recovery does not match its carrier");
+            }
+            sources.push_back(carrier);
+            affected.insert(header.nBlockHash);
+        }
+        int canonical_fork_height{recovered->nHeight};
+        std::set<const CBlockIndex*> visited;
+        NEVMMintTxSet discarded_mints, canonical_mints;
+        for (const auto* source : sources) {
+            const auto* fork{LastCommonAncestor(source, recovered)};
+            if (!fork) return error("ReplayBlocks(): NEVM root branches have no common ancestor");
+            canonical_fork_height = std::min(canonical_fork_height, fork->nHeight);
+            for (auto* index = source; index != fork; index = index->pprev) {
+                if (index->nHeight < m_chainman.GetConsensus().nNEVMStartBlock) break;
+                if (!visited.insert(index).second) break;
+                CNEVMHeader header;
+                if (!ReadNEVMRootCarrier(m_blockman, *index, header,
+                                        /*allow_pruned=*/false, &discarded_mints)) {
+                    return error("ReplayBlocks(): Cannot authenticate discarded NEVM root carrier %s",
+                                 index->GetBlockHash().ToString());
+                }
+                affected.insert(header.nBlockHash);
+            }
+        }
+        NEVMTxRootMap canonical_roots;
+        auto unresolved{affected};
+        // A NEVM hash can also occur in the common prefix, with a different
+        // accepted commitment. Search canonical ancestry for every affected
+        // key, choosing its latest carrier, and rebuild the replacement suffix.
+        for (auto* index = recovered;
+             index && index->nHeight >= m_chainman.GetConsensus().nNEVMStartBlock;
+             index = index->pprev) {
+            const bool replacement{index->nHeight > canonical_fork_height};
+            if (!replacement && unresolved.empty()) break;
+            CNEVMHeader header;
+            // SYSCOIN BEGIN: Authenticate canonical aliases after body pruning.
+            // Only old canonical alias lookup can use pruning proofs. The
+            // replacement suffix and every discarded/journal carrier above
+            // still require their retained block bodies.
+            if (!ReadNEVMRootCarrier(m_blockman, *index, header,
+                                     /*allow_pruned=*/!replacement,
+                                     replacement ? &canonical_mints : nullptr)) {
+                return error("ReplayBlocks(): Cannot authenticate canonical NEVM root carrier %s",
+                             index->GetBlockHash().ToString());
+            }
+            // SYSCOIN END: Authenticate canonical aliases after body pruning.
+            if (replacement || affected.contains(header.nBlockHash)) {
+                canonical_roots.try_emplace(header.nBlockHash,
+                    NEVMTxRoot{header.nTxRoot, header.nReceiptRoot});
+                unresolved.erase(header.nBlockHash);
+            }
+        }
+        // SYSCOIN: A previously validated discarded mint cannot also occur in
+        // its common prefix. Only the recovered replacement suffix can own
+        // the same proof again; preserve it even if its outputs were spent.
+        for (const auto& hash : canonical_mints) discarded_mints.erase(hash);
+        if (!discarded_mints.empty() && !pnevmtxmintdb) {
+            return error("ReplayBlocks(): Mint database unavailable for NEVM recovery");
+        }
+        // Pin the recovered coins endpoint before any destructive cleanup or
+        // restoration. A second crash must recover to this same branch while
+        // the old source endpoints still describe the unfinished root work.
+        if (!coins_synced) {
+            cache.SetBestBlock(recovered_hash);
+            if (!CoinsDB().FlushWithSync(cache)) {
+                return error("ReplayBlocks(): Failed to synchronize coins for NEVM root recovery");
+            }
+        }
+        std::vector<uint256> erased_roots;
+        for (const auto& hash : affected) {
+            // Do not create a missing-canonical-root window by erasing an
+            // alias before replacing its value. This also preserves roots if
+            // the already-published endpoint equals the recovered coins tip.
+            if (!canonical_roots.contains(hash)) erased_roots.push_back(hash);
+        }
+        if (!pnevmtxrootsdb->FlushErase(erased_roots)) {
+            return error("ReplayBlocks(): Failed to erase discarded NEVM roots");
+        }
+        pnevmtxrootsdb->FlushDataToCache(canonical_roots);
+        if (!pnevmtxrootsdb->FlushCacheToDisk(/*CHUNK_ITEMS=*/100000, /*fSync=*/true) ||
+            !pnevmtxrootsdb->Sync()) {
+            return error("ReplayBlocks(): Failed to synchronize recovered NEVM roots");
+        }
+        // SYSCOIN: Keep the journal/source cursor until these erasures are
+        // durable too. A second restart can reconstruct the same cleanup even
+        // though the coins database no longer has interrupted-batch heads.
+        if (!discarded_mints.empty() && !pnevmtxmintdb->FlushErase(discarded_mints)) {
+            return error("ReplayBlocks(): Failed to erase recovered orphan mint markers");
+        }
+        std::optional<NEVMTxRoot> pending_root;
+        if (root_disconnect) {
+            const auto it{canonical_roots.find(root_disconnect->block_hash)};
+            if (it != canonical_roots.end()) pending_root = it->second;
+        }
+        if (!pnevmtxrootsdb->CompleteRootRecovery(recovered_hash, pending_root)) {
+            return error("ReplayBlocks(): Failed to complete NEVM root recovery");
+        }
+        return true;
+    };
+    if (hashHeads.empty()) return recover_roots(/*coins_synced=*/false);
     if (hashHeads.size() != 2) return error("ReplayBlocks(): unknown inconsistent state");
 
     m_chainman.GetNotifications().progress(_("Replaying blocks…"), 0, false);
@@ -5835,6 +11239,27 @@ bool Chainstate::ReplayBlocks()
         pindexOld = &(m_blockman.m_block_index[hashHeads[1]]);
         pindexFork = LastCommonAncestor(pindexOld, pindexNew);
         assert(pindexFork != nullptr);
+    }
+    // SYSCOIN: Interrupted-flush replay touches branch-bound DMN/PQ stores
+    // before LoadChainTip(). Publish the active recovered target first so a
+    // crash-restored GC floor is authenticated against the intended chain.
+    // Background AssumeUTXO replay deliberately keeps that active authority.
+    if (this == &m_chainman.ActiveChainstate() &&
+        deterministicMNManager &&
+        !deterministicMNManager->UpdatedBlockTipForStartup(
+            pindexNew,
+            [this](const uint256& hash)
+                EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+                return m_blockman.LookupBlockIndex(hash);
+            },
+            llmq::chainLocksHandler
+                ? llmq::chainLocksHandler
+                      ->GetDurableFinalityTargetForStartup()
+                : std::nullopt)) {
+        return error(
+            "ReplayBlocks(): auxiliary-history GC authorization is not "
+            "compatible with recovered head %s",
+            pindexNew->GetBlockHash().ToString());
     }
     // Rollback along the old branch.
     while (pindexOld != pindexFork) {
@@ -5860,7 +11285,13 @@ bool Chainstate::ReplayBlocks()
     // deferred: erasing them before the recovered UTXO tip is durable can leave
     // minted UTXOs without replay protection after a crash.
     if (pnevmtxrootsdb != nullptr) {
-        if (!pnevmtxrootsdb->FlushErase(vecNEVMBlocks) || !pblockindexdb->FlushErase(vecTXIDPairs)) {
+        // SYSCOIN: Root recovery reconciles both branches after coins are
+        // pinned, preserving keys also carried by the canonical branch.
+        // Legacy stores retain their existing rollback path.
+        if (!root_recovery) pnevmtxrootsdb->EraseCache(vecNEVMBlocks);
+        pblockindexdb->EraseCache(vecTXIDPairs);
+        if ((!root_recovery && !pnevmtxrootsdb->FlushErase(vecNEVMBlocks)) ||
+            !pblockindexdb->FlushErase(vecTXIDPairs)) {
             return error("RollbackBlock(): Error flushing to asset dbs on disconnect");
         }
     }
@@ -5869,16 +11300,19 @@ bool Chainstate::ReplayBlocks()
     // Roll forward from the forking point to the new tip.
     int nForkHeight = pindexFork ? pindexFork->nHeight : 0;
     for (int nHeight = nForkHeight + 1; nHeight <= pindexNew->nHeight; ++nHeight) {
-        const CBlockIndex& pindex{*Assert(pindexNew->GetAncestor(nHeight))};
-        LogPrintf("Rolling forward %s (%i)\n", pindex.GetBlockHash().ToString(), nHeight);
+        const CBlockIndex* ancestor{Assert(pindexNew->GetAncestor(nHeight))};
+        // SYSCOIN: Receipt replay mutates the persisted accumulator on the
+        // canonical in-memory index entry, not an immutable ancestor view.
+        CBlockIndex* pindex{Assert(
+            m_blockman.LookupBlockIndex(ancestor->GetBlockHash()))};
+        LogPrintf("Rolling forward %s (%i)\n", pindex->GetBlockHash().ToString(), nHeight);
         m_chainman.GetNotifications().progress(_("Replaying blocks…"), (int)((nHeight - nForkHeight) * 100.0 / (pindexNew->nHeight - nForkHeight)), false);
         // SYSCOIN
-        if (!RollforwardBlock(&pindex, cache, mapNEVMTxRoots, setMintTxsConnect, mapPoDAConnect, vecTXIDPairs)) return false;
+        if (!RollforwardBlock(pindex, cache, mapNEVMTxRoots, setMintTxsConnect, mapPoDAConnect, vecTXIDPairs)) return false;
     }
 
     cache.SetBestBlock(pindexNew->GetBlockHash());
-    // SYSCOIN: additions before UTXO commit; erasures after. Extra markers after a
-    // crash are fail-closed (may require -reindex-chainstate).
+    // SYSCOIN: additions before UTXO commit; erasures after.
     NEVMMintTxSet setMintDisconnectOnly;
     if (pnevmtxmintdb) {
         for (const auto& hash : setMintTxsDisconnect) {
@@ -5891,7 +11325,23 @@ bool Chainstate::ReplayBlocks()
             return error("ReplayBlocks(): Failed to persist mint replay additions");
         }
     }
-    if (!cache.Flush()) {
+    // Replay mutates the same branch-bound DMN/PQ databases as normal block
+    // connection. Order those asynchronous writes before publishing the
+    // recovered UTXO best-block marker.
+    if (deterministicMNManager &&
+        !deterministicMNManager->FlushPendingSnapshotsToDisk(
+            /*fSync=*/true)) {
+        return error(
+            "ReplayBlocks(): Failed to persist deterministic masternode state");
+    }
+    // SYSCOIN: Keep both source endpoints until the recovered coins branch is
+    // durable, then reconcile roots against it. Publishing replacement roots
+    // before this barrier could leave them outside the recorded source branch.
+    const bool coins_flushed = root_recovery ||
+            (pnevmtxmintdb && !setMintDisconnectOnly.empty())
+        ? CoinsDB().FlushWithSync(cache)
+        : cache.Flush();
+    if (!coins_flushed) {
         return error("ReplayBlocks(): Failed to commit replayed UTXO state");
     }
     if (pnevmtxmintdb && !setMintDisconnectOnly.empty() &&
@@ -5904,9 +11354,10 @@ bool Chainstate::ReplayBlocks()
     if(pblockindexdb) {
         pblockindexdb->FlushDataToCache(vecTXIDPairs);
     }
-    if(pnevmtxrootsdb) {
+    if(pnevmtxrootsdb && !root_recovery) {
         pnevmtxrootsdb->FlushDataToCache(mapNEVMTxRoots);
     }
+    if (!recover_roots(/*coins_synced=*/true)) return false;
     m_chainman.GetNotifications().progress(bilingual_str{}, 100, false);
     return true;
 }
@@ -5933,6 +11384,8 @@ void Chainstate::ClearBlockIndexCandidates()
 {
     AssertLockHeld(::cs_main);
     setBlockIndexCandidates.clear();
+    // SYSCOIN: Candidate reset also discards transient receipt quarantine.
+    m_deferred_btcc_receipt_candidates.clear();
 }
 
 bool ChainstateManager::LoadBlockIndex()
@@ -5944,8 +11397,10 @@ bool ChainstateManager::LoadBlockIndex()
         bool ret{m_blockman.LoadBlockIndexDB(SnapshotBlockhash())};
         if (!ret) return false;
 
-        m_blockman.ScanAndUnlinkAlreadyPrunedFiles();
-
+        // SYSCOIN BEGIN: Move Bitcoin's startup cleanup after the NEVM evidence
+        // audit in CompleteChainstateInitialization(); retain the original call here.
+        // m_blockman.ScanAndUnlinkAlreadyPrunedFiles();
+        // SYSCOIN END: Move startup cleanup after the NEVM evidence audit.
         std::vector<CBlockIndex*> vSortedByHeight{m_blockman.GetAllBlockIndices()};
         std::sort(vSortedByHeight.begin(), vSortedByHeight.end(),
                   CBlockIndexHeightOnlyComparator());
@@ -5970,7 +11425,11 @@ bool ChainstateManager::LoadBlockIndex()
             if (pindex->nStatus & BLOCK_FAILED_MASK && (!m_best_invalid || pindex->nChainWork > m_best_invalid->nChainWork)) {
                 m_best_invalid = pindex;
             }
-            if (pindex->IsValid(BLOCK_VALID_TREE) && (m_best_header == nullptr || CBlockIndexWorkComparator()(m_best_header, pindex)))
+            if (!(pindex->nStatus &
+                  (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK)) &&
+                pindex->IsValid(BLOCK_VALID_TREE) &&
+                (m_best_header == nullptr ||
+                 CBlockIndexWorkComparator()(m_best_header, pindex)))
                 m_best_header = pindex;
         }
 
@@ -6016,6 +11475,70 @@ bool Chainstate::LoadGenesisBlock()
 
     return true;
 }
+
+// SYSCOIN BEGIN: Authenticate repaired NEVM payloads encountered during full reindex.
+// Full reindex discards the block-index DB and encounters the original record
+// before an appended repair. Only differing duplicate payloads need this check.
+static bool RecoverReindexedNEVMPayload(BlockManager& blockman,
+                                        CBlockIndex& index,
+                                        const CBlock& candidate,
+                                        const FlatFilePos& pos,
+                                        std::string& error)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    if (!fReindex || !candidate.IsNEVM()) return true;
+    CBlock original;
+    if (!blockman.ReadBlockFromDisk(original, index, /*load_auxiliary_data=*/false)) {
+        error = "nevm-payload-reindex-original-unavailable";
+        return false;
+    }
+    if (candidate.vchNEVMBlockData == original.vchNEVMBlockData) return true;
+    if (!fNEVMConnection) {
+        error = "Differing NEVM payload records require the configured Geth recovery validator during reindex";
+        return false;
+    }
+    CNEVMHeader header;
+    BlockValidationState state;
+    if (!GetNEVMData(state, original, header)) {
+        error = "nevm-payload-reindex-commitment-unavailable";
+        return false;
+    }
+    bool valid{false};
+    std::optional<NEVMBlockReject> rejection;
+    GetMainSignals().NotifyNEVMPayloadCheck(header, original,
+        index.GetBlockHash(), valid, error, &rejection);
+    // SYSCOIN: Keep proof of an immutable contradiction for normal activation.
+    if (valid || MatchesNEVMCommitmentRejection(rejection, header, index.GetBlockHash())) return true;
+    if (!rejection || !rejection->IsPayload() ||
+        rejection->nevm_hash != header.nBlockHash ||
+        rejection->syscoin_hash != index.GetBlockHash() ||
+        !MatchesNEVMPayloadRejection(*rejection, header, original.vchNEVMBlockData)) {
+        error = "nevm-payload-reindex-old-check-unavailable:" + error;
+        return false;
+    }
+    original.vchNEVMBlockData = candidate.vchNEVMBlockData;
+    rejection.reset();
+    GetMainSignals().NotifyNEVMPayloadCheck(header, original,
+        index.GetBlockHash(), valid, error, &rejection);
+    if (!valid && !MatchesNEVMCommitmentRejection(rejection, header, index.GetBlockHash())) {
+        // Another rejected representation may precede the repaired record.
+        if (rejection && rejection->IsPayload() &&
+            rejection->nevm_hash == header.nBlockHash &&
+            rejection->syscoin_hash == index.GetBlockHash() &&
+            MatchesNEVMPayloadRejection(*rejection, header, original.vchNEVMBlockData)) return true;
+        error = "nevm-payload-reindex-new-check-unavailable:" + error;
+        return false;
+    }
+    if (!blockman.AdoptNEVMBlockDataForReindex(state, index, candidate, pos)) {
+        // A different AuxPoW wrapper is not a payload-only replacement.
+        if (state.GetRejectReason() == "nevm-payload-reindex-core-block-mismatch") return true;
+        error = state.ToString();
+        return false;
+    }
+    return true;
+}
+
+// SYSCOIN END: Authenticate repaired NEVM payloads during full reindex.
 
 void ChainstateManager::LoadExternalBlockFile(
     CAutoFile& file_in,
@@ -6087,7 +11610,7 @@ void ChainstateManager::LoadExternalBlockFile(
                         continue;
                     }
                     // process in case the block isn't known yet
-                    const CBlockIndex* pindex = m_blockman.LookupBlockIndex(hash);
+                    CBlockIndex* pindex = m_blockman.LookupBlockIndex(hash);
                     if (!pindex || (pindex->nStatus & BLOCK_HAVE_DATA) == 0) {
                         pblock = std::make_shared<CBlock>();
                         // SYSCOIN
@@ -6126,6 +11649,17 @@ void ChainstateManager::LoadExternalBlockFile(
                         if (state.IsError()) {
                             break;
                         }
+                    // SYSCOIN BEGIN: Extend Bitcoin reindex imports to recover
+                    // a repaired representation of an already indexed NEVM block.
+                    } else if (fReindex && dbp && header.IsNEVM()) {
+                        CBlock duplicate;
+                        std::string error;
+                        if (!m_blockman.ReadBlockFromDisk(duplicate, *dbp) ||
+                            !RecoverReindexedNEVMPayload(m_blockman, *pindex, duplicate, *dbp, error)) {
+                            GetNotifications().fatalError("Cannot recover duplicate NEVM payload during reindex: " + error);
+                            return;
+                        }
+                    // SYSCOIN END: Recover an already indexed NEVM payload representation.
                     } else if (hash != params.GetConsensus().hashGenesisBlock && pindex->nHeight % 1000 == 0) {
                         LogPrint(BCLog::REINDEX, "Block Import: already had block %s at height %d\n", hash.ToString(), pindex->nHeight);
                     }
@@ -6187,6 +11721,18 @@ void ChainstateManager::LoadExternalBlockFile(
                                     head.ToString());
                             LOCK(cs_main);
                             BlockValidationState dummy;
+                            // SYSCOIN BEGIN: Recover repaired NEVM payloads when
+                            // Bitcoin's out-of-order import queue revisits a stored block.
+                            if (auto* existing{m_blockman.LookupBlockIndex(pblockrecursive->GetHash())};
+                                existing && (existing->nStatus & BLOCK_HAVE_DATA)) {
+                                std::string error;
+                                if (!RecoverReindexedNEVMPayload(m_blockman, *existing,
+                                        *pblockrecursive, it->second, error)) {
+                                    GetNotifications().fatalError("Cannot recover queued NEVM payload during reindex: " + error);
+                                    return;
+                                }
+                            }
+                            // SYSCOIN END: Recover payload repairs from the import queue.
                             if (AcceptBlock(pblockrecursive, dummy, nullptr, true, &it->second, nullptr, true)) {
                                 nLoaded++;
                                 queue.push_back(pblockrecursive->GetHash());
@@ -6380,7 +11926,8 @@ void ChainstateManager::CheckBlockIndex()
                         // as a candidate, but a background chainstate should
                         // only have it if it is an ancestor of the snapshot base.
                         if (is_active || GetSnapshotBaseBlock()->GetAncestor(pindex->nHeight) == pindex) {
-                            assert(c->setBlockIndexCandidates.count(pindex));
+                            assert(c->setBlockIndexCandidates.count(pindex) ||
+                                   c->IsBTCCReceiptCandidateDeferred(*pindex));
                         }
                     }
                     // If some parent is missing, then it could be that this block was in
@@ -6421,7 +11968,11 @@ void ChainstateManager::CheckBlockIndex()
             // setBlockIndexCandidates, then it must be in m_blocks_unlinked.
             for (auto c : GetAll()) {
                 const bool is_active = c == &ActiveChainstate();
-                if (!CBlockIndexWorkComparator()(pindex, c->m_chain.Tip()) && c->setBlockIndexCandidates.count(pindex) == 0) {
+                // SYSCOIN: Receipt-deferred candidates are intentionally absent
+                // from the ordinary work set and need not be unlinked.
+                if (!CBlockIndexWorkComparator()(pindex, c->m_chain.Tip()) &&
+                    c->setBlockIndexCandidates.count(pindex) == 0 &&
+                    !c->IsBTCCReceiptCandidateDeferred(*pindex)) {
                     if (pindexFirstInvalid == nullptr) {
                         if (is_active || GetSnapshotBaseBlock()->GetAncestor(pindex->nHeight) == pindex) {
                             assert(foundInUnlinked);
@@ -6483,35 +12034,64 @@ void ChainstateManager::CheckBlockIndex()
     assert(nNodes == forward.size());
 }
 
-// SYSCOIN: fill btcpPrevCommitment for recent sign-offset blocks if missing.
+// SYSCOIN: fill recent PQ BTCPREV candidate commitments if missing.
 void ChainstateManager::BackfillRecentBTCPREVCommitments()
 {
     LOCK(cs_main);
 
     const auto& consensus = GetConsensus();
-    if (!IsBTCCDeploymentConfigured(consensus)) return;
+    const auto config{llmq::pq::GetBTCCScheduleConfig(consensus)};
+    if (!config.IsValid()) return;
 
-    const int start = consensus.nBTCCStartBlock;
+    const int start = config.candidate_origin;
     const int tip = ActiveHeight();
     if (tip < 0 || tip < start) return;
 
-    // Only need a small window: carriers reference the (h-5) sign-offset block.
-    const int low = std::max(start, tip - (BTCCHECK_PERIOD * 2));
+    // The deterministic NEVM lag and live cursor validation only need a small
+    // recent window; older values are populated during normal block replay.
+    const int low = std::max(start, tip - static_cast<int>(config.candidate_period * 2));
 
     for (int h = tip; h >= low; --h) {
-        if (!IsBTCCSignHeight(consensus, h)) continue;
+        if (!llmq::pq::IsBTCPREVCommitmentHeight(consensus, h)) continue;
         CBlockIndex* pindex = ActiveChain()[h];
         if (!pindex) continue;
-        if (!pindex->btcpPrevCommitment.IsNull()) continue;
         if (!(pindex->nStatus & BLOCK_HAVE_DATA)) continue;
 
         CBlock block;
         if (!m_blockman.ReadBlockFromDisk(block, *pindex)) continue;
         if (!block.auxpow) continue;
 
+        BlockValidationState validation_state;
+        if (!CheckBlock(block, validation_state, consensus,
+                        /*fCheckPOW=*/true, /*fCheckMerkleRoot=*/true) ||
+            !CheckBTCPREVCommitment(block, validation_state, h,
+                                    consensus)) {
+            LogPrintf("%s: retained candidate failed validation at height "
+                      "%d: %s\n", __func__, h,
+                      validation_state.ToString());
+            continue;
+        }
+
         uint256 btcp;
         if (!ExtractBTCPREVCommitment(block, btcp)) continue;
         if (btcp != block.auxpow->getParentPrevBlockHash()) continue;
+        if (!pindex->btcpPrevCommitment.IsNull() &&
+            pindex->btcpPrevCommitment != btcp) {
+            LogPrintf("%s: retained block disagrees with block-index Bitcoin "
+                      "metadata at height %d\n", __func__, h);
+            constexpr uint32_t provenance_mask{
+                BLOCK_PQ_BTCC_INDEX_VALIDATED |
+                BLOCK_PQ_RECEIPT_INDEX_VALIDATED};
+            if (pindex->nStatus & provenance_mask) {
+                NotePQProvenanceRevoked();
+                pindex->nStatus = static_cast<BlockStatus>(
+                    pindex->nStatus & ~provenance_mask);
+            }
+            pindex->btcpPrevCommitment.SetNull();
+            m_blockman.m_dirty_blockindex.insert(pindex);
+            continue;
+        }
+        if (pindex->btcpPrevCommitment == btcp) continue;
 
         pindex->btcpPrevCommitment = btcp;
         m_blockman.m_dirty_blockindex.insert(pindex);
@@ -6601,6 +12181,119 @@ std::vector<Chainstate*> ChainstateManager::GetAll()
     return out;
 }
 
+// SYSCOIN: Retain shared DMN/PQ state for every crash-visible chainstate
+// recovery marker, including disabled snapshot chainstates awaiting cleanup.
+std::vector<Chainstate*> ChainstateManager::GetAllForPersistence()
+{
+    LOCK(::cs_main);
+    std::vector<Chainstate*> out;
+
+    for (Chainstate* cs : {m_ibd_chainstate.get(), m_snapshot_chainstate.get()}) {
+        if (cs != nullptr && cs->CanFlushToDisk()) out.push_back(cs);
+    }
+
+    return out;
+}
+
+std::optional<std::vector<uint256>>
+ChainstateManager::GetCoinsRecoveryMarkers(
+    const uint256& best_block,
+    std::span<const uint256> head_blocks,
+    const uint256& coins_tip,
+    std::string& error)
+{
+    error.clear();
+    std::vector<uint256> markers;
+    const auto add_marker = [&](const uint256& marker) {
+        if (!marker.IsNull() &&
+            std::find(markers.begin(), markers.end(), marker) ==
+                markers.end()) {
+            markers.push_back(marker);
+        }
+    };
+
+    if (!best_block.IsNull()) {
+        if (!head_blocks.empty()) {
+            error = strprintf(
+                "CoinsDB has both best block %s and %u head blocks",
+                best_block.ToString(),
+                static_cast<unsigned>(head_blocks.size()));
+            return std::nullopt;
+        }
+        add_marker(best_block);
+    } else if (!head_blocks.empty()) {
+        if (head_blocks.size() != 2 || head_blocks.front().IsNull()) {
+            error = strprintf(
+                "CoinsDB without a best block has %u invalid head blocks",
+                static_cast<unsigned>(head_blocks.size()));
+            return std::nullopt;
+        }
+        if (!coins_tip.IsNull() && coins_tip != head_blocks.front()) {
+            error = strprintf(
+                "CoinsTip %s does not match interrupted CoinsDB head %s",
+                coins_tip.ToString(), head_blocks.front().ToString());
+            return std::nullopt;
+        }
+        for (const uint256& head : head_blocks) add_marker(head);
+    }
+    add_marker(coins_tip);
+    return markers;
+}
+
+[[nodiscard]] static bool AddChainstateRecoveryBlockIndex(
+    node::BlockManager& blockman,
+    const uint256& marker,
+    std::vector<const CBlockIndex*>& indexes,
+    std::string& error) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    if (marker.IsNull()) return true;
+    const CBlockIndex* pindex{blockman.LookupBlockIndex(marker)};
+    if (pindex == nullptr) {
+        error = strprintf("unknown chainstate recovery block %s",
+                          marker.ToString());
+        return false;
+    }
+    if (std::find(indexes.begin(), indexes.end(), pindex) == indexes.end()) {
+        indexes.push_back(pindex);
+    }
+    return true;
+}
+
+std::optional<std::vector<const CBlockIndex*>>
+ChainstateManager::GetAllRecoveryBlockIndexes(std::string& error)
+{
+    LOCK(::cs_main);
+    error.clear();
+    std::vector<const CBlockIndex*> indexes;
+
+    for (Chainstate* chainstate : GetAllForPersistence()) {
+        try {
+            const auto markers{GetCoinsRecoveryMarkers(
+                chainstate->CoinsDB().GetBestBlock(),
+                chainstate->CoinsDB().GetHeadBlocks(),
+                chainstate->CoinsTip().GetBestBlock(), error)};
+            if (!markers) return std::nullopt;
+            for (const uint256& marker : *markers) {
+                if (!AddChainstateRecoveryBlockIndex(
+                        m_blockman, marker, indexes, error)) {
+                    return std::nullopt;
+                }
+            }
+        } catch (const std::exception& exception) {
+            error = strprintf(
+                "failed to read chainstate recovery markers: %s",
+                exception.what());
+            return std::nullopt;
+        }
+    }
+    // SYSCOIN: Pin the external child's inverse metadata before the first
+    // marker write as well as throughout recovery after reopening.
+    if (m_nevm_pending_connect_record && !m_nevm_pending_connect_rebuild &&
+        !AddChainstateRecoveryBlockIndex(m_blockman,
+            m_nevm_pending_connect_record->second, indexes, error)) return std::nullopt;
+    return indexes;
+}
+
 Chainstate& ChainstateManager::InitializeChainstate(CTxMemPool* mempool)
 {
     AssertLockHeld(::cs_main);
@@ -6657,6 +12350,12 @@ bool ChainstateManager::ActivateSnapshot(
         const SnapshotMetadata& metadata,
         bool in_memory)
 {
+    // SYSCOIN: A snapshot must not jump over real block reconnection and
+    // thereby complete pairing without recovering the already-applied prefix.
+    if (HasPendingNEVMStartupPair()) {
+        LogPrintf("[snapshot] waiting for NEVM startup pair recovery\n");
+        return false;
+    }
     uint256 base_blockhash = metadata.m_base_blockhash;
 
     if (this->SnapshotBlockhash()) {
@@ -7182,8 +12881,9 @@ bool ChainstateManager::IsSnapshotActive() const
 }
 
 
-// SYSCOIN
+// SYSCOIN BEGIN: Retain pending index writes and deletions until batch success.
 bool CBlockIndexDB::ReadBlockHeight(const uint256& txid, uint32_t& nHeight) {
+    if (m_pending_erases.contains(txid)) return false;
     auto it = mapCache.find(txid);
     if(it != mapCache.end()){
         nHeight = it->second;
@@ -7196,62 +12896,67 @@ bool CBlockIndexDB::ReadBlockHeight(const uint256& txid, uint32_t& nHeight) {
 bool CBlockIndexDB::FlushErase(const std::vector<std::pair<uint256,uint32_t> > &vecTXIDPairs) {
     if(vecTXIDPairs.empty())
         return true;
+    EraseCache(vecTXIDPairs);
     CDBBatch batch(*this);
-    FlushErase(vecTXIDPairs, batch);
-    return WriteBatch(batch, true);
+    for (const auto& txid : m_pending_erases) batch.Erase(txid);
+    if (!WriteCacheBatch(batch, /*sync=*/true)) return false;
+    m_pending_erases.clear();
+    m_pending_erase_sync = false;
+    return true;
 }
-bool CBlockIndexDB::FlushErase(const std::vector<std::pair<uint256,uint32_t> > &vecTXIDPairs, CDBBatch &batch) {
-    if(vecTXIDPairs.empty())
-        return true;
+void CBlockIndexDB::EraseCache(const std::vector<std::pair<uint256,uint32_t> > &vecTXIDPairs) {
+    StageErase(vecTXIDPairs);
+    if (!vecTXIDPairs.empty()) m_pending_erase_sync = true;
+}
+void CBlockIndexDB::StageErase(const std::vector<std::pair<uint256,uint32_t> > &vecTXIDPairs) {
     for (const auto &pair : vecTXIDPairs) {
-        batch.Erase(pair.first);
-        auto it = mapCache.find(pair.first);
-        if(it != mapCache.end()){
-            mapCache.erase(it);
-        }
+        m_pending_erases.insert(pair.first);
+        mapCache.erase(pair.first);
     }
     if(vecTXIDPairs.size() > 0)
-        LogPrint(BCLog::SYS, "Flushing %d block index removals\n", vecTXIDPairs.size());
-    return true;
+        LogPrint(BCLog::SYS, "Staged %d block index removals\n", vecTXIDPairs.size());
 }
 void CBlockIndexDB::FlushDataToCache(const std::vector<std::pair<uint256,uint32_t> > &vecTXIDPairs) {
     if(vecTXIDPairs.empty()) {
         return;
     }
     for (auto const& [key, val] : vecTXIDPairs) {
+        m_pending_erases.erase(key);
         mapCache.try_emplace(key, val);
     }
+    if (m_pending_erases.empty()) m_pending_erase_sync = false;
 }
 bool CBlockIndexDB::FlushCacheToDisk(const uint32_t &nHeight,
                                      std::size_t CHUNK_ITEMS,
                                      bool fSync)
 {
-    if (mapCache.empty()) return true;
+    if (mapCache.empty() && m_pending_erases.empty()) return true;
 
     CDBBatch batch(*this);
-    std::size_t items = 0;
     std::size_t count = 0;
-    /* prune first so we don’t write obsolete entries */
-    Prune(nHeight, batch);
+    // Keep pruning in the first existing batch, including a prune-only batch.
+    if (!Prune(nHeight)) return false;
+    for (const auto& txid : m_pending_erases) batch.Erase(txid);
 
-    auto flush = [&]() {
-        if (batch.SizeEstimate() == 0) return true;
-        if (!WriteBatch(batch, fSync)) return false;
-        batch.Clear();
-        items = 0;
-        return true;
-    };
-
-    for (auto it = mapCache.begin(); it != mapCache.end(); ) {
-        batch.Write(it->first, it->second);
-        count++;
-        if (++items == CHUNK_ITEMS) {
-            if (!flush()) return false;
+    auto first = mapCache.begin();
+    do {
+        auto last = first;
+        std::size_t items{0};
+        while (last != mapCache.end() && (CHUNK_ITEMS == 0 || items < CHUNK_ITEMS)) {
+            batch.Write(last->first, last->second);
+            ++last;
+            ++items;
         }
-        // safe to erase now – record is durable
-        it = mapCache.erase(it);
-    }
-    if (!flush()) return false;
+        if (batch.SizeEstimate() == 0) break;
+        // Explicit erase retries retain their original synchronous requirement.
+        // A failed batch leaves its complete range and all deletion intents pending.
+        if (!WriteCacheBatch(batch, fSync || m_pending_erase_sync)) return false;
+        first = mapCache.erase(first, last);
+        m_pending_erases.clear();
+        m_pending_erase_sync = false;
+        count += items;
+        batch.Clear();
+    } while (first != mapCache.end());
 
     LogPrint(BCLog::SYS,
              "Flushed %zu block-index entries (chunk=%zu)\n",
@@ -7259,7 +12964,7 @@ bool CBlockIndexDB::FlushCacheToDisk(const uint32_t &nHeight,
     return true;
 }
 
-bool CBlockIndexDB::Prune(const uint32_t &nHeight, CDBBatch &batch) {
+bool CBlockIndexDB::Prune(const uint32_t &nHeight) {
     if(MAX_BLOCK_INDEX > nHeight) {
         LogPrintf("PruneIndex not enough blocks, not pruning\n");
         return true;
@@ -7273,7 +12978,11 @@ bool CBlockIndexDB::Prune(const uint32_t &nHeight, CDBBatch &batch) {
     while (pcursor->Valid()) {
         try {
             if(pcursor->GetValue(nValue) && nValue < cutoffHeight && pcursor->GetKey(nKey)) {
-                vecTXIDPairs.emplace_back(std::make_pair(nKey, nValue));
+                // A newer cached height supersedes an obsolete disk row.
+                const auto cached = mapCache.find(nKey);
+                if (cached == mapCache.end() || cached->second < cutoffHeight) {
+                    vecTXIDPairs.emplace_back(std::make_pair(nKey, nValue));
+                }
             }
             pcursor->Next();
         }
@@ -7281,9 +12990,10 @@ bool CBlockIndexDB::Prune(const uint32_t &nHeight, CDBBatch &batch) {
             return error("%s() : deserialize error", __func__);
         }
     }
-    return FlushErase(vecTXIDPairs, batch);
+    StageErase(vecTXIDPairs);
+    return true;
 }
-
+// SYSCOIN END: Retain pending index writes and deletions until batch success.
 
 void recursive_copy(const fs::path &src, const fs::path &dst)
 {
@@ -7341,6 +13051,7 @@ bool Chainstate::RestartGethNode() {
     }
 #endif
     StopGethNode();
+    m_chainman.ResetNEVMNetworkStart();
 #if ENABLE_ZMQ
     if (g_zmq_notification_interface) {
         UnregisterValidationInterface(g_zmq_notification_interface.get());
@@ -7370,12 +13081,8 @@ bool Chainstate::RestartGethNode() {
             return false;
         }
     }
-    bool bResponse = false;
-    GetMainSignals().NotifyNEVMComms("startnetwork", bResponse);
-    if(!bResponse) {
-        LogPrintf("RestartGethNode: Could not start network\n");
-        return false;
-    }
+    // The connect caller reconciles the applied prefix before requesting
+    // networking. Starting the process alone does not restore its buffer.
     return true;
 }
 fs::path FindExecPath(std::string &binArchitectureTag) {
@@ -7410,14 +13117,10 @@ namespace {
 int GetManagedBTCHeaderDefaultP2PPort(ChainType chain_type)
 {
     switch (chain_type) {
-    case ChainType::MAIN:
-        return DEFAULT_BTC_HEADER_MAINNET_P2P_PORT;
-    case ChainType::TESTNET:
-        return DEFAULT_BTC_HEADER_TESTNET_P2P_PORT;
-    case ChainType::SIGNET:
-        return DEFAULT_BTC_HEADER_SIGNET_P2P_PORT;
-    case ChainType::REGTEST:
-        return DEFAULT_BTC_HEADER_REGTEST_P2P_PORT;
+    case ChainType::MAIN: return DEFAULT_BTC_HEADER_MAINNET_P2P_PORT;
+    case ChainType::TESTNET: return DEFAULT_BTC_HEADER_TESTNET_P2P_PORT;
+    case ChainType::SIGNET: return DEFAULT_BTC_HEADER_SIGNET_P2P_PORT;
+    case ChainType::REGTEST: return DEFAULT_BTC_HEADER_REGTEST_P2P_PORT;
     }
     return DEFAULT_BTC_HEADER_MAINNET_P2P_PORT;
 }
@@ -7425,28 +13128,26 @@ int GetManagedBTCHeaderDefaultP2PPort(ChainType chain_type)
 int GetManagedBTCHeaderDefaultRPCPort(ChainType chain_type)
 {
     switch (chain_type) {
-    case ChainType::MAIN:
-        return DEFAULT_BTC_HEADER_MAINNET_RPC_PORT;
-    case ChainType::TESTNET:
-        return DEFAULT_BTC_HEADER_TESTNET_RPC_PORT;
-    case ChainType::SIGNET:
-        return DEFAULT_BTC_HEADER_SIGNET_RPC_PORT;
-    case ChainType::REGTEST:
-        return DEFAULT_BTC_HEADER_REGTEST_RPC_PORT;
+    case ChainType::MAIN: return DEFAULT_BTC_HEADER_MAINNET_RPC_PORT;
+    case ChainType::TESTNET: return DEFAULT_BTC_HEADER_TESTNET_RPC_PORT;
+    case ChainType::SIGNET: return DEFAULT_BTC_HEADER_SIGNET_RPC_PORT;
+    case ChainType::REGTEST: return DEFAULT_BTC_HEADER_REGTEST_RPC_PORT;
     }
     return DEFAULT_BTC_HEADER_MAINNET_RPC_PORT;
 }
 
 bool ParseManagedBTCHeaderPorts(int& p2p_port_out, int& rpc_port_out)
 {
-    const int64_t p2p_port = gArgs.GetIntArg("-btcheaderport", GetManagedBTCHeaderDefaultP2PPort(Params().GetChainType()));
-    const int64_t rpc_port = gArgs.GetIntArg("-btcheaderrpcport", GetManagedBTCHeaderDefaultRPCPort(Params().GetChainType()));
-    if (p2p_port < 1 || p2p_port > 65535) {
-        LogPrintf("Invalid -btcheaderport=%d (must be 1..65535)\n", p2p_port);
-        return false;
-    }
-    if (rpc_port < 1 || rpc_port > 65535) {
-        LogPrintf("Invalid -btcheaderrpcport=%d (must be 1..65535)\n", rpc_port);
+    const int64_t p2p_port{gArgs.GetIntArg(
+        "-btcheaderport",
+        GetManagedBTCHeaderDefaultP2PPort(Params().GetChainType()))};
+    const int64_t rpc_port{gArgs.GetIntArg(
+        "-btcheaderrpcport",
+        GetManagedBTCHeaderDefaultRPCPort(Params().GetChainType()))};
+    if (p2p_port < 1 || p2p_port > 65535 ||
+        rpc_port < 1 || rpc_port > 65535 || p2p_port == rpc_port) {
+        LogPrintf("Invalid managed BTC header ports (p2p=%d rpc=%d)\n",
+                  p2p_port, rpc_port);
         return false;
     }
     p2p_port_out = static_cast<int>(p2p_port);
@@ -7472,144 +13173,546 @@ std::string GetBTCHeaderCliFilename()
 #endif
 }
 
-void AppendBTCHeaderNetworkArg(std::vector<std::string>& args_out)
+void AppendBTCHeaderNetworkArg(std::vector<std::string>& args)
 {
     switch (Params().GetChainType()) {
-    case ChainType::MAIN:
-        break;
-    case ChainType::TESTNET:
-        args_out.emplace_back("-testnet=1");
-        break;
-    case ChainType::SIGNET:
-        args_out.emplace_back("-signet=1");
-        break;
-    case ChainType::REGTEST:
-        args_out.emplace_back("-regtest=1");
-        break;
+    case ChainType::MAIN: break;
+    case ChainType::TESTNET: args.emplace_back("-testnet=1"); break;
+    case ChainType::SIGNET: args.emplace_back("-signet=1"); break;
+    case ChainType::REGTEST: args.emplace_back("-regtest=1"); break;
     }
 }
 
-void AppendBTCHeaderNetworkArgCli(std::string& cmd_out)
+std::vector<std::string> BuildManagedBTCHeaderRPCArgs(
+    const fs::path& cli_binary, const fs::path& data_dir, int rpc_port)
 {
-    switch (Params().GetChainType()) {
-    case ChainType::MAIN:
-        break;
-    case ChainType::TESTNET:
-        cmd_out += " -testnet";
-        break;
-    case ChainType::SIGNET:
-        cmd_out += " -signet";
-        break;
-    case ChainType::REGTEST:
-        cmd_out += " -regtest";
-        break;
-    }
-}
-
-std::vector<std::string> BuildManagedBTCHeaderRPCArgs(const fs::path& cli_binary, const fs::path& data_dir, int rpc_port)
-{
-    std::vector<std::string> args;
-    args.emplace_back(fs::PathToString(cli_binary));
-    args.emplace_back(strprintf("-datadir=%s", fs::PathToString(data_dir)));
-    args.emplace_back(strprintf("-rpcport=%d", rpc_port));
+    std::vector<std::string> args{
+        fs::PathToString(cli_binary),
+        strprintf("-datadir=%s", fs::PathToString(data_dir)),
+        strprintf("-rpcport=%d", rpc_port),
+    };
     AppendBTCHeaderNetworkArg(args);
     return args;
 }
 
 fs::path ResolveFirstExistingPath(const std::vector<fs::path>& candidates)
 {
-    for (const auto& candidate : candidates) {
+    for (fs::path candidate : candidates) {
         if (candidate.empty()) continue;
-        fs::path preferred = candidate;
-        preferred.make_preferred();
-        if (fs::exists(preferred)) return preferred;
+        candidate.make_preferred();
+        if (fs::is_regular_file(candidate)) return candidate;
     }
-    return fs::path{};
+    return {};
 }
 
-fs::path ResolveManagedBTCHeaderBinaryPath(const fs::path& exec_path, const fs::path& datadir_base, const std::string& filename)
+fs::path AppendPath(fs::path base, const fs::path& child)
 {
-    const fs::path filename_path = fs::u8path(filename);
-    const std::string configured = gArgs.GetArg("-btcheaderbinary", "");
-    if (!configured.empty()) {
-        const fs::path configured_path = fs::u8path(configured).make_preferred();
-        if (fs::exists(configured_path)) return configured_path;
-        LogPrintf("Configured -btcheaderbinary not found: %s\n", fs::PathToString(configured_path));
-        return fs::path{};
-    }
+    base /= child;
+    return base;
+}
 
+fs::path ResolveManagedBTCHeaderBinaryPath(
+    const fs::path& exec_path, const fs::path& datadir_base,
+    const std::string& filename)
+{
+    const std::string configured{gArgs.GetArg("-btcheaderbinary", "")};
+    if (!configured.empty()) {
+        const fs::path path{fs::PathFromString(configured)};
+        if (fs::is_regular_file(path)) return path;
+        LogPrintf("Configured -btcheaderbinary not found: %s\n",
+                  fs::PathToString(path));
+        return {};
+    }
+    const fs::path name{fs::PathFromString(filename)};
     return ResolveFirstExistingPath({
-        exec_path / "../Resources" / "btcheadernode" / "bin" / filename_path,
-        exec_path / "bin" / "btcheadernode" / "bin" / filename_path,
-        exec_path / "btcheadernode" / "bin" / filename_path,
-        exec_path / "../Resources" / filename_path,
-        exec_path / filename_path,
-        exec_path / "daemon" / filename_path,
-        datadir_base / "btcheadernode" / "bin" / filename_path,
-        datadir_base / filename_path,
+        AppendPath(exec_path / "../Resources" / "btcheadernode" / "bin", name),
+        AppendPath(exec_path / "bin" / "btcheadernode" / "bin", name),
+        AppendPath(exec_path / "btcheadernode" / "bin", name),
+        AppendPath(exec_path / "../Resources", name),
+        AppendPath(exec_path, name),
+        AppendPath(exec_path / "daemon", name),
+        AppendPath(datadir_base / "btcheadernode" / "bin", name),
 #ifndef WIN32
-        fs::u8path("/usr/local/bin") / filename_path,
-        fs::u8path("/usr/bin") / filename_path,
+        AppendPath(fs::PathFromString("/usr/local/bin"), name),
+        AppendPath(fs::PathFromString("/usr/bin"), name),
 #endif
     });
 }
 
-fs::path ResolveManagedBTCHeaderCliPath(const fs::path& bitcoind_path, const fs::path& exec_path, const fs::path& datadir_base, const std::string& filename)
+fs::path ResolveManagedBTCHeaderCliPath(
+    const fs::path& bitcoind_path, const fs::path& exec_path,
+    const fs::path& datadir_base, const std::string& filename)
 {
-    const fs::path filename_path = fs::u8path(filename);
-    fs::path sibling_cli = bitcoind_path.parent_path();
-    sibling_cli /= filename_path;
-    const std::string configured = gArgs.GetArg("-btcheaderclibinary", "");
+    const std::string configured{gArgs.GetArg("-btcheaderclibinary", "")};
     if (!configured.empty()) {
-        const fs::path configured_path = fs::u8path(configured).make_preferred();
-        if (fs::exists(configured_path)) return configured_path;
-        LogPrintf("Configured -btcheaderclibinary not found: %s\n", fs::PathToString(configured_path));
-        return fs::path{};
+        const fs::path path{fs::PathFromString(configured)};
+        if (fs::is_regular_file(path)) return path;
+        LogPrintf("Configured -btcheaderclibinary not found: %s\n",
+                  fs::PathToString(path));
+        return {};
     }
-
+    const fs::path name{fs::PathFromString(filename)};
     return ResolveFirstExistingPath({
-        sibling_cli,
-        exec_path / "../Resources" / "btcheadernode" / "bin" / filename_path,
-        exec_path / "bin" / "btcheadernode" / "bin" / filename_path,
-        exec_path / "btcheadernode" / "bin" / filename_path,
-        exec_path / "../Resources" / filename_path,
-        exec_path / filename_path,
-        exec_path / "daemon" / filename_path,
-        datadir_base / "btcheadernode" / "bin" / filename_path,
-        datadir_base / filename_path,
+        AppendPath(bitcoind_path.parent_path(), name),
+        AppendPath(exec_path / "../Resources" / "btcheadernode" / "bin", name),
+        AppendPath(exec_path / "bin" / "btcheadernode" / "bin", name),
+        AppendPath(exec_path / "btcheadernode" / "bin", name),
+        AppendPath(exec_path / "../Resources", name),
+        AppendPath(exec_path, name),
+        AppendPath(exec_path / "daemon", name),
+        AppendPath(datadir_base / "btcheadernode" / "bin", name),
 #ifndef WIN32
-        fs::u8path("/usr/local/bin") / filename_path,
-        fs::u8path("/usr/bin") / filename_path,
+        AppendPath(fs::PathFromString("/usr/local/bin"), name),
+        AppendPath(fs::PathFromString("/usr/bin"), name),
 #endif
     });
 }
 
-std::vector<std::string> SanitizeBTCHeaderNodeCmdLine(const std::vector<std::string>& extra_args, const fs::path& binary_url, const fs::path& data_dir, int p2p_port, int rpc_port, bool force_reindex)
+bool IsUnsafeManagedBTCHeaderDataDir(const fs::path& data_dir,
+                                     const fs::path& syscoin_data_dir)
 {
-    std::vector<std::string> cmd;
-    cmd.push_back(fs::PathToString(binary_url));
-    for (const auto& arg : extra_args) cmd.push_back(arg);
-    cmd.push_back("-headersonly=1");
-    cmd.push_back("-server=1");
-    cmd.push_back("-daemon=0");
-    cmd.push_back(strprintf("-datadir=%s", fs::PathToString(data_dir)));
-    cmd.push_back(strprintf("-port=%d", p2p_port));
-    cmd.push_back(strprintf("-rpcport=%d", rpc_port));
-    if (force_reindex) {
-        cmd.push_back("-reindex=1");
+    try {
+        // SYSCOIN: Resolve all existing symlink components before doing ancestry and
+        // equivalence checks. The caller repeats this after mkdir and passes
+        // the resolved path to both daemon and CLI, so an alias cannot turn a
+        // dedicated child datadir into the Syscoin datadir or filesystem root.
+        const fs::path child{
+            fs::weakly_canonical(fs::absolute(data_dir))};
+        const fs::path syscoin{
+            fs::weakly_canonical(fs::absolute(syscoin_data_dir))};
+        if (child.empty() || child == child.root_path() || child == syscoin) {
+            return true;
+        }
+        auto child_it{child.begin()};
+        auto syscoin_it{syscoin.begin()};
+        while (child_it != child.end() && syscoin_it != syscoin.end() &&
+               *child_it == *syscoin_it) {
+            ++child_it;
+            ++syscoin_it;
+        }
+        if (child_it == child.end()) return true;
+        if ((fs::exists(child) && !fs::is_directory(child)) ||
+            !fs::is_directory(syscoin) ||
+            (fs::exists(child) && fs::equivalent(child, syscoin))) {
+            return true;
+        }
+    } catch (const fs::filesystem_error&) {
+        return true;
     }
-    AppendBTCHeaderNetworkArg(cmd);
-    return cmd;
+    return false;
 }
 
-std::string BuildManagedBTCHeaderRPCCommand(const fs::path& cli_binary, const fs::path& data_dir, int rpc_port)
+bool IsProtectedBTCHeaderArg(const std::string& arg)
 {
-    std::string cmd = strprintf("%s -datadir=%s -rpcport=%d",
-        fs::quoted(fs::PathToString(cli_binary)),
-        fs::quoted(fs::PathToString(data_dir)),
-        rpc_port);
-    AppendBTCHeaderNetworkArgCli(cmd);
-    return cmd;
+    if (arg.empty() || arg.front() != '-') return false;
+    const std::size_t name_end{arg.find('=')};
+    std::string name{arg.substr(0, name_end)};
+    while (!name.empty() && name.front() == '-') name.erase(name.begin());
+    if (name.rfind("no", 0) == 0) name.erase(0, 2);
+    // SYSCOIN: Headers-only must remain transaction-relay-free even if an
+    // operator appends a conflicting child argument after the fixed profile.
+    static const std::array<const char*, 13> protected_names{
+        "chain", "testnet", "signet", "regtest", "datadir", "port",
+        "rpcport", "server", "daemon", "headersonly", "blocksonly", "reindex",
+        "uacomment"};
+    return std::any_of(protected_names.begin(), protected_names.end(),
+                       [&](const char* protected_name) {
+                           return name == protected_name;
+                       });
+}
+
+std::optional<std::vector<std::string>> BuildManagedBTCHeaderNodeArgs(
+    const std::vector<std::string>& extra_args,
+    const fs::path& binary, const fs::path& data_dir,
+    int p2p_port, int rpc_port, bool force_reindex,
+    const std::string& owner_comment)
+{
+    if (extra_args.size() > 64 || owner_comment.empty() ||
+        owner_comment.size() > 128 ||
+        owner_comment.find_first_not_of(
+            "abcdefghijklmnopqrstuvwxyz0123456789_") != std::string::npos) {
+        return std::nullopt;
+    }
+    std::vector<std::string> args{fs::PathToString(binary)};
+    for (const std::string& arg : extra_args) {
+        if (arg.size() > 4096 || arg.find('\0') != std::string::npos ||
+            IsProtectedBTCHeaderArg(arg)) {
+            return std::nullopt;
+        }
+        args.push_back(arg);
+    }
+    args.emplace_back("-headersonly=1");
+    args.emplace_back("-blocksonly=1");
+    args.emplace_back("-server=1");
+    args.emplace_back("-daemon=0");
+    args.emplace_back(strprintf("-datadir=%s", fs::PathToString(data_dir)));
+    args.emplace_back(strprintf("-port=%d", p2p_port));
+    args.emplace_back(strprintf("-rpcport=%d", rpc_port));
+    args.emplace_back("-uacomment=" + owner_comment);
+    if (force_reindex) args.emplace_back("-reindex=1");
+    AppendBTCHeaderNetworkArg(args);
+    return args;
+}
+
+// SYSCOIN: The owner record persists the observed Bitcoin tip and wall-clock
+// time so a child restart cannot reset the configured no-progress/eclipse window.
+constexpr int MANAGED_BTC_HEADER_OWNER_VERSION{1};
+constexpr std::size_t MAX_MANAGED_BTC_HEADER_OWNER_FILE{8192};
+constexpr std::string_view MANAGED_BTC_HEADER_OWNER_FILENAME{
+    ".syscoin-btcheader-owner.json"};
+constexpr std::string_view MANAGED_BTC_HEADER_OWNER_PREFIX{
+    "syscoinbtcc_"};
+constexpr int64_t MANAGED_BTC_HEADER_OWNER_MAX_FUTURE_TIME{300};
+
+struct ManagedBTCHeaderOwnerRecord {
+    std::string comment;
+    fs::path node_binary;
+    fs::path cli_binary;
+    std::string chain;
+    int p2p_port{0};
+    int rpc_port{0};
+    int64_t pid{-1};
+    int64_t last_tip_height{-1};
+    uint256 last_tip_hash;
+    int64_t last_progress_time{0};
+};
+
+std::optional<ManagedBTCHeaderOwnerRecord> g_managed_btcheader_owner_record
+    GUARDED_BY(cs_btcheader);
+
+bool IsValidManagedBTCHeaderOwnerComment(const std::string& comment)
+{
+    if (comment.size() != MANAGED_BTC_HEADER_OWNER_PREFIX.size() + 64 ||
+        comment.compare(0, MANAGED_BTC_HEADER_OWNER_PREFIX.size(),
+                        MANAGED_BTC_HEADER_OWNER_PREFIX.data(),
+                        MANAGED_BTC_HEADER_OWNER_PREFIX.size()) != 0) {
+        return false;
+    }
+    const std::string token{
+        comment.substr(MANAGED_BTC_HEADER_OWNER_PREFIX.size())};
+    return IsHex(token) && token.find_first_not_of('0') != std::string::npos;
+}
+
+bool ParseOwnerInteger(const UniValue& object, const char* key,
+                       int64_t& value)
+{
+    const UniValue& encoded{object.find_value(key)};
+    if (!encoded.isNum()) return false;
+    try {
+        value = encoded.getInt<int64_t>();
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+bool ReadManagedBTCHeaderOwnerRecord(
+    const fs::path& owner_path, const fs::path& expected_node_binary,
+    const fs::path& expected_cli_binary, const std::string& expected_chain,
+    int expected_p2p_port, int expected_rpc_port,
+    ManagedBTCHeaderOwnerRecord& record, std::string& error)
+{
+    error.clear();
+    try {
+        if (!fs::exists(owner_path)) {
+            error = "owner-record-missing";
+            return false;
+        }
+        if (fs::is_symlink(owner_path) || !fs::is_regular_file(owner_path)) {
+            error = "owner-record-not-regular-file";
+            return false;
+        }
+    } catch (const fs::filesystem_error& e) {
+        error = strprintf("owner-record-stat-failed:%s", e.what());
+        return false;
+    }
+
+    const auto [read_ok, contents]{ReadBinaryFile(
+        owner_path, MAX_MANAGED_BTC_HEADER_OWNER_FILE + 1)};
+    if (!read_ok || contents.size() > MAX_MANAGED_BTC_HEADER_OWNER_FILE) {
+        error = "owner-record-read-failed";
+        return false;
+    }
+    UniValue object;
+    if (!object.read(contents) || !object.isObject()) {
+        error = "owner-record-invalid-json";
+        return false;
+    }
+
+    int64_t version{0};
+    int64_t p2p_port{0};
+    int64_t rpc_port{0};
+    int64_t pid{-1};
+    int64_t last_tip_height{-1};
+    int64_t last_progress_time{0};
+    const UniValue& comment{object.find_value("comment")};
+    const UniValue& node_binary{object.find_value("node_binary")};
+    const UniValue& cli_binary{object.find_value("cli_binary")};
+    const UniValue& chain{object.find_value("chain")};
+    const UniValue& last_tip_hash{object.find_value("last_tip_hash")};
+    if (!ParseOwnerInteger(object, "version", version) ||
+        version != MANAGED_BTC_HEADER_OWNER_VERSION ||
+        !ParseOwnerInteger(object, "p2p_port", p2p_port) ||
+        !ParseOwnerInteger(object, "rpc_port", rpc_port) ||
+        !ParseOwnerInteger(object, "pid", pid) ||
+        !ParseOwnerInteger(object, "last_tip_height", last_tip_height) ||
+        !ParseOwnerInteger(object, "last_progress_time", last_progress_time) ||
+        !comment.isStr() || !node_binary.isStr() || !cli_binary.isStr() ||
+        !chain.isStr() || !last_tip_hash.isStr() ||
+        !IsValidManagedBTCHeaderOwnerComment(comment.get_str()) ||
+        p2p_port != expected_p2p_port || rpc_port != expected_rpc_port ||
+        (pid != -1 && pid <= 0)) {
+        error = "owner-record-invalid-fields";
+        return false;
+    }
+
+    uint256 parsed_tip_hash;
+    if (last_tip_hash.get_str().size() != 64 ||
+        !IsHex(last_tip_hash.get_str())) {
+        error = "owner-record-invalid-progress";
+        return false;
+    }
+    parsed_tip_hash.SetHex(last_tip_hash.get_str());
+    const bool progress_unset{
+        last_tip_height == -1 && parsed_tip_hash.IsNull() &&
+        last_progress_time == 0};
+    const bool progress_set{
+        last_tip_height >= 0 && !parsed_tip_hash.IsNull() &&
+        last_progress_time > 0 &&
+        last_progress_time <=
+            GetTime() + MANAGED_BTC_HEADER_OWNER_MAX_FUTURE_TIME};
+    if (!progress_unset && !progress_set) {
+        error = "owner-record-invalid-progress";
+        return false;
+    }
+
+    record = ManagedBTCHeaderOwnerRecord{
+        comment.get_str(), fs::PathFromString(node_binary.get_str()),
+        fs::PathFromString(cli_binary.get_str()), chain.get_str(),
+        static_cast<int>(p2p_port), static_cast<int>(rpc_port), pid,
+        last_tip_height, parsed_tip_hash, last_progress_time};
+    if (record.node_binary != expected_node_binary ||
+        record.cli_binary != expected_cli_binary ||
+        record.chain != expected_chain) {
+        error = "owner-record-config-mismatch";
+        return false;
+    }
+    return true;
+}
+
+bool WriteManagedBTCHeaderOwnerRecord(
+    const fs::path& owner_path, const ManagedBTCHeaderOwnerRecord& record,
+    std::string& error)
+{
+    error.clear();
+    if (!IsValidManagedBTCHeaderOwnerComment(record.comment) ||
+        record.node_binary.empty() || record.cli_binary.empty() ||
+        record.chain.empty() || record.p2p_port <= 0 ||
+        record.rpc_port <= 0 || (record.pid != -1 && record.pid <= 0)) {
+        error = "owner-record-invalid-fields";
+        return false;
+    }
+    const bool progress_unset{
+        record.last_tip_height == -1 && record.last_tip_hash.IsNull() &&
+        record.last_progress_time == 0};
+    const bool progress_set{
+        record.last_tip_height >= 0 && !record.last_tip_hash.IsNull() &&
+        record.last_progress_time > 0 &&
+        record.last_progress_time <=
+            GetTime() + MANAGED_BTC_HEADER_OWNER_MAX_FUTURE_TIME};
+    if (!progress_unset && !progress_set) {
+        error = "owner-record-invalid-progress";
+        return false;
+    }
+
+    UniValue object(UniValue::VOBJ);
+    object.pushKV("version", MANAGED_BTC_HEADER_OWNER_VERSION);
+    object.pushKV("comment", record.comment);
+    object.pushKV("node_binary", fs::PathToString(record.node_binary));
+    object.pushKV("cli_binary", fs::PathToString(record.cli_binary));
+    object.pushKV("chain", record.chain);
+    object.pushKV("p2p_port", record.p2p_port);
+    object.pushKV("rpc_port", record.rpc_port);
+    object.pushKV("pid", record.pid);
+    object.pushKV("last_tip_height", record.last_tip_height);
+    object.pushKV("last_tip_hash", record.last_tip_hash.GetHex());
+    object.pushKV("last_progress_time", record.last_progress_time);
+
+    const fs::path temporary_path{fs::PathFromString(
+        fs::PathToString(owner_path) + ".tmp." + record.comment)};
+    if (!WriteBinaryFile(temporary_path, object.write() + "\n") ||
+        !RenameOver(temporary_path, owner_path)) {
+        try {
+            fs::remove(temporary_path);
+        } catch (const fs::filesystem_error&) {
+        }
+        error = "owner-record-write-failed";
+        return false;
+    }
+    return true;
+}
+
+void RestoreManagedBTCHeaderProgress(
+    const ManagedBTCHeaderOwnerRecord& record)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_btcheader)
+{
+    g_btcheader_last_tip_height = record.last_tip_height;
+    g_btcheader_last_tip_hash = record.last_tip_hash;
+    g_btcheader_last_progress_time = record.last_progress_time;
+}
+
+bool PersistManagedBTCHeaderProgress(int64_t tip_height,
+                                     const uint256& tip_hash,
+                                     int64_t progress_time,
+                                     std::string& error)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_btcheader)
+{
+    if (!g_managed_btcheader_owner_record ||
+        g_managed_btcheader_owner_path.empty()) {
+        error = "owner-record-runtime-missing";
+        return false;
+    }
+    ManagedBTCHeaderOwnerRecord updated{
+        *g_managed_btcheader_owner_record};
+    updated.last_tip_height = tip_height;
+    updated.last_tip_hash = tip_hash;
+    updated.last_progress_time = progress_time;
+    if (!WriteManagedBTCHeaderOwnerRecord(
+            g_managed_btcheader_owner_path, updated, error)) {
+        return false;
+    }
+    g_managed_btcheader_owner_record = std::move(updated);
+    return true;
+}
+
+void PersistStoppedManagedBTCHeaderOwner()
+    EXCLUSIVE_LOCKS_REQUIRED(cs_btcheader)
+{
+    if (!g_managed_btcheader_owner_record ||
+        g_managed_btcheader_owner_path.empty()) {
+        return;
+    }
+    ManagedBTCHeaderOwnerRecord stopped{
+        *g_managed_btcheader_owner_record};
+    stopped.pid = -1;
+    std::string error;
+    if (!WriteManagedBTCHeaderOwnerRecord(
+            g_managed_btcheader_owner_path, stopped, error)) {
+        // SYSCOIN: The previous record still contains the same authenticated token and
+        // progress observation. Its PID is diagnostic only and is never used
+        // as process ownership, so retaining it is safer than erasing state.
+        LogPrintf("Unable to mark managed Bitcoin header owner stopped: %s\n",
+                  error);
+        return;
+    }
+    g_managed_btcheader_owner_record = std::move(stopped);
+}
+
+bool VerifyManagedBTCHeaderEndpoint(const std::string& owner_comment,
+                                    std::string& error)
+{
+    if (!IsValidManagedBTCHeaderOwnerComment(owner_comment)) {
+        error = "owner-comment-invalid";
+        return false;
+    }
+    UniValue chain_info;
+    if (!llmq::pq::RunConfiguredBTCHeaderCommand(
+            {"getblockchaininfo"}, chain_info, error) ||
+        !chain_info.isObject()) {
+        if (error.empty()) error = "managed-chaininfo-invalid";
+        return false;
+    }
+    const UniValue& chain{chain_info.find_value("chain")};
+    const UniValue& headers_only{chain_info.find_value("headersonly")};
+    if (!chain.isStr() || chain.get_str() != Params().GetChainTypeString() ||
+        !headers_only.isBool() || !headers_only.get_bool()) {
+        error = "managed-endpoint-not-expected-headers-only-chain";
+        return false;
+    }
+
+    UniValue network_info;
+    if (!llmq::pq::RunConfiguredBTCHeaderCommand(
+            {"getnetworkinfo"}, network_info, error) ||
+        !network_info.isObject()) {
+        if (error.empty()) error = "managed-networkinfo-invalid";
+        return false;
+    }
+    const UniValue& subversion{network_info.find_value("subversion")};
+    if (!subversion.isStr() ||
+        subversion.get_str().find(owner_comment) == std::string::npos) {
+        error = "managed-endpoint-owner-token-mismatch";
+        return false;
+    }
+    error.clear();
+    return true;
+}
+
+#ifndef WIN32
+// SYSCOIN: Distinguish a child we just reaped from a PID that was never ours.
+// Only the former authorizes deleting the durable ownership record and
+// starting a replacement without first authenticating an orphaned endpoint.
+enum class OwnedBTCHeaderChildState : uint8_t {
+    MISSING = 0,
+    RUNNING,
+    EXITED_REAPED,
+    NOT_OWNED,
+};
+
+OwnedBTCHeaderChildState GetOwnedBTCHeaderChildState(
+    std::string* reason = nullptr)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_btcheader)
+{
+    if (btcheaderpid <= 0) {
+        if (reason != nullptr) *reason = "pid-missing";
+        return OwnedBTCHeaderChildState::MISSING;
+    }
+    int status{0};
+    pid_t result{-1};
+    do {
+        result = waitpid(btcheaderpid, &status, WNOHANG);
+    } while (result == -1 && errno == EINTR);
+    if (result == 0) {
+        if (reason != nullptr) reason->clear();
+        return OwnedBTCHeaderChildState::RUNNING;
+    }
+    if (result == btcheaderpid) {
+        if (reason != nullptr) {
+            *reason = strprintf("owned-child-exited(status=%d)", status);
+        }
+        btcheaderpid = -1;
+        return OwnedBTCHeaderChildState::EXITED_REAPED;
+    }
+    // SYSCOIN: ECHILD means this PID is not ours (for example after a syscoind crash).
+    // Never fall back to kill(pid, 0): PID reuse could otherwise make a later
+    // Stop or watchdog signal an unrelated process.
+    if (reason != nullptr) {
+        *reason = strprintf("owned-child-wait-failed(errno=%d)", errno);
+    }
+    btcheaderpid = -1;
+    return OwnedBTCHeaderChildState::NOT_OWNED;
+}
+#endif
+
+void ClearManagedBTCHeaderRuntime(bool remove_owner_record)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_btcheader)
+{
+    if (remove_owner_record && !g_managed_btcheader_owner_path.empty()) {
+        try {
+            fs::remove(g_managed_btcheader_owner_path);
+        } catch (const fs::filesystem_error& e) {
+            LogPrintf("Failed removing managed Bitcoin header ownership "
+                      "record %s: %s\n",
+                      fs::PathToString(g_managed_btcheader_owner_path),
+                      e.what());
+        }
+    }
+    btcheaderpid = -1;
+    g_managed_btcheader_adopted = false;
+    g_managed_btcheader_owner_token.clear();
+    g_managed_btcheader_owner_path.clear();
+    g_managed_btcheader_owner_record.reset();
+    g_managed_btcheader_rpc_args.clear();
+    g_btcheader_startup_time.reset();
 }
 
 #ifndef WIN32
@@ -7974,12 +14077,20 @@ bool Chainstate::DoGethStartupProcedure() {
 bool Chainstate::RestartBTCHeaderNode(bool force_reindex)
 {
     LOCK(cs_btcheader);
-
     if (!gArgs.GetBoolArg("-btcheadermanaged", DEFAULT_BTC_HEADER_MANAGED)) {
-        LogPrintf("%s: Managed BTC header node is disabled (-btcheadermanaged=0)\n", __func__);
+        LogPrintf("%s: managed Bitcoin header node is disabled\n", __func__);
         return false;
     }
-    StopBTCHeaderNodeInternal(/*bOnStart=*/false);
+    const bool had_runtime{btcheaderpid > 0 || g_managed_btcheader_adopted ||
+                           !g_managed_btcheader_owner_token.empty() ||
+                           !g_managed_btcheader_rpc_args.empty()};
+    if (!StopBTCHeaderNodeInternal(/*bOnStart=*/false) && had_runtime) {
+        LogPrintf("%s: authenticated managed Bitcoin header backend did not "
+                  "stop; refusing to start or adopt a replacement\n", __func__);
+        return false;
+    }
+    // SYSCOIN: Start/adoption restores the persisted observation. A managed
+    // child restart must never grant a fresh no-progress window.
     return StartBTCHeaderNodeInternal(force_reindex);
 }
 
@@ -7991,101 +14102,223 @@ bool Chainstate::StartBTCHeaderNode(bool force_reindex)
 
 bool Chainstate::StartBTCHeaderNodeInternal(bool force_reindex)
 {
-
     if (!gArgs.GetBoolArg("-btcheadermanaged", DEFAULT_BTC_HEADER_MANAGED)) {
-        LogPrintf("%s: Managed BTC header node is disabled (-btcheadermanaged=0)\n", __func__);
+        LogPrintf("%s: managed Bitcoin header node is disabled\n", __func__);
+        return false;
+    }
+#ifdef WIN32
+    LogPrintf("%s: managed Bitcoin header node is unsupported on Windows\n",
+              __func__);
+    return false;
+#else
+    // SYSCOIN: The bundled helper is pinned to Bitcoin's standard signet.
+    // Syscoin signet deployments can use different challenge parameters, so
+    // silently treating that view as authoritative would approve the wrong
+    // chain. Require an explicitly configured external backend instead.
+    if (Params().GetChainType() == ChainType::SIGNET) {
+        LogPrintf("%s: managed Bitcoin header node is unsupported on signet; "
+                  "use -btcheadermanaged=0 with an explicit -btcheadercmd\n",
+                  __func__);
         return false;
     }
 
-#ifdef WIN32
-    LogPrintf("%s: Managed BTC header node is not supported on WIN32 builds\n", __func__);
-    return false;
-#else
-    LogPrintf("%s: Starting managed BTC header node\n", __func__);
+    const OwnedBTCHeaderChildState child_state{
+        GetOwnedBTCHeaderChildState()};
+    if (child_state == OwnedBTCHeaderChildState::RUNNING) {
+        LogPrintf("%s: managed Bitcoin header node is already running (pid=%d)\n",
+                  __func__, btcheaderpid);
+        return true;
+    }
+    if (child_state == OwnedBTCHeaderChildState::EXITED_REAPED) {
+        // SYSCOIN: The waitpid result proves this was our child and prevents PID reuse
+        // until it was reaped, so its ownership record can be retired safely.
+        PersistStoppedManagedBTCHeaderOwner();
+        ClearManagedBTCHeaderRuntime(/*remove_owner_record=*/false);
+    } else if (child_state == OwnedBTCHeaderChildState::NOT_OWNED) {
+        // SYSCOIN: Keep the record for authenticated orphan adoption below. Never use
+        // the stale numeric PID as proof that signalling is safe.
+        btcheaderpid = -1;
+    }
+    if (g_managed_btcheader_adopted &&
+        !g_managed_btcheader_owner_token.empty()) {
+        std::string adoption_error;
+        if (VerifyManagedBTCHeaderEndpoint(
+                g_managed_btcheader_owner_token, adoption_error)) {
+            return true;
+        }
+        LogPrintf("%s: previously adopted Bitcoin header backend is no "
+                  "longer ready: %s\n", __func__, adoption_error);
+        g_managed_btcheader_adopted = false;
+    }
 
     int p2p_port{0};
     int rpc_port{0};
-    if (!ParseManagedBTCHeaderPorts(p2p_port, rpc_port)) {
-        return false;
-    }
+    if (!ParseManagedBTCHeaderPorts(p2p_port, rpc_port)) return false;
 
-    std::string binArchitectureTag;
-    const fs::path exec_path = FindExecPath(binArchitectureTag);
-    const fs::path node_binary = ResolveManagedBTCHeaderBinaryPath(exec_path, m_chainman.m_options.datadir_base, GetBTCHeaderNodeFilename());
+    std::string architecture;
+    const fs::path exec_path{FindExecPath(architecture)};
+    fs::path node_binary{ResolveManagedBTCHeaderBinaryPath(
+        exec_path, m_chainman.m_options.datadir_base,
+        GetBTCHeaderNodeFilename())};
     if (node_binary.empty()) {
-        LogPrintf("%s: Could not locate bitcoind for managed BTC header node. Configure -btcheaderbinary.\n", __func__);
+        LogPrintf("%s: bitcoind not found; set -btcheaderbinary or build the "
+                  "pinned btcheadernode helper\n", __func__);
         return false;
     }
-
-    const fs::path cli_binary = ResolveManagedBTCHeaderCliPath(node_binary, exec_path, m_chainman.m_options.datadir_base, GetBTCHeaderCliFilename());
+    fs::path cli_binary{ResolveManagedBTCHeaderCliPath(
+        node_binary, exec_path, m_chainman.m_options.datadir_base,
+        GetBTCHeaderCliFilename())};
     if (cli_binary.empty()) {
-        LogPrintf("%s: Could not locate bitcoin-cli for managed BTC header node. Configure -btcheaderclibinary.\n", __func__);
+        LogPrintf("%s: bitcoin-cli not found; set -btcheaderclibinary\n",
+                  __func__);
+        return false;
+    }
+    try {
+        node_binary = fs::weakly_canonical(fs::absolute(node_binary));
+        cli_binary = fs::weakly_canonical(fs::absolute(cli_binary));
+    } catch (const fs::filesystem_error& e) {
+        LogPrintf("%s: failed to canonicalize managed Bitcoin binaries: %s\n",
+                  __func__, e.what());
         return false;
     }
 
-    const fs::path data_dir = gArgs.GetPathArg("-btcheaderdatadir", m_chainman.m_options.datadir / "btcheader");
-    const fs::path log_path = m_chainman.m_options.datadir / "btcheadernode.log";
+    fs::path data_dir{gArgs.GetPathArg(
+        "-btcheaderdatadir", m_chainman.m_options.datadir / "btcheader")};
+    if (IsUnsafeManagedBTCHeaderDataDir(data_dir,
+                                       m_chainman.m_options.datadir)) {
+        LogPrintf("%s: refusing unsafe -btcheaderdatadir=%s\n", __func__,
+                  fs::PathToString(data_dir));
+        return false;
+    }
     try {
         fs::create_directories(data_dir);
+        data_dir = fs::weakly_canonical(fs::absolute(data_dir));
     } catch (const fs::filesystem_error& e) {
-        LogPrintf("%s: Failed to create managed BTC header datadir %s (%s)\n", __func__, fs::PathToString(data_dir), e.what());
+        LogPrintf("%s: failed to create managed Bitcoin header datadir %s: %s\n",
+                  __func__, fs::PathToString(data_dir), e.what());
+        return false;
+    }
+    if (IsUnsafeManagedBTCHeaderDataDir(data_dir,
+                                       m_chainman.m_options.datadir)) {
+        LogPrintf("%s: managed Bitcoin header datadir became unsafe after "
+                  "canonicalization: %s\n", __func__,
+                  fs::PathToString(data_dir));
         return false;
     }
 
-    std::vector<std::string> cmdline = SanitizeBTCHeaderNodeCmdLine(gArgs.GetArgs("-btcheadercommandline"), node_binary, data_dir, p2p_port, rpc_port, force_reindex);
+    g_managed_btcheader_rpc_args =
+        BuildManagedBTCHeaderRPCArgs(cli_binary, data_dir, rpc_port);
+    g_managed_btcheader_owner_path = data_dir /
+        fs::PathFromString(std::string{MANAGED_BTC_HEADER_OWNER_FILENAME});
 
-    g_managed_btcheader_rpc_args = BuildManagedBTCHeaderRPCArgs(cli_binary, data_dir, rpc_port);
-    g_managed_btcheader_rpc_cmd = BuildManagedBTCHeaderRPCCommand(cli_binary, data_dir, rpc_port);
-    if (gArgs.IsArgSet("-btcheadercmd")) {
-        LogPrintf("%s: Overriding user-provided -btcheadercmd with managed local bitcoin-cli command\n", __func__);
-    }
-    gArgs.ForceSetArg("-btcheadercmd", g_managed_btcheader_rpc_cmd);
-
-    // Best-effort cleanup for stale managed instances from previous unclean exits.
-    if (!g_managed_btcheader_rpc_args.empty()) {
-        std::vector<std::string> stop_cmd = g_managed_btcheader_rpc_args;
-        stop_cmd.emplace_back("stop");
-        try {
-            (void)RunCommandParseJSON(stop_cmd);
-            UninterruptibleSleep(std::chrono::milliseconds{200});
-        } catch (const std::exception&) {
-            // Ignore when no previous node is reachable.
-        }
-    }
-
-    std::string spawn_error;
-    if (!SpawnDetachedProcessWithStderrLog(cmdline, log_path, btcheaderpid, spawn_error)) {
-        LogPrintf("%s: Could not start managed BTC header node (%s)\n", __func__, spawn_error);
-        btcheaderpid = -1;
-        g_managed_btcheader_rpc_cmd.clear();
-        g_managed_btcheader_rpc_args.clear();
-        return false;
-    }
-
-    LogPrintf("%s: Managed BTC header node started with pid %d (reindex=%d)\n", __func__, btcheaderpid, force_reindex ? 1 : 0);
-
-    // Ensure the child stays alive beyond initial spawn, without depending on
-    // external signer support for JSON command execution.
-    for (int i = 0; i < 15; ++i) {
-        int status = 0;
-        const pid_t result = waitpid(btcheaderpid, &status, WNOHANG);
-        if (result == btcheaderpid) {
-            LogPrintf("%s: Managed BTC header node exited early with status %d\n", __func__, status);
+    ManagedBTCHeaderOwnerRecord owner_record;
+    std::string owner_error;
+    const bool reusable_owner_record{ReadManagedBTCHeaderOwnerRecord(
+        g_managed_btcheader_owner_path, node_binary, cli_binary,
+        Params().GetChainTypeString(), p2p_port, rpc_port, owner_record,
+        owner_error)};
+    if (reusable_owner_record) {
+        g_managed_btcheader_owner_token = owner_record.comment;
+        g_managed_btcheader_owner_record = owner_record;
+        RestoreManagedBTCHeaderProgress(owner_record);
+        std::string adoption_error;
+        if (VerifyManagedBTCHeaderEndpoint(owner_record.comment,
+                                           adoption_error)) {
+            g_managed_btcheader_adopted = true;
             btcheaderpid = -1;
-            g_managed_btcheader_rpc_cmd.clear();
-            g_managed_btcheader_rpc_args.clear();
+            LogPrintf("%s: adopted the authenticated orphaned managed "
+                      "Bitcoin headers-only backend (recorded pid=%d)\n",
+                      __func__, owner_record.pid);
+            return true;
+        }
+        LogPrintf("%s: ownership record found but its backend is not ready "
+                  "for adoption: %s\n", __func__, adoption_error);
+    } else if (owner_error != "owner-record-missing") {
+        LogPrintf("%s: existing ownership record is unusable: %s\n",
+                  __func__, owner_error);
+        // SYSCOIN: Never overwrite a corrupt progress/ownership record and
+        // grant a fresh eclipse window. Operators must resolve the dedicated
+        // backend state explicitly.
+        ClearManagedBTCHeaderRuntime(/*remove_owner_record=*/false);
+        return false;
+    }
+
+    if (!reusable_owner_record) {
+        owner_record = ManagedBTCHeaderOwnerRecord{
+            std::string{MANAGED_BTC_HEADER_OWNER_PREFIX} +
+                GetRandHash().GetHex(),
+            node_binary, cli_binary, Params().GetChainTypeString(),
+            p2p_port, rpc_port, -1, g_btcheader_last_tip_height,
+            g_btcheader_last_tip_hash, g_btcheader_last_progress_time};
+        if (!WriteManagedBTCHeaderOwnerRecord(
+                g_managed_btcheader_owner_path, owner_record,
+                owner_error)) {
+            LogPrintf("%s: cannot persist managed Bitcoin header ownership "
+                      "record before spawn: %s\n", __func__, owner_error);
+            ClearManagedBTCHeaderRuntime(/*remove_owner_record=*/false);
             return false;
         }
-        if (result == -1 && errno == ECHILD) {
-            LogPrintf("%s: Managed BTC header node exited early (ECHILD)\n", __func__);
-            btcheaderpid = -1;
-            g_managed_btcheader_rpc_cmd.clear();
-            g_managed_btcheader_rpc_args.clear();
+    }
+    g_managed_btcheader_owner_token = owner_record.comment;
+    g_managed_btcheader_owner_record = owner_record;
+    g_managed_btcheader_adopted = false;
+
+    const auto child_args{BuildManagedBTCHeaderNodeArgs(
+        gArgs.GetArgs("-btcheadercommandline"), node_binary, data_dir,
+        p2p_port, rpc_port, force_reindex, owner_record.comment)};
+    if (!child_args) {
+        LogPrintf("%s: invalid or protected -btcheadercommandline argument\n",
+                  __func__);
+        ClearManagedBTCHeaderRuntime(/*remove_owner_record=*/false);
+        return false;
+    }
+
+    // SYSCOIN: If a backend with this dedicated datadir survived a syscoind crash, it
+    // was adopted above only after the RPC cookie, chain, headers-only flag,
+    // and random user-agent token all matched. We never signal the recorded
+    // PID; if adoption failed, a new child must acquire the datadir lock and
+    // ports itself.
+
+    const fs::path log_path{m_chainman.m_options.datadir /
+                            "btcheadernode.log"};
+    std::string spawn_error;
+    if (!SpawnDetachedProcessWithStderrLog(
+            *child_args, log_path, btcheaderpid, spawn_error)) {
+        LogPrintf("%s: failed to start managed Bitcoin header node: %s\n",
+                  __func__, spawn_error);
+        ClearManagedBTCHeaderRuntime(/*remove_owner_record=*/false);
+        return false;
+    }
+
+    owner_record.pid = btcheaderpid;
+    if (!WriteManagedBTCHeaderOwnerRecord(
+            g_managed_btcheader_owner_path, owner_record, owner_error)) {
+        // SYSCOIN: The pre-spawn record already binds the random child token, so crash
+        // recovery remains authenticated even if this informational PID
+        // update cannot be committed.
+        LogPrintf("%s: warning: could not update ownership record PID: %s\n",
+                  __func__, owner_error);
+    } else {
+        g_managed_btcheader_owner_record = owner_record;
+    }
+
+    LogPrintf("%s: managed Bitcoin header node started (pid=%d reindex=%d)\n",
+              __func__, btcheaderpid, force_reindex);
+    for (int i = 0; i < 15; ++i) {
+        int status{0};
+        const pid_t result{waitpid(btcheaderpid, &status, WNOHANG)};
+        if (result == btcheaderpid || result == -1) {
+            LogPrintf("%s: managed Bitcoin header node exited during startup "
+                      "(status=%d errno=%d)\n",
+                      __func__, status, errno);
+            if (result == btcheaderpid) {
+                PersistStoppedManagedBTCHeaderOwner();
+            }
+            ClearManagedBTCHeaderRuntime(/*remove_owner_record=*/false);
             return false;
         }
         UninterruptibleSleep(std::chrono::milliseconds{200});
     }
-
     return true;
 #endif
 }
@@ -8098,67 +14331,144 @@ bool Chainstate::StopBTCHeaderNode(bool bOnStart)
 
 bool Chainstate::StopBTCHeaderNodeInternal(bool bOnStart)
 {
-
     if (!gArgs.GetBoolArg("-btcheadermanaged", DEFAULT_BTC_HEADER_MANAGED)) {
         return false;
     }
-
 #ifdef WIN32
     return false;
 #else
-    if (!bOnStart && !g_managed_btcheader_rpc_args.empty()) {
-        try {
-            std::vector<std::string> stop_cmd = g_managed_btcheader_rpc_args;
-            stop_cmd.emplace_back("stop");
-            (void)RunCommandParseJSON(stop_cmd);
-        } catch (const std::exception& e) {
-            LogPrintf("%s: Managed BTC header node graceful shutdown request failed: %s\n", __func__, e.what());
+    std::string child_reason;
+    OwnedBTCHeaderChildState child_state{
+        GetOwnedBTCHeaderChildState(&child_reason)};
+    if (child_state == OwnedBTCHeaderChildState::EXITED_REAPED) {
+        PersistStoppedManagedBTCHeaderOwner();
+        ClearManagedBTCHeaderRuntime(/*remove_owner_record=*/false);
+        return true;
+    }
+    bool owned_child{child_state == OwnedBTCHeaderChildState::RUNNING};
+    const bool adopted{g_managed_btcheader_adopted};
+    if (!owned_child && !adopted) {
+        // SYSCOIN: A stale numeric PID is never evidence of ownership. In particular,
+        // ECHILD must not fall through to kill(2) after PID reuse.
+        ClearManagedBTCHeaderRuntime(/*remove_owner_record=*/false);
+        return false;
+    }
+
+    bool endpoint_verified{false};
+    if (!bOnStart && !g_managed_btcheader_owner_token.empty() &&
+        !g_managed_btcheader_rpc_args.empty()) {
+        std::string verify_error;
+        endpoint_verified = VerifyManagedBTCHeaderEndpoint(
+            g_managed_btcheader_owner_token, verify_error);
+        if (endpoint_verified) {
+            std::string stop_error;
+            if (!llmq::pq::RequestManagedBTCHeaderStop(stop_error)) {
+                LogPrintf("%s: authenticated bitcoin-cli stop failed: %s\n",
+                          __func__, stop_error);
+            }
+        } else {
+            LogPrintf("%s: refusing RPC stop for an unauthenticated managed "
+                      "endpoint: %s\n", __func__, verify_error);
         }
     }
 
-    // Always send SIGTERM for managed restarts, including startup stop path.
-    if (btcheaderpid > 0) {
+    if (adopted) {
+        if (!endpoint_verified) {
+            // SYSCOIN: An adopted process is not our child. Its recorded PID is only
+            // diagnostic and is never signalled.
+            return false;
+        }
+        for (int i{0}; i < 20; ++i) {
+            UniValue ignored;
+            std::string probe_error;
+            if (!llmq::pq::RunConfiguredBTCHeaderCommand(
+                    {"getblockchaininfo"}, ignored, probe_error)) {
+                PersistStoppedManagedBTCHeaderOwner();
+                ClearManagedBTCHeaderRuntime(/*remove_owner_record=*/false);
+                return true;
+            }
+            UninterruptibleSleep(std::chrono::milliseconds{500});
+        }
+        LogPrintf("%s: authenticated adopted Bitcoin header backend did not "
+                  "stop; leaving its ownership record intact\n", __func__);
+        return false;
+    }
+
+    // SYSCOIN: For a process spawned by this syscoind, waitpid(WNOHANG)==0 is the
+    // ownership proof immediately before every signal. An exited but
+    // unreaped child also prevents PID reuse, closing the check/signal race.
+    if (!endpoint_verified && owned_child) {
         if (kill(btcheaderpid, SIGTERM) != 0 && errno != ESRCH) {
-            LogPrintf("Failed to SIGTERM BTC header node pid %d (errno=%d)\n", btcheaderpid, errno);
+            LogPrintf("%s: SIGTERM failed for owned Bitcoin header pid %d "
+                      "(errno=%d)\n", __func__, btcheaderpid, errno);
         }
     }
-
-    if (btcheaderpid > 0) {
-        for (int i = 0; i < 20; ++i) {
-            int status = 0;
-            const pid_t result = waitpid(btcheaderpid, &status, WNOHANG);
-            if (result == btcheaderpid) {
-                if (WIFEXITED(status)) {
-                    LogPrintf("BTC header node shutdown gracefully with exit code %d.\n", WEXITSTATUS(status));
-                } else if (WIFSIGNALED(status)) {
-                    LogPrintf("BTC header node terminated by signal %d.\n", WTERMSIG(status));
-                }
-                btcheaderpid = -1;
-                g_managed_btcheader_rpc_cmd.clear();
-                g_managed_btcheader_rpc_args.clear();
-                return true;
-            }
-            if (result == -1 && errno == ECHILD) {
-                LogPrintf("BTC header node process no longer exists (ECHILD).\n");
-                btcheaderpid = -1;
-                g_managed_btcheader_rpc_cmd.clear();
-                g_managed_btcheader_rpc_args.clear();
-                return true;
-            }
-            LogPrintf("BTC header node shutdown check (%d)\n", i);
-            UninterruptibleSleep(std::chrono::milliseconds{2000});
-        }
-        LogPrintf("Graceful BTC header node shutdown failed; explicitly killing pid %d\n", btcheaderpid);
-        if (kill(btcheaderpid, SIGKILL) != 0) {
-            LogPrintf("Failed to kill BTC header node pid %d (errno=%d)\n", btcheaderpid, errno);
-        }
-        int status = 0;
-        waitpid(btcheaderpid, &status, 0);
+    for (int i{0}; i < 20 && owned_child; ++i) {
+        UninterruptibleSleep(std::chrono::milliseconds{500});
+        child_state = GetOwnedBTCHeaderChildState(&child_reason);
+        owned_child = child_state == OwnedBTCHeaderChildState::RUNNING;
     }
+    if (owned_child &&
+        GetOwnedBTCHeaderChildState(&child_reason) ==
+            OwnedBTCHeaderChildState::RUNNING) {
+        LogPrintf("%s: forcing owned Bitcoin header pid %d to stop\n",
+                  __func__, btcheaderpid);
+        if (kill(btcheaderpid, SIGKILL) != 0 && errno != ESRCH) {
+            LogPrintf("%s: SIGKILL failed for owned pid %d (errno=%d)\n",
+                      __func__, btcheaderpid, errno);
+            return false;
+        }
+        int status{0};
+        pid_t result{-1};
+        do {
+            result = waitpid(btcheaderpid, &status, 0);
+        } while (result == -1 && errno == EINTR);
+        if (result == -1) {
+            LogPrintf("%s: waitpid failed after SIGKILL (errno=%d)\n",
+                      __func__, errno);
+            return false;
+        }
+        owned_child = false;
+    }
+    if (owned_child) return false;
+    PersistStoppedManagedBTCHeaderOwner();
+    ClearManagedBTCHeaderRuntime(/*remove_owner_record=*/false);
+    return true;
+#endif
+}
 
-    btcheaderpid = -1;
-    g_managed_btcheader_rpc_cmd.clear();
-    g_managed_btcheader_rpc_args.clear();
+// SYSCOIN: The watchdog already holds cs_btcheader while it evaluates and
+// possibly restarts the backend. Keep the actual probe non-locking to avoid
+// recursive public API entry and make the lock contract explicit.
+static bool IsManagedBTCHeaderNodeRunningLocked(std::string& reason)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_btcheader)
+{
+    if (!gArgs.GetBoolArg("-btcheadermanaged", DEFAULT_BTC_HEADER_MANAGED)) {
+        reason = "managed-disabled";
+        return true;
+    }
+#ifdef WIN32
+    reason = "managed-unsupported-win32";
+    return false;
+#else
+    const OwnedBTCHeaderChildState child_state{
+        GetOwnedBTCHeaderChildState(&reason)};
+    if (child_state == OwnedBTCHeaderChildState::RUNNING) return true;
+    if (child_state == OwnedBTCHeaderChildState::EXITED_REAPED) {
+        PersistStoppedManagedBTCHeaderOwner();
+        ClearManagedBTCHeaderRuntime(/*remove_owner_record=*/false);
+        return false;
+    }
+    if (!g_managed_btcheader_adopted ||
+        g_managed_btcheader_owner_token.empty()) {
+        return false;
+    }
+    if (!VerifyManagedBTCHeaderEndpoint(g_managed_btcheader_owner_token,
+                                        reason)) {
+        reason = "adopted-backend-unhealthy:" + reason;
+        return false;
+    }
+    reason.clear();
     return true;
 #endif
 }
@@ -8166,59 +14476,264 @@ bool Chainstate::StopBTCHeaderNodeInternal(bool bOnStart)
 bool Chainstate::IsManagedBTCHeaderNodeRunning(std::string& reason)
 {
     LOCK(cs_btcheader);
+    return IsManagedBTCHeaderNodeRunningLocked(reason);
+}
 
-    if (!gArgs.GetBoolArg("-btcheadermanaged", DEFAULT_BTC_HEADER_MANAGED)) {
-        reason = "managed-disabled";
-        return true;
-    }
-
-#ifdef WIN32
-    reason = "managed-unsupported-win32";
+// SYSCOIN: These helpers make the watchdog's ownership/health mutations
+// statically auditable. Capturing a held mutex in a lambda loses Clang's
+// capability proof and previously hid the public-method recursive lock bug.
+static bool RecordBTCHeaderHealthFailure(int64_t now,
+                                         const std::string& failure,
+                                         std::string& reason)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_btcheader)
+{
+    g_btcheader_last_probe_time = now;
+    g_btcheader_last_probe_healthy = false;
+    g_btcheader_last_probe_reason = failure;
+    reason = failure;
     return false;
-#else
-    if (btcheaderpid <= 0) {
-        reason = "pid-missing";
+}
+
+bool Chainstate::RestartBTCHeaderNodeForWatchdog(
+    bool recover,
+    int64_t now,
+    const std::string& cause,
+    std::string& reason)
+{
+    const int64_t cooldown{std::max<int64_t>(
+        1, gArgs.GetIntArg("-btcheaderwatchdogrestartcooldown",
+                           DEFAULT_BTC_HEADER_WATCHDOG_RESTART_COOLDOWN))};
+    if (!recover) return false;
+    if (g_btcheader_last_restart_time > 0 &&
+        now - g_btcheader_last_restart_time < cooldown) {
+        reason = strprintf("btcheader-watchdog-restart-cooldown(%d):%s",
+                           cooldown -
+                               (now - g_btcheader_last_restart_time),
+                           cause);
         return false;
     }
-    if (kill(btcheaderpid, 0) == 0 || errno == EPERM) {
-        reason.clear();
-        return true;
-    }
-    if (errno == ESRCH) {
-        btcheaderpid = -1;
-        g_managed_btcheader_rpc_cmd.clear();
-        g_managed_btcheader_rpc_args.clear();
-        reason = "process-not-found";
+
+    const int64_t reindex_after{std::max<int64_t>(
+        0, gArgs.GetIntArg("-btcheaderwatchdogreindexafter",
+                           DEFAULT_BTC_HEADER_WATCHDOG_REINDEX_AFTER))};
+    const bool force_reindex{
+        reindex_after > 0 && !g_btcheader_reindex_attempted &&
+        g_btcheader_restart_failures >= reindex_after};
+    if (force_reindex) g_btcheader_reindex_attempted = true;
+    g_btcheader_last_restart_time = now;
+
+    // SYSCOIN: Stop either proves waitpid ownership of this process's child or
+    // authenticates an adopted orphan through its dedicated RPC cookie,
+    // headers-only chain view, and random user-agent token. It never signals a
+    // recorded/stale PID.
+    const bool had_runtime{
+        btcheaderpid > 0 || g_managed_btcheader_adopted ||
+        !g_managed_btcheader_owner_token.empty() ||
+        !g_managed_btcheader_rpc_args.empty()};
+    if (!StopBTCHeaderNodeInternal(/*bOnStart=*/false) && had_runtime) {
+        reason = "btcheader-watchdog-authenticated-stop-failed:" + cause;
         return false;
     }
-    reason = strprintf("process-check-failed(errno=%d)", errno);
-    return false;
-#endif
+    if (!StartBTCHeaderNodeInternal(force_reindex)) {
+        ++g_btcheader_restart_failures;
+        reason = strprintf(
+            "btcheader-watchdog-restart-failed(reindex=%d failures=%d):%s",
+            force_reindex, g_btcheader_restart_failures, cause);
+        return false;
+    }
+    g_btcheader_startup_time = GetTime();
+    LogPrintf("Bitcoin header watchdog restarted managed child "
+              "(reindex=%d reason=%s)\n", force_reindex, cause);
+    return true;
+}
+
+bool Chainstate::CheckBTCHeaderNodeHealth(bool recover, std::string& reason)
+{
+    LOCK(cs_btcheader);
+    reason.clear();
+    const int64_t now{GetTime()};
+    const bool managed{
+        gArgs.GetBoolArg("-btcheadermanaged", DEFAULT_BTC_HEADER_MANAGED)};
+    recover = recover && managed &&
+              gArgs.GetBoolArg("-btcheaderwatchdog",
+                               DEFAULT_BTC_HEADER_WATCHDOG);
+
+    const auto probe = [&](UniValue& chain_info,
+                           std::string& probe_error) {
+        return llmq::pq::RunConfiguredBTCHeaderCommand(
+                   {"getblockchaininfo"}, chain_info, probe_error) &&
+               chain_info.isObject();
+    };
+
+    bool restarted{false};
+    if (managed) {
+        std::string process_reason;
+        if (!IsManagedBTCHeaderNodeRunningLocked(process_reason)) {
+            if (!RestartBTCHeaderNodeForWatchdog(
+                    recover, now, "process-not-running:" + process_reason,
+                    reason)) {
+                return RecordBTCHeaderHealthFailure(
+                    now, reason.empty() ? process_reason : reason, reason);
+            }
+            restarted = true;
+        }
+    }
+
+    UniValue chain_info;
+    std::string probe_error;
+    if (!probe(chain_info, probe_error)) {
+        if (!restarted && g_btcheader_startup_time) {
+            const int64_t startup_age{GetTime() - *g_btcheader_startup_time};
+            if (startup_age < 0) {
+                return RecordBTCHeaderHealthFailure(
+                    now, "btcheader-startup-clock-regressed", reason);
+            }
+            const int64_t startup_grace{std::max<int64_t>(
+                0, gArgs.GetIntArg("-btcheaderwatchdogstartupgrace",
+                                   DEFAULT_BTC_HEADER_WATCHDOG_STARTUP_GRACE))};
+            if (startup_age < startup_grace) {
+                // SYSCOIN: A live replacement may still be initializing RPC.
+                // Keep policy fail-closed without resetting its startup budget
+                // or the durable header-progress clock on each failed probe.
+                return RecordBTCHeaderHealthFailure(
+                    now, "btcheader-watchdog-startup-pending:" + probe_error,
+                    reason);
+            }
+        }
+        if (!restarted && !RestartBTCHeaderNodeForWatchdog(
+                recover, now, "rpc-unreachable:" + probe_error, reason)) {
+            return RecordBTCHeaderHealthFailure(
+                now, reason.empty() ? probe_error : reason, reason);
+        }
+        // SYSCOIN: Both restart paths must probe the new child before another
+        // restart can be considered. A new process can need a short interval
+        // to publish its RPC cookie and bind the endpoint. Keep the scheduler
+        // bounded while permitting recovery from a transient crash.
+        for (int attempt{0}; attempt < 10; ++attempt) {
+            UninterruptibleSleep(std::chrono::milliseconds{200});
+            probe_error.clear();
+            if (probe(chain_info, probe_error)) break;
+        }
+        if (!chain_info.isObject()) {
+            ++g_btcheader_restart_failures;
+            return RecordBTCHeaderHealthFailure(
+                now,
+                "btcheader-watchdog-rpc-unreachable-after-restart:" +
+                    probe_error,
+                reason);
+        }
+    }
+
+    const UniValue& ibd_value{chain_info.find_value("initialblockdownload")};
+    const UniValue& headers_value{chain_info.find_value("headers")};
+    const UniValue& blocks_value{chain_info.find_value("blocks")};
+    const UniValue& best_hash_value{chain_info.find_value("bestblockhash")};
+    const UniValue& chain_value{chain_info.find_value("chain")};
+    const UniValue& headers_only_value{chain_info.find_value("headersonly")};
+    if (!ibd_value.isBool() ||
+        (!headers_value.isNum() && !blocks_value.isNum()) ||
+        !best_hash_value.isStr() || best_hash_value.get_str().size() != 64 ||
+        !IsHex(best_hash_value.get_str()) ||
+        !chain_value.isStr() ||
+        chain_value.get_str() != Params().GetChainTypeString() ||
+        (managed && (!headers_only_value.isBool() ||
+                     !headers_only_value.get_bool()))) {
+        return RecordBTCHeaderHealthFailure(
+            now, "btcheader-watchdog-invalid-chaininfo", reason);
+    }
+    const bool ibd{ibd_value.get_bool()};
+    const int64_t tip_height{headers_value.isNum()
+                                 ? headers_value.getInt<int64_t>()
+                                 : blocks_value.getInt<int64_t>()};
+    if (tip_height < 0) {
+        return RecordBTCHeaderHealthFailure(
+            now, "btcheader-watchdog-negative-tip", reason);
+    }
+    uint256 tip_hash;
+    tip_hash.SetHex(best_hash_value.get_str());
+    if (tip_hash.IsNull()) {
+        return RecordBTCHeaderHealthFailure(
+            now, "btcheader-watchdog-null-tip", reason);
+    }
+    g_btcheader_startup_time.reset();
+
+    const bool tip_changed{
+        g_btcheader_last_progress_time == 0 ||
+        tip_height != g_btcheader_last_tip_height ||
+        tip_hash != g_btcheader_last_tip_hash};
+    if (tip_changed) {
+        if (managed) {
+            std::string persist_error;
+            if (!PersistManagedBTCHeaderProgress(
+                    tip_height, tip_hash, now, persist_error)) {
+                return RecordBTCHeaderHealthFailure(
+                    now,
+                    "btcheader-progress-persistence-failed:" +
+                        persist_error,
+                    reason);
+            }
+        }
+        g_btcheader_last_progress_time = now;
+        g_btcheader_last_tip_height = tip_height;
+        g_btcheader_last_tip_hash = tip_hash;
+    } else if (now < g_btcheader_last_progress_time) {
+        return RecordBTCHeaderHealthFailure(
+            now, "btcheader-progress-clock-regressed", reason);
+    }
+    const int64_t stall_timeout{std::max<int64_t>(
+        0, gArgs.GetIntArg("-btcheaderwatchdogstalltimeout",
+                           DEFAULT_BTC_HEADER_WATCHDOG_STALL_TIMEOUT))};
+    if (ibd && stall_timeout > 0 &&
+        now - g_btcheader_last_progress_time >= stall_timeout) {
+        const std::string stalled{strprintf(
+            "ibd-stalled(headers=%d seconds=%d)", tip_height,
+            now - g_btcheader_last_progress_time)};
+        if (!RestartBTCHeaderNodeForWatchdog(
+                recover, now, stalled, reason)) {
+            return RecordBTCHeaderHealthFailure(
+                now, reason.empty() ? stalled : reason, reason);
+        }
+        ++g_btcheader_restart_failures;
+        return RecordBTCHeaderHealthFailure(
+            now, "btcheader-watchdog-restarted-stalled-backend", reason);
+    }
+    const int64_t maximum_no_progress{std::max<int64_t>(
+        0, gArgs.GetIntArg("-btcheadertipmaxnoprogress",
+                           DEFAULT_BTC_HEADER_TIP_MAX_NO_PROGRESS))};
+    if (!ibd && maximum_no_progress > 0 &&
+        now - g_btcheader_last_progress_time >= maximum_no_progress) {
+        return RecordBTCHeaderHealthFailure(
+            now,
+            strprintf(
+                "btcheader-tip-no-progress(headers=%d hash=%s seconds=%d)",
+                tip_height, tip_hash.ToString(),
+                now - g_btcheader_last_progress_time),
+            reason);
+    }
+
+    g_btcheader_last_probe_time = now;
+    g_btcheader_last_probe_healthy = true;
+    g_btcheader_last_probe_reason.clear();
+    g_btcheader_restart_failures = 0;
+    g_btcheader_reindex_attempted = false;
+    return true;
 }
 
 bool Chainstate::DoBTCHeaderStartupProcedure()
 {
-    if (m_chainman.m_interrupt) {
-        return false;
-    }
-
+    if (m_chainman.m_interrupt) return false;
     if (!gArgs.GetBoolArg("-btcheadermanaged", DEFAULT_BTC_HEADER_MANAGED)) {
-        const std::string cmd = gArgs.GetArg("-btcheadercmd", "");
-        if (cmd.empty()) {
-            LogPrintf("%s: -btcheadermanaged=0 requires -btcheadercmd to be configured\n", __func__);
+        if (gArgs.GetArg("-btcheadercmd", "").empty()) {
+            LogPrintf("%s: external mode requires -btcheadercmd\n", __func__);
             return false;
         }
-        LogPrintf("%s: Using external -btcheadercmd backend (managed node disabled)\n", __func__);
+        LogPrintf("%s: using external Bitcoin header backend\n", __func__);
         return true;
     }
-
-    LogPrintf("%s: Restarting managed BTC header node\n", __func__);
-    StopBTCHeaderNode(true);
-    if (!StartBTCHeaderNode()) {
-        LogPrintf("%s: Failed to start managed BTC header node\n", __func__);
-        return false;
-    }
-    return true;
+    // SYSCOIN: Start authenticates and adopts an exact dedicated orphan left by a
+    // previous syscoind crash. It must not issue an unauthenticated stop to
+    // whatever happens to occupy the configured RPC port first.
+    return StartBTCHeaderNode();
 }
 
 void ChainstateManager::MaybeRebalanceCaches()
@@ -8243,7 +14758,9 @@ void ChainstateManager::MaybeRebalanceCaches()
         // If both chainstates exist, determine who needs more cache based on IBD status.
         //
         // Note: shrink caches first so that we don't inadvertently overwhelm available memory.
-        if (IsInitialBlockDownload()) {
+        // SYSCOIN: PQ authentication may extend public IBD after cache
+        // priority must return to background snapshot validation.
+        if (!IsBaseBlockSyncComplete()) {
             m_ibd_chainstate->ResizeCoinsCaches(
                 m_total_coinstip_cache * 0.05, m_total_coinsdb_cache * 0.05);
             m_snapshot_chainstate->ResizeCoinsCaches(
@@ -8262,6 +14779,11 @@ void ChainstateManager::ResetChainstates()
     m_ibd_chainstate.reset();
     m_snapshot_chainstate.reset();
     m_active_chainstate = nullptr;
+    // SYSCOIN: The reopened block-tree owns any surviving recovery record.
+    m_nevm_pending_connect_record.reset();
+    m_nevm_pending_connect_durable = false;
+    m_nevm_pending_connect_rebuild = false;
+    m_blockman.RemovePruneLock(NEVM_PENDING_CONNECT_PRUNE_LOCK);
 }
 
 /**
@@ -8281,7 +14803,14 @@ static ChainstateManager::Options&& Flatten(ChainstateManager::Options&& opts)
 ChainstateManager::ChainstateManager(const util::SignalInterrupt& interrupt, Options options, node::BlockManager::Options blockman_options)
     : m_interrupt{interrupt},
       m_options{Flatten(std::move(options))},
-      m_blockman{interrupt, std::move(blockman_options)} {}
+      m_blockman{interrupt, std::move(blockman_options)}
+{
+    // SYSCOIN: A network without a PQ finality store has no historical
+    // certificate-authentication gate to hold public readiness.
+    if (!llmq::MakePQChainLockFinalityStoreConfig(GetConsensus())) {
+        m_pq_history_auth_state = PQHistoryAuthState::READY;
+    }
+}
 
 ChainstateManager::~ChainstateManager()
 {

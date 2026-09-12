@@ -88,7 +88,44 @@ std::vector<uint256> CCoinsViewDB::GetHeadBlocks() const {
     return vhashHeadBlocks;
 }
 
+// SYSCOIN BEGIN: Sync all prior coins writes before deleting mint markers.
+bool CCoinsViewDB::WriteCoinsBatch(CDBBatch& batch)
+{
+    // SYSCOIN: Latch before either a false result or an exception can escape.
+    // Preserve the on-disk BEST/HEADS recovery state until this DB is reopened.
+    m_write_failed = true;
+    if (m_write_batch_callback_for_testing &&
+        !m_write_batch_callback_for_testing(false)) return false;
+    const bool written{m_db->WriteBatch(batch)};
+    if (written) m_write_failed = false;
+    return written;
+}
+
+void CCoinsViewDB::SetWriteBatchCallbackForTesting(std::function<bool(bool)> callback)
+{
+    m_write_batch_callback_for_testing = std::move(callback);
+}
+
+void CCoinsViewDB::SetSyncCallbackForTesting(std::function<bool()> callback)
+{
+    m_sync_callback_for_testing = std::move(callback);
+}
+
+bool CCoinsViewDB::FlushWithSync(CCoinsViewCache& cache)
+{
+    AssertLockHeld(cs_main);
+    if (!cache.Flush()) return false;
+    if (m_sync_callback_for_testing && !m_sync_callback_for_testing()) return false;
+    // Cover earlier WALs too: FRESH cache entries can cancel a rollback's
+    // deletion when an earlier asynchronous write already spent that output.
+    return m_db->Sync();
+}
+// SYSCOIN END: Sync all prior coins writes before deleting mint markers.
+
 bool CCoinsViewDB::BatchWrite(CCoinsMap &mapCoins, const uint256 &hashBlock, bool erase) {
+    // SYSCOIN: A previous attempt may have discarded unwritten dirty entries.
+    // Do not mutate this cache or retire its recovery markers on a retry.
+    if (m_write_failed) return false;
     CDBBatch batch(*m_db);
     size_t count = 0;
     size_t changed = 0;
@@ -127,7 +164,8 @@ bool CCoinsViewDB::BatchWrite(CCoinsMap &mapCoins, const uint256 &hashBlock, boo
         it = erase ? mapCoins.erase(it) : std::next(it);
         if (batch.SizeEstimate() > m_options.batch_write_bytes) {
             LogPrint(BCLog::COINDB, "Writing partial batch of %.2f MiB\n", batch.SizeEstimate() * (1.0 / 1048576.0));
-            m_db->WriteBatch(batch);
+            // SYSCOIN: Surface injected write failures before the durability barrier.
+            if (!WriteCoinsBatch(batch)) return false;
             batch.Clear();
             if (m_options.simulate_crash_ratio) {
                 static FastRandomContext rng;
@@ -144,7 +182,8 @@ bool CCoinsViewDB::BatchWrite(CCoinsMap &mapCoins, const uint256 &hashBlock, boo
     batch.Write(DB_BEST_BLOCK, hashBlock);
 
     LogPrint(BCLog::COINDB, "Writing final batch of %.2f MiB\n", batch.SizeEstimate() * (1.0 / 1048576.0));
-    bool ret = m_db->WriteBatch(batch);
+    // SYSCOIN: The mint rollback barrier follows this final asynchronous write.
+    bool ret = WriteCoinsBatch(batch);
     LogPrint(BCLog::COINDB, "Committed %u changed transaction outputs (out of %u) to coin database...\n", (unsigned int)changed, (unsigned int)count);
     return ret;
 }

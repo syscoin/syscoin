@@ -5,6 +5,8 @@
 #ifndef SYSCOIN_ZMQ_ZMQABSTRACTNOTIFIER_H
 #define SYSCOIN_ZMQ_ZMQABSTRACTNOTIFIER_H
 
+#include <nevm/response.h>
+
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -40,9 +42,9 @@ public:
     std::string GetType() const { return type; }
     void SetType(const std::string &t) { type = t; }
     std::string GetAddress() const { return address; }
-    std::string GetAddressSub() const { return addresssub; }
+    std::string GetAddressSub() const { return addresssub; } // SYSCOIN: NEVM request endpoint.
     void SetAddress(const std::string &a) { address = a; }
-    void SetAddressSub(const std::string &a) { addresssub = a; }
+    void SetAddressSub(const std::string &a) { addresssub = a; } // SYSCOIN: NEVM request endpoint.
     int GetOutboundMessageHighWaterMark() const { return outbound_message_high_water_mark; }
     void SetOutboundMessageHighWaterMark(const int sndhwm) {
         if (sndhwm >= 0) {
@@ -69,11 +71,15 @@ public:
     virtual bool NotifyTransactionMempool(const CTransaction &transaction);
     virtual bool NotifyGovernanceVote(const uint256& vote);
     virtual bool NotifyGovernanceObject(const uint256& object);
-    virtual bool NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation, const uint256& btcPrevHashForNEVM, const CDeterministicMNListNEVMAddressDiff &diff);
+    virtual bool NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation, const uint256& btcPrevHashForNEVM, const CDeterministicMNListNEVMAddressDiff &diff, std::optional<NEVMBlockReject>* rejection = nullptr);
+    virtual bool NotifyNEVMPayloadCheck(const CNEVMHeader& evmBlock, const CBlock& block, const uint256& syscoin_hash, bool& valid, std::string& error, std::optional<NEVMBlockReject>* rejection = nullptr);
     virtual bool NotifyNEVMBlockDisconnect(std::string &state, const uint256& nBlockHash, const CDeterministicMNListNEVMAddressDiff &diff);
-    virtual bool NotifyGetNEVMBlockInfo(uint64_t &nHeight, std::string &state);
+    // SYSCOIN: Return count plus the exact paired Syscoin tip hash.
+    virtual bool NotifyGetNEVMBlockInfo(uint64_t &nHeight,
+                                        uint256& nSYSBlockHash,
+                                        std::string &state);
     virtual bool NotifyGetNEVMBlock(CNEVMBlock &evmBlock, std::string &state);
-    virtual bool NotifyNEVMComms(const std::string& commMessage, bool &bResponse);
+    virtual bool NotifyNEVMComms(const std::string& commMessage, bool &bResponse, std::optional<NEVMBlockReject>* rejection = nullptr);
 
 protected:
     void* psocket{nullptr};

@@ -38,7 +38,6 @@
 #include <algorithm>
 #include <deque>
 #include <llmq/quorums_chainlocks.h>
-#include <llmq/quorums_btccheckpoints.h>
 #include <evo/specialtx.h>
 #include <evo/deterministicmns.h>
 namespace Consensus {
@@ -54,6 +53,7 @@ static const char *MSG_RAWBLOCK  = "rawblock";
 static const char *MSG_RAWTX     = "rawtx";
 // SYSCOIN
 static const char *MSG_NEVMBLOCKCONNECT  = "nevmconnect";
+static const char *MSG_NEVMPAYLOADCHECK  = "nevmvalidate";
 static const char *MSG_NEVMCOMMS  = "nevmcomms";
 static const char *MSG_NEVMBLOCKDISCONNECT  = "nevmdisconnect";
 static const char *MSG_NEVMBLOCK  = "nevmblock";
@@ -62,10 +62,13 @@ static const char *MSG_RAWMEMPOOLTX  = "rawmempooltx";
 static const char *MSG_HASHGVOTE     = "hashgovernancevote";
 static const char *MSG_HASHGOBJ      = "hashgovernanceobject";
 static const char *MSG_SEQUENCE  = "sequence";
+// SYSCOIN BEGIN: NEVM request timeouts and socket serialization.
 static constexpr int NEVM_STATUS_TIMEOUT_MS{2000};
 static constexpr int NEVM_COMMS_TIMEOUT_MS{150000};
 static constexpr int NEVM_DISCONNECT_TIMEOUT_MS{30000};
+static constexpr int NEVM_PAYLOAD_CHECK_TIMEOUT_MS{5000};
 RecursiveMutex cs_nevm;
+// SYSCOIN END: NEVM request timeouts and socket serialization.
 
 // Internal function to send multipart message
 static int zmq_send_multipart(void *sock, const void* data, size_t size, ...)
@@ -110,6 +113,7 @@ static int zmq_send_multipart(void *sock, const void* data, size_t size, ...)
     return 0;
 }
 
+// SYSCOIN BEGIN: Configure NEVM receive timeouts.
 static bool SetNEVMReceiveTimeout(void* socket, int timeout_ms)
 {
     if (!socket) {
@@ -122,6 +126,7 @@ static bool SetNEVMReceiveTimeout(void* socket, int timeout_ms)
     }
     return true;
 }
+// SYSCOIN END: Configure NEVM receive timeouts.
 static bool IsZMQAddressIPV6(const std::string &zmq_address)
 {
     const std::string tcp_prefix = "tcp://";
@@ -134,6 +139,7 @@ static bool IsZMQAddressIPV6(const std::string &zmq_address)
     }
     return false;
 }
+// SYSCOIN BEGIN: Receive multipart NEVM request responses.
 // Internal function to receive multipart message
 static int zmq_receive_multipart(void *socket, std::vector<std::string>& parts)
 {
@@ -160,15 +166,19 @@ static int zmq_receive_multipart(void *socket, std::vector<std::string>& parts)
     zmq_msg_close (&part); } while (more);
     return 0;
 }
+// SYSCOIN END: Receive multipart NEVM request responses.
 
+// SYSCOIN: Extend Bitcoin notifier initialization with an NEVM request context.
 bool CZMQAbstractPublishNotifier::Initialize(void *pcontext, void *pcontextsub)
 {
+    // SYSCOIN: Neither the publisher nor NEVM request socket may be initialized.
     assert(!psocket && !psocketsub);
 
     // check if address is being used by other publish notifier
     std::multimap<std::string, CZMQAbstractPublishNotifier*>::iterator i = mapPublishNotifiers.find(address);
     if (i==mapPublishNotifiers.end())
     {
+        // SYSCOIN BEGIN: Select NEVM request setup or the retained Bitcoin publisher setup.
         if(!addresssub.empty()) {
             psocketsub = zmq_socket(pcontextsub, ZMQ_REQ);
             if (!psocketsub)
@@ -215,6 +225,7 @@ bool CZMQAbstractPublishNotifier::Initialize(void *pcontext, void *pcontextsub)
             }
             LogPrint(BCLog::ZMQ, "REQ subscribed on address %s\n", addresssub);
         } else {
+        // SYSCOIN END: Select NEVM request setup or the retained Bitcoin publisher setup.
             psocket = zmq_socket(pcontext, ZMQ_PUB);
             if (!psocket)
             {
@@ -250,10 +261,12 @@ bool CZMQAbstractPublishNotifier::Initialize(void *pcontext, void *pcontextsub)
             rc = zmq_bind(psocket, address.c_str());
             if (rc != 0)
             {
+                // SYSCOIN: Distinguish publisher failures from NEVM request-socket failures.
                 zmqError("Failed to bind address for publisher");
                 zmq_close(psocket);
                 return false;
             }
+        // SYSCOIN: Close the socket-selection wrapper around Bitcoin publisher setup.
         }
         // register this notifier for the address, so it can be reused for other publish notifier
         mapPublishNotifiers.insert(std::make_pair(address, this));
@@ -261,10 +274,12 @@ bool CZMQAbstractPublishNotifier::Initialize(void *pcontext, void *pcontextsub)
     }
     else
     {
+        // SYSCOIN: Include the NEVM request endpoint when reusing a notifier socket.
         LogPrint(BCLog::ZMQ, "Reusing socket for address %s, subscriber %s\n", address, addresssub);
         LogPrint(BCLog::ZMQ, "Outbound message high water mark for %s at %s is %d\n", type, address, outbound_message_high_water_mark);
 
         psocket = i->second->psocket;
+        // SYSCOIN: Share the NEVM request socket with other notifiers at this address.
         psocketsub = i->second->psocketsub;
         mapPublishNotifiers.insert(std::make_pair(address, this));
 
@@ -275,6 +290,7 @@ bool CZMQAbstractPublishNotifier::Initialize(void *pcontext, void *pcontextsub)
 void CZMQAbstractPublishNotifier::Shutdown()
 {
     // Early return if Initialize was not called
+    // SYSCOIN: Keep shutdown active when only the NEVM request socket exists.
     if (!psocket && !psocketsub) return;
 
     int count = mapPublishNotifiers.count(address);
@@ -295,20 +311,23 @@ void CZMQAbstractPublishNotifier::Shutdown()
     if (count == 1)
     {
         LogPrint(BCLog::ZMQ, "Close socket at address %s\n", address);
+        // SYSCOIN BEGIN: Guard retained Bitcoin publisher cleanup when using NEVM-only sockets.
         if(psocket) {
             int linger = 0;
             zmq_setsockopt(psocket, ZMQ_LINGER, &linger, sizeof(linger));
             zmq_close(psocket);
         }
-        // SYSCOIN
+        // SYSCOIN END: Guard retained Bitcoin publisher cleanup when using NEVM-only sockets.
+        // SYSCOIN BEGIN: Close the NEVM request socket on its final reference.
         if(psocketsub) {
             int linger = 0;
             zmq_setsockopt(psocketsub, ZMQ_LINGER, &linger, sizeof(linger));
             zmq_close(psocketsub);
         }
+        // SYSCOIN END: Close the NEVM request socket on its final reference.
     }
     psocket = nullptr;
-    // SYSCOIN
+    // SYSCOIN: Clear the released NEVM request-socket handle.
     psocketsub = nullptr;
 }
 
@@ -328,6 +347,7 @@ bool CZMQAbstractPublishNotifier::SendZmqMessage(const char *command, const void
 
     return true;
 }
+// SYSCOIN BEGIN: Send NEVM requests without Bitcoin publication sequence numbers.
 bool CZMQAbstractPublishNotifier::SendZmqMessageNEVM(const char *command, const void* data, size_t size)
 {
     assert(psocketsub);
@@ -340,6 +360,7 @@ bool CZMQAbstractPublishNotifier::SendZmqMessageNEVM(const char *command, const 
 
     return true;
 }
+// SYSCOIN END: Send NEVM requests without Bitcoin publication sequence numbers.
 
 // SYSCOIN
 bool CZMQAbstractPublishNotifier::ReceiveZmqMessage(std::vector<std::string>& parts)
@@ -352,15 +373,17 @@ bool CZMQAbstractPublishNotifier::ReceiveZmqMessage(std::vector<std::string>& pa
         return false;
     return true;
 }
-bool CZMQPublishNEVMCommsNotifier::NotifyNEVMComms(const std::string &commMessage, bool &bResponse) {
-    return NotifyNEVMCommsCommon(commMessage, bResponse);
+bool CZMQPublishNEVMCommsNotifier::NotifyNEVMComms(const std::string &commMessage, bool &bResponse, std::optional<NEVMBlockReject>* rejection) {
+    return NotifyNEVMCommsCommon(commMessage, bResponse, rejection);
 
 }
-bool CZMQAbstractPublishNotifier::NotifyNEVMCommsCommon(const std::string &commMessage, bool &bResponse)
+bool CZMQAbstractPublishNotifier::NotifyNEVMCommsCommon(const std::string &commMessage, bool &bResponse, std::optional<NEVMBlockReject>* rejection)
 {
     LOCK(cs_nevm);
+    if (rejection) rejection->reset();
     bResponse = false;
-    const int timeout = commMessage == "status" ? NEVM_STATUS_TIMEOUT_MS : NEVM_COMMS_TIMEOUT_MS;
+    const int timeout = (commMessage == "status" || commMessage == "connect-v1" || commMessage == "payload-v1")
+        ? NEVM_STATUS_TIMEOUT_MS : NEVM_COMMS_TIMEOUT_MS;
     if(!SetNEVMReceiveTimeout(psocketsub, timeout)) {
         return false;
     }
@@ -382,7 +405,20 @@ bool CZMQAbstractPublishNotifier::NotifyNEVMCommsCommon(const std::string &commM
                 LogPrint(BCLog::SYS, "NotifyNEVMComms: nevm-response-wrong-command\n");
                 return false;
             }
-            if(parts[1] != "ack") {
+            // Older Geth versions acknowledge unknown commands. Require an
+            // explicit response for each capability before relying on it.
+            const std::string expected_response{
+                commMessage == "flush" ? "flushed" :
+                commMessage == "connect-v1" ? "connect-v1" :
+                commMessage == "payload-v1" ? "payload-v1" :
+                // SYSCOIN: The recovery fence must acknowledge the exact
+                // expected pair; an older engine's generic ack is insufficient.
+                commMessage.rfind("durable-pair-v1:", 0) == 0 ? commMessage : "ack"};
+            if(parts[1] != expected_response) {
+                // Only an explicit flush can report buffered block rejection.
+                if (commMessage == "flush" && rejection) {
+                    *rejection = ParseNEVMBlockReject(parts[1]);
+                }
                 LogPrint(BCLog::SYS, "NotifyNEVMComms: nevm-comms-response-invalid-data\n");
                 return false;
             }
@@ -396,18 +432,32 @@ bool CZMQAbstractPublishNotifier::NotifyNEVMCommsCommon(const std::string &commM
     }
     return true;
 }
-bool CZMQPublishNEVMBlockConnectNotifier::NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nSYSBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation, const uint256& btcPrevHashForNEVM, const CDeterministicMNListNEVMAddressDiff &diff)
+bool CZMQPublishNEVMBlockConnectNotifier::NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nSYSBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation, const uint256& btcPrevHashForNEVM, const CDeterministicMNListNEVMAddressDiff &diff, std::optional<NEVMBlockReject>* rejection)
 {
     LOCK(cs_nevm);
+    if (rejection) rejection->reset();
     state = "";
+    // Negotiate on every connect: the engine may have restarted or been
+    // replaced since any previous request. A generic ack is insufficient.
+    bool classified_responses{false};
+    if (!NotifyNEVMCommsCommon("connect-v1", classified_responses) ||
+        !classified_responses) {
+        // Preserve managed restart when the engine is unavailable. A live
+        // legacy engine instead needs an upgrade, not a restart loop.
+        bool connected{false};
+        NotifyNEVMCommsCommon("status", connected);
+        state = connected ? "nevm-connect-protocol-unsupported"
+                          : "nevm-connect-not-sent";
+        return false;
+    }
     if(bFirstTime) {
-        bFirstTime = false;
         bool bResponse = false;
         NotifyNEVMCommsCommon("status", bResponse);
         if(!bResponse) {
             state = "nevm-not-connected";
             return false;
         }
+        bFirstTime = false;
     }
     if(!SetNEVMReceiveTimeout(psocketsub, NEVM_COMMS_TIMEOUT_MS)) {
         state = "ZMQ_RCVTIMEO";
@@ -432,9 +482,16 @@ bool CZMQPublishNEVMBlockConnectNotifier::NotifyNEVMBlockConnect(const CNEVMHead
             state = "nevm-response-wrong-command";
             return false;
         }
-        if(!bSkipValidation && parts[1] != "connected") {
+        if(parts[1] != "connected") {
             LogPrint(BCLog::SYS, "NotifyNEVMBlockConnect: %s\n", parts[1]);
-            state = "nevm-connect-response-invalid-data";
+            // Preserve an earlier pair's rejection for chain validation while
+            // retaining the current candidate's operational-error state.
+            const auto parsed = ParseNEVMBlockReject(parts[1]);
+            if (rejection) *rejection = parsed;
+            state = parsed && parsed->nevm_hash == evmBlock.nBlockHash &&
+                    parsed->syscoin_hash == nSYSBlockHash
+                ? (parsed->IsPayload() ? "nevm-connect-payload-invalid" : "nevm-connect-consensus-invalid")
+                : "nevm-connect-response-invalid-data";
             return false;
         }
     } else if (!bSkipValidation) {
@@ -442,6 +499,83 @@ bool CZMQPublishNEVMBlockConnectNotifier::NotifyNEVMBlockConnect(const CNEVMHead
         return false;
     }
 
+    return true;
+}
+bool CZMQPublishNEVMBlockConnectNotifier::NotifyNEVMPayloadCheck(const CNEVMHeader& evmBlock, const CBlock& block, const uint256& syscoin_hash, bool& valid, std::string& error, std::optional<NEVMBlockReject>* rejection)
+{
+    LOCK(cs_nevm);
+    valid = false;
+    error = "nevm-payload-check-unavailable";
+    if (rejection) rejection->reset();
+    if (!psocketsub) return false;
+
+    int send_timeout{0}, receive_timeout{0};
+    size_t option_size{sizeof(int)};
+    if (zmq_getsockopt(psocketsub, ZMQ_SNDTIMEO, &send_timeout, &option_size) != 0 ||
+        zmq_getsockopt(psocketsub, ZMQ_RCVTIMEO, &receive_timeout, &option_size) != 0) {
+        error = "nevm-payload-check-timeout-unavailable";
+        return false;
+    }
+    struct RestoreTimeouts {
+        void* socket;
+        int send_timeout;
+        int receive_timeout;
+        ~RestoreTimeouts()
+        {
+            zmq_setsockopt(socket, ZMQ_SNDTIMEO, &send_timeout, sizeof(send_timeout));
+            zmq_setsockopt(socket, ZMQ_RCVTIMEO, &receive_timeout, sizeof(receive_timeout));
+        }
+    } restore{psocketsub, send_timeout, receive_timeout};
+    if (zmq_setsockopt(psocketsub, ZMQ_SNDTIMEO, &NEVM_PAYLOAD_CHECK_TIMEOUT_MS,
+                       sizeof(NEVM_PAYLOAD_CHECK_TIMEOUT_MS)) != 0) {
+        error = "nevm-payload-check-send-timeout-failed";
+        return false;
+    }
+    bool supported{false};
+    if (!NotifyNEVMCommsCommon("payload-v1", supported) || !supported) {
+        error = "nevm-payload-check-protocol-unavailable";
+        return false;
+    }
+    if (!SetNEVMReceiveTimeout(psocketsub, NEVM_PAYLOAD_CHECK_TIMEOUT_MS)) {
+        error = "nevm-payload-check-receive-timeout-failed";
+        return false;
+    }
+    try {
+        CDataStream ss{SER_NETWORK, PROTOCOL_VERSION};
+        // Preserve the complete connect envelope. The pure validator does not
+        // consume version hashes, the MN diff or the authenticated BTC cursor.
+        ss << evmBlock << block.vchNEVMBlockData << syscoin_hash
+           << NEVMDataVec{} << CDeterministicMNListNEVMAddressDiff{} << uint256{};
+        if (!SendZmqMessageNEVM(MSG_NEVMPAYLOADCHECK, ss.data(), ss.size())) {
+            error = "nevm-payload-check-not-sent";
+            return false;
+        }
+        std::vector<std::string> parts;
+        if (!ReceiveZmqMessage(parts)) {
+            error = "nevm-payload-check-response-not-found";
+            return false;
+        }
+        if (parts.size() != 2 || parts[0] != MSG_NEVMPAYLOADCHECK) {
+            error = "nevm-payload-check-response-invalid";
+            return false;
+        }
+        if (parts[1] != "payload-valid") {
+            error = parts[1].empty() ? "nevm-payload-check-response-empty" : parts[1];
+            const auto parsed{ParseNEVMBlockReject(parts[1])};
+            // SYSCOIN: Preserve exact immutable verdicts for recovery replay.
+            if (rejection && parsed &&
+                parsed->nevm_hash == evmBlock.nBlockHash &&
+                parsed->syscoin_hash == syscoin_hash) {
+                *rejection = parsed;
+            }
+            return false;
+        }
+    } catch (const std::exception& e) {
+        error = strprintf("nevm-payload-check-error:%s", e.what());
+        return false;
+    }
+    valid = true;
+    error.clear();
     return true;
 }
 bool CZMQPublishNEVMBlockDisconnectNotifier::NotifyNEVMBlockDisconnect(std::string &state, const uint256& nSYSBlockHash, const CDeterministicMNListNEVMAddressDiff &diff)
@@ -489,7 +623,9 @@ bool CZMQPublishNEVMBlockDisconnectNotifier::NotifyNEVMBlockDisconnect(std::stri
     }
     return true;
 }
-bool CZMQPublishNEVMBlockInfoNotifier::NotifyGetNEVMBlockInfo(uint64_t &nHeight, std::string &state)
+// SYSCOIN: NEVM reports the paired Syscoin hash so equal-height reorgs cannot
+// authorize replay by count alone.
+bool CZMQPublishNEVMBlockInfoNotifier::NotifyGetNEVMBlockInfo(uint64_t &nHeight, uint256& nSYSBlockHash, std::string &state)
 {
     LOCK(cs_nevm);
     if(bFirstTime) {
@@ -512,7 +648,9 @@ bool CZMQPublishNEVMBlockInfoNotifier::NotifyGetNEVMBlockInfo(uint64_t &nHeight,
     }
     std::vector<std::string> parts;
     if(ReceiveZmqMessage(parts)) {
-        if(parts.size() != 2) {
+        // SYSCOIN: A count without its paired Syscoin hash is ambiguous after
+        // an equal-height reorg and cannot authorize deferred BTCC replay.
+        if(parts.size() != 3) {
             state = "nevm-response-invalid-parts";
             return false;
         }
@@ -522,6 +660,15 @@ bool CZMQPublishNEVMBlockInfoNotifier::NotifyGetNEVMBlockInfo(uint64_t &nHeight,
         }
         if(!ParseUInt64(parts[1], &nHeight)) {
             state = "nevm-response-unserialize";
+            return false;
+        }
+        if (parts[2].size() != 64 || !IsHex(parts[2])) {
+            state = "nevm-response-invalid-sysblockhash";
+            return false;
+        }
+        nSYSBlockHash.SetHex(parts[2]);
+        if (nHeight > 0 && nSYSBlockHash.IsNull()) {
+            state = "nevm-response-null-sysblockhash";
             return false;
         }
             

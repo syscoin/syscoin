@@ -5,6 +5,7 @@
 
 #include <node/miner.h>
 
+#include <auxpow.h>
 #include <chain.h>
 #include <chainparams.h>
 #include <coins.h>
@@ -16,6 +17,7 @@
 #include <consensus/validation.h>
 #include <deploymentstatus.h>
 #include <logging.h>
+#include <node/blockstorage.h>
 #include <policy/feerate.h>
 #include <policy/policy.h>
 #include <pow.h>
@@ -31,12 +33,12 @@
 #include <masternode/masternodesync.h>
 #include <evo/specialtx.h>
 #include <evo/deterministicmns.h>
-#include <llmq/quorums_blockprocessor.h>
-#include <llmq/quorums_commitment.h>
+#include <governance/governance.h>
+#include <governance/governanceclasses.h>
 #include <llmq/quorums_chainlocks.h>
-#include <llmq/quorums_btccheckpoints.h>
+#include <llmq/pq_btcc.h>
+#include <llmq/pq_recovery_refresh.h>
 #include <validationinterface.h>
-#include <llmq/quorums.h>
 namespace node {
 int64_t UpdateTime(CBlockHeader* pblock, const Consensus::Params& consensusParams, const CBlockIndex* pindexPrev)
 {
@@ -101,6 +103,13 @@ static BlockAssembler::Options ConfiguredOptions()
 BlockAssembler::BlockAssembler(Chainstate& chainstate, const CTxMemPool* mempool)
     : BlockAssembler(chainstate, mempool, ConfiguredOptions()) {}
 
+// SYSCOIN BEGIN: One central gate covers GBT and every direct generate RPC.
+bool ShouldCreateBlockTemplate(bool pq_participation_allowed) noexcept
+{
+    return pq_participation_allowed;
+}
+// SYSCOIN END: Public PQ activation block-production gate.
+
 void BlockAssembler::resetBlock()
 {
     inBlock.clear();
@@ -116,7 +125,10 @@ void BlockAssembler::resetBlock()
     nNumNEVMDataTxs = 0;
 }
 
-std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& scriptPubKeyIn)
+// SYSCOIN: Merge mining may supply the scheduled Bitcoin parent commitment.
+std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(
+    const CScript& scriptPubKeyIn,
+    const std::optional<uint256>& auxpow_btc_prev)
 {
     const auto time_start{SteadyClock::now()};
 
@@ -137,8 +149,29 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
     LOCK(::cs_main);
     CBlockIndex* pindexPrev = m_chainstate.m_chain.Tip();
     assert(pindexPrev != nullptr);
+    // SYSCOIN BEGIN: Block production requires authenticated handoff
+    // participation; historical replay is always sync-only.
+    if (!ShouldCreateBlockTemplate(
+            m_chainstate.m_chainman.IsPQBlockProductionAllowed())) {
+        throw std::runtime_error(
+            "PQ activation handoff is in sync-only quarantine");
+    }
+    // SYSCOIN END: Public PQ activation block-production gate.
+    // SYSCOIN: Startup pairing and deferred replay must finish before the
+    // engine can supply the next block for this active Core branch.
+    if (!m_chainstate.m_chainman.PrepareNEVMBlockProduction()) {
+        throw std::runtime_error(
+            "NEVM block production is waiting for execution recovery");
+    }
     nHeight = pindexPrev->nHeight + 1;
     // SYSCOIN
+    const bool btcp_required{llmq::pq::IsBTCPREVCommitmentHeight(
+        chainparams.GetConsensus(), nHeight)};
+    if (auxpow_btc_prev &&
+        (!btcp_required || auxpow_btc_prev->IsNull())) {
+        throw std::runtime_error(
+            "AuxPoW BTC parent prevhash supplied outside a scheduled BTCPREV height");
+    }
     bool fDIP0003Active_context = nHeight >= chainparams.GetConsensus().DIP0003Height;
     bool NEVMActive_context = nHeight >= chainparams.GetConsensus().nNEVMStartBlock;
     if(fDIP0003Active_context) {
@@ -156,9 +189,52 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
     if (chainparams.MineBlocksOnDemand()) {
         pblock->nVersion = gArgs.GetIntArg("-blockversion", pblock->nVersion);
     }
-
     pblock->nTime = TicksSinceEpoch<std::chrono::seconds>(GetAdjustedTime());
     m_lock_time_cutoff = pindexPrev->GetMedianTimePast();
+
+    const auto btcc_schedule{
+        llmq::pq::GetBTCCScheduleConfig(chainparams.GetConsensus())};
+    const auto chainlock_schedule{llmq::pq::MakeChainLockScheduleConfig(
+        chainparams.GetConsensus().nPQChainLockEpochOrigin)};
+    std::vector<uint8_t> recovery_work_extra;
+    if (chainlock_schedule) {
+        const auto config{llmq::pq::GetRecoveryRefreshConfig(chainparams.GetConsensus())};
+        const auto coordinates{llmq::pq::RecoveryRefreshCoordinatesForCarrierHeight(
+            *chainlock_schedule, btcc_schedule, config, nHeight)};
+        if (coordinates) {
+            const auto* entropy{pindexPrev->GetAncestor(coordinates->entropy_height)};
+            CBlock entropy_block;
+            if (entropy && (entropy->nStatus & BLOCK_HAVE_DATA) &&
+                m_chainstate.m_chainman.m_blockman.ReadBlockFromDisk(entropy_block, *entropy) &&
+                entropy_block.auxpow) {
+                CDataStream proof{SER_NETWORK, PROTOCOL_VERSION};
+                proof << *entropy_block.auxpow;
+                const auto proof_bytes{MakeUCharSpan(proof)};
+                llmq::pq::RecoveryRefreshWorkCommitment commitment;
+                commitment.group = coordinates->group;
+                commitment.entropy_block_hash = entropy->GetBlockHash();
+                commitment.parent_work_hash = entropy_block.auxpow->getParentBlockHash();
+                commitment.proof.assign(proof_bytes.begin(), proof_bytes.end());
+                // F's local wrapper is only a producer-selected candidate.
+                // Authority later comes from these immutable G coinbase bytes.
+                CBlockIndex carrier;
+                carrier.pprev = pindexPrev;
+                carrier.nHeight = nHeight;
+                carrier.phashBlock = pindexPrev->phashBlock;
+                if (llmq::pq::VerifyRecoveryRefreshWorkCommitment(
+                        *chainlock_schedule, btcc_schedule, config, *coordinates,
+                        carrier, commitment, chainparams.GetConsensus()) &&
+                    llmq::pq::AppendRecoveryRefreshWorkCommitment(recovery_work_extra, commitment)) {
+                    const size_t weight{WITNESS_SCALE_FACTOR * (recovery_work_extra.size() + 3)};
+                    if (weight <= m_options.nBlockMaxWeight - nBlockWeight) {
+                        nBlockWeight += weight;
+                    } else {
+                        recovery_work_extra.clear();
+                    }
+                }
+            }
+        }
+    }
 
     int nPackagesSelected = 0;
     int nDescendantsUpdated = 0;
@@ -189,24 +265,28 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
             throw std::runtime_error("Masternode information has not synced, please wait until it finishes before mining!");	
         }
     }
-    CDataStream ds(SER_NETWORK, PROTOCOL_VERSION);
     CDataStream dsNEVM(SER_NETWORK, PROTOCOL_VERSION);
     BlockValidationState state;
     if(fDIP0003Active_context) {
-        // Update coinbase transaction with additional info about masternode and governance payments,
-        // get some info back to pass to getblocktemplate
-        llmq::CFinalCommitmentTxPayload qcTx;
-        // create commitment payload if quorum commitment is needed
-        llmq::CFinalCommitment commitment;
-        // this quorum period start
-        if (llmq::quorumBlockProcessor->GetMinableCommitment(nHeight, qcTx.commitment)) {
-            qcTx.nHeight = nHeight;
-            coinbaseTx.nVersion = SYSCOIN_TX_VERSION_MN_QUORUM_COMMITMENT;
-            ds << qcTx;
+        // SYSCOIN: Aborted undo closes governance readiness even when Core
+        // keeps this parent. Authenticate it before payment construction;
+        // the template cannot reach TestBlockValidity while this gate is shut.
+        if (AreSuperblocksEnabled() && CSuperblock::IsValidBlockHeight(nHeight) &&
+            (governance == nullptr || !governance->IsValid() ||
+             (!governance->IsReadyForTip(pindexPrev) &&
+              !governance->RevalidatePQGovernance(*pindexPrev)))) {
+            throw std::runtime_error(
+                "Payment or governance state is unavailable for block template");
         }
         // Update coinbase transaction with additional info about masternode and governance payments,
         // get some info back to pass to getblocktemplate
-        FillBlockPayments(m_chainstate.m_chain, coinbaseTx, nHeight, blockReward, nFees, pblocktemplate->voutMasternodePayments, pblocktemplate->voutSuperblockPayments);
+        if (!FillBlockPayments(
+                m_chainstate.m_chain, coinbaseTx, nHeight, blockReward,
+                nFees, pblocktemplate->voutMasternodePayments,
+                pblocktemplate->voutSuperblockPayments)) {
+            throw std::runtime_error(
+                "Payment or governance state is unavailable for block template");
+        }
     }
     if(NEVMActive_context && fNEVMConnection) {
         CNEVMBlock nevmBlock;
@@ -220,35 +300,61 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
         dsNEVM << NEVM_MAGIC_BYTES << CNEVMHeader(std::move(nevmBlock));
     }
 
-    // SYSCOIN: embed lagged BTC checkpoint attestation (null allowed), independent of finality.
-    // Schedule: one checkpoint per 10-block absolute epoch (+2 sign, +7 carrier).
-    // Require carrier embedding only when its referenced sign height (H-5) is post-activation.
-    // - Sign at epoch offset +2 (avoids CL's mod-5 boundary)
-    // - Mine/embed at epoch offset +7 (5-block propagation buffer)
-    // Carrier height H where H % 10 == 7 embeds a btcc that attests height (H-5).
-    const auto& consensus = Params().GetConsensus();
-    const int32_t expectedHeight = nHeight - BTCCHECK_PROP_BUFFER;
-    if (IsBTCCCarrierHeight(consensus, nHeight)) {
-        const CBlockIndex* pindexReceipt = pindexPrev->GetAncestor(expectedHeight);
-        llmq::CBTCCheckpointSig btcc;
-        if (llmq::btcCheckpointsHandler && pindexReceipt != nullptr &&
-            llmq::btcCheckpointsHandler->GetRecentBTCCheckpointByHeight(expectedHeight, btcc)) {
-            if (btcc.nHeight != expectedHeight || btcc.sysHash != pindexReceipt->GetBlockHash() ||
-                pindexReceipt->btcpPrevCommitment.IsNull() ||
-                !llmq::btcCheckpointsHandler->VerifyAggregatedBTCCheckpoint(btcc, pindexReceipt)) {
-                btcc = llmq::CBTCCheckpointSig();
-            }
-        } else {
-            btcc = llmq::CBTCCheckpointSig();
-        }
-        dsNEVM << BTCCHECK_MAGIC_BYTES << btcc;
-    }
     pblock->vtx[0] = MakeTransactionRef(coinbaseTx);
-    // SYSCOIN
-    const auto bytesVec = MakeUCharSpan(ds);
-    pblocktemplate->vchCoinbaseCommitmentExtra = std::vector<unsigned char>(bytesVec.begin(), bytesVec.end());
+    // SYSCOIN: Commit a canonical receipt slot at every scheduled carrier.
+    // ADVANCE carries the exact durable PQ certificate reference; the null
+    // sentinel preserves deterministic cadence when no BTC cursor advanced.
     const auto bytesVecNEVM = MakeUCharSpan(dsNEVM);
     pblocktemplate->vchCoinbaseCommitmentExtra.insert( pblocktemplate->vchCoinbaseCommitmentExtra.end(), bytesVecNEVM.begin(), bytesVecNEVM.end() );
+    pblocktemplate->vchCoinbaseCommitmentExtra.insert(
+        pblocktemplate->vchCoinbaseCommitmentExtra.end(),
+        recovery_work_extra.begin(), recovery_work_extra.end());
+    if (chainlock_schedule) {
+        const llmq::pq::PaymentAuditScheduleConfig audit_schedule{
+            *chainlock_schedule, btcc_schedule};
+        if (llmq::pq::PaymentAuditReceiptSlotEpoch(audit_schedule,
+                                                    nHeight)) {
+            const llmq::pq::PaymentAuditReceipt receipt{
+                llmq::chainLocksHandler
+                    ? llmq::chainLocksHandler
+                          ->GetPaymentAuditReceiptForCarrier(
+                              nHeight, *pindexPrev)
+                    : llmq::pq::PaymentAuditReceipt{}};
+            CDataStream ds_audit{SER_NETWORK, PROTOCOL_VERSION};
+            ds_audit << PAYMENT_AUDIT_RECEIPT_MAGIC_BYTES << receipt;
+            const auto audit_bytes{MakeUCharSpan(ds_audit)};
+            pblocktemplate->vchCoinbaseCommitmentExtra.insert(
+                pblocktemplate->vchCoinbaseCommitmentExtra.end(),
+                audit_bytes.begin(), audit_bytes.end());
+        }
+    }
+    // Both receipts share carrier heights. Keep their suffix order fixed so
+    // each consensus decoder can reject ambiguous duplicate or interleaved
+    // tags while still allowing the optional BTCPREV tail below.
+    if (llmq::pq::IsBTCCReceiptCarrierHeight(btcc_schedule, nHeight)) {
+        const llmq::pq::BTCCReceipt receipt{
+            llmq::chainLocksHandler
+                ? llmq::chainLocksHandler->GetBTCCReceiptForCarrier(
+                      nHeight, *pindexPrev)
+                : llmq::pq::BTCCReceipt{}};
+        CDataStream dsReceipt{SER_NETWORK, PROTOCOL_VERSION};
+        dsReceipt << BTCC_RECEIPT_MAGIC_BYTES << receipt;
+        const auto receipt_bytes{MakeUCharSpan(dsReceipt)};
+        pblocktemplate->vchCoinbaseCommitmentExtra.insert(
+            pblocktemplate->vchCoinbaseCommitmentExtra.end(),
+            receipt_bytes.begin(), receipt_bytes.end());
+    }
+    if (auxpow_btc_prev) {
+        // SYSCOIN: append BTCPREV before the witness/Syscoin coinbase
+        // commitment is generated, so template validity covers the exact
+        // bytes later authenticated by the submitted Bitcoin parent header.
+        CDataStream ds_btcp{SER_NETWORK, PROTOCOL_VERSION};
+        ds_btcp << BTCPREV_MAGIC_BYTES << *auxpow_btc_prev;
+        const auto btcp_bytes{MakeUCharSpan(ds_btcp)};
+        pblocktemplate->vchCoinbaseCommitmentExtra.insert(
+            pblocktemplate->vchCoinbaseCommitmentExtra.end(),
+            btcp_bytes.begin(), btcp_bytes.end());
+    }
     pblocktemplate->vchCoinbaseCommitment = m_chainstate.m_chainman.GenerateCoinbaseCommitment(*pblock, pindexPrev, pblocktemplate->vchCoinbaseCommitmentExtra);
     // add coinbase payload if not witness commitment which would append it after witness data, in this case we can assume no witness commitment
     if(pblocktemplate->vchCoinbaseCommitment.empty() && !pblocktemplate->vchCoinbaseCommitmentExtra.empty()) {
@@ -265,10 +371,23 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
     pblock->nNonce         = 0;
     pblocktemplate->vTxSigOpsCost[0] = WITNESS_SCALE_FACTOR * GetLegacySigOpCount(*pblock->vtx[0]);
 
-    // SYSCOIN BlockValidationState state;
-    if (m_options.test_block_validity && !TestBlockValidity(state, chainparams, m_chainstate, *pblock, pindexPrev,
-                                                  GetAdjustedTime, /*fCheckPOW=*/false, /*fCheckMerkleRoot=*/false)) {
-        throw std::runtime_error(strprintf("%s: TestBlockValidity failed: %s", __func__, state.ToString()));
+    // SYSCOIN: Validate the template against the exact policy-selected
+    // Bitcoin parent before returning merge-mining work.
+    if (m_options.test_block_validity) {
+        const bool valid{
+            auxpow_btc_prev
+                ? TestAuxpowBlockTemplateValidity(
+                      state, chainparams, m_chainstate, *pblock, pindexPrev,
+                      *auxpow_btc_prev, GetAdjustedTime)
+                : TestBlockValidity(
+                      state, chainparams, m_chainstate, *pblock, pindexPrev,
+                      GetAdjustedTime, /*fCheckPOW=*/false,
+                      /*fCheckMerkleRoot=*/false)};
+        if (!valid) {
+            throw std::runtime_error(strprintf(
+                "%s: TestBlockValidity failed: %s", __func__,
+                state.ToString()));
+        }
     }
     const auto time_2{SteadyClock::now()};
 

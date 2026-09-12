@@ -7,6 +7,8 @@
 #define SYSCOIN_WALLET_WALLETDB_H
 
 #include <script/sign.h>
+#include <crypto/slhdsa/slhdsa.h>
+#include <wallet/crypter.h>
 #include <wallet/db.h>
 #include <wallet/walletutil.h>
 #include <key.h>
@@ -95,6 +97,8 @@ extern const std::string WATCHMETA;
 extern const std::string WATCHS;
 // SYSCOIN
 extern const std::string GOBJECT;
+extern const std::string PQ_VOTING_KEY;
+extern const std::string PQ_VOTING_CRYPTED_KEY;
 
 // Keys in this set pertain only to the legacy wallet (LegacyScriptPubKeyMan) and are removed during migration from legacy to descriptors.
 extern const std::unordered_set<std::string> LEGACY_TYPES;
@@ -301,6 +305,9 @@ public:
     // SYSCOIN
     //! Write a CGovernanceObject to the database
     bool WriteGovernanceObject(const Governance::Object& obj);
+    bool WriteVotingKey(const slhdsa::PublicKey& public_key, const CKeyingMaterial& secret);
+    bool WriteCryptedVotingKey(const slhdsa::PublicKey& public_key,
+                               const std::vector<unsigned char>& secret, bool erase_plaintext = false);
 private:
     std::unique_ptr<DatabaseBatch> m_batch;
     WalletDatabase& m_database;

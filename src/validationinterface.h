@@ -8,6 +8,7 @@
 
 #include <kernel/cs_main.h>
 #include <kernel/chain.h>
+#include <nevm/response.h>
 #include <primitives/transaction.h> // CTransaction(Ref)
 #include <sync.h>
 
@@ -98,6 +99,11 @@ protected:
      * Called on a background thread. Only called for the active chainstate.
      */
     virtual void UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *pindexFork, ChainstateManager& chainman, bool fInitialDownload) {}
+    // SYSCOIN: Notify subscribers when public IBD ends without requiring a
+    // new active tip.
+    /** Public IBD completed without necessarily changing the active tip. */
+    virtual void InitialBlockDownloadCompleted(
+        const CBlockIndex* tip, ChainstateManager& chainman) {}
     /**
      * Notifies listeners of a transaction having been added to mempool.
      *
@@ -188,11 +194,15 @@ protected:
     virtual void NotifyGovernanceVote(const uint256& vote) {}
     virtual void NotifyGovernanceObject(const uint256 &object) {}
     virtual void NotifyMasternodeListChanged(bool undo, const CDeterministicMNList& oldMNList, const CDeterministicMNListDiff& diff) {}
-    virtual void NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation, const uint256& btcPrevHashForNEVM, const CDeterministicMNListNEVMAddressDiff &diff) {}
+    virtual void NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation, const uint256& btcPrevHashForNEVM, const CDeterministicMNListNEVMAddressDiff &diff, std::optional<NEVMBlockReject>* rejection = nullptr) {}
+    virtual void NotifyNEVMPayloadCheck(const CNEVMHeader& evmBlock, const CBlock& block, const uint256& syscoin_hash, bool& valid, std::string& error, std::optional<NEVMBlockReject>* rejection = nullptr) {}
     virtual void NotifyNEVMBlockDisconnect(std::string &state, const uint256& nBlockHash, const CDeterministicMNListNEVMAddressDiff &diff) {}
-    virtual void NotifyGetNEVMBlockInfo(uint64_t &nHeight, std::string &state) {}
+    // SYSCOIN: Bind the applied NEVM height to its paired Syscoin branch tip.
+    virtual void NotifyGetNEVMBlockInfo(uint64_t &nHeight,
+                                        uint256& nSYSBlockHash,
+                                        std::string &state) {}
     virtual void NotifyGetNEVMBlock(CNEVMBlock &evmBlock, std::string &state) {}
-    virtual void NotifyNEVMComms(const std::string& commMessage, bool &bResponse) {}
+    virtual void NotifyNEVMComms(const std::string& commMessage, bool &bResponse, std::optional<NEVMBlockReject>* rejection = nullptr) {}
     friend class ValidationInterfaceTest;
 };
 
@@ -218,6 +228,8 @@ public:
 
 
     void UpdatedBlockTip(const CBlockIndex *, const CBlockIndex *, ChainstateManager&, bool fInitialDownload);
+    // SYSCOIN: Fan out public-readiness completion independently of a tip update.
+    void InitialBlockDownloadCompleted(ChainstateManager& chainman);
     // SYSCOIN
     void NotifyHeaderTip(const CBlockIndex *pindexNew);
     void TransactionAddedToMempool(const CTransactionRef&, uint64_t mempool_sequence);
@@ -230,11 +242,16 @@ public:
     void NotifyGovernanceVote(const uint256& vote);
     void NotifyGovernanceObject(const uint256& object);
     void NotifyMasternodeListChanged(bool undo, const CDeterministicMNList& oldMNList, const CDeterministicMNListDiff& diff);
-    void NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation, const uint256& btcPrevHashForNEVM, const CDeterministicMNListNEVMAddressDiff &diff);
+    void NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation, const uint256& btcPrevHashForNEVM, const CDeterministicMNListNEVMAddressDiff &diff, std::optional<NEVMBlockReject>* rejection = nullptr);
+    /** Recovery-only check; true requires an explicit successful engine reply. */
+    bool NotifyNEVMPayloadCheck(const CNEVMHeader& evmBlock, const CBlock& block, const uint256& syscoin_hash, bool& valid, std::string& error, std::optional<NEVMBlockReject>* rejection = nullptr);
     void NotifyNEVMBlockDisconnect(std::string &state, const uint256& nBlockHash, const CDeterministicMNListNEVMAddressDiff &diff);
-    void NotifyGetNEVMBlockInfo(uint64_t &nHeight, std::string &state);
+    // SYSCOIN: Returns the last applied Syscoin hash with the NEVM block count.
+    void NotifyGetNEVMBlockInfo(uint64_t &nHeight,
+                                uint256& nSYSBlockHash,
+                                std::string &state);
     void NotifyGetNEVMBlock(CNEVMBlock &evmBlock, std::string &state);
-    void NotifyNEVMComms(const std::string& commMessage, bool &bResponse);
+    void NotifyNEVMComms(const std::string& commMessage, bool &bResponse, std::optional<NEVMBlockReject>* rejection = nullptr);
 };
 
 CMainSignals& GetMainSignals();

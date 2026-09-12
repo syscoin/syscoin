@@ -12,6 +12,8 @@ src/syscoin-util
 src/syscoin-chainstate
 src/syscoin-wallet
 src/test/fuzz/fuzz
+# SYSCOIN: full-dimension PQ ChainLock fixture binary.
+src/test/pq_chainlock_fixture
 src/test/test_syscoin
 src/qt/test/test_syscoin-qt
 src/bin
@@ -160,8 +162,6 @@ dist/
 /guix-build-*
 
 /ci/scratch/
-/build_msvc/dashbls-build/
-/build_msvc/dashbls-install/
 
 .vscode
 *.old

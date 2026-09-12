@@ -9,32 +9,44 @@
 #include <arith_uint256.h>
 #include <consensus/params.h>
 #include <crypto/common.h>
+#include <crypto/muhash.h> // SYSCOIN: incremental DMN state commitment.
+#include <evo/auxiliary_history_gc.h>
 #include <evo/evodb.h>
+#include <evo/pq_registry.h>
+#include <evo/pq_payment_probation_db.h>
 #include <evo/providertx.h>
 #include <saltedhasher.h>
 #include <scheduler.h>
 #include <sync.h>
+#include <util/ranges.h>
 
 #include <immer/map.hpp>
 
+#include <algorithm>
+#include <array>
 #include <atomic>
+#include <functional>
+#include <ios>
 #include <limits>
+#include <mutex>
 #include <numeric>
+#include <optional>
+#include <set>
+#include <span>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 #include <interfaces/chain.h>
 class CBlock;
 class UniValue;
 class CBlockIndex;
 class TxValidationState;
 class ChainstateManager;
-namespace llmq
-{
-    class CFinalCommitmentTxPayload;
-    class CFinalCommitment;
-} // namespace llmq
-
+namespace llmq {
+class CFinalCommitmentTxPayload;
+}
 class CDeterministicMN
 {
 private:
@@ -88,13 +100,33 @@ public:
     using MnMap = immer::map<uint256, CDeterministicMNCPtr, ImmerHasher>;
     using MnInternalIdMap = immer::map<uint64_t, uint256>;
     using MnUniquePropertyMap = immer::map<uint256, std::pair<uint256, uint32_t>, ImmerHasher>;
-    bool m_changed_nevm_address{false};
 private:
     uint256 blockHash;
     int nHeight{-1};
     uint32_t nTotalRegisteredCount{0};
     MnMap mnMap;
     MnInternalIdMap mnInternalIdMap;
+    // SYSCOIN: Incremental authenticated content for the inverse journal.
+    // Block identity remains outside this set so unchanged lists share O(1)
+    // content across blocks while each mutation updates one exact element.
+    MuHash3072 m_pq_legacy_content_hash;
+    // Authenticated identity of only the DMN fields that select governance
+    // authorities. Ordinary payment/service updates must not force an O(N)
+    // governance rebuild at every straight chain extension.
+    MuHash3072 m_pq_governance_authority_content_hash;
+    // Memory-only address projection, rebuilt with snapshots. Unrelated DMN
+    // bookkeeping must not force a full-list comparison during NEVM replay.
+    MuHash3072 m_nevm_address_content_hash;
+    mutable std::optional<uint256> m_nevm_address_hash;
+    [[nodiscard]] uint256 GetNEVMAddressHash() const;
+    // Memory-only cache for branch-local deterministic-state diagnostics.
+    mutable std::optional<uint256> m_pq_legacy_state_hash;
+    mutable uint256 m_pq_legacy_state_hash_genesis;
+    mutable std::optional<uint256> m_pq_governance_authority_hash;
+    mutable uint256 m_pq_governance_authority_hash_genesis;
+    // Memory-only mutation keys for compact inverse-journal construction.
+    // BuildNewListFromBlock resets this after copying the parent list.
+    std::set<uint256> m_tracked_changes;
 
     // map of unique properties like address and keys
     // we keep track of this as checking for duplicates would otherwise be painfully slow
@@ -128,6 +160,14 @@ public:
         mnMap = MnMap();
         mnUniquePropertyMap = MnUniquePropertyMap();
         mnInternalIdMap = MnInternalIdMap();
+        // SYSCOIN: Rebuild the memory-only commitment through AddMN below.
+        m_pq_legacy_content_hash = MuHash3072{};
+        m_pq_governance_authority_content_hash = MuHash3072{};
+        m_nevm_address_content_hash = MuHash3072{};
+        m_nevm_address_hash.reset();
+        m_pq_legacy_state_hash.reset();
+        m_pq_governance_authority_hash.reset();
+        m_tracked_changes.clear();
         s >> blockHash;
         s >> nHeight;
         s >> nTotalRegisteredCount;
@@ -136,15 +176,24 @@ public:
         for (size_t i = 0; i < cnt; i++) {
             AddMN(std::make_shared<CDeterministicMN>(deserialize, s), false);
         }
+        m_pq_legacy_state_hash.reset();
+        m_tracked_changes.clear();
     }
     void clear() {
         mnMap = MnMap();
         mnUniquePropertyMap = MnUniquePropertyMap();
         mnInternalIdMap = MnInternalIdMap();
+        // SYSCOIN: Clear the memory-only deterministic-state commitment.
+        m_pq_legacy_content_hash = MuHash3072{};
+        m_pq_governance_authority_content_hash = MuHash3072{};
+        m_nevm_address_content_hash = MuHash3072{};
+        m_nevm_address_hash.reset();
+        m_pq_legacy_state_hash.reset();
+        m_pq_governance_authority_hash.reset();
+        m_tracked_changes.clear();
         blockHash.SetNull();
         nHeight = -1;
         nTotalRegisteredCount = 0;
-        m_changed_nevm_address = false;
     }
     [[nodiscard]] size_t GetAllMNsCount() const
     {
@@ -198,6 +247,12 @@ public:
     void SetBlockHash(const uint256& _blockHash)
     {
         blockHash = _blockHash;
+        m_pq_legacy_state_hash.reset();
+    }
+    /** The default list is the intentional pre-DIP3 / unavailable sentinel. */
+    [[nodiscard]] bool IsNull() const noexcept
+    {
+        return nHeight < 0;
     }
     [[nodiscard]] int GetHeight() const
     {
@@ -208,11 +263,20 @@ public:
     {
         assert(_height >= 0);
         nHeight = _height;
+        m_pq_legacy_state_hash.reset();
     }
     [[nodiscard]] uint32_t GetTotalRegisteredCount() const
     {
         return nTotalRegisteredCount;
     }
+
+    /** SYSCOIN: Stable versioned digest for branch-local diagnostics. */
+    [[nodiscard]] uint256 GetPQLegacyStateHash(const uint256& genesis_hash) const;
+    [[nodiscard]] uint256 GetOrComputePQLegacyStateHash(
+        const uint256& genesis_hash) const;
+    /** Stable authenticated identity of governance-relevant DMN content. */
+    [[nodiscard]] uint256 GetOrComputePQGovernanceAuthorityHash(
+        const uint256& genesis_hash) const;
 
     [[nodiscard]] bool IsMNValid(const uint256& proTxHash) const;
     [[nodiscard]] bool IsMNPoSeBanned(const uint256& proTxHash) const;
@@ -233,20 +297,28 @@ public:
     }
     [[nodiscard]] CDeterministicMNCPtr GetMN(const uint256& proTxHash) const;
     [[nodiscard]] CDeterministicMNCPtr GetValidMN(const uint256& proTxHash) const;
-    [[nodiscard]] CDeterministicMNCPtr GetMNByOperatorKey(const CBLSPublicKey& pubKey) const;
     [[nodiscard]] CDeterministicMNCPtr GetMNByCollateral(const COutPoint& collateralOutpoint) const;
     [[nodiscard]] CDeterministicMNCPtr GetValidMNByCollateral(const COutPoint& collateralOutpoint) const;
     [[nodiscard]] CDeterministicMNCPtr GetMNByService(const CService& service) const;
     [[nodiscard]] CDeterministicMNCPtr GetMNByInternalId(uint64_t internalId) const;
-    [[nodiscard]] CDeterministicMNCPtr GetMNPayee() const;
+    [[nodiscard]] CDeterministicMNCPtr GetMNPayee(
+        const llmq::pq::PQPaymentProbationStateView* payment_state = nullptr,
+        const llmq::pq::PQPaymentEligibleProTxHashes* pq_payment_eligible =
+            nullptr) const;
 
-    /**
+    /** SYSCOIN:
      * Calculates the projected MN payees for the next *count* blocks. The result is not guaranteed to be correct
      * as PoSe banning might occur later
      * @param nCount the number of payees to return. "nCount = max()"" means "all", use it to avoid calling GetValidMNsCount twice.
+     * @param payment_state exact parent payment-probation state, when active
+     * @param pq_payment_eligible exact frozen root-capable set, when required
      * @return
      */
-    [[nodiscard]] std::vector<CDeterministicMNCPtr> GetProjectedMNPayees(int nCount = std::numeric_limits<int>::max()) const;
+    [[nodiscard]] std::vector<CDeterministicMNCPtr> GetProjectedMNPayees(
+        int nCount = std::numeric_limits<int>::max(),
+        const llmq::pq::PQPaymentProbationStateView* payment_state = nullptr,
+        const llmq::pq::PQPaymentEligibleProTxHashes* pq_payment_eligible =
+            nullptr) const;
 
     /**
      * Calculate a quorum based on the modifier. The resulting list is deterministically sorted by score
@@ -288,10 +360,32 @@ public:
      * Decrease penalty score of MN by 1.
      * Only allowed on non-banned MNs.
      */
-    void PoSeDecrease(const CDeterministicMN& dmn);
+    // SYSCOIN: Resolve against the current immutable-list entry by identity.
+    void PoSeDecrease(const uint256& proTxHash);
 
     void BuildDiff(const CDeterministicMNList& to, CDeterministicMNListDiff &diffRet, CDeterministicMNListNEVMAddressDiff &diffRetNEVMAddress) const;
-    [[nodiscard]] CDeterministicMNList ApplyDiff(const CBlockIndex* pindex, const CDeterministicMNListDiff& diff) const;
+    [[nodiscard]] bool HasNEVMAddressChanges(const CDeterministicMNList& to) const;
+    void BuildNEVMAddressDiff(const CDeterministicMNList& to,
+                              CDeterministicMNListNEVMAddressDiff& diff) const;
+    void BuildTrackedInverseDiff(const CDeterministicMNList& parent,
+                                 CDeterministicMNListDiff& inverse) const;
+    [[nodiscard]] std::vector<uint256> BuildTrackedNetRemovedProTxHashes(
+        const CDeterministicMNList& parent) const;
+    void ResetTrackedChanges() { m_tracked_changes.clear(); }
+    [[nodiscard]] size_t TrackedChangeCountForTesting() const
+    {
+        return m_tracked_changes.size();
+    }
+    [[nodiscard]] bool HasPQLegacyStateHashCacheForTesting(
+        const uint256& genesis_hash) const
+    {
+        return m_pq_legacy_state_hash &&
+               m_pq_legacy_state_hash_genesis == genesis_hash;
+    }
+    [[nodiscard]] CDeterministicMNList ApplyDiff(
+        const CBlockIndex* pindex,
+        const CDeterministicMNListDiff& diff,
+        std::optional<uint32_t> total_registered_count = std::nullopt) const;
 
     void AddMN(const CDeterministicMNCPtr& dmn, bool fBumpTotalCount = true);
     void UpdateMN(const CDeterministicMN& oldDmn, const std::shared_ptr<const CDeterministicMNState>& pdmnState);
@@ -318,7 +412,6 @@ private:
     template <typename T>
     [[nodiscard]] uint256 GetUniquePropertyHash(const T& v) const
     {
-        static_assert(!std::is_same<T, CBLSPublicKey>(), "GetUniquePropertyHash cannot be templated against CBLSPublicKey");
         return ::SerializeHash(v);
     }
     template <typename T>
@@ -425,6 +518,8 @@ struct NEVMDiffEntry {
 class CDeterministicMNListDiff
 {
 public:
+    static constexpr size_t MAX_CHANGES{1'000'000};
+
     int nHeight{-1}; //memory only
 
     std::vector<CDeterministicMNCPtr> addedMNs;
@@ -437,9 +532,15 @@ public:
     {
         s << addedMNs;
         WriteCompactSize(s, updatedMNs.size());
-        for (const auto& p : updatedMNs) {
-            WriteVarInt<Stream, VarIntMode::DEFAULT, uint64_t>(s, p.first);
-            s << p.second;
+        std::vector<uint64_t> updated_ids;
+        updated_ids.reserve(updatedMNs.size());
+        for (const auto& [internal_id, _] : updatedMNs) {
+            updated_ids.emplace_back(internal_id);
+        }
+        std::sort(updated_ids.begin(), updated_ids.end());
+        for (const uint64_t internal_id : updated_ids) {
+            WriteVarInt<Stream, VarIntMode::DEFAULT, uint64_t>(s, internal_id);
+            s << updatedMNs.at(internal_id);
         }
         WriteCompactSize(s, removedMns.size());
         for (const auto& p : removedMns) {
@@ -450,13 +551,28 @@ public:
     template <typename Stream>
     void Unserialize(Stream& s)
     {
+        addedMNs.clear();
         updatedMNs.clear();
         removedMns.clear();
 
         size_t tmp;
         uint64_t tmp2;
-        s >> addedMNs;
         tmp = ReadCompactSize(s);
+        if (tmp > MAX_CHANGES) {
+            throw std::ios_base::failure(
+                "too many added deterministic-MN diff entries");
+        }
+        addedMNs.reserve(tmp);
+        for (size_t i = 0; i < tmp; ++i) {
+            CDeterministicMNCPtr dmn;
+            s >> dmn;
+            addedMNs.emplace_back(std::move(dmn));
+        }
+        tmp = ReadCompactSize(s);
+        if (tmp > MAX_CHANGES - addedMNs.size()) {
+            throw std::ios_base::failure(
+                "too many updated deterministic-MN diff entries");
+        }
         for (size_t i = 0; i < tmp; i++) {
             CDeterministicMNStateDiff diff;
             // CDeterministicMNState holds a new field {nVersion} but no migration is needed here since:
@@ -464,12 +580,22 @@ public:
             // Because the new field have a new bit guide value then we are good to continue
             tmp2 = ReadVarInt<Stream, VarIntMode::DEFAULT, uint64_t>(s);
             s >> diff;
-            updatedMNs.emplace(tmp2, std::move(diff));
+            if (!updatedMNs.emplace(tmp2, std::move(diff)).second) {
+                throw std::ios_base::failure(
+                    "duplicate deterministic-MN state diff ID");
+            }
         }
         tmp = ReadCompactSize(s);
+        if (tmp > MAX_CHANGES - addedMNs.size() - updatedMNs.size()) {
+            throw std::ios_base::failure(
+                "too many removed deterministic-MN diff entries");
+        }
         for (size_t i = 0; i < tmp; i++) {
             tmp2 = ReadVarInt<Stream, VarIntMode::DEFAULT, uint64_t>(s);
-            removedMns.emplace(tmp2);
+            if (!removedMns.emplace(tmp2).second) {
+                throw std::ios_base::failure(
+                    "duplicate removed deterministic-MN diff ID");
+            }
         }
     }
 
@@ -478,22 +604,415 @@ public:
         return !addedMNs.empty() || !updatedMNs.empty() || !removedMns.empty();
     }
 };
+
+/**
+ * Compact branch-local inverse of one accepted deterministic-MN transition.
+ * The two state hashes bind both ends so local database damage cannot turn an
+ * otherwise valid reorg into a silently different provider state.
+ */
+class CDeterministicMNListInverse
+{
+public:
+    static constexpr uint16_t VERSION{1};
+    static constexpr size_t MAX_CHANGES{
+        CDeterministicMNListDiff::MAX_CHANGES};
+
+    uint16_t version{VERSION};
+    uint256 genesis_hash;
+    int32_t coverage_base_height{-1};
+    uint256 parent_history_commitment;
+    uint256 history_commitment;
+    int32_t child_height{-1};
+    uint256 child_hash;
+    uint256 child_state_hash;
+    int32_t parent_height{-1};
+    uint256 parent_hash;
+    uint256 parent_state_hash;
+    uint32_t parent_total_registered_count{0};
+    CDeterministicMNListDiff inverse_diff;
+
+    SERIALIZE_METHODS(CDeterministicMNListInverse, obj)
+    {
+        SER_WRITE(obj, if (!obj.IsStructurallyValid()) {
+            throw std::ios_base::failure(
+                "invalid deterministic-MN inverse journal entry");
+        });
+        READWRITE(obj.version, obj.genesis_hash, obj.coverage_base_height,
+                  obj.parent_history_commitment, obj.history_commitment,
+                  obj.child_height, obj.child_hash, obj.child_state_hash,
+                  obj.parent_height, obj.parent_hash, obj.parent_state_hash,
+                  obj.parent_total_registered_count, obj.inverse_diff);
+        SER_READ(obj, if (!obj.IsStructurallyValid()) {
+            throw std::ios_base::failure(
+                "invalid deterministic-MN inverse journal entry");
+        });
+    }
+
+    [[nodiscard]] bool IsStructurallyValid() const;
+};
+
 class CDeterministicMNManager
 {
 public:
+    using AuxiliaryHistoryGCAuthorizationSource =
+        evo::AuxiliaryHistoryGCAuthorizationSource;
+    using AuxiliaryHistoryBlockIdentity =
+        evo::AuxiliaryHistoryGCBlockIdentity;
+    using AuxiliaryHistoryGCAuthorization =
+        evo::AuxiliaryHistoryGCAuthorization;
+
+    struct AuxiliaryHistoryBranchRequirement {
+        bool active{false};
+        AuxiliaryHistoryBlockIdentity head;
+        AuxiliaryHistoryBlockIdentity random_access_floor;
+        std::vector<uint256> snapshot_window;
+    };
+
+    struct EffectiveDMNInverseGCBoundary {
+        evo::AuxiliaryHistoryGCComponent component;
+        evo::DMNInverseGCClosure closure;
+        AuxiliaryHistoryGCAuthorization authorization;
+        bool pending{false};
+
+        friend bool operator==(const EffectiveDMNInverseGCBoundary&,
+                               const EffectiveDMNInverseGCBoundary&) = default;
+    };
+
+    struct EffectivePQRegistryGCBoundary {
+        evo::AuxiliaryHistoryGCComponent component;
+        evo::PQRegistryGCClosure closure;
+        AuxiliaryHistoryGCAuthorization authorization;
+        bool pending{false};
+
+        friend bool operator==(const EffectivePQRegistryGCBoundary&,
+                               const EffectivePQRegistryGCBoundary&) = default;
+    };
+
+    /**
+     * SYSCOIN: One immutable maintenance observation for both append-only
+     * auxiliary histories. Finality authorizes destruction; branch windows,
+     * roster floors, and fixed anchors independently describe what survives.
+     */
+    struct AuxiliaryHistoryRetentionPlan {
+        std::optional<AuxiliaryHistoryGCAuthorization>
+            destructive_authorization;
+        std::optional<int32_t> replay_floor;
+        std::optional<int32_t> finality_roster_floor;
+        std::vector<AuxiliaryHistoryBranchRequirement> branches;
+        std::vector<AuxiliaryHistoryBlockIdentity> fixed_dependencies;
+        std::optional<EffectiveDMNInverseGCBoundary>
+            effective_dmn_inverse_gc_boundary;
+        std::optional<EffectivePQRegistryGCBoundary>
+            effective_pq_registry_gc_boundary;
+        bool finality_verification_active{false};
+        bool finality_publication_pending{false};
+        bool pre_dip3_recovery_pending{false};
+        bool requirements_valid{false};
+        bool finality_health_ambiguous{true};
+        uint64_t generation{0};
+
+        [[nodiscard]] bool AllowsDestructiveGC() const noexcept
+        {
+            return destructive_authorization.has_value() &&
+                   finality_roster_floor.has_value() && !branches.empty() &&
+                   !replay_floor.has_value() &&
+                   !finality_verification_active &&
+                   !finality_publication_pending &&
+                   !pre_dip3_recovery_pending &&
+                   requirements_valid &&
+                   !finality_health_ambiguous;
+        }
+    };
+
+    enum class DMNInverseGCBoundaryStatus : uint8_t {
+        BLOCKED = 0,
+        NO_OP,
+        READY,
+    };
+
+    struct DMNInverseGCBoundary {
+        DMNInverseGCBoundaryStatus status{
+            DMNInverseGCBoundaryStatus::BLOCKED};
+        std::optional<AuxiliaryHistoryBlockIdentity> boundary;
+        std::optional<evo::AuxiliaryHistoryGCComponent> component;
+        std::optional<CDeterministicMNList> snapshot;
+    };
+
+    struct InverseJournalEntryStatsForTesting {
+        uint16_t version{0};
+        size_t serialized_size{0};
+        size_t added_mns{0};
+        size_t updated_mns{0};
+        size_t removed_mns{0};
+    };
+
     static constexpr int DISK_SNAPSHOT_PERIOD = 576; // once per day
     static constexpr int DISK_SNAPSHOTS = 3; // keep cache for 3 disk snapshots to have 2 full days covered
 public:
+    // Full snapshots are a bounded random-access availability/performance
+    // window. Sequential rollback depth is provided by the inverse journal
+    // and must never be inferred from this cache size.
     static constexpr int LIST_CACHE_SIZE = DISK_SNAPSHOT_PERIOD * DISK_SNAPSHOTS;
     static constexpr int HOT_LIST_CACHE_SIZE = 128;
+    // SYSCOIN: ChainstateManager persists at most two chainstates and each
+    // exposes at most two distinct coins-recovery markers. One additional
+    // child can own an unresolved external NEVM connection.
+    static constexpr std::size_t MAX_RECOVERY_SNAPSHOT_HEADS{5};
+    static constexpr std::size_t SNAPSHOT_GC_MAX_FIXED_RETAINED_KEYS{8};
+    static constexpr std::size_t SNAPSHOT_GC_MAX_RETAINED_KEYS{
+        (MAX_RECOVERY_SNAPSHOT_HEADS + 1) *
+            static_cast<std::size_t>(LIST_CACHE_SIZE) +
+        SNAPSHOT_GC_MAX_FIXED_RETAINED_KEYS};
+    static constexpr std::size_t SNAPSHOT_GC_MAX_ERASE_ITEMS_PER_PASS{256};
+    // SYSCOIN: Full-snapshot compaction runs while chainstate is quiescent.
+    // One pass can cross every explicitly retained branch key and still
+    // reclaim a complete erase batch, independent of their hash ordering.
+    static constexpr std::size_t SNAPSHOT_GC_MAX_SCANNED_RECORDS_PER_PASS{
+        SNAPSHOT_GC_MAX_RETAINED_KEYS +
+        SNAPSHOT_GC_MAX_ERASE_ITEMS_PER_PASS};
+    static constexpr std::size_t SNAPSHOT_GC_MAX_SCANNED_VALUE_BYTES_PER_PASS{
+        64U << 20};
+    static constexpr std::size_t SNAPSHOT_GC_MAX_RECORD_BYTES{256U << 20};
+    static constexpr std::size_t
+        DMN_INVERSE_GC_MAX_SCANNED_RECORDS_PER_PASS{4096};
+    static constexpr std::size_t
+        DMN_INVERSE_GC_MAX_SCANNED_VALUE_BYTES_PER_PASS{256U << 20};
+    static constexpr std::size_t DMN_INVERSE_GC_MAX_RECORD_BYTES{64U << 20};
+    // SYSCOIN: Exact-parent payment selection is shared by consensus,
+    // templates, governance, and RPC without retaining an unbounded branch
+    // history.
+    static constexpr std::size_t MN_PAYEE_CACHE_SIZE{64};
+
+    struct MNPayeeCacheStatsForTesting {
+        std::size_t entries{0};
+        uint64_t hits{0};
+        uint64_t builds{0};
+    };
 private:
-    Mutex cs;
+    struct MNPayeeCacheKey {
+        uint256 block_hash;
+        int32_t height{-1};
+        uint256 payment_probation_state_hash;
+
+        friend bool operator==(const MNPayeeCacheKey&,
+                               const MNPayeeCacheKey&) = default;
+    };
+    struct MNPayeeCacheEntry {
+        MNPayeeCacheKey key;
+        CDeterministicMNCPtr payee;
+        bool occupied{false};
+        bool recently_used{false};
+    };
+    class MNPayeeCache final {
+    public:
+        [[nodiscard]] std::optional<CDeterministicMNCPtr> Get(
+            const MNPayeeCacheKey& key) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+        [[nodiscard]] CDeterministicMNCPtr Publish(
+            const MNPayeeCacheKey& key,
+            CDeterministicMNCPtr payee) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+        [[nodiscard]] MNPayeeCacheStatsForTesting Stats()
+            EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    private:
+        Mutex m_mutex;
+        std::array<MNPayeeCacheEntry, MN_PAYEE_CACHE_SIZE> m_entries
+            GUARDED_BY(m_mutex);
+        std::size_t m_clock GUARDED_BY(m_mutex){0};
+        uint64_t m_hits GUARDED_BY(m_mutex){0};
+        uint64_t m_builds GUARDED_BY(m_mutex){0};
+    };
+
+    // SYSCOIN: Const PQ readers may perform one-time journal-bound startup.
+    mutable Mutex cs;
     // Main thread has indicated we should perform cleanup up to this height
     std::atomic<int> to_cleanup {0};
     std::atomic<bool> m_persistent_window_initialized{false};
+    // SYSCOIN: Bounded auxiliary-GC batches must remain schedulable without
+    // waiting for the hourly metadata-write interval or a newer ChainLock.
+    std::atomic_bool m_auxiliary_history_maintenance_retry_requested{false};
+    // SYSCOIN: External retention/finality changes may require a new pass at
+    // the same tip; internal batch continuation is deliberately tip-throttled.
+    std::atomic<uint64_t>
+        m_auxiliary_history_maintenance_request_generation{0};
 
     const CBlockIndex* tipIndex GUARDED_BY(cs) {nullptr};
     uint256 m_last_maintained_tip GUARDED_BY(cs);
+    std::vector<uint256> m_last_maintained_recovery_blocks GUARDED_BY(cs);
+    uint64_t m_last_maintained_snapshot_persistence_generation
+        GUARDED_BY(cs){0};
+    // SYSCOIN: Every full-snapshot insertion defeats the same-tip no-op. The
+    // cursor itself keeps moving across plan changes; each visited key is
+    // re-evaluated against the latest immutable retention plan.
+    std::atomic<uint64_t> m_snapshot_persistence_generation{0};
+    struct SnapshotGCScanProgress {
+        int32_t sweep_start_finality_roster_floor;
+        uint64_t sweep_start_retention_generation{0};
+        uint64_t sweep_start_persistence_generation{0};
+        uint256 sweep_start_tip;
+        std::vector<uint256> sweep_start_recovery_heads;
+        std::optional<uint256> resume_after_key;
+    };
+    std::optional<SnapshotGCScanProgress> m_snapshot_gc_scan_progress
+        GUARDED_BY(cs);
+    // SYSCOIN: A crash-durable BTCC/NEVM replay obligation retains every
+    // branch snapshot at or above this floor. It is memory-only because the
+    // preseal marker is the authoritative crash-restored record.
+    int m_replay_snapshot_retention_floor GUARDED_BY(cs){
+        std::numeric_limits<int>::max()};
+    // SYSCOIN: This replaceable floor keeps every persisted branch snapshot
+    // that can still supply a roster for an admissible finality certificate.
+    int m_finality_snapshot_retention_floor GUARDED_BY(cs){
+        std::numeric_limits<int>::max()};
+    // SYSCOIN: Candidate verification and durable-but-not-yet-enforced
+    // finality must temporarily retain every branch. The transient count is
+    // globally bounded by the ChainLock verifier mutex; the publication flag
+    // survives verification until the durable winner is active.
+    size_t m_finality_snapshot_verifications_in_flight GUARDED_BY(cs){0};
+    bool m_finality_snapshot_publication_pending GUARDED_BY(cs){false};
+    uint64_t m_replay_snapshot_retention_generation GUARDED_BY(cs){0};
+    // SYSCOIN: These process-local values are admission proofs, not persisted
+    // deletion metadata. Physical GC must rederive durable authority and
+    // validate each retained database boundary before publishing tombstones.
+    std::optional<AuxiliaryHistoryGCAuthorization>
+        m_auxiliary_history_gc_authorization GUARDED_BY(cs);
+    std::optional<AuxiliaryHistoryGCAuthorization>
+        m_auxiliary_history_gc_high_watermark GUARDED_BY(cs);
+    DBParams m_pq_registry_db_params;
+    // SYSCOIN: The registry is immutable after successful publication. A
+    // once-flag models that lifetime directly and avoids imposing a private
+    // initialization-lock precondition on every consensus caller.
+    mutable std::once_flag m_pq_registry_init_once;
+    mutable std::atomic_bool m_pq_registry_init_requested{false};
+    mutable std::atomic_bool m_pq_registry_ready{false};
+    mutable std::unique_ptr<llmq::pq::PQRegistryManager> m_pq_registry;
+    // SYSCOIN: During crash recovery the durable ChainLock authorizer may be
+    // a known descendant of the older recovered UTXO tip. Keep that ancestry
+    // witness separate from the actual manager tip.
+    const CBlockIndex* m_pq_registry_startup_authorization_head
+        GUARDED_BY(cs){nullptr};
+    std::unique_ptr<llmq::pq::PQPaymentProbationManager>
+        m_payment_probation;
+    std::unique_ptr<CEvoDB<uint256, CDeterministicMNListInverse,
+                          StaticSaltedHasher>> m_inverse_journal;
+    // SYSCOIN: One crash-monotonic coordinator owns physical-GC progress for
+    // both auxiliary stores; store-specific deletion is intentionally separate.
+    std::unique_ptr<evo::AuxiliaryHistoryGCJournal>
+        m_auxiliary_history_gc_journal;
+    // SYSCOIN: The durable journal is decoded into a typed rollback floor.
+    // The manager caches exact B/I_B authentication after a frontier's first
+    // non-destructive use, invalidates it on every durable transition, and
+    // force-exactly reauthenticates every pending destructive resume pass.
+    std::optional<EffectiveDMNInverseGCBoundary>
+        m_effective_dmn_inverse_gc_boundary GUARDED_BY(cs);
+    bool m_effective_dmn_inverse_gc_boundary_authenticated GUARDED_BY(cs){
+        false};
+    uint64_t m_effective_dmn_inverse_gc_exact_authentications_for_testing
+        GUARDED_BY(cs){0};
+    struct DMNInverseGCScanProgress {
+        uint256 intent_id;
+        std::optional<uint256> resume_after_key;
+        bool erased_in_cycle{false};
+        bool found_boundary_in_cycle{false};
+    };
+    std::optional<DMNInverseGCScanProgress>
+        m_dmn_inverse_gc_scan_progress GUARDED_BY(cs);
+    // SYSCOIN: The key includes every branch-local input not already
+    // committed by the parent block hash. Miss derivation stays outside this
+    // mutex; publication is double-checked.
+    MNPayeeCache m_mn_payee_cache;
+
+    llmq::pq::PQRegistryManager* GetOrCreatePQRegistry(
+        std::string& error) const;
+    bool CommitInverseJournal(
+        const CBlockIndex* child,
+        const CDeterministicMNList& child_list,
+        CDeterministicMNList& parent_list,
+        const uint256& child_state_hash);
+    bool LoadAndVerifyInverseJournal(
+        const CBlockIndex* child,
+        const CDeterministicMNList& child_list,
+        CDeterministicMNList& parent_list);
+    bool LoadAndVerifyInverseJournalExactForGC(
+        const CBlockIndex* child,
+        const CDeterministicMNList& child_list,
+        CDeterministicMNList& parent_list,
+        std::size_t max_decoded_bytes =
+            std::numeric_limits<std::size_t>::max(),
+        std::size_t max_record_bytes =
+            std::numeric_limits<std::size_t>::max(),
+        std::size_t* decoded_bytes = nullptr,
+        std::size_t* decoded_records = nullptr);
+    bool LoadAndVerifyInverseJournalInternal(
+        const CBlockIndex* child,
+        const CDeterministicMNList& child_list,
+        CDeterministicMNList& parent_list,
+        bool exact_disk_for_gc,
+        std::size_t max_decoded_bytes,
+        std::size_t max_record_bytes,
+        std::size_t* decoded_bytes,
+        std::size_t* decoded_records);
+    bool EnsureRetainedSnapshotWindow(
+        const CBlockIndex* tip,
+        const CDeterministicMNList& tip_list)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    [[nodiscard]] AuxiliaryHistoryRetentionPlan
+    BuildAuxiliaryHistoryRetentionPlan(
+        const CBlockIndex* tip,
+        std::span<const CBlockIndex* const> recovery_snapshot_indexes)
+        EXCLUSIVE_LOCKS_REQUIRED(m_evoDb->cs, cs);
+    [[nodiscard]] DMNInverseGCBoundary DeriveDMNInverseGCBoundary(
+        const CBlockIndex* tip,
+        std::span<const CBlockIndex* const> recovery_snapshot_indexes,
+        const AuxiliaryHistoryRetentionPlan& plan,
+        const std::optional<evo::AuxiliaryHistoryGCComponent>&
+            previous_component = std::nullopt)
+        EXCLUSIVE_LOCKS_REQUIRED(m_evoDb->cs, cs);
+    bool PrepareDMNInverseGCIntent(
+        const CBlockIndex* tip,
+        std::span<const CBlockIndex* const> recovery_snapshot_indexes,
+        const AuxiliaryHistoryRetentionPlan& plan,
+        bool& retry_required)
+        EXCLUSIVE_LOCKS_REQUIRED(m_evoDb->cs, cs);
+    bool RefreshEffectiveDMNInverseGCBoundary()
+        EXCLUSIVE_LOCKS_REQUIRED(cs);
+    bool IsHeadCompatibleWithEffectiveDMNInverseGCBoundary(
+        const CBlockIndex* head,
+        const EffectiveDMNInverseGCBoundary& effective) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs);
+    bool AuthenticateEffectiveDMNInverseGCBoundary(
+        const CBlockIndex* head,
+        const EffectiveDMNInverseGCBoundary& effective,
+        CDeterministicMNList* boundary_snapshot = nullptr)
+        EXCLUSIVE_LOCKS_REQUIRED(m_evoDb->cs, cs);
+    bool EnsureAuthenticatedEffectiveDMNInverseGCBoundary(
+        const CBlockIndex* head,
+        const EffectiveDMNInverseGCBoundary& effective)
+        EXCLUSIVE_LOCKS_REQUIRED(m_evoDb->cs, cs);
+    bool ResumePendingDMNInverseGC(
+        const CBlockIndex* tip,
+        const AuxiliaryHistoryRetentionPlan& plan,
+        bool& retry_required)
+        EXCLUSIVE_LOCKS_REQUIRED(m_evoDb->cs, !cs);
+    bool ResumePendingPQRegistryGC(
+        const CBlockIndex* tip,
+        std::span<const CBlockIndex* const> recovery_snapshot_indexes,
+        const AuxiliaryHistoryRetentionPlan& plan,
+        bool& handled,
+        bool& retry_required)
+        EXCLUSIVE_LOCKS_REQUIRED(m_evoDb->cs, !cs);
+    bool PreparePQRegistryGCIntent(
+        const CBlockIndex* tip,
+        std::span<const CBlockIndex* const> recovery_snapshot_indexes,
+        bool& retry_required)
+        EXCLUSIVE_LOCKS_REQUIRED(m_evoDb->cs, !cs);
+    bool GarbageCollectDMNInversePrefix(
+        const uint256& intent_id,
+        const EffectiveDMNInverseGCBoundary& effective,
+        bool& complete)
+        EXCLUSIVE_LOCKS_REQUIRED(m_evoDb->cs, !cs);
+    bool GetPQPaymentEligibleProTxHashes(
+        const CBlockIndex* pindex,
+        llmq::pq::PQPaymentEligibleProTxHashesPtr& eligible) const;
 public:
     struct EvoDBStats {
         int64_t approxPersistedEntries{0};
@@ -508,31 +1027,237 @@ public:
     ~CDeterministicMNManager() = default;
 
     bool ProcessBlock(const CBlock& block, const CBlockIndex* pindex, BlockValidationState& state,
-                      const CCoinsViewCache& view, const llmq::CFinalCommitmentTxPayload &qcTx, CDeterministicMNListNEVMAddressDiff &diff, bool fJustCheck, bool ibd) EXCLUSIVE_LOCKS_REQUIRED(!cs, cs_main);
+                      const CCoinsViewCache& view, const llmq::CFinalCommitmentTxPayload& legacy_commitment,
+                      CDeterministicMNListNEVMAddressDiff &diff, bool fJustCheck, bool ibd,
+                      bool nevm_delivery_deferred = false) EXCLUSIVE_LOCKS_REQUIRED(!cs, cs_main);
     bool UndoBlock(const CBlockIndex* pindex, CDeterministicMNListNEVMAddressDiff &inversedDiffNEVMAddress) EXCLUSIVE_LOCKS_REQUIRED(!cs, cs_main);
 
     // the returned list will not contain the correct block hash (we can't know it yet as the coinbase TX is not updated yet)
     bool BuildNewListFromBlock(const CBlock& block, const CBlockIndex* pindexPrev, BlockValidationState& state, const CCoinsViewCache& view,
-                                CDeterministicMNList& mnListRet, CDeterministicMNList& mnOldListRet, const llmq::CFinalCommitmentTxPayload &qcTx) EXCLUSIVE_LOCKS_REQUIRED(!cs);
-    void HandleQuorumCommitment(const llmq::CFinalCommitment& qc, const CBlockIndex* pQuorumBaseBlockIndex, CDeterministicMNList& mnList);
+                                CDeterministicMNList& mnListRet, CDeterministicMNList& mnOldListRet,
+                                const llmq::CFinalCommitmentTxPayload& legacy_commitment) EXCLUSIVE_LOCKS_REQUIRED(!cs);
     static void DecreasePoSePenalties(CDeterministicMNList& mnList, const std::vector<CDeterministicMNCPtr> &toDecrease);
 
     const CDeterministicMNList GetListForBlock(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(!cs);
     void GetListForBlock(const CBlockIndex* pindex, CDeterministicMNList& list);
     const CDeterministicMNList GetListAtChainTip() EXCLUSIVE_LOCKS_REQUIRED(!cs);
 
+    /** SYSCOIN: Validate PQ operator-key transactions against exact parent snapshots. */
+    bool CheckPQTransaction(const CTransaction& tx,
+                            const CBlockIndex* pindexPrev,
+                            TxValidationState& state,
+                            bool fJustCheck,
+                            bool check_sigs)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs, cs_main);
+
+    /** SYSCOIN: Exact branch lookup used by quorum construction and MNAUTH. */
+    bool GetPQRegistrySnapshot(const CBlockIndex* pindex,
+                               llmq::pq::PQRegistrySnapshot& snapshot,
+                               std::string& error) const;
+
+    /** Immutable exact-branch handle for hot registry readers. */
+    bool GetPQRegistryReadView(const CBlockIndex* pindex,
+                               llmq::pq::PQRegistryReadView& view,
+                               std::string& error) const;
+
+    /** Resolve an immutable exact branch-local payment-only state view. */
+    bool GetPaymentProbationStateView(
+        const CBlockIndex* pindex,
+        llmq::pq::PQPaymentProbationStateView& view) const
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
+    /** Derive membership and state from one exact carrier parent. */
+    [[nodiscard]] llmq::pq::PQPaymentProbationTransitionOutcome
+    ApplyPaymentProbationTransition(
+        const CBlockIndex& carrier_parent,
+        const llmq::pq::PQPaymentProbationTransitionContext& context)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs, cs_main);
+
+    /** Publish one receipt-derived state before the block index root is durable. */
+    bool CommitPaymentProbationState(
+        const llmq::pq::PQPaymentProbationState& state,
+        const uint256& expected_hash,
+        bool fJustCheck) EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
+    /** Persist and publish an exact manager-authenticated transition result. */
+    bool CommitPaymentProbationTransition(
+        const llmq::pq::PQPaymentProbationTransitionView& transition,
+        bool fJustCheck,
+        llmq::pq::PQPaymentProbationStateView* published = nullptr)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
+    [[nodiscard]] uint256 EmptyPaymentProbationStateHash() const;
+
+    [[nodiscard]] uint64_t PaymentProbationStateViewGeneration() const;
+
+    /** Whether state GC completed for the same authenticated deletion boundary. */
+    bool IsPaymentProbationGCCompleteForCheckpoint(
+        const llmq::pq::PaymentAuditStoreCheckpoint& checkpoint) const
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
+    /**
+     * After an authenticated audit checkpoint is durably committed, prune
+     * covered payment-state roots synchronously. Callers must retain every
+     * root referenced by active/prospective replay markers and the
+     * authenticated current suffix.
+     */
+    bool PrunePaymentProbationStatesThroughCheckpoint(
+        const llmq::pq::PaymentAuditStoreCheckpoint& checkpoint,
+        std::span<const uint256> retained_state_hashes)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
+    /** Retire one bounded probation-state maintenance slice. */
+    [[nodiscard]] llmq::pq::PQPaymentProbationPruneProgress
+    PrunePaymentProbationStatesThroughCheckpointStep(
+        const llmq::pq::PaymentAuditStoreCheckpoint& checkpoint,
+        std::span<const uint256> retained_state_hashes)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
+    /** Recover the exact durable request after an interrupted GC pass. */
+    [[nodiscard]] std::optional<llmq::pq::PQPaymentProbationGCRequest>
+    GetPendingPaymentProbationGCRequest() const
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
+    /** Select the deterministic payee after applying payment-only probation. */
+    bool GetMNPayeeForBlock(const CBlockIndex* pindex,
+                            CDeterministicMNCPtr& payee)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
+    /** SYSCOIN: Deterministic counters for cache regression tests. */
+    [[nodiscard]] MNPayeeCacheStatsForTesting
+    GetMNPayeeCacheStatsForTesting();
+
+    /** SYSCOIN:
+     * Project payees only through the currently knowable payment-root epoch.
+     * Future PQ epochs may have a different frozen root-capable set, so a
+     * shorter successful result means the remaining requested heights are
+     * not yet knowable from this parent state.
+     */
+    bool GetProjectedMNPayeesForBlock(
+        const CBlockIndex* pindex,
+        int count,
+        std::vector<CDeterministicMNCPtr>& payees)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
+    /** SYSCOIN: Bounded exact-parent registry view for mempool reservations. */
+    bool GetPQRegistryMempoolView(
+        const CBlockIndex* pindex,
+        std::span<const uint256> requested_operators,
+        llmq::pq::PQRegistryMempoolView& view,
+        std::string& error) const;
+
     // Test if given TX is a ProRegTx which also contains the collateral at index n
     static bool IsProTxWithCollateral(const CTransactionRef& tx, uint32_t n);
     bool IsDIP3Enforced(int nHeight = -1) EXCLUSIVE_LOCKS_REQUIRED(!cs);
-    bool FlushCacheToDisk(bool bForceFlush, bool fSync = true) EXCLUSIVE_LOCKS_REQUIRED(!cs);
-    bool DoMaintenance(bool bForceFlush, bool fSync = true) EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    bool FlushCacheToDisk(
+        bool bForceFlush,
+        bool fSync = true,
+        std::span<const CBlockIndex* const> recovery_snapshot_indexes = {})
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    /**
+     * SYSCOIN: Persist dirty DMN snapshots and order prior asynchronous PQ
+     * registry writes without pruning against a potentially stale tip.
+     */
+    bool FlushPendingSnapshotsToDisk(bool fSync = true) EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    bool DoMaintenance(
+        bool bForceFlush,
+        bool fSync = true,
+        std::span<const CBlockIndex* const> recovery_snapshot_indexes = {})
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
     void UpdatedBlockTip(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    /** SYSCOIN: Bind crash-restored journal authority to a comparable tip. */
+    [[nodiscard]] bool UpdatedBlockTipForStartup(
+        const CBlockIndex* recovered_tip,
+        const std::function<const CBlockIndex*(const uint256&)>& lookup,
+        const std::optional<AuxiliaryHistoryBlockIdentity>&
+            durable_finality_target)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs, cs_main);
     bool GetEvoDBStats(EvoDBStats& stats) EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    /** Read process-local PQ registry payload ownership without opening it. */
+    [[nodiscard]] bool GetPQRegistryMemoryStats(
+        llmq::pq::PQRegistryMemoryStats& stats) const;
     bool HasPersistentWindow() const;
+    [[nodiscard]] bool AuxiliaryHistoryMaintenanceRetryRequested() const
+        noexcept;
+    [[nodiscard]] uint64_t AuxiliaryHistoryMaintenanceRequestGeneration()
+        const noexcept;
+    bool VerifyPersistedPQRegistrySnapshot(const CBlockIndex* pindex);
+    /** SYSCOIN: Read an existing snapshot without creating recovery state on a miss. */
+    bool VerifyPersistedSnapshot(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    /**
+     * Verify the tip and its immediate predecessor seals. Ordered publication
+     * proves normal upgrade/crash lineage; like other LevelDB-backed state,
+     * later arbitrary key loss is detected fail-closed when that link is read.
+     */
+    bool VerifyInverseJournalTipSeal(const CBlockIndex* tip)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    /** Restore the active tip's bounded random-access snapshot window. */
+    bool EnsureRetainedSnapshotWindow(const CBlockIndex* tip)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    /** Inject a self-consistent but semantically wrong parent hash in tests. */
+    bool CorruptInverseJournalForTesting(const uint256& child_hash);
+    bool AppendInverseJournalTrailingByteForTesting(
+        const uint256& child_hash);
+    bool RewriteExactInverseJournalValueForTesting(
+        const uint256& child_hash);
+    bool GetInverseJournalEntryStatsForTesting(
+        const uint256& child_hash,
+        InverseJournalEntryStatsForTesting& stats);
+    bool EraseInverseJournalEntryForTesting(const uint256& child_hash);
+    void FailNextInverseJournalFlushForTesting();
+    void FailNextInverseJournalSynchronousFlushForTesting();
+    void FailNextAuxiliaryHistoryGCCompleteForTesting();
+    /** SYSCOIN: Verify rejected and check-only blocks never reach PQ publication. */
+    void FailNextPQRegistryWriteThroughForTesting();
+    void FailNextPQPaymentEligibilityCacheIndexInsertForTesting();
+    /** SYSCOIN: Lower a replay floor, or erase it only after the durable marker clears. */
+    int UpdateReplaySnapshotRetentionFloor(
+        std::optional<int32_t> floor) EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    /** SYSCOIN: Replace the roster floor derived from durable certificates. */
+    int UpdateFinalitySnapshotRetentionFloor(
+        std::optional<int32_t> floor) EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    /** SYSCOIN: Serialize candidate-roster use against snapshot pruning. */
+    void BeginFinalitySnapshotVerificationRetention()
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    /** SYSCOIN: Release one globally bounded candidate-verification hold. */
+    void EndFinalitySnapshotVerificationRetention()
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    /** SYSCOIN: Retain all branches until durable finality is active. */
+    void UpdateFinalitySnapshotPublicationRetention(bool retain)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    /**
+     * SYSCOIN: Publish only an exact active finality decision already proven
+     * by the ChainLock handler. Null marks finality health as ambiguous.
+     */
+    [[nodiscard]] bool UpdateAuxiliaryHistoryGCAuthorization(
+        std::optional<AuxiliaryHistoryGCAuthorization> authorization,
+        bool release_publication = false)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    /** SYSCOIN: Observe the immutable plan without granting erase authority. */
+    [[nodiscard]] AuxiliaryHistoryRetentionPlan
+    GetAuxiliaryHistoryRetentionPlanForTesting(
+        std::span<const CBlockIndex* const> recovery_snapshot_indexes = {})
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    /** SYSCOIN: Derive the read-only authenticated DMN GC closure. */
+    [[nodiscard]] DMNInverseGCBoundary
+    GetDMNInverseGCBoundaryForTesting(
+        std::span<const CBlockIndex* const> recovery_snapshot_indexes = {},
+        const std::optional<evo::AuxiliaryHistoryGCComponent>&
+            previous_component = std::nullopt)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    [[nodiscard]] evo::AuxiliaryHistoryGCState
+    GetAuxiliaryHistoryGCStateForTesting() const;
+    [[nodiscard]] bool BeginAuxiliaryHistoryGCIntentForTesting(
+        const evo::AuxiliaryHistoryGCIntentTarget& target)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    [[nodiscard]] bool CompleteAuxiliaryHistoryGCIntentForTesting()
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    [[nodiscard]] uint64_t
+    GetDMNInverseGCExactAuthenticationCountForTesting()
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
 private:
     const CDeterministicMNList GetListForBlockInternal(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(!cs);
 };
-extern int64_t DEFAULT_MAX_RECOVERED_SIGS_AGE; // keep them for a week
 extern std::unique_ptr<CDeterministicMNManager> deterministicMNManager;
 extern bool fMasternodeMode;
 #endif // SYSCOIN_EVO_DETERMINISTICMNS_H

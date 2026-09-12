@@ -11,6 +11,8 @@
 #include <rpc/blockchain.h>
 #include <node/context.h>
 #include <evo/deterministicmns.h>
+#include <evo/pq_voting_key.h>
+#include <llmq/pq_global_auth.h>
 #include <messagesigner.h>
 #include <rpc/server_util.h>
 #include <wallet/rpc/wallet.h>
@@ -18,63 +20,122 @@
 #include <util/result.h>
 #include <governance/governance.h>
 #include <index/txindex.h>
+#include <variant>
 using namespace wallet;
-UniValue VoteWithMasternodes(const std::map<uint256, CKeyID>& key_ids,
+using WalletVotingKey = std::variant<CKeyID, slhdsa::PublicKey>;
+
+UniValue VoteWithMasternodes(const std::map<uint256, WalletVotingKey>& keys,
                              const uint256& hash, vote_signal_enum_t eVoteSignal,
-                             vote_outcome_enum_t eVoteOutcome, const CWallet& wallet, CConnman& connman, PeerManager& peerman)
+                             vote_outcome_enum_t eVoteOutcome, const CWallet& wallet,
+                             ChainstateManager& chainman, CConnman& connman, PeerManager& peerman)
 {
+    int object_type{GOVERNANCE_OBJECT_UNKNOWN};
     {
         LOCK(governance->cs);
         CGovernanceObject *pGovObj = governance->FindGovernanceObject(hash);
         if (!pGovObj) {
             throw JSONRPCError(RPC_INVALID_PARAMETER, "Governance object not found");
         }
+        object_type = pGovObj->GetObjectType();
+    }
+    if (object_type != GOVERNANCE_OBJECT_PROPOSAL || eVoteSignal != VOTE_SIGNAL_FUNDING) {
+        throw JSONRPCError(
+            RPC_INVALID_PARAMETER,
+            "This vote signal requires the online masternode SLH operator key; the wallet voting key is authorized only for proposal funding");
     }
 
     int nSuccessful = 0;
     int nFailed = 0;
-    auto mnList = deterministicMNManager->GetListAtChainTip();
-
     UniValue resultsObj(UniValue::VOBJ);
 
-    for (const auto& p : key_ids) {
-        const auto& proTxHash = p.first;
-        const auto& keyID = p.second;
-
+    for (const auto& [proTxHash, selected_key] : keys) {
         UniValue statusObj(UniValue::VOBJ);
-
-        auto dmn = mnList.GetValidMN(proTxHash);
-        if (!dmn) {
+        const auto fail = [&](const std::string& message) {
             nFailed++;
             statusObj.pushKV("result", "failed");
-            statusObj.pushKV("errorMessage", "Can't find masternode by proTxHash");
+            statusObj.pushKV("errorMessage", message);
             resultsObj.pushKV(proTxHash.ToString(), statusObj);
+        };
+
+        CDeterministicMNCPtr dmn;
+        llmq::pq::GovernanceAuthorization authorization;
+        std::string error;
+        {
+            LOCK(cs_main);
+            const auto* tip{chainman.ActiveChain().Tip()};
+            dmn = deterministicMNManager->GetListAtChainTip().GetValidMN(proTxHash);
+            const bool pq{tip && IsPQGovernanceEnabledAtHeight(tip->nHeight)};
+            if (!dmn) {
+                error = "Can't find masternode by proTxHash";
+            } else if (pq != std::holds_alternative<slhdsa::PublicKey>(selected_key)) {
+                error = "Voting rules changed; retry with the current voting key";
+            } else if (pq) {
+                const auto& key{dmn->pdmnState->pqVotingKey};
+                // Match the online governance signer's six-block relay floor.
+                const auto* signing_block{tip->nHeight >= 6 ? tip->GetAncestor(tip->nHeight - 6) : nullptr};
+                if (!key.HasActiveKey() || key.public_key != std::get<slhdsa::PublicKey>(selected_key)) {
+                    error = "Masternode voting key was rotated or revoked";
+                } else if (!signing_block || !IsPQGovernanceEnabledAtHeight(signing_block->nHeight) ||
+                           key.activated_height > signing_block->nHeight) {
+                    error = "Voting key requires six blocks of confirmation before signing";
+                } else {
+                    authorization.signed_height = signing_block->nHeight;
+                    authorization.signed_block_hash = signing_block->GetBlockHash();
+                    authorization.pro_tx_hash = proTxHash;
+                    authorization.global_key_version = key.key_version;
+                }
+            } else if (dmn->pdmnState->keyIDVoting != std::get<CKeyID>(selected_key)) {
+                error = "Masternode voting key changed; retry";
+            }
+        }
+        if (!error.empty()) {
+            fail(error);
             continue;
         }
 
         CGovernanceVote vote(dmn->collateralOutpoint, hash, eVoteSignal, eVoteOutcome);
-        CKey voting_key;
-        if (!wallet.GetKey(keyID, voting_key)) {
-            nFailed++;
-            statusObj.pushKV("result", "failed");
-            statusObj.pushKV("errorMessage", "Private key not available.");
-            resultsObj.pushKV(proTxHash.ToString(), statusObj);
-            continue;
-        }
         std::vector<unsigned char> vchSig;
-        if (!CHashSigner::SignHash(vote.GetSignatureHash(), voting_key, vchSig)) {
-            nFailed++;
-            statusObj.pushKV("result", "failed");
-            statusObj.pushKV("errorMessage", "Failure to sign.");
-            resultsObj.pushKV(proTxHash.ToString(), statusObj);
-            continue;
+        if (const auto* public_key{std::get_if<slhdsa::PublicKey>(&selected_key)}) {
+            const auto digest{llmq::pq::GetGovernanceFundingAuthorizationHash(
+                Params().GetConsensus().hashGenesisBlock, dmn->pdmnState->pqVotingKey,
+                authorization, vote.GetSignatureHash())};
+            if (!digest || !wallet.SignVotingAuthorization(*public_key, *digest, authorization.signature, error) ||
+                !llmq::pq::EncodeGovernanceAuthorization(authorization, vchSig)) {
+                fail(error.empty() ? "Failure to sign voting authorization" : error);
+                continue;
+            }
+        } else {
+            CKey voting_key;
+            if (!wallet.GetKey(std::get<CKeyID>(selected_key), voting_key) ||
+                !CHashSigner::SignHash(vote.GetSignatureHash(), voting_key, vchSig)) {
+                fail("Private key not available or failure to sign");
+                continue;
+            }
         }
         vote.SetSignature(vchSig);
-        if (!vote.CheckSignature(keyID)) {
-            nFailed++;
-            statusObj.pushKV("result", "failed");
-            statusObj.pushKV("errorMessage", "Failure to verify signature.");
-            resultsObj.pushKV(proTxHash.ToString(), statusObj);
+
+        CDeterministicMNList mnList;
+        {
+            LOCK(cs_main);
+            const auto* tip{chainman.ActiveChain().Tip()};
+            mnList = deterministicMNManager->GetListAtChainTip();
+            const auto current{mnList.GetValidMN(proTxHash)};
+            if (!tip || !current || current->collateralOutpoint != dmn->collateralOutpoint) {
+                error = "Masternode changed while signing; retry";
+            } else if (std::holds_alternative<slhdsa::PublicKey>(selected_key)) {
+                const auto* anchor{tip->GetAncestor(authorization.signed_height)};
+                if (!IsPQGovernanceEnabledAtHeight(tip->nHeight) || !anchor ||
+                    anchor->GetBlockHash() != authorization.signed_block_hash ||
+                    current->pdmnState->pqVotingKey != dmn->pdmnState->pqVotingKey) {
+                    error = "Voting key was rotated or revoked, or signing branch changed; retry";
+                }
+            } else if (IsPQGovernanceEnabledAtHeight(tip->nHeight) ||
+                       current->pdmnState->keyIDVoting != std::get<CKeyID>(selected_key)) {
+                error = "Voting authority changed while signing; retry";
+            }
+        }
+        if (!error.empty()) {
+            fail(error);
             continue;
         }
 
@@ -264,7 +325,7 @@ static RPCHelpMan gobject_prepare()
 static RPCHelpMan gobject_vote_many()
 {
     return RPCHelpMan{"gobject_vote_many",
-        "\nVote on a governance object by all masternodes for which the voting key is present in the local wallet.\n",
+        "\nVote on proposal funding with all masternode voting keys present in this wallet. After PQ activation these must be delegated SLH voting keys.\n",
         {      
             {"governanceHash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Hash of the governance object."},
             {"vote", RPCArg::Type::STR, RPCArg::Optional::NO, "Vote, possible values: [funding|valid|delete|endorsed]."},   
@@ -300,23 +361,33 @@ static RPCHelpMan gobject_vote_many()
     if (eVoteOutcome == VOTE_OUTCOME_NONE) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid vote outcome. Please use one of the following: 'yes', 'no' or 'abstain'");
     }
+    if (eVoteSignal != VOTE_SIGNAL_FUNDING) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER,
+            "This vote signal requires the online masternode SLH operator key; the wallet voting key is authorized only for proposal funding");
+    }
 
     EnsureWalletIsUnlocked(*pwallet);
 
-    std::map<uint256, CKeyID> votingKeyIDs;
+    std::map<uint256, WalletVotingKey> voting_keys;
     // Make sure the results are valid at least up to the most recent block
     // the user could have gotten from another RPC command prior to now
     pwallet->BlockUntilSyncedToCurrentChain();
     auto mnList = deterministicMNManager->GetListAtChainTip();
     mnList.ForEachMN(true, [&](const auto& dmn) {
-        EnsureWalletIsUnlocked(*pwallet);
-        CKey dummy;
-        if (pwallet->GetKey(dmn.pdmnState->keyIDVoting, dummy)) {
-            votingKeyIDs.emplace(dmn.proTxHash, dmn.pdmnState->keyIDVoting);
+        if (IsPQGovernanceEnabledAtHeight(mnList.GetHeight())) {
+            const auto& key{dmn.pdmnState->pqVotingKey};
+            if (key.HasActiveKey() && pwallet->HasVotingKey(key.public_key)) {
+                voting_keys.emplace(dmn.proTxHash, key.public_key);
+            }
+        } else {
+            CKey dummy;
+            if (pwallet->GetKey(dmn.pdmnState->keyIDVoting, dummy)) {
+                voting_keys.emplace(dmn.proTxHash, dmn.pdmnState->keyIDVoting);
+            }
         }
     });
 
-    return VoteWithMasternodes(votingKeyIDs, hash, eVoteSignal, eVoteOutcome, *pwallet, *node.connman, *node.peerman);
+    return VoteWithMasternodes(voting_keys, hash, eVoteSignal, eVoteOutcome, *pwallet, *node.chainman, *node.connman, *node.peerman);
 },
     };
 } 
@@ -324,7 +395,7 @@ static RPCHelpMan gobject_vote_many()
 static RPCHelpMan gobject_vote_alias()
 {
     return RPCHelpMan{"gobject_vote_alias",
-        "\nVote on a governance object by masternode's voting key (if present in local wallet).\n",
+        "\nVote on proposal funding with a masternode voting key in this wallet. After PQ activation this must be its delegated SLH voting key.\n",
         {      
             {"governanceHash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Hash of the governance object."},
             {"vote", RPCArg::Type::STR, RPCArg::Optional::NO, "Vote, possible values: [funding|valid|delete|endorsed]."},   
@@ -361,26 +432,39 @@ static RPCHelpMan gobject_vote_alias()
     if (eVoteOutcome == VOTE_OUTCOME_NONE) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid vote outcome. Please use one of the following: 'yes', 'no' or 'abstain'");
     }
+    if (eVoteSignal != VOTE_SIGNAL_FUNDING) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER,
+            "This vote signal requires the online masternode SLH operator key; the wallet voting key is authorized only for proposal funding");
+    }
 
     EnsureWalletIsUnlocked(*pwallet);
 
     uint256 proTxHash = ParseHashV(request.params[3], "protxHash");
+    pwallet->BlockUntilSyncedToCurrentChain();
     auto mnList = deterministicMNManager->GetListAtChainTip();
     auto dmn = mnList.GetValidMN(proTxHash);
     if (!dmn) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid or unknown proTxHash");
     }
-    // Make sure the results are valid at least up to the most recent block
-    // the user could have gotten from another RPC command prior to now
-    pwallet->BlockUntilSyncedToCurrentChain();
-    CKey dummy;
-    if (!pwallet->GetKey(dmn->pdmnState->keyIDVoting, dummy)) {
-        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Private key for voting address %s not known by wallet", EncodeDestination(WitnessV0KeyHash(dmn->pdmnState->keyIDVoting))));
+    std::map<uint256, WalletVotingKey> voting_keys;
+    if (IsPQGovernanceEnabledAtHeight(mnList.GetHeight())) {
+        const auto& key{dmn->pdmnState->pqVotingKey};
+        if (!key.HasActiveKey()) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Masternode has no active SLH voting key");
+        }
+        if (!pwallet->HasVotingKey(key.public_key)) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Private SLH voting key not known by wallet");
+        }
+        voting_keys.emplace(proTxHash, key.public_key);
+    } else {
+        CKey dummy;
+        if (!pwallet->GetKey(dmn->pdmnState->keyIDVoting, dummy)) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Private voting key not known by wallet");
+        }
+        voting_keys.emplace(proTxHash, dmn->pdmnState->keyIDVoting);
     }
-    std::map<uint256, CKeyID> votingKeyIDs;
-    votingKeyIDs.emplace(proTxHash, dmn->pdmnState->keyIDVoting);
 
-    return VoteWithMasternodes(votingKeyIDs, hash, eVoteSignal, eVoteOutcome, *pwallet, *node.connman, *node.peerman);
+    return VoteWithMasternodes(voting_keys, hash, eVoteSignal, eVoteOutcome, *pwallet, *node.chainman, *node.connman, *node.peerman);
 },
     };
 } 

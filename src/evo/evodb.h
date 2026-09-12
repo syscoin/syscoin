@@ -11,11 +11,22 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <list>
+#include <limits>
 #include <utility>
+#include <vector>
 #include <logging.h>
 
 template <typename K, typename V, typename Hasher = std::hash<K>>
 class CEvoDB : public CDBWrapper {
+    struct ValueWithTrailingByteForTesting {
+        V value;
+        uint8_t trailing{0};
+
+        SERIALIZE_METHODS(ValueWithTrailingByteForTesting, obj)
+        {
+            READWRITE(obj.value, obj.trailing);
+        }
+    };
     std::unordered_map<K, typename std::list<std::pair<K, V>>::iterator, Hasher> mapCache;
     std::list<std::pair<K, V>> fifoList;
     std::unordered_map<K, typename std::list<std::pair<K, V>>::iterator, Hasher> mapReadCache;
@@ -25,7 +36,20 @@ class CEvoDB : public CDBWrapper {
     size_t maxReadCacheSize{0};
     DBParams m_db_params;
     bool bFlushOnNextRead{false};
+    // SYSCOIN: Exercise retry safety at the exact batch-publication seam
+    // without changing CDBWrapper's production exception contract.
+    bool m_fail_next_flush_batch_for_testing{false};
+    bool m_fail_next_sync_flush_batch_for_testing{false};
+    bool m_fail_next_flush_barrier_for_testing{false};
+    bool m_fail_next_write_through_for_testing{false};
+    bool m_fail_next_sync_write_through_for_testing{false};
 public:
+    enum class ExactDiskReadResult : uint8_t {
+        NOT_FOUND = 0,
+        FOUND,
+        BLOCKED,
+    };
+
     mutable RecursiveMutex cs;
     using CDBWrapper::CDBWrapper;
     explicit CEvoDB(const DBParams &db_params, size_t maxCacheSizeIn, size_t maxReadCacheSizeIn = 0)
@@ -39,6 +63,29 @@ public:
         FlushCacheToDisk();
     }
 private:
+    bool WriteFlushBatch(CDBBatch& batch, bool fSync)
+    {
+        if (m_fail_next_flush_batch_for_testing) {
+            m_fail_next_flush_batch_for_testing = false;
+            throw dbwrapper_error{"injected EvoDB flush-batch failure"};
+        }
+        if (fSync && m_fail_next_sync_flush_batch_for_testing) {
+            m_fail_next_sync_flush_batch_for_testing = false;
+            throw dbwrapper_error{
+                "injected synchronous EvoDB flush-batch failure"};
+        }
+        // SYSCOIN: Empty barriers must not rotate a full, unsynced WAL via
+        // DB::Write. Non-empty batches still need Sync afterward to cover any
+        // earlier asynchronous writes in a rotated immutable memtable.
+        if (batch.SizeEstimate() != 0 && !WriteBatch(batch, fSync)) return false;
+        if (!fSync) return true;
+        if (m_fail_next_flush_barrier_for_testing) {
+            m_fail_next_flush_barrier_for_testing = false;
+            throw dbwrapper_error{"injected EvoDB flush-barrier failure"};
+        }
+        return CDBWrapper::Sync();
+    }
+
     void TrimReadCache()
     {
         while (maxReadCacheSize == 0 ? !readFifoList.empty() : readFifoList.size() > maxReadCacheSize) {
@@ -96,9 +143,11 @@ public:
     bool ReadCache(const K& key, V& value) {
         LOCK(cs);
         if(bFlushOnNextRead) {
-            bFlushOnNextRead = false;
             LogPrint(BCLog::SYS, "Evodb::ReadCache flushing cache before read\n");
-            FlushCacheToDisk();
+            // SYSCOIN: Keep the retry armed until every tombstone is durable;
+            // otherwise a failed flush can expose the value being erased.
+            if (!FlushCacheToDisk()) return false;
+            bFlushOnNextRead = false;
         }
         auto it = mapCache.find(key);
         if (it != mapCache.end()) {
@@ -115,6 +164,97 @@ public:
             return false;
         }
         WriteReadCache(key, value);
+        return true;
+    }
+
+    // SYSCOIN: Destructive GC derives its durable trust boundary from the
+    // physical record, not a cache entry that could hide trailing corruption.
+    ExactDiskReadResult ReadExactDiskForGC(
+        const K& key,
+        V& value,
+        std::size_t max_serialized_size =
+            std::numeric_limits<std::size_t>::max()) {
+        LOCK(cs);
+        if (mapCache.contains(key) || setEraseCache.contains(key)) {
+            return ExactDiskReadResult::BLOCKED;
+        }
+        std::unique_ptr<CDBIterator> cursor{NewIterator()};
+        if (!cursor) return ExactDiskReadResult::BLOCKED;
+        cursor->Seek(key);
+        if (!cursor->Valid()) {
+            cursor->CheckStatus();
+            return ExactDiskReadResult::NOT_FOUND;
+        }
+        K found_key;
+        if (!cursor->GetKeyExact(found_key)) {
+            return ExactDiskReadResult::BLOCKED;
+        }
+        if (found_key != key) return ExactDiskReadResult::NOT_FOUND;
+        // SYSCOIN: Reject an oversized physical value before exact decoding
+        // can allocate or copy attacker-controlled/corrupt storage bytes.
+        if (cursor->GetValueSize() > max_serialized_size) {
+            return ExactDiskReadResult::BLOCKED;
+        }
+        return cursor->GetValueExact(value)
+            ? ExactDiskReadResult::FOUND
+            : ExactDiskReadResult::BLOCKED;
+    }
+
+    // SYSCOIN: Let bounded authenticated replays budget physical decoding
+    // before allocating the exact value. Cache/tombstone ambiguity is the
+    // same fail-closed state as an exact destructive read.
+    ExactDiskReadResult GetExactDiskValueSizeForGC(
+        const K& key, std::size_t& value_size) {
+        LOCK(cs);
+        value_size = 0;
+        if (mapCache.contains(key) || setEraseCache.contains(key)) {
+            return ExactDiskReadResult::BLOCKED;
+        }
+        std::unique_ptr<CDBIterator> cursor{NewIterator()};
+        if (!cursor) return ExactDiskReadResult::BLOCKED;
+        cursor->Seek(key);
+        if (!cursor->Valid()) {
+            cursor->CheckStatus();
+            return ExactDiskReadResult::NOT_FOUND;
+        }
+        K found_key;
+        if (!cursor->GetKeyExact(found_key)) {
+            return ExactDiskReadResult::BLOCKED;
+        }
+        if (found_key != key) return ExactDiskReadResult::NOT_FOUND;
+        value_size = cursor->GetValueSize();
+        return ExactDiskReadResult::FOUND;
+    }
+
+    // SYSCOIN: Exercise the exact-value decoder against physical trailing
+    // bytes without changing the production serialization type.
+    bool AppendTrailingValueByteForTesting(const K& key) {
+        LOCK(cs);
+        if (mapCache.contains(key) || setEraseCache.contains(key)) {
+            return false;
+        }
+        V value;
+        if (!CDBWrapper::Read(key, value) ||
+            !CDBWrapper::Write(
+                key, ValueWithTrailingByteForTesting{value, 0xa5},
+                /*fSync=*/true)) {
+            return false;
+        }
+        EraseReadCache(key);
+        return true;
+    }
+
+    bool RewriteExactValueForTesting(const K& key) {
+        LOCK(cs);
+        if (mapCache.contains(key) || setEraseCache.contains(key)) {
+            return false;
+        }
+        V value;
+        if (!CDBWrapper::Read(key, value) ||
+            !CDBWrapper::Write(key, value, /*fSync=*/true)) {
+            return false;
+        }
+        EraseReadCache(key);
         return true;
     }
 
@@ -156,12 +296,40 @@ public:
         }
     }
 
+    // SYSCOIN: Persist sparse consensus records immediately so bounded
+    // dirty-FIFO eviction cannot remove their only durable copy during IBD.
+    // Keep only the read-cache copy afterward.
+    bool WriteThrough(const K& key, const V& value, bool fSync = true) {
+        LOCK(cs);
+        if (m_fail_next_write_through_for_testing) {
+            m_fail_next_write_through_for_testing = false;
+            throw dbwrapper_error{"injected EvoDB write-through failure"};
+        }
+        if (fSync && m_fail_next_sync_write_through_for_testing) {
+            m_fail_next_sync_write_through_for_testing = false;
+            throw dbwrapper_error{
+                "injected synchronous EvoDB write-through failure"};
+        }
+        if (!Write(key, value, fSync)) return false;
+
+        auto it = mapCache.find(key);
+        if (it != mapCache.end()) {
+            fifoList.erase(it->second);
+            mapCache.erase(it);
+        }
+        WriteReadCache(key, value);
+        setEraseCache.erase(key);
+        return true;
+    }
+
     bool ExistsCache(const K& key) {
         LOCK(cs);
         if(bFlushOnNextRead) {
-            bFlushOnNextRead = false;
             LogPrint(BCLog::SYS, "Evodb::ReadCache flushing cache before read\n");
-            FlushCacheToDisk();
+            // SYSCOIN: Existence checks obey the same tombstone durability
+            // barrier as reads and retry after a transient batch failure.
+            if (!FlushCacheToDisk()) return false;
+            bFlushOnNextRead = false;
         }
         auto it_read = mapReadCache.find(key);
         if (it_read != mapReadCache.end()) {
@@ -186,50 +354,125 @@ public:
     bool FlushCacheToDisk(std::size_t CHUNK_ITEMS = 256, bool fSync = true)
     {
         LOCK(cs);
-        if (mapCache.empty() && setEraseCache.empty()) return true;
+        if (mapCache.empty() && setEraseCache.empty()) {
+            if (!fSync) return true;
 
-        CDBBatch batch(*this);
-        std::size_t items = 0;
+            // SYSCOIN: WriteThrough(..., false) records are already outside the
+            // dirty FIFO, but a later consensus marker can still require an
+            // ordering barrier for all prior LevelDB WALs. The shared helper
+            // syncs directly for an empty batch and retains the same retryable
+            // failure seam as a non-empty flush.
+            CDBBatch barrier(*this);
+            return WriteFlushBatch(barrier, /*fSync=*/true);
+        }
+
+        const std::size_t chunk_items{CHUNK_ITEMS == 0 ? 1 : CHUNK_ITEMS};
         std::size_t count = 0;
-        auto flush = [&]() {
-            if (batch.SizeEstimate() == 0) return true;
-            if (!WriteBatch(batch, fSync)) return false;
-            batch.Clear();
-            items = 0;
-            return true;
-        };
 
+        // SYSCOIN: A failed LevelDB batch must leave its entire dirty chunk
+        // retryable. Remove entries only after that exact batch is committed;
+        // earlier successful chunks are already durable and may be released.
         while (!fifoList.empty()) {
-            batch.Write(fifoList.front().first, fifoList.front().second);
-            ++items;
-            count++;
-            if (items == CHUNK_ITEMS || fifoList.size() == 1) {
-                if (!flush()) return false;
+            CDBBatch batch(*this);
+            std::size_t staged{0};
+            for (auto it = fifoList.cbegin();
+                 it != fifoList.cend() && staged < chunk_items;
+                 ++it, ++staged) {
+                batch.Write(it->first, it->second);
             }
-            mapCache.erase(fifoList.front().first);
-            fifoList.pop_front();
+            if (!WriteFlushBatch(batch, fSync)) return false;
+            for (std::size_t committed{0}; committed < staged; ++committed) {
+                mapCache.erase(fifoList.front().first);
+                fifoList.pop_front();
+            }
+            count += staged;
         }
 
-        items = 0;
-        for (auto it = setEraseCache.begin(); it != setEraseCache.end(); ) {
-            batch.Erase(*it);
-            ++items;
-            count++;
-            if (items == CHUNK_ITEMS) {
-                if (!flush()) return false;
-                it = setEraseCache.erase(setEraseCache.begin(), ++it);
-                items = 0;
-            } else {
-                ++it;
+        // SYSCOIN: Apply the same post-commit removal rule to tombstones so a
+        // failed erase batch cannot resurrect data after restart.
+        while (!setEraseCache.empty()) {
+            CDBBatch batch(*this);
+            std::vector<K> staged_keys;
+            staged_keys.reserve(setEraseCache.size() < chunk_items
+                                    ? setEraseCache.size()
+                                    : chunk_items);
+            for (auto it = setEraseCache.cbegin();
+                 it != setEraseCache.cend() && staged_keys.size() < chunk_items;
+                 ++it) {
+                batch.Erase(*it);
+                staged_keys.emplace_back(*it);
             }
+            if (!WriteFlushBatch(batch, fSync)) return false;
+            for (const auto& key : staged_keys) {
+                setEraseCache.erase(key);
+            }
+            count += staged_keys.size();
         }
-        if (!flush()) return false;
-        setEraseCache.clear();
 
         LogPrint(BCLog::SYS,
                 "Flushed %zu items to disk (%s) in %zu-item chunks\n",
-                count, GetName().c_str(), CHUNK_ITEMS);
+                count, GetName().c_str(), chunk_items);
         return true;
+    }
+
+    // SYSCOIN: Destructive auxiliary-history maintenance exact-decodes each
+    // bounded physical slice and requires a final deletion-free absence
+    // cycle. Bypass the ordinary tombstone cache so each successful chunk is
+    // independently crash durable and a failed chunk remains retryable.
+    bool EraseExactDiskKeysForGC(Span<const K> keys, bool fSync = true)
+    {
+        LOCK(cs);
+        if (keys.empty()) return true;
+        CDBBatch batch(*this);
+        for (const auto& key : keys) {
+            if (mapCache.contains(key) || setEraseCache.contains(key)) {
+                return false;
+            }
+            batch.Erase(key);
+        }
+        if (!WriteFlushBatch(batch, fSync)) return false;
+        for (const auto& key : keys) EraseReadCache(key);
+        return true;
+    }
+
+    // SYSCOIN: Tests inject a one-shot exception at the same seam used by
+    // real LevelDB failures and then verify that the staged chunk can retry.
+    void FailNextFlushBatchForTesting()
+    {
+        LOCK(cs);
+        m_fail_next_flush_batch_for_testing = true;
+    }
+
+    // SYSCOIN: Exercise a WAL ordering barrier independently from the normal
+    // asynchronous maintenance flush that can precede it.
+    void FailNextSynchronousFlushBatchForTesting()
+    {
+        LOCK(cs);
+        m_fail_next_sync_flush_batch_for_testing = true;
+    }
+
+    // SYSCOIN: Exercise retained retry bookkeeping when a non-empty batch has
+    // succeeded but the following durability barrier has not completed.
+    void FailNextFlushBarrierForTesting()
+    {
+        LOCK(cs);
+        m_fail_next_flush_barrier_for_testing = true;
+    }
+
+    // SYSCOIN: This one-shot seam verifies that consensus callers classify a
+    // real WriteThrough exception as local I/O failure rather than invalidity.
+    void FailNextWriteThroughForTesting()
+    {
+        LOCK(cs);
+        m_fail_next_write_through_for_testing = true;
+    }
+
+    // SYSCOIN: Distinguish async journal publication from an accidental
+    // per-record fsync without exposing LevelDB internals to focused tests.
+    void FailNextSynchronousWriteThroughForTesting()
+    {
+        LOCK(cs);
+        m_fail_next_sync_write_through_for_testing = true;
     }
 
     int64_t CountPersistedEntries() {
@@ -246,6 +489,9 @@ public:
                 count++;
                 pcursor->Next();
             }
+            // SYSCOIN: A partial LevelDB scan is an error, not a smaller
+            // persisted set.
+            pcursor->CheckStatus();
             return count;
         } catch (const std::exception& e) {
              LogPrint(BCLog::SYS, "CEvoDB::%s -- Exception during iteration: %s\n", __func__, e.what());

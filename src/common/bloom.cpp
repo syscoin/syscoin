@@ -21,7 +21,6 @@
 // SYSCOIN
 #include <evo/specialtx.h>
 #include <evo/providertx.h>
-#include <llmq/quorums_commitment.h>
 static constexpr double LN2SQUARED = 0.4804530139182014246671025263266649717305529515945455;
 static constexpr double LN2 = 0.6931471805599453094172321214581765680755001343602552;
 

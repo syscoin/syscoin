@@ -152,6 +152,20 @@ public:
      * RegTestOptions holds configurations for creating a regtest CChainParams.
      */
     struct RegTestOptions {
+        // SYSCOIN BEGIN: Regtest PQ activation and receipt-anchor overrides.
+        // The activation height is the first block which enforces PQ-only
+        // provider authorization, payment eligibility, and finality rules.
+        struct PQBTCCReceiptAnchorOptions {
+            int height;
+            uint256 block_hash;
+            int cursor_height;
+            uint256 cursor_sys_hash;
+            uint256 cursor_btc_hash;
+            uint256 receipt_state_hash;
+            int latest_target_height;
+            int latest_carrier_height;
+        };
+
         std::unordered_map<Consensus::DeploymentPos, VersionBitsParameters> version_bits_parameters{};
         std::unordered_map<Consensus::BuriedDeployment, int> activation_heights{};
         bool fastprune{false};
@@ -160,7 +174,27 @@ public:
         int dip3enforcement{432};
         int nevmstartblock{2050};
         int clreceiptstartblock{std::numeric_limits<int>::max()};
-        int btccstartblock{std::numeric_limits<int>::max()};
+        int pqactivationheight{std::numeric_limits<int>::max()};
+        std::optional<PQBTCCReceiptAnchorOptions> pqbtccreceiptanchor;
+        int pqpreparationheight{std::numeric_limits<int>::max()};
+        int pqchainlockepochorigin{std::numeric_limits<int>::max()};
+        int pqregistrationcutoffblocks{0};
+        int pqrostersnapshotlag{288}; // SYSCOIN: Carry the regtest-only PQ roster lag into consensus parameters.
+        int pqfuturehorizonepochs{0};
+        struct PQRecoveryRefreshOptions {
+            int32_t activation_height;
+            uint32_t snapshot_lag;
+            uint32_t entropy_delay;
+            uint32_t carrier_delay;
+            uint32_t carrier_min_depth;
+            uint32_t snapshot_min_work;
+            uint32_t carrier_min_work;
+            uint32_t readiness_window;
+        };
+        std::optional<PQRecoveryRefreshOptions> pqrecoveryrefresh;
+        int pqbtcccandidateorigin{std::numeric_limits<int>::max()};
+        int pqbtccnevminjectionlag{10};
+        // SYSCOIN END: Regtest PQ activation and receipt-anchor overrides.
         int bridgev2startblock{std::numeric_limits<int>::max()};
 
     };
@@ -177,7 +211,6 @@ public:
     int FulfilledRequestExpireTime() const { return nFulfilledRequestExpireTime; }
     const std::vector<std::string>& SporkAddresses() const { return vSporkAddresses; }
     int MinSporkKeys() const { return nMinSporkKeys; }
-    void UpdateLLMQTestParams(int size, int threshold);
     /** Require addresses specified with "-externalip" parameter to be routable */
     bool RequireRoutableExternalIP() const { return fRequireRoutableExternalIP; }
     /** How long to wait until we allow retrying of a LLMQ connection  */

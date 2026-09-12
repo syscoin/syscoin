@@ -30,8 +30,8 @@ class AuxpowSelfParentTest(SyscoinTestFramework):
         self.num_nodes = 2
         self.setup_clean_chain = True
         self.extra_args = [
-            ["-dip3params=0:0", "-bridgev2startheight=1"],
-            ["-dip3params=0:0", "-bridgev2startheight=2"],
+            ["-dip3params=1:1", "-bridgev2startheight=1"],
+            ["-dip3params=1:1", "-bridgev2startheight=2"],
         ]
 
     def build_pair(self, node, parent_chain_id=CHAIN_ID):

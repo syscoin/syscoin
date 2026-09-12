@@ -8,15 +8,18 @@
 #include <coins.h>
 #include <consensus/merkle.h>
 #include <evo/specialtx.h>
+#include <llmq/pq_btcc.h>
 #include <validation.h>
 #include <pow.h>
 #include <primitives/block.h>
 #include <rpc/auxpow_miner.h>
+#include <rpc/protocol.h>
 #include <script/script.h>
 #include <util/strencodings.h>
 #include <util/time.h>
 #include <uint256.h>
 #include <univalue.h>
+#include <validationinterface.h>
 
 #include <test/util/setup_common.h>
 
@@ -385,6 +388,41 @@ BOOST_FIXTURE_TEST_CASE (check_auxpow, BasicTestingSetup)
   BOOST_CHECK (builder2.get ().check (hashAux, ourChainId, params));
 }
 
+BOOST_FIXTURE_TEST_CASE (auxpow_parent_wrapper_is_not_child_hash_committed,
+                         BasicTestingSetup)
+{
+  const Consensus::Params& params = Params ().GetConsensus ();
+  const int32_t ourChainId = params.nAuxpowChainId;
+  const uint256 anchor = ArithToUint256 (arith_uint256 (77));
+
+  CBlockHeader child;
+  child.SetBaseVersion (2, ourChainId);
+  child.SetAuxpowVersion (true);
+  child.hashMerkleRoot = ArithToUint256 (arith_uint256 (123));
+  const uint256 childHash = child.GetHash ();
+
+  CAuxpowBuilder builder(5, 42);
+  builder.parentBlock.hashPrevBlock = anchor;
+  const int nonce = 7;
+  const unsigned height = 3;
+  const int index = CAuxPow::getExpectedIndex (nonce, ourChainId, height);
+  const valtype auxRoot = builder.buildAuxpowChain (childHash, height, index);
+  const valtype data = CAuxpowBuilder::buildCoinbaseData (
+      true, auxRoot, height, nonce);
+  builder.setCoinbase (CScript () << data);
+
+  const CAuxPow first = builder.get ();
+  ++builder.parentBlock.nNonce;
+  const CAuxPow second = builder.get ();
+
+  BOOST_REQUIRE (first.check (childHash, ourChainId, params));
+  BOOST_REQUIRE (second.check (childHash, ourChainId, params));
+  BOOST_CHECK (first.getParentPrevBlockHash () == anchor);
+  BOOST_CHECK (second.getParentPrevBlockHash () == anchor);
+  BOOST_CHECK (first.getParentBlockHash () != second.getParentBlockHash ());
+  BOOST_CHECK (child.GetHash () == childHash);
+}
+
 /* ************************************************************************** */
 
 /**
@@ -524,12 +562,524 @@ class AuxpowMinerForTest : public AuxpowMiner
 
 public:
 
+  using Resolution = AuxpowMiner::BTCPrevResolution;
+
   using AuxpowMiner::cs;
 
-  using AuxpowMiner::getCurrentBlock;
   using AuxpowMiner::lookupSavedBlock;
+  using AuxpowMiner::TemplateMatchesBTCPREV;
+
+  Resolution resolveBTCPrevHash(
+      ChainstateManager& chainman,
+      const std::optional<uint256>& requested)
+  {
+    return AuxpowMiner::resolveBTCPrevHash(chainman, requested);
+  }
+
+  const CBlock* getCurrentBlock(
+      ChainstateManager& chainman, const CTxMemPool& mempool,
+      const CScript& scriptPubKey, uint256& target,
+      const std::optional<uint256>& btc_prev = std::nullopt)
+      EXCLUSIVE_LOCKS_REQUIRED(cs)
+  {
+    const int32_t next_height{
+        WITH_LOCK(cs_main, return chainman.ActiveHeight() + 1)};
+    return AuxpowMiner::getCurrentBlock(
+        chainman, mempool, scriptPubKey, target,
+        Resolution{next_height, btc_prev});
+  }
+
+  const CBlock* getCurrentBlockWithResolution(
+      ChainstateManager& chainman, const CTxMemPool& mempool,
+      const CScript& scriptPubKey, uint256& target,
+      const Resolution& resolution) EXCLUSIVE_LOCKS_REQUIRED(cs)
+  {
+    return AuxpowMiner::getCurrentBlock(
+        chainman, mempool, scriptPubKey, target, resolution);
+  }
 
 };
+
+// SYSCOIN BEGIN: Helpers for exercising multiple mutable AuxPoW wrappers that
+// share one pure child-header identity.
+static CBlock BuildAuxpowChildTemplate(
+    node::NodeContext& node,
+    const std::optional<uint256>& btc_prev = std::nullopt)
+{
+  CTxMemPool mempool{MemPoolOptionsForTest(node)};
+  AuxpowMinerForTest miner;
+  CScript script_pub_key;
+  uint256 target;
+  LOCK(miner.cs);
+  const CBlock* block{miner.getCurrentBlock(
+      *Assert(node.chainman), mempool, script_pub_key, target, btc_prev)};
+  if (block == nullptr) {
+    throw std::runtime_error("failed to create AuxPoW child template");
+  }
+  return *block;
+}
+
+static CScript CurrentAuxpowTag(ChainstateManager& chainman)
+{
+  LOCK(cs_main);
+  const CBlockIndex* tip{Assert(chainman.ActiveTip())};
+  int ref_height{tip->nHeight - 5};
+  ref_height -= ref_height % 10;
+  const CBlockIndex* ref{Assert(tip->GetAncestor(ref_height))};
+  return AuxpowMiner::createScriptPubKey(ref->GetBlockHash(), ref->nHeight);
+}
+
+static std::shared_ptr<CBlock> BuildAuxpowWrapper(
+    const CBlock& child,
+    const uint256& parent_prev,
+    const CScript& syscoin_tag,
+    bool valid_parent_pow = true,
+    bool valid_auxpow_proof = true)
+{
+  auto block{std::make_shared<CBlock>(child)};
+  const uint256 child_hash{block->GetHash()};
+  CAuxpowBuilder builder{/*baseVersion=*/5, /*chainId=*/42};
+  builder.parentBlock.hashPrevBlock = parent_prev;
+
+  constexpr unsigned merkle_height{0};
+  constexpr int nonce{7};
+  const int index{CAuxPow::getExpectedIndex(
+      nonce, Params().GetConsensus().nAuxpowChainId, merkle_height)};
+  const valtype aux_root{
+      builder.buildAuxpowChain(child_hash, merkle_height, index)};
+  const valtype data{CAuxpowBuilder::buildCoinbaseData(
+      /*header=*/true, aux_root, merkle_height, nonce)};
+  builder.setCoinbase(CScript{} << data);
+
+  CMutableTransaction parent_coinbase{*builder.parentBlock.vtx[0]};
+  parent_coinbase.vout.emplace_back(/*nValue=*/0, syscoin_tag);
+  builder.parentBlock.vtx[0] =
+      MakeTransactionRef(std::move(parent_coinbase));
+  builder.parentBlock.hashMerkleRoot = BlockMerkleRoot(builder.parentBlock);
+  mineBlock(builder.parentBlock, /*ok=*/valid_parent_pow, block->nBits);
+  if (!valid_auxpow_proof) ++builder.auxpowChainIndex;
+  block->SetAuxpow(builder.getUnique());
+  block->fChecked = false;
+  return block;
+}
+
+struct NexusAuxpowWrapperSetup : TestChain100Setup {
+  NexusAuxpowWrapperSetup()
+      : TestChain100Setup(ChainType::REGTEST),
+        consensus{const_cast<Consensus::Params&>(Params().GetConsensus())},
+        original_nexus_start{consensus.nNexusStartBlock}
+  {
+    consensus.nNexusStartBlock = 101;
+  }
+
+  ~NexusAuxpowWrapperSetup()
+  {
+    consensus.nNexusStartBlock = original_nexus_start;
+  }
+
+  Consensus::Params& consensus;
+  const int original_nexus_start;
+};
+
+class AuxpowConnectedObserver final : public CValidationInterface {
+public:
+  explicit AuxpowConnectedObserver(const uint256& target) : target{target} {}
+
+  void BlockConnected(ChainstateRole,
+                      const std::shared_ptr<const CBlock>& block,
+                      const CBlockIndex* index) override
+  {
+    if (index->GetBlockHash() != target) return;
+    connected = true;
+    if (block->auxpow) {
+      had_auxpow = true;
+      parent_prev = block->auxpow->getParentPrevBlockHash();
+    }
+  }
+
+  const uint256 target;
+  bool connected{false};
+  bool had_auxpow{false};
+  uint256 parent_prev;
+};
+BOOST_FIXTURE_TEST_CASE(
+    auxpow_btcp_mismatch_does_not_poison_child_header,
+    NexusAuxpowWrapperSetup)
+{
+  ChainstateManager& chainman{*Assert(m_node.chainman)};
+  const uint256 committed{ArithToUint256(arith_uint256{101})};
+  const uint256 mismatched{ArithToUint256(arith_uint256{202})};
+  CBlock child{BuildAuxpowChildTemplate(m_node)};
+  CDataStream btcp_data{SER_NETWORK, PROTOCOL_VERSION};
+  btcp_data << BTCPREV_MAGIC_BYTES << committed;
+  const auto btcp_bytes{MakeUCharSpan(btcp_data)};
+  node::RegenerateCommitments(
+      child, chainman,
+      std::vector<unsigned char>{btcp_bytes.begin(), btcp_bytes.end()});
+  uint256 extracted;
+  BOOST_REQUIRE(ExtractBTCPREVCommitment(child, extracted));
+  BOOST_REQUIRE(extracted == committed);
+
+  auto& consensus{
+      const_cast<Consensus::Params&>(Params().GetConsensus())};
+  struct RestoreCandidateOrigin {
+    Consensus::Params& consensus;
+    const int origin{consensus.nPQBTCCCandidateOrigin};
+    ~RestoreCandidateOrigin()
+    {
+      consensus.nPQBTCCCandidateOrigin = origin;
+    }
+  } restore{consensus};
+  consensus.nPQBTCCCandidateOrigin = 101;
+  BOOST_REQUIRE(llmq::pq::IsBTCPREVCommitmentHeight(consensus, 101));
+
+  const CScript tag{CurrentAuxpowTag(chainman)};
+  const auto bad{BuildAuxpowWrapper(child, mismatched, tag)};
+  const auto good{BuildAuxpowWrapper(child, committed, tag)};
+  BOOST_REQUIRE(bad->GetHash() == good->GetHash());
+
+  LOCK(cs_main);
+  CBlockIndex* index{nullptr};
+  bool is_new{false};
+  BlockValidationState bad_state;
+  BOOST_REQUIRE(!chainman.AcceptBlock(
+      bad, bad_state, &index, /*fRequested=*/true, /*dbp=*/nullptr,
+      &is_new, /*min_pow_checked=*/true));
+  BOOST_REQUIRE(index != nullptr);
+  BOOST_CHECK(bad_state.GetResult() == BlockValidationResult::BLOCK_MUTATED);
+  BOOST_CHECK_EQUAL(bad_state.GetRejectReason(), "bad-btcp-mismatch");
+  BOOST_CHECK(!(index->nStatus & BLOCK_FAILED_MASK));
+  BOOST_CHECK(!(index->nStatus & BLOCK_HAVE_DATA));
+  BOOST_CHECK(!is_new);
+
+  BlockValidationState good_state;
+  CBlockIndex* good_index{nullptr};
+  BOOST_REQUIRE(chainman.AcceptBlock(
+      good, good_state, &good_index, /*fRequested=*/true, /*dbp=*/nullptr,
+      &is_new, /*min_pow_checked=*/true));
+  BOOST_CHECK(good_index == index);
+  BOOST_CHECK(is_new);
+  BOOST_CHECK(good_index->nStatus & BLOCK_HAVE_DATA);
+  BOOST_CHECK(!(good_index->nStatus & BLOCK_FAILED_MASK));
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    auxpow_noncacheable_activation_rejection_does_not_repeat_candidate,
+    NexusAuxpowWrapperSetup)
+{
+  auto& chainman{*Assert(m_node.chainman)};
+  auto& chainstate{chainman.ActiveChainstate()};
+  const uint256 committed{ArithToUint256(arith_uint256{101})};
+  const uint256 mismatched{ArithToUint256(arith_uint256{202})};
+  CBlock child{BuildAuxpowChildTemplate(m_node)};
+  CDataStream btcp_data{SER_NETWORK, PROTOCOL_VERSION};
+  btcp_data << BTCPREV_MAGIC_BYTES << committed;
+  const auto btcp_bytes{MakeUCharSpan(btcp_data)};
+  node::RegenerateCommitments(child, chainman,
+      std::vector<unsigned char>{btcp_bytes.begin(), btcp_bytes.end()});
+  auto& consensus{const_cast<Consensus::Params&>(Params().GetConsensus())};
+  struct Restore {
+    Consensus::Params& consensus;
+    util::SignalInterrupt& interrupt;
+    const int origin{consensus.nPQBTCCCandidateOrigin};
+    ~Restore() { consensus.nPQBTCCCandidateOrigin = origin; interrupt.reset(); }
+  } restore{consensus, m_node.kernel->interrupt};
+  consensus.nPQBTCCCandidateOrigin = 101;
+  const CScript tag{CurrentAuxpowTag(chainman)};
+  const auto good{BuildAuxpowWrapper(child, committed, tag)};
+  const auto bad{BuildAuxpowWrapper(child, mismatched, tag)};
+  ++child.nTime;
+  const auto sibling{BuildAuxpowWrapper(child, committed, tag)};
+  BOOST_REQUIRE(good->GetHash() == bad->GetHash());
+  BOOST_REQUIRE(good->GetHash() != sibling->GetHash());
+  BOOST_REQUIRE(!m_node.kernel->interrupt);
+  // The alternate wrapper passes CheckBlock, then fails the contextual
+  // BTCPREV check in ConnectBlock without turning into a fatal disk error.
+  BlockValidationState checked_state;
+  BOOST_REQUIRE_MESSAGE(CheckBlock(*bad, checked_state, consensus), checked_state.ToString());
+  CBlockIndex* candidate_index{nullptr};
+  CBlockIndex* sibling_index{nullptr};
+  CBlockIndex* parent{nullptr};
+  {
+    LOCK(cs_main);
+    parent = chainman.ActiveTip();
+    BOOST_REQUIRE(parent);
+    BOOST_REQUIRE_LT(parent->nHeight + 1, consensus.nNEVMStartBlock);
+    BlockValidationState stored_state;
+    BOOST_REQUIRE_MESSAGE(chainman.AcceptBlock(good, stored_state, &candidate_index,
+        true, nullptr, nullptr, true), stored_state.ToString());
+    BOOST_REQUIRE_MESSAGE(chainman.AcceptBlock(sibling, stored_state, &sibling_index,
+        true, nullptr, nullptr, true), stored_state.ToString());
+    BOOST_REQUIRE(candidate_index && sibling_index);
+    BOOST_REQUIRE(chainstate.IsCurrentMostWorkBranch(*candidate_index));
+    BOOST_REQUIRE(!chainstate.IsCurrentMostWorkBranch(*sibling_index));
+  }
+  class Observer final : public CValidationInterface {
+  public:
+    std::vector<uint256> checked;
+    util::SignalInterrupt& interrupt;
+    explicit Observer(util::SignalInterrupt& value) : interrupt{value}
+    { RegisterValidationInterface(this); }
+    ~Observer()
+    {
+      UnregisterValidationInterface(this);
+      SyncWithValidationInterfaceQueue();
+    }
+    void BlockChecked(const CBlock& block, const BlockValidationState& state) override
+    {
+      checked.push_back(block.GetHash());
+      BOOST_CHECK(state.GetResult() == BlockValidationResult::BLOCK_MUTATED);
+      BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-btcp-mismatch");
+      BOOST_CHECK(!IsBlockRejectionCacheable(state.GetResult()));
+      // Stop an erroneous retry loop so the negative regression stays bounded.
+      if (checked.size() > 1) interrupt();
+    }
+  };
+  {
+    Observer observer{m_node.kernel->interrupt};
+    BlockValidationState state;
+    BOOST_REQUIRE_MESSAGE(chainstate.ActivateBestChain(state, bad), state.ToString());
+    BOOST_CHECK(state.IsValid());
+    BOOST_CHECK(observer.checked == std::vector<uint256>{good->GetHash()});
+    BOOST_CHECK(!m_node.kernel->interrupt);
+  }
+  {
+    LOCK(cs_main);
+    BOOST_CHECK(chainman.ActiveTip() == parent);
+    BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == parent->GetBlockHash());
+    for (auto* index : {candidate_index, sibling_index}) {
+      BOOST_CHECK_EQUAL(index->nStatus & BLOCK_FAILED_MASK, 0U);
+      BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(index), 1U);
+    }
+    BOOST_CHECK(chainstate.IsCurrentMostWorkBranch(*candidate_index));
+    // The rejected in-memory wrapper must not replace the usable wrapper
+    // already stored for this child-header identity.
+    CBlock stored;
+    BOOST_REQUIRE(chainman.m_blockman.ReadBlockFromDisk(stored, *candidate_index));
+    BOOST_REQUIRE(stored.auxpow);
+    BOOST_CHECK(stored.auxpow->getParentPrevBlockHash() == committed);
+  }
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    auxpow_known_header_rechecks_first_storable_wrapper,
+    NexusAuxpowWrapperSetup)
+{
+  ChainstateManager& chainman{*Assert(m_node.chainman)};
+  const CBlock child{BuildAuxpowChildTemplate(m_node)};
+  const uint256 parent_prev{ArithToUint256(arith_uint256{303})};
+  const CScript good_tag{CurrentAuxpowTag(chainman)};
+  const CScript bad_tag{AuxpowMiner::createScriptPubKey(
+      ArithToUint256(arith_uint256{404}), /*nHeight=*/90)};
+  const auto good{BuildAuxpowWrapper(child, parent_prev, good_tag)};
+  const auto bad{BuildAuxpowWrapper(child, parent_prev, bad_tag)};
+  BOOST_REQUIRE(good->GetHash() == bad->GetHash());
+
+  BlockValidationState header_state;
+  const CBlockIndex* index{nullptr};
+  BOOST_REQUIRE(chainman.ProcessNewBlockHeaders(
+      {good->GetBlockHeader()}, /*min_pow_checked=*/true, header_state,
+      &index));
+  BOOST_REQUIRE(index != nullptr);
+
+  LOCK(cs_main);
+  bool is_new{false};
+  CBlockIndex* bad_index{nullptr};
+  BlockValidationState bad_state;
+  BOOST_REQUIRE(!chainman.AcceptBlock(
+      bad, bad_state, &bad_index, /*fRequested=*/true, /*dbp=*/nullptr,
+      &is_new, /*min_pow_checked=*/true));
+  BOOST_CHECK(bad_index == index);
+  BOOST_CHECK(bad_state.GetResult() == BlockValidationResult::BLOCK_MUTATED);
+  BOOST_CHECK_EQUAL(bad_state.GetRejectReason(), "bad-auxpow-tag");
+  BOOST_CHECK(!(index->nStatus & BLOCK_FAILED_MASK));
+  BOOST_CHECK(!(index->nStatus & BLOCK_HAVE_DATA));
+
+  BlockValidationState good_state;
+  CBlockIndex* good_index{nullptr};
+  BOOST_REQUIRE(chainman.AcceptBlock(
+      good, good_state, &good_index, /*fRequested=*/true, /*dbp=*/nullptr,
+      &is_new, /*min_pow_checked=*/true));
+  BOOST_CHECK(good_index == index);
+  BOOST_CHECK(is_new);
+  BOOST_CHECK(good_index->nStatus & BLOCK_HAVE_DATA);
+  BOOST_CHECK(!(good_index->nStatus & BLOCK_FAILED_MASK));
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    auxpow_bad_proof_does_not_poison_known_child_header,
+    NexusAuxpowWrapperSetup)
+{
+  ChainstateManager& chainman{*Assert(m_node.chainman)};
+  const CBlock child{BuildAuxpowChildTemplate(m_node)};
+  const uint256 parent_prev{ArithToUint256(arith_uint256{454})};
+  const CScript tag{CurrentAuxpowTag(chainman)};
+  const auto good{BuildAuxpowWrapper(child, parent_prev, tag)};
+  const auto bad_parent_pow{BuildAuxpowWrapper(
+      child, parent_prev, tag, /*valid_parent_pow=*/false)};
+  const auto bad_auxpow_proof{BuildAuxpowWrapper(
+      child, parent_prev, tag, /*valid_parent_pow=*/true,
+      /*valid_auxpow_proof=*/false)};
+  BOOST_REQUIRE(good->GetHash() == bad_parent_pow->GetHash());
+  BOOST_REQUIRE(good->GetHash() == bad_auxpow_proof->GetHash());
+  BOOST_REQUIRE(!CheckProofOfWork(
+      bad_parent_pow->auxpow->getParentBlockHash(),
+      bad_parent_pow->nBits, Params().GetConsensus()));
+  BOOST_REQUIRE(!bad_auxpow_proof->auxpow->check(
+      bad_auxpow_proof->GetHash(), bad_auxpow_proof->GetChainId(),
+      Params().GetConsensus()));
+
+  BlockValidationState header_state;
+  const CBlockIndex* index{nullptr};
+  BOOST_REQUIRE(chainman.ProcessNewBlockHeaders(
+      {good->GetBlockHeader()}, /*min_pow_checked=*/true, header_state,
+      &index));
+  BOOST_REQUIRE(index != nullptr);
+
+  LOCK(cs_main);
+  for (const auto& bad : {bad_parent_pow, bad_auxpow_proof}) {
+    bool is_new{true};
+    CBlockIndex* bad_index{nullptr};
+    BlockValidationState bad_state;
+    BOOST_REQUIRE(!chainman.AcceptBlock(
+        bad, bad_state, &bad_index, /*fRequested=*/true,
+        /*dbp=*/nullptr, &is_new, /*min_pow_checked=*/true));
+    BOOST_CHECK(bad_index == index);
+    BOOST_CHECK(bad_state.GetResult() ==
+                BlockValidationResult::BLOCK_MUTATED);
+    BOOST_CHECK_EQUAL(bad_state.GetRejectReason(), "high-hash");
+    BOOST_CHECK(!(index->nStatus & BLOCK_FAILED_MASK));
+    BOOST_CHECK(!(index->nStatus & BLOCK_HAVE_DATA));
+    BOOST_CHECK(!is_new);
+  }
+
+  bool is_new{false};
+  CBlockIndex* good_index{nullptr};
+  BlockValidationState good_state;
+  BOOST_REQUIRE(chainman.AcceptBlock(
+      good, good_state, &good_index, /*fRequested=*/true,
+      /*dbp=*/nullptr, &is_new, /*min_pow_checked=*/true));
+  BOOST_CHECK(good_index == index);
+  BOOST_CHECK(is_new);
+  BOOST_CHECK(good_index->nStatus & BLOCK_HAVE_DATA);
+  BOOST_CHECK(!(good_index->nStatus & BLOCK_FAILED_MASK));
+
+  auto invalid_target{std::make_shared<CBlock>(*good)};
+  invalid_target->nBits = 0;
+  invalid_target->fChecked = false;
+  CBlockIndex* invalid_target_index{nullptr};
+  BlockValidationState invalid_target_state;
+  BOOST_REQUIRE(!chainman.AcceptBlock(
+      invalid_target, invalid_target_state, &invalid_target_index,
+      /*fRequested=*/true, /*dbp=*/nullptr, /*fNewBlock=*/nullptr,
+      /*min_pow_checked=*/true));
+  BOOST_CHECK(invalid_target_state.GetResult() ==
+              BlockValidationResult::BLOCK_INVALID_HEADER);
+  BOOST_CHECK(invalid_target_index == nullptr);
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    auxpow_presence_mismatch_preserves_child_failure_provenance,
+    NexusAuxpowWrapperSetup)
+{
+  CBlock direct{BuildAuxpowChildTemplate(m_node)};
+  direct.SetAuxpow(nullptr);
+  mineBlock(direct, /*ok=*/true);
+  direct.auxpow = std::make_shared<CAuxPow>();
+  direct.fChecked = false;
+
+  BlockValidationState unexpected_wrapper_state;
+  BOOST_REQUIRE(!CheckBlock(
+      direct, unexpected_wrapper_state, Params().GetConsensus(),
+      /*fCheckPOW=*/true, /*fCheckMerkleRoot=*/true));
+  BOOST_CHECK(unexpected_wrapper_state.GetResult() ==
+              BlockValidationResult::BLOCK_MUTATED);
+
+  CBlock missing_wrapper{BuildAuxpowChildTemplate(m_node)};
+  missing_wrapper.SetAuxpow(nullptr);
+  missing_wrapper.SetOldBaseVersion(
+      /*nBaseVersion=*/2,
+      Params().GetConsensus().nAuxpowOldChainId + 32);
+  missing_wrapper.SetAuxpowVersion(true);
+  missing_wrapper.fChecked = false;
+
+  BlockValidationState invalid_old_chain_id_state;
+  BOOST_REQUIRE(!CheckBlock(
+      missing_wrapper, invalid_old_chain_id_state,
+      Params().GetConsensus(), /*fCheckPOW=*/true,
+      /*fCheckMerkleRoot=*/true));
+  BOOST_CHECK(invalid_old_chain_id_state.GetResult() ==
+              BlockValidationResult::BLOCK_INVALID_HEADER);
+
+  missing_wrapper.SetAuxpowVersion(false);
+  missing_wrapper.SetOldBaseVersion(
+      /*nBaseVersion=*/2,
+      Params().GetConsensus().nAuxpowOldChainId);
+  missing_wrapper.SetAuxpowVersion(true);
+  missing_wrapper.fChecked = false;
+  BlockValidationState missing_wrapper_state;
+  BOOST_REQUIRE(!CheckBlock(
+      missing_wrapper, missing_wrapper_state, Params().GetConsensus(),
+      /*fCheckPOW=*/true, /*fCheckMerkleRoot=*/true));
+  BOOST_CHECK(missing_wrapper_state.GetResult() ==
+              BlockValidationResult::BLOCK_MUTATED);
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    auxpow_duplicate_activation_uses_persisted_wrapper,
+    NexusAuxpowWrapperSetup)
+{
+  ChainstateManager& chainman{*Assert(m_node.chainman)};
+  const CBlock child{BuildAuxpowChildTemplate(m_node)};
+  const CScript tag{CurrentAuxpowTag(chainman)};
+  const uint256 persisted_parent_prev{
+      ArithToUint256(arith_uint256{505})};
+  const uint256 alternate_parent_prev{
+      ArithToUint256(arith_uint256{606})};
+  const CScript alternate_tag{AuxpowMiner::createScriptPubKey(
+      ArithToUint256(arith_uint256{707}), /*nHeight=*/90)};
+  const auto persisted{
+      BuildAuxpowWrapper(child, persisted_parent_prev, tag)};
+  const auto alternate{
+      BuildAuxpowWrapper(child, alternate_parent_prev, alternate_tag)};
+  BOOST_REQUIRE(persisted->GetHash() == alternate->GetHash());
+
+  {
+    LOCK(cs_main);
+    BlockValidationState state;
+    CBlockIndex* index{nullptr};
+    bool is_new{false};
+    BOOST_REQUIRE(chainman.AcceptBlock(
+        persisted, state, &index, /*fRequested=*/true, /*dbp=*/nullptr,
+        &is_new, /*min_pow_checked=*/true));
+    BOOST_REQUIRE(index != nullptr);
+    BOOST_REQUIRE(is_new);
+    BOOST_REQUIRE(index->nStatus & BLOCK_HAVE_DATA);
+    BOOST_REQUIRE(chainman.ActiveTip()->GetBlockHash() !=
+                  persisted->GetHash());
+  }
+
+  auto observer{
+      std::make_shared<AuxpowConnectedObserver>(persisted->GetHash())};
+  RegisterSharedValidationInterface(observer);
+  bool is_new{true};
+  const bool processed{chainman.ProcessNewBlock(
+      alternate, /*force_processing=*/true, /*min_pow_checked=*/true,
+      &is_new)};
+  SyncWithValidationInterfaceQueue();
+  UnregisterSharedValidationInterface(observer);
+
+  BOOST_REQUIRE(processed);
+  BOOST_CHECK(!is_new);
+  BOOST_REQUIRE(observer->connected);
+  BOOST_REQUIRE(observer->had_auxpow);
+  BOOST_CHECK(observer->parent_prev == persisted_parent_prev);
+  BOOST_CHECK(observer->parent_prev != alternate_parent_prev);
+  BOOST_CHECK(WITH_LOCK(cs_main,
+                        return chainman.ActiveTip()->GetBlockHash()) ==
+              persisted->GetHash());
+}
+// SYSCOIN END: Mutable AuxPoW wrapper regression coverage.
 
 BOOST_FIXTURE_TEST_CASE (auxpow_miner_blockRegeneration, TestChain100Setup)
 {
@@ -619,6 +1169,70 @@ struct AuxpowCLReceiptOnlySetup : TestChain100Setup {
       : TestChain100Setup(ChainType::REGTEST, {"-clreceiptstartheight=0"}) {}
 };
 
+BOOST_FIXTURE_TEST_CASE(
+    auxpow_miner_btcp_resolution_is_bound_to_exact_next_height,
+    TestChain100Setup)
+{
+  CTxMemPool mempool{MemPoolOptionsForTest(m_node)};
+  AuxpowMinerForTest miner;
+  CScript script_pub_key;
+  uint256 target;
+  const uint256 requested{uint256S(std::string(64, '1'))};
+
+  const auto stale_resolution{
+      miner.resolveBTCPrevHash(*m_node.chainman, requested)};
+  BOOST_REQUIRE_EQUAL(stale_resolution.next_height, 101);
+  auto boundary_schedule{
+      llmq::pq::GetBTCCScheduleConfig(Params().GetConsensus())};
+  // Isolate the height-binding invariant without mutating the complete PQ
+  // deployment profile required by block validation.
+  boundary_schedule.candidate_origin = 102;
+  BOOST_REQUIRE(boundary_schedule.IsValid());
+  BOOST_REQUIRE(!llmq::pq::IsBTCCCandidateHeight(
+      boundary_schedule, stale_resolution.next_height));
+  BOOST_REQUIRE(llmq::pq::IsBTCCCandidateHeight(
+      boundary_schedule, /*height=*/102));
+  {
+    LOCK(miner.cs);
+    const CBlock* unscheduled{miner.getCurrentBlockWithResolution(
+        *m_node.chainman, mempool, script_pub_key, target,
+        stale_resolution)};
+    BOOST_REQUIRE(unscheduled != nullptr);
+    uint256 committed;
+    BOOST_CHECK(!ExtractBTCPREVCommitment(*unscheduled, committed));
+  }
+
+  CreateAndProcessBlock({}, script_pub_key);
+  BOOST_REQUIRE_EQUAL(
+      WITH_LOCK(cs_main, return m_node.chainman->ActiveHeight() + 1), 102);
+  const auto tip_changed = [](const UniValue& error) {
+    return error["code"].getInt<int>() == RPC_MISC_ERROR &&
+           error["message"].get_str() ==
+               "Syscoin tip changed while selecting BTCPREV; retry template request";
+  };
+  {
+    LOCK(miner.cs);
+    BOOST_CHECK_EXCEPTION(
+        miner.getCurrentBlockWithResolution(
+            *m_node.chainman, mempool, script_pub_key, target,
+            stale_resolution),
+        UniValue, tip_changed);
+  }
+
+  const auto current_resolution{
+      miner.resolveBTCPrevHash(*m_node.chainman, requested)};
+  BOOST_REQUIRE_EQUAL(current_resolution.next_height, 102);
+  {
+    LOCK(miner.cs);
+    const CBlock* current{miner.getCurrentBlockWithResolution(
+        *m_node.chainman, mempool, script_pub_key, target,
+        current_resolution)};
+    BOOST_REQUIRE(current != nullptr);
+    uint256 committed;
+    BOOST_CHECK(!ExtractBTCPREVCommitment(*current, committed));
+  }
+}
+
 BOOST_FIXTURE_TEST_CASE(auxpow_miner_doesNotEmbedBTCPREVWhenBTCCDisabled, AuxpowCLReceiptOnlySetup)
 {
   CTxMemPool mempool{MemPoolOptionsForTest(m_node)};
@@ -626,8 +1240,7 @@ BOOST_FIXTURE_TEST_CASE(auxpow_miner_doesNotEmbedBTCPREVWhenBTCCDisabled, Auxpow
   CScript scriptPubKey;
 
   // CL receipt rules are active, but BTCC remains at its disabled default.
-  // Move to height 101 so the next template would otherwise be a BTCC
-  // sign-offset block at height 102.
+  // Move to height 101 so the next template can be a PQ BTCC candidate.
   CreateAndProcessBlock({}, scriptPubKey);
   const int next_height = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height() + 1);
   BOOST_CHECK_EQUAL(next_height, 102);
@@ -641,50 +1254,34 @@ BOOST_FIXTURE_TEST_CASE(auxpow_miner_doesNotEmbedBTCPREVWhenBTCCDisabled, Auxpow
   BOOST_CHECK(!ExtractBTCPREVCommitment(*pblock, committed));
 }
 
-struct AuxpowBTCCStartSetup : TestChain100Setup {
-  AuxpowBTCCStartSetup()
-      : TestChain100Setup(ChainType::REGTEST, {"-btccstartheight=102"}) {}
-};
-
-BOOST_FIXTURE_TEST_CASE(auxpow_miner_regeneratesTemplateOnBTCPREVChange, AuxpowBTCCStartSetup)
+BOOST_AUTO_TEST_CASE(auxpow_miner_btcp_cache_key_requires_exact_commitment)
 {
-  CTxMemPool mempool{MemPoolOptionsForTest(m_node)};
-  AuxpowMinerForTest miner;
-  CScript scriptPubKey;
   const uint256 btc_prev_1 = uint256S(std::string(64, '1'));
   const uint256 btc_prev_2 = uint256S(std::string(64, '2'));
+  CDataStream payload{SER_NETWORK, PROTOCOL_VERSION};
+  payload << BTCPREV_MAGIC_BYTES << btc_prev_1;
+  const auto bytes{MakeUCharSpan(payload)};
 
-  // Move to height 101 so next template is for height 102 (sign-offset height).
-  CreateAndProcessBlock({}, scriptPubKey);
-  const int next_height = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height() + 1);
-  BOOST_CHECK_EQUAL(next_height, 102);
+  CMutableTransaction coinbase;
+  coinbase.vin.resize(1);
+  coinbase.vin[0].prevout.SetNull();
+  coinbase.vout.emplace_back(
+      /*nValue=*/0,
+      CScript{} << OP_RETURN <<
+          std::vector<unsigned char>{bytes.begin(), bytes.end()});
+  CBlock block;
+  block.vtx.push_back(MakeTransactionRef(std::move(coinbase)));
 
-  LOCK(miner.cs);
-  uint256 target;
-  const CBlock* pblock1 = miner.getCurrentBlock(*m_node.chainman, mempool, scriptPubKey, target, btc_prev_1);
-  BOOST_REQUIRE(pblock1 != nullptr);
-  const uint256 hash1 = pblock1->GetHash();
-
-  uint256 committed;
-  BOOST_CHECK(ExtractBTCPREVCommitment(*pblock1, committed));
-  BOOST_CHECK_EQUAL(committed, btc_prev_1);
-
-  // Same BTCPREV should reuse the cached template.
-  const CBlock* pblock_same = miner.getCurrentBlock(*m_node.chainman, mempool, scriptPubKey, target, btc_prev_1);
-  BOOST_CHECK(pblock_same == pblock1);
-  BOOST_CHECK_EQUAL(pblock_same->GetHash(), hash1);
-
-  // Different BTCPREV must invalidate and rebuild template.
-  const CBlock* pblock2 = miner.getCurrentBlock(*m_node.chainman, mempool, scriptPubKey, target, btc_prev_2);
-  BOOST_REQUIRE(pblock2 != nullptr);
-  BOOST_CHECK_NE(pblock2->GetHash(), hash1);
-  BOOST_CHECK(ExtractBTCPREVCommitment(*pblock2, committed));
-  BOOST_CHECK_EQUAL(committed, btc_prev_2);
-
-  // After rebuilding, subsequent polls must reuse the new cached template.
-  const CBlock* pblock2_same = miner.getCurrentBlock(*m_node.chainman, mempool, scriptPubKey, target, btc_prev_2);
-  BOOST_CHECK(pblock2_same == pblock2);
-  BOOST_CHECK_EQUAL(pblock2_same->GetHash(), pblock2->GetHash());
+  BOOST_CHECK(AuxpowMinerForTest::TemplateMatchesBTCPREV(
+      &block, /*required=*/false, std::nullopt));
+  BOOST_CHECK(!AuxpowMinerForTest::TemplateMatchesBTCPREV(
+      nullptr, /*required=*/true, btc_prev_1));
+  BOOST_CHECK(!AuxpowMinerForTest::TemplateMatchesBTCPREV(
+      &block, /*required=*/true, std::nullopt));
+  BOOST_CHECK(AuxpowMinerForTest::TemplateMatchesBTCPREV(
+      &block, /*required=*/true, btc_prev_1));
+  BOOST_CHECK(!AuxpowMinerForTest::TemplateMatchesBTCPREV(
+      &block, /*required=*/true, btc_prev_2));
 }
 
 /* ************************************************************************** */

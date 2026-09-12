@@ -164,7 +164,10 @@ int64_t GetTransactionSigOpCost(const CTransaction& tx, const CCoinsViewCache& i
     }
     return nSigOps;
 }
+// SYSCOIN BEGIN: Extend Bitcoin's input-validation signature with asset totals.
+// bool Consensus::CheckTxInputs(const CTransaction& tx, TxValidationState& state, const CCoinsViewCache& inputs, int nSpendHeight, CAmount& txfee)
 bool Consensus::CheckTxInputs(const CTransaction& tx, TxValidationState& state, const CCoinsViewCache &inputs, int nSpendHeight, CAmount& txfee, CAssetsMap &mapAssetIn, CAssetsMap &mapAssetOut)
+// SYSCOIN END: Extend the input-validation signature with asset totals.
 {
     // are the actual inputs available?
     if (!inputs.HaveInputs(tx)) {
@@ -172,7 +175,9 @@ bool Consensus::CheckTxInputs(const CTransaction& tx, TxValidationState& state, 
                          strprintf("%s: inputs missing/spent", __func__));
     }
     CAmount nValueIn = 0;
+    // SYSCOIN BEGIN: Select asset input accounting for this transaction.
     bool hasAssets = tx.HasAssets();
+    // SYSCOIN END: Select asset input accounting.
     for (unsigned int i = 0; i < tx.vin.size(); ++i) {
         const COutPoint &prevout = tx.vin[i].prevout;
         const Coin& coin = inputs.AccessCoin(prevout);
@@ -183,6 +188,7 @@ bool Consensus::CheckTxInputs(const CTransaction& tx, TxValidationState& state, 
             return state.Invalid(TxValidationResult::TX_PREMATURE_SPEND, "bad-txns-premature-spend-of-coinbase",
                 strprintf("tried to spend coinbase at depth %d", nSpendHeight - coin.nHeight));
         }
+        // SYSCOIN BEGIN: Validate and accumulate each asset's input amount.
         if (hasAssets && !coin.out.assetInfo.IsNull()) {
             const CAmount& nAssetValue = coin.out.assetInfo.nValue;
             // Same form as GetValueOut / Bitcoin: range-check before mutating total.
@@ -192,6 +198,7 @@ bool Consensus::CheckTxInputs(const CTransaction& tx, TxValidationState& state, 
             }
             it->second += nAssetValue;
         }
+        // SYSCOIN END: Validate and accumulate asset input amounts.
         // Check for negative or overflow input values
         if (!MoneyRange(coin.out.nValue) || !MoneyRange(nValueIn + coin.out.nValue)) {
             return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-inputvalues-outofrange");

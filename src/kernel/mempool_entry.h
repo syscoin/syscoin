@@ -174,10 +174,6 @@ public:
 
     mutable size_t vTxHashesIdx; //!< Index in mempool's vTxHashes
     mutable Epoch::Marker m_epoch_marker; //!< epoch when last touched, useful for graph algorithms
-    // SYSCOIN
-    // If this is a proTx, this will be the hash of the key for which this ProTx was valid
-    mutable uint256 validForProTxKey;
-    mutable bool isKeyChangeProTx{false};
 };
 
 #endif // SYSCOIN_KERNEL_MEMPOOL_ENTRY_H

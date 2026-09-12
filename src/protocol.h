@@ -7,6 +7,7 @@
 #define SYSCOIN_PROTOCOL_H
 
 #include <kernel/messagestartchars.h> // IWYU pragma: export
+#include <hash.h> // SYSCOIN: governance page view commitments.
 #include <netaddress.h>
 #include <primitives/transaction.h>
 #include <serialize.h>
@@ -15,9 +16,12 @@
 #include <util/time.h>
 
 #include <array>
+#include <chrono> // SYSCOIN: bounded governance page leases.
 #include <cstdint>
 #include <limits>
+#include <optional> // SYSCOIN: governance page commitment validation.
 #include <string>
+#include <vector> // SYSCOIN: bounded governance page inventory.
 
 /** Message header.
  * (4) message start.
@@ -266,23 +270,16 @@ extern const char *SYNCSTATUSCOUNT;
 extern const char *MNGOVERNANCESYNC;
 extern const char *MNGOVERNANCEOBJECT;
 extern const char *MNGOVERNANCEOBJECTVOTE;
-extern const char *QSENDRECSIGS;
-extern const char *QFCOMMITMENT;
-extern const char *QCONTRIB;
-extern const char *QCOMPLAINT;
-extern const char *QJUSTIFICATION;
-extern const char *QPCOMMITMENT;
-extern const char *QWATCH;
-extern const char *QSIGSESANN;
-extern const char *QSIGSHARESINV;
-extern const char *QGETSIGSHARES;
-extern const char *QBSIGSHARES;
-extern const char *QSIGREC;
-extern const char *QSIGSHARE;
+extern const char *GETGOVPAGE;
+extern const char *GOVPAGE;
 extern const char *CLSIG;
 extern const char *GETCLSIG;
-extern const char *BTCCSIG;
-extern const char *GETBTCCSIG;
+extern const char *PQCLSHARE;
+extern const char *PQPOSEHAVE;
+extern const char *PQPOSERESP;
+extern const char *PQPOSESHARE;
+extern const char *PQPOSECERT;
+extern const char *GETPQPOSE;
 extern const char *MNAUTH;
 /**
  * Contains a 4-byte version number and an 8-byte salt.
@@ -506,14 +503,10 @@ enum GetDataMsg : uint32_t {
     MSG_SPORK = 11,
     MSG_GOVERNANCE_OBJECT = 12,
     MSG_GOVERNANCE_OBJECT_VOTE = 13,
-    MSG_QUORUM_FINAL_COMMITMENT = 14,
-    MSG_QUORUM_CONTRIB = 15,
-    MSG_QUORUM_COMPLAINT = 16,
-    MSG_QUORUM_JUSTIFICATION = 17,
-    MSG_QUORUM_PREMATURE_COMMITMENT = 18,
-    MSG_QUORUM_RECOVERED_SIG = 19,
+    // Values 14 through 19 are reserved by the retired BLS/DKG protocol.
     MSG_CLSIG = 20,
-    MSG_BTCCSIG = 21,
+    // Value 21 is reserved by the retired standalone BTCC protocol.
+    MSG_PQPOSECERT = 22,
     MSG_WITNESS_BLOCK = MSG_BLOCK | MSG_WITNESS_FLAG, //!< Defined in BIP144
     MSG_WITNESS_TX = MSG_TX | MSG_WITNESS_FLAG,       //!< Defined in BIP144
     // MSG_FILTERED_WITNESS_BLOCK is defined in BIP144 as reserved for future
@@ -530,6 +523,8 @@ public:
 
     SERIALIZE_METHODS(CInv, obj) { READWRITE(obj.type, obj.hash); }
 
+    // SYSCOIN: Exact fork inventory tracking requires value equality.
+    friend bool operator==(const CInv&, const CInv&) = default;
     friend bool operator<(const CInv& a, const CInv& b);
     std::string GetCommand() const;
     std::string ToString() const;
@@ -550,7 +545,9 @@ public:
         if(bJustTx || bJustTxInternal) {
             return bJustTxInternal;
         }
-        return type >= MSG_SPORK && type <= MSG_BTCCSIG;
+        return type == MSG_SPORK || type == MSG_GOVERNANCE_OBJECT ||
+               type == MSG_GOVERNANCE_OBJECT_VOTE || type == MSG_CLSIG ||
+               type == MSG_PQPOSECERT;
     }
     bool IsGenBlkMsg() const
     {
@@ -560,6 +557,144 @@ public:
     uint32_t type;
     uint256 hash;
 };
+
+// SYSCOIN: version 70018 replaces lossy bulk governance inventory relay with
+// deterministic, cursor-bound pages. The small fixed bound is also the
+// admission budget for the expensive payloads named by one page.
+static constexpr int GOVERNANCE_PAGE_PROTO_VERSION{70018};
+static constexpr std::size_t MAX_GOVERNANCE_PAGE_INVENTORY{2};
+static constexpr std::size_t MAX_GOVERNANCE_PAGE_PAYLOAD_BYTES{
+    100ULL * 1024 * 1024};
+// A metadata response is small; a silent source must not hold the leased
+// governance lane for the much longer payload-transfer allowance.
+static constexpr auto GOVERNANCE_PAGE_RESPONSE_TIMEOUT{
+    std::chrono::seconds{30}};
+// Once a page arrives, this covers receipt and semantic verification of both
+// legal payloads. Fifteen minutes lets a full 64 MiB retained page make
+// progress on a roughly 0.6 Mbps link.
+static constexpr auto GOVERNANCE_PAGE_TRANSFER_TIMEOUT{
+    std::chrono::minutes{15}};
+// Payload admission refills once per two seconds. A 43,200-item scope can
+// therefore drain within a 24-hour immutable-snapshot lease; a larger count
+// would be advertised as resumable while being impossible to service before
+// its bounded server state expires.
+static constexpr uint32_t MAX_GOVERNANCE_PAGE_SCOPE_ITEMS{43'200};
+
+enum GovernancePageStatus : uint8_t {
+    GOVERNANCE_PAGE_OK = 0,
+    GOVERNANCE_PAGE_VIEW_CHANGED = 1,
+    GOVERNANCE_PAGE_RESTART_REQUIRED = 2,
+    GOVERNANCE_PAGE_TEMPORARILY_UNAVAILABLE = 3,
+    GOVERNANCE_PAGE_SCOPE_TOO_LARGE = 4,
+};
+
+[[nodiscard]] constexpr bool SupportsGovernancePages(int version) noexcept
+{
+    return version >= GOVERNANCE_PAGE_PROTO_VERSION;
+}
+
+template <std::size_t MaximumSize>
+struct LimitedInvVectorFormatter
+{
+    template <typename Stream>
+    void Ser(Stream& stream, const std::vector<CInv>& inventory)
+    {
+        if (inventory.size() > MaximumSize) {
+            throw std::ios_base::failure("governance page inventory too large");
+        }
+        WriteCompactSize(stream, inventory.size());
+        for (const CInv& inv : inventory) stream << inv;
+    }
+
+    template <typename Stream>
+    void Unser(Stream& stream, std::vector<CInv>& inventory)
+    {
+        const std::size_t size{ReadCompactSize(stream)};
+        if (size > MaximumSize) {
+            throw std::ios_base::failure("governance page inventory too large");
+        }
+        inventory.clear();
+        inventory.reserve(size);
+        while (inventory.size() < size) {
+            inventory.emplace_back();
+            stream >> inventory.back();
+        }
+    }
+};
+
+struct CGovernancePageRequest
+{
+    // A null scope requests objects; otherwise it requests votes for scope.
+    uint256 scope_hash;
+    // Exclusive hash cursor. A null cursor starts a scope.
+    uint256 cursor;
+    // Null only when establishing a deterministic view at cursor zero.
+    uint256 view_id;
+    uint64_t nonce{0};
+
+    SERIALIZE_METHODS(CGovernancePageRequest, obj)
+    {
+        READWRITE(obj.scope_hash, obj.cursor, obj.view_id, obj.nonce);
+    }
+
+    friend bool operator==(const CGovernancePageRequest&,
+                           const CGovernancePageRequest&) = default;
+};
+
+struct CGovernancePageResponse
+{
+    uint256 scope_hash;
+    uint256 cursor;
+    uint256 request_view_id;
+    uint64_t nonce{0};
+    uint8_t status{GOVERNANCE_PAGE_OK};
+    uint256 view_id;
+    uint32_t total_count{0};
+    uint256 next_cursor;
+    bool done{false};
+    std::vector<CInv> inventory;
+
+    SERIALIZE_METHODS(CGovernancePageResponse, obj)
+    {
+        READWRITE(
+            obj.scope_hash, obj.cursor, obj.request_view_id, obj.nonce,
+            obj.status, obj.view_id, obj.total_count,
+            obj.next_cursor, obj.done,
+            Using<LimitedInvVectorFormatter<
+                MAX_GOVERNANCE_PAGE_INVENTORY>>(obj.inventory));
+    }
+
+    friend bool operator==(const CGovernancePageResponse&,
+                           const CGovernancePageResponse&) = default;
+};
+
+/**
+ * Incremental commitment to one exact ordered governance inventory scope.
+ * Entries are appended only after their page has passed semantic admission.
+ */
+class CGovernancePageViewHasher
+{
+public:
+    CGovernancePageViewHasher(const uint256& scope_hash,
+                              uint32_t total_count);
+
+    [[nodiscard]] bool Append(const CInv& inv);
+    [[nodiscard]] std::optional<uint256> Finalize();
+    [[nodiscard]] uint32_t SeenCount() const noexcept { return m_seen_count; }
+    [[nodiscard]] uint32_t TotalCount() const noexcept { return m_total_count; }
+    [[nodiscard]] const uint256& LastHash() const noexcept { return m_last_hash; }
+
+private:
+    HashWriter m_writer{SER_GETHASH, GOVERNANCE_PAGE_PROTO_VERSION};
+    uint256 m_scope_hash;
+    uint256 m_last_hash;
+    uint32_t m_total_count{0};
+    uint32_t m_seen_count{0};
+    bool m_finalized{false};
+};
+
+[[nodiscard]] std::optional<uint256> ComputeGovernancePageViewHash(
+    const uint256& scope_hash, const std::vector<CInv>& inventory);
 
 /** Convert a TX/WITNESS_TX/WTX CInv to a GenTxid. */
 GenTxid ToGenTxid(const CInv& inv);

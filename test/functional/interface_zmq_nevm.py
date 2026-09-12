@@ -5,10 +5,11 @@
 """Test the ZMQ notification interface."""
 
 from test_framework.address import ADDRESS_BCRT1_UNSPENDABLE
-from test_framework.test_framework import SyscoinTestFramework
-from test_framework.messages import hash256, CNEVMBlock, CNEVMBlockConnect, CNEVMBlockDisconnect, uint256_from_str
+from test_framework.test_framework import AuxPoWMiningMixin, SyscoinTestFramework
+from test_framework.messages import hash256, CNEVMBlock, CNEVMBlockConnect, CNEVMBlockDisconnect, ser_string, uint256_from_str
 from test_framework.util import (
     assert_equal,
+    get_rpc_proxy,
     p2p_port,
     force_finish_mnsync,
     assert_raises_rpc_error
@@ -26,7 +27,8 @@ def receive_thread_nevm(test_framework, idx, subscriber):
         try:
             data = subscriber.receive()
             if data[0] == b"nevmcomms":
-                subscriber.send([b"nevmcomms", b"ack"])
+                response = b"connect-v1" if data[1] == ser_string(b"connect-v1") else b"ack"
+                subscriber.send([b"nevmcomms", response])
             elif data[0] == b"nevmblock":
                 hashStr = hash256(str(random.randint(-0x80000000, 0x7fffffff)).encode())
                 hashTopic = uint256_from_str(hashStr)
@@ -189,7 +191,7 @@ class ZMQPublisher:
         print(f"Expected: {expected_mn_mapping}")
         assert self.mnNEVMAddressMapping == expected_mn_mapping, "MN mapping did not match expected state"
 
-class ZMQTest(SyscoinTestFramework):
+class ZMQTest(AuxPoWMiningMixin, SyscoinTestFramework):
 
     def add_options(self, parser):
         # This test is descriptor-only; do not expose legacy wallet mode.
@@ -198,8 +200,8 @@ class ZMQTest(SyscoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 2
         self.extra_args = [
-            ["-whitelist=noban@127.0.0.1", "-nevmstartheight=205", "-mncollateral=100", "-dip3params=205:205"],
-            ["-whitelist=noban@127.0.0.1", "-nevmstartheight=205", "-mncollateral=100", "-dip3params=205:205"]
+            ["-whitelist=noban@127.0.0.1", "-nevmstartheight=205", "-mncollateral=100", "-dip3params=204:204"],
+            ["-whitelist=noban@127.0.0.1", "-nevmstartheight=205", "-mncollateral=100", "-dip3params=204:204"]
         ]
         
     def skip_test_if_missing_module(self):
@@ -221,6 +223,8 @@ class ZMQTest(SyscoinTestFramework):
         self.ctxpub = zmq.Context()
         self.threads = []
         try:
+            # SYSCOIN: Rebuild the cached legacy chain under PQ preparation rules.
+            self.configure_pq_preparation()
             address = 'tcp://127.0.0.1:29458'
             address1 = 'tcp://127.0.0.1:29459'
 
@@ -243,6 +247,10 @@ class ZMQTest(SyscoinTestFramework):
             self.sync_blocks()
             self.mn_count = 0
             self.test_basic(nevmsub, nevmsub1)
+            # SYSCOIN BEGIN: Register roots and cross the PQ activation boundary.
+            self.prepare_pq_masternodes()
+            self.activate_pq_profile((nevmsub, nevmsub1))
+            # SYSCOIN END: Register roots and cross the PQ activation boundary.
             self.test_nevm_mapping(nevmsub)
             self.test_nevm_edge_cases(nevmsub)
         finally:
@@ -252,6 +260,49 @@ class ZMQTest(SyscoinTestFramework):
             self.ctxpub.destroy(linger=None)
             for t in self.threads:
                 t.join()
+
+    def configure_pq_preparation(self):
+        # SYSCOIN: Start registry preparation immediately before NEVM
+        # activation so subscribers observe block 205 and the 206 -> 205
+        # rollback remains covered.
+        dip3_height = 204
+        current_height = self.nodes[0].getblockcount()
+        assert current_height <= dip3_height
+        if current_height < dip3_height:
+            self.generatetoaddress(
+                self.nodes[0], dip3_height - current_height,
+                self.nodes[0].getnewaddress())
+            self.sync_blocks()
+        anchor = self.nodes[0].protx_migration_info()
+        assert_equal(anchor['height'], dip3_height)
+        registration_cutoff_blocks = 288
+        # SYSCOIN: roster membership is sampled only after root registration closes.
+        roster_snapshot_lag = 288
+        assert registration_cutoff_blocks >= roster_snapshot_lag
+        pq_args = [
+            '-pqpreparationheight=%d' % dip3_height,
+            '-pqchainlockepochorigin=1440',
+            '-pqregistrationcutoffblocks=%d' % registration_cutoff_blocks,
+            '-pqrostersnapshotlag=%d' % roster_snapshot_lag,
+            '-pqfuturehorizonepochs=8',
+            '-pqfinalitypreparation=1',
+            # SYSCOIN: NEVM mapping exercises global operator authorization,
+            # not child signatures; avoid rebuilding a full tree in this test.
+            '-pqoperatorcommitmentteststub=1',
+        ]
+        for args in self.extra_args:
+            args.extend(pq_args)
+        self.stop_nodes()
+        for index in range(self.num_nodes):
+            self.nodes[index].extra_args = list(self.extra_args[index])
+        # SYSCOIN: This test starts from the shared cached chain. Rebuild the
+        # UTXO, deterministic-MN, and PQ-registry state from validated history.
+        self.start_node(0, extra_args=self.extra_args[0] + ['-reindex-chainstate'])
+        self.start_node(1, extra_args=self.extra_args[1] + ['-reindex-chainstate'])
+        self.connect_nodes(0, 1)
+        self.sync_blocks()
+        assert_equal(self.nodes[0].protx_migration_info(), anchor)
+        assert_equal(self.nodes[1].protx_migration_info(), anchor)
 
     def setup_zmq_test(self, address, idx, *, recv_timeout=60):
         socket = self.ctx.socket(zmq.REP)
@@ -309,8 +360,11 @@ class ZMQTest(SyscoinTestFramework):
         assert_equal(nevmsub1.getLastSYSBlock(), nevmsub.getLastSYSBlock())
         assert_equal(nevmsub1.getLastBTCPrevHash(), nevmsub.getLastBTCPrevHash())
 
-        self.log.info('Reindexing node 0')
-        self.extra_args[0] += ["-reindex"]
+        self.log.info('Reindexing chainstate on node 0')
+        # SYSCOIN: Replaying the chainstate is the operation under test here:
+        # it reconstructs NEVM notifications without discarding the cached,
+        # already-validated block index that identifies the migration branch.
+        self.extra_args[0] += ["-reindex-chainstate"]
         nevmsub.clearMappings()
         self.restart_node(0, self.extra_args[0])
         self.connect_nodes(0, 1)
@@ -321,8 +375,8 @@ class ZMQTest(SyscoinTestFramework):
         assert_equal(nevmsub1.getLastSYSBlock(), nevmsub.getLastSYSBlock())
         assert_equal(nevmsub1.getLastBTCPrevHash(), nevmsub.getLastBTCPrevHash())
 
-        self.log.info('Reindexing node 1')
-        self.extra_args[1] += ["-reindex"]
+        self.log.info('Reindexing chainstate on node 1')
+        self.extra_args[1] += ["-reindex-chainstate"]
         nevmsub1.clearMappings()
         self.restart_node(1, self.extra_args[1])
         self.connect_nodes(0, 1)
@@ -333,28 +387,30 @@ class ZMQTest(SyscoinTestFramework):
         assert_equal(nevmsub1.getLastSYSBlock(), nevmsub.getLastSYSBlock())
         assert_equal(nevmsub1.getLastBTCPrevHash(), nevmsub.getLastBTCPrevHash())
 
+        common_height = self.nodes[0].getblockcount()
+        assert_equal(self.nodes[1].getblockcount(), common_height)
         self.disconnect_nodes(0, 1)
         self.log.info("Mine 4 blocks on Node 0")
         for i in range(len(self.nodes)):
             force_finish_mnsync(self.nodes[i])
         self.generatetoaddress(self.nodes[0], 4, ADDRESS_BCRT1_UNSPENDABLE, sync_fun=self.no_op)
-        assert_equal(self.nodes[1].getblockcount(), 210)
-        assert_equal(self.nodes[0].getblockcount(), 214)
+        assert_equal(self.nodes[1].getblockcount(), common_height)
+        assert_equal(self.nodes[0].getblockcount(), common_height + 4)
         besthash_n0 = self.nodes[0].getbestblockhash()
 
         self.log.info("Mine competing 6 blocks on Node 1")
         self.generatetoaddress(self.nodes[1], 6, ADDRESS_BCRT1_UNSPENDABLE, sync_fun=self.no_op)
-        assert_equal(self.nodes[1].getblockcount(), 216)
+        assert_equal(self.nodes[1].getblockcount(), common_height + 6)
 
         self.log.info("Connect nodes to force a reorg")
         self.connect_nodes(0, 1)
         self.sync_blocks()
-        assert_equal(self.nodes[0].getblockcount(), 216)
-        badhash = self.nodes[1].getblockhash(212)
+        assert_equal(self.nodes[0].getblockcount(), common_height + 6)
+        badhash = self.nodes[1].getblockhash(common_height + 2)
 
         self.log.info("Invalidate block 2 on node 0 and verify we reorg to node 0's original chain")
         self.nodes[0].invalidateblock(badhash)
-        assert_equal(self.nodes[0].getblockcount(), 214)
+        assert_equal(self.nodes[0].getblockcount(), common_height + 4)
         assert_equal(self.nodes[0].getbestblockhash(), besthash_n0)
         self.nodes[0].reconsiderblock(badhash)
         self.sync_blocks()
@@ -440,9 +496,12 @@ class ZMQTest(SyscoinTestFramework):
         expected_mapping[new_mn1_nevm_address.lower()] = self.mns[1].collateral_height
         nevmsub.assertMNList(expected_mapping)
         
-        # Test case 7: Reorg that undoes an MN creation (should remove NEVM address)
-        self.log.info("Reorg to undo MN creation")
-        invalidblock = self.reorg(self.mns[0].collateral_height)
+        # SYSCOIN BEGIN: Post-activation NEVM mapping reorg coverage.
+        # Test case 7: Reorg that undoes the first post-activation mapping.
+        # The provider/root records deliberately predate the immutable receipt
+        # assumption boundary; the NEVM transition under test does not.
+        self.log.info("Reorg to undo initial MN mapping")
+        invalidblock = self.reorg(self.mns[0].initial_nevm_height)
         nevmsub.assertMNList({})
         # sync back to tip
         self.nodes[0].reconsiderblock(invalidblock)
@@ -460,12 +519,13 @@ class ZMQTest(SyscoinTestFramework):
 
         # Test case 9: Reorg that undoes an MN removal (should re-add NEVM address)
         self.log.info("Reorg to undo MN removal")
-        self.reorg(self.mns[1].removal_height)
+        removal_block = self.reorg(self.mns[1].removal_height)
         nevmsub.assertMNList({new_mn1_nevm_address.lower(): self.mns[0].collateral_height})
         # sync back to tip
-        self.nodes[0].reconsiderblock(invalidblock)
+        self.nodes[0].reconsiderblock(removal_block)
         self.sync_blocks()
         nevmsub.assertMNList(expected_mapping)
+        # SYSCOIN END: Post-activation NEVM mapping reorg coverage.
         self.log.info('NEVM address mapping tests done')
 
     def test_nevm_edge_cases(self, nevmsub):
@@ -522,20 +582,25 @@ class ZMQTest(SyscoinTestFramework):
         expected_mapping[mn2_nevm_address.lower()] = self.mns[1].collateral_height
         nevmsub.assertMNList(expected_mapping)
         # Now attempt to update mn2 (or a different MN) with the same NEVM address as mn1.
+        # SYSCOIN: Use a throwaway confirmed fee input because the expected
+        # rejection may leave its selected input unavailable to later checks.
+        duplicate_fee_address = self.nodes[0].getnewaddress()
+        self.nodes[0].sendtoaddress(duplicate_fee_address, 1)
+        self.generate(self.nodes[0], 1)
         assert_raises_rpc_error(-4, 'bad-protx-dup-nevm-address', 
                                 self.nodes[0].protx_update_service,  
                                 self.mns[1].protx_hash, 
                                 '127.0.0.2:%d' % self.mns[1].p2p_port,
-                                self.mns[1].blsMnkey,
+                                self.mns[1].operatorKey,
                                 mn1_nevm_address,
                                 "",
-                                self.mns[1].fundsAddr)
+                                duplicate_fee_address)
         # not 20 bytes
         assert_raises_rpc_error(-5, 'Invalid NEVM address (must be 20 bytes / 40 hex chars)', 
                         self.nodes[0].protx_update_service,  
                         self.mns[0].protx_hash, 
                         '127.0.0.2:%d' % self.mns[0].p2p_port,
-                        self.mns[0].blsMnkey,
+                        self.mns[0].operatorKey,
                         "0x11111111111111111111111111111111111111",
                         "",
                         self.mns[1].fundsAddr)
@@ -544,7 +609,7 @@ class ZMQTest(SyscoinTestFramework):
                         self.nodes[0].protx_update_service,  
                         self.mns[0].protx_hash, 
                         '127.0.0.2:%d' % self.mns[0].p2p_port,
-                        self.mns[0].blsMnkey,
+                        self.mns[0].operatorKey,
                         "0x1111111111111111111111111111111111111L",
                         "",
                         self.mns[1].fundsAddr)
@@ -557,23 +622,46 @@ class ZMQTest(SyscoinTestFramework):
         mn.is_protx = True
         mn.p2p_port = p2p_port(mn.idx)
 
-        blsKey = node.bls_generate()
+        operator_keys = node.protx_generate_operator_keypair()
         mn.fundsAddr = node.getnewaddress()
         mn.ownerAddr = node.getnewaddress()
-        mn.operatorAddr = blsKey['public']
         mn.votingAddr = mn.ownerAddr
-        mn.blsMnkey = blsKey['secret']
+        mn.operatorKey = operator_keys['operatorKey']
+        mn.chainlockSeed = operator_keys['chainlockSeed']
         return mn
 
+    # SYSCOIN BEGIN: PQ-rooted NEVM masternode preparation and activation.
     def create_mn_with_nevm(self, index, alias, nevm_address = None):
         """Create a masternode with the specified NEVM address"""
+        mn = self.prepared_mns.pop(index)
+        assert_equal(mn.alias, alias)
+        # Registration and later wallet funding may consume the original
+        # setup balance. Give this post-activation update its own fee input.
+        service_fee_address = self.nodes[0].getnewaddress()
+        self.nodes[0].sendtoaddress(service_fee_address, 1)
+        self.generate(self.nodes[0], 1)
+        self.nodes[0].protx_update_service(
+            mn.protx_hash, '127.0.0.1:%d' % mn.p2p_port,
+            mn.operatorKey, "", "", service_fee_address)
+        self.generate(self.nodes[0], 1)
+        if nevm_address is not None:
+            self.generate(self.nodes[0], (self.mn_count+1)*2 + 1)
+            self.update_mn_set_nevm(mn, nevm_address)
+            mn.initial_nevm_height = self.nodes[0].getblockcount()
+        else:
+            self.generate(self.nodes[0], 1)
+            self.generate(self.nodes[0], (self.mn_count+1)*2 + 1)
+        return mn
+
+    def prepare_registered_mn(self, index, alias):
+        """Register one legacy provider and its PQ root before activation."""
         mn = self.prepare_mn(self.nodes[0], index, alias)
         self.nodes[0].sendtoaddress(mn.fundsAddr, 100.001)
         mn.collateral_address = self.nodes[0].getnewaddress()
         mn.rewards_address = self.nodes[0].getnewaddress()
         self.nodes[0].sendtoaddress(mn.rewards_address, 0.001)
 
-        mn.protx_hash = self.nodes[0].protx_register_fund( mn.collateral_address, '127.0.0.1:%d' % mn.p2p_port, mn.ownerAddr, mn.operatorAddr, mn.votingAddr, 0, mn.rewards_address, mn.fundsAddr)
+        mn.protx_hash = self.nodes[0].protx_register_fund( mn.collateral_address, '127.0.0.1:%d' % mn.p2p_port, mn.ownerAddr, "", mn.votingAddr, 0, mn.rewards_address, mn.fundsAddr)
         mn.collateral_txid = mn.protx_hash
         mn.collateral_vout = -1
 
@@ -585,29 +673,96 @@ class ZMQTest(SyscoinTestFramework):
         assert mn.collateral_vout != -1
         mn.collateral_height = self.nodes[0].getblockcount() + 1
         self.mn_count = self.mn_count + 1
-        if nevm_address is not None:
-            # 2 rounds of payments of 2 nodes atleast before MN is "confirmed"
-            self.generate(self.nodes[0], 1)
-            assert_raises_rpc_error(-4, 'bad-protx-unconfirmed-nevm-address', self.update_mn_set_nevm, mn, nevm_address)
-            self.generate(self.nodes[0], (self.mn_count+1)*2 + 1)
-            self.update_mn_set_nevm(mn, nevm_address)
-        else:
-            self.generate(self.nodes[0], 1)
-            self.generate(self.nodes[0], (self.mn_count+1)*2 + 1)
+        self.generate(self.nodes[0], 1)
+        # SYSCOIN: Building and signing the fixed scheduled-WOTS root can exceed the
+        # ordinary RPC timeout on reference SLH-DSA builds. Scope the larger
+        # budget to this cryptographic setup call only.
+        operator_registration_rpc = get_rpc_proxy(
+            self.nodes[0].url,
+            self.nodes[0].index,
+            timeout=600,
+            coveragedir=self.nodes[0].coverage_dir,
+        )
+        operator_registration_rpc.protx_register_operator_key(
+            mn.protx_hash, mn.operatorKey, mn.chainlockSeed, mn.fundsAddr)
+        self.generate(self.nodes[0], 1)
         return mn
+
+    def prepare_pq_masternodes(self):
+        self.prepared_mns = {}
+        for index, alias in (
+                (1, "nevm-mn"),
+                (2, "non-nevm-mn"),
+                (3, "edge-nevm-mn"),
+                (4, "edge-non-nevm-mn")):
+            self.prepared_mns[index] = self.prepare_registered_mn(index, alias)
+
+    def activate_pq_profile(self, subscribers):
+        predecessor_height = 2304
+        assert self.nodes[0].getblockcount() <= predecessor_height
+        self.generatetoaddress(
+            self.nodes[0],
+            predecessor_height - self.nodes[0].getblockcount(),
+            self.nodes[0].getnewaddress())
+        self.sync_blocks()
+        predecessor_hash = self.nodes[0].getblockhash(predecessor_height)
+        activation_args = [
+            '-pqactivationheight=%d' % (predecessor_height + 1),
+            '-pqbtcccandidateorigin=%d' % (predecessor_height + 1),
+            '-pqbtccreceiptanchorheight=%d' % predecessor_height,
+            '-pqbtccreceiptanchorblockhash=%s' % predecessor_hash,
+            '-pqbtccreceiptanchorcursorheight=-1',
+            '-pqbtccreceiptanchorcursorsyshash=%s' % ('0' * 64),
+            '-pqbtccreceiptanchorcursorbtchash=%s' % ('0' * 64),
+            '-pqbtccreceiptanchorstatehash=%s' % ('0' * 64),
+            '-pqbtccreceiptanchorlatesttargetheight=-1',
+            '-pqbtccreceiptanchorlatestcarrierheight=-1',
+        ]
+        for index, args in enumerate(self.extra_args):
+            self.extra_args[index] = [
+                arg for arg in args
+                if arg != '-pqfinalitypreparation=1'
+            ] + activation_args
+            if '-reindex-chainstate' not in self.extra_args[index]:
+                self.extra_args[index].append('-reindex-chainstate')
+
+        self.stop_nodes()
+        # Reindex replays every NEVM connect. Reset each stopped node's mock
+        # engine state so its original blocks are not rejected as duplicates.
+        for subscriber in subscribers:
+            subscriber.clearMappings()
+        for index, node in enumerate(self.nodes):
+            node.extra_args = list(self.extra_args[index])
+            self.start_node(index, extra_args=self.extra_args[index])
+            force_finish_mnsync(node)
+        self.connect_nodes(0, 1)
+        self.sync_blocks()
+        assert_equal(self.nodes[0].getblockcount(), predecessor_height)
+        assert_equal(self.nodes[1].getblockcount(), predecessor_height)
+        assert_equal(self.nodes[0].getbestblockhash(), predecessor_hash)
+        assert_equal(self.nodes[1].getbestblockhash(), predecessor_hash)
+        for subscriber in subscribers:
+            assert_equal(subscriber.getLastSYSBlock(), int(predecessor_hash, 16))
+    # SYSCOIN END: PQ-rooted NEVM masternode preparation and activation.
 
     def update_mn_set_nevm(self, mn, nevm_address):
         """Update an MN to set an NEVM address"""
-        self.nodes[0].protx_update_service( mn.protx_hash, '127.0.0.2:%d' % p2p_port(7), mn.blsMnkey, "0x1111111111111111111111111111111111111110", "", mn.fundsAddr)
-        self.nodes[0].protx_update_service( mn.protx_hash, '127.0.0.2:%d' % p2p_port(8), mn.blsMnkey, "0x1111111111111111111111111111111111111112", "", mn.fundsAddr)
-        self.nodes[0].protx_update_service( mn.protx_hash, '127.0.0.2:%d' % p2p_port(9), mn.blsMnkey, "0x1111111111111111111111111111111111111113", "", mn.fundsAddr)
-        self.nodes[0].protx_update_service( mn.protx_hash, '127.0.0.2:%d' % p2p_port(10), mn.blsMnkey,"0x1111111111111111111111111111111111111114", "", mn.fundsAddr)
-        self.nodes[0].protx_update_service( mn.protx_hash, '127.0.0.2:%d' % p2p_port(11), mn.blsMnkey, "", "", mn.fundsAddr)
-        self.nodes[0].protx_update_service( mn.protx_hash, '127.0.0.2:%d' % mn.p2p_port, mn.blsMnkey, nevm_address,  "", mn.fundsAddr)
+        # SYSCOIN: Each batch ends with an intentional mempool rejection,
+        # which can retain the selected fee input. Isolate that side effect
+        # with a fresh confirmed input instead of draining the MN setup fund.
+        update_fee_address = self.nodes[0].getnewaddress()
+        self.nodes[0].sendtoaddress(update_fee_address, 1)
+        self.generate(self.nodes[0], 1)
+        self.nodes[0].protx_update_service( mn.protx_hash, '127.0.0.2:%d' % p2p_port(7), mn.operatorKey, "0x1111111111111111111111111111111111111110", "", update_fee_address)
+        self.nodes[0].protx_update_service( mn.protx_hash, '127.0.0.2:%d' % p2p_port(8), mn.operatorKey, "0x1111111111111111111111111111111111111112", "", update_fee_address)
+        self.nodes[0].protx_update_service( mn.protx_hash, '127.0.0.2:%d' % p2p_port(9), mn.operatorKey, "0x1111111111111111111111111111111111111113", "", update_fee_address)
+        self.nodes[0].protx_update_service( mn.protx_hash, '127.0.0.2:%d' % p2p_port(10), mn.operatorKey,"0x1111111111111111111111111111111111111114", "", update_fee_address)
+        self.nodes[0].protx_update_service( mn.protx_hash, '127.0.0.2:%d' % p2p_port(11), mn.operatorKey, "", "", update_fee_address)
+        self.nodes[0].protx_update_service( mn.protx_hash, '127.0.0.2:%d' % mn.p2p_port, mn.operatorKey, nevm_address,  "", update_fee_address)
 
         # dis-allow multiple in mempool from same MN
         if nevm_address:
-            assert_raises_rpc_error(-4, 'protx-dup', self.nodes[0].protx_update_service,  mn.protx_hash, '127.0.0.2:%d' % mn.p2p_port, mn.blsMnkey, nevm_address, "", mn.fundsAddr)
+            assert_raises_rpc_error(-4, 'protx-dup', self.nodes[0].protx_update_service,  mn.protx_hash, '127.0.0.2:%d' % mn.p2p_port, mn.operatorKey, nevm_address, "", update_fee_address)
         self.generate(self.nodes[0], 1)
         # Verify NEVM address was set correctly
         mn_info = self.nodes[0].masternode_list("nevmaddress", f"{mn.collateral_txid}-{mn.collateral_vout}")

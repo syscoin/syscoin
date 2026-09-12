@@ -26,7 +26,9 @@ EXCLUDE_FILES_WITH_PREFIX = ['contrib/devtools/syscoin-tidy',
                              'src/tinyformat.h',
                              'src/bench/nanobench.h',
                              'src/test/fuzz/FuzzedDataProvider.h',
-                             'src/dashbls',
+                             # SYSCOIN: Preserve the pinned SLH-DSA reference
+                             # implementation's upstream header layout.
+                             'src/crypto/slhdsa/vendor',
                              'src/immer']
 
 

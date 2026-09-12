@@ -23,6 +23,8 @@
 #include <common/args.h>
 #include <common/system.h>
 #include <consensus/amount.h>
+// SYSCOIN: Validate the release-pinned PQ deployment profile at startup.
+#include <consensus/pq_migration_config.h>
 #include <deploymentstatus.h>
 #include <hash.h>
 #include <httprpc.h>
@@ -47,7 +49,7 @@
 #include <node/chainstate.h>
 #include <node/chainstatemanager_args.h>
 #include <node/context.h>
-#include <node/geth_startup.h>
+#include <node/geth_startup.h> // SYSCOIN: Managed Geth startup and recovery support.
 #include <node/interface_ui.h>
 #include <node/kernel_notifications.h>
 #include <node/mempool_args.h>
@@ -68,6 +70,7 @@
 #include <scheduler.h>
 #include <script/sigcache.h>
 #include <shutdown.h>
+#include <support/cleanse.h> // SYSCOIN: wipe decoded PQ operator secrets.
 #include <sync.h>
 #include <timedata.h>
 #include <torcontrol.h>
@@ -96,6 +99,7 @@
 #include <array>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef> // SYSCOIN: size secret-wiping guards.
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
@@ -125,20 +129,16 @@
 #include <masternode/masternodesync.h>
 #include <masternode/masternodemeta.h>
 #include <masternode/masternodeutils.h>
-#include <llmq/quorums_utils.h>
 #include <messagesigner.h>
 #include <spork.h>
 #include <netfulfilledman.h>
 #include <services/nevmconsensus.h>
 #include <services/assetconsensus.h>
 #include <key_io.h>
-#include <llmq/quorums.h>
+#include <llmq/btc_header_policy.h>
+#include <llmq/quorums_chainlocks.h>
 #include <llmq/quorums_init.h>
 #include <evo/deterministicmns.h>
-#include <spork.h>
-#include <netfulfilledman.h>
-#include <masternode/masternodemeta.h>
-#include <llmq/quorums_dkgsessionmgr.h>
 static CDSNotificationInterface* pdsNotificationInterface = nullptr;
 
 using kernel::DumpMempool;
@@ -173,26 +173,57 @@ static constexpr int64_t DEFAULT_GETH_STARTUP_TIMEOUT{300};
 static constexpr int64_t DEFAULT_GETH_BOOTSTRAP_STARTUP_TIMEOUT{7200};
 static constexpr int64_t DEFAULT_GETH_STARTUP_RETRY_INTERVAL_MS{2000};
 static constexpr int64_t DEFAULT_GETH_STARTUP_LOG_INTERVAL{30};
+static constexpr int64_t DEFAULT_BTC_HEADER_STARTUP_TIMEOUT{30};
 static const char* GETH_STATE_BOOTSTRAP_STATUS_FILENAME = "state-bootstrap.status";
 
 static bool HasNEVMMinerFeeRecipientConfig(const ArgsManager& args)
 {
-    const std::vector<std::string> geth_args = args.GetArgs("-gethcommandline");
-    if (geth_args.empty()) return false;
-
-    static const std::array<std::string, 2> miner_addr_flags{
-        "--miner.etherbase",
-        "--miner.pendingfeerecipient",
-    };
-
-    for (size_t i = 0; i < geth_args.size(); ++i) {
-        const std::string& arg = geth_args[i];
-        for (const std::string& flag : miner_addr_flags) {
-            if (arg == flag || arg.rfind(flag + "=", 0) == 0) {
-                return true;
-            }
+    static const std::array<std::string, 2> flags{
+        "--miner.etherbase", "--miner.pendingfeerecipient"};
+    for (const std::string& arg : args.GetArgs("-gethcommandline")) {
+        if (std::any_of(flags.begin(), flags.end(), [&](const std::string& flag) {
+                return arg == flag || arg.rfind(flag + "=", 0) == 0;
+            })) {
+            return true;
         }
     }
+    return false;
+}
+
+static bool WaitForBTCHeaderBackend(const ArgsManager& args,
+                                    std::string& error)
+{
+    const int64_t timeout{std::clamp<int64_t>(
+        args.GetIntArg("-btcheaderstartuptimeout",
+                       DEFAULT_BTC_HEADER_STARTUP_TIMEOUT),
+        1, 300)};
+    const auto deadline{SteadyClock::now() + std::chrono::seconds{timeout}};
+    do {
+        UniValue chain_info;
+        if (llmq::pq::RunConfiguredBTCHeaderCommand(
+                {"getblockchaininfo"}, chain_info, error) &&
+            chain_info.isObject()) {
+            const UniValue& chain{chain_info.find_value("chain")};
+            const UniValue& headers_only{
+                chain_info.find_value("headersonly")};
+            const bool managed{args.GetBoolArg(
+                "-btcheadermanaged", DEFAULT_BTC_HEADER_MANAGED)};
+            if (chain.isStr() &&
+                chain.get_str() == Params().GetChainTypeString() &&
+                (!managed || (headers_only.isBool() &&
+                              headers_only.get_bool()))) {
+                return true;
+            }
+            error = managed
+                ? "managed backend is not the expected headers-only chain"
+                : "external backend is on the wrong Bitcoin chain";
+        }
+        if (ShutdownRequested()) {
+            error = "shutdown-requested";
+            return false;
+        }
+        UninterruptibleSleep(std::chrono::milliseconds{200});
+    } while (SteadyClock::now() < deadline);
     return false;
 }
 
@@ -293,7 +324,6 @@ void Interrupt(NodeContext& node)
     InterruptREST();
     InterruptTorControl();
     // SYSCOIN
-    llmq::InterruptLLMQSystem();
     InterruptMapPort();
     if (node.connman)
         node.connman->Interrupt();
@@ -365,6 +395,13 @@ void Shutdown(NodeContext& node)
     if (node.fee_estimator) node.fee_estimator->Flush();
 
     if (node.chainman) {
+        // SYSCOIN: both children perform bounded shutdown outside cs_main.
+        // The Bitcoin-header child is independent of deterministic block
+        // replay, but leaving it behind would make the next managed startup
+        // race a stale process and RPC cookie.
+        if (gArgs.GetBoolArg("-btcheadermanaged", DEFAULT_BTC_HEADER_MANAGED)) {
+            node.chainman->ActiveChainstate().StopBTCHeaderNode();
+        }
         node.chainman->ActiveChainstate().StopGethNode();
     }
 
@@ -416,8 +453,6 @@ void Shutdown(NodeContext& node)
         if (node.chainman) {
             const auto phase2_flush_start = std::chrono::steady_clock::now();
             LogPrint(BCLog::SYS, "Shutdown: phase 2 ForceFlushStateToDisk + ResetCoinsViews start\n");
-            // SYSCOIN
-            node.chainman->ActiveChainstate().StopBTCHeaderNode();
             for (Chainstate* chainstate : node.chainman->GetAll()) {
                 if (chainstate->CanFlushToDisk()) {
                     chainstate->ForceFlushStateToDisk();
@@ -432,19 +467,23 @@ void Shutdown(NodeContext& node)
         }
         UninterruptibleSleep(std::chrono::milliseconds{200});
 
-        {
-            pnevmtxrootsdb.reset();
-            pnevmtxmintdb.reset();
-            pblockindexdb.reset();
-            pnevmdatadb.reset();
-            pnevmdatablobdb.reset();
-            llmq::DestroyLLMQSystem();
-            deterministicMNManager.reset();
-            netfulfilledman.reset();
-            sporkManager.reset();
-            mmetaman.reset();
-        }
+        pnevmtxrootsdb.reset();
+        pnevmtxmintdb.reset();
+        pblockindexdb.reset();
+        pnevmdatadb.reset();
+        pnevmdatablobdb.reset();
+    }
 
+    // SYSCOIN: StopLLMQSystem has already joined the handler scheduler. Destroy
+    // the stopped handler without cs_main so its defensive Stop() cannot form
+    // the reverse of the startup lifecycle -> admission -> cs_main lock order.
+    llmq::DestroyLLMQSystem();
+    {
+        LOCK(cs_main);
+        deterministicMNManager.reset();
+        netfulfilledman.reset();
+        sporkManager.reset();
+        mmetaman.reset();
     }
     for (const auto& client : node.chain_clients) {
         client->stop();
@@ -466,9 +505,14 @@ void Shutdown(NodeContext& node)
     }
     {
         LOCK(activeMasternodeInfoCs);
-        // make sure to clean up BLS keys before global destructors are called (they have allocated from the secure memory pool)
-        activeMasternodeInfo.blsKeyOperator.reset();
-        activeMasternodeInfo.blsPubKeyOperator.reset();
+        // SYSCOIN: Join the public child-tree cache worker before destroying the
+        // seed-owning key manager it references.
+        activeMasternodeInfo.childKeyCache.reset();
+        activeMasternodeInfo.operatorKeyManager.reset();
+        activeMasternodeInfo.proTxHash.SetNull();
+        activeMasternodeInfo.globalKeyVersion = 0;
+        ++activeMasternodeInfo.identityGeneration;
+        fMasternodeMode = false;
     }
     node.chain_clients.clear();
     UnregisterAllValidationInterfaces();
@@ -558,9 +602,11 @@ void SetupServerArgs(ArgsManager& argsman)
     const auto signetChainParams = CreateChainParams(argsman, ChainType::SIGNET);
     const auto regtestChainParams = CreateChainParams(argsman, ChainType::REGTEST);
 
+    // SYSCOIN: Keep decoded masternode PQ secret inputs out of ordinary help.
     // Hidden Options
     std::vector<std::string> hidden_args = {
-        "-masternodeblsprivkey", "-dbcrashratio", "-forcecompactdb",
+        "-masternodeslhprivkey", "-masternodechainlockseed", "-dbcrashratio",
+        "-forcecompactdb",
         // GUI args. These will be overwritten by SetupUIArgs for the GUI
         "-choosedatadir", "-lang=<lang>", "-min", "-resetguisettings", "-splash", "-uiplatform"};
 
@@ -611,8 +657,8 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-sporkaddr=<hex>", strprintf("Override spork address. Only useful for regtest. Using this on mainnet or testnet will ban you."), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-mnconf=<file>", strprintf("Specify masternode configuration file (default: %s)", "masternode.conf"), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-mnconflock=<n>", strprintf("Lock masternodes from masternode configuration file (default: %u)", 1), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-maxrecsigsage=<n>", strprintf("Number of seconds to keep LLMQ recovery sigs (default: %u)", DEFAULT_MAX_RECOVERED_SIGS_AGE), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-masternodeblsprivkey=<n>", "Set the masternode private key", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::OPTIONS);
+    argsman.AddArg("-masternodeslhprivkey=<hex>", "Set the canonical 64-byte SLH-DSA-SHAKE-128s masternode global secret key", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::OPTIONS);
+    argsman.AddArg("-masternodechainlockseed=<hex>", "Set the independent 32-byte master seed for scheduled-WOTS ChainLock child keys", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::OPTIONS);
     argsman.AddArg("-minsporkkeys=<n>", "Overrides minimum spork signers to change spork value. Only useful for regtest. Using this on mainnet or testnet will ban you.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-assetindex=<n>", strprintf("Wallet is Asset aware, won't spend assets when sending only Syscoin (0-1, default: 0)"), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-dip3params=<n:m>", "DIP3 params used for testing only", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -620,30 +666,59 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-dip19params=<n:m>", "DIP19 params used for testing only", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-nevmstartheight=<n>", "NEVM Start height used for testing only", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-clreceiptstartheight=<n>", "CL receipt start height used for testing only", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-btccstartheight=<n>", "BTCC start height used for testing only", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    // SYSCOIN BEGIN: Regtest PQ deployment arguments.
+    argsman.AddArg("-pqactivationheight=<n>", "First block enforcing PQ-only provider authorization, root-qualified payments, and PQ finality; regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-pqfinalitypreparation", "Run the regtest PQ registry/quorum preparation phase without a finality store, signing, acceptance, or enforcement", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-pqpreparationheight=<n>", "First PQ key-registry transaction height used for regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-pqchainlockepochorigin=<n>", "PQ ChainLock epoch origin used for regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-pqregistrationcutoffblocks=<n>", "PQ child-key registration cutoff lag used for regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-pqrostersnapshotlag=<n>", "PQ deterministic-roster snapshot lag used for regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS); // SYSCOIN: Expose the branch-bound PQ roster lag only to regtest fixtures.
+    argsman.AddArg("-pqfuturehorizonepochs=<n>", "PQ child-key future registration horizon used for regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-pqrecoveryrefresh=<start>:<snapshot-lag>:<entropy-delay>:<carrier-delay>:<carrier-depth>:<snapshot-work>:<carrier-work>:<readiness-window>", "Explicit PoW recovery-refresh test profile; regtest only, disabled by default", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-pqchainlocktestfixture=<path>", "Load a bounded branch-bound quorum snapshot fixture for full-dimension ChainLock functional tests; mine-on-demand regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
+    argsman.AddArg("-pqoperatorcommitmenttestfixture=<genesis>:<chainlockseedhash>:<treeid>:<generation>:<firstepoch>:<root>", "Use an exact precomputed depth-16 operator commitment whose tree ID matches the target operator and schedule; mine-on-demand regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST); // SYSCOIN: Keep low-core lifecycle tests on real signatures without rebuilding 65,536 child keys.
+    argsman.AddArg("-pqoperatorcommitmenttestfixtureverify", "Rebuild and verify the configured PQ operator commitment test fixture", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
+    argsman.AddArg("-pqoperatorcommitmentteststub", "Use recognizable synthetic child roots in mine-on-demand regtest functional tests; root creation remains preparation-only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST); // SYSCOIN: Keep unrelated regtest suites from multiplying the production 65,536-leaf build.
+    argsman.AddArg("-pqbtcccandidateorigin=<n>", "PQ BTCC candidate origin used for regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-pqbtccnevminjectionlag=<n>", "PQ BTCC NEVM injection lag used for regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
+    // SYSCOIN: Regtest-only override for the release-pinned receipt-crypto
+    // assumption. All eight values are required together and never alter the
+    // height-only PQ activation boundary.
+    argsman.AddArg("-pqbtccreceiptanchorheight=<n>", "Historical PQ BTCC receipt assumption carrier height; regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-pqbtccreceiptanchorblockhash=<hex>", "Exact block hash at the PQ BTCC receipt assumption height; regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-pqbtccreceiptanchorcursorheight=<n>", "Last receipted Syscoin cursor height at the PQ BTCC assumption boundary (-1 for none); regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-pqbtccreceiptanchorcursorsyshash=<hex>", "Last receipted Syscoin cursor hash at the PQ BTCC assumption boundary; regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-pqbtccreceiptanchorcursorbtchash=<hex>", "Last receipted Bitcoin hash at the PQ BTCC assumption boundary; regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-pqbtccreceiptanchorstatehash=<hex>", "Cumulative PQ BTCC receipt-state hash at the assumption boundary; regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-pqbtccreceiptanchorlatesttargetheight=<n>", "Newest non-null PQ BTCC receipt target at the assumption boundary (-1 for none); regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-pqbtccreceiptanchorlatestcarrierheight=<n>", "Newest non-null PQ BTCC receipt carrier at the assumption boundary (-1 for none); regtest only", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
+    // SYSCOIN END: Regtest PQ deployment arguments.
+    argsman.AddArg("-btcheadermanaged", strprintf("Start and supervise the pinned local Bitcoin headers-only node (default: %u)", DEFAULT_BTC_HEADER_MANAGED), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-btcheaderbinary=<path>", "Path to managed bitcoind; otherwise search bundled btcheadernode locations", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-btcheaderclibinary=<path>", "Path to managed bitcoin-cli; otherwise use the binary beside bitcoind", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-btcheaderdatadir=<dir>", "Dedicated managed Bitcoin header-node data directory (default: <network datadir>/btcheader)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-btcheaderport=<port>", "Managed Bitcoin header-node P2P port", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-btcheaderrpcport=<port>", "Managed Bitcoin header-node RPC port", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-btcheadercommandline=<arg>", "Additional literal managed bitcoind argv argument (repeatable; lifecycle-critical options are rejected)", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::OPTIONS);
+    argsman.AddArg("-btcheadercmd=<path>", "External bitcoin-cli-compatible executable used only with -btcheadermanaged=0. A shell is never used.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-btcheaderarg=<arg>", "Base argument passed to -btcheadercmd before the fixed RPC method (repeatable; use for network, datadir, RPC endpoint, or authentication settings)", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::OPTIONS);
+    argsman.AddArg("-btcheadercmdtimeout=<n>", strprintf("Per-command Bitcoin header backend timeout in seconds (1-60, default: %d)", llmq::pq::DEFAULT_BTC_HEADER_COMMAND_TIMEOUT), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-btcheaderstartuptimeout=<n>", strprintf("Seconds to wait for managed or external Bitcoin header RPC readiness (1-300, default: %d)", DEFAULT_BTC_HEADER_STARTUP_TIMEOUT), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-btcheaderpolicyondemand", "Enable independent Bitcoin-header mining and sentry signing policy on mine-on-demand networks (default: 0)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-btcheaderwatchdog", strprintf("Monitor and recover the managed Bitcoin header node (default: %u)", DEFAULT_BTC_HEADER_WATCHDOG), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-btcheaderwatchdogprobeinterval=<n>", strprintf("Seconds between backend health probes (default: %d)", DEFAULT_BTC_HEADER_WATCHDOG_PROBE_INTERVAL), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-btcheaderwatchdogrestartcooldown=<n>", strprintf("Minimum seconds between managed restart attempts (default: %d)", DEFAULT_BTC_HEADER_WATCHDOG_RESTART_COOLDOWN), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-btcheaderwatchdogstartupgrace=<n>", strprintf("Seconds to allow a restarted managed child to become RPC-ready before another restart; 0 disables (default: %d)", DEFAULT_BTC_HEADER_WATCHDOG_STARTUP_GRACE), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-btcheaderwatchdogstalltimeout=<n>", strprintf("Seconds without header progress during IBD before restart (default: %d)", DEFAULT_BTC_HEADER_WATCHDOG_STALL_TIMEOUT), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-btcheaderwatchdogreindexafter=<n>", strprintf("Failed managed restarts before one reindex attempt; 0 disables (default: %d)", DEFAULT_BTC_HEADER_WATCHDOG_REINDEX_AFTER), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-btcheaderminconfirmations=<n>", strprintf("Minimum active-chain confirmations for a BTCPREV candidate (minimum 1, default: %d)", llmq::pq::DEFAULT_BTC_HEADER_MIN_CONFIRMATIONS), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-btcheadertipmaxage=<n>", strprintf("Maximum Bitcoin active-tip age in seconds before mining/signing pauses; 0 disables (default: %d)", llmq::pq::DEFAULT_BTC_HEADER_TIP_MAX_AGE), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-btcheadertipmaxnoprogress=<n>", strprintf("Maximum seconds without observed Bitcoin tip-height progress before signing pauses; 0 disables (default: %d)", DEFAULT_BTC_HEADER_TIP_MAX_NO_PROGRESS), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-btcheadermaxlagblocks=<n>", strprintf("Maximum Bitcoin blocks between active tip and BTCPREV candidate; 0 disables (default: %d)", llmq::pq::DEFAULT_BTC_HEADER_MAX_LAG_BLOCKS), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-btcheaderrecentforkdepth=<n>", strprintf("Pause BTCPREV mining/signing while a valid non-active Bitcoin tip is within this depth; 0 disables (default: %d)", llmq::pq::DEFAULT_BTC_HEADER_RECENT_FORK_DEPTH), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-bridgev2startheight=<n>", "Bridge V2 vault-manager cutover height used for testing only", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-btcheadermanaged", strprintf("Automatically start/stop a local Bitcoin headers-only node for BTCC signer policy checks (default: %u)", DEFAULT_BTC_HEADER_MANAGED), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-btcheaderbinary=<path>", "Path to bitcoind binary used when -btcheadermanaged=1. If unset, syscoin searches common install/build locations.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-btcheaderclibinary=<path>", "Path to bitcoin-cli binary used for managed BTC header RPC checks. If unset, syscoin tries the bitcoind directory first.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-btcheaderdatadir=<dir>", "Data directory for managed BTC header node (default: <syscoin datadir>/btcheader).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-btcheaderport=<port>", strprintf("P2P port for managed BTC header node (default: mainnet=%u, testnet=%u, signet=%u, regtest=%u)", DEFAULT_BTC_HEADER_MAINNET_P2P_PORT, DEFAULT_BTC_HEADER_TESTNET_P2P_PORT, DEFAULT_BTC_HEADER_SIGNET_P2P_PORT, DEFAULT_BTC_HEADER_REGTEST_P2P_PORT), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-btcheaderrpcport=<port>", strprintf("RPC port for managed BTC header node (default: mainnet=%u, testnet=%u, signet=%u, regtest=%u)", DEFAULT_BTC_HEADER_MAINNET_RPC_PORT, DEFAULT_BTC_HEADER_TESTNET_RPC_PORT, DEFAULT_BTC_HEADER_SIGNET_RPC_PORT, DEFAULT_BTC_HEADER_REGTEST_RPC_PORT), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-btcheadercommandline=<arg>", "Additional command-line argument passed to managed bitcoind (may be specified multiple times).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-btcheadercmd=<cmd>", "External command used to query BTC header-node JSON-RPC for BTCC signer policy checks. The command must accept an appended method+args and return JSON.", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::OPTIONS);
-    argsman.AddArg("-btcheaderpolicyondemand", strprintf("Enforce BTCC BTC-header signer policy checks even on mine-blocks-on-demand chains (regtest-style, default: %u)", DEFAULT_BTC_HEADER_POLICY_ON_DEMAND), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-btcheaderwatchdog", strprintf("Enable BTCC signer watchdog checks for BTC header backend health (default: %u)", DEFAULT_BTC_HEADER_WATCHDOG), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-btcheaderwatchdogprobeinterval=<n>", strprintf("Seconds between BTCC watchdog backend probes (default: %d)", DEFAULT_BTC_HEADER_WATCHDOG_PROBE_INTERVAL), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-btcheaderwatchdogrestartcooldown=<n>", strprintf("Minimum seconds between managed BTC header watchdog restart attempts (default: %d)", DEFAULT_BTC_HEADER_WATCHDOG_RESTART_COOLDOWN), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-btcheaderwatchdogstalltimeout=<n>", strprintf("Seconds without BTC header height progress (during BTC IBD) before watchdog restart is attempted (default: %d)", DEFAULT_BTC_HEADER_WATCHDOG_STALL_TIMEOUT), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-btcheaderwatchdogreindexafter=<n>", strprintf("After this many consecutive watchdog-managed restart failures, attempt one managed restart with -reindex=1 (0 disables, default: %d)", DEFAULT_BTC_HEADER_WATCHDOG_REINDEX_AFTER), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-btcheadertipmaxage=<n>", strprintf("Maximum allowed BTC header tip age in seconds before BTCC signing pauses (0 disables, default: %d)", DEFAULT_BTC_HEADER_TIP_MAX_AGE), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-btcheadertipmaxnoprogress=<n>", strprintf("Maximum seconds without BTC tip-height progress before BTCC signing pauses (0 disables, default: %d)", DEFAULT_BTC_HEADER_TIP_MAX_NO_PROGRESS), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-btcheadermaxlagblocks=<n>", strprintf("Maximum allowed lag (in BTC blocks) between active tip and candidate BTCPREV before BTCC signing pauses (0 disables, default: %d)", DEFAULT_BTC_HEADER_MAX_LAG_BLOCKS), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-btcheaderrecentforkdepth=<n>", strprintf("Pause BTCC signing when a non-active BTC chain tip exists within this many blocks of the active tip (0 disables, default: %d)", DEFAULT_BTC_HEADER_RECENT_FORK_DEPTH), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-llmqtestparams=<n:m>", "LLMQ params used for testing only", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-mncollateral=<n>", strprintf("Masternode Collateral required, used for testing only (default: %u)", DEFAULT_MN_COLLATERAL_REQUIRED), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-sporkkey=<key>", strprintf("Private key for use with sporks"), ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::OPTIONS);
-    argsman.AddArg("-watchquorums=<n>", strprintf("Watch and validate quorum communication (default: %u)", llmq::DEFAULT_WATCH_QUORUMS), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-pushversion=<n>", "Specify running with a protocol version. Only useful for regtest", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-blockfilterindex=<type>",
                  strprintf("Maintain an index of compact filters by block (default: %s, values: %s).", DEFAULT_BLOCKFILTERINDEX, ListBlockFilterTypes()) +
@@ -887,21 +962,21 @@ void InitParameterInteraction(ArgsManager& args)
             LogPrintf("%s: parameter interaction: -whitebind set -> setting -listen=1\n", __func__);
     }
     // SYSCOIN
-    if (args.GetBoolArg("-masternodeblsprivkey", false)) {
+    if (args.IsArgSet("-masternodeslhprivkey")) {
         // masternodes MUST accept connections from outside
         if(!args.GetBoolArg("-regtest", false)) {
             args.SoftSetBoolArg("-listen", true);
-            LogPrintf("%s: parameter interaction: -masternodeblsprivkey=... -> setting -listen=1\n", __func__);
+            LogPrintf("%s: parameter interaction: -masternodeslhprivkey=... -> setting -listen=1\n", __func__);
         }
         #ifdef ENABLE_WALLET
         // masternode should not have wallet enabled
         args.SoftSetBoolArg("-disablewallet", true);
-        LogPrintf("%s: parameter interaction: -masternodeblsprivkey=... -> setting -disablewallet=1\n", __func__);
+        LogPrintf("%s: parameter interaction: -masternodeslhprivkey=... -> setting -disablewallet=1\n", __func__);
         #endif // ENABLE_WALLET
         if (args.GetIntArg("-maxconnections", DEFAULT_MAX_PEER_CONNECTIONS) < DEFAULT_MAX_PEER_CONNECTIONS) {
             // masternodes MUST be able to handle at least DEFAULT_MAX_PEER_CONNECTIONS connections
             args.SoftSetArg("-maxconnections", ToString(DEFAULT_MAX_PEER_CONNECTIONS));
-            LogPrintf("%s: parameter interaction: -masternodeblsprivkey=... -> setting -maxconnections=%d\n", __func__, DEFAULT_MAX_PEER_CONNECTIONS);
+            LogPrintf("%s: parameter interaction: -masternodeslhprivkey=... -> setting -maxconnections=%d\n", __func__, DEFAULT_MAX_PEER_CONNECTIONS);
         }
     }
     if (args.IsArgSet("-connect") || args.GetIntArg("-maxconnections", DEFAULT_MAX_PEER_CONNECTIONS) <= 0) {
@@ -990,6 +1065,23 @@ void InitLogging(const ArgsManager& args)
 }
 
 namespace { // Variables internal to initialization process only
+
+// SYSCOIN: Wipe temporary decoded PQ key material on every return path.
+class SensitiveBytesGuard final {
+public:
+    SensitiveBytesGuard(void* data, std::size_t size) noexcept
+        : m_data{data}, m_size{size}
+    {
+    }
+    ~SensitiveBytesGuard() { memory_cleanse(m_data, m_size); }
+
+    SensitiveBytesGuard(const SensitiveBytesGuard&) = delete;
+    SensitiveBytesGuard& operator=(const SensitiveBytesGuard&) = delete;
+
+private:
+    void* m_data;
+    std::size_t m_size;
+};
 
 int nMaxConnections;
 int nUserMaxConnections;
@@ -1082,6 +1174,32 @@ bool AppInitParameterInteraction(const ArgsManager& args)
     if (!warnings.empty()) {
         InitWarning(warnings);
     }
+
+    // SYSCOIN: begin Bitcoin-header backend parameter validation.
+    const bool managed_btc_headers{
+        args.GetBoolArg("-btcheadermanaged", DEFAULT_BTC_HEADER_MANAGED)};
+    if (managed_btc_headers &&
+        (args.IsArgSet("-btcheadercmd") || args.IsArgSet("-btcheaderarg"))) {
+        return InitError(Untranslated(
+            "-btcheadercmd/-btcheaderarg select an external Bitcoin header "
+            "backend; also set -btcheadermanaged=0"));
+    }
+    if (!managed_btc_headers && args.IsArgSet("-btcheaderarg") &&
+        !args.IsArgSet("-btcheadercmd")) {
+        return InitError(Untranslated(
+            "-btcheaderarg requires -btcheadercmd=<executable path>"));
+    }
+    if (args.IsArgSet("-btcheadercmd") &&
+        args.GetArg("-btcheadercmd", "").empty()) {
+        return InitError(Untranslated("-btcheadercmd must not be empty"));
+    }
+    if (!managed_btc_headers && args.IsArgSet("-btcheadercmd") &&
+        !llmq::pq::BTCHeaderCommandSupportAvailable()) {
+        return InitError(Untranslated(
+            "This binary was built without Boost.Process support required "
+            "by -btcheadercmd; rebuild with --with-boost-process=yes"));
+    }
+    // SYSCOIN: end Bitcoin-header backend parameter validation.
 
     if (!fs::is_directory(args.GetBlocksDirPath())) {
         return InitError(strprintf(_("Specified blocks directory \"%s\" does not exist."), args.GetArg("-blocksdir", "")));
@@ -1193,21 +1311,6 @@ bool AppInitParameterInteraction(const ArgsManager& args)
 
     if (!g_wallet_init_interface.ParameterInteraction()) return false;
 
-    // SYSCOIN
-    if (args.GetChainType() == ChainType::REGTEST) {
-        if (args.IsArgSet("-llmqtestparams")) {
-            std::string s = args.GetArg("-llmqtestparams", "");
-            std::vector<std::string> v = SplitString(s, ':');
-            int size, threshold;
-            if (v.size() != 2 || !ParseInt32(v[0], &size) || !ParseInt32(v[1], &threshold) ||
-                size <= 0 || size > Consensus::MAX_LLMQ_SIZE || threshold <= 0 || threshold > size) {
-                return InitError(Untranslated("Invalid -llmqtestparams specified"));
-            }
-            UpdateLLMQTestParams(size, threshold);
-        }
-    } else if (args.IsArgSet("-llmqtestparams")) {
-        return InitError(Untranslated("LLMQ test params can only be overridden on regtest."));
-    }
     // Option to startup with mocktime set (used for regression testing):
     SetMockTime(args.GetIntArg("-mocktime", 0)); // SetMockTime(0) is a no-op
 
@@ -1224,7 +1327,15 @@ bool AppInitParameterInteraction(const ArgsManager& args)
         return InitError(Untranslated("-rpcserialversion=0 is deprecated and will be removed in the future. Specify -deprecatedrpc=serialversion to allow anyway."));
     }
 
-    if (args.IsArgSet("-masternodeblsprivkey")) {
+    // SYSCOIN: Global identity and ChainLock child keys are independent.
+    if (args.IsArgSet("-masternodechainlockseed") !=
+        args.IsArgSet("-masternodeslhprivkey")) {
+        return InitError(Untranslated(
+            "Masternodes require both -masternodeslhprivkey and "
+            "-masternodechainlockseed; the independent ChainLock seed must not be "
+            "derived from the global SLH-DSA key"));
+    }
+    if (args.IsArgSet("-masternodeslhprivkey")) {
         if (!args.GetBoolArg("-listen", DEFAULT_LISTEN) && Params().RequireRoutableExternalIP()) {
             return InitError(Untranslated("Masternode must accept connections from outside, set -listen=1"));
         }
@@ -1317,7 +1428,136 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 {
     const ArgsManager& args = *Assert(node.args);
     const CChainParams& chainparams = Params();
-    // SYSCOIN
+    // SYSCOIN BEGIN: Public PQ deployment-profile validation.
+    // Public chains remain explicitly pre-activation until a release
+    // assigns the complete height-based profile. Regtest additionally has an
+    // explicit registry preparation state with finality disabled.
+    const auto& consensus{chainparams.GetConsensus()};
+    static constexpr std::array<const char*, 18> REGTEST_PQ_DEPLOYMENT_ARGS{
+        "-pqrecoveryrefresh",
+        "-pqactivationheight",
+        "-pqfinalitypreparation",
+        "-pqpreparationheight", "-pqchainlockepochorigin",
+        "-pqregistrationcutoffblocks", "-pqrostersnapshotlag",
+        "-pqfuturehorizonepochs", "-pqbtcccandidateorigin",
+        "-pqbtccnevminjectionlag", "-pqbtccreceiptanchorheight",
+        "-pqbtccreceiptanchorblockhash",
+        "-pqbtccreceiptanchorcursorheight",
+        "-pqbtccreceiptanchorcursorsyshash",
+        "-pqbtccreceiptanchorcursorbtchash",
+        "-pqbtccreceiptanchorstatehash",
+        "-pqbtccreceiptanchorlatesttargetheight",
+        "-pqbtccreceiptanchorlatestcarrierheight",
+    };
+    static constexpr std::array<const char*, 12> REGTEST_PQ_FINALITY_ARGS{
+        "-pqrecoveryrefresh",
+        "-pqactivationheight", "-pqbtcccandidateorigin",
+        "-pqbtccnevminjectionlag",
+        "-pqbtccreceiptanchorheight", "-pqbtccreceiptanchorblockhash",
+        "-pqbtccreceiptanchorcursorheight",
+        "-pqbtccreceiptanchorcursorsyshash",
+        "-pqbtccreceiptanchorcursorbtchash",
+        "-pqbtccreceiptanchorstatehash",
+        "-pqbtccreceiptanchorlatesttargetheight",
+        "-pqbtccreceiptanchorlatestcarrierheight",
+    };
+    const bool regtest_pq_arg_supplied{
+        chainparams.GetChainType() == ChainType::REGTEST &&
+        std::any_of(REGTEST_PQ_DEPLOYMENT_ARGS.begin(),
+                    REGTEST_PQ_DEPLOYMENT_ARGS.end(),
+                    [&](const char* name) { return args.IsArgSet(name); })};
+    const bool preparation_requested{
+        chainparams.GetChainType() == ChainType::REGTEST &&
+        args.GetBoolArg("-pqfinalitypreparation", false)};
+    const bool operator_commitment_test_stub{
+        args.GetBoolArg("-pqoperatorcommitmentteststub", false)};
+    if (operator_commitment_test_stub &&
+        (chainparams.GetChainType() != ChainType::REGTEST ||
+         !chainparams.MineBlocksOnDemand() ||
+         args.IsArgSet("-pqoperatorcommitmenttestfixture") ||
+         args.GetBoolArg("-pqoperatorcommitmenttestfixtureverify", false))) {
+        return InitError(Untranslated(
+            "-pqoperatorcommitmentteststub requires mine-on-demand regtest "
+            "and cannot be combined with an exact "
+            "operator commitment fixture"));
+    }
+    const bool finality_arg_supplied{std::any_of(
+        REGTEST_PQ_FINALITY_ARGS.begin(), REGTEST_PQ_FINALITY_ARGS.end(),
+        [&](const char* name) { return args.IsArgSet(name); })};
+    const bool public_profile_unassigned{
+        chainparams.GetChainType() != ChainType::REGTEST &&
+        consensus.nPQActivationHeight == std::numeric_limits<int>::max() &&
+        consensus.nPQPreparationHeight == std::numeric_limits<int>::max() &&
+        consensus.nPQChainLockEpochOrigin == std::numeric_limits<int>::max() &&
+        consensus.nPQRegistrationCutoffBlocks == 0 &&
+        consensus.nPQFutureHorizonEpochs == 0 &&
+        consensus.nPQBTCCCandidateOrigin == std::numeric_limits<int>::max() &&
+        consensus.nPQBTCCReceiptAnchorHeight ==
+            std::numeric_limits<int>::max() &&
+        consensus.hashPQBTCCReceiptAnchorBlock.IsNull() &&
+        consensus.nPQBTCCReceiptAnchorCursorHeight == -1 &&
+        consensus.hashPQBTCCReceiptAnchorCursorSysBlock.IsNull() &&
+        consensus.hashPQBTCCReceiptAnchorCursorBTCBlock.IsNull() &&
+        consensus.hashPQBTCCReceiptAnchorState.IsNull() &&
+        consensus.nPQBTCCReceiptAnchorLatestTargetHeight == -1 &&
+        consensus.nPQBTCCReceiptAnchorLatestCarrierHeight == -1};
+    const bool complete_pq_profile{
+        llmq::MakePQChainLockFinalityStoreConfig(consensus).has_value() &&
+        llmq::MakePQQuorumBuildConfig(consensus).has_value()};
+    // SYSCOIN BEGIN: Historical replay cannot obtain exact live governance
+    // authority while quarantined, so a superblock at A cannot establish the
+    // strong provenance required to leave quarantine.
+    if (complete_pq_profile &&
+        !Consensus::IsPQActivationHeightCompatibleWithSuperblocks(consensus)) {
+        return InitError(Untranslated(
+            "PQ activation height must not be a superblock height"));
+    }
+    // SYSCOIN END: Reject a circular PQ activation profile at startup.
+    const bool preparation_profile{
+        preparation_requested && !finality_arg_supplied &&
+        Consensus::CheckPQActivationConfiguration(consensus) ==
+            Consensus::PQActivationResult::DISABLED &&
+        consensus.nPQBTCCCandidateOrigin == std::numeric_limits<int>::max() &&
+        consensus.nPQBTCCReceiptAnchorHeight ==
+            std::numeric_limits<int>::max() &&
+        consensus.hashPQBTCCReceiptAnchorBlock.IsNull() &&
+        consensus.nPQBTCCReceiptAnchorCursorHeight == -1 &&
+        consensus.hashPQBTCCReceiptAnchorCursorSysBlock.IsNull() &&
+        consensus.hashPQBTCCReceiptAnchorCursorBTCBlock.IsNull() &&
+        consensus.hashPQBTCCReceiptAnchorState.IsNull() &&
+        consensus.nPQBTCCReceiptAnchorLatestTargetHeight == -1 &&
+        consensus.nPQBTCCReceiptAnchorLatestCarrierHeight == -1 &&
+        llmq::MakePQQuorumBuildConfig(consensus).has_value() &&
+        !llmq::MakePQChainLockFinalityStoreConfig(consensus).has_value()};
+    if (operator_commitment_test_stub &&
+        !preparation_profile && !complete_pq_profile) {
+        return InitError(Untranslated(
+            "-pqoperatorcommitmentteststub requires a complete preparation "
+            "or activation profile"));
+    }
+    if ((preparation_requested && !preparation_profile) ||
+        (regtest_pq_arg_supplied && !preparation_requested &&
+         !complete_pq_profile) ||
+        (chainparams.GetChainType() != ChainType::REGTEST &&
+         !public_profile_unassigned && !complete_pq_profile)) {
+        return InitError(_(
+            "This BLS-free build has an incomplete PQ deployment: the "
+            "activation height, BTCC receipt assumption anchor, schedules, "
+            "and roster parameters must be assigned "
+            "consistently. Regtest preparation requires "
+            "-pqfinalitypreparation with all finality fields unassigned."));
+    }
+    if (preparation_profile) {
+        LogPrintf("PQ registry/quorum preparation is active on regtest; no "
+                  "PQ finality service will start\n");
+    }
+    if (public_profile_unassigned) {
+        InitWarning(_(
+            "PQ ChainLock/BTCC deployment is release-disabled on this "
+            "network. Legacy history uses compatibility replay and no "
+            "ChainLock finality service will start."));
+    }
+    // SYSCOIN END: Public PQ deployment-profile validation.
     fRegTest = args.GetBoolArg("-regtest", false);
     fSigNet = args.GetBoolArg("-signet", false);
     fTestNet = args.GetBoolArg("-testnet", false);
@@ -1374,28 +1614,79 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     }
 
     // SYSCOIN
-    assert(activeMasternodeInfo.blsKeyOperator == nullptr);
-    assert(activeMasternodeInfo.blsPubKeyOperator == nullptr);
-    fMasternodeMode = false;
-    std::string strMasterNodeBLSPrivKey = args.GetArg("-masternodeblsprivkey", "");
-    if (!strMasterNodeBLSPrivKey.empty()) {
-        CBLSSecretKey keyOperator(ParseHex(strMasterNodeBLSPrivKey));
-        if (!keyOperator.IsValid()) {
-            return InitError(_("Invalid masternodeblsprivkey. Please see documentation."));
+    {
+        LOCK(activeMasternodeInfoCs);
+        assert(activeMasternodeInfo.operatorKeyManager == nullptr);
+        assert(activeMasternodeInfo.childKeyCache == nullptr);
+        fMasternodeMode = false;
+    }
+    std::string encoded_operator_key =
+        args.GetArg("-masternodeslhprivkey", "");
+    std::string encoded_chainlock_seed =
+        args.GetArg("-masternodechainlockseed", "");
+    SensitiveBytesGuard encoded_operator_key_guard{
+        encoded_operator_key.data(), encoded_operator_key.size()};
+    SensitiveBytesGuard encoded_chainlock_seed_guard{
+        encoded_chainlock_seed.data(), encoded_chainlock_seed.size()};
+    if (args.IsArgSet("-masternodeslhprivkey") &&
+        encoded_operator_key.empty()) {
+        return InitError(_("Invalid masternodeslhprivkey: key is empty."));
+    }
+    if (!encoded_operator_key.empty()) {
+        auto chainlock_seed_bytes =
+            TryParseHex<uint8_t>(encoded_chainlock_seed);
+        if (!chainlock_seed_bytes ||
+            chainlock_seed_bytes->size() !=
+                llmq::pq::ChainLockMasterSeed{}.size() ||
+            std::all_of(chainlock_seed_bytes->begin(),
+                        chainlock_seed_bytes->end(),
+                        [](uint8_t byte) { return byte == 0; })) {
+            if (chainlock_seed_bytes) {
+                memory_cleanse(chainlock_seed_bytes->data(),
+                               chainlock_seed_bytes->size());
+            }
+            return InitError(_(
+                "Invalid masternodechainlockseed: expected a nonzero 32-byte "
+                "independent ChainLock master seed."));
         }
-        fMasternodeMode = true;
+        llmq::pq::ChainLockMasterSeed chainlock_seed{};
+        SensitiveBytesGuard chainlock_seed_guard{chainlock_seed.data(),
+                                                 chainlock_seed.size()};
+        std::copy(chainlock_seed_bytes->begin(), chainlock_seed_bytes->end(),
+                  chainlock_seed.begin());
+        memory_cleanse(chainlock_seed_bytes->data(),
+                       chainlock_seed_bytes->size());
+
+        auto key_bytes = TryParseHex<uint8_t>(encoded_operator_key);
+        if (!key_bytes || key_bytes->size() != slhdsa::SECRET_KEY_SIZE) {
+            if (key_bytes) {
+                memory_cleanse(key_bytes->data(), key_bytes->size());
+            }
+            return InitError(_("Invalid masternodeslhprivkey: expected a canonical 64-byte SLH-DSA secret key."));
+        }
+        auto secret_key = slhdsa::ImportSecretKey(*key_bytes);
+        memory_cleanse(key_bytes->data(), key_bytes->size());
+        if (!secret_key) {
+            return InitError(_("Invalid masternodeslhprivkey: public root validation failed."));
+        }
+
+        auto key_manager =
+            std::make_shared<llmq::pq::LocalOperatorKeyManager>(
+                std::move(*secret_key), std::move(chainlock_seed));
+        if (!key_manager->IsValid()) {
+            return InitError(_("Invalid masternodeslhprivkey."));
+        }
+        const llmq::pq::GlobalPublicKey public_key =
+            key_manager->GetGlobalPublicKey();
         {
             LOCK(activeMasternodeInfoCs);
-            activeMasternodeInfo.blsKeyOperator = std::make_unique<CBLSSecretKey>(keyOperator);
-            activeMasternodeInfo.blsPubKeyOperator = std::make_unique<CBLSPublicKey>(keyOperator.GetPublicKey());
+            activeMasternodeInfo.operatorKeyManager = std::move(key_manager);
+            ++activeMasternodeInfo.identityGeneration;
+            fMasternodeMode = true;
         }
-        LogPrintf("MASTERNODE:\n  blsPubKeyOperator: %s\n", activeMasternodeInfo.blsPubKeyOperator->ToString());
-    } else {
-        LOCK(activeMasternodeInfoCs);
-        activeMasternodeInfo.blsKeyOperator = std::make_unique<CBLSSecretKey>();
-        activeMasternodeInfo.blsPubKeyOperator = std::make_unique<CBLSPublicKey>();
+        LogPrintf("MASTERNODE:\n  globalSLHDSAPublicKey: %s\n",
+                  HexStr(public_key));
     }
-
 
     assert(!node.scheduler);
     node.scheduler = std::make_unique<CScheduler>();
@@ -1694,11 +1985,13 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             return chainman->m_blockman.ReadBlockFromDisk(block, index);
         });
 
+    // SYSCOIN BEGIN: Require the configured NEVM notification interface.
     if(fNEVMConnection) {
         if(!g_zmq_notification_interface) {
             return InitError(Untranslated("Could not establish ZMQ interface connections, check your ZMQ settings and try again..."));
         }
     }
+    // SYSCOIN END: Require the configured NEVM notification interface.
     if (g_zmq_notification_interface) {
         RegisterValidationInterface(g_zmq_notification_interface.get());
     }
@@ -1841,17 +2134,10 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                 LogPrintfCategory(BCLog::PRUNE, "pruned datadir may not have more than %d blocks; only checking available blocks\n",
                                   MIN_BLOCKS_TO_KEEP);
             }
-            int nHeight = WITH_LOCK(chainman.GetMutex(), return chainman.ActiveHeight());
-            if (llmq::CLLMQUtils::IsV19Active(nHeight)) {
-                bls::bls_legacy_scheme.store(false);
-                LogPrintf("BLS scheme - Basic\n");
-            } else {
-                LogPrintf("BLS scheme - Legacy\n");
-            }
             std::tie(status, error) = catch_exceptions([&]{ return VerifyLoadedChainstate(chainman, options);});
             if (status == node::ChainstateLoadStatus::SUCCESS) {
-                // SYSCOIN: ensure recent sign-offset BTCPREV commitments are available in the block index
-                // before we start processing new blocks (prevents false bad-btcc-btcp after crash/upgrade).
+                // SYSCOIN: populate recent PQ candidate commitments before live
+                // ChainLock selection and deterministic NEVM forwarding begin.
                 chainman.BackfillRecentBTCPREVCommitments();
                 fLoaded = true;
                 LogPrintf(" block index %15dms\n", Ticks<std::chrono::milliseconds>(SteadyClock::now() - load_block_index_start_time));
@@ -1870,6 +2156,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                     "", CClientUIInterface::MSG_ERROR | CClientUIInterface::BTN_ABORT);
                 if (fRet) {
                     fReindex = true;
+                    // SYSCOIN: Rebuild Geth together with the requested Syscoin reindex.
                     fReindexGeth = true;
                     AbortShutdown();
                 } else {
@@ -1900,20 +2187,62 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     }
 
     fRPCSerialVersion = gArgs.GetIntArg("-rpcserialversion", DEFAULT_RPC_SERIALIZE_VERSION);
-    const bool enforce_btcheader_policy_ondemand = gArgs.GetBoolArg("-btcheaderpolicyondemand", DEFAULT_BTC_HEADER_POLICY_ON_DEMAND);
-    const bool nevm_miner_addr_configured = HasNEVMMinerFeeRecipientConfig(args);
-    const bool hrp_forces_nevm_off = args.IsArgSet("-hrp");
-    const bool btcheader_policy_active_chain = !Params().MineBlocksOnDemand() || enforce_btcheader_policy_ondemand;
-    const bool btcc_deployment_configured = IsBTCCDeploymentConfigured(Params().GetConsensus());
-    bool btc_header_policy_ready{true};
+    // SYSCOIN: the managed headers-only Bitcoin view is required only by
+    // roles that can author a BTCPREV or vote for a PQ BTCC ADVANCE. Ordinary
+    // full nodes and historical replay never acquire this external dependency.
+    const bool enforce_btcheader_policy_ondemand{
+        args.GetBoolArg("-btcheaderpolicyondemand",
+                        DEFAULT_BTC_HEADER_POLICY_ON_DEMAND)};
+    const bool btcheader_policy_active_chain{
+        !Params().MineBlocksOnDemand() || enforce_btcheader_policy_ondemand};
+    const bool btcc_deployment_configured{
+        llmq::MakePQChainLockFinalityStoreConfig(
+            Params().GetConsensus()).has_value()};
+    const bool nevm_miner_addr_configured{
+        HasNEVMMinerFeeRecipientConfig(args)};
+    const bool hrp_forces_nevm_off{args.IsArgSet("-hrp")};
     bool btcheader_backend_initialized{false};
-    const bool init_btcheader_backend_early =
-        btcc_deployment_configured && fMasternodeMode && btcheader_policy_active_chain;
-    if (init_btcheader_backend_early) {
+
+    const auto start_required_btcheader_backend = [&]() -> bool {
+        if (btcheader_backend_initialized) return true;
         btcheader_backend_initialized = true;
         if (!node.chainman->ActiveChainstate().DoBTCHeaderStartupProcedure()) {
-            btc_header_policy_ready = false;
-            LogPrintf("Failed to initialize BTC header policy backend; startup will abort before node enters steady state\n");
+            return false;
+        }
+        std::string error;
+        if (!WaitForBTCHeaderBackend(args, error)) {
+            LogPrintf("Bitcoin header policy backend did not become ready: %s\n",
+                      error);
+            if (args.GetBoolArg("-btcheadermanaged",
+                                DEFAULT_BTC_HEADER_MANAGED)) {
+                node.chainman->ActiveChainstate().StopBTCHeaderNode(
+                    /*bOnStart=*/true);
+            }
+            return false;
+        }
+        return true;
+    };
+
+    // SYSCOIN: A sentry can sign before the local NEVM child attaches, so establish its
+    // independent Bitcoin view first. Initial misconfiguration is fatal; a
+    // later outage is handled fail-closed by ADVANCE policy while KEEP stays
+    // available to the ChainLock signer.
+    const bool require_btcheader_backend_early{
+        btcc_deployment_configured && fMasternodeMode &&
+        btcheader_policy_active_chain};
+    if (require_btcheader_backend_early &&
+        !start_required_btcheader_backend()) {
+        return InitError(Untranslated(
+            "Failed to initialize the Bitcoin header policy backend. Ensure "
+            "the pinned managed btcheadernode binaries are installed, or set "
+            "-btcheadermanaged=0 with a valid -btcheadercmd executable and "
+            "literal -btcheaderarg values."));
+    }
+    {
+        LOCK(cs_main);
+        std::string error;
+        if (!chainman.InitializeNEVMPayloadRepair(error)) {
+            return InitError(Untranslated("Cannot restore NEVM payload repair: " + error));
         }
     }
     if(fNEVMConnection && !fRegTest) {
@@ -1923,19 +2252,16 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         }
     }
     LogPrintf("NEVM connection %d\n", fNEVMConnection? 1: 0);
-    const bool require_btcheader_backend_post_nevm =
-        btcc_deployment_configured &&
-        (fMasternodeMode || ((fNEVMConnection && !hrp_forces_nevm_off) && nevm_miner_addr_configured)) &&
-        btcheader_policy_active_chain;
-    if (require_btcheader_backend_post_nevm && !btcheader_backend_initialized) {
-        btcheader_backend_initialized = true;
-        if (!node.chainman->ActiveChainstate().DoBTCHeaderStartupProcedure()) {
-            btc_header_policy_ready = false;
-            LogPrintf("Failed to initialize BTC header policy backend after NEVM startup; startup will abort before node enters steady state\n");
-        }
-    }
-    if (require_btcheader_backend_post_nevm && !btc_header_policy_ready) {
-        return InitError(Untranslated("Failed to initialize BTC header policy backend. Ensure managed btcheadernode binaries are available (configure with --enable-btcheadernode-build) or set -btcheadermanaged=0 with a valid -btcheadercmd. This backend is required for BTCC policy."));
+    const bool require_btcheader_backend_post_nevm{
+        btcc_deployment_configured && btcheader_policy_active_chain &&
+        (fMasternodeMode ||
+         (fNEVMConnection && !hrp_forces_nevm_off &&
+          nevm_miner_addr_configured))};
+    if (require_btcheader_backend_post_nevm &&
+        !start_required_btcheader_backend()) {
+        return InitError(Untranslated(
+            "Failed to initialize the Bitcoin header policy backend required "
+            "for BTCPREV mining/BTCC signing."));
     }
     if(args.IsArgSet("-hrp"))
         fNEVMConnection = false;
@@ -1950,11 +2276,14 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             std::chrono::seconds{geth_bootstrap_startup_timeout}};
         auto next_wait_log = wait_start;
         uint64_t nHeightFromGeth{0};
+        // SYSCOIN: The status protocol also authenticates Geth's paired branch.
+        uint256 lastSYSBlockHashFromGeth;
         std::string stateStr;
         bool geth_ready{false};
         while (!ShutdownRequested()) {
             stateStr.clear();
-            GetMainSignals().NotifyGetNEVMBlockInfo(nHeightFromGeth, stateStr);
+            GetMainSignals().NotifyGetNEVMBlockInfo(
+                nHeightFromGeth, lastSYSBlockHashFromGeth, stateStr);
             if (stateStr.empty()) {
                 geth_ready = true;
                 break;
@@ -1999,13 +2328,40 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             }
         }
         if(geth_ready) {
+            // SYSCOIN: Resolve a durable external attempt before the ordinary
+            // ahead-pair classifier rejects a retired child. Refresh this
+            // tuple for all subsequent startup decisions after compensation.
+            std::string pending_connect_error;
+            if (!chainman.RecoverNEVMPendingConnect(
+                    nHeightFromGeth, lastSYSBlockHashFromGeth, pending_connect_error)) {
+                node.chainman->ActiveChainstate().StopGethNode(true);
+                return InitError(Untranslated("Cannot recover NEVM pending connection: " + pending_connect_error));
+            }
             int64_t nHeightLocalGeth;
+            bool geth_syscoin_pair_accepted{false};
+            std::string geth_pair_error;
             {
                 LOCK(cs_main);
                 nHeightLocalGeth = (chainman.ActiveChain().Height() - Params().GetConsensus().nNEVMStartBlock) + 1;
                 if(nHeightLocalGeth < 0) {
                     nHeightLocalGeth = 0;
                 }
+                // SYSCOIN: Geth can retain a newer pair than the last Core
+                // coins flush. Reconcile that exact prefix before readiness.
+                geth_syscoin_pair_accepted = chainman.InitializeNEVMStartupPair(
+                    nHeightFromGeth, lastSYSBlockHashFromGeth, geth_pair_error);
+            }
+            if (!geth_syscoin_pair_accepted) {
+                node.chainman->ActiveChainstate().StopGethNode(true);
+                fNEVMConnection = false;
+                return InitError(Untranslated(strprintf(
+                    "Cannot reconcile Geth's applied Syscoin pair: %s. "
+                    "Preserve both databases and repair their branch alignment.",
+                    geth_pair_error)));
+            }
+            if (!chainman.DiscoverNEVMPayloadRepair(
+                    nHeightFromGeth, lastSYSBlockHashFromGeth, geth_pair_error)) {
+                return InitError(Untranslated("Cannot recover NEVM payload: " + geth_pair_error));
             }
             LogPrintf("Geth nHeightFromGeth %d nHeightLocalGeth %d\n", nHeightFromGeth, nHeightLocalGeth);
             {
@@ -2026,34 +2382,25 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                     LogPrintf("Skipping external NEVM notify calls through bootstrap base height %u\n", bypass_height);
                 }
             }
+            // SYSCOIN: A durable BTCC pre-seal means Syscoin intentionally
+            // validated farther than Geth while historical receipt finality
+            // was unavailable. Preserve both databases in place; the PQ
+            // handler replays the exact authenticated prefix after catch-up.
+            const bool preseal_replay_active{
+                llmq::chainLocksHandler != nullptr &&
+                llmq::chainLocksHandler->HasNEVMReplayObligation()};
+            if (chainman.HasPendingNEVMPayloadRepair()) {
+                LogPrintf("Preserving Core's chain while a rejected NEVM payload awaits repair\n");
+            } else if (preseal_replay_active) {
+                LogPrintf("Geth is intentionally behind while the durable "
+                          "BTCC pre-seal awaits authenticated replay\n");
             // local height is higher so we need to rollback to geth height
-            if(nHeightFromGeth > 0) {
+            } else if(nHeightFromGeth > 0) {
                 if((int64_t)nHeightFromGeth < nHeightLocalGeth) {
                     const int64_t geth_lag_blocks = nHeightLocalGeth - (int64_t)nHeightFromGeth;
-                    const int64_t geth_reindex_lag_threshold = CDeterministicMNManager::LIST_CACHE_SIZE;
-                    if (geth_lag_blocks > geth_reindex_lag_threshold) {
-                        bool wrote_reindex_flag{false};
-                        {
-                            LOCK(cs_main);
-                            if (chainman.m_blockman.m_block_tree_db) {
-                                wrote_reindex_flag = chainman.m_blockman.m_block_tree_db->WriteReindexing(true);
-                            }
-                        }
-                        if (wrote_reindex_flag) {
-                            LogPrintf("Persisted reindex marker due to deep geth lag; next restart will reindex automatically.\n");
-                        } else {
-                            LogPrintf("Failed to persist reindex marker due to deep geth lag; restart with -reindex manually.\n");
-                        }
-                        const std::string err = strprintf(
-                            "Geth lag (%d blocks) exceeds deterministic masternode cache horizon (%d). Refusing automatic rollback to avoid deep reorg validation failures. %s",
-                            geth_lag_blocks, geth_reindex_lag_threshold,
-                            wrote_reindex_flag
-                                ? "Reindex marker persisted; restart to continue with automatic reindex (state bootstrap if configured)."
-                                : "Restart with -reindex (and state bootstrap if configured).");
-                        LogPrintf("%s\n", err);
-                        return InitError(Untranslated(err));
-                    }
-                    LogPrintf("Geth nHeightFromGeth %d vs nHeightLocalGeth %d, rolling back...\n",nHeightFromGeth, nHeightLocalGeth);
+                    LogPrintf("Geth nHeightFromGeth %d vs nHeightLocalGeth %d, rolling back %d blocks using the durable deterministic-MN inverse journal...\n",
+                              nHeightFromGeth, nHeightLocalGeth,
+                              geth_lag_blocks);
                     nHeightFromGeth += Params().GetConsensus().nNEVMStartBlock;
                     BlockValidationState rollback_state;
                     CBlockIndex *pblockindex;
@@ -2061,12 +2408,70 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                         LOCK(cs_main);
                         pblockindex = chainman.ActiveChain()[(int)nHeightFromGeth];
                     }
-                    chainman.ActiveChainstate().InvalidateBlock(rollback_state, pblockindex, false);
-                    if (rollback_state.IsValid()) {
+                    if (pblockindex == nullptr) {
+                        return InitError(Untranslated(strprintf(
+                            "Geth rollback target height %d is not in the "
+                            "active chain. Restart with -reindex.",
+                            nHeightFromGeth)));
+                    }
+                    // SYSCOIN BEGIN: Durable finality floor for Geth recovery.
+                    // Resolve the floor before beginning recovery so the
+                    // operator gets a precise Geth-specific error. The
+                    // administrative invalidation repeats this check while
+                    // holding the active-chain transition lock.
+                    const CBlockIndex* durable_finality_floor{nullptr};
+                    const CBlockIndex* durable_finality_target{nullptr};
+                    std::string finality_floor_error;
+                    bool finality_floor_available{true};
+                    {
+                        LOCK(cs_main);
+                        finality_floor_available =
+                            llmq::chainLocksHandler == nullptr ||
+                            llmq::chainLocksHandler
+                                ->GetDurableFinalityRecoveryFloor(
+                                    durable_finality_floor,
+                                    durable_finality_target,
+                                    finality_floor_error);
+                    }
+                    if (!finality_floor_available) {
+                        node.chainman->ActiveChainstate().StopGethNode(true);
+                        return InitError(Untranslated(strprintf(
+                            "Cannot establish the durable finality recovery "
+                            "floor before Geth alignment: %s. Preserve Core "
+                            "state and repair or reindex explicitly.",
+                            finality_floor_error)));
+                    }
+                    if (durable_finality_floor != nullptr &&
+                        pblockindex->nHeight <=
+                            durable_finality_floor->nHeight) {
+                        node.chainman->ActiveChainstate().StopGethNode(true);
+                        return InitError(Untranslated(strprintf(
+                            "Geth recovery would roll Core back through "
+                            "finalized height %d. Preserve the finalized Core "
+                            "chain and rebuild or bootstrap Geth state instead.",
+                            durable_finality_floor->nHeight)));
+                    }
+                    // SYSCOIN END: Durable finality floor for Geth recovery.
+                    // Core is ahead of Geth here, so align Core without
+                    // emitting nevmdisconnect notifications for blocks Geth
+                    // has never applied. All local special-tx state still
+                    // follows the rollback.
+                    const bool rollback_succeeded{
+                        chainman.ActiveChainstate().InvalidateBlock(
+                            rollback_state, pblockindex,
+                            /*bReverify=*/false,
+                            /*bUpdateSpecialTxState=*/true)};
+                    if (rollback_succeeded && rollback_state.IsValid()) {
                         LOCK(cs_main);
                         chainman.ActiveChainstate().ResetBlockFailureFlags(pblockindex);
                     } else {
-                        LogPrintf("InvalidateBlock failed %s...\n", rollback_state.ToString());
+                        const std::string error{strprintf(
+                            "Geth rollback failed because Core rollback "
+                            "data/state is unavailable: %s. Restart with "
+                            "-reindex or redownload as appropriate.",
+                            rollback_state.ToString())};
+                        LogPrintf("%s\n", error);
+                        return InitError(Untranslated(error));
                     }
                 } else if((int64_t)nHeightFromGeth > nHeightLocalGeth) {
                     LogPrintf("Geth nHeightFromGeth %d vs nHeightLocalGeth %d, catching up...\n",nHeightFromGeth, nHeightLocalGeth);
@@ -2075,6 +2480,17 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                 fNEVMConnection = false;
                 LogPrintf("nHeightFromGeth == 0 and nHeightLocalGeth > 0, setting fNEVMConnection to false...\n");
             }
+        }
+    }
+
+    // SYSCOIN: Regtest uses an already-running execution endpoint instead of
+    // managed attachment, but must resolve the same record before import ABC.
+    if (fNEVMConnection && fRegTest) {
+        uint64_t count{0};
+        uint256 hash;
+        std::string error;
+        if (!chainman.RecoverNEVMPendingConnect(count, hash, error)) {
+            return InitError(Untranslated("Cannot recover NEVM pending connection: " + error));
         }
     }
 
@@ -2191,6 +2607,21 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             StartShutdown();
             return;
         }
+        // SYSCOIN BEGIN: Resolve the NEVM startup pair before starting indexes and mempool.
+        // ImportingNow has ended, so missing headers/blocks can be acquired.
+        // Use the import thread: ABC may wait for the scheduler's validation
+        // callbacks, and must not run on that scheduler itself.
+        while (chainman.HasPendingNEVMStartupPair() && !chainman.m_interrupt) {
+            UninterruptibleSleep(std::chrono::seconds{1});
+            BlockValidationState state;
+            if (!chainman.RetryNEVMStartupPair(state)) {
+                chainman.GetNotifications().fatalError(strprintf(
+                    "Failed to recover NEVM startup pair (%s)", state.ToString()));
+                return;
+            }
+        }
+        if (chainman.m_interrupt) return;
+        // SYSCOIN END: Resolve the NEVM startup pair before starting indexes and mempool.
         // Start indexes initial sync
         if (!StartIndexBackgroundSync(node)) {
             bilingual_str err_str = _("Failed to start indexes, shutting down..");
@@ -2276,11 +2707,24 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     }
 
     node.scheduler->scheduleEvery([&] { netfulfilledman->DoMaintenance(); }, std::chrono::minutes{1});
-    node.scheduler->scheduleEvery([&] { masternodeSync.DoMaintenance(*node.connman, *node.peerman); }, std::chrono::seconds{1});
+    node.scheduler->scheduleEvery([&] { masternodeSync.DoMaintenance(*node.connman, *node.peerman, *node.chainman); }, std::chrono::seconds{1});
     node.scheduler->scheduleEvery(std::bind(CMasternodeUtils::DoMaintenance, std::ref(*node.connman)), std::chrono::minutes{1});
     node.scheduler->scheduleEvery([&] { governance->DoMaintenance(*node.connman); }, std::chrono::minutes{5});
-    if (activeMasternodeManager) {
-        node.scheduler->scheduleEvery([&] { llmq::quorumDKGSessionManager->CleanupOldContributions(*node.chainman); }, std::chrono::hours{1});
+    // SYSCOIN: Supervise the authenticated Bitcoin-header policy backend only
+    // after this startup instance successfully initialized it.
+    if (btcheader_backend_initialized) {
+        const int64_t probe_interval{std::max<int64_t>(
+            1, args.GetIntArg("-btcheaderwatchdogprobeinterval",
+                              DEFAULT_BTC_HEADER_WATCHDOG_PROBE_INTERVAL))};
+        node.scheduler->scheduleEvery([&chainman] {
+            std::string reason;
+            if (!chainman.ActiveChainstate().CheckBTCHeaderNodeHealth(
+                    /*recover=*/true, reason)) {
+                LogPrintf("WARNING: Bitcoin header policy backend is not "
+                          "ready; PQ BTCC ADVANCE and scheduled BTCPREV mining "
+                          "remain fail-closed (%s)\n", reason);
+            }
+        }, std::chrono::seconds{probe_interval});
     }
     llmq::StartLLMQSystem();
     // ********************************************************* Step 12: start node

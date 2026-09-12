@@ -693,6 +693,18 @@ public:
         return 0;
     }
 
+    // SYSCOIN: Match both preferred and non-preferred indices because request
+    // direction is not part of the on-wire object identity.
+    bool IsRequested(NodeId peer, const uint256& txhash) const
+    {
+        auto it = m_index.get<ByPeer>().find(ByPeerView{peer, false, txhash});
+        if (it == m_index.get<ByPeer>().end()) {
+            it = m_index.get<ByPeer>().find(ByPeerView{peer, true, txhash});
+        }
+        return it != m_index.get<ByPeer>().end() &&
+               it->GetState() == State::REQUESTED;
+    }
+
     size_t CountCandidates(NodeId peer) const
     {
         auto it = m_peerinfo.find(peer);
@@ -726,6 +738,9 @@ TxRequestTracker::~TxRequestTracker() = default;
 void TxRequestTracker::ForgetTxHash(const uint256& txhash) { m_impl->ForgetTxHash(txhash); }
 void TxRequestTracker::DisconnectedPeer(NodeId peer) { m_impl->DisconnectedPeer(peer); }
 size_t TxRequestTracker::CountInFlight(NodeId peer) const { return m_impl->CountInFlight(peer); }
+// SYSCOIN: Expose exact peer/object request state to the bounded CLSIG response
+// path without leaking the tracker's internal multi-index representation.
+bool TxRequestTracker::IsRequested(NodeId peer, const uint256& txhash) const { return m_impl->IsRequested(peer, txhash); }
 size_t TxRequestTracker::CountCandidates(NodeId peer) const { return m_impl->CountCandidates(peer); }
 size_t TxRequestTracker::Count(NodeId peer) const { return m_impl->Count(peer); }
 size_t TxRequestTracker::Size() const { return m_impl->Size(); }

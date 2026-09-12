@@ -15,14 +15,12 @@ export MSAN_AND_LIBCXX_FLAGS="${MSAN_FLAGS} ${LIBCXX_FLAGS}"
 export CONTAINER_NAME="ci_native_msan"
 export PACKAGES="cmake ninja-build clang-18 llvm-18 llvm-18-dev libclang-18-dev libclang-rt-18-dev"
 # BDB generates false positives and will be removed in future.
-export DEP_OPTS="NO_BDB=1 NO_QT=1 DEBUG=1 CC=clang CXX=clang++ CFLAGS='${MSAN_FLAGS}' CXXFLAGS='${MSAN_AND_LIBCXX_FLAGS}' gmp_config_opts='--disable-shared --enable-cxx --disable-fat --disable-assembly'"
+# SYSCOIN: The post-BLS MSan depends build has no GMP configuration.
+export DEP_OPTS="NO_BDB=1 NO_QT=1 DEBUG=1 CC=clang CXX=clang++ CFLAGS='${MSAN_FLAGS}' CXXFLAGS='${MSAN_AND_LIBCXX_FLAGS}'"
 export GOAL="install"
 export SYSCOIN_CONFIG="--with-sanitizers=memory --disable-hardening --with-asm=no CPPFLAGS='-U_FORTIFY_SOURCE' CFLAGS='${MSAN_FLAGS}' CXXFLAGS='${MSAN_AND_LIBCXX_FLAGS}'"
 export USE_MEMORY_SANITIZER="true"
 export RUN_FUNCTIONAL_TESTS="false"
-# GMP's fat-build CPU dispatcher intentionally probes an uninitialized stack
-# buffer, while uninstrumented assembly writes are invisible to MSan. Use the
-# instrumented generic-C implementation so the complete unit suite can run.
 export RUN_UNIT_TESTS="false"
 export RUN_UNIT_TESTS_SEQUENTIAL="true"
 export CCACHE_MAXSIZE=250M

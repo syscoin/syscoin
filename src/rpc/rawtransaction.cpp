@@ -51,9 +51,11 @@ using node::FindCoins;
 using node::GetTransaction;
 using node::PSBTAnalysis;
 
+// SYSCOIN BEGIN: Expose the upstream helper for AuxPoW; defaults are in its header.
 void TxToJSON(const CTransaction& tx, const uint256 hashBlock, UniValue& entry,
                      Chainstate& active_chainstate, const CTxUndo* txundo,
                      TxVerbosity verbosity)
+// SYSCOIN END: Expose the upstream helper for AuxPoW; defaults are in its header.
 {
     CHECK_NONFATAL(verbosity >= TxVerbosity::SHOW_DETAILS);
     // Call into TxToUniv() in bitcoin-common to decode the transaction hex.
@@ -132,6 +134,7 @@ static std::vector<RPCResult> DecodeTxDoc(const std::string& txid_field_doc)
                 {RPCResult::Type::STR_AMOUNT, "asset_value", /*optional=*/true, "The asset value in " + CURRENCY_UNIT},
             }},
         }},
+        // SYSCOIN BEGIN: Document asset, provider, coinbase, and quorum transaction JSON.
         {RPCResult::Type::OBJ, "systx", /*optional=*/true, "",
         {
             {RPCResult::Type::STR, "txtype", "Transaction type"},
@@ -158,7 +161,10 @@ static std::vector<RPCResult> DecodeTxDoc(const std::string& txid_field_doc)
             {RPCResult::Type::STR, "ownerAddress", "Owner Address"},
             {RPCResult::Type::STR, "votingAddress", "Voting Address"},
             {RPCResult::Type::STR, "payoutAddress", /*optional=*/true, "Payout Address"},
-            {RPCResult::Type::STR_HEX, "pubKeyOperator", "Operator public key"},
+            // SYSCOIN BEGIN: Provider JSON separates historical and PQ keys.
+            {RPCResult::Type::STR_HEX, "legacyPubKeyOperator", /*optional=*/true, "Historical operator public key"},
+            {RPCResult::Type::STR_HEX, "pqVotingPublicKey", /*optional=*/true, "PQ proposal-funding voting public key"},
+            // SYSCOIN END: Provider JSON separates historical and PQ keys.
             {RPCResult::Type::NUM, "operatorReward", "Operator reward"},
             {RPCResult::Type::STR_HEX, "inputsHash", "Inputs Hash"}
         }},
@@ -167,7 +173,10 @@ static std::vector<RPCResult> DecodeTxDoc(const std::string& txid_field_doc)
             {RPCResult::Type::NUM, "version", "Version"},
             {RPCResult::Type::STR_HEX, "proTxHash", "proTxHash"},
             {RPCResult::Type::STR, "service", "Service IP"},
-            {RPCResult::Type::STR, "payoutAddress", /*optional=*/true, "Payout Address"},
+            // SYSCOIN BEGIN: Match service-update JSON field names.
+            {RPCResult::Type::STR, "operatorPayoutAddress", /*optional=*/true, "Operator payout address"},
+            {RPCResult::Type::STR, "nevmAddress", "NEVM address, or empty when unset"},
+            // SYSCOIN END: Match service-update JSON field names.
             {RPCResult::Type::STR_HEX, "inputsHash", "Inputs Hash"}
         }},
         {RPCResult::Type::OBJ, "proUpRegTx", /*optional=*/true, "",
@@ -175,9 +184,11 @@ static std::vector<RPCResult> DecodeTxDoc(const std::string& txid_field_doc)
             {RPCResult::Type::NUM, "version", "Version"},
             {RPCResult::Type::STR_HEX, "proTxHash", "proTxHash"},
             {RPCResult::Type::STR, "votingAddress", "Voting Address"},
-            {RPCResult::Type::STR, "nevmAddress", "NEVM Address"},
+            // SYSCOIN BEGIN: Registrar JSON has voting keys, not an NEVM address.
             {RPCResult::Type::STR, "payoutAddress", /*optional=*/true, "Payout Address"},
-            {RPCResult::Type::STR_HEX, "pubKeyOperator", "Operator public key"},
+            {RPCResult::Type::STR_HEX, "legacyPubKeyOperator", /*optional=*/true, "Historical operator public key"},
+            {RPCResult::Type::STR_HEX, "pqVotingPublicKey", /*optional=*/true, "PQ proposal-funding voting public key"},
+            // SYSCOIN END: Registrar JSON has voting keys, not an NEVM address.
             {RPCResult::Type::STR_HEX, "inputsHash", "Inputs Hash"}
         }},
         {RPCResult::Type::OBJ, "proUpRevTx", /*optional=*/true, "",
@@ -213,6 +224,7 @@ static std::vector<RPCResult> DecodeTxDoc(const std::string& txid_field_doc)
                 }}
             }}
         }}
+        // SYSCOIN END: Document asset, provider, coinbase, and quorum transaction JSON.
     };
 }
 
@@ -443,9 +455,10 @@ static RPCHelpMan getrawtransaction()
         }
     // SYSCOIN
     } else {
+        // SYSCOIN: Protect the cache lookup and corresponding active-chain height.
+        LOCK(cs_main);
         uint32_t nBlockHeight;
         if(pblockindexdb != nullptr && pblockindexdb->ReadBlockHeight(hash, nBlockHeight)){     
-            LOCK(cs_main);
             blockindex = chainman.ActiveChain()[nBlockHeight];
         } 
  

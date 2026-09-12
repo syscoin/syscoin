@@ -39,6 +39,7 @@
 #include <warnings.h>
 
 #include <memory>
+#include <optional> // SYSCOIN: explicit BTCPREV merge-mining input.
 #include <stdint.h>
 // SYSCOIN
 #include <governance/governanceclasses.h>
@@ -740,24 +741,42 @@ static RPCHelpMan getblocktemplate()
     if (strMode != "template")
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid mode");
 
+    // SYSCOIN BEGIN: Historical replay remains sync-only, including at A-1.
+    const bool pq_block_production_allowed{
+        chainman.IsPQBlockProductionAllowed()};
+    if (!pq_block_production_allowed) {
+        throw JSONRPCError(
+            RPC_CLIENT_IN_INITIAL_DOWNLOAD,
+            PACKAGE_NAME " is in sync-only PQ activation quarantine");
+    }
+    // SYSCOIN END: Public PQ activation mining gate.
+
     if (!chainman.GetParams().IsTestChain()) {
         const CConnman& connman = EnsureConnman(node);
         if (connman.GetNodeCount(ConnectionDirection::Both) == 0) {
             throw JSONRPCError(RPC_CLIENT_NOT_CONNECTED, PACKAGE_NAME " is not connected!");
         }
 
+        // SYSCOIN BEGIN: Authenticated handoff does not bypass ordinary IBD.
         if (chainman.IsInitialBlockDownload()) {
             throw JSONRPCError(RPC_CLIENT_IN_INITIAL_DOWNLOAD, PACKAGE_NAME " is in initial sync and waiting for blocks...");
         }
+        // SYSCOIN END: Public activation IBD gate.
     }
 
     // SYSCOIN
-    // Get expected MN/superblock payees. The call to GetBlockTxOuts might fail on regtest/devnet or when
-    // testnet is reset. This is fine and we ignore failure (blocks will be accepted)
+    // A verified empty set can be mined, but unavailable PQ state must not
+    // inherit the legacy no-payee fallback or a cached template's allowance.
     std::vector<CTxOut> voutMasternodePayments;
     CAmount mnRet, mnRet1;
     int nCollateralHeight;
-    mnpayments.GetBlockTxOuts(node.chainman->ActiveChain(), node.chainman->ActiveHeight() + 1, 0, voutMasternodePayments, 0, mnRet, mnRet1, nCollateralHeight);
+    if (mnpayments.GetBlockTxOuts(
+            node.chainman->ActiveChain(), node.chainman->ActiveHeight() + 1,
+            0, voutMasternodePayments, 0, mnRet, mnRet1,
+            nCollateralHeight) == MasternodePaymentStatus::UNAVAILABLE) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR,
+                           "Payment eligibility state is unavailable");
+    }
 
     // next bock is a superblock and we need governance info to correctly construct it
     if (!fRegTest && !fSigNet && isSBSportActive
@@ -826,6 +845,14 @@ static RPCHelpMan getblocktemplate()
     // GBT must be called with 'segwit' set in the rules
     if (setClientRules.count("segwit") != 1) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "getblocktemplate must be called with the segwit rule set (call with {\"rules\": [\"segwit\"]})");
+    }
+
+    // SYSCOIN: Recheck after long-poll released cs_main, including when the
+    // current tip still matches a cached template from before replay began.
+    if (!chainman.PrepareNEVMBlockProduction()) {
+        throw JSONRPCError(
+            RPC_CLIENT_IN_INITIAL_DOWNLOAD,
+            "NEVM block production is waiting for execution recovery");
     }
 
     // Update block
@@ -1164,6 +1191,7 @@ static RPCHelpMan submitheader()
     };
 }
 
+// SYSCOIN: begin AuxPoW merge-mining RPCs.
 /* ************************************************************************** */
 /* Merge mining.  */
 static RPCHelpMan createauxblock()
@@ -1173,7 +1201,7 @@ static RPCHelpMan createauxblock()
                 " merge-mine it.\n",
                 {
                     {"address", RPCArg::Type::STR, RPCArg::Optional::NO, "Payout address for the coinbase transaction"},
-                    {"btcprevhash", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Optional. BTC prev-block hash commitment for BTCC sign-offset blocks. When omitted on non-mine-blocks-on-demand chains, sourced from local BTC header backend."},
+                    {"btcprevhash", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "BTC parent-prev-block hash committed by candidate-height blocks. Auto-selected from -btcheadercmd when policy is enabled; an explicit value is independently policy-checked."},
                 },
                 RPCResult{
                     RPCResult::Type::OBJ, "", "",
@@ -1186,7 +1214,7 @@ static RPCHelpMan createauxblock()
                         {RPCResult::Type::STR, "bits", "compressed target of the block"},
                         {RPCResult::Type::NUM, "height", "height of the block"},
                         {RPCResult::Type::STR_HEX, "_target", "target in reversed byte order, deprecated"},
-                        {RPCResult::Type::STR_HEX, "_btcprevhash", /*optional=*/true, "BTCPREV committed into the template when required for BTCC sign-offset blocks"},
+                        {RPCResult::Type::STR_HEX, "_btcprevhash", /*optional=*/true, "BTCPREV committed into the template at PQ BTCC candidate heights"},
                     }},
                 RPCExamples{
                   HelpExampleCli("createauxblock", "\"address\"")
@@ -1203,7 +1231,12 @@ static RPCHelpMan createauxblock()
     }
     const CScript scriptPubKey = GetScriptForDestination(coinbaseScript);
 
-    return AuxpowMiner::get ().createAuxBlock(request, scriptPubKey);
+    std::optional<uint256> btc_prev_hash;
+    if (request.params.size() > 1 && !request.params[1].isNull()) {
+        btc_prev_hash = ParseHashV(request.params[1], "btcprevhash");
+    }
+    return AuxpowMiner::get ().createAuxBlock(request, scriptPubKey,
+                                              btc_prev_hash);
 },
     };
 }
@@ -1231,6 +1264,8 @@ static RPCHelpMan submitauxblock()
 },
     };
 }
+// SYSCOIN: end AuxPoW merge-mining RPCs.
+
 void RegisterMiningRPCCommands(CRPCTable& t)
 {
     static const CRPCCommand commands[]{

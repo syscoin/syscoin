@@ -3,17 +3,22 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <common/system.h>
+#include <evo/deterministicmns.h> // SYSCOIN: deterministic provider-state fixtures.
+#include <evo/pq_providertx.h> // SYSCOIN: PQ provider transaction fixtures.
+#include <evo/pq_registry.h> // SYSCOIN: PQ registry reservation fixtures.
+#include <evo/providertx.h> // SYSCOIN: provider transaction fixtures.
+#include <evo/specialtx.h> // SYSCOIN: special-transaction mempool fixtures.
+#include <netbase.h> // SYSCOIN: provider service fixtures.
 #include <policy/policy.h>
 #include <test/util/txmempool.h>
 #include <txmempool.h>
 #include <util/time.h>
+#include <validation.h> // SYSCOIN: branch-bound provider admission fixtures.
 
 #include <test/util/setup_common.h>
 
 #include <boost/test/unit_test.hpp>
 #include <vector>
-
-BOOST_FIXTURE_TEST_SUITE(mempool_tests, TestingSetup)
 
 static constexpr auto REMOVAL_REASON_DUMMY = MemPoolRemovalReason::REPLACED;
 
@@ -22,6 +27,1024 @@ class MemPoolTest final : public CTxMemPool
 public:
     using CTxMemPool::GetMinFee;
 };
+
+// SYSCOIN BEGIN: expose fork-only mempool reservation invariants to tests.
+struct PQMempoolTestAccess {
+    static void ResetPackageProviderConflictStats(CTxMemPool& pool)
+        EXCLUSIVE_LOCKS_REQUIRED(pool.cs)
+    {
+        pool.m_last_package_provider_conflict_stats = {};
+    }
+
+    static std::pair<std::size_t, std::size_t>
+    LastPackageProviderConflictStats(const CTxMemPool& pool)
+        EXCLUSIVE_LOCKS_REQUIRED(pool.cs)
+    {
+        const auto& stats{pool.m_last_package_provider_conflict_stats};
+        return {stats.registry_operator_requests,
+                stats.indexed_provider_references_examined};
+    }
+
+    static std::optional<size_t> FindPackageProviderTxConflict(
+        const CTxMemPool& pool,
+        const std::vector<CTransactionRef>& package,
+        const CDeterministicMNList& mn_list,
+        const llmq::pq::PQRegistryMempoolView& registry_view)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main, pool.cs)
+    {
+        return pool.FindPackageProviderTxConflict(package, mn_list,
+                                                   registry_view);
+    }
+
+    static bool RebuildPQRegistryReservations(
+        CTxMemPool& pool,
+        const llmq::pq::PQRegistryMempoolView& registry_view)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main, pool.cs)
+    {
+        return pool.RebuildPQRegistryReservations(registry_view);
+    }
+
+    static void RemoveProTxConflicts(
+        CTxMemPool& pool,
+        const CTransaction& tx,
+        const CDeterministicMNList& mn_list)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main, pool.cs)
+    {
+        pool.removeProTxConflicts(tx, mn_list);
+    }
+};
+// SYSCOIN END: expose fork-only mempool reservation invariants to tests.
+
+BOOST_FIXTURE_TEST_SUITE(mempool_tests, TestingSetup)
+
+// SYSCOIN BEGIN: PQ provider mempool conflict and reservation tests.
+namespace {
+
+uint256 PQMempoolHash(uint32_t value)
+{
+    uint256 hash;
+    hash.begin()[0] = value & 0xff;
+    hash.begin()[1] = (value >> 8) & 0xff;
+    hash.begin()[2] = (value >> 16) & 0xff;
+    hash.begin()[3] = (value >> 24) & 0xff;
+    if (hash.IsNull()) hash.begin()[0] = 1;
+    return hash;
+}
+
+CMutableTransaction PQMempoolBaseTransaction(int32_t version, uint32_t id)
+{
+    CMutableTransaction tx;
+    tx.nVersion = version;
+    tx.vin.emplace_back(COutPoint{PQMempoolHash(10'000 + id), id});
+    tx.vout.emplace_back(1, CScript{} << OP_TRUE);
+    return tx;
+}
+
+llmq::pq::ChildKeyTreeCommitment PQMempoolCommitment(uint32_t tag)
+{
+    llmq::pq::ChildKeyTreeCommitment commitment;
+    commitment.generation = 1;
+    commitment.tree_id = PQMempoolHash(20'000 + tag);
+    commitment.root = PQMempoolHash(30'000 + tag);
+    return commitment;
+}
+
+CMutableTransaction PQGlobalKeyTransaction(const uint256& pro_tx_hash,
+                                            uint32_t key_tag = 1,
+                                            uint32_t tree_tag = 0)
+{
+    CMutableTransaction tx = PQMempoolBaseTransaction(
+        SYSCOIN_TX_VERSION_PQ_GLOBAL_KEY, 1);
+    llmq::pq::GlobalKeyTxPayload payload;
+    payload.operation = llmq::pq::GlobalKeyOperation::ROTATE;
+    payload.pro_tx_hash = pro_tx_hash;
+    payload.candidate.key_version = 2;
+    payload.candidate.public_key[0] = static_cast<uint8_t>(key_tag);
+    payload.candidate.child_key_commitment =
+        PQMempoolCommitment(tree_tag == 0 ? key_tag : tree_tag);
+    payload.transaction_inputs_hash = PQMempoolHash(2);
+    payload.authorization[0] = 1;
+    SetTxPayload(tx, payload);
+    return tx;
+}
+
+CMutableTransaction PQRevokeTransaction(const uint256& pro_tx_hash)
+{
+    CMutableTransaction tx = PQMempoolBaseTransaction(
+        SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE, 3);
+    CProUpRevTx payload;
+    payload.nVersion = CProUpRevTx::PQ_VERSION;
+    payload.proTxHash = pro_tx_hash;
+    payload.inputsHash = PQMempoolHash(4);
+    payload.globalKeyVersion = 1;
+    payload.pqSig[0] = 1;
+    SetTxPayload(tx, payload);
+    return tx;
+}
+
+CMutableTransaction PQReadinessTransaction(const uint256& pro_tx_hash)
+{
+    auto tx{PQMempoolBaseTransaction(SYSCOIN_TX_VERSION_PQ_RECOVERY_READINESS, 87)};
+    llmq::pq::RecoveryReadinessTxPayload payload;
+    payload.readiness.pro_tx_hash = pro_tx_hash;
+    payload.readiness.global_key_version = 1;
+    payload.readiness.group = 1;
+    payload.readiness.reference_height = 1000;
+    payload.readiness.reference_hash = PQMempoolHash(88);
+    payload.readiness.transaction_inputs_hash = CalcTxInputsHash(CTransaction(tx));
+    payload.signature[0] = 1;
+    SetTxPayload(tx, payload);
+    return tx;
+}
+
+CMutableTransaction PQServiceTransaction(
+    const uint256& pro_tx_hash,
+    const CService& service = {},
+    std::vector<unsigned char> nevm_address = {})
+{
+    CMutableTransaction tx = PQMempoolBaseTransaction(
+        SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE, 4);
+    CProUpServTx payload;
+    payload.nVersion = CProUpServTx::PQ_VERSION;
+    payload.proTxHash = pro_tx_hash;
+    payload.addr = service;
+    payload.inputsHash = PQMempoolHash(5);
+    payload.globalKeyVersion = 1;
+    payload.pqSig[0] = 1;
+    payload.vchNEVMAddress = std::move(nevm_address);
+    SetTxPayload(tx, payload);
+    return tx;
+}
+
+CMutableTransaction PQRegistrarTransaction(const uint256& pro_tx_hash)
+{
+    CMutableTransaction tx = PQMempoolBaseTransaction(
+        SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR, 5);
+    CProUpRegTx payload;
+    payload.nVersion = CProUpRegTx::PQ_VERSION;
+    payload.proTxHash = pro_tx_hash;
+    payload.keyIDVoting.begin()[0] = 1;
+    payload.inputsHash = PQMempoolHash(6);
+    payload.vchSig.assign(1, 1);
+    SetTxPayload(tx, payload);
+    return tx;
+}
+
+CMutableTransaction PQRegisterTransaction(
+    uint32_t tag,
+    const CService& service,
+    const CKeyID& owner,
+    const COutPoint& collateral)
+{
+    CMutableTransaction tx = PQMempoolBaseTransaction(
+        SYSCOIN_TX_VERSION_MN_REGISTER, 100 + tag);
+    CProRegTx payload;
+    payload.nVersion = CProRegTx::PQ_VERSION;
+    payload.collateralOutpoint = collateral;
+    payload.addr = service;
+    payload.keyIDOwner = owner;
+    payload.keyIDVoting.begin()[0] = 1;
+    payload.pqVotingPublicKey[0] = 1;
+    payload.scriptPayout = CScript{} << OP_TRUE;
+    payload.inputsHash = PQMempoolHash(40'000 + tag);
+    payload.vchSig.assign(1, 1);
+    SetTxPayload(tx, payload);
+    return tx;
+}
+
+CDeterministicMNList PQMempoolMNList(const uint256& pro_tx_hash,
+                                     const COutPoint& collateral)
+{
+    CDeterministicMNList list{PQMempoolHash(60'000), 1, 1};
+    auto dmn{std::make_shared<CDeterministicMN>(1)};
+    dmn->proTxHash = pro_tx_hash;
+    dmn->collateralOutpoint = collateral;
+    auto state{std::make_shared<CDeterministicMNState>()};
+    state->keyIDOwner.begin()[0] = 1;
+    dmn->pdmnState = std::move(state);
+    list.AddMN(std::move(dmn), /*fBumpTotalCount=*/false);
+    return list;
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(PQOperatorUpdateConflicts)
+{
+    CTxMemPool& pool = *Assert(m_node.mempool);
+    LOCK2(cs_main, pool.cs);
+    TestMemPoolEntryHelper entry;
+    const CBlockIndex* active_tip{m_node.chainman->ActiveTip()};
+
+    const uint256 pro_tx_hash{PQMempoolHash(1)};
+    const auto global{PQGlobalKeyTransaction(pro_tx_hash)};
+    const auto revoke{PQRevokeTransaction(pro_tx_hash)};
+    const auto service{PQServiceTransaction(pro_tx_hash)};
+    const auto registrar{PQRegistrarTransaction(pro_tx_hash)};
+
+    // Production admission supplies a non-null tip and requires the exact-tip
+    // target collateral to be resolved before addUnchecked mutates any index.
+    // A missing target/incomplete admission result must fail closed without
+    // publishing an unguarded PQ reservation.
+    std::optional<COutPoint> unresolved_collateral;
+    BOOST_CHECK(pool.existsProviderTxConflict(
+        CTransaction{global}, active_tip, &unresolved_collateral));
+    BOOST_CHECK(!unresolved_collateral);
+    BOOST_CHECK(!pool.addUnchecked(entry.FromTx(global), true, active_tip,
+                                   unresolved_collateral));
+    BOOST_CHECK(!pool.exists(GenTxid::Txid(global.GetHash())));
+
+    BOOST_CHECK(!pool.existsProviderTxConflict(CTransaction{global},
+                                                active_tip));
+    pool.addUnchecked(entry.FromTx(global));
+    BOOST_CHECK(pool.existsProviderTxConflict(CTransaction{revoke},
+                                               active_tip));
+    pool.removeRecursive(CTransaction{global}, REMOVAL_REASON_DUMMY);
+
+    pool.addUnchecked(entry.FromTx(service));
+    BOOST_CHECK(pool.existsProviderTxConflict(CTransaction{revoke},
+                                               active_tip));
+    pool.removeRecursive(CTransaction{service}, REMOVAL_REASON_DUMMY);
+
+    pool.addUnchecked(entry.FromTx(registrar));
+    BOOST_CHECK(pool.existsProviderTxConflict(CTransaction{revoke},
+                                               active_tip));
+    pool.removeRecursive(CTransaction{registrar}, REMOVAL_REASON_DUMMY);
+
+    pool.addUnchecked(entry.FromTx(revoke));
+    BOOST_CHECK(pool.existsProviderTxConflict(CTransaction{global},
+                                               active_tip));
+    BOOST_CHECK(pool.existsProviderTxConflict(CTransaction{service},
+                                               active_tip));
+    BOOST_CHECK(pool.existsProviderTxConflict(CTransaction{registrar},
+                                               active_tip));
+    pool.removeRecursive(CTransaction{revoke}, REMOVAL_REASON_DUMMY);
+
+    BOOST_CHECK(!pool.existsProviderTxConflict(CTransaction{global},
+                                                active_tip));
+    BOOST_CHECK_EQUAL(pool.size(), 0U);
+
+    const auto same_key{PQGlobalKeyTransaction(PQMempoolHash(2), 1, 2)};
+    const auto same_tree{PQGlobalKeyTransaction(PQMempoolHash(3), 2, 1)};
+    const auto distinct_global{
+        PQGlobalKeyTransaction(PQMempoolHash(4), 3, 3)};
+    llmq::pq::PQRegistryMempoolView synthetic_registry_view;
+    synthetic_registry_view.operators = {
+        {.pro_tx_hash = pro_tx_hash,
+         .state_exists = 0,
+         .has_global_key = 0,
+         .current_commitment = {}},
+        {.pro_tx_hash = PQMempoolHash(2),
+         .state_exists = 0,
+         .has_global_key = 0,
+         .current_commitment = {}},
+        {.pro_tx_hash = PQMempoolHash(3),
+         .state_exists = 0,
+         .has_global_key = 0,
+         .current_commitment = {}},
+        {.pro_tx_hash = PQMempoolHash(4),
+         .state_exists = 0,
+         .has_global_key = 0,
+         .current_commitment = {}},
+    };
+    std::sort(synthetic_registry_view.operators.begin(),
+              synthetic_registry_view.operators.end(),
+              [](const auto& lhs, const auto& rhs) {
+                  return lhs.pro_tx_hash < rhs.pro_tx_hash;
+              });
+    const auto find_package_conflict =
+        [&](const std::vector<CTransactionRef>& package)
+            EXCLUSIVE_LOCKS_REQUIRED(cs_main, pool.cs) {
+            return PQMempoolTestAccess::FindPackageProviderTxConflict(
+                pool, package, CDeterministicMNList{},
+                synthetic_registry_view);
+        };
+    pool.addUnchecked(entry.FromTx(global));
+    BOOST_CHECK(pool.existsProviderTxConflict(CTransaction{same_key},
+                                               active_tip));
+    BOOST_CHECK(!pool.existsProviderTxConflict(CTransaction{same_tree},
+                                                active_tip));
+    BOOST_CHECK(!pool.existsProviderTxConflict(CTransaction{distinct_global},
+                                                active_tip));
+    pool.removeRecursive(CTransaction{global}, REMOVAL_REASON_DUMMY);
+
+    // Removing an unchecked duplicate must not erase the first transaction's
+    // uniqueness reservations.
+    pool.addUnchecked(entry.FromTx(global));
+    pool.addUnchecked(entry.FromTx(same_key));
+    pool.removeRecursive(CTransaction{same_key}, REMOVAL_REASON_DUMMY);
+    BOOST_CHECK(!pool.existsProviderTxConflict(CTransaction{same_tree},
+                                                active_tip));
+    pool.removeRecursive(CTransaction{global}, REMOVAL_REASON_DUMMY);
+    BOOST_CHECK(!pool.existsProviderTxConflict(CTransaction{same_tree},
+                                                active_tip));
+
+    // Package members are prechecked before any of them updates the mempool's
+    // provider indexes. The package-level view must enforce the same ordering
+    // invariants without inserting a partial package.
+    const auto other_global{PQGlobalKeyTransaction(PQMempoolHash(2), 2)};
+    auto conflict_index = find_package_conflict(
+        {MakeTransactionRef(global), MakeTransactionRef(global)});
+    BOOST_REQUIRE(conflict_index);
+    BOOST_CHECK_EQUAL(*conflict_index, 1U);
+    BOOST_CHECK(!find_package_conflict(
+        {MakeTransactionRef(global), MakeTransactionRef(other_global)}));
+    conflict_index = find_package_conflict(
+        {MakeTransactionRef(global), MakeTransactionRef(same_key)});
+    BOOST_REQUIRE(conflict_index);
+    BOOST_CHECK_EQUAL(*conflict_index, 1U);
+    BOOST_CHECK(!find_package_conflict(
+        {MakeTransactionRef(global), MakeTransactionRef(same_tree)}));
+
+    pool.addUnchecked(entry.FromTx(global));
+    conflict_index = find_package_conflict({MakeTransactionRef(same_key)});
+    BOOST_REQUIRE(conflict_index);
+    BOOST_CHECK_EQUAL(*conflict_index, 0U);
+    pool.removeRecursive(CTransaction{global}, REMOVAL_REASON_DUMMY);
+
+    const std::vector<std::pair<const CMutableTransaction*,
+                                const CMutableTransaction*>> package_conflicts{
+        {&global, &revoke},
+        {&service, &revoke},
+        {&registrar, &revoke},
+        {&revoke, &global},
+        {&revoke, &service},
+        {&revoke, &registrar},
+    };
+    for (const auto& [first, second] : package_conflicts) {
+        conflict_index = find_package_conflict(
+            {MakeTransactionRef(*first), MakeTransactionRef(*second)});
+        BOOST_REQUIRE(conflict_index);
+        BOOST_CHECK_EQUAL(*conflict_index, 1U);
+    }
+    BOOST_CHECK(!find_package_conflict(
+        {MakeTransactionRef(service), MakeTransactionRef(registrar)}));
+
+    // Mirror the other provider indexes as well: batching must not bypass
+    // address, NEVM-address, owner-key, or collateral uniqueness merely
+    // because no package member has reached addUnchecked yet.
+    const CService shared_service{LookupNumeric("127.0.0.1", 19'999)};
+    const CService other_service{LookupNumeric("127.0.0.1", 20'000)};
+    std::vector<unsigned char> shared_nevm_address(20, 7);
+    const auto service_address_a{PQServiceTransaction(
+        PQMempoolHash(11), shared_service)};
+    const auto service_address_b{PQServiceTransaction(
+        PQMempoolHash(12), shared_service)};
+    const auto service_nevm_a{PQServiceTransaction(
+        PQMempoolHash(13), shared_service, shared_nevm_address)};
+    const auto service_nevm_b{PQServiceTransaction(
+        PQMempoolHash(14), other_service, shared_nevm_address)};
+    BOOST_CHECK(find_package_conflict(
+        {MakeTransactionRef(service_address_a),
+         MakeTransactionRef(service_address_b)}));
+    BOOST_CHECK(find_package_conflict(
+        {MakeTransactionRef(service_nevm_a),
+         MakeTransactionRef(service_nevm_b)}));
+    BOOST_CHECK(!find_package_conflict(
+        {MakeTransactionRef(service_address_a),
+         MakeTransactionRef(service_nevm_b)}));
+
+    CKeyID owner_a;
+    owner_a.begin()[0] = 1;
+    CKeyID owner_b;
+    owner_b.begin()[0] = 2;
+    const COutPoint shared_collateral{PQMempoolHash(50'000), 0};
+    const auto registration_a{PQRegisterTransaction(
+        1, shared_service, owner_a, shared_collateral)};
+    const auto registration_owner_conflict{PQRegisterTransaction(
+        2, other_service, owner_a,
+        COutPoint{PQMempoolHash(50'001), 0})};
+    const auto registration_collateral_conflict{PQRegisterTransaction(
+        3, other_service, owner_b, shared_collateral)};
+    BOOST_CHECK(find_package_conflict(
+        {MakeTransactionRef(registration_a),
+         MakeTransactionRef(registration_owner_conflict)}));
+    BOOST_CHECK(find_package_conflict(
+        {MakeTransactionRef(registration_a),
+         MakeTransactionRef(registration_collateral_conflict)}));
+    const auto registration_distinct{PQRegisterTransaction(
+        4, CService{LookupNumeric("127.0.0.1", 20'001)}, owner_b,
+        COutPoint{PQMempoolHash(50'002), 0})};
+    BOOST_CHECK(!find_package_conflict(
+        {MakeTransactionRef(registration_a),
+         MakeTransactionRef(registration_distinct)}));
+    BOOST_CHECK(find_package_conflict(
+        {MakeTransactionRef(service_address_a),
+         MakeTransactionRef(registration_a)}));
+
+    // Removing an unchecked duplicate must leave the first provider index
+    // owner intact, just as for global-key reservations above.
+    pool.addUnchecked(entry.FromTx(registration_a));
+    pool.addUnchecked(entry.FromTx(registration_owner_conflict));
+    pool.removeRecursive(CTransaction{registration_owner_conflict},
+                         REMOVAL_REASON_DUMMY);
+    conflict_index = find_package_conflict(
+        {MakeTransactionRef(registration_owner_conflict)});
+    BOOST_REQUIRE(conflict_index);
+    BOOST_CHECK_EQUAL(*conflict_index, 0U);
+    pool.removeRecursive(CTransaction{registration_a}, REMOVAL_REASON_DUMMY);
+
+    CMutableTransaction collateral_spend{PQMempoolBaseTransaction(2, 200)};
+    collateral_spend.vin[0].prevout = shared_collateral;
+    BOOST_CHECK(find_package_conflict(
+        {MakeTransactionRef(collateral_spend),
+         MakeTransactionRef(registration_a)}));
+
+    // An external-collateral ProReg removes the existing operator from the
+    // deterministic list. PQ registry mutations are invalid in either order.
+    // Ordinary mutations may precede replacement only when transaction
+    // ancestry forces that order; independent entries remain excluded because
+    // fee sorting gives them no deterministic block order.
+    const uint256 replaced_operator{PQMempoolHash(60'001)};
+    const COutPoint replaced_collateral{PQMempoolHash(60'002), 1};
+    const auto replacement{PQRegisterTransaction(
+        20, CService{LookupNumeric("127.0.0.1", 20'020)}, owner_b,
+        replaced_collateral)};
+    const auto replacement_global{
+        PQGlobalKeyTransaction(replaced_operator, 20, 20)};
+    const auto replacement_revoke{PQRevokeTransaction(replaced_operator)};
+    const auto replacement_service{
+        PQServiceTransaction(replaced_operator)};
+    const auto replacement_registrar{
+        PQRegistrarTransaction(replaced_operator)};
+    const auto replacement_list{
+        PQMempoolMNList(replaced_operator, replaced_collateral)};
+    llmq::pq::PQRegistryMempoolView replacement_view;
+    replacement_view.operator_state_count = 1;
+    replacement_view.operators.push_back({
+        .pro_tx_hash = replaced_operator,
+        .state_exists = 1,
+        .has_global_key = 1,
+        .current_commitment = PQMempoolCommitment(21),
+    });
+    const auto find_replacement_conflict =
+        [&](const std::vector<CTransactionRef>& package)
+            EXCLUSIVE_LOCKS_REQUIRED(cs_main, pool.cs) {
+            return PQMempoolTestAccess::FindPackageProviderTxConflict(
+                pool, package, replacement_list, replacement_view);
+        };
+    // SYSCOIN: A single registry update cannot remove its own target DMN;
+    // reject it before admission or block-template assembly.
+    for (const auto* mutation : {&replacement_global,
+                                 &replacement_revoke}) {
+        CMutableTransaction self_spend{*mutation};
+        self_spend.vin[0].prevout = replaced_collateral;
+        conflict_index = find_replacement_conflict(
+            {MakeTransactionRef(self_spend)});
+        BOOST_REQUIRE(conflict_index);
+        BOOST_CHECK_EQUAL(*conflict_index, 0U);
+    }
+    for (const auto* mutation : {&replacement_global,
+                                 &replacement_revoke}) {
+        conflict_index = find_replacement_conflict(
+            {MakeTransactionRef(*mutation), MakeTransactionRef(replacement)});
+        BOOST_REQUIRE(conflict_index);
+        BOOST_CHECK_EQUAL(*conflict_index, 1U);
+        conflict_index = find_replacement_conflict(
+            {MakeTransactionRef(replacement), MakeTransactionRef(*mutation)});
+        BOOST_REQUIRE(conflict_index);
+        BOOST_CHECK_EQUAL(*conflict_index, 1U);
+
+        pool.addUnchecked(entry.FromTx(*mutation));
+        conflict_index = find_replacement_conflict(
+            {MakeTransactionRef(replacement)});
+        BOOST_REQUIRE(conflict_index);
+        BOOST_CHECK_EQUAL(*conflict_index, 0U);
+        pool.removeRecursive(CTransaction{*mutation}, REMOVAL_REASON_DUMMY);
+
+        pool.addUnchecked(entry.FromTx(replacement));
+        conflict_index = find_replacement_conflict(
+            {MakeTransactionRef(*mutation)});
+        BOOST_REQUIRE(conflict_index);
+        BOOST_CHECK_EQUAL(*conflict_index, 0U);
+        pool.removeRecursive(CTransaction{replacement}, REMOVAL_REASON_DUMMY);
+    }
+
+    for (const auto* mutation : {&replacement_service,
+                                 &replacement_registrar}) {
+        conflict_index = find_replacement_conflict(
+            {MakeTransactionRef(*mutation), MakeTransactionRef(replacement)});
+        BOOST_REQUIRE(conflict_index);
+        BOOST_CHECK_EQUAL(*conflict_index, 1U);
+        conflict_index = find_replacement_conflict(
+            {MakeTransactionRef(replacement), MakeTransactionRef(*mutation)});
+        BOOST_REQUIRE(conflict_index);
+        BOOST_CHECK_EQUAL(*conflict_index, 1U);
+
+        CMutableTransaction ordered_replacement{replacement};
+        ordered_replacement.vin[0].prevout =
+            COutPoint{mutation->GetHash(), 0};
+        BOOST_CHECK(!find_replacement_conflict(
+            {MakeTransactionRef(*mutation),
+             MakeTransactionRef(ordered_replacement)}));
+
+        pool.addUnchecked(entry.FromTx(*mutation));
+        BOOST_CHECK(!find_replacement_conflict(
+            {MakeTransactionRef(ordered_replacement)}));
+        pool.removeRecursive(CTransaction{*mutation}, REMOVAL_REASON_DUMMY);
+
+        pool.addUnchecked(entry.FromTx(replacement));
+        conflict_index = find_replacement_conflict(
+            {MakeTransactionRef(*mutation)});
+        BOOST_REQUIRE(conflict_index);
+        BOOST_CHECK_EQUAL(*conflict_index, 0U);
+        pool.removeRecursive(CTransaction{replacement}, REMOVAL_REASON_DUMMY);
+    }
+
+    // A replacement only needs one ancestry walk even when an operator has
+    // many pending mutations. Every live reference is allowed when the UTXO
+    // chain forces all mutations to precede the replacement.
+    std::vector<CMutableTransaction> ordered_mutations;
+    ordered_mutations.reserve(32);
+    for (uint32_t i{0}; i < 32; ++i) {
+        CMutableTransaction mutation{
+            (i % 2 == 0) ? PQServiceTransaction(replaced_operator)
+                         : PQRegistrarTransaction(replaced_operator)};
+        mutation.vin[0].prevout =
+            i == 0
+                ? COutPoint{PQMempoolHash(61'000), 0}
+                : COutPoint{ordered_mutations.back().GetHash(), 0};
+        ordered_mutations.push_back(std::move(mutation));
+    }
+    CMutableTransaction ordered_many_replacement{replacement};
+    ordered_many_replacement.vin[0].prevout =
+        COutPoint{ordered_mutations.back().GetHash(), 0};
+    std::vector<CTransactionRef> ordered_package;
+    ordered_package.reserve(ordered_mutations.size() + 1);
+    for (const auto& mutation : ordered_mutations) {
+        ordered_package.push_back(MakeTransactionRef(mutation));
+    }
+    ordered_package.push_back(MakeTransactionRef(ordered_many_replacement));
+    BOOST_CHECK(!find_replacement_conflict(ordered_package));
+
+    for (const auto& mutation : ordered_mutations) {
+        pool.addUnchecked(entry.FromTx(mutation));
+    }
+    BOOST_CHECK(!find_replacement_conflict(
+        {MakeTransactionRef(ordered_many_replacement)}));
+    pool.removeRecursive(CTransaction{ordered_mutations.front()},
+                         REMOVAL_REASON_DUMMY);
+    BOOST_CHECK_EQUAL(pool.size(), 0U);
+
+    // Package admission may stage up to 64 provider mutations locally, but it
+    // must fail closed before doing unbounded package-local work.
+    std::vector<CMutableTransaction> bounded_mutations;
+    std::vector<CTransactionRef> bounded_package;
+    bounded_mutations.reserve(65);
+    bounded_package.reserve(65);
+    for (uint32_t i{0}; i < 65; ++i) {
+        auto mutation{PQServiceTransaction(PQMempoolHash(90'000 + i))};
+        mutation.vin[0].prevout =
+            COutPoint{PQMempoolHash(91'000 + i), 0};
+        bounded_mutations.push_back(std::move(mutation));
+        bounded_package.push_back(
+            MakeTransactionRef(bounded_mutations.back()));
+    }
+    const std::vector<CTransactionRef> allowed_package{
+        bounded_package.begin(), bounded_package.begin() + 64};
+    BOOST_CHECK(!find_replacement_conflict(allowed_package));
+    conflict_index = find_replacement_conflict(bounded_package);
+    BOOST_REQUIRE(conflict_index);
+    BOOST_CHECK_EQUAL(*conflict_index, 0U);
+
+    // Unrelated provider reservations must not be copied or walked for a
+    // replacement. Only references indexed under the replaced operator are
+    // relevant to its UTXO-ordering check.
+    constexpr uint32_t unrelated_count{512};
+    std::vector<CMutableTransaction> unrelated_mutations;
+    unrelated_mutations.reserve(unrelated_count);
+    for (uint32_t i{0}; i < unrelated_count; ++i) {
+        auto mutation{PQServiceTransaction(PQMempoolHash(100'000 + i))};
+        mutation.vin[0].prevout =
+            COutPoint{PQMempoolHash(110'000 + i), 0};
+        unrelated_mutations.push_back(std::move(mutation));
+        pool.addUnchecked(entry.FromTx(unrelated_mutations.back()));
+    }
+    pool.addUnchecked(entry.FromTx(replacement_service));
+    CMutableTransaction indexed_replacement{replacement};
+    indexed_replacement.vin[0].prevout =
+        COutPoint{replacement_service.GetHash(), 0};
+    PQMempoolTestAccess::ResetPackageProviderConflictStats(pool);
+    BOOST_CHECK(!find_replacement_conflict(
+        {MakeTransactionRef(indexed_replacement)}));
+    const auto [registry_requests, indexed_references]{
+        PQMempoolTestAccess::LastPackageProviderConflictStats(pool)};
+    BOOST_CHECK_EQUAL(registry_requests, 0U);
+    BOOST_CHECK_EQUAL(indexed_references, 1U);
+    BOOST_CHECK_EQUAL(pool.size(), unrelated_count + 1);
+    pool.RemoveProviderTransactionsForReorg();
+    BOOST_CHECK_EQUAL(pool.size(), 0U);
+
+    // Connected external-collateral replacement and PQ mutations evict the
+    // opposite pending transaction plus descendants using the parent-tip DMN
+    // list, so block assembly never sees a stale provider entry.
+    CMutableTransaction replacement_global_child{
+        PQMempoolBaseTransaction(2, 410)};
+    replacement_global_child.vin[0].prevout =
+        COutPoint{replacement_global.GetHash(), 0};
+    CMutableTransaction replacement_service_child{
+        PQMempoolBaseTransaction(2, 411)};
+    replacement_service_child.vin[0].prevout =
+        COutPoint{replacement_service.GetHash(), 0};
+    pool.addUnchecked(entry.FromTx(replacement_global));
+    pool.addUnchecked(entry.FromTx(replacement_global_child));
+    pool.addUnchecked(entry.FromTx(replacement_service));
+    pool.addUnchecked(entry.FromTx(replacement_service_child));
+    BOOST_REQUIRE_EQUAL(pool.size(), 4U);
+    PQMempoolTestAccess::RemoveProTxConflicts(
+        pool, CTransaction{replacement}, replacement_list);
+    BOOST_CHECK_EQUAL(pool.size(), 0U);
+
+    CMutableTransaction replacement_child{
+        PQMempoolBaseTransaction(2, 412)};
+    replacement_child.vin[0].prevout =
+        COutPoint{replacement.GetHash(), 0};
+    pool.addUnchecked(entry.FromTx(replacement));
+    pool.addUnchecked(entry.FromTx(replacement_child));
+    BOOST_REQUIRE_EQUAL(pool.size(), 2U);
+    PQMempoolTestAccess::RemoveProTxConflicts(
+        pool, CTransaction{replacement_global}, replacement_list);
+    BOOST_CHECK_EQUAL(pool.size(), 0U);
+
+    CMutableTransaction mined_collateral_spend{
+        PQMempoolBaseTransaction(2, 420)};
+    mined_collateral_spend.vin[0].prevout = replaced_collateral;
+    BOOST_CHECK(!find_replacement_conflict(
+        {MakeTransactionRef(replacement_service),
+         MakeTransactionRef(mined_collateral_spend)}));
+    BOOST_CHECK(!find_replacement_conflict(
+        {MakeTransactionRef(mined_collateral_spend),
+         MakeTransactionRef(replacement_service)}));
+    conflict_index = find_replacement_conflict(
+        {MakeTransactionRef(replacement_global),
+         MakeTransactionRef(mined_collateral_spend)});
+    BOOST_REQUIRE(conflict_index);
+    BOOST_CHECK_EQUAL(*conflict_index, 1U);
+    conflict_index = find_replacement_conflict(
+        {MakeTransactionRef(mined_collateral_spend),
+         MakeTransactionRef(replacement_global)});
+    BOOST_REQUIRE(conflict_index);
+    BOOST_CHECK_EQUAL(*conflict_index, 1U);
+
+    const std::vector<std::pair<const CMutableTransaction*,
+                                const CMutableTransaction*>> conflict_cases{
+        {&global, &revoke},
+        {&service, &revoke},
+        {&registrar, &revoke},
+        {&revoke, &service},
+        {&revoke, &registrar},
+    };
+    for (const auto& [mempool_tx, block_tx] : conflict_cases) {
+        pool.addUnchecked(entry.FromTx(*mempool_tx));
+        BOOST_REQUIRE_EQUAL(pool.size(), 1U);
+        pool.removeForBlock({MakeTransactionRef(*block_tx)}, 1);
+        BOOST_CHECK_EQUAL(pool.size(), 0U);
+    }
+
+    CMutableTransaction registration_child{
+        PQMempoolBaseTransaction(2, 450)};
+    registration_child.vin[0].prevout =
+        COutPoint{registration_a.GetHash(), 0};
+    pool.addUnchecked(entry.FromTx(registration_a));
+    pool.addUnchecked(entry.FromTx(registration_child));
+    BOOST_REQUIRE_EQUAL(pool.size(), 2U);
+    pool.removeForBlock({MakeTransactionRef(collateral_spend)}, 1);
+    BOOST_CHECK_EQUAL(pool.size(), 0U);
+
+    CMutableTransaction global_child{PQMempoolBaseTransaction(2, 500)};
+    global_child.vin[0].prevout = COutPoint{global.GetHash(), 0};
+    pool.addUnchecked(entry.FromTx(global));
+    pool.addUnchecked(entry.FromTx(global_child));
+    BOOST_REQUIRE_EQUAL(pool.size(), 2U);
+    pool.removeForBlock({MakeTransactionRef(same_key)}, 1);
+    BOOST_CHECK_EQUAL(pool.size(), 0U);
+
+    pool.addUnchecked(entry.FromTx(global));
+    BOOST_REQUIRE_EQUAL(pool.size(), 1U);
+    pool.removeForBlock({MakeTransactionRef(same_tree)}, 1);
+    BOOST_CHECK_EQUAL(pool.size(), 0U);
+
+    const uint256 rotated_operator{PQMempoolHash(80'000)};
+    const auto pending_service{PQServiceTransaction(rotated_operator)};
+    CMutableTransaction pending_service_child{
+        PQMempoolBaseTransaction(2, 799)};
+    pending_service_child.vin[0].prevout =
+        COutPoint{pending_service.GetHash(), 0};
+    pool.addUnchecked(entry.FromTx(pending_service));
+    pool.addUnchecked(entry.FromTx(pending_service_child));
+    BOOST_REQUIRE_EQUAL(pool.size(), 2U);
+    pool.removeForBlock(
+        {MakeTransactionRef(PQGlobalKeyTransaction(rotated_operator, 30, 30))},
+        1);
+    BOOST_CHECK_EQUAL(pool.size(), 0U);
+
+    // A reorg changes branch-bound provider membership and signing keys. Drop
+    // those transactions and descendants without scanning/verifying SLH under
+    // the global locks; unrelated ordinary transactions must survive.
+    const auto stale_service{
+        PQServiceTransaction(PQMempoolHash(80'001))};
+    CMutableTransaction stale_child{PQMempoolBaseTransaction(2, 800)};
+    stale_child.vin[0].prevout = COutPoint{stale_service.GetHash(), 0};
+    const auto ordinary{PQMempoolBaseTransaction(2, 801)};
+    pool.addUnchecked(entry.FromTx(stale_service));
+    pool.addUnchecked(entry.FromTx(stale_child));
+    pool.addUnchecked(entry.FromTx(ordinary));
+    BOOST_REQUIRE_EQUAL(pool.size(), 3U);
+    pool.RemoveProviderTransactionsForReorg();
+    BOOST_CHECK_EQUAL(pool.size(), 1U);
+    BOOST_CHECK(pool.exists(GenTxid::Txid(ordinary.GetHash())));
+    BOOST_CHECK(!pool.exists(GenTxid::Txid(stale_service.GetHash())));
+    BOOST_CHECK(!pool.exists(GenTxid::Txid(stale_child.GetHash())));
+    BOOST_CHECK(!pool.existsProviderTxConflict(
+        CTransaction{PQRevokeTransaction(PQMempoolHash(80'001))},
+        active_tip));
+    pool.removeRecursive(CTransaction{ordinary}, REMOVAL_REASON_DUMMY);
+
+    // A normal forward connection to A - 1 changes the next-block provider
+    // wire era. Drop legacy provider payloads and descendants without evicting
+    // preparation-era global-key registrations or ordinary transactions.
+    CMutableTransaction legacy_service{PQServiceTransaction(
+        PQMempoolHash(80'002))};
+    CProUpServTx legacy_payload;
+    BOOST_REQUIRE(GetTxPayload(legacy_service, legacy_payload));
+    legacy_payload.nVersion = CProUpServTx::UPDATE_NEVM_VERSION;
+    legacy_payload.legacySig = {};
+    legacy_payload.globalKeyVersion = 0;
+    legacy_payload.pqSig = {};
+    SetTxPayload(legacy_service, legacy_payload);
+    CMutableTransaction legacy_child{PQMempoolBaseTransaction(2, 802)};
+    legacy_child.vin[0].prevout =
+        COutPoint{legacy_service.GetHash(), 0};
+    const auto retained_global{
+        PQGlobalKeyTransaction(PQMempoolHash(80'003), 31, 31)};
+    const auto retained_ordinary{PQMempoolBaseTransaction(2, 803)};
+    pool.addUnchecked(entry.FromTx(legacy_service));
+    pool.addUnchecked(entry.FromTx(legacy_child));
+    pool.addUnchecked(entry.FromTx(retained_global));
+    pool.addUnchecked(entry.FromTx(retained_ordinary));
+    BOOST_REQUIRE_EQUAL(pool.size(), 4U);
+    pool.RemoveLegacyProviderTransactionsForPQActivation();
+    BOOST_CHECK_EQUAL(pool.size(), 2U);
+    BOOST_CHECK(!pool.exists(GenTxid::Txid(legacy_service.GetHash())));
+    BOOST_CHECK(!pool.exists(GenTxid::Txid(legacy_child.GetHash())));
+    BOOST_CHECK(pool.exists(GenTxid::Txid(retained_global.GetHash())));
+    BOOST_CHECK(pool.exists(GenTxid::Txid(retained_ordinary.GetHash())));
+    pool.removeRecursive(CTransaction{retained_global}, REMOVAL_REASON_DUMMY);
+    pool.removeRecursive(CTransaction{retained_ordinary},
+                         REMOVAL_REASON_DUMMY);
+}
+
+BOOST_AUTO_TEST_CASE(PQReadinessConflictsAreIndexedWithoutNewKeyReservations)
+{
+    CTxMemPool& pool{*Assert(m_node.mempool)};
+    LOCK2(cs_main, pool.cs);
+    TestMemPoolEntryHelper entry;
+    const auto* tip{m_node.chainman->ActiveTip()};
+    const uint256 pro_tx_hash{PQMempoolHash(870)};
+    const COutPoint collateral{PQMempoolHash(871), 0};
+    const auto ready{PQReadinessTransaction(pro_tx_hash)};
+    const auto global{PQGlobalKeyTransaction(pro_tx_hash)};
+    const auto revoke{PQRevokeTransaction(pro_tx_hash)};
+    BOOST_CHECK(IsMasternodeTx(ready.nVersion));
+    BOOST_CHECK(IsPQActivationQuarantinedProviderTxVersion(ready.nVersion));
+    BOOST_REQUIRE(pool.addUnchecked(entry.FromTx(ready), true, nullptr, collateral));
+    BOOST_CHECK(pool.existsProviderTxConflict(CTransaction(global), tip));
+    BOOST_CHECK(pool.existsProviderTxConflict(CTransaction(revoke), tip));
+    auto spend{PQMempoolBaseTransaction(2, 872)};
+    spend.vin[0].prevout = collateral;
+    BOOST_CHECK(pool.existsProviderTxConflict(CTransaction(spend), tip));
+    pool.removeRecursive(CTransaction(ready), REMOVAL_REASON_DUMMY);
+    BOOST_CHECK(!pool.existsProviderTxConflict(CTransaction(spend), tip));
+
+    llmq::pq::PQRegistryMempoolView registry_view;
+    registry_view.operators = {{
+        .pro_tx_hash = pro_tx_hash,
+        .state_exists = 1,
+        .has_global_key = 0,
+        .current_commitment = {},
+    }};
+    const auto mn_list{PQMempoolMNList(pro_tx_hash, collateral)};
+    const auto find_conflict = [&](const std::vector<CTransactionRef>& package)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main, pool.cs) {
+        return PQMempoolTestAccess::FindPackageProviderTxConflict(pool, package, mn_list, registry_view);
+    };
+    BOOST_CHECK(!find_conflict({MakeTransactionRef(ready)}));
+    BOOST_CHECK(find_conflict({MakeTransactionRef(ready), MakeTransactionRef(global)}) == 1U);
+    BOOST_CHECK(find_conflict({MakeTransactionRef(global), MakeTransactionRef(ready)}) == 1U);
+    BOOST_CHECK(find_conflict({MakeTransactionRef(ready), MakeTransactionRef(revoke)}) == 1U);
+    BOOST_CHECK(find_conflict({MakeTransactionRef(revoke), MakeTransactionRef(ready)}) == 1U);
+    BOOST_CHECK(find_conflict({MakeTransactionRef(ready), MakeTransactionRef(spend)}) == 1U);
+    BOOST_CHECK(find_conflict({MakeTransactionRef(spend), MakeTransactionRef(ready)}) == 1U);
+    pool.addUnchecked(entry.FromTx(ready));
+    PQMempoolTestAccess::RemoveProTxConflicts(pool, CTransaction(global), mn_list);
+    BOOST_CHECK(!pool.exists(GenTxid::Txid(ready.GetHash())));
+}
+
+BOOST_AUTO_TEST_CASE(PQReadinessExpiresAtForwardSnapshotTipWithoutKeyReservations)
+{
+    CTxMemPool& pool{*Assert(m_node.mempool)};
+    LOCK2(cs_main, pool.cs);
+    TestMemPoolEntryHelper entry;
+    llmq::pq::PQRegistryMempoolView view;
+    view.config.schedule.epoch_origin = 1440;
+    view.config.btcc_schedule.candidate_origin = 1440;
+    view.config.recovery_refresh = {
+        .activation_height = 1000,
+        .grace_groups = 1,
+        .snapshot_lag_blocks = 140,
+        .entropy_delay_blocks = 2,
+        .carrier_delay_blocks = 2,
+        .carrier_min_depth_blocks = 2,
+        .snapshot_min_work_blocks = 1,
+        .carrier_min_work_blocks = 1,
+        .readiness_window_blocks = 4,
+    };
+    const auto coordinates{llmq::pq::DeriveRecoveryRefreshCoordinates(
+        view.config.schedule, view.config.btcc_schedule,
+        view.config.recovery_refresh, 0)};
+    BOOST_REQUIRE(coordinates);
+    const auto next_coordinates{llmq::pq::DeriveRecoveryRefreshCoordinates(
+        view.config.schedule, view.config.btcc_schedule,
+        view.config.recovery_refresh, 1)};
+    BOOST_REQUIRE(next_coordinates);
+    auto ready{PQReadinessTransaction(PQMempoolHash(880))};
+    llmq::pq::RecoveryReadinessTxPayload payload;
+    BOOST_REQUIRE(GetTxPayload(ready, payload));
+    payload.readiness.group = 0;
+    payload.readiness.reference_height = coordinates->readiness_reference_height;
+    SetTxPayload(ready, payload);
+    auto child{PQMempoolBaseTransaction(2, 881)};
+    child.vin[0].prevout = COutPoint{ready.GetHash(), 0};
+    auto later{PQReadinessTransaction(PQMempoolHash(882))};
+    later.vin[0].prevout = COutPoint{PQMempoolHash(883), 0};
+    BOOST_REQUIRE(GetTxPayload(later, payload));
+    payload.readiness.reference_height = next_coordinates->readiness_reference_height;
+    payload.readiness.transaction_inputs_hash = CalcTxInputsHash(CTransaction(later));
+    SetTxPayload(later, payload);
+    const auto ordinary{PQMempoolBaseTransaction(2, 884)};
+    const auto revoke{PQRevokeTransaction(PQMempoolHash(885))};
+    pool.addUnchecked(entry.FromTx(ready));
+    pool.addUnchecked(entry.FromTx(child));
+    pool.addUnchecked(entry.FromTx(later));
+    pool.addUnchecked(entry.FromTx(ordinary));
+    pool.addUnchecked(entry.FromTx(revoke));
+    BOOST_REQUIRE_EQUAL(pool.size(), 5U);
+
+    view.tip_height = coordinates->snapshot_height - 1;
+    BOOST_CHECK(PQMempoolTestAccess::RebuildPQRegistryReservations(pool, view));
+    BOOST_CHECK_EQUAL(pool.size(), 5U);
+    // Next height S remains admissible; after an omitted declaration's block S
+    // connects, both the declaration and its funding descendants must leave.
+    view.tip_height = coordinates->snapshot_height;
+    BOOST_CHECK(PQMempoolTestAccess::RebuildPQRegistryReservations(pool, view));
+    BOOST_CHECK_EQUAL(pool.size(), 3U);
+    BOOST_CHECK(!pool.exists(GenTxid::Txid(ready.GetHash())));
+    BOOST_CHECK(!pool.exists(GenTxid::Txid(child.GetHash())));
+    BOOST_CHECK(pool.exists(GenTxid::Txid(later.GetHash())));
+    BOOST_CHECK(pool.exists(GenTxid::Txid(ordinary.GetHash())));
+    BOOST_CHECK(pool.exists(GenTxid::Txid(revoke.GetHash())));
+    view.tip_height = next_coordinates->snapshot_height - 1;
+    BOOST_CHECK(PQMempoolTestAccess::RebuildPQRegistryReservations(pool, view));
+    BOOST_CHECK(pool.exists(GenTxid::Txid(later.GetHash())));
+    view.tip_height = next_coordinates->snapshot_height;
+    BOOST_CHECK(PQMempoolTestAccess::RebuildPQRegistryReservations(pool, view));
+    BOOST_CHECK(!pool.exists(GenTxid::Txid(later.GetHash())));
+
+    // The production tip entry point may not skip a readiness-only pool. A
+    // failed exact-tip view drops registry transactions, not unrelated entries.
+    pool.addUnchecked(entry.FromTx(ready));
+    pool.addUnchecked(entry.FromTx(child));
+    BOOST_CHECK(!pool.RebuildPQRegistryReservations(nullptr));
+    BOOST_CHECK(!pool.exists(GenTxid::Txid(ready.GetHash())));
+    BOOST_CHECK(!pool.exists(GenTxid::Txid(child.GetHash())));
+    BOOST_CHECK_EQUAL(pool.size(), 2U);
+    pool.removeRecursive(CTransaction(ordinary), REMOVAL_REASON_DUMMY);
+    pool.removeRecursive(CTransaction(revoke), REMOVAL_REASON_DUMMY);
+}
+
+BOOST_AUTO_TEST_CASE(PQRegistryMempoolCapacity)
+{
+    CTxMemPool& pool = *Assert(m_node.mempool);
+    LOCK2(cs_main, pool.cs);
+    const CBlockIndex* active_tip{m_node.chainman->ActiveTip()};
+
+    const uint256 operator_a{PQMempoolHash(70'001)};
+    const uint256 operator_b{PQMempoolHash(70'002)};
+    const auto global_a{PQGlobalKeyTransaction(operator_a, 10, 10)};
+    const auto global_b{PQGlobalKeyTransaction(operator_b, 11, 11)};
+    const std::vector<CTransactionRef> both{
+        MakeTransactionRef(global_a), MakeTransactionRef(global_b)};
+
+    auto missing_view = [&](size_t operator_count) {
+        llmq::pq::PQRegistryMempoolView view;
+        view.operator_state_count = operator_count;
+        view.operators = {
+            {.pro_tx_hash = operator_a,
+             .state_exists = 0,
+             .has_global_key = 0,
+             .current_commitment = {}},
+            {.pro_tx_hash = operator_b,
+             .state_exists = 0,
+             .has_global_key = 0,
+             .current_commitment = {}},
+        };
+        std::sort(view.operators.begin(), view.operators.end(),
+                  [](const auto& lhs, const auto& rhs) {
+                      return lhs.pro_tx_hash < rhs.pro_tx_hash;
+                  });
+        return view;
+    };
+
+    auto view{missing_view(llmq::pq::MAX_PQ_OPERATOR_STATES - 1)};
+    BOOST_CHECK(!pool.FindPackageProviderTxConflict(
+        {both.front()}, active_tip, view));
+    const auto boundary_conflict{pool.FindPackageProviderTxConflict(
+        both, active_tip, view)};
+    BOOST_REQUIRE(boundary_conflict);
+    BOOST_CHECK_EQUAL(*boundary_conflict, 1U);
+
+    // A rotation that retains the exact current commitment consumes no new
+    // operator slot, even when the registry is exactly full.
+    view = missing_view(llmq::pq::MAX_PQ_OPERATOR_STATES);
+    auto current_a{std::find_if(
+        view.operators.begin(), view.operators.end(), [&](const auto& state) {
+            return state.pro_tx_hash == operator_a;
+        })};
+    BOOST_REQUIRE(current_a != view.operators.end());
+    current_a->state_exists = 1;
+    current_a->has_global_key = 1;
+    current_a->current_commitment = PQMempoolCommitment(10);
+    BOOST_CHECK(!pool.FindPackageProviderTxConflict(
+        {both.front()}, active_tip, view));
+    const auto full_operator_conflict{pool.FindPackageProviderTxConflict(
+        {both.back()}, active_tip, view)};
+    BOOST_REQUIRE(full_operator_conflict);
+    BOOST_CHECK_EQUAL(*full_operator_conflict, 0U);
+
+    // Malformed over-cap summaries fail closed without unsigned wraparound.
+    view.operator_state_count = llmq::pq::MAX_PQ_OPERATOR_STATES + 1;
+    const auto over_cap_conflict{pool.FindPackageProviderTxConflict(
+        {both.front()}, active_tip, view)};
+    BOOST_REQUIRE(over_cap_conflict);
+    BOOST_CHECK_EQUAL(*over_cap_conflict, 0U);
+
+    TestMemPoolEntryHelper entry;
+    CMutableTransaction child{PQMempoolBaseTransaction(2, 900)};
+    child.vin[0].prevout = COutPoint{global_a.GetHash(), 0};
+    pool.addUnchecked(entry.FromTx(global_a));
+    pool.addUnchecked(entry.FromTx(child));
+    auto aged_view{missing_view(0)};
+    aged_view.has_next_block_schedule = 1;
+    aged_view.next_first_mutable_epoch = 1;
+    BOOST_CHECK(PQMempoolTestAccess::RebuildPQRegistryReservations(
+        pool, aged_view));
+    BOOST_CHECK_EQUAL(pool.size(), 0U);
+
+    // StartsAtMutableCutoff does not apply when a rotation deliberately keeps
+    // the exact current commitment, so it survives the same cutoff advance.
+    pool.addUnchecked(entry.FromTx(global_a));
+    auto reused_view{aged_view};
+    auto reused{std::find_if(
+        reused_view.operators.begin(), reused_view.operators.end(),
+        [&](const auto& state) {
+            return state.pro_tx_hash == operator_a;
+        })};
+    BOOST_REQUIRE(reused != reused_view.operators.end());
+    reused->state_exists = 1;
+    reused->has_global_key = 1;
+    reused->current_commitment = PQMempoolCommitment(10);
+    BOOST_CHECK(PQMempoolTestAccess::RebuildPQRegistryReservations(
+        pool, reused_view));
+    BOOST_CHECK_EQUAL(pool.size(), 1U);
+    pool.removeRecursive(CTransaction{global_a}, REMOVAL_REASON_DUMMY);
+
+    // Loading branch state for a package is proportional to the package's
+    // operators, regardless of unrelated global-key reservations already in
+    // the mempool.
+    constexpr uint32_t unrelated_count{128};
+    std::vector<CMutableTransaction> unrelated_globals;
+    unrelated_globals.reserve(unrelated_count);
+    for (uint32_t i{0}; i < unrelated_count; ++i) {
+        auto unrelated{PQGlobalKeyTransaction(
+            PQMempoolHash(120'000 + i), 64 + i, 1'000 + i)};
+        unrelated.vin[0].prevout =
+            COutPoint{PQMempoolHash(130'000 + i), 0};
+        unrelated_globals.push_back(std::move(unrelated));
+        pool.addUnchecked(entry.FromTx(unrelated_globals.back()));
+    }
+    const auto package_global{
+        PQGlobalKeyTransaction(PQMempoolHash(140'000), 250, 2'000)};
+    (void)pool.FindPackageProviderTxConflict(
+        {MakeTransactionRef(package_global)}, active_tip);
+    const auto [registry_requests, indexed_references]{
+        PQMempoolTestAccess::LastPackageProviderConflictStats(pool)};
+    BOOST_CHECK_EQUAL(registry_requests, 1U);
+    BOOST_CHECK_EQUAL(indexed_references, 0U);
+    BOOST_CHECK_EQUAL(pool.size(), unrelated_count);
+    pool.RemoveProviderTransactionsForReorg();
+    BOOST_CHECK_EQUAL(pool.size(), 0U);
+}
+
+// SYSCOIN END: PQ provider mempool conflict and reservation tests.
 
 BOOST_AUTO_TEST_CASE(MempoolRemoveTest)
 {

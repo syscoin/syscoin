@@ -8,6 +8,7 @@
 #include <chain.h>
 #include <coins.h>
 #include <consensus/params.h>
+#include <consensus/pq_migration_config.h> // SYSCOIN: validate the height-only PQ deployment.
 #include <logging.h>
 #include <node/blockstorage.h>
 #include <node/caches.h>
@@ -25,6 +26,7 @@
 #include <services/assetconsensus.h>
 #include <evo/evodb.h>
 #include <evo/deterministicmns.h>
+#include <llmq/quorums_chainlocks.h> // SYSCOIN: startup handoff finality provenance.
 #include <llmq/quorums_init.h>
 #include <governance/governance.h>
 #include <netfulfilledman.h>
@@ -38,6 +40,47 @@
 #include <vector>
 
 namespace node {
+namespace {
+
+// SYSCOIN: A loaded coins database is usable only when its branch-local
+// deterministic-MN, rollback, probation, and PQ-registry state is intact.
+bool VerifyActivePQState(const Chainstate& chainstate)
+    EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    const auto& consensus = chainstate.m_chainman.GetConsensus();
+    llmq::pq::PQRegistryConfig pq_config;
+    const auto pq_deployment =
+        llmq::pq::GetPQRegistryConfig(consensus, pq_config);
+    if (pq_deployment ==
+        llmq::pq::PQRegistryDeploymentResult::INVALID_CONFIGURATION) {
+        return false;
+    }
+    if (Consensus::CheckPQActivationConfiguration(consensus) ==
+        Consensus::PQActivationResult::INVALID_CONFIGURATION) {
+        return false;
+    }
+    const CBlockIndex* tip = chainstate.m_chain.Tip();
+    llmq::pq::PQPaymentProbationStateView probation_state;
+    if (tip != nullptr && tip->nHeight >= consensus.DIP0003Height &&
+        (deterministicMNManager == nullptr ||
+         !deterministicMNManager->VerifyPersistedSnapshot(tip) ||
+         !deterministicMNManager->VerifyInverseJournalTipSeal(tip) ||
+         !deterministicMNManager->GetPaymentProbationStateView(
+             tip, probation_state))) {
+        // The inverse DB is intentionally versioned and not backfilled from a
+        // bounded snapshot window. Fresh sync or reindex inductively publishes
+        // each predecessor seal. Startup also resolves the exact probation
+        // root referenced by the tip; later physical LevelDB damage remains
+        // fail-closed at point of use.
+        return false;
+    }
+    return pq_deployment != llmq::pq::PQRegistryDeploymentResult::VALID ||
+           tip == nullptr ||
+           (deterministicMNManager != nullptr &&
+            deterministicMNManager->VerifyPersistedPQRegistrySnapshot(tip));
+}
+
+} // namespace
 // Complete initialization of chainstates after the initial call has been made
 // to ChainstateManager::InitializeChainstate().
 static ChainstateLoadResult CompleteChainstateInitialization(
@@ -76,7 +119,9 @@ static ChainstateLoadResult CompleteChainstateInitialization(
         LogPrintf("Continuing reindex from persisted marker; forcing NEVM/LLMQ database reinitialization.\n");
     }
 
-    LogPrintf("Creating LLMQ databases...\n");
+    // SYSCOIN: Recreate fork-owned deterministic-MN, governance, and PQ
+    // finality state alongside the Bitcoin block-tree lifecycle.
+    LogPrintf("Creating legacy quorum replay state and PQ finality...\n");
     llmq::DestroyLLMQSystem();
     auto evoDmnDbParams = DBParams{
         .path = chainman.m_options.datadir / "evodb_dmn",
@@ -94,25 +139,10 @@ static ChainstateLoadResult CompleteChainstateInitialization(
     netfulfilledman.reset(new CNetFulfilledRequestManager());
     mmetaman.reset();
     mmetaman.reset(new CMasternodeMetaMan());
-    auto quorumCommitmentDB = DBParams{
-        .path = chainman.m_options.datadir / "evodb_qc",
-        .cache_bytes = static_cast<size_t>(cache_sizes.evo_qc_db),
-        .memory_only = options.block_tree_db_in_memory,
-        .wipe_data = effective_reindex_geth,
-        .options = chainman.m_options.block_tree_db};
-    auto quorumVectorDB = DBParams{
-        .path = chainman.m_options.datadir / "evodb_qvvecs",
-        .cache_bytes = static_cast<size_t>(cache_sizes.evo_qvvecs_db),
-        .memory_only = options.block_tree_db_in_memory,
-        .wipe_data = effective_reindex_geth,
-        .options = chainman.m_options.block_tree_db};
-    auto quorumSkDB = DBParams{
-        .path = chainman.m_options.datadir / "evodb_qsk",
-        .cache_bytes = static_cast<size_t>(cache_sizes.evo_qsk_db),
-        .memory_only = options.block_tree_db_in_memory,
-        .wipe_data = effective_reindex_geth,
-        .options = chainman.m_options.block_tree_db};
-    llmq::InitLLMQSystem(quorumCommitmentDB, quorumVectorDB, quorumSkDB, options.block_tree_db_in_memory, *options.connman, *options.banman, *options.peerman, chainman, effective_reindex_geth);
+    // SYSCOIN: Audit state follows Core reconstruction, including its prune
+    // checkpoint. A Geth-only reset retains the exact audit archive.
+    llmq::InitLLMQSystem(*options.connman, *options.peerman, chainman,
+                        options.reindex || options.reindex_chainstate);
     pnevmtxrootsdb.reset();
     pnevmtxrootsdb = std::make_unique<CNEVMTxRootsDB>(DBParams{
         .path = chainman.m_options.datadir / "nevmtxroots",
@@ -159,6 +189,22 @@ static ChainstateLoadResult CompleteChainstateInitialization(
         if (options.check_interrupt && options.check_interrupt()) return {ChainstateLoadStatus::INTERRUPTED, {}};
         return {ChainstateLoadStatus::FAILURE, _("Error loading block database")};
     }
+    // SYSCOIN: Restore the exceptional external-effect retention head before
+    // startup pruning, inverse-metadata maintenance, or coins reconstruction.
+    std::string pending_connect_error;
+    if (!chainman.InitializeNEVMPendingConnect(pending_connect_error)) {
+        return {ChainstateLoadStatus::FAILURE_INCOMPATIBLE_DB,
+                Untranslated("Cannot restore NEVM pending connection: " + pending_connect_error)};
+    }
+
+    // SYSCOIN BEGIN: Authenticate retained NEVM commitments before removing files
+    // whose pruning metadata survived a crash. Older pruned databases cannot
+    // backfill this evidence after their historical block bodies are gone.
+    if (!fReindex && !chainman.m_blockman.ScanAndUnlinkAlreadyPrunedFiles()) {
+        return {ChainstateLoadStatus::FAILURE_INCOMPATIBLE_DB,
+                _("Pruned NEVM commitment evidence is missing or corrupt. Restart with -reindex to rebuild the block database and redownload pruned history.")};
+    }
+    // SYSCOIN END: Authenticate retained NEVM commitments before removing files.
 
     if (!chainman.BlockIndex().empty() &&
             !chainman.m_blockman.LookupBlockIndex(chainman.GetConsensus().hashGenesisBlock)) {
@@ -198,13 +244,58 @@ static ChainstateLoadResult CompleteChainstateInitialization(
     // block tree into BlockIndex()!
     // SYSCOIN
     bool coinsViewEmpty = false;
-    for (Chainstate* chainstate : chainman.GetAll()) {
+    std::vector<Chainstate*> loaded_chainstates;
+    auto chainstates{chainman.GetAll()};
+    Chainstate* const active_chainstate{&chainman.ActiveChainstate()};
+    // SYSCOIN BEGIN: Publish the recovered tip with durable finality authority.
+    const auto publish_startup_tip = [&](const CBlockIndex* recovered_tip)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+        return deterministicMNManager == nullptr ||
+               deterministicMNManager->UpdatedBlockTipForStartup(
+                   recovered_tip,
+                   [&](const uint256& hash)
+                       EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+                       return chainman.m_blockman.LookupBlockIndex(hash);
+                   },
+                   llmq::chainLocksHandler
+                       ? llmq::chainLocksHandler
+                             ->GetDurableFinalityTargetForStartup()
+                       : std::nullopt);
+    };
+    // SYSCOIN END: Publish the recovered tip with durable finality authority.
+    // SYSCOIN: The active recovery head is the ancestry authority for shared
+    // journal-bound stores. Load it before an AssumeUTXO background state.
+    std::stable_partition(
+        chainstates.begin(), chainstates.end(),
+        [active_chainstate](const Chainstate* chainstate) {
+            return chainstate == active_chainstate;
+        });
+    for (Chainstate* chainstate : chainstates) {
         LogPrintf("Initializing chainstate %s\n", chainstate->ToString());
 
         chainstate->InitCoinsDB(
             /*cache_size_bytes=*/chainman.m_total_coinsdb_cache * init_cache_fraction,
             /*in_memory=*/options.coins_db_in_memory,
             /*should_wipe=*/options.reindex || options.reindex_chainstate);
+
+        // SYSCOIN BEGIN: Persist replay quarantine before opaque legacy state
+        // can be reconstructed by this BLS-free binary.
+        if (chainstate == active_chainstate) {
+            const bool coins_db_empty{
+                chainstate->CoinsDB().GetBestBlock().IsNull() &&
+                chainstate->CoinsDB().GetHeadBlocks().empty()};
+            const bool force_historical_replay{
+                options.reindex || options.reindex_chainstate ||
+                disk_reindexing || chainman.IsSnapshotActive()};
+            bilingual_str handoff_error;
+            if (!chainman.PreparePQActivationHandoff(
+                    force_historical_replay, coins_db_empty,
+                    handoff_error)) {
+                return {ChainstateLoadStatus::FAILURE_INCOMPATIBLE_DB,
+                        handoff_error};
+            }
+        }
+        // SYSCOIN END: Persist replay quarantine before legacy replay.
 
         if (options.coins_error_cb) {
             chainstate->CoinsErrorCatcher().AddReadErrCallback(options.coins_error_cb);
@@ -220,7 +311,11 @@ static ChainstateLoadResult CompleteChainstateInitialization(
 
         // ReplayBlocks is a no-op if we cleared the coinsviewdb with -reindex or -reindex-chainstate
         if (!chainstate->ReplayBlocks()) {
-            return {ChainstateLoadStatus::FAILURE, _("Unable to replay blocks. You will need to rebuild the database using -reindex-chainstate.")};
+            // SYSCOIN: Pruned recovery requires full reindex and redownload.
+            return {ChainstateLoadStatus::FAILURE,
+                    chainman.m_blockman.m_have_pruned
+                        ? _("Unable to replay blocks. Restart with -reindex to rebuild the block database and redownload pruned history.")
+                        : _("Unable to replay blocks. You will need to rebuild the database using -reindex-chainstate.")};
         }
 
         // The on-disk coinsdb is now in a good state, create the cache
@@ -233,10 +328,57 @@ static ChainstateLoadResult CompleteChainstateInitialization(
                 return {ChainstateLoadStatus::FAILURE, _("Error initializing block database")};
             }
             assert(chainstate->m_chain.Tip() != nullptr);
+            // SYSCOIN BEGIN: Verify the transition release's imported A-1 pin
+            // before any public service can observe startup readiness.
+            if (chainstate == active_chainstate) {
+                bilingual_str handoff_error;
+                if (!chainman.FinalizePQActivationHandoff(
+                        chainstate->m_chain.Tip(), handoff_error)) {
+                    return {
+                        ChainstateLoadStatus::FAILURE_INCOMPATIBLE_DB,
+                        handoff_error};
+                }
+            }
+            // SYSCOIN END: Verify the local PQ activation handoff.
+            if (chainstate == active_chainstate &&
+                !publish_startup_tip(chainstate->m_chain.Tip())) {
+                return {ChainstateLoadStatus::FAILURE_INCOMPATIBLE_DB,
+                        _("Auxiliary-history GC authorization is not compatible with the recovered active chain")};
+            }
+            loaded_chainstates.push_back(chainstate);
         }
         // SYSCOIN
         else {
             coinsViewEmpty = true;
+        }
+    }
+
+    // SYSCOIN: Publish the loaded active tip before opening any journal-bound
+    // auxiliary store. A pending GC intent is authenticated against the
+    // active chain, which may be the snapshot chainstate loaded after its IBD
+    // counterpart. Verify every loaded recovery chainstate only after that
+    // active-chain identity is available.
+    if (!coinsViewEmpty && !loaded_chainstates.empty()) {
+        const CBlockIndex* active_tip{active_chainstate->m_chain.Tip()};
+        if (active_tip == nullptr) {
+            return {ChainstateLoadStatus::FAILURE,
+                    _("Error initializing active chain tip")};
+        }
+        if (!publish_startup_tip(active_tip)) {
+            return {ChainstateLoadStatus::FAILURE_INCOMPATIBLE_DB,
+                    _("Auxiliary-history GC authorization is not compatible with the recovered active chain")};
+        }
+        for (const Chainstate* chainstate : loaded_chainstates) {
+            // SYSCOIN: Treat an auxiliary-state mismatch as an incompatible
+            // database, not a recoverable tip-selection error; reindexing is
+            // required to reconstruct the branch-bound records.
+            if (!VerifyActivePQState(*chainstate)) {
+                return {ChainstateLoadStatus::FAILURE_INCOMPATIBLE_DB,
+                        _("Post-quantum deterministic masternode state, rollback-journal tip seal, payment probation state, or PQ key registry is missing or invalid. Reindex with the matching Syscoin release; existing pre-journal datadirs cannot be backfilled from the bounded snapshot window.")};
+            }
+        }
+        if (deterministicMNManager) {
+            deterministicMNManager->UpdatedBlockTip(active_tip);
         }
     }
 
@@ -249,6 +391,8 @@ static ChainstateLoadResult CompleteChainstateInitialization(
         };
     }
     // if coinsview is empty we clear all SYS db's overriding anything we did before
+    // SYSCOIN: An empty UTXO view cannot reuse branch-bound deterministic-MN
+    // or PQ finality databases from the prior chainstate.
     if(coinsViewEmpty && !effective_reindex_geth) {
         LogPrintf("coinsViewEmpty recreating LLMQ and NEVM databases\n");
         llmq::DestroyLLMQSystem();
@@ -268,25 +412,9 @@ static ChainstateLoadResult CompleteChainstateInitialization(
         netfulfilledman.reset(new CNetFulfilledRequestManager());
         mmetaman.reset();
         mmetaman.reset(new CMasternodeMetaMan());
-        auto quorumCommitmentDB = DBParams{
-        .path = chainman.m_options.datadir / "evodb_qc",
-        .cache_bytes = static_cast<size_t>(cache_sizes.evo_qc_db),
-        .memory_only = options.block_tree_db_in_memory,
-        .wipe_data = coinsViewEmpty,
-        .options = chainman.m_options.block_tree_db};
-        auto quorumVectorDB = DBParams{
-            .path = chainman.m_options.datadir / "evodb_qvvecs",
-            .cache_bytes = static_cast<size_t>(cache_sizes.evo_qvvecs_db),
-            .memory_only = options.block_tree_db_in_memory,
-            .wipe_data = coinsViewEmpty,
-            .options = chainman.m_options.block_tree_db};
-        auto quorumSkDB = DBParams{
-            .path = chainman.m_options.datadir / "evodb_qsk",
-            .cache_bytes = static_cast<size_t>(cache_sizes.evo_qsk_db),
-            .memory_only = options.block_tree_db_in_memory,
-            .wipe_data = coinsViewEmpty,
-            .options = chainman.m_options.block_tree_db};
-        llmq::InitLLMQSystem(quorumCommitmentDB, quorumVectorDB, quorumSkDB, options.block_tree_db_in_memory, *options.connman, *options.banman, *options.peerman, chainman, coinsViewEmpty);
+        // SYSCOIN: Rebind fork-owned finality after empty-coins recovery.
+        llmq::InitLLMQSystem(*options.connman, *options.peerman, chainman,
+                            /*rebuild_core_chainstate=*/true);
         pnevmtxrootsdb.reset();
         pnevmtxrootsdb = std::make_unique<CNEVMTxRootsDB>(DBParams{
             .path = chainman.m_options.datadir / "nevmtxroots",
@@ -324,6 +452,13 @@ static ChainstateLoadResult CompleteChainstateInitialization(
             .wipe_data = false,
             .options = chainman.m_options.coins_db});  
     } else if (coinsViewEmpty) {
+        if (!options.reindex && !options.reindex_chainstate && !disk_reindexing) {
+            // Geth reconstruction already rebuilt auxiliary state, but an
+            // empty coins view also requires the Core audit checkpoint reset.
+            llmq::DestroyLLMQSystem();
+            llmq::InitLLMQSystem(*options.connman, *options.peerman, chainman,
+                                /*rebuild_core_chainstate=*/true);
+        }
         // SYSCOIN Continued reindex already reinitialized reconstructible NEVM DBs above
         // via effective_reindex_geth, which skips the block above. nevmminttx still
         // must clear whenever the UTXO set is empty so replay state matches chainstate.
@@ -365,6 +500,7 @@ ChainstateLoadResult LoadChainstate(ChainstateManager& chainman, const CacheSize
 
     LOCK(cs_main);
 
+    // SYSCOIN BEGIN: Resume durable reindex state before loading chainstate and Geth.
     ChainstateLoadOptions effective_options{options};
     if (!effective_options.reindex && !effective_options.block_tree_db_in_memory) {
         auto& pblocktree{chainman.m_blockman.m_block_tree_db};
@@ -386,16 +522,19 @@ ChainstateLoadResult LoadChainstate(ChainstateManager& chainman, const CacheSize
             fReindexGeth = true;
         }
     }
+    // SYSCOIN END: Resume durable reindex state before loading chainstate and Geth.
 
     chainman.m_total_coinstip_cache = cache_sizes.coins;
     chainman.m_total_coinsdb_cache = cache_sizes.coins_db;
 
     // Load the fully validated chainstate.
+    // SYSCOIN: Use the recovered reindex options in Bitcoin chainstate initialization.
     chainman.InitializeChainstate(effective_options.mempool);
 
     // Load a chain created from a UTXO snapshot, if any exist.
     bool has_snapshot = chainman.DetectSnapshotChainstate();
 
+    // SYSCOIN: Use the recovered reindex options in Bitcoin chainstate initialization.
     if (has_snapshot && (effective_options.reindex || effective_options.reindex_chainstate)) {
         LogPrintf("[snapshot] deleting snapshot chainstate due to reindexing\n");
         if (!chainman.DeleteSnapshotChainstate()) {
@@ -403,6 +542,7 @@ ChainstateLoadResult LoadChainstate(ChainstateManager& chainman, const CacheSize
         }
     }
 
+    // SYSCOIN: Use the recovered reindex options in Bitcoin chainstate initialization.
     auto [init_status, init_error] = CompleteChainstateInitialization(chainman, cache_sizes, effective_options);
     if (init_status != ChainstateLoadStatus::SUCCESS) {
         return {init_status, init_error};
@@ -433,12 +573,14 @@ ChainstateLoadResult LoadChainstate(ChainstateManager& chainman, const CacheSize
         assert(!chainman.IsSnapshotActive());
         assert(!chainman.IsSnapshotValidated());
 
+        // SYSCOIN: Preserve recovered reindex options during Bitcoin snapshot cleanup.
         chainman.InitializeChainstate(effective_options.mempool);
 
         // A reload of the block index is required to recompute setBlockIndexCandidates
         // for the fully validated chainstate.
         chainman.ActiveChainstate().ClearBlockIndexCandidates();
 
+        // SYSCOIN: Preserve recovered reindex options during Bitcoin snapshot cleanup.
         auto [init_status, init_error] = CompleteChainstateInitialization(chainman, cache_sizes, effective_options);
         if (init_status != ChainstateLoadStatus::SUCCESS) {
             return {init_status, init_error};
@@ -496,6 +638,9 @@ ChainstateLoadResult VerifyLoadedChainstate(ChainstateManager& chainman, const C
                 return {ChainstateLoadStatus::INTERRUPTED, _("Block verification was interrupted")};
             case VerifyDBResult::CORRUPTED_BLOCK_DB:
                 return {ChainstateLoadStatus::FAILURE, _("Corrupted block database detected")};
+            case VerifyDBResult::UNSUPPORTED_CHECK_LEVEL:
+                return {ChainstateLoadStatus::FAILURE,
+                        _("Check level 4 is unavailable after PQ activation; use check levels 0 through 3")};
             case VerifyDBResult::SKIPPED_L3_CHECKS:
                 if (options.require_full_verification) {
                     return {ChainstateLoadStatus::FAILURE_INSUFFICIENT_DBCACHE, _("Insufficient dbcache for block verification")};

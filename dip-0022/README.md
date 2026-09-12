@@ -4,12 +4,19 @@
   Author(s): sidhujag, UdjinM6, dustinface
   Special-Thanks: Thephez
   Comments-Summary: No comments yet.
-  Status: Proposed
+  Status: Superseded
   Type: Standard
   Created: 2021-12-15
   License: MIT License
   Requires: 8
 </pre>
+
+> **Historical specification:** This DIP documents the retired BLS/LLMQ
+> ChainLock protocol and is retained only as a record of the previous design.
+> The current post-quantum protocol is specified in
+> [Post-quantum ChainLocks and BTCC](../doc/pq-chainlocks.md); the wire messages,
+> signing flow, and validation rules below are not implemented by current
+> Syscoin Core.
 
 ## Table of Contents
 

@@ -13,6 +13,12 @@
 class CTxOut;
 class CTransaction;
 
+enum class SuperblockTriggerState {
+    UNAVAILABLE,
+    NOT_TRIGGERED,
+    TRIGGERED,
+};
+
 class CSuperblock;
 class CSuperblockManager;
 
@@ -28,14 +34,26 @@ CAmount ParsePaymentAmount(const std::string& strAmount);
 class CSuperblockManager
 {
 private:
-    static bool GetBestSuperblock(CSuperblock_sptr& pSuperblockRet, int nBlockHeight) EXCLUSIVE_LOCKS_REQUIRED(governance->cs);
+    static bool GetBestSuperblock(
+        CSuperblock_sptr& pSuperblockRet, int nBlockHeight,
+        const CBlockIndex* expected_tip)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main, governance->cs);
 
 public:
+    static SuperblockTriggerState GetSuperblockTriggerState(
+        int nBlockHeight, const CBlockIndex* expected_tip = nullptr);
     static bool IsSuperblockTriggered(int nBlockHeight);
 
-    static bool GetSuperblockPayments(int nBlockHeight, std::vector<CTxOut>& voutSuperblockRet);
-    static void ExecuteBestSuperblock(int nBlockHeight);
-    static bool IsValidSuperblock(const CTransaction& txNew, int nBlockHeight, const CAmount &blockReward, const CAmount &nGovernanceBudget, const std::vector<bool>* matched_outputs = nullptr);
+    static bool GetSuperblockPayments(
+        int nBlockHeight, std::vector<CTxOut>& voutSuperblockRet,
+        const CBlockIndex* expected_tip = nullptr);
+    static void ExecuteBestSuperblock(
+        int nBlockHeight, const CBlockIndex* expected_tip = nullptr);
+    static bool IsValidSuperblock(
+        const CTransaction& txNew, int nBlockHeight,
+        const CAmount &blockReward, const CAmount &nGovernanceBudget,
+        const std::vector<bool>* matched_outputs = nullptr,
+        const CBlockIndex* expected_tip = nullptr);
 };
 
 /**

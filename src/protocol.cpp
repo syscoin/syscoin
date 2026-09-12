@@ -8,6 +8,7 @@
 #include <common/system.h>
 
 #include <atomic>
+#include <string> // SYSCOIN: governance page view domain separation.
 
 static std::atomic<bool> g_initial_block_download_completed(false);
 
@@ -54,23 +55,16 @@ const char *SYNCSTATUSCOUNT="ssc";
 const char *MNGOVERNANCESYNC="govsync";
 const char *MNGOVERNANCEOBJECT="govobj";
 const char *MNGOVERNANCEOBJECTVOTE="govobjvote";
-const char *QSENDRECSIGS="qsendrecsigs";
-const char *QFCOMMITMENT="qfcommit";
-const char *QCONTRIB="qcontrib";
-const char *QCOMPLAINT="qcomplaint";
-const char *QJUSTIFICATION="qjustify";
-const char *QPCOMMITMENT="qpcommit";
-const char *QWATCH="qwatch";
-const char *QSIGSESANN="qsigsesann";
-const char *QSIGSHARESINV="qsigsinv";
-const char *QGETSIGSHARES="qgetsigs";
-const char *QBSIGSHARES="qbsigs";
-const char *QSIGREC="qsigrec";
-const char *QSIGSHARE="qsigshare";
+const char *GETGOVPAGE="getgovpage";
+const char *GOVPAGE="govpage";
 const char *CLSIG="clsig";
 const char *GETCLSIG="getclsig";
-const char *BTCCSIG="btccsig";
-const char *GETBTCCSIG="getbtccsig";
+const char *PQCLSHARE="pqclshare";
+const char *PQPOSEHAVE="pqposehave";
+const char *PQPOSERESP="pqposeresp";
+const char *PQPOSESHARE="pqposeshare";
+const char *PQPOSECERT="pqposecert";
+const char *GETPQPOSE="getpqpose";
 const char *MNAUTH="mnauth";
 } // namespace NetMsgType
 
@@ -113,23 +107,16 @@ const static std::vector<std::string> g_all_net_message_types{
     NetMsgType::MNGOVERNANCESYNC,
     NetMsgType::MNGOVERNANCEOBJECT,
     NetMsgType::MNGOVERNANCEOBJECTVOTE,
-    NetMsgType::QSENDRECSIGS,
-    NetMsgType::QFCOMMITMENT,
-    NetMsgType::QCONTRIB,
-    NetMsgType::QCOMPLAINT,
-    NetMsgType::QJUSTIFICATION,
-    NetMsgType::QPCOMMITMENT,
-    NetMsgType::QWATCH,
-    NetMsgType::QSIGSESANN,
-    NetMsgType::QSIGSHARESINV,
-    NetMsgType::QGETSIGSHARES,
-    NetMsgType::QBSIGSHARES,
-    NetMsgType::QSIGREC,
-    NetMsgType::QSIGSHARE,
+    NetMsgType::GETGOVPAGE,
+    NetMsgType::GOVPAGE,
     NetMsgType::CLSIG,
     NetMsgType::GETCLSIG,
-    NetMsgType::BTCCSIG,
-    NetMsgType::GETBTCCSIG,
+    NetMsgType::PQCLSHARE,
+    NetMsgType::PQPOSEHAVE,
+    NetMsgType::PQPOSERESP,
+    NetMsgType::PQPOSESHARE,
+    NetMsgType::PQPOSECERT,
+    NetMsgType::GETPQPOSE,
     NetMsgType::MNAUTH,  
     NetMsgType::GETCFILTERS,
     NetMsgType::CFILTER,
@@ -140,6 +127,58 @@ const static std::vector<std::string> g_all_net_message_types{
     NetMsgType::WTXIDRELAY,
     NetMsgType::SENDTXRCNCL,
 };
+
+// SYSCOIN: begin governance page view commitment.
+namespace {
+constexpr const char* GOVERNANCE_PAGE_VIEW_DOMAIN{
+    "syscoin-governance-page-view-v1"};
+} // namespace
+
+CGovernancePageViewHasher::CGovernancePageViewHasher(
+    const uint256& scope_hash, uint32_t total_count)
+    : m_scope_hash{scope_hash}, m_total_count{total_count}
+{
+    m_writer << std::string{GOVERNANCE_PAGE_VIEW_DOMAIN} << m_scope_hash;
+    WriteCompactSize(m_writer, m_total_count);
+}
+
+bool CGovernancePageViewHasher::Append(const CInv& inv)
+{
+    const uint32_t expected_type{m_scope_hash.IsNull()
+        ? MSG_GOVERNANCE_OBJECT
+        : MSG_GOVERNANCE_OBJECT_VOTE};
+    if (m_finalized || m_seen_count >= m_total_count ||
+        inv.type != expected_type || inv.hash.IsNull() ||
+        !(m_last_hash < inv.hash)) {
+        return false;
+    }
+    m_writer << inv;
+    m_last_hash = inv.hash;
+    ++m_seen_count;
+    return true;
+}
+
+std::optional<uint256> CGovernancePageViewHasher::Finalize()
+{
+    if (m_finalized || m_seen_count != m_total_count) return std::nullopt;
+    m_finalized = true;
+    return m_writer.GetHash();
+}
+
+std::optional<uint256> ComputeGovernancePageViewHash(
+    const uint256& scope_hash, const std::vector<CInv>& inventory)
+{
+    if (inventory.size() > MAX_GOVERNANCE_PAGE_SCOPE_ITEMS) {
+        return std::nullopt;
+    }
+    CGovernancePageViewHasher hasher{
+        scope_hash, static_cast<uint32_t>(inventory.size())};
+    for (const CInv& inv : inventory) {
+        if (!hasher.Append(inv)) return std::nullopt;
+    }
+    return hasher.Finalize();
+}
+// SYSCOIN: end governance page view commitment.
 
 CMessageHeader::CMessageHeader(const MessageStartChars& pchMessageStartIn, const char* pszCommand, unsigned int nMessageSizeIn)
 {
@@ -221,14 +260,8 @@ std::string CInv::GetCommand() const
     case MSG_SPORK:                         return cmd.append(NetMsgType::SPORK);
     case MSG_GOVERNANCE_OBJECT:             return cmd.append(NetMsgType::MNGOVERNANCEOBJECT);
     case MSG_GOVERNANCE_OBJECT_VOTE:        return cmd.append(NetMsgType::MNGOVERNANCEOBJECTVOTE);
-    case MSG_QUORUM_FINAL_COMMITMENT:       return cmd.append(NetMsgType::QFCOMMITMENT);
-    case MSG_QUORUM_CONTRIB:                return cmd.append(NetMsgType::QCONTRIB);
-    case MSG_QUORUM_COMPLAINT:              return cmd.append(NetMsgType::QCOMPLAINT);
-    case MSG_QUORUM_JUSTIFICATION:          return cmd.append(NetMsgType::QJUSTIFICATION);
-    case MSG_QUORUM_PREMATURE_COMMITMENT:   return cmd.append(NetMsgType::QPCOMMITMENT);
-    case MSG_QUORUM_RECOVERED_SIG:          return cmd.append(NetMsgType::QSIGREC);
     case MSG_CLSIG:                         return cmd.append(NetMsgType::CLSIG);
-    case MSG_BTCCSIG:                       return cmd.append(NetMsgType::BTCCSIG);
+    case MSG_PQPOSECERT:                    return cmd.append(NetMsgType::PQPOSECERT);
 
 
     default:

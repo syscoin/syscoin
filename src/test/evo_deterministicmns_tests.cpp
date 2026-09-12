@@ -1,233 +1,97 @@
 // Copyright (c) 2018-2019 The Dash Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
-#include <test/util/setup_common.h>
-
-#include <script/interpreter.h>
+#include <chain.h>
+#include <addresstype.h>
 #include <script/script.h>
-#include <script/sign.h>
-#include <validation.h>
-#include <base58.h>
-#include <netbase.h>
-#include <messagesigner.h>
-#include <masternode/masternodepayments.h>
-#include <policy/policy.h>
-#include <script/signingprovider.h>
-#include <spork.h>
-#include <txmempool.h>
-
-#include <evo/specialtx.h>
+#include <coins.h>
+#include <consensus/pq_migration_config.h> // SYSCOIN: Exercise PQ activation boundaries.
+#include <consensus/validation.h>
+#include <crypto/slhdsa/slhdsa.h>
 #include <evo/providertx.h>
+#include <evo/specialtx.h>
 #include <evo/deterministicmns.h>
+#include <evo/pq_providertx.h>
 #include <chainparams.h>
 #include <dbwrapper.h>
+#include <key.h>
+#include <llmq/quorums_commitment.h>
+#include <masternode/masternodemeta.h>
+#include <messagesigner.h>
+#include <netbase.h>
+#include <streams.h>
+#include <test/util/random.h>
+#include <test/util/setup_common.h>
+#include <util/strencodings.h>
+#include <validation.h>
+#include <version.h>
 #include <boost/test/unit_test.hpp>
-#include <test/util/txmempool.h>
-#include <interfaces/chain.h>
 
-using SimpleUTXOVec = std::vector<std::pair<COutPoint, std::pair<int, CAmount>> >;
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <future>
+#include <initializer_list>
+#include <limits>
+#include <memory>
+#include <span>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <utility>
+#include <vector>
 
-static SimpleUTXOVec BuildSimpleUTXOVec(const std::vector<CTransactionRef>& txs)
+static fs::path SiblingDBPath(const fs::path& path, std::string_view suffix)
 {
-    SimpleUTXOVec utxos;
-    for (size_t i = 0; i < txs.size(); i++) {
-        auto& tx = *txs[i];
-        for (size_t j = 0; j < tx.vout.size(); j++) {
-            if(tx.vout[j].nValue > 0)
-                utxos.emplace_back(COutPoint(tx.GetHash(), j), std::make_pair((int)i + 1, tx.vout[j].nValue));
-        }
+    fs::path sibling{path.parent_path()};
+    sibling /= fs::PathFromString(
+        fs::PathToString(path.filename()) + std::string{suffix});
+    return sibling;
+}
+
+static uint64_t DirectorySizeBytes(const fs::path& path)
+{
+    uint64_t total{0};
+    std::error_code error;
+    for (auto entry = fs::recursive_directory_iterator(path, error);
+         !error && entry != fs::recursive_directory_iterator();
+         entry.increment(error)) {
+        if (!entry->is_regular_file(error) || error) continue;
+        total += entry->file_size(error);
+        if (error) return 0;
     }
-    return utxos;
+    return error ? 0 : total;
 }
 
-static std::vector<COutPoint> SelectUTXOs(const node::NodeContext& node, SimpleUTXOVec& utxos, CAmount amount, CAmount& changeRet)
+class ScopedDiskDBPath
 {
-    changeRet = 0;
-    std::vector<COutPoint> selectedUtxos;
-    CAmount selectedAmount = 0;
-    auto it = utxos.begin();
-    bool bFound = false;
-    while (it != utxos.end()) {
-        if (*node.chain->getHeight() - it->second.first < 101) {
-            it++;
-            continue;
-        }
-        selectedAmount += it->second.second;
-        selectedUtxos.emplace_back(it->first);
-        it = utxos.erase(it);
-        bFound = true;
-        if (selectedAmount >= amount) {
-            changeRet = selectedAmount - amount;
-            break;
-        }
+public:
+    ScopedDiskDBPath()
+        : path{fs::temp_directory_path() /
+               (std::string{"syscoin_dmn_test_"} +
+                g_insecure_rand_ctx.rand256().ToString())}
+    {
     }
-    assert(bFound);
-    return selectedUtxos;
-}
 
-static void FundTransaction(const node::NodeContext& node, CMutableTransaction& tx, SimpleUTXOVec& utoxs, const CScript& scriptPayout, CAmount amount)
-{
-    CAmount change;
-    auto inputs = SelectUTXOs(node, utoxs, amount, change);
-    for (size_t i = 0; i < inputs.size(); i++) {
-        tx.vin.emplace_back(CTxIn(inputs[i]));
+    ~ScopedDiskDBPath()
+    {
+        std::error_code error;
+        fs::remove_all(path, error);
+        error.clear();
+        fs::remove_all(SiblingDBPath(path, "_inverse"), error);
+        error.clear();
+        fs::remove_all(
+            SiblingDBPath(path, "_pq_payment_probation"), error);
+        error.clear();
+        fs::remove_all(SiblingDBPath(path, "_pq_registry"), error);
+        error.clear();
+        fs::remove_all(SiblingDBPath(path, "_aux_gc"), error);
     }
-    tx.vout.emplace_back(CTxOut(amount, scriptPayout));
-    if (change != 0) {
-        tx.vout.emplace_back(CTxOut(change, scriptPayout));
-    }
-}
 
-static void SignTransaction(const node::NodeContext& node, CMutableTransaction& tx, const CKey& coinbaseKey)
-{
-    LOCK(cs_main);
-    FillableSigningProvider tempKeystore;
-    tempKeystore.AddKeyPubKey(coinbaseKey, coinbaseKey.GetPubKey());
-    std::map<COutPoint, Coin> coins;
-    for (size_t i = 0; i < tx.vin.size(); i++) {
-        coins[tx.vin[i].prevout]; 
-        node.chain->findCoins(coins);
-    }
-    std::map<int, bilingual_str> input_errors;
-    BOOST_CHECK(SignTransaction(tx, &tempKeystore, coins, SIGHASH_ALL, input_errors));
-}
-
-static CMutableTransaction CreateProRegTx(const node::NodeContext& node, SimpleUTXOVec& utxos, int port, const CScript& scriptPayout, const CKey& coinbaseKey, CKey& ownerKeyRet, CBLSSecretKey& operatorKeyRet)
-{
-    ownerKeyRet.MakeNewKey(true);
-    operatorKeyRet.MakeNewKey();
-
-    CProRegTx proTx;
-    proTx.nVersion = CProRegTx::GetVersion(!bls::bls_legacy_scheme);
-    proTx.collateralOutpoint.n = 0;
-    proTx.addr = LookupNumeric("1.1.1.1", port);
-    proTx.keyIDOwner = ownerKeyRet.GetPubKey().GetID();
-    proTx.pubKeyOperator.Set(operatorKeyRet.GetPublicKey(), bls::bls_legacy_scheme.load());
-    proTx.keyIDVoting = ownerKeyRet.GetPubKey().GetID();
-    proTx.scriptPayout = scriptPayout;
-    proTx.nOperatorReward = 5000;
-
-    CMutableTransaction tx;
-    tx.nVersion = SYSCOIN_TX_VERSION_MN_REGISTER;
-    FundTransaction(node, tx, utxos, scriptPayout, 100 * COIN);
-    proTx.inputsHash = CalcTxInputsHash(CTransaction(tx));
-    SetTxPayload(tx, proTx);
-    SignTransaction(node, tx, coinbaseKey);
-
-    return tx;
-}
-
-static CMutableTransaction CreateProUpServTx(const node::NodeContext& node, SimpleUTXOVec& utxos, const uint256& proTxHash, const CBLSSecretKey& operatorKey, int port, const CKey& coinbaseKey)
-{
-    CProUpServTx proTx;
-    proTx.nVersion = CProUpRevTx::GetVersion(!bls::bls_legacy_scheme);
-    proTx.proTxHash = proTxHash;
-    proTx.addr = LookupNumeric("1.1.1.1", port);
-    proTx.scriptOperatorPayout = GetScriptForDestination(WitnessV0KeyHash(coinbaseKey.GetPubKey()));
-    CMutableTransaction tx;
-    tx.nVersion = SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE;
-    FundTransaction(node, tx, utxos, GetScriptForDestination(WitnessV0KeyHash(coinbaseKey.GetPubKey())), 1 * COIN);
-    proTx.inputsHash = CalcTxInputsHash(CTransaction(tx));
-    proTx.sig = operatorKey.Sign(::SerializeHash(proTx), bls::bls_legacy_scheme);
-    SetTxPayload(tx, proTx);
-    SignTransaction(node, tx, coinbaseKey);
-
-    return tx;
-}
-
-static CMutableTransaction CreateProUpRegTx(const node::NodeContext& node, SimpleUTXOVec& utxos, const uint256& proTxHash, const CKey& mnKey, const CBLSPublicKey& pubKeyOperator, const CKeyID& keyIDVoting, const CScript& scriptPayout, const CKey& coinbaseKey)
-{
-
-    CProUpRegTx proTx;
-    proTx.nVersion = CProUpRegTx::GetVersion(!bls::bls_legacy_scheme);
-    proTx.proTxHash = proTxHash;
-    proTx.pubKeyOperator.Set(pubKeyOperator, bls::bls_legacy_scheme.load());
-    proTx.keyIDVoting = keyIDVoting;
-    proTx.scriptPayout = scriptPayout;
-
-    CMutableTransaction tx;
-    tx.nVersion = SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR;
-    FundTransaction(node, tx, utxos, GetScriptForDestination(WitnessV0KeyHash(coinbaseKey.GetPubKey())), 1 * COIN);
-    proTx.inputsHash = CalcTxInputsHash(CTransaction(tx));
-    CHashSigner::SignHash(::SerializeHash(proTx), mnKey, proTx.vchSig);
-    SetTxPayload(tx, proTx);
-    SignTransaction(node, tx, coinbaseKey);
-
-    return tx;
-}
-
-static CMutableTransaction CreateProUpRevTx(const node::NodeContext& node, SimpleUTXOVec& utxos, const uint256& proTxHash, const CBLSSecretKey& operatorKey, const CKey& coinbaseKey)
-{
-    CProUpRevTx proTx;
-    proTx.nVersion = CProUpRevTx::GetVersion(!bls::bls_legacy_scheme);
-    proTx.proTxHash = proTxHash;
-
-    CMutableTransaction tx;
-    tx.nVersion = SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE;
-    FundTransaction(node, tx, utxos, GetScriptForDestination(WitnessV0KeyHash(coinbaseKey.GetPubKey())), 1 * COIN);
-    proTx.inputsHash = CalcTxInputsHash(CTransaction(tx));
-    proTx.sig = operatorKey.Sign(::SerializeHash(proTx), bls::bls_legacy_scheme);
-    SetTxPayload(tx, proTx);
-    SignTransaction(node, tx, coinbaseKey);
-
-    return tx;
-}
-
-template<typename ProTx>
-static CMutableTransaction MalleateProTxPayout(const CMutableTransaction& tx)
-{
-    ProTx proTx;
-    GetTxPayload(tx, proTx);
-
-    CKey key;
-    key.MakeNewKey(true);
-    proTx.scriptPayout = GetScriptForDestination(WitnessV0KeyHash(key.GetPubKey()));
-
-    CMutableTransaction tx2 = tx;
-    SetTxPayload(tx2, proTx);
-
-    return tx2;
-}
-
-static CScript GenerateRandomAddress()
-{
-    CKey key;
-    key.MakeNewKey(true);
-    return GetScriptForDestination(WitnessV0KeyHash(key.GetPubKey()));
-}
-
-static CDeterministicMNCPtr FindPayoutDmn(const CBlock& block)
-{
-    auto mnList = deterministicMNManager->GetListAtChainTip();
-
-    for (const auto& txout : block.vtx[0]->vout) {
-        CDeterministicMNCPtr found;
-        mnList.ForEachMNShared(true, [&](const CDeterministicMNCPtr& dmn) {
-            if (found == nullptr && txout.scriptPubKey == dmn->pdmnState->scriptPayout) {
-                found = dmn;
-            }
-        });
-        if (found != nullptr) {
-            return found;
-        }
-    }
-    return nullptr;
-}
-
-static bool CheckTransactionSignature(const node::NodeContext& node, const CMutableTransaction& tx)
-{
-    for (unsigned int i = 0; i < tx.vin.size(); i++) {
-        const auto& txin = tx.vin[i];
-        std::map<COutPoint, Coin> coins;
-        coins[txin.prevout]; 
-        node.chain->findCoins(coins);
-        const Coin& coin = coins.at(txin.prevout);
-        if (!VerifyScript(txin.scriptSig, coin.out.scriptPubKey, nullptr, STANDARD_SCRIPT_VERIFY_FLAGS, MutableTransactionSignatureChecker(&tx, i, coin.out.nValue, MissingDataBehavior::ASSERT_FAIL))) {
-            return false;
-        }
-    }
-    return true;
-}
+    const fs::path path;
+};
 
 static uint256 MakeSnapshotKey(int height)
 {
@@ -238,6 +102,123 @@ static CDeterministicMNList MakeSnapshot(int height)
 {
     const uint256 block_hash = MakeSnapshotKey(height);
     return CDeterministicMNList(block_hash, height, 0);
+}
+
+static uint256 MakeOrderedSnapshotKey(uint8_t prefix, uint64_t ordinal)
+{
+    uint256 key;
+    key.SetNull();
+    key.begin()[0] = prefix;
+    for (size_t i{0}; i < sizeof(ordinal); ++i) {
+        key.begin()[i + 1] = static_cast<uint8_t>(ordinal >> (8 * i));
+    }
+    return key;
+}
+
+// SYSCOIN: Preserve the full synthetic discriminator until byte materialization.
+static CKeyID MakeAnchorKeyID(uint32_t seed)
+{
+    CKeyID key_id;
+    for (size_t i = 0; i < key_id.size(); ++i) {
+        key_id.begin()[i] = static_cast<uint8_t>(seed + i);
+    }
+    return key_id;
+}
+
+static CDeterministicMNCPtr MakeAnchorMN(uint64_t internal_id, uint32_t tag)
+{
+    auto dmn = std::make_shared<CDeterministicMN>(internal_id);
+    dmn->proTxHash = ArithToUint256(arith_uint256{0x1000 + tag});
+    dmn->collateralOutpoint = COutPoint(
+        ArithToUint256(arith_uint256{0x2000 + tag}), tag + 1);
+    dmn->nOperatorReward = 1000 + tag;
+
+    auto state = std::make_shared<CDeterministicMNState>();
+    state->nVersion = tag % 2 == 0 ? CProRegTx::BASIC_BLS_VERSION
+                                   : CProRegTx::LEGACY_BLS_VERSION;
+    state->nRegisteredHeight = 100 + tag;
+    state->nCollateralHeight = 80 + tag;
+    state->nLastPaidHeight = 200 + tag;
+    state->nPoSePenalty = 3 + tag;
+    state->nPoSeRevivedHeight = 90 + tag;
+    state->nRevocationReason = tag;
+    state->confirmedHash = ArithToUint256(arith_uint256{0x3000 + tag});
+    state->confirmedHashWithProRegTxHash =
+        ArithToUint256(arith_uint256{0x4000 + tag});
+    state->keyIDOwner = MakeAnchorKeyID(0x10 * tag);
+    std::array<uint8_t, CLegacyBLSPublicKey::SERIALIZED_SIZE> operator_key;
+    operator_key.fill(static_cast<uint8_t>(0x30 + tag));
+    BOOST_REQUIRE(state->pubKeyOperator.SetBytes(operator_key));
+    state->keyIDVoting = MakeAnchorKeyID(0x20 + 0x10 * tag);
+    state->scriptPayout = CScript() << OP_DUP << std::vector<unsigned char>{
+        static_cast<unsigned char>(tag), 0xa5};
+    state->scriptOperatorPayout = CScript() << OP_HASH160 << std::vector<unsigned char>{
+        0x5a, static_cast<unsigned char>(tag)};
+    if (tag == 2) state->BanIfNotBanned(300 + tag);
+    state->vchNEVMAddress = {
+        static_cast<unsigned char>(tag), 0x55, 0xaa,
+        static_cast<unsigned char>(tag + 1)};
+    dmn->pdmnState = std::move(state);
+    return dmn;
+}
+
+static CDeterministicMNCPtr MakeLegacyReplayMN(
+    uint64_t internal_id, uint32_t tag)
+{
+    const auto source{MakeAnchorMN(internal_id, tag)};
+    auto dmn{std::make_shared<CDeterministicMN>(internal_id)};
+    dmn->proTxHash = source->proTxHash;
+    dmn->collateralOutpoint = source->collateralOutpoint;
+    dmn->nOperatorReward = source->nOperatorReward;
+    auto state{std::make_shared<CDeterministicMNState>(*source->pdmnState)};
+    state->Revive(0);
+    state->nPoSeRevivedHeight = -1;
+    dmn->pdmnState = std::move(state);
+    return dmn;
+}
+
+template <std::size_t Size>
+static std::array<uint8_t, Size> FilledLegacyBytes(uint8_t value)
+{
+    std::array<uint8_t, Size> bytes;
+    bytes.fill(value);
+    return bytes;
+}
+
+static llmq::CFinalCommitmentTxPayload MakeLegacyReplayCommitment(
+    uint32_t height,
+    const uint256& quorum_hash,
+    std::size_t invalid_member)
+{
+    llmq::CFinalCommitmentTxPayload payload;
+    payload.nHeight = height;
+    payload.commitment = llmq::CFinalCommitment{quorum_hash};
+    payload.commitment.nVersion = llmq::CFinalCommitment::GetVersion(true);
+    payload.commitment.signers.assign(
+        payload.commitment.signers.size(), true);
+    payload.commitment.validMembers.assign(
+        payload.commitment.validMembers.size(), true);
+    BOOST_REQUIRE(invalid_member < payload.commitment.validMembers.size());
+    payload.commitment.validMembers[invalid_member] = false;
+    BOOST_REQUIRE(payload.commitment.quorumPublicKey.SetBytes(
+        FilledLegacyBytes<48>(1)));
+    payload.commitment.quorumVvecHash = uint256::ONEV;
+    BOOST_REQUIRE(payload.commitment.quorumSig.SetBytes(
+        FilledLegacyBytes<96>(2)));
+    BOOST_REQUIRE(payload.commitment.membersSig.SetBytes(
+        FilledLegacyBytes<96>(3)));
+    return payload;
+}
+
+static CDeterministicMNList MakeNontrivialAnchorSnapshot(
+    const uint256& block_hash, int height, bool reverse_insertion)
+{
+    CDeterministicMNList snapshot(block_hash, height, 17);
+    std::array<CDeterministicMNCPtr, 3> members{
+        MakeAnchorMN(9, 1), MakeAnchorMN(2, 2), MakeAnchorMN(14, 3)};
+    if (reverse_insertion) std::reverse(members.begin(), members.end());
+    for (const auto& member : members) snapshot.AddMN(member, /*fBumpTotalCount=*/false);
+    return snapshot;
 }
 
 static void WriteSnapshotRange(CDeterministicMNManager& manager, int start_height, int count)
@@ -262,6 +243,11 @@ struct SnapshotIndexChain {
     {
         return &indices.at(height - start_height);
     }
+
+    CBlockIndex* At(int height)
+    {
+        return &indices.at(height - start_height);
+    }
 };
 
 static SnapshotIndexChain BuildSnapshotIndexChain(int start_height, int count)
@@ -277,558 +263,2371 @@ static SnapshotIndexChain BuildSnapshotIndexChain(int start_height, int count)
     return chain;
 }
 
-void FuncDIP3Activation(TestChain100Setup& setup)
+static SnapshotIndexChain BuildForkedSnapshotIndexChain(
+    SnapshotIndexChain& parent,
+    int fork_height,
+    int tip_height,
+    uint8_t salt)
 {
-    auto utxos = BuildSimpleUTXOVec(setup.m_coinbase_txns);
-    CKey ownerKey;
-    CBLSSecretKey operatorKey;
-    CScript addr = GenerateRandomAddress();
-    auto tx = CreateProRegTx(setup.m_node, utxos, 1, addr, setup.coinbaseKey, ownerKey, operatorKey);
-    std::vector<CMutableTransaction> txns = std::vector<CMutableTransaction>{tx};
-
-    int nHeight = *setup.m_node.chain->getHeight();
-
-    // We start one block before DIP3 activation, so mining a block with a DIP3 transaction should be no-op
-    auto block = std::make_shared<CBlock>(setup.CreateAndProcessBlock(txns, GetScriptForRawPubKey(setup.coinbaseKey.GetPubKey())));
- 
-    BOOST_CHECK_EQUAL(*setup.m_node.chain->getHeight() , nHeight + 1);
-    BOOST_CHECK_EQUAL(block->GetHash() , setup.m_node.chain->getBlockHash(*setup.m_node.chain->getHeight()));
-    
-    assert(!deterministicMNManager->GetListAtChainTip().HasMN(tx.GetHash()));
-
-    // re-create reg tx prev one got mined as no-op
-    tx = CreateProRegTx(setup.m_node, utxos, 1, addr, setup.coinbaseKey, ownerKey, operatorKey);
-    txns = std::vector<CMutableTransaction>{tx};
-    // Mining a block with a DIP3 transaction should succeed now
-    block = std::make_shared<CBlock>(setup.CreateAndProcessBlock(txns, GetScriptForRawPubKey(setup.coinbaseKey.GetPubKey())));
-
-    BOOST_CHECK_EQUAL(*setup.m_node.chain->getHeight() , nHeight + 2);
-    BOOST_CHECK_EQUAL(block->GetHash() , setup.m_node.chain->getBlockHash(*setup.m_node.chain->getHeight()));
-    
-    assert(deterministicMNManager->GetListAtChainTip().HasMN(tx.GetHash()));
+    const int start_height{fork_height + 1};
+    const int count{tip_height - fork_height};
+    SnapshotIndexChain chain{
+        start_height, std::vector<uint256>(count),
+        std::vector<CBlockIndex>(count)};
+    for (int i{0}; i < count; ++i) {
+        const int height{start_height + i};
+        chain.hashes[i] = MakeSnapshotKey(height);
+        chain.hashes[i].begin()[31] ^= salt;
+        chain.hashes[i].begin()[30] ^=
+            static_cast<uint8_t>(i + 1);
+        chain.indices[i].nHeight = height;
+        chain.indices[i].pprev =
+            i == 0 ? parent.At(fork_height) : &chain.indices[i - 1];
+        chain.indices[i].phashBlock = &chain.hashes[i];
+    }
+    return chain;
 }
 
-void FuncDIP3Protx(TestChain100Setup& setup)
+static void SetProbationBitmapBit(
+    llmq::pq::QuorumBitmap& bitmap, std::size_t member)
 {
-    CKey sporkKey;
-    sporkKey.MakeNewKey(true);
-    sporkManager->SetSporkAddress(EncodeDestination(PKHash(sporkKey.GetPubKey())));
-    sporkManager->SetPrivKey(EncodeSecret(sporkKey));
-
-    auto utxos = BuildSimpleUTXOVec(setup.m_coinbase_txns);
-
-    int nHeight = *setup.m_node.chain->getHeight();
-    int port = 1;
-
-    std::vector<uint256> dmnHashes;
-    std::map<uint256, CKey> ownerKeys;
-    std::map<uint256, CBLSSecretKey> operatorKeys;
-
-    // register one MN per block
-    for (size_t i = 0; i < 6; i++) {
-        CKey ownerKey;
-        CBLSSecretKey operatorKey;
-        auto tx = CreateProRegTx(setup.m_node, utxos, port++, GenerateRandomAddress(), setup.coinbaseKey, ownerKey, operatorKey);
-        dmnHashes.emplace_back(tx.GetHash());
-        ownerKeys.emplace(tx.GetHash(), ownerKey);
-        operatorKeys.emplace(tx.GetHash(), operatorKey);
-        {
-            LOCK(cs_main);
-            // also verify that payloads are not malleable after they have been signed
-            // the form of ProRegTx we use here is one with a collateral included, so there is no signature inside the
-            // payload itself. This means, we need to rely on script verification, which takes the hash of the extra payload
-            // into account
-            auto tx2 = MalleateProTxPayout<CProRegTx>(tx);
-            TxValidationState dummyState;
-            // Technically, the payload is still valid...
-            assert(CheckProRegTx(CTransaction(tx), setup.m_node.chainman->ActiveTip(), dummyState, setup.m_node.chainman->ActiveChainstate().CoinsTip(), false, true));
-            assert(CheckProRegTx(CTransaction(tx2), setup.m_node.chainman->ActiveTip(), dummyState, setup.m_node.chainman->ActiveChainstate().CoinsTip(), false, true));
-            // But the signature should not verify anymore
-            assert(CheckTransactionSignature(setup.m_node, tx));
-            assert(!CheckTransactionSignature(setup.m_node, tx2));
-        }
-
-        setup.CreateAndProcessBlock({tx}, GetScriptForRawPubKey(setup.coinbaseKey.GetPubKey()));
-
-        BOOST_CHECK_EQUAL(*setup.m_node.chain->getHeight() , nHeight + 1);
-        
-        auto mnList = deterministicMNManager->GetListAtChainTip();
-        assert(mnList.HasMN(tx.GetHash()));
-
-        nHeight++;
-    }
-    int DIP0003EnforcementHeightBackup = Params().GetConsensus().DIP0003EnforcementHeight;
-    const_cast<Consensus::Params&>(Params().GetConsensus()).DIP0003EnforcementHeight = *setup.m_node.chain->getHeight() + 1;
-    
-    setup.CreateAndProcessBlock({}, GetScriptForRawPubKey(setup.coinbaseKey.GetPubKey()));
-
-    nHeight++;
-
-    // check MN reward payments
-    for (size_t i = 0; i < 20; i++) {
-        auto mnList = deterministicMNManager->GetListAtChainTip();
-        auto dmnExpectedPayee = mnList.GetMNPayee();
-
-        CBlock block = setup.CreateAndProcessBlock({}, GetScriptForRawPubKey(setup.coinbaseKey.GetPubKey()));
-
-        assert(!block.vtx.empty());
-
-        auto dmnPayout = FindPayoutDmn(block);
-        assert(dmnPayout != nullptr);
-        BOOST_CHECK_EQUAL(dmnPayout->proTxHash.ToString(), dmnExpectedPayee->proTxHash.ToString());
-
-        nHeight++;
-    }
-
-    // register multiple MNs per block
-    for (size_t i = 0; i < 3; i++) {
-        std::vector<CMutableTransaction> txns;
-        for (size_t j = 0; j < 3; j++) {
-            CKey ownerKey;
-            CBLSSecretKey operatorKey;
-            auto tx = CreateProRegTx(setup.m_node, utxos, port++, GenerateRandomAddress(), setup.coinbaseKey, ownerKey, operatorKey);
-            dmnHashes.emplace_back(tx.GetHash());
-            ownerKeys.emplace(tx.GetHash(), ownerKey);
-            operatorKeys.emplace(tx.GetHash(), operatorKey);
-            txns.emplace_back(tx);
-        }
-        setup.CreateAndProcessBlock(txns, GetScriptForRawPubKey(setup.coinbaseKey.GetPubKey()));
-
-
-        for (size_t j = 0; j < 3; j++) {
-            assert(deterministicMNManager->GetListAtChainTip().HasMN(txns[j].GetHash()));
-        }
-
-        nHeight++;
-    }
-
-    // test ProUpServTx
-    auto tx = CreateProUpServTx(setup.m_node, utxos, dmnHashes[0], operatorKeys[dmnHashes[0]], 1000, setup.coinbaseKey);
-    setup.CreateAndProcessBlock({tx}, GetScriptForRawPubKey(setup.coinbaseKey.GetPubKey()));
-
-    BOOST_CHECK_EQUAL(*setup.m_node.chain->getHeight() , nHeight + 1);
-    nHeight++;
-    auto dmn = deterministicMNManager->GetListAtChainTip().GetMN(dmnHashes[0]);
-    assert(dmn != nullptr && dmn->pdmnState->addr.GetPort() == 1000);
-
-    // test ProUpRevTx
-    tx = CreateProUpRevTx(setup.m_node, utxos, dmnHashes[0], operatorKeys[dmnHashes[0]], setup.coinbaseKey);
-    setup.CreateAndProcessBlock({tx}, GetScriptForRawPubKey(setup.coinbaseKey.GetPubKey()));
-
-    BOOST_CHECK_EQUAL(*setup.m_node.chain->getHeight() , nHeight + 1);
-    
-    nHeight++;
-    dmn = deterministicMNManager->GetListAtChainTip().GetMN(dmnHashes[0]);
-    assert(dmn != nullptr && dmn->pdmnState->GetBannedHeight() == nHeight);
-
-    // test that the revoked MN does not get paid anymore
-    for (size_t i = 0; i < 20; i++) {
-        auto dmnExpectedPayee = deterministicMNManager->GetListAtChainTip().GetMNPayee();
-        assert(dmnExpectedPayee->proTxHash != dmnHashes[0]);
-
-        CBlock block = setup.CreateAndProcessBlock({}, GetScriptForRawPubKey(setup.coinbaseKey.GetPubKey()));
-
-        assert(!block.vtx.empty());
-
-        auto dmnPayout = FindPayoutDmn(block);
-        assert(dmnPayout != nullptr);
-        BOOST_CHECK_EQUAL(dmnPayout->proTxHash.ToString(), dmnExpectedPayee->proTxHash.ToString());
-
-        nHeight++;
-    }
-
-    // test reviving the MN
-    CBLSSecretKey newOperatorKey;
-    newOperatorKey.MakeNewKey();
-    dmn = deterministicMNManager->GetListAtChainTip().GetMN(dmnHashes[0]);
-    tx = CreateProUpRegTx(setup.m_node, utxos, dmnHashes[0], ownerKeys[dmnHashes[0]], newOperatorKey.GetPublicKey(), ownerKeys[dmnHashes[0]].GetPubKey().GetID(), dmn->pdmnState->scriptPayout, setup.coinbaseKey);
-    {
-        LOCK(cs_main);
-        // check malleability protection again, but this time by also relying on the signature inside the ProUpRegTx
-        auto tx2 = MalleateProTxPayout<CProUpRegTx>(tx);
-        TxValidationState dummyState;
-        assert(CheckProUpRegTx(CTransaction(tx), setup.m_node.chainman->ActiveTip(), dummyState, setup.m_node.chainman->ActiveChainstate().CoinsTip(), false, true));
-        assert(!CheckProUpRegTx(CTransaction(tx2), setup.m_node.chainman->ActiveTip(), dummyState, setup.m_node.chainman->ActiveChainstate().CoinsTip(), false, true));
-        assert(CheckTransactionSignature(setup.m_node, tx));
-        assert(!CheckTransactionSignature(setup.m_node, tx2));
-    }
-    // now process the block
-    setup.CreateAndProcessBlock({tx}, GetScriptForRawPubKey(setup.coinbaseKey.GetPubKey()));
-
-    BOOST_CHECK_EQUAL(*setup.m_node.chain->getHeight() , nHeight + 1);
-    nHeight++;
-
-    tx = CreateProUpServTx(setup.m_node, utxos, dmnHashes[0], newOperatorKey, 100, setup.coinbaseKey);
-    setup.CreateAndProcessBlock({tx}, GetScriptForRawPubKey(setup.coinbaseKey.GetPubKey()));
-
-    BOOST_CHECK_EQUAL(*setup.m_node.chain->getHeight() , nHeight + 1);
-    nHeight++;
-    dmn = deterministicMNManager->GetListAtChainTip().GetMN(dmnHashes[0]);
-    assert(dmn != nullptr && dmn->pdmnState->addr.GetPort() == 100);
-    assert(dmn != nullptr && !dmn->pdmnState->IsBanned());
-
-    // test that the revived MN gets payments again
-    bool foundRevived = false;
-    for (size_t i = 0; i < 20; i++) {
-        auto dmnExpectedPayee = deterministicMNManager->GetListAtChainTip().GetMNPayee();
-        if (dmnExpectedPayee->proTxHash == dmnHashes[0]) {
-            foundRevived = true;
-        }
-
-        CBlock block = setup.CreateAndProcessBlock({}, GetScriptForRawPubKey(setup.coinbaseKey.GetPubKey()));
-
-        assert(!block.vtx.empty());
-
-        auto dmnPayout = FindPayoutDmn(block);
-        assert(dmnPayout != nullptr);
-        BOOST_CHECK_EQUAL(dmnPayout->proTxHash.ToString(), dmnExpectedPayee->proTxHash.ToString());
-
-        nHeight++;
-    }
-    assert(foundRevived);
-
-    const_cast<Consensus::Params&>(Params().GetConsensus()).DIP0003EnforcementHeight = DIP0003EnforcementHeightBackup;
+    bitmap[member / 8] |=
+        static_cast<uint8_t>(uint8_t{1} << (member % 8));
 }
 
-void FuncTestMempoolReorg(TestChain100Setup& setup)
+static llmq::pq::PQPaymentProbationTransitionContext
+MakeProbationTransitionContext(
+    int parent_height,
+    const std::array<uint256, 4>& special_members,
+    uint32_t epoch = 1)
 {
-    int nHeight = *setup.m_node.chain->getHeight();
-    auto utxos = BuildSimpleUTXOVec(setup.m_coinbase_txns);
-    CKey ownerKey;
-    CKey payoutKey;
-    CKey collateralKey;
-    CBLSSecretKey operatorKey;
-
-    ownerKey.MakeNewKey(true);
-    payoutKey.MakeNewKey(true);
-    collateralKey.MakeNewKey(true);
-    operatorKey.MakeNewKey();
-
-    auto scriptPayout = GetScriptForDestination(WitnessV0KeyHash(payoutKey.GetPubKey()));
-    auto scriptCollateral = GetScriptForDestination(WitnessV0KeyHash(collateralKey.GetPubKey()));
-
-    // Create a MN with an external collateral
-    CMutableTransaction tx_collateral;
-    FundTransaction(setup.m_node, tx_collateral, utxos, scriptCollateral, 100 * COIN);
-    SignTransaction(setup.m_node, tx_collateral, setup.coinbaseKey);
-
-    auto block = setup.CreateAndProcessBlock({tx_collateral}, GetScriptForRawPubKey(setup.coinbaseKey.GetPubKey()));
-
-    BOOST_CHECK_EQUAL(*(setup.m_node.chain->getHeight()) , nHeight + 1);
-    BOOST_CHECK_EQUAL(block.GetHash() , setup.m_node.chain->getBlockHash(*setup.m_node.chain->getHeight()));
-
-    CProRegTx payload;
-    payload.addr = LookupNumeric("1.1.1.1", 1);
-    payload.keyIDOwner = ownerKey.GetPubKey().GetID();
-    payload.pubKeyOperator.Set(operatorKey.GetPublicKey(), bls::bls_legacy_scheme.load());
-    payload.keyIDVoting = ownerKey.GetPubKey().GetID();
-    payload.scriptPayout = scriptPayout;
-
-    for (size_t i = 0; i < tx_collateral.vout.size(); ++i) {
-        if (tx_collateral.vout[i].nValue == 100 * COIN) {
-            payload.collateralOutpoint = COutPoint(tx_collateral.GetHash(), i);
-            break;
+    llmq::pq::PQPaymentProbationTransitionContext context;
+    context.receipt = {
+        epoch, parent_height + 1,
+        MakeSnapshotKey(1'000'000 + parent_height)};
+    for (std::size_t member{0}; member < llmq::pq::QUORUM_SIZE; ++member) {
+        context.frozen_roster[member] =
+            MakeSnapshotKey(2'000'000 + static_cast<int>(member));
+        if (member < llmq::pq::QUORUM_MIN_VALID) {
+            SetProbationBitmapBit(context.roster_valid_members, member);
         }
     }
-
-    CMutableTransaction tx_reg;
-    tx_reg.nVersion = SYSCOIN_TX_VERSION_MN_REGISTER;
-    FundTransaction(setup.m_node, tx_reg, utxos, scriptPayout, 100 * COIN);
-    payload.inputsHash = CalcTxInputsHash(CTransaction(tx_reg));
-    CMessageSigner::SignMessage(payload.MakeSignString(), payload.vchSig, collateralKey);
-    SetTxPayload(tx_reg, payload);
-    SignTransaction(setup.m_node, tx_reg, setup.coinbaseKey);
-
-    CTxMemPool testPool{MemPoolOptionsForTest(setup.m_node)};
-    TestMemPoolEntryHelper entry;
-    LOCK2(cs_main, testPool.cs);
-    // Create ProUpServ and test block reorg which double-spend ProRegTx
-    auto tx_up_serv = CreateProUpServTx(setup.m_node, utxos, tx_reg.GetHash(), operatorKey, 2, setup.coinbaseKey);
-    testPool.addUnchecked(entry.FromTx(tx_up_serv));
-    // A disconnected block would insert ProRegTx back into mempool
-    testPool.addUnchecked(entry.FromTx(tx_reg));
-    BOOST_CHECK_EQUAL(testPool.size(), 2U);
-
-    // Create a tx that will double-spend ProRegTx
-    CMutableTransaction tx_reg_ds;
-    tx_reg_ds.vin = tx_reg.vin;
-    tx_reg_ds.vout.emplace_back(0, CScript() << OP_RETURN);
-    SignTransaction(setup.m_node, tx_reg_ds, setup.coinbaseKey);
-
-    // Check mempool as if a new block with tx_reg_ds was connected instead of the old one with tx_reg
-    std::vector<CTransactionRef> block_reorg;
-    block_reorg.emplace_back(std::make_shared<CTransaction>(tx_reg_ds));
-    testPool.removeForBlock(block_reorg, nHeight + 2);
-    BOOST_CHECK_EQUAL(testPool.size(), 0U);
+    context.frozen_roster[0] = special_members[0];
+    context.frozen_roster[1] = special_members[1];
+    context.frozen_roster[2] = special_members[2];
+    context.frozen_roster[350] = special_members[3];
+    SetProbationBitmapBit(context.observed_members, 0);
+    SetProbationBitmapBit(context.observed_members, 1);
+    SetProbationBitmapBit(context.observed_members, 2);
+    return context;
 }
 
-void FuncTestMempoolDualProregtx(TestChain100Setup& setup)
+static llmq::pq::PQPaymentProbationTransitionInput
+MakeReferenceProbationInput(
+    const llmq::pq::PQPaymentProbationTransitionContext& context,
+    const CDeterministicMNList& list)
 {
-    auto utxos = BuildSimpleUTXOVec(setup.m_coinbase_txns);
-
-    // Create a MN
-    CKey ownerKey1;
-    CBLSSecretKey operatorKey1;
-    auto tx_reg1 = CreateProRegTx(setup.m_node, utxos, 1, GenerateRandomAddress(), setup.coinbaseKey, ownerKey1, operatorKey1);
-
-    // Create a MN with an external collateral that references tx_reg1
-    CKey ownerKey;
-    CKey payoutKey;
-    CKey collateralKey;
-    CBLSSecretKey operatorKey;
-
-    ownerKey.MakeNewKey(true);
-    payoutKey.MakeNewKey(true);
-    collateralKey.MakeNewKey(true);
-    operatorKey.MakeNewKey();
-
-    auto scriptPayout = GetScriptForDestination(WitnessV0KeyHash(payoutKey.GetPubKey()));
-
-    CProRegTx payload;
-    payload.addr = LookupNumeric("1.1.1.1", 2);
-    payload.keyIDOwner = ownerKey.GetPubKey().GetID();
-    payload.pubKeyOperator.Set(operatorKey.GetPublicKey(), bls::bls_legacy_scheme.load());
-    payload.keyIDVoting = ownerKey.GetPubKey().GetID();
-    payload.scriptPayout = scriptPayout;
-
-    for (size_t i = 0; i < tx_reg1.vout.size(); ++i) {
-        if (tx_reg1.vout[i].nValue == 100 * COIN) {
-            payload.collateralOutpoint = COutPoint(tx_reg1.GetHash(), i);
-            break;
+    llmq::pq::PQPaymentProbationTransitionInput input;
+    static_cast<llmq::pq::PQPaymentProbationTransitionContext&>(input) =
+        context;
+    list.ForEachMN(false, [&](const CDeterministicMN& dmn) {
+        input.existing_pro_tx_hashes.push_back(dmn.proTxHash);
+        if (CDeterministicMNList::IsMNValid(dmn)) {
+            input.current_valid_pro_tx_hashes.push_back(dmn.proTxHash);
         }
-    }
-
-    CMutableTransaction tx_reg2;
-    tx_reg2.nVersion = SYSCOIN_TX_VERSION_MN_REGISTER;
-    FundTransaction(setup.m_node, tx_reg2, utxos, scriptPayout, 100 * COIN);
-    payload.inputsHash = CalcTxInputsHash(CTransaction(tx_reg2));
-    CMessageSigner::SignMessage(payload.MakeSignString(), payload.vchSig, collateralKey);
-    SetTxPayload(tx_reg2, payload);
-    SignTransaction(setup.m_node, tx_reg2, setup.coinbaseKey);
-
-    CTxMemPool testPool{MemPoolOptionsForTest(setup.m_node)};
-    TestMemPoolEntryHelper entry;
-    LOCK2(cs_main, testPool.cs);
-
-    testPool.addUnchecked(entry.FromTx(tx_reg1));
-    BOOST_CHECK_EQUAL(testPool.size(), 1U);
-    BOOST_CHECK(testPool.existsProviderTxConflict(CTransaction(tx_reg2)));
+    });
+    std::sort(input.existing_pro_tx_hashes.begin(),
+              input.existing_pro_tx_hashes.end());
+    std::sort(input.current_valid_pro_tx_hashes.begin(),
+              input.current_valid_pro_tx_hashes.end());
+    return input;
 }
 
-void FuncVerifyDB(TestChain100Setup& setup)
+static uint256 CheckExactParentProbationTransition(
+    CDeterministicMNManager& manager,
+    const CBlockIndex& parent,
+    const llmq::pq::PQPaymentProbationTransitionContext& context,
+    const CDeterministicMNList& list,
+    const llmq::pq::PQPaymentProbationState& previous,
+    const uint256& previous_hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
-    int nHeight = *setup.m_node.chain->getHeight();
-    auto utxos = BuildSimpleUTXOVec(setup.m_coinbase_txns);
-
-    CKey ownerKey;
-    CKey payoutKey;
-    CKey collateralKey;
-    CBLSSecretKey operatorKey;
-
-    ownerKey.MakeNewKey(true);
-    payoutKey.MakeNewKey(true);
-    collateralKey.MakeNewKey(true);
-    operatorKey.MakeNewKey();
-
-    auto scriptPayout = GetScriptForDestination(WitnessV0KeyHash(payoutKey.GetPubKey()));
-    auto scriptCollateral = GetScriptForDestination(WitnessV0KeyHash(collateralKey.GetPubKey()));
-
-    // Create a MN with an external collateral
-    CMutableTransaction tx_collateral;
-    FundTransaction(setup.m_node, tx_collateral, utxos, scriptCollateral, 100 * COIN);
-    SignTransaction(setup.m_node, tx_collateral, setup.coinbaseKey);
-
-
-    auto block = setup.CreateAndProcessBlock({tx_collateral}, GetScriptForRawPubKey(setup.coinbaseKey.GetPubKey()));
-
-    assert(*setup.m_node.chain->getHeight() == nHeight + 1);
-    assert(block.GetHash() == setup.m_node.chain->getBlockHash(*setup.m_node.chain->getHeight()));
-
-    CProRegTx payload;
-    payload.addr = LookupNumeric("1.1.1.1", 1);
-    payload.keyIDOwner = ownerKey.GetPubKey().GetID();
-    payload.pubKeyOperator.Set(operatorKey.GetPublicKey(), bls::bls_legacy_scheme.load());
-    payload.keyIDVoting = ownerKey.GetPubKey().GetID();
-    payload.scriptPayout = scriptPayout;
-
-    for (size_t i = 0; i < tx_collateral.vout.size(); ++i) {
-        if (tx_collateral.vout[i].nValue == 100 * COIN) {
-            payload.collateralOutpoint = COutPoint(tx_collateral.GetHash(), i);
-            break;
-        }
-    }
-
-    CMutableTransaction tx_reg;
-    tx_reg.nVersion = SYSCOIN_TX_VERSION_MN_REGISTER;
-    FundTransaction(setup.m_node, tx_reg, utxos, scriptPayout, 100 * COIN);
-    payload.inputsHash = CalcTxInputsHash(CTransaction(tx_reg));
-    CMessageSigner::SignMessage(payload.MakeSignString(), payload.vchSig, collateralKey);
-    SetTxPayload(tx_reg, payload);
-    SignTransaction(setup.m_node, tx_reg, setup.coinbaseKey);
-
-    auto tx_reg_hash = tx_reg.GetHash();
-
-    block = setup.CreateAndProcessBlock({tx_reg}, GetScriptForRawPubKey(setup.coinbaseKey.GetPubKey()));
-
-    BOOST_CHECK_EQUAL(*setup.m_node.chain->getHeight() , nHeight + 2);
-    BOOST_CHECK_EQUAL(block.GetHash() , setup.m_node.chain->getBlockHash(*setup.m_node.chain->getHeight()));
-    assert(deterministicMNManager->GetListAtChainTip().HasMN(tx_reg_hash));
-
-    // Now spend the collateral while updating the same MN
-    SimpleUTXOVec collateral_utxos;
-    collateral_utxos.emplace_back(payload.collateralOutpoint, std::make_pair(1, 100 * COIN));
-    auto proUpRevTx = CreateProUpRevTx(setup.m_node, collateral_utxos, tx_reg_hash, operatorKey, collateralKey);
-
-    block = setup.CreateAndProcessBlock({proUpRevTx}, GetScriptForRawPubKey(setup.coinbaseKey.GetPubKey()));
-
-    BOOST_CHECK_EQUAL(*setup.m_node.chain->getHeight() , nHeight + 3);
-    BOOST_CHECK_EQUAL(block.GetHash() , setup.m_node.chain->getBlockHash(*setup.m_node.chain->getHeight()));
-    assert(!deterministicMNManager->GetListAtChainTip().HasMN(tx_reg_hash));
-    LOCK(cs_main);
-    Chainstate& active_chainstate = setup.m_node.chainman->ActiveChainstate();
-    // Verify db consistency
-    assert(CVerifyDB(setup.m_node.chainman->GetNotifications()).VerifyDB(active_chainstate, Params().GetConsensus(), active_chainstate.CoinsTip(), 4, 2) == VerifyDBResult::SUCCESS);
-}
-BOOST_AUTO_TEST_SUITE(evo_dip3_activation_tests)
-
-// DIP3 can only be activated with legacy scheme (v19 is activated later)
-BOOST_AUTO_TEST_CASE(dip3_activation_legacy)
-{
-    TestChainDIP3BeforeActivationSetup setup;
-    FuncDIP3Activation(setup);
-}
-
-BOOST_AUTO_TEST_CASE(dip3_protx_legacy)
-{
-    TestChainDIP3Setup setup;
-    FuncDIP3Protx(setup);
-}
-
-BOOST_AUTO_TEST_CASE(dip3_protx_basic)
-{
-    TestChainDIP3V19Setup setup;
-    FuncDIP3Protx(setup);
-}
-
-BOOST_AUTO_TEST_CASE(masternode_required_outputs_are_matched_once)
-{
-    TestChainDIP3V19Setup setup;
-    auto utxos = BuildSimpleUTXOVec(setup.m_coinbase_txns);
-    const CScript payout =
-        GetScriptForDestination(WitnessV0KeyHash(setup.coinbaseKey.GetPubKey()));
-
-    CKey owner_key;
-    CBLSSecretKey operator_key;
-    const CMutableTransaction pro_reg =
-        CreateProRegTx(
-            setup.m_node,
-            utxos,
-            /*port=*/1,
-            payout,
-            setup.coinbaseKey,
-            owner_key,
-            operator_key);
-    setup.CreateAndProcessBlock(
-        {pro_reg}, GetScriptForRawPubKey(setup.coinbaseKey.GetPubKey()));
-
-    const CMutableTransaction pro_up_serv =
-        CreateProUpServTx(
-            setup.m_node,
-            utxos,
-            pro_reg.GetHash(),
-            operator_key,
-            /*port=*/2,
-            setup.coinbaseKey);
-    setup.CreateAndProcessBlock(
-        {pro_up_serv}, GetScriptForRawPubKey(setup.coinbaseKey.GetPubKey()));
-
-    CChain* active_chain = WITH_LOCK(
-        ::cs_main, return &setup.m_node.chainman->ActiveChain());
-    const int next_height = *setup.m_node.chain->getHeight() + 1;
-    constexpr CAmount block_reward{100 * COIN};
-    CAmount mn_seniority{0};
-    CAmount mn_floor_diff{0};
-    int collateral_height{0};
-    std::vector<CTxOut> required_outputs;
+    AssertLockHeld(::cs_main);
+    const auto reference_input{MakeReferenceProbationInput(context, list)};
+    BOOST_REQUIRE(reference_input.IsStructurallyValid());
+    const auto expected{llmq::pq::ApplyPQPaymentProbationTransition(
+        previous, reference_input)};
+    BOOST_REQUIRE(expected);
+    auto outcome{manager.ApplyPaymentProbationTransition(parent, context)};
     BOOST_REQUIRE(
-        CMasternodePayments::GetBlockTxOuts(
-            *active_chain,
-            next_height,
-            block_reward,
-            required_outputs,
-            /*nHalfFee=*/0,
-            mn_seniority,
-            mn_floor_diff,
-            collateral_height));
-    BOOST_REQUIRE_EQUAL(required_outputs.size(), 2);
-    BOOST_REQUIRE(required_outputs[0] == required_outputs[1]);
+        outcome.status ==
+        llmq::pq::PQPaymentProbationTransitionStatus::READY);
+    BOOST_CHECK(outcome.error == llmq::pq::PQPaymentProbationError::NONE);
+    BOOST_REQUIRE(outcome.transition);
+    BOOST_REQUIRE(outcome.transition->Result().State() != nullptr);
+    BOOST_CHECK(*outcome.transition->Result().State() == expected->state);
+    BOOST_CHECK(outcome.transition->PreviousStateHash() == previous_hash);
+    BOOST_CHECK(outcome.transition->AppliedReceipt() ==
+                expected->undo.applied_receipt);
+    BOOST_CHECK(outcome.transition->Result().StateHash() ==
+                expected->undo.applied_state_hash);
 
+    CDataStream actual_bytes{SER_NETWORK, PROTOCOL_VERSION};
+    actual_bytes << *outcome.transition->Result().State()
+                 << outcome.transition->PreviousStateHash()
+                 << outcome.transition->AppliedReceipt()
+                 << outcome.transition->Result().StateHash();
+    CDataStream expected_bytes{SER_NETWORK, PROTOCOL_VERSION};
+    expected_bytes << expected->state << expected->undo.previous_state_hash
+                   << expected->undo.applied_receipt
+                   << expected->undo.applied_state_hash;
+    BOOST_CHECK_EQUAL_COLLECTIONS(
+        actual_bytes.begin(), actual_bytes.end(), expected_bytes.begin(),
+        expected_bytes.end());
+    return outcome.transition->Result().StateHash();
+}
+
+static CTransactionRef MakeProviderMutationTransaction(
+    int32_t transaction_version, const uint256& pro_tx_hash, uint32_t tag)
+{
     CMutableTransaction tx;
-    tx.vout = {required_outputs[0]};
-    mn_seniority = 0;
-    mn_floor_diff = 0;
-    BOOST_CHECK(
-        !CMasternodePayments::IsTransactionValid(
-            *active_chain,
-            CTransaction{tx},
-            next_height,
-            block_reward,
-            /*nHalfFee=*/0,
-            mn_seniority,
-            mn_floor_diff));
+    tx.nVersion = transaction_version;
+    tx.vin.emplace_back(COutPoint{MakeSnapshotKey(10'000 + tag), tag});
+    tx.vout.emplace_back(1, CScript{} << OP_TRUE);
 
-    tx.vout.push_back(required_outputs[1]);
-    mn_seniority = 0;
-    mn_floor_diff = 0;
-    std::vector<bool> matched_outputs;
-    BOOST_CHECK(
-        CMasternodePayments::IsTransactionValid(
-            *active_chain,
-            CTransaction{tx},
-            next_height,
-            block_reward,
-            /*nHalfFee=*/0,
-            mn_seniority,
-            mn_floor_diff,
-            &matched_outputs));
-    BOOST_REQUIRE_EQUAL(matched_outputs.size(), tx.vout.size());
-    BOOST_CHECK(matched_outputs[0]);
-    BOOST_CHECK(matched_outputs[1]);
+    if (transaction_version == SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE) {
+        CProUpServTx payload;
+        payload.nVersion = CProUpServTx::PQ_VERSION;
+        payload.proTxHash = pro_tx_hash;
+        payload.inputsHash = MakeSnapshotKey(20'000 + tag);
+        payload.globalKeyVersion = 1;
+        payload.pqSig[0] = 1;
+        SetTxPayload(tx, payload);
+    } else if (transaction_version == SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR) {
+        CProUpRegTx payload;
+        payload.nVersion = CProUpRegTx::PQ_VERSION;
+        payload.proTxHash = pro_tx_hash;
+        payload.keyIDVoting = MakeAnchorKeyID(0x70);
+        payload.inputsHash = MakeSnapshotKey(20'000 + tag);
+        payload.vchSig.assign(1, 1);
+        SetTxPayload(tx, payload);
+    } else {
+        BOOST_REQUIRE_EQUAL(transaction_version,
+                            SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE);
+        CProUpRevTx payload;
+        payload.nVersion = CProUpRevTx::PQ_VERSION;
+        payload.proTxHash = pro_tx_hash;
+        payload.inputsHash = MakeSnapshotKey(20'000 + tag);
+        payload.globalKeyVersion = 1;
+        payload.pqSig[0] = 1;
+        SetTxPayload(tx, payload);
+    }
+    return MakeTransactionRef(std::move(tx));
 }
 
-BOOST_AUTO_TEST_CASE(test_mempool_reorg_legacy)
+static CBlock MakeProviderMutationBlock(
+    std::initializer_list<CTransactionRef> transactions)
 {
-    TestChainDIP3Setup setup;
-    FuncTestMempoolReorg(setup);
+    CBlock block;
+    block.vtx.emplace_back(MakeTransactionRef(CMutableTransaction{}));
+    block.vtx.insert(block.vtx.end(), transactions.begin(), transactions.end());
+    return block;
 }
 
-BOOST_AUTO_TEST_CASE(test_mempool_reorg_basic)
+static CDeterministicMNCPtr MakeNEVMAddressMN(uint64_t internal_id, uint32_t tag)
 {
-    TestChainDIP3V19Setup setup;
-    FuncTestMempoolReorg(setup);
+    auto member{std::make_shared<CDeterministicMN>(
+        *MakeLegacyReplayMN(internal_id, tag))};
+    auto state{
+        std::make_shared<CDeterministicMNState>(*member->pdmnState)};
+    state->vchNEVMAddress.assign(20, static_cast<unsigned char>(tag));
+    member->pdmnState = std::move(state);
+    return member;
 }
 
-BOOST_AUTO_TEST_CASE(test_mempool_dual_proregtx_legacy)
+static void CheckNEVMAddressDiff(
+    const CDeterministicMNListNEVMAddressDiff& actual,
+    const CDeterministicMNListNEVMAddressDiff& expected)
 {
-    TestChainDIP3Setup setup;
-    FuncTestMempoolDualProregtx(setup);
+    BOOST_CHECK(actual.addedMNNEVM == expected.addedMNNEVM);
+    BOOST_CHECK(actual.updatedMNNEVM == expected.updatedMNNEVM);
+    BOOST_CHECK(actual.removedMNNEVM == expected.removedMNNEVM);
 }
-
-BOOST_AUTO_TEST_CASE(test_mempool_dual_proregtx_basic)
-{
-    TestChainDIP3V19Setup setup;
-    FuncTestMempoolDualProregtx(setup);
-}
-
-//This one can be started only with legacy scheme, since inside undo block will switch it back to legacy resulting into an inconsistency
-BOOST_AUTO_TEST_CASE(verify_db_legacy)
-{
-    TestChainDIP3Setup setup;
-    FuncVerifyDB(setup);
-}
-BOOST_AUTO_TEST_SUITE_END()
 
 BOOST_AUTO_TEST_SUITE(evo_dmn_db_maintenance_tests)
+
+BOOST_AUTO_TEST_CASE(unavailable_and_corrupt_negative_heights_are_null)
+{
+    CDeterministicMNList unavailable;
+    BOOST_CHECK(unavailable.IsNull());
+    unavailable.SetHeight(0);
+    BOOST_CHECK(!unavailable.IsNull());
+    BOOST_CHECK_EQUAL(unavailable.GetHeight(), 0);
+
+    CDataStream encoded{SER_DISK, PROTOCOL_VERSION};
+    const uint256 block_hash{MakeSnapshotKey(0)};
+    const int corrupt_height{-2};
+    const uint32_t total_registered_count{0};
+    encoded << block_hash << corrupt_height << total_registered_count;
+    WriteCompactSize(encoded, 0);
+    CDeterministicMNList corrupt;
+    encoded >> corrupt;
+    BOOST_CHECK(corrupt.IsNull());
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    special_tx_local_error_is_not_cached_as_consensus_invalid,
+    TestingSetup)
+{
+    LOCK(::cs_main);
+    BOOST_REQUIRE(deterministicMNManager);
+    CBlockIndex* parent{m_node.chainman->ActiveTip()};
+    BOOST_REQUIRE(parent);
+
+    CMutableTransaction pq_transaction;
+    pq_transaction.nVersion = llmq::pq::PQ_GLOBAL_KEY_TX_VERSION;
+    CBlock block{MakeProviderMutationBlock(
+        {MakeTransactionRef(std::move(pq_transaction))})};
+    block.hashPrevBlock = parent->GetBlockHash();
+    block.nNonce = 90'001;
+    const uint256 block_hash{block.GetHash()};
+    CBlockIndex block_index;
+    block_index.nHeight = parent->nHeight + 1;
+    block_index.pprev = parent;
+    block_index.phashBlock = &block_hash;
+
+    auto saved_manager{std::move(deterministicMNManager)};
+    BlockValidationState local_state;
+    CDeterministicMNListNEVMAddressDiff local_diff;
+    const bool local_result{ProcessSpecialTxsInBlock(
+        *m_node.chainman, block, &block_index, local_state, local_diff,
+        m_node.chainman->ActiveChainstate().CoinsTip(),
+        /*fJustCheck=*/true, /*check_sigs=*/true, /*ibd=*/true,
+        SpecialTxValidationContext::NORMAL)};
+    deterministicMNManager = std::move(saved_manager);
+    BOOST_CHECK(!local_result);
+    BOOST_CHECK(local_state.IsError());
+    BOOST_CHECK(!local_state.IsInvalid());
+    BOOST_CHECK_EQUAL(local_state.GetRejectReason(),
+                      "failed-pq-registry-unavailable");
+
+    CMutableTransaction invalid_registration;
+    invalid_registration.nVersion = SYSCOIN_TX_VERSION_MN_REGISTER;
+    CBlock invalid_block{MakeProviderMutationBlock(
+        {MakeTransactionRef(std::move(invalid_registration))})};
+    invalid_block.hashPrevBlock = parent->GetBlockHash();
+    invalid_block.nNonce = 90'002;
+    const uint256 invalid_hash{invalid_block.GetHash()};
+    CBlockIndex invalid_index;
+    invalid_index.nHeight = parent->nHeight + 1;
+    invalid_index.pprev = parent;
+    invalid_index.phashBlock = &invalid_hash;
+    BlockValidationState invalid_state;
+    CDeterministicMNListNEVMAddressDiff invalid_diff;
+    BOOST_CHECK(!ProcessSpecialTxsInBlock(
+        *m_node.chainman, invalid_block, &invalid_index, invalid_state,
+        invalid_diff, m_node.chainman->ActiveChainstate().CoinsTip(),
+        /*fJustCheck=*/true, /*check_sigs=*/true, /*ibd=*/true,
+        SpecialTxValidationContext::NORMAL));
+    BOOST_CHECK(invalid_state.IsInvalid());
+    BOOST_CHECK(!invalid_state.IsError());
+}
+
+// SYSCOIN: Prove the genesis-active base survives bounded-window maintenance.
+BOOST_AUTO_TEST_CASE(dip3_at_genesis_persists_only_the_canonical_empty_base)
+{
+    SelectParams(ChainType::REGTEST);
+    LOCK(::cs_main);
+    auto& consensus{const_cast<Consensus::Params&>(Params().GetConsensus())};
+    struct RestoreDIP3Heights {
+        Consensus::Params& consensus;
+        int activation{consensus.DIP0003Height};
+        int enforcement{consensus.DIP0003EnforcementHeight};
+        ~RestoreDIP3Heights()
+        {
+            consensus.DIP0003Height = activation;
+            consensus.DIP0003EnforcementHeight = enforcement;
+        }
+    } restore{consensus};
+    consensus.DIP0003Height = 0;
+    consensus.DIP0003EnforcementHeight = 0;
+
+    const uint256 genesis_hash{consensus.hashGenesisBlock};
+    auto chain{BuildSnapshotIndexChain(
+        /*start_height=*/0, CDeterministicMNManager::LIST_CACHE_SIZE + 2)};
+    chain.hashes.front() = genesis_hash;
+    const CBlockIndex* genesis_index{chain.At(0)};
+    const CBlockIndex* first_child{chain.At(1)};
+
+    const ScopedDiskDBPath disk_db;
+    auto db_params = DBParams{
+        .path = disk_db.path,
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = false,
+        .wipe_data = true,
+    };
+    {
+        CDeterministicMNManager manager(db_params);
+        BOOST_CHECK(!manager.HasPersistentWindow());
+        BOOST_CHECK_EQUAL(manager.m_evoDb->CountPersistedEntries(), 1);
+        BOOST_CHECK_EQUAL(manager.m_evoDb->GetReadCacheSize(), 0U);
+        const auto snapshot{manager.GetListForBlock(genesis_index)};
+        BOOST_CHECK(!snapshot.IsNull());
+        BOOST_CHECK_EQUAL(snapshot.GetHeight(), 0);
+        BOOST_CHECK(snapshot.GetBlockHash() == genesis_hash);
+        BOOST_CHECK_EQUAL(snapshot.GetAllMNsCount(), 0U);
+        BOOST_CHECK_EQUAL(snapshot.GetTotalRegisteredCount(), 0U);
+        BOOST_CHECK_THROW(manager.GetListForBlock(first_child),
+                          std::runtime_error);
+    }
+
+    db_params.wipe_data = false;
+    {
+        CDeterministicMNManager genesis_only_restart(db_params);
+        BOOST_CHECK(!genesis_only_restart.HasPersistentWindow());
+        BOOST_CHECK_EQUAL(
+            genesis_only_restart.m_evoDb->CountPersistedEntries(), 1);
+        BOOST_CHECK_EQUAL(
+            genesis_only_restart.m_evoDb->GetReadCacheSize(), 0U);
+        const auto snapshot{
+            genesis_only_restart.GetListForBlock(genesis_index)};
+        BOOST_CHECK(!snapshot.IsNull());
+        BOOST_CHECK_EQUAL(snapshot.GetHeight(), 0);
+        BOOST_CHECK(snapshot.GetBlockHash() == genesis_hash);
+        BOOST_CHECK_EQUAL(snapshot.GetAllMNsCount(), 0U);
+        BOOST_CHECK_EQUAL(snapshot.GetTotalRegisteredCount(), 0U);
+        BOOST_CHECK_THROW(
+            genesis_only_restart.GetListForBlock(first_child),
+            std::runtime_error);
+
+        BOOST_REQUIRE(genesis_only_restart.m_evoDb->WriteThrough(
+            first_child->GetBlockHash(),
+            CDeterministicMNList{first_child->GetBlockHash(), 1, 0},
+            /*fSync=*/true));
+        for (int height{2}; height <= chain.Tip()->nHeight; ++height) {
+            const auto* index{chain.At(height)};
+            genesis_only_restart.m_evoDb->WriteCache(
+                index->GetBlockHash(),
+                CDeterministicMNList{index->GetBlockHash(), height, 0});
+        }
+        genesis_only_restart.UpdatedBlockTip(chain.Tip());
+        BOOST_REQUIRE(genesis_only_restart.FlushCacheToDisk(
+            /*bForceFlush=*/true));
+        BOOST_CHECK(genesis_only_restart.HasPersistentWindow());
+        BOOST_CHECK_EQUAL(
+            genesis_only_restart.m_evoDb->CountPersistedEntries(),
+            CDeterministicMNManager::LIST_CACHE_SIZE + 1);
+        CDeterministicMNList persisted;
+        BOOST_CHECK(genesis_only_restart.m_evoDb->Read(genesis_hash,
+                                                       persisted));
+        BOOST_CHECK(!genesis_only_restart.m_evoDb->Read(
+            first_child->GetBlockHash(), persisted));
+        BOOST_CHECK_THROW(genesis_only_restart.GetListForBlock(first_child),
+                          std::runtime_error);
+    }
+
+    {
+        CDeterministicMNManager restarted(db_params);
+        BOOST_CHECK(!restarted.HasPersistentWindow());
+        const auto snapshot{restarted.GetListForBlock(genesis_index)};
+        BOOST_CHECK(!snapshot.IsNull());
+        BOOST_CHECK_EQUAL(snapshot.GetHeight(), 0);
+        BOOST_CHECK(snapshot.GetBlockHash() == genesis_hash);
+        BOOST_CHECK_EQUAL(snapshot.GetAllMNsCount(), 0U);
+        BOOST_CHECK_EQUAL(snapshot.GetTotalRegisteredCount(), 0U);
+        BOOST_CHECK_THROW(restarted.GetListForBlock(first_child),
+                          std::runtime_error);
+        restarted.UpdatedBlockTip(chain.Tip());
+        BOOST_REQUIRE(restarted.FlushCacheToDisk(/*bForceFlush=*/true));
+        BOOST_CHECK(restarted.HasPersistentWindow());
+        BOOST_REQUIRE(restarted.m_evoDb->WriteThrough(
+            genesis_hash, CDeterministicMNList{genesis_hash, 0, 1},
+            /*fSync=*/true));
+    }
+    BOOST_CHECK_THROW(CDeterministicMNManager{db_params},
+                      std::runtime_error);
+}
+
+// SYSCOIN BEGIN: PQ deterministic-MN, payment, registry, and maintenance regressions.
+BOOST_AUTO_TEST_CASE(first_dip3_just_check_validates_pq_without_persisting)
+{
+    SelectParams(ChainType::REGTEST);
+    LOCK(::cs_main);
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    struct RestorePQDeployment {
+        Consensus::Params& consensus;
+        int preparation_height{consensus.nPQPreparationHeight};
+        int epoch_origin{consensus.nPQChainLockEpochOrigin};
+        uint32_t registration_cutoff{consensus.nPQRegistrationCutoffBlocks};
+        uint32_t future_horizon{consensus.nPQFutureHorizonEpochs};
+        int activation_height{consensus.nPQActivationHeight};
+        ~RestorePQDeployment()
+        {
+            consensus.nPQPreparationHeight = preparation_height;
+            consensus.nPQChainLockEpochOrigin = epoch_origin;
+            consensus.nPQRegistrationCutoffBlocks = registration_cutoff;
+            consensus.nPQFutureHorizonEpochs = future_horizon;
+            consensus.nPQActivationHeight = activation_height;
+        }
+    } restore{consensus};
+    consensus.nPQPreparationHeight = std::numeric_limits<int>::max();
+    consensus.nPQChainLockEpochOrigin = std::numeric_limits<int>::max();
+    consensus.nPQRegistrationCutoffBlocks = 0;
+    consensus.nPQFutureHorizonEpochs = 0;
+    consensus.nPQActivationHeight = std::numeric_limits<int>::max();
+
+    const int active_height{consensus.DIP0003Height};
+    BOOST_REQUIRE_GT(active_height, 0);
+    const uint256 parent_hash{MakeSnapshotKey(active_height - 1)};
+    CBlockIndex parent_index;
+    parent_index.nHeight = active_height - 1;
+    parent_index.phashBlock = &parent_hash;
+
+    auto db_params = DBParams{
+        .path = "testdb_dmn_first_dip3_just_check",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    };
+    CDeterministicMNManager manager(db_params);
+    BOOST_CHECK(manager.GetListForBlock(&parent_index).IsNull());
+
+    CMutableTransaction pq_transaction;
+    pq_transaction.nVersion = llmq::pq::PQ_GLOBAL_KEY_TX_VERSION;
+    CBlock rejected_block{MakeProviderMutationBlock(
+        {MakeTransactionRef(std::move(pq_transaction))})};
+    rejected_block.hashPrevBlock = parent_hash;
+    rejected_block.nNonce = 1;
+    const uint256 rejected_hash{rejected_block.GetHash()};
+    CBlockIndex rejected_index;
+    rejected_index.nHeight = active_height;
+    rejected_index.pprev = &parent_index;
+    rejected_index.phashBlock = &rejected_hash;
+
+    CCoinsView base_view;
+    CCoinsViewCache view(&base_view);
+    const llmq::CFinalCommitmentTxPayload no_legacy_commitment;
+    BlockValidationState rejected_state;
+    CDeterministicMNListNEVMAddressDiff rejected_diff;
+    BOOST_CHECK(!manager.ProcessBlock(
+        rejected_block, &rejected_index, rejected_state, view,
+        no_legacy_commitment, rejected_diff,
+        /*fJustCheck=*/true, /*ibd=*/true));
+    BOOST_CHECK_EQUAL(rejected_state.GetRejectReason(),
+                      "bad-pq-registry-disabled");
+    CDeterministicMNList snapshot;
+    BOOST_CHECK(!manager.m_evoDb->ReadCache(rejected_hash, snapshot));
+
+    CBlock accepted_block{MakeProviderMutationBlock({})};
+    accepted_block.hashPrevBlock = parent_hash;
+    accepted_block.nNonce = 2;
+    const uint256 accepted_hash{accepted_block.GetHash()};
+    CBlockIndex accepted_index;
+    accepted_index.nHeight = active_height;
+    accepted_index.pprev = &parent_index;
+    accepted_index.phashBlock = &accepted_hash;
+
+    BlockValidationState accepted_state;
+    CDeterministicMNListNEVMAddressDiff accepted_diff;
+    BOOST_REQUIRE(manager.ProcessBlock(
+        accepted_block, &accepted_index, accepted_state, view,
+        no_legacy_commitment, accepted_diff,
+        /*fJustCheck=*/true, /*ibd=*/true));
+    BOOST_CHECK(!manager.m_evoDb->ReadCache(accepted_hash, snapshot));
+}
+
+BOOST_AUTO_TEST_CASE(missing_parent_snapshot_is_local_process_error)
+{
+    SelectParams(ChainType::REGTEST);
+    LOCK(::cs_main);
+
+    const int parent_height{Params().GetConsensus().DIP0003Height};
+    BOOST_REQUIRE_GE(parent_height, 0);
+    const uint256 parent_hash{MakeSnapshotKey(parent_height)};
+    CBlockIndex parent_index;
+    parent_index.nHeight = parent_height;
+    parent_index.phashBlock = &parent_hash;
+
+    CBlock block{MakeProviderMutationBlock({})};
+    block.hashPrevBlock = parent_hash;
+    block.nNonce = 1;
+    const uint256 block_hash{block.GetHash()};
+    CBlockIndex block_index;
+    block_index.nHeight = parent_height + 1;
+    block_index.pprev = &parent_index;
+    block_index.phashBlock = &block_hash;
+
+    auto db_params = DBParams{
+        .path = "testdb_dmn_missing_parent_process_error",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    };
+    CDeterministicMNManager manager(db_params);
+    CCoinsView base_view;
+    CCoinsViewCache view(&base_view);
+    BlockValidationState state;
+    CDeterministicMNListNEVMAddressDiff diff;
+    const llmq::CFinalCommitmentTxPayload no_legacy_commitment;
+
+    BOOST_CHECK(!manager.ProcessBlock(
+        block, &block_index, state, view, no_legacy_commitment, diff,
+        /*fJustCheck=*/true, /*ibd=*/true));
+    BOOST_CHECK(state.IsError());
+    BOOST_CHECK(!state.IsInvalid());
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "failed-dmn-parent-state");
+}
+
+BOOST_AUTO_TEST_CASE(pq_payment_eligibility_follows_consensus_ban_state)
+{
+    const auto clone_with_state = [](const CDeterministicMNCPtr& source,
+                                     std::shared_ptr<CDeterministicMNState> state) {
+        auto result{std::make_shared<CDeterministicMN>(source->GetInternalId())};
+        result->proTxHash = source->proTxHash;
+        result->collateralOutpoint = source->collateralOutpoint;
+        result->nOperatorReward = source->nOperatorReward;
+        result->pdmnState = std::move(state);
+        return CDeterministicMNCPtr{std::move(result)};
+    };
+
+    // A valid pre-activation member remains a payee even when no external PQ
+    // operator state exists. Missing child-key participation is not PoSe.
+    const auto migrated{MakeLegacyReplayMN(20, 5)};
+    CDeterministicMNList migrated_list{MakeSnapshotKey(500), 500, 1};
+    migrated_list.AddMN(migrated, /*fBumpTotalCount=*/false);
+    BOOST_REQUIRE(migrated_list.GetMNPayee());
+    BOOST_CHECK(migrated_list.GetMNPayee()->proTxHash == migrated->proTxHash);
+
+    // A new PQ ProRegTx is consensus-banned until an active global key and a
+    // later service update revive it, so collateral alone earns no payment.
+    const auto source{MakeLegacyReplayMN(21, 6)};
+    auto preregistration_state{
+        std::make_shared<CDeterministicMNState>(*source->pdmnState)};
+    preregistration_state->nVersion = CProRegTx::PQ_VERSION;
+    preregistration_state->pubKeyOperator.SetNull();
+    preregistration_state->BanIfNotBanned(501);
+    const auto preregistration{
+        clone_with_state(source, preregistration_state)};
+    CDeterministicMNList preregistration_list{MakeSnapshotKey(501), 501, 1};
+    preregistration_list.AddMN(preregistration, /*fBumpTotalCount=*/false);
+    BOOST_CHECK_EQUAL(preregistration_list.GetValidMNsCount(), 0U);
+    BOOST_CHECK(!preregistration_list.GetMNPayee());
+
+    auto activated_state{
+        std::make_shared<CDeterministicMNState>(*preregistration->pdmnState)};
+    activated_state->Revive(502);
+    const auto activated{clone_with_state(source, activated_state)};
+    CDeterministicMNList activated_list{MakeSnapshotKey(502), 502, 1};
+    activated_list.AddMN(activated, /*fBumpTotalCount=*/false);
+    BOOST_CHECK_EQUAL(activated_list.GetValidMNsCount(), 1U);
+    BOOST_REQUIRE(activated_list.GetMNPayee());
+    BOOST_CHECK(activated_list.GetMNPayee()->proTxHash == activated->proTxHash);
+}
+
+BOOST_AUTO_TEST_CASE(payment_probation_is_reflected_in_projected_payees)
+{
+    llmq::pq::PQPaymentProbationManager probation_manager{DBParams{
+        .path = "testdb_dmn_payment_probation_view",
+        .cache_bytes = static_cast<std::size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    }};
+    std::array<CDeterministicMNCPtr, 3> members{
+        MakeLegacyReplayMN(30, 10), MakeLegacyReplayMN(31, 11),
+        MakeLegacyReplayMN(32, 12)};
+    CDeterministicMNList list{MakeSnapshotKey(510), 510, 3};
+    for (const auto& member : members) {
+        list.AddMN(member, /*fBumpTotalCount=*/false);
+    }
+    const auto banned{MakeLegacyReplayMN(33, 13)};
+    list.AddMN(banned, /*fBumpTotalCount=*/false);
+    auto banned_state{
+        std::make_shared<CDeterministicMNState>(*banned->pdmnState)};
+    banned_state->BanIfNotBanned(510);
+    list.UpdateMN(banned->proTxHash, banned_state);
+    BOOST_CHECK(!list.GetValidMN(banned->proTxHash));
+
+    llmq::pq::PQPaymentProbationState partial;
+    partial.entries = {{members[0]->proTxHash, 2},
+                       {members[2]->proTxHash, 2}};
+    std::sort(partial.entries.begin(), partial.entries.end(),
+              [](const auto& left, const auto& right) {
+                  return left.pro_tx_hash < right.pro_tx_hash;
+    });
+    BOOST_REQUIRE(partial.IsStructurallyValid());
+    const auto partial_hash{
+        llmq::pq::GetPQPaymentProbationStateHash(partial)};
+    BOOST_REQUIRE(partial_hash);
+    BOOST_REQUIRE(probation_manager.CommitState(
+        partial, *partial_hash, /*fJustCheck=*/false));
+    llmq::pq::PQPaymentProbationStateView partial_view;
+    BOOST_REQUIRE(probation_manager.GetStateView(*partial_hash,
+                                                 partial_view));
+    const auto projected{list.GetProjectedMNPayees(
+        std::numeric_limits<int>::max(), &partial_view)};
+    BOOST_REQUIRE_EQUAL(projected.size(), 1U);
+    BOOST_CHECK(projected.front()->proTxHash == members[1]->proTxHash);
+
+    llmq::pq::PQPaymentProbationState all;
+    for (const auto& member : members) {
+        all.entries.push_back({member->proTxHash, 2});
+    }
+    std::sort(all.entries.begin(), all.entries.end(),
+              [](const auto& left, const auto& right) {
+                  return left.pro_tx_hash < right.pro_tx_hash;
+    });
+    BOOST_REQUIRE(all.IsStructurallyValid());
+    const auto all_hash{llmq::pq::GetPQPaymentProbationStateHash(all)};
+    BOOST_REQUIRE(all_hash);
+    BOOST_REQUIRE(probation_manager.CommitState(
+        all, *all_hash, /*fJustCheck=*/false));
+    llmq::pq::PQPaymentProbationStateView all_view;
+    BOOST_REQUIRE(probation_manager.GetStateView(*all_hash, all_view));
+    const auto fallback{list.GetProjectedMNPayees(
+        std::numeric_limits<int>::max(), &all_view)};
+    const auto ordinary{list.GetProjectedMNPayees()};
+    BOOST_CHECK(fallback == ordinary);
+
+    // Once PQ payment eligibility is active, the audit liveness fallback is
+    // confined to root-bearing operators and cannot reintroduce a rootless
+    // payee.
+    const auto sorted_hashes{[](std::initializer_list<uint256> hashes) {
+        std::vector<uint256> result{hashes};
+        std::sort(result.begin(), result.end());
+        return result;
+    }};
+    const auto pq_payment_eligible{sorted_hashes(
+        {members[1]->proTxHash, members[2]->proTxHash})};
+    BOOST_REQUIRE(list.GetMNPayee(&all_view, &pq_payment_eligible));
+    BOOST_CHECK(list.GetMNPayee(&all_view, &pq_payment_eligible)->proTxHash ==
+                members[1]->proTxHash);
+    const auto filtered_fallback{list.GetProjectedMNPayees(
+        std::numeric_limits<int>::max(), &all_view,
+        &pq_payment_eligible)};
+    const auto filtered_ordinary{list.GetProjectedMNPayees(
+        std::numeric_limits<int>::max(), nullptr, &pq_payment_eligible)};
+    BOOST_CHECK(filtered_fallback == filtered_ordinary);
+    BOOST_REQUIRE_EQUAL(filtered_fallback.size(), 2U);
+    BOOST_CHECK(std::none_of(
+        filtered_fallback.begin(), filtered_fallback.end(),
+        [&](const auto& payee) {
+            return payee->proTxHash == members[0]->proTxHash;
+        }));
+
+    // Direct PQ-set iteration must retain the old membership-filter behavior:
+    // absent and PoSe-banned entries are ignored, and duplicate entries cannot
+    // duplicate projected payees.
+    const auto noisy_pq_payment_eligible{sorted_hashes(
+        {MakeSnapshotKey(50'000), banned->proTxHash,
+         members[1]->proTxHash, members[1]->proTxHash,
+         members[2]->proTxHash})};
+    const auto noisy_payee{
+        list.GetMNPayee(&all_view, &noisy_pq_payment_eligible)};
+    BOOST_REQUIRE(noisy_payee);
+    BOOST_CHECK(noisy_payee->proTxHash ==
+                list.GetMNPayee(&all_view, &pq_payment_eligible)->proTxHash);
+    BOOST_CHECK(list.GetProjectedMNPayees(
+                    std::numeric_limits<int>::max(), &all_view,
+                    &noisy_pq_payment_eligible) == filtered_fallback);
+    BOOST_CHECK(list.GetProjectedMNPayees(
+                    std::numeric_limits<int>::max(), nullptr,
+                    &noisy_pq_payment_eligible) == filtered_ordinary);
+    BOOST_CHECK(list.GetProjectedMNPayees(
+                    std::numeric_limits<int>::max(), &partial_view,
+                    &noisy_pq_payment_eligible) ==
+                list.GetProjectedMNPayees(
+                    std::numeric_limits<int>::max(), &partial_view,
+                    &pq_payment_eligible));
+
+    const std::vector<uint256> no_pq_payment_eligible;
+    BOOST_CHECK(!list.GetMNPayee(&all_view, &no_pq_payment_eligible));
+    BOOST_CHECK(list.GetProjectedMNPayees(
+                         std::numeric_limits<int>::max(), &all_view,
+                         &no_pq_payment_eligible)
+                    .empty());
+
+    // SYSCOIN: Root capability gates admission only. Restoring it preserves
+    // queue age, and the ordinary payment update moves the selected node back.
+    const auto only_newer{sorted_hashes({members[1]->proTxHash})};
+    BOOST_REQUIRE(list.GetMNPayee(nullptr, &only_newer));
+    BOOST_CHECK(list.GetMNPayee(nullptr, &only_newer)->proTxHash ==
+                members[1]->proTxHash);
+    const auto restored{sorted_hashes(
+        {members[0]->proTxHash, members[1]->proTxHash})};
+    BOOST_REQUIRE(list.GetMNPayee(nullptr, &restored));
+    BOOST_CHECK(list.GetMNPayee(nullptr, &restored)->proTxHash ==
+                members[0]->proTxHash);
+    const auto restored_projection{list.GetProjectedMNPayees(
+        std::numeric_limits<int>::max(), nullptr, &restored)};
+    BOOST_REQUIRE(!restored_projection.empty());
+    BOOST_CHECK(restored_projection.front()->proTxHash ==
+                members[0]->proTxHash);
+}
+
+// SYSCOIN: Consensus validation, templates, governance, and RPC must share
+// one branch-exact payee derivation without allowing a fork or indexed
+// probation root to reuse another entry.
+BOOST_AUTO_TEST_CASE(exact_parent_payee_cache_is_branch_bounded)
+{
+    SelectParams(ChainType::REGTEST);
+    auto db_params = DBParams{
+        .path = "testdb_dmn_exact_parent_payee_cache",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    };
+    CDeterministicMNManager manager(db_params);
+
+    const int height{std::max(Params().GetConsensus().DIP0003Height, 520)};
+    const uint256 hash_a{MakeSnapshotKey(height)};
+    const uint256 hash_b{MakeSnapshotKey(height + 10'000)};
+    const uint256 hash_empty{MakeSnapshotKey(height + 20'000)};
+    const auto member_a{MakeLegacyReplayMN(40, 20)};
+    const auto member_b{MakeLegacyReplayMN(41, 21)};
+
+    CDeterministicMNList list_a{hash_a, height, 1};
+    list_a.AddMN(member_a, /*fBumpTotalCount=*/false);
+    CDeterministicMNList list_b{hash_b, height, 1};
+    list_b.AddMN(member_b, /*fBumpTotalCount=*/false);
+    const CDeterministicMNList empty_list{hash_empty, height, 0};
+    manager.m_evoDb->WriteCache(hash_a, list_a);
+    manager.m_evoDb->WriteCache(hash_b, list_b);
+    manager.m_evoDb->WriteCache(hash_empty, empty_list);
+
+    CBlockIndex index_a;
+    index_a.nHeight = height;
+    index_a.phashBlock = &hash_a;
+    CBlockIndex index_b;
+    index_b.nHeight = height;
+    index_b.phashBlock = &hash_b;
+    CBlockIndex index_empty;
+    index_empty.nHeight = height;
+    index_empty.phashBlock = &hash_empty;
+
+    CDeterministicMNCPtr payee;
+    BOOST_REQUIRE(manager.GetMNPayeeForBlock(&index_a, payee));
+    BOOST_REQUIRE(payee);
+    BOOST_CHECK(payee->proTxHash == member_a->proTxHash);
+    auto stats{manager.GetMNPayeeCacheStatsForTesting()};
+    BOOST_CHECK_EQUAL(stats.entries, 1U);
+    BOOST_CHECK_EQUAL(stats.builds, 1U);
+    BOOST_CHECK_EQUAL(stats.hits, 0U);
+
+    BOOST_REQUIRE(manager.GetMNPayeeForBlock(&index_a, payee));
+    BOOST_CHECK(payee->proTxHash == member_a->proTxHash);
+    stats = manager.GetMNPayeeCacheStatsForTesting();
+    BOOST_CHECK_EQUAL(stats.builds, 1U);
+    BOOST_CHECK_EQUAL(stats.hits, 1U);
+
+    BOOST_REQUIRE(manager.GetMNPayeeForBlock(&index_b, payee));
+    BOOST_REQUIRE(payee);
+    BOOST_CHECK(payee->proTxHash == member_b->proTxHash);
+    stats = manager.GetMNPayeeCacheStatsForTesting();
+    BOOST_CHECK_EQUAL(stats.entries, 2U);
+    BOOST_CHECK_EQUAL(stats.builds, 2U);
+    BOOST_CHECK_EQUAL(stats.hits, 1U);
+
+    // An empty list is a successful null result and must be cacheable too.
+    BOOST_REQUIRE(manager.GetMNPayeeForBlock(&index_empty, payee));
+    BOOST_CHECK(!payee);
+    BOOST_REQUIRE(manager.GetMNPayeeForBlock(&index_empty, payee));
+    BOOST_CHECK(!payee);
+    stats = manager.GetMNPayeeCacheStatsForTesting();
+    BOOST_CHECK_EQUAL(stats.entries, 3U);
+    BOOST_CHECK_EQUAL(stats.builds, 3U);
+    BOOST_CHECK_EQUAL(stats.hits, 2U);
+
+    // The payment-only root is not committed by block_hash and therefore
+    // participates independently in the exact-parent key.
+    index_a.pqPaymentProbationStateHash = uint256::ONEV;
+    BOOST_CHECK(!manager.GetMNPayeeForBlock(&index_a, payee));
+    index_a.pqPaymentProbationStateHash.SetNull();
+    BOOST_REQUIRE(manager.GetMNPayeeForBlock(&index_a, payee));
+    BOOST_REQUIRE(payee);
+    BOOST_CHECK(payee->proTxHash == member_a->proTxHash);
+    stats = manager.GetMNPayeeCacheStatsForTesting();
+    BOOST_CHECK_EQUAL(stats.builds, 3U);
+    BOOST_CHECK_EQUAL(stats.hits, 3U);
+
+    // The exact-parent hot reader shares one authenticated indexed state
+    // across consumers; changing only that root creates one payee-cache key.
+    llmq::pq::PQPaymentProbationState probation;
+    probation.entries.push_back({member_a->proTxHash, 1, -1});
+    const auto probation_hash{
+        llmq::pq::GetPQPaymentProbationStateHash(probation)};
+    BOOST_REQUIRE(probation_hash);
+    BOOST_REQUIRE(manager.CommitPaymentProbationState(
+        probation, *probation_hash, /*fJustCheck=*/false));
+    index_a.pqPaymentProbationStateHash = *probation_hash;
+    llmq::pq::PQPaymentProbationStateView view_a;
+    llmq::pq::PQPaymentProbationStateView view_b;
+    BOOST_REQUIRE(manager.GetPaymentProbationStateView(&index_a, view_a));
+    BOOST_REQUIRE(manager.GetPaymentProbationStateView(&index_a, view_b));
+    BOOST_CHECK(view_a.SharesStateWith(view_b));
+    BOOST_CHECK_EQUAL(view_a.MissCount(member_a->proTxHash), 1U);
+    BOOST_REQUIRE(manager.GetMNPayeeForBlock(&index_a, payee));
+    BOOST_REQUIRE(payee);
+    BOOST_CHECK(payee->proTxHash == member_a->proTxHash);
+    BOOST_REQUIRE(manager.GetMNPayeeForBlock(&index_a, payee));
+    stats = manager.GetMNPayeeCacheStatsForTesting();
+    BOOST_CHECK_EQUAL(stats.builds, 4U);
+    BOOST_CHECK_EQUAL(stats.hits, 4U);
+}
+
+BOOST_AUTO_TEST_CASE(
+    exact_parent_probation_transition_matches_reference_on_each_branch)
+{
+    SelectParams(ChainType::REGTEST);
+    LOCK(::cs_main);
+    auto db_params = DBParams{
+        .path = "testdb_dmn_exact_parent_probation_transition",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    };
+    CDeterministicMNManager manager(db_params);
+
+    const int height{std::max(Params().GetConsensus().DIP0003Height, 600)};
+    const uint256 hash_a{MakeSnapshotKey(height + 30'000)};
+    const uint256 hash_b{MakeSnapshotKey(height + 40'000)};
+    CBlockIndex parent_a;
+    parent_a.nHeight = height;
+    parent_a.phashBlock = &hash_a;
+    CBlockIndex parent_b;
+    parent_b.nHeight = height;
+    parent_b.phashBlock = &hash_b;
+
+    const auto valid{MakeAnchorMN(100, 1)};
+    const auto banned{MakeAnchorMN(101, 2)};
+    const uint256 absent{MakeSnapshotKey(2'500'000)};
+    const auto branch_only{MakeAnchorMN(102, 3)};
+    const std::array<uint256, 4> special_members{
+        valid->proTxHash, banned->proTxHash, absent,
+        branch_only->proTxHash};
+    const auto context{
+        MakeProbationTransitionContext(height, special_members)};
+    BOOST_REQUIRE(context.IsStructurallyValid());
+
+    CDeterministicMNList list_a{hash_a, height, 2};
+    list_a.AddMN(valid, /*fBumpTotalCount=*/false);
+    list_a.AddMN(banned, /*fBumpTotalCount=*/false);
+    CDeterministicMNList list_b{hash_b, height, 3};
+    list_b.AddMN(valid, /*fBumpTotalCount=*/false);
+    list_b.AddMN(banned, /*fBumpTotalCount=*/false);
+    list_b.AddMN(branch_only, /*fBumpTotalCount=*/false);
+    manager.m_evoDb->WriteCache(hash_a, list_a);
+    manager.m_evoDb->WriteCache(hash_b, list_b);
+
+    llmq::pq::PQPaymentProbationState previous;
+    previous.entries = {
+        {valid->proTxHash, 1, -1},
+        {banned->proTxHash, 1, -1},
+        {absent, 1, -1},
+        {branch_only->proTxHash, 1, -1},
+    };
+    std::sort(previous.entries.begin(), previous.entries.end(),
+              [](const auto& lhs, const auto& rhs) {
+                  return lhs.pro_tx_hash < rhs.pro_tx_hash;
+              });
+    const auto previous_hash{
+        llmq::pq::GetPQPaymentProbationStateHash(previous)};
+    BOOST_REQUIRE(previous_hash);
+    BOOST_REQUIRE(manager.CommitPaymentProbationState(
+        previous, *previous_hash, /*fJustCheck=*/false));
+    parent_a.pqPaymentProbationStateHash = *previous_hash;
+    parent_b.pqPaymentProbationStateHash = *previous_hash;
+
+    const uint256 result_a{CheckExactParentProbationTransition(
+        manager, parent_a, context, list_a, previous, *previous_hash)};
+    const uint256 result_b{CheckExactParentProbationTransition(
+        manager, parent_b, context, list_b, previous, *previous_hash)};
+    BOOST_CHECK(result_a != result_b);
+    const auto outcome_a{
+        manager.ApplyPaymentProbationTransition(parent_a, context)};
+    const auto outcome_b{
+        manager.ApplyPaymentProbationTransition(parent_b, context)};
+    BOOST_REQUIRE(outcome_a.transition);
+    BOOST_REQUIRE(outcome_b.transition);
+    BOOST_CHECK_EQUAL(
+        outcome_a.transition->Result().MissCount(valid->proTxHash), 0U);
+    BOOST_CHECK_EQUAL(
+        outcome_a.transition->Result().MissCount(banned->proTxHash), 0U);
+    BOOST_CHECK_EQUAL(
+        outcome_a.transition->Result().MissCount(absent), 0U);
+    BOOST_CHECK_EQUAL(
+        outcome_a.transition->Result().MissCount(branch_only->proTxHash),
+        0U);
+    BOOST_CHECK_EQUAL(
+        outcome_b.transition->Result().MissCount(branch_only->proTxHash),
+        1U);
+
+    FastRandomContext random{true};
+    for (uint32_t trial{0}; trial < 24; ++trial) {
+        auto randomized_context{context};
+        randomized_context.receipt.epoch = 10 + trial;
+        randomized_context.receipt.receipt_id =
+            MakeSnapshotKey(2'800'000 + static_cast<int>(trial));
+        randomized_context.observed_members.fill(0);
+        for (std::size_t member{0}; member < 3; ++member) {
+            if (random.randrange(2) != 0) {
+                SetProbationBitmapBit(
+                    randomized_context.observed_members, member);
+            }
+        }
+
+        llmq::pq::PQPaymentProbationState randomized_previous;
+        for (const uint256& pro_tx_hash : special_members) {
+            if (random.randrange(2) == 0) continue;
+            randomized_previous.entries.push_back({
+                pro_tx_hash,
+                static_cast<uint8_t>(1 + random.randrange(2)), -1});
+        }
+        std::sort(randomized_previous.entries.begin(),
+                  randomized_previous.entries.end(),
+                  [](const auto& lhs, const auto& rhs) {
+                      return lhs.pro_tx_hash < rhs.pro_tx_hash;
+                  });
+        const auto randomized_previous_hash{
+            llmq::pq::GetPQPaymentProbationStateHash(randomized_previous)};
+        BOOST_REQUIRE(randomized_previous_hash);
+        BOOST_REQUIRE(manager.CommitPaymentProbationState(
+            randomized_previous, *randomized_previous_hash,
+            /*fJustCheck=*/false));
+        parent_a.pqPaymentProbationStateHash = *randomized_previous_hash;
+        (void)CheckExactParentProbationTransition(
+            manager, parent_a, randomized_context, list_a,
+            randomized_previous, *randomized_previous_hash);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(exact_parent_probation_transition_fails_closed)
+{
+    SelectParams(ChainType::REGTEST);
+    LOCK(::cs_main);
+    auto db_params = DBParams{
+        .path = "testdb_dmn_exact_parent_probation_failures",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    };
+    CDeterministicMNManager manager(db_params);
+    using Status = llmq::pq::PQPaymentProbationTransitionStatus;
+    using Error = llmq::pq::PQPaymentProbationError;
+
+    const int height{std::max(Params().GetConsensus().DIP0003Height, 700)};
+    const uint256 empty_hash{MakeSnapshotKey(height + 50'000)};
+    CBlockIndex empty_parent;
+    empty_parent.nHeight = height;
+    empty_parent.phashBlock = &empty_hash;
+    manager.m_evoDb->WriteCache(
+        empty_hash, CDeterministicMNList{empty_hash, height, 0});
+    const std::array<uint256, 4> special_members{
+        MakeSnapshotKey(2'600'000), MakeSnapshotKey(2'600'001),
+        MakeSnapshotKey(2'600'002), MakeSnapshotKey(2'600'003)};
+    const auto context{
+        MakeProbationTransitionContext(height, special_members)};
+    const auto empty_outcome{
+        manager.ApplyPaymentProbationTransition(empty_parent, context)};
+    BOOST_REQUIRE(empty_outcome.status == Status::READY);
+    BOOST_CHECK(empty_outcome.error == Error::NONE);
+    BOOST_REQUIRE(empty_outcome.transition);
+    BOOST_CHECK(empty_outcome.transition->PreviousStateHash() ==
+                manager.EmptyPaymentProbationStateHash());
+
+    // The live receipt seam must reject malformed peer context while keeping
+    // unavailable exact-parent data in the local-error path below.
+    auto invalid_bitmap{context};
+    invalid_bitmap.roster_valid_members.fill(0);
+    const auto malformed{
+        manager.ApplyPaymentProbationTransition(empty_parent,
+                                                 invalid_bitmap)};
+    BOOST_CHECK(malformed.status == Status::INVALID);
+    BOOST_CHECK(malformed.error == Error::INVALID_BITMAP);
+    BOOST_CHECK(!malformed.transition);
+
+    const uint256 missing_hash{MakeSnapshotKey(height + 60'000)};
+    CBlockIndex missing_parent;
+    missing_parent.nHeight = height;
+    missing_parent.phashBlock = &missing_hash;
+    auto wrong_height{context};
+    ++wrong_height.receipt.carrier_height;
+    const auto invalid{
+        manager.ApplyPaymentProbationTransition(missing_parent,
+                                                 wrong_height)};
+    BOOST_CHECK(invalid.status == Status::INVALID);
+    BOOST_CHECK(invalid.error ==
+                llmq::pq::PQPaymentProbationError::INVALID_RECEIPT);
+    BOOST_CHECK(!invalid.transition);
+
+    const auto missing_snapshot{
+        manager.ApplyPaymentProbationTransition(missing_parent, context)};
+    BOOST_CHECK(missing_snapshot.status == Status::LOCAL_ERROR);
+    BOOST_CHECK(missing_snapshot.error == Error::INVALID_STATE);
+    BOOST_CHECK(!missing_snapshot.transition);
+
+    const uint256 missing_root_hash{MakeSnapshotKey(height + 70'000)};
+    CBlockIndex missing_root_parent;
+    missing_root_parent.nHeight = height;
+    missing_root_parent.phashBlock = &missing_root_hash;
+    manager.m_evoDb->WriteCache(
+        missing_root_hash,
+        CDeterministicMNList{missing_root_hash, height, 0});
+    missing_root_parent.pqPaymentProbationStateHash =
+        MakeSnapshotKey(2'700'000);
+    const auto missing_root{manager.ApplyPaymentProbationTransition(
+        missing_root_parent, context)};
+    BOOST_CHECK(missing_root.status == Status::LOCAL_ERROR);
+    BOOST_CHECK(missing_root.error == Error::INVALID_STATE);
+    BOOST_CHECK(!missing_root.transition);
+
+    const uint256 corrupt_hash{MakeSnapshotKey(height + 80'000)};
+    CBlockIndex corrupt_parent;
+    corrupt_parent.nHeight = height;
+    corrupt_parent.phashBlock = &corrupt_hash;
+    manager.m_evoDb->WriteCache(
+        corrupt_hash,
+        CDeterministicMNList{MakeSnapshotKey(height + 80'001), height, 0});
+    const auto corrupt_snapshot{
+        manager.ApplyPaymentProbationTransition(corrupt_parent, context)};
+    BOOST_CHECK(corrupt_snapshot.status == Status::LOCAL_ERROR);
+    BOOST_CHECK(corrupt_snapshot.error == Error::INVALID_STATE);
+    BOOST_CHECK(!corrupt_snapshot.transition);
+}
+
+// SYSCOIN: A legacy projection ends where root eligibility begins.
+BOOST_AUTO_TEST_CASE(payment_projection_stops_at_root_gate)
+{
+    SelectParams(ChainType::REGTEST);
+    LOCK(::cs_main);
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    struct RestoreProfile {
+        Consensus::Params& consensus;
+        int dip3_height{consensus.DIP0003Height};
+        int activation_height{consensus.nPQActivationHeight};
+        ~RestoreProfile()
+        {
+            consensus.DIP0003Height = dip3_height;
+            consensus.nPQActivationHeight = activation_height;
+        }
+    } restore{consensus};
+
+    constexpr int activation_height{1441};
+    constexpr int parent_height{activation_height - 3};
+    consensus.DIP0003Height = 1299;
+    consensus.nPQActivationHeight = activation_height;
+
+    CDeterministicMNManager manager(DBParams{
+        .path = "testdb_dmn_pq_payment_projection_boundary",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    });
+    const uint256 parent_hash{MakeSnapshotKey(parent_height)};
+    CDeterministicMNList list{parent_hash, parent_height, 3};
+    for (uint32_t member{0}; member < 3; ++member) {
+        list.AddMN(MakeLegacyReplayMN(40 + member, 20 + member),
+                   /*fBumpTotalCount=*/false);
+    }
+    BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+        parent_hash, list, /*fSync=*/true));
+
+    CBlockIndex parent;
+    parent.nHeight = parent_height;
+    parent.phashBlock = &parent_hash;
+    std::vector<CDeterministicMNCPtr> projection;
+    BOOST_REQUIRE(manager.GetProjectedMNPayeesForBlock(
+        &parent, 10, projection));
+    BOOST_CHECK_EQUAL(projection.size(), 2U);
+    BOOST_REQUIRE(manager.GetProjectedMNPayeesForBlock(
+        &parent, 1, projection));
+    BOOST_CHECK_EQUAL(projection.size(), 1U);
+}
+
+// SYSCOIN: A root-required projection cannot reuse one epoch's frozen set for
+// the following epoch.
+BOOST_AUTO_TEST_CASE(payment_projection_stops_at_frozen_epoch_boundary)
+{
+    SelectParams(ChainType::REGTEST);
+    LOCK(::cs_main);
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    struct RestoreProfile {
+        Consensus::Params& consensus;
+        int dip3_height{consensus.DIP0003Height};
+        int preparation_height{consensus.nPQPreparationHeight};
+        int epoch_origin{consensus.nPQChainLockEpochOrigin};
+        uint32_t cutoff{consensus.nPQRegistrationCutoffBlocks};
+        uint32_t future{consensus.nPQFutureHorizonEpochs};
+        int activation_height{consensus.nPQActivationHeight};
+        ~RestoreProfile()
+        {
+            consensus.DIP0003Height = dip3_height;
+            consensus.nPQPreparationHeight = preparation_height;
+            consensus.nPQChainLockEpochOrigin = epoch_origin;
+            consensus.nPQRegistrationCutoffBlocks = cutoff;
+            consensus.nPQFutureHorizonEpochs = future;
+            consensus.nPQActivationHeight = activation_height;
+        }
+    } restore{consensus};
+
+    constexpr int preparation_height{1295};
+    constexpr int epoch_origin{1440};
+    constexpr int checkpoint_height{1583};
+    constexpr int activation_height{1440};
+    constexpr int first_parent_height{1725};
+    constexpr int second_parent_height{1726};
+    consensus.DIP0003Height = preparation_height - 1;
+    consensus.nPQPreparationHeight = preparation_height;
+    consensus.nPQChainLockEpochOrigin = epoch_origin;
+    consensus.nPQRegistrationCutoffBlocks = 144;
+    consensus.nPQFutureHorizonEpochs = 8;
+    consensus.nPQActivationHeight = activation_height;
+
+    llmq::pq::PQRegistryConfig registry_config;
+    BOOST_REQUIRE(llmq::pq::GetPQRegistryConfig(
+                      consensus, registry_config) ==
+                  llmq::pq::PQRegistryDeploymentResult::VALID);
+    const auto preparation_view{llmq::pq::DeriveOperatorKeyScheduleView(
+        registry_config.schedule, preparation_height,
+        registry_config.registration_cutoff_blocks,
+        registry_config.future_horizon_epochs)};
+    const auto checkpoint_view{llmq::pq::DeriveOperatorKeyScheduleView(
+        registry_config.schedule, checkpoint_height,
+        registry_config.registration_cutoff_blocks,
+        registry_config.future_horizon_epochs)};
+    BOOST_REQUIRE(preparation_view);
+    BOOST_REQUIRE(checkpoint_view);
+
+    std::array<CDeterministicMNCPtr, 3> members{
+        MakeLegacyReplayMN(50, 30), MakeLegacyReplayMN(51, 31),
+        MakeLegacyReplayMN(52, 32)};
+    std::vector<llmq::pq::OperatorKeyState> operator_states;
+    for (std::size_t index{0}; index < members.size(); ++index) {
+        llmq::pq::GlobalKeyRecord key;
+        key.key_version = 1;
+        key.public_key[0] = static_cast<uint8_t>(index + 1);
+        key.child_key_commitment.generation = 1;
+        key.child_key_commitment.first_epoch = 0;
+        const auto tree_id{llmq::pq::GetChildKeyTreeId(
+            consensus.hashGenesisBlock, members[index]->proTxHash,
+            key.child_key_commitment.generation,
+            key.child_key_commitment.first_epoch)};
+        BOOST_REQUIRE(tree_id);
+        key.child_key_commitment.tree_id = *tree_id;
+        key.child_key_commitment.root =
+            MakeSnapshotKey(92'000 + static_cast<int>(index));
+        llmq::pq::GlobalSignature proof{};
+        proof[0] = 1;
+        auto state{llmq::pq::OperatorKeyState::ForOperator(
+            members[index]->proTxHash)};
+        BOOST_REQUIRE(state.Advance(*preparation_view) ==
+                      llmq::pq::OperatorKeyStateResult::OK);
+        BOOST_REQUIRE(state.ApplyInitialGlobalKey(
+                          *preparation_view, consensus.hashGenesisBlock, key,
+                          MakeSnapshotKey(93'000 + static_cast<int>(index)),
+                          proof, /*owner_authorization_verified=*/true,
+                          /*check_sigs=*/false) ==
+                      llmq::pq::OperatorKeyStateResult::OK);
+        BOOST_REQUIRE(state.Advance(*checkpoint_view) ==
+                      llmq::pq::OperatorKeyStateResult::OK);
+        BOOST_REQUIRE(state.ResolveChildRoot(0).status ==
+                      llmq::pq::ChildRootResolutionStatus::FROZEN_PRESENT);
+        operator_states.push_back(std::move(state));
+    }
+    std::sort(operator_states.begin(), operator_states.end(),
+              [](const auto& left, const auto& right) {
+                  return left.pro_tx_hash < right.pro_tx_hash;
+              });
+
+    ScopedDiskDBPath db_path;
+    DBParams manager_db{
+        .path = db_path.path,
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = false,
+        .wipe_data = true,
+    };
+    DBParams registry_db{manager_db};
+    registry_db.path = SiblingDBPath(manager_db.path, "_pq_registry");
+    registry_db.cache_bytes =
+        std::max<std::size_t>(1, registry_db.cache_bytes / 2);
+
+    const uint256 checkpoint_parent_hash{
+        MakeSnapshotKey(checkpoint_height - 1)};
+    const uint256 checkpoint_hash{MakeSnapshotKey(checkpoint_height)};
+    std::vector<uint256> branch_hashes{
+        checkpoint_hash};
+    {
+        llmq::pq::PQRegistryManager registry{
+            registry_db, consensus.hashGenesisBlock, registry_config};
+        const auto empty_root{
+            llmq::pq::PQRegistrySnapshot{}.RecomputeConsensusStateRoot(
+                consensus.hashGenesisBlock)};
+        BOOST_REQUIRE(empty_root);
+        // SYSCOIN: Seed the same bounded authenticated checkpoint segment used
+        // by production replay; a synthetic C-1 root cannot authorize C's
+        // sparse operator transition.
+        uint256 previous_registry_hash{
+            MakeSnapshotKey(preparation_height - 1)};
+        for (int height{preparation_height}; height < checkpoint_height;
+             ++height) {
+            llmq::pq::PQRegistryDiskSnapshot record;
+            record.is_checkpoint = static_cast<uint8_t>(
+                height == preparation_height);
+            record.height = height;
+            record.block_hash = MakeSnapshotKey(height);
+            record.previous_block_hash = previous_registry_hash;
+            record.previous_consensus_state_root = *empty_root;
+            record.consensus_state_root = *empty_root;
+            BOOST_REQUIRE(record.IsStructurallyValid());
+            BOOST_REQUIRE(registry.WriteExactSnapshotForTesting(
+                record.block_hash, record));
+            previous_registry_hash = record.block_hash;
+        }
+        BOOST_REQUIRE(previous_registry_hash == checkpoint_parent_hash);
+
+        llmq::pq::PQRegistrySnapshot checkpoint;
+        checkpoint.height = checkpoint_height;
+        checkpoint.block_hash = checkpoint_hash;
+        checkpoint.previous_block_hash = checkpoint_parent_hash;
+        checkpoint.operator_states = operator_states;
+        const auto checkpoint_root{checkpoint.RecomputeConsensusStateRoot(
+            consensus.hashGenesisBlock)};
+        BOOST_REQUIRE(checkpoint_root);
+        checkpoint.consensus_state_root = *checkpoint_root;
+        BOOST_REQUIRE(checkpoint.IsStructurallyValid());
+
+        llmq::pq::PQRegistryDiskSnapshot checkpoint_disk;
+        checkpoint_disk.is_checkpoint = 1;
+        checkpoint_disk.height = checkpoint_height;
+        checkpoint_disk.block_hash = checkpoint_hash;
+        checkpoint_disk.previous_block_hash = checkpoint_parent_hash;
+        checkpoint_disk.previous_consensus_state_root =
+            *empty_root;
+        checkpoint_disk.operator_states = operator_states;
+        checkpoint_disk.checkpoint_operator_states = operator_states;
+        checkpoint_disk.consensus_state_root = *checkpoint_root;
+        BOOST_REQUIRE(checkpoint_disk.IsStructurallyValid());
+        BOOST_REQUIRE(registry.WriteExactSnapshotForTesting(
+            checkpoint_hash, checkpoint_disk));
+
+        llmq::pq::PQRegistryCallbacks membership;
+        membership.dmn_exists_before = [](const uint256&) { return true; };
+        membership.dmn_exists_after = [](const uint256&) { return true; };
+        uint256 previous_hash{checkpoint_hash};
+        for (int height{checkpoint_height + 1};
+             height <= second_parent_height; ++height) {
+            CBlock block{MakeProviderMutationBlock({})};
+            block.hashPrevBlock = previous_hash;
+            block.nTime = static_cast<uint32_t>(height);
+            block.nNonce = static_cast<uint32_t>(height);
+            llmq::pq::PQRegistryError error;
+            BOOST_REQUIRE_MESSAGE(registry.ProcessBlock(
+                block, height, membership, {}, /*fJustCheck=*/false, error),
+                llmq::pq::PQRegistryResultString(error.result));
+            previous_hash = block.GetHash();
+            branch_hashes.push_back(previous_hash);
+        }
+        BOOST_REQUIRE(registry.Flush(/*fSync=*/true));
+    }
+
+    manager_db.wipe_data = false;
+    CDeterministicMNManager manager{manager_db};
+    const auto branch_hash_at = [&](int height) -> const uint256& {
+        return branch_hashes.at(
+            static_cast<std::size_t>(height - checkpoint_height));
+    };
+    for (int height{first_parent_height};
+         height <= second_parent_height; ++height) {
+        CDeterministicMNList list{
+            branch_hash_at(height), height,
+            static_cast<uint32_t>(members.size())};
+        for (const auto& member : members) {
+            list.AddMN(member, /*fBumpTotalCount=*/false);
+        }
+        BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+            branch_hash_at(height), list, /*fSync=*/true));
+    }
+
+    CBlockIndex previous;
+    previous.nHeight = first_parent_height - 1;
+    previous.phashBlock = &branch_hash_at(first_parent_height - 1);
+    CBlockIndex first_parent;
+    first_parent.nHeight = first_parent_height;
+    first_parent.pprev = &previous;
+    first_parent.phashBlock = &branch_hash_at(first_parent_height);
+    CBlockIndex second_parent;
+    second_parent.nHeight = second_parent_height;
+    second_parent.pprev = &first_parent;
+    second_parent.phashBlock = &branch_hash_at(second_parent_height);
+
+    CBlock candidate{MakeProviderMutationBlock({})};
+    candidate.hashPrevBlock = first_parent.GetBlockHash();
+    candidate.nTime = static_cast<uint32_t>(first_parent_height + 1);
+    candidate.nNonce = static_cast<uint32_t>(first_parent_height + 1);
+    const uint256 candidate_hash{candidate.GetHash()};
+    CBlockIndex candidate_index;
+    candidate_index.nHeight = first_parent_height + 1;
+    candidate_index.pprev = &first_parent;
+    candidate_index.phashBlock = &candidate_hash;
+    CCoinsView base_view;
+    CCoinsViewCache view{&base_view};
+    const llmq::CFinalCommitmentTxPayload no_legacy_commitment;
+
+    // A failed cache allocation says nothing about this block's validity,
+    // and neither checking nor connecting may publish a partial payee view.
+    for (const bool just_check : {true, false}) {
+        manager.FailNextPQPaymentEligibilityCacheIndexInsertForTesting();
+        BlockValidationState failed_state;
+        CDeterministicMNListNEVMAddressDiff failed_diff;
+        BOOST_CHECK(!manager.ProcessBlock(
+            candidate, &candidate_index, failed_state, view,
+            no_legacy_commitment, failed_diff, just_check, /*ibd=*/true));
+        BOOST_CHECK(failed_state.IsError());
+        BOOST_CHECK(!failed_state.IsInvalid());
+        BOOST_CHECK_EQUAL(failed_state.GetRejectReason(),
+                          "failed-pq-payment-eligibility-state");
+        const auto failed_stats{manager.GetMNPayeeCacheStatsForTesting()};
+        BOOST_CHECK_EQUAL(failed_stats.entries, 0U);
+        BOOST_CHECK_EQUAL(failed_stats.builds, 0U);
+        BOOST_CHECK_EQUAL(candidate_index.nStatus & BLOCK_FAILED_MASK, 0U);
+    }
+    BlockValidationState retry_state;
+    CDeterministicMNListNEVMAddressDiff retry_diff;
+    BOOST_REQUIRE_MESSAGE(manager.ProcessBlock(
+        candidate, &candidate_index, retry_state, view,
+        no_legacy_commitment, retry_diff, /*fJustCheck=*/true,
+        /*ibd=*/true), retry_state.ToString());
+    BOOST_CHECK(retry_state.IsValid());
+
+    std::vector<CDeterministicMNCPtr> projection;
+    BOOST_REQUIRE(manager.GetProjectedMNPayeesForBlock(
+        &first_parent, 20, projection));
+    BOOST_CHECK_EQUAL(projection.size(), 2U);
+    BOOST_REQUIRE(manager.GetProjectedMNPayeesForBlock(
+        &second_parent, 20, projection));
+    BOOST_CHECK_EQUAL(projection.size(), 1U);
+}
+
+static void CheckEmptyPQPaymentRegistration(bool start_empty)
+{
+    SelectParams(ChainType::REGTEST);
+    LOCK(::cs_main);
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    struct RestoreProfile {
+        Consensus::Params& consensus;
+        int dip3_height{consensus.DIP0003Height};
+        int preparation_height{consensus.nPQPreparationHeight};
+        int epoch_origin{consensus.nPQChainLockEpochOrigin};
+        uint32_t cutoff{consensus.nPQRegistrationCutoffBlocks};
+        uint32_t future{consensus.nPQFutureHorizonEpochs};
+        int activation_height{consensus.nPQActivationHeight};
+        ~RestoreProfile()
+        {
+            consensus.DIP0003Height = dip3_height;
+            consensus.nPQPreparationHeight = preparation_height;
+            consensus.nPQChainLockEpochOrigin = epoch_origin;
+            consensus.nPQRegistrationCutoffBlocks = cutoff;
+            consensus.nPQFutureHorizonEpochs = future;
+            consensus.nPQActivationHeight = activation_height;
+        }
+    } restore{consensus};
+
+    constexpr int preparation_height{1295};
+    constexpr int epoch_origin{1440};
+    constexpr int activation_height{1441};
+    constexpr int provider_registration_height{activation_height + 1};
+    constexpr int registration_height{activation_height + 2};
+    constexpr int service_height{registration_height + 1};
+    consensus.DIP0003Height = preparation_height - 1;
+    consensus.nPQPreparationHeight = preparation_height;
+    consensus.nPQChainLockEpochOrigin = epoch_origin;
+    consensus.nPQRegistrationCutoffBlocks = 144;
+    consensus.nPQFutureHorizonEpochs = 8;
+    consensus.nPQActivationHeight = activation_height;
+
+    llmq::pq::PQRegistryConfig registry_config;
+    BOOST_REQUIRE(llmq::pq::GetPQRegistryConfig(
+                      consensus, registry_config) ==
+                  llmq::pq::PQRegistryDeploymentResult::VALID);
+    const auto registration_view{llmq::pq::DeriveOperatorKeyScheduleView(
+        registry_config.schedule, registration_height,
+        registry_config.registration_cutoff_blocks,
+        registry_config.future_horizon_epochs)};
+    BOOST_REQUIRE(registration_view);
+    const uint32_t payment_epoch{registration_view->first_mutable_epoch};
+    const auto cutoff_height{llmq::pq::RegistrationCutoffHeight(
+        registry_config.schedule, payment_epoch,
+        registry_config.registration_cutoff_blocks)};
+    const auto first_payment_height{llmq::pq::EpochBaseHeight(
+        registry_config.schedule, payment_epoch)};
+    BOOST_REQUIRE(cutoff_height);
+    BOOST_REQUIRE(first_payment_height);
+    BOOST_REQUIRE_GT(*cutoff_height, registration_height);
+    BOOST_REQUIRE_GT(*first_payment_height, *cutoff_height);
+
+    auto db_params = DBParams{
+        .path = "testdb_dmn_pq_payment_root_gate",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    };
+    // Provider validators must see the same evolving snapshots as ProcessBlock.
+    struct RestoreManager {
+        std::unique_ptr<CDeterministicMNManager> previous{
+            std::move(deterministicMNManager)};
+        ~RestoreManager()
+        {
+            deterministicMNManager = std::move(previous);
+        }
+    } restore_manager;
+    deterministicMNManager =
+        std::make_unique<CDeterministicMNManager>(db_params);
+    auto& manager{*deterministicMNManager};
+    CKey owner_key;
+    owner_key.MakeNewKey(/*fCompressed=*/true);
+    const uint256 base_hash{MakeSnapshotKey(preparation_height - 1)};
+    CDeterministicMNList base_list{base_hash, preparation_height - 1, 0};
+    uint256 pro_tx_hash;
+    CTransactionRef provider_registration_tx;
+    if (start_empty) {
+        CMutableTransaction provider_registration;
+        provider_registration.nVersion = SYSCOIN_TX_VERSION_MN_REGISTER;
+        provider_registration.vin.emplace_back(
+            COutPoint{MakeSnapshotKey(94'002), 0});
+        const CScript payout{GetScriptForDestination(
+            WitnessV0KeyHash{MakeAnchorKeyID(0x75)})};
+        provider_registration.vout.emplace_back(nMNCollateralRequired, payout);
+        CProRegTx provider;
+        provider.nVersion = CProRegTx::PQ_VERSION;
+        provider.collateralOutpoint = COutPoint{uint256{}, 0};
+        provider.keyIDOwner = owner_key.GetPubKey().GetID();
+        provider.keyIDVoting = MakeAnchorKeyID(0x76);
+        provider.pqVotingPublicKey.fill(0x77);
+        provider.scriptPayout = payout;
+        provider.inputsHash = CalcTxInputsHash(
+            CTransaction{provider_registration});
+        SetTxPayload(provider_registration, provider);
+        provider_registration_tx = MakeTransactionRef(
+            std::move(provider_registration));
+        pro_tx_hash = provider_registration_tx->GetHash();
+    } else {
+        auto member{std::make_shared<CDeterministicMN>(
+            *MakeLegacyReplayMN(0, 20))};
+        auto member_state{
+            std::make_shared<CDeterministicMNState>(*member->pdmnState)};
+        member_state->keyIDOwner = owner_key.GetPubKey().GetID();
+        member->pdmnState = std::move(member_state);
+        pro_tx_hash = member->proTxHash;
+        base_list.AddMN(member);
+    }
+    BOOST_CHECK_EQUAL(base_list.GetAllMNsCount(), start_empty ? 0U : 1U);
+    BOOST_CHECK_EQUAL(base_list.GetTotalRegisteredCount(), start_empty ? 0U : 1U);
+    BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+        base_hash, base_list, /*fSync=*/true));
+
+    slhdsa::KeyGenerationSeed seed;
+    for (std::size_t i{0}; i < seed.size(); ++i) {
+        seed[i] = static_cast<uint8_t>(i + 91);
+    }
+    auto operator_key{slhdsa::GenerateSecretKey(seed)};
+    BOOST_REQUIRE(operator_key);
+    llmq::pq::ChildKeyTreeCommitment commitment;
+    commitment.generation = 1;
+    commitment.first_epoch = payment_epoch;
+    const auto tree_id{llmq::pq::GetChildKeyTreeId(
+        consensus.hashGenesisBlock, pro_tx_hash,
+        commitment.generation, commitment.first_epoch)};
+    BOOST_REQUIRE(tree_id);
+    commitment.tree_id = *tree_id;
+    // This manager-level fixture authenticates registration and commits to a
+    // child root; it does not build or exercise a scheduled-WOTS signing tree.
+    commitment.root = MakeSnapshotKey(94'000);
+    BOOST_REQUIRE(commitment.IsStructurallyValid());
+
+    CMutableTransaction registration;
+    registration.nVersion = llmq::pq::PQ_GLOBAL_KEY_TX_VERSION;
+    registration.vin.emplace_back(COutPoint{MakeSnapshotKey(94'001), 0});
+    registration.vout.emplace_back(1, CScript{} << OP_TRUE);
+    llmq::pq::GlobalKeyTxPayload payload;
+    payload.operation = llmq::pq::GlobalKeyOperation::INITIAL;
+    payload.pro_tx_hash = pro_tx_hash;
+    payload.candidate.key_version = 1;
+    payload.candidate.child_key_commitment = commitment;
+    BOOST_REQUIRE(operator_key->GetPublicKey(payload.candidate.public_key));
+    BOOST_REQUIRE(llmq::pq::IsGlobalKeyCandidateStructurallyValid(
+        payload.candidate));
+    payload.transaction_inputs_hash = CalcTxInputsHash(
+        CTransaction{registration});
+    const auto owner_digest{
+        llmq::pq::GetGlobalOwnerRegistrationAuthorizationHash(
+            consensus.hashGenesisBlock, payload)};
+    BOOST_REQUIRE(owner_digest);
+    std::vector<unsigned char> owner_signature;
+    BOOST_REQUIRE(CHashSigner::SignHash(
+        *owner_digest, owner_key, owner_signature));
+    BOOST_REQUIRE_EQUAL(owner_signature.size(),
+                        llmq::pq::COMPACT_ECDSA_SIGNATURE_SIZE);
+    std::copy(owner_signature.begin(), owner_signature.end(),
+              payload.owner_authorization.begin());
+    const auto registration_digest{
+        llmq::pq::GetGlobalRegistrationAuthorizationHash(
+            consensus.hashGenesisBlock, pro_tx_hash,
+            payload.candidate, payload.transaction_inputs_hash)};
+    BOOST_REQUIRE(registration_digest);
+    BOOST_REQUIRE(slhdsa::SignDeterministic(
+        *operator_key,
+        std::span<const uint8_t>{registration_digest->begin(),
+                                 registration_digest->size()},
+        llmq::pq::GetGlobalAuthContext(
+            llmq::pq::GlobalAuthPurpose::GLOBAL_REGISTRATION),
+        payload.authorization));
+    SetTxPayload(registration, payload);
+    const auto registration_tx{MakeTransactionRef(std::move(registration))};
+
+    const int block_count{
+        *first_payment_height + 2 - preparation_height};
+    std::vector<CBlock> blocks(static_cast<size_t>(block_count));
+    std::vector<uint256> hashes(static_cast<size_t>(block_count));
+    std::vector<CBlockIndex> indices(static_cast<size_t>(block_count));
+    CBlockIndex base_index;
+    base_index.nHeight = preparation_height - 1;
+    base_index.phashBlock = &base_hash;
+    CCoinsView base_view;
+    CCoinsViewCache view(&base_view);
+    const llmq::CFinalCommitmentTxPayload no_legacy_commitment;
+
+    for (int offset{0}; offset < block_count; ++offset) {
+        const int height{preparation_height + offset};
+        CBlockIndex* const parent{offset == 0
+            ? &base_index
+            : &indices[static_cast<size_t>(offset - 1)]};
+        auto& block{blocks[static_cast<size_t>(offset)]};
+        block = MakeProviderMutationBlock({});
+        if (start_empty && height == provider_registration_height) {
+            block.vtx.emplace_back(provider_registration_tx);
+            TxValidationState provider_state;
+            BOOST_REQUIRE_MESSAGE(CheckProRegTx(
+                *provider_registration_tx, parent, provider_state, view,
+                /*fJustCheck=*/true, /*check_sigs=*/true),
+                provider_state.ToString());
+        }
+        if (height == registration_height) {
+            block.vtx.emplace_back(registration_tx);
+        }
+        if (start_empty && height == service_height) {
+            llmq::pq::PQRegistryReadView parent_registry;
+            std::string registry_error;
+            BOOST_REQUIRE_MESSAGE(manager.GetPQRegistryReadView(
+                parent, parent_registry, registry_error), registry_error);
+            const auto* registered{parent_registry.FindOperator(pro_tx_hash)};
+            BOOST_REQUIRE(registered);
+            BOOST_REQUIRE(registered->HasActiveGlobalKey());
+
+            CMutableTransaction service;
+            service.nVersion = SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE;
+            service.vin.emplace_back(COutPoint{MakeSnapshotKey(94'003), 0});
+            service.vout.emplace_back(1, CScript{} << OP_TRUE);
+            CProUpServTx update;
+            update.nVersion = CProUpServTx::PQ_VERSION;
+            update.proTxHash = pro_tx_hash;
+            const auto address{LookupHost("127.0.0.1", /*fAllowLookup=*/false)};
+            BOOST_REQUIRE(address);
+            update.addr = CService{*address, 12345};
+            update.inputsHash = CalcTxInputsHash(CTransaction{service});
+            update.globalKeyVersion = registered->global_key.key_version;
+            const auto endpoint{llmq::pq::MakeNetworkEndpoint(update.addr)};
+            BOOST_REQUIRE(endpoint);
+            llmq::pq::ProviderServiceAuthorization authorization;
+            authorization.payload_version = update.nVersion;
+            authorization.pro_tx_hash = pro_tx_hash;
+            authorization.global_key_version = update.globalKeyVersion;
+            authorization.service = *endpoint;
+            authorization.transaction_inputs_hash = update.inputsHash;
+            const auto service_digest{
+                llmq::pq::GetProviderServiceAuthorizationHash(
+                    consensus.hashGenesisBlock, registered->global_key,
+                    authorization)};
+            BOOST_REQUIRE(service_digest);
+            BOOST_REQUIRE(slhdsa::SignDeterministic(
+                *operator_key,
+                std::span<const uint8_t>{service_digest->begin(),
+                                         service_digest->size()},
+                llmq::pq::GetGlobalAuthContext(
+                    llmq::pq::GlobalAuthPurpose::PROVIDER_SERVICE),
+                update.pqSig));
+            SetTxPayload(service, update);
+            const auto service_tx{MakeTransactionRef(std::move(service))};
+            TxValidationState service_state;
+            BOOST_REQUIRE_MESSAGE(CheckProUpServTx(
+                *service_tx, parent, service_state, /*fJustCheck=*/true,
+                /*check_sigs=*/true, SpecialTxValidationContext::NORMAL),
+                service_state.ToString());
+            block.vtx.emplace_back(service_tx);
+        }
+        block.hashPrevBlock = parent->GetBlockHash();
+        block.nTime = static_cast<uint32_t>(height);
+        block.nNonce = static_cast<uint32_t>(height);
+        hashes[static_cast<size_t>(offset)] = block.GetHash();
+
+        auto& index{indices[static_cast<size_t>(offset)]};
+        index.nHeight = height;
+        index.pprev = parent;
+        index.phashBlock = &hashes[static_cast<size_t>(offset)];
+
+        const bool has_payee{
+            (!start_empty && height < activation_height) ||
+            height >= *first_payment_height};
+        CDeterministicMNCPtr payee;
+        BOOST_REQUIRE(manager.GetMNPayeeForBlock(index.pprev, payee));
+        std::vector<CDeterministicMNCPtr> projected_payees;
+        BOOST_REQUIRE(manager.GetProjectedMNPayeesForBlock(
+            index.pprev, 20, projected_payees));
+        if (has_payee) {
+            BOOST_REQUIRE(payee);
+            BOOST_CHECK(payee->proTxHash == pro_tx_hash);
+            BOOST_REQUIRE_EQUAL(projected_payees.size(), 1U);
+            BOOST_CHECK(projected_payees.front()->proTxHash == pro_tx_hash);
+        } else {
+            BOOST_CHECK(!payee);
+            BOOST_CHECK(projected_payees.empty());
+        }
+
+        if (height == activation_height) {
+            BlockValidationState check_state;
+            CDeterministicMNListNEVMAddressDiff check_diff;
+            BOOST_REQUIRE_MESSAGE(manager.ProcessBlock(
+                block, &index, check_state, view, no_legacy_commitment,
+                check_diff, /*fJustCheck=*/true, /*ibd=*/true),
+                check_state.ToString());
+            CDeterministicMNList unpublished;
+            BOOST_CHECK(!manager.m_evoDb->ReadCache(
+                index.GetBlockHash(), unpublished));
+        }
+
+        BlockValidationState state;
+        CDeterministicMNListNEVMAddressDiff diff;
+        BOOST_REQUIRE_MESSAGE(manager.ProcessBlock(
+            block, &index, state, view, no_legacy_commitment, diff,
+            /*fJustCheck=*/false, /*ibd=*/true), state.ToString());
+        BOOST_CHECK(state.IsValid());
+        const auto current{manager.GetListForBlock(&index)};
+        const auto current_member{current.GetMN(pro_tx_hash)};
+        const bool member_exists{
+            !start_empty || height >= provider_registration_height};
+        BOOST_CHECK_EQUAL(current.GetAllMNsCount(), member_exists ? 1U : 0U);
+        BOOST_CHECK_EQUAL(current.GetTotalRegisteredCount(), member_exists ? 1U : 0U);
+        BOOST_CHECK_EQUAL(current.GetValidMNsCount(),
+                          !start_empty || height >= service_height ? 1U : 0U);
+        if (member_exists) {
+            BOOST_REQUIRE(current_member);
+            BOOST_CHECK_EQUAL(current_member->pdmnState->nLastPaidHeight,
+                              has_payee ? height :
+                                  start_empty ? 0 : activation_height - 1);
+            BOOST_CHECK_EQUAL(current_member->pdmnState->nPoSeRevivedHeight,
+                              start_empty && height >= service_height
+                                  ? service_height : -1);
+            if (start_empty) {
+                BOOST_CHECK_EQUAL(current_member->pdmnState->nVersion,
+                                  CProRegTx::PQ_VERSION);
+                BOOST_CHECK_EQUAL(current_member->pdmnState->nRegisteredHeight,
+                                  provider_registration_height);
+                BOOST_CHECK_EQUAL(current_member->pdmnState->IsBanned(),
+                                  height < service_height);
+                BOOST_CHECK_EQUAL(current_member->pdmnState->confirmedHash.IsNull(),
+                                  height == provider_registration_height);
+            }
+        } else {
+            BOOST_CHECK(!current_member);
+        }
+
+        llmq::pq::PQPaymentProbationStateView payment_state;
+        BOOST_REQUIRE(manager.GetPaymentProbationStateView(
+            &index, payment_state));
+        BOOST_CHECK(payment_state.StateHash() ==
+                    manager.EmptyPaymentProbationStateHash());
+        BOOST_CHECK_EQUAL(payment_state.MissCount(pro_tx_hash), 0U);
+        BOOST_CHECK(!payment_state.IsPaymentWithheld(pro_tx_hash));
+        BOOST_CHECK_EQUAL(
+            payment_state.PaymentEligibleSinceHeight(pro_tx_hash), -1);
+
+        llmq::pq::PQRegistryReadView registry_view;
+        std::string registry_error;
+        BOOST_REQUIRE_MESSAGE(manager.GetPQRegistryReadView(
+            &index, registry_view, registry_error), registry_error);
+        if (height < registration_height) {
+            BOOST_CHECK_EQUAL(registry_view.OperatorCount(), 0U);
+            BOOST_CHECK(registry_view.FindOperator(pro_tx_hash) == nullptr);
+        } else {
+            BOOST_CHECK_EQUAL(registry_view.OperatorCount(), 1U);
+            const auto* registered{registry_view.FindOperator(pro_tx_hash)};
+            BOOST_REQUIRE(registered);
+            BOOST_CHECK(registered->HasActiveGlobalKey());
+            BOOST_CHECK(registered->global_key.child_key_commitment == commitment);
+            BOOST_CHECK_EQUAL(registered->global_key.activated_height,
+                              registration_height);
+            const auto root{registered->ResolveChildRoot(payment_epoch)};
+            BOOST_CHECK(root.status ==
+                (height < *cutoff_height
+                    ? llmq::pq::ChildRootResolutionStatus::MUTABLE_PRESENT
+                    : llmq::pq::ChildRootResolutionStatus::FROZEN_PRESENT));
+            BOOST_REQUIRE(root.record);
+            BOOST_CHECK(root.record->commitment == commitment);
+        }
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    pq_empty_payment_set_advances_until_registered_root_is_eligible,
+    BasicTestingSetup)
+{
+    CheckEmptyPQPaymentRegistration(/*start_empty=*/false);
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    pq_zero_masternodes_register_and_resume_payments,
+    BasicTestingSetup)
+{
+    CheckEmptyPQPaymentRegistration(/*start_empty=*/true);
+}
+
+BOOST_AUTO_TEST_CASE(outbound_probe_failures_do_not_mutate_pose_or_payments)
+{
+    const auto member{MakeLegacyReplayMN(22, 7)};
+    CDeterministicMNList list{MakeSnapshotKey(503), 503, 1};
+    list.AddMN(member, /*fBumpTotalCount=*/false);
+
+    const int penalty_before{member->pdmnState->nPoSePenalty};
+    const int ban_height_before{member->pdmnState->GetBannedHeight()};
+    const int revived_height_before{member->pdmnState->nPoSeRevivedHeight};
+    CMasternodeMetaInfo metadata{member->proTxHash};
+    for (int attempt{0};
+         attempt <= MASTERNODE_MAX_FAILED_OUTBOUND_ATTEMPTS; ++attempt) {
+        metadata.SetLastOutboundAttempt(attempt + 1);
+    }
+    BOOST_CHECK(metadata.OutboundFailedTooManyTimes());
+
+    const auto after{list.GetMN(member->proTxHash)};
+    BOOST_REQUIRE(after);
+    BOOST_CHECK_EQUAL(after->pdmnState->nPoSePenalty, penalty_before);
+    BOOST_CHECK_EQUAL(after->pdmnState->GetBannedHeight(), ban_height_before);
+    BOOST_CHECK_EQUAL(after->pdmnState->nPoSeRevivedHeight,
+                      revived_height_before);
+    BOOST_CHECK(list.IsMNValid(*after));
+    BOOST_REQUIRE(list.GetMNPayee());
+    BOOST_CHECK(list.GetMNPayee()->proTxHash == member->proTxHash);
+}
+
+BOOST_AUTO_TEST_CASE(pq_legacy_state_commitment_tracks_exact_content)
+{
+    const uint256 genesis_hash{MakeSnapshotKey(59'999)};
+    const uint256 block_hash{MakeSnapshotKey(60'000)};
+    constexpr int height{4320};
+    CDeterministicMNList forward{
+        MakeNontrivialAnchorSnapshot(block_hash, height, false)};
+    CDeterministicMNList reverse{
+        MakeNontrivialAnchorSnapshot(block_hash, height, true)};
+
+    // SYSCOIN: MuHash makes insertion order irrelevant while the envelope
+    // still binds the exact branch identity and total-registration counter.
+    const uint256 expected{
+        forward.GetOrComputePQLegacyStateHash(genesis_hash)};
+    BOOST_CHECK(reverse.GetOrComputePQLegacyStateHash(genesis_hash) ==
+                expected);
+
+    CDataStream encoded{SER_DISK, PROTOCOL_VERSION};
+    encoded << forward;
+    CDeterministicMNList decoded;
+    encoded >> decoded;
+    BOOST_CHECK(decoded.GetOrComputePQLegacyStateHash(genesis_hash) ==
+                expected);
+
+    const auto member{forward.GetMNByInternalId(2)};
+    BOOST_REQUIRE(member);
+    auto changed_state{
+        std::make_shared<CDeterministicMNState>(*member->pdmnState)};
+    ++changed_state->nPoSePenalty;
+    forward.UpdateMN(member->proTxHash, changed_state);
+    BOOST_CHECK(forward.GetOrComputePQLegacyStateHash(genesis_hash) !=
+                expected);
+    forward.UpdateMN(member->proTxHash, member->pdmnState);
+    BOOST_CHECK(forward.GetOrComputePQLegacyStateHash(genesis_hash) ==
+                expected);
+
+    const auto removed{forward.GetMNByInternalId(9)};
+    BOOST_REQUIRE(removed);
+    forward.RemoveMN(removed->proTxHash);
+    BOOST_CHECK(forward.GetOrComputePQLegacyStateHash(genesis_hash) !=
+                expected);
+    forward.AddMN(removed, /*fBumpTotalCount=*/false);
+    BOOST_CHECK(forward.GetOrComputePQLegacyStateHash(genesis_hash) ==
+                expected);
+
+    forward.SetBlockHash(MakeSnapshotKey(60'001));
+    BOOST_CHECK(forward.GetOrComputePQLegacyStateHash(genesis_hash) !=
+                expected);
+    forward.SetBlockHash(block_hash);
+    BOOST_CHECK(forward.GetOrComputePQLegacyStateHash(genesis_hash) ==
+                expected);
+}
+
+BOOST_AUTO_TEST_CASE(pq_dmn_muhash_state_v1_empty_vector)
+{
+    const CDeterministicMNList empty{
+        MakeSnapshotKey(60'101), 4322, 17};
+    BOOST_CHECK_EQUAL(
+        empty.GetPQLegacyStateHash(MakeSnapshotKey(60'100)).ToString(),
+        "0a456800d383b162a7dc448dbdf04b3d0f0d04f5f6e2105523ae87ba892bd898");
+}
+
+BOOST_AUTO_TEST_CASE(
+    pq_governance_authority_commitment_tracks_only_authority_content)
+{
+    const uint256 genesis_hash{MakeSnapshotKey(60'102)};
+    CDeterministicMNList list{MakeNontrivialAnchorSnapshot(
+        MakeSnapshotKey(60'103), 4323, false)};
+    const uint256 expected{
+        list.GetOrComputePQGovernanceAuthorityHash(genesis_hash)};
+
+    // Exact-tip coordinates and routine payment bookkeeping are not inputs to
+    // either governance authority map.
+    list.SetBlockHash(MakeSnapshotKey(60'104));
+    list.SetHeight(4324);
+    BOOST_CHECK(list.GetOrComputePQGovernanceAuthorityHash(genesis_hash) ==
+                expected);
+    const auto member{list.GetMNByInternalId(9)};
+    BOOST_REQUIRE(member);
+    auto paid_state{
+        std::make_shared<CDeterministicMNState>(*member->pdmnState)};
+    ++paid_state->nLastPaidHeight;
+    ++paid_state->nPoSePenalty;
+    list.UpdateMN(member->proTxHash, paid_state);
+    BOOST_CHECK(list.GetOrComputePQGovernanceAuthorityHash(genesis_hash) ==
+                expected);
+
+    auto voting_state{
+        std::make_shared<CDeterministicMNState>(*paid_state)};
+    voting_state->keyIDVoting.begin()[0] ^= 1;
+    list.UpdateMN(member->proTxHash, voting_state);
+    BOOST_CHECK(list.GetOrComputePQGovernanceAuthorityHash(genesis_hash) !=
+                expected);
+    list.UpdateMN(member->proTxHash, paid_state);
+    BOOST_CHECK(list.GetOrComputePQGovernanceAuthorityHash(genesis_hash) ==
+                expected);
+
+    auto banned_state{
+        std::make_shared<CDeterministicMNState>(*paid_state)};
+    banned_state->BanIfNotBanned(list.GetHeight());
+    list.UpdateMN(member->proTxHash, banned_state);
+    BOOST_CHECK(list.GetOrComputePQGovernanceAuthorityHash(genesis_hash) !=
+                expected);
+    list.UpdateMN(member->proTxHash, paid_state);
+    BOOST_CHECK(list.GetOrComputePQGovernanceAuthorityHash(genesis_hash) ==
+                expected);
+
+    CDataStream encoded{SER_DISK, PROTOCOL_VERSION};
+    encoded << list;
+    CDeterministicMNList decoded;
+    encoded >> decoded;
+    BOOST_CHECK(
+        decoded.GetOrComputePQGovernanceAuthorityHash(genesis_hash) ==
+        expected);
+}
+
+BOOST_AUTO_TEST_CASE(pq_voting_authority_commits_rotation_revocation_and_undo)
+{
+    const uint256 genesis_hash{MakeSnapshotKey(60'120)};
+    CDeterministicMNList list{MakeNontrivialAnchorSnapshot(
+        MakeSnapshotKey(60'121), 4323, false)};
+    const uint256 legacy_authority{list.GetOrComputePQGovernanceAuthorityHash(genesis_hash)};
+    const uint256 legacy_state{list.GetOrComputePQLegacyStateHash(genesis_hash)};
+    const auto member{list.GetMNByInternalId(9)};
+    BOOST_REQUIRE(member);
+    auto first{std::make_shared<CDeterministicMNState>(*member->pdmnState)};
+    llmq::pq::GlobalPublicKey key{};
+    key.fill(0x81);
+    BOOST_REQUIRE(first->pqVotingKey.UpdatePublicKey(key, list.GetHeight()));
+    list.UpdateMN(member->proTxHash, first);
+    const uint256 first_authority{list.GetOrComputePQGovernanceAuthorityHash(genesis_hash)};
+    BOOST_CHECK(first_authority != legacy_authority);
+    BOOST_CHECK(list.GetOrComputePQLegacyStateHash(genesis_hash) != legacy_state);
+
+    auto payout_only{std::make_shared<CDeterministicMNState>(*first)};
+    payout_only->scriptPayout = CScript{} << OP_TRUE;
+    BOOST_REQUIRE(payout_only->pqVotingKey.UpdatePublicKey(key, list.GetHeight() + 1));
+    list.UpdateMN(member->proTxHash, payout_only);
+    BOOST_CHECK(list.GetOrComputePQGovernanceAuthorityHash(genesis_hash) == first_authority);
+    auto rotated{std::make_shared<CDeterministicMNState>(*first)};
+    key[0] ^= 1;
+    BOOST_REQUIRE(rotated->pqVotingKey.UpdatePublicKey(key, list.GetHeight() + 1));
+    key[0] ^= 1;
+    BOOST_REQUIRE(rotated->pqVotingKey.UpdatePublicKey(key, list.GetHeight() + 2));
+    list.UpdateMN(member->proTxHash, rotated);
+    BOOST_CHECK(rotated->pqVotingKey.public_key == first->pqVotingKey.public_key);
+    const uint256 rotated_authority{list.GetOrComputePQGovernanceAuthorityHash(genesis_hash)};
+    BOOST_CHECK(rotated_authority != first_authority);
+
+    CDataStream encoded{SER_DISK, PROTOCOL_VERSION};
+    encoded << list;
+    CDeterministicMNList decoded;
+    encoded >> decoded;
+    BOOST_CHECK(decoded.GetOrComputePQGovernanceAuthorityHash(genesis_hash) == rotated_authority);
+    BOOST_CHECK(decoded.GetOrComputePQLegacyStateHash(genesis_hash) ==
+                list.GetOrComputePQLegacyStateHash(genesis_hash));
+
+    auto revoked{std::make_shared<CDeterministicMNState>(*rotated)};
+    BOOST_REQUIRE(revoked->pqVotingKey.UpdatePublicKey({}, list.GetHeight() + 3));
+    list.UpdateMN(member->proTxHash, revoked);
+    const uint256 revoked_authority{list.GetOrComputePQGovernanceAuthorityHash(genesis_hash)};
+    BOOST_CHECK(revoked_authority != rotated_authority);
+    BOOST_CHECK(revoked_authority != legacy_authority);
+    CDeterministicMNStateDiff inverse{*revoked, *member->pdmnState};
+    auto restored{std::make_shared<CDeterministicMNState>(*revoked)};
+    inverse.ApplyToState(*restored);
+    list.UpdateMN(member->proTxHash, restored);
+    BOOST_CHECK(list.GetOrComputePQGovernanceAuthorityHash(genesis_hash) == legacy_authority);
+    BOOST_CHECK(list.GetOrComputePQLegacyStateHash(genesis_hash) == legacy_state);
+}
+
+BOOST_AUTO_TEST_CASE(inverse_journal_v1_rejects_unknown_versions_and_fields)
+{
+    BOOST_CHECK_EQUAL(CDeterministicMNListInverse::VERSION, 1U);
+    CDeterministicMNListInverse inverse;
+    inverse.genesis_hash = MakeSnapshotKey(61'000);
+    inverse.coverage_base_height = 10;
+    inverse.parent_history_commitment = MakeSnapshotKey(61'001);
+    inverse.child_height = 11;
+    inverse.child_hash = MakeSnapshotKey(61'002);
+    inverse.child_state_hash = MakeSnapshotKey(61'003);
+    inverse.parent_height = 10;
+    inverse.parent_hash = MakeSnapshotKey(61'004);
+    inverse.parent_state_hash = MakeSnapshotKey(61'005);
+    inverse.parent_total_registered_count = 1;
+    CDeterministicMNStateDiff voting_diff;
+    voting_diff.fields = CDeterministicMNStateDiff::Field_pqVotingKey;
+    voting_diff.state.pqVotingKey.public_key.fill(0x91);
+    voting_diff.state.pqVotingKey.key_version = 1;
+    voting_diff.state.pqVotingKey.activated_height = 10;
+    inverse.inverse_diff.updatedMNs.emplace(0, voting_diff);
+
+    const auto seal = [](CDeterministicMNListInverse& record) {
+        constexpr std::string_view domain{"SYS_DMN_INVERSE_HISTORY_V1"};
+        CHashWriter writer{SER_GETHASH, 0};
+        writer.write(AsBytes(Span{domain.data(), domain.size()}));
+        writer << record.version << record.genesis_hash
+               << record.coverage_base_height
+               << record.parent_history_commitment << record.child_height
+               << record.child_hash << record.child_state_hash
+               << record.parent_height << record.parent_hash
+               << record.parent_state_hash
+               << record.parent_total_registered_count
+               << ::SerializeHash(record.inverse_diff);
+        record.history_commitment = writer.GetHash();
+    };
+    const auto encode_unchecked = [](const CDeterministicMNListInverse& record) {
+        CDataStream stream{SER_DISK, PROTOCOL_VERSION};
+        stream << record.version << record.genesis_hash << record.coverage_base_height
+               << record.parent_history_commitment << record.history_commitment
+               << record.child_height << record.child_hash << record.child_state_hash
+               << record.parent_height << record.parent_hash << record.parent_state_hash
+               << record.parent_total_registered_count << record.inverse_diff;
+        return stream;
+    };
+    seal(inverse);
+    BOOST_REQUIRE(inverse.IsStructurallyValid());
+    CDataStream encoded{SER_DISK, PROTOCOL_VERSION};
+    encoded << inverse;
+    CDeterministicMNListInverse decoded;
+    encoded >> decoded;
+    BOOST_CHECK(encoded.empty());
+    BOOST_CHECK_EQUAL(decoded.version, 1U);
+    BOOST_CHECK(decoded.inverse_diff.updatedMNs.at(0).state.pqVotingKey ==
+                voting_diff.state.pqVotingKey);
+    BOOST_CHECK(::SerializeHash(decoded) == ::SerializeHash(inverse));
+
+    // Recompute each commitment so rejection proves the schema gate, rather
+    // than merely detecting a stale hash after an in-memory mutation.
+    for (uint16_t version : std::array<uint16_t, 4>{0, 2, 3, 0xffff}) {
+        auto unsupported{inverse};
+        unsupported.version = version;
+        seal(unsupported);
+        BOOST_CHECK(!unsupported.IsStructurallyValid());
+        BOOST_CHECK_THROW(::SerializeHash(unsupported), std::ios_base::failure);
+        auto malformed{encode_unchecked(unsupported)};
+        BOOST_CHECK_THROW(malformed >> decoded, std::ios_base::failure);
+    }
+    for (uint32_t field : std::array<uint32_t, 2>{0x40000, 0x80000000}) {
+        auto unsupported{inverse};
+        unsupported.inverse_diff.updatedMNs.at(0).fields |= field;
+        seal(unsupported);
+        BOOST_CHECK(!unsupported.IsStructurallyValid());
+        BOOST_CHECK_THROW(::SerializeHash(unsupported), std::ios_base::failure);
+        auto malformed{encode_unchecked(unsupported)};
+        BOOST_CHECK_THROW(malformed >> decoded, std::ios_base::failure);
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    pq_voting_inverse_journal_persists_and_restores_across_restart,
+    ChainTestingSetup)
+{
+    SelectParams(ChainType::REGTEST);
+    LOCK(cs_main);
+    auto& consensus{const_cast<Consensus::Params&>(Params().GetConsensus())};
+    struct RestoreProfile {
+        Consensus::Params& consensus;
+        int dip3{consensus.DIP0003Height};
+        int preparation{consensus.nPQPreparationHeight};
+        int activation{consensus.nPQActivationHeight};
+        int origin{consensus.nPQChainLockEpochOrigin};
+        uint32_t cutoff{consensus.nPQRegistrationCutoffBlocks};
+        uint32_t horizon{consensus.nPQFutureHorizonEpochs};
+        ~RestoreProfile()
+        {
+            consensus.DIP0003Height = dip3;
+            consensus.nPQPreparationHeight = preparation;
+            consensus.nPQActivationHeight = activation;
+            consensus.nPQChainLockEpochOrigin = origin;
+            consensus.nPQRegistrationCutoffBlocks = cutoff;
+            consensus.nPQFutureHorizonEpochs = horizon;
+        }
+    } restore{consensus};
+    constexpr int base_height{1294};
+    constexpr int registration_offset{1441 - base_height};
+    constexpr int depth{registration_offset + 5};
+    consensus.DIP0003Height = base_height;
+    consensus.nPQPreparationHeight = base_height + 1;
+    consensus.nPQActivationHeight = base_height + registration_offset;
+    consensus.nPQChainLockEpochOrigin = 1440;
+    consensus.nPQRegistrationCutoffBlocks = 144;
+    consensus.nPQFutureHorizonEpochs = 8;
+    auto chain{BuildSnapshotIndexChain(base_height, depth + 1)};
+    const auto member{MakeLegacyReplayMN(0, 1)};
+    CDeterministicMNList base{chain.hashes[0], base_height, 1};
+    base.AddMN(member, /*fBumpTotalCount=*/false);
+    std::array<uint256, depth + 1> expected_hashes;
+    std::array<uint256, depth + 1> expected_authorities;
+    expected_hashes[0] = base.GetOrComputePQLegacyStateHash(consensus.hashGenesisBlock);
+    expected_authorities[0] = base.GetOrComputePQGovernanceAuthorityHash(consensus.hashGenesisBlock);
+    const ScopedDiskDBPath disk;
+    auto db_params = DBParams{
+        .path = disk.path,
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = false,
+        .wipe_data = true,
+    };
+    llmq::pq::GlobalPublicKey first_key{};
+    first_key.fill(0x91);
+    const std::array<uint32_t, 6> versions{1, 1, 2, 3, 4, 0};
+    {
+        CDeterministicMNManager manager{db_params};
+        BOOST_REQUIRE(manager.m_evoDb->WriteThrough(chain.hashes[0], base, true));
+        CCoinsView base_view;
+        CCoinsViewCache view{&base_view};
+        for (int offset{1}; offset <= depth; ++offset) {
+            CBlock block{MakeProviderMutationBlock({})};
+            block.hashPrevBlock = chain.hashes[offset - 1];
+            block.nTime = 100 + offset;
+            block.nNonce = 200 + offset;
+            if (offset >= registration_offset) {
+                const int update_index{offset - registration_offset};
+                CMutableTransaction tx;
+                tx.vin.emplace_back(offset == depth ? member->collateralOutpoint
+                    : COutPoint{MakeSnapshotKey(80'000 + offset), 0});
+                tx.vout.emplace_back(1, CScript{} << OP_TRUE);
+                if (offset != depth) {
+                    tx.nVersion = SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR;
+                    CProUpRegTx payload;
+                    payload.nVersion = CProUpRegTx::PQ_VERSION;
+                    payload.proTxHash = member->proTxHash;
+                    payload.keyIDVoting = member->pdmnState->keyIDVoting;
+                    payload.pqVotingPublicKey = first_key;
+                    if (update_index == 2) payload.pqVotingPublicKey.front() ^= 1;
+                    if (update_index == 3) payload.pqVotingPublicKey = {};
+                    payload.scriptPayout = CScript{} << (update_index == 1 ? OP_2 : OP_TRUE);
+                    payload.inputsHash = CalcTxInputsHash(CTransaction{tx});
+                    SetTxPayload(tx, payload);
+                }
+                block.vtx.emplace_back(MakeTransactionRef(std::move(tx)));
+            }
+            chain.hashes[offset] = block.GetHash();
+            BlockValidationState state;
+            CDeterministicMNListNEVMAddressDiff nevm;
+            BOOST_REQUIRE_MESSAGE(manager.ProcessBlock(block, &chain.indices[offset], state,
+                view, llmq::CFinalCommitmentTxPayload{}, nevm, false, true), state.ToString());
+            const auto current{manager.GetListForBlock(&chain.indices[offset])};
+            const auto current_member{current.GetMN(member->proTxHash)};
+            if (offset == depth) {
+                BOOST_CHECK(!current_member);
+            } else {
+                BOOST_REQUIRE(current_member);
+                BOOST_CHECK_EQUAL(current_member->pdmnState->pqVotingKey.key_version,
+                    offset < registration_offset ? 0 : versions[offset - registration_offset]);
+                if (offset == registration_offset + 1) {
+                    BOOST_CHECK_EQUAL(current_member->pdmnState->pqVotingKey.activated_height,
+                        base_height + registration_offset);
+                }
+            }
+            CDeterministicMNManager::InverseJournalEntryStatsForTesting stats;
+            BOOST_REQUIRE(manager.GetInverseJournalEntryStatsForTesting(chain.hashes[offset], stats));
+            BOOST_CHECK_EQUAL(stats.version, 1U);
+            expected_hashes[offset] = current.GetOrComputePQLegacyStateHash(consensus.hashGenesisBlock);
+            expected_authorities[offset] = current.GetOrComputePQGovernanceAuthorityHash(consensus.hashGenesisBlock);
+        }
+        BOOST_REQUIRE(manager.FlushPendingSnapshotsToDisk(true));
+    }
+    db_params.wipe_data = false;
+    {
+        CDeterministicMNManager restarted{db_params};
+        BOOST_REQUIRE(restarted.VerifyInverseJournalTipSeal(&chain.indices.back()));
+        for (int offset{1}; offset < depth; ++offset) {
+            restarted.m_evoDb->EraseCache(chain.hashes[offset]);
+        }
+        BOOST_REQUIRE(restarted.m_evoDb->FlushCacheToDisk(256, true));
+        for (int offset{depth}; offset > 0; --offset) {
+            CDeterministicMNListNEVMAddressDiff nevm;
+            BOOST_REQUIRE(restarted.UndoBlock(&chain.indices[offset], nevm));
+            const auto restored{restarted.GetListForBlock(&chain.indices[offset - 1])};
+            BOOST_CHECK(restored.GetOrComputePQLegacyStateHash(consensus.hashGenesisBlock) == expected_hashes[offset - 1]);
+            BOOST_CHECK(restored.GetOrComputePQGovernanceAuthorityHash(consensus.hashGenesisBlock) == expected_authorities[offset - 1]);
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(pq_legacy_state_commitment_uses_current_update_entry)
+{
+    const uint256 genesis_hash{MakeSnapshotKey(60'010)};
+    CDeterministicMNList list{
+        MakeNontrivialAnchorSnapshot(MakeSnapshotKey(60'011), 4321, false)};
+    const auto stale_member{list.GetMNByInternalId(9)};
+    BOOST_REQUIRE(stale_member);
+
+    auto first_state{
+        std::make_shared<CDeterministicMNState>(*stale_member->pdmnState)};
+    first_state->nLastPaidHeight++;
+    list.UpdateMN(stale_member->proTxHash, first_state);
+
+    // SYSCOIN: A caller may retain an object from the persistent map across a
+    // later replacement. It identifies the entry but must not supply the old
+    // element removed from the incremental commitment.
+    auto second_state{
+        std::make_shared<CDeterministicMNState>(*stale_member->pdmnState)};
+    second_state->nPoSeRevivedHeight++;
+    list.UpdateMN(*stale_member, second_state);
+
+    CDataStream encoded{SER_DISK, PROTOCOL_VERSION};
+    encoded << list;
+    CDeterministicMNList decoded;
+    encoded >> decoded;
+    BOOST_CHECK(decoded.GetOrComputePQLegacyStateHash(genesis_hash) ==
+                list.GetOrComputePQLegacyStateHash(genesis_hash));
+
+    const auto current{list.GetMN(stale_member->proTxHash)};
+    BOOST_REQUIRE(current);
+    auto confirmed_state{
+        std::make_shared<CDeterministicMNState>(*current->pdmnState)};
+    confirmed_state->UpdateConfirmedHash(
+        current->proTxHash, MakeSnapshotKey(60'012));
+    confirmed_state->nPoSePenalty = 2;
+    list.UpdateMN(current->proTxHash, confirmed_state);
+    list.PoSeDecrease(current->proTxHash);
+
+    const auto decreased{list.GetMN(current->proTxHash)};
+    BOOST_REQUIRE(decreased);
+    BOOST_CHECK_EQUAL(decreased->pdmnState->nPoSePenalty, 1);
+    BOOST_CHECK(decreased->pdmnState->confirmedHash ==
+                confirmed_state->confirmedHash);
+    BOOST_CHECK(decreased->pdmnState->confirmedHashWithProRegTxHash ==
+                confirmed_state->confirmedHashWithProRegTxHash);
+
+    CDataStream decreased_encoded{SER_DISK, PROTOCOL_VERSION};
+    decreased_encoded << list;
+    CDeterministicMNList decreased_decoded;
+    decreased_encoded >> decreased_decoded;
+    BOOST_CHECK(
+        decreased_decoded.GetOrComputePQLegacyStateHash(genesis_hash) ==
+        list.GetOrComputePQLegacyStateHash(genesis_hash));
+}
+
+BOOST_AUTO_TEST_CASE(inverse_diff_round_trip_restores_all_mutation_kinds)
+{
+    CDataStream oversized_diff{SER_DISK, PROTOCOL_VERSION};
+    WriteCompactSize(
+        oversized_diff, CDeterministicMNListDiff::MAX_CHANGES + 1);
+    CDeterministicMNListDiff rejected_diff;
+    BOOST_CHECK_THROW(oversized_diff >> rejected_diff,
+                      std::ios_base::failure);
+
+    const uint256 parent_hash{MakeSnapshotKey(60'001)};
+    const uint256 child_hash{MakeSnapshotKey(60'002)};
+    constexpr int parent_height{4321};
+    CDeterministicMNList parent{
+        MakeNontrivialAnchorSnapshot(parent_hash, parent_height, false)};
+
+    CDeterministicMNList child{parent};
+    child.ResetTrackedChanges();
+    child.SetBlockHash(child_hash);
+    child.SetHeight(parent_height + 1);
+
+    const auto removed{parent.GetMNByInternalId(9)};
+    BOOST_REQUIRE(removed);
+    child.RemoveMN(removed->proTxHash);
+
+    const auto added{MakeAnchorMN(17, 4)};
+    child.AddMN(added);
+
+    const auto updated_before{parent.GetMNByInternalId(2)};
+    BOOST_REQUIRE(updated_before);
+    auto updated_state{
+        std::make_shared<CDeterministicMNState>(*updated_before->pdmnState)};
+    updated_state->nLastPaidHeight += 77;
+    updated_state->nPoSePenalty += 5;
+    // The child validly takes a unique property freed by the removal. The
+    // inverse must release it from this node before restoring the removed
+    // parent node, independent of unordered update iteration.
+    updated_state->vchNEVMAddress = removed->pdmnState->vchNEVMAddress;
+    child.UpdateMN(updated_before->proTxHash, updated_state);
+
+    CDeterministicMNListDiff inverse;
+    child.BuildTrackedInverseDiff(parent, inverse);
+    BOOST_REQUIRE_EQUAL(inverse.addedMNs.size(), 1U);
+    BOOST_REQUIRE_EQUAL(inverse.updatedMNs.size(), 1U);
+    BOOST_REQUIRE_EQUAL(inverse.removedMns.size(), 1U);
+
+    CDataStream encoded{SER_DISK, PROTOCOL_VERSION};
+    encoded << inverse;
+    CDeterministicMNListDiff decoded;
+    encoded >> decoded;
+
+    CBlockIndex parent_index;
+    parent_index.nHeight = parent_height;
+    parent_index.phashBlock = &parent_hash;
+    const CDeterministicMNList recovered{child.ApplyDiff(
+        &parent_index, decoded, parent.GetTotalRegisteredCount())};
+
+    BOOST_CHECK_EQUAL(recovered.GetAllMNsCount(), parent.GetAllMNsCount());
+    BOOST_CHECK_EQUAL(recovered.GetTotalRegisteredCount(),
+                      parent.GetTotalRegisteredCount());
+    CDataStream encoded_parent{SER_DISK, PROTOCOL_VERSION};
+    CDataStream encoded_recovered{SER_DISK, PROTOCOL_VERSION};
+    encoded_parent << parent;
+    encoded_recovered << recovered;
+    BOOST_REQUIRE_EQUAL(encoded_recovered.size(), encoded_parent.size());
+    BOOST_CHECK(std::equal(encoded_recovered.begin(),
+                           encoded_recovered.end(),
+                           encoded_parent.begin()));
+    parent.ForEachMN(false, [&recovered](const CDeterministicMN& expected) {
+        const auto actual{recovered.GetMN(expected.proTxHash)};
+        BOOST_REQUIRE(actual);
+        BOOST_CHECK_EQUAL(actual->GetInternalId(), expected.GetInternalId());
+        BOOST_REQUIRE(recovered.GetMNByInternalId(expected.GetInternalId()));
+        BOOST_CHECK(recovered.GetMNByInternalId(expected.GetInternalId())
+                        ->proTxHash == expected.proTxHash);
+        const auto by_collateral{
+            recovered.GetUniquePropertyMN(expected.collateralOutpoint)};
+        BOOST_REQUIRE(by_collateral);
+        BOOST_CHECK(by_collateral->proTxHash == expected.proTxHash);
+        const auto by_owner{
+            recovered.GetUniquePropertyMN(expected.pdmnState->keyIDOwner)};
+        BOOST_REQUIRE(by_owner);
+        BOOST_CHECK(by_owner->proTxHash == expected.proTxHash);
+    });
+    BOOST_CHECK(!recovered.HasMN(added->proTxHash));
+}
+
+BOOST_AUTO_TEST_CASE(tracked_net_removals_follow_final_membership)
+{
+    const auto member{MakeAnchorMN(1, 1)};
+    CDeterministicMNList parent{MakeSnapshotKey(60'010), 4'330, 1};
+    parent.AddMN(member, /*fBumpTotalCount=*/false);
+
+    auto update_only{parent};
+    update_only.ResetTrackedChanges();
+    auto updated_state{
+        std::make_shared<CDeterministicMNState>(*member->pdmnState)};
+    ++updated_state->nLastPaidHeight;
+    update_only.UpdateMN(member->proTxHash, updated_state);
+    BOOST_CHECK(
+        update_only.BuildTrackedNetRemovedProTxHashes(parent).empty());
+
+    auto failed_mutation{parent};
+    failed_mutation.ResetTrackedChanges();
+    BOOST_CHECK_THROW(
+        failed_mutation.RemoveMN(MakeSnapshotKey(60'099)),
+        std::runtime_error);
+    BOOST_CHECK_EQUAL(failed_mutation.TrackedChangeCountForTesting(), 0U);
+    BOOST_CHECK(
+        failed_mutation.BuildTrackedNetRemovedProTxHashes(parent).empty());
+
+    auto removed{parent};
+    removed.ResetTrackedChanges();
+    removed.RemoveMN(member->proTxHash);
+    const auto parent_removal{
+        removed.BuildTrackedNetRemovedProTxHashes(parent)};
+    BOOST_REQUIRE_EQUAL(parent_removal.size(), 1U);
+    BOOST_CHECK(parent_removal.front() == member->proTxHash);
+
+    auto transient_add{parent};
+    transient_add.ResetTrackedChanges();
+    const auto transient{MakeAnchorMN(2, 2)};
+    transient_add.AddMN(transient, /*fBumpTotalCount=*/false);
+    transient_add.RemoveMN(transient->proTxHash);
+    BOOST_CHECK(
+        transient_add.BuildTrackedNetRemovedProTxHashes(parent).empty());
+
+    auto restored{parent};
+    restored.ResetTrackedChanges();
+    restored.RemoveMN(member->proTxHash);
+    restored.AddMN(member, /*fBumpTotalCount=*/false);
+    BOOST_CHECK(restored.BuildTrackedNetRemovedProTxHashes(parent).empty());
+
+    auto updated_then_removed{parent};
+    updated_then_removed.ResetTrackedChanges();
+    updated_then_removed.UpdateMN(member->proTxHash, updated_state);
+    updated_then_removed.RemoveMN(member->proTxHash);
+    const auto updated_removal{
+        updated_then_removed.BuildTrackedNetRemovedProTxHashes(parent)};
+    BOOST_REQUIRE_EQUAL(updated_removal.size(), 1U);
+    BOOST_CHECK(updated_removal.front() == member->proTxHash);
+}
+
+BOOST_AUTO_TEST_CASE(tracked_net_removals_are_sorted_unique_and_cover_collateral_replacement)
+{
+    const auto first{MakeAnchorMN(3, 3)};
+    const auto second{MakeAnchorMN(4, 20)};
+    const auto replaced{MakeAnchorMN(5, 11)};
+    CDeterministicMNList parent{MakeSnapshotKey(60'011), 4'331, 3};
+    parent.AddMN(first, /*fBumpTotalCount=*/false);
+    parent.AddMN(second, /*fBumpTotalCount=*/false);
+    parent.AddMN(replaced, /*fBumpTotalCount=*/false);
+
+    auto child{parent};
+    child.ResetTrackedChanges();
+    child.RemoveMN(second->proTxHash);
+    child.RemoveMN(replaced->proTxHash);
+    auto first_state{
+        std::make_shared<CDeterministicMNState>(*first->pdmnState)};
+    ++first_state->nPoSePenalty;
+    child.UpdateMN(first->proTxHash, first_state);
+    child.RemoveMN(first->proTxHash);
+
+    const auto replacement_source{MakeAnchorMN(6, 12)};
+    auto replacement{std::make_shared<CDeterministicMN>(
+        replacement_source->GetInternalId())};
+    replacement->proTxHash = replacement_source->proTxHash;
+    replacement->collateralOutpoint = replaced->collateralOutpoint;
+    replacement->nOperatorReward = replacement_source->nOperatorReward;
+    replacement->pdmnState = replacement_source->pdmnState;
+    child.AddMN(replacement, /*fBumpTotalCount=*/false);
+
+    std::vector<uint256> expected{
+        first->proTxHash, second->proTxHash, replaced->proTxHash};
+    std::sort(expected.begin(), expected.end());
+    const auto removals{child.BuildTrackedNetRemovedProTxHashes(parent)};
+    BOOST_CHECK(removals == expected);
+    BOOST_CHECK(std::adjacent_find(removals.begin(), removals.end()) ==
+                removals.end());
+    BOOST_REQUIRE(child.HasMN(replacement->proTxHash));
+    BOOST_CHECK(child.GetMN(replacement->proTxHash)->collateralOutpoint ==
+                replaced->collateralOutpoint);
+}
 
 BOOST_AUTO_TEST_CASE(non_forced_flush_does_not_persist_snapshots_during_ibd)
 {
@@ -854,6 +2653,38 @@ BOOST_AUTO_TEST_CASE(non_forced_flush_does_not_persist_snapshots_during_ibd)
     BOOST_CHECK_EQUAL(manager.m_evoDb->GetEraseCacheSize(), 0U);
     BOOST_CHECK_EQUAL(manager.m_evoDb->GetReadCacheSize(), 0U);
     BOOST_CHECK(!manager.HasPersistentWindow());
+}
+
+BOOST_AUTO_TEST_CASE(pending_snapshot_sync_flush_orders_prior_write_through)
+{
+    SelectParams(ChainType::MAIN);
+    auto db_params = DBParams{
+        .path = "testdb_dmn_pending_sync_barrier",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    };
+    CDeterministicMNManager manager(db_params);
+    const int height{Params().GetConsensus().DIP0003Height};
+    const uint256 block_hash{MakeSnapshotKey(height)};
+
+    BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+        block_hash, MakeSnapshot(height), /*fSync=*/false));
+    BOOST_CHECK_EQUAL(manager.m_evoDb->GetReadWriteCacheSize(), 0U);
+
+    manager.FailNextInverseJournalFlushForTesting();
+    BOOST_REQUIRE(manager.FlushPendingSnapshotsToDisk(/*fSync=*/false));
+    BOOST_CHECK_THROW(
+        manager.FlushPendingSnapshotsToDisk(/*fSync=*/true),
+        dbwrapper_error);
+    BOOST_REQUIRE(manager.FlushPendingSnapshotsToDisk(/*fSync=*/true));
+
+    manager.m_evoDb->FailNextFlushBatchForTesting();
+    BOOST_REQUIRE(manager.FlushPendingSnapshotsToDisk(/*fSync=*/false));
+    BOOST_CHECK_THROW(
+        manager.FlushPendingSnapshotsToDisk(/*fSync=*/true),
+        dbwrapper_error);
+    BOOST_REQUIRE(manager.FlushPendingSnapshotsToDisk(/*fSync=*/true));
 }
 
 BOOST_AUTO_TEST_CASE(first_forced_flush_initializes_persisted_window_and_hot_cache)
@@ -893,14 +2724,1476 @@ BOOST_AUTO_TEST_CASE(first_forced_flush_initializes_persisted_window_and_hot_cac
     BOOST_CHECK_EQUAL(snapshot.GetHeight(), start_height + total_snapshots - 1);
 }
 
+BOOST_AUTO_TEST_CASE(snapshot_compaction_is_bounded_and_resumes_after_restart)
+{
+    SelectParams(ChainType::MAIN);
+    constexpr int stale_backlog{
+        2 * static_cast<int>(
+                CDeterministicMNManager::
+                    SNAPSHOT_GC_MAX_ERASE_ITEMS_PER_PASS) +
+        17};
+    const int cache_limit{CDeterministicMNManager::LIST_CACHE_SIZE};
+    const int start_height{Params().GetConsensus().DIP0003Height};
+    const int total_snapshots{cache_limit + stale_backlog};
+    const auto chain{
+        BuildSnapshotIndexChain(start_height, total_snapshots)};
+    const ScopedDiskDBPath disk_db;
+    auto db_params = DBParams{
+        .path = disk_db.path,
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = false,
+        .wipe_data = true,
+    };
+
+    {
+        CDeterministicMNManager manager(db_params);
+        manager.UpdatedBlockTip(chain.Tip());
+        constexpr int flush_chunk{256};
+        for (int offset{0}; offset < total_snapshots;
+             offset += flush_chunk) {
+            const int count{
+                std::min(flush_chunk, total_snapshots - offset)};
+            WriteSnapshotRange(manager, start_height + offset, count);
+            BOOST_REQUIRE(
+                manager.FlushPendingSnapshotsToDisk(/*fSync=*/true));
+        }
+        BOOST_REQUIRE_EQUAL(
+            manager.m_evoDb->CountPersistedEntries(), total_snapshots);
+
+        BOOST_REQUIRE(manager.FlushCacheToDisk(/*bForceFlush=*/true));
+        BOOST_CHECK(!manager.HasPersistentWindow());
+        BOOST_CHECK_EQUAL(
+            manager.m_evoDb->CountPersistedEntries(),
+            total_snapshots - static_cast<int>(
+                CDeterministicMNManager::
+                    SNAPSHOT_GC_MAX_ERASE_ITEMS_PER_PASS));
+    }
+
+    // The cursor is deliberately process-local. A restart safely rescans
+    // already-compacted keys and still applies only one bounded erase batch.
+    db_params.wipe_data = false;
+    CDeterministicMNManager restarted(db_params);
+    restarted.UpdatedBlockTip(chain.Tip());
+    int64_t previous_count{
+        restarted.m_evoDb->CountPersistedEntries()};
+    BOOST_REQUIRE(restarted.FlushCacheToDisk(/*bForceFlush=*/true));
+    int64_t current_count{restarted.m_evoDb->CountPersistedEntries()};
+    BOOST_CHECK_LE(
+        previous_count - current_count,
+        static_cast<int64_t>(
+            CDeterministicMNManager::
+                SNAPSHOT_GC_MAX_ERASE_ITEMS_PER_PASS));
+    BOOST_CHECK(!restarted.HasPersistentWindow());
+
+    previous_count = current_count;
+    BOOST_REQUIRE(restarted.FlushCacheToDisk(/*bForceFlush=*/true));
+    current_count = restarted.m_evoDb->CountPersistedEntries();
+    BOOST_CHECK_LE(
+        previous_count - current_count,
+        static_cast<int64_t>(
+            CDeterministicMNManager::
+                SNAPSHOT_GC_MAX_ERASE_ITEMS_PER_PASS));
+    BOOST_CHECK(restarted.HasPersistentWindow());
+    BOOST_CHECK_EQUAL(current_count, cache_limit);
+}
+
+BOOST_AUTO_TEST_CASE(snapshot_compaction_progresses_across_moving_tips)
+{
+    SelectParams(ChainType::MAIN);
+    const int cache_limit{CDeterministicMNManager::LIST_CACHE_SIZE};
+    const int start_height{Params().GetConsensus().DIP0003Height};
+    constexpr int stale_count{300};
+    constexpr size_t recovery_limit{
+        CDeterministicMNManager::MAX_RECOVERY_SNAPSHOT_HEADS};
+    std::array<SnapshotIndexChain, recovery_limit + 1> branches;
+    for (size_t branch{0}; branch < branches.size(); ++branch) {
+        branches[branch] = BuildSnapshotIndexChain(
+            start_height, cache_limit + (branch == 0 ? 1 : 0));
+        for (size_t offset{0}; offset < branches[branch].hashes.size();
+             ++offset) {
+            branches[branch].hashes[offset] = MakeOrderedSnapshotKey(
+                static_cast<uint8_t>(0x10 + branch), offset);
+        }
+    }
+
+    CDeterministicMNManager manager(DBParams{
+        .path = "testdb_dmn_moving_tip_compaction",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    });
+    const CBlockIndex* first_tip{
+        branches[0].At(start_height + cache_limit - 1)};
+    manager.UpdatedBlockTip(first_tip);
+
+    size_t pending{0};
+    const auto persist = [&](const uint256& hash, int height) {
+        manager.m_evoDb->WriteCache(
+            hash, CDeterministicMNList{hash, height, 0});
+        if (++pending == 256) {
+            BOOST_REQUIRE(
+                manager.FlushPendingSnapshotsToDisk(/*fSync=*/true));
+            pending = 0;
+        }
+    };
+    for (size_t branch{0}; branch < branches.size(); ++branch) {
+        for (int offset{0}; offset < cache_limit; ++offset) {
+            persist(branches[branch].hashes[offset],
+                    start_height + offset);
+        }
+    }
+    std::array<uint256, stale_count> stale_hashes;
+    for (size_t offset{0}; offset < stale_hashes.size(); ++offset) {
+        stale_hashes[offset] = MakeOrderedSnapshotKey(0xe0, offset);
+        persist(stale_hashes[offset], start_height);
+    }
+    if (pending != 0) {
+        BOOST_REQUIRE(
+            manager.FlushPendingSnapshotsToDisk(/*fSync=*/true));
+    }
+
+    std::array<const CBlockIndex*, recovery_limit> recovery;
+    for (size_t branch{0}; branch < recovery.size(); ++branch) {
+        recovery[branch] = branches[branch + 1].Tip();
+    }
+    const int64_t initial_count{
+        static_cast<int64_t>(branches.size()) * cache_limit + stale_count};
+    BOOST_REQUIRE_EQUAL(
+        manager.m_evoDb->CountPersistedEntries(), initial_count);
+    BOOST_REQUIRE(manager.FlushCacheToDisk(
+        /*bForceFlush=*/true, /*fSync=*/false, recovery));
+    BOOST_CHECK_EQUAL(
+        manager.m_evoDb->CountPersistedEntries(),
+        initial_count - static_cast<int64_t>(
+                            CDeterministicMNManager::
+                                SNAPSHOT_GC_MAX_ERASE_ITEMS_PER_PASS));
+    CDeterministicMNList snapshot;
+    BOOST_CHECK(!manager.m_evoDb->Read(stale_hashes.front(), snapshot));
+    BOOST_CHECK(!manager.HasPersistentWindow());
+
+    // A normal tip insertion changes one retained key but must not reset or
+    // starve compaction behind the maximum number of production branch windows.
+    const CBlockIndex* advanced_tip{branches[0].Tip()};
+    const uint256 advanced_hash{advanced_tip->GetBlockHash()};
+    BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+        advanced_hash,
+        CDeterministicMNList{
+            advanced_hash, advanced_tip->nHeight, 0},
+        /*fSync=*/true));
+    manager.UpdatedBlockTip(advanced_tip);
+    BOOST_REQUIRE(manager.FlushCacheToDisk(
+        /*bForceFlush=*/true, /*fSync=*/false, recovery));
+    BOOST_CHECK_EQUAL(
+        manager.m_evoDb->CountPersistedEntries(),
+        static_cast<int64_t>(branches.size()) * cache_limit);
+    BOOST_CHECK(manager.HasPersistentWindow());
+    BOOST_CHECK(!manager.m_evoDb->Read(
+        branches[0].hashes.front(), snapshot));
+    BOOST_REQUIRE(manager.m_evoDb->Read(advanced_hash, snapshot));
+
+    // The limit above is accepted. One additional distinct recovery head
+    // must be rejected without weakening the bounded compaction proof.
+    std::array<const CBlockIndex*, recovery_limit + 1> excessive_recovery;
+    excessive_recovery.front() = advanced_tip;
+    std::copy(recovery.begin(), recovery.end(), excessive_recovery.begin() + 1);
+    BOOST_CHECK(!manager.FlushCacheToDisk(
+        /*bForceFlush=*/true, /*fSync=*/false, excessive_recovery));
+}
+
+BOOST_AUTO_TEST_CASE(snapshot_compaction_rechecks_dirty_finality_floor_sweep)
+{
+    SelectParams(ChainType::MAIN);
+    const int cache_limit{CDeterministicMNManager::LIST_CACHE_SIZE};
+    const int start_height{Params().GetConsensus().DIP0003Height};
+    auto chain{BuildSnapshotIndexChain(start_height, cache_limit)};
+    for (size_t offset{0}; offset < chain.hashes.size(); ++offset) {
+        chain.hashes[offset] = MakeOrderedSnapshotKey(0xf0, offset);
+    }
+    const int side_height{chain.Tip()->nHeight - 1};
+    constexpr size_t side_count{
+        CDeterministicMNManager::
+            SNAPSHOT_GC_MAX_SCANNED_RECORDS_PER_PASS + 1};
+
+    CDeterministicMNManager manager(DBParams{
+        .path = "testdb_dmn_finality_floor_cursor",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    });
+    manager.UpdatedBlockTip(chain.Tip());
+    size_t pending{0};
+    const auto persist = [&](const uint256& hash, int height) {
+        manager.m_evoDb->WriteCache(
+            hash, CDeterministicMNList{hash, height, 0});
+        if (++pending == 256) {
+            BOOST_REQUIRE(
+                manager.FlushPendingSnapshotsToDisk(/*fSync=*/true));
+            pending = 0;
+        }
+    };
+    for (size_t offset{0}; offset < chain.hashes.size(); ++offset) {
+        persist(chain.hashes[offset], start_height + offset);
+    }
+    std::vector<uint256> side_hashes;
+    side_hashes.reserve(side_count);
+    for (size_t offset{0}; offset < side_count; ++offset) {
+        side_hashes.emplace_back(MakeOrderedSnapshotKey(0x10, offset));
+        persist(side_hashes.back(), side_height);
+    }
+    if (pending != 0) {
+        BOOST_REQUIRE(
+            manager.FlushPendingSnapshotsToDisk(/*fSync=*/true));
+    }
+
+    BOOST_CHECK_EQUAL(
+        manager.UpdateFinalitySnapshotRetentionFloor(side_height),
+        side_height);
+    const int64_t initial_count{
+        static_cast<int64_t>(cache_limit + side_count)};
+    BOOST_REQUIRE(manager.FlushCacheToDisk(/*bForceFlush=*/true));
+    BOOST_CHECK_EQUAL(
+        manager.m_evoDb->CountPersistedEntries(), initial_count);
+    BOOST_CHECK(!manager.HasPersistentWindow());
+
+    // Raising the floor makes every previously visited side snapshot
+    // deletable. A new low key also lands behind the existing cursor.
+    const uint256 inserted_low_hash{MakeOrderedSnapshotKey(0x01, 0)};
+    BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+        inserted_low_hash,
+        CDeterministicMNList{inserted_low_hash, side_height, 0},
+        /*fSync=*/true));
+    BOOST_CHECK_EQUAL(
+        manager.UpdateFinalitySnapshotRetentionFloor(side_height + 1),
+        side_height + 1);
+
+    // Continue to EOF instead of restarting on a moving ChainLock floor. The
+    // changed sweep identity prevents this call from declaring completion.
+    BOOST_REQUIRE(manager.FlushCacheToDisk(/*bForceFlush=*/true));
+    BOOST_CHECK_EQUAL(
+        manager.m_evoDb->CountPersistedEntries(),
+        initial_count);
+    BOOST_CHECK(!manager.HasPersistentWindow());
+
+    // The mandatory fresh cycle now sees both the newly stale prefix and the
+    // insertion that sorted before the old cursor.
+    BOOST_REQUIRE(manager.FlushCacheToDisk(/*bForceFlush=*/true));
+    BOOST_CHECK_EQUAL(
+        manager.m_evoDb->CountPersistedEntries(),
+        initial_count - static_cast<int64_t>(
+                            CDeterministicMNManager::
+                                SNAPSHOT_GC_MAX_ERASE_ITEMS_PER_PASS));
+    CDeterministicMNList snapshot;
+    BOOST_CHECK(!manager.m_evoDb->Read(inserted_low_hash, snapshot));
+    BOOST_CHECK(!manager.m_evoDb->Read(side_hashes.front(), snapshot));
+    BOOST_REQUIRE(manager.m_evoDb->Read(side_hashes.back(), snapshot));
+}
+
+BOOST_AUTO_TEST_CASE(maintenance_retains_all_chainstate_recovery_snapshots)
+{
+    SelectParams(ChainType::MAIN);
+    const int cache_limit = CDeterministicMNManager::LIST_CACHE_SIZE;
+    const int start_height = Params().GetConsensus().DIP0003Height;
+    const int total_snapshots = cache_limit + 8;
+
+    auto db_params = DBParams{
+        .path = "testdb_dmn_durable_coins_recovery",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    };
+    CDeterministicMNManager manager(db_params);
+    const auto chain = BuildSnapshotIndexChain(start_height, total_snapshots);
+    manager.UpdatedBlockTip(chain.Tip());
+    const uint256 durable_hash{MakeSnapshotKey(start_height)};
+    const uint256 prospective_hash{MakeSnapshotKey(start_height + 1)};
+    BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+        durable_hash, MakeSnapshot(start_height), /*fSync=*/true));
+    BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+        prospective_hash, MakeSnapshot(start_height + 1),
+        /*fSync=*/true));
+    WriteSnapshotRange(manager, start_height + 2, total_snapshots - 2);
+
+    const std::array<const CBlockIndex*, 3> recovery_indexes{
+        chain.At(start_height), chain.At(start_height + 1),
+        chain.At(start_height)};
+    BOOST_REQUIRE(manager.FlushCacheToDisk(
+        /*bForceFlush=*/true, /*fSync=*/false, recovery_indexes));
+
+    CDeterministicMNList snapshot;
+    BOOST_REQUIRE(manager.m_evoDb->Read(durable_hash, snapshot));
+    BOOST_CHECK_EQUAL(snapshot.GetHeight(), start_height);
+    BOOST_REQUIRE(manager.m_evoDb->Read(prospective_hash, snapshot));
+    BOOST_CHECK_EQUAL(snapshot.GetHeight(), start_height + 1);
+    BOOST_CHECK(!manager.m_evoDb->Read(MakeSnapshotKey(start_height + 2),
+                                       snapshot));
+    BOOST_CHECK_EQUAL(manager.m_evoDb->CountPersistedEntries(),
+                      cache_limit + 2);
+
+    // Once every chainstate advances, same-tip maintenance must reconsider
+    // both old recovery snapshots rather than taking its normal no-op path.
+    const std::array<const CBlockIndex*, 1> advanced_recovery{
+        chain.Tip()};
+    BOOST_REQUIRE(manager.FlushCacheToDisk(
+        /*bForceFlush=*/true, /*fSync=*/false,
+        advanced_recovery));
+    BOOST_CHECK(!manager.m_evoDb->Read(durable_hash, snapshot));
+    BOOST_CHECK(!manager.m_evoDb->Read(prospective_hash, snapshot));
+    BOOST_CHECK_EQUAL(manager.m_evoDb->CountPersistedEntries(), cache_limit);
+}
+
+BOOST_AUTO_TEST_CASE(maintenance_pre_dip3_recovery_vetoes_auxiliary_gc)
+{
+    SelectParams(ChainType::MAIN);
+    const int cache_limit{CDeterministicMNManager::LIST_CACHE_SIZE};
+    const int dip3_height{Params().GetConsensus().DIP0003Height};
+    const int total_snapshots{cache_limit + 8};
+    BOOST_REQUIRE_GT(dip3_height, 0);
+
+    CDeterministicMNManager manager(DBParams{
+        .path = "testdb_dmn_pre_dip3_recovery_veto",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    });
+    const auto active_chain{
+        BuildSnapshotIndexChain(dip3_height, total_snapshots)};
+    manager.UpdatedBlockTip(active_chain.Tip());
+    for (int offset{0}; offset < total_snapshots - cache_limit; ++offset) {
+        const int height{dip3_height + offset};
+        BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+            MakeSnapshotKey(height), MakeSnapshot(height),
+            /*fSync=*/true));
+    }
+    WriteSnapshotRange(manager, dip3_height + total_snapshots - cache_limit,
+                       cache_limit);
+
+    auto active_recovery{
+        BuildSnapshotIndexChain(dip3_height - 1, 1)};
+    auto background_recovery{
+        BuildSnapshotIndexChain(dip3_height - 1, 1)};
+    background_recovery.hashes.front().begin()[31] ^= 0x80;
+
+    // The active chainstate's durable CoinsDB marker can lag its in-memory
+    // tip across a flush. It has no DMN snapshot before DIP3, but replay from
+    // it still needs the entire unpruned auxiliary prefix.
+    const std::array<const CBlockIndex*, 1> active_marker{
+        active_recovery.Tip()};
+    const auto active_plan{
+        manager.GetAuxiliaryHistoryRetentionPlanForTesting(active_marker)};
+    BOOST_CHECK(active_plan.pre_dip3_recovery_pending);
+    BOOST_CHECK(!active_plan.AllowsDestructiveGC());
+    BOOST_REQUIRE(manager.FlushCacheToDisk(
+        /*bForceFlush=*/true, /*fSync=*/false, active_marker));
+    BOOST_CHECK_EQUAL(manager.m_evoDb->CountPersistedEntries(),
+                      total_snapshots);
+
+    // A cleanup-pending AssumeUTXO background chainstate is an independent
+    // durable replay consumer and must impose the same veto.
+    const std::array<const CBlockIndex*, 2> all_markers{
+        active_recovery.Tip(), background_recovery.Tip()};
+    const auto background_plan{
+        manager.GetAuxiliaryHistoryRetentionPlanForTesting(all_markers)};
+    BOOST_CHECK(background_plan.pre_dip3_recovery_pending);
+    BOOST_CHECK(!background_plan.AllowsDestructiveGC());
+    BOOST_REQUIRE(manager.FlushCacheToDisk(
+        /*bForceFlush=*/true, /*fSync=*/false, all_markers));
+    BOOST_CHECK_EQUAL(manager.m_evoDb->CountPersistedEntries(),
+                      total_snapshots);
+
+    // Once every durable recovery marker reaches covered history, ordinary
+    // bounded-window compaction may proceed at the unchanged live tip.
+    const std::array<const CBlockIndex*, 1> covered_marker{
+        active_chain.Tip()};
+    BOOST_REQUIRE(manager.FlushCacheToDisk(
+        /*bForceFlush=*/true, /*fSync=*/false, covered_marker));
+    BOOST_CHECK_EQUAL(manager.m_evoDb->CountPersistedEntries(), cache_limit);
+}
+
+BOOST_AUTO_TEST_CASE(maintenance_retains_each_chainstate_random_access_window)
+{
+    SelectParams(ChainType::MAIN);
+    const int cache_limit{CDeterministicMNManager::LIST_CACHE_SIZE};
+    const int start_height{Params().GetConsensus().DIP0003Height};
+    const auto active_chain{BuildSnapshotIndexChain(
+        start_height, 2 * cache_limit + 17)};
+    auto background_chain{BuildSnapshotIndexChain(
+        start_height, cache_limit + 6)};
+    for (uint256& hash : background_chain.hashes) {
+        hash.begin()[31] ^= 0x80;
+    }
+    const int background_height{start_height + cache_limit + 4};
+    const int oldest_retained_height{
+        background_height - cache_limit + 1};
+    const int representative_ancestor_height{
+        background_height - cache_limit / 2};
+    const int outside_window_height{background_height - cache_limit};
+    BOOST_REQUIRE_GT(active_chain.Tip()->nHeight - background_height,
+                     cache_limit);
+
+    CDeterministicMNManager manager(DBParams{
+        .path = "testdb_dmn_multichain_window",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    });
+    manager.UpdatedBlockTip(active_chain.Tip());
+    const auto write_snapshot = [&](const CBlockIndex* pindex) {
+        BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+            pindex->GetBlockHash(),
+            CDeterministicMNList{
+                pindex->GetBlockHash(), pindex->nHeight, 0},
+            /*fSync=*/true));
+    };
+    WriteSnapshotRange(
+        manager, active_chain.Tip()->nHeight - cache_limit + 1,
+        cache_limit);
+    for (const int height : {background_height,
+                             oldest_retained_height,
+                             representative_ancestor_height,
+                             outside_window_height}) {
+        write_snapshot(background_chain.At(height));
+    }
+
+    const std::array<const CBlockIndex*, 2> recovery_indexes{
+        active_chain.Tip(), background_chain.At(background_height)};
+    BOOST_REQUIRE(manager.FlushCacheToDisk(
+        /*bForceFlush=*/true, /*fSync=*/false, recovery_indexes));
+
+    const auto oldest_retained{manager.GetListForBlock(
+        background_chain.At(oldest_retained_height))};
+    BOOST_CHECK_EQUAL(oldest_retained.GetHeight(), oldest_retained_height);
+    const auto representative_ancestor{manager.GetListForBlock(
+        background_chain.At(representative_ancestor_height))};
+    BOOST_CHECK_EQUAL(representative_ancestor.GetHeight(),
+                      representative_ancestor_height);
+    CDeterministicMNList snapshot;
+    BOOST_CHECK(!manager.m_evoDb->Read(
+        background_chain.At(outside_window_height)->GetBlockHash(),
+        snapshot));
+
+    // Changing only the background marker must bypass the same-active-tip
+    // no-op and reclaim the single ancestor that fell out of its new window.
+    const CBlockIndex* advanced_background{
+        background_chain.At(background_height + 1)};
+    write_snapshot(advanced_background);
+    const std::array<const CBlockIndex*, 2> advanced_recovery_indexes{
+        active_chain.Tip(), advanced_background};
+    BOOST_REQUIRE(manager.FlushCacheToDisk(
+        /*bForceFlush=*/true, /*fSync=*/false,
+        advanced_recovery_indexes));
+    BOOST_CHECK(!manager.m_evoDb->Read(
+        background_chain.At(oldest_retained_height)->GetBlockHash(),
+        snapshot));
+    BOOST_REQUIRE(manager.VerifyPersistedSnapshot(advanced_background));
+    BOOST_CHECK_EQUAL(
+        manager.GetListForBlock(
+                   background_chain.At(representative_ancestor_height))
+            .GetHeight(),
+        representative_ancestor_height);
+}
+
+BOOST_AUTO_TEST_CASE(retired_nevm_child_snapshot_survives_gc_and_disk_reopen)
+{
+    SelectParams(ChainType::MAIN);
+    LOCK(::cs_main);
+    const int parent_height{Params().GetConsensus().DIP0003Height};
+    auto chain{BuildSnapshotIndexChain(parent_height, 2)};
+    const CBlockIndex* parent_index{chain.At(parent_height)};
+    CBlockIndex* child_index{chain.At(parent_height + 1)};
+    child_index->nStatus = BLOCK_VALID_TRANSACTIONS | BLOCK_FAILED_VALID;
+    BOOST_CHECK(!child_index->IsValid(BLOCK_VALID_TRANSACTIONS));
+
+    const auto member{MakeNEVMAddressMN(1, 1)};
+    const auto parent_address{member->pdmnState->vchNEVMAddress};
+    const std::vector<unsigned char> child_address(20, 0x42);
+    const auto collateral_height{
+        static_cast<uint32_t>(member->pdmnState->nCollateralHeight)};
+    CDeterministicMNList parent{parent_index->GetBlockHash(), parent_height, 0};
+    parent.AddMN(member);
+    auto child{parent};
+    child.SetBlockHash(child_index->GetBlockHash());
+    child.SetHeight(child_index->nHeight);
+    auto changed_state{
+        std::make_shared<CDeterministicMNState>(*member->pdmnState)};
+    changed_state->vchNEVMAddress = child_address;
+    child.UpdateMN(member->proTxHash, changed_state);
+    child.ResetTrackedChanges();
+    const uint256 parent_snapshot_hash{::SerializeHash(parent)};
+    const uint256 child_snapshot_hash{::SerializeHash(child)};
+    const std::array<const CBlockIndex*, 1> recovery_heads{child_index};
+
+    const ScopedDiskDBPath disk_db;
+    auto db_params = DBParams{
+        .path = disk_db.path,
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = false,
+        .wipe_data = true,
+    };
+    const uint256 unretained_hash{MakeSnapshotKey(parent_height + 100)};
+    {
+        CDeterministicMNManager manager(db_params);
+        // Core still owns P. C's retirement does not revoke the snapshots
+        // needed to compensate its unpublished external address change.
+        manager.UpdatedBlockTip(parent_index);
+        manager.m_evoDb->WriteCache(parent.GetBlockHash(), parent);
+        manager.m_evoDb->WriteCache(child.GetBlockHash(), child);
+        manager.m_evoDb->WriteCache(unretained_hash,
+            CDeterministicMNList{unretained_hash, child.GetHeight(), 0});
+        BOOST_REQUIRE(manager.FlushCacheToDisk(
+            /*bForceFlush=*/true, /*fSync=*/true, recovery_heads));
+        BOOST_REQUIRE(manager.FlushPendingSnapshotsToDisk(/*fSync=*/true));
+        BOOST_REQUIRE(manager.VerifyPersistedSnapshot(parent_index));
+        BOOST_REQUIRE(manager.VerifyPersistedSnapshot(child_index));
+        CDeterministicMNList unretained;
+        BOOST_CHECK(!manager.m_evoDb->Read(unretained_hash, unretained));
+        BOOST_CHECK_EQUAL(manager.m_evoDb->CountPersistedEntries(), 2U);
+    }
+
+    db_params.wipe_data = false;
+    {
+        CDeterministicMNManager reopened(db_params);
+        reopened.UpdatedBlockTip(parent_index);
+        // Restore the exceptional head before the first maintenance pass,
+        // just as startup does before resolving the durable external attempt.
+        BOOST_REQUIRE(reopened.FlushCacheToDisk(
+            /*bForceFlush=*/true, /*fSync=*/true, recovery_heads));
+        const auto persisted_parent{reopened.GetListForBlock(parent_index)};
+        const auto persisted_child{reopened.GetListForBlock(child_index)};
+        BOOST_CHECK(::SerializeHash(persisted_parent) == parent_snapshot_hash);
+        BOOST_CHECK(::SerializeHash(persisted_child) == child_snapshot_hash);
+        CDeterministicMNListNEVMAddressDiff inverse;
+        persisted_child.BuildNEVMAddressDiff(persisted_parent, inverse);
+        CDeterministicMNListNEVMAddressDiff expected;
+        expected.updatedMNNEVM.emplace_back(child_address,
+            std::make_pair(parent_address, collateral_height));
+        CheckNEVMAddressDiff(inverse, expected);
+        BOOST_CHECK_EQUAL(child_index->nStatus & BLOCK_FAILED_MASK,
+                          BLOCK_FAILED_VALID);
+        BOOST_CHECK(::SerializeHash(reopened.GetListAtChainTip()) ==
+                    parent_snapshot_hash);
+
+        // Removing only the exceptional head must bypass same-tip reuse and
+        // release C; retaining P alone would not have preserved the inverse.
+        BOOST_REQUIRE(reopened.FlushCacheToDisk(
+            /*bForceFlush=*/true, /*fSync=*/true));
+        BOOST_REQUIRE(reopened.VerifyPersistedSnapshot(parent_index));
+        BOOST_CHECK(!reopened.VerifyPersistedSnapshot(child_index));
+        BOOST_CHECK_EQUAL(reopened.m_evoDb->CountPersistedEntries(), 1U);
+    }
+    {
+        CDeterministicMNManager reopened(db_params);
+        BOOST_REQUIRE(reopened.VerifyPersistedSnapshot(parent_index));
+        BOOST_CHECK(!reopened.VerifyPersistedSnapshot(child_index));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(auxiliary_history_retention_plan_separates_authority)
+{
+    SelectParams(ChainType::MAIN);
+    LOCK(::cs_main);
+    auto& consensus{const_cast<Consensus::Params&>(Params().GetConsensus())};
+    struct RestoreActivation {
+        Consensus::Params& consensus;
+        int activation_height{consensus.nPQActivationHeight};
+        ~RestoreActivation()
+        {
+            consensus.nPQActivationHeight = activation_height;
+        }
+    } restore{consensus};
+
+    const int start_height{consensus.DIP0003Height};
+    auto active_chain{BuildSnapshotIndexChain(start_height, 24)};
+    auto recovery_chain{BuildSnapshotIndexChain(start_height, 17)};
+    const int anchor_height{start_height + 5};
+    for (int height{anchor_height + 1};
+         height <= recovery_chain.Tip()->nHeight; ++height) {
+        recovery_chain.hashes[height - start_height].begin()[31] ^= 0x80;
+    }
+    consensus.nPQActivationHeight = anchor_height;
+
+    CDeterministicMNManager manager(DBParams{
+        .path = "testdb_dmn_auxiliary_retention_plan",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    });
+    manager.UpdatedBlockTip(active_chain.Tip());
+    BOOST_CHECK_EQUAL(
+        manager.UpdateFinalitySnapshotRetentionFloor(start_height + 1),
+        start_height + 1);
+    const std::array<const CBlockIndex*, 1> recovery{
+        recovery_chain.Tip()};
+
+    auto plan{manager.GetAuxiliaryHistoryRetentionPlanForTesting(recovery)};
+    BOOST_CHECK(plan.requirements_valid);
+    BOOST_CHECK(plan.finality_health_ambiguous);
+    BOOST_CHECK(!plan.destructive_authorization);
+    BOOST_CHECK(!plan.AllowsDestructiveGC());
+    BOOST_REQUIRE_EQUAL(plan.branches.size(), 2U);
+    BOOST_CHECK(plan.branches.front().active);
+    BOOST_CHECK_EQUAL(plan.branches.front().snapshot_window.size(), 24U);
+    BOOST_CHECK(!plan.branches.back().active);
+    BOOST_CHECK_EQUAL(plan.branches.back().snapshot_window.size(), 17U);
+    BOOST_CHECK(plan.fixed_dependencies.empty());
+
+    using Authorization =
+        CDeterministicMNManager::AuxiliaryHistoryGCAuthorization;
+    using AuthorizationSource = CDeterministicMNManager::
+        AuxiliaryHistoryGCAuthorizationSource;
+    const Authorization invalid{
+        static_cast<AuthorizationSource>(0xff),
+        {anchor_height, active_chain.At(anchor_height)->GetBlockHash()}};
+    BOOST_CHECK(!manager.UpdateAuxiliaryHistoryGCAuthorization(invalid));
+    BOOST_CHECK(!manager.GetAuxiliaryHistoryRetentionPlanForTesting(recovery)
+                     .destructive_authorization);
+
+    const Authorization initial_authorization{
+        AuthorizationSource::ENFORCED_DURABLE_CHAINLOCK,
+        {anchor_height, active_chain.At(anchor_height)->GetBlockHash()}};
+    manager.UpdateFinalitySnapshotPublicationRetention(true);
+    BOOST_REQUIRE(manager.UpdateAuxiliaryHistoryGCAuthorization(
+        initial_authorization, /*release_publication=*/true));
+    plan = manager.GetAuxiliaryHistoryRetentionPlanForTesting(recovery);
+    BOOST_CHECK(!plan.finality_publication_pending);
+    BOOST_CHECK(!plan.finality_health_ambiguous);
+    BOOST_CHECK(plan.AllowsDestructiveGC());
+
+    BOOST_CHECK_EQUAL(
+        manager.UpdateReplaySnapshotRetentionFloor(start_height),
+        start_height);
+    plan = manager.GetAuxiliaryHistoryRetentionPlanForTesting(recovery);
+    BOOST_CHECK(plan.replay_floor);
+    BOOST_CHECK(!plan.AllowsDestructiveGC());
+    manager.UpdateReplaySnapshotRetentionFloor(std::nullopt);
+
+    manager.BeginFinalitySnapshotVerificationRetention();
+    plan = manager.GetAuxiliaryHistoryRetentionPlanForTesting(recovery);
+    BOOST_CHECK(plan.finality_verification_active);
+    BOOST_CHECK(!plan.AllowsDestructiveGC());
+    manager.EndFinalitySnapshotVerificationRetention();
+
+    const int winner_height{anchor_height + 5};
+    const Authorization winner{
+        AuthorizationSource::ENFORCED_DURABLE_CHAINLOCK,
+        {winner_height,
+         active_chain.At(winner_height)->GetBlockHash()}};
+    BOOST_REQUIRE(
+        manager.UpdateAuxiliaryHistoryGCAuthorization(winner));
+
+    // A crash can leave the recovered UTXO tip behind the fsynced GC
+    // authorizer. Startup accepts only a directly comparable indexed
+    // descendant and keeps the actual recovered tip as the retention head.
+    CBlockIndex* winner_index{active_chain.At(winner_height)};
+    winner_index->nStatus = BLOCK_VALID_SCRIPTS;
+    const CDeterministicMNManager::AuxiliaryHistoryBlockIdentity
+        durable_winner{winner_height, winner_index->GetBlockHash()};
+    const auto lookup_winner = [&](const uint256& hash) {
+        return hash == winner_index->GetBlockHash()
+            ? winner_index
+            : nullptr;
+    };
+    const CBlockIndex* recovered_tip{active_chain.At(winner_height - 1)};
+    BOOST_REQUIRE(manager.UpdatedBlockTipForStartup(
+        recovered_tip, lookup_winner, durable_winner));
+    plan = manager.GetAuxiliaryHistoryRetentionPlanForTesting(recovery);
+    BOOST_REQUIRE(!plan.branches.empty());
+    BOOST_CHECK(plan.branches.front().head.block_hash ==
+                recovered_tip->GetBlockHash());
+    BOOST_CHECK(plan.finality_health_ambiguous);
+    BOOST_CHECK(!manager.UpdatedBlockTipForStartup(
+        recovery_chain.At(winner_height - 1), lookup_winner,
+        durable_winner));
+    manager.UpdatedBlockTip(active_chain.Tip());
+
+    BOOST_REQUIRE(
+        manager.UpdateAuxiliaryHistoryGCAuthorization(std::nullopt));
+    BOOST_CHECK(!manager.UpdateAuxiliaryHistoryGCAuthorization(
+        initial_authorization));
+    plan = manager.GetAuxiliaryHistoryRetentionPlanForTesting(recovery);
+    BOOST_CHECK(!plan.destructive_authorization);
+    BOOST_CHECK(plan.finality_health_ambiguous);
+    BOOST_CHECK(!plan.AllowsDestructiveGC());
+}
+
+BOOST_AUTO_TEST_CASE(
+    pq_gc_startup_binds_descendant_authorizer_across_activation)
+{
+    SelectParams(ChainType::MAIN);
+    LOCK(::cs_main);
+    auto& consensus{const_cast<Consensus::Params&>(Params().GetConsensus())};
+    struct RestoreProfile {
+        Consensus::Params& consensus;
+        int dip3{consensus.DIP0003Height};
+        int preparation{consensus.nPQPreparationHeight};
+        int epoch_origin{consensus.nPQChainLockEpochOrigin};
+        uint32_t cutoff{consensus.nPQRegistrationCutoffBlocks};
+        uint32_t future{consensus.nPQFutureHorizonEpochs};
+        int activation{consensus.nPQActivationHeight};
+        ~RestoreProfile()
+        {
+            consensus.DIP0003Height = dip3;
+            consensus.nPQPreparationHeight = preparation;
+            consensus.nPQChainLockEpochOrigin = epoch_origin;
+            consensus.nPQRegistrationCutoffBlocks = cutoff;
+            consensus.nPQFutureHorizonEpochs = future;
+            consensus.nPQActivationHeight = activation;
+        }
+    } restore{consensus};
+
+    constexpr int dip3_height{1290};
+    constexpr int boundary_height{dip3_height + 1};
+    constexpr int recovered_height{dip3_height + 2};
+    constexpr int preparation_height{dip3_height + 3};
+    constexpr int activation_height{dip3_height + 4};
+    constexpr int authorizer_height{dip3_height + 5};
+    constexpr int durable_descendant_height{authorizer_height + 2};
+    auto chain{BuildSnapshotIndexChain(
+        dip3_height, durable_descendant_height - dip3_height + 1)};
+    auto fork{BuildForkedSnapshotIndexChain(
+        chain, boundary_height, durable_descendant_height, 0x80)};
+
+    consensus.DIP0003Height = dip3_height;
+    consensus.nPQPreparationHeight = preparation_height;
+    consensus.nPQChainLockEpochOrigin = 1440;
+    consensus.nPQRegistrationCutoffBlocks = 144;
+    consensus.nPQFutureHorizonEpochs = 8;
+    consensus.nPQActivationHeight = activation_height;
+    llmq::pq::PQRegistryConfig registry_config;
+    BOOST_REQUIRE(llmq::pq::GetPQRegistryConfig(
+                      consensus, registry_config) ==
+                  llmq::pq::PQRegistryDeploymentResult::VALID);
+    BOOST_REQUIRE(Consensus::CheckPQActivationConfiguration(consensus) ==
+                  Consensus::PQActivationResult::VALID);
+
+    const ScopedDiskDBPath disk_db;
+    auto db_params = DBParams{
+        .path = disk_db.path,
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = false,
+        .wipe_data = true,
+    };
+    using Authorization =
+        CDeterministicMNManager::AuxiliaryHistoryGCAuthorization;
+    const Authorization authorization{
+        evo::AuxiliaryHistoryGCAuthorizationSource::
+            ENFORCED_DURABLE_CHAINLOCK,
+        {authorizer_height,
+         chain.At(authorizer_height)->GetBlockHash()}};
+
+    {
+        CDeterministicMNManager builder(db_params);
+        BOOST_REQUIRE(builder.UpdateAuxiliaryHistoryGCAuthorization(
+            authorization));
+        evo::DMNInverseGCClosure closure;
+        closure.boundary = {
+            boundary_height,
+            chain.At(boundary_height)->GetBlockHash()};
+        closure.boundary_state_hash = MakeSnapshotKey(96'003);
+        closure.inverse_history_commitment = MakeSnapshotKey(96'004);
+        closure.inverse_record_hash = MakeSnapshotKey(96'005);
+        const auto payload{evo::EncodeDMNInverseGCClosure(closure)};
+        BOOST_REQUIRE(payload);
+        evo::AuxiliaryHistoryGCIntentTarget target;
+        target.authorization = authorization;
+        target.frontier.dmn = evo::AuxiliaryHistoryGCComponent{
+            evo::DMNInverseGCClosure::VERSION,
+            static_cast<uint64_t>(boundary_height), *payload};
+        BOOST_REQUIRE(builder.BeginAuxiliaryHistoryGCIntentForTesting(
+            target));
+    }
+
+    CBlockIndex* authorizer{chain.At(authorizer_height)};
+    authorizer->nStatus = BLOCK_VALID_SCRIPTS;
+    CBlockIndex* durable_descendant{
+        chain.At(durable_descendant_height)};
+    durable_descendant->nStatus = BLOCK_VALID_SCRIPTS;
+    CBlockIndex* fork_target{fork.At(durable_descendant_height)};
+    fork_target->nStatus = BLOCK_VALID_SCRIPTS;
+    const CDeterministicMNManager::AuxiliaryHistoryBlockIdentity
+        durable_authorizer{authorizer_height,
+                           authorizer->GetBlockHash()};
+    const CDeterministicMNManager::AuxiliaryHistoryBlockIdentity
+        durable_descendant_identity{
+            durable_descendant_height,
+            durable_descendant->GetBlockHash()};
+    const auto lookup_index = [&](const uint256& hash) {
+        for (const auto& index : chain.indices) {
+            if (index.GetBlockHash() == hash) return &index;
+        }
+        for (const auto& index : fork.indices) {
+            if (index.GetBlockHash() == hash) return &index;
+        }
+        return static_cast<const CBlockIndex*>(nullptr);
+    };
+    uint256 fork_hash{MakeSnapshotKey(96'006)};
+    CBlockIndex fork_recovered;
+    fork_recovered.nHeight = recovered_height;
+    fork_recovered.pprev = chain.At(boundary_height);
+    fork_recovered.phashBlock = &fork_hash;
+    const CBlockIndex* recovered{chain.At(recovered_height)};
+    {
+        CDeterministicMNManager empty(DBParams{
+            .path = "testdb_dmn_auxiliary_empty_startup",
+            .cache_bytes = static_cast<size_t>(1 << 20),
+            .memory_only = true,
+            .wipe_data = true,
+        });
+        BOOST_REQUIRE(empty.UpdatedBlockTipForStartup(
+            recovered, lookup_index, std::nullopt));
+    }
+
+    db_params.wipe_data = false;
+    {
+        CDeterministicMNManager restarted(db_params);
+        // A durable GC intent cannot outlive the certificate that authorized
+        // its irreversible floor.
+        BOOST_CHECK(!restarted.UpdatedBlockTipForStartup(
+            recovered, lookup_index, std::nullopt));
+        BOOST_CHECK(!restarted.UpdatedBlockTipForStartup(
+            &fork_recovered, lookup_index, durable_authorizer));
+        BOOST_REQUIRE(restarted.UpdatedBlockTipForStartup(
+            recovered, lookup_index, durable_authorizer));
+        BOOST_REQUIRE(restarted.UpdatedBlockTipForStartup(
+            recovered, lookup_index, durable_descendant_identity));
+
+        const CDeterministicMNManager::AuxiliaryHistoryBlockIdentity
+            wrong_height{durable_descendant_height + 1,
+                         durable_descendant->GetBlockHash()};
+        BOOST_CHECK(!restarted.UpdatedBlockTipForStartup(
+            recovered, lookup_index, wrong_height));
+        BOOST_CHECK(!restarted.UpdatedBlockTipForStartup(
+            recovered, lookup_index,
+            CDeterministicMNManager::AuxiliaryHistoryBlockIdentity{
+                durable_descendant_height, MakeSnapshotKey(96'007)}));
+        BOOST_CHECK(!restarted.UpdatedBlockTipForStartup(
+            recovered, lookup_index,
+            CDeterministicMNManager::AuxiliaryHistoryBlockIdentity{
+                durable_descendant_height, fork_target->GetBlockHash()}));
+
+        durable_descendant->nStatus |= BLOCK_FAILED_VALID;
+        BOOST_CHECK(!restarted.UpdatedBlockTipForStartup(
+            recovered, lookup_index, durable_descendant_identity));
+        durable_descendant->nStatus = BLOCK_VALID_SCRIPTS;
+        durable_descendant->nStatus |= BLOCK_ASSUMED_VALID;
+        BOOST_CHECK(!restarted.UpdatedBlockTipForStartup(
+            recovered, lookup_index, durable_descendant_identity));
+        durable_descendant->nStatus = BLOCK_VALID_TREE;
+        BOOST_CHECK(!restarted.UpdatedBlockTipForStartup(
+            recovered, lookup_index, durable_descendant_identity));
+        durable_descendant->nStatus = BLOCK_VALID_SCRIPTS;
+        durable_descendant->nStatus |= BLOCK_CONFLICT_CHAINLOCK;
+        BOOST_CHECK(!restarted.UpdatedBlockTipForStartup(
+            recovered, lookup_index, durable_descendant_identity));
+        durable_descendant->nStatus = BLOCK_VALID_SCRIPTS;
+
+        BOOST_CHECK(restarted.VerifyPersistedPQRegistrySnapshot(recovered));
+        restarted.UpdatedBlockTip(recovered);
+        BOOST_CHECK_NO_THROW(
+            restarted.FailNextPQRegistryWriteThroughForTesting());
+        BOOST_CHECK(restarted.VerifyPersistedPQRegistrySnapshot(recovered));
+        BOOST_REQUIRE(
+            restarted.CompleteAuxiliaryHistoryGCIntentForTesting());
+    }
+
+    // The same dependency is retained after INTENT becomes WATERMARK.
+    {
+        CDeterministicMNManager watermarked(db_params);
+        BOOST_CHECK(!watermarked.UpdatedBlockTipForStartup(
+            recovered, lookup_index, std::nullopt));
+        BOOST_REQUIRE(watermarked.UpdatedBlockTipForStartup(
+            recovered, lookup_index, durable_descendant_identity));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(
+    pq_gc_startup_authenticates_tip_paths_and_rooted_interval)
+{
+    SelectParams(ChainType::REGTEST);
+    LOCK(::cs_main);
+    auto& consensus{const_cast<Consensus::Params&>(Params().GetConsensus())};
+    struct RestoreProfile {
+        Consensus::Params& consensus;
+        int dip3{consensus.DIP0003Height};
+        int preparation{consensus.nPQPreparationHeight};
+        int epoch_origin{consensus.nPQChainLockEpochOrigin};
+        uint32_t cutoff{consensus.nPQRegistrationCutoffBlocks};
+        uint32_t future{consensus.nPQFutureHorizonEpochs};
+        int activation{consensus.nPQActivationHeight};
+        ~RestoreProfile()
+        {
+            consensus.DIP0003Height = dip3;
+            consensus.nPQPreparationHeight = preparation;
+            consensus.nPQChainLockEpochOrigin = epoch_origin;
+            consensus.nPQRegistrationCutoffBlocks = cutoff;
+            consensus.nPQFutureHorizonEpochs = future;
+            consensus.nPQActivationHeight = activation;
+        }
+    } restore{consensus};
+
+    constexpr int preparation_height{1295};
+    constexpr int checkpoint_height{
+        preparation_height + llmq::pq::PQ_REGISTRY_CHECKPOINT_INTERVAL};
+    constexpr int first_height{preparation_height - 1};
+    const int block_count{
+        checkpoint_height - preparation_height +
+        static_cast<int>(
+            evo::PQRegistryGCEraseManifest::MAX_CANDIDATES) +
+        512};
+
+    SnapshotIndexChain chain{
+        first_height,
+        std::vector<uint256>(block_count + 1),
+        std::vector<CBlockIndex>(block_count + 1)};
+    std::vector<CBlock> blocks;
+    blocks.reserve(block_count);
+    chain.hashes.front() = MakeSnapshotKey(120'000);
+    chain.indices.front().nHeight = first_height;
+    chain.indices.front().phashBlock = &chain.hashes.front();
+    for (int i{0}; i < block_count; ++i) {
+        const int height{preparation_height + i};
+        CBlock block{MakeProviderMutationBlock({})};
+        block.hashPrevBlock = chain.hashes[i];
+        block.nTime = static_cast<uint32_t>(1'700'000'000 + height);
+        block.nNonce = static_cast<uint32_t>(height);
+        blocks.push_back(std::move(block));
+        chain.hashes[i + 1] = blocks.back().GetHash();
+        chain.indices[i + 1].nHeight = height;
+        chain.indices[i + 1].pprev = &chain.indices[i];
+        chain.indices[i + 1].phashBlock = &chain.hashes[i + 1];
+    }
+
+    consensus.DIP0003Height = first_height;
+    consensus.nPQPreparationHeight = preparation_height;
+    consensus.nPQChainLockEpochOrigin = 1440;
+    consensus.nPQRegistrationCutoffBlocks = 144;
+    consensus.nPQFutureHorizonEpochs = 8;
+    consensus.nPQActivationHeight = preparation_height + 1;
+
+    llmq::pq::PQRegistryConfig registry_config;
+    BOOST_REQUIRE(llmq::pq::GetPQRegistryConfig(
+                      consensus, registry_config) ==
+                  llmq::pq::PQRegistryDeploymentResult::VALID);
+    const uint256 gc_configuration_id{
+        evo::MakeAuxiliaryHistoryGCDeployment(consensus).configuration_id};
+    const ScopedDiskDBPath disk_db;
+    DBParams db_params{
+        .path = disk_db.path,
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = false,
+        .wipe_data = false,
+    };
+    auto pq_db_params{db_params};
+    pq_db_params.path = SiblingDBPath(db_params.path, "_pq_registry");
+    pq_db_params.wipe_data = true;
+    llmq::pq::PQRegistryCallbacks callbacks;
+    callbacks.dmn_exists_before = [](const uint256&) { return false; };
+    callbacks.dmn_exists_after = [](const uint256&) { return false; };
+    llmq::pq::PQRegistryError registry_error;
+    {
+        llmq::pq::PQRegistryManager writer{
+            pq_db_params, consensus.hashGenesisBlock, registry_config};
+        for (int i{0}; i < block_count; ++i) {
+            uint256 state_root;
+            BOOST_REQUIRE(writer.ProcessBlock(
+                blocks[i], preparation_height + i, callbacks, {},
+                /*fJustCheck=*/false, registry_error, &state_root));
+            BOOST_CHECK(!state_root.IsNull());
+        }
+        BOOST_REQUIRE(writer.Flush(/*fSync=*/true));
+    }
+    pq_db_params.wipe_data = false;
+
+    llmq::pq::PQRegistryGCAuthenticationContext context;
+    for (int height{preparation_height}; height <= checkpoint_height;
+         ++height) {
+        context.rooted_segment.push_back(
+            {height, chain.At(height)->GetBlockHash()});
+    }
+    evo::AuxiliaryHistoryGCComponent component;
+    evo::PQRegistryGCEraseManifest erase_manifest;
+    {
+        llmq::pq::PQRegistryManager authenticator{
+            pq_db_params, consensus.hashGenesisBlock, registry_config,
+            gc_configuration_id};
+        BOOST_REQUIRE(authenticator.FlushForGC(registry_error));
+        BOOST_REQUIRE(authenticator.BuildGCEraseBatch(
+            context, std::nullopt, /*max_scanned_records=*/1,
+            llmq::pq::PQ_REGISTRY_GC_MAX_SCANNED_VALUE_BYTES,
+            /*max_candidates=*/1, component, erase_manifest,
+            registry_error));
+    }
+    const auto closure{evo::DecodePQRegistryGCClosure(component.closure)};
+    BOOST_REQUIRE(closure);
+    BOOST_CHECK_EQUAL(closure->scan_complete,
+                      evo::PQRegistryGCClosure::SCANNING);
+    const auto manifest_payload{
+        evo::EncodePQRegistryGCEraseManifest(erase_manifest)};
+    BOOST_REQUIRE(manifest_payload);
+    evo::AuxiliaryHistoryGCIntentTarget target;
+    target.authorization = {
+        evo::AuxiliaryHistoryGCAuthorizationSource::
+            ENFORCED_DURABLE_CHAINLOCK,
+        {checkpoint_height,
+         chain.At(checkpoint_height)->GetBlockHash()}};
+    target.frontier.pq_registry = component;
+    target.pq_erase_manifest = evo::AuxiliaryHistoryGCManifest{
+        evo::PQRegistryGCEraseManifest::VERSION, *manifest_payload};
+
+    {
+        CDeterministicMNManager builder{db_params};
+        for (int height{checkpoint_height};
+             height <= checkpoint_height + 1; ++height) {
+            BOOST_REQUIRE(builder.m_evoDb->WriteThrough(
+                chain.At(height)->GetBlockHash(),
+                CDeterministicMNList{
+                    chain.At(height)->GetBlockHash(), height, 0},
+                /*fSync=*/true));
+        }
+        BOOST_REQUIRE(builder.BeginAuxiliaryHistoryGCIntentForTesting(
+            target));
+    }
+
+    CDeterministicMNManager restarted{db_params};
+    BOOST_CHECK(restarted.AuxiliaryHistoryMaintenanceRetryRequested());
+    CBlockIndex* authorizer{chain.At(checkpoint_height)};
+    authorizer->nStatus = BLOCK_VALID_SCRIPTS;
+    const CBlockIndex* recovered{chain.At(checkpoint_height + 1)};
+    const auto lookup_authorizer = [&](const uint256& hash) {
+        return hash == authorizer->GetBlockHash() ? authorizer : nullptr;
+    };
+    BOOST_REQUIRE(restarted.UpdatedBlockTipForStartup(
+        recovered, lookup_authorizer,
+        CDeterministicMNManager::AuxiliaryHistoryBlockIdentity{
+            checkpoint_height, authorizer->GetBlockHash()}));
+    const CDeterministicMNManager::AuxiliaryHistoryGCAuthorization
+        live_authorization{
+            evo::AuxiliaryHistoryGCAuthorizationSource::
+                ENFORCED_DURABLE_CHAINLOCK,
+            {checkpoint_height + 1, recovered->GetBlockHash()}};
+    BOOST_REQUIRE(restarted.UpdateAuxiliaryHistoryGCAuthorization(
+        live_authorization));
+    BOOST_REQUIRE(restarted.VerifyPersistedPQRegistrySnapshot(recovered));
+    const auto pending_plan{
+        restarted.GetAuxiliaryHistoryRetentionPlanForTesting()};
+    BOOST_REQUIRE(pending_plan.requirements_valid);
+    BOOST_REQUIRE(pending_plan.effective_pq_registry_gc_boundary);
+    BOOST_CHECK(pending_plan.effective_pq_registry_gc_boundary->pending);
+    BOOST_CHECK(
+        pending_plan.effective_pq_registry_gc_boundary->closure.checkpoint ==
+        closure->checkpoint);
+
+    const std::array<const CBlockIndex*, 1> below_checkpoint{
+        chain.At(checkpoint_height - 1)};
+    BOOST_CHECK(!restarted.GetAuxiliaryHistoryRetentionPlanForTesting(
+                              below_checkpoint)
+                     .requirements_valid);
+    uint256 side_checkpoint_hash{MakeSnapshotKey(120'999)};
+    CBlockIndex side_checkpoint;
+    side_checkpoint.nHeight = checkpoint_height;
+    side_checkpoint.pprev = chain.At(checkpoint_height - 1);
+    side_checkpoint.phashBlock = &side_checkpoint_hash;
+    const std::array<const CBlockIndex*, 1> side_checkpoint_recovery{
+        &side_checkpoint};
+    BOOST_CHECK(!restarted.GetAuxiliaryHistoryRetentionPlanForTesting(
+                              side_checkpoint_recovery)
+                     .requirements_valid);
+
+    // SYSCOIN: A restart resumes the PQ-owned intent before considering new
+    // DMN work, installs its logical floor, and completes its exact manifest.
+    BOOST_REQUIRE(restarted.FlushCacheToDisk(
+        /*bForceFlush=*/true, /*fSync=*/false));
+    BOOST_CHECK(restarted.AuxiliaryHistoryMaintenanceRetryRequested());
+    const auto completed_state{
+        restarted.GetAuxiliaryHistoryGCStateForTesting()};
+    BOOST_CHECK(!completed_state.intent);
+    BOOST_REQUIRE(completed_state.watermark);
+    BOOST_CHECK(completed_state.watermark->frontier.pq_registry ==
+                target.frontier.pq_registry);
+    BOOST_CHECK(completed_state.watermark->authorization ==
+                target.authorization);
+
+    constexpr int next_checkpoint_height{
+        checkpoint_height + llmq::pq::PQ_REGISTRY_CHECKPOINT_INTERVAL};
+    const int catchup_tip_height{
+        next_checkpoint_height +
+        CDeterministicMNManager::LIST_CACHE_SIZE - 1};
+    BOOST_REQUIRE_LT(catchup_tip_height,
+                     preparation_height + block_count);
+    const CBlockIndex* catchup_tip{chain.At(catchup_tip_height)};
+    restarted.UpdatedBlockTip(catchup_tip);
+    BOOST_CHECK_EQUAL(restarted.UpdateFinalitySnapshotRetentionFloor(
+                          next_checkpoint_height + 1),
+                      next_checkpoint_height + 1);
+    const CDeterministicMNManager::AuxiliaryHistoryGCAuthorization
+        catchup_authorization{
+            evo::AuxiliaryHistoryGCAuthorizationSource::
+                ENFORCED_DURABLE_CHAINLOCK,
+            {catchup_tip_height, catchup_tip->GetBlockHash()}};
+    BOOST_REQUIRE(restarted.UpdateAuxiliaryHistoryGCAuthorization(
+        catchup_authorization));
+    const evo::AuxiliaryHistoryGCBlockIdentity expected_checkpoint{
+        next_checkpoint_height,
+        chain.At(next_checkpoint_height)->GetBlockHash()};
+
+    // Logical authentication can catch up without waiting for the older
+    // physical cursor. The inherited cursor is dirty until EOF forces one
+    // restart from the beginning under the new floor.
+    uint64_t generation{closure->generation};
+    std::size_t continued_batches{0};
+    bool saw_restart_required{false};
+    bool saw_clean_restart{false};
+    evo::AuxiliaryHistoryGCState continued_state;
+    for (; continued_batches < 8; ++continued_batches) {
+        BOOST_REQUIRE(restarted.FlushCacheToDisk(
+            /*bForceFlush=*/true, /*fSync=*/false));
+        BOOST_CHECK(
+            restarted.AuxiliaryHistoryMaintenanceRetryRequested());
+        continued_state =
+            restarted.GetAuxiliaryHistoryGCStateForTesting();
+        BOOST_CHECK(!continued_state.intent);
+        BOOST_REQUIRE(continued_state.watermark);
+        BOOST_REQUIRE(continued_state.watermark->frontier.pq_registry);
+        const auto continued_closure{evo::DecodePQRegistryGCClosure(
+            continued_state.watermark->frontier.pq_registry->closure)};
+        BOOST_REQUIRE(continued_closure);
+        BOOST_CHECK_GT(continued_closure->generation, generation);
+        BOOST_CHECK(continued_closure->checkpoint ==
+                    expected_checkpoint);
+        BOOST_CHECK(continued_state.watermark->authorization ==
+                    catchup_authorization);
+        if (continued_batches == 0) {
+            BOOST_CHECK_EQUAL(
+                continued_closure->scan_complete,
+                evo::PQRegistryGCClosure::SCANNING_DIRTY);
+        }
+        if (continued_closure->scan_complete ==
+            evo::PQRegistryGCClosure::RESTART_REQUIRED) {
+            saw_restart_required = true;
+        } else if (saw_restart_required &&
+                   continued_closure->scan_complete ==
+                       evo::PQRegistryGCClosure::SCANNING) {
+            saw_clean_restart = true;
+        }
+        generation = continued_closure->generation;
+        if (continued_closure->scan_complete ==
+            evo::PQRegistryGCClosure::COMPLETE) {
+            ++continued_batches;
+            break;
+        }
+    }
+    BOOST_CHECK_GE(continued_batches, 2U);
+    BOOST_CHECK_LT(continued_batches, 8U);
+    BOOST_CHECK(saw_restart_required);
+    BOOST_CHECK(saw_clean_restart);
+
+    // Hold the shared finality barrier so unrelated DMN work is also a no-op.
+    // A clean PQ EOF must not keep the maintenance loop awake by itself.
+    restarted.BeginFinalitySnapshotVerificationRetention();
+    BOOST_REQUIRE(restarted.FlushCacheToDisk(
+        /*bForceFlush=*/true, /*fSync=*/false));
+    BOOST_CHECK(!restarted.AuxiliaryHistoryMaintenanceRetryRequested());
+    const auto stable_state{
+        restarted.GetAuxiliaryHistoryGCStateForTesting()};
+    BOOST_CHECK(stable_state.intent == continued_state.intent);
+    BOOST_CHECK(stable_state.watermark == continued_state.watermark);
+    restarted.EndFinalitySnapshotVerificationRetention();
+    llmq::pq::PQRegistrySnapshot below_floor_snapshot;
+    std::string below_floor_error;
+    BOOST_CHECK(!restarted.GetPQRegistrySnapshot(
+        chain.At(preparation_height), below_floor_snapshot,
+        below_floor_error));
+}
+
+BOOST_AUTO_TEST_CASE(dmn_inverse_gc_boundary_uses_only_rollback_inputs)
+{
+    SelectParams(ChainType::MAIN);
+    LOCK(::cs_main);
+    auto& consensus{const_cast<Consensus::Params&>(Params().GetConsensus())};
+    struct RestoreActivation {
+        Consensus::Params& consensus;
+        int activation_height{consensus.nPQActivationHeight};
+        ~RestoreActivation()
+        {
+            consensus.nPQActivationHeight = activation_height;
+        }
+    } restore{consensus};
+
+    const int base{consensus.DIP0003Height};
+    const int window{CDeterministicMNManager::LIST_CACHE_SIZE};
+    auto active{BuildSnapshotIndexChain(base, 2 * window + 101)};
+    consensus.nPQActivationHeight = base;
+
+    CDeterministicMNManager manager(DBParams{
+        .path = "testdb_dmn_inverse_gc_boundary",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    });
+    manager.UpdatedBlockTip(active.Tip());
+    BOOST_CHECK_EQUAL(
+        manager.UpdateFinalitySnapshotRetentionFloor(base), base);
+
+    using Status = CDeterministicMNManager::DMNInverseGCBoundaryStatus;
+    using Authorization =
+        CDeterministicMNManager::AuxiliaryHistoryGCAuthorization;
+    using Source = CDeterministicMNManager::
+        AuxiliaryHistoryGCAuthorizationSource;
+    const Authorization initial_authorization{
+        Source::ENFORCED_DURABLE_CHAINLOCK,
+        {base, active.At(base)->GetBlockHash()}};
+    BOOST_REQUIRE(manager.UpdateAuxiliaryHistoryGCAuthorization(
+        initial_authorization));
+    auto result{manager.GetDMNInverseGCBoundaryForTesting()};
+    BOOST_CHECK(result.status == Status::NO_OP);
+    BOOST_REQUIRE(result.boundary);
+    BOOST_CHECK_EQUAL(result.boundary->height, base);
+    BOOST_CHECK(!result.component);
+
+    const int authorization_height{base + 50};
+    const Authorization authorization{
+        Source::ENFORCED_DURABLE_CHAINLOCK,
+        {authorization_height,
+         active.At(authorization_height)->GetBlockHash()}};
+    BOOST_REQUIRE(
+        manager.UpdateAuxiliaryHistoryGCAuthorization(authorization));
+    result = manager.GetDMNInverseGCBoundaryForTesting();
+    BOOST_CHECK(result.status == Status::BLOCKED);
+    BOOST_REQUIRE(result.boundary);
+    BOOST_CHECK_EQUAL(result.boundary->height, authorization_height);
+
+    const Authorization tip_authorization{
+        Source::ENFORCED_DURABLE_CHAINLOCK,
+        {active.Tip()->nHeight, active.Tip()->GetBlockHash()}};
+    BOOST_REQUIRE(
+        manager.UpdateAuxiliaryHistoryGCAuthorization(tip_authorization));
+    result = manager.GetDMNInverseGCBoundaryForTesting();
+    BOOST_CHECK(result.status == Status::BLOCKED);
+    BOOST_REQUIRE(result.boundary);
+    const int active_floor{active.Tip()->nHeight - window + 1};
+    BOOST_CHECK_EQUAL(result.boundary->height, active_floor);
+
+    const int recovery_fork{base + window + 500};
+    const int recovery_tip{base + 2 * window};
+    auto recovery{BuildForkedSnapshotIndexChain(
+        active, recovery_fork, recovery_tip, 0x41)};
+    const std::array<const CBlockIndex*, 1> recovery_heads{
+        recovery.Tip()};
+    result = manager.GetDMNInverseGCBoundaryForTesting(recovery_heads);
+    BOOST_CHECK(result.status == Status::BLOCKED);
+    BOOST_REQUIRE(result.boundary);
+    BOOST_CHECK_EQUAL(
+        result.boundary->height, recovery_tip - window + 1);
+
+    // SYSCOIN: A roster snapshot floor is an availability dependency, not a
+    // sequential rollback dependency, so moving it cannot move B.
+    BOOST_CHECK_EQUAL(
+        manager.UpdateFinalitySnapshotRetentionFloor(active.Tip()->nHeight),
+        active.Tip()->nHeight);
+    const auto roster_moved{
+        manager.GetDMNInverseGCBoundaryForTesting(recovery_heads)};
+    BOOST_REQUIRE(roster_moved.boundary);
+    BOOST_CHECK(*roster_moved.boundary == *result.boundary);
+
+    const int deep_fork{base + 20};
+    auto deep_recovery{BuildForkedSnapshotIndexChain(
+        active, deep_fork, active.Tip()->nHeight, 0x82)};
+    const std::array<const CBlockIndex*, 1> deep_recovery_heads{
+        deep_recovery.Tip()};
+    result = manager.GetDMNInverseGCBoundaryForTesting(
+        deep_recovery_heads);
+    BOOST_CHECK(result.status == Status::BLOCKED);
+    BOOST_REQUIRE(result.boundary);
+    BOOST_CHECK_EQUAL(result.boundary->height, deep_fork);
+    BOOST_CHECK_GT(active_floor - deep_fork, window);
+}
+
+BOOST_AUTO_TEST_CASE(auxiliary_retention_plan_allows_null_tip_flush)
+{
+    SelectParams(ChainType::MAIN);
+    const int height{Params().GetConsensus().DIP0003Height};
+    CDeterministicMNManager manager(DBParams{
+        .path = "testdb_dmn_auxiliary_null_tip",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    });
+    manager.m_evoDb->WriteCache(MakeSnapshotKey(height),
+                                MakeSnapshot(height));
+
+    const auto plan{
+        manager.GetAuxiliaryHistoryRetentionPlanForTesting()};
+    BOOST_CHECK(plan.requirements_valid);
+    BOOST_CHECK(plan.branches.empty());
+    BOOST_CHECK(!plan.AllowsDestructiveGC());
+    BOOST_REQUIRE(manager.FlushCacheToDisk(/*bForceFlush=*/true));
+    CDeterministicMNList persisted;
+    BOOST_REQUIRE(manager.m_evoDb->Read(MakeSnapshotKey(height), persisted));
+    BOOST_CHECK_EQUAL(persisted.GetHeight(), height);
+}
+
+BOOST_AUTO_TEST_CASE(auxiliary_retention_mutators_share_maintenance_barrier)
+{
+    SelectParams(ChainType::MAIN);
+    LOCK(::cs_main);
+    auto& consensus{const_cast<Consensus::Params&>(Params().GetConsensus())};
+    struct RestoreActivation {
+        Consensus::Params& consensus;
+        int height{consensus.nPQActivationHeight};
+        ~RestoreActivation()
+        {
+            consensus.nPQActivationHeight = height;
+        }
+    } restore{consensus};
+    const int anchor_height{consensus.DIP0003Height + 5};
+    const uint256 anchor_hash{MakeSnapshotKey(anchor_height)};
+    consensus.nPQActivationHeight = anchor_height;
+
+    CDeterministicMNManager manager(DBParams{
+        .path = "testdb_dmn_auxiliary_retention_barrier",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    });
+    const auto expect_serialized = [&](auto operation) {
+        std::promise<void> entered;
+        std::promise<void> completed;
+        auto entered_future{entered.get_future()};
+        auto completed_future{completed.get_future()};
+        std::thread worker;
+        bool blocked{false};
+        {
+            LOCK(manager.m_evoDb->cs);
+            worker = std::thread([&] {
+                entered.set_value();
+                operation();
+                completed.set_value();
+            });
+            entered_future.wait();
+            blocked = completed_future.wait_for(
+                std::chrono::milliseconds{50}) ==
+                std::future_status::timeout;
+        }
+        completed_future.wait();
+        worker.join();
+        BOOST_CHECK(blocked);
+    };
+
+    expect_serialized([&] {
+        (void)manager.UpdateReplaySnapshotRetentionFloor(anchor_height);
+    });
+    expect_serialized([&] {
+        (void)manager.UpdateFinalitySnapshotRetentionFloor(anchor_height);
+    });
+    expect_serialized([&] { manager.UpdatedBlockTip(nullptr); });
+    expect_serialized([&] {
+        const CDeterministicMNManager::AuxiliaryHistoryGCAuthorization
+            authorization{
+                CDeterministicMNManager::
+                    AuxiliaryHistoryGCAuthorizationSource::
+                        ENFORCED_DURABLE_CHAINLOCK,
+                {anchor_height, anchor_hash}};
+        (void)manager.UpdateAuxiliaryHistoryGCAuthorization(
+            authorization);
+    });
+}
+
+BOOST_AUTO_TEST_CASE(finality_floor_skips_retained_values_before_decoding)
+{
+    SelectParams(ChainType::MAIN);
+    const int cache_limit{CDeterministicMNManager::LIST_CACHE_SIZE};
+    const int hot_cache_limit{CDeterministicMNManager::HOT_LIST_CACHE_SIZE};
+    const int start_height{Params().GetConsensus().DIP0003Height};
+    const int total_snapshots{cache_limit + hot_cache_limit + 8};
+    const auto chain{BuildSnapshotIndexChain(start_height, total_snapshots)};
+    const int oldest_retained_height{
+        chain.Tip()->nHeight - cache_limit + 1};
+    const int finality_floor{chain.Tip()->nHeight - 16};
+
+    CDeterministicMNManager manager(DBParams{
+        .path = "testdb_dmn_retained_value_skip",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    });
+    manager.UpdatedBlockTip(chain.Tip());
+    for (int height{oldest_retained_height};
+         height <= chain.Tip()->nHeight; ++height) {
+        BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+            MakeSnapshotKey(height), MakeSnapshot(height),
+            /*fSync=*/true));
+    }
+
+    // This retained active-chain key is deliberately outside the hot cache.
+    // Maintenance owns only its lifetime; consumers validate its value when
+    // they actually load the snapshot.
+    const uint256 retained_hash{MakeSnapshotKey(oldest_retained_height)};
+    BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+        retained_hash,
+        CDeterministicMNList{
+            MakeSnapshotKey(oldest_retained_height + 1),
+            oldest_retained_height, 0},
+        /*fSync=*/true));
+
+    const uint256 old_side_hash{
+        MakeSnapshotKey(start_height + total_snapshots + 100)};
+    const uint256 retained_side_hash{
+        MakeSnapshotKey(start_height + total_snapshots + 101)};
+    BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+        old_side_hash,
+        CDeterministicMNList{old_side_hash, finality_floor - 1, 0},
+        /*fSync=*/true));
+    BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+        retained_side_hash,
+        CDeterministicMNList{retained_side_hash, finality_floor, 0},
+        /*fSync=*/true));
+
+    BOOST_CHECK_EQUAL(
+        manager.UpdateFinalitySnapshotRetentionFloor(finality_floor),
+        finality_floor);
+    BOOST_REQUIRE(manager.FlushCacheToDisk(/*bForceFlush=*/true));
+    BOOST_CHECK(manager.m_evoDb->ExistsCache(retained_hash));
+    BOOST_CHECK(!manager.VerifyPersistedSnapshot(
+        chain.At(oldest_retained_height)));
+
+    CDeterministicMNList snapshot;
+    BOOST_CHECK(!manager.m_evoDb->Read(old_side_hash, snapshot));
+    BOOST_REQUIRE(manager.m_evoDb->Read(retained_side_hash, snapshot));
+    BOOST_CHECK_EQUAL(snapshot.GetHeight(), finality_floor);
+
+    BOOST_REQUIRE(manager.m_evoDb->AppendTrailingValueByteForTesting(
+        retained_side_hash));
+    manager.BeginFinalitySnapshotVerificationRetention();
+    manager.EndFinalitySnapshotVerificationRetention();
+    BOOST_CHECK(!manager.FlushCacheToDisk(/*bForceFlush=*/true));
+    BOOST_REQUIRE(manager.m_evoDb->RewriteExactValueForTesting(
+        retained_side_hash));
+    manager.BeginFinalitySnapshotVerificationRetention();
+    manager.EndFinalitySnapshotVerificationRetention();
+    BOOST_REQUIRE(manager.FlushCacheToDisk(/*bForceFlush=*/true));
+
+    // Side-branch values remain fail-closed under the same floor.
+    const uint256 corrupt_side_hash{
+        MakeSnapshotKey(start_height + total_snapshots + 102)};
+    BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+        corrupt_side_hash,
+        CDeterministicMNList{
+            MakeSnapshotKey(start_height + total_snapshots + 103),
+            finality_floor, 0},
+        /*fSync=*/true));
+    manager.BeginFinalitySnapshotVerificationRetention();
+    manager.EndFinalitySnapshotVerificationRetention();
+    BOOST_CHECK(!manager.FlushCacheToDisk(/*bForceFlush=*/true));
+}
+
 BOOST_AUTO_TEST_CASE(subsequent_forced_flush_appends_and_prunes_without_rewrite)
 {
     SelectParams(ChainType::MAIN);
     const int cache_limit = CDeterministicMNManager::LIST_CACHE_SIZE;
     const int start_height = Params().GetConsensus().DIP0003Height;
+    const ScopedDiskDBPath disk_db;
 
     auto db_params = DBParams{
-        .path = "testdb_dmn_incremental_append_prune",
+        .path = disk_db.path,
         .cache_bytes = static_cast<size_t>(1 << 20),
         .memory_only = false,
         .wipe_data = true,
@@ -966,5 +4259,1857 @@ BOOST_AUTO_TEST_CASE(older_snapshot_reads_fall_back_to_disk_after_hot_cache_shri
         manager.m_evoDb->GetReadCacheSize(),
         static_cast<size_t>(CDeterministicMNManager::HOT_LIST_CACHE_SIZE));
 }
+
+BOOST_FIXTURE_TEST_CASE(
+    nonempty_deep_rollback_reconstructs_pruned_parents_after_restart,
+    ChainTestingSetup)
+{
+    SelectParams(ChainType::MAIN);
+    LOCK(::cs_main);
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    struct RestoreProfile {
+        Consensus::Params& consensus;
+        bool regtest{fRegTest};
+        int preparation_height{consensus.nPQPreparationHeight};
+        int epoch_origin{consensus.nPQChainLockEpochOrigin};
+        uint32_t cutoff{consensus.nPQRegistrationCutoffBlocks};
+        uint32_t future{consensus.nPQFutureHorizonEpochs};
+        int activation_height{consensus.nPQActivationHeight};
+        ~RestoreProfile()
+        {
+            fRegTest = regtest;
+            consensus.nPQPreparationHeight = preparation_height;
+            consensus.nPQChainLockEpochOrigin = epoch_origin;
+            consensus.nPQRegistrationCutoffBlocks = cutoff;
+            consensus.nPQFutureHorizonEpochs = future;
+            consensus.nPQActivationHeight = activation_height;
+        }
+    } restore{consensus};
+    fRegTest = false;
+    consensus.nPQPreparationHeight = std::numeric_limits<int>::max();
+    consensus.nPQChainLockEpochOrigin = std::numeric_limits<int>::max();
+    consensus.nPQRegistrationCutoffBlocks = 0;
+    consensus.nPQFutureHorizonEpochs = 0;
+    consensus.nPQActivationHeight = std::numeric_limits<int>::max();
+
+    const int start_height{consensus.DIP0003Height};
+    constexpr int gc_boundary_offset{300};
+    const int rollback_depth{
+        CDeterministicMNManager::LIST_CACHE_SIZE + gc_boundary_offset};
+    std::vector<uint256> hashes(static_cast<size_t>(rollback_depth + 1));
+    std::vector<CBlockIndex> indices(static_cast<size_t>(rollback_depth + 1));
+    hashes[0] = MakeSnapshotKey(start_height);
+    indices[0].nHeight = start_height;
+    indices[0].phashBlock = &hashes[0];
+    const CDeterministicMNList base_snapshot{
+        MakeNontrivialAnchorSnapshot(hashes[0], start_height, false)};
+    const ScopedDiskDBPath disk_db;
+    auto db_params = DBParams{
+        .path = disk_db.path,
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = false,
+        .wipe_data = true,
+    };
+    CDeterministicMNList expected_gc_boundary_snapshot;
+    uint256 expected_gc_boundary_snapshot_hash;
+    std::optional<evo::AuxiliaryHistoryGCComponent>
+        expected_gc_component;
+
+    {
+        CDeterministicMNManager manager(db_params);
+        BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+            hashes[0], base_snapshot, /*fSync=*/true));
+        CCoinsView base_view;
+        CCoinsViewCache view(&base_view);
+        const llmq::CFinalCommitmentTxPayload no_legacy_commitment;
+
+        const uint256 empty_base_hash{
+            MakeSnapshotKey(start_height + rollback_depth + 100)};
+        CBlockIndex empty_base_index;
+        empty_base_index.nHeight = start_height;
+        empty_base_index.phashBlock = &empty_base_hash;
+        BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+            empty_base_hash,
+            CDeterministicMNList{empty_base_hash, start_height, 0},
+            /*fSync=*/true));
+        CBlock empty_block{MakeProviderMutationBlock({})};
+        empty_block.hashPrevBlock = empty_base_hash;
+        empty_block.nTime = 0xf00d;
+        empty_block.nNonce = 0xbeef;
+        const uint256 empty_child_hash{empty_block.GetHash()};
+        CBlockIndex empty_child_index;
+        empty_child_index.nHeight = start_height + 1;
+        empty_child_index.pprev = &empty_base_index;
+        empty_child_index.phashBlock = &empty_child_hash;
+        BlockValidationState empty_state;
+        CDeterministicMNListNEVMAddressDiff empty_nevm_diff;
+        BOOST_REQUIRE(manager.ProcessBlock(
+            empty_block, &empty_child_index, empty_state, view,
+            no_legacy_commitment, empty_nevm_diff,
+            /*fJustCheck=*/false, /*ibd=*/true));
+        CDeterministicMNManager::InverseJournalEntryStatsForTesting
+            empty_stats;
+        BOOST_REQUIRE(manager.GetInverseJournalEntryStatsForTesting(
+            empty_child_hash, empty_stats));
+        BOOST_CHECK_EQUAL(empty_stats.added_mns, 0U);
+        BOOST_CHECK_EQUAL(empty_stats.updated_mns, 0U);
+        BOOST_CHECK_EQUAL(empty_stats.removed_mns, 0U);
+        BOOST_CHECK_EQUAL(empty_stats.serialized_size, 245U);
+
+        for (int offset{1}; offset <= rollback_depth; ++offset) {
+            CBlock block{MakeProviderMutationBlock({})};
+            block.hashPrevBlock = hashes[static_cast<size_t>(offset - 1)];
+            block.nTime = static_cast<uint32_t>(offset + 1);
+            block.nNonce = static_cast<uint32_t>(offset);
+            hashes[static_cast<size_t>(offset)] = block.GetHash();
+            auto& index{indices[static_cast<size_t>(offset)]};
+            index.nHeight = start_height + offset;
+            index.pprev = &indices[static_cast<size_t>(offset - 1)];
+            index.phashBlock = &hashes[static_cast<size_t>(offset)];
+
+            BlockValidationState state;
+            CDeterministicMNListNEVMAddressDiff diff;
+            BOOST_REQUIRE_MESSAGE(
+                manager.ProcessBlock(
+                    block, &index, state, view, no_legacy_commitment, diff,
+                    /*fJustCheck=*/false, /*ibd=*/true),
+                state.ToString());
+            if (offset == 1) {
+                CDeterministicMNManager::InverseJournalEntryStatsForTesting
+                    update_stats;
+                BOOST_REQUIRE(manager.GetInverseJournalEntryStatsForTesting(
+                    hashes[1], update_stats));
+                BOOST_CHECK_EQUAL(update_stats.added_mns, 0U);
+                BOOST_CHECK_EQUAL(update_stats.updated_mns, 1U);
+                BOOST_CHECK_EQUAL(update_stats.removed_mns, 0U);
+                BOOST_CHECK_EQUAL(update_stats.serialized_size, 251U);
+                const auto stored_child{
+                    manager.GetListForBlock(&indices[1])};
+                BOOST_CHECK_EQUAL(
+                    stored_child.TrackedChangeCountForTesting(), 0U);
+                BOOST_TEST_MESSAGE(
+                    "DMN inverse payload sizes: empty=245 bytes, "
+                    "one-state-update=251 bytes");
+            }
+            if (offset == gc_boundary_offset) {
+                expected_gc_boundary_snapshot =
+                    manager.GetListForBlock(
+                        &indices[gc_boundary_offset]);
+                expected_gc_boundary_snapshot_hash =
+                    ::SerializeHash(expected_gc_boundary_snapshot);
+            }
+        }
+        manager.UpdatedBlockTip(&indices.back());
+        BOOST_REQUIRE(manager.FlushCacheToDisk(
+            /*bForceFlush=*/true, /*fSync=*/true));
+        BOOST_CHECK_EQUAL(manager.m_evoDb->CountPersistedEntries(),
+                          CDeterministicMNManager::LIST_CACHE_SIZE);
+        BOOST_CHECK(!manager.VerifyPersistedSnapshot(&indices.front()));
+    }
+
+    // The empty GC journal can adopt the configured height-only activation
+    // before any destructive authorization has been published.
+    consensus.nPQActivationHeight = start_height + gc_boundary_offset;
+    db_params.wipe_data = false;
+
+
+    {
+        CDeterministicMNManager manager(db_params);
+        manager.UpdatedBlockTip(&indices.back());
+        BOOST_CHECK_EQUAL(
+            manager.UpdateFinalitySnapshotRetentionFloor(start_height),
+            start_height);
+        using Source = CDeterministicMNManager::
+            AuxiliaryHistoryGCAuthorizationSource;
+        using Status =
+            CDeterministicMNManager::DMNInverseGCBoundaryStatus;
+        const CDeterministicMNManager::AuxiliaryHistoryGCAuthorization
+            gc_authorization{
+            Source::ENFORCED_DURABLE_CHAINLOCK,
+            {start_height + gc_boundary_offset,
+             hashes[gc_boundary_offset]}};
+        BOOST_REQUIRE(manager.UpdateAuxiliaryHistoryGCAuthorization(
+            gc_authorization));
+
+        const auto check_boundary = [&]() {
+            const auto result{
+                manager.GetDMNInverseGCBoundaryForTesting()};
+            BOOST_REQUIRE(result.status == Status::READY);
+            BOOST_REQUIRE(result.boundary);
+            BOOST_REQUIRE(result.component);
+            BOOST_CHECK_EQUAL(result.boundary->height,
+                              start_height + gc_boundary_offset);
+            BOOST_CHECK_EQUAL(result.boundary->block_hash,
+                              hashes[gc_boundary_offset]);
+            BOOST_CHECK_EQUAL(result.component->monotonic_position,
+                              static_cast<uint64_t>(
+                                  start_height + gc_boundary_offset));
+            const auto closure{evo::DecodeDMNInverseGCClosure(
+                result.component->closure)};
+            BOOST_REQUIRE(closure);
+            BOOST_CHECK(closure->boundary == *result.boundary);
+            BOOST_CHECK(!closure->boundary_state_hash.IsNull());
+            BOOST_REQUIRE(result.snapshot);
+            BOOST_CHECK(::SerializeHash(*result.snapshot) ==
+                        expected_gc_boundary_snapshot_hash);
+            BOOST_CHECK(!closure->inverse_history_commitment.IsNull());
+            BOOST_CHECK(!closure->inverse_record_hash.IsNull());
+            const auto encoded{evo::EncodeDMNInverseGCClosure(*closure)};
+            BOOST_REQUIRE(encoded);
+            BOOST_CHECK(*encoded == result.component->closure);
+            return result;
+        };
+        const auto first_boundary{check_boundary()};
+        BOOST_REQUIRE(first_boundary.component);
+        expected_gc_component = first_boundary.component;
+        BOOST_CHECK(evo::IsDMNInverseGCComponentBoundedByAuthorization(
+            *first_boundary.component, gc_authorization));
+        const CDeterministicMNManager::AuxiliaryHistoryGCAuthorization
+            under_authorized{
+                Source::ENFORCED_DURABLE_CHAINLOCK,
+                {start_height + gc_boundary_offset - 1,
+                 hashes[gc_boundary_offset - 1]}};
+        BOOST_CHECK(!evo::IsDMNInverseGCComponentBoundedByAuthorization(
+            *first_boundary.component, under_authorized));
+
+        // SYSCOIN: Derivation reconstructs the boundary in memory; this stage
+        // must not silently turn a closure proposal into a database mutation.
+        CDeterministicMNList absent_boundary;
+        BOOST_CHECK(!manager.m_evoDb->Read(
+            hashes[gc_boundary_offset], absent_boundary));
+
+        // A read-only derivation must not flush a pending tombstone while
+        // distinguishing an absent optional B snapshot from corrupt state.
+        manager.m_evoDb->EraseCache(hashes[gc_boundary_offset]);
+        BOOST_CHECK_EQUAL(manager.m_evoDb->GetEraseCacheSize(), 1U);
+        BOOST_CHECK(manager.GetDMNInverseGCBoundaryForTesting().status ==
+                    Status::BLOCKED);
+        BOOST_CHECK_EQUAL(manager.m_evoDb->GetEraseCacheSize(), 1U);
+        BOOST_CHECK(!manager.m_evoDb->Read(
+            hashes[gc_boundary_offset], absent_boundary));
+        manager.m_evoDb->WriteCache(
+            hashes[gc_boundary_offset], expected_gc_boundary_snapshot);
+        BOOST_REQUIRE(manager.m_evoDb->FlushCacheToDisk(
+            /*CHUNK_ITEMS=*/256, /*fSync=*/true));
+        check_boundary();
+
+        // Ordinary EvoDB reads accept a valid object prefix. The physical GC
+        // path must reject the same snapshot and inverse with trailing bytes.
+        BOOST_REQUIRE(manager.m_evoDb->AppendTrailingValueByteForTesting(
+            hashes[gc_boundary_offset]));
+        CDeterministicMNList prefix_snapshot;
+        BOOST_REQUIRE(manager.m_evoDb->Read(
+            hashes[gc_boundary_offset], prefix_snapshot));
+        BOOST_CHECK(manager.GetDMNInverseGCBoundaryForTesting().status ==
+                    Status::BLOCKED);
+        BOOST_REQUIRE(
+            manager.m_evoDb->RewriteExactValueForTesting(
+                hashes[gc_boundary_offset]));
+        check_boundary();
+
+        BOOST_REQUIRE(
+            manager.AppendInverseJournalTrailingByteForTesting(
+                hashes[gc_boundary_offset]));
+        CDeterministicMNManager::InverseJournalEntryStatsForTesting
+            prefix_inverse_stats;
+        BOOST_REQUIRE(manager.GetInverseJournalEntryStatsForTesting(
+            hashes[gc_boundary_offset], prefix_inverse_stats));
+        BOOST_CHECK(manager.GetDMNInverseGCBoundaryForTesting().status ==
+                    Status::BLOCKED);
+        BOOST_REQUIRE(
+            manager.RewriteExactInverseJournalValueForTesting(
+                hashes[gc_boundary_offset]));
+        check_boundary();
+
+        auto trailing{first_boundary.component->closure};
+        trailing.push_back(0);
+        BOOST_CHECK(!evo::DecodeDMNInverseGCClosure(trailing));
+        auto wrong_guard{first_boundary.component->closure};
+        wrong_guard.front() ^= 1;
+        BOOST_CHECK(!evo::DecodeDMNInverseGCClosure(wrong_guard));
+
+        // The selected floor is B+1, so I_(B+1) materializes the chosen
+        // boundary while I_B remains its retained closure endpoint.
+        BOOST_REQUIRE(manager.CorruptInverseJournalForTesting(
+            hashes[gc_boundary_offset + 1]));
+        BOOST_CHECK(manager.GetDMNInverseGCBoundaryForTesting().status ==
+                    Status::BLOCKED);
+        BOOST_REQUIRE(manager.CorruptInverseJournalForTesting(
+            hashes[gc_boundary_offset + 1]));
+        check_boundary();
+        BOOST_REQUIRE(manager.CorruptInverseJournalForTesting(
+            hashes[gc_boundary_offset]));
+        BOOST_CHECK(manager.GetDMNInverseGCBoundaryForTesting().status ==
+                    Status::BLOCKED);
+        BOOST_REQUIRE(manager.CorruptInverseJournalForTesting(
+            hashes[gc_boundary_offset]));
+        check_boundary();
+
+        // Preparation has two independent durability barriers. Neither a
+        // failed B snapshot fsync nor a failed inverse-WAL fsync may publish
+        // an intent that a restart could mistake for deletion authority.
+        manager.m_evoDb->FailNextSynchronousWriteThroughForTesting();
+        BOOST_CHECK(!manager.FlushCacheToDisk(
+            /*bForceFlush=*/true, /*fSync=*/false));
+        BOOST_CHECK(!manager.GetAuxiliaryHistoryGCStateForTesting().intent);
+        manager.FailNextInverseJournalSynchronousFlushForTesting();
+        BOOST_CHECK(!manager.FlushCacheToDisk(
+            /*bForceFlush=*/true, /*fSync=*/false));
+        BOOST_CHECK(!manager.GetAuxiliaryHistoryGCStateForTesting().intent);
+
+    }
+
+
+    // Publish the unified DMN frontier directly from the durable ChainLock;
+    // there is no migration-only H-to-B proof cursor.
+    {
+        CDeterministicMNManager manager(db_params);
+        manager.UpdatedBlockTip(&indices.back());
+        BOOST_CHECK_EQUAL(
+            manager.UpdateFinalitySnapshotRetentionFloor(start_height),
+            start_height);
+        const CDeterministicMNManager::AuxiliaryHistoryGCAuthorization
+            gc_authorization{
+                CDeterministicMNManager::
+                    AuxiliaryHistoryGCAuthorizationSource::
+                        ENFORCED_DURABLE_CHAINLOCK,
+                {start_height + gc_boundary_offset,
+                 hashes[gc_boundary_offset]}};
+        BOOST_REQUIRE(manager.UpdateAuxiliaryHistoryGCAuthorization(
+            gc_authorization));
+        BOOST_REQUIRE(manager.FlushCacheToDisk(
+            /*bForceFlush=*/true, /*fSync=*/false));
+        const auto prepared_state{
+            manager.GetAuxiliaryHistoryGCStateForTesting()};
+        BOOST_REQUIRE(prepared_state.intent);
+        BOOST_CHECK(!prepared_state.watermark);
+        BOOST_REQUIRE(prepared_state.intent->target.frontier.dmn);
+        BOOST_CHECK(prepared_state.intent->target.frontier.dmn ==
+                    expected_gc_component);
+        BOOST_CHECK(prepared_state.intent->target.authorization ==
+                    gc_authorization);
+        BOOST_CHECK(!prepared_state.intent->target.frontier.pq_registry);
+        BOOST_CHECK(!prepared_state.intent->target.pq_erase_manifest);
+        CDeterministicMNManager::InverseJournalEntryStatsForTesting
+            retained_preboundary_inverse;
+        BOOST_REQUIRE(manager.GetInverseJournalEntryStatsForTesting(
+            hashes[1], retained_preboundary_inverse));
+        BOOST_REQUIRE(manager.VerifyPersistedSnapshot(
+            &indices[gc_boundary_offset]));
+
+        // A prolonged finality stall can move the ordinary random-access
+        // window beyond B without invalidating the authenticated closure.
+        constexpr int stalled_extension{
+            CDeterministicMNManager::LIST_CACHE_SIZE + 8};
+        std::vector<uint256> stalled_hashes(stalled_extension);
+        std::vector<CBlockIndex> stalled_indexes(stalled_extension);
+        for (int offset{0}; offset < stalled_extension; ++offset) {
+            stalled_hashes[static_cast<size_t>(offset)] =
+                MakeSnapshotKey(5'000'000 + offset);
+            auto& index{stalled_indexes[static_cast<size_t>(offset)]};
+            index.nHeight = indices.back().nHeight + offset + 1;
+            index.pprev = offset == 0
+                ? &indices.back()
+                : &stalled_indexes[static_cast<size_t>(offset - 1)];
+            index.phashBlock =
+                &stalled_hashes[static_cast<size_t>(offset)];
+        }
+        manager.UpdatedBlockTip(&stalled_indexes.back());
+        const auto stalled_plan{
+            manager.GetAuxiliaryHistoryRetentionPlanForTesting()};
+        BOOST_REQUIRE(stalled_plan.requirements_valid);
+        BOOST_REQUIRE(stalled_plan.effective_dmn_inverse_gc_boundary);
+        BOOST_CHECK(
+            stalled_plan.effective_dmn_inverse_gc_boundary->component ==
+            prepared_state.intent->target.frontier.dmn);
+        manager.UpdatedBlockTip(&indices.back());
+
+        // A failed first physical chunk preserves the exact durable intent
+        // and all records for the following restart to resume.
+        manager.FailNextInverseJournalSynchronousFlushForTesting();
+        BOOST_CHECK(!manager.FlushCacheToDisk(
+            /*bForceFlush=*/true, /*fSync=*/false));
+        BOOST_CHECK(manager.GetAuxiliaryHistoryGCStateForTesting().intent ==
+                    prepared_state.intent);
+        BOOST_REQUIRE(manager.GetInverseJournalEntryStatsForTesting(
+            hashes[1], retained_preboundary_inverse));
+    }
+
+    const uint64_t inverse_disk_bytes{DirectorySizeBytes(
+        SiblingDBPath(disk_db.path, "_inverse"))};
+    BOOST_REQUIRE_GT(inverse_disk_bytes, 0U);
+    BOOST_TEST_MESSAGE(strprintf(
+        "DMN inverse LevelDB: %u records occupy %u bytes (%.1f bytes/record)",
+        static_cast<unsigned>(rollback_depth + 1), inverse_disk_bytes,
+        static_cast<double>(inverse_disk_bytes) /
+            static_cast<double>(rollback_depth + 1)));
+
+    db_params.wipe_data = false;
+    {
+        CDeterministicMNManager restarted(db_params);
+        restarted.UpdatedBlockTip(&indices.back());
+        BOOST_CHECK_EQUAL(
+            restarted.UpdateFinalitySnapshotRetentionFloor(start_height),
+            start_height);
+        const CDeterministicMNManager::AuxiliaryHistoryGCAuthorization
+            resumed_authorization{
+                CDeterministicMNManager::
+                    AuxiliaryHistoryGCAuthorizationSource::
+                        ENFORCED_DURABLE_CHAINLOCK,
+                {start_height + gc_boundary_offset + 1,
+                 hashes[gc_boundary_offset + 1]}};
+        BOOST_REQUIRE(restarted.UpdateAuxiliaryHistoryGCAuthorization(
+            resumed_authorization));
+        const auto resumed_state{
+            restarted.GetAuxiliaryHistoryGCStateForTesting()};
+        BOOST_REQUIRE(resumed_state.intent);
+
+        // The bounded physical scan must reject strict-decoding failures in
+        // every record, not only at the retained B endpoint. Choose the
+        // lexicographically first non-B chain record so the first pass is
+        // guaranteed to encounter it before reaching its erase budget.
+        size_t malformed_scan_offset{1};
+        for (size_t offset{2}; offset < hashes.size(); ++offset) {
+            if (offset != static_cast<size_t>(gc_boundary_offset) &&
+                (malformed_scan_offset ==
+                     static_cast<size_t>(gc_boundary_offset) ||
+                 hashes[offset] < hashes[malformed_scan_offset])) {
+                malformed_scan_offset = offset;
+            }
+        }
+        BOOST_REQUIRE_NE(malformed_scan_offset,
+                         static_cast<size_t>(gc_boundary_offset));
+        BOOST_REQUIRE(
+            restarted.AppendInverseJournalTrailingByteForTesting(
+                hashes[malformed_scan_offset]));
+        BOOST_CHECK(!restarted.FlushCacheToDisk(
+            /*bForceFlush=*/true, /*fSync=*/false));
+        BOOST_CHECK(restarted.GetAuxiliaryHistoryGCStateForTesting().intent ==
+                    resumed_state.intent);
+        BOOST_REQUIRE(
+            restarted.RewriteExactInverseJournalValueForTesting(
+                hashes[malformed_scan_offset]));
+
+        // First use has more than one erase chunk. Each same-tip pass removes
+        // at most 256 child heights below B and leaves the durable intent
+        // pending; reaching EOF after erases starts a fresh absence cycle.
+        BOOST_REQUIRE(restarted.FlushCacheToDisk(
+            /*bForceFlush=*/true, /*fSync=*/false));
+        BOOST_CHECK(restarted.GetAuxiliaryHistoryGCStateForTesting().intent ==
+                    resumed_state.intent);
+        BOOST_REQUIRE(restarted.FlushCacheToDisk(
+            /*bForceFlush=*/true, /*fSync=*/false));
+        BOOST_CHECK(restarted.GetAuxiliaryHistoryGCStateForTesting().intent ==
+                    resumed_state.intent);
+        CDeterministicMNManager::InverseJournalEntryStatsForTesting
+            erased_inverse;
+        BOOST_CHECK(!restarted.GetInverseJournalEntryStatsForTesting(
+            hashes[1], erased_inverse));
+        BOOST_CHECK(!restarted.GetInverseJournalEntryStatsForTesting(
+            hashes[gc_boundary_offset - 1], erased_inverse));
+        BOOST_REQUIRE(restarted.GetInverseJournalEntryStatsForTesting(
+            hashes[gc_boundary_offset], erased_inverse));
+
+        // The final deletion-free cycle authenticates both physical halves of
+        // the closure. Neither a prefix-decodable B snapshot nor I_B may
+        // authorize completion.
+        BOOST_REQUIRE(restarted.m_evoDb->AppendTrailingValueByteForTesting(
+            hashes[gc_boundary_offset]));
+        BOOST_CHECK(!restarted.FlushCacheToDisk(
+            /*bForceFlush=*/true, /*fSync=*/false));
+        BOOST_REQUIRE(
+            restarted.m_evoDb->RewriteExactValueForTesting(
+                hashes[gc_boundary_offset]));
+        BOOST_REQUIRE(
+            restarted.AppendInverseJournalTrailingByteForTesting(
+                hashes[gc_boundary_offset]));
+        BOOST_CHECK(!restarted.FlushCacheToDisk(
+            /*bForceFlush=*/true, /*fSync=*/false));
+        BOOST_REQUIRE(
+            restarted.RewriteExactInverseJournalValueForTesting(
+                hashes[gc_boundary_offset]));
+
+        // A failure after all inverse chunks are durable must leave the exact
+        // pending target for restart; it must not resurrect the erased prefix.
+        restarted.FailNextAuxiliaryHistoryGCCompleteForTesting();
+        BOOST_CHECK(!restarted.FlushCacheToDisk(
+            /*bForceFlush=*/true, /*fSync=*/false));
+        BOOST_CHECK(restarted.GetAuxiliaryHistoryGCStateForTesting().intent ==
+                    resumed_state.intent);
+        BOOST_CHECK(!restarted.GetInverseJournalEntryStatsForTesting(
+            hashes[1], erased_inverse));
+        BOOST_REQUIRE(restarted.GetInverseJournalEntryStatsForTesting(
+            hashes[gc_boundary_offset], erased_inverse));
+    }
+
+    {
+        CDeterministicMNManager restarted(db_params);
+        restarted.UpdatedBlockTip(&indices.back());
+        BOOST_CHECK_EQUAL(
+            restarted.UpdateFinalitySnapshotRetentionFloor(start_height),
+            start_height);
+        const CDeterministicMNManager::AuxiliaryHistoryGCAuthorization
+            resumed_authorization{
+                CDeterministicMNManager::
+                    AuxiliaryHistoryGCAuthorizationSource::
+                        ENFORCED_DURABLE_CHAINLOCK,
+                {start_height + gc_boundary_offset + 1,
+                 hashes[gc_boundary_offset + 1]}};
+        BOOST_REQUIRE(restarted.UpdateAuxiliaryHistoryGCAuthorization(
+            resumed_authorization));
+        BOOST_REQUIRE(
+            restarted.GetAuxiliaryHistoryGCStateForTesting().intent);
+        BOOST_REQUIRE(restarted.FlushCacheToDisk(
+            /*bForceFlush=*/true, /*fSync=*/false));
+        const auto completed_state{
+            restarted.GetAuxiliaryHistoryGCStateForTesting()};
+        BOOST_CHECK(!completed_state.intent);
+        BOOST_REQUIRE(completed_state.watermark);
+        BOOST_REQUIRE(completed_state.watermark->frontier.dmn);
+        BOOST_CHECK(completed_state.watermark->frontier.dmn ==
+                    expected_gc_component);
+
+        // Recovery heads below B or on a branch with a different block at B
+        // cannot widen the random-access window across the durable floor.
+        const std::array<const CBlockIndex*, 1> below_boundary_recovery{
+            &indices[gc_boundary_offset - 1]};
+        BOOST_CHECK(!restarted.GetAuxiliaryHistoryRetentionPlanForTesting(
+                                  below_boundary_recovery)
+                         .requirements_valid);
+        uint256 wrong_boundary_hash{MakeSnapshotKey(7'000'004)};
+        uint256 wrong_child_hash{MakeSnapshotKey(7'000'005)};
+        CBlockIndex wrong_boundary;
+        wrong_boundary.nHeight = start_height + gc_boundary_offset;
+        wrong_boundary.pprev = &indices[gc_boundary_offset - 1];
+        wrong_boundary.phashBlock = &wrong_boundary_hash;
+        CBlockIndex wrong_child;
+        wrong_child.nHeight = start_height + gc_boundary_offset + 1;
+        wrong_child.pprev = &wrong_boundary;
+        wrong_child.phashBlock = &wrong_child_hash;
+        const std::array<const CBlockIndex*, 1> wrong_branch_recovery{
+            &wrong_child};
+        BOOST_CHECK(!restarted.GetAuxiliaryHistoryRetentionPlanForTesting(
+                                  wrong_branch_recovery)
+                         .requirements_valid);
+        const uint64_t exact_authentications_before_wrong_undo{
+            restarted.GetDMNInverseGCExactAuthenticationCountForTesting()};
+        CDeterministicMNListNEVMAddressDiff wrong_branch_nevm;
+        BOOST_CHECK(!restarted.UndoBlock(
+            &wrong_child, wrong_branch_nevm));
+        BOOST_CHECK_EQUAL(
+            restarted.GetDMNInverseGCExactAuthenticationCountForTesting(),
+            exact_authentications_before_wrong_undo);
+
+        BOOST_REQUIRE(restarted.VerifyPersistedSnapshot(&indices.back()));
+        BOOST_REQUIRE(restarted.VerifyInverseJournalTipSeal(&indices.back()));
+        const uint64_t exact_authentications_before_disconnects{
+            restarted.GetDMNInverseGCExactAuthenticationCountForTesting()};
+        for (int offset{rollback_depth};
+             offset > gc_boundary_offset; --offset) {
+            CDeterministicMNListNEVMAddressDiff inverse_nevm;
+            BOOST_TEST_CONTEXT("undo offset=" << offset) {
+                BOOST_REQUIRE(restarted.UndoBlock(
+                    &indices[static_cast<size_t>(offset)], inverse_nevm));
+            }
+            BOOST_REQUIRE(restarted.EnsureRetainedSnapshotWindow(
+                &indices[static_cast<size_t>(offset - 1)]));
+            restarted.UpdatedBlockTip(
+                &indices[static_cast<size_t>(offset - 1)]);
+        }
+        BOOST_REQUIRE(restarted.EnsureRetainedSnapshotWindow(
+            &indices[gc_boundary_offset]));
+        BOOST_REQUIRE(restarted.VerifyInverseJournalTipSeal(
+            &indices[gc_boundary_offset]));
+        BOOST_CHECK_EQUAL(
+            restarted.GetDMNInverseGCExactAuthenticationCountForTesting(),
+            exact_authentications_before_disconnects);
+        const auto boundary_plan{
+            restarted.GetAuxiliaryHistoryRetentionPlanForTesting()};
+        BOOST_REQUIRE(boundary_plan.requirements_valid);
+        BOOST_REQUIRE_EQUAL(boundary_plan.branches.size(), 1U);
+        BOOST_CHECK_EQUAL(
+            boundary_plan.branches.front().random_access_floor.height,
+            start_height + gc_boundary_offset);
+        BOOST_CHECK_EQUAL(
+            boundary_plan.branches.front().random_access_floor.block_hash,
+            hashes[gc_boundary_offset]);
+        CDeterministicMNListNEVMAddressDiff boundary_nevm;
+        BOOST_CHECK(!restarted.UndoBlock(
+            &indices[gc_boundary_offset], boundary_nevm));
+        BOOST_REQUIRE(restarted.FlushPendingSnapshotsToDisk(/*fSync=*/true));
+        BOOST_REQUIRE(restarted.VerifyPersistedSnapshot(
+            &indices[gc_boundary_offset]));
+        BOOST_CHECK(::SerializeHash(restarted.GetListForBlock(
+                        &indices[gc_boundary_offset])) ==
+                    expected_gc_boundary_snapshot_hash);
+    }
+
+    {
+        CDeterministicMNManager reopened(db_params);
+        reopened.UpdatedBlockTip(&indices[gc_boundary_offset]);
+        BOOST_REQUIRE(reopened.VerifyInverseJournalTipSeal(
+            &indices[gc_boundary_offset]));
+        BOOST_REQUIRE(reopened.VerifyPersistedSnapshot(
+            &indices[gc_boundary_offset]));
+        BOOST_CHECK(::SerializeHash(reopened.GetListForBlock(
+                        &indices[gc_boundary_offset])) ==
+                    expected_gc_boundary_snapshot_hash);
+        CDeterministicMNListNEVMAddressDiff inverse_nevm;
+        BOOST_CHECK(!reopened.UndoBlock(
+            &indices[gc_boundary_offset], inverse_nevm));
+        CDeterministicMNManager::InverseJournalEntryStatsForTesting
+            boundary_inverse;
+        BOOST_REQUIRE(reopened.GetInverseJournalEntryStatsForTesting(
+            hashes[gc_boundary_offset], boundary_inverse));
+        BOOST_CHECK(!reopened.GetInverseJournalEntryStatsForTesting(
+            hashes[gc_boundary_offset - 1], boundary_inverse));
+
+        // SYSCOIN: A shared intent carrying a malformed PQ advance is not a
+        // usable effective floor and must fail closed before either store can
+        // complete it. Publish it last because the durable journal correctly
+        // makes this corruption sticky across restart.
+        const auto completed_state{
+            reopened.GetAuxiliaryHistoryGCStateForTesting()};
+        BOOST_REQUIRE(completed_state.watermark);
+        evo::AuxiliaryHistoryGCIntentTarget combined_target;
+        combined_target.authorization = {
+            CDeterministicMNManager::
+                AuxiliaryHistoryGCAuthorizationSource::
+                    ENFORCED_DURABLE_CHAINLOCK,
+            {start_height + gc_boundary_offset + 2,
+             hashes[gc_boundary_offset + 2]}};
+        combined_target.frontier = completed_state.watermark->frontier;
+        combined_target.frontier.pq_registry =
+            evo::AuxiliaryHistoryGCComponent{1, 1, {0x51}};
+        combined_target.pq_erase_manifest =
+            evo::AuxiliaryHistoryGCManifest{1, {0x52}};
+        BOOST_REQUIRE(reopened.UpdateAuxiliaryHistoryGCAuthorization(
+            combined_target.authorization));
+        BOOST_REQUIRE(reopened.BeginAuxiliaryHistoryGCIntentForTesting(
+            combined_target));
+        const auto combined_state{
+            reopened.GetAuxiliaryHistoryGCStateForTesting()};
+        BOOST_REQUIRE(combined_state.intent);
+        BOOST_CHECK(!reopened.GetAuxiliaryHistoryRetentionPlanForTesting()
+                         .requirements_valid);
+        BOOST_CHECK(!reopened.FlushCacheToDisk(
+            /*bForceFlush=*/true, /*fSync=*/false));
+        BOOST_CHECK(reopened.GetAuxiliaryHistoryGCStateForTesting().intent ==
+                    combined_state.intent);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(missing_inverse_coverage_fails_closed)
+{
+    SelectParams(ChainType::MAIN);
+    LOCK(::cs_main);
+    const int parent_height{Params().GetConsensus().DIP0003Height};
+    auto chain{BuildSnapshotIndexChain(parent_height, 2)};
+    auto db_params = DBParams{
+        .path = "testdb_dmn_missing_inverse",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    };
+    CDeterministicMNManager manager(db_params);
+    BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+        chain.Tip()->GetBlockHash(),
+        CDeterministicMNList{chain.Tip()->GetBlockHash(),
+                             chain.Tip()->nHeight, 0},
+        /*fSync=*/true));
+
+    CDeterministicMNListNEVMAddressDiff inverse_nevm;
+    BOOST_CHECK(!manager.VerifyInverseJournalTipSeal(chain.Tip()));
+    BOOST_CHECK(!manager.UndoBlock(chain.Tip(), inverse_nevm));
+    BOOST_CHECK(!manager.VerifyPersistedSnapshot(chain.At(parent_height)));
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    corrupt_inverse_parent_hash_is_rejected_before_undo,
+    ChainTestingSetup)
+{
+    SelectParams(ChainType::MAIN);
+    LOCK(::cs_main);
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    struct RestoreProfile {
+        Consensus::Params& consensus;
+        int preparation_height{consensus.nPQPreparationHeight};
+        int epoch_origin{consensus.nPQChainLockEpochOrigin};
+        uint32_t cutoff{consensus.nPQRegistrationCutoffBlocks};
+        uint32_t future{consensus.nPQFutureHorizonEpochs};
+        int activation_height{consensus.nPQActivationHeight};
+        ~RestoreProfile()
+        {
+            consensus.nPQPreparationHeight = preparation_height;
+            consensus.nPQChainLockEpochOrigin = epoch_origin;
+            consensus.nPQRegistrationCutoffBlocks = cutoff;
+            consensus.nPQFutureHorizonEpochs = future;
+            consensus.nPQActivationHeight = activation_height;
+        }
+    } restore{consensus};
+    consensus.nPQPreparationHeight = std::numeric_limits<int>::max();
+    consensus.nPQChainLockEpochOrigin = std::numeric_limits<int>::max();
+    consensus.nPQRegistrationCutoffBlocks = 0;
+    consensus.nPQFutureHorizonEpochs = 0;
+    consensus.nPQActivationHeight = std::numeric_limits<int>::max();
+
+    const int base_height{consensus.DIP0003Height};
+    std::array<uint256, 2> hashes{MakeSnapshotKey(base_height), uint256{}};
+    std::array<CBlockIndex, 2> indices;
+    indices[0].nHeight = base_height;
+    indices[0].phashBlock = &hashes[0];
+    auto db_params = DBParams{
+        .path = "testdb_dmn_corrupt_inverse",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    };
+    CDeterministicMNManager manager(db_params);
+    const auto base_snapshot{
+        MakeNontrivialAnchorSnapshot(hashes[0], base_height, false)};
+    BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+        hashes[0], base_snapshot, /*fSync=*/true));
+
+    CBlock block{MakeProviderMutationBlock({})};
+    block.hashPrevBlock = hashes[0];
+    block.nTime = 1;
+    block.nNonce = 1;
+    hashes[1] = block.GetHash();
+    indices[1].nHeight = base_height + 1;
+    indices[1].pprev = &indices[0];
+    indices[1].phashBlock = &hashes[1];
+    CCoinsView base_view;
+    CCoinsViewCache view(&base_view);
+    BlockValidationState state;
+    CDeterministicMNListNEVMAddressDiff diff;
+    BOOST_REQUIRE(manager.ProcessBlock(
+        block, &indices[1], state, view,
+        llmq::CFinalCommitmentTxPayload{}, diff,
+        /*fJustCheck=*/false, /*ibd=*/true));
+    BOOST_REQUIRE(manager.FlushPendingSnapshotsToDisk(/*fSync=*/true));
+    BOOST_REQUIRE(manager.VerifyInverseJournalTipSeal(&indices[1]));
+    BOOST_REQUIRE(manager.CorruptInverseJournalForTesting(hashes[1]));
+    BOOST_CHECK(!manager.VerifyInverseJournalTipSeal(&indices[1]));
+
+    CDeterministicMNListNEVMAddressDiff inverse_nevm;
+    BOOST_CHECK(!manager.UndoBlock(&indices[1], inverse_nevm));
+    BOOST_REQUIRE(manager.VerifyPersistedSnapshot(&indices[1]));
+
+    // A tip seal intentionally does not rescan the complete LevelDB history.
+    // If an older key is damaged after publication, sequential undo must stop
+    // at the last verified link before reconstructing its missing parent (and
+    // therefore before the later PQ-registry rollback stage is entered).
+    constexpr int gap_depth{5};
+    std::array<uint256, gap_depth + 1> gap_hashes;
+    std::array<CBlockIndex, gap_depth + 1> gap_indices;
+    gap_hashes[0] = MakeSnapshotKey(base_height + 100);
+    gap_indices[0].nHeight = base_height;
+    gap_indices[0].phashBlock = &gap_hashes[0];
+    const ScopedDiskDBPath gap_disk;
+    auto gap_db_params = DBParams{
+        .path = gap_disk.path,
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = false,
+        .wipe_data = true,
+    };
+    {
+        CDeterministicMNManager builder(gap_db_params);
+        BOOST_REQUIRE(builder.m_evoDb->WriteThrough(
+            gap_hashes[0],
+            MakeNontrivialAnchorSnapshot(
+                gap_hashes[0], base_height, false),
+            /*fSync=*/true));
+        CCoinsView gap_base_view;
+        CCoinsViewCache gap_view(&gap_base_view);
+        for (int offset{1}; offset <= gap_depth; ++offset) {
+            CBlock gap_block{MakeProviderMutationBlock({})};
+            gap_block.hashPrevBlock = gap_hashes[offset - 1];
+            gap_block.nTime = static_cast<uint32_t>(50 + offset);
+            gap_block.nNonce = static_cast<uint32_t>(100 + offset);
+            gap_hashes[offset] = gap_block.GetHash();
+            gap_indices[offset].nHeight = base_height + offset;
+            gap_indices[offset].pprev = &gap_indices[offset - 1];
+            gap_indices[offset].phashBlock = &gap_hashes[offset];
+            BlockValidationState gap_state;
+            CDeterministicMNListNEVMAddressDiff gap_diff;
+            BOOST_REQUIRE_MESSAGE(builder.ProcessBlock(
+                gap_block, &gap_indices[offset], gap_state, gap_view,
+                llmq::CFinalCommitmentTxPayload{}, gap_diff,
+                /*fJustCheck=*/false, /*ibd=*/true),
+                gap_state.ToString());
+        }
+        BOOST_REQUIRE(builder.FlushPendingSnapshotsToDisk(/*fSync=*/true));
+    }
+
+    gap_db_params.wipe_data = false;
+    {
+        CDeterministicMNManager damaged(gap_db_params);
+        BOOST_REQUIRE(damaged.EraseInverseJournalEntryForTesting(
+            gap_hashes[2]));
+        damaged.m_evoDb->EraseCache(gap_hashes[2]);
+        BOOST_REQUIRE(damaged.m_evoDb->FlushCacheToDisk(
+            /*CHUNK_ITEMS=*/256, /*fSync=*/true));
+    }
+
+    {
+        CDeterministicMNManager restarted(gap_db_params);
+        BOOST_REQUIRE(restarted.VerifyInverseJournalTipSeal(
+            &gap_indices.back()));
+        CDeterministicMNList gap_child_before;
+        BOOST_REQUIRE(restarted.m_evoDb->Read(
+            gap_hashes[3], gap_child_before));
+        const uint256 gap_child_state_hash{::SerializeHash(gap_child_before)};
+
+        CDeterministicMNListNEVMAddressDiff gap_nevm;
+        BOOST_REQUIRE(restarted.UndoBlock(&gap_indices[5], gap_nevm));
+        gap_nevm = {};
+        BOOST_REQUIRE(restarted.UndoBlock(&gap_indices[4], gap_nevm));
+        BOOST_CHECK(!restarted.VerifyPersistedSnapshot(&gap_indices[2]));
+        gap_nevm = {};
+        BOOST_CHECK(!restarted.UndoBlock(&gap_indices[3], gap_nevm));
+        BOOST_CHECK(gap_nevm.addedMNNEVM.empty());
+        BOOST_CHECK(gap_nevm.updatedMNNEVM.empty());
+        BOOST_CHECK(gap_nevm.removedMNNEVM.empty());
+        BOOST_CHECK(!restarted.VerifyPersistedSnapshot(&gap_indices[2]));
+
+        CDeterministicMNList gap_child_after;
+        BOOST_REQUIRE(restarted.m_evoDb->Read(
+            gap_hashes[3], gap_child_after));
+        BOOST_CHECK(::SerializeHash(gap_child_after) ==
+                    gap_child_state_hash);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(replay_floor_retains_all_persisted_branches_until_clear)
+{
+    SelectParams(ChainType::MAIN);
+    const int cache_limit = CDeterministicMNManager::LIST_CACHE_SIZE;
+    const int start_height = Params().GetConsensus().DIP0003Height;
+    const int total_snapshots = cache_limit + 40;
+    const int replay_floor = start_height + 20;
+
+    auto db_params = DBParams{
+        .path = "testdb_dmn_replay_retention",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    };
+    CDeterministicMNManager manager(db_params);
+    const auto chain = BuildSnapshotIndexChain(start_height, total_snapshots);
+    manager.UpdatedBlockTip(chain.Tip());
+
+    // SYSCOIN: Model the marker publication barrier: every dirty fork-local
+    // snapshot is durable before the replay floor is made live.
+    constexpr int flush_chunk{256};
+    for (int offset{0}; offset < total_snapshots; offset += flush_chunk) {
+        const int count{std::min(flush_chunk, total_snapshots - offset)};
+        WriteSnapshotRange(manager, start_height + offset, count);
+        BOOST_REQUIRE(manager.FlushPendingSnapshotsToDisk(/*fSync=*/true));
+    }
+    const int side_height{replay_floor + 5};
+    const uint256 side_hash{MakeSnapshotKey(start_height + total_snapshots + 100)};
+    BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+        side_hash, CDeterministicMNList{side_hash, side_height, 0},
+        /*fSync=*/true));
+
+    BOOST_CHECK_EQUAL(
+        manager.UpdateReplaySnapshotRetentionFloor(replay_floor),
+        replay_floor);
+    BOOST_CHECK_EQUAL(
+        manager.UpdateReplaySnapshotRetentionFloor(replay_floor + 100),
+        replay_floor);
+    BOOST_REQUIRE(manager.FlushCacheToDisk(/*bForceFlush=*/true));
+
+    CDeterministicMNList snapshot;
+    BOOST_REQUIRE(manager.m_evoDb->Read(side_hash, snapshot));
+    BOOST_CHECK_EQUAL(snapshot.GetHeight(), side_height);
+    BOOST_REQUIRE(manager.m_evoDb->Read(MakeSnapshotKey(start_height), snapshot));
+
+    BOOST_CHECK_EQUAL(
+        manager.UpdateFinalitySnapshotRetentionFloor(start_height + 10),
+        start_height + 10);
+    BOOST_CHECK_EQUAL(manager.UpdateReplaySnapshotRetentionFloor(std::nullopt),
+                      std::numeric_limits<int>::max());
+    // SYSCOIN: Value-aware finality retention preserves fork snapshots at or
+    // above its floor after paired replay clears.
+    BOOST_REQUIRE(manager.FlushCacheToDisk(/*bForceFlush=*/true));
+    BOOST_REQUIRE(manager.m_evoDb->Read(side_hash, snapshot));
+
+    const int replacement_floor{chain.Tip()->nHeight - 10};
+    BOOST_CHECK_EQUAL(
+        manager.UpdateFinalitySnapshotRetentionFloor(replacement_floor),
+        replacement_floor);
+    BOOST_REQUIRE(manager.FlushCacheToDisk(/*bForceFlush=*/true));
+    BOOST_CHECK(!manager.m_evoDb->Read(side_hash, snapshot));
+    BOOST_CHECK(!manager.m_evoDb->Read(MakeSnapshotKey(start_height), snapshot));
+
+    const int recent_side_height{chain.Tip()->nHeight - 5};
+    const uint256 recent_side_hash{
+        MakeSnapshotKey(start_height + total_snapshots + 101)};
+    BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+        recent_side_hash,
+        CDeterministicMNList{recent_side_hash, recent_side_height, 0},
+        /*fSync=*/true));
+    BOOST_REQUIRE(manager.FlushCacheToDisk(/*bForceFlush=*/true));
+    BOOST_REQUIRE(manager.m_evoDb->Read(recent_side_hash, snapshot));
+
+    const uint256 pending_side_hash{
+        MakeSnapshotKey(start_height + total_snapshots + 102)};
+    BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+        pending_side_hash,
+        CDeterministicMNList{pending_side_hash, side_height, 0},
+        /*fSync=*/true));
+    manager.UpdateFinalitySnapshotPublicationRetention(true);
+    BOOST_REQUIRE(manager.FlushCacheToDisk(/*bForceFlush=*/true));
+    BOOST_REQUIRE(manager.m_evoDb->Read(pending_side_hash, snapshot));
+
+    BOOST_CHECK(!manager.AuxiliaryHistoryMaintenanceRetryRequested());
+    const uint64_t request_generation_before_verification{
+        manager.AuxiliaryHistoryMaintenanceRequestGeneration()};
+    manager.BeginFinalitySnapshotVerificationRetention();
+    BOOST_CHECK(manager.GetAuxiliaryHistoryRetentionPlanForTesting()
+                    .finality_verification_active);
+    BOOST_CHECK(!manager.AuxiliaryHistoryMaintenanceRetryRequested());
+    BOOST_CHECK_EQUAL(
+        manager.AuxiliaryHistoryMaintenanceRequestGeneration(),
+        request_generation_before_verification);
+    manager.UpdateFinalitySnapshotPublicationRetention(false);
+    BOOST_REQUIRE(manager.FlushCacheToDisk(/*bForceFlush=*/true));
+    BOOST_REQUIRE(manager.m_evoDb->Read(pending_side_hash, snapshot));
+    BOOST_CHECK(!manager.AuxiliaryHistoryMaintenanceRetryRequested());
+    const uint64_t request_generation_before_release{
+        manager.AuxiliaryHistoryMaintenanceRequestGeneration()};
+    manager.EndFinalitySnapshotVerificationRetention();
+    BOOST_CHECK(!manager.GetAuxiliaryHistoryRetentionPlanForTesting()
+                     .finality_verification_active);
+    BOOST_CHECK(!manager.AuxiliaryHistoryMaintenanceRetryRequested());
+    BOOST_CHECK_EQUAL(
+        manager.AuxiliaryHistoryMaintenanceRequestGeneration(),
+        request_generation_before_release);
+    BOOST_REQUIRE(manager.FlushCacheToDisk(/*bForceFlush=*/true));
+    BOOST_CHECK(!manager.m_evoDb->Read(pending_side_hash, snapshot));
+    BOOST_REQUIRE(manager.m_evoDb->Read(recent_side_hash, snapshot));
+
+    BOOST_CHECK_EQUAL(
+        manager.UpdateFinalitySnapshotRetentionFloor(chain.Tip()->nHeight),
+        chain.Tip()->nHeight);
+    BOOST_REQUIRE(manager.FlushCacheToDisk(/*bForceFlush=*/true));
+    BOOST_CHECK(!manager.m_evoDb->Read(recent_side_hash, snapshot));
+    BOOST_REQUIRE(manager.m_evoDb->Read(
+        MakeSnapshotKey(start_height + total_snapshots - 1), snapshot));
+
+    const uint256 corrupt_key{
+        MakeSnapshotKey(start_height + total_snapshots + 103)};
+    BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+        corrupt_key, CDeterministicMNList{side_hash, chain.Tip()->nHeight, 0},
+        /*fSync=*/true));
+    manager.BeginFinalitySnapshotVerificationRetention();
+    manager.EndFinalitySnapshotVerificationRetention();
+    BOOST_CHECK(!manager.FlushCacheToDisk(/*bForceFlush=*/true));
+}
+
+BOOST_AUTO_TEST_CASE(replay_floor_writes_through_a_long_null_receipt_tail)
+{
+    SelectParams(ChainType::MAIN);
+    LOCK(::cs_main);
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    struct RestoreProfile {
+        Consensus::Params& consensus;
+        int preparation_height{consensus.nPQPreparationHeight};
+        int epoch_origin{consensus.nPQChainLockEpochOrigin};
+        uint32_t cutoff{consensus.nPQRegistrationCutoffBlocks};
+        uint32_t future{consensus.nPQFutureHorizonEpochs};
+        int activation_height{consensus.nPQActivationHeight};
+        ~RestoreProfile()
+        {
+            consensus.nPQPreparationHeight = preparation_height;
+            consensus.nPQChainLockEpochOrigin = epoch_origin;
+            consensus.nPQRegistrationCutoffBlocks = cutoff;
+            consensus.nPQFutureHorizonEpochs = future;
+            consensus.nPQActivationHeight = activation_height;
+        }
+    } restore{consensus};
+    consensus.nPQPreparationHeight = std::numeric_limits<int>::max();
+    consensus.nPQChainLockEpochOrigin = std::numeric_limits<int>::max();
+    consensus.nPQRegistrationCutoffBlocks = 0;
+    consensus.nPQFutureHorizonEpochs = 0;
+    consensus.nPQActivationHeight = std::numeric_limits<int>::max();
+
+    const int start_height{consensus.DIP0003Height};
+    const int tail_length{CDeterministicMNManager::LIST_CACHE_SIZE + 25};
+    std::vector<uint256> hashes(static_cast<size_t>(tail_length + 1));
+    std::vector<CBlockIndex> indices(static_cast<size_t>(tail_length + 1));
+    hashes[0] = MakeSnapshotKey(start_height);
+    indices[0].nHeight = start_height;
+    indices[0].phashBlock = &hashes[0];
+    const ScopedDiskDBPath disk_db;
+
+    auto db_params = DBParams{
+        .path = disk_db.path,
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = false,
+        .wipe_data = true,
+    };
+    {
+        CDeterministicMNManager manager(db_params);
+        BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+            hashes[0], CDeterministicMNList{hashes[0], start_height, 0},
+            /*fSync=*/true));
+        BOOST_CHECK_EQUAL(
+            manager.UpdateReplaySnapshotRetentionFloor(start_height),
+            start_height);
+
+        CCoinsView base_view;
+        CCoinsViewCache view(&base_view);
+        const llmq::CFinalCommitmentTxPayload no_legacy_commitment;
+        for (int offset{1}; offset <= tail_length; ++offset) {
+            CBlock block{MakeProviderMutationBlock({})};
+            block.hashPrevBlock = hashes[static_cast<size_t>(offset - 1)];
+            block.nTime = static_cast<uint32_t>(offset + 1);
+            block.nNonce = static_cast<uint32_t>(offset);
+            hashes[static_cast<size_t>(offset)] = block.GetHash();
+            auto& index{indices[static_cast<size_t>(offset)]};
+            index.nHeight = start_height + offset;
+            index.pprev = &indices[static_cast<size_t>(offset - 1)];
+            index.phashBlock = &hashes[static_cast<size_t>(offset)];
+
+            BlockValidationState state;
+            CDeterministicMNListNEVMAddressDiff diff;
+            BOOST_REQUIRE(manager.ProcessBlock(
+                block, &index, state, view, no_legacy_commitment, diff,
+                /*fJustCheck=*/false, /*ibd=*/true));
+        }
+        BOOST_CHECK_EQUAL(manager.m_evoDb->CountPersistedEntries(),
+                          tail_length + 1);
+    }
+
+    // SYSCOIN: A crash-restored marker reopens snapshots written after more
+    // than one dirty-FIFO window even though no later non-null receipt moved it.
+    db_params.wipe_data = false;
+    CDeterministicMNManager restarted(db_params);
+    BOOST_CHECK_EQUAL(
+        restarted.UpdateReplaySnapshotRetentionFloor(start_height),
+        start_height);
+    CDeterministicMNList snapshot;
+    BOOST_REQUIRE(restarted.m_evoDb->Read(hashes.front(), snapshot));
+    BOOST_CHECK_EQUAL(snapshot.GetHeight(), start_height);
+    BOOST_REQUIRE(restarted.m_evoDb->Read(hashes.back(), snapshot));
+    BOOST_CHECK_EQUAL(snapshot.GetHeight(), start_height + tail_length);
+}
+
+BOOST_AUTO_TEST_CASE(finality_roster_cutoffs_survive_branch_churn)
+{
+    SelectParams(ChainType::MAIN);
+    constexpr uint32_t roster_lag{288};
+    const int64_t minimum_origin{
+        static_cast<int64_t>(Params().GetConsensus().DIP0003Height) +
+        roster_lag};
+    const int64_t aligned_origin{
+        ((minimum_origin + llmq::pq::PQ_EPOCH_ALIGNMENT - 1) /
+         llmq::pq::PQ_EPOCH_ALIGNMENT) *
+        llmq::pq::PQ_EPOCH_ALIGNMENT};
+    BOOST_REQUIRE_LE(aligned_origin,
+                     std::numeric_limits<int32_t>::max());
+    const llmq::pq::ChainLockScheduleConfig schedule{
+        .epoch_origin = static_cast<int32_t>(aligned_origin)};
+    const auto roster_height{
+        llmq::pq::RegistrationCutoffHeight(schedule, 5, roster_lag)};
+    BOOST_REQUIRE(roster_height);
+    BOOST_REQUIRE(llmq::pq::IsRegistrationCutoffHeight(
+        schedule, roster_lag, *roster_height));
+    BOOST_CHECK(!llmq::pq::IsRegistrationCutoffHeight(
+        schedule, roster_lag, *roster_height + 1));
+
+    const int ordinary_branch_writes{
+        CDeterministicMNManager::LIST_CACHE_SIZE + 25};
+    const auto branch_hash = [](int offset) {
+        return ArithToUint256(arith_uint256{
+            static_cast<uint64_t>(0x100000 + offset)});
+    };
+    const ScopedDiskDBPath disk_db;
+
+    auto db_params = DBParams{
+        .path = disk_db.path,
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = false,
+        .wipe_data = true,
+    };
+    {
+        CDeterministicMNManager manager(db_params);
+        BOOST_CHECK_EQUAL(
+            manager.UpdateFinalitySnapshotRetentionFloor(*roster_height),
+            *roster_height);
+        for (int offset{0}; offset < 2; ++offset) {
+            const uint256 hash{branch_hash(offset)};
+            BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+                hash, CDeterministicMNList{hash, *roster_height, 0},
+                /*fSync=*/true));
+        }
+
+        // SYSCOIN: Only exact roster cutoffs bypass the lossy ordinary FIFO.
+        // More than one complete window of non-cutoff branch churn therefore
+        // cannot evict either persisted roster, without making IBD retain a
+        // full DMN list for every historical block.
+        const int ordinary_height{*roster_height + 1};
+        for (int offset{0}; offset < ordinary_branch_writes; ++offset) {
+            const uint256 hash{branch_hash(100 + offset)};
+            manager.m_evoDb->WriteCache(
+                hash, CDeterministicMNList{hash, ordinary_height, 0});
+        }
+        BOOST_CHECK_EQUAL(manager.m_evoDb->CountPersistedEntries(), 2);
+        CDeterministicMNList snapshot;
+        BOOST_REQUIRE(manager.m_evoDb->Read(branch_hash(0), snapshot));
+        BOOST_CHECK(snapshot.GetBlockHash() == branch_hash(0));
+        BOOST_REQUIRE(manager.m_evoDb->Read(branch_hash(1), snapshot));
+        BOOST_CHECK(snapshot.GetBlockHash() == branch_hash(1));
+    }
+
+    db_params.wipe_data = false;
+    CDeterministicMNManager restarted(db_params);
+    CDeterministicMNList snapshot;
+    BOOST_REQUIRE(restarted.m_evoDb->Read(branch_hash(0), snapshot));
+    BOOST_CHECK(snapshot.GetBlockHash() == branch_hash(0));
+    BOOST_REQUIRE(restarted.m_evoDb->Read(branch_hash(1), snapshot));
+    BOOST_CHECK(snapshot.GetBlockHash() == branch_hash(1));
+    BOOST_CHECK(!restarted.m_evoDb->Read(branch_hash(100), snapshot));
+    BOOST_REQUIRE(restarted.m_evoDb->Read(
+        branch_hash(100 + ordinary_branch_writes - 1), snapshot));
+}
+
+BOOST_AUTO_TEST_CASE(finality_roster_process_block_uses_sparse_write_through)
+{
+    SelectParams(ChainType::MAIN);
+    LOCK(::cs_main);
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    struct RestoreProfile {
+        Consensus::Params& consensus;
+        int dip3_height{consensus.DIP0003Height};
+        int preparation_height{consensus.nPQPreparationHeight};
+        int epoch_origin{consensus.nPQChainLockEpochOrigin};
+        uint32_t registration_cutoff{consensus.nPQRegistrationCutoffBlocks};
+        int roster_lag{consensus.nPQRosterSnapshotLag};
+        uint32_t future_horizon{consensus.nPQFutureHorizonEpochs};
+        int activation_height{consensus.nPQActivationHeight};
+        ~RestoreProfile()
+        {
+            consensus.DIP0003Height = dip3_height;
+            consensus.nPQPreparationHeight = preparation_height;
+            consensus.nPQChainLockEpochOrigin = epoch_origin;
+            consensus.nPQRegistrationCutoffBlocks = registration_cutoff;
+            consensus.nPQRosterSnapshotLag = roster_lag;
+            consensus.nPQFutureHorizonEpochs = future_horizon;
+            consensus.nPQActivationHeight = activation_height;
+        }
+    } restore{consensus};
+
+    constexpr int roster_lag{288};
+    const int64_t minimum_origin{
+        static_cast<int64_t>(consensus.DIP0003Height) + 2 * roster_lag};
+    const int64_t aligned_origin{
+        ((minimum_origin + llmq::pq::PQ_EPOCH_ALIGNMENT - 1) /
+         llmq::pq::PQ_EPOCH_ALIGNMENT) *
+        llmq::pq::PQ_EPOCH_ALIGNMENT};
+    BOOST_REQUIRE_LE(aligned_origin,
+                     std::numeric_limits<int32_t>::max());
+    consensus.nPQChainLockEpochOrigin = static_cast<int>(aligned_origin);
+    consensus.nPQRegistrationCutoffBlocks = roster_lag;
+    consensus.nPQRosterSnapshotLag = roster_lag;
+    consensus.nPQFutureHorizonEpochs = 8;
+    consensus.nPQPreparationHeight =
+        consensus.nPQChainLockEpochOrigin - roster_lag - 1;
+    consensus.DIP0003Height = consensus.nPQPreparationHeight - 1;
+    consensus.nPQActivationHeight = std::numeric_limits<int>::max();
+
+    llmq::pq::PQRegistryConfig registry_config;
+    BOOST_REQUIRE(llmq::pq::GetPQRegistryConfig(
+                      consensus, registry_config) ==
+                  llmq::pq::PQRegistryDeploymentResult::VALID);
+    const int preparation_height{consensus.nPQPreparationHeight};
+    const int roster_height{preparation_height + 1};
+    BOOST_REQUIRE(!llmq::pq::IsRegistrationCutoffHeight(
+        registry_config.schedule, roster_lag, preparation_height));
+    BOOST_REQUIRE(llmq::pq::IsRegistrationCutoffHeight(
+        registry_config.schedule, roster_lag, roster_height));
+
+    auto db_params = DBParams{
+        .path = "testdb_dmn_sparse_roster_write_through",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    };
+    CDeterministicMNManager manager(db_params);
+    const uint256 parent_hash{MakeSnapshotKey(preparation_height - 1)};
+    BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+        parent_hash,
+        CDeterministicMNList{
+            parent_hash, preparation_height - 1, 0},
+        /*fSync=*/true));
+    BOOST_CHECK_EQUAL(manager.UpdateFinalitySnapshotRetentionFloor(
+                          preparation_height),
+                      preparation_height);
+    manager.m_evoDb->FailNextWriteThroughForTesting();
+
+    CBlockIndex parent_index;
+    parent_index.nHeight = preparation_height - 1;
+    parent_index.phashBlock = &parent_hash;
+    CBlock preparation_block{MakeProviderMutationBlock({})};
+    preparation_block.hashPrevBlock = parent_hash;
+    preparation_block.nTime = 1;
+    preparation_block.nNonce = 1;
+    const uint256 preparation_hash{preparation_block.GetHash()};
+    CBlockIndex preparation_index;
+    preparation_index.nHeight = preparation_height;
+    preparation_index.pprev = &parent_index;
+    preparation_index.phashBlock = &preparation_hash;
+
+    CCoinsView base_view;
+    CCoinsViewCache view(&base_view);
+    const llmq::CFinalCommitmentTxPayload no_legacy_commitment;
+    BlockValidationState preparation_state;
+    CDeterministicMNListNEVMAddressDiff preparation_diff;
+    BOOST_REQUIRE(manager.ProcessBlock(
+        preparation_block, &preparation_index, preparation_state, view,
+        no_legacy_commitment, preparation_diff,
+        /*fJustCheck=*/false, /*ibd=*/true));
+    CDeterministicMNList snapshot;
+    BOOST_CHECK(!manager.m_evoDb->Read(preparation_hash, snapshot));
+
+    CBlock roster_block{MakeProviderMutationBlock({})};
+    roster_block.hashPrevBlock = preparation_hash;
+    roster_block.nTime = 2;
+    roster_block.nNonce = 2;
+    const uint256 roster_hash{roster_block.GetHash()};
+    CBlockIndex roster_index;
+    roster_index.nHeight = roster_height;
+    roster_index.pprev = &preparation_index;
+    roster_index.phashBlock = &roster_hash;
+
+    // SYSCOIN: The hook remains armed across the non-cutoff block and fires
+    // only at the exact roster cutoff. Its exception must be a local runtime
+    // error, never a consensus-invalid verdict, and a retry must persist it.
+    BlockValidationState failed_state;
+    CDeterministicMNListNEVMAddressDiff failed_diff;
+    BOOST_CHECK(!manager.ProcessBlock(
+        roster_block, &roster_index, failed_state, view,
+        no_legacy_commitment, failed_diff,
+        /*fJustCheck=*/false, /*ibd=*/true));
+    BOOST_CHECK(failed_state.IsError());
+    BOOST_CHECK(!failed_state.IsInvalid());
+    BOOST_CHECK_EQUAL(failed_state.GetRejectReason(), "failed-dmn-persist");
+    BOOST_CHECK(!manager.m_evoDb->Read(roster_hash, snapshot));
+
+    BlockValidationState retry_state;
+    CDeterministicMNListNEVMAddressDiff retry_diff;
+    BOOST_REQUIRE(manager.ProcessBlock(
+        roster_block, &roster_index, retry_state, view,
+        no_legacy_commitment, retry_diff,
+        /*fJustCheck=*/false, /*ibd=*/true));
+    BOOST_REQUIRE(manager.m_evoDb->Read(roster_hash, snapshot));
+    BOOST_CHECK(snapshot.GetBlockHash() == roster_hash);
+}
+
+BOOST_AUTO_TEST_CASE(pq_revoke_provider_mutation_conflicts_are_order_independent)
+{
+    SelectParams(ChainType::REGTEST);
+    const int parent_height = Params().GetConsensus().DIP0003Height;
+    const uint256 parent_hash{MakeSnapshotKey(parent_height)};
+    CBlockIndex parent_index;
+    parent_index.nHeight = parent_height;
+    parent_index.phashBlock = &parent_hash;
+
+    auto db_params = DBParams{
+        .path = "testdb_dmn_pq_revoke_conflicts",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    };
+    CDeterministicMNManager manager(db_params);
+    CDeterministicMNList parent_list(parent_hash, parent_height, 1);
+    const auto member{MakeAnchorMN(1, 1)};
+    parent_list.AddMN(member, /*fBumpTotalCount=*/false);
+    manager.m_evoDb->WriteCache(parent_hash, parent_list);
+
+    CCoinsView base_view;
+    CCoinsViewCache view(&base_view);
+    const auto revoke{MakeProviderMutationTransaction(
+        SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE, member->proTxHash, 1)};
+    const auto service{MakeProviderMutationTransaction(
+        SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE, member->proTxHash, 2)};
+    const auto registrar{MakeProviderMutationTransaction(
+        SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR, member->proTxHash, 3)};
+    const llmq::CFinalCommitmentTxPayload no_legacy_commitment;
+
+    auto check_conflict = [&](const CBlock& block) {
+        BlockValidationState state;
+        CDeterministicMNList next_list;
+        CDeterministicMNList old_list;
+        BOOST_CHECK(!manager.BuildNewListFromBlock(
+            block, &parent_index, state, view, next_list, old_list,
+            no_legacy_commitment));
+        BOOST_CHECK_EQUAL(state.GetRejectReason(),
+                          "bad-protx-pq-revoke-conflict");
+    };
+    check_conflict(MakeProviderMutationBlock({revoke, service}));
+    check_conflict(MakeProviderMutationBlock({service, revoke}));
+    check_conflict(MakeProviderMutationBlock({revoke, registrar}));
+    check_conflict(MakeProviderMutationBlock({registrar, revoke}));
+
+    BlockValidationState state;
+    CDeterministicMNList next_list;
+    CDeterministicMNList old_list;
+    BOOST_REQUIRE(manager.BuildNewListFromBlock(
+        MakeProviderMutationBlock({revoke}), &parent_index, state, view,
+        next_list, old_list, no_legacy_commitment));
+    const auto revoked{next_list.GetMN(member->proTxHash)};
+    BOOST_REQUIRE(revoked);
+    BOOST_CHECK(revoked->pdmnState->IsBanned());
+}
+
+BOOST_AUTO_TEST_CASE(opaque_legacy_participation_penalties_replay_until_activation)
+{
+    SelectParams(ChainType::REGTEST);
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    const int old_activation_height{consensus.nPQActivationHeight};
+    struct RestoreActivation {
+        Consensus::Params& consensus;
+        int height;
+        ~RestoreActivation()
+        {
+            consensus.nPQActivationHeight = height;
+        }
+    } restore{consensus, old_activation_height};
+
+    const int replay_interval{
+        consensus.legacyQuorumReplay.session_interval};
+    BOOST_REQUIRE_GT(replay_interval, 0);
+    BOOST_REQUIRE_GE(consensus.DIP0003Height, 0);
+    // SYSCOIN: Test fixtures may override DIP3 to a non-session boundary, but
+    // the commitment must reference the exact replay base selected by consensus.
+    const int64_t base_height_wide{
+        ((static_cast<int64_t>(consensus.DIP0003Height) +
+          replay_interval - 1) /
+         replay_interval) * replay_interval};
+    BOOST_REQUIRE_GE(base_height_wide, consensus.DIP0003Height);
+    BOOST_REQUIRE_LE(
+        base_height_wide + replay_interval - 1,
+        static_cast<int64_t>(std::numeric_limits<int>::max()));
+    const int base_height{static_cast<int>(base_height_wide)};
+    const int final_legacy_height{base_height + replay_interval - 1};
+    const auto chain{BuildSnapshotIndexChain(
+        base_height, final_legacy_height - base_height + 1)};
+    consensus.nPQActivationHeight = final_legacy_height + 1;
+
+    auto db_params = DBParams{
+        .path = "testdb_dmn_opaque_legacy_penalties",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    };
+    CDeterministicMNManager manager(db_params);
+    std::array<CDeterministicMNCPtr, 3> source_members{
+        MakeLegacyReplayMN(1, 1), MakeLegacyReplayMN(2, 3),
+        MakeLegacyReplayMN(3, 4)};
+
+    auto make_list = [&](int height) {
+        CDeterministicMNList list{
+            chain.At(height)->GetBlockHash(), height,
+            static_cast<uint32_t>(source_members.size())};
+        for (const auto& member : source_members) {
+            list.AddMN(member, /*fBumpTotalCount=*/false);
+        }
+        return list;
+    };
+    const auto base_list{make_list(base_height)};
+    const auto parent_list{make_list(final_legacy_height - 1)};
+    const auto final_legacy_list{make_list(final_legacy_height)};
+    manager.m_evoDb->WriteCache(chain.At(base_height)->GetBlockHash(),
+                                base_list);
+    manager.m_evoDb->WriteCache(
+        chain.At(final_legacy_height - 1)->GetBlockHash(), parent_list);
+    manager.m_evoDb->WriteCache(
+        chain.At(final_legacy_height)->GetBlockHash(), final_legacy_list);
+
+    const auto roster{base_list.CalculateQuorum(
+        static_cast<std::size_t>(consensus.legacyQuorumReplay.size),
+        chain.At(base_height)->GetBlockHash())};
+    BOOST_REQUIRE_EQUAL(roster.size(), source_members.size());
+    constexpr std::size_t invalid_member{1};
+    const auto commitment{MakeLegacyReplayCommitment(
+        static_cast<uint32_t>(final_legacy_height),
+        chain.At(base_height)->GetBlockHash(), invalid_member)};
+
+    CCoinsView base_view;
+    CCoinsViewCache view(&base_view);
+    const CBlock empty_block{MakeProviderMutationBlock({})};
+    BlockValidationState state;
+    CDeterministicMNList next_list;
+    CDeterministicMNList old_list;
+    BOOST_REQUIRE(manager.BuildNewListFromBlock(
+        empty_block, chain.At(final_legacy_height - 1), state, view, next_list,
+        old_list, commitment));
+    const auto punished{next_list.GetMN(roster[invalid_member]->proTxHash)};
+    BOOST_REQUIRE(punished);
+    BOOST_CHECK_EQUAL(punished->pdmnState->nPoSePenalty,
+                      next_list.CalcPenalty(66));
+    for (std::size_t i{0}; i < roster.size(); ++i) {
+        if (i == invalid_member) continue;
+        const auto member{next_list.GetMN(roster[i]->proTxHash)};
+        BOOST_REQUIRE(member);
+        BOOST_CHECK_EQUAL(member->pdmnState->nPoSePenalty, 0);
+    }
+
+    auto truncated{commitment};
+    truncated.commitment.validMembers.pop_back();
+    BlockValidationState malformed_state;
+    BOOST_CHECK(!manager.BuildNewListFromBlock(
+        empty_block, chain.At(final_legacy_height - 1), malformed_state, view,
+        next_list, old_list, truncated));
+    BOOST_CHECK_EQUAL(malformed_state.GetRejectReason(), "bad-qc-structure");
+
+    BOOST_CHECK(Consensus::CheckPQLegacyReplay(
+                    consensus, final_legacy_height + 1) ==
+                Consensus::PQLegacyReplayResult::RETIRED);
+}
+
+BOOST_AUTO_TEST_CASE(legacy_operator_scheme_migration_preserves_operator_state)
+{
+    SelectParams(ChainType::REGTEST);
+    const int parent_height{std::max(Params().GetConsensus().DIP0003Height, 1)};
+    const uint256 parent_hash{MakeSnapshotKey(parent_height)};
+    CBlockIndex parent_index;
+    parent_index.nHeight = parent_height;
+    parent_index.phashBlock = &parent_hash;
+
+    auto db_params = DBParams{
+        .path = "testdb_dmn_legacy_operator_scheme_migration",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true,
+        .wipe_data = true,
+    };
+    CDeterministicMNManager manager(db_params);
+
+    // The first same-key v1-to-v2 migration on mainnet occurred in ProUpReg
+    // dee303e3... at height 1,625,508 and must not reset operator state.
+    const auto legacy_bytes{ParseHex(
+        "0171e2a623a3f2709cb7d1802860be86ed5f5ef78c09c166"
+        "f3f58369e1bbd55b50a47f3ca5464819b21131026d678afb")};
+    const auto basic_bytes{ParseHex(
+        "8171e2a623a3f2709cb7d1802860be86ed5f5ef78c09c166"
+        "f3f58369e1bbd55b50a47f3ca5464819b21131026d678afb")};
+    CLegacyBLSPublicKey legacy_key;
+    CLegacyBLSPublicKey basic_key;
+    BOOST_REQUIRE(legacy_key.SetBytes(legacy_bytes));
+    BOOST_REQUIRE(basic_key.SetBytes(basic_bytes));
+
+    auto member = std::make_shared<CDeterministicMN>(1);
+    member->proTxHash = MakeSnapshotKey(30'001);
+    member->collateralOutpoint = COutPoint{MakeSnapshotKey(30'002), 0};
+    auto member_state = std::make_shared<CDeterministicMNState>();
+    member_state->nVersion = CProRegTx::LEGACY_BLS_VERSION;
+    member_state->nRegisteredHeight = parent_height - 1;
+    member_state->nCollateralHeight = parent_height - 1;
+    member_state->confirmedHash = MakeSnapshotKey(30'003);
+    member_state->confirmedHashWithProRegTxHash = MakeSnapshotKey(30'004);
+    member_state->keyIDOwner = MakeAnchorKeyID(0x21);
+    member_state->keyIDVoting = MakeAnchorKeyID(0x31);
+    member_state->pubKeyOperator = legacy_key;
+    member_state->scriptPayout = CScript{} << OP_TRUE;
+    member_state->scriptOperatorPayout = CScript{} << OP_DUP;
+    member_state->vchNEVMAddress = {1, 2, 3, 4};
+    member->pdmnState = member_state;
+
+    CDeterministicMNList parent_list{parent_hash, parent_height, 1};
+    parent_list.AddMN(member, /*fBumpTotalCount=*/false);
+    manager.m_evoDb->WriteCache(parent_hash, parent_list);
+
+    CCoinsView base_view;
+    CCoinsViewCache view(&base_view);
+    const llmq::CFinalCommitmentTxPayload no_legacy_commitment;
+    const auto build_update = [&](const CLegacyBLSPublicKey& operator_key) {
+        CMutableTransaction tx;
+        tx.nVersion = SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR;
+        tx.vin.emplace_back(COutPoint{MakeSnapshotKey(30'005), 0});
+        tx.vout.emplace_back(1, CScript{} << OP_TRUE);
+
+        CProUpRegTx payload;
+        payload.nVersion = CProUpRegTx::BASIC_BLS_VERSION;
+        payload.proTxHash = member->proTxHash;
+        payload.pubKeyOperator = operator_key;
+        payload.keyIDVoting = member_state->keyIDVoting;
+        payload.scriptPayout = member_state->scriptPayout;
+        payload.inputsHash = MakeSnapshotKey(30'006);
+        payload.vchSig.assign(1, 1);
+        SetTxPayload(tx, payload);
+
+        BlockValidationState state;
+        CDeterministicMNList next_list;
+        CDeterministicMNList old_list;
+        BOOST_REQUIRE(manager.BuildNewListFromBlock(
+            MakeProviderMutationBlock({MakeTransactionRef(std::move(tx))}),
+            &parent_index, state, view, next_list, old_list,
+            no_legacy_commitment));
+        return next_list;
+    };
+
+    const auto migrated_list{build_update(basic_key)};
+    const auto migrated{migrated_list.GetMN(member->proTxHash)};
+    BOOST_REQUIRE(migrated);
+    BOOST_CHECK_EQUAL(migrated->pdmnState->nVersion,
+                      CProRegTx::LEGACY_BLS_VERSION);
+    BOOST_CHECK(migrated->pdmnState->pubKeyOperator == legacy_key);
+    BOOST_CHECK(!migrated->pdmnState->IsBanned());
+    BOOST_CHECK(migrated->pdmnState->scriptOperatorPayout ==
+                member_state->scriptOperatorPayout);
+    BOOST_CHECK(migrated->pdmnState->vchNEVMAddress ==
+                member_state->vchNEVMAddress);
+    BOOST_CHECK(!parent_list.HasNEVMAddressChanges(migrated_list));
+    BOOST_REQUIRE(migrated_list.GetUniquePropertyMN(legacy_key));
+    BOOST_CHECK(!migrated_list.HasUniqueProperty(basic_key));
+    auto removable_list{migrated_list};
+    BOOST_CHECK_NO_THROW(removable_list.RemoveMN(member->proTxHash));
+    BOOST_CHECK(!removable_list.HasMN(member->proTxHash));
+
+    auto changed_bytes{basic_bytes};
+    changed_bytes.front() ^= 0x20U;
+    CLegacyBLSPublicKey changed_key;
+    BOOST_REQUIRE(changed_key.SetBytes(changed_bytes));
+    const auto changed_list{build_update(changed_key)};
+    const auto changed{changed_list.GetMN(member->proTxHash)};
+    BOOST_REQUIRE(changed);
+    BOOST_CHECK_EQUAL(changed->pdmnState->nVersion,
+                      CProRegTx::BASIC_BLS_VERSION);
+    BOOST_CHECK(changed->pdmnState->pubKeyOperator == changed_key);
+    BOOST_CHECK(changed->pdmnState->IsBanned());
+    BOOST_CHECK(changed->pdmnState->scriptOperatorPayout.empty());
+    BOOST_CHECK(changed->pdmnState->vchNEVMAddress.empty());
+    BOOST_CHECK(parent_list.HasNEVMAddressChanges(changed_list));
+    BOOST_REQUIRE(changed_list.GetUniquePropertyMN(changed_key));
+    BOOST_CHECK(!changed_list.HasUniqueProperty(legacy_key));
+}
+
+BOOST_AUTO_TEST_CASE(nevm_address_projection_tracks_exact_net_changes)
+{
+    const auto member{MakeNEVMAddressMN(1, 1)};
+    const auto& address{member->pdmnState->vchNEVMAddress};
+    const auto collateral_height{
+        static_cast<uint32_t>(member->pdmnState->nCollateralHeight)};
+    const std::vector<unsigned char> updated_address(20, 0x42);
+    const CDeterministicMNList empty{MakeSnapshotKey(61'001), 5000, 0};
+    auto original{empty};
+    original.AddMN(member);
+
+    CDeterministicMNListNEVMAddressDiff actual;
+    CDeterministicMNListNEVMAddressDiff expected;
+    expected.addedMNNEVM.emplace_back(address, collateral_height);
+    BOOST_CHECK(empty.HasNEVMAddressChanges(original));
+    empty.BuildNEVMAddressDiff(original, actual);
+    CheckNEVMAddressDiff(actual, expected);
+
+    auto updated{original};
+    auto updated_state{
+        std::make_shared<CDeterministicMNState>(*member->pdmnState)};
+    updated_state->vchNEVMAddress = updated_address;
+    updated.UpdateMN(member->proTxHash, updated_state);
+    expected = {};
+    expected.updatedMNNEVM.emplace_back(
+        address, std::make_pair(updated_address, collateral_height));
+    BOOST_CHECK(original.HasNEVMAddressChanges(updated));
+    original.BuildNEVMAddressDiff(updated, actual);
+    CheckNEVMAddressDiff(actual, expected);
+
+    CDeterministicMNListDiff inverse;
+    updated.BuildTrackedInverseDiff(original, inverse);
+    const uint256 parent_hash{original.GetBlockHash()};
+    CBlockIndex parent_index;
+    parent_index.nHeight = original.GetHeight();
+    parent_index.phashBlock = &parent_hash;
+    const auto restored{updated.ApplyDiff(
+        &parent_index, inverse, original.GetTotalRegisteredCount())};
+    BOOST_CHECK(!original.HasNEVMAddressChanges(restored));
+
+    auto cleared{updated};
+    auto cleared_state{
+        std::make_shared<CDeterministicMNState>(*updated_state)};
+    cleared_state->vchNEVMAddress.clear();
+    cleared.UpdateMN(member->proTxHash, cleared_state);
+    expected = {};
+    expected.removedMNNEVM.emplace_back(updated_address);
+    BOOST_CHECK(updated.HasNEVMAddressChanges(cleared));
+    updated.BuildNEVMAddressDiff(cleared, actual);
+    CheckNEVMAddressDiff(actual, expected);
+
+    auto removed{original};
+    removed.RemoveMN(member->proTxHash);
+    expected.removedMNNEVM = {address};
+    original.BuildNEVMAddressDiff(removed, actual);
+    CheckNEVMAddressDiff(actual, expected);
+    BOOST_CHECK(!empty.HasNEVMAddressChanges(removed));
+
+    auto banned{original};
+    banned.PoSePunish(member->proTxHash, banned.CalcMaxPoSePenalty());
+    BOOST_CHECK(banned.GetMN(member->proTxHash)->pdmnState->IsBanned());
+    BOOST_CHECK(original.HasNEVMAddressChanges(banned));
+    original.BuildNEVMAddressDiff(banned, actual);
+    CheckNEVMAddressDiff(actual, expected);
+
+    auto bookkeeping{original};
+    auto bookkeeping_state{
+        std::make_shared<CDeterministicMNState>(*member->pdmnState)};
+    ++bookkeeping_state->nLastPaidHeight;
+    ++bookkeeping_state->nPoSePenalty;
+    ++bookkeeping_state->nCollateralHeight;
+    bookkeeping.UpdateMN(member->proTxHash, bookkeeping_state);
+    bookkeeping.SetHeight(original.GetHeight() + 1);
+    bookkeeping.SetBlockHash(MakeSnapshotKey(61'002));
+    bookkeeping.ResetTrackedChanges();
+    BOOST_CHECK(!original.HasNEVMAddressChanges(bookkeeping));
+    original.BuildNEVMAddressDiff(bookkeeping, actual);
+    CheckNEVMAddressDiff(actual, {});
+
+    updated.UpdateMN(member->proTxHash, member->pdmnState);
+    BOOST_CHECK(!original.HasNEVMAddressChanges(updated));
+    original.BuildNEVMAddressDiff(updated, actual);
+    CheckNEVMAddressDiff(actual, {});
+
+    auto addressless{std::make_shared<CDeterministicMN>(
+        *MakeNEVMAddressMN(3, 3))};
+    auto addressless_state{
+        std::make_shared<CDeterministicMNState>(*addressless->pdmnState)};
+    addressless_state->vchNEVMAddress.clear();
+    addressless->pdmnState = std::move(addressless_state);
+    bookkeeping.AddMN(addressless);
+    BOOST_CHECK(!original.HasNEVMAddressChanges(bookkeeping));
+    original.BuildNEVMAddressDiff(bookkeeping, actual);
+    CheckNEVMAddressDiff(actual, {});
+    bookkeeping.RemoveMN(addressless->proTxHash);
+    BOOST_CHECK(!original.HasNEVMAddressChanges(bookkeeping));
+}
+
+BOOST_AUTO_TEST_CASE(nevm_address_projection_preserves_owner_identity)
+{
+    const auto first_owner{MakeNEVMAddressMN(1, 1)};
+    auto next_owner{std::make_shared<CDeterministicMN>(
+        *MakeNEVMAddressMN(3, 3))};
+    auto next_state{
+        std::make_shared<CDeterministicMNState>(*next_owner->pdmnState)};
+    next_state->vchNEVMAddress = first_owner->pdmnState->vchNEVMAddress;
+    next_owner->pdmnState = std::move(next_state);
+
+    CDeterministicMNList original{MakeSnapshotKey(62'001), 5000, 0};
+    original.AddMN(first_owner);
+    auto transferred{original};
+    transferred.RemoveMN(first_owner->proTxHash);
+    transferred.AddMN(next_owner);
+
+    // The address set is unchanged, but BuildDiff preserves provider identity.
+    BOOST_CHECK(original.HasNEVMAddressChanges(transferred));
+    CDeterministicMNListNEVMAddressDiff actual;
+    original.BuildNEVMAddressDiff(transferred, actual);
+    CDeterministicMNListNEVMAddressDiff expected;
+    expected.addedMNNEVM.emplace_back(
+        next_owner->pdmnState->vchNEVMAddress,
+        static_cast<uint32_t>(next_owner->pdmnState->nCollateralHeight));
+    expected.removedMNNEVM.emplace_back(
+        first_owner->pdmnState->vchNEVMAddress);
+    CheckNEVMAddressDiff(actual, expected);
+
+    transferred.BuildNEVMAddressDiff(original, actual);
+    expected.addedMNNEVM.front().second =
+        static_cast<uint32_t>(first_owner->pdmnState->nCollateralHeight);
+    CheckNEVMAddressDiff(actual, expected);
+}
+
+BOOST_AUTO_TEST_CASE(nevm_address_projection_survives_reload_and_rejected_updates)
+{
+    const auto first{MakeNEVMAddressMN(1, 1)};
+    const auto second{MakeNEVMAddressMN(3, 3)};
+    CDeterministicMNList original{MakeSnapshotKey(63'001), 5000, 0};
+    original.AddMN(first);
+    original.AddMN(second);
+    auto changed{original};
+    auto changed_state{
+        std::make_shared<CDeterministicMNState>(*first->pdmnState)};
+    changed_state->vchNEVMAddress.assign(20, 0x42);
+    changed.UpdateMN(first->proTxHash, changed_state);
+    BOOST_REQUIRE(original.HasNEVMAddressChanges(changed));
+
+    auto reloaded{changed};
+    BOOST_CHECK(!changed.HasNEVMAddressChanges(reloaded));
+    CDataStream original_encoded{SER_DISK, PROTOCOL_VERSION};
+    original_encoded << original;
+    original_encoded >> reloaded;
+    BOOST_CHECK(!original.HasNEVMAddressChanges(reloaded));
+    BOOST_CHECK(changed.HasNEVMAddressChanges(reloaded));
+    CDataStream changed_encoded{SER_DISK, PROTOCOL_VERSION};
+    changed_encoded << changed;
+    changed_encoded >> reloaded;
+    BOOST_CHECK(!changed.HasNEVMAddressChanges(reloaded));
+    BOOST_CHECK(original.HasNEVMAddressChanges(reloaded));
+
+    CDeterministicMNListNEVMAddressDiff expected;
+    CDeterministicMNListNEVMAddressDiff actual;
+    original.BuildNEVMAddressDiff(changed, expected);
+    original.BuildNEVMAddressDiff(reloaded, actual);
+    CheckNEVMAddressDiff(actual, expected);
+    reloaded.clear();
+    const CDeterministicMNList empty;
+    BOOST_CHECK(!empty.HasNEVMAddressChanges(reloaded));
+    empty.BuildNEVMAddressDiff(reloaded, actual);
+    CheckNEVMAddressDiff(actual, {});
+    reloaded = original;
+    reloaded.ResetTrackedChanges();
+    BOOST_CHECK(!original.HasNEVMAddressChanges(reloaded));
+
+    auto duplicate_state{
+        std::make_shared<CDeterministicMNState>(*second->pdmnState)};
+    duplicate_state->vchNEVMAddress = first->pdmnState->vchNEVMAddress;
+    BOOST_CHECK_THROW(reloaded.UpdateMN(second->proTxHash, duplicate_state),
+                      std::runtime_error);
+    BOOST_CHECK(!original.HasNEVMAddressChanges(reloaded));
+    BOOST_CHECK(reloaded == original);
+
+    auto duplicate{std::make_shared<CDeterministicMN>(
+        *MakeNEVMAddressMN(5, 5))};
+    auto duplicate_add_state{
+        std::make_shared<CDeterministicMNState>(*duplicate->pdmnState)};
+    duplicate_add_state->vchNEVMAddress = first->pdmnState->vchNEVMAddress;
+    duplicate->pdmnState = std::move(duplicate_add_state);
+    BOOST_CHECK_THROW(reloaded.AddMN(duplicate), std::runtime_error);
+    BOOST_CHECK(!original.HasNEVMAddressChanges(reloaded));
+    BOOST_CHECK(reloaded == original);
+}
+
+BOOST_FIXTURE_TEST_CASE(ibd_nevm_service_diffs_match_warm_and_reloaded_parents,
+                        ChainTestingSetup)
+{
+    SelectParams(ChainType::MAIN);
+    LOCK(::cs_main);
+    auto& consensus{const_cast<Consensus::Params&>(Params().GetConsensus())};
+    struct RestoreProfile {
+        Consensus::Params& consensus;
+        int preparation_height{consensus.nPQPreparationHeight};
+        int epoch_origin{consensus.nPQChainLockEpochOrigin};
+        uint32_t cutoff{consensus.nPQRegistrationCutoffBlocks};
+        uint32_t future{consensus.nPQFutureHorizonEpochs};
+        int activation_height{consensus.nPQActivationHeight};
+        int nexus_height{consensus.nNexusStartBlock};
+        bool nevm_connection{fNEVMConnection};
+        ~RestoreProfile()
+        {
+            consensus.nPQPreparationHeight = preparation_height;
+            consensus.nPQChainLockEpochOrigin = epoch_origin;
+            consensus.nPQRegistrationCutoffBlocks = cutoff;
+            consensus.nPQFutureHorizonEpochs = future;
+            consensus.nPQActivationHeight = activation_height;
+            consensus.nNexusStartBlock = nexus_height;
+            fNEVMConnection = nevm_connection;
+        }
+    } restore{consensus};
+    consensus.nPQPreparationHeight = std::numeric_limits<int>::max();
+    consensus.nPQChainLockEpochOrigin = std::numeric_limits<int>::max();
+    consensus.nPQRegistrationCutoffBlocks = 0;
+    consensus.nPQFutureHorizonEpochs = 0;
+    consensus.nPQActivationHeight = std::numeric_limits<int>::max();
+    consensus.nNexusStartBlock = consensus.DIP0003Height;
+    fNEVMConnection = true;
+
+    const int base_height{consensus.DIP0003Height};
+    auto member{std::make_shared<CDeterministicMN>(*MakeNEVMAddressMN(1, 1))};
+    auto member_state{
+        std::make_shared<CDeterministicMNState>(*member->pdmnState)};
+    member_state->vchNEVMAddress.clear();
+    member->pdmnState = member_state;
+    const auto collateral_height{
+        static_cast<uint32_t>(member_state->nCollateralHeight)};
+    const std::vector<unsigned char> first_address(20, 0x11);
+    const std::vector<unsigned char> second_address(20, 0x22);
+    const std::array<std::vector<unsigned char>, 4> addresses{
+        first_address, first_address, second_address, {}};
+    std::array<CDeterministicMNListNEVMAddressDiff, 4> expected;
+    expected[0].addedMNNEVM.emplace_back(first_address, collateral_height);
+    expected[2].updatedMNNEVM.emplace_back(
+        first_address, std::make_pair(second_address, collateral_height));
+    expected[3].removedMNNEVM.emplace_back(second_address);
+
+    for (const auto& [reload_parent, deferred] :
+         {std::pair{false, false}, std::pair{true, false},
+          std::pair{true, true}}) {
+        const ScopedDiskDBPath disk;
+        auto db_params = DBParams{
+            .path = disk.path,
+            .cache_bytes = static_cast<size_t>(1 << 20),
+            .memory_only = false,
+            .wipe_data = true,
+        };
+        auto manager{std::make_unique<CDeterministicMNManager>(db_params)};
+        std::array<uint256, 5> hashes;
+        std::array<CBlockIndex, 5> indices;
+        hashes[0] = MakeSnapshotKey(64'001);
+        indices[0].nHeight = base_height;
+        indices[0].phashBlock = &hashes[0];
+        CDeterministicMNList parent{hashes[0], base_height, 0};
+        parent.AddMN(member);
+        BOOST_REQUIRE(manager->m_evoDb->WriteThrough(
+            hashes[0], parent, /*fSync=*/true));
+        CCoinsView base_view;
+        CCoinsViewCache view(&base_view);
+
+        for (size_t step{0}; step < addresses.size(); ++step) {
+            if (reload_parent) {
+                manager.reset();
+                db_params.wipe_data = false;
+                manager = std::make_unique<CDeterministicMNManager>(db_params);
+            }
+            CMutableTransaction tx;
+            tx.nVersion = SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE;
+            tx.vin.emplace_back(COutPoint{
+                MakeSnapshotKey(65'000 + static_cast<int>(step)), 0});
+            tx.vout.emplace_back(1, CScript{} << OP_TRUE);
+            CProUpServTx payload;
+            payload.nVersion = CProUpServTx::UPDATE_NEVM_VERSION;
+            payload.proTxHash = member->proTxHash;
+            payload.inputsHash = MakeSnapshotKey(66'000 + static_cast<int>(step));
+            payload.vchNEVMAddress = addresses[step];
+            SetTxPayload(tx, payload);
+            CBlock block{MakeProviderMutationBlock(
+                {MakeTransactionRef(std::move(tx))})};
+            block.hashPrevBlock = hashes[step];
+            block.nTime = static_cast<uint32_t>(step + 1);
+            block.nNonce = static_cast<uint32_t>(step + 1);
+            hashes[step + 1] = block.GetHash();
+            auto& index{indices[step + 1]};
+            index.nHeight = base_height + static_cast<int>(step) + 1;
+            index.pprev = &indices[step];
+            index.phashBlock = &hashes[step + 1];
+
+            BlockValidationState state;
+            CDeterministicMNListNEVMAddressDiff delivered;
+            BOOST_REQUIRE_MESSAGE(manager->ProcessBlock(
+                block, &index, state, view, llmq::CFinalCommitmentTxPayload{},
+                delivered, /*fJustCheck=*/false, /*ibd=*/true, deferred),
+                state.ToString());
+            CheckNEVMAddressDiff(delivered,
+                                 deferred ? CDeterministicMNListNEVMAddressDiff{}
+                                          : expected[step]);
+            BOOST_REQUIRE(manager->FlushPendingSnapshotsToDisk(/*fSync=*/true));
+
+            // Deferred delivery must depend on persisted states, not live flags.
+            if (deferred) {
+                manager.reset();
+                db_params.wipe_data = false;
+                manager = std::make_unique<CDeterministicMNManager>(db_params);
+            }
+            const auto before{manager->GetListForBlock(index.pprev)};
+            const auto after{manager->GetListForBlock(&index)};
+            CDeterministicMNListNEVMAddressDiff replayed;
+            before.BuildNEVMAddressDiff(after, replayed);
+            CheckNEVMAddressDiff(replayed, expected[step]);
+            const auto current_member{after.GetMN(member->proTxHash)};
+            BOOST_REQUIRE(current_member);
+            BOOST_CHECK(current_member->pdmnState->vchNEVMAddress == addresses[step]);
+        }
+    }
+}
+// SYSCOIN END: PQ deterministic-MN, payment, registry, and maintenance regressions.
 
 BOOST_AUTO_TEST_SUITE_END()

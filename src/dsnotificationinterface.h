@@ -22,6 +22,8 @@ protected:
     // CValidationInterface
     void NotifyHeaderTip(const CBlockIndex *pindexNew) override;
     void UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *pindexFork, ChainstateManager& chainman, bool fInitialDownload) override;
+    void InitialBlockDownloadCompleted(
+        const CBlockIndex* tip, ChainstateManager& chainman) override;
     void NotifyMasternodeListChanged(bool undo, const CDeterministicMNList& oldMNList, const CDeterministicMNListDiff& diff) override;
 
 private:

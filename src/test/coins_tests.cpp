@@ -15,6 +15,9 @@
 #include <util/strencodings.h>
 
 #include <map>
+// SYSCOIN BEGIN: Exercise failed mint rollback durability barriers.
+#include <stdexcept>
+// SYSCOIN END: Exercise failed mint rollback durability barriers.
 #include <vector>
 
 #include <boost/test/unit_test.hpp>
@@ -1084,6 +1087,320 @@ BOOST_AUTO_TEST_CASE(ccoins_flush_behavior)
         TestFlushBehavior(view.get(), base, caches, /*do_erasing_flush=*/true);
     }
 }
+
+// SYSCOIN BEGIN: Mint rollback must sync prior coins writes before replay erasure.
+BOOST_AUTO_TEST_CASE(ccoins_mint_rollback_sync_batches)
+{
+    LOCK(cs_main);
+    const fs::path db_path{m_args.GetDataDirBase() / "mint_rollback_coins"};
+    const uint256 minted_tip{InsecureRand256()};
+    const uint256 parent_tip{InsecureRand256()};
+    const std::vector<COutPoint> minted_outputs{
+        {InsecureRand256(), 0}, {InsecureRand256(), 1},
+        {InsecureRand256(), 2}, {InsecureRand256(), 3}};
+    const COutPoint retained_output{InsecureRand256(), 0};
+    const COutPoint restored_input{InsecureRand256(), 0};
+    const Coin retained_coin{MakeCoin()};
+    const Coin restored_coin{MakeCoin()};
+
+    {
+        // Keep ordinary chunk writes asynchronous and issue one final barrier.
+        CCoinsViewDB db{{.path = db_path, .cache_bytes = 1 << 20,
+                        .wipe_data = true}, {.batch_write_bytes = 1}};
+        std::vector<bool> sync_flags;
+        size_t barriers{0};
+        db.SetWriteBatchCallbackForTesting([&](bool sync) {
+            sync_flags.push_back(sync);
+            return true;
+        });
+        db.SetSyncCallbackForTesting([&] {
+            ++barriers;
+            BOOST_CHECK(db.GetBestBlock() == parent_tip);
+            for (const auto& output : minted_outputs) {
+                BOOST_CHECK(!db.HaveCoin(output));
+            }
+            return true;
+        });
+
+        CCoinsViewCache connected{&db};
+        connected.SetBestBlock(minted_tip);
+        for (const auto& output : minted_outputs) {
+            connected.AddCoin(output, MakeCoin(), false);
+        }
+        connected.AddCoin(retained_output, Coin{retained_coin}, false);
+        BOOST_REQUIRE(connected.Flush());
+        BOOST_REQUIRE_GT(sync_flags.size(), 1U);
+        for (const bool sync : sync_flags) BOOST_CHECK(!sync);
+        BOOST_CHECK_EQUAL(barriers, 0U);
+
+        CCoinsViewCache disconnected{&db};
+        disconnected.SetBestBlock(parent_tip);
+        for (const auto& output : minted_outputs) {
+            BOOST_REQUIRE(disconnected.SpendCoin(output));
+        }
+        disconnected.AddCoin(restored_input, Coin{restored_coin}, false);
+        sync_flags.clear();
+        BOOST_REQUIRE(db.FlushWithSync(disconnected));
+        BOOST_REQUIRE_GT(sync_flags.size(), 1U);
+        for (const bool sync : sync_flags) BOOST_CHECK(!sync);
+        BOOST_CHECK_EQUAL(barriers, 1U);
+        BOOST_CHECK(db.GetBestBlock() == parent_tip);
+        BOOST_CHECK(db.GetHeadBlocks().empty());
+
+        // The critical flush must not change ordinary writes afterward.
+        CCoinsViewCache ordinary{&db};
+        ordinary.SetBestBlock(parent_tip);
+        sync_flags.clear();
+        BOOST_REQUIRE(ordinary.Flush());
+        BOOST_REQUIRE(!sync_flags.empty());
+        for (const bool sync : sync_flags) BOOST_CHECK(!sync);
+        BOOST_CHECK_EQUAL(barriers, 1U);
+        db.SetWriteBatchCallbackForTesting({});
+        db.SetSyncCallbackForTesting({});
+    }
+
+    CCoinsViewDB reopened{{.path = db_path, .cache_bytes = 1 << 20}, {}};
+    BOOST_CHECK(reopened.GetBestBlock() == parent_tip);
+    BOOST_CHECK(reopened.GetHeadBlocks().empty());
+    for (const auto& output : minted_outputs) {
+        BOOST_CHECK(!reopened.HaveCoin(output));
+    }
+    Coin actual;
+    BOOST_REQUIRE(reopened.GetCoin(retained_output, actual));
+    BOOST_CHECK(actual == retained_coin);
+    BOOST_REQUIRE(reopened.GetCoin(restored_input, actual));
+    BOOST_CHECK(actual == restored_coin);
+}
+
+BOOST_AUTO_TEST_CASE(ccoins_mint_rollback_write_failure_skips_barrier)
+{
+    LOCK(cs_main);
+    for (const bool throw_on_failure : {false, true}) {
+        // Three dirty coins create three partial writes followed by the tip
+        // commit. Cover failure before progress, after progress, and at commit.
+        for (const size_t fail_at : {1U, 2U, 4U}) {
+            const fs::path db_path{m_args.GetDataDirBase() /
+                fs::u8path(std::string{"mint_rollback_write_failure_"} +
+                           (throw_on_failure ? "throw_" : "false_") + std::to_string(fail_at))};
+            const uint256 minted_tip{InsecureRand256()};
+            const uint256 parent_tip{InsecureRand256()};
+            const std::vector<COutPoint> minted_outputs{
+                {InsecureRand256(), 0}, {InsecureRand256(), 1},
+                {InsecureRand256(), 2}};
+            const COutPoint retry_output{InsecureRand256(), 0};
+            uint256 failed_best;
+            std::vector<uint256> failed_heads;
+            {
+                CCoinsViewDB db{{.path = db_path, .cache_bytes = 1 << 20,
+                                .wipe_data = true}, {.batch_write_bytes = 1}};
+                CCoinsViewCache connected{&db};
+                connected.SetBestBlock(minted_tip);
+                for (const auto& output : minted_outputs) {
+                    connected.AddCoin(output, MakeCoin(), false);
+                }
+                BOOST_REQUIRE(db.FlushWithSync(connected));
+
+                std::vector<bool> sync_flags;
+                size_t barriers{0};
+                db.SetSyncCallbackForTesting([&] {
+                    ++barriers;
+                    return true;
+                });
+                db.SetWriteBatchCallbackForTesting([&](bool sync) {
+                    sync_flags.push_back(sync);
+                    if (sync_flags.size() == fail_at) {
+                        if (throw_on_failure) {
+                            throw std::runtime_error("injected coins write failure");
+                        }
+                        return false;
+                    }
+                    return true;
+                });
+                CCoinsViewCache critical{&db};
+                critical.SetBestBlock(parent_tip);
+                for (const auto& output : minted_outputs) {
+                    BOOST_REQUIRE(critical.SpendCoin(output));
+                }
+                if (throw_on_failure) {
+                    BOOST_CHECK_THROW(db.FlushWithSync(critical), std::runtime_error);
+                } else {
+                    BOOST_CHECK(!db.FlushWithSync(critical));
+                }
+                BOOST_REQUIRE_EQUAL(sync_flags.size(), fail_at);
+                for (const bool sync : sync_flags) BOOST_CHECK(!sync);
+                BOOST_CHECK_EQUAL(barriers, 0U);
+                failed_best = db.GetBestBlock();
+                failed_heads = db.GetHeadBlocks();
+                if (fail_at == 1) {
+                    BOOST_CHECK(failed_best == minted_tip);
+                    BOOST_CHECK(failed_heads.empty());
+                } else {
+                    BOOST_CHECK(failed_best.IsNull());
+                    BOOST_REQUIRE_EQUAL(failed_heads.size(), 2U);
+                    BOOST_CHECK(failed_heads[0] == parent_tip);
+                    BOOST_CHECK(failed_heads[1] == minted_tip);
+                }
+
+                size_t surviving_outputs{0};
+                for (const auto& output : minted_outputs) {
+                    surviving_outputs += db.HaveCoin(output);
+                }
+                BOOST_CHECK_EQUAL(surviving_outputs, 4U - fail_at);
+
+                // BatchWrite has already consumed part of this cache. Removing
+                // the injected failure must not let shutdown commit its now
+                // incomplete contents and clear the recovery heads.
+                size_t retry_writes{0};
+                db.SetWriteBatchCallbackForTesting([&](bool) {
+                    ++retry_writes;
+                    return true;
+                });
+                const auto check_failed_state = [&] {
+                    BOOST_CHECK_EQUAL(retry_writes, 0U);
+                    BOOST_CHECK_EQUAL(barriers, 0U);
+                    BOOST_CHECK(db.GetBestBlock() == failed_best);
+                    BOOST_CHECK(db.GetHeadBlocks() == failed_heads);
+                    BOOST_CHECK(!db.HaveCoin(retry_output));
+                    size_t still_surviving{0};
+                    for (const auto& output : minted_outputs) {
+                        still_surviving += db.HaveCoin(output);
+                    }
+                    BOOST_CHECK_EQUAL(still_surviving, surviving_outputs);
+                };
+                BOOST_CHECK(!critical.Flush());
+                check_failed_state();
+                BOOST_CHECK(!critical.Sync());
+                check_failed_state();
+                BOOST_CHECK(!db.FlushWithSync(critical));
+                check_failed_state();
+
+                // A fresh or emptied cache still belongs to the failed DB
+                // object; only reopening and reconstructing state can retry.
+                CCoinsViewCache ordinary{&db};
+                ordinary.SetBestBlock(parent_tip);
+                ordinary.AddCoin(retry_output, MakeCoin(), false);
+                BOOST_CHECK(!ordinary.Flush());
+                check_failed_state();
+                BOOST_CHECK(!ordinary.Sync());
+                check_failed_state();
+                BOOST_CHECK(!db.FlushWithSync(ordinary));
+                check_failed_state();
+                db.SetWriteBatchCallbackForTesting({});
+                db.SetSyncCallbackForTesting({});
+                BOOST_CHECK(!ordinary.Flush());
+                BOOST_CHECK(db.GetBestBlock() == failed_best);
+                BOOST_CHECK(db.GetHeadBlocks() == failed_heads);
+            }
+
+            // The failed-write latch is process-local. A cold DB preserves
+            // the exact old/partial state and accepts a fully reconstructed
+            // rollback, as startup's block replay supplies in production.
+            CCoinsViewDB reopened{{.path = db_path, .cache_bytes = 1 << 20},
+                                 {.batch_write_bytes = 1}};
+            BOOST_CHECK(reopened.GetBestBlock() == failed_best);
+            BOOST_CHECK(reopened.GetHeadBlocks() == failed_heads);
+            BOOST_CHECK(!reopened.HaveCoin(retry_output));
+            CCoinsViewCache reconstructed{&reopened};
+            reconstructed.SetBestBlock(parent_tip);
+            for (const auto& output : minted_outputs) {
+                if (reconstructed.HaveCoin(output)) {
+                    BOOST_REQUIRE(reconstructed.SpendCoin(output));
+                }
+            }
+            std::vector<bool> recovered_sync_flags;
+            size_t recovered_barriers{0};
+            reopened.SetWriteBatchCallbackForTesting([&](bool sync) {
+                recovered_sync_flags.push_back(sync);
+                return true;
+            });
+            reopened.SetSyncCallbackForTesting([&] {
+                ++recovered_barriers;
+                return true;
+            });
+            BOOST_REQUIRE(reopened.FlushWithSync(reconstructed));
+            BOOST_REQUIRE(!recovered_sync_flags.empty());
+            for (const bool sync : recovered_sync_flags) BOOST_CHECK(!sync);
+            BOOST_CHECK_EQUAL(recovered_barriers, 1U);
+            BOOST_CHECK(reopened.GetBestBlock() == parent_tip);
+            BOOST_CHECK(reopened.GetHeadBlocks().empty());
+            for (const auto& output : minted_outputs) {
+                BOOST_CHECK(!reopened.HaveCoin(output));
+            }
+            reopened.SetWriteBatchCallbackForTesting({});
+            reopened.SetSyncCallbackForTesting({});
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(ccoins_mint_rollback_sync_failure)
+{
+    LOCK(cs_main);
+    for (const bool throw_on_failure : {false, true}) {
+        CCoinsViewDB db{{.path = "mint_rollback_barrier_failure",
+                        .cache_bytes = 1 << 20, .memory_only = true}, {}};
+        const uint256 parent_tip{InsecureRand256()};
+        size_t barriers{0};
+        db.SetSyncCallbackForTesting([&] {
+            ++barriers;
+            BOOST_CHECK(db.GetBestBlock() == parent_tip);
+            if (throw_on_failure) throw std::runtime_error("injected coins sync failure");
+            return false;
+        });
+        CCoinsViewCache critical{&db};
+        critical.SetBestBlock(parent_tip);
+        critical.AddCoin({InsecureRand256(), 0}, MakeCoin(), false);
+        if (throw_on_failure) {
+            BOOST_CHECK_THROW(db.FlushWithSync(critical), std::runtime_error);
+        } else {
+            BOOST_CHECK(!db.FlushWithSync(critical));
+        }
+        BOOST_CHECK_EQUAL(barriers, 1U);
+
+        // Failed barriers do not turn later ordinary flushes into syncs.
+        CCoinsViewCache ordinary{&db};
+        ordinary.SetBestBlock(parent_tip);
+        BOOST_REQUIRE(ordinary.Flush());
+        BOOST_CHECK_EQUAL(barriers, 1U);
+        db.SetSyncCallbackForTesting({});
+    }
+}
+
+BOOST_AUTO_TEST_CASE(ccoins_mint_rollback_sync_after_fresh_cancellation)
+{
+    LOCK(cs_main);
+    CCoinsViewDB db{{.path = "mint_rollback_fresh_cancellation",
+                    .cache_bytes = 1 << 20, .memory_only = true}, {}};
+    const COutPoint minted_output{InsecureRand256(), 0};
+    const Coin minted_coin{MakeCoin()};
+    CCoinsViewCache minted{&db};
+    minted.SetBestBlock(InsecureRand256());
+    minted.AddCoin(minted_output, Coin{minted_coin}, false);
+    BOOST_REQUIRE(db.FlushWithSync(minted));
+
+    size_t barriers{0};
+    db.SetSyncCallbackForTesting([&] { ++barriers; return true; });
+    CCoinsViewCache spender{&db};
+    spender.SetBestBlock(InsecureRand256());
+    BOOST_REQUIRE(spender.SpendCoin(minted_output));
+    BOOST_REQUIRE(spender.Flush());
+    BOOST_CHECK_EQUAL(barriers, 0U);
+
+    // Undoing the spender restores a FRESH coin because the DB sees its earlier
+    // async spend. Undoing the mint then cancels that cache entry completely.
+    CCoinsViewCache rollback{&db};
+    BOOST_REQUIRE(!rollback.HaveCoin(minted_output));
+    rollback.AddCoin(minted_output, Coin{minted_coin}, false);
+    BOOST_REQUIRE(rollback.SpendCoin(minted_output));
+    BOOST_REQUIRE_EQUAL(rollback.GetCacheSize(), 0U);
+    const uint256 parent_tip{InsecureRand256()};
+    rollback.SetBestBlock(parent_tip);
+    BOOST_REQUIRE(db.FlushWithSync(rollback));
+    BOOST_CHECK_EQUAL(barriers, 1U);
+    BOOST_CHECK(db.GetBestBlock() == parent_tip);
+    BOOST_CHECK(!db.HaveCoin(minted_output));
+    db.SetSyncCallbackForTesting({});
+}
+// SYSCOIN END: Mint rollback must sync prior coins writes before replay erasure.
 
 BOOST_AUTO_TEST_CASE(coins_resource_is_used)
 {

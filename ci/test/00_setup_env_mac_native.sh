@@ -11,9 +11,9 @@ export PIP_PACKAGES="zmq"
 export PIP_INSTALL_FLAGS="--break-system-packages"
 export GOAL="install"
 export SYSCOIN_CONFIG="--with-gui --with-miniupnpc --with-natpmp --enable-reduce-exports"
-# Hosted macOS cannot reliably complete the long-running Syscoin
-# LLMQ/governance tests; cover those paths in the follow-up CI work.
-export TEST_RUNNER_EXTRA="--exclude interface_zmq_nevm,feature_llmqchainlocks,feature_llmqconnections,feature_llmqsimplepose,feature_governance,feature_governance_dynamic"
+# SYSCOIN: Generic MN/governance fixtures use lightweight test commitments,
+# so include them in the regular functional batch.
+export TEST_RUNNER_EXTRA="--exclude interface_zmq_nevm"
 export CI_OS_NAME="macos"
 export NO_DEPENDS=1
 export OSX_SDK=""

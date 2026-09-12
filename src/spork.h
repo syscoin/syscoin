@@ -38,10 +38,8 @@ enum {
     SPORK_TEST                                             = 10000,
     SPORK_TEST1                                            = 10001,
     SPORK_9_SUPERBLOCKS_ENABLED                            = 10008,
-    SPORK_17_QUORUM_DKG_ENABLED                            = 10016,
     SPORK_19_CHAINLOCKS_ENABLED                            = 10018,
-    SPORK_21_QUORUM_ALL_CONNECTED                          = 10020,
-    SPORK_23_QUORUM_POSE                                   = 10022,
+    // IDs 10016, 10020, and 10022 are reserved by the retired DKG stack.
 
     SPORK_INVALID                                          = -1,
 };
@@ -56,10 +54,7 @@ struct CSporkDef
 #define MAKE_SPORK_DEF(name, defaultValue) CSporkDef{name, defaultValue, #name}
 [[maybe_unused]] static constexpr std::array sporkDefs = {
         MAKE_SPORK_DEF(SPORK_9_SUPERBLOCKS_ENABLED,            0), // ON
-        MAKE_SPORK_DEF(SPORK_17_QUORUM_DKG_ENABLED,            4070908800ULL), // OFF
         MAKE_SPORK_DEF(SPORK_19_CHAINLOCKS_ENABLED,            4070908800ULL), // OFF
-        MAKE_SPORK_DEF(SPORK_21_QUORUM_ALL_CONNECTED,          4070908800ULL), // OFF
-        MAKE_SPORK_DEF(SPORK_23_QUORUM_POSE,                   4070908800ULL), // OFF
         MAKE_SPORK_DEF(SPORK_TEST,                             4070908800ULL), // OFF
         MAKE_SPORK_DEF(SPORK_TEST1,                            4070908800ULL), // OFF
 };

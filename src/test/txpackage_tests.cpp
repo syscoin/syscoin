@@ -2,17 +2,27 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <chainparams.h> // SYSCOIN: branch-bound provider package fixtures.
+#include <common/args.h> // SYSCOIN: regtest PQ activation fixtures.
 #include <consensus/validation.h>
+#include <evo/providertx.h> // SYSCOIN: provider package fixtures.
+#include <evo/specialtx_payload.h> // SYSCOIN: provider payload fixtures.
 #include <key_io.h>
+#include <netbase.h> // SYSCOIN: provider service fixtures.
 #include <policy/packages.h>
 #include <policy/policy.h>
 #include <primitives/transaction.h>
 #include <script/script.h>
+#include <script/sign.h> // SYSCOIN: provider package signing fixtures.
+#include <services/assetconsensus.h> // SYSCOIN: local mint database failures.
+#include <test/util/nevm_mint.h> // SYSCOIN: mint package read-error regression.
 #include <test/util/random.h>
 #include <test/util/setup_common.h>
 #include <validation.h>
 
 #include <boost/test/unit_test.hpp>
+
+extern NEVMMintTxSet setMintTxsMempool;
 
 BOOST_AUTO_TEST_SUITE(txpackage_tests)
 // A fee amount that is above 1sat/vB but below 5sat/vB for most transactions created within these
@@ -37,6 +47,102 @@ inline CTransactionRef create_placeholder_tx(size_t num_inputs, size_t num_outpu
     }
     return MakeTransactionRef(mtx);
 }
+
+// SYSCOIN BEGIN: branch-bound provider package fixtures.
+std::optional<CMutableTransaction> CreateFundedProviderRegistration(
+    const CTransactionRef& funding,
+    const CKey& funding_key,
+    const CKeyID& owner,
+    const CService& service,
+    CKey& change_key,
+    CAmount fee,
+    uint8_t tag)
+{
+    CKey collateral_key;
+    collateral_key.MakeNewKey(true);
+    CKey voting_key;
+    voting_key.MakeNewKey(true);
+    CKey payout_key;
+    payout_key.MakeNewKey(true);
+    change_key.MakeNewKey(true);
+
+    CMutableTransaction tx;
+    tx.nVersion = SYSCOIN_TX_VERSION_MN_REGISTER;
+    tx.vin.emplace_back(COutPoint{funding->GetHash(), 0});
+    tx.vout.emplace_back(
+        nMNCollateralRequired,
+        GetScriptForDestination(PKHash(collateral_key.GetPubKey())));
+    const CAmount change{
+        funding->vout.at(0).nValue - nMNCollateralRequired - fee};
+    if (change <= 0) return std::nullopt;
+    tx.vout.emplace_back(
+        change, GetScriptForDestination(PKHash(change_key.GetPubKey())));
+
+    CProRegTx payload;
+    payload.nVersion = CProRegTx::LEGACY_BLS_VERSION;
+    payload.collateralOutpoint = COutPoint{uint256{}, 0};
+    payload.addr = service;
+    payload.keyIDOwner = owner;
+    // Legacy BLS fields are opaque historical blobs during pre-activation
+    // replay; IsValid only requires a non-null, correctly sized byte string.
+    std::array<uint8_t, CLegacyBLSPublicKey::SERIALIZED_SIZE> operator_key;
+    operator_key.fill(tag);
+    if (!payload.pubKeyOperator.SetBytes(operator_key)) {
+        return std::nullopt;
+    }
+    payload.keyIDVoting = voting_key.GetPubKey().GetID();
+    payload.scriptPayout =
+        GetScriptForDestination(PKHash(payout_key.GetPubKey()));
+    payload.inputsHash = CalcTxInputsHash(CTransaction{tx});
+    SetTxPayload(tx, payload);
+
+    FillableSigningProvider provider;
+    provider.AddKey(funding_key);
+    SignatureData signature_data;
+    if (!SignSignature(provider, *funding, tx, 0, SIGHASH_ALL,
+                       signature_data)) {
+        return std::nullopt;
+    }
+    return tx;
+}
+
+std::optional<CMutableTransaction> CreateFundedMergeChild(
+    const CTransactionRef& first,
+    const CKey& first_key,
+    const CTransactionRef& second,
+    const CKey& second_key,
+    CAmount fee)
+{
+    if (first->vout.size() <= 1 || second->vout.size() <= 1) {
+        return std::nullopt;
+    }
+    const CAmount output_value{
+        first->vout.at(1).nValue + second->vout.at(1).nValue - fee};
+    if (output_value <= 0) return std::nullopt;
+
+    CKey output_key;
+    output_key.MakeNewKey(true);
+    CMutableTransaction child;
+    child.vin.emplace_back(COutPoint{first->GetHash(), 1});
+    child.vin.emplace_back(COutPoint{second->GetHash(), 1});
+    child.vout.emplace_back(
+        output_value,
+        GetScriptForDestination(PKHash(output_key.GetPubKey())));
+
+    FillableSigningProvider provider;
+    provider.AddKey(first_key);
+    provider.AddKey(second_key);
+    SignatureData first_signature;
+    SignatureData second_signature;
+    if (!SignSignature(provider, *first, child, 0, SIGHASH_ALL,
+                       first_signature) ||
+        !SignSignature(provider, *second, child, 1, SIGHASH_ALL,
+                       second_signature)) {
+        return std::nullopt;
+    }
+    return child;
+}
+// SYSCOIN END: branch-bound provider package fixtures.
 
 BOOST_FIXTURE_TEST_CASE(package_sanitization_tests, TestChain100Setup)
 {
@@ -135,6 +241,233 @@ BOOST_FIXTURE_TEST_CASE(package_validation_tests, TestChain100Setup)
     // Check that mempool size hasn't changed.
     BOOST_CHECK_EQUAL(m_node.mempool->size(), initialPoolSize);
 }
+
+// SYSCOIN: Local mint database errors survive package wrapping and merging.
+BOOST_FIXTURE_TEST_CASE(package_mint_database_read_error, TestChain100Setup)
+{
+    struct UnavailableRootsDB final : CNEVMTxRootsDB {
+        using CNEVMTxRootsDB::CNEVMTxRootsDB;
+        bool fail{true};
+        unsigned reads{0};
+        bool ReadTxRootsFromDisk(const uint256& hash, NEVMTxRoot& roots) override
+        {
+            ++reads;
+            if (fail) throw dbwrapper_error("mint roots unavailable");
+            return CNEVMTxRootsDB::ReadTxRootsFromDisk(hash, roots);
+        }
+    };
+    auto& consensus{const_cast<Consensus::Params&>(Params().GetConsensus())};
+    struct RestoreMintState {
+        Consensus::Params& consensus;
+        int nexus_height;
+        std::unique_ptr<CNEVMTxRootsDB> roots{std::move(pnevmtxrootsdb)};
+        ~RestoreMintState()
+        {
+            consensus.nNexusStartBlock = nexus_height;
+            pnevmtxrootsdb = std::move(roots);
+        }
+    } restore{consensus, consensus.nNexusStartBlock};
+    consensus.nNexusStartBlock = 0;
+    auto roots{std::make_unique<UnavailableRootsDB>(DBParams{
+        .path = "package_mint_read_error", .cache_bytes = 1U << 20,
+        .memory_only = true, .wipe_data = true})};
+    auto& db{*roots};
+    pnevmtxrootsdb = std::move(roots);
+
+    const WitnessV0KeyHash destination{coinbaseKey.GetPubKey().GetID()};
+    auto fixture{MakeValidNEVMMintFixture(consensus, 101, destination, uint256S("c001"))};
+    fixture.tx.vin.emplace_back(COutPoint{m_coinbase_txns.front()->GetHash(), 0});
+    fixture.tx.vout[0].nValue = m_coinbase_txns.front()->vout[0].nValue - COIN;
+    FillableSigningProvider provider;
+    provider.AddKey(coinbaseKey);
+    SignatureData signature;
+    BOOST_REQUIRE(SignSignature(provider, *m_coinbase_txns.front(), fixture.tx,
+                                0, SIGHASH_ALL, signature));
+    const auto mint{MakeTransactionRef(fixture.tx)};
+    CMutableTransaction child;
+    child.vin.emplace_back(COutPoint{mint->GetHash(), 0});
+    child.vout.emplace_back(-1, GetScriptForDestination(destination));
+    const auto invalid_child{MakeTransactionRef(child)};
+
+    LOCK(cs_main);
+    auto& chainstate{m_node.chainman->ActiveChainstate()};
+    auto& pool{*m_node.mempool};
+    const auto initial_size{pool.size()};
+    const auto initial_reservations{setMintTxsMempool};
+    for (const bool test_accept : {true, false}) {
+        for (const bool include_invalid_child : {false, true}) {
+            if (!test_accept && !include_invalid_child) continue;
+            const Package package{include_invalid_child ? Package{mint, invalid_child} : Package{mint}};
+            const auto previous_reads{db.reads};
+            const auto result{ProcessNewPackage(chainstate, pool, package, test_accept)};
+            BOOST_CHECK_EQUAL(result.m_state.GetResult(), PackageValidationResult::PCKG_MEMPOOL_ERROR);
+            BOOST_CHECK_EQUAL(result.m_state.GetRejectReason(), "mint roots unavailable");
+            BOOST_REQUIRE(result.m_tx_results.contains(mint->GetWitnessHash()));
+            BOOST_CHECK(result.m_tx_results.at(mint->GetWitnessHash()).m_state.IsError());
+            BOOST_CHECK_GT(db.reads, previous_reads);
+            BOOST_CHECK_EQUAL(pool.size(), initial_size);
+            BOOST_CHECK(setMintTxsMempool == initial_reservations);
+        }
+    }
+
+    // An absent source record remains an ordinary rejection after reads resume.
+    db.fail = false;
+    const auto missing{ProcessNewPackage(chainstate, pool, {mint}, /*test_accept=*/true)};
+    BOOST_CHECK_EQUAL(missing.m_state.GetResult(), PackageValidationResult::PCKG_TX);
+    BOOST_REQUIRE(missing.m_tx_results.contains(mint->GetWitnessHash()));
+    const auto& missing_state{missing.m_tx_results.at(mint->GetWitnessHash()).m_state};
+    BOOST_CHECK(missing_state.IsInvalid());
+    BOOST_CHECK_EQUAL(missing_state.GetRejectReason(), "mint-txroot-missing");
+}
+
+// SYSCOIN BEGIN: package admission cannot bypass provider/PQ uniqueness.
+BOOST_FIXTURE_TEST_CASE(provider_package_conflict_boundary,
+                        TestChain100Setup)
+{
+    // Mine one more block so two distinct coinbase outputs are mature and the
+    // package boundary is exercised with independently funded transactions.
+    mineBlocks(1);
+    MockMempoolMinFee(CFeeRate(5000));
+    const CAmount provider_parent_fee{1000};
+
+    auto& consensus{
+        const_cast<Consensus::Params&>(Params().GetConsensus())};
+    struct RestoreProviderParams {
+        Consensus::Params& consensus;
+        CAmount collateral;
+        int activation_height;
+        ~RestoreProviderParams()
+        {
+            nMNCollateralRequired = collateral;
+            consensus.nPQActivationHeight = activation_height;
+        }
+    } restore{
+        consensus,
+        nMNCollateralRequired,
+        consensus.nPQActivationHeight,
+    };
+    nMNCollateralRequired = 40 * COIN;
+    consensus.nPQActivationHeight = consensus.DIP0003Height;
+
+    CKey owner_key;
+    owner_key.MakeNewKey(true);
+    const CKeyID shared_owner{owner_key.GetPubKey().GetID()};
+    CKey first_change_key;
+    CKey second_change_key;
+    const auto first{CreateFundedProviderRegistration(
+        m_coinbase_txns.at(0), coinbaseKey, shared_owner,
+        LookupNumeric("1.2.3.4", 20'101), first_change_key,
+        provider_parent_fee, 1)};
+    const auto second{CreateFundedProviderRegistration(
+        m_coinbase_txns.at(1), coinbaseKey, shared_owner,
+        LookupNumeric("1.2.3.5", 20'102), second_change_key,
+        provider_parent_fee, 2)};
+    BOOST_REQUIRE(first);
+    BOOST_REQUIRE(second);
+    const CTransactionRef first_tx{MakeTransactionRef(*first)};
+    const CTransactionRef second_tx{MakeTransactionRef(*second)};
+
+    const auto child{CreateFundedMergeChild(
+        first_tx, first_change_key, second_tx, second_change_key, COIN)};
+    BOOST_REQUIRE(child);
+    const CTransactionRef child_tx{MakeTransactionRef(*child)};
+
+    LOCK(cs_main);
+    CTxMemPool& pool{*Assert(m_node.mempool)};
+    const size_t initial_size{pool.size()};
+
+    for (const auto& tx : {first_tx, second_tx}) {
+        BOOST_CHECK(pool.GetMinFee().GetFee(
+                        GetVirtualTransactionSize(*tx)) >
+                    provider_parent_fee);
+        BOOST_CHECK(pool.m_min_relay_feerate.GetFee(
+                        GetVirtualTransactionSize(*tx)) <=
+                    provider_parent_fee);
+        const auto individual{
+            m_node.chainman->ProcessTransaction(tx, /*test_accept=*/true)};
+        BOOST_CHECK_EQUAL(individual.m_result_type,
+                          MempoolAcceptResult::ResultType::INVALID);
+        BOOST_CHECK_EQUAL(individual.m_state.GetResult(),
+                          TxValidationResult::TX_MEMPOOL_POLICY);
+        BOOST_CHECK_EQUAL(individual.m_state.GetRejectReason(),
+                          "mempool min fee not met");
+        BOOST_CHECK(!pool.exists(GenTxid::Txid(tx->GetHash())));
+    }
+
+    const auto check_conflict = [&](const PackageMempoolAcceptResult& combined,
+                                    const CTransactionRef& offender_tx,
+                                    const Package& package,
+                                    size_t expected_result_count) {
+        BOOST_CHECK(combined.m_state.IsInvalid());
+        BOOST_CHECK_EQUAL(combined.m_state.GetResult(),
+                          PackageValidationResult::PCKG_TX);
+        BOOST_CHECK_EQUAL(combined.m_state.GetRejectReason(),
+                          "transaction failed");
+        BOOST_REQUIRE_EQUAL(combined.m_tx_results.size(),
+                            expected_result_count);
+        const auto offender{
+            combined.m_tx_results.find(offender_tx->GetWitnessHash())};
+        BOOST_REQUIRE(offender != combined.m_tx_results.end());
+        BOOST_CHECK_EQUAL(offender->second.m_state.GetResult(),
+                          TxValidationResult::TX_CONFLICT);
+        BOOST_CHECK_EQUAL(offender->second.m_state.GetRejectReason(),
+                          "protx-dup");
+        BOOST_CHECK_EQUAL(pool.size(), initial_size);
+        for (const auto& tx : package) {
+            BOOST_CHECK(!pool.exists(GenTxid::Txid(tx->GetHash())));
+        }
+    };
+
+    // PackageTestAccept does not use aggregate feerates. High-fee parents
+    // therefore reach the multi-transaction provider-conflict prepass.
+    CKey high_first_change_key;
+    CKey high_second_change_key;
+    const auto high_first{CreateFundedProviderRegistration(
+        m_coinbase_txns.at(0), coinbaseKey, shared_owner,
+        LookupNumeric("1.2.3.6", 20'103), high_first_change_key, COIN, 3)};
+    const auto high_second{CreateFundedProviderRegistration(
+        m_coinbase_txns.at(1), coinbaseKey, shared_owner,
+        LookupNumeric("1.2.3.7", 20'104), high_second_change_key, COIN, 4)};
+    BOOST_REQUIRE(high_first);
+    BOOST_REQUIRE(high_second);
+    const CTransactionRef high_first_tx{MakeTransactionRef(*high_first)};
+    const CTransactionRef high_second_tx{MakeTransactionRef(*high_second)};
+    const auto high_child{CreateFundedMergeChild(
+        high_first_tx, high_first_change_key,
+        high_second_tx, high_second_change_key, COIN)};
+    BOOST_REQUIRE(high_child);
+    const Package high_fee_package{
+        high_first_tx, high_second_tx, MakeTransactionRef(*high_child)};
+    const auto dry_run{ProcessNewPackage(
+        m_node.chainman->ActiveChainstate(), pool, high_fee_package,
+        /*test_accept=*/true)};
+    check_conflict(dry_run, high_second_tx, high_fee_package,
+                   /*expected_result_count=*/1);
+
+    // Actual submission keeps the individually low-fee parents together with
+    // the high-fee child, exercising atomic CPFP package admission. The
+    // provider conflict must reject before any parent is partially inserted.
+    const Package low_fee_package{first_tx, second_tx, child_tx};
+    const auto submitted{ProcessNewPackage(
+        m_node.chainman->ActiveChainstate(), pool, low_fee_package,
+        /*test_accept=*/false)};
+    check_conflict(submitted, second_tx, low_fee_package,
+                   /*expected_result_count=*/3);
+    BOOST_CHECK_EQUAL(
+        submitted.m_tx_results.at(first_tx->GetWitnessHash())
+            .m_state.GetResult(),
+        TxValidationResult::TX_MEMPOOL_POLICY);
+    BOOST_CHECK_EQUAL(
+        submitted.m_tx_results.at(first_tx->GetWitnessHash())
+            .m_state.GetRejectReason(),
+        "mempool min fee not met");
+    BOOST_CHECK_EQUAL(
+        submitted.m_tx_results.at(child_tx->GetWitnessHash())
+            .m_state.GetResult(),
+        TxValidationResult::TX_MISSING_INPUTS);
+}
+
+// SYSCOIN END: package admission cannot bypass provider/PQ uniqueness.
 
 BOOST_FIXTURE_TEST_CASE(noncontextual_package_tests, TestChain100Setup)
 {
