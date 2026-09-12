@@ -2328,6 +2328,15 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             }
         }
         if(geth_ready) {
+            // SYSCOIN: Resolve a durable external attempt before the ordinary
+            // ahead-pair classifier rejects a retired child. Refresh this
+            // tuple for all subsequent startup decisions after compensation.
+            std::string pending_connect_error;
+            if (!chainman.RecoverNEVMPendingConnect(
+                    nHeightFromGeth, lastSYSBlockHashFromGeth, pending_connect_error)) {
+                node.chainman->ActiveChainstate().StopGethNode(true);
+                return InitError(Untranslated("Cannot recover NEVM pending connection: " + pending_connect_error));
+            }
             int64_t nHeightLocalGeth;
             bool geth_syscoin_pair_accepted{false};
             std::string geth_pair_error;
@@ -2471,6 +2480,17 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                 fNEVMConnection = false;
                 LogPrintf("nHeightFromGeth == 0 and nHeightLocalGeth > 0, setting fNEVMConnection to false...\n");
             }
+        }
+    }
+
+    // SYSCOIN: Regtest uses an already-running execution endpoint instead of
+    // managed attachment, but must resolve the same record before import ABC.
+    if (fNEVMConnection && fRegTest) {
+        uint64_t count{0};
+        uint256 hash;
+        std::string error;
+        if (!chainman.RecoverNEVMPendingConnect(count, hash, error)) {
+            return InitError(Untranslated("Cannot recover NEVM pending connection: " + error));
         }
     }
 

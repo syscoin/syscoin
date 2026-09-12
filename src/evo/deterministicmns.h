@@ -755,8 +755,9 @@ public:
     static constexpr int LIST_CACHE_SIZE = DISK_SNAPSHOT_PERIOD * DISK_SNAPSHOTS;
     static constexpr int HOT_LIST_CACHE_SIZE = 128;
     // SYSCOIN: ChainstateManager persists at most two chainstates and each
-    // exposes at most two distinct coins-recovery markers.
-    static constexpr std::size_t MAX_RECOVERY_SNAPSHOT_HEADS{4};
+    // exposes at most two distinct coins-recovery markers. One additional
+    // child can own an unresolved external NEVM connection.
+    static constexpr std::size_t MAX_RECOVERY_SNAPSHOT_HEADS{5};
     static constexpr std::size_t SNAPSHOT_GC_MAX_FIXED_RETAINED_KEYS{8};
     static constexpr std::size_t SNAPSHOT_GC_MAX_RETAINED_KEYS{
         (MAX_RECOVERY_SNAPSHOT_HEADS + 1) *

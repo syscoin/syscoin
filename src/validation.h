@@ -1093,6 +1093,8 @@ private:
     // SYSCOIN: Retirement revokes publication, not knowledge of an external effect.
     CBlockIndex* NEVMPendingConnectAttempt() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     CBlockIndex* NEVMPendingConnectCandidate() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    // SYSCOIN: Persist only failed live attempts, before callbacks can retire them.
+    bool PersistNEVMPendingConnect(BlockValidationState& state) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     // SYSCOIN: Cancel only the authenticated external effect of an unpublished child.
     bool CancelUnselectedNEVMPendingConnect(const CBlockIndex& pending, std::string& error)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_chainstate_mutex);
@@ -1346,6 +1348,11 @@ private:
     // SYSCOIN: Ordinary buffer loss can leave no payload/receipt marker.
     // Clear only after flushing and binding the applied pair to ActiveTip().
     bool m_nevm_prefix_recovery_needed GUARDED_BY(::cs_main){false};
+    // SYSCOIN: One durable external attempt, never publication or fork-choice authority.
+    std::optional<std::pair<uint256, uint256>> m_nevm_pending_connect_record GUARDED_BY(::cs_main);
+    bool m_nevm_pending_connect_durable GUARDED_BY(::cs_main){false};
+    bool m_nevm_pending_connect_rebuild GUARDED_BY(::cs_main){false};
+    bool ClearNEVMPendingConnect(std::string& error) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool NEVMBlockProductionPrerequisitesMet()
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
@@ -1695,6 +1702,12 @@ public:
 
     /** Start NEVM peer networking after IBD and deferred replay are complete. */
     [[nodiscard]] bool MaybeStartNEVMNetwork();
+
+    // SYSCOIN: Restore and resolve a failed live attempt before startup activation.
+    [[nodiscard]] bool InitializeNEVMPendingConnect(std::string& error)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    [[nodiscard]] bool RecoverNEVMPendingConnect(uint64_t& count, uint256& hash, std::string& error)
+        LOCKS_EXCLUDED(::cs_main);
 
     /** Accept a paired startup snapshot, retaining an ahead pair for recovery. */
     [[nodiscard]] bool InitializeNEVMStartupPair(

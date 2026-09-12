@@ -189,6 +189,13 @@ static ChainstateLoadResult CompleteChainstateInitialization(
         if (options.check_interrupt && options.check_interrupt()) return {ChainstateLoadStatus::INTERRUPTED, {}};
         return {ChainstateLoadStatus::FAILURE, _("Error loading block database")};
     }
+    // SYSCOIN: Restore the exceptional external-effect retention head before
+    // startup pruning, inverse-metadata maintenance, or coins reconstruction.
+    std::string pending_connect_error;
+    if (!chainman.InitializeNEVMPendingConnect(pending_connect_error)) {
+        return {ChainstateLoadStatus::FAILURE_INCOMPATIBLE_DB,
+                Untranslated("Cannot restore NEVM pending connection: " + pending_connect_error)};
+    }
 
     // SYSCOIN BEGIN: Authenticate retained NEVM commitments before removing files
     // whose pruning metadata survived a crash. Older pruned databases cannot

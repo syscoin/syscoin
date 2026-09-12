@@ -787,7 +787,7 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
             self._block_info_available = True
             self._expected_connect_syshashes = None
 
-    def _check_applied_pending_child_reselected(self, *, deeper_fork=False, retire_pending=False):
+    def _check_applied_pending_child_reselected(self, *, deeper_fork=False, retire_pending=False, restart_before_recovery=False):
         node = self.nodes[0]
         assert_equal(node.getconnectioncount(), 0)
         core_pid = node.process.pid
@@ -804,6 +804,8 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
         scenario = b"applied-deeper-reselection" if deeper_fork else b"applied-reselection"
         if retire_pending:
             scenario += b"-retired"
+        if restart_before_recovery:
+            scenario += b"-restart"
 
         def build_branch_block(label, parent_hash, height):
             # Reuse pre-DIP3 payments while committing distinct mock NEVM
@@ -895,9 +897,19 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
                 [f"UpdateTip: new best={selected.hash}"],
                 unexpected_msgs=[f"UpdateTip: new best={block_c.hash}"],
             ):
+                if restart_before_recovery:
+                    # Persist C's invalidity and all branch bodies while the
+                    # live worker still cannot observe or cancel engine-only C.
+                    self.stop_node(0)
+                    assert_equal(self._applied_syshashes, applied + [block_c.sha256])
                 self._expected_connect_syshashes = prefix + selected_hashes
                 self._connect_response = b"connected"
                 self._block_info_available = True
+                if restart_before_recovery:
+                    # Keep the same mock engine alive across the daemon restart.
+                    # No block submission or reconsideration restores its work.
+                    self.start_node(0, self.extra_args[0])
+                    force_finish_mnsync(node)
                 self.wait_until(lambda: node.getbestblockhash() == selected.hash)
 
                 templates = []
@@ -914,7 +926,7 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
                 self.wait_until(ready)
                 assert_equal(templates[0]["previousblockhash"], selected.hash)
 
-            assert_equal(node.process.pid, core_pid)
+            assert_equal(node.process.pid == core_pid, not restart_before_recovery)
             assert_equal(node.process.poll(), None)
             assert_equal(node.gettxout(block_c.vtx[0].hash, 0), None)
             if deeper_fork:
@@ -1060,6 +1072,9 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
 
             self.log.info("Scheduled recovery cancels an engine-only child after Core invalidates it")
             self._check_applied_pending_child_reselected(retire_pending=True)
+
+            self.log.info("Restart preserves recovery of an invalid engine-only child and its stored alternative")
+            self._check_applied_pending_child_reselected(retire_pending=True, restart_before_recovery=True)
 
             self.log.info("A requested full block repairs only the engine-approved NEVM payload")
             self._check_payload_repair_from_requested_peer()

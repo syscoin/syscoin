@@ -2803,7 +2803,9 @@ BOOST_AUTO_TEST_CASE(snapshot_compaction_progresses_across_moving_tips)
     const int cache_limit{CDeterministicMNManager::LIST_CACHE_SIZE};
     const int start_height{Params().GetConsensus().DIP0003Height};
     constexpr int stale_count{300};
-    std::array<SnapshotIndexChain, 5> branches;
+    constexpr size_t recovery_limit{
+        CDeterministicMNManager::MAX_RECOVERY_SNAPSHOT_HEADS};
+    std::array<SnapshotIndexChain, recovery_limit + 1> branches;
     for (size_t branch{0}; branch < branches.size(); ++branch) {
         branches[branch] = BuildSnapshotIndexChain(
             start_height, cache_limit + (branch == 0 ? 1 : 0));
@@ -2850,9 +2852,10 @@ BOOST_AUTO_TEST_CASE(snapshot_compaction_progresses_across_moving_tips)
             manager.FlushPendingSnapshotsToDisk(/*fSync=*/true));
     }
 
-    const std::array<const CBlockIndex*, 4> recovery{
-        branches[1].Tip(), branches[2].Tip(), branches[3].Tip(),
-        branches[4].Tip()};
+    std::array<const CBlockIndex*, recovery_limit> recovery;
+    for (size_t branch{0}; branch < recovery.size(); ++branch) {
+        recovery[branch] = branches[branch + 1].Tip();
+    }
     const int64_t initial_count{
         static_cast<int64_t>(branches.size()) * cache_limit + stale_count};
     BOOST_REQUIRE_EQUAL(
@@ -2869,7 +2872,7 @@ BOOST_AUTO_TEST_CASE(snapshot_compaction_progresses_across_moving_tips)
     BOOST_CHECK(!manager.HasPersistentWindow());
 
     // A normal tip insertion changes one retained key but must not reset or
-    // starve snapshot compaction behind the five production branch windows.
+    // starve compaction behind the maximum number of production branch windows.
     const CBlockIndex* advanced_tip{branches[0].Tip()};
     const uint256 advanced_hash{advanced_tip->GetBlockHash()};
     BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
@@ -2888,11 +2891,11 @@ BOOST_AUTO_TEST_CASE(snapshot_compaction_progresses_across_moving_tips)
         branches[0].hashes.front(), snapshot));
     BOOST_REQUIRE(manager.m_evoDb->Read(advanced_hash, snapshot));
 
-    // Production supplies no more than four distinct recovery heads. Reject
-    // a structurally impossible caller instead of weakening the visit proof.
-    const std::array<const CBlockIndex*, 5> excessive_recovery{
-        advanced_tip, branches[1].Tip(), branches[2].Tip(),
-        branches[3].Tip(), branches[4].Tip()};
+    // The limit above is accepted. One additional distinct recovery head
+    // must be rejected without weakening the bounded compaction proof.
+    std::array<const CBlockIndex*, recovery_limit + 1> excessive_recovery;
+    excessive_recovery.front() = advanced_tip;
+    std::copy(recovery.begin(), recovery.end(), excessive_recovery.begin() + 1);
     BOOST_CHECK(!manager.FlushCacheToDisk(
         /*bForceFlush=*/true, /*fSync=*/false, excessive_recovery));
 }
@@ -3187,6 +3190,101 @@ BOOST_AUTO_TEST_CASE(maintenance_retains_each_chainstate_random_access_window)
                    background_chain.At(representative_ancestor_height))
             .GetHeight(),
         representative_ancestor_height);
+}
+
+BOOST_AUTO_TEST_CASE(retired_nevm_child_snapshot_survives_gc_and_disk_reopen)
+{
+    SelectParams(ChainType::MAIN);
+    LOCK(::cs_main);
+    const int parent_height{Params().GetConsensus().DIP0003Height};
+    auto chain{BuildSnapshotIndexChain(parent_height, 2)};
+    const CBlockIndex* parent_index{chain.At(parent_height)};
+    CBlockIndex* child_index{chain.At(parent_height + 1)};
+    child_index->nStatus = BLOCK_VALID_TRANSACTIONS | BLOCK_FAILED_VALID;
+    BOOST_CHECK(!child_index->IsValid(BLOCK_VALID_TRANSACTIONS));
+
+    const auto member{MakeNEVMAddressMN(1, 1)};
+    const auto parent_address{member->pdmnState->vchNEVMAddress};
+    const std::vector<unsigned char> child_address(20, 0x42);
+    const auto collateral_height{
+        static_cast<uint32_t>(member->pdmnState->nCollateralHeight)};
+    CDeterministicMNList parent{parent_index->GetBlockHash(), parent_height, 0};
+    parent.AddMN(member);
+    auto child{parent};
+    child.SetBlockHash(child_index->GetBlockHash());
+    child.SetHeight(child_index->nHeight);
+    auto changed_state{
+        std::make_shared<CDeterministicMNState>(*member->pdmnState)};
+    changed_state->vchNEVMAddress = child_address;
+    child.UpdateMN(member->proTxHash, changed_state);
+    child.ResetTrackedChanges();
+    const uint256 parent_snapshot_hash{::SerializeHash(parent)};
+    const uint256 child_snapshot_hash{::SerializeHash(child)};
+    const std::array<const CBlockIndex*, 1> recovery_heads{child_index};
+
+    const ScopedDiskDBPath disk_db;
+    auto db_params = DBParams{
+        .path = disk_db.path,
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = false,
+        .wipe_data = true,
+    };
+    const uint256 unretained_hash{MakeSnapshotKey(parent_height + 100)};
+    {
+        CDeterministicMNManager manager(db_params);
+        // Core still owns P. C's retirement does not revoke the snapshots
+        // needed to compensate its unpublished external address change.
+        manager.UpdatedBlockTip(parent_index);
+        manager.m_evoDb->WriteCache(parent.GetBlockHash(), parent);
+        manager.m_evoDb->WriteCache(child.GetBlockHash(), child);
+        manager.m_evoDb->WriteCache(unretained_hash,
+            CDeterministicMNList{unretained_hash, child.GetHeight(), 0});
+        BOOST_REQUIRE(manager.FlushCacheToDisk(
+            /*bForceFlush=*/true, /*fSync=*/true, recovery_heads));
+        BOOST_REQUIRE(manager.FlushPendingSnapshotsToDisk(/*fSync=*/true));
+        BOOST_REQUIRE(manager.VerifyPersistedSnapshot(parent_index));
+        BOOST_REQUIRE(manager.VerifyPersistedSnapshot(child_index));
+        CDeterministicMNList unretained;
+        BOOST_CHECK(!manager.m_evoDb->Read(unretained_hash, unretained));
+        BOOST_CHECK_EQUAL(manager.m_evoDb->CountPersistedEntries(), 2U);
+    }
+
+    db_params.wipe_data = false;
+    {
+        CDeterministicMNManager reopened(db_params);
+        reopened.UpdatedBlockTip(parent_index);
+        // Restore the exceptional head before the first maintenance pass,
+        // just as startup does before resolving the durable external attempt.
+        BOOST_REQUIRE(reopened.FlushCacheToDisk(
+            /*bForceFlush=*/true, /*fSync=*/true, recovery_heads));
+        const auto persisted_parent{reopened.GetListForBlock(parent_index)};
+        const auto persisted_child{reopened.GetListForBlock(child_index)};
+        BOOST_CHECK(::SerializeHash(persisted_parent) == parent_snapshot_hash);
+        BOOST_CHECK(::SerializeHash(persisted_child) == child_snapshot_hash);
+        CDeterministicMNListNEVMAddressDiff inverse;
+        persisted_child.BuildNEVMAddressDiff(persisted_parent, inverse);
+        CDeterministicMNListNEVMAddressDiff expected;
+        expected.updatedMNNEVM.emplace_back(child_address,
+            std::make_pair(parent_address, collateral_height));
+        CheckNEVMAddressDiff(inverse, expected);
+        BOOST_CHECK_EQUAL(child_index->nStatus & BLOCK_FAILED_MASK,
+                          BLOCK_FAILED_VALID);
+        BOOST_CHECK(::SerializeHash(reopened.GetListAtChainTip()) ==
+                    parent_snapshot_hash);
+
+        // Removing only the exceptional head must bypass same-tip reuse and
+        // release C; retaining P alone would not have preserved the inverse.
+        BOOST_REQUIRE(reopened.FlushCacheToDisk(
+            /*bForceFlush=*/true, /*fSync=*/true));
+        BOOST_REQUIRE(reopened.VerifyPersistedSnapshot(parent_index));
+        BOOST_CHECK(!reopened.VerifyPersistedSnapshot(child_index));
+        BOOST_CHECK_EQUAL(reopened.m_evoDb->CountPersistedEntries(), 1U);
+    }
+    {
+        CDeterministicMNManager reopened(db_params);
+        BOOST_REQUIRE(reopened.VerifyPersistedSnapshot(parent_index));
+        BOOST_CHECK(!reopened.VerifyPersistedSnapshot(child_index));
+    }
 }
 
 BOOST_AUTO_TEST_CASE(auxiliary_history_retention_plan_separates_authority)

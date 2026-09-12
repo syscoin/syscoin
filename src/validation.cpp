@@ -3285,6 +3285,12 @@ bool ChainstateManager::MaybeRecoverNEVMBlockProduction(std::string& error)
                     return false;
                 }
                 if (!m_nevm_prefix_recovery_needed) {
+                    // SYSCOIN: This worker owns the completed endpoint proof;
+                    // unlike a live-prefix retry, it has no send in flight.
+                    if (!ClearNEVMPendingConnect(error)) {
+                        m_nevm_prefix_recovery_needed = true;
+                        return false;
+                    }
                     // SYSCOIN BEGIN: Finish selection after resolving the lost-ACK child.
                     const CBlockIndex* attempted{chainstate->m_nevm_pending_connect
                         ? m_blockman.LookupBlockIndex(*chainstate->m_nevm_pending_connect) : nullptr};
@@ -3334,6 +3340,149 @@ bool ChainstateManager::MaybeRecoverNEVMBlockProduction(std::string& error)
     error.clear();
     return true;
 }
+
+// SYSCOIN BEGIN: Durable provenance for an unresolved external connection.
+static bool FlushAndGetNEVMBlockInfo(
+    uint64_t& count, uint256& syscoin_hash, std::string& error,
+    std::optional<NEVMBlockReject>* rejection = nullptr);
+
+namespace {
+const auto NEVM_PENDING_CONNECT_KEY{std::make_pair(uint8_t{'F'}, std::string{"nevm_pending_connect_v1"})};
+const std::string NEVM_PENDING_CONNECT_PRUNE_LOCK{"nevm-pending-connect"};
+
+bool MatchesNEVMActivePrefix(int64_t start, uint64_t count,
+                            const uint256& hash, const CBlockIndex* tip)
+{
+    if (tip == nullptr || start < 0) return false;
+    if (count == 0) return hash.IsNull();
+    if (tip->nHeight < start ||
+        count > static_cast<uint64_t>(int64_t{tip->nHeight} - start + 1)) return false;
+    const auto* ancestor{tip->GetAncestor(
+        static_cast<int32_t>(start + static_cast<int64_t>(count) - 1))};
+    return ancestor && ancestor->GetBlockHash() == hash;
+}
+}
+
+bool ChainstateManager::InitializeNEVMPendingConnect(std::string& error)
+{
+    AssertLockHeld(cs_main);
+    error.clear();
+    if (m_nevm_pending_connect_record) return true;
+    std::pair<uint256, uint256> record;
+    try {
+        auto& db{*m_blockman.m_block_tree_db};
+        if (!db.Exists(NEVM_PENDING_CONNECT_KEY)) return true;
+        std::unique_ptr<CDBIterator> it{db.NewIterator()};
+        it->Seek(NEVM_PENDING_CONNECT_KEY);
+        it->CheckStatus();
+        std::pair<uint8_t, std::string> key;
+        if (!it->Valid() || !it->GetKeyExact(key) || key != NEVM_PENDING_CONNECT_KEY ||
+            it->GetValueSize() != 64 || !it->GetValueExact(record) ||
+            record.first.IsNull() || record.second.IsNull() || record.first == record.second) {
+            error = "nevm-pending-connect-record-invalid";
+            return false;
+        }
+    } catch (const std::exception& e) {
+        error = strprintf("nevm-pending-connect-record-read:%s", e.what());
+        return false;
+    }
+    m_nevm_pending_connect_record = record;
+    m_nevm_pending_connect_durable = true;
+    // DoGethStartupProcedure consumes this rebuild flag before engine attach.
+    m_nevm_pending_connect_rebuild = fReindexGeth.load();
+    ActiveChainstate().m_nevm_pending_connect = record.second;
+    m_nevm_prefix_recovery_needed = true;
+    m_blockman.UpdatePruneLock(NEVM_PENDING_CONNECT_PRUNE_LOCK,
+        {std::max(0, GetConsensus().nNEVMStartBlock)});
+    return true;
+}
+
+bool ChainstateManager::ClearNEVMPendingConnect(std::string& error)
+{
+    AssertLockHeld(cs_main);
+    if (!m_nevm_pending_connect_record) return true;
+    try {
+        if (!m_blockman.m_block_tree_db->Erase(NEVM_PENDING_CONNECT_KEY, /*fSync=*/true)) {
+            error = "nevm-pending-connect-record-erase-failed";
+            return false;
+        }
+    } catch (const std::exception& e) {
+        error = strprintf("nevm-pending-connect-record-erase:%s", e.what());
+        return false;
+    }
+    m_nevm_pending_connect_record.reset();
+    m_nevm_pending_connect_durable = false;
+    m_nevm_pending_connect_rebuild = false;
+    m_blockman.RemovePruneLock(NEVM_PENDING_CONNECT_PRUNE_LOCK);
+    return true;
+}
+
+bool ChainstateManager::RecoverNEVMPendingConnect(
+    uint64_t& count, uint256& hash, std::string& error)
+{
+    AssertLockNotHeld(cs_main);
+    Chainstate& chainstate{ActiveChainstate()};
+    LOCK(chainstate.m_chainstate_mutex);
+    LOCK(cs_main);
+    error.clear();
+    if (!m_nevm_pending_connect_record) return true;
+    if (!fNEVMConnection || m_interrupt) {
+        error = "nevm-pending-connect-engine-unavailable";
+        return false;
+    }
+    const auto& record{*m_nevm_pending_connect_record};
+    chainstate.m_nevm_pending_connect = record.second;
+    const CBlockIndex* tip{ActiveTip()};
+    CBlockIndex* pending{m_blockman.LookupBlockIndex(record.second)};
+    const int64_t start{GetConsensus().nNEVMStartBlock};
+    if (!FlushAndGetNEVMBlockInfo(count, hash, error)) return false;
+    // An explicit paired rebuild may have removed both the saved parent and
+    // all external effects. An ordinary unexplained pair gets no such escape.
+    const bool rebuilt_empty{m_nevm_pending_connect_rebuild && count == 0 && hash.IsNull()};
+    if (!rebuilt_empty && (pending == nullptr || pending->pprev == nullptr ||
+        pending->pprev->GetBlockHash() != record.first ||
+        (pending->nStatus & BLOCK_VALID_MASK) < BLOCK_VALID_TRANSACTIONS ||
+        !pending->HaveNumChainTxs())) {
+        error = "nevm-pending-connect-record-branch-mismatch";
+        return false;
+    }
+    const bool aligned{tip && (tip->nHeight < start ? (count == 0 && hash.IsNull()) :
+        DoesNEVMBlockInfoMatchSyscoinBlock(start, count, tip->nHeight, hash, tip->GetBlockHash()))};
+    // A freshly proved earlier active endpoint also proves C is absent.
+    // Preserve ordinary startup's existing prefix rollback/replay policy.
+    if (rebuilt_empty || MatchesNEVMActivePrefix(start, count, hash, tip)) {
+        if (!ClearNEVMPendingConnect(error)) return false;
+        chainstate.m_nevm_pending_connect.reset();
+        chainstate.m_nevm_activation_continuation = false;
+        m_nevm_prefix_recovery_needed = !aligned && tip && tip->nHeight >= start;
+        return true;
+    }
+    if (tip == nullptr || pending->pprev != tip ||
+        chainstate.NEVMPendingConnectAttempt() != pending ||
+        !DoesNEVMBlockInfoMatchSyscoinBlock(start, count, pending->nHeight, hash, pending->GetBlockHash())) {
+        error = "nevm-pending-connect-applied-pair-mismatch";
+        return false;
+    }
+    // A record alone never retires C. Ordinary startup may still publish an
+    // eligible selected child; retirement/unselection permits only its inverse.
+    if (chainstate.NEVMPendingConnectCandidate() == pending) return true;
+    if (!chainstate.CancelUnselectedNEVMPendingConnect(*pending, error)) return false;
+    m_nevm_prefix_recovery_needed = true;
+    // Refresh the caller's startup tuple after compensation. Later startup
+    // payload, bootstrap and rollback decisions must see P, not the old C.
+    if (!FlushAndGetNEVMBlockInfo(count, hash, error)) return false;
+    if (tip->nHeight < start ? (count != 0 || !hash.IsNull()) :
+        !DoesNEVMBlockInfoMatchSyscoinBlock(start, count, tip->nHeight, hash, tip->GetBlockHash())) {
+        error = "nevm-pending-connect-compensation-pair-mismatch";
+        return false;
+    }
+    if (!ClearNEVMPendingConnect(error)) return false;
+    chainstate.m_nevm_pending_connect.reset();
+    chainstate.m_nevm_activation_continuation = false;
+    m_nevm_prefix_recovery_needed = false;
+    return true;
+}
+// SYSCOIN END: Startup never infers an attempted operation from an ahead hash.
 
 bool ChainstateManager::InitializeNEVMStartupPair(
     uint64_t geth_count, const uint256& syscoin_hash, std::string& error)
@@ -3530,6 +3679,10 @@ void Chainstate::ConflictingChainFound(CBlockIndex* pindexNew)
 // which does its own setBlockIndexCandidates management.
 void Chainstate::InvalidBlockFound(CBlockIndex* pindex, const BlockValidationState& state)
 {
+    // SYSCOIN: A failed journal write has already requested fatal shutdown.
+    // Do not make an unrecorded retirement durable while shutdown unwinds.
+    if (m_chainman.m_nevm_pending_connect_record &&
+        !m_chainman.m_nevm_pending_connect_durable) return;
     if (IsBlockRejectionCacheable(state.GetResult())) {
         pindex->nStatus |= BLOCK_FAILED_VALID;
         m_chainman.m_failed_blocks.insert(pindex);
@@ -3954,6 +4107,29 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
                     return state.Error("nevm-live-recovery-pending-other-block");
                 }
             }
+            // SYSCOIN: A published child or a completed ordinary rollback may
+            // leave its durable attempt behind. Prove an active prefix before
+            // a different send can replace that record. An earlier endpoint
+            // remains subject to the existing live-prefix recovery path.
+            if (m_chainman.m_nevm_pending_connect_record &&
+                this == &m_chainman.ActiveChainstate() &&
+                m_chainman.m_nevm_pending_connect_record->second != pindex->GetBlockHash()) {
+                uint64_t count{0};
+                uint256 hash;
+                std::string error;
+                const CBlockIndex* tip{m_chainman.ActiveTip()};
+                const int64_t start{m_chainman.GetConsensus().nNEVMStartBlock};
+                if (!FlushAndGetNEVMBlockInfo(count, hash, error)) return state.Error(error);
+                if (!MatchesNEVMActivePrefix(start, count, hash, tip)) {
+                    return state.Error("nevm-pending-connect-unresolved");
+                }
+                if (tip->nHeight >= start &&
+                    !DoesNEVMBlockInfoMatchSyscoinBlock(start, count, tip->nHeight,
+                                                       hash, tip->GetBlockHash())) {
+                    m_chainman.m_nevm_prefix_recovery_needed = true;
+                }
+                if (!m_chainman.ClearNEVMPendingConnect(error)) return state.Error(error);
+            }
         }
         // SYSCOIN END: Only a reconciled attempt may yield its identity.
         std::optional<NEVMBlockReject> rejected_pair;
@@ -4098,7 +4274,7 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
 // applied pair after flushing that buffer, including an interrupted pass.
 static bool FlushAndGetNEVMBlockInfo(
     uint64_t& count, uint256& syscoin_hash, std::string& error,
-    std::optional<NEVMBlockReject>* rejection = nullptr)
+    std::optional<NEVMBlockReject>* rejection)
 {
     error.clear();
     if (rejection) rejection->reset();
@@ -4575,6 +4751,50 @@ bool ChainstateManager::MaybeRecoverNEVMPayload(std::string& error)
         error = "nevm-payload-repair-network-unavailable";
         return false;
     }
+    return true;
+}
+
+bool Chainstate::PersistNEVMPendingConnect(BlockValidationState& state)
+{
+    AssertLockHeld(cs_main);
+    if (this != &m_chainman.ActiveChainstate() || !m_nevm_pending_connect) return true;
+    CBlockIndex* pending{NEVMPendingConnectAttempt()};
+    if (pending == nullptr) return true;
+    const auto record{std::make_pair(pending->pprev->GetBlockHash(), pending->GetBlockHash())};
+    if (m_chainman.m_nevm_pending_connect_record) {
+        if (*m_chainman.m_nevm_pending_connect_record != record) {
+            return FatalError(m_chainman.GetNotifications(), state,
+                              "Cannot replace an unresolved durable NEVM connection");
+        }
+        if (m_chainman.m_nevm_pending_connect_durable) return true;
+    }
+    // Stage the retention head before maintenance can discard C's inverse.
+    m_chainman.m_nevm_pending_connect_record = record;
+    m_blockman.UpdatePruneLock(NEVM_PENDING_CONNECT_PRUNE_LOCK,
+        {std::max(0, m_chainman.GetConsensus().nNEVMStartBlock)});
+    BlockValidationState persistence_state;
+    try {
+        // C may occupy a different block-file cursor than its active parent.
+        if (!m_blockman.FlushBlockFile(pending->nFile, /*fFinalize=*/false, /*finalize_undo=*/false) ||
+            !FlushStateToDisk(persistence_state, FlushStateMode::ALWAYS)) {
+            return FatalError(m_chainman.GetNotifications(), state,
+                              "Failed to persist NEVM pending-connection evidence: " + persistence_state.ToString());
+        }
+        // The full flush can leave P's coins in an asynchronous WAL. The
+        // separate block-tree record must not become durable before P does.
+        if (!CoinsDB().FlushWithSync(CoinsTip())) {
+            return FatalError(m_chainman.GetNotifications(), state,
+                              "Failed to sync NEVM pending-connection parent coins");
+        }
+        if (!m_blockman.m_block_tree_db->Write(NEVM_PENDING_CONNECT_KEY, record, /*fSync=*/true)) {
+            return FatalError(m_chainman.GetNotifications(), state,
+                              "Failed to persist NEVM pending-connection record");
+        }
+    } catch (const std::exception& e) {
+        return FatalError(m_chainman.GetNotifications(), state,
+                          strprintf("Failed to persist NEVM pending connection: %s", e.what()));
+    }
+    m_chainman.m_nevm_pending_connect_durable = true;
     return true;
 }
 
@@ -7151,6 +7371,11 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
                 return ConnectBlock(*pthisBlock, state, pindexNew, *connection.view, false /*bJustCheck*/,
                                     connection.mint_txs, connection.nevm_tx_roots, connection.poda, connection.txid_pairs, true, &rejection);
             });
+        // SYSCOIN: Candidate outputs are still private. Make the accepted
+        // parent and the failed attempt durable before notifications or
+        // invalidation can persist its retirement independently.
+        if (result != node::BlockConnectionResult::SUCCESS &&
+            !PersistNEVMPendingConnect(state)) return false;
         if (result == node::BlockConnectionResult::DISK_READ_FAILED) {
             rejection.reset();
             return FatalError(m_chainman.GetNotifications(), state, "Failed to reread committed block");
@@ -8213,6 +8438,12 @@ bool Chainstate::ActivateBestChainInternal(BlockValidationState& state,
             "Please report this as a bug. %s\n", PACKAGE_BUGREPORT);
         return false;
     }
+    // SYSCOIN: Persistence failure must not permit another activation to
+    // mutate or replace the unrecorded external attempt before shutdown.
+    if (WITH_LOCK(cs_main, return m_chainman.m_nevm_pending_connect_record &&
+        !m_chainman.m_nevm_pending_connect_durable)) {
+        return state.Error("nevm-pending-connect-not-durable");
+    }
 
     // SYSCOIN BEGIN: Consume aligned recovery's ordinary continuation once.
     if (nevm_continuation) {
@@ -8238,6 +8469,7 @@ bool Chainstate::ActivateBestChainInternal(BlockValidationState& state,
                                                syscoin_hash, tip->GetBlockHash()))) {
             return state.Error("nevm-live-recovery-continuation-pair-changed");
         }
+        if (!m_chainman.ClearNEVMPendingConnect(error)) return state.Error(error);
         m_nevm_activation_continuation = false;
         m_nevm_pending_connect.reset();
     }
@@ -8755,6 +8987,11 @@ bool Chainstate::InvalidateBlockLocked(BlockValidationState& state,
     AssertLockHeld(m_chainstate_mutex);
     AssertLockNotHeld(cs_main);
     if (m_mempool) AssertLockNotHeld(m_mempool->cs);
+    // SYSCOIN: Preserve retirement ordering even during fatal-error shutdown.
+    if (WITH_LOCK(cs_main, return m_chainman.m_nevm_pending_connect_record &&
+        !m_chainman.m_nevm_pending_connect_durable)) {
+        return state.Error("nevm-pending-connect-not-durable");
+    }
 
     // The NEVM body is outside the Syscoin block identity. Its rejection
     // cannot invalidate the committed Syscoin header or its descendants.
@@ -9049,6 +9286,11 @@ bool Chainstate::MarkConflictingBlocks(
     const NEVMDisconnectPrefix* nevm_prefix)
 {
     AssertLockHeld(cs_main);
+    // SYSCOIN: A failed intent write cannot be followed by durable retirement.
+    if (m_chainman.m_nevm_pending_connect_record &&
+        !m_chainman.m_nevm_pending_connect_durable) {
+        return state.Error("nevm-pending-connect-not-durable");
+    }
     const bool disconnect_active{
         mode == ChainLockConflictMarkingMode::DISCONNECT_ACTIVE};
     if (disconnect_active && m_mempool != nullptr) {
@@ -11930,6 +12172,11 @@ ChainstateManager::GetAllRecoveryBlockIndexes(std::string& error)
             return std::nullopt;
         }
     }
+    // SYSCOIN: Pin the external child's inverse metadata before the first
+    // marker write as well as throughout recovery after reopening.
+    if (m_nevm_pending_connect_record && !m_nevm_pending_connect_rebuild &&
+        !AddChainstateRecoveryBlockIndex(m_blockman,
+            m_nevm_pending_connect_record->second, indexes, error)) return std::nullopt;
     return indexes;
 }
 
@@ -14418,6 +14665,11 @@ void ChainstateManager::ResetChainstates()
     m_ibd_chainstate.reset();
     m_snapshot_chainstate.reset();
     m_active_chainstate = nullptr;
+    // SYSCOIN: The reopened block-tree owns any surviving recovery record.
+    m_nevm_pending_connect_record.reset();
+    m_nevm_pending_connect_durable = false;
+    m_nevm_pending_connect_rebuild = false;
+    m_blockman.RemovePruneLock(NEVM_PENDING_CONNECT_PRUNE_LOCK);
 }
 
 /**
