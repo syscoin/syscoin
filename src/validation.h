@@ -1352,7 +1352,9 @@ private:
     std::optional<std::pair<uint256, uint256>> m_nevm_pending_connect_record GUARDED_BY(::cs_main);
     bool m_nevm_pending_connect_durable GUARDED_BY(::cs_main){false};
     bool m_nevm_pending_connect_rebuild GUARDED_BY(::cs_main){false};
-    bool ClearNEVMPendingConnect(std::string& error) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    // Fence a freshly authenticated engine endpoint before erasing its obligation.
+    bool ClearNEVMPendingConnect(uint64_t count, const uint256& hash, std::string& error)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool NEVMBlockProductionPrerequisitesMet()
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 

@@ -3287,7 +3287,10 @@ bool ChainstateManager::MaybeRecoverNEVMBlockProduction(std::string& error)
                 if (!m_nevm_prefix_recovery_needed) {
                     // SYSCOIN: This worker owns the completed endpoint proof;
                     // unlike a live-prefix retry, it has no send in flight.
-                    if (!ClearNEVMPendingConnect(error)) {
+                    const int64_t start{GetConsensus().nNEVMStartBlock};
+                    const uint64_t count{tip->nHeight < start ? 0 :
+                        static_cast<uint64_t>(int64_t{tip->nHeight} - start + 1)};
+                    if (!ClearNEVMPendingConnect(count, count ? tip->GetBlockHash() : uint256{}, error)) {
                         m_nevm_prefix_recovery_needed = true;
                         return false;
                     }
@@ -3397,16 +3400,32 @@ bool ChainstateManager::InitializeNEVMPendingConnect(std::string& error)
     return true;
 }
 
-bool ChainstateManager::ClearNEVMPendingConnect(std::string& error)
+bool ChainstateManager::ClearNEVMPendingConnect(
+    uint64_t count, const uint256& hash, std::string& error)
 {
     AssertLockHeld(cs_main);
     if (!m_nevm_pending_connect_record) return true;
+    // An applied endpoint is not a durability barrier. Every cleanup route,
+    // including already-aligned and lost-reply recovery, must fence that exact
+    // engine pair before Core can durably forget the original obligation.
+    bool durable{false};
+    if (fNEVMConnection && !m_interrupt) {
+        GetMainSignals().NotifyNEVMComms(
+            "durable-pair-v1:" + std::to_string(count) + ":" + hash.GetHex(), durable);
+    }
+    if (!durable) {
+        m_nevm_prefix_recovery_needed = true;
+        error = "nevm-pending-connect-durability-unavailable";
+        return false;
+    }
     try {
         if (!m_blockman.m_block_tree_db->Erase(NEVM_PENDING_CONNECT_KEY, /*fSync=*/true)) {
+            m_nevm_prefix_recovery_needed = true;
             error = "nevm-pending-connect-record-erase-failed";
             return false;
         }
     } catch (const std::exception& e) {
+        m_nevm_prefix_recovery_needed = true;
         error = strprintf("nevm-pending-connect-record-erase:%s", e.what());
         return false;
     }
@@ -3451,7 +3470,7 @@ bool ChainstateManager::RecoverNEVMPendingConnect(
     // A freshly proved earlier active endpoint also proves C is absent.
     // Preserve ordinary startup's existing prefix rollback/replay policy.
     if (rebuilt_empty || MatchesNEVMActivePrefix(start, count, hash, tip)) {
-        if (!ClearNEVMPendingConnect(error)) return false;
+        if (!ClearNEVMPendingConnect(count, hash, error)) return false;
         chainstate.m_nevm_pending_connect.reset();
         chainstate.m_nevm_activation_continuation = false;
         m_nevm_prefix_recovery_needed = !aligned && tip && tip->nHeight >= start;
@@ -3476,7 +3495,7 @@ bool ChainstateManager::RecoverNEVMPendingConnect(
         error = "nevm-pending-connect-compensation-pair-mismatch";
         return false;
     }
-    if (!ClearNEVMPendingConnect(error)) return false;
+    if (!ClearNEVMPendingConnect(count, hash, error)) return false;
     chainstate.m_nevm_pending_connect.reset();
     chainstate.m_nevm_activation_continuation = false;
     m_nevm_prefix_recovery_needed = false;
@@ -4128,7 +4147,7 @@ bool Chainstate::ConnectNEVMCommitment(BlockValidationState& state, NEVMTxRootMa
                                                        hash, tip->GetBlockHash())) {
                     m_chainman.m_nevm_prefix_recovery_needed = true;
                 }
-                if (!m_chainman.ClearNEVMPendingConnect(error)) return state.Error(error);
+                if (!m_chainman.ClearNEVMPendingConnect(count, hash, error)) return state.Error(error);
             }
         }
         // SYSCOIN END: Only a reconciled attempt may yield its identity.
@@ -8469,7 +8488,7 @@ bool Chainstate::ActivateBestChainInternal(BlockValidationState& state,
                                                syscoin_hash, tip->GetBlockHash()))) {
             return state.Error("nevm-live-recovery-continuation-pair-changed");
         }
-        if (!m_chainman.ClearNEVMPendingConnect(error)) return state.Error(error);
+        if (!m_chainman.ClearNEVMPendingConnect(count, syscoin_hash, error)) return state.Error(error);
         m_nevm_activation_continuation = false;
         m_nevm_pending_connect.reset();
     }

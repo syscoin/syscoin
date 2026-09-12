@@ -272,6 +272,10 @@ struct StartupNEVMSubscriber final : CValidationInterface {
                        std::string&)> disconnect_response;
     bool strict_disconnect_order{false};
     std::vector<AppliedPair> applied_pairs;
+    std::optional<AppliedPair> durable_pair;
+    std::vector<AppliedPair> durable_pairs;
+    std::function<bool()> durable_pair_response;
+    std::size_t durable_pair_requests{0};
     std::size_t block_info_queries{0};
     std::vector<uint256> connected_blocks;
     std::vector<uint256> disconnected_blocks;
@@ -386,11 +390,35 @@ struct StartupNEVMSubscriber final : CValidationInterface {
         applied_hash = pair.hash;
     }
 
+    void PersistAppliedPair()
+    {
+        durable_pair = AppliedPair{applied_count, applied_hash};
+        durable_pairs = applied_pairs;
+    }
+
+    void RestartFromDurablePair()
+    {
+        BOOST_REQUIRE(durable_pair.has_value());
+        applied_count = durable_pair->count;
+        applied_hash = durable_pair->hash;
+        applied_pairs = durable_pairs;
+        buffered_pairs.clear();
+        buffered_pair.reset();
+    }
+
     void NotifyNEVMComms(
         const std::string& command, bool& response,
         std::optional<NEVMBlockReject>* rejection = nullptr) override
     {
         if (rejection) rejection->reset();
+        if (command.starts_with("durable-pair-v1:")) {
+            command_trace.push_back(command);
+            ++durable_pair_requests;
+            const std::string expected{"durable-pair-v1:" + std::to_string(applied_count) + ":" + applied_hash.ToString()};
+            response = command == expected && (!durable_pair_response || durable_pair_response());
+            if (response) PersistAppliedPair();
+            return;
+        }
         if (command == "startnetwork") {
             command_trace.push_back(command);
             ++network_start_requests;
@@ -2247,6 +2275,7 @@ struct LostAckMiningNEVMPrefixSetup : MiningNEVMPrefixSetup {
         RecoverPrefix();
         auto expected_commands{published_commands};
         expected_commands.insert(expected_commands.end(), {"flush", "blockinfo"});
+        expected_commands.push_back("durable-pair-v1:" + std::to_string(prefix.size() + 1) + ":" + candidate->GetHash().ToString());
         BOOST_CHECK(nevm->command_trace == expected_commands);
         BOOST_CHECK(WITH_LOCK(::cs_main, return chainman.PrepareNEVMBlockProduction()));
         BOOST_CHECK_EQUAL(candidate_attempts, attempts + 1);
@@ -2491,6 +2520,7 @@ struct LostAckMiningNEVMPrefixSetup : MiningNEVMPrefixSetup {
             RecoverPrefix();
             auto expected{commands};
             expected.insert(expected.end(), {"flush", "blockinfo"});
+            expected.push_back("durable-pair-v1:" + std::to_string(prefix.size() + 1) + ":" + candidate->GetHash().ToString());
             BOOST_CHECK(nevm->command_trace == expected);
             BOOST_CHECK(WITH_LOCK(::cs_main, return chainman.PrepareNEVMBlockProduction()));
         }
@@ -3027,9 +3057,10 @@ struct UnselectedLostAckMiningSetup : LostAckDescendantMiningSetup {
             CheckChildUnpublished();
             BOOST_CHECK(pnevmtxrootsdb->GetPublishedTip() == published_tip);
             BOOST_CHECK(WITH_LOCK(::cs_main, return chainstate.CoinsDB().GetBestBlock()) == durable_tip);
-            // C cancellation has its own fresh P proof. With no ordinary branch
-            // activation left, that proof can reopen mining at the unchanged P.
-            const std::vector<std::string> proof{"flush", "blockinfo", "flush", "blockinfo"};
+            // C cancellation proves P, then fences that exact pair before
+            // forgetting C and reopening mining at the unchanged parent.
+            const std::vector<std::string> proof{"flush", "blockinfo", "flush", "blockinfo",
+                "durable-pair-v1:" + std::to_string(prefix.size()) + ":" + original_tip->GetBlockHash().ToString()};
             BOOST_CHECK(nevm->command_trace == proof);
             BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainman.PrepareNEVMBlockProduction()));
             RecoverPrefix();
@@ -3560,9 +3591,18 @@ struct UnappliedMiningSetup : LostAckDescendantMiningSetup {
                 BOOST_CHECK(chainman.HasPendingNEVMPayloadRepair());
                 CheckUnappliedState();
             }
+            const std::string fence{"durable-pair-v1:" + std::to_string(prefix.size()) + ":" + original_tip->GetBlockHash().ToString()};
+            std::size_t fences{0};
             for (std::size_t i{commands.size()}; i < nevm->command_trace.size(); ++i) {
-                BOOST_CHECK(nevm->command_trace[i] == "flush" || nevm->command_trace[i] == "blockinfo");
+                if (nevm->command_trace[i] == fence) {
+                    ++fences;
+                    BOOST_REQUIRE_GT(i, 0U);
+                    BOOST_CHECK_EQUAL(nevm->command_trace[i - 1], "blockinfo");
+                } else {
+                    BOOST_CHECK(nevm->command_trace[i] == "flush" || nevm->command_trace[i] == "blockinfo");
+                }
             }
+            BOOST_CHECK_EQUAL(fences, 1U);
         } else {
             RecoverPrefix();
             auto expected{commands};
@@ -3954,6 +3994,7 @@ struct ReopenedPendingNEVMConnectSetup : LostAckDescendantMiningSetup {
     enum class Scenario { PARENT, REPLACEMENT, ELIGIBLE, BEFORE_APPLY, LOST_ACK,
                           POST_QUERY, OUTPUT_QUERY, ALREADY_PARENT, BEHIND_PARENT, EMPTY_ENGINE, INTERRUPTED, FOREIGN_PAIR,
                           WRONG_HEIGHT, MISSING_BODY, DMN, FINALITY };
+    enum class FenceScenario { SUCCESS, BEFORE_SYNC, LOST_ACK, ALREADY_PARENT, DISCONNECT_LOST_ACK };
     const std::pair<uint8_t, std::string> marker{uint8_t{'F'}, "nevm_pending_connect_v1"};
     std::vector<std::shared_ptr<const CBlock>> replacement;
     bool retired{true};
@@ -3963,6 +4004,7 @@ struct ReopenedPendingNEVMConnectSetup : LostAckDescendantMiningSetup {
     {
         nevm->disconnect_response = {};
         nevm->flush_verdict = {};
+        nevm->durable_pair_response = {};
         nevm->reported_pair_override.reset();
         m_node.kernel->interrupt.reset();
     }
@@ -4067,6 +4109,7 @@ struct ReopenedPendingNEVMConnectSetup : LostAckDescendantMiningSetup {
         BOOST_CHECK_EQUAL(activated, !fail_sync);
         BOOST_CHECK_EQUAL(syncs, fail_sync ? 1U : 0U);
         BOOST_CHECK_EQUAL(checked, fail_sync ? 0U : 1U);
+        BOOST_CHECK_EQUAL(nevm->durable_pair_requests, 0U);
         CheckMarker(chainman, false);
         BOOST_CHECK(nevm->applied_hash == candidate->GetHash());
         BOOST_CHECK(nevm->disconnected_blocks.empty());
@@ -4182,7 +4225,7 @@ struct ReopenedPendingNEVMConnectSetup : LostAckDescendantMiningSetup {
         nevm->applied_hash = nevm->applied_pairs.back().hash;
     }
 
-    void WithReopened(const std::function<void(ChainstateManager&)>& run)
+    void WithReopened(const std::function<void(ChainstateManager&)>& run, bool pending_record = true)
     {
         auto& original{*m_node.chainman};
         auto& original_state{original.ActiveChainstate()};
@@ -4254,6 +4297,7 @@ struct ReopenedPendingNEVMConnectSetup : LostAckDescendantMiningSetup {
             {
                 subscriber.disconnect_response = {};
                 subscriber.flush_verdict = {};
+                subscriber.durable_pair_response = {};
             }
         } clear_response{*nevm};
         std::string error;
@@ -4266,10 +4310,98 @@ struct ReopenedPendingNEVMConnectSetup : LostAckDescendantMiningSetup {
             BOOST_CHECK(!reopened.HasPendingNEVMStartupPair());
         }
         BOOST_REQUIRE_MESSAGE(WITH_LOCK(::cs_main, return reopened.InitializeNEVMPendingConnect(error)), error);
-        CheckMarker(reopened);
-        BOOST_CHECK(!WITH_LOCK(::cs_main, return reopened.PrepareNEVMBlockProduction()));
-        CheckRefused(reopened.ActiveChainstate());
+        CheckMarker(reopened, pending_record);
+        if (pending_record) {
+            BOOST_CHECK(!WITH_LOCK(::cs_main, return reopened.PrepareNEVMBlockProduction()));
+            CheckRefused(reopened.ActiveChainstate());
+        }
         run(reopened);
+    }
+
+    void CheckDurableFence(FenceScenario scenario)
+    {
+        PrepareReopen(Scenario::PARENT);
+        nevm->PersistAppliedPair();
+        BOOST_REQUIRE(nevm->durable_pair->hash == candidate->GetHash());
+        if (scenario == FenceScenario::ALREADY_PARENT) RemoveExternalChild();
+        std::size_t expected_disconnects{1};
+        if (scenario != FenceScenario::SUCCESS) {
+            WithReopened([&](ChainstateManager& chainman) {
+                const auto recover = [&] {
+                    uint64_t count{nevm->applied_count};
+                    uint256 hash{nevm->applied_hash};
+                    std::string error;
+                    BOOST_CHECK(!chainman.RecoverNEVMPendingConnect(count, hash, error));
+                    CheckAtParent(chainman);
+                    CheckMarker(chainman);
+                    BOOST_CHECK(!WITH_LOCK(::cs_main, return chainman.PrepareNEVMBlockProduction()));
+                    BOOST_CHECK(nevm->connected_blocks.empty());
+                    return error;
+                };
+                if (scenario == FenceScenario::DISCONNECT_LOST_ACK) {
+                    nevm->disconnect_response = [&](const uint256& hash,
+                        const CDeterministicMNListNEVMAddressDiff&, std::string& error) {
+                        BOOST_CHECK(hash == candidate->GetHash());
+                        RemoveExternalChild();
+                        error = "nevm-disconnect-response-not-found";
+                    };
+                    BOOST_CHECK_EQUAL(recover(), "nevm-disconnect-response-not-found");
+                    BOOST_CHECK_EQUAL(nevm->durable_pair_requests, 0U);
+                    nevm->disconnect_response = {};
+                }
+                nevm->durable_pair_response = [&] {
+                    CheckAtParent(chainman);
+                    CheckMarker(chainman);
+                    BOOST_CHECK(nevm->applied_hash == original_tip->GetBlockHash());
+                    BOOST_CHECK(nevm->durable_pair->hash == candidate->GetHash());
+                    if (scenario == FenceScenario::LOST_ACK) nevm->PersistAppliedPair();
+                    return false;
+                };
+                BOOST_CHECK_EQUAL(recover(), "nevm-pending-connect-durability-unavailable");
+                BOOST_CHECK_EQUAL(nevm->durable_pair_requests, 1U);
+                BOOST_CHECK(nevm->applied_hash == original_tip->GetBlockHash());
+                BOOST_CHECK(nevm->durable_pair->hash == (scenario == FenceScenario::LOST_ACK
+                    ? original_tip->GetBlockHash() : candidate->GetHash()));
+                BOOST_CHECK_EQUAL(nevm->disconnected_blocks.size(), scenario == FenceScenario::ALREADY_PARENT ? 0U : 1U);
+            });
+            // An applied P is not a durable P. Before the successful fence,
+            // storage restart may restore C and must retain its recovery duty.
+            nevm->RestartFromDurablePair();
+            expected_disconnects = nevm->disconnected_blocks.size() +
+                (nevm->applied_hash == candidate->GetHash() ? 1U : 0U);
+        }
+        const auto fences{nevm->durable_pair_requests};
+        WithReopened([&](ChainstateManager& chainman) {
+            nevm->durable_pair_response = [&] {
+                CheckAtParent(chainman);
+                CheckMarker(chainman);
+                BOOST_CHECK(nevm->applied_hash == original_tip->GetBlockHash());
+                return true;
+            };
+            FinishStartup(chainman, expected_disconnects);
+            BOOST_CHECK_EQUAL(nevm->durable_pair_requests, fences + 1);
+            BOOST_REQUIRE(nevm->durable_pair.has_value());
+            BOOST_CHECK_EQUAL(nevm->durable_pair->count, prefix.size());
+            BOOST_CHECK(nevm->durable_pair->hash == original_tip->GetBlockHash());
+        });
+        // Reopen both engine storage and Core after the journal was erased.
+        // Neither ordinary flush nor disconnect wrote the durable engine pair;
+        // the acknowledged recovery fence alone made this restart safe.
+        nevm->RestartFromDurablePair();
+        BOOST_CHECK(nevm->applied_hash == original_tip->GetBlockHash());
+        WithReopened([&](ChainstateManager& chainman) {
+            std::string error;
+            BOOST_REQUIRE_MESSAGE(WITH_LOCK(::cs_main, return chainman.InitializeNEVMStartupPair(
+                nevm->applied_count, nevm->applied_hash, error)), error);
+            BlockValidationState state;
+            BOOST_REQUIRE_MESSAGE(chainman.ActiveChainstate().ActivateBestChain(state), state.ToString());
+            CheckAtParent(chainman);
+            CheckMarker(chainman, false);
+            BOOST_CHECK(WITH_LOCK(::cs_main, return chainman.PrepareNEVMBlockProduction()));
+            BOOST_CHECK_EQUAL(nevm->durable_pair_requests, fences + 1);
+            BOOST_CHECK_EQUAL(nevm->disconnected_blocks.size(), expected_disconnects);
+            BOOST_CHECK(nevm->connected_blocks.empty());
+        }, /*pending_record=*/false);
     }
 
     void FinishStartup(ChainstateManager& chainman, std::size_t expected_disconnects,
@@ -9746,6 +9878,31 @@ BOOST_FIXTURE_TEST_CASE(nevm_mining_pending_connect_sync_failure_blocks_retireme
 BOOST_FIXTURE_TEST_CASE(nevm_mining_reopened_pending_retired_parent, ReopenedPendingNEVMConnectSetup)
 {
     CheckReopenedAttempt(Scenario::PARENT);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_mining_durable_pending_fence_survives_storage_restart, ReopenedPendingNEVMConnectSetup)
+{
+    CheckDurableFence(FenceScenario::SUCCESS);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_mining_durable_pending_failed_sync_retains_record, ReopenedPendingNEVMConnectSetup)
+{
+    CheckDurableFence(FenceScenario::BEFORE_SYNC);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_mining_durable_pending_lost_fence_ack_retains_record, ReopenedPendingNEVMConnectSetup)
+{
+    CheckDurableFence(FenceScenario::LOST_ACK);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_mining_durable_pending_already_applied_parent_requires_fence, ReopenedPendingNEVMConnectSetup)
+{
+    CheckDurableFence(FenceScenario::ALREADY_PARENT);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_mining_durable_pending_lost_disconnect_ack_requires_fence, ReopenedPendingNEVMConnectSetup)
+{
+    CheckDurableFence(FenceScenario::DISCONNECT_LOST_ACK);
 }
 
 BOOST_FIXTURE_TEST_CASE(nevm_mining_reopened_pending_retired_replacement, ReopenedPendingNEVMConnectSetup)

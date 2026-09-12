@@ -26,6 +26,7 @@ from test_framework.messages import (
     CNEVMHeader,
     CTxOut,
     hash256,
+    deser_string,
     msg_generic,
     ser_string,
     ser_uint256,
@@ -85,6 +86,9 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
         self._payload_checks = []
         self._payload_check_response = b"payload-valid"
         self._applied_syshashes = []
+        self._durable_syshashes = []
+        self._durable_pair_response = None
+        self._durable_pair_replies = []
         self._buffer_connects = False
         self._buffered_syshashes = []
         self._expected_connect_syshashes = None
@@ -109,6 +113,7 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
                 payload = parts[1] if len(parts) > 1 else b""
                 if topic == b"nevmcomms":
                     response = b"ack"
+                    command = deser_string(BytesIO(payload))
                     if payload == ser_string(b"connect-v1"):
                         self._connect_negotiations += 1
                         response = self._connect_protocol_response
@@ -119,6 +124,22 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
                         self._flush_mock_buffer()
                         self._nevm_events.append(("flush", len(self._applied_syshashes)))
                         response = b"flushed"
+                    elif command.startswith(b"durable-pair-v1:"):
+                        expected = (
+                            f"durable-pair-v1:{len(self._applied_syshashes)}:"
+                            f"{self._applied_syshashes[-1] if self._applied_syshashes else 0:064x}"
+                        ).encode()
+                        if command != expected:
+                            response = b"error:mock-durable-pair-mismatch"
+                        elif self._durable_pair_response is not None:
+                            response = self._durable_pair_response
+                        else:
+                            # Ordinary flush and disconnect change applied
+                            # state only. This exact fence alone commits it.
+                            self._durable_syshashes = self._applied_syshashes[:]
+                            response = command
+                        self._durable_pair_replies.append((command, response))
+                        self._nevm_events.append(("durable-pair", command, response))
                     self._zmq_sock.send_multipart([b"nevmcomms", response])
                 elif topic == b"nevmblock":
                     h = hash256(str(random.randint(-0x80000000, 0x7FFFFFFF)).encode())
@@ -787,7 +808,8 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
             self._block_info_available = True
             self._expected_connect_syshashes = None
 
-    def _check_applied_pending_child_reselected(self, *, deeper_fork=False, retire_pending=False, restart_before_recovery=False):
+    def _check_applied_pending_child_reselected(self, *, deeper_fork=False, retire_pending=False,
+                                               restart_before_recovery=False, check_durable_fence=False):
         node = self.nodes[0]
         assert_equal(node.getconnectioncount(), 0)
         core_pid = node.process.pid
@@ -806,6 +828,8 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
             scenario += b"-retired"
         if restart_before_recovery:
             scenario += b"-restart"
+        if check_durable_fence:
+            scenario += b"-durable-fence"
 
         def build_branch_block(label, parent_hash, height):
             # Reuse pre-DIP3 payments while committing distinct mock NEVM
@@ -863,6 +887,9 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
                 assert_equal(node.invalidateblock(block_c.hash), None)
                 assert_equal(node.getbestblockhash(), previous_tip)
                 assert_equal(self._applied_syshashes, applied + [block_c.sha256])
+            if check_durable_fence:
+                assert retire_pending and not deeper_fork and not restart_before_recovery
+                self._durable_syshashes = self._applied_syshashes[:]
             # A deeper branch first reaches ordinary disconnect preflight;
             # its unavailable engine status must leave P entirely unchanged.
             with node.assert_debug_log(["nevm-reorg-status:nevm-response-unserialize"] if deeper_fork else []):
@@ -904,10 +931,40 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
                     assert_equal(self._applied_syshashes, applied + [block_c.sha256])
                 self._expected_connect_syshashes = prefix + selected_hashes
                 self._connect_response = b"connected"
+                if check_durable_fence:
+                    self._durable_pair_response = b"error:mock-durable-sync"
                 self._block_info_available = True
                 if restart_before_recovery:
                     # Keep the same mock engine alive across the daemon restart.
                     # No block submission or reconsideration restores its work.
+                    self.start_node(0, self.extra_args[0])
+                    force_finish_mnsync(node)
+                if check_durable_fence:
+                    # Neither a failed barrier, a legacy ack, nor an echo for
+                    # another pair may erase C's durable recovery obligation.
+                    expected_command = f"durable-pair-v1:{len(applied)}:{applied[-1]:064x}".encode()
+                    for reply in (
+                        b"error:mock-durable-sync", b"ack",
+                        f"durable-pair-v1:{len(applied)}:{block_c.sha256:064x}".encode(),
+                    ):
+                        reply_start = len(self._durable_pair_replies)
+                        self._durable_pair_response = reply
+                        self.wait_until(lambda: (expected_command, reply) in self._durable_pair_replies[reply_start:])
+                        assert_equal(node.getbestblockhash(), previous_tip)
+                        assert_equal(self._applied_syshashes, applied)
+                        assert_equal(self._durable_syshashes, applied + [block_c.sha256])
+                        assert_equal(self._nonzero_connects_since(recovery_connect_len), [])
+                        assert_equal(node.gettxout(block_c.vtx[0].hash, 0), None)
+                        assert_raises_rpc_error(
+                            -10, "execution recovery", node.getblocktemplate, {"rules": ["segwit"]},
+                        )
+                    assert_equal(self._disconnect_syshashes[disconnect_len:], [block_c.sha256])
+                    self.stop_node(0)
+                    # Simulate engine storage restart, which restores C
+                    # because the applied disconnect was never made durable.
+                    self._applied_syshashes = self._durable_syshashes[:]
+                    self._buffered_syshashes.clear()
+                    self._durable_pair_response = None
                     self.start_node(0, self.extra_args[0])
                     force_finish_mnsync(node)
                 self.wait_until(lambda: node.getbestblockhash() == selected.hash)
@@ -926,7 +983,7 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
                 self.wait_until(ready)
                 assert_equal(templates[0]["previousblockhash"], selected.hash)
 
-            assert_equal(node.process.pid == core_pid, not restart_before_recovery)
+            assert_equal(node.process.pid == core_pid, not (restart_before_recovery or check_durable_fence))
             assert_equal(node.process.poll(), None)
             assert_equal(node.gettxout(block_c.vtx[0].hash, 0), None)
             if deeper_fork:
@@ -945,9 +1002,15 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
             assert_equal(tips[selected.hash], "active")
             assert_equal(self._applied_syshashes, prefix + selected_hashes)
             assert_equal(self._nonzero_connects_since(recovery_connect_len), selected_hashes)
-            assert_equal(self._disconnect_syshashes[disconnect_len:], [block_c.sha256] + (
+            assert_equal(self._disconnect_syshashes[disconnect_len:], [block_c.sha256] * (2 if check_durable_fence else 1) + (
                 [int(previous_tip, 16)] if deeper_fork else []
             ))
+            if check_durable_fence:
+                # After record erase, an engine storage restart can recover P,
+                # but cannot resurrect the retired C. Healthy B adds no fence.
+                assert_equal(self._durable_syshashes, applied)
+                expected_command = f"durable-pair-v1:{len(applied)}:{applied[-1]:064x}".encode()
+                assert_equal(self._durable_pair_replies[-1], (expected_command, expected_command))
 
             # Remove C before undoing B so cleanup selects the retained P and
             # can reconnect it after unwinding a deeper branch to the fork.
@@ -963,6 +1026,7 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
             self._connect_response = b"connected"
             self._block_info_available = True
             self._expected_connect_syshashes = None
+            self._durable_pair_response = None
 
     def _check_connect_responses(self, responses, *, protocol_response=b"connect-v1", consensus_invalid=False, connects_per_attempt=None):
         node = self.nodes[0]
@@ -1075,6 +1139,9 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
 
             self.log.info("Restart preserves recovery of an invalid engine-only child and its stored alternative")
             self._check_applied_pending_child_reselected(retire_pending=True, restart_before_recovery=True)
+
+            self.log.info("Retired-child recovery requires an exact durable engine fence before forgetting the attempt")
+            self._check_applied_pending_child_reselected(retire_pending=True, check_durable_fence=True)
 
             self.log.info("A requested full block repairs only the engine-approved NEVM payload")
             self._check_payload_repair_from_requested_peer()

@@ -410,7 +410,10 @@ bool CZMQAbstractPublishNotifier::NotifyNEVMCommsCommon(const std::string &commM
             const std::string expected_response{
                 commMessage == "flush" ? "flushed" :
                 commMessage == "connect-v1" ? "connect-v1" :
-                commMessage == "payload-v1" ? "payload-v1" : "ack"};
+                commMessage == "payload-v1" ? "payload-v1" :
+                // SYSCOIN: The recovery fence must acknowledge the exact
+                // expected pair; an older engine's generic ack is insufficient.
+                commMessage.rfind("durable-pair-v1:", 0) == 0 ? commMessage : "ack"};
             if(parts[1] != expected_response) {
                 // Only an explicit flush can report buffered block rejection.
                 if (commMessage == "flush" && rejection) {
