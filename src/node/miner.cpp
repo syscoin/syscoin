@@ -33,6 +33,8 @@
 #include <masternode/masternodesync.h>
 #include <evo/specialtx.h>
 #include <evo/deterministicmns.h>
+#include <governance/governance.h>
+#include <governance/governanceclasses.h>
 #include <llmq/quorums_chainlocks.h>
 #include <llmq/pq_btcc.h>
 #include <llmq/pq_recovery_refresh.h>
@@ -266,6 +268,16 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(
     CDataStream dsNEVM(SER_NETWORK, PROTOCOL_VERSION);
     BlockValidationState state;
     if(fDIP0003Active_context) {
+        // SYSCOIN: Aborted undo closes governance readiness even when Core
+        // keeps this parent. Authenticate it before payment construction;
+        // the template cannot reach TestBlockValidity while this gate is shut.
+        if (AreSuperblocksEnabled() && CSuperblock::IsValidBlockHeight(nHeight) &&
+            (governance == nullptr || !governance->IsValid() ||
+             (!governance->IsReadyForTip(pindexPrev) &&
+              !governance->RevalidatePQGovernance(*pindexPrev)))) {
+            throw std::runtime_error(
+                "Payment or governance state is unavailable for block template");
+        }
         // Update coinbase transaction with additional info about masternode and governance payments,
         // get some info back to pass to getblocktemplate
         if (!FillBlockPayments(

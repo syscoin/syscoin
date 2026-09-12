@@ -39,6 +39,7 @@
 // SYSCOIN BEGIN: fork governance/PQ chainstate test dependencies.
 #include <node/blockstorage.h>
 #include <node/kernel_notifications.h>
+#include <node/miner.h>
 #include <txdb.h>
 #include <algorithm>
 #include <array>
@@ -83,6 +84,11 @@ public:
         } else {
             manager.MarkPQGovernanceUnavailableForTip(*tip);
         }
+    }
+
+    static void SetInitialized(CGovernanceManager& manager, bool initialized)
+    {
+        manager.is_valid.store(initialized, std::memory_order_release);
     }
 
     static bool AddTriggerAtHeight(
@@ -4064,20 +4070,23 @@ BOOST_FIXTURE_TEST_CASE(governance_activation_blocks_unchanged_authority_reuse,
     governance->ObserveChainTip(tip);
 }
 
-BOOST_FIXTURE_TEST_CASE(
-    governance_future_vote_height_blocks_reuse_and_restores_exact_wire,
-    TestChain100Setup)
+// SYSCOIN: Share authenticated disk snapshots between vote-height and fresh
+// template controls without bypassing the production governance rebuild.
+static void CheckGovernanceFutureVotes(TestChain100Setup& fixture,
+                                      bool check_templates)
 {
     using Access = governance_tests::CGovernanceManagerTestAccess;
     using namespace llmq::pq;
     BOOST_REQUIRE(governance != nullptr);
     BOOST_REQUIRE(deterministicMNManager != nullptr);
-    auto& chainman{*m_node.chainman};
+    auto& chainman{*fixture.m_node.chainman};
     auto& consensus{const_cast<Consensus::Params&>(Params().GetConsensus())};
     constexpr int preparation_height{1295};
-    constexpr int creator_height{1296};
-    constexpr int vote_height{1298};
-    constexpr int final_height{1299};
+    // Templates need a real payment epoch as well as post-activation signing
+    // heights. The original vote-height profile remains before epoch zero.
+    const int creator_height{check_templates ? 1446 : 1296};
+    const int vote_height{check_templates ? 1448 : 1298};
+    const int final_height{check_templates ? 1449 : 1299};
     std::vector<uint256> hashes(final_height + 1);
     std::vector<CBlockIndex> indices(final_height + 1);
     for (int height{0}; height <= final_height; ++height) {
@@ -4130,8 +4139,12 @@ BOOST_FIXTURE_TEST_CASE(
     member->proTxHash = pro_tx_hash;
     member->collateralOutpoint = collateral;
     auto member_state{std::make_shared<CDeterministicMNState>()};
-    member_state->keyIDOwner = coinbaseKey.GetPubKey().GetID();
-    member_state->keyIDVoting = coinbaseKey.GetPubKey().GetID();
+    member_state->keyIDOwner = fixture.coinbaseKey.GetPubKey().GetID();
+    member_state->keyIDVoting = fixture.coinbaseKey.GetPubKey().GetID();
+    if (check_templates) {
+        member_state->scriptPayout = GetScriptForDestination(
+            WitnessV0KeyHash(fixture.coinbaseKey.GetPubKey()));
+    }
     member_state->nRegisteredHeight = preparation_height - 1;
     member->pdmnState = std::move(member_state);
 
@@ -4160,14 +4173,14 @@ BOOST_FIXTURE_TEST_CASE(
     BOOST_REQUIRE(operator_state.IsStructurallyValid());
 
     const DBParams dmn_db_params{
-        .path = m_path_root / "governance_future_votes_evodb",
+        .path = fixture.m_path_root / "governance_future_votes_evodb",
         .cache_bytes = 1 << 20,
         .memory_only = false,
         .wipe_data = false,
     };
     DBParams registry_db_params{dmn_db_params};
     registry_db_params.path =
-        m_path_root / "governance_future_votes_evodb_pq_registry";
+        fixture.m_path_root / "governance_future_votes_evodb_pq_registry";
     registry_db_params.cache_bytes /= 2;
     std::vector<uint256> registry_roots(final_height + 1);
     const auto empty_root{
@@ -4257,7 +4270,7 @@ BOOST_FIXTURE_TEST_CASE(
                                              uint256 proposal_hash) {
         std::vector<CGovernancePayment> payments;
         payments.emplace_back(
-            PKHash(coinbaseKey.GetPubKey()), COIN, proposal_hash);
+            PKHash(fixture.coinbaseKey.GetPubKey()), COIN, proposal_hash);
         CSuperblock schedule{event_height, std::move(payments)};
         CGovernanceObject trigger{
             uint256{}, /*revision=*/1,
@@ -4320,6 +4333,128 @@ BOOST_FIXTURE_TEST_CASE(
 
     revalidate_at(indices[final_height]);
     check_vote(&vote);
+    if (check_templates) {
+        BOOST_REQUIRE_EQUAL(event_height, final_height + 1);
+        BOOST_REQUIRE(AreSuperblocksEnabled());
+        BOOST_REQUIRE(governance->IsReadyForTip(&indices[final_height]));
+        BOOST_REQUIRE(CSuperblockManager::GetSuperblockTriggerState(
+            event_height, &indices[final_height]) ==
+            SuperblockTriggerState::TRIGGERED);
+        const CScript payout{GetScriptForDestination(
+            PKHash(fixture.coinbaseKey.GetPubKey()))};
+        const std::vector<CTxOut> expected_payments{CTxOut{COIN, payout}};
+        // Advancing the persisted registry through epoch zero freezes the
+        // member's child-key commitment. Exercise its real PQ MN payment
+        // alongside the separately funded governance output.
+        CDeterministicMNCPtr mn_payee;
+        BOOST_REQUIRE(deterministicMNManager->GetMNPayeeForBlock(
+            &indices[final_height], mn_payee));
+        BOOST_REQUIRE(mn_payee);
+        BOOST_REQUIRE(mn_payee->proTxHash == pro_tx_hash);
+        // These are production templates and payment builders over the exact
+        // synthetic parent. Skip only final block consensus validation: this
+        // fixture supplies admitted authorization envelopes, not block/UTXO
+        // history or fresh SLH signature verification. The paired rollback
+        // regression separately exercises CreateNewBlock with full validity.
+        node::BlockAssembler::Options options;
+        options.test_block_validity = false;
+        const auto make_template = [&]() {
+            return node::BlockAssembler{chainman.ActiveChainstate(), nullptr, options}
+                .CreateNewBlock(payout);
+        };
+        const auto check_payments = [&](const node::CBlockTemplate& block_template) {
+            BOOST_CHECK(block_template.block.hashPrevBlock ==
+                        indices[final_height].GetBlockHash());
+            BOOST_CHECK(block_template.voutSuperblockPayments == expected_payments);
+            BOOST_REQUIRE_EQUAL(block_template.voutMasternodePayments.size(), 1U);
+            BOOST_CHECK(block_template.voutMasternodePayments.front().scriptPubKey ==
+                        member->pdmnState->scriptPayout);
+            const auto& outputs{block_template.block.vtx[0]->vout};
+            BOOST_CHECK_EQUAL(std::count(outputs.begin(), outputs.end(),
+                                         expected_payments.front()), 1);
+            BOOST_CHECK(governance->IsReadyForTip(&indices[final_height]));
+        };
+        const auto ready_stats{Access::AuthoritySnapshotStats(*governance)};
+        check_payments(*make_template());
+        BOOST_CHECK_EQUAL(Access::AuthoritySnapshotStats(*governance).builds,
+                          ready_stats.builds);
+        BOOST_CHECK_EQUAL(Access::AuthoritySnapshotStats(*governance).reuses,
+                          ready_stats.reuses);
+
+        governance->ObserveChainTip(nullptr);
+        {
+            LOCK(::cs_main);
+            chainman.ActiveChain().SetTip(indices[final_height - 1]);
+        }
+        BOOST_REQUIRE(!CSuperblock::IsValidBlockHeight(final_height));
+        const auto ordinary_template{make_template()};
+        BOOST_CHECK(ordinary_template->voutSuperblockPayments.empty());
+        BOOST_CHECK(!governance->IsReady());
+        BOOST_CHECK_EQUAL(Access::AuthoritySnapshotStats(*governance).builds,
+                          ready_stats.builds);
+        BOOST_CHECK_EQUAL(Access::AuthoritySnapshotStats(*governance).reuses,
+                          ready_stats.reuses);
+        {
+            LOCK(::cs_main);
+            chainman.ActiveChain().SetTip(indices[final_height]);
+        }
+        const auto unavailable_error = [](const std::runtime_error& error) {
+            return std::string{error.what()} ==
+                "Payment or governance state is unavailable for block template";
+        };
+        {
+            struct RestoreManager {
+                std::unique_ptr<CDeterministicMNManager> original{
+                    std::move(deterministicMNManager)};
+                ~RestoreManager()
+                {
+                    deterministicMNManager = std::move(original);
+                }
+            } restore_manager;
+            BOOST_CHECK_EXCEPTION(make_template(), std::runtime_error,
+                                  unavailable_error);
+            BOOST_CHECK(!governance->IsReady());
+        }
+        {
+            struct RestoreInitialization {
+                ~RestoreInitialization()
+                {
+                    Access::SetInitialized(*governance, true);
+                }
+            } restore_initialization;
+            Access::SetInitialized(*governance, false);
+            const auto unavailable_stats{Access::AuthoritySnapshotStats(*governance)};
+            BOOST_CHECK_EXCEPTION(make_template(), std::runtime_error,
+                                  unavailable_error);
+            BOOST_CHECK(!governance->IsValid());
+            BOOST_CHECK(!governance->IsReady());
+            BOOST_CHECK_EQUAL(Access::AuthoritySnapshotStats(*governance).builds,
+                              unavailable_stats.builds);
+            BOOST_CHECK_EQUAL(Access::AuthoritySnapshotStats(*governance).reuses,
+                              unavailable_stats.reuses);
+        }
+        // No readiness publication or funding override follows closure. The
+        // fresh template must rebuild from the same retained local authority,
+        // trigger and vote, then include the exact governance payment.
+        BOOST_REQUIRE(governance->IsValid());
+        BOOST_REQUIRE(!governance->IsReady());
+        std::unique_ptr<node::CBlockTemplate> recovered;
+        BOOST_REQUIRE_NO_THROW(recovered = make_template());
+        BOOST_REQUIRE(recovered);
+        check_payments(*recovered);
+        check_vote(&vote);
+
+        governance->DeleteGovernanceObject(trigger_hash);
+        governance->ObserveChainTip(nullptr);
+        BOOST_REQUIRE(!governance->IsReady());
+        const auto untriggered{make_template()};
+        BOOST_CHECK(untriggered->voutSuperblockPayments.empty());
+        BOOST_CHECK(governance->IsReadyForTip(&indices[final_height]));
+        BOOST_CHECK(CSuperblockManager::GetSuperblockTriggerState(
+            event_height, &indices[final_height]) ==
+            SuperblockTriggerState::NOT_TRIGGERED);
+        return;
+    }
     revalidate_at(indices[creator_height]);
     check_vote(nullptr);
     BOOST_CHECK((Access::TriggerStateCounts(*governance) ==
@@ -4386,6 +4521,20 @@ BOOST_FIXTURE_TEST_CASE(
     BOOST_CHECK(!governance->HaveVoteForHash(later_vote.GetHash()));
     revalidate_at(indices[vote_height]);
     BOOST_CHECK(governance->HaveVoteForHash(later_vote.GetHash()));
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    governance_future_vote_height_blocks_reuse_and_restores_exact_wire,
+    TestChain100Setup)
+{
+    CheckGovernanceFutureVotes(*this, /*check_templates=*/false);
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    superblock_templates_revalidate_available_governance_before_payments,
+    TestChain100Setup)
+{
+    CheckGovernanceFutureVotes(*this, /*check_templates=*/true);
 }
 
 BOOST_FIXTURE_TEST_CASE(

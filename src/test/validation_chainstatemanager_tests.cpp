@@ -7408,6 +7408,175 @@ struct NEVMSuperblockBudgetRollbackSetup : OrdinaryNEVMDisconnectDurabilitySetup
     }
 };
 
+// SYSCOIN: External-only recovery must leave a fresh superblock template able
+// to authenticate governance for the unchanged active parent.
+struct NEVMGovernanceTemplateRecoverySetup : OrdinaryNEVMDisconnectDurabilitySetup {
+    void CheckFreshTemplateAfterAbortedRollback()
+    {
+        auto& chainman{*m_node.chainman};
+        auto& state{chainman.ActiveChainstate()};
+        auto& consensus{const_cast<Consensus::Params&>(chainman.GetConsensus())};
+        struct Restore {
+            Chainstate& state;
+            Consensus::Params& consensus;
+            const Consensus::Params original_consensus;
+            std::unique_ptr<CDeterministicMNManager> original_manager;
+            StartupNEVMSubscriber& nevm;
+            ~Restore()
+            {
+                WITH_LOCK(::cs_main, state.CoinsDB().SetSyncCallbackForTesting({}));
+                nevm.durable_pair_response = {};
+                governance->ObserveChainTip(nullptr);
+                deterministicMNManager = std::move(original_manager);
+                consensus = original_consensus;
+            }
+        } restore{state, consensus, consensus, std::move(deterministicMNManager), *nevm};
+        // The existing 100-block prefix predates DIP3. Every later exact DMN
+        // snapshot and inverse is produced by ordinary block connection.
+        consensus.DIP0003Height = 101;
+        consensus.DIP0003EnforcementHeight = 101;
+        consensus.nPQPreparationHeight = 1000;
+        consensus.nPQChainLockEpochOrigin = 1440;
+        consensus.nPQRegistrationCutoffBlocks = 144;
+        consensus.nPQFutureHorizonEpochs = 8;
+        llmq::pq::PQRegistryConfig registry_config;
+        BOOST_REQUIRE(llmq::pq::GetPQRegistryConfig(consensus, registry_config) ==
+                      llmq::pq::PQRegistryDeploymentResult::VALID);
+        deterministicMNManager = std::make_unique<CDeterministicMNManager>(DBParams{
+            .path = m_path_root / "template-recovery-dmn", .cache_bytes = 1U << 20});
+        BOOST_REQUIRE(governance->LoadCache(/*load_cache=*/false));
+        std::shared_ptr<const CBlock> superblock, tip_block;
+        CBlockIndex* superblock_index{nullptr};
+        while (WITH_LOCK(::cs_main, return chainman.ActiveHeight()) < 119) {
+            auto* parent{WITH_LOCK(::cs_main, return chainman.ActiveTip())};
+            if (CSuperblock::IsValidBlockHeight(parent->nHeight + 1)) {
+                BOOST_REQUIRE(governance->RevalidatePQGovernance(*parent));
+                BOOST_REQUIRE(governance->IsReadyForTip(parent));
+            }
+            tip_block = MineNEVMBlock();
+            if (WITH_LOCK(::cs_main, return chainman.ActiveHeight()) == 110) {
+                superblock = tip_block;
+                superblock_index = WITH_LOCK(::cs_main, return chainman.ActiveTip());
+            }
+        }
+        BOOST_REQUIRE(superblock);
+        auto* tip{WITH_LOCK(::cs_main, return chainman.ActiveTip())};
+        BOOST_REQUIRE_EQUAL(tip->nHeight, 119);
+        BOOST_REQUIRE(CSuperblock::IsValidBlockHeight(tip->nHeight + 1));
+        BOOST_REQUIRE(governance->RevalidatePQGovernance(*tip));
+        BOOST_REQUIRE(governance->IsReadyForTip(tip));
+        BOOST_REQUIRE(CSuperblockManager::GetSuperblockTriggerState(
+            tip->nHeight + 1, tip) == SuperblockTriggerState::NOT_TRIGGERED);
+        const CAmount budget{CSuperblock::SUPERBLOCK_BUDGET * CSuperblock::SHIFT_DOWN / CSuperblock::SHIFT};
+        {
+            LOCK(::cs_main);
+            struct RestoreSync {
+                const int previous{masternodeSync.GetAssetID()};
+                ~RestoreSync() { masternodeSync.SetSyncMode(previous); }
+            } restore_sync;
+            masternodeSync.SetSyncMode(MASTERNODE_SYNC_GOVERNANCE);
+            // Preserve a nondefault row produced by the actual historical
+            // amount-only transition; no trigger/vote authorization is modeled.
+            std::string error;
+            BOOST_REQUIRE_MESSAGE(IsBlockValueValid(*superblock, superblock_index,
+                superblock->vtx.front()->GetValueOut() - COIN, error,
+                /*fJustCheck=*/false, /*check_superblock=*/false), error);
+            BOOST_REQUIRE_EQUAL(CSuperblock::GetPaymentsLimit(superblock_index), budget);
+            BlockValidationState flushed;
+            BOOST_REQUIRE_MESSAGE(state.FlushStateToDisk(flushed, FlushStateMode::ALWAYS), flushed.ToString());
+            BOOST_REQUIRE(state.CoinsDB().FlushWithSync(state.CoinsTip()));
+        }
+        CNEVMHeader header;
+        BlockValidationState decoded;
+        BOOST_REQUIRE(GetNEVMData(decoded, *tip_block, header));
+        const auto original_status{WITH_LOCK(::cs_main, return tip->nStatus)};
+        std::size_t coins_syncs{0};
+        WITH_LOCK(::cs_main, state.CoinsDB().SetSyncCallbackForTesting([&] {
+            ++coins_syncs;
+            return true;
+        }));
+        const auto check_unchanged = [&] {
+            LOCK(::cs_main);
+            BOOST_CHECK(chainman.ActiveTip() == tip);
+            BOOST_CHECK(state.CoinsTip().GetBestBlock() == tip->GetBlockHash());
+            BOOST_CHECK(state.CoinsDB().GetBestBlock() == tip->GetBlockHash());
+            BOOST_CHECK(state.CoinsDB().HaveCoin(COutPoint{tip_block->vtx.front()->GetHash(), 0}));
+            BOOST_CHECK_EQUAL(tip->nStatus, original_status);
+            BOOST_CHECK(!pnevmtxrootsdb->GetPendingDisconnect());
+            NEVMTxRoot roots;
+            BOOST_REQUIRE(pnevmtxrootsdb->Read(header.nBlockHash, roots));
+            BOOST_CHECK(roots.nTxRoot == header.nTxRoot);
+            BOOST_CHECK(roots.nReceiptRoot == header.nReceiptRoot);
+            CAmount stored{0};
+            BOOST_CHECK(governance->m_sb->Read(superblock->GetHash(), stored));
+            BOOST_CHECK_EQUAL(stored, budget);
+            BOOST_CHECK_EQUAL(coins_syncs, 0U);
+        };
+        const auto make_template = [&] {
+            return node::BlockAssembler{state, nullptr}.CreateNewBlock(CScript{} << OP_TRUE);
+        };
+        // A fresh, fully validated template succeeds before the incident.
+        BOOST_REQUIRE(make_template());
+        governance->m_sb->FailNextSynchronousFlushBatchForTesting();
+        struct ConsumeSyncFailure {
+            ~ConsumeSyncFailure()
+            {
+                try { governance->FlushCacheToDisk(/*fSync=*/true); } catch (const dbwrapper_error&) {}
+            }
+        } consume_sync_failure;
+        CheckNoPendingNEVMRecovery();
+        nevm->durable_pair_response = [] { return false; };
+        BlockValidationState refused;
+        BOOST_REQUIRE(!state.InvalidateBlock(refused, tip));
+        nevm->durable_pair_response = {};
+        BOOST_REQUIRE(refused.IsError());
+        BOOST_CHECK_EQUAL(refused.GetRejectReason(), "nevm-disconnect-durability-unavailable");
+        BOOST_CHECK(nevm->disconnected_blocks == std::vector<uint256>{tip->GetBlockHash()});
+        BOOST_CHECK(nevm->applied_hash == tip->pprev->GetBlockHash());
+        BOOST_CHECK(!governance->IsReadyForTip(tip));
+        check_unchanged();
+        const auto sends{nevm->connected_blocks.size()};
+        const auto fences{nevm->durable_pair_requests};
+        std::size_t publications{0};
+        ActivationAttemptObserver observer{[&](const CBlock&, const BlockValidationState&) { ++publications; }};
+        std::string error;
+        BOOST_REQUIRE_MESSAGE(chainman.MaybeRecoverNEVMBlockProduction(error), error);
+        BOOST_CHECK(nevm->applied_hash == tip->GetBlockHash());
+        BOOST_CHECK_EQUAL(nevm->connected_blocks.size(), sends + 1);
+        BOOST_CHECK(nevm->connected_blocks.back() == tip->GetBlockHash());
+        BOOST_CHECK_EQUAL(publications, 0U);
+        BOOST_CHECK_EQUAL(nevm->durable_pair_requests, fences);
+        CheckNoPendingNEVMRecovery();
+        BOOST_CHECK(!governance->IsReadyForTip(tip));
+        check_unchanged();
+        // No forced readiness publication, tip change or block submission:
+        // the fresh assembler itself must authenticate the exact parent.
+        std::unique_ptr<node::CBlockTemplate> fresh;
+        try {
+            fresh = make_template();
+        } catch (const std::exception& e) {
+            BOOST_ERROR("Fresh superblock template after engine-only recovery: " << e.what());
+            return;
+        }
+        BOOST_REQUIRE(fresh);
+        BOOST_CHECK(fresh->block.hashPrevBlock == tip->GetBlockHash());
+        BOOST_CHECK(fresh->voutSuperblockPayments.empty());
+        BOOST_CHECK(governance->IsReadyForTip(tip));
+        BOOST_CHECK(CSuperblockManager::GetSuperblockTriggerState(
+            tip->nHeight + 1, tip) == SuperblockTriggerState::NOT_TRIGGERED);
+        BOOST_REQUIRE_MESSAGE(chainman.MaybeRecoverNEVMBlockProduction(error), error);
+        BOOST_CHECK_NO_THROW(fresh = make_template());
+        BOOST_REQUIRE(fresh);
+        BOOST_CHECK(fresh->block.hashPrevBlock == tip->GetBlockHash());
+        BOOST_CHECK_EQUAL(nevm->connected_blocks.size(), sends + 1);
+        BOOST_CHECK_EQUAL(nevm->durable_pair_requests, fences);
+        BOOST_CHECK_EQUAL(publications, 0U);
+        check_unchanged();
+        // Readiness repair and repeated healthy templates add no budget sync.
+        BOOST_CHECK_THROW(governance->FlushCacheToDisk(/*fSync=*/true), dbwrapper_error);
+    }
+};
+
 // SYSCOIN: Removing an ordinary child must persist a surviving superblock's
 // newly computed budget before independently synchronizing parent coins.
 struct NEVMSurvivingBudgetSetup : NEVMSuperblockBudgetRollbackSetup {
@@ -10728,6 +10897,12 @@ BOOST_FIXTURE_TEST_CASE(nevm_superblock_budget_erased_after_successful_rollback,
                         NEVMSuperblockBudgetRollbackSetup)
 {
     CheckBudgetRollback(Fault::NONE);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_fresh_superblock_template_recovers_after_aborted_rollback,
+                        NEVMGovernanceTemplateRecoverySetup)
+{
+    CheckFreshTemplateAfterAbortedRollback();
 }
 
 BOOST_FIXTURE_TEST_CASE(nevm_surviving_budget_crash_child, NEVMSurvivingBudgetSetup,
