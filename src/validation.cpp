@@ -3274,12 +3274,13 @@ bool ChainstateManager::MaybeRecoverNEVMBlockProduction(std::string& error)
             const CBlockIndex* tip{ActiveTip()};
             if (tip == nullptr) return true;
             // SYSCOIN BEGIN: Preserve the known attempted child across ticks.
-            CBlockIndex* pending{chainstate->NEVMPendingConnectCandidate(/*require_selected=*/false)};
-            // SYSCOIN: An attempted operation remains known after losing selection.
-            const bool unselected{pending && !chainstate->IsCurrentMostWorkBranch(*pending)};
-            if (unselected) chainstate->m_nevm_activation_continuation = true;
+            CBlockIndex* pending{chainstate->NEVMPendingConnectAttempt()};
+            // SYSCOIN: A retired or unselected child may only be compensated,
+            // never published on the strength of its recorded external effect.
+            const bool cancel_pending{pending && chainstate->NEVMPendingConnectCandidate() != pending};
+            if (cancel_pending) chainstate->m_nevm_activation_continuation = true;
             if (chainstate->RecoverNEVMPrefixThrough(*tip, pending, error, rejection)) {
-                if (unselected && m_nevm_prefix_recovery_needed &&
+                if (cancel_pending && m_nevm_prefix_recovery_needed &&
                     !chainstate->CancelUnselectedNEVMPendingConnect(*pending, error)) {
                     return false;
                 }
@@ -4596,17 +4597,25 @@ bool Chainstate::RecoverNEVMPrefixForConnect(
 }
 
 // SYSCOIN BEGIN: Known external effects and publication selection are distinct.
-CBlockIndex* Chainstate::NEVMPendingConnectCandidate(bool require_selected)
+CBlockIndex* Chainstate::NEVMPendingConnectAttempt()
 {
     AssertLockHeld(cs_main);
     if (!m_nevm_pending_connect || this != &m_chainman.ActiveChainstate()) return nullptr;
     CBlockIndex* pending{m_blockman.LookupBlockIndex(*m_nevm_pending_connect)};
     if (pending == nullptr || pending->pprev != m_chain.Tip() ||
         !(pending->nStatus & BLOCK_HAVE_DATA) ||
-        !pending->IsValid(BLOCK_VALID_TRANSACTIONS) ||
+        (pending->nStatus & BLOCK_VALID_MASK) < BLOCK_VALID_TRANSACTIONS ||
+        !pending->HaveNumChainTxs()) return nullptr;
+    return pending;
+}
+
+CBlockIndex* Chainstate::NEVMPendingConnectCandidate()
+{
+    AssertLockHeld(cs_main);
+    CBlockIndex* pending{NEVMPendingConnectAttempt()};
+    if (pending == nullptr || !pending->IsValid(BLOCK_VALID_TRANSACTIONS) ||
         (pending->nStatus & BLOCK_CONFLICT_CHAINLOCK) ||
-        !pending->HaveNumChainTxs() ||
-        (require_selected && !IsCurrentMostWorkBranch(*pending))) return nullptr;
+        !IsCurrentMostWorkBranch(*pending)) return nullptr;
     return pending;
 }
 
@@ -4620,8 +4629,11 @@ bool Chainstate::CancelUnselectedNEVMPendingConnect(
     // SYSCOIN: Cancellation resolves only the known external child of this tip.
     // The preferred fork can diverge below it or win with fewer blocks; ordinary
     // activation independently authorizes and performs every active-chain undo.
-    if (parent == nullptr || NEVMPendingConnectCandidate(/*require_selected=*/false) != &pending ||
-        selected == nullptr || m_chain.Contains(selected) ||
+    // A retired child can also be cancelled when the active parent remains
+    // selected and there is no replacement branch to activate.
+    const bool retired{(pending.nStatus & (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK)) != 0};
+    if (parent == nullptr || NEVMPendingConnectAttempt() != &pending ||
+        selected == nullptr || (m_chain.Contains(selected) && !(retired && selected == parent)) ||
         selected->GetAncestor(pending.nHeight) == &pending) {
         error = "nevm-live-recovery-cancel-selection-changed";
         return false;

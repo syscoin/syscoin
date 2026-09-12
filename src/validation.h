@@ -1090,7 +1090,9 @@ private:
         std::shared_ptr<const CBlock> pblock, const CBlockIndex* nevm_pending,
         bool nevm_continuation = false)
         EXCLUSIVE_LOCKS_REQUIRED(!m_chainstate_mutex) LOCKS_EXCLUDED(cs_main);
-    CBlockIndex* NEVMPendingConnectCandidate(bool require_selected = true) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    // SYSCOIN: Retirement revokes publication, not knowledge of an external effect.
+    CBlockIndex* NEVMPendingConnectAttempt() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    CBlockIndex* NEVMPendingConnectCandidate() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     // SYSCOIN: Cancel only the authenticated external effect of an unpublished child.
     bool CancelUnselectedNEVMPendingConnect(const CBlockIndex& pending, std::string& error)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_chainstate_mutex);

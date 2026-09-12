@@ -2078,7 +2078,7 @@ struct ManagedProposalMiningNEVMPrefixSetup : ProposalMiningNEVMPrefixSetup {
 // remain unpublished until scheduled recovery resumes its ordinary activation.
 struct LostAckMiningNEVMPrefixSetup : MiningNEVMPrefixSetup {
     enum class InitialFailure { PAIR_QUERY, CURRENT_RETRY };
-    enum class OwnershipFault { FOREIGN_SIBLING, FAILED, REMOVED, MISSING_DATA, CONFLICT };
+    enum class OwnershipFault { FOREIGN_SIBLING, REMOVED, MISSING_DATA };
 
     LostAckMiningNEVMPrefixSetup()
     {
@@ -2347,19 +2347,13 @@ struct LostAckMiningNEVMPrefixSetup : MiningNEVMPrefixSetup {
             nevm->reported_pair_override = StartupNEVMSubscriber::AppliedPair{
                 prefix.size() + 1, sibling->GetBlockHash()};
             BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.IsCurrentMostWorkBranch(*candidate_index)));
-        } else if (fault == OwnershipFault::FAILED) {
-            BlockValidationState state;
-            BOOST_REQUIRE_MESSAGE(chainstate.InvalidateBlock(state, candidate_index), state.ToString());
         } else {
             LOCK(::cs_main);
             if (fault == OwnershipFault::REMOVED) {
                 BOOST_REQUIRE_EQUAL(chainstate.setBlockIndexCandidates.erase(candidate_index), 1U);
-            } else if (fault == OwnershipFault::MISSING_DATA) {
-                candidate_index->nStatus &= ~BLOCK_HAVE_DATA;
             } else {
-                std::array<CBlockIndex*, 1> conflicts{candidate_index};
-                BlockValidationState state;
-                BOOST_REQUIRE_MESSAGE(chainstate.MarkConflictingBlocksInactive(state, conflicts), state.ToString());
+                BOOST_REQUIRE(fault == OwnershipFault::MISSING_DATA);
+                candidate_index->nStatus &= ~BLOCK_HAVE_DATA;
             }
         }
         const auto candidates{WITH_LOCK(::cs_main, return chainstate.setBlockIndexCandidates)};
@@ -2797,6 +2791,8 @@ struct UnselectedLostAckMiningSetup : LostAckDescendantMiningSetup {
     std::shared_ptr<const CBlock> preferred;
     std::shared_ptr<const CBlock> preferred_tip;
     std::size_t lost_ack_attempts{0};
+    uint32_t expected_child_failed{0};
+    uint32_t expected_child_conflict{0};
 
     ~UnselectedLostAckMiningSetup() { nevm->disconnect_response = {}; }
 
@@ -2807,7 +2803,9 @@ struct UnselectedLostAckMiningSetup : LostAckDescendantMiningSetup {
         auto& chainstate{chainman.ActiveChainstate()};
         BOOST_CHECK(!chainman.ActiveChain().Contains(candidate_index));
         BOOST_CHECK(!candidate_index->IsValid(BLOCK_VALID_SCRIPTS));
-        BOOST_CHECK_EQUAL(candidate_index->nStatus & BLOCK_FAILED_MASK, 0U);
+        BOOST_CHECK_EQUAL(candidate_index->nStatus & BLOCK_HAVE_UNDO, 0U);
+        BOOST_CHECK_EQUAL(candidate_index->nStatus & BLOCK_FAILED_MASK, expected_child_failed);
+        BOOST_CHECK_EQUAL(candidate_index->nStatus & BLOCK_CONFLICT_CHAINLOCK, expected_child_conflict);
         BOOST_CHECK(!chainstate.CoinsTip().HaveCoin(COutPoint{candidate->vtx.front()->GetHash(), 0}));
         CNEVMHeader header;
         BlockValidationState state;
@@ -2839,7 +2837,7 @@ struct UnselectedLostAckMiningSetup : LostAckDescendantMiningSetup {
         BOOST_CHECK(nevm->command_trace == commands);
     }
 
-    void BeginPreferredRecovery(bool stale_publication_ticket = false)
+    void BeginPreferredRecovery(bool stale_publication_ticket = false, bool invalidate_child = false)
     {
         auto& chainstate{m_node.chainman->ActiveChainstate()};
         EnterLostAck(InitialFailure::PAIR_QUERY);
@@ -2854,6 +2852,13 @@ struct UnselectedLostAckMiningSetup : LostAckDescendantMiningSetup {
         }
         preferred = StoreDescendant(*original_tip);
         preferred_tip = StoreDescendant(*Index(*preferred));
+        if (invalidate_child) {
+            BlockValidationState state;
+            BOOST_REQUIRE_MESSAGE(chainstate.InvalidateBlock(state, candidate_index), state.ToString());
+            expected_child_failed = BLOCK_FAILED_VALID;
+            BOOST_REQUIRE_EQUAL(WITH_LOCK(::cs_main, return candidate_index->nStatus & BLOCK_FAILED_MASK), expected_child_failed);
+            BOOST_REQUIRE_EQUAL(WITH_LOCK(::cs_main, return chainstate.setBlockIndexCandidates.count(candidate_index)), 0U);
+        }
         BOOST_REQUIRE(!WITH_LOCK(::cs_main, return chainstate.IsCurrentMostWorkBranch(*candidate_index)));
         BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.IsCurrentMostWorkBranch(*Index(*preferred_tip))));
         nevm->connected_blocks.clear();
@@ -2871,6 +2876,7 @@ struct UnselectedLostAckMiningSetup : LostAckDescendantMiningSetup {
         BlockValidationState state;
         BOOST_REQUIRE(!chainstate.ActivateBestChain(state, preferred_tip));
         BOOST_REQUIRE(state.IsError());
+        BOOST_CHECK_EQUAL(state.GetRejectReason(), "nevm-live-recovery-pending-other-block");
         BOOST_CHECK(nevm->connected_blocks.empty());
         BOOST_CHECK(nevm->disconnected_blocks.empty());
         BOOST_CHECK(nevm->applied_hash == candidate->GetHash());
@@ -2952,9 +2958,119 @@ struct UnselectedLostAckMiningSetup : LostAckDescendantMiningSetup {
         }
     }
 
-    void CheckUnavailableEvidence(EvidenceFault fault)
+    void CheckRetiredWithoutAlternative(bool conflict = false)
     {
-        BeginPreferredRecovery();
+        auto& chainman{*m_node.chainman};
+        auto& chainstate{chainman.ActiveChainstate()};
+        EnterLostAck(InitialFailure::PAIR_QUERY);
+        lost_ack_attempts = candidate_attempts;
+        nevm->block_info_error.clear();
+        nevm->connect_response = {};
+        const auto retire_and_recover = [&] {
+            BlockValidationState state;
+            if (conflict) {
+                LOCK(::cs_main);
+                const CBlockIndex* floor{nullptr};
+                const CBlockIndex* target{nullptr};
+                std::string error;
+                BOOST_REQUIRE_MESSAGE(llmq::chainLocksHandler->GetDurableFinalityRecoveryFloor(floor, target, error), error);
+                BOOST_REQUIRE(floor == original_tip);
+                BOOST_REQUIRE(target != nullptr);
+                BOOST_REQUIRE_GT(target->nHeight, candidate_index->nHeight);
+                BOOST_REQUIRE(target->GetAncestor(candidate_index->nHeight) != candidate_index);
+                std::array<CBlockIndex*, 1> conflicts{candidate_index};
+                BOOST_REQUIRE_MESSAGE(chainstate.MarkConflictingBlocksInactive(state, conflicts), state.ToString());
+                expected_child_conflict = BLOCK_CONFLICT_CHAINLOCK;
+            } else {
+                BOOST_REQUIRE_MESSAGE(chainstate.InvalidateBlock(state, candidate_index), state.ToString());
+                expected_child_failed = BLOCK_FAILED_VALID;
+            }
+            // The RPC's ordinary activation is idle when P is the best remaining
+            // candidate. It must not pretend that Geth has already returned to P.
+            BOOST_REQUIRE_MESSAGE(chainstate.ActivateBestChain(state), state.ToString());
+            CheckCoreAtParent();
+            nevm->connected_blocks.clear();
+            nevm->command_trace.clear();
+            nevm->disconnect_response = [this](const uint256& hash,
+                const CDeterministicMNListNEVMAddressDiff& diff, std::string&) {
+                BOOST_CHECK(hash == candidate->GetHash());
+                BOOST_CHECK(nevm->applied_hash == hash);
+                BOOST_CHECK_EQUAL(nevm->applied_count, prefix.size() + 1);
+                BOOST_CHECK(diff.addedMNNEVM.empty());
+                BOOST_CHECK(diff.updatedMNNEVM.empty());
+                BOOST_CHECK(diff.removedMNNEVM.empty());
+                CheckCoreAtParent(/*check_rpcs=*/false);
+            };
+            std::size_t checked{0};
+            ActivationAttemptObserver observer{[&](const CBlock&, const BlockValidationState&) {
+                ++checked;
+            }};
+            RecoverPrefix();
+            BOOST_CHECK_EQUAL(checked, 0U);
+            BOOST_CHECK(nevm->connected_blocks.empty());
+            BOOST_CHECK(nevm->disconnected_blocks == std::vector<uint256>{candidate->GetHash()});
+            BOOST_CHECK_EQUAL(nevm->applied_pairs.size(), prefix.size());
+            BOOST_CHECK_EQUAL(nevm->applied_count, prefix.size());
+            BOOST_CHECK(nevm->applied_hash == original_tip->GetBlockHash());
+            CheckDescendantPublication(*prefix.back(), nevm->disconnected_blocks);
+            CheckChildUnpublished();
+            BOOST_CHECK(pnevmtxrootsdb->GetPublishedTip() == published_tip);
+            BOOST_CHECK(WITH_LOCK(::cs_main, return chainstate.CoinsDB().GetBestBlock()) == durable_tip);
+            // C cancellation has its own fresh P proof. With no ordinary branch
+            // activation left, that proof can reopen mining at the unchanged P.
+            const std::vector<std::string> proof{"flush", "blockinfo", "flush", "blockinfo"};
+            BOOST_CHECK(nevm->command_trace == proof);
+            BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainman.PrepareNEVMBlockProduction()));
+            RecoverPrefix();
+            BOOST_CHECK(nevm->command_trace == proof);
+            CheckTemplate(*MakeNEVMBlock());
+            for (const auto* method : {"getblocktemplate", "createauxblock"}) {
+                BOOST_CHECK_EQUAL(MiningRPC(method)["previousblockhash"].get_str(), original_tip->GetBlockHash().ToString());
+            }
+            BOOST_CHECK_EQUAL(checked, 0U);
+        };
+        if (conflict) {
+            // Persist an actual finality boundary after the original applied
+            // attempt. Its synthetic target diverges from C above active P.
+            WITH_LOCK(::cs_main, chainman.m_blockman.m_have_pruned = true);
+            llmq::test::WithNEVMDurableFinalityForTest(chainman, *original_tip, retire_and_recover);
+        } else {
+            retire_and_recover();
+        }
+    }
+
+    void CheckInvalidatedRecovery(bool stale_publication_ticket = false)
+    {
+        BeginPreferredRecovery(stale_publication_ticket, /*invalidate_child=*/true);
+        FinishPreferredRecovery();
+        LOCK(::cs_main);
+        auto& chainman{*m_node.chainman};
+        auto& chainstate{chainman.ActiveChainstate()};
+        BlockValidationState state;
+        BOOST_REQUIRE_MESSAGE(chainstate.FlushStateToDisk(state, FlushStateMode::ALWAYS), state.ToString());
+        BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == preferred_tip->GetHash());
+        for (const auto& block : {candidate, preferred, preferred_tip}) {
+            const bool connected{block != candidate};
+            BOOST_CHECK_EQUAL(chainstate.CoinsDB().HaveCoin(COutPoint{block->vtx.front()->GetHash(), 0}), connected);
+            CNEVMHeader header;
+            BOOST_REQUIRE(GetNEVMData(state, *block, header));
+            NEVMTxRoot roots;
+            BOOST_CHECK_EQUAL(pnevmtxrootsdb->Read(header.nBlockHash, roots), connected);
+        }
+        CDiskBlockIndex persisted;
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->Read(
+            std::make_pair(uint8_t{'b'}, candidate->GetHash()), persisted));
+        BOOST_CHECK_EQUAL(persisted.nStatus & BLOCK_FAILED_MASK, BLOCK_FAILED_VALID);
+        BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(candidate_index), 0U);
+        BOOST_CHECK(pnevmtxrootsdb->GetPublishedTip() == preferred_tip->GetHash());
+        BOOST_CHECK(pnevmtxmintdb->Exists(mint_marker));
+        BOOST_CHECK(!pnevmtxrootsdb->GetPendingDisconnect());
+        CheckChildUnpublished();
+    }
+
+    void CheckUnavailableEvidence(EvidenceFault fault, bool invalidate_child = false)
+    {
+        BeginPreferredRecovery(/*stale_publication_ticket=*/false, invalidate_child);
         {
             struct RestorePosition {
                 CBlockIndex& index;
@@ -3047,9 +3163,9 @@ struct UnselectedLostAckMiningSetup : LostAckDescendantMiningSetup {
         FinishPreferredRecovery(fault == DisconnectFault::BEFORE_APPLY ? 2U : 1U);
     }
 
-    void CheckRequiredDMNSnapshotUnavailable()
+    void CheckRequiredDMNSnapshotUnavailable(bool invalidate_child = false)
     {
-        BeginPreferredRecovery();
+        BeginPreferredRecovery(/*stale_publication_ticket=*/false, invalidate_child);
         {
             auto& consensus{const_cast<Consensus::Params&>(Params().GetConsensus())};
             struct RestoreDIP3Height {
@@ -3073,9 +3189,9 @@ struct UnselectedLostAckMiningSetup : LostAckDescendantMiningSetup {
         FinishPreferredRecovery();
     }
 
-    void CheckPreferredFinalityRefusal()
+    void CheckPreferredFinalityRefusal(bool invalidate_child = false)
     {
-        BeginPreferredRecovery();
+        BeginPreferredRecovery(/*stale_publication_ticket=*/false, invalidate_child);
         auto& chainman{*m_node.chainman};
         WITH_LOCK(::cs_main, chainman.m_blockman.m_have_pruned = true);
         llmq::test::WithNEVMDurableFinalityForTest(chainman, *original_tip, [&] {
@@ -8974,9 +9090,9 @@ BOOST_FIXTURE_TEST_CASE(nevm_mining_worker_lost_ack_rejects_foreign_sibling_pair
     CheckWorkerRejectsLostAckOwnership(OwnershipFault::FOREIGN_SIBLING);
 }
 
-BOOST_FIXTURE_TEST_CASE(nevm_mining_worker_lost_ack_rejects_failed_candidate, LostAckMiningNEVMPrefixSetup)
+BOOST_FIXTURE_TEST_CASE(nevm_mining_worker_lost_ack_cancels_invalidated_child, UnselectedLostAckMiningSetup)
 {
-    CheckWorkerRejectsLostAckOwnership(OwnershipFault::FAILED);
+    CheckInvalidatedRecovery();
 }
 
 BOOST_FIXTURE_TEST_CASE(nevm_mining_worker_lost_ack_rejects_removed_candidate, LostAckMiningNEVMPrefixSetup)
@@ -8987,11 +9103,6 @@ BOOST_FIXTURE_TEST_CASE(nevm_mining_worker_lost_ack_rejects_removed_candidate, L
 BOOST_FIXTURE_TEST_CASE(nevm_mining_worker_lost_ack_rejects_missing_candidate_body, LostAckMiningNEVMPrefixSetup)
 {
     CheckWorkerRejectsLostAckOwnership(OwnershipFault::MISSING_DATA);
-}
-
-BOOST_FIXTURE_TEST_CASE(nevm_mining_worker_lost_ack_rejects_chainlock_conflict, LostAckMiningNEVMPrefixSetup)
-{
-    CheckWorkerRejectsLostAckOwnership(OwnershipFault::CONFLICT);
 }
 
 BOOST_FIXTURE_TEST_CASE(nevm_mining_worker_lost_ack_recovers_preferred_branch, UnselectedLostAckMiningSetup)
@@ -9054,6 +9165,51 @@ BOOST_FIXTURE_TEST_CASE(nevm_mining_worker_unselected_lost_ack_rechecks_stale_ti
 {
     BeginPreferredRecovery(/*stale_publication_ticket=*/true);
     FinishPreferredRecovery();
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_mining_worker_invalidated_lost_ack_rejects_stale_publication_ticket, UnselectedLostAckMiningSetup)
+{
+    CheckInvalidatedRecovery(/*stale_publication_ticket=*/true);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_mining_worker_invalidated_lost_ack_recovers_parent_without_alternative, UnselectedLostAckMiningSetup)
+{
+    CheckRetiredWithoutAlternative();
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_mining_worker_conflicted_lost_ack_recovers_parent_with_durable_authority, UnselectedLostAckMiningSetup)
+{
+    CheckRetiredWithoutAlternative(/*conflict=*/true);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_mining_worker_invalidated_lost_ack_rejects_foreign_pair, UnselectedLostAckMiningSetup)
+{
+    CheckUnavailableEvidence(EvidenceFault::FOREIGN_PAIR, /*invalidate_child=*/true);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_mining_worker_invalidated_lost_ack_requires_exact_height, UnselectedLostAckMiningSetup)
+{
+    CheckUnavailableEvidence(EvidenceFault::WRONG_HEIGHT, /*invalidate_child=*/true);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_mining_worker_invalidated_lost_ack_requires_stored_body, UnselectedLostAckMiningSetup)
+{
+    CheckUnavailableEvidence(EvidenceFault::MISSING_BODY, /*invalidate_child=*/true);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_mining_worker_invalidated_lost_ack_requires_child_merkle_proof, UnselectedLostAckMiningSetup)
+{
+    CheckUnavailableEvidence(EvidenceFault::MERKLE, /*invalidate_child=*/true);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_mining_worker_invalidated_lost_ack_requires_dmn_snapshot, UnselectedLostAckMiningSetup)
+{
+    CheckRequiredDMNSnapshotUnavailable(/*invalidate_child=*/true);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_mining_worker_invalidated_lost_ack_respects_durable_finality, UnselectedLostAckMiningSetup)
+{
+    CheckPreferredFinalityRefusal(/*invalidate_child=*/true);
 }
 
 BOOST_FIXTURE_TEST_CASE(nevm_mining_worker_lost_ack_recovers_deeper_fork, DeepForkLostAckMiningSetup)

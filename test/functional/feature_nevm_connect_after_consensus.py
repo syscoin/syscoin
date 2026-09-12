@@ -787,7 +787,7 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
             self._block_info_available = True
             self._expected_connect_syshashes = None
 
-    def _check_applied_pending_child_reselected(self, *, deeper_fork=False):
+    def _check_applied_pending_child_reselected(self, *, deeper_fork=False, retire_pending=False):
         node = self.nodes[0]
         assert_equal(node.getconnectioncount(), 0)
         core_pid = node.process.pid
@@ -802,6 +802,8 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
         fork_coin = node.gettxout(fork_coinbase, 0)
         prefix = applied[:-1] if deeper_fork else applied
         scenario = b"applied-deeper-reselection" if deeper_fork else b"applied-reselection"
+        if retire_pending:
+            scenario += b"-retired"
 
         def build_branch_block(label, parent_hash, height):
             # Reuse pre-DIP3 payments while committing distinct mock NEVM
@@ -853,23 +855,34 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
         self._block_info_available = False
         try:
             assert_raises_rpc_error(-25, "nevm-response-unserialize", node.submitblock, raws[0])
+            if retire_pending:
+                # Invalidating an inactive Core candidate cannot remove its
+                # already-applied external effect or retire that recovery duty.
+                assert_equal(node.invalidateblock(block_c.hash), None)
+                assert_equal(node.getbestblockhash(), previous_tip)
+                assert_equal(self._applied_syshashes, applied + [block_c.sha256])
             # A deeper branch first reaches ordinary disconnect preflight;
             # its unavailable engine status must leave P entirely unchanged.
             with node.assert_debug_log(["nevm-reorg-status:nevm-response-unserialize"] if deeper_fork else []):
-                for raw in raws[1:]:
-                    assert_equal(node.submitblock(raw), "inconclusive")
+                for index, raw in enumerate(raws[1:]):
+                    if retire_pending and index == 0:
+                        assert_raises_rpc_error(-25, "nevm-live-recovery-pending-other-block", node.submitblock, raw)
+                    else:
+                        assert_equal(node.submitblock(raw), "inconclusive")
             assert_equal(node.getbestblockhash(), previous_tip)
             assert_equal(node.gettxout(previous_coinbase, 0), previous_coin)
             for block, raw in zip(blocks, raws):
                 assert_equal(node.getblock(block.hash, 0), raw)
                 assert_equal(node.gettxout(block.vtx[0].hash, 0), None)
             tips = {tip["hash"]: tip["status"] for tip in node.getchaintips()}
-            assert tips[block_c.hash] != "invalid"
+            assert_equal(tips[block_c.hash] == "invalid", retire_pending)
             assert tips[selected.hash] != "invalid"
             assert_equal(self._applied_syshashes, applied + [block_c.sha256])
             # B's ordinary activation attempt must wait before external
             # delivery while C's earlier applied identity remains unresolved.
-            assert_equal(self._nonzero_connects_since(connect_len), [block_c.sha256] * len(preferred))
+            assert_equal(self._nonzero_connects_since(connect_len), [block_c.sha256] * (
+                1 if retire_pending else len(preferred)
+            ))
             assert_equal(self._disconnect_syshashes[disconnect_len:], [])
             assert_raises_rpc_error(
                 -10, "execution recovery", node.getblocktemplate, {"rules": ["segwit"]},
@@ -916,7 +929,7 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
             for block, raw in zip(blocks, raws):
                 assert_equal(node.getblock(block.hash, 0), raw)
             tips = {tip["hash"]: tip["status"] for tip in node.getchaintips()}
-            assert tips[block_c.hash] != "invalid"
+            assert_equal(tips[block_c.hash] == "invalid", retire_pending)
             assert_equal(tips[selected.hash], "active")
             assert_equal(self._applied_syshashes, prefix + selected_hashes)
             assert_equal(self._nonzero_connects_since(recovery_connect_len), selected_hashes)
@@ -927,7 +940,8 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
             # Remove C before undoing B so cleanup selects the retained P and
             # can reconnect it after unwinding a deeper branch to the fork.
             self._expected_connect_syshashes = applied
-            node.invalidateblock(block_c.hash)
+            if not retire_pending:
+                node.invalidateblock(block_c.hash)
             node.invalidateblock(preferred[0].hash)
             assert_equal(node.getbestblockhash(), previous_tip)
             assert_equal(node.getblockcount(), previous_height)
@@ -1043,6 +1057,9 @@ class FeatureNEVMConnectAfterConsensus(SyscoinTestFramework):
 
             self.log.info("Scheduled recovery can select a better branch that forks below the current Core tip")
             self._check_applied_pending_child_reselected(deeper_fork=True)
+
+            self.log.info("Scheduled recovery cancels an engine-only child after Core invalidates it")
+            self._check_applied_pending_child_reselected(retire_pending=True)
 
             self.log.info("A requested full block repairs only the engine-approved NEVM payload")
             self._check_payload_repair_from_requested_peer()
