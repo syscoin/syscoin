@@ -12,6 +12,7 @@
 #include <evo/specialtx_payload.h>
 #include <evo/pq_payment_probation_db.h> // SYSCOIN: multi-chainstate probation GC.
 #include <evo/pq_registry.h> // SYSCOIN: deep rollback registry roots.
+#include <governance/governanceclasses.h> // SYSCOIN: adaptive budget rollback.
 #include <governance/governance.h> // SYSCOIN: tip-bound block fixture readiness.
 #include <key_io.h> // SYSCOIN: valid mining RPC payout address.
 #include <kernel/disconnected_transactions.h>
@@ -22,6 +23,7 @@
 #include <llmq/quorums_chainlocks.h> // SYSCOIN: retained probation roots.
 #include <llmq/quorums_init.h> // SYSCOIN: recreate pre-import finality handler.
 #include <masternode/activemasternode.h>
+#include <masternode/masternodepayments.h> // SYSCOIN: adaptive superblock budget consumer.
 #include <masternode/masternodemeta.h> // SYSCOIN: rebuild auxiliary fixture state.
 #include <masternode/masternodesync.h> // SYSCOIN: replay before governance sync.
 #include <nevm/rlp.h> // SYSCOIN: committed NEVM header continuity fixtures.
@@ -7162,6 +7164,237 @@ struct OrdinaryNEVMDisconnectDurabilitySetup : StartupNEVMRecoverySetup {
     }
 };
 
+// SYSCOIN: A failed paired undo must preserve the adaptive budget of the
+// still-active superblock, including when its invalidation is abandoned.
+struct NEVMSuperblockBudgetRollbackSetup : OrdinaryNEVMDisconnectDurabilitySetup {
+    enum class Fault { NONE, STATUS, PREFIX, FENCE, ROOT_PREPARE };
+
+    struct BudgetValidationRules {
+        Consensus::Params& consensus{const_cast<Consensus::Params&>(Params().GetConsensus())};
+        const int previous_dip{consensus.DIP0003Height};
+        const int previous_sync{masternodeSync.GetAssetID()};
+        BudgetValidationRules()
+        {
+            consensus.DIP0003Height = 1;
+            masternodeSync.SetSyncMode(MASTERNODE_SYNC_GOVERNANCE);
+        }
+        ~BudgetValidationRules()
+        {
+            consensus.DIP0003Height = previous_dip;
+            masternodeSync.SetSyncMode(previous_sync);
+        }
+    };
+
+    void CheckBudgetRollback(Fault fault)
+    {
+        auto& chainman{*m_node.chainman};
+        auto& state{chainman.ActiveChainstate()};
+        BOOST_REQUIRE(governance);
+        std::size_t coins_syncs{0};
+        auto& roots{static_cast<ObservedDisconnectRootsDB&>(*pnevmtxrootsdb)};
+        struct Restore {
+            Chainstate& state;
+            StartupNEVMSubscriber& nevm;
+            ObservedDisconnectRootsDB& roots;
+            node::KernelNotifications& notifications;
+            std::atomic<int>& exit_status;
+            const bool shutdown_on_error{notifications.m_shutdown_on_fatal_error};
+            const int previous_exit{exit_status.load()};
+            ~Restore()
+            {
+                WITH_LOCK(::cs_main, state.CoinsDB().SetSyncCallbackForTesting({}));
+                nevm.disconnect_response = {};
+                nevm.durable_pair_response = {};
+                nevm.block_info_error.clear();
+                nevm.reported_pair_override.reset();
+                roots.before_write = {};
+                notifications.m_shutdown_on_fatal_error = shutdown_on_error;
+                exit_status.store(previous_exit);
+                governance->ObserveChainTip(nullptr);
+            }
+        } restore{state, *nevm, roots, *m_node.notifications, m_node.exit_status};
+        WITH_LOCK(::cs_main, state.CoinsDB().SetSyncCallbackForTesting([&] {
+            ++coins_syncs;
+            return true;
+        }));
+        int previous_superblock{0}, superblock_height{0};
+        CSuperblock::GetNearestSuperblocksHeights(
+            WITH_LOCK(::cs_main, return chainman.ActiveHeight() + 1), previous_superblock, superblock_height);
+        std::shared_ptr<const CBlock> superblock;
+        while (WITH_LOCK(::cs_main, return chainman.ActiveHeight()) < superblock_height) {
+            const auto* tip{WITH_LOCK(::cs_main, return chainman.ActiveTip())};
+            BOOST_REQUIRE(governance_tests::PublishGovernanceReadyForTest(*governance, *tip));
+            superblock = MineNEVMBlock();
+        }
+        BOOST_REQUIRE(superblock);
+        BOOST_CHECK_EQUAL(coins_syncs, 0U);
+        BOOST_CHECK_EQUAL(nevm->durable_pair_requests, 0U);
+        CheckNoPendingNEVMRecovery();
+        auto* index{WITH_LOCK(::cs_main, return chainman.ActiveTip())};
+        BOOST_REQUIRE(CSuperblock::IsValidBlockHeight(index->nHeight));
+        BOOST_REQUIRE(index->GetBlockHash() == superblock->GetHash());
+        CNEVMHeader header;
+        BlockValidationState decoded;
+        BOOST_REQUIRE(GetNEVMData(decoded, *superblock, header));
+        const CAmount budget{CSuperblock::SUPERBLOCK_BUDGET * CSuperblock::SHIFT_DOWN / CSuperblock::SHIFT};
+        {
+            LOCK(::cs_main);
+            // Model an accepted historical reward context with one coin of
+            // governance payments. The real amount-only producer computes the
+            // adaptive row; this setup does not attest a trigger or its votes.
+            {
+                BudgetValidationRules rules;
+                BOOST_REQUIRE_GT(superblock->vtx.front()->GetValueOut(), COIN);
+                std::string error;
+                BOOST_REQUIRE_MESSAGE(IsBlockValueValid(*superblock, index,
+                    superblock->vtx.front()->GetValueOut() - COIN, error,
+                    /*fJustCheck=*/false, /*check_superblock=*/false), error);
+                BOOST_REQUIRE_EQUAL(CSuperblock::GetPaymentsLimit(index), budget);
+                BOOST_REQUIRE_NE(budget, CSuperblock::SUPERBLOCK_BUDGET);
+            }
+            BOOST_REQUIRE(governance->FlushCacheToDisk(/*fSync=*/true));
+            BlockValidationState flushed;
+            BOOST_REQUIRE_MESSAGE(state.FlushStateToDisk(flushed, FlushStateMode::ALWAYS), flushed.ToString());
+            BOOST_REQUIRE(state.CoinsDB().FlushWithSync(state.CoinsTip()));
+            BOOST_REQUIRE(state.CoinsDB().GetBestBlock() == index->GetBlockHash());
+        }
+        coins_syncs = 0;
+        const auto original_status{WITH_LOCK(::cs_main, return index->nStatus)};
+        const auto marker{std::make_pair(uint8_t{'F'}, std::string{"nevm_pending_connect_v1"})};
+        const auto check_budget = [&] {
+            // ReadCache flushes a queued erase before lookup. This must read
+            // the exact budget rather than silently substituting the default.
+            BOOST_CHECK_EQUAL(CSuperblock::GetPaymentsLimit(index), budget);
+            CAmount stored{0};
+            BOOST_CHECK(governance->m_sb->Read(index->GetBlockHash(), stored));
+            BOOST_CHECK_EQUAL(stored, budget);
+        };
+        const auto check_active = [&] {
+            LOCK(::cs_main);
+            BOOST_CHECK(chainman.ActiveTip() == index);
+            BOOST_CHECK(state.CoinsTip().GetBestBlock() == index->GetBlockHash());
+            BOOST_CHECK(state.CoinsDB().GetBestBlock() == index->GetBlockHash());
+            BOOST_CHECK(state.CoinsTip().HaveCoin(COutPoint{superblock->vtx.front()->GetHash(), 0}));
+            BOOST_CHECK(state.CoinsDB().HaveCoin(COutPoint{superblock->vtx.front()->GetHash(), 0}));
+            BOOST_CHECK_EQUAL(index->nStatus, original_status);
+            NEVMTxRoot root;
+            BOOST_REQUIRE(roots.ReadTxRoots(header.nBlockHash, root));
+            BOOST_CHECK(root.nTxRoot == header.nTxRoot);
+            BOOST_REQUIRE(roots.Read(header.nBlockHash, root));
+            BOOST_CHECK(root.nReceiptRoot == header.nReceiptRoot);
+            BOOST_CHECK(!roots.GetPendingDisconnect());
+            BOOST_CHECK(!chainman.m_blockman.m_block_tree_db->Exists(marker));
+            check_budget();
+        };
+        nevm->disconnect_response = [&](const uint256& hash,
+            const CDeterministicMNListNEVMAddressDiff&, std::string&) {
+            BOOST_CHECK(hash == index->GetBlockHash());
+            if (fault == Fault::STATUS) nevm->block_info_error = "budget-test-post-disconnect-status";
+            if (fault == Fault::PREFIX) nevm->reported_pair_override = StartupNEVMSubscriber::AppliedPair{
+                nevm->applied_count - 1, uint256S("bad")};
+        };
+        nevm->durable_pair_response = [&] { return fault != Fault::FENCE; };
+        std::unique_ptr<DebugLogHelper> root_failure;
+        if (fault == Fault::ROOT_PREPARE) {
+            m_node.notifications->m_shutdown_on_fatal_error = false;
+            roots.before_write = [] { return false; };
+            root_failure = std::make_unique<DebugLogHelper>("Failed to persist NEVM root revocation");
+        }
+        std::size_t publications{0};
+        ActivationAttemptObserver observer{[&](const CBlock&, const BlockValidationState&) { ++publications; }};
+        BlockValidationState result;
+        const bool invalidated{state.InvalidateBlock(result, index)};
+        nevm->disconnect_response = {};
+        nevm->durable_pair_response = {};
+        nevm->block_info_error.clear();
+        nevm->reported_pair_override.reset();
+        roots.before_write = {};
+        BOOST_CHECK_EQUAL(invalidated, fault == Fault::NONE);
+        BOOST_CHECK(nevm->disconnected_blocks == std::vector<uint256>{index->GetBlockHash()});
+        BOOST_CHECK(nevm->applied_hash == index->pprev->GetBlockHash());
+        if (fault == Fault::NONE) {
+            LOCK(::cs_main);
+            BOOST_REQUIRE_MESSAGE(result.IsValid(), result.ToString());
+            BOOST_CHECK(chainman.ActiveTip() == index->pprev);
+            BOOST_CHECK(state.CoinsDB().GetBestBlock() == index->pprev->GetBlockHash());
+            BOOST_CHECK(index->nStatus & BLOCK_FAILED_VALID);
+            CAmount erased{0};
+            BOOST_CHECK(!governance->m_sb->ReadCache(index->GetBlockHash(), erased));
+            BOOST_CHECK(!governance->m_sb->Read(index->GetBlockHash(), erased));
+            BOOST_CHECK_EQUAL(coins_syncs, 1U);
+            return;
+        }
+        BOOST_CHECK(result.IsError());
+        BOOST_CHECK(!result.IsInvalid());
+        if (fault == Fault::STATUS) BOOST_CHECK_EQUAL(result.GetRejectReason(),
+            "nevm-disconnect-status:budget-test-post-disconnect-status");
+        if (fault == Fault::PREFIX) BOOST_CHECK_EQUAL(result.GetRejectReason(), "nevm-disconnect-applied-prefix-mismatch");
+        if (fault == Fault::FENCE) BOOST_CHECK_EQUAL(result.GetRejectReason(), "nevm-disconnect-durability-unavailable");
+        check_active();
+        BOOST_CHECK_EQUAL(coins_syncs, 0U);
+        BOOST_CHECK(!WITH_LOCK(::cs_main, return chainman.PrepareNEVMBlockProduction()));
+        m_node.exit_status.store(restore.previous_exit);
+        // Abandon invalidation. The scheduler replays S externally while
+        // leaving its Core budget, coins and block status untouched.
+        const auto connects{nevm->connected_blocks.size()};
+        std::string error;
+        BOOST_REQUIRE_MESSAGE(chainman.MaybeRecoverNEVMBlockProduction(error), error);
+        BOOST_CHECK_EQUAL(nevm->connected_blocks.size(), connects + 1);
+        BOOST_CHECK(nevm->connected_blocks.back() == index->GetBlockHash());
+        BOOST_CHECK(nevm->applied_hash == index->GetBlockHash());
+        BOOST_CHECK_EQUAL(publications, 0U);
+        BOOST_CHECK_EQUAL(coins_syncs, 0U);
+        CheckNoPendingNEVMRecovery();
+        check_active();
+        BOOST_REQUIRE(governance->FlushCacheToDisk(/*fSync=*/true));
+        auto params{governance->m_sb->GetDBParams()};
+        params.wipe_data = false;
+        governance->m_sb->CloseDB();
+        {
+            struct ReopenOriginal {
+                ~ReopenOriginal() { governance->m_sb->OpenDB(); }
+            } reopen_original;
+            CEvoDB<uint256, CAmount, StaticSaltedHasher> reopened{params, 0};
+            CAmount persisted{0};
+            BOOST_CHECK(reopened.Read(index->GetBlockHash(), persisted));
+            BOOST_CHECK_EQUAL(persisted, budget);
+        }
+        check_budget();
+        // Exercise the subsequent adaptive amount consumer with a payment
+        // above B(S)'s maximum but below the default budget's maximum.
+        {
+            LOCK(::cs_main);
+            BudgetValidationRules rules;
+            const int cycle{chainman.GetConsensus().SuperBlockCycle(index->nHeight)};
+            std::vector<CBlockIndex> next(static_cast<std::size_t>(cycle));
+            for (int i{0}; i < cycle; ++i) {
+                next[i].nHeight = index->nHeight + i + 1;
+                next[i].pprev = i == 0 ? index : &next[i - 1];
+                next[i].BuildSkip();
+            }
+            BOOST_REQUIRE(CSuperblock::IsValidBlockHeight(next.back().nHeight));
+            CMutableTransaction coinbase;
+            coinbase.vin.resize(1);
+            coinbase.vin.front().prevout.SetNull();
+            const CAmount reward{50 * COIN};
+            coinbase.vout.emplace_back(reward + CSuperblock::SUPERBLOCK_BUDGET, CScript{} << OP_TRUE);
+            CBlock later;
+            later.vtx.push_back(MakeTransactionRef(std::move(coinbase)));
+            BOOST_CHECK(!IsBlockValueValid(later, &next.back(), reward, error,
+                /*fJustCheck=*/true, /*check_superblock=*/false));
+            BOOST_CHECK(error.find("exceeded superblock max value") != std::string::npos);
+        }
+        // Ordinary progress after recovery adds no engine durability request
+        // or parent-coins barrier and does not reconstruct S's budget.
+        BOOST_REQUIRE(governance_tests::PublishGovernanceReadyForTest(*governance, *index));
+        const auto fences{nevm->durable_pair_requests};
+        MineNEVMBlock();
+        BOOST_CHECK_EQUAL(nevm->durable_pair_requests, fences);
+        BOOST_CHECK_EQUAL(coins_syncs, 0U);
+        check_budget();
+    }
+};
+
 // SYSCOIN: A fully validated mint remains usable after interrupted removal.
 struct NEVMMintCleanupSetup : NEVMMintReadErrorSetup {
     enum class Cut { BEFORE_ERASE, ERASE_FAILURE, BEFORE_COMPLETE, AFTER_COMPLETE };
@@ -10179,6 +10412,36 @@ BOOST_FIXTURE_TEST_CASE(nevm_mining_durable_pending_lost_fence_ack_retains_recor
 BOOST_FIXTURE_TEST_CASE(nevm_mining_durable_pending_already_applied_parent_requires_fence, ReopenedPendingNEVMConnectSetup)
 {
     CheckDurableFence(FenceScenario::ALREADY_PARENT);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_superblock_budget_survives_failed_disconnect_status,
+                        NEVMSuperblockBudgetRollbackSetup)
+{
+    CheckBudgetRollback(Fault::STATUS);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_superblock_budget_survives_wrong_disconnect_prefix,
+                        NEVMSuperblockBudgetRollbackSetup)
+{
+    CheckBudgetRollback(Fault::PREFIX);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_superblock_budget_survives_failed_disconnect_fence,
+                        NEVMSuperblockBudgetRollbackSetup)
+{
+    CheckBudgetRollback(Fault::FENCE);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_superblock_budget_survives_failed_root_prepare,
+                        NEVMSuperblockBudgetRollbackSetup)
+{
+    CheckBudgetRollback(Fault::ROOT_PREPARE);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_superblock_budget_erased_after_successful_rollback,
+                        NEVMSuperblockBudgetRollbackSetup)
+{
+    CheckBudgetRollback(Fault::NONE);
 }
 
 BOOST_FIXTURE_TEST_CASE(nevm_ordinary_invalidation_durable_engine_before_local_rollback,

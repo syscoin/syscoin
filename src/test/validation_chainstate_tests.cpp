@@ -37,6 +37,9 @@
 #include <validation.h>
 
 // SYSCOIN BEGIN: fork governance/PQ chainstate test dependencies.
+#include <node/blockstorage.h>
+#include <node/kernel_notifications.h>
+#include <txdb.h>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -1691,6 +1694,148 @@ BOOST_FIXTURE_TEST_CASE(
     BOOST_CHECK_EQUAL(
         CSuperblock::GetPaymentsLimit(post_first_invalid), 0);
 }
+
+// SYSCOIN BEGIN: Budget retirement on rollback without a NEVM coins barrier.
+struct SuperblockBudgetRollbackSetup : TestChain100Setup {
+    SuperblockBudgetRollbackSetup()
+        : TestChain100Setup{ChainType::REGTEST, {}, 100,
+                           /*coins_db_in_memory=*/false,
+                           /*block_tree_db_in_memory=*/false} {}
+
+    void CheckBudgetRetirement(bool fail_sync)
+    {
+        auto& chainman{*Assert(m_node.chainman)};
+        auto& chainstate{chainman.ActiveChainstate()};
+        CBlockIndex* tip;
+        CAmount budget{0};
+        {
+            LOCK(::cs_main);
+            tip = chainman.ActiveTip();
+            BOOST_REQUIRE(tip && tip->pprev);
+            BOOST_REQUIRE(CSuperblock::IsValidBlockHeight(tip->nHeight));
+            BOOST_REQUIRE(!fNEVMConnection);
+            BOOST_REQUIRE_LT(tip->nHeight, chainman.GetConsensus().nNEVMStartBlock);
+            CBlock block;
+            BOOST_REQUIRE(chainman.m_blockman.ReadBlockFromDisk(block, *tip));
+            BOOST_REQUIRE_EQUAL(block.vtx.size(), 1U);
+            BOOST_REQUIRE(block.vtx.front()->IsCoinBase());
+
+            // Reconstruct a recorded adaptive budget through the historical
+            // amount-validation path, using a positive one-coin payment.
+            auto& consensus{const_cast<Consensus::Params&>(chainman.GetConsensus())};
+            struct RestoreBudgetContext {
+                Consensus::Params& consensus;
+                int dip3_height{consensus.DIP0003Height};
+                int sync_mode{masternodeSync.GetAssetID()};
+                ~RestoreBudgetContext()
+                {
+                    consensus.DIP0003Height = dip3_height;
+                    masternodeSync.SetSyncMode(sync_mode);
+                }
+            } restore{consensus};
+            consensus.DIP0003Height = 1;
+            masternodeSync.SetSyncMode(MASTERNODE_SYNC_GOVERNANCE);
+            std::string error;
+            BOOST_REQUIRE_MESSAGE(IsBlockValueValid(
+                block, tip, block.vtx.front()->GetValueOut() - COIN, error,
+                /*fJustCheck=*/false, /*check_superblock=*/false), error);
+            BOOST_REQUIRE(governance->m_sb->ReadCache(tip->GetBlockHash(), budget));
+            BOOST_REQUIRE_EQUAL(budget,
+                CSuperblock::SUPERBLOCK_BUDGET * CSuperblock::SHIFT_DOWN /
+                    CSuperblock::SHIFT);
+            BOOST_REQUIRE_NE(budget, CSuperblock::SUPERBLOCK_BUDGET);
+        }
+        {
+            LOCK(::cs_main);
+            BlockValidationState state;
+            BOOST_REQUIRE_MESSAGE(chainstate.FlushStateToDisk(
+                state, FlushStateMode::ALWAYS), state.ToString());
+            BOOST_REQUIRE(chainstate.CoinsDB().FlushWithSync(chainstate.CoinsTip()));
+            BOOST_REQUIRE(governance->FlushCacheToDisk(/*fSync=*/true));
+            BOOST_REQUIRE(chainstate.CoinsDB().GetBestBlock() == tip->GetBlockHash());
+        }
+
+        struct RestoreFailureState {
+            Chainstate& chainstate;
+            node::KernelNotifications& notifications;
+            std::atomic<int>& exit_status;
+            bool shutdown_on_error;
+            int previous_exit_status;
+            ~RestoreFailureState()
+            {
+                WITH_LOCK(::cs_main, chainstate.CoinsDB().SetSyncCallbackForTesting({}));
+                notifications.m_shutdown_on_fatal_error = shutdown_on_error;
+                exit_status.store(previous_exit_status);
+            }
+        } restore{chainstate, *m_node.notifications, m_node.exit_status,
+            m_node.notifications->m_shutdown_on_fatal_error, m_node.exit_status.load()};
+        m_node.notifications->m_shutdown_on_fatal_error = false;
+        std::size_t syncs{0};
+        WITH_LOCK(::cs_main, chainstate.CoinsDB().SetSyncCallbackForTesting([&] {
+            LOCK(::cs_main);
+            ++syncs;
+            BOOST_CHECK(chainman.ActiveTip() == tip);
+            BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == tip->pprev->GetBlockHash());
+            BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == tip->pprev->GetBlockHash());
+            // A read must not find or flush a premature budget tombstone at
+            // the last boundary before the parent coins become durable.
+            BOOST_CHECK_EQUAL(governance->m_sb->GetEraseCacheSize(), 0U);
+            BOOST_CHECK_EQUAL(CSuperblock::GetPaymentsLimit(tip), budget);
+            return !fail_sync;
+        }));
+        BlockValidationState state;
+        BOOST_CHECK_EQUAL(chainstate.InvalidateBlock(state, tip), !fail_sync);
+        BOOST_CHECK_EQUAL(syncs, 1U);
+        BOOST_CHECK_EQUAL(state.IsError(), fail_sync);
+        BOOST_CHECK_EQUAL(m_node.exit_status.load(), fail_sync ? EXIT_FAILURE : EXIT_SUCCESS);
+
+        LOCK(::cs_main);
+        chainstate.CoinsDB().SetSyncCallbackForTesting({});
+        BOOST_CHECK(chainman.ActiveTip() == (fail_sync ? tip : tip->pprev));
+        BOOST_CHECK_EQUAL(bool(tip->nStatus & BLOCK_FAILED_MASK), !fail_sync);
+        CAmount stored{0};
+        BOOST_CHECK_EQUAL(governance->m_sb->ReadCache(tip->GetBlockHash(), stored), fail_sync);
+        if (fail_sync) BOOST_CHECK_EQUAL(stored, budget);
+        BOOST_REQUIRE(governance->FlushCacheToDisk(/*fSync=*/true));
+
+        // Inspect an independent disk handle after the read-triggered flush.
+        // In the failure case, the async parent-coins writes may also survive;
+        // retaining the old budget remains safe until rollback can complete.
+        auto budget_params{governance->m_sb->GetDBParams()};
+        budget_params.wipe_data = false;
+        governance->m_sb->CloseDB();
+        struct ReopenBudget {
+            CDBWrapper& db;
+            ~ReopenBudget() { db.OpenDB(); }
+        } reopen{*governance->m_sb};
+        {
+            CEvoDB<uint256, CAmount, StaticSaltedHasher> persisted{budget_params, 0};
+            BOOST_CHECK_EQUAL(persisted.Read(tip->GetBlockHash(), stored), fail_sync);
+            if (fail_sync) BOOST_CHECK_EQUAL(stored, budget);
+        }
+        const auto coins_path{chainstate.CoinsDB().StoragePath()};
+        BOOST_REQUIRE(coins_path);
+        chainstate.ResetCoinsViews();
+        chainstate.InitCoinsDB(1U << 20, /*in_memory=*/false,
+                              /*should_wipe=*/false, *coins_path);
+        BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == tip->pprev->GetBlockHash());
+        BOOST_CHECK(chainstate.CoinsDB().GetHeadBlocks().empty());
+        chainstate.InitCoinsCache(1U << 20);
+    }
+};
+
+BOOST_FIXTURE_TEST_CASE(superblock_budget_retirement_waits_for_parent_coins,
+                        SuperblockBudgetRollbackSetup)
+{
+    CheckBudgetRetirement(/*fail_sync=*/false);
+}
+
+BOOST_FIXTURE_TEST_CASE(superblock_budget_survives_failed_parent_coins_sync,
+                        SuperblockBudgetRollbackSetup)
+{
+    CheckBudgetRetirement(/*fail_sync=*/true);
+}
+// SYSCOIN END: Budget retirement on rollback without a NEVM coins barrier.
 
 BOOST_FIXTURE_TEST_CASE(superblock_chainlock_requires_exact_governance_provenance,
                         TestChainDIP3V19Setup)

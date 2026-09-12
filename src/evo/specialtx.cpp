@@ -126,7 +126,7 @@ bool ProcessSpecialTxsInBlock(ChainstateManager &chainman, const CBlock& block, 
     return true;
 }
 
-bool UndoSpecialTxsInBlock(const CBlock& block, const CBlockIndex* pindex, CDeterministicMNListNEVMAddressDiff& diffNEVM, bool bUpdateSpecialTxState, bool bReplay)
+bool UndoSpecialTxsInBlock(const CBlock& block, const CBlockIndex* pindex, CDeterministicMNListNEVMAddressDiff& diffNEVM, bool bUpdateSpecialTxState)
 {
     try {
         if(bUpdateSpecialTxState) {
@@ -140,12 +140,10 @@ bool UndoSpecialTxsInBlock(const CBlock& block, const CBlockIndex* pindex, CDete
             if (!llmq::quorumBlockProcessor->UndoBlock(block, pindex)) {
                 return false;
             }
-            // replay doesn't connect block which writes governance SB to cache again
-            if(!bReplay) {
-                if (!governance->UndoBlock(pindex)) {
-                    return false;
-                }
-            }
+            // SYSCOIN: Budget deletion belongs to DisconnectTip's committed
+            // rollback, after all refusal points and durable parent coins.
+            // Private undo, verification and interrupted-flush replay retain
+            // the exact budget of a block that may still be active on restart.
         }
 
     } catch (const std::exception& e) {

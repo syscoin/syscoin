@@ -5709,7 +5709,7 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
         return DISCONNECT_FAILED;
     }
     // SYSCOIN
-    if (!UndoSpecialTxsInBlock(block, pindex, diffNEVM, bUpdateSpecialTxState, bReplay)) {
+    if (!UndoSpecialTxsInBlock(block, pindex, diffNEVM, bUpdateSpecialTxState)) {
         error("DisconnectBlock(): UndoSpecialTxsInBlock failed!\n");
         return DISCONNECT_FAILED;
     }
@@ -7091,6 +7091,9 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
     CBlockIndex *pindexDelete = m_chain.Tip();
     assert(pindexDelete);
     assert(pindexDelete->pprev);
+    // SYSCOIN: Keep the child's adaptive budget until this rollback commits.
+    const bool undo_superblock_budget{bUpdateSpecialTxState && governance &&
+        CSuperblock::IsValidBlockHeight(pindexDelete->nHeight)};
     if (nevm_prefix != nullptr &&
         !nevm_prefix->ContainsUnapplied(*pindexDelete)) {
         return state.Error("nevm-disconnect-unapplied-prefix-mismatch");
@@ -7214,6 +7217,7 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
                       "masternode snapshot window for parent of %s",
                       pindexDelete->GetBlockHash().ToString()));
     }
+    bool parent_coins_synced{false};
     // SYSCOIN: Root authority is already revoked. Persist replay protection
     // and branch-bound DMN/PQ state before synchronizing parent coins; only
     // then remove consumed-proof markers before retiring the recovery record.
@@ -7244,6 +7248,13 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
                     return FatalError(m_chainman.GetNotifications(), state,
                                       "DisconnectTip(): Failed to persist retained NEVM roots");
                 }
+                // SYSCOIN: A surviving parent may still need cached budgets.
+                // Persist them before its coins, retaining the child's row
+                // through every remaining rollback failure.
+                if (undo_superblock_budget && !governance->FlushCacheToDisk(/*fSync=*/true)) {
+                    return FatalError(m_chainman.GetNotifications(), state,
+                                      "DisconnectTip(): Failed to persist superblock budgets");
+                }
                 // SYSCOIN: All prior coins writes must be durable before
                 // retiring root recovery or hiding any mint replay marker.
                 if (!CoinsDB().FlushWithSync(CoinsTip())) {
@@ -7252,6 +7263,7 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
                         strprintf("DisconnectTip(): Failed to flush disconnected UTXO state %s",
                                   pindexDelete->GetBlockHash().ToString()));
                 }
+                parent_coins_synced = true;
             }
             // SYSCOIN: Retain all deletion intents if an earlier DB write fails.
             if (pnevmtxmintdb) pnevmtxmintdb->EraseCache(setMintTxs);
@@ -7289,9 +7301,24 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
         }
     }
 
-    // Write the chain state to disk, if necessary.
-    if (!FlushStateToDisk(state, FlushStateMode::IF_NEEDED)) {
+    // SYSCOIN: Offline and pre-NEVM superblock rollback may not cross the
+    // root/mint coins barrier above. Persist its parent and auxiliary state
+    // before a budget tombstone can outlive the child's on-disk coins.
+    const bool sync_budget_parent{undo_superblock_budget && !parent_coins_synced};
+    if (!FlushStateToDisk(state, sync_budget_parent
+            ? FlushStateMode::ALWAYS : FlushStateMode::IF_NEEDED)) {
         return false;
+    }
+    if (sync_budget_parent) {
+        try {
+            if (!CoinsDB().FlushWithSync(CoinsTip())) {
+                return FatalError(m_chainman.GetNotifications(), state,
+                                  "DisconnectTip(): Failed to persist superblock parent coins");
+            }
+        } catch (const std::runtime_error& e) {
+            return FatalError(m_chainman.GetNotifications(), state,
+                              std::string{"System error while persisting superblock parent: "} + e.what());
+        }
     }
 
     if (disconnectpool && m_mempool) {
@@ -7303,6 +7330,13 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
     }
 
     m_chain.SetTip(*pindexDelete->pprev);
+
+    // SYSCOIN: Every fallible persistence step has succeeded and this
+    // chainstate names its durable parent. Reads may now flush budget deletion.
+    if (undo_superblock_budget && !governance->UndoBlock(pindexDelete)) {
+        return FatalError(m_chainman.GetNotifications(), state,
+                          "DisconnectTip(): Failed to retire superblock budget");
+    }
 
     // SYSCOIN: Ordinary undo has fully resolved this once-published attempt.
     // Its retained identity must not block delivery of the replacement branch.

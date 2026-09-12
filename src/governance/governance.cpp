@@ -5443,9 +5443,10 @@ bool CGovernanceManager::FlushCacheToDisk(bool fSync)
 }
 bool CGovernanceManager::UndoBlock(const CBlockIndex* pindex)
 {
-    // UndoSpecialTxsInBlock closes readiness before branch-bound state is
-    // rolled back. Keep this idempotent closure for direct callers; UpdateTip
-    // will bind and publish the exact parent snapshot synchronously.
+    // SYSCOIN: DisconnectTip calls this only after publishing a parent whose
+    // coins are durable. Earlier private undo closes readiness without erasing
+    // the still-active child's budget. Keep closure idempotent for direct
+    // callers; UpdateTip publishes the exact parent snapshot synchronously.
     ObserveChainTip(nullptr);
     if (CSuperblock::IsValidBlockHeight(pindex->nHeight)) {
         LogPrint(BCLog::GOBJECT, "CGovernanceManager::UndoBlock -- Removing superblock at height from SB cache: %d\n", pindex->nHeight);
