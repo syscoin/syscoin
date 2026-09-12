@@ -27,6 +27,7 @@
 #include <rpc/server.h>
 #include <script/script.h>
 #include <sync.h>
+#include <spork.h> // SYSCOIN: signed payment-switch regression.
 #include <test/util/chainstate.h>
 #include <test/util/coins.h>
 #include <test/util/net.h>
@@ -1705,6 +1706,190 @@ BOOST_FIXTURE_TEST_CASE(
         CSuperblock::SUPERBLOCK_BUDGET);
     BOOST_CHECK_EQUAL(
         CSuperblock::GetPaymentsLimit(post_first_invalid), 0);
+}
+
+// SYSCOIN: An accepted scheduled block inherits the same adaptive budget
+// regardless of local sync mode or whether governance payments are enabled.
+BOOST_FIXTURE_TEST_CASE(superblock_disabled_payments_preserve_inherited_budget,
+                        TestChain100Setup)
+{
+    auto& original{*m_node.chainman};
+    auto& consensus{const_cast<Consensus::Params&>(original.GetConsensus())};
+    struct Restore {
+        Consensus::Params& consensus;
+        const Consensus::Params previous_consensus;
+        const int previous_sync{masternodeSync.GetAssetID()};
+        std::unique_ptr<CSporkManager> previous_sporks{std::move(sporkManager)};
+        std::unique_ptr<CGovernanceManager> previous_governance{std::move(governance)};
+        std::unique_ptr<CDeterministicMNManager> previous_mns{std::move(deterministicMNManager)};
+        ~Restore()
+        {
+            governance = std::move(previous_governance);
+            deterministicMNManager = std::move(previous_mns);
+            sporkManager = std::move(previous_sporks);
+            masternodeSync.SetSyncMode(previous_sync);
+            consensus = previous_consensus;
+        }
+    } restore{consensus, consensus};
+    consensus.DIP0003Height = 1;
+    consensus.nPQPreparationHeight = 1000;
+    consensus.nPQChainLockEpochOrigin = 1440;
+    consensus.nPQRegistrationCutoffBlocks = 144;
+    consensus.nPQFutureHorizonEpochs = 8;
+    sporkManager = std::make_unique<CSporkManager>();
+    BOOST_REQUIRE_EQUAL(original.GetParams().SporkAddresses().size(), 1U);
+    BOOST_REQUIRE(sporkManager->SetSporkAddress(original.GetParams().SporkAddresses().front()));
+    BOOST_REQUIRE(sporkManager->SetMinSporkKeys(1));
+    // Public regtest key shared with the functional-test framework.
+    BOOST_REQUIRE(sporkManager->SetPrivKey("cVpF924EspNh8KjYsfhgY96mmxvT6DgdWiTYMtMjuM74hJaU5psW"));
+    BOOST_REQUIRE(m_node.peerman);
+    CBlockIndex *predecessor, *index, *next;
+    CBlock predecessor_block, block, next_block;
+    {
+        LOCK(::cs_main);
+        predecessor = original.ActiveChain()[25];
+        index = original.ActiveChain()[50];
+        next = original.ActiveChain()[75];
+        BOOST_REQUIRE(predecessor && index && next);
+        BOOST_REQUIRE(CSuperblock::IsValidBlockHeight(predecessor->nHeight));
+        BOOST_REQUIRE(CSuperblock::IsValidBlockHeight(index->nHeight));
+        BOOST_REQUIRE(CSuperblock::IsValidBlockHeight(next->nHeight));
+        BOOST_REQUIRE(index->GetAncestor(index->nHeight - consensus.SuperBlockCycle(index->nHeight)) == predecessor);
+        BOOST_REQUIRE(next->GetAncestor(next->nHeight - consensus.SuperBlockCycle(next->nHeight)) == index);
+        BOOST_REQUIRE(original.m_blockman.ReadBlockFromDisk(predecessor_block, *predecessor));
+        BOOST_REQUIRE(original.m_blockman.ReadBlockFromDisk(block, *index));
+        BOOST_REQUIRE(original.m_blockman.ReadBlockFromDisk(next_block, *next));
+    }
+    BOOST_REQUIRE(block.GetHash() == index->GetBlockHash());
+    const CAmount reward{block.vtx.front()->GetValueOut()};
+    const CAmount budget{CSuperblock::SUPERBLOCK_BUDGET * CSuperblock::SHIFT_DOWN / CSuperblock::SHIFT};
+    const CAmount expected_maximum{budget * CSuperblock::SHIFT_UP / CSuperblock::SHIFT};
+    std::array<CAmount, 3> reopened_budgets{};
+    std::array<CAmount, 3> reopened_maxima{};
+    std::array<bool, 3> next_accepted{};
+    const std::array<std::string, 3> modes{"synced-disabled", "historical-disabled", "enabled-untriggered"};
+    for (std::size_t mode{0}; mode < modes.size(); ++mode) {
+        BOOST_TEST_CONTEXT(modes[mode]) {
+            auto options{original.m_options};
+            options.datadir = m_path_root / fs::u8path(modes[mode]);
+            ChainstateManager isolated{m_node.kernel->interrupt, options,
+                {.chainparams = original.GetParams(), .blocks_dir = options.datadir / "blocks",
+                 .notifications = *m_node.notifications}};
+            {
+                LOCK(::cs_main);
+                isolated.InitializeChainstate(nullptr).m_chain.SetTip(*index->pprev);
+            }
+            struct ReleaseManagers {
+                ~ReleaseManagers()
+                {
+                    governance.reset();
+                    deterministicMNManager.reset();
+                }
+            } release_managers;
+            governance = std::make_unique<CGovernanceManager>(isolated);
+            BOOST_REQUIRE(governance->m_sb->StoragePath() == options.datadir / "evodb_sb");
+            std::string error;
+            masternodeSync.SetSyncMode(MASTERNODE_SYNC_GOVERNANCE);
+            // Use the existing amount-only producer to seed the same prior
+            // nondefault budget in each isolated store.
+            BOOST_REQUIRE_GT(predecessor_block.vtx.front()->GetValueOut(), COIN);
+            BOOST_REQUIRE_MESSAGE(IsBlockValueValid(predecessor_block, predecessor,
+                predecessor_block.vtx.front()->GetValueOut() - COIN, error,
+                /*fJustCheck=*/false, /*check_superblock=*/false), error);
+            BOOST_REQUIRE(governance->FlushCacheToDisk(/*fSync=*/true));
+            CAmount previous{0};
+            BOOST_REQUIRE(governance->m_sb->Read(predecessor->GetBlockHash(), previous));
+            BOOST_REQUIRE_EQUAL(previous, budget);
+            const bool enabled{mode == 2};
+            BOOST_REQUIRE(sporkManager->UpdateSpork(SPORK_9_SUPERBLOCKS_ENABLED,
+                enabled ? 0 : 4070908800LL, *m_node.peerman));
+            BOOST_REQUIRE_EQUAL(AreSuperblocksEnabled(), enabled);
+            if (enabled) {
+                deterministicMNManager = std::make_unique<CDeterministicMNManager>(DBParams{
+                    .path = options.datadir / "dmn", .cache_bytes = 1U << 20, .memory_only = true});
+                const auto* parent{index->pprev};
+                deterministicMNManager->m_evoDb->WriteCache(parent->GetBlockHash(),
+                    CDeterministicMNList{parent->GetBlockHash(), parent->nHeight, 0});
+                BOOST_REQUIRE(governance->LoadCache(/*load_cache=*/false));
+                BOOST_REQUIRE(governance->RevalidatePQGovernance(*parent));
+                BOOST_REQUIRE(CSuperblockManager::GetSuperblockTriggerState(
+                    index->nHeight, parent) == SuperblockTriggerState::NOT_TRIGGERED);
+            }
+            masternodeSync.SetSyncMode(mode == 1 ? MASTERNODE_SYNC_GOVERNANCE : MASTERNODE_SYNC_FINISHED);
+            const auto check_absent = [&](const uint256& hash) {
+                CAmount absent{0};
+                BOOST_CHECK(!governance->m_sb->ReadCache(hash, absent));
+                BOOST_CHECK(!governance->m_sb->Read(hash, absent));
+                BOOST_CHECK_EQUAL(governance->m_sb->GetReadWriteCacheSize(), 0U);
+            };
+            bool exact{false};
+            BOOST_REQUIRE_MESSAGE(IsBlockValueValid(block, index, reward, error,
+                /*fJustCheck=*/true, /*check_superblock=*/true, &exact), error);
+            BOOST_CHECK_EQUAL(exact, mode != 1);
+            check_absent(block.GetHash());
+            if (mode == 0) {
+                CBlock overpaid{block};
+                CMutableTransaction coinbase{*overpaid.vtx.front()};
+                ++coinbase.vout.front().nValue;
+                overpaid.vtx.front() = MakeTransactionRef(std::move(coinbase));
+                overpaid.hashMerkleRoot = BlockMerkleRoot(overpaid);
+                const uint256 rejected_hash{overpaid.GetHash()};
+                CBlockIndex rejected{overpaid};
+                rejected.phashBlock = &rejected_hash;
+                rejected.nHeight = index->nHeight;
+                rejected.pprev = index->pprev;
+                BOOST_REQUIRE_LT(overpaid.vtx.front()->GetValueOut(), reward + expected_maximum);
+                BOOST_CHECK(!IsBlockValueValid(overpaid, &rejected, reward, error,
+                    /*fJustCheck=*/false, /*check_superblock=*/true));
+                BOOST_CHECK(error.find("superblocks are disabled") != std::string::npos);
+                check_absent(rejected_hash);
+            }
+            governance->m_sb->FailNextSynchronousFlushBatchForTesting();
+            BOOST_REQUIRE_MESSAGE(IsBlockValueValid(block, index, reward, error,
+                /*fJustCheck=*/false, /*check_superblock=*/true, &exact), error);
+            BOOST_CHECK_EQUAL(exact, mode != 1);
+            CAmount staged{0};
+            BOOST_CHECK(governance->m_sb->ReadCache(block.GetHash(), staged));
+            BOOST_CHECK_EQUAL(staged, budget);
+            CAmount physical{0};
+            BOOST_CHECK(!governance->m_sb->Read(block.GetHash(), physical));
+            // Accepted validation only stages the budget; existing explicit
+            // persistence boundaries own synchronization.
+            BOOST_CHECK_THROW(governance->FlushCacheToDisk(/*fSync=*/true), dbwrapper_error);
+            BOOST_REQUIRE(governance->FlushCacheToDisk(/*fSync=*/true));
+            BOOST_REQUIRE_EQUAL(governance->m_sb->GetReadWriteCacheSize(), 0U);
+            governance.reset();
+            governance = std::make_unique<CGovernanceManager>(isolated);
+            BOOST_CHECK_EQUAL(governance->m_sb->GetReadWriteCacheSize(), 0U);
+            BOOST_CHECK(governance->m_sb->Read(block.GetHash(), reopened_budgets[mode]));
+            BOOST_CHECK_EQUAL(reopened_budgets[mode], budget);
+            const CAmount limit{CSuperblock::GetPaymentsLimit(index)};
+            reopened_maxima[mode] = limit * CSuperblock::SHIFT_UP / CSuperblock::SHIFT;
+            BOOST_CHECK_EQUAL(reopened_maxima[mode], expected_maximum);
+            // Isolate the subsequent amount maximum, before trigger or
+            // historical-sync decisions. This does not assert a funded payout.
+            CBlock later{next_block};
+            const CAmount later_reward{later.vtx.front()->GetValueOut()};
+            CMutableTransaction later_coinbase{*later.vtx.front()};
+            later_coinbase.vout.front().nValue += CSuperblock::SUPERBLOCK_BUDGET;
+            later.vtx.front() = MakeTransactionRef(std::move(later_coinbase));
+            later.hashMerkleRoot = BlockMerkleRoot(later);
+            const uint256 later_hash{later.GetHash()};
+            CBlockIndex later_index{later};
+            later_index.phashBlock = &later_hash;
+            later_index.nHeight = next->nHeight;
+            later_index.pprev = next->pprev;
+            masternodeSync.SetSyncMode(MASTERNODE_SYNC_GOVERNANCE);
+            next_accepted[mode] = IsBlockValueValid(later, &later_index, later_reward, error,
+                /*fJustCheck=*/true, /*check_superblock=*/false);
+            BOOST_CHECK(!next_accepted[mode]);
+            BOOST_CHECK(error.find("exceeded superblock max value") != std::string::npos);
+        }
+    }
+    BOOST_CHECK_EQUAL(reopened_budgets[0], reopened_budgets[1]);
+    BOOST_CHECK_EQUAL(reopened_budgets[0], reopened_budgets[2]);
+    BOOST_CHECK_EQUAL(reopened_maxima[0], reopened_maxima[1]);
+    BOOST_CHECK_EQUAL(next_accepted[0], next_accepted[1]);
 }
 
 // SYSCOIN BEGIN: Budget retirement on rollback without a NEVM coins barrier.

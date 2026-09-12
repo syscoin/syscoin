@@ -160,6 +160,10 @@ bool IsBlockValueValid(const CBlock& block, const CBlockIndex* pindex, const CAm
             strErrorRet = strprintf("coinbase pays too much at height %d (actual=%d vs limit=%d), exceeded block reward, superblocks are disabled",
                             nBlockHeight, block.vtx[0]->GetValueOut(), blockReward);
         }
+        else if (!fJustCheck) {
+            // SYSCOIN: Disabled payouts still carry the branch's adaptive budget.
+            CheckAndWriteBudget(nSuperblockPayment, nPaymentLimit, nGovernanceBudgetUp, pindex);
+        }
         return isBlockRewardValueMet;
     }
     // Off-chain votes can change after this exact block was connected. Keep
