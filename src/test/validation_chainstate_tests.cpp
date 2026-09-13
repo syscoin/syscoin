@@ -4331,6 +4331,9 @@ static void CheckGovernanceFutureVotes(TestChain100Setup& fixture,
             WitnessV0KeyHash(fixture.coinbaseKey.GetPubKey()));
     }
     member_state->nRegisteredHeight = preparation_height - 1;
+    // SYSCOIN: model collateral created with registration, as BuildNewList
+    // does for an internal collateral. The default -1 is not a payable MN.
+    member_state->nCollateralHeight = preparation_height - 1;
     member->pdmnState = std::move(member_state);
 
     OperatorKeyState operator_state{OperatorKeyState::ForOperator(pro_tx_hash)};
@@ -4536,6 +4539,8 @@ static void CheckGovernanceFutureVotes(TestChain100Setup& fixture,
             &indices[final_height], mn_payee));
         BOOST_REQUIRE(mn_payee);
         BOOST_REQUIRE(mn_payee->proTxHash == pro_tx_hash);
+        BOOST_REQUIRE_EQUAL(mn_payee->pdmnState->nCollateralHeight,
+                            preparation_height - 1);
         // These are production templates and payment builders over the exact
         // synthetic parent. Skip only final block consensus validation: this
         // fixture supplies admitted authorization envelopes, not block/UTXO

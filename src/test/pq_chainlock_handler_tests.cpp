@@ -2227,6 +2227,7 @@ struct PresealMiningSetup : TestChain100Setup {
     PresealMiningSetup()
         : TestChain100Setup{ChainType::REGTEST, {"-nevmstartheight=101"}}
     {
+        SyncWithValidationInterfaceQueue();
         fNEVMConnection = false;
         mineBlocks(TIP_HEIGHT - 100);
         SyncWithValidationInterfaceQueue();
@@ -2244,6 +2245,9 @@ struct PresealMiningSetup : TestChain100Setup {
         chainman.ResetIbd(PQHistoryAuthState::READY);
         BOOST_REQUIRE(!chainman.IsInitialBlockDownload());
         BOOST_REQUIRE(!chainman.HasPendingNEVMStartupPair());
+        // IBD completion reads the connection flag on the scheduler thread.
+        // Finish that callback before changing this fixture-wide global.
+        SyncWithValidationInterfaceQueue();
         RegisterSharedValidationInterface(nevm);
         fNEVMConnection = true;
     }

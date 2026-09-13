@@ -4272,6 +4272,7 @@ struct ReopenedMiningNEVMPrefixSetup : MiningNEVMPrefixSetup {
 
     void CheckReopened(uint64_t retained)
     {
+        SyncWithValidationInterfaceQueue();
         auto& original{*m_node.chainman};
         auto& original_chainstate{original.ActiveChainstate()};
         ChainstateManager reopened{m_node.kernel->interrupt, original.m_options,
@@ -4296,6 +4297,9 @@ struct ReopenedMiningNEVMPrefixSetup : MiningNEVMPrefixSetup {
             fs::path coins_path;
             ~RestoreDatabases()
             {
+                // Recovered mining can enqueue IBD completion with a reference
+                // to this temporary manager. Drain before restoring its DBs.
+                SyncWithValidationInterfaceQueue();
                 LOCK(::cs_main);
                 reopened.ActiveChainstate().ResetCoinsViews();
                 original.m_blockman.m_block_tree_db = std::move(reopened.m_blockman.m_block_tree_db);
@@ -4577,6 +4581,7 @@ struct ReopenedPendingNEVMConnectSetup : LostAckDescendantMiningSetup {
 
     void WithReopened(const std::function<void(ChainstateManager&)>& run, bool pending_record = true)
     {
+        SyncWithValidationInterfaceQueue();
         auto& original{*m_node.chainman};
         auto& original_state{original.ActiveChainstate()};
         ChainstateManager reopened{m_node.kernel->interrupt, original.m_options,
@@ -4597,6 +4602,9 @@ struct ReopenedPendingNEVMConnectSetup : LostAckDescendantMiningSetup {
             fs::path coins_path;
             ~RestoreDatabases()
             {
+                // Also cover exceptions before the temporary handler and its
+                // callback cleanup guard have been installed.
+                SyncWithValidationInterfaceQueue();
                 LOCK(::cs_main);
                 for (const auto* index : reopened.m_blockman.GetAllBlockIndices()) {
                     if (auto* prior{original.m_blockman.LookupBlockIndex(index->GetBlockHash())}) {
@@ -4645,6 +4653,9 @@ struct ReopenedPendingNEVMConnectSetup : LostAckDescendantMiningSetup {
             StartupNEVMSubscriber& subscriber;
             ~ClearDisconnectResponse()
             {
+                // Queued tip/IBD callbacks still reference the temporary
+                // manager and finality handler, including on assertion failure.
+                SyncWithValidationInterfaceQueue();
                 subscriber.disconnect_response = {};
                 subscriber.flush_verdict = {};
                 subscriber.durable_pair_response = {};

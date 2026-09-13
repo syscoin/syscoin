@@ -17,6 +17,7 @@ from test_framework.messages import (
     CNEVMBlock,
     CNEVMBlockConnect,
     CNEVMBlockDisconnect,
+    deser_string,
     hash256,
     ser_compact_size,
     ser_string,
@@ -29,9 +30,11 @@ class NEVMDataTest(DashTestFramework):
 
     def set_test_params(self):
         self.set_dash_test_params(5, 4, [["-disablewallet=0","-walletrejectlongchains=0"]] * 5, fast_dip3_enforcement=True)
-        # Activate NEVM commitment path in this test's height range.
+        # Framework setup mines without a paired engine. Its ordinary blocks
+        # must stay below NEVM activation; run_test selects the first paired
+        # height after setup has finished.
         for i in range(self.num_nodes):
-            self.extra_args[i].append("-nevmstartheight=1")
+            self.extra_args[i].append("-nevmstartheight=2147483647")
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_py3_zmq()
@@ -298,7 +301,13 @@ class NEVMDataTest(DashTestFramework):
         nowblockhash = self.nodes[0].getbestblockhash()
         print('Checking NEVM data reorg without fabricated PQ finality')
         print('Invalidating back to the original blockhash {}'.format(startblockhash))
+        fences_before = len(self._zmq_durable_pair_events)
         self.nodes[0].invalidateblock(startblockhash)
+        assert_greater_than(len(self._zmq_durable_pair_events), fences_before)
+        rollback_count = self.nodes[0].getblockcount() - self._nevm_start_height + 1
+        rollback_hash = int(self.nodes[0].getbestblockhash(), 16) if rollback_count else 0
+        assert_equal(self._zmq_durable_pair_events[-1], (rollback_count, rollback_hash))
+        assert_equal(self._zmq_durable_syshashes, self._zmq_applied_syshashes)
         print('Reconsidering block')
         self.nodes[0].reconsiderblock(startblockhash)
         assert_equal(self.nodes[0].getbestblockhash(), nowblockhash)
@@ -331,13 +340,11 @@ class NEVMDataTest(DashTestFramework):
         self._zmq_running = True
         self._zmq_connect_count = 0
         self._zmq_connect_events = []
-        # The engine attaches after setup mined with -nevmstartheight=1.
-        # Seed its applied prefix before enabling ZMQ, then update it from
-        # notifications so rollback can verify the exact count/hash pair.
-        self._zmq_applied_syshashes = [
-            int(self.nodes[0].getblockhash(height), 16)
-            for height in range(1, self.nodes[0].getblockcount() + 1)
-        ]
+        # Setup blocks are below activation and have no NEVM commitments.
+        # Only real connection notifications establish this engine's prefix.
+        self._zmq_applied_syshashes = []
+        self._zmq_durable_syshashes = []
+        self._zmq_durable_pair_events = []
         self._zmq_ctx = zmq.Context()
         self._zmq_ready = Event()
         self._zmq_error = None
@@ -362,11 +369,22 @@ class NEVMDataTest(DashTestFramework):
                     topic = parts[0]
                     if topic == b"nevmcomms":
                         response = b"ack"
+                        command = deser_string(BytesIO(parts[1]))
                         if parts[1] == ser_string(b"connect-v1"):
                             response = b"connect-v1"
                         elif parts[1] == ser_string(b"flush"):
                             # This mock applies every accepted connect inline.
                             response = b"flushed"
+                        elif command.startswith(b"durable-pair-v1:"):
+                            count = len(self._zmq_applied_syshashes)
+                            tip = self._zmq_applied_syshashes[-1] if count else 0
+                            expected = f"durable-pair-v1:{count}:{tip:064x}".encode()
+                            if command != expected:
+                                response = b"error:mock-durable-pair-mismatch"
+                            else:
+                                self._zmq_durable_syshashes = self._zmq_applied_syshashes[:]
+                                self._zmq_durable_pair_events.append((count, tip))
+                                response = command
                         sock.send_multipart([b"nevmcomms", response])
                     elif topic == b"nevmblock":
                         h = hash256(str(random.randint(-0x80000000, 0x7FFFFFFF)).encode())
@@ -436,13 +454,23 @@ class NEVMDataTest(DashTestFramework):
             raise RuntimeError("NEVM ZMQ responder failed") from self._zmq_error
 
     def run_test(self):
+        setup_height = self.nodes[0].getblockcount()
+        for node in self.nodes:
+            assert_equal(node.getblockcount(), setup_height)
+        self._nevm_start_height = setup_height + 1
+        for i in range(self.num_nodes):
+            self.extra_args[i] = [arg for arg in self.extra_args[i] if not arg.startswith("-nevmstartheight=")]
+            self.extra_args[i].append(f"-nevmstartheight={self._nevm_start_height}")
         self._start_nevm_zmq_responder()
         try:
             # Enable ZMQ NEVM publisher only after responder is up to avoid
             # startup-time RPC stalls in framework setup_network mining.
             self.extra_args[0].append("-zmqpubnevm=tcp://127.0.0.1:29555")
             self.extra_args[0].append("-debug=zmq")
-            self.restart_node(0, self.extra_args[0])
+            # Every validator and later reindex/restart must use the same
+            # activation height, with no uncommitted setup carrier above it.
+            self.stop_nodes()
+            self.start_nodes(self.extra_args)
             self.nodes[1].createwallet("")
             self.nodes[2].createwallet("")
             self.nodes[3].createwallet("")
@@ -453,6 +481,9 @@ class NEVMDataTest(DashTestFramework):
                     self.connect_nodes(i, j, wait_for_connect=False)
             self.generate_helper(self.nodes[0], 10)
             self.sync_blocks(self.nodes, timeout=60)
+            assert_equal(len(self._zmq_applied_syshashes), 10)
+            assert_equal(self._zmq_applied_syshashes[-1], int(self.nodes[0].getbestblockhash(), 16))
+            assert_equal(self._zmq_durable_pair_events, [])
             self.nodes[0].spork("SPORK_19_CHAINLOCKS_ENABLED", 0)
             self.wait_for_sporks_same()
 
