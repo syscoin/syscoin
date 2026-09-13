@@ -6820,6 +6820,18 @@ bool Chainstate::FlushStateToDisk(
                 if (mode == FlushStateMode::PERIODIC) {
                     LogPrint(BCLog::SYS, "%s: requesting periodic DMN EvoDB maintenance at height %d\n", __func__, m_chain.Height());
                 }
+                // SYSCOIN: A visible BEST/HEADS marker can still be in an
+                // asynchronous WAL. Make prior publications durable before
+                // shared DMN/PQ maintenance can discard their predecessors.
+                // Sync only the DB: publishing the current coins cache here
+                // would precede its auxiliary-state barriers below.
+                for (Chainstate* chainstate : m_chainman.GetAllForPersistence()) {
+                    if (!chainstate->CoinsDB().Sync()) {
+                        return FatalError(
+                            m_chainman.GetNotifications(), state,
+                            "Failed to sync coins before deterministic masternode maintenance");
+                    }
+                }
                 std::string recovery_error;
                 const auto all_recovery_indexes{
                     m_chainman.GetAllRecoveryBlockIndexes(recovery_error)};

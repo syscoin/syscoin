@@ -1267,6 +1267,10 @@ BOOST_AUTO_TEST_CASE(ccoins_mint_rollback_write_failure_skips_barrier)
                     }
                     BOOST_CHECK_EQUAL(still_surviving, surviving_outputs);
                 };
+                // A DB-only fence cannot make a partly consumed cache safe
+                // or clear the failed-write latch, even before any retry.
+                BOOST_CHECK(!db.Sync());
+                check_failed_state();
                 BOOST_CHECK(!critical.Flush());
                 check_failed_state();
                 BOOST_CHECK(!critical.Sync());
@@ -1284,6 +1288,8 @@ BOOST_AUTO_TEST_CASE(ccoins_mint_rollback_write_failure_skips_barrier)
                 BOOST_CHECK(!ordinary.Sync());
                 check_failed_state();
                 BOOST_CHECK(!db.FlushWithSync(ordinary));
+                check_failed_state();
+                BOOST_CHECK(!db.Sync());
                 check_failed_state();
                 db.SetWriteBatchCallbackForTesting({});
                 db.SetSyncCallbackForTesting({});
@@ -1401,6 +1407,167 @@ BOOST_AUTO_TEST_CASE(ccoins_mint_rollback_sync_after_fresh_cancellation)
     db.SetSyncCallbackForTesting({});
 }
 // SYSCOIN END: Mint rollback must sync prior coins writes before replay erasure.
+
+// SYSCOIN BEGIN: Fence earlier coins publications without flushing prospective state.
+BOOST_AUTO_TEST_CASE(ccoins_db_sync_preserves_prospective_cache)
+{
+    LOCK(cs_main);
+    size_t barriers{0};
+    size_t writes{0};
+    CCoinsViewDB db{{.path = "coins_db_sync_cache", .cache_bytes = 1 << 20,
+                    .memory_only = true}, {}};
+    db.SetSyncCallbackForTesting([&] { ++barriers; return true; });
+    db.SetWriteBatchCallbackForTesting([&](bool sync) {
+        BOOST_CHECK(!sync);
+        ++writes;
+        return true;
+    });
+
+    // Opening a DB conservatively requires one barrier. Repeated maintenance
+    // without any coins publication must not issue another physical sync.
+    BOOST_REQUIRE(db.Sync());
+    BOOST_REQUIRE(db.Sync());
+    BOOST_CHECK_EQUAL(barriers, 1U);
+    BOOST_CHECK_EQUAL(writes, 0U);
+    BOOST_CHECK(db.GetBestBlock().IsNull());
+
+    const uint256 first_tip{InsecureRand256()};
+    const uint256 visible_tip{InsecureRand256()};
+    const uint256 prospective_tip{InsecureRand256()};
+    const COutPoint old_output{InsecureRand256(), 0};
+    const COutPoint new_output{InsecureRand256(), 0};
+    const Coin old_coin{MakeCoin()};
+    const Coin new_coin{MakeCoin()};
+    CCoinsViewCache published{&db};
+    published.SetBestBlock(first_tip);
+    published.AddCoin(old_output, Coin{old_coin}, false);
+    BOOST_REQUIRE(published.Flush());
+    published.SetBestBlock(visible_tip);
+    BOOST_REQUIRE(published.Flush());
+    BOOST_CHECK_EQUAL(barriers, 1U);
+
+    CCoinsViewCache prospective{&db};
+    prospective.SetBestBlock(prospective_tip);
+    BOOST_REQUIRE(prospective.SpendCoin(old_output));
+    prospective.AddCoin(new_output, Coin{new_coin}, false);
+    const auto cached_entries{prospective.GetCacheSize()};
+    const auto prior_writes{writes};
+    BOOST_REQUIRE(db.Sync());
+    BOOST_REQUIRE(db.Sync());
+    BOOST_CHECK_EQUAL(barriers, 2U);
+    BOOST_CHECK_EQUAL(writes, prior_writes);
+    BOOST_CHECK(db.GetBestBlock() == visible_tip);
+    BOOST_CHECK(db.GetHeadBlocks().empty());
+    Coin actual;
+    BOOST_REQUIRE(db.GetCoin(old_output, actual));
+    BOOST_CHECK(actual == old_coin);
+    BOOST_CHECK(!db.HaveCoin(new_output));
+    BOOST_CHECK(prospective.GetBestBlock() == prospective_tip);
+    BOOST_CHECK_EQUAL(prospective.GetCacheSize(), cached_entries);
+    BOOST_CHECK(!prospective.HaveCoin(old_output));
+    BOOST_CHECK(prospective.AccessCoin(new_output) == new_coin);
+
+    BOOST_REQUIRE(db.FlushWithSync(prospective));
+    BOOST_CHECK_EQUAL(barriers, 3U);
+    BOOST_CHECK(db.GetBestBlock() == prospective_tip);
+    BOOST_CHECK(!db.HaveCoin(old_output));
+    BOOST_REQUIRE(db.GetCoin(new_output, actual));
+    BOOST_CHECK(actual == new_coin);
+    BOOST_REQUIRE(db.Sync());
+    BOOST_CHECK_EQUAL(barriers, 3U);
+    // The existing explicit flush still writes its BEST batch and fences it,
+    // even when the cache contains no changed outputs.
+    BOOST_REQUIRE(db.FlushWithSync(prospective));
+    BOOST_CHECK_EQUAL(barriers, 4U);
+    db.SetWriteBatchCallbackForTesting({});
+    db.SetSyncCallbackForTesting({});
+}
+
+BOOST_AUTO_TEST_CASE(ccoins_db_sync_failure_remains_retryable)
+{
+    LOCK(cs_main);
+    size_t barriers{0};
+    CCoinsViewDB db{{.path = "coins_db_sync_retry", .cache_bytes = 1 << 20,
+                    .memory_only = true}, {}};
+    BOOST_REQUIRE(db.Sync());
+    const uint256 tip{InsecureRand256()};
+    CCoinsViewCache cache{&db};
+    cache.SetBestBlock(tip);
+    cache.AddCoin({InsecureRand256(), 0}, MakeCoin(), false);
+    BOOST_REQUIRE(cache.Flush());
+    db.SetSyncCallbackForTesting([&] {
+        ++barriers;
+        BOOST_CHECK(db.GetBestBlock() == tip);
+        if (barriers == 1) return false;
+        if (barriers == 2) throw std::runtime_error("injected DB-only sync failure");
+        return true;
+    });
+    BOOST_CHECK(!db.Sync());
+    BOOST_CHECK_THROW(db.Sync(), std::runtime_error);
+    // No intervening write is needed to retry either failure. Only success
+    // may discharge the existing publication's durability obligation.
+    BOOST_REQUIRE(db.Sync());
+    BOOST_CHECK_EQUAL(barriers, 3U);
+    BOOST_REQUIRE(db.Sync());
+    BOOST_CHECK_EQUAL(barriers, 3U);
+    BOOST_CHECK(db.GetBestBlock() == tip);
+    BOOST_CHECK(db.GetHeadBlocks().empty());
+    db.SetSyncCallbackForTesting({});
+}
+
+BOOST_AUTO_TEST_CASE(ccoins_db_sync_reopen_and_resize)
+{
+    LOCK(cs_main);
+    const fs::path db_path{m_args.GetDataDirBase() / "coins_db_sync_reopen"};
+    const uint256 first_tip{InsecureRand256()};
+    const uint256 second_tip{InsecureRand256()};
+    const uint256 third_tip{InsecureRand256()};
+    const COutPoint output{InsecureRand256(), 0};
+    const Coin expected{MakeCoin()};
+    {
+        size_t barriers{0};
+        CCoinsViewDB db{{.path = db_path, .cache_bytes = 1 << 20,
+                        .wipe_data = true}, {}};
+        db.SetSyncCallbackForTesting([&] { ++barriers; return true; });
+        CCoinsViewCache cache{&db};
+        cache.SetBestBlock(first_tip);
+        cache.AddCoin(output, Coin{expected}, false);
+        BOOST_REQUIRE(db.FlushWithSync(cache));
+        BOOST_CHECK_EQUAL(barriers, 1U);
+        cache.SetBestBlock(second_tip);
+        BOOST_REQUIRE(cache.Flush());
+        db.ResizeCache(2 << 20);
+        BOOST_CHECK(db.GetBestBlock() == second_tip);
+        BOOST_REQUIRE(db.Sync());
+        BOOST_CHECK_EQUAL(barriers, 2U);
+        BOOST_REQUIRE(db.Sync());
+        BOOST_CHECK_EQUAL(barriers, 2U);
+        db.ResizeCache(3 << 20);
+        BOOST_REQUIRE(db.Sync());
+        BOOST_CHECK_EQUAL(barriers, 2U);
+        cache.SetBestBlock(third_tip);
+        BOOST_REQUIRE(cache.Flush());
+        BOOST_CHECK_EQUAL(barriers, 2U);
+        db.SetSyncCallbackForTesting({});
+    }
+    // A real close/reopen preserves the rows. It is not a power-cut model:
+    // the fresh object must conservatively fence prior writes regardless of
+    // whether the previous process or an orderly close persisted them.
+    size_t reopened_barriers{0};
+    CCoinsViewDB reopened{{.path = db_path, .cache_bytes = 1 << 20}, {}};
+    reopened.SetSyncCallbackForTesting([&] { ++reopened_barriers; return true; });
+    BOOST_CHECK(reopened.GetBestBlock() == third_tip);
+    Coin actual;
+    BOOST_REQUIRE(reopened.GetCoin(output, actual));
+    BOOST_CHECK(actual == expected);
+    BOOST_REQUIRE(reopened.Sync());
+    BOOST_REQUIRE(reopened.Sync());
+    BOOST_CHECK_EQUAL(reopened_barriers, 1U);
+    BOOST_CHECK(reopened.GetBestBlock() == third_tip);
+    BOOST_CHECK(reopened.GetHeadBlocks().empty());
+    reopened.SetSyncCallbackForTesting({});
+}
+// SYSCOIN END: Fence earlier coins publications without flushing prospective state.
 
 BOOST_AUTO_TEST_CASE(coins_resource_is_used)
 {

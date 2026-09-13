@@ -3915,10 +3915,15 @@ struct LatePaymentAuditPresealSetup : TestingSetup {
             m_node.notifications->m_shutdown_on_fatal_error, m_node.exit_status.load()};
         if (fail_parent_sync) {
             m_node.notifications->m_shutdown_on_fatal_error = false;
-            WITH_LOCK(::cs_main, chainstate.CoinsDB().SetSyncCallbackForTesting([&] {
+            LOCK(::cs_main);
+            // Finish the setup's asynchronous coins writes before arming the
+            // failure. Otherwise the pre-DMN-maintenance barrier consumes it
+            // before the pending-connection flush republishes the parent coins.
+            BOOST_REQUIRE(chainstate.CoinsDB().Sync());
+            chainstate.CoinsDB().SetSyncCallbackForTesting([&] {
                 ++parent_syncs;
                 return false;
-            }));
+            });
         }
         std::unique_ptr<DebugLogHelper> fatal_log;
         if (fail_parent_sync) fatal_log = std::make_unique<DebugLogHelper>(
@@ -13084,4 +13089,153 @@ BOOST_FIXTURE_TEST_CASE(payment_audit_gc_reopened_archive_waits_for_probation_co
     BOOST_CHECK_EQUAL(sync_attempts, 2U);
     BOOST_CHECK(!deterministicMNManager->GetPendingPaymentProbationGCRequest());
     CheckRootsBeforeGC();
+}
+
+namespace {
+struct DMNGCCoinsSetup : LatePaymentAuditPresealSetup {
+    const CBlockIndex* durable_tip{nullptr};
+    CBlockIndex* visible_tip{nullptr};
+    std::size_t coins_syncs{0};
+    const bool shutdown_on_error{m_node.notifications->m_shutdown_on_fatal_error};
+    const int previous_exit_status{m_node.exit_status.load()};
+
+    ~DMNGCCoinsSetup()
+    {
+        WITH_LOCK(::cs_main, m_node.chainman->ActiveChainstate().CoinsDB().SetSyncCallbackForTesting({}));
+        m_node.notifications->m_shutdown_on_fatal_error = shutdown_on_error;
+        m_node.exit_status.store(previous_exit_status);
+        AbortShutdown();
+    }
+
+    void PrepareAsynchronousPublication()
+    {
+        auto& chainman{*m_node.chainman};
+        auto& chainstate{chainman.ActiveChainstate()};
+        // The historical fixture configured a PQ handler just to construct
+        // receipt state. Recreate the ordinary shipped, PQ-disabled handler:
+        // its real initialization removes obsolete roster/replay holds.
+        SyncWithValidationInterfaceQueue();
+        LOCK(::cs_main);
+        fNEVMConnection = false;
+        Access::SetReplayMarkers(*handler, {}, {});
+        llmq::chainLocksHandler = previous_handler;
+        handler.reset();
+        BOOST_REQUIRE_EQUAL(chainman.GetConsensus().nPQActivationHeight,
+                            std::numeric_limits<int>::max());
+        BOOST_REQUIRE_EQUAL(chainman.GetConsensus().nPQPreparationHeight,
+                            std::numeric_limits<int>::max());
+        handler = std::make_unique<llmq::CChainLocksHandler>(
+            *m_node.connman, *m_node.peerman, chainman);
+        llmq::chainLocksHandler = handler.get();
+        BOOST_REQUIRE(!Access::Config(*handler));
+
+        durable_tip = chain[1'000];
+        visible_tip = chain[TIP_HEIGHT - 1];
+        BOOST_REQUIRE_GE(durable_tip->nHeight, chainman.GetConsensus().DIP0003Height);
+        BOOST_REQUIRE_LT(durable_tip->nHeight,
+            visible_tip->nHeight - CDeterministicMNManager::LIST_CACHE_SIZE);
+        BOOST_REQUIRE(deterministicMNManager->FlushPendingSnapshotsToDisk(true));
+        chainstate.CoinsTip().SetBestBlock(durable_tip->GetBlockHash());
+        BOOST_REQUIRE(chainstate.CoinsDB().FlushWithSync(chainstate.CoinsTip()));
+        BOOST_REQUIRE(deterministicMNManager->VerifyPersistedSnapshot(durable_tip));
+
+        chainstate.m_chain.SetTip(*visible_tip);
+        deterministicMNManager->UpdatedBlockTip(visible_tip);
+        chainstate.CoinsTip().SetBestBlock(visible_tip->GetBlockHash());
+        // The preceding explicit sync cleaned the DB. A fresh cache marker
+        // alone must not cause a pre-maintenance sync or publish coins early.
+        chainstate.CoinsDB().SetSyncCallbackForTesting([this] {
+            ++coins_syncs;
+            return false;
+        });
+        BlockValidationState first;
+        BOOST_REQUIRE_MESSAGE(chainstate.FlushStateToDisk(first, FlushStateMode::ALWAYS), first.ToString());
+        BOOST_REQUIRE_EQUAL(coins_syncs, 0U);
+        BOOST_REQUIRE(chainstate.CoinsDB().GetBestBlock() == visible_tip->GetBlockHash());
+        BOOST_REQUIRE(deterministicMNManager->VerifyPersistedSnapshot(durable_tip));
+
+        chainstate.m_chain.SetTip(*chain.back());
+        deterministicMNManager->UpdatedBlockTip(chain.back());
+        chainstate.CoinsTip().SetBestBlock(chain.back()->GetBlockHash());
+        BOOST_REQUIRE(chainstate.CoinsDB().GetBestBlock() != chainstate.CoinsTip().GetBestBlock());
+        BOOST_CHECK_EQUAL(coins_syncs, 0U);
+    }
+
+    void CheckFailure(bool throw_on_sync)
+    {
+        PrepareAsynchronousPublication();
+        LOCK(::cs_main);
+        auto& chainstate{m_node.chainman->ActiveChainstate()};
+        m_node.notifications->m_shutdown_on_fatal_error = false;
+        chainstate.CoinsDB().SetSyncCallbackForTesting([&, this] {
+            LOCK(::cs_main);
+            ++coins_syncs;
+            BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == visible_tip->GetBlockHash());
+            BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == chain.back()->GetBlockHash());
+            BOOST_CHECK(deterministicMNManager->VerifyPersistedSnapshot(durable_tip));
+            if (throw_on_sync) throw std::runtime_error{"injected DMN coins sync failure"};
+            return false;
+        });
+        BlockValidationState refused;
+        BOOST_CHECK(!chainstate.FlushStateToDisk(refused, FlushStateMode::ALWAYS));
+        BOOST_CHECK(refused.IsError());
+        BOOST_CHECK(refused.ToString().find(throw_on_sync
+            ? "injected DMN coins sync failure"
+            : "Failed to sync coins before deterministic masternode maintenance") != std::string::npos);
+        BOOST_CHECK_EQUAL(coins_syncs, 1U);
+        BOOST_CHECK_EQUAL(m_node.exit_status.load(), EXIT_FAILURE);
+        BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == visible_tip->GetBlockHash());
+        BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == chain.back()->GetBlockHash());
+        BOOST_CHECK(deterministicMNManager->VerifyPersistedSnapshot(durable_tip));
+        BOOST_CHECK(deterministicMNManager->VerifyPersistedSnapshot(visible_tip));
+        BOOST_CHECK(deterministicMNManager->VerifyPersistedSnapshot(chain.back()));
+        BOOST_TEST_MESSAGE("coins_syncs=" << coins_syncs
+            << " durable_tip_height=" << durable_tip->nHeight
+            << " visible_coins_height=" << visible_tip->nHeight
+            << " durable_tip_snapshot_readable=" << deterministicMNManager->VerifyPersistedSnapshot(durable_tip));
+        chainstate.CoinsDB().SetSyncCallbackForTesting({});
+    }
+};
+} // namespace
+
+BOOST_FIXTURE_TEST_CASE(dmn_gc_retains_last_synchronized_coins_snapshot,
+                        DMNGCCoinsSetup)
+{
+    CheckFailure(/*throw_on_sync=*/false);
+}
+
+BOOST_FIXTURE_TEST_CASE(dmn_gc_retains_coins_snapshot_after_sync_exception,
+                        DMNGCCoinsSetup)
+{
+    CheckFailure(/*throw_on_sync=*/true);
+}
+
+BOOST_FIXTURE_TEST_CASE(dmn_gc_syncs_visible_coins_before_retiring_old_snapshot,
+                        DMNGCCoinsSetup)
+{
+    PrepareAsynchronousPublication();
+    LOCK(::cs_main);
+    auto& chainstate{m_node.chainman->ActiveChainstate()};
+    chainstate.CoinsDB().SetSyncCallbackForTesting([&, this] {
+        LOCK(::cs_main);
+        ++coins_syncs;
+        // This callback runs before the DB barrier and any DMN tombstone.
+        // In particular, the first barrier must not flush the newer cache.
+        BOOST_CHECK(deterministicMNManager->VerifyPersistedSnapshot(durable_tip));
+        BOOST_CHECK(deterministicMNManager->VerifyPersistedSnapshot(visible_tip));
+        BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == chain.back()->GetBlockHash());
+        BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() ==
+            (coins_syncs == 1 ? visible_tip : chain.back())->GetBlockHash());
+        return true;
+    });
+    for (int pass{0}; pass < 16 && deterministicMNManager->VerifyPersistedSnapshot(durable_tip); ++pass) {
+        BlockValidationState repeated;
+        BOOST_REQUIRE_MESSAGE(chainstate.FlushStateToDisk(repeated, FlushStateMode::ALWAYS), repeated.ToString());
+    }
+    BOOST_CHECK_GT(coins_syncs, 0U);
+    BOOST_CHECK(!deterministicMNManager->VerifyPersistedSnapshot(durable_tip));
+    BOOST_CHECK(deterministicMNManager->VerifyPersistedSnapshot(visible_tip));
+    BOOST_CHECK(deterministicMNManager->VerifyPersistedSnapshot(chain.back()));
+    BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == chain.back()->GetBlockHash());
+    chainstate.CoinsDB().SetSyncCallbackForTesting({});
 }

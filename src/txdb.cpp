@@ -94,6 +94,7 @@ bool CCoinsViewDB::WriteCoinsBatch(CDBBatch& batch)
     // SYSCOIN: Latch before either a false result or an exception can escape.
     // Preserve the on-disk BEST/HEADS recovery state until this DB is reopened.
     m_write_failed = true;
+    m_unsynced_writes = true;
     if (m_write_batch_callback_for_testing &&
         !m_write_batch_callback_for_testing(false)) return false;
     const bool written{m_db->WriteBatch(batch)};
@@ -114,11 +115,20 @@ void CCoinsViewDB::SetSyncCallbackForTesting(std::function<bool()> callback)
 bool CCoinsViewDB::FlushWithSync(CCoinsViewCache& cache)
 {
     AssertLockHeld(cs_main);
-    if (!cache.Flush()) return false;
+    return cache.Flush() && Sync();
+}
+
+bool CCoinsViewDB::Sync()
+{
+    AssertLockHeld(cs_main);
+    if (m_write_failed) return false;
+    if (!m_unsynced_writes) return true;
     if (m_sync_callback_for_testing && !m_sync_callback_for_testing()) return false;
     // Cover earlier WALs too: FRESH cache entries can cancel a rollback's
     // deletion when an earlier asynchronous write already spent that output.
-    return m_db->Sync();
+    if (!m_db->Sync()) return false;
+    m_unsynced_writes = false;
+    return true;
 }
 // SYSCOIN END: Sync all prior coins writes before deleting mint markers.
 

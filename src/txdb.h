@@ -57,6 +57,9 @@ class CCoinsViewDB final : public CCoinsView
     // complete. After failure, only reopening can recover a usable view;
     // shutdown must not retry the depleted cache and publish a false tip.
     bool m_write_failed{false};
+    // SYSCOIN: Reopened WALs and every subsequent batch need a durability
+    // barrier before auxiliary GC can trust the visible recovery markers.
+    bool m_unsynced_writes{true};
     // SYSCOIN BEGIN: Observe and inject failures at mint rollback barriers.
     std::function<bool(bool)> m_write_batch_callback_for_testing;
     std::function<bool()> m_sync_callback_for_testing;
@@ -77,6 +80,9 @@ public:
     // SYSCOIN BEGIN: Mint markers may be erased only after all prior coins writes sync.
     // The cache must flush to this DB, optionally through its error catcher.
     bool FlushWithSync(CCoinsViewCache& cache) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    // Sync prior DB writes without publishing the current coins cache.
+    // Repeated calls without intervening writes require no disk I/O.
+    bool Sync() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     // Observe each batch's sync policy or inject a failed write before LevelDB.
     void SetWriteBatchCallbackForTesting(std::function<bool(bool)> callback);
     void SetSyncCallbackForTesting(std::function<bool()> callback);
