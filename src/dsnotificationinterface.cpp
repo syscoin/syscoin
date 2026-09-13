@@ -57,7 +57,7 @@ void CDSNotificationInterface::UpdatedBlockTip(const CBlockIndex *pindexNew, con
         return;
     if(llmq::chainLocksHandler)
         llmq::chainLocksHandler->UpdatedBlockTip(pindexNew, fInitialDownload);
-    CMNAuth::UpdatedBlockTip(pindexNew, connman);
+    CMNAuth::UpdatedBlockTip(chainman, connman);
     if (governance && governance->IsValid()) governance->UpdatedBlockTip(pindexNew, connman, peerman);
 }
 
@@ -75,7 +75,7 @@ void CDSNotificationInterface::InitialBlockDownloadCompleted(
         llmq::chainLocksHandler->UpdatedBlockTip(
             tip, /*initial_download=*/false);
     }
-    CMNAuth::UpdatedBlockTip(tip, connman);
+    CMNAuth::UpdatedBlockTip(chainman, connman);
     if (governance && governance->IsValid()) {
         governance->UpdatedBlockTip(tip, connman, peerman);
     }

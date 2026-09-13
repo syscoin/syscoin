@@ -1667,10 +1667,22 @@ void CMNAuth::ProcessAsyncCompletionsImpl(
     }
 }
 
-void CMNAuth::UpdatedBlockTip(const CBlockIndex* pindex_new,
+void CMNAuth::UpdatedBlockTip(ChainstateManager& chainman,
                               CConnman& connman)
 {
+    AssertLockNotHeld(cs_main);
+    const CConnman::NodesSnapshot nodes_snapshot{
+        connman, FullyConnectedOnly, /*shuffle=*/false};
+    // Notifications can be delayed across more than one chain transition.
+    // Bind retirement to the current committed tip and exclude publication
+    // until its authority checks and disconnect decisions are complete.
+    LOCK(chainman.GetMutex());
+    const CBlockIndex* pindex_new{chainman.ActiveTip()};
     if (pindex_new == nullptr || deterministicMNManager == nullptr) return;
+    if (std::none_of(nodes_snapshot.Nodes().begin(), nodes_snapshot.Nodes().end(),
+                     [](const CNode* node) {
+                         return !node->GetVerifiedProRegTxHash().IsNull();
+                     })) return;
 
     llmq::pq::PQRegistryReadView snapshot;
     std::string error;
@@ -1681,9 +1693,9 @@ void CMNAuth::UpdatedBlockTip(const CBlockIndex* pindex_new,
     const CDeterministicMNList mn_list =
         deterministicMNManager->GetListForBlock(pindex_new);
 
-    connman.ForEachNode([&](CNode* pnode) {
+    for (CNode* pnode : nodes_snapshot.Nodes()) {
         const uint256 pro_tx_hash = pnode->GetVerifiedProRegTxHash();
-        if (pro_tx_hash.IsNull()) return;
+        if (pro_tx_hash.IsNull()) continue;
 
         const auto* operator_state =
             have_snapshot ? snapshot.FindOperator(pro_tx_hash) : nullptr;
@@ -1703,5 +1715,5 @@ void CMNAuth::UpdatedBlockTip(const CBlockIndex* pindex_new,
                      pro_tx_hash.ToString(), pnode->GetId());
             pnode->fDisconnect = true;
         }
-    });
+    }
 }

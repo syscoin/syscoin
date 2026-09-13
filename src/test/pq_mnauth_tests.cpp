@@ -5,6 +5,7 @@
 #include <evo/mnauth.h>
 
 #include <chainparams.h>
+#include <coins.h>
 #include <crypto/slhdsa/slhdsa.h>
 #include <evo/deterministicmns.h>
 #include <hash.h>
@@ -16,6 +17,7 @@
 #include <test/util/setup_common.h>
 #include <util/time.h>
 #include <validation.h>
+#include <validationinterface.h>
 
 #include <boost/test/unit_test.hpp>
 
@@ -29,6 +31,7 @@
 #include <memory>
 #include <mutex>
 #include <span>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -620,9 +623,11 @@ public:
 
     void AdvanceTip()
     {
-        LOCK(cs_main);
-        chainman.ActiveChain().SetTip(m_indices[NEXT_HEIGHT]);
-        CMNAuth::UpdatedBlockTip(&m_indices[NEXT_HEIGHT], connman);
+        {
+            LOCK(cs_main);
+            chainman.ActiveChain().SetTip(m_indices[NEXT_HEIGHT]);
+        }
+        CMNAuth::UpdatedBlockTip(chainman, connman);
     }
 
     void ProcessGuarded(CMNAuth::AsyncProcessor& async,
@@ -656,8 +661,10 @@ public:
                         attempted = true;
                         cv.notify_all();
                     }
-                    LOCK(cs_main);
-                    observed_publication = published();
+                    {
+                        LOCK(cs_main);
+                        observed_publication = published();
+                    }
                     if (advance_tip) AdvanceTip();
                 }};
                 std::unique_lock lock{mutex};
@@ -668,6 +675,284 @@ public:
         BOOST_CHECK(!acquired_during_validation);
         BOOST_CHECK(observed_publication);
     }
+};
+
+// The chain and UTXO undo are genuinely mined by TestChain100Setup. Only the
+// completed authentication and its branch-local authority records are seeded;
+// handshake verification and registration transaction processing have separate
+// tests. In particular, cleanup must come from the registered PeerManager.
+class RollbackNotificationFixture {
+    Consensus::Params& m_consensus;
+    struct RestoreState {
+        Consensus::Params& consensus;
+        Consensus::Params original_consensus;
+        std::unique_ptr<CDeterministicMNManager> original_manager;
+        ConnmanTestMsg& connman;
+        ~RestoreState()
+        {
+            SyncWithValidationInterfaceQueue();
+            connman.ClearTestNodes();
+            LOCK(cs_main);
+            deterministicMNManager = std::move(original_manager);
+            consensus = original_consensus;
+        }
+    } m_restore;
+    std::array<GlobalKeyRecord, 3> m_parent_keys;
+    std::array<GlobalKeyRecord, 3> m_tip_keys;
+    std::array<CService, 3> m_parent_services;
+    std::array<CService, 3> m_tip_services;
+
+    static uint256 Provider(std::size_t member)
+    {
+        return NonNullHash(500 + member);
+    }
+
+public:
+    static constexpr std::size_t KEY_CHANGED{0};
+    static constexpr std::size_t SERVICE_CHANGED{1};
+    static constexpr std::size_t UNCHANGED{2};
+    ChainstateManager& chainman;
+    ConnmanTestMsg& connman;
+    PeerManager& peerman;
+    CBlockIndex* const tip;
+
+    explicit RollbackNotificationFixture(TestChain100Setup& fixture)
+        : m_consensus{const_cast<Consensus::Params&>(Params().GetConsensus())},
+          m_restore{m_consensus, m_consensus, std::move(deterministicMNManager),
+                    static_cast<ConnmanTestMsg&>(*fixture.m_node.connman)},
+          chainman{*fixture.m_node.chainman},
+          connman{static_cast<ConnmanTestMsg&>(*fixture.m_node.connman)},
+          peerman{*fixture.m_node.peerman},
+          tip{WITH_LOCK(cs_main, return chainman.ActiveTip())}
+    {
+        const int preparation_height{tip->nHeight - 2};
+        m_consensus.DIP0003Height = preparation_height - 1;
+        m_consensus.DIP0003EnforcementHeight = preparation_height - 1;
+        m_consensus.nPQPreparationHeight = preparation_height;
+        m_consensus.nPQActivationHeight = preparation_height + 1;
+        m_consensus.nPQChainLockEpochOrigin = 1440;
+        m_consensus.nPQRegistrationCutoffBlocks = 144;
+        m_consensus.nPQFutureHorizonEpochs = 8;
+        PQRegistryConfig config;
+        BOOST_REQUIRE(GetPQRegistryConfig(m_consensus, config) ==
+                      PQRegistryDeploymentResult::VALID);
+        const auto key_for = [&](uint8_t seed, uint32_t version,
+                                 std::size_t member, int height) {
+            auto key{StoredKey(DeterministicKey(seed), version, height)};
+            const auto tree_id{GetChildKeyTreeId(
+                m_consensus.hashGenesisBlock, Provider(member),
+                key.child_key_commitment.generation,
+                key.child_key_commitment.first_epoch)};
+            BOOST_REQUIRE(tree_id);
+            key.child_key_commitment.tree_id = *tree_id;
+            return key;
+        };
+        for (std::size_t member{0}; member < m_parent_keys.size(); ++member) {
+            m_parent_keys[member] = key_for(member, 1, member, preparation_height);
+            m_tip_keys[member] = m_parent_keys[member];
+            m_parent_services[member] = Service(10 + member);
+            m_tip_services[member] = m_parent_services[member];
+        }
+        m_tip_keys[KEY_CHANGED] = key_for(4, 2, KEY_CHANGED, tip->nHeight);
+        m_tip_services[SERVICE_CHANGED] = Service(20);
+
+        const DBParams dmn_params{
+            .path = fixture.m_path_root / "mnauth_rollback",
+            .cache_bytes = 1 << 20,
+            .memory_only = false,
+            .wipe_data = false,
+        };
+        DBParams registry_params{dmn_params};
+        registry_params.path += "_pq_registry";
+        registry_params.cache_bytes /= 2;
+        {
+            PQRegistryManager writer{
+                registry_params, m_consensus.hashGenesisBlock, config,
+                evo::MakeAuxiliaryHistoryGCDeployment(m_consensus).configuration_id};
+            const auto empty_root{PQRegistrySnapshot{}.RecomputeConsensusStateRoot(
+                m_consensus.hashGenesisBlock)};
+            BOOST_REQUIRE(empty_root);
+            uint256 previous_root{*empty_root};
+            std::vector<OperatorKeyState> previous_states;
+            for (int height{preparation_height}; height <= tip->nHeight; ++height) {
+                const auto schedule{DeriveOperatorKeyScheduleView(
+                    config.schedule, height, config.registration_cutoff_blocks,
+                    config.future_horizon_epochs)};
+                BOOST_REQUIRE(schedule);
+                PQRegistrySnapshot snapshot;
+                for (std::size_t member{0}; member < m_parent_keys.size(); ++member) {
+                    auto state{OperatorKeyState::ForOperator(Provider(member))};
+                    state.schedule_initialized = 1;
+                    state.schedule = OperatorKeyScheduleState::FromView(*schedule);
+                    state.has_global_key = 1;
+                    state.global_key_active = 1;
+                    state.global_key = height == tip->nHeight
+                        ? m_tip_keys[member] : m_parent_keys[member];
+                    BOOST_REQUIRE(state.IsStructurallyValid());
+                    snapshot.operator_states.push_back(state);
+                }
+                std::sort(snapshot.operator_states.begin(), snapshot.operator_states.end(),
+                          [](const auto& lhs, const auto& rhs) {
+                              return lhs.pro_tx_hash < rhs.pro_tx_hash;
+                          });
+                const auto root{snapshot.RecomputeConsensusStateRoot(
+                    m_consensus.hashGenesisBlock)};
+                BOOST_REQUIRE(root);
+                const auto* index{tip->GetAncestor(height)};
+                PQRegistryDiskSnapshot disk;
+                disk.is_checkpoint = height == preparation_height;
+                disk.height = height;
+                disk.block_hash = index->GetBlockHash();
+                disk.previous_block_hash = index->pprev->GetBlockHash();
+                disk.previous_consensus_state_root = previous_root;
+                for (const auto& state : snapshot.operator_states) {
+                    if (std::find(previous_states.begin(), previous_states.end(), state) ==
+                        previous_states.end()) {
+                        disk.operator_states.push_back(state);
+                    }
+                }
+                if (disk.is_checkpoint) disk.checkpoint_operator_states = snapshot.operator_states;
+                disk.consensus_state_root = *root;
+                BOOST_REQUIRE(writer.WriteExactSnapshotForTesting(disk.block_hash, disk));
+                previous_root = *root;
+                previous_states = std::move(snapshot.operator_states);
+            }
+        }
+        // Seed the public V1 inverse schema before opening the manager. Both
+        // endpoints and the history chain are verified again by real undo.
+        DBParams inverse_params{dmn_params};
+        inverse_params.path += "_inverse";
+        inverse_params.cache_bytes /= 8;
+        {
+            CEvoDB<uint256, CDeterministicMNList, StaticSaltedHasher> lists{dmn_params, 0};
+            CEvoDB<uint256, CDeterministicMNListInverse, StaticSaltedHasher>
+                inverses{inverse_params, 0};
+            CDeterministicMNList previous;
+            uint256 previous_history;
+            for (int height{m_consensus.DIP0003Height}; height <= tip->nHeight; ++height) {
+                const auto* index{tip->GetAncestor(height)};
+                CDeterministicMNList list{index->GetBlockHash(), height, 3};
+                for (std::size_t member{0}; member < m_parent_keys.size(); ++member) {
+                    auto dmn{std::make_shared<CDeterministicMN>(member)};
+                    dmn->proTxHash = Provider(member);
+                    dmn->collateralOutpoint = COutPoint{NonNullHash(600 + member), 0};
+                    auto state{std::make_shared<CDeterministicMNState>()};
+                    state->keyIDOwner.begin()[0] = member + 1;
+                    state->addr = height == tip->nHeight
+                        ? m_tip_services[member] : m_parent_services[member];
+                    state->nRegisteredHeight = m_consensus.DIP0003Height;
+                    dmn->pdmnState = state;
+                    list.AddMN(dmn, /*fBumpTotalCount=*/false);
+                }
+                const uint256 state_hash{list.GetOrComputePQLegacyStateHash(
+                    m_consensus.hashGenesisBlock)};
+                BOOST_REQUIRE(lists.WriteThrough(index->GetBlockHash(), list));
+                if (height == m_consensus.DIP0003Height) {
+                    static constexpr std::string_view domain{"SYS_DMN_INVERSE_BASE_V1"};
+                    CHashWriter writer{SER_GETHASH, 0};
+                    writer.write(AsBytes(Span{domain.data(), domain.size()}));
+                    writer << m_consensus.hashGenesisBlock << int32_t{height}
+                           << index->GetBlockHash() << state_hash;
+                    previous_history = writer.GetHash();
+                } else {
+                    CDeterministicMNListInverse inverse;
+                    inverse.genesis_hash = m_consensus.hashGenesisBlock;
+                    inverse.coverage_base_height = m_consensus.DIP0003Height;
+                    inverse.parent_history_commitment = previous_history;
+                    inverse.child_height = height;
+                    inverse.child_hash = index->GetBlockHash();
+                    inverse.child_state_hash = state_hash;
+                    inverse.parent_height = height - 1;
+                    inverse.parent_hash = index->pprev->GetBlockHash();
+                    inverse.parent_state_hash = previous.GetOrComputePQLegacyStateHash(
+                        m_consensus.hashGenesisBlock);
+                    inverse.parent_total_registered_count = previous.GetTotalRegisteredCount();
+                    CDeterministicMNListNEVMAddressDiff nevm_diff;
+                    list.BuildDiff(previous, inverse.inverse_diff, nevm_diff);
+                    static constexpr std::string_view domain{"SYS_DMN_INVERSE_HISTORY_V1"};
+                    CHashWriter writer{SER_GETHASH, 0};
+                    writer.write(AsBytes(Span{domain.data(), domain.size()}));
+                    writer << inverse.version << inverse.genesis_hash
+                           << inverse.coverage_base_height << inverse.parent_history_commitment
+                           << inverse.child_height << inverse.child_hash << inverse.child_state_hash
+                           << inverse.parent_height << inverse.parent_hash << inverse.parent_state_hash
+                           << inverse.parent_total_registered_count << ::SerializeHash(inverse.inverse_diff);
+                    inverse.history_commitment = writer.GetHash();
+                    BOOST_REQUIRE(inverse.IsStructurallyValid());
+                    BOOST_REQUIRE(inverses.WriteThrough(inverse.child_hash, inverse));
+                    previous_history = inverse.history_commitment;
+                }
+                previous = std::move(list);
+            }
+        }
+        deterministicMNManager = std::make_unique<CDeterministicMNManager>(dmn_params);
+        LOCK(cs_main);
+        BOOST_REQUIRE(deterministicMNManager->VerifyInverseJournalTipSeal(tip));
+        for (const auto* index : {tip->pprev, tip}) {
+            PQRegistryReadView view;
+            std::string error;
+            BOOST_REQUIRE_MESSAGE(deterministicMNManager->GetPQRegistryReadView(
+                index, view, error), error);
+            BOOST_REQUIRE(view.FindOperator(Provider(UNCHANGED)));
+        }
+        deterministicMNManager->UpdatedBlockTip(tip);
+    }
+
+    CNode& AddCompletedPeer(std::size_t member, bool parent_authority = false)
+    {
+        const auto& key{parent_authority ? m_parent_keys[member] : m_tip_keys[member]};
+        const auto& service{parent_authority ? m_parent_services[member] : m_tip_services[member]};
+        auto* node = new CNode{
+            static_cast<NodeId>(100 + member + (parent_authority ? 10 : 0)),
+            nullptr, CAddress{service, NODE_NETWORK}, 42, 1, CAddress{},
+            std::string{}, ConnectionType::OUTBOUND_FULL_RELAY, false};
+        connman.AddTestNode(*node);
+        node->fSuccessfullyConnected = true;
+        node->m_masternode_connection = true;
+        node->SetCommonVersion(PQ_MNAUTH_PROTO_VERSION);
+        node->SetVerifiedMasternode(Provider(member), ::Hash(key.public_key),
+                                   key.key_version, service);
+        node->SetMNAuthPending(CMNAuthPendingPhase::COMPLETE, 0);
+        return *node;
+    }
+
+    std::shared_ptr<CBlock> ReadBlock(const CBlockIndex* index)
+    {
+        auto block{std::make_shared<CBlock>()};
+        BOOST_REQUIRE(chainman.m_blockman.ReadBlockFromDisk(*block, *index));
+        return block;
+    }
+};
+
+class ValidationRegistration {
+    CValidationInterface& m_subscriber;
+
+public:
+    explicit ValidationRegistration(CValidationInterface& subscriber)
+        : m_subscriber{subscriber}
+    {
+        SyncWithValidationInterfaceQueue();
+        RegisterValidationInterface(&m_subscriber);
+    }
+    ~ValidationRegistration()
+    {
+        UnregisterValidationInterface(&m_subscriber);
+        SyncWithValidationInterfaceQueue();
+    }
+};
+
+class RollbackNotifications final : public CValidationInterface {
+public:
+    unsigned disconnected{0};
+    unsigned connected{0};
+    unsigned updated_tips{0};
+
+    void BlockDisconnected(const std::shared_ptr<const CBlock>&,
+                           const CBlockIndex*) override { ++disconnected; }
+    void BlockConnected(ChainstateRole, const std::shared_ptr<const CBlock>&,
+                        const CBlockIndex*) override { ++connected; }
+    void UpdatedBlockTip(const CBlockIndex*, const CBlockIndex*,
+                         ChainstateManager&, bool) override { ++updated_tips; }
 };
 
 bool HasQueuedMNAUTH(CNode& node)
@@ -681,6 +966,105 @@ bool HasQueuedMNAUTH(CNode& node)
 } // namespace
 
 BOOST_AUTO_TEST_SUITE(pq_mnauth_tests)
+
+BOOST_FIXTURE_TEST_CASE(rollback_only_notifications_retire_completed_authentication,
+                        TestChain100Setup)
+{
+    RollbackNotificationFixture fixture{*this};
+    CNode& rotated{fixture.AddCompletedPeer(RollbackNotificationFixture::KEY_CHANGED)};
+    CNode& moved{fixture.AddCompletedPeer(RollbackNotificationFixture::SERVICE_CHANGED)};
+    CNode& unchanged{fixture.AddCompletedPeer(RollbackNotificationFixture::UNCHANGED)};
+    RollbackNotifications notifications;
+    ValidationRegistration observe{notifications};
+    ValidationRegistration register_peerman{fixture.peerman};
+
+    BlockValidationState invalidate_state;
+    BOOST_REQUIRE_MESSAGE(fixture.chainman.ActiveChainstate().InvalidateBlock(
+        invalidate_state, fixture.tip), invalidate_state.ToString());
+    BlockValidationState activate_state;
+    BOOST_REQUIRE_MESSAGE(fixture.chainman.ActiveChainstate().ActivateBestChain(
+        activate_state), activate_state.ToString());
+    SyncWithValidationInterfaceQueue();
+
+    BOOST_CHECK(WITH_LOCK(cs_main, return fixture.chainman.ActiveTip()) == fixture.tip->pprev);
+    BOOST_CHECK_EQUAL(notifications.disconnected, 1U);
+    BOOST_CHECK_EQUAL(notifications.connected, 0U);
+    BOOST_CHECK_EQUAL(notifications.updated_tips, 0U);
+    BOOST_CHECK(rotated.fDisconnect);
+    BOOST_CHECK(moved.fDisconnect);
+    BOOST_CHECK(!unchanged.fDisconnect);
+    BOOST_CHECK(unchanged.GetMNAuthPending().phase == CMNAuthPendingPhase::COMPLETE);
+}
+
+BOOST_FIXTURE_TEST_CASE(historical_disconnect_notification_uses_current_authentication_authority,
+                        TestChain100Setup)
+{
+    RollbackNotificationFixture fixture{*this};
+    CNode& rotated{fixture.AddCompletedPeer(RollbackNotificationFixture::KEY_CHANGED)};
+    CNode& moved{fixture.AddCompletedPeer(RollbackNotificationFixture::SERVICE_CHANGED)};
+    CNode& unchanged{fixture.AddCompletedPeer(RollbackNotificationFixture::UNCHANGED)};
+    CNode& old_key{fixture.AddCompletedPeer(RollbackNotificationFixture::KEY_CHANGED,
+                                          /*parent_authority=*/true)};
+    CNode& old_service{fixture.AddCompletedPeer(RollbackNotificationFixture::SERVICE_CHANGED,
+                                              /*parent_authority=*/true)};
+    ValidationRegistration register_peerman{fixture.peerman};
+
+    // Deliver an older event after the actual active tip already names the
+    // successor. The production subscriber must resolve authority at that tip.
+    GetMainSignals().BlockDisconnected(fixture.ReadBlock(fixture.tip->pprev),
+                                       fixture.tip->pprev);
+    SyncWithValidationInterfaceQueue();
+
+    BOOST_CHECK(WITH_LOCK(cs_main, return fixture.chainman.ActiveTip()) == fixture.tip);
+    BOOST_CHECK(!rotated.fDisconnect);
+    BOOST_CHECK(!moved.fDisconnect);
+    BOOST_CHECK(!unchanged.fDisconnect);
+    BOOST_CHECK(old_key.fDisconnect);
+    BOOST_CHECK(old_service.fDisconnect);
+}
+
+BOOST_FIXTURE_TEST_CASE(private_and_failed_undo_preserve_current_authentication,
+                        TestChain100Setup)
+{
+    RollbackNotificationFixture fixture{*this};
+    CNode& rotated{fixture.AddCompletedPeer(RollbackNotificationFixture::KEY_CHANGED)};
+    CNode& moved{fixture.AddCompletedPeer(RollbackNotificationFixture::SERVICE_CHANGED)};
+    CNode& unchanged{fixture.AddCompletedPeer(RollbackNotificationFixture::UNCHANGED)};
+    RollbackNotifications notifications;
+    ValidationRegistration observe{notifications};
+    ValidationRegistration register_peerman{fixture.peerman};
+    const auto block{fixture.ReadBlock(fixture.tip)};
+    {
+        LOCK(cs_main);
+        CCoinsViewCache private_view{&fixture.chainman.ActiveChainstate().CoinsTip()};
+        NEVMMintTxSet mint_txs;
+        std::vector<uint256> nevm_blocks;
+        std::vector<std::pair<uint256, uint32_t>> txid_pairs;
+        BOOST_REQUIRE(fixture.chainman.ActiveChainstate().DisconnectBlock(
+            *block, fixture.tip, private_view, mint_txs, nevm_blocks, txid_pairs) == DISCONNECT_OK);
+        BOOST_CHECK(private_view.GetBestBlock() == fixture.tip->pprev->GetBlockHash());
+        BOOST_CHECK(fixture.chainman.ActiveChainstate().CoinsTip().GetBestBlock() ==
+                    fixture.tip->GetBlockHash());
+    }
+    SyncWithValidationInterfaceQueue();
+    BOOST_CHECK(!rotated.fDisconnect);
+    BOOST_CHECK(!moved.fDisconnect);
+    BOOST_CHECK(!unchanged.fDisconnect);
+    BOOST_REQUIRE(deterministicMNManager->CorruptInverseJournalForTesting(
+        fixture.tip->GetBlockHash()));
+    BlockValidationState state;
+    BOOST_CHECK(!fixture.chainman.ActiveChainstate().InvalidateBlock(state, fixture.tip));
+    SyncWithValidationInterfaceQueue();
+
+    BOOST_CHECK(WITH_LOCK(cs_main, return fixture.chainman.ActiveTip()) == fixture.tip);
+    BOOST_CHECK_EQUAL(notifications.disconnected, 0U);
+    BOOST_CHECK_EQUAL(notifications.connected, 0U);
+    BOOST_CHECK_EQUAL(notifications.updated_tips, 0U);
+    BOOST_CHECK(!rotated.fDisconnect);
+    BOOST_CHECK(!moved.fDisconnect);
+    BOOST_CHECK(!unchanged.fDisconnect);
+}
+
 
 BOOST_FIXTURE_TEST_CASE(completions_after_tip_change_do_not_publish_or_retire_duplicates,
                         RegTestingSetup)

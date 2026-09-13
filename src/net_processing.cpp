@@ -4861,8 +4861,13 @@ void PeerManagerImpl::BlockDisconnected(const std::shared_ptr<const CBlock> &blo
     // block's worth of transactions in it, but that should be fine, since
     // presumably the most common case of relaying a confirmed transaction
     // should be just after a new block containing it is found.
-    LOCK(m_recent_confirmed_transactions_mutex);
-    m_recent_confirmed_transactions.reset();
+    {
+        LOCK(m_recent_confirmed_transactions_mutex);
+        m_recent_confirmed_transactions.reset();
+    }
+    // A committed rollback may have no replacement block to trigger the
+    // forward-tip callback. Retire identities against the actual active tip.
+    CMNAuth::UpdatedBlockTip(m_chainman, m_connman);
 }
 
 /**

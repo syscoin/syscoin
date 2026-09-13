@@ -21,7 +21,6 @@
 #include <string>
 #include <vector>
 
-class CBlockIndex;
 class CConnman;
 class CDataStream;
 class CNode;
@@ -222,7 +221,7 @@ public:
                                         ChainstateManager& chainman,
                                         CConnman& connman,
                                         PeerManager& peerman);
-    static void UpdatedBlockTip(const CBlockIndex* pindex_new,
+    static void UpdatedBlockTip(ChainstateManager& chainman,
                                 CConnman& connman);
 
 private:
