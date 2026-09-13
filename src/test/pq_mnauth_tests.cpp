@@ -4,18 +4,23 @@
 
 #include <evo/mnauth.h>
 
+#include <addresstype.h>
 #include <chainparams.h>
 #include <coins.h>
 #include <crypto/slhdsa/slhdsa.h>
 #include <evo/deterministicmns.h>
 #include <hash.h>
+#include <init.h>
 #include <masternode/activemasternode.h>
+#include <masternode/masternodesync.h>
 #include <netbase.h>
 #include <net_processing.h>
+#include <node/transaction.h>
 #include <streams.h>
 #include <test/util/net.h>
 #include <test/util/pq_registry_read_error.h>
 #include <test/util/setup_common.h>
+#include <txmempool.h>
 #include <util/time.h>
 #include <validation.h>
 #include <validationinterface.h>
@@ -29,6 +34,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <condition_variable>
+#include <exception>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -382,7 +389,7 @@ public:
     GlobalKeyRecord next_remote_key;
     CService next_remote_service;
 
-    CompletionPublicationFixture(RegTestingSetup& fixture,
+    CompletionPublicationFixture(TestingSetup& fixture,
                                  bool outbound, bool rotate_key)
         : m_restore{*fixture.m_node.chainman,
                     static_cast<ConnmanTestMsg&>(*fixture.m_node.connman),
@@ -2634,6 +2641,268 @@ BOOST_AUTO_TEST_CASE(async_sign_demand_releases_on_cancel_and_stop)
     BOOST_CHECK(stop_returned.load(std::memory_order_acquire));
     BOOST_CHECK_EQUAL(
         GetActiveMasternodeGlobalSigningStats().mnauth_demands, 0U);
+}
+
+BOOST_AUTO_TEST_CASE(async_interrupt_cancels_queues_without_joining_active_hooks)
+{
+    const auto initiator_key{StoredKey(DeterministicKey(0), 1, 100)};
+    const auto responder_key{StoredKey(DeterministicKey(64), 2, 101)};
+    const auto transcript{Transcript(initiator_key, responder_key)};
+    const auto sign_request = [&](int64_t peer, bool initiator) {
+        return AsyncSignRequest(AsyncContext(
+            peer, peer, initiator_key, responder_key, transcript,
+            initiator, /*authenticated_remote=*/!initiator));
+    };
+    const auto verify_request = [&](int64_t peer) {
+        return AsyncVerifyRequest(
+            peer, peer, NonNullHash(1), initiator_key, responder_key,
+            Transcript(initiator_key, responder_key, peer));
+    };
+
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool release{false};
+    bool hooks_timed_out{false};
+    unsigned sign_calls{0};
+    unsigned verify_calls{0};
+    const auto enter_hook = [&](unsigned& calls) {
+        std::unique_lock lock{mutex};
+        ++calls;
+        cv.notify_all();
+        const bool released{cv.wait_for(lock, std::chrono::seconds{30},
+                                       [&] { return release; })};
+        hooks_timed_out |= !released;
+        return released;
+    };
+    CMNAuth::AsyncHooks hooks;
+    hooks.verify = [&](MNAUTHVerificationTask&) { return enter_hook(verify_calls); };
+    hooks.sign = [&](const uint256&, uint32_t, const uint256&,
+                     GlobalSignature& signature) {
+        if (!enter_hook(sign_calls)) return false;
+        signature[0] = 1;
+        return true;
+    };
+    CMNAuth::AsyncConfig config;
+    config.verify_threads = 1;
+    CMNAuth::AsyncProcessor async{config, std::move(hooks)};
+    std::promise<void> interrupted;
+    auto interrupt_result{interrupted.get_future()};
+    std::thread interrupter;
+    struct Cleanup {
+        CMNAuth::AsyncProcessor& async;
+        std::mutex& mutex;
+        std::condition_variable& cv;
+        bool& release;
+        std::thread& interrupter;
+        ~Cleanup()
+        {
+            {
+                std::lock_guard lock{mutex};
+                release = true;
+            }
+            cv.notify_all();
+            if (interrupter.joinable()) interrupter.join();
+            async.Stop();
+        }
+    } cleanup{async, mutex, cv, release, interrupter};
+
+    for (int64_t peer : {1, 2, 3, 4, 5}) BOOST_REQUIRE(async.RegisterPeer(peer));
+    BOOST_REQUIRE(async.EnqueueSign(sign_request(1, true)).Accepted());
+    BOOST_REQUIRE(async.EnqueueVerify(verify_request(4)).Accepted());
+    {
+        std::unique_lock lock{mutex};
+        BOOST_REQUIRE(cv.wait_for(lock, std::chrono::seconds{5}, [&] {
+            return sign_calls == 1 && verify_calls == 1;
+        }));
+    }
+    BOOST_REQUIRE(async.EnqueueSign(sign_request(2, true)).Accepted());
+    BOOST_REQUIRE(async.EnqueueSign(sign_request(3, false)).Accepted());
+    BOOST_REQUIRE(async.EnqueueVerify(verify_request(5)).Accepted());
+    BOOST_REQUIRE_EQUAL(GetActiveMasternodeGlobalSigningStats().mnauth_demands, 3U);
+
+    interrupter = std::thread{[&] {
+        async.Interrupt();
+        async.Interrupt();
+        interrupted.set_value();
+    }};
+    // The hooks remain held until after this assertion. Cleanup releases them
+    // even if Interrupt regresses into a joining operation.
+    BOOST_REQUIRE(interrupt_result.wait_for(std::chrono::seconds{5}) ==
+                  std::future_status::ready);
+    interrupter.join();
+    const auto interrupted_stats{async.GetStats()};
+    BOOST_CHECK_EQUAL(interrupted_stats.verify_queue_depth, 0U);
+    BOOST_CHECK_EQUAL(interrupted_stats.initiator_sign_queue_depth, 0U);
+    BOOST_CHECK_EQUAL(interrupted_stats.responder_sign_queue_depth, 0U);
+    BOOST_CHECK_EQUAL(interrupted_stats.verify_inflight, 1U);
+    BOOST_CHECK_EQUAL(interrupted_stats.sign_inflight, 1U);
+    BOOST_CHECK_EQUAL(interrupted_stats.cancelled_jobs, 3U);
+    BOOST_CHECK_EQUAL(GetActiveMasternodeGlobalSigningStats().mnauth_demands, 1U);
+    BOOST_CHECK(!async.RegisterPeer(6));
+    BOOST_CHECK(async.EnqueueSign(sign_request(6, true)).error == CMNAuth::AsyncError::STOPPED);
+    BOOST_CHECK(async.EnqueueVerify(verify_request(6)).error == CMNAuth::AsyncError::STOPPED);
+    BOOST_CHECK(async.WaitForCompletions(std::chrono::milliseconds{0}).empty());
+
+    {
+        std::lock_guard lock{mutex};
+        release = true;
+    }
+    cv.notify_all();
+    async.Stop();
+    async.Stop();
+    const auto stopped_stats{async.GetStats()};
+    BOOST_CHECK_EQUAL(stopped_stats.verify_inflight, 0U);
+    BOOST_CHECK_EQUAL(stopped_stats.sign_inflight, 0U);
+    BOOST_CHECK_EQUAL(stopped_stats.cancelled_jobs, 5U);
+    BOOST_CHECK_EQUAL(sign_calls, 1U);
+    BOOST_CHECK_EQUAL(verify_calls, 1U);
+    BOOST_CHECK(!hooks_timed_out);
+    BOOST_CHECK(async.TakeCompletions().empty());
+    BOOST_CHECK_EQUAL(GetActiveMasternodeGlobalSigningStats().mnauth_demands, 0U);
+}
+
+BOOST_FIXTURE_TEST_CASE(node_interrupt_releases_validation_and_transaction_waiters,
+                        TestChain100Setup)
+{
+    const auto tx{MakeTransactionRef(CreateValidMempoolTransaction(
+        m_coinbase_txns.front(), 0, 1, coinbaseKey,
+        GetScriptForDestination(PKHash{coinbaseKey.GetPubKey()}),
+        m_coinbase_txns.front()->vout[0].nValue - 10'000,
+        /*submit=*/false))};
+    const auto original_consensus{Params().GetConsensus()};
+    CBlockIndex* const original_tip{WITH_LOCK(cs_main, return m_node.chainman->ActiveTip())};
+    {
+        LOCK(cs_main);
+        BOOST_REQUIRE(m_node.chainman->ProcessTransaction(tx, /*test_accept=*/true).
+            m_result_type == MempoolAcceptResult::ResultType::VALID);
+    }
+    SyncWithValidationInterfaceQueue();
+    CompletionPublicationFixture fixture{*this, /*outbound=*/true, /*rotate_key=*/false};
+    const int original_sync_mode{masternodeSync.GetAssetID()};
+    std::vector<CNode*> registered_nodes;
+    std::thread broadcaster;
+    std::promise<bool> governance_signed;
+    auto governance_result{governance_signed.get_future()};
+    std::promise<TransactionError> broadcast_finished;
+    auto broadcast_result{broadcast_finished.get_future()};
+    GlobalSignature governance_signature{};
+    std::string broadcast_error;
+    struct Cleanup {
+        PeerManager& peerman;
+        std::vector<CNode*>& nodes;
+        std::thread& broadcaster;
+        int original_sync_mode;
+        ~Cleanup()
+        {
+            // Failure cleanup cancels queued peers first, so a failed bounded
+            // wait cannot leave a signer reservation blocking fixture teardown.
+            for (auto it{nodes.rbegin()}; it != nodes.rend(); ++it) peerman.FinalizeNode(**it);
+            if (broadcaster.joinable()) broadcaster.join();
+            SyncWithValidationInterfaceQueue();
+            masternodeSync.SetSyncMode(original_sync_mode);
+        }
+    } cleanup{fixture.peerman, registered_nodes, broadcaster, original_sync_mode};
+    masternodeSync.SetSyncMode(MASTERNODE_SYNC_GOVERNANCE);
+    const auto wait_until = [](const auto& predicate) {
+        const auto deadline{std::chrono::steady_clock::now() + std::chrono::seconds{30}};
+        while (!predicate()) {
+            if (std::chrono::steady_clock::now() >= deadline) return false;
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        }
+        return true;
+    };
+    const auto begin_handshake = [&](NodeId id) {
+        auto* node = new CNode{
+            id, nullptr, CAddress{fixture.context.connected_service, NODE_NETWORK},
+            fixture.context.keyed_net_group, 1, CAddress{}, std::string{},
+            ConnectionType::OUTBOUND_FULL_RELAY, false};
+        fixture.connman.AddTestNode(*node);
+        node->m_masternode_connection = true;
+        fixture.peerman.InitializeNode(*node, NODE_NETWORK);
+        registered_nodes.push_back(node);
+        BOOST_REQUIRE(!node->fDisconnect);
+        auto remote{fixture.context.connection.remote};
+        remote.cookie = NonNullHash(50'000 + id);
+        BOOST_REQUIRE(node->SetRemoteMNAuthConnectionData(
+            remote, fixture.context.connection.remote_challenge,
+            fixture.context.connection.remote_version_nonce,
+            PQ_MNAUTH_PROTO_VERSION, NODE_NETWORK));
+        node->nVersion = PQ_MNAUTH_PROTO_VERSION;
+        node->SetCommonVersion(PQ_MNAUTH_PROTO_VERSION);
+        CDataStream verack{SER_NETWORK, PROTOCOL_VERSION};
+        const std::atomic_bool interrupt{false};
+        {
+            LOCK(NetEventsInterface::g_msgproc_mutex);
+            fixture.peerman.ProcessMessage(*node, NetMsgType::VERACK,
+                                          verack, GetTime<std::chrono::microseconds>(), interrupt);
+        }
+        BOOST_REQUIRE(!node->fDisconnect);
+        BOOST_REQUIRE(node->GetMNAuthPending().phase == CMNAuthPendingPhase::SIGN_PENDING);
+    };
+    begin_handshake(100);
+    BOOST_REQUIRE(wait_until([&] {
+        const auto stats{fixture.peerman.GetMNAuthAsyncStats()};
+        return stats.sign_completed == 1 && stats.completion_queue_depth == 1;
+    }));
+    begin_handshake(101);
+    BOOST_REQUIRE_EQUAL(fixture.peerman.GetMNAuthAsyncStats().sign_queue_depth, 1U);
+    BOOST_REQUIRE_EQUAL(GetActiveMasternodeGlobalSigningStats().mnauth_demands, 1U);
+
+    // Admission above needs the fixture's authenticated registry tip. Return
+    // to the mined chain for real mempool validation; the executor still owns
+    // its admitted work and no completion has been acknowledged or cancelled.
+    {
+        LOCK(cs_main);
+        m_node.chainman->ActiveChain().SetTip(*original_tip);
+        const_cast<Consensus::Params&>(Params().GetConsensus()) = original_consensus;
+    }
+    const uint256 governance_digest{NonNullHash(90'001)};
+    CallFunctionInValidationInterfaceQueue([&, governance_digest] {
+        try {
+            governance_signed.set_value(SignActiveMasternodeGovernanceTrigger(
+                fixture.context.connection.local.pro_tx_hash,
+                fixture.context.local_key.key_version, governance_digest,
+                governance_signature));
+        } catch (...) {
+            governance_signed.set_exception(std::current_exception());
+        }
+    });
+    BOOST_REQUIRE(wait_until([] {
+        return GetActiveMasternodeGlobalSigningStats().governance_waiters == 1;
+    }));
+    broadcaster = std::thread{[&] {
+        try {
+            broadcast_finished.set_value(node::BroadcastTransaction(
+                m_node, tx, broadcast_error, /*max_tx_fee=*/0,
+                /*relay=*/false, /*wait_callback=*/true));
+        } catch (...) {
+            broadcast_finished.set_exception(std::current_exception());
+        }
+    }};
+    BOOST_REQUIRE(wait_until([&] {
+        // Taking cs_main also waits for BroadcastTransaction to enqueue its
+        // ordered callback after successful admission and release the lock.
+        LOCK(cs_main);
+        return m_node.mempool->exists(GenTxid::Txid(tx->GetHash()));
+    }));
+    BOOST_REQUIRE(broadcast_result.wait_for(std::chrono::milliseconds{0}) == std::future_status::timeout);
+
+    ::Interrupt(m_node);
+    const auto interrupted_stats{fixture.peerman.GetMNAuthAsyncStats()};
+    BOOST_CHECK_EQUAL(interrupted_stats.sign_queue_depth, 0U);
+    BOOST_CHECK_EQUAL(interrupted_stats.completion_queue_depth, 0U);
+    BOOST_CHECK_EQUAL(GetActiveMasternodeGlobalSigningStats().mnauth_demands, 0U);
+    BOOST_REQUIRE(broadcast_result.wait_for(std::chrono::seconds{30}) == std::future_status::ready);
+    BOOST_CHECK(broadcast_result.get() == TransactionError::OK);
+    BOOST_CHECK(broadcast_error.empty());
+    broadcaster.join();
+    BOOST_REQUIRE(governance_result.wait_for(std::chrono::milliseconds{0}) == std::future_status::ready);
+    BOOST_CHECK(governance_result.get());
+    BOOST_CHECK(slhdsa::Verify(fixture.context.local_key.public_key,
+        std::span<const uint8_t>{governance_digest.begin(), governance_digest.size()},
+        GetGlobalAuthContext(GlobalAuthPurpose::GOVERNANCE_TRIGGER), governance_signature));
+    BOOST_CHECK_EQUAL(fixture.peerman.GetMNAuthAsyncStats().sign_completed, 1U);
+    BOOST_CHECK_EQUAL(fixture.peerman.GetMNAuthAsyncStats().cancelled_jobs, 2U);
 }
 
 BOOST_AUTO_TEST_CASE(stale_sign_ack_cannot_release_reused_node_generation)

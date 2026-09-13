@@ -892,6 +892,9 @@ public:
     /** Begin running background tasks, should only be called once */
     virtual void StartScheduledTasks(CScheduler& scheduler) = 0;
 
+    /** Cancel asynchronous work before shutdown joins validation-dependent callers. */
+    virtual void Interrupt() = 0;
+
     /** Get statistics from node state */
     virtual bool GetNodeStateStats(NodeId nodeid, CNodeStateStats& stats) const = 0;
 

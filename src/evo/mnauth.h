@@ -204,6 +204,8 @@ public:
         [[nodiscard]] int64_t DeadlineFor(
             CMNAuthPendingPhase phase) const noexcept;
         void RecordStaleCompletion() noexcept;
+        /** Cancel admission and queued work without joining running workers. */
+        void Interrupt() noexcept;
         void Stop() noexcept;
 
     private:

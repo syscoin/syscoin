@@ -325,6 +325,11 @@ void Interrupt(NodeContext& node)
     InterruptTorControl();
     // SYSCOIN
     InterruptMapPort();
+    // Release queued MNAUTH signing demand before its completion pump stops.
+    // Validation callbacks may need the signer to finish an in-flight RPC;
+    // Shutdown joins those RPC workers before finalizing peers.
+    if (node.peerman)
+        node.peerman->Interrupt();
     if (node.connman)
         node.connman->Interrupt();
     if (g_txindex) {

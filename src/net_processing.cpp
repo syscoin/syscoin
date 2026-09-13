@@ -2500,6 +2500,7 @@ public:
 
     /** Implement PeerManager */
     void StartScheduledTasks(CScheduler& scheduler) override;
+    void Interrupt() override;
     void CheckForStaleTipAndEvictPeers() override;
     std::optional<std::string> FetchBlock(NodeId peer_id, const CBlockIndex& block_index) override
         EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
@@ -4324,6 +4325,12 @@ void PeerManagerImpl::InitializeNode(CNode& node, ServiceFlags our_services)
     if (!node.IsInboundConn()) {
         PushNodeVersion(node, *peer);
     }
+}
+
+// SYSCOIN: Cancel MNAUTH without joining workers or destroying peer state.
+void PeerManagerImpl::Interrupt()
+{
+    m_mnauth_async.Interrupt();
 }
 
 // SYSCOIN: Apply PQ MNAUTH results only after main-thread revalidation.

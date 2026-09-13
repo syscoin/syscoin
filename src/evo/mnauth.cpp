@@ -780,7 +780,7 @@ struct CMNAuth::AsyncProcessor::Impl {
         return result;
     }
 
-    void Stop() noexcept
+    void Interrupt() noexcept
     {
         {
             std::lock_guard lock{mutex};
@@ -806,6 +806,11 @@ struct CMNAuth::AsyncProcessor::Impl {
         sign_ready.notify_all();
         completion_space.notify_all();
         completion_ready.notify_all();
+    }
+
+    void Stop() noexcept
+    {
+        Interrupt();
 
         // A test hook may request shutdown from a worker. It can safely stop
         // admission and wake every lane, but the owner must perform the join.
@@ -1185,6 +1190,11 @@ void CMNAuth::AsyncProcessor::RecordStaleCompletion() noexcept
 {
     std::lock_guard lock{m_impl->mutex};
     ++m_impl->stats.stale_completion_drops;
+}
+
+void CMNAuth::AsyncProcessor::Interrupt() noexcept
+{
+    m_impl->Interrupt();
 }
 
 void CMNAuth::AsyncProcessor::Stop() noexcept
