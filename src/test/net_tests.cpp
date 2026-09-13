@@ -6,15 +6,20 @@
 #include <clientversion.h>
 #include <common/args.h>
 #include <compat/compat.h>
+#include <consensus/validation.h>
 #include <cstdint>
 #include <governance/governance.h>
 #include <governance/governancepages.h> // SYSCOIN: fork relay tests.
+#include <init.h>
+#include <interfaces/chain.h>
+#include <masternode/activemasternode.h>
 #include <net.h>
 #include <net_processing.h>
 #include <netaddress.h>
 #include <netbase.h>
 #include <netmessagemaker.h>
 #include <protocol.h>
+#include <scheduler.h>
 #include <serialize.h>
 #include <span.h>
 #include <streams.h>
@@ -26,20 +31,282 @@
 #include <util/strencodings.h>
 #include <util/string.h>
 #include <validation.h>
+#include <validationinterface.h>
 #include <version.h>
 
 #include <boost/test/unit_test.hpp>
 
 #include <algorithm>
+#include <array>
+#include <atomic>
+#include <condition_variable>
+#include <future>
 #include <ios>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector> // SYSCOIN: bounded fork inventory tests.
 
 using namespace std::literals;
 
+namespace {
+
+struct ShutdownSnapshotState {
+    std::mutex mutex;
+    std::condition_variable changed;
+    bool entered{false};
+    bool released{false};
+    bool finished{false};
+    bool client_flush_started{false};
+    std::size_t snapshot_size{0};
+    std::atomic<bool> callback_timed_out{false};
+    std::atomic<bool> early_finalization{false};
+    std::atomic<unsigned> finalized{0};
+    std::atomic<unsigned> connected_finalized{0};
+    std::atomic<unsigned> disconnected_finalized{0};
+    std::atomic<unsigned> late_tip_calls{0};
+    std::atomic<unsigned> final_flush_calls{0};
+    std::atomic<bool> client_stopped_after_flush{false};
+
+    bool WaitFor(bool ShutdownSnapshotState::* flag, std::chrono::seconds timeout = 10s)
+    {
+        std::unique_lock lock{mutex};
+        return changed.wait_for(lock, timeout, [&] { return this->*flag; });
+    }
+
+    void Release()
+    {
+        std::lock_guard lock{mutex};
+        released = true;
+        changed.notify_all();
+    }
+
+    void HoldSnapshot(CConnman& connman)
+    {
+        {
+            const CConnman::NodesSnapshot snapshot{connman};
+            std::unique_lock lock{mutex};
+            snapshot_size = snapshot.Nodes().size();
+            entered = true;
+            changed.notify_all();
+            callback_timed_out = !changed.wait_for(lock, 30s, [&] { return released; });
+        }
+        // Publish completion only after the snapshot has released its refs.
+        std::lock_guard lock{mutex};
+        finished = true;
+        changed.notify_all();
+    }
+};
+
+class ShutdownNetEvents final : public NetEventsInterface {
+    PeerManager& m_peerman;
+    ShutdownSnapshotState& m_state;
+
+public:
+    ShutdownNetEvents(PeerManager& peerman, ShutdownSnapshotState& state)
+        : m_peerman{peerman}, m_state{state} {}
+
+    void InitializeNode(CNode& node, ServiceFlags services) override { m_peerman.InitializeNode(node, services); }
+    void ProcessAsyncCompletions() override { m_peerman.ProcessAsyncCompletions(); }
+    bool ProcessMessages(CNode* node, std::atomic<bool>& interrupt) override
+        EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex) { return m_peerman.ProcessMessages(node, interrupt); }
+    bool SendMessages(CNode* node) override
+        EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex) { return m_peerman.SendMessages(node); }
+
+    void FinalizeNode(const CNode& node) override
+    {
+        {
+            std::unique_lock lock{m_state.mutex};
+            if (m_state.entered && !m_state.finished) {
+                m_state.early_finalization = true;
+                // Fail safely if teardown order regresses: let the snapshot
+                // release its references before DeleteNode can reclaim it.
+                m_state.released = true;
+                m_state.changed.notify_all();
+                if (!m_state.changed.wait_for(lock, 30s, [&] { return m_state.finished; })) {
+                    std::terminate();
+                }
+            }
+        }
+        m_peerman.FinalizeNode(node);
+        ++m_state.finalized;
+        if (node.GetId() == 9101) ++m_state.connected_finalized;
+        if (node.GetId() == 9102) ++m_state.disconnected_finalized;
+    }
+};
+
+class ShutdownValidationSnapshot final : public CValidationInterface {
+    CConnman& m_connman;
+    ShutdownSnapshotState& m_state;
+
+public:
+    ShutdownValidationSnapshot(CConnman& connman, ShutdownSnapshotState& state)
+        : m_connman{connman}, m_state{state} {}
+    void BlockChecked(const CBlock&, const BlockValidationState&) override { m_state.HoldSnapshot(m_connman); }
+};
+
+// Model a wallet/index subscriber that must receive the real final flush
+// before its owning chain client is stopped.
+class ShutdownFlushClient final : public interfaces::ChainClient, public CValidationInterface {
+    ShutdownSnapshotState& m_state;
+
+public:
+    explicit ShutdownFlushClient(ShutdownSnapshotState& state) : m_state{state} { RegisterValidationInterface(this); }
+    ~ShutdownFlushClient() override { UnregisterValidationInterface(this); }
+    void registerRpcs() override {}
+    bool verify() override { return true; }
+    bool load() override { return true; }
+    void start(CScheduler&) override {}
+    void setMockTime(int64_t) override {}
+    void flush() override
+    {
+        std::lock_guard lock{m_state.mutex};
+        m_state.client_flush_started = true;
+        m_state.changed.notify_all();
+    }
+    void stop() override { m_state.client_stopped_after_flush = m_state.final_flush_calls > 0; }
+    void ChainStateFlushed(ChainstateRole, const CBlockLocator&) override
+    {
+        if (m_state.finalized == 2) ++m_state.final_flush_calls;
+    }
+};
+
+class ShutdownTipObserver final : public CActiveMasternodeManager {
+    ShutdownSnapshotState& m_state;
+
+public:
+    ShutdownTipObserver(CConnman& connman, ShutdownSnapshotState& state)
+        : CActiveMasternodeManager{connman}, m_state{state} {}
+    void UpdatedBlockTip(const CBlockIndex*, const CBlockIndex*, ChainstateManager&, bool) override
+    {
+        ++m_state.late_tip_calls;
+    }
+};
+
+void CheckShutdownWaitsForSnapshots(node::NodeContext& node, bool validation_callback)
+{
+    BOOST_REQUIRE(!activeMasternodeManager);
+    node.args->ForceSetArg("-btcheadermanaged", "0");
+    SyncWithValidationInterfaceQueue();
+    auto& connman{static_cast<ConnmanTestMsg&>(*node.connman)};
+    ShutdownSnapshotState state;
+    ShutdownNetEvents events{*node.peerman, state};
+    ShutdownValidationSnapshot subscriber{connman, state};
+    std::future<void> shutdown;
+    struct Cleanup {
+        node::NodeContext& node;
+        ShutdownSnapshotState& state;
+        std::future<void>& shutdown;
+        ~Cleanup()
+        {
+            state.Release();
+            if (shutdown.valid()) {
+                // Bound failure cleanup instead of leaving a detached thread
+                // holding references to this fixture or its observers.
+                if (shutdown.wait_for(60s) != std::future_status::ready) std::terminate();
+                shutdown.get();
+            } else if (node.scheduler || node.connman) {
+                ::Interrupt(node);
+                ::Shutdown(node);
+            }
+        }
+    } cleanup{node, state, shutdown};
+
+    CConnman::Options options;
+    options.m_msgproc = &events;
+    connman.Init(options);
+    node.chain_clients.push_back(std::make_unique<ShutdownFlushClient>(state));
+    activeMasternodeManager = std::make_unique<ShutdownTipObserver>(connman, state);
+    RegisterValidationInterface(activeMasternodeManager.get());
+
+    in_addr ipv4_addr;
+    ipv4_addr.s_addr = 0xa0b0c001;
+    const CAddress address{CService{ipv4_addr, 7799}, NODE_NETWORK};
+    std::array<CNode*, 2> peers;
+    for (std::size_t i = 0; i < peers.size(); ++i) {
+        peers[i] = new CNode{9101 + static_cast<NodeId>(i), nullptr, address,
+                            1, i + 1, CAddress{}, std::string{},
+                            ConnectionType::INBOUND, false};
+        events.InitializeNode(*peers[i], NODE_NETWORK);
+        peers[i]->fSuccessfullyConnected = true;
+        peers[i]->AddRef(); // The connection reference normally acquired by net.cpp.
+        connman.AddTestNode(*peers[i]);
+    }
+
+    if (validation_callback) RegisterValidationInterface(&subscriber);
+    node.scheduler->scheduleFromNow([&] {
+        if (validation_callback) {
+            const CBlock block;
+            const BlockValidationState block_state;
+            GetMainSignals().BlockChecked(block, block_state);
+        } else {
+            state.HoldSnapshot(connman);
+        }
+    }, 0ms);
+    BOOST_REQUIRE(state.WaitFor(&ShutdownSnapshotState::entered));
+    BOOST_CHECK_EQUAL(state.snapshot_size, 2U);
+    BOOST_CHECK_EQUAL(peers[0]->GetRefCount(), 2);
+    BOOST_CHECK_EQUAL(peers[1]->GetRefCount(), 2);
+
+    peers[1]->fDisconnect = true;
+    connman.DisconnectTestNodes();
+    BOOST_CHECK_EQUAL(connman.GetNodeCount(ConnectionDirection::Both), 1U);
+    BOOST_CHECK_EQUAL(peers[1]->GetRefCount(), 1);
+    BOOST_CHECK_EQUAL(state.finalized.load(), 0U);
+
+    if (validation_callback) {
+        UnregisterValidationInterface(&subscriber);
+        std::lock_guard lock{state.mutex};
+        BOOST_CHECK(!state.finished); // Unregister is not a callback join.
+    }
+
+    // This peer-dependent subscriber must be removed before the remaining
+    // queue is drained, while the chain client must retain its final flush.
+    const CBlockIndex* tip;
+    {
+        LOCK(cs_main);
+        tip = node.chainman->ActiveTip();
+    }
+    BOOST_REQUIRE(tip);
+    GetMainSignals().UpdatedBlockTip(tip, tip, *node.chainman, true);
+    shutdown = std::async(std::launch::async, [&] {
+        ::Interrupt(node);
+        ::Shutdown(node);
+    });
+    BOOST_REQUIRE(state.WaitFor(&ShutdownSnapshotState::client_flush_started));
+    BOOST_CHECK(shutdown.wait_for(1s) == std::future_status::timeout);
+    BOOST_CHECK_EQUAL(state.finalized.load(), 0U);
+    state.Release();
+    BOOST_REQUIRE(shutdown.wait_for(30s) == std::future_status::ready);
+    shutdown.get();
+
+    BOOST_CHECK(!state.callback_timed_out.load());
+    BOOST_CHECK(!state.early_finalization.load());
+    BOOST_CHECK_EQUAL(state.connected_finalized.load(), 1U);
+    BOOST_CHECK_EQUAL(state.disconnected_finalized.load(), 1U);
+    BOOST_CHECK_EQUAL(state.late_tip_calls.load(), 0U);
+    BOOST_CHECK_GT(state.final_flush_calls.load(), 0U);
+    BOOST_CHECK(state.client_stopped_after_flush.load());
+    BOOST_CHECK(!node.connman);
+    BOOST_CHECK(!node.peerman);
+    BOOST_CHECK(!node.scheduler);
+}
+
+} // namespace
+
 BOOST_FIXTURE_TEST_SUITE(net_tests, RegTestingSetup)
+
+BOOST_AUTO_TEST_CASE(shutdown_waits_for_scheduler_peer_snapshots)
+{
+    CheckShutdownWaitsForSnapshots(m_node, false);
+}
+
+BOOST_AUTO_TEST_CASE(shutdown_waits_for_unregistered_validation_peer_snapshots)
+{
+    CheckShutdownWaitsForSnapshots(m_node, true);
+}
+
 // SYSCOIN: BEGIN fork-only bounded admission and failover tests for PQ
 // certificates, paged governance relay, and masternode connection roles.
 BOOST_AUTO_TEST_CASE(masternode_connection_status_is_role_exact)

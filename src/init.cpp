@@ -372,16 +372,24 @@ void Shutdown(NodeContext& node)
     // Because these depend on each-other, we make sure that neither can be
     // using the other before destroying them.
     if (node.peerman) UnregisterValidationInterface(node.peerman.get());
-    if (node.connman) node.connman->Stop();
+    if (node.connman) node.connman->StopThreads();
 
     StopTorControl();
     UninterruptibleSleep(std::chrono::milliseconds{100});
 
-    // After everything has been shut down, but before things get flushed, stop the
-    // CScheduler/checkqueue, scheduler and load block thread.
-    if (node.scheduler) node.scheduler->stop();
+    // Block import may wait for validation callbacks, so keep the scheduler
+    // running until the last block producer has exited.
     if (node.chainman && node.chainman->m_thread_load.joinable()) node.chainman->m_thread_load.join();
+    if (node.scheduler) node.scheduler->stop();
     StopScriptCheckWorkerThreads();
+
+    // Scheduler callbacks can retain peer snapshots after unregistration.
+    // They have now finished; remove the remaining peer-dependent subscribers
+    // before final flushes can enqueue more callbacks, then reclaim peers.
+    // Wallet and index subscribers remain registered for the final flush below.
+    if (pdsNotificationInterface) UnregisterValidationInterface(pdsNotificationInterface);
+    if (activeMasternodeManager) UnregisterValidationInterface(activeMasternodeManager.get());
+    if (node.connman) node.connman->StopNodes();
     UninterruptibleSleep(std::chrono::milliseconds{100});
 
     // After the threads that potentially access these pointers have been stopped,
@@ -501,12 +509,8 @@ void Shutdown(NodeContext& node)
 #endif
     // SYSCOIN
     if (pdsNotificationInterface) {
-        UnregisterValidationInterface(pdsNotificationInterface);
         delete pdsNotificationInterface;
         pdsNotificationInterface = nullptr;
-    }
-    if (fMasternodeMode) {
-        UnregisterValidationInterface(activeMasternodeManager.get());
     }
     {
         LOCK(activeMasternodeInfoCs);
