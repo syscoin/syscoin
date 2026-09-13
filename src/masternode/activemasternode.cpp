@@ -26,6 +26,7 @@
 #include <iterator>
 #include <map>
 #include <mutex>
+#include <stdexcept>
 #include <thread>
 #include <utility>
 
@@ -678,9 +679,17 @@ public:
             m_fixture_operators = std::move(fixture->operator_key_states);
             return true;
         }
-        deterministic_mns = deterministicMNManager->GetListForBlock(&index);
-        return deterministicMNManager->GetPQRegistryReadView(
-            &index, m_registry, error);
+        try {
+            deterministic_mns = deterministicMNManager->GetListForBlock(&index);
+            return deterministicMNManager->GetPQRegistryReadView(
+                &index, m_registry, error);
+        } catch (const std::runtime_error& e) {
+            // A successfully loaded list is not sufficient operator authority
+            // when the registry read fails. Both callers honor this result.
+            error = e.what();
+            LogPrintf("Active operator local authority read failed: %s\n", error);
+            return false;
+        }
     }
 
     const llmq::pq::OperatorKeyState* FindOperator(const uint256& pro_tx_hash) const
@@ -1047,6 +1056,7 @@ void CActiveMasternodeManager::Init(const CBlockIndex* pindex)
     ActiveOperatorSnapshot snapshot;
     std::string registry_error;
     if (!snapshot.Load(*pindex, registry_error)) {
+        ClearActiveIdentity();
         state = MASTERNODE_ERROR;
         strError = "Unable to load the active PQ operator registry: " +
                    registry_error;

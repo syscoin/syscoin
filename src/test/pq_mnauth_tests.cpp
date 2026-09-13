@@ -8,15 +8,19 @@
 #include <chainparams.h>
 #include <coins.h>
 #include <crypto/slhdsa/slhdsa.h>
+#include <dsnotificationinterface.h>
 #include <evo/deterministicmns.h>
 #include <hash.h>
 #include <init.h>
+#include <llmq/pq_quorum_overlay.h>
+#include <llmq/quorums_chainlocks.h>
 #include <masternode/activemasternode.h>
 #include <masternode/masternodesync.h>
 #include <netbase.h>
 #include <net_processing.h>
 #include <node/transaction.h>
 #include <streams.h>
+#include <test/util/logging.h>
 #include <test/util/net.h>
 #include <test/util/pq_registry_read_error.h>
 #include <test/util/setup_common.h>
@@ -354,11 +358,12 @@ private:
 class CompletionPublicationFixture {
     static constexpr int PREPARATION_HEIGHT{1295};
     static constexpr int CURRENT_HEIGHT{1296};
-    static constexpr int NEXT_HEIGHT{1297};
 
     ActiveMasternodeInfoGuard m_active_info_guard;
-    std::vector<uint256> m_hashes{NEXT_HEIGHT + 1};
-    std::vector<CBlockIndex> m_indices{NEXT_HEIGHT + 1};
+    const int m_current_height;
+    const int m_next_height;
+    std::vector<uint256> m_hashes;
+    std::vector<CBlockIndex> m_indices;
     struct RestoreState {
         ChainstateManager& chainman;
         ConnmanTestMsg& connman;
@@ -390,8 +395,13 @@ public:
     CService next_remote_service;
 
     CompletionPublicationFixture(TestingSetup& fixture,
-                                 bool outbound, bool rotate_key)
-        : m_restore{*fixture.m_node.chainman,
+                                 bool outbound, bool rotate_key,
+                                 bool active_manager_setup = false)
+        : m_current_height{active_manager_setup ? 2310 : CURRENT_HEIGHT},
+          m_next_height{m_current_height + 1},
+          m_hashes(m_next_height + 1),
+          m_indices(m_next_height + 1),
+          m_restore{*fixture.m_node.chainman,
                     static_cast<ConnmanTestMsg&>(*fixture.m_node.connman),
                     const_cast<Consensus::Params&>(Params().GetConsensus()),
                     Params().GetConsensus(),
@@ -411,7 +421,7 @@ public:
         PQRegistryConfig config;
         BOOST_REQUIRE(GetPQRegistryConfig(consensus, config) ==
                       PQRegistryDeploymentResult::VALID);
-        for (int height{0}; height <= NEXT_HEIGHT; ++height) {
+        for (int height{0}; height <= m_next_height; ++height) {
             m_hashes[height] = NonNullHash(80'000 + height);
             auto& index{m_indices[height]};
             index.nHeight = height;
@@ -430,17 +440,31 @@ public:
                 key.child_key_commitment.first_epoch)};
             BOOST_REQUIRE(tree_id);
             key.child_key_commitment.tree_id = *tree_id;
+            if (active_manager_setup) {
+                const auto& commitment{key.child_key_commitment};
+                CHashWriter writer{SER_GETHASH, 0};
+                writer << std::string{"SYS_PQ_OPERATOR_TEST_STUB_V1"}
+                       << consensus.hashGenesisBlock << commitment.tree_id
+                       << commitment.generation << commitment.first_epoch
+                       << commitment.depth;
+                key.child_key_commitment.root = writer.GetHash();
+            }
             return key;
         };
         const auto initiator_key{key_for(0, 1, NonNullHash(10))};
         const auto responder_key{key_for(1, 1, NonNullHash(11))};
         context = AsyncContext(100, 42, initiator_key, responder_key,
                                Transcript(initiator_key, responder_key), outbound);
-        context.tip_hash = m_hashes[CURRENT_HEIGHT];
+        if (active_manager_setup) {
+            const auto local_service{Lookup("127.0.0.1", GetListenPort(), false)};
+            BOOST_REQUIRE(local_service);
+            context.local_service = *local_service;
+        }
+        context.tip_hash = m_hashes[m_current_height];
         const auto& remote_pro_tx{context.connection.remote.pro_tx_hash};
         next_remote_key = rotate_key ? key_for(2, 2, remote_pro_tx)
                                      : context.remote_key;
-        if (rotate_key) next_remote_key.activated_height = NEXT_HEIGHT;
+        if (rotate_key) next_remote_key.activated_height = m_next_height;
         next_remote_service = rotate_key ? context.remote_service : Service(3);
 
         const DBParams dmn_params{
@@ -462,7 +486,7 @@ public:
             BOOST_REQUIRE(empty_root);
             uint256 previous_root{*empty_root};
             std::vector<OperatorKeyState> previous_states;
-            for (int height{PREPARATION_HEIGHT}; height <= NEXT_HEIGHT; ++height) {
+            for (int height{PREPARATION_HEIGHT}; height <= m_next_height; ++height) {
                 const auto schedule{DeriveOperatorKeyScheduleView(
                     config.schedule, height, config.registration_cutoff_blocks,
                     config.future_horizon_epochs)};
@@ -477,7 +501,7 @@ public:
                     state.has_global_key = 1;
                     state.global_key_active = 1;
                     state.global_key = local ? context.local_key
-                        : height == NEXT_HEIGHT ? next_remote_key : context.remote_key;
+                        : height == m_next_height ? next_remote_key : context.remote_key;
                     BOOST_REQUIRE(state.IsStructurallyValid());
                     snapshot.operator_states.push_back(state);
                 }
@@ -488,7 +512,8 @@ public:
                 const auto root{snapshot.RecomputeConsensusStateRoot(consensus.hashGenesisBlock)};
                 BOOST_REQUIRE(root);
                 PQRegistryDiskSnapshot disk;
-                disk.is_checkpoint = height == PREPARATION_HEIGHT;
+                disk.is_checkpoint =
+                    (height - PREPARATION_HEIGHT) % PQ_REGISTRY_CHECKPOINT_INTERVAL == 0;
                 disk.height = height;
                 disk.block_hash = m_hashes[height];
                 disk.previous_block_hash = m_hashes[height - 1];
@@ -507,7 +532,7 @@ public:
             }
         }
         deterministicMNManager = std::make_unique<CDeterministicMNManager>(dmn_params);
-        for (int height{CURRENT_HEIGHT}; height <= NEXT_HEIGHT; ++height) {
+        for (int height{m_current_height}; height <= m_next_height; ++height) {
             CDeterministicMNList list{m_hashes[height], height, 2};
             for (const bool local : {true, false}) {
                 auto member{std::make_shared<CDeterministicMN>(local ? 0 : 1)};
@@ -516,7 +541,7 @@ public:
                 auto state{std::make_shared<CDeterministicMNState>()};
                 state->keyIDOwner.begin()[0] = local ? 1 : 2;
                 state->addr = local ? context.local_service
-                    : height == NEXT_HEIGHT ? next_remote_service : context.remote_service;
+                    : height == m_next_height ? next_remote_service : context.remote_service;
                 state->nRegisteredHeight = PREPARATION_HEIGHT - 1;
                 member->pdmnState = state;
                 list.AddMN(member, /*fBumpTotalCount=*/false);
@@ -537,8 +562,8 @@ public:
             fMasternodeMode = true;
         }
         LOCK(cs_main);
-        chainman.ActiveChain().SetTip(m_indices[CURRENT_HEIGHT]);
-        for (int height{CURRENT_HEIGHT}; height <= NEXT_HEIGHT; ++height) {
+        chainman.ActiveChain().SetTip(m_indices[m_current_height]);
+        for (int height{m_current_height}; height <= m_next_height; ++height) {
             PQRegistryReadView view;
             std::string error;
             BOOST_REQUIRE_MESSAGE(deterministicMNManager->GetPQRegistryReadView(
@@ -641,7 +666,7 @@ public:
     {
         {
             LOCK(cs_main);
-            chainman.ActiveChain().SetTip(m_indices[NEXT_HEIGHT]);
+            chainman.ActiveChain().SetTip(m_indices[m_next_height]);
         }
         CMNAuth::UpdatedBlockTip(chainman, connman);
     }
@@ -1021,6 +1046,171 @@ public:
                          ChainstateManager&, bool) override { ++updated_tips; }
 };
 
+// Keep the actual Init path inexpensive: regtest accepts the loopback service,
+// and its existing commitment stub avoids requesting a full child-key tree.
+class ActiveOperatorTipFixture {
+    struct RuntimeOptions {
+        const bool original_listen{fListen};
+        const std::string original_stub{
+            gArgs.GetArg("-pqoperatorcommitmentteststub", "0")};
+        RuntimeOptions()
+        {
+            fListen = false;
+            gArgs.ForceSetArg("-pqoperatorcommitmentteststub", "1");
+        }
+        ~RuntimeOptions()
+        {
+            fListen = original_listen;
+            gArgs.ForceSetArg("-pqoperatorcommitmentteststub", original_stub);
+        }
+    } m_options;
+
+public:
+    CompletionPublicationFixture publication;
+    CActiveMasternodeManager active;
+    const CBlockIndex* const tip;
+    const std::shared_ptr<LocalOperatorKeyManager> key_manager;
+    const ActiveChildKeyCache* const child_cache;
+
+    explicit ActiveOperatorTipFixture(TestingSetup& fixture)
+        : publication{fixture, /*outbound=*/true, /*rotate_key=*/false,
+                      /*active_manager_setup=*/true},
+          active{publication.connman},
+          tip{WITH_LOCK(cs_main, return publication.chainman.ActiveTip())},
+          key_manager{WITH_LOCK(activeMasternodeInfoCs,
+              return activeMasternodeInfo.operatorKeyManager)},
+          child_cache{[&] {
+              LOCK(activeMasternodeInfoCs);
+              activeMasternodeInfo.proTxHash.SetNull();
+              activeMasternodeInfo.globalKeyVersion = 0;
+              activeMasternodeInfo.outpoint.SetNull();
+              ++activeMasternodeInfo.identityGeneration;
+              activeMasternodeInfo.childKeyCache =
+                  std::make_unique<ActiveChildKeyCache>(
+                      *key_manager, fixture.m_path_root / "tip-child-cache");
+              return activeMasternodeInfo.childKeyCache.get();
+          }()}
+    {
+    }
+
+    ~ActiveOperatorTipFixture() { SyncWithValidationInterfaceQueue(); }
+
+    void InitReady()
+    {
+        BOOST_CHECK_NO_THROW(active.Init(tip));
+        BOOST_REQUIRE_EQUAL(active.GetStateString(), "READY");
+        CheckRetained();
+    }
+
+    void Notify()
+    {
+        GetMainSignals().UpdatedBlockTip(
+            tip, tip->pprev, publication.chainman, /*fInitialDownload=*/false);
+        SyncWithValidationInterfaceQueue();
+    }
+
+    ActiveChildSigningMaterial Lease() const
+    {
+        LOCK(activeMasternodeInfoCs);
+        ActiveChildSigningMaterial lease;
+        lease.active_key_manager = activeMasternodeInfo.operatorKeyManager;
+        lease.active_global_key_version = activeMasternodeInfo.globalKeyVersion;
+        lease.active_identity_generation = activeMasternodeInfo.identityGeneration;
+        return lease;
+    }
+
+    void CheckRetained() const
+    {
+        LOCK(activeMasternodeInfoCs);
+        BOOST_CHECK(activeMasternodeInfo.operatorKeyManager == key_manager);
+        BOOST_CHECK(activeMasternodeInfo.childKeyCache.get() == child_cache);
+        BOOST_CHECK(key_manager->IsValid());
+    }
+
+    void CheckInactive() const
+    {
+        uint256 provider;
+        uint32_t version{0};
+        GlobalPublicKey public_key{};
+        CService service;
+        BOOST_CHECK(!GetActiveMasternodeIdentity(provider, version, public_key, service));
+        GlobalSignature signature;
+        signature.fill(1);
+        BOOST_CHECK(!SignActiveMasternodeMNAUTH(
+            publication.context.connection.local.pro_tx_hash,
+            publication.context.local_key.key_version, NonNullHash(70'006), signature));
+        BOOST_CHECK(std::all_of(signature.begin(), signature.end(),
+                                [](uint8_t value) { return value == 0; }));
+        LOCK(activeMasternodeInfoCs);
+        BOOST_CHECK(activeMasternodeInfo.proTxHash.IsNull());
+        BOOST_CHECK_EQUAL(activeMasternodeInfo.globalKeyVersion, 0U);
+        BOOST_CHECK(activeMasternodeInfo.outpoint.IsNull());
+        CheckRetained();
+    }
+};
+
+class TipReadFault final : public CValidationInterface {
+public:
+    std::optional<AuthorityReadFailure> next_failure;
+    unsigned injected{0};
+
+    void UpdatedBlockTip(const CBlockIndex*, const CBlockIndex*,
+                         ChainstateManager&, bool) override
+    {
+        if (const auto failure{std::exchange(next_failure, std::nullopt)}) {
+            FailNextAuthorityRead(*failure);
+            ++injected;
+        }
+    }
+};
+
+// The default fixture initializes a disabled global overlay. Supply a real
+// overlay with an eligible schedule so queued CDS notifications reach its
+// registry read, without starting the unrelated finality worker.
+class TipOverlayGuard {
+    static FrozenQuorumRosterCachePtr Cache()
+    {
+        QuorumBuildConfig config;
+        const auto schedule{MakeChainLockScheduleConfig(
+            Params().GetConsensus().nPQChainLockEpochOrigin)};
+        BOOST_REQUIRE(schedule);
+        config.schedule = *schedule;
+        config.roster_snapshot_lag_blocks = 144;
+        config.registration_cutoff_blocks = 144;
+        config.future_horizon_epochs = 8;
+        auto cache{FrozenQuorumRosterCache::Create(
+            Params().GetConsensus().hashGenesisBlock, config,
+            [](const CBlockIndex&) -> std::optional<QuorumSnapshotState> {
+                return std::nullopt;
+            })};
+        BOOST_REQUIRE(cache);
+        return cache;
+    }
+
+public:
+    llmq::CPQQuorumConnectionOverlay overlay;
+
+private:
+    llmq::CPQQuorumConnectionOverlay* const m_original;
+
+public:
+    explicit TipOverlayGuard(CConnman& connman)
+        : overlay{connman, Cache(), [] { return std::optional<int32_t>{2304}; }},
+          m_original{llmq::pqQuorumConnectionOverlay}
+    {
+        BOOST_REQUIRE(m_original);
+        BOOST_REQUIRE(llmq::chainLocksHandler);
+        BOOST_REQUIRE(!llmq::chainLocksHandler->GetBestChainLock());
+        llmq::pqQuorumConnectionOverlay = &overlay;
+    }
+
+    ~TipOverlayGuard()
+    {
+        SyncWithValidationInterfaceQueue();
+        llmq::pqQuorumConnectionOverlay = m_original;
+    }
+};
+
 bool HasQueuedMNAUTH(CNode& node)
 {
     LOCK(node.cs_vSend);
@@ -1032,6 +1222,176 @@ bool HasQueuedMNAUTH(CNode& node)
 } // namespace
 
 BOOST_AUTO_TEST_SUITE(pq_mnauth_tests)
+
+BOOST_FIXTURE_TEST_CASE(queued_tip_authority_errors_preserve_overlay_and_revoke_leases,
+                        RegTestingSetup)
+{
+    ActiveOperatorTipFixture fixture{*this};
+    fixture.InitReady();
+    TipOverlayGuard overlay{fixture.publication.connman};
+    const uint256 relay_member{NonNullHash(70'001)};
+    const uint256 audit_member{NonNullHash(70'002)};
+    BOOST_REQUIRE(overlay.overlay.ApplyPreparedContext(
+        NonNullHash(70'003), {relay_member}, std::nullopt));
+    BOOST_REQUIRE(overlay.overlay.ApplyPaymentAuditContext(
+        NonNullHash(70'004), {audit_member}, 1));
+
+    TipReadFault overlay_fault;
+    CDSNotificationInterface ds{fixture.publication.connman,
+                                fixture.publication.peerman};
+    TipReadFault active_fault;
+    RollbackNotifications notifications;
+    ValidationRegistration arm_overlay{overlay_fault};
+    ValidationRegistration register_ds{ds};
+    ValidationRegistration arm_active{active_fault};
+    ValidationRegistration register_active{fixture.active};
+    ValidationRegistration observe{notifications};
+    const auto& provider{fixture.publication.context.connection.local.pro_tx_hash};
+    const auto original_lease{fixture.Lease()};
+    BOOST_REQUIRE(IsActiveMasternodeChildSigningMaterialCurrent(provider, original_lease));
+
+    // The active subscriber must keep its identity unchanged: this proves the
+    // overlay consumed the throwing read before any later authority consumer.
+    overlay_fault.next_failure = AuthorityReadFailure::REGISTRY;
+    {
+        ASSERT_DEBUG_LOG("PQ overlay local authority read failed:");
+        BOOST_CHECK_NO_THROW(fixture.Notify());
+    }
+    BOOST_CHECK_EQUAL(overlay_fault.injected, 1U);
+    BOOST_CHECK_EQUAL(notifications.updated_tips, 1U);
+    BOOST_CHECK(IsActiveMasternodeChildSigningMaterialCurrent(provider, original_lease));
+    BOOST_CHECK(fixture.publication.connman.IsMasternodeQuorumRelayMember(relay_member));
+    BOOST_CHECK(fixture.publication.connman.IsMasternodeQuorumRelayMember(audit_member));
+
+    for (const auto failure : {AuthorityReadFailure::REGISTRY,
+                               AuthorityReadFailure::DETERMINISTIC_LIST}) {
+        const auto lease{fixture.Lease()};
+        BOOST_REQUIRE(IsActiveMasternodeChildSigningMaterialCurrent(provider, lease));
+        active_fault.next_failure = failure;
+        BOOST_CHECK_NO_THROW(fixture.Notify());
+        // READY intentionally retries Init in the same notification. A
+        // readable retry can restore the same identity, but never its lease.
+        BOOST_CHECK_EQUAL(fixture.active.GetStateString(), "READY");
+        BOOST_CHECK(!IsActiveMasternodeChildSigningMaterialCurrent(provider, lease));
+        BOOST_CHECK(IsActiveMasternodeChildSigningMaterialCurrent(provider, fixture.Lease()));
+        fixture.CheckRetained();
+        BOOST_CHECK(fixture.publication.connman.IsMasternodeQuorumRelayMember(relay_member));
+        BOOST_CHECK(fixture.publication.connman.IsMasternodeQuorumRelayMember(audit_member));
+    }
+    BOOST_CHECK_EQUAL(active_fault.injected, 2U);
+    BOOST_CHECK_EQUAL(notifications.updated_tips, 3U);
+    BOOST_CHECK_NO_THROW(fixture.Notify());
+    BOOST_CHECK_EQUAL(notifications.updated_tips, 4U);
+    BOOST_CHECK_EQUAL(fixture.active.GetStateString(), "READY");
+}
+
+BOOST_FIXTURE_TEST_CASE(active_operator_init_authority_errors_clear_identity_and_recover,
+                        RegTestingSetup)
+{
+    ActiveOperatorTipFixture fixture{*this};
+    TipReadFault fault;
+    RollbackNotifications notifications;
+    ValidationRegistration arm{fault};
+    ValidationRegistration register_active{fixture.active};
+    ValidationRegistration observe{notifications};
+    const auto& provider{fixture.publication.context.connection.local.pro_tx_hash};
+
+    for (const auto failure : {AuthorityReadFailure::REGISTRY,
+                               AuthorityReadFailure::DETERMINISTIC_LIST}) {
+        // A failed direct re-init also revokes an already published identity.
+        fixture.InitReady();
+        const auto lease{fixture.Lease()};
+        BOOST_REQUIRE(IsActiveMasternodeChildSigningMaterialCurrent(provider, lease));
+        FailNextAuthorityRead(failure);
+        BOOST_CHECK_NO_THROW(fixture.active.Init(fixture.tip));
+        BOOST_CHECK_EQUAL(fixture.active.GetStateString(), "ERROR");
+        fixture.CheckInactive();
+        BOOST_CHECK(!IsActiveMasternodeChildSigningMaterialCurrent(provider, lease));
+
+        // The non-READY notification branch shares Init's exception boundary.
+        fault.next_failure = failure;
+        BOOST_CHECK_NO_THROW(fixture.Notify());
+        BOOST_CHECK_EQUAL(fixture.active.GetStateString(), "ERROR");
+        fixture.CheckInactive();
+        BOOST_CHECK_NO_THROW(fixture.Notify());
+        BOOST_CHECK_EQUAL(fixture.active.GetStateString(), "READY");
+        fixture.CheckRetained();
+        BOOST_CHECK(IsActiveMasternodeChildSigningMaterialCurrent(provider, fixture.Lease()));
+        BOOST_CHECK(!IsActiveMasternodeChildSigningMaterialCurrent(provider, lease));
+    }
+    BOOST_CHECK_EQUAL(fault.injected, 2U);
+    BOOST_CHECK_EQUAL(notifications.updated_tips, 4U);
+}
+
+BOOST_FIXTURE_TEST_CASE(active_operator_missing_or_invalid_dmn_snapshot_recovers,
+                        RegTestingSetup)
+{
+    ActiveOperatorTipFixture fixture{*this};
+    fixture.InitReady();
+    RollbackNotifications notifications;
+    ValidationRegistration register_active{fixture.active};
+    ValidationRegistration observe{notifications};
+    const auto& provider{fixture.publication.context.connection.local.pro_tx_hash};
+    const auto saved_list{deterministicMNManager->GetListForBlock(fixture.tip)};
+
+    for (const bool missing : {true, false}) {
+        const auto lease{fixture.Lease()};
+        BOOST_REQUIRE(IsActiveMasternodeChildSigningMaterialCurrent(provider, lease));
+        if (missing) {
+            deterministicMNManager->m_evoDb->EraseCache(fixture.tip->GetBlockHash());
+        } else {
+            deterministicMNManager->m_evoDb->WriteCache(fixture.tip->GetBlockHash(),
+                CDeterministicMNList{NonNullHash(70'005), fixture.tip->nHeight, 0});
+        }
+        BOOST_CHECK_NO_THROW(fixture.Notify());
+        BOOST_CHECK_EQUAL(fixture.active.GetStateString(), "ERROR");
+        fixture.CheckInactive();
+        BOOST_CHECK(!IsActiveMasternodeChildSigningMaterialCurrent(provider, lease));
+        deterministicMNManager->m_evoDb->WriteCache(fixture.tip->GetBlockHash(), saved_list);
+        BOOST_CHECK_NO_THROW(fixture.Notify());
+        BOOST_CHECK_EQUAL(fixture.active.GetStateString(), "READY");
+        BOOST_CHECK(IsActiveMasternodeChildSigningMaterialCurrent(provider, fixture.Lease()));
+        BOOST_CHECK(!IsActiveMasternodeChildSigningMaterialCurrent(provider, lease));
+        fixture.CheckRetained();
+    }
+    BOOST_CHECK_EQUAL(notifications.updated_tips, 4U);
+}
+
+BOOST_FIXTURE_TEST_CASE(active_operator_dmn_removal_survives_registry_read_failure,
+                        RegTestingSetup)
+{
+    ActiveOperatorTipFixture fixture{*this};
+    fixture.InitReady();
+    TipReadFault fault;
+    RollbackNotifications notifications;
+    ValidationRegistration arm{fault};
+    ValidationRegistration register_active{fixture.active};
+    ValidationRegistration observe{notifications};
+    const auto& provider{fixture.publication.context.connection.local.pro_tx_hash};
+    const auto saved_list{deterministicMNManager->GetListForBlock(fixture.tip)};
+    const auto lease{fixture.Lease()};
+    BOOST_REQUIRE(IsActiveMasternodeChildSigningMaterialCurrent(provider, lease));
+    auto removed_list{saved_list};
+    removed_list.RemoveMN(provider);
+    deterministicMNManager->m_evoDb->WriteCache(fixture.tip->GetBlockHash(), removed_list);
+    fault.next_failure = AuthorityReadFailure::REGISTRY;
+    BOOST_CHECK_NO_THROW(fixture.Notify());
+    // The successful DMN read remains authoritative despite the later failed
+    // registry read; Init's readable retry cannot restore a removed operator.
+    BOOST_CHECK_EQUAL(fixture.active.GetStateString(), "REMOVED");
+    fixture.CheckInactive();
+    BOOST_CHECK(!IsActiveMasternodeChildSigningMaterialCurrent(provider, lease));
+    BOOST_CHECK_EQUAL(fault.injected, 1U);
+    BOOST_CHECK_EQUAL(notifications.updated_tips, 1U);
+
+    deterministicMNManager->m_evoDb->WriteCache(fixture.tip->GetBlockHash(), saved_list);
+    BOOST_CHECK_NO_THROW(fixture.Notify());
+    BOOST_CHECK_EQUAL(fixture.active.GetStateString(), "READY");
+    BOOST_CHECK(IsActiveMasternodeChildSigningMaterialCurrent(provider, fixture.Lease()));
+    BOOST_CHECK(!IsActiveMasternodeChildSigningMaterialCurrent(provider, lease));
+    fixture.CheckRetained();
+    BOOST_CHECK_EQUAL(notifications.updated_tips, 2U);
+}
 
 BOOST_FIXTURE_TEST_CASE(rollback_only_notifications_retire_completed_authentication,
                         TestChain100Setup)

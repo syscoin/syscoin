@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -387,8 +388,16 @@ void CPQQuorumConnectionOverlay::UpdatedBlockTip(
 
     pq::PQRegistryReadView current_registry;
     std::string registry_error;
-    if (!deterministicMNManager->GetPQRegistryReadView(
-            new_tip, current_registry, registry_error)) {
+    bool have_registry{false};
+    try {
+        have_registry = deterministicMNManager->GetPQRegistryReadView(
+            new_tip, current_registry, registry_error);
+    } catch (const std::runtime_error& e) {
+        registry_error = e.what();
+        LogPrintf("PQ overlay local authority read failed: %s\n",
+                  registry_error);
+    }
+    if (!have_registry) {
         // Snapshot recovery may be transient during a reorg. Keeping the old
         // bounded overlay cannot authorize a share and avoids needless
         // liveness loss while deterministic state catches up.
