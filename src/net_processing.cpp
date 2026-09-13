@@ -5391,6 +5391,9 @@ CTransactionRef PeerManagerImpl::FindTxForGetData(const Peer::TxRelay& tx_relay,
 void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic<bool>& interruptMsgProc)
 {
     AssertLockNotHeld(cs_main);
+    if (GetTime<std::chrono::microseconds>() <
+        peer.m_governance_getdata_retry_after) return;
+    peer.m_governance_getdata_retry_after = std::chrono::microseconds{0};
 
     auto tx_relay = peer.GetTxRelay();
 
@@ -5399,6 +5402,7 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
     const CNetMsgMaker msgMaker(pfrom.GetCommonVersion());
     // SYSCOIN: Permit only one large consensus-certificate upload per pass.
     std::size_t clsig_upload_bytes{0};
+    bool governance_upload_deferred{false};
 
     // Process as many TX items from the front of the getdata queue as
     // possible, since they're common and it's efficient to batch process
@@ -5470,8 +5474,14 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
                 const auto upload{
                     peer.m_governance_page_uploads.find(inv)};
                 if (upload != peer.m_governance_page_uploads.end()) {
-                    governance_upload = std::move(upload->second);
-                    peer.m_governance_page_uploads.erase(upload);
+                    if (upload->second.exact_page) {
+                        // Keep the immutable lease until its payload can be
+                        // served. Temporary byte pressure must not revoke it.
+                        governance_upload = upload->second;
+                    } else {
+                        governance_upload = std::move(upload->second);
+                        peer.m_governance_page_uploads.erase(upload);
+                    }
                 } else if (const auto retired{
                                peer.m_retired_governance_ordinary_uploads.find(
                                    inv)};
@@ -5516,6 +5526,7 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
                                 pfrom.GetVerifiedProRegTxHash(),
                                 pfrom.nKeyedNetGroup, entry.PayloadSize(),
                                 GetTime<std::chrono::microseconds>())) {
+                            governance_upload_deferred = true;
                             break;
                         }
                         CSerializedNetMsg message;
@@ -5576,6 +5587,7 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
                                 pfrom.GetVerifiedProRegTxHash(),
                                 pfrom.nKeyedNetGroup, entry.PayloadSize(),
                                 GetTime<std::chrono::microseconds>())) {
+                            governance_upload_deferred = true;
                             break;
                         }
                         CSerializedNetMsg message;
@@ -5684,6 +5696,28 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
                     break;
                 }
             }
+            if (governance_upload_deferred) {
+                // Retry the same queued request without another GETDATA from
+                // the client. The bucket refills in whole seconds; preserve
+                // the lease's original expiry and revalidate it on each retry.
+                --it;
+                peer.m_governance_getdata_retry_after =
+                    GetTime<std::chrono::microseconds>() + std::chrono::seconds{1};
+                break;
+            }
+            if (governance_upload && governance_upload->exact_page) {
+                LOCK(peer.m_governance_page_upload_mutex);
+                const auto upload{peer.m_governance_page_uploads.find(inv)};
+                if (upload != peer.m_governance_page_uploads.end() &&
+                    upload->second.exact_page &&
+                    upload->second.scope_hash == governance_upload->scope_hash &&
+                    upload->second.expiry == governance_upload->expiry &&
+                    upload->second.snapshot == governance_upload->snapshot &&
+                    upload->second.entry_index == governance_upload->entry_index) {
+                    // Do not consume a newer page's replacement authorization.
+                    peer.m_governance_page_uploads.erase(upload);
+                }
+            }
             if (!push) {
                 vNotFound.push_back(inv);
             }
@@ -5694,7 +5728,7 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
 
     // Only process one BLOCK item per call, since they're uncommon and can be
     // expensive to process.
-    if (clsig_upload_bytes == 0 && it != peer.m_getdata_requests.end() &&
+    if (!governance_upload_deferred && clsig_upload_bytes == 0 && it != peer.m_getdata_requests.end() &&
         !pfrom.fPauseSend) {
         const CInv &inv = *it++;
         if (inv.IsGenBlkMsg()) {
@@ -8979,7 +9013,13 @@ bool PeerManagerImpl::ProcessMessages(CNode* pfrom, std::atomic<bool>& interrupt
     // and prevents m_getdata_requests to grow unbounded
     {
         LOCK(peer->m_getdata_requests_mutex);
-        if (!peer->m_getdata_requests.empty()) return true;
+        // SYSCOIN BEGIN: Await byte credit without making Bitcoin's queue loop spin.
+        // if (!peer->m_getdata_requests.empty()) return true;
+        if (!peer->m_getdata_requests.empty()) {
+            return GetTime<std::chrono::microseconds>() >=
+                peer->m_governance_getdata_retry_after;
+        }
+        // SYSCOIN END: Await byte credit without making Bitcoin's queue loop spin.
     }
 
     // Don't bother if send buffer is too full to respond anyway
@@ -9014,7 +9054,13 @@ bool PeerManagerImpl::ProcessMessages(CNode* pfrom, std::atomic<bool>& interrupt
         if (interruptMsgProc) return false;
         {
             LOCK(peer->m_getdata_requests_mutex);
-            if (!peer->m_getdata_requests.empty()) fMoreWork = true;
+            // SYSCOIN BEGIN: A deferred GETDATA is not immediately runnable.
+            // if (!peer->m_getdata_requests.empty()) fMoreWork = true;
+            if (!peer->m_getdata_requests.empty()) {
+                fMoreWork = GetTime<std::chrono::microseconds>() >=
+                    peer->m_governance_getdata_retry_after;
+            }
+            // SYSCOIN END: A deferred GETDATA is not immediately runnable.
         }
         // Does this peer has an orphan ready to reconsider?
         // (Note: we may have provided a parent for an orphan provided

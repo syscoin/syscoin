@@ -815,6 +815,10 @@ struct Peer {
     Mutex m_getdata_requests_mutex;
     /** Work queue of items requested by this peer **/
     std::deque<CInv> m_getdata_requests GUARDED_BY(m_getdata_requests_mutex);
+    // SYSCOIN: Preserve exact governance GETDATA under temporary byte pressure
+    // without keeping the message-processing loop runnable while awaiting credit.
+    std::chrono::microseconds m_governance_getdata_retry_after
+        GUARDED_BY(m_getdata_requests_mutex){0};
 
     /** Time of the last getheaders message to this peer */
     NodeClock::time_point m_last_getheaders_timestamp GUARDED_BY(NetEventsInterface::g_msgproc_mutex){};

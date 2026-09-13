@@ -7,6 +7,7 @@
 #include <common/args.h>
 #include <compat/compat.h>
 #include <cstdint>
+#include <governance/governance.h>
 #include <governance/governancepages.h> // SYSCOIN: fork relay tests.
 #include <net.h>
 #include <net_processing.h>
@@ -2676,6 +2677,227 @@ BOOST_AUTO_TEST_CASE(
         BOOST_CHECK(!peer->m_governance_page_serve_phase->object_done);
     }
     m_node.peerman->FinalizeNode(node);
+}
+
+namespace {
+enum class GovernanceUploadRetryOutcome { DELIVER, EXPIRE, CONTEXT_CHANGED };
+
+void CheckGovernanceUploadBackpressure(node::NodeContext& node_context,
+                                      bool vote,
+                                      GovernanceUploadRetryOutcome outcome)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    const auto saved_time{GetMockTime()};
+    const auto now{std::chrono::seconds{1'700'000'000}};
+    SetMockTime(now);
+    struct RestoreTime {
+        std::chrono::seconds saved;
+        ~RestoreTime() { SetMockTime(saved); }
+    } restore_time{saved_time};
+    auto& connman{static_cast<ConnmanTestMsg&>(*node_context.connman)};
+    in_addr ipv4_addr;
+    ipv4_addr.s_addr = 0xa0b0c007;
+    const CAddress address{CService{ipv4_addr, 7783}, NODE_NETWORK};
+    CNode node{
+        /*id=*/8, /*sock=*/nullptr, address,
+        /*nKeyedNetGroupIn=*/7, /*nLocalHostNonceIn=*/8, CAddress{},
+        /*addrNameIn=*/std::string{}, ConnectionType::OUTBOUND_FULL_RELAY,
+        /*inbound_onion=*/false};
+    connman.Handshake(node, /*successfully_connected=*/true,
+        ServiceFlags(NODE_NETWORK | NODE_WITNESS),
+        ServiceFlags(NODE_NETWORK | NODE_WITNESS),
+        PROTOCOL_VERSION, /*relay_txs=*/true);
+    TestOnlyResetTimeData();
+    struct FinalizePeer {
+        PeerManager& peerman;
+        CNode& node;
+        ~FinalizePeer()
+        {
+            peerman.FinalizeNode(node);
+            governance->ObserveChainTip(nullptr);
+        }
+    } finalize{*node_context.peerman, node};
+    const PeerRef peer{node_context.peerman->GetPeerRef(node.GetId())};
+    BOOST_REQUIRE(peer);
+    const CBlockIndex* tip{WITH_LOCK(::cs_main,
+        return node_context.chainman->ActiveTip())};
+    BOOST_REQUIRE(tip);
+    // These are transport tests: reuse the existing readiness seam, and do
+    // not claim the one-byte payload models governance signature admission.
+    BOOST_REQUIRE(governance_tests::PublishGovernanceReadyForTest(*governance, *tip));
+    const auto epoch{governance->GetPQGovernanceValidationContextEpoch()};
+    BOOST_REQUIRE(epoch);
+
+    const uint256 scope{vote ? uint256{71} : uint256{}};
+    const CInv inv{vote ? MSG_GOVERNANCE_OBJECT_VOTE : MSG_GOVERNANCE_OBJECT,
+                   uint256{72}};
+    const std::vector<CInv> inventory{inv};
+    const auto view{ComputeGovernancePageViewHash(scope, inventory)};
+    BOOST_REQUIRE(view);
+    auto budget{std::make_shared<GovernancePageSnapshotBudget>()};
+    GovernancePageSnapshotReservation reservation{budget};
+    const std::vector<unsigned char> payload{0x42};
+    std::vector<GovernancePageSnapshotEntry> entries{{inv, payload}};
+    BOOST_REQUIRE(reservation.Reserve(sizeof(GovernancePageImmutableSnapshot) +
+        entries.capacity() * sizeof(GovernancePageSnapshotEntry) + payload.size()));
+    const auto snapshot{GovernancePageImmutableSnapshot::Create(
+        std::move(reservation), /*instance_id=*/1, *epoch, scope, *view,
+        std::move(entries))};
+    BOOST_REQUIRE(snapshot);
+    if (vote) {
+        // Use the actual object-phase completion before opening a vote scope.
+        const auto empty_view{ComputeGovernancePageViewHash({}, {})};
+        BOOST_REQUIRE(empty_view);
+        GovernancePageBuildResult empty_page{
+            MakeGovernancePageResponse(MakeGovernancePageRequest(), {},
+                /*done=*/true, *empty_view, /*total_count=*/0), {}, {}};
+        BOOST_REQUIRE(node_context.peerman->SendGovernancePage(node, empty_page));
+    }
+    const auto request{MakeGovernancePageRequest(scope, {}, {}, vote ? 2 : 1)};
+    GovernancePageBuildResult page{
+        MakeGovernancePageResponse(request, inventory, /*done=*/true, *view, 1),
+        snapshot, {0}};
+    BOOST_REQUIRE(node_context.peerman->SendGovernancePage(node, page));
+    std::chrono::microseconds expiry;
+    {
+        LOCK(peer->m_governance_page_upload_mutex);
+        const auto upload{peer->m_governance_page_uploads.find(inv)};
+        BOOST_REQUIRE(upload != peer->m_governance_page_uploads.end());
+        expiry = upload->second.expiry;
+    }
+    connman.FlushSendBuffer(node);
+    node.fPauseSend = false;
+    // Consume accounting directly: no large allocation or synthetic traffic.
+    BOOST_REQUIRE(governance->ConsumeGovernancePayloadBytes(
+        node.GetId(), {}, node.nKeyedNetGroup,
+        GovernancePageServeRateLimiter::SOURCE_BYTE_CAPACITY, now));
+    std::atomic<bool> interrupt{false};
+    CDataStream getdata{SER_NETWORK, node.GetCommonVersion()};
+    getdata << inventory;
+    node_context.peerman->ProcessMessage(node, NetMsgType::GETDATA,
+                                         getdata, now, interrupt);
+    const auto check_pending = [&] {
+        {
+            LOCK(peer->m_getdata_requests_mutex);
+            BOOST_REQUIRE_EQUAL(peer->m_getdata_requests.size(), 1U);
+            BOOST_CHECK(peer->m_getdata_requests.front() == inv);
+            BOOST_CHECK(peer->m_governance_getdata_retry_after == now + 1s);
+        }
+        {
+            LOCK(peer->m_governance_page_upload_mutex);
+            const auto upload{peer->m_governance_page_uploads.find(inv)};
+            BOOST_REQUIRE(upload != peer->m_governance_page_uploads.end());
+            BOOST_CHECK(upload->second.exact_page);
+            BOOST_CHECK(upload->second.snapshot == snapshot);
+            BOOST_CHECK(upload->second.scope_hash == scope);
+            BOOST_CHECK_EQUAL(upload->second.entry_index, 0U);
+            BOOST_CHECK(upload->second.expiry == expiry);
+        }
+        LOCK(node.cs_vSend);
+        BOOST_CHECK(node.vSendMsg.empty());
+        BOOST_CHECK(std::get<0>(node.m_transport->GetBytesToSend(false)).empty());
+    };
+    check_pending();
+    // A deferred queue must yield to the scheduler rather than busy-loop,
+    // extend its lease, emit NOTFOUND, or consume the same request twice.
+    for (int pass{0}; pass < 3; ++pass) {
+        BOOST_CHECK(!node_context.peerman->ProcessMessages(&node, interrupt));
+        check_pending();
+    }
+    if (outcome == GovernanceUploadRetryOutcome::EXPIRE) {
+        SetMockTime(std::chrono::duration_cast<std::chrono::seconds>(expiry) + 1s);
+    } else {
+        SetMockTime(now + 1s);
+        if (outcome == GovernanceUploadRetryOutcome::CONTEXT_CHANGED) {
+            governance->ObserveChainTip(nullptr);
+            BOOST_REQUIRE(governance_tests::PublishGovernanceReadyForTest(*governance, *tip));
+            BOOST_REQUIRE(governance->GetPQGovernanceValidationContextEpoch() != epoch);
+        }
+    }
+    // No second GETDATA is supplied: the ordinary scheduler owns this retry.
+    BOOST_CHECK(!node_context.peerman->ProcessMessages(&node, interrupt));
+    {
+        LOCK(peer->m_getdata_requests_mutex);
+        BOOST_CHECK(peer->m_getdata_requests.empty());
+        BOOST_CHECK(peer->m_governance_getdata_retry_after == 0us);
+    }
+    {
+        LOCK(peer->m_governance_page_upload_mutex);
+        BOOST_CHECK(!peer->m_governance_page_uploads.count(inv));
+    }
+
+    // Read the in-memory V1 send transport; the peer has no socket.
+    V1Transport receiver{node.GetId(), SER_NETWORK, node.GetCommonVersion()};
+    std::vector<CNetMessage> messages;
+    {
+        LOCK(node.cs_vSend);
+        for (int part{0}; part < 8; ++part) {
+            if (!node.vSendMsg.empty()) {
+                const auto usage{node.vSendMsg.front().GetMemoryUsage()};
+                if (node.m_transport->SetMessageToSend(node.vSendMsg.front())) {
+                    node.vSendMsg.pop_front();
+                    node.m_send_memusage -= usage;
+                }
+            }
+            auto bytes{std::get<0>(node.m_transport->GetBytesToSend(!node.vSendMsg.empty()))};
+            if (bytes.empty()) break;
+            const auto size{bytes.size()};
+            while (!bytes.empty()) BOOST_REQUIRE(receiver.ReceivedBytes(bytes));
+            node.m_transport->MarkBytesSent(size);
+            if (receiver.ReceivedMessageComplete()) {
+                bool reject{false};
+                messages.push_back(receiver.GetReceivedMessage({}, reject));
+                BOOST_REQUIRE(!reject);
+            }
+        }
+        BOOST_CHECK(node.vSendMsg.empty());
+        BOOST_CHECK(std::get<0>(node.m_transport->GetBytesToSend(false)).empty());
+    }
+    BOOST_REQUIRE_EQUAL(messages.size(), 1U);
+    if (outcome == GovernanceUploadRetryOutcome::DELIVER) {
+        BOOST_CHECK_EQUAL(messages.front().m_type, vote
+            ? NetMsgType::MNGOVERNANCEOBJECTVOTE : NetMsgType::MNGOVERNANCEOBJECT);
+        const auto received{MakeUCharSpan(messages.front().m_recv)};
+        BOOST_CHECK_EQUAL_COLLECTIONS(received.begin(), received.end(),
+                                      payload.begin(), payload.end());
+    } else {
+        BOOST_CHECK_EQUAL(messages.front().m_type, NetMsgType::NOTFOUND);
+        std::vector<CInv> not_found;
+        messages.front().m_recv >> not_found;
+        BOOST_CHECK(not_found == inventory);
+    }
+    BOOST_CHECK(!node_context.peerman->ProcessMessages(&node, interrupt));
+    {
+        LOCK(node.cs_vSend);
+        BOOST_CHECK(node.vSendMsg.empty());
+        BOOST_CHECK(std::get<0>(node.m_transport->GetBytesToSend(false)).empty());
+    }
+    BOOST_CHECK(!node.fDisconnect);
+}
+} // namespace
+
+BOOST_AUTO_TEST_CASE(pq_governance_object_upload_retries_after_backpressure)
+{
+    CheckGovernanceUploadBackpressure(m_node, /*vote=*/false,
+                                      GovernanceUploadRetryOutcome::DELIVER);
+}
+
+BOOST_AUTO_TEST_CASE(pq_governance_vote_upload_retries_after_backpressure)
+{
+    CheckGovernanceUploadBackpressure(m_node, /*vote=*/true,
+                                      GovernanceUploadRetryOutcome::DELIVER);
+}
+
+BOOST_AUTO_TEST_CASE(pq_governance_deferred_upload_expires_without_payload)
+{
+    CheckGovernanceUploadBackpressure(m_node, /*vote=*/false,
+                                      GovernanceUploadRetryOutcome::EXPIRE);
+}
+
+BOOST_AUTO_TEST_CASE(pq_governance_deferred_upload_rechecks_context)
+{
+    CheckGovernanceUploadBackpressure(m_node, /*vote=*/true,
+                                      GovernanceUploadRetryOutcome::CONTEXT_CHANGED);
 }
 
 BOOST_AUTO_TEST_CASE(
