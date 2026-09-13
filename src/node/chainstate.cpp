@@ -197,14 +197,10 @@ static ChainstateLoadResult CompleteChainstateInitialization(
                 Untranslated("Cannot restore NEVM pending connection: " + pending_connect_error)};
     }
 
-    // SYSCOIN BEGIN: Authenticate retained NEVM commitments before removing files
-    // whose pruning metadata survived a crash. Older pruned databases cannot
-    // backfill this evidence after their historical block bodies are gone.
     if (!fReindex && !chainman.m_blockman.ScanAndUnlinkAlreadyPrunedFiles()) {
         return {ChainstateLoadStatus::FAILURE_INCOMPATIBLE_DB,
-                _("Pruned NEVM commitment evidence is missing or corrupt. Restart with -reindex to rebuild the block database and redownload pruned history.")};
+                _("Failed to clean up pruned block files.")};
     }
-    // SYSCOIN END: Authenticate retained NEVM commitments before removing files.
 
     if (!chainman.BlockIndex().empty() &&
             !chainman.m_blockman.LookupBlockIndex(chainman.GetConsensus().hashGenesisBlock)) {

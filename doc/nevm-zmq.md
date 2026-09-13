@@ -163,17 +163,19 @@ selection runs after releasing the replay activation lock.
 ## Root ownership during rollback
 
 A receipt-deferred suffix can repeat a NEVM hash already carried by the retained
-branch. Before undoing a carrier, Core authenticates the retained ancestry and
-finds that key's latest surviving tuple. Clean completion restores that tuple
-through the existing root-disconnect journal; it erases the key only after
-establishing that no canonical carrier remains. Missing or corrupt evidence
-stops rollback before undo or root revocation. The coins durability barrier,
-pending-root masking, and consumed-proof cleanup ordering still apply.
+branch. Each published carrier records the previous root tuple in the
+roots database. Before undoing that carrier, Core reads this compact undo record;
+clean completion restores the previous tuple or erases the key when no previous
+owner existed. Routine rollback uses bounded database lookups rather than scanning
+ancestry. The coins durability barrier, pending-root masking, and consumed-proof
+cleanup ordering still apply.
 
-This lookup runs on rollback, including local undo of unapplied blocks, and
-shares startup recovery's block/proof reader. It adds no work to healthy block
-extensions and retains no additional records. A lookup may scan back to NEVM
-activation; a multi-block rollback can repeat that scan for each removed key.
+Undo records reach disk before root publication or disconnect journaling. Startup
+recovery applies these records across the divergent suffix and still authenticates
+recent discarded and replacement block bodies when reconstructing mint cleanup.
+Missing or inconsistent metadata stops recovery with a local error.
+Post-NEVM UTXO snapshots cannot supply this ownership history and require normal
+block synchronization.
 
 ## Interrupted mint rollback
 
@@ -187,28 +189,18 @@ connections require no additional reads or writes for this cleanup.
 
 ## Root recovery with pruning
 
-Before deleting a block file, Core synchronously retains each indexed NEVM
-carrier's coinbase and its Merkle inclusion proof in the block index database.
-The proof binds the coinbase to the carrier's indexed Merkle root and transaction
-count. Recovery uses these proofs to find the latest surviving canonical owner
-of an affected NEVM root key, including aliases whose block bodies were pruned.
-It still requires block bodies for the recent discarded and replacement suffixes
-and for an unfinished disconnect journal's carrier. Missing or corrupt evidence
-stops recovery without completing its metadata.
+Root ownership and per-carrier undo records remain in the roots database after
+block bodies are pruned. Pruning does not retain coinbase transactions or Merkle
+proofs. A shallow rollback can restore an older root owner from its undo record
+without reading the old owner's block body or scanning back to NEVM activation.
+Startup recovery is limited to the divergent suffix. Recent discarded and
+replacement bodies remain necessary for consumed-mint cleanup.
 
-Pruning adds no proof generation to healthy block imports. It does add retained
-metadata outside the block-file prune target. Startup authenticates the retained
-proofs before completing deletion of previously pruned files. An orphan-only key
-can still require scanning canonical commitment metadata back to NEVM activation;
-this recovery work is proportional to history length, even for a shallow rollback.
-On an archive node, historical carriers without retained proofs are read from
-their block bodies.
-
-An older database that already pruned NEVM bodies without retaining these proofs
-cannot backfill them locally. Startup rejects missing or corrupt pruning evidence
-with instructions to use full `-reindex` and redownload the missing history.
-`-reindex-chainstate` cannot recover this data and is incompatible with prune mode.
-Unpruned databases need no backfill: proofs are created when their files are pruned.
+A database from the prior root schema requires a one-time chainstate rebuild to
+populate the ownership and undo records. An unpruned node can use
+`-reindex-chainstate`. A node that has already pruned the required block history
+must use full `-reindex` and redownload that history; `-reindex-chainstate` is
+incompatible with prune mode.
 
 ## Upgrade order
 

@@ -6,7 +6,6 @@
 
 #include <chain.h>
 #include <clientversion.h>
-#include <consensus/merkle.h> // SYSCOIN: authenticate retained NEVM coinbases.
 #include <consensus/validation.h>
 #include <dbwrapper.h>
 #include <flatfile.h>
@@ -36,7 +35,6 @@
 #include <masternode/activemasternode.h>
 #include <algorithm>
 #include <map>
-#include <stdexcept>
 #include <unordered_map>
 
 namespace kernel {
@@ -45,7 +43,6 @@ static constexpr uint8_t DB_BLOCK_INDEX{'b'};
 static constexpr uint8_t DB_FLAG{'F'};
 static constexpr uint8_t DB_REINDEX_FLAG{'R'};
 static constexpr uint8_t DB_LAST_BLOCK{'l'};
-static constexpr uint8_t DB_NEVM_PRUNED_ROOT_PROOF{'N'}; // SYSCOIN: retained NEVM carrier evidence.
 // Keys used in previous version that might still be found in the DB:
 // BlockTreeDB::DB_TXINDEX_BLOCK{'T'};
 // BlockTreeDB::DB_TXINDEX{'t'}
@@ -126,45 +123,6 @@ bool BlockTreeDB::ReadPQActivationHandoff(
     return Read(std::make_pair(DB_FLAG, DB_PQ_ACTIVATION_HANDOFF), record);
 }
 // SYSCOIN END: Persist the local BLS-to-PQ activation handoff atomically.
-
-// SYSCOIN BEGIN: Persist authenticated NEVM commitments across pruning.
-bool BlockTreeDB::ReadNEVMPrunedRootProof(
-    const uint256& carrier, node::NEVMPrunedRootProof& proof)
-{
-    // A coinbase cannot exceed the block weight limit. Leave room for the
-    // logarithmic inclusion proof, and bound corrupt rows before decoding.
-    static constexpr std::size_t MAX_PROOF_BYTES{MAX_BLOCK_WEIGHT + 2048};
-    try {
-        const auto key{std::make_pair(DB_NEVM_PRUNED_ROOT_PROOF, carrier)};
-        std::unique_ptr<CDBIterator> it{NewIterator()};
-        it->Seek(key);
-        it->CheckStatus();
-        std::pair<uint8_t, uint256> found;
-        if (!it->Valid() || !it->GetKeyExact(found) || found != key ||
-            it->GetValueSize() > MAX_PROOF_BYTES || !it->GetValueExact(proof)) {
-            return false;
-        }
-        return proof.version == node::NEVMPrunedRootProof::VERSION;
-    } catch (const std::exception&) {
-        return false;
-    }
-}
-
-bool BlockTreeDB::WriteNEVMPrunedRootProofs(
-    const std::vector<std::pair<uint256, node::NEVMPrunedRootProof>>& proofs)
-{
-    if (proofs.empty()) return true;
-    CDBBatch batch(*this);
-    for (const auto& [carrier, proof] : proofs) {
-        if (carrier.IsNull() || proof.version != node::NEVMPrunedRootProof::VERSION ||
-            !proof.coinbase) return false;
-        batch.Write(std::make_pair(DB_NEVM_PRUNED_ROOT_PROOF, carrier), proof);
-    }
-    // These rows must survive before either block-index pruning or physical
-    // deletion becomes visible. Extra rows from an interrupted prune are safe.
-    return WriteBatch(batch, /*fSync=*/true);
-}
-// SYSCOIN END: Persist authenticated NEVM commitments across pruning.
 
 bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, std::function<CBlockIndex*(const uint256&)> insertBlockIndex, const util::SignalInterrupt& interrupt)
 {
@@ -261,33 +219,6 @@ bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, s
 
 namespace node {
 std::atomic_bool fReindex(false);
-
-// SYSCOIN BEGIN: Authenticate retained NEVM coinbase inclusion proofs.
-namespace {
-bool IsNEVMBlockIndex(const CBlockIndex& index)
-{
-    CPureBlockHeader header;
-    header.nVersion = index.nVersion;
-    return header.IsNEVM();
-}
-
-bool VerifyNEVMPrunedRootProof(const CBlockIndex& index,
-                               NEVMPrunedRootProof& proof)
-{
-    if (proof.version != NEVMPrunedRootProof::VERSION || !proof.coinbase ||
-        !proof.coinbase->IsCoinBase() || proof.coinbase->HasWitness() ||
-        index.nTx == 0 || proof.merkle_tree.GetNumTransactions() != index.nTx) {
-        return false;
-    }
-    std::vector<uint256> matches;
-    std::vector<unsigned int> positions;
-    const uint256 merkle_root{proof.merkle_tree.ExtractMatches(matches, positions)};
-    return !merkle_root.IsNull() && merkle_root == index.hashMerkleRoot &&
-           matches.size() == 1 && matches.front() == proof.coinbase->GetHash() &&
-           positions.size() == 1 && positions.front() == 0;
-}
-} // namespace
-// SYSCOIN END: Authenticate retained NEVM coinbase inclusion proofs.
 
 bool CBlockIndexWorkComparator::operator()(const CBlockIndex* pa, const CBlockIndex* pb) const
 {
@@ -392,60 +323,6 @@ void BlockManager::PruneOneBlockFile(const int fileNumber)
 {
     AssertLockHeld(cs_main);
     LOCK(cs_LastBlockFile);
-
-    // SYSCOIN BEGIN: Retain authenticated NEVM commitments before pruning.
-    // Retain every indexed NEVM coinbase in this file, including inactive
-    // branches. Root recovery can then authenticate old canonical aliases
-    // after their bodies are gone. Do all reads and synchronous proof writes
-    // before clearing any block positions or scheduling physical deletion.
-    std::vector<std::pair<uint256, NEVMPrunedRootProof>> proofs;
-    std::size_t proof_bytes{0};
-    constexpr std::size_t PROOF_BATCH_BYTES{1 << 20};
-    const auto flush_proofs = [&]() EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
-        if (proofs.empty()) return;
-        if (!m_block_tree_db || !m_block_tree_db->WriteNEVMPrunedRootProofs(proofs)) {
-            throw std::runtime_error("PruneOneBlockFile(): Failed to persist NEVM carrier proofs");
-        }
-        proofs.clear();
-        proof_bytes = 0;
-    };
-    for (const auto& [_, index] : m_block_index) {
-        if (index.nFile != fileNumber || !(index.nStatus & BLOCK_HAVE_DATA) ||
-            index.nTx == 0 || !IsNEVMBlockIndex(index)) {
-            continue;
-        }
-        CBlock block;
-        bool mutated{false};
-        if (!ReadBlockFromDisk(block, index, /*load_auxiliary_data=*/false) ||
-            block.vtx.size() != index.nTx || block.vtx.empty() ||
-            !block.vtx.front()->IsCoinBase() ||
-            BlockMerkleRoot(block, &mutated) != index.hashMerkleRoot || mutated) {
-            throw std::runtime_error(strprintf(
-                "PruneOneBlockFile(): Cannot authenticate NEVM carrier %s",
-                index.GetBlockHash().ToString()));
-        }
-        std::vector<uint256> txids;
-        txids.reserve(block.vtx.size());
-        for (const auto& tx : block.vtx) txids.push_back(tx->GetHash());
-        std::vector<bool> matches(block.vtx.size(), false);
-        matches.front() = true;
-        CMutableTransaction coinbase{*block.vtx.front()};
-        coinbase.vin.front().scriptWitness.SetNull();
-        NEVMPrunedRootProof proof;
-        proof.coinbase = MakeTransactionRef(std::move(coinbase));
-        proof.merkle_tree = CPartialMerkleTree{txids, matches};
-        if (!VerifyNEVMPrunedRootProof(index, proof)) {
-            throw std::runtime_error(strprintf(
-                "PruneOneBlockFile(): Invalid NEVM carrier proof %s",
-                index.GetBlockHash().ToString()));
-        }
-        const std::size_t bytes{GetSerializeSize(proof, CLIENT_VERSION)};
-        if (proof_bytes + bytes > PROOF_BATCH_BYTES) flush_proofs();
-        proof_bytes += bytes;
-        proofs.emplace_back(index.GetBlockHash(), std::move(proof));
-    }
-    flush_proofs();
-    // SYSCOIN END: Retain authenticated NEVM commitments before pruning.
 
     for (auto& entry : m_block_index) {
         CBlockIndex* pindex = &entry.second;
@@ -800,32 +677,6 @@ bool BlockManager::LoadBlockIndexDB(const std::optional<uint256>& snapshot_block
     return true;
 }
 
-// SYSCOIN BEGIN: Verify pruning evidence before startup file cleanup.
-bool BlockManager::CheckNEVMPrunedBlockProofs() const
-{
-    AssertLockHeld(cs_main);
-    for (const auto& [_, index] : m_block_index) {
-        // Snapshot loading gives never-received headers a synthetic nTx.
-        // Only actual body receipt raises transaction validity. Use the raw
-        // validity bits so failed stored branches still require their proofs.
-        if (index.nTx == 0 || (index.nStatus & BLOCK_HAVE_DATA) ||
-            (index.nStatus & BLOCK_VALID_MASK) < BLOCK_VALID_TRANSACTIONS ||
-            !IsNEVMBlockIndex(index)) {
-            continue;
-        }
-        NEVMPrunedRootProof proof;
-        if (!m_block_tree_db ||
-            !m_block_tree_db->ReadNEVMPrunedRootProof(index.GetBlockHash(), proof) ||
-            !VerifyNEVMPrunedRootProof(index, proof)) {
-            return error("CheckNEVMPrunedBlockProofs(): Missing or corrupt NEVM carrier proof %s",
-                         index.GetBlockHash().ToString());
-        }
-    }
-    return true;
-}
-// SYSCOIN END: Verify pruning evidence before startup file cleanup.
-
-// SYSCOIN: Return pruning-evidence failures to chainstate initialization.
 bool BlockManager::ScanAndUnlinkAlreadyPrunedFiles()
 {
     AssertLockHeld(::cs_main);
@@ -833,11 +684,6 @@ bool BlockManager::ScanAndUnlinkAlreadyPrunedFiles()
     if (!m_have_pruned) {
         return true;
     }
-    // SYSCOIN BEGIN: Preserve files when retained NEVM evidence is unavailable.
-    // Check on every startup, before cleanup can erase the last surviving
-    // body from an interrupted prune or an older release without evidence.
-    if (!CheckNEVMPrunedBlockProofs()) return false;
-    // SYSCOIN END: Preserve files when retained NEVM evidence is unavailable.
 
     std::set<int> block_files_to_prune;
     for (int file_number = 0; file_number < max_blockfile; file_number++) {
@@ -1416,28 +1262,6 @@ bool BlockManager::ReadBlockFromDisk(CBlock& block, const CBlockIndex& index, bo
     return res;
 }
 // SYSCOIN END: Wrap shared disk readers with optional NEVM auxiliary-data loading.
-
-// SYSCOIN BEGIN: Recover canonical NEVM roots from retained coinbase evidence.
-bool BlockManager::ReadNEVMPrunedHeader(CNEVMHeader& header, const CBlockIndex& index) const
-{
-    AssertLockHeld(cs_main);
-    if (!IsNEVMBlockIndex(index) || !m_block_tree_db) {
-        return false;
-    }
-    NEVMPrunedRootProof proof;
-    if (!m_block_tree_db->ReadNEVMPrunedRootProof(index.GetBlockHash(), proof) ||
-        !VerifyNEVMPrunedRootProof(index, proof)) {
-        return false;
-    }
-    // An unconnected side branch can contain an invalid NEVM commitment.
-    // Pruning retains its authenticated coinbase too, but only canonical
-    // recovery interprets those bytes as root authority.
-    CBlock carrier;
-    carrier.vtx.push_back(std::move(proof.coinbase));
-    BlockValidationState state;
-    return GetNEVMData(state, carrier, header);
-}
-// SYSCOIN END: Recover canonical NEVM roots from retained coinbase evidence.
 
 bool BlockManager::ReadBlockHeaderFromDisk(CBlockHeader& block, const CBlockIndex* pindex) const
 {

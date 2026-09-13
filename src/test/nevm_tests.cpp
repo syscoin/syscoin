@@ -1321,18 +1321,27 @@ BOOST_AUTO_TEST_CASE(root_disconnect_journal_preserves_opaque_roots_and_rejects_
             BOOST_CHECK(!db.GetPendingDisconnect());
             BOOST_REQUIRE(db.Write(uint8_t{'D'}, invalid, true));
         }
-        BOOST_CHECK_THROW(CNEVMTxRootsDB{params}, dbwrapper_error);
+        BOOST_CHECK_EXCEPTION(CNEVMTxRootsDB{params}, dbwrapper_error,
+            [](const dbwrapper_error& error) {
+                return std::string{error.what()} == "Invalid pending NEVM root disconnect record";
+            });
     }
     {
-        CDBWrapper db({.path = path, .cache_bytes = 1 << 20, .wipe_data = true});
+        CNEVMTxRootsDB db({.path = path, .cache_bytes = 1 << 20, .wipe_data = true});
         BOOST_REQUIRE(db.Write(uint8_t{'D'}, uint8_t{1}, true));
     }
-    BOOST_CHECK_THROW(CNEVMTxRootsDB{params}, dbwrapper_error);
+    BOOST_CHECK_EXCEPTION(CNEVMTxRootsDB{params}, dbwrapper_error,
+        [](const dbwrapper_error& error) {
+            return std::string{error.what()} == "Invalid pending NEVM root disconnect record";
+        });
     {
-        CDBWrapper db({.path = path, .cache_bytes = 1 << 20, .wipe_data = true});
+        CNEVMTxRootsDB db({.path = path, .cache_bytes = 1 << 20, .wipe_data = true});
         BOOST_REQUIRE(db.Write(uint8_t{'D'}, std::pair{record, uint8_t{1}}, true));
     }
-    BOOST_CHECK_THROW(CNEVMTxRootsDB{params}, dbwrapper_error);
+    BOOST_CHECK_EXCEPTION(CNEVMTxRootsDB{params}, dbwrapper_error,
+        [](const dbwrapper_error& error) {
+            return std::string{error.what()} == "Invalid pending NEVM root disconnect record";
+        });
     {
         // The reserved one-byte key must not collide with a legacy root hash
         // whose first byte is the same journal tag.
@@ -1457,10 +1466,13 @@ BOOST_AUTO_TEST_CASE(published_root_tip_rejects_malformed_records_and_preserves_
     const uint256 tip{NEVMCacheTestKey(10)};
     const auto check_malformed = [&](const auto& value) {
         {
-            CDBWrapper db({.path = path, .cache_bytes = 1 << 20, .wipe_data = true});
+            CNEVMTxRootsDB db({.path = path, .cache_bytes = 1 << 20, .wipe_data = true});
             BOOST_REQUIRE(db.Write(uint8_t{'T'}, value, true));
         }
-        BOOST_CHECK_THROW(CNEVMTxRootsDB{params}, dbwrapper_error);
+        BOOST_CHECK_EXCEPTION(CNEVMTxRootsDB{params}, dbwrapper_error,
+            [](const dbwrapper_error& error) {
+                return std::string{error.what()} == "Invalid published NEVM root tip record";
+            });
     };
     check_malformed(uint256{});
     check_malformed(uint8_t{1});
@@ -1477,6 +1489,241 @@ BOOST_AUTO_TEST_CASE(published_root_tip_rejects_malformed_records_and_preserves_
     BOOST_CHECK(NEVMCacheValueMatches(db, NEVMCacheTestKey('T'), 13));
 }
 // SYSCOIN END: Root publication coverage survives asynchronous puts and crashes.
+
+BOOST_AUTO_TEST_CASE(root_undo_preserves_absence_zero_tuples_and_canonical_aliases)
+{
+    const fs::path path{m_args.GetDataDirBase() / "root_undo_aliases"};
+    const uint256 parent{NEVMCacheTestKey(1)}, first{NEVMCacheTestKey(2)},
+        second{NEVMCacheTestKey(3)}, third{NEVMCacheTestKey(4)};
+    const uint256 hash{};
+    const NEVMTxRoot zero{}, changed{NEVMCacheTestKey(11), NEVMCacheTestKey(12)};
+    CNEVMTxRootsDB db({.path = path, .cache_bytes = 1 << 20, .wipe_data = true});
+    NEVMRootUndo undo;
+    BOOST_CHECK(!db.ReadRootUndo(first, undo));
+    db.StageConnect(first, parent, hash, zero);
+    BOOST_REQUIRE(db.ReadRootUndo(first, undo));
+    BOOST_CHECK(undo.parent == parent);
+    BOOST_CHECK(undo.block_hash.IsNull());
+    BOOST_CHECK(!undo.previous);
+    BOOST_CHECK(undo.roots.nTxRoot.IsNull());
+    BOOST_REQUIRE(db.FlushCacheToDisk());
+
+    db.StageConnect(second, first, hash, changed);
+    BOOST_REQUIRE(db.ReadRootUndo(second, undo));
+    BOOST_REQUIRE(undo.previous);
+    BOOST_CHECK(undo.previous->nTxRoot.IsNull());
+    BOOST_CHECK(undo.previous->nReceiptRoot.IsNull());
+    BOOST_CHECK(undo.roots.nTxRoot == changed.nTxRoot);
+    // An alias with identical roots still has a present predecessor.
+    db.StageConnect(third, second, hash, changed);
+    BOOST_REQUIRE(db.ReadRootUndo(third, undo));
+    BOOST_REQUIRE(undo.previous);
+    BOOST_CHECK(undo.previous->nTxRoot == changed.nTxRoot);
+    BOOST_CHECK(undo.previous->nReceiptRoot == changed.nReceiptRoot);
+    BOOST_REQUIRE(db.FlushCacheToDisk());
+}
+
+BOOST_AUTO_TEST_CASE(root_undo_exact_retries_never_capture_the_child_as_parent)
+{
+    const fs::path path{m_args.GetDataDirBase() / "root_undo_retry"};
+    const uint256 parent{NEVMCacheTestKey(1)}, first{NEVMCacheTestKey(2)},
+        second{NEVMCacheTestKey(3)}, hash{NEVMCacheTestKey(4)};
+    const NEVMTxRoot old_roots{NEVMCacheTestKey(11), NEVMCacheTestKey(12)},
+        new_roots{NEVMCacheTestKey(21), NEVMCacheTestKey(22)};
+    {
+        CNEVMTxRootsDB db({.path = path, .cache_bytes = 1 << 20, .wipe_data = true});
+        db.StageConnect(first, parent, hash, old_roots);
+        db.StageConnect(first, parent, hash, old_roots);
+        NEVMRootUndo undo;
+        BOOST_REQUIRE(db.ReadRootUndo(first, undo));
+        BOOST_CHECK(!undo.previous);
+        db.StageConnect(second, first, hash, new_roots);
+        db.StageConnect(second, first, hash, new_roots);
+        BOOST_REQUIRE(db.FlushCacheToDisk());
+    }
+    {
+        CNEVMTxRootsDB db({.path = path, .cache_bytes = 1 << 20});
+        db.StageConnect(second, first, hash, new_roots);
+        NEVMRootUndo undo;
+        BOOST_REQUIRE(db.ReadRootUndo(second, undo));
+        BOOST_REQUIRE(undo.previous);
+        BOOST_CHECK(undo.previous->nTxRoot == old_roots.nTxRoot);
+        BOOST_CHECK(undo.previous->nReceiptRoot == old_roots.nReceiptRoot);
+        BOOST_CHECK_THROW(db.StageConnect(second, parent, hash, new_roots), dbwrapper_error);
+        BOOST_CHECK_THROW(db.StageConnect(second, first, NEVMCacheTestKey(5), new_roots), dbwrapper_error);
+        BOOST_CHECK_THROW(db.StageConnect(second, first, hash, old_roots), dbwrapper_error);
+
+        // A real reconnect observes the recorded parent tuple again.
+        db.FlushDataToCache({{hash, old_roots}});
+        db.StageConnect(second, first, hash, new_roots);
+        BOOST_REQUIRE(db.ReadRootUndo(second, undo));
+        BOOST_REQUIRE(undo.previous);
+        BOOST_CHECK(undo.previous->nTxRoot == old_roots.nTxRoot);
+        db.FlushDataToCache({{hash, NEVMTxRoot{NEVMCacheTestKey(31), NEVMCacheTestKey(32)}}});
+        BOOST_CHECK_THROW(db.StageConnect(second, first, hash, new_roots), dbwrapper_error);
+        BOOST_CHECK(NEVMCacheValueMatches(db, hash, 31));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(root_undo_is_write_ahead_and_failed_writes_remain_retryable)
+{
+    const fs::path path{m_args.GetDataDirBase() / "root_undo_failed_write"};
+    const uint256 parent{NEVMCacheTestKey(1)}, carrier{NEVMCacheTestKey(2)}, hash{NEVMCacheTestKey(3)};
+    const NEVMTxRoot roots{NEVMCacheTestKey(11), NEVMCacheTestKey(12)};
+    const auto undo_key{std::make_pair(uint8_t{'U'}, carrier)};
+    for (const bool throw_error : {false, true}) {
+        {
+            FailingNEVMCacheDB<CNEVMTxRootsDB> db(
+                {.path = path, .cache_bytes = 1 << 20, .wipe_data = true});
+            db.StageConnect(carrier, parent, hash, roots);
+            BOOST_CHECK(db.writes.empty());
+            db.FailNextWrite(throw_error);
+            CheckNEVMCacheWriteFailure(throw_error, [&] { return db.RecordPublishedTip(carrier); });
+            BOOST_CHECK(!db.GetPublishedTip());
+            BOOST_CHECK(!db.Exists(undo_key));
+            BOOST_CHECK(!db.Exists(hash));
+            NEVMRootUndo undo;
+            BOOST_REQUIRE(db.ReadRootUndo(carrier, undo));
+            BOOST_CHECK(!undo.previous);
+
+            db.FailNextWrite(throw_error);
+            CheckNEVMCacheWriteFailure(throw_error, [&] { return db.FlushCacheToDisk(1, false); });
+            BOOST_CHECK(!db.Exists(undo_key));
+            BOOST_CHECK(!db.Exists(hash));
+            BOOST_REQUIRE(db.RecordPublishedTip(carrier));
+            BOOST_REQUIRE(db.Exists(undo_key));
+            BOOST_CHECK(!db.Exists(hash));
+            BOOST_CHECK(db.writes == std::vector<bool>({true, false, true, true}));
+            // Root publication may fail independently after its undo is durable.
+            db.FailNextWrite(throw_error);
+            CheckNEVMCacheWriteFailure(throw_error, [&] { return db.FlushCacheToDisk(1, false); });
+            BOOST_CHECK(!db.Exists(hash));
+        }
+        {
+            CNEVMTxRootsDB db({.path = path, .cache_bytes = 1 << 20});
+            BOOST_CHECK(db.GetPublishedTip() == carrier);
+            NEVMRootUndo undo;
+            BOOST_REQUIRE(db.ReadRootUndo(carrier, undo));
+            BOOST_CHECK(!undo.previous);
+            db.StageConnect(carrier, parent, hash, roots);
+            BOOST_REQUIRE(db.FlushCacheToDisk(1, false));
+            BOOST_CHECK(NEVMCacheValueMatches(db, hash, 11));
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(root_undo_flush_retries_keep_every_unwritten_record)
+{
+    const fs::path path{m_args.GetDataDirBase() / "root_undo_flush_retry"};
+    const uint256 parent{NEVMCacheTestKey(1)}, first{NEVMCacheTestKey(2)},
+        second{NEVMCacheTestKey(3)}, hash{NEVMCacheTestKey(4)};
+    FailingNEVMCacheDB<CNEVMTxRootsDB> db(
+        {.path = path, .cache_bytes = 1 << 20, .wipe_data = true});
+    const auto empty_memory{db.GetRootUndoMemoryUsage()};
+    db.StageConnect(first, parent, hash, NEVMTxRoot{});
+    db.StageConnect(second, first, hash, NEVMTxRoot{NEVMCacheTestKey(11), NEVMCacheTestKey(12)});
+    const auto staged_memory{db.GetRootUndoMemoryUsage()};
+    BOOST_CHECK_GT(staged_memory, empty_memory);
+    db.FailNextWrite(false);
+    BOOST_CHECK(!db.FlushRootUndo());
+    BOOST_CHECK_EQUAL(db.GetRootUndoMemoryUsage(), staged_memory);
+    NEVMRootUndo undo;
+    BOOST_REQUIRE(db.ReadRootUndo(first, undo));
+    BOOST_CHECK(!undo.previous);
+    BOOST_REQUIRE(db.ReadRootUndo(second, undo));
+    BOOST_REQUIRE(undo.previous);
+    BOOST_CHECK(undo.previous->nTxRoot.IsNull());
+    BOOST_REQUIRE(db.FlushRootUndo(false));
+    BOOST_CHECK_LT(db.GetRootUndoMemoryUsage(), staged_memory);
+    BOOST_REQUIRE(db.Exists(std::make_pair(uint8_t{'U'}, first)));
+    BOOST_REQUIRE(db.Exists(std::make_pair(uint8_t{'U'}, second)));
+    BOOST_CHECK(!db.Exists(hash));
+    const auto writes{db.writes.size()};
+    BOOST_REQUIRE(db.FlushRootUndo());
+    BOOST_CHECK_EQUAL(db.writes.size(), writes);
+}
+
+BOOST_AUTO_TEST_CASE(root_disconnect_persists_a_cached_inverse_before_revocation)
+{
+    const fs::path path{m_args.GetDataDirBase() / "root_undo_disconnect_barrier"};
+    const uint256 parent{NEVMCacheTestKey(1)}, carrier{NEVMCacheTestKey(2)}, hash{NEVMCacheTestKey(3)};
+    const NEVMTxRoot roots{NEVMCacheTestKey(11), NEVMCacheTestKey(12)};
+    const NEVMRootDisconnect record{carrier, hash, roots.nTxRoot, roots.nReceiptRoot};
+    for (const bool throw_error : {false, true}) {
+        {
+            FailingNEVMCacheDB<CNEVMTxRootsDB> db(
+                {.path = path, .cache_bytes = 1 << 20, .wipe_data = true});
+            db.StageConnect(carrier, parent, hash, roots);
+            db.FailNextWrite(throw_error);
+            CheckNEVMCacheWriteFailure(throw_error, [&] { return db.BeginDisconnect(record); });
+            BOOST_CHECK(!db.GetPendingDisconnect());
+            BOOST_CHECK(!db.Exists(uint8_t{'D'}));
+            BOOST_CHECK(NEVMCacheValueMatches(db, hash, 11));
+            BOOST_REQUIRE(db.BeginDisconnect(record));
+            BOOST_CHECK(db.writes == std::vector<bool>({true, true, true}));
+        }
+        CNEVMTxRootsDB db({.path = path, .cache_bytes = 1 << 20});
+        BOOST_REQUIRE(db.GetPendingDisconnect());
+        NEVMRootUndo undo;
+        BOOST_REQUIRE(db.ReadRootUndo(carrier, undo));
+        BOOST_CHECK(undo.parent == parent);
+        BOOST_CHECK(!undo.previous);
+        BOOST_CHECK(!NEVMCacheValueMatches(db, hash, 11));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(root_schema_and_undo_reject_missing_legacy_or_malformed_metadata)
+{
+    const fs::path path{m_args.GetDataDirBase() / "root_undo_malformed"};
+    const DBParams params{.path = path, .cache_bytes = 1 << 20};
+    const uint256 parent{NEVMCacheTestKey(1)}, carrier{NEVMCacheTestKey(2)}, hash{NEVMCacheTestKey(3)};
+    const auto undo_key{std::make_pair(uint8_t{'U'}, carrier)};
+    {
+        CDBWrapper db({.path = path, .cache_bytes = 1 << 20, .wipe_data = true});
+        BOOST_REQUIRE(db.Write(hash, NEVMTxRoot{}, true));
+    }
+    BOOST_CHECK_EXCEPTION(CNEVMTxRootsDB{params}, dbwrapper_error,
+        [](const dbwrapper_error& error) { return std::string{error.what()}.find("-reindex") != std::string::npos; });
+    const auto check_schema = [&](const auto& value) {
+        {
+            CDBWrapper db({.path = path, .cache_bytes = 1 << 20, .wipe_data = true});
+            BOOST_REQUIRE(db.Write(uint8_t{'V'}, value, true));
+        }
+        BOOST_CHECK_THROW(CNEVMTxRootsDB{params}, dbwrapper_error);
+    };
+    check_schema(uint32_t{0});
+    check_schema(uint32_t{2});
+    check_schema(uint8_t{1});
+    check_schema(std::pair{uint32_t{1}, uint8_t{0}});
+
+    const NEVMRootUndo valid{parent, hash, NEVMTxRoot{}, std::nullopt};
+    const auto check_undo = [&](const auto& value) {
+        {
+            CNEVMTxRootsDB db({.path = path, .cache_bytes = 1 << 20, .wipe_data = true});
+            BOOST_REQUIRE(db.Write(undo_key, value, true));
+        }
+        CNEVMTxRootsDB db(params);
+        NEVMRootUndo undo;
+        BOOST_CHECK_THROW(db.ReadRootUndo(carrier, undo), dbwrapper_error);
+        BOOST_CHECK_THROW(db.StageConnect(carrier, parent, hash, NEVMTxRoot{}), dbwrapper_error);
+        BOOST_CHECK(!db.Exists(hash));
+    };
+    check_undo(uint8_t{1});
+    check_undo(uint8_t{2});
+    check_undo(std::pair{valid, uint8_t{0}});
+    check_undo(std::pair{std::pair{std::pair{std::pair{uint8_t{1}, parent}, hash}, NEVMTxRoot{}}, uint8_t{2}});
+    check_undo(NEVMRootUndo{uint256{}, hash, NEVMTxRoot{}, std::nullopt});
+    check_undo(NEVMRootUndo{carrier, hash, NEVMTxRoot{}, std::nullopt});
+    {
+        CNEVMTxRootsDB db({.path = path, .cache_bytes = 1 << 20, .wipe_data = true, .obfuscate = true});
+        db.StageConnect(carrier, parent, hash, NEVMTxRoot{});
+        BOOST_REQUIRE(db.FlushCacheToDisk());
+    }
+    CNEVMTxRootsDB db(params);
+    NEVMRootUndo undo;
+    BOOST_REQUIRE(db.ReadRootUndo(carrier, undo));
+    BOOST_CHECK(!undo.previous);
+}
 
 BOOST_AUTO_TEST_SUITE_END()
 // SYSCOIN END: Exercise real NEVM cache classes with failed batch writes.

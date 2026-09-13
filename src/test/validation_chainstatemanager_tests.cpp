@@ -593,6 +593,16 @@ struct StartupNEVMRecoverySetup : DeferredNEVMReplaySetup {
         BOOST_REQUIRE(WITH_LOCK(
             ::cs_main, return chainman.ActiveTip()->GetBlockHash()) ==
                       block->GetHash());
+        if (!forward_to_nevm) {
+            // Real receipt deferral still publishes local bridge ownership.
+            // The regtest connection-off shortcut above suppresses that path,
+            // so reproduce its local effect without delivering to the engine.
+            CNEVMHeader header;
+            BlockValidationState state;
+            BOOST_REQUIRE(GetNEVMData(state, *block, header));
+            pnevmtxrootsdb->StageConnect(block->GetHash(), block->hashPrevBlock,
+                header.nBlockHash, NEVMTxRoot{header.nTxRoot, header.nReceiptRoot});
+        }
         SetMockTime(GetTime() + 1);
         return block;
     }
@@ -7019,6 +7029,11 @@ struct CoinsNEVMRecoverySetup : StartupNEVMRecoverySetup {
         LOCK(::cs_main);
         const auto path{chainstate.CoinsDB().StoragePath()};
         BOOST_REQUIRE(path.has_value());
+        // Production publishes all root inverses and its source endpoint
+        // before CoinsDB can acquire an interrupted-batch HEADS record.
+        BOOST_REQUIRE(pnevmtxrootsdb->FlushRootUndo());
+        BOOST_REQUIRE(pnevmtxrootsdb->RecordPublishedTip(
+            chainman.ActiveTip()->GetBlockHash()));
         // Drop unflushed cache changes and reopen the real coins store with
         // the exact recovery marker written by an interrupted BatchWrite.
         chainstate.ResetCoinsViews();
@@ -8173,6 +8188,31 @@ struct NEVMSurvivingBudgetSetup : NEVMSuperblockBudgetRollbackSetup {
 };
 
 // SYSCOIN: A fully validated mint remains usable after interrupted removal.
+// A few crash fixtures materialize an already-validated replacement's coins
+// directly. Reproduce the undo captured while its parent was current, without
+// accidentally treating the old sibling's root as a previous canonical value.
+static void SeedNEVMRootUndoForSibling(const uint256& sibling_hash,
+                                      const CBlock& replacement)
+{
+    NEVMRootUndo sibling;
+    BOOST_REQUIRE(pnevmtxrootsdb->ReadRootUndo(sibling_hash, sibling));
+    BOOST_REQUIRE(sibling.parent == replacement.hashPrevBlock);
+    CNEVMHeader header;
+    BlockValidationState state;
+    BOOST_REQUIRE(GetNEVMData(state, replacement, header));
+    std::optional<NEVMTxRoot> previous;
+    if (header.nBlockHash == sibling.block_hash) {
+        previous = sibling.previous;
+    } else {
+        NEVMTxRoot roots;
+        if (pnevmtxrootsdb->ReadTxRoots(header.nBlockHash, roots)) previous = roots;
+    }
+    const NEVMRootUndo undo{replacement.hashPrevBlock, header.nBlockHash,
+        NEVMTxRoot{header.nTxRoot, header.nReceiptRoot}, previous};
+    BOOST_REQUIRE(pnevmtxrootsdb->Write(
+        std::make_pair(uint8_t{'U'}, replacement.GetHash()), undo, /*fSync=*/true));
+}
+
 struct NEVMMintCleanupSetup : NEVMMintReadErrorSetup {
     enum class Cut { BEFORE_ERASE, ERASE_FAILURE, BEFORE_COMPLETE, AFTER_COMPLETE };
     enum class Damage { NONE, MISSING, CORRUPT, MISSING_REPLACEMENT };
@@ -8307,6 +8347,7 @@ struct NEVMMintCleanupSetup : NEVMMintReadErrorSetup {
         BOOST_REQUIRE_EQUAL(pnevmtxrootsdb->GetPendingDisconnect().has_value(),
                             cut != Cut::AFTER_COMPLETE);
         if (reincluded) {
+            SeedNEVMRootUndoForSibling(candidate->GetHash(), *replacement);
             // TestBlockValidity above fully validated this replacement. Model
             // its already-durable coins endpoint with the old journal pending.
             auto& coins{chainstate.CoinsTip()};
@@ -8524,6 +8565,7 @@ struct NEVMCleanRootAliasSetup : NEVMMintCleanupSetup {
             flush();
             check_roots(removed);
             LOCK(chainstate.MempoolMutex());
+            bool disconnected_without_history{false};
             if (variant == Variant::MISSING || variant == Variant::CORRUPT ||
                 variant == Variant::MISSING_ORPHAN) {
                 auto* source_index{chainman.m_blockman.LookupBlockIndex(source->GetHash())};
@@ -8545,20 +8587,19 @@ struct NEVMCleanRootAliasSetup : NEVMMintCleanupSetup {
                 } else {
                     source_index->nFile = std::numeric_limits<int>::max();
                 }
-                BlockValidationState failed;
-                BOOST_REQUIRE(!chainstate.DisconnectTip(failed, nullptr, true));
-                BOOST_CHECK(failed.IsError());
-                BOOST_CHECK(!failed.IsInvalid());
-                BOOST_CHECK(chainman.ActiveTip() == duplicate_index);
-                BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == duplicate->GetHash());
-                BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == duplicate->GetHash());
-                BOOST_CHECK(!pnevmtxrootsdb->GetPendingDisconnect());
-                BOOST_CHECK(pnevmtxrootsdb->GetPublishedTip() == duplicate->GetHash());
-                check_roots(removed);
+                // The accepted carrier's durable undo owns the prior tuple.
+                // An unrelated historical body must not participate in a
+                // shallow rollback, including when this key has no alias.
+                BlockValidationState disconnected;
+                BOOST_REQUIRE_MESSAGE(chainstate.DisconnectTip(disconnected, nullptr, true),
+                                      disconnected.ToString());
+                disconnected_without_history = true;
             }
-            BlockValidationState disconnected;
-            BOOST_REQUIRE_MESSAGE(chainstate.DisconnectTip(disconnected, nullptr, true),
-                                  disconnected.ToString());
+            if (!disconnected_without_history) {
+                BlockValidationState disconnected;
+                BOOST_REQUIRE_MESSAGE(chainstate.DisconnectTip(disconnected, nullptr, true),
+                                      disconnected.ToString());
+            }
             check_roots(retained);
             if (orphan) {
                 NEVMTxRoot roots;
@@ -8681,6 +8722,8 @@ struct NEVMRootRollbackSetup : StartupNEVMRecoverySetup {
             SyncWithValidationInterfaceQueue();
             LOCK(::cs_main);
             auto& chainstate{m_node.chainman->ActiveChainstate()};
+            BOOST_REQUIRE(RootsDB().FlushRootUndo());
+            BOOST_REQUIRE(RootsDB().RecordPublishedTip(checkpoint->GetHash()));
             BOOST_REQUIRE(RootsDB().FlushCacheToDisk());
             BOOST_REQUIRE(chainstate.CoinsDB().FlushWithSync(chainstate.CoinsTip()));
             if (alias_checkpoint) {
@@ -8747,10 +8790,11 @@ struct NEVMRootRollbackSetup : StartupNEVMRecoverySetup {
         BOOST_REQUIRE(chainman.m_blockman.WriteUndoDataForBlock(undo, undo_state, *index));
         coins.SetBestBlock(carrier.GetHash());
         chainstate.m_chain.SetTip(*index);
-        RootsDB().FlushDataToCache({
-            {orphan_header.nBlockHash, {orphan_header.nTxRoot, orphan_header.nReceiptRoot}},
-            {canonical_header.nBlockHash, {canonical_header.nTxRoot, canonical_header.nReceiptRoot}},
-        });
+        // This fixture models a completed connection without invoking its
+        // proof checks, so capture the same immutable undo as ConnectTip.
+        RootsDB().StageConnect(carrier.GetHash(), parent->GetHash(),
+            orphan_header.nBlockHash,
+            NEVMTxRoot{orphan_header.nTxRoot, orphan_header.nReceiptRoot});
         if (lagging_coins) {
             NEVMTxRoot root;
             if (alias_checkpoint) {
@@ -8762,6 +8806,8 @@ struct NEVMRootRollbackSetup : StartupNEVMRecoverySetup {
             BOOST_REQUIRE(!RootsDB().Read(orphan_header.nBlockHash, root));
             BOOST_REQUIRE(chainstate.CoinsDB().GetBestBlock() == checkpoint->GetHash());
         } else {
+            BOOST_REQUIRE(RootsDB().FlushRootUndo());
+            BOOST_REQUIRE(RootsDB().RecordPublishedTip(carrier.GetHash()));
             BOOST_REQUIRE(RootsDB().FlushCacheToDisk());
             BOOST_REQUIRE(chainstate.CoinsDB().FlushWithSync(coins));
         }
@@ -9029,6 +9075,7 @@ struct PrunedNEVMRootRecoverySetup : NEVMRootRollbackSetup {
         } else {
             // This is the same forward root-publication cut as the existing
             // crash fixture: roots are durable while coins still name Q.
+            BOOST_REQUIRE(RootsDB().FlushRootUndo());
             BOOST_REQUIRE(RootsDB().RecordPublishedTip(carrier.GetHash()));
             BOOST_REQUIRE(RootsDB().FlushCacheToDisk());
             BOOST_REQUIRE(!RootsDB().GetPendingDisconnect());
@@ -9141,22 +9188,8 @@ struct PrunedNEVMRootRecoverySetup : NEVMRootRollbackSetup {
             BOOST_REQUIRE(index != nullptr);
             BOOST_REQUIRE(index->nStatus & BLOCK_HAVE_DATA);
             BOOST_REQUIRE_GT(index->nHeight, old_index->nHeight + static_cast<int>(MIN_BLOCKS_TO_KEEP));
-            // Even a valid extra proof row cannot replace the recent body
-            // needed to authenticate a journal or discarded source branch.
-            CMutableTransaction coinbase{*carrier.vtx.front()};
-            for (auto& input : coinbase.vin) input.scriptWitness.SetNull();
-            std::vector<uint256> txids;
-            for (const auto& tx : carrier.vtx) txids.push_back(tx->GetHash());
-            std::vector<bool> matches(txids.size(), false);
-            matches.front() = true;
-            node::NEVMPrunedRootProof proof;
-            proof.coinbase = MakeTransactionRef(std::move(coinbase));
-            proof.merkle_tree = CPartialMerkleTree{txids, matches};
-            BOOST_REQUIRE(reopened.m_blockman.m_block_tree_db->WriteNEVMPrunedRootProofs(
-                {{carrier.GetHash(), proof}}));
-            CNEVMHeader authenticated;
-            BOOST_REQUIRE(reopened.m_blockman.ReadNEVMPrunedHeader(authenticated, *index));
-            BOOST_CHECK(authenticated.nBlockHash == orphan_header.nBlockHash);
+            // Root undo replaces the common-prefix scan; the discarded
+            // recent body still authenticates consumed-mint cleanup.
             const fs::path block_path{m_args.GetBlocksDirPath() /
                 fs::PathFromString(strprintf("blk%05u.dat", index->GetBlockPos().nFile))};
             const fs::path unavailable_path{fs::PathFromString(
@@ -9496,22 +9529,20 @@ struct DeferredNEVMContinuitySetup : CommittedNEVMContinuitySetup {
             BOOST_REQUIRE_MESSAGE(chainman.ActiveChainstate().ActivateBestChain(state, candidate), state.ToString());
         }
         BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainman.ActiveTip()) == candidate_index);
+        {
+            CNEVMHeader header;
+            BlockValidationState state;
+            BOOST_REQUIRE(GetNEVMData(state, *candidate, header));
+            pnevmtxrootsdb->StageConnect(candidate->GetHash(), candidate->hashPrevBlock,
+                header.nBlockHash, NEVMTxRoot{header.nTxRoot, header.nReceiptRoot});
+        }
         prefix.push_back(candidate);
         deferred_tip = MineNEVMBlock(/*forward_to_nevm=*/false);
         prefix.pop_back();
         {
             LOCK(::cs_main);
-            // Regtest's connection-off shortcut also skips local root
-            // recording. Real receipt deferral records these commitments
-            // before external execution, so retain the same durable roots.
-            NEVMTxRootMap roots;
-            for (const auto& block : {candidate, deferred_tip}) {
-                CNEVMHeader header;
-                BlockValidationState state;
-                BOOST_REQUIRE(GetNEVMData(state, *block, header));
-                roots.emplace(header.nBlockHash, NEVMTxRoot{header.nTxRoot, header.nReceiptRoot});
-            }
-            pnevmtxrootsdb->FlushDataToCache(roots);
+            // Both local connections captured ownership before this durable
+            // endpoint, even though the engine still has only the prefix.
             BlockValidationState state;
             BOOST_REQUIRE_MESSAGE(chainman.ActiveChainstate().FlushStateToDisk(state, FlushStateMode::ALWAYS), state.ToString());
         }
@@ -11814,9 +11845,6 @@ BOOST_FIXTURE_TEST_CASE(nevm_connect_live_missing_parent_evidence_remains_retrya
         } restore{*original_tip, WITH_LOCK(::cs_main, return original_tip->nDataPos)};
         {
             LOCK(::cs_main);
-            node::NEVMPrunedRootProof proof;
-            BOOST_REQUIRE(!m_node.chainman->m_blockman.m_block_tree_db->ReadNEVMPrunedRootProof(
-                original_tip->GetBlockHash(), proof));
             // Keep the indexed parent and UTXO state intact, but make a read
             // of its commitment fail the existing block/index hash binding.
             BOOST_REQUIRE_EQUAL(original_tip->nFile, candidate_index->nFile);
@@ -12547,17 +12575,17 @@ BOOST_FIXTURE_TEST_CASE(nevm_clean_rollback_selects_latest_owner, NEVMCleanRootA
     CheckCleanAlias(Variant::LATEST);
 }
 
-BOOST_FIXTURE_TEST_CASE(nevm_clean_rollback_requires_canonical_body, NEVMCleanRootAliasSetup)
+BOOST_FIXTURE_TEST_CASE(nevm_clean_rollback_uses_undo_when_canonical_body_missing, NEVMCleanRootAliasSetup)
 {
     CheckCleanAlias(Variant::MISSING);
 }
 
-BOOST_FIXTURE_TEST_CASE(nevm_clean_rollback_authenticates_canonical_body, NEVMCleanRootAliasSetup)
+BOOST_FIXTURE_TEST_CASE(nevm_clean_rollback_uses_undo_when_canonical_body_corrupt, NEVMCleanRootAliasSetup)
 {
     CheckCleanAlias(Variant::CORRUPT);
 }
 
-BOOST_FIXTURE_TEST_CASE(nevm_clean_rollback_requires_evidence_of_absence, NEVMCleanRootAliasSetup)
+BOOST_FIXTURE_TEST_CASE(nevm_clean_rollback_erases_unique_key_without_canonical_body, NEVMCleanRootAliasSetup)
 {
     CheckCleanAlias(Variant::MISSING_ORPHAN);
 }
@@ -13104,6 +13132,8 @@ BOOST_FIXTURE_TEST_CASE(nevm_disconnect_root_crash_child, NEVMRootRollbackSetup,
                                   m_node.chainman->GetConsensus())) ++replacement.nNonce;
         BOOST_REQUIRE(replacement.GetHash() != parent->GetHash());
         StoreBlockIndex(replacement);
+        SeedNEVMRootUndoForSibling(parent->GetHash(), replacement);
+        BOOST_REQUIRE(RootsDB().FlushRootUndo());
         BOOST_REQUIRE(RootsDB().FlushCacheToDisk());
         // T=R describes an already-published canonical root set. Retain the
         // shared P/R key and Q; remove the key unique to abandoned carrier A.
@@ -13129,6 +13159,7 @@ BOOST_FIXTURE_TEST_CASE(nevm_disconnect_root_crash_child, NEVMRootRollbackSetup,
     if (forward_only) {
         // Ordinary forward batching has no disconnect journal, but the root
         // publisher must still describe the suffix ahead of durable coins Q.
+        BOOST_REQUIRE(RootsDB().FlushRootUndo());
         BOOST_REQUIRE(RootsDB().RecordPublishedTip(carrier.GetHash()));
         BOOST_REQUIRE(RootsDB().FlushCacheToDisk());
         BOOST_REQUIRE(!RootsDB().GetPendingDisconnect());
@@ -13398,6 +13429,7 @@ BOOST_FIXTURE_TEST_CASE(nevm_disconnect_roots_recover_lagging_coins,
                 BOOST_REQUIRE(GetNEVMData(state, replacement, replacement_header));
                 BOOST_REQUIRE(replacement_header.nBlockHash == parent_header.nBlockHash);
                 recovered = StoreBlockIndex(replacement);
+                SeedNEVMRootUndoForSibling(saved.parent.GetHash(), replacement);
                 chainstate.ResetCoinsViews();
                 {
                     CDBWrapper coins{DBParams{
@@ -13573,14 +13605,20 @@ BOOST_FIXTURE_TEST_CASE(nevm_full_flush_publishes_root_branch_before_coins,
     BOOST_CHECK(!RootsDB().Read(canonical_header.nBlockHash, root));
     BOOST_CHECK(!RootsDB().Read(orphan_header.nBlockHash, root));
 
-    // Retry the same real flush. The first successful root write publishes T;
-    // every root cache batch and the later coins write must observe that T.
+    // Retry the same real flush: immutable inverses must be durable before
+    // the source cursor, and both must precede roots and their coins.
     root_writes = 0;
     bool publication_written{false};
     RootsDB().observe_sync = [](bool sync) { BOOST_CHECK(sync); };
     RootsDB().before_write = [&] {
         ++root_writes;
         if (root_writes > 1) {
+            for (const auto& hash : {parent->GetHash(), carrier.GetHash()}) {
+                NEVMRootUndo durable_undo;
+                BOOST_REQUIRE(RootsDB().Read(std::make_pair(uint8_t{'U'}, hash), durable_undo));
+            }
+        }
+        if (root_writes > 2) {
             uint256 published;
             BOOST_REQUIRE(publication_written);
             BOOST_REQUIRE(RootsDB().Read(uint8_t{'T'}, published));
@@ -13589,7 +13627,7 @@ BOOST_FIXTURE_TEST_CASE(nevm_full_flush_publishes_root_branch_before_coins,
         return true;
     };
     RootsDB().after_write = [&] {
-        if (root_writes == 1) {
+        if (root_writes == 2) {
             uint256 published;
             BOOST_REQUIRE(RootsDB().Read(uint8_t{'T'}, published));
             BOOST_CHECK(published == carrier.GetHash());
@@ -13599,7 +13637,7 @@ BOOST_FIXTURE_TEST_CASE(nevm_full_flush_publishes_root_branch_before_coins,
     chainstate.CoinsDB().SetWriteBatchCallbackForTesting([&](bool) {
         ++coins_writes;
         BOOST_REQUIRE(publication_written);
-        BOOST_REQUIRE_GE(root_writes, 2U);
+        BOOST_REQUIRE_GE(root_writes, 3U);
         BOOST_REQUIRE(RootsDB().GetPublishedTip());
         BOOST_CHECK(*RootsDB().GetPublishedTip() == carrier.GetHash());
         for (const auto* header : {&canonical_header, &orphan_header}) {
@@ -13617,7 +13655,7 @@ BOOST_FIXTURE_TEST_CASE(nevm_full_flush_publishes_root_branch_before_coins,
     RootsDB().observe_sync = {};
     chainstate.CoinsDB().SetWriteBatchCallbackForTesting({});
     BOOST_REQUIRE_MESSAGE(flushed, state.ToString());
-    BOOST_CHECK_EQUAL(root_writes, 2U);
+    BOOST_CHECK_EQUAL(root_writes, 3U);
     BOOST_CHECK_GT(coins_writes, 0U);
     BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == carrier.GetHash());
     BOOST_CHECK(chainstate.CoinsDB().HaveCoin(minted_coin));
@@ -13747,6 +13785,128 @@ BOOST_FIXTURE_TEST_CASE(nevm_nonmint_local_disconnect_revokes_roots,
     BOOST_REQUIRE(RootsDB().Read(canonical_header.nBlockHash, roots));
     BOOST_CHECK(RootsDB().ReadTxRoots(canonical_header.nBlockHash, roots));
     BOOST_CHECK(nevm->disconnected_blocks.empty());
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_unique_root_rollback_does_not_read_ancestor_bodies,
+                        NEVMRootRollbackSetup)
+{
+    // Make the absence of an alias depend on more than the immediate parent.
+    // Every commitment is unique, so the historical scan would visit all of
+    // these carriers before it could establish that the deleted key is absent.
+    for (unsigned int i{0}; i < 24; ++i) {
+        auto* tip{WITH_LOCK(::cs_main, return m_node.chainman->ActiveTip())};
+        BOOST_REQUIRE(tip != nullptr);
+        BOOST_REQUIRE(governance_tests::PublishGovernanceReadyForTest(*governance, *tip));
+        nevm->template_block_hash = GetRandHash();
+        nevm->template_roots = NEVMTxRoot{GetRandHash(), GetRandHash()};
+        MineNEVMBlock();
+    }
+    nevm->template_block_hash.reset();
+    nevm->template_roots.reset();
+    PrepareRootDisconnect(/*with_mint=*/false);
+    auto& chainman{*m_node.chainman};
+    auto& chainstate{chainman.ActiveChainstate()};
+    LOCK(::cs_main);
+    struct RestoreAncestorPositions {
+        std::vector<std::pair<CBlockIndex*, FlatFilePos>> positions;
+        ~RestoreAncestorPositions()
+        {
+            for (const auto& [index, position] : positions) {
+                index->nFile = position.nFile;
+                index->nDataPos = position.nPos;
+            }
+        }
+    } restore;
+    for (auto* index{chainman.ActiveTip()->pprev};
+         index && index->nHeight >= chainman.GetConsensus().nNEVMStartBlock;
+         index = index->pprev) {
+        restore.positions.emplace_back(index, index->GetBlockPos());
+        index->nFile = std::numeric_limits<int>::max();
+    }
+    BOOST_REQUIRE_GE(restore.positions.size(), 25U);
+    BlockValidationState state;
+    BOOST_REQUIRE_MESSAGE(DisconnectRootTip(state, /*reverify=*/false), state.ToString());
+    BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == parent->GetHash());
+    BOOST_CHECK(!RootsDB().GetPendingDisconnect());
+    NEVMTxRoot root;
+    BOOST_CHECK(!RootsDB().ReadTxRoots(orphan_header.nBlockHash, root));
+    BOOST_REQUIRE(RootsDB().ReadTxRoots(canonical_header.nBlockHash, root));
+    BOOST_CHECK(root.nTxRoot == canonical_header.nTxRoot);
+    BOOST_CHECK(root.nReceiptRoot == canonical_header.nReceiptRoot);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_root_rollback_rejects_missing_or_malformed_undo_before_side_effects,
+                        NEVMRootRollbackSetup)
+{
+    PrepareRootDisconnect(/*with_mint=*/true);
+    auto& chainman{*m_node.chainman};
+    auto& chainstate{chainman.ActiveChainstate()};
+    LOCK2(::cs_main, chainstate.MempoolMutex());
+    const auto key{std::make_pair(uint8_t{'U'}, carrier.GetHash())};
+    NEVMRootUndo original;
+    BOOST_REQUIRE(RootsDB().Read(key, original));
+    const auto commands{nevm->command_trace};
+    const auto published{RootsDB().GetPublishedTip()};
+    for (const bool malformed : {false, true}) {
+        if (malformed) {
+            BOOST_REQUIRE(RootsDB().Write(key, uint8_t{NEVMRootUndo::VERSION}, /*fSync=*/true));
+        } else {
+            BOOST_REQUIRE(RootsDB().Erase(key, /*fSync=*/true));
+        }
+        std::size_t root_writes{0}, coins_writes{0};
+        RootsDB().before_write = [&] { ++root_writes; return true; };
+        chainstate.CoinsDB().SetWriteBatchCallbackForTesting([&](bool) {
+            ++coins_writes;
+            return true;
+        });
+        BlockValidationState state;
+        const bool disconnected{chainstate.DisconnectTip(state, nullptr, /*bReverify=*/true)};
+        RootsDB().before_write = {};
+        chainstate.CoinsDB().SetWriteBatchCallbackForTesting({});
+        BOOST_CHECK(!disconnected);
+        BOOST_CHECK(state.IsError());
+        BOOST_CHECK(!state.IsInvalid());
+        BOOST_CHECK_EQUAL(root_writes, 0U);
+        BOOST_CHECK_EQUAL(coins_writes, 0U);
+        BOOST_CHECK(nevm->command_trace == commands);
+        BOOST_CHECK(chainman.ActiveTip()->GetBlockHash() == carrier.GetHash());
+        BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == carrier.GetHash());
+        BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == carrier.GetHash());
+        BOOST_CHECK(chainstate.CoinsDB().HaveCoin(minted_coin));
+        BOOST_CHECK(MintDB().ExistsTx(mint_hash));
+        BOOST_CHECK(!RootsDB().GetPendingDisconnect());
+        BOOST_CHECK(RootsDB().GetPublishedTip() == published);
+        NEVMTxRoot roots;
+        BOOST_REQUIRE(RootsDB().ReadTxRoots(orphan_header.nBlockHash, roots));
+        BOOST_CHECK(roots.nTxRoot == orphan_header.nTxRoot);
+        BOOST_CHECK(roots.nReceiptRoot == orphan_header.nReceiptRoot);
+        BOOST_REQUIRE(RootsDB().Write(key, original, /*fSync=*/true));
+    }
+    BlockValidationState state;
+    BOOST_REQUIRE_MESSAGE(chainstate.DisconnectTip(state, nullptr, /*bReverify=*/true),
+                          state.ToString());
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_snapshot_activation_requires_block_synchronization,
+                        NEVMRootRollbackSetup)
+{
+    PrepareRootDisconnect(/*with_mint=*/false);
+    auto& chainman{*m_node.chainman};
+    auto& chainstate{chainman.ActiveChainstate()};
+    const uint256 tip{WITH_LOCK(::cs_main, return chainman.ActiveTip()->GetBlockHash())};
+    BOOST_REQUIRE(!chainman.IsSnapshotActive());
+    const auto published{RootsDB().GetPublishedTip()};
+    AutoFile unavailable_coins{nullptr};
+    const SnapshotMetadata metadata{parent->GetHash(), 0};
+    {
+        ASSERT_DEBUG_LOG("NEVM root ownership requires block synchronization");
+        BOOST_CHECK(!chainman.ActivateSnapshot(unavailable_coins, metadata, /*in_memory=*/true));
+    }
+    BOOST_CHECK(!chainman.IsSnapshotActive());
+    BOOST_CHECK(&chainman.ActiveChainstate() == &chainstate);
+    BOOST_CHECK(WITH_LOCK(::cs_main, return chainman.ActiveTip()->GetBlockHash()) == tip);
+    BOOST_CHECK(RootsDB().GetPublishedTip() == published);
+    BOOST_CHECK(!RootsDB().GetPendingDisconnect());
 }
 
 BOOST_FIXTURE_TEST_CASE(nevm_root_prepare_failure_preserves_coin_cache,
