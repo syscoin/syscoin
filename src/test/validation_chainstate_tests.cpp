@@ -824,11 +824,22 @@ public:
         state.scope.Reset(uint256{});
     }
 
-    static std::vector<CNode*> DeduplicatePageCandidates(
-        std::vector<CNode*> candidates)
+    static auto CapturePageCandidates(const std::vector<CNode*>& candidates)
+    {
+        return CMasternodeSync::CaptureGovernancePageCandidates(candidates);
+    }
+
+    static std::vector<CNode*> SelectPageCandidates(
+        std::vector<CMasternodeSync::GovernancePageCandidate> candidates)
     {
         return CMasternodeSync::DeduplicateGovernancePageCandidates(
             std::move(candidates));
+    }
+
+    static std::vector<CNode*> DeduplicatePageCandidates(
+        const std::vector<CNode*>& candidates)
+    {
+        return SelectPageCandidates(CapturePageCandidates(candidates));
     }
 
     static CNode* FindPageSource(
@@ -3512,6 +3523,93 @@ BOOST_AUTO_TEST_CASE(
         admitted.get());
     BOOST_CHECK(
         SyncAccess::FindPageSource(cohort, admitted->GetId()) == nullptr);
+}
+
+BOOST_AUTO_TEST_CASE(governance_page_candidates_preserve_priority_and_identity)
+{
+    using SyncAccess = masternode_sync_tests::CMasternodeSyncTestAccess;
+    std::vector<std::unique_ptr<CNode>> nodes;
+    std::vector<CNode*> candidates;
+    const auto add_node = [&](NodeId id, ConnectionType type,
+                              uint64_t netgroup, const uint256& identity = {}) {
+        auto node{std::make_unique<CNode>(
+            id, /*sock=*/nullptr, CAddress{}, netgroup,
+            /*nLocalHostNonceIn=*/0, CAddress{}, /*addrNameIn=*/"",
+            type, /*inbound_onion=*/false)};
+        if (!identity.IsNull()) {
+            node->SetVerifiedMasternode(identity, uint256{99}, 1);
+        }
+        candidates.push_back(node.get());
+        nodes.push_back(std::move(node));
+    };
+    add_node(3, ConnectionType::OUTBOUND_FULL_RELAY, 30, uint256{1});
+    add_node(6, ConnectionType::OUTBOUND_FULL_RELAY, 77, uint256{1});
+    add_node(4, ConnectionType::OUTBOUND_FULL_RELAY, 31, uint256{2});
+    add_node(5, ConnectionType::BLOCK_RELAY, 31, uint256{3});
+    add_node(99, ConnectionType::OUTBOUND_FULL_RELAY, 100);
+    add_node(1, ConnectionType::INBOUND, 0, uint256{4});
+    add_node(7, ConnectionType::MANUAL, 200, uint256{5});
+    add_node(1001, ConnectionType::INBOUND, 100);
+    add_node(999, ConnectionType::INBOUND, 999);
+    add_node(1002, ConnectionType::MANUAL, 998);
+    add_node(8, ConnectionType::INBOUND, 0);
+    add_node(9, ConnectionType::INBOUND, 0);
+
+    // Authenticated identity beats netgroup identity; otherwise retain one
+    // representative per netgroup, with separate NodeId fallbacks for zero.
+    // MANUAL keeps its existing non-outbound rank even when authenticated.
+    const std::vector<NodeId> expected{6, 5, 4, 99, 7, 1, 999, 1002, 9, 8};
+    for (const bool reverse : {false, true}) {
+        if (reverse) std::reverse(candidates.begin(), candidates.end());
+        std::vector<NodeId> selected;
+        for (CNode* node : SyncAccess::DeduplicatePageCandidates(candidates)) {
+            selected.push_back(node->GetId());
+        }
+        BOOST_CHECK_EQUAL_COLLECTIONS(selected.begin(), selected.end(),
+                                      expected.begin(), expected.end());
+    }
+    BOOST_CHECK(SyncAccess::DeduplicatePageCandidates({}).empty());
+}
+
+BOOST_AUTO_TEST_CASE(governance_page_candidates_freeze_authentication_per_pass)
+{
+    using SyncAccess = masternode_sync_tests::CMasternodeSyncTestAccess;
+    const auto make_node = [](NodeId id, uint64_t netgroup) {
+        return std::make_unique<CNode>(
+            id, /*sock=*/nullptr, CAddress{}, netgroup,
+            /*nLocalHostNonceIn=*/0, CAddress{}, /*addrNameIn=*/"",
+            ConnectionType::OUTBOUND_FULL_RELAY, /*inbound_onion=*/false);
+    };
+    auto authenticated{make_node(1, 10)};
+    auto completing_auth{make_node(2, 20)};
+    auto same_group{make_node(3, 20)};
+    authenticated->SetVerifiedMasternode(uint256{1}, uint256{11}, 1);
+    const std::vector<CNode*> candidates{
+        authenticated.get(), completing_auth.get(), same_group.get()};
+    auto captured{SyncAccess::CapturePageCandidates(candidates)};
+
+    // A normal MNAUTH completion after capture affects the next pass, not
+    // the ordering or identity deduplication of the pass already captured.
+    completing_auth->SetVerifiedMasternode(uint256{2}, uint256{12}, 1);
+    const std::vector<CNode*> expected_frozen{
+        authenticated.get(), same_group.get()};
+    BOOST_CHECK(SyncAccess::SelectPageCandidates(std::move(captured)) ==
+                expected_frozen);
+    const std::vector<CNode*> expected_fresh{
+        completing_auth.get(), authenticated.get(), same_group.get()};
+    BOOST_CHECK(SyncAccess::DeduplicatePageCandidates(candidates) ==
+                expected_fresh);
+
+    // A second connection authenticating as an existing operator likewise
+    // changes deduplication only after recapture, using the same ranking keys.
+    captured = SyncAccess::CapturePageCandidates(candidates);
+    same_group->SetVerifiedMasternode(uint256{1}, uint256{11}, 1);
+    BOOST_CHECK(SyncAccess::SelectPageCandidates(std::move(captured)) ==
+                expected_fresh);
+    const std::vector<CNode*> expected_duplicate{
+        same_group.get(), completing_auth.get()};
+    BOOST_CHECK(SyncAccess::DeduplicatePageCandidates(candidates) ==
+                expected_duplicate);
 }
 
 BOOST_FIXTURE_TEST_CASE(

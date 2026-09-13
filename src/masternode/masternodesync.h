@@ -237,8 +237,18 @@ private:
     [[nodiscard]] GovernanceScopeRetryAction ScheduleGovernanceScopeRetry(
         std::chrono::microseconds now)
         EXCLUSIVE_LOCKS_REQUIRED(m_governance_page_mutex);
+    struct GovernancePageCandidate {
+        CNode* node;
+        uint256 pro_tx;
+        uint64_t netgroup;
+        int64_t node_id;
+        int rank;
+    };
+    [[nodiscard]] static std::vector<GovernancePageCandidate>
+    CaptureGovernancePageCandidates(const std::vector<CNode*>& candidates);
     [[nodiscard]] static std::vector<CNode*>
-    DeduplicateGovernancePageCandidates(std::vector<CNode*> candidates);
+    DeduplicateGovernancePageCandidates(
+        std::vector<GovernancePageCandidate> candidates);
     [[nodiscard]] static CNode* FindGovernancePageSource(
         const std::vector<CNode*>& eligible_nodes, int64_t id);
     [[nodiscard]] static GovernancePagePumpResult

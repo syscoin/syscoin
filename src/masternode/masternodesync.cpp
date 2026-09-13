@@ -482,41 +482,49 @@ void CMasternodeSync::AdvanceGovernanceScope(
     ResetGovernanceScope(state.vote_scopes[state.vote_scope_index]);
 }
 
+std::vector<CMasternodeSync::GovernancePageCandidate>
+CMasternodeSync::CaptureGovernancePageCandidates(
+    const std::vector<CNode*>& candidates)
+{
+    std::vector<GovernancePageCandidate> captured;
+    captured.reserve(candidates.size());
+    for (CNode* node : candidates) {
+        // MNAUTH can finish during selection. Freeze one identity for both
+        // ranking and deduplication; live session admission still rechecks it.
+        const uint256 pro_tx{node->GetVerifiedProRegTxHash()};
+        const bool authenticated{!pro_tx.IsNull()};
+        const bool outbound{node->IsOutboundOrBlockRelayConn()};
+        const int rank{outbound ? (authenticated ? 3 : 2)
+                                : (authenticated ? 1 : 0)};
+        captured.push_back(
+            {node, pro_tx, node->nKeyedNetGroup, node->GetId(), rank});
+    }
+    return captured;
+}
+
 std::vector<CNode*> CMasternodeSync::DeduplicateGovernancePageCandidates(
-    std::vector<CNode*> candidates)
+    std::vector<GovernancePageCandidate> candidates)
 {
     std::sort(candidates.begin(), candidates.end(),
-              [](const CNode* lhs, const CNode* rhs) {
-                  const bool lhs_auth{
-                      !lhs->GetVerifiedProRegTxHash().IsNull()};
-                  const bool rhs_auth{
-                      !rhs->GetVerifiedProRegTxHash().IsNull()};
-                  const bool lhs_out{lhs->IsOutboundOrBlockRelayConn()};
-                  const bool rhs_out{rhs->IsOutboundOrBlockRelayConn()};
-                  const int lhs_rank{lhs_out ? (lhs_auth ? 3 : 2)
-                                             : (lhs_auth ? 1 : 0)};
-                  const int rhs_rank{rhs_out ? (rhs_auth ? 3 : 2)
-                                             : (rhs_auth ? 1 : 0)};
-                  return std::tuple{lhs_rank,
-                                    lhs->nKeyedNetGroup, lhs->GetId()} >
-                         std::tuple{rhs_rank,
-                                    rhs->nKeyedNetGroup, rhs->GetId()};
+              [](const GovernancePageCandidate& lhs,
+                 const GovernancePageCandidate& rhs) {
+                  return std::tuple{lhs.rank, lhs.netgroup, lhs.node_id} >
+                         std::tuple{rhs.rank, rhs.netgroup, rhs.node_id};
               });
     std::set<std::tuple<uint8_t, uint256, uint64_t, NodeId>> identities;
     std::vector<CNode*> unique_candidates;
     unique_candidates.reserve(candidates.size());
-    for (CNode* node : candidates) {
-        const uint256 pro_tx{node->GetVerifiedProRegTxHash()};
-        const auto identity{!pro_tx.IsNull()
+    for (const auto& candidate : candidates) {
+        const auto identity{!candidate.pro_tx.IsNull()
             ? std::tuple<uint8_t, uint256, uint64_t, NodeId>{
-                  0, pro_tx, 0, -1}
-            : node->nKeyedNetGroup != 0
+                  0, candidate.pro_tx, 0, -1}
+            : candidate.netgroup != 0
                 ? std::tuple<uint8_t, uint256, uint64_t, NodeId>{
-                      1, {}, node->nKeyedNetGroup, -1}
+                      1, {}, candidate.netgroup, -1}
                 : std::tuple<uint8_t, uint256, uint64_t, NodeId>{
-                      2, {}, 0, node->GetId()}};
+                      2, {}, 0, candidate.node_id}};
         if (identities.insert(identity).second) {
-            unique_candidates.push_back(node);
+            unique_candidates.push_back(candidate.node);
         }
     }
     return unique_candidates;
@@ -569,7 +577,8 @@ CMasternodeSync::PumpGovernancePages(
         if (!peerman.CanUseGovernancePageSource(*node)) continue;
         eligible_nodes.push_back(node);
     }
-    auto candidates{DeduplicateGovernancePageCandidates(eligible_nodes)};
+    auto candidates{DeduplicateGovernancePageCandidates(
+        CaptureGovernancePageCandidates(eligible_nodes))};
     if (candidates.empty()) {
         {
             LOCK(m_governance_page_mutex);
