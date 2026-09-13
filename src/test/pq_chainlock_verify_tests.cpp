@@ -302,6 +302,121 @@ void SetMember(QuorumBitmap& bitmap, std::size_t member)
     bitmap[member / 8] |= static_cast<uint8_t>(uint8_t{1} << (member % 8));
 }
 
+// SYSCOIN BEGIN: Preserve selected-roster admission across prepared contexts.
+void SetRosterValidCount(VerificationFixture& fixture, std::size_t slot,
+                         std::size_t valid_count)
+{
+    BOOST_REQUIRE_LT(slot, ACTIVE_QUORUMS);
+    BOOST_REQUIRE_LE(valid_count, QUORUM_MIN_VALID);
+    auto& roster{fixture.rosters[slot]};
+    for (std::size_t member{0}; member < QUORUM_SIZE; ++member) {
+        roster.members[member].eligible = member < valid_count;
+    }
+    SetFirstMembers(roster.descriptor.valid_members, valid_count);
+    roster.descriptor.valid_count = static_cast<uint16_t>(valid_count);
+    // The child commitments remain intact, including keys that are now
+    // ineligible. Recompute all affected descriptor commitments explicitly.
+    roster.descriptor.member_root =
+        ComputeQuorumMemberRoot(fixture.genesis_hash, roster);
+    roster.descriptor.child_key_root =
+        ComputeQuorumChildKeyRoot(fixture.genesis_hash, roster);
+    std::array<QuorumDescriptor, ACTIVE_QUORUMS> descriptors;
+    for (std::size_t index{0}; index < ACTIVE_QUORUMS; ++index) {
+        descriptors[index] = fixture.rosters[index].descriptor;
+    }
+    auto& statement{fixture.chainlock.statement};
+    statement.quorum_context_hash = GetQuorumContextHash(
+        fixture.genesis_hash, statement.height, statement.block_hash,
+        descriptors);
+}
+
+void CheckFinalPreparationParity(
+    const VerificationFixture& fixture, const VerifiedRosterSet& roster_set,
+    const PreparedChainLockContext& context, bool accepted)
+{
+    // This fixture exercises real roster, authorization and child-key-proof
+    // preparation. Its tagged WOTS signatures are not a cryptographic witness.
+    const auto& chainlock{fixture.chainlock};
+    BOOST_REQUIRE(chainlock.IsStructurallyValid());
+    BOOST_REQUIRE_EQUAL(chainlock.signatures.size(), FINAL_SIGNATURE_COUNT);
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        const bool selected{(chainlock.selected_quorum_mask & (uint8_t{1} << slot)) != 0};
+        BOOST_CHECK_EQUAL(CountSet(chainlock.signer_bitmaps[slot]),
+                          selected ? QUORUM_THRESHOLD : 0U);
+    }
+    const auto hashes_before{GetQuorumRootTaggedHashCountForTesting()};
+    ChainLockVerificationError error{ChainLockVerificationError::INVALID_ARGUMENT};
+    const auto direct{PrepareFinalChainLockVerification(
+        fixture.schedule, chainlock, roster_set, fixture.authorization, &error)};
+    BOOST_CHECK_EQUAL(direct.has_value(), accepted);
+    BOOST_CHECK(error == (accepted ? ChainLockVerificationError::NONE
+                                  : ChainLockVerificationError::INVALID_DESCRIPTOR));
+    const auto prepared{PrepareFinalChainLockVerification(chainlock, context, &error)};
+    BOOST_CHECK_EQUAL(prepared.has_value(), accepted);
+    BOOST_CHECK(error == (accepted ? ChainLockVerificationError::NONE
+                                  : ChainLockVerificationError::INVALID_DESCRIPTOR));
+    if (direct) BOOST_CHECK_EQUAL(direct->checks.size(), FINAL_SIGNATURE_COUNT);
+    if (prepared) BOOST_CHECK_EQUAL(prepared->checks.size(), FINAL_SIGNATURE_COUNT);
+    BOOST_CHECK_EQUAL(GetQuorumRootTaggedHashCountForTesting(), hashes_before);
+}
+
+void ConfigureRecoveryVerification(VerificationFixture& fixture)
+{
+    auto& statement{fixture.chainlock.statement};
+    const RosterAuthorizationPriorState prior{
+        NonNullHash(520'000), InitializationWindow(/*first_epoch=*/0)};
+    statement.roster_transition = RosterAuthorizationTransitionKind::RECOVER;
+    statement.roster_authorization_base = {
+        statement.previous_chainlock_height,
+        statement.previous_chainlock_hash,
+        NonNullHash(520'001)};
+    statement.roster_beacons = RecoveryWindow(
+        fixture.rosters.front().descriptor.epoch, prior.window.active);
+    statement.previous_btcc_cursor = {};
+    statement.accepted_btcc_cursor = {};
+    statement.btcc_advance = BTCCAdvance::KEEP;
+    fixture.authorization = {};
+    auto& recovery{fixture.authorization};
+    recovery.admission = RosterAuthorizationAdmission::RECOVER;
+    recovery.predecessor_height = statement.previous_chainlock_height;
+    recovery.predecessor_block_hash = statement.previous_chainlock_hash;
+    recovery.authorization_base = statement.roster_authorization_base;
+    recovery.reset_policy = ResetPolicy(fixture.schedule);
+    recovery.previous = prior;
+    SealRosterAuthorization(fixture.genesis_hash, statement, recovery);
+    std::array<QuorumDescriptor, ACTIVE_QUORUMS> descriptors;
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        const auto beacon_hash{GetRosterBeaconCommitmentHash(
+            fixture.genesis_hash, statement.roster_beacons.active.seeds[slot])};
+        BOOST_REQUIRE(beacon_hash);
+        fixture.rosters[slot].descriptor.roster_beacon_hash = *beacon_hash;
+        descriptors[slot] = fixture.rosters[slot].descriptor;
+    }
+    statement.quorum_context_hash = GetQuorumContextHash(
+        fixture.genesis_hash, statement.height, statement.block_hash, descriptors);
+}
+
+void SelectRetainedRecoveryRosters(VerificationFixture& fixture)
+{
+    // RECOVER authorizes all four slots. Move the certificate from 0/1/2 to
+    // 1/2/3, retaining 267 correctly mapped child-key proofs in every slot.
+    auto& chainlock{fixture.chainlock};
+    chainlock.selected_quorum_mask = 0b1110;
+    chainlock.signer_bitmaps[0].fill(0);
+    SetFirstMembers(chainlock.signer_bitmaps[3], QUORUM_THRESHOLD);
+    for (std::size_t index{0}; index < 2 * QUORUM_THRESHOLD; ++index) {
+        chainlock.signatures[index] = chainlock.signatures[index + QUORUM_THRESHOLD];
+    }
+    for (std::size_t member{0}; member < QUORUM_THRESHOLD; ++member) {
+        const auto child{test::MakeSyntheticChildAuthorization(
+            fixture.genesis_hash, fixture.rosters[3].members[member].pro_tx_hash,
+            fixture.rosters[3].descriptor.epoch, UniqueChildKey(3, member),
+            1 + 3 * QUORUM_SIZE + member)};
+        chainlock.signatures[2 * QUORUM_THRESHOLD + member].key_proof = child.proof;
+    }
+}
+// SYSCOIN END: Preserve selected-roster admission across prepared contexts.
+
 constexpr std::size_t DURABLE_HEADER_SIZE{sizeof(uint16_t) + 32};
 constexpr std::size_t DESCRIPTOR_MEMBER_ROOT_OFFSET{164};
 constexpr std::size_t DESCRIPTOR_CHILD_ROOT_OFFSET{196};
@@ -547,44 +662,9 @@ BOOST_AUTO_TEST_CASE(durable_roster_context_rejects_noncanonical_content)
 BOOST_AUTO_TEST_CASE(durable_recovery_requires_explicit_trusted_path)
 {
     auto fixture{MakeVerificationFixture(/*target_height=*/2025)};
+    ConfigureRecoveryVerification(*fixture);
     auto& statement{fixture->chainlock.statement};
-    const RosterAuthorizationPriorState prior{
-        NonNullHash(520'000), InitializationWindow(/*first_epoch=*/0)};
-    statement.roster_transition =
-        RosterAuthorizationTransitionKind::RECOVER;
-    statement.roster_authorization_base = {
-        statement.previous_chainlock_height,
-        statement.previous_chainlock_hash,
-        NonNullHash(520'001)};
-    statement.roster_beacons = RecoveryWindow(
-        fixture->rosters.front().descriptor.epoch,
-        prior.window.active);
-    statement.previous_btcc_cursor = {};
-    statement.accepted_btcc_cursor = {};
-    statement.btcc_advance = BTCCAdvance::KEEP;
-
-    RosterAuthorizationVerificationContext recovery;
-    recovery.admission = RosterAuthorizationAdmission::RECOVER;
-    recovery.predecessor_height = statement.previous_chainlock_height;
-    recovery.predecessor_block_hash = statement.previous_chainlock_hash;
-    recovery.authorization_base = statement.roster_authorization_base;
-    recovery.reset_policy = ResetPolicy(fixture->schedule);
-    recovery.previous = prior;
-    SealRosterAuthorization(fixture->genesis_hash, statement, recovery);
-
-    std::array<QuorumDescriptor, ACTIVE_QUORUMS> descriptors;
-    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
-        const auto beacon_hash{GetRosterBeaconCommitmentHash(
-            fixture->genesis_hash,
-            statement.roster_beacons.active.seeds[slot])};
-        BOOST_REQUIRE(beacon_hash);
-        fixture->rosters[slot].descriptor.roster_beacon_hash =
-            *beacon_hash;
-        descriptors[slot] = fixture->rosters[slot].descriptor;
-    }
-    statement.quorum_context_hash = GetQuorumContextHash(
-        fixture->genesis_hash, statement.height,
-        statement.block_hash, descriptors);
+    const auto& recovery{fixture->authorization};
 
     // The test-only canonical builder stands in for the production snapshot
     // builder. The durable decoder itself never receives that provenance.
@@ -764,6 +844,84 @@ BOOST_AUTO_TEST_CASE(verified_roster_preparation_reuses_intrinsic_validation)
     BOOST_CHECK_EQUAL(GetQuorumRootTaggedHashCountForTesting(),
                       underfilled_hashes_before);
 }
+
+// SYSCOIN BEGIN: Selected-roster minima cannot be bypassed by context reuse or durable reconstruction.
+BOOST_AUTO_TEST_CASE(final_preparation_selected_roster_minimum_matches_direct_path)
+{
+    const auto source{MakeVerificationFixture()};
+    for (const std::size_t valid_count : {
+             std::size_t{QUORUM_MIN_VALID}, std::size_t{QUORUM_MIN_VALID - 1}, QUORUM_THRESHOLD}) {
+        for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+            BOOST_TEST_CONTEXT("valid_count=" << valid_count << ", slot=" << slot) {
+                auto fixture{std::make_unique<VerificationFixture>(*source)};
+                SetRosterValidCount(*fixture, slot, valid_count);
+                ChainLockVerificationError error{ChainLockVerificationError::NONE};
+                const auto rosters{VerifiedRosterSet::Create(
+                    fixture->genesis_hash,
+                    std::make_shared<const FrozenQuorumRosters>(fixture->rosters), &error)};
+                BOOST_REQUIRE(rosters);
+                const auto context{PreparedChainLockContext::Create(
+                    fixture->schedule, fixture->chainlock.statement, rosters,
+                    fixture->authorization, &error)};
+                // Intrinsic contexts intentionally retain unusable rosters;
+                // only selecting such a roster in a final witness is invalid.
+                BOOST_REQUIRE(context);
+                BOOST_CHECK(error == ChainLockVerificationError::NONE);
+                const bool selected{(fixture->chainlock.selected_quorum_mask & (uint8_t{1} << slot)) != 0};
+                CheckFinalPreparationParity(*fixture, *rosters, *context,
+                    !selected || valid_count >= QUORUM_MIN_VALID);
+            }
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(final_preparation_recovery_and_durable_context_enforce_selected_minimum)
+{
+    const auto source{MakeVerificationFixture(/*target_height=*/2025)};
+    ConfigureRecoveryVerification(*source);
+    for (const std::size_t valid_count : {
+             std::size_t{QUORUM_MIN_VALID}, std::size_t{QUORUM_MIN_VALID - 1}, QUORUM_THRESHOLD}) {
+        for (const bool select_oldest : {true, false}) {
+            BOOST_TEST_CONTEXT("valid_count=" << valid_count << ", select_oldest=" << select_oldest) {
+                auto fixture{std::make_unique<VerificationFixture>(*source)};
+                // A reset separately requires retained slots1/2/3 to be
+                // usable. Slot0 may be underfilled until a witness selects it.
+                SetRosterValidCount(*fixture, 0, valid_count);
+                if (!select_oldest) SelectRetainedRecoveryRosters(*fixture);
+                ChainLockVerificationError error{ChainLockVerificationError::NONE};
+                // Existing canonical-builder seam supplies provenance only;
+                // roster bytes still pass the real intrinsic validator.
+                const auto rosters{ChainLockStoreTestContextFactory::CreateCanonicalRosterSet(
+                    fixture->genesis_hash,
+                    std::make_shared<const FrozenQuorumRosters>(fixture->rosters), &error)};
+                BOOST_REQUIRE(rosters);
+                const auto context{PreparedChainLockContext::Create(
+                    fixture->schedule, fixture->chainlock.statement, rosters,
+                    fixture->authorization, &error)};
+                BOOST_REQUIRE(context);
+                BOOST_CHECK_EQUAL(context->AuthorizationMask(), 0b1111);
+                const bool accepted{!select_oldest || valid_count >= QUORUM_MIN_VALID};
+                CheckFinalPreparationParity(*fixture, *rosters, *context, accepted);
+
+                const auto bytes{DurableRosterContext::Capture(*context).Encode()};
+                const auto durable{DurableRosterContext::DecodeTrustedPersistence(bytes, &error)};
+                BOOST_REQUIRE(durable);
+                RosterAuthorizationVerificationContext trusted;
+                trusted.admission = RosterAuthorizationAdmission::TRUSTED_PERSISTENCE;
+                trusted.predecessor_height = fixture->chainlock.statement.previous_chainlock_height;
+                trusted.predecessor_block_hash = fixture->chainlock.statement.previous_chainlock_hash;
+                const auto restored{PreparedChainLockContext::CreateFromTrustedPersistence(
+                    fixture->schedule, fixture->chainlock.statement, *durable, trusted, &error)};
+                BOOST_REQUIRE(restored);
+                BOOST_CHECK(error == ChainLockVerificationError::NONE);
+                BOOST_CHECK(!restored->RosterSetPtr()->HasCanonicalBuildProvenance());
+                BOOST_CHECK(restored->Rosters() == fixture->rosters);
+                CheckFinalPreparationParity(*fixture, *rosters, *restored, accepted);
+            }
+        }
+    }
+}
+// SYSCOIN END: Selected-roster minima cannot be bypassed by context reuse or durable reconstruction.
 
 BOOST_AUTO_TEST_CASE(preparation_rejects_root_context_index_and_bitmap_corruption)
 {

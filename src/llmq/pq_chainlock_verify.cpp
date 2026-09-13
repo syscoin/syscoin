@@ -1334,7 +1334,9 @@ PrepareFinalChainLockVerificationInternal(
         const auto& roster = rosters[slot];
         const auto leaf_index{ChainLockLeafIndex(
             schedule, roster.descriptor.epoch, chainlock.statement.height)};
-        if (!leaf_index) {
+        // Context preparation precedes bundle selection. Enforce the selected
+        // roster minimum here for both direct and prepared-context callers.
+        if (roster.descriptor.valid_count < QUORUM_MIN_VALID || !leaf_index) {
             SetError(error, ChainLockVerificationError::INVALID_DESCRIPTOR);
             return std::nullopt;
         }

@@ -2518,18 +2518,38 @@ BOOST_AUTO_TEST_CASE(recovery_requires_three_usable_retained_rosters)
     const auto source_snapshot_height{RegistrationCutoffHeight(
         BuildConfig(SNAPSHOT_LAG).schedule, SOURCE_EPOCH, SNAPSHOT_LAG)};
     BOOST_REQUIRE(source_snapshot_height);
-    const auto make_lookup = [&](uint32_t usable_members) {
+    // SYSCOIN: A valid recovery source can retain three usable rosters while
+    // the oldest roster loses one frozen key at the signing boundary.
+    const auto active_epochs{ActiveEpochsAtHeight(Schedule(), TARGET_HEIGHT)};
+    BOOST_REQUIRE(active_epochs);
+    const uint32_t oldest_epoch{active_epochs->front().epoch};
+    const int32_t signing_boundary{
+        TARGET_HEIGHT - static_cast<int32_t>(Schedule().sign_lag)};
+    std::size_t degraded_boundaries{0};
+    const auto make_lookup = [&](uint32_t usable_members, bool degrade_oldest = false) {
         return QuorumSnapshotLookup{
-            [&, usable_members](const CBlockIndex& index) {
+            [&, usable_members, degrade_oldest](const CBlockIndex& index) {
                 QuorumSnapshotState result;
                 result.deterministic_mns = Snapshot(
                     index.nHeight, index.GetBlockHash(), QUORUM_SIZE);
-                result.operator_key_states =
-                    index.nHeight == *source_snapshot_height
-                    ? SharedOperatorStates(KeyStates(
-                          QUORUM_SIZE, SOURCE_EPOCH, index.nHeight))
-                    : SharedOperatorStates(RecoveryTargetKeyStates(
-                          usable_members, index.nHeight));
+                auto states{index.nHeight == *source_snapshot_height
+                    ? KeyStates(QUORUM_SIZE, SOURCE_EPOCH, index.nHeight)
+                    : RecoveryTargetKeyStates(usable_members, index.nHeight)};
+                if (degrade_oldest && index.nHeight == signing_boundary) {
+                    BOOST_REQUIRE(index.nHeight != *source_snapshot_height);
+                    BOOST_REQUIRE(!states.empty());
+                    auto& member{states.front()};
+                    const auto child{std::find_if(
+                        member.frozen_child_roots.begin(), member.frozen_child_roots.end(),
+                        [&](const FrozenChildRootRecord& value) { return value.epoch == oldest_epoch; })};
+                    BOOST_REQUIRE(child != member.frozen_child_roots.end());
+                    member.frozen_child_roots.erase(child);
+                    BOOST_REQUIRE(member.IsStructurallyValid());
+                    BOOST_REQUIRE(member.ResolveChildRoot(oldest_epoch).status ==
+                                  ChildRootResolutionStatus::FROZEN_ABSENT);
+                    ++degraded_boundaries;
+                }
+                result.operator_key_states = SharedOperatorStates(std::move(states));
                 return std::optional<QuorumSnapshotState>{std::move(result)};
             }};
     };
@@ -2556,6 +2576,98 @@ BOOST_AUTO_TEST_CASE(recovery_requires_three_usable_retained_rosters)
     BOOST_CHECK(!below_threshold->GetVerifiedActive(
         TARGET_HEIGHT, chain.Tip(), bundle, &error));
     BOOST_CHECK(error == QuorumBuildError::CHILD_KEY_NOT_FROZEN);
+
+    // SYSCOIN BEGIN: Build the underfilled selected roster through the real canonical cache.
+    const auto oldest_underfilled{FrozenQuorumRosterCache::Create(
+        genesis, BuildConfig(SNAPSHOT_LAG), make_lookup(QUORUM_MIN_VALID, true))};
+    BOOST_REQUIRE(oldest_underfilled);
+    const auto canonical{oldest_underfilled->GetVerifiedActive(
+        TARGET_HEIGHT, chain.Tip(), bundle, &error)};
+    BOOST_REQUIRE(canonical);
+    BOOST_CHECK(error == QuorumBuildError::NONE);
+    BOOST_CHECK_GT(degraded_boundaries, 0U);
+    BOOST_CHECK(canonical->HasCanonicalBuildProvenance());
+    BOOST_CHECK_EQUAL(canonical->Rosters()[0].descriptor.valid_count, QUORUM_MIN_VALID - 1);
+    const auto disabled_slot{FindMember(canonical->Rosters()[0], NonNullHash(10'000))};
+    BOOST_REQUIRE_LT(disabled_slot, QUORUM_SIZE);
+    BOOST_CHECK(!canonical->Rosters()[0].members[disabled_slot].eligible);
+    for (std::size_t slot{1}; slot < ACTIVE_QUORUMS; ++slot) {
+        BOOST_CHECK_EQUAL(canonical->Rosters()[slot].descriptor.valid_count, QUORUM_MIN_VALID);
+        BOOST_CHECK(canonical->Rosters()[slot].descriptor == accepted->Rosters()[slot].descriptor);
+    }
+
+    FinalChainLock certificate;
+    auto& statement{certificate.statement};
+    statement.height = TARGET_HEIGHT;
+    statement.block_hash = chain.Tip().GetBlockHash();
+    statement.previous_chainlock_height = TARGET_HEIGHT - static_cast<int32_t>(PQ_CL_PERIOD);
+    statement.previous_chainlock_hash = chain.At(statement.previous_chainlock_height).GetBlockHash();
+    statement.roster_transition = RosterAuthorizationTransitionKind::RECOVER;
+    statement.roster_authorization_base = {
+        statement.previous_chainlock_height, statement.previous_chainlock_hash, NonNullHash(18'202)};
+    const auto window{MakeRecoveryRosterBeaconWindow(source, active_epochs->back().epoch)};
+    BOOST_REQUIRE(window);
+    statement.roster_beacons = *window;
+    statement.payment_probation_state_hash = NonNullHash(18'203);
+    RosterBeaconWindow previous;
+    previous.active = BeaconBundle(SOURCE_EPOCH, 18'201);
+    previous.active.seeds.back() = source.normal_beacon;
+    previous.active.recovery_authority_source = source;
+    previous.next.epoch = SOURCE_EPOCH + 1;
+    BOOST_REQUIRE(previous.IsStructurallyValid());
+    RosterAuthorizationVerificationContext recovery;
+    recovery.admission = RosterAuthorizationAdmission::RECOVER;
+    recovery.predecessor_height = statement.previous_chainlock_height;
+    recovery.predecessor_block_hash = statement.previous_chainlock_hash;
+    recovery.authorization_base = statement.roster_authorization_base;
+    recovery.reset_policy = ResetPolicy();
+    recovery.previous = RosterAuthorizationPriorState{NonNullHash(18'204), previous};
+    RosterAuthorizationTransition transition;
+    transition.kind = statement.roster_transition;
+    transition.target_height = statement.height;
+    transition.target_block_hash = statement.block_hash;
+    transition.predecessor_height = statement.previous_chainlock_height;
+    transition.predecessor_block_hash = statement.previous_chainlock_hash;
+    transition.authorization_base = statement.roster_authorization_base;
+    transition.previous = recovery.previous;
+    transition.new_window = statement.roster_beacons;
+    const auto authorization_hash{GetRosterAuthorizationStateHash(genesis, transition)};
+    BOOST_REQUIRE(authorization_hash);
+    statement.roster_authorization_state_hash = *authorization_hash;
+    std::array<QuorumDescriptor, ACTIVE_QUORUMS> descriptors;
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        descriptors[slot] = canonical->Rosters()[slot].descriptor;
+    }
+    statement.quorum_context_hash = GetQuorumContextHash(
+        genesis, TARGET_HEIGHT, statement.block_hash, descriptors);
+    const auto hashes_before{GetQuorumRootTaggedHashCountForTesting()};
+    ChainLockVerificationError verification_error{ChainLockVerificationError::NONE};
+    const auto prepared{PreparedChainLockContext::Create(
+        Schedule(), statement, canonical, recovery, &verification_error)};
+    BOOST_REQUIRE(prepared);
+    certificate.selected_quorum_mask = 0b0111;
+    certificate.signatures.resize(FINAL_SIGNATURE_COUNT);
+    for (auto& signature : certificate.signatures) {
+        signature.key_proof.public_key[0] = 1;
+    }
+    for (std::size_t slot{0}; slot < REQUIRED_QUORUMS; ++slot) {
+        auto& bitmap{certificate.signer_bitmaps[slot]};
+        std::size_t count{0};
+        for (std::size_t member{0}; member < QUORUM_SIZE && count < QUORUM_THRESHOLD; ++member) {
+            if (!canonical->Rosters()[slot].members[member].eligible) continue;
+            bitmap[member / 8] |= static_cast<uint8_t>(uint8_t{1} << (member % 8));
+            ++count;
+        }
+        BOOST_REQUIRE_EQUAL(count, QUORUM_THRESHOLD);
+    }
+    BOOST_REQUIRE(certificate.IsStructurallyValid());
+    // Existing builder snapshots carry synthetic commitment bytes. The
+    // selected-roster check must reject before reading these unfilled proofs;
+    // actual proof preparation and durable decoding are covered in verifier tests.
+    BOOST_CHECK(!PrepareFinalChainLockVerification(certificate, *prepared, &verification_error));
+    BOOST_CHECK(verification_error == ChainLockVerificationError::INVALID_DESCRIPTOR);
+    BOOST_CHECK_EQUAL(GetQuorumRootTaggedHashCountForTesting(), hashes_before);
+    // SYSCOIN END: Build the underfilled selected roster through the real canonical cache.
 }
 
 BOOST_AUTO_TEST_CASE(future_recovery_source_requires_400_frozen_roots)
