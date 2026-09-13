@@ -160,6 +160,12 @@ Deferred replay retains its original marker and does not call its finalizer
 after reconciliation, because the original target was not applied. Replacement
 selection runs after releasing the replay activation lock.
 
+Successful deferred BTCC or payment-audit replay requires `durable-pair-v1`
+for the exact completed endpoint before clearing its marker and releasing
+retained replay inputs. This also applies when a retry finds the endpoint
+already applied. A failed acknowledgement retains the marker for retry. The
+durability request occurs at completion, not after every batch or healthy block.
+
 ## Root ownership during rollback
 
 A receipt-deferred suffix can repeat a NEVM hash already carried by the retained

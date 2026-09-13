@@ -9334,6 +9334,67 @@ void AssertMainLockHeldForTest() NO_THREAD_SAFETY_ANALYSIS
     AssertLockHeld(::cs_main);
 }
 
+struct DeferredNEVMDurabilitySetup : StartupNEVMRecoverySetup {
+    std::shared_ptr<const CBlock> prefix, target;
+    std::size_t finalizations{0};
+    bool complete{false};
+    std::string error;
+
+    DeferredNEVMDurabilitySetup()
+    {
+        nevm->strict_connect_order = true;
+        prefix = MineNEVMBlock();
+        BOOST_REQUIRE_EQUAL(nevm->durable_pair_requests, 0U);
+        nevm->PersistAppliedPair();
+        target = MineNEVMBlock(/*forward_to_nevm=*/false);
+        nevm->connected_blocks.clear();
+        nevm->command_trace.clear();
+    }
+
+    bool Replay(const std::function<bool()>& finalize = {},
+                const std::function<bool()>& revalidate = {})
+    {
+        return ReplayDeferredForTest(
+            m_node.chainman->ActiveChainstate(), 102, target->GetHash(),
+            [&] {
+                AssertMainLockHeldForTest();
+                ++finalizations;
+                BOOST_REQUIRE(nevm->durable_pair.has_value());
+                BOOST_CHECK_EQUAL(nevm->durable_pair->count, 2U);
+                BOOST_CHECK(nevm->durable_pair->hash == target->GetHash());
+                return !finalize || finalize();
+            }, complete, error, revalidate);
+    }
+
+    void CheckLocalState()
+    {
+        LOCK(::cs_main);
+        auto& chainstate{m_node.chainman->ActiveChainstate()};
+        BOOST_CHECK(chainstate.m_chain.Tip()->GetBlockHash() == target->GetHash());
+        BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == target->GetHash());
+        BOOST_CHECK(chainstate.CoinsTip().HaveCoin({target->vtx.front()->GetHash(), 0}));
+        BOOST_CHECK(!(chainstate.m_chain.Tip()->nStatus &
+                      (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK)));
+        BOOST_CHECK(!node::test::NEVMMiningTestAccess::HasPendingRecoveryContext(chainstate));
+        CNEVMHeader header;
+        BlockValidationState state;
+        BOOST_REQUIRE(GetNEVMData(state, *target, header));
+        NEVMTxRoot roots;
+        BOOST_REQUIRE(pnevmtxrootsdb->ReadTxRoots(header.nBlockHash, roots));
+        BOOST_CHECK(roots.nTxRoot == header.nTxRoot);
+        BOOST_CHECK(roots.nReceiptRoot == header.nReceiptRoot);
+        BOOST_CHECK(nevm->disconnected_blocks.empty());
+    }
+
+    void CheckAlreadyAppliedTrace()
+    {
+        const std::vector<std::string> expected{
+            "flush", "blockinfo", "durable-pair-v1:2:" + target->GetHash().GetHex()};
+        BOOST_CHECK(nevm->command_trace == expected);
+        BOOST_CHECK(nevm->connected_blocks == std::vector<uint256>{target->GetHash()});
+    }
+};
+
 // SYSCOIN: Deferred replay must preserve its original marker when a synthetic
 // engine verdict causes ordinary invalidation of locally valid fixture blocks.
 struct DeferredNEVMRejectionSetup : StartupNEVMRecoverySetup {
@@ -13729,8 +13790,10 @@ BOOST_FIXTURE_TEST_CASE(nevm_root_publication_requires_distinct_blockfile_flush,
         const bool flushed{chainstate.FlushStateToDisk(state, FlushStateMode::ALWAYS)};
         BOOST_CHECK(!flushed);
         BOOST_CHECK(state.IsError());
+        // The index writer now fences both file cursors before root branch
+        // publication, so the missing carrier stream is rejected there first.
         BOOST_CHECK_EQUAL(state.GetRejectReason(),
-                          "Failed to persist NEVM root publication branch");
+                          "Failed to write to block index database");
         BOOST_CHECK_EQUAL(root_writes, 0U);
         BOOST_CHECK_EQUAL(coins_writes, 0U);
         BOOST_CHECK(RootsDB().GetPublishedTip() == previous_published_tip);
@@ -14250,6 +14313,108 @@ BOOST_FIXTURE_TEST_CASE(deferred_nevm_replay_clears_only_at_exact_tip,
     BOOST_CHECK(error.empty());
 }
 
+BOOST_FIXTURE_TEST_CASE(deferred_nevm_replay_requires_durable_pair_on_every_finalization,
+                        DeferredNEVMDurabilitySetup)
+{
+    nevm->durable_pair_response = [] { return false; };
+    BOOST_CHECK(!Replay());
+    BOOST_CHECK(!complete);
+    BOOST_CHECK_EQUAL(error, "deferred-nevm-durability-unavailable");
+    BOOST_CHECK_EQUAL(finalizations, 0U);
+    BOOST_CHECK_EQUAL(nevm->durable_pair_requests, 1U);
+    BOOST_CHECK_EQUAL(nevm->applied_count, 2U);
+    BOOST_CHECK(nevm->applied_hash == target->GetHash());
+    BOOST_REQUIRE(nevm->durable_pair.has_value());
+    BOOST_CHECK_EQUAL(nevm->durable_pair->count, 1U);
+    BOOST_CHECK(nevm->durable_pair->hash == prefix->GetHash());
+    CheckLocalState();
+
+    // Status now reports the exact tip, but that does not make an unavailable
+    // durability ACK usable. This retry must fence without redelivering it.
+    nevm->command_trace.clear();
+    BOOST_CHECK(!Replay());
+    BOOST_CHECK(!complete);
+    BOOST_CHECK_EQUAL(error, "deferred-nevm-durability-unavailable");
+    BOOST_CHECK_EQUAL(finalizations, 0U);
+    BOOST_CHECK_EQUAL(nevm->durable_pair_requests, 2U);
+    CheckAlreadyAppliedTrace();
+    CheckLocalState();
+
+    nevm->durable_pair_response = {};
+    nevm->command_trace.clear();
+    BOOST_REQUIRE_MESSAGE(Replay(), error);
+    BOOST_CHECK(complete);
+    BOOST_CHECK(error.empty());
+    BOOST_CHECK_EQUAL(finalizations, 1U);
+    BOOST_CHECK_EQUAL(nevm->durable_pair_requests, 3U);
+    CheckAlreadyAppliedTrace();
+    nevm->RestartFromDurablePair();
+    BOOST_CHECK_EQUAL(nevm->applied_count, 2U);
+    BOOST_CHECK(nevm->applied_hash == target->GetHash());
+    CheckLocalState();
+}
+
+BOOST_FIXTURE_TEST_CASE(deferred_nevm_replay_lost_durable_ack_and_finalizer_failure_retry,
+                        DeferredNEVMDurabilitySetup)
+{
+    // A completed engine barrier with a lost reply still cannot authorize
+    // marker deletion. Model the separate live and durable engine endpoints.
+    nevm->durable_pair_response = [&] {
+        nevm->PersistAppliedPair();
+        return false;
+    };
+    BOOST_CHECK(!Replay());
+    BOOST_CHECK(!complete);
+    BOOST_CHECK_EQUAL(error, "deferred-nevm-durability-unavailable");
+    BOOST_CHECK_EQUAL(finalizations, 0U);
+    nevm->RestartFromDurablePair();
+    BOOST_CHECK(nevm->applied_hash == target->GetHash());
+
+    // The existing finalizer callback is the marker-deletion boundary. Its
+    // refusal must remain safely retryable after the engine barrier succeeds.
+    nevm->durable_pair_response = {};
+    nevm->command_trace.clear();
+    BOOST_CHECK(!Replay([] { return false; }));
+    BOOST_CHECK_EQUAL(error, "deferred-nevm-replay-finalization-failed");
+    BOOST_CHECK_EQUAL(finalizations, 1U);
+    CheckAlreadyAppliedTrace();
+    nevm->RestartFromDurablePair();
+    nevm->command_trace.clear();
+    BOOST_REQUIRE_MESSAGE(Replay(), error);
+    BOOST_CHECK(complete);
+    BOOST_CHECK(error.empty());
+    BOOST_CHECK_EQUAL(finalizations, 2U);
+    BOOST_CHECK_EQUAL(nevm->durable_pair_requests, 3U);
+    CheckAlreadyAppliedTrace();
+    CheckLocalState();
+}
+
+BOOST_FIXTURE_TEST_CASE(deferred_nevm_replay_revalidates_after_durable_ack,
+                        DeferredNEVMDurabilitySetup)
+{
+    bool authorized{true};
+    nevm->durable_pair_response = [&] {
+        authorized = false;
+        return true;
+    };
+    BOOST_CHECK(!Replay({}, [&] { return authorized; }));
+    BOOST_CHECK(!complete);
+    BOOST_CHECK_EQUAL(error, "deferred-nevm-replay-authorization-changed");
+    BOOST_CHECK_EQUAL(finalizations, 0U);
+    BOOST_REQUIRE(nevm->durable_pair.has_value());
+    BOOST_CHECK(nevm->durable_pair->hash == target->GetHash());
+    CheckLocalState();
+
+    authorized = true;
+    nevm->durable_pair_response = {};
+    nevm->command_trace.clear();
+    BOOST_REQUIRE_MESSAGE(Replay({}, [&] { return authorized; }), error);
+    BOOST_CHECK(complete);
+    BOOST_CHECK_EQUAL(finalizations, 1U);
+    BOOST_CHECK_EQUAL(nevm->durable_pair_requests, 2U);
+    CheckAlreadyAppliedTrace();
+}
+
 BOOST_FIXTURE_TEST_CASE(deferred_nevm_replay_revalidation_rejects_before_engine_activity,
                         StartupNEVMRecoverySetup)
 {
@@ -14398,6 +14563,7 @@ BOOST_FIXTURE_TEST_CASE(deferred_nevm_replay_commits_each_bounded_batch,
     BOOST_REQUIRE(target != nullptr);
     BOOST_REQUIRE_EQUAL(nevm->applied_count, 0U);
     BOOST_REQUIRE(nevm->connected_blocks.empty());
+    BOOST_REQUIRE_EQUAL(nevm->durable_pair_requests, 0U);
     nevm->buffer_connects = true;
 
     std::size_t finalizations{0};
@@ -14420,6 +14586,7 @@ BOOST_FIXTURE_TEST_CASE(deferred_nevm_replay_commits_each_bounded_batch,
     BOOST_CHECK(!complete);
     BOOST_CHECK_EQUAL(finalizations, 0U);
     BOOST_CHECK_EQUAL(nevm->applied_count, 64U);
+    BOOST_CHECK_EQUAL(nevm->durable_pair_requests, 0U);
     BOOST_CHECK(nevm->applied_hash == expected_blocks[63]);
     BOOST_CHECK(!nevm->buffered_pair.has_value());
     BOOST_CHECK(error.empty());
@@ -14431,6 +14598,7 @@ BOOST_FIXTURE_TEST_CASE(deferred_nevm_replay_commits_each_bounded_batch,
     BOOST_CHECK_EQUAL(finalizations, 1U);
     BOOST_CHECK(error.empty());
     BOOST_CHECK(nevm->connected_blocks == expected_blocks);
+    BOOST_CHECK_EQUAL(nevm->durable_pair_requests, 1U);
 }
 
 BOOST_FIXTURE_TEST_CASE(deferred_nevm_replay_flushes_accepted_prefix_before_cursor,

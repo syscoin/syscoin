@@ -585,6 +585,10 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
 bool BlockManager::WriteBlockIndexDB()
 {
     AssertLockHeld(::cs_main);
+    // File metadata may name unfinished undo in an older download file.
+    // Persist those streams before publishing their positions or forgetting
+    // the dirty entries, including across a later process restart.
+    if (!m_dirty_fileinfo.empty() && !FlushBlockFilesForDurability()) return false;
     std::vector<std::pair<int, const CBlockFileInfo*>> vFiles;
     vFiles.reserve(m_dirty_fileinfo.size());
     // SYSCOIN BEGIN: Retain dirty file entries while collecting the Bitcoin database batch.
@@ -951,7 +955,7 @@ bool BlockManager::FlushBlockFilesForDurability()
         if (!flush(BlockFileSeq(), info.nSize) ||
             !flush(UndoFileSeq(), info.nUndoSize)) return false;
     }
-    // Keep both dirty sets intact until WriteBlockIndexDB succeeds.
+    // Leave dirty index/file metadata intact until WriteBlockIndexDB succeeds.
     return true;
 }
 

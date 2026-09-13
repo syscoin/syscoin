@@ -3401,7 +3401,7 @@ bool ChainstateManager::InitializeNEVMPendingConnect(std::string& error)
 }
 
 // SYSCOIN: A live endpoint acknowledgment does not make its state durable.
-// Share the exact engine barrier between rollback and failed-connect cleanup.
+// Share the exact engine barrier across rollback and recovery completion.
 static bool MakeNEVMPairDurable(const ChainstateManager& chainman,
                                 uint64_t count, const uint256& hash)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main)
@@ -5189,11 +5189,11 @@ bool Chainstate::ReplayDeferredBTCCNEVMLocked(
 
     // SYSCOIN: Marker deletion is the commit point for deferred replay. Keep
     // the ActivateBestChain exclusion held through the exact-tip recheck and
-    // durable deletion so no newly connected block can be skipped between
-    // those operations. The finalizer may take the marker mutex, preserving
-    // the canonical m_chainstate_mutex -> cs_main -> marker lock order.
+    // engine durability and marker deletion so no newly connected block can
+    // be skipped between those operations. The finalizer may take the marker
+    // mutex, preserving m_chainstate_mutex -> cs_main -> marker lock order.
     const auto finalize_at_exact_tip =
-        [&]() EXCLUSIVE_LOCKS_REQUIRED(m_chainstate_mutex) {
+        [&](uint64_t count, const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(m_chainstate_mutex) {
         if (!complete) return true;
         LOCK(cs_main);
         const CBlockIndex* active_tip{m_chainman.ActiveTip()};
@@ -5201,6 +5201,15 @@ bool Chainstate::ReplayDeferredBTCCNEVMLocked(
             active_tip->GetBlockHash() != through_hash) {
             complete = false;
             return true;
+        }
+        if (!authorization_current()) return false;
+        // Ordinary flush/status proves only the live pair. Fence that exact
+        // authenticated endpoint before either marker callback can release
+        // replay inputs, including when an earlier attempt already applied it.
+        if (!MakeNEVMPairDurable(m_chainman, count, hash)) {
+            complete = false;
+            error = "deferred-nevm-durability-unavailable";
+            return false;
         }
         if (!authorization_current()) return false;
         if (!finalize()) {
@@ -5266,7 +5275,7 @@ bool Chainstate::ReplayDeferredBTCCNEVMLocked(
             error = "deferred-nevm-prefix-reorged";
             return false;
         }
-        return finalize_at_exact_tip();
+        return finalize_at_exact_tip(geth_count, geth_last_syscoin_hash);
     }
 
     // SYSCOIN: Bound scheduler work. Flush before reading the applied pair
@@ -5405,7 +5414,7 @@ bool Chainstate::ReplayDeferredBTCCNEVMLocked(
         }
     }
     complete = last_height == through_height;
-    return finalize_at_exact_tip();
+    return finalize_at_exact_tip(geth_count, geth_last_syscoin_hash);
 }
 
 bool Chainstate::RunWithStableActiveChain(

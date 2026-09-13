@@ -633,6 +633,14 @@ public:
         return handler.ClearPaymentAuditPreseal(marker);
     }
 
+    static void RefreshReplayPruneLocks(CChainLocksHandler& handler)
+    {
+        LOCK(::cs_main);
+        LOCK(handler.m_btcc_preseal_mutex);
+        handler.UpdateBTCCPresealPruneLock(handler.m_btcc_preseal_state);
+        handler.UpdatePaymentAuditPresealPruneLock(handler.m_payment_audit_preseal_state);
+    }
+
     static void ReplayPaymentPreseal(CChainLocksHandler& handler)
     {
         handler.MaybeReplayPaymentAuditPreseal();
@@ -2529,6 +2537,12 @@ struct BTCCPresealDurabilitySetup : TestingSetup {
 struct ReplayMiningNEVMSubscriber final : CValidationInterface {
     std::size_t template_requests{0};
     std::string template_error;
+    std::optional<std::pair<uint64_t, uint256>> applied_pair;
+    std::optional<std::pair<uint64_t, uint256>> durable_pair;
+    bool durable_pair_available{true};
+    bool lose_durable_ack{false};
+    std::vector<std::string> replay_commands;
+    std::size_t replay_connects{0};
 
     void NotifyGetNEVMBlock(CNEVMBlock& block, std::string& error) override
     {
@@ -2542,12 +2556,39 @@ struct ReplayMiningNEVMSubscriber final : CValidationInterface {
 
     void NotifyNEVMBlockConnect(
         const CNEVMHeader&, const CBlock&, std::string& error,
-        const uint256&, NEVMDataVec&, const uint32_t&, bool, const uint256&,
+        const uint256& hash, NEVMDataVec&, const uint32_t&, bool, const uint256&,
         const CDeterministicMNListNEVMAddressDiff&,
         std::optional<NEVMBlockReject>* rejection = nullptr) override
     {
         error.clear();
         if (rejection) rejection->reset();
+        if (!hash.IsNull()) ++replay_connects;
+    }
+
+    void NotifyGetNEVMBlockInfo(uint64_t& count, uint256& hash,
+                               std::string& error) override
+    {
+        if (!applied_pair) return;
+        replay_commands.push_back("blockinfo");
+        std::tie(count, hash) = *applied_pair;
+        error.clear();
+    }
+
+    void NotifyNEVMComms(const std::string& command, bool& response,
+                        std::optional<NEVMBlockReject>* rejection = nullptr) override
+    {
+        if (!applied_pair) return;
+        if (rejection) rejection->reset();
+        replay_commands.push_back(command);
+        if (command == "flush") {
+            response = true;
+            return;
+        }
+        const auto expected{"durable-pair-v1:" + std::to_string(applied_pair->first) +
+                            ":" + applied_pair->second.GetHex()};
+        response = command == expected && durable_pair_available;
+        if (response) durable_pair = applied_pair;
+        if (lose_durable_ack) response = false;
     }
 };
 
@@ -2679,6 +2720,108 @@ struct PresealMiningSetup : TestChain100Setup {
         BOOST_REQUIRE(durable->LoadBTCCPresealState() == btcc);
         BOOST_REQUIRE(durable->LoadPaymentAuditPresealState() == payment);
         BOOST_REQUIRE(!durable->HasBest());
+    }
+
+    void CheckReplayFinalizationDurability(bool payment)
+    {
+        auto& chainman{*m_node.chainman};
+        auto& handler{*llmq::chainLocksHandler};
+        const CBlockIndex* tip{WITH_LOCK(::cs_main, return chainman.ActiveTip())};
+        BOOST_REQUIRE(tip);
+        CheckAssemblerAllowed();
+        CheckMiningCachesAllowed();
+        llmq::pq::BTCCPresealState btcc_state;
+        llmq::pq::PaymentAuditPresealState payment_state;
+        if (payment) payment_state.active = PaymentMarker();
+        else btcc_state.active = BTCCMarker();
+        Access::SetReplayMarkers(handler, btcc_state, payment_state);
+        Access::RefreshReplayPruneLocks(handler);
+        const std::string prune_lock{payment ? "payment-audit-replay" : "btcc-nevm-replay"};
+        const int retained_height{payment ? TIP_HEIGHT : BTCC_CARRIER_HEIGHT};
+        const auto check_retained = [&] {
+            CheckDurableMarkers(btcc_state, payment_state);
+            BOOST_CHECK(handler.HasNEVMReplayObligation());
+            CheckAssemblerBlocked();
+            CheckMiningCachesBlocked();
+            LOCK(::cs_main);
+            // A maximum request observes the existing lower-only lock without
+            // raising its floor, as in the block-manager retention tests.
+            BOOST_CHECK_EQUAL(chainman.m_blockman.UpdatePruneLockLowerOnly(
+                prune_lock, node::PruneLockInfo{std::numeric_limits<int>::max()}),
+                retained_height);
+            BOOST_CHECK(chainman.ActiveTip() == tip);
+            BOOST_CHECK(chainman.ActiveChainstate().CoinsTip().GetBestBlock() == tip->GetBlockHash());
+        };
+        check_retained();
+
+        // This fixture supplies the already-authenticated, already-applied
+        // endpoint. The small validation fixture separately exercises delivery
+        // of real deferred NEVM blocks. Here the production marker callbacks,
+        // disk erasure, pruning and mining gates are the objects under test.
+        const uint64_t count{TIP_HEIGHT - 101 + 1};
+        nevm->applied_pair = std::make_pair(count, tip->GetBlockHash());
+        nevm->durable_pair = std::make_pair(count - 1, tip->pprev->GetBlockHash());
+        nevm->durable_pair_available = false;
+        std::size_t finalizations{0};
+        bool complete{true};
+        std::string error;
+        const auto replay = [&]() NO_THREAD_SAFETY_ANALYSIS {
+            AssertLockNotHeld(::cs_main);
+            return chainman.ActiveChainstate().ReplayDeferredBTCCNEVM(
+                tip->nHeight, tip->GetBlockHash(),
+                [&] {
+                    ++finalizations;
+                    BOOST_CHECK(nevm->durable_pair == nevm->applied_pair);
+                    return payment ? Access::ClearReplayMarker(handler, *payment_state.active)
+                                   : Access::ClearReplayMarker(handler, *btcc_state.active);
+                }, complete, error);
+        };
+        BOOST_CHECK(!replay());
+        BOOST_CHECK(!complete);
+        BOOST_CHECK_EQUAL(error, "deferred-nevm-durability-unavailable");
+        BOOST_CHECK_EQUAL(finalizations, 0U);
+        BOOST_CHECK(nevm->durable_pair != nevm->applied_pair);
+        check_retained();
+
+        // A lost ACK remains unusable even if the engine did persist the pair.
+        nevm->durable_pair_available = true;
+        nevm->lose_durable_ack = true;
+        BOOST_CHECK(!replay());
+        BOOST_CHECK(!complete);
+        BOOST_CHECK_EQUAL(error, "deferred-nevm-durability-unavailable");
+        BOOST_CHECK_EQUAL(finalizations, 0U);
+        BOOST_CHECK(nevm->durable_pair == nevm->applied_pair);
+        check_retained();
+
+        nevm->lose_durable_ack = false;
+        BOOST_REQUIRE_MESSAGE(replay(), error);
+        BOOST_CHECK(complete);
+        BOOST_CHECK(error.empty());
+        BOOST_CHECK_EQUAL(finalizations, 1U);
+        CheckDurableMarkers({}, {});
+        BOOST_CHECK(!handler.HasNEVMReplayObligation());
+        {
+            LOCK(::cs_main);
+            BOOST_CHECK_EQUAL(chainman.m_blockman.UpdatePruneLockLowerOnly(
+                prune_lock, node::PruneLockInfo{std::numeric_limits<int>::max()}),
+                std::numeric_limits<int>::max());
+            chainman.m_blockman.RemovePruneLock(prune_lock);
+        }
+        // Reopening the model engine after marker erasure preserves the exact
+        // endpoint; none of these already-applied retries sends another block.
+        nevm->applied_pair = nevm->durable_pair;
+        BOOST_REQUIRE(nevm->applied_pair.has_value());
+        BOOST_CHECK_EQUAL(nevm->applied_pair->first, count);
+        BOOST_CHECK(nevm->applied_pair->second == tip->GetBlockHash());
+        BOOST_CHECK_EQUAL(nevm->replay_connects, 0U);
+        const std::string fence{"durable-pair-v1:" + std::to_string(count) + ":" + tip->GetBlockHash().GetHex()};
+        const std::vector<std::string> expected{
+            "flush", "blockinfo", fence, "flush", "blockinfo", fence,
+            "flush", "blockinfo", fence};
+        BOOST_CHECK(nevm->replay_commands == expected);
+        nevm->applied_pair.reset();
+        CheckAssemblerAllowed();
+        CheckMiningCachesAllowed();
     }
 
     UniValue MiningRPC(const std::string& method)
@@ -4713,6 +4856,18 @@ BOOST_FIXTURE_TEST_CASE(nevm_mining_active_btcc_preseal_blocks_before_template_r
     CheckDurableMarkers({}, {});
     CheckAssemblerAllowed();
     CheckMiningCachesAllowed();
+}
+
+BOOST_FIXTURE_TEST_CASE(btcc_preseal_replay_finalizer_retains_marker_until_durable_pair,
+                        PresealMiningSetup)
+{
+    CheckReplayFinalizationDurability(/*payment=*/false);
+}
+
+BOOST_FIXTURE_TEST_CASE(payment_preseal_replay_finalizer_retains_marker_until_durable_pair,
+                        PresealMiningSetup)
+{
+    CheckReplayFinalizationDurability(/*payment=*/true);
 }
 
 BOOST_FIXTURE_TEST_CASE(nevm_mining_active_payment_preseal_blocks_fresh_and_cached_templates,

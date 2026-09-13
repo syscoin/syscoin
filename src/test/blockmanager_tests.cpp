@@ -904,6 +904,102 @@ BOOST_FIXTURE_TEST_CASE(preseal_durability_flushes_older_dirty_undo, NEVMBlockSt
     CheckStored(*index, block.vchNEVMBlockData);
 }
 
+BOOST_FIXTURE_TEST_CASE(block_index_flush_requires_older_unfinished_undo, NEVMBlockStorageSetup)
+{
+    LOCK(cs_main);
+    Store(/*with_undo=*/false);
+    const auto old_file{index->nFile};
+    const auto later{blockman.SaveBlockToDisk(
+        Params().GenesisBlock(), index->nHeight + 1, nullptr)};
+    BOOST_REQUIRE_EQUAL(later.nFile, old_file);
+    RollBlockFile();
+    BOOST_REQUIRE(blockman.WriteBlockIndexDB());
+    BOOST_REQUIRE_GT(blockman.GetBlockFileInfo(old_file)->nHeightLast,
+                     static_cast<unsigned int>(index->nHeight));
+    undo.vtxundo.resize(1);
+    undo.vtxundo.front().vprevout.emplace_back(
+        CTxOut{456, CScript{} << OP_TRUE}, 8, false);
+    BlockValidationState state;
+    BOOST_REQUIRE(blockman.WriteUndoDataForBlock(undo, state, *index));
+
+    // The ordinary current-file flush cannot cover this older undo stream.
+    // Index publication must fence it before clearing its dirty file entry.
+    BOOST_REQUIRE(blockman.FlushChainstateBlockFile(index->nHeight));
+    const auto key{std::make_pair(uint8_t{'b'}, index->GetBlockHash())};
+    const auto check_unpublished = [&]() EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+        CDiskBlockIndex persisted;
+        BOOST_REQUIRE(blockman.m_block_tree_db->Read(key, persisted));
+        BOOST_CHECK(!(persisted.nStatus & BLOCK_HAVE_UNDO));
+        BOOST_CHECK(persisted.GetUndoPos().IsNull());
+    };
+    check_unpublished();
+
+    const fs::path old_undo{m_args.GetBlocksDirPath() / "rev00000.dat"};
+    BOOST_REQUIRE_EQUAL(old_file, 0);
+    WithMovedFlatFile(old_undo, [&](const fs::path&) EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+        BOOST_REQUIRE(fs::create_directory(old_undo));
+        BOOST_CHECK(!blockman.WriteBlockIndexDB());
+        check_unpublished();
+        // A failed index write must retain both the stream obligation and
+        // unpublished index, even if a recovery barrier also fails.
+        BOOST_CHECK(!blockman.FlushBlockFilesForDurability());
+        BOOST_CHECK(!blockman.WriteBlockIndexDB());
+        check_unpublished();
+    });
+    BOOST_REQUIRE(blockman.WriteBlockIndexDB());
+    blockman.m_block_tree_db.reset();
+    blockman.m_block_tree_db = std::make_unique<node::BlockTreeDB>(
+        DBParams{.path = db_path, .cache_bytes = 1 << 20});
+    CDiskBlockIndex persisted;
+    BOOST_REQUIRE(blockman.m_block_tree_db->Read(key, persisted));
+    BOOST_REQUIRE(persisted.nStatus & BLOCK_HAVE_UNDO);
+    BOOST_CHECK(persisted.GetUndoPos() == index->GetUndoPos());
+    CheckStored(*index, block.vchNEVMBlockData);
+
+    // The successful index write has also flushed the old stream. A later
+    // recovery barrier may safely omit that clean, non-current file.
+    WithMovedFlatFile(old_undo, [&](const fs::path&) EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+        BOOST_REQUIRE(fs::create_directory(old_undo));
+        BOOST_CHECK(blockman.FlushBlockFilesForDurability());
+    });
+}
+
+BOOST_FIXTURE_TEST_CASE(block_index_flush_retries_failed_rotation_flush, NEVMBlockStorageSetup)
+{
+    LOCK(cs_main);
+    Store(/*with_undo=*/false);
+    const auto old_file{index->nFile};
+    const auto old_block{blockman.GetBlockPosFilename(index->GetBlockPos())};
+    CBlockFileInfo prior_file;
+    BOOST_REQUIRE(blockman.m_block_tree_db->ReadBlockFileInfo(old_file, prior_file));
+    const auto pending{blockman.SaveBlockToDisk(
+        Params().GenesisBlock(), index->nHeight + 1, nullptr)};
+    BOOST_REQUIRE_EQUAL(pending.nFile, old_file);
+    // Force the existing small-file rotation path, but fail its old-file
+    // flush. FindBlockPos deliberately still permits the new block write.
+    blockman.GetBlockFileInfo(old_file)->nSize = 0x10000;
+    fs::resize_file(old_block, 0x10000);
+    WithMovedFlatFile(old_block, [&](const fs::path&) EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+        BOOST_REQUIRE(fs::create_directory(old_block));
+        const auto next{blockman.SaveBlockToDisk(
+            Params().GenesisBlock(), index->nHeight + 2, nullptr)};
+        BOOST_REQUIRE(!next.IsNull());
+        BOOST_REQUIRE_NE(next.nFile, old_file);
+        BOOST_REQUIRE(blockman.FlushChainstateBlockFile(index->nHeight));
+        BOOST_CHECK(!blockman.WriteBlockIndexDB());
+        CBlockFileInfo persisted_file;
+        BOOST_REQUIRE(blockman.m_block_tree_db->ReadBlockFileInfo(old_file, persisted_file));
+        BOOST_CHECK_EQUAL(persisted_file.nSize, prior_file.nSize);
+        BOOST_CHECK(!blockman.FlushBlockFilesForDurability());
+    });
+    BOOST_REQUIRE(blockman.WriteBlockIndexDB());
+    CheckStored(*index, block.vchNEVMBlockData);
+    WithMovedFlatFile(old_block, [&](const fs::path&) EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+        BOOST_REQUIRE(fs::create_directory(old_block));
+        BOOST_CHECK(blockman.FlushBlockFilesForDurability());
+    });
+}
+
 BOOST_FIXTURE_TEST_CASE(preseal_durability_flushes_both_clean_cursors, NEVMBlockStorageSetup)
 {
     LOCK(cs_main);

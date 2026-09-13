@@ -938,8 +938,9 @@ public:
         LOCKS_EXCLUDED(cs_main);
     /**
      * SYSCOIN: Replay one bounded batch of a catch-up-authenticated prefix.
-     * When replay reaches the requested exact active tip, finalize is invoked
-     * synchronously while activation is excluded and cs_main is held.
+     * When replay reaches the requested exact active tip, require Geth's
+     * durable acknowledgement before invoking finalize synchronously while
+     * activation is excluded and cs_main is held.
      * The optional revalidator runs under those same locks before engine
      * activity, each block notification, and finalization.
      */
