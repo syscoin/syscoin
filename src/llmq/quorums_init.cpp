@@ -149,10 +149,15 @@ void InitLLMQSystem(CConnman& connman,
     pqQuorumConnectionOverlay = connection_overlay.release();
 }
 
-void DestroyLLMQSystem()
+void DestroyPQQuorumConnectionOverlay()
 {
     delete pqQuorumConnectionOverlay;
     pqQuorumConnectionOverlay = nullptr;
+}
+
+void DestroyLLMQSystem()
+{
+    DestroyPQQuorumConnectionOverlay();
     delete chainLocksHandler;
     chainLocksHandler = nullptr;
     delete quorumBlockProcessor;

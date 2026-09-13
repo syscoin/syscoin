@@ -12,6 +12,8 @@
 #include <governance/governancepages.h> // SYSCOIN: fork relay tests.
 #include <init.h>
 #include <interfaces/chain.h>
+#include <llmq/pq_quorum_overlay.h>
+#include <llmq/quorums_init.h>
 #include <masternode/activemasternode.h>
 #include <net.h>
 #include <net_processing.h>
@@ -52,6 +54,8 @@ using namespace std::literals;
 
 namespace {
 
+enum class ShutdownOverlayMode { NONE, EMPTY, DELAYED_REINSTALL };
+
 struct ShutdownSnapshotState {
     std::mutex mutex;
     std::condition_variable changed;
@@ -68,6 +72,13 @@ struct ShutdownSnapshotState {
     std::atomic<unsigned> late_tip_calls{0};
     std::atomic<unsigned> final_flush_calls{0};
     std::atomic<bool> client_stopped_after_flush{false};
+    ShutdownOverlayMode overlay_mode{ShutdownOverlayMode::NONE};
+    const uint256 overlay_group{uint256S("9103")};
+    const uint256 overlay_member{uint256S("9104")};
+    std::atomic<bool> overlay_reinstalled{false};
+    std::atomic<bool> overlay_relay_restored{false};
+    std::atomic<bool> overlay_alive_at_finalization{false};
+    std::atomic<bool> overlay_member_at_finalization{false};
 
     bool WaitFor(bool ShutdownSnapshotState::* flag, std::chrono::seconds timeout = 10s)
     {
@@ -84,6 +95,7 @@ struct ShutdownSnapshotState {
 
     void HoldSnapshot(CConnman& connman)
     {
+        auto* const overlay{llmq::pqQuorumConnectionOverlay};
         {
             const CConnman::NodesSnapshot snapshot{connman};
             std::unique_lock lock{mutex};
@@ -92,7 +104,16 @@ struct ShutdownSnapshotState {
             changed.notify_all();
             callback_timed_out = !changed.wait_for(lock, 30s, [&] { return released; });
         }
-        // Publish completion only after the snapshot has released its refs.
+        // Resume a prepared-plan installer after the early stop-time Clear.
+        // The real overlay owns reconciliation and the connection callbacks.
+        if (overlay_mode == ShutdownOverlayMode::DELAYED_REINSTALL &&
+            overlay && overlay == llmq::pqQuorumConnectionOverlay) {
+            overlay_reinstalled = overlay->ApplyPreparedContext(
+                overlay_group, {overlay_member}, std::nullopt);
+            overlay_relay_restored = connman.IsMasternodeQuorumRelayMember(overlay_member);
+        }
+        // Publish completion after releasing snapshot refs and finishing any
+        // delayed overlay update.
         std::lock_guard lock{mutex};
         finished = true;
         changed.notify_all();
@@ -100,12 +121,13 @@ struct ShutdownSnapshotState {
 };
 
 class ShutdownNetEvents final : public NetEventsInterface {
+    CConnman& m_connman;
     PeerManager& m_peerman;
     ShutdownSnapshotState& m_state;
 
 public:
-    ShutdownNetEvents(PeerManager& peerman, ShutdownSnapshotState& state)
-        : m_peerman{peerman}, m_state{state} {}
+    ShutdownNetEvents(CConnman& connman, PeerManager& peerman, ShutdownSnapshotState& state)
+        : m_connman{connman}, m_peerman{peerman}, m_state{state} {}
 
     void InitializeNode(CNode& node, ServiceFlags services) override { m_peerman.InitializeNode(node, services); }
     void ProcessAsyncCompletions() override { m_peerman.ProcessAsyncCompletions(); }
@@ -127,6 +149,19 @@ public:
                 if (!m_state.changed.wait_for(lock, 30s, [&] { return m_state.finished; })) {
                     std::terminate();
                 }
+            }
+        }
+        if (m_state.overlay_mode != ShutdownOverlayMode::NONE) {
+            // StopNodes calls this while connman is still alive. Observe the
+            // destructor's removal before any defensive failure cleanup.
+            if (m_connman.IsMasternodeQuorumRelayMember(m_state.overlay_member)) {
+                m_state.overlay_member_at_finalization = true;
+            }
+            if (llmq::pqQuorumConnectionOverlay) {
+                m_state.overlay_alive_at_finalization = true;
+                // Keep an ordering regression from later invoking a removal
+                // callback after connman has been destroyed.
+                llmq::pqQuorumConnectionOverlay->Clear();
             }
         }
         m_peerman.FinalizeNode(node);
@@ -184,14 +219,16 @@ public:
     }
 };
 
-void CheckShutdownWaitsForSnapshots(node::NodeContext& node, bool validation_callback)
+void CheckShutdownWaitsForSnapshots(node::NodeContext& node, bool validation_callback,
+                                   ShutdownOverlayMode overlay_mode = ShutdownOverlayMode::NONE)
 {
     BOOST_REQUIRE(!activeMasternodeManager);
     node.args->ForceSetArg("-btcheadermanaged", "0");
     SyncWithValidationInterfaceQueue();
     auto& connman{static_cast<ConnmanTestMsg&>(*node.connman)};
     ShutdownSnapshotState state;
-    ShutdownNetEvents events{*node.peerman, state};
+    state.overlay_mode = overlay_mode;
+    ShutdownNetEvents events{connman, *node.peerman, state};
     ShutdownValidationSnapshot subscriber{connman, state};
     std::future<void> shutdown;
     struct Cleanup {
@@ -219,6 +256,18 @@ void CheckShutdownWaitsForSnapshots(node::NodeContext& node, bool validation_cal
     node.chain_clients.push_back(std::make_unique<ShutdownFlushClient>(state));
     activeMasternodeManager = std::make_unique<ShutdownTipObserver>(connman, state);
     RegisterValidationInterface(activeMasternodeManager.get());
+    // Chainstate loading creates the real overlay. Select the absent-owner
+    // control after draining the initial validation queue above.
+    if (overlay_mode == ShutdownOverlayMode::NONE) {
+        llmq::DestroyPQQuorumConnectionOverlay();
+    } else {
+        BOOST_REQUIRE(llmq::pqQuorumConnectionOverlay);
+        if (overlay_mode == ShutdownOverlayMode::DELAYED_REINSTALL) {
+            BOOST_REQUIRE(llmq::pqQuorumConnectionOverlay->ApplyPreparedContext(
+                state.overlay_group, {state.overlay_member}, std::nullopt));
+            BOOST_CHECK(connman.IsMasternodeQuorumRelayMember(state.overlay_member));
+        }
+    }
 
     in_addr ipv4_addr;
     ipv4_addr.s_addr = 0xa0b0c001;
@@ -275,6 +324,10 @@ void CheckShutdownWaitsForSnapshots(node::NodeContext& node, bool validation_cal
         ::Shutdown(node);
     });
     BOOST_REQUIRE(state.WaitFor(&ShutdownSnapshotState::client_flush_started));
+    if (overlay_mode == ShutdownOverlayMode::DELAYED_REINSTALL) {
+        // Client flush follows StopLLMQSystem, while the installer is held.
+        BOOST_CHECK(!connman.IsMasternodeQuorumRelayMember(state.overlay_member));
+    }
     BOOST_CHECK(shutdown.wait_for(1s) == std::future_status::timeout);
     BOOST_CHECK_EQUAL(state.finalized.load(), 0U);
     state.Release();
@@ -288,6 +341,13 @@ void CheckShutdownWaitsForSnapshots(node::NodeContext& node, bool validation_cal
     BOOST_CHECK_EQUAL(state.late_tip_calls.load(), 0U);
     BOOST_CHECK_GT(state.final_flush_calls.load(), 0U);
     BOOST_CHECK(state.client_stopped_after_flush.load());
+    if (overlay_mode == ShutdownOverlayMode::DELAYED_REINSTALL) {
+        BOOST_CHECK(state.overlay_reinstalled.load());
+        BOOST_CHECK(state.overlay_relay_restored.load());
+    }
+    BOOST_CHECK(!state.overlay_alive_at_finalization.load());
+    BOOST_CHECK(!state.overlay_member_at_finalization.load());
+    BOOST_CHECK(!llmq::pqQuorumConnectionOverlay);
     BOOST_CHECK(!node.connman);
     BOOST_CHECK(!node.peerman);
     BOOST_CHECK(!node.scheduler);
@@ -305,6 +365,16 @@ BOOST_AUTO_TEST_CASE(shutdown_waits_for_scheduler_peer_snapshots)
 BOOST_AUTO_TEST_CASE(shutdown_waits_for_unregistered_validation_peer_snapshots)
 {
     CheckShutdownWaitsForSnapshots(m_node, true);
+}
+
+BOOST_AUTO_TEST_CASE(shutdown_destroys_reinstalled_overlay_before_peer_finalization)
+{
+    CheckShutdownWaitsForSnapshots(m_node, true, ShutdownOverlayMode::DELAYED_REINSTALL);
+}
+
+BOOST_AUTO_TEST_CASE(shutdown_destroys_empty_overlay_before_peer_finalization)
+{
+    CheckShutdownWaitsForSnapshots(m_node, false, ShutdownOverlayMode::EMPTY);
 }
 
 // SYSCOIN: BEGIN fork-only bounded admission and failover tests for PQ

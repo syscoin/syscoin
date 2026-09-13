@@ -263,6 +263,7 @@ ChainTestingSetup::~ChainTestingSetup()
     StopScriptCheckWorkerThreads();
     GetMainSignals().FlushBackgroundCallbacks();
     GetMainSignals().UnregisterBackgroundSignalScheduler();
+    llmq::DestroyPQQuorumConnectionOverlay();
     m_node.connman.reset();
     m_node.banman.reset();
     m_node.addrman.reset();

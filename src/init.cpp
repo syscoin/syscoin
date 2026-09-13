@@ -389,6 +389,10 @@ void Shutdown(NodeContext& node)
     // Wallet and index subscribers remain registered for the final flush below.
     if (pdsNotificationInterface) UnregisterValidationInterface(pdsNotificationInterface);
     if (activeMasternodeManager) UnregisterValidationInterface(activeMasternodeManager.get());
+    // An in-flight callback could reinstall groups after StopLLMQSystem's
+    // early clear. Its callers are now stopped, but CConnman is still alive
+    // for the overlay destructor's removal callbacks.
+    llmq::DestroyPQQuorumConnectionOverlay();
     if (node.connman) node.connman->StopNodes();
     UninterruptibleSleep(std::chrono::milliseconds{100});
 

@@ -21,6 +21,9 @@ void InitLLMQSystem(CConnman& connman,
     EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 void DestroyLLMQSystem();
 
+// After overlay callers have stopped, destroy its callbacks while CConnman lives.
+void DestroyPQQuorumConnectionOverlay();
+
 // Manage the PQ ChainLock service lifecycle.
 void StartLLMQSystem() LOCKS_EXCLUDED(cs_main);
 void StopLLMQSystem();
