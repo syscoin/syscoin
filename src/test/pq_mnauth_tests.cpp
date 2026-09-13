@@ -4,16 +4,22 @@
 
 #include <evo/mnauth.h>
 
+#include <chainparams.h>
 #include <crypto/slhdsa/slhdsa.h>
 #include <evo/deterministicmns.h>
+#include <hash.h>
 #include <masternode/activemasternode.h>
 #include <netbase.h>
 #include <net_processing.h>
 #include <streams.h>
+#include <test/util/net.h>
+#include <test/util/setup_common.h>
 #include <util/time.h>
+#include <validation.h>
 
 #include <boost/test/unit_test.hpp>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -28,6 +34,21 @@
 #include <vector>
 
 using namespace llmq::pq;
+
+namespace mnauth_tests {
+class CMNAuthTestAccess {
+public:
+    static void Process(CMNAuth::AsyncProcessor& async,
+                        ChainstateManager& chainman,
+                        CConnman& connman,
+                        PeerManager& peerman,
+                        const std::function<void()>& context_validated)
+    {
+        CMNAuth::ProcessAsyncCompletionsImpl(
+            async, chainman, connman, peerman, context_validated);
+    }
+};
+} // namespace mnauth_tests
 
 namespace {
 
@@ -317,9 +338,425 @@ private:
     CActiveMasternodeInfo m_previous;
 };
 
+// Exercise the live completion handler against authenticated persisted registry
+// records. The successor changes only the remote key or its advertised service.
+class CompletionPublicationFixture {
+    static constexpr int PREPARATION_HEIGHT{1295};
+    static constexpr int CURRENT_HEIGHT{1296};
+    static constexpr int NEXT_HEIGHT{1297};
+
+    ActiveMasternodeInfoGuard m_active_info_guard;
+    std::vector<uint256> m_hashes{NEXT_HEIGHT + 1};
+    std::vector<CBlockIndex> m_indices{NEXT_HEIGHT + 1};
+    struct RestoreState {
+        ChainstateManager& chainman;
+        ConnmanTestMsg& connman;
+        Consensus::Params& consensus;
+        Consensus::Params original_consensus;
+        CBlockIndex* original_tip;
+        std::unique_ptr<CDeterministicMNManager> original_manager;
+        ~RestoreState()
+        {
+            LOCK(cs_main);
+            connman.ClearTestNodes();
+            chainman.ActiveChain().SetTip(*original_tip);
+            deterministicMNManager = std::move(original_manager);
+            consensus = original_consensus;
+        }
+    } m_restore;
+
+    std::mutex m_wake_mutex;
+    std::condition_variable m_wake_cv;
+    unsigned m_wakes{0};
+    unsigned m_consumed_wakes{0};
+
+public:
+    ChainstateManager& chainman;
+    ConnmanTestMsg& connman;
+    PeerManager& peerman;
+    CMNAuth::ContextToken context;
+    GlobalKeyRecord next_remote_key;
+    CService next_remote_service;
+
+    CompletionPublicationFixture(RegTestingSetup& fixture,
+                                 bool outbound, bool rotate_key)
+        : m_restore{*fixture.m_node.chainman,
+                    static_cast<ConnmanTestMsg&>(*fixture.m_node.connman),
+                    const_cast<Consensus::Params&>(Params().GetConsensus()),
+                    Params().GetConsensus(),
+                    WITH_LOCK(cs_main, return fixture.m_node.chainman->ActiveTip()),
+                    std::move(deterministicMNManager)},
+          chainman{m_restore.chainman}, connman{m_restore.connman},
+          peerman{*fixture.m_node.peerman}
+    {
+        auto& consensus{m_restore.consensus};
+        consensus.DIP0003Height = PREPARATION_HEIGHT - 1;
+        consensus.DIP0003EnforcementHeight = PREPARATION_HEIGHT - 1;
+        consensus.nPQPreparationHeight = PREPARATION_HEIGHT;
+        consensus.nPQActivationHeight = CURRENT_HEIGHT;
+        consensus.nPQChainLockEpochOrigin = 1440;
+        consensus.nPQRegistrationCutoffBlocks = 144;
+        consensus.nPQFutureHorizonEpochs = 8;
+        PQRegistryConfig config;
+        BOOST_REQUIRE(GetPQRegistryConfig(consensus, config) ==
+                      PQRegistryDeploymentResult::VALID);
+        for (int height{0}; height <= NEXT_HEIGHT; ++height) {
+            m_hashes[height] = NonNullHash(80'000 + height);
+            auto& index{m_indices[height]};
+            index.nHeight = height;
+            index.pprev = height == 0 ? nullptr : &m_indices[height - 1];
+            index.phashBlock = &m_hashes[height];
+            index.BuildSkip();
+        }
+
+        const auto key_for = [&](uint8_t offset, uint32_t version,
+                                 const uint256& pro_tx_hash) {
+            auto key{StoredKey(DeterministicKey(offset), version,
+                               PREPARATION_HEIGHT)};
+            const auto tree_id{GetChildKeyTreeId(
+                consensus.hashGenesisBlock, pro_tx_hash,
+                key.child_key_commitment.generation,
+                key.child_key_commitment.first_epoch)};
+            BOOST_REQUIRE(tree_id);
+            key.child_key_commitment.tree_id = *tree_id;
+            return key;
+        };
+        const auto initiator_key{key_for(0, 1, NonNullHash(10))};
+        const auto responder_key{key_for(1, 1, NonNullHash(11))};
+        context = AsyncContext(100, 42, initiator_key, responder_key,
+                               Transcript(initiator_key, responder_key), outbound);
+        context.tip_hash = m_hashes[CURRENT_HEIGHT];
+        const auto& remote_pro_tx{context.connection.remote.pro_tx_hash};
+        next_remote_key = rotate_key ? key_for(2, 2, remote_pro_tx)
+                                     : context.remote_key;
+        if (rotate_key) next_remote_key.activated_height = NEXT_HEIGHT;
+        next_remote_service = rotate_key ? context.remote_service : Service(3);
+
+        const DBParams dmn_params{
+            .path = fixture.m_path_root / fs::PathFromString(
+                strprintf("mnauth_publication_%d_%d", outbound, rotate_key)),
+            .cache_bytes = 1 << 20,
+            .memory_only = false,
+            .wipe_data = false,
+        };
+        DBParams registry_params{dmn_params};
+        registry_params.path += "_pq_registry";
+        registry_params.cache_bytes /= 2;
+        {
+            PQRegistryManager writer{
+                registry_params, consensus.hashGenesisBlock, config,
+                evo::MakeAuxiliaryHistoryGCDeployment(consensus).configuration_id};
+            const auto empty_root{PQRegistrySnapshot{}.RecomputeConsensusStateRoot(
+                consensus.hashGenesisBlock)};
+            BOOST_REQUIRE(empty_root);
+            uint256 previous_root{*empty_root};
+            std::vector<OperatorKeyState> previous_states;
+            for (int height{PREPARATION_HEIGHT}; height <= NEXT_HEIGHT; ++height) {
+                const auto schedule{DeriveOperatorKeyScheduleView(
+                    config.schedule, height, config.registration_cutoff_blocks,
+                    config.future_horizon_epochs)};
+                BOOST_REQUIRE(schedule);
+                PQRegistrySnapshot snapshot;
+                for (const bool local : {true, false}) {
+                    const auto& pro_tx{local ? context.connection.local.pro_tx_hash
+                                             : remote_pro_tx};
+                    auto state{OperatorKeyState::ForOperator(pro_tx)};
+                    state.schedule_initialized = 1;
+                    state.schedule = OperatorKeyScheduleState::FromView(*schedule);
+                    state.has_global_key = 1;
+                    state.global_key_active = 1;
+                    state.global_key = local ? context.local_key
+                        : height == NEXT_HEIGHT ? next_remote_key : context.remote_key;
+                    BOOST_REQUIRE(state.IsStructurallyValid());
+                    snapshot.operator_states.push_back(state);
+                }
+                std::sort(snapshot.operator_states.begin(), snapshot.operator_states.end(),
+                          [](const auto& lhs, const auto& rhs) {
+                              return lhs.pro_tx_hash < rhs.pro_tx_hash;
+                          });
+                const auto root{snapshot.RecomputeConsensusStateRoot(consensus.hashGenesisBlock)};
+                BOOST_REQUIRE(root);
+                PQRegistryDiskSnapshot disk;
+                disk.is_checkpoint = height == PREPARATION_HEIGHT;
+                disk.height = height;
+                disk.block_hash = m_hashes[height];
+                disk.previous_block_hash = m_hashes[height - 1];
+                disk.previous_consensus_state_root = previous_root;
+                for (const auto& state : snapshot.operator_states) {
+                    if (std::find(previous_states.begin(), previous_states.end(), state) ==
+                        previous_states.end()) {
+                        disk.operator_states.push_back(state);
+                    }
+                }
+                if (disk.is_checkpoint) disk.checkpoint_operator_states = snapshot.operator_states;
+                disk.consensus_state_root = *root;
+                BOOST_REQUIRE(writer.WriteExactSnapshotForTesting(disk.block_hash, disk));
+                previous_root = *root;
+                previous_states = std::move(snapshot.operator_states);
+            }
+        }
+        deterministicMNManager = std::make_unique<CDeterministicMNManager>(dmn_params);
+        for (int height{CURRENT_HEIGHT}; height <= NEXT_HEIGHT; ++height) {
+            CDeterministicMNList list{m_hashes[height], height, 2};
+            for (const bool local : {true, false}) {
+                auto member{std::make_shared<CDeterministicMN>(local ? 0 : 1)};
+                member->proTxHash = local ? context.connection.local.pro_tx_hash : remote_pro_tx;
+                member->collateralOutpoint = COutPoint{NonNullHash(local ? 300 : 301), 0};
+                auto state{std::make_shared<CDeterministicMNState>()};
+                state->keyIDOwner.begin()[0] = local ? 1 : 2;
+                state->addr = local ? context.local_service
+                    : height == NEXT_HEIGHT ? next_remote_service : context.remote_service;
+                state->nRegisteredHeight = PREPARATION_HEIGHT - 1;
+                member->pdmnState = state;
+                list.AddMN(member, /*fBumpTotalCount=*/false);
+            }
+            deterministicMNManager->m_evoDb->WriteCache(m_hashes[height], list);
+        }
+        {
+            ChainLockMasterSeed master_seed{};
+            master_seed[0] = 1;
+            LOCK(activeMasternodeInfoCs);
+            activeMasternodeInfo.operatorKeyManager = std::make_shared<LocalOperatorKeyManager>(
+                DeterministicKey(outbound ? 0 : 1), std::move(master_seed));
+            BOOST_REQUIRE(activeMasternodeInfo.operatorKeyManager->IsValid());
+            activeMasternodeInfo.proTxHash = context.connection.local.pro_tx_hash;
+            activeMasternodeInfo.globalKeyVersion = context.local_key.key_version;
+            activeMasternodeInfo.service = context.local_service;
+            ++activeMasternodeInfo.identityGeneration;
+            fMasternodeMode = true;
+        }
+        LOCK(cs_main);
+        chainman.ActiveChain().SetTip(m_indices[CURRENT_HEIGHT]);
+        for (int height{CURRENT_HEIGHT}; height <= NEXT_HEIGHT; ++height) {
+            PQRegistryReadView view;
+            std::string error;
+            BOOST_REQUIRE_MESSAGE(deterministicMNManager->GetPQRegistryReadView(
+                &m_indices[height], view, error), error);
+            BOOST_REQUIRE(view.FindOperator(remote_pro_tx));
+        }
+    }
+
+    CNode& AddNode(int64_t peer_id)
+    {
+        auto* node = new CNode{
+            peer_id, nullptr, CAddress{context.connected_service, NODE_NETWORK},
+            context.keyed_net_group, 1, CAddress{}, std::string{},
+            context.local_is_initiator ? ConnectionType::OUTBOUND_FULL_RELAY
+                                       : ConnectionType::INBOUND,
+            false};
+        connman.AddTestNode(*node);
+        node->fSuccessfullyConnected = true;
+        node->m_masternode_connection = true;
+        node->SetCommonVersion(context.common_version);
+        const auto& connection{context.connection};
+        BOOST_REQUIRE(node->SetLocalMNAuthConnectionData(
+            connection.local, connection.local_challenge,
+            connection.local_version_nonce, connection.local_protocol_version,
+            connection.local_service_flags));
+        BOOST_REQUIRE(node->SetRemoteMNAuthConnectionData(
+            connection.remote, connection.remote_challenge,
+            connection.remote_version_nonce, connection.remote_protocol_version,
+            connection.remote_service_flags));
+        return *node;
+    }
+
+    CMNAuth::AsyncHooks Hooks()
+    {
+        CMNAuth::AsyncHooks hooks;
+        // Cryptography is covered by the transcript tests. These hooks isolate
+        // publication ordering while retaining production admission/completions.
+        hooks.verify = [](MNAUTHVerificationTask&) { return true; };
+        hooks.sign = [](const uint256&, uint32_t, const uint256&, GlobalSignature& signature) {
+            signature[0] = 1;
+            return true;
+        };
+        hooks.wake = [this] {
+            std::lock_guard lock{m_wake_mutex};
+            ++m_wakes;
+            m_wake_cv.notify_all();
+        };
+        return hooks;
+    }
+
+    void WaitForCompletion()
+    {
+        std::unique_lock lock{m_wake_mutex};
+        BOOST_REQUIRE(m_wake_cv.wait_for(lock, std::chrono::seconds{5},
+            [&] { return m_wakes > m_consumed_wakes; }));
+        ++m_consumed_wakes;
+    }
+
+    void QueueVerify(CNode& node, CMNAuth::AsyncProcessor& async)
+    {
+        CMNAuth::VerifyRequest request;
+        request.context = context;
+        request.genesis_hash = Params().GetConsensus().hashGenesisBlock;
+        request.required_service_flags = REQUIRED_SERVICES;
+        request.expected_signer_role = context.local_is_initiator
+            ? MNAUTHSignerRole::RESPONDER : MNAUTHSignerRole::INITIATOR;
+        const auto transcript{BuildMNAUTHTranscript(
+            context.connection, context.local_is_initiator,
+            context.local_endpoint, context.remote_endpoint,
+            request.expected_signer_role, Params().MessageStart(), REQUIRED_SERVICES)};
+        BOOST_REQUIRE(transcript);
+        request.transcript = *transcript;
+        request.message.signer_role = request.expected_signer_role;
+        request.message.signer_pro_tx_hash = context.connection.remote.pro_tx_hash;
+        request.message.signer_global_key_version = context.remote_key.key_version;
+        request.message.signature[0] = 1;
+        const auto result{async.EnqueueVerify(std::move(request))};
+        BOOST_REQUIRE(result.Accepted());
+        node.SetMNAuthPending(CMNAuthPendingPhase::VERIFY_PENDING, result.deadline_micros);
+        WaitForCompletion();
+    }
+
+    void QueueSign(CNode& node, CMNAuth::AsyncProcessor& async)
+    {
+        const auto result{async.EnqueueSign(AsyncSignRequest(context))};
+        BOOST_REQUIRE(result.Accepted());
+        node.SetMNAuthPending(CMNAuthPendingPhase::SIGN_PENDING, result.deadline_micros);
+        WaitForCompletion();
+    }
+
+    void AdvanceTip()
+    {
+        LOCK(cs_main);
+        chainman.ActiveChain().SetTip(m_indices[NEXT_HEIGHT]);
+        CMNAuth::UpdatedBlockTip(&m_indices[NEXT_HEIGHT], connman);
+    }
+
+    void ProcessGuarded(CMNAuth::AsyncProcessor& async,
+                        const std::function<bool()>& published,
+                        bool advance_tip = false)
+    {
+        std::mutex mutex;
+        std::condition_variable cv;
+        bool attempted{false};
+        bool acquired_during_validation{false};
+        bool observed_publication{false};
+        unsigned callbacks{0};
+        std::thread transition;
+        struct ThreadJoinGuard {
+            std::thread& thread;
+            ~ThreadJoinGuard()
+            {
+                if (thread.joinable()) thread.join();
+            }
+        } join_guard{transition};
+        mnauth_tests::CMNAuthTestAccess::Process(
+            async, chainman, connman, peerman, [&] {
+                ++callbacks;
+                transition = std::thread{[&] {
+                    {
+                        TRY_LOCK(cs_main, lock);
+                        acquired_during_validation = bool(lock);
+                    }
+                    {
+                        std::lock_guard lock{mutex};
+                        attempted = true;
+                        cv.notify_all();
+                    }
+                    LOCK(cs_main);
+                    observed_publication = published();
+                    if (advance_tip) AdvanceTip();
+                }};
+                std::unique_lock lock{mutex};
+                cv.wait(lock, [&] { return attempted; });
+            });
+        if (transition.joinable()) transition.join();
+        BOOST_CHECK_EQUAL(callbacks, 1U);
+        BOOST_CHECK(!acquired_during_validation);
+        BOOST_CHECK(observed_publication);
+    }
+};
+
+bool HasQueuedMNAUTH(CNode& node)
+{
+    LOCK(node.cs_vSend);
+    if (!node.vSendMsg.empty()) return node.vSendMsg.front().m_type == NetMsgType::MNAUTH;
+    const auto& [bytes, more, command]{node.m_transport->GetBytesToSend(false)};
+    return !bytes.empty() && command == NetMsgType::MNAUTH;
+}
+
 } // namespace
 
 BOOST_AUTO_TEST_SUITE(pq_mnauth_tests)
+
+BOOST_FIXTURE_TEST_CASE(completions_after_tip_change_do_not_publish_or_retire_duplicates,
+                        RegTestingSetup)
+{
+    for (const bool sign : {false, true}) {
+        CompletionPublicationFixture fixture{*this, /*outbound=*/true, /*rotate_key=*/!sign};
+        CMNAuth::AsyncProcessor async{CMNAuth::AsyncConfig{}, fixture.Hooks()};
+        CNode& node{fixture.AddNode(100)};
+        CNode& duplicate{fixture.AddNode(200)};
+        duplicate.SetVerifiedMasternode(
+            fixture.context.connection.remote.pro_tx_hash,
+            ::Hash(fixture.next_remote_key.public_key),
+            fixture.next_remote_key.key_version, fixture.next_remote_service);
+        BOOST_REQUIRE(async.RegisterPeer(node.GetId()));
+        if (sign) fixture.QueueSign(node, async);
+        else fixture.QueueVerify(node, async);
+
+        fixture.AdvanceTip();
+        BOOST_REQUIRE(!duplicate.fDisconnect);
+        CMNAuth::ProcessAsyncCompletions(
+            async, fixture.chainman, fixture.connman, fixture.peerman);
+        BOOST_CHECK(node.fDisconnect);
+        BOOST_CHECK(!duplicate.fDisconnect);
+        BOOST_CHECK(node.GetVerifiedProRegTxHash().IsNull());
+        BOOST_CHECK(!HasQueuedMNAUTH(node));
+        BOOST_CHECK(node.GetMNAuthPending().phase != CMNAuthPendingPhase::COMPLETE);
+        BOOST_CHECK_EQUAL(async.GetStats().stale_completion_drops, 1U);
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(current_completions_publish_before_tip_cleanup,
+                        RegTestingSetup)
+{
+    for (const bool outbound : {false, true}) {
+        CompletionPublicationFixture fixture{*this, outbound, /*rotate_key=*/outbound};
+        CMNAuth::AsyncProcessor async{CMNAuth::AsyncConfig{}, fixture.Hooks()};
+        CNode& node{fixture.AddNode(100)};
+        CNode& duplicate{fixture.AddNode(200)};
+        duplicate.SetVerifiedMasternode(
+            fixture.context.connection.remote.pro_tx_hash,
+            ::Hash(fixture.context.remote_key.public_key),
+            fixture.context.remote_key.key_version, fixture.context.remote_service);
+        BOOST_REQUIRE(async.RegisterPeer(node.GetId()));
+        if (outbound) {
+            fixture.QueueSign(node, async);
+            fixture.ProcessGuarded(async, [&] {
+                return !node.fDisconnect && HasQueuedMNAUTH(node) &&
+                    node.GetMNAuthPending().phase == CMNAuthPendingPhase::AWAITING_REMOTE;
+            });
+        }
+        fixture.QueueVerify(node, async);
+        const auto published = [&] {
+            return !node.fDisconnect && duplicate.fDisconnect &&
+                node.GetVerifiedProRegTxHash() == fixture.context.connection.remote.pro_tx_hash &&
+                node.GetVerifiedGlobalKeyVersion() == fixture.context.remote_key.key_version &&
+                node.GetVerifiedMasternodeService() == fixture.context.remote_service;
+        };
+        fixture.ProcessGuarded(async, [&] {
+            return published() && node.GetMNAuthPending().phase ==
+                (outbound ? CMNAuthPendingPhase::COMPLETE : CMNAuthPendingPhase::SIGN_PENDING);
+        }, /*advance_tip=*/outbound);
+        if (!outbound) {
+            fixture.WaitForCompletion();
+            fixture.ProcessGuarded(async, [&] {
+                return published() && HasQueuedMNAUTH(node) &&
+                    node.GetMNAuthPending().phase == CMNAuthPendingPhase::COMPLETE;
+            }, /*advance_tip=*/true);
+        }
+        // The serialized tip transition sees the published remote identity and
+        // retires it on either key rotation or service replacement.
+        BOOST_CHECK(node.fDisconnect);
+        BOOST_CHECK_EQUAL(async.GetStats().stale_completion_drops, 0U);
+        BOOST_CHECK_EQUAL(async.GetStats().verify_completed, 1U);
+        BOOST_CHECK_EQUAL(async.GetStats().sign_completed, 1U);
+    }
+}
 
 BOOST_AUTO_TEST_CASE(
     deterministic_duplicate_policy_selects_one_stable_connection)

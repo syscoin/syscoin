@@ -227,7 +227,9 @@ bool BuildContextToken(CNode& node,
 bool ContextStillMatches(CNode& node,
                          ChainstateManager& chainman,
                          const CMNAuth::ContextToken& expected)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
+    AssertLockHeld(cs_main);
     if (node.fDisconnect || node.GetId() != expected.peer_id ||
         node.GetCommonVersion() != expected.common_version ||
         node.nKeyedNetGroup != expected.keyed_net_group ||
@@ -1427,6 +1429,14 @@ void CMNAuth::ProcessAsyncCompletions(AsyncProcessor& async,
                                       CConnman& connman,
                                       PeerManager& peerman)
 {
+    ProcessAsyncCompletionsImpl(async, chainman, connman, peerman, {});
+}
+
+void CMNAuth::ProcessAsyncCompletionsImpl(
+    AsyncProcessor& async, ChainstateManager& chainman,
+    CConnman& connman, PeerManager& peerman,
+    const std::function<void()>& context_validated)
+{
     // NodesSnapshot pins lifetimes while releasing m_nodes_mutex before any
     // chain-state or peer-tracker locks are acquired below.
     const CConnman::NodesSnapshot nodes_snapshot{
@@ -1453,14 +1463,20 @@ void CMNAuth::ProcessAsyncCompletions(AsyncProcessor& async,
             [&](const CNode* node) {
                 return node->GetId() == completion.context.peer_id;
             })};
-        const bool found{
-            node_it != nodes_snapshot.Nodes().end() &&
-            async.IsCurrentRegistration(
-                completion.context.peer_id,
-                completion.registration_generation)};
+        const bool found{node_it != nodes_snapshot.Nodes().end()};
         if (found) {
             CNode* pnode{*node_it};
             (void)[&](CNode* pnode) -> bool {
+                // Bind revalidation and every success effect to one active
+                // tip. A later tip cleanup must see the published identity;
+                // stale work must not retire duplicates or send a signature.
+                LOCK(chainman.GetMutex());
+                if (!async.IsCurrentRegistration(
+                        completion.context.peer_id,
+                        completion.registration_generation)) {
+                    async.RecordStaleCompletion();
+                    return true;
+                }
                 const int64_t now_micros{
                     TicksSinceEpoch<std::chrono::microseconds>(
                         SteadyClock::now())};
@@ -1487,6 +1503,9 @@ void CMNAuth::ProcessAsyncCompletions(AsyncProcessor& async,
                     }
                     return true;
                 }
+
+                // Private regression-test seam at the validation/use boundary.
+                if (context_validated) context_validated();
 
                 if (sign_completion) {
                     const bool attributed{

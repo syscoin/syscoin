@@ -28,6 +28,10 @@ class CNode;
 class ChainstateManager;
 class PeerManager;
 
+namespace mnauth_tests {
+class CMNAuthTestAccess;
+}
+
 struct MNAUTHConnectionSelectionCandidate {
     int64_t peer_id{-1};
     bool inbound{false};
@@ -220,6 +224,13 @@ public:
                                         PeerManager& peerman);
     static void UpdatedBlockTip(const CBlockIndex* pindex_new,
                                 CConnman& connman);
+
+private:
+    friend class mnauth_tests::CMNAuthTestAccess;
+    static void ProcessAsyncCompletionsImpl(
+        AsyncProcessor& async, ChainstateManager& chainman,
+        CConnman& connman, PeerManager& peerman,
+        const std::function<void()>& context_validated);
 };
 
 #endif // SYSCOIN_EVO_MNAUTH_H
