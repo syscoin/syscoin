@@ -14,6 +14,7 @@
 #include <net_processing.h>
 #include <streams.h>
 #include <test/util/net.h>
+#include <test/util/pq_registry_read_error.h>
 #include <test/util/setup_common.h>
 #include <util/time.h>
 #include <validation.h>
@@ -551,7 +552,10 @@ public:
         node->fSuccessfullyConnected = true;
         node->m_masternode_connection = true;
         node->SetCommonVersion(context.common_version);
-        const auto& connection{context.connection};
+        auto connection{context.connection};
+        if (peer_id != context.peer_id) {
+            connection.remote.cookie = NonNullHash(50'000 + static_cast<uint32_t>(peer_id));
+        }
         BOOST_REQUIRE(node->SetLocalMNAuthConnectionData(
             connection.local, connection.local_challenge,
             connection.local_version_nonce, connection.local_protocol_version,
@@ -593,12 +597,14 @@ public:
     {
         CMNAuth::VerifyRequest request;
         request.context = context;
+        request.context.peer_id = node.GetId();
+        request.context.connection = node.GetMNAuthConnectionData();
         request.genesis_hash = Params().GetConsensus().hashGenesisBlock;
         request.required_service_flags = REQUIRED_SERVICES;
         request.expected_signer_role = context.local_is_initiator
             ? MNAUTHSignerRole::RESPONDER : MNAUTHSignerRole::INITIATOR;
         const auto transcript{BuildMNAUTHTranscript(
-            context.connection, context.local_is_initiator,
+            request.context.connection, context.local_is_initiator,
             context.local_endpoint, context.remote_endpoint,
             request.expected_signer_role, Params().MessageStart(), REQUIRED_SERVICES)};
         BOOST_REQUIRE(transcript);
@@ -615,7 +621,10 @@ public:
 
     void QueueSign(CNode& node, CMNAuth::AsyncProcessor& async)
     {
-        const auto result{async.EnqueueSign(AsyncSignRequest(context))};
+        auto peer_context{context};
+        peer_context.peer_id = node.GetId();
+        peer_context.connection = node.GetMNAuthConnectionData();
+        const auto result{async.EnqueueSign(AsyncSignRequest(std::move(peer_context)))};
         BOOST_REQUIRE(result.Accepted());
         node.SetMNAuthPending(CMNAuthPendingPhase::SIGN_PENDING, result.deadline_micros);
         WaitForCompletion();
@@ -916,6 +925,17 @@ public:
         return *node;
     }
 
+    CNode& AddUnverifiedPeer()
+    {
+        auto* node = new CNode{
+            200, nullptr, CAddress{Service(99), NODE_NETWORK}, 42, 1,
+            CAddress{}, std::string{}, ConnectionType::INBOUND, false};
+        connman.AddTestNode(*node);
+        node->fSuccessfullyConnected = true;
+        node->SetCommonVersion(PQ_MNAUTH_PROTO_VERSION);
+        return *node;
+    }
+
     std::shared_ptr<CBlock> ReadBlock(const CBlockIndex* index)
     {
         auto block{std::make_shared<CBlock>()};
@@ -940,6 +960,45 @@ public:
         SyncWithValidationInterfaceQueue();
     }
 };
+
+class InboundPeerRegistration {
+    PeerManager& m_peerman;
+    CNode& m_node;
+
+public:
+    InboundPeerRegistration(PeerManager& peerman, CNode& node)
+        : m_peerman{peerman}, m_node{node}
+    {
+        BOOST_REQUIRE(node.IsInboundConn());
+        peerman.InitializeNode(node, NODE_NETWORK);
+        BOOST_REQUIRE(peerman.GetPeerRef(node.GetId()));
+    }
+    ~InboundPeerRegistration() { m_peerman.FinalizeNode(m_node); }
+
+    void CheckNoPenalty() const
+    {
+        const auto peer{m_peerman.GetPeerRef(m_node.GetId())};
+        BOOST_REQUIRE(peer);
+        LOCK(peer->m_misbehavior_mutex);
+        BOOST_CHECK_EQUAL(peer->m_misbehavior_score, 0);
+        BOOST_CHECK(!peer->m_should_discourage);
+    }
+};
+
+enum class AuthorityReadFailure { REGISTRY, DETERMINISTIC_LIST };
+
+void FailNextAuthorityRead(AuthorityReadFailure failure)
+{
+    if (failure == AuthorityReadFailure::REGISTRY) {
+        llmq::pq::test::PQRegistryReadErrorTestAccess::FailNextRead(
+            *deterministicMNManager);
+    } else {
+        // Exercise the same pending-flush dbwrapper_error on the second
+        // authority source, even when its requested list is cached.
+        deterministicMNManager->m_evoDb->EraseCache(uint256{});
+        deterministicMNManager->m_evoDb->FailNextFlushBatchForTesting();
+    }
+}
 
 class RollbackNotifications final : public CValidationInterface {
 public:
@@ -1139,6 +1198,238 @@ BOOST_FIXTURE_TEST_CASE(current_completions_publish_before_tip_cleanup,
         BOOST_CHECK_EQUAL(async.GetStats().stale_completion_drops, 0U);
         BOOST_CHECK_EQUAL(async.GetStats().verify_completed, 1U);
         BOOST_CHECK_EQUAL(async.GetStats().sign_completed, 1U);
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(authority_read_errors_drop_one_completion_and_preserve_batch_progress,
+                        RegTestingSetup)
+{
+    for (const auto failure : {AuthorityReadFailure::REGISTRY,
+                               AuthorityReadFailure::DETERMINISTIC_LIST}) {
+        for (const bool sign : {false, true}) {
+            CompletionPublicationFixture fixture{*this, /*outbound=*/true, /*rotate_key=*/false};
+            CMNAuth::AsyncProcessor async{CMNAuth::AsyncConfig{}, fixture.Hooks()};
+            CNode& rejected{fixture.AddNode(100)};
+            CNode& sibling{fixture.AddNode(50)};
+            CNode& duplicate{fixture.AddNode(200)};
+            duplicate.SetVerifiedMasternode(
+                fixture.context.connection.remote.pro_tx_hash,
+                ::Hash(fixture.context.remote_key.public_key),
+                fixture.context.remote_key.key_version, fixture.context.remote_service);
+            BOOST_REQUIRE(async.RegisterPeer(rejected.GetId()));
+            BOOST_REQUIRE(async.RegisterPeer(sibling.GetId()));
+            // Waiting for each completion fixes the mixed batch order while
+            // retaining the real queues, registrations and signer latch.
+            if (sign) {
+                fixture.QueueSign(rejected, async);
+                fixture.QueueVerify(sibling, async);
+            } else {
+                fixture.QueueVerify(rejected, async);
+                fixture.QueueSign(sibling, async);
+            }
+            BOOST_REQUIRE_EQUAL(async.GetStats().completion_queue_depth, 2U);
+            FailNextAuthorityRead(failure);
+            unsigned validated{0};
+            BOOST_CHECK_NO_THROW(mnauth_tests::CMNAuthTestAccess::Process(
+                async, fixture.chainman, fixture.connman, fixture.peerman, [&] {
+                    ++validated;
+                    // Observe the rejected attempt before its readable
+                    // sibling can legitimately publish or retire a duplicate.
+                    BOOST_CHECK(rejected.fDisconnect);
+                    BOOST_CHECK(rejected.GetVerifiedProRegTxHash().IsNull());
+                    BOOST_CHECK(!HasQueuedMNAUTH(rejected));
+                    BOOST_CHECK(!duplicate.fDisconnect);
+                }));
+            BOOST_CHECK_EQUAL(validated, 1U);
+            BOOST_CHECK(rejected.fDisconnect);
+            BOOST_CHECK(rejected.GetVerifiedProRegTxHash().IsNull());
+            BOOST_CHECK(!HasQueuedMNAUTH(rejected));
+            BOOST_CHECK(rejected.GetMNAuthPending().phase != CMNAuthPendingPhase::COMPLETE);
+            BOOST_CHECK(!sibling.fDisconnect);
+            if (sign) {
+                BOOST_CHECK(sibling.GetVerifiedProRegTxHash() ==
+                            fixture.context.connection.remote.pro_tx_hash);
+                BOOST_CHECK(sibling.GetMNAuthPending().phase == CMNAuthPendingPhase::COMPLETE);
+                BOOST_CHECK(duplicate.fDisconnect);
+            } else {
+                BOOST_CHECK(HasQueuedMNAUTH(sibling));
+                BOOST_CHECK(sibling.GetMNAuthPending().phase == CMNAuthPendingPhase::AWAITING_REMOTE);
+                BOOST_CHECK(!duplicate.fDisconnect);
+            }
+            const auto stats{async.GetStats()};
+            BOOST_CHECK_EQUAL(stats.verify_completed, 1U);
+            BOOST_CHECK_EQUAL(stats.sign_completed, 1U);
+            BOOST_CHECK_EQUAL(stats.verify_failed, 0U);
+            BOOST_CHECK_EQUAL(stats.sign_failed, 0U);
+            BOOST_CHECK_EQUAL(stats.stale_completion_drops, 1U);
+            BOOST_CHECK_EQUAL(stats.completion_queue_depth, 0U);
+            BOOST_CHECK_EQUAL(stats.verify_inflight, 0U);
+            BOOST_CHECK_EQUAL(stats.sign_inflight, 0U);
+
+            // No cancellation or manual acknowledgement releases the first
+            // SIGN. A new private-key job can finish only after its exact
+            // completion was acknowledged by the production drain.
+            CNode& recovered{fixture.AddNode(75)};
+            BOOST_REQUIRE(async.RegisterPeer(recovered.GetId()));
+            fixture.QueueSign(recovered, async);
+            BOOST_CHECK_NO_THROW(CMNAuth::ProcessAsyncCompletions(
+                async, fixture.chainman, fixture.connman, fixture.peerman));
+            BOOST_CHECK(!recovered.fDisconnect);
+            BOOST_CHECK(HasQueuedMNAUTH(recovered));
+            BOOST_CHECK(recovered.GetMNAuthPending().phase == CMNAuthPendingPhase::AWAITING_REMOTE);
+            BOOST_CHECK_EQUAL(async.GetStats().sign_completed, 2U);
+            BOOST_CHECK_EQUAL(async.GetStats().stale_completion_drops, 1U);
+            BOOST_CHECK_EQUAL(async.GetStats().completion_queue_depth, 0U);
+        }
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(inbound_authority_read_errors_do_not_punish_or_schedule_response,
+                        RegTestingSetup)
+{
+    for (const auto failure : {AuthorityReadFailure::REGISTRY,
+                               AuthorityReadFailure::DETERMINISTIC_LIST}) {
+        for (const bool after_validation : {false, true}) {
+            CompletionPublicationFixture fixture{*this, /*outbound=*/false, /*rotate_key=*/false};
+            CMNAuth::AsyncProcessor async{CMNAuth::AsyncConfig{}, fixture.Hooks()};
+            CNode& rejected{fixture.AddNode(100)};
+            InboundPeerRegistration registration{fixture.peerman, rejected};
+            CNode& duplicate{fixture.AddNode(200)};
+            duplicate.SetVerifiedMasternode(
+                fixture.context.connection.remote.pro_tx_hash,
+                ::Hash(fixture.context.remote_key.public_key),
+                fixture.context.remote_key.key_version, fixture.context.remote_service);
+            BOOST_REQUIRE(async.RegisterPeer(rejected.GetId()));
+            fixture.QueueVerify(rejected, async);
+            unsigned validated{0};
+            if (!after_validation) FailNextAuthorityRead(failure);
+            BOOST_CHECK_NO_THROW(mnauth_tests::CMNAuthTestAccess::Process(
+                async, fixture.chainman, fixture.connman, fixture.peerman, [&] {
+                    ++validated;
+                    // Arm the actual database read after initial revalidation
+                    // to exercise the inbound authenticated-context rebuild.
+                    BOOST_REQUIRE(after_validation);
+                    FailNextAuthorityRead(failure);
+                }));
+            BOOST_CHECK_EQUAL(validated, after_validation ? 1U : 0U);
+            BOOST_CHECK(rejected.fDisconnect);
+            BOOST_CHECK(!HasQueuedMNAUTH(rejected));
+            BOOST_CHECK(rejected.GetMNAuthPending().phase != CMNAuthPendingPhase::COMPLETE);
+            registration.CheckNoPenalty();
+            if (after_validation) {
+                // The first read authorized publication. The second local
+                // read must fail closed before any responder signing work.
+                BOOST_CHECK(rejected.GetVerifiedProRegTxHash() ==
+                            fixture.context.connection.remote.pro_tx_hash);
+                BOOST_CHECK(duplicate.fDisconnect);
+            } else {
+                BOOST_CHECK(rejected.GetVerifiedProRegTxHash().IsNull());
+                BOOST_CHECK(!duplicate.fDisconnect);
+            }
+            BOOST_CHECK_EQUAL(async.GetStats().verify_completed, 1U);
+            BOOST_CHECK_EQUAL(async.GetStats().verify_failed, 0U);
+            BOOST_CHECK_EQUAL(async.GetStats().sign_completed, 0U);
+            BOOST_CHECK_EQUAL(async.GetStats().sign_queue_depth, 0U);
+            BOOST_CHECK_EQUAL(async.GetStats().sign_inflight, 0U);
+            BOOST_CHECK_EQUAL(async.GetStats().completion_queue_depth, 0U);
+            BOOST_CHECK_EQUAL(async.GetStats().stale_completion_drops,
+                              after_validation ? 0U : 1U);
+
+            CNode& recovered{fixture.AddNode(50)};
+            InboundPeerRegistration recovered_registration{fixture.peerman, recovered};
+            BOOST_REQUIRE(async.RegisterPeer(recovered.GetId()));
+            fixture.QueueVerify(recovered, async);
+            BOOST_CHECK_NO_THROW(CMNAuth::ProcessAsyncCompletions(
+                async, fixture.chainman, fixture.connman, fixture.peerman));
+            BOOST_REQUIRE(!recovered.fDisconnect);
+            BOOST_CHECK(recovered.GetVerifiedProRegTxHash() ==
+                        fixture.context.connection.remote.pro_tx_hash);
+            BOOST_CHECK(recovered.GetMNAuthPending().phase == CMNAuthPendingPhase::SIGN_PENDING);
+            fixture.WaitForCompletion();
+            BOOST_CHECK_NO_THROW(CMNAuth::ProcessAsyncCompletions(
+                async, fixture.chainman, fixture.connman, fixture.peerman));
+            BOOST_CHECK(!recovered.fDisconnect);
+            BOOST_CHECK(HasQueuedMNAUTH(recovered));
+            BOOST_CHECK(recovered.GetMNAuthPending().phase == CMNAuthPendingPhase::COMPLETE);
+            recovered_registration.CheckNoPenalty();
+            BOOST_CHECK_EQUAL(async.GetStats().verify_completed, 2U);
+            BOOST_CHECK_EQUAL(async.GetStats().sign_completed, 1U);
+        }
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(missing_deterministic_authority_drops_sign_and_recovers_after_restore,
+                        RegTestingSetup)
+{
+    CompletionPublicationFixture fixture{*this, /*outbound=*/true, /*rotate_key=*/false};
+    CMNAuth::AsyncProcessor async{CMNAuth::AsyncConfig{}, fixture.Hooks()};
+    CNode& rejected{fixture.AddNode(100)};
+    BOOST_REQUIRE(async.RegisterPeer(rejected.GetId()));
+    fixture.QueueSign(rejected, async);
+    const auto* tip{WITH_LOCK(cs_main, return fixture.chainman.ActiveTip())};
+    const auto saved_list{deterministicMNManager->GetListForBlock(tip)};
+    // An absent persisted snapshot throws std::runtime_error rather than
+    // dbwrapper_error. Keep the known list for a subsequent readable attempt.
+    deterministicMNManager->m_evoDb->EraseCache(tip->GetBlockHash());
+    BOOST_CHECK_NO_THROW(CMNAuth::ProcessAsyncCompletions(
+        async, fixture.chainman, fixture.connman, fixture.peerman));
+    deterministicMNManager->m_evoDb->WriteCache(tip->GetBlockHash(), saved_list);
+    BOOST_CHECK(rejected.fDisconnect);
+    BOOST_CHECK(rejected.GetVerifiedProRegTxHash().IsNull());
+    BOOST_CHECK(!HasQueuedMNAUTH(rejected));
+    BOOST_CHECK_EQUAL(async.GetStats().stale_completion_drops, 1U);
+    BOOST_CHECK_EQUAL(async.GetStats().completion_queue_depth, 0U);
+
+    CNode& recovered{fixture.AddNode(50)};
+    BOOST_REQUIRE(async.RegisterPeer(recovered.GetId()));
+    fixture.QueueSign(recovered, async);
+    BOOST_CHECK_NO_THROW(CMNAuth::ProcessAsyncCompletions(
+        async, fixture.chainman, fixture.connman, fixture.peerman));
+    BOOST_CHECK(!recovered.fDisconnect);
+    BOOST_CHECK(HasQueuedMNAUTH(recovered));
+    BOOST_CHECK_EQUAL(async.GetStats().sign_completed, 2U);
+    BOOST_CHECK_EQUAL(async.GetStats().sign_failed, 0U);
+    BOOST_CHECK_EQUAL(async.GetStats().stale_completion_drops, 1U);
+}
+
+BOOST_FIXTURE_TEST_CASE(notification_authority_read_errors_retire_verified_peers_and_recover,
+                        TestChain100Setup)
+{
+    for (const auto failure : {AuthorityReadFailure::REGISTRY,
+                               AuthorityReadFailure::DETERMINISTIC_LIST}) {
+        RollbackNotificationFixture fixture{*this};
+        CNode& rotated{fixture.AddCompletedPeer(RollbackNotificationFixture::KEY_CHANGED)};
+        CNode& moved{fixture.AddCompletedPeer(RollbackNotificationFixture::SERVICE_CHANGED)};
+        CNode& unchanged{fixture.AddCompletedPeer(RollbackNotificationFixture::UNCHANGED)};
+        CNode& unverified{fixture.AddUnverifiedPeer()};
+        RollbackNotifications notifications;
+        ValidationRegistration observe{notifications};
+        ValidationRegistration register_peerman{fixture.peerman};
+        const auto block{fixture.ReadBlock(fixture.tip->pprev)};
+        const auto notify = [&] {
+            // An already committed historical notification reaches the real
+            // PeerManager subscriber without an undo consuming the read fault.
+            GetMainSignals().BlockDisconnected(block, fixture.tip->pprev);
+            SyncWithValidationInterfaceQueue();
+        };
+        FailNextAuthorityRead(failure);
+        BOOST_CHECK_NO_THROW(notify());
+        BOOST_CHECK_EQUAL(notifications.disconnected, 1U);
+        BOOST_CHECK(rotated.fDisconnect);
+        BOOST_CHECK(moved.fDisconnect);
+        BOOST_CHECK(unchanged.fDisconnect);
+        BOOST_CHECK(!unverified.fDisconnect);
+        BOOST_CHECK(unverified.GetVerifiedProRegTxHash().IsNull());
+        BOOST_CHECK(unverified.GetMNAuthPending().phase == CMNAuthPendingPhase::NONE);
+
+        CNode& recovered{fixture.AddCompletedPeer(
+            RollbackNotificationFixture::UNCHANGED, /*parent_authority=*/true)};
+        BOOST_CHECK_NO_THROW(notify());
+        BOOST_CHECK_EQUAL(notifications.disconnected, 2U);
+        BOOST_CHECK(!recovered.fDisconnect);
+        BOOST_CHECK(recovered.GetMNAuthPending().phase == CMNAuthPendingPhase::COMPLETE);
+        BOOST_CHECK(!unverified.fDisconnect);
+        BOOST_CHECK(WITH_LOCK(cs_main, return fixture.chainman.ActiveTip()) == fixture.tip);
     }
 }
 

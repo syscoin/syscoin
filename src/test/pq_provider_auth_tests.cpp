@@ -16,6 +16,7 @@
 #include <node/kernel_notifications.h>
 #include <primitives/block.h>
 #include <script/script.h>
+#include <test/util/pq_registry_read_error.h>
 #include <test/util/setup_common.h>
 #include <validation.h>
 
@@ -28,27 +29,6 @@
 #include <limits>
 #include <memory>
 #include <utility>
-
-namespace llmq::pq::test {
-
-class PQRegistryReadErrorTestAccess {
-public:
-    static void FailNextRead(CDeterministicMNManager& manager)
-    {
-        std::string error;
-        auto* registry = manager.GetOrCreatePQRegistry(error);
-        BOOST_REQUIRE_MESSAGE(registry != nullptr, error);
-        LOCK(registry->m_mutex);
-        registry->m_snapshot_cache.clear();
-        registry->m_snapshot_cache_index.clear();
-        // ReadCache flushes this unrelated tombstone before returning the
-        // parent. Use the existing one-shot database exception seam.
-        registry->m_snapshot_db->EraseCache(uint256{});
-        registry->m_snapshot_db->FailNextFlushBatchForTesting();
-    }
-};
-
-} // namespace llmq::pq::test
 
 namespace {
 

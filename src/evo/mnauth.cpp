@@ -38,6 +38,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <tuple>
@@ -192,8 +193,18 @@ bool BuildContextToken(CNode& node,
     const CMNAuthConnectionData connection{
         node.GetMNAuthConnectionData()};
     RegistryConnectionContext registry;
-    if (!LoadRegistryConnectionContext(
-            chainman, connection, registry, error) ||
+    bool have_registry{false};
+    try {
+        have_registry = LoadRegistryConnectionContext(
+            chainman, connection, registry, error);
+    } catch (const std::runtime_error& e) {
+        // Local storage or missing exact authority cannot authenticate a peer.
+        // Returning normally also preserves each completion's SIGN acknowledgement.
+        error = e.what();
+        LogPrintf("%s -- local authority read failed: %s\n", __func__, error);
+        return false;
+    }
+    if (!have_registry ||
         !LocalIdentityMatches(connection, registry)) {
         if (error.empty()) error = "local MNAUTH identity changed";
         return false;
@@ -1686,12 +1697,19 @@ void CMNAuth::UpdatedBlockTip(ChainstateManager& chainman,
 
     llmq::pq::PQRegistryReadView snapshot;
     std::string error;
-    const bool have_snapshot =
-        deterministicMNManager->GetPQRegistryReadView(
+    bool have_snapshot{false};
+    CDeterministicMNList mn_list;
+    try {
+        have_snapshot = deterministicMNManager->GetPQRegistryReadView(
             pindex_new, snapshot, error) &&
-        snapshot.BlockHash() == pindex_new->GetBlockHash();
-    const CDeterministicMNList mn_list =
-        deterministicMNManager->GetListForBlock(pindex_new);
+            snapshot.BlockHash() == pindex_new->GetBlockHash();
+        mn_list = deterministicMNManager->GetListForBlock(pindex_new);
+    } catch (const std::runtime_error& e) {
+        // Keep the unavailable-authority path below conservative even when
+        // the registry read succeeded but the deterministic list read failed.
+        have_snapshot = false;
+        LogPrintf("%s -- local authority read failed: %s\n", __func__, e.what());
+    }
 
     for (CNode* pnode : nodes_snapshot.Nodes()) {
         const uint256 pro_tx_hash = pnode->GetVerifiedProRegTxHash();
