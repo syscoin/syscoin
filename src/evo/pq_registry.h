@@ -40,6 +40,7 @@ namespace llmq::pq {
 
 namespace test {
 class PQRegistryManagerTestAccess;
+class PQRegistryReadErrorTestAccess;
 }
 
 using PQPaymentEligibleProTxHashes = std::vector<uint256>;
@@ -733,6 +734,7 @@ public:
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     friend class test::PQRegistryManagerTestAccess;
+    friend class test::PQRegistryReadErrorTestAccess;
 };
 
 } // namespace llmq::pq

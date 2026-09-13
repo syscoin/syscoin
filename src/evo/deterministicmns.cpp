@@ -3561,9 +3561,18 @@ bool CDeterministicMNManager::CheckPQTransaction(
         parent_list, parent_list, Params().GetConsensus().hashGenesisBlock,
         pindexPrev);
     llmq::pq::PQRegistryError error;
-    if (!registry->ValidateTransaction(tx, pindexPrev->GetBlockHash(),
-                                       pindexPrev->nHeight + 1, callbacks,
-                                       check_sigs, error)) {
+    bool valid{false};
+    try {
+        valid = registry->ValidateTransaction(
+            tx, pindexPrev->GetBlockHash(), pindexPrev->nHeight + 1,
+            callbacks, check_sigs, error);
+    } catch (const dbwrapper_error& e) {
+        // A failed local registry read says nothing about transaction validity.
+        LogPrintf("%s -- PQ registry validation database error: %s\n",
+                  __func__, e.what());
+        return state.Error("failed-pq-registry-validation");
+    }
+    if (!valid) {
         if (llmq::pq::IsPQRegistryLocalFailure(error.result)) {
             return state.Error(strprintf(
                 "failed-pq-%s",

@@ -12,6 +12,8 @@
 #include <key.h>
 #include <messagesigner.h>
 #include <netbase.h>
+#include <node/blockstorage.h>
+#include <node/kernel_notifications.h>
 #include <primitives/block.h>
 #include <script/script.h>
 #include <test/util/setup_common.h>
@@ -26,6 +28,27 @@
 #include <limits>
 #include <memory>
 #include <utility>
+
+namespace llmq::pq::test {
+
+class PQRegistryReadErrorTestAccess {
+public:
+    static void FailNextRead(CDeterministicMNManager& manager)
+    {
+        std::string error;
+        auto* registry = manager.GetOrCreatePQRegistry(error);
+        BOOST_REQUIRE_MESSAGE(registry != nullptr, error);
+        LOCK(registry->m_mutex);
+        registry->m_snapshot_cache.clear();
+        registry->m_snapshot_cache_index.clear();
+        // ReadCache flushes this unrelated tombstone before returning the
+        // parent. Use the existing one-shot database exception seam.
+        registry->m_snapshot_db->EraseCache(uint256{});
+        registry->m_snapshot_db->FailNextFlushBatchForTesting();
+    }
+};
+
+} // namespace llmq::pq::test
 
 namespace {
 
@@ -311,6 +334,57 @@ public:
                 legacy ? LegacyRevokeMutation() : RevokeMutation()};
     }
 
+    std::array<CTransaction, 2> RegistryTransactions() const
+    {
+        using namespace llmq::pq;
+        PQRegistryConfig config;
+        BOOST_REQUIRE(GetPQRegistryConfig(m_consensus, config) ==
+                      PQRegistryDeploymentResult::VALID);
+        const auto schedule{DeriveOperatorKeyScheduleView(
+            config.schedule, parent_index.nHeight + 1,
+            config.registration_cutoff_blocks, config.future_horizon_epochs)};
+        BOOST_REQUIRE(schedule);
+
+        CMutableTransaction global;
+        global.nVersion = PQ_GLOBAL_KEY_TX_VERSION;
+        global.vin.emplace_back(COutPoint{NonNullHash(92), 0});
+        global.vout.emplace_back(1, CScript{} << OP_TRUE);
+        GlobalKeyTxPayload key;
+        key.pro_tx_hash = pro_tx_hash;
+        key.candidate.key_version = 1;
+        key.candidate.public_key[0] = 1;
+        auto& commitment{key.candidate.child_key_commitment};
+        commitment.generation = 1;
+        commitment.first_epoch = schedule->first_mutable_epoch;
+        const auto tree_id{GetChildKeyTreeId(m_consensus.hashGenesisBlock,
+            pro_tx_hash, commitment.generation, commitment.first_epoch)};
+        BOOST_REQUIRE(tree_id);
+        commitment.tree_id = *tree_id;
+        commitment.root = NonNullHash(93);
+        key.transaction_inputs_hash = CalcTxInputsHash(CTransaction{global});
+        // Structurally canonical placeholders, not valid authorization.
+        key.owner_authorization[0] = 27;
+        key.owner_authorization[1] = 1;
+        key.owner_authorization.back() = 1;
+        key.authorization[0] = 1;
+        SetTxPayload(global, key);
+
+        CMutableTransaction recovery;
+        recovery.nVersion = PQ_RECOVERY_READINESS_TX_VERSION;
+        recovery.vin.emplace_back(COutPoint{NonNullHash(94), 0});
+        recovery.vout.emplace_back(1, CScript{} << OP_TRUE);
+        RecoveryReadinessTxPayload readiness;
+        readiness.readiness.pro_tx_hash = pro_tx_hash;
+        readiness.readiness.global_key_version = 1;
+        readiness.readiness.reference_height = parent_index.nHeight;
+        readiness.readiness.reference_hash = parent_hash;
+        readiness.readiness.transaction_inputs_hash =
+            CalcTxInputsHash(CTransaction{recovery});
+        readiness.signature[0] = 1;
+        SetTxPayload(recovery, readiness);
+        return {CTransaction{global}, CTransaction{recovery}};
+    }
+
     bool CheckProvider(const CTransaction& transaction,
                        const CBlockIndex* parent,
                        TxValidationState& state,
@@ -468,6 +542,90 @@ BOOST_AUTO_TEST_CASE(unavailable_parent_registry_is_a_local_error)
         service_precheck, /*fJustCheck=*/false, /*check_sigs=*/true,
         SpecialTxValidationContext::PQ_REGISTRY_PRECHECK));
     BOOST_CHECK(service_precheck.IsError());
+}
+
+BOOST_AUTO_TEST_CASE(registry_database_exceptions_preserve_validation_state)
+{
+    LOCK(cs_main);
+    // Missing local state uses the existing false + populated-error path.
+    for (const auto& transaction : RegistryTransactions()) {
+        TxValidationState missing_parent;
+        BOOST_CHECK(!deterministicMNManager->CheckPQTransaction(transaction,
+            &parent_index, missing_parent, false, false));
+        BOOST_CHECK(missing_parent.IsError());
+        BOOST_CHECK_EQUAL(missing_parent.GetRejectReason(),
+                          "failed-pq-missing-parent-snapshot");
+    }
+    LoadEmptyParentRegistry();
+    kernel::Notifications notifications;
+    node::BlockManager blockman{
+        m_node.kernel->interrupt,
+        {.chainparams = Params(), .fast_prune = true,
+         .blocks_dir = m_args.GetBlocksDirPath(), .notifications = notifications}};
+    CCoinsView base_view;
+    CCoinsViewCache view{&base_view};
+    const auto transactions{RegistryTransactions()};
+    for (const auto& transaction : transactions) {
+        for (const bool just_check : {false, true}) {
+            for (const bool check_sigs : {false, true}) {
+                BOOST_TEST_CONTEXT("version=" << transaction.nVersion
+                    << " just_check=" << just_check
+                    << " check_sigs=" << check_sigs) {
+                    llmq::pq::test::PQRegistryReadErrorTestAccess::FailNextRead(
+                        *deterministicMNManager);
+                    TxValidationState direct;
+                    BOOST_CHECK(!deterministicMNManager->CheckPQTransaction(
+                        transaction, &parent_index, direct, just_check, check_sigs));
+                    BOOST_CHECK(direct.IsError());
+                    BOOST_CHECK(!direct.IsInvalid());
+                    BOOST_CHECK_EQUAL(direct.GetRejectReason(),
+                                      "failed-pq-registry-validation");
+
+                    for (const auto context : {
+                             SpecialTxValidationContext::NORMAL,
+                             SpecialTxValidationContext::MEMPOOL_PRECHECK,
+                             SpecialTxValidationContext::PQ_REGISTRY_PRECHECK,
+                             SpecialTxValidationContext::ALREADY_VALIDATED_ROLLFORWARD}) {
+                        llmq::pq::test::PQRegistryReadErrorTestAccess::FailNextRead(
+                            *deterministicMNManager);
+                        TxValidationState special;
+                        BOOST_CHECK(!CheckSpecialTx(blockman, transaction,
+                            &parent_index, special, view, just_check,
+                            check_sigs, context));
+                        BOOST_CHECK(special.IsError());
+                        BOOST_CHECK(!special.IsInvalid());
+                        BOOST_CHECK_EQUAL(special.GetRejectReason(),
+                                          "failed-pq-registry-validation");
+                    }
+                }
+            }
+        }
+
+        // Once the local failure clears, normal authorization must still
+        // reject these placeholders instead of converting every false to Error.
+        TxValidationState unauthorized;
+        BOOST_CHECK(!CheckSpecialTx(blockman, transaction, &parent_index,
+            unauthorized, view, false, true, SpecialTxValidationContext::NORMAL));
+        BOOST_CHECK(unauthorized.IsInvalid());
+        BOOST_CHECK(!unauthorized.IsError());
+
+        CMutableTransaction malformed{transaction};
+        malformed.vout.pop_back(); // Remove the payload output.
+        TxValidationState invalid_payload;
+        BOOST_CHECK(!CheckSpecialTx(blockman, CTransaction{malformed},
+            &parent_index, invalid_payload, view, false, false,
+            SpecialTxValidationContext::PQ_REGISTRY_PRECHECK));
+        BOOST_CHECK(invalid_payload.IsInvalid());
+        BOOST_CHECK(!invalid_payload.IsError());
+    }
+
+    // The global registration's structural prepass succeeds on retry without
+    // reinitializing the manager. Full authentication is checked separately.
+    TxValidationState retry;
+    BOOST_REQUIRE_MESSAGE(CheckSpecialTx(blockman, transactions.front(),
+        &parent_index, retry, view, false, false,
+        SpecialTxValidationContext::PQ_REGISTRY_PRECHECK), retry.ToString());
+    BOOST_CHECK(retry.IsValid());
 }
 
 BOOST_AUTO_TEST_CASE(provider_parent_snapshot_failures_are_local_errors)
