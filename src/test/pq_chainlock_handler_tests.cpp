@@ -923,6 +923,18 @@ public:
         return *Assert(handler.m_payment_audit_store);
     }
 
+    static void RunPaymentCheckpoint(CChainLocksHandler& handler)
+    {
+        const auto record{handler.m_store->GetBestRecord()};
+        BOOST_REQUIRE(record);
+        handler.MaybeCheckpointPaymentAuditPreseal(record->metadata);
+    }
+
+    static bool ContinuePaymentCheckpoint(CChainLocksHandler& handler)
+    {
+        return handler.ContinuePaymentAuditCheckpointGC();
+    }
+
     static void SetAuditPinWriter(CChainLocksHandler& handler,
                                   std::function<bool(CDBBatch&, bool)> writer)
     {
@@ -12777,4 +12789,299 @@ BOOST_FIXTURE_TEST_CASE(
         *handler, audit_seal.statement, audit_objective_base));
     BOOST_CHECK(!Access::HasPendingPaymentAuditSeal(*handler));
     BOOST_CHECK(!Access::HasNeededPaymentAuditSeal(*handler));
+}
+
+namespace {
+struct PaymentAuditGCSetup : LatePaymentAuditPresealSetup {
+    // The finality store retains this context by reference.
+    FullReceiptCatchupContext store_context;
+    const CBlockIndex* old_tip{nullptr};
+    uint256 old_root;
+    std::size_t sync_attempts{0};
+
+    ~PaymentAuditGCSetup()
+    {
+        WITH_LOCK(::cs_main, m_node.chainman->ActiveChainstate().CoinsDB().SetSyncCallbackForTesting({}));
+        SyncWithValidationInterfaceQueue();
+        Access::ResetFinalityStore(*handler);
+    }
+
+    void PrepareCheckpoint(bool populate_archive = false)
+    {
+        using namespace llmq::pq;
+        auto& chainman{*m_node.chainman};
+        auto& chainstate{chainman.ActiveChainstate()};
+        if (populate_archive) {
+            for (std::size_t ordinal{0}; ordinal < audits.size(); ++ordinal) {
+                Admit(ordinal);
+                BOOST_REQUIRE(Access::AuditStore(*handler).Get(receipts[ordinal].audit_witness_id));
+            }
+        }
+        // Reuse the fixture's three authenticated receipt transitions. This test
+        // starts after cryptographic admission and exercises real GC persistence.
+        store_context.full_receipt_history = true;
+        Access::ResetFinalityStoreWithContext(*handler, store_context);
+        auto* store{Access::Store(*handler)};
+        Access::SetReplayMarkers(*handler, {}, {});
+        auto base{MakeCatchupChainLock(2'305, 2'304,
+                                      chain[2'304]->GetBlockHash(), 1'980'001)};
+        base.statement.block_hash = chain[2'305]->GetBlockHash();
+        base.statement.payment_probation_state_hash =
+            deterministicMNManager->EmptyPaymentProbationStateHash();
+        base.statement.accepted_btcc_cursor = {
+            2'305, base.statement.block_hash, chain[2'305]->btcpPrevCommitment};
+        base.statement.btcc_advance = BTCCAdvance::ADVANCE;
+        base.statement.roster_transition = RosterAuthorizationTransitionKind::INITIALIZE;
+        base.statement.roster_authorization_base = {};
+        const auto epoch{EpochForHeight(config.chainlock_schedule, 2'305)};
+        BOOST_REQUIRE(epoch);
+        auto ready{SubjectBeacon(*epoch)};
+        ready.anchor_cursor = base.statement.accepted_btcc_cursor;
+        for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+            auto& seed{base.statement.roster_beacons.active.seeds[slot]};
+            seed = ready;
+            seed.epoch = *epoch - (ACTIVE_QUORUMS - 1) + slot;
+        }
+        base.statement.roster_beacons.active.recovery_authority_source.normal_beacon = ready;
+        base.statement.roster_beacons.next = {};
+        base.statement.roster_beacons.next.epoch = *epoch + 1;
+        const auto bind_transition = [&](FinalChainLock& value, const FinalChainLock* prior) {
+            RosterAuthorizationTransition transition;
+            transition.kind = value.statement.roster_transition;
+            transition.target_height = value.statement.height;
+            transition.target_block_hash = value.statement.block_hash;
+            transition.predecessor_height = value.statement.previous_chainlock_height;
+            transition.predecessor_block_hash = value.statement.previous_chainlock_hash;
+            if (prior) {
+                value.statement.roster_authorization_base = {
+                    prior->statement.height, prior->statement.block_hash, prior->GetLogicalId(genesis)};
+                transition.previous = RosterAuthorizationPriorState{
+                    prior->statement.roster_authorization_state_hash, prior->statement.roster_beacons};
+            }
+            transition.authorization_base = value.statement.roster_authorization_base;
+            transition.new_window = value.statement.roster_beacons;
+            const auto hash{GetRosterAuthorizationStateHash(genesis, transition)};
+            BOOST_REQUIRE(hash);
+            value.statement.roster_authorization_state_hash = *hash;
+            BOOST_REQUIRE(value.IsStructurallyValid());
+        };
+        bind_transition(base, nullptr);
+        const auto universe{SelectorRecoveryUniverse(genesis,
+            base.statement.roster_beacons.active.recovery_authority_source,
+            chain[2'304]->GetBlockHash())};
+        auto context{ChainLockStoreTestContextFactory::CreateDurable(
+            genesis, config.chainlock_schedule, base.statement)};
+        auto prepared{store->PrepareCandidate(base)};
+        BOOST_REQUIRE(context && prepared);
+        BOOST_REQUIRE(store->AcceptVerified(*prepared, base, true, nullptr, context));
+        BOOST_REQUIRE(Access::Persistence(*handler).PersistInitializedBest(
+            base, context, nullptr, nullptr, std::nullopt, universe));
+        auto winner{base};
+        winner.statement.height = CARRIERS.back();
+        winner.statement.block_hash = chain[CARRIERS.back()]->GetBlockHash();
+        winner.statement.previous_chainlock_height = CARRIERS.back() - PQ_CL_PERIOD;
+        winner.statement.previous_chainlock_hash = chain[winner.statement.previous_chainlock_height]->GetBlockHash();
+        winner.statement.previous_btcc_cursor = base.statement.accepted_btcc_cursor;
+        winner.statement.accepted_btcc_cursor = btcc_state.cursor;
+        winner.statement.btcc_receipt_state = btcc_state;
+        winner.statement.payment_audit_receipt_state = payment_state;
+        winner.statement.payment_probation_state_hash = probation_hash;
+        winner.statement.roster_transition = RosterAuthorizationTransitionKind::KEEP;
+        bind_transition(winner, &base);
+        context = ChainLockStoreTestContextFactory::CreateDurable(
+            genesis, config.chainlock_schedule, winner.statement);
+        prepared = store->PrepareCatchupCandidate(winner);
+        BOOST_REQUIRE(context && prepared);
+        ChainLockFinalityError admission_error{ChainLockFinalityError::NONE};
+        BOOST_REQUIRE_MESSAGE(store->AcceptCatchupVerified(
+            *prepared, winner, true, [] { return true; }, {}, &admission_error, nullptr, context, universe),
+            "catchup admission=" << static_cast<int>(admission_error));
+        BOOST_REQUIRE(Access::Persistence(*handler).PersistCatchupBest(
+            winner, context, nullptr, std::nullopt, nullptr, std::nullopt, universe));
+
+        LOCK(::cs_main);
+        fNEVMConnection = false;
+        old_tip = chain[CARRIERS[1]];
+        chainstate.CoinsTip().SetBestBlock(old_tip->GetBlockHash());
+        BOOST_REQUIRE(chainstate.CoinsDB().FlushWithSync(chainstate.CoinsTip()));
+        BOOST_REQUIRE(deterministicMNManager->FlushPendingSnapshotsToDisk(true));
+        PQPaymentProbationStateView old_state;
+        BOOST_REQUIRE(deterministicMNManager->GetPaymentProbationStateView(old_tip, old_state));
+        old_root = old_state.StateHash();
+        BOOST_REQUIRE(!old_root.IsNull());
+        BOOST_REQUIRE(old_root != probation_hash);
+        BOOST_REQUIRE(old_root != deterministicMNManager->EmptyPaymentProbationStateHash());
+        chainstate.CoinsTip().SetBestBlock(chain.back()->GetBlockHash());
+        BOOST_REQUIRE_NE(Access::OpenShareAdmissionForTest(*handler), 0U);
+    }
+
+    void CheckRootsBeforeGC()
+    {
+        LOCK(::cs_main);
+        llmq::pq::PQPaymentProbationStateView state;
+        BOOST_REQUIRE(deterministicMNManager->GetPaymentProbationStateView(old_tip, state));
+        BOOST_CHECK(state.StateHash() == old_root);
+        BOOST_REQUIRE(deterministicMNManager->GetPaymentProbationStateView(chain.back(), state));
+        BOOST_CHECK(state.StateHash() == probation_hash);
+    }
+
+    void FinishArchive()
+    {
+        for (int pass{0}; pass < 64 && !Access::AuditStore(*handler).GetPruneCheckpoint(); ++pass) {
+            BOOST_REQUIRE(Access::ContinuePaymentCheckpoint(*handler));
+        }
+        BOOST_REQUIRE(Access::AuditStore(*handler).GetPruneCheckpoint());
+        BOOST_CHECK(!Access::AuditStore(*handler).GetPendingPruneCheckpoint());
+        BOOST_CHECK(!deterministicMNManager->GetPendingPaymentProbationGCRequest());
+        BOOST_CHECK_EQUAL(sync_attempts, 1U);
+    }
+};
+} // namespace
+
+BOOST_FIXTURE_TEST_CASE(payment_audit_gc_requires_coins_sync_before_checkpoint,
+                        PaymentAuditGCSetup)
+{
+    using namespace llmq::pq;
+    PrepareCheckpoint();
+    auto& chainstate{m_node.chainman->ActiveChainstate()};
+    LOCK(::cs_main);
+    chainstate.CoinsDB().SetSyncCallbackForTesting([this] {
+        ++sync_attempts;
+        CheckRootsBeforeGC();
+        return false;
+    });
+    Access::RunPaymentCheckpoint(*handler);
+    BOOST_CHECK_EQUAL(sync_attempts, 1U);
+    BOOST_CHECK(!Access::AuditStore(*handler).GetPendingPruneCheckpoint());
+    BOOST_CHECK(!Access::AuditStore(*handler).GetPruneCheckpoint());
+    BOOST_CHECK(!deterministicMNManager->GetPendingPaymentProbationGCRequest());
+    BOOST_CHECK(Access::PersistenceFailed(*handler));
+    BOOST_CHECK(!Access::HasShareAdmission(*handler));
+    for (int pass{0}; pass < 12; ++pass) {
+        if (!Access::ContinuePaymentCheckpoint(*handler)) break;
+    }
+    const auto completed{Access::AuditStore(*handler).GetPruneCheckpoint()};
+    PQPaymentProbationStateView old_state;
+    BOOST_TEST_MESSAGE("coins_sync_attempts=" << sync_attempts
+        << " archive_checkpoint_complete=" << completed.has_value()
+        << " probation_gc_complete=" << (completed && deterministicMNManager->
+            IsPaymentProbationGCCompleteForCheckpoint(*completed))
+        << " old_tip=" << old_tip->nHeight
+        << " published_coins_tip=" << chainstate.CoinsDB().GetBestBlock().ToString()
+        << " prior_root_readable=" << deterministicMNManager->
+            GetPaymentProbationStateView(old_tip, old_state));
+    BOOST_CHECK(deterministicMNManager->GetPaymentProbationStateView(old_tip, old_state));
+    CheckRootsBeforeGC();
+    BOOST_CHECK_EQUAL(sync_attempts, 1U);
+}
+
+BOOST_FIXTURE_TEST_CASE(payment_audit_gc_syncs_both_publications_and_completed_noop,
+                        PaymentAuditGCSetup)
+{
+    PrepareCheckpoint(/*populate_archive=*/true);
+    LOCK(::cs_main);
+    m_node.chainman->ActiveChainstate().CoinsDB().SetSyncCallbackForTesting([this] {
+        ++sync_attempts;
+        CheckRootsBeforeGC();
+        // No logical probation floor may precede either successful barrier.
+        BOOST_CHECK(!deterministicMNManager->GetPendingPaymentProbationGCRequest());
+        if (sync_attempts == 1) {
+            BOOST_CHECK(!Access::AuditStore(*handler).GetPendingPruneCheckpoint());
+            BOOST_CHECK(!Access::AuditStore(*handler).GetPruneCheckpoint());
+        } else {
+            BOOST_CHECK_EQUAL(sync_attempts, 2U);
+            BOOST_CHECK(Access::AuditStore(*handler).GetPruneCheckpoint());
+        }
+        return true;
+    });
+    Access::RunPaymentCheckpoint(*handler);
+    FinishArchive();
+    const auto checkpoint{Access::AuditStore(*handler).GetPruneCheckpoint()};
+    BOOST_REQUIRE(checkpoint);
+    CheckRootsBeforeGC();
+    std::size_t frozen_continuations{0};
+    for (int pass{0}; pass < 64 &&
+         !deterministicMNManager->IsPaymentProbationGCCompleteForCheckpoint(*checkpoint); ++pass) {
+        const bool frozen{deterministicMNManager->GetPendingPaymentProbationGCRequest().has_value()};
+        const auto syncs_before{sync_attempts};
+        BOOST_REQUIRE(Access::ContinuePaymentCheckpoint(*handler));
+        if (frozen) {
+            ++frozen_continuations;
+            BOOST_CHECK_EQUAL(sync_attempts, syncs_before);
+        }
+    }
+    BOOST_REQUIRE(deterministicMNManager->IsPaymentProbationGCCompleteForCheckpoint(*checkpoint));
+    BOOST_CHECK_GT(frozen_continuations, 0U);
+    BOOST_CHECK_EQUAL(sync_attempts, 2U);
+    BOOST_CHECK(!Access::PersistenceFailed(*handler));
+    BOOST_CHECK(!deterministicMNManager->GetPendingPaymentProbationGCRequest());
+    llmq::pq::PQPaymentProbationStateView state;
+    BOOST_CHECK(!deterministicMNManager->GetPaymentProbationStateView(old_tip, state));
+    BOOST_REQUIRE(deterministicMNManager->GetPaymentProbationStateView(chain.back(), state));
+    BOOST_CHECK(state.StateHash() == probation_hash);
+    for (const auto& receipt : receipts) {
+        BOOST_CHECK(!Access::AuditStore(*handler).Has(receipt.audit_witness_id));
+    }
+    const auto generation{deterministicMNManager->PaymentProbationStateViewGeneration()};
+    Access::RunPaymentCheckpoint(*handler);
+    BOOST_CHECK(!Access::ContinuePaymentCheckpoint(*handler));
+    BOOST_CHECK_EQUAL(sync_attempts, 2U);
+    BOOST_CHECK(Access::AuditStore(*handler).GetPruneCheckpoint() == checkpoint);
+    BOOST_CHECK(!Access::AuditStore(*handler).GetPendingPruneCheckpoint());
+    BOOST_CHECK(!deterministicMNManager->GetPendingPaymentProbationGCRequest());
+    BOOST_CHECK_EQUAL(deterministicMNManager->PaymentProbationStateViewGeneration(), generation);
+}
+
+BOOST_FIXTURE_TEST_CASE(payment_audit_gc_reopened_archive_waits_for_probation_coins_sync,
+                        PaymentAuditGCSetup)
+{
+    PrepareCheckpoint(/*populate_archive=*/true);
+    {
+        LOCK(::cs_main);
+        m_node.chainman->ActiveChainstate().CoinsDB().SetSyncCallbackForTesting([this] {
+            ++sync_attempts;
+            CheckRootsBeforeGC();
+            return true;
+        });
+    }
+    Access::RunPaymentCheckpoint(*handler);
+    FinishArchive();
+    const auto checkpoint{Access::AuditStore(*handler).GetPruneCheckpoint()};
+    BOOST_REQUIRE(checkpoint);
+    BOOST_CHECK(!deterministicMNManager->IsPaymentProbationGCCompleteForCheckpoint(*checkpoint));
+    CheckRootsBeforeGC();
+
+    // Reopen the ordinary disk archive after its completed checkpoint, with
+    // no probation intent yet. This isolates the restart continuation lane;
+    // the fixture's coins and probation stores remain in memory.
+    SyncWithValidationInterfaceQueue();
+    auto closed{Access::ExchangeAuditStore(*handler, {})};
+    closed.reset();
+    Access::ExchangeAuditStore(*handler, std::make_unique<llmq::pq::PaymentAuditStore>(
+        m_node.chainman->m_options.datadir / "llmq/pq-payment-audits", genesis));
+    BOOST_REQUIRE(Access::AuditStore(*handler).IsHealthy());
+    BOOST_REQUIRE(Access::AuditStore(*handler).GetPruneCheckpoint() == checkpoint);
+    BOOST_REQUIRE(!Access::AuditStore(*handler).GetPendingPruneCheckpoint());
+    {
+        LOCK(::cs_main);
+        m_node.chainman->ActiveChainstate().CoinsDB().SetSyncCallbackForTesting([this] {
+            ++sync_attempts;
+            CheckRootsBeforeGC();
+            BOOST_CHECK(!deterministicMNManager->GetPendingPaymentProbationGCRequest());
+            return false;
+        });
+    }
+    BOOST_CHECK(Access::ContinuePaymentCheckpoint(*handler));
+    BOOST_CHECK_EQUAL(sync_attempts, 2U);
+    BOOST_CHECK(Access::PersistenceFailed(*handler));
+    BOOST_CHECK(!Access::HasShareAdmission(*handler));
+    BOOST_CHECK(Access::AuditStore(*handler).GetPruneCheckpoint() == checkpoint);
+    BOOST_CHECK(!deterministicMNManager->GetPendingPaymentProbationGCRequest());
+    BOOST_CHECK(!deterministicMNManager->IsPaymentProbationGCCompleteForCheckpoint(*checkpoint));
+    CheckRootsBeforeGC();
+    BOOST_CHECK(!Access::ContinuePaymentCheckpoint(*handler));
+    Access::RunPaymentCheckpoint(*handler);
+    BOOST_CHECK_EQUAL(sync_attempts, 2U);
+    BOOST_CHECK(!deterministicMNManager->GetPendingPaymentProbationGCRequest());
+    CheckRootsBeforeGC();
 }

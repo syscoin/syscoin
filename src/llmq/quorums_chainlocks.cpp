@@ -2128,6 +2128,38 @@ SelectCurrentChainLockBTCC(
         durable_cursor, *durable_selection, std::nullopt};
 }
 
+static bool FlushChainstatesForPaymentAuditGC(
+    ChainstateManager& chainman, BlockValidationState& state)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    AssertLockHeld(cs_main);
+    try {
+        for (Chainstate* chainstate : chainman.GetAllForPersistence()) {
+            if (chainstate->CoinsTip().GetBestBlock().IsNull()) {
+                if (!chainstate->CoinsDB().GetHeadBlocks().empty()) {
+                    return state.Error("Unrecovered coins heads before payment-audit GC");
+                }
+                continue;
+            }
+            // ALWAYS orders auxiliary state before coins, but its ordinary
+            // coins write is asynchronous. Fence every recoverable chainstate,
+            // including disabled snapshot owners, before an irreversible floor
+            // can discard roots behind its currently visible coins marker.
+            if (!chainstate->FlushStateToDisk(state, FlushStateMode::ALWAYS)) {
+                return false;
+            }
+            if (!chainstate->CoinsDB().FlushWithSync(chainstate->CoinsTip())) {
+                return state.Error("Failed to sync coins before payment-audit GC");
+            }
+        }
+    } catch (const std::exception& exception) {
+        return state.Error(strprintf(
+            "Failed to persist coins before payment-audit GC: %s",
+            exception.what()));
+    }
+    return true;
+}
+
 std::optional<std::vector<uint256>>
 CollectChainstatePaymentProbationRoots(ChainstateManager& chainman)
 {
@@ -12165,6 +12197,16 @@ bool CChainLocksHandler::ContinuePaymentAuditCheckpointGC()
         retained_probation_roots =
             pending_probation_request->retained_state_hashes;
     } else if (plan.derive_retained_probation_roots) {
+        // Coins may have advanced asynchronously during archive GC or after
+        // restart. Make the endpoints durable before freezing their roots in
+        // the first probation intent. Existing intents already pin that set.
+        BlockValidationState flush_state;
+        if (!FlushChainstatesForPaymentAuditGC(m_chainman, flush_state)) {
+            LogPrintf("CChainLocksHandler::%s -- probation GC coins barrier "
+                      "failed: %s\n", __func__, flush_state.ToString());
+            fail("could not persist retained chainstate endpoints");
+            return true;
+        }
         pq::PaymentAuditPresealState retained_markers;
         {
             LOCK(m_btcc_preseal_mutex);
@@ -12344,19 +12386,16 @@ void CChainLocksHandler::MaybeCheckpointPaymentAuditPreseal(
     const bool requires_durable_gc{ShouldRunPaymentAuditDurableGC(
         reuse_archive_checkpoint, probation_gc_complete)};
     if (requires_durable_gc) {
-        // Pruning either store is irreversible across a crash. First publish
-        // the active chainstate marker after the DMN, PQ-registry, and
-        // probation-state durability barriers, so restart can never land
-        // below a root removed by this checkpoint. Holding cs_main keeps the
-        // authenticated target active across the flush and both GC commits.
+        // Pruning either store is irreversible across a crash. Synchronize
+        // recoverable coins markers after their auxiliary-state barriers.
+        // Holding cs_main pins the authenticated branch through publication.
         if (reuse_archive_checkpoint) {
             // A completed archive with unfinished probation state is resumed
             // by the exact durable-request path on the next bounded pass.
             return;
         }
         BlockValidationState flush_state;
-        if (!m_chainman.ActiveChainstate().FlushStateToDisk(
-                flush_state, FlushStateMode::ALWAYS)) {
+        if (!FlushChainstatesForPaymentAuditGC(m_chainman, flush_state)) {
             LogPrintf("CChainLocksHandler::%s -- chainstate flush before "
                       "payment-audit GC failed: %s\n",
                       __func__, flush_state.ToString());
