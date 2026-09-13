@@ -59,13 +59,11 @@ void CMasternodeSync::Reset(bool fForce, bool fNotifyReset)
             return;
         }
     }
-    nTriedPeerCount = 0;
     nTimeAssetSyncStarted = GetTime();
     nTimeLastBumped = GetTime();
     nTimeLastUpdateBlockTip = 0;
     fReachedBestHeader = false;
     m_next_governance_page_attempt = 0;
-    m_governance_page_legacy_fallback = false;
     {
         LOCK(m_governance_page_mutex);
         nCurrentAsset = MASTERNODE_SYNC_BLOCKCHAIN;
@@ -106,7 +104,6 @@ void CMasternodeSync::SwitchToNextAsset(CConnman& connman)
             LogPrintf("CMasternodeSync::SwitchToNextAsset -- Completed %s in %llds\n", GetAssetName(), GetTime() - GetAssetStartTime());
             SetSyncMode(MASTERNODE_SYNC_GOVERNANCE);
             m_next_governance_page_attempt = 0;
-            m_governance_page_legacy_fallback = false;
             LogPrintf("CMasternodeSync::SwitchToNextAsset -- Starting %s\n", GetAssetName());
             break;
         case(MASTERNODE_SYNC_GOVERNANCE):
@@ -124,7 +121,6 @@ void CMasternodeSync::SwitchToNextAsset(CConnman& connman)
 
             break;
     }
-    nTriedPeerCount = 0;
     nTimeAssetSyncStarted = GetTime();
     BumpAssetLastTime("CMasternodeSync::SwitchToNextAsset");
 }
@@ -139,19 +135,11 @@ bilingual_str CMasternodeSync::GetSyncStatus()
     }
 }
 
-void CMasternodeSync::ProcessMessage(CNode* pfrom, const std::string& strCommand, CDataStream& vRecv) const
+int CMasternodeSync::GetAttempt() const
 {
-    if (strCommand == NetMsgType::SYNCSTATUSCOUNT) { //Sync status count
-
-        //do not care about stats if sync process finished or failed
-        if(IsSynced()) return;
-
-        int nItemID;
-        int nCount;
-        vRecv >> nItemID >> nCount;
-
-        LogPrint(BCLog::MNSYNC, "SYNCSTATUSCOUNT -- got inventory count: nItemID=%d  nCount=%d  peer=%d\n", nItemID, nCount, pfrom->GetId());
-    }
+    LOCK(m_governance_page_mutex);
+    return m_governance_page_sync.phase == GovernancePagePhase::IDLE
+        ? 0 : static_cast<int>(m_governance_page_sync.source_index + 1);
 }
 
 bool CMasternodeSync::IsGovernancePagePumpEligible(
@@ -230,7 +218,6 @@ void CMasternodeSync::ProcessGovernancePage(
                 prospective_count > response.total_count ||
                 response.done !=
                     (prospective_count == response.total_count) ||
-                scope.page_count >= MAX_GOVERNANCE_PAGES_PER_SCOPE ||
                 (!scope.transcript.empty() &&
                  !response.inventory.empty() &&
                  !(scope.transcript.back().hash <
@@ -576,8 +563,8 @@ CMasternodeSync::PumpGovernancePages(
             (fMasternodeMode && node->IsInboundConn())) {
             continue;
         }
-        // A transient cooldown must not look like an absence of upgraded
-        // peers, because only the latter permits lossy legacy fallback.
+        // Distinguish missing peers from temporary source cooldowns so each
+        // condition retains its bounded retry interval.
         has_capable_peer = true;
         if (!peerman.CanUseGovernancePageSource(*node)) continue;
         eligible_nodes.push_back(node);
@@ -646,7 +633,6 @@ CMasternodeSync::PumpGovernancePages(
                     pending->inventory.end());
                 scope.seen_count += pending->inventory.size();
                 scope.cursor = pending->next_cursor;
-                ++scope.page_count;
                 if (pending->done) {
                     AdvanceGovernanceScope(
                         GovernancePageSourceOutcome::SUCCESS,
@@ -927,47 +913,37 @@ void CMasternodeSync::ProcessTick(CConnman& connman, PeerManager& peerman,
         }
     }
 
-    bool governance_pages_active{false};
     if (GetAssetID() == MASTERNODE_SYNC_GOVERNANCE) {
-        if (now < m_next_governance_page_attempt.load()) {
-            if (!m_governance_page_legacy_fallback.load()) return;
-        } else {
-            m_governance_page_legacy_fallback = false;
-            constexpr auto context{
-                GovernancePagePumpContext::INITIAL_SYNC};
-            const uint64_t generation{
-                m_governance_page_generation.load()};
-            const auto page_result{
-                PumpGovernancePages(
-                    connman, peerman, context, generation)};
-            if (page_result == GovernancePagePumpResult::CANCELLED) {
-                return;
-            }
-            if (!IsGovernancePagePumpEligible(context, generation)) {
-                CancelGovernancePageSession(peerman);
-                return;
-            }
-            if (page_result == GovernancePagePumpResult::COMPLETE) {
-                m_next_governance_page_resync = now + 5 * 60;
-                SwitchToNextAsset(connman);
-                return;
-            }
-            if (page_result == GovernancePagePumpResult::ACTIVE) return;
-            if (page_result ==
-                GovernancePagePumpResult::UNSERVICEABLE) {
-                m_next_governance_page_attempt = now + 5 * 60;
-                LogPrintf("CMasternodeSync::ProcessTick -- governance page scope exceeds the bounded service contract\n");
-                return;
-            }
-            if (page_result == GovernancePagePumpResult::
-                    TEMPORARILY_UNAVAILABLE) {
-                m_next_governance_page_attempt =
-                    now + GOVERNANCE_PAGE_RESOURCE_RETRY_SECONDS;
-                return;
-            }
-            m_governance_page_legacy_fallback = true;
-            m_next_governance_page_attempt = now + 30;
+        if (now < m_next_governance_page_attempt.load()) return;
+        constexpr auto context{GovernancePagePumpContext::INITIAL_SYNC};
+        const uint64_t generation{m_governance_page_generation.load()};
+        const auto page_result{
+            PumpGovernancePages(connman, peerman, context, generation)};
+        if (page_result == GovernancePagePumpResult::CANCELLED) return;
+        if (!IsGovernancePagePumpEligible(context, generation)) {
+            CancelGovernancePageSession(peerman);
+            return;
         }
+        if (page_result == GovernancePagePumpResult::COMPLETE) {
+            m_next_governance_page_resync = now + 5 * 60;
+            SwitchToNextAsset(connman);
+            return;
+        }
+        if (page_result == GovernancePagePumpResult::ACTIVE) return;
+        if (page_result == GovernancePagePumpResult::UNSERVICEABLE) {
+            m_next_governance_page_attempt = now + 5 * 60;
+            LogPrintf("CMasternodeSync::ProcessTick -- governance page scope exceeds the bounded service contract\n");
+            return;
+        }
+        if (page_result == GovernancePagePumpResult::TEMPORARILY_UNAVAILABLE) {
+            m_next_governance_page_attempt =
+                now + GOVERNANCE_PAGE_RESOURCE_RETRY_SECONDS;
+            return;
+        }
+        // Governance sync requires an exact paged traversal. Remain in this
+        // stage until a capable source becomes available.
+        m_next_governance_page_attempt = now + 30;
+        return;
     } else if (IsSynced() &&
                GetTime() >= m_next_governance_page_resync.load()) {
         constexpr auto context{
@@ -983,8 +959,6 @@ void CMasternodeSync::ProcessTick(CConnman& connman, PeerManager& peerman,
             CancelGovernancePageSession(peerman);
             return;
         }
-        governance_pages_active =
-            page_result == GovernancePagePumpResult::ACTIVE;
         if (page_result == GovernancePagePumpResult::COMPLETE) {
             m_next_governance_page_resync = GetTime() + 5 * 60;
         } else if (page_result ==
@@ -1009,13 +983,8 @@ void CMasternodeSync::ProcessTick(CConnman& connman, PeerManager& peerman,
 
     m_last_maintenance_tick.store(now);
     const CConnman::NodesSnapshot snap{connman, /* filter = */ FullyConnectedOnly};
-    // Gradually request the rest of the votes after sync finished and make sure
-    // we recover the latest CLSIG after startup if local state is still empty.
+    // Recover the latest CLSIG after startup if local state is still empty.
     if(IsSynced()) {
-        if (!governance_pages_active) {
-            governance->RequestGovernanceObjectVotes(
-                snap.Nodes(), connman, peerman);
-        }
         static int64_t nTimeLastSigSyncRequest = 0;
         const int64_t nNow = GetTime<std::chrono::seconds>().count();
         const bool fNeedCLSIG = llmq::chainLocksHandler &&
@@ -1045,8 +1014,9 @@ void CMasternodeSync::ProcessTick(CConnman& connman, PeerManager& peerman,
 
 
     // Calculate "progress" for LOG reporting / GUI notification
-    double nSyncProgress = double(nTriedPeerCount + (nMode - 1) * 8) / (8*4);
-    LogPrint(BCLog::MNSYNC, "CMasternodeSync::ProcessTick -- nTick %d nCurrentAsset %d nTriedPeerCount %d nSyncProgress %f\n", nTick, nMode, nTriedPeerCount, nSyncProgress);
+    const int attempt{GetAttempt()};
+    double nSyncProgress = double(attempt + (nMode - 1) * 8) / (8*4);
+    LogPrint(BCLog::MNSYNC, "CMasternodeSync::ProcessTick -- nTick %d nCurrentAsset %d attempt %d nSyncProgress %f\n", nTick, nMode, attempt, nSyncProgress);
     uiInterface.NotifyAdditionalDataSyncProgressChanged(nSyncProgress);
     for (auto& pnode : snap.Nodes())
     {
@@ -1073,33 +1043,6 @@ void CMasternodeSync::ProcessTick(CConnman& connman, PeerManager& peerman,
                     }
                 }
                 return;
-            } else if (nMode == MASTERNODE_SYNC_GOVERNANCE) {
-                if (!governance->IsValid()) {
-                    SwitchToNextAsset(connman);
-                    return;
-                }
-                // check for timeout first
-                if(GetTime() - GetTimeLastBumped() > MASTERNODE_SYNC_TIMEOUT_SECONDS) {
-                    if (nTriedPeerCount == 0) {
-                        BumpAssetLastTime(
-                            "CMasternodeSync::NoLegacyGovernanceSource");
-                        return;
-                    }
-                    SwitchToNextAsset(connman);
-                    return;
-                }
-
-                // only request obj sync once from each peer
-                if(netfulfilledman->HasFulfilledRequest(pnode->addr, "governance-sync")) {
-                    // will request votes on per-obj basis from each node in a separate loop below
-                    // to avoid deadlocks here
-                    continue;
-                }
-                if (!SendGovernanceSyncRequest(pnode, connman)) continue;
-                netfulfilledman->AddFulfilledRequest(
-                    pnode->addr, "governance-sync");
-                nTriedPeerCount++;
-                continue; //this will cause each peer to get one request each six seconds for the various assets we need
             }
         }
 
@@ -1163,96 +1106,8 @@ void CMasternodeSync::ProcessTick(CConnman& connman, PeerManager& peerman,
                     }
                 }
             }
-
-            // GOVOBJ : SYNC GOVERNANCE ITEMS FROM OUR PEERS
-
-            if(nMode == MASTERNODE_SYNC_GOVERNANCE) {
-                if (!governance->IsValid()) {
-                    SwitchToNextAsset(connman);
-                    return;
-                }
-                LogPrint(BCLog::GOBJECT, "CMasternodeSync::ProcessTick -- nTick %d nMode %d nTimeLastBumped %lld GetTime() %lld diff %lld\n", nTick, nMode, GetTimeLastBumped(), GetTime(), GetTime() - GetTimeLastBumped());
-
-                // check for timeout first
-                if(GetTime() - GetTimeLastBumped() > MASTERNODE_SYNC_TIMEOUT_SECONDS) {
-                    LogPrintf("CMasternodeSync::ProcessTick -- nTick %d nMode %d -- timeout\n", nTick, nMode);
-                    if(nTriedPeerCount == 0) {
-                        LogPrintf("CMasternodeSync::ProcessTick -- WARNING: failed to sync %s\n", GetAssetName());
-                        BumpAssetLastTime(
-                            "CMasternodeSync::NoLegacyGovernanceSource");
-                        return;
-                    }
-                    SwitchToNextAsset(connman);
-                    return;
-                }
-
-                // only request obj sync once from each peer
-                if(netfulfilledman->HasFulfilledRequest(pnode->addr, "governance-sync")) {
-                    // will request votes on per-obj basis from each node in a separate loop below
-                    // to avoid deadlocks here
-                    continue;
-                }
-                if (!SendGovernanceSyncRequest(pnode, connman)) continue;
-                netfulfilledman->AddFulfilledRequest(
-                    pnode->addr, "governance-sync");
-                nTriedPeerCount++;
-
-                break; //this will cause each peer to get one request each six seconds for the various assets we need
-            }
         }
     }
-
-
-    if (nCurrentAsset != MASTERNODE_SYNC_GOVERNANCE) {
-        return;
-    }
-
-    // request votes on per-obj basis from each node
-    for (auto& pnode : snap.Nodes()) {
-        if(!netfulfilledman->HasFulfilledRequest(pnode->addr, "governance-sync")) {
-            continue; // to early for this node
-        }
-        int nObjsLeftToAsk = governance->RequestGovernanceObjectVotes(pnode, connman, peerman);
-        // check for data
-        if(nObjsLeftToAsk == 0) {
-            static int64_t nTimeNoObjectsLeft = 0;
-            static int nLastTick = 0;
-            static int nLastVotes = 0;
-            if(nTimeNoObjectsLeft == 0) {
-                // asked all objects for votes for the first time
-                nTimeNoObjectsLeft = GetTime();
-            }
-            // make sure the condition below is checked only once per tick
-            if(nLastTick == nTick) continue;
-            if(GetTime() - nTimeNoObjectsLeft > MASTERNODE_SYNC_TIMEOUT_SECONDS &&
-                governance->GetVoteCount() - nLastVotes < std::max(int(0.0001 * nLastVotes), MASTERNODE_SYNC_TICK_SECONDS)
-            ) {
-                // We already asked for all objects, waited for MASTERNODE_SYNC_TIMEOUT_SECONDS
-                // after that and less then 0.01% or MASTERNODE_SYNC_TICK_SECONDS
-                // (i.e. 1 per second) votes were received during the last tick.
-                // We can be pretty sure that we are done syncing.
-                LogPrintf("CMasternodeSync::ProcessTick -- nTick %d nCurrentAsset %d -- asked for all objects, nothing to do\n", nTick, MASTERNODE_SYNC_GOVERNANCE);
-                // reset nTimeNoObjectsLeft to be able to use the same condition on resync
-                nTimeNoObjectsLeft = 0;
-                SwitchToNextAsset(connman);
-                return;
-            }
-            nLastTick = nTick;
-            nLastVotes = governance->GetVoteCount();
-        }
-    }
-}
-
-bool CMasternodeSync::SendGovernanceSyncRequest(
-    CNode* pnode, CConnman& connman)
-{
-    if (SupportsGovernancePages(pnode->GetCommonVersion())) return false;
-    CNetMsgMaker msgMaker(pnode->GetCommonVersion());
-
-    CBloomFilter filter;
-
-    connman.PushMessage(pnode, msgMaker.Make(NetMsgType::MNGOVERNANCESYNC, uint256(), filter));
-    return true;
 }
 
 void CMasternodeSync::NotifyHeaderTip(const CBlockIndex *pindexNew)

@@ -111,7 +111,6 @@ bool IsValidGovernancePageResponse(
         response.request_view_id != request.view_id ||
         response.nonce != request.nonce ||
         response.status > GOVERNANCE_PAGE_SCOPE_TOO_LARGE ||
-        response.total_count > MAX_GOVERNANCE_PAGE_SCOPE_ITEMS ||
         response.inventory.size() > MAX_GOVERNANCE_PAGE_INVENTORY) {
         return false;
     }
@@ -4055,26 +4054,12 @@ bool PeerManagerImpl::SendGovernancePage(
             }
             if (!response.done && page.snapshot) {
                 if (!session) {
-                    const uint64_t item_seconds{
-                        static_cast<uint64_t>(
-                            response.total_count) * 2};
-                    const auto minimum_lifetime{
-                        std::chrono::duration_cast<
-                            std::chrono::microseconds>(
-                            GOVERNANCE_PAGE_RESPONSE_TIMEOUT +
-                            GOVERNANCE_PAGE_TRANSFER_TIMEOUT)};
-                    const auto lifetime{std::max(
-                        minimum_lifetime,
-                        std::chrono::duration_cast<
-                            std::chrono::microseconds>(
-                            std::chrono::seconds{item_seconds}) +
-                            minimum_lifetime)};
                     session = Peer::GovernancePageServeSession{
                         peer->m_next_governance_page_serve_generation++,
                         page.snapshot, response.scope_hash,
                         response.view_id, response.next_cursor,
                         response.nonce, /*cursor_zero_restarts=*/0,
-                        expiry, now + lifetime};
+                        expiry, now + std::chrono::hours{24}};
                 } else {
                     session->expected_cursor = response.next_cursor;
                     session->last_nonce = response.nonce;
@@ -4082,6 +4067,12 @@ bool PeerManagerImpl::SendGovernancePage(
                         ++session->cursor_zero_restarts;
                     }
                     session->idle_expiry = expiry;
+                    // Renew only after forward progress. Repeating cursor zero
+                    // cannot extend the lifetime of a pinned snapshot.
+                    if (!response.cursor.IsNull() &&
+                        response.cursor < response.next_cursor) {
+                        session->hard_expiry = now + std::chrono::hours{24};
+                    }
                 }
             } else if (session) {
                 retired_session = std::move(session);
@@ -5519,18 +5510,24 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
                         const auto& entry{
                             governance_upload->snapshot->Entries()[
                                 governance_upload->entry_index]};
-                        if (entry.inv != inv || entry.payload.empty()) break;
+                        if (entry.inv != inv || entry.PayloadSize() == 0) break;
                         if (!governance->ConsumeGovernancePayloadBytes(
                                 pfrom.GetId(),
                                 pfrom.GetVerifiedProRegTxHash(),
-                                pfrom.nKeyedNetGroup, entry.payload.size(),
+                                pfrom.nKeyedNetGroup, entry.PayloadSize(),
                                 GetTime<std::chrono::microseconds>())) {
                             break;
                         }
-                        ss = CDataStream{
-                            Span<const uint8_t>{entry.payload}, SER_NETWORK,
-                            pfrom.GetCommonVersion()};
-                        topush = true;
+                        CSerializedNetMsg message;
+                        message.m_type = NetMsgType::MNGOVERNANCEOBJECT;
+                        if (!governance_upload->snapshot->ReadPayload(
+                                governance_upload->entry_index, message.data) ||
+                            governance->GetPQGovernanceValidationContextEpoch() != current_epoch) {
+                            break;
+                        }
+                        m_connman.PushMessage(&pfrom, std::move(message));
+                        push = true;
+                        break;
                     } else if (governance_upload) {
                         const auto payload_size{
                             governance->GetObjectSerializedSizeForHash(
@@ -5573,18 +5570,24 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
                         const auto& entry{
                             governance_upload->snapshot->Entries()[
                                 governance_upload->entry_index]};
-                        if (entry.inv != inv || entry.payload.empty()) break;
+                        if (entry.inv != inv || entry.PayloadSize() == 0) break;
                         if (!governance->ConsumeGovernancePayloadBytes(
                                 pfrom.GetId(),
                                 pfrom.GetVerifiedProRegTxHash(),
-                                pfrom.nKeyedNetGroup, entry.payload.size(),
+                                pfrom.nKeyedNetGroup, entry.PayloadSize(),
                                 GetTime<std::chrono::microseconds>())) {
                             break;
                         }
-                        ss = CDataStream{
-                            Span<const uint8_t>{entry.payload}, SER_NETWORK,
-                            pfrom.GetCommonVersion()};
-                        topush = true;
+                        CSerializedNetMsg message;
+                        message.m_type = NetMsgType::MNGOVERNANCEOBJECTVOTE;
+                        if (!governance_upload->snapshot->ReadPayload(
+                                governance_upload->entry_index, message.data) ||
+                            governance->GetPQGovernanceValidationContextEpoch() != current_epoch) {
+                            break;
+                        }
+                        m_connman.PushMessage(&pfrom, std::move(message));
+                        push = true;
+                        break;
                     } else if (governance_upload) {
                         const auto payload_size{
                             governance->GetVoteSerializedSizeUpperBoundForHash(
@@ -8852,9 +8855,6 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
     if(msg_type == NetMsgType::SPORK || msg_type == NetMsgType::GETSPORKS) {
         sporkManager->ProcessMessage(&pfrom, msg_type, vRecv, m_connman, *this);
         return;
-    } else if(msg_type == NetMsgType::SYNCSTATUSCOUNT) {
-        masternodeSync.ProcessMessage(&pfrom, msg_type, vRecv);
-        return;
     } else if (msg_type == NetMsgType::GOVPAGE) {
         // SYSCOIN BEGIN: Governance synchronization is live authority and is
         // disabled while the public activation handoff is quarantined.
@@ -8869,7 +8869,6 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             &pfrom, response, *this);
         return;
     } else if(msg_type == NetMsgType::GETGOVPAGE ||
-        msg_type == NetMsgType::MNGOVERNANCESYNC ||
         msg_type == NetMsgType::MNGOVERNANCEOBJECT ||
         msg_type == NetMsgType::MNGOVERNANCEOBJECTVOTE) {
         // SYSCOIN BEGIN: Do not let quarantined governance traffic mutate

@@ -228,29 +228,23 @@ std::optional<CGovernanceVote> CGovernanceObjectVoteFile::GetVote(
 std::optional<std::size_t>
 CGovernanceObjectVoteFile::GetPageSnapshotRetainedBytes() const
 {
-    if (mapVoteIndex.size() > MAX_GOVERNANCE_PAGE_SCOPE_ITEMS) {
-        return std::nullopt;
-    }
-    if (mapVoteIndex.size() >
-        (std::numeric_limits<std::size_t>::max() -
-         sizeof(GovernancePageImmutableSnapshot)) /
-            sizeof(GovernancePageSnapshotEntry)) {
+    if (mapVoteIndex.size() > std::numeric_limits<uint32_t>::max() ||
+        mapVoteIndex.size() >
+            (std::numeric_limits<std::size_t>::max() -
+             sizeof(GovernancePageImmutableSnapshot)) /
+                sizeof(GovernancePageSnapshotEntry)) {
         return std::nullopt;
     }
     std::size_t retained{
         sizeof(GovernancePageImmutableSnapshot) +
         mapVoteIndex.size() * sizeof(GovernancePageSnapshotEntry)};
-    if (retained > MAX_GOVERNANCE_PAGE_SNAPSHOT_BYTES) {
-        return std::nullopt;
-    }
     for (const auto& [hash, vote] : mapVoteIndex) {
         (void)hash;
         const std::size_t payload_size{::GetSerializeSize(
             *vote, GOVERNANCE_PAGE_PROTO_VERSION, SER_NETWORK)};
         if (payload_size == 0 ||
             payload_size > MAX_GOVERNANCE_PAGE_PAYLOAD_BYTES ||
-            payload_size >
-                MAX_GOVERNANCE_PAGE_SNAPSHOT_BYTES - retained) {
+            payload_size > std::numeric_limits<std::size_t>::max() - retained) {
             return std::nullopt;
         }
         retained += payload_size;
@@ -275,10 +269,10 @@ CGovernanceObjectVoteFile::GetPageSnapshot(
     const std::shared_ptr<GovernancePageSnapshotBudget>& budget,
     uint64_t instance_id,
     uint64_t validation_context_epoch,
-    std::optional<std::size_t> retained_bytes) const
+    std::optional<std::size_t> retained_bytes) const try
 {
     if (scope_hash.IsNull() ||
-        mapVoteIndex.size() > MAX_GOVERNANCE_PAGE_SCOPE_ITEMS) {
+        mapVoteIndex.size() > std::numeric_limits<uint32_t>::max()) {
         return {};
     }
     if (const auto cached{
@@ -290,28 +284,54 @@ CGovernanceObjectVoteFile::GetPageSnapshot(
         retained_bytes = GetPageSnapshotRetainedBytes();
     }
     if (!retained_bytes) return {};
-
+    const bool spill{*retained_bytes > MAX_GOVERNANCE_PAGE_SNAPSHOT_BYTES};
+    if (mapVoteIndex.size() >
+        (std::numeric_limits<std::size_t>::max() -
+         sizeof(GovernancePageImmutableSnapshot) -
+         GovernancePagePayloadSpool::ResidentBytes()) /
+            sizeof(GovernancePageSnapshotEntry)) {
+        return {};
+    }
+    const std::size_t metadata_bytes{
+        sizeof(GovernancePageImmutableSnapshot) +
+        mapVoteIndex.size() * sizeof(GovernancePageSnapshotEntry)};
     const uint32_t total_count{static_cast<uint32_t>(mapVoteIndex.size())};
     CGovernancePageViewHasher hasher{scope_hash, total_count};
     GovernancePageSnapshotReservation reservation{budget};
-    if (!reservation.Reserve(*retained_bytes)) return {};
+    if (!reservation.Reserve(spill
+            ? metadata_bytes + GovernancePagePayloadSpool::ResidentBytes()
+            : *retained_bytes, /*allow_oversized_metadata=*/spill)) {
+        return {};
+    }
+    const auto spool{spill ? GovernancePagePayloadSpool::Create(
+                              budget, *retained_bytes - metadata_bytes)
+                          : std::shared_ptr<GovernancePagePayloadSpool>{}};
+    if (spill && !spool) return {};
+    std::size_t scratch_bytes{0};
     std::vector<GovernancePageSnapshotEntry> entries;
     entries.reserve(total_count);
     if (entries.capacity() > total_count &&
         !reservation.Reserve(
             (entries.capacity() - total_count) *
-            sizeof(GovernancePageSnapshotEntry))) {
+            sizeof(GovernancePageSnapshotEntry),
+            /*allow_oversized_metadata=*/spill)) {
         return {};
     }
     for (const auto& [hash, vote] : mapVoteIndex) {
         const CInv inv{MSG_GOVERNANCE_OBJECT_VOTE, hash};
         if (!hasher.Append(inv)) return {};
-        const std::size_t payload_size{
-            ::GetSerializeSize(
-                *vote, GOVERNANCE_PAGE_PROTO_VERSION, SER_NETWORK)};
+        const std::size_t payload_size{::GetSerializeSize(
+            *vote, GOVERNANCE_PAGE_PROTO_VERSION, SER_NETWORK)};
         if (payload_size == 0 ||
             payload_size > MAX_GOVERNANCE_PAGE_PAYLOAD_BYTES) {
             return {};
+        }
+        if (spill && payload_size > scratch_bytes) {
+            if (!reservation.Reserve(payload_size - scratch_bytes,
+                    /*allow_oversized_metadata=*/true)) {
+                return {};
+            }
+            scratch_bytes = payload_size;
         }
         std::vector<unsigned char> payload;
         payload.reserve(payload_size);
@@ -319,22 +339,37 @@ CGovernanceObjectVoteFile::GetPageSnapshot(
             SER_NETWORK, GOVERNANCE_PAGE_PROTO_VERSION,
             payload, 0, *vote};
         if (payload.size() != payload_size) return {};
-        if (payload.capacity() > payload_size &&
-            !reservation.Reserve(
-                payload.capacity() - payload_size)) {
-            return {};
+        if (spill) {
+            if (payload.capacity() > scratch_bytes) {
+                if (!reservation.Reserve(payload.capacity() - scratch_bytes,
+                        /*allow_oversized_metadata=*/true)) {
+                    return {};
+                }
+                scratch_bytes = payload.capacity();
+            }
+            const auto offset{spool->Append(payload)};
+            if (!offset) return {};
+            entries.push_back(GovernancePageSnapshotEntry{
+                inv, {}, *offset, static_cast<uint32_t>(payload_size)});
+        } else {
+            if (payload.capacity() > payload_size &&
+                !reservation.Reserve(payload.capacity() - payload_size)) {
+                return {};
+            }
+            entries.push_back(
+                GovernancePageSnapshotEntry{inv, std::move(payload)});
         }
-        entries.push_back(
-            GovernancePageSnapshotEntry{inv, std::move(payload)});
     }
     const auto view{hasher.Finalize()};
     if (!view) return {};
     const auto snapshot{GovernancePageImmutableSnapshot::Create(
         std::move(reservation), instance_id,
         validation_context_epoch, scope_hash, *view,
-        std::move(entries))};
+        std::move(entries), spool)};
     m_page_snapshot = snapshot;
     return snapshot;
+} catch (const std::bad_alloc&) {
+    return {};
 }
 
 bool CGovernanceObjectVoteFile::SerializeVoteToStream(const uint256& nHash, CDataStream& ss) const

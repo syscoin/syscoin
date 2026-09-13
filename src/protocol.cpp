@@ -51,8 +51,6 @@ const char* SENDTXRCNCL = "sendtxrcncl";
 // SYSCOIN message types
 const char *SPORK="spork";
 const char *GETSPORKS="getsporks";
-const char *SYNCSTATUSCOUNT="ssc";
-const char *MNGOVERNANCESYNC="govsync";
 const char *MNGOVERNANCEOBJECT="govobj";
 const char *MNGOVERNANCEOBJECTVOTE="govobjvote";
 const char *GETGOVPAGE="getgovpage";
@@ -103,8 +101,6 @@ const static std::vector<std::string> g_all_net_message_types{
     // NOTE: include non-implmented here, we must keep this list in sync with enum in protocol.h
     NetMsgType::SPORK,
     NetMsgType::GETSPORKS,
-    NetMsgType::SYNCSTATUSCOUNT,
-    NetMsgType::MNGOVERNANCESYNC,
     NetMsgType::MNGOVERNANCEOBJECT,
     NetMsgType::MNGOVERNANCEOBJECTVOTE,
     NetMsgType::GETGOVPAGE,
@@ -168,7 +164,7 @@ std::optional<uint256> CGovernancePageViewHasher::Finalize()
 std::optional<uint256> ComputeGovernancePageViewHash(
     const uint256& scope_hash, const std::vector<CInv>& inventory)
 {
-    if (inventory.size() > MAX_GOVERNANCE_PAGE_SCOPE_ITEMS) {
+    if (inventory.size() > std::numeric_limits<uint32_t>::max()) {
         return std::nullopt;
     }
     CGovernancePageViewHasher hasher{

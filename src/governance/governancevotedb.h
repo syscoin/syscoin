@@ -77,7 +77,7 @@ public:
     [[nodiscard]] std::optional<CGovernanceVote> GetVote(
         const uint256& nHash) const;
 
-    /** Exact fixed-wire bytes retained by a fresh page snapshot. */
+    /** Full fixed-wire snapshot size, including payloads that may spill. */
     [[nodiscard]] std::optional<std::size_t>
     GetPageSnapshotRetainedBytes() const;
 

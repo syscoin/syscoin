@@ -18,15 +18,12 @@ class PeerManager;
 class CBlockIndex;
 class CConnman;
 class CNode;
-class CDataStream;
 class ChainstateManager;
 namespace masternode_sync_tests {
 class CMasternodeSyncTestAccess;
 }
 static constexpr int MASTERNODE_SYNC_BLOCKCHAIN      = 1;
 static constexpr int MASTERNODE_SYNC_GOVERNANCE      = 4;
-static constexpr int MASTERNODE_SYNC_GOVOBJ          = 10;
-static constexpr int MASTERNODE_SYNC_GOVOBJ_VOTE     = 11;
 static constexpr int MASTERNODE_SYNC_FINISHED        = 999;
 
 static constexpr int MASTERNODE_SYNC_TICK_SECONDS    = 6;
@@ -45,10 +42,6 @@ class CMasternodeSync
 
 private:
     static constexpr std::size_t MAX_GOVERNANCE_PAGE_SOURCES{3};
-    static constexpr std::size_t MAX_GOVERNANCE_PAGES_PER_SCOPE{
-        (MAX_GOVERNANCE_PAGE_SCOPE_ITEMS +
-         MAX_GOVERNANCE_PAGE_INVENTORY - 1) /
-        MAX_GOVERNANCE_PAGE_INVENTORY};
     static constexpr std::size_t MAX_GOVERNANCE_VIEW_RESTARTS{4};
     static constexpr std::size_t MAX_GOVERNANCE_RESOURCE_RETRIES{4};
     static constexpr std::size_t
@@ -84,7 +77,6 @@ private:
         uint256 view_id;
         uint32_t total_count{0};
         uint32_t seen_count{0};
-        std::size_t page_count{0};
         std::size_t restarts{0};
         std::size_t resource_retries{0};
         std::chrono::microseconds retry_not_before{0};
@@ -98,7 +90,6 @@ private:
             view_id.SetNull();
             total_count = 0;
             seen_count = 0;
-            page_count = 0;
             retry_not_before = std::chrono::microseconds{0};
             established = false;
             transcript.clear();
@@ -157,19 +148,13 @@ private:
     std::atomic<uint64_t> m_governance_page_generation{1};
     std::atomic<int64_t> m_next_governance_page_attempt{0};
     std::atomic<int64_t> m_next_governance_page_resync{0};
-    // Only an actual absence of upgraded peers permits the legacy best-effort
-    // path. Transient page backpressure must keep exact sync fail-closed.
-    std::atomic<bool> m_governance_page_legacy_fallback{false};
-
     // Paging is pumped every scheduler call. Keep that heartbeat separate
-    // from the six-second cadence used by the legacy maintenance path.
+    // from the six-second cadence used by the other sync maintenance.
     std::atomic<int64_t> m_last_process_tick{0};
     std::atomic<int64_t> m_last_maintenance_tick{0};
 
     // Keep track of current asset
     std::atomic<int> nCurrentAsset {MASTERNODE_SYNC_BLOCKCHAIN};
-    // Count peers we've requested the asset from
-    std::atomic<int> nTriedPeerCount {0};
 
     // Time when current masternode asset sync started
     std::atomic<int64_t> nTimeAssetSyncStarted {0};
@@ -185,9 +170,6 @@ public:
     CMasternodeSync();
 
 
-    [[nodiscard]] static bool SendGovernanceSyncRequest(
-        CNode* pnode, CConnman& connman);
-
     bool IsBlockchainSynced() const {return nCurrentAsset > MASTERNODE_SYNC_BLOCKCHAIN; }
     bool IsSynced() const { return nCurrentAsset == MASTERNODE_SYNC_FINISHED; }
     void SetSyncMode(int nMode)
@@ -195,7 +177,8 @@ public:
 
     int GetAssetID() const {  return nCurrentAsset; }
     int64_t GetLastUpdateBlockTip() const { return nTimeLastUpdateBlockTip; }
-    int GetAttempt() const { return nTriedPeerCount; }
+    int GetAttempt() const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_governance_page_mutex);
     void BumpAssetLastTime(const std::string& strFuncName);
     int64_t GetAssetStartTime() { return nTimeAssetSyncStarted; }
     int64_t GetTimeLastBumped() { return nTimeLastBumped; }
@@ -208,7 +191,6 @@ public:
     void SwitchToNextAsset(CConnman& connman)
         EXCLUSIVE_LOCKS_REQUIRED(!m_governance_page_mutex);
 
-    void ProcessMessage(CNode* pfrom, const std::string& strCommand, CDataStream& vRecv) const;
     void ProcessGovernancePage(CNode* pfrom,
                                const CGovernancePageResponse& response,
                                PeerManager& peerman)

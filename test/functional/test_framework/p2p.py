@@ -155,7 +155,6 @@ MESSAGEMAP = {
     b"getgovpage": None,
     b"getsporks": None,
     b"govpage": None,
-    b"govsync": None,
     b"pqclshare": msg_pqclshare,
     b"pqposecert": msg_pqposecert,
     b"spork": None,

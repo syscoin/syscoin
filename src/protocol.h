@@ -266,8 +266,6 @@ extern const char *WTXIDRELAY;
 // SYSCOIN message types
 extern const char *SPORK;
 extern const char *GETSPORKS;
-extern const char *SYNCSTATUSCOUNT;
-extern const char *MNGOVERNANCESYNC;
 extern const char *MNGOVERNANCEOBJECT;
 extern const char *MNGOVERNANCEOBJECTVOTE;
 extern const char *GETGOVPAGE;
@@ -574,11 +572,6 @@ static constexpr auto GOVERNANCE_PAGE_RESPONSE_TIMEOUT{
 // progress on a roughly 0.6 Mbps link.
 static constexpr auto GOVERNANCE_PAGE_TRANSFER_TIMEOUT{
     std::chrono::minutes{15}};
-// Payload admission refills once per two seconds. A 43,200-item scope can
-// therefore drain within a 24-hour immutable-snapshot lease; a larger count
-// would be advertised as resumable while being impossible to service before
-// its bounded server state expires.
-static constexpr uint32_t MAX_GOVERNANCE_PAGE_SCOPE_ITEMS{43'200};
 
 enum GovernancePageStatus : uint8_t {
     GOVERNANCE_PAGE_OK = 0,

@@ -26,7 +26,6 @@
 #include <util/check.h>
 #include <utility>
 
-class CBloomFilter;
 class CBlockIndex;
 class CConnman;
 template<typename T>
@@ -73,49 +72,6 @@ enum class GovernanceTriggerAdmissionResult {
 
 [[nodiscard]] std::string_view GovernanceObjectAdmissionError(
     GovernanceObjectAdmissionResult result);
-
-// SYSCOIN: bound peer-triggered SLH work when serving governance votes.
-class GovernanceVoteSyncRateLimiter final
-{
-public:
-    static constexpr std::size_t MAX_SOURCES{512};
-    static constexpr std::size_t MAX_VERIFICATIONS_PER_REQUEST{256};
-    static constexpr uint8_t SOURCE_BURST{2};
-    static constexpr auto SOURCE_REFILL_INTERVAL{std::chrono::minutes{5}};
-    static constexpr auto GLOBAL_MIN_INTERVAL{std::chrono::seconds{2}};
-    static constexpr auto SOURCE_EXPIRY{std::chrono::hours{24}};
-
-    [[nodiscard]] bool Consume(
-        int64_t peer, const uint256& authenticated_pro_tx,
-        uint64_t keyed_net_group, std::chrono::microseconds now);
-    [[nodiscard]] std::size_t Size() const noexcept { return m_buckets.size(); }
-
-private:
-    struct SourceIdentity {
-        uint256 authenticated_pro_tx;
-        uint64_t keyed_net_group{0};
-        int64_t fallback_peer{-1};
-
-        friend bool operator<(const SourceIdentity& lhs,
-                              const SourceIdentity& rhs) noexcept
-        {
-            return std::tie(lhs.authenticated_pro_tx,
-                            lhs.keyed_net_group, lhs.fallback_peer) <
-                   std::tie(rhs.authenticated_pro_tx,
-                            rhs.keyed_net_group, rhs.fallback_peer);
-        }
-    };
-
-    struct Bucket {
-        uint8_t tokens{SOURCE_BURST};
-        std::chrono::microseconds last_refill{0};
-        std::chrono::microseconds last_seen{0};
-    };
-
-    std::map<SourceIdentity, Bucket> m_buckets;
-    std::chrono::microseconds m_next_global_request{0};
-};
-// SYSCOIN: end bounded governance vote sync admission.
 
 // Cheap page requests are rate-limited independently of expensive payload
 // verification. Authenticated peers remain constrained by both their ProTx
@@ -183,9 +139,9 @@ private:
     std::chrono::microseconds m_global_byte_last_refill{0};
 };
 
-// Cache hits are cheap, but constructing a new immutable scope can serialize
-// tens of MiB. Charge that work independently from the per-request limiter so
-// rotating peers/scopes cannot repeatedly hold governance validation locks.
+// Cache misses serialize an entire immutable scope, including disk payloads.
+// Charge their full size independently from the request limiter; large builds
+// repay byte debt before another miss can hold governance validation locks.
 class GovernancePageBuildRateLimiter final
 {
 public:
@@ -196,14 +152,15 @@ public:
     static constexpr auto MIN_BUILD_INTERVAL{
         std::chrono::milliseconds{500}};
 
-    /** Reserve the minimum work charge before inspecting an uncached scope. */
+    /** Reserve the full burst before inspecting an uncached scope. */
     [[nodiscard]] bool Begin(std::chrono::microseconds now);
 
-    /** Charge the measured remainder after the bounded size preflight. */
-    [[nodiscard]] bool Charge(std::size_t retained_bytes);
+    /** Charge all serialization work, including payloads written to disk. */
+    [[nodiscard]] bool Charge(std::size_t serialized_bytes);
 
 private:
     std::size_t m_tokens{TOKEN_CAPACITY};
+    std::size_t m_byte_debt{0};
     std::chrono::microseconds m_last_refill{0};
     std::chrono::microseconds m_next_build{0};
     bool m_build_active{false};
@@ -556,9 +513,6 @@ private:
     std::optional<uint256> votedFundingYesTriggerHash;
     std::map<uint256, std::shared_ptr<CSuperblock>> mapTrigger;
     std::set<uint256> m_pq_inactive_triggers GUARDED_BY(cs);
-    Mutex m_vote_sync_rate_mutex;
-    GovernanceVoteSyncRateLimiter m_vote_sync_rate
-        GUARDED_BY(m_vote_sync_rate_mutex);
     Mutex m_page_serve_rate_mutex;
     GovernancePageServeRateLimiter m_page_serve_rate
         GUARDED_BY(m_page_serve_rate_mutex);
@@ -613,12 +567,6 @@ public:
     GetPQGovernanceValidationContextEpoch() const;
     void ObserveChainTip(const CBlockIndex* tip);
 
-    // SYSCOIN: SLH vote verification is forbidden under global state locks.
-    void SyncSingleObjVotes(CNode* pnode, const uint256& nProp,
-                            const CBloomFilter& filter, CConnman& connman,
-                            PeerManager& peerman);
-    void SyncObjects(CNode* pnode, CConnman& connman, PeerManager &peerman) const;
-
     void ProcessMessage(CNode* pfrom, const std::string& strCommand,
                         CDataStream& vRecv, CConnman& connman,
                         PeerManager& peerman)
@@ -635,7 +583,7 @@ public:
 
     void ResetVotedFundingTrigger();
 
-    void DoMaintenance(CConnman& connman);
+    void DoMaintenance();
 
     const CGovernanceObject* FindConstGovernanceObject(const uint256& nHash) const;
     CGovernanceObject* FindGovernanceObject(const uint256& nHash);
@@ -738,9 +686,6 @@ public:
 
     bool InitOnLoad();
 
-    int RequestGovernanceObjectVotes(CNode* pnode, CConnman& connman, const PeerManager& peerman) const;
-    int RequestGovernanceObjectVotes(const std::vector<CNode*>& vNodesCopy, CConnman& connman, const PeerManager& peerman) const;
-
     /*
      * Trigger Management (formerly CGovernanceTriggerManager)
      *   - Track governance objects which are triggers
@@ -775,8 +720,6 @@ private:
                             const vote_outcome_enum_t outcome,
                             CConnman& connman, PeerManager& peerman);
     bool HasAlreadyVotedFundingTrigger() const;
-
-    void RequestGovernanceObject(CNode* pfrom, const uint256& nHash, CConnman& connman, bool fUseFilter = false) const;
 
     bool ProcessVote(CNode* pfrom, const CGovernanceVote& vote,
                      CGovernanceException& exception, CConnman& connman,
@@ -976,8 +919,6 @@ private:
         EXCLUSIVE_LOCKS_REQUIRED(cs);
 
     [[nodiscard]] bool RebuildIndexes();
-
-    void RequestOrphanObjects(CConnman& connman);
 
     void CleanOrphanObjects();
 

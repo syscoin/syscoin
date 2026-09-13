@@ -34,10 +34,6 @@ struct PQRegistrySnapshot;
 class PQRegistryReadView;
 }
 
-
-static constexpr double GOVERNANCE_FILTER_FP_RATE = 0.001;
-
-
 static constexpr CAmount GOVERNANCE_PROPOSAL_FEE_TX = (150.0 * COIN);
 
 static constexpr int64_t GOVERNANCE_FEE_CONFIRMATIONS = 6;

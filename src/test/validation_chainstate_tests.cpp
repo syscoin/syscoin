@@ -14,6 +14,8 @@
 #include <governance/governanceexceptions.h>
 #include <governance/pq_governance_auth.h> // SYSCOIN: PQ governance authorization fixtures.
 #include <governance/governancevote.h>
+#include <governance/governancevalidators.h>
+#include <key_io.h>
 #include <llmq/quorums_commitment.h>
 #include <masternode/masternodepayments.h>
 #include <masternode/masternodesync.h>
@@ -415,6 +417,13 @@ public:
     {
         LOCK(manager.cs);
         manager.InvalidateObjectPageCache();
+    }
+
+    static std::shared_ptr<GovernancePageSnapshotBudget> PageBudget(
+        CGovernanceManager& manager)
+    {
+        LOCK(manager.cs);
+        return manager.m_page_snapshot_budget;
     }
 
     static std::size_t ObjectCount(CGovernanceManager& manager)
@@ -1037,7 +1046,6 @@ public:
         scope.view_id = *view;
         scope.total_count = full_scope.size();
         scope.seen_count = 2;
-        scope.page_count = 1;
         scope.transcript.assign(full_scope.begin(), full_scope.begin() + 2);
         scope.cursor = scope.transcript.back().hash;
     }
@@ -3152,6 +3160,103 @@ BOOST_FIXTURE_TEST_CASE(
 }
 
 BOOST_FIXTURE_TEST_CASE(
+    governance_object_pages_complete_large_local_scope,
+    TestChain100Setup)
+{
+    using Access = governance_tests::CGovernanceManagerTestAccess;
+    BOOST_REQUIRE(governance != nullptr);
+    Access::SetReady(*governance, true);
+    constexpr int version{GOVERNANCE_PAGE_PROTO_VERSION};
+    constexpr uint32_t count{43'300};
+    const std::string json{
+        "{\"type\":1,\"name\":\"page-fixture\",\"start_epoch\":1,"
+        "\"end_epoch\":2,\"payment_amount\":1,\"payment_address\":\"" +
+        EncodeDestination(PKHash(coinbaseKey.GetPubKey())) +
+        "\",\"url\":\"https://example.com/proposal\"}"};
+    const std::string data{HexStr(json)};
+    CProposalValidator validator{data};
+    BOOST_REQUIRE(validator.Validate(/*fCheckExpiration=*/false));
+
+    // Model stored proposals through the same local cache seam as the small
+    // page fixture. Each proposal has ordinary schema and bounded wire data.
+    std::set<uint256> expected;
+    for (uint32_t i{0}; i < count; ++i) {
+        CGovernanceObject proposal{
+            uint256{}, static_cast<int>(i + 1), 100 + i, uint256{}, data};
+        expected.insert(Access::InsertObject(*governance, std::move(proposal)));
+    }
+    BOOST_REQUIRE_EQUAL(expected.size(), count);
+
+    CGovernancePageRequest request;
+    request.nonce = 1;
+    std::shared_ptr<const GovernancePageImmutableSnapshot> snapshot;
+    std::vector<uint256> received;
+    CGovernancePageViewHasher hasher{uint256{}, count};
+    do {
+        const auto page{governance->BuildGovernancePage(
+            request, snapshot)};
+        BOOST_REQUIRE(page);
+        BOOST_REQUIRE_EQUAL(page->response.status, GOVERNANCE_PAGE_OK);
+        BOOST_REQUIRE(IsValidGovernancePageResponse(request, page->response));
+        BOOST_REQUIRE_EQUAL(page->response.total_count, count);
+        BOOST_REQUIRE(page->snapshot);
+        if (!snapshot) snapshot = page->snapshot;
+        BOOST_REQUIRE(page->snapshot == snapshot);
+        BOOST_REQUIRE_EQUAL(page->entry_indices.size(), page->response.inventory.size());
+        for (std::size_t i{0}; i < page->entry_indices.size(); ++i) {
+            const auto& inv{page->response.inventory[i]};
+            BOOST_REQUIRE(hasher.Append(inv));
+            received.push_back(inv.hash);
+            std::vector<unsigned char> payload;
+            BOOST_REQUIRE(snapshot->ReadPayload(page->entry_indices[i], payload));
+            CDataStream wire{Span<const uint8_t>{payload}, SER_NETWORK, version};
+            CGovernanceObject decoded;
+            wire >> decoded;
+            BOOST_CHECK(decoded.GetHash() == inv.hash);
+            BOOST_CHECK(wire.empty());
+        }
+        if (page->response.done) break;
+        request.cursor = page->response.next_cursor;
+        request.view_id = page->response.view_id;
+        ++request.nonce;
+    } while (received.size() < count);
+    BOOST_REQUIRE_EQUAL(received.size(), count);
+    BOOST_CHECK_EQUAL_COLLECTIONS(
+        received.begin(), received.end(), expected.begin(), expected.end());
+    const auto commitment{hasher.Finalize()};
+    BOOST_REQUIRE(commitment);
+    BOOST_CHECK(*commitment == snapshot->ViewId());
+    const auto local{governance->GetGovernancePageObjectHashes()};
+    BOOST_REQUIRE_EQUAL(local.status, GOVERNANCE_PAGE_OK);
+    BOOST_CHECK_EQUAL_COLLECTIONS(
+        local.hashes.begin(), local.hashes.end(), expected.begin(), expected.end());
+
+    // A pinned successful generation must not turn resource exhaustion into
+    // permanent scope rejection, and all provisional reservations roll back.
+    const auto budget{Access::PageBudget(*governance)};
+    const std::size_t pinned{budget->Retained()};
+    Access::InvalidateObjectPage(*governance);
+    request = {};
+    request.nonce = 100'000;
+    {
+        GovernancePageSnapshotReservation occupied{budget};
+        BOOST_REQUIRE(occupied.Reserve(
+            GovernancePageSnapshotBudget::MAX_RETAINED_BYTES - pinned));
+        const auto unavailable{governance->BuildGovernancePage(
+            request)};
+        BOOST_REQUIRE(unavailable);
+        BOOST_CHECK_EQUAL(unavailable->response.status,
+                          GOVERNANCE_PAGE_TEMPORARILY_UNAVAILABLE);
+        BOOST_CHECK(!unavailable->snapshot);
+    }
+    BOOST_CHECK_EQUAL(budget->Retained(), pinned);
+    const auto recovered{governance->BuildGovernancePage(
+        request)};
+    BOOST_REQUIRE(recovered);
+    BOOST_CHECK_EQUAL(recovered->response.status, GOVERNANCE_PAGE_OK);
+}
+
+BOOST_FIXTURE_TEST_CASE(
     governance_page_client_filters_vote_sources_and_seeds_local_objects,
     TestChain100Setup)
 {
@@ -3332,8 +3437,8 @@ BOOST_FIXTURE_TEST_CASE(
     tick();
     BOOST_CHECK_EQUAL(sync.GetAssetID(), MASTERNODE_SYNC_BLOCKCHAIN);
 
-    // Header lag also drains an existing page pass without starting a
-    // fallback or deferring the next initial or periodic attempt.
+    // Header lag also drains an existing page pass without deferring the
+    // next initial or periodic attempt.
     (void)SyncAccess::PrepareInitialPagePump(sync);
     SyncAccess::StartObjectPass(sync, {peer->GetId()});
     const auto initial_attempt{SyncAccess::NextInitialPageAttempt(sync)};
@@ -3409,8 +3514,9 @@ BOOST_AUTO_TEST_CASE(
         SyncAccess::FindPageSource(cohort, admitted->GetId()) == nullptr);
 }
 
-BOOST_AUTO_TEST_CASE(
-    governance_page_client_does_not_legacy_fallback_while_sources_cool)
+BOOST_FIXTURE_TEST_CASE(
+    governance_page_client_waits_for_page_capable_peer,
+    TestChain100Setup)
 {
     using SyncAccess =
         masternode_sync_tests::CMasternodeSyncTestAccess;
@@ -3421,6 +3527,46 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         !SyncAccess::NoUsablePageCandidatesAreTemporary(
             /*has_capable_peer=*/false));
+
+    auto& chainman{*Assert(m_node.chainman)};
+    auto& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+    auto& peerman{*Assert(m_node.peerman)};
+    auto* peer = new CNode{
+        /*id=*/103, /*sock=*/nullptr, CAddress{},
+        /*nKeyedNetGroupIn=*/1, /*nLocalHostNonceIn=*/1, CAddress{},
+        /*addrNameIn=*/std::string{}, ConnectionType::OUTBOUND_FULL_RELAY,
+        /*inbound_onion=*/false};
+    peer->nVersion = GOVERNANCE_PAGE_PROTO_VERSION - 1;
+    peer->SetCommonVersion(GOVERNANCE_PAGE_PROTO_VERSION - 1);
+    peer->fSuccessfullyConnected = true;
+    connman.AddTestNode(*peer);
+    struct ClearPeers {
+        ConnmanTestMsg& connman;
+        ~ClearPeers() { connman.ClearTestNodes(); }
+    } clear_peers{connman};
+    CMasternodeSync sync;
+    (void)SyncAccess::PrepareInitialPagePump(sync);
+    const int64_t start{GetTime()};
+    sync.ProcessTick(connman, peerman, chainman);
+    BOOST_CHECK_EQUAL(sync.GetAssetID(), MASTERNODE_SYNC_GOVERNANCE);
+    BOOST_CHECK_EQUAL(SyncAccess::NextInitialPageAttempt(sync), start + 30);
+    BOOST_CHECK(SyncAccess::IsIdleAndEmpty(sync));
+    BOOST_CHECK_EQUAL(sync.GetAttempt(), 0);
+
+    // An old transport cannot complete governance sync, even after the old
+    // quiet-period timeout. The client waits without issuing bulk requests.
+    SetMockTime(start + 60);
+    sync.ProcessTick(connman, peerman, chainman);
+    BOOST_CHECK_EQUAL(sync.GetAssetID(), MASTERNODE_SYNC_GOVERNANCE);
+    BOOST_CHECK_EQUAL(SyncAccess::NextInitialPageAttempt(sync), start + 90);
+    {
+        LOCK(peer->cs_vSend);
+        BOOST_CHECK(peer->vSendMsg.empty());
+    }
+    SyncAccess::StartObjectPass(sync, {1, 2});
+    BOOST_CHECK_EQUAL(sync.GetAttempt(), 1);
+    (void)SyncAccess::AdvanceObjectSource(sync, /*success=*/false);
+    BOOST_CHECK_EQUAL(sync.GetAttempt(), 2);
 }
 
 BOOST_AUTO_TEST_CASE(
@@ -3708,11 +3854,29 @@ BOOST_AUTO_TEST_CASE(governance_page_build_work_is_globally_bounded)
 
     GovernancePageBuildRateLimiter oversized;
     BOOST_REQUIRE(oversized.Begin(start));
-    BOOST_CHECK(!oversized.Charge(
+    BOOST_REQUIRE(oversized.Charge(
         GovernancePageBuildRateLimiter::TOKEN_CAPACITY + 1));
     BOOST_CHECK(!oversized.Begin(start));
     BOOST_CHECK(!oversized.Begin(start + std::chrono::seconds{1}));
-    BOOST_REQUIRE(oversized.Begin(start + std::chrono::seconds{64}));
+    BOOST_CHECK(!oversized.Begin(start + std::chrono::seconds{64}));
+    BOOST_REQUIRE(oversized.Begin(start + std::chrono::seconds{65}));
+
+    GovernancePageBuildRateLimiter scalable;
+    constexpr std::size_t large_charge{
+        3 * GovernancePageBuildRateLimiter::TOKEN_CAPACITY};
+    const auto full_refill{std::chrono::seconds{
+        large_charge / GovernancePageBuildRateLimiter::REFILL_BYTES_PER_SECOND}};
+    BOOST_REQUIRE(scalable.Begin(start));
+    BOOST_REQUIRE(scalable.Charge(large_charge));
+    BOOST_CHECK(!scalable.Charge(large_charge));
+    BOOST_CHECK(!scalable.Begin(start + std::chrono::seconds{64}));
+    BOOST_CHECK(!scalable.Begin(start + full_refill - std::chrono::microseconds{1}));
+    BOOST_REQUIRE(scalable.Begin(start + full_refill));
+    BOOST_REQUIRE(scalable.Charge(
+        GovernancePageBuildRateLimiter::MINIMUM_BUILD_CHARGE));
+    BOOST_CHECK(!scalable.Begin(start + full_refill +
+                               GovernancePageBuildRateLimiter::MIN_BUILD_INTERVAL));
+    BOOST_REQUIRE(scalable.Begin(start + full_refill + std::chrono::seconds{1}));
 }
 
 BOOST_AUTO_TEST_CASE(governance_page_payload_authorization_is_byte_bounded)
@@ -3849,52 +4013,6 @@ BOOST_AUTO_TEST_CASE(governance_page_payload_authorization_is_byte_bounded)
     BOOST_CHECK(!full_byte_table.ConsumePayloadBytes(
         3000, {}, target_netgroup, 1,
         start + std::chrono::microseconds{3}));
-}
-
-BOOST_FIXTURE_TEST_CASE(
-    legacy_governance_sync_rejects_oversized_bloom_filter,
-    TestChain100Setup)
-{
-    using Access = governance_tests::CGovernanceManagerTestAccess;
-    BOOST_REQUIRE(governance != nullptr);
-    Access::SetReady(*governance, true);
-    BOOST_REQUIRE(masternodeSync.IsSynced());
-
-    in_addr ipv4_addr;
-    ipv4_addr.s_addr = 0xa0b0c006;
-    const CAddress address{CService{ipv4_addr, 7782}, NODE_NETWORK};
-    const auto process_invalid_filter = [&](const NodeId node_id, CDataStream& request) {
-        CNode node{
-            node_id, /*sock=*/nullptr, address,
-            /*nKeyedNetGroupIn=*/6, /*nLocalHostNonceIn=*/7, CAddress{},
-            /*addrNameIn=*/std::string{}, ConnectionType::INBOUND,
-            /*inbound_onion=*/false};
-        node.SetCommonVersion(GOVERNANCE_PAGE_PROTO_VERSION - 1);
-        m_node.peerman->InitializeNode(node, NODE_NETWORK);
-
-        governance->ProcessMessage(
-            &node, NetMsgType::MNGOVERNANCESYNC, request,
-            *m_node.connman, *m_node.peerman);
-
-        BOOST_CHECK(request.empty());
-        BOOST_CHECK(m_node.peerman->IsBanned(node.GetId()));
-        m_node.peerman->FinalizeNode(node);
-    };
-
-    CDataStream excessive_hash_funcs{
-        SER_NETWORK, GOVERNANCE_PAGE_PROTO_VERSION - 1};
-    excessive_hash_funcs << uint256::ONEV;
-    excessive_hash_funcs << std::vector<unsigned char>{0xff};
-    excessive_hash_funcs << std::numeric_limits<unsigned int>::max();
-    excessive_hash_funcs << static_cast<unsigned int>(0);
-    excessive_hash_funcs << static_cast<unsigned char>(BLOOM_UPDATE_NONE);
-    process_invalid_filter(/*node_id=*/7, excessive_hash_funcs);
-
-    CDataStream oversized_declaration{
-        SER_NETWORK, GOVERNANCE_PAGE_PROTO_VERSION - 1};
-    oversized_declaration << uint256::ONEV;
-    WriteCompactSize(oversized_declaration, MAX_VECTOR_ALLOCATE);
-    process_invalid_filter(/*node_id=*/8, oversized_declaration);
 }
 
 BOOST_AUTO_TEST_CASE(

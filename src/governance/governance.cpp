@@ -4,7 +4,6 @@
 
 #include <governance/governance.h>
 
-#include <common/bloom.h>
 #include <chain.h>
 #include <chainparams.h>
 #include <consensus/validation.h>
@@ -20,8 +19,6 @@
 #include <masternode/activemasternode.h>
 #include <masternode/masternodesync.h>
 #include <net_processing.h>
-#include <netfulfilledman.h>
-#include <netmessagemaker.h>
 #include <protocol.h>
 #include <pubkey.h>
 #include <shutdown.h>
@@ -126,71 +123,6 @@ private:
 };
 
 } // namespace
-
-// SYSCOIN: reconnect-resistant and Sybil-independent admission for expensive
-// trigger-vote sync verification.
-bool GovernanceVoteSyncRateLimiter::Consume(
-    int64_t peer, const uint256& authenticated_pro_tx,
-    uint64_t keyed_net_group, std::chrono::microseconds now)
-{
-    SourceIdentity source;
-    if (!authenticated_pro_tx.IsNull()) {
-        source.authenticated_pro_tx = authenticated_pro_tx;
-    } else if (keyed_net_group != 0) {
-        source.keyed_net_group = keyed_net_group;
-    } else if (peer >= 0) {
-        source.fallback_peer = peer;
-    } else {
-        return false;
-    }
-
-    if (now < m_next_global_request) return false;
-
-    auto bucket{m_buckets.find(source)};
-    if (bucket == m_buckets.end()) {
-        if (m_buckets.size() >= MAX_SOURCES) {
-            for (auto it{m_buckets.begin()}; it != m_buckets.end();) {
-                if (now >= it->second.last_seen &&
-                    now - it->second.last_seen >= SOURCE_EXPIRY) {
-                    it = m_buckets.erase(it);
-                } else {
-                    ++it;
-                }
-            }
-        }
-        if (m_buckets.size() >= MAX_SOURCES) {
-            const auto oldest{std::min_element(
-                m_buckets.begin(), m_buckets.end(),
-                [](const auto& lhs, const auto& rhs) {
-                    return lhs.second.last_seen < rhs.second.last_seen;
-                })};
-            if (oldest != m_buckets.end()) m_buckets.erase(oldest);
-        }
-        bucket = m_buckets.emplace(
-            source, Bucket{SOURCE_BURST, now, now}).first;
-    }
-
-    Bucket& state{bucket->second};
-    if (now < state.last_refill) state.last_refill = now;
-    if (now > state.last_refill) {
-        const auto refills{(now - state.last_refill) /
-                           SOURCE_REFILL_INTERVAL};
-        if (refills > 0) {
-            state.tokens = static_cast<uint8_t>(std::min<uint64_t>(
-                SOURCE_BURST,
-                static_cast<uint64_t>(state.tokens) +
-                    static_cast<uint64_t>(refills)));
-            state.last_refill += SOURCE_REFILL_INTERVAL * refills;
-        }
-    }
-    state.last_seen = std::max(state.last_seen, now);
-    if (state.tokens == 0) return false;
-
-    --state.tokens;
-    m_next_global_request = now + GLOBAL_MIN_INTERVAL;
-    return true;
-}
-// SYSCOIN: end bounded governance vote sync admission.
 
 GovernancePageServeRateLimiter::RequestResult
 GovernancePageServeRateLimiter::Consume(
@@ -413,16 +345,21 @@ bool GovernancePageBuildRateLimiter::Begin(
     if (elapsed_seconds > 0) {
         const uint64_t bounded_seconds{std::min<uint64_t>(
             static_cast<uint64_t>(elapsed_seconds),
-            TOKEN_CAPACITY / REFILL_BYTES_PER_SECOND)};
-        const uint64_t refill{
-            bounded_seconds * REFILL_BYTES_PER_SECOND};
-        m_tokens = static_cast<std::size_t>(std::min<uint64_t>(
-            TOKEN_CAPACITY,
-            static_cast<uint64_t>(m_tokens) + refill));
+            std::numeric_limits<std::size_t>::max() /
+                REFILL_BYTES_PER_SECOND)};
+        std::size_t refill{static_cast<std::size_t>(
+            bounded_seconds * REFILL_BYTES_PER_SECOND)};
+        // Large snapshots debit their full serialized size. Repay that debt
+        // before filling the normal bucket, so successive cache misses wait
+        // in proportion to the work even when the payloads live on disk.
+        const std::size_t repayment{std::min(m_byte_debt, refill)};
+        m_byte_debt -= repayment;
+        refill -= repayment;
+        m_tokens += std::min(TOKEN_CAPACITY - m_tokens, refill);
         m_last_refill += std::chrono::seconds{elapsed_seconds};
     }
-    // Reserve the maximum legal build before even sizing the scope. This
-    // makes a rejected/oversized preflight consume real work budget too.
+    // Reserve the full burst before sizing the scope. Failed preflights keep
+    // this charge; completed preflights debit any additional work.
     if (TOKEN_CAPACITY > m_tokens) return false;
     m_tokens -= TOKEN_CAPACITY;
     m_build_active = true;
@@ -432,16 +369,18 @@ bool GovernancePageBuildRateLimiter::Begin(
 }
 
 bool GovernancePageBuildRateLimiter::Charge(
-    std::size_t retained_bytes)
+    std::size_t serialized_bytes)
 {
     if (!m_build_active) return false;
     m_build_active = false;
-    if (retained_bytes == 0 || retained_bytes > TOKEN_CAPACITY) {
-        return false;
-    }
+    if (serialized_bytes == 0) return false;
     const std::size_t charge{
-        std::max(MINIMUM_BUILD_CHARGE, retained_bytes)};
-    m_tokens += TOKEN_CAPACITY - charge;
+        std::max(MINIMUM_BUILD_CHARGE, serialized_bytes)};
+    if (charge > TOKEN_CAPACITY) {
+        m_byte_debt = charge - TOKEN_CAPACITY;
+    } else {
+        m_tokens += TOKEN_CAPACITY - charge;
+    }
     return true;
 }
 
@@ -853,7 +792,7 @@ std::optional<GovernancePageBuildResult>
 CGovernanceManager::BuildGovernancePage(
     const CGovernancePageRequest& request,
     std::shared_ptr<const GovernancePageImmutableSnapshot> continuation,
-    std::optional<std::chrono::microseconds> build_request_time) const
+    std::optional<std::chrono::microseconds> build_request_time) const try
 {
     if (request.nonce == 0 ||
         request.cursor.IsNull() != request.view_id.IsNull()) {
@@ -932,13 +871,6 @@ CGovernanceManager::BuildGovernancePage(
                 return status_result(
                     GOVERNANCE_PAGE_TEMPORARILY_UNAVAILABLE);
             }
-            if (mapObjects.size() >
-                MAX_GOVERNANCE_PAGE_SCOPE_ITEMS) {
-                (void)charge_build(
-                    MAX_GOVERNANCE_PAGE_SNAPSHOT_BYTES);
-                return status_result(
-                    GOVERNANCE_PAGE_SCOPE_TOO_LARGE);
-            }
             std::size_t eligible_count{0};
             int next_trigger_height{std::numeric_limits<int>::max()};
             for (const auto& [hash, object] : mapObjects) {
@@ -956,24 +888,19 @@ CGovernanceManager::BuildGovernancePage(
                 }
             }
             std::optional<uint8_t> preflight_status;
-            std::size_t retained_bytes{
-                MAX_GOVERNANCE_PAGE_SNAPSHOT_BYTES};
-            if (eligible_count > MAX_GOVERNANCE_PAGE_SCOPE_ITEMS ||
-                eligible_count >
-                    (std::numeric_limits<std::size_t>::max() -
-                     sizeof(GovernancePageImmutableSnapshot)) /
-                        sizeof(GovernancePageSnapshotEntry)) {
+            std::size_t metadata_bytes{0};
+            std::size_t serialized_bytes{0};
+            if (eligible_count > std::numeric_limits<uint32_t>::max()) {
                 preflight_status = GOVERNANCE_PAGE_SCOPE_TOO_LARGE;
+            } else if (eligible_count >
+                       (std::numeric_limits<std::size_t>::max() -
+                        sizeof(GovernancePageImmutableSnapshot)) /
+                           sizeof(GovernancePageSnapshotEntry)) {
+                preflight_status = GOVERNANCE_PAGE_TEMPORARILY_UNAVAILABLE;
             } else {
-                retained_bytes =
-                    sizeof(GovernancePageImmutableSnapshot) +
-                    eligible_count *
-                        sizeof(GovernancePageSnapshotEntry);
-                if (retained_bytes >
-                    MAX_GOVERNANCE_PAGE_SNAPSHOT_BYTES) {
-                    preflight_status =
-                        GOVERNANCE_PAGE_SCOPE_TOO_LARGE;
-                }
+                metadata_bytes = sizeof(GovernancePageImmutableSnapshot) +
+                    eligible_count * sizeof(GovernancePageSnapshotEntry);
+                serialized_bytes = metadata_bytes;
             }
             if (!preflight_status) {
                 for (const auto& [hash, object] : mapObjects) {
@@ -990,35 +917,48 @@ CGovernanceManager::BuildGovernancePage(
                             GOVERNANCE_PAGE_TEMPORARILY_UNAVAILABLE;
                         break;
                     }
-                    if (payload_size >
-                            MAX_GOVERNANCE_PAGE_PAYLOAD_BYTES ||
-                        payload_size >
-                            MAX_GOVERNANCE_PAGE_SNAPSHOT_BYTES -
-                                retained_bytes) {
-                        preflight_status =
-                            GOVERNANCE_PAGE_SCOPE_TOO_LARGE;
+                    if (payload_size > MAX_GOVERNANCE_PAGE_PAYLOAD_BYTES) {
+                        preflight_status = GOVERNANCE_PAGE_SCOPE_TOO_LARGE;
                         break;
                     }
-                    retained_bytes += payload_size;
+                    if (payload_size > std::numeric_limits<std::size_t>::max() -
+                                           serialized_bytes) {
+                        preflight_status =
+                            GOVERNANCE_PAGE_TEMPORARILY_UNAVAILABLE;
+                        break;
+                    }
+                    serialized_bytes += payload_size;
                 }
             }
             const bool build_charged{charge_build(
-                preflight_status
-                    ? MAX_GOVERNANCE_PAGE_SNAPSHOT_BYTES
-                    : retained_bytes)};
-            if (preflight_status) {
-                return status_result(*preflight_status);
-            }
+                preflight_status ? MAX_GOVERNANCE_PAGE_SNAPSHOT_BYTES
+                                 : serialized_bytes)};
+            if (preflight_status) return status_result(*preflight_status);
             if (!build_charged) {
-                return status_result(
-                    GOVERNANCE_PAGE_TEMPORARILY_UNAVAILABLE);
+                return status_result(GOVERNANCE_PAGE_TEMPORARILY_UNAVAILABLE);
             }
-            GovernancePageSnapshotReservation reservation{
-                m_page_snapshot_budget};
-            if (!reservation.Reserve(retained_bytes)) {
-                return status_result(
-                    GOVERNANCE_PAGE_TEMPORARILY_UNAVAILABLE);
+            const bool spill{serialized_bytes > MAX_GOVERNANCE_PAGE_SNAPSHOT_BYTES};
+            if (spill && metadata_bytes >
+                             std::numeric_limits<std::size_t>::max() -
+                                 GovernancePagePayloadSpool::ResidentBytes()) {
+                return status_result(GOVERNANCE_PAGE_TEMPORARILY_UNAVAILABLE);
             }
+            GovernancePageSnapshotReservation reservation{m_page_snapshot_budget};
+            if (!reservation.Reserve(spill
+                    ? metadata_bytes + GovernancePagePayloadSpool::ResidentBytes()
+                    : serialized_bytes, /*allow_oversized_metadata=*/spill)) {
+                return status_result(GOVERNANCE_PAGE_TEMPORARILY_UNAVAILABLE);
+            }
+            const auto spool{spill
+                ? GovernancePagePayloadSpool::Create(
+                    m_page_snapshot_budget, serialized_bytes - metadata_bytes)
+                : std::shared_ptr<GovernancePagePayloadSpool>{}};
+            if (spill && !spool) {
+                return status_result(GOVERNANCE_PAGE_TEMPORARILY_UNAVAILABLE);
+            }
+            // Reserve one scratch payload with the scope's metadata so a
+            // scope near the ordinary RAM quota can still finish building.
+            std::size_t scratch_bytes{0};
             CGovernancePageViewHasher hasher{
                 uint256{}, static_cast<uint32_t>(eligible_count)};
             std::vector<GovernancePageSnapshotEntry> entries;
@@ -1026,9 +966,9 @@ CGovernanceManager::BuildGovernancePage(
             if (entries.capacity() > eligible_count &&
                 !reservation.Reserve(
                     (entries.capacity() - eligible_count) *
-                    sizeof(GovernancePageSnapshotEntry))) {
-                return status_result(
-                    GOVERNANCE_PAGE_TEMPORARILY_UNAVAILABLE);
+                    sizeof(GovernancePageSnapshotEntry),
+                    /*allow_oversized_metadata=*/spill)) {
+                return status_result(GOVERNANCE_PAGE_TEMPORARILY_UNAVAILABLE);
             }
             for (const auto& [hash, object] : mapObjects) {
                 if (!IsGovernancePageObjectEligible(
@@ -1037,20 +977,20 @@ CGovernanceManager::BuildGovernancePage(
                 }
                 const CInv inv{MSG_GOVERNANCE_OBJECT, hash};
                 if (!hasher.Append(inv)) {
-                    return status_result(
-                        GOVERNANCE_PAGE_TEMPORARILY_UNAVAILABLE);
+                    return status_result(GOVERNANCE_PAGE_TEMPORARILY_UNAVAILABLE);
                 }
-                const std::size_t payload_size{
-                    ::GetSerializeSize(
-                        object, GOVERNANCE_PAGE_PROTO_VERSION,
-                        SER_NETWORK)};
-                if (payload_size == 0) {
-                    return status_result(
-                        GOVERNANCE_PAGE_TEMPORARILY_UNAVAILABLE);
+                const std::size_t payload_size{::GetSerializeSize(
+                    object, GOVERNANCE_PAGE_PROTO_VERSION, SER_NETWORK)};
+                if (payload_size == 0 ||
+                    payload_size > MAX_GOVERNANCE_PAGE_PAYLOAD_BYTES) {
+                    return status_result(GOVERNANCE_PAGE_TEMPORARILY_UNAVAILABLE);
                 }
-                if (payload_size > MAX_GOVERNANCE_PAGE_PAYLOAD_BYTES) {
-                    return status_result(
-                        GOVERNANCE_PAGE_SCOPE_TOO_LARGE);
+                if (spill && payload_size > scratch_bytes) {
+                    if (!reservation.Reserve(payload_size - scratch_bytes,
+                            /*allow_oversized_metadata=*/true)) {
+                        return status_result(GOVERNANCE_PAGE_TEMPORARILY_UNAVAILABLE);
+                    }
+                    scratch_bytes = payload_size;
                 }
                 std::vector<unsigned char> payload;
                 payload.reserve(payload_size);
@@ -1058,37 +998,45 @@ CGovernanceManager::BuildGovernancePage(
                     SER_NETWORK, GOVERNANCE_PAGE_PROTO_VERSION,
                     payload, 0, object};
                 if (payload.size() != payload_size) {
-                    return status_result(
-                        GOVERNANCE_PAGE_TEMPORARILY_UNAVAILABLE);
+                    return status_result(GOVERNANCE_PAGE_TEMPORARILY_UNAVAILABLE);
                 }
-                if (payload.capacity() > payload_size &&
-                    !reservation.Reserve(
-                        payload.capacity() - payload_size)) {
-                    return status_result(
-                        GOVERNANCE_PAGE_TEMPORARILY_UNAVAILABLE);
+                if (spill) {
+                    if (payload.capacity() > scratch_bytes) {
+                        if (!reservation.Reserve(payload.capacity() - scratch_bytes,
+                                /*allow_oversized_metadata=*/true)) {
+                            return status_result(GOVERNANCE_PAGE_TEMPORARILY_UNAVAILABLE);
+                        }
+                        scratch_bytes = payload.capacity();
+                    }
+                    const auto offset{spool->Append(payload)};
+                    if (!offset) {
+                        return status_result(GOVERNANCE_PAGE_TEMPORARILY_UNAVAILABLE);
+                    }
+                    entries.push_back(GovernancePageSnapshotEntry{
+                        inv, {}, *offset, static_cast<uint32_t>(payload_size)});
+                } else {
+                    if (payload.capacity() > payload_size &&
+                        !reservation.Reserve(payload.capacity() - payload_size)) {
+                        return status_result(GOVERNANCE_PAGE_TEMPORARILY_UNAVAILABLE);
+                    }
+                    entries.push_back(GovernancePageSnapshotEntry{
+                        inv, std::move(payload)});
                 }
-                entries.push_back(GovernancePageSnapshotEntry{
-                    inv, std::move(payload)});
             }
             const auto view{hasher.Finalize()};
             if (!view) {
-                return status_result(
-                    GOVERNANCE_PAGE_TEMPORARILY_UNAVAILABLE);
+                return status_result(GOVERNANCE_PAGE_TEMPORARILY_UNAVAILABLE);
             }
-            const auto instance_id{
-                NextGovernancePageSnapshotInstance()};
+            const auto instance_id{NextGovernancePageSnapshotInstance()};
             if (!instance_id) {
-                return status_result(
-                    GOVERNANCE_PAGE_TEMPORARILY_UNAVAILABLE);
+                return status_result(GOVERNANCE_PAGE_TEMPORARILY_UNAVAILABLE);
             }
-            const auto built{
-                GovernancePageImmutableSnapshot::Create(
-                    std::move(reservation), *instance_id,
-                    *validation_context_epoch, uint256{}, *view,
-                    std::move(entries))};
+            const auto built{GovernancePageImmutableSnapshot::Create(
+                std::move(reservation), *instance_id,
+                *validation_context_epoch, uint256{}, *view,
+                std::move(entries), spool)};
             if (!built) {
-                return status_result(
-                    GOVERNANCE_PAGE_TEMPORARILY_UNAVAILABLE);
+                return status_result(GOVERNANCE_PAGE_TEMPORARILY_UNAVAILABLE);
             }
             m_object_page_snapshot = built;
             snapshot = built;
@@ -1114,13 +1062,6 @@ CGovernanceManager::BuildGovernancePage(
             response.next_cursor.SetNull();
             return result;
         } else {
-            if (object->second.GetVoteFile().GetVoteCount() < 0 ||
-                static_cast<uint64_t>(
-                    object->second.GetVoteFile().GetVoteCount()) >
-                    MAX_GOVERNANCE_PAGE_SCOPE_ITEMS) {
-                return status_result(
-                    GOVERNANCE_PAGE_SCOPE_TOO_LARGE);
-            }
             snapshot = object->second.GetCachedVotePageSnapshot(
                 *validation_context_epoch);
             if (!snapshot) {
@@ -1203,6 +1144,16 @@ CGovernanceManager::BuildGovernancePage(
         : response.inventory.back().hash;
     result.snapshot = std::move(snapshot);
     return result;
+} catch (const std::bad_alloc&) {
+    GovernancePageBuildResult unavailable;
+    auto& response{unavailable.response};
+    response.scope_hash = request.scope_hash;
+    response.cursor = request.cursor;
+    response.request_view_id = request.view_id;
+    response.nonce = request.nonce;
+    response.status = GOVERNANCE_PAGE_TEMPORARILY_UNAVAILABLE;
+    response.next_cursor = request.cursor;
+    return unavailable;
 }
 
 bool CGovernanceManager::SerializeObjectForPage(
@@ -1247,16 +1198,26 @@ CGovernanceManager::GetGovernancePageObjectHashes() const
     LOCK2(chainman.GetMutex(), cs);
     const CBlockIndex* tip{chainman.ActiveTip()};
     if (!IsReadyForTip(tip)) return result;
-    if (mapObjects.size() > MAX_GOVERNANCE_PAGE_SCOPE_ITEMS) {
+    std::size_t eligible_count{0};
+    for (const auto& [hash, object] : mapObjects) {
+        if (IsGovernancePageObjectEligible(hash, object, tip->nHeight)) {
+            ++eligible_count;
+        }
+    }
+    if (eligible_count > std::numeric_limits<uint32_t>::max()) {
         result.status = GOVERNANCE_PAGE_SCOPE_TOO_LARGE;
         return result;
     }
-
-    result.hashes.reserve(mapObjects.size());
-    for (const auto& [hash, object] : mapObjects) {
-        if (IsGovernancePageObjectEligible(hash, object, tip->nHeight)) {
-            result.hashes.push_back(hash);
+    try {
+        result.hashes.reserve(eligible_count);
+        for (const auto& [hash, object] : mapObjects) {
+            if (IsGovernancePageObjectEligible(hash, object, tip->nHeight)) {
+                result.hashes.push_back(hash);
+            }
         }
+    } catch (const std::bad_alloc&) {
+        result.hashes.clear();
+        return result;
     }
     result.status = GOVERNANCE_PAGE_OK;
     return result;
@@ -1359,108 +1320,8 @@ void CGovernanceManager::ProcessMessage(CNode* pfrom, const std::string& strComm
         return;
     }
 
-    // ANOTHER USER IS ASKING US TO HELP THEM SYNC GOVERNANCE OBJECT DATA
-    if (strCommand == NetMsgType::MNGOVERNANCESYNC) {
-        // Upgraded peers must use the bounded exact protocol; permitting the
-        // legacy bulk path would restore the dropped-tail and CPU-amplification
-        // behavior the version gate removes.
-        if (SupportsGovernancePages(pfrom->GetCommonVersion())) return;
-        if (!IsReady() || !masternodeSync.IsBlockchainSynced()) return;
-        // Ignore such requests until we are fully synced.
-        // We could start processing this after masternode list is synced
-        // but this is a heavy one so it's better to finish sync first.
-        if (!masternodeSync.IsSynced()) return;
-
-        uint256 nProp;
-        CBloomFilter filter;
-
-        vRecv >> nProp;
-
-        try {
-            vRecv >> filter;
-        } catch (const CBloomFilterSizeError&) {
-            const PeerRef peer{peerman.GetPeerRef(pfrom->GetId())};
-            if (peer) {
-                peerman.Misbehaving(*peer, 100, "too-large bloom filter");
-            }
-            return;
-        }
-
-        if (!filter.IsWithinSizeConstraints()) {
-            const PeerRef peer{peerman.GetPeerRef(pfrom->GetId())};
-            if (peer) {
-                peerman.Misbehaving(*peer, 100, "too-large bloom filter");
-            }
-            return;
-        }
-
-        LogPrint(BCLog::GOBJECT, "MNGOVERNANCESYNC -- syncing governance objects to our peer %s\n", pfrom->addr.ToStringAddr());
-        const auto legacy_request_time{
-            GetTime<std::chrono::microseconds>()};
-        {
-            LOCK(m_page_serve_rate_mutex);
-            if (m_page_serve_rate.Consume(
-                    pfrom->GetId(), pfrom->GetVerifiedProRegTxHash(),
-                    pfrom->nKeyedNetGroup, legacy_request_time) !=
-                GovernancePageServeRateLimiter::RequestResult::ACCEPTED) {
-                return;
-            }
-        }
-        if (connman.OutboundTargetReached(false) &&
-            !pfrom->HasPermission(NetPermissionFlags::Download)) {
-            return;
-        }
-
-        const PeerRef peer{peerman.GetPeerRef(pfrom->GetId())};
-        if (!peer) return;
-        if (nProp.IsNull()) {
-            if (netfulfilledman->HasFulfilledRequest(
-                    pfrom->addr, NetMsgType::MNGOVERNANCESYNC)) {
-                peerman.Misbehaving(
-                    *peer, 20, "peer already asked for list");
-                return;
-            }
-            netfulfilledman->AddFulfilledRequest(
-                pfrom->addr, NetMsgType::MNGOVERNANCESYNC);
-        }
-
-        CGovernancePageRequest bounded_request;
-        bounded_request.scope_hash = nProp;
-        bounded_request.nonce = 1;
-        const auto bounded_page{BuildGovernancePage(
-            bounded_request, {}, legacy_request_time)};
-        if (!bounded_page ||
-            bounded_page->response.status != GOVERNANCE_PAGE_OK) {
-            return;
-        }
-
-        std::vector<CInv> relay_inventory;
-        if (bounded_page->snapshot) {
-            relay_inventory.reserve(
-                bounded_page->snapshot->Entries().size());
-            for (const auto& entry :
-                 bounded_page->snapshot->Entries()) {
-                if (!nProp.IsNull() &&
-                    filter.contains(entry.inv.hash)) {
-                    continue;
-                }
-                relay_inventory.push_back(entry.inv);
-            }
-        }
-        for (const CInv& inv : relay_inventory) {
-            peerman.PushTxInventoryOther(*peer, inv);
-        }
-        connman.PushMessage(
-            pfrom, CNetMsgMaker(pfrom->GetCommonVersion()).Make(
-                       NetMsgType::SYNCSTATUSCOUNT,
-                       nProp.IsNull() ? MASTERNODE_SYNC_GOVOBJ
-                                      : MASTERNODE_SYNC_GOVOBJ_VOTE,
-                       static_cast<int>(relay_inventory.size())));
-        return;
-    }
-
     // A NEW GOVERNANCE OBJECT HAS ARRIVED
-    else if (strCommand == NetMsgType::MNGOVERNANCEOBJECT) {
+    if (strCommand == NetMsgType::MNGOVERNANCEOBJECT) {
         // MAKE SURE WE HAVE A VALID REFERENCE TO THE TIP BEFORE CONTINUING
 
         CGovernanceObject govobj;
@@ -3182,272 +3043,17 @@ void CGovernanceManager::ResetVotedFundingTrigger()
     votedFundingYesTriggerHash = std::nullopt;
 }
 
-void CGovernanceManager::DoMaintenance(CConnman& connman)
+void CGovernanceManager::DoMaintenance()
 {
     if (!IsReady()) return;
     if (!masternodeSync.IsSynced()) return;
     if (ShutdownRequested()) return;
 
-    // CHECK OBJECTS WE'VE ASKED FOR, REMOVE OLD ENTRIES
+    // Remove expired orphan votes while paged reconciliation finds parents.
     CleanOrphanObjects();
-    RequestOrphanObjects(connman);
 
     // CHECK AND REMOVE - REPROCESS GOVERNANCE OBJECTS
     CheckAndRemove();
-}
-
-void CGovernanceManager::SyncSingleObjVotes(CNode* pnode, const uint256& nProp, const CBloomFilter& filter, CConnman& connman, PeerManager& peerman)
-{
-    AssertLockNotHeld(cs_main);
-    AssertLockNotHeld(cs);
-    if (!IsReady()) return;
-
-    // do not provide any data until our node is synced
-    if (!masternodeSync.IsSynced()) return;
-
-    int nVoteCount = 0;
-    const CBlockIndex* validation_tip{nullptr};
-    CDeterministicMNList validation_mn_list;
-    std::vector<CGovernanceVote> candidates;
-    int object_type{GOVERNANCE_OBJECT_UNKNOWN};
-
-    // SYNC GOVERNANCE OBJECTS WITH OTHER CLIENT
-
-    LogPrint(BCLog::GOBJECT, "CGovernanceManager::%s -- syncing single object to peer=%d, nProp = %s\n", __func__, nProp.ToString(), pnode->GetId());
-    {
-        LOCK(cs);
-        const auto it = mapObjects.find(nProp);
-        if (it == mapObjects.end()) {
-            LogPrint(BCLog::GOBJECT, "CGovernanceManager::%s -- no matching object for hash %s, peer=%d\n", __func__, nProp.ToString(), pnode->GetId());
-            return;
-        }
-        const CGovernanceObject& govobj = it->second;
-        if (m_pq_inactive_triggers.contains(nProp)) return;
-        std::string strHash = it->first.ToString();
-
-        LogPrint(BCLog::GOBJECT, "CGovernanceManager::%s -- attempting to sync govobj: %s, peer=%d\n", __func__, strHash, pnode->GetId());
-
-        if (govobj.IsSetCachedDelete() || govobj.IsSetExpired()) {
-            LogPrint(BCLog::GOBJECT, "CGovernanceManager::%s -- not syncing deleted/expired govobj: %s, peer=%d\n", __func__,
-                strHash, pnode->GetId());
-            return;
-        }
-        object_type = govobj.GetObjectType();
-    }
-
-    // Snapshot at most one legacy funding vote per valid masternode and a
-    // fixed number of PQ votes. SLH work runs only after locks release.
-    {
-        LOCK2(chainman.GetMutex(), cs);
-        validation_tip = chainman.ActiveTip();
-        if (!IsReadyForTip(validation_tip)) return;
-        const auto object_it{mapObjects.find(nProp)};
-        if (object_it == mapObjects.end() ||
-            object_it->second.IsSetCachedDelete() ||
-            object_it->second.IsSetExpired() ||
-            m_pq_inactive_triggers.contains(nProp) ||
-            object_it->second.GetObjectType() != object_type) {
-            return;
-        }
-
-        validation_mn_list =
-            deterministicMNManager->GetListForBlock(validation_tip);
-        const std::size_t max_delegated_votes{
-            validation_mn_list.GetValidMNsCount()};
-        std::size_t delegated_votes{0};
-        std::size_t pq_votes{0};
-        object_it->second.GetVoteFile().ForEachVote(
-            [&](const CGovernanceVote& vote) {
-                const bool requires_pq{
-                    GetGovernanceVoteAuthPurpose(
-                        object_type, vote.GetSignal(), validation_tip->nHeight)
-                        .has_value()};
-                if (!filter.contains(vote.GetHash())) {
-                    if (requires_pq &&
-                        pq_votes <
-                            GovernanceVoteSyncRateLimiter::
-                                MAX_VERIFICATIONS_PER_REQUEST) {
-                        candidates.push_back(vote);
-                        ++pq_votes;
-                    } else if (!requires_pq &&
-                               delegated_votes < max_delegated_votes) {
-                        candidates.push_back(vote);
-                        ++delegated_votes;
-                    }
-                }
-                return pq_votes <
-                           GovernanceVoteSyncRateLimiter::
-                               MAX_VERIFICATIONS_PER_REQUEST ||
-                       delegated_votes < max_delegated_votes;
-            });
-    }
-
-    const bool has_pq_votes{std::any_of(
-        candidates.begin(), candidates.end(), [&](const auto& vote) {
-            return GetGovernanceVoteAuthPurpose(
-                       object_type, vote.GetSignal(), validation_tip->nHeight)
-                .has_value();
-        })};
-    bool pq_votes_admitted{!has_pq_votes};
-    if (has_pq_votes) {
-        const uint256 authenticated_pro_tx{
-            pnode->GetVerifiedProRegTxHash()};
-        const uint64_t keyed_net_group{pnode->nKeyedNetGroup};
-        // SYSCOIN: the non-recursive limiter mutex is scoped only around its
-        // small in-memory token table; SLH work never inherits it.
-        UniqueLock rate_lock{m_vote_sync_rate_mutex,
-                             "m_vote_sync_rate_mutex", __FILE__, __LINE__};
-        pq_votes_admitted = m_vote_sync_rate.Consume(
-            pnode->GetId(), authenticated_pro_tx, keyed_net_group,
-            GetTime<std::chrono::microseconds>());
-    }
-    if (!pq_votes_admitted) {
-        LogPrint(BCLog::GOBJECT,
-                 "CGovernanceManager::%s -- rate limited PQ-vote sync from peer=%d, object=%s\n",
-                 __func__, pnode->GetId(), nProp.ToString());
-        // CGovernanceVote caches its hash in a const member and is therefore
-        // deliberately non-assignable; vector erase/compaction is invalid.
-        std::vector<CGovernanceVote> delegated_candidates;
-        delegated_candidates.reserve(candidates.size());
-        for (const auto& vote : candidates) {
-            if (!GetGovernanceVoteAuthPurpose(
-                     object_type, vote.GetSignal(), validation_tip->nHeight)) {
-                delegated_candidates.push_back(vote);
-            }
-        }
-        candidates.swap(delegated_candidates);
-    }
-
-    std::vector<CGovernanceVote> verified_votes;
-    verified_votes.reserve(candidates.size());
-    for (const auto& vote : candidates) {
-        bool valid{false};
-        const auto pq_purpose{GetGovernanceVoteAuthPurpose(
-            object_type, vote.GetSignal(), validation_tip->nHeight)};
-        if (pq_purpose) {
-            // SYSCOIN: never hold chain/governance/object locks across SLH.
-            AssertLockNotHeld(cs_main);
-            AssertLockNotHeld(cs);
-            std::string signature_error;
-            valid = VerifyPQVoteUnlocked(
-                vote, *validation_tip, validation_mn_list,
-                *pq_purpose, signature_error);
-        } else {
-            valid = vote.IsValid(validation_mn_list);
-        }
-        if (valid) verified_votes.push_back(vote);
-    }
-
-    std::vector<uint256> relay_hashes;
-    if (!verified_votes.empty()) {
-        std::map<uint256, const CGovernanceVote*> verified_by_hash;
-        for (const auto& vote : verified_votes) {
-            verified_by_hash.emplace(vote.GetHash(), &vote);
-        }
-        LOCK2(chainman.GetMutex(), cs);
-        if (chainman.ActiveTip() != validation_tip ||
-            !IsReadyForTip(validation_tip)) return;
-        const auto object_it{mapObjects.find(nProp)};
-        if (object_it == mapObjects.end() ||
-            object_it->second.IsSetCachedDelete() ||
-            object_it->second.IsSetExpired() ||
-            m_pq_inactive_triggers.contains(nProp) ||
-            object_it->second.GetObjectType() != object_type) {
-            return;
-        }
-        object_it->second.GetVoteFile().ForEachVote(
-            [&](const CGovernanceVote& current) {
-                const auto verified{verified_by_hash.find(current.GetHash())};
-                if (verified != verified_by_hash.end() &&
-                    current == *verified->second &&
-                    current.vchSig == verified->second->vchSig &&
-                    !filter.contains(current.GetHash())) {
-                    relay_hashes.push_back(current.GetHash());
-                    verified_by_hash.erase(verified);
-                }
-                return !verified_by_hash.empty();
-            });
-    }
-
-    const PeerRef peer{peerman.GetPeerRef(pnode->GetId())};
-    if (peer) {
-        LOCK2(chainman.GetMutex(), cs);
-        if (chainman.ActiveTip() != validation_tip ||
-            !IsReadyForTip(validation_tip)) {
-            return;
-        }
-        const auto object_it{mapObjects.find(nProp)};
-        if (object_it == mapObjects.end() ||
-            object_it->second.IsSetCachedDelete() ||
-            object_it->second.IsSetExpired() ||
-            m_pq_inactive_triggers.contains(nProp) ||
-            object_it->second.GetObjectType() != object_type) {
-            return;
-        }
-        for (const uint256& hash : relay_hashes) {
-            if (!object_it->second.GetVoteFile().HasVote(hash)) continue;
-            peerman.PushTxInventoryOther(
-                *peer, CInv(MSG_GOVERNANCE_OBJECT_VOTE, hash));
-            ++nVoteCount;
-        }
-    }
-
-    CNetMsgMaker msgMaker(pnode->GetCommonVersion());
-    connman.PushMessage(pnode, msgMaker.Make(NetMsgType::SYNCSTATUSCOUNT, MASTERNODE_SYNC_GOVOBJ_VOTE, nVoteCount));
-    LogPrint(BCLog::GOBJECT, "CGovernanceManager::%s -- sent %d votes to peer=%d\n", __func__, nVoteCount, pnode->GetId());
-}
-
-void CGovernanceManager::SyncObjects(CNode* pnode, CConnman& connman, PeerManager& peerman) const
-{
-    if (!IsReady()) return;
-    if (!masternodeSync.IsSynced()) return;
-    PeerRef peer = peerman.GetPeerRef(pnode->GetId());
-    if (netfulfilledman->HasFulfilledRequest(pnode->addr, NetMsgType::MNGOVERNANCESYNC)) {
-        // Asking for the whole list multiple times in a short period of time is no good
-        LogPrint(BCLog::GOBJECT, "CGovernanceManager::%s -- peer already asked me for the list\n", __func__);
-        if(peer)
-            peerman.Misbehaving(*peer, 20, "peer already asked for list");
-        return;
-    }
-    netfulfilledman->AddFulfilledRequest(pnode->addr, NetMsgType::MNGOVERNANCESYNC);
-
-    int nObjCount = 0;
-
-    // SYNC GOVERNANCE OBJECTS WITH OTHER CLIENT
-
-    LogPrint(BCLog::GOBJECT, "CGovernanceManager::%s -- syncing all objects to peer=%d\n", __func__, pnode->GetId());
-    {
-        LOCK2(cs_main, cs);
-        const CBlockIndex* validation_tip{chainman.ActiveTip()};
-        if (!IsReadyForTip(validation_tip)) return;
-
-        // all valid objects, no votes
-        for (const auto& objPair : mapObjects) {
-            uint256 nHash = objPair.first;
-            const CGovernanceObject& govobj = objPair.second;
-            std::string strHash = nHash.ToString();
-
-            LogPrint(BCLog::GOBJECT, "CGovernanceManager::%s -- attempting to sync govobj: %s, peer=%d\n", __func__, strHash, pnode->GetId());
-
-            if (govobj.IsSetCachedDelete() || govobj.IsSetExpired()) {
-                LogPrint(BCLog::GOBJECT, "CGovernanceManager::%s -- not syncing deleted/expired govobj: %s, peer=%d\n", __func__,
-                    strHash, pnode->GetId());
-                continue;
-            }
-            if (m_pq_inactive_triggers.contains(nHash)) continue;
-
-            // Push the inventory budget proposal message over to the other client
-            LogPrint(BCLog::GOBJECT, "CGovernanceManager::%s -- syncing govobj: %s, peer=%d\n", __func__, strHash, pnode->GetId());
-            if(peer) {
-                peerman.PushTxInventoryOther(*peer, CInv(MSG_GOVERNANCE_OBJECT, nHash));
-            }
-            ++nObjCount;
-        }
-    }
-
-    CNetMsgMaker msgMaker(pnode->GetCommonVersion());
-    connman.PushMessage(pnode, msgMaker.Make(NetMsgType::SYNCSTATUSCOUNT, MASTERNODE_SYNC_GOVOBJ, nObjCount));
-    LogPrint(BCLog::GOBJECT, "CGovernanceManager::%s -- sent %d objects to peer=%d\n", __func__, nObjCount, pnode->GetId());
 }
 
 void CGovernanceManager::MasternodeRateUpdate(const CGovernanceObject& govobj)
@@ -3656,7 +3262,6 @@ bool CGovernanceManager::ProcessVote(
     const CBlockIndex* validation_tip{nullptr};
     CDeterministicMNList validation_mn_list;
     bool missing_parent{false};
-    bool request_parent{false};
     int object_type{GOVERNANCE_OBJECT_UNKNOWN};
     std::optional<llmq::pq::GovernanceAuthPurpose> pq_purpose;
     bool orphan_signature_is_pq{false};
@@ -3817,13 +3422,13 @@ bool CGovernanceManager::ProcessVote(
                 }
                 parent_arrived = mapObjects.contains(nHashGovobj);
                 if (!branch_changed && !parent_arrived) {
-                    request_parent = StoreOrphanVote(
+                    const bool retained{StoreOrphanVote(
                         nHashGovobj,
                         vote_time_pair_t{
                             vote,
                             GetTime<std::chrono::seconds>().count() +
-                                GOVERNANCE_ORPHAN_EXPIRATION_TIME});
-                    if (request_parent && orphan_vote_retained != nullptr) {
+                                GOVERNANCE_ORPHAN_EXPIRATION_TIME})};
+                    if (retained && orphan_vote_retained != nullptr) {
                         *orphan_vote_retained = true;
                     }
                 }
@@ -3854,9 +3459,6 @@ bool CGovernanceManager::ProcessVote(
                  << vote.GetMasternodeOutpoint().ToStringShort();
             exception = CGovernanceException(
                 ostr.str(), GOVERNANCE_EXCEPTION_WARNING);
-            if (request_parent) {
-                RequestGovernanceObject(pfrom, nHashGovobj, connman);
-            }
             LogPrint(BCLog::GOBJECT, "%s\n", ostr.str());
             return false;
         }
@@ -4035,158 +3637,6 @@ void CGovernanceManager::CheckPostponedObjects(PeerManager& peerman)
             setAdditionalRelayObjects.erase(it++);
         }
     }
-}
-
-void CGovernanceManager::RequestGovernanceObject(CNode* pfrom, const uint256& nHash, CConnman& connman, bool fUseFilter) const
-{
-    if (!pfrom || SupportsGovernancePages(pfrom->GetCommonVersion())) {
-        return;
-    }
-
-    LogPrint(BCLog::GOBJECT, "CGovernanceManager::RequestGovernanceObject -- nHash %s peer=%d\n", nHash.ToString(), pfrom->GetId());
-
-    CNetMsgMaker msgMaker(pfrom->GetCommonVersion());
-
-    CBloomFilter filter;
-
-    size_t nVoteCount = 0;
-    if (fUseFilter) {
-        LOCK2(chainman.GetMutex(), cs);
-        if (!IsReadyForTip(chainman.ActiveTip())) return;
-        const CGovernanceObject* pObj = FindConstGovernanceObject(nHash);
-
-        if (pObj) {
-            filter = CBloomFilter(Params().GetConsensus().nGovernanceFilterElements, GOVERNANCE_FILTER_FP_RATE, GetRand(999999), BLOOM_UPDATE_ALL);
-            pObj->GetVoteFile().ForEachVote([&](const auto& vote) {
-                filter.insert(vote.GetHash());
-                ++nVoteCount;
-                return true;
-            });
-        }
-    }
-
-    LogPrint(BCLog::GOBJECT, "CGovernanceManager::RequestGovernanceObject -- nHash %s nVoteCount %d peer=%d\n", nHash.ToString(), nVoteCount, pfrom->GetId());
-    connman.PushMessage(pfrom, msgMaker.Make(NetMsgType::MNGOVERNANCESYNC, nHash, filter));
-}
-
-int CGovernanceManager::RequestGovernanceObjectVotes(CNode* pnode, CConnman& connman, const PeerManager& peerman) const
-{
-    const std::vector<CNode*> vNodeCopy{pnode};
-    return RequestGovernanceObjectVotes(vNodeCopy, connman, peerman);
-}
-
-int CGovernanceManager::RequestGovernanceObjectVotes(const std::vector<CNode*>& vNodesCopy, CConnman& connman, const PeerManager& peerman) const
-{
-    static std::map<uint256, std::map<CService, int64_t> > mapAskedRecently;
-
-    if (!IsReady() || vNodesCopy.empty()) return -1;
-
-    int64_t nNow = GetTime();
-    int nTimeout = 60 * 60;
-    size_t nPeersPerHashMax = 3;
-
-    std::vector<uint256> vTriggerObjHashes;
-    std::vector<uint256> vOtherObjHashes;
-
-    // This should help us to get some idea about an impact this can bring once deployed on mainnet.
-    // Testnet is ~40 times smaller in masternode count, but only ~1000 masternodes usually vote,
-    // so 1 obj on mainnet == ~10 objs or ~1000 votes on testnet. However we want to test a higher
-    // number of votes to make sure it's robust enough, so aim at 2000 votes per masternode per request.
-    // On mainnet nMaxObjRequestsPerNode is always set to 1.
-    int nMaxObjRequestsPerNode = 1;
-    size_t nProjectedVotes = 2000;
-
-    {
-        LOCK2(chainman.GetMutex(), cs);
-        const CBlockIndex* validation_tip{chainman.ActiveTip()};
-        if (!IsReadyForTip(validation_tip)) return -1;
-        if (Params().GetChainType() != ChainType::MAIN) {
-            const auto validation_mn_list{
-                deterministicMNManager->GetListForBlock(validation_tip)};
-            nMaxObjRequestsPerNode = std::max(
-                1, int(nProjectedVotes /
-                       std::max(
-                           1,
-                           static_cast<int>(
-                               validation_mn_list.GetValidMNsCount()))));
-        }
-
-        if (mapObjects.empty()) return -2;
-
-        for (const auto& [nHash, govobj] : mapObjects) {
-            if (govobj.IsSetCachedDelete()) continue;
-            if (m_pq_inactive_triggers.contains(nHash)) continue;
-            if (mapAskedRecently.count(nHash)) {
-                auto it = mapAskedRecently[nHash].begin();
-                while (it != mapAskedRecently[nHash].end()) {
-                    if (it->second < nNow) {
-                        mapAskedRecently[nHash].erase(it++);
-                    } else {
-                        ++it;
-                    }
-                }
-                if (mapAskedRecently[nHash].size() >= nPeersPerHashMax) continue;
-            }
-
-            if (govobj.GetObjectType() == GOVERNANCE_OBJECT_TRIGGER) {
-                vTriggerObjHashes.push_back(nHash);
-            } else {
-                vOtherObjHashes.push_back(nHash);
-            }
-        }
-    }
-
-    LogPrint(BCLog::GOBJECT, "CGovernanceManager::RequestGovernanceObjectVotes -- start: vTriggerObjHashes %d vOtherObjHashes %d mapAskedRecently %d\n",
-        vTriggerObjHashes.size(), vOtherObjHashes.size(), mapAskedRecently.size());
-
-    Shuffle(vTriggerObjHashes.begin(), vTriggerObjHashes.end(), FastRandomContext());
-    Shuffle(vOtherObjHashes.begin(), vOtherObjHashes.end(), FastRandomContext());
-
-    for (int i = 0; i < nMaxObjRequestsPerNode; ++i) {
-        uint256 nHashGovobj;
-
-        // ask for triggers first
-        if (!vTriggerObjHashes.empty()) {
-            nHashGovobj = vTriggerObjHashes.back();
-        } else {
-            if (vOtherObjHashes.empty()) break;
-            nHashGovobj = vOtherObjHashes.back();
-        }
-        bool fAsked = false;
-        for (const auto& pnode : vNodesCopy) {
-            // Don't try to sync any data from outbound non-relay "masternode" connections.
-            // Inbound connection this early is most likely a "masternode" connection
-            // initiated from another node, so skip it too.
-            if (!pnode->CanRelay() ||
-                SupportsGovernancePages(pnode->GetCommonVersion()) ||
-                (fMasternodeMode && pnode->IsInboundConn())) continue;
-            // stop early to prevent setAskFor overflow
-            {
-                LOCK(cs_main);
-                size_t nProjectedSize = peerman.GetRequestedCount(pnode->GetId()) + nProjectedVotes;
-                if (nProjectedSize > GetMaxInv()) continue;
-                // to early to ask the same node
-                if (mapAskedRecently[nHashGovobj].count(pnode->addr)) continue;
-            }
-
-            RequestGovernanceObject(pnode, nHashGovobj, connman, true);
-            mapAskedRecently[nHashGovobj][pnode->addr] = nNow + nTimeout;
-            fAsked = true;
-            // stop loop if max number of peers per obj was asked
-            if (mapAskedRecently[nHashGovobj].size() >= nPeersPerHashMax) break;
-        }
-        // NOTE: this should match `if` above (the one before `while`)
-        if (!vTriggerObjHashes.empty()) {
-            vTriggerObjHashes.pop_back();
-        } else {
-            vOtherObjHashes.pop_back();
-        }
-        if (!fAsked) i--;
-    }
-    LogPrint(BCLog::GOBJECT, "CGovernanceManager::RequestGovernanceObjectVotes -- end: vTriggerObjHashes %d vOtherObjHashes %d mapAskedRecently %d\n",
-        vTriggerObjHashes.size(), vOtherObjHashes.size(), mapAskedRecently.size());
-
-    return int(vTriggerObjHashes.size() + vOtherObjHashes.size());
 }
 
 uint64_t CGovernanceManager::PersistedVoteBytes(
@@ -5388,35 +4838,6 @@ void CGovernanceManager::UpdatedBlockTip(
     DrainReadyOrphanVotes(peerman);
 
     CSuperblockManager::ExecuteBestSuperblock(pindex->nHeight, pindex);
-}
-
-void CGovernanceManager::RequestOrphanObjects(CConnman& connman)
-{
-    const CConnman::NodesSnapshot snap{connman, /* filter = */ FullyConnectedOnly};
-
-    std::vector<uint256> vecHashesFiltered;
-    {
-        std::vector<uint256> vecHashes;
-        LOCK2(chainman.GetMutex(), cs);
-        const CBlockIndex* validation_tip{chainman.ActiveTip()};
-        if (!IsReadyForTip(validation_tip)) return;
-        cmmapOrphanVotes.GetKeys(vecHashes);
-        for (const uint256& nHash : vecHashes) {
-            if (mapObjects.find(nHash) == mapObjects.end()) {
-                vecHashesFiltered.push_back(nHash);
-            }
-        }
-    }
-
-    LogPrint(BCLog::GOBJECT, "CGovernanceObject::RequestOrphanObjects -- number objects = %d\n", vecHashesFiltered.size());
-    for (const uint256& nHash : vecHashesFiltered) {
-        for (CNode* pnode : snap.Nodes()) {
-            if (!pnode->CanRelay()) {
-                continue;
-            }
-            RequestGovernanceObject(pnode, nHash, connman);
-        }
-    }
 }
 
 void CGovernanceManager::CleanOrphanObjects()

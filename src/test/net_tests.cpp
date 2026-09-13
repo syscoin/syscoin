@@ -2284,8 +2284,13 @@ BOOST_AUTO_TEST_CASE(
         uint256::ONEV, uint256::ONEV, /*global_key_version=*/1);
     BOOST_CHECK(!CanUseGovernancePageProtocol(block_only));
 
-    inbound.SetCommonVersion(GOVERNANCE_PAGE_PROTO_VERSION - 1);
-    BOOST_CHECK(!CanUseGovernancePageProtocol(inbound));
+    CNode old_peer{
+        /*id=*/3, /*sock=*/nullptr, address,
+        /*nKeyedNetGroupIn=*/1, /*nLocalHostNonceIn=*/3, CAddress{},
+        destination, ConnectionType::INBOUND,
+        /*inbound_onion=*/false};
+    old_peer.SetCommonVersion(GOVERNANCE_PAGE_PROTO_VERSION - 1);
+    BOOST_CHECK(!CanUseGovernancePageProtocol(old_peer));
 }
 
 BOOST_AUTO_TEST_CASE(
@@ -2563,6 +2568,113 @@ BOOST_AUTO_TEST_CASE(
         }
     }
 
+    m_node.peerman->FinalizeNode(node);
+}
+
+BOOST_AUTO_TEST_CASE(
+    pq_governance_page_lease_renews_only_on_progress)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    in_addr ipv4_addr;
+    ipv4_addr.s_addr = 0xa0b0c004;
+    const CAddress address{CService{ipv4_addr, 7780}, NODE_NETWORK};
+    CNode node{
+        /*id=*/5, /*sock=*/nullptr, address,
+        /*nKeyedNetGroupIn=*/4, /*nLocalHostNonceIn=*/5, CAddress{},
+        /*addrNameIn=*/std::string{},
+        ConnectionType::OUTBOUND_FULL_RELAY, /*inbound_onion=*/false};
+    auto& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+    connman.Handshake(
+        node, /*successfully_connected=*/true,
+        ServiceFlags(NODE_NETWORK | NODE_WITNESS),
+        ServiceFlags(NODE_NETWORK | NODE_WITNESS),
+        PROTOCOL_VERSION, /*relay_txs=*/true);
+    TestOnlyResetTimeData();
+    const PeerRef peer{m_node.peerman->GetPeerRef(node.GetId())};
+    BOOST_REQUIRE(peer);
+    const uint256 view{uint256{31}};
+    const std::vector<CInv> inventory{
+        {MSG_GOVERNANCE_OBJECT, uint256{10}},
+        {MSG_GOVERNANCE_OBJECT, uint256{20}},
+        {MSG_GOVERNANCE_OBJECT, uint256{30}},
+        {MSG_GOVERNANCE_OBJECT, uint256{40}},
+        {MSG_GOVERNANCE_OBJECT, uint256{50}},
+    };
+    auto snapshot{MakeGovernancePageSnapshot({}, view, inventory)};
+    BOOST_REQUIRE(snapshot);
+    const std::weak_ptr<const GovernancePageImmutableSnapshot> retained{snapshot};
+    const auto send_page = [&](const CGovernancePageRequest& request,
+                               std::size_t offset) {
+        GovernancePageBuildResult page{
+            MakeGovernancePageResponse(
+                request, {inventory[offset], inventory[offset + 1]},
+                /*done=*/false, view,
+                static_cast<uint32_t>(inventory.size())),
+            snapshot, {offset, offset + 1}};
+        BOOST_REQUIRE(IsValidGovernancePageResponse(request, page.response));
+        BOOST_REQUIRE(m_node.peerman->SendGovernancePage(node, page));
+    };
+    send_page(MakeGovernancePageRequest(), 0);
+    const auto original_expiry{GetTime<std::chrono::microseconds>() + 1h};
+    {
+        LOCK(peer->m_governance_page_upload_mutex);
+        BOOST_REQUIRE(peer->m_governance_page_serve_session);
+        peer->m_governance_page_serve_session->hard_expiry = original_expiry;
+        peer->m_governance_page_serve_session->idle_expiry = original_expiry;
+    }
+
+    const auto restart{MakeGovernancePageRequest({}, {}, {}, /*nonce=*/2)};
+    {
+        const auto prepared{m_node.peerman->PrepareGovernancePageRequest(node, restart)};
+        BOOST_REQUIRE(prepared.has_value());
+        BOOST_CHECK(*prepared == snapshot);
+    }
+    send_page(restart, 0);
+    {
+        LOCK(peer->m_governance_page_upload_mutex);
+        BOOST_REQUIRE(peer->m_governance_page_serve_session);
+        BOOST_CHECK(peer->m_governance_page_serve_session->hard_expiry == original_expiry);
+        BOOST_CHECK_EQUAL(peer->m_governance_page_serve_session->cursor_zero_restarts, 1U);
+    }
+    const auto continuation{MakeGovernancePageRequest(
+        {}, inventory[1].hash, view, /*nonce=*/3)};
+    {
+        const auto prepared{m_node.peerman->PrepareGovernancePageRequest(node, continuation)};
+        BOOST_REQUIRE(prepared.has_value());
+        BOOST_CHECK(*prepared == snapshot);
+    }
+    const auto before{GetTime<std::chrono::microseconds>()};
+    send_page(continuation, 2);
+    const auto after{GetTime<std::chrono::microseconds>()};
+    BOOST_CHECK(!m_node.peerman->PrepareGovernancePageRequest(node, continuation));
+    {
+        LOCK(peer->m_governance_page_upload_mutex);
+        BOOST_REQUIRE(peer->m_governance_page_serve_session);
+        const auto& session{*peer->m_governance_page_serve_session};
+        BOOST_CHECK(session.hard_expiry >= before + 24h);
+        BOOST_CHECK(session.hard_expiry <= after + 24h);
+        BOOST_CHECK(session.hard_expiry > original_expiry);
+        BOOST_CHECK(session.expected_cursor == inventory[3].hash);
+        BOOST_CHECK_EQUAL(session.last_nonce, 3U);
+        BOOST_REQUIRE(peer->m_governance_page_serve_phase);
+        BOOST_CHECK(!peer->m_governance_page_serve_phase->object_done);
+        peer->m_governance_page_serve_session->idle_expiry =
+            GetTime<std::chrono::microseconds>() - 1us;
+    }
+    snapshot.reset();
+    BOOST_CHECK(!retained.expired());
+    const auto expired{m_node.peerman->PrepareGovernancePageRequest(
+        node, MakeGovernancePageRequest({}, inventory[3].hash, view, /*nonce=*/4))};
+    BOOST_REQUIRE(expired.has_value());
+    BOOST_CHECK(!*expired);
+    BOOST_CHECK(retained.expired());
+    {
+        LOCK(peer->m_governance_page_upload_mutex);
+        BOOST_CHECK(!peer->m_governance_page_serve_session);
+        BOOST_CHECK(peer->m_governance_page_uploads.empty());
+        BOOST_REQUIRE(peer->m_governance_page_serve_phase);
+        BOOST_CHECK(!peer->m_governance_page_serve_phase->object_done);
+    }
     m_node.peerman->FinalizeNode(node);
 }
 

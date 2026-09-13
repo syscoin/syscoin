@@ -619,75 +619,6 @@ BOOST_AUTO_TEST_CASE(orphan_vote_encoding_is_signal_specific)
         VOTE_SIGNAL_FUNDING, compact + 1));
 }
 
-BOOST_AUTO_TEST_CASE(operator_vote_sync_verification_is_globally_and_source_bounded)
-{
-    BOOST_CHECK_LE(
-        GovernanceVoteSyncRateLimiter::MAX_VERIFICATIONS_PER_REQUEST,
-        256U);
-    GovernanceVoteSyncRateLimiter limiter;
-    const auto now{std::chrono::microseconds{100}};
-    const uint64_t keyed_group{0x1234};
-
-    BOOST_CHECK(limiter.Consume(/*peer=*/1, {}, keyed_group, now));
-    BOOST_CHECK(!limiter.Consume(
-        /*peer=*/2, {}, keyed_group + 1,
-        now + GovernanceVoteSyncRateLimiter::GLOBAL_MIN_INTERVAL -
-            std::chrono::microseconds{1}));
-    BOOST_CHECK(limiter.Consume(
-        /*peer=*/2, {}, keyed_group + 1,
-        now + GovernanceVoteSyncRateLimiter::GLOBAL_MIN_INTERVAL));
-
-    const auto second_window{
-        now + 2 * GovernanceVoteSyncRateLimiter::GLOBAL_MIN_INTERVAL};
-    BOOST_CHECK(limiter.Consume(
-        /*peer=*/3, {}, keyed_group, second_window));
-    BOOST_CHECK(!limiter.Consume(
-        /*peer=*/4, {}, keyed_group,
-        second_window +
-            GovernanceVoteSyncRateLimiter::GLOBAL_MIN_INTERVAL));
-    BOOST_CHECK(limiter.Consume(
-        /*peer=*/4, {}, keyed_group,
-        second_window +
-            GovernanceVoteSyncRateLimiter::SOURCE_REFILL_INTERVAL));
-
-    GovernanceVoteSyncRateLimiter authenticated;
-    const uint256 pro_tx_hash{uint256S("a001")};
-    BOOST_CHECK(authenticated.Consume(
-        /*peer=*/10, pro_tx_hash, 1, now));
-    BOOST_CHECK(authenticated.Consume(
-        /*peer=*/11, pro_tx_hash, 2,
-        now + GovernanceVoteSyncRateLimiter::GLOBAL_MIN_INTERVAL));
-    BOOST_CHECK(!authenticated.Consume(
-        /*peer=*/12, pro_tx_hash, 3,
-        now + 2 * GovernanceVoteSyncRateLimiter::GLOBAL_MIN_INTERVAL));
-    BOOST_CHECK(authenticated.Consume(
-        /*peer=*/12, {}, keyed_group,
-        now + 2 * GovernanceVoteSyncRateLimiter::GLOBAL_MIN_INTERVAL));
-    BOOST_CHECK_EQUAL(authenticated.Size(), 2U);
-
-    GovernanceVoteSyncRateLimiter cooldown;
-    BOOST_REQUIRE(cooldown.Consume(/*peer=*/20, {}, /*keyed_net_group=*/0,
-                                   now));
-    for (int64_t peer{21}; peer < 64; ++peer) {
-        BOOST_CHECK(!cooldown.Consume(
-            peer, {}, /*keyed_net_group=*/0,
-            now + std::chrono::microseconds{1}));
-    }
-    BOOST_CHECK_EQUAL(cooldown.Size(), 1U);
-
-    GovernanceVoteSyncRateLimiter bounded;
-    for (std::size_t source{0};
-         source < GovernanceVoteSyncRateLimiter::MAX_SOURCES + 32;
-         ++source) {
-        BOOST_REQUIRE(bounded.Consume(
-            static_cast<int64_t>(source), {}, /*keyed_net_group=*/0,
-            now + source *
-                GovernanceVoteSyncRateLimiter::GLOBAL_MIN_INTERVAL));
-    }
-    BOOST_CHECK_EQUAL(
-        bounded.Size(), GovernanceVoteSyncRateLimiter::MAX_SOURCES);
-}
-
 // SYSCOIN: Vote invalidation checks activation against initialized chain parameters.
 BOOST_FIXTURE_TEST_CASE(authority_delta_vote_lookup_is_operator_bounded, BasicTestingSetup)
 {
@@ -795,6 +726,319 @@ BOOST_AUTO_TEST_CASE(governance_vote_pages_follow_exact_hash_index_order)
     BOOST_CHECK(new_context != changed);
     BOOST_CHECK(new_context->ViewId() == changed->ViewId());
     BOOST_CHECK_EQUAL(new_context->ValidationContextEpoch(), 2U);
+}
+
+BOOST_AUTO_TEST_CASE(governance_snapshot_spool_is_immutable_and_releases_budget)
+{
+    const auto budget{std::make_shared<GovernancePageSnapshotBudget>()};
+    constexpr std::size_t block_size{1ULL << 20};
+    constexpr uint32_t block_count{65};
+    {
+        auto spool{GovernancePagePayloadSpool::Create(
+            budget, block_count * block_size)};
+        BOOST_REQUIRE(spool);
+        std::vector<GovernancePageSnapshotEntry> entries;
+        entries.reserve(block_count);
+        CGovernancePageViewHasher hasher{uint256{}, block_count};
+        // Synthetic storage blocks exercise the spill boundary without
+        // constructing oversized governance objects or network messages.
+        std::vector<unsigned char> payload(block_size);
+        for (uint32_t i{0}; i < block_count; ++i) {
+            std::fill(payload.begin(), payload.end(), static_cast<unsigned char>(i));
+            const auto offset{spool->Append(payload)};
+            BOOST_REQUIRE(offset);
+            const CInv inv{MSG_GOVERNANCE_OBJECT, uint256{static_cast<uint8_t>(i + 1)}};
+            BOOST_REQUIRE(hasher.Append(inv));
+            entries.push_back({inv, {}, *offset, block_size});
+        }
+        const auto view{hasher.Finalize()};
+        BOOST_REQUIRE(view);
+        const std::size_t resident{
+            sizeof(GovernancePageImmutableSnapshot) +
+            GovernancePagePayloadSpool::ResidentBytes() +
+            entries.capacity() * sizeof(GovernancePageSnapshotEntry)};
+        GovernancePageSnapshotReservation reservation{budget};
+        BOOST_REQUIRE(reservation.Reserve(resident));
+        const auto snapshot{GovernancePageImmutableSnapshot::Create(
+            std::move(reservation), /*instance_id=*/1,
+            /*validation_context_epoch=*/1, uint256{}, *view,
+            std::move(entries), spool)};
+        BOOST_REQUIRE(snapshot);
+        BOOST_CHECK_GT(budget->Spooled(), MAX_GOVERNANCE_PAGE_SNAPSHOT_BYTES);
+        BOOST_CHECK_LT(snapshot->RetainedBytes(), budget->Spooled());
+        BOOST_CHECK_EQUAL(snapshot->RetainedBytes(), resident);
+        BOOST_CHECK(!spool->Append(payload));
+        spool.reset();
+        std::fill(payload.begin(), payload.end(), 0xff);
+        for (uint32_t i{0}; i < block_count; ++i) {
+            BOOST_REQUIRE(snapshot->ReadPayload(i, payload));
+            BOOST_CHECK_EQUAL(payload.size(), block_size);
+            BOOST_CHECK_EQUAL(snapshot->Entries()[i].PayloadSize(), payload.size());
+            BOOST_CHECK(snapshot->Entries()[i].inv.hash == uint256{static_cast<uint8_t>(i + 1)});
+            BOOST_CHECK(std::all_of(payload.begin(), payload.end(),
+                [i](unsigned char value) { return value == i; }));
+        }
+        BOOST_CHECK(!snapshot->ReadPayload(block_count, payload));
+        BOOST_CHECK(payload.empty());
+    }
+    BOOST_CHECK_EQUAL(budget->Retained(), 0U);
+    BOOST_CHECK_EQUAL(budget->Spooled(), 0U);
+
+    BOOST_REQUIRE(budget->ReserveSpooled(GovernancePageSnapshotBudget::MAX_SPOOLED_BYTES));
+    const std::vector<unsigned char> one_byte{1};
+    BOOST_CHECK(!GovernancePagePayloadSpool::Create(budget, one_byte.size()));
+    budget->ReleaseSpooled(GovernancePageSnapshotBudget::MAX_SPOOLED_BYTES);
+    BOOST_CHECK_EQUAL(budget->Spooled(), 0U);
+}
+
+BOOST_AUTO_TEST_CASE(governance_spool_reserves_one_large_scope_beyond_normal_pool)
+{
+    constexpr std::size_t normal_limit{1ULL << 20};
+    const auto budget{std::make_shared<GovernancePageSnapshotBudget>(normal_limit)};
+    std::vector<unsigned char> payload(2 * normal_limit);
+    for (std::size_t i{0}; i < payload.size(); ++i) {
+        payload[i] = static_cast<unsigned char>(i);
+    }
+    {
+        auto large{GovernancePagePayloadSpool::Create(budget, payload.size())};
+        BOOST_REQUIRE(large);
+        BOOST_CHECK_EQUAL(budget->Spooled(), payload.size());
+        BOOST_CHECK(!GovernancePagePayloadSpool::Create(budget, payload.size()));
+
+        // The one large generation does not consume the normal pool, while
+        // a second large generation waits for the first reservation to end.
+        auto regular{GovernancePagePayloadSpool::Create(budget, normal_limit)};
+        BOOST_REQUIRE(regular);
+        BOOST_CHECK_EQUAL(budget->Spooled(), payload.size() + normal_limit);
+        BOOST_CHECK(!GovernancePagePayloadSpool::Create(budget, 1));
+        const auto offset{large->Append(payload)};
+        BOOST_REQUIRE(offset);
+        BOOST_CHECK_EQUAL(*offset, 0U);
+        BOOST_CHECK(!large->Contains(*offset, payload.size()));
+        BOOST_REQUIRE(large->Seal());
+        const auto regular_offset{regular->Append(
+            Span<const unsigned char>{payload.data(), normal_limit})};
+        BOOST_REQUIRE(regular_offset);
+        BOOST_REQUIRE(regular->Seal());
+        std::vector<unsigned char> normal_payload;
+        BOOST_REQUIRE(regular->Read(*regular_offset, normal_limit, normal_payload));
+        BOOST_CHECK(std::equal(normal_payload.begin(), normal_payload.end(), payload.begin()));
+
+        const CInv inv{MSG_GOVERNANCE_OBJECT, uint256{90}};
+        const auto view{ComputeGovernancePageViewHash({}, {inv})};
+        BOOST_REQUIRE(view);
+        std::vector<GovernancePageSnapshotEntry> entries{
+            {inv, {}, *offset, static_cast<uint32_t>(payload.size())}};
+        GovernancePageSnapshotReservation reservation{budget};
+        BOOST_REQUIRE(reservation.Reserve(
+            sizeof(GovernancePageImmutableSnapshot) +
+            GovernancePagePayloadSpool::ResidentBytes() +
+            entries.capacity() * sizeof(GovernancePageSnapshotEntry)));
+        const auto snapshot{GovernancePageImmutableSnapshot::Create(
+            std::move(reservation), /*instance_id=*/1,
+            /*validation_context_epoch=*/1, {}, *view, std::move(entries), large)};
+        BOOST_REQUIRE(snapshot);
+        large.reset();
+        std::vector<unsigned char> exact;
+        BOOST_REQUIRE(snapshot->ReadPayload(0, exact));
+        BOOST_CHECK(exact == payload);
+        BOOST_CHECK_LT(snapshot->RetainedBytes(), payload.size());
+    }
+    BOOST_CHECK_EQUAL(budget->Retained(), 0U);
+    BOOST_CHECK_EQUAL(budget->Spooled(), 0U);
+
+    // A partial write cannot publish a snapshot or strand its whole-scope
+    // reservation. Destruction also releases reservations with no writes.
+    auto incomplete{GovernancePagePayloadSpool::Create(budget, payload.size())};
+    BOOST_REQUIRE(incomplete);
+    BOOST_REQUIRE(incomplete->Append(
+        Span<const unsigned char>{payload.data(), normal_limit}));
+    BOOST_CHECK(!incomplete->Seal());
+    BOOST_CHECK_EQUAL(budget->Spooled(), 0U);
+    {
+        const auto retry{GovernancePagePayloadSpool::Create(budget, payload.size())};
+        BOOST_REQUIRE(retry);
+        BOOST_CHECK_EQUAL(budget->Spooled(), payload.size());
+    }
+    BOOST_CHECK_EQUAL(budget->Spooled(), 0U);
+}
+
+BOOST_AUTO_TEST_CASE(governance_spooled_metadata_reservation_is_exclusive_and_grows)
+{
+    constexpr std::size_t normal_limit{1024};
+    constexpr uint32_t count{100};
+    constexpr std::size_t growth{128};
+    const auto budget{std::make_shared<GovernancePageSnapshotBudget>(
+        /*max_spooled_bytes=*/1ULL << 20, /*max_retained_bytes=*/normal_limit)};
+    {
+        auto spool{GovernancePagePayloadSpool::Create(budget, count)};
+        BOOST_REQUIRE(spool);
+        std::vector<GovernancePageSnapshotEntry> entries;
+        entries.reserve(count);
+        CGovernancePageViewHasher hasher{{}, count};
+        for (uint32_t i{0}; i < count; ++i) {
+            const std::array<unsigned char, 1> payload{static_cast<unsigned char>(i)};
+            const auto offset{spool->Append(payload)};
+            BOOST_REQUIRE(offset);
+            const CInv inv{MSG_GOVERNANCE_OBJECT, uint256{static_cast<uint8_t>(i + 1)}};
+            BOOST_REQUIRE(hasher.Append(inv));
+            entries.push_back({inv, {}, *offset, 1});
+        }
+        const auto view{hasher.Finalize()};
+        BOOST_REQUIRE(view);
+        const std::size_t resident{
+            sizeof(GovernancePageImmutableSnapshot) +
+            GovernancePagePayloadSpool::ResidentBytes() +
+            entries.capacity() * sizeof(GovernancePageSnapshotEntry)};
+        BOOST_REQUIRE_GT(resident, normal_limit);
+        GovernancePageSnapshotReservation reservation{budget};
+        BOOST_CHECK(!reservation.Reserve(resident));
+        BOOST_REQUIRE(reservation.Reserve(resident, /*allow_oversized_metadata=*/true));
+        BOOST_REQUIRE(reservation.Reserve(growth));
+        const std::size_t total{resident + growth};
+        BOOST_CHECK_EQUAL(reservation.Reserved(), total);
+        BOOST_CHECK_EQUAL(budget->Retained(), total);
+
+        // A metadata lease can grow without taking ordinary resident quota.
+        // Its exclusive ownership must survive publication into a snapshot.
+        GovernancePageSnapshotReservation regular{budget};
+        BOOST_REQUIRE(regular.Reserve(normal_limit));
+        BOOST_CHECK(!regular.Reserve(1));
+        BOOST_CHECK_EQUAL(budget->Retained(), total + normal_limit);
+        GovernancePageSnapshotReservation blocked{budget};
+        BOOST_CHECK(!blocked.Reserve(resident, /*allow_oversized_metadata=*/true));
+        auto snapshot{GovernancePageImmutableSnapshot::Create(
+            std::move(reservation), /*instance_id=*/1,
+            /*validation_context_epoch=*/1, {}, *view, std::move(entries), spool)};
+        BOOST_REQUIRE(snapshot);
+        BOOST_CHECK_EQUAL(snapshot->RetainedBytes(), total);
+        spool.reset();
+        BOOST_CHECK(!blocked.Reserve(resident, /*allow_oversized_metadata=*/true));
+        for (uint32_t i{0}; i < count; ++i) {
+            std::vector<unsigned char> payload;
+            BOOST_REQUIRE(snapshot->ReadPayload(i, payload));
+            BOOST_REQUIRE_EQUAL(payload.size(), 1U);
+            BOOST_CHECK_EQUAL(payload.front(), i);
+        }
+        snapshot.reset();
+        BOOST_CHECK_EQUAL(budget->Retained(), normal_limit);
+        BOOST_CHECK_EQUAL(budget->Spooled(), 0U);
+
+        // The released lease is immediately reusable, and an unpublished
+        // reservation rolls back its initial amount plus subsequent growth.
+        BOOST_REQUIRE(blocked.Reserve(resident, /*allow_oversized_metadata=*/true));
+        BOOST_REQUIRE(blocked.Reserve(growth));
+        BOOST_CHECK_EQUAL(budget->Retained(), total + normal_limit);
+    }
+    BOOST_CHECK_EQUAL(budget->Retained(), 0U);
+    BOOST_CHECK_EQUAL(budget->Spooled(), 0U);
+}
+
+BOOST_AUTO_TEST_CASE(governance_spooled_metadata_promotes_with_scratch_growth)
+{
+    constexpr std::size_t normal_limit{1024};
+    const auto budget{std::make_shared<GovernancePageSnapshotBudget>(
+        /*max_spooled_bytes=*/1ULL << 20, /*max_retained_bytes=*/normal_limit)};
+    {
+        GovernancePageSnapshotReservation scope{budget};
+        BOOST_REQUIRE(scope.Reserve(normal_limit));
+        BOOST_CHECK(!scope.Reserve(1));
+        {
+            GovernancePageSnapshotReservation competing{budget};
+            BOOST_REQUIRE(competing.Reserve(normal_limit + 1, true));
+            // A failed promotion preserves the original normal reservation.
+            BOOST_CHECK(!scope.Reserve(1, true));
+            BOOST_CHECK_EQUAL(scope.Reserved(), normal_limit);
+            BOOST_CHECK(!scope.IsOversizedMetadata());
+            BOOST_CHECK_EQUAL(budget->Retained(), 2 * normal_limit + 1);
+        }
+        BOOST_REQUIRE(scope.Reserve(1, true));
+        BOOST_CHECK(scope.IsOversizedMetadata());
+        BOOST_CHECK_EQUAL(scope.Reserved(), normal_limit + 1);
+        BOOST_CHECK_EQUAL(budget->Retained(), normal_limit + 1);
+        GovernancePageSnapshotReservation regular{budget};
+        BOOST_REQUIRE(regular.Reserve(normal_limit));
+        BOOST_CHECK_EQUAL(budget->Retained(), 2 * normal_limit + 1);
+    }
+    BOOST_CHECK_EQUAL(budget->Retained(), 0U);
+}
+
+BOOST_AUTO_TEST_CASE(governance_vote_pages_spill_complete_wire_snapshot)
+{
+    const auto budget{std::make_shared<GovernancePageSnapshotBudget>()};
+    {
+        CGovernanceObjectVoteFile votes;
+        const uint256 parent{uint256{80}};
+        GovernanceAuthorization authorization;
+        authorization.signed_height = 1;
+        authorization.signed_block_hash = uint256{81};
+        authorization.pro_tx_hash = uint256{82};
+        authorization.global_key_version = 1;
+        authorization.signature[0] = 1;
+        std::vector<unsigned char> signature;
+        BOOST_REQUIRE(EncodeGovernanceAuthorization(authorization, signature));
+        // Model stored fixed-width authorizations through the local vote-file
+        // seam. Cryptographic admission is covered by the authorization tests.
+        const std::size_t count{MAX_GOVERNANCE_PAGE_SNAPSHOT_BYTES / signature.size() + 1};
+        BOOST_REQUIRE_LT(count, 43'200U);
+        for (std::size_t i{0}; i < count; ++i) {
+            uint256 collateral;
+            WriteLE64(collateral.begin(), i + 1);
+            CGovernanceVote vote{COutPoint{collateral, 0}, parent,
+                                 VOTE_SIGNAL_VALID, VOTE_OUTCOME_YES};
+            vote.SetTime(100);
+            vote.SetSignature(signature);
+            votes.AddVote(vote);
+        }
+        const auto wire_size{votes.GetPageSnapshotRetainedBytes()};
+        BOOST_REQUIRE(wire_size);
+        BOOST_REQUIRE_GT(*wire_size, MAX_GOVERNANCE_PAGE_SNAPSHOT_BYTES);
+
+        // Exhausting file capacity leaves this generation retryable and
+        // releases its provisional resident-memory reservation.
+        BOOST_REQUIRE(budget->ReserveSpooled(GovernancePageSnapshotBudget::MAX_SPOOLED_BYTES));
+        BOOST_CHECK(!votes.GetPageSnapshot(parent, budget, 1, 1));
+        BOOST_CHECK_EQUAL(budget->Retained(), 0U);
+        budget->ReleaseSpooled(GovernancePageSnapshotBudget::MAX_SPOOLED_BYTES);
+        const auto snapshot{votes.GetPageSnapshot(parent, budget, 2, 1)};
+        BOOST_REQUIRE(snapshot);
+        BOOST_REQUIRE_EQUAL(snapshot->TotalCount(), count);
+        BOOST_CHECK_GT(budget->Spooled(), MAX_GOVERNANCE_PAGE_SNAPSHOT_BYTES);
+        BOOST_CHECK_LT(snapshot->RetainedBytes(), budget->Spooled());
+        CGovernancePageViewHasher hasher{parent, snapshot->TotalCount()};
+        for (std::size_t i{0}; i < count; ++i) {
+            const auto& entry{snapshot->Entries()[i]};
+            BOOST_REQUIRE(hasher.Append(entry.inv));
+            BOOST_CHECK(entry.payload.empty());
+            std::vector<unsigned char> payload;
+            BOOST_REQUIRE(snapshot->ReadPayload(i, payload));
+            CDataStream wire{Span<const uint8_t>{payload}, SER_NETWORK,
+                             GOVERNANCE_PAGE_PROTO_VERSION};
+            CGovernanceVote decoded;
+            wire >> decoded;
+            const auto original{votes.GetVote(entry.inv.hash)};
+            BOOST_REQUIRE(original);
+            BOOST_CHECK(decoded.HasSameWireEncoding(*original));
+            BOOST_CHECK(wire.empty());
+        }
+        const auto view{hasher.Finalize()};
+        BOOST_REQUIRE(view);
+        BOOST_CHECK(*view == snapshot->ViewId());
+        std::vector<unsigned char> original_payload;
+        BOOST_REQUIRE(snapshot->ReadPayload(0, original_payload));
+        votes.RemoveVotes({snapshot->Entries().front().inv.hash});
+        const auto changed{votes.GetPageSnapshot(parent, budget, 3, 2)};
+        BOOST_REQUIRE(changed);
+        BOOST_CHECK_EQUAL(changed->TotalCount(), count - 1);
+        BOOST_CHECK_EQUAL(changed->ValidationContextEpoch(), 2U);
+        BOOST_CHECK(changed->ViewId() != snapshot->ViewId());
+        BOOST_CHECK_EQUAL(snapshot->TotalCount(), count);
+        std::vector<unsigned char> retained_payload;
+        BOOST_REQUIRE(snapshot->ReadPayload(0, retained_payload));
+        BOOST_CHECK(retained_payload == original_payload);
+    }
+    BOOST_CHECK_EQUAL(budget->Retained(), 0U);
+    BOOST_CHECK_EQUAL(budget->Spooled(), 0U);
 }
 
 BOOST_AUTO_TEST_CASE(governance_vote_bytes_and_flatdb_sizes_are_checked)
