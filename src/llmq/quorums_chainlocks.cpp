@@ -14,6 +14,7 @@
 #include <consensus/params.h>
 #include <consensus/pq_migration_config.h>
 #include <consensus/validation.h>
+#include <dbwrapper.h>
 #include <evo/deterministicmns.h>
 #include <evo/pq_registry.h>
 #include <governance/governanceclasses.h>
@@ -6930,8 +6931,7 @@ bool CChainLocksHandler::PersistBTCCPresealStateLocked(
                 : std::nullopt};
         if (!deterministicMNManager || !m_quorum_build_config || !m_config ||
             !auxiliary_floor ||
-            !deterministicMNManager->FlushPendingSnapshotsToDisk(
-                /*fSync=*/true)) {
+            !FlushPresealEvidenceForDurability()) {
             m_persistence_failed.store(true);
             DisableShareAdmission();
             return false;
@@ -6986,14 +6986,7 @@ bool CChainLocksHandler::PersistPaymentAuditPresealStateLocked(
                 durable, *m_config, *m_quorum_build_config,
                 auxiliary_floor) ||
             !auxiliary_floor ||
-            // BeginPaymentAuditPreseal records the predecessor's indexed
-            // receipt/probation roots before the carrier itself is committed.
-            // Publish dirty block-index metadata only after its referenced
-            // block and undo streams are durable, then fsync the marker.
-            !deterministicMNManager->FlushPendingSnapshotsToDisk(
-                /*fSync=*/true) ||
-            !FlushPaymentAuditPresealBlockFilesForDurability(durable) ||
-            !m_chainman.m_blockman.WriteBlockIndexDB()) {
+            !FlushPresealEvidenceForDurability()) {
             m_persistence_failed.store(true);
             DisableShareAdmission();
             return false;
@@ -7011,43 +7004,24 @@ bool CChainLocksHandler::PersistPaymentAuditPresealStateLocked(
     return true;
 }
 
-bool CChainLocksHandler::FlushPaymentAuditPresealBlockFilesForDurability(
-    const pq::PaymentAuditPresealState& state) const
+bool CChainLocksHandler::FlushPresealEvidenceForDurability() const
 {
     AssertLockHeld(cs_main);
-    std::array<std::optional<int32_t>, node::BlockfileType::NUM_TYPES>
-        flush_heights{};
-    const auto require_height = [&](int32_t height) {
-        if (height < 0) return false;
-        const auto type{
-            m_chainman.m_blockman.m_snapshot_height &&
-                    height >= *m_chainman.m_blockman.m_snapshot_height
-                ? node::BlockfileType::ASSUMED
-                : node::BlockfileType::NORMAL};
-        flush_heights[static_cast<std::size_t>(type)] = height;
-        return true;
-    };
-    const auto require_marker = [&](const auto& marker) {
-        if (!marker) return true;
-        // The marker authenticates the state immediately before its first
-        // carrier and may advance across the AssumeUTXO block-file split.
-        // One current-cursor flush per represented type orders every earlier
-        // file, which was finalized when that cursor advanced.
-        return marker->earliest_carrier_height > 0 &&
-               require_height(marker->earliest_carrier_height - 1) &&
-               require_height(marker->terminal_carrier_height);
-    };
-    if (!require_marker(state.active) ||
-        !require_marker(state.prospective)) {
+    // SYSCOIN: Begin may advance an active or prospective terminal before
+    // ConnectBlock has committed the carrier. Persist snapshots, then block
+    // and undo streams, then indexes before either kind of preseal marker.
+    // This is an unresolved-receipt boundary, never a healthy-forward flush.
+    try {
+        return deterministicMNManager->FlushPendingSnapshotsToDisk(/*fSync=*/true) &&
+               m_chainman.m_blockman.FlushBlockFilesForDurability() &&
+               m_chainman.m_blockman.WriteBlockIndexDB();
+    } catch (const dbwrapper_error& e) {
+        LogPrintf("CChainLocksHandler::%s -- preseal evidence persistence failed: %s\n",
+                  __func__, e.what());
+        // The caller latches failure and retains the previous marker,
+        // revision and retention floors; no new reference was published.
         return false;
     }
-    for (const auto& height : flush_heights) {
-        if (height &&
-            !m_chainman.m_blockman.FlushChainstateBlockFile(*height)) {
-            return false;
-        }
-    }
-    return true;
 }
 
 void CChainLocksHandler::UpdateBTCCPresealPruneLock(

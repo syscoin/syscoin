@@ -13,6 +13,7 @@
 #include <evo/deterministicmns.h>
 #include <governance/governanceclasses.h>
 #include <key_io.h>
+#include <kernel/context.h>
 #include <net.h>
 #include <netbase.h>
 #include <net_processing.h>
@@ -28,6 +29,7 @@
 #include <rpc/server.h>
 #include <script/script.h>
 #include <services/assetconsensus.h>
+#include <shutdown.h>
 #include <streams.h>
 #include <test/pq_test_util.h>
 #include <test/util/net.h>
@@ -37,6 +39,7 @@
 #include <timedata.h>
 #include <util/time.h>
 #include <validationinterface.h>
+#include <txdb.h>
 
 #include <algorithm>
 #include <array>
@@ -48,11 +51,23 @@
 #include <future>
 #include <limits>
 #include <memory>
+#include <map>
 #include <optional>
 #include <thread>
 #include <tuple>
 #include <utility>
 #include <vector>
+
+#if defined(HAVE_BOOST_PROCESS) || defined(ENABLE_EXTERNAL_SIGNER)
+#include <boost/version.hpp>
+#if BOOST_VERSION >= 108800
+#include <boost/process/v1/args.hpp>
+#include <boost/process/v1/child.hpp>
+#include <boost/process/v1/exe.hpp>
+#else
+#include <boost/process.hpp>
+#endif
+#endif
 
 #include <boost/test/unit_test.hpp>
 
@@ -730,6 +745,23 @@ public:
     static void RefreshHistory(CChainLocksHandler& handler)
     {
         handler.RefreshPQHistoryAuthState();
+    }
+
+    static bool RepairBTCCPresealTerminals(CChainLocksHandler& handler)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        return handler.RepairReorgedBTCCPresealTerminals();
+    }
+
+    static pq::BTCCPresealState BTCCPresealState(CChainLocksHandler& handler)
+    {
+        LOCK(handler.m_btcc_preseal_mutex);
+        return handler.m_btcc_preseal_state;
+    }
+
+    static bool PersistenceFailed(const CChainLocksHandler& handler)
+    {
+        return handler.m_persistence_failed.load();
     }
 
     static std::optional<pq::BTCCPresealMarker> RecoverBTCCPresealMarker(
@@ -2179,6 +2211,317 @@ struct BTCCPresealRecoveryChain {
         replacement.active.SetTip(replacement.At(TIP_HEIGHT));
         BOOST_REQUIRE(replacement.active.FindFork(&original.At(OLD_TERMINAL)) ==
                       &original.At(common_height));
+    }
+};
+
+// The block bodies and indexed receipt transitions are real; the accepted
+// historical prefix is a fixture, not a claim to have verified certificates.
+struct BTCCPresealDurabilitySetup : TestingSetup {
+    using Access = llmq::test::CChainLocksHandlerTestAccess;
+    static constexpr int32_t EARLIEST{2'315};
+    static constexpr int32_t TERMINAL{2'325};
+    static constexpr int32_t PARENT{2'334};
+    static constexpr int32_t NEW_TERMINAL{2'335};
+
+    struct Profile {
+        Consensus::Params& consensus;
+        const Consensus::Params saved;
+        explicit Profile(ChainstateManager& chainman)
+            : consensus{const_cast<Consensus::Params&>(chainman.GetConsensus())}, saved{consensus}
+        {
+            const auto enabled{ValidConsensus()};
+            consensus.DIP0003Height = enabled.DIP0003Height;
+            consensus.nPQActivationHeight = enabled.nPQActivationHeight;
+            consensus.nPQPreparationHeight = enabled.nPQPreparationHeight;
+            consensus.nPQChainLockEpochOrigin = enabled.nPQChainLockEpochOrigin;
+            consensus.nPQRegistrationCutoffBlocks = enabled.nPQRegistrationCutoffBlocks;
+            consensus.nPQFutureHorizonEpochs = enabled.nPQFutureHorizonEpochs;
+            consensus.nPQRosterSnapshotLag = enabled.nPQRosterSnapshotLag;
+            consensus.nPQBTCCCandidateOrigin = enabled.nPQBTCCCandidateOrigin;
+            consensus.nPQBTCCNEVMInjectionLag = enabled.nPQBTCCNEVMInjectionLag;
+            consensus.nPQBTCCReceiptAnchorHeight = 0;
+            consensus.hashPQBTCCReceiptAnchorBlock = consensus.hashGenesisBlock;
+        }
+        ~Profile() { consensus = saved; }
+    };
+
+    BTCCPresealDurabilitySetup()
+        : TestingSetup{ChainType::REGTEST, {}, /*coins_db_in_memory=*/false,
+                       /*block_tree_db_in_memory=*/false} {}
+
+    static void Stamp(CBlockIndex& index, const llmq::pq::BTCCReceiptState& state)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        index.nStatus = (index.nStatus & ~BLOCK_VALID_MASK) | BLOCK_VALID_SCRIPTS |
+            BLOCK_PQ_BTCC_INDEX_VALIDATED | BLOCK_PQ_RECEIPT_INDEX_VALIDATED |
+            BLOCK_GOVERNANCE_VALIDATED;
+        index.pqBTCCReceiptCursorHeight = state.cursor.sys_height;
+        index.pqBTCCReceiptCursorSysHash = state.cursor.sys_hash;
+        index.pqBTCCReceiptCursorBTCHash = state.cursor.btc_hash;
+        index.pqBTCCReceiptStateHash = state.cumulative_hash;
+        index.pqBTCCReceiptLatestTargetHeight = state.latest_chainlock_target_height;
+        index.pqBTCCReceiptLatestCarrierHeight = state.latest_receipt_carrier_height;
+    }
+
+    void PrepareCrash(const fs::path& manifest_path, bool prospective, bool fail_file)
+    {
+        SyncWithValidationInterfaceQueue();
+        auto& chainman{static_cast<TestChainstateManager&>(*m_node.chainman)};
+        Profile profile{chainman};
+        chainman.ResetIbd(PQHistoryAuthState::PENDING);
+        LOCK(::cs_main);
+        auto handler{std::make_unique<llmq::CChainLocksHandler>(
+            *m_node.connman, *m_node.peerman, chainman)};
+        const auto config{*Assert(Access::Config(*handler))};
+        auto& blockman{chainman.m_blockman};
+        auto& chainstate{chainman.ActiveChainstate()};
+        std::vector<CBlockIndex*> chain(PARENT + 1);
+        chain[0] = chainman.ActiveTip();
+        BOOST_REQUIRE(chain[0]);
+        llmq::pq::BTCCReceiptState state;
+        Stamp(*chain[0], state);
+        std::map<int32_t, llmq::pq::BTCCReceipt> receipts;
+        const auto make_receipt = [&](int32_t height, const CBlockIndex& parent) {
+            llmq::pq::BTCCReceipt receipt;
+            receipt.chainlock_target_height = height - llmq::pq::PQ_BTCC_NEVM_LAG;
+            receipt.chainlock_target_hash = parent.GetAncestor(receipt.chainlock_target_height)->GetBlockHash();
+            receipt.chainlock_logical_id = NonNullHash(1'700'000 + height);
+            receipt.accepted_cursor = {2'305, parent.GetAncestor(2'305)->GetBlockHash(), NonNullHash(1'700'001)};
+            return receipt;
+        };
+        const auto store = [&](CBlockIndex& parent, const llmq::pq::BTCCReceipt& receipt,
+                               const llmq::pq::BTCCReceiptState& previous, bool alternate)
+            EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+            const int32_t height{parent.nHeight + 1};
+            CBlock block;
+            block.SetBaseVersion(4, chainman.GetConsensus().nAuxpowChainId);
+            block.hashPrevBlock = parent.GetBlockHash();
+            block.nBits = chain[0]->nBits;
+            block.nTime = parent.nTime + 1;
+            CMutableTransaction coinbase;
+            coinbase.vin.resize(1);
+            coinbase.vin[0].prevout.SetNull();
+            coinbase.vin[0].scriptSig = CScript{} << height << (alternate ? OP_1 : OP_0);
+            coinbase.vout.emplace_back(1, CScript{} << OP_TRUE);
+            if (llmq::pq::IsBTCCReceiptCarrierHeight(config.btcc_schedule, height)) {
+                DataStream payload;
+                payload << BTCC_RECEIPT_MAGIC_BYTES << receipt;
+                const auto bytes{MakeUCharSpan(payload)};
+                coinbase.vout.emplace_back(0, CScript{} << OP_RETURN <<
+                    std::vector<unsigned char>{bytes.begin(), bytes.end()});
+            }
+            block.vtx.push_back(MakeTransactionRef(std::move(coinbase)));
+            block.hashMerkleRoot = BlockMerkleRoot(block);
+            while (!CheckProofOfWork(block.GetHash(), block.nBits, chainman.GetConsensus())) ++block.nNonce;
+            const auto pos{blockman.SaveBlockToDisk(block, height, nullptr)};
+            BOOST_REQUIRE(!pos.IsNull());
+            auto* index{blockman.AddToBlockIndex(block, chainman.m_best_header)};
+            BOOST_REQUIRE(index);
+            chainman.ReceivedBlockTransactions(block, index, pos);
+            auto next{previous};
+            if (!receipt.IsNull()) {
+                auto applied{llmq::pq::ApplyBTCCReceiptState(
+                    chainman.GetConsensus().hashGenesisBlock, config.chainlock_schedule,
+                    config.btcc_schedule, config.activation_predecessor_height,
+                    height, block.GetHash(), previous, receipt)};
+                BOOST_REQUIRE(applied);
+                next = *applied;
+                index->pqBTCCReceiptLogicalId = receipt.chainlock_logical_id;
+            }
+            Stamp(*index, next);
+            if (height == 2'305) index->btcpPrevCommitment = NonNullHash(1'700'001);
+            return std::make_tuple(index, next, COutPoint{block.vtx.front()->GetHash(), 0});
+        };
+        COutPoint parent_coin;
+        for (int32_t height{1}; height <= PARENT; ++height) {
+            llmq::pq::BTCCReceipt receipt;
+            if (height == EARLIEST || height == TERMINAL) {
+                receipt = make_receipt(height, *chain[height - 1]);
+                receipts.emplace(height, receipt);
+            }
+            auto [index, next, coin]{store(*chain[height - 1], receipt, state, false)};
+            chain[height] = index;
+            state = next;
+            if (height == (prospective ? EARLIEST - 1 : PARENT)) parent_coin = coin;
+        }
+        auto [alternate, alternate_state, alternate_coin]{store(*chain[PARENT], {}, state, true)};
+        auto* active{prospective ? chain[EARLIEST - 1] : chain[PARENT]};
+        chainstate.m_chain.SetTip(*active);
+        chainstate.CoinsTip().SetBestBlock(active->GetBlockHash());
+        chainstate.CoinsTip().AddCoin(parent_coin, Coin{CTxOut{1, CScript{} << OP_TRUE},
+            active->nHeight, true}, false);
+        BOOST_REQUIRE(blockman.FlushChainstateBlockFile(PARENT + 1));
+        BOOST_REQUIRE(blockman.WriteBlockIndexDB());
+        BOOST_REQUIRE(chainstate.CoinsDB().FlushWithSync(chainstate.CoinsTip()));
+        BOOST_REQUIRE(handler->BeginBTCCPreseal(*chain[EARLIEST], receipts.at(EARLIEST)));
+        BOOST_REQUIRE(handler->BeginBTCCPreseal(*chain[TERMINAL], receipts.at(TERMINAL)));
+        const auto old{Access::Persistence(*handler).LoadBTCCPresealState()};
+        BOOST_REQUIRE(prospective ? old.prospective.has_value() : old.active.has_value());
+        const auto& old_marker{prospective ? *old.prospective : *old.active};
+        BOOST_REQUIRE_EQUAL(old_marker.earliest_carrier_height, EARLIEST);
+        BOOST_REQUIRE_EQUAL(old_marker.terminal_carrier_height, TERMINAL);
+
+        const auto receipt{make_receipt(NEW_TERMINAL, *chain[PARENT])};
+        auto [terminal, next, terminal_coin]{store(*chain[PARENT], receipt, state, false)};
+        const auto index_key{std::make_pair(uint8_t{'b'}, terminal->GetBlockHash())};
+        BOOST_REQUIRE(!blockman.m_block_tree_db->Exists(index_key));
+        BOOST_CHECK(!handler->BeginBTCCPreseal(*terminal, {}));
+        auto malformed{receipt};
+        malformed.chainlock_target_hash.SetNull();
+        BOOST_CHECK(!handler->BeginBTCCPreseal(*terminal, malformed));
+        BOOST_CHECK(Access::Persistence(*handler).LoadBTCCPresealState() == old);
+        BOOST_CHECK(!blockman.m_block_tree_db->Exists(index_key));
+        if (fail_file) {
+            const auto path{blockman.GetBlockPosFilename(terminal->GetBlockPos())};
+            const auto saved{fs::path{path}.concat(".saved")};
+            fs::rename(path, saved);
+            BOOST_REQUIRE(fs::create_directory(path));
+            m_node.notifications->m_shutdown_on_fatal_error = false;
+            const bool began{handler->BeginBTCCPreseal(*terminal, receipt)};
+            m_node.notifications->m_shutdown_on_fatal_error = true;
+            m_node.exit_status.store(EXIT_SUCCESS);
+            AbortShutdown();
+            fs::remove(path);
+            fs::rename(saved, path);
+            BOOST_CHECK(!began);
+            BOOST_CHECK(Access::Persistence(*handler).LoadBTCCPresealState() == old);
+            BOOST_CHECK(Access::BTCCPresealState(*handler) == old);
+            BOOST_CHECK(Access::PersistenceFailed(*handler));
+            BOOST_CHECK(!blockman.m_block_tree_db->Exists(index_key));
+            return;
+        }
+        BOOST_REQUIRE(handler->BeginBTCCPreseal(*terminal, receipt));
+        const auto advanced{Access::Persistence(*handler).LoadBTCCPresealState()};
+        const auto& marker{prospective ? *advanced.prospective : *advanced.active};
+        BOOST_CHECK_EQUAL(marker.earliest_carrier_height, EARLIEST);
+        BOOST_CHECK_EQUAL(marker.terminal_carrier_height, NEW_TERMINAL);
+        BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == active->GetBlockHash());
+        BOOST_CHECK(!chainstate.CoinsTip().HaveCoin(terminal_coin));
+        CDBWrapper manifest{DBParams{.path = manifest_path, .cache_bytes = 1U << 20}};
+        CDBBatch batch{manifest};
+        batch.Write(std::string{"root"}, fs::PathToString(m_path_root));
+        batch.Write(std::string{"datadir"}, fs::PathToString(chainman.m_options.datadir));
+        batch.Write(std::string{"blocks"}, fs::PathToString(m_args.GetBlocksDirPath()));
+        batch.Write(std::string{"index"}, fs::PathToString(*blockman.m_block_tree_db->StoragePath()));
+        batch.Write(std::string{"coins"}, fs::PathToString(*chainstate.CoinsDB().StoragePath()));
+        batch.Write(std::string{"active"}, active->GetBlockHash());
+        batch.Write(std::string{"alternate"}, alternate->GetBlockHash());
+        batch.Write(std::string{"terminal"}, terminal->GetBlockHash());
+        batch.Write(std::string{"old_earliest"}, old_marker.earliest_carrier_hash);
+        batch.Write(std::string{"old_predecessor"}, old_marker.predecessor_receipt_state);
+        batch.Write(std::string{"old_receipt"}, old_marker.terminal_receipt);
+        batch.Write(std::string{"parent_coin"}, parent_coin);
+        batch.Write(std::string{"terminal_coin"}, terminal_coin);
+        BOOST_REQUIRE(manifest.WriteBatch(batch, true));
+        // No handler, block manager, coins or DB destructor runs after the
+        // marker publication. The parent never held these index objects.
+        std::_Exit(73);
+    }
+
+    void CheckCrash(bool prospective)
+    {
+#if defined(HAVE_BOOST_PROCESS) || defined(ENABLE_EXTERNAL_SIGNER)
+#if BOOST_VERSION >= 108800
+        namespace bp = boost::process::v1;
+#else
+        namespace bp = boost::process;
+#endif
+        const auto manifest_path{m_path_root / "btcc-crash-manifest"};
+        BOOST_REQUIRE(fs::create_directory(manifest_path));
+        const std::vector<std::string> args{
+            "--run_test=pq_chainlock_handler_tests/btcc_preseal_durability_crash_child",
+            "--", "BTCC_PRESEAL_CRASH", fs::PathToString(manifest_path), prospective ? "prospective" : "active"};
+        bp::child child{bp::exe = boost::unit_test::framework::master_test_suite().argv[0], bp::args = args};
+        const auto deadline{std::chrono::steady_clock::now() + std::chrono::minutes{2}};
+        while (child.running() && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{10});
+        }
+        const bool timeout{child.running()};
+        if (timeout) child.terminate();
+        child.wait();
+        BOOST_REQUIRE(!timeout);
+        BOOST_REQUIRE_EQUAL(child.exit_code(), 73);
+        CDBWrapper manifest{DBParams{.path = manifest_path, .cache_bytes = 1U << 20}};
+        std::string child_root, datadir, blocks, index_path, coins_path;
+        uint256 active_hash, alternate_hash, terminal_hash;
+        COutPoint parent_coin, terminal_coin;
+        llmq::pq::BTCCPresealMarker old;
+        BOOST_REQUIRE(manifest.Read(std::string{"root"}, child_root));
+        BOOST_REQUIRE(manifest.Read(std::string{"datadir"}, datadir));
+        BOOST_REQUIRE(manifest.Read(std::string{"blocks"}, blocks));
+        BOOST_REQUIRE(manifest.Read(std::string{"index"}, index_path));
+        BOOST_REQUIRE(manifest.Read(std::string{"coins"}, coins_path));
+        BOOST_REQUIRE(manifest.Read(std::string{"active"}, active_hash));
+        BOOST_REQUIRE(manifest.Read(std::string{"alternate"}, alternate_hash));
+        BOOST_REQUIRE(manifest.Read(std::string{"terminal"}, terminal_hash));
+        BOOST_REQUIRE(manifest.Read(std::string{"old_earliest"}, old.earliest_carrier_hash));
+        BOOST_REQUIRE(manifest.Read(std::string{"old_predecessor"}, old.predecessor_receipt_state));
+        BOOST_REQUIRE(manifest.Read(std::string{"old_receipt"}, old.terminal_receipt));
+        BOOST_REQUIRE(manifest.Read(std::string{"parent_coin"}, parent_coin));
+        BOOST_REQUIRE(manifest.Read(std::string{"terminal_coin"}, terminal_coin));
+        BOOST_REQUIRE(fs::u8path(child_root) != m_path_root);
+        BOOST_REQUIRE(fs::u8path(child_root).parent_path() == m_path_root.parent_path());
+        {
+            Profile profile{*m_node.chainman};
+            auto options{m_node.chainman->m_options};
+            options.datadir = fs::u8path(datadir);
+            ChainstateManager reopened{m_node.kernel->interrupt, options,
+                {.chainparams = m_node.chainman->GetParams(), .blocks_dir = fs::u8path(blocks),
+                 .notifications = *m_node.notifications}};
+            std::unique_ptr<llmq::CChainLocksHandler> handler;
+            // Drain even when an assertion aborts the locked section, before
+            // destroying either object referenced by a queued callback.
+            struct DrainBeforeDestroy {
+                ~DrainBeforeDestroy() { SyncWithValidationInterfaceQueue(); }
+            } drain;
+            {
+                LOCK(::cs_main);
+                reopened.m_blockman.m_block_tree_db = std::make_unique<node::BlockTreeDB>(
+                    DBParams{.path = fs::u8path(index_path), .cache_bytes = 1U << 20});
+                BOOST_REQUIRE(reopened.m_blockman.LoadBlockIndexDB(std::nullopt));
+                auto& chainstate{reopened.InitializeChainstate(nullptr)};
+                chainstate.InitCoinsDB(1U << 20, false, false, fs::u8path(coins_path));
+                chainstate.InitCoinsCache(1U << 20);
+                BOOST_REQUIRE(chainstate.CoinsDB().GetBestBlock() == active_hash);
+                BOOST_CHECK(chainstate.CoinsDB().HaveCoin(parent_coin));
+                BOOST_CHECK(!chainstate.CoinsDB().HaveCoin(terminal_coin));
+                auto* active{reopened.m_blockman.LookupBlockIndex(active_hash)};
+                auto* alternate{reopened.m_blockman.LookupBlockIndex(alternate_hash)};
+                const auto* terminal{reopened.m_blockman.LookupBlockIndex(terminal_hash)};
+                BOOST_REQUIRE(active && alternate);
+                chainstate.m_chain.SetTip(*active);
+                handler = std::make_unique<llmq::CChainLocksHandler>(*m_node.connman, *m_node.peerman, reopened);
+                const auto advanced{Access::Persistence(*handler).LoadBTCCPresealState()};
+                const auto marker{prospective ? advanced.prospective : advanced.active};
+                BOOST_REQUIRE(marker);
+                BOOST_CHECK(marker->earliest_carrier_hash == old.earliest_carrier_hash);
+                BOOST_CHECK(marker->terminal_carrier_hash == terminal_hash);
+                BOOST_CHECK_MESSAGE(terminal, "Durable BTCC terminal must retain its block-index evidence after process loss");
+                if (terminal) {
+                    CBlock block;
+                    BOOST_CHECK(reopened.m_blockman.ReadBlockFromDisk(block, *terminal, false));
+                    BOOST_CHECK(block.GetHash() == terminal_hash);
+                    BOOST_CHECK_EQUAL(terminal->nStatus & BLOCK_FAILED_MASK, 0U);
+                }
+                // The alternative was durable before K arrived. Selecting it
+                // needs no K redelivery and repairs only the terminal dependency.
+                chainstate.m_chain.SetTip(*alternate);
+                BOOST_CHECK(Access::RepairBTCCPresealTerminals(*handler));
+                const auto repaired{Access::Persistence(*handler).LoadBTCCPresealState()};
+                const auto surviving{prospective ? repaired.prospective : repaired.active};
+                BOOST_REQUIRE(surviving);
+                BOOST_CHECK(surviving->earliest_carrier_hash == old.earliest_carrier_hash);
+                BOOST_CHECK(surviving->predecessor_receipt_state == old.predecessor_receipt_state);
+                BOOST_CHECK_EQUAL(surviving->terminal_carrier_height, TERMINAL);
+                BOOST_CHECK(surviving->terminal_receipt == old.terminal_receipt);
+                BOOST_CHECK(handler->HasNEVMReplayObligation());
+                BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == active_hash);
+            }
+        }
+        fs::remove_all(fs::u8path(child_root));
+#else
+        BOOST_TEST_MESSAGE("Skipping BTCC subprocess regression: Boost.Process unavailable");
+#endif
     }
 };
 
@@ -4423,6 +4766,32 @@ BOOST_FIXTURE_TEST_CASE(nevm_mining_prospective_markers_follow_the_active_branch
             }
         }
     }
+}
+
+BOOST_FIXTURE_TEST_CASE(btcc_preseal_durability_crash_child, BTCCPresealDurabilitySetup,
+                        *boost::unit_test::disabled())
+{
+    const auto args{G_TEST_COMMAND_LINE_ARGUMENTS()};
+    if (args.empty() || std::string{args[0]} != "BTCC_PRESEAL_CRASH") return;
+    BOOST_REQUIRE_EQUAL(args.size(), 3U);
+    const auto path{fs::u8path(args[1])};
+    BOOST_REQUIRE(path.is_absolute() && fs::is_directory(path));
+    PrepareCrash(path, std::string{args[2]} == "prospective", false);
+}
+
+BOOST_FIXTURE_TEST_CASE(btcc_preseal_active_terminal_survives_process_loss, BTCCPresealDurabilitySetup)
+{
+    CheckCrash(false);
+}
+
+BOOST_FIXTURE_TEST_CASE(btcc_preseal_prospective_terminal_survives_process_loss, BTCCPresealDurabilitySetup)
+{
+    CheckCrash(true);
+}
+
+BOOST_FIXTURE_TEST_CASE(btcc_preseal_file_failure_preserves_previous_terminal, BTCCPresealDurabilitySetup)
+{
+    PrepareCrash(m_path_root / "unused-manifest", false, true);
 }
 
 BOOST_AUTO_TEST_CASE(btcc_preseal_terminal_reorg_preserves_single_carrier)

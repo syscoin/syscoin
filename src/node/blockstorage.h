@@ -336,6 +336,10 @@ public:
     /** Flush the current block and undo file for the chainstate type at the given height. */
     [[nodiscard]] bool FlushChainstateBlockFile(int tip_height);
 
+    // SYSCOIN: Fence pending block/undo evidence across both chainstate cursors
+    // before a recovery marker publishes references through WriteBlockIndexDB.
+    [[nodiscard]] bool FlushBlockFilesForDurability() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
     bool WriteBlockIndexDB() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool LoadBlockIndexDB(const std::optional<uint256>& snapshot_blockhash)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);

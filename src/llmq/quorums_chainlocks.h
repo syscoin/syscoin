@@ -2813,8 +2813,7 @@ private:
     [[nodiscard]] bool PersistPaymentAuditPresealStateLocked(
         const pq::PaymentAuditPresealState& state)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_btcc_preseal_mutex);
-    [[nodiscard]] bool FlushPaymentAuditPresealBlockFilesForDurability(
-        const pq::PaymentAuditPresealState& state) const
+    [[nodiscard]] bool FlushPresealEvidenceForDurability() const
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     [[nodiscard]] bool ClearPaymentAuditPreseal(
         const pq::PaymentAuditPresealMarker& expected)

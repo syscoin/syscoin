@@ -1067,6 +1067,48 @@ bool BlockManager::FlushChainstateBlockFile(int tip_height)
     return true;
 }
 
+// SYSCOIN: Recovery markers must fence all streams whose metadata the next
+// index batch can publish. Undo writes can still target older files after a
+// download cursor advances, including during AssumeUTXO background validation.
+bool BlockManager::FlushBlockFilesForDurability()
+{
+    AssertLockHeld(::cs_main);
+    LOCK(cs_LastBlockFile);
+    if (m_blockfile_info.empty()) return true;
+
+    std::set<int> files{m_dirty_fileinfo};
+    for (const auto& cursor : m_blockfile_cursors) {
+        if (cursor) files.insert(cursor->file_num);
+    }
+    for (const int file : files) {
+        const auto& info{m_blockfile_info.at(file)};
+        const auto flush = [&](FlatFileSeq sequence, unsigned int size) {
+            // Pruning leaves zero-size tombstones in the dirty batch. A
+            // not-yet-connected block can also have no undo stream at all.
+            if (size == 0) return true;
+            const FlatFilePos pos{file, size};
+            std::error_code ec;
+            const auto path{sequence.FileName(pos)};
+            const auto disk_size{fs::file_size(path, ec)};
+            // FlatFileSeq::Open can create an absent file. That must not turn
+            // missing or truncated recovery evidence into a successful fence.
+            if (ec || disk_size < size) {
+                m_opts.notifications.flushError("Recovery block or undo file is missing or truncated.");
+                return error("%s: incomplete recovery stream %s", __func__, fs::PathToString(path));
+            }
+            if (!sequence.Flush(pos, /*finalize=*/false)) {
+                m_opts.notifications.flushError("Flushing recovery block or undo file to disk failed.");
+                return false;
+            }
+            return true;
+        };
+        if (!flush(BlockFileSeq(), info.nSize) ||
+            !flush(UndoFileSeq(), info.nUndoSize)) return false;
+    }
+    // Keep both dirty sets intact until WriteBlockIndexDB succeeds.
+    return true;
+}
+
 uint64_t BlockManager::CalculateCurrentUsage()
 {
     LOCK(cs_LastBlockFile);

@@ -20,6 +20,8 @@
 #include <test/util/logging.h>
 #include <test/util/setup_common.h>
 
+#include <array>
+#include <functional>
 #include <stdexcept>
 
 using node::BLOCK_SERIALIZATION_HEADER_SIZE;
@@ -197,6 +199,29 @@ struct ReindexForStorageTest {
     const bool previous{node::fReindex.exchange(true)};
     ~ReindexForStorageTest() { node::fReindex = previous; }
 };
+
+// Keep the actual bytes available for retry while exercising the real flat-file
+// open/size checks. Restore them even when a BOOST_REQUIRE aborts the case.
+void WithMovedFlatFile(const fs::path& path,
+                       const std::function<void(const fs::path&)>& check)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    fs::path saved{path};
+    saved += ".durability-test";
+    BOOST_REQUIRE(fs::exists(path));
+    BOOST_REQUIRE(!fs::exists(saved));
+    fs::rename(path, saved);
+    struct RestoreFile {
+        fs::path path;
+        fs::path saved;
+        ~RestoreFile()
+        {
+            fs::remove_all(path);
+            fs::rename(saved, path);
+        }
+    } restore{path, saved};
+    check(saved);
+}
 } // namespace
 // SYSCOIN END: Inject batch failures in the real transaction-height cache.
 
@@ -950,6 +975,142 @@ BOOST_AUTO_TEST_CASE(blockmanager_flush_chainstate_block_file_by_type)
         blockman.SaveBlockToDisk(block, /*nHeight=*/2, /*dbp=*/nullptr)};
     BOOST_CHECK_NE(normal.nFile, assumed.nFile);
     BOOST_CHECK(blockman.FlushChainstateBlockFile(/*tip_height=*/2));
+}
+
+// SYSCOIN: A preseal may publish all dirty indexes while download cursors have
+// moved ahead of validation's undo writes. The shared barrier must cover both.
+BOOST_FIXTURE_TEST_CASE(preseal_durability_flushes_older_dirty_undo, NEVMBlockStorageSetup)
+{
+    LOCK(cs_main);
+    Store(/*with_undo=*/false);
+    const auto old_file{index->nFile};
+    // A downloaded later block keeps this file's undo incomplete when the
+    // block writer rotates. No validation of this storage-only body is implied.
+    const auto later{blockman.SaveBlockToDisk(
+        Params().GenesisBlock(), index->nHeight + 1, nullptr)};
+    BOOST_REQUIRE_EQUAL(later.nFile, old_file);
+    RollBlockFile();
+    BOOST_REQUIRE(blockman.WriteBlockIndexDB());
+    BOOST_REQUIRE_GT(blockman.GetBlockFileInfo(old_file)->nHeightLast,
+                     static_cast<unsigned int>(index->nHeight));
+    undo.vtxundo.resize(1);
+    undo.vtxundo.front().vprevout.emplace_back(
+        CTxOut{456, CScript{} << OP_TRUE}, 8, false);
+    BlockValidationState state;
+    BOOST_REQUIRE(blockman.WriteUndoDataForBlock(undo, state, *index));
+    const auto key{std::make_pair(uint8_t{'b'}, index->GetBlockHash())};
+    const auto check_unpublished = [&]() EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+        CDiskBlockIndex persisted;
+        BOOST_REQUIRE(blockman.m_block_tree_db->Read(key, persisted));
+        BOOST_CHECK(!(persisted.nStatus & BLOCK_HAVE_UNDO));
+        BOOST_CHECK(persisted.GetUndoPos().IsNull());
+    };
+    check_unpublished();
+    const fs::path old_undo{m_args.GetBlocksDirPath() / "rev00000.dat"};
+    BOOST_REQUIRE_EQUAL(old_file, 0);
+    WithMovedFlatFile(old_undo, [&](const fs::path&) EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+        BOOST_REQUIRE(fs::create_directory(old_undo));
+        // The newer current stream is healthy. A current-cursor-only barrier
+        // would wrongly return success here and allow the undo index to publish.
+        BOOST_CHECK(blockman.FlushChainstateBlockFile(index->nHeight));
+        BOOST_CHECK(!blockman.FlushBlockFilesForDurability());
+        BOOST_CHECK(!blockman.FlushBlockFilesForDurability());
+        check_unpublished();
+    });
+    BOOST_REQUIRE(blockman.FlushBlockFilesForDurability());
+    check_unpublished(); // The stream barrier itself must not publish indexes.
+    BOOST_REQUIRE(blockman.WriteBlockIndexDB());
+    blockman.m_block_tree_db.reset();
+    blockman.m_block_tree_db = std::make_unique<node::BlockTreeDB>(
+        DBParams{.path = db_path, .cache_bytes = 1 << 20});
+    CDiskBlockIndex persisted;
+    BOOST_REQUIRE(blockman.m_block_tree_db->Read(key, persisted));
+    BOOST_CHECK(persisted.nStatus & BLOCK_HAVE_UNDO);
+    BOOST_CHECK(persisted.GetUndoPos() == index->GetUndoPos());
+    CBlockFileInfo persisted_file;
+    BOOST_REQUIRE(blockman.m_block_tree_db->ReadBlockFileInfo(old_file, persisted_file));
+    BOOST_CHECK_EQUAL(persisted_file.nUndoSize,
+                      blockman.GetBlockFileInfo(old_file)->nUndoSize);
+    CheckStored(*index, block.vchNEVMBlockData);
+}
+
+BOOST_FIXTURE_TEST_CASE(preseal_durability_flushes_both_clean_cursors, NEVMBlockStorageSetup)
+{
+    LOCK(cs_main);
+    Store(/*with_undo=*/true);
+    const auto normal{index->GetBlockPos()};
+    blockman.m_snapshot_height = index->nHeight + 1;
+    const auto assumed{blockman.SaveBlockToDisk(
+        Params().GenesisBlock(), *blockman.m_snapshot_height, nullptr)};
+    BOOST_REQUIRE(!assumed.IsNull());
+    BOOST_REQUIRE_NE(normal.nFile, assumed.nFile);
+    BOOST_REQUIRE(blockman.FlushBlockFilesForDurability());
+    BOOST_REQUIRE(blockman.WriteBlockIndexDB()); // Neither cursor is dirty now.
+    for (const auto& pos : {normal, assumed}) {
+        BOOST_TEST_CONTEXT("current file=" << pos.nFile) {
+            const auto path{blockman.GetBlockPosFilename(pos)};
+            WithMovedFlatFile(path, [&](const fs::path&) EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+                BOOST_REQUIRE(fs::create_directory(path));
+                BOOST_CHECK(!blockman.FlushBlockFilesForDurability());
+            });
+            BOOST_CHECK(blockman.FlushBlockFilesForDurability());
+        }
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(preseal_durability_rejects_missing_or_truncated_streams, NEVMBlockStorageSetup)
+{
+    LOCK(cs_main);
+    Store(/*with_undo=*/true);
+    const auto* info{blockman.GetBlockFileInfo(index->nFile)};
+    const std::array<std::pair<fs::path, unsigned int>, 2> streams{{
+        {blockman.GetBlockPosFilename(index->GetBlockPos()), info->nSize},
+        {m_args.GetBlocksDirPath() / "rev00000.dat", info->nUndoSize},
+    }};
+    BOOST_REQUIRE_EQUAL(index->nFile, 0);
+    for (const auto& [path, size] : streams) {
+        BOOST_REQUIRE_GT(size, 0U);
+        for (const bool truncate : {false, true}) {
+            BOOST_TEST_CONTEXT("stream=" << fs::PathToString(path) << ", truncate=" << truncate) {
+                WithMovedFlatFile(path, [&](const fs::path& saved) EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+                    if (truncate) {
+                        BOOST_REQUIRE(fs::copy_file(saved, path, fs::copy_options::none));
+                        fs::resize_file(path, size - 1);
+                    }
+                    BOOST_CHECK(!blockman.FlushBlockFilesForDurability());
+                    if (truncate) BOOST_CHECK_EQUAL(fs::file_size(path), size - 1);
+                    else BOOST_CHECK(!fs::exists(path));
+                });
+                BOOST_CHECK(blockman.FlushBlockFilesForDurability());
+            }
+        }
+    }
+    CheckStored(*index, block.vchNEVMBlockData);
+}
+
+BOOST_FIXTURE_TEST_CASE(preseal_durability_does_not_recreate_pruned_dirty_files, NEVMBlockStorageSetup)
+{
+    LOCK(cs_main);
+    Store(/*with_undo=*/true);
+    const auto old_file{index->nFile};
+    const auto block_path{blockman.GetBlockPosFilename(index->GetBlockPos())};
+    const fs::path undo_path{m_args.GetBlocksDirPath() / "rev00000.dat"};
+    BOOST_REQUIRE_EQUAL(old_file, 0);
+    RollBlockFile();
+    blockman.PruneOneBlockFile(old_file);
+    BOOST_REQUIRE_EQUAL(blockman.GetBlockFileInfo(old_file)->nSize, 0U);
+    BOOST_REQUIRE_EQUAL(blockman.GetBlockFileInfo(old_file)->nUndoSize, 0U);
+    BOOST_REQUIRE(fs::remove(block_path));
+    BOOST_REQUIRE(fs::remove(undo_path));
+    // PruneOneBlockFile leaves zero-size file metadata in the dirty batch.
+    BOOST_REQUIRE(blockman.FlushBlockFilesForDurability());
+    BOOST_CHECK(!fs::exists(block_path));
+    BOOST_CHECK(!fs::exists(undo_path));
+    BOOST_REQUIRE(blockman.WriteBlockIndexDB());
+    CBlockFileInfo persisted;
+    BOOST_REQUIRE(blockman.m_block_tree_db->ReadBlockFileInfo(old_file, persisted));
+    BOOST_CHECK_EQUAL(persisted.nSize, 0U);
+    BOOST_CHECK_EQUAL(persisted.nUndoSize, 0U);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
