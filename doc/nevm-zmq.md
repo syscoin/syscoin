@@ -202,6 +202,13 @@ without reading the old owner's block body or scanning back to NEVM activation.
 Startup recovery is limited to the divergent suffix. Recent discarded and
 replacement bodies remain necessary for consumed-mint cleanup.
 
+Manual and automatic pruning first select files without changing their indexes.
+The existing full state flush then persists the auxiliary dependencies and
+synchronizes coins before publishing pruning tombstones and unlinking files.
+Until that barrier succeeds, the bodies and disk positions needed to recover an
+earlier published root tip remain available. This adds a coins sync only when
+files are selected for pruning, not on each healthy block connection.
+
 A database from the prior root schema requires a one-time chainstate rebuild to
 populate the ownership and undo records. An unpruned node can use
 `-reindex-chainstate`. A node that has already pruned the required block history

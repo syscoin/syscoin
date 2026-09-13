@@ -23,6 +23,7 @@
 #include <net.h>
 #include <net_processing.h>
 #include <node/blockstorage.h>
+#include <node/blockmanager_args.h> // SYSCOIN: exercise real pruning options in native fixtures.
 #include <node/chainstate.h>
 #include <node/context.h>
 #include <node/kernel_notifications.h>
@@ -224,11 +225,15 @@ ChainTestingSetup::ChainTestingSetup(const ChainType chainType, const std::vecto
         .notifications = *m_node.notifications,
         .geth_commandline = m_node.args->GetArgs("-gethcommandline"),
     };
-    const BlockManager::Options blockman_opts{
+    // SYSCOIN BEGIN: Honor explicit block-manager options in native fixtures.
+    // const BlockManager::Options blockman_opts{
+    BlockManager::Options blockman_opts{
         .chainparams = chainman_opts.chainparams,
         .blocks_dir = m_args.GetBlocksDirPath(),
         .notifications = chainman_opts.notifications,
     };
+    Assert(ApplyArgsManOptions(*m_node.args, blockman_opts));
+    // SYSCOIN END: Honor explicit block-manager options in native fixtures.
     m_node.chainman = std::make_unique<ChainstateManager>(m_node.kernel->interrupt, chainman_opts, blockman_opts);
     m_node.chainman->m_blockman.m_block_tree_db = std::make_unique<BlockTreeDB>(DBParams{
         .path = m_args.GetDataDirNet() / "blocks" / "index",

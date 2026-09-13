@@ -375,11 +375,13 @@ void BlockManager::FindFilesToPruneManual(
             continue;
         }
 
-        PruneOneBlockFile(fileNumber);
+        // SYSCOIN BEGIN: Defer Bitcoin's index mutation until coins are durable.
+        // PruneOneBlockFile(fileNumber);
+        // SYSCOIN END: Defer Bitcoin's index mutation until coins are durable.
         setFilesToPrune.insert(fileNumber);
         count++;
     }
-    LogPrintf("[%s] Prune (Manual): prune_height=%d removed %d blk/rev pairs\n",
+    LogPrintf("[%s] Prune (Manual): prune_height=%d selected %d blk/rev pairs\n",
         chain.GetRole(), last_block_can_prune, count);
 }
 
@@ -439,7 +441,9 @@ void BlockManager::FindFilesToPrune(
                 continue;
             }
 
-            PruneOneBlockFile(fileNumber);
+            // SYSCOIN BEGIN: Defer Bitcoin's index mutation until coins are durable.
+            // PruneOneBlockFile(fileNumber);
+            // SYSCOIN END: Defer Bitcoin's index mutation until coins are durable.
             // Queue up the files for removal
             setFilesToPrune.insert(fileNumber);
             nCurrentUsage -= nBytesToPrune;
@@ -447,7 +451,7 @@ void BlockManager::FindFilesToPrune(
         }
     }
 
-    LogPrint(BCLog::PRUNE, "[%s] target=%dMiB actual=%dMiB diff=%dMiB min_height=%d max_prune_height=%d removed %d blk/rev pairs\n",
+    LogPrint(BCLog::PRUNE, "[%s] target=%dMiB actual=%dMiB diff=%dMiB min_height=%d max_prune_height=%d selected %d blk/rev pairs\n",
              chain.GetRole(), target / 1024 / 1024, nCurrentUsage / 1024 / 1024,
              (int64_t(target) - int64_t(nCurrentUsage)) / 1024 / 1024,
              min_block_to_prune, last_block_can_prune, count);

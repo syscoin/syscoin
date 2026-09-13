@@ -59,6 +59,7 @@
 #include <test/util/validation.h>
 #include <timedata.h>
 #include <uint256.h>
+#include <util/vector.h> // SYSCOIN: explicit pruning options for disk-backed fixtures.
 #include <undo.h> // SYSCOIN: mint rollback durability fixture.
 #include <validation.h>
 #include <validationinterface.h>
@@ -251,12 +252,13 @@ namespace {
 struct DeferredNEVMReplaySetup : TestChain100Setup {
     explicit DeferredNEVMReplaySetup(bool coins_db_in_memory = true,
                                      bool managed_exit = false,
-                                     bool block_tree_db_in_memory = true)
+                                     bool block_tree_db_in_memory = true,
+                                     const std::vector<const char*>& extra_args = {})
         : TestChain100Setup{ChainType::REGTEST,
-                            managed_exit
+                            Cat(managed_exit
                                 ? std::vector<const char*>{"-nevmstartheight=101",
                                                           "-gethcommandline=--exitwhensynced"}
-                                : std::vector<const char*>{"-nevmstartheight=101"},
+                                : std::vector<const char*>{"-nevmstartheight=101"}, extra_args),
                             COINBASE_MATURITY,
                             coins_db_in_memory,
                             block_tree_db_in_memory} {}
@@ -535,8 +537,9 @@ struct StartupNEVMRecoverySetup : DeferredNEVMReplaySetup {
 
     explicit StartupNEVMRecoverySetup(bool coins_db_in_memory = true,
                                       bool managed_exit = false,
-                                      bool block_tree_db_in_memory = true)
-        : DeferredNEVMReplaySetup{coins_db_in_memory, managed_exit, block_tree_db_in_memory}
+                                      bool block_tree_db_in_memory = true,
+                                      const std::vector<const char*>& extra_args = {})
+        : DeferredNEVMReplaySetup{coins_db_in_memory, managed_exit, block_tree_db_in_memory, extra_args}
     {
         RegisterSharedValidationInterface(nevm);
         fNEVMConnection = true;
@@ -8649,10 +8652,11 @@ struct NEVMRootRollbackSetup : StartupNEVMRecoverySetup {
     COutPoint minted_coin;
     std::function<void()> before_root_block;
 
-    explicit NEVMRootRollbackSetup(bool block_tree_db_in_memory = true)
+    explicit NEVMRootRollbackSetup(bool block_tree_db_in_memory = true,
+                                  const std::vector<const char*>& extra_args = {})
         : StartupNEVMRecoverySetup{/*coins_db_in_memory=*/false,
                                     /*managed_exit=*/false,
-                                    block_tree_db_in_memory}
+                                    block_tree_db_in_memory, extra_args}
     {
         pnevmtxrootsdb = std::make_unique<ObservedDisconnectRootsDB>(DBParams{
             .path = roots_path, .cache_bytes = 1U << 20, .wipe_data = true});
@@ -9290,6 +9294,322 @@ struct PrunedNEVMRootRecoverySetup : NEVMRootRollbackSetup {
         BOOST_CHECK(nevm->command_trace.empty());
     }
 };
+
+// SYSCOIN BEGIN: Pruning must retain a metadata-published recovery suffix until coins are durable.
+struct PruningNEVMRootPublicationSetup : NEVMRootRollbackSetup {
+    enum class Failure { NONE, ROOT_WRITE, COINS_WRITE, COINS_SYNC };
+    std::shared_ptr<const CBlock> durable_block, published_block, cached_block;
+    CNEVMHeader durable_header, published_header, cached_header;
+    CBlockIndex* victim{nullptr};
+    uint32_t victim_status{0};
+    FlatFilePos victim_block_pos, victim_undo_pos;
+    fs::path victim_block_path, victim_undo_path;
+
+    PruningNEVMRootPublicationSetup()
+        : NEVMRootRollbackSetup{/*block_tree_db_in_memory=*/false,
+                                {"-fastprune", "-prune=550"}}
+    {
+        nevm->strict_connect_order = true;
+        nevm->disconnect_response = {};
+    }
+
+    ~PruningNEVMRootPublicationSetup()
+    {
+        RootsDB().before_write = {};
+        RootsDB().after_write = {};
+        WITH_LOCK(::cs_main, m_node.chainman->ActiveChainstate().CoinsDB().SetWriteBatchCallbackForTesting({}));
+        WITH_LOCK(::cs_main, m_node.chainman->ActiveChainstate().CoinsDB().SetSyncCallbackForTesting({}));
+        if (governance) governance->ObserveChainTip(nullptr);
+    }
+
+    std::shared_ptr<const CBlock> MinePruningBlock()
+    {
+        const auto* tip{WITH_LOCK(::cs_main, return m_node.chainman->ActiveTip())};
+        BOOST_REQUIRE(tip && governance);
+        BOOST_REQUIRE(governance_tests::PublishGovernanceReadyForTest(*governance, *tip));
+        // The default mock serial is one byte; every root in this longer
+        // history needs its own identity so recovery must read the whole gap.
+        nevm->template_block_hash = GetRandHash();
+        nevm->template_roots = NEVMTxRoot{GetRandHash(), GetRandHash()};
+        return MineNEVMBlock();
+    }
+
+    void PreparePruningGap()
+    {
+        auto& chainman{*m_node.chainman};
+        auto& chainstate{chainman.ActiveChainstate()};
+        auto& blockman{chainman.m_blockman};
+        BOOST_REQUIRE(blockman.IsPruneMode());
+        BOOST_REQUIRE_LT(chainman.GetParams().PruneAfterHeight(), 500U);
+        durable_block = MinePruningBlock();
+        {
+            LOCK(::cs_main);
+            BOOST_REQUIRE_EQUAL(chainman.ActiveHeight(), 101);
+            BlockValidationState state;
+            BOOST_REQUIRE(chainstate.FlushStateToDisk(state, FlushStateMode::ALWAYS));
+            BOOST_REQUIRE(chainstate.CoinsDB().FlushWithSync(chainstate.CoinsTip()));
+            BOOST_REQUIRE(GetNEVMData(state, *durable_block, durable_header));
+        }
+        for (int height{102}; height <= 250; ++height) published_block = MinePruningBlock();
+        SyncWithValidationInterfaceQueue();
+        {
+            LOCK(::cs_main);
+            BlockValidationState state;
+            node::test::NEVMMiningTestAccess::AgeMetadataWrite(chainstate);
+            // Actual periodic metadata publication: T advances independently
+            // of the UTXO best-block marker B, as it can in ordinary operation.
+            BOOST_REQUIRE(chainstate.FlushStateToDisk(state, FlushStateMode::PERIODIC));
+            BOOST_REQUIRE(RootsDB().Sync());
+            BOOST_REQUIRE(chainstate.CoinsDB().GetBestBlock() == durable_block->GetHash());
+            BOOST_REQUIRE(RootsDB().GetPublishedTip() == published_block->GetHash());
+            BOOST_REQUIRE(GetNEVMData(state, *published_block, published_header));
+        }
+        for (int height{251}; height <= 500; ++height) cached_block = MinePruningBlock();
+        SyncWithValidationInterfaceQueue();
+        LOCK(::cs_main);
+        BOOST_REQUIRE_EQUAL(chainman.ActiveHeight(), 500);
+        BOOST_REQUIRE_GT(chainman.ActiveHeight() - 101, static_cast<int>(MIN_BLOCKS_TO_KEEP));
+        BOOST_REQUIRE(chainstate.CoinsDB().GetBestBlock() == durable_block->GetHash());
+        BOOST_REQUIRE(chainstate.CoinsTip().GetBestBlock() == cached_block->GetHash());
+        BOOST_REQUIRE(RootsDB().GetPublishedTip() == published_block->GetHash());
+        BOOST_REQUIRE(!RootsDB().GetPendingDisconnect());
+        BlockValidationState state;
+        BOOST_REQUIRE(GetNEVMData(state, *cached_block, cached_header));
+        victim = chainman.ActiveChain()[102];
+        BOOST_REQUIRE(victim);
+        victim_status = victim->nStatus;
+        victim_block_pos = victim->GetBlockPos();
+        victim_undo_pos = victim->GetUndoPos();
+        BOOST_REQUIRE_EQUAL(victim_status & (BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO),
+                            BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO);
+        BOOST_REQUIRE(victim_block_pos.nFile != chainman.ActiveTip()->GetBlockPos().nFile);
+        BOOST_REQUIRE_LE(blockman.GetBlockFileInfo(victim_block_pos.nFile)->nHeightLast,
+                         500U - MIN_BLOCKS_TO_KEEP);
+        victim_block_path = m_args.GetBlocksDirPath() /
+            fs::PathFromString(strprintf("blk%05u.dat", victim_block_pos.nFile));
+        victim_undo_path = m_args.GetBlocksDirPath() /
+            fs::PathFromString(strprintf("rev%05u.dat", victim_undo_pos.nFile));
+        CheckRetainedFiles(*victim);
+        MintDB().FlushDataToCache({mint_hash});
+        BOOST_REQUIRE(MintDB().FlushCacheToDisk(/*CHUNK_ITEMS=*/256, /*fSync=*/true));
+        CheckNoPendingNEVMRecovery();
+        nevm->command_trace.clear();
+    }
+
+    void CheckRetainedFiles(const CBlockIndex& index)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        BOOST_CHECK_EQUAL(index.nStatus, victim_status);
+        BOOST_CHECK(index.GetBlockPos() == victim_block_pos);
+        BOOST_CHECK(index.GetUndoPos() == victim_undo_pos);
+        BOOST_CHECK(fs::exists(victim_block_path));
+        BOOST_CHECK(fs::exists(victim_undo_path));
+    }
+
+    void CheckColdRecovery(bool pruned, const uint256& physical_coins,
+                           const uint256& physical_roots)
+    {
+        // Drop all live caches without a flush, then reopen index, coins,
+        // roots and mint rows. In the root/write failures, real ReplayBlocks
+        // must read the formerly prune-eligible suffix to restore B101.
+        SyncWithValidationInterfaceQueue();
+        auto& original{*m_node.chainman};
+        auto& original_chainstate{original.ActiveChainstate()};
+        ChainstateManager reopened{m_node.kernel->interrupt, original.m_options,
+            {.chainparams = original.GetParams(),
+             .prune_target = BlockManager::PRUNE_TARGET_MANUAL,
+             .blocks_dir = m_args.GetBlocksDirPath(),
+             .notifications = *m_node.notifications}};
+        LOCK(::cs_main);
+        const auto coins_path{original_chainstate.CoinsDB().StoragePath()};
+        const auto index_path{original.m_blockman.m_block_tree_db->StoragePath()};
+        BOOST_REQUIRE(coins_path && index_path);
+        auto& recovered{reopened.InitializeChainstate(nullptr)};
+        struct RestoreDatabases {
+            ChainstateManager& original;
+            ChainstateManager& reopened;
+            fs::path coins_path;
+            ~RestoreDatabases()
+            {
+                reopened.ActiveChainstate().ResetCoinsViews();
+                original.m_blockman.m_block_tree_db = std::move(reopened.m_blockman.m_block_tree_db);
+                auto& state{original.ActiveChainstate()};
+                state.InitCoinsDB(1U << 20, false, false, coins_path);
+                state.InitCoinsCache(1U << 23);
+                if (auto* tip{original.m_blockman.LookupBlockIndex(state.CoinsDB().GetBestBlock())}) {
+                    state.m_chain.SetTip(*tip);
+                }
+            }
+        } restore{original, reopened, *coins_path};
+        original_chainstate.ResetCoinsViews();
+        original.m_blockman.m_block_tree_db.reset();
+        reopened.m_blockman.m_block_tree_db = std::make_unique<node::BlockTreeDB>(DBParams{
+            .path = *index_path, .cache_bytes = 1U << 20});
+        BOOST_REQUIRE(reopened.m_blockman.LoadBlockIndexDB(std::nullopt));
+        const auto* cold_victim{reopened.m_blockman.LookupBlockIndex(victim->GetBlockHash())};
+        BOOST_REQUIRE(cold_victim);
+        BOOST_CHECK_EQUAL(reopened.m_blockman.IsBlockPruned(cold_victim), pruned);
+        if (!pruned) CheckRetainedFiles(*cold_victim);
+        recovered.InitCoinsDB(1U << 20, false, false, *coins_path);
+        pnevmtxrootsdb.reset();
+        pnevmtxrootsdb = std::make_unique<ObservedDisconnectRootsDB>(DBParams{
+            .path = roots_path, .cache_bytes = 1U << 20});
+        pnevmtxmintdb.reset();
+        pnevmtxmintdb = std::make_unique<ObservedRollbackMintDB>(DBParams{
+            .path = mints_path, .cache_bytes = 1U << 20});
+        BOOST_CHECK(recovered.CoinsDB().GetBestBlock() == physical_coins);
+        BOOST_CHECK(RootsDB().GetPublishedTip() == physical_roots);
+        BOOST_REQUIRE(recovered.ReplayBlocks());
+        BOOST_CHECK(recovered.CoinsDB().GetBestBlock() == physical_coins);
+        BOOST_CHECK(recovered.CoinsDB().GetHeadBlocks().empty());
+        BOOST_CHECK(RootsDB().GetPublishedTip() == physical_coins);
+        BOOST_CHECK(!RootsDB().GetPendingDisconnect());
+        BOOST_CHECK(recovered.CoinsDB().HaveCoin(COutPoint{durable_block->vtx[0]->GetHash(), 0}));
+        BOOST_CHECK_EQUAL(recovered.CoinsDB().HaveCoin(COutPoint{cached_block->vtx[0]->GetHash(), 0}),
+                          physical_coins == cached_block->GetHash());
+        NEVMTxRoot root;
+        BOOST_CHECK(RootsDB().Read(durable_header.nBlockHash, root));
+        // T250 was already physically published before the pruning attempt;
+        // removing its root proves real surplus recovery after a refused write.
+        const bool retained_publication{RootsDB().Read(published_header.nBlockHash, root)};
+        BOOST_CHECK_EQUAL(retained_publication, physical_coins == cached_block->GetHash());
+        if (retained_publication) {
+            BOOST_CHECK(root.nTxRoot == published_header.nTxRoot);
+            BOOST_CHECK(root.nReceiptRoot == published_header.nReceiptRoot);
+        }
+        BOOST_CHECK_EQUAL(RootsDB().Read(cached_header.nBlockHash, root),
+                          physical_coins == cached_block->GetHash());
+        BOOST_CHECK(MintDB().Exists(mint_hash));
+        BOOST_CHECK(MintDB().ExistsTx(mint_hash));
+        BOOST_CHECK(!MintDB().ExistsTx(unclaimed_hash));
+        BOOST_CHECK(nevm->command_trace.empty());
+    }
+
+    void CheckPrunePublication(bool automatic, Failure failure)
+    {
+        PreparePruningGap();
+        auto& chainman{*m_node.chainman};
+        auto& chainstate{chainman.ActiveChainstate()};
+        auto& blockman{chainman.m_blockman};
+        std::size_t root_writes{0}, coins_writes{0}, coins_syncs{0};
+        uint256 physical_coins, physical_roots;
+        {
+            LOCK(::cs_main);
+            struct RestoreCallbacks {
+                PruningNEVMRootPublicationSetup& fixture;
+                Chainstate& state;
+                bool shutdown_on_error;
+                int exit_status;
+                ~RestoreCallbacks()
+                {
+                    LOCK(::cs_main);
+                    fixture.RootsDB().before_write = {};
+                    state.CoinsDB().SetWriteBatchCallbackForTesting({});
+                    state.CoinsDB().SetSyncCallbackForTesting({});
+                    fixture.m_node.notifications->m_shutdown_on_fatal_error = shutdown_on_error;
+                    fixture.m_node.exit_status.store(exit_status);
+                    AbortShutdown();
+                }
+            } restore{*this, chainstate, m_node.notifications->m_shutdown_on_fatal_error,
+                      m_node.exit_status.load()};
+            chainstate.CoinsDB().SetWriteBatchCallbackForTesting([&](bool) { ++coins_writes; return true; });
+            chainstate.CoinsDB().SetSyncCallbackForTesting([&] { ++coins_syncs; return true; });
+            // Healthy cache-only work, including automatic selection below
+            // the disk target, must not acquire the new pruning barrier.
+            chainstate.PruneAndFlush();
+            BOOST_REQUIRE_EQUAL(m_node.exit_status.load(), EXIT_SUCCESS);
+            BlockValidationState no_prune;
+            BOOST_REQUIRE(chainstate.FlushStateToDisk(no_prune, FlushStateMode::IF_NEEDED));
+            BOOST_CHECK_EQUAL(coins_writes, 0U);
+            BOOST_CHECK_EQUAL(coins_syncs, 0U);
+            BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == durable_block->GetHash());
+            BOOST_CHECK(RootsDB().GetPublishedTip() == published_block->GetHash());
+            CheckRetainedFiles(*victim);
+            if (automatic) {
+                // Apply real target pressure without allocating hundreds of
+                // MiB of payload. This sparse extension is matched by actual
+                // file metadata, so all flat-file durability checks still run.
+                const int current_file{chainman.ActiveTip()->GetBlockPos().nFile};
+                const auto path{m_args.GetBlocksDirPath() /
+                    fs::PathFromString(strprintf("blk%05u.dat", current_file))};
+                const auto target{blockman.GetPruneTarget()};
+                BOOST_REQUIRE_LE(target, std::numeric_limits<unsigned int>::max());
+                fs::resize_file(path, target);
+                blockman.GetBlockFileInfo(current_file)->nSize = static_cast<unsigned int>(target);
+            }
+            RootsDB().before_write = [&] {
+                LOCK(::cs_main);
+                ++root_writes;
+                CheckRetainedFiles(*victim);
+                return failure != Failure::ROOT_WRITE;
+            };
+            chainstate.CoinsDB().SetWriteBatchCallbackForTesting([&](bool sync) {
+                LOCK(::cs_main);
+                ++coins_writes;
+                BOOST_CHECK(!sync);
+                CheckRetainedFiles(*victim);
+                BOOST_CHECK(RootsDB().GetPublishedTip() == cached_block->GetHash());
+                return failure != Failure::COINS_WRITE;
+            });
+            chainstate.CoinsDB().SetSyncCallbackForTesting([&] {
+                LOCK(::cs_main);
+                ++coins_syncs;
+                // This is the final barrier: no index tombstone or unlink
+                // may precede it, even when the asynchronous batch is visible.
+                CheckRetainedFiles(*victim);
+                BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == cached_block->GetHash());
+                BOOST_CHECK(RootsDB().GetPublishedTip() == cached_block->GetHash());
+                NEVMTxRoot root;
+                BOOST_REQUIRE(RootsDB().Read(cached_header.nBlockHash, root));
+                BOOST_CHECK(root.nTxRoot == cached_header.nTxRoot);
+                BOOST_CHECK(root.nReceiptRoot == cached_header.nReceiptRoot);
+                return failure != Failure::COINS_SYNC;
+            });
+            m_node.notifications->m_shutdown_on_fatal_error = false;
+            BlockValidationState state;
+            bool flushed;
+            if (automatic) {
+                chainstate.PruneAndFlush();
+                flushed = m_node.exit_status.load() == EXIT_SUCCESS;
+            } else {
+                flushed = chainstate.FlushStateToDisk(state, FlushStateMode::NONE, 500);
+            }
+            BOOST_CHECK_EQUAL(flushed, failure == Failure::NONE);
+            BOOST_CHECK_EQUAL(m_node.exit_status.load(),
+                              failure == Failure::NONE ? EXIT_SUCCESS : EXIT_FAILURE);
+            BOOST_CHECK_GT(root_writes, 0U);
+            BOOST_CHECK_EQUAL(coins_writes, failure == Failure::ROOT_WRITE ? 0U : 1U);
+            BOOST_CHECK_EQUAL(coins_syncs,
+                              failure == Failure::NONE || failure == Failure::COINS_SYNC ? 1U : 0U);
+            BOOST_CHECK(chainman.ActiveTip()->GetBlockHash() == cached_block->GetHash());
+            BOOST_CHECK_EQUAL(victim->nStatus & BLOCK_FAILED_MASK, 0U);
+            BOOST_CHECK(nevm->command_trace.empty());
+            if (failure == Failure::NONE) {
+                BOOST_CHECK(blockman.IsBlockPruned(victim));
+                BOOST_CHECK_EQUAL(victim->nStatus & (BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO), 0U);
+                BOOST_CHECK_EQUAL(victim->nDataPos, 0U);
+                BOOST_CHECK_EQUAL(victim->nUndoPos, 0U);
+                BOOST_CHECK(!fs::exists(victim_block_path));
+                BOOST_CHECK(!fs::exists(victim_undo_path));
+                BOOST_CHECK(blockman.m_have_pruned);
+            } else {
+                if (!automatic) BOOST_CHECK(state.IsError());
+                CheckRetainedFiles(*victim);
+                BOOST_CHECK(!blockman.m_have_pruned);
+            }
+            physical_coins = chainstate.CoinsDB().GetBestBlock();
+            physical_roots = RootsDB().GetPublishedTip().value();
+            BOOST_CHECK(physical_coins == (failure == Failure::ROOT_WRITE || failure == Failure::COINS_WRITE
+                ? durable_block->GetHash() : cached_block->GetHash()));
+            BOOST_CHECK(physical_roots == (failure == Failure::ROOT_WRITE
+                ? published_block->GetHash() : cached_block->GetHash()));
+        }
+        // A failed Sync callback follows the real asynchronous write; clean
+        // reopen can therefore see its new coins. It is not a power-loss model.
+        CheckColdRecovery(failure == Failure::NONE, physical_coins, physical_roots);
+    }
+};
+// SYSCOIN END: Pruning must retain a metadata-published recovery suffix until coins are durable.
 
 struct FreshNEVMStartupSetup : ChainTestingSetup {
     const bool previous_nevm_connection{fNEVMConnection};
@@ -13628,6 +13948,54 @@ BOOST_FIXTURE_TEST_CASE(nevm_replay_preserves_alias_with_aligned_published_tip,
 #else
     BOOST_TEST_MESSAGE("Skipping subprocess root-crash regression: Boost.Process unavailable");
 #endif
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_prune_manual_retains_files_on_root_write_failure,
+                        PruningNEVMRootPublicationSetup)
+{
+    CheckPrunePublication(false, Failure::ROOT_WRITE);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_prune_automatic_retains_files_on_root_write_failure,
+                        PruningNEVMRootPublicationSetup)
+{
+    CheckPrunePublication(true, Failure::ROOT_WRITE);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_prune_manual_retains_files_on_coins_write_failure,
+                        PruningNEVMRootPublicationSetup)
+{
+    CheckPrunePublication(false, Failure::COINS_WRITE);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_prune_automatic_retains_files_on_coins_write_failure,
+                        PruningNEVMRootPublicationSetup)
+{
+    CheckPrunePublication(true, Failure::COINS_WRITE);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_prune_manual_retains_files_on_coins_sync_failure,
+                        PruningNEVMRootPublicationSetup)
+{
+    CheckPrunePublication(false, Failure::COINS_SYNC);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_prune_automatic_retains_files_on_coins_sync_failure,
+                        PruningNEVMRootPublicationSetup)
+{
+    CheckPrunePublication(true, Failure::COINS_SYNC);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_prune_manual_retires_files_after_coins_sync,
+                        PruningNEVMRootPublicationSetup)
+{
+    CheckPrunePublication(false, Failure::NONE);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_prune_automatic_retires_files_after_coins_sync,
+                        PruningNEVMRootPublicationSetup)
+{
+    CheckPrunePublication(true, Failure::NONE);
 }
 
 BOOST_FIXTURE_TEST_CASE(nevm_full_flush_publishes_root_branch_before_coins,

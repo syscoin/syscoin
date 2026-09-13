@@ -182,7 +182,7 @@ private:
     bool WriteBlockToDisk(const CBlock& block, FlatFilePos& pos) const;
     bool UndoWriteToDisk(const CBlockUndo& blockundo, FlatFilePos& pos, const uint256& hashBlock) const;
 
-    /* Calculate the block/rev files to delete based on height specified by user with RPC command pruneblockchain */
+    /** Select block/rev files for pruneblockchain without changing their indexes or deleting them. */
     void FindFilesToPruneManual(
         std::set<int>& setFilesToPrune,
         int nManualPruneHeight,
@@ -190,7 +190,7 @@ private:
         ChainstateManager& chainman);
 
     /**
-     * Prune block and undo files (blk???.dat and rev???.dat) so that the disk space used is less than a user-defined target.
+     * Select block and undo files (blk???.dat and rev???.dat) to bring disk usage below a user-defined target.
      * The user sets the target (in MB) on the command line or in config file.  This will be run on startup and whenever new
      * space is allocated in a block or undo file, staying below the target. Changing back to unpruned requires a reindex
      * (which in this case means the blockchain must be re-downloaded.)
@@ -199,8 +199,8 @@ private:
      * Block and undo files are deleted in lock-step (when blk00003.dat is deleted, so is rev00003.dat.)
      * Pruning cannot take place until the longest chain is at least a certain length (CChainParams::nPruneAfterHeight).
      * Pruning will never delete a block within a defined distance (currently 288) from the active chain's tip.
-     * The block index is updated by unsetting HAVE_DATA and HAVE_UNDO for any blocks that were stored in the deleted files.
-     * A db flag records the fact that at least some block files have been pruned.
+     * Selection does not mutate the block index. FlushStateToDisk must durably flush coins and their
+     * dependencies before calling PruneOneBlockFile, publishing the indexes, and unlinking these files.
      *
      * @param[out]   setFilesToPrune   The set of file indices that can be unlinked will be returned
      * @param        last_prune        The last height we're able to prune, according to the prune locks

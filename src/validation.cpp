@@ -6675,10 +6675,12 @@ bool Chainstate::FlushStateToDisk(
             }
             if (!setFilesToPrune.empty()) {
                 fFlushForPrune = true;
-                if (!m_blockman.m_have_pruned) {
-                    m_blockman.m_block_tree_db->WriteFlag("prunedblockfiles", true);
-                    m_blockman.m_have_pruned = true;
-                }
+                // SYSCOIN BEGIN: Publish Bitcoin's pruned flag after the coins barrier below.
+                // if (!m_blockman.m_have_pruned) {
+                //     m_blockman.m_block_tree_db->WriteFlag("prunedblockfiles", true);
+                //     m_blockman.m_have_pruned = true;
+                // }
+                // SYSCOIN END: Publish Bitcoin's pruned flag after the coins barrier below.
             }
         }
         const auto nNow{SteadyClock::now()};
@@ -6757,12 +6759,13 @@ bool Chainstate::FlushStateToDisk(
                     return FatalError(m_chainman.GetNotifications(), state, "Failed to write to block index database");
                 }
             }
+            // SYSCOIN BEGIN: Move Bitcoin's unlink step after durable coins and pruning indexes.
             // Finally remove any pruned files
-            if (fFlushForPrune) {
-                LOG_TIME_MILLIS_WITH_CATEGORY("unlink pruned files", BCLog::BENCHMARK);
-
-                m_blockman.UnlinkPrunedFiles(setFilesToPrune);
-            }
+            // if (fFlushForPrune) {
+            //     LOG_TIME_MILLIS_WITH_CATEGORY("unlink pruned files", BCLog::BENCHMARK);
+            //     m_blockman.UnlinkPrunedFiles(setFilesToPrune);
+            // }
+            // SYSCOIN END: Move Bitcoin's unlink step after durable coins and pruning indexes.
             // SYSCOIN
             const bool sys_sync_flush = mode == FlushStateMode::ALWAYS;
             if (pnevmdatadb &&
@@ -6882,8 +6885,37 @@ bool Chainstate::FlushStateToDisk(
                                   "Failed to commit deterministic masternode state");
             }
             // Flush the chainstate (which may refer to block index entries).
-            if (!CoinsTip().Flush())
+            // SYSCOIN BEGIN: Synchronize coins before applying Bitcoin's pruning mutations.
+            // if (!CoinsTip().Flush())
+            //     return FatalError(m_chainman.GetNotifications(), state, "Failed to write to coin database");
+            // Root T can already be ahead of on-disk coins before
+            // this flush. Preserve every selected block's index and body until
+            // the coins endpoint and its write-ahead dependencies are durable;
+            // an asynchronous coins write cannot authorize pruning.
+            if (!(fFlushForPrune ? CoinsDB().FlushWithSync(CoinsTip()) : CoinsTip().Flush()))
                 return FatalError(m_chainman.GetNotifications(), state, "Failed to write to coin database");
+
+            if (fFlushForPrune) {
+                // Selection above is read-only. Publish pruning tombstones
+                // only after the recovery suffix has retired, then unlink.
+                if (!m_blockman.m_have_pruned) {
+                    if (!m_blockman.m_block_tree_db->WriteFlag("prunedblockfiles", true)) {
+                        return FatalError(m_chainman.GetNotifications(), state,
+                                          "Failed to write pruned block files flag");
+                    }
+                    m_blockman.m_have_pruned = true;
+                }
+                for (const int file : setFilesToPrune) {
+                    m_blockman.PruneOneBlockFile(file);
+                }
+                if (!m_blockman.WriteBlockIndexDB()) {
+                    return FatalError(m_chainman.GetNotifications(), state,
+                                      "Failed to write pruned block index database");
+                }
+                LOG_TIME_MILLIS_WITH_CATEGORY("unlink pruned files", BCLog::BENCHMARK);
+                m_blockman.UnlinkPrunedFiles(setFilesToPrune);
+            }
+            // SYSCOIN END: Synchronize coins before applying Bitcoin's pruning mutations.
 
             m_last_flush = nNow;
             full_flush_completed = true;
