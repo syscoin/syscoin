@@ -3177,18 +3177,30 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
                                   "bad-qc-quorum-hash");
         }
 
-        const auto quorum_list{GetListForBlock(quorum_base)};
-        const auto members{quorum_list.CalculateQuorum(
-            static_cast<std::size_t>(replay.size),
-            quorum_base->GetBlockHash())};
-        if (std::any_of(members.begin(), members.end(),
-                        [](const CDeterministicMNCPtr& member) {
-                            return member == nullptr;
-                        })) {
-            return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
-                                  "bad-qc-structure");
-        }
         const auto& commitment{legacy_commitment.commitment};
+        std::vector<CDeterministicMNCPtr> members;
+        if (!commitment.IsNull()) {
+            CDeterministicMNList quorum_list;
+            try {
+                quorum_list = GetListForBlock(quorum_base);
+            } catch (const std::runtime_error& e) {
+                LogPrintf("%s -- failed to load legacy quorum state at "
+                          "height=%d block=%s: %s\n", __func__,
+                          quorum_base->nHeight,
+                          quorum_base->GetBlockHash().ToString(), e.what());
+                return _state.Error("failed-qc-quorum-state");
+            }
+            members = quorum_list.CalculateQuorum(
+                static_cast<std::size_t>(replay.size),
+                quorum_base->GetBlockHash());
+            if (std::any_of(members.begin(), members.end(),
+                            [](const CDeterministicMNCPtr& member) {
+                                return member == nullptr;
+                            })) {
+                return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                      "bad-qc-structure");
+            }
+        }
         if (!commitment.IsStructurallyValid(
                 static_cast<std::size_t>(replay.size), members.size(),
                 static_cast<std::size_t>(replay.minimum_size),

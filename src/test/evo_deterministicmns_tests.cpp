@@ -5606,6 +5606,7 @@ BOOST_AUTO_TEST_CASE(opaque_legacy_participation_penalties_replay_until_activati
         .wipe_data = true,
     };
     CDeterministicMNManager manager(db_params);
+    LOCK(::cs_main);
     std::array<CDeterministicMNCPtr, 3> source_members{
         MakeLegacyReplayMN(1, 1), MakeLegacyReplayMN(2, 3),
         MakeLegacyReplayMN(3, 4)};
@@ -5657,6 +5658,7 @@ BOOST_AUTO_TEST_CASE(opaque_legacy_participation_penalties_replay_until_activati
         BOOST_REQUIRE(member);
         BOOST_CHECK_EQUAL(member->pdmnState->nPoSePenalty, 0);
     }
+    const uint256 replayed_list_hash{::SerializeHash(next_list)};
 
     auto truncated{commitment};
     truncated.commitment.validMembers.pop_back();
@@ -5665,6 +5667,133 @@ BOOST_AUTO_TEST_CASE(opaque_legacy_participation_penalties_replay_until_activati
         empty_block, chain.At(final_legacy_height - 1), malformed_state, view,
         next_list, old_list, truncated));
     BOOST_CHECK_EQUAL(malformed_state.GetRejectReason(), "bad-qc-structure");
+    BOOST_CHECK(malformed_state.IsInvalid());
+    BOOST_CHECK(!malformed_state.IsError());
+
+    enum class Fault { MISSING, MALFORMED, WRONG_IDENTITY };
+    for (const auto fault : {Fault::MISSING, Fault::MALFORMED,
+                             Fault::WRONG_IDENTITY}) {
+        const auto& base_hash{chain.At(base_height)->GetBlockHash()};
+        manager.m_evoDb->EraseCache(base_hash);
+        if (fault == Fault::MALFORMED) {
+            BOOST_REQUIRE(manager.m_evoDb->FlushCacheToDisk());
+            BOOST_REQUIRE(manager.m_evoDb->Write(base_hash, uint8_t{0}));
+        } else if (fault == Fault::WRONG_IDENTITY) {
+            auto wrong_snapshot{base_list};
+            wrong_snapshot.SetBlockHash(
+                chain.At(final_legacy_height)->GetBlockHash());
+            manager.m_evoDb->WriteCache(base_hash, wrong_snapshot);
+        }
+
+        // Both entry points must preserve a local quorum-state failure. The
+        // separately available parent is sufficient to select the payee.
+        BlockValidationState failed_build;
+        BOOST_CHECK(!manager.BuildNewListFromBlock(
+            empty_block, chain.At(final_legacy_height - 1), failed_build,
+            view, next_list, old_list, commitment));
+        BOOST_CHECK(failed_build.IsError());
+        BOOST_CHECK(!failed_build.IsInvalid());
+        BOOST_CHECK_EQUAL(failed_build.GetRejectReason(),
+                          "failed-qc-quorum-state");
+        BlockValidationState failed_process;
+        CDeterministicMNListNEVMAddressDiff diff;
+        BOOST_CHECK(!manager.ProcessBlock(
+            empty_block, chain.At(final_legacy_height), failed_process,
+            view, commitment, diff, /*fJustCheck=*/true, /*ibd=*/true));
+        BOOST_CHECK(failed_process.IsError());
+        BOOST_CHECK(!failed_process.IsInvalid());
+        BOOST_CHECK_EQUAL(failed_process.GetRejectReason(),
+                          "failed-qc-quorum-state");
+
+        manager.m_evoDb->WriteCache(base_hash, base_list);
+        BlockValidationState retry_build;
+        BOOST_REQUIRE(manager.BuildNewListFromBlock(
+            empty_block, chain.At(final_legacy_height - 1), retry_build,
+            view, next_list, old_list, commitment));
+        BOOST_CHECK(::SerializeHash(next_list) == replayed_list_hash);
+        BOOST_CHECK(::SerializeHash(old_list) == ::SerializeHash(parent_list));
+        const auto recovered{next_list.GetMN(roster[invalid_member]->proTxHash)};
+        BOOST_REQUIRE(recovered);
+        BOOST_CHECK_EQUAL(recovered->pdmnState->nPoSePenalty,
+                          next_list.CalcPenalty(66));
+        BlockValidationState retry_process;
+        BOOST_REQUIRE(manager.ProcessBlock(
+            empty_block, chain.At(final_legacy_height), retry_process,
+            view, commitment, diff, /*fJustCheck=*/true, /*ibd=*/true));
+    }
+
+    // An inner null commitment retains its hash, height, and size checks but
+    // has no roster dependency, and must continue ordinary DMN processing.
+    manager.m_evoDb->EraseCache(chain.At(base_height)->GetBlockHash());
+    CDeterministicMNCPtr payee;
+    BOOST_REQUIRE(manager.GetMNPayeeForBlock(
+        chain.At(final_legacy_height - 1), payee));
+    BOOST_REQUIRE(payee);
+    const auto spent_member{source_members[0]->proTxHash == payee->proTxHash
+                                ? source_members[1] : source_members[0]};
+    CProUpServTx service;
+    service.nVersion = CProUpServTx::BASIC_BLS_VERSION;
+    service.proTxHash = payee->proTxHash;
+    service.scriptOperatorPayout = CScript{} << OP_TRUE;
+    CMutableTransaction service_transaction;
+    service_transaction.nVersion = SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE;
+    SetTxPayload(service_transaction, service);
+    CMutableTransaction collateral_spend;
+    collateral_spend.vin.emplace_back(spent_member->collateralOutpoint);
+    const auto transition_block{MakeProviderMutationBlock({
+        MakeTransactionRef(std::move(service_transaction)),
+        MakeTransactionRef(std::move(collateral_spend))})};
+
+    const llmq::CFinalCommitmentTxPayload absent;
+    BOOST_CHECK(absent.IsNull());
+    BlockValidationState absent_state;
+    CDeterministicMNList absent_list;
+    BOOST_REQUIRE(manager.BuildNewListFromBlock(
+        transition_block, chain.At(final_legacy_height - 1), absent_state,
+        view, absent_list, old_list, absent));
+    llmq::CFinalCommitmentTxPayload null_payload;
+    null_payload.nHeight = final_legacy_height;
+    null_payload.commitment = llmq::CFinalCommitment{
+        chain.At(base_height)->GetBlockHash()};
+    null_payload.commitment.nVersion = std::numeric_limits<uint16_t>::max();
+    BOOST_CHECK(!null_payload.IsNull());
+    BOOST_CHECK(null_payload.commitment.IsNull());
+    BlockValidationState null_state;
+    BOOST_REQUIRE(manager.BuildNewListFromBlock(
+        transition_block, chain.At(final_legacy_height - 1), null_state,
+        view, next_list, old_list, null_payload));
+    BOOST_CHECK(::SerializeHash(next_list) == ::SerializeHash(absent_list));
+    BOOST_CHECK(!next_list.HasMN(spent_member->proTxHash));
+    const auto updated_payee{next_list.GetMN(payee->proTxHash)};
+    BOOST_REQUIRE(updated_payee);
+    BOOST_CHECK(updated_payee->pdmnState->scriptOperatorPayout ==
+                service.scriptOperatorPayout);
+    BOOST_CHECK_EQUAL(updated_payee->pdmnState->nLastPaidHeight,
+                      final_legacy_height);
+
+    const auto check_null_invalid = [&](const llmq::CFinalCommitmentTxPayload& payload,
+                                        const char* reason) {
+        BlockValidationState rejected;
+        BOOST_CHECK(!manager.BuildNewListFromBlock(
+            transition_block, chain.At(final_legacy_height - 1), rejected,
+            view, next_list, old_list, payload));
+        BOOST_CHECK(rejected.IsInvalid());
+        BOOST_CHECK(!rejected.IsError());
+        BOOST_CHECK_EQUAL(rejected.GetRejectReason(), reason);
+    };
+    auto wrong_height{null_payload};
+    ++wrong_height.nHeight;
+    check_null_invalid(wrong_height, "bad-qc-cbtx-height");
+    auto wrong_hash{null_payload};
+    wrong_hash.commitment.quorumHash =
+        chain.At(final_legacy_height)->GetBlockHash();
+    check_null_invalid(wrong_hash, "bad-qc-quorum-hash");
+    for (const bool truncate_signers : {false, true}) {
+        auto wrong_size{null_payload};
+        (truncate_signers ? wrong_size.commitment.signers
+                          : wrong_size.commitment.validMembers).pop_back();
+        check_null_invalid(wrong_size, "bad-qc-structure");
+    }
 
     BOOST_CHECK(Consensus::CheckPQLegacyReplay(
                     consensus, final_legacy_height + 1) ==

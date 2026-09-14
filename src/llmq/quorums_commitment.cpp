@@ -73,6 +73,9 @@ bool CFinalCommitment::Verify(const CBlockIndex* quorum_base,
     if (quorum_base == nullptr || quorumHash != quorum_base->GetBlockHash()) {
         return false;
     }
+    // Null commitments need only their branch hash and fixed bitset sizes;
+    // their historical semantics do not depend on a reconstructed roster.
+    if (IsNull()) return !quorumHash.IsNull() && VerifyNull();
     const auto& params{Params().GetConsensus().legacyQuorumReplay};
     const auto members{CLLMQUtils::GetAllQuorumMembers(quorum_base)};
     return IsStructurallyValid(

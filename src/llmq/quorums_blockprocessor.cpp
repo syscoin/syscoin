@@ -9,8 +9,11 @@
 #include <consensus/pq_migration_config.h>
 #include <consensus/validation.h>
 #include <evo/specialtx.h>
+#include <logging.h>
 #include <primitives/block.h>
 #include <validation.h>
+
+#include <stdexcept>
 
 namespace llmq {
 
@@ -62,7 +65,18 @@ bool CQuorumBlockProcessor::ProcessBlock(
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
                              "bad-qc-block-mismatch");
     }
-    if (!commitment.commitment.Verify(quorum_base, false)) {
+    bool valid_structure;
+    try {
+        valid_structure = commitment.commitment.Verify(quorum_base, false);
+    } catch (const std::runtime_error& e) {
+        // The verifier's roster acquisition can fail on unavailable local
+        // state. Do not let special-tx handling cache the block as invalid.
+        LogPrintf("%s -- failed to load legacy quorum state at height=%d "
+                  "block=%s: %s\n", __func__, quorum_base->nHeight,
+                  quorum_base->GetBlockHash().ToString(), e.what());
+        return state.Error("failed-qc-quorum-state");
+    }
+    if (!valid_structure) {
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
                              "bad-qc-structure");
     }

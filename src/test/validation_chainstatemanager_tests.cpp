@@ -20,6 +20,7 @@
 #include <llmq/pq_chainlock_persistence.h> // SYSCOIN: pre-import durable finality.
 #include <llmq/pq_chainlock_schedule.h> // SYSCOIN: payment-audit preseal coverage.
 #include <llmq/pq_payment_audit_staging_store.h> // SYSCOIN: durable audit reconstruction controls.
+#include <llmq/quorums_commitment.h> // SYSCOIN: historical quorum replay activation.
 #include <llmq/quorums_chainlocks.h> // SYSCOIN: retained probation roots.
 #include <llmq/quorums_init.h> // SYSCOIN: recreate pre-import finality handler.
 #include <masternode/activemasternode.h>
@@ -933,6 +934,13 @@ struct CandidateSelectionSetup : TestChain100Setup {
     CBlockIndex* selected_index{nullptr};
     CBlockIndex* sibling_index{nullptr};
 
+    explicit CandidateSelectionSetup(bool coins_db_in_memory = true,
+                                     bool block_tree_db_in_memory = true)
+        : TestChain100Setup{ChainType::REGTEST, {}, 100,
+                           coins_db_in_memory, block_tree_db_in_memory}
+    {
+    }
+
     ~CandidateSelectionSetup() { m_node.kernel->interrupt.reset(); }
 
     void Store(const std::shared_ptr<const CBlock>& block, CBlockIndex*& index)
@@ -1040,6 +1048,14 @@ struct CandidateSelectionSetup : TestChain100Setup {
                 std::make_pair(uint8_t{'b'}, index->GetBlockHash()), persisted));
             BOOST_CHECK_EQUAL(persisted.nStatus & BLOCK_FAILED_MASK, index->nStatus & BLOCK_FAILED_MASK);
         }
+    }
+};
+
+struct LegacyQuorumSnapshotActivationSetup : CandidateSelectionSetup {
+    LegacyQuorumSnapshotActivationSetup()
+        : CandidateSelectionSetup{/*coins_db_in_memory=*/false,
+                                  /*block_tree_db_in_memory=*/false}
+    {
     }
 };
 
@@ -10235,6 +10251,175 @@ BOOST_FIXTURE_TEST_CASE(activation_operational_error_does_not_select_known_sibli
     BOOST_CHECK_EQUAL(nevm->connected_blocks.size(), 3U);
     BOOST_CHECK(nevm->applied_hash == candidate->GetHash());
     BOOST_CHECK(WITH_LOCK(::cs_main, return chainman.ActiveTip()) == candidate_index);
+}
+
+BOOST_FIXTURE_TEST_CASE(activation_legacy_quorum_snapshot_failure_preserves_candidate,
+                        LegacyQuorumSnapshotActivationSetup)
+{
+    auto& chainman{*m_node.chainman};
+    auto& chainstate{chainman.ActiveChainstate()};
+    auto& consensus{const_cast<Consensus::Params&>(chainman.GetConsensus())};
+    struct RestoreConsensus {
+        Consensus::Params& consensus;
+        const int dip3{consensus.DIP0003Height};
+        const int nexus{consensus.nNexusStartBlock};
+        ~RestoreConsensus()
+        {
+            consensus.DIP0003Height = dip3;
+            consensus.nNexusStartBlock = nexus;
+        }
+    } restore{consensus};
+
+    parent_index = WITH_LOCK(::cs_main, return chainman.ActiveTip());
+    BOOST_REQUIRE(parent_index != nullptr);
+    const int height{parent_index->nHeight + 1};
+    BOOST_REQUIRE_EQUAL(height, 101);
+    BOOST_REQUIRE_EQUAL(consensus.legacyQuorumReplay.session_interval, 24);
+    BOOST_REQUIRE_EQUAL(consensus.legacyQuorumReplay.size, 3);
+    BOOST_REQUIRE_LT(height, consensus.nPQActivationHeight);
+    BOOST_REQUIRE_LT(height, consensus.nPQPreparationHeight);
+    BOOST_REQUIRE_LT(height, consensus.nNEVMStartBlock);
+    const CBlockIndex* quorum_base{parent_index->GetAncestor(96)};
+    BOOST_REQUIRE(quorum_base != nullptr);
+    CBlock block{CreateBlock({}, CScript{} << OP_TRUE, chainstate)};
+    consensus.DIP0003Height = quorum_base->nHeight;
+    consensus.nNexusStartBlock = height;
+
+    // These exact snapshots isolate local replay availability. They do not
+    // model the provider lifecycle between the quorum base and its parent;
+    // the empty parent also makes the healthy block require no MN payee.
+    auto& snapshots{*deterministicMNManager->m_evoDb};
+    snapshots.WriteCache(quorum_base->GetBlockHash(),
+        CDeterministicMNList{quorum_base->GetBlockHash(), quorum_base->nHeight, 0});
+    {
+        LOCK(::cs_main);
+        CCoinsViewCache replay_view{&chainstate.CoinsTip()};
+        const llmq::CFinalCommitmentTxPayload no_commitment;
+        // The bootstrap preceded DIP3. Reconstruct its empty parent journal
+        // so the eventual successful connection uses ordinary persistence.
+        for (int replay_height{quorum_base->nHeight + 1};
+             replay_height <= parent_index->nHeight; ++replay_height) {
+            const auto* index{parent_index->GetAncestor(replay_height)};
+            CBlock stored;
+            BOOST_REQUIRE(chainman.m_blockman.ReadBlockFromDisk(stored, *index, false));
+            BlockValidationState replay_state;
+            CDeterministicMNListNEVMAddressDiff replay_diff;
+            BOOST_REQUIRE_MESSAGE(deterministicMNManager->ProcessBlock(
+                stored, index, replay_state, replay_view, no_commitment,
+                replay_diff, /*fJustCheck=*/false, /*ibd=*/true),
+                replay_state.ToString());
+        }
+    }
+    CDeterministicMNList quorum_list{quorum_base->GetBlockHash(),
+                                   quorum_base->nHeight, 3};
+    for (uint8_t i{0}; i < 3; ++i) {
+        auto member{std::make_shared<CDeterministicMN>(i)};
+        member->proTxHash = GetRandHash();
+        member->collateralOutpoint = COutPoint{GetRandHash(), 0};
+        auto member_state{std::make_shared<CDeterministicMNState>()};
+        member_state->nVersion = CProRegTx::LEGACY_BLS_VERSION;
+        member_state->keyIDOwner.begin()[0] = i + 1;
+        std::array<uint8_t, CLegacyBLSPublicKey::SERIALIZED_SIZE> operator_key;
+        operator_key.fill(i + 1);
+        BOOST_REQUIRE(member_state->pubKeyOperator.SetBytes(operator_key));
+        member_state->UpdateConfirmedHash(member->proTxHash,
+                                         quorum_base->GetBlockHash());
+        member->pdmnState = std::move(member_state);
+        quorum_list.AddMN(member, /*fBumpTotalCount=*/false);
+    }
+    BOOST_REQUIRE_EQUAL(quorum_list.CalculateQuorum(
+        3, quorum_base->GetBlockHash()).size(), 3U);
+    snapshots.WriteCache(quorum_base->GetBlockHash(), quorum_list);
+    {
+        LOCK(::cs_main);
+        // Initialize the ordinary snapshot window before introducing the
+        // outage; this does not call the global quorum-member verifier.
+        BlockValidationState baseline;
+        BOOST_REQUIRE_MESSAGE(chainstate.FlushStateToDisk(
+            baseline, FlushStateMode::ALWAYS), baseline.ToString());
+    }
+    snapshots.EraseCache(quorum_base->GetBlockHash());
+    BOOST_REQUIRE(!snapshots.ExistsCache(quorum_base->GetBlockHash()));
+
+    llmq::CFinalCommitmentTxPayload payload;
+    payload.nHeight = height;
+    auto& commitment{payload.commitment};
+    commitment = llmq::CFinalCommitment{quorum_base->GetBlockHash()};
+    commitment.nVersion = llmq::CFinalCommitment::GetVersion(
+        quorum_base->nHeight >= consensus.nV19StartBlock);
+    commitment.signers.assign(3, true);
+    commitment.validMembers.assign(3, true);
+    std::array<uint8_t, CLegacyBLSPublicKey::SERIALIZED_SIZE> public_key;
+    public_key.fill(7);
+    BOOST_REQUIRE(commitment.quorumPublicKey.SetBytes(public_key));
+    commitment.quorumVvecHash = GetRandHash();
+    std::array<uint8_t, CLegacyBLSSignature::SERIALIZED_SIZE> signature;
+    signature.fill(8);
+    BOOST_REQUIRE(commitment.quorumSig.SetBytes(signature));
+    BOOST_REQUIRE(commitment.membersSig.SetBytes(signature));
+    CMutableTransaction coinbase{*block.vtx.front()};
+    coinbase.nVersion = SYSCOIN_TX_VERSION_MN_QUORUM_COMMITMENT;
+    block.vtx.front() = MakeTransactionRef(std::move(coinbase));
+    CDataStream serialized_payload{SER_NETWORK, PROTOCOL_VERSION};
+    serialized_payload << payload;
+    const auto payload_bytes{MakeUCharSpan(serialized_payload)};
+    node::RegenerateCommitments(block, chainman,
+        std::vector<unsigned char>{payload_bytes.begin(), payload_bytes.end()});
+    llmq::CFinalCommitmentTxPayload decoded;
+    BOOST_REQUIRE(GetTxPayload(*block.vtx.front(), decoded));
+    BOOST_REQUIRE_EQUAL(decoded.nHeight, height);
+    BOOST_REQUIRE(decoded.commitment.quorumHash == quorum_base->GetBlockHash());
+    Solve(block);
+    candidate = std::make_shared<const CBlock>(std::move(block));
+    Store(candidate, candidate_index);
+
+    // Do not call Verify/TestBlockValidity before this first activation:
+    // a successful verifier read would warm the process-wide member cache.
+    BlockValidationState failed;
+    BOOST_CHECK(!chainstate.ActivateBestChain(failed, candidate));
+    BOOST_CHECK(failed.IsError());
+    BOOST_CHECK(!failed.IsInvalid());
+    BOOST_CHECK_EQUAL(failed.GetRejectReason(), "failed-qc-quorum-state");
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK(chainman.ActiveTip() == parent_index);
+        BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == parent_index->GetBlockHash());
+        BOOST_CHECK_EQUAL(candidate_index->nStatus & BLOCK_FAILED_MASK, 0U);
+        BOOST_CHECK_EQUAL(chainman.m_failed_blocks.count(candidate_index), 0U);
+        BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(candidate_index), 1U);
+        BOOST_CHECK(chainstate.IsCurrentMostWorkBranch(*candidate_index));
+        BOOST_CHECK(!chainstate.CoinsTip().HaveCoin(
+            COutPoint{candidate->vtx.front()->GetHash(), 0}));
+        BlockValidationState flushed;
+        BOOST_REQUIRE_MESSAGE(chainstate.FlushStateToDisk(
+            flushed, FlushStateMode::ALWAYS), flushed.ToString());
+        CDiskBlockIndex persisted;
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->Read(
+            std::make_pair(uint8_t{'b'}, candidate->GetHash()), persisted));
+        BOOST_CHECK_EQUAL(persisted.nStatus & BLOCK_FAILED_MASK, 0U);
+        BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == parent_index->GetBlockHash());
+    }
+
+    snapshots.WriteCache(quorum_base->GetBlockHash(), quorum_list);
+    {
+        LOCK(::cs_main);
+        BlockValidationState healthy;
+        BOOST_REQUIRE_MESSAGE(TestBlockValidity(
+            healthy, chainman.GetParams(), chainstate, *candidate,
+            parent_index, chainman.m_options.adjusted_time_callback),
+            healthy.ToString());
+    }
+    BlockValidationState retry;
+    BOOST_REQUIRE_MESSAGE(chainstate.ActivateBestChain(retry, candidate), retry.ToString());
+    BOOST_CHECK(retry.IsValid());
+    LOCK(::cs_main);
+    BOOST_CHECK(chainman.ActiveTip() == candidate_index);
+    BOOST_CHECK(chainman.m_blockman.LookupBlockIndex(candidate->GetHash()) == candidate_index);
+    BOOST_CHECK(candidate_index->IsValid(BLOCK_VALID_SCRIPTS));
+    BOOST_CHECK_EQUAL(candidate_index->nStatus & BLOCK_FAILED_MASK, 0U);
+    BOOST_CHECK_EQUAL(chainman.m_failed_blocks.count(candidate_index), 0U);
+    BOOST_CHECK(chainstate.CoinsTip().HaveCoin(
+        COutPoint{candidate->vtx.front()->GetHash(), 0}));
 }
 
 // SYSCOIN END: Continue selection after cacheable candidate rejection.
