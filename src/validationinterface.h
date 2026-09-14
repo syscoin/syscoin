@@ -193,6 +193,10 @@ protected:
     virtual void NotifyHeaderTip(const CBlockIndex *pindexNew) {}
     virtual void NotifyGovernanceVote(const uint256& vote) {}
     virtual void NotifyGovernanceObject(const uint256 &object) {}
+    // Publication-only subscribers share the ordered block/transaction queue.
+    // Admission observers above retain their synchronous semantics.
+    virtual void NotifyGovernanceVoteAsync(const uint256& vote) {}
+    virtual void NotifyGovernanceObjectAsync(const uint256& object) {}
     virtual void NotifyMasternodeListChanged(bool undo, const CDeterministicMNList& oldMNList, const CDeterministicMNListDiff& diff) {}
     virtual void NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation, const uint256& btcPrevHashForNEVM, const CDeterministicMNListNEVMAddressDiff &diff, std::optional<NEVMBlockReject>* rejection = nullptr) {}
     virtual void NotifyNEVMPayloadCheck(const CNEVMHeader& evmBlock, const CBlock& block, const uint256& syscoin_hash, bool& valid, std::string& error, std::optional<NEVMBlockReject>* rejection = nullptr) {}

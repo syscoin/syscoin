@@ -294,9 +294,17 @@ void CMainSignals::NotifyHeaderTip(const CBlockIndex *pindexNew) {
 }
 void CMainSignals::NotifyGovernanceVote(const uint256& vote) {
     m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.NotifyGovernanceVote(vote); });
+    auto event = [vote, this] {
+        m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.NotifyGovernanceVoteAsync(vote); });
+    };
+    ENQUEUE_AND_LOG_EVENT(event, "%s: vote hash=%s", __func__, vote.ToString());
 }
 void CMainSignals::NotifyGovernanceObject(const uint256& object) {
     m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.NotifyGovernanceObject(object); });
+    auto event = [object, this] {
+        m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.NotifyGovernanceObjectAsync(object); });
+    };
+    ENQUEUE_AND_LOG_EVENT(event, "%s: object hash=%s", __func__, object.ToString());
 }
 void CMainSignals::NotifyMasternodeListChanged(bool undo, const CDeterministicMNList& oldMNList, const CDeterministicMNListDiff& diff) {
     m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.NotifyMasternodeListChanged(undo, oldMNList, diff); });

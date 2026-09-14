@@ -299,6 +299,8 @@ test_pq_chainlock_fixture_LDFLAGS = $(syscoin_bin_ldflags)
 test_pq_chainlock_fixture_LDADD = $(syscoin_bin_ldadd)
 
 if ENABLE_ZMQ
+test_test_syscoin_SOURCES += test/zmq_tests.cpp
+test_test_syscoin_CPPFLAGS += $(ZMQ_CFLAGS)
 test_test_syscoin_LDADD += $(LIBSYSCOIN_ZMQ) $(ZMQ_LIBS)
 FUZZ_SUITE_LD_COMMON += $(LIBSYSCOIN_ZMQ) $(ZMQ_LIBS)
 endif

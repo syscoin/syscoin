@@ -7,6 +7,7 @@
 
 #include <nevm/response.h>
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -27,11 +28,19 @@ using CZMQNotifierFactory = std::function<std::unique_ptr<CZMQAbstractNotifier>(
 
 class CZMQAbstractNotifier
 {
+private:
+    std::atomic<bool> m_active{true};
+
 public:
     static const int DEFAULT_ZMQ_SNDHWM {1000};
 
     CZMQAbstractNotifier() : outbound_message_high_water_mark(DEFAULT_ZMQ_SNDHWM) {}
     virtual ~CZMQAbstractNotifier();
+
+    bool IsActive() const { return m_active.load(std::memory_order_relaxed); }
+    // Retire on the publication queue, retaining the object for synchronous
+    // request traversal and metadata readers until interface destruction.
+    void Deactivate() { m_active.store(false, std::memory_order_relaxed); }
 
     template <typename T>
     static std::unique_ptr<CZMQAbstractNotifier> Create()
