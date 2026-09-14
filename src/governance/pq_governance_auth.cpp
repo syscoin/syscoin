@@ -11,6 +11,7 @@
 #include <evo/pq_registry.h>
 #include <governance/governancecommon.h>
 
+#include <stdexcept>
 #include <utility>
 
 static_assert(llmq::pq::GovernanceAuthorization::WIRE_SIZE <=
@@ -190,8 +191,14 @@ bool GetCurrentGovernanceSigningKey(const CBlockIndex& signing_tip,
     }
 
     PQRegistryReadView snapshot;
-    if (!deterministicMNManager->GetPQRegistryReadView(
-            &signing_tip, snapshot, error)) {
+    bool available{false};
+    try {
+        available = deterministicMNManager->GetPQRegistryReadView(
+            &signing_tip, snapshot, error);
+    } catch (const std::runtime_error& e) {
+        error = e.what();
+    }
+    if (!available) {
         error = "unable to reconstruct current governance signing registry: " +
                 error;
         return false;

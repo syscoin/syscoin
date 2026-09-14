@@ -17,8 +17,10 @@
 #include <governance/governancevalidators.h>
 #include <key_io.h>
 #include <llmq/quorums_commitment.h>
+#include <masternode/activemasternode.h>
 #include <masternode/masternodepayments.h>
 #include <masternode/masternodesync.h>
+#include <masternode/pq_operatorkeys.h>
 #include <net.h> // SYSCOIN: bounded governance transport fixtures.
 #include <net_processing.h> // SYSCOIN: governance peer-state fixtures.
 #include <primitives/block.h>
@@ -466,6 +468,26 @@ public:
     {
         LOCK(manager.cs);
         manager.votedFundingYesTriggerHash = std::move(trigger_hash);
+    }
+
+    static void VoteTriggers(CGovernanceManager& manager,
+                             const CGovernanceObject& trigger,
+                             CConnman& connman, PeerManager& peerman)
+    {
+        manager.VoteGovernanceTriggers(trigger, connman, peerman);
+    }
+
+    static std::optional<uint256> VotedFundingYesTrigger(CGovernanceManager& manager)
+    {
+        LOCK(manager.cs);
+        return manager.votedFundingYesTriggerHash;
+    }
+
+    static std::optional<const CGovernanceObject> CreateTrigger(
+        CGovernanceManager& manager, const CSuperblock& candidate,
+        const CBlockIndex& tip, PeerManager& peerman)
+    {
+        return manager.CreateGovernanceTrigger(candidate, &tip, peerman);
     }
 
     static std::vector<uint256> NoFundingTriggerHashes(
@@ -4487,7 +4509,8 @@ BOOST_FIXTURE_TEST_CASE(governance_activation_blocks_unchanged_authority_reuse,
 // template controls without bypassing the production governance rebuild.
 static void CheckGovernanceFutureVotes(TestChain100Setup& fixture,
                                       bool check_templates,
-                                      bool check_read_errors = false)
+                                      bool check_read_errors = false,
+                                      bool check_signing_read_errors = false)
 {
     using Access = governance_tests::CGovernanceManagerTestAccess;
     using namespace llmq::pq;
@@ -4498,9 +4521,9 @@ static void CheckGovernanceFutureVotes(TestChain100Setup& fixture,
     constexpr int preparation_height{1295};
     // Templates need a real payment epoch as well as post-activation signing
     // heights. The original vote-height profile remains before epoch zero.
-    const int creator_height{check_templates ? 1446 : 1296};
-    const int vote_height{check_templates ? 1448 : 1298};
-    const int final_height{check_templates ? 1449 : 1299};
+    const int creator_height{check_templates || check_signing_read_errors ? 1446 : 1296};
+    const int vote_height{check_templates || check_signing_read_errors ? 1448 : 1298};
+    const int final_height{check_signing_read_errors ? 1452 : check_templates ? 1449 : 1299};
     std::vector<uint256> hashes(final_height + 1);
     std::vector<CBlockIndex> indices(final_height + 1);
     for (int height{0}; height <= final_height; ++height) {
@@ -4549,13 +4572,25 @@ static void CheckGovernanceFutureVotes(TestChain100Setup& fixture,
 
     const uint256 pro_tx_hash{uint256{161}};
     const COutPoint collateral{uint256{162}, 0};
+    std::shared_ptr<LocalOperatorKeyManager> signing_keys;
+    if (check_signing_read_errors) {
+        slhdsa::KeyGenerationSeed key_seed{};
+        key_seed[0] = 0x75;
+        auto global_key{slhdsa::GenerateSecretKey(key_seed)};
+        BOOST_REQUIRE(global_key);
+        ChainLockMasterSeed master_seed{};
+        master_seed[0] = 0x76;
+        signing_keys = std::make_shared<LocalOperatorKeyManager>(
+            std::move(*global_key), std::move(master_seed));
+        BOOST_REQUIRE(signing_keys->IsValid());
+    }
     auto member{std::make_shared<CDeterministicMN>(1)};
     member->proTxHash = pro_tx_hash;
     member->collateralOutpoint = collateral;
     auto member_state{std::make_shared<CDeterministicMNState>()};
     member_state->keyIDOwner = fixture.coinbaseKey.GetPubKey().GetID();
     member_state->keyIDVoting = fixture.coinbaseKey.GetPubKey().GetID();
-    if (check_templates) {
+    if (check_templates || check_signing_read_errors) {
         member_state->scriptPayout = GetScriptForDestination(
             WitnessV0KeyHash(fixture.coinbaseKey.GetPubKey()));
     }
@@ -4577,6 +4612,9 @@ static void CheckGovernanceFutureVotes(TestChain100Setup& fixture,
     operator_state.global_key_active = 1;
     operator_state.global_key.key_version = 1;
     operator_state.global_key.public_key[0] = 1;
+    if (signing_keys) {
+        operator_state.global_key.public_key = signing_keys->GetGlobalPublicKey();
+    }
     operator_state.global_key.activated_height = preparation_height;
     operator_state.global_key.child_key_commitment.generation = 1;
     operator_state.global_key.child_key_commitment.first_epoch = 0;
@@ -4750,6 +4788,251 @@ static void CheckGovernanceFutureVotes(TestChain100Setup& fixture,
 
     revalidate_at(indices[final_height]);
     check_vote(&vote);
+    if (check_signing_read_errors) {
+        BOOST_REQUIRE(fixture.m_node.connman);
+        BOOST_REQUIRE(fixture.m_node.peerman);
+        auto& connman{*fixture.m_node.connman};
+        auto& peerman{*fixture.m_node.peerman};
+        const CBlockIndex& signing_tip{indices[final_height - 6]};
+        BOOST_REQUIRE_EQUAL(signing_tip.nHeight, creator_height);
+        struct RestoreActiveIdentity {
+            bool original_mode;
+            CActiveMasternodeInfo original;
+            ~RestoreActiveIdentity()
+            {
+                LOCK(activeMasternodeInfoCs);
+                const auto next_generation{activeMasternodeInfo.identityGeneration + 1};
+                activeMasternodeInfo = std::move(original);
+                activeMasternodeInfo.identityGeneration = next_generation;
+                fMasternodeMode = original_mode;
+            }
+        } restore_identity{fMasternodeMode, WITH_LOCK(activeMasternodeInfoCs,
+            return std::move(activeMasternodeInfo))};
+        {
+            LOCK(activeMasternodeInfoCs);
+            activeMasternodeInfo = {};
+            activeMasternodeInfo.operatorKeyManager = signing_keys;
+            activeMasternodeInfo.proTxHash = pro_tx_hash;
+            activeMasternodeInfo.globalKeyVersion = 1;
+            activeMasternodeInfo.outpoint = collateral;
+            activeMasternodeInfo.identityGeneration =
+                restore_identity.original.identityGeneration + 1;
+            fMasternodeMode = true;
+        }
+        const auto identity_generation{WITH_LOCK(activeMasternodeInfoCs,
+            return activeMasternodeInfo.identityGeneration)};
+        const auto ready_epoch{Access::ValidationContextEpoch(*governance)};
+        BOOST_REQUIRE(ready_epoch);
+        const auto check_current_authority = [&] {
+            BOOST_CHECK(governance->IsReadyForTip(&indices[final_height]));
+            BOOST_CHECK(Access::ValidationContextEpoch(*governance) == ready_epoch);
+            uint256 identity;
+            uint32_t version{0};
+            GlobalPublicKey public_key{};
+            CService service;
+            BOOST_REQUIRE(GetActiveMasternodeIdentity(
+                identity, version, public_key, service));
+            BOOST_CHECK(identity == pro_tx_hash);
+            BOOST_CHECK_EQUAL(version, 1U);
+            BOOST_CHECK(public_key == signing_keys->GetGlobalPublicKey());
+            LOCK(activeMasternodeInfoCs);
+            BOOST_CHECK_EQUAL(activeMasternodeInfo.identityGeneration,
+                              identity_generation);
+        };
+        const auto fail_registry = [&] {
+            llmq::pq::test::PQRegistryReadErrorTestAccess::FailNextRead(
+                *deterministicMNManager);
+        };
+        const auto fail_dmn = [&] {
+            deterministicMNManager->m_evoDb->EraseCache(uint256{});
+            deterministicMNManager->m_evoDb->FailNextFlushBatchForTesting();
+        };
+        const std::size_t original_objects{Access::ObjectCount(*governance)};
+        const auto check_retained = [&] {
+            BOOST_CHECK(governance->HaveObjectForHash(trigger_hash));
+            BOOST_CHECK(Access::ObjectHasVote(*governance, trigger_hash, vote.GetHash()));
+            const auto retained{Access::RetainedVote(
+                *governance, trigger_hash, vote.GetHash())};
+            BOOST_REQUIRE(retained);
+            BOOST_CHECK(retained->HasSameWireEncoding(vote));
+            check_current_authority();
+        };
+
+        // Readiness authenticates height 1452. Both fresh signing callers
+        // must independently refuse a local read failure at height 1446.
+        CGovernanceObject unsigned_trigger{
+            uint256{}, 1, GetTime<std::chrono::seconds>().count(), uint256{},
+            "7b2274797065223a317d"};
+        unsigned_trigger.SetMasternodeOutpoint(collateral);
+        fail_registry();
+        bool signed_object{true};
+        BOOST_CHECK_NO_THROW(signed_object = unsigned_trigger.SignPQ(
+            signing_tip, pro_tx_hash, 1));
+        BOOST_CHECK(!signed_object);
+        BOOST_CHECK(unsigned_trigger.Object().vchSig.empty());
+        CGovernanceVote unsigned_vote{
+            collateral, trigger_hash, VOTE_SIGNAL_FUNDING, VOTE_OUTCOME_NO};
+        fail_registry();
+        bool signed_vote{true};
+        BOOST_CHECK_NO_THROW(signed_vote = unsigned_vote.SignPQ(
+            signing_tip, pro_tx_hash, 1, GovernanceAuthPurpose::TRIGGER_VOTE));
+        BOOST_CHECK(!signed_vote);
+        BOOST_CHECK_EQUAL(unsigned_vote.GetSignatureSize(), 0U);
+        BOOST_CHECK_EQUAL(Access::ObjectCount(*governance), original_objects);
+        BOOST_CHECK_EQUAL(Access::PersistedVoteBytes(*governance), retained_bytes);
+        check_retained();
+
+        // Warm only current payment eligibility so the injected registry
+        // failure belongs to trigger signing, after automatic payee selection.
+        CDeterministicMNCPtr payee;
+        BOOST_REQUIRE(deterministicMNManager->GetMNPayeeForBlock(
+            &indices[final_height], payee));
+        BOOST_REQUIRE(payee);
+        BOOST_REQUIRE(payee->proTxHash == pro_tx_hash);
+        std::vector<CGovernancePayment> new_payments;
+        new_payments.emplace_back(
+            PKHash(fixture.coinbaseKey.GetPubKey()), COIN, uint256{167});
+        CSuperblock candidate{event_height, std::move(new_payments)};
+        fail_registry();
+        bool created{true};
+        {
+            ASSERT_DEBUG_LOG("failed to sign PQ trigger");
+            BOOST_CHECK_NO_THROW(created = Access::CreateTrigger(
+                *governance, candidate, indices[final_height], peerman).has_value());
+        }
+        BOOST_CHECK(!created);
+        BOOST_CHECK_EQUAL(Access::ObjectCount(*governance), original_objects);
+        BOOST_CHECK_EQUAL(Access::PersistedVoteBytes(*governance), retained_bytes);
+        check_retained();
+
+        // Reuse the admitted creator-envelope fixture for a new future
+        // trigger; only its fresh funding vote is signed and admitted below.
+        const uint256 candidate_hash{
+            insert_admitted_trigger(creator_height, uint256{168})};
+        governance->ObserveChainTip(nullptr);
+        revalidate_at(indices[final_height]);
+        const auto candidate_object{WITH_LOCK(governance->cs,
+            return *governance->FindConstGovernanceObject(candidate_hash))};
+        const auto signing_ready_epoch{Access::ValidationContextEpoch(*governance)};
+        const auto check_signing_failure = [&] {
+            BOOST_CHECK(!Access::VotedFundingYesTrigger(*governance));
+            BOOST_CHECK_EQUAL(governance->GetVoteCount(), 1);
+            BOOST_CHECK_EQUAL(Access::PersistedVoteBytes(*governance), retained_bytes);
+            BOOST_CHECK(governance->GetCurrentVotes(candidate_hash, collateral).empty());
+            BOOST_CHECK(governance->IsReadyForTip(&indices[final_height]));
+            BOOST_CHECK(Access::ValidationContextEpoch(*governance) == signing_ready_epoch);
+            BOOST_CHECK(Access::ObjectHasVote(*governance, trigger_hash, vote.GetHash()));
+            check_vote(&vote);
+            LOCK(activeMasternodeInfoCs);
+            BOOST_CHECK_EQUAL(activeMasternodeInfo.identityGeneration,
+                              identity_generation);
+        };
+        for (const bool registry_failure : {true, false}) {
+            BOOST_TEST_CONTEXT("historical registry failure=" << registry_failure) {
+                if (registry_failure) fail_registry();
+                else fail_dmn();
+                BOOST_CHECK_NO_THROW(Access::VoteTriggers(
+                    *governance, candidate_object, connman, peerman));
+                check_signing_failure();
+            }
+        }
+
+        // The real tip callback can still authenticate its current roster
+        // while the distinct historical roster is unavailable. It must reach
+        // the maintenance tail without admitting any automatic NO votes.
+        deterministicMNManager->m_evoDb->EraseCache(signing_tip.GetBlockHash());
+        {
+            ASSERT_DEBUG_LOG("UpdatedBlockTip -- nCachedBlockHeight:");
+            BOOST_CHECK_NO_THROW(governance->UpdatedBlockTip(
+                &indices[final_height], connman, peerman));
+        }
+        check_signing_failure();
+        seed_member(signing_tip);
+
+        // NotifyGovernanceVote is synchronous after vote-file admission.
+        // Arm the next read here to fail only relay's current-tip DMN read.
+        class RelayReadFailure final : public CValidationInterface {
+        public:
+            std::optional<uint256> admitted_vote;
+            void NotifyGovernanceVote(const uint256& hash) override
+            {
+                if (admitted_vote) return;
+                admitted_vote = hash;
+                deterministicMNManager->m_evoDb->EraseCache(uint256{});
+                deterministicMNManager->m_evoDb->FailNextFlushBatchForTesting();
+            }
+        } relay_failure;
+        struct UnregisterObserver {
+            CValidationInterface* observer;
+            ~UnregisterObserver() { UnregisterValidationInterface(observer); }
+        } unregister{&relay_failure};
+        RegisterValidationInterface(&relay_failure);
+        {
+            ASSERT_DEBUG_LOG("admitted but not relayed");
+            BOOST_CHECK_NO_THROW(Access::VoteTriggers(
+                *governance, candidate_object, connman, peerman));
+        }
+        BOOST_REQUIRE(relay_failure.admitted_vote);
+        BOOST_REQUIRE(Access::VotedFundingYesTrigger(*governance) == candidate_hash);
+        const auto admitted{Access::RetainedVote(
+            *governance, candidate_hash, *relay_failure.admitted_vote)};
+        BOOST_REQUIRE(admitted);
+        BOOST_CHECK(admitted->GetOutcome() == VOTE_OUTCOME_YES);
+        BOOST_CHECK_EQUAL(admitted->GetSignatureSize(), GovernanceAuthorization::WIRE_SIZE);
+        std::string authorization_error;
+        BOOST_CHECK(admitted->CheckPQSignature(
+            indices[final_height], deterministicMNManager->GetListForBlock(
+                &indices[final_height]), GovernanceAuthPurpose::TRIGGER_VOTE,
+            authorization_error));
+        BOOST_CHECK(governance->IsReadyForTip(&indices[final_height]));
+        BOOST_CHECK(Access::ValidationContextEpoch(*governance) == signing_ready_epoch);
+        {
+            // Successful automatic production also replaces the baseline's
+            // active YES with NO. Its admitted wire remains in stored history.
+            bool original_vote_retained{false};
+            LOCK(governance->cs);
+            const auto* original{governance->FindConstGovernanceObject(trigger_hash)};
+            BOOST_REQUIRE(original);
+            original->GetVoteFile().ForEachStoredVote([&](const CGovernanceVote& stored) {
+                if (stored.HasSameWireEncoding(vote)) original_vote_retained = true;
+                return !original_vote_retained;
+            });
+            BOOST_CHECK(original_vote_retained);
+        }
+        const auto votes_after_admission{governance->GetVoteCount()};
+        BOOST_CHECK_NO_THROW(governance->UpdatedBlockTip(
+            &indices[final_height], connman, peerman));
+        BOOST_CHECK(Access::VotedFundingYesTrigger(*governance) == candidate_hash);
+        BOOST_CHECK_EQUAL(governance->GetVoteCount(), votes_after_admission);
+        BOOST_CHECK(Access::ObjectHasVote(
+            *governance, candidate_hash, *relay_failure.admitted_vote));
+
+        // The shared RPC-facing operation still reports relay failure while
+        // exposing admission separately. A different signal avoids replacing
+        // the funding YES whose reservation is being protected above.
+        CGovernanceVote direct_vote{
+            collateral, candidate_hash, VOTE_SIGNAL_VALID, VOTE_OUTCOME_YES};
+        BOOST_REQUIRE(direct_vote.SignPQ(
+            signing_tip, pro_tx_hash, 1, GovernanceAuthPurpose::TRIGGER_VOTE));
+        const auto current_list{deterministicMNManager->GetListForBlock(
+            &indices[final_height])};
+        relay_failure.admitted_vote.reset();
+        bool vote_admitted{false};
+        bool relayed{true};
+        CGovernanceException relay_error;
+        BOOST_CHECK_NO_THROW(relayed = governance->ProcessVoteAndRelay(
+            direct_vote, current_list, relay_error, connman, peerman, &vote_admitted));
+        BOOST_CHECK(!relayed);
+        BOOST_CHECK(vote_admitted);
+        BOOST_CHECK(relay_error.GetType() == GOVERNANCE_EXCEPTION_TEMPORARY_ERROR);
+        BOOST_CHECK_EQUAL(relay_error.GetNodePenalty(), 0);
+        BOOST_CHECK(Access::ObjectHasVote(*governance, candidate_hash, direct_vote.GetHash()));
+        BOOST_CHECK(Access::VotedFundingYesTrigger(*governance) == candidate_hash);
+        BOOST_CHECK(!governance->ProcessVoteAndRelay(
+            direct_vote, current_list, relay_error, connman, peerman, &vote_admitted));
+        BOOST_CHECK(!vote_admitted);
+        return;
+    }
     if (check_read_errors) {
         enum class RevalidationEntry { READY_TIP, NEW_TIP, INIT_ON_LOAD };
         for (const bool registry_failure : {true, false}) {
@@ -5034,6 +5317,15 @@ BOOST_FIXTURE_TEST_CASE(
 {
     CheckGovernanceFutureVotes(*this, /*check_templates=*/false,
                               /*check_read_errors=*/true);
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    governance_historical_signing_read_errors_preserve_ready_identity_and_yes_admission,
+    TestChain100Setup)
+{
+    CheckGovernanceFutureVotes(*this, /*check_templates=*/false,
+                              /*check_read_errors=*/false,
+                              /*check_signing_read_errors=*/true);
 }
 
 BOOST_FIXTURE_TEST_CASE(

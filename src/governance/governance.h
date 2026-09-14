@@ -674,7 +674,8 @@ public:
 
     bool MasternodeRateCheck(const CGovernanceObject& govobj, bool fUpdateFailStatus, bool fForce, bool& fRateCheckBypassed);
 
-    bool ProcessVoteAndRelay(const CGovernanceVote& vote, const CDeterministicMNList& mnList, CGovernanceException& exception, CConnman& connman, PeerManager& peerman);
+    /** Relay result; vote_admitted remains true if admission preceded relay failure. */
+    bool ProcessVoteAndRelay(const CGovernanceVote& vote, const CDeterministicMNList& mnList, CGovernanceException& exception, CConnman& connman, PeerManager& peerman, bool* vote_admitted = nullptr);
 
     void CheckPostponedObjects(PeerManager& peerman);
 

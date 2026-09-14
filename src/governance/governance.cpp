@@ -2998,8 +2998,15 @@ bool CGovernanceManager::VoteFundingTrigger(const uint256& nHash, const vote_out
         }
         signing_tip = GetGovernanceSigningBlock(validation_tip);
         if (signing_tip == nullptr) return false;
-        signing_mn_list =
-            deterministicMNManager->GetListForBlock(signing_tip);
+        try {
+            signing_mn_list =
+                deterministicMNManager->GetListForBlock(signing_tip);
+        } catch (const std::runtime_error& e) {
+            LogPrint(BCLog::GOBJECT,
+                     "CGovernanceManager::%s unable to read governance signing masternode snapshot: %s\n",
+                     __func__, e.what());
+            return false;
+        }
         const auto local_dmn{
             signing_mn_list.GetMN(local_pro_tx_hash)};
         if (!local_dmn) return false;
@@ -3020,15 +3027,19 @@ bool CGovernanceManager::VoteFundingTrigger(const uint256& nHash, const vote_out
     }
 
     CGovernanceException exception;
+    bool vote_admitted{false};
     if (!ProcessVoteAndRelay(vote, signing_mn_list, exception, connman,
-                             peerman)) {
+                             peerman, &vote_admitted)) {
         LogPrint(BCLog::GOBJECT,
                  "CGovernanceManager::%s Vote FUNDING %d for trigger %s "
-                 "failed: %s\n",
-                 __func__, outcome, nHash.ToString(), exception.what());
-        return false;
+                 "%s: %s\n",
+                 __func__, outcome, nHash.ToString(),
+                 vote_admitted ? "admitted but not relayed" : "failed",
+                 exception.what());
     }
-    return true;
+    // The caller owns the sole-YES reservation. Once admitted, a vote must
+    // retain it even if a later tip change or local read prevents relay.
+    return vote_admitted;
 }
 
 bool CGovernanceManager::HasAlreadyVotedFundingTrigger() const
@@ -3149,8 +3160,9 @@ bool CGovernanceManager::MasternodeRateCheck(const CGovernanceObject& govobj, bo
     return false;
 }
 
-bool CGovernanceManager::ProcessVoteAndRelay(const CGovernanceVote& vote, const CDeterministicMNList&, CGovernanceException& exception, CConnman& connman, PeerManager& peerman)
+bool CGovernanceManager::ProcessVoteAndRelay(const CGovernanceVote& vote, const CDeterministicMNList&, CGovernanceException& exception, CConnman& connman, PeerManager& peerman, bool* vote_admitted)
 {
+    if (vote_admitted != nullptr) *vote_admitted = false;
     // SYSCOIN: trigger authorization may enter SLH verification below.
     AssertLockNotHeld(cs_main);
     AssertLockNotHeld(cs);
@@ -3158,6 +3170,7 @@ bool CGovernanceManager::ProcessVoteAndRelay(const CGovernanceVote& vote, const 
     if (!ProcessVote(/* pfrom = */ nullptr, vote, exception, connman)) {
         return false;
     }
+    if (vote_admitted != nullptr) *vote_admitted = true;
 
     LOCK2(chainman.GetMutex(), cs);
     const CBlockIndex* relay_tip{chainman.ActiveTip()};
@@ -3169,8 +3182,15 @@ bool CGovernanceManager::ProcessVoteAndRelay(const CGovernanceVote& vote, const 
         !relayed_object->GetVoteFile().HasVote(vote.GetHash())) {
         return false;
     }
-    const auto relay_mn_list{
-        deterministicMNManager->GetListForBlock(relay_tip)};
+    CDeterministicMNList relay_mn_list;
+    try {
+        relay_mn_list = deterministicMNManager->GetListForBlock(relay_tip);
+    } catch (const std::runtime_error& e) {
+        exception = CGovernanceException(
+            strprintf("CGovernanceManager::ProcessVoteAndRelay -- unable to read relay masternode snapshot: %s", e.what()),
+            GOVERNANCE_EXCEPTION_TEMPORARY_ERROR);
+        return false;
+    }
     vote.Relay(peerman, relay_mn_list);
     return true;
 }
