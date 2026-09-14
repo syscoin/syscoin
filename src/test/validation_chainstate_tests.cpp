@@ -32,7 +32,9 @@
 #include <spork.h> // SYSCOIN: signed payment-switch regression.
 #include <test/util/chainstate.h>
 #include <test/util/coins.h>
+#include <test/util/logging.h>
 #include <test/util/net.h>
+#include <test/util/pq_registry_read_error.h>
 #include <test/util/random.h>
 #include <test/util/setup_common.h>
 #include <uint256.h>
@@ -482,6 +484,16 @@ public:
         auto object{manager.mapObjects.find(object_hash)};
         return object != manager.mapObjects.end() &&
             object->second.GetVoteFile().HasVote(vote_hash);
+    }
+
+    static std::optional<CGovernanceVote> RetainedVote(
+        CGovernanceManager& manager, const uint256& object_hash,
+        const uint256& vote_hash)
+    {
+        LOCK(manager.cs);
+        const auto object{manager.mapObjects.find(object_hash)};
+        if (object == manager.mapObjects.end()) return std::nullopt;
+        return object->second.GetVoteFile().GetVote(vote_hash);
     }
 
     static bool InsertVoteForSerializationTest(
@@ -4474,7 +4486,8 @@ BOOST_FIXTURE_TEST_CASE(governance_activation_blocks_unchanged_authority_reuse,
 // SYSCOIN: Share authenticated disk snapshots between vote-height and fresh
 // template controls without bypassing the production governance rebuild.
 static void CheckGovernanceFutureVotes(TestChain100Setup& fixture,
-                                      bool check_templates)
+                                      bool check_templates,
+                                      bool check_read_errors = false)
 {
     using Access = governance_tests::CGovernanceManagerTestAccess;
     using namespace llmq::pq;
@@ -4737,6 +4750,85 @@ static void CheckGovernanceFutureVotes(TestChain100Setup& fixture,
 
     revalidate_at(indices[final_height]);
     check_vote(&vote);
+    if (check_read_errors) {
+        enum class RevalidationEntry { READY_TIP, NEW_TIP, INIT_ON_LOAD };
+        for (const bool registry_failure : {true, false}) {
+            for (const auto entry : {RevalidationEntry::READY_TIP,
+                                     RevalidationEntry::NEW_TIP,
+                                     RevalidationEntry::INIT_ON_LOAD}) {
+                BOOST_TEST_CONTEXT("registry_failure=" << registry_failure
+                                   << " entry=" << static_cast<int>(entry)) {
+                    revalidate_at(indices[vote_height]);
+                    if (entry != RevalidationEntry::NEW_TIP) {
+                        revalidate_at(indices[final_height]);
+                    }
+                    check_vote(&vote);
+                    const auto old_epoch{Access::ValidationContextEpoch(*governance)};
+                    BOOST_REQUIRE(old_epoch);
+                    const auto before{Access::AuthoritySnapshotStats(*governance)};
+                    const auto objects{Access::ObjectCount(*governance)};
+                    {
+                        LOCK(::cs_main);
+                        chainman.ActiveChain().SetTip(indices[final_height]);
+                    }
+                    if (registry_failure) {
+                        llmq::pq::test::PQRegistryReadErrorTestAccess::FailNextRead(
+                            *deterministicMNManager);
+                    } else {
+                        deterministicMNManager->m_evoDb->EraseCache(uint256{});
+                        deterministicMNManager->m_evoDb->FailNextFlushBatchForTesting();
+                    }
+                    bool available{true};
+                    {
+                        ASSERT_DEBUG_LOG(registry_failure
+                            ? "unable to read PQ registry: injected EvoDB flush-batch failure"
+                            : "unable to read deterministic masternode snapshot: injected EvoDB flush-batch failure");
+                        BOOST_CHECK_NO_THROW(available = entry == RevalidationEntry::INIT_ON_LOAD
+                            ? governance->InitOnLoad()
+                            : governance->RevalidatePQGovernance(indices[final_height]));
+                    }
+                    BOOST_CHECK(!available);
+                    BOOST_CHECK(governance->IsValid());
+                    BOOST_CHECK(!governance->IsReady());
+                    BOOST_CHECK(!governance->IsReadyForTip(&indices[final_height]));
+                    BOOST_CHECK(!Access::ValidationContextEpoch(*governance));
+                    BOOST_CHECK(!governance->HaveObjectForHash(trigger_hash));
+                    BOOST_CHECK(!governance->HaveVoteForHash(vote.GetHash()));
+                    CDataStream hidden{SER_NETWORK, PROTOCOL_VERSION};
+                    BOOST_CHECK(!governance->SerializeObjectForHash(trigger_hash, hidden));
+                    BOOST_CHECK(!governance->SerializeVoteForHash(vote.GetHash(), hidden));
+                    BOOST_CHECK(hidden.empty());
+                    BOOST_CHECK_EQUAL(Access::ObjectCount(*governance), objects);
+                    BOOST_CHECK(Access::ObjectHasVote(*governance, trigger_hash, vote.GetHash()));
+                    BOOST_CHECK_EQUAL(Access::PersistedVoteBytes(*governance), retained_bytes);
+                    const auto retained_vote{Access::RetainedVote(
+                        *governance, trigger_hash, vote.GetHash())};
+                    BOOST_REQUIRE(retained_vote);
+                    BOOST_CHECK(retained_vote->HasSameWireEncoding(vote));
+                    const auto remembered{Access::RememberedAuthorityTip(*governance)};
+                    BOOST_CHECK_EQUAL(remembered.first, final_height);
+                    BOOST_CHECK(remembered.second == indices[final_height].GetBlockHash());
+                    BOOST_CHECK(!Access::IsRememberedTip(*governance, indices[final_height]));
+                    const auto failed{Access::AuthoritySnapshotStats(*governance)};
+                    BOOST_CHECK_EQUAL(failed.builds, before.builds);
+                    BOOST_CHECK_EQUAL(failed.reuses, before.reuses);
+
+                    // Recovery must authenticate and rebuild, even though the
+                    // original authority content and admitted vote are unchanged.
+                    revalidate_at(indices[final_height]);
+                    check_vote(&vote);
+                    BOOST_CHECK_EQUAL(Access::PersistedVoteBytes(*governance), retained_bytes);
+                    const auto recovered{Access::AuthoritySnapshotStats(*governance)};
+                    BOOST_CHECK_EQUAL(recovered.builds, before.builds + 1);
+                    BOOST_CHECK_EQUAL(recovered.reuses, before.reuses);
+                    const auto recovered_epoch{Access::ValidationContextEpoch(*governance)};
+                    BOOST_REQUIRE(recovered_epoch);
+                    BOOST_CHECK_GT(*recovered_epoch, *old_epoch);
+                }
+            }
+        }
+        return;
+    }
     if (check_templates) {
         BOOST_REQUIRE_EQUAL(event_height, final_height + 1);
         BOOST_REQUIRE(AreSuperblocksEnabled());
@@ -4934,6 +5026,14 @@ BOOST_FIXTURE_TEST_CASE(
     TestChain100Setup)
 {
     CheckGovernanceFutureVotes(*this, /*check_templates=*/false);
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    governance_authority_read_errors_close_readiness_and_recover_retained_votes,
+    TestChain100Setup)
+{
+    CheckGovernanceFutureVotes(*this, /*check_templates=*/false,
+                              /*check_read_errors=*/true);
 }
 
 BOOST_FIXTURE_TEST_CASE(

@@ -10,6 +10,8 @@
 #include <crypto/slhdsa/slhdsa.h>
 #include <dsnotificationinterface.h>
 #include <evo/deterministicmns.h>
+#include <governance/governance.h>
+#include <governance/governanceclasses.h>
 #include <hash.h>
 #include <init.h>
 #include <llmq/pq_quorum_overlay.h>
@@ -24,6 +26,7 @@
 #include <test/util/net.h>
 #include <test/util/pq_registry_read_error.h>
 #include <test/util/setup_common.h>
+#include <txdb.h>
 #include <txmempool.h>
 #include <util/time.h>
 #include <validation.h>
@@ -1794,6 +1797,97 @@ BOOST_AUTO_TEST_CASE(active_operator_rollback_authority_read_errors_revoke_lease
             BOOST_CHECK(!IsActiveMasternodeChildSigningMaterialCurrent(fixture.provider, lease));
         }
     }
+}
+
+BOOST_FIXTURE_TEST_CASE(committed_rollback_delivers_notification_with_governance_read_error,
+                        TestChain100Setup)
+{
+    RollbackNotificationFixture fixture{*this};
+    auto& chainstate{fixture.chainman.ActiveChainstate()};
+    BOOST_REQUIRE(governance);
+    BOOST_REQUIRE(CSuperblock::IsValidBlockHeight(fixture.tip->nHeight));
+    BOOST_REQUIRE(governance->LoadCache(/*load_cache=*/false));
+    BOOST_REQUIRE(governance->IsReadyForTip(fixture.tip));
+    BOOST_REQUIRE(governance->IsReady());
+
+    class GovernanceDisconnectObserver final : public CValidationInterface {
+        ChainstateManager& m_chainman;
+        const CBlockIndex* const m_child;
+
+    public:
+        unsigned delivered{0};
+        bool exact_block{false};
+        bool committed_parent{false};
+        bool governance_unavailable{false};
+
+        GovernanceDisconnectObserver(ChainstateManager& chainman,
+                                     const CBlockIndex* child)
+            : m_chainman{chainman}, m_child{child} {}
+
+        void BlockDisconnected(const std::shared_ptr<const CBlock>& block,
+                               const CBlockIndex* index) override
+        {
+            LOCK(cs_main);
+            ++delivered;
+            exact_block = index == m_child && block->GetHash() == m_child->GetBlockHash();
+            const auto& parent_hash{m_child->pprev->GetBlockHash()};
+            committed_parent = m_chainman.ActiveTip() == m_child->pprev &&
+                m_chainman.ActiveChainstate().CoinsTip().GetBestBlock() == parent_hash &&
+                m_chainman.ActiveChainstate().CoinsDB().GetBestBlock() == parent_hash;
+            governance_unavailable = governance->IsValid() &&
+                !governance->IsReady() && !governance->IsReadyForTip(m_child->pprev);
+        }
+    } observer{fixture.chainman, fixture.tip};
+    RollbackNotifications notifications;
+    ValidationRegistration observe_counts{notifications};
+    ValidationRegistration observe_governance{observer};
+    struct RestoreCoinsCallback {
+        Chainstate& chainstate;
+        ~RestoreCoinsCallback()
+        {
+            WITH_LOCK(cs_main, chainstate.CoinsDB().SetSyncCallbackForTesting({}));
+        }
+    } restore_callback{chainstate};
+    unsigned injected{0};
+    WITH_LOCK(cs_main, chainstate.CoinsDB().SetSyncCallbackForTesting([&] {
+        LOCK(cs_main);
+        // A full flush may first synchronize the previous on-disk child.
+        // Its auxiliary flushes must not consume the governance read fault.
+        if (chainstate.CoinsDB().GetBestBlock() != fixture.tip->pprev->GetBlockHash()) {
+            return true;
+        }
+        ++injected;
+        BOOST_CHECK(fixture.chainman.ActiveTip() == fixture.tip);
+        BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == fixture.tip->pprev->GetBlockHash());
+        BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == fixture.tip->pprev->GetBlockHash());
+        // Ordinary undo and auxiliary flushing have finished. Arm the local
+        // registry fault at the final parent-coins barrier, before UpdateTip's
+        // synchronous governance read and its ensuing BlockDisconnected event.
+        llmq::pq::test::PQRegistryReadErrorTestAccess::FailNextRead(*deterministicMNManager);
+        return true;
+    }));
+    BlockValidationState state;
+    bool disconnected{false};
+    {
+        ASSERT_DEBUG_LOG("unable to read PQ registry: injected EvoDB flush-batch failure");
+        BOOST_CHECK_NO_THROW(disconnected = chainstate.InvalidateBlock(state, fixture.tip));
+    }
+    WITH_LOCK(cs_main, chainstate.CoinsDB().SetSyncCallbackForTesting({}));
+    SyncWithValidationInterfaceQueue();
+    BOOST_REQUIRE_MESSAGE(disconnected, state.ToString());
+    BOOST_CHECK(state.IsValid());
+    BOOST_CHECK_EQUAL(injected, 1U);
+    CheckRollbackOnly(notifications);
+    BOOST_CHECK_EQUAL(observer.delivered, 1U);
+    BOOST_CHECK(observer.exact_block);
+    BOOST_CHECK(observer.committed_parent);
+    BOOST_CHECK(observer.governance_unavailable);
+    BOOST_CHECK(!governance->IsReady());
+
+    BOOST_REQUIRE(governance->RevalidatePQGovernance(*fixture.tip->pprev));
+    BOOST_CHECK(governance->IsReadyForTip(fixture.tip->pprev));
+    BOOST_CHECK(governance->IsReady());
+    CheckRollbackOnly(notifications);
 }
 
 BOOST_FIXTURE_TEST_CASE(rollback_only_notifications_retire_completed_authentication,

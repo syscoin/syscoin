@@ -4596,8 +4596,14 @@ bool CGovernanceManager::RevalidatePQGovernanceImpl(
     }
     llmq::pq::PQRegistryReadView registry_snapshot;
     std::string registry_error;
-    if (!deterministicMNManager->GetPQRegistryReadView(
-            &validation_tip, registry_snapshot, registry_error)) {
+    bool registry_available{false};
+    try {
+        registry_available = deterministicMNManager->GetPQRegistryReadView(
+            &validation_tip, registry_snapshot, registry_error);
+    } catch (const std::runtime_error& e) {
+        registry_error = e.what();
+    }
+    if (!registry_available) {
         MarkPQGovernanceUnavailableForTip(validation_tip);
         RememberFailedPQGovernanceTip(validation_tip);
         LogPrint(BCLog::GOBJECT,
