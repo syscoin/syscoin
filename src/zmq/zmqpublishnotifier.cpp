@@ -168,6 +168,69 @@ static int zmq_receive_multipart(void *socket, std::vector<std::string>& parts)
 }
 // SYSCOIN END: Receive multipart NEVM request responses.
 
+static void* CreateNEVMRequestSocket(void* context, const std::string& address)
+{
+    if (!context) return nullptr;
+    void* socket = zmq_socket(context, ZMQ_REQ);
+    if (!socket) {
+        zmqError("Failed to create NEVM request socket");
+        return nullptr;
+    }
+    const auto set_option = [socket](int option, int value, const char* error) {
+        if (zmq_setsockopt(socket, option, &value, sizeof(value)) == 0) return true;
+        zmqError(error);
+        return false;
+    };
+#ifdef ZMQ_REQ_RELAXED
+    if (!set_option(ZMQ_REQ_RELAXED, 1, "Failed to set ZMQ_REQ_RELAXED")) {
+        zmq_close(socket);
+        return nullptr;
+    }
+#endif
+#ifdef ZMQ_REQ_CORRELATE
+    if (!set_option(ZMQ_REQ_CORRELATE, 1, "Failed to set ZMQ_REQ_CORRELATE")) {
+        zmq_close(socket);
+        return nullptr;
+    }
+#endif
+    if (!set_option(ZMQ_SNDTIMEO, 60000, "Failed to set ZMQ_SNDTIMEO")) {
+        zmq_close(socket);
+        return nullptr;
+    }
+    if (zmq_connect(socket, address.c_str()) != 0) {
+        zmqError("Failed to connect NEVM request socket");
+        zmq_close(socket);
+        return nullptr;
+    }
+    LogPrint(BCLog::ZMQ, "REQ subscribed on address %s\n", address);
+    return socket;
+}
+
+bool CZMQAbstractPublishNotifier::ResetNEVMConnection(
+    void* context, const std::vector<CZMQAbstractPublishNotifier*>& notifiers)
+{
+    LOCK(cs_nevm);
+    if (notifiers.empty()) return false;
+    const auto* first = notifiers.front();
+    void* old_socket = first->psocketsub;
+    for (const auto* notifier : notifiers) {
+        if (notifier->addresssub != first->addresssub || notifier->psocketsub != old_socket) return false;
+    }
+    // Discard queued commands, including an unanswered shutdown request, before
+    // the new engine connects. Keep the notifier registry and PUB state intact.
+    if (old_socket) {
+        const int linger{0};
+        zmq_setsockopt(old_socket, ZMQ_LINGER, &linger, sizeof(linger));
+        zmq_close(old_socket);
+    }
+    for (auto* notifier : notifiers) notifier->psocketsub = nullptr;
+    bFirstTime = true;
+    void* socket = CreateNEVMRequestSocket(context, first->addresssub);
+    if (!socket) return false;
+    for (auto* notifier : notifiers) notifier->psocketsub = socket;
+    return true;
+}
+
 // SYSCOIN: Extend Bitcoin notifier initialization with an NEVM request context.
 bool CZMQAbstractPublishNotifier::Initialize(void *pcontext, void *pcontextsub)
 {
@@ -180,50 +243,12 @@ bool CZMQAbstractPublishNotifier::Initialize(void *pcontext, void *pcontextsub)
     {
         // SYSCOIN BEGIN: Select NEVM request setup or the retained Bitcoin publisher setup.
         if(!addresssub.empty()) {
-            psocketsub = zmq_socket(pcontextsub, ZMQ_REQ);
-            if (!psocketsub)
-            {
-                zmqError("Failed to create socket");
-                return false;
-            }
-            int rc = 0;
-#ifdef ZMQ_REQ_RELAXED
-            int relaxed = 1;
-            rc = zmq_setsockopt(psocketsub, ZMQ_REQ_RELAXED, &relaxed, sizeof(relaxed));
-            if (rc != 0) {
-                zmqError("Failed to set ZMQ_REQ_RELAXED");
-                zmq_close(psocketsub);
-                return false;
-            }
-#endif
-#ifdef ZMQ_REQ_CORRELATE
-            int correlate = 1;
-            rc = zmq_setsockopt(psocketsub, ZMQ_REQ_CORRELATE, &correlate, sizeof(correlate));
-            if (rc != 0) {
-                zmqError("Failed to set ZMQ_REQ_CORRELATE");
-                zmq_close(psocketsub);
-                return false;
-            }
-#endif
+            psocketsub = CreateNEVMRequestSocket(pcontextsub, addresssub);
+            if (!psocketsub) return false;
             {
                 LOCK(cs_nevm);
                 bFirstTime = true;
             }
-            rc = zmq_connect(psocketsub, addresssub.c_str());
-            if (rc != 0)
-            {
-                zmqError("Failed to bind address for subscriber");
-                zmq_close(psocketsub);
-                return false;
-            }
-            int timeout = 60000;
-            rc = zmq_setsockopt(psocketsub, ZMQ_SNDTIMEO, &timeout, sizeof(timeout));
-            if (rc != 0) {
-                zmqError("Failed to set ZMQ_SNDTIMEO");
-                zmq_close(psocketsub);
-                return false;
-            }
-            LogPrint(BCLog::ZMQ, "REQ subscribed on address %s\n", addresssub);
         } else {
         // SYSCOIN END: Select NEVM request setup or the retained Bitcoin publisher setup.
             psocket = zmq_socket(pcontext, ZMQ_PUB);
@@ -274,6 +299,10 @@ bool CZMQAbstractPublishNotifier::Initialize(void *pcontext, void *pcontextsub)
     }
     else
     {
+        if (addresssub != i->second->addresssub) {
+            LogPrintf("Cannot share ZMQ address %s between PUB and NEVM request sockets\n", address);
+            return false;
+        }
         // SYSCOIN: Include the NEVM request endpoint when reusing a notifier socket.
         LogPrint(BCLog::ZMQ, "Reusing socket for address %s, subscriber %s\n", address, addresssub);
         LogPrint(BCLog::ZMQ, "Outbound message high water mark for %s at %s is %d\n", type, address, outbound_message_high_water_mark);
@@ -289,10 +318,7 @@ bool CZMQAbstractPublishNotifier::Initialize(void *pcontext, void *pcontextsub)
 
 void CZMQAbstractPublishNotifier::Shutdown()
 {
-    // Early return if Initialize was not called
-    // SYSCOIN: Keep shutdown active when only the NEVM request socket exists.
-    if (!psocket && !psocketsub) return;
-
+    // A failed NEVM reset leaves null sockets but still owns registry entries.
     int count = mapPublishNotifiers.count(address);
 
     // remove this notifier from the list of publishers using this address

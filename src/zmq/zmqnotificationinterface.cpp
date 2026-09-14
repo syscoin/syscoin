@@ -41,6 +41,18 @@ std::list<const CZMQAbstractNotifier*> CZMQNotificationInterface::GetActiveNotif
     return result;
 }
 
+bool CZMQNotificationInterface::ResetNEVMConnection()
+{
+    std::vector<CZMQAbstractPublishNotifier*> nevm_notifiers;
+    for (const auto& notifier : notifiers) {
+        if (notifier->GetAddressSub().empty()) continue;
+        auto* nevm = dynamic_cast<CZMQAbstractPublishNotifier*>(notifier.get());
+        if (!nevm) return false;
+        nevm_notifiers.push_back(nevm);
+    }
+    return CZMQAbstractPublishNotifier::ResetNEVMConnection(pcontextsub, nevm_notifiers);
+}
+
 std::unique_ptr<CZMQNotificationInterface> CZMQNotificationInterface::Create(
     std::function<bool(CBlock&, const CBlockIndex&)> get_block_by_index)
 {

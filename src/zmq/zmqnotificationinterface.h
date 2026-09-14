@@ -29,6 +29,7 @@ public:
     virtual ~CZMQNotificationInterface();
 
     std::list<const CZMQAbstractNotifier*> GetActiveNotifiers() const;
+    bool ResetNEVMConnection();
 
     static std::unique_ptr<CZMQNotificationInterface> Create(
         std::function<bool(CBlock&, const CBlockIndex&)> get_block_by_index);

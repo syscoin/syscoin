@@ -44,6 +44,7 @@ public:
           * data
     */
     bool ReceiveZmqMessage(std::vector<std::string>& parts);
+    static bool ResetNEVMConnection(void* context, const std::vector<CZMQAbstractPublishNotifier*>& notifiers);
     bool Initialize(void *pcontext, void *pcontextsub) override;
     void Shutdown() override;
 };

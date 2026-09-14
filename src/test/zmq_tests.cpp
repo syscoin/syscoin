@@ -3,11 +3,16 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <crypto/common.h>
+#include <evo/deterministicmns.h>
+#include <primitives/block.h>
 #include <primitives/transaction.h>
 #include <scheduler.h>
+#include <streams.h>
 #include <test/util/setup_common.h>
 #include <uint256.h>
+#include <util/strencodings.h>
 #include <validationinterface.h>
+#include <version.h>
 #include <zmq/zmqabstractnotifier.h>
 #include <zmq/zmqnotificationinterface.h>
 #include <zmq/zmqpublishnotifier.h>
@@ -27,6 +32,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 using namespace std::chrono_literals;
@@ -43,6 +49,11 @@ public:
     }
 
     static void* Context(const CZMQNotificationInterface& interface) { return interface.pcontext; }
+    static void* NEVMContext(const CZMQNotificationInterface& interface) { return interface.pcontextsub; }
+    static void* ExchangeNEVMContext(CZMQNotificationInterface& interface, void* context)
+    {
+        return std::exchange(interface.pcontextsub, context);
+    }
 };
 
 namespace {
@@ -262,6 +273,171 @@ std::string CheckMessage(const std::vector<Bytes>& frames, Sequences& sequences)
     sequences[topic] = sequence;
     return topic;
 }
+
+std::list<std::unique_ptr<CZMQAbstractNotifier>> NEVMNotifiers(const std::string& address)
+{
+    std::list<std::unique_ptr<CZMQAbstractNotifier>> result;
+    result.push_back(Publisher<CZMQPublishNEVMCommsNotifier>("pubnevmcomms", address));
+    result.push_back(Publisher<CZMQPublishNEVMBlockInfoNotifier>("pubnevmblockinfo", address));
+    result.push_back(Publisher<CZMQPublishNEVMBlockNotifier>("pubnevmblock", address));
+    result.push_back(Publisher<CZMQPublishNEVMBlockConnectNotifier>("pubnevmconnect", address));
+    result.push_back(Publisher<CZMQPublishNEVMBlockDisconnectNotifier>("pubnevmdisconnect", address));
+    for (auto& notifier : result) notifier->SetAddressSub(address);
+    return result;
+}
+
+template <typename T>
+std::string Serialized(const T& value)
+{
+    CDataStream stream{SER_NETWORK, PROTOCOL_VERSION};
+    stream << value;
+    return stream.str();
+}
+
+// Unlike a paused queue, this holds a real PUB callback after dispatch has
+// entered the notifier. Its bounded wait also lets a failing test unwind.
+class GatedTransactionNotifier final : public CZMQPublishHashTransactionNotifier
+{
+public:
+    std::promise<void> entered;
+    std::promise<void> release;
+    std::shared_future<void> resume{release.get_future().share()};
+    bool armed{false};
+
+    bool NotifyTransaction(const CTransaction& transaction) override
+    {
+        if (armed) {
+            entered.set_value();
+            if (resume.wait_for(10s) != std::future_status::ready) return false;
+        }
+        return CZMQPublishHashTransactionNotifier::NotifyTransaction(transaction);
+    }
+};
+
+struct NEVMExchange {
+    std::string command;
+    std::optional<std::string> data;
+    std::vector<std::string> response;
+};
+
+class ZMQTestContext
+{
+    void* context{zmq_ctx_new()};
+
+public:
+    ZMQTestContext()
+    {
+        if (!context) throw std::runtime_error{"Unable to create test ZMQ context"};
+    }
+    ~ZMQTestContext() { zmq_ctx_term(context); }
+    ZMQTestContext(const ZMQTestContext&) = delete;
+    ZMQTestContext& operator=(const ZMQTestContext&) = delete;
+    void* Get() const { return context; }
+};
+
+std::string UnboundTCPEndpoint()
+{
+    ZMQTestContext context;
+    void* socket = zmq_socket(context.Get(), ZMQ_REP);
+    if (!socket) throw std::runtime_error{"Unable to create TCP endpoint reservation"};
+    const int linger{0};
+    char endpoint[128];
+    size_t size{sizeof(endpoint)};
+    if (zmq_setsockopt(socket, ZMQ_LINGER, &linger, sizeof(linger)) != 0 ||
+        zmq_bind(socket, "tcp://127.0.0.1:*") != 0 ||
+        zmq_getsockopt(socket, ZMQ_LAST_ENDPOINT, endpoint, &size) != 0) {
+        zmq_close(socket);
+        throw std::runtime_error{"Unable to reserve a TCP test endpoint"};
+    }
+    zmq_close(socket);
+    return std::string{endpoint};
+}
+
+// Serve a finite request script on a real REP socket. A protocol mismatch or
+// timeout shuts down the test context before joining, so even the production
+// 150-second receive timeout cannot strand the unit-test worker.
+class NEVMResponder
+{
+    void* context;
+    void* socket;
+
+public:
+    NEVMResponder(void* value, const std::string& address, void* socket_context = nullptr)
+        : context{value}, socket{zmq_socket(socket_context ? socket_context : context, ZMQ_REP)}
+    {
+        if (!socket) throw std::runtime_error{"Unable to create NEVM test responder"};
+        const int timeout{100};
+        const int linger{0};
+        if (zmq_setsockopt(socket, ZMQ_RCVTIMEO, &timeout, sizeof(timeout)) != 0 ||
+            zmq_setsockopt(socket, ZMQ_SNDTIMEO, &timeout, sizeof(timeout)) != 0 ||
+            zmq_setsockopt(socket, ZMQ_LINGER, &linger, sizeof(linger)) != 0 ||
+            zmq_bind(socket, address.c_str()) != 0) {
+            zmq_close(socket);
+            throw std::runtime_error{"Unable to bind NEVM test responder"};
+        }
+    }
+
+    ~NEVMResponder() { zmq_close(socket); }
+
+    void Serve(const std::function<void()>& request, const std::vector<NEVMExchange>& script)
+    {
+        auto operation = std::async(std::launch::async, request);
+        try {
+            for (const auto& exchange : script) {
+                std::vector<std::string> frames;
+                const auto deadline = std::chrono::steady_clock::now() + 5s;
+                int more{0};
+                do {
+                    zmq_msg_t message;
+                    if (zmq_msg_init(&message) != 0) throw std::runtime_error{"Unable to initialize NEVM test message"};
+                    const int result = zmq_msg_recv(&message, socket, 0);
+                    if (result < 0) {
+                        const int error = errno;
+                        zmq_msg_close(&message);
+                        if (error == EAGAIN && frames.empty() && std::chrono::steady_clock::now() < deadline) {
+                            more = 1;
+                            continue;
+                        }
+                        throw std::runtime_error{"NEVM test request timed out or was incomplete"};
+                    }
+                    frames.emplace_back(static_cast<const char*>(zmq_msg_data(&message)), zmq_msg_size(&message));
+                    zmq_msg_close(&message);
+                    size_t size{sizeof(more)};
+                    if (zmq_getsockopt(socket, ZMQ_RCVMORE, &more, &size) != 0) throw std::runtime_error{"Unable to read NEVM test message boundary"};
+                } while (more);
+                if (frames.size() != 2 || frames[0] != exchange.command ||
+                    (exchange.data && frames[1] != *exchange.data)) {
+                    throw std::runtime_error{"Unexpected NEVM request after reset: " + (frames.empty() ? "empty" : frames[0]) +
+                        " data=" + (frames.size() > 1 ? HexStr(frames[1]) : "missing") +
+                        ", expected " + exchange.command + " data=" + (exchange.data ? HexStr(*exchange.data) : "any")};
+                }
+                for (size_t i = 0; i < exchange.response.size(); ++i) {
+                    const auto& frame = exchange.response[i];
+                    if (zmq_send(socket, frame.data(), frame.size(), i + 1 < exchange.response.size() ? ZMQ_SNDMORE : 0) < 0) {
+                        throw std::runtime_error{"Unable to send NEVM test response"};
+                    }
+                }
+            }
+            if (operation.wait_for(5s) != std::future_status::ready) throw std::runtime_error{"NEVM request did not finish"};
+            operation.get();
+        } catch (...) {
+            zmq_ctx_shutdown(context);
+            if (operation.valid()) operation.wait();
+            throw;
+        }
+    }
+};
+
+class MissingNEVMContext
+{
+    CZMQNotificationInterface& interface;
+    void* context;
+
+public:
+    explicit MissingNEVMContext(CZMQNotificationInterface& value)
+        : interface{value}, context{CZMQNotificationInterfaceTestAccess::ExchangeNEVMContext(value, nullptr)} {}
+    ~MissingNEVMContext() { CZMQNotificationInterfaceTestAccess::ExchangeNEVMContext(interface, context); }
+};
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(zmq_tests, ZMQTestingSetup)
@@ -462,6 +638,201 @@ BOOST_AUTO_TEST_CASE(failed_publication_retires_once_and_preserves_metadata_life
     BOOST_CHECK_EQUAL(failed->destroyed, 1U);
     BOOST_CHECK_EQUAL(healthy->shutdowns, 1U);
     BOOST_CHECK_EQUAL(healthy->destroyed, 1U);
+}
+
+BOOST_AUTO_TEST_CASE(nevm_reset_preserves_an_inflight_publication_and_its_sequence)
+{
+    const std::string pub_address{"inproc://nevm-reset-publication"};
+    auto notifiers = NEVMNotifiers("inproc://nevm-reset-unbound");
+    auto publisher = Publisher<GatedTransactionNotifier>("pubhashtx", pub_address);
+    auto* gate = publisher.get();
+    notifiers.push_back(std::move(publisher));
+    auto interface = CZMQNotificationInterfaceTestAccess::Create(std::move(notifiers));
+    Subscriber subscriber{CZMQNotificationInterfaceTestAccess::Context(*interface), pub_address};
+    RegisteredInterface registered{interface};
+    Sequences sequences;
+    for (int attempt = 0; attempt < 10 && sequences.empty(); ++attempt) {
+        GetMainSignals().TransactionAddedToMempool(TestTransaction(0), 0);
+        SyncWithValidationInterfaceQueue();
+        for (auto frames = subscriber.Receive(); !frames.empty(); frames = subscriber.Receive()) CheckMessage(frames, sequences);
+    }
+    BOOST_REQUIRE_EQUAL(sequences.size(), 1U);
+    const auto snapshot = interface->GetActiveNotifiers();
+    auto entered = gate->entered.get_future();
+    gate->armed = true;
+    GetMainSignals().TransactionAddedToMempool(TestTransaction(1), 1);
+    const bool callback_entered = entered.wait_for(5s) == std::future_status::ready;
+    if (!callback_entered) gate->release.set_value();
+    BOOST_REQUIRE(callback_entered);
+
+    auto reset = std::async(std::launch::async, [&] { return interface->ResetNEVMConnection(); });
+    const bool reset_without_drain = reset.wait_for(5s) == std::future_status::ready;
+    gate->release.set_value();
+    BOOST_CHECK(reset_without_drain);
+    BOOST_CHECK(reset.get());
+    SyncWithValidationInterfaceQueue();
+    BOOST_CHECK(interface->GetActiveNotifiers() == snapshot);
+    auto frames = subscriber.Receive();
+    BOOST_CHECK_EQUAL(CheckMessage(frames, sequences), "hashtx");
+    BOOST_CHECK(frames[1] == HashBytes(TestTransaction(1)->GetHash()));
+
+    gate->armed = false;
+    GetMainSignals().TransactionAddedToMempool(TestTransaction(2), 2);
+    SyncWithValidationInterfaceQueue();
+    frames = subscriber.Receive();
+    BOOST_CHECK_EQUAL(CheckMessage(frames, sequences), "hashtx");
+    BOOST_CHECK(frames[1] == HashBytes(TestTransaction(2)->GetHash()));
+}
+
+BOOST_AUTO_TEST_CASE(nevm_reset_discards_unsent_disconnect_and_refreshes_every_alias)
+{
+    // Geth runs in another process. Use its TCP transport and a separate
+    // context: inproc can place an undelivered message in a context-owned pipe
+    // that survives closing the sending socket.
+    const std::string address = UnboundTCPEndpoint();
+    auto interface = CZMQNotificationInterfaceTestAccess::Create(NEVMNotifiers(address));
+    RegisteredInterface registered{interface};
+    bool response{false};
+    // There is no engine yet: this command is queued locally on the old REQ
+    // socket. It must never reach the engine started after the reset.
+    GetMainSignals().NotifyNEVMComms("disconnect", response);
+    BOOST_REQUIRE(response);
+    BOOST_REQUIRE(interface->ResetNEVMConnection());
+    ZMQTestContext responder_context;
+    NEVMResponder responder{CZMQNotificationInterfaceTestAccess::NEVMContext(*interface), address, responder_context.Get()};
+    CNEVMBlock expected_block;
+    expected_block.nBlockHash = TestHash(101);
+    expected_block.nTxRoot = TestHash(102);
+    expected_block.nReceiptRoot = TestHash(103);
+    expected_block.vchNEVMBlockData = {4, 5, 6};
+    const uint256 syscoin_hash = TestHash(104);
+    const std::string rejected = "invalid:" + expected_block.nBlockHash.GetHex() + ":" + syscoin_hash.GetHex();
+    uint64_t height{0};
+    uint256 paired_hash;
+    CNEVMBlock received_block;
+    std::string info_state, block_state, connect_state, disconnect_state;
+    std::optional<NEVMBlockReject> rejection;
+    responder.Serve([&] {
+        GetMainSignals().NotifyGetNEVMBlockInfo(height, paired_hash, info_state);
+        GetMainSignals().NotifyNEVMComms("flush", response);
+        GetMainSignals().NotifyGetNEVMBlock(received_block, block_state);
+        NEVMDataVec data;
+        GetMainSignals().NotifyNEVMBlockConnect(expected_block, CBlock{}, connect_state, syscoin_hash,
+            data, 1, false, uint256{}, CDeterministicMNListNEVMAddressDiff{}, &rejection);
+        GetMainSignals().NotifyNEVMBlockDisconnect(disconnect_state, syscoin_hash, CDeterministicMNListNEVMAddressDiff{});
+    }, {
+        {"nevmcomms", Serialized(std::string{"status"}), {"nevmcomms", "ack"}},
+        {"nevmblockinfo", "nevmblockinfo", {"nevmblockinfo", "42", syscoin_hash.GetHex()}},
+        {"nevmcomms", Serialized(std::string{"flush"}), {"nevmcomms", "flushed"}},
+        {"nevmblock", "nevmblock", {"nevmblock", Serialized(expected_block)}},
+        {"nevmcomms", Serialized(std::string{"connect-v1"}), {"nevmcomms", "connect-v1"}},
+        {"nevmconnect", std::nullopt, {"nevmconnect", rejected}},
+        {"nevmdisconnect", std::nullopt, {"nevmdisconnect", "disconnected"}},
+    });
+    BOOST_CHECK(response);
+    BOOST_CHECK_EQUAL(height, 42U);
+    BOOST_CHECK(paired_hash == syscoin_hash);
+    BOOST_CHECK_EQUAL(Serialized(received_block), Serialized(expected_block));
+    BOOST_CHECK(info_state.empty());
+    BOOST_CHECK(block_state.empty());
+    BOOST_CHECK(disconnect_state.empty());
+    BOOST_CHECK_EQUAL(connect_state, "nevm-connect-consensus-invalid");
+    BOOST_REQUIRE(rejection);
+    BOOST_CHECK(rejection->nevm_hash == expected_block.nBlockHash);
+    BOOST_CHECK(rejection->syscoin_hash == syscoin_hash);
+}
+
+BOOST_AUTO_TEST_CASE(nevm_failed_reset_is_retryable_and_shutdown_removes_null_socket_aliases)
+{
+    const std::string address{"inproc://nevm-reset-failure"};
+    auto interface = CZMQNotificationInterfaceTestAccess::Create(NEVMNotifiers(address));
+    const auto snapshot = interface->GetActiveNotifiers();
+    {
+        RegisteredInterface registered{interface};
+        {
+            MissingNEVMContext missing{*interface};
+            BOOST_CHECK(!interface->ResetNEVMConnection());
+            bool response{true};
+            GetMainSignals().NotifyNEVMComms("disconnect", response);
+            BOOST_CHECK(!response);
+            uint64_t height{0};
+            uint256 hash;
+            std::string state;
+            GetMainSignals().NotifyGetNEVMBlockInfo(height, hash, state);
+            BOOST_CHECK(!state.empty());
+            CNEVMBlock block;
+            state.clear();
+            GetMainSignals().NotifyGetNEVMBlock(block, state);
+            BOOST_CHECK(!state.empty());
+            NEVMDataVec data;
+            state.clear();
+            GetMainSignals().NotifyNEVMBlockConnect(block, CBlock{}, state, TestHash(106),
+                data, 1, false, uint256{}, CDeterministicMNListNEVMAddressDiff{});
+            BOOST_CHECK(!state.empty());
+            state.clear();
+            GetMainSignals().NotifyNEVMBlockDisconnect(state, TestHash(106), CDeterministicMNListNEVMAddressDiff{});
+            BOOST_CHECK(!state.empty());
+            bool valid{true};
+            state.clear();
+            GetMainSignals().NotifyNEVMPayloadCheck(block, CBlock{}, TestHash(106), valid, state);
+            BOOST_CHECK(!valid);
+            BOOST_CHECK(!state.empty());
+        }
+        BOOST_CHECK(interface->GetActiveNotifiers() == snapshot);
+        BOOST_REQUIRE(interface->ResetNEVMConnection());
+        NEVMResponder responder{CZMQNotificationInterfaceTestAccess::NEVMContext(*interface), address};
+        uint64_t height{0};
+        uint256 hash;
+        std::string state;
+        responder.Serve([&] { GetMainSignals().NotifyGetNEVMBlockInfo(height, hash, state); }, {
+            {"nevmcomms", Serialized(std::string{"status"}), {"nevmcomms", "ack"}},
+            {"nevmblockinfo", "nevmblockinfo", {"nevmblockinfo", "1", TestHash(105).GetHex()}},
+        });
+        BOOST_CHECK_EQUAL(height, 1U);
+        BOOST_CHECK(hash == TestHash(105));
+        BOOST_CHECK(state.empty());
+    }
+    {
+        MissingNEVMContext missing{*interface};
+        BOOST_CHECK(!interface->ResetNEVMConnection());
+    }
+    interface.reset();
+    // Reusing the registry key after destruction must create a new socket;
+    // null aliases left in the registry would reuse freed notifier objects.
+    interface = CZMQNotificationInterfaceTestAccess::Create(NEVMNotifiers(address));
+    RegisteredInterface registered{interface};
+    NEVMResponder responder{CZMQNotificationInterfaceTestAccess::NEVMContext(*interface), address};
+    bool response{false};
+    responder.Serve([&] { GetMainSignals().NotifyNEVMComms("status", response); }, {
+        {"nevmcomms", Serialized(std::string{"status"}), {"nevmcomms", "ack"}},
+    });
+    BOOST_CHECK(response);
+}
+
+BOOST_AUTO_TEST_CASE(nevm_and_pub_cannot_share_a_registry_address_in_either_order)
+{
+    const std::string address{"inproc://nevm-pub-address-conflict"};
+    for (const bool pub_first : {true, false}) {
+        auto mixed = NEVMNotifiers(address);
+        auto publisher = Publisher<CZMQPublishHashTransactionNotifier>("pubhashtx", address);
+        if (pub_first) {
+            mixed.push_front(std::move(publisher));
+        } else {
+            mixed.push_back(std::move(publisher));
+        }
+        BOOST_CHECK_THROW(CZMQNotificationInterfaceTestAccess::Create(std::move(mixed)), std::runtime_error);
+
+        // Partial initialization must clean up its registry entries and sockets
+        // before a valid configuration can reuse the same endpoint.
+        auto interface = CZMQNotificationInterfaceTestAccess::Create(NEVMNotifiers(address));
+        RegisteredInterface registered{interface};
+        NEVMResponder responder{CZMQNotificationInterfaceTestAccess::NEVMContext(*interface), address};
+        bool response{false};
+        responder.Serve([&] { GetMainSignals().NotifyNEVMComms("status", response); }, {
+            {"nevmcomms", Serialized(std::string{"status"}), {"nevmcomms", "ack"}},
+        });
+        BOOST_CHECK(response);
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

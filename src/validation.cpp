@@ -13109,6 +13109,7 @@ std::vector<std::string> SanitizeGethCmdLine(const std::vector<std::string> &cmd
     return cmdLineRet;
 }
 bool Chainstate::RestartGethNode() {
+    LOCK(cs_main);
 #if ENABLE_ZMQ
     if(fNEVMSub.empty()) {
         LogPrintf("RestartGethNode: Could not start Geth. zmqpubnevm not defined\n");
@@ -13118,33 +13119,20 @@ bool Chainstate::RestartGethNode() {
     StopGethNode();
     m_chainman.ResetNEVMNetworkStart();
 #if ENABLE_ZMQ
-    if (g_zmq_notification_interface) {
-        UnregisterValidationInterface(g_zmq_notification_interface.get());
-        g_zmq_notification_interface.reset();
-    }
-    g_zmq_notification_interface = CZMQNotificationInterface::Create(
-        [&chainman = m_chainman](CBlock& block, const CBlockIndex& index) {
-            return chainman.m_blockman.ReadBlockFromDisk(block, index);
-        });
-    if(fNEVMConnection) {
-        if(!g_zmq_notification_interface) {
-            LogPrintf("RestartGethNode: Could not establish ZMQ interface connections, check your ZMQ settings and try again...\n");
-        }
-    }
-    if (g_zmq_notification_interface) {
-        RegisterValidationInterface(g_zmq_notification_interface.get());
+    // Keep notification callbacks and PUB sockets alive across an engine
+    // restart. A callback may already be running and waiting for cs_main.
+    if (!g_zmq_notification_interface || !g_zmq_notification_interface->ResetNEVMConnection()) {
+        LogPrintf("RestartGethNode: Could not reset NEVM ZMQ connection\n");
+        return false;
     }
 #endif
     if(!StartGethNode()) {
         LogPrintf("RestartGethNode: Could not start Geth\n");
         return false;
     }
-    {
-        LOCK(cs_main);
-        if(!ResetLastBlock()) {
-            LogPrintf("RestartGethNode: Could not reset last invalid block\n");
-            return false;
-        }
+    if(!ResetLastBlock()) {
+        LogPrintf("RestartGethNode: Could not reset last invalid block\n");
+        return false;
     }
     // The connect caller reconciles the applied prefix before requesting
     // networking. Starting the process alone does not restore its buffer.
