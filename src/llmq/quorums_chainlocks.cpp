@@ -3364,6 +3364,7 @@ void CChainLocksHandler::Start()
             m_signer_startup_tip_height.reset();
         }
         if (fMasternodeMode && m_config && m_quorum_build_config) {
+            LOCK(m_signer_reconcile_mutex);
             try {
                 m_signer_journal = std::make_unique<CPQSignerJournal>(
                     gArgs.GetDataDirNet() / "llmq/pq-signer-journal");
@@ -3487,7 +3488,10 @@ void CChainLocksHandler::Stop()
             ResetPaymentAuditRuntime();
             m_payment_audit_network_context.reset();
         }
-        m_signer_journal.reset();
+        {
+            LOCK(m_signer_reconcile_mutex);
+            m_signer_journal.reset();
+        }
         {
             LOCK(m_pending_btcc_receipt_mutex);
             m_pending_btcc_receipt.reset();
@@ -3701,18 +3705,29 @@ bool CChainLocksHandler::IsChainLockVerificationAvailable() const
 
 bool CChainLocksHandler::ReconcileSignerJournal(const uint256& pro_tx_hash)
 {
+    LOCK(m_signer_reconcile_mutex);
     if (!m_signer_journal || !m_store) return true;
+    // Choose the durable winner and journal owner in one lifetime scope. A
+    // call after restart reconciles current accepted state into the new owner.
     const auto chainlock{m_store->GetBestRecord()};
     if (!chainlock) return true;
-    return ReconcileSignerJournal(pro_tx_hash, chainlock->metadata);
+    return ReconcileSignerJournalLocked(pro_tx_hash, chainlock->metadata);
 }
 
 bool CChainLocksHandler::ReconcileSignerJournal(
     const uint256& pro_tx_hash,
     const pq::FinalChainLockRecordMetadata& chainlock)
 {
-    if (!m_signer_journal) return true;
     LOCK(m_signer_reconcile_mutex);
+    return ReconcileSignerJournalLocked(pro_tx_hash, chainlock);
+}
+
+bool CChainLocksHandler::ReconcileSignerJournalLocked(
+    const uint256& pro_tx_hash,
+    const pq::FinalChainLockRecordMetadata& chainlock)
+{
+    AssertLockHeld(m_signer_reconcile_mutex);
+    if (!m_signer_journal) return true;
     const PQSignerJournalResult result{
         m_signer_journal->ReconcileDurableAcceptedChainLock(
             m_genesis_hash, pro_tx_hash, chainlock)};

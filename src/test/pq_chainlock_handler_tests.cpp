@@ -915,7 +915,38 @@ public:
     static std::unique_ptr<CPQSignerJournal> ExchangeSignerJournal(
         CChainLocksHandler& handler, std::unique_ptr<CPQSignerJournal> journal)
     {
+        LOCK(handler.m_signer_reconcile_mutex);
         return std::exchange(handler.m_signer_journal, std::move(journal));
+    }
+
+    static Mutex& SignerReconcileMutex(CChainLocksHandler& handler)
+    {
+        return handler.m_signer_reconcile_mutex;
+    }
+
+    static Mutex& LifecycleMutex(CChainLocksHandler& handler)
+    {
+        return handler.m_lifecycle_mutex;
+    }
+
+    static CPQSignerJournal* SignerJournal(CChainLocksHandler& handler)
+    {
+        // Only inspect or use this pointer during quiescent test phases.
+        LOCK(handler.m_signer_reconcile_mutex);
+        return handler.m_signer_journal.get();
+    }
+
+    static bool ReconcileSignerJournal(CChainLocksHandler& handler,
+                                       const uint256& pro_tx_hash)
+    {
+        return handler.ReconcileSignerJournal(pro_tx_hash);
+    }
+
+    static bool ReconcileSignerJournal(
+        CChainLocksHandler& handler, const uint256& pro_tx_hash,
+        const pq::FinalChainLockRecordMetadata& metadata)
+    {
+        return handler.ReconcileSignerJournal(pro_tx_hash, metadata);
     }
 
     static pq::PaymentAuditStore& AuditStore(CChainLocksHandler& handler)
@@ -9706,6 +9737,222 @@ BOOST_FIXTURE_TEST_CASE(
         BOOST_CHECK(!(chain[TARGET_HEIGHT]->nStatus & BLOCK_HAVE_DATA));
         BOOST_CHECK(!(chain[TARGET_HEIGHT]->nStatus & BLOCK_GOVERNANCE_VALIDATED));
         BOOST_CHECK(sibling->nStatus & BLOCK_CONFLICT_CHAINLOCK);
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    signer_journal_reconciliation_serializes_stop_and_reopens_current_winner,
+    PQAuthorizationBasePathSetup)
+{
+    using Access = llmq::test::CChainLocksHandlerTestAccess;
+    using namespace llmq::pq;
+    using Outcome = llmq::PQSignerJournalOutcome;
+    auto& chainman{*Assert(m_node.chainman)};
+    const uint256 genesis{chainman.GetConsensus().hashGenesisBlock};
+    const uint256 pro_tx_hash{NonNullHash(921'001)};
+    const auto journal_path{gArgs.GetDataDirNet() / "llmq/pq-signer-journal"};
+    struct RestoreMasternodeMode {
+        bool original{fMasternodeMode};
+        ~RestoreMasternodeMode() { fMasternodeMode = original; }
+    } restore_mode;
+    std::unique_ptr<llmq::CChainLocksHandler> handler;
+    {
+        auto& consensus{const_cast<Consensus::Params&>(chainman.GetConsensus())};
+        struct RestoreConsensus {
+            Consensus::Params& target;
+            Consensus::Params original;
+            ~RestoreConsensus() { target = original; }
+        } restore{consensus, consensus};
+        // Only construction needs the configured deployment. The test begins
+        // at accepted-store reconciliation, without activating PQ on the chain.
+        consensus = ValidConsensus();
+        consensus.hashGenesisBlock = genesis;
+        LOCK(::cs_main);
+        handler = std::make_unique<llmq::CChainLocksHandler>(
+            *Assert(m_node.connman), *Assert(m_node.peerman), chainman);
+    }
+    BOOST_REQUIRE(Access::Config(*handler));
+    BOOST_REQUIRE(Access::QuorumConfig(*handler));
+
+    // Install the empty store before Start launches its private scheduler.
+    // Seed the already-verified boundary used by existing handler tests below.
+    // This test exercises real journal persistence and handler lifecycle, not
+    // network signature verification or certificate acceptance durability.
+    FullReceiptCatchupContext context;
+    context.full_receipt_history = true;
+    const auto config{CatchupStoreConfig()};
+    auto finality_store{std::make_unique<ChainLockFinalityStore>(genesis, config, context)};
+    auto* store{finality_store.get()};
+    struct RestoreStore {
+        llmq::CChainLocksHandler& handler;
+        std::unique_ptr<ChainLockFinalityStore> original;
+        ~RestoreStore()
+        {
+            handler.Stop();
+            Access::ExchangeFinalityStore(handler, std::move(original)).reset();
+        }
+    } restore_store{*handler, Access::ExchangeFinalityStore(*handler, std::move(finality_store))};
+    fMasternodeMode = true;
+    handler->Start();
+    auto* journal{Access::SignerJournal(*handler)};
+    BOOST_REQUIRE(journal);
+    handler->Start();
+    BOOST_CHECK(Access::SignerJournal(*handler) == journal);
+
+    const llmq::PQSignerJournalKey reserved_key{
+        .genesis_hash = genesis,
+        .child_profile = CHILD_SCHEDULED_WOTS_SHAKE_128_V1,
+        .pro_tx_hash = pro_tx_hash,
+        .quorum_epoch = 17,
+        .child_key_hash = NonNullHash(921'002),
+        .leaf_index = 0,
+        .absolute_height = 100};
+    auto signed_key{reserved_key};
+    signed_key.leaf_index = 1;
+    signed_key.absolute_height = 105;
+    const llmq::PQSignerBranchLock reserved_vote{
+        100, NonNullHash(921'003), NonNullHash(921'004)};
+    const llmq::PQSignerBranchLock signed_vote{
+        105, NonNullHash(921'005), NonNullHash(921'006)};
+    const uint256 reserved_message{NonNullHash(921'007)};
+    const uint256 signed_message{NonNullHash(921'008)};
+    llmq::PQChildSignature signature;
+    signature.fill(3);
+    BOOST_REQUIRE(journal->Reserve(reserved_key, reserved_message,
+                                  reserved_vote, std::nullopt).outcome == Outcome::RESERVED);
+    BOOST_REQUIRE(journal->Reserve(signed_key, signed_message,
+                                  signed_vote, std::nullopt).outcome == Outcome::RESERVED);
+    BOOST_REQUIRE(journal->StoreSignature(signed_key, signed_message,
+                                         signature).outcome == Outcome::STORED);
+
+    const auto accept = [&](const FinalChainLock& certificate) {
+        const auto prepared{store->PrepareCandidate(certificate)};
+        BOOST_REQUIRE(prepared);
+        const auto verified{ChainLockStoreTestContextFactory::Create(
+            genesis, config.chainlock_schedule, certificate.statement)};
+        BOOST_REQUIRE(verified);
+        BOOST_REQUIRE(store->AcceptVerified(*prepared, certificate,
+                                            /*signatures_valid=*/true, nullptr, verified));
+    };
+    const auto first{MakeCatchupChainLock(865, config.activation_predecessor_height,
+                                        NonNullHash(864), 921'010)};
+    accept(first);
+
+    std::promise<void> store_entered;
+    std::promise<void> release_store;
+    auto entered{store_entered.get_future()};
+    auto released{release_store.get_future()};
+    std::future<void> store_holder;
+    std::future<bool> reconciliation;
+    std::future<void> stopping;
+    struct ReleaseStore {
+        std::promise<void>& release;
+        bool done{false};
+        void Run() { if (!done) { done = true; release.set_value(); } }
+        ~ReleaseStore() { Run(); }
+    } release{release_store};
+    store_holder = std::async(std::launch::async, [&] {
+        (void)store->GetBestRecordWithDurableSnapshot([&] {
+            store_entered.set_value();
+            released.wait();
+        });
+    });
+    const auto observe_locked = [](Mutex& mutex) {
+        const auto deadline{std::chrono::steady_clock::now() + std::chrono::seconds{10}};
+        do {
+            {
+                TRY_LOCK(mutex, lock);
+                if (!lock) return true;
+            }
+            std::this_thread::yield();
+        } while (std::chrono::steady_clock::now() < deadline);
+        return false;
+    };
+    const bool store_is_held{entered.wait_for(std::chrono::seconds{10}) == std::future_status::ready};
+    bool reader_owns_journal{false};
+    bool stop_has_entered{false};
+    bool stop_is_pending{false};
+    if (store_is_held) {
+        reconciliation = std::async(std::launch::async, [&] {
+            return Access::ReconcileSignerJournal(*handler, pro_tx_hash);
+        });
+        // A positive lock observation while GetBestRecord is blocked proves
+        // the reader protects both journal presence and the current winner.
+        // The deadline bounds failure; elapsed time never establishes success.
+        reader_owns_journal = observe_locked(Access::SignerReconcileMutex(*handler));
+        if (reader_owns_journal) {
+            stopping = std::async(std::launch::async, [&] { handler->Stop(); });
+            stop_has_entered = observe_locked(Access::LifecycleMutex(*handler));
+            stop_is_pending = stopping.wait_for(std::chrono::seconds{0}) != std::future_status::ready;
+        }
+    }
+    release.Run();
+    store_holder.get();
+    const bool reconciled{reconciliation.valid() && reconciliation.get()};
+    if (stopping.valid()) stopping.get();
+    else handler->Stop();
+    BOOST_REQUIRE(store_is_held);
+    BOOST_REQUIRE(reader_owns_journal);
+    BOOST_REQUIRE(stop_has_entered);
+    BOOST_CHECK(stop_is_pending);
+    BOOST_REQUIRE(reconciled);
+    BOOST_CHECK(!Access::SignerJournal(*handler));
+    BOOST_CHECK(!Access::HasShareAdmission(*handler));
+    handler->Stop();
+
+    const auto check_consumed_and_replayed = [&](llmq::CPQSignerJournal& reopened) {
+        BOOST_CHECK(reopened.Reserve(reserved_key, reserved_message,
+                                    reserved_vote, reserved_vote).outcome == Outcome::CONSUMED);
+        BOOST_CHECK(reopened.StoreSignature(reserved_key, reserved_message,
+                                           signature).outcome == Outcome::CONSUMED);
+        const auto replay{reopened.Reserve(signed_key, signed_message,
+                                          signed_vote, signed_vote)};
+        BOOST_REQUIRE(replay.outcome == Outcome::REPLAY);
+        BOOST_CHECK(replay.signature == signature);
+    };
+    const llmq::PQSignerBranchLock first_lock{
+        first.statement.height, first.statement.block_hash, first.GetLogicalId(genesis)};
+    {
+        llmq::CPQSignerJournal reopened{journal_path};
+        BOOST_CHECK(reopened.GetAcceptedCertificate(genesis, pro_tx_hash,
+                                                    first.statement.height) == first_lock);
+        check_consumed_and_replayed(reopened);
+    }
+
+    const auto next{MakeCatchupChainLock(870, first.statement.height,
+                                       first.statement.block_hash, 921'011)};
+    accept(next);
+    // A certificate completion after retirement sees no owner. Both overloads
+    // are harmless, and no accepted row appears until a new journal is open.
+    const FinalChainLockRecordMetadata next_metadata{
+        next.GetLogicalId(genesis), next.GetWitnessId(genesis), next.statement};
+    BOOST_CHECK(Access::ReconcileSignerJournal(*handler, pro_tx_hash));
+    BOOST_CHECK(Access::ReconcileSignerJournal(*handler, pro_tx_hash, next_metadata));
+    BOOST_CHECK(!Access::SignerJournal(*handler));
+    {
+        llmq::CPQSignerJournal reopened{journal_path};
+        BOOST_CHECK(!reopened.GetAcceptedCertificate(genesis, pro_tx_hash,
+                                                     next.statement.height));
+    }
+    handler->Start();
+    BOOST_REQUIRE(Access::SignerJournal(*handler));
+    BOOST_CHECK(!Access::HasShareAdmission(*handler));
+    // A delayed completion beginning reconciliation after restart must freshly
+    // read the current winner, rather than carry a pre-restart store snapshot.
+    BOOST_REQUIRE(Access::ReconcileSignerJournal(*handler, pro_tx_hash));
+    BOOST_REQUIRE(Access::ReconcileSignerJournal(*handler, pro_tx_hash, next_metadata));
+    handler->Stop();
+    handler->Stop();
+    BOOST_CHECK(!Access::SignerJournal(*handler));
+    {
+        llmq::CPQSignerJournal reopened{journal_path};
+        const llmq::PQSignerBranchLock next_lock{
+            next.statement.height, next.statement.block_hash, next.GetLogicalId(genesis)};
+        BOOST_CHECK(reopened.GetAcceptedCertificate(genesis, pro_tx_hash,
+                                                    first.statement.height) == first_lock);
+        BOOST_CHECK(reopened.GetAcceptedCertificate(genesis, pro_tx_hash,
+                                                    next.statement.height) == next_lock);
+        check_consumed_and_replayed(reopened);
     }
 }
 

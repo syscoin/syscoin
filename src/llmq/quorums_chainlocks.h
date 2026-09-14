@@ -1048,6 +1048,7 @@ public:
                                  !m_btcc_preseal_mutex);
     void Stop()
         EXCLUSIVE_LOCKS_REQUIRED(!m_lifecycle_mutex,
+                                 !m_signer_reconcile_mutex,
                                  !m_share_lifecycle_mutex,
                                  !m_context_build_mutex,
                                  !m_collector_mutex,
@@ -1951,6 +1952,10 @@ private:
         const uint256& pro_tx_hash,
         const pq::FinalChainLockRecordMetadata& chainlock)
         EXCLUSIVE_LOCKS_REQUIRED(!m_signer_reconcile_mutex);
+    [[nodiscard]] bool ReconcileSignerJournalLocked(
+        const uint256& pro_tx_hash,
+        const pq::FinalChainLockRecordMetadata& chainlock)
+        EXCLUSIVE_LOCKS_REQUIRED(m_signer_reconcile_mutex);
     [[nodiscard]] bool InitializeSignerStartupTip(
         const uint256& local_pro_tx_hash)
         EXCLUSIVE_LOCKS_REQUIRED(m_share_signing_mutex, !cs_main);
@@ -3010,6 +3015,9 @@ private:
         GUARDED_BY(cs_main);
     mutable AtomicPendingVerifiedHistoricalChainLock
         m_pending_verified_historical;
+    // Private signing tasks are joined before retirement. Other users hold
+    // m_signer_reconcile_mutex across presence, access and owner replacement;
+    // Stop takes it only after joining, so reconciliation can finish first.
     std::unique_ptr<CPQSignerJournal> m_signer_journal;
     Mutex m_signer_reconcile_mutex;
     Mutex m_share_signing_mutex;
