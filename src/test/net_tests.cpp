@@ -3689,13 +3689,13 @@ BOOST_AUTO_TEST_CASE(pq_governance_vote_handler_defers_unavailable_registry)
         vote.SetSignature(std::move(encoded));
     }};
 
-    enum class VoteKind { FRESH, ALTERNATE, SUPERSEDED };
+    enum class VoteKind { FRESH, ALTERNATE_ENCODING, SUPERSEDED };
     enum class Fault { MISSING, THROWN, BAD_SIGNATURE };
     std::size_t scenario{0};
     uint64_t nonce{1};
     for (const auto fault : {Fault::MISSING, Fault::THROWN, Fault::BAD_SIGNATURE}) {
         for (const bool page : {false, true}) {
-            for (const auto kind : {VoteKind::FRESH, VoteKind::ALTERNATE,
+            for (const auto kind : {VoteKind::FRESH, VoteKind::ALTERNATE_ENCODING,
                                     VoteKind::SUPERSEDED}) {
                 BOOST_TEST_CONTEXT("fault=" << int(fault) << ", page=" << page
                                    << ", vote kind=" << int(kind)) {
@@ -3731,7 +3731,7 @@ BOOST_AUTO_TEST_CASE(pq_governance_vote_handler_defers_unavailable_registry)
                     CGovernanceVote known{vote};
                     if (kind == VoteKind::SUPERSEDED) known.SetTime(101);
                     if (kind != VoteKind::FRESH) sign_vote(known, activation_height);
-                    if (kind == VoteKind::ALTERNATE) {
+                    if (kind == VoteKind::ALTERNATE_ENCODING) {
                         BOOST_REQUIRE(known.GetHash() == vote.GetHash());
                         BOOST_REQUIRE(!known.HasSameWireEncoding(vote));
                     }
@@ -3852,7 +3852,7 @@ BOOST_AUTO_TEST_CASE(pq_governance_vote_handler_defers_unavailable_registry)
                     // cooldown could expire. An alternate's exact known hash is
                     // now completed locally by SendMessages; fresh and superseded
                     // votes pass through the payload handler again after recovery.
-                    const bool complete_locally{kind == VoteKind::ALTERNATE};
+                    const bool complete_locally{kind == VoteKind::ALTERNATE_ENCODING};
                     request(false, complete_locally);
                     if (!complete_locally) deliver();
                     BOOST_CHECK_EQUAL(WITH_LOCK(peer->m_misbehavior_mutex,
