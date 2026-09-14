@@ -238,6 +238,12 @@ place. Interrupted database removal can be retried without copying or
 relocating key files. Custom ancient database locations are not cleared by
 this operation and may require an explicit engine rebuild.
 
+Before removing either database, Core acquires Geth's exclusive instance
+lock at `geth/geth/LOCK` and holds it throughout removal. A surviving Geth
+process or a lock error blocks reindex without removing chain data, even
+when Core has no recorded Geth PID. Stop the engine before retrying. The
+lock file is preserved; its presence alone does not block reindex.
+
 If `keystoretmp` or `nodekeytmp` exists from an older copy/restore attempt,
 managed startup and reindex stop before resetting data or launching Geth.
 These paths may contain the only complete keys; an existing original may

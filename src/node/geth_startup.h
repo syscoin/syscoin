@@ -6,9 +6,18 @@
 #define SYSCOIN_NODE_GETH_STARTUP_H
 
 #include <util/fs.h>
+#include <util/syserror.h>
 
+#include <cerrno>
 #include <chrono>
 #include <string>
+
+#ifndef WIN32
+#include <fcntl.h>
+#include <sys/file.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 namespace node {
 
@@ -27,6 +36,10 @@ inline bool PrepareGethDataDirectory(const fs::path& data_dir, bool reindex, std
             }
         }
         if (!reindex) return true;
+#ifdef WIN32
+        error = "Managed Geth reindex is not supported on WIN32 builds";
+        return false;
+#else
         const auto geth_dir = data_dir / "geth";
         // Refuse ambiguous directory aliases before deleting any chain data.
         for (const auto& dir : {geth_dir, geth_dir / "geth"}) {
@@ -36,11 +49,31 @@ inline bool PrepareGethDataDirectory(const fs::path& data_dir, bool reindex, std
                 return false;
             }
         }
+        const auto instance_dir = geth_dir / "geth";
+        fs::create_directories(instance_dir);
+        const auto lock_path = instance_dir / "LOCK";
+        // Geth's gofrs/flock uses flock, not Core's fcntl FileLock. Keep the
+        // same lock inode and hold ownership until both removals finish.
+        struct InstanceLock {
+            const int fd;
+            ~InstanceLock() { if (fd >= 0) ::close(fd); }
+        };
+        const InstanceLock instance_lock{::open(lock_path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600)};
+        const auto lock_error = [&](const std::string& reason) {
+            error = "Unable to exclusively lock Geth database at " + fs::PathToString(lock_path) + ": " + reason;
+            return false;
+        };
+        if (instance_lock.fd < 0) return lock_error(SysErrorString(errno));
+        struct stat lock_stat{};
+        if (::fstat(instance_lock.fd, &lock_stat) != 0) return lock_error(SysErrorString(errno));
+        if (!S_ISREG(lock_stat.st_mode)) return lock_error("instance lock is not a regular file");
+        if (::flock(instance_lock.fd, LOCK_EX | LOCK_NB) != 0) return lock_error(SysErrorString(errno));
         // Paired NEVM state and default ancients live in this database. Geth
         // also recognizes the older location directly below its data directory.
         fs::remove_all(geth_dir / "geth" / "chaindata");
         fs::remove_all(geth_dir / "chaindata");
         return true;
+#endif
     } catch (const fs::filesystem_error& e) {
         error = "Unable to prepare Geth data directory: " + std::string{e.what()};
         return false;
