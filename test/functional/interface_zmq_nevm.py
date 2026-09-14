@@ -5,8 +5,9 @@
 """Test the ZMQ notification interface."""
 
 from test_framework.address import ADDRESS_BCRT1_UNSPENDABLE
+from test_framework.authproxy import JSONRPCException
 from test_framework.test_framework import AuxPoWMiningMixin, SyscoinTestFramework
-from test_framework.messages import hash256, CNEVMBlock, CNEVMBlockConnect, CNEVMBlockDisconnect, ser_string, uint256_from_str
+from test_framework.messages import hash256, CNEVMBlock, CNEVMBlockConnect, CNEVMBlockDisconnect, deser_string, uint256_from_str
 from test_framework.util import (
     assert_equal,
     get_rpc_proxy,
@@ -15,9 +16,10 @@ from test_framework.util import (
     assert_raises_rpc_error
 )
 from io import BytesIO
+from concurrent.futures import Future
 from decimal import Decimal
 from time import sleep
-from threading import Thread
+from threading import Event, Thread
 import random
 class Masternode(object):
     pass
@@ -27,8 +29,27 @@ def receive_thread_nevm(test_framework, idx, subscriber):
         try:
             data = subscriber.receive()
             if data[0] == b"nevmcomms":
-                response = b"connect-v1" if data[1] == ser_string(b"connect-v1") else b"ack"
+                command = deser_string(BytesIO(data[1]))
+                response = b"ack"
+                if command == b"connect-v1":
+                    response = b"connect-v1"
+                elif command == b"flush":
+                    # Accepted connects are applied inline in this mock.
+                    response = b"flushed"
+                elif command.startswith(b"durable-pair-v1:"):
+                    count = len(subscriber.sysToNEVMBlockMapping)
+                    tip = subscriber.getLastSYSBlock()
+                    expected = f"durable-pair-v1:{count}:{tip:064x}".encode()
+                    # This in-memory engine survives Core restarts; require
+                    # the exact applied pair before acknowledging the fence.
+                    response = command if command == expected else b"error:mock-durable-pair-mismatch"
                 subscriber.send([b"nevmcomms", response])
+            elif data[0] == b"nevmblockinfo":
+                subscriber.send([
+                    b"nevmblockinfo",
+                    str(len(subscriber.sysToNEVMBlockMapping)).encode(),
+                    f"{subscriber.getLastSYSBlock():064x}".encode(),
+                ])
             elif data[0] == b"nevmblock":
                 hashStr = hash256(str(random.randint(-0x80000000, 0x7fffffff)).encode())
                 hashTopic = uint256_from_str(hashStr)
@@ -43,6 +64,8 @@ def receive_thread_nevm(test_framework, idx, subscriber):
                 evmBlockConnect.deserialize(BytesIO(data[1]))
                 resBlock = subscriber.addBlock(evmBlockConnect)
                 res = b"connected" if resBlock else b"not connected"
+                if subscriber.artificialDelay:
+                    subscriber.delayedConnect.set()
                 while subscriber.artificialDelay and test_framework.running:
                     sleep(0.1)
                 subscriber.send([b"nevmconnect", res])
@@ -62,10 +85,15 @@ def receive_thread_nevm(test_framework, idx, subscriber):
             sleep(1)
             break
 
-def thread_generate(test_framework, node):
+def thread_generate(test_framework, node, result):
     test_framework.log.info('thread_generate start')
-    test_framework.generatetoaddress(node, 1, ADDRESS_BCRT1_UNSPENDABLE, sync_fun=test_framework.no_op)
-    test_framework.log.info('thread_generate done')
+    try:
+        blocks = test_framework.generatetoaddress(node, 1, ADDRESS_BCRT1_UNSPENDABLE, sync_fun=test_framework.no_op)
+    except Exception as error:
+        result.set_exception(error)
+    else:
+        result.set_result(blocks)
+        test_framework.log.info('thread_generate done')
 
 try:
     import zmq
@@ -81,6 +109,7 @@ class ZMQPublisher:
         self.sysToBTCPrevHashMapping = {}
         self.mnNEVMAddressMapping = {}
         self.artificialDelay = False
+        self.delayedConnect = Event()
 
     # Send message to subscriber
     def _send_to_publisher_and_check(self, msg_parts):
@@ -315,6 +344,18 @@ class ZMQTest(AuxPoWMiningMixin, SyscoinTestFramework):
         subscriber.socket.setsockopt(zmq.RCVTIMEO, recv_timeout * 1000)
         return subscriber
 
+    def wait_for_nevm_mining(self, node):
+        def mining_ready():
+            try:
+                node.getblocktemplate({"rules": ["segwit"]})
+                return True
+            except JSONRPCException as error:
+                if error.error["code"] == -10 and error.error["message"] == "NEVM block production is waiting for execution recovery":
+                    return False
+                raise
+
+        self.wait_until(mining_ready)
+
     def test_basic(self, nevmsub, nevmsub1):
         bestblockhash = self.nodes[0].getbestblockhash()
         assert_equal(int(bestblockhash, 16), nevmsub.getLastSYSBlock())
@@ -415,27 +456,42 @@ class ZMQTest(AuxPoWMiningMixin, SyscoinTestFramework):
         self.nodes[0].reconsiderblock(badhash)
         self.sync_blocks()
 
+        # The reorg publishes the Core tip before its execution recovery
+        # readiness tick. Start the delayed-connect scenario only once mining
+        # can actually reach the mock engine.
+        self.wait_for_nevm_mining(self.nodes[0])
         self.log.info("Artificially delaying node0")
         nevmsub.artificialDelay = True
+        nevmsub.delayedConnect.clear()
         self.log.info("Generating on node0 in separate thread")
-        t3 = Thread(target=thread_generate, args=(self, self.nodes[0],))
+        generation = Future()
+        t3 = Thread(target=thread_generate, args=(self, self.nodes[0], generation))
         t3.start()
         self.threads.append(t3)
 
-        self.log.info("Creating re-org and letting node1 become longest chain, node0 should re-org to node0")
-        self.generatetoaddress(self.nodes[1], 10, ADDRESS_BCRT1_UNSPENDABLE, sync_fun=self.no_op)
-        besthash = self.nodes[1].getbestblockhash()
-        nevmsub.artificialDelay = False
-        sleep(1)
+        try:
+            self.wait_until(lambda: nevmsub.delayedConnect.is_set() or generation.done())
+            if generation.done():
+                generation.result()
+            assert nevmsub.delayedConnect.is_set()
+            self.log.info("Creating re-org and letting node1 become longest chain")
+            self.generatetoaddress(self.nodes[1], 10, ADDRESS_BCRT1_UNSPENDABLE, sync_fun=self.no_op)
+            besthash = self.nodes[1].getbestblockhash()
+        finally:
+            nevmsub.artificialDelay = False
+        assert_equal(len(generation.result(timeout=60)), 1)
+        t3.join()
         self.sync_blocks()
 
         assert_equal(nevmsub1.getLastSYSBlock(), nevmsub.getLastSYSBlock())
         assert_equal(int(besthash, 16), nevmsub.getLastSYSBlock())
         assert_equal(self.nodes[0].getbestblockhash(), self.nodes[1].getbestblockhash())
         assert_equal(nevmsub1.getLastBTCPrevHash(), nevmsub.getLastBTCPrevHash())
+        self.wait_for_nevm_mining(self.nodes[0])
     
     def test_nevm_mapping(self, nevmsub):
-        nevmsub.clearMappings()
+        # Keep the applied block prefix for status and rollback checks.
+        nevmsub.mnNEVMAddressMapping.clear()
         self.mns = []
         # Test case 1: Create MN with NEVM address (should add)
         self.log.info("Creating MN with NEVM address")
@@ -526,6 +582,7 @@ class ZMQTest(AuxPoWMiningMixin, SyscoinTestFramework):
         self.sync_blocks()
         nevmsub.assertMNList(expected_mapping)
         # SYSCOIN END: Post-activation NEVM mapping reorg coverage.
+        self.wait_for_nevm_mining(self.nodes[0])
         self.log.info('NEVM address mapping tests done')
 
     def test_nevm_edge_cases(self, nevmsub):
@@ -536,8 +593,8 @@ class ZMQTest(AuxPoWMiningMixin, SyscoinTestFramework):
          - Mempool conflict check for duplicate NEVM addresses
         """
         self.log.info("Starting NEVM edge case tests")
-        # Clear any previous state.
-        nevmsub.clearMappings()
+        # Reset address expectations without discarding the applied prefix.
+        nevmsub.mnNEVMAddressMapping.clear()
         start_height = self.nodes[0].getblockcount() + 1
         self.mns = []
     
@@ -569,6 +626,7 @@ class ZMQTest(AuxPoWMiningMixin, SyscoinTestFramework):
         self.sync_blocks()
         # Mapping should be restored.
         nevmsub.assertMNList(expected_mapping)
+        self.wait_for_nevm_mining(self.nodes[0])
     
         # Test mempool conflict: attempt to update another MN with a duplicate NEVM address.
         self.log.info("Edge Case 4: Mempool duplicate NEVM conflict")
